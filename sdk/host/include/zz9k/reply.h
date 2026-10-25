@@ -691,6 +691,37 @@ static inline int zz9k_reply_audio_fabric_state_result(
   return ZZ9K_STATUS_OK;
 }
 
+static inline int zz9k_reply_audio_output_clock_result(
+    const ZZ9KMailboxEntry *reply,
+    ZZ9KAudioOutputClockResult *result)
+{
+  const uint8_t *payload;
+  int status;
+
+  if (!result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  memset(result, 0, sizeof(*result));
+  status = zz9k_reply_require(reply, ZZ9K_OP_AUDIO_OUTPUT_CLOCK,
+                              sizeof(ZZ9KAudioOutputClockResultPayload));
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  payload = reply->payload.inline_data;
+  result->retired_frames =
+      zz9k_media_u64_from_be(&payload[0], &payload[4]);
+  result->lead_frames =
+      zz9k_media_u64_from_be(&payload[8], &payload[12]);
+  result->output_rate = zz9k_get_be32(&payload[16]);
+  result->flags = zz9k_get_be32(&payload[20]);
+  if (result->output_rate == 0U ||
+      (result->flags & ~0U) != 0U) {
+    memset(result, 0, sizeof(*result));
+    return ZZ9K_STATUS_INTERNAL_ERROR;
+  }
+  return ZZ9K_STATUS_OK;
+}
+
 static inline int zz9k_reply_video_session_result(
     const ZZ9KMailboxEntry *reply,
     uint16_t opcode,

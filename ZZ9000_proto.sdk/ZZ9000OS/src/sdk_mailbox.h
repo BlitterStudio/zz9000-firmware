@@ -262,6 +262,19 @@
 #define SDK_OP_AUDIO_RING_RELEASE      0x0514U
 #define SDK_OP_AUDIO_STREAM_GAIN       0x0515U
 #define SDK_OP_AUDIO_STREAM_BEGIN_EX   0x0516U
+#define SDK_OP_AUDIO_OUTPUT_CLOCK      0x0517U
+
+/* Mirrors ZZ9KAudioOutputClockResultPayload. Retired and lead are
+ * stereo transmitter frames; output_rate is the formatter rate. */
+struct SDKAudioOutputClockResultPayload {
+	uint8_t retired_hi[4];
+	uint8_t retired_lo[4];
+	uint8_t lead_hi[4];
+	uint8_t lead_lo[4];
+	uint8_t output_rate[4];
+	uint8_t flags[4];
+	uint8_t reserved[24];
+};
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U

@@ -4646,6 +4646,35 @@ static uint16_t handle_audio_control(
  * session passes (R12).
  */
 
+static uint16_t handle_audio_output_clock(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioOutputClockResultPayload *result;
+	uint64_t retired = 0U;
+	uint64_t lead = 0U;
+	uint32_t rate = 0U;
+	uint32_t flags;
+
+	if (payload_len < 4U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	flags = get_be32(req->payload);
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	audio_fabric_output_clock(&retired, &lead, &rate);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioOutputClockResultPayload *)
+		comp->payload;
+	put_be32(result->retired_hi, (uint32_t)(retired >> 32));
+	put_be32(result->retired_lo, (uint32_t)retired);
+	put_be32(result->lead_hi, (uint32_t)(lead >> 32));
+	put_be32(result->lead_lo, (uint32_t)lead);
+	put_be32(result->output_rate, rate);
+	put_be32(result->flags, 0U);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_audio_fabric_state_get(
 	volatile struct SDKMailboxEntry *req,
 	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
@@ -8453,6 +8482,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_audio_control(req, comp, payload_len, opcode);
 	case SDK_OP_AUDIO_FABRIC_STATE_GET:
 		return handle_audio_fabric_state_get(req, comp, payload_len);
+	case SDK_OP_AUDIO_OUTPUT_CLOCK:
+		return handle_audio_output_clock(req, comp, payload_len);
 	case SDK_OP_AUDIO_RING_ACQUIRE:
 		return handle_audio_ring_acquire(req, comp, payload_len);
 	case SDK_OP_AUDIO_RING_RELEASE:

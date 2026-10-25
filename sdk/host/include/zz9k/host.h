@@ -289,6 +289,8 @@ int zz9k_audio_ring_release(ZZ9KContext *ctx, uint32_t slot,
 int zz9k_audio_fabric_state_get(
     ZZ9KContext *ctx, const ZZ9KAudioFabricStateDesc *desc,
     ZZ9KAudioFabricStateResult *result);
+int zz9k_audio_output_clock_get(ZZ9KContext *ctx,
+                                ZZ9KAudioOutputClockResult *result);
 
 /* Direct-ring client session (plan U4): acquire one slot, validate
  * the grant, and map the granted ring and control block into the

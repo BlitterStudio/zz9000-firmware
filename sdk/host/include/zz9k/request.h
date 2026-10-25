@@ -903,6 +903,18 @@ static inline int zz9k_request_audio_fabric_state_get(
   return ZZ9K_STATUS_OK;
 }
 
+static inline int zz9k_request_audio_output_clock(ZZ9KRequest *request)
+{
+  if (!request) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  zz9k_request_init(request, ZZ9K_OP_AUDIO_OUTPUT_CLOCK);
+  request->entry.payload_len = sizeof(ZZ9KAudioOutputClockPayload);
+  memset(request->entry.payload.inline_data, 0,
+         sizeof(request->entry.payload.inline_data));
+  return ZZ9K_STATUS_OK;
+}
+
 static inline int zz9k_request_video_session_begin(
     ZZ9KRequest *request,
     const ZZ9KVideoSessionBeginDesc *desc)

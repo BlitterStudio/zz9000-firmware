@@ -7,6 +7,7 @@
 #include "zz9k/host.h"
 #include "zz9k/shared.h"
 #include "zzplay-codec.h"
+#include "zzplay-audio-clock.h"
 #include "zzplay-core.h"
 #include "zzplay-launch.h"
 
@@ -46,24 +47,31 @@ static uint32_t zzplay_card_played_bytes(const ZZ9KAudioStreamResult *result,
   return result->bytes_produced - used;
 }
 
-static void zzplay_card_report_position(const ZZPlayCodecDecode *decode)
+static void zzplay_card_report_position(ZZPlayCodecDecode *decode)
 {
-  uint32_t rate = decode->result.sample_rate != 0U
-                      ? decode->result.sample_rate
-                      : decode->engine->sample_rate;
-  uint32_t channels = decode->result.channels != 0U
-                          ? decode->result.channels
-                          : decode->engine->channels;
-  uint32_t frame = channels * 2U;
-  uint32_t played;
+  uint32_t elapsed_ms = 0U;
+  uint64_t played;
 
-  if (rate == 0U || frame == 0U) {
+  if (zzplay_output_clock_elapsed(decode->ctx, &decode->clock_origin,
+                                  &decode->clock_armed,
+                                  decode->position_base_ms,
+                                  &elapsed_ms)) {
+    zzplay_controller_set_position(decode->engine->ctl, elapsed_ms, 1);
     return;
   }
-  played = zzplay_card_played_bytes(&decode->result, decode->pcm.length);
+  /* Old firmware has no output clock. Fall back to bytes the card has
+   * played, which is exact for a constant rate and only approximate
+   * for VBR. */
+  if (decode->engine->info->bitrate_kbps == 0U) {
+    return;
+  }
+  played = zzplay_card_played_bytes(&decode->result,
+                                    decode->engine->pcm_width);
   zzplay_controller_set_position(
       decode->engine->ctl,
-      (uint32_t)(((uint64_t)played / frame) * 1000ULL / rate), 1);
+      (uint32_t)((uint64_t)decode->position_base_ms +
+                 (played * 8ULL) / decode->engine->info->bitrate_kbps),
+      1);
 }
 
 static void zzplay_card_apply_gain(ZZPlayCodecDecode *decode)

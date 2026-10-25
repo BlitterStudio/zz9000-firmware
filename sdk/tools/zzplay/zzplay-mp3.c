@@ -3,7 +3,9 @@
 #include "zzplay-mp3.h"
 
 #include "zz9k/audio.h"
+#include "zz9k/host.h"
 #include "zzplay-codec.h"
+#include "zzplay-audio-clock.h"
 #include "zzplay-core.h"
 #include "zzplay-gui.h"
 #include "zzplay-launch.h"
@@ -18,13 +20,15 @@
  * the callbacks need behind it. */
 typedef struct ZZPlayMHIBridge {
   ZZPlayCodecEngine *engine;
+  ZZ9KContext *ctx;
   ZZPlayMHISink *sink;
-  /* Where the current pass started, in bytes and in time; the reported
-   * MHI position is derived from the bytes handed to the decoder since
-   * then and therefore runs slightly ahead (shown as approximate). */
+  /* offset/base_ms are the seek restart point. The displayed time comes
+   * from the card output clock, anchored at clock_origin when the pass
+   * starts, so a tag or a VBR header cannot move it. */
   uint64_t offset;
   uint32_t base_ms;
-  /* A consumed SEEK ended the pass; restart at the new offset. */
+  uint64_t clock_origin;
+  int clock_armed;
   int seek_restart;
 } ZZPlayMHIBridge;
 
@@ -41,13 +45,21 @@ static int zzplay_mp3_mhi_stop_thunk(void *user)
   /* Runs once per driver poll: this is where the MHI path pumps the GUI,
    * reports its position and applies live controls. */
   zzplay_codec_pump(bridge->engine);
-  if (bridge->engine->info->bitrate_kbps != 0U) {
-    zzplay_controller_set_position(
-        ctl,
-        bridge->base_ms +
-            (uint32_t)((bridge->sink->input_bytes * 8ULL) /
-                       bridge->engine->info->bitrate_kbps),
-        0);
+  {
+    uint32_t elapsed_ms = 0U;
+
+    if (zzplay_output_clock_elapsed(bridge->ctx, &bridge->clock_origin,
+                                    &bridge->clock_armed, bridge->base_ms,
+                                    &elapsed_ms)) {
+      zzplay_controller_set_position(ctl, elapsed_ms, 1);
+    } else if (bridge->engine->info->bitrate_kbps != 0U) {
+      zzplay_controller_set_position(
+          ctl,
+          bridge->base_ms +
+              (uint32_t)((bridge->sink->input_bytes * 8ULL) /
+                         bridge->engine->info->bitrate_kbps),
+          0);
+    }
   }
   if (zzplay_controller_take_volume(ctl, &volume)) {
     (void)zzplay_mhi_set_volume(bridge->sink, volume);
@@ -61,6 +73,7 @@ static int zzplay_mp3_mhi_stop_thunk(void *user)
         bridge->engine->audio_start, bridge->engine->audio_end,
         bridge->engine->total_ms, seek_ms);
     bridge->base_ms = seek_ms;
+    bridge->clock_armed = 0;
     bridge->seek_restart = 1;
     return 1;
   }
@@ -120,6 +133,9 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
   }
   (void)zzplay_mhi_set_volume(&sink, run->ctl->volume);
   zzplay_info("zzplay: selected audio backend MHI (card-local Layer III)\n");
+  if (zz9k_open(&bridge.ctx) != ZZ9K_STATUS_OK) {
+    bridge.ctx = NULL;
+  }
   for (;;) {
     ZZPlayFile *file = zzplay_file_open(run->path, 0);
 
@@ -163,6 +179,7 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
       }
       bridge.offset = engine->audio_start;
       bridge.base_ms = 0U;
+      bridge.clock_armed = 0;
       completed++;
       continue;
     }
@@ -174,6 +191,9 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
 
 done:
   zzplay_mhi_release(&sink);
+  if (bridge.ctx) {
+    zz9k_close(bridge.ctx);
+  }
   return result;
 }
 

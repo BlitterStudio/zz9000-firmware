@@ -7,6 +7,7 @@
 #include "zz9k/host.h"
 #include "zz9k/shared.h"
 #include "zzplay-ahi.h"
+#include "zzplay-audio-clock.h"
 #include "zzplay-core.h"
 #include "zzplay-launch.h"
 #include "zzplay-mp3-transport.h"
@@ -79,14 +80,25 @@ static int zzplay_codec_service_controls(ZZPlayCodecDecode *decode)
   return zzplay_controller_item_should_end(ctl);
 }
 
-static void zzplay_codec_report_progress(const ZZPlayCodecDecode *decode)
+static void zzplay_codec_report_progress(ZZPlayCodecDecode *decode)
 {
+  uint32_t elapsed_ms = 0U;
+  uint64_t frames;
+
+  /* The card's DMA clock is the same transmitter AHI feeds. Prefer it
+   * so a resampled source is timed at 48 kHz, not at the file rate. */
+  if (zzplay_output_clock_elapsed(decode->ctx, &decode->clock_origin,
+                                  &decode->clock_armed,
+                                  (uint32_t)decode->position_base_ms,
+                                  &elapsed_ms)) {
+    zzplay_controller_set_position(decode->engine->ctl, elapsed_ms, 1);
+    return;
+  }
   /* Count what AHI has played, not what was queued to it: the queue holds
    * a few hundred milliseconds, which would put the position ahead of the
    * sound. Without a sink (muted) output is consumed as it is produced. */
-  uint64_t frames = decode->ahi ? zzplay_ahi_played_frames(decode->ahi)
-                                : decode->output_frames;
-
+  frames = decode->ahi ? zzplay_ahi_played_frames(decode->ahi)
+                       : decode->output_frames;
   if (decode->engine->sample_rate != 0U) {
     zzplay_controller_set_position(
         decode->engine->ctl,
