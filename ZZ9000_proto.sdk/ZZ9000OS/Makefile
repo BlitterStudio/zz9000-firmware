@@ -286,6 +286,8 @@ TARGET = $(BUILD_DIR)/ZZ9000OS.elf
 FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 
+.DEFAULT_GOAL := all
+
 include modules/mpeg2/module.mk
 include modules/webm/module.mk
 include modules/webp/module.mk
