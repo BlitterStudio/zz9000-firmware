@@ -14,14 +14,19 @@ REGIONS = {
 }
 SECTION = re.compile(r"^\s*\d+\s+(\S+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)")
 
-
 def parse_sections(objdump, elf):
     output = subprocess.check_output([objdump, "-h", str(elf)], text=True)
     result = []
+    section = None
     for line in output.splitlines():
         match = SECTION.match(line)
         if match:
-            result.append((match.group(1), int(match.group(2), 16), int(match.group(3), 16)))
+            section = (match.group(1), int(match.group(2), 16), int(match.group(3), 16))
+            continue
+        if section is not None:
+            if "ALLOC" in line:
+                result.append(section)
+            section = None
     return result
 
 
