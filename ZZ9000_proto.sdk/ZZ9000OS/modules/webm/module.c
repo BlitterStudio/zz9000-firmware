@@ -11,6 +11,14 @@ static const struct zzm_webm_ops webm_ops = {
 	zzm_webm_ops,
 };
 
+/* External modules never expose newlib process services. */
+int _kill(int pid, int signal)
+{
+	(void)pid; (void)signal;
+	return -1;
+}
+int _getpid(void) { return -1; }
+
 int zzm_module_init(const zzm_services_t *services)
 {
 	if (!services || services->abi_version != ZZM_MODULE_ABI_VERSION ||
