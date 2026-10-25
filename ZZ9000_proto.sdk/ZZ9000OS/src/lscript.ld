@@ -43,11 +43,11 @@ ENTRY(_vector_table)
 
 SECTIONS
 {
-/* VBAR on both cores points here. Every other executable and mutable
- * firmware section lives in the 4 MiB high-image region. */
+/* VBAR on both cores points here. Keep the vector branches in range of
+ * the high firmware image rather than pinning the whole boot path low. */
 .vectors : {
    KEEP (*(.vectors))
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .text : {
    KEEP (*(.boot))
@@ -167,11 +167,6 @@ SECTIONS
    *(.gcc_except_table)
 } > ps7_ddr_hi
 
-.mmu_tbl (ALIGN(16384)) : {
-   __mmu_tbl_start = .;
-   KEEP (*(.mmu_tbl))
-   __mmu_tbl_end = .;
-} > ps7_ddr_0
 
 .ARM.exidx : {
    __exidx_start = .;
@@ -526,6 +521,15 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    __bss_end = .;
 } > ps7_ddr_hi
 
+/* The MMU table has a fixed low address used during early startup. Put it
+ * after every high-image section so changing regions cannot advance the
+ * high-DDR location counter. */
+.mmu_tbl 0x001F8000 : {
+   __mmu_tbl_start = .;
+   KEEP (*(.mmu_tbl))
+   __mmu_tbl_end = .;
+} > ps7_ddr_0
+
 _SDA_BASE_ = __sdata_start + ((__sbss_end - __sdata_start) / 2 );
 
 _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
@@ -574,7 +578,7 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
 
 _end = .;
 ASSERT(SIZEOF(.vectors) <= 0x4000,
-       "exception vectors exceed their 16 KiB low-area budget")
+       "exception vectors exceed their 16 KiB high-image budget")
 ASSERT(__bss_end <= 0x08600000,
        "firmware image/BSS reaches the task-queue region")
 ASSERT(__bss_end - ORIGIN(ps7_ddr_hi) <= LENGTH(ps7_ddr_hi),
