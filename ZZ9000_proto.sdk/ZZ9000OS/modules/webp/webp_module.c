@@ -35,6 +35,43 @@ static uint32_t le32(const uint8_t *p)
 	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static int anmf_has_image(const uint8_t *data, uint32_t length)
+{
+	uint32_t offset = 16U;
+	int saw_alpha = 0;
+	int saw_image = 0;
+
+	if (length < offset)
+		return 0;
+	while (offset < length) {
+		uint32_t chunk_length;
+		uint32_t padded_length;
+
+		if (length - offset < 8U)
+			return 0;
+		chunk_length = le32(data + offset + 4U);
+		padded_length = chunk_length + (chunk_length & 1U);
+		if (padded_length < chunk_length ||
+		    padded_length > length - offset - 8U)
+			return 0;
+		if (memcmp(data + offset, "ALPH", 4U) == 0) {
+			if (saw_alpha || saw_image || chunk_length == 0U)
+				return 0;
+			saw_alpha = 1;
+		} else if (memcmp(data + offset, "VP8 ", 4U) == 0) {
+			if (saw_image || chunk_length < 10U)
+				return 0;
+			saw_image = 1;
+		} else if (memcmp(data + offset, "VP8L", 4U) == 0) {
+			if (saw_alpha || saw_image || chunk_length < 5U)
+				return 0;
+			saw_image = 1;
+		}
+		offset += 8U + padded_length;
+	}
+	return offset == length && saw_image;
+}
+
 static void result_fill(const struct zzm_webp_session *session, uint32_t state,
 			uint32_t consumed, struct SDKImageStreamResult *result)
 {
@@ -56,7 +93,7 @@ static void result_direct(const struct zzm_webp_session *session,
 	result->flush_address = session->dst_address +
 		((uintptr_t)session->dst_y * session->dst_pitch) +
 		((uintptr_t)session->dst_x * bpp);
-	result->flush_length = height * session->dst_pitch;
+	result->flush_length = (height - 1U) * session->dst_pitch + width * bpp;
 	result->bytes_written = width * height * bpp;
 }
 
@@ -182,22 +219,32 @@ static int is_animated(const struct zzm_webp_session *session)
 {
 	const uint8_t *data = (const uint8_t *)session->input;
 	uint32_t offset;
+	int animated = 0;
 
-	if (!data || session->input_length < 30U || le32(data + 4U) != session->input_length - 8U)
+	if (!data || session->input_length < 12U ||
+	    le32(data + 4U) != session->input_length - 8U)
 		return -1;
-	for (offset = 12U; offset + 8U <= session->input_length;) {
-		uint32_t length = le32(data + offset + 4U);
-		uint32_t padded = length + (length & 1U);
+	for (offset = 12U; offset < session->input_length;) {
+		uint32_t length;
+		uint32_t padded;
+
+		if (session->input_length - offset < 8U)
+			return -1;
+		length = le32(data + offset + 4U);
+		padded = length + (length & 1U);
 		if (padded < length || padded > session->input_length - offset - 8U)
 			return -1;
 		if (memcmp(data + offset, "VP8X", 4U) == 0) {
 			if (length != 10U)
 				return -1;
-			return (data[offset + 8U] & 2U) != 0U;
+			animated = (data[offset + 8U] & 2U) != 0U;
+		} else if (animated && memcmp(data + offset, "ANMF", 4U) == 0 &&
+		           !anmf_has_image(data + offset + 8U, length)) {
+			return -1;
 		}
 		offset += 8U + padded;
 	}
-	return 0;
+	return offset == session->input_length ? animated : -1;
 }
 
 static int emit_tile(struct zzm_webp_session *session, uint32_t consumed,
@@ -228,7 +275,7 @@ static int emit_tile(struct zzm_webp_session *session, uint32_t consumed,
 	result->tile_height = rows;
 	result->bytes_written = row_bytes * rows;
 	result->flush_address = session->tile_address;
-	result->flush_length = session->tile_stride * rows;
+	result->flush_length = row_bytes * rows;
 	session->tile_next_y += rows;
 	if (session->tile_next_y < session->image_height)
 		result->flags |= SDK_IMAGE_SESSION_RESULT_PARTIAL;
@@ -452,8 +499,10 @@ static uint16_t frame_next(struct zzm_webp_session *session, uint32_t flags,
 	if (!session || !result)
 		return SDK_STATUS_BAD_REQUEST;
 	memset(result, 0, sizeof(*result));
-	if (!session->is_animation || !session->decoded || session->failed ||
-		session->anim_token_outstanding)
+	if (session->failed)
+		return SDK_STATUS_IO_ERROR;
+	if (!session->is_animation || !session->decoded ||
+	    session->anim_token_outstanding)
 		return SDK_STATUS_BAD_REQUEST;
 	decoder = (WebPAnimDecoder *)session->anim_decoder;
 	if (!decoder)
@@ -501,6 +550,10 @@ static uint16_t frame_next(struct zzm_webp_session *session, uint32_t flags,
 	result->frame_token = session->anim_token;
 	result->output_format = SDK_SURFACE_FORMAT_YUV422CGX;
 	result->flags = SDK_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY;
+	if (!WebPAnimDecoderHasMoreFrames(decoder) &&
+	    session->anim_loop_count != 0U &&
+	    session->anim_loop_index + 1U >= session->anim_loop_count)
+		result->flags |= SDK_IMAGE_ANIMATION_FRAME_FLAG_LAST_FRAME;
 	return SDK_STATUS_OK;
 }
 
@@ -508,8 +561,12 @@ static uint16_t frame_present(struct zzm_webp_session *session, uint32_t token,
 			      uint32_t flags, struct SDKImageAnimationFrameResult *result)
 {
 	(void)flags;
-	if (!session || !result || token == 0U || !session->is_animation ||
-		session->failed || !session->anim_token_outstanding || token != session->anim_token ||
+	if (!session || !result)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->failed)
+		return SDK_STATUS_IO_ERROR;
+	if (token == 0U || !session->is_animation ||
+		!session->anim_token_outstanding || token != session->anim_token ||
 		session->anim_presented)
 		return SDK_STATUS_BAD_REQUEST;
 	memset(result, 0, sizeof(*result));
@@ -531,22 +588,35 @@ static uint16_t frame_retire(struct zzm_webp_session *session, uint32_t token,
 			     uint32_t flags, struct SDKImageAnimationFrameResult *result)
 {
 	(void)flags;
-	if (!session || !result || token == 0U || !session->is_animation ||
-		session->failed || !session->anim_token_outstanding || token != session->anim_token ||
+	if (!session || !result)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->failed)
+		return SDK_STATUS_IO_ERROR;
+	if (token == 0U || !session->is_animation ||
+		!session->anim_token_outstanding || token != session->anim_token ||
 		!session->anim_presented)
 		return SDK_STATUS_BAD_REQUEST;
 	memset(result, 0, sizeof(*result));
 	session->anim_token_outstanding = 0U;
 	session->anim_presented = 0U;
 	session->anim_token = 0U;
+	if (!WebPAnimDecoderHasMoreFrames(
+		    (WebPAnimDecoder *)session->anim_decoder) &&
+	    session->anim_loop_count != 0U &&
+	    session->anim_loop_index + 1U >= session->anim_loop_count) {
+		session->anim_ended = 1U;
+		session->anim_state = SDK_IMAGE_SESSION_STATE_ANIMATION_ENDED;
+	}
 	result->session = session->session;
-	result->state = SDK_IMAGE_SESSION_STATE_ANIMATION_READY;
+	result->state = session->anim_state;
 	result->canvas_width = session->image_width;
 	result->canvas_height = session->image_height;
 	result->frame_index = session->anim_frame_index - 1U;
 	result->loop_index = session->anim_loop_index;
 	result->loop_count = session->anim_loop_count;
 	result->output_format = SDK_SURFACE_FORMAT_YUV422CGX;
+	result->flags = session->anim_ended ?
+		SDK_IMAGE_ANIMATION_FRAME_FLAG_ENDED : 0U;
 	return SDK_STATUS_OK;
 }
 
@@ -559,8 +629,12 @@ static uint16_t restart(struct zzm_webp_session *session, uint32_t flags,
 	WebPAnimInfo info;
 
 	(void)flags;
-	if (!session || !result || !session->is_animation || session->failed ||
-		session->anim_token_outstanding || !session->input)
+	if (!session || !result)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->failed)
+		return SDK_STATUS_IO_ERROR;
+	if (!session->is_animation || session->anim_token_outstanding ||
+	    !session->decoded || !session->input)
 		return SDK_STATUS_BAD_REQUEST;
 	zzm_webp_alloc_select(&session->arena);
 	if (session->anim_decoder)

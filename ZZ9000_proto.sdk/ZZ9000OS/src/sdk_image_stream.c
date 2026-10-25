@@ -2190,6 +2190,11 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 			return status;
 		if (!webp_ops())
 			return SDK_STATUS_MODULE_MISMATCH;
+		for (uint32_t i = 0U; i < SDK_MAX_IMAGE_SESSIONS; ++i) {
+			if (image_sessions[i].in_use &&
+			    image_sessions[i].codec == SDK_IMAGE_CODEC_WEBP)
+				return SDK_STATUS_NO_MEMORY;
+		}
 	}
 
 	session = find_free_session();
@@ -2376,9 +2381,12 @@ void sdk_image_stream_poison_core1_sessions(void)
 				CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, slot->session));
 			if (ops)
 				ops->poison(&slot->webp);
+			slot->decode_state_committed = 0U;
 			slot->failed = 1U;
 			continue;
 		}
+		card_pool_release_owner(&card_pool,
+			CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, slot->session));
 		slot->jpeg_created = 0U;
 		slot->png_created = 0U;
 		slot->png_ptr = 0;

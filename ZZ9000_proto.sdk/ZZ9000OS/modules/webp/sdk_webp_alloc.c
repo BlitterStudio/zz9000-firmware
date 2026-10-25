@@ -1,10 +1,16 @@
 #include <stdint.h>
 #include <string.h>
 #include "sdk_webp_alloc.h"
+#ifdef ZZM_WEBP_HOST_TEST
+#include "sdk_vorbis_alloc.h"
+#endif
 
 static const zzm_services_t *module_services;
 static struct zzm_webp_arena *active_arena;
 static int active_failed;
+#ifdef ZZM_WEBP_HOST_TEST
+static struct sdk_vorbis_heap *host_heap;
+#endif
 
 void zzm_webp_alloc_init(const zzm_services_t *services)
 {
@@ -15,7 +21,19 @@ void zzm_webp_alloc_select(struct zzm_webp_arena *arena)
 {
 	active_arena = arena;
 	active_failed = 0;
+#ifdef ZZM_WEBP_HOST_TEST
+	host_heap = 0;
+#endif
 }
+
+#ifdef ZZM_WEBP_HOST_TEST
+void sdk_webp_alloc_select(struct sdk_vorbis_heap *heap)
+{
+	sdk_vorbis_heap_select(heap, 0);
+	host_heap = heap;
+	active_failed = 0;
+}
+#endif
 
 int zzm_webp_alloc_failed(void)
 {
@@ -45,6 +63,10 @@ void *sdk_webp_malloc(size_t size)
 	uint32_t region_bytes;
 	uintptr_t region;
 
+#ifdef ZZM_WEBP_HOST_TEST
+	if (host_heap)
+		return sdk_vorbis_malloc(size);
+#endif
 	if (!arena || !module_services || size == 0U || size > 0xffffffffU) {
 		active_failed = 1;
 		return 0;
@@ -104,5 +126,11 @@ void *sdk_webp_calloc(size_t count, size_t size)
 
 void sdk_webp_free(void *ptr)
 {
+#ifdef ZZM_WEBP_HOST_TEST
+	if (host_heap) {
+		sdk_vorbis_free(ptr);
+		return;
+	}
+#endif
 	(void)ptr;
 }

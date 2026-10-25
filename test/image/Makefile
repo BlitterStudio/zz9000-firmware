@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 CC ?= cc
-CFLAGS ?= -O2 -Wall -Wextra -Werror -Wno-clobbered -std=c99 -D_GNU_SOURCE
+CFLAGS ?= -O2 -Wall -Wextra -Werror -Wno-clobbered -std=c99 -D_GNU_SOURCE -DZZM_WEBP_HOST_TEST
 ROOT := ../..
 FIRMWARE_SRC := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/src
 LIBWEBP_ROOT := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/build/deps/libwebp/1.6.0/host
@@ -8,9 +8,10 @@ BUILD := build
 HOST_LIBWEBP := $(LIBWEBP_ROOT)/lib/libwebpdecoder.a
 HOST_DEMUX := $(LIBWEBP_ROOT)/lib/libwebpdemux.a
 RUNTIME := $(FIRMWARE_SRC)/sdk_image_stream.c $(FIRMWARE_SRC)/sdk_jpeg.c $(FIRMWARE_SRC)/sdk_surface.c $(FIRMWARE_SRC)/sdk_smp_lock.c \
-	$(FIRMWARE_SRC)/sdk_decode_reclaim.c $(FIRMWARE_SRC)/sdk_webp_alloc.c $(FIRMWARE_SRC)/sdk_vorbis_alloc.c \
-	$(FIRMWARE_SRC)/card_pool.c ../card_pool/host_card_pool.c
-INCLUDES := -I$(FIRMWARE_SRC) -Imock -I../card_pool -I$(LIBWEBP_ROOT)/include
+	$(FIRMWARE_SRC)/sdk_decode_reclaim.c $(FIRMWARE_SRC)/sdk_vorbis_alloc.c \
+	$(FIRMWARE_SRC)/card_pool.c ../card_pool/host_card_pool.c module_registry_mock.c \
+	$(FIRMWARE_SRC)/../modules/webp/webp_module.c $(FIRMWARE_SRC)/../modules/webp/sdk_webp_alloc.c
+INCLUDES := -I$(FIRMWARE_SRC) -I$(FIRMWARE_SRC)/../modules/webp -Imock -I../card_pool -I$(LIBWEBP_ROOT)/include
 # host_runtime.c observes the WebP arenas' pool allocations through the wrap.
 LDLIBS := -Wl,--wrap=card_pool_alloc $(HOST_DEMUX) $(HOST_LIBWEBP) -lpng -ljpeg -lz -lm
 
