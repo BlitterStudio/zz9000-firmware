@@ -11,10 +11,7 @@ ZZM_MPEG2_OBJS := \
 	$(ZZM_MPEG2_BUILD)/sdk_dvd_ps.o \
 	$(ZZM_MPEG2_BUILD)/sdk_dvd_lpcm.o \
 	$(ZZM_MPEG2_BUILD)/sdk_dvd_ac3.o \
-	$(ZZM_MPEG2_BUILD)/webm_parse.o \
-	$(ZZM_MPEG2_BUILD)/webm_window.o \
-	$(ZZM_MPEG2_BUILD)/sdk_media_timeline.o \
-	$(ZZM_MPEG2_BUILD)/decode_mp3.o
+	$(ZZM_MPEG2_BUILD)/sdk_media_timeline.o
 ZZM_MPEG2_LINKER := ../../util/zzm_module.ld
 ZZM_MPEG2_CFLAGS := $(CPU_FLAGS) $(COMMON_FLAGS) -O3 \
 	-DSDK_VIDEO_MPEG2_MODULE -I$(ZZM_MPEG2_DIR) \
@@ -44,21 +41,11 @@ $(ZZM_MPEG2_BUILD)/sdk_dvd_ac3.o: $(SRC_DIR)/sdk_dvd_ac3.c $(A52_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
 
-$(ZZM_MPEG2_BUILD)/webm_parse.o: $(SRC_DIR)/webm_parse.c
-	@mkdir -p $(dir $@)
-	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
-
-$(ZZM_MPEG2_BUILD)/webm_window.o: $(SRC_DIR)/webm_window.c
-	@mkdir -p $(dir $@)
-	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
 
 $(ZZM_MPEG2_BUILD)/sdk_media_timeline.o: $(SRC_DIR)/sdk_media_timeline.c
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
 
-$(ZZM_MPEG2_BUILD)/decode_mp3.o: $(SRC_DIR)/mp3/decode_mp3.c
-	@mkdir -p $(dir $@)
-	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
 
 $(ZZM_MPEG2_ELF): $(ZZM_MPEG2_OBJS) $(LIBMPEG2_LIB) $(A52_LIB) $(ZZM_MPEG2_LINKER)
 	@mkdir -p $(dir $@)
