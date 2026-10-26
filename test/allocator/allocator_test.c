@@ -22,6 +22,12 @@ int smp_cpu_id(void) { return 0; }
 uint32_t smp_local_irq_save(void) { return 0; }
 void smp_local_irq_restore(uint32_t state) { (void)state; }
 void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1u; }
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+    if (*word) return 0;
+    *word = 1u;
+    return 1;
+}
 void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0u; }
 
 /* ---- tiny test harness --------------------------------------------- */

@@ -28,6 +28,12 @@ void smp_raw_spin_lock(volatile uint32_t *w)
     }
     *w = 1u;
 }
+int smp_raw_spin_try_lock(volatile uint32_t *w)
+{
+    if (*w) return 0;
+    *w = 1u;
+    return 1;
+}
 void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0u; }
 
 #define PAGE CARD_POOL_PAGE_BYTES
