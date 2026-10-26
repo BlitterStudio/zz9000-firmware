@@ -14,6 +14,7 @@
 #include "zzm_format.h"
 #include "zzm_registry.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <xil_cache.h>
 
@@ -254,6 +255,15 @@ int sdk_video_stream_ack_media(uint32_t id, uint64_t acknowledged)
 	return session->ops->ack_media(session->decoder, acknowledged);
 }
 
+
+static void log_module_begin_failure(uint32_t module_id, const char *step,
+	                                 uint16_t status)
+{
+	const char *module = module_id == ZZM_MODULE_MPEG2 ? "MPEG2" : "WEBM";
+
+	printf("[ZZM] begin %s %s status %u\n", module, step,
+	       (unsigned)status);
+}
 uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 	                            struct SDKVideoStreamResult *result)
 {
@@ -281,8 +291,11 @@ uint16_t sdk_video_stream_begin_owned(
 		uint16_t module_status =
 			zzm_registry_sdk_status(ZZM_MODULE_WEBM);
 
-		if (module_status != SDK_STATUS_OK)
+		if (module_status != SDK_STATUS_OK) {
+			log_module_begin_failure(ZZM_MODULE_WEBM, "registry",
+			                         module_status);
 			return module_status;
+		}
 		module_id = ZZM_MODULE_WEBM;
 	}
 	if ((begin->container == SDK_VIDEO_CONTAINER_MPEG_PS ||
@@ -292,8 +305,11 @@ uint16_t sdk_video_stream_begin_owned(
 		uint16_t module_status =
 			zzm_registry_sdk_status(ZZM_MODULE_MPEG2);
 
-		if (module_status != SDK_STATUS_OK)
+		if (module_status != SDK_STATUS_OK) {
+			log_module_begin_failure(ZZM_MODULE_MPEG2, "registry",
+			                         module_status);
 			return module_status;
+		}
 		module_id = ZZM_MODULE_MPEG2;
 	}
 	ops = sdk_video_backend_find(begin->codec, begin->container);
@@ -326,13 +342,20 @@ uint16_t sdk_video_stream_begin_owned(
 	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA && ops && ops->audio_ok &&
 	    !ops->audio_ok(begin->audio_codec))
 		return SDK_STATUS_UNSUPPORTED;
-	if (!ops)
+	if (!ops) {
+		if (module_id != 0U)
+			log_module_begin_failure(module_id, "ops",
+			                         SDK_STATUS_UNSUPPORTED);
 		return SDK_STATUS_UNSUPPORTED;
+	}
 	session = find_free_session();
 	if (!session)
 		return SDK_STATUS_NO_MEMORY;
-	if (module_id != 0U && !zzm_loader_acquire(module_id))
+	if (module_id != 0U && !zzm_loader_acquire(module_id)) {
+		log_module_begin_failure(module_id, "acquire",
+		                         SDK_STATUS_MODULE_MISMATCH);
 		return SDK_STATUS_MODULE_MISMATCH;
+	}
 
 	memset(session, 0, sizeof(*session));
 	session->id = next_session_id();

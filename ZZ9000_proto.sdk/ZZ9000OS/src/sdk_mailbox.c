@@ -883,6 +883,49 @@ typedef char video_op_params_size_check[
      sizeof(struct video_session_op_params) <= TASKQ_OP_PARAM_BYTES &&
      sizeof(struct media_audio_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
+/* Begins which can load a module run on core 1, so the load and its first
+ * registry lookup are one task. Image begin needs more than the task's 48-byte
+ * inline parameter area after core 0 has resolved its output buffers. */
+struct media_begin_op_params {
+	uint32_t video_codec;
+	uint32_t container;
+	uint32_t width;
+	uint32_t height;
+	uint32_t output_format;
+	uint32_t audio_codec;
+	uint32_t pcm_ring_handle;
+	uint32_t pcm_ring_capacity;
+	uint32_t pcm_low_water_bytes;
+	uint32_t pcm_high_water_bytes;
+	uint32_t flags;
+	uint32_t pcm_ring_addr;
+};
+
+struct video_begin_op_params {
+	uint32_t codec;
+	uint32_t container;
+	uint32_t width;
+	uint32_t height;
+	uint32_t output_format;
+	uint32_t flags;
+};
+
+struct image_begin_op_params {
+	uint32_t pending_slot;
+};
+
+struct image_begin_pending {
+	struct SDKImageStreamBegin begin;
+	uint8_t in_use;
+};
+
+static struct image_begin_pending image_begin_pending[TASKQ_CAPACITY];
+
+typedef char begin_op_params_size_check[
+	(sizeof(struct media_begin_op_params) <= TASKQ_OP_PARAM_BYTES &&
+	 sizeof(struct video_begin_op_params) <= TASKQ_OP_PARAM_BYTES &&
+	 sizeof(struct image_begin_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
 struct SDKAudioStream {
 	uint32_t id;
 	uint32_t codec;
@@ -1201,6 +1244,13 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
 int sdk_mailbox_load_module_core1(uint32_t module_id)
 {
 	XTime now;
+	/* A deferred session begin already owns core 1. It must load directly:
+	 * queueing another core-1 task here would make the worker wait for
+	 * itself, while returning pending would repeat the old premature
+	 * registry failure. */
+	if (smp_cpu_id() == 1)
+		return zzm_loader_load_on_owner(module_id);
+
 
 	if (zzm_module_loaded(module_id))
 		return 1;
@@ -1624,6 +1674,10 @@ static uint16_t service_try_defer(uint16_t opcode,
                                   volatile struct SDKMailboxEntry *req,
                                   const void *params, uint32_t param_len,
                                   uint32_t in_len);
+
+static uint16_t image_session_begin_try_defer(
+	volatile struct SDKMailboxEntry *req,
+	const struct SDKImageStreamBegin *begin);
 
 /* Core-1 half of the canvas handoff: NEXT converted the frame through this
  * core's cache, and core 0 reads it from DRAM at PRESENT (after the
@@ -5416,6 +5470,14 @@ static uint16_t handle_image_session_begin(
 		}
 	}
 
+	if (begin.codec == SDK_IMAGE_CODEC_WEBP) {
+		status = image_session_begin_try_defer(req, &begin);
+		if (status == SDK_STATUS_QUEUED)
+			return status;
+		/* WebP module loading and begin must stay on core 1. Running the
+		 * fallback on core 0 would queue a load then reject this request. */
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
 	status = sdk_image_stream_begin(&begin, &result);
 	return complete_image_session_result(req, comp, status, &result);
 }
@@ -5528,8 +5590,7 @@ static uint16_t handle_video_session_begin(
 	uint16_t payload_len)
 {
 	volatile struct SDKVideoSessionBeginPayload *payload;
-	struct SDKVideoStreamBegin begin;
-	struct SDKVideoStreamResult result;
+	struct video_begin_op_params p;
 	uint16_t status;
 
 	if (payload_len < sizeof(*payload))
@@ -5537,15 +5598,18 @@ static uint16_t handle_video_session_begin(
 	if (!scheduler_core1_available())
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	payload = (volatile struct SDKVideoSessionBeginPayload *)req->payload;
-	memset(&begin, 0, sizeof(begin));
-	begin.codec = get_be32(payload->codec);
-	begin.container = get_be32(payload->container);
-	begin.width = get_be32(payload->width);
-	begin.height = get_be32(payload->height);
-	begin.output_format = get_be32(payload->output_format);
-	begin.flags = get_be32(payload->flags);
-	status = sdk_video_stream_begin(&begin, &result);
-	return complete_video_session_result(req, comp, status, &result);
+	memset(&p, 0, sizeof(p));
+	p.codec = get_be32(payload->codec);
+	p.container = get_be32(payload->container);
+	p.width = get_be32(payload->width);
+	p.height = get_be32(payload->height);
+	p.output_format = get_be32(payload->output_format);
+	p.flags = get_be32(payload->flags);
+	status = service_try_defer(SDK_OP_VIDEO_SESSION_BEGIN, req, &p,
+	                           sizeof(p), 0U);
+	if (status == SDK_STATUS_QUEUED)
+		return status;
+	return complete_status(req, comp, SDK_STATUS_BUSY);
 }
 
 static uint16_t handle_video_session_write(
@@ -5634,8 +5698,7 @@ static uint16_t handle_media_session_begin(
 	uint16_t payload_len)
 {
 	volatile struct SDKMediaSessionBeginPayload *payload;
-	struct SDKMediaSessionBegin begin;
-	struct SDKMediaSessionMainResult result;
+	struct media_begin_op_params p;
 	struct SDKSharedBuffer *pcm_ring = 0;
 	uint16_t status;
 
@@ -5644,42 +5707,46 @@ static uint16_t handle_media_session_begin(
 	if (!scheduler_core1_available())
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	payload = (volatile struct SDKMediaSessionBeginPayload *)req->payload;
-	memset(&begin, 0, sizeof(begin));
-	begin.video_codec = get_be32(payload->video_codec);
-	begin.container = get_be32(payload->container);
-	begin.width = get_be32(payload->width);
-	begin.height = get_be32(payload->height);
-	begin.output_format = get_be32(payload->output_format);
-	begin.audio_codec = get_be32(payload->audio_codec);
-	begin.pcm_ring_handle = get_be32(payload->pcm_ring_handle);
-	begin.pcm_ring_capacity = get_be32(payload->pcm_ring_capacity);
-	begin.pcm_low_water_bytes = get_be32(payload->pcm_low_water_bytes);
-	begin.pcm_high_water_bytes = get_be32(payload->pcm_high_water_bytes);
-	begin.flags = get_be32(payload->flags);
+	memset(&p, 0, sizeof(p));
+	p.video_codec = get_be32(payload->video_codec);
+	p.container = get_be32(payload->container);
+	p.width = get_be32(payload->width);
+	p.height = get_be32(payload->height);
+	p.output_format = get_be32(payload->output_format);
+	p.audio_codec = get_be32(payload->audio_codec);
+	p.pcm_ring_handle = get_be32(payload->pcm_ring_handle);
+	p.pcm_ring_capacity = get_be32(payload->pcm_ring_capacity);
+	p.pcm_low_water_bytes = get_be32(payload->pcm_low_water_bytes);
+	p.pcm_high_water_bytes = get_be32(payload->pcm_high_water_bytes);
+	p.flags = get_be32(payload->flags);
 	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
+	if (sdk_media_session_audio_uses_ring(p.audio_codec)) {
 		if (media_pcm_ring)
 			return complete_status(req, comp, SDK_STATUS_BUSY);
-		pcm_ring = find_shared_buffer(begin.pcm_ring_handle);
+		pcm_ring = find_shared_buffer(p.pcm_ring_handle);
 		if (!pcm_ring)
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-		if (begin.pcm_ring_capacity > pcm_ring->length)
+		if (p.pcm_ring_capacity > pcm_ring->length)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 		if (!shared_buffer_pin(pcm_ring))
 			return complete_status(req, comp, SDK_STATUS_BUSY);
-		begin.pcm_ring = (uint8_t *)(uintptr_t)pcm_ring->address;
+		p.pcm_ring_addr = pcm_ring->address;
+		/* Reserve the ring until the deferred begin either binds it to its
+		 * returned session or reports a failure. */
+		media_pcm_ring = pcm_ring;
+		media_pcm_ring_session = 0U;
 	}
-	status = sdk_media_session_begin(&begin, &result);
-	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
-		if (status == SDK_STATUS_OK) {
-			media_pcm_ring = pcm_ring;
-			media_pcm_ring_session = result.session;
-		} else {
-			shared_buffer_unpin(pcm_ring);
-		}
+	status = service_try_defer(SDK_OP_MEDIA_SESSION_BEGIN, req, &p,
+	                           sizeof(p), 0U);
+	if (status == SDK_STATUS_QUEUED)
+		return status;
+	if (pcm_ring) {
+		shared_buffer_unpin(pcm_ring);
+		media_pcm_ring = 0;
+		media_pcm_ring_session = 0U;
 	}
-	return complete_media_session_main_result(req, comp, status, &result);
+	return complete_status(req, comp, SDK_STATUS_BUSY);
 }
 
 static uint16_t handle_media_session_write(
@@ -6611,6 +6678,48 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		(void)zzm_loader_load_on_owner(module_id);
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_IMAGE_SESSION_BEGIN: {
+		const struct image_begin_op_params *p =
+		    (const struct image_begin_op_params *)d->op_params;
+		struct SDKImageStreamResult image_result;
+		struct SDKImageStreamBegin begin;
+		volatile struct SDKImageSessionResultPayload *reply;
+		uint16_t s;
+
+		*result_len = 0U;
+		if (smp_cpu_id() != 1 || p->pending_slot >= TASKQ_CAPACITY)
+			return SDK_STATUS_IO_ERROR;
+		Xil_DCacheInvalidateRange(
+			(INTPTR)(uintptr_t)&image_begin_pending[p->pending_slot],
+			sizeof(image_begin_pending[p->pending_slot]));
+		if (!image_begin_pending[p->pending_slot].in_use)
+			return SDK_STATUS_IO_ERROR;
+		begin = image_begin_pending[p->pending_slot].begin;
+		s = sdk_image_stream_begin(&begin, &image_result);
+		image_begin_pending[p->pending_slot].in_use = 0U;
+		Xil_DCacheFlushRange(
+			(INTPTR)(uintptr_t)&image_begin_pending[p->pending_slot],
+			sizeof(image_begin_pending[p->pending_slot]));
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKImageSessionResultPayload));
+		reply = (volatile struct SDKImageSessionResultPayload *)result_payload;
+		put_be32(reply->session, image_result.session);
+		put_be32(reply->state, image_result.state);
+		put_be32(reply->image_width, image_result.image_width);
+		put_be32(reply->image_height, image_result.image_height);
+		put_be32(reply->output_format, image_result.output_format);
+		put_be32(reply->tile_x, image_result.tile_x);
+		put_be32(reply->tile_y, image_result.tile_y);
+		put_be32(reply->tile_width, image_result.tile_width);
+		put_be32(reply->tile_height, image_result.tile_height);
+		put_be32(reply->bytes_consumed, image_result.bytes_consumed);
+		put_be32(reply->bytes_written, image_result.bytes_written);
+		put_be32(reply->flags, image_result.flags);
+		*result_len = sizeof(struct SDKImageSessionResultPayload);
+		return SDK_STATUS_OK;
+	}
 	case SDK_OP_IMAGE_SESSION_FEED: {
 		const struct imgsess_op_params *p =
 		    (const struct imgsess_op_params *)d->op_params;
@@ -6705,6 +6814,69 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		put_be32(reply->flags, ares.flags);
 		put_be32(reply->reserved, 0U);
 		*result_len = sizeof(struct SDKImageAnimationFrameResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_VIDEO_SESSION_BEGIN: {
+		const struct video_begin_op_params *p =
+		    (const struct video_begin_op_params *)d->op_params;
+		struct SDKVideoStreamBegin begin;
+		struct SDKVideoStreamResult video_result;
+		uint16_t s;
+
+		*result_len = 0U;
+		if (smp_cpu_id() != 1)
+			return SDK_STATUS_IO_ERROR;
+		memset(&begin, 0, sizeof(begin));
+		begin.codec = p->codec;
+		begin.container = p->container;
+		begin.width = p->width;
+		begin.height = p->height;
+		begin.output_format = p->output_format;
+		begin.flags = p->flags;
+		s = sdk_video_stream_begin(&begin, &video_result);
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKVideoSessionResultPayload));
+		encode_video_session_result(
+			(volatile struct SDKVideoSessionResultPayload *)result_payload,
+			&video_result);
+		*result_len = sizeof(struct SDKVideoSessionResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_MEDIA_SESSION_BEGIN: {
+		const struct media_begin_op_params *p =
+		    (const struct media_begin_op_params *)d->op_params;
+		struct SDKMediaSessionBegin begin;
+		struct SDKMediaSessionMainResult media_result;
+		uint16_t s;
+
+		*result_len = 0U;
+		if (smp_cpu_id() != 1)
+			return SDK_STATUS_IO_ERROR;
+		memset(&begin, 0, sizeof(begin));
+		begin.video_codec = p->video_codec;
+		begin.container = p->container;
+		begin.width = p->width;
+		begin.height = p->height;
+		begin.output_format = p->output_format;
+		begin.audio_codec = p->audio_codec;
+		begin.pcm_ring_handle = p->pcm_ring_handle;
+		begin.pcm_ring_capacity = p->pcm_ring_capacity;
+		begin.pcm_low_water_bytes = p->pcm_low_water_bytes;
+		begin.pcm_high_water_bytes = p->pcm_high_water_bytes;
+		begin.flags = p->flags;
+		begin.pcm_ring = (uint8_t *)(uintptr_t)p->pcm_ring_addr;
+		s = sdk_media_session_begin(&begin, &media_result);
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKMediaSessionMainResultPayload));
+		encode_media_session_main_result(
+			(volatile struct SDKMediaSessionMainResultPayload *)
+			    result_payload,
+			&media_result);
+		*result_len = sizeof(struct SDKMediaSessionMainResultPayload);
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_VIDEO_SESSION_WRITE: {
@@ -7240,6 +7412,45 @@ static uint16_t service_try_defer(uint16_t opcode,
 		/* queue full -> caller computes inline */
 	}
 	return SDK_STATUS_BUSY;
+}
+
+static uint16_t image_session_begin_try_defer(
+	volatile struct SDKMailboxEntry *req,
+	const struct SDKImageStreamBegin *begin)
+{
+	taskq_shared_t *sh;
+	struct image_begin_op_params p;
+	uint32_t i;
+	int slot;
+
+	if (!scheduler_core1_available() || !g_request_is_batch_tail)
+		return SDK_STATUS_BUSY;
+	Xil_DCacheInvalidateRange((INTPTR)(uintptr_t)image_begin_pending,
+	                          sizeof(image_begin_pending));
+	for (i = 0U; i < TASKQ_CAPACITY; i++) {
+		if (!image_begin_pending[i].in_use)
+			break;
+	}
+	if (i == TASKQ_CAPACITY)
+		return SDK_STATUS_BUSY;
+	image_begin_pending[i].begin = *begin;
+	image_begin_pending[i].in_use = 1U;
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)&image_begin_pending[i],
+	                     sizeof(image_begin_pending[i]));
+	p.pending_slot = i;
+	sh = scheduler_shared();
+	slot = taskq_enqueue(&sh->queue, SDK_OP_IMAGE_SESSION_BEGIN, TASK_LONG,
+	                     0U, 0U, 0U, 0U, get_be32(req->request_id),
+	                     get_be32(req->user_cookie), &p, sizeof(p));
+	if (slot < 0) {
+		image_begin_pending[i].in_use = 0U;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&image_begin_pending[i],
+		                     sizeof(image_begin_pending[i]));
+		return SDK_STATUS_BUSY;
+	}
+	g_task_generation[slot] = sdk_mailbox_generation;
+	__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+	return SDK_STATUS_QUEUED;
 }
 
 /*
@@ -8803,6 +9014,7 @@ void sdk_mailbox_init(void)
 	timing_decode_us = 0;
 	media_pcm_ring = 0;
 	media_pcm_ring_session = 0U;
+	memset(image_begin_pending, 0, sizeof(image_begin_pending));
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
 	/* Shared-buffer handles restart at 1, so the console encoder's owner
@@ -9098,6 +9310,20 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		                 ? (uint16_t)sizeof(comp->payload) : payload_len;
 		memset((void *)comp->payload, 0, sizeof(comp->payload));
 		memcpy((void *)comp->payload, payload, n);
+	}
+	if (opcode == SDK_OP_MEDIA_SESSION_BEGIN) {
+		if (status == SDK_STATUS_OK && payload != 0 &&
+		    payload_len >= sizeof(struct SDKMediaSessionMainResultPayload)) {
+			const struct SDKMediaSessionMainResultPayload *media =
+			    (const struct SDKMediaSessionMainResultPayload *)payload;
+
+			if (media_pcm_ring && media_pcm_ring_session == 0U)
+				media_pcm_ring_session = get_be32(media->session);
+		} else if (media_pcm_ring && media_pcm_ring_session == 0U) {
+			shared_buffer_unpin(media_pcm_ring);
+			media_pcm_ring = 0;
+			media_pcm_ring_session = 0U;
+		}
 	}
 	if (status == SDK_STATUS_OK && opcode == SDK_OP_IMAGE_SESSION_FEED &&
 	    payload != 0 && payload_len >= sizeof(struct SDKImageSessionResultPayload)) {

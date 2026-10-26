@@ -2188,10 +2188,15 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 
 	if (begin->codec == SDK_IMAGE_CODEC_WEBP) {
 		status = zzm_registry_sdk_status(ZZM_MODULE_WEBP);
-		if (status != SDK_STATUS_OK)
+		if (status != SDK_STATUS_OK) {
+			printf("[ZZM] begin WEBP registry status %u\n", (unsigned)status);
 			return status;
-		if (!webp_ops())
+		}
+		if (!webp_ops()) {
+			printf("[ZZM] begin WEBP ops status %u\n",
+			       (unsigned)SDK_STATUS_MODULE_MISMATCH);
 			return SDK_STATUS_MODULE_MISMATCH;
+		}
 		for (uint32_t i = 0U; i < SDK_MAX_IMAGE_SESSIONS; ++i) {
 			if (image_sessions[i].in_use &&
 			    image_sessions[i].codec == SDK_IMAGE_CODEC_WEBP)
@@ -2222,8 +2227,11 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 		}
 	}
 	if (begin->codec == SDK_IMAGE_CODEC_WEBP &&
-	    !zzm_loader_acquire(ZZM_MODULE_WEBP))
+	    !zzm_loader_acquire(ZZM_MODULE_WEBP)) {
+		printf("[ZZM] begin WEBP acquire status %u\n",
+		       (unsigned)SDK_STATUS_MODULE_MISMATCH);
 		return SDK_STATUS_MODULE_MISMATCH;
+	}
 	session->codec = begin->codec;
 	session->output_mode = begin->output_mode;
 	session->dst_surface = begin->dst_surface;

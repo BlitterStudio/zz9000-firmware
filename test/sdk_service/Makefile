@@ -8,7 +8,8 @@ CFLAGS += -std=c99 -Wall -Wextra -Werror -I$(SRC)
 
 .PHONY: test clean
 
-TARGETS := build/service_discovery_test build/mailbox_memory_test
+TARGETS := build/service_discovery_test build/mailbox_memory_test \
+	build/module_ondemand_session_test
 
 build/service_discovery_test: service_discovery_test.c $(SRC)/sdk_service_catalog.h
 	mkdir -p build
@@ -18,9 +19,14 @@ build/mailbox_memory_test: mailbox_memory_test.c $(SRC)/sdk_mailbox.c
 	mkdir -p build
 	$(CC) $(CFLAGS) $< -o $@
 
+build/module_ondemand_session_test: module_ondemand_session_test.c $(SRC)/sdk_mailbox.c
+	mkdir -p build
+	$(CC) $(CFLAGS) $< -o $@
+
 test: $(TARGETS)
 	./build/service_discovery_test
 	./build/mailbox_memory_test $(SRC)/sdk_mailbox.c
+	./build/module_ondemand_session_test $(SRC)/sdk_mailbox.c
 
 clean:
 	rm -f $(TARGETS)

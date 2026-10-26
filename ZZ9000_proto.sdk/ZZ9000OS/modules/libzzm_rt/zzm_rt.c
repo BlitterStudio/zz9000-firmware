@@ -295,7 +295,7 @@ int _kill(int pid, int signal) ZZM_RT_SYSCALL;
 int _getpid(void) ZZM_RT_SYSCALL;
 
 int _write(int fd, const void *buffer, int length)
-{ (void)fd; (void)buffer; if (length > 0) zzm_rt_log("module write"); return length; }
+{ (void)fd; (void)buffer; return length; }
 int _write_r(void *reent, int fd, const void *buffer, int length)
 { (void)reent; return _write(fd, buffer, length); }
 void exit(int status) { (void)status; zzm_rt_fault("module exit"); for (;;) {} }
