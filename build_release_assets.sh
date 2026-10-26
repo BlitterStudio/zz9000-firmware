@@ -178,6 +178,8 @@ if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
     exit 1
 fi
 
+bash ./util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+
 MODULE_DIR=ZZ9000_proto.sdk/ZZ9000OS/build/modules
 make -C ZZ9000_proto.sdk/ZZ9000OS modules
 for module in MPEG2.ZZM WEBM.ZZM WEBP.ZZM; do
