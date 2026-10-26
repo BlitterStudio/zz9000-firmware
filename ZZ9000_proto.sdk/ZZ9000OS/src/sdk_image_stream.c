@@ -152,6 +152,9 @@ static uint32_t next_image_session_id;
  * word accesses (ns-scale, never held across decode work), so a decode
  * fault can never land inside it.
  */
+/* The decode budget and session table have separate critical sections:
+ * beginning a WebP session runs on core 1 while JPEG/PNG can begin on core 0. */
+static sdk_smp_lock_t image_session_lock = SDK_SMP_LOCK_INIT;
 static sdk_smp_lock_t image_decode_state_lock = SDK_SMP_LOCK_INIT;
 
 #define IMAGE_POOL_ALLOC_MAGIC 0x494D4750u
@@ -2172,8 +2175,9 @@ uint32_t sdk_image_stream_active_count(void)
 	return count;
 }
 
-uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
-                                struct SDKImageStreamResult *result)
+static uint16_t image_stream_begin_locked(
+	const struct SDKImageStreamBegin *begin,
+	struct SDKImageStreamResult *result)
 {
 	struct SDKImageStreamSession *session;
 	uint16_t status;
@@ -2266,6 +2270,31 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 
 	fill_result(session, SDK_IMAGE_SESSION_STATE_NEED_INPUT, 0U, result);
 	return SDK_STATUS_OK;
+}
+uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
+                                struct SDKImageStreamResult *result)
+{
+	uint16_t status;
+	int module_guard = begin && begin->codec == SDK_IMAGE_CODEC_WEBP;
+	int locked;
+
+	/* WebP loads on core 1. Keep core 0's JPEG/PNG mailbox work from
+	 * waiting with IRQs masked while that SD-backed load runs. */
+	if (module_guard)
+		zzm_loader_session_begin_lock();
+	locked = smp_cpu_id() == 0 ?
+		sdk_smp_lock_try_acquire(&image_session_lock) :
+		(sdk_smp_lock_acquire(&image_session_lock), 1);
+	if (!locked) {
+		if (module_guard)
+			zzm_loader_session_begin_unlock();
+		return SDK_STATUS_BUSY;
+	}
+	status = image_stream_begin_locked(begin, result);
+	sdk_smp_lock_release(&image_session_lock);
+	if (module_guard)
+		zzm_loader_session_begin_unlock();
+	return status;
 }
 
 uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *feed,
@@ -2439,9 +2468,16 @@ void sdk_image_stream_poison_core1_sessions(void)
  * the lock back to the free state so neither the restarted worker
  * nor core 0's next reservation spins on the orphaned lock.
  */
-void sdk_image_stream_reset_decode_state_lock(void)
+void sdk_image_stream_reset_locks(void)
 {
+	sdk_smp_lock_reset(&image_session_lock);
 	sdk_smp_lock_reset(&image_decode_state_lock);
+}
+
+void sdk_image_stream_reset_locks_if_owned(void)
+{
+	sdk_smp_lock_reset_if_owned(&image_session_lock);
+	sdk_smp_lock_reset_if_owned(&image_decode_state_lock);
 }
 uint16_t sdk_image_stream_frame_next(uint32_t session_id,
                                      uint32_t flags,

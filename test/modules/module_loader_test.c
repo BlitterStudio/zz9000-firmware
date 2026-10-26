@@ -5,6 +5,19 @@
 #include "ff.h"
 #include "zzm_runtime.h"
 
+
+/* Single-threaded host backing for the loader's cross-core session lock. */
+int smp_cpu_id(void) { return 0; }
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t flags) { (void)flags; }
+void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1U; }
+void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0U; }
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+    if (*word) return 0;
+    *word = 1U;
+    return 1;
+}
 static unsigned loader_open_calls;
 static unsigned loader_close_calls;
 static FRESULT loader_open_result;

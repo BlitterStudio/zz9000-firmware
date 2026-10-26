@@ -50,6 +50,31 @@ void smp_raw_spin_lock(volatile uint32_t *word)
         : "=&r"(status), "=&r"(value) : "r"(word) : "cc", "memory");
 }
 
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+    uint32_t state;
+    uint32_t status;
+    uint32_t result;
+    uint32_t value = 1U;
+
+    __asm__ __volatile__(
+        "ldrex %0, [%3]\n"
+        "cmp %0, #0\n"
+        "bne 1f\n"
+        "strex %1, %4, [%3]\n"
+        "cmp %1, #0\n"
+        "moveq %2, #1\n"
+        "movne %2, #0\n"
+        "b 2f\n"
+        "1: clrex\n"
+        "mov %2, #0\n"
+        "2: dmb\n"
+        : "=&r"(state), "=&r"(status), "=&r"(result)
+        : "r"(word), "r"(value)
+        : "cc", "memory");
+    return (int)result;
+}
+
 void smp_raw_spin_unlock(volatile uint32_t *word)
 {
     __asm__ __volatile__(

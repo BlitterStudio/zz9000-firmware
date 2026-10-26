@@ -19,6 +19,12 @@ uint32_t smp_local_irq_save(void) { return 0U; }
 void smp_local_irq_restore(uint32_t s) { (void)s; }
 void smp_raw_spin_lock(volatile uint32_t *w) { *w = 1U; }
 void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0U; }
+int smp_raw_spin_try_lock(volatile uint32_t *w)
+{
+	if (*w) return 0;
+	*w = 1U;
+	return 1;
+}
 
 uint16_t zzm_registry_sdk_status(uint32_t module_id)
 {
@@ -36,6 +42,9 @@ void zzm_loader_release(uint32_t module_id)
 {
 	(void)module_id;
 }
+
+void zzm_loader_session_begin_lock(void) {}
+void zzm_loader_session_begin_unlock(void) {}
 
 static uint8_t decoder_storage;
 static uint32_t create_calls;

@@ -271,7 +271,7 @@ uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 		begin, SDK_VIDEO_STREAM_OWNER_LEGACY, result);
 }
 
-uint16_t sdk_video_stream_begin_owned(
+static uint16_t sdk_video_stream_begin_owned_locked(
 	const struct SDKVideoStreamBegin *begin, uint32_t owner,
 	struct SDKVideoStreamResult *result)
 {
@@ -380,6 +380,20 @@ uint16_t sdk_video_stream_begin_owned(
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,
 	            SDK_VIDEO_SESSION_RESULT_NEED_INPUT, result);
 	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_video_stream_begin_owned(
+	const struct SDKVideoStreamBegin *begin, uint32_t owner,
+	struct SDKVideoStreamResult *result)
+{
+	uint16_t status;
+
+	/* The module registry returns callable ops before the reference is
+	 * acquired.  Do not let core 0 idle-unload that image in this gap. */
+	zzm_loader_session_begin_lock();
+	status = sdk_video_stream_begin_owned_locked(begin, owner, result);
+	zzm_loader_session_begin_unlock();
+	return status;
 }
 
 uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,

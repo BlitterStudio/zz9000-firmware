@@ -475,7 +475,7 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
        * above have already released their charges, so the 72 MiB budget
        * stays usable). */
       sdk_smp_lock_reset_malloc();
-      sdk_image_stream_reset_decode_state_lock();
+      sdk_image_stream_reset_locks();
       sdk_compression_reclaim_core1_decode();
       g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
     }

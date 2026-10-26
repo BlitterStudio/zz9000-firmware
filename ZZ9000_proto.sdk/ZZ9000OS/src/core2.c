@@ -12,7 +12,7 @@
 #include "card_pool.h"
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
-
+#include "zzm_loader.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
 #define A9_CLKSTOP1_MASK	0x00000020
@@ -198,6 +198,8 @@ static void record_fault(uint32_t code, const char *name)
 	/* Same for the card pool lock: WebM and WebP decodes on this core
 	 * allocate arena regions from the pool. */
 	sdk_smp_lock_reset_if_owned(&card_pool.lock);
+	zzm_loader_reset_session_lock_if_owned();
+	sdk_image_stream_reset_locks_if_owned();
 
 	taskq_shared_t *sh = scheduler_shared();
 	int slot = sh->core1_current_slot;
@@ -312,7 +314,8 @@ void core1_cold_restart(void)
 	 * window in header parsing), leaving that lock owned by the
 	 * dead core.
 	 */
-	sdk_image_stream_reset_decode_state_lock();
+	sdk_image_stream_reset_locks();
+	zzm_loader_reset_session_lock();
 
 	/*
 	 * CPU1 is still halted and the malloc lock is now free: reclaim any heap

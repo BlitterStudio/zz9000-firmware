@@ -1307,6 +1307,7 @@ static struct SDKSharedBuffer shared_buffers[SDK_MAX_SHARED_BUFFERS];
 static struct SDKSurface surfaces[SDK_MAX_SURFACES];
 static struct SDKSharedBuffer *media_pcm_ring;
 static uint32_t media_pcm_ring_session;
+static uint32_t media_pcm_ring_request_id;
 
 /*
  * The audio-stream table lives in the SCU-coherent scheduler region
@@ -2207,6 +2208,7 @@ static void release_media_pcm_ring(uint32_t session)
 		shared_buffer_unpin(media_pcm_ring);
 		media_pcm_ring = 0;
 		media_pcm_ring_session = 0U;
+		media_pcm_ring_request_id = 0U;
 	}
 }
 
@@ -5732,10 +5734,12 @@ static uint16_t handle_media_session_begin(
 		if (!shared_buffer_pin(pcm_ring))
 			return complete_status(req, comp, SDK_STATUS_BUSY);
 		p.pcm_ring_addr = pcm_ring->address;
-		/* Reserve the ring until the deferred begin either binds it to its
-		 * returned session or reports a failure. */
+		/* Reserve the ring until this begin either binds it to its returned
+		 * session or reports a failure. A no-audio begin may complete first,
+		 * so completion retires only this request's reservation. */
 		media_pcm_ring = pcm_ring;
 		media_pcm_ring_session = 0U;
+		media_pcm_ring_request_id = get_be32(req->request_id);
 	}
 	status = service_try_defer(SDK_OP_MEDIA_SESSION_BEGIN, req, &p,
 	                           sizeof(p), 0U);
@@ -5745,6 +5749,7 @@ static uint16_t handle_media_session_begin(
 		shared_buffer_unpin(pcm_ring);
 		media_pcm_ring = 0;
 		media_pcm_ring_session = 0U;
+		media_pcm_ring_request_id = 0U;
 	}
 	return complete_status(req, comp, SDK_STATUS_BUSY);
 }
@@ -9014,6 +9019,7 @@ void sdk_mailbox_init(void)
 	timing_decode_us = 0;
 	media_pcm_ring = 0;
 	media_pcm_ring_session = 0U;
+	media_pcm_ring_request_id = 0U;
 	memset(image_begin_pending, 0, sizeof(image_begin_pending));
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
@@ -9311,18 +9317,20 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		memset((void *)comp->payload, 0, sizeof(comp->payload));
 		memcpy((void *)comp->payload, payload, n);
 	}
-	if (opcode == SDK_OP_MEDIA_SESSION_BEGIN) {
+	if (opcode == SDK_OP_MEDIA_SESSION_BEGIN && media_pcm_ring &&
+	    media_pcm_ring_session == 0U &&
+	    media_pcm_ring_request_id == request_id) {
 		if (status == SDK_STATUS_OK && payload != 0 &&
 		    payload_len >= sizeof(struct SDKMediaSessionMainResultPayload)) {
 			const struct SDKMediaSessionMainResultPayload *media =
 			    (const struct SDKMediaSessionMainResultPayload *)payload;
 
-			if (media_pcm_ring && media_pcm_ring_session == 0U)
-				media_pcm_ring_session = get_be32(media->session);
-		} else if (media_pcm_ring && media_pcm_ring_session == 0U) {
+			media_pcm_ring_session = get_be32(media->session);
+		} else {
 			shared_buffer_unpin(media_pcm_ring);
 			media_pcm_ring = 0;
 			media_pcm_ring_session = 0U;
+			media_pcm_ring_request_id = 0U;
 		}
 	}
 	if (status == SDK_STATUS_OK && opcode == SDK_OP_IMAGE_SESSION_FEED &&

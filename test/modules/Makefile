@@ -9,7 +9,7 @@ PACKER_TEST_TARGET := build/zzm_pack_test
 test: $(LOADER_TARGET) $(PACKER_TARGET) $(PACKER_TEST_TARGET)
 	$(LOADER_TARGET)
 	$(PACKER_TEST_TARGET) ./$(PACKER_TARGET)
-$(LOADER_TARGET): module_loader_test.c $(SRC)/zzm_loader.c $(SRC)/zzm_manifest.c
+$(LOADER_TARGET): module_loader_test.c $(SRC)/zzm_loader.c $(SRC)/zzm_manifest.c $(SRC)/sdk_smp_lock.c
 	@mkdir -p build
 	$(CC) $(CFLAGS) -Wl,--gc-sections -Imock -I$(SRC) -o $@ $^
 $(PACKER_TARGET): ../../util/zzm_pack.c $(SRC)/zzm_manifest.c

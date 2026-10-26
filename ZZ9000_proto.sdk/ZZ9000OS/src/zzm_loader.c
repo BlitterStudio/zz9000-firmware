@@ -3,11 +3,11 @@
 #include <ff.h>
 #include "xil_cache.h"
 #include "sdk_crypto.h"
+#include "sdk_smp_lock.h"
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
 #include "zzm_registry.h"
 #include "zzm_runtime.h"
-
 #define ZZM_MODULE_MAX 8U
 #define ZZM_MODULE_COUNT ZZM_MODULE_MAX
 
@@ -31,6 +31,32 @@ static uint64_t module_idle_since[ZZM_MODULE_MAX];
 static uint64_t last_poll_ms;
 static int (*storage_idle)(void);
 static int (*load_dispatch)(uint32_t module_id);
+
+/* Session-begin module callbacks run on core 1 while core 0 services idle
+ * unloading.  This lock prevents a callback from observing a reclaimed
+ * module image; it is recursive because load/init paths call back into the
+ * loader. */
+static sdk_smp_lock_t session_begin_lock = SDK_SMP_LOCK_INIT;
+
+void zzm_loader_session_begin_lock(void)
+{
+    sdk_smp_lock_acquire(&session_begin_lock);
+}
+
+void zzm_loader_session_begin_unlock(void)
+{
+    sdk_smp_lock_release(&session_begin_lock);
+}
+
+void zzm_loader_reset_session_lock_if_owned(void)
+{
+    sdk_smp_lock_reset_if_owned(&session_begin_lock);
+}
+
+void zzm_loader_reset_session_lock(void)
+{
+    sdk_smp_lock_reset(&session_begin_lock);
+}
 
 static int module_index(uint32_t module_id)
 {
@@ -365,43 +391,76 @@ void zzm_loader_boot_load(void)
      * FatFs payload reads are deferred to the first requesting service. */
 }
 
-int zzm_loader_load_on_owner(uint32_t module_id)
+static int load_on_owner_locked(uint32_t module_id)
 {
     uint8_t visiting[ZZM_MODULE_COUNT] = { 0 };
     int index = module_index(module_id);
-    return index >= 0 ? load_module((uint32_t)index, visiting) : 0;
+
+    if (index < 0)
+        return 0;
+    return load_module((uint32_t)index, visiting);
+}
+
+int zzm_loader_load_on_owner(uint32_t module_id)
+{
+    int loaded;
+
+    zzm_loader_session_begin_lock();
+    loaded = load_on_owner_locked(module_id);
+    zzm_loader_session_begin_unlock();
+    return loaded;
 }
 
 int zzm_loader_ensure_loaded(uint32_t module_id)
 {
-    return load_dispatch ? load_dispatch(module_id) :
-        zzm_loader_load_on_owner(module_id);
+    int loaded;
+
+    zzm_loader_session_begin_lock();
+    loaded = load_dispatch ? load_dispatch(module_id) :
+        load_on_owner_locked(module_id);
+    zzm_loader_session_begin_unlock();
+    return loaded;
 }
 
 int zzm_loader_acquire(uint32_t module_id)
 {
-    int index = module_index(module_id);
-    if (index < 0 || !zzm_loader_ensure_loaded(module_id))
-        return 0;
-    module_status[index].ref_count++;
-    module_idle_since[index] = 0U;
-    return 1;
+    int index;
+    int acquired = 0;
+
+    zzm_loader_session_begin_lock();
+    index = module_index(module_id);
+    if (index >= 0 && zzm_loader_ensure_loaded(module_id)) {
+        module_status[index].ref_count++;
+        module_idle_since[index] = 0U;
+        acquired = 1;
+    }
+    zzm_loader_session_begin_unlock();
+    return acquired;
 }
 
 void zzm_loader_release(uint32_t module_id)
 {
-    int index = module_index(module_id);
+    int index;
+
+    zzm_loader_session_begin_lock();
+    index = module_index(module_id);
     if (index >= 0 && module_status[index].state == ZZM_STATE_LOADED &&
         module_status[index].ref_count != 0U) {
         module_status[index].ref_count--;
         if (module_status[index].ref_count == 0U)
             module_idle_since[index] = last_poll_ms;
     }
+    zzm_loader_session_begin_unlock();
 }
 
 void zzm_loader_poll(uint64_t now_ms)
 {
     uint32_t i;
+
+    /* Core 0 must never wait with its IRQs masked for an SD-backed core-1
+     * load. A live begin holds this guard, so defer unloading one pass. */
+    if (!sdk_smp_lock_try_acquire(&session_begin_lock))
+        return;
     last_poll_ms = now_ms;
     for (i = 0; i < zzm_slot_count; i++) {
         uint32_t idle_ms;
@@ -418,6 +477,7 @@ void zzm_loader_poll(uint64_t now_ms)
         release_dependencies(i);
         printf("[ZZM] %s unloaded\n", zzm_slots[i].name);
     }
+    zzm_loader_session_begin_unlock();
 }
 
 void zzm_loader_mark_faulted(uint32_t module_id, const char *reason)

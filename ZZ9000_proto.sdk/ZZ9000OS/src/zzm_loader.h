@@ -57,6 +57,16 @@ enum zzm_state zzm_verify_image(const zzm_header_t *header,
                                 const uint8_t *image, uint32_t file_size,
                                 zzm_sha256_fn sha256);
 void zzm_loader_boot_load(void);
+/*
+ * Keep the lookup, module callbacks, and reference acquire of a session
+ * begin atomic with idle unloading.  Recursive: loader internals acquire it
+ * as well, so a guarded begin can load a module without dropping the guard.
+ */
+void zzm_loader_session_begin_lock(void);
+void zzm_loader_session_begin_unlock(void);
+/* Core-1 fault recovery only. */
+void zzm_loader_reset_session_lock_if_owned(void);
+void zzm_loader_reset_session_lock(void);
 int zzm_loader_ensure_loaded(uint32_t module_id);
 int zzm_loader_acquire(uint32_t module_id);
 void zzm_loader_release(uint32_t module_id);

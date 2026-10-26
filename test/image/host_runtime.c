@@ -141,6 +141,12 @@ void smp_raw_spin_lock(volatile uint32_t *word)
 {
   (void)word;
 }
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+  if (*word) return 0;
+  *word = 1U;
+  return 1;
+}
 
 void smp_raw_spin_unlock(volatile uint32_t *word)
 {

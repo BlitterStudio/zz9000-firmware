@@ -18,6 +18,25 @@ void sdk_smp_lock_acquire(sdk_smp_lock_t *l)
     /* keep IRQs masked until release at depth 0 */
 }
 
+int sdk_smp_lock_try_acquire(sdk_smp_lock_t *l)
+{
+    uint32_t flags = smp_local_irq_save();
+    int me = smp_cpu_id();
+    if (l->owner == me) {
+        l->depth++;
+        smp_local_irq_restore(flags);
+        return 1;
+    }
+    if (!smp_raw_spin_try_lock(&l->raw)) {
+        smp_local_irq_restore(flags);
+        return 0;
+    }
+    l->owner = me;
+    l->depth = 1u;
+    l->saved_irq = flags;
+    return 1;
+}
+
 void sdk_smp_lock_release(sdk_smp_lock_t *l)
 {
     /* Precondition: caller is the owner and local IRQs are masked. */

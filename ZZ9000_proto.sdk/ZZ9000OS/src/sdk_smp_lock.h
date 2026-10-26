@@ -18,10 +18,14 @@ int      smp_cpu_id(void);
 uint32_t smp_local_irq_save(void);         /* disable local IRQs, return prior state */
 void     smp_local_irq_restore(uint32_t s);
 void     smp_raw_spin_lock(volatile uint32_t *word);
+int      smp_raw_spin_try_lock(volatile uint32_t *word);
 void     smp_raw_spin_unlock(volatile uint32_t *word);
 
 void sdk_smp_lock_acquire(sdk_smp_lock_t *l);
 void sdk_smp_lock_release(sdk_smp_lock_t *l);
+
+/* Like acquire, but never waits with local IRQs masked. */
+int sdk_smp_lock_try_acquire(sdk_smp_lock_t *l);
 
 /* Force a lock to the free state, unconditionally. Portable (host-testable):
  * touches only the sdk_smp_lock_t fields, no platform calls. For fault
