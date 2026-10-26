@@ -20,6 +20,9 @@
 #include "sdk_compression.h"
 #include "sdk_decode_reclaim.h"
 #include "sdk_vorbis_alloc.h"
+#ifdef SDK_VIDEO_WEBM_MODULE
+#include "webm_module_alloc.h"
+#endif
 #include "xil_cache.h"
 #define WEBM_ALLOC(n) sdk_decode_heap_alloc(n)
 #define WEBM_FREE(p) sdk_decode_heap_free(p)
@@ -143,8 +146,12 @@ struct sdk_video_webm {
 static void heap_select(struct sdk_video_webm *d)
 {
 	if (!d->heap_inited) {
+#ifdef SDK_VIDEO_WEBM_MODULE
+		webm_module_heap_init(&d->heap, d->pool_owner);
+#else
 		sdk_vorbis_heap_init(&d->heap, WEBM_HEAP_REGION, WEBM_HEAP_LIMIT,
 		                     d->pool_owner);
+#endif
 		d->heap_inited = 1U;
 	}
 	sdk_vorbis_heap_select(&d->heap, &d->alloc_fail);

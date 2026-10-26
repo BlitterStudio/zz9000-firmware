@@ -61,11 +61,16 @@ static int region_of(const struct sdk_vorbis_heap *h, const void *p)
 
 static void region_drop(struct sdk_vorbis_heap *h, unsigned r)
 {
-	if (h->pool_owner)
+	if (h->region_alloc) {
+		(void)h->region_free(h->region_context,
+				     (uint32_t)(uintptr_t)h->region[r],
+				     h->pool_owner);
+	} else if (h->pool_owner) {
 		card_pool_free(&card_pool, (uint32_t)(uintptr_t)h->region[r],
 		               h->pool_owner);
-	else
+	} else {
 		sdk_decode_heap_free(h->region[r]);
+	}
 	h->used -= h->region_bytes[r];
 	h->region[r] = 0;
 	h->region_bytes[r] = 0U;
@@ -97,7 +102,10 @@ static int region_add(struct sdk_vorbis_heap *h, uint32_t need)
 		if (bytes > h->limit - h->used)
 			bytes = (h->limit - h->used) & ~7U;
 	}
-	if (h->pool_owner) {
+	if (h->region_alloc) {
+		base = (uint8_t *)(uintptr_t)h->region_alloc(h->region_context,
+							 bytes, h->pool_owner);
+	} else if (h->pool_owner) {
 		base = (uint8_t *)(uintptr_t)card_pool_alloc(&card_pool, bytes,
 		                                             h->pool_owner);
 	} else {
@@ -315,6 +323,16 @@ void sdk_vorbis_heap_init(struct sdk_vorbis_heap *heap, uint32_t region_size,
 	heap->region_size = (region_size + 7U) & ~7U;
 	heap->limit = limit;
 	heap->pool_owner = pool_owner;
+}
+void sdk_vorbis_heap_set_region_ops(
+	struct sdk_vorbis_heap *heap, sdk_vorbis_region_alloc_fn alloc,
+	sdk_vorbis_region_free_fn free_fn, void *context)
+{
+	if (!heap)
+		return;
+	heap->region_alloc = alloc;
+	heap->region_free = free_fn;
+	heap->region_context = context;
 }
 
 void sdk_vorbis_heap_select(struct sdk_vorbis_heap *heap, jmp_buf *fail)

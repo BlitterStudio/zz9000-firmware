@@ -32,17 +32,26 @@
  * stream needs about ten. */
 #define SDK_VORBIS_HEAP_MAX_REGIONS 16U
 
+typedef uint32_t (*sdk_vorbis_region_alloc_fn)(void *context, uint32_t bytes,
+						 uint32_t owner);
+typedef int (*sdk_vorbis_region_free_fn)(void *context, uint32_t address,
+					 uint32_t owner);
+
 struct sdk_vorbis_heap {
 	uint8_t *region[SDK_VORBIS_HEAP_MAX_REGIONS];
 	uint32_t region_bytes[SDK_VORBIS_HEAP_MAX_REGIONS];
 	/* Offset of the lowest block that may be free (a lower bound). */
 	uint32_t region_hint[SDK_VORBIS_HEAP_MAX_REGIONS];
-	uint32_t region_size;       /* default region size */
+	uint32_t region_size;       /* default region allocation */
 	uint32_t limit;             /* ceiling on tracked bytes held */
 	uint32_t used;              /* tracked bytes held in regions */
 	uint32_t peak;
 	/* card_pool owner of the regions; 0 takes them from the decode heap. */
 	uint32_t pool_owner;
+	/* Optional module runtime forwarding for card-pool regions. */
+	sdk_vorbis_region_alloc_fn region_alloc;
+	sdk_vorbis_region_free_fn region_free;
+	void *region_context;
 };
 
 void *sdk_vorbis_malloc(size_t size);
@@ -54,6 +63,10 @@ void sdk_vorbis_free(void *ptr);
  * pool_owner: card_pool owner for the regions, or 0 for the decode heap. */
 void sdk_vorbis_heap_init(struct sdk_vorbis_heap *heap, uint32_t region_size,
                           uint32_t limit, uint32_t pool_owner);
+/* Override card-pool region allocation for an external module. */
+void sdk_vorbis_heap_set_region_ops(
+	struct sdk_vorbis_heap *heap, sdk_vorbis_region_alloc_fn alloc,
+	sdk_vorbis_region_free_fn free_fn, void *context);
 /* Route the allocator to heap (NULL: every allocation fails). When fail is
  * non-NULL an allocation failure longjmp()s to it with value 1; otherwise
  * it returns NULL. */
