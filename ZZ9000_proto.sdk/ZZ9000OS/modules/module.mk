@@ -12,7 +12,7 @@ $(CC) $(CPU_FLAGS) -nostdlib -Wl,-build-id=none -Wl,--gc-sections \
 	-Wl,--undefined=_malloc_r -Wl,--undefined=_free_r \
 	-Wl,--undefined=_calloc_r -Wl,--undefined=_realloc_r \
 	-Wl,--undefined=_memalign_r -Wl,--undefined=zzm_rt_identity \
-	-Wl,--undefined=zzm_module_descriptor \
+	-Wl,--undefined=zzm_module_descriptor -Wl,--undefined=zzm_module_exit \
 	-Wl,--whole-archive $(ZZM_RT_LIB) -Wl,--no-whole-archive -o $(6) \
 	$(1) $(2)
 endef

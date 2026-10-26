@@ -15,6 +15,7 @@
 #include "sdk_console_encode.h"
 #include "xil_mmu.h"
 #include "xtime_l.h"
+#include "sleep.h"
 #include "sdk_palette.h"
 #include "sdk_mailbox.h"
 #include "sdk_service_catalog.h"
@@ -1161,6 +1162,7 @@ static volatile int sdk_completion_irq_enabled;
  */
 static uint32_t sdk_mailbox_generation;
 static uint32_t g_task_generation[TASKQ_CAPACITY];
+static uint32_t zzm_load_pending_id;
 
 /* Enqueue an internal core-1 task (request_id 0, no client completion).
  * Core-0 main-loop context ONLY: the task queue is single-producer.
@@ -1183,6 +1185,32 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
 	g_task_generation[slot] = sdk_mailbox_generation;
 	__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
 	return 1;
+}
+
+int sdk_mailbox_load_module_core1(uint32_t module_id)
+{
+	uint32_t spins;
+	zzm_status_t status;
+
+	if (zzm_load_pending_id != 0U)
+		return 0;
+	zzm_load_pending_id = module_id;
+	if (!sdk_mailbox_enqueue_internal(TASKQ_OP_ZZM_LOAD, &module_id,
+	                                  sizeof(module_id))) {
+		zzm_load_pending_id = 0U;
+		return 0;
+	}
+	for (spins = 0; zzm_load_pending_id != 0U && spins < 30000U; spins++) {
+		scheduler_core0_poll(1, 1);
+		if (zzm_load_pending_id != 0U)
+			usleep(100);
+	}
+	if (zzm_load_pending_id != 0U) {
+		zzm_loader_mark_load_failed(module_id, ZZM_REASON_STORAGE_BUSY);
+		return 0;
+	}
+	return zzm_loader_status((uint32_t)(module_id - 1U), &status) &&
+	       status.state == ZZM_STATE_LOADED;
 }
 
 /*
@@ -6550,6 +6578,13 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		*result_len = 2U;
 		return SDK_STATUS_OK;
 	}
+	case TASKQ_OP_ZZM_LOAD: {
+		uint32_t module_id;
+		memcpy(&module_id, d->op_params, sizeof(module_id));
+		*result_len = 0U;
+		return zzm_loader_load_on_owner(module_id) ? SDK_STATUS_OK :
+			SDK_STATUS_MODULE_MISMATCH;
+	}
 	case SDK_OP_IMAGE_SESSION_FEED: {
 		const struct imgsess_op_params *p =
 		    (const struct imgsess_op_params *)d->op_params;
@@ -8446,7 +8481,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		put_be32(reply->image_size, status.image_size);
 		put_be32(reply->bss_size, status.bss_size);
 		put_be32(reply->state, status.state);
-		put_be32(reply->reserved, status.ref_count);
+		put_be32(reply->detail, status.state == ZZM_STATE_LOADED ?
+		         status.ref_count : status.reason);
 		memcpy((void *)reply->name, status.name, sizeof(reply->name));
 		return SDK_STATUS_OK;
 	}
@@ -8991,6 +9027,11 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 				                            payload[1]));
 			else
 				fw_update_retire_failed(); /* faulted on core 1 */
+		}
+		else if (opcode == (uint16_t)TASKQ_OP_ZZM_LOAD) {
+			if (status != SDK_STATUS_OK && zzm_load_pending_id != 0U)
+				zzm_loader_mark_faulted(zzm_load_pending_id, "core-1 load fault");
+			zzm_load_pending_id = 0U;
 		}
 		else if (opcode == (uint16_t)SDK_OP_AUDIO_STREAM_CLOSE) {
 			/* Background close: sdk_mailbox_audio_stream_reap

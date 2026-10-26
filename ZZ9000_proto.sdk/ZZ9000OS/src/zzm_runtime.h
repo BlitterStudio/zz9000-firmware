@@ -39,6 +39,7 @@ typedef struct zzm_core_service {
     void (*log)(const char *message);
     void (*fault)(const char *reason);
     uint64_t (*time_us)(void);
+    void (*module_fault)(uint32_t module_id, const char *reason);
 } zzm_core_service_t;
 
 typedef struct zzm_memory_service {
@@ -82,6 +83,8 @@ const zzm_services_t *zzm_runtime_services(void);
 int zzm_runtime_register_ops(uint32_t module_id, const void *ops,
                              uint32_t ops_size);
 void zzm_runtime_module_fault(uint32_t module_id, const char *reason);
+uint32_t zzm_runtime_release_module(uint32_t module_id);
+int zzm_runtime_quota_available(uint32_t memory_class, uint32_t quota);
 
 /* libzzm_rt public module-side binding and context API. */
 int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,

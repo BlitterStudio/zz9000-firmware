@@ -23,6 +23,7 @@
 struct SDKVideoStreamSession {
 	uint32_t id;
 	uint32_t codec;
+	uint32_t module_id;
 	uint32_t container;
 	uint32_t width;
 	uint32_t height;
@@ -265,6 +266,7 @@ uint16_t sdk_video_stream_begin_owned(
 {
 	const struct SDKVideoDecoderOps *ops;
 	struct SDKVideoStreamSession *session;
+	uint32_t module_id = 0U;
 	if (!begin || !result ||
 	    (owner != SDK_VIDEO_STREAM_OWNER_LEGACY &&
 	     owner != SDK_VIDEO_STREAM_OWNER_MEDIA) ||
@@ -280,6 +282,7 @@ uint16_t sdk_video_stream_begin_owned(
 
 		if (module_status != SDK_STATUS_OK)
 			return module_status;
+		module_id = ZZM_MODULE_WEBM;
 	}
 	if ((begin->container == SDK_VIDEO_CONTAINER_MPEG_PS ||
 	     begin->container == SDK_VIDEO_CONTAINER_WEBM) &&
@@ -290,6 +293,7 @@ uint16_t sdk_video_stream_begin_owned(
 
 		if (module_status != SDK_STATUS_OK)
 			return module_status;
+		module_id = ZZM_MODULE_MPEG2;
 	}
 	ops = sdk_video_backend_find(begin->codec, begin->container);
 	if (ops && ops->geometry_ok) {
@@ -326,11 +330,14 @@ uint16_t sdk_video_stream_begin_owned(
 	session = find_free_session();
 	if (!session)
 		return SDK_STATUS_NO_MEMORY;
+	if (module_id != 0U && !zzm_loader_acquire(module_id))
+		return SDK_STATUS_MODULE_MISMATCH;
 
 	memset(session, 0, sizeof(*session));
 	session->id = next_session_id();
 	session->codec = begin->codec;
 	session->container = begin->container;
+	session->module_id = module_id;
 	session->width = begin->width;
 	session->height = begin->height;
 	session->output_format = begin->output_format;
@@ -479,6 +486,7 @@ uint16_t sdk_video_stream_close(uint32_t id,
 	                            struct SDKVideoStreamResult *result)
 {
 	struct SDKVideoStreamSession *session;
+	uint32_t module_id;
 
 	if (!result || id == 0U)
 		return SDK_STATUS_BAD_REQUEST;
@@ -489,6 +497,9 @@ uint16_t sdk_video_stream_close(uint32_t id,
 	            SDK_VIDEO_SESSION_RESULT_DONE, result);
 	if (session->decoder && !session->faulted)
 		session->ops->destroy(session->decoder);
+	module_id = session->module_id;
+	if (module_id != 0U)
+		zzm_loader_release(module_id);
 	memset(session, 0, sizeof(*session));
 	return SDK_STATUS_OK;
 }

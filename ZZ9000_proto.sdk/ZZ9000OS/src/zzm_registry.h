@@ -22,5 +22,7 @@ const void *zzm_registry_get_service(uint32_t service_id,
                                      uint32_t min_version);
 const void *zzm_registry_ops(uint32_t module_id, uint32_t min_size);
 uint16_t zzm_registry_sdk_status(uint32_t module_id);
+void zzm_registry_unregister_module(uint32_t module_id);
+int zzm_registry_module_services_ready(uint32_t module_id);
 
 #endif

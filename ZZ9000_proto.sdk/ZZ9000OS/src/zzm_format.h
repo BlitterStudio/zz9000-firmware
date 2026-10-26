@@ -24,6 +24,8 @@ enum zzm_module_id {
     ZZM_MODULE_MINIGL = 4,
     ZZM_MODULE_H264 = 5,
     ZZM_MODULE_H265 = 6,
+    ZZM_MODULE_MP4 = 7,
+    ZZM_MODULE_AAC = 8,
 };
 
 typedef struct __attribute__((packed)) zzm_service_requirement {
@@ -42,6 +44,7 @@ typedef struct __attribute__((packed)) zzm_header {
     uint32_t image_size;
     uint32_t bss_size;
     uint32_t init_entry;
+    uint32_t fini_entry;
     char name[ZZM_NAME_SIZE];
     uint32_t load_policy;
     uint32_t idle_unload_ms;
@@ -52,7 +55,7 @@ typedef struct __attribute__((packed)) zzm_header {
     zzm_service_requirement_t required[ZZM_MAX_SERVICE_REQUIREMENTS];
     zzm_service_requirement_t provided[ZZM_MAX_SERVICE_PROVISIONS];
     uint8_t image_sha256[ZZM_SHA256_SIZE];
-    uint8_t reserved[88];
+    uint8_t reserved[84];
 } zzm_header_t;
 
 typedef char zzm_header_size_must_be_256[(sizeof(zzm_header_t) == ZZM_HEADER_SIZE) ? 1 : -1];

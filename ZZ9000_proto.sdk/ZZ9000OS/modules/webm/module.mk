@@ -48,8 +48,8 @@ $(ZZM_WEBM_BUILD)/sdk_media_timeline.o: $(SRC_DIR)/sdk_media_timeline.c
 $(ZZM_WEBM_ELF): $(ZZM_WEBM_OBJS) $(LIBVPX_LIB) $(LIBOPUS_LIB) \
 	$(LIBVORBIS_LIB) $(ZZM_WEBM_LINKER) $(ZZM_RT_LIB)
 	@mkdir -p $(dir $@)
-	$(call zzm_module_link,$(ZZM_WEBM_OBJS),$(ZZM_WEBM_LIBS),$(ZZM_WEBM_LINKER),0x09400000,0x00800000,$@)
-	$(ZZM_CONFORMANCE) $@ 2 WEBM 0x09400000 0x00800000
+	$(call zzm_module_link,$(ZZM_WEBM_OBJS),$(ZZM_WEBM_LIBS),$(ZZM_WEBM_LINKER),0x09200000,0x00400000,$@)
+	$(ZZM_CONFORMANCE) $@ 2 WEBM 0x09200000 0x00400000
 
 $(ZZM_WEBM_IMAGE): $(ZZM_WEBM_ELF) $(ZZM_PACKER)
 	@mkdir -p $(dir $@)

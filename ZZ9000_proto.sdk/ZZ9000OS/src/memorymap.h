@@ -374,9 +374,9 @@
 #define NEWLIB_HEAP_END \
     (NEWLIB_HEAP_ADDRESS + NEWLIB_HEAP_SIZE)
 
-// Fixed-slot modules occupy the first 16 MiB that was formerly permanent
-// card-pool space. The loader owns this range before any allocator starts;
-// all card-pool addresses therefore begin after it.
+// Fixed-slot modules occupy the first 32 MiB of permanent card-pool space.
+// The loader owns this range before any allocator starts; all card-pool
+// addresses therefore begin after it.
 #define FIRMWARE_MODULE_ARENA_ADDRESS 0x09000000
 #define FIRMWARE_MODULE_ARENA_SIZE    0x02000000
 #define FIRMWARE_MODULE_ARENA_END \
