@@ -618,11 +618,36 @@ static int test_ping_echoes_inline_payload(void)
 
 static int test_status_and_service_helpers_are_stable(void)
 {
-  if (strcmp(zz9k_status_name(ZZ9K_STATUS_OK), "ok") != 0) return 1;
-  if (strcmp(zz9k_status_name(ZZ9K_STATUS_TIMEOUT), "timeout") != 0) {
-    return 2;
+  static const struct {
+    int status;
+    const char *name;
+  } status_names[] = {
+      {ZZ9K_STATUS_OK, "ok"},
+      {ZZ9K_STATUS_QUEUED, "queued"},
+      {ZZ9K_STATUS_BUSY, "busy"},
+      {ZZ9K_STATUS_UNSUPPORTED, "unsupported"},
+      {ZZ9K_STATUS_BAD_REQUEST, "bad-request"},
+      {ZZ9K_STATUS_BAD_HANDLE, "bad-handle"},
+      {ZZ9K_STATUS_NO_MEMORY, "no-memory"},
+      {ZZ9K_STATUS_TIMEOUT, "timeout"},
+      {ZZ9K_STATUS_CANCELLED, "cancelled"},
+      {ZZ9K_STATUS_IO_ERROR, "io-error"},
+      {ZZ9K_STATUS_NOT_FOUND, "not-found"},
+      {ZZ9K_STATUS_MODULE_MISSING, "module not installed"},
+      {ZZ9K_STATUS_MODULE_MISMATCH, "module version mismatch"},
+      {ZZ9K_STATUS_INTERNAL_ERROR, "internal-error"},
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof(status_names) / sizeof(status_names[0]); i++) {
+    const char *name = zz9k_status_name(status_names[i].status);
+
+    if (!name || strcmp(name, "error") == 0 ||
+        strcmp(name, status_names[i].name) != 0) {
+      return (int)i + 1;
+    }
   }
-  if (strcmp(zz9k_status_name(0x12345678), "error") != 0) return 3;
+
   if (strcmp(zz9k_service_name(ZZ9K_SERVICE_CORE), "core") != 0) return 4;
   if (strcmp(zz9k_service_name(ZZ9K_SERVICE_IMAGE), "image") != 0) return 5;
   if (strcmp(zz9k_service_name(0x77770000UL), "unknown") != 0) return 6;
