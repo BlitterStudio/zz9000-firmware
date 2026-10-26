@@ -10,6 +10,7 @@
 #include "card_pool.h"
 #include "host_card_pool.h"
 #include "sdk_decode_reclaim.h"
+#include "sdk_smp_lock.h"
 
 #define HOST_RUNTIME_POOL_BYTES (96U << 20)
 
@@ -139,7 +140,7 @@ uint32_t __wrap_card_pool_alloc(card_pool_t *pool, uint32_t size,
 
 void smp_raw_spin_lock(volatile uint32_t *word)
 {
-  (void)word;
+  *word = 1U;
 }
 int smp_raw_spin_try_lock(volatile uint32_t *word)
 {
@@ -148,7 +149,12 @@ int smp_raw_spin_try_lock(volatile uint32_t *word)
   return 1;
 }
 
+void sdk_smp_lock_reset_if_owned(sdk_smp_lock_t *lock)
+{
+  if (lock->owner == smp_cpu_id()) sdk_smp_lock_reset(lock);
+}
+
 void smp_raw_spin_unlock(volatile uint32_t *word)
 {
-  (void)word;
+  *word = 0U;
 }
