@@ -111,9 +111,14 @@ entry_file=$tmp/entry
 errors=$tmp/errors
 : > "$errors"
 
-"$READELF" -W -h "$elf" > "$header" || die "cannot read ELF header: $elf"
-"$READELF" -W -s "$elf" > "$symbols" || die "cannot read ELF symbols: $elf"
-"$READELF" -W -S "$elf" > "$sections" || die "cannot read ELF sections: $elf"
+"$READELF" -W -h "$elf" > "$header" 2>/dev/null || die "cannot read ELF header: $elf"
+"$READELF" -W -s "$elf" > "$symbols" 2>/dev/null || die "cannot read ELF symbols: $elf"
+"$READELF" -W -S "$elf" > "$sections" 2>/dev/null || die "cannot read ELF sections: $elf"
+syscall_section=$(awk '
+$3 == ".zzm_rt.syscall" { section_number = $2; gsub(/[^0-9]/, "", section_number); print section_number; exit }
+$2 == ".zzm_rt.syscall" { section_number = $1; gsub(/[^0-9]/, "", section_number); print section_number; exit }
+' "$sections")
+
 
 awk -v entry_file="$entry_file" '
 function hex(text,    i, c, digit, value) {
@@ -177,7 +182,7 @@ entry_value=$(cat "$entry_file")
 # All entries here must arrive from the mandatory, whole-archived libzzm_rt.
 # The final ELF has no archive provenance, so a section-defined identity marker
 # is the stable link-time proof that the runtime was included.
-awk -v runtime_symbol="$runtime_symbol" -v entry="$entry_value" -v errors="$errors" '
+awk -v runtime_symbol="$runtime_symbol" -v syscall_section="$syscall_section" -v entry="$entry_value" -v errors="$errors" '
 function hex(text,    i, c, digit, value) {
     sub(/^0[xX]/, "", text)
     value = 0
@@ -210,10 +215,12 @@ BEGIN {
     split("_malloc_r _free_r _calloc_r _realloc_r _memalign_r", reentrant_alloc, " ")
     split("_Znwj _Znaj _ZdlPv _ZdaPv _ZdlPvj _ZdaPvj _ZnwjSt11align_val_t _ZnajSt11align_val_t _ZdlPvSt11align_val_t _ZdaPvSt11align_val_t", cpp_alloc, " ")
     split("__cxa_atexit __cxa_guard_acquire __cxa_guard_release __cxa_guard_abort __dso_handle", cpp_runtime, " ")
+    split("_write _write_r _open _read _close _lseek _fstat _isatty _kill _getpid _exit", syscall_stub, " ")
     for (i in c_alloc) required_symbol(c_alloc[i])
     for (i in reentrant_alloc) required_symbol(reentrant_alloc[i])
     for (i in cpp_alloc) cpp_required_symbol(cpp_alloc[i])
     for (i in cpp_runtime) cpp_required_symbol(cpp_runtime[i])
+    for (i in syscall_stub) syscall_required[syscall_stub[i]] = 1
 }
 $1 ~ /^[0-9]+:$/ {
     value = hex($2)
@@ -224,7 +231,7 @@ $1 ~ /^[0-9]+:$/ {
     sub(/@@?.*$/, "", name)
     if (name == "") next
 
-    if (ndx == "UND")
+    if (ndx == "UND" && !(name in required) && !(name in cpp_required))
         report("undefined:" name, "undefined ELF symbol: " name)
 
     if ((name == "__cxa_throw" || name == "__gxx_personality_v0" || name ~ /^_Unwind_/) &&
@@ -245,6 +252,8 @@ $1 ~ /^[0-9]+:$/ {
         init_marker = 1
     if (name == "zzm_module_descriptor" && section_index(ndx) && binding != "LOCAL")
         descriptor_marker = 1
+    if (name == "zzm_module_exit" && section_index(ndx) && binding != "LOCAL")
+        fini_marker = 1
     if (name == runtime_symbol && section_index(ndx) && binding != "LOCAL")
         runtime_marker = 1
 
@@ -254,12 +263,16 @@ $1 ~ /^[0-9]+:$/ {
         else if (ndx != "UND")
             report("allocator-origin:" name, "allocator/runtime symbol is not section-defined by libzzm_rt: " name)
     }
+    if (name in syscall_required && (!section_index(ndx) || ndx != syscall_section))
+        report("syscall-origin:" name, "module-local syscall stub is not supplied by libzzm_rt: " name)
 }
 END {
     if (!entry_marker || !init_marker)
         report("entry", "missing zzm_module_entry/zzm_module_init entry markers")
     if (!descriptor_marker)
         report("descriptor", "missing zzm_module_descriptor module header marker")
+    if (!fini_marker)
+        report("fini", "missing zzm_module_exit orderly teardown marker")
     if (!runtime_marker)
         report("runtime", "missing section-defined libzzm_rt identity symbol: " runtime_symbol)
     for (name in required) {

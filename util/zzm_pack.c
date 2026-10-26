@@ -7,6 +7,7 @@
 
 #include "zzm_format.h"
 #include "zzm_manifest.h"
+#include "zzm_runtime.h"
 
 #define ELF32_EHDR_SIZE 52U
 #define ELF32_SHDR_SIZE 40U
@@ -18,6 +19,8 @@
 #define SHT_NOBITS 8U
 #define SHT_REL 9U
 #define SHT_RELR 19U
+#define SHT_SYMTAB 2U
+#define ELF32_SYM_SIZE 16U
 
 typedef struct {
     uint32_t state[8];
@@ -223,6 +226,66 @@ static const zzm_slot_t *find_slot(uint32_t id)
     return 0;
 }
 
+static int find_symbol_value(FILE *input, long file_size,
+                             const uint8_t elf_header[ELF32_EHDR_SIZE],
+                             const char *wanted, uint32_t *value)
+{
+    uint8_t section[ELF32_SHDR_SIZE];
+    uint8_t symbol[ELF32_SYM_SIZE];
+    uint8_t *strings = 0;
+    uint32_t section_table_offset = read_le32(elf_header + 32);
+    uint16_t section_size = read_le16(elf_header + 46);
+    uint16_t section_count = read_le16(elf_header + 48);
+    uint16_t i;
+    int found = 0;
+
+    for (i = 0; i < section_count; i++) {
+        uint32_t symbol_offset;
+        uint32_t symbol_size;
+        uint32_t string_index;
+        uint32_t string_offset;
+        uint32_t string_size;
+        uint32_t offset;
+        if (!read_at(input, file_size,
+                     section_table_offset + (uint32_t)i * section_size,
+                     section, sizeof(section)) || read_le32(section + 4) != SHT_SYMTAB)
+            continue;
+        symbol_offset = read_le32(section + 16);
+        symbol_size = read_le32(section + 20);
+        string_index = read_le32(section + 24);
+        if (string_index >= section_count ||
+            !read_at(input, file_size,
+                     section_table_offset + string_index * section_size,
+                     section, sizeof(section)))
+            break;
+        string_offset = read_le32(section + 16);
+        string_size = read_le32(section + 20);
+        if (string_size == 0U || (uint64_t)string_offset + string_size > (uint64_t)file_size)
+            break;
+        strings = malloc(string_size);
+        if (!strings || !read_at(input, file_size, string_offset, strings, string_size))
+            break;
+        for (offset = 0; offset + ELF32_SYM_SIZE <= symbol_size;
+             offset += ELF32_SYM_SIZE) {
+            uint32_t name_offset;
+            if (!read_at(input, file_size, symbol_offset + offset,
+                         symbol, sizeof(symbol)))
+                break;
+            name_offset = read_le32(symbol);
+            if (name_offset < string_size &&
+                memchr(strings + name_offset, '\0', string_size - name_offset) &&
+                strcmp((const char *)strings + name_offset, wanted) == 0) {
+                *value = read_le32(symbol + 4);
+                found = 1;
+                break;
+            }
+        }
+        break;
+    }
+    free(strings);
+    return found;
+}
+
 static int section_in_slot(uint32_t address, uint32_t size,
                            const zzm_slot_t *slot)
 {
@@ -249,6 +312,7 @@ static int pack_elf(uint32_t module_id, uint32_t module_version,
     uint32_t image_end;
     uint32_t allocation_end;
     uint32_t entry;
+    uint32_t fini_entry;
     uint16_t section_count;
     uint16_t section_size;
     uint16_t index;
@@ -340,6 +404,13 @@ static int pack_elf(uint32_t module_id, uint32_t module_version,
         fprintf(stderr, "zzm_pack: invalid allocated section layout\n");
         goto done;
     }
+    fini_entry = 0U;
+    if (find_symbol_value(input, file_size, elf_header, "zzm_module_exit",
+                          &fini_entry) &&
+        (fini_entry < slot->address || fini_entry >= image_end)) {
+        fprintf(stderr, "zzm_pack: zzm_module_exit is outside module image\n");
+        goto done;
+    }
 
     image = calloc((size_t)(image_end - slot->address), 1);
     if (!image) {
@@ -385,22 +456,23 @@ static int pack_elf(uint32_t module_id, uint32_t module_version,
     write_le32(header + 24, image_size);
     write_le32(header + 28, bss_size);
     write_le32(header + 32, entry);
-    memcpy(header + 36, slot->name, strlen(slot->name) + 1);
+    write_le32(header + 36, fini_entry);
+    memcpy(header + 40, slot->name, strlen(slot->name) + 1);
     /* v2 modules are loaded only when a media path needs them. The first
      * four requirements are the firmware-provided core runtime interfaces. */
-    write_le32(header + 52, ZZM_LOAD_ON_DEMAND);
-    write_le32(header + 56, ZZM_DEFAULT_IDLE_UNLOAD_MS);
-    write_le32(header + 60, 1U); /* ZZM_MEMORY_CLASS_MEDIA */
-    write_le32(header + 64, module_id == 2U ? (64U << 20) : (32U << 20));
-    write_le16(header + 68, 4U);
-    write_le32(header + 72, 1U);  write_le32(header + 76, 1U);
-    write_le32(header + 80, 2U);  write_le32(header + 84, 1U);
-    write_le32(header + 88, 3U);  write_le32(header + 92, 1U);
-    write_le32(header + 96, 4U);  write_le32(header + 100, 1U);
+    write_le32(header + 56, ZZM_LOAD_ON_DEMAND);
+    write_le32(header + 60, ZZM_DEFAULT_IDLE_UNLOAD_MS);
+    write_le32(header + 64, module_id == 3U ? ZZM_MEMORY_CLASS_IMAGE :
+               ZZM_MEMORY_CLASS_MEDIA);
+    write_le32(header + 68, module_id == 2U ? (64U << 20) : (32U << 20));
+    write_le16(header + 72, 4U);
+    write_le32(header + 76, 1U);  write_le32(header + 80, 1U);
+    write_le32(header + 84, 2U);  write_le32(header + 88, 1U);
+    write_le32(header + 92, 3U);  write_le32(header + 96, 1U);
+    write_le32(header + 100, 4U); write_le32(header + 104, 1U);
     sha256_init(&sha256);
     sha256_update(&sha256, image, image_size);
-    sha256_final(&sha256, header + 136);
-
+    sha256_final(&sha256, header + 140);
     output = fopen(output_path, "wb");
     if (!output) {
         fprintf(stderr, "zzm_pack: cannot write %s\n", output_path);

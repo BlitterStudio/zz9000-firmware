@@ -14,4 +14,5 @@ typedef int FRESULT;
 FRESULT f_open(FIL *, const char *, unsigned char);
 FRESULT f_read(FIL *, void *, UINT, UINT *);
 FRESULT f_close(FIL *);
+FRESULT f_lseek(FIL *, uint32_t);
 #endif
