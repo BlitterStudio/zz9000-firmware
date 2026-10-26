@@ -386,9 +386,20 @@ static int pack_elf(uint32_t module_id, uint32_t module_version,
     write_le32(header + 28, bss_size);
     write_le32(header + 32, entry);
     memcpy(header + 36, slot->name, strlen(slot->name) + 1);
+    /* v2 modules are loaded only when a media path needs them. The first
+     * four requirements are the firmware-provided core runtime interfaces. */
+    write_le32(header + 52, ZZM_LOAD_ON_DEMAND);
+    write_le32(header + 56, ZZM_DEFAULT_IDLE_UNLOAD_MS);
+    write_le32(header + 60, 1U); /* ZZM_MEMORY_CLASS_MEDIA */
+    write_le32(header + 64, module_id == 2U ? (64U << 20) : (32U << 20));
+    write_le16(header + 68, 4U);
+    write_le32(header + 72, 1U);  write_le32(header + 76, 1U);
+    write_le32(header + 80, 2U);  write_le32(header + 84, 1U);
+    write_le32(header + 88, 3U);  write_le32(header + 92, 1U);
+    write_le32(header + 96, 4U);  write_le32(header + 100, 1U);
     sha256_init(&sha256);
     sha256_update(&sha256, image, image_size);
-    sha256_final(&sha256, header + 52);
+    sha256_final(&sha256, header + 136);
 
     output = fopen(output_path, "wb");
     if (!output) {

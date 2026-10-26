@@ -182,6 +182,13 @@ bash ./util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
 
 MODULE_DIR=ZZ9000_proto.sdk/ZZ9000OS/build/modules
 make -C ZZ9000_proto.sdk/ZZ9000OS modules
+for spec in "MPEG2 1 MPEG2 0x09000000 0x00400000" \
+            "WEBM 2 WEBM 0x09400000 0x00800000" \
+            "WEBP 3 WEBP 0x09c00000 0x00400000"; do
+    set -- $spec
+    READELF=arm-none-eabi-readelf bash util/check_zzm_conformance.sh \
+        "$MODULE_DIR/$(printf '%s' "$1" | tr A-Z a-z)/$1.elf" "$2" "$3" "$4" "$5"
+done
 for module in MPEG2.ZZM WEBM.ZZM WEBP.ZZM; do
     if [ ! -f "$MODULE_DIR/$module" ]; then
         echo "ERROR: missing built module $MODULE_DIR/$module." >&2

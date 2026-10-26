@@ -291,13 +291,9 @@ static void ring_write(struct sdk_video_mpeg2 *d, const uint8_t *src,
 	memcpy(d->media.pcm_ring + offset, src, first);
 	memcpy(d->media.pcm_ring, src + first, bytes - first);
 #if defined(SDK_VIDEO_MPEG2_MODULE)
-	if (mpeg2_module_services()->dcache_clean) {
-		mpeg2_module_services()->dcache_clean(
-			(uint32_t)(uintptr_t)(d->media.pcm_ring + offset), first);
-		if (bytes - first != 0U)
-			mpeg2_module_services()->dcache_clean(
-				(uint32_t)(uintptr_t)d->media.pcm_ring, bytes - first);
-	}
+	zzm_rt_dcache_clean((uint32_t)(uintptr_t)(d->media.pcm_ring + offset), first);
+	if (bytes - first != 0U)
+		zzm_rt_dcache_clean((uint32_t)(uintptr_t)d->media.pcm_ring, bytes - first);
 #elif !defined(SDK_VIDEO_HOST_TEST)
 	Xil_DCacheFlushRange(
 		(INTPTR)(uintptr_t)(d->media.pcm_ring + offset), first);

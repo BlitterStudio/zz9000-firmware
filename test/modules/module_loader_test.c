@@ -68,6 +68,7 @@ static zzm_header_t valid_header(uint32_t image_size)
     header.slot_load_address = zzm_slots[0].address;
     header.image_size = image_size;
     header.init_entry = header.slot_load_address;
+    header.memory_quota = 1U;
     strcpy(header.name, "MPEG2");
     return header;
 }
@@ -80,6 +81,11 @@ int main(void)
     CHECK(zzm_verify_image(&header, image, ZZM_HEADER_SIZE + sizeof(image), test_hash) == ZZM_STATE_LOADED);
     header.module_abi_version++;
     CHECK(zzm_verify_image(&header, image, ZZM_HEADER_SIZE + sizeof(image), test_hash) == ZZM_STATE_REJECTED_ABI);
+    header = valid_header(sizeof(image));
+    header.required_count = 1U;
+    header.required[0].service_id = 1U;
+    header.required[0].min_version = 1U;
+    CHECK(zzm_verify_image(&header, image, ZZM_HEADER_SIZE + sizeof(image), test_hash) == ZZM_STATE_REJECTED_SERVICE);
     header = valid_header(sizeof(image));
     test_hash(image, sizeof(image), header.image_sha256);
     header.slot_load_address++;

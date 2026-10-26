@@ -713,11 +713,14 @@ static const struct zzm_webp_ops module_ops = {
 	frame_next, frame_present, frame_retire, restart,
 };
 
+const uint32_t zzm_module_descriptor = ZZM_MODULE_WEBP;
+
 int zzm_module_init(const zzm_services_t *services)
 {
-	if (!services || services->abi_version != ZZM_MODULE_ABI_VERSION ||
-		services->size < sizeof(*services) || !services->register_ops)
+	if (!zzm_rt_bind(services, ZZM_MODULE_WEBP, ZZM_MEMORY_CLASS_IMAGE,
+	                 32U << 20))
 		return -1;
 	zzm_webp_alloc_init(services);
-	return services->register_ops(ZZM_MODULE_WEBP, &module_ops, sizeof(module_ops)) ? 0 : -1;
+	return services->register_ops(ZZM_MODULE_WEBP, &module_ops,
+	                              sizeof(module_ops)) ? 0 : -1;
 }

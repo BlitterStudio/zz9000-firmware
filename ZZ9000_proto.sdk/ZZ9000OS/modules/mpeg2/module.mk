@@ -19,6 +19,7 @@ ZZM_MPEG2_LINKER := ../../util/zzm_module.ld
 ZZM_MPEG2_CFLAGS := $(CPU_FLAGS) $(COMMON_FLAGS) -O3 \
 	-DSDK_VIDEO_MPEG2_MODULE -I$(ZZM_MPEG2_DIR) \
 	-I$(LIBMPEG2_INCLUDE_DIR) -I$(A52_INCLUDE_DIR)
+ZZM_MPEG2_LIBS := -Wl,--start-group $(LIBMPEG2_LIB) $(A52_LIB) -lm -lc -lgcc -Wl,--end-group
 
 $(ZZM_MPEG2_BUILD)/module.o: $(ZZM_MPEG2_DIR)/module.c
 	@mkdir -p $(dir $@)
@@ -62,14 +63,10 @@ $(ZZM_MPEG2_BUILD)/decode_mp3.o: $(SRC_DIR)/mp3/decode_mp3.c
 	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
 
 
-$(ZZM_MPEG2_ELF): $(ZZM_MPEG2_OBJS) $(LIBMPEG2_LIB) $(A52_LIB) $(ZZM_MPEG2_LINKER)
+$(ZZM_MPEG2_ELF): $(ZZM_MPEG2_OBJS) $(LIBMPEG2_LIB) $(A52_LIB) $(ZZM_MPEG2_LINKER) $(ZZM_RT_LIB)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) -nostdlib -Wl,-build-id=none -Wl,--gc-sections \
-		-Wl,-T,$(ZZM_MPEG2_LINKER) -Wl,--defsym,ZZM_SLOT=0x09000000 \
-		-Wl,--defsym,ZZM_SLOT_SIZE=0x00400000 -Wl,--wrap=malloc \
-		-Wl,--wrap=free -Wl,--wrap=calloc -Wl,--wrap=realloc -o $@ \
-		$(ZZM_MPEG2_OBJS) -Wl,--start-group $(LIBMPEG2_LIB) $(A52_LIB) \
-		-lm -lc -lgcc -Wl,--end-group
+	$(call zzm_module_link,$(ZZM_MPEG2_OBJS),$(ZZM_MPEG2_LIBS),$(ZZM_MPEG2_LINKER),0x09000000,0x00400000,$@)
+	$(ZZM_CONFORMANCE) $@ 1 MPEG2 0x09000000 0x00400000
 
 $(ZZM_MPEG2_IMAGE): $(ZZM_MPEG2_ELF) $(ZZM_PACKER)
 	@mkdir -p $(dir $@)

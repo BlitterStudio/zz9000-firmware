@@ -8446,6 +8446,7 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		put_be32(reply->image_size, status.image_size);
 		put_be32(reply->bss_size, status.bss_size);
 		put_be32(reply->state, status.state);
+		put_be32(reply->reserved, status.ref_count);
 		memcpy((void *)reply->name, status.name, sizeof(reply->name));
 		return SDK_STATUS_OK;
 	}

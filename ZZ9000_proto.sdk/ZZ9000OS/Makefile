@@ -18,7 +18,7 @@
 
 CC = arm-none-eabi-gcc
 OBJCOPY = arm-none-eabi-objcopy
-SIZE = arm-none-eabi-size
+AR = arm-none-eabi-ar
 CC_FOR_BUILD ?= cc
 
 CPU_FLAGS = -mcpu=cortex-a9 -marm -mfpu=neon -mfloat-abi=hard
@@ -288,6 +288,7 @@ ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 
 .DEFAULT_GOAL := all
 
+include modules/module.mk
 include modules/mpeg2/module.mk
 include modules/webm/module.mk
 include modules/webp/module.mk
