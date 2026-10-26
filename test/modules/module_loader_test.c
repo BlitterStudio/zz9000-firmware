@@ -2,6 +2,48 @@
 #include <string.h>
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
+#include "ff.h"
+#include "zzm_runtime.h"
+
+static unsigned loader_open_calls;
+static unsigned loader_close_calls;
+
+FRESULT f_open(FIL *file, const char *path, unsigned char mode)
+{
+    (void)file;
+    (void)path;
+    (void)mode;
+    loader_open_calls++;
+    return FR_NOT_READY;
+}
+
+FRESULT f_read(FIL *file, void *buffer, UINT length, UINT *read)
+{
+    (void)file;
+    (void)buffer;
+    (void)length;
+    *read = 0;
+    return FR_NOT_READY;
+}
+
+FRESULT f_close(FIL *file)
+{
+    (void)file;
+    loader_close_calls++;
+    return FR_OK;
+}
+
+void sdk_sha256(const uint8_t *data, uint32_t length, uint8_t digest[32])
+{
+    (void)data;
+    (void)length;
+    memset(digest, 0, 32);
+}
+
+const zzm_services_t *zzm_runtime_services(void)
+{
+    return 0;
+}
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { failures++; printf("FAIL %s:%d\n", __FILE__, __LINE__); } } while (0)
@@ -48,5 +90,8 @@ int main(void)
     header = valid_header(sizeof(image));
     test_hash(image, sizeof(image), header.image_sha256);
     CHECK(zzm_verify_image(&header, image, ZZM_HEADER_SIZE + sizeof(image) - 1, test_hash) == ZZM_STATE_REJECTED_SLOT);
+    zzm_loader_boot_load();
+    CHECK(loader_open_calls == zzm_slot_count);
+    CHECK(loader_close_calls == 0);
     return failures != 0;
 }

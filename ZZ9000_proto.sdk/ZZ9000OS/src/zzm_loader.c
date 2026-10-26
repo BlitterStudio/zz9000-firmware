@@ -88,7 +88,12 @@ void zzm_loader_boot_load(void)
             printf("[ZZM] %s missing\n", slot->name);
             continue;
         }
-        if (fr != FR_OK || f_read(&file, &header, sizeof(header), &read) != FR_OK ||
+        if (fr != FR_OK) {
+            printf("[ZZM] %s rejected: open %u\n", slot->name, (unsigned)fr);
+            status_from_slot(i, ZZM_STATE_REJECTED_SLOT, 0);
+            continue;
+        }
+        if (f_read(&file, &header, sizeof(header), &read) != FR_OK ||
             read != sizeof(header)) {
             printf("[ZZM] %s rejected: truncated\n", slot->name);
             status_from_slot(i, ZZM_STATE_REJECTED_SLOT, 0);
