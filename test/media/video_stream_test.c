@@ -26,6 +26,17 @@ uint16_t zzm_registry_sdk_status(uint32_t module_id)
 	return SDK_STATUS_OK;
 }
 
+int zzm_loader_acquire(uint32_t module_id)
+{
+	(void)module_id;
+	return 1;
+}
+
+void zzm_loader_release(uint32_t module_id)
+{
+	(void)module_id;
+}
+
 static uint8_t decoder_storage;
 static uint32_t create_calls;
 static uint32_t destroy_calls;

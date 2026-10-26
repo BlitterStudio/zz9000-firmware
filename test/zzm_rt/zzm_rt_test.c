@@ -190,13 +190,13 @@ static void test_allocator_entry_points(void)
     reset_runtime(0U);
     pointer = malloc(13U);
     CHECK(pointer != 0);
-    CHECK(alloc_owner == 0x55U);
+    CHECK(alloc_owner == ZZM_MODULE_OWNER(0x55U));
     CHECK(alloc_class == ZZM_MEMORY_CLASS_MEDIA);
     CHECK(alloc_quota == 0U);
     CHECK(alloc_bytes > 13U);
     free(pointer);
     CHECK(free_calls == 1U);
-    CHECK(free_owner == 0x55U);
+    CHECK(free_owner == ZZM_MODULE_OWNER(0x55U));
 
     pointer = _malloc_r(0, 7U);
     CHECK(pointer != 0);
@@ -261,6 +261,24 @@ static void test_alignment_and_quota(void)
     CHECK(last_log != 0 && strcmp(last_log, "module allocation quota exceeded") == 0);
 }
 
+static void test_per_owner_quota_accounting(void)
+{
+    void *first;
+    void *second;
+
+    reset_runtime(4U);
+    zzm_rt_set_context(0x56U, ZZM_MEMORY_CLASS_MEDIA, 4U);
+    first = malloc(4U);
+    CHECK(first != 0);
+    zzm_rt_set_context(0x57U, ZZM_MEMORY_CLASS_MEDIA, 4U);
+    second = malloc(4U);
+    CHECK(second != 0);
+    free(first);
+    zzm_rt_set_context(0x56U, ZZM_MEMORY_CLASS_MEDIA, 4U);
+    CHECK(malloc(4U) != 0);
+    free(second);
+}
+
 static void expect_fault(void (*call)(void), const char *expected)
 {
     fault_jump_enabled = 1;
@@ -321,6 +339,7 @@ int main(void)
     test_allocator_entry_points();
     test_calloc_and_realloc_failures();
     test_alignment_and_quota();
+    test_per_owner_quota_accounting();
     test_faults_cpp_and_guards();
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;

@@ -1,7 +1,7 @@
 CC ?= cc
-CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c99
+CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c99 -fno-pie -no-pie
 SANITIZE_CFLAGS ?= -O1 -g -Wall -Wextra -Werror -std=c99 \
-	-fsanitize=address,undefined -fno-omit-frame-pointer
+	-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie
 FIRMWARE_SRC := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 WEBM_MODULE_SRC := $(FIRMWARE_SRC)/../modules/webm
 

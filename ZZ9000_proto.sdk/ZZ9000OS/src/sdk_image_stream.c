@@ -22,6 +22,7 @@
 #include "png.h"
 #include "sdk_webp_module.h"
 #include "zzm_registry.h"
+#include "zzm_loader.h"
 
 #define SDK_IMAGE_STREAM_MAX_DIMENSION 8192U
 /* Coarse pre-header source-size filter; the whole-image decode-state
@@ -121,6 +122,7 @@ struct SDKImageStreamSession {
 	uint8_t failed;
 	uint8_t direct_arm_local;
 	uint8_t in_use;
+	uint8_t module_ref;
 	uint8_t core1_affine;
 	uint8_t direct_scale_row_valid[2];
 	uint32_t direct_scale_row_y[2];
@@ -2219,6 +2221,9 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 			return SDK_STATUS_BAD_REQUEST;
 		}
 	}
+	if (begin->codec == SDK_IMAGE_CODEC_WEBP &&
+	    !zzm_loader_acquire(ZZM_MODULE_WEBP))
+		return SDK_STATUS_MODULE_MISMATCH;
 	session->codec = begin->codec;
 	session->output_mode = begin->output_mode;
 	session->dst_surface = begin->dst_surface;
@@ -2239,12 +2244,15 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 	session->core1_affine = begin->core1_affine ? 1U : 0U;
 	session->direct_arm_local = begin->direct_arm_local ? 1U : 0U;
 	session->in_use = 1U;
+	session->module_ref = begin->codec == SDK_IMAGE_CODEC_WEBP ? 1U : 0U;
 	if (session->codec == SDK_IMAGE_CODEC_WEBP) {
 		const struct zzm_webp_ops *ops = webp_ops();
 
 		status = ops->begin(&session->webp, session->session, begin, result);
-		if (status != SDK_STATUS_OK)
+		if (status != SDK_STATUS_OK) {
+			zzm_loader_release(ZZM_MODULE_WEBP);
 			memset(session, 0, sizeof(*session));
+		}
 		return status;
 	}
 
@@ -2301,8 +2309,9 @@ uint16_t sdk_image_stream_close(uint32_t session)
 
 	if (!slot)
 		return SDK_STATUS_BAD_HANDLE;
-
 	destroy_stream_codec(slot);
+	if (slot->module_ref)
+		zzm_loader_release(ZZM_MODULE_WEBP);
 	memset(slot, 0, sizeof(*slot));
 	return SDK_STATUS_OK;
 }
@@ -2383,6 +2392,10 @@ void sdk_image_stream_poison_core1_sessions(void)
 				ops->poison(&slot->webp);
 			slot->decode_state_committed = 0U;
 			slot->failed = 1U;
+			if (slot->module_ref) {
+				zzm_loader_release(ZZM_MODULE_WEBP);
+				slot->module_ref = 0U;
+			}
 			continue;
 		}
 		card_pool_release_owner(&card_pool,

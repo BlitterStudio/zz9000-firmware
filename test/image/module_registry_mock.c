@@ -13,7 +13,35 @@ extern int zzm_module_init(const zzm_services_t *services);
 
 static const void *webp_ops;
 static uint32_t webp_ops_size;
+
+static zzm_allocation_context_t host_context;
+
+int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
+                uint32_t memory_class, uint32_t quota)
+{
+    if (!services || services->abi_version != ZZM_MODULE_ABI_VERSION ||
+        services->size < sizeof(*services) || !services->get_service)
+        return 0;
+    host_context.owner = module_id;
+    host_context.memory_class = memory_class;
+    host_context.quota = quota;
+    return 1;
+}
+
+void zzm_rt_set_context(uint32_t owner, uint32_t memory_class, uint32_t quota)
+{
+    host_context.owner = owner;
+    host_context.memory_class = memory_class;
+    host_context.quota = quota;
+}
+
+void zzm_rt_get_context(zzm_allocation_context_t *out)
+{
+    if (out)
+        *out = host_context;
+}
 static int initialized;
+static uint32_t webp_refs;
 
 static uint32_t host_card_alloc(uint32_t owner, uint32_t memory_class,
                                 uint32_t quota, uint32_t bytes,
@@ -93,6 +121,21 @@ static void ensure_initialized(void)
         initialized = 1;
         (void)zzm_module_init(&services);
     }
+}
+
+int zzm_loader_acquire(uint32_t id)
+{
+    ensure_initialized();
+    if (id != ZZM_MODULE_WEBP || !webp_ops)
+        return 0;
+    webp_refs++;
+    return 1;
+}
+
+void zzm_loader_release(uint32_t id)
+{
+    if (id == ZZM_MODULE_WEBP && webp_refs != 0U)
+        webp_refs--;
 }
 
 uint16_t zzm_registry_sdk_status(uint32_t id)

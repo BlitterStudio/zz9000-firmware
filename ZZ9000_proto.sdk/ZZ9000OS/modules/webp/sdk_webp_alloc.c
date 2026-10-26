@@ -3,6 +3,7 @@
 #include <string.h>
 #include "sdk_webp_alloc.h"
 #ifdef ZZM_WEBP_HOST_TEST
+#include "card_pool.h"
 #include "sdk_vorbis_alloc.h"
 #endif
 
@@ -48,8 +49,14 @@ void zzm_webp_alloc_release(struct zzm_webp_arena *arena)
 
 	if (!arena)
 		return;
-	for (i = 0U; i < arena->region_count; ++i)
+	for (i = 0U; i < arena->region_count; ++i) {
+#ifdef ZZM_WEBP_HOST_TEST
+		(void)card_pool_free(&card_pool, (uint32_t)arena->region[i],
+		                     CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, arena->owner));
+#else
 		free((void *)arena->region[i]);
+#endif
+	}
 	memset(arena, 0, sizeof(*arena));
 	if (active_arena == arena)
 		active_arena = 0;
@@ -96,12 +103,12 @@ void *sdk_webp_malloc(size_t size)
 		active_failed = 1;
 		return 0;
 	}
-	{
-		zzm_allocation_context_t context;
-		zzm_rt_get_context(&context);
-		zzm_rt_set_context(arena->owner, context.memory_class, context.quota);
-		region = (uintptr_t)malloc(region_bytes);
-	}
+#ifdef ZZM_WEBP_HOST_TEST
+	region = card_pool_alloc(&card_pool, region_bytes,
+	                         CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, arena->owner));
+#else
+	region = (uintptr_t)malloc(region_bytes);
+#endif
 	if (region == 0U) {
 		active_failed = 1;
 		return 0;

@@ -872,8 +872,8 @@ int main() {
 #else
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
 	zzm_loader_set_storage_idle(zzm_storage_idle);
-	/* The initial media reset mounted SD. Load fixed-slot modules after the
-	 * permanent pool boundary is established and before core 1 accepts work. */
+	/* The initial media reset mounted SD. The scan validates headers only;
+	 * payload reads and initialization run on core 1 at first use. */
 	if (sd_storage_available_flag) {
 		zzm_loader_boot_load();
 	} else {
@@ -963,6 +963,7 @@ int main() {
 			XTime module_now;
 			XTime_GetTime(&module_now);
 			zzm_loader_poll((uint64_t)module_now * 1000U / COUNTS_PER_SECOND);
+			sdk_mailbox_poll_module_load();
 		}
 		usb_proxy_periodic_pump();
 		usb_proxy_iso_pump();

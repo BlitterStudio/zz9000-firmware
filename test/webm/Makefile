@@ -53,7 +53,7 @@ build/webm_module_alloc_test: webm_module_alloc_test.c \
 	mkdir -p build
 	$(CC) $(CFLAGS) -I$(WEBM_MODULE_SRC) -I$(FIRMWARE_SRC) -o $@ \
 		webm_module_alloc_test.c $(WEBM_MODULE_SRC)/webm_module_alloc.c \
-		$(FIRMWARE_SRC)/sdk_vorbis_alloc.c
+		$(FIRMWARE_SRC)/sdk_vorbis_alloc.c -Wl,--wrap=malloc -Wl,--wrap=free
 
 clean:
 	rm -rf build

@@ -1164,6 +1164,17 @@ static uint32_t sdk_mailbox_generation;
 static uint32_t g_task_generation[TASKQ_CAPACITY];
 static uint32_t zzm_load_pending_id;
 
+#define ZZM_LOAD_WAIT_TICKS (3ULL * (uint64_t)COUNTS_PER_SECOND)
+static XTime zzm_load_deadline;
+
+static int zzm_module_loaded(uint32_t module_id)
+{
+	zzm_status_t status;
+
+	return zzm_loader_status_by_id(module_id, &status) &&
+	       status.state == ZZM_STATE_LOADED;
+}
+
 /* Enqueue an internal core-1 task (request_id 0, no client completion).
  * Core-0 main-loop context ONLY: the task queue is single-producer.
  * The caller owns its own in-flight marker; retirement is dispatched by
@@ -1189,28 +1200,41 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
 
 int sdk_mailbox_load_module_core1(uint32_t module_id)
 {
-	uint32_t spins;
-	zzm_status_t status;
+	XTime now;
 
-	if (zzm_load_pending_id != 0U)
+	if (zzm_module_loaded(module_id))
+		return 1;
+	if (zzm_load_pending_id != 0U) {
+		XTime_GetTime(&now);
+		if ((int64_t)(now - zzm_load_deadline) >= 0)
+			zzm_loader_mark_load_failed(zzm_load_pending_id,
+			                            ZZM_REASON_STORAGE_BUSY);
 		return 0;
+	}
 	zzm_load_pending_id = module_id;
+	XTime_GetTime(&now);
+	zzm_load_deadline = now + ZZM_LOAD_WAIT_TICKS;
 	if (!sdk_mailbox_enqueue_internal(TASKQ_OP_ZZM_LOAD, &module_id,
 	                                  sizeof(module_id))) {
 		zzm_load_pending_id = 0U;
 		return 0;
 	}
-	for (spins = 0; zzm_load_pending_id != 0U && spins < 30000U; spins++) {
-		scheduler_core0_poll(1, 1);
-		if (zzm_load_pending_id != 0U)
-			usleep(100);
-	}
-	if (zzm_load_pending_id != 0U) {
-		zzm_loader_mark_load_failed(module_id, ZZM_REASON_STORAGE_BUSY);
-		return 0;
-	}
-	return zzm_loader_status((uint32_t)(module_id - 1U), &status) &&
-	       status.state == ZZM_STATE_LOADED;
+	/* This can run inside a mailbox handler. The main loop harvests the
+	 * task; nesting scheduler_core0_poll here would corrupt its reserved
+	 * completion slot if another task had already completed. */
+	return 0;
+}
+
+void sdk_mailbox_poll_module_load(void)
+{
+	XTime now;
+
+	if (zzm_load_pending_id == 0U)
+		return;
+	XTime_GetTime(&now);
+	if ((int64_t)(now - zzm_load_deadline) >= 0)
+		zzm_loader_mark_load_failed(zzm_load_pending_id,
+		                            ZZM_REASON_STORAGE_BUSY);
 }
 
 /*
@@ -6582,8 +6606,10 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		uint32_t module_id;
 		memcpy(&module_id, d->op_params, sizeof(module_id));
 		*result_len = 0U;
-		return zzm_loader_load_on_owner(module_id) ? SDK_STATUS_OK :
-			SDK_STATUS_MODULE_MISMATCH;
+		/* The loader exposes ordinary failures in module status. A non-OK
+		 * task status therefore identifies a failed core-1 worker. */
+		(void)zzm_loader_load_on_owner(module_id);
+		return SDK_STATUS_OK;
 	}
 	case SDK_OP_IMAGE_SESSION_FEED: {
 		const struct imgsess_op_params *p =
@@ -8738,6 +8764,8 @@ void sdk_mailbox_init(void)
 	 * the queue and will never post their deferred completion */
 	overlay_scheduler_reset();
 	fw_update_forget_queued();
+	zzm_load_pending_id = 0U;
+	zzm_load_deadline = 0U;
 
 	select_mailbox_placement();
 	if (mailbox_base != 0U)

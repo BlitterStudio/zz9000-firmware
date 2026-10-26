@@ -104,7 +104,18 @@ static uint32_t module_release_owner(uint32_t owner)
 
 uint32_t zzm_runtime_release_module(uint32_t module_id)
 {
-    uint32_t released = module_release_owner(module_id);
+    static const uint32_t classes[] = {
+        ZZM_MEMORY_CLASS_MEDIA,
+        ZZM_MEMORY_CLASS_MEDIA_INPUT,
+        ZZM_MEMORY_CLASS_IMAGE,
+        ZZM_MEMORY_CLASS_GENERAL,
+    };
+    uint32_t released = 0U;
+    uint32_t owner = ZZM_MODULE_OWNER(module_id);
+    uint32_t i;
+
+    for (i = 0U; i < sizeof(classes) / sizeof(classes[0]); i++)
+        released += module_release_owner(module_card_owner(owner, classes[i]));
     if (released)
         printf("[ZZM] module %lu reclaimed %lu bytes\n",
                (unsigned long)module_id, (unsigned long)released);
@@ -118,8 +129,11 @@ int zzm_runtime_quota_available(uint32_t memory_class, uint32_t quota)
     uint32_t free_bytes = card_pool_range_free_bytes(
         &card_pool, CARD_POOL_RANGE_PERMANENT) +
         card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_REVOCABLE);
+
     return quota != 0U && class_id < CARD_POOL_CLASS_COUNT &&
-        quota <= card_pool.class_limit[class_id] && quota <= free_bytes;
+        quota <= card_pool.class_limit[class_id] &&
+        card_pool.class_used[class_id] <= card_pool.class_limit[class_id] - quota &&
+        quota <= free_bytes;
 }
 
 static int module_register_ops(uint32_t module_id, const void *ops,

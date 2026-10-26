@@ -75,6 +75,8 @@ static zzm_header_t valid_header(uint32_t image_size)
     header.slot_load_address = zzm_slots[0].address;
     header.image_size = image_size;
     header.init_entry = header.slot_load_address;
+    header.idle_unload_ms = ZZM_DEFAULT_IDLE_UNLOAD_MS;
+    header.memory_class = ZZM_MEMORY_CLASS_MEDIA;
     header.memory_quota = 1U;
     strcpy(header.name, "MPEG2");
     return header;

@@ -26,6 +26,7 @@ static zzm_header_t module_header[ZZM_MODULE_MAX];
 static uint8_t module_header_valid[ZZM_MODULE_MAX];
 static uint8_t module_dependencies[ZZM_MODULE_MAX][ZZM_MAX_SERVICE_REQUIREMENTS];
 static uint8_t module_dependency_count[ZZM_MODULE_MAX];
+static uint8_t module_dependencies_held[ZZM_MODULE_MAX];
 static uint64_t module_idle_since[ZZM_MODULE_MAX];
 static uint64_t last_poll_ms;
 static int (*storage_idle)(void);
@@ -86,7 +87,9 @@ static enum zzm_state verify_header_shape(const zzm_header_t *header,
         header->required_count > ZZM_MAX_SERVICE_REQUIREMENTS ||
         header->provided_count > ZZM_MAX_SERVICE_PROVISIONS ||
         header->load_policy > ZZM_LOAD_BOOT || header->memory_quota == 0U ||
-        header->idle_unload_ms == 0U)
+        header->idle_unload_ms == 0U ||
+        header->memory_class < ZZM_MEMORY_CLASS_MEDIA ||
+        header->memory_class > ZZM_MEMORY_CLASS_GENERAL)
         return ZZM_STATE_REJECTED_SLOT;
     for (i = 0; i < header->required_count; i++) {
         if (!header->required[i].service_id || !header->required[i].min_version)
@@ -200,12 +203,17 @@ static void poison_slot(uint32_t index)
     Xil_ICacheInvalidateRange(header->slot_load_address, bytes);
 }
 
+static void unregister_module(uint32_t index)
+{
+    if (zzm_registry_unregister_module)
+        zzm_registry_unregister_module(module_status[index].id);
+}
+
 static void unregister_and_reclaim(uint32_t index, int run_fini)
 {
     const zzm_header_t *header = &module_header[index];
 
-    if (zzm_registry_unregister_module)
-        zzm_registry_unregister_module(module_status[index].id);
+    unregister_module(index);
     if (run_fini && header->fini_entry)
         ((zzm_fini_fn)(uintptr_t)header->fini_entry)();
     if (zzm_runtime_release_module)
@@ -213,12 +221,19 @@ static void unregister_and_reclaim(uint32_t index, int run_fini)
     poison_slot(index);
 }
 
-static void load_failed(uint32_t index, enum zzm_state state, uint32_t reason)
+static void release_dependencies(uint32_t index)
 {
     uint32_t dependency;
-    unregister_and_reclaim(index, 0);
-    for (dependency = 0; dependency < module_dependency_count[index]; dependency++)
+
+    for (dependency = 0; dependency < module_dependencies_held[index]; dependency++)
         zzm_loader_release(zzm_slots[module_dependencies[index][dependency]].id);
+    module_dependencies_held[index] = 0U;
+}
+
+static void load_failed(uint32_t index, enum zzm_state state, uint32_t reason)
+{
+    unregister_and_reclaim(index, 0);
+    release_dependencies(index);
     module_status[index].ref_count = 0U;
     status_from_slot(index, state, &module_header[index], reason);
 }
@@ -237,6 +252,8 @@ static int load_module(uint32_t index, uint8_t visiting[ZZM_MODULE_COUNT])
         status_from_slot(index, ZZM_STATE_REJECTED_SERVICE, header, ZZM_REASON_CYCLE);
         return 0;
     }
+    if (module_status[index].state == ZZM_STATE_LOAD_FAILED)
+        status_from_slot(index, ZZM_STATE_AVAILABLE, header, ZZM_REASON_NONE);
     if (module_status[index].state != ZZM_STATE_AVAILABLE || !module_header_valid[index])
         return 0;
     if (storage_idle && !storage_idle()) {
@@ -250,15 +267,14 @@ static int load_module(uint32_t index, uint8_t visiting[ZZM_MODULE_COUNT])
         uint32_t dependency = module_dependencies[index][i];
         if (!load_module(dependency, visiting)) {
             uint32_t reason = module_status[dependency].reason;
-            if (reason == ZZM_REASON_CYCLE)
-                status_from_slot(index, ZZM_STATE_REJECTED_SERVICE, header, reason);
-            else
-                load_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_DEPENDENCY);
+            load_failed(index, reason == ZZM_REASON_CYCLE ?
+                        ZZM_STATE_REJECTED_SERVICE : ZZM_STATE_LOAD_FAILED,
+                        reason == ZZM_REASON_CYCLE ? reason : ZZM_REASON_DEPENDENCY);
             visiting[index] = 0U;
             return 0;
         }
         module_status[dependency].ref_count++;
-        module_idle_since[dependency] = 0U;
+        module_dependencies_held[index] = (uint8_t)(i + 1U);
     }
     if (zzm_runtime_quota_available &&
         !zzm_runtime_quota_available(header->memory_class, header->memory_quota)) {
@@ -319,7 +335,7 @@ void zzm_loader_boot_load(void)
 
         module_header_valid[i] = 0U;
         module_idle_since[i] = 0U;
-        module_status[i].ref_count = 0U;
+        module_dependencies_held[i] = 0U;
         status_from_slot(i, ZZM_STATE_MISSING, 0, ZZM_REASON_NONE);
         if (storage_idle && !storage_idle()) {
             status_from_slot(i, ZZM_STATE_LOAD_FAILED, 0, ZZM_REASON_STORAGE_BUSY);
@@ -345,12 +361,8 @@ void zzm_loader_boot_load(void)
         }
     }
     resolve_dependencies();
-    for (i = 0; i < zzm_slot_count; i++) {
-        uint8_t visiting[ZZM_MODULE_COUNT] = { 0 };
-        if (module_status[i].state == ZZM_STATE_AVAILABLE &&
-            module_header[i].load_policy == ZZM_LOAD_BOOT)
-            (void)load_module(i, visiting);
-    }
+    /* Boot validation intentionally reads headers only. Module code and
+     * FatFs payload reads are deferred to the first requesting service. */
 }
 
 int zzm_loader_load_on_owner(uint32_t module_id)
@@ -403,8 +415,7 @@ void zzm_loader_poll(uint64_t now_ms)
         unregister_and_reclaim(i, 1);
         status_from_slot(i, ZZM_STATE_AVAILABLE, &module_header[i], ZZM_REASON_NONE);
         module_idle_since[i] = 0U;
-        for (uint32_t dependency = 0; dependency < module_dependency_count[i]; dependency++)
-            zzm_loader_release(zzm_slots[module_dependencies[i][dependency]].id);
+        release_dependencies(i);
         printf("[ZZM] %s unloaded\n", zzm_slots[i].name);
     }
 }
@@ -412,18 +423,21 @@ void zzm_loader_poll(uint64_t now_ms)
 void zzm_loader_mark_faulted(uint32_t module_id, const char *reason)
 {
     int index = module_index(module_id);
+
     (void)reason;
     if (index < 0 || module_status[index].state == ZZM_STATE_FAULTED)
         return;
-    unregister_and_reclaim((uint32_t)index, 0);
+    /* A fault can be reported from module code. Withdraw every callable
+     * entry first, but never poison the slot on that stack; it remains
+     * faulted until reboot. */
+    unregister_module((uint32_t)index);
+    if (zzm_runtime_release_module)
+        (void)zzm_runtime_release_module(module_status[index].id);
     module_status[index].ref_count = 0U;
     status_from_slot((uint32_t)index, ZZM_STATE_FAULTED, &module_header[index],
                      ZZM_REASON_FAULT);
-    for (uint32_t dependency = 0; dependency < module_dependency_count[index]; dependency++)
-        zzm_loader_release(zzm_slots[module_dependencies[index][dependency]].id);
+    release_dependencies((uint32_t)index);
 }
-
-
 void zzm_loader_mark_load_failed(uint32_t module_id, uint32_t reason)
 {
     int index = module_index(module_id);
@@ -483,6 +497,12 @@ void zzm_loader_set_load_dispatch(int (*dispatch)(uint32_t module_id))
 }
 void zzm_loader_set_storage_idle(int (*is_idle)(void)) { storage_idle = is_idle; }
 uint32_t zzm_loader_count(void) { return zzm_slot_count; }
+int zzm_loader_status_by_id(uint32_t module_id, zzm_status_t *out)
+{
+    int index = module_index(module_id);
+
+    return index >= 0 && zzm_loader_status((uint32_t)index, out);
+}
 int zzm_loader_status(uint32_t index, zzm_status_t *out)
 {
     if (!out || index >= zzm_slot_count) return 0;

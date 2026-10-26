@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 CC ?= cc
-CFLAGS ?= -O2 -Wall -Wextra -Werror -Wno-clobbered -std=c99 -D_GNU_SOURCE -DZZM_WEBP_HOST_TEST
+CFLAGS ?= -O2 -Wall -Wextra -Werror -Wno-clobbered -std=c99 -D_GNU_SOURCE -DZZM_WEBP_HOST_TEST -fno-pie -no-pie
 ROOT := ../..
 FIRMWARE_SRC := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/src
 LIBWEBP_ROOT := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/build/deps/libwebp/1.6.0/host

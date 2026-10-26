@@ -1338,6 +1338,7 @@ void sdk_mailbox_poison_core1_audio_streams(void);
 int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
                                  uint32_t params_len);
 int sdk_mailbox_load_module_core1(uint32_t module_id);
+void sdk_mailbox_poll_module_load(void);
 /* AX playback pump, core-1 refill kick: call from the core-0 main
  * loop every pass. No-op when nothing is bound. The TX-fill half is
  * the audio fabric compositor (audio_fabric_isr, audio_fabric.h)

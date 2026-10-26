@@ -1,17 +1,12 @@
 #define _GNU_SOURCE
 
-#include "card_pool.h"
 #include "webm_module_alloc.h"
+#include "card_pool.h"
 
-#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
-
-#ifndef EINVAL
-#define EINVAL 22
-#endif
 
 #define TEST_REGION_ADDRESS ((void *)0x18000000U)
 #define TEST_REGION_BYTES (8U * 1024U * 1024U)
@@ -20,9 +15,6 @@ static uint8_t *region;
 static uint32_t region_next;
 static unsigned alloc_calls;
 static unsigned free_calls;
-static uint32_t last_owner;
-static int fail_next_alloc;
-
 card_pool_t card_pool;
 
 int smp_cpu_id(void) { return 0; }
@@ -46,27 +38,42 @@ int card_pool_free(card_pool_t *pool, uint32_t address, uint32_t owner)
 	return 0;
 }
 
-static uint32_t fake_card_alloc(uint32_t bytes, uint32_t owner)
-{
-	uint32_t at = (region_next + 0xffffU) & ~0xffffU;
+static zzm_allocation_context_t context = {
+	.owner = 0x02000001U,
+	.memory_class = ZZM_MEMORY_CLASS_MEDIA,
+	.quota = 4U * 1024U * 1024U,
+};
+static uint32_t last_context_owner;
 
-	if (fail_next_alloc || bytes > TEST_REGION_BYTES - at)
-		return 0U;
-	fail_next_alloc = 0;
-	region_next = at + bytes;
-	alloc_calls++;
-	last_owner = owner;
-	return (uint32_t)(uintptr_t)(region + at);
+void zzm_rt_get_context(zzm_allocation_context_t *out)
+{
+	if (out)
+		*out = context;
 }
 
-static int fake_card_free(uint32_t address, uint32_t owner)
+void zzm_rt_set_context(uint32_t owner, uint32_t memory_class, uint32_t quota)
 {
-	if (address < (uint32_t)(uintptr_t)region ||
-	    address >= (uint32_t)(uintptr_t)(region + TEST_REGION_BYTES) ||
-	    owner != last_owner)
+	last_context_owner = owner;
+	context.owner = owner;
+	context.memory_class = memory_class;
+	context.quota = quota;
+}
+
+void *__wrap_malloc(size_t bytes)
+{
+	uint32_t aligned = (region_next + 7U) & ~7U;
+
+	if (bytes > TEST_REGION_BYTES - aligned)
 		return 0;
-	free_calls++;
-	return 1;
+	region_next = aligned + (uint32_t)bytes;
+	alloc_calls++;
+	return region + aligned;
+}
+
+void __wrap_free(void *ptr)
+{
+	if (ptr >= (void *)region && ptr < (void *)(region + TEST_REGION_BYTES))
+		free_calls++;
 }
 
 static int check(int condition, const char *message)
@@ -79,65 +86,37 @@ static int check(int condition, const char *message)
 
 int main(void)
 {
-	zzm_services_t services;
 	struct sdk_vorbis_heap heap;
-	void *ptr;
-	void *aligned;
-	void *kept;
-	unsigned char *bytes;
+	void *first;
+	void *second;
 	uint32_t owner = 0x02000037U;
 
 	region = mmap(TEST_REGION_ADDRESS, TEST_REGION_BYTES, PROT_READ | PROT_WRITE,
 	              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
 	if (!check(region != MAP_FAILED, "cannot map low card region"))
 		return 1;
-	memset(&services, 0, sizeof(services));
-	services.abi_version = ZZM_MODULE_ABI_VERSION;
-	services.size = sizeof(services);
-	services.card_alloc = fake_card_alloc;
-	services.card_free = fake_card_free;
-	webm_module_alloc_init(&services);
 	webm_module_heap_init(&heap, owner);
 	sdk_vorbis_heap_select(&heap, 0);
-
-	ptr = __wrap_calloc(32U, 4U);
-	if (!check(ptr != 0 && alloc_calls == 1U && last_owner == owner,
-	           "calloc did not use module card service"))
+	first = sdk_vorbis_malloc(128U);
+	second = sdk_vorbis_malloc(256U);
+	if (!check(first != 0 && second != 0 && alloc_calls == 1U,
+	           "WebM heap did not obtain one runtime region"))
 		return 1;
-	bytes = ptr;
-	for (unsigned i = 0U; i < 128U; i++)
-		if (!check(bytes[i] == 0U, "calloc did not clear memory"))
-			return 1;
-	memset(ptr, 0x5a, 128U);
-	kept = ptr;
-	fail_next_alloc = 1;
-	if (!check(__wrap_realloc(ptr, 5U * 1024U * 1024U) == 0 &&
-	           ((unsigned char *)kept)[0] == 0x5a,
-	           "failed realloc did not preserve the original block"))
+	if (!check(last_context_owner == owner,
+	           "WebM runtime region did not retain its module owner"))
 		return 1;
-	fail_next_alloc = 0;
-	__wrap_free(ptr);
-
-	aligned = __wrap_memalign(256U, 31U);
-	if (!check(aligned != 0 && ((uintptr_t)aligned & 255U) == 0U,
-	           "memalign did not honor alignment"))
+	memset(first, 0x5a, 128U);
+	sdk_vorbis_free(first);
+	if (!check(alloc_calls == 1U && free_calls == 0U,
+	           "individual WebM frees must retain the arena region"))
 		return 1;
-	if (!check(__wrap_posix_memalign(&ptr, 3U, 32U) == EINVAL,
-	           "posix_memalign accepted invalid alignment"))
-		return 1;
-	if (!check(__wrap_posix_memalign(&ptr, 64U, 17U) == 0 &&
-	           ((uintptr_t)ptr & 63U) == 0U,
-	           "posix_memalign did not use module allocator"))
-		return 1;
-	__wrap_free(ptr);
-	__wrap_free(aligned);
-	if (!check(free_calls == alloc_calls,
-	           "module card regions were not released through the service"))
-		return 1;
-	if (!check(__wrap_aligned_alloc(64U, 65U) == 0,
-	           "aligned_alloc accepted a non-multiple size"))
+	if (!check(sdk_vorbis_malloc(5U * 1024U * 1024U) == 0,
+	           "WebM heap exceeded its configured quota"))
 		return 1;
 	sdk_vorbis_heap_release(&heap);
+	if (!check(free_calls == alloc_calls,
+	           "WebM heap did not release its runtime region"))
+		return 1;
 	if (munmap(region, TEST_REGION_BYTES) != 0)
 		return 1;
 	puts("webm_module_alloc_test: all passed");

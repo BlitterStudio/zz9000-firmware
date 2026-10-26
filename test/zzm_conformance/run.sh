@@ -56,6 +56,6 @@ expect_failure outside-slot "allocated section outside module slot: .outside" "$
 expect_failure bad-header "cannot read ELF header" "$fixture_dir/bad_header.elf"
 
 # These are the release module ELFs produced by the build job, not fixtures.
-expect_pass "$mpeg2" 1 MPEG2 0x09000000 0x00400000
-expect_pass "$webm" 2 WEBM 0x09400000 0x00800000
-expect_pass "$webp" 3 WEBP 0x09c00000 0x00400000
+expect_pass "$mpeg2" 1 MPEG2 0x09000000 0x00200000
+expect_pass "$webm" 2 WEBM 0x09200000 0x00400000
+expect_pass "$webp" 3 WEBP 0x09600000 0x00200000

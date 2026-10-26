@@ -27,6 +27,13 @@ enum zzm_memory_class {
     ZZM_MEMORY_CLASS_GENERAL = 4U,
 };
 
+/* Resident module allocations use a namespace disjoint from session owners.
+ * The card pool keeps only 24 owner bits below its memory-class byte. */
+#define ZZM_MODULE_OWNER_TAG 0x00800000U
+#define ZZM_MODULE_OWNER(id) \
+    (ZZM_MODULE_OWNER_TAG | ((uint32_t)(id) & (ZZM_MODULE_OWNER_TAG - 1U)))
+
+
 typedef struct zzm_allocation_context {
     uint32_t owner;
     uint32_t memory_class;

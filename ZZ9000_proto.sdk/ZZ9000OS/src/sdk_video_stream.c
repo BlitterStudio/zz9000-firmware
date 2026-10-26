@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include "zzm_loader.h"
 #include "sdk_video_stream.h"
 
 #include "card_pool.h"

@@ -4,6 +4,11 @@
 #include <stdint.h>
 #include "zzm_format.h"
 
+/* A32 UDF #0. Unlike an unallocated opcode, this encoding is permanently
+ * undefined by the architecture, so a stale module entry faults reliably. */
+#define ZZM_POISON_WORD 0xE7F000F0U
+
+
 enum zzm_state {
     ZZM_STATE_LOADED = 0,
     ZZM_STATE_MISSING = 1,
@@ -59,6 +64,7 @@ void zzm_loader_poll(uint64_t now_ms);
 void zzm_loader_mark_faulted(uint32_t module_id, const char *reason);
 void zzm_loader_mark_load_failed(uint32_t module_id, uint32_t reason);
 uint32_t zzm_loader_count(void);
+int zzm_loader_status_by_id(uint32_t module_id, zzm_status_t *out);
 int zzm_loader_status(uint32_t index, zzm_status_t *out);
 int zzm_loader_can_register(uint32_t module_id);
 int zzm_loader_service_declared(uint32_t module_id, uint32_t service_id,

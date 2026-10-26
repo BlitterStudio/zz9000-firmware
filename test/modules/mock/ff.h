@@ -2,6 +2,7 @@
 #define FF_H
 #include <stdint.h>
 typedef unsigned int UINT;
+typedef uint32_t FSIZE_t;
 typedef struct { uint32_t size; } FIL;
 typedef int FRESULT;
 #define FR_OK 0
@@ -14,5 +15,5 @@ typedef int FRESULT;
 FRESULT f_open(FIL *, const char *, unsigned char);
 FRESULT f_read(FIL *, void *, UINT, UINT *);
 FRESULT f_close(FIL *);
-FRESULT f_lseek(FIL *, uint32_t);
+FRESULT f_lseek(FIL *, FSIZE_t);
 #endif

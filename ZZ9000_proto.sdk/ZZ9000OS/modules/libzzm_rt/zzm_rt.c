@@ -35,8 +35,17 @@ static const zzm_core_service_t *core;
 static const zzm_memory_service_t *memory;
 static const zzm_cache_service_t *cache;
 static zzm_allocation_context_t context;
-static uint32_t context_used;
+
+#define ZZM_RT_MAX_CONTEXTS 16U
+typedef struct zzm_rt_usage {
+    uint32_t owner;
+    uint32_t memory_class;
+    uint32_t quota;
+    uint32_t used;
+} zzm_rt_usage_t;
+static zzm_rt_usage_t usages[ZZM_RT_MAX_CONTEXTS];
 static uint32_t quota_reported;
+static uint32_t bound_module_id;
 
 const uint32_t zzm_rt_identity = 0x5a5a4d32U;
 void *__dso_handle __attribute__((weak)) = &__dso_handle;
@@ -52,6 +61,30 @@ static void quota_log_once(void)
         core->log("module allocation quota exceeded");
         quota_reported = 1U;
     }
+}
+
+static zzm_rt_usage_t *usage_for(uint32_t owner, uint32_t memory_class,
+                                  uint32_t quota, int create)
+{
+    zzm_rt_usage_t *empty = 0;
+    uint32_t i;
+
+    for (i = 0U; i < ZZM_RT_MAX_CONTEXTS; i++) {
+        zzm_rt_usage_t *usage = &usages[i];
+
+        if (usage->owner == owner && usage->memory_class == memory_class &&
+            usage->quota == quota)
+            return usage;
+        if (!empty && (usage->owner == 0U || usage->used == 0U))
+            empty = usage;
+    }
+    if (create && empty) {
+        empty->owner = owner;
+        empty->memory_class = memory_class;
+        empty->quota = quota;
+        empty->used = 0U;
+    }
+    return create ? empty : 0;
 }
 
 int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
@@ -70,10 +103,11 @@ int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
     if (!core || !memory || !core->log || !core->fault || !memory->alloc ||
         !memory->free || !memory->realloc)
         return 0;
-    context.owner = module_id;
+    bound_module_id = module_id;
+    context.owner = ZZM_MODULE_OWNER(module_id);
     context.memory_class = memory_class;
     context.quota = quota;
-    context_used = 0U;
+    memset(usages, 0, sizeof(usages));
     quota_reported = 0U;
     return 1;
 }
@@ -102,7 +136,7 @@ void zzm_rt_fault(const char *reason)
     if (core && core->size >= offsetof(zzm_core_service_t, module_fault) +
                                    sizeof(core->module_fault) &&
         core->module_fault)
-        core->module_fault(context.owner, reason);
+        core->module_fault(bound_module_id, reason);
     else if (core && core->fault)
         core->fault(reason);
 }
@@ -124,10 +158,15 @@ void *memalign(size_t alignment, size_t bytes)
         bytes > UINT32_MAX || bytes > SIZE_MAX - sizeof(*header) - alignment)
         return 0;
     total = bytes + sizeof(*header) + alignment - 1U;
-    if (context.quota != 0U && (bytes > context.quota ||
-        context_used > context.quota - (uint32_t)bytes)) {
-        quota_log_once();
-        return 0;
+    {
+        zzm_rt_usage_t *usage = usage_for(context.owner, context.memory_class,
+                                           context.quota, 1);
+        if (!usage || (context.quota != 0U &&
+            (bytes > context.quota ||
+             usage->used > context.quota - (uint32_t)bytes))) {
+            quota_log_once();
+            return 0;
+        }
     }
     address = memory->alloc(context.owner, context.memory_class, context.quota,
                             (uint32_t)total, (uint32_t)alignment);
@@ -142,7 +181,12 @@ void *memalign(size_t alignment, size_t bytes)
     header->owner = context.owner;
     header->memory_class = context.memory_class;
     header->quota = context.quota;
-    context_used += (uint32_t)bytes;
+    {
+        zzm_rt_usage_t *usage = usage_for(context.owner, context.memory_class,
+                                           context.quota, 0);
+        if (usage)
+            usage->used += (uint32_t)bytes;
+    }
     return (void *)aligned;
 }
 
@@ -157,8 +201,12 @@ void free(void *pointer)
     header = (struct zzm_rt_allocation *)pointer - 1;
     if (header->magic != ZZM_RT_ALLOC_MAGIC || !memory || !memory->free)
         return;
-    if (header->owner == context.owner && context_used >= header->bytes)
-        context_used -= header->bytes;
+    {
+        zzm_rt_usage_t *usage = usage_for(header->owner, header->memory_class,
+                                           header->quota, 0);
+        if (usage && usage->used >= header->bytes)
+            usage->used -= header->bytes;
+    }
     (void)memory->free(header->address, header->owner);
 }
 
