@@ -130,8 +130,10 @@ static int load_module(uint32_t index)
         status_from_slot(index, ZZM_STATE_LOAD_FAILED, header, 1U);
         return 0;
     }
-    /* Header was validated during the boot scan; read only the image now. */
-    if (f_read(&file, (void *)(uintptr_t)header->slot_load_address,
+    /* The boot scan read only this header. The slot receives the ELF image,
+     * not the container header. */
+    if (f_lseek(&file, ZZM_HEADER_SIZE) != FR_OK ||
+        f_read(&file, (void *)(uintptr_t)header->slot_load_address,
                header->image_size, &read) != FR_OK || read != header->image_size) {
         f_close(&file);
         status_from_slot(index, ZZM_STATE_LOAD_FAILED, header, 2U);
