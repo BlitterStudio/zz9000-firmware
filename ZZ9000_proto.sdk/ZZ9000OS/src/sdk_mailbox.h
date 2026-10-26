@@ -345,6 +345,11 @@ struct SDKCryptoVerifyPayload {
 #define SDK_MODULE_REJECTED_ABI         2U
 #define SDK_MODULE_REJECTED_HASH        3U
 #define SDK_MODULE_REJECTED_SLOT        4U
+#define SDK_MODULE_REJECTED_SERVICE     5U
+#define SDK_MODULE_FAULTED              6U
+#define SDK_MODULE_AVAILABLE            7U
+#define SDK_MODULE_LOADING              8U
+#define SDK_MODULE_LOAD_FAILED          9U
 
 struct SDKModuleStatusRequestPayload {
 	uint8_t index[4];

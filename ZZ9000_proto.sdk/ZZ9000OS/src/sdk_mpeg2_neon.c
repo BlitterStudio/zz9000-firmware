@@ -478,9 +478,7 @@ void sdk_mpeg2_neon_install(void)
 	if (!mpeg2_idct_copy || !mpeg2_idct_add || !check_idct() ||
 	    !check_mc()) {
 #ifdef SDK_VIDEO_MPEG2_MODULE
-		if (mpeg2_module_services()->log)
-			mpeg2_module_services()->log(
-				"mpeg2 NEON IDCT/MC self check failed; C kept");
+		zzm_rt_log("mpeg2 NEON IDCT/MC self check failed; C kept");
 #else
 		printf("[mpeg2] NEON IDCT/MC self check failed; C kept\n");
 #endif
@@ -495,8 +493,7 @@ void sdk_mpeg2_neon_install(void)
 	}
 	neon_state = 1;
 #ifdef SDK_VIDEO_MPEG2_MODULE
-	if (mpeg2_module_services()->log)
-		mpeg2_module_services()->log("mpeg2 NEON IDCT/MC installed");
+	zzm_rt_log("mpeg2 NEON IDCT/MC installed");
 #else
 	printf("[mpeg2] NEON IDCT/MC installed\n");
 #endif

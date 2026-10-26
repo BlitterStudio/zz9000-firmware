@@ -1,20 +1,22 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include "sdk_webp_alloc.h"
 #ifdef ZZM_WEBP_HOST_TEST
 #include "sdk_vorbis_alloc.h"
 #endif
 
-static const zzm_services_t *module_services;
 static struct zzm_webp_arena *active_arena;
 static int active_failed;
 #ifdef ZZM_WEBP_HOST_TEST
 static struct sdk_vorbis_heap *host_heap;
 #endif
 
+/* The module keeps libwebp's bounded-session arena semantics, but all
+ * regions now enter through libzzm_rt rather than a module allocator copy. */
 void zzm_webp_alloc_init(const zzm_services_t *services)
 {
-	module_services = services;
+	(void)services;
 }
 
 void zzm_webp_alloc_select(struct zzm_webp_arena *arena)
@@ -44,13 +46,10 @@ void zzm_webp_alloc_release(struct zzm_webp_arena *arena)
 {
 	uint32_t i;
 
-	if (!arena || !module_services)
+	if (!arena)
 		return;
-	for (i = 0U; i < arena->region_count; ++i) {
-		if (arena->region[i] != 0U)
-			(void)module_services->card_free((uint32_t)arena->region[i],
-			                                 arena->owner);
-	}
+	for (i = 0U; i < arena->region_count; ++i)
+		free((void *)arena->region[i]);
 	memset(arena, 0, sizeof(*arena));
 	if (active_arena == arena)
 		active_arena = 0;
@@ -67,7 +66,7 @@ void *sdk_webp_malloc(size_t size)
 	if (host_heap)
 		return sdk_vorbis_malloc(size);
 #endif
-	if (!arena || !module_services || size == 0U || size > 0xffffffffU) {
+	if (!arena || size == 0U || size > 0xffffffffU) {
 		active_failed = 1;
 		return 0;
 	}
@@ -97,7 +96,12 @@ void *sdk_webp_malloc(size_t size)
 		active_failed = 1;
 		return 0;
 	}
-	region = (uintptr_t)module_services->card_alloc(region_bytes, arena->owner);
+	{
+		zzm_allocation_context_t context;
+		zzm_rt_get_context(&context);
+		zzm_rt_set_context(arena->owner, context.memory_class, context.quota);
+		region = (uintptr_t)malloc(region_bytes);
+	}
 	if (region == 0U) {
 		active_failed = 1;
 		return 0;

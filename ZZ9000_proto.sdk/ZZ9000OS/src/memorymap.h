@@ -378,7 +378,7 @@
 // card-pool space. The loader owns this range before any allocator starts;
 // all card-pool addresses therefore begin after it.
 #define FIRMWARE_MODULE_ARENA_ADDRESS 0x09000000
-#define FIRMWARE_MODULE_ARENA_SIZE    0x01000000
+#define FIRMWARE_MODULE_ARENA_SIZE    0x02000000
 #define FIRMWARE_MODULE_ARENA_END \
     (FIRMWARE_MODULE_ARENA_ADDRESS + FIRMWARE_MODULE_ARENA_SIZE)
 

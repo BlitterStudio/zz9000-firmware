@@ -5,7 +5,7 @@
 #include "zzm_format.h"
 
 #define ZZM_ARENA_ADDRESS 0x09000000U
-#define ZZM_ARENA_SIZE    0x01000000U
+#define ZZM_ARENA_SIZE    0x02000000U
 #define ZZM_ARENA_END     (ZZM_ARENA_ADDRESS + ZZM_ARENA_SIZE)
 
 typedef struct zzm_slot {
