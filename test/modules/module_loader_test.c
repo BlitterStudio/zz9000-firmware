@@ -7,6 +7,7 @@
 
 static unsigned loader_open_calls;
 static unsigned loader_close_calls;
+static FRESULT loader_open_result;
 
 FRESULT f_open(FIL *file, const char *path, unsigned char mode)
 {
@@ -14,7 +15,7 @@ FRESULT f_open(FIL *file, const char *path, unsigned char mode)
     (void)path;
     (void)mode;
     loader_open_calls++;
-    return FR_NOT_READY;
+    return loader_open_result;
 }
 
 FRESULT f_read(FIL *file, void *buffer, UINT length, UINT *read)
@@ -90,6 +91,12 @@ int main(void)
     header = valid_header(sizeof(image));
     test_hash(image, sizeof(image), header.image_sha256);
     CHECK(zzm_verify_image(&header, image, ZZM_HEADER_SIZE + sizeof(image) - 1, test_hash) == ZZM_STATE_REJECTED_SLOT);
+    loader_open_result = FR_NOT_READY;
+    zzm_loader_boot_load();
+    CHECK(loader_open_calls == zzm_slot_count);
+    CHECK(loader_close_calls == 0);
+    loader_open_calls = 0;
+    loader_open_result = FR_NO_FILESYSTEM;
     zzm_loader_boot_load();
     CHECK(loader_open_calls == zzm_slot_count);
     CHECK(loader_close_calls == 0);

@@ -687,6 +687,12 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 int main() {
 	init_platform();
+	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_DATA_ABORT_INT,
+		(Xil_ExceptionHandler)arm_exception_handler_id_data_abort, NULL);
+	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_PREFETCH_ABORT_INT,
+		(Xil_ExceptionHandler)arm_exception_handler_id_prefetch_abort, NULL);
+	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_UNDEFINED_INT,
+		(Xil_ExceptionHandler)arm_exception_handler_illinst, NULL);
 
 	/* Fast-Ram advertisement (fast-ram-cfg plan, KTD1/KTD6): the RTL
 	 * withholds the second Z3 autoconfig PIC (256 MiB Fast RAM) until
@@ -859,7 +865,11 @@ int main() {
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
 	/* The initial media reset mounted SD. Load fixed-slot modules after the
 	 * permanent pool boundary is established and before core 1 accepts work. */
-	zzm_loader_boot_load();
+	if (sd_storage_available_flag) {
+		zzm_loader_boot_load();
+	} else {
+		printf("[ZZM] skipped: SD volume not mounted\n");
+	}
 #endif
 
 	// Mark the task-queue region shareable-cacheable in the shared MMU table
