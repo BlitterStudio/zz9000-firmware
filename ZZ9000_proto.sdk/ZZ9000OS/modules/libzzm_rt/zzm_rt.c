@@ -8,6 +8,17 @@
 
 #include "zzm_runtime.h"
 
+void abort(void);
+void exit(int status);
+
+/* Some standalone newlib headers expose errno but not its POSIX constants. */
+#ifndef EINVAL
+#define EINVAL 22
+#endif
+#ifndef ENOSYS
+#define ENOSYS 38
+#endif
+
 #define ZZM_RT_ALLOC_MAGIC 0x5a52544dU
 
 struct zzm_rt_allocation {
@@ -28,7 +39,7 @@ static uint32_t context_used;
 static uint32_t quota_reported;
 
 const uint32_t zzm_rt_identity = 0x5a5a4d32U;
-void *__dso_handle = &__dso_handle;
+void *__dso_handle __attribute__((weak)) = &__dso_handle;
 
 static int is_power_of_two(size_t value)
 {
@@ -88,7 +99,11 @@ void zzm_rt_log(const char *message)
 
 void zzm_rt_fault(const char *reason)
 {
-    if (core && core->fault)
+    if (core && core->size >= offsetof(zzm_core_service_t, module_fault) +
+                                   sizeof(core->module_fault) &&
+        core->module_fault)
+        core->module_fault(context.owner, reason);
+    else if (core && core->fault)
         core->fault(reason);
 }
 
@@ -218,10 +233,24 @@ size_t malloc_usable_size(void *pointer)
     return header && header->magic == ZZM_RT_ALLOC_MAGIC ? header->bytes : 0U;
 }
 
+#define ZZM_RT_SYSCALL __attribute__((section(".zzm_rt.syscall")))
+int _write(int fd, const void *buffer, int length) ZZM_RT_SYSCALL;
+int _write_r(void *reent, int fd, const void *buffer, int length) ZZM_RT_SYSCALL;
+void _exit(int status) ZZM_RT_SYSCALL;
+int _open(const char *path, int flags, int mode) ZZM_RT_SYSCALL;
+int _read(int fd, void *buffer, int length) ZZM_RT_SYSCALL;
+int _close(int fd) ZZM_RT_SYSCALL;
+int _lseek(int fd, int offset, int whence) ZZM_RT_SYSCALL;
+int _fstat(int fd, struct stat *status) ZZM_RT_SYSCALL;
+int _isatty(int fd) ZZM_RT_SYSCALL;
+int _kill(int pid, int signal) ZZM_RT_SYSCALL;
+int _getpid(void) ZZM_RT_SYSCALL;
+
 int _write(int fd, const void *buffer, int length)
 { (void)fd; (void)buffer; if (length > 0) zzm_rt_log("module write"); return length; }
 int _write_r(void *reent, int fd, const void *buffer, int length)
 { (void)reent; return _write(fd, buffer, length); }
+void exit(int status) { (void)status; zzm_rt_fault("module exit"); for (;;) {} }
 void _exit(int status) { (void)status; zzm_rt_fault("module exit"); for (;;) {} }
 void abort(void) { zzm_rt_fault("module abort"); for (;;) {} }
 void __assert_func(const char *file, int line, const char *func, const char *expr)

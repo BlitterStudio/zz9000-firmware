@@ -365,7 +365,8 @@ struct SDKModuleStatusPayload {
 	uint8_t bss_size[4];
 	uint8_t state[4];
 	char name[16];
-	uint8_t reserved[4];
+	/* LOADED: strong reference count. Other states: reason/missing service ID. */
+	uint8_t detail[4];
 };
 
 #define SDK_OP_VIDEO_SESSION_BEGIN     0x0b00U
@@ -1336,6 +1337,7 @@ void sdk_mailbox_poison_core1_audio_streams(void);
  * queued. */
 int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
                                  uint32_t params_len);
+int sdk_mailbox_load_module_core1(uint32_t module_id);
 /* AX playback pump, core-1 refill kick: call from the core-0 main
  * loop every pass. No-op when nothing is bound. The TX-fill half is
  * the audio fabric compositor (audio_fabric_isr, audio_fabric.h)

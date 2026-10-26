@@ -341,7 +341,8 @@ typedef struct ZZ9KModuleStatusPayload {
   uint8_t bss_size[4];
   uint8_t state[4];
   char name[16];
-  uint8_t reserved[4];
+  /* LOADED: strong reference count. Other states: reason/missing service ID. */
+  uint8_t detail[4];
 } ZZ9KModuleStatusPayload;
 
 #define ZZ9K_APERTURE_LAYOUT_GENERATION_SHIFT 16U

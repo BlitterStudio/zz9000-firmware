@@ -82,6 +82,9 @@
  * (fw_update_run_staged) on core 1, so its FatFs and SD work never stalls
  * the core-0 Zorro service. TASK_LONG via the default case. */
 #define TASKQ_OP_FWUP                0x0c00u
+/* Internal on-demand module image load.  It is a LONG task so FatFs runs on
+ * core 1 with FWUP and never in a core-0 mailbox handler. */
+#define TASKQ_OP_ZZM_LOAD            0x0c01u
 
 typedef enum {
   TASK_FREE    = 0,

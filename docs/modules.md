@@ -75,8 +75,10 @@ process termination, dynamic loader facilities or background threads. Static
 constructors run only as part of successful module start and static destructors
 run during orderly unload. `libzzm_rt` supplies the required guards and
 `new`/`delete` bridge; no second C++ runtime, private allocator or unwinder may
-be linked. An allocation failure is reported by the configured no-exception
-allocation path and must be handled by the module.
+be linked. `__cxa_guard_*` is deliberately a single-threaded implementation:
+module initialization, constructors and function-local static initialization
+must remain serialized on the owning core. An allocation failure is reported by
+the configured no-exception allocation path and must be handled by the module.
 
 ## Runtime service directory
 
@@ -130,11 +132,14 @@ static/global pointer after the session ends.
 ## Lifecycle, references and faults
 
 A manifest entry begins **available** when its package is installed and passes
-validation; it has no loaded image or registered interface. The first service
-lookup that needs one of its provided interfaces starts an **on-demand load**.
-Concurrent requests join that one load rather than loading the slot twice.
-After image validation, constructor/start work and atomic interface
-registration succeed, the module is **loaded** and may accept sessions.
+the header-only boot scan; it has no loaded image or registered interface. The
+first service lookup that needs one starts an **on-demand load**. The storage
+operation is serialized with the core-1 FWUP FatFs owner and has a bounded
+wait; storage contention records `LOAD_FAILED` rather than hanging the core.
+Dependencies load in topological order and hold a dependency reference. After
+image validation, BSS zeroing, cache maintenance, constructor/start work and
+atomic interface registration succeed, the module is **loaded** and may accept
+sessions.
 
 An accepted session takes a strong module reference. A pending host-owned
 callback or future job would also take a strong reference; a transient lookup
@@ -142,34 +147,33 @@ does not. On session close, release the reference only after all of that
 session's tracked resources have been reclaimed. At reference count zero the
 module becomes **idle**. The default idle-unload delay is **30 seconds**. A new
 request during that interval cancels unloading and reuses the loaded module.
-After the delay, the runtime stops the module, unregisters its interfaces,
-runs orderly C++ teardown, reclaims resident resources and returns the slot to
-available.
+After the delay, the runtime unregisters ops/services first, runs orderly C++
+teardown, reclaims resident resources, releases dependency references, poisons
+the slot with undefined ARM instructions and returns it to available.
 
 A start failure, contract violation or reported unrecoverable runtime error
 moves the module to **faulted**. The runtime withdraws its interfaces, rejects
 new sessions, drains/reclaims affected sessions and records the reason. It may
-not call into the module after faulting. The default retry/back-off interval is
-**30 seconds**; an explicit administrative reload may retry sooner after the
-cause is corrected. Missing, hash/ABI/service mismatch, quota rejection and
-fault are separate observable states.
+not call into the module after faulting. Missing, hash/ABI/service mismatch,
+quota rejection and fault are separate observable states; a missing service
+records its service ID.
 
-## 32 MiB slots and H.264/H.265
+## Fixed arena and H.264/H.265
 
-v2 uses **32 MiB fixed slots**. Slot capacity covers the complete linked image:
-code, read-only data, data and BSS. It is not decoder working memory and does
-not replace a session quota. Each H.264 and H.265 implementation gets its own
-32 MiB manifest slot, so the two codec images have 64 MiB of fixed-slot
-capacity and cannot overwrite or evict each other. Their decoded frames,
-reference pictures, bitstream windows and AAC buffers are session-class memory
-and are reclaimed at session end.
+v2 reserves one **32 MiB total arena** for fixed module images. Slots cover
+only linked code, read-only data, data and BSS; they are not decoder working
+memory. The current manifest assigns MPEG-2 2 MiB, WebM 4 MiB, WebP 2 MiB,
+and reserves 4 MiB each for MiniGL, H.264 and H.265, with smaller MP4/AAC
+future slots and unassigned headroom. Decoded frames, reference pictures,
+bitstream windows and AAC buffers are owner-tagged session allocations from
+the card pool and are reclaimed at session end.
 
 This sizing establishes loadability headroom, not throughput. Estimates that a
 software decoder may meet a particular resolution or frame rate are inference
 until measured on the target card with the intended streams, display path and
-audio active. There is no implied dedicated H.264/H.265 FPGA decoder. The FPGA
-rasterizer remains present and continues to handle the display/raster path;
-codec modules do not replace it.
+audio active. The FPGA rasterizer and the FPGA side of every advertised media
+feature remain present regardless of a module's load state; modules provide
+optional software codec paths and never replace the display/raster hardware.
 
 Initial H.264/H.265 playback scope is deliberately narrow: 8-bit 4:2:0 video
 in MP4, with AAC audio through the audio plugin contract. Higher bit depth,

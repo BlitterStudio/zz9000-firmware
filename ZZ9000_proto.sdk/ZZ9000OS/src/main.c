@@ -360,6 +360,14 @@ static int fwup_wait_idle(void) {
 	}
 	return 1;
 }
+
+/* Module reads share FatFs with the staged FWUP worker.  On-demand loads fail
+ * promptly while that core-1 job owns the volume rather than touching FatFs
+ * concurrently or waiting unboundedly in a mailbox path. */
+static int zzm_storage_idle(void)
+{
+	return !fw_update_busy();
+}
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
 
@@ -863,6 +871,7 @@ int main() {
 	handle_amiga_reset(AMIGA_RESET_FAST);
 #else
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
+	zzm_loader_set_storage_idle(zzm_storage_idle);
 	/* The initial media reset mounted SD. Load fixed-slot modules after the
 	 * permanent pool boundary is established and before core 1 accepts work. */
 	if (sd_storage_available_flag) {
@@ -895,6 +904,8 @@ int main() {
 	} else {
 		print("[sched] core 1 offline - single-core fallback\r\n");
 	}
+	if (scheduler_core1_available())
+		zzm_loader_set_load_dispatch(sdk_mailbox_load_module_core1);
 #endif
 	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
 
@@ -948,6 +959,11 @@ int main() {
 	while (1) {
 		watchdog_kick();
 		sd_activity_led_poll();
+		{
+			XTime module_now;
+			XTime_GetTime(&module_now);
+			zzm_loader_poll((uint64_t)module_now * 1000U / COUNTS_PER_SECOND);
+		}
 		usb_proxy_periodic_pump();
 		usb_proxy_iso_pump();
 #ifdef AUDIO_FABRIC_BENCH

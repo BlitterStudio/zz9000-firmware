@@ -3,29 +3,44 @@
 #include "xtime_l.h"
 #include "card_pool.h"
 #include "zzm_registry.h"
+#include "zzm_loader.h"
 #include "zzm_runtime.h"
+
+static uint32_t module_card_owner(uint32_t owner, uint32_t memory_class)
+{
+    switch (memory_class) {
+    case ZZM_MEMORY_CLASS_MEDIA:
+        return (owner & 0x00ffffffU) | (CARD_POOL_CLASS_MEDIA << 24);
+    case ZZM_MEMORY_CLASS_MEDIA_INPUT:
+        return (owner & 0x00ffffffU) | (CARD_POOL_CLASS_MEDIA_INPUT << 24);
+    case ZZM_MEMORY_CLASS_IMAGE:
+        return (owner & 0x00ffffffU) | (CARD_POOL_CLASS_IMAGE << 24);
+    default:
+        return (owner & 0x00ffffffU) | (CARD_POOL_CLASS_FIRMWARE << 24);
+    }
+}
+
+static uint32_t module_owner_used(uint32_t owner)
+{
+    uint32_t used = 0U;
+    uint32_t i;
+    for (i = 0; i < card_pool.block_count; i++) {
+        if (card_pool.blocks[i].owner == owner)
+            used += card_pool.blocks[i].size;
+    }
+    return used;
+}
 
 static uint32_t module_card_alloc(uint32_t owner, uint32_t memory_class,
                                   uint32_t quota, uint32_t bytes,
                                   uint32_t alignment)
 {
-    (void)quota;
+    uint32_t card_owner = module_card_owner(owner, memory_class);
     (void)alignment; /* Card-pool pages are 64 KiB aligned. */
-    switch (memory_class) {
-    case ZZM_MEMORY_CLASS_MEDIA:
-        owner = (owner & 0x00ffffffU) | (CARD_POOL_CLASS_MEDIA << 24);
-        break;
-    case ZZM_MEMORY_CLASS_MEDIA_INPUT:
-        owner = (owner & 0x00ffffffU) | (CARD_POOL_CLASS_MEDIA_INPUT << 24);
-        break;
-    case ZZM_MEMORY_CLASS_IMAGE:
-        owner = (owner & 0x00ffffffU) | (CARD_POOL_CLASS_IMAGE << 24);
-        break;
-    default:
-        owner = (owner & 0x00ffffffU) | (CARD_POOL_CLASS_FIRMWARE << 24);
-        break;
-    }
-    return card_pool_alloc(&card_pool, bytes, owner);
+    if (!bytes || !quota || bytes > quota ||
+        module_owner_used(card_owner) > quota - bytes)
+        return 0U;
+    return card_pool_alloc(&card_pool, bytes, card_owner);
 }
 
 static int module_card_free(uint32_t address, uint32_t owner)
@@ -69,6 +84,12 @@ static void module_fault(const char *reason)
     printf("[ZZM] module fault: %s\n", reason ? reason : "");
 }
 
+static void module_fault_by_id(uint32_t module_id, const char *reason)
+{
+    module_fault(reason);
+    zzm_loader_mark_faulted(module_id, reason);
+}
+
 static uint64_t module_time_us(void)
 {
     XTime now;
@@ -79,6 +100,26 @@ static uint64_t module_time_us(void)
 static uint32_t module_release_owner(uint32_t owner)
 {
     return card_pool_release_owner(&card_pool, owner);
+}
+
+uint32_t zzm_runtime_release_module(uint32_t module_id)
+{
+    uint32_t released = module_release_owner(module_id);
+    if (released)
+        printf("[ZZM] module %lu reclaimed %lu bytes\n",
+               (unsigned long)module_id, (unsigned long)released);
+    return released;
+}
+
+int zzm_runtime_quota_available(uint32_t memory_class, uint32_t quota)
+{
+    uint32_t owner = module_card_owner(0U, memory_class);
+    uint32_t class_id = CARD_POOL_OWNER_CLASS(owner);
+    uint32_t free_bytes = card_pool_range_free_bytes(
+        &card_pool, CARD_POOL_RANGE_PERMANENT) +
+        card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_REVOCABLE);
+    return quota != 0U && class_id < CARD_POOL_CLASS_COUNT &&
+        quota <= card_pool.class_limit[class_id] && quota <= free_bytes;
 }
 
 static int module_register_ops(uint32_t module_id, const void *ops,
@@ -97,7 +138,7 @@ static int module_register_service(uint32_t module_id, uint32_t id,
 
 static const zzm_core_service_t core_service = {
     ZZM_SERVICE_CORE_V1, sizeof(core_service), module_log, module_fault,
-    module_time_us
+    module_time_us, module_fault_by_id
 };
 static const zzm_memory_service_t memory_service = {
     ZZM_SERVICE_MEMORY_V1, sizeof(memory_service), module_card_alloc,
@@ -142,6 +183,5 @@ int zzm_runtime_register_ops(uint32_t module_id, const void *ops,
 
 void zzm_runtime_module_fault(uint32_t module_id, const char *reason)
 {
-    (void)module_id;
-    module_fault(reason);
+    module_fault_by_id(module_id, reason);
 }
