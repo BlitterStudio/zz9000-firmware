@@ -262,9 +262,11 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 `ZZ9K_OP_MODULE_STATUS` takes a 48-byte `ZZ9KModuleStatusRequestPayload`:
 the only nonzero field is the big-endian zero-based `index`. It returns a
 48-byte `ZZ9KModuleStatusPayload` with big-endian module ID, version, ABI,
-slot address, image and BSS sizes, and state; `name` is a NUL-terminated
-module name. State is loaded, missing, rejected ABI, rejected hash, or
-rejected slot. An index outside the fixed manifest returns `ZZ9K_STATUS_NOT_FOUND`.
+slot address, image and BSS sizes, state and `detail`; `name` is a
+NUL-terminated module name. `detail` is the strong reference count while
+loaded, otherwise the state reason (including a missing service ID for
+`REJECTED_SERVICE`). An index outside the fixed manifest returns
+`ZZ9K_STATUS_NOT_FOUND`.
 
 ### Public descriptor layout
 

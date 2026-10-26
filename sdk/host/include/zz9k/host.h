@@ -34,6 +34,7 @@ typedef struct ZZ9KModuleStatus {
   uint32_t image_size;
   uint32_t bss_size;
   uint32_t state;
+  uint32_t detail; /* LOADED: refcount; other states: reason/missing service ID. */
   char name[16];
 } ZZ9KModuleStatus;
 
