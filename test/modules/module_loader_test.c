@@ -18,6 +18,13 @@ FRESULT f_open(FIL *file, const char *path, unsigned char mode)
     return loader_open_result;
 }
 
+FRESULT f_lseek(FIL *file, FSIZE_t offset)
+{
+    (void)file;
+    (void)offset;
+    return FR_OK;
+}
+
 FRESULT f_read(FIL *file, void *buffer, UINT length, UINT *read)
 {
     (void)file;

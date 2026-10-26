@@ -19,6 +19,7 @@
 CC = arm-none-eabi-gcc
 OBJCOPY = arm-none-eabi-objcopy
 AR = arm-none-eabi-ar
+SIZE = arm-none-eabi-size
 CC_FOR_BUILD ?= cc
 
 CPU_FLAGS = -mcpu=cortex-a9 -marm -mfpu=neon -mfloat-abi=hard

@@ -15,14 +15,62 @@ static const void *webp_ops;
 static uint32_t webp_ops_size;
 static int initialized;
 
-static uint32_t host_card_alloc(uint32_t bytes, uint32_t owner)
+static uint32_t host_card_alloc(uint32_t owner, uint32_t memory_class,
+                                uint32_t quota, uint32_t bytes,
+                                uint32_t alignment)
 {
+    (void)memory_class;
+    (void)quota;
+    (void)alignment;
     return card_pool_alloc(&card_pool, bytes, owner);
 }
 
 static int host_card_free(uint32_t address, uint32_t owner)
 {
     return card_pool_free(&card_pool, address, owner);
+}
+
+static uint32_t host_card_realloc(uint32_t address, uint32_t owner,
+                                  uint32_t bytes, uint32_t alignment)
+{
+    (void)address;
+    (void)owner;
+    (void)bytes;
+    (void)alignment;
+    return 0;
+}
+
+static void host_log(const char *message)
+{
+    (void)message;
+}
+
+static void host_fault(const char *reason)
+{
+    (void)reason;
+}
+
+static const zzm_core_service_t core_service = {
+    ZZM_SERVICE_CORE_V1, sizeof(core_service), host_log, host_fault, 0, 0
+};
+static const zzm_memory_service_t memory_service = {
+    ZZM_SERVICE_MEMORY_V1, sizeof(memory_service),
+    host_card_alloc, host_card_free, host_card_realloc
+};
+static const zzm_cache_service_t cache_service = {
+    ZZM_SERVICE_CACHE_V1, sizeof(cache_service), 0, 0
+};
+
+static const void *host_get_service(uint32_t id, uint32_t min_version)
+{
+    if (min_version != 1U)
+        return 0;
+    switch (id) {
+    case ZZM_SERVICE_CORE: return &core_service;
+    case ZZM_SERVICE_MEMORY: return &memory_service;
+    case ZZM_SERVICE_CACHE: return &cache_service;
+    default: return 0;
+    }
 }
 
 static int host_register_ops(uint32_t id, const void *ops, uint32_t size)
@@ -37,8 +85,8 @@ static int host_register_ops(uint32_t id, const void *ops, uint32_t size)
 static void ensure_initialized(void)
 {
     static const zzm_services_t services = {
-        ZZM_MODULE_ABI_VERSION, sizeof(services), host_card_alloc,
-        host_card_free, 0, 0, 0, host_register_ops,
+        ZZM_MODULE_ABI_VERSION, sizeof(services), host_get_service,
+        host_register_ops, 0
     };
 
     if (!initialized) {
