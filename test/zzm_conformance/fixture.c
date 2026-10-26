@@ -71,3 +71,7 @@ int zzm_module_init(const void *services)
     (void)services;
     return 0;
 }
+
+void zzm_module_exit(void)
+{
+}

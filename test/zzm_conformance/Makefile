@@ -12,6 +12,7 @@ WEBP_ELF ?= $(MODULE_BUILD)/webp/WEBP.elf
 COMMON_FLAGS := -mcpu=cortex-a9 -marm -ffreestanding -fno-builtin -fno-pic \
 	-nostdlib -Wl,--gc-sections -Wl,-T,$(LINKER) \
 	-Wl,--undefined=zzm_rt_identity -Wl,--undefined=zzm_module_descriptor \
+	-Wl,--undefined=zzm_module_exit \
 	-Wl,--defsym,ZZM_SLOT=0x09000000 -Wl,--defsym,ZZM_SLOT_SIZE=0x00400000
 
 FIXTURES := $(BUILD_DIR)/valid.elf $(BUILD_DIR)/local_heap.elf \
