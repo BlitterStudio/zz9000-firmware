@@ -121,6 +121,8 @@ jobs:
         run: make -C test/fwupdate test
       - name: Firmware module loader suite
         run: make -C test/modules test
+      - name: Module runtime allocation bridge suite
+        run: make -C test/zzm_rt test
       - name: SD activity LED suite
         run: make -C test/sd_activity_led test
       - name: Scheduler host tests
@@ -267,6 +269,10 @@ jobs:
 
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh
+      - name: Build and check firmware module ELFs
+        run: |
+          make -C ZZ9000_proto.sdk/ZZ9000OS modules
+          make -C test/zzm_conformance test
 
       - name: Check exception-vector placement
         run: bash util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
