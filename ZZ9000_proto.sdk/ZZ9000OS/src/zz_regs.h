@@ -78,7 +78,9 @@ enum zz_reg_offsets {
 
   REG_ZZ_SET_FEATURE    = 0x60,
   REG_ZZ_UNUSED_REG62   = 0x62,
-  REG_ZZ_UNUSED_REG64   = 0x64,
+  /* write: output gamma in hundredths (20..500, 0 or 100 = off); read the
+     applied value through ZZ_CONFIG_KEY_GAMMA. Needs MNTZORRO_CAP_GAMMA_LUT. */
+  REG_ZZ_GAMMA          = 0x64,
   REG_ZZ_UNUSED_REG66   = 0x66,
   /* read: asynchronous-send status, bit 15 = present, 14..0 frames done
      (ethernet.h ETH_TX_ASYNC).  Its own aligned register: the value is the
@@ -298,12 +300,6 @@ enum zz9k_card_features {
    * 0/0 restores the automatic window. Gated by
    * ZZ_FW_CAP_VIDEOCAP_GEOMETRY. */
   CARD_FEATURE_VIDEOCAP_GEOMETRY,
-  /* Runtime output gamma (ZZGamma): the value is gamma in hundredths
-   * (20..500, 0 switches the filter off); the ARM computes one curve
-   * and loads the formatter's per-channel LUT. Gated by REG7 bit 30
-   * (MNTZORRO_CAP_GAMMA_LUT) and reported by config key
-   * ZZ_CONFIG_KEY_GAMMA. */
-  CARD_FEATURE_GAMMA,
   CARD_FEATURE_NUM,
 };
 

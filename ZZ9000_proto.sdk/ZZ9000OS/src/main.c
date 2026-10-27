@@ -1483,6 +1483,23 @@ int main() {
 					video_custom_commit((uint16_t)zdata);
 					break;
 
+				case REG_ZZ_GAMMA:
+					/* Runtime output gamma (ZZGamma, ZZTop slider): gamma in
+					 * hundredths, 0 or 100 = off. Its own register, not a
+					 * card feature: the feature selector is REG_ZZ_USER1,
+					 * which the RTG driver caches as a blitter operand, so a
+					 * tool writing it would leave the driver's cache wrong.
+					 * The ZZTop slider writes at up to 10 Hz, so success
+					 * is silent; read back through ZZ_CONFIG_KEY_GAMMA. */
+					if (zdata != 0U && (zdata < GAMMA_HUNDREDTHS_MIN ||
+					    zdata > GAMMA_HUNDREDTHS_MAX)) {
+						printf("[gamma] rejected: %lu\n",
+						       (unsigned long)zdata);
+						break;
+					}
+					(void)video_set_gamma((uint16_t)zdata);
+					break;
+
 				case REG_ZZ_SET_FEATURE:
 					switch (blitter_user1) {
 						case CARD_FEATURE_SECONDARY_PALETTE:
@@ -1524,25 +1541,6 @@ int main() {
 								printf("[feature] VIDEOCAP_GEOMETRY rejected: %lux%lu\n",
 									(unsigned long)blitter_user2,
 									(unsigned long)(zdata & 0xffffU));
-							break;
-						case CARD_FEATURE_GAMMA:
-							/* Runtime output gamma (ZZGamma):
-							 * value is gamma in hundredths,
-							 * 0 switches the filter off. */
-							if (zdata > GAMMA_HUNDREDTHS_MAX) {
-								printf("[feature] GAMMA rejected: %lu\n",
-									zdata);
-								break;
-							}
-							if (!video_set_gamma((uint16_t)zdata)) {
-								printf("[feature] GAMMA: unsupported by bitstream\n");
-								break;
-							}
-							if (zdata)
-								printf("[feature] GAMMA: %lu.%02lu\n",
-									zdata / 100, zdata % 100);
-							else
-								printf("[feature] GAMMA: off\n");
 							break;
 						default:
 							break;

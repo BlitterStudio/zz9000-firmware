@@ -216,7 +216,7 @@ int video_videocap_backing_reserve(void);
  * Zorro FSM exits reset. Safe to repeat. */
 int video_videocap_backing_arm(void);
 
-/* Output gamma (config key ZZ_CONFIG_KEY_GAMMA, CARD_FEATURE_GAMMA):
+/* Output gamma (REG_ZZ_GAMMA, config key ZZ_CONFIG_KEY_GAMMA):
  * loads the formatter LUT. video_set_gamma takes hundredths, where 0
  * switches the filter off (identity curve); it returns 0 when the
  * loaded bitstream lacks the LUT stage or the value is out of range.
