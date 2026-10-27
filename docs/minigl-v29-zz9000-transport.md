@@ -110,19 +110,43 @@ To confirm the board runs firmware capable of Wire Protocol v9 without triggerin
    Read 16-bit register at board offset `0x0100` (`ZZ9K_REG_SDK_MAGIC`).
    - Must return `0x5a39` (`ZZ9K_REG_SDK_MAGIC_VALUE`).
 2. **SDK ABI Version Probe**:
-   Read 16-bit register at board offset `0x0102` (`ZZ9K_REG_SDK_VERSION`).
-   - High byte is major ABI version (must be `>= 2`).
-3. **MiniGL Wire-v9 Capability Bit**:
-   Firmware advertises Wire-v9 support via bit 18 in `ZZ9KMiniGLStatus.capabilities` and in the SDK mailbox capability mask:
+3. **SDK Mailbox Location**:
+   Read the 16-bit register pair at board offsets `0x0104`/`0x0106`
+   (`REG_ZZ_SDK_MAILBOX_HI/LO`). The combined 32-bit value is the ARM
+   address of the SDK mailbox reservation; its board offset is
+   `arm − 0x001F0000`. A zero or out-of-aperture value means the firmware
+   has no mailbox (Zorro II, or an unacknowledised generation-2 aperture):
+   the MiniGL service is unavailable and the transport fails its probe.
+4. **Transport Allocation Descriptor**:
+   At mailbox board offset + `0x8000` the firmware publishes a versioned
+   **big-endian** descriptor (magic `'MGTD'`, `descriptor_version` 1)
+   holding the transport window address/size, `address_adjust`, the
+   control/status/slot/reply offsets and capacities, the required
+   alignment, cache rules, the BLIT/CAPTURE VRAM limit, and an allocation
+   generation. The library must reject an absent, invalid, or
+   newer-version descriptor and fall back — it must never compute
+   addresses by arithmetic on a fixed base. The live control block may
+   narrow the descriptor geometry (a constrained session) but never
+   widen it.
+5. **MiniGL Wire-v9 Capability Bit**:
+   Firmware advertises Wire-v9 support via bit 18 in
+   `ZZ9KMiniGLStatus.capabilities`:
    - `#define ZZ9K_CAP_MINIGL_WIRE_V9 (1U << 18)`
-4. **Transport Handshake (`BRIDGE_QUERY`)**:
-   The library inspects the MiniGL Control Block at the negotiated base address:
+6. **Transport Handshake (`BRIDGE_QUERY`)**:
+   The library inspects the MiniGL Control Block at the descriptor's
+   address:
    - `magic` must equal `0x4D474C39UL` (ASCII `'MGL9'`).
    - `wire_version` must equal `9` (`MW_VERSION`).
    - If `wire_version != 9`, initialization aborts with `GL_FALSE`.
 
----
+### 2.4 Firmware residency (2.9.0)
 
+The wire-v9 service is **resident** firmware (core-1 worker owned), not a
+`ZZ9K/MINIGL.ZZM` module: module runtime v2 has no core-1/jobs execution
+contract (`docs/modules.md` reserves the jobs service), no surface-allocator
+memory class for a host-visible transport window, and no cross-core
+doorbell/unload ordering. The manifest slot stays reserved for a future
+module once those runtime features exist.
 ## 3. Shared Memory Architecture (Zorro III and Zorro II)
 
 ### 3.1 Address Mapping
@@ -133,45 +157,38 @@ Card DDR is mapped to the Amiga Zorro bus through an address adjustment:
 - `Board_Offset = ARM_Address - 0x001F0000`
 - `ARM_Address = Board_Offset + 0x001F0000`
 
-### 3.2 Zorro III Memory Layout
-On Zorro III, the Amiga maps a 128 MiB address space (`cd_BoardSize = 0x08000000`).
-The MiniGL transport resides in the dedicated 16 MiB window at ARM `0x07000000..0x08000000` (board offset `0x06E10000..0x07E10000`):
 
-| Region | ARM Address | Board Offset | Size | Ownership | Purpose |
-|---|---|---|---|---|---|
-| **Control Block** | `0x07000000` | `0x06E10000` | 128 B | FW (0..63) / Host (64..127) | Ring cursors, fences, sequence numbers |
-| **Status Block** | `0x07000080` | `0x06E10080` | 128 B | FW (0..63) / Host (64..127) | Heartbeat, caps, error state, telemetry |
-| **Packet Slot 0** | `0x07001000` | `0x06E11000` | 256 KiB | Host producer, FW consumer | Wire-v9 command packet submission buffer 0 |
-| **Packet Slot 1** | `0x07041000` | `0x06E51000` | 256 KiB | Host producer, FW consumer | Wire-v9 command packet submission buffer 1 |
-| **Reply Buffer** | `0x07081000` | `0x06E91000` | 64 KiB | FW producer, Host consumer | Staging buffer for bounded REQUEST / READ_PIXELS |
-| *Freed MGL5 space* | `0x07091000..0x08000000` | `0x06EA1000..0x07E10000` | ~7.4 MiB | — | Deliberately unowned pending low-DDR map consolidation |
+### 3.2 Transport Window Layout (2.9.0)
+On Zorro III the transport is **one dynamic allocation** from the firmware
+host-visible heap (`surface_allocator_alloc_range`, 0x91000 bytes, 4 KiB
+aligned), constrained to `0x08110000..0x081C0000` — the free gap between
+the SDK mailbox and direct-ring reservations inside the 1 MiB MMU section
+the mailbox already maps Normal non-cacheable. The window's exact address
+is published in the transport descriptor (§2.3); nothing computes it from
+a fixed base. Offsets inside the window:
 
-*Note*: The fixed host-visible window ends at the reply buffer. Wire-v9 render
-targets, depth buffers, texture storage, and draw scratch are allocated from
-the card pool only when a context is created, then released when it is
-destroyed or reset. They do not reserve low DDR at firmware boot.
-
-### 3.3 Zorro II Memory Layout & Budget
-On Zorro II, the host aperture is constrained: standard autoconfig provides 4 MiB (optionally 2 MiB or 8 MiB). The high DDR range `0x07000000` is unreachable over Zorro II.
-
-#### Zorro II Memory Budget Rules:
-1. **Render Target & Depth Buffer are Card-Private**:
-   Because the 68k never writes directly to the 3D render target or depth buffer in Wire v9, they are allocated from ARM-private DDR via `card_pool_alloc()` in DDR high memory, consuming **zero** Zorro II host window space.
-2. **Host-Visible Staging in Zorro II Window**:
-   The control block and packet slots must reside within the host-visible aperture. Under generation-2 aperture layout (`sdk_aperture_layout.c`):
-   - The RTG driver allocates display bitmaps from board offset `0x00010000` upwards.
-   - For an 800x600x16 display (960 KiB) or 640x480x16 display (600 KiB), ample room remains between the display bitmap and the top reservation (audio scratch at `audio.base = 0x003F0000`).
-   - The MiniGL transport allocates its shared staging buffer dynamically via `p96AllocBitMap(512, 128, 8)` (64 KiB) or `p96AllocBitMap(512, 256, 8)` (128 KiB) in card VRAM, or uses the dedicated generation-2 host-window reservation.
-   - On Zorro II, the transport configures a budgeted single slot or double 64 KiB slots:
-     - `max_packet_bytes = 65536` (64 KiB).
-     - When an application accumulates commands reaching 64 KiB, `amiberry_command()` flushes automatically.
-
-| Region (Zorro II) | Location | Size | Alignment | Purpose |
+| Region | Window offset | Size | Ownership | Purpose |
 |---|---|---|---|---|
-| **Control & Status Block** | Top of VRAM reservation or host-window heap | 256 B | 64 B | Transport control & synchronization |
-| **Packet Slot 0** | Host-visible card DDR | 64 KiB | 64 B | Command packet buffer |
-| **Packet Slot 1** *(if 128K budget)* | Host-visible card DDR | 64 KiB | 64 B | Double-buffering slot |
-| **Reply Buffer** | Host-visible card DDR | 16 KiB | 64 B | Bounded query reply staging |
+| **Control Block** | `0x0000` | 128 B | FW (0..63) / Host (64..127) | Ring cursors, fences, sequence numbers |
+| **Status Block** | `0x0080` | 128 B | FW (0..63) / Host (64..127) | Heartbeat, caps, error state, telemetry |
+| **Packet Slot 0** | `0x1000` | 256 KiB | Host producer, FW consumer | Wire-v9 command packet submission buffer 0 |
+| **Packet Slot 1** | `0x41000` | 256 KiB | Host producer, FW consumer | Wire-v9 command packet submission buffer 1 |
+| **Reply Buffer** | `0x81000` | 64 KiB | FW producer, Host consumer | Staging buffer for bounded REQUEST / READ_PIXELS |
+
+*Note*: Render targets, depth buffers, texture storage, and draw scratch
+are card-pool allocations (`CARD_POOL_CLASS_MINIGL`, 128 MiB class limit)
+created with the context and released on destroy/fault/reset. They consume
+no host-visible heap at firmware boot.
+### 3.3 Zorro II: service unavailable
+Zorro II cannot host the transport: the shared host window is 64 KiB total
+(16 KiB for clients on generation-2 bitstreams once the audio direct-ring
+grant takes its 48 KiB), while even a single-slot layout needs 68 KiB
+(control page + 64 KiB slot + 16 KiB reply), and Z2 has no SDK mailbox
+reservation to publish the descriptor through. The firmware therefore
+binds no window, publishes no descriptor, and reports the service
+unavailable; the library's probe fails with
+`ZZ9K_MINIGL_PROBE_MAILBOX_REGISTERS`/`_TRANSPORT_DESCRIPTOR` and the
+backend falls back exactly as on firmware built without the service.
 
 ### 3.4 Ownership Blocks and Alignment
 Cache line sharing between the 68k (up to 16 bytes on 68040/060; 64 bytes for bursting) and ARM Cortex-A9 (32-byte L1, 32-byte L2) presents false-sharing risks.
@@ -261,7 +278,7 @@ typedef struct ZZ9KMiniGLStatus {
 - Memory barriers: An explicit compiler barrier (`__asm__ volatile ("" ::: "memory")`) follows all cache sync operations.
 
 #### ARM Cortex-A9 Side:
-- Shared control blocks at `0x07000000` are mapped as **Normal Non-Cacheable** (`NORM_NONCACHE`, inner/outer uncached) in the ARM MMU page tables via `mmu_page_set_noncacheable()`.
+- The transport window lives inside the SDK mailbox MMU section, which the firmware maps **Normal Non-Cacheable** (`NORM_NONCACHE`) at mailbox placement time (`Xil_SetTlbAttributes`); the descriptor publishes this in `cache_rules`.
 - Packet slots and reply buffers in DDR are cacheable by ARM for fast command parsing and SIMD operations:
   - **Before Parsing a Submitted Packet**: Core 1 invalidates the packet range in its data cache so it reads fresh DDR contents written by the 68k over Zorro:
     ```c

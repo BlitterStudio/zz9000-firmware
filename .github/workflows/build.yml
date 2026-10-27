@@ -101,6 +101,10 @@ jobs:
         run: make -C test/usb test
       - name: RTG regression suite
         run: make -C test/rtg test
+      - name: MiniGL raster behavioral suite
+        run: make -C test/minigl test
+      - name: MiniGL wire-v9 transport suite
+        run: make -C test/minigl_v9 test
       - name: Video pipeline regression suite
         run: make -C test/video test
       - name: Native capture RTL regressions

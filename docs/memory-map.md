@@ -22,7 +22,7 @@ above it.
 | `0x00000000`–`0x00100000` | 1 MiB | Low aperture/boot-reserved DDR. |
 | `0x00100000`–`0x00200000` | 1 MiB | Low exception vectors and MMU table only. |
 | `0x00200000`–`0x033F0000` | 49.9375 MiB | P96 VRAM, managed by rtg.library. The RTG driver's MemorySize ends here. |
-| `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages and the AHI/MHI scratch. |
+| `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages, the MiniGL wire-v9 transport window (one dynamic allocation, see below) and the AHI/MHI scratch. |
 | `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. |
 | `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
@@ -42,6 +42,31 @@ Zorro II fallback; the firmware publishes the active address in allocation
 replies and `DIAG_MEMORY`.
 
 The linker gives image/static and heap their own memory regions, so neither
+
+### MiniGL wire-v9 transport window
+
+MiniGL's host-visible transport (control/status page, two 256 KiB packet
+slots, 64 KiB reply buffer — 0x91000 bytes) is **one dynamic allocation**
+from the host-visible heap, taken by `minigl_transport_init()` at boot and
+after every Amiga reset. There is deliberately no fixed MiniGL DDR
+carve-out. The allocation is constrained (`surface_allocator_alloc_range`)
+to `0x08110000`–`0x081C0000`, the free gap between the SDK mailbox and
+direct-ring reservations inside the 1 MiB MMU section the mailbox already
+maps Normal non-cacheable: both CPUs poll the control block, so the
+window must not be cacheable, and confining it to that existing section
+avoids new MMU work. The gap (704 KiB) exceeds the window with the
+partition checks in `memorymap.h` holding. On allocation failure — or on
+Zorro II, whose host window cannot hold even a single-slot window — the
+service reports unavailable and the Amiga library falls back exactly as
+on firmware built without it.
+
+The Amiga side discovers the window through a versioned big-endian
+transport descriptor ('MGTD') published at offset 0x8000 inside the
+64 KiB SDK mailbox reservation (descriptor plus both 64-entry rings end
+at 0x2080, and no mailbox ABI user — firmware or host library — reads or
+writes beyond them). The library locates the mailbox via
+`REG_ZZ_SDK_MAILBOX_HI/LO`, validates the descriptor, and uses its
+addresses verbatim.
 can grow across the task queue, core-1 stack, or first card-pool byte.
 
 ## RTL-pinned top belt
@@ -91,4 +116,10 @@ Use the card pool or the host-visible interval allocator unless hardware or
 the Amiga protocol requires a stable address. A true fixed range must have
 derived exclusive bounds, overlap assertions in `memorymap.h`, matching RTL
 definitions where applicable, and an entry in this document.
+
+The card-pool class table: `FIRMWARE` 64 MiB, `MEDIA` 128 MiB,
+`MEDIA_INPUT` 64 MiB, `IMAGE` 72 MiB, `SDK_SURFACE` 128 MiB,
+`CONSOLE` 32 MiB, `MINIGL` 128 MiB (colour/depth/texture working sets of
+live wire-v9 render contexts; released per context destroy, by owner on
+fault recovery, and on every Amiga reset).
 

@@ -44,6 +44,7 @@ void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0u; }
 #define FIRMWARE(i) CARD_POOL_OWNER(CARD_POOL_CLASS_FIRMWARE, (i))
 #define SDK_SURFACE(i) CARD_POOL_OWNER(CARD_POOL_CLASS_SDK_SURFACE, (i))
 #define CONSOLE(i)  CARD_POOL_OWNER(CARD_POOL_CLASS_CONSOLE, (i))
+#define MINIGL(i)   CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, (i))
 
 static int failures = 0;
 static int checks = 0;
@@ -239,6 +240,30 @@ static void test_decode_classes_reclaimed_on_reset(void)
     CHECK(!card_pool_block_owned(&pool, media, PAGE, MEDIA(1)));
 }
 
+static void test_minigl_class(void)
+{
+    uint32_t ctx1, ctx2;
+
+    two_ranges(4 * PAGE, PAGE);
+    /* MiniGL render contexts allocate under their own class with the
+     * context handle+generation as the owner instance. */
+    ctx1 = card_pool_alloc(&pool, PAGE, MINIGL(0x00010001U));
+    ctx2 = card_pool_alloc(&pool, PAGE, MINIGL(0x00010002U));
+    CHECK(ctx1 == A_BASE);
+    CHECK(ctx2 == A_BASE + PAGE);
+    CHECK(pool.class_used[CARD_POOL_CLASS_MINIGL] == 2U * PAGE);
+    /* Destroying one context releases only its own owner's pages. */
+    CHECK(card_pool_release_owner(&pool, MINIGL(0x00010001U)) == PAGE);
+    CHECK(card_pool_block_owned(&pool, ctx2, PAGE, MINIGL(0x00010002U)));
+    CHECK(!card_pool_block_owned(&pool, ctx1, PAGE, MINIGL(0x00010001U)));
+    /* An Amiga reset reclaims every live MiniGL context. */
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.class_used[CARD_POOL_CLASS_MINIGL] == 0U);
+    CHECK(pool.block_count == 0);
+    /* The class limit is the published MiniGL budget. */
+    CHECK(pool.class_limit[CARD_POOL_CLASS_MINIGL] == CARD_POOL_LIMIT_MINIGL);
+}
+
 static void test_firmware_never_in_revocable(void)
 {
     card_pool_init(&pool);
@@ -430,6 +455,7 @@ int main(void)
     test_shared_media_owner_isolated_from_session_reclaim();
     test_sdk_surface_reclaimed_on_reset();
     test_console_reclaimed_on_reset();
+    test_minigl_class();
     test_firmware_never_in_revocable();
     test_decode_classes_reclaimed_on_reset();
     test_reset_fast_ram_switches_on();
