@@ -125,8 +125,13 @@ enum zz_reg_offsets {
   /* read: GEM checksum capabilities and the presented frame's RX verdict
      (ethernet.h ETH_RX_META_*); the low half of the 0xA4 longword. */
   REG_ZZ_ETH_RX_META    = 0xA6,
-  REG_ZZ_UNUSED_REGA8   = 0xA8,
-  REG_ZZ_UNUSED_REGAA   = 0xAA,
+  /* write-only capture-window override (vcap_geometry_reg.h): WIDTH
+     stages the width in captured words, COMMIT carries the height in
+     source lines and applies the pair. Not blitter operands, unlike the
+     REG_ZZ_USER2 + CARD_FEATURE_VIDEOCAP_GEOMETRY path kept for 2.9.0
+     clients. Clients detect them with ZZ_CONFIG_KEY_VCAP_GEOMETRY_REGS. */
+  REG_ZZ_VCAP_GEOMETRY_WIDTH  = 0xA8,
+  REG_ZZ_VCAP_GEOMETRY_COMMIT = 0xAA,
   REG_ZZ_UNUSED_REGAC   = 0xAC,
   REG_ZZ_UNUSED_REGAE   = 0xAE,
 
@@ -251,8 +256,11 @@ enum zz_reg_offsets {
  * be applied. Drivers require bits 8 and 10 together.
  *
  * Bit 8 is the capture-window override (videocap_width / videocap_height):
- * the caller first stages the width (captured words) in REG_ZZ_USER2,
- * then writes the feature with the height as the 16-bit value; the
+ * the caller stages the width (captured words) in
+ * REG_ZZ_VCAP_GEOMETRY_WIDTH, then writes the height to
+ * REG_ZZ_VCAP_GEOMETRY_COMMIT when ZZ_CONFIG_KEY_VCAP_GEOMETRY_REGS is
+ * present; 2.9.0 firmware only has the CARD_FEATURE_VIDEOCAP_GEOMETRY
+ * sequence (width in REG_ZZ_USER2, height as the feature value). The
  * pair applies at the next stable frame boundary and the scanout
  * letterboxes the smaller window. Older firmware ignores the feature;
  * drivers gate the calibration UI on it.
@@ -292,11 +300,13 @@ enum zz9k_card_features {
   CARD_FEATURE_NONSTANDARD_VSYNC,
   CARD_FEATURE_VIDEO_OVERLAY,
   CARD_FEATURE_DPMS,
-  /* Capture-window override (ZZTop calibration): REG_ZZ_USER2 stages
+  /* Capture-window override from 2.9.0 ZZTop: REG_ZZ_USER2 stages
    * the width and the feature value carries the height, both in
    * captured words / source lines and validated by video_scale.h;
    * 0/0 restores the automatic window. Gated by
-   * ZZ_FW_CAP_VIDEOCAP_GEOMETRY. */
+   * ZZ_FW_CAP_VIDEOCAP_GEOMETRY. Newer clients use
+   * REG_ZZ_VCAP_GEOMETRY_WIDTH/COMMIT, which leave the RTG driver's
+   * cached USER1/USER2 operands alone. */
   CARD_FEATURE_VIDEOCAP_GEOMETRY,
   CARD_FEATURE_NUM,
 };

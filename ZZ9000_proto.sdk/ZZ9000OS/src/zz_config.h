@@ -94,6 +94,11 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL = 32,
 	ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_SERIAL = 33,
 	ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS = 34,
+	/* Key 35 is reserved for the output gamma query. */
+	/* Present (value VCAP_GEOMETRY_REGS_ABI) when the firmware decodes
+	 * REG_ZZ_VCAP_GEOMETRY_WIDTH/COMMIT; older firmware reports it as
+	 * absent and only has CARD_FEATURE_VIDEOCAP_GEOMETRY. */
+	ZZ_CONFIG_KEY_VCAP_GEOMETRY_REGS = 36,
 	ZZ_CONFIG_KEY_NUM
 };
 
