@@ -1,4 +1,4 @@
-
+*.o
 minigl_lighting_test
 minigl_oracle_test
 minigl_polygon_test

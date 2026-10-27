@@ -42,7 +42,7 @@ test: all
 	./test_mw_draw
 	./test_mw_texture
 	./test_mw_host_api
-	./test_mw_e2e
+	$(E2E_RUN)
 	./test_mw_rasterix_mapper
 
 asan: CFLAGS += -fsanitize=address,undefined -g
