@@ -14,7 +14,7 @@
 #include "cardmem_acc.h"
 
 #ifndef CARDMEM_UART_LOG
-#define CARDMEM_UART_LOG 0
+#define CARDMEM_UART_LOG 1 /* DIAG: revert to 0 before merging */
 #endif
 
 #if CARDMEM_UART_LOG
