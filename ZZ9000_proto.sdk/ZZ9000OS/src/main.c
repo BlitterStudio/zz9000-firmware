@@ -776,6 +776,22 @@ int main() {
 		       cfg->scanline_mode, cfg->scanline_parity);
 	}
 
+	if (zz_config_get()->gamma_present) {
+		// Load the output gamma curve the same way as the scanline
+		// options above: through the ARM formatter-op path. A
+		// bitstream without the LUT stage (REG7 bit 30) rejects the
+		// call and keeps its power-up identity table.
+		const struct zz_config *cfg = zz_config_get();
+
+		if (video_set_gamma(cfg->gamma)) {
+			printf("[CFG] gamma: %u.%02u\n",
+			       cfg->gamma / 100U, cfg->gamma % 100U);
+		} else {
+			printf("[CFG] gamma: %u.%02u unsupported by bitstream\n",
+			       cfg->gamma / 100U, cfg->gamma % 100U);
+		}
+	}
+
 	{
 		// Push videocap sampler options through the existing ARM
 		// video_formatter_write path. MNTVF_OP_VIDEOCAP enters the shared
@@ -1506,6 +1522,25 @@ int main() {
 									(unsigned long)blitter_user2,
 									(unsigned long)(zdata & 0xffffU));
 							break;
+						case CARD_FEATURE_GAMMA:
+							/* Runtime output gamma (ZZGamma):
+							 * value is gamma in hundredths,
+							 * 0 switches the filter off. */
+							if (zdata > GAMMA_HUNDREDTHS_MAX) {
+								printf("[feature] GAMMA rejected: %lu\n",
+									zdata);
+								break;
+							}
+							if (!video_set_gamma((uint16_t)zdata)) {
+								printf("[feature] GAMMA: unsupported by bitstream\n");
+								break;
+							}
+							if (zdata)
+								printf("[feature] GAMMA: %lu.%02lu\n",
+									zdata / 100, zdata % 100);
+							else
+								printf("[feature] GAMMA: off\n");
+							break;
 						default:
 							break;
 					}
@@ -2173,6 +2208,12 @@ int main() {
 					    config_query_key <= ZZ_CONFIG_KEY_RTG_GEOM_MODESEL) {
 						value = video_rtg_diag_value(
 							config_query_key, &present);
+					} else if (config_query_key ==
+					           ZZ_CONFIG_KEY_GAMMA) {
+						/* Runtime applied gamma, not the raw
+						 * file value: 0 means the loaded
+						 * bitstream has no LUT stage. */
+						value = video_gamma_query(&present);
 					} else if (config_query_key >=
 					           ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH &&
 					           config_query_key <=

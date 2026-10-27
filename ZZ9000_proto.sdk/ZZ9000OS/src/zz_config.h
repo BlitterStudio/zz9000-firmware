@@ -94,6 +94,10 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL = 32,
 	ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_SERIAL = 33,
 	ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS = 34,
+	ZZ_CONFIG_KEY_GAMMA           = 35, /* applied output gamma in hundredths;
+	                                    * runtime state, not file content:
+	                                    * 0 = bitstream lacks the LUT stage,
+	                                    * 100 = identity (filter off) */
 	ZZ_CONFIG_KEY_NUM
 };
 
@@ -163,6 +167,9 @@ struct zz_config {
 
 	uint8_t int2_present;
 	uint16_t int2;                  /* 0-1, informational (drivers query it) */
+
+	uint8_t gamma_present;
+	uint16_t gamma;                 /* hundredths, 20..500 (0.20..5.00) */
 
 	uint8_t mac_present;
 	uint8_t mac[6];

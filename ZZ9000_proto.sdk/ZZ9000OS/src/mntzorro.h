@@ -40,6 +40,11 @@
  * Old bitstreams return zero on Z3; firmware must withhold Fast RAM then. */
 #define MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000 0x80000000UL
 
+/* REG7 bit 30: the video formatter carries the per-channel output gamma
+ * LUT (MNTVF_OP_GAMMA). Older bitstreams read zero here; firmware must
+ * keep the gamma feature off instead of streaming LUT entries. */
+#define MNTZORRO_CAP_GAMMA_LUT 0x40000000UL
+
 #define MNTZORRO_STATUS_SDK_IRQ_ACK     (1UL << 18)
 #define MNTZORRO_STATUS_SDK_DOORBELL    (1UL << 19)
 #define MNTZORRO_STATUS_VCAP_VIEWPORT   (1UL << 15)

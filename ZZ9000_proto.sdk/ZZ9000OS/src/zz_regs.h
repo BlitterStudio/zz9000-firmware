@@ -298,6 +298,12 @@ enum zz9k_card_features {
    * 0/0 restores the automatic window. Gated by
    * ZZ_FW_CAP_VIDEOCAP_GEOMETRY. */
   CARD_FEATURE_VIDEOCAP_GEOMETRY,
+  /* Runtime output gamma (ZZGamma): the value is gamma in hundredths
+   * (20..500, 0 switches the filter off); the ARM computes one curve
+   * and loads the formatter's per-channel LUT. Gated by REG7 bit 30
+   * (MNTZORRO_CAP_GAMMA_LUT) and reported by config key
+   * ZZ_CONFIG_KEY_GAMMA. */
+  CARD_FEATURE_GAMMA,
   CARD_FEATURE_NUM,
 };
 

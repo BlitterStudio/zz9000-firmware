@@ -47,6 +47,7 @@ localparam OP_OVERLAY_SOURCE_SIZE = 26;
 localparam OP_OVERLAY_FRAME = 27;
 localparam OP_VIEWPORT_POS = 28;
 localparam OP_VIEWPORT_SIZE_COMMIT = 29;
+localparam OP_GAMMA = 34;
 
 // config (from plusargs)
 integer cfg_cmode;
@@ -56,6 +57,7 @@ integer cfg_interlace;
 integer cfg_width;
 integer cfg_stream_gap_every;
 integer cfg_stream_gap_cycles;
+integer cfg_gamma;
 integer cfg_viewport;
 integer cfg_scanline;
 integer cfg_source_rows;
@@ -338,6 +340,13 @@ function integer expected_source_line(input integer output_line);
   end
 endfunction
 
+// expected dvi_rgb after the channel-distinct gamma test table
+// (R = 255 - in, G = in, B = in ^ 8'h55); catches swapped or shared
+// per-channel tables as well as wrong index wiring
+function [31:0] expected_gamma_pix(input [31:0] rgb);
+  expected_gamma_pix = {8'h00, ~rgb[23:16], rgb[15:8], rgb[7:0] ^ 8'h55};
+endfunction
+
 // control op helper
 task op(input [7:0] o, input [31:0] d);
   begin
@@ -423,6 +432,77 @@ integer frames = 0;
 always @(posedge dvi_clk)
   if (uut.counter_y == vs_start && uut.counter_x == 0)
     frames = frames + 1;
+
+integer i, x, mism, shown, overlay_start_frame, expected_row;
+
+`ifndef MASTER_DUT
+/* Gamma LUT timing witness: timestamps the DE rise/fall and HSYNC assert
+ * edges of one display line with an absolute pixel-clock counter. The
+ * three intervals (DE width, DE fall -> HSYNC assert, HSYNC assert -> next
+ * DE rise) must be identical before and after a LUT load: the gamma stage
+ * adds one pipeline register to RGB, HSYNC, VSYNC and DE alike, and any
+ * skew would show up here. */
+integer gamma_clock = 0;
+integer gamma_t_de_rise1, gamma_t_de_fall, gamma_t_hs, gamma_t_de_rise2;
+integer gamma_ref_de_width = -1;
+integer gamma_ref_de_fall_to_hs = -1;
+integer gamma_ref_hs_to_de = -1;
+reg gamma_meas_run = 0;
+reg gamma_prev_de = 0;
+reg gamma_prev_hs_active = 0;
+reg gamma_hs_active = 0;
+
+always @(posedge dvi_clk) begin
+  gamma_prev_de <= dvi_active_video === 1'b1;
+  gamma_prev_hs_active <= gamma_hs_active;
+  gamma_hs_active <= dvi_hsync === (1'b1 ^ uut.vga_sync_polarity);
+  if (gamma_meas_run) begin
+    gamma_clock = gamma_clock + 1;
+    if (dvi_active_video === 1'b1) begin
+      if (!gamma_prev_de) begin
+        if (gamma_t_de_rise1 < 0)
+          gamma_t_de_rise1 = gamma_clock;
+        else if (gamma_t_de_fall >= 0 && gamma_t_hs >= 0 &&
+                 gamma_t_de_rise2 < 0)
+          gamma_t_de_rise2 = gamma_clock;
+      end
+    end else if (gamma_prev_de && gamma_t_de_rise1 >= 0 &&
+                 gamma_t_de_fall < 0)
+      gamma_t_de_fall = gamma_clock;
+    if (gamma_hs_active && !gamma_prev_hs_active &&
+        gamma_t_de_fall >= 0 && gamma_t_hs < 0)
+      gamma_t_hs = gamma_clock;
+  end
+end
+
+task gamma_measure;
+  begin
+    gamma_t_de_rise1 = -1;
+    gamma_t_de_fall = -1;
+    gamma_t_hs = -1;
+    gamma_t_de_rise2 = -1;
+    gamma_clock = 0;
+    gamma_meas_run = 1;
+    wait (gamma_t_de_rise2 >= 0);
+    gamma_meas_run = 0;
+    if (gamma_ref_de_width >= 0) begin
+      if (gamma_t_de_fall - gamma_t_de_rise1 != gamma_ref_de_width ||
+          gamma_t_hs - gamma_t_de_fall != gamma_ref_de_fall_to_hs ||
+          gamma_t_de_rise2 - gamma_t_hs != gamma_ref_hs_to_de) begin
+        mism = mism + 1;
+        $display("GAMMA SYNC PHASE SHIFT de_width=%0d/%0d de_to_hs=%0d/%0d hs_to_de=%0d/%0d",
+                 gamma_t_de_fall - gamma_t_de_rise1, gamma_ref_de_width,
+                 gamma_t_hs - gamma_t_de_fall, gamma_ref_de_fall_to_hs,
+                 gamma_t_de_rise2 - gamma_t_hs, gamma_ref_hs_to_de);
+      end
+    end else begin
+      gamma_ref_de_width = gamma_t_de_fall - gamma_t_de_rise1;
+      gamma_ref_de_fall_to_hs = gamma_t_hs - gamma_t_de_fall;
+      gamma_ref_hs_to_de = gamma_t_de_rise2 - gamma_t_hs;
+    end
+  end
+endtask
+`endif
 
 `ifndef MASTER_DUT
 integer dpms_errors = 0;
@@ -519,7 +599,6 @@ endtask
 `endif
 
 // main
-integer i, x, mism, shown, overlay_start_frame, expected_row;
 reg [31:0] got, exp;
 initial begin
   cfg_cmode = 2;
@@ -527,6 +606,7 @@ initial begin
   cfg_scaley = 0;
   cfg_interlace = 0;
   cfg_width = 64;
+  cfg_gamma = 0;
   cfg_stream_gap_every = 0;
   cfg_stream_gap_cycles = 0;
   cfg_viewport = 0;
@@ -545,6 +625,8 @@ initial begin
   if ($value$plusargs("SCANLINE=%d", cfg_scanline)) ;
   if ($value$plusargs("SOURCE_ROWS=%d", cfg_source_rows)) ;
   if ($value$plusargs("LETTERBOX_H=%d", cfg_letterbox_h)) ;
+
+  if ($value$plusargs("GAMMA=%d", cfg_gamma)) ;
 
   canvas_width = cfg_width;
   canvas_height = DEFAULT_LINES;
@@ -652,6 +734,50 @@ initial begin
       end
     end
   end
+`ifndef MASTER_DUT
+  /* Gamma LUT phase: the frame-5 compare above already proves the table
+   * powers up as identity. A channel-distinct table must transform the
+   * picture per channel, the DE/HSYNC phase must not move across a LUT
+   * load, and an identity reload must restore the unmodified picture. */
+  if (cfg_gamma && cfg_viewport == 0) begin
+    gamma_measure;
+    for (i = 0; i < 256; i = i + 1)
+      op(OP_GAMMA, {(8'h55 ^ i[7:0]), i[7:0], ~i[7:0], i[7:0]});
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 3);
+    for (i = 0; i < canvas_height; i = i + 1)
+      for (x = 0; x < canvas_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        exp = expected_gamma_pix(expected_pix(expected_source_line(i), x));
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 24) begin
+            $display("GAMMA LUT MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+    gamma_measure;
+    for (i = 0; i < 256; i = i + 1)
+      op(OP_GAMMA, {i[7:0], i[7:0], i[7:0], i[7:0]});
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 3);
+    for (i = 0; i < canvas_height; i = i + 1)
+      for (x = 0; x < canvas_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        exp = expected_pix(expected_source_line(i), x);
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 24) begin
+            $display("GAMMA IDENTITY MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+  end
+`endif
 
 `ifndef MASTER_DUT
   if (cfg_viewport == 1 && cfg_scalex == 0 && cfg_scaley == 0 &&

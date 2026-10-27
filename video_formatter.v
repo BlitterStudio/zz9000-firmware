@@ -87,6 +87,7 @@ localparam OP_OVERLAY_FRAME=27;
 localparam OP_VIEWPORT_POS=28;
 localparam OP_VIEWPORT_SIZE_COMMIT=29;
 localparam OP_SOURCE_SYNC=30; // output frame follows the capture anchor (bit0: enable)
+localparam OP_GAMMA=34; // per-channel 256-entry output gamma LUT (index + R/G/B)
 
 localparam DPMS_ON=0;
 localparam DPMS_STANDBY=1; // HSync disabled, VSync enabled
@@ -104,6 +105,28 @@ reg scale_x = 0;
 reg [1:0] scale_y = 2'd1; // amiga boots in 640x256, so double the resolution vertically
 reg [11:0] scale_source_rows = 0;
 reg [23:0] palette[511:0];
+/* Output gamma LUT, applied to the final composed pixel after RTG,
+ * scandoubled/captured native video, overlay, sprite and scanline merge.
+ * Written one entry per OP_GAMMA control word in the aclk domain (same
+ * arrangement as the CLUT: a single write is atomic per entry, and the
+ * dvi_clk domain reads it asynchronously). Powers up as identity, so a
+ * bitstream that never receives OP_GAMMA is pixel-identical to one without
+ * this stage. */
+reg [7:0] gamma_lut_r[0:255];
+reg [7:0] gamma_lut_g[0:255];
+reg [7:0] gamma_lut_b[0:255];
+reg [31:0] dvi_rgb_pregamma;
+reg dvi_hsync_stage;
+reg dvi_vsync_stage;
+reg dvi_active_video_stage;
+integer gamma_init_i;
+initial begin
+  for (gamma_init_i = 0; gamma_init_i < 256; gamma_init_i = gamma_init_i + 1) begin
+    gamma_lut_r[gamma_init_i] = gamma_init_i[7:0];
+    gamma_lut_g[gamma_init_i] = gamma_init_i[7:0];
+    gamma_lut_b[gamma_init_i] = gamma_init_i[7:0];
+  end
+end
 reg [2:0] colormode = CMODE_32BIT;
 reg vsync_request;
 reg sync_polarity = 1; // negative polarity
@@ -598,6 +621,11 @@ begin
       end
     OP_OVERLAY_FRAME: overlay_frame_generation <= control_data_in;
     OP_SOURCE_SYNC: source_sync_enable <= control_data_in[0];
+    OP_GAMMA: begin
+      gamma_lut_r[control_data_in[7:0]] <= control_data_in[15:8];
+      gamma_lut_g[control_data_in[7:0]] <= control_data_in[23:16];
+      gamma_lut_b[control_data_in[7:0]] <= control_data_in[31:24];
+    end
   endcase
 end
 
@@ -1699,9 +1727,20 @@ end else case (vga_scanline_width)
 endcase
 
   if (source_sync_video_hidden)
-    dvi_rgb <= 32'b0;
+    dvi_rgb_pregamma <= 32'b0;
   else
-    dvi_rgb <= viewport_output_active ? composed_rgb : 32'b0;
+    dvi_rgb_pregamma <= viewport_output_active ? composed_rgb : 32'b0;
+
+  /* Gamma output stage: the composed pixel is registered before the LUT
+   * read so the asynchronous RAM access sits between two registers instead
+   * of on the composition critical path. HSync, VSync and DE below gain the
+   * same extra stage, keeping their phase relative to the pixel data.
+   * Bits [31:24] are not a colour channel: 32-bit framebuffers store a
+   * payload byte there, so it bypasses the tables. */
+  dvi_rgb <= {dvi_rgb_pregamma[31:24],
+              gamma_lut_r[dvi_rgb_pregamma[23:16]],
+              gamma_lut_g[dvi_rgb_pregamma[15:8]],
+              gamma_lut_b[dvi_rgb_pregamma[7:0]]};
 
   /* The refill side can overwrite the bank from the completed row during
    * horizontal blanking. Select the upcoming row one clock before raster
@@ -1861,29 +1900,33 @@ endcase
   // raster/vblank state machines running so firmware and P96 waits continue
   // to work while the monitor is asleep.
   if (vga_dpms_level == DPMS_STANDBY || vga_dpms_level == DPMS_OFF)
-    dvi_hsync <= 0^vga_sync_polarity;
+    dvi_hsync_stage <= 0^vga_sync_polarity;
   else if (counter_x >= vga_h_sync_start_delayed && counter_x < vga_h_sync_end_delayed)
-    dvi_hsync <= 1^vga_sync_polarity;
+    dvi_hsync_stage <= 1^vga_sync_polarity;
   else
-    dvi_hsync <= 0^vga_sync_polarity;
+    dvi_hsync_stage <= 0^vga_sync_polarity;
+  dvi_hsync <= dvi_hsync_stage;
 
   if (vga_dpms_level == DPMS_SUSPEND || vga_dpms_level == DPMS_OFF)
-    dvi_vsync <= 0^vga_sync_polarity;
+    dvi_vsync_stage <= 0^vga_sync_polarity;
   else if (counter_x >= vga_h_sync_start_delayed)
     if (counter_y >= vga_v_sync_start && counter_y < vga_v_sync_end)
-      dvi_vsync <= 1^vga_sync_polarity;
+      dvi_vsync_stage <= 1^vga_sync_polarity;
     else
-      dvi_vsync <= 0^vga_sync_polarity;
+      dvi_vsync_stage <= 0^vga_sync_polarity;
+  dvi_vsync <= dvi_vsync_stage;
 
   // account for 1 line of vdma wrap-around
   if (counter_y >= vga_scale_y_factor &&
       counter_y < (vga_v_rez + vga_scale_y_factor) &&
       counter_x == PIPE_DELAY +
                    (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0))
-    dvi_active_video <= 1;
+    dvi_active_video_stage <= 1;
 
   if (counter_x==vga_h_rez_delayed)
-    dvi_active_video <= 0;
+    dvi_active_video_stage <= 0;
+
+  dvi_active_video <= dvi_active_video_stage;
 end
 
 endmodule

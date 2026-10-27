@@ -136,6 +136,7 @@ C_SRCS = \
 	$(SRC_DIR)/main.c \
 	$(SRC_DIR)/gfx.c \
 	$(SRC_DIR)/video.c \
+	$(SRC_DIR)/gamma.c \
 	$(SRC_DIR)/zz_video_modes.c \
 	$(SRC_DIR)/ethernet.c \
 	$(SRC_DIR)/ethernet_mcast.c \

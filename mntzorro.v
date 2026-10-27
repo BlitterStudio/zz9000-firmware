@@ -1111,11 +1111,13 @@ module MNTZorro_v0_1_S00_AXI
       (`VCAP_FULLRATE_INT != 0), VCAP_DIAG_VARIANT_2MB,
       VCAP_DIAG_VARIANT_FASTRAM, VCAP_DIAG_VARIANT_Z3
   };
-  // REG7's lower bits are the existing Z2 aperture byte count. Its high bit
-  // is zero on every older Z3 image, allowing new firmware to withhold Fast
-  // RAM rather than lend the wrong DDR interval to the host.
+  // REG7's lower bits are the existing Z2 aperture byte count. Bit 31 is
+  // zero on every older Z3 image, allowing new firmware to withhold Fast
+  // RAM. Bit 30 marks the video formatter's output gamma LUT (OP_GAMMA);
+  // older bitstreams read zero there and firmware must keep gamma off.
   localparam [31:0] MNTZORRO_CAPABILITY_VALUE =
-      VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE ? 32'h80000000 : 32'h00000000;
+      (VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE ? 32'h80000000 : 32'h00000000) |
+      32'h40000000;
   // Raw sampler words immediately before the configured horizontal crop.
   // Host-visible direct-register offsets are 0x12e0 and 0x1300..0x13ff.
   localparam [15:0] VCAP_PRE_CROP_PROBE_META = 16'h02e0;
