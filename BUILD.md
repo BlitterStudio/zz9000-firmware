@@ -330,6 +330,7 @@ you changed.
 | Firmware-file restore | `make -C test/fwupdate test` |
 | SD activity LED | `make -C test/sd_activity_led test` |
 | Ethernet IRQ re-raise throttle | `make -C test/eth_irq_throttle test` |
+| SD boot metadata | `make -C test/sd_boot test` |
 
 Hardware validation remains necessary before treating bus-timing or performance
 changes as proven.
