@@ -1154,13 +1154,6 @@ int main() {
 				case REG_ZZ_PAN_LO: {
 					u32 raw_pan = reg_pan_hi | zdata;
 
-					/* DIAG (shared-heap drag test): remove before merging. */
-					static u32 diag_last_pan = 0xffffffffU;
-					if (raw_pan != diag_last_pan) {
-						printf("[p96d] pan %08lx\n", (unsigned long)raw_pan);
-						diag_last_pan = raw_pan;
-					}
-
 					/* The native-display switch names the old fixed
 					 * capture area; capture derives its own origin, and
 					 * the RTG screen's pan must survive the switch. */
@@ -1632,15 +1625,6 @@ int main() {
 				case REG_ZZ_SET_SPLIT_POS:
 					video_state->bgbuf_offset = blitter_src_offset;
 					video_state->split_request_pos = zdata;
-					{
-						/* DIAG (shared-heap drag test): remove before merging. */
-						static u32 diag_last_bg = 0xffffffffU;
-						if (blitter_src_offset != diag_last_bg) {
-							printf("[p96d] split bg %08lx\n",
-							       (unsigned long)blitter_src_offset);
-							diag_last_bg = blitter_src_offset;
-						}
-					}
 					break;
 
 				// Ethernet
