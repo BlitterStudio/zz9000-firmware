@@ -23,7 +23,6 @@ enum sa_owner {
 struct sa_block {
     uint32_t addr;
     uint32_t size;
-    uint32_t refs;
     uint8_t owner;
 };
 
@@ -72,7 +71,7 @@ static int sa_find(uint32_t addr)
 }
 
 static int sa_insert(uint32_t index, uint32_t address, uint32_t size,
-                     enum sa_owner owner, uint32_t refs)
+                     enum sa_owner owner)
 {
     if (sa_count >= SURFACE_ALLOCATOR_MAX_BLOCKS)
         return -1;
@@ -81,7 +80,6 @@ static int sa_insert(uint32_t index, uint32_t address, uint32_t size,
     sa_blocks[index].addr = address;
     sa_blocks[index].size = size;
     sa_blocks[index].owner = (uint8_t)owner;
-    sa_blocks[index].refs = refs;
     sa_count++;
     sa_used += size;
     return 0;
@@ -137,7 +135,7 @@ int surface_allocator_reserve(uint32_t address, uint32_t size)
         return -1;
     sdk_smp_lock_acquire(&sa_lock);
     if (sa_gap_insert_index(address, rounded, &insert_at) == 0)
-        result = sa_insert(insert_at, address, rounded, SA_OWNER_RESERVED, 0U);
+        result = sa_insert(insert_at, address, rounded, SA_OWNER_RESERVED);
     sdk_smp_lock_release(&sa_lock);
     return result;
 }
@@ -180,34 +178,30 @@ uint32_t surface_allocator_p96_alloc(uint32_t size, uint32_t alignment)
     }
     if (candidate < sa_base || candidate > sa_end ||
         rounded > sa_end - candidate ||
-        sa_insert(insert_at, candidate, rounded, SA_OWNER_P96, 1U) != 0)
+        sa_insert(insert_at, candidate, rounded, SA_OWNER_P96) != 0)
         candidate = 0U;
     sdk_smp_lock_release(&sa_lock);
     return candidate;
 }
 
+/* P96 asks for an absolute address when it wants a bitmap at a fixed
+ * place, e.g. the front screen at MemoryBase while a screen is dragged.
+ * Grant it only when the whole range is free. Granting the block that
+ * Workbench still held put the dragged screen on top of Workbench; with
+ * P96's own allocator the same drag ends with the dragged screen in its
+ * own block (A4000 traces, 2026-10-27). */
 uint32_t surface_allocator_p96_alloc_abs(uint32_t address, uint32_t size)
 {
     uint32_t rounded = sa_round_size(size);
     uint32_t insert_at;
-    int found;
     uint32_t result = 0U;
 
     if (rounded == 0U || (address & (SURFACE_ALLOCATOR_ALIGNMENT - 1U)) != 0U)
         return 0U;
     sdk_smp_lock_acquire(&sa_lock);
-    found = sa_find(address);
-    if (found >= 0) {
-        if (sa_blocks[found].owner == SA_OWNER_P96 &&
-            sa_blocks[found].size >= rounded &&
-            sa_blocks[found].refs != UINT32_MAX) {
-            sa_blocks[found].refs++;
-            result = address;
-        }
-    } else if (sa_gap_insert_index(address, rounded, &insert_at) == 0 &&
-               sa_insert(insert_at, address, rounded, SA_OWNER_P96, 1U) == 0) {
+    if (sa_gap_insert_index(address, rounded, &insert_at) == 0 &&
+        sa_insert(insert_at, address, rounded, SA_OWNER_P96) == 0)
         result = address;
-    }
     sdk_smp_lock_release(&sa_lock);
     return result;
 }
@@ -220,8 +214,7 @@ int surface_allocator_p96_free(uint32_t address)
     sdk_smp_lock_acquire(&sa_lock);
     found = sa_find(address);
     if (found >= 0 && sa_blocks[found].owner == SA_OWNER_P96) {
-        if (--sa_blocks[found].refs == 0U)
-            sa_remove((uint32_t)found);
+        sa_remove((uint32_t)found);
         result = 0;
     }
     sdk_smp_lock_release(&sa_lock);
@@ -263,7 +256,7 @@ uint32_t surface_allocator_firmware_alloc_aligned(uint32_t size,
             candidate = 0U;
     }
     if (candidate != 0U &&
-        sa_insert(insert_at, candidate, rounded, SA_OWNER_FIRMWARE, 1U) != 0)
+        sa_insert(insert_at, candidate, rounded, SA_OWNER_FIRMWARE) != 0)
         candidate = 0U;
     sdk_smp_lock_release(&sa_lock);
     return candidate;

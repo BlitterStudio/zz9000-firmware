@@ -382,17 +382,20 @@ static void test_acc_surface_uses_firmware_heap(void)
     CHECK(surface_allocator_p96_free(p96) == 0);
 }
 
-static void test_abs_regrant_reference(void)
+static void test_abs_refuses_held_range(void)
 {
     const uint32_t target = HEAP_BASE + 0x2000U;
 
     surface_allocator_init(HEAP_BASE, HEAP_SIZE);
     CHECK(surface_allocator_p96_alloc_abs(target, 0x101U) == target);
-    CHECK(surface_allocator_p96_alloc_abs(target, 0x100U) == target);
-    CHECK(surface_allocator_p96_free(target) == 0);
+    /* Same start, inside, and straddling the held block: all refused. */
+    CHECK(surface_allocator_p96_alloc_abs(target, 0x100U) == 0U);
+    CHECK(surface_allocator_p96_alloc_abs(target + ALIGN, ALIGN) == 0U);
+    CHECK(surface_allocator_p96_alloc_abs(target - ALIGN, 2U * ALIGN) == 0U);
     CHECK(surface_allocator_block_size(target) == 0x200U);
     CHECK(surface_allocator_p96_free(target) == 0);
     CHECK(surface_allocator_block_size(target) == 0U);
+    CHECK(surface_allocator_p96_free(target) == -1);
     CHECK(surface_allocator_p96_alloc_abs(target, 0x200U) == target);
     CHECK(surface_allocator_p96_free(target) == 0);
 }
@@ -447,13 +450,21 @@ static void test_cardmem_announcement_guard(void)
     offset1 = be32(0x100U);
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS, &offset0, &offset1,
                          &accepted);
+    CHECK(accepted == 0U); /* Offset zero is still held: no second owner. */
+    offset0 = 0U;
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
     CHECK(accepted == 1U);
-    CHECK(offset0 == 0U); /* Regrant preserves offset zero. */
+    offset0 = 0U;
+    offset1 = be32(0x100U);
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS, &offset0, &offset1,
+                         &accepted);
+    CHECK(accepted == 1U);
+    CHECK(offset0 == 0U); /* Granted absolute offset zero round-trips. */
     offset0 = 0U;
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
     CHECK(accepted == 1U);
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
-    CHECK(accepted == 1U);
+    CHECK(accepted == 0U);
 
     surface_allocator_init(FRAMEBUFFER_ADDRESS,
                            HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
@@ -499,7 +510,7 @@ int main(void) {
     test_z3_host_window_reservation();
     test_owner_split_and_guards();
     test_acc_surface_uses_firmware_heap();
-    test_abs_regrant_reference();
+    test_abs_refuses_held_range();
     test_reset_reinstalls_reservations();
     test_cardmem_announcement_guard();
 

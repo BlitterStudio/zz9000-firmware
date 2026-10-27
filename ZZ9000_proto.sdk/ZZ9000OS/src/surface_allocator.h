@@ -36,8 +36,7 @@ int surface_allocator_release_reservation(uint32_t address);
  * zero selects the mandatory 256-byte granularity. */
 uint32_t surface_allocator_p96_alloc(uint32_t size, uint32_t alignment);
 
-/* Grant an absolute P96 address when free, or regrant the P96 block exactly
- * at that address when it covers the rounded size. Regrants add one reference. */
+/* Grant an absolute P96 address only when the whole range is free. */
 uint32_t surface_allocator_p96_alloc_abs(uint32_t address, uint32_t size);
 int surface_allocator_p96_free(uint32_t address);
 
