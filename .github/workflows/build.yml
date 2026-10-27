@@ -147,6 +147,8 @@ jobs:
         run: make -C test/palette test
       - name: Ethernet multicast hash and RX ring suites
         run: make -C test/ethernet test
+      - name: Ethernet IRQ re-raise throttle suite
+        run: make -C test/eth_irq_throttle test
       - name: Console encoder suite
         run: make -C test/console test
       - name: Ethernet async TX completion-order suite

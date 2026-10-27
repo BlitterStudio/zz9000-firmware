@@ -329,6 +329,7 @@ you changed.
 | Zorro II aperture layout | `make -C test/aperture test` |
 | Firmware-file restore | `make -C test/fwupdate test` |
 | SD activity LED | `make -C test/sd_activity_led test` |
+| Ethernet IRQ re-raise throttle | `make -C test/eth_irq_throttle test` |
 
 Hardware validation remains necessary before treating bus-timing or performance
 changes as proven.
