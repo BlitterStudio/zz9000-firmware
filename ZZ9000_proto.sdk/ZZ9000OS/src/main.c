@@ -44,6 +44,7 @@ void Xil_AssertNonVoid() {}
 #include "hdmi.h"
 #include "gfx.h"
 #include "ethernet.h"
+#include "ethernet_irq_throttle.h"
 #include "usb.h"
 #include "sd_activity_led.h"
 #include "sd_storage.h"
@@ -281,10 +282,13 @@ void usb_proxy_poll_maintenance(void)
 static uint32_t sd_storage_read_block = 0;
 static uint32_t sd_storage_write_block = 0;
 
+#define ETH_IRQ_REPEAT_INTERVAL_TICKS \
+	((COUNTS_PER_SECOND + 1999U) / 2000U)
+
 // ethernet state
 uint16_t ethernet_send_result = 0;
-int eth_backlog_nag_counter = 0;
 int interrupt_enabled_ethernet = 0;
+static struct ethernet_irq_throttle eth_irq_throttle;
 
 static uint32_t sdk_diag_last_reg_write_addr = 0;
 static uint32_t sdk_diag_last_reg_write_raw_addr = 0;
@@ -611,7 +615,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	// ethernet
 	ethernet_reset_for_amiga();
 	ethernet_send_result = 0;
-	eth_backlog_nag_counter = 0;
+	ethernet_irq_throttle_reset(&eth_irq_throttle);
 	interrupt_enabled_ethernet = 0;
 	audio_set_interrupt_mask(0);
 	interrupt_enabled_vblank = 0;
@@ -1204,6 +1208,7 @@ int main() {
 					} else {
 						//printf("[enable] eth: %d\n", (int)zdata);
 						interrupt_enabled_ethernet = zdata & 1;
+						ethernet_irq_throttle_reset(&eth_irq_throttle);
 						if (!interrupt_enabled_ethernet) {
 							amiga_interrupt_clear(AMIGA_INTERRUPT_ETH);
 						}
@@ -2483,10 +2488,25 @@ int main() {
 				audio_debug_timer(1);
 			}
 
-			// check for queued up ethernet frames and interrupt amiga
-			if (interrupt_enabled_ethernet && ethernet_get_backlog()) {
-				amiga_interrupt_set(AMIGA_INTERRUPT_ETH);
-				eth_backlog_nag_counter = 0;
+			// Check queued Ethernet frames and signal the Amiga.
+			if (interrupt_enabled_ethernet) {
+				int backlog = ethernet_get_backlog();
+
+				if (backlog > 0 &&
+				    !(amiga_interrupt_get() & AMIGA_INTERRUPT_ETH)) {
+					XTime eth_irq_now;
+
+					XTime_GetTime(&eth_irq_now);
+					if (ethernet_irq_throttle_should_raise(
+							&eth_irq_throttle, interrupt_enabled_ethernet,
+							(uint16_t)backlog, get_frames_received(), 0,
+							(uint32_t)eth_irq_now,
+							ETH_IRQ_REPEAT_INTERVAL_TICKS)) {
+						amiga_interrupt_set(AMIGA_INTERRUPT_ETH);
+					}
+				} else if (backlog == 0) {
+					ethernet_irq_throttle_reset(&eth_irq_throttle);
+				}
 			}
 		}
 
