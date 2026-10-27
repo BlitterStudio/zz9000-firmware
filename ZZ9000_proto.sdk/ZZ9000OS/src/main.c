@@ -41,6 +41,7 @@ void Xil_AssertNonVoid() {}
 #include "memorymap.h"
 #include "mntzorro.h"
 #include "video.h"
+#include "gamma.h"
 #include "vcap_geometry_reg.h"
 #include "hdmi.h"
 #include "gfx.h"
@@ -645,7 +646,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* The generation-2 Z2 command block is host-visible template scratch and
 	 * must be acknowledged again after every Amiga reset. Z3 keeps its fixed
 	 * command block. */
-	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
+	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
+			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
 	apply_aperture_framebuffer_limit();
 	clear_runtime_gfxdata();
@@ -759,7 +761,8 @@ int main() {
 
 	sd_activity_led_init();
 
-	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
+	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
+			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
 	/* The section split is break-before-make: do it while core 1 is still
 	 * held and no interrupt can touch the framebuffer/PIP section. */
@@ -789,6 +792,22 @@ int main() {
 		                      MNTVF_OP_SCANLINES);
 		printf("[CFG] scanlines: mode %d parity %d\n",
 		       cfg->scanline_mode, cfg->scanline_parity);
+	}
+
+	if (zz_config_get()->gamma_present) {
+		// Load the output gamma curve the same way as the scanline
+		// options above: through the ARM formatter-op path. A
+		// bitstream without the LUT stage (REG7 bit 30) rejects the
+		// call and keeps its power-up identity table.
+		const struct zz_config *cfg = zz_config_get();
+
+		if (video_set_gamma(cfg->gamma)) {
+			printf("[CFG] gamma: %u.%02u\n",
+			       cfg->gamma / 100U, cfg->gamma % 100U);
+		} else {
+			printf("[CFG] gamma: %u.%02u unsupported by bitstream\n",
+			       cfg->gamma / 100U, cfg->gamma % 100U);
+		}
 	}
 
 	{
@@ -1479,6 +1498,23 @@ int main() {
 					 * slot | (color << 8), no scale. The
 					 * result reads back from this group. */
 					video_custom_commit((uint16_t)zdata);
+					break;
+
+				case REG_ZZ_GAMMA:
+					/* Runtime output gamma (ZZGamma, ZZTop slider): gamma in
+					 * hundredths, 0 or 100 = off. Its own register, not a
+					 * card feature: the feature selector is REG_ZZ_USER1,
+					 * which the RTG driver caches as a blitter operand, so a
+					 * tool writing it would leave the driver's cache wrong.
+					 * The ZZTop slider writes at up to 10 Hz, so success
+					 * is silent; read back through ZZ_CONFIG_KEY_GAMMA. */
+					if (zdata != 0U && (zdata < GAMMA_HUNDREDTHS_MIN ||
+					    zdata > GAMMA_HUNDREDTHS_MAX)) {
+						printf("[gamma] rejected: %lu\n",
+						       (unsigned long)zdata);
+						break;
+					}
+					(void)video_set_gamma((uint16_t)zdata);
 					break;
 
 				case REG_ZZ_SET_FEATURE:
@@ -2199,6 +2235,12 @@ int main() {
 					    config_query_key <= ZZ_CONFIG_KEY_RTG_GEOM_MODESEL) {
 						value = video_rtg_diag_value(
 							config_query_key, &present);
+					} else if (config_query_key ==
+					           ZZ_CONFIG_KEY_GAMMA) {
+						/* Runtime applied gamma, not the raw
+						 * file value: 0 means the loaded
+						 * bitstream has no LUT stage. */
+						value = video_gamma_query(&present);
 					} else if (config_query_key >=
 					           ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH &&
 					           config_query_key <=

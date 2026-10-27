@@ -18,6 +18,7 @@
 #include "zz_config.h"
 #include "sd_boot_deadline.h"
 #include "zz_video_modes.h"
+#include "gamma.h"
 
 static struct zz_config cfg;
 
@@ -122,6 +123,35 @@ static int parse_onoff(const char *s) {
 	if (token_eq(s, "on") || token_eq(s, "1")) return 1;
 	if (token_eq(s, "off") || token_eq(s, "0")) return 0;
 	return -1;
+}
+
+/* Parse a gamma value like "1.8", "0.5" or "2" into hundredths.
+ * At most two fraction digits; "1." and "1.805" are rejected.
+ * Returns -1 on garbage. */
+static long parse_gamma(const char *s) {
+	long whole = 0, frac = 0;
+	int digits = 0, seen_dot = 0;
+	if (!*s) return -1;
+	while (*s) {
+		if (*s == '.') {
+			if (seen_dot) return -1;
+			seen_dot = 1;
+		} else if (*s >= '0' && *s <= '9') {
+			if (seen_dot) {
+				if (++digits > 2) return -1;
+				frac = frac * 10 + (*s - '0');
+			} else {
+				whole = whole * 10 + (*s - '0');
+				if (whole > GAMMA_HUNDREDTHS_MAX / 100) return -1;
+			}
+		} else {
+			return -1;
+		}
+		s++;
+	}
+	if (seen_dot && digits == 0) return -1;
+	if (digits == 1) frac *= 10; /* "1.8" and "1.80" agree */
+	return whole * 100 + frac;
 }
 
 static int hex_nibble(char c) {
@@ -371,6 +401,13 @@ static int apply_key(const char *key, const char *value) {
 		if (v < 0 || v > 1) return -1;
 		cfg.scanline_parity = (uint16_t)v;
 		cfg.scanline_parity_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "gamma")) {
+		long v = parse_gamma(value);
+		if (v < GAMMA_HUNDREDTHS_MIN || v > GAMMA_HUNDREDTHS_MAX) return -1;
+		cfg.gamma = (uint16_t)v;
+		cfg.gamma_present = 1;
 		return 0;
 	}
 	if (token_eq(key, "int2")) {
@@ -1243,6 +1280,9 @@ int zz_config_emit_present_keys(char *buf, unsigned size, int off) {
 		EMIT("scanline_mode = %u\n", (unsigned)cfg.scanline_mode);
 	if (cfg.scanline_parity_present)
 		EMIT("scanline_parity = %u\n", (unsigned)cfg.scanline_parity);
+	if (cfg.gamma_present)
+		EMIT("gamma = %u.%02u\n", (unsigned)(cfg.gamma / 100U),
+			(unsigned)(cfg.gamma % 100U));
 	if (cfg.int2_present)
 		EMIT("int2 = %s\n", cfg.int2 ? "on" : "off");
 	if (cfg.offscreen_bitmaps_present)

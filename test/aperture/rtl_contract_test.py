@@ -35,6 +35,7 @@ for fragment in (
     "localparam VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE = 1'b1;",
     "7'h00, VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE",
     "MNTZORRO_CAPABILITY_VALUE",
+    "(VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE ? 32'h80000000 : 32'h00000000) |\n      32'h40000000;",
     "3'h7   : reg_data_out <= SDK_APERTURE_SIZE_VALUE |",
 ):
     require(RTL, fragment)
@@ -58,6 +59,8 @@ for fragment in (
     "#define MNTZORRO_REG7 28",
     "#define MNTZORRO_APERTURE_ACK_STATUS 0xa5020001UL",
     "#define MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000 0x80000000UL",
+    "#define MNTZORRO_CAP_GAMMA_LUT 0x40000000UL",
+    "(MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000 | MNTZORRO_CAP_GAMMA_LUT)",
 ):
     require(HEADER, fragment)
 

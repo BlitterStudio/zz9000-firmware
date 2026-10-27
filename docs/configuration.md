@@ -134,6 +134,7 @@ Zorro II reads.
 |---|---|---|
 | `scanline_mode` | `0`–`3` | `0` off, `1` black, `2` dimmed, `3` gradient. |
 | `scanline_parity` | `0`, `1` | Selects the darkened line parity. |
+| `gamma` | `0.20`–`5.00` | Output gamma filter; `1.00` or absent is identity. Above `1.00` brightens, below `1.00` darkens. Ignored by bitstreams without the FPGA gamma LUT; the `ZZGamma` tool also sets it live. |
 | `int2` | `on`, `off`, `1`, `0` | Selects INT2 instead of INT6. |
 | `offscreen_bitmaps` | `on`, `off`, `1`, `0` | Enables or disables Picasso96 off-screen bitmaps. |
 | `video_overlay` | `on`, `off`, `1`, `0` | Enables or disables the Picasso96 video window. |

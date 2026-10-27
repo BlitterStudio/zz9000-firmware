@@ -322,6 +322,7 @@ you changed.
 | RTG comparative micro-benchmarks | `make -C test/rtg bench` |
 | Media sessions | `make -C test/media test` |
 | Palette shadow state | `make -C test/palette test` |
+| Output gamma LUT | `make -C test/gamma test` |
 | Audio capture | `make -C test/audio test` |
 | `ZZ9000.CFG` parser and loader | `make -C test/config test` |
 | Dual-core scheduler | `make -C test/scheduler test` |
