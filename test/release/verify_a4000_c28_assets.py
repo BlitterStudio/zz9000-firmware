@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,21 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILDS = ROOT / "bootimage_work/variants/a4000-c28-builds.json"
+
+
+def shell():
+    if os.name != "nt":
+        return "bash"
+    git = shutil.which("git")
+    if git:
+        for directory in Path(git).resolve().parents:
+            candidate = directory / "bin" / "bash.exe"
+            if candidate.is_file():
+                return str(candidate)
+    return "bash"
+
+
+BASH = shell()
 
 
 def fpga_payload(bitstream):
@@ -66,15 +82,17 @@ def verify_variant(output_dir, tag, variant, expected):
 
 def verify_qualification_gate():
     record = json.loads((ROOT / "bootimage_work/variants/timing-qualification.json").read_text(encoding="utf-8"))
-    script = ROOT / "build_release_assets.sh"
     with tempfile.TemporaryDirectory() as temporary:
         record_path = Path(temporary) / "timing-qualification.json"
-        environment = os.environ | {"ZZ9000_QUALIFICATION_RECORD": str(record_path)}
+        environment = os.environ | {
+            "PYTHON": Path(sys.executable).as_posix(),
+            "ZZ9000_QUALIFICATION_RECORD": record_path.as_posix(),
+        }
 
         record["variants"]["zorro3"]["sha256"] = "0" * 64
         record_path.write_text(json.dumps(record), encoding="utf-8")
         mismatch = subprocess.run(
-            ["bash", str(script), "--check-qualification"],
+            [BASH, "./build_release_assets.sh", "--check-qualification"],
             cwd=ROOT,
             env=environment,
             capture_output=True,
@@ -88,7 +106,7 @@ def verify_qualification_gate():
         ).hexdigest()
         record_path.write_text(json.dumps(record), encoding="utf-8")
         match = subprocess.run(
-            ["bash", str(script), "--check-qualification"],
+            [BASH, "./build_release_assets.sh", "--check-qualification"],
             cwd=ROOT,
             env=environment,
             capture_output=True,

@@ -18,6 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 source bootimage_work/variants/variant-matrix.sh
+PYTHON=${PYTHON:-python3}
 QUALIFICATION_RECORD=${ZZ9000_QUALIFICATION_RECORD:-bootimage_work/variants/timing-qualification.json}
 
 usage() {
@@ -107,7 +108,7 @@ validate_qualifications() {
         args+=("$variant" "$bitstream")
     done < <(variant_matrix_rows)
 
-    python3 - "${args[@]}" <<'PY'
+    "$PYTHON" - "${args[@]}" <<'PY'
 import hashlib
 import json
 from pathlib import Path
