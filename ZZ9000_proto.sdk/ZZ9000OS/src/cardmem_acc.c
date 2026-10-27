@@ -26,6 +26,8 @@ int cardmem_acc_announce(int is_zorro3)
         return 1;
     if (surface_allocator_release_reservation(FRAMEBUFFER_ADDRESS) != 0)
         return 0;
+    surface_allocator_set_dynamic_floor(FRAMEBUFFER_ADDRESS +
+                                        CARDMEM_P96_SPLIT_SLOT_SIZE);
     cardmem_acc_enabled = 1U;
     return 1;
 }

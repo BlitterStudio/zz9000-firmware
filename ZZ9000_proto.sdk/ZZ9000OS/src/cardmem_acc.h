@@ -8,6 +8,15 @@
 
 #include <stdint.h>
 
+/* The driver sets BIF_VGASCREENSPLIT, so while a screen is dragged P96
+ * wants the front screen at MemoryBase (AllocCardMemAbs offset 0). P96's
+ * own allocator copes with Workbench living there; through these hooks a
+ * refused request makes P96 retry endlessly and the drag stalls (A4000
+ * traces, 2026-10-27). Keep this much of the bottom free of ordinary
+ * allocations so that request can be met. 16 MiB holds a 2560x1600 32-bit
+ * screen. */
+#define CARDMEM_P96_SPLIT_SLOT_SIZE 0x01000000U
+
 /* All arguments and replies are command-boundary big-endian words. The
  * return value tells the dispatcher whether the zero offset is a valid grant
  * (status 1) or an allocation/free failure (status 0). */

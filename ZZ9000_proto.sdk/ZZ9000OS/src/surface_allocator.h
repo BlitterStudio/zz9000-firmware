@@ -32,6 +32,11 @@ int surface_allocator_reserve(uint32_t address, uint32_t size);
  * remain protected; only the driver-announcement guard is releasable. */
 int surface_allocator_release_reservation(uint32_t address);
 
+/* Keep P96 and firmware allocations that do not name an address at or
+ * above `floor`; reservations and absolute P96 requests may still use the
+ * range below it. Reset by surface_allocator_init(). */
+void surface_allocator_set_dynamic_floor(uint32_t floor);
+
 /* P96 allocations scan free space bottom-up. `alignment` is a power of two;
  * zero selects the mandatory 256-byte granularity. */
 uint32_t surface_allocator_p96_alloc(uint32_t size, uint32_t alignment);

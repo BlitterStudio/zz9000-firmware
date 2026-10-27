@@ -412,6 +412,31 @@ static void test_reset_reinstalls_reservations(void)
     CHECK(surface_allocator_p96_alloc(ALIGN, ALIGN) == HEAP_BASE);
 }
 
+static void test_dynamic_floor(void)
+{
+    const uint32_t floor = HEAP_BASE + 0x4000U;
+    uint32_t low;
+    uint32_t fw;
+
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    low = surface_allocator_p96_alloc_abs(HEAP_BASE + 0x1000U, ALIGN);
+    CHECK(low == HEAP_BASE + 0x1000U);
+    surface_allocator_set_dynamic_floor(floor);
+    /* Ordinary P96 allocations skip the gaps below the floor. */
+    CHECK(surface_allocator_p96_alloc(ALIGN, ALIGN) == floor);
+    /* Absolute requests may still use them. */
+    CHECK(surface_allocator_p96_alloc_abs(HEAP_BASE, ALIGN) == HEAP_BASE);
+    /* Firmware fills top-down but never below the floor. */
+    fw = surface_allocator_firmware_alloc_aligned(
+        HEAP_BASE + HEAP_SIZE - floor - ALIGN, ALIGN);
+    CHECK(fw == floor + ALIGN);
+    CHECK(surface_allocator_firmware_alloc_aligned(ALIGN, ALIGN) == 0U);
+    CHECK(surface_allocator_p96_alloc(ALIGN, ALIGN) == 0U);
+    /* Reset drops the floor. */
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    CHECK(surface_allocator_p96_alloc(ALIGN, ALIGN) == HEAP_BASE);
+}
+
 static void test_cardmem_announcement_guard(void)
 {
     uint32_t offset0;
@@ -439,32 +464,34 @@ static void test_cardmem_announcement_guard(void)
 
     CHECK(cardmem_acc_announce(1) == 1);
     CHECK(cardmem_acc_is_enabled());
+    /* Workbench: an ordinary allocation starts above the split slot. */
     offset0 = be32(0x400U);
-    offset1 = be32(0x100U);
+    offset1 = be32(0x384000U);
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC, &offset0, &offset1,
                          &accepted);
     CHECK(accepted == 1U);
-    CHECK(offset0 == 0U); /* Offset zero is a valid wire reply. */
+    CHECK(offset0 == be32(CARDMEM_P96_SPLIT_SLOT_SIZE));
 
+    /* Screen drag: P96 asks for the front screen at offset zero. */
+    offset0 = 0U;
+    offset1 = be32(0x384000U);
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS, &offset0, &offset1,
+                         &accepted);
+    CHECK(accepted == 1U);
+    CHECK(offset0 == 0U); /* Offset zero is a valid wire reply. */
     offset0 = 0U;
     offset1 = be32(0x100U);
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS, &offset0, &offset1,
                          &accepted);
-    CHECK(accepted == 0U); /* Offset zero is still held: no second owner. */
-    offset0 = 0U;
-    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
-    CHECK(accepted == 1U);
-    offset0 = 0U;
-    offset1 = be32(0x100U);
-    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS, &offset0, &offset1,
-                         &accepted);
-    CHECK(accepted == 1U);
-    CHECK(offset0 == 0U); /* Granted absolute offset zero round-trips. */
+    CHECK(accepted == 0U); /* Offset zero is held: no second owner. */
     offset0 = 0U;
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
     CHECK(accepted == 1U);
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
     CHECK(accepted == 0U);
+    offset0 = be32(CARDMEM_P96_SPLIT_SLOT_SIZE);
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
+    CHECK(accepted == 1U);
 
     surface_allocator_init(FRAMEBUFFER_ADDRESS,
                            HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
@@ -512,6 +539,7 @@ int main(void) {
     test_acc_surface_uses_firmware_heap();
     test_abs_refuses_held_range();
     test_reset_reinstalls_reservations();
+    test_dynamic_floor();
     test_cardmem_announcement_guard();
 
     printf("%d checks, %d failures\n", checks, failures);

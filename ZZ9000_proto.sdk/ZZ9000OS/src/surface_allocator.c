@@ -31,6 +31,9 @@ static sdk_smp_lock_t sa_lock = SDK_SMP_LOCK_INIT;
 static uint32_t sa_count;
 static uint32_t sa_base;
 static uint32_t sa_end;
+/* Lowest address for allocations that do not name an address. Only
+ * absolute P96 requests and fixed reservations may go below it. */
+static uint32_t sa_floor;
 static uint32_t sa_used;
 
 static uint32_t sa_round_size(uint32_t size)
@@ -120,8 +123,20 @@ void surface_allocator_init(uint32_t base, uint32_t size)
         sa_base = base;
         sa_end = base + size;
     }
+    sa_floor = sa_base;
     sa_count = 0U;
     sa_used = 0U;
+    sdk_smp_lock_release(&sa_lock);
+}
+
+void surface_allocator_set_dynamic_floor(uint32_t floor)
+{
+    sdk_smp_lock_acquire(&sa_lock);
+    if (floor < sa_base)
+        floor = sa_base;
+    if (floor > sa_end)
+        floor = sa_end;
+    sa_floor = floor;
     sdk_smp_lock_release(&sa_lock);
 }
 
@@ -166,15 +181,16 @@ uint32_t surface_allocator_p96_alloc(uint32_t size, uint32_t alignment)
     if (rounded == 0U || (alignment & (alignment - 1U)) != 0U)
         return 0U;
     sdk_smp_lock_acquire(&sa_lock);
-    candidate = sa_align_up(sa_base, alignment);
+    candidate = sa_align_up(sa_floor, alignment);
     for (uint32_t i = 0U; i < sa_count; i++) {
         if (candidate >= sa_base && candidate <= sa_blocks[i].addr &&
             rounded <= sa_blocks[i].addr - candidate) {
             insert_at = i;
             break;
         }
-        candidate = sa_align_up(sa_blocks[i].addr + sa_blocks[i].size,
-                                alignment);
+        if (sa_blocks[i].addr + sa_blocks[i].size > candidate)
+            candidate = sa_align_up(sa_blocks[i].addr + sa_blocks[i].size,
+                                    alignment);
     }
     if (candidate < sa_base || candidate > sa_end ||
         rounded > sa_end - candidate ||
@@ -241,16 +257,18 @@ uint32_t surface_allocator_firmware_alloc_aligned(uint32_t size,
 
         if (rounded <= gap_end - gap_start) {
             candidate = sa_align_down(gap_end - rounded, alignment);
-            if (candidate >= gap_start) {
+            if (candidate >= gap_start && candidate >= sa_floor) {
                 insert_at = i;
                 break;
             }
+            candidate = 0U;
         }
         gap_end = sa_blocks[i - 1U].addr;
     }
-    if (candidate == 0U && rounded <= gap_end - sa_base) {
+    if (candidate == 0U && gap_end >= sa_floor &&
+        rounded <= gap_end - sa_floor) {
         candidate = sa_align_down(gap_end - rounded, alignment);
-        if (candidate >= sa_base)
+        if (candidate >= sa_floor)
             insert_at = 0U;
         else
             candidate = 0U;
