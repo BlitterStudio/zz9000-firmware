@@ -342,9 +342,10 @@ endfunction
 
 // expected dvi_rgb after the channel-distinct gamma test table
 // (R = 255 - in, G = in, B = in ^ 8'h55); catches swapped or shared
-// per-channel tables as well as wrong index wiring
+// per-channel tables as well as wrong index wiring. Bits 31:24 bypass
+// the tables (32-bit framebuffers keep a payload byte there).
 function [31:0] expected_gamma_pix(input [31:0] rgb);
-  expected_gamma_pix = {8'h00, ~rgb[23:16], rgb[15:8], rgb[7:0] ^ 8'h55};
+  expected_gamma_pix = {rgb[31:24], ~rgb[23:16], rgb[15:8], rgb[7:0] ^ 8'h55};
 endfunction
 
 // control op helper
