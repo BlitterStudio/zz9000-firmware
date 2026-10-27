@@ -41,6 +41,11 @@ enum card_pool_class {
     CARD_POOL_CLASS_SDK_SURFACE = 5,
     /* RFB console shadow, snapshot, scratch, and deflate workspace. */
     CARD_POOL_CLASS_CONSOLE = 6,
+    /* MiniGL wire-v9 render contexts: colour/depth/texture working sets.
+     * Released per context destroy, by owner on fault recovery, and on
+     * every Amiga reset. Host-visible transport memory never comes from
+     * here -- only card-private render data. */
+    CARD_POOL_CLASS_MINIGL = 7,
     CARD_POOL_CLASS_COUNT
 };
 
@@ -48,6 +53,9 @@ enum card_pool_class {
 #define CARD_POOL_LIMIT_MEDIA       (128u << 20)
 #define CARD_POOL_LIMIT_MEDIA_INPUT (64u << 20)
 #define CARD_POOL_LIMIT_CONSOLE     (32u << 20)
+/* Per-context MiniGL colour+depth+texture working sets across all live
+ * contexts (a 1920x1080 context holds ~16 MiB colour + ~8 MiB depth). */
+#define CARD_POOL_LIMIT_MINIGL      (128u << 20)
 /* ARM-only client surfaces are card-resident and reset-reclaimable. */
 #define CARD_POOL_LIMIT_SDK_SURFACE (128u << 20)
 /* Matches the image decode budget all image sessions share

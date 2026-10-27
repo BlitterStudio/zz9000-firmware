@@ -1,0 +1,1441 @@
+/*
+ * ZZ9000 MiniGL Wire Protocol v9 Context Implementation
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#include "mw_ctx.h"
+#include "mw_parse.h"
+#include "mw_draw.h"
+#include "minigl_raster.h"
+#include "minigl_lighting.h"
+#include "card_pool.h"
+#include <stdlib.h>
+#include <math.h>
+
+#define GL_TEXTURE_2D 0x0de1U
+
+static uint32_t g_next_handle = 1U;
+
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#define MW_CONTEXT_CARD_POOL 1
+#else
+#define MW_CONTEXT_CARD_POOL 0
+#endif
+
+static void *mw_context_alloc(mw_ctx *c, uint32_t bytes, uint32_t *address)
+{
+#if MW_CONTEXT_CARD_POOL
+    uint32_t card_address = card_pool_alloc(&card_pool, bytes, c->card_pool_owner);
+    if (!card_address)
+        return NULL;
+    *address = card_address;
+    memset((void *)(uintptr_t)card_address, 0, bytes);
+    return (void *)(uintptr_t)card_address;
+#else
+    (void)c;
+    (void)address;
+    return calloc(1, bytes);
+#endif
+}
+
+static void mw_context_free(mw_ctx *c, void *memory, uint32_t *address)
+{
+#if MW_CONTEXT_CARD_POOL
+    (void)memory;
+    if (*address)
+        (void)card_pool_free(&card_pool, *address, c->card_pool_owner);
+    *address = 0;
+#else
+    (void)c;
+    (void)address;
+    free(memory);
+#endif
+}
+
+static uint32_t mw_color_from_floats(float r, float g, float b, float a)
+{
+    uint8_t ur = (uint8_t)(r < 0.0f ? 0.0f : r > 1.0f ? 255.0f : r * 255.0f);
+    uint8_t ug = (uint8_t)(g < 0.0f ? 0.0f : g > 1.0f ? 255.0f : g * 255.0f);
+    uint8_t ub = (uint8_t)(b < 0.0f ? 0.0f : b > 1.0f ? 255.0f : b * 255.0f);
+    uint8_t ua = (uint8_t)(a < 0.0f ? 0.0f : a > 1.0f ? 255.0f : a * 255.0f);
+    return ((uint32_t)ur << 24) | ((uint32_t)ug << 16) | ((uint32_t)ub << 8) | (uint32_t)ua;
+}
+
+static uint8_t g_dummy_vertices[256];
+static uint8_t g_dummy_staging[256];
+
+static inline void mw_ctx_update_latest(mw_ctx *c)
+{
+    if (c->state.draw_buffer == 0) return; /* GL_NONE */
+    int front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400);
+    c->state.target.latest = front ? c->state.target.front : c->state.target.back;
+    if (front || c->state.draw_buffer == 0x408) {
+        c->presented_valid = 0;
+    }
+}
+
+static void mw_ctx_bind_buffers(mw_ctx *c)
+{
+    MiniGLRasterBuffers buffers;
+    int draw_front;
+    memset(&buffers, 0, sizeof(buffers));
+    draw_front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400) && (c->state.target.buffer_count > 1);
+    buffers.color = c->color_buffers[draw_front ? c->state.target.front : c->state.target.back];
+    buffers.color_bytes = c->width * c->height * sizeof(uint32_t);
+    buffers.depth = c->depth_buffer;
+    buffers.depth_bytes = c->width * c->height * 4;
+    buffers.vertices = g_dummy_vertices;
+    buffers.vertices_bytes = sizeof(g_dummy_vertices);
+    buffers.texture_staging = g_dummy_staging;
+    buffers.texture_staging_bytes = sizeof(g_dummy_staging);
+    buffers.texture_pool = c->texture_pool;
+    buffers.texture_pool_bytes = c->texture_pool_bytes;
+    buffers.width = (uint16_t)c->width;
+    buffers.height = (uint16_t)c->height;
+    (void)minigl_raster_configure_buffers(&buffers);
+}
+
+static void mw_ctx_sync_to_raster(mw_ctx *c)
+{
+    ZZ9KMiniGLPacketSetState rstate;
+    uint32_t flags = 0;
+    mw_state *s = &c->state;
+
+    memset(&rstate, 0, sizeof(rstate));
+    rstate.depth_bits = (uint16_t)s->target.depth_bits;
+    if (s->force_cpu) rstate.reserved |= ZZ9K_MGL_STATE_FLAG_FORCE_CPU;
+    if (s->depth_test) flags |= ZZ9K_MGL_STATE_DEPTH_TEST;
+    if (s->depth_mask) flags |= ZZ9K_MGL_STATE_DEPTH_WRITE;
+    if (s->blend_enabled) flags |= ZZ9K_MGL_STATE_BLEND;
+    if (s->alpha_test) flags |= ZZ9K_MGL_STATE_ALPHA_TEST;
+    if (s->cull_enabled) flags |= ZZ9K_MGL_STATE_CULL_FACE;
+    if (s->scissor_enabled) flags |= ZZ9K_MGL_STATE_SCISSOR_TEST;
+    if (s->offset_fill) flags |= ZZ9K_MGL_STATE_POLYGON_OFFSET_FILL;
+    if (s->offset_line) flags |= ZZ9K_MGL_STATE_POLYGON_OFFSET_LINE;
+    if (s->offset_point) flags |= ZZ9K_MGL_STATE_POLYGON_OFFSET_POINT;
+    if (s->stages[0].enabled) flags |= ZZ9K_MGL_STATE_TEXTURE_2D_0;
+    if (s->stages[1].enabled) flags |= ZZ9K_MGL_STATE_TEXTURE_2D_1;
+    if (s->fog_enabled) flags |= ZZ9K_MGL_STATE_FOG;
+    rstate.enabled_flags = flags;
+    rstate.viewport_x = (int16_t)s->viewport_x;
+    rstate.viewport_y = (int16_t)s->viewport_y;
+    rstate.viewport_w = (uint16_t)s->viewport_w;
+    rstate.viewport_h = (uint16_t)s->viewport_h;
+    rstate.scissor_x = (int16_t)s->scissor_x;
+    rstate.scissor_y = (int16_t)s->scissor_y;
+    rstate.scissor_w = (uint16_t)s->scissor_w;
+    rstate.scissor_h = (uint16_t)s->scissor_h;
+    rstate.depth_func = (uint16_t)s->depth_func;
+    rstate.depth_near = (uint32_t)(s->depth_range_near * 16777215.0f);
+    rstate.depth_far = (uint32_t)(s->depth_range_far * 16777215.0f);
+    rstate.blend_src = (uint16_t)s->blend_src_rgb;
+    rstate.blend_dst = (uint16_t)s->blend_dst_rgb;
+    rstate.blend_src_alpha = (uint16_t)s->blend_src_alpha;
+    rstate.blend_dst_alpha = (uint16_t)s->blend_dst_alpha;
+    rstate.blend_equation = (uint16_t)s->blend_equation;
+    rstate.alpha_func = (uint16_t)s->alpha_func;
+    rstate.alpha_ref = (uint16_t)(s->alpha_ref * 255.0f);
+    rstate.cull_face_mode = (uint16_t)s->cull_face;
+    rstate.front_face = (uint16_t)s->front_face;
+    rstate.color_mask = (s->color_mask[0] ? 1U : 0U) |
+                        (s->color_mask[1] ? 2U : 0U) |
+                        (s->color_mask[2] ? 4U : 0U) |
+                        (s->color_mask[3] ? 8U : 0U);
+    rstate.shade_model = (uint16_t)s->shade_model;
+    rstate.polygon_offset_factor = s->polygon_offset_factor;
+    rstate.polygon_offset_units = s->polygon_offset_units;
+    rstate.point_size = (uint16_t)s->point_size;
+    rstate.line_width = (uint16_t)s->line_width;
+    rstate.tex_env_mode[0] = (uint16_t)s->stages[0].environment;
+    rstate.tex_env_mode[1] = (uint16_t)s->stages[1].environment;
+    rstate.tex_env_color[0] = mw_color_from_floats(s->stages[0].env_color[0], s->stages[0].env_color[1],
+                                                  s->stages[0].env_color[2], s->stages[0].env_color[3]);
+    rstate.tex_env_color[1] = mw_color_from_floats(s->stages[1].env_color[0], s->stages[1].env_color[1],
+                                                  s->stages[1].env_color[2], s->stages[1].env_color[3]);
+    rstate.fog_mode = (uint16_t)s->fog_mode;
+    rstate.fog_density = s->fog_density;
+    rstate.fog_start = s->fog_start;
+    rstate.fog_end = s->fog_end;
+    rstate.fog_color = mw_color_from_floats(s->fog_color[0], s->fog_color[1],
+                                            s->fog_color[2], s->fog_color[3]);
+    minigl_raster_set_wire_v9_state(&c->state);
+    minigl_lighting_configure_wire_v9(&c->state);
+
+    minigl_raster_set_state(&rstate);
+    minigl_raster_load_matrix(0, s->modelview);
+    minigl_raster_load_matrix(1, s->projection);
+    minigl_raster_load_matrix(2, s->texture_matrix[0]);
+    minigl_raster_load_matrix(3, s->texture_matrix[1]);
+
+    if (s->stages[0].enabled)
+        minigl_raster_bind_texture(0, GL_TEXTURE_2D, s->stages[0].name);
+    if (s->stages[1].enabled)
+        minigl_raster_bind_texture(1, GL_TEXTURE_2D, s->stages[1].name);
+}
+
+mw_ctx *mw_host_create(uint32_t width, uint32_t height)
+{
+    return mw_host_create_owned(width, height,
+                                CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL,
+                                                g_next_handle));
+}
+
+mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
+{
+    mw_ctx *c;
+    int i;
+
+    if (!width || !height || width > MW_MAX_DIMENSION || height > MW_MAX_DIMENSION)
+        return NULL;
+
+    c = (mw_ctx *)calloc(1, sizeof(mw_ctx));
+    if (!c)
+        return NULL;
+    c->card_pool_owner = owner;
+    c->card_pool_backed = MW_CONTEXT_CARD_POOL;
+    c->width = width;
+    c->height = height;
+    mw_state_init(&c->state, width, height);
+    mw_texmgr_init(&c->texmgr);
+
+    for (i = 0; i < 3; ++i) {
+        c->color_buffers[i] = (uint32_t *)mw_context_alloc(
+            c, width * height * sizeof(*c->color_buffers[i]),
+            &c->color_buffer_addresses[i]);
+        if (!c->color_buffers[i]) {
+            mw_host_destroy(c);
+            return NULL;
+        }
+        for (size_t px = 0; px < (size_t)width * height; ++px)
+            c->color_buffers[i][px] = 0x000000ffU;
+    }
+
+    c->depth_buffer = (uint8_t *)mw_context_alloc(
+        c, width * height * 4U, &c->depth_buffer_address);
+    if (!c->depth_buffer) {
+        mw_host_destroy(c);
+        return NULL;
+    }
+
+    c->texture_pool_bytes = 16U * 1024U * 1024U;
+    c->texture_pool = (uint8_t *)mw_context_alloc(
+        c, c->texture_pool_bytes, &c->texture_pool_address);
+    if (!c->texture_pool) {
+        mw_host_destroy(c);
+        return NULL;
+    }
+
+    c->vertex_scratch_capacity = MW_MAX_VERTICES * MW_OBJECT_WORDS;
+    c->vertex_scratch = (float *)mw_context_alloc(
+        c, c->vertex_scratch_capacity * sizeof(*c->vertex_scratch),
+        &c->vertex_scratch_address);
+    if (!c->vertex_scratch) {
+        mw_host_destroy(c);
+        return NULL;
+    }
+
+    c->handle = g_next_handle++;
+    minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes);
+    mw_ctx_bind_buffers(c);
+    minigl_raster_init();
+    mw_ctx_sync_to_raster(c);
+
+    return c;
+}
+
+void mw_host_destroy(mw_ctx *c)
+{
+    int i;
+    if (!c)
+        return;
+
+    for (i = 0; i < 3; ++i) {
+        if (c->color_buffers[i]) {
+            mw_context_free(c, c->color_buffers[i], &c->color_buffer_addresses[i]);
+            c->color_buffers[i] = NULL;
+        }
+    }
+    if (c->depth_buffer) {
+        mw_context_free(c, c->depth_buffer, &c->depth_buffer_address);
+        c->depth_buffer = NULL;
+    }
+    if (c->texture_pool) {
+        mw_context_free(c, c->texture_pool, &c->texture_pool_address);
+        c->texture_pool = NULL;
+    }
+    if (c->vertex_scratch) {
+        mw_context_free(c, c->vertex_scratch, &c->vertex_scratch_address);
+        c->vertex_scratch = NULL;
+    }
+    if (c->presented_span) {
+        free(c->presented_span);
+        c->presented_span = NULL;
+    }
+    mw_texmgr_destroy(&c->texmgr);
+#if MW_CONTEXT_CARD_POOL
+    /* Catch every card-pool block belonging to this context, including one
+     * from an interrupted resize, before its handle can be reused. */
+    (void)card_pool_release_owner(&card_pool, c->card_pool_owner);
+#endif
+    free(c);
+}
+
+static int mw_ensure_scratch(mw_ctx *c, uint32_t needed_words)
+{
+    if (c->vertex_scratch_capacity < needed_words) {
+        if (c->card_pool_backed) {
+            uint32_t new_address = 0;
+            float *new_scratch = (float *)mw_context_alloc(
+                c, needed_words * sizeof(*new_scratch), &new_address);
+            if (!new_scratch)
+                return 0;
+            mw_context_free(c, c->vertex_scratch, &c->vertex_scratch_address);
+            c->vertex_scratch = new_scratch;
+            c->vertex_scratch_address = new_address;
+        } else {
+            float *new_scratch = (float *)realloc(
+                c->vertex_scratch, needed_words * sizeof(*new_scratch));
+            if (!new_scratch)
+                return 0;
+            c->vertex_scratch = new_scratch;
+        }
+        c->vertex_scratch_capacity = needed_words;
+    }
+    return 1;
+}
+
+static int mw_execute_command(void *user, const mw_command *cmd)
+{
+    mw_ctx *c = (mw_ctx *)user;
+    const uint8_t *p = cmd->payload;
+
+    switch (cmd->opcode) {
+    case MW_TARGET: {
+        uint32_t w = mw_be32(p);
+        uint32_t h = mw_be32(p + 4);
+        uint32_t buf_count = mw_be32(p + 8);
+        uint32_t depth_bits = mw_be32(p + 12);
+        uint32_t pres_w = mw_be32(p + 16);
+        uint32_t pres_h = mw_be32(p + 20);
+        int i;
+
+        c->state.target.buffer_count = buf_count;
+        c->state.target.depth_bits = depth_bits;
+        c->state.target.present_width = pres_w;
+        c->state.target.present_height = pres_h;
+
+        if (w != c->width || h != c->height) {
+            for (i = 0; i < 3; ++i) {
+                mw_context_free(c, c->color_buffers[i], &c->color_buffer_addresses[i]);
+                c->color_buffers[i] = (uint32_t *)mw_context_alloc(
+                    c, w * h * sizeof(*c->color_buffers[i]),
+                    &c->color_buffer_addresses[i]);
+                if (!c->color_buffers[i])
+                    return 0;
+                for (size_t px = 0; px < (size_t)w * h; ++px)
+                    c->color_buffers[i][px] = 0x000000ffU;
+            }
+            mw_context_free(c, c->depth_buffer, &c->depth_buffer_address);
+            c->depth_buffer = (uint8_t *)mw_context_alloc(
+                c, w * h * 4U, &c->depth_buffer_address);
+            if (!c->depth_buffer)
+                return 0;
+
+            c->width = w;
+            c->height = h;
+            c->state.target.width = w;
+            c->state.target.height = h;
+            c->state.viewport_x = 0;
+            c->state.viewport_y = 0;
+            c->state.viewport_w = w;
+            c->state.viewport_h = h;
+            mw_ctx_bind_buffers(c);
+        }
+        break;
+    }
+
+    case MW_CLEAR: {
+        uint32_t mask = mw_be32(p);
+        uint32_t raster_mask = (mask & 1U ? 0x4000U : 0U) | (mask & 2U ? 0x100U : 0U);
+        float r = mw_bef(p + 4);
+        float g = mw_bef(p + 8);
+        float b = mw_bef(p + 12);
+        float a = mw_bef(p + 16);
+        float depth_f = mw_bef(p + 20);
+        uint32_t color_rgba = mw_color_from_floats(r, g, b, a);
+        uint32_t depth_val = (uint32_t)(depth_f < 0.0f ? 0.0f : depth_f > 1.0f ? 16777215.0f : depth_f * 16777215.0f);
+
+        c->state.clear_color[0] = r;
+        c->state.clear_color[1] = g;
+        c->state.clear_color[2] = b;
+        c->state.clear_color[3] = a;
+        c->state.clear_depth = depth_f;
+
+        mw_ctx_bind_buffers(c);
+        mw_ctx_sync_to_raster(c);
+        minigl_raster_clear(raster_mask, color_rgba, depth_val);
+        mw_ctx_update_latest(c);
+        break;
+    }
+
+    case MW_STATE: {
+        uint32_t key = mw_be32(p);
+        const uint8_t *v = p + 8;
+        mw_state *s = &c->state;
+
+        switch (key) {
+        case MW_DEPTH_TEST: s->depth_test = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_DEPTH_FUNC: s->depth_func = mw_be32(v); break;
+        case MW_DEPTH_MASK: s->depth_mask = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_DEPTH_RANGE: s->depth_range_near = mw_bef(v); s->depth_range_far = mw_bef(v + 4); break;
+        case MW_BLEND: s->blend_enabled = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_BLEND_FACTORS:
+            s->blend_src_rgb = mw_be32(v); s->blend_dst_rgb = mw_be32(v + 4);
+            s->blend_src_alpha = mw_be32(v + 8); s->blend_dst_alpha = mw_be32(v + 12);
+            break;
+        case MW_BLEND_EQUATION: s->blend_equation = mw_be32(v); break;
+        case MW_ALPHA_TEST: s->alpha_test = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_ALPHA_FUNC: s->alpha_func = mw_be32(v); s->alpha_ref = mw_bef(v + 4); break;
+        case MW_CULL: s->cull_enabled = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_CULL_FACE: s->cull_face = mw_be32(v); break;
+        case MW_FRONT_FACE: s->front_face = mw_be32(v); break;
+        case MW_SCISSOR: s->scissor_enabled = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_SCISSOR_BOX:
+            s->scissor_x = (int32_t)mw_be32(v); s->scissor_y = (int32_t)mw_be32(v + 4);
+            s->scissor_w = mw_be32(v + 8); s->scissor_h = mw_be32(v + 12);
+            break;
+        case MW_COLOR_MASK:
+            s->color_mask[0] = (uint8_t)(mw_be32(v) != 0);
+            s->color_mask[1] = (uint8_t)(mw_be32(v + 4) != 0);
+            s->color_mask[2] = (uint8_t)(mw_be32(v + 8) != 0);
+            s->color_mask[3] = (uint8_t)(mw_be32(v + 12) != 0);
+            break;
+        case MW_POLYGON_OFFSET:
+            s->polygon_offset_factor = mw_bef(v); s->polygon_offset_units = mw_bef(v + 4);
+            break;
+        case MW_OFFSET_FILL: s->offset_fill = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_OFFSET_LINE: s->offset_line = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_OFFSET_POINT: s->offset_point = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_LINE_WIDTH: s->line_width = mw_bef(v); break;
+        case MW_POINT_SIZE: s->point_size = mw_bef(v); break;
+        case MW_SHADE_MODEL: s->shade_model = mw_be32(v); break;
+        case MW_FOG: s->fog_enabled = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_FOG_MODE: s->fog_mode = mw_be32(v); break;
+        case MW_FOG_PARAMS:
+            s->fog_density = mw_bef(v); s->fog_start = mw_bef(v + 4); s->fog_end = mw_bef(v + 8);
+            break;
+        case MW_FOG_COLOR: {
+            int k; for (k = 0; k < 4; ++k) s->fog_color[k] = mw_bef(v + k * 4);
+            break;
+        }
+        case MW_TEXTURE_STAGE: {
+            uint32_t unit = mw_be32(v);
+            if (unit < 2) {
+                s->stages[unit].name = mw_be32(v + 4);
+                s->stages[unit].enabled = (uint8_t)(mw_be32(v + 8) != 0);
+                s->stages[unit].environment = mw_be32(v + 12);
+            }
+            break;
+        }
+        case MW_DRAW_BUFFER:
+            s->draw_buffer = mw_be32(v);
+            mw_ctx_update_latest(c);
+            mw_ctx_bind_buffers(c);
+            break;
+        case MW_READ_BUFFER: s->read_buffer = mw_be32(v); break;
+        case MW_DITHER: s->dither = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_POINT_SMOOTH: s->point_smooth = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_VIEWPORT:
+            s->viewport_x = (int32_t)mw_be32(v); s->viewport_y = (int32_t)mw_be32(v + 4);
+            s->viewport_w = mw_be32(v + 8); s->viewport_h = mw_be32(v + 12);
+            break;
+        case MW_Z_OFFSET: s->z_offset = mw_bef(v); break;
+        case MW_PERSPECTIVE: s->perspective = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_MODELVIEW: {
+            int k; for (k = 0; k < 16; ++k) s->modelview[k] = mw_bef(v + k * 4);
+            mw_state_update_normal_matrix(s);
+            mw_state_update_mvp(s);
+            break;
+        }
+        case MW_TEXGEN0:
+        case MW_TEXGEN1: {
+            uint32_t u = (key == MW_TEXGEN0 ? 0 : 1);
+            s->texgen[u].s_enabled = (uint8_t)(mw_be32(v) != 0);
+            s->texgen[u].t_enabled = (uint8_t)(mw_be32(v + 4) != 0);
+            s->texgen[u].s_mode = mw_be32(v + 8);
+            s->texgen[u].t_mode = mw_be32(v + 12);
+            int k;
+            for (k = 0; k < 4; ++k) {
+                s->texgen[u].obj_plane_s[k] = mw_bef(v + (4 + k) * 4);
+                s->texgen[u].obj_plane_t[k] = mw_bef(v + (8 + k) * 4);
+                s->texgen[u].eye_plane_s[k] = mw_bef(v + (12 + k) * 4);
+                s->texgen[u].eye_plane_t[k] = mw_bef(v + (16 + k) * 4);
+            }
+            break;
+        }
+        case MW_PROJECTION: {
+            int k; for (k = 0; k < 16; ++k) s->projection[k] = mw_bef(v + k * 4);
+            mw_state_update_mvp(s);
+            break;
+        }
+        case MW_TEXTURE_MATRIX0: {
+            int k; for (k = 0; k < 16; ++k) s->texture_matrix[0][k] = mw_bef(v + k * 4);
+            break;
+        }
+        case MW_TEXTURE_MATRIX1: {
+            int k; for (k = 0; k < 16; ++k) s->texture_matrix[1][k] = mw_bef(v + k * 4);
+            break;
+        }
+        case MW_LIGHTING: s->lighting_enabled = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_LIGHT: {
+            uint32_t idx = mw_be32(v);
+            if (idx < 8) {
+                int k;
+                s->lights[idx].enabled = (uint8_t)(mw_be32(v + 4) != 0);
+                for (k = 0; k < 4; ++k) s->lights[idx].ambient[k] = mw_bef(v + (2 + k) * 4);
+                for (k = 0; k < 4; ++k) s->lights[idx].diffuse[k] = mw_bef(v + (6 + k) * 4);
+                for (k = 0; k < 4; ++k) s->lights[idx].specular[k] = mw_bef(v + (10 + k) * 4);
+                for (k = 0; k < 4; ++k) s->lights[idx].position[k] = mw_bef(v + (14 + k) * 4);
+                for (k = 0; k < 3; ++k) s->lights[idx].spot_direction[k] = mw_bef(v + (18 + k) * 4);
+                s->lights[idx].spot_exponent = mw_bef(v + 21 * 4);
+                s->lights[idx].spot_cutoff = mw_bef(v + 22 * 4);
+                s->lights[idx].constant = mw_bef(v + 23 * 4);
+                s->lights[idx].linear = mw_bef(v + 24 * 4);
+                s->lights[idx].quadratic = mw_bef(v + 25 * 4);
+            }
+            break;
+        }
+        case MW_LIGHT_MODEL: {
+            int k;
+            for (k = 0; k < 4; ++k) s->light_model_ambient[k] = mw_bef(v + k * 4);
+            s->light_model_local_viewer = (uint8_t)(mw_be32(v + 16) != 0);
+            s->light_model_two_side = (uint8_t)(mw_be32(v + 20) != 0);
+            break;
+        }
+        case MW_MATERIAL: {
+            uint32_t face = mw_be32(v);
+            if (face < 2) {
+                int k;
+                for (k = 0; k < 4; ++k) s->materials[face].ambient[k] = mw_bef(v + (1 + k) * 4);
+                for (k = 0; k < 4; ++k) s->materials[face].diffuse[k] = mw_bef(v + (5 + k) * 4);
+                for (k = 0; k < 4; ++k) s->materials[face].specular[k] = mw_bef(v + (9 + k) * 4);
+                for (k = 0; k < 4; ++k) s->materials[face].emission[k] = mw_bef(v + (13 + k) * 4);
+                s->materials[face].shininess = mw_bef(v + 17 * 4);
+            }
+            break;
+        }
+        case MW_COLOR_MATERIAL:
+            s->color_material_enabled = (uint8_t)(mw_be32(v) != 0);
+            s->color_material_face = mw_be32(v + 4);
+            s->color_material_mode = mw_be32(v + 8);
+            break;
+        case MW_NORMALIZE: s->normalize_enabled = (uint8_t)(mw_be32(v) != 0); break;
+        case MW_TEXTURE_ENV_COLOR: {
+            uint32_t unit = mw_be32(v);
+            if (unit < 2) {
+                int k; for (k = 0; k < 4; ++k) s->stages[unit].env_color[k] = mw_bef(v + (1 + k) * 4);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        mw_ctx_sync_to_raster(c);
+        break;
+    }
+
+    case MW_TEXTURE_IMAGE_RAW: {
+        uint32_t name = mw_be32(p);
+        uint32_t level = mw_be32(p + 4);
+        uint32_t width = mw_be32(p + 12);
+        uint32_t height = mw_be32(p + 16);
+        mw_texture *t;
+
+        if (!mw_texmgr_image_raw(&c->texmgr, p, cmd->bytes, (const uint8_t (*)[4])c->palette, c->palette_width))
+            return 0;
+
+        t = mw_texmgr_find(&c->texmgr, name);
+        if (t && t->pixels[level]) {
+            (void)minigl_raster_upload_rgba8(name, (uint16_t)level, (uint16_t)width, (uint16_t)height,
+                                             t->pixels[level], t->internal_rgb[level]);
+        }
+        break;
+    }
+
+    case MW_TEXTURE_SUB_RAW: {
+        uint32_t name = mw_be32(p);
+        uint32_t level = mw_be32(p + 4);
+        uint32_t xoffset = mw_be32(p + 8);
+        uint32_t yoffset = mw_be32(p + 12);
+        uint32_t width = mw_be32(p + 16);
+        uint32_t height = mw_be32(p + 20);
+        mw_texture *t;
+
+        if (!mw_texmgr_sub_raw(&c->texmgr, p, cmd->bytes, (const uint8_t (*)[4])c->palette, c->palette_width))
+            return 0;
+
+        t = mw_texmgr_find(&c->texmgr, name);
+        if (t && t->pixels[level]) {
+            uint32_t *sub = (uint32_t *)malloc((size_t)width * height * sizeof(uint32_t));
+            if (sub) {
+                uint32_t y;
+                for (y = 0; y < height; ++y)
+                    memcpy(sub + (size_t)y * width,
+                           t->pixels[level] + (size_t)(yoffset + y) * t->widths[level] + xoffset,
+                           (size_t)width * sizeof(uint32_t));
+                (void)minigl_raster_subimage_rgba8(name, (uint16_t)level, (uint16_t)xoffset, (uint16_t)yoffset,
+                                                   (uint16_t)width, (uint16_t)height, sub, t->internal_rgb[level]);
+                free(sub);
+            }
+        }
+        break;
+    }
+
+    case MW_TEXTURE_PARAM: {
+        uint32_t name = mw_be32(p);
+        uint32_t pname = mw_be32(p + 4);
+        uint32_t val = mw_be32(p + 8);
+        float fval = mw_bef(p + 8);
+        mw_texture *t;
+
+        (void)mw_texmgr_param(&c->texmgr, name, pname, val, fval);
+        t = mw_texmgr_find(&c->texmgr, name);
+        if (t)
+            minigl_raster_tex_params(name, t->min_filter, t->mag_filter, t->wrap_s, t->wrap_t);
+        break;
+    }
+
+    case MW_TEXTURE_DELETE: {
+        uint32_t name = mw_be32(p);
+        mw_texmgr_delete(&c->texmgr, name);
+        minigl_raster_delete_texture(name);
+        break;
+    }
+    case MW_TEXTURE_COPY: {
+        uint32_t name = mw_be32(p);
+        uint32_t level = mw_be32(p + 4);
+        uint32_t internal_format = mw_be32(p + 8);
+        uint32_t xoffset = mw_be32(p + 12);
+        uint32_t yoffset = mw_be32(p + 16);
+        int32_t  x = (int32_t)mw_be32(p + 20);
+        int32_t  y = (int32_t)mw_be32(p + 24);
+        uint32_t w = mw_be32(p + 28);
+        uint32_t h = mw_be32(p + 32);
+        uint32_t define = mw_be32(p + 36);
+        mw_texture *t;
+
+        if (level >= MW_MAX_MIP_LEVELS || !w || !h || w > MW_MAX_DIMENSION || h > MW_MAX_DIMENSION)
+            return 0;
+
+        t = mw_texmgr_get_or_create(&c->texmgr, name);
+        if (!t) return 0;
+
+        uint32_t read_idx = (c->state.read_buffer == 0x404 || c->state.read_buffer == 0x400) ?
+                            c->state.target.front : c->state.target.back;
+        const uint32_t *src_buf = c->color_buffers[read_idx];
+        if (!src_buf) return 0;
+
+        if (define) {
+            if (t->widths[level] != w || t->heights[level] != h || !t->pixels[level]) {
+                if (t->pixels[level]) free(t->pixels[level]);
+                t->pixels[level] = (uint32_t *)malloc((size_t)w * h * sizeof(uint32_t));
+                if (!t->pixels[level]) return 0;
+                t->widths[level] = w;
+                t->heights[level] = h;
+            }
+            t->base_format[level] = internal_format;
+            t->internal_rgb[level] = (internal_format == 3 || internal_format == 0x1907);
+
+            uint32_t r, col;
+            for (r = 0; r < h; ++r) {
+                int32_t src_y = (int32_t)c->height - 1 - (y + (int32_t)r);
+                for (col = 0; col < w; ++col) {
+                    int32_t src_x = x + (int32_t)col;
+                    uint32_t px = 0;
+                    if (src_x >= 0 && src_x < (int32_t)c->width && src_y >= 0 && src_y < (int32_t)c->height) {
+                        px = src_buf[(uint32_t)src_y * c->width + (uint32_t)src_x];
+                    }
+                    if (t->internal_rgb[level]) px |= 0xffU;
+                    t->pixels[level][r * w + col] = px;
+                }
+            }
+            (void)minigl_raster_upload_rgba8(name, (uint16_t)level, (uint16_t)w, (uint16_t)h,
+                                             t->pixels[level], t->internal_rgb[level]);
+        } else {
+            if (level >= MW_MAX_MIP_LEVELS || !t->pixels[level] ||
+                xoffset + w > t->widths[level] || yoffset + h > t->heights[level])
+                return 0;
+
+            uint32_t *sub = (uint32_t *)malloc((size_t)w * h * sizeof(uint32_t));
+            if (!sub) return 0;
+
+            uint32_t r, col;
+            for (r = 0; r < h; ++r) {
+                int32_t src_y = (int32_t)c->height - 1 - (y + (int32_t)r);
+                for (col = 0; col < w; ++col) {
+                    int32_t src_x = x + (int32_t)col;
+                    uint32_t px = 0;
+                    if (src_x >= 0 && src_x < (int32_t)c->width && src_y >= 0 && src_y < (int32_t)c->height) {
+                        px = src_buf[(uint32_t)src_y * c->width + (uint32_t)src_x];
+                    }
+                    if (t->internal_rgb[level]) px |= 0xffU;
+                    t->pixels[level][(yoffset + r) * t->widths[level] + (xoffset + col)] = px;
+                    sub[r * w + col] = px;
+                }
+            }
+            (void)minigl_raster_subimage_rgba8(name, (uint16_t)level, (uint16_t)xoffset, (uint16_t)yoffset,
+                                               (uint16_t)w, (uint16_t)h, sub, t->internal_rgb[level]);
+            free(sub);
+        }
+
+        if (level == 0 && t->generate_mipmap)
+            mw_texmgr_generate_mips(t);
+        break;
+    }
+
+    case MW_COLOR_TABLE: {
+        uint32_t width = mw_be32(p + 12);
+        uint32_t format = mw_be32(p + 16);
+        uint32_t i;
+        if (width > 256) return 0;
+        for (i = 0; i < width; ++i) {
+            const uint8_t *src = p + 28 + i * (format == 0x1908 ? 4 : 3);
+            c->palette[i][0] = src[0];
+            c->palette[i][1] = src[1];
+            c->palette[i][2] = src[2];
+            c->palette[i][3] = (format == 0x1908 ? src[3] : 255U);
+        }
+        c->palette_width = width;
+        for (i = 0; i < c->texmgr.capacity; ++i) {
+            mw_texture *t = &c->texmgr.textures[i];
+            if (!t->valid || !t->indexed) continue;
+            uint32_t lvl;
+            for (lvl = 0; lvl < MW_MAX_MIP_LEVELS; ++lvl) {
+                if (t->indices[lvl] && t->pixels[lvl]) {
+                    uint32_t total = t->widths[lvl] * t->heights[lvl];
+                    uint32_t k;
+                    for (k = 0; k < total; ++k) {
+                        uint8_t idx = t->indices[lvl][k];
+                        if (idx < c->palette_width) {
+                            t->pixels[lvl][k] = ((uint32_t)c->palette[idx][0] << 24) |
+                                                ((uint32_t)c->palette[idx][1] << 16) |
+                                                ((uint32_t)c->palette[idx][2] << 8)  |
+                                                (uint32_t)c->palette[idx][3];
+                        } else {
+                            t->pixels[lvl][k] = 0x000000ffU;
+                        }
+                    }
+                    (void)minigl_raster_upload_rgba8(t->id, (uint16_t)lvl, (uint16_t)t->widths[lvl],
+                                                     (uint16_t)t->heights[lvl], t->pixels[lvl], t->internal_rgb[lvl]);
+                }
+            }
+        }
+        break;
+    }
+
+    case MW_DRAW_PACKED:
+    case MW_DRAW_OBJECT:
+    case MW_DRAW_LOWERED:
+    case MW_DRAW_ARRAY_RAW: {
+        uint32_t mode = 0, count = 0, flags = 0;
+        const uint8_t *edge_mask = NULL;
+        int ok = 0;
+
+        if (cmd->opcode == MW_DRAW_PACKED) {
+            uint32_t constants, words;
+            if (cmd->bytes < 12 || !mw_packed_layout(mw_be32(p + 8), &constants, &words))
+                return 0;
+            count = mw_be32(p + 4);
+            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) return 0;
+            ok = mw_decode_draw_packed(p, cmd->bytes, c->vertex_scratch, &mode, &count);
+        } else if (cmd->opcode == MW_DRAW_OBJECT) {
+            count = mw_be32(p + 4);
+            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) return 0;
+            ok = mw_decode_draw_object(p, cmd->bytes, c->vertex_scratch, &mode, &count);
+        } else if (cmd->opcode == MW_DRAW_LOWERED) {
+            count = mw_be32(p + 4);
+            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) return 0;
+            ok = mw_decode_draw_lowered(p, cmd->bytes, c->vertex_scratch, &mode, &count, &flags, &edge_mask);
+        } else if (cmd->opcode == MW_DRAW_ARRAY_RAW) {
+            count = mw_be32(p + 4);
+            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) return 0;
+            ok = mw_decode_draw_array_raw(p, cmd->bytes, c->vertex_scratch, &mode, &count);
+        }
+
+        if (!ok) return 0;
+
+        mw_ctx_sync_to_raster(c);
+        minigl_raster_draw_wire_v9((uint16_t)mode, c->vertex_scratch, count, flags, (const uint32_t *)edge_mask);
+        mw_ctx_update_latest(c);
+        break;
+    }
+
+    case MW_PRESENT:
+        c->state.target.front = c->state.target.back;
+        c->state.target.latest = c->state.target.front;
+        c->state.target.back = (c->state.target.back + 1U) % c->state.target.buffer_count;
+        (void)minigl_raster_finish();
+        mw_ctx_bind_buffers(c);
+        break;
+
+    case MW_SYNC:
+        (void)minigl_raster_finish();
+        break;
+
+    case MW_UPLOAD: {
+        uint32_t x = mw_be32(p);
+        uint32_t y = mw_be32(p + 4);
+        uint32_t w = mw_be32(p + 8);
+        uint32_t h = mw_be32(p + 12);
+        const uint8_t *src_pixels = p + 16;
+        int draw_front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400) && (c->state.target.buffer_count > 1);
+        uint32_t *dst_buffer = c->color_buffers[draw_front ? c->state.target.front : c->state.target.back];
+        uint32_t r, col;
+
+        if (x > c->width || w > c->width - x || y > c->height || h > c->height - y)
+            return 0;
+
+        for (r = 0; r < h; ++r) {
+            const uint8_t *src_row = src_pixels + (size_t)r * w * 4;
+            uint32_t *dst_row = dst_buffer + (size_t)(y + r) * c->width + x;
+            for (col = 0; col < w; ++col) {
+                uint8_t pr = src_row[col * 4];
+                uint8_t pg = src_row[col * 4 + 1];
+                uint8_t pb = src_row[col * 4 + 2];
+                uint8_t pa = src_row[col * 4 + 3];
+                dst_row[col] = ((uint32_t)pr << 24) | ((uint32_t)pg << 16) | ((uint32_t)pb << 8) | (uint32_t)pa;
+            }
+        }
+        mw_ctx_update_latest(c);
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return 1;
+}
+
+uint32_t mw_host_submit(mw_ctx *c, const uint8_t *packet, uint32_t bytes)
+{
+    uint32_t status;
+
+    if (!c || !packet || bytes < 16)
+        return MW_STATUS_INVALID;
+
+    status = mw_validate_packet(packet, bytes);
+    if (status != MW_STATUS_OK)
+        return status;
+
+    mw_ctx_bind_buffers(c);
+    mw_ctx_sync_to_raster(c);
+
+    status = mw_parse_packet(packet, bytes, mw_execute_command, c);
+    (void)minigl_raster_finish();
+    return status;
+}
+
+static inline uint8_t mw_widen5(uint32_t v) {
+    return (uint8_t)((v << 3) | (v >> 2));
+}
+
+static inline uint8_t mw_widen6(uint32_t v) {
+    return (uint8_t)((v << 2) | (v >> 4));
+}
+
+static void mw_letterbox_rect(uint32_t width, uint32_t height,
+                             uint32_t present_width, uint32_t present_height,
+                             int32_t *dx0, int32_t *dy0, int32_t *dx1, int32_t *dy1)
+{
+    double scale = ((double)present_width / (double)width < (double)present_height / (double)height)
+                 ? ((double)present_width / (double)width)
+                 : ((double)present_height / (double)height);
+    int32_t dw = (int32_t)lround(width * scale);
+    int32_t dh = (int32_t)lround(height * scale);
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+    if (dw > (int32_t)present_width) dw = (int32_t)present_width;
+    if (dh > (int32_t)present_height) dh = (int32_t)present_height;
+    *dx0 = (int32_t)((present_width - (uint32_t)dw) / 2U);
+    *dy0 = (int32_t)((present_height - (uint32_t)dh) / 2U);
+    *dx1 = *dx0 + dw;
+    *dy1 = *dy0 + dh;
+}
+
+static inline void mw_encode_pixel(uint32_t format, const uint8_t *p, uint8_t *d)
+{
+    switch (format) {
+    case 2: /* RGBFB_R8G8B8 */
+        d[0] = p[0]; d[1] = p[1]; d[2] = p[2];
+        break;
+    case 3: /* RGBFB_B8G8R8 */
+        d[0] = p[2]; d[1] = p[1]; d[2] = p[0];
+        break;
+    case 4: { /* RGBFB_R5G6B5PC (LE) */
+        const unsigned r = p[0] >> 3, g = p[1] >> 2, b = p[2] >> 3;
+        d[0] = (uint8_t)(((g & 7) << 5) | b);
+        d[1] = (uint8_t)((r << 3) | (g >> 3));
+        break;
+    }
+    case 5: { /* RGBFB_R5G5B5PC (LE) */
+        const unsigned r = p[0] >> 3, g = p[1] >> 3, b = p[2] >> 3;
+        d[0] = (uint8_t)(((g & 7) << 5) | b);
+        d[1] = (uint8_t)((r << 2) | (g >> 3));
+        break;
+    }
+    case 6: /* RGBFB_A8R8G8B8 */
+        d[0] = 0xff; d[1] = p[0]; d[2] = p[1]; d[3] = p[2];
+        break;
+    case 7: /* RGBFB_A8B8G8R8 */
+        d[0] = 0xff; d[1] = p[2]; d[2] = p[1]; d[3] = p[0];
+        break;
+    case 8: /* RGBFB_R8G8B8A8 */
+        d[0] = p[0]; d[1] = p[1]; d[2] = p[2]; d[3] = 0xff;
+        break;
+    case 9: /* RGBFB_B8G8R8A8 */
+        d[0] = p[2]; d[1] = p[1]; d[2] = p[0]; d[3] = 0xff;
+        break;
+    case 10: { /* RGBFB_R5G6B5 (BE) */
+        uint16_t r = p[0] >> 3, g = p[1] >> 2, b = p[2] >> 3;
+        uint16_t v = (uint16_t)((r << 11) | (g << 5) | b);
+        d[0] = (uint8_t)(v >> 8);
+        d[1] = (uint8_t)v;
+        break;
+    }
+    case 11: { /* RGBFB_R5G5B5 (BE) */
+        uint16_t r = p[0] >> 3, g = p[1] >> 3, b = p[2] >> 3;
+        uint16_t v = (uint16_t)((r << 10) | (g << 5) | b);
+        d[0] = (uint8_t)(v >> 8);
+        d[1] = (uint8_t)v;
+        break;
+    }
+    case 12: { /* RGBFB_B5G6R5PC (LE) */
+        const unsigned r = p[0] >> 3, g = p[1] >> 2, b = p[2] >> 3;
+        d[0] = (uint8_t)(((g & 7) << 5) | r);
+        d[1] = (uint8_t)((b << 3) | (g >> 3));
+        break;
+    }
+    case 13: { /* RGBFB_B5G5R5PC (LE) */
+        const unsigned r = p[0] >> 3, g = p[1] >> 3, b = p[2] >> 3;
+        d[0] = (uint8_t)(((g & 7) << 5) | r);
+        d[1] = (uint8_t)((b << 2) | (g >> 3));
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static inline void mw_decode_pixel(uint32_t format, const uint8_t *d, uint8_t *o)
+{
+    switch (format) {
+    case 2: /* RGBFB_R8G8B8 */
+        o[0] = d[0]; o[1] = d[1]; o[2] = d[2];
+        break;
+    case 3: /* RGBFB_B8G8R8 */
+        o[0] = d[2]; o[1] = d[1]; o[2] = d[0];
+        break;
+    case 4: /* RGBFB_R5G6B5PC */
+        o[0] = mw_widen5(d[1] >> 3);
+        o[1] = mw_widen6(((d[1] & 7) << 3) | (d[0] >> 5));
+        o[2] = mw_widen5(d[0] & 31);
+        break;
+    case 5: /* RGBFB_R5G5B5PC */
+        o[0] = mw_widen5((d[1] >> 2) & 31);
+        o[1] = mw_widen5(((d[1] & 3) << 3) | (d[0] >> 5));
+        o[2] = mw_widen5(d[0] & 31);
+        break;
+    case 6: /* RGBFB_A8R8G8B8 */
+        o[0] = d[1]; o[1] = d[2]; o[2] = d[3];
+        break;
+    case 7: /* RGBFB_A8B8G8R8 */
+        o[0] = d[3]; o[1] = d[2]; o[2] = d[1];
+        break;
+    case 8: /* RGBFB_R8G8B8A8 */
+        o[0] = d[0]; o[1] = d[1]; o[2] = d[2];
+        break;
+    case 9: /* RGBFB_B8G8R8A8 */
+        o[0] = d[2]; o[1] = d[1]; o[2] = d[0];
+        break;
+    case 10: { /* RGBFB_R5G6B5 */
+        const uint32_t v = ((uint32_t)d[0] << 8) | d[1];
+        o[0] = mw_widen5(v >> 11);
+        o[1] = mw_widen6((v >> 5) & 63);
+        o[2] = mw_widen5(v & 31);
+        break;
+    }
+    case 11: { /* RGBFB_R5G5B5 */
+        const uint32_t v = ((uint32_t)d[0] << 8) | d[1];
+        o[0] = mw_widen5((v >> 10) & 31);
+        o[1] = mw_widen5((v >> 5) & 31);
+        o[2] = mw_widen5(v & 31);
+        break;
+    }
+    case 12: { /* RGBFB_B5G6R5PC */
+        o[0] = mw_widen5(d[1] >> 3);
+        o[1] = mw_widen6(((d[1] & 7) << 3) | (d[0] >> 5));
+        o[2] = mw_widen5(d[0] & 31);
+        break;
+    }
+    case 13: { /* RGBFB_B5G5R5PC */
+        o[0] = mw_widen5((d[1] >> 2) & 31);
+        o[1] = mw_widen5(((d[1] & 3) << 3) | (d[0] >> 5));
+        o[2] = mw_widen5(d[0] & 31);
+        break;
+    }
+    default:
+        o[0] = 0; o[1] = 0; o[2] = 0;
+        break;
+    }
+    o[3] = 0xff;
+}
+
+typedef struct {
+    uint32_t format;
+    uint32_t bytes_per_pixel;
+    uint32_t pitch;
+    int32_t  frame_x;
+    int32_t  frame_y;
+    uint32_t count;
+    uint32_t rects[MW_BLIT_MAX_RECTS * 4];
+} mw_span_request;
+
+static uint32_t mw_parse_span(const uint8_t *p, uint32_t bytes,
+                             const uint8_t *span, uint32_t span_bytes,
+                             mw_span_request *r)
+{
+    uint32_t kept = 0, i;
+    if (bytes < 24)
+        return MW_STATUS_INVALID;
+
+    r->format = mw_be32(p + 4);
+    if (r->format < 2 || r->format > 13)
+        return MW_STATUS_INVALID;
+
+    r->bytes_per_pixel = (r->format <= 3) ? 3U :
+                         (r->format >= 6 && r->format <= 9) ? 4U : 2U;
+    r->pitch = mw_be32(p + 8);
+    if (!r->pitch || r->pitch < r->bytes_per_pixel)
+        return MW_STATUS_INVALID;
+
+    r->frame_x = (int32_t)mw_be32(p + 12);
+    r->frame_y = (int32_t)mw_be32(p + 16);
+    r->count = mw_be32(p + 20);
+    if (!r->count || r->count > MW_BLIT_MAX_RECTS || bytes != 24 + 16 * r->count)
+        return MW_STATUS_INVALID;
+
+    for (i = 0; i < r->count; ++i) {
+        uint32_t rx0 = mw_be32(p + 24 + i * 16 + 0);
+        uint32_t ry0 = mw_be32(p + 24 + i * 16 + 4);
+        uint32_t rx1 = mw_be32(p + 24 + i * 16 + 8);
+        uint32_t ry1 = mw_be32(p + 24 + i * 16 + 12);
+
+        if (rx0 > rx1 || ry0 > ry1)
+            return MW_STATUS_INVALID;
+        if (rx0 == rx1 || ry0 == ry1)
+            continue;
+        if ((uint64_t)(ry1 - 1) * r->pitch + (uint64_t)rx1 * r->bytes_per_pixel > span_bytes)
+            return MW_STATUS_INVALID;
+
+        r->rects[kept * 4 + 0] = rx0;
+        r->rects[kept * 4 + 1] = ry0;
+        r->rects[kept * 4 + 2] = rx1;
+        r->rects[kept * 4 + 3] = ry1;
+        kept++;
+    }
+
+    r->count = kept;
+    if (span_bytes && !span)
+        return MW_STATUS_INVALID;
+
+    return MW_STATUS_OK;
+}
+
+static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
+                       uint8_t *span, uint32_t span_bytes)
+{
+    mw_span_request r;
+    uint32_t status = mw_parse_span(p, bytes, span, span_bytes, &r);
+    if (status != MW_STATUS_OK)
+        return status;
+
+    (void)minigl_raster_finish();
+
+    const uint32_t *src_buf = c->color_buffers[c->state.target.latest];
+    if (!src_buf)
+        return MW_STATUS_FAILED;
+
+    int scaled = (c->state.target.present_width != c->width || c->state.target.present_height != c->height);
+    uint32_t frame_w = scaled ? c->state.target.present_width : c->width;
+    uint32_t frame_h = scaled ? c->state.target.present_height : c->height;
+
+    int32_t bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+    if (scaled) {
+        mw_letterbox_rect(c->width, c->height, frame_w, frame_h, &bx0, &by0, &bx1, &by1);
+    }
+
+    if (r.count > 0) {
+        uint32_t top = 0x7fffffffU, bottom = 0;
+        uint32_t i;
+        for (i = 0; i < r.count; ++i) {
+            if (r.rects[i * 4 + 1] < top) top = r.rects[i * 4 + 1];
+            if (r.rects[i * 4 + 3] > bottom) bottom = r.rects[i * 4 + 3];
+        }
+
+        int64_t first = (int64_t)top > (int64_t)r.frame_y ? (int64_t)top : (int64_t)r.frame_y;
+        int64_t last = (int64_t)bottom < (int64_t)r.frame_y + frame_h ? (int64_t)bottom : (int64_t)r.frame_y + frame_h;
+
+        for (int64_t at = first; at < last; ++at) {
+            uint32_t row = (uint32_t)at;
+            int64_t fy = at - r.frame_y;
+            uint8_t *dst_row = span + (size_t)row * r.pitch;
+
+            for (i = 0; i < r.count; ++i) {
+                if (row < r.rects[i * 4 + 1] || row >= r.rects[i * 4 + 3])
+                    continue;
+
+                int64_t lo = (int64_t)r.rects[i * 4] > (int64_t)(r.frame_x < 0 ? 0 : r.frame_x)
+                           ? (int64_t)r.rects[i * 4] : (int64_t)(r.frame_x < 0 ? 0 : r.frame_x);
+                int64_t hi = (int64_t)r.rects[i * 4 + 2] < (int64_t)frame_w + r.frame_x
+                           ? (int64_t)r.rects[i * 4 + 2] : (int64_t)frame_w + r.frame_x;
+
+                for (int64_t col = lo; col < hi; ++col) {
+                    int64_t fx = col - r.frame_x;
+                    uint32_t pix;
+
+                    if (scaled) {
+                        if (fx >= bx0 && fx < bx1 && fy >= by0 && fy < by1) {
+                            int64_t sx = (fx - bx0) * (int64_t)c->width / (bx1 - bx0);
+                            int64_t sy = (fy - by0) * (int64_t)c->height / (by1 - by0);
+                            if (sx >= 0 && sx < (int64_t)c->width && sy >= 0 && sy < (int64_t)c->height) {
+                                pix = src_buf[(size_t)sy * c->width + sx];
+                            } else {
+                                pix = 0x000000ffU;
+                            }
+                        } else {
+                            pix = 0x000000ffU;
+                        }
+                    } else {
+                        pix = src_buf[(size_t)fy * c->width + fx];
+                    }
+
+                    uint8_t p_col[4];
+                    p_col[0] = (uint8_t)(pix >> 24);
+                    p_col[1] = (uint8_t)(pix >> 16);
+                    p_col[2] = (uint8_t)(pix >> 8);
+                    p_col[3] = (uint8_t)pix;
+
+                    uint8_t *dst = dst_row + (size_t)col * r.bytes_per_pixel;
+                    mw_encode_pixel(r.format, p_col, dst);
+                }
+            }
+        }
+    }
+
+    /* Save snapshot for MW_CAPTURE fast path */
+    c->presented_valid = 0;
+    c->presented_span_address = span;
+    c->presented_request_len = bytes - 4;
+    if (bytes - 4 <= sizeof(c->presented_request)) {
+        memcpy(c->presented_request, p + 4, bytes - 4);
+    }
+
+    size_t total_rect_bytes = 0;
+    for (uint32_t i = 0; i < r.count; ++i) {
+        total_rect_bytes += (size_t)(r.rects[i * 4 + 3] - r.rects[i * 4 + 1]) *
+                            (size_t)(r.rects[i * 4 + 2] - r.rects[i * 4]) * r.bytes_per_pixel;
+    }
+
+    if (total_rect_bytes > 0) {
+        if (total_rect_bytes > c->presented_span_capacity) {
+            uint8_t *new_buf = (uint8_t *)realloc(c->presented_span, total_rect_bytes);
+            if (new_buf) {
+                c->presented_span = new_buf;
+                c->presented_span_capacity = (uint32_t)total_rect_bytes;
+            }
+        }
+        if (c->presented_span && total_rect_bytes <= c->presented_span_capacity) {
+            size_t at = 0;
+            for (uint32_t i = 0; i < r.count; ++i) {
+                const uint32_t *rc = &r.rects[i * 4];
+                size_t row_len = (size_t)(rc[2] - rc[0]) * r.bytes_per_pixel;
+                for (uint32_t y = rc[1]; y < rc[3]; ++y) {
+                    memcpy(c->presented_span + at, span + (size_t)y * r.pitch + (size_t)rc[0] * r.bytes_per_pixel, row_len);
+                    at += row_len;
+                }
+            }
+            c->presented_span_size = (uint32_t)total_rect_bytes;
+            c->presented_valid = 1;
+        }
+    }
+
+    return MW_STATUS_OK;
+}
+
+static uint32_t mw_capture(mw_ctx *c, const uint8_t *p, uint32_t bytes,
+                          const uint8_t *span, uint32_t span_bytes)
+{
+    mw_span_request r;
+    uint32_t status = mw_parse_span(p, bytes, span, span_bytes, &r);
+    if (status != MW_STATUS_OK)
+        return status;
+
+    (void)minigl_raster_finish();
+
+    int scaled = (c->state.target.present_width != c->width || c->state.target.present_height != c->height);
+    uint32_t frame_w = scaled ? c->state.target.present_width : c->width;
+    uint32_t frame_h = scaled ? c->state.target.present_height : c->height;
+
+    /* Fast path */
+    const uint32_t *cover = r.rects;
+    if (!scaled && c->state.target.buffer_count > 1 && span == c->presented_span_address && r.count == 1 &&
+        (int64_t)cover[0] <= r.frame_x && (int64_t)cover[1] <= r.frame_y &&
+        (int64_t)cover[2] >= r.frame_x + (int64_t)c->width &&
+        (int64_t)cover[3] >= r.frame_y + (int64_t)c->height &&
+        c->presented_valid &&
+        c->presented_request_len == (bytes - 4) &&
+        memcmp(p + 4, c->presented_request, bytes - 4) == 0) {
+
+        int same = 1;
+        size_t at = 0;
+        size_t row_len = (size_t)(cover[2] - cover[0]) * r.bytes_per_pixel;
+        for (uint32_t y = cover[1]; y < cover[3]; ++y) {
+            if (at + row_len > c->presented_span_size ||
+                memcmp(span + (size_t)y * r.pitch + (size_t)cover[0] * r.bytes_per_pixel,
+                       c->presented_span + at, row_len) != 0) {
+                same = 0;
+                break;
+            }
+            at += row_len;
+        }
+
+        if (same) {
+            /* Fast path hit: copy front buffer to back buffer */
+            memcpy(c->color_buffers[c->state.target.back],
+                   c->color_buffers[c->state.target.front],
+                   (size_t)c->width * c->height * sizeof(uint32_t));
+            c->state.target.latest = c->state.target.back;
+            return MW_STATUS_OK;
+        }
+    }
+
+    /* Slow path: decode span into back buffer */
+    memset(c->color_buffers[c->state.target.back], 0, (size_t)c->width * c->height * sizeof(uint32_t));
+
+    int32_t bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+    if (scaled) {
+        mw_letterbox_rect(c->width, c->height, frame_w, frame_h, &bx0, &by0, &bx1, &by1);
+    }
+
+    for (uint32_t i = 0; i < r.count; ++i) {
+        const uint32_t *rc = &r.rects[i * 4];
+        int64_t lo = (int64_t)rc[0] > (int64_t)(r.frame_x < 0 ? 0 : r.frame_x)
+                   ? (int64_t)rc[0] : (int64_t)(r.frame_x < 0 ? 0 : r.frame_x);
+        int64_t hi = (int64_t)rc[2] < (int64_t)frame_w + r.frame_x
+                   ? (int64_t)rc[2] : (int64_t)frame_w + r.frame_x;
+        int64_t first = (int64_t)rc[1] > (int64_t)r.frame_y
+                      ? (int64_t)rc[1] : (int64_t)r.frame_y;
+        int64_t last = (int64_t)rc[3] < (int64_t)frame_h + r.frame_y
+                     ? (int64_t)rc[3] : (int64_t)frame_h + r.frame_y;
+
+        for (int64_t row = first; row < last; ++row) {
+            int64_t fy = row - r.frame_y;
+            int64_t dy = fy;
+            if (scaled) {
+                if (bx1 <= bx0 || by1 <= by0)
+                    continue;
+                dy = (fy - by0) * (int64_t)c->height / (by1 - by0);
+                if (dy < 0 || dy >= (int64_t)c->height)
+                    continue;
+            }
+
+            const uint8_t *src_row = span + (size_t)row * r.pitch;
+            uint32_t *dst_row = c->color_buffers[c->state.target.back] + (size_t)dy * c->width;
+
+            for (int64_t c_col = lo; c_col < hi; ++c_col) {
+                int64_t px = c_col - r.frame_x;
+                int64_t dx = px;
+                if (scaled) {
+                    dx = (px - bx0) * (int64_t)c->width / (bx1 - bx0);
+                    if (dx < 0 || dx >= (int64_t)c->width)
+                        continue;
+                }
+
+                const uint8_t *d = src_row + (size_t)c_col * r.bytes_per_pixel;
+                uint8_t o[4];
+                mw_decode_pixel(r.format, d, o);
+                dst_row[dx] = ((uint32_t)o[0] << 24) | ((uint32_t)o[1] << 16) | ((uint32_t)o[2] << 8) | 0xffU;
+            }
+        }
+    }
+
+    c->state.target.latest = c->state.target.back;
+    return MW_STATUS_OK;
+}
+
+uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
+                         uint8_t *reply, uint32_t reply_capacity, uint32_t *reply_bytes)
+{
+    uint32_t id;
+
+    if (!c || !request || bytes < 4)
+        return MW_STATUS_INVALID;
+
+    id = mw_be32(request);
+
+    if (id == MW_PLUGIN_VERSION) {
+        static const char version[] = "zz9000-minigl-v29-v9";
+        size_t len = strlen(version) + 1;
+        if (len > MW_PLUGIN_VERSION_BYTES)
+            len = MW_PLUGIN_VERSION_BYTES;
+        if (reply_capacity < len)
+            return MW_STATUS_CAPACITY;
+        if (!reply)
+            return MW_STATUS_INVALID;
+        memcpy(reply, version, len);
+        reply[len - 1] = 0;
+        if (reply_bytes)
+            *reply_bytes = (uint32_t)len;
+        return MW_STATUS_OK;
+    }
+
+    if (id == MW_BLIT) {
+        uint32_t status = mw_blit(c, request, bytes, reply, reply_capacity);
+        if (status == MW_STATUS_OK && reply_bytes)
+            *reply_bytes = reply_capacity;
+        return status;
+    }
+
+    if (id == MW_CAPTURE) {
+        uint32_t status = mw_capture(c, request, bytes, reply, reply_capacity);
+        if (status == MW_STATUS_OK && reply_bytes)
+            *reply_bytes = 0;
+        return status;
+    }
+
+    if (id == MW_READ_PIXELS) {
+        uint32_t format, w, h;
+        int32_t x, y;
+        uint64_t req_bytes;
+        uint32_t *color_buffer;
+        uint32_t row;
+        int read_idx;
+
+        if (bytes != 24)
+            return MW_STATUS_INVALID;
+
+        format = mw_be32(request + 4);
+        x = (int32_t)mw_be32(request + 8);
+        y = (int32_t)mw_be32(request + 12);
+        w = mw_be32(request + 16);
+        h = mw_be32(request + 20);
+
+        if ((format != 0x1908 && format != 0x1902) || w > MW_MAX_DIMENSION || h > MW_MAX_DIMENSION)
+            return MW_STATUS_INVALID;
+
+        req_bytes = (uint64_t)w * h * 4;
+        if (reply_capacity < req_bytes)
+            return MW_STATUS_CAPACITY;
+        if (req_bytes && !reply)
+            return MW_STATUS_INVALID;
+        if (!req_bytes) {
+            if (reply_bytes) *reply_bytes = 0;
+            return MW_STATUS_OK;
+        }
+
+        (void)minigl_raster_finish();
+
+        read_idx = c->state.target.back;
+        if ((c->state.read_buffer == 0x404 || c->state.read_buffer == 0x400) && c->state.target.buffer_count > 1) {
+            read_idx = c->state.target.front;
+        } else if (c->state.read_buffer == 0) {
+            read_idx = -1;
+        }
+        color_buffer = (read_idx >= 0 && read_idx < 3) ? c->color_buffers[read_idx] : NULL;
+
+        /* GL glReadPixels produces bottom-row-first reply */
+        for (row = 0; row < h; ++row) {
+            int32_t gl_row = y + (int32_t)row;
+            int32_t rast_row = (int32_t)c->height - 1 - gl_row;
+            uint8_t *dst_row = reply + (size_t)row * w * 4;
+            uint32_t col;
+
+            for (col = 0; col < w; ++col) {
+                int32_t gl_col = x + (int32_t)col;
+                if (rast_row >= 0 && rast_row < (int32_t)c->height &&
+                    gl_col >= 0 && gl_col < (int32_t)c->width) {
+                    if (format == 0x1908) { /* GL_RGBA */
+                        if (color_buffer) {
+                            uint32_t pix = color_buffer[(size_t)rast_row * c->width + gl_col];
+                            dst_row[col * 4]     = (uint8_t)(pix >> 24);
+                            dst_row[col * 4 + 1] = (uint8_t)(pix >> 16);
+                            dst_row[col * 4 + 2] = (uint8_t)(pix >> 8);
+                            dst_row[col * 4 + 3] = (uint8_t)pix;
+                        } else {
+                            memset(dst_row + col * 4, 0, 4);
+                        }
+                    } else { /* GL_DEPTH_COMPONENT */
+                        uint32_t dval = 0;
+                        float df;
+                        if (c->state.target.depth_bits == 16) {
+                            const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 2;
+                            dval = ((uint32_t)dp[0] << 8) | dp[1];
+                            df = (float)dval / 65535.0f;
+                        } else if (c->state.target.depth_bits == 24) {
+                            const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 3;
+                            dval = ((uint32_t)dp[0] << 16) | ((uint32_t)dp[1] << 8) | dp[2];
+                            df = (float)dval / 16777215.0f;
+                        } else {
+                            const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 4;
+                            dval = ((uint32_t)dp[0] << 24) | ((uint32_t)dp[1] << 16) | ((uint32_t)dp[2] << 8) | dp[3];
+                            df = (float)dval / 4294967295.0f;
+                        }
+                        mw_put_bef(dst_row + col * 4, df);
+                    }
+                } else {
+                    memset(dst_row + col * 4, 0, 4);
+                }
+            }
+        }
+
+        if (reply_bytes)
+            *reply_bytes = (uint32_t)req_bytes;
+        return MW_STATUS_OK;
+    }
+
+    return MW_STATUS_INVALID;
+}
+
+uint32_t mw_host_readback_rgba8(mw_ctx *c, uint8_t *out, uint32_t capacity)
+{
+    uint64_t req_bytes;
+    const uint32_t *color_buffer;
+    uint32_t y, x;
+
+    if (!c || !out)
+        return MW_STATUS_UNAVAILABLE;
+
+    req_bytes = (uint64_t)c->width * c->height * 4;
+    if (capacity < req_bytes)
+        return MW_STATUS_CAPACITY;
+
+    (void)minigl_raster_finish();
+    color_buffer = c->color_buffers[c->state.target.latest];
+
+    /* Output top-row-first RGBA8 */
+    for (y = 0; y < c->height; ++y) {
+        const uint32_t *src_row = color_buffer + (size_t)y * c->width;
+        uint8_t *dst_row = out + (size_t)y * c->width * 4;
+        for (x = 0; x < c->width; ++x) {
+            uint32_t pix = src_row[x];
+            dst_row[x * 4]     = (uint8_t)(pix >> 24);
+            dst_row[x * 4 + 1] = (uint8_t)(pix >> 16);
+            dst_row[x * 4 + 2] = (uint8_t)(pix >> 8);
+            dst_row[x * 4 + 3] = (uint8_t)pix;
+        }
+    }
+
+    return MW_STATUS_OK;
+}

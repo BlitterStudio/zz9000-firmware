@@ -471,6 +471,41 @@
 #error "Z3 host window lies outside the Zorro III main board aperture"
 #endif
 
+// MiniGL wire-v9 transport window (2.9.0 layout). One dynamic allocation
+// from the host-visible heap -- there is deliberately NO fixed low-DDR
+// MiniGL carve-out. minigl_transport.c requests the window between the
+// bounds below and publishes its address through the versioned transport
+// descriptor inside the SDK mailbox reservation (SDK_MAILBOX_MINIGL_DESC_
+// OFFSET); the Amiga library reads the descriptor and never assumes an
+// address. The bounds keep the window inside the 1 MiB MMU section the
+// SDK mailbox already maps Normal non-cacheable (both CPUs poll the
+// control block, so a cacheable placement would need per-poll cache
+// maintenance); the allocator still owns every page in the gap.
+#define MW_TRANSPORT_WINDOW_ALIGNMENT  0x00001000U
+#define MW_TRANSPORT_PLACEMENT_LO \
+	(SDK_MAILBOX_Z3_ADDRESS + SDK_MAILBOX_Z3_RESERVE_SIZE)
+#define MW_TRANSPORT_PLACEMENT_HI SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS
+
+#if (MW_TRANSPORT_PLACEMENT_HI - MW_TRANSPORT_PLACEMENT_LO) < 0x00091000U
+#error "MiniGL transport gap inside the mailbox MMU section is too small"
+#endif
+#if (MW_TRANSPORT_PLACEMENT_LO & (MW_TRANSPORT_WINDOW_ALIGNMENT - 1U)) != 0U
+#error "MiniGL transport placement must start page aligned"
+#endif
+
+// Offset of the versioned MiniGL transport descriptor inside the Z3 SDK
+// mailbox reservation. The mailbox descriptor plus both 64-entry rings end
+// at 0x2080; the descriptor sits beyond them and survives mailbox re-inits
+// (which memset only the ring area).
+#define SDK_MAILBOX_MINIGL_DESC_OFFSET 0x00008000U
+
+#if SDK_MAILBOX_MINIGL_DESC_OFFSET <= 0x00002080U
+#error "MiniGL transport descriptor overlaps the SDK mailbox rings"
+#endif
+#if (SDK_MAILBOX_MINIGL_DESC_OFFSET + 256U) > SDK_MAILBOX_Z3_RESERVE_SIZE
+#error "MiniGL transport descriptor exceeds the SDK mailbox reservation"
+#endif
+
 /* Immutable Z3 control ranges are reserved after every allocator reset. */
 #define Z3_HOST_CONTROL_RANGES(X) \
 	X(Z3_SCRATCH_ADDR, 0x00010000U) \

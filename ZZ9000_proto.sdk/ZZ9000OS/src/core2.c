@@ -12,6 +12,7 @@
 #include "card_pool.h"
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
+#include "mw_service.h"
 #include "zzm_loader.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -208,6 +209,13 @@ static void record_fault(uint32_t code, const char *name)
 	Xil_DCacheFlushRange((INTPTR)&core1_fault, sizeof(core1_fault));
 	printf("%s: arm_exception_handler()!\n", name);
 	print_fault_detail(code);
+
+	if (sh->minigl_in_flight) {
+		/* Core 1 faulted during a Wire-v9 operation. Publish the v9
+		 * generation change before the scheduler recovery path restarts it. */
+		mw_service_on_core1_fault();
+		sh->minigl_in_flight = 0;
+	}
 
 	if (slot >= 0) {
 		/*

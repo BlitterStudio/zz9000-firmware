@@ -3,12 +3,23 @@
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * This file carries the Cortex-A9 / Xilinx-BSP integration that cannot be
- * host-tested: SCU/SMP coherency bring-up, the coherent shared control block,
- * the core-1 worker, and the core-0 poll. The portable state machine it drives
- * lives in scheduler.c (host-tested). Compiled out of the host test build.
+ *
+ * This file carries the Cortex-A9 / Xilinx-BSP integration: SCU/SMP
+ * coherency bring-up, the coherent shared control block, the core-1 worker,
+ * and the core-0 poll. The portable state machine it drives lives in
+ * scheduler.c (host-tested); a focused host seam covers worker initialization.
  */
-#ifndef TASKQ_HOST_TEST
+#if defined(TASKQ_HOST_TEST) && defined(MINIGL_HOST_TEST)
+
+#include "scheduler.h"
+#include "scheduler_core1_minigl_init.h"
+
+void scheduler_core1_host_test_init(taskq_shared_t *sh)
+{
+  scheduler_core1_minigl_init(sh);
+}
+
+#elif !defined(TASKQ_HOST_TEST)
 
 #include "scheduler.h"
 #include "memorymap.h"
@@ -19,6 +30,7 @@
 #include "sdk_media_session.h"
 #include "sdk_smp_lock.h"
 #include "card_pool.h"
+#include "mw_service.h"
 #include "core2.h"
 #include "sleep.h"
 #include "xil_types.h"
@@ -26,6 +38,7 @@
 #include "xil_cache.h"
 #include "xpseudo_asm.h"
 #include "xreg_cortexa9.h"
+#include "scheduler_core1_minigl_init.h"
 #include <stdio.h>
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
@@ -102,6 +115,12 @@ void scheduler_boot_init(void)
   sh->core1_reclaim_done = 0;
   sh->core1_clean_request = 0;
   sh->core1_clean_done = 0;
+  sh->minigl_doorbell = 0;
+  sh->minigl_reset_request = 0;
+  sh->minigl_reset_ack = 0;
+  sh->minigl_in_flight = 0;
+  sh->minigl_packets_on_core1 = 0;
+  sh->minigl_packets_on_core0 = 0;
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   g_core1_started = 0;
 }
@@ -269,27 +288,79 @@ void scheduler_core1_worker(void)
 {
   taskq_shared_t *sh = scheduler_shared();
 
-  sh->core1_alive = 1;
-  dmb();  /* make the alive flag observable to core 0 before we sleep on WFE */
+
+  scheduler_core1_minigl_init(sh);
 
   for (;;) {
-    int slot;
+    int reset_req;
+    int task_slot;
+    int task_avail;
+    int mgl_avail;
+    int mgl_bound;
+    sched_worker_action_t action;
 
     /* Checked before every claim: once core 0 asks, no further task runs. */
     scheduler_core1_reclaim_if_requested(sh);
     scheduler_core1_clean_if_requested(sh);
     scheduler_core1_park_if_requested();
-    slot = taskq_claim_any(&sh->queue);
-    if (slot < 0) {
-      __asm__ __volatile__("wfe" ::: "memory");
-      continue;
+
+    reset_req = (sh->minigl_reset_request != 0);
+    task_slot = taskq_claim_any(&sh->queue);
+    task_avail = (task_slot >= 0);
+    mgl_avail = mw_service_has_work();
+    mgl_bound = mw_service_is_bound();
+    action = sched_worker_decide(reset_req, task_avail, mgl_avail, mgl_bound);
+
+    switch (action) {
+    case SCHED_WORKER_ACTION_RESET:
+      mw_service_reset_local();
+      sh->minigl_reset_request = 0;
+      sh->minigl_reset_ack = 1;
+      dmb();
+      if (task_slot >= 0) {
+        sh->core1_current_slot = task_slot;
+        (void)scheduler_run_slot(&sh->queue.descs[task_slot]);
+        sh->core1_current_slot = -1;
+        sh->tasks_on_core1++;
+      }
+      break;
+
+    case SCHED_WORKER_ACTION_TASK:
+      sh->core1_current_slot = task_slot;
+      (void)scheduler_run_slot(&sh->queue.descs[task_slot]);
+      sh->core1_current_slot = -1;
+      sh->tasks_on_core1++;
+      break;
+
+    case SCHED_WORKER_ACTION_MINIGL:
+      sh->minigl_in_flight = 1;
+      dmb();
+      if (mw_service_has_work()) {
+        int mw_res = mw_service_poll();
+        if (mw_res > 0)
+          sh->minigl_packets_on_core1 += (uint32_t)mw_res;
+      }
+      sh->minigl_in_flight = 0;
+      dmb();
+      break;
+
+    case SCHED_WORKER_ACTION_POLL_IDLE:
+      if (mw_service_has_work())
+        (void)mw_service_poll();
+      break;
+
+    case SCHED_WORKER_ACTION_WFE:
+    default:
+      if (!taskq_has_active(&sh->queue) &&
+          !sh->minigl_reset_request &&
+          !sh->minigl_doorbell &&
+          !mw_service_is_bound())
+        __asm__ __volatile__("wfe" ::: "memory");
+      break;
     }
-    sh->core1_current_slot = slot;
-    (void)scheduler_run_slot(&sh->queue.descs[slot]);
-    sh->core1_current_slot = -1;
-    sh->tasks_on_core1++;   /* proof: this core executed a crypto task */
   }
 }
+
 
 /*
  * Core 1 side of the reset-time reclaim. Core 0 asks only after the quiesce,
@@ -478,6 +549,8 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
       sdk_image_stream_reset_locks();
       sdk_compression_reclaim_core1_decode();
       g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
+      /* Re-initialize Wire-v9 on core 0 so fallback main-loop polling works. */
+      mw_service_init();
     }
   }
 
@@ -558,7 +631,7 @@ void scheduler_quiesce_for_reset(void)
     return;   /* no core-1 worker -> no in-flight writes to drain */
 
   for (spins = 0; spins < SCHED_QUIESCE_SPINS; spins++) {
-    if (!taskq_has_active(&sh->queue))
+    if (!taskq_has_active(&sh->queue) && !sh->minigl_in_flight)
       break;
     usleep(SCHED_QUIESCE_US);
   }
@@ -568,7 +641,7 @@ void scheduler_quiesce_for_reset(void)
    * taskq_init leaves zero QUEUED slots, and the worker only ever claims QUEUED,
    * so it cannot pick up a stale task and write into buffers the mailbox is
    * about to reuse. */
-  timed_out = taskq_has_active(&sh->queue);
+  timed_out = taskq_has_active(&sh->queue) || sh->minigl_in_flight;
   taskq_init(&sh->queue);
   sh->core1_current_slot = -1;
 

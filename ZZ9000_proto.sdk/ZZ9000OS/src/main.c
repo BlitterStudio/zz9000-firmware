@@ -72,6 +72,8 @@ void Xil_AssertNonVoid() {}
 #include "surface_allocator.h"
 #include "card_pool.h"
 #include "overlay.h"
+#include "mw_service.h"
+#include "minigl_transport.h"
 #include "newlib_heap.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
@@ -677,6 +679,11 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	amiga_interrupt_clear(0xffffffff);
 
 	sdk_mailbox_init();
+
+	/* Bind the MiniGL transport after the mailbox placement made its MMU
+	 * section non-cacheable; publishes the descriptor or reports the
+	 * service unavailable (Zorro II, no heap room). */
+	minigl_transport_init();
 	sdk_diag_last_reg_write_addr = 0;
 	sdk_diag_last_reg_write_raw_addr = 0;
 	sdk_diag_last_reg_write_data = 0;
@@ -1045,6 +1052,8 @@ int main() {
 		 * job that owns the SD card. */
 		if (!fw_update_busy())
 			audio_scene_poll();
+		if (!scheduler_core1_available())
+			(void)mw_service_poll();
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		u32 aperture_flags = sdk_aperture_runtime_flags();
 		/* Acknowledge late: firmware normally boots before the RTG driver.
@@ -2429,9 +2438,11 @@ int main() {
 					sdk_mailbox_ack_irq();
 				if (events & SDK_MAILBOX_EVENT_IRQ_ENABLE)
 					sdk_mailbox_irq_enable();
-				if (events & SDK_MAILBOX_EVENT_DOORBELL)
-					sdk_mailbox_doorbell();
 				sdk_mailbox_task();
+				if (events & SDK_MAILBOX_EVENT_DOORBELL) {
+					sdk_mailbox_doorbell();
+					mw_service_doorbell();
+				}
 				sdk_diag_task_count++;
 			}
 
@@ -2444,11 +2455,15 @@ int main() {
 			}
 			if (zstate & MNTZORRO_STATUS_SDK_DOORBELL) {
 				sdk_mailbox_doorbell();
+				mw_service_doorbell();
 				mntzorro_pulse_control(MNTZORRO_CTRL_SDK_DOORBELL_CLEAR);
 				sdk_mailbox_task();
 				sdk_diag_task_count++;
 			}
 #endif
+			/* Core 1 owns Wire-v9 execution whenever it is available. */
+			if (!scheduler_core1_available())
+				(void)mw_service_poll();
 			sdk_mailbox_poll_divider++;
 			if ((sdk_mailbox_poll_divider & 0xffU) == 0) {
 				sdk_mailbox_task();
@@ -2469,6 +2484,7 @@ int main() {
 			if ((zstate & 0xff) == 0) {
 				if (!amiga_reset_seen) {
 					handle_amiga_reset(AMIGA_RESET_FAST);
+					mw_service_reset();
 					amiga_reset_seen = 1;
 					videocap_backing_arm_pending = 1;
 				}

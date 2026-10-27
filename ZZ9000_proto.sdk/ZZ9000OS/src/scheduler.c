@@ -294,6 +294,25 @@ int taskq_should_drain(int zorro_pending, int display_pending, int core1_enabled
   return (!zorro_pending && !display_pending) ? 1 : 0;
 }
 
+/* ---- core-1 worker action policy (portable, host-tested) ---- */
+sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
+                                          int minigl_work_available, int minigl_bound)
+{
+  if (reset_requested) {
+    return SCHED_WORKER_ACTION_RESET;
+  }
+  if (task_available) {
+    return SCHED_WORKER_ACTION_TASK;
+  }
+  if (minigl_work_available) {
+    return SCHED_WORKER_ACTION_MINIGL;
+  }
+  if (minigl_bound) {
+    return SCHED_WORKER_ACTION_POLL_IDLE;
+  }
+  return SCHED_WORKER_ACTION_WFE;
+}
+
 /* ---- fault watchdog: trips core 1 off after too many consecutive faults ---- */
 void taskq_watchdog_init(taskq_watchdog_t *w, uint32_t threshold)
 {

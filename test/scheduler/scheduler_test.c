@@ -347,6 +347,61 @@ static void test_watchdog_success_resets_counter(void)
   expect_int("wd_still_enabled", taskq_watchdog_core1_enabled(&w), 1);
 }
 
+static void test_sched_worker_decide_priorities(void)
+{
+  /* Reset preempts queued tasks, MiniGL work, and idle polling */
+  expect_int("decide_reset_only", sched_worker_decide(1, 0, 0, 0), SCHED_WORKER_ACTION_RESET);
+  expect_int("decide_reset_over_task", sched_worker_decide(1, 1, 0, 0), SCHED_WORKER_ACTION_RESET);
+  expect_int("decide_reset_over_mgl", sched_worker_decide(1, 0, 1, 0), SCHED_WORKER_ACTION_RESET);
+  expect_int("decide_reset_over_bound", sched_worker_decide(1, 0, 0, 1), SCHED_WORKER_ACTION_RESET);
+  expect_int("decide_reset_over_all", sched_worker_decide(1, 1, 1, 1), SCHED_WORKER_ACTION_RESET);
+
+  /* Task preempts MiniGL work when no reset requested */
+  expect_int("decide_task_only", sched_worker_decide(0, 1, 0, 0), SCHED_WORKER_ACTION_TASK);
+  expect_int("decide_task_over_mgl", sched_worker_decide(0, 1, 1, 1), SCHED_WORKER_ACTION_TASK);
+
+  /* MiniGL packet slice executes when no reset and no queued task */
+  expect_int("decide_mgl_only", sched_worker_decide(0, 0, 1, 1), SCHED_WORKER_ACTION_MINIGL);
+
+  /* When idle with MiniGL bound: poll heartbeat + pause, do NOT WFE */
+  expect_int("decide_poll_idle_bound", sched_worker_decide(0, 0, 0, 1), SCHED_WORKER_ACTION_POLL_IDLE);
+
+  /* WFE only when idle and MiniGL is NOT bound */
+  expect_int("decide_wfe_unbound", sched_worker_decide(0, 0, 0, 0), SCHED_WORKER_ACTION_WFE);
+}
+
+static void test_minigl_reset_handshake_flow(void)
+{
+  taskq_shared_t sh;
+  sh.minigl_reset_request = 0;
+  sh.minigl_reset_ack = 0;
+
+  /* Core 0 initiates reset */
+  sh.minigl_reset_request = 1;
+  expect_int("hs_c0_req", sh.minigl_reset_request, 1);
+  expect_int("hs_c0_ack", sh.minigl_reset_ack, 0);
+
+  /* Worker policy responds with RESET action */
+  expect_int("hs_worker_action", sched_worker_decide(sh.minigl_reset_request, 0, 1, 1),
+             SCHED_WORKER_ACTION_RESET);
+
+  /* Core 1 executes reset and acknowledges */
+  sh.minigl_reset_request = 0;
+  sh.minigl_reset_ack = 1;
+
+  /* Core 0 observes ack */
+  expect_int("hs_done_req", sh.minigl_reset_request, 0);
+  expect_int("hs_done_ack", sh.minigl_reset_ack, 1);
+
+  /* Next worker decision is now MiniGL work, not reset */
+  expect_int("hs_next_action", sched_worker_decide(sh.minigl_reset_request, 0, 1, 1),
+             SCHED_WORKER_ACTION_MINIGL);
+
+  /* When ring is empty and MiniGL bound: next action is POLL_IDLE */
+  expect_int("hs_idle_action", sched_worker_decide(sh.minigl_reset_request, 0, 0, 1),
+             SCHED_WORKER_ACTION_POLL_IDLE);
+}
+
 int main(void)
 {
   test_stress_fill_is_deterministic();
@@ -376,6 +431,8 @@ int main(void)
   test_should_drain_gates();
   test_watchdog_trips_at_threshold();
   test_watchdog_success_resets_counter();
+  test_sched_worker_decide_priorities();
+  test_minigl_reset_handshake_flow();
 
   if (failures) {
     printf("scheduler_test: %d failure(s)\n", failures);

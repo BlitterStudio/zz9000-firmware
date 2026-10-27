@@ -37,6 +37,14 @@ int surface_allocator_reserve(uint32_t address, uint32_t size);
 uint32_t surface_allocator_alloc_aligned(uint32_t size, uint32_t alignment);
 
 /* P96 allocation shorthand. */
+
+/* Allocate `size` bytes with at least the requested power-of-two alignment,
+ * constrained to the placement window [lo, hi). For firmware services whose
+ * buffers must land in a specific MMU section (the MiniGL transport window
+ * shares the SDK mailbox's non-cacheable section). Returns 0 on invalid
+ * input or when the window has no fitting gap. */
+uint32_t surface_allocator_alloc_range(uint32_t size, uint32_t alignment,
+                                       uint32_t lo, uint32_t hi);
 uint32_t surface_allocator_alloc(uint32_t size);
 
 /* Free the block starting exactly at `addr`. Returns 0 on success, -1 if
@@ -57,5 +65,3 @@ uint32_t surface_allocator_used_bytes(void);
 uint32_t surface_allocator_total_bytes(void);
 void surface_allocator_free_stats(uint32_t *free_total,
                                   uint32_t *largest_free);
-
-#endif /* SURFACE_ALLOCATOR_H */

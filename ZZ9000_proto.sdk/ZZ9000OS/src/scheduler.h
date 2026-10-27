@@ -145,6 +145,13 @@ typedef struct {                /* coherent control block at the queue region */
    * this for it. */
   volatile uint32_t core1_clean_request;
   volatile uint32_t core1_clean_done;
+  /* MiniGL dual-core coordination */
+  volatile uint32_t minigl_doorbell;        /* core 0 sets 1 on doorbell; core 1 clears 0 */
+  volatile uint32_t minigl_reset_request;   /* core 0 sets 1 on Amiga reset; core 1 clears 0 */
+  volatile uint32_t minigl_reset_ack;       /* core 1 sets 1 after reset executed */
+  volatile uint32_t minigl_in_flight;       /* core 1 sets 1 while executing MiniGL packet */
+  volatile uint32_t minigl_packets_on_core1;/* observability counter */
+  volatile uint32_t minigl_packets_on_core0;/* observability counter (fallback) */
 } taskq_shared_t;
 
 typedef struct {
@@ -172,6 +179,16 @@ int  taskq_has_active(taskq_t *q);         /* any slot still QUEUED or CLAIMED *
 /* ---- dispatch policy (portable) ---- */
 taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len);
 int  taskq_should_drain(int zorro_pending, int display_pending, int core1_enabled);
+typedef enum {
+  SCHED_WORKER_ACTION_RESET,      /* reset requested: execute minigl reset */
+  SCHED_WORKER_ACTION_TASK,       /* queued task available: claim and run task */
+  SCHED_WORKER_ACTION_MINIGL,     /* MiniGL packet available: execute packet slice */
+  SCHED_WORKER_ACTION_POLL_IDLE,  /* no task, MiniGL bound, idle: poll heartbeat + pause */
+  SCHED_WORKER_ACTION_WFE         /* no task, MiniGL not bound: sleep on WFE */
+} sched_worker_action_t;
+
+sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
+                                          int minigl_work_available, int minigl_bound);
 
 /* ---- fault watchdog (portable) ---- */
 void taskq_watchdog_init(taskq_watchdog_t *w, uint32_t threshold);
@@ -187,6 +204,10 @@ int      taskq_stress_check(uint32_t seed, uint32_t index, uint32_t value);
 int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired);
 #ifdef TASKQ_HOST_TEST
 extern int taskq_test_force_cas_fail;  /* >0: force the next N CAS calls to fail */
+#endif
+#if defined(MINIGL_HOST_TEST)
+/* Exercises the exact core-1 MiniGL initialization shared with the worker. */
+void scheduler_core1_host_test_init(taskq_shared_t *sh);
 #endif
 
 #ifndef TASKQ_HOST_TEST

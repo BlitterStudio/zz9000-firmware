@@ -145,6 +145,66 @@ uint32_t surface_allocator_alloc(uint32_t size) {
     return surface_allocator_alloc_aligned(size, SURFACE_ALLOCATOR_ALIGNMENT);
 }
 
+/* First fit constrained to [lo, hi): same walk as alloc_aligned, but a
+ * placement window (firmware services whose buffers need a specific MMU
+ * section) bounds the candidate. Returns 0 when the window has no fit. */
+uint32_t surface_allocator_alloc_range(uint32_t size, uint32_t alignment,
+                                       uint32_t lo, uint32_t hi) {
+    uint32_t rounded;
+    uint32_t candidate;
+    uint32_t insert_at;
+    uint32_t i;
+    uint8_t found = 0;
+
+    if (!size || !alignment || (alignment & (alignment - 1u)) ||
+        lo >= hi || size > UINT32_MAX - (SURFACE_ALLOCATOR_ALIGNMENT - 1u))
+        return 0;
+    rounded = (size + SURFACE_ALLOCATOR_ALIGNMENT - 1u) &
+              ~(SURFACE_ALLOCATOR_ALIGNMENT - 1u);
+
+    sdk_smp_lock_acquire(&sa_lock);
+    if (sa_count >= SURFACE_ALLOCATOR_MAX_BLOCKS || lo < sa_base ||
+        hi > sa_end || rounded > hi - lo) {
+        sdk_smp_lock_release(&sa_lock);
+        return 0;
+    }
+
+    /* First fit inside [lo, hi): gaps below lo are skipped entirely. */
+    candidate = sa_align_up(lo, alignment);
+    insert_at = sa_count;
+    for (i = 0; i < sa_count; i++) {
+        uint32_t baddr = sa_blocks[i].addr;
+        uint32_t bend = baddr + sa_blocks[i].size;
+
+        if (baddr >= hi)
+            break;              /* this and later blocks are past the window */
+        if (bend <= candidate)
+            continue;           /* block ends at/below the candidate */
+        if (baddr >= candidate && baddr - candidate >= rounded) {
+            insert_at = i;      /* gap [candidate, baddr) fits */
+            found = 1;
+            break;
+        }
+        candidate = sa_align_up(bend, alignment);
+        if (candidate < bend || candidate >= hi)
+            break;              /* next gap starts past the window */
+    }
+    if (!found &&
+        (candidate < lo || candidate >= hi || hi - candidate < rounded)) {
+        sdk_smp_lock_release(&sa_lock);
+        return 0;
+    }
+
+    memmove(&sa_blocks[insert_at + 1], &sa_blocks[insert_at],
+            (sa_count - insert_at) * sizeof(struct sa_block));
+    sa_blocks[insert_at].addr = candidate;
+    sa_blocks[insert_at].size = rounded;
+    sa_count++;
+    sa_used += rounded;
+    sdk_smp_lock_release(&sa_lock);
+    return candidate;
+}
+
 int surface_allocator_free(uint32_t addr) {
     int i;
 
