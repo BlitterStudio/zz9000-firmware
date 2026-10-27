@@ -65,3 +65,5 @@ uint32_t surface_allocator_used_bytes(void);
 uint32_t surface_allocator_total_bytes(void);
 void surface_allocator_free_stats(uint32_t *free_total,
                                   uint32_t *largest_free);
+
+#endif /* SURFACE_ALLOCATOR_H */

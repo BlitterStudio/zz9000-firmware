@@ -163,7 +163,7 @@ int minigl_present_copy_rgb565(const ZZ9KMiniGLPacketPresent *p,
 int minigl_present_frame(const ZZ9KMiniGLPacketPresent *p,
                          const uint32_t *color_buffer)
 {
-    const uint32_t length = SDK_SHARED_HEAP_ADDRESS - FRAMEBUFFER_ADDRESS;
+    const uint32_t length = HOST_VISIBLE_HEAP_ADDRESS - FRAMEBUFFER_ADDRESS;
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
     uint32_t y, bytes;
 #endif
@@ -196,7 +196,7 @@ int minigl_present_frame(const ZZ9KMiniGLPacketPresent *p,
 int minigl_present_frame_rgb565(const ZZ9KMiniGLPacketPresent *p,
                                 const uint16_t *color_buffer)
 {
-    const uint32_t length = SDK_SHARED_HEAP_ADDRESS - FRAMEBUFFER_ADDRESS;
+    const uint32_t length = HOST_VISIBLE_HEAP_ADDRESS - FRAMEBUFFER_ADDRESS;
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
     uint32_t y, bytes;
 #endif
