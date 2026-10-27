@@ -631,7 +631,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* The generation-2 Z2 command block is host-visible template scratch and
 	 * must be acknowledged again after every Amiga reset. Z3 keeps its fixed
 	 * command block. */
-	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
+	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
+			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
 	apply_aperture_framebuffer_limit();
 	clear_runtime_gfxdata();
@@ -745,7 +746,8 @@ int main() {
 
 	sd_activity_led_init();
 
-	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
+	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
+			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
 	/* The section split is break-before-make: do it while core 1 is still
 	 * held and no interrupt can touch the framebuffer/PIP section. */

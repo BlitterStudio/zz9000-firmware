@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "sdk_aperture_layout.h"
-#include "memorymap.h"
+#include "mntzorro.h"
 
 static int checks;
 static int failures;
@@ -189,6 +189,65 @@ static void test_runtime_ack_gate(void)
 	CHECK(!sdk_aperture_runtime_ack());
 }
 
+/* REG7 carries capability bits above the Z2 aperture size: bit 30 (gamma
+ * LUT) on every current image, bit 31 (Fast RAM base) on Z3 Fast-RAM
+ * images. Firmware strips them before sizing the aperture, so a Z2 image
+ * still gets its canonical layout and an image with no size stays legacy. */
+static void check_reg7_z2_layout(uint32_t aperture)
+{
+	struct sdk_aperture_layout expected;
+	const struct sdk_aperture_layout *layout;
+	uint32_t reg7 = aperture | MNTZORRO_CAP_GAMMA_LUT;
+
+	CHECK(sdk_aperture_layout_compute(aperture, &expected));
+	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(reg7), 0);
+	layout = sdk_aperture_runtime_layout();
+	CHECK(sdk_aperture_runtime_reported_size() == aperture);
+	CHECK(!sdk_aperture_runtime_is_legacy());
+	CHECK(sdk_aperture_runtime_diag_state() ==
+	      SDK_APERTURE_DIAG_STATE_UNACKNOWLEDGED);
+	CHECK(layout->profile == expected.profile);
+	CHECK(layout->aperture_size == expected.aperture_size);
+	CHECK(layout->framebuffer.base == expected.framebuffer.base);
+	CHECK(layout->framebuffer.size == expected.framebuffer.size);
+	CHECK(layout->pip.base == expected.pip.base);
+	CHECK(layout->pip.size == expected.pip.size);
+	CHECK(layout->template_scratch.base == expected.template_scratch.base);
+	CHECK(layout->template_scratch.size == expected.template_scratch.size);
+	CHECK(layout->host_window.base == expected.host_window.base);
+	CHECK(layout->host_window.size == expected.host_window.size);
+	CHECK(layout->audio.base == expected.audio.base);
+	CHECK(layout->audio.size == expected.audio.size);
+	CHECK(sdk_aperture_runtime_ack());
+}
+
+static void test_reg7_capability_bits(void)
+{
+	CHECK(MNTZORRO_REG7_CAPABILITY_MASK == 0xc0000000UL);
+	CHECK((SDK_APERTURE_BYTES_8M & MNTZORRO_REG7_CAPABILITY_MASK) == 0U);
+
+	check_reg7_z2_layout(SDK_APERTURE_BYTES_2M);
+	CHECK(sdk_aperture_host_window_address() == 0x003d0000U);
+	check_reg7_z2_layout(SDK_APERTURE_BYTES_4M);
+	CHECK(sdk_aperture_host_window_address() == 0x005d0000U);
+
+	/* A Z2 image reporting no aperture size stays on the legacy path. */
+	sdk_aperture_runtime_init(
+		MNTZORRO_REG7_APERTURE_SIZE(MNTZORRO_CAP_GAMMA_LUT), 0);
+	CHECK(sdk_aperture_runtime_reported_size() == 0U);
+	CHECK(sdk_aperture_runtime_is_legacy());
+	CHECK(sdk_aperture_runtime_diag_state() ==
+	      SDK_APERTURE_DIAG_STATE_LEGACY);
+	CHECK(!sdk_aperture_runtime_ack());
+
+	/* zorro3-aga: both capability bits, no Z2 aperture. */
+	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
+		MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000 | MNTZORRO_CAP_GAMMA_LUT), 1);
+	CHECK(sdk_aperture_runtime_reported_size() == 0U);
+	CHECK(sdk_aperture_runtime_is_zorro3());
+	CHECK(!sdk_aperture_runtime_is_legacy());
+}
+
 /* Direct-ring grant geometry (U2): capacities are whole 3840-byte
  * periods, control blocks are 64-byte aligned and non-overlapping, the
  * Z2 leftover makes a second grant arithmetically impossible, and the
@@ -297,6 +356,7 @@ int main(void)
 	test_8m();
 	test_invalid_sizes_and_layouts();
 	test_runtime_ack_gate();
+	test_reg7_capability_bits();
 	test_direct_ring_geometry();
 	test_z2_mailbox_placement();
 	printf("%d checks, %d failures\n", checks, failures);
