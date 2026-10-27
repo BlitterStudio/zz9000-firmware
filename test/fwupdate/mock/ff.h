@@ -47,5 +47,6 @@ FRESULT f_sync(FIL *fp);
 FRESULT f_stat(const char *path, FILINFO *fno);
 FRESULT f_rename(const char *path_old, const char *path_new);
 FRESULT f_unlink(const char *path);
+FRESULT f_mkdir(const char *path);
 
 #endif /* FF_H */

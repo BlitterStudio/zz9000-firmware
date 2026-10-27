@@ -240,6 +240,12 @@ jobs:
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh
 
+      # A tag that disagrees with REVISION_* would make a later ZZTop
+      # offer the same update forever. The script only reads main.c.
+      - name: Check tag matches firmware revision
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: sh util/check_release_version.sh "$GITHUB_REF_NAME"
+
       - name: Package release assets (standard)
         run: |
           set -euo pipefail

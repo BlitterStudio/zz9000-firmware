@@ -79,8 +79,9 @@ int main(int argc, char **argv)
 		     "boot ROM header");
 	checked_copy(rom, sizeof(rom), 0x20, diag_code, diag_code_len,
 		     "diag code");
-	checked_copy(rom, sizeof(rom), ZZSD_DRIVER_OFFSET, zzsd_device,
-		     zzsd_device_len, "zzsd.device");
+	/* The last longword is the FWUP status mirror, not ROM image. */
+	checked_copy(rom, BOOT_ROM_FWUP_MIRROR_OFFSET, ZZSD_DRIVER_OFFSET,
+		     zzsd_device, zzsd_device_len, "zzsd.device");
 
 	if (env_enabled("ZZ9000_BOOTROM_DIAG_STUB")) {
 		write_entry_stub(rom, ZZSD_DA_DIAG_POINT, "DiagPoint stub");

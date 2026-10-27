@@ -20,9 +20,13 @@ struct mock_file {
     int  open;
     char path[MOCK_PATH_MAX];
     char tag[MOCK_TAG_MAX];
+    unsigned char data[MOCK_DATA_MAX]; /* first bytes written via f_write */
+    unsigned data_len;                 /* total bytes written */
 };
 
 static struct mock_file g_files[MOCK_MAX_FILES];
+static char g_dirs[MOCK_MAX_FILES][MOCK_PATH_MAX];
+static int g_dir_count;
 static int g_rename_calls = 0;
 static int g_rename_fail_at = 0;
 
@@ -52,6 +56,8 @@ static int alloc_file(const char *path, const char *tag) {
 
 void mock_reset(void) {
     memset(g_files, 0, sizeof(g_files));
+    memset(g_dirs, 0, sizeof(g_dirs));
+    g_dir_count = 0;
     g_rename_calls = 0;
     g_rename_fail_at = 0;
 }
@@ -85,6 +91,7 @@ FRESULT f_open(FIL *fp, const char *path, unsigned char mode) {
     } else {
         g_files[i].tag[0] = '\0'; /* CREATE_ALWAYS truncates */
     }
+    g_files[i].data_len = 0;
     g_files[i].open = 1;
     fp->idx = i;
     return FR_OK;
@@ -98,12 +105,26 @@ FRESULT f_close(FIL *fp) {
 }
 
 FRESULT f_write(FIL *fp, const void *buff, UINT btw, UINT *bw) {
-    (void)buff;
     if (fp->idx < 0 || fp->idx >= MOCK_MAX_FILES || !g_files[fp->idx].used) {
         return FR_INVALID_OBJECT;
     }
+    struct mock_file *f = &g_files[fp->idx];
+    for (UINT k = 0; k < btw && f->data_len + k < MOCK_DATA_MAX; k++) {
+        f->data[f->data_len + k] = ((const unsigned char *)buff)[k];
+    }
+    f->data_len += btw;
     if (bw) *bw = btw;
     return FR_OK;
+}
+
+const unsigned char *mock_data(const char *path, unsigned *len) {
+    int i = find_file(path);
+    if (i < 0) {
+        *len = 0;
+        return NULL;
+    }
+    *len = g_files[i].data_len;
+    return g_files[i].data;
 }
 
 FRESULT f_sync(FIL *fp) {
@@ -138,5 +159,16 @@ FRESULT f_unlink(const char *path) {
     int i = find_file(path);
     if (i < 0) return FR_NO_FILE;
     g_files[i].used = 0;
+    return FR_OK;
+}
+
+FRESULT f_mkdir(const char *path) {
+    for (int i = 0; i < g_dir_count; i++) {
+        if (strcmp(g_dirs[i], path) == 0) return FR_EXIST;
+    }
+    if (g_dir_count >= MOCK_MAX_FILES) return FR_DISK_ERR;
+    strncpy(g_dirs[g_dir_count], path, MOCK_PATH_MAX - 1);
+    g_dirs[g_dir_count][MOCK_PATH_MAX - 1] = '\0';
+    g_dir_count++;
     return FR_OK;
 }

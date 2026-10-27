@@ -39,6 +39,7 @@
 #include "video.h"
 #include "video_scale.h"
 #include "overlay.h"
+#include "fw_update.h"
 #include "mp3/mp3.h"
 #include "mp3/minimp3.h"
 
@@ -5878,6 +5879,16 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		*result_len = 0U;
 		return overlay_run_compose(p);
 	}
+	case TASKQ_OP_FWUP: {
+		/* Core 1 owns FatFs and the SD card until this retires
+		 * (fw_update_busy holds core 0's users off). */
+		uint16_t r = fw_update_run_staged();
+
+		result_payload[0] = (uint8_t)(r >> 8);
+		result_payload[1] = (uint8_t)r;
+		*result_len = 2U;
+		return SDK_STATUS_OK;
+	}
 	case SDK_OP_IMAGE_SESSION_FEED: {
 		const struct imgsess_op_params *p =
 		    (const struct imgsess_op_params *)d->op_params;
@@ -7730,9 +7741,10 @@ void sdk_mailbox_init(void)
 	 * generation tag stops the stale completion from posting, but only the
 	 * quiesce stops the write itself. No-op at cold boot (core 1 not yet up). */
 	scheduler_quiesce_for_reset();
-	/* internal tasks (video compose) were drained/dropped with the
-	 * queue and will never post their deferred completion */
+	/* internal tasks (video compose, FWUP) were drained/dropped with
+	 * the queue and will never post their deferred completion */
 	overlay_scheduler_reset();
+	fw_update_forget_queued();
 
 	memset((void *)SDK_MAILBOX_ADDRESS, 0, SDK_MAILBOX_TOTAL_SIZE);
 	put_be32(desc->magic, SDK_MAILBOX_MAGIC);
@@ -8009,7 +8021,13 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		 * producer's in-flight marker, dispatched by opcode. */
 		if (opcode == (uint16_t)TASKQ_OP_VIDEO_COMPOSE)
 			overlay_compose_retired(status == SDK_STATUS_OK);
-		else
+		else if (opcode == (uint16_t)TASKQ_OP_FWUP) {
+			if (status == SDK_STATUS_OK && payload && payload_len >= 2U)
+				fw_update_retire((uint16_t)((payload[0] << 8) |
+				                            payload[1]));
+			else
+				fw_update_retire_failed(); /* faulted on core 1 */
+		} else
 			g_audio_playback.refill_pending = 0U; /* AX refill */
 		return 1;
 	}

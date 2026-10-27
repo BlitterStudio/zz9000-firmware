@@ -249,6 +249,13 @@ git tag -a v2.2.0 -m "Firmware 2.2.0"
 git push origin v2.2.0
 ```
 
+Set `REVISION_MAJOR`, `REVISION_MINOR`, and `REVISION_PATCH` in
+`ZZ9000_proto.sdk/ZZ9000OS/src/main.c` to the release version first.
+Tag builds run `util/check_release_version.sh` and fail when the tag
+(ignoring a `-rc1` suffix) disagrees. A 16-bit read of
+`REG_ZZ_FW_VERSION` is still major.minor; the patch is a 16-bit read
+of 0xC2, advertised by capability bit 12. Older firmware reads 0 there.
+
 Tags containing `-` are marked as pre-releases.
 
 CI cannot run Vivado, so it packages variants from committed bitstreams.

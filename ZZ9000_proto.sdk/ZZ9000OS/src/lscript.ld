@@ -44,8 +44,8 @@ SECTIONS
 .text : {
    KEEP (*(.vectors))
    KEEP (*(.boot))
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o) .text)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o) .text.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o *fw_update.o) .text)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o *fw_update.o) .text.*)
    *(.gnu.linkonce.t.*)
    *(.plt)
    *(.gnu_warning)
@@ -67,8 +67,8 @@ SECTIONS
 
 .rodata : {
    __rodata_start = .;
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o) .rodata)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o) .rodata.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o *fw_update.o) .rodata)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o *fw_update.o) .rodata.*)
    *(.gnu.linkonce.r.*)
    __rodata_end = .;
 } > ps7_ddr_0
@@ -353,6 +353,20 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    *usb_proxy_iso.o(.rodata.*)
    . = ALIGN(16);
    __usb_iso_text_end = .;
+} > ps7_ddr_hi
+
+/* FWUP runs only from the initialized service loop. Its core-1 staging
+ * support exceeds the remaining low-DDR headroom on the v2.8.1 layout,
+ * so keep its code with the other non-boot-path services. */
+.fwup_text : {
+   . = ALIGN(16);
+   __fwup_text_start = .;
+   *fw_update.o(.text)
+   *fw_update.o(.text.*)
+   *fw_update.o(.rodata)
+   *fw_update.o(.rodata.*)
+   . = ALIGN(16);
+   __fwup_text_end = .;
 } > ps7_ddr_hi
 
 .bss (NOLOAD) : {
