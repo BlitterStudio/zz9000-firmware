@@ -142,6 +142,21 @@ int surface_allocator_reserve(uint32_t address, uint32_t size)
     return result;
 }
 
+int surface_allocator_release_reservation(uint32_t address)
+{
+    int found;
+    int result = -1;
+
+    sdk_smp_lock_acquire(&sa_lock);
+    found = sa_find(address);
+    if (found >= 0 && sa_blocks[found].owner == SA_OWNER_RESERVED) {
+        sa_remove((uint32_t)found);
+        result = 0;
+    }
+    sdk_smp_lock_release(&sa_lock);
+    return result;
+}
+
 uint32_t surface_allocator_p96_alloc(uint32_t size, uint32_t alignment)
 {
     uint32_t rounded = sa_round_size(size);

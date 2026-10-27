@@ -10,16 +10,21 @@ Ranges below use an exclusive end: `0x00000000`–`0x08000000` is 128 MiB.
 ## Shared Zorro III allocator
 
 Every boundary below is half-open. On Zorro III, `0x00200000`–`0x08200000`
-is one shared allocator interval. P96 CARDMEM allocations scan from the
-bottom upward, so a screen at offset zero stays contiguous. Firmware-owned
-surfaces, capture backing, SDK allocations, and overlay buffers scan from the
-top downward. Neither owner can free the other's blocks.
+becomes one shared allocator interval only after the matched RTG driver writes
+and reads back `REG_ZZ_CARDMEM_PROTOCOL`. Until that acknowledgement, including
+after every Amiga reset, firmware reserves `0x00200000`–`0x033F0000` for the
+legacy P96 allocator and uses the 2.9.0 firmware-only interval above it.
+After acknowledgement P96 CARDMEM allocations scan bottom-up, so a screen at
+offset zero stays contiguous, while firmware-owned surfaces, capture backing,
+SDK allocations, and overlay buffers scan top-down. Neither owner can free the
+other's blocks.
 
 The CARDMEM protocol is enabled only when firmware capability bit 13
-(`ZZ_FW_CAP_P96_CARDMEM`) is advertised. A matched driver uses its accepted
-flag and big-endian offset reply, including an accepted offset of zero. An
-older firmware that lacks bit 13 keeps the driver's previous allocation path;
-it does not attempt CARDMEM commands.
+(`ZZ_FW_CAP_P96_CARDMEM`) is advertised and the board is Zorro III. The driver
+keeps its legacy MemorySize unless the protocol-token readback succeeds. It
+uses the accepted flag and big-endian offset reply, including an accepted offset
+of zero. Zorro II never announces CARDMEM and retains its firmware-only
+interval.
 
 | Range | Size | Use |
 |---|---:|---|

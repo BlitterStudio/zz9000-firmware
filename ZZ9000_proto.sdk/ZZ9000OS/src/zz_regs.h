@@ -77,7 +77,9 @@ enum zz_reg_offsets {
   REG_ZZ_SET_SPLIT_POS  = 0x5E,
 
   REG_ZZ_SET_FEATURE    = 0x60,
-  REG_ZZ_UNUSED_REG62   = 0x62,
+  /* write: matched Z3 driver announces that it owns P96 allocation through
+     ACC_OP_CARDMEM_*; firmware then releases the legacy P96 reservation. */
+  REG_ZZ_CARDMEM_PROTOCOL = 0x62,
   REG_ZZ_UNUSED_REG64   = 0x64,
   REG_ZZ_UNUSED_REG66   = 0x66,
   /* read: asynchronous-send status, bit 15 = present, 14..0 frames done
@@ -207,6 +209,9 @@ enum zz_reg_offsets {
 /* Token written by the RTG driver to REG_ZZ_ALLOC_CLEAR_PROTOCOL at
  * init to activate the conditional ACC surface clear. */
 #define ZZ_REG_ZZ_ALLOC_CLEAR_TOKEN 0x5AC1U
+/* Token written by the matched Z3 RTG driver before it extends MemorySize
+ * to the shared interval. */
+#define ZZ_REG_ZZ_CARDMEM_TOKEN 0xC96DU
 
 #define ZZ_FW_CAP_VIDEOCAP_PROFILE (1U << 0)
 #define ZZ_FW_CAP_VIDEOCAP_LIVE    (1U << 1)

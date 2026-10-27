@@ -28,6 +28,9 @@ void surface_allocator_init(uint32_t base, uint32_t size);
 /* Reserve an immutable fixed ABI range. It can never be freed by either
  * owner and is rounded to the allocator's 256-byte granularity. */
 int surface_allocator_reserve(uint32_t address, uint32_t size);
+/* Release a fixed reservation at exactly `address`. Dynamic allocations
+ * remain protected; only the driver-announcement guard is releasable. */
+int surface_allocator_release_reservation(uint32_t address);
 
 /* P96 allocations scan free space bottom-up. `alignment` is a power of two;
  * zero selects the mandatory 256-byte granularity. */

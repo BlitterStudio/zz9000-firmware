@@ -7,6 +7,30 @@
 #include "memorymap.h"
 #include "surface_allocator.h"
 
+static uint8_t cardmem_acc_enabled;
+
+void cardmem_acc_reset(void)
+{
+    cardmem_acc_enabled = 0U;
+}
+
+int cardmem_acc_announce(int is_zorro3)
+{
+    if (!is_zorro3)
+        return 0;
+    if (cardmem_acc_enabled)
+        return 1;
+    if (surface_allocator_release_reservation(FRAMEBUFFER_ADDRESS) != 0)
+        return 0;
+    cardmem_acc_enabled = 1U;
+    return 1;
+}
+
+int cardmem_acc_is_enabled(void)
+{
+    return cardmem_acc_enabled != 0U;
+}
+
 static uint32_t cardmem_be32(uint32_t value)
 {
     return ((value & 0x000000ffU) << 24) |
@@ -20,7 +44,7 @@ int cardmem_acc_alloc(uint32_t alignment_be, uint32_t size_be,
 {
     uint32_t address;
 
-    if (!reply_be)
+    if (!reply_be || !cardmem_acc_enabled)
         return 0;
     address = surface_allocator_p96_alloc(cardmem_be32(size_be),
                                           cardmem_be32(alignment_be));
@@ -41,7 +65,7 @@ int cardmem_acc_alloc_abs(uint32_t target_be, uint32_t size_be,
     uint32_t size;
     uint32_t address;
 
-    if (!reply_be)
+    if (!reply_be || !cardmem_acc_enabled)
         return 0;
     target = cardmem_be32(target_be);
     size = cardmem_be32(size_be);
@@ -63,7 +87,7 @@ int cardmem_acc_free(uint32_t target_be, uint32_t *reply_be)
 {
     uint32_t target;
 
-    if (!reply_be)
+    if (!reply_be || !cardmem_acc_enabled)
         return 0;
     target = cardmem_be32(target_be);
     *reply_be = 0U;

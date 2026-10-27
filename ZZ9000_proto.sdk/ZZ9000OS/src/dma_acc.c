@@ -13,6 +13,16 @@
 #include "sdk_aperture_layout.h"
 #include "cardmem_acc.h"
 
+#ifndef CARDMEM_UART_LOG
+#define CARDMEM_UART_LOG 0
+#endif
+
+#if CARDMEM_UART_LOG
+#define CARDMEM_LOG(...) printf(__VA_ARGS__)
+#else
+#define CARDMEM_LOG(...) ((void)0)
+#endif
+
 /* Set only by the REG_ZZ_ALLOC_CLEAR_PROTOCOL register write (see
  * main.c); cleared on Amiga reset so a warm reboot re-handshakes. */
 uint8_t alloc_clear_protocol_v2 = 0;
@@ -235,12 +245,12 @@ void handle_acc_op(uint16_t zdata)
                 uint32_t offset = data->offset[0];
 
                 SWAP32(offset);
-                printf("[p96h] alloc +%lx %lu/%lu\n",
-                       (unsigned long)offset,
-                       (unsigned long)size, (unsigned long)alignment);
+                CARDMEM_LOG("[p96h] alloc +%lx %lu/%lu\n",
+                            (unsigned long)offset,
+                            (unsigned long)size, (unsigned long)alignment);
             } else {
-                printf("[p96h] alloc reject %lu/%lu\n",
-                       (unsigned long)size, (unsigned long)alignment);
+                CARDMEM_LOG("[p96h] alloc reject %lu/%lu\n",
+                            (unsigned long)size, (unsigned long)alignment);
             }
             break;
         }
@@ -254,11 +264,11 @@ void handle_acc_op(uint16_t zdata)
                                  &data->offset[0], &data->offset[1],
                                  &data->u8_user[0]);
             if (data->u8_user[0]) {
-                printf("[p96h] abs +%lx %lu\n", (unsigned long)target,
-                       (unsigned long)size);
+                CARDMEM_LOG("[p96h] abs +%lx %lu\n", (unsigned long)target,
+                            (unsigned long)size);
             } else {
-                printf("[p96h] abs reject +%lx %lu\n",
-                       (unsigned long)target, (unsigned long)size);
+                CARDMEM_LOG("[p96h] abs reject +%lx %lu\n",
+                            (unsigned long)target, (unsigned long)size);
             }
             break;
         }
@@ -269,9 +279,9 @@ void handle_acc_op(uint16_t zdata)
             cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &data->offset[0],
                                  0, &data->u8_user[0]);
             if (data->u8_user[0]) {
-                printf("[p96h] free +%lx\n", (unsigned long)target);
+                CARDMEM_LOG("[p96h] free +%lx\n", (unsigned long)target);
             } else {
-                printf("[p96h] free reject +%lx\n", (unsigned long)target);
+                CARDMEM_LOG("[p96h] free reject +%lx\n", (unsigned long)target);
             }
             break;
         }

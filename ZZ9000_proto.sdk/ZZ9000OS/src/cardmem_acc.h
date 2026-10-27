@@ -17,6 +17,12 @@ int cardmem_acc_alloc_abs(uint32_t target_be, uint32_t size_be,
                           uint32_t *reply_be);
 int cardmem_acc_free(uint32_t target_be, uint32_t *reply_be);
 
+/* The shared interval stays guarded until the matched Z3 driver announces
+ * that it will route P96 allocations through these commands. */
+void cardmem_acc_reset(void);
+int cardmem_acc_announce(int is_zorro3);
+int cardmem_acc_is_enabled(void);
+
 enum cardmem_acc_command {
 	CARDMEM_ACC_COMMAND_ALLOC,
 	CARDMEM_ACC_COMMAND_ALLOC_ABS,

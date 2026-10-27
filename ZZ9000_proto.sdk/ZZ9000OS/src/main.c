@@ -70,6 +70,7 @@ void Xil_AssertNonVoid() {}
 #include "sdk_mailbox.h"
 #include "sdk_aperture_layout.h"
 #include "surface_allocator.h"
+#include "cardmem_acc.h"
 #include "card_pool.h"
 #include "overlay.h"
 #include "newlib_heap.h"
@@ -444,6 +445,22 @@ static int reserve_host_control_ranges(void)
 #undef RESERVE_HOST_CONTROL_RANGE
 }
 
+static int reset_host_visible_allocator(int is_zorro3)
+{
+	cardmem_acc_reset();
+	if (is_zorro3) {
+		surface_allocator_init(FRAMEBUFFER_ADDRESS,
+			HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
+		if (surface_allocator_reserve(FRAMEBUFFER_ADDRESS,
+			Z3_P96_VRAM_END - FRAMEBUFFER_ADDRESS) != 0)
+			return 0;
+	} else {
+		surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS,
+			HOST_VISIBLE_HEAP_SIZE);
+	}
+	return reserve_host_control_ranges() && video_videocap_backing_reserve();
+}
+
 static void apply_aperture_framebuffer_limit(void)
 {
 	if ((sdk_aperture_runtime_flags() & SDK_APERTURE_FLAG_VALID) != 0U)
@@ -620,10 +637,10 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	audio_set_interrupt_mask(0);
 	interrupt_enabled_vblank = 0;
 
-	// Drop all host-visible allocations; P96 and SDK clients re-allocate.
-	surface_allocator_init(FRAMEBUFFER_ADDRESS,
-		HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
-	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
+	// Keep the legacy P96 interval reserved until a matched Z3 driver
+	// explicitly takes responsibility for card-memory allocations.
+	if (!reset_host_visible_allocator(
+		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U))
 		printf("[video] host-control or videocap backing unavailable after reset\n");
 	// the overlay shadows lived in that heap: drop the overlay too
 	overlay_amiga_reset(video_state);
@@ -848,9 +865,7 @@ int main() {
 	set_src_window((void *)(uintptr_t)ADDR_ADJ,
 		(void *)(uintptr_t)(ADDR_ADJ + Z3_MAIN_BOARD_WINDOW_SIZE));
 
-	surface_allocator_init(FRAMEBUFFER_ADDRESS,
-		HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
-	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
+	if (!reset_host_visible_allocator(sdk_aperture_runtime_is_zorro3()))
 		printf("[video] host-control or videocap backing unavailable at boot\n");
 
 	xadc_init();
@@ -1849,6 +1864,13 @@ int main() {
 					printf("%04x", (unsigned int)(zdata&0xffff));
 					break;
 				}
+				case REG_ZZ_CARDMEM_PROTOCOL:
+					/* Only a matched Z3 RTG driver may open the shared
+					 * interval. The latch is cleared by every Amiga reset. */
+					if (zdata == ZZ_REG_ZZ_CARDMEM_TOKEN)
+						cardmem_acc_announce(
+							sdk_aperture_runtime_is_zorro3());
+					break;
 				case REG_ZZ_ALLOC_CLEAR_PROTOCOL: {
 					/* Driver init handshake: only after this token
 					 * does the ACC surface allocator honor
@@ -2199,6 +2221,14 @@ int main() {
 						data = (amiga_interrupt_get())<<16;
 						break;
 					}
+					case REG_ZZ_SET_FEATURE:
+						/* REG_ZZ_CARDMEM_PROTOCOL is the low half of
+						 * this 32-bit group. A matched driver reads it
+						 * back after its announce and keeps the legacy
+						 * MemorySize unless firmware accepted the token. */
+						data = cardmem_acc_is_enabled() ?
+							ZZ_REG_ZZ_CARDMEM_TOKEN : 0U;
+						break;
 					case REG_ZZ_AUDIO_SWAB: {
 						// misc status bits (low word was the legacy MP3
 						// FIFO read index; that decoder is gone)

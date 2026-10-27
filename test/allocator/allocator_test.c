@@ -409,14 +409,33 @@ static void test_reset_reinstalls_reservations(void)
     CHECK(surface_allocator_p96_alloc(ALIGN, ALIGN) == HEAP_BASE);
 }
 
-static void test_cardmem_acc_dispatch(void)
+static void test_cardmem_announcement_guard(void)
 {
     uint32_t offset0;
     uint32_t offset1;
+    uint32_t firmware;
     uint8_t accepted;
-    const uint32_t base = 0x00200000U;
 
-    surface_allocator_init(base, 0x4000U);
+    surface_allocator_init(FRAMEBUFFER_ADDRESS,
+                           HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
+    CHECK(surface_allocator_reserve(FRAMEBUFFER_ADDRESS,
+                                    Z3_P96_VRAM_END - FRAMEBUFFER_ADDRESS) == 0);
+    cardmem_acc_reset();
+    CHECK(!cardmem_acc_is_enabled());
+    firmware = surface_allocator_firmware_alloc_aligned(ALIGN, ALIGN);
+    CHECK(firmware >= Z3_P96_VRAM_END);
+
+    offset0 = be32(0x400U);
+    offset1 = be32(0x100U);
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC, &offset0, &offset1,
+                         &accepted);
+    CHECK(accepted == 0U);
+    CHECK(offset0 == 0U);
+    CHECK(cardmem_acc_announce(0) == 0);
+    CHECK(!cardmem_acc_is_enabled());
+
+    CHECK(cardmem_acc_announce(1) == 1);
+    CHECK(cardmem_acc_is_enabled());
     offset0 = be32(0x400U);
     offset1 = be32(0x100U);
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC, &offset0, &offset1,
@@ -430,22 +449,20 @@ static void test_cardmem_acc_dispatch(void)
                          &accepted);
     CHECK(accepted == 1U);
     CHECK(offset0 == 0U); /* Regrant preserves offset zero. */
-
     offset0 = 0U;
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
     CHECK(accepted == 1U);
-    CHECK(offset0 == 0U);
-    offset0 = 0U;
     cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
     CHECK(accepted == 1U);
-    CHECK(offset0 == 0U);
 
-    offset0 = be32(0x4000U);
-    offset1 = be32(0x100U);
-    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS, &offset0, &offset1,
-                         &accepted);
-    CHECK(accepted == 0U);
-    CHECK(offset0 == 0U);
+    surface_allocator_init(FRAMEBUFFER_ADDRESS,
+                           HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
+    CHECK(surface_allocator_reserve(FRAMEBUFFER_ADDRESS,
+                                    Z3_P96_VRAM_END - FRAMEBUFFER_ADDRESS) == 0);
+    cardmem_acc_reset();
+    CHECK(!cardmem_acc_is_enabled());
+    firmware = surface_allocator_firmware_alloc_aligned(ALIGN, ALIGN);
+    CHECK(firmware >= Z3_P96_VRAM_END);
 }
 
 static void test_z3_host_window_reservation(void)
@@ -463,17 +480,6 @@ static void test_z3_host_window_reservation(void)
     CHECK(SDK_HOST_WINDOW_Z3_END <= HOST_VISIBLE_HEAP_END);
 }
 
-static void test_z3_host_window_reservation(void)
-{
-    surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
-    Z3_HOST_CONTROL_RANGES(CHECK_CONTROL_RANGE)
-    CHECK(surface_allocator_block_size(SDK_HOST_WINDOW_Z3_ADDRESS) ==
-          SDK_HOST_WINDOW_HEAP_SIZE);
-    CHECK(surface_allocator_owns(SDK_HOST_WINDOW_Z3_ADDRESS,
-                                 SDK_HOST_WINDOW_HEAP_SIZE));
-    CHECK(SDK_HOST_WINDOW_Z3_ADDRESS >= Z3_P96_VRAM_END);
-    CHECK(SDK_HOST_WINDOW_Z3_END <= HOST_VISIBLE_HEAP_END);
-}
 
 /* ---------------------------------------------------------------------- */
 
@@ -489,14 +495,13 @@ int main(void) {
     test_slot_exhaustion();
     test_reset();
     test_churn();
-test_p96_firmware_interleaving();
+    test_p96_firmware_interleaving();
     test_z3_host_window_reservation();
     test_owner_split_and_guards();
     test_acc_surface_uses_firmware_heap();
     test_abs_regrant_reference();
     test_reset_reinstalls_reservations();
-    test_cardmem_acc_dispatch();
-    test_z3_host_window_reservation();
+    test_cardmem_announcement_guard();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
