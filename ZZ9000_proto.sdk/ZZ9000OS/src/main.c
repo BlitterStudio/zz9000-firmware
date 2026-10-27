@@ -41,6 +41,7 @@ void Xil_AssertNonVoid() {}
 #include "memorymap.h"
 #include "mntzorro.h"
 #include "video.h"
+#include "gamma.h"
 #include "hdmi.h"
 #include "gfx.h"
 #include "ethernet.h"
