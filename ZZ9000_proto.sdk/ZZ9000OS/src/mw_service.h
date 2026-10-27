@@ -53,6 +53,20 @@ extern "C" {
 #define MW_WINDOW_SIZE_Z2_1SLOT \
     (MW_WINDOW_REPLY_OFFSET_Z2_1SLOT + MW_DEFAULT_REPLY_CAPACITY_Z2)
 
+/*
+ * Worker drain guard rails. The window is raw host-visible heap memory: a
+ * compliant host can never be more than slot_count ring packets ahead of
+ * the firmware, so a gap far beyond that means uninitialized or destroyed
+ * control memory. The worker resynchronizes instead of draining a phantom
+ * backlog, and one mw_service_poll() call never drains more than
+ * MW_POLL_MAX_RING_BATCH ring packets, so a bad transport can never wedge
+ * the worker (or starve core 0 / flood the UART) inside a single poll.
+ */
+#define MW_RING_MAX_OUTSTANDING 1024U
+#define MW_POLL_MAX_RING_BATCH    64U
+/* Reject diagnostics: log the first reject, then one line per this many. */
+#define MW_REJECT_LOG_INTERVAL  1024U
+
 /* Control Block: Exactly 128 bytes, 64-byte ownership partition */
 typedef struct ZZ9KMiniGLControlBlockV9 {
     /* Bytes 0..63: Firmware Ownership */
@@ -215,6 +229,10 @@ uint32_t mw_service_transport_window_size(void);
 #if defined(MINIGL_HOST_TEST)
 void mw_service_set_host_vram(void *base, uint32_t limit_arm);
 #endif
+/* Number of reject diagnostics the service has emitted (throttled by
+ * MW_REJECT_LOG_INTERVAL); observable so host tests can prove a reject
+ * storm cannot flood the UART. */
+uint32_t mw_service_reject_log_events(void);
 
 #ifdef __cplusplus
 }

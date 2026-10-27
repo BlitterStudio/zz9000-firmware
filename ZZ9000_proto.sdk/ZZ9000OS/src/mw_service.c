@@ -52,12 +52,33 @@ static uint32_t mw_packet_first_opcode(const uint8_t *packet, uint32_t bytes)
     return packet && bytes >= 24U ? mw_be32(packet + 16U) : 0U;
 }
 
+static uint32_t g_reject_total;
+static uint32_t g_reject_since_log;
+static uint32_t g_reject_log_events;
+
 static void mw_log_reject(uint32_t status, uint32_t opcode)
 {
     (void)status;
     (void)opcode;
-    MW_DIAG("[MGL9] reject status=%08lx opcode=%08lx\n",
-            (unsigned long)status, (unsigned long)opcode);
+    g_reject_total++;
+    g_reject_since_log++;
+    /* printf on the worker shares the polled UART FIFO with core 0 with no
+     * arbitration: an unthrottled reject print per packet can monopolize
+     * the FIFO, starve core 0's console (and its boot), and drown every
+     * other diagnostic. Log the first reject, then one line per
+     * MW_REJECT_LOG_INTERVAL with the suppressed count. */
+    if (g_reject_total == 1U || g_reject_since_log >= MW_REJECT_LOG_INTERVAL) {
+        MW_DIAG("[MGL9] reject status=%08lx opcode=%08lx (suppressed %lu)\n",
+                (unsigned long)status, (unsigned long)opcode,
+                (unsigned long)(g_reject_since_log - 1U));
+        g_reject_log_events++;
+        g_reject_since_log = 0;
+    }
+}
+
+uint32_t mw_service_reject_log_events(void)
+{
+    return g_reject_log_events;
 }
 #if defined(MINIGL_HOST_TEST)
 static uint8_t *g_host_vram_base = NULL;
@@ -147,6 +168,16 @@ int mw_service_bind_region(volatile void *region, uint32_t size)
     }
 
     g_ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)region;
+
+    /* The window is one raw allocation from the host-visible heap
+     * (surface_allocator_alloc_range): it holds whatever DDR last held --
+     * at power-on typically all ones. A fresh binding must present a
+     * quiescent transport, so zero BOTH ownership halves of the control
+     * and status blocks: the worker then sees producer_seq/op_seq 0 ("no
+     * host has opened the transport yet") instead of a garbage backlog it
+     * would drain one rejected packet at a time. */
+    memset((void *)(uintptr_t)region, 0,
+           sizeof(ZZ9KMiniGLControlBlockV9) + sizeof(ZZ9KMiniGLStatusV9));
     g_status = (volatile ZZ9KMiniGLStatusV9 *)((uint8_t *)region + sizeof(ZZ9KMiniGLControlBlockV9));
 
     if (size >= MW_WINDOW_SIZE_Z3) { /* Full Z3 layout with 256K slots and 64K reply */
@@ -201,15 +232,29 @@ void mw_service_init(void)
     g_ctrl->magic = MW_SERVICE_MAGIC;
     g_ctrl->transport_version = MW_SERVICE_TRANSPORT_VER;
     g_ctrl->wire_version = MW_SERVICE_WIRE_VER;
-    g_ctrl->consumer_seq = 0;
-    g_ctrl->completion_fence = 0;
+    /* Absorb host progress instead of replaying it: re-init runs on core-1
+     * (re)start and on transport resets, where the host-owned counters can
+     * be ahead of the firmware-owned ones. Resetting consumer_seq to 0
+     * would re-drain every slot retired before the re-init as a phantom
+     * backlog (stale-packet replay); adopting producer_seq retires them. */
+    g_ctrl->consumer_seq = g_ctrl->producer_seq;
+    g_ctrl->completion_fence = g_ctrl->producer_seq;
     g_ctrl->slot_capacity = MW_DEFAULT_SLOT_CAPACITY_Z3;
     g_ctrl->slot_count = MW_DEFAULT_SLOT_COUNT_Z3;
     g_ctrl->firmware_heartbeat = 0;
-    g_ctrl->op_status = 0;
     g_ctrl->op_reply_bytes = 0;
-    g_ctrl->op_done_seq = 0;
     g_ctrl->op_reply_handle = 0;
+    /* Same for a synchronous op left pending by a previous worker life:
+     * complete it with CONTEXT_LOST rather than re-executing stale op
+     * fields. A host waiting on the fence observes the error and recovers
+     * via the generation change; a freshly bound window has op_seq 0, so
+     * nothing is published there. */
+    if (g_ctrl->op_seq != g_ctrl->op_done_seq) {
+        g_ctrl->op_status = MW_STATUS_CONTEXT_LOST;
+        g_ctrl->op_done_seq = g_ctrl->op_seq;
+    } else {
+        g_ctrl->op_status = 0;
+    }
     /* Initialize status block */
     if (g_status) {
         g_status->generation = g_generation;
@@ -405,38 +450,56 @@ int mw_service_poll(void)
         g_status->trace_fallback_reason = minigl_raster_first_fallback_reason();
     }
 
-    /* 1. Process asynchronous command packets from slot ring */
-    while (g_ctrl->consumer_seq < g_ctrl->producer_seq) {
-        uint32_t slot_idx = g_ctrl->consumer_seq % g_ctrl->slot_count;
-        const uint8_t *slot_buf = g_slot_ptrs[slot_idx];
+    /* 1. Process asynchronous command packets from slot ring.
+     * Guard rails: a gap no compliant host can produce means uninitialized
+     * or destroyed control memory -- resynchronize once instead of
+     * draining a phantom backlog (the boot-loop failure), and never drain
+     * more than MW_POLL_MAX_RING_BATCH packets per call so this poll
+     * always returns to its scheduler. */
+    uint32_t producer = g_ctrl->producer_seq;
+    uint32_t outstanding = producer - g_ctrl->consumer_seq;
+    uint32_t batch;
 
-        if (slot_buf) {
-            uint32_t packet_bytes = mw_be32(slot_buf + 8);
-            uint32_t target_handle = g_ctrl->op_handle ? g_ctrl->op_handle : g_active_handle;
-            mw_ctx *c = mw_service_find_context(target_handle);
-
-            if (c && packet_bytes >= 16 && packet_bytes <= g_ctrl->slot_capacity) {
-                uint32_t opcode = 0U;
-                uint32_t status = mw_validate_packet_report(slot_buf, packet_bytes, &opcode);
-                if (status == MW_STATUS_OK)
-                    status = mw_host_submit(c, slot_buf, packet_bytes);
-                g_ctrl->op_status = status;
-                if (status != MW_STATUS_OK)
-                    mw_log_reject(status, opcode);
-            } else if (!c) {
-                g_ctrl->op_status = MW_STATUS_CONTEXT_LOST;
-                mw_log_reject(g_ctrl->op_status,
-                              mw_packet_first_opcode(slot_buf, packet_bytes));
-            } else {
-                g_ctrl->op_status = MW_STATUS_INVALID;
-                mw_log_reject(g_ctrl->op_status,
-                              mw_packet_first_opcode(slot_buf, packet_bytes));
-            }
-        }
-
-        g_ctrl->consumer_seq++;
-        g_ctrl->completion_fence = g_ctrl->consumer_seq;
+    if (outstanding > MW_RING_MAX_OUTSTANDING) {
+        g_ctrl->consumer_seq = producer;
+        g_ctrl->completion_fence = producer;
+        mw_log_reject(MW_STATUS_INVALID, 0U);
         work_done++;
+    } else {
+        batch = (outstanding < MW_POLL_MAX_RING_BATCH) ? outstanding
+                                                       : MW_POLL_MAX_RING_BATCH;
+        while (batch--) {
+            uint32_t slot_idx = g_ctrl->consumer_seq % g_ctrl->slot_count;
+            const uint8_t *slot_buf = g_slot_ptrs[slot_idx];
+
+            if (slot_buf) {
+                uint32_t packet_bytes = mw_be32(slot_buf + 8);
+                uint32_t target_handle = g_ctrl->op_handle ? g_ctrl->op_handle : g_active_handle;
+                mw_ctx *c = mw_service_find_context(target_handle);
+
+                if (c && packet_bytes >= 16 && packet_bytes <= g_ctrl->slot_capacity) {
+                    uint32_t opcode = 0U;
+                    uint32_t status = mw_validate_packet_report(slot_buf, packet_bytes, &opcode);
+                    if (status == MW_STATUS_OK)
+                        status = mw_host_submit(c, slot_buf, packet_bytes);
+                    g_ctrl->op_status = status;
+                    if (status != MW_STATUS_OK)
+                        mw_log_reject(status, opcode);
+                } else if (!c) {
+                    g_ctrl->op_status = MW_STATUS_CONTEXT_LOST;
+                    mw_log_reject(g_ctrl->op_status,
+                                  mw_packet_first_opcode(slot_buf, packet_bytes));
+                } else {
+                    g_ctrl->op_status = MW_STATUS_INVALID;
+                    mw_log_reject(g_ctrl->op_status,
+                                  mw_packet_first_opcode(slot_buf, packet_bytes));
+                }
+            }
+
+            g_ctrl->consumer_seq++;
+            g_ctrl->completion_fence = g_ctrl->consumer_seq;
+            work_done++;
+        }
     }
 
     /* 2. Process synchronous bridge operations (op_code != 0) */

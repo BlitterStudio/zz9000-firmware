@@ -325,6 +325,29 @@ To minimize bus turnaround latency, the transport uses **double-buffered packet 
      - Updates `g_ctrl->consumer_seq = ++consumer_seq`.
      - Updates `g_ctrl->completion_fence`.
 
+   Consumer guard rails (firmware 2.9.x hardening, from the A4000 boot-loop
+   postmortem: the window is a raw host-visible heap allocation, and
+   uninitialized control memory read as `producer_seq = 0xffffffff`, which
+   the worker drained one rejected packet at a time with an unthrottled
+   diagnostic print per packet, flooding the shared polled UART and
+   starving core 0's console while the Amiga waited on the bus):
+   - **Quiescent binding**: `mw_service_bind_region` zeroes both ownership
+     halves of the control and status blocks before publishing, so a fresh
+     window presents `producer_seq = op_seq = 0` ("no host has opened the
+     transport yet") whatever the DDR last held.
+   - **Absorbing re-init**: `mw_service_init` (core-1 start/restart,
+     transport reset) adopts `consumer_seq = producer_seq` and completes a
+     pending synchronous op with `CONTEXT_LOST`, so retired slots are never
+     replayed as a phantom backlog.
+   - **Bounded drain**: one `mw_service_poll` call drains at most 64 ring
+     packets, and a gap larger than 1024 -- impossible for a compliant
+     host, which can be at most `slot_count` packets ahead -- is treated as
+     destroyed control memory and resynchronized (`consumer_seq =
+     producer_seq`) in a single step.
+   - **Throttled rejects**: reject diagnostics log the first rejection and
+     then one line per 1024 with the suppressed count; a bad transport can
+     never monopolize the UART FIFO shared with core 0.
+
 ### 4.3 Doorbell Signaling via MNTZorro
 - The 68k signals the card by writing to the 16-bit doorbell register:
   - Zorro III Direct Register: `cd_BoardAddr + 0x1108` (`ZZ9K_REG_SDK_DOORBELL`).
