@@ -307,9 +307,9 @@ static void test_probe_and_handshake(void)
 
     /* 3. Missing Wire-v9 capability bit */
     volatile ZZ9KMiniGLStatusV9 *st = (volatile ZZ9KMiniGLStatusV9 *)(g_card_mem + 0x06E10080UL);
-    st->capabilities = 0;
+    mw_wire_st32(&st->capabilities, 0);
     assert(amiberry_transport_zz9000_probe() == NULL);
-    st->capabilities = (1U << 18);
+    mw_wire_st32(&st->capabilities, (1U << 18));
 
     /* Re-probe succeeds */
     transport = amiberry_transport_zz9000_probe();
@@ -939,12 +939,12 @@ static void test_scheduler_core1_initialization_preserves_wire_v9(void)
     scheduler_core1_host_test_init(&scheduler_shared);
 
     assert(scheduler_shared.core1_alive == 1);
-    assert(ctrl->magic == MW_SERVICE_MAGIC);
-    assert(ctrl->transport_version == MW_SERVICE_TRANSPORT_VER);
-    assert(ctrl->wire_version == MW_SERVICE_WIRE_VER);
-    assert(ctrl->slot_capacity == MW_DEFAULT_SLOT_CAPACITY_Z3);
-    assert(ctrl->slot_count == MW_DEFAULT_SLOT_COUNT_Z3);
-    assert(status->capabilities == (1U << 18));
+    assert(mw_wire_ld32(&ctrl->magic) == MW_SERVICE_MAGIC);
+    assert(mw_wire_ld16(&ctrl->transport_version) == MW_SERVICE_TRANSPORT_VER);
+    assert(mw_wire_ld16(&ctrl->wire_version) == MW_SERVICE_WIRE_VER);
+    assert(mw_wire_ld32(&ctrl->slot_capacity) == MW_DEFAULT_SLOT_CAPACITY_Z3);
+    assert(mw_wire_ld32(&ctrl->slot_count) == MW_DEFAULT_SLOT_COUNT_Z3);
+    assert(mw_wire_ld32(&status->capabilities) == (1U << 18));
     assert(memcmp(control_host_bytes, (const uint8_t *)ctrl + 64,
                   sizeof(control_host_bytes)) == 0);
     assert(memcmp(status_host_bytes, (const uint8_t *)status + 64,

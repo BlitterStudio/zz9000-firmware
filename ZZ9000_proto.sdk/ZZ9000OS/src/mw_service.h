@@ -67,7 +67,9 @@ extern "C" {
 /* Reject diagnostics: log the first reject, then one line per this many. */
 #define MW_REJECT_LOG_INTERVAL  1024U
 
-/* Control Block: Exactly 128 bytes, 64-byte ownership partition */
+/* Control Block: Exactly 128 bytes, 64-byte ownership partition. All
+ * multi-byte fields are big-endian wire values (the 68k library reads
+ * them directly), so use the mw_wire_* helpers below. */
 typedef struct ZZ9KMiniGLControlBlockV9 {
     /* Bytes 0..63: Firmware Ownership */
     uint32_t magic;              /* 0x4D474C39 ('MGL9') */
@@ -97,7 +99,9 @@ typedef struct ZZ9KMiniGLControlBlockV9 {
     const uint8_t  host_reserved[28];
 } __attribute__((packed, aligned(64))) ZZ9KMiniGLControlBlockV9;
 
-/* Status Block: Exactly 128 bytes, 64-byte ownership partition */
+/* Status Block: Exactly 128 bytes, 64-byte ownership partition. All
+ * multi-byte fields are big-endian wire values (the 68k library reads
+ * them directly), so use the mw_wire_* helpers below. */
 typedef struct ZZ9KMiniGLStatusV9 {
     /* Bytes 0..63: Firmware Ownership */
     uint32_t generation;
@@ -124,6 +128,40 @@ typedef struct ZZ9KMiniGLStatusV9 {
     uint8_t  host_reserved[52];
 } __attribute__((packed, aligned(64))) ZZ9KMiniGLStatusV9;
 
+/* Big-endian load/store for the shared control/status block fields: the
+ * consumer is the big-endian 68k library, so the wire image is
+ * big-endian (same convention as the transport descriptor and the wire
+ * packets) even though the ARM (and host test builds) are little-endian.
+ * Byte-wise access also works on any host, keeping the host tests
+ * faithful to the hardware layout. */
+static inline uint32_t mw_wire_ld32(const volatile uint32_t *field)
+{
+	const volatile uint8_t *b = (const volatile uint8_t *)field;
+	return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+	       ((uint32_t)b[2] << 8) | (uint32_t)b[3];
+}
+
+static inline void mw_wire_st32(volatile uint32_t *field, uint32_t value)
+{
+	volatile uint8_t *b = (volatile uint8_t *)field;
+	b[0] = (uint8_t)(value >> 24);
+	b[1] = (uint8_t)(value >> 16);
+	b[2] = (uint8_t)(value >> 8);
+	b[3] = (uint8_t)value;
+}
+
+static inline uint16_t mw_wire_ld16(const volatile uint16_t *field)
+{
+	const volatile uint8_t *b = (const volatile uint8_t *)field;
+	return (uint16_t)(((uint16_t)b[0] << 8) | (uint16_t)b[1]);
+}
+
+static inline void mw_wire_st16(volatile uint16_t *field, uint16_t value)
+{
+	volatile uint8_t *b = (volatile uint8_t *)field;
+	b[0] = (uint8_t)(value >> 8);
+	b[1] = (uint8_t)value;
+}
 
 /*
  * Versioned transport allocation descriptor, published big-endian at a

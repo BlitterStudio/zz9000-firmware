@@ -191,6 +191,13 @@ unavailable; the library's probe fails with
 backend falls back exactly as on firmware built without the service.
 
 ### 3.4 Ownership Blocks and Alignment
+
+**Byte order**: every multi-byte field in the Control and Status Blocks is
+a big-endian wire value, matching the transport descriptor and the wire
+packet framing. The little-endian ARM firmware serializes them with
+byte-order-explicit stores; the 68k library reads and writes them
+natively.
+
 Cache line sharing between the 68k (up to 16 bytes on 68040/060; 64 bytes for bursting) and ARM Cortex-A9 (32-byte L1, 32-byte L2) presents false-sharing risks.
 - **Rule**: All shared control structures are divided into independent 64-byte blocks.
 - **Firmware Block (Bytes 0..63)**: Written only by ARM; read-only to 68k.

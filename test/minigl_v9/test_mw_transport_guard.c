@@ -29,10 +29,10 @@ static volatile ZZ9KMiniGLControlBlockV9 *bind_all_ones(void)
 }
 
 /* The host-owned control fields are declared const (firmware never writes
- * them); tests play the 68k host, so write through an explicit cast. */
+ * them); tests play the 68k host, which stores big-endian wire values. */
 static void set_host_u32(const volatile uint32_t *field, uint32_t value)
 {
-    *(volatile uint32_t *)(void *)field = value;
+    mw_wire_st32((volatile uint32_t *)(void *)field, value);
 }
 static void test_bind_zeroes_control_memory(void)
 {
@@ -40,21 +40,21 @@ static void test_bind_zeroes_control_memory(void)
     volatile ZZ9KMiniGLStatusV9 *status =
         (volatile ZZ9KMiniGLStatusV9 *)(void *)(g_window + MW_WINDOW_STATUS_OFFSET);
 
-    assert(ctrl->magic == MW_SERVICE_MAGIC);
-    assert(ctrl->consumer_seq == 0);
-    assert(ctrl->completion_fence == 0);
-    assert(ctrl->op_done_seq == 0);
-    assert(ctrl->slot_capacity == MW_DEFAULT_SLOT_CAPACITY_Z3);
-    assert(ctrl->slot_count == MW_DEFAULT_SLOT_COUNT_Z3);
+    assert(mw_wire_ld32(&ctrl->magic) == MW_SERVICE_MAGIC);
+    assert(mw_wire_ld32(&ctrl->consumer_seq) == 0);
+    assert(mw_wire_ld32(&ctrl->completion_fence) == 0);
+    assert(mw_wire_ld32(&ctrl->op_done_seq) == 0);
+    assert(mw_wire_ld32(&ctrl->slot_capacity) == MW_DEFAULT_SLOT_CAPACITY_Z3);
+    assert(mw_wire_ld32(&ctrl->slot_count) == MW_DEFAULT_SLOT_COUNT_Z3);
 
     /* Host ownership half: no host has opened the transport yet. */
-    assert(ctrl->producer_seq == 0);
-    assert(ctrl->active_slot == 0);
-    assert(ctrl->op_code == 0);
-    assert(ctrl->op_handle == 0);
-    assert(ctrl->op_seq == 0);
+    assert(mw_wire_ld32(&ctrl->producer_seq) == 0);
+    assert(mw_wire_ld32(&ctrl->active_slot) == 0);
+    assert(mw_wire_ld32(&ctrl->op_code) == 0);
+    assert(mw_wire_ld32(&ctrl->op_handle) == 0);
+    assert(mw_wire_ld32(&ctrl->op_seq) == 0);
 
-    assert(status->capabilities == (1U << 18));
+    assert(mw_wire_ld32(&status->capabilities) == (1U << 18));
     assert(mw_service_has_work() == 0);
     printf("PASS: test_bind_zeroes_control_memory\n");
 }
@@ -74,10 +74,10 @@ static void test_reinit_absorbs_host_progress(void)
 
     mw_service_init();
 
-    assert(ctrl->consumer_seq == 47U);
-    assert(ctrl->completion_fence == 47U);
-    assert(ctrl->op_done_seq == 5U);
-    assert(ctrl->op_status == MW_STATUS_CONTEXT_LOST);
+    assert(mw_wire_ld32(&ctrl->consumer_seq) == 47U);
+    assert(mw_wire_ld32(&ctrl->completion_fence) == 47U);
+    assert(mw_wire_ld32(&ctrl->op_done_seq) == 5U);
+    assert(mw_wire_ld32(&ctrl->op_status) == MW_STATUS_CONTEXT_LOST);
     assert(mw_service_has_work() == 0);
     printf("PASS: test_reinit_absorbs_host_progress\n");
 }
@@ -97,8 +97,8 @@ static void test_poll_garbage_producer_resyncs_once(void)
      * a time (here: 4294967295 iterations); the resync retires it at once. */
     assert(done >= 1);
     assert(done <= (int)MW_POLL_MAX_RING_BATCH + 1);
-    assert(ctrl->consumer_seq == 0xffffffffU);
-    assert(ctrl->completion_fence == 0xffffffffU);
+    assert(mw_wire_ld32(&ctrl->consumer_seq) == 0xffffffffU);
+    assert(mw_wire_ld32(&ctrl->completion_fence) == 0xffffffffU);
     assert(mw_service_has_work() == 0);
     printf("PASS: test_poll_garbage_producer_resyncs_once\n");
 }
@@ -110,14 +110,14 @@ static void test_poll_ring_drain_is_batched(void)
     volatile ZZ9KMiniGLControlBlockV9 *ctrl = bind_all_ones();
 
     set_host_u32((volatile uint32_t *)&ctrl->producer_seq,
-                 ctrl->consumer_seq + 100U);
+                 mw_wire_ld32(&ctrl->consumer_seq) + 100U);
     assert(mw_service_poll() == (int)MW_POLL_MAX_RING_BATCH);
-    assert(ctrl->consumer_seq == MW_POLL_MAX_RING_BATCH);
+    assert(mw_wire_ld32(&ctrl->consumer_seq) == MW_POLL_MAX_RING_BATCH);
     assert(mw_service_has_work());
 
     assert(mw_service_poll() == (int)(100U - MW_POLL_MAX_RING_BATCH));
-    assert(ctrl->consumer_seq == 100U);
-    assert(ctrl->completion_fence == 100U);
+    assert(mw_wire_ld32(&ctrl->consumer_seq) == 100U);
+    assert(mw_wire_ld32(&ctrl->completion_fence) == 100U);
     assert(mw_service_has_work() == 0);
     printf("PASS: test_poll_ring_drain_is_batched\n");
 }
@@ -135,11 +135,11 @@ static void test_reject_log_is_throttled(void)
         uint32_t round = rejects < MW_POLL_MAX_RING_BATCH ? rejects
                                                           : MW_POLL_MAX_RING_BATCH;
         set_host_u32((volatile uint32_t *)&ctrl->producer_seq,
-                     ctrl->consumer_seq + round);
+                     mw_wire_ld32(&ctrl->consumer_seq) + round);
         (void)mw_service_poll();
         rejects -= round;
     }
-    assert(ctrl->consumer_seq == ctrl->producer_seq);
+    assert(mw_wire_ld32(&ctrl->consumer_seq) == mw_wire_ld32(&ctrl->producer_seq));
 
     events_after = mw_service_reject_log_events();
     assert(events_after > events_before);

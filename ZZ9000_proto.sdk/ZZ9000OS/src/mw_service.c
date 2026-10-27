@@ -186,24 +186,24 @@ int mw_service_bind_region(volatile void *region, uint32_t size)
         g_reply_ptr = (uint8_t *)region + MW_WINDOW_REPLY_OFFSET_Z3;
         g_is_bound = 1;
         mw_service_init();
-        g_ctrl->slot_capacity = MW_DEFAULT_SLOT_CAPACITY_Z3;
-        g_ctrl->slot_count = MW_DEFAULT_SLOT_COUNT_Z3;
+        mw_wire_st32(&g_ctrl->slot_capacity, MW_DEFAULT_SLOT_CAPACITY_Z3);
+        mw_wire_st32(&g_ctrl->slot_count, MW_DEFAULT_SLOT_COUNT_Z3);
     } else if (size >= MW_WINDOW_SIZE_Z2_2SLOT) { /* Zorro II layout with 64K slots (2 slots + 16K reply) */
         g_slot_ptrs[0] = (uint8_t *)region + MW_WINDOW_SLOT0_OFFSET;
         g_slot_ptrs[1] = (uint8_t *)region + MW_WINDOW_SLOT0_OFFSET + MW_WINDOW_SLOT_STRIDE_Z2;
         g_reply_ptr = (uint8_t *)region + MW_WINDOW_REPLY_OFFSET_Z2_2SLOT;
         g_is_bound = 1;
         mw_service_init();
-        g_ctrl->slot_capacity = MW_DEFAULT_SLOT_CAPACITY_Z2;
-        g_ctrl->slot_count = MW_DEFAULT_SLOT_COUNT_Z2;
+        mw_wire_st32(&g_ctrl->slot_capacity, MW_DEFAULT_SLOT_CAPACITY_Z2);
+        mw_wire_st32(&g_ctrl->slot_count, MW_DEFAULT_SLOT_COUNT_Z2);
     } else if (size >= MW_WINDOW_SIZE_Z2_1SLOT) { /* Zorro II single slot layout (1 slot + 16K reply) */
         g_slot_ptrs[0] = (uint8_t *)region + MW_WINDOW_SLOT0_OFFSET;
         g_slot_ptrs[1] = NULL;
         g_reply_ptr = (uint8_t *)region + MW_WINDOW_REPLY_OFFSET_Z2_1SLOT;
         g_is_bound = 1;
         mw_service_init();
-        g_ctrl->slot_capacity = MW_DEFAULT_SLOT_CAPACITY_Z2;
-        g_ctrl->slot_count = 1U;
+        mw_wire_st32(&g_ctrl->slot_capacity, MW_DEFAULT_SLOT_CAPACITY_Z2);
+        mw_wire_st32(&g_ctrl->slot_count, 1U);
     } else {
         g_slot_ptrs[0] = NULL;
         g_slot_ptrs[1] = NULL;
@@ -229,48 +229,50 @@ void mw_service_init(void)
         return;
 
     /* Initialize firmware ownership block (bytes 0..63) */
-    g_ctrl->magic = MW_SERVICE_MAGIC;
-    g_ctrl->transport_version = MW_SERVICE_TRANSPORT_VER;
-    g_ctrl->wire_version = MW_SERVICE_WIRE_VER;
+    mw_wire_st32(&g_ctrl->magic, MW_SERVICE_MAGIC);
+    mw_wire_st16(&g_ctrl->transport_version, MW_SERVICE_TRANSPORT_VER);
+    mw_wire_st16(&g_ctrl->wire_version, MW_SERVICE_WIRE_VER);
     /* Absorb host progress instead of replaying it: re-init runs on core-1
      * (re)start and on transport resets, where the host-owned counters can
      * be ahead of the firmware-owned ones. Resetting consumer_seq to 0
      * would re-drain every slot retired before the re-init as a phantom
      * backlog (stale-packet replay); adopting producer_seq retires them. */
-    g_ctrl->consumer_seq = g_ctrl->producer_seq;
-    g_ctrl->completion_fence = g_ctrl->producer_seq;
-    g_ctrl->slot_capacity = MW_DEFAULT_SLOT_CAPACITY_Z3;
-    g_ctrl->slot_count = MW_DEFAULT_SLOT_COUNT_Z3;
-    g_ctrl->firmware_heartbeat = 0;
-    g_ctrl->op_reply_bytes = 0;
-    g_ctrl->op_reply_handle = 0;
+    mw_wire_st32(&g_ctrl->consumer_seq, mw_wire_ld32(&g_ctrl->producer_seq));
+    mw_wire_st32(&g_ctrl->completion_fence, mw_wire_ld32(&g_ctrl->producer_seq));
+    mw_wire_st32(&g_ctrl->slot_capacity, MW_DEFAULT_SLOT_CAPACITY_Z3);
+    mw_wire_st32(&g_ctrl->slot_count, MW_DEFAULT_SLOT_COUNT_Z3);
+    mw_wire_st32(&g_ctrl->firmware_heartbeat, 0);
+    mw_wire_st32(&g_ctrl->op_reply_bytes, 0);
+    mw_wire_st32(&g_ctrl->op_reply_handle, 0);
     /* Same for a synchronous op left pending by a previous worker life:
      * complete it with CONTEXT_LOST rather than re-executing stale op
      * fields. A host waiting on the fence observes the error and recovers
      * via the generation change; a freshly bound window has op_seq 0, so
      * nothing is published there. */
-    if (g_ctrl->op_seq != g_ctrl->op_done_seq) {
-        g_ctrl->op_status = MW_STATUS_CONTEXT_LOST;
-        g_ctrl->op_done_seq = g_ctrl->op_seq;
+    if (mw_wire_ld32(&g_ctrl->op_seq) != mw_wire_ld32(&g_ctrl->op_done_seq)) {
+        mw_wire_st32(&g_ctrl->op_status, MW_STATUS_CONTEXT_LOST);
+        mw_wire_st32(&g_ctrl->op_done_seq, mw_wire_ld32(&g_ctrl->op_seq));
     } else {
-        g_ctrl->op_status = 0;
+        mw_wire_st32(&g_ctrl->op_status, 0);
     }
     /* Initialize status block */
     if (g_status) {
-        g_status->generation = g_generation;
-        g_status->error = 0;
-        g_status->error_sequence_hi = 0;
-        g_status->error_sequence_lo = 0;
-        g_status->firmware_epoch = 0;
-        g_status->heartbeat = 0;
-        g_status->capabilities = (1U << 18); /* Wire v9 capability bit */
+        mw_wire_st32(&g_status->generation, g_generation);
+        mw_wire_st32(&g_status->error, 0);
+        mw_wire_st32(&g_status->error_sequence_hi, 0);
+        mw_wire_st32(&g_status->error_sequence_lo, 0);
+        mw_wire_st32(&g_status->firmware_epoch, 0);
+        mw_wire_st32(&g_status->heartbeat, 0);
+        mw_wire_st32(&g_status->capabilities, (1U << 18)); /* Wire v9 capability bit */
     }
     g_doorbell_pending = 0;
     MW_DIAG("[MGL9] publish magic=%08lx wire=%u transport=%u slot_bytes=%lu slots=%lu caps=%08lx\n",
-            (unsigned long)g_ctrl->magic, (unsigned)g_ctrl->wire_version,
-            (unsigned)g_ctrl->transport_version, (unsigned long)g_ctrl->slot_capacity,
-            (unsigned long)g_ctrl->slot_count,
-            (unsigned long)(g_status ? g_status->capabilities : 0U));
+            (unsigned long)mw_wire_ld32(&g_ctrl->magic),
+            (unsigned)mw_wire_ld16(&g_ctrl->wire_version),
+            (unsigned)mw_wire_ld16(&g_ctrl->transport_version),
+            (unsigned long)mw_wire_ld32(&g_ctrl->slot_capacity),
+            (unsigned long)mw_wire_ld32(&g_ctrl->slot_count),
+            (unsigned long)(g_status ? mw_wire_ld32(&g_status->capabilities) : 0U));
 }
 
 uint32_t mw_service_transport_window_base(void)
@@ -323,8 +325,8 @@ int mw_service_get_transport_descriptor(ZZ9KMiniGLTransportDescriptor *out)
     out->slot0_offset = MW_WINDOW_SLOT0_OFFSET;
     out->slot1_offset = (g_slot_ptrs[1] != NULL) ?
         (uint32_t)(MW_WINDOW_SLOT0_OFFSET + (g_slot_ptrs[1] - g_slot_ptrs[0])) : 0U;
-    out->slot_capacity = g_ctrl->slot_capacity;
-    out->slot_count = g_ctrl->slot_count;
+    out->slot_capacity = mw_wire_ld32(&g_ctrl->slot_capacity);
+    out->slot_count = mw_wire_ld32(&g_ctrl->slot_count);
     out->reply_offset = (uint32_t)(g_reply_ptr - (uint8_t *)(uintptr_t)base);
     out->reply_capacity = (out->reply_offset == MW_WINDOW_REPLY_OFFSET_Z3) ?
         MW_DEFAULT_REPLY_CAPACITY : MW_DEFAULT_REPLY_CAPACITY_Z2;
@@ -401,8 +403,8 @@ int mw_service_has_work(void)
         return 0;
 
     return g_doorbell_pending ||
-           (g_ctrl->producer_seq > g_ctrl->consumer_seq) ||
-           (g_ctrl->op_seq != g_ctrl->op_done_seq);
+           (mw_wire_ld32(&g_ctrl->producer_seq) > mw_wire_ld32(&g_ctrl->consumer_seq)) ||
+           (mw_wire_ld32(&g_ctrl->op_seq) != mw_wire_ld32(&g_ctrl->op_done_seq));
 }
 
 void mw_service_reset_local(void)
@@ -428,8 +430,8 @@ void mw_service_on_core1_fault(void)
 {
     g_generation++;
     if (g_status) {
-        g_status->generation = g_generation;
-        g_status->error = 3U; /* Reset error */
+        mw_wire_st32(&g_status->generation, g_generation);
+        mw_wire_st32(&g_status->error, 3U); /* Reset error */
     }
     mw_service_reset_local();
 }
@@ -442,12 +444,12 @@ int mw_service_poll(void)
         return 0;
 
     g_doorbell_pending = 0;
-    g_ctrl->firmware_heartbeat++;
+    mw_wire_st32(&g_ctrl->firmware_heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat) + 1U);
     if (g_status) {
-        g_status->heartbeat = g_ctrl->firmware_heartbeat;
-        g_status->trace_draws_hardware = minigl_raster_draws_hardware();
-        g_status->trace_draws_software = minigl_raster_draws_software();
-        g_status->trace_fallback_reason = minigl_raster_first_fallback_reason();
+        mw_wire_st32(&g_status->heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat));
+        mw_wire_st32(&g_status->trace_draws_hardware, minigl_raster_draws_hardware());
+        mw_wire_st32(&g_status->trace_draws_software, minigl_raster_draws_software());
+        mw_wire_st32(&g_status->trace_fallback_reason, minigl_raster_first_fallback_reason());
     }
 
     /* 1. Process asynchronous command packets from slot ring.
@@ -456,61 +458,62 @@ int mw_service_poll(void)
      * draining a phantom backlog (the boot-loop failure), and never drain
      * more than MW_POLL_MAX_RING_BATCH packets per call so this poll
      * always returns to its scheduler. */
-    uint32_t producer = g_ctrl->producer_seq;
-    uint32_t outstanding = producer - g_ctrl->consumer_seq;
+    uint32_t producer = mw_wire_ld32(&g_ctrl->producer_seq);
+    uint32_t outstanding = producer - mw_wire_ld32(&g_ctrl->consumer_seq);
     uint32_t batch;
 
     if (outstanding > MW_RING_MAX_OUTSTANDING) {
-        g_ctrl->consumer_seq = producer;
-        g_ctrl->completion_fence = producer;
+        mw_wire_st32(&g_ctrl->consumer_seq, producer);
+        mw_wire_st32(&g_ctrl->completion_fence, producer);
         mw_log_reject(MW_STATUS_INVALID, 0U);
         work_done++;
     } else {
         batch = (outstanding < MW_POLL_MAX_RING_BATCH) ? outstanding
                                                        : MW_POLL_MAX_RING_BATCH;
         while (batch--) {
-            uint32_t slot_idx = g_ctrl->consumer_seq % g_ctrl->slot_count;
+            uint32_t slot_idx = mw_wire_ld32(&g_ctrl->consumer_seq) % mw_wire_ld32(&g_ctrl->slot_count);
             const uint8_t *slot_buf = g_slot_ptrs[slot_idx];
 
             if (slot_buf) {
                 uint32_t packet_bytes = mw_be32(slot_buf + 8);
-                uint32_t target_handle = g_ctrl->op_handle ? g_ctrl->op_handle : g_active_handle;
+                uint32_t ctrl_op_handle = mw_wire_ld32(&g_ctrl->op_handle);
+                uint32_t target_handle = ctrl_op_handle ? ctrl_op_handle : g_active_handle;
                 mw_ctx *c = mw_service_find_context(target_handle);
 
-                if (c && packet_bytes >= 16 && packet_bytes <= g_ctrl->slot_capacity) {
+                if (c && packet_bytes >= 16 && packet_bytes <= mw_wire_ld32(&g_ctrl->slot_capacity)) {
                     uint32_t opcode = 0U;
                     uint32_t status = mw_validate_packet_report(slot_buf, packet_bytes, &opcode);
                     if (status == MW_STATUS_OK)
                         status = mw_host_submit(c, slot_buf, packet_bytes);
-                    g_ctrl->op_status = status;
+                    mw_wire_st32(&g_ctrl->op_status, status);
                     if (status != MW_STATUS_OK)
                         mw_log_reject(status, opcode);
                 } else if (!c) {
-                    g_ctrl->op_status = MW_STATUS_CONTEXT_LOST;
-                    mw_log_reject(g_ctrl->op_status,
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_CONTEXT_LOST);
+                    mw_log_reject(MW_STATUS_CONTEXT_LOST,
                                   mw_packet_first_opcode(slot_buf, packet_bytes));
                 } else {
-                    g_ctrl->op_status = MW_STATUS_INVALID;
-                    mw_log_reject(g_ctrl->op_status,
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_INVALID);
+                    mw_log_reject(MW_STATUS_INVALID,
                                   mw_packet_first_opcode(slot_buf, packet_bytes));
                 }
             }
 
-            g_ctrl->consumer_seq++;
-            g_ctrl->completion_fence = g_ctrl->consumer_seq;
+            mw_wire_st32(&g_ctrl->consumer_seq, mw_wire_ld32(&g_ctrl->consumer_seq) + 1U);
+            mw_wire_st32(&g_ctrl->completion_fence, mw_wire_ld32(&g_ctrl->consumer_seq));
             work_done++;
         }
     }
 
     /* 2. Process synchronous bridge operations (op_code != 0) */
-    if (g_ctrl->op_seq != g_ctrl->op_done_seq) {
-        uint32_t op = g_ctrl->op_code;
-        uint32_t handle = g_ctrl->op_handle;
+    if (mw_wire_ld32(&g_ctrl->op_seq) != mw_wire_ld32(&g_ctrl->op_done_seq)) {
+        uint32_t op = mw_wire_ld32(&g_ctrl->op_code);
+        uint32_t handle = mw_wire_ld32(&g_ctrl->op_handle);
 
         switch (op) {
         case 1: { /* CREATE: width = op_arg1, height = op_arg2 */
-            uint32_t width = g_ctrl->op_arg1;
-            uint32_t height = g_ctrl->op_arg2;
+            uint32_t width = mw_wire_ld32(&g_ctrl->op_arg1);
+            uint32_t height = mw_wire_ld32(&g_ctrl->op_arg2);
             uint32_t slot;
             mw_ctx *c;
 
@@ -525,28 +528,28 @@ int mw_service_poll(void)
                 c = mw_host_create_owned(width, height,
                     CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, new_handle));
                 if (c) {
-                    uint32_t flags = g_ctrl->op_arg3;
+                    uint32_t flags = mw_wire_ld32(&g_ctrl->op_arg3);
                     if (flags & 1U)
                         c->state.force_cpu = 1;
                     c->handle = new_handle;
                     g_contexts[slot] = c;
                     g_active_handle = new_handle;
-                    g_ctrl->op_reply_handle = new_handle;
-                    g_ctrl->op_status = MW_STATUS_OK;
+                    mw_wire_st32(&g_ctrl->op_reply_handle, new_handle);
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_OK);
                     const char *backend = mw_backend_name(c);
                     (void)backend;
                     MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=%s\n",
                             (unsigned long)new_handle, (unsigned long)width,
                             (unsigned long)height, backend);
                 } else {
-                    g_ctrl->op_reply_handle = 0;
-                    g_ctrl->op_status = MW_STATUS_FAILED;
+                    mw_wire_st32(&g_ctrl->op_reply_handle, 0);
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_FAILED);
                     MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=none\n",
                             0UL, (unsigned long)width, (unsigned long)height);
                 }
             } else {
-                g_ctrl->op_reply_handle = 0;
-                g_ctrl->op_status = MW_STATUS_CAPACITY;
+                mw_wire_st32(&g_ctrl->op_reply_handle, 0);
+                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_CAPACITY);
                 MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=none\n",
                         0UL, (unsigned long)width, (unsigned long)height);
             }
@@ -556,12 +559,12 @@ int mw_service_poll(void)
         case 3: { /* READBACK: op_handle, op_arg1 = bytes */
             mw_ctx *c = mw_service_find_context(handle);
             if (!c || !g_reply_ptr) {
-                g_ctrl->op_status = MW_STATUS_UNAVAILABLE;
+                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
             } else {
-                uint32_t cap = g_ctrl->op_arg1 ? g_ctrl->op_arg1 : (g_ctrl->op_arg3 ? g_ctrl->op_arg3 : MW_DEFAULT_REPLY_CAPACITY);
+                uint32_t cap = mw_wire_ld32(&g_ctrl->op_arg1) ? mw_wire_ld32(&g_ctrl->op_arg1) : (mw_wire_ld32(&g_ctrl->op_arg3) ? mw_wire_ld32(&g_ctrl->op_arg3) : MW_DEFAULT_REPLY_CAPACITY);
                 uint32_t status = mw_host_readback_rgba8(c, g_reply_ptr, cap);
-                g_ctrl->op_status = status;
-                g_ctrl->op_reply_bytes = (status == MW_STATUS_OK) ? (c->width * c->height * 4) : 0;
+                mw_wire_st32(&g_ctrl->op_status, status);
+                mw_wire_st32(&g_ctrl->op_reply_bytes, (status == MW_STATUS_OK) ? (c->width * c->height * 4) : 0);
             }
             break;
         }
@@ -581,17 +584,17 @@ int mw_service_poll(void)
                     g_contexts[slot - 1U] = NULL;
                     if (g_active_handle == handle)
                         g_active_handle = 0;
-                    g_ctrl->op_status = MW_STATUS_OK;
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_OK);
                     MW_DIAG("[MGL9] destroy handle=%08lx size=%lux%lu backend=%s\n",
                             (unsigned long)handle, (unsigned long)width,
                             (unsigned long)height, backend);
                 } else {
-                    g_ctrl->op_status = MW_STATUS_UNAVAILABLE;
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
                     MW_DIAG("[MGL9] destroy handle=%08lx size=0x0 backend=none\n",
                             (unsigned long)handle);
                 }
             } else {
-                g_ctrl->op_status = MW_STATUS_UNAVAILABLE;
+                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
                 MW_DIAG("[MGL9] destroy handle=%08lx size=0x0 backend=none\n",
                         (unsigned long)handle);
             }
@@ -601,15 +604,15 @@ int mw_service_poll(void)
         case 5: { /* REQUEST: op_handle, op_arg1 = req bytes, op_arg3 = reply capacity */
             mw_ctx *c = mw_service_find_context(handle);
             if (!c || !g_reply_ptr) {
-                g_ctrl->op_status = MW_STATUS_UNAVAILABLE;
+                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
             } else {
-                uint32_t req_bytes = g_ctrl->op_arg1;
-                uint32_t reply_cap = g_ctrl->op_arg3 ? g_ctrl->op_arg3 : MW_DEFAULT_REPLY_CAPACITY;
+                uint32_t req_bytes = mw_wire_ld32(&g_ctrl->op_arg1);
+                uint32_t reply_cap = mw_wire_ld32(&g_ctrl->op_arg3) ? mw_wire_ld32(&g_ctrl->op_arg3) : MW_DEFAULT_REPLY_CAPACITY;
                 uint32_t reply_written = 0;
                 uint32_t status = mw_host_request(c, g_reply_ptr, req_bytes,
                                                   g_reply_ptr, reply_cap, &reply_written);
-                g_ctrl->op_status = status;
-                g_ctrl->op_reply_bytes = reply_written;
+                mw_wire_st32(&g_ctrl->op_status, status);
+                mw_wire_st32(&g_ctrl->op_reply_bytes, reply_written);
             }
             break;
         }
@@ -617,26 +620,26 @@ int mw_service_poll(void)
         case 6: { /* BLIT / CAPTURE: Direct VRAM presentation / capture */
             mw_ctx *c = mw_service_find_context(handle);
             if (!c || !g_reply_ptr) {
-                g_ctrl->op_status = MW_STATUS_UNAVAILABLE;
+                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
             } else {
-                uint32_t req_bytes = g_ctrl->op_arg1;
-                uint32_t card_offset = g_ctrl->op_arg2;
-                uint32_t span_total = g_ctrl->op_arg3;
+                uint32_t req_bytes = mw_wire_ld32(&g_ctrl->op_arg1);
+                uint32_t card_offset = mw_wire_ld32(&g_ctrl->op_arg2);
+                uint32_t span_total = mw_wire_ld32(&g_ctrl->op_arg3);
                 uint32_t arm = card_offset + 0x001F0000UL;
 
                 /* Check bounds against the card's RTG VRAM range */
                 if (card_offset < MNT_FB_BASE || arm < MW_VRAM_ARM_BASE ||
                     span_total == 0 || (uint64_t)arm + span_total > g_vram_limit_arm) {
-                    g_ctrl->op_status = MW_STATUS_UNAVAILABLE;
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
                 } else if (req_bytes < 24) {
-                    g_ctrl->op_status = MW_STATUS_INVALID;
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_INVALID);
                 } else {
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
                     Xil_DCacheInvalidateRange((INTPTR)g_reply_ptr, req_bytes);
 #endif
                     uint32_t req_id = mw_be32(g_reply_ptr);
                     if (req_id != MW_BLIT && req_id != MW_CAPTURE) {
-                        g_ctrl->op_status = MW_STATUS_INVALID;
+                        mw_wire_st32(&g_ctrl->op_status, MW_STATUS_INVALID);
                     } else {
 #if defined(MINIGL_HOST_TEST)
                         uint8_t *span = g_host_vram_base ? (g_host_vram_base + card_offset)
@@ -653,8 +656,8 @@ int mw_service_poll(void)
                         uint32_t reply_written = 0;
                         uint32_t status = mw_host_request(c, g_reply_ptr, req_bytes,
                                                           span, span_total, &reply_written);
-                        g_ctrl->op_status = status;
-                        g_ctrl->op_reply_bytes = reply_written;
+                        mw_wire_st32(&g_ctrl->op_status, status);
+                        mw_wire_st32(&g_ctrl->op_reply_bytes, reply_written);
 
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
                         if (req_id == MW_BLIT && status == MW_STATUS_OK) {
@@ -668,12 +671,12 @@ int mw_service_poll(void)
         }
 
         default:
-            g_ctrl->op_status = MW_STATUS_INVALID;
-            mw_log_reject(g_ctrl->op_status, op);
+            mw_wire_st32(&g_ctrl->op_status, MW_STATUS_INVALID);
+            mw_log_reject(MW_STATUS_INVALID, op);
             break;
         }
 
-        g_ctrl->op_done_seq = g_ctrl->op_seq; /* Publish completion in firmware block */
+        mw_wire_st32(&g_ctrl->op_done_seq, mw_wire_ld32(&g_ctrl->op_seq)); /* Publish completion in firmware block */
         work_done++;
     }
 
