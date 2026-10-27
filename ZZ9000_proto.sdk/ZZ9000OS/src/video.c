@@ -458,6 +458,13 @@ int video_set_videocap_geometry(uint16_t width, uint16_t height)
 	return 1;
 }
 
+/* Report a malformed request (a geometry commit with no staged width)
+ * through the same REJECTED status bit, leaving the applied geometry. */
+void video_reject_videocap_geometry(void)
+{
+	vs.videocap_geometry_rejected = 1;
+}
+
 uint16_t video_videocap_geometry_value(uint16_t key, uint16_t *present)
 {
 	uint16_t value = 0;
