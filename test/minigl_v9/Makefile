@@ -10,9 +10,13 @@ MW_OBJS := mw_parse.o mw_texture.o mw_draw.o mw_ctx.o mw_service.o \
            minigl_rix_backend.o rix_cmd.o rix_texture.o rix_setup.o rix_bin.o rix_drv.o
 
 TESTS := test_mw_validate test_mw_state test_mw_draw test_mw_texture test_mw_host_api test_mw_e2e test_mw_rasterix_mapper
-
-AMIBERRY_DIR ?= $(ROOT)/../amiberry-minigl-library-mw-e2e
-ifeq ($(wildcard $(AMIBERRY_DIR)/src/amiberry_transport_zz9000.c),)
+# Prefer a library checkout with the descriptor-based transport: the zz9k
+# worktree, then the historical e2e checkout, then the plain checkout.
+AMIBERRY_DIR ?= $(patsubst %/src/amiberry_transport_zz9000.c,%,$(firstword $(wildcard \
+  $(ROOT)/../amiberry-minigl-library-zz9k/src/amiberry_transport_zz9000.c \
+  $(ROOT)/../amiberry-minigl-library-mw-e2e/src/amiberry_transport_zz9000.c \
+  $(ROOT)/../amiberry-minigl-library/src/amiberry_transport_zz9000.c)))
+ifeq ($(AMIBERRY_DIR),)
 AMIBERRY_DIR := $(ROOT)/../amiberry-minigl-library
 endif
 MOCK_AMIGA := ./mock_amiga

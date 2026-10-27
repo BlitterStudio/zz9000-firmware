@@ -16,6 +16,11 @@ REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 docker volume create "$VOL" >/dev/null
 docker volume create "$OUT_VOL" >/dev/null
 
+# MSYS rewrites container paths like /src otherwise.
+export MSYS_NO_PATHCONV=1
+if command -v cygpath >/dev/null 2>&1; then
+  REPO_ROOT="$(cygpath -w "$REPO_ROOT")"
+fi
 # Fresh source tree in the volume from git archive (tracked files only).
 docker run --rm -v "$VOL:/src" -v "$OUT_VOL:/out" "$IMAGE" bash -c 'rm -rf /src/*'
 git -C "$REPO_ROOT" archive HEAD | docker run --rm -i -v "$VOL:/src" "$IMAGE" \

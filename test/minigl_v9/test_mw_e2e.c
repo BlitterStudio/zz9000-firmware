@@ -150,6 +150,47 @@ static void free_card_memory(void)
     }
 }
 
+
+/* Descriptor-based discovery mock: the firmware publishes the transport
+ * descriptor (big-endian, 'MGTD') inside the mock SDK mailbox reservation,
+ * exactly as minigl_transport.c does on hardware. */
+#define MOCK_MAILBOX_ARM        0x08100000UL
+#define MOCK_MAILBOX_DESC_OFF   0x8000U
+#define MOCK_ADDR_ADJ           0x001F0000UL
+
+static void publish_mock_descriptor(uint32_t window_board, uint32_t window_bytes,
+                                    uint32_t slot_capacity, uint32_t slot_count,
+                                    uint32_t vram_limit_arm)
+{
+    uint32_t mailbox_board = MOCK_MAILBOX_ARM - MOCK_ADDR_ADJ;
+    uint8_t *desc = g_card_mem + mailbox_board + MOCK_MAILBOX_DESC_OFF;
+    uint32_t reply_capacity = slot_capacity > (64UL * 1024UL) ? (64UL * 1024UL)
+                                                             : (16UL * 1024UL);
+    uint32_t reply_offset = 0x1000U + slot_count * slot_capacity;
+
+    memset(desc, 0, 80);
+    mw_put_be32(desc + 0, 0x4D475444UL);            /* 'MGTD' */
+    mw_put_be32(desc + 4, (1U << 16) | 1U);         /* desc ver 1, transport 1 */
+    mw_put_be32(desc + 8, 1U);                      /* generation */
+    mw_put_be32(desc + 12, window_board + MOCK_ADDR_ADJ); /* window_address */
+    mw_put_be32(desc + 16, window_bytes);
+    mw_put_be32(desc + 20, MOCK_ADDR_ADJ);          /* address_adjust */
+    mw_put_be32(desc + 24, 0U);                     /* ctrl_offset */
+    mw_put_be32(desc + 28, 0x80U);                  /* status_offset */
+    mw_put_be32(desc + 32, 0x1000U);                /* slot0_offset */
+    mw_put_be32(desc + 36, slot_count == 2U ? 0x1000U + slot_capacity : 0U);
+    mw_put_be32(desc + 40, slot_capacity);
+    mw_put_be32(desc + 44, slot_count);
+    mw_put_be32(desc + 48, reply_offset);
+    mw_put_be32(desc + 52, reply_capacity);
+    mw_put_be32(desc + 56, 4U);                     /* alignment */
+    mw_put_be32(desc + 60, 1U);                     /* cache_rules */
+    mw_put_be32(desc + 64, vram_limit_arm);
+
+    /* SDK mailbox registers (native-endian mock matches the mock UWORD reads) */
+    *(uint16_t *)(g_card_mem + 0x0104) = (uint16_t)(MOCK_MAILBOX_ARM >> 16);
+    *(uint16_t *)(g_card_mem + 0x0106) = (uint16_t)(MOCK_MAILBOX_ARM & 0xffffU);
+}
 static void setup_mock_card(int is_z3)
 {
     stop_core1();
@@ -181,6 +222,7 @@ static void setup_mock_card(int is_z3)
         int bound = mw_service_bind_region(g_card_mem + 0x06E10000UL, 0x100000UL);
         assert(bound == 1);
         mw_service_set_host_vram(g_card_mem, 0x07000000UL);
+        publish_mock_descriptor(0x06E10000UL, 0x100000UL, 256UL * 1024UL, 2U, 0x07000000UL);
     } else {
         g_card_size = 4UL * 1024UL * 1024UL;
 #ifdef MAP_32BIT
@@ -202,11 +244,9 @@ static void setup_mock_card(int is_z3)
         g_mock_cd.cd_BoardSize = (ULONG)g_card_size;
         g_mock_cd.cd_Rom_er_Manufacturer = 0x6d6e;
         g_mock_cd.cd_Rom_er_Product = 3; /* Zorro II */
-        uint32_t ctrl_offset = (uint32_t)(g_card_size - 0x40000UL);
-        g_active_ctrl_base = g_card_mem + ctrl_offset;
-        int bound = mw_service_bind_region(g_card_mem + ctrl_offset, 0x40000UL);
-        assert(bound == 1);
-        mw_service_set_host_vram(g_card_mem, ctrl_offset + 0x001F0000UL);
+        /* Zorro II: the firmware reports the MiniGL service unavailable
+         * (the host window cannot hold the transport; no descriptor is
+         * published), so the library probe must fail cleanly. */
     }
 
     start_core1();
@@ -501,9 +541,35 @@ static void test_readback(void)
     printf("PASS: test_readback\n");
 }
 
-static void test_z2_packet_capacity(void)
+static void test_z2_unavailable(void)
 {
-    setup_mock_card(0); /* Zorro II */
+    struct ZZ9KMiniGLProbeReport report;
+
+    setup_mock_card(0); /* Zorro II: firmware publishes no descriptor */
+
+    const struct MiniGLTransport *transport =
+        amiberry_transport_zz9000_probe_report(&report);
+    assert(transport == NULL);
+    assert(report.configdev_found == 1);
+    assert(report.is_zorro3 == 0);
+    assert(report.first_failure == ZZ9K_MINIGL_PROBE_MAILBOX_REGISTERS ||
+           report.first_failure == ZZ9K_MINIGL_PROBE_TRANSPORT_DESCRIPTOR);
+    printf("PASS: test_z2_unavailable\n");
+}
+
+static void test_descriptor_geometry_64k_slots(void)
+{
+    setup_mock_card(1); /* Zorro III card, but a 64K single-slot descriptor */
+
+    /* Re-publish the descriptor with the small geometry a constrained
+     * firmware session would advertise; the library must honour the
+     * descriptor (not the Z3 defaults) for its packet-size limit. */
+    publish_mock_descriptor(0x06E10000UL, 0x11000UL + 0x4000UL,
+                            64UL * 1024UL, 1U, 0x07000000UL);
+    /* Match the live control block to the constrained geometry (the
+     * service owns this field; a real 64K session publishes 64K in the
+     * descriptor and the control block alike). */
+    *(uint32_t *)(g_card_mem + 0x06E10000UL + 16) = 65536U;
 
     const struct MiniGLTransport *transport = amiberry_transport_zz9000_probe();
     assert(transport != NULL);
@@ -513,25 +579,22 @@ static void test_z2_packet_capacity(void)
     ULONG handle = transport->create(16, 16);
     assert(handle != 0);
 
-    /* Small valid packet (56 bytes) */
     uint8_t packet[256];
     uint32_t len = build_clear_present_packet(packet, 1.0f, 1.0f, 0.0f, 1.0f);
     assert(transport->submit(handle, packet, len) == 0);
 
-    /* Packet exactly 64 KiB */
+    /* Packet exactly 64 KiB is accepted; 64 KiB + 4 is rejected. */
     uint8_t *exact_pkt = malloc(65536);
     assert(exact_pkt != NULL);
     memset(exact_pkt, 0, 65536);
     mw_put_be32(exact_pkt, MW_MAGIC);
     mw_put_be32(exact_pkt + 4, MW_VERSION);
     mw_put_be32(exact_pkt + 8, 65536);
-    mw_put_be32(exact_pkt + 12, 1); /* 1 command */
+    mw_put_be32(exact_pkt + 12, 1);
     mw_put_be32(exact_pkt + 16, MW_PRESENT);
-    mw_put_be32(exact_pkt + 20, 65536 - 24); /* Large payload */
-
+    mw_put_be32(exact_pkt + 20, 65536 - 24);
     assert(transport->submit(handle, exact_pkt, 65536) == 0);
 
-    /* Packet exceeding 64 KiB: must be rejected with MINIGL_BRIDGE_ERROR_INVALID */
     uint8_t *oversized_pkt = malloc(65540);
     assert(oversized_pkt != NULL);
     memset(oversized_pkt, 0, 65540);
@@ -541,16 +604,14 @@ static void test_z2_packet_capacity(void)
     mw_put_be32(oversized_pkt + 12, 1);
     mw_put_be32(oversized_pkt + 16, MW_PRESENT);
     mw_put_be32(oversized_pkt + 20, 65540 - 24);
-
-    ULONG over_st = transport->submit(handle, oversized_pkt, 65540);
-    assert(over_st == MINIGL_BRIDGE_ERROR_INVALID);
+    assert(transport->submit(handle, oversized_pkt, 65540) ==
+           MINIGL_BRIDGE_ERROR_INVALID);
 
     free(exact_pkt);
     free(oversized_pkt);
-
     transport->destroy(handle);
     transport->term();
-    printf("PASS: test_z2_packet_capacity\n");
+    printf("PASS: test_descriptor_geometry_64k_slots\n");
 }
 static void test_back_to_back_and_pipeline(void)
 {
@@ -905,7 +966,8 @@ int main(void)
     test_lost_on_generation_change();
     test_request_with_reply();
     test_readback();
-    test_z2_packet_capacity();
+    test_z2_unavailable();
+    test_descriptor_geometry_64k_slots();
     test_back_to_back_and_pipeline();
     test_mw_e2e_blit_and_capture();
 
