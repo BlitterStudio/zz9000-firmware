@@ -98,6 +98,10 @@ enum zz_config_key {
 	                                    * runtime state, not file content:
 	                                    * 0 = bitstream lacks the LUT stage,
 	                                    * 100 = identity (filter off) */
+	/* Present (value VCAP_GEOMETRY_REGS_ABI) when the firmware decodes
+	 * REG_ZZ_VCAP_GEOMETRY_WIDTH/COMMIT; older firmware reports it as
+	 * absent and only has CARD_FEATURE_VIDEOCAP_GEOMETRY. */
+	ZZ_CONFIG_KEY_VCAP_GEOMETRY_REGS = 36,
 	ZZ_CONFIG_KEY_NUM
 };
 

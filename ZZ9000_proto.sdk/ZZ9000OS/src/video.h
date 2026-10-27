@@ -233,6 +233,7 @@ void video_set_dpms(uint8_t level);
 int video_set_videocap_video_mode(uint32_t mode);
 int video_set_videocap_vsync(uint32_t setting);
 int video_set_videocap_geometry(uint16_t width, uint16_t height);
+void video_reject_videocap_geometry(void);
 uint16_t video_videocap_geometry_value(uint16_t key, uint16_t *present);
 uint32_t video_firmware_capabilities(void);
 void hw_sprite_show(int show);

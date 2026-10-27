@@ -42,6 +42,7 @@ void Xil_AssertNonVoid() {}
 #include "mntzorro.h"
 #include "video.h"
 #include "gamma.h"
+#include "vcap_geometry_reg.h"
 #include "hdmi.h"
 #include "gfx.h"
 #include "ethernet.h"
@@ -482,6 +483,20 @@ static uint8_t amiga_boot_reset_pass = 1;
 
 /* ADAU write count when the last handle_amiga_reset() pass finished. */
 static uint32_t adau_writes_after_reset_pass;
+
+/* Capture-window request from either the dedicated registers or the
+ * 2.9.0 CARD_FEATURE_VIDEOCAP_GEOMETRY sequence. 0/0 restores the
+ * automatic window; an invalid pair is rejected without touching the
+ * applied geometry. */
+static void set_videocap_geometry(uint16_t width, uint16_t height)
+{
+	if (video_set_videocap_geometry(width, height))
+		printf("[vcap] geometry: %ux%u\n",
+		       (unsigned)width, (unsigned)height);
+	else
+		printf("[vcap] geometry rejected: %ux%u\n",
+		       (unsigned)width, (unsigned)height);
+}
 
 static void print_memory_line(void)
 {
@@ -949,6 +964,8 @@ int main() {
 	uint16_t blitter_user1 = 0;
 	uint16_t blitter_user2 = 0;
 	int16_t blitter_user3 = 0;	// line Bresenham work-variable seed
+	// REG_ZZ_VCAP_GEOMETRY_WIDTH, consumed by the next COMMIT
+	struct vcap_geometry_reg vcap_geometry_reg = { 0, 0 };
 
 	// custom video mode transaction state lives in video.c
 	// (video_custom_select/param/value/commit)
@@ -1525,27 +1542,36 @@ int main() {
 							}
 							break;
 						case CARD_FEATURE_VIDEOCAP_GEOMETRY:
-							/* Live capture-window calibration from
-							 * ZZTop: REG_ZZ_USER2 stages the width,
-							 * this write carries the height (both
-							 * are 16-bit bus values). 0/0 restores
-							 * the automatic window; an invalid pair
-							 * is rejected without touching the
-							 * applied geometry. */
-							if (video_set_videocap_geometry(blitter_user2,
-										(uint16_t)zdata))
-								printf("[feature] VIDEOCAP_GEOMETRY: %lux%lu\n",
-									(unsigned long)blitter_user2,
-									(unsigned long)(zdata & 0xffffU));
-							else
-								printf("[feature] VIDEOCAP_GEOMETRY rejected: %lux%lu\n",
-									(unsigned long)blitter_user2,
-									(unsigned long)(zdata & 0xffffU));
+							/* 2.9.0 ZZTop: REG_ZZ_USER2 stages the
+							 * width, this write carries the height.
+							 * Kept for old clients; it leaves the RTG
+							 * driver's USER1/USER2 cache stale. */
+							set_videocap_geometry(blitter_user2,
+								(uint16_t)zdata);
 							break;
 						default:
 							break;
 					}
 					break;
+
+				case REG_ZZ_VCAP_GEOMETRY_WIDTH:
+					vcap_geometry_reg_stage(&vcap_geometry_reg,
+						(uint16_t)zdata);
+					break;
+
+				case REG_ZZ_VCAP_GEOMETRY_COMMIT: {
+					uint16_t width;
+
+					if (vcap_geometry_reg_commit(&vcap_geometry_reg,
+							&width)) {
+						set_videocap_geometry(width, (uint16_t)zdata);
+					} else {
+						video_reject_videocap_geometry();
+						printf("[vcap] geometry rejected: height %u without a staged width\n",
+						       (unsigned)(zdata & 0xffffU));
+					}
+					break;
+				}
 
 				case REG_ZZ_CONFIG_KEY:
 					// select which ZZ9000.CFG value a read of this
@@ -2221,6 +2247,11 @@ int main() {
 					           ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS) {
 						value = video_videocap_geometry_value(
 							config_query_key, &present);
+					} else if (config_query_key ==
+					           ZZ_CONFIG_KEY_VCAP_GEOMETRY_REGS) {
+						/* the dedicated geometry registers exist */
+						value = VCAP_GEOMETRY_REGS_ABI;
+						present = 1;
 					} else {
 						value = zz_config_query(
 							config_query_key, &present);
