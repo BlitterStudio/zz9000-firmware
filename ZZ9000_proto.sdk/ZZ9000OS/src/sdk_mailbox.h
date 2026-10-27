@@ -33,6 +33,8 @@
 #define SDK_STATUS_NO_MEMORY           6U
 #define SDK_STATUS_IO_ERROR            9U
 #define SDK_STATUS_NOT_FOUND           10U
+#define SDK_STATUS_MODULE_MISSING      11U
+#define SDK_STATUS_MODULE_MISMATCH     12U
 #define SDK_STATUS_INTERNAL_ERROR      0xffffU
 
 #define SDK_CAP_MAILBOX                (1U << 0)
@@ -44,6 +46,7 @@
 #define SDK_CAP_IMAGE_SCALE            (1U << 6)
 #define SDK_CAP_AUDIO_DECODE           (1U << 7)
 #define SDK_CAP_CRYPTO                 (1U << 8)
+#define SDK_CAP_MODULES                (1U << 9)
 #define SDK_CAP_AUDIO_PLAYBACK         (1U << 19)
 #define SDK_CAP_MEMORY_OPS             (1U << 10)
 #define SDK_CAP_DIAGNOSTICS            (1U << 11)
@@ -262,6 +265,19 @@
 #define SDK_OP_AUDIO_RING_RELEASE      0x0514U
 #define SDK_OP_AUDIO_STREAM_GAIN       0x0515U
 #define SDK_OP_AUDIO_STREAM_BEGIN_EX   0x0516U
+#define SDK_OP_AUDIO_OUTPUT_CLOCK      0x0517U
+
+/* Mirrors ZZ9KAudioOutputClockResultPayload. Retired and lead are
+ * stereo transmitter frames; output_rate is the formatter rate. */
+struct SDKAudioOutputClockResultPayload {
+	uint8_t retired_hi[4];
+	uint8_t retired_lo[4];
+	uint8_t lead_hi[4];
+	uint8_t lead_lo[4];
+	uint8_t output_rate[4];
+	uint8_t flags[4];
+	uint8_t reserved[24];
+};
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U
@@ -322,6 +338,36 @@ struct SDKCryptoVerifyPayload {
 #define SDK_OP_DIAG_TIMING             0x0901U
 #define SDK_OP_DIAG_SCHED              0x0902U
 #define SDK_OP_DIAG_MEMORY             0x0903U
+
+#define SDK_OP_MODULE_STATUS           0x0a00U
+#define SDK_MODULE_LOADED               0U
+#define SDK_MODULE_MISSING              1U
+#define SDK_MODULE_REJECTED_ABI         2U
+#define SDK_MODULE_REJECTED_HASH        3U
+#define SDK_MODULE_REJECTED_SLOT        4U
+#define SDK_MODULE_REJECTED_SERVICE     5U
+#define SDK_MODULE_FAULTED              6U
+#define SDK_MODULE_AVAILABLE            7U
+#define SDK_MODULE_LOADING              8U
+#define SDK_MODULE_LOAD_FAILED          9U
+
+struct SDKModuleStatusRequestPayload {
+	uint8_t index[4];
+	uint8_t reserved[44];
+};
+
+struct SDKModuleStatusPayload {
+	uint8_t id[4];
+	uint8_t version[4];
+	uint8_t abi_version[4];
+	uint8_t load_address[4];
+	uint8_t image_size[4];
+	uint8_t bss_size[4];
+	uint8_t state[4];
+	char name[16];
+	/* LOADED: strong reference count. Other states: reason/missing service ID. */
+	uint8_t detail[4];
+};
 
 #define SDK_OP_VIDEO_SESSION_BEGIN     0x0b00U
 #define SDK_OP_VIDEO_SESSION_WRITE     0x0b01U
@@ -1291,6 +1337,8 @@ void sdk_mailbox_poison_core1_audio_streams(void);
  * queued. */
 int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
                                  uint32_t params_len);
+int sdk_mailbox_load_module_core1(uint32_t module_id);
+void sdk_mailbox_poll_module_load(void);
 /* AX playback pump, core-1 refill kick: call from the core-0 main
  * loop every pass. No-op when nothing is bound. The TX-fill half is
  * the audio fabric compositor (audio_fabric_isr, audio_fabric.h)

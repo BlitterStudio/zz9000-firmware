@@ -1467,6 +1467,22 @@ int zz9k_query_caps(ZZ9KContext *ctx, ZZ9KCaps *caps)
   return status;
 }
 
+int zz9k_module_status(ZZ9KContext *ctx, uint32_t index,
+                       ZZ9KModuleStatus *module)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (!ctx || !module) return ZZ9K_STATUS_BAD_REQUEST;
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_module_status(&request, index);
+  if (status != ZZ9K_STATUS_OK) return status;
+  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status != ZZ9K_STATUS_OK) return status;
+  return zz9k_reply_module_status(&reply, module);
+}
+
 int zz9k_query_aperture_layout(ZZ9KContext *ctx,
                                ZZ9KApertureLayout *layout)
 {
@@ -2389,6 +2405,27 @@ int zz9k_audio_fabric_state_get(
     return status;
   }
   return zz9k_reply_audio_fabric_state_result(&reply, result);
+}
+
+int zz9k_audio_output_clock_get(ZZ9KContext *ctx,
+                                ZZ9KAudioOutputClockResult *result)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (!ctx || !result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  status = zz9k_request_audio_output_clock(&request);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  return zz9k_reply_audio_output_clock_result(&reply, result);
 }
 
 int zz9k_audio_ring_session_begin(ZZ9KContext *ctx,

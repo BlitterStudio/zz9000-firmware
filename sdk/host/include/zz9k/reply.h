@@ -117,6 +117,30 @@ static inline int zz9k_reply_caps(const ZZ9KMailboxEntry *reply,
   return ZZ9K_STATUS_OK;
 }
 
+static inline int zz9k_reply_module_status(const ZZ9KMailboxEntry *reply,
+                                           ZZ9KModuleStatus *status)
+{
+  const ZZ9KModuleStatusPayload *payload;
+  int result;
+  if (!status) return ZZ9K_STATUS_BAD_REQUEST;
+  memset(status, 0, sizeof(*status));
+  result = zz9k_reply_require(reply, ZZ9K_OP_MODULE_STATUS,
+                              sizeof(ZZ9KModuleStatusPayload));
+  if (result != ZZ9K_STATUS_OK) return result;
+  payload = (const ZZ9KModuleStatusPayload *)reply->payload.inline_data;
+  status->id = zz9k_get_be32(payload->id);
+  status->version = zz9k_get_be32(payload->version);
+  status->abi_version = zz9k_get_be32(payload->abi_version);
+  status->load_address = zz9k_get_be32(payload->load_address);
+  status->image_size = zz9k_get_be32(payload->image_size);
+  status->bss_size = zz9k_get_be32(payload->bss_size);
+  status->state = zz9k_get_be32(payload->state);
+  status->detail = zz9k_get_be32(payload->detail);
+  memcpy(status->name, payload->name, sizeof(status->name));
+  status->name[sizeof(status->name) - 1] = '\0';
+  return ZZ9K_STATUS_OK;
+}
+
 static inline int zz9k_reply_aperture_layout(
     const ZZ9KMailboxEntry *reply, ZZ9KApertureLayout *layout)
 {
@@ -688,6 +712,37 @@ static inline int zz9k_reply_audio_fabric_state_result(
     return ZZ9K_STATUS_INTERNAL_ERROR;
   }
 
+  return ZZ9K_STATUS_OK;
+}
+
+static inline int zz9k_reply_audio_output_clock_result(
+    const ZZ9KMailboxEntry *reply,
+    ZZ9KAudioOutputClockResult *result)
+{
+  const uint8_t *payload;
+  int status;
+
+  if (!result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  memset(result, 0, sizeof(*result));
+  status = zz9k_reply_require(reply, ZZ9K_OP_AUDIO_OUTPUT_CLOCK,
+                              sizeof(ZZ9KAudioOutputClockResultPayload));
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  payload = reply->payload.inline_data;
+  result->retired_frames =
+      zz9k_media_u64_from_be(&payload[0], &payload[4]);
+  result->lead_frames =
+      zz9k_media_u64_from_be(&payload[8], &payload[12]);
+  result->output_rate = zz9k_get_be32(&payload[16]);
+  result->flags = zz9k_get_be32(&payload[20]);
+  if (result->output_rate == 0U ||
+      (result->flags & ~0U) != 0U) {
+    memset(result, 0, sizeof(*result));
+    return ZZ9K_STATUS_INTERNAL_ERROR;
+  }
   return ZZ9K_STATUS_OK;
 }
 

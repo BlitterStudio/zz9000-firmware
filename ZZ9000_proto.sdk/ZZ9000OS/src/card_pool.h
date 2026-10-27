@@ -19,7 +19,7 @@
 #include "sdk_smp_lock.h"
 
 #define CARD_POOL_PAGE_BYTES 0x00010000u
-#define CARD_POOL_MAX_RANGES 4u
+#define CARD_POOL_MAX_RANGES 2u
 /* A full table fails the allocation like an out-of-memory. */
 #define CARD_POOL_MAX_BLOCKS 512u
 
@@ -37,12 +37,19 @@ enum card_pool_class {
     /* Client-owned resident media input. This is deliberately distinct from
      * decoder MEDIA: fault recovery releases decoder owners by session id. */
     CARD_POOL_CLASS_MEDIA_INPUT = 4,
+    /* ARM-only SDK surfaces. They are released on every Amiga reset. */
+    CARD_POOL_CLASS_SDK_SURFACE = 5,
+    /* RFB console shadow, snapshot, scratch, and deflate workspace. */
+    CARD_POOL_CLASS_CONSOLE = 6,
     CARD_POOL_CLASS_COUNT
 };
 
 #define CARD_POOL_LIMIT_FIRMWARE    (64u << 20)
 #define CARD_POOL_LIMIT_MEDIA       (128u << 20)
 #define CARD_POOL_LIMIT_MEDIA_INPUT (64u << 20)
+#define CARD_POOL_LIMIT_CONSOLE     (32u << 20)
+/* ARM-only client surfaces are card-resident and reset-reclaimable. */
+#define CARD_POOL_LIMIT_SDK_SURFACE (128u << 20)
 /* Matches the image decode budget all image sessions share
  * (SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES). */
 #define CARD_POOL_LIMIT_IMAGE       (72u << 20)
@@ -78,14 +85,12 @@ typedef struct {
     uint32_t ignored_frees;
 } card_pool_t;
 
-/* The firmware's pool. Ranges A1, A2 and C open; B (the fast-RAM window)
- * stays closed until card_pool_open_range. */
+/* One contiguous card pool: a permanent prefix plus a revocable Fast-RAM
+ * tail. The tail stays closed while Fast RAM is advertised. */
 extern card_pool_t card_pool;
 enum {
-    CARD_POOL_RANGE_A1,
-    CARD_POOL_RANGE_A2,
-    CARD_POOL_RANGE_C,
-    CARD_POOL_RANGE_B,
+    CARD_POOL_RANGE_PERMANENT,
+    CARD_POOL_RANGE_REVOCABLE,
 };
 void card_pool_setup_card(card_pool_t *pool);
 
@@ -106,6 +111,10 @@ uint32_t card_pool_revoke_range(card_pool_t *pool, uint32_t range);
  * address, or 0 for a zero size, an invalid owner class, a class over its
  * limit, no gap large enough, or a full block table. */
 uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner);
+/* Whether `owner` owns the live block starting at `addr` and that block
+ * covers `length`. */
+int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
+                          uint32_t owner);
 /* Frees the block starting at `addr` when `owner` owns it and returns 1.
  * Otherwise nothing changes, the free is counted in ignored_frees, and it
  * returns 0. A zero address is a no-op returning 0. */
@@ -122,13 +131,13 @@ int card_pool_has_lent(const card_pool_t *pool);
  * lines for that memory. Takes no lock when nothing is lent. */
 void card_pool_take_back_lent(card_pool_t *pool);
 /* Amiga reset, after the module resets: release every owner except the
- * FIRMWARE class, then lend the revocable ranges again when the Amiga
- * cannot use them -- a Zorro II board has no fast-RAM window, and on
- * Zorro III the window is free while fast RAM is not advertised. */
+ * FIRMWARE class, then lend the revocable tail when the Amiga cannot use it
+ * -- a Zorro II board has no fast-RAM window, and Zorro III lends the tail
+ * while Fast RAM is withheld. */
 void card_pool_finish_amiga_reset(card_pool_t *pool, int is_zorro3,
                                   int fastram_advertised);
 
-/* Free bytes in one range; 0 while it is closed. */
+/* Free bytes in one interval; 0 while it is closed. */
 uint32_t card_pool_range_free_bytes(card_pool_t *pool, uint32_t range);
 
 /* Force the pool lock free. Only for core-1 fault recovery, while core 1

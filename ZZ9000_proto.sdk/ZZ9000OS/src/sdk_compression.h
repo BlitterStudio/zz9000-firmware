@@ -57,23 +57,17 @@ uint16_t sdk_decompress_stream_read(
 uint16_t sdk_decompress_stream_close(uint32_t session);
 
 /*
- * Reclaim any heap blocks a core-1 one-shot decode still held when it was
- * cold-reset mid-decode. Call from core 0 (core1_cold_restart, or the
- * scheduler's single-core fallback) while core 1 is halted and after the
- * malloc lock has been reset. Returns blocks reclaimed
- * (0 when the last decode completed cleanly).
+ * Reclaim card-pool-owned decode working sets after a core-1 cold reset.
+ * The pool owner can be dropped without touching newlib metadata. Returns
+ * nonzero when one or more blocks were reclaimed.
  */
 unsigned sdk_compression_reclaim_core1_decode(void);
 
-/*
- * Heap wrappers for decode backends that may run on core 1: plain
- * malloc/free on core 0, tracked (reclaimable after a core-1 cold reset)
- * on core 1. Shared by the zlib/LZMA callbacks here and by the libjpeg
- * memory backend (jmem_zz9k.c) and libpng allocator hooks
- * (sdk_image_stream.c) so image decodes get the same fault-reclaim
- * guarantee as the decompress services.
- */
+/* Decode backend allocations use the reset-reclaimable MEDIA card-pool
+ * owner. The historical name is retained for codec callback compatibility. */
 void *sdk_decode_heap_alloc(size_t size);
 void sdk_decode_heap_free(void *ptr);
+void *sdk_decode_heap_realloc(void *ptr, size_t size);
+void *sdk_decode_heap_calloc(size_t count, size_t size);
 
 #endif /* SDK_COMPRESSION_H */

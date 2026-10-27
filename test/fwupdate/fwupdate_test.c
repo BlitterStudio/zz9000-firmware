@@ -202,6 +202,86 @@ static void test_staged_job_keeps_limits(void) {
     fw_update_abort();
 }
 
+/* A module target has one exact uppercase ZZ9K component and an uppercase
+ * 8.3 leaf. Rejecting a malformed path must happen before temporary state is
+ * created, so a following valid OPEN still works. */
+static void test_module_name_validation_and_paths(void) {
+    static const char *const accepted[] = {
+        "ZZ9K/MPEG2.ZZM", "ZZ9K/WEBP.ZZM", "ZZ9K/A1_B.C3"
+    };
+    static const char *const rejected[] = {
+        "zz9k/X.ZZM", "ZZ9K/../BOOT.bin", "ZZ9K/A/B.ZZM", "ZZ9K/",
+        "ZZ9K/ABCDEFGHI.ZZM", "ZZ9K/A.TOOLONG", "ZZ9K/a.ZZM"
+    };
+
+    printf("test_module_name_validation_and_paths\n");
+    mock_reset();
+    for (unsigned i = 0; i < sizeof(accepted) / sizeof(accepted[0]); i++) {
+        CHECK(fw_update_open(accepted[i]) == FWUP_OK, "valid module target opens");
+        CHECK(fw_update_abort() == FWUP_OK, "valid module target aborts");
+    }
+    for (unsigned i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+        CHECK(fw_update_open(rejected[i]) == FWUP_ERR_BAD_NAME,
+              "malformed module target is rejected");
+    }
+
+    CHECK(fw_update_open("ZZ9K/MPEG2.ZZM") == FWUP_OK, "module update opens");
+    CHECK(fw_update_write("new", 3) == FWUP_OK, "module update writes");
+    mock_add_file("0:/ZZ9K/MPEG2.ZZM", "old");
+    CHECK(fw_update_close() == FWUP_OK, "module update commits");
+    CHECK(mock_exists("0:/ZZ9K/MPEG2.BAK"), "backup remains in module directory");
+    CHECK(mock_exists("0:/ZZ9K/MPEG2.ZZM"), "module target remains in directory");
+}
+
+/* Replacing a target that already has a retained backup must preserve all
+ * three generations in order. This covers both the legacy root and module
+ * directory discard paths. */
+static void test_commit_displaces_existing_backup(void) {
+    printf("test_commit_displaces_existing_backup\n");
+    mock_reset();
+    mock_add_file("0:/BOOT.bin", "active");
+    mock_add_file("0:/BOOT.bak", "backup");
+    CHECK(fw_update_open("BOOT.bin") == FWUP_OK, "root update opens");
+    CHECK(fw_update_write("new", 3) == FWUP_OK, "root update writes");
+    CHECK(fw_update_close() == FWUP_OK, "root update commits");
+    CHECK(strcmp(mock_tag("0:/ZZFWUP.DEL"), "backup") == 0,
+          "root retained backup goes to discard");
+    CHECK(strcmp(mock_tag("0:/BOOT.bak"), "active") == 0,
+          "root active becomes backup");
+
+    mock_reset();
+    mock_add_file("0:/ZZ9K/MPEG2.ZZM", "active");
+    mock_add_file("0:/ZZ9K/MPEG2.BAK", "backup");
+    CHECK(fw_update_open("ZZ9K/MPEG2.ZZM") == FWUP_OK, "module update opens");
+    CHECK(fw_update_write("new", 3) == FWUP_OK, "module update writes");
+    CHECK(fw_update_close() == FWUP_OK, "module update commits");
+    CHECK(strcmp(mock_tag("0:/ZZ9K/ZZFWUP.DEL"), "backup") == 0,
+          "module retained backup goes to module discard");
+    CHECK(strcmp(mock_tag("0:/ZZ9K/MPEG2.BAK"), "active") == 0,
+          "module active becomes backup");
+}
+
+static void test_commit_fails_when_discard_slots_full(void) {
+    char path[32];
+    printf("test_commit_fails_when_discard_slots_full\n");
+    mock_reset();
+    mock_add_file("0:/BOOT.bin", "active");
+    mock_add_file("0:/BOOT.bak", "backup");
+    mock_add_file("0:/ZZFWUP.DEL", "discard");
+    for (int i = 0; i < 8; i++) {
+        snprintf(path, sizeof(path), "0:/ZZFWUP%02d.DEL", i);
+        mock_add_file(path, "discard");
+    }
+    CHECK(fw_update_open("BOOT.bin") == FWUP_OK, "full-discard update opens");
+    CHECK(fw_update_write("new", 3) == FWUP_OK, "full-discard update writes");
+    CHECK(fw_update_close() == FWUP_ERR_CLOSE, "full discard set rejects commit");
+    CHECK(strcmp(mock_tag("0:/BOOT.bin"), "active") == 0,
+          "active target remains untouched");
+    CHECK(strcmp(mock_tag("0:/BOOT.bak"), "backup") == 0,
+          "retained backup remains untouched");
+    fw_update_abort();
+}
+
 /* Core 0 sees a queued job as busy until it retires; the result is taken
  * once. A job that faulted reports its command's error; a job dropped
  * with the task queue (Amiga reset) leaves no result. */
@@ -247,6 +327,9 @@ int main(void) {
     test_staged_job_runs_on_its_own_copy();
     test_staged_job_keeps_limits();
     test_job_retirement();
+    test_module_name_validation_and_paths();
+    test_commit_displaces_existing_backup();
+    test_commit_fails_when_discard_slots_full();
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

@@ -28,6 +28,12 @@ void smp_raw_spin_lock(volatile uint32_t *w)
     }
     *w = 1u;
 }
+int smp_raw_spin_try_lock(volatile uint32_t *w)
+{
+    if (*w) return 0;
+    *w = 1u;
+    return 1;
+}
 void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0u; }
 
 #define PAGE CARD_POOL_PAGE_BYTES
@@ -36,6 +42,8 @@ void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0u; }
 #define MEDIA(i)    CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, (i))
 #define IMAGE(i)    CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, (i))
 #define FIRMWARE(i) CARD_POOL_OWNER(CARD_POOL_CLASS_FIRMWARE, (i))
+#define SDK_SURFACE(i) CARD_POOL_OWNER(CARD_POOL_CLASS_SDK_SURFACE, (i))
+#define CONSOLE(i)  CARD_POOL_OWNER(CARD_POOL_CLASS_CONSOLE, (i))
 
 static int failures = 0;
 static int checks = 0;
@@ -76,6 +84,21 @@ static void test_fills_ranges_in_order(void)
     CHECK(d == C_BASE + 2 * PAGE);
 }
 
+static void test_block_ownership(void)
+{
+    uint32_t address;
+
+    two_ranges(MB(1), MB(1));
+    address = card_pool_alloc(&pool, PAGE + 1, MEDIA(1));
+    CHECK(card_pool_block_owned(&pool, address, PAGE + 1, MEDIA(1)));
+    CHECK(card_pool_block_owned(&pool, address, 2 * PAGE, MEDIA(1)));
+    CHECK(!card_pool_block_owned(&pool, address, 2 * PAGE + 1, MEDIA(1)));
+    CHECK(!card_pool_block_owned(&pool, address, PAGE, MEDIA(2)));
+    CHECK(!card_pool_block_owned(&pool, address + PAGE, PAGE, MEDIA(1)));
+    CHECK(card_pool_free(&pool, address, MEDIA(1)) == 1);
+    CHECK(!card_pool_block_owned(&pool, address, PAGE, MEDIA(1)));
+}
+
 static void test_too_large_leaves_table(void)
 {
     two_ranges(MB(1), MB(1));
@@ -99,8 +122,12 @@ static void test_class_limit(void)
                           CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 1)) != 0);
     CHECK(card_pool_alloc(&pool, PAGE,
                           CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 2)) == 0);
+    CHECK(card_pool_alloc(&pool, MB(32), CONSOLE(1)) != 0);
+    CHECK(card_pool_alloc(&pool, PAGE, CONSOLE(2)) == 0);
     CHECK(card_pool_alloc(&pool, MB(64), FIRMWARE(1)) != 0);
     CHECK(card_pool_alloc(&pool, PAGE, FIRMWARE(2)) == 0);
+    CHECK(card_pool_release_owner(&pool, CONSOLE(1)) == MB(32));
+    CHECK(card_pool_alloc(&pool, PAGE, CONSOLE(2)) != 0);
     CHECK(card_pool_release_owner(&pool, IMAGE(1)) == MB(72));
     CHECK(card_pool_alloc(&pool, PAGE, IMAGE(2)) != 0);
 }
@@ -163,6 +190,55 @@ static void test_shared_media_owner_isolated_from_session_reclaim(void)
     CHECK(card_pool_free(&pool, shared_block, shared_owner) == 1);
 }
 
+static void test_sdk_surface_reclaimed_on_reset(void)
+{
+    uint32_t firmware;
+    uint32_t surface;
+
+    two_ranges(4 * PAGE, PAGE);
+    firmware = card_pool_alloc(&pool, PAGE, FIRMWARE(1));
+    surface = card_pool_alloc(&pool, PAGE, SDK_SURFACE(1));
+    CHECK(firmware == A_BASE);
+    CHECK(surface == A_BASE + PAGE);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.block_count == 1);
+    CHECK(pool.blocks[0].addr == firmware);
+    CHECK(pool.blocks[0].owner == FIRMWARE(1));
+    CHECK(pool.class_used[CARD_POOL_CLASS_SDK_SURFACE] == 0U);
+    CHECK(!card_pool_block_owned(&pool, surface, PAGE, SDK_SURFACE(1)));
+}
+
+static void test_console_reclaimed_on_reset(void)
+{
+    uint32_t console;
+
+    two_ranges(4 * PAGE, PAGE);
+    console = card_pool_alloc(&pool, PAGE, CONSOLE(1));
+    CHECK(console == A_BASE);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.block_count == 0);
+    CHECK(pool.class_used[CARD_POOL_CLASS_CONSOLE] == 0U);
+    CHECK(!card_pool_block_owned(&pool, console, PAGE, CONSOLE(1)));
+}
+
+static void test_decode_classes_reclaimed_on_reset(void)
+{
+    uint32_t image;
+    uint32_t media;
+
+    two_ranges(4 * PAGE, PAGE);
+    image = card_pool_alloc(&pool, PAGE, IMAGE(1));
+    media = card_pool_alloc(&pool, PAGE, MEDIA(1));
+    CHECK(image == A_BASE);
+    CHECK(media == A_BASE + PAGE);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.block_count == 0U);
+    CHECK(pool.class_used[CARD_POOL_CLASS_IMAGE] == 0U);
+    CHECK(pool.class_used[CARD_POOL_CLASS_MEDIA] == 0U);
+    CHECK(!card_pool_block_owned(&pool, image, PAGE, IMAGE(1)));
+    CHECK(!card_pool_block_owned(&pool, media, PAGE, MEDIA(1)));
+}
+
 static void test_firmware_never_in_revocable(void)
 {
     card_pool_init(&pool);
@@ -175,50 +251,50 @@ static void test_firmware_never_in_revocable(void)
     CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == 0x20000000u);
 }
 
-/* Ranges in card order: A and C fixed, B revocable and tried last. */
+/* One permanent prefix plus the revocable Fast-RAM tail. */
 #define B_BASE 0x20000000u
 static void card_like_pool(void)
 {
     card_pool_init(&pool);
-    CHECK(card_pool_add_range(&pool, A_BASE, A_BASE + PAGE, 0) == 0);
-    CHECK(card_pool_add_range(&pool, C_BASE, C_BASE + 2 * PAGE, 0) == 1);
-    CHECK(card_pool_add_range(&pool, B_BASE, B_BASE + MB(1), 1) == 2);
+    CHECK(card_pool_add_range(&pool, A_BASE, A_BASE + 3 * PAGE, 0) == 0);
+    CHECK(card_pool_add_range(&pool, B_BASE, B_BASE + MB(1), 1) == 1);
     card_pool_open_range(&pool, 0);
-    card_pool_open_range(&pool, 1);
 }
 
 static void test_reset_fast_ram_switches_on(void)
 {
+    uint32_t fw;
+    uint32_t media;
+    uint32_t fw_next;
+    uint32_t in_b;
+
     card_like_pool();
-    /* Boot with fast RAM off lends B. */
     CHECK(!card_pool_has_lent(&pool));
     card_pool_finish_amiga_reset(&pool, 1, 0);
     CHECK(card_pool_has_lent(&pool));
-    uint32_t fw = card_pool_alloc(&pool, PAGE, FIRMWARE(1));
-    uint32_t in_c = card_pool_alloc(&pool, PAGE, MEDIA(1));
-    uint32_t fw_c = card_pool_alloc(&pool, PAGE, FIRMWARE(2));
-    uint32_t in_b = card_pool_alloc(&pool, MB(1), IMAGE(2));
-    CHECK(fw == A_BASE && in_c == C_BASE && fw_c == C_BASE + PAGE &&
-          in_b == B_BASE);
+    fw = card_pool_alloc(&pool, PAGE, FIRMWARE(1));
+    media = card_pool_alloc(&pool, PAGE, MEDIA(1));
+    fw_next = card_pool_alloc(&pool, PAGE, FIRMWARE(2));
+    in_b = card_pool_alloc(&pool, MB(1), IMAGE(2));
+    CHECK(fw == A_BASE && media == A_BASE + PAGE &&
+          fw_next == A_BASE + 2 * PAGE && in_b == B_BASE);
 
-    /* Warm reset that enables fast RAM. Range C sits above B, so its
-     * blocks follow B's in the table and must survive B's removal. */
     card_pool_take_back_lent(&pool);
     CHECK(!card_pool_has_lent(&pool));
-    CHECK(card_pool_range_free_bytes(&pool, 2) == 0);
-    CHECK(pool.block_count == 3 && pool.blocks[2].addr == fw_c);
+    CHECK(card_pool_range_free_bytes(&pool, 1) == 0);
+    CHECK(pool.block_count == 3 && pool.blocks[2].addr == fw_next);
     card_pool_finish_amiga_reset(&pool, 1, 1);
     CHECK(pool.block_count == 2 &&
           pool.blocks[0].addr == fw && pool.blocks[0].owner == FIRMWARE(1) &&
-          pool.blocks[1].addr == fw_c && pool.blocks[1].owner == FIRMWARE(2));
+          pool.blocks[1].addr == fw_next &&
+          pool.blocks[1].owner == FIRMWARE(2));
     CHECK(pool.class_used[CARD_POOL_CLASS_MEDIA] == 0);
     CHECK(pool.class_used[CARD_POOL_CLASS_IMAGE] == 0);
     CHECK(pool.class_used[CARD_POOL_CLASS_FIRMWARE] == 2 * PAGE);
-    CHECK(card_pool_range_free_bytes(&pool, 2) == 0);
-    /* The revoked block's late free is ignored and B is never handed out. */
+    CHECK(card_pool_range_free_bytes(&pool, 1) == 0);
     CHECK(card_pool_free(&pool, in_b, IMAGE(2)) == 0);
     CHECK(pool.ignored_frees == 1);
-    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == C_BASE);
+    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == A_BASE + PAGE);
     CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == 0);
     CHECK(!card_pool_has_lent(&pool));
 }
@@ -228,22 +304,19 @@ static void test_reset_relends_when_unused(void)
     card_like_pool();
     card_pool_finish_amiga_reset(&pool, 1, 0);
     CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == A_BASE);
-    CHECK(card_pool_alloc(&pool, 2 * PAGE, MEDIA(1)) == C_BASE);
+    CHECK(card_pool_alloc(&pool, 2 * PAGE, MEDIA(1)) == A_BASE + PAGE);
     CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == B_BASE);
 
-    /* Fast RAM stays off: B comes back empty. */
     CHECK(card_pool_has_lent(&pool));
     card_pool_take_back_lent(&pool);
     card_pool_finish_amiga_reset(&pool, 1, 0);
     CHECK(pool.block_count == 0);
-    CHECK(card_pool_range_free_bytes(&pool, 2) == MB(1));
+    CHECK(card_pool_range_free_bytes(&pool, 1) == MB(1));
 
-    /* Zorro II has no fast-RAM window: B is lent whatever the config says. */
     card_pool_take_back_lent(&pool);
     card_pool_finish_amiga_reset(&pool, 0, 1);
-    CHECK(card_pool_range_free_bytes(&pool, 2) == MB(1));
+    CHECK(card_pool_range_free_bytes(&pool, 1) == MB(1));
 }
-
 static void test_lock_left_by_faulted_core(void)
 {
     card_like_pool();
@@ -275,16 +348,22 @@ static void test_full_table(void)
 
 static void test_card_setup(void)
 {
+    uint32_t permanent;
+    uint32_t revocable;
+
     card_pool_setup_card(&pool);
-    uint32_t a1 = card_pool_range_free_bytes(&pool, CARD_POOL_RANGE_A1);
-    uint32_t a2 = card_pool_range_free_bytes(&pool, CARD_POOL_RANGE_A2);
-    uint32_t c = card_pool_range_free_bytes(&pool, CARD_POOL_RANGE_C);
-    CHECK(a1 == MB(62) && a2 == MB(64) && c == MB(252));
-    CHECK(a1 + a2 + c == MB(378));
-    CHECK(card_pool_range_free_bytes(&pool, CARD_POOL_RANGE_B) == 0);
-    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == CARD_POOL_A1_ADDRESS);
-    card_pool_open_range(&pool, CARD_POOL_RANGE_B);
-    CHECK(card_pool_range_free_bytes(&pool, CARD_POOL_RANGE_B) == MB(256));
+    permanent = card_pool_range_free_bytes(
+        &pool, CARD_POOL_RANGE_PERMANENT);
+    revocable = card_pool_range_free_bytes(
+        &pool, CARD_POOL_RANGE_REVOCABLE);
+    CHECK(permanent == CARD_POOL_PERMANENT_END -
+          CARD_POOL_PERMANENT_ADDRESS);
+    CHECK(revocable == 0);
+    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) ==
+          CARD_POOL_PERMANENT_ADDRESS);
+    card_pool_open_range(&pool, CARD_POOL_RANGE_REVOCABLE);
+    CHECK(card_pool_range_free_bytes(&pool, CARD_POOL_RANGE_REVOCABLE) ==
+          CARD_POOL_REVOCABLE_END - CARD_POOL_REVOCABLE_ADDRESS);
 }
 
 /* Randomised allocate/free run: blocks stay sorted, non-overlapping, inside
@@ -343,12 +422,16 @@ static void test_random(void)
 int main(void)
 {
     test_fills_ranges_in_order();
+    test_block_ownership();
     test_too_large_leaves_table();
     test_class_limit();
     test_wrong_owner_and_unknown_frees();
     test_release_owner_merges_gaps();
     test_shared_media_owner_isolated_from_session_reclaim();
+    test_sdk_surface_reclaimed_on_reset();
+    test_console_reclaimed_on_reset();
     test_firmware_never_in_revocable();
+    test_decode_classes_reclaimed_on_reset();
     test_reset_fast_ram_switches_on();
     test_reset_relends_when_unused();
     test_lock_left_by_faulted_core();

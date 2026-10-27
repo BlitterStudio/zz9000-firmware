@@ -78,6 +78,18 @@ static inline int zz9k_request_query_aperture_layout(ZZ9KRequest *request)
   return ZZ9K_STATUS_OK;
 }
 
+static inline int zz9k_request_module_status(ZZ9KRequest *request,
+                                              uint32_t index)
+{
+  ZZ9KModuleStatusRequestPayload *payload;
+  if (!request) return ZZ9K_STATUS_BAD_REQUEST;
+  zz9k_request_init(request, ZZ9K_OP_MODULE_STATUS);
+  request->entry.payload_len = sizeof(ZZ9KModuleStatusRequestPayload);
+  payload = (ZZ9KModuleStatusRequestPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->index, index);
+  return ZZ9K_STATUS_OK;
+}
+
 static inline int zz9k_request_alloc_shared(ZZ9KRequest *request,
                                             uint32_t length,
                                             uint32_t alignment,
@@ -900,6 +912,18 @@ static inline int zz9k_request_audio_fabric_state_get(
       (ZZ9KAudioFabricStateGetPayload *)request->entry.payload.inline_data;
   zz9k_put_be32(payload->slot, validated.slot);
   zz9k_put_be32(payload->flags, validated.flags);
+  return ZZ9K_STATUS_OK;
+}
+
+static inline int zz9k_request_audio_output_clock(ZZ9KRequest *request)
+{
+  if (!request) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  zz9k_request_init(request, ZZ9K_OP_AUDIO_OUTPUT_CLOCK);
+  request->entry.payload_len = sizeof(ZZ9KAudioOutputClockPayload);
+  memset(request->entry.payload.inline_data, 0,
+         sizeof(request->entry.payload.inline_data));
   return ZZ9K_STATUS_OK;
 }
 

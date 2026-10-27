@@ -29,6 +29,7 @@ typedef struct ZZPlayCodecEngine {
    * trailer. Seeking and the duration estimate work inside this range. */
   uint64_t audio_start;
   uint64_t audio_end;
+  uint64_t position_base_ms;
   const ZZPlayMP3Info *info;
   /* Stream the accelerated path decodes: MP3 geometry comes from the frame
    * probe, FLAC from STREAMINFO. pcm_width is the bytes per channel
@@ -76,6 +77,8 @@ typedef struct ZZPlayCodecDecode {
   /* Where in the item this pass started; positions are reported from
    * here plus the frames this pass has played. */
   uint32_t position_base_ms;
+  uint64_t clock_origin;
+  int clock_armed;
   /* Last non-OK status of a Feed or Read; UNSUPPORTED means the card
    * refused the stream's layout (a chained or multiplexed Ogg link, or a
    * geometry it cannot decode), not a transport failure. */

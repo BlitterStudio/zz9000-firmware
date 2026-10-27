@@ -18,6 +18,8 @@
 #include <opus/opus.h>
 #include "tremor/ivorbiscodec.h"
 
+
+extern const struct SDKVideoDecoderOps *zzm_webm_ops(uint32_t codec);
 static int failures;
 
 static void check(int cond, const char *what)
@@ -1035,13 +1037,13 @@ static void test_audio_demuxed_ahead_of_video(void)
 
 int main(void)
 {
-	ops = sdk_video_webm_ops(SDK_VIDEO_CODEC_VP8);
+	ops = zzm_webm_ops(SDK_VIDEO_CODEC_VP8);
 	check(ops != 0, "VP8 ops");
 	check(ops && ops->geometry_ok && ops->geometry_ok(1920U, 1088U) &&
 	      !ops->geometry_ok(1921U, 1080U), "backend owns WebM geometry");
 	{
 		const struct SDKVideoDecoderOps *vp9 =
-			sdk_video_webm_ops(SDK_VIDEO_CODEC_VP9);
+			zzm_webm_ops(SDK_VIDEO_CODEC_VP9);
 
 		/* Portrait phone sizes must reach the VP9 backend too. */
 		check(vp9 && vp9->geometry_ok &&
@@ -1051,7 +1053,7 @@ int main(void)
 	}
 	{
 		const struct SDKVideoDecoderOps *vp9 =
-			sdk_video_webm_ops(SDK_VIDEO_CODEC_VP9);
+			zzm_webm_ops(SDK_VIDEO_CODEC_VP9);
 		int i;
 
 		for (i = 0; i < 2; i++) {

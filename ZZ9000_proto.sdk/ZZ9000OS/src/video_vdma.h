@@ -4,14 +4,25 @@
 #include <stdint.h>
 #include "zz_video_modes.h"
 
-/* Framebuffer-relative base of the native capture area (matches the
- * RTL's VIDEOCAP_ADDR write base) and the one legacy exception: the
- * hand-tuned PAL 800x600 filtered scanout origin, which starts 0x2f8
- * bytes (190 words) before the capture rows. */
-#define VIDEO_VDMA_CAPTURE_PAN_BASE          0x00e00000U
-#define VIDEO_VDMA_CAPTURE_PAN_PAL_800X600   0x00dff2f8U
-
+/* The sampler writes up to a 1280-word by 1024-row, 32-bit frame. Capture
+ * backing is allocated from host-visible DDR and must meet the RTL's 64-byte
+ * address-alignment requirement. */
 #define VIDEO_VDMA_WORD_BYTES 4U
+#define VIDEO_VIDEOCAP_MAX_WORDS          1280U
+#define VIDEO_VIDEOCAP_MAX_ROWS           1024U
+#define VIDEO_VIDEOCAP_BACKING_ALIGNMENT  64U
+#define VIDEO_VIDEOCAP_BACKING_SIZE \
+	(VIDEO_VIDEOCAP_MAX_WORDS * VIDEO_VDMA_WORD_BYTES * \
+	 VIDEO_VIDEOCAP_MAX_ROWS)
+
+/* PAL filtered 800x600 preserves its tuned pre-row scanout origin. This is
+ * deliberately a delta from the runtime capture backing rather than a fixed
+ * DDR address. */
+#define VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA 0x00000d08U
+#define VIDEO_VIDEOCAP_BACKING_RESERVATION_SIZE \
+	(VIDEO_VIDEOCAP_BACKING_SIZE + \
+	 VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA + \
+	 VIDEO_VIDEOCAP_BACKING_ALIGNMENT - 1U)
 
 static inline uint32_t video_vdma_line_bytes(uint32_t hsize, uint32_t hdiv)
 {
@@ -21,30 +32,19 @@ static inline uint32_t video_vdma_line_bytes(uint32_t hsize, uint32_t hdiv)
 	return (hsize * VIDEO_VDMA_WORD_BYTES) / hdiv;
 }
 
-/* Keep each native scanout line within its corresponding capture row.
- * Starting before the row prepends pixels from the preceding row and drops
- * the same number from the current row; horizontal origin belongs in the
- * capture sampler instead. */
-static inline uint32_t video_vdma_native_row_start(uint32_t capture_offset)
+static inline uint32_t video_vdma_native_row_start(uint32_t capture_address)
 {
-	return capture_offset;
+	return capture_address;
 }
 
-/* Native-scanout origin inside the capture area. The pre-row constant is
- * the tuned centering for the PAL 800x600 filtered profile ONLY. Every
- * other combination must start at the capture row base: a driver's
- * legacy native-pan write of the PAL constant with NTSC detected makes
- * each fetched line begin 190 words before its capture row, wrapping the
- * preceding row's tail across the left edge (zz9000-drivers #84). */
-static inline uint32_t video_videocap_scanout_pan_base(uint32_t ntsc,
-		uint32_t full_width, uint32_t base_mode)
+static inline uint32_t video_videocap_scanout_address(uint32_t capture_address,
+		uint32_t ntsc, uint32_t full_width, uint32_t base_mode)
 {
 	if (ntsc != 0U || full_width != 0U ||
 	    base_mode != ZZVMODE_800x600)
-		return video_vdma_native_row_start(
-			VIDEO_VDMA_CAPTURE_PAN_BASE);
+		return video_vdma_native_row_start(capture_address);
 
-	return VIDEO_VDMA_CAPTURE_PAN_PAL_800X600;
+	return capture_address - VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA;
 }
 
 static inline uint32_t video_vdma_stride_bytes(uint32_t hsize, uint32_t hdiv,

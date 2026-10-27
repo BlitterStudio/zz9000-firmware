@@ -11,10 +11,9 @@
 /*******************************************************************/
 
 _STACK_SIZE = DEFINED(_STACK_SIZE) ? _STACK_SIZE : 0x4000;
-/* ps7_ddr_hi is 254 MB and the high code before the heap is under 3 MB:
- * a 224 MB heap leaves about 25 MB for that code to grow. The linker
- * fails the build if heap and stacks no longer fit below 0x18000000. */
-_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE : 0x0E000000;
+/* The 8 MiB runtime region also contains the ARM exception stacks below,
+ * so the newlib break stops before that 22 KiB reservation. */
+_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE : 0x007FA800;
 
 _ABORT_STACK_SIZE = DEFINED(_ABORT_STACK_SIZE) ? _ABORT_STACK_SIZE : 1024;
 _SUPERVISOR_STACK_SIZE = DEFINED(_SUPERVISOR_STACK_SIZE) ? _SUPERVISOR_STACK_SIZE : 2048;
@@ -27,11 +26,11 @@ _UNDEF_STACK_SIZE = DEFINED(_UNDEF_STACK_SIZE) ? _UNDEF_STACK_SIZE : 1024;
 MEMORY
 {
    ps7_ddr_0 : ORIGIN = 0x100000, LENGTH = 0x07F00000
-   /* 0x081e0000..0x081f0000 is the host-visible Z3 AHI/MHI audio
-    * scratch window (see memorymap.h). Keep the firmware image, BSS and
-    * newlib heap above it; 0x08200000 preserves 1 MB MMU alignment. */
-   ps7_ddr_hi : ORIGIN = 0x08200000, LENGTH = 0x0FE00000
-   bootrom_ddr : ORIGIN = 0x3FCF0000, LENGTH = 0x2000
+   /* Image/BSS: 0x08200000..0x08600000. The adjacent 1 MiB task queue
+    * and core-1 stack are not linker-managed. */
+   ps7_ddr_hi : ORIGIN = 0x08200000, LENGTH = 0x00400000
+   ps7_ddr_heap : ORIGIN = 0x08800000, LENGTH = 0x00800000
+   bootrom_ddr : ORIGIN = 0x3FEF0000, LENGTH = 0x2000
    ps7_ram_0 : ORIGIN = 0x0, LENGTH = 0x30000
    ps7_ram_1 : ORIGIN = 0xFFFF0000, LENGTH = 0xFE00
 }
@@ -44,7 +43,10 @@ ENTRY(_vector_table)
 
 SECTIONS
 {
+/* VBAR on both cores points here. Keep the vector branches in range of
+ * the high firmware image rather than pinning the whole boot path low. */
 .text : {
+   . = ALIGN(32);
    KEEP (*(.vectors))
    KEEP (*(.boot))
    *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o *sdk_console_encode.o *rfb_encode.o *rfb_words.o *deflate.c.obj *trees.c.obj) .text)
@@ -58,15 +60,15 @@ SECTIONS
    *(.vfp11_veneer)
    *(.ARM.extab)
    *(.gnu.linkonce.armextab.*)
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .init : {
    KEEP (*(.init))
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .fini : {
    KEEP (*(.fini))
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .rodata : {
    __rodata_start = .;
@@ -74,14 +76,14 @@ SECTIONS
    *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o *sdk_console_encode.o *rfb_encode.o *rfb_words.o *deflate.c.obj *trees.c.obj) .rodata.*)
    *(.gnu.linkonce.r.*)
    __rodata_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .rodata1 : {
    __rodata1_start = .;
    *(.rodata1)
    *(.rodata1.*)
    __rodata1_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .sdata2 : {
    __sdata2_start = .;
@@ -89,7 +91,7 @@ SECTIONS
    *(.sdata2.*)
    *(.gnu.linkonce.s2.*)
    __sdata2_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .sbss2 : {
    __sbss2_start = .;
@@ -97,7 +99,7 @@ SECTIONS
    *(.sbss2.*)
    *(.gnu.linkonce.sb2.*)
    __sbss2_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .data : {
    __data_start = .;
@@ -108,18 +110,18 @@ SECTIONS
    *(.got)
    *(.got.plt)
    __data_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .data1 : {
    __data1_start = .;
    *(.data1)
    *(.data1.*)
    __data1_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .got : {
    *(.got)
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .ctors : {
    __CTOR_LIST__ = .;
@@ -130,7 +132,7 @@ SECTIONS
    KEEP (*(.ctors))
    __CTOR_END__ = .;
    ___CTORS_END___ = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .dtors : {
    __DTOR_LIST__ = .;
@@ -141,67 +143,62 @@ SECTIONS
    KEEP (*(.dtors))
    __DTOR_END__ = .;
    ___DTORS_END___ = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .fixup : {
    __fixup_start = .;
    *(.fixup)
    __fixup_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .eh_frame : {
    *(.eh_frame)
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .eh_framehdr : {
    __eh_framehdr_start = .;
    *(.eh_framehdr)
    __eh_framehdr_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .gcc_except_table : {
    *(.gcc_except_table)
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
-.mmu_tbl (ALIGN(16384)) : {
-   __mmu_tbl_start = .;
-   KEEP (*(.mmu_tbl))
-   __mmu_tbl_end = .;
-} > ps7_ddr_0
 
 .ARM.exidx : {
    __exidx_start = .;
    *(.ARM.exidx*)
    *(.gnu.linkonce.armexidix.*.*)
    __exidx_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .preinit_array : {
    __preinit_array_start = .;
    KEEP (*(SORT(.preinit_array.*)))
    KEEP (*(.preinit_array))
    __preinit_array_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .init_array : {
    __init_array_start = .;
    KEEP (*(SORT(.init_array.*)))
    KEEP (*(.init_array))
    __init_array_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .fini_array : {
    __fini_array_start = .;
    KEEP (*(SORT(.fini_array.*)))
    KEEP (*(.fini_array))
    __fini_array_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .ARM.attributes : {
    __ARM.attributes_start = .;
    *(.ARM.attributes)
    __ARM.attributes_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .sdata : {
    __sdata_start = .;
@@ -209,7 +206,7 @@ SECTIONS
    *(.sdata.*)
    *(.gnu.linkonce.s.*)
    __sdata_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .sbss (NOLOAD) : {
    __sbss_start = .;
@@ -217,7 +214,7 @@ SECTIONS
    *(.sbss.*)
    *(.gnu.linkonce.sb.*)
    __sbss_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .tdata : {
    __tdata_start = .;
@@ -225,7 +222,7 @@ SECTIONS
    *(.tdata.*)
    *(.gnu.linkonce.td.*)
    __tdata_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 .tbss : {
    __tbss_start = .;
@@ -233,17 +230,19 @@ SECTIONS
    *(.tbss.*)
    *(.gnu.linkonce.tb.*)
    __tbss_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
-__firmware_low_end = .;
+__firmware_low_end = __mmu_tbl_end;
 __framebuffer_start = 0x00200000;
 ASSERT(__firmware_low_end <= __framebuffer_start, "firmware low sections overlap framebuffer memory")
+ASSERT(__firmware_low_end <= 0x001FC000,
+       "low vectors and MMU table exceed their 1008 KiB budget")
 
 /* Keep synchronized with Z3_AUDIO_SCRATCH_{ADDRESS,END} in memorymap.h.
- * The legacy audio RX formatter writes this window continuously after AHI
- * first opens, so an overlap corrupts persistent firmware heap state. */
+ * The matched audio driver receives this reservation through its discovery
+ * path; it stays out of the common host allocator. */
 __z3_audio_scratch_start = 0x081E0000;
-__z3_audio_scratch_end = 0x081F0000;
+__z3_audio_scratch_end = 0x08200000;
 ASSERT(ORIGIN(ps7_ddr_hi) >= __z3_audio_scratch_end,
        "firmware high DDR overlaps Z3 AHI/MHI audio scratch")
 
@@ -520,6 +519,15 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    __bss_end = .;
 } > ps7_ddr_hi
 
+/* The MMU table has a fixed low address used during early startup. Put it
+ * after every high-image section so changing regions cannot advance the
+ * high-DDR location counter. */
+.mmu_tbl 0x001F8000 : {
+   __mmu_tbl_start = .;
+   KEEP (*(.mmu_tbl))
+   __mmu_tbl_end = .;
+} > ps7_ddr_0
+
 _SDA_BASE_ = __sdata_start + ((__sbss_end - __sdata_start) / 2 );
 
 _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
@@ -534,7 +542,7 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
    . += _HEAP_SIZE;
    _heap_end = .;
    HeapLimit = .;
-} > ps7_ddr_hi
+} > ps7_ddr_heap
 
 .stack (NOLOAD) : {
    . = ALIGN(16);
@@ -564,12 +572,19 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
    . += _UNDEF_STACK_SIZE;
    . = ALIGN(16);
    __undef_stack = .;
-} > ps7_ddr_hi
+} > ps7_ddr_heap
 
 _end = .;
-/* Keep synchronized with SDK_TASKQ_REGION_ADDRESS in memorymap.h: the task
- * queue, the core-1 stack and the card pool live above the linker image. */
-ASSERT(_end <= 0x18000000, "firmware image, heap and stacks reach the task-queue region")
+ASSERT(_vector_table == ORIGIN(ps7_ddr_hi),
+       "_vector_table must remain at the start of ps7_ddr_hi")
+ASSERT(__bss_end <= 0x08600000,
+       "firmware image/BSS reaches the task-queue region")
+ASSERT(__bss_end - ORIGIN(ps7_ddr_hi) <= LENGTH(ps7_ddr_hi),
+       "firmware high image exceeds its 4 MiB budget")
+ASSERT(_end <= 0x09000000,
+       "firmware heap and stacks reach the card-pool region")
+ASSERT(_end - ORIGIN(ps7_ddr_heap) <= LENGTH(ps7_ddr_heap),
+       "newlib heap and stacks exceed their 8 MiB budget")
 
 .bootrom_image : {
    KEEP(*(.bootrom_image))

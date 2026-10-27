@@ -113,6 +113,11 @@ static inline uint32_t videocap_control_width_only(uint32_t full_width)
  * or reinterpreted as a C28 calibration. */
 #define MNTVF_OP_VIDEOCAP_C28_PHASE 32
 
+/* ARM-only capture backing selection. `video_formatter_write()` sends the
+ * allocated DDR base as the payload; RTL accepts only nonzero 64-byte-aligned
+ * bases and stops writeback after reset until this is sent again. */
+#define MNTVF_OP_VIDEOCAP_ADDRESS 33
+
 enum zz_dpms_level {
 	ZZ_DPMS_ON,
 	ZZ_DPMS_STANDBY,
@@ -138,6 +143,12 @@ struct ZZ_VIDEO_STATE {
 	int videocap_output_profile_applied;
 	int videocap_full_width_applied;
 	int videocap_ns_vsync_applied;
+
+	/* Host-visible backing selected for capture writeback. The RTL clears
+	 * its address-valid latch on reset; `videocap_backing_programmed` stays
+	 * clear until the Zorro reset state has exited and firmware arms it. */
+	uint32_t videocap_backing_address;
+	uint8_t videocap_backing_programmed;
 
 	int interlace_old;
 	int videocap_ntsc_old;
@@ -165,6 +176,12 @@ struct ZZ_VIDEO_STATE {
 
 	uint32_t framebuffer_pan_offset;
 	uint32_t framebuffer_pan_width;
+	/* Last pan the host driver set for its RTG screen. Capture owns
+	 * framebuffer_pan_* while it is displayed; leaving capture restores
+	 * these, because P96 may pan its screen before it switches the
+	 * monitor back to RTG. */
+	uint32_t host_pan_offset;
+	uint32_t host_pan_width;
 	uint8_t scandoubler_mode_adjust;
 
 	int sprite_showing;
@@ -185,6 +202,13 @@ struct ZZ_VIDEO_STATE {
 
 struct ZZ_VIDEO_STATE* video_init();
 void video_reset();
+
+/* Reserve host-visible capture backing after surface_allocator_init(). This
+ * only allocates the range; capture stays inactive until it is armed. */
+int video_videocap_backing_reserve(void);
+/* Program MNTVF_OP_VIDEOCAP_ADDRESS once for a reserved backing after the
+ * Zorro FSM exits reset. Safe to repeat. */
+int video_videocap_backing_arm(void);
 
 /* Runtime RTG scanout-geometry diagnostics (config keys 21-25):
  * value of a diagnostic key from the last video_mode_init snapshot. */
@@ -220,5 +244,12 @@ uint16_t video_custom_status(void);
 
 struct ZZ_VIDEO_STATE* video_get_state();
 void video_formatter_write(uint32_t data, uint16_t op);
+
+/* Raw REG_ZZ_PAN values the RTG driver writes when it switches to the
+ * native (capture) display (zz_vcap_native_pan_offset). They name the old
+ * fixed capture area, not an RTG screen: capture derives its own origin
+ * from the allocated backing, so these never become the host pan. */
+#define VIDEOCAP_NATIVE_PAN_LEGACY_BASE   0x00e00000U
+#define VIDEOCAP_NATIVE_PAN_LEGACY_TUNED  0x00dff2f8U
 
 #endif

@@ -558,6 +558,12 @@ add_executable(zzplay_audio_clock_test
 target_link_libraries(zzplay_audio_clock_test PRIVATE zzplay_core)
 add_test(NAME zzplay_audio_clock_test COMMAND zzplay_audio_clock_test)
 
+add_executable(zzplay_output_clock_test
+  tests/zzplay_output_clock_test.c
+)
+target_link_libraries(zzplay_output_clock_test PRIVATE zzplay_core)
+add_test(NAME zzplay_output_clock_test COMMAND zzplay_output_clock_test)
+
 add_executable(zzplay_frame_clock_test
   tests/zzplay_frame_clock_test.c
 )

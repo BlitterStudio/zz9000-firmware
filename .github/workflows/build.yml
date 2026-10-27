@@ -119,6 +119,10 @@ jobs:
         run: make -C test/audio test
       - name: Firmware-file restore suite
         run: make -C test/fwupdate test
+      - name: Firmware module loader suite
+        run: make -C test/modules test
+      - name: Module runtime allocation bridge suite
+        run: make -C test/zzm_rt test
       - name: SD activity LED suite
         run: make -C test/sd_activity_led test
       - name: Scheduler host tests
@@ -127,6 +131,8 @@ jobs:
         run: make -C test/config test
       - name: Surface allocator suite
         run: make -C test/allocator test
+      - name: Newlib heap suite
+        run: make -C test/newlib_heap test
       - name: Card pool suite
         run: make -C test/card_pool test
       - name: Zorro II aperture layout suite
@@ -263,6 +269,13 @@ jobs:
 
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh
+      - name: Build and check firmware module ELFs
+        run: |
+          make -C ZZ9000_proto.sdk/ZZ9000OS modules
+          make -C test/zzm_conformance test
+
+      - name: Check exception-vector placement
+        run: bash util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
 
       - name: Package release assets (standard)
         run: |
@@ -273,6 +286,12 @@ jobs:
             ARGS+=(--require-all)
           fi
           ./build_release_assets.sh "${ARGS[@]}"
+
+      - name: Check firmware DDR and BOOT.bin budgets
+        run: |
+          python3 util/check_firmware_size.py \
+            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
+            bootimage_work/BOOT.bin
 
       - name: Verify A4000 C28 release BOOT payloads
         run: |
@@ -285,11 +304,13 @@ jobs:
       # ZZ9000.CFG shipped inside every archive (issue #33). The
       # DEFAULT_NS_VIDEOCAP compile flag still works for manual builds.
 
-      - name: Upload artifacts
+      - name: Upload firmware and module artifacts
         uses: actions/upload-artifact@v7
         with:
           name: zz9000-firmware-${{ github.sha }}
-          path: release_assets/*.zip
+          path: |
+            release_assets/*.zip
+            release_assets/ZZ9K/*.ZZM
           if-no-files-found: error
           retention-days: 14
 

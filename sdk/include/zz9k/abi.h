@@ -51,7 +51,7 @@ typedef struct ZZ9KMediaClock {
  * Clients must map the address published in ZZ9K_REG_SDK_MAILBOX_HI/LO and
  * size the rings from the descriptor, never assume a placement.
  */
-#define ZZ9K_MAPPED_IO_ARM_START    0x3FE40000UL
+#define ZZ9K_MAPPED_IO_ARM_START    0x3FF70000UL
 #define ZZ9K_MAPPED_IO_BOARD_OFFSET 0x0000A000UL
 #define ZZ9K_MAPPED_IO_WINDOW_SIZE  0x00006000UL
 
@@ -123,6 +123,8 @@ enum ZZ9KStatus {
   ZZ9K_STATUS_CANCELLED = 8,
   ZZ9K_STATUS_IO_ERROR = 9,
   ZZ9K_STATUS_NOT_FOUND = 10,
+  ZZ9K_STATUS_MODULE_MISSING = 11,
+  ZZ9K_STATUS_MODULE_MISMATCH = 12,
   ZZ9K_STATUS_INTERNAL_ERROR = 0xffff
 };
 
@@ -219,6 +221,10 @@ enum ZZ9KOpcode {
   ZZ9K_OP_AUDIO_RING_RELEASE = ZZ9K_SERVICE_AUDIO + 0x14,
   ZZ9K_OP_AUDIO_STREAM_GAIN = ZZ9K_SERVICE_AUDIO + 0x15,
   ZZ9K_OP_AUDIO_STREAM_BEGIN_EX = ZZ9K_SERVICE_AUDIO + 0x16,
+  /* Transmitter playback clock. Retired frames are DMA periods crossed
+   * while a producer was live; lead frames are written to the TX ring
+   * but not yet retired. output_rate is the formatter rate. */
+  ZZ9K_OP_AUDIO_OUTPUT_CLOCK = ZZ9K_SERVICE_AUDIO + 0x17,
 
   ZZ9K_OP_DECOMPRESS = ZZ9K_SERVICE_CODEC + 0x00,
   ZZ9K_OP_DECOMPRESS_TEST = ZZ9K_SERVICE_CODEC + 0x01,
@@ -253,6 +259,8 @@ enum ZZ9KOpcode {
   ZZ9K_OP_DIAG_TIMING = ZZ9K_SERVICE_DIAG + 0x01,
   ZZ9K_OP_DIAG_SCHED = ZZ9K_SERVICE_DIAG + 0x02,
   ZZ9K_OP_DIAG_MEMORY = ZZ9K_SERVICE_DIAG + 0x03,
+
+  ZZ9K_OP_MODULE_STATUS = ZZ9K_SERVICE_MODULE + 0x00,
 
   ZZ9K_OP_CONSOLE_ENCODE = ZZ9K_SERVICE_CONSOLE + 0x00
 };
@@ -305,6 +313,37 @@ enum ZZ9KCapability {
   /* Zorro III: card-only allocations for preloaded media input. */
   ZZ9K_CAP_MEDIA_INPUT = 1U << 30
 };
+
+enum ZZ9KModuleState {
+  ZZ9K_MODULE_LOADED = 0,
+  ZZ9K_MODULE_MISSING = 1,
+  ZZ9K_MODULE_REJECTED_ABI = 2,
+  ZZ9K_MODULE_REJECTED_HASH = 3,
+  ZZ9K_MODULE_REJECTED_SLOT = 4,
+  ZZ9K_MODULE_REJECTED_SERVICE = 5,
+  ZZ9K_MODULE_FAULTED = 6,
+  ZZ9K_MODULE_AVAILABLE = 7,
+  ZZ9K_MODULE_LOADING = 8,
+  ZZ9K_MODULE_LOAD_FAILED = 9
+};
+
+typedef struct ZZ9KModuleStatusRequestPayload {
+  uint8_t index[4];
+  uint8_t reserved[44];
+} ZZ9KModuleStatusRequestPayload;
+
+typedef struct ZZ9KModuleStatusPayload {
+  uint8_t id[4];
+  uint8_t version[4];
+  uint8_t abi_version[4];
+  uint8_t load_address[4];
+  uint8_t image_size[4];
+  uint8_t bss_size[4];
+  uint8_t state[4];
+  char name[16];
+  /* LOADED: strong reference count. Other states: reason/missing service ID. */
+  uint8_t detail[4];
+} ZZ9KModuleStatusPayload;
 
 #define ZZ9K_APERTURE_LAYOUT_GENERATION_SHIFT 16U
 #define ZZ9K_APERTURE_LAYOUT_GENERATION_MASK  0xffff0000UL
@@ -1409,6 +1448,27 @@ typedef struct ZZ9KAudioFabricStateResultPayload {
  * the result's flags word echoes it when the read consumed it. */
 #define ZZ9K_AUDIO_FABRIC_STATE_HOLD_RESET (1U << 0)
 
+/* ZZ9K_OP_AUDIO_OUTPUT_CLOCK. flags must be zero. */
+typedef struct ZZ9KAudioOutputClockPayload {
+  uint8_t flags[4];
+  uint8_t reserved[44];
+} ZZ9KAudioOutputClockPayload;
+
+/* retired is DMA frames since the last fabric reset. lead is the
+ * current TX fill ahead of that DMA position, in the same frames.
+ * output_rate is 48000. Played frames are retired - origin, and the
+ * lead is subtracted only when the caller passes the write cursor
+ * as retired plus lead. */
+typedef struct ZZ9KAudioOutputClockResultPayload {
+  uint8_t retired_hi[4];
+  uint8_t retired_lo[4];
+  uint8_t lead_hi[4];
+  uint8_t lead_lo[4];
+  uint8_t output_rate[4];
+  uint8_t flags[4];
+  uint8_t reserved[24];
+} ZZ9KAudioOutputClockResultPayload;
+
 /* Decoder identity and immutable geometry are fixed at BEGIN. DECODE publishes
  * a decoder-owned frame to the active P96 overlay; client-visible bitmap
  * addresses and pitches are deliberately not part of this contract. */
@@ -1925,6 +1985,10 @@ typedef char ZZ9KAudioFabricStateGetPayload_must_be_48_bytes[
     (sizeof(ZZ9KAudioFabricStateGetPayload) == 48U) ? 1 : -1];
 typedef char ZZ9KAudioFabricStateResultPayload_must_be_48_bytes[
     (sizeof(ZZ9KAudioFabricStateResultPayload) == 48U) ? 1 : -1];
+typedef char ZZ9KAudioOutputClockPayload_must_be_48_bytes[
+    (sizeof(ZZ9KAudioOutputClockPayload) == 48U) ? 1 : -1];
+typedef char ZZ9KAudioOutputClockResultPayload_must_be_48_bytes[
+    (sizeof(ZZ9KAudioOutputClockResultPayload) == 48U) ? 1 : -1];
 typedef char ZZ9KAudioRingProducerLine_is_one_cache_line[
     (sizeof(ZZ9KAudioRingProducerLine) ==
      ZZ9K_AUDIO_RING_CONTROL_LINE_SIZE) ? 1 : -1];
@@ -2418,6 +2482,13 @@ typedef struct ZZ9KAudioFabricStateResult {
   uint32_t peak;
   uint32_t clip;
 } ZZ9KAudioFabricStateResult;
+
+typedef struct ZZ9KAudioOutputClockResult {
+  uint64_t retired_frames;
+  uint64_t lead_frames;
+  uint32_t output_rate;
+  uint32_t flags;
+} ZZ9KAudioOutputClockResult;
 
 typedef struct ZZ9KVideoSessionBeginDesc {
   uint32_t codec;

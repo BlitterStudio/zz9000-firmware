@@ -10,11 +10,25 @@
 #include <stdint.h>
 #include <string.h>
 #include "surface_allocator.h"
+#include "memorymap.h"
 
 /* Fake heap: addresses are never dereferenced by the allocator. */
 #define HEAP_BASE 0x03500000u
 #define HEAP_SIZE 0x00100000u /* 1 MB keeps exhaustion tests fast */
 #define ALIGN     SURFACE_ALLOCATOR_ALIGNMENT
+
+/* Host backing for the allocator's firmware SMP lock. */
+int smp_cpu_id(void) { return 0; }
+uint32_t smp_local_irq_save(void) { return 0; }
+void smp_local_irq_restore(uint32_t state) { (void)state; }
+void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1u; }
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+    if (*word) return 0;
+    *word = 1u;
+    return 1;
+}
+void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0u; }
 
 /* ---- tiny test harness --------------------------------------------- */
 
@@ -28,6 +42,9 @@ static int checks = 0;
         printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
     } \
 } while (0)
+
+#define CHECK_CONTROL_RANGE(address, size) \
+    CHECK(surface_allocator_reserve((address), (size)) == 0);
 
 /* ---- tests ---------------------------------------------------------- */
 
@@ -44,6 +61,33 @@ static void test_basic_alloc(void) {
     CHECK(surface_allocator_block_size(b) == ALIGN);
     CHECK(surface_allocator_block_size(c) == 2 * ALIGN); /* 257 -> 512 */
     CHECK(surface_allocator_used_bytes() == 4 * ALIGN);
+}
+
+static void test_p96_sdk_interleaving(void) {
+    uint32_t p96_a;
+    uint32_t sdk;
+    uint32_t p96_b;
+    uint32_t sdk_reused;
+    uint32_t free_total;
+    uint32_t largest_free;
+
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    p96_a = surface_allocator_alloc(1024);
+    sdk = surface_allocator_alloc_aligned(300, 4096);
+    p96_b = surface_allocator_alloc(1024);
+    CHECK(p96_a == HEAP_BASE);
+    CHECK(sdk == HEAP_BASE + 4096);
+    CHECK((sdk & 4095u) == 0u);
+    CHECK(p96_b == HEAP_BASE + 1024);
+    CHECK(surface_allocator_owns(p96_a, 1024));
+    CHECK(surface_allocator_owns(sdk, 300));
+    CHECK(!surface_allocator_owns(sdk, 513));
+    CHECK(surface_allocator_free(sdk) == 0);
+    sdk_reused = surface_allocator_alloc_aligned(128, 4096);
+    CHECK(sdk_reused == sdk);
+    surface_allocator_free_stats(&free_total, &largest_free);
+    CHECK(free_total == HEAP_SIZE - surface_allocator_used_bytes());
+    CHECK(largest_free >= HEAP_SIZE - 4608);
 }
 
 static void test_zero_size(void) {
@@ -285,6 +329,18 @@ static void test_churn(void) {
     CHECK(!bad);
 }
 
+static void test_z3_host_window_reservation(void)
+{
+    surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
+    Z3_HOST_CONTROL_RANGES(CHECK_CONTROL_RANGE)
+    CHECK(surface_allocator_block_size(SDK_HOST_WINDOW_Z3_ADDRESS) ==
+          SDK_HOST_WINDOW_HEAP_SIZE);
+    CHECK(surface_allocator_owns(SDK_HOST_WINDOW_Z3_ADDRESS,
+                                 SDK_HOST_WINDOW_HEAP_SIZE));
+    CHECK(SDK_HOST_WINDOW_Z3_ADDRESS >= Z3_P96_VRAM_END);
+    CHECK(SDK_HOST_WINDOW_Z3_END <= HOST_VISIBLE_HEAP_END);
+}
+
 /* ---------------------------------------------------------------------- */
 
 int main(void) {
@@ -299,6 +355,8 @@ int main(void) {
     test_slot_exhaustion();
     test_reset();
     test_churn();
+    test_p96_sdk_interleaving();
+    test_z3_host_window_reservation();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

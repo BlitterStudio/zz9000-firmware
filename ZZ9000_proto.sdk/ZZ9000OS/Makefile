@@ -18,6 +18,7 @@
 
 CC = arm-none-eabi-gcc
 OBJCOPY = arm-none-eabi-objcopy
+AR = arm-none-eabi-ar
 SIZE = arm-none-eabi-size
 CC_FOR_BUILD ?= cc
 
@@ -95,7 +96,6 @@ INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
 INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
 INCLUDES += -I$(LIBWEBP_INCLUDE_DIR)
-INCLUDES += -I$(LIBMPEG2_INCLUDE_DIR) -I$(A52_INCLUDE_DIR)
 INCLUDES += -I$(LIBFLAC_INCLUDE_DIR) -I$(LIBVORBIS_INCLUDE_DIR)
 INCLUDES += -I$(LIBVPX_INCLUDE_DIR) -I$(LIBOPUS_INCLUDE_DIR)
 INCLUDES += -I$(LZMA_SDK_SRC)/C
@@ -125,10 +125,11 @@ LDFLAGS += -Wl,-build-id=none
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -specs=$(SRC_DIR)/Xilinx.spec
 LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
+LDFLAGS += -Wl,-Map,$(BUILD_DIR)/ZZ9000OS.map
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -181,6 +182,10 @@ C_SRCS = \
 	$(SRC_DIR)/sd_boot.c \
 	$(SRC_DIR)/zz_config.c \
 	$(SRC_DIR)/fw_update.c \
+	$(SRC_DIR)/zzm_manifest.c \
+	$(SRC_DIR)/zzm_runtime.c \
+	$(SRC_DIR)/zzm_loader.c \
+	$(SRC_DIR)/zzm_registry.c \
 	$(SRC_DIR)/usb_proxy.c \
 	$(SRC_DIR)/usb_proxy_diag.c \
 	$(SRC_DIR)/usb_proxy_iso.c \
@@ -237,24 +242,16 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/ghash_ctmul.c \
 	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
-	$(SRC_DIR)/sdk_webp_alloc.c \
 	$(SRC_DIR)/sdk_flac_alloc.c \
 	$(SRC_DIR)/sdk_audio_flac.c \
 	$(SRC_DIR)/sdk_vorbis_alloc.c \
 	$(SRC_DIR)/sdk_audio_vorbis.c \
 	$(SRC_DIR)/sdk_video_stream.c \
+	$(SRC_DIR)/sdk_video_mpeg2_glue.c \
 	$(SRC_DIR)/sdk_media_profile.c \
 	$(SRC_DIR)/sdk_media_session.c \
-	$(SRC_DIR)/sdk_media_timeline.c \
-	$(SRC_DIR)/webm_parse.c \
-	$(SRC_DIR)/webm_window.c \
-	$(SRC_DIR)/sdk_video_webm.c \
+	$(SRC_DIR)/sdk_video_webm_module.c \
 	$(SRC_DIR)/sdk_video_yuy2.c \
-	$(SRC_DIR)/sdk_dvd_ps.c \
-	$(SRC_DIR)/sdk_dvd_lpcm.c \
-	$(SRC_DIR)/sdk_dvd_ac3.c \
-	$(SRC_DIR)/sdk_video_mpeg2.c \
-	$(SRC_DIR)/sdk_mpeg2_neon.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/jmem_zz9k.c \
 	$(SRC_DIR)/sdk_surface.c \
@@ -266,6 +263,7 @@ C_SRCS = \
 	$(SRC_DIR)/rfb/rfb_words.c \
 	$(SRC_DIR)/watchdog.c \
 	$(SRC_DIR)/newlib_compat.c \
+	$(SRC_DIR)/newlib_heap.c \
 	$(SRC_DIR)/sd_boot_deadline.c
 
 # Object files shared by both bitstream-capability firmware images.
@@ -287,20 +285,33 @@ FALLBACK_OBJS = $(COMMON_OBJS) $(OVERLAY_HW_FALLBACK_OBJ)
 # Output
 TARGET = $(BUILD_DIR)/ZZ9000OS.elf
 FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
+ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 
-.PHONY: all clean size FORCE
+.DEFAULT_GOAL := all
+
+include modules/module.mk
+include modules/mpeg2/module.mk
+include modules/webm/module.mk
+include modules/webp/module.mk
+
+
+.PHONY: all clean size modules FORCE
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
+
+$(ZZM_PACKER): ../../util/zzm_pack.c $(SRC_DIR)/zzm_format.h $(SRC_DIR)/zzm_manifest.c $(SRC_DIR)/zzm_manifest.h
+	@mkdir -p $(dir $@)
+	$(CC_FOR_BUILD) -I$(SRC_DIR) -o $@ ../../util/zzm_pack.c $(SRC_DIR)/zzm_manifest.c
 $(LIBJPEG_TURBO_LIB):
 	@echo 'Building libjpeg-turbo dependency...'
 	cd ../.. && bash ./build_libjpeg_turbo.sh
@@ -429,25 +440,6 @@ $(BUILD_DIR)/gfx.o: $(SRC_DIR)/gfx.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
-# Program Stream hot path: demux, MPEG-1/MPEG-2 decode and AC-3 downmix at
-# -O3. The MPEG and AC-3 wrappers include libmpeg2/liba52 headers that exist
-# only after the pinned dependency build, so those objects depend on the
-# archives.
-$(BUILD_DIR)/sdk_dvd_ps.o: $(SRC_DIR)/sdk_dvd_ps.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
-
-$(BUILD_DIR)/sdk_video_mpeg2.o: $(SRC_DIR)/sdk_video_mpeg2.c $(LIBMPEG2_LIB) $(A52_LIB)
-	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
-
-$(BUILD_DIR)/sdk_mpeg2_neon.o: $(SRC_DIR)/sdk_mpeg2_neon.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
-
-$(BUILD_DIR)/sdk_dvd_ac3.o: $(SRC_DIR)/sdk_dvd_ac3.c $(LIBMPEG2_LIB) $(A52_LIB)
-	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
 # U7 FLAC backend: includes libFLAC headers that exist only after the pinned
 # dependency build, so the object depends on the archive (DVD codec pattern).
@@ -494,4 +486,4 @@ size: $(TARGET)
 clean:
 	rm -rf $(BUILD_DIR)
 
--include $(OBJS:.o=.d) $(OVERLAY_HW_FALLBACK_OBJ:.o=.d)
+-include $(OBJS:.o=.d) $(OVERLAY_HW_FALLBACK_OBJ:.o=.d) $(ZZM_MPEG2_OBJS:.o=.d) $(ZZM_WEBM_OBJS:.o=.d) $(ZZM_WEBP_OBJS:.o=.d)

@@ -257,3 +257,54 @@ uint64_t zzplay_audio_clock_presentation_pts(
   return zzplay_audio_frames_to_pts(
       clock->presentation_frames, clock->sample_rate, origin_pts);
 }
+
+uint32_t zzplay_output_elapsed_ms(uint64_t written_frames,
+                                  uint64_t lead_frames,
+                                  uint64_t origin_frames,
+                                  uint32_t output_rate)
+{
+  uint64_t played;
+  uint64_t milliseconds;
+
+  if (output_rate == 0U || written_frames < lead_frames) {
+    return 0U;
+  }
+  played = written_frames - lead_frames;
+  if (played < origin_frames) {
+    return 0U;
+  }
+  played -= origin_frames;
+  milliseconds = played * 1000ULL / output_rate;
+  return milliseconds > 0xffffffffULL ? 0xffffffffU
+                                      : (uint32_t)milliseconds;
+}
+
+#if defined(__amigaos__) || defined(__amiga__) || defined(__AMIGA__) || \
+    defined(__VBCC__)
+#include "zz9k/host.h"
+
+int zzplay_output_clock_elapsed(struct ZZ9KContext *ctx,
+                                uint64_t *origin_frames, int *armed,
+                                uint32_t base_ms, uint32_t *elapsed_ms)
+{
+  ZZ9KAudioOutputClockResult clock;
+  uint64_t written;
+  int status;
+
+  if (!ctx || !origin_frames || !armed || !elapsed_ms) {
+    return 0;
+  }
+  status = zz9k_audio_output_clock_get(ctx, &clock);
+  if (status != ZZ9K_STATUS_OK || clock.output_rate == 0U) {
+    return 0;
+  }
+  if (!*armed) {
+    *origin_frames = clock.retired_frames;
+    *armed = 1;
+  }
+  written = clock.retired_frames + clock.lead_frames;
+  *elapsed_ms = base_ms + zzplay_output_elapsed_ms(
+      written, clock.lead_frames, *origin_frames, clock.output_rate);
+  return 1;
+}
+#endif

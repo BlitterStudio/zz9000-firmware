@@ -49,6 +49,7 @@ void Xil_AssertNonVoid() {}
 #include "sd_storage.h"
 #include "sd_boot.h"
 #include "fw_update.h"
+#include "zzm_loader.h"
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
@@ -70,6 +71,7 @@ void Xil_AssertNonVoid() {}
 #include "surface_allocator.h"
 #include "card_pool.h"
 #include "overlay.h"
+#include "newlib_heap.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
  * P96 off-screen bitmap hooks on this revision (older firmware would
@@ -92,12 +94,12 @@ void Xil_AssertNonVoid() {}
  * live calibration also requires the bitstream's exact capability. Other
  * SDK additions use service flags and status pages that self-gate. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 8
+#define REVISION_MINOR 9
 /* Third release-tag component. REG_ZZ_FW_VERSION reads major.minor at
  * 0xC0 and this at 0xC2 (ZZ_FW_CAP_FW_VERSION_PATCH); ZZTop compares the
  * three against the latest GitHub release, and util/check_release_version.sh
  * makes tag builds fail when they disagree with the tag. */
-#define REVISION_PATCH 1
+#define REVISION_PATCH 0
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -358,6 +360,14 @@ static int fwup_wait_idle(void) {
 	}
 	return 1;
 }
+
+/* Module reads share FatFs with the staged FWUP worker.  On-demand loads fail
+ * promptly while that core-1 job owns the volume rather than touching FatFs
+ * concurrently or waiting unboundedly in a mailbox path. */
+static int zzm_storage_idle(void)
+{
+	return !fw_update_busy();
+}
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
 
@@ -422,13 +432,23 @@ static void init_storage_services() {
 typedef char z2_gfxdata_must_fit_template_scratch[
 	(sizeof(struct GFXData) <= 0x00010000U) ? 1 : -1];
 
+static int reserve_host_control_ranges(void)
+{
+#define RESERVE_HOST_CONTROL_RANGE(address, size) \
+	&& surface_allocator_reserve((address), (size)) == 0
+	return 1 Z3_HOST_CONTROL_RANGES(RESERVE_HOST_CONTROL_RANGE);
+#undef RESERVE_HOST_CONTROL_RANGE
+}
+
 static void apply_aperture_framebuffer_limit(void)
 {
 	if ((sdk_aperture_runtime_flags() & SDK_APERTURE_FLAG_VALID) != 0U)
 		set_fb_limit((uint8_t *)(uintptr_t)
 			(FRAMEBUFFER_ADDRESS + sdk_aperture_framebuffer_size()));
 	else
-		set_fb_limit((uint8_t *)(uintptr_t)LEGACY_SURFACE_HEAP_END);
+		/* RTG rect ops target P96 VRAM and firmware-allocated
+		 * off-screen surfaces alike. */
+		set_fb_limit((uint8_t *)(uintptr_t)HOST_VISIBLE_HEAP_END);
 }
 
 static void clear_runtime_gfxdata(void)
@@ -455,24 +475,47 @@ static void activate_aperture_layout_if_acknowledged(void)
 
 static uint8_t amiga_boot_reset_pass = 1;
 
+/* ADAU write count when the last handle_amiga_reset() pass finished. */
+static uint32_t adau_writes_after_reset_pass;
+
 static void print_memory_line(void)
 {
 	extern char _heap_start[], _heap_end[];
-	uint32_t a1 = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_A1);
-	uint32_t a2 = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_A2);
-	uint32_t c = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_C);
-	uint32_t b = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_B);
+	uint32_t permanent = card_pool_range_free_bytes(
+		&card_pool, CARD_POOL_RANGE_PERMANENT);
+	uint32_t revocable = card_pool_range_free_bytes(
+		&card_pool, CARD_POOL_RANGE_REVOCABLE);
+	uint32_t heap_used;
+	uint32_t heap_peak;
 
-	printf("[mem] heap %u MB, card pool %u MB free (A1 %u, A2 %u, C %u, "
-	       "B %s %u)\n",
-	       (unsigned)((uint32_t)(_heap_end - _heap_start) >> 20),
-	       (unsigned)((a1 + a2 + c + b) >> 20),
-	       (unsigned)(a1 >> 20), (unsigned)(a2 >> 20), (unsigned)(c >> 20),
-	       card_pool.ranges[CARD_POOL_RANGE_B].open ? "lent" : "fast-ram",
-	       (unsigned)(b >> 20));
+	newlib_heap_usage(&heap_used, &heap_peak);
+	printf("[mem] newlib reserved=%lu break-used=%lu peak-since-boot=%lu "
+	       "free=%lu; pool card-free=%lu revocable=%s:%lu\n",
+	       (unsigned long)(_heap_end - _heap_start),
+	       (unsigned long)heap_used, (unsigned long)heap_peak,
+	       (unsigned long)((_heap_end - _heap_start) - heap_used),
+	       (unsigned long)(permanent + revocable),
+	       card_pool_has_lent(&card_pool) ? "open" : "fast-ram",
+	       (unsigned long)revocable);
+}
+
+/*
+ * Fast RAM changes the ARM's ownership of the revocable pool tail. A new
+ * firmware must never advertise the 0x2fe00000 landing zone to an older
+ * bitstream that still decodes a different address, even when configuration
+ * requests it. REG7 is zero on older/Z2 variants, so this is fail closed.
+ */
+static int fastram_can_advertise(void)
+{
+	return zz_config_fastram_advertise() &&
+	       (mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7) &
+	        MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000) != 0U;
 }
 
 void handle_amiga_reset(enum amiga_reset_mode mode) {
+	/* amiga_boot_reset_pass is consumed by the Fast-RAM step below. */
+	const int boot_pass = amiga_boot_reset_pass;
+
 	/* A FWUP job on core 1 may still own FatFs and the SD card; the
 	 * Fast-RAM re-read and the storage reset below use both, and the
 	 * mailbox quiesce would cut a long SD write short. A job stuck past
@@ -521,16 +564,31 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 		zz_config_fastram_reload_warm(ZZ_CONFIG_FASTRAM_DEADLINE_MS);
 	amiga_boot_reset_pass = 0;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
-		zz_config_fastram_advertise() ? 1 : 0);
+		fastram_can_advertise() ? 1 : 0);
 
-	printf("    _______________   ___   ___   ___  \n");
-	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
-	printf("      / /   / / (_) | | | | | | | | | |\n");
-	printf("     / /   / / \\__, | | | | | | | | |\n");
-	printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
-	printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
-	printf("[reset] Amiga reset (%s)\r\n",
-	       mode == AMIGA_RESET_INIT_MEDIA ? "media init" : "fast");
+	/* The boot pass initialises card services; it is not an Amiga reset.
+	 * A real reset finds the audio DSP exactly as the previous pass left
+	 * it when nothing has written to it since (typically the reset right
+	 * after power-on, before any host driver runs): a Zorro reset does not
+	 * touch the audio path in the RTL. Keep it instead of reloading the
+	 * program and scene a second time. */
+	const int keep_dsp = !boot_pass && adau_enabled &&
+	                     audio_adau_write_count() ==
+	                     adau_writes_after_reset_pass;
+
+	if (boot_pass) {
+		printf("    _______________   ___   ___   ___  \n");
+		printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
+		printf("      / /   / / (_) | | | | | | | | | |\n");
+		printf("     / /   / / \\__, | | | | | | | | |\n");
+		printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
+		printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
+		printf("[boot] card services init (%s)\r\n",
+		       mode == AMIGA_RESET_INIT_MEDIA ? "media" : "no media");
+	} else {
+		printf("[reset] Amiga reset%s\r\n",
+		       keep_dsp ? " (audio DSP unchanged: kept)" : "");
+	}
 
 	video_reset();
 
@@ -558,8 +616,10 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	audio_set_interrupt_mask(0);
 	interrupt_enabled_vblank = 0;
 
-	// drop all RTG off-screen surfaces; P96 re-allocates after reboot
-	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
+	// Drop all host-visible allocations; P96 and SDK clients re-allocate.
+	surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
+	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
+		printf("[video] host-control or videocap backing unavailable after reset\n");
 	// the overlay shadows lived in that heap: drop the overlay too
 	overlay_amiga_reset(video_state);
 
@@ -586,24 +646,28 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 		f-=0.0001;
 	}*/
 
-	// reset ADAU
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
+	if (!keep_dsp) {
+		// reset ADAU
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
 
-	adau_enabled = audio_adau_init(1);
-	audio_set_codec_present(adau_enabled);
+		adau_enabled = audio_adau_init(1);
+		audio_set_codec_present(adau_enabled);
 
-	/* The DSP now holds power-on defaults; the control plane re-applies
-	 * the active scene (R10) before the request loop below can service
-	 * any owner. Cold boot reaches this through main() -> this handler,
-	 * so boot and warm reset share the apply. A failed apply leaves the
-	 * DSP at those defaults; one retry covers a transient write failure
-	 * before owners can be serviced. */
-	if (adau_enabled && audio_scene_apply_after_dsp_init() == -1) {
-		printf("[scene] post-reset apply failed; DSP holds defaults\n");
-		audio_scene_apply_after_dsp_init();
+		/* The DSP now holds power-on defaults; the control plane
+		 * re-applies the active scene (R10) before the request loop
+		 * below can service any owner. Cold boot reaches this through
+		 * main() -> this handler, so boot and warm reset share the
+		 * apply. A failed apply leaves the DSP at those defaults; one
+		 * retry covers a transient write failure before owners can be
+		 * serviced. */
+		if (adau_enabled && audio_scene_apply_after_dsp_init() == -1) {
+			printf("[scene] post-reset apply failed; DSP holds defaults\n");
+			audio_scene_apply_after_dsp_init();
+		}
 	}
+	adau_writes_after_reset_pass = audio_adau_write_count();
 
 	// clear interrupt holding amiga
 	amiga_interrupt_clear(0xffffffff);
@@ -621,7 +685,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* Every session went down above: give back what they held, and lend
 	 * the fast-RAM window again when the Amiga cannot use it. */
 	card_pool_finish_amiga_reset(&card_pool,
-		sdk_aperture_runtime_is_zorro3(), zz_config_fastram_advertise());
+		sdk_aperture_runtime_is_zorro3(), fastram_can_advertise());
 	print_memory_line();
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
@@ -631,6 +695,12 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 int main() {
 	init_platform();
+	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_DATA_ABORT_INT,
+		(Xil_ExceptionHandler)arm_exception_handler_id_data_abort, NULL);
+	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_PREFETCH_ABORT_INT,
+		(Xil_ExceptionHandler)arm_exception_handler_id_prefetch_abort, NULL);
+	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_UNDEFINED_INT,
+		(Xil_ExceptionHandler)arm_exception_handler_illinst, NULL);
 
 	/* Fast-Ram advertisement (fast-ram-cfg plan, KTD1/KTD6): the RTL
 	 * withholds the second Z3 autoconfig PIC (256 MiB Fast RAM) until
@@ -649,7 +719,7 @@ int main() {
 	zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS, 1);
 	XTime_GetTime(&fastram_t1);
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
-		zz_config_fastram_advertise() ? 1 : 0);
+		fastram_can_advertise() ? 1 : 0);
 	{
 		uint64_t load_counts = (uint64_t)(fastram_t1 - fastram_t0);
 		uint32_t load_ms = (uint32_t)((load_counts * 1000U) /
@@ -658,9 +728,13 @@ int main() {
 		 * the gate write so it cannot delay the decision, and the
 		 * only UART output this path produces before the service
 		 * bring-up. */
-		printf("[boot] fastram: %s cfg=%ums diag=%u\n",
+		printf("[boot] fastram: %s rtl-2fe00000=%s advertised=%s "
+		       "cfg=%ums diag=%u\n",
 			zz_fastram_outcome_name((enum zz_fastram_outcome)
 				zz_config_get()->fastram_outcome),
+			(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7) &
+			 MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000) ? "yes" : "no",
+			fastram_can_advertise() ? "yes" : "no",
 			load_ms, zz_config_diag_count());
 	}
 
@@ -761,8 +835,7 @@ int main() {
 			                  cfg->videocap_height : 0));
 	}
 
-	// RTG rect ops may write anywhere in framebuffer + legacy surface
-	// memory, but never past it into the SDK heaps and beyond
+	// RTG rect operations can use the entire allocator-backed Z3 aperture.
 	apply_aperture_framebuffer_limit();
 	// Host-supplied blit and sprite sources are board offsets, so they must
 	// stay inside the card memory the Zorro III board window maps
@@ -770,7 +843,9 @@ int main() {
 	set_src_window((void *)(uintptr_t)ADDR_ADJ,
 		(void *)(uintptr_t)(ADDR_ADJ + Z3_MAIN_BOARD_WINDOW_SIZE));
 
-	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
+	surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
+	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
+		printf("[video] host-control or videocap backing unavailable at boot\n");
 
 	xadc_init();
 
@@ -796,6 +871,14 @@ int main() {
 	handle_amiga_reset(AMIGA_RESET_FAST);
 #else
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
+	zzm_loader_set_storage_idle(zzm_storage_idle);
+	/* The initial media reset mounted SD. The scan validates headers only;
+	 * payload reads and initialization run on core 1 at first use. */
+	if (sd_storage_available_flag) {
+		zzm_loader_boot_load();
+	} else {
+		printf("[ZZM] skipped: SD volume not mounted\n");
+	}
 #endif
 
 	// Mark the task-queue region shareable-cacheable in the shared MMU table
@@ -821,10 +904,13 @@ int main() {
 	} else {
 		print("[sched] core 1 offline - single-core fallback\r\n");
 	}
+	if (scheduler_core1_available())
+		zzm_loader_set_load_dispatch(sdk_mailbox_load_module_core1);
 #endif
 	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
 
 	// graphics temporary registers
+	uint32_t reg_pan_hi = 0;
 	uint16_t rect_x1 = 0;
 	uint16_t rect_x2 = 0;
 	uint16_t rect_x3 = 0;
@@ -855,6 +941,7 @@ int main() {
 	u32 zstate_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 	int amiga_reset_seen = ((zstate_raw & 0xff) == 0);
 	int need_req_ack = 0;
+	int videocap_backing_arm_pending = 1;
 
 	// audio parameters (buffer locations)
 	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
@@ -872,6 +959,12 @@ int main() {
 	while (1) {
 		watchdog_kick();
 		sd_activity_led_poll();
+		{
+			XTime module_now;
+			XTime_GetTime(&module_now);
+			zzm_loader_poll((uint64_t)module_now * 1000U / COUNTS_PER_SECOND);
+			sdk_mailbox_poll_module_load();
+		}
 		usb_proxy_periodic_pump();
 		usb_proxy_iso_pump();
 #ifdef AUDIO_FABRIC_BENCH
@@ -1035,10 +1128,17 @@ int main() {
 				switch (zaddr) {
 				// Various blitter/video registers
 				case REG_ZZ_PAN_HI:
-					video_state->framebuffer_pan_offset = zdata << 16;
+					reg_pan_hi = zdata << 16;
 					break;
-				case REG_ZZ_PAN_LO:
-					video_state->framebuffer_pan_offset |= zdata;
+				case REG_ZZ_PAN_LO: {
+					u32 raw_pan = reg_pan_hi | zdata;
+
+					/* The native-display switch names the old fixed
+					 * capture area; capture derives its own origin, and
+					 * the RTG screen's pan must survive the switch. */
+					if (raw_pan == VIDEOCAP_NATIVE_PAN_LEGACY_BASE ||
+					    raw_pan == VIDEOCAP_NATIVE_PAN_LEGACY_TUNED)
+						break;
 
 					// cursor offset support for p96 panning
 					video_state->sprite_x_offset = rect_x1;
@@ -1050,9 +1150,13 @@ int main() {
 
 					video_state->framebuffer_pan_width = rect_x2;
 					u32 framebuffer_color_format = blitter_colormode;
+					video_state->framebuffer_pan_offset = raw_pan;
 					video_state->framebuffer_pan_offset += (rect_x1 << blitter_colormode);
 					video_state->framebuffer_pan_offset += (rect_y1 * (video_state->framebuffer_pan_width << framebuffer_color_format));
+					video_state->host_pan_offset = video_state->framebuffer_pan_offset;
+					video_state->host_pan_width = video_state->framebuffer_pan_width;
 					break;
+				}
 
 				case REG_ZZ_BLIT_SRC_HI:
 					blitter_src_offset = zdata << 16;
@@ -2361,8 +2465,14 @@ int main() {
 				if (!amiga_reset_seen) {
 					handle_amiga_reset(AMIGA_RESET_FAST);
 					amiga_reset_seen = 1;
+					videocap_backing_arm_pending = 1;
 				}
 			} else {
+				if (videocap_backing_arm_pending) {
+					if (!video_videocap_backing_arm())
+						printf("[video] videocap backing unavailable after reset\n");
+					videocap_backing_arm_pending = 0;
+				}
 				amiga_reset_seen = 0;
 			}
 

@@ -19,6 +19,10 @@
 #error "card pool page size differs between memorymap.h and card_pool.h"
 #endif
 
+#if CARD_POOL_PERMANENT_ADDRESS != FIRMWARE_MODULE_ARENA_END
+#error "module arena must reserve the first permanent card-pool pages"
+#endif
+
 card_pool_t card_pool;
 
 void card_pool_init(card_pool_t *pool)
@@ -29,21 +33,22 @@ void card_pool_init(card_pool_t *pool)
     pool->class_limit[CARD_POOL_CLASS_MEDIA] = CARD_POOL_LIMIT_MEDIA;
     pool->class_limit[CARD_POOL_CLASS_MEDIA_INPUT] =
         CARD_POOL_LIMIT_MEDIA_INPUT;
+    pool->class_limit[CARD_POOL_CLASS_CONSOLE] = CARD_POOL_LIMIT_CONSOLE;
+    pool->class_limit[CARD_POOL_CLASS_SDK_SURFACE] =
+        CARD_POOL_LIMIT_SDK_SURFACE;
     pool->class_limit[CARD_POOL_CLASS_IMAGE] = CARD_POOL_LIMIT_IMAGE;
 }
 
 void card_pool_setup_card(card_pool_t *pool)
 {
     card_pool_init(pool);
-    /* Indices follow the CARD_POOL_RANGE_* order, which is also the
-     * allocation order: the revocable range is used last. */
-    card_pool_add_range(pool, CARD_POOL_A1_ADDRESS, CARD_POOL_A1_END, 0);
-    card_pool_add_range(pool, CARD_POOL_A2_ADDRESS, CARD_POOL_A2_END, 0);
-    card_pool_add_range(pool, CARD_POOL_C_ADDRESS, CARD_POOL_C_END, 0);
-    card_pool_add_range(pool, CARD_POOL_B_ADDRESS, CARD_POOL_B_END, 1);
-    card_pool_open_range(pool, CARD_POOL_RANGE_A1);
-    card_pool_open_range(pool, CARD_POOL_RANGE_A2);
-    card_pool_open_range(pool, CARD_POOL_RANGE_C);
+    /* The permanent prefix is always card-owned. The contiguous tail is
+     * revocable because the Amiga owns it whenever Fast RAM is advertised. */
+    card_pool_add_range(pool, CARD_POOL_PERMANENT_ADDRESS,
+                        CARD_POOL_PERMANENT_END, 0);
+    card_pool_add_range(pool, CARD_POOL_REVOCABLE_ADDRESS,
+                        CARD_POOL_REVOCABLE_END, 1);
+    card_pool_open_range(pool, CARD_POOL_RANGE_PERMANENT);
 }
 
 int card_pool_add_range(card_pool_t *pool, uint32_t base, uint32_t end,
@@ -163,6 +168,24 @@ uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner)
     }
     sdk_smp_lock_release(&pool->lock);
     return addr;
+}
+
+int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
+                          uint32_t owner)
+{
+    uint32_t i;
+    int owned = 0;
+
+    if (!pool || !addr || !length || !owner)
+        return 0;
+    sdk_smp_lock_acquire(&pool->lock);
+    i = lower_bound(pool, addr);
+    if (i < pool->block_count && pool->blocks[i].addr == addr &&
+        pool->blocks[i].owner == owner &&
+        length <= pool->blocks[i].size)
+        owned = 1;
+    sdk_smp_lock_release(&pool->lock);
+    return owned;
 }
 
 int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner)

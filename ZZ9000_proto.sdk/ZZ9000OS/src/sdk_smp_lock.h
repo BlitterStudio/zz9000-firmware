@@ -18,10 +18,14 @@ int      smp_cpu_id(void);
 uint32_t smp_local_irq_save(void);         /* disable local IRQs, return prior state */
 void     smp_local_irq_restore(uint32_t s);
 void     smp_raw_spin_lock(volatile uint32_t *word);
+int      smp_raw_spin_try_lock(volatile uint32_t *word);
 void     smp_raw_spin_unlock(volatile uint32_t *word);
 
 void sdk_smp_lock_acquire(sdk_smp_lock_t *l);
 void sdk_smp_lock_release(sdk_smp_lock_t *l);
+
+/* Like acquire, but never waits with local IRQs masked. */
+int sdk_smp_lock_try_acquire(sdk_smp_lock_t *l);
 
 /* Force a lock to the free state, unconditionally. Portable (host-testable):
  * touches only the sdk_smp_lock_t fields, no platform calls. For fault
@@ -38,5 +42,9 @@ void sdk_smp_lock_reset(sdk_smp_lock_t *l);
 void sdk_smp_lock_reset_if_owned(sdk_smp_lock_t *l); /* reset + dsb/sev only if this core owns it */
 void sdk_smp_lock_reset_malloc(void);          /* unconditional reset + dsb/sev */
 void sdk_smp_lock_reset_malloc_if_owned(void); /* reset + dsb/sev only if this core owns it */
+
+/* Serialize a non-allocating heap-stat snapshot with newlib's allocator. */
+void sdk_smp_lock_malloc_acquire(void);
+void sdk_smp_lock_malloc_release(void);
 
 #endif /* SDK_SMP_LOCK_H */

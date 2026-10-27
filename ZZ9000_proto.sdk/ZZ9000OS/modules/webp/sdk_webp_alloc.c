@@ -1,0 +1,147 @@
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "sdk_webp_alloc.h"
+#ifdef ZZM_WEBP_HOST_TEST
+#include "card_pool.h"
+#include "sdk_vorbis_alloc.h"
+#endif
+
+static struct zzm_webp_arena *active_arena;
+static int active_failed;
+#ifdef ZZM_WEBP_HOST_TEST
+static struct sdk_vorbis_heap *host_heap;
+#endif
+
+/* The module keeps libwebp's bounded-session arena semantics, but all
+ * regions now enter through libzzm_rt rather than a module allocator copy. */
+void zzm_webp_alloc_init(const zzm_services_t *services)
+{
+	(void)services;
+}
+
+void zzm_webp_alloc_select(struct zzm_webp_arena *arena)
+{
+	active_arena = arena;
+	active_failed = 0;
+#ifdef ZZM_WEBP_HOST_TEST
+	host_heap = 0;
+#endif
+}
+
+#ifdef ZZM_WEBP_HOST_TEST
+void sdk_webp_alloc_select(struct sdk_vorbis_heap *heap)
+{
+	sdk_vorbis_heap_select(heap, 0);
+	host_heap = heap;
+	active_failed = 0;
+}
+#endif
+
+int zzm_webp_alloc_failed(void)
+{
+	return active_failed;
+}
+
+void zzm_webp_alloc_release(struct zzm_webp_arena *arena)
+{
+	uint32_t i;
+
+	if (!arena)
+		return;
+	for (i = 0U; i < arena->region_count; ++i) {
+#ifdef ZZM_WEBP_HOST_TEST
+		(void)card_pool_free(&card_pool, (uint32_t)arena->region[i],
+		                     CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, arena->owner));
+#else
+		free((void *)arena->region[i]);
+#endif
+	}
+	memset(arena, 0, sizeof(*arena));
+	if (active_arena == arena)
+		active_arena = 0;
+}
+
+void *sdk_webp_malloc(size_t size)
+{
+	struct zzm_webp_arena *arena = active_arena;
+	uint32_t bytes;
+	uint32_t region_bytes;
+	uintptr_t region;
+
+#ifdef ZZM_WEBP_HOST_TEST
+	if (host_heap)
+		return sdk_vorbis_malloc(size);
+#endif
+	if (!arena || size == 0U || size > 0xffffffffU) {
+		active_failed = 1;
+		return 0;
+	}
+	bytes = ((uint32_t)size + 7U) & ~7U;
+	if (bytes < (uint32_t)size || bytes > arena->limit - arena->held) {
+		active_failed = 1;
+		return 0;
+	}
+	if (arena->region_count != 0U) {
+		uint32_t index = arena->region_count - 1U;
+		if (bytes <= arena->region_bytes[index] - arena->region_used[index]) {
+			void *ptr = (void *)(arena->region[index] + arena->region_used[index]);
+			arena->region_used[index] += bytes;
+			return ptr;
+		}
+	}
+	if (arena->region_count >= ZZM_WEBP_ARENA_MAX_REGIONS) {
+		active_failed = 1;
+		return 0;
+	}
+	region_bytes = arena->region_size;
+	if (region_bytes < bytes)
+		region_bytes = bytes;
+	if (region_bytes > arena->limit - arena->held)
+		region_bytes = arena->limit - arena->held;
+	if (region_bytes < bytes) {
+		active_failed = 1;
+		return 0;
+	}
+#ifdef ZZM_WEBP_HOST_TEST
+	region = card_pool_alloc(&card_pool, region_bytes,
+	                         CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, arena->owner));
+#else
+	region = (uintptr_t)malloc(region_bytes);
+#endif
+	if (region == 0U) {
+		active_failed = 1;
+		return 0;
+	}
+	arena->region[arena->region_count] = region;
+	arena->region_bytes[arena->region_count] = region_bytes;
+	arena->region_used[arena->region_count] = bytes;
+	arena->region_count++;
+	arena->held += region_bytes;
+	return (void *)region;
+}
+
+void *sdk_webp_calloc(size_t count, size_t size)
+{
+	void *ptr;
+
+	if (count != 0U && size > SIZE_MAX / count) {
+		active_failed = 1;
+		return 0;
+	}
+	ptr = sdk_webp_malloc(count * size);
+	if (ptr)
+		memset(ptr, 0, count * size);
+	return ptr;
+}
+
+void sdk_webp_free(void *ptr)
+{
+#ifdef ZZM_WEBP_HOST_TEST
+	if (host_heap) {
+		sdk_vorbis_free(ptr);
+		return;
+	}
+#endif
+	(void)ptr;
+}

@@ -39,16 +39,17 @@ int main(void) {
 
     const char *load = strstr(buf,
         "zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS, 1);");
-    const char *gate = strstr(buf,
-        "zz_config_fastram_advertise() ? 1 : 0");
+    const char *gate = strstr(buf, "fastram_can_advertise() ? 1 : 0");
+    const char *rtl_guard = strstr(buf,
+        "MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000");
 
     CHECK(load != NULL);
     CHECK(gate != NULL);
-    /* the cold-boot gate write follows the cold-boot bounded load
-     * (the warm-reset handler earlier in the file rewrites the gate
-     * from its own reload) */
+    CHECK(rtl_guard != NULL);
+    /* The cold-boot gate follows the bounded configuration read and is
+     * additionally guarded against a bitstream with the old DDR base. */
     CHECK(load != NULL && strstr(load,
-        "zz_config_fastram_advertise() ? 1 : 0") != NULL);
+        "fastram_can_advertise() ? 1 : 0") != NULL);
     /* every patched vendor SD object must be registered in the build:
      * a defined-but-unreferenced override silently links the unpatched
      * libxil.a object instead (caught review three times) */

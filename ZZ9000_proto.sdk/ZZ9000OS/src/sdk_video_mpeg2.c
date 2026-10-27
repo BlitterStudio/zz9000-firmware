@@ -24,7 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef SDK_VIDEO_HOST_TEST
+#if defined(SDK_VIDEO_MPEG2_MODULE)
+#include "module.h"
+#elif !defined(SDK_VIDEO_HOST_TEST)
 #include "sdk_compression.h"
 #include "xil_cache.h"
 #endif
@@ -66,6 +68,21 @@
 #ifdef SDK_VIDEO_HOST_TEST
 #define M2_MALLOC(size) malloc(size)
 #define M2_FREE(ptr) free(ptr)
+#elif defined(SDK_VIDEO_MPEG2_MODULE)
+static void *m2_alloc_hook(unsigned size, mpeg2_alloc_t reason)
+{
+	(void)reason;
+	return mpeg2_module_alloc(size);
+}
+
+static int m2_free_hook(void *buf)
+{
+	mpeg2_module_free(buf);
+	return 1;
+}
+
+#define M2_MALLOC(size) mpeg2_module_alloc(size)
+#define M2_FREE(ptr) mpeg2_module_free(ptr)
 #else
 /* sdk_decode_heap_alloc records the block for reclaim when it runs on
  * core 1, so these hooks must not track it again: reclaim frees every
@@ -273,7 +290,11 @@ static void ring_write(struct sdk_video_mpeg2 *d, const uint8_t *src,
 		first = bytes;
 	memcpy(d->media.pcm_ring + offset, src, first);
 	memcpy(d->media.pcm_ring, src + first, bytes - first);
-#ifndef SDK_VIDEO_HOST_TEST
+#if defined(SDK_VIDEO_MPEG2_MODULE)
+	zzm_rt_dcache_clean((uint32_t)(uintptr_t)(d->media.pcm_ring + offset), first);
+	if (bytes - first != 0U)
+		zzm_rt_dcache_clean((uint32_t)(uintptr_t)d->media.pcm_ring, bytes - first);
+#elif !defined(SDK_VIDEO_HOST_TEST)
 	Xil_DCacheFlushRange(
 		(INTPTR)(uintptr_t)(d->media.pcm_ring + offset), first);
 	if (bytes - first != 0U)
@@ -1888,7 +1909,11 @@ static void *mpeg2_create(uint32_t pool_owner)
 {
 	struct sdk_video_mpeg2 *d;
 
+#ifdef SDK_VIDEO_MPEG2_MODULE
+	mpeg2_module_set_owner(pool_owner);
+#else
 	(void)pool_owner;
+#endif
 #ifndef SDK_VIDEO_HOST_TEST
 	mpeg2_malloc_hooks(m2_alloc_hook, m2_free_hook);
 #endif
@@ -2433,8 +2458,8 @@ static const struct SDKVideoDecoderOps mkv_mpeg2_ops = {
 	.audio_ok = mpeg2_audio_ok,
 };
 
-const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
-	                                                     uint32_t container)
+const struct SDKVideoDecoderOps *zzm_mpeg2_module_find_ops(uint32_t codec,
+	                                                        uint32_t container)
 {
 	if (container == SDK_VIDEO_CONTAINER_MPEG_PS) {
 		if (codec == SDK_VIDEO_CODEC_MPEG1)
@@ -2448,20 +2473,34 @@ const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 			return &mkv_mpeg1_ops;
 		if (codec == SDK_VIDEO_CODEC_MPEG2)
 			return &mkv_mpeg2_ops;
-		if (codec == SDK_VIDEO_CODEC_VP8 || codec == SDK_VIDEO_CODEC_VP9)
-			return sdk_video_webm_ops(codec);
 	}
 	return 0;
 }
 
-/* DVD host tests link this file without the WebM backend. The firmware
- * link provides the strong definition in sdk_video_webm.c. */
+#ifdef SDK_VIDEO_HOST_TEST
+const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
+	                                                     uint32_t container)
+{
+	if (codec == SDK_VIDEO_CODEC_MPEG1 || codec == SDK_VIDEO_CODEC_MPEG2) {
+		const struct SDKVideoDecoderOps *ops =
+			zzm_mpeg2_module_find_ops(codec, container);
+
+		if (ops)
+			return ops;
+	}
+	if (container == SDK_VIDEO_CONTAINER_WEBM &&
+	    (codec == SDK_VIDEO_CODEC_VP8 || codec == SDK_VIDEO_CODEC_VP9))
+		return sdk_video_webm_ops(codec);
+	return 0;
+}
+
 __attribute__((weak))
 const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec)
 {
 	(void)codec;
 	return 0;
 }
+#endif
 
 #ifdef SDK_VIDEO_HOST_TEST
 int sdk_video_mpeg2_test_milli_from_period(

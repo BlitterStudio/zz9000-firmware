@@ -91,71 +91,46 @@ static int test_default_stride_matches_line_bytes(void)
 	return 0;
 }
 
-static int test_native_scanout_starts_at_capture_row(void)
+static int test_native_scanout_uses_capture_backing(void)
 {
+	const uint32_t capture_base = 0x03400000U;
+	const uint32_t alternate_base = 0x05200000U;
+
+	if (!expect_u32("capture backing capacity",
+	                VIDEO_VIDEOCAP_BACKING_SIZE, 5242880U)) {
+		return 1;
+	}
 	if (!expect_u32("1280 native row-aligned start",
-	                video_vdma_native_row_start(0x00e00000U),
-	                0x00e00000U)) {
-		return 1;
-	}
-
-	return 0;
-}
-
-static int test_native_scanout_pan_base(void)
-{
-	/* The 0x00dff2f8 origin is the tuned exception for PAL 800x600
-	 * filtered only. Every other combination must start at the capture
-	 * row base 0x00e00000: the host driver's legacy native-pan write
-	 * carries the PAL constant unconditionally, and scanning 720x480
-	 * lines from 190 words before their capture rows wraps the left
-	 * edge of every line (zz9000-drivers #84). */
-	if (!expect_u32("ntsc filtered 800x600 base",
-	                video_videocap_scanout_pan_base(1U, 0U,
-	                ZZVMODE_800x600), 0x00e00000U)) {
-		return 1;
-	}
-	if (!expect_u32("ntsc filtered 720x576 base",
-	                video_videocap_scanout_pan_base(1U, 0U,
-	                ZZVMODE_720x576), 0x00e00000U)) {
+	                video_vdma_native_row_start(capture_base),
+	                capture_base)) {
 		return 2;
 	}
-	if (!expect_u32("ntsc full width",
-	                video_videocap_scanout_pan_base(1U, 1U,
-	                ZZVMODE_800x600), 0x00e00000U)) {
+	if (!expect_u32("ntsc filtered 800x600 uses backing",
+	                video_videocap_scanout_address(capture_base, 1U, 0U,
+	                ZZVMODE_800x600), capture_base)) {
 		return 3;
 	}
-	if (!expect_u32("pal full width",
-	                video_videocap_scanout_pan_base(0U, 1U,
-	                ZZVMODE_800x600), 0x00e00000U)) {
+	if (!expect_u32("ntsc full width uses backing",
+	                video_videocap_scanout_address(capture_base, 1U, 1U,
+	                ZZVMODE_800x600), capture_base)) {
 		return 4;
 	}
-	if (!expect_u32("pal filtered 720x576 base",
-	                video_videocap_scanout_pan_base(0U, 0U,
-	                ZZVMODE_720x576), 0x00e00000U)) {
+	if (!expect_u32("pal filtered 720x576 uses backing",
+	                video_videocap_scanout_address(capture_base, 0U, 0U,
+	                ZZVMODE_720x576), capture_base)) {
 		return 5;
 	}
-	if (!expect_u32("pal filtered 800x600 tuned origin preserved",
-	                video_videocap_scanout_pan_base(0U, 0U,
-	                ZZVMODE_800x600), 0x00dff2f8U)) {
+	if (!expect_u32("pal filtered 800x600 keeps relative origin",
+	                video_videocap_scanout_address(capture_base, 0U, 0U,
+	                ZZVMODE_800x600),
+	                capture_base - VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA)) {
 		return 6;
 	}
-	/* Centered profiles route through this same contract: their runtime
-	 * request keeps the default base mode ZZVMODE_800x600
-	 * (video_videocap_sanitize_runtime_mode), so the VDMA-restart heal
-	 * must derive NTSC centered from the capture row base — not the
-	 * stale PAL constant the driver writes — while PAL centered keeps
-	 * the tuned origin. These pins guard the base-mode default the
-	 * centered scanout origin depends on (the #84 centered residual). */
-	if (!expect_u32("ntsc centered origin",
-	                video_videocap_scanout_pan_base(1U, 0U,
-	                ZZVMODE_800x600), 0x00e00000U)) {
+	if (!expect_u32("pal origin follows relocated backing",
+	                video_videocap_scanout_address(alternate_base, 0U, 0U,
+	                ZZVMODE_800x600),
+	                alternate_base - VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA)) {
 		return 7;
-	}
-	if (!expect_u32("pal centered origin",
-	                video_videocap_scanout_pan_base(0U, 0U,
-	                ZZVMODE_800x600), 0x00dff2f8U)) {
-		return 8;
 	}
 
 	return 0;
@@ -217,13 +192,9 @@ int main(void)
 	if (result)
 		return 50 + result;
 
-	result = test_native_scanout_starts_at_capture_row();
+	result = test_native_scanout_uses_capture_backing();
 	if (result)
 		return 70 + result;
-
-	result = test_native_scanout_pan_base();
-	if (result)
-		return 80 + result;
 
 	result = test_centered_output_keeps_native_content_geometry(
 		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);

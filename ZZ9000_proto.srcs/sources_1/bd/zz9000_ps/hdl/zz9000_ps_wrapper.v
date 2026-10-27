@@ -232,13 +232,13 @@ module zz9000_ps_wrapper
   wire VCAP_R6;
   wire VCAP_R7;
   wire VCAP_VSYNC;
-  wire [7:0]VGA_B;
-  wire VGA_DE;
-  wire [7:0]VGA_G;
-  wire VGA_HS;
-  wire VGA_PCLK;
-  wire [7:0]VGA_R;
-  wire VGA_VS;
+  wire [7:0]vga_b_unregistered;
+  wire vga_de_unregistered;
+  wire [7:0]vga_g_unregistered;
+  wire vga_hs_unregistered;
+  wire vga_pclk_unregistered;
+  wire [7:0]vga_r_unregistered;
+  wire vga_vs_unregistered;
   wire [22:0]ZORRO_ADDR;
   wire ZORRO_ADDRDIR;
   wire ZORRO_ADDRDIR2;
@@ -318,13 +318,13 @@ module zz9000_ps_wrapper
         .VCAP_R6(VCAP_R6),
         .VCAP_R7(VCAP_R7),
         .VCAP_VSYNC(VCAP_VSYNC),
-        .VGA_B(VGA_B),
-        .VGA_DE(VGA_DE),
-        .VGA_G(VGA_G),
-        .VGA_HS(VGA_HS),
-        .VGA_PCLK(VGA_PCLK),
-        .VGA_R(VGA_R),
-        .VGA_VS(VGA_VS),
+        .VGA_B(vga_b_unregistered),
+        .VGA_DE(vga_de_unregistered),
+        .VGA_G(vga_g_unregistered),
+        .VGA_HS(vga_hs_unregistered),
+        .VGA_PCLK(vga_pclk_unregistered),
+        .VGA_R(vga_r_unregistered),
+        .VGA_VS(vga_vs_unregistered),
         .ZORRO_ADDR(ZORRO_ADDR),
         .ZORRO_ADDRDIR(ZORRO_ADDRDIR),
         .ZORRO_ADDRDIR2(ZORRO_ADDRDIR2),
@@ -349,4 +349,20 @@ module zz9000_ps_wrapper
         .ZORRO_NSLAVE(ZORRO_NSLAVE),
         .ZORRO_NUDS(ZORRO_NUDS),
         .ZORRO_READ(ZORRO_READ));
+
+  vga_output_stage vga_output_stage_i
+       (.pixel_clk(vga_pclk_unregistered),
+        .rgb_r_in(vga_r_unregistered),
+        .rgb_g_in(vga_g_unregistered),
+        .rgb_b_in(vga_b_unregistered),
+        .hsync_in(vga_hs_unregistered),
+        .vsync_in(vga_vs_unregistered),
+        .de_in(vga_de_unregistered),
+        .VGA_R(VGA_R),
+        .VGA_G(VGA_G),
+        .VGA_B(VGA_B),
+        .VGA_HS(VGA_HS),
+        .VGA_VS(VGA_VS),
+        .VGA_DE(VGA_DE),
+        .VGA_PCLK(VGA_PCLK));
 endmodule

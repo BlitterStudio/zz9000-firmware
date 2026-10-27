@@ -4,13 +4,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include "zzm_loader.h"
 #include "sdk_video_stream.h"
 
 #include "card_pool.h"
 #include "memorymap.h"
 #include "overlay.h"
 #include "sdk_video_backend.h"
+#include "zzm_format.h"
+#include "zzm_registry.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <xil_cache.h>
 
@@ -21,6 +25,7 @@
 struct SDKVideoStreamSession {
 	uint32_t id;
 	uint32_t codec;
+	uint32_t module_id;
 	uint32_t container;
 	uint32_t width;
 	uint32_t height;
@@ -250,6 +255,15 @@ int sdk_video_stream_ack_media(uint32_t id, uint64_t acknowledged)
 	return session->ops->ack_media(session->decoder, acknowledged);
 }
 
+
+static void log_module_begin_failure(uint32_t module_id, const char *step,
+	                                 uint16_t status)
+{
+	const char *module = module_id == ZZM_MODULE_MPEG2 ? "MPEG2" : "WEBM";
+
+	printf("[ZZM] begin %s %s status %u\n", module, step,
+	       (unsigned)status);
+}
 uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 	                            struct SDKVideoStreamResult *result)
 {
@@ -257,12 +271,13 @@ uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 		begin, SDK_VIDEO_STREAM_OWNER_LEGACY, result);
 }
 
-uint16_t sdk_video_stream_begin_owned(
+static uint16_t sdk_video_stream_begin_owned_locked(
 	const struct SDKVideoStreamBegin *begin, uint32_t owner,
 	struct SDKVideoStreamResult *result)
 {
 	const struct SDKVideoDecoderOps *ops;
 	struct SDKVideoStreamSession *session;
+	uint32_t module_id = 0U;
 	if (!begin || !result ||
 	    (owner != SDK_VIDEO_STREAM_OWNER_LEGACY &&
 	     owner != SDK_VIDEO_STREAM_OWNER_MEDIA) ||
@@ -270,6 +285,33 @@ uint16_t sdk_video_stream_begin_owned(
 	    begin->output_format != SDK_VIDEO_OUTPUT_DIRECT_OVERLAY ||
 	    begin->width == 0U || begin->height == 0U)
 		return SDK_STATUS_BAD_REQUEST;
+	if (begin->container == SDK_VIDEO_CONTAINER_WEBM &&
+	    (begin->codec == SDK_VIDEO_CODEC_VP8 ||
+	     begin->codec == SDK_VIDEO_CODEC_VP9)) {
+		uint16_t module_status =
+			zzm_registry_sdk_status(ZZM_MODULE_WEBM);
+
+		if (module_status != SDK_STATUS_OK) {
+			log_module_begin_failure(ZZM_MODULE_WEBM, "registry",
+			                         module_status);
+			return module_status;
+		}
+		module_id = ZZM_MODULE_WEBM;
+	}
+	if ((begin->container == SDK_VIDEO_CONTAINER_MPEG_PS ||
+	     begin->container == SDK_VIDEO_CONTAINER_WEBM) &&
+	    (begin->codec == SDK_VIDEO_CODEC_MPEG1 ||
+	     begin->codec == SDK_VIDEO_CODEC_MPEG2)) {
+		uint16_t module_status =
+			zzm_registry_sdk_status(ZZM_MODULE_MPEG2);
+
+		if (module_status != SDK_STATUS_OK) {
+			log_module_begin_failure(ZZM_MODULE_MPEG2, "registry",
+			                         module_status);
+			return module_status;
+		}
+		module_id = ZZM_MODULE_MPEG2;
+	}
 	ops = sdk_video_backend_find(begin->codec, begin->container);
 	if (ops && ops->geometry_ok) {
 		if (!ops->geometry_ok(begin->width, begin->height))
@@ -300,16 +342,26 @@ uint16_t sdk_video_stream_begin_owned(
 	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA && ops && ops->audio_ok &&
 	    !ops->audio_ok(begin->audio_codec))
 		return SDK_STATUS_UNSUPPORTED;
-	if (!ops)
+	if (!ops) {
+		if (module_id != 0U)
+			log_module_begin_failure(module_id, "ops",
+			                         SDK_STATUS_UNSUPPORTED);
 		return SDK_STATUS_UNSUPPORTED;
+	}
 	session = find_free_session();
 	if (!session)
 		return SDK_STATUS_NO_MEMORY;
+	if (module_id != 0U && !zzm_loader_acquire(module_id)) {
+		log_module_begin_failure(module_id, "acquire",
+		                         SDK_STATUS_MODULE_MISMATCH);
+		return SDK_STATUS_MODULE_MISMATCH;
+	}
 
 	memset(session, 0, sizeof(*session));
 	session->id = next_session_id();
 	session->codec = begin->codec;
 	session->container = begin->container;
+	session->module_id = module_id;
 	session->width = begin->width;
 	session->height = begin->height;
 	session->output_format = begin->output_format;
@@ -328,6 +380,20 @@ uint16_t sdk_video_stream_begin_owned(
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,
 	            SDK_VIDEO_SESSION_RESULT_NEED_INPUT, result);
 	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_video_stream_begin_owned(
+	const struct SDKVideoStreamBegin *begin, uint32_t owner,
+	struct SDKVideoStreamResult *result)
+{
+	uint16_t status;
+
+	/* The module registry returns callable ops before the reference is
+	 * acquired.  Do not let core 0 idle-unload that image in this gap. */
+	zzm_loader_session_begin_lock();
+	status = sdk_video_stream_begin_owned_locked(begin, owner, result);
+	zzm_loader_session_begin_unlock();
+	return status;
 }
 
 uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
@@ -458,6 +524,7 @@ uint16_t sdk_video_stream_close(uint32_t id,
 	                            struct SDKVideoStreamResult *result)
 {
 	struct SDKVideoStreamSession *session;
+	uint32_t module_id;
 
 	if (!result || id == 0U)
 		return SDK_STATUS_BAD_REQUEST;
@@ -468,6 +535,9 @@ uint16_t sdk_video_stream_close(uint32_t id,
 	            SDK_VIDEO_SESSION_RESULT_DONE, result);
 	if (session->decoder && !session->faulted)
 		session->ops->destroy(session->decoder);
+	module_id = session->module_id;
+	if (module_id != 0U)
+		zzm_loader_release(module_id);
 	memset(session, 0, sizeof(*session));
 	return SDK_STATUS_OK;
 }

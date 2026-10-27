@@ -13,9 +13,12 @@
 
 #include "sdk_mpeg2_neon.h"
 
+#ifdef SDK_VIDEO_MPEG2_MODULE
+#include "module.h"
+#else
 #include <stdio.h>
+#endif
 #include <string.h>
-
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
 
@@ -474,7 +477,11 @@ void sdk_mpeg2_neon_install(void)
 	check_seed = 0x2b992ddfU;
 	if (!mpeg2_idct_copy || !mpeg2_idct_add || !check_idct() ||
 	    !check_mc()) {
+#ifdef SDK_VIDEO_MPEG2_MODULE
+		zzm_rt_log("mpeg2 NEON IDCT/MC self check failed; C kept");
+#else
 		printf("[mpeg2] NEON IDCT/MC self check failed; C kept\n");
+#endif
 		neon_state = -1;
 		return;
 	}
@@ -485,7 +492,11 @@ void sdk_mpeg2_neon_install(void)
 		mpeg2_mc.avg[f] = sdk_mpeg2_neon_mc[f + 8];
 	}
 	neon_state = 1;
+#ifdef SDK_VIDEO_MPEG2_MODULE
+	zzm_rt_log("mpeg2 NEON IDCT/MC installed");
+#else
 	printf("[mpeg2] NEON IDCT/MC installed\n");
+#endif
 }
 
 int sdk_mpeg2_neon_active(void)

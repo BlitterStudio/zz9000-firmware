@@ -68,6 +68,12 @@ static struct {
 	uint32_t fill_offset;     /* next TX-ring byte, period-aligned */
 	uint8_t rebuild_pending;  /* queued-period rebuild armed by a
 	                           * direct-ring lease detach */
+	/* Playback clock. Retired frames are DMA periods crossed while a
+	 * producer was live. The last offset is period-aligned; armed is
+	 * clear across pause and idle so that gap is not billed. */
+	uint64_t output_frames_retired;
+	uint32_t output_clock_last;
+	uint8_t output_clock_armed;
 	struct audio_fabric_slot slot[AUDIO_FABRIC_SLOT_COUNT];
 } g_audio_fabric;
 
@@ -956,6 +962,28 @@ static void audio_fabric_compositor_fill(void)
 	pos_period =
 		audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
 	pos_period -= pos_period % AUDIO_FABRIC_PERIOD_BYTES;
+	/* Count transmitter frames the DMA has reached while someone is
+	 * actually playing. The fill frontier runs ahead of this; that
+	 * lead is not part of the retired count. Pause clears live, so
+	 * the next resume re-arms and does not bill the hold. */
+	if (fabric_any_live()) {
+		if (!g_audio_fabric.output_clock_armed) {
+			g_audio_fabric.output_clock_last = pos_period;
+			g_audio_fabric.output_clock_armed = 1U;
+		} else {
+			uint32_t step = audio_playback_ring_distance(
+				pos_period, g_audio_fabric.output_clock_last,
+				AUDIO_FABRIC_RING_BYTES) /
+				AUDIO_FABRIC_PERIOD_BYTES;
+
+			g_audio_fabric.output_frames_retired +=
+				(uint64_t)step *
+				(AUDIO_FABRIC_PERIOD_BYTES / 4U);
+			g_audio_fabric.output_clock_last = pos_period;
+		}
+	} else {
+		g_audio_fabric.output_clock_armed = 0U;
+	}
 	ahead = audio_playback_ring_distance(
 		g_audio_fabric.fill_offset, pos_period,
 		AUDIO_FABRIC_RING_BYTES);
@@ -1544,6 +1572,29 @@ enum audio_fabric_ownership audio_fabric_ownership(void)
 int audio_fabric_output_busy(void)
 {
 	return g_audio_fabric.ownership == AUDIO_FABRIC_ACTIVE;
+}
+
+void audio_fabric_output_clock(uint64_t *retired_frames,
+	uint64_t *lead_frames, uint32_t *output_rate)
+{
+	uint32_t dma;
+	uint32_t ahead;
+
+	if (retired_frames)
+		*retired_frames = g_audio_fabric.output_frames_retired;
+	if (output_rate)
+		*output_rate = 48000U;
+	if (!lead_frames)
+		return;
+	*lead_frames = 0U;
+	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
+		return;
+	dma = audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
+	dma -= dma % AUDIO_FABRIC_PERIOD_BYTES;
+	ahead = audio_playback_ring_distance(
+		g_audio_fabric.fill_offset, dma, AUDIO_FABRIC_RING_BYTES);
+	*lead_frames = ((uint64_t)ahead / AUDIO_FABRIC_PERIOD_BYTES) *
+		(AUDIO_FABRIC_PERIOD_BYTES / 4U);
 }
 
 uint32_t audio_fabric_slot_underruns(uint32_t slot)

@@ -5,17 +5,20 @@
 # Each archive mirrors the public firmware ZIP shape:
 #   zz9000-firmware-<tag>-<variant>/BOOT.bin
 #   zz9000-firmware-<tag>-<variant>/ZZ9000.CFG
-#
+#   zz9000-firmware-<tag>-<variant>/ZZ9K/*.ZZM
 # CI can only package variants that already have a committed bitstream.
-# All nine committed bitstreams contain the current hardware ABI, including
-# the native overlay and ZZ9000AX capture paths, so every archive uses the
-# same current firmware ELF. The separately built legacy-bitstream ELF remains
-# available for manual compatibility packages that retain an older bitstream.
+# All seven committed release bitstreams contain the current hardware ABI,
+# including the native overlay and ZZ9000AX capture paths, so every archive
+# uses the same current firmware ELF. The separately built legacy-bitstream
+# ELF remains available for manual compatibility packages that retain an older
+# bitstream.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+source bootimage_work/variants/variant-matrix.sh
+QUALIFICATION_RECORD=${ZZ9000_QUALIFICATION_RECORD:-bootimage_work/variants/timing-qualification.json}
 
 usage() {
     cat >&2 <<'EOF'
@@ -27,7 +30,9 @@ Options:
                           (default: local)
   --output DIR            Directory to write release assets into
                           (default: release)
-  --require-all           Fail if any known variant bitstream is missing
+  --require-all           Fail unless every release bitstream has a matching
+                          passing timing qualification record
+  --check-qualification   Validate all qualification records and exit
   --firmware-flavor SUFFIX
                           Append SUFFIX to each archive name, e.g. "diag"
                           produces zz9000-firmware-<tag>-<variant>-diag.zip.
@@ -44,6 +49,7 @@ EOF
 TAG=local
 OUT_DIR=release
 REQUIRE_ALL=0
+CHECK_QUALIFICATION=0
 FIRMWARE_FLAVOR=
 
 while [ "$#" -gt 0 ]; do
@@ -70,6 +76,10 @@ while [ "$#" -gt 0 ]; do
             REQUIRE_ALL=1
             shift
             ;;
+        --check-qualification)
+            CHECK_QUALIFICATION=1
+            shift
+            ;;
         --firmware-flavor)
             if [ "$#" -lt 2 ]; then
                 echo "ERROR: --firmware-flavor needs a value." >&2
@@ -91,6 +101,73 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+validate_qualifications() {
+    local args=("$QUALIFICATION_RECORD") variant bitstream label
+    while IFS='|' read -r variant bitstream label _; do
+        args+=("$variant" "$bitstream")
+    done < <(variant_matrix_rows)
+
+    python3 - "${args[@]}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+record_path = Path(sys.argv[1])
+try:
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"[release] invalid qualification record {record_path}: {error}")
+
+if record.get("schema_version") != 1 or not isinstance(record.get("variants"), dict):
+    raise SystemExit(f"[release] invalid qualification record schema: {record_path}")
+
+errors = []
+for index in range(2, len(sys.argv), 2):
+    variant, bitstream_path = sys.argv[index:index + 2]
+    bitstream = Path(bitstream_path)
+    entry = record["variants"].get(variant)
+    if not bitstream.is_file():
+        errors.append(f"{variant}: missing bitstream {bitstream_path}")
+        continue
+    if not isinstance(entry, dict):
+        errors.append(f"{variant}: missing qualification record")
+        continue
+    required = (
+        "bitstream", "sha256", "source_revision", "build_id",
+        "placement_directive", "pixel_slack_ns", "overall_slack_ns",
+        "i2s_slack_ns", "sii9022_slack_ns", "gate_passed",
+    )
+    missing = [field for field in required if field not in entry]
+    if missing:
+        errors.append(f"{variant}: qualification record missing {', '.join(missing)}")
+        continue
+    if entry["bitstream"] != bitstream_path:
+        errors.append(f"{variant}: qualification bitstream path does not match release matrix")
+        continue
+    if entry["gate_passed"] is not True:
+        errors.append(f"{variant}: qualification gate did not pass")
+        continue
+    actual = hashlib.sha256(bitstream.read_bytes()).hexdigest()
+    if entry["sha256"] != actual:
+        errors.append(f"{variant}: bitstream SHA256 does not match passing qualification")
+
+if errors:
+    print("[release] qualification failures:", file=sys.stderr)
+    for error in errors:
+        print(f"  - {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+if [ "$REQUIRE_ALL" -eq 1 ] || [ "$CHECK_QUALIFICATION" -eq 1 ]; then
+    validate_qualifications
+fi
+if [ "$CHECK_QUALIFICATION" -eq 1 ]; then
+    echo "[release] all release bitstreams match passing timing qualifications."
+    exit 0
+fi
+
 if ! command -v zip >/dev/null 2>&1; then
     echo "ERROR: zip not found on PATH." >&2
     exit 1
@@ -101,15 +178,30 @@ if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
     exit 1
 fi
 
-variant_defs=(
-    "zorro3|bootimage_work/zz9000_ps_wrapper.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|Zorro III, A3000/A4000, E7M capture"
-    "zorro3-aga|bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|A4000/A4000T AGA video-slot capture, Zorro III Fast RAM"
-    "zorro2|bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|Zorro II 4MB, A2000"
-    "zorro2-2mb|bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|Zorro II 2MB, A2000"
-    "a500|bootimage_work/variants/zz9000_ps_wrapper-a500.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|A500 4MB, ZZ9500CX Denise adapter"
-    "a500-2mb|bootimage_work/variants/zz9000_ps_wrapper-a500-2mb.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|A500 2MB, ZZ9500CX Denise adapter"
-    "a500plus|bootimage_work/variants/zz9000_ps_wrapper-a500plus.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|A500+ or Super Denise, ZZ9500CX Denise adapter"
-)
+bash ./util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+
+MODULE_DIR=ZZ9000_proto.sdk/ZZ9000OS/build/modules
+make -C ZZ9000_proto.sdk/ZZ9000OS modules
+for spec in "MPEG2 1 MPEG2 0x09000000 0x00200000" \
+            "WEBM 2 WEBM 0x09200000 0x00400000" \
+            "WEBP 3 WEBP 0x09600000 0x00200000"; do
+    set -- $spec
+    READELF=arm-none-eabi-readelf bash util/check_zzm_conformance.sh \
+        "$MODULE_DIR/$(printf '%s' "$1" | tr A-Z a-z)/$1.elf" "$2" "$3" "$4" "$5"
+done
+for module in MPEG2.ZZM WEBM.ZZM WEBP.ZZM; do
+    if [ ! -f "$MODULE_DIR/$module" ]; then
+        echo "ERROR: missing built module $MODULE_DIR/$module." >&2
+        exit 1
+    fi
+done
+
+# Keep the modules alongside the archives for CI consumers that install a
+# firmware artifact directly rather than unpacking a release ZIP.
+mkdir -p "$OUT_DIR/ZZ9K"
+cp "$MODULE_DIR"/*.ZZM "$OUT_DIR/ZZ9K/"
+
+variant_defs=("${VARIANT_MATRIX[@]}")
 
 mkdir -p "$OUT_DIR"
 # Each pass deletes only the exact archive names it's about to (re)write,
@@ -131,7 +223,7 @@ created=()
 missing=()
 
 for def in "${variant_defs[@]}"; do
-    IFS='|' read -r variant bitstream firmware label <<< "$def"
+    IFS='|' read -r variant bitstream label _ <<< "$def"
 
     if [ ! -f "$bitstream" ]; then
         missing+=("$variant ($bitstream)")
@@ -151,11 +243,13 @@ for def in "${variant_defs[@]}"; do
 
     echo "[release] building $variant${flavor_label}: $label"
     mkdir -p "$archive_root"
-    ./build_bootimage.sh --bitstream "$bitstream" --firmware "$firmware" \
+    ./build_bootimage.sh --bitstream "$bitstream" --firmware ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
         --output "$boot_bin"
     # Ship the (all-commented) sample config next to BOOT.bin so users
     # discover it; copying it to the SD card as-is changes nothing.
     cp ZZ9000.CFG "$archive_root/ZZ9000.CFG"
+    mkdir -p "$archive_root/ZZ9K"
+    cp "$MODULE_DIR"/*.ZZM "$archive_root/ZZ9K/"
 
     rm -f "$zip_path"
     (

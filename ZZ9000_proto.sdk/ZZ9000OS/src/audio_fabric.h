@@ -146,6 +146,11 @@ void audio_fabric_producer_restart(uint32_t slot);
 void audio_fabric_ring_silence(uint32_t slot);
 /* Mailbox teardown: drop every slot, no formatter transactions. */
 void audio_fabric_reset(void);
+/* Transmitter frames the DMA has reached while a producer was live,
+ * and frames written to the TX ring but not yet retired. output_rate
+ * is the formatter rate (48000). Both frame counts are stereo frames. */
+void audio_fabric_output_clock(uint64_t *retired_frames,
+	uint64_t *lead_frames, uint32_t *output_rate);
 
 /*
  * The widened ownership gate for legacy register entry points

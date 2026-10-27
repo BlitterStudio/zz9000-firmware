@@ -8,7 +8,7 @@ TARGET := $(BUILD_DIR)/console_encode_test
 
 SDK_INCLUDE := ../../sdk/include
 
-CPPFLAGS += -I$(SRC_DIR) -I$(SDK_INCLUDE)
+CPPFLAGS += -DSDK_CONSOLE_HOST_TEST -I$(SRC_DIR) -I$(SDK_INCLUDE)
 
 SOURCES := console_encode_test.c $(SRC_DIR)/sdk_console_encode.c \
 	$(SRC_DIR)/rfb/rfb_encode.c \

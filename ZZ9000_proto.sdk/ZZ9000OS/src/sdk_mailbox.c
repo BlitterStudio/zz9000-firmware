@@ -15,6 +15,7 @@
 #include "sdk_console_encode.h"
 #include "xil_mmu.h"
 #include "xtime_l.h"
+#include "sleep.h"
 #include "sdk_palette.h"
 #include "sdk_mailbox.h"
 #include "sdk_service_catalog.h"
@@ -41,6 +42,7 @@
 #include "sdk_smp_lock.h"
 #include "memorymap.h"
 #include "card_pool.h"
+#include "surface_allocator.h"
 #include "mmu_page.h"
 #include "scheduler.h"
 #include "core2.h"
@@ -54,6 +56,7 @@
 #include "mp3/minimp3.h"
 #include "sdk_audio_flac.h"
 #include "sdk_audio_vorbis.h"
+#include "zzm_loader.h"
 
 /* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
  * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
@@ -68,7 +71,7 @@
 	 SDK_CAP_SHARED_ALLOC | SDK_CAP_SURFACES | \
 	 SDK_CAP_FRAMEBUFFER_SURFACE | SDK_CAP_IMAGE_DECODE | \
 	 SDK_CAP_IMAGE_SCALE | SDK_CAP_AUDIO_DECODE | \
-	 SDK_CAP_AUDIO_PLAYBACK | \
+	 SDK_CAP_AUDIO_PLAYBACK | SDK_CAP_MODULES | \
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
 	 SDK_CAP_VIDEO_DECODE | \
@@ -736,6 +739,7 @@ struct SDKSurface {
 	uint32_t format;
 	uint32_t flags;
 	uint32_t length;
+	uint32_t pool_owner;
 	uint8_t in_use;
 };
 
@@ -786,6 +790,10 @@ struct jpeg_op_params {
 
 typedef char jpeg_op_params_size_check[
     (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
+/* One-shot minimp3 retains an index over the supplied complete buffer. Keep
+ * it bounded; callers needing arbitrarily long media use AUDIO_STREAM_*. */
+#define SDK_MP3_ONE_SHOT_MAX_INPUT (16U << 20)
 
 /*
  * Native-endian packed parameters for a deferred DECODE_MP3 task. Source
@@ -874,6 +882,49 @@ typedef char video_op_params_size_check[
     (sizeof(struct video_write_op_params) <= TASKQ_OP_PARAM_BYTES &&
      sizeof(struct video_session_op_params) <= TASKQ_OP_PARAM_BYTES &&
      sizeof(struct media_audio_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
+/* Begins which can load a module run on core 1, so the load and its first
+ * registry lookup are one task. Image begin needs more than the task's 48-byte
+ * inline parameter area after core 0 has resolved its output buffers. */
+struct media_begin_op_params {
+	uint32_t video_codec;
+	uint32_t container;
+	uint32_t width;
+	uint32_t height;
+	uint32_t output_format;
+	uint32_t audio_codec;
+	uint32_t pcm_ring_handle;
+	uint32_t pcm_ring_capacity;
+	uint32_t pcm_low_water_bytes;
+	uint32_t pcm_high_water_bytes;
+	uint32_t flags;
+	uint32_t pcm_ring_addr;
+};
+
+struct video_begin_op_params {
+	uint32_t codec;
+	uint32_t container;
+	uint32_t width;
+	uint32_t height;
+	uint32_t output_format;
+	uint32_t flags;
+};
+
+struct image_begin_op_params {
+	uint32_t pending_slot;
+};
+
+struct image_begin_pending {
+	struct SDKImageStreamBegin begin;
+	uint8_t in_use;
+};
+
+static struct image_begin_pending image_begin_pending[TASKQ_CAPACITY];
+
+typedef char begin_op_params_size_check[
+	(sizeof(struct media_begin_op_params) <= TASKQ_OP_PARAM_BYTES &&
+	 sizeof(struct video_begin_op_params) <= TASKQ_OP_PARAM_BYTES &&
+	 sizeof(struct image_begin_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
 struct SDKAudioStream {
 	uint32_t id;
@@ -1154,6 +1205,18 @@ static volatile int sdk_completion_irq_enabled;
  */
 static uint32_t sdk_mailbox_generation;
 static uint32_t g_task_generation[TASKQ_CAPACITY];
+static uint32_t zzm_load_pending_id;
+
+#define ZZM_LOAD_WAIT_TICKS (3ULL * (uint64_t)COUNTS_PER_SECOND)
+static XTime zzm_load_deadline;
+
+static int zzm_module_loaded(uint32_t module_id)
+{
+	zzm_status_t status;
+
+	return zzm_loader_status_by_id(module_id, &status) &&
+	       status.state == ZZM_STATE_LOADED;
+}
 
 /* Enqueue an internal core-1 task (request_id 0, no client completion).
  * Core-0 main-loop context ONLY: the task queue is single-producer.
@@ -1178,6 +1241,52 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
 	return 1;
 }
 
+int sdk_mailbox_load_module_core1(uint32_t module_id)
+{
+	XTime now;
+	/* A deferred session begin already owns core 1. It must load directly:
+	 * queueing another core-1 task here would make the worker wait for
+	 * itself, while returning pending would repeat the old premature
+	 * registry failure. */
+	if (smp_cpu_id() == 1)
+		return zzm_loader_load_on_owner(module_id);
+
+
+	if (zzm_module_loaded(module_id))
+		return 1;
+	if (zzm_load_pending_id != 0U) {
+		XTime_GetTime(&now);
+		if ((int64_t)(now - zzm_load_deadline) >= 0)
+			zzm_loader_mark_load_failed(zzm_load_pending_id,
+			                            ZZM_REASON_STORAGE_BUSY);
+		return 0;
+	}
+	zzm_load_pending_id = module_id;
+	XTime_GetTime(&now);
+	zzm_load_deadline = now + ZZM_LOAD_WAIT_TICKS;
+	if (!sdk_mailbox_enqueue_internal(TASKQ_OP_ZZM_LOAD, &module_id,
+	                                  sizeof(module_id))) {
+		zzm_load_pending_id = 0U;
+		return 0;
+	}
+	/* This can run inside a mailbox handler. The main loop harvests the
+	 * task; nesting scheduler_core0_poll here would corrupt its reserved
+	 * completion slot if another task had already completed. */
+	return 0;
+}
+
+void sdk_mailbox_poll_module_load(void)
+{
+	XTime now;
+
+	if (zzm_load_pending_id == 0U)
+		return;
+	XTime_GetTime(&now);
+	if ((int64_t)(now - zzm_load_deadline) >= 0)
+		zzm_loader_mark_load_failed(zzm_load_pending_id,
+		                            ZZM_REASON_STORAGE_BUSY);
+}
+
 /*
  * Batch-tail gate for crypto offload. The request loop processes a FIFO batch
  * (the requests present when it started); the synchronous dispatcher completed
@@ -1198,6 +1307,7 @@ static struct SDKSharedBuffer shared_buffers[SDK_MAX_SHARED_BUFFERS];
 static struct SDKSurface surfaces[SDK_MAX_SURFACES];
 static struct SDKSharedBuffer *media_pcm_ring;
 static uint32_t media_pcm_ring_session;
+static uint32_t media_pcm_ring_request_id;
 
 /*
  * The audio-stream table lives in the SCU-coherent scheduler region
@@ -1252,12 +1362,12 @@ static uint32_t effective_host_window_address(void)
 {
 	if (aperture_contract_present())
 		return sdk_aperture_host_window_address();
-	/* Compatibility for Z3 and old 4 MB Z2 bitstreams which expose no
-	 * generation-tagged aperture register. The existing host library rejects
-	 * this legacy address on sub-4 MB boards. New 2 MB bitstreams expose the
-	 * exact size and therefore take the acknowledged dynamic path instead. */
-	if (sdk_aperture_runtime_is_zorro3() ||
-	    sdk_aperture_runtime_is_legacy())
+	/* Z3 owns a reserved host window above P96 VRAM. Legacy Z2 remains at
+	 * its fixed compatibility address; generation-2 Z2 uses the negotiated
+	 * aperture address above. */
+	if (sdk_aperture_runtime_is_zorro3())
+		return SDK_HOST_WINDOW_Z3_ADDRESS;
+	if (sdk_aperture_runtime_is_legacy())
 		return SDK_HOST_WINDOW_HEAP_ADDRESS;
 	/* A nonzero but unsupported FPGA-reported size is not a legacy image.
 	 * Keep the host heap disabled instead of guessing at a 4 MB address. */
@@ -1565,6 +1675,10 @@ static uint16_t service_try_defer(uint16_t opcode,
                                   volatile struct SDKMailboxEntry *req,
                                   const void *params, uint32_t param_len,
                                   uint32_t in_len);
+
+static uint16_t image_session_begin_try_defer(
+	volatile struct SDKMailboxEntry *req,
+	const struct SDKImageStreamBegin *begin);
 
 /* Core-1 half of the canvas handoff: NEXT converted the frame through this
  * core's cache, and core 0 reads it from DRAM at PRESENT (after the
@@ -1910,15 +2024,7 @@ static int range_valid(uint32_t address, uint32_t length,
 
 static int heap_range_valid(uint32_t address, uint32_t length)
 {
-	return range_valid(address, length,
-	                   SDK_SHARED_HEAP_ADDRESS, SDK_SHARED_HEAP_SIZE);
-}
-
-static int local_surface_range_valid(uint32_t address, uint32_t length)
-{
-	return range_valid(address, length,
-	                   SDK_LOCAL_SURFACE_HEAP_ADDRESS,
-	                   SDK_LOCAL_SURFACE_HEAP_SIZE);
+	return surface_allocator_owns(address, length);
 }
 
 static int host_window_range_valid(uint32_t address, uint32_t length)
@@ -1939,7 +2045,8 @@ static int shared_buffer_live(const struct SDKSharedBuffer *buffer)
 	if (buffer->handle == 0 || buffer->handle == SDK_INVALID_HANDLE)
 		return 0;
 	if ((buffer->flags & SDK_ALLOC_MEDIA) != 0U)
-		return buffer->pool_owner != 0U && buffer->length != 0U;
+		return card_pool_block_owned(&card_pool, buffer->address,
+		                             buffer->length, buffer->pool_owner);
 	if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) != 0U)
 		return host_window_range_valid(buffer->address, buffer->length);
 	return heap_range_valid(buffer->address, buffer->length);
@@ -2028,8 +2135,8 @@ static int surface_live(const struct SDKSurface *surface)
 	if (surface->length != surface->pitch * surface->height)
 		return 0;
 	if (surface_is_arm_local(surface))
-		return local_surface_range_valid(surface->address,
-		                                 surface->length);
+		return card_pool_block_owned(&card_pool, surface->address,
+		                             surface->length, surface->pool_owner);
 	return heap_range_valid(surface->address, surface->length);
 }
 
@@ -2101,6 +2208,7 @@ static void release_media_pcm_ring(uint32_t session)
 		shared_buffer_unpin(media_pcm_ring);
 		media_pcm_ring = 0;
 		media_pcm_ring_session = 0U;
+		media_pcm_ring_request_id = 0U;
 	}
 }
 
@@ -2154,113 +2262,50 @@ static uint32_t count_used_surfaces(void)
 	return used;
 }
 
-static uint32_t find_allocation_end_containing(uint32_t address,
-                                               int local_surfaces)
-{
-	uint32_t i;
-
-	if (!local_surfaces) {
-		for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
-			uint32_t start;
-			uint32_t end;
-
-			if (!shared_buffer_live(&shared_buffers[i]))
-				continue;
-
-			start = shared_buffers[i].address;
-			end = start + shared_buffers[i].length;
-			if (address >= start && address < end)
-				return end;
-		}
-	}
-
-	for (i = 0; i < SDK_MAX_SURFACES; i++) {
-		uint32_t start;
-		uint32_t end;
-
-		if (!surface_live(&surfaces[i]))
-			continue;
-		if (surface_is_arm_local(&surfaces[i]) != local_surfaces)
-			continue;
-
-		start = surfaces[i].address;
-		end = start + surfaces[i].length;
-		if (address >= start && address < end)
-			return end;
-	}
-
-	return 0;
-}
-
-static uint32_t find_next_allocation_start(uint32_t address, uint32_t heap_end,
-                                           int local_surfaces)
-{
-	uint32_t i;
-	uint32_t next = heap_end;
-
-	if (!local_surfaces) {
-		for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
-			if (shared_buffer_live(&shared_buffers[i]) &&
-			    shared_buffers[i].address >= address &&
-			    shared_buffers[i].address < next) {
-				next = shared_buffers[i].address;
-			}
-		}
-	}
-
-	for (i = 0; i < SDK_MAX_SURFACES; i++) {
-		if (surface_live(&surfaces[i]) &&
-		    surface_is_arm_local(&surfaces[i]) == local_surfaces &&
-		    surfaces[i].address >= address &&
-		    surfaces[i].address < next) {
-			next = surfaces[i].address;
-		}
-	}
-
-	return next;
-}
-
-static void heap_free_stats_in(uint32_t base, uint32_t size,
-			       uint32_t *free_total, uint32_t *largest_free)
-{
-	uint32_t cursor = base;
-	uint32_t heap_end;
-	uint32_t total = 0;
-	uint32_t largest = 0;
-
-	if (base > UINT32_MAX - size) {
-		*free_total = 0U;
-		*largest_free = 0U;
-		return;
-	}
-	heap_end = base + size;
-
-	while (cursor < heap_end) {
-		uint32_t alloc_end = find_allocation_end_containing(cursor, 0);
-		uint32_t next_alloc;
-		uint32_t free_len;
-
-		if (alloc_end != 0) {
-			cursor = alloc_end;
-			continue;
-		}
-
-		next_alloc = find_next_allocation_start(cursor, heap_end, 0);
-		free_len = next_alloc - cursor;
-		total += free_len;
-		if (free_len > largest)
-			largest = free_len;
-		cursor = next_alloc;
-	}
-
-	*free_total = total;
-	*largest_free = largest;
-}
-
 static void heap_free_stats(uint32_t *free_total, uint32_t *largest_free)
 {
-	heap_free_stats_in(SDK_SHARED_HEAP_ADDRESS, SDK_SHARED_HEAP_SIZE,
-			   free_total, largest_free);
+	surface_allocator_free_stats(free_total, largest_free);
+}
+
+static void host_window_free_stats(uint32_t base, uint32_t size,
+				   uint32_t *free_total,
+				   uint32_t *largest_free)
+{
+	uint32_t end;
+	uint32_t cursor;
+	uint32_t i;
+
+	if (!free_total || !largest_free)
+		return;
+	*free_total = 0U;
+	*largest_free = 0U;
+	if (base == 0U || size == 0U || base > UINT32_MAX - size)
+		return;
+
+	end = base + size;
+	cursor = base;
+	for (;;) {
+		uint32_t next_start = end;
+		uint32_t next_end = end;
+
+		for (i = 0U; i < SDK_MAX_SHARED_BUFFERS; i++) {
+			const struct SDKSharedBuffer *buffer = &shared_buffers[i];
+
+			if (!shared_buffer_live(buffer) ||
+			    (buffer->flags & SDK_ALLOC_HOST_WINDOW) == 0U ||
+			    buffer->address < cursor ||
+			    buffer->address >= next_start)
+				continue;
+			next_start = buffer->address;
+			next_end = buffer->address + buffer->length;
+		}
+		*free_total += next_start - cursor;
+		if (next_start - cursor > *largest_free)
+			*largest_free = next_start - cursor;
+		if (next_start == end)
+			break;
+		cursor = next_end;
+	}
 }
 
 static uint32_t count_host_window_allocations(void)
@@ -2319,95 +2364,45 @@ static uint32_t next_handle(void)
 	return handle;
 }
 
-static uint32_t find_free_region_in(uint32_t base, uint32_t size,
-                                    uint32_t length, uint32_t alignment,
-                                    int local_surfaces)
+static uint32_t find_free_host_window_region(uint32_t length,
+					     uint32_t alignment)
 {
-	uint32_t heap_end = base + size;
-	uint32_t candidate = align_up(base, alignment);
+	uint32_t base = effective_host_window_address();
+	uint32_t size = effective_host_window_size();
+	uint32_t heap_end;
+	uint32_t candidate;
 	uint32_t i;
 
-	while (candidate != 0 && candidate < heap_end &&
-	       length <= (heap_end - candidate)) {
+	if (base == 0U || size == 0U || base > UINT32_MAX - size)
+		return 0U;
+	heap_end = base + size;
+	candidate = align_up(base, alignment);
+	while (candidate != 0U && candidate < heap_end &&
+	       length <= heap_end - candidate) {
 		int collision = 0;
 
-		if (!local_surfaces) {
-			for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
-				uint32_t block_start;
-				uint32_t block_end;
-
-				if (!shared_buffer_live(&shared_buffers[i]))
-					continue;
-
-				block_start = shared_buffers[i].address;
-				block_end = block_start + shared_buffers[i].length;
-				if (candidate + length <= block_start ||
-				    candidate >= block_end)
-					continue;
-
-				candidate = align_up(block_end, alignment);
-				collision = 1;
-				break;
-			}
-		}
-
-		if (collision)
-			continue;
-
-		for (i = 0; i < SDK_MAX_SURFACES; i++) {
+		for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
 			uint32_t block_start;
 			uint32_t block_end;
 
-			if (!surface_live(&surfaces[i]))
+			if (!shared_buffer_live(&shared_buffers[i]) ||
+			    (shared_buffers[i].flags & SDK_ALLOC_HOST_WINDOW) == 0U)
 				continue;
-			if (surface_is_arm_local(&surfaces[i]) != local_surfaces)
+			block_start = shared_buffers[i].address;
+			block_end = block_start + shared_buffers[i].length;
+			if (candidate + length <= block_start ||
+			    candidate >= block_end)
 				continue;
-
-			block_start = surfaces[i].address;
-			block_end = block_start + surfaces[i].length;
-			if (candidate + length <= block_start || candidate >= block_end)
-				continue;
-
 			candidate = align_up(block_end, alignment);
 			collision = 1;
 			break;
 		}
-
 		if (!collision)
 			return candidate;
 	}
-
-	return 0;
+	return 0U;
 }
 
-static uint32_t find_free_region(uint32_t length, uint32_t alignment)
-{
-	return find_free_region_in(SDK_SHARED_HEAP_ADDRESS,
-	                           SDK_SHARED_HEAP_SIZE,
-	                           length, alignment, 0);
-}
-
-static uint32_t find_free_local_surface_region(uint32_t length,
-                                               uint32_t alignment)
-{
-	return find_free_region_in(SDK_LOCAL_SURFACE_HEAP_ADDRESS,
-	                           SDK_LOCAL_SURFACE_HEAP_SIZE,
-	                           length, alignment, 1);
-}
-
-static uint32_t find_free_host_window_region(uint32_t length,
-                                             uint32_t alignment)
-{
-	uint32_t base = effective_host_window_address();
-	uint32_t size = effective_host_window_size();
-
-	if (base == 0U || size == 0U)
-		return 0U;
-	/* Shared-heap blocks can never overlap a candidate here (disjoint
-	 * regions), so the region-agnostic overlap scan is reusable. */
-	return find_free_region_in(base, size,
-	                           length, alignment, 0);
-}
 
 static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
                                     volatile struct SDKMailboxEntry *comp,
@@ -2452,7 +2447,7 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 		if (length > host_window_size)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	} else if (length > SDK_SHARED_HEAP_SIZE) {
+	} else if (length > surface_allocator_total_bytes()) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 
@@ -2468,7 +2463,7 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
 		address = find_free_host_window_region(length, alignment);
 	} else {
-		address = find_free_region(length, alignment);
+		address = surface_allocator_alloc_aligned(length, alignment);
 	}
 	if (address == 0U) {
 		memset(slot, 0, sizeof(*slot));
@@ -2512,6 +2507,8 @@ static uint16_t handle_free_shared(volatile struct SDKMailboxEntry *req,
 	if (buffer->pool_owner != 0U)
 		(void)card_pool_free(&card_pool, buffer->address,
 		                     buffer->pool_owner);
+	else if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) == 0U)
+		(void)surface_allocator_free(buffer->address);
 
 	memset(buffer, 0, sizeof(*buffer));
 	return complete_status(req, comp, SDK_STATUS_OK);
@@ -2791,9 +2788,9 @@ static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
 	length = pitch * height;
 	if (length == 0)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (arm_local && length > SDK_LOCAL_SURFACE_HEAP_SIZE)
+	if (arm_local && length > CARD_POOL_LIMIT_SDK_SURFACE)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (!arm_local && length > SDK_SHARED_HEAP_SIZE)
+	if (!arm_local && length > surface_allocator_total_bytes())
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
 	sanitize_allocator_metadata();
@@ -2801,13 +2798,19 @@ static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
 	if (!slot)
 		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
 
-	address = arm_local ? find_free_local_surface_region(length, 64U) :
-	                      find_free_region(length, 64U);
-	if (address == 0)
-		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
-
 	memset(slot, 0, sizeof(*slot));
 	slot->handle = next_surface_id();
+	if (arm_local) {
+		slot->pool_owner = CARD_POOL_OWNER(CARD_POOL_CLASS_SDK_SURFACE,
+						   slot->handle);
+		address = card_pool_alloc(&card_pool, length, slot->pool_owner);
+	} else {
+		address = surface_allocator_alloc_aligned(length, 64U);
+	}
+	if (address == 0U) {
+		memset(slot, 0, sizeof(*slot));
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+	}
 	slot->address = address;
 	slot->width = width;
 	slot->height = height;
@@ -2847,6 +2850,11 @@ static uint16_t handle_free_surface(volatile struct SDKMailboxEntry *req,
 	if (!surface)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 
+	if (surface->pool_owner != 0U)
+		(void)card_pool_free(&card_pool, surface->address,
+		                     surface->pool_owner);
+	else
+		(void)surface_allocator_free(surface->address);
 	memset(surface, 0, sizeof(*surface));
 	return complete_status(req, comp, SDK_STATUS_OK);
 }
@@ -2867,9 +2875,9 @@ static uint16_t service_try_defer(uint16_t opcode,
  * ARM-local surfaces are excluded because their cache contract is
  * single-core: they have no Zorro-side writer, so reads skip
  * invalidation (prepare_surface_for_arm_read) and rely on the reading
- * core's cache being authoritative. The local surface heap is NOT in
- * the SCU-coherent region, so letting these ops bounce between cores
- * would need invalidate/flush in both directions on every hop --
+ * ARM-local pool storage is NOT in the SCU-coherent region, so letting
+ * these ops bounce between cores would need invalidate/flush in both
+ * directions on every hop --
  * cheaper and safer to keep ARM-local work on core 0.
  */
 static int scale_defer_eligible(uint32_t src_handle, uint32_t dst_handle,
@@ -3360,7 +3368,8 @@ static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
 
 	if (!buffer_range_valid(src, src_offset, src_length) ||
 	    !buffer_range_valid(dst, dst_offset, dst_capacity) ||
-	    src_length == 0U || dst_capacity < 2U) {
+	    src_length == 0U || src_length > SDK_MP3_ONE_SHOT_MAX_INPUT ||
+	    dst_capacity < 2U) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 	if ((flags & ~SDK_AUDIO_DECODE_FLAG_EXPECT_END) != 0U)
@@ -4746,6 +4755,35 @@ static uint16_t handle_audio_control(
  * session passes (R12).
  */
 
+static uint16_t handle_audio_output_clock(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioOutputClockResultPayload *result;
+	uint64_t retired = 0U;
+	uint64_t lead = 0U;
+	uint32_t rate = 0U;
+	uint32_t flags;
+
+	if (payload_len < 4U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	flags = get_be32(req->payload);
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	audio_fabric_output_clock(&retired, &lead, &rate);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioOutputClockResultPayload *)
+		comp->payload;
+	put_be32(result->retired_hi, (uint32_t)(retired >> 32));
+	put_be32(result->retired_lo, (uint32_t)retired);
+	put_be32(result->lead_hi, (uint32_t)(lead >> 32));
+	put_be32(result->lead_lo, (uint32_t)lead);
+	put_be32(result->output_rate, rate);
+	put_be32(result->flags, 0U);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_audio_fabric_state_get(
 	volatile struct SDKMailboxEntry *req,
 	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
@@ -5434,6 +5472,14 @@ static uint16_t handle_image_session_begin(
 		}
 	}
 
+	if (begin.codec == SDK_IMAGE_CODEC_WEBP) {
+		status = image_session_begin_try_defer(req, &begin);
+		if (status == SDK_STATUS_QUEUED)
+			return status;
+		/* WebP module loading and begin must stay on core 1. Running the
+		 * fallback on core 0 would queue a load then reject this request. */
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
 	status = sdk_image_stream_begin(&begin, &result);
 	return complete_image_session_result(req, comp, status, &result);
 }
@@ -5546,8 +5592,7 @@ static uint16_t handle_video_session_begin(
 	uint16_t payload_len)
 {
 	volatile struct SDKVideoSessionBeginPayload *payload;
-	struct SDKVideoStreamBegin begin;
-	struct SDKVideoStreamResult result;
+	struct video_begin_op_params p;
 	uint16_t status;
 
 	if (payload_len < sizeof(*payload))
@@ -5555,15 +5600,18 @@ static uint16_t handle_video_session_begin(
 	if (!scheduler_core1_available())
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	payload = (volatile struct SDKVideoSessionBeginPayload *)req->payload;
-	memset(&begin, 0, sizeof(begin));
-	begin.codec = get_be32(payload->codec);
-	begin.container = get_be32(payload->container);
-	begin.width = get_be32(payload->width);
-	begin.height = get_be32(payload->height);
-	begin.output_format = get_be32(payload->output_format);
-	begin.flags = get_be32(payload->flags);
-	status = sdk_video_stream_begin(&begin, &result);
-	return complete_video_session_result(req, comp, status, &result);
+	memset(&p, 0, sizeof(p));
+	p.codec = get_be32(payload->codec);
+	p.container = get_be32(payload->container);
+	p.width = get_be32(payload->width);
+	p.height = get_be32(payload->height);
+	p.output_format = get_be32(payload->output_format);
+	p.flags = get_be32(payload->flags);
+	status = service_try_defer(SDK_OP_VIDEO_SESSION_BEGIN, req, &p,
+	                           sizeof(p), 0U);
+	if (status == SDK_STATUS_QUEUED)
+		return status;
+	return complete_status(req, comp, SDK_STATUS_BUSY);
 }
 
 static uint16_t handle_video_session_write(
@@ -5652,8 +5700,7 @@ static uint16_t handle_media_session_begin(
 	uint16_t payload_len)
 {
 	volatile struct SDKMediaSessionBeginPayload *payload;
-	struct SDKMediaSessionBegin begin;
-	struct SDKMediaSessionMainResult result;
+	struct media_begin_op_params p;
 	struct SDKSharedBuffer *pcm_ring = 0;
 	uint16_t status;
 
@@ -5662,42 +5709,49 @@ static uint16_t handle_media_session_begin(
 	if (!scheduler_core1_available())
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	payload = (volatile struct SDKMediaSessionBeginPayload *)req->payload;
-	memset(&begin, 0, sizeof(begin));
-	begin.video_codec = get_be32(payload->video_codec);
-	begin.container = get_be32(payload->container);
-	begin.width = get_be32(payload->width);
-	begin.height = get_be32(payload->height);
-	begin.output_format = get_be32(payload->output_format);
-	begin.audio_codec = get_be32(payload->audio_codec);
-	begin.pcm_ring_handle = get_be32(payload->pcm_ring_handle);
-	begin.pcm_ring_capacity = get_be32(payload->pcm_ring_capacity);
-	begin.pcm_low_water_bytes = get_be32(payload->pcm_low_water_bytes);
-	begin.pcm_high_water_bytes = get_be32(payload->pcm_high_water_bytes);
-	begin.flags = get_be32(payload->flags);
+	memset(&p, 0, sizeof(p));
+	p.video_codec = get_be32(payload->video_codec);
+	p.container = get_be32(payload->container);
+	p.width = get_be32(payload->width);
+	p.height = get_be32(payload->height);
+	p.output_format = get_be32(payload->output_format);
+	p.audio_codec = get_be32(payload->audio_codec);
+	p.pcm_ring_handle = get_be32(payload->pcm_ring_handle);
+	p.pcm_ring_capacity = get_be32(payload->pcm_ring_capacity);
+	p.pcm_low_water_bytes = get_be32(payload->pcm_low_water_bytes);
+	p.pcm_high_water_bytes = get_be32(payload->pcm_high_water_bytes);
+	p.flags = get_be32(payload->flags);
 	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
+	if (sdk_media_session_audio_uses_ring(p.audio_codec)) {
 		if (media_pcm_ring)
 			return complete_status(req, comp, SDK_STATUS_BUSY);
-		pcm_ring = find_shared_buffer(begin.pcm_ring_handle);
+		pcm_ring = find_shared_buffer(p.pcm_ring_handle);
 		if (!pcm_ring)
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-		if (begin.pcm_ring_capacity > pcm_ring->length)
+		if (p.pcm_ring_capacity > pcm_ring->length)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 		if (!shared_buffer_pin(pcm_ring))
 			return complete_status(req, comp, SDK_STATUS_BUSY);
-		begin.pcm_ring = (uint8_t *)(uintptr_t)pcm_ring->address;
+		p.pcm_ring_addr = pcm_ring->address;
+		/* Reserve the ring until this begin either binds it to its returned
+		 * session or reports a failure. A no-audio begin may complete first,
+		 * so completion retires only this request's reservation. */
+		media_pcm_ring = pcm_ring;
+		media_pcm_ring_session = 0U;
+		media_pcm_ring_request_id = get_be32(req->request_id);
 	}
-	status = sdk_media_session_begin(&begin, &result);
-	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
-		if (status == SDK_STATUS_OK) {
-			media_pcm_ring = pcm_ring;
-			media_pcm_ring_session = result.session;
-		} else {
-			shared_buffer_unpin(pcm_ring);
-		}
+	status = service_try_defer(SDK_OP_MEDIA_SESSION_BEGIN, req, &p,
+	                           sizeof(p), 0U);
+	if (status == SDK_STATUS_QUEUED)
+		return status;
+	if (pcm_ring) {
+		shared_buffer_unpin(pcm_ring);
+		media_pcm_ring = 0;
+		media_pcm_ring_session = 0U;
+		media_pcm_ring_request_id = 0U;
 	}
-	return complete_media_session_main_result(req, comp, status, &result);
+	return complete_status(req, comp, SDK_STATUS_BUSY);
 }
 
 static uint16_t handle_media_session_write(
@@ -6620,6 +6674,57 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		*result_len = 2U;
 		return SDK_STATUS_OK;
 	}
+	case TASKQ_OP_ZZM_LOAD: {
+		uint32_t module_id;
+		memcpy(&module_id, d->op_params, sizeof(module_id));
+		*result_len = 0U;
+		/* The loader exposes ordinary failures in module status. A non-OK
+		 * task status therefore identifies a failed core-1 worker. */
+		(void)zzm_loader_load_on_owner(module_id);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_IMAGE_SESSION_BEGIN: {
+		const struct image_begin_op_params *p =
+		    (const struct image_begin_op_params *)d->op_params;
+		struct SDKImageStreamResult image_result;
+		struct SDKImageStreamBegin begin;
+		volatile struct SDKImageSessionResultPayload *reply;
+		uint16_t s;
+
+		*result_len = 0U;
+		if (smp_cpu_id() != 1 || p->pending_slot >= TASKQ_CAPACITY)
+			return SDK_STATUS_IO_ERROR;
+		Xil_DCacheInvalidateRange(
+			(INTPTR)(uintptr_t)&image_begin_pending[p->pending_slot],
+			sizeof(image_begin_pending[p->pending_slot]));
+		if (!image_begin_pending[p->pending_slot].in_use)
+			return SDK_STATUS_IO_ERROR;
+		begin = image_begin_pending[p->pending_slot].begin;
+		s = sdk_image_stream_begin(&begin, &image_result);
+		image_begin_pending[p->pending_slot].in_use = 0U;
+		Xil_DCacheFlushRange(
+			(INTPTR)(uintptr_t)&image_begin_pending[p->pending_slot],
+			sizeof(image_begin_pending[p->pending_slot]));
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKImageSessionResultPayload));
+		reply = (volatile struct SDKImageSessionResultPayload *)result_payload;
+		put_be32(reply->session, image_result.session);
+		put_be32(reply->state, image_result.state);
+		put_be32(reply->image_width, image_result.image_width);
+		put_be32(reply->image_height, image_result.image_height);
+		put_be32(reply->output_format, image_result.output_format);
+		put_be32(reply->tile_x, image_result.tile_x);
+		put_be32(reply->tile_y, image_result.tile_y);
+		put_be32(reply->tile_width, image_result.tile_width);
+		put_be32(reply->tile_height, image_result.tile_height);
+		put_be32(reply->bytes_consumed, image_result.bytes_consumed);
+		put_be32(reply->bytes_written, image_result.bytes_written);
+		put_be32(reply->flags, image_result.flags);
+		*result_len = sizeof(struct SDKImageSessionResultPayload);
+		return SDK_STATUS_OK;
+	}
 	case SDK_OP_IMAGE_SESSION_FEED: {
 		const struct imgsess_op_params *p =
 		    (const struct imgsess_op_params *)d->op_params;
@@ -6714,6 +6819,69 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		put_be32(reply->flags, ares.flags);
 		put_be32(reply->reserved, 0U);
 		*result_len = sizeof(struct SDKImageAnimationFrameResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_VIDEO_SESSION_BEGIN: {
+		const struct video_begin_op_params *p =
+		    (const struct video_begin_op_params *)d->op_params;
+		struct SDKVideoStreamBegin begin;
+		struct SDKVideoStreamResult video_result;
+		uint16_t s;
+
+		*result_len = 0U;
+		if (smp_cpu_id() != 1)
+			return SDK_STATUS_IO_ERROR;
+		memset(&begin, 0, sizeof(begin));
+		begin.codec = p->codec;
+		begin.container = p->container;
+		begin.width = p->width;
+		begin.height = p->height;
+		begin.output_format = p->output_format;
+		begin.flags = p->flags;
+		s = sdk_video_stream_begin(&begin, &video_result);
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKVideoSessionResultPayload));
+		encode_video_session_result(
+			(volatile struct SDKVideoSessionResultPayload *)result_payload,
+			&video_result);
+		*result_len = sizeof(struct SDKVideoSessionResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_MEDIA_SESSION_BEGIN: {
+		const struct media_begin_op_params *p =
+		    (const struct media_begin_op_params *)d->op_params;
+		struct SDKMediaSessionBegin begin;
+		struct SDKMediaSessionMainResult media_result;
+		uint16_t s;
+
+		*result_len = 0U;
+		if (smp_cpu_id() != 1)
+			return SDK_STATUS_IO_ERROR;
+		memset(&begin, 0, sizeof(begin));
+		begin.video_codec = p->video_codec;
+		begin.container = p->container;
+		begin.width = p->width;
+		begin.height = p->height;
+		begin.output_format = p->output_format;
+		begin.audio_codec = p->audio_codec;
+		begin.pcm_ring_handle = p->pcm_ring_handle;
+		begin.pcm_ring_capacity = p->pcm_ring_capacity;
+		begin.pcm_low_water_bytes = p->pcm_low_water_bytes;
+		begin.pcm_high_water_bytes = p->pcm_high_water_bytes;
+		begin.flags = p->flags;
+		begin.pcm_ring = (uint8_t *)(uintptr_t)p->pcm_ring_addr;
+		s = sdk_media_session_begin(&begin, &media_result);
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKMediaSessionMainResultPayload));
+		encode_media_session_main_result(
+			(volatile struct SDKMediaSessionMainResultPayload *)
+			    result_payload,
+			&media_result);
+		*result_len = sizeof(struct SDKMediaSessionMainResultPayload);
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_VIDEO_SESSION_WRITE: {
@@ -7249,6 +7417,45 @@ static uint16_t service_try_defer(uint16_t opcode,
 		/* queue full -> caller computes inline */
 	}
 	return SDK_STATUS_BUSY;
+}
+
+static uint16_t image_session_begin_try_defer(
+	volatile struct SDKMailboxEntry *req,
+	const struct SDKImageStreamBegin *begin)
+{
+	taskq_shared_t *sh;
+	struct image_begin_op_params p;
+	uint32_t i;
+	int slot;
+
+	if (!scheduler_core1_available() || !g_request_is_batch_tail)
+		return SDK_STATUS_BUSY;
+	Xil_DCacheInvalidateRange((INTPTR)(uintptr_t)image_begin_pending,
+	                          sizeof(image_begin_pending));
+	for (i = 0U; i < TASKQ_CAPACITY; i++) {
+		if (!image_begin_pending[i].in_use)
+			break;
+	}
+	if (i == TASKQ_CAPACITY)
+		return SDK_STATUS_BUSY;
+	image_begin_pending[i].begin = *begin;
+	image_begin_pending[i].in_use = 1U;
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)&image_begin_pending[i],
+	                     sizeof(image_begin_pending[i]));
+	p.pending_slot = i;
+	sh = scheduler_shared();
+	slot = taskq_enqueue(&sh->queue, SDK_OP_IMAGE_SESSION_BEGIN, TASK_LONG,
+	                     0U, 0U, 0U, 0U, get_be32(req->request_id),
+	                     get_be32(req->user_cookie), &p, sizeof(p));
+	if (slot < 0) {
+		image_begin_pending[i].in_use = 0U;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&image_begin_pending[i],
+		                     sizeof(image_begin_pending[i]));
+		return SDK_STATUS_BUSY;
+	}
+	g_task_generation[slot] = sdk_mailbox_generation;
+	__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+	return SDK_STATUS_QUEUED;
 }
 
 /*
@@ -8135,7 +8342,7 @@ static uint16_t handle_diag_read(volatile struct SDKMailboxEntry *req,
 	put_be32(diag->last_status, sdk_status);
 	put_be32(diag->pending_requests, pending_requests);
 	put_be32(diag->shared_buffers_used, count_used_shared_buffers());
-	put_be32(diag->shared_heap_total, SDK_SHARED_HEAP_SIZE);
+	put_be32(diag->shared_heap_total, surface_allocator_total_bytes());
 	put_be32(diag->shared_heap_free, free_total);
 	put_be32(diag->shared_heap_largest_free, largest_free);
 	put_be32(diag->mailbox_arm_addr, (uint32_t)mailbox_base);
@@ -8235,8 +8442,8 @@ static uint16_t handle_diag_memory(volatile struct SDKMailboxEntry *req,
 
 	invalid_slots = sanitize_allocator_metadata();
 	if (host_arm != 0U && host_total != 0U) {
-		heap_free_stats_in(host_arm, host_total,
-				   &free_total, &largest_free);
+		host_window_free_stats(host_arm, host_total,
+				       &free_total, &largest_free);
 		host_board = host_arm - SDK_APERTURE_ARM_ADDRESS_ADJUSTMENT;
 	} else if ((flags & SDK_APERTURE_FLAG_VALID) != 0U) {
 		host_board = layout->host_window.base;
@@ -8360,6 +8567,9 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 static uint8_t    *cenc_defl;        /* per-message deflate scratch */
 static uint32_t    cenc_defl_len;
 
+#define CENC_DEFLATE_POOL_OWNER \
+	CARD_POOL_OWNER(CARD_POOL_CLASS_CONSOLE, 1u)
+
 static uint16_t handle_console_encode(volatile struct SDKMailboxEntry *req,
                                       volatile struct SDKMailboxEntry *comp,
                                       uint16_t payload_len)
@@ -8414,8 +8624,12 @@ static uint16_t handle_console_encode(volatile struct SDKMailboxEntry *req,
 	if (n > 4u) {
 		uLong bound = compressBound((uLong)(n - 4u));
 		if (cenc_defl_len < (uint32_t)bound) {
-			free(cenc_defl);
-			cenc_defl = (uint8_t *)malloc(bound);
+			if (cenc_defl)
+				(void)card_pool_free(&card_pool,
+					(uint32_t)(uintptr_t)cenc_defl,
+					CENC_DEFLATE_POOL_OWNER);
+			cenc_defl = (uint8_t *)(uintptr_t)card_pool_alloc(&card_pool,
+				(uint32_t)bound, CENC_DEFLATE_POOL_OWNER);
 			cenc_defl_len = cenc_defl ? (uint32_t)bound : 0u;
 		}
 		if (cenc_defl) {
@@ -8486,6 +8700,34 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		         effective_host_window_size());
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_MODULE_STATUS: {
+		const struct SDKModuleStatusRequestPayload *request =
+			(const struct SDKModuleStatusRequestPayload *)req->payload;
+		volatile struct SDKModuleStatusPayload *reply =
+			(volatile struct SDKModuleStatusPayload *)comp->payload;
+		zzm_status_t status;
+		if (payload_len != sizeof(*request))
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		for (uint32_t i = 0; i < sizeof(request->reserved); i++) {
+			if (request->reserved[i] != 0)
+				return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		}
+		if (!zzm_loader_status(get_be32(request->index), &status))
+			return complete_status(req, comp, SDK_STATUS_NOT_FOUND);
+		write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
+		memset((void *)reply, 0, sizeof(*reply));
+		put_be32(reply->id, status.id);
+		put_be32(reply->version, status.version);
+		put_be32(reply->abi_version, status.abi_version);
+		put_be32(reply->load_address, status.load_address);
+		put_be32(reply->image_size, status.image_size);
+		put_be32(reply->bss_size, status.bss_size);
+		put_be32(reply->state, status.state);
+		put_be32(reply->detail, status.state == ZZM_STATE_LOADED ?
+		         status.ref_count : status.reason);
+		memcpy((void *)reply->name, status.name, sizeof(reply->name));
+		return SDK_STATUS_OK;
+	}
 	case SDK_OP_QUERY_APERTURE_LAYOUT:
 		return handle_query_aperture_layout(req, comp);
 	case SDK_OP_QUERY_SERVICE:
@@ -8546,6 +8788,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_audio_control(req, comp, payload_len, opcode);
 	case SDK_OP_AUDIO_FABRIC_STATE_GET:
 		return handle_audio_fabric_state_get(req, comp, payload_len);
+	case SDK_OP_AUDIO_OUTPUT_CLOCK:
+		return handle_audio_output_clock(req, comp, payload_len);
 	case SDK_OP_AUDIO_RING_ACQUIRE:
 		return handle_audio_ring_acquire(req, comp, payload_len);
 	case SDK_OP_AUDIO_RING_RELEASE:
@@ -8736,6 +8980,8 @@ void sdk_mailbox_init(void)
 	 * the queue and will never post their deferred completion */
 	overlay_scheduler_reset();
 	fw_update_forget_queued();
+	zzm_load_pending_id = 0U;
+	zzm_load_deadline = 0U;
 
 	select_mailbox_placement();
 	if (mailbox_base != 0U)
@@ -8773,11 +9019,17 @@ void sdk_mailbox_init(void)
 	timing_decode_us = 0;
 	media_pcm_ring = 0;
 	media_pcm_ring_session = 0U;
+	media_pcm_ring_request_id = 0U;
+	memset(image_begin_pending, 0, sizeof(image_begin_pending));
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
 	/* Shared-buffer handles restart at 1, so the console encoder's owner
 	 * (an output handle) would match a new client; drop its session. */
 	sdk_console_encode_reset();
+	/* The encoder released the shared console owner; its mailbox-side
+	 * deflate pointer must not survive that owner reclaim. */
+	cenc_defl = 0;
+	cenc_defl_len = 0u;
 	/* Unbind AX playback before the table goes away: the fabric
 	 * reset above already dropped every producer, silenced the ring
 	 * it owned and retired the lease epochs (R7). */
@@ -9022,6 +9274,11 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 			else
 				fw_update_retire_failed(); /* faulted on core 1 */
 		}
+		else if (opcode == (uint16_t)TASKQ_OP_ZZM_LOAD) {
+			if (status != SDK_STATUS_OK && zzm_load_pending_id != 0U)
+				zzm_loader_mark_faulted(zzm_load_pending_id, "core-1 load fault");
+			zzm_load_pending_id = 0U;
+		}
 		else if (opcode == (uint16_t)SDK_OP_AUDIO_STREAM_CLOSE) {
 			/* Background close: sdk_mailbox_audio_stream_reap
 			 * clears the slot once the task has left the queue. */
@@ -9059,6 +9316,22 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		                 ? (uint16_t)sizeof(comp->payload) : payload_len;
 		memset((void *)comp->payload, 0, sizeof(comp->payload));
 		memcpy((void *)comp->payload, payload, n);
+	}
+	if (opcode == SDK_OP_MEDIA_SESSION_BEGIN && media_pcm_ring &&
+	    media_pcm_ring_session == 0U &&
+	    media_pcm_ring_request_id == request_id) {
+		if (status == SDK_STATUS_OK && payload != 0 &&
+		    payload_len >= sizeof(struct SDKMediaSessionMainResultPayload)) {
+			const struct SDKMediaSessionMainResultPayload *media =
+			    (const struct SDKMediaSessionMainResultPayload *)payload;
+
+			media_pcm_ring_session = get_be32(media->session);
+		} else {
+			shared_buffer_unpin(media_pcm_ring);
+			media_pcm_ring = 0;
+			media_pcm_ring_session = 0U;
+			media_pcm_ring_request_id = 0U;
+		}
 	}
 	if (status == SDK_STATUS_OK && opcode == SDK_OP_IMAGE_SESSION_FEED &&
 	    payload != 0 && payload_len >= sizeof(struct SDKImageSessionResultPayload)) {

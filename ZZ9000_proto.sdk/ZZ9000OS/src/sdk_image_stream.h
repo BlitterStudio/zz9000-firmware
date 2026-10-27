@@ -81,6 +81,12 @@ struct SDKImageAnimationFrameResult {
 };
 
 
+/* Decoder-library allocation hooks. JPEG and PNG pass their session as
+ * client data, so their working sets can use the IMAGE owner and be reclaimed
+ * without trusting newlib metadata after a core-1 reset. */
+void *sdk_image_decode_alloc(void *session, uint32_t size);
+void sdk_image_decode_free(void *ptr);
+
 void sdk_image_stream_init(void);
 uint32_t sdk_image_stream_active_count(void);
 /* Session affinity lookup: 1 = core-1-affine, 0 = core-0, -1 = not found. */
@@ -102,11 +108,10 @@ int sdk_image_stream_has_core1_sessions(void);
  * references (their heap blocks were already freed by the decode-reclaim
  * pass) WITHOUT running destructors, and mark the sessions failed. */
 void sdk_image_stream_poison_core1_sessions(void);
-/* core-1 fault recovery only (core1_cold_restart, core 1 provably
- * halted): a cold reset can land inside the decode-state budget
- * critical section and orphan the lock, so force it back to the
- * free state. */
-void sdk_image_stream_reset_decode_state_lock(void);
+/* Core-1 fault recovery only (core1_cold_restart, core 1 provably halted):
+ * a cold reset can orphan either the decode-budget or session-create lock. */
+void sdk_image_stream_reset_locks(void);
+void sdk_image_stream_reset_locks_if_owned(void);
 uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
                                 struct SDKImageStreamResult *result);
 uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *feed,

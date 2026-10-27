@@ -71,6 +71,7 @@ ELF=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
 if [ -f "$ELF" ]; then
     arm-none-eabi-size "$ELF"
     echo "[firmware] done: $ELF"
+    bash ./util/check_elf_vectors.sh "$ELF"
 else
     echo "[firmware] done (no ELF produced — target was likely 'clean')."
 fi
@@ -79,4 +80,5 @@ FALLBACK_ELF=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf
 if [ -f "$FALLBACK_ELF" ]; then
     arm-none-eabi-size "$FALLBACK_ELF"
     echo "[firmware] legacy-bitstream fallback: $FALLBACK_ELF"
+    bash ./util/check_elf_vectors.sh "$FALLBACK_ELF"
 fi

@@ -25,12 +25,13 @@
 #include "jmemsys.h"
 
 #include "sdk_compression.h"
+#include "sdk_image_stream.h"
 
 GLOBAL(void *)
 jpeg_get_small(j_common_ptr cinfo, size_t sizeofobject)
 {
   (void)cinfo;
-  return sdk_decode_heap_alloc(sizeofobject);
+  return sdk_image_decode_alloc(cinfo->client_data, (uint32_t)sizeofobject);
 }
 
 GLOBAL(void)
@@ -38,14 +39,14 @@ jpeg_free_small(j_common_ptr cinfo, void *object, size_t sizeofobject)
 {
   (void)cinfo;
   (void)sizeofobject;
-  sdk_decode_heap_free(object);
+  sdk_image_decode_free(object);
 }
 
 GLOBAL(void *)
 jpeg_get_large(j_common_ptr cinfo, size_t sizeofobject)
 {
   (void)cinfo;
-  return sdk_decode_heap_alloc(sizeofobject);
+  return sdk_image_decode_alloc(cinfo->client_data, (uint32_t)sizeofobject);
 }
 
 GLOBAL(void)
@@ -53,7 +54,7 @@ jpeg_free_large(j_common_ptr cinfo, void *object, size_t sizeofobject)
 {
   (void)cinfo;
   (void)sizeofobject;
-  sdk_decode_heap_free(object);
+  sdk_image_decode_free(object);
 }
 
 GLOBAL(size_t)

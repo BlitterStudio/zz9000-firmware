@@ -14,6 +14,7 @@
 #include "xil_cache_l.h"
 #include "xil_io.h"
 #include "sdk_smp_lock.h"
+#include "surface_allocator.h"
 /* kept after the Xilinx headers: overlay.h pulls in gfx.h (see the
  * pack note on struct GFXData) */
 #include "overlay.h"
@@ -74,23 +75,19 @@ static void videocap_geometry_commit(uint16_t width, uint16_t height)
 }
 
 /* Capture-area scanout origin for the detected standard and requested
- * base mode. One derivation for every capture-area VDMA start, so a
- * stale legacy native-pan write from the host driver (its constant is
- * tuned for PAL 800x600 only) can never wrap NTSC lines (#84). */
+ * base mode. The PAL filtered 800x600 adjustment is relative to the
+ * allocated capture backing, never to a legacy fixed framebuffer offset. */
 static uint32_t videocap_scanout_pan_offset(int ntsc, int full_width,
 		int source_class)
 {
 	uint32_t base_mode = (uint32_t)vs.videocap_video_mode;
 
-	/* The tuned pre-row origin belongs only to a 15 kHz filtered
-	 * 800x600 canvas. A short-line source is shown on 720x480/576
-	 * even when the configured base stays 800x600, and that origin
-	 * would prepend the previous capture row. */
 	if (source_class & VIDEO_VIDEOCAP_SOURCE_SHORT)
 		base_mode = ntsc ? ZZVMODE_720x480 : ZZVMODE_720x576;
 
-	return video_videocap_scanout_pan_base((uint32_t)ntsc,
-		(uint32_t)full_width, base_mode);
+	return video_videocap_scanout_address(vs.videocap_backing_address,
+		(uint32_t)ntsc, (uint32_t)full_width, base_mode) -
+		FRAMEBUFFER_ADDRESS;
 }
 
 static int isr_flush_count = 0;
@@ -100,8 +97,49 @@ struct ZZ_VIDEO_STATE* video_get_state() {
 	return &vs;
 }
 
+int video_videocap_backing_reserve(void)
+{
+	uint32_t address = vs.videocap_backing_address;
+
+	if (address == 0U) {
+		uint32_t allocation = surface_allocator_alloc(
+			VIDEO_VIDEOCAP_BACKING_RESERVATION_SIZE);
+
+		if (allocation == 0U)
+			return 0;
+		address = (allocation +
+			VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA +
+			VIDEO_VIDEOCAP_BACKING_ALIGNMENT - 1U) &
+			~(VIDEO_VIDEOCAP_BACKING_ALIGNMENT - 1U);
+		if (address == 0U || address - allocation <
+		    VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA) {
+			(void)surface_allocator_free(allocation);
+			return 0;
+		}
+		vs.videocap_backing_address = address;
+	}
+
+
+	return 1;
+}
+
+int video_videocap_backing_arm(void)
+{
+	uint32_t address = vs.videocap_backing_address;
+
+	if (address == 0U)
+		return 0;
+
+	if (vs.videocap_backing_programmed == 0U) {
+		video_formatter_write(address, MNTVF_OP_VIDEOCAP_ADDRESS);
+		vs.videocap_backing_programmed = 1U;
+	}
+
+	return 1;
+}
+
 static void videocap_detection_reset() {
-	/* Also covers leaving capture by panning without a mode write. */
+	/* Also covers leaving capture without a mode write. */
 	if (vs.videocap_output_profile_applied ==
 	    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
 		video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
@@ -202,9 +240,13 @@ struct ZZ_VIDEO_STATE* video_init() {
 
 void video_reset() {
 	vs.videocap_enabled_old = 0;
+	vs.videocap_backing_address = 0;
+	vs.videocap_backing_programmed = 0;
 	videocap_detection_reset();
 	vs.framebuffer_pan_width = 0;
-	vs.framebuffer_pan_offset = VIDEO_VDMA_CAPTURE_PAN_PAL_800X600;
+	vs.framebuffer_pan_offset = 0;
+	vs.host_pan_width = 0;
+	vs.host_pan_offset = 0;
 	vs.split_request_pos = 0;
 
 	vs.sprite_colors[0] = 0x00ff00ff;
@@ -560,12 +602,16 @@ static void init_videocap_video_mode(int ntsc, int full_width,
 		ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 }
 
-void fb_fill(uint32_t offset) {
-	memset(vs.framebuffer + offset, 0, 1280 * 1024 * 4);
-}
-
 void videocap_area_clear() {
-	fb_fill(0x00dff000 / 4);
+	if (vs.videocap_backing_address != 0U) {
+		uint32_t offset = vs.videocap_backing_address -
+			VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA -
+			FRAMEBUFFER_ADDRESS;
+
+		memset((uint8_t *)vs.framebuffer + offset, 0,
+		       VIDEO_VIDEOCAP_BACKING_SIZE +
+		       VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA);
+	}
 }
 
 #define VF_DLY ;
@@ -627,6 +673,13 @@ void video_set_dpms(uint8_t level) {
 // interrupt service routine for IRQ_F2P[0:0]
 // vblank + raster position interrupt
 void isr_video(void *dummy) {
+	/* FPGA vblank can arrive during boot before the host selects an RTG
+	 * mode. A zero geometry makes XAxiVdma_DmaConfig reject the request
+	 * (XST_INVALID_PARAM), which used to print several spurious failures. */
+	if (vs.vmode_hsize == 0U || vs.vmode_vdma_rows == 0U ||
+			vs.vmode_hdiv == 0U)
+		return;
+
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 	u32 live_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG2);
 	uint32_t videocap_live_rows = 0U;
@@ -659,8 +712,16 @@ void isr_video(void *dummy) {
 		(int)(((zstate >> 8) & 3U) << VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT);
 	int videocap_full_width = videocap_full_width_enabled(zstate);
 	int videocap_output_profile = videocap_effective_output_profile(zstate);
+	int videocap_active = videocap_enabled &&
+		vs.videocap_backing_programmed != 0U;
 
-	if (!videocap_enabled) {
+	if (!videocap_active) {
+		/* Capture overwrote framebuffer_pan_* with its own origin and
+		 * stride; give the RTG screen back the pan its driver set. */
+		if (vs.videocap_enabled_old) {
+			vs.framebuffer_pan_offset = vs.host_pan_offset;
+			vs.framebuffer_pan_width = vs.host_pan_width;
+		}
 		if (!vblank) {
 			// if this is not the vblank interrupt, set up the split buffer
 			// TODO: VDMA doesn't seem to like switching buffers in the middle of a frame.
@@ -693,32 +754,19 @@ void isr_video(void *dummy) {
 		// can proceed (the overlay present hook does not run in this
 		// branch and would otherwise stay latched as presenting)
 		if (vblank && overlay_scanout_active()) {
-			/* Same geometry discipline as the mode-change trigger:
-			 * a driver pan write that landed inside the capture area
-			 * must not become the scanout stride or the scanout base
-			 * for any profile. The origin helper already encodes the
-			 * per-standard centered contract — centered profiles keep
-			 * base mode ZZVMODE_800x600, so PAL centered retains the
-			 * tuned origin and NTSC centered takes the capture row
-			 * base instead of the stale PAL constant (#84). */
-			if (vs.framebuffer_pan_offset >= 0x00dff000) {
-				vs.framebuffer_pan_width = 0;
-				vs.framebuffer_pan_offset =
-					videocap_scanout_pan_offset(
-						videocap_ntsc,
-						videocap_full_width,
-						videocap_source_class);
-			}
+			/* Capture owns the VDMA origin. Re-derive it from the
+			 * allocated backing instead of accepting a host pan. */
+			vs.framebuffer_pan_width = 0;
+			vs.framebuffer_pan_offset =
+				videocap_scanout_pan_offset(
+					videocap_ntsc,
+					videocap_full_width,
+					videocap_source_class);
 			init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
 					(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 			overlay_scanout_released();
 		}
-		// FIXME magic constant
-		if (vs.framebuffer_pan_offset >= 0x00dff000) {
-			// videocap is enabled and
-			// we are looking at the videocap area
-			// so set up the right mode for it
-			if (vblank) {
+		if (vblank) {
 				int videocap_reset = 0;
 
 				if (!vs.videocap_enabled_old) {
@@ -843,16 +891,10 @@ void isr_video(void *dummy) {
 							(uint32_t)videocap_source_class);
 					vs.scalemode = (int)videocap_scalemode;
 					vs.vmode_vdma_rows = videocap_source_rows;
-					/* The mode-change trigger above may have run
-					 * several vblanks earlier; a host driver pan
-					 * write that landed since then must not leak
-					 * into this VDMA restart. The stride width is
-					 * firmware-owned for every profile (the trigger
-					 * clears it unconditionally); the origin is
-					 * re-derived for every profile too — the helper
-					 * returns the tuned PAL constant for centered
-					 * (base mode stays ZZVMODE_800x600) and the
-					 * capture row base for NTSC centered (#84). */
+				/* The VDMA restart always re-derives its origin from
+				 * the runtime capture backing. The PAL filtered
+				 * profile retains its tuned relative origin; every
+				 * other profile starts at the capture row. */
 					vs.framebuffer_pan_width = 0;
 					vs.framebuffer_pan_offset =
 						videocap_scanout_pan_offset(
@@ -953,11 +995,6 @@ void isr_video(void *dummy) {
 					vs.videocap_source_class_old = videocap_source_class;
 				}
 			}
-		} else {
-			// not looking at the videocap area
-			vs.videocap_enabled_old = 0;
-			videocap_detection_reset();
-		}
 	}
 
 	if (vblank)

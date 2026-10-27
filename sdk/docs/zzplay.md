@@ -173,6 +173,10 @@ buttons (`|<`, **Play**, **Pause**, **Stop**, `>|`), the volume slider, the
 repeat cycle gadget, the **Shuffle** check box, and the playlist. A message
 line reports errors and notices. The window remembers its position.
 
+The playing time follows frames the card has actually output, divided by
+the card's 48 kHz rate, not the file's bitrate. A VBR file and a file with
+a large ID3 tag therefore keep time with the audio.
+
 Drag the position slider to seek in MP3 files. The slider is unavailable for
 MPEG video, WebM, FLAC, Ogg Vorbis, and WebP animations.
 

@@ -46,6 +46,7 @@ module extracted_videocap_writeback (
     input S_AXI_ACLK, input m01_axi_aresetn,
     input vcap_capture_ready_axi, input [11:0] vcap_line_payload_axi,
     input videocap_mode, input [31:0] videocap_address,
+    input videocap_address_valid,
     input [7:0] video_control_op, input [31:0] video_control_data,
     input S_AXI_ARESETN, input z_reset,
     input videocap_control_applied_full_width,
