@@ -125,6 +125,8 @@ jobs:
         run: make -C test/zzm_rt test
       - name: SD activity LED suite
         run: make -C test/sd_activity_led test
+      - name: SD boot metadata suite
+        run: make -C test/sd_boot test
       - name: Scheduler host tests
         run: make -C test/scheduler test
       - name: ZZ9000.CFG parser suite

@@ -16,6 +16,9 @@
 #define SD_BOOT_VERSION         2
 #define SD_BOOT_MAX_PARTITIONS  16
 #define SD_BOOT_MAX_FILESYSTEMS 4
+/* GETINFO completed normally, but no HDF is configured or open. Keep this
+ * distinct from SD_STATUS_BUSY (0xFFFF) and real command failures. */
+#define SD_BOOT_STATUS_NO_HDF   0xFFFE
 
 /* All multi-byte values below are transported in big-endian byte order
  * so the 68k driver can read them natively. The firmware copies the

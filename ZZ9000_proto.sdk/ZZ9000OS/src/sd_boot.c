@@ -18,6 +18,7 @@ static uint32_t be32(uint32_t v) { return __builtin_bswap32(v); }
 static uint8_t block_buf[512] __attribute__((aligned(32)));
 static struct sd_boot_info boot_info;
 static int boot_info_valid = 0;
+static int boot_info_status = -1;
 #define SD_BOOT_FS_BUF_SIZE (64 * 1024)
 static uint8_t fs_buf[SD_BOOT_FS_BUF_SIZE];
 static uint32_t fs_offsets[SD_BOOT_MAX_FILESYSTEMS];
@@ -121,10 +122,12 @@ int sd_boot_init(void) {
     memset(fs_sizes, 0, sizeof(fs_sizes));
     memset(fs_offsets, 0, sizeof(fs_offsets));
     boot_info_valid = 0;
+    boot_info_status = -1;
 
     if (!sd_storage_available()) {
         printf("[SD] Boot: no HDF mounted\n");
-        return -1;
+        boot_info_status = SD_BOOT_STATUS_NO_HDF;
+        return boot_info_status;
     }
 
     /* The HDF is presented as the entire Amiga drive — RDSK lives at
@@ -143,7 +146,7 @@ int sd_boot_init(void) {
         if (sd_storage_read_blocks(rdb_start + off, 1, block_buf)) {
             printf("[SD] Boot: read failed at block %lu\n",
                    (unsigned long)(rdb_start + off));
-            break;
+            return -1;
         }
         if (be32(rdb->rdb_ID) == RDB_IDENTIFIER) {
             rdb_found = 1;
@@ -184,6 +187,7 @@ int sd_boot_init(void) {
         boot_info.magic = SD_BOOT_MAGIC;
         boot_info.version = SD_BOOT_VERSION;
         boot_info_valid = 1;
+        boot_info_status = 0;
         printf("[SD] Boot: no RDSK in first 16 blocks\n");
         printf("[SD] Boot: device ready, no RDB (%lu blocks)\n",
                (unsigned long)boot_info.partition_blocks);
@@ -197,6 +201,7 @@ int sd_boot_init(void) {
         boot_info.magic = SD_BOOT_MAGIC;
         boot_info.version = SD_BOOT_VERSION;
         boot_info_valid = 1;
+        boot_info_status = 0;
         printf("[SD] Boot: device ready, bad RDB block size\n");
         return 0;
     }
@@ -300,12 +305,13 @@ int sd_boot_init(void) {
     boot_info.magic = SD_BOOT_MAGIC;
     boot_info.version = SD_BOOT_VERSION;
     boot_info_valid = 1;
+    boot_info_status = 0;
     printf("[SD] Boot: %d partitions, %d filesystems found\n", part_count, fs_count);
     return 0;
 }
 
 int sd_boot_get_info(void *buffer) {
-    if (!boot_info_valid) return -1;
+    if (!boot_info_valid) return boot_info_status;
 
     struct sd_boot_info be;
     memset(&be, 0, sizeof(be));
