@@ -289,14 +289,6 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             vs->framebuffer_pan_offset += (((int16_t)data->y[0]) * (vs->framebuffer_pan_width << framebuffer_color_format));
             vs->host_pan_offset = vs->framebuffer_pan_offset;
             vs->host_pan_width = vs->framebuffer_pan_width;
-            {
-                /* DIAG (shared-heap drag test): remove before merging. */
-                static uint32_t diag_last_pan = 0xffffffffU;
-                if (data->offset[0] != diag_last_pan) {
-                    printf("[p96d] pan +%lx\n", (unsigned long)data->offset[0]);
-                    diag_last_pan = data->offset[0];
-                }
-            }
             break;
 
         case OP_SET_SPLIT_POS:
@@ -305,18 +297,6 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             vs->bgbuf_offset = data->offset[0];
 
             vs->split_request_pos = data->y[0];
-            {
-                /* DIAG (shared-heap drag test): remove before merging. */
-                static uint32_t diag_last_bg = 0xffffffffU;
-                static uint16_t diag_split_on = 0xffffU;
-                uint16_t on = data->y[0] != 0U;
-                if (data->offset[0] != diag_last_bg || on != diag_split_on) {
-                    printf("[p96d] split %s bg +%lx\n", on ? "on" : "off",
-                           (unsigned long)data->offset[0]);
-                    diag_last_bg = data->offset[0];
-                    diag_split_on = on;
-                }
-            }
             break;
 
         case OP_SET_PALETTE: {
