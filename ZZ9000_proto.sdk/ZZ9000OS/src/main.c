@@ -1867,16 +1867,19 @@ int main() {
 				case REG_ZZ_CARDMEM_PROTOCOL:
 					/* Only a matched Z3 RTG driver may open the shared
 					 * interval. The latch is cleared by every Amiga reset. */
-					if (zdata == ZZ_REG_ZZ_CARDMEM_TOKEN &&
-					    !cardmem_acc_is_enabled()) {
-						/* One line per handoff (once per Amiga reset),
-						 * so a test run can see which mode is active. */
-						if (cardmem_acc_announce(
+					if (cardmem_acc_is_enabled())
+						break;
+					/* One line per handoff attempt (once per Amiga
+					 * reset), so a test run can see which mode is
+					 * active and what the driver actually wrote. */
+					if (zdata != ZZ_REG_ZZ_CARDMEM_TOKEN)
+						printf("[p96] cardmem: unexpected token %04lx\n",
+						       (unsigned long)(zdata & 0xffff));
+					else if (cardmem_acc_announce(
 							sdk_aperture_runtime_is_zorro3()))
-							printf("[p96] cardmem: shared heap on\n");
-						else
-							printf("[p96] cardmem: refused\n");
-					}
+						printf("[p96] cardmem: shared heap on\n");
+					else
+						printf("[p96] cardmem: refused\n");
 					break;
 				case REG_ZZ_ALLOC_CLEAR_PROTOCOL: {
 					/* Driver init handshake: only after this token

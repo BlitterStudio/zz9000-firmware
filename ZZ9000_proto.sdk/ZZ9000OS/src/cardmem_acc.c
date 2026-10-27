@@ -3,15 +3,19 @@
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
+#include <stdio.h>
+
 #include "cardmem_acc.h"
 #include "memorymap.h"
 #include "surface_allocator.h"
 
 static uint8_t cardmem_acc_enabled;
+static uint8_t cardmem_acc_refusal_logged;
 
 void cardmem_acc_reset(void)
 {
     cardmem_acc_enabled = 0U;
+    cardmem_acc_refusal_logged = 0U;
 }
 
 int cardmem_acc_announce(int is_zorro3)
@@ -106,6 +110,13 @@ void cardmem_acc_dispatch(enum cardmem_acc_command command,
 	if (!offset0_be || !accepted)
 		return;
 	*accepted = 0U;
+	if (!cardmem_acc_enabled && !cardmem_acc_refusal_logged) {
+		/* A driver that skipped or failed the handoff is still routing
+		 * P96 allocations here; say so once per Amiga reset. */
+		printf("[p96] cardmem: op %d before handoff refused\n",
+		       (int)command);
+		cardmem_acc_refusal_logged = 1U;
+	}
 	switch (command) {
 	case CARDMEM_ACC_COMMAND_ALLOC:
 		if (offset1_be)
