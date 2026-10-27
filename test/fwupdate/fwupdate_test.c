@@ -282,6 +282,63 @@ static void test_commit_fails_when_discard_slots_full(void) {
     fw_update_abort();
 }
 
+/* Boot cleanup must release every module-directory discard slot, just as it
+ * does the root slots. A missing module directory is also harmless. */
+static void test_cleanup_releases_module_discard_slots(void) {
+    char path[32];
+
+    printf("test_cleanup_releases_module_discard_slots\n");
+    mock_reset();
+    mock_add_file("0:/ZZ9K/MPEG2.ZZM", "active");
+    mock_add_file("0:/ZZ9K/MPEG2.BAK", "backup");
+    for (int i = 0; i <= 8; i++) {
+        CHECK(fw_update_open("ZZ9K/MPEG2.ZZM") == FWUP_OK,
+              "module update opens while a discard slot remains");
+        CHECK(fw_update_write("new", 3) == FWUP_OK,
+              "module update writes while a discard slot remains");
+        CHECK(fw_update_close() == FWUP_OK,
+              "module update commits while a discard slot remains");
+    }
+    CHECK(fw_update_open("ZZ9K/MPEG2.ZZM") == FWUP_OK,
+          "module update opens with all discard slots full");
+    CHECK(fw_update_write("new", 3) == FWUP_OK,
+          "module update writes with all discard slots full");
+    CHECK(fw_update_close() == FWUP_ERR_CLOSE,
+          "full module discard set rejects commit before boot cleanup");
+    fw_update_abort();
+
+    mock_add_file("0:/ZZFWUP.DEL", "root discard");
+    for (int i = 0; i < 8; i++) {
+        snprintf(path, sizeof(path), "0:/ZZFWUP%02d.DEL", i);
+        mock_add_file(path, "root discard");
+    }
+    fw_update_cleanup_backups();
+    CHECK(!mock_exists("0:/ZZFWUP.DEL"), "cleanup removes root default discard");
+    for (int i = 0; i < 8; i++) {
+        snprintf(path, sizeof(path), "0:/ZZFWUP%02d.DEL", i);
+        CHECK(!mock_exists(path), "cleanup removes root numbered discard");
+    }
+    CHECK(!mock_exists("0:/ZZ9K/ZZFWUP.DEL"),
+          "cleanup removes module default discard");
+    for (int i = 0; i < 8; i++) {
+        snprintf(path, sizeof(path), "0:/ZZ9K/ZZFWUP%02d.DEL", i);
+        CHECK(!mock_exists(path), "cleanup removes module numbered discard");
+    }
+
+    CHECK(fw_update_open("ZZ9K/MPEG2.ZZM") == FWUP_OK,
+          "module update opens after boot cleanup");
+    CHECK(fw_update_write("new", 3) == FWUP_OK,
+          "module update writes after boot cleanup");
+    CHECK(fw_update_close() == FWUP_OK,
+          "module update commits after boot cleanup");
+
+    mock_reset();
+    mock_add_file("0:/ZZFWUP.DEL", "root discard");
+    fw_update_cleanup_backups();
+    CHECK(!mock_exists("0:/ZZFWUP.DEL"),
+          "cleanup tolerates a missing module directory");
+}
+
 /* Core 0 sees a queued job as busy until it retires; the result is taken
  * once. A job that faulted reports its command's error; a job dropped
  * with the task queue (Amiga reset) leaves no result. */
@@ -330,6 +387,7 @@ int main(void) {
     test_module_name_validation_and_paths();
     test_commit_displaces_existing_backup();
     test_commit_fails_when_discard_slots_full();
+    test_cleanup_releases_module_discard_slots();
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

@@ -16,10 +16,9 @@
 #define FWUP_VOLUME      "0:"
 #define FWUP_NAME_MAX    64
 #define FWUP_PATH_MAX    (FWUP_NAME_MAX + 10) /* "0:/ZZ9K/" + 8.3 + NUL */
-#define FWUP_MODULE_DIR  "ZZ9K"
-#define FWUP_MODULE_PATH FWUP_VOLUME "/" FWUP_MODULE_DIR
-#define FWUP_TEMP_PATH   FWUP_VOLUME "/ZZFWUP.TMP"
-#define FWUP_DISCARD_PATH FWUP_VOLUME "/ZZFWUP.DEL"
+#define FWUP_MODULE_DIR   "ZZ9K"
+#define FWUP_MODULE_PATH  FWUP_VOLUME "/" FWUP_MODULE_DIR
+#define FWUP_TEMP_PATH    FWUP_VOLUME "/ZZFWUP.TMP"
 #define FWUP_DISCARD_SLOTS 8
 
 static FIL  fwup_file;
@@ -254,7 +253,7 @@ static int reserve_discard_path(char *discard_path, size_t discard_path_size,
             return 0;
         }
     }
-    printf("[FWUP] COMMIT no free discard path; reboot to clean ZZFWUP*.DEL\n");
+    printf("[FWUP] COMMIT no free discard path; reboot to clean stale discard files\n");
     return 0;
 }
 
@@ -341,28 +340,33 @@ static uint16_t commit_temp_file(void) {
     return FWUP_OK;
 }
 
-void fw_update_cleanup_backups(void) {
-    FRESULT fr = f_unlink(FWUP_DISCARD_PATH);
+static void cleanup_discard_path(const char *target_path, int slot) {
+    char discard_path[FWUP_PATH_MAX];
+    discard_slot_path(discard_path, sizeof(discard_path), target_path, slot);
+
+    FRESULT fr = f_unlink(discard_path);
     if (fr == FR_OK) {
-        printf("[FWUP] cleanup removed %s\n", FWUP_DISCARD_PATH);
+        printf("[FWUP] cleanup removed %s\n", discard_path);
     } else if (fr != FR_NO_FILE) {
         printf("[FWUP] cleanup unlink(%s) failed: %d\n",
-               FWUP_DISCARD_PATH, (int)fr);
+               discard_path, (int)fr);
     }
+}
 
-    for (int slot = 0; slot < FWUP_DISCARD_SLOTS; slot++) {
-        char discard_path[FWUP_PATH_MAX];
-        discard_slot_path(discard_path, sizeof(discard_path), FWUP_VOLUME "/",
-                          slot);
-        fr = f_unlink(discard_path);
-        if (fr == FR_OK) {
-            printf("[FWUP] cleanup removed %s\n", discard_path);
-        } else if (fr != FR_NO_FILE) {
-            printf("[FWUP] cleanup unlink(%s) failed: %d\n",
-                   discard_path, (int)fr);
+void fw_update_cleanup_backups(void) {
+    const char *const cleanup_targets[] = {
+        FWUP_VOLUME "/",
+        FWUP_MODULE_PATH "/",
+    };
+
+    for (size_t target = 0;
+         target < sizeof(cleanup_targets) / sizeof(cleanup_targets[0]);
+         target++) {
+        cleanup_discard_path(cleanup_targets[target], -1);
+        for (int slot = 0; slot < FWUP_DISCARD_SLOTS; slot++) {
+            cleanup_discard_path(cleanup_targets[target], slot);
         }
     }
-
 }
 
 uint16_t fw_update_open(const char *name_buf) {
