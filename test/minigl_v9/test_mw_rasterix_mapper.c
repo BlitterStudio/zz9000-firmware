@@ -440,6 +440,9 @@ static void test_backend_disable_cpu_rerender_present(void)
     };
     MiniGLRixPlatform platform;
     mw_ctx *c;
+    uint32_t *old_color;
+    uint8_t *old_depth;
+    uint32_t old_pixels[4];
 
     setup_mock_platform(&s_mock, &platform);
     s_mock.complete_submissions = 0;
@@ -449,8 +452,15 @@ static void test_backend_disable_cpu_rerender_present(void)
     c->state.target.latest = c->state.target.back;
     minigl_raster_clear(0x4000U, 0U, 0U);
     assert(minigl_raster_present_is_rgb565());
+    old_color = c->color_buffers[c->state.target.back];
+    old_depth = c->depth_buffer;
+    memcpy(old_pixels, old_color, sizeof(old_pixels));
     assert(!minigl_raster_prepare_present()); /* Timeout disables RasterIX. */
-    minigl_raster_clear(0x4000U, 0U, 0U); /* CPU re-renders the target. */
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(c->rix_target_quarantined);
+    assert(c->color_buffers[c->state.target.back] != old_color);
+    assert(c->depth_buffer != old_depth);
+    assert(memcmp(old_color, old_pixels, sizeof(old_pixels)) == 0);
     assert(!minigl_raster_present_is_rgb565());
     assert(!minigl_raster_present_is_bottom_up());
     c->color_buffers[c->state.target.latest][0] = 0xff0000ffU;
@@ -520,19 +530,20 @@ static void test_wire_cpu_handoffs(void)
 
     minigl_raster_clear(0x4000U, 0U, 0U);
     assert(minigl_raster_present_is_rgb565());
-    mw_put_be32(target, 3U);
+    mw_put_be32(target, 4U);
     mw_put_be32(target + 4, 2U);
     mw_put_be32(target + 8, 2U);
     mw_put_be32(target + 12, 24U);
-    mw_put_be32(target + 16, 3U);
+    mw_put_be32(target + 16, 4U);
     mw_put_be32(target + 20, 2U);
     assert(submit_single_command(c, MW_TARGET, target, sizeof(target)) == MW_STATUS_OK);
-    assert(c->width == 3U && c->height == 2U);
+    assert(c->width == 4U && c->height == 2U);
     assert(!minigl_raster_present_is_rgb565());
 
     minigl_raster_clear(0x4000U, 0U, 0U);
     assert(minigl_raster_present_is_rgb565());
     mw_put_be32(draw_buffer, MW_DRAW_BUFFER);
+    mw_put_be32(draw_buffer + 4, 1U);
     mw_put_be32(draw_buffer + 8, 0x404U);
     assert(submit_single_command(c, MW_STATE, draw_buffer, sizeof(draw_buffer)) == MW_STATUS_OK);
     assert(!minigl_raster_present_is_rgb565());

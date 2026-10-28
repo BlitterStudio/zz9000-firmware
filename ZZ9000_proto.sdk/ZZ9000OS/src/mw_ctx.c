@@ -317,6 +317,73 @@ static int mw_ctx_bind_buffers(mw_ctx *c)
     return minigl_raster_configure_buffers(&buffers);
 }
 
+static int mw_ctx_replace_rix_target(void *context,
+                                     MiniGLRasterBuffers *replacement)
+{
+    mw_ctx *c = (mw_ctx *)context;
+    uint32_t *new_colors[3] = { NULL, NULL, NULL };
+    uint8_t *new_depth = NULL;
+    uint32_t new_color_addresses[3] = { 0U, 0U, 0U };
+    uint32_t new_depth_address = 0U;
+    size_t color_bytes;
+    size_t depth_bytes;
+    int index;
+
+    if (!c || !replacement || c->rix_target_quarantined)
+        return 0;
+    color_bytes = (size_t)c->width * c->height * sizeof(*new_colors[0]);
+    depth_bytes = (size_t)c->width * c->height * 4U;
+    for (index = 0; index < 3; ++index) {
+        new_colors[index] = (uint32_t *)mw_context_alloc(
+            c, (uint32_t)color_bytes, &new_color_addresses[index]);
+        if (!new_colors[index])
+            goto allocation_failed;
+        memset(new_colors[index], 0, color_bytes);
+    }
+    new_depth = (uint8_t *)mw_context_alloc(c, (uint32_t)depth_bytes,
+                                             &new_depth_address);
+    if (!new_depth)
+        goto allocation_failed;
+
+    for (index = 0; index < 3; ++index) {
+        c->rix_quarantined_color_buffers[index] = c->color_buffers[index];
+        c->rix_quarantined_color_addresses[index] =
+            c->color_buffer_addresses[index];
+        c->color_buffers[index] = new_colors[index];
+        c->color_buffer_addresses[index] = new_color_addresses[index];
+    }
+    c->rix_quarantined_depth_buffer = c->depth_buffer;
+    c->rix_quarantined_depth_address = c->depth_buffer_address;
+    c->depth_buffer = new_depth;
+    c->depth_buffer_address = new_depth_address;
+    c->rix_target_quarantined = 1U;
+
+    memset(replacement, 0, sizeof(*replacement));
+    replacement->color = c->color_buffers[(c->state.draw_buffer == 0x404 ||
+                                           c->state.draw_buffer == 0x400) &&
+                                          c->state.target.buffer_count > 1 ?
+                                          c->state.target.front :
+                                          c->state.target.back];
+    replacement->color_bytes = (uint32_t)color_bytes;
+    replacement->depth = c->depth_buffer;
+    replacement->depth_bytes = (uint32_t)depth_bytes;
+    replacement->vertices = g_dummy_vertices;
+    replacement->vertices_bytes = sizeof(g_dummy_vertices);
+    replacement->texture_staging = g_dummy_staging;
+    replacement->texture_staging_bytes = sizeof(g_dummy_staging);
+    replacement->texture_pool = c->texture_pool;
+    replacement->texture_pool_bytes = c->texture_pool_bytes;
+    replacement->width = (uint16_t)c->width;
+    replacement->height = (uint16_t)c->height;
+    return 1;
+
+allocation_failed:
+    for (index = 0; index < 3; ++index)
+        mw_context_free(c, new_colors[index], &new_color_addresses[index]);
+    mw_context_free(c, new_depth, &new_depth_address);
+    return 0;
+}
+
 static void mw_ctx_sync_to_raster(mw_ctx *c)
 {
     ZZ9KMiniGLPacketSetState rstate;
@@ -459,6 +526,7 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
 
     c->handle = g_next_handle++;
     mw_ctx_configure_rix(c);
+    minigl_raster_set_fail_stop_target_handler(mw_ctx_replace_rix_target, c);
     minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes,
                                    mw_ctx_grow_texture_pool, c);
     if (!mw_ctx_bind_buffers(c)) {
@@ -474,10 +542,27 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
 void mw_host_destroy(mw_ctx *c)
 {
     int i;
+
     if (!c)
         return;
     if (!minigl_raster_quiesce() && c->rix_enabled)
         return;
+    minigl_raster_set_fail_stop_target_handler(NULL, NULL);
+    if (c->rix_target_quarantined) {
+#if MW_CONTEXT_CARD_POOL
+        /* The disabled engine may still write any allocation owned by this
+         * context.  The one permitted fail-stop leaves that whole owner
+         * intact rather than risking a card-pool record being recycled. */
+        free(c);
+        return;
+#else
+        for (i = 0; i < 3; ++i)
+            mw_context_free(c, c->rix_quarantined_color_buffers[i],
+                            &c->rix_quarantined_color_addresses[i]);
+        mw_context_free(c, c->rix_quarantined_depth_buffer,
+                        &c->rix_quarantined_depth_address);
+#endif
+    }
     mw_ctx_release_rix(c);
 
     for (i = 0; i < 3; ++i) {

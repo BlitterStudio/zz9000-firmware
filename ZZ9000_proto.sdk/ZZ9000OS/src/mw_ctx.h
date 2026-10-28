@@ -42,7 +42,13 @@ struct mw_ctx {
     uint32_t rix_texture_pool_address;
     uint32_t rix_texture_pool_bytes;
     uint8_t  rix_enabled;
-
+    /* A disabled RasterIX can retain unbounded DMA writes to its old target.
+     * That allocation deliberately outlives this context. */
+    uint8_t  rix_target_quarantined;
+    uint32_t *rix_quarantined_color_buffers[3];
+    uint8_t  *rix_quarantined_depth_buffer;
+    uint32_t rix_quarantined_color_addresses[3];
+    uint32_t rix_quarantined_depth_address;
     float *vertex_scratch;
     uint32_t vertex_scratch_capacity;
 

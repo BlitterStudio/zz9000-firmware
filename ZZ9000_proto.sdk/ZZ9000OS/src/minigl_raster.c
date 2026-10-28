@@ -172,6 +172,8 @@ static uint32_t g_error;
 static MiniGLRasterDirtyRegion g_dirty;
 static int g_dirty_valid;
 static MiniGLRasterTraceHook g_trace_hook;
+static MiniGLRasterFailStopTargetFn g_rix_fail_stop_target_handler;
+static void *g_rix_fail_stop_target_context;
 static MiniGLRixBackend g_rix;
 static MiniGLRixPlatform g_rix_platform;
 static int g_rix_platform_set;
@@ -422,10 +424,22 @@ static int rix_prepare_target(void)
 
 static int rix_make_cpu_visible(void)
 {
+    MiniGLRasterBuffers replacement;
+
     if (!rix_target_is_rgb565())
         return 1;
-    if (!minigl_rix_backend_surface_is_rgb565(&g_rix) ||
-        !minigl_rix_backend_make_cpu_visible(&g_rix, g_buffers.color, pixels()) ||
+    if (!minigl_rix_backend_surface_is_rgb565(&g_rix)) {
+        if (g_rix_fail_stop_target_handler == NULL ||
+            !g_rix_fail_stop_target_handler(g_rix_fail_stop_target_context,
+                                            &replacement))
+            return 0;
+        g_buffers = replacement;
+        g_rix_surface = NULL;
+        g_rix_surface_rgb565 = 0;
+        g_rix_depth_z16 = 0;
+        return 1;
+    }
+    if (!minigl_rix_backend_make_cpu_visible(&g_rix, g_buffers.color, pixels()) ||
         !rix_make_cpu_depth_visible())
         return 0;
     g_rix_surface_rgb565 = 0;
@@ -482,6 +496,13 @@ int minigl_raster_quiesce(void)
         minigl_raster_set_rix_platform(NULL);
     }
     return result;
+}
+
+void minigl_raster_set_fail_stop_target_handler(MiniGLRasterFailStopTargetFn handler,
+                                                void *context)
+{
+    g_rix_fail_stop_target_handler = handler;
+    g_rix_fail_stop_target_context = context;
 }
 
 static int rix_cpu_visible(void)

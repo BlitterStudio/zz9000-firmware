@@ -25,6 +25,8 @@ typedef struct MiniGLRasterBuffers {
     uint16_t width;
     uint16_t height;
 } MiniGLRasterBuffers;
+typedef int (*MiniGLRasterFailStopTargetFn)(void *context,
+                                            MiniGLRasterBuffers *replacement);
 /* `live_bytes` reaches the highest live allocation offset, not the sum of
  * allocations, so a relocating grow callback preserves fragmented residency. */
 typedef int (*MiniGLRasterTexturePoolGrowFn)(void *context,
@@ -80,6 +82,10 @@ int minigl_raster_present_is_bottom_up(void);
 int minigl_raster_finish(void);
 /* Retires all queued engine work before its card-pool buffers are released. */
 int minigl_raster_quiesce(void);
+/* Replaces a target after a RasterIX fail-stop without reusing memory that
+ * may still be subject to an unbounded DMA write. */
+void minigl_raster_set_fail_stop_target_handler(MiniGLRasterFailStopTargetFn handler,
+                                                void *context);
 void minigl_raster_clear(uint32_t mask, uint32_t color_rgba, uint32_t depth_value);
 void minigl_raster_set_state(const ZZ9KMiniGLPacketSetState *state);
 void minigl_raster_load_matrix(uint16_t mode, const float *m);
