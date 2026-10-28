@@ -6,16 +6,31 @@
 #include "rix_texture.h"
 
 #if !defined(MINIGL_HOST_TEST) && !defined(MINIGL_SERVICE_HOST_TEST)
+#include "xil_io.h"
 #include "xil_printf.h"
 #define RIX_LOG(...) xil_printf(__VA_ARGS__)
+#define RIX_AFI_DIAGNOSTICS 1
 #else
 void (*g_rix_test_log)(const char *fmt, ...) = NULL;
 #define RIX_LOG(...) do { if (g_rix_test_log) g_rix_test_log(__VA_ARGS__); } while (0)
+#define RIX_AFI_DIAGNOSTICS 0
 #endif
 
 #include <string.h>
 
 #define RIX_TIMEOUT 1000000U
+#define RIX_AFI0_BASE 0xf8008000U
+#define RIX_AFI1_BASE 0xf8009000U
+#define RIX_AFI_RD_CTRL 0x00U
+#define RIX_AFI_RD_ISSUING_CAP 0x04U
+#define RIX_AFI_RD_QOS 0x08U
+#define RIX_AFI_RD_DATAFIFO_LEVEL 0x0cU
+#define RIX_AFI_RD_DEBUG 0x10U
+#define RIX_AFI_WR_CTRL 0x14U
+#define RIX_AFI_WR_ISSUING_CAP 0x18U
+#define RIX_AFI_WR_QOS 0x1cU
+#define RIX_AFI_WR_DATAFIFO_LEVEL 0x20U
+#define RIX_AFI_WR_DEBUG 0x24U
 #define GL_COLOR_BUFFER_BIT 0x00004000U
 #define GL_DEPTH_BUFFER_BIT 0x00000100U
 #define GL_FILL 0x1b02U
@@ -630,6 +645,23 @@ static void backend_release_buffer(MiniGLRixBackend *backend, uint8_t index)
 
 static uint8_t g_timeout_diagnostics_logged;
 
+#if RIX_AFI_DIAGNOSTICS
+static void backend_log_afi_timeout_diagnostics(uint32_t base, const char *name)
+{
+    RIX_LOG("[RasterIX] timeout %s-r=%08lx/%08lx/%08lx/%08lx/%08lx %s-w=%08lx/%08lx/%08lx/%08lx/%08lx\r\n",
+            name, (unsigned long)Xil_In32(base + RIX_AFI_RD_CTRL),
+            (unsigned long)Xil_In32(base + RIX_AFI_RD_ISSUING_CAP),
+            (unsigned long)Xil_In32(base + RIX_AFI_RD_QOS),
+            (unsigned long)Xil_In32(base + RIX_AFI_RD_DATAFIFO_LEVEL),
+            (unsigned long)Xil_In32(base + RIX_AFI_RD_DEBUG),
+            name, (unsigned long)Xil_In32(base + RIX_AFI_WR_CTRL),
+            (unsigned long)Xil_In32(base + RIX_AFI_WR_ISSUING_CAP),
+            (unsigned long)Xil_In32(base + RIX_AFI_WR_QOS),
+            (unsigned long)Xil_In32(base + RIX_AFI_WR_DATAFIFO_LEVEL),
+            (unsigned long)Xil_In32(base + RIX_AFI_WR_DEBUG));
+}
+#endif
+
 static void backend_log_timeout_diagnostics(MiniGLRixBackend *backend, uint8_t index)
 {
     uint32_t csr[14];
@@ -674,6 +706,10 @@ static void backend_log_timeout_diagnostics(MiniGLRixBackend *backend, uint8_t i
             (unsigned long)words[8], (unsigned long)words[9], (unsigned long)words[10],
             (unsigned long)words[11], (unsigned long)words[12], (unsigned long)words[13],
             (unsigned long)words[14], (unsigned long)words[15]);
+#if RIX_AFI_DIAGNOSTICS
+    backend_log_afi_timeout_diagnostics(RIX_AFI0_BASE, "afi0");
+    backend_log_afi_timeout_diagnostics(RIX_AFI1_BASE, "afi1");
+#endif
 }
 
 static void backend_disable(MiniGLRixBackend *backend, const char *operation, int result)
