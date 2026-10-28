@@ -13,6 +13,12 @@
 #include <stdlib.h>
 #include <math.h>
 
+#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#include "mntzorro.h"
+#include "xil_cache.h"
+#include "xil_io.h"
+#endif
+
 #define GL_TEXTURE_2D 0x0de1U
 
 static uint32_t g_next_handle = 1U;
@@ -73,6 +79,117 @@ static uint32_t mw_color_from_floats(float r, float g, float b, float a)
 
 static uint8_t g_dummy_vertices[256];
 static uint8_t g_dummy_staging[256];
+
+#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
+static uint32_t mw_rix_mntzorro_read(void *context, uint32_t offset)
+{
+    (void)context;
+    return mntzorro_read(MNTZ_BASE_ADDR, offset);
+}
+
+static uint32_t mw_rix_csr_read(void *context, uint32_t offset)
+{
+    (void)context;
+    return Xil_In32(MINIGL_RIX_CSR_BASE + offset);
+}
+
+static void mw_rix_csr_write(void *context, uint32_t offset, uint32_t value)
+{
+    (void)context;
+    Xil_Out32(MINIGL_RIX_CSR_BASE + offset, value);
+}
+
+static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
+{
+    (void)context;
+    Xil_DCacheFlushRange((INTPTR)address, (u32)bytes);
+}
+
+static void mw_rix_cache_invalidate(void *context, uintptr_t address, size_t bytes)
+{
+    (void)context;
+    Xil_DCacheInvalidateRange((INTPTR)address, (u32)bytes);
+}
+
+static void mw_ctx_release_rix(mw_ctx *c)
+{
+    unsigned index;
+
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        if (c->rix_command_buffers[index]) {
+            mw_context_free(c, c->rix_command_buffers[index],
+                            &c->rix_command_buffer_addresses[index]);
+            c->rix_command_buffers[index] = NULL;
+        }
+    }
+    if (c->rix_white_texture) {
+        mw_context_free(c, c->rix_white_texture, &c->rix_white_texture_address);
+        c->rix_white_texture = NULL;
+    }
+    if (c->rix_texture_pool) {
+        mw_context_free(c, c->rix_texture_pool, &c->rix_texture_pool_address);
+        c->rix_texture_pool = NULL;
+    }
+    c->rix_enabled = 0U;
+}
+
+static void mw_ctx_configure_rix(mw_ctx *c)
+{
+    MiniGLRixPlatform platform;
+    unsigned index;
+
+    memset(&platform, 0, sizeof(platform));
+    platform.mntzorro_read = mw_rix_mntzorro_read;
+    platform.csr_read = mw_rix_csr_read;
+    platform.csr_write = mw_rix_csr_write;
+    platform.cache_clean = mw_rix_cache_clean;
+    platform.cache_invalidate = mw_rix_cache_invalidate;
+    /* This probe reads the MNTZorro signature and then exactly the versioned
+     * CSR identity pair.  No RIX address is touched by standard firmware. */
+    if (!minigl_rix_backend_probe_platform(&platform)) {
+        minigl_raster_set_rix_platform(NULL);
+        return;
+    }
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        c->rix_command_buffers[index] = (uint8_t *)mw_context_alloc(
+            c, MINIGL_RIX_COMMAND_BYTES, &c->rix_command_buffer_addresses[index]);
+        if (!c->rix_command_buffers[index])
+            goto unavailable;
+        platform.command_buffer[index] = c->rix_command_buffers[index];
+        platform.command_address[index] = c->rix_command_buffer_addresses[index];
+    }
+    c->rix_white_texture = (uint8_t *)mw_context_alloc(
+        c, MINIGL_RIX_WHITE_TEXTURE_BYTES, &c->rix_white_texture_address);
+    c->rix_texture_pool = (uint8_t *)mw_context_alloc(
+        c, MINIGL_RIX_TEXTURE_POOL_BYTES, &c->rix_texture_pool_address);
+    if (!c->rix_white_texture || !c->rix_texture_pool)
+        goto unavailable;
+    platform.command_capacity = MINIGL_RIX_COMMAND_BYTES;
+    platform.white_texture = c->rix_white_texture;
+    platform.white_texture_address = c->rix_white_texture_address;
+    platform.white_texture_bytes = MINIGL_RIX_WHITE_TEXTURE_BYTES;
+    platform.texture_memory = c->rix_texture_pool;
+    platform.texture_address = c->rix_texture_pool_address;
+    platform.texture_bytes = MINIGL_RIX_TEXTURE_POOL_BYTES;
+    minigl_raster_set_rix_platform(&platform);
+    c->rix_enabled = 1U;
+    return;
+
+unavailable:
+    mw_ctx_release_rix(c);
+    minigl_raster_set_rix_platform(NULL);
+}
+#else
+static void mw_ctx_release_rix(mw_ctx *c)
+{
+    (void)c;
+}
+
+static void mw_ctx_configure_rix(mw_ctx *c)
+{
+    (void)c;
+}
+#endif
 
 static inline void mw_ctx_update_latest(mw_ctx *c)
 {
@@ -253,6 +370,7 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     }
 
     c->handle = g_next_handle++;
+    mw_ctx_configure_rix(c);
     minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes);
     mw_ctx_bind_buffers(c);
     minigl_raster_init();
@@ -266,6 +384,8 @@ void mw_host_destroy(mw_ctx *c)
     int i;
     if (!c)
         return;
+    (void)minigl_raster_quiesce();
+    mw_ctx_release_rix(c);
 
     for (i = 0; i < 3; ++i) {
         if (c->color_buffers[i]) {

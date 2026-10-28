@@ -323,6 +323,15 @@ int minigl_raster_finish(void)
     return 1;
 }
 
+int minigl_raster_quiesce(void)
+{
+    int result = minigl_raster_finish();
+
+    minigl_rix_backend_reset(&g_rix);
+    minigl_raster_set_rix_platform(NULL);
+    return result;
+}
+
 static int rix_cpu_visible(void)
 {
     return minigl_raster_finish();

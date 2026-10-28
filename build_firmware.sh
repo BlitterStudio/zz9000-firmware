@@ -8,11 +8,20 @@
 # See ZZ9000_proto.sdk/ZZ9000OS/Makefile for toolchain notes.
 #
 # Output: ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+#
+# Pass --rasterix to compile the firmware that is safe to package only with
+# the qualified RasterIX bitstream.  The normal build contains no platform
+# registration and therefore cannot issue a GP1 access to 0x83c60000.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+
+MAKE_ARGS=("$@")
+if [ "${1:-}" = "--rasterix" ]; then
+    MAKE_ARGS=("MINIGL_RASTERIX=1" "${@:2}")
+fi
 
 if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
     # Auto-discover common toolchain installs before giving up, so a fresh
@@ -51,7 +60,7 @@ fi
 echo "[firmware] toolchain: $(arm-none-eabi-gcc --version | head -1)"
 echo "[firmware] host cc:   $(${CC_FOR_BUILD:-cc} --version 2>/dev/null | head -1 || printf '%s' "${CC_FOR_BUILD:-cc}")"
 
-if [ "$#" -eq 0 ] || [ "$1" != "clean" ] || [ "$#" -gt 1 ]; then
+if [ "${#MAKE_ARGS[@]}" -eq 0 ] || [ "${MAKE_ARGS[0]}" != "clean" ] || [ "${#MAKE_ARGS[@]}" -gt 1 ]; then
     bash ./build_libjpeg_turbo.sh
     bash ./build_libpng.sh
     bash ./build_lzma_sdk.sh
@@ -63,7 +72,7 @@ if [ "$#" -eq 0 ] || [ "$1" != "clean" ] || [ "$#" -gt 1 ]; then
     bash ./build_opus.sh --arm
 fi
 
-make -C ZZ9000_proto.sdk/ZZ9000OS "$@"
+make -C ZZ9000_proto.sdk/ZZ9000OS "${MAKE_ARGS[@]}"
 
 # Only report size when the ELF actually exists (skips cases like
 # `./build_firmware.sh clean` where the ELF was just removed).

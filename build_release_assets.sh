@@ -39,9 +39,12 @@ Options:
                           produces zz9000-firmware-<tag>-<variant>-diag.zip.
                           Use this when packaging an alternate ZZ9000OS.elf
                           flavor (the script does not rebuild firmware —
-                          the caller is expected to do that). Skips the
-                          canonical bootimage_work/BOOT.bin overwrite so the
-                          standard-flavor BOOT.bin remains the local default.
+                          the caller is expected to do that). The "rasterix"
+                          flavor emits only the qualified zorro3-aga-rix
+                          image; canonical packages never include it. Skips
+                          the canonical bootimage_work/BOOT.bin overwrite so
+                          the standard-flavor BOOT.bin remains the local
+                          default.
                           CI should not use this for PAL/native-video
                           defaults; use ZZ9000.CFG instead.
 EOF
@@ -202,7 +205,10 @@ done
 mkdir -p "$OUT_DIR/ZZ9K"
 cp "$MODULE_DIR"/*.ZZM "$OUT_DIR/ZZ9K/"
 
-variant_defs=("${VARIANT_MATRIX[@]}")
+variant_defs=()
+while IFS= read -r def; do
+    variant_defs+=("$def")
+done < <(variant_matrix_release_rows "$FIRMWARE_FLAVOR")
 
 mkdir -p "$OUT_DIR"
 # Each pass deletes only the exact archive names it's about to (re)write,

@@ -23,8 +23,9 @@
 #define MINIGL_RIX_TEXTURE_POOL_BYTES (24U * 1024U * 1024U)
 #define MINIGL_RIX_MAX_TEXTURES \
     (MINIGL_RIX_TEXTURE_POOL_BYTES / MINIGL_RIX_TEXTURE_VIRTUAL_BYTES)
-/* The former 0xef800-byte fixed tails each rounded to this pool page size. */
-#define MINIGL_RIX_COMMAND_BYTES 0x00400000U
+/* A complete 20-band 640x480 replay is below the 7,000-word budget.  One
+ * card-pool page per in-flight DSE stream keeps context allocation bounded. */
+#define MINIGL_RIX_COMMAND_BYTES 0x00010000U
 #define MINIGL_RIX_COMMAND_BUFFERS 2U
 #define MINIGL_RIX_MAX_TRIANGLES 1024U
 #define MINIGL_RIX_MAX_OPS 1024U
@@ -131,6 +132,9 @@ typedef struct MiniGLRixBackend {
     size_t command_words_estimate;
 } MiniGLRixBackend;
 
+/* Probe only the versioned presence contract.  This is the sole CSR access
+ * permitted before the RasterIX ABI has been validated. */
+int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform);
 /* Validates MNTZorro identity before rix_drv_init can access the GP1 CSR. */
 void minigl_rix_backend_init(MiniGLRixBackend *backend,
                              const MiniGLRixPlatform *platform);

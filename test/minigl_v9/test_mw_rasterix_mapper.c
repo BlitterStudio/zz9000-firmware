@@ -33,20 +33,23 @@ struct mock_platform {
     uint8_t cmd_buf[2][64 * 1024];
     uint8_t white_tex[MINIGL_RIX_WHITE_TEXTURE_BYTES];
     uint8_t tex_pool[MINIGL_RIX_TEXTURE_POOL_BYTES];
+    uint32_t mntz_identity;
+    unsigned csr_reads;
     unsigned submissions;
 };
 static struct mock_platform s_mock;
 
 static uint32_t mock_mnt_read(void *ctx, uint32_t offset)
 {
-    (void)ctx;
+    struct mock_platform *p = (struct mock_platform *)ctx;
     (void)offset;
-    return RIX_DRV_IDENTITY_VALUE;
+    return p->mntz_identity;
 }
 
 static uint32_t mock_csr_read(void *ctx, uint32_t offset)
 {
     struct mock_platform *p = (struct mock_platform *)ctx;
+    ++p->csr_reads;
     return p->csr[offset / 4U];
 }
 
@@ -73,6 +76,7 @@ static void setup_mock_platform(struct mock_platform *p, MiniGLRixPlatform *out)
 {
     memset(p, 0, sizeof(*p));
     memset(out, 0, sizeof(*out));
+    p->mntz_identity = RIX_DRV_IDENTITY_VALUE;
     p->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     p->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     p->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
@@ -94,6 +98,26 @@ static void setup_mock_platform(struct mock_platform *p, MiniGLRixPlatform *out)
     out->texture_memory = p->tex_pool;
     out->texture_address = 0x300000;
     out->texture_bytes = sizeof(p->tex_pool);
+}
+
+static void test_platform_probe_guard(void)
+{
+    MiniGLRixPlatform platform;
+
+    setup_mock_platform(&s_mock, &platform);
+    s_mock.mntz_identity = 0U;
+    assert(!minigl_rix_backend_probe_platform(&platform));
+    assert(s_mock.csr_reads == 0U);
+
+    setup_mock_platform(&s_mock, &platform);
+    s_mock.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE + 1U;
+    assert(!minigl_rix_backend_probe_platform(&platform));
+    assert(s_mock.csr_reads == 2U);
+
+    setup_mock_platform(&s_mock, &platform);
+    assert(minigl_rix_backend_probe_platform(&platform));
+    assert(s_mock.csr_reads == 2U);
+    printf("PASS: test_platform_probe_guard\n");
 }
 
 /* 1. Direct state mapper test */
@@ -402,6 +426,7 @@ int main(void)
 {
     g_rix_test_log = test_log_wrapper;
     printf("Starting Wire-v9 RasterIX Mapper Tests...\n");
+    test_platform_probe_guard();
     test_state_mapper_fallback_rules();
     test_texture_env_modes();
     test_wire_v9_draw_routing_and_fallback();

@@ -78,9 +78,10 @@ fetch() {
     if [ ! -f "$dest" ]; then
         echo "[vorbis] downloading $url"
         if command -v curl >/dev/null 2>&1; then
-            curl --fail --location --silent --show-error "$url" -o "$dest"
+            curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
+                "$url" -o "$dest"
         elif command -v wget >/dev/null 2>&1; then
-            wget -q "$url" -O "$dest"
+            wget -q --tries=4 "$url" -O "$dest"
         else
             echo "ERROR: install curl or wget to download $url." >&2
             exit 1

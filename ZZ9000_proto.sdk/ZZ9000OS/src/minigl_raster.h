@@ -53,6 +53,8 @@ void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes);
 void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform);
 /* Drains RasterIX and restores the shared target to CPU RGBA before readback. */
 int minigl_raster_finish(void);
+/* Retires all queued engine work before its card-pool buffers are released. */
+int minigl_raster_quiesce(void);
 void minigl_raster_clear(uint32_t mask, uint32_t color_rgba, uint32_t depth_value);
 void minigl_raster_set_state(const ZZ9KMiniGLPacketSetState *state);
 void minigl_raster_load_matrix(uint16_t mode, const float *m);

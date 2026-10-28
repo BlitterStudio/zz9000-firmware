@@ -32,6 +32,16 @@ struct mw_ctx {
     uint8_t  *texture_pool;
     uint32_t texture_pool_bytes;
 
+    /* RasterIX storage is independent from CPU texture residency.  It belongs
+     * to this context's card-pool owner and is absent in normal firmware. */
+    uint8_t  *rix_command_buffers[2];
+    uint8_t  *rix_white_texture;
+    uint8_t  *rix_texture_pool;
+    uint32_t rix_command_buffer_addresses[2];
+    uint32_t rix_white_texture_address;
+    uint32_t rix_texture_pool_address;
+    uint8_t  rix_enabled;
+
     float *vertex_scratch;
     uint32_t vertex_scratch_capacity;
 

@@ -115,6 +115,13 @@ COMMON_FLAGS += -DCONFIG_EHCI_IS_TDI
 # Errors (status=0x20) on HS bulk OUT.
 COMMON_FLAGS += -DCONFIG_USB_EHCI_TXFIFO_THRESH=4
 
+# RasterIX is physically absent from ordinary bitstreams.  Keep every CSR
+# access out of their firmware by making the platform registration opt-in.
+MINIGL_RASTERIX ?= 0
+ifeq ($(MINIGL_RASTERIX),1)
+EXTRA_CFLAGS += -DMINIGL_RASTERIX=1
+endif
+
 # -O2 flags (default for all files)
 EXTRA_CFLAGS ?=
 CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2 $(EXTRA_CFLAGS)

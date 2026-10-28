@@ -559,42 +559,60 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
     return 1;
 }
 
+int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform)
+{
+    static int logged = 0;
+    uint32_t mntz_id;
+    uint32_t csr_id;
+    uint32_t csr_ver;
+
+    if (platform == NULL || platform->mntzorro_read == NULL ||
+        platform->csr_read == NULL || platform->csr_write == NULL) {
+        if (!logged) {
+            RIX_LOG("[RasterIX] discovery: CPU fallback (platform unavailable)\r\n");
+            logged = 1;
+        }
+        return 0;
+    }
+    mntz_id = platform->mntzorro_read(platform->context,
+                                      MINIGL_RIX_MNTZORRO_IDENTITY_OFFSET);
+    if (mntz_id != RIX_DRV_IDENTITY_VALUE) {
+        if (!logged) {
+            RIX_LOG("[RasterIX] discovery: CPU fallback (MNTZorro=0x%08lx)\r\n",
+                    (unsigned long)mntz_id);
+            logged = 1;
+        }
+        return 0;
+    }
+    csr_id = platform->csr_read(platform->context, RIX_DRV_CSR_IDENTITY);
+    csr_ver = platform->csr_read(platform->context, RIX_DRV_CSR_VERSION);
+    if (csr_id != RIX_DRV_IDENTITY_VALUE || csr_ver != RIX_DRV_VERSION_VALUE) {
+        if (!logged) {
+            RIX_LOG("[RasterIX] discovery: CPU fallback (CSR id=0x%08lx ver=0x%08lx)\r\n",
+                    (unsigned long)csr_id, (unsigned long)csr_ver);
+            logged = 1;
+        }
+        return 0;
+    }
+    if (!logged) {
+        RIX_LOG("[RasterIX] discovery: RasterIX ABI 0x%08lx (TMU=1, band=16k)\r\n",
+                (unsigned long)csr_ver);
+        logged = 1;
+    }
+    return 1;
+}
+
 void minigl_rix_backend_init(MiniGLRixBackend *backend,
                              const MiniGLRixPlatform *platform)
 {
     struct rix_drv_config config;
-    static int s_logged_discovery = 0;
-    uint32_t mntz_id = 0U;
-    uint32_t csr_id = 0U;
-    uint32_t csr_ver = 0U;
 
     if (backend == NULL)
         return;
     memset(backend, 0, sizeof(*backend));
-    if (platform == NULL)
+    if (!minigl_rix_backend_probe_platform(platform))
         return;
     backend->platform = *platform;
-    if (platform->mntzorro_read != NULL) {
-        mntz_id = platform->mntzorro_read(platform->context, MINIGL_RIX_MNTZORRO_IDENTITY_OFFSET);
-    }
-    if (mntz_id != RIX_DRV_IDENTITY_VALUE || platform->csr_read == NULL ||
-        platform->csr_write == NULL) {
-        if (!s_logged_discovery) {
-            RIX_LOG("[RasterIX] discovery: absent (MNTZorro 0x38 = 0x%08lx)\r\n", (unsigned long)mntz_id);
-            s_logged_discovery = 1;
-        }
-        (void)mntz_id;
-        return;
-    }
-    csr_id = platform->csr_read(platform->context, RIX_DRV_CSR_IDENTITY);
-    csr_ver = platform->csr_read(platform->context, RIX_DRV_CSR_VERSION);
-    (void)csr_id;
-    (void)csr_ver;
-    if (!s_logged_discovery) {
-        RIX_LOG("[RasterIX] discovery: present (CSR id=0x%08lx ver=0x%08lx, TMU=1, band=16k)\r\n",
-                (unsigned long)csr_id, (unsigned long)csr_ver);
-        s_logged_discovery = 1;
-    }
     memset(&config, 0, sizeof(config));
     config.context = platform->context;
     config.read = platform->csr_read;
