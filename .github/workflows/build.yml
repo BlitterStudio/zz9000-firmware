@@ -155,6 +155,8 @@ jobs:
         run: make -C test/webm test
       - name: Palette shadow suite
         run: make -C test/palette test
+      - name: Output gamma LUT suite
+        run: make -C test/gamma test
       - name: Ethernet multicast hash and RX ring suites
         run: make -C test/ethernet test
       - name: Ethernet IRQ re-raise throttle suite

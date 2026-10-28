@@ -35,10 +35,27 @@
 /* Read direction of REG6: generation-2 host aperture acknowledgement. */
 #define MNTZORRO_APERTURE_ACK_STATUS 0xa5020001UL
 
-/* Read direction of REG7: low bits retain the Z2 aperture byte count. Bit 31
- * is set only by a Z3 Fast-RAM image whose host PIC lands at DDR 0x2fe00000.
- * Old bitstreams return zero on Z3; firmware must withhold Fast RAM then. */
+/* Read direction of REG7: low bits retain the Z2 aperture byte count; the
+ * high bits are capability flags. Bit 31 is set only by a Z3 Fast-RAM image
+ * whose host PIC lands at DDR 0x2fe00000. Old bitstreams return zero on Z3;
+ * firmware must withhold Fast RAM then. */
 #define MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000 0x80000000UL
+
+/* REG7 bit 30: the video formatter carries the per-channel output gamma
+ * LUT (MNTVF_OP_GAMMA). Every variant sets it, Z2 included. Older
+ * bitstreams read zero here; firmware must keep the gamma feature off
+ * instead of streaming LUT entries. */
+#define MNTZORRO_CAP_GAMMA_LUT 0x40000000UL
+
+/* Every REG7 capability bit. Add new REG7 capabilities here so they never
+ * leak into the aperture size. */
+#define MNTZORRO_REG7_CAPABILITY_MASK \
+	(MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000 | MNTZORRO_CAP_GAMMA_LUT)
+
+/* The Z2 aperture byte count carried in a REG7 read (zero on Z3 and on
+ * pre-generation-2 Z2 bitstreams). */
+#define MNTZORRO_REG7_APERTURE_SIZE(reg7) \
+	((uint32_t)(reg7) & ~(uint32_t)MNTZORRO_REG7_CAPABILITY_MASK)
 
 #define MNTZORRO_STATUS_SDK_IRQ_ACK     (1UL << 18)
 #define MNTZORRO_STATUS_SDK_DOORBELL    (1UL << 19)

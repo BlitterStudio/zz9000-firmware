@@ -118,6 +118,12 @@ static inline uint32_t videocap_control_width_only(uint32_t full_width)
  * bases and stops writeback after reset until this is sent again. */
 #define MNTVF_OP_VIDEOCAP_ADDRESS 33
 
+/* Per-channel output gamma LUT entry load, decoded by video_formatter.v.
+ * One entry per word: [7:0] index, [15:8] red, [23:16] green, [31:24]
+ * blue. The table powers up as identity; bitstreams without the stage
+ * ignore the op. 256 writes load a complete curve. */
+#define MNTVF_OP_GAMMA 34
+
 enum zz_dpms_level {
 	ZZ_DPMS_ON,
 	ZZ_DPMS_STANDBY,
@@ -210,6 +216,14 @@ int video_videocap_backing_reserve(void);
  * Zorro FSM exits reset. Safe to repeat. */
 int video_videocap_backing_arm(void);
 
+/* Output gamma (REG_ZZ_GAMMA, config key ZZ_CONFIG_KEY_GAMMA):
+ * loads the formatter LUT. video_set_gamma takes hundredths, where 0
+ * switches the filter off (identity curve); it returns 0 when the
+ * loaded bitstream lacks the LUT stage or the value is out of range.
+ * video_gamma_query reports the applied value, 0 when unsupported. */
+int video_set_gamma(uint16_t gamma_hundredths);
+uint16_t video_gamma_query(uint16_t *present);
+
 /* Runtime RTG scanout-geometry diagnostics (config keys 21-25):
  * value of a diagnostic key from the last video_mode_init snapshot. */
 uint16_t video_rtg_diag_value(uint16_t key, uint8_t *present);
@@ -219,6 +233,7 @@ void video_set_dpms(uint8_t level);
 int video_set_videocap_video_mode(uint32_t mode);
 int video_set_videocap_vsync(uint32_t setting);
 int video_set_videocap_geometry(uint16_t width, uint16_t height);
+void video_reject_videocap_geometry(void);
 uint16_t video_videocap_geometry_value(uint16_t key, uint16_t *present);
 uint32_t video_firmware_capabilities(void);
 void hw_sprite_show(int show);

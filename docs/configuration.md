@@ -105,12 +105,23 @@ same timing preset do not require transmitter or pixel-clock retraining.
 Different refresh rates or sync timings still require an output-mode change.
 
 The runtime geometry request is distinct from the persistent file keys.
-Firmware capability bit 8 accepts `CARD_FEATURE_VIDEOCAP_GEOMETRY`, and bit 10
+Firmware capability bit 8 accepts a runtime capture-window request, and bit 10
 adds its acknowledgement contract. `REG_ZZ_CONFIG_KEY` queries 28–34 report
 the requested and applied dimensions, serials, and `APPLIED_VALID`, `PENDING`,
 and `REJECTED` status bits. An accepted request remains pending until stable
 native-vblank VDMA programming succeeds. RTG vblanks and failed VDMA setup do
 not acknowledge it.
+
+Firmware after 2.9.0 takes the request on its own write-only registers: the
+width goes to `REG_ZZ_VCAP_GEOMETRY_WIDTH` (`0xa8`), then the height to
+`REG_ZZ_VCAP_GEOMETRY_COMMIT` (`0xaa`), which applies the pair. Each staged
+width serves one commit; a commit with no staged width sets `REJECTED`.
+`REG_ZZ_CONFIG_KEY` query 36 is present (value 1) on firmware with these
+registers. Firmware 2.9.0 only has the `CARD_FEATURE_VIDEOCAP_GEOMETRY`
+sequence (width in `REG_ZZ_USER2`, feature id in `REG_ZZ_USER1`, height
+through `REG_ZZ_SET_FEATURE`), which newer firmware still accepts. That
+sequence overwrites `REG_ZZ_USER1` and `REG_ZZ_USER2`, which the RTG driver
+caches as blitter operands, so later blits can use the wrong values.
 
 `VCAP_LIVE_EFFECTIVE_CROP` at host offset `0x140c` reports the resolved
 capture-domain automatic crop. `REG_ZZ_VIDEOCAP_STATS` (`0x4e`) reports the
@@ -123,6 +134,7 @@ Zorro II reads.
 |---|---|---|
 | `scanline_mode` | `0`–`3` | `0` off, `1` black, `2` dimmed, `3` gradient. |
 | `scanline_parity` | `0`, `1` | Selects the darkened line parity. |
+| `gamma` | `0.20`–`5.00` | Output gamma filter; `1.00` or absent is identity. Above `1.00` brightens, below `1.00` darkens. Ignored by bitstreams without the FPGA gamma LUT; the `ZZGamma` tool also sets it live. |
 | `int2` | `on`, `off`, `1`, `0` | Selects INT2 instead of INT6. |
 | `offscreen_bitmaps` | `on`, `off`, `1`, `0` | Enables or disables Picasso96 off-screen bitmaps. |
 | `video_overlay` | `on`, `off`, `1`, `0` | Enables or disables the Picasso96 video window. |

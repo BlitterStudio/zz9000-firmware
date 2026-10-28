@@ -6,9 +6,10 @@ SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/aperture_layout_test
 
-CPPFLAGS += -I$(SRC_DIR)
+# mntzorro.h needs xil_io.h; the video suite's host stub supplies it.
+CPPFLAGS += -I$(SRC_DIR) -I../video/stubs
 SOURCES := aperture_layout_test.c $(SRC_DIR)/sdk_aperture_layout.c
-DEPS := $(SRC_DIR)/sdk_aperture_layout.h
+DEPS := $(SRC_DIR)/sdk_aperture_layout.h $(SRC_DIR)/mntzorro.h
 
 .PHONY: test clean
 

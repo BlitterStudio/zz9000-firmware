@@ -507,6 +507,24 @@ int main(void)
 	geometry_native_vblank();
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == 0);
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (600U << 16 | 800U));
+	/* A geometry commit with no staged width is reported as REJECTED and
+	 * leaves the accepted request, its ACK and the window alone. */
+	{
+		uint16_t serial = video_videocap_geometry_value(
+			ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL, NULL);
+
+		video_reject_videocap_geometry();
+		assert(video_videocap_geometry_value(
+			ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS, NULL) ==
+			(ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID |
+			 ZZ_VCAP_GEOMETRY_STATUS_REJECTED));
+		assert(video_videocap_geometry_value(
+			ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL, NULL) == serial);
+		assert(video_videocap_geometry_value(
+			ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_SERIAL, NULL) == serial);
+		assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
+			(600U << 16 | 800U));
+	}
 	/* PAL filtered 800x600 keeps its tuned origin relative to the
 	 * dynamically allocated capture backing. A short-line PAL field on
 	 * that same configured base is shown on 720x576 and starts at the

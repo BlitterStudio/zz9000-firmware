@@ -13,6 +13,7 @@ BSP_INCLUDE := ../../ZZ9000_proto.sdk/zz9000_bsp_new/ps7_cortexa9_0/include
 TARGETS := \
 	$(BUILD_DIR)/video_vdma_test \
 	$(BUILD_DIR)/video_scale_test \
+	$(BUILD_DIR)/vcap_geometry_reg_test \
 	$(BUILD_DIR)/videocap_control_test \
 	$(BUILD_DIR)/video_mode_pll_test \
 	$(BUILD_DIR)/video_mode_switch_test \
@@ -29,6 +30,7 @@ DEPS :=
 test: $(TARGETS)
 	$(BUILD_DIR)/video_vdma_test
 	$(BUILD_DIR)/video_scale_test
+	$(BUILD_DIR)/vcap_geometry_reg_test
 	$(BUILD_DIR)/videocap_control_test
 	$(BUILD_DIR)/video_mode_pll_test
 	$(BUILD_DIR)/video_mode_switch_test
@@ -43,6 +45,12 @@ $(BUILD_DIR)/video_vdma_test: video_vdma_test.c $(DEPS)
 $(BUILD_DIR)/video_scale_test: video_scale_test.c $(SRC_DIR)/video_scale.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ video_scale_test.c
+
+$(BUILD_DIR)/vcap_geometry_reg_test: vcap_geometry_reg_test.c \
+		$(SRC_DIR)/vcap_geometry_reg.h $(SRC_DIR)/zz_regs.h \
+		$(SRC_DIR)/zz_config.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ vcap_geometry_reg_test.c
 
 $(BUILD_DIR)/videocap_control_test: videocap_control_test.c $(SRC_DIR)/video.h
 	@mkdir -p $(BUILD_DIR)
