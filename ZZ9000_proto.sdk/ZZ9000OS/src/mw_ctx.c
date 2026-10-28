@@ -305,6 +305,25 @@ static int mw_ensure_scratch(mw_ctx *c, uint32_t needed_words)
     return 1;
 }
 
+/* GL_GENERATE_MIPMAP fills the texture manager's own level buffers; the
+ * rasterizer keeps an independent texture copy, so every generated level
+ * must also be uploaded there -- the reference host regenerates the chain
+ * on the GPU the same way. Level 0 is uploaded by the image commands. */
+static void mw_upload_generated_mips(mw_ctx *c, const mw_texture *t)
+{
+    uint32_t lvl;
+    (void)c;
+    if (!t)
+        return;
+    for (lvl = 1; lvl < MW_MAX_MIP_LEVELS; ++lvl) {
+        if (t->pixels[lvl] && t->widths[lvl] && t->heights[lvl])
+            (void)minigl_raster_upload_rgba8(t->id, (uint16_t)lvl,
+                                             (uint16_t)t->widths[lvl],
+                                             (uint16_t)t->heights[lvl],
+                                             t->pixels[lvl], t->internal_rgb[lvl]);
+    }
+}
+
 static int mw_execute_command(void *user, const mw_command *cmd)
 {
     mw_ctx *c = (mw_ctx *)user;
@@ -586,12 +605,12 @@ static int mw_execute_command(void *user, const mw_command *cmd)
                            (size_t)width * sizeof(uint32_t));
                 (void)minigl_raster_subimage_rgba8(name, (uint16_t)level, (uint16_t)xoffset, (uint16_t)yoffset,
                                                    (uint16_t)width, (uint16_t)height, sub, t->internal_rgb[level]);
+                mw_upload_generated_mips(c, t);
                 free(sub);
             }
         }
         break;
     }
-
     case MW_TEXTURE_PARAM: {
         uint32_t name = mw_be32(p);
         uint32_t pname = mw_be32(p + 4);
@@ -601,8 +620,10 @@ static int mw_execute_command(void *user, const mw_command *cmd)
 
         (void)mw_texmgr_param(&c->texmgr, name, pname, val, fval);
         t = mw_texmgr_find(&c->texmgr, name);
-        if (t)
+        if (t) {
             minigl_raster_tex_params(name, t->min_filter, t->mag_filter, t->wrap_s, t->wrap_t);
+            mw_upload_generated_mips(c, t);
+        }
         break;
     }
 
@@ -689,8 +710,10 @@ static int mw_execute_command(void *user, const mw_command *cmd)
             free(sub);
         }
 
-        if (level == 0 && t->generate_mipmap)
+        if (level == 0 && t->generate_mipmap) {
             mw_texmgr_generate_mips(t);
+            mw_upload_generated_mips(c, t);
+        }
         break;
     }
 
@@ -1348,7 +1371,13 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
         (void)minigl_raster_finish();
 
         read_idx = c->state.target.back;
-        if ((c->state.read_buffer == 0x404 || c->state.read_buffer == 0x400) && c->state.target.buffer_count > 1) {
+        /* GL semantics: a GL_FRONT read answers the front buffer -- the
+         * last presented frame -- whatever the buffer count. A single-
+         * buffered context presents by swapping front to the initial back
+         * (1), so falling through to the post-swap back would answer a
+         * buffer nothing was drawn into: the first frame of every
+         * single-buffered context read back black. */
+        if (c->state.read_buffer == 0x404 || c->state.read_buffer == 0x400) {
             read_idx = c->state.target.front;
         } else if (c->state.read_buffer == 0) {
             read_idx = -1;
@@ -1388,9 +1417,14 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
                             dval = ((uint32_t)dp[0] << 16) | ((uint32_t)dp[1] << 8) | dp[2];
                             df = (float)dval / 16777215.0f;
                         } else {
-                            const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 4;
-                            dval = ((uint32_t)dp[0] << 24) | ((uint32_t)dp[1] << 16) | ((uint32_t)dp[2] << 8) | dp[3];
-                            df = (float)dval / 4294967295.0f;
+                            /* The software rasterizer stores every depth
+                             * format wider than 16 bits as a packed 24-bit
+                             * value. GL's requested 32-bit depth buffer is
+                             * therefore read back from that 24-bit backing
+                             * store and normalized as such. */
+                            const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 3;
+                            dval = ((uint32_t)dp[0] << 16) | ((uint32_t)dp[1] << 8) | dp[2];
+                            df = (float)dval / 16777215.0f;
                         }
                         mw_put_bef(dst_row + col * 4, df);
                     }

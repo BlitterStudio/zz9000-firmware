@@ -97,6 +97,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+      - name: Install host-test multilib support
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc-multilib
       - name: USB proxy and EHCI regression suite
         run: make -C test/usb test
       - name: RTG regression suite

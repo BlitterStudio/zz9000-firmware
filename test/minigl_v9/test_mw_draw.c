@@ -179,8 +179,19 @@ static void test_lowered_area_and_outline(void)
     memcpy(tri + 38, c, sizeof(c));
 
     uint8_t mask[4] = {0xff, 0xff, 0xff, 0xff};
+    uint8_t selected_edges[4];
     size_t line_verts = mw_outline_lowered(4 /* GL_TRIANGLES */, tri, 3, mask, lines);
     assert(line_verts == 6); /* 3 edges * 2 verts = 6 */
+
+    /* Edge masks are wire-order big-endian words.  On a little-endian host
+     * 00 00 00 05 selects edges 0 and 2, not bits 24 and 26. */
+    mw_put_be32(selected_edges, (1U << 0) | (1U << 2));
+    line_verts = mw_outline_lowered(4 /* GL_TRIANGLES */, tri, 3, selected_edges, lines);
+    assert(line_verts == 4);
+    assert(lines[0] == a[0] && lines[1] == a[1]);
+    assert(lines[MW_OBJECT_WORDS] == b[0] && lines[MW_OBJECT_WORDS + 1U] == b[1]);
+    assert(lines[2U * MW_OBJECT_WORDS] == c[0] && lines[2U * MW_OBJECT_WORDS + 1U] == c[1]);
+    assert(lines[3U * MW_OBJECT_WORDS] == a[0] && lines[3U * MW_OBJECT_WORDS + 1U] == a[1]);
 
     printf("PASS: test_lowered_area_and_outline\n");
 }

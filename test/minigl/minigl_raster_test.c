@@ -5,6 +5,7 @@
 #include <string.h>
 #include <math.h>
 #include "../../ZZ9000_proto.sdk/ZZ9000OS/src/minigl_raster.h"
+#include "../../ZZ9000_proto.sdk/ZZ9000OS/src/mw_types.h"
 
 #define W 64U
 #define H 48U
@@ -164,6 +165,68 @@ static void assert_scanline_coverage(void)
     }
 }
 
+static void assert_point_half_open_coverage(void)
+{
+    ZZ9KMiniGLPacketSetState s = state();
+
+    minigl_raster_set_state(&s);
+    minigl_raster_clear(0x4000U, 0U, 0x00ffffffU);
+    /* NDC (1/64, -1/48) projects to the half-integer (32.5, 24.5). */
+    vertex(0U, 1.0f / 64.0f, -1.0f / 48.0f, 0.0f, 0xff0000ffU, 0, 0);
+    minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
+    assert(pixel(32U, 24U) == 0xff0000ffU);
+    assert(pixel(31U, 24U) == 0U && pixel(33U, 24U) == 0U);
+    assert(pixel(32U, 23U) == 0U && pixel(32U, 25U) == 0U);
+
+    minigl_raster_clear(0x4000U, 0U, 0x00ffffffU);
+    /* An integer centre belongs to the low half-open pixel square. */
+    vertex(0U, 0.0f, 0.0f, 0.0f, 0x00ff00ffU, 0, 0);
+    minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
+    assert(pixel(31U, 23U) == 0x00ff00ffU);
+    assert(pixel(32U, 23U) == 0U && pixel(31U, 24U) == 0U && pixel(32U, 24U) == 0U);
+}
+
+static void wire_vertex(float *v, float x, float y, uint32_t rgba)
+{
+    memset(v, 0, MW_OBJECT_BYTES);
+    v[0] = x;
+    v[1] = y;
+    v[3] = 1.0f;
+    v[4] = (float)(rgba >> 24) / 255.0f;
+    v[5] = (float)((rgba >> 16) & 0xffU) / 255.0f;
+    v[6] = (float)((rgba >> 8) & 0xffU) / 255.0f;
+    v[7] = (float)(rgba & 0xffU) / 255.0f;
+}
+
+static void assert_large_lowered_outline(void)
+{
+    enum { OUTLINE_COUNT = 3444U };
+    static float lowered[OUTLINE_COUNT * MW_OBJECT_WORDS];
+    ZZ9KMiniGLPacketSetState s = state();
+    unsigned i;
+
+    for (i = 0U; i < OUTLINE_COUNT; i += 3U) {
+        wire_vertex(lowered + (i + 0U) * MW_OBJECT_WORDS, 2.0f, 2.0f, 0xffffffffU);
+        wire_vertex(lowered + (i + 1U) * MW_OBJECT_WORDS, 3.0f, 2.0f, 0xffffffffU);
+        wire_vertex(lowered + (i + 2U) * MW_OBJECT_WORDS, 2.0f, 3.0f, 0xffffffffU);
+    }
+    wire_vertex(lowered, -0.75f, -0.75f, 0xff0000ffU);
+    wire_vertex(lowered + MW_OBJECT_WORDS, -0.25f, -0.75f, 0xff0000ffU);
+    wire_vertex(lowered + 2U * MW_OBJECT_WORDS, -0.50f, -0.25f, 0xff0000ffU);
+    wire_vertex(lowered + (OUTLINE_COUNT - 3U) * MW_OBJECT_WORDS, 0.25f, -0.75f, 0x00ff00ffU);
+    wire_vertex(lowered + (OUTLINE_COUNT - 2U) * MW_OBJECT_WORDS, 0.75f, -0.75f, 0x00ff00ffU);
+    wire_vertex(lowered + (OUTLINE_COUNT - 1U) * MW_OBJECT_WORDS, 0.50f, -0.25f, 0x00ff00ffU);
+
+    minigl_raster_set_state(&s);
+    minigl_raster_clear(0x4000U, 0U, 0x00ffffffU);
+    minigl_raster_draw_wire_v9(GL_TRIANGLES, lowered, OUTLINE_COUNT,
+                               2U << MW_LOWERED_FRONT_SHIFT, NULL);
+    assert(pixel(16U, 41U) == 0xff0000ffU);
+    assert(pixel(48U, 41U) == 0x00ff00ffU);
+    assert(pixel(16U, 36U) == 0U);
+    assert(pixel(48U, 36U) == 0U);
+}
+
 static void mip_level(uint32_t id, unsigned level, unsigned width, unsigned height, uint32_t value)
 {
     unsigned i;
@@ -251,10 +314,10 @@ static void assert_mipmaps(void)
     vertex(0U, 0, 0, 0, 0xffffffffU, 0.5f, 0);
     minigl_raster_tex_params(2U, 0x2700U, GL_NEAREST, GL_REPEAT, GL_REPEAT);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0x0000ffffU);
+    assert(pixel(31U, 23U) == 0x0000ffffU);
     minigl_raster_tex_params(2U, 0x2700U, GL_LINEAR, GL_REPEAT, GL_REPEAT);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0x800080ffU);
+    assert(pixel(31U, 23U) == 0x800080ffU);
     mip_quad(0.125f, 4.8f);
     {
         uint32_t value = pixel(32U, 24U);
@@ -278,10 +341,10 @@ static void assert_mipmaps(void)
     vertex(0U, 0, 0, 0, 0xffffffffU, -0.25f, 1.25f);
     minigl_raster_tex_params(3U, GL_NEAREST, GL_NEAREST, GL_REPEAT, 0x812fU);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0xffffffffU);
+    assert(pixel(31U, 23U) == 0xffffffffU);
     minigl_raster_tex_params(3U, GL_NEAREST, GL_NEAREST, 0x812fU, GL_REPEAT);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0xff0000ffU);
+    assert(pixel(31U, 23U) == 0xff0000ffU);
     mip_level(4U, 3U, 1U, 1U, 0xffffffffU);
     mip_level(4U, 2U, 2U, 2U, 0x0000ffffU);
     mip_level(4U, 1U, 4U, 4U, 0x00ff00ffU);
@@ -357,29 +420,29 @@ static void assert_default_texture(void)
     mip_quad(0.125f, 8.0f); assert(pixel(32U, 24U) == 0x0000ffffU);
     vertex(0U, 0, 0, 0, 0xffffffffU, 0.25f, 0.25f);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0xff0000ffU);
+    assert(pixel(31U, 23U) == 0xff0000ffU);
     put32(staging, 0x00ff00ffU);
     minigl_raster_tex_subimage(0U, 0U, 0U, 0U, 1U, 1U, ZZ9K_MGL_TEXFMT_RGBA8888, 0U, 4U);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0x00ff00ffU);
+    assert(pixel(31U, 23U) == 0x00ff00ffU);
     minigl_raster_delete_texture(0U);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0x00ff00ffU);
+    assert(pixel(31U, 23U) == 0x00ff00ffU);
     mip_level(1U, 0U, 1U, 1U, 0xff0000ffU);
     minigl_raster_bind_texture(0U, GL_TEXTURE_2D, 1U);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0xff0000ffU);
+    assert(pixel(31U, 23U) == 0xff0000ffU);
     minigl_raster_delete_texture(1U);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0x00ff00ffU);
+    assert(pixel(31U, 23U) == 0x00ff00ffU);
     minigl_raster_bind_texture(1U, GL_TEXTURE_2D, 0U);
     s.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_1; minigl_raster_set_state(&s);
     putfloat(vertices + 24U, 0.25f); putfloat(vertices + 28U, 0.25f);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0x00ff00ffU);
+    assert(pixel(31U, 23U) == 0x00ff00ffU);
     minigl_raster_reset(); minigl_raster_set_state(&s);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(32U, 24U) == 0xffffffffU);
+    assert(pixel(31U, 23U) == 0xffffffffU);
 }
 
 static void assert_sampler_defaults(void)
@@ -393,10 +456,10 @@ static void assert_sampler_defaults(void)
     minigl_raster_bind_texture(0U, GL_TEXTURE_2D, 1U);
     vertex(0U, 0, 0, 0, 0xffffffffU, 0.5f, 0);
     minigl_raster_draw_arrays(GL_POINTS, 0U, VSTRIDE, 0U, 1U, 0U);
-    assert(pixel(32U, 24U) == 0x00ff00ffU);
+    assert(pixel(31U, 23U) == 0x00ff00ffU);
     mip_level(1U, 1U, 1U, 1U, 0x0000ffffU);
     minigl_raster_draw_arrays(GL_POINTS, 0U, VSTRIDE, 0U, 1U, 0U);
-    assert(pixel(32U, 24U) == 0x808000ffU);
+    assert(pixel(31U, 23U) == 0x808000ffU);
     mip_quad(0.125f, 8.0f); assert(pixel(32U, 24U) == 0x0000ffffU);
     minigl_raster_tex_params(1U, GL_NEAREST, GL_NEAREST, GL_REPEAT, GL_REPEAT);
     minigl_raster_delete_texture(1U);
@@ -405,10 +468,10 @@ static void assert_sampler_defaults(void)
     minigl_raster_bind_texture(0U, GL_TEXTURE_2D, 1U);
     vertex(0U, 0, 0, 0, 0xffffffffU, 0.5f, 0);
     minigl_raster_draw_arrays(GL_POINTS, 0U, VSTRIDE, 0U, 1U, 0U);
-    assert(pixel(32U, 24U) == 0x00ff00ffU);
+    assert(pixel(31U, 23U) == 0x00ff00ffU);
     mip_level(1U, 1U, 1U, 1U, 0x0000ffffU);
     minigl_raster_draw_arrays(GL_POINTS, 0U, VSTRIDE, 0U, 1U, 0U);
-    assert(pixel(32U, 24U) == 0x808000ffU);
+    assert(pixel(31U, 23U) == 0x808000ffU);
     assert(minigl_raster_get_error() == 0U);
 }
 
@@ -469,7 +532,7 @@ static void assert_integer_vertices(void)
     vertex(1U, 0, 0, 0, 0x0000ffffU, 0, 0); put32(vertices + VSTRIDE, 0x7fffffffU);
     minigl_raster_clear(0x4000U, 0U, 0U);
     minigl_raster_draw_arrays(GL_POINTS, MINIGL_RASTER_ATTR_POSITION_INT32, VSTRIDE, 0U, 2U, 0U);
-    assert(pixel(16U, 24U) == 0xff0000ffU && pixel(48U, 24U) == 0x0000ffffU);
+    assert(pixel(15U, 23U) == 0xff0000ffU && pixel(47U, 23U) == 0x0000ffffU);
 }
 
 static void assert_texture_compaction(void)
@@ -490,7 +553,7 @@ static void assert_texture_compaction(void)
         minigl_raster_bind_texture(0U, GL_TEXTURE_2D, id);
         minigl_raster_tex_params(id, GL_NEAREST, GL_NEAREST, GL_REPEAT, GL_REPEAT);
         minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-        assert(pixel(32U, 24U) == ((id << 24) | 0xffU));
+        assert(pixel(31U, 23U) == ((id << 24) | 0xffU));
     }
     buffers.texture_pool_bytes = 512U;
     assert(minigl_raster_configure_buffers(&buffers)); minigl_raster_reset();
@@ -559,7 +622,7 @@ static void assert_fragment_extensions(void)
         minigl_raster_set_state(&s);
         minigl_raster_clear(0x4000U, 0x20406080U, 0x00ffffffU);
         draw_point(0x90501040U);
-        assert(pixel(W / 2U, H / 2U) == equations[index].expected);
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) == equations[index].expected);
     }
 
     s = state(); s.enabled_flags = ZZ9K_MGL_STATE_BLEND;
@@ -568,14 +631,14 @@ static void assert_fragment_extensions(void)
     minigl_raster_set_state(&s);
     minigl_raster_clear(0x4000U, 0x20406080U, 0x00ffffffU);
     draw_point(0x90501040U);
-    assert(pixel(W / 2U, H / 2U) == 0x3c444c40U);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0x3c444c40U);
 
     s.blend_src = GL_SRC_ALPHA_SATURATE; s.blend_dst = GL_ONE;
     s.blend_src_alpha = GL_SRC_ALPHA_SATURATE; s.blend_dst_alpha = GL_ZERO;
     minigl_raster_set_state(&s);
     minigl_raster_clear(0x4000U, 0x20406080U, 0x00ffffffU);
     draw_point(0x90501040U);
-    assert(pixel(W / 2U, H / 2U) == 0x44546440U);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0x44546440U);
 
     for (index = 0U; index < 4U; ++index) {
         s = state();
@@ -611,7 +674,7 @@ static void assert_fragment_extensions(void)
         minigl_raster_set_state(&s);
         draw_point(0xff0000ffU);
         draw_point(0x0000ffffU);
-        assert(pixel(W / 2U, H / 2U) == 0xff0000ffU);
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0xff0000ffU);
     }
 }
 
@@ -635,26 +698,26 @@ int main(void)
     minigl_raster_clear(0x4100U, 0U, 0x00ffffffU);
     vertex(0, 0.0f, 0.0f, 1.0f, 0xff0000ffU, 0, 0);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(W / 2U, H / 2U) == 0xff0000ffU);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0xff0000ffU);
     {
-        unsigned di = (H / 2U * W + W / 2U) * 3U;
+        unsigned di = ((H / 2U - 1U) * W + W / 2U - 1U) * 3U;
         assert(depth[di] == 255U && depth[di + 1U] == 255U && depth[di + 2U] == 255U);
     }
     s.depth_bits = 16U; minigl_raster_set_state(&s);
     minigl_raster_clear(0x4100U, 0U, 0x00ffffffU);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(W / 2U, H / 2U) == 0xff0000ffU);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0xff0000ffU);
     {
-        unsigned di = (H / 2U * W + W / 2U) * 2U;
+        unsigned di = ((H / 2U - 1U) * W + W / 2U - 1U) * 2U;
         assert(depth[di] == 255U && depth[di + 1U] == 255U);
     }
     s.depth_bits = 24U; s.depth_near = 0x00ffffffU; s.depth_far = 0U;
     minigl_raster_set_state(&s); minigl_raster_clear(0x4100U, 0U, 0x00ffffffU);
     vertex(0, 0.0f, 0.0f, -1.0f, 0x00ff00ffU, 0, 0);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(W / 2U, H / 2U) == 0x00ff00ffU);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0x00ff00ffU);
     {
-        unsigned di = (H / 2U * W + W / 2U) * 3U;
+        unsigned di = ((H / 2U - 1U) * W + W / 2U - 1U) * 3U;
         assert(depth[di] == 255U && depth[di + 1U] == 255U && depth[di + 2U] == 255U);
         vertex(0, 0, 0, 1.0f, 0x0000ffffU, 0, 0);
         minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
@@ -663,12 +726,12 @@ int main(void)
     s.depth_near = 0U; s.depth_far = 0U;
     for (x = 0U; x < 6U; ++x) {
         unsigned bytes = x < 3U ? 2U : 3U;
-        unsigned di = (H / 2U * W + W / 2U) * bytes;
+        unsigned di = ((H / 2U - 1U) * W + W / 2U - 1U) * bytes;
         s.depth_bits = x < 3U ? 16U : 24U; minigl_raster_set_state(&s);
         minigl_raster_clear(0x4100U, 0U, 0U);
         vertex(0, 0, 0, (float)(x % 3U) - 1.0f, 0xff00ffffU, 0, 0);
         minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-        assert(pixel(W / 2U, H / 2U) == 0xff00ffffU);
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0xff00ffffU);
         assert(depth[di] == 0U && depth[di + 1U] == 0U && (bytes == 2U || depth[di + 2U] == 0U));
     }
 
@@ -693,7 +756,7 @@ int main(void)
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
     minigl_raster_draw_arrays(GL_LINES, 0, VSTRIDE, 1, 2, 0);
     minigl_raster_draw_arrays(GL_QUADS, 0, VSTRIDE, 3, 4, 0);
-    assert(pixel(W / 4U, H / 2U) == 0x00ff00ffU);
+    assert(pixel(W / 4U - 1U, H / 2U - 1U) == 0x00ff00ffU);
     assert(pixel(W / 2U, H / 2U) == 0xffffffffU);
 
     /* Scissor/color masks, 24-bit depth, alpha blending and linear fog compose per pixel. */
@@ -733,21 +796,21 @@ int main(void)
         minigl_raster_set_state(&s);
         vertex(0, 0.0f, 0.0f, -0.6f, 0xff000080U, 0, 0);
         minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-        assert(pixel(W / 2U, H / 2U) == 0x11223344U);
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0x11223344U);
         s.color_mask = 0xfU;
         s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_DEPTH_WRITE;
         minigl_raster_set_state(&s);
         vertex(0, 0.0f, 0.0f, 0.6f, 0x0000ffffU, 0, 0);
         minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-        assert(pixel(W / 2U, H / 2U) ==
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) ==
                (x == 0U ? 0x0000ffffU : 0x11223344U));
         s.color_mask = 0U; minigl_raster_set_state(&s);
         minigl_raster_clear(0x4100U, 0xffffffffU, 0x00ffffffU);
-        assert(pixel(W / 2U, H / 2U) ==
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) ==
                (x == 0U ? 0x0000ffffU : 0x11223344U));
         s.color_mask = 0xfU; minigl_raster_set_state(&s);
         minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-        assert(pixel(W / 2U, H / 2U) == 0x0000ffffU);
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0x0000ffffU);
     }
 
     /* ARGB1555 upload expands, and P8 upload palette expansion feeds bilinear TMU0. */
@@ -769,7 +832,7 @@ int main(void)
         vertex(x, 0.0f, 0.0f, 0.0f, 0x123456ffU, 0, 0);
     assert(minigl_raster_get_error() == 0U);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 300, 0);
-    assert(pixel(W / 2U, H / 2U) == 0x123456ffU);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0x123456ffU);
     assert(minigl_raster_get_error() == 0U);
 
     /* GL_LINES pairs only adjacent vertices; point and line widths cover their stated areas. */
@@ -783,7 +846,6 @@ int main(void)
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 3, 1, 0);
     assert(pixel(W / 4U, H / 2U) == 0xff0000ffU);
     assert(pixel(W / 2U, H / 2U + 5U) == 0x00ff00ffU);
-    assert(pixel(W / 2U + 1U, H / 2U + 5U) == 0x00ff00ffU);
 
     /* Polygon line mode leaves the interior untouched, while fill blends each shared edge once. */
     s = state(); s.enabled_flags = ZZ9K_MGL_STATE_BLEND; s.blend_src = GL_SRC_ALPHA;
@@ -865,7 +927,7 @@ int main(void)
     minigl_raster_draw_arrays(GL_TRIANGLES, 0, VSTRIDE, 0, 3, 0);
     assert(pixel(W / 2U, H / 2U) == 0x000000ffU);
 
-    /* OpenGL point coordinates round half-up to the containing pixel row. */
+    /* Points on the top boundary are outside the half-open raster domain. */
     s = state(); minigl_raster_set_state(&s); minigl_raster_clear(0x4000U, 0, 0x00ffffffU);
     vertex(0, 0.0f, -1.0f, 0.0f, 0xabcdef01U, 0, 0);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
@@ -873,7 +935,7 @@ int main(void)
     minigl_raster_clear(0x4000U, 0, 0x00ffffffU);
     vertex(0, 0.0f, 1.0f, 0.0f, 0xabcdef01U, 0, 0);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(W / 2U, 0U) == 0xabcdef01U);
+    assert(pixel(W / 2U, 0U) == 0U);
 
     /* Fractional stitched triangles must blend their diagonal exactly once. */
     s = state(); s.enabled_flags = ZZ9K_MGL_STATE_BLEND; s.blend_src = GL_SRC_ALPHA;
@@ -918,7 +980,7 @@ int main(void)
         putfloat(v64 + 48, 1.0f); putfloat(v64 + 52, 1.0f);
         putfloat(v64 + 56, 1.0f); putfloat(v64 + 60, 0.0f);
         minigl_raster_draw_arrays(GL_POINTS, 0, 64U, 0, 1, 0);
-        assert(pixel(W / 2U, H / 2U) == 0x0000ffffU);
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0x0000ffffU);
         {
             float ident[16];
             memset(ident, 0, sizeof(ident));
@@ -932,14 +994,14 @@ int main(void)
     minigl_raster_set_state(&s); minigl_raster_clear(0x4100U, 0U, 0x00999999U);
     vertex(0, 0.0f, 0.0f, 0.0f, 0xff0000ffU, 0, 0);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(W / 2U, H / 2U) == 0U);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0U);
     s.depth_offset = -0.2f; minigl_raster_set_state(&s);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(W / 2U, H / 2U) == 0xff0000ffU);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0xff0000ffU);
     s.depth_offset = 2.0f; s.depth_func = GL_LEQUAL;
     minigl_raster_set_state(&s); minigl_raster_clear(0x4100U, 0U, 0x00ffffffU);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-    assert(pixel(W / 2U, H / 2U) == 0xff0000ffU);
+    assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0xff0000ffU);
     s = state(); s.min_triangle_area = 20.0f; minigl_raster_set_state(&s);
     minigl_raster_clear(0x4000U, 0U, 0U);
     vertex(0, -0.1f, -0.1f, 0, 0xff0000ffU, 0, 0);
@@ -964,7 +1026,7 @@ int main(void)
     for (x = 0U; x < ZZ9K_MINIGL_MAX_TEXTURES; ++x) {
         minigl_raster_bind_texture(0U, GL_TEXTURE_2D, 10000U + x);
         minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-        assert(pixel(W / 2U, H / 2U) == (((x & 255U) << 24) | 0x00aabbffU));
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) == (((x & 255U) << 24) | 0x00aabbffU));
     }
     for (x = 0U; x < ZZ9K_MINIGL_MAX_TEXTURES; x += 2U)
         minigl_raster_delete_texture(10000U + x);
@@ -973,7 +1035,7 @@ int main(void)
         minigl_raster_upload_texture(20000U + x, 0U, 1U, 1U, ZZ9K_MGL_TEXFMT_RGBA8888, 0U, 4U);
         minigl_raster_bind_texture(0U, GL_TEXTURE_2D, 20000U + x);
         minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
-        assert(pixel(W / 2U, H / 2U) == 0x123456ffU);
+        assert(pixel(W / 2U - 1U, H / 2U - 1U) == 0x123456ffU);
     }
     assert(minigl_raster_get_error() == 0U);
     minigl_raster_reset();
@@ -998,6 +1060,8 @@ int main(void)
     minigl_raster_draw_arrays(GL_TRIANGLES, 0, VSTRIDE, 0, 3, 0);
     assert(pixel(50U, 38U) == 0xff0000ffU);
     assert_scanline_coverage();
+    assert_point_half_open_coverage();
+    assert_large_lowered_outline();
     assert_fragment_extensions();
     assert_mipmaps();
     assert_quake_charset_incomplete_mipmaps();

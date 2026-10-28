@@ -102,42 +102,58 @@ static void test_texture_generate_mipmap(void)
 {
     mw_texture_manager tm;
     uint8_t payload[128];
+    uint8_t *pix;
     mw_texture *t;
+    unsigned x, y;
 
     mw_texmgr_init(&tm);
     memset(payload, 0, sizeof(payload));
 
-    /* Enable GENERATE_MIPMAP on texture 3 before upload */
+    /* Regenerate a non-uniform 4x4 base level so every derived level's
+     * content, not just its dimensions, is checked. */
     mw_texmgr_param(&tm, 3, 0x8191 /* GL_GENERATE_MIPMAP */, 1, 0.0f);
-
-    /* 2x2 RGBA8 texture upload: Red (255,0,0,255) */
     mw_put_be32(payload, 3);
-    mw_put_be32(payload + 4, 0);  /* level 0 */
-    mw_put_be32(payload + 8, 4);  /* RGBA */
-    mw_put_be32(payload + 12, 2); /* 2x2 */
-    mw_put_be32(payload + 16, 2);
+    mw_put_be32(payload + 4, 0);
+    mw_put_be32(payload + 8, 4);
+    mw_put_be32(payload + 12, 4);
+    mw_put_be32(payload + 16, 4);
     mw_put_be32(payload + 20, 0x1908);
     mw_put_be32(payload + 24, 0x1401);
     mw_put_be32(payload + 28, 4);
-    mw_put_be32(payload + 52, 16);
-
-    uint8_t *pix = payload + 56;
-    int i;
-    for (i = 0; i < 4; ++i) {
-        pix[i * 4] = 200; pix[i * 4 + 1] = 100; pix[i * 4 + 2] = 50; pix[i * 4 + 3] = 255;
+    mw_put_be32(payload + 52, 64);
+    pix = payload + 56;
+    for (y = 0; y < 4; ++y) {
+        for (x = 0; x < 4; ++x) {
+            uint32_t rgba = y < 2 ? (x < 2 ? 0xff0000ffU : 0x00ff00ffU)
+                                  : (x < 2 ? 0x0000ffffU : 0xffffffffU);
+            mw_put_be32(pix + (y * 4 + x) * 4, rgba);
+        }
     }
-
-    assert(mw_texmgr_image_raw(&tm, payload, 56 + 16, NULL, 0));
+    assert(mw_texmgr_image_raw(&tm, payload, 56 + 64, NULL, 0));
 
     t = mw_texmgr_find(&tm, 3);
     assert(t != NULL);
-    assert(t->widths[0] == 2 && t->heights[0] == 2);
+    assert(t->widths[1] == 2 && t->heights[1] == 2);
+    assert(t->pixels[1][0] == 0xff0000ffU);
+    assert(t->pixels[1][1] == 0x00ff00ffU);
+    assert(t->pixels[1][2] == 0x0000ffffU);
+    assert(t->pixels[1][3] == 0xffffffffU);
+    assert(t->widths[2] == 1 && t->heights[2] == 1);
+    assert(t->pixels[2][0] == 0x808080ffU);
 
-    /* Level 1 must have been automatically generated as 1x1 */
+    /* Replacing level zero must rebuild the chain and discard deeper,
+     * now-invalid generated levels. */
+    memset(payload + 56, 0xff, 16);
+    for (x = 0; x < 4; ++x)
+        mw_put_be32(payload + 56 + x * 4, 0xffff00ffU);
+    mw_put_be32(payload + 12, 2);
+    mw_put_be32(payload + 16, 2);
+    mw_put_be32(payload + 52, 16);
+    assert(mw_texmgr_image_raw(&tm, payload, 56 + 16, NULL, 0));
+    assert(t->widths[0] == 2 && t->heights[0] == 2);
     assert(t->widths[1] == 1 && t->heights[1] == 1);
-    assert(t->pixels[1] != NULL);
-    /* Level 1 pixel should equal average of level 0 pixels */
-    assert(t->pixels[1][0] == t->pixels[0][0]);
+    assert(t->pixels[1][0] == 0xffff00ffU);
+    assert(t->widths[2] == 0 && t->heights[2] == 0 && t->pixels[2] == NULL);
 
     mw_texmgr_destroy(&tm);
     printf("PASS: test_texture_generate_mipmap\n");

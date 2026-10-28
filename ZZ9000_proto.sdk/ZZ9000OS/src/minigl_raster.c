@@ -2008,16 +2008,21 @@ static void line_screen(const Vertex *a, const Vertex *b, float polygon_offset)
 static void point_screen(const Vertex *vertex, float polygon_offset)
 {
     int size = g_state.point_size ? g_state.point_size : 1;
-    int cx = (int)floorf(vertex->sx + 0.5f);
-    int cy = (int)floorf(vertex->sy + 0.5f);
-    int x_start = cx - size / 2;
-    int y_start = cy - size / 2;
+    /* Pixels whose centres lie in the half-open square [c - s/2, c + s/2),
+     * the same llvmpipe convention line_screen applies to its minor axis:
+     * a size-1 point at a half-integer centre covers the pixel containing
+     * that centre, and a boundary centre on the low edge is included while
+     * one on the high edge is not. */
+    int x_first = (int)ceilf(vertex->sx - (float)size * 0.5f - 0.5f);
+    int x_last = (int)ceilf(vertex->sx + (float)size * 0.5f - 0.5f) - 1;
+    int y_first = (int)ceilf(vertex->sy - (float)size * 0.5f - 0.5f);
+    int y_last = (int)ceilf(vertex->sy + (float)size * 0.5f - 0.5f) - 1;
     int x, y;
 
-    mark_dirty(x_start, y_start, x_start + size - 1, y_start + size - 1);
-    for (y = 0; y < size; ++y)
-        for (x = 0; x < size; ++x)
-            fragment(x_start + x, y_start + y, vertex->sz,
+    mark_dirty(x_first, y_first, x_last, y_last);
+    for (y = y_first; y <= y_last; ++y)
+        for (x = x_first; x <= x_last; ++x)
+            fragment(x, y, vertex->sz,
                      vertex->q0 != 0.0f ? vertex->u0 / vertex->q0 : 0.0f,
                      vertex->q0 != 0.0f ? vertex->v0 / vertex->q0 : 0.0f,
                      vertex->q1 != 0.0f ? vertex->u1 / vertex->q1 : 0.0f,
@@ -3213,8 +3218,10 @@ static void v9_vert_convert(const float *v, Vertex *out)
 
 static int v9_mask_edge(const uint32_t *mask, size_t i)
 {
+    /* The wire carries the edge-mask words big-endian (mw_draw.c's
+     * mw_mask_edge reads them the same way). */
     if (!mask) return 1;
-    return (mask[i / 32] & (1U << (i % 32))) != 0;
+    return (mw_be32((const uint8_t *)mask + (i / 32) * 4) & (1U << (i % 32))) != 0;
 }
 
 static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
@@ -3243,53 +3250,123 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
         if (style == 2U) {
             /* Outline: emit the primitive's boundary edges as independent
              * lines, exactly as the reference lowers them (one GL_LINES
-             * pair per kept edge, edge mask applied per leading vertex). */
-            Vertex v[CLIP_MAX_VERTICES];
-            if (count <= CLIP_MAX_VERTICES) {
-                for (i = 0; i < count; ++i)
-                    v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &v[i]);
-                if (mode == GL_TRIANGLES) {
-                    for (i = 0; i + 2 < count; i += 3) {
-                        if (v9_mask_edge(edge_mask, i)) primitive_line(&v[i], &v[i + 1]);
-                        if (v9_mask_edge(edge_mask, i + 1)) primitive_line(&v[i + 1], &v[i + 2]);
-                        if (v9_mask_edge(edge_mask, i + 2)) primitive_line(&v[i + 2], &v[i]);
+             * pair per kept edge, edge mask applied per leading vertex).
+             * Vertices are converted per edge -- the lowered chunk ceiling
+             * (3443) is far above any stack buffer, and a vertex joins at
+             * most three edges, so no count falls back to fill here. */
+            if (mode == GL_TRIANGLES) {
+                for (i = 0; i + 2 < count; i += 3) {
+                    if (v9_mask_edge(edge_mask, i)) {
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
                     }
-                } else if (mode == GL_TRIANGLE_STRIP) {
-                    for (i = 2; i < count; ++i) {
-                        uint32_t p = i - 2, q = i - 1;
-                        if (i & 1) { uint32_t t = p; p = q; q = t; }
-                        if (v9_mask_edge(edge_mask, p)) primitive_line(&v[p], &v[q]);
-                        if (v9_mask_edge(edge_mask, q)) primitive_line(&v[q], &v[i]);
-                        if (v9_mask_edge(edge_mask, i)) primitive_line(&v[i], &v[p]);
+                    if (v9_mask_edge(edge_mask, i + 1)) {
+                        v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
                     }
-                } else if (mode == GL_TRIANGLE_FAN) {
-                    for (i = 2; i < count; ++i) {
-                        if (v9_mask_edge(edge_mask, 0)) primitive_line(&v[0], &v[i - 1]);
-                        if (v9_mask_edge(edge_mask, i - 1)) primitive_line(&v[i - 1], &v[i]);
-                        if (v9_mask_edge(edge_mask, i)) primitive_line(&v[i], &v[0]);
+                    if (v9_mask_edge(edge_mask, i + 2)) {
+                        v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
                     }
-                } else if (mode == GL_QUADS) {
-                    for (i = 0; i + 3 < count; i += 4) {
-                        if (v9_mask_edge(edge_mask, i)) primitive_line(&v[i], &v[i + 1]);
-                        if (v9_mask_edge(edge_mask, i + 1)) primitive_line(&v[i + 1], &v[i + 2]);
-                        if (v9_mask_edge(edge_mask, i + 2)) primitive_line(&v[i + 2], &v[i + 3]);
-                        if (v9_mask_edge(edge_mask, i + 3)) primitive_line(&v[i + 3], &v[i]);
-                    }
-                } else if (mode == GL_QUAD_STRIP) {
-                    for (i = 0; i + 3 < count; i += 2) {
-                        if (v9_mask_edge(edge_mask, i)) primitive_line(&v[i], &v[i + 1]);
-                        if (v9_mask_edge(edge_mask, i + 1)) primitive_line(&v[i + 1], &v[i + 3]);
-                        if (v9_mask_edge(edge_mask, i + 3)) primitive_line(&v[i + 3], &v[i + 2]);
-                        if (v9_mask_edge(edge_mask, i + 2)) primitive_line(&v[i + 2], &v[i]);
-                    }
-                } else if (mode == GL_POLYGON) {
-                    for (i = 0; i < count; ++i)
-                        if (v9_mask_edge(edge_mask, i))
-                            primitive_line(&v[i], &v[(i + 1) % count]);
                 }
-                return;
+            } else if (mode == GL_TRIANGLE_STRIP) {
+                for (i = 2; i < count; ++i) {
+                    uint32_t p = i - 2, q = i - 1;
+                    if (i & 1) { uint32_t t = p; p = q; q = t; }
+                    if (v9_mask_edge(edge_mask, p)) {
+                        v9_vert_convert(object_vertices + p * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + q * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, q)) {
+                        v9_vert_convert(object_vertices + q * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i)) {
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + p * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                }
+            } else if (mode == GL_TRIANGLE_FAN) {
+                for (i = 2; i < count; ++i) {
+                    if (v9_mask_edge(edge_mask, 0)) {
+                        v9_vert_convert(object_vertices, &a);
+                        v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i - 1)) {
+                        v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i)) {
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices, &b);
+                        primitive_line(&a, &b);
+                    }
+                }
+            } else if (mode == GL_QUADS) {
+                for (i = 0; i + 3 < count; i += 4) {
+                    if (v9_mask_edge(edge_mask, i)) {
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i + 1)) {
+                        v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i + 2)) {
+                        v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + (i + 3) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i + 3)) {
+                        v9_vert_convert(object_vertices + (i + 3) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                }
+            } else if (mode == GL_QUAD_STRIP) {
+                for (i = 0; i + 3 < count; i += 2) {
+                    if (v9_mask_edge(edge_mask, i)) {
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i + 1)) {
+                        v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + (i + 3) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i + 3)) {
+                        v9_vert_convert(object_vertices + (i + 3) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                    if (v9_mask_edge(edge_mask, i + 2)) {
+                        v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                }
+            } else if (mode == GL_POLYGON) {
+                for (i = 0; i < count; ++i) {
+                    uint32_t next = (i + 1 == count) ? 0 : i + 1;
+                    if (v9_mask_edge(edge_mask, i)) {
+                        v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
+                        v9_vert_convert(object_vertices + next * MW_OBJECT_WORDS, &b);
+                        primitive_line(&a, &b);
+                    }
+                }
             }
-            /* Too many vertices for the outline buffer: fall through to fill. */
+            return;
         }
 
         if (flags & MW_LOWERED_FLAT) {
