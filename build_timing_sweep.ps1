@@ -145,12 +145,8 @@ function Update-QualificationRecord {
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not determine the source revision for the timing qualification.'
     }
-    $artifactName = if ($RasterIX) {
-        'bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga-rix.bit'
-    } else {
-        $Definition.Bitstream
-    }
-    $recordName = if ($RasterIX) { "$($Definition.Name)-rix" } else { $Definition.Name }
+    $artifactName = $Definition.Bitstream
+    $recordName = $Definition.Name
     $qualification = [pscustomobject][ordered]@{
         bitstream = $artifactName
         sha256 = Get-Sha256 $SelectedBitstream
