@@ -116,13 +116,16 @@ static int backend_maps_state(const ZZ9KMiniGLPacketSetState *state,
     }
 
     memset(fragment, 0, sizeof(*fragment));
+    enabled = state->enabled_flags;
     if (!map_compare(state->depth_func, &fragment->depth_func) ||
-        !map_compare(state->alpha_func, &fragment->alpha_func) ||
+        ((enabled & ZZ9K_MGL_STATE_ALPHA_TEST) != 0U &&
+         !map_compare(state->alpha_func, &fragment->alpha_func)) ||
         !map_blend(state->blend_src, &fragment->src_factor) ||
         !map_blend(state->blend_dst, &fragment->dst_factor)) {
         return 0;
     }
-    enabled = state->enabled_flags;
+    if ((enabled & ZZ9K_MGL_STATE_ALPHA_TEST) == 0U)
+        fragment->alpha_func = RIX_FUNC_ALWAYS;
     fragment->alpha_ref = (uint8_t)state->alpha_ref;
     fragment->depth_mask = (enabled & ZZ9K_MGL_STATE_DEPTH_WRITE) != 0U;
     fragment->color_mask_r = (state->color_mask & 1U) != 0U;

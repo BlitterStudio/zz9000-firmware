@@ -331,6 +331,10 @@ void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
         memset(&g_rix_platform, 0, sizeof(g_rix_platform));
         memset(&g_rix_diagnostics, 0, sizeof(g_rix_diagnostics));
         g_rix_platform_set = 0;
+        g_rix_surface = NULL;
+        g_rix_surface_rgb565 = 0;
+        g_rix_depth_z16 = 0;
+        g_rix_collecting = 0;
         return;
     }
     g_rix_platform = *platform;
@@ -2621,6 +2625,8 @@ void minigl_raster_init(void)
     minigl_rix_backend_init(&g_rix, g_rix_platform_set ? &g_rix_platform : NULL);
     memset(&g_rix_diagnostics, 0, sizeof(g_rix_diagnostics));
     g_rix_depth_z16 = 0;
+    g_rix_cpu_fallbacks = 0U;
+    g_rix_cpu_frame = 0;
     for (index = 0U; index < 4U; ++index)
         identity(g_matrix[index]);
     update_mvp();
