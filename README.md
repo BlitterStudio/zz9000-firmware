@@ -21,6 +21,7 @@ sources, and host tests.
 - Firmware-file updates from AmigaOS through the matching driver tools.
 - SDK media, image, archive, audio, and AmiSSL-provider components.
 - Release packages for Zorro III, AGA video-slot, Zorro II, and ZZ9500CX adapter variants.
+- MiniGL texture backing grows on demand to 128 MiB within a shared 384 MiB card-pool budget.
 
 ## Install firmware
 

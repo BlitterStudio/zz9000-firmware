@@ -32,6 +32,8 @@ static void mw_ctx_set_error(mw_ctx *c, uint32_t error)
 #define MW_CONTEXT_CARD_POOL 0
 #endif
 
+static void mw_context_free(mw_ctx *c, void *memory, uint32_t *address);
+
 static void *mw_context_alloc(mw_ctx *c, uint32_t bytes, uint32_t *address)
 {
 #if MW_CONTEXT_CARD_POOL
@@ -45,6 +47,22 @@ static void *mw_context_alloc(mw_ctx *c, uint32_t bytes, uint32_t *address)
     (void)c;
     (void)address;
     return calloc(1, bytes);
+#endif
+}
+
+static void *mw_context_alloc_uninitialized(mw_ctx *c, uint32_t bytes,
+                                            uint32_t *address)
+{
+#if MW_CONTEXT_CARD_POOL
+    uint32_t card_address = card_pool_alloc(&card_pool, bytes, c->card_pool_owner);
+    if (!card_address)
+        return NULL;
+    *address = card_address;
+    return (void *)(uintptr_t)card_address;
+#else
+    (void)c;
+    (void)address;
+    return malloc(bytes);
 #endif
 }
 
@@ -73,6 +91,45 @@ static uint32_t mw_color_from_floats(float r, float g, float b, float a)
 
 static uint8_t g_dummy_vertices[256];
 static uint8_t g_dummy_staging[256];
+static uint8_t g_dummy_texture[1];
+
+static int mw_ctx_grow_texture_pool(void *context, uint32_t minimum_bytes,
+                                    uint32_t used_bytes, uint8_t **pool,
+                                    uint32_t *pool_bytes)
+{
+    mw_ctx *c = (mw_ctx *)context;
+    uint32_t new_bytes = c->texture_pool == g_dummy_texture ?
+                         0U : c->texture_pool_bytes;
+    uint32_t new_address = 0U;
+    uint8_t *new_pool;
+
+    if (minimum_bytes > MINIGL_TEXTURE_CPU_ARENA_MAX_BYTES)
+        return 0;
+    if (new_bytes == 0U)
+        new_bytes = MINIGL_TEXTURE_CPU_ARENA_INITIAL_BYTES;
+    while (new_bytes < minimum_bytes) {
+        if (new_bytes > MINIGL_TEXTURE_CPU_ARENA_MAX_BYTES -
+                        MINIGL_TEXTURE_ARENA_GROW_BYTES) {
+            new_bytes = MINIGL_TEXTURE_CPU_ARENA_MAX_BYTES;
+            break;
+        }
+        new_bytes += MINIGL_TEXTURE_ARENA_GROW_BYTES;
+    }
+    new_pool = (uint8_t *)mw_context_alloc_uninitialized(c, new_bytes,
+                                                          &new_address);
+    if (!new_pool)
+        return 0;
+    if (c->texture_pool != g_dummy_texture)
+        memcpy(new_pool, c->texture_pool, used_bytes);
+    if (c->texture_pool != g_dummy_texture)
+        mw_context_free(c, c->texture_pool, &c->texture_pool_address);
+    c->texture_pool = new_pool;
+    c->texture_pool_address = new_address;
+    c->texture_pool_bytes = new_bytes;
+    *pool = new_pool;
+    *pool_bytes = new_bytes;
+    return 1;
+}
 
 static inline void mw_ctx_update_latest(mw_ctx *c)
 {
@@ -89,6 +146,8 @@ static void mw_ctx_bind_buffers(mw_ctx *c)
     MiniGLRasterBuffers buffers;
     int draw_front;
     memset(&buffers, 0, sizeof(buffers));
+    minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes,
+                                   mw_ctx_grow_texture_pool, c);
     draw_front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400) && (c->state.target.buffer_count > 1);
     buffers.color = c->color_buffers[draw_front ? c->state.target.front : c->state.target.back];
     buffers.color_bytes = c->width * c->height * sizeof(uint32_t);
@@ -231,17 +290,10 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
         return NULL;
     }
 
-    /* GLQuake's working set includes full generated mip chains; 16 MiB
-     * exhausted before its resident textures settled, leaving the CPU
-     * rasterizer with incomplete white textures.  Keep the CPU residency
-     * aligned with the 24 MiB RasterIX texture budget. */
-    c->texture_pool_bytes = 24U * 1024U * 1024U;
-    c->texture_pool = (uint8_t *)mw_context_alloc(
-        c, c->texture_pool_bytes, &c->texture_pool_address);
-    if (!c->texture_pool) {
-        mw_host_destroy(c);
-        return NULL;
-    }
+    /* Resident CPU texels grow in 16 MiB steps only when uploaded.  The
+     * one-byte sentinel keeps empty contexts out of the card pool. */
+    c->texture_pool = g_dummy_texture;
+    c->texture_pool_bytes = sizeof(g_dummy_texture);
 
     c->vertex_scratch_capacity = MW_MAX_VERTICES * MW_OBJECT_WORDS;
     c->vertex_scratch = (float *)mw_context_alloc(
@@ -253,7 +305,8 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     }
 
     c->handle = g_next_handle++;
-    minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes);
+    minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes,
+                                   mw_ctx_grow_texture_pool, c);
     mw_ctx_bind_buffers(c);
     minigl_raster_init();
     mw_ctx_sync_to_raster(c);
@@ -277,7 +330,7 @@ void mw_host_destroy(mw_ctx *c)
         mw_context_free(c, c->depth_buffer, &c->depth_buffer_address);
         c->depth_buffer = NULL;
     }
-    if (c->texture_pool) {
+    if (c->texture_pool && c->texture_pool != g_dummy_texture) {
         mw_context_free(c, c->texture_pool, &c->texture_pool_address);
         c->texture_pool = NULL;
     }

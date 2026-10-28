@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "mw_types.h"
+#include "minigl_pool.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,16 +40,23 @@ typedef struct mw_texture {
     uint32_t index_addresses[MW_MAX_MIP_LEVELS];
 } mw_texture;
 
+typedef struct mw_texmgr_arena_chunk {
+    uint8_t *memory;
+    uint32_t address;
+    uint32_t bytes;
+    uint32_t free;
+} mw_texmgr_arena_chunk;
+
 typedef struct mw_texture_manager {
     mw_texture *textures;
     uint32_t capacity;
     uint32_t count;
     uint32_t card_pool_owner;
     uint32_t textures_address;
-    uint8_t *arena;
-    uint32_t arena_address;
+    mw_texmgr_arena_chunk arena_chunks[
+        MINIGL_TEXTURE_CPU_ARENA_MAX_BYTES / MINIGL_TEXTURE_ARENA_GROW_BYTES];
+    uint32_t arena_chunk_count;
     uint32_t arena_bytes;
-    uint32_t arena_free;
 } mw_texture_manager;
 
 void mw_texmgr_init(mw_texture_manager *tm);
