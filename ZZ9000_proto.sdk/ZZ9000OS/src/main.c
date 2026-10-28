@@ -102,7 +102,7 @@ void Xil_AssertNonVoid() {}
  * 0xC0 and this at 0xC2 (ZZ_FW_CAP_FW_VERSION_PATCH); ZZTop compares the
  * three against the latest GitHub release, and util/check_release_version.sh
  * makes tag builds fail when they disagree with the tag. */
-#define REVISION_PATCH 0
+#define REVISION_PATCH 1
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
