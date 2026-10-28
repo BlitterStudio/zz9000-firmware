@@ -13,7 +13,8 @@ int rix_band_list_init(RixBandList *list, uint16_t width, uint16_t height,
 {
     uint32_t rows, count, i;
 
-    if (list == NULL || references == NULL || width == 0U || height == 0U) {
+    if (list == NULL || references == NULL || width == 0U || height == 0U ||
+        (width & 1U) != 0U) {
         return 0;
     }
     /* Every scanline is dispatched: full bands of RIX_BAND_PIXELS / width
@@ -77,6 +78,10 @@ void rix_band_setup(RixBandSetup *setup, const RixBandList *list,
 
 int rix_band_emit_header(RixCmdWriter *writer, const RixBandSetup *setup)
 {
+    if (writer == NULL || setup == NULL || setup->x_resolution == 0U ||
+        (setup->x_resolution & 1U) != 0U || setup->y_resolution == 0U) {
+        return 0;
+    }
     return rix_cmd_resolution(writer, setup->x_resolution, setup->y_resolution) &&
            rix_cmd_y_offset(writer, setup->y_offset) &&
            rix_cmd_buffer_address(writer, RIX_REG_COLOR_BUFFER_ADDR,
@@ -109,7 +114,8 @@ int rix_band_emit_frame(RixCmdWriter *writer, const RixBandList *list,
     uint16_t i;
 
     if (writer == NULL || list == NULL || config == NULL || list->count == 0U ||
-        list->width != config->width || list->height != config->height) {
+        list->width != config->width || list->height != config->height ||
+        list->width == 0U || (list->width & 1U) != 0U) {
         return 0;
     }
     if (!rix_cmd_clear_color(writer, config->clear_color) ||

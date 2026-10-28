@@ -115,6 +115,10 @@ int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
         if (clipped_start_x >= clipped_end_x || clipped_start_y >= clipped_end_y) {
             return 0;
         }
+        start_x = clipped_start_x;
+        start_y = clipped_start_y;
+        end_x = clipped_end_x;
+        end_y = clipped_end_y;
     }
 
     memset(triangle, 0, sizeof(*triangle));

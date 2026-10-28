@@ -64,6 +64,8 @@ typedef struct RixBandSetup {
     uint32_t pixels;       /* band line count * width */
 } RixBandSetup;
 
+/* RasterIX_IF framebuffer transfers are two RGB565/Z16 pixels per beat, so
+ * width must be even.  Unsupported geometry returns zero before recording. */
 int rix_band_list_init(RixBandList *list, uint16_t width, uint16_t height,
                        RixTriangle **references, size_t reference_capacity);
 int rix_band_list_add(RixBandList *list, RixTriangle *triangle);

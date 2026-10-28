@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include <assert.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,6 +19,33 @@ static uint32_t word_at(const uint8_t *bytes, size_t word)
     const uint8_t *p = bytes + word * 4U;
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static float triangle_float(const RixTriangle *triangle, unsigned int word)
+{
+    float value;
+
+    memcpy(&value, &triangle->words[word], sizeof(value));
+    return value;
+}
+
+static void assert_rebased_components(const RixTriangle *unclipped,
+                                      const RixTriangle *clipped,
+                                      unsigned int value_word,
+                                      unsigned int x_word,
+                                      unsigned int y_word,
+                                      unsigned int count,
+                                      int32_t dx, int32_t dy)
+{
+    unsigned int i;
+
+    for (i = 0U; i < count; ++i) {
+        float expected = triangle_float(unclipped, value_word + i) +
+                         triangle_float(unclipped, x_word + i) * (float)dx +
+                         triangle_float(unclipped, y_word + i) * (float)dy;
+
+        assert(fabsf(triangle_float(clipped, value_word + i) - expected) < 0.00001f);
+    }
 }
 
 static RixVertex vertex(float x, float y, float z, float w,
@@ -150,6 +178,74 @@ static void test_triangle_setup_and_bands(void)
         }
     }
     assert(commits == bands.count);
+}
+
+static void test_scissor_clips_descriptor_and_interpolation(void)
+{
+    RixVertex v0 = vertex(10.25f, 4.5f, 0.1f, 1.0f, 0xff0000ffU, 0.0f, 0.0f, 1.0f);
+    RixVertex v1 = vertex(100.75f, 40.125f, 0.6f, 0.5f, 0x00ff00ffU, 1.0f, 0.0f, 1.0f);
+    RixVertex v2 = vertex(20.0f, 88.875f, 0.9f, 0.25f, 0x0000ffffU, 0.0f, 1.0f, 1.0f);
+    RixScissor scissor = { 20U, 10U, 80U, 70U, 1U };
+    RixTriangle unclipped;
+    RixTriangle clipped;
+    int32_t dx;
+    int32_t dy;
+    unsigned int i;
+
+    assert(rix_setup_triangle(&unclipped, &v0, &v1, &v2, NULL));
+    assert(rix_setup_triangle(&clipped, &v0, &v1, &v2, &scissor));
+    assert(clipped.words[RIX_WORD_BB_START] == 0x000a0014U);
+    assert(clipped.words[RIX_WORD_BB_END] == 0x00460050U);
+    dx = (int32_t)(uint16_t)clipped.words[RIX_WORD_BB_START] -
+         (int32_t)(uint16_t)unclipped.words[RIX_WORD_BB_START];
+    dy = (int32_t)(uint16_t)(clipped.words[RIX_WORD_BB_START] >> 16U) -
+         (int32_t)(uint16_t)(unclipped.words[RIX_WORD_BB_START] >> 16U);
+    assert(dx == 10 && dy == 5);
+    for (i = 0U; i < 3U; ++i) {
+        int32_t expected = (int32_t)unclipped.words[RIX_WORD_W_INIT + i] +
+                           (int32_t)unclipped.words[RIX_WORD_W_X + i] * dx +
+                           (int32_t)unclipped.words[RIX_WORD_W_Y + i] * dy;
+
+        assert(clipped.words[RIX_WORD_W_INIT + i] == (uint32_t)expected);
+    }
+    assert_rebased_components(&unclipped, &clipped, RIX_WORD_COLOR,
+                              RIX_WORD_COLOR_X, RIX_WORD_COLOR_Y, 4U, dx, dy);
+    assert_rebased_components(&unclipped, &clipped, RIX_WORD_DEPTH,
+                              RIX_WORD_DEPTH_X, RIX_WORD_DEPTH_Y, 2U, dx, dy);
+    assert_rebased_components(&unclipped, &clipped, RIX_WORD_TEXTURE,
+                              RIX_WORD_TEXTURE_X, RIX_WORD_TEXTURE_Y, 3U, dx, dy);
+}
+
+static void test_odd_widths_emit_no_commands(void)
+{
+    RixBandList bands;
+    RixBandConfig config;
+    RixBandSetup setup;
+    RixTriangle *references[1] = { NULL };
+    RixCmdWriter writer;
+    uint8_t bytes[128];
+
+    assert(!rix_band_list_init(&bands, 1U, 1U, references, 1U));
+    assert(!rix_band_list_init(&bands, 641U, 480U, references, 1U));
+    assert(rix_band_list_init(&bands, 2U, 1U, references, 1U));
+
+    memset(&setup, 0, sizeof(setup));
+    setup.x_resolution = 1U;
+    setup.y_resolution = 1U;
+    rix_cmd_init(&writer, bytes, sizeof(bytes));
+    assert(!rix_band_emit_header(&writer, &setup));
+    assert(rix_cmd_words(&writer) == 0U);
+
+    memset(&config, 0, sizeof(config));
+    config.width = 1U;
+    config.height = 1U;
+    config.color_pitch = 2U;
+    config.depth_pitch = 2U;
+    config.clear_mask = RIX_CLEAR_COLOR | RIX_CLEAR_DEPTH;
+    bands.width = 1U;
+    rix_cmd_init(&writer, bytes, sizeof(bytes));
+    assert(!rix_band_emit_frame(&writer, &bands, &config));
+    assert(rix_cmd_words(&writer) == 0U);
 }
 
 static void test_band_protocol_stream(void)
@@ -289,6 +385,8 @@ int main(void)
 {
     test_register_and_stream_encoding();
     test_triangle_setup_and_bands();
+    test_scissor_clips_descriptor_and_interpolation();
+    test_odd_widths_emit_no_commands();
     test_band_protocol_stream();
     test_seeded_gears_like_mesh();
     puts("rix core tests passed");
