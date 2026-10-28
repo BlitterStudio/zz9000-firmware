@@ -174,6 +174,7 @@ static volatile ZZ9KMiniGLControlBlockV9 *g_ctrl = NULL;
 static volatile ZZ9KMiniGLStatusV9       *g_status = NULL;
 static uint8_t *g_slot_ptrs[2] = {NULL, NULL};
 static uint8_t *g_reply_ptr = NULL;
+static uint32_t g_reply_capacity = 0U;
 
 static mw_ctx *g_contexts[MW_MAX_CONTEXTS];
 static uint32_t g_active_handle = 0;
@@ -203,6 +204,7 @@ int mw_service_bind_region(volatile void *region, uint32_t size)
         g_slot_ptrs[0] = NULL;
         g_slot_ptrs[1] = NULL;
         g_reply_ptr = NULL;
+        g_reply_capacity = 0U;
         g_is_bound = 0;
         return 0;
     }
@@ -225,6 +227,7 @@ int mw_service_bind_region(volatile void *region, uint32_t size)
         g_slot_ptrs[0] = (uint8_t *)region + MW_WINDOW_SLOT0_OFFSET;
         g_slot_ptrs[1] = (uint8_t *)region + MW_WINDOW_SLOT0_OFFSET + MW_WINDOW_SLOT_STRIDE_Z3;
         g_reply_ptr = (uint8_t *)region + MW_WINDOW_REPLY_OFFSET_Z3;
+        g_reply_capacity = MW_DEFAULT_REPLY_CAPACITY;
         g_is_bound = 1;
         mw_service_init();
         mw_wire_st32(&g_ctrl->slot_capacity, MW_DEFAULT_SLOT_CAPACITY_Z3);
@@ -233,6 +236,7 @@ int mw_service_bind_region(volatile void *region, uint32_t size)
         g_slot_ptrs[0] = (uint8_t *)region + MW_WINDOW_SLOT0_OFFSET;
         g_slot_ptrs[1] = (uint8_t *)region + MW_WINDOW_SLOT0_OFFSET + MW_WINDOW_SLOT_STRIDE_Z2;
         g_reply_ptr = (uint8_t *)region + MW_WINDOW_REPLY_OFFSET_Z2_2SLOT;
+        g_reply_capacity = MW_DEFAULT_REPLY_CAPACITY_Z2;
         g_is_bound = 1;
         mw_service_init();
         mw_wire_st32(&g_ctrl->slot_capacity, MW_DEFAULT_SLOT_CAPACITY_Z2);
@@ -241,6 +245,7 @@ int mw_service_bind_region(volatile void *region, uint32_t size)
         g_slot_ptrs[0] = (uint8_t *)region + MW_WINDOW_SLOT0_OFFSET;
         g_slot_ptrs[1] = NULL;
         g_reply_ptr = (uint8_t *)region + MW_WINDOW_REPLY_OFFSET_Z2_1SLOT;
+        g_reply_capacity = MW_DEFAULT_REPLY_CAPACITY_Z2;
         g_is_bound = 1;
         mw_service_init();
         mw_wire_st32(&g_ctrl->slot_capacity, MW_DEFAULT_SLOT_CAPACITY_Z2);
@@ -249,6 +254,7 @@ int mw_service_bind_region(volatile void *region, uint32_t size)
         g_slot_ptrs[0] = NULL;
         g_slot_ptrs[1] = NULL;
         g_reply_ptr = NULL;
+        g_reply_capacity = 0U;
         g_is_bound = 1;
         mw_service_init();
     }
@@ -666,13 +672,14 @@ int mw_service_poll(void)
 
         case 3: { /* READBACK: op_handle, op_arg1 = bytes */
             mw_ctx *c = mw_service_find_context(handle);
-            if (!c || !g_reply_ptr) {
+            if (!c || !g_reply_ptr || !g_reply_capacity) {
                 mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
             } else {
-                uint32_t cap = mw_wire_ld32(&g_ctrl->op_arg1) ? mw_wire_ld32(&g_ctrl->op_arg1) : (mw_wire_ld32(&g_ctrl->op_arg3) ? mw_wire_ld32(&g_ctrl->op_arg3) : MW_DEFAULT_REPLY_CAPACITY);
-                uint32_t status = mw_host_readback_rgba8(c, g_reply_ptr, cap);
+                uint32_t status = mw_host_readback_rgba8(c, g_reply_ptr,
+                                                          g_reply_capacity);
                 mw_wire_st32(&g_ctrl->op_status, status);
-                mw_wire_st32(&g_ctrl->op_reply_bytes, (status == MW_STATUS_OK) ? (c->width * c->height * 4) : 0);
+                mw_wire_st32(&g_ctrl->op_reply_bytes,
+                             status == MW_STATUS_OK ? c->width * c->height * 4U : 0U);
             }
             break;
         }
@@ -711,12 +718,16 @@ int mw_service_poll(void)
 
         case 5: { /* REQUEST: op_handle, op_arg1 = req bytes, op_arg3 = reply capacity */
             mw_ctx *c = mw_service_find_context(handle);
-            if (!c || !g_reply_ptr) {
+            uint32_t req_bytes = mw_wire_ld32(&g_ctrl->op_arg1);
+            uint32_t reply_cap = mw_wire_ld32(&g_ctrl->op_arg3);
+            if (!c || !g_reply_ptr || !g_reply_capacity) {
                 mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
+            } else if (req_bytes > g_reply_capacity) {
+                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_CAPACITY);
             } else {
-                uint32_t req_bytes = mw_wire_ld32(&g_ctrl->op_arg1);
-                uint32_t reply_cap = mw_wire_ld32(&g_ctrl->op_arg3) ? mw_wire_ld32(&g_ctrl->op_arg3) : MW_DEFAULT_REPLY_CAPACITY;
                 uint32_t reply_written = 0;
+                if (!reply_cap || reply_cap > g_reply_capacity)
+                    reply_cap = g_reply_capacity;
                 uint32_t status = mw_host_request(c, g_reply_ptr, req_bytes,
                                                   g_reply_ptr, reply_cap, &reply_written);
                 mw_wire_st32(&g_ctrl->op_status, status);
@@ -727,7 +738,7 @@ int mw_service_poll(void)
 
         case 6: { /* BLIT / CAPTURE: Direct VRAM presentation / capture */
             mw_ctx *c = mw_service_find_context(handle);
-            if (!c || !g_reply_ptr) {
+            if (!c || !g_reply_ptr || !g_reply_capacity) {
                 mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
             } else {
                 uint32_t req_bytes = mw_wire_ld32(&g_ctrl->op_arg1);
@@ -736,7 +747,9 @@ int mw_service_poll(void)
                 uint32_t arm = card_offset + 0x001F0000UL;
 
                 /* Check bounds against the card's RTG VRAM range */
-                if (card_offset < MNT_FB_BASE || arm < MW_VRAM_ARM_BASE ||
+                if (req_bytes > g_reply_capacity) {
+                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_CAPACITY);
+                } else if (card_offset < MNT_FB_BASE || arm < MW_VRAM_ARM_BASE ||
                     span_total == 0 || (uint64_t)arm + span_total > g_vram_limit_arm) {
                     mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
                 } else if (req_bytes < 24) {
