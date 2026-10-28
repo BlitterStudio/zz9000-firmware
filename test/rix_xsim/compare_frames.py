@@ -62,7 +62,8 @@ def main():
     beyond_one = 0
     coverage = 0
     diff = bytearray(width * height * 3)
-    clear = (ref[0] >> 3, ref[1] >> 2, ref[2] >> 3)
+    expected_clear = (ref[0] >> 3, ref[1] >> 2, ref[2] >> 3)
+    actual_clear = (cand[0] >> 3, cand[1] >> 2, cand[2] >> 3)
     for index in range(width * height):
         base = index * 3
         expected = (ref[base] >> 3, ref[base + 1] >> 2, ref[base + 2] >> 3)
@@ -73,8 +74,8 @@ def main():
             maxima[channel] = max(maxima[channel], error[channel])
         if max(error) > 1:
             beyond_one += 1
-        expected_drawn = expected != clear
-        actual_drawn = actual != clear
+        expected_drawn = expected != expected_clear
+        actual_drawn = actual != actual_clear
         if expected_drawn != actual_drawn:
             coverage += 1
             diff[base:base + 3] = b"\xff\xff\x00"

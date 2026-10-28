@@ -38,6 +38,11 @@ flat-primary-colour rendering.
 
 ## Captured MiniGL scenes
 
+Build real wire-v9 captures with `make -C test/minigl_v9 rix_v9_capture`, then
+run `test/minigl_v9/rix_v9_capture OUT`. It emits `blended_quad`, `gears`, and
+`textured_lightmap` directories containing `commands.hex`, `ddr.hex`, and
+`cpu.ppm`; replay each directory with `run_xsim.bat ROOT OUT SCENE LATENCY`.
+
 `run_xsim.bat ROOT OUT SCENE LATENCY` automatically selects capture mode when
 `OUT\SCENE\commands.hex` (or the singular `command.hex`) and `ddr.hex` exist.
 It passes `CMDS`, `DDR`, `PPM`, and `SCENE` to the testbench; the output is
@@ -63,11 +68,14 @@ ff
 00
 ```
 
-The harness maps MiniGL's `0x07820000` color and `0x07b20000` depth buffers
-to compact backing arrays, and maps the capture's 24 MiB texture pool from
-`0x00380000`; the sparse preload represents omitted bytes as zero. It writes
-the PPM from the physical color location. Direct single-buffer `CMD`/`TEXTURE`
-operation remains the S1–S4 path.
+The host capture serialiser rewrites only RasterIX color/depth register
+operands from host heap pointers to the harness's `0x07820000` color and
+`0x07b20000` depth aliases, retaining the backend's commands and per-band
+offsets unchanged. The harness maps those targets to compact backing arrays
+and maps the capture's 24 MiB texture pool from `0x00380000`; the sparse
+preload represents omitted bytes as zero. It writes the PPM from the physical
+color location. Direct single-buffer `CMD`/`TEXTURE` operation remains the
+S1–S4 path.
 For a mixed CPU/FPGA frame, an optional `handoff.ddr` is a sparse target
 snapshot written by the CPU fallback. The launcher applies it after captured
 submission 1 and before submission 2, preserving the real target hand-off.

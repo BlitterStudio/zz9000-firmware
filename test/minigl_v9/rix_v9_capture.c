@@ -14,6 +14,7 @@
 #include <math.h>
 #include <sys/stat.h>
 
+#include "mw_ctx.h"
 #include "mw_host.h"
 #include "mw_types.h"
 #include "minigl_raster.h"
@@ -26,6 +27,13 @@
 #define CAPTURE_COMMAND_ADDRESS 0x00100000U
 #define CAPTURE_WHITE_ADDRESS   0x00300000U
 #define CAPTURE_TEXTURE_ADDRESS 0x00380000U
+/*
+ * The host service renders through ordinary heap pointers, unlike ARM where
+ * these are physical card-pool addresses.  The xsim harness maps these stable
+ * physical targets to compact backing arrays when it replays a capture.
+ */
+#define CAPTURE_COLOR_ADDRESS   0x07820000U
+#define CAPTURE_DEPTH_ADDRESS   0x07b20000U
 
 struct capture_model {
     uint32_t csr[16];
@@ -142,6 +150,122 @@ static void configure_capture_platform(struct capture_model *model)
     platform.texture_address = model->texture_address;
     platform.texture_bytes = TEXTURE_BYTES;
     minigl_raster_set_rix_platform(&platform);
+}
+
+static uint32_t read_le32(const uint8_t *bytes)
+{
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) |
+           ((uint32_t)bytes[2] << 16U) | ((uint32_t)bytes[3] << 24U);
+}
+
+static void write_le32(uint8_t *bytes, uint32_t value)
+{
+    bytes[0] = (uint8_t)value;
+    bytes[1] = (uint8_t)(value >> 8U);
+    bytes[2] = (uint8_t)(value >> 16U);
+    bytes[3] = (uint8_t)(value >> 24U);
+}
+
+static int relocate_address(uint32_t address, const uint32_t *sources,
+                            size_t count, uint32_t bytes, uint32_t target,
+                            uint32_t *relocated)
+{
+    size_t index;
+
+    for (index = 0U; index < count; ++index) {
+        uint32_t offset = address - sources[index];
+
+        if (offset < bytes) {
+            *relocated = target + offset;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Host MiniGL uses process pointers for its targets.  Rewrite only the
+ * RasterIX color/depth register values in the captured DSE payload, preserving
+ * every backend command and all offsets.  The resulting physical addresses
+ * match the sparse xsim DDR aliases.
+ */
+static void relocate_capture_targets(struct capture_model *model,
+                                     const mw_ctx *context,
+                                     unsigned *color_count,
+                                     unsigned *depth_count)
+{
+    uint32_t color_sources[3];
+    uint32_t depth_source;
+    size_t stream = 0U;
+    size_t index;
+
+    assert(model != NULL && context != NULL);
+    *color_count = 0U;
+    *depth_count = 0U;
+    for (index = 0U; index < 3U; ++index)
+        color_sources[index] = (uint32_t)(uintptr_t)context->color_buffers[index];
+    depth_source = (uint32_t)(uintptr_t)context->depth_buffer;
+
+    while (stream < model->submitted_bytes) {
+        uint32_t dse_header;
+        size_t parser;
+        size_t parser_end;
+
+        assert(model->submitted_bytes - stream >= 8U);
+        dse_header = read_le32(model->submitted + stream);
+        assert((dse_header & 0xf0000000U) == 0x90000000U);
+        parser = stream + 8U;
+        parser_end = parser + (dse_header & 0x0fffffffU);
+        assert(parser_end >= parser && parser_end <= model->submitted_bytes);
+        while (parser < parser_end) {
+            uint32_t command = read_le32(model->submitted + parser);
+            uint32_t kind = command & 0xf0000000U;
+
+            if (kind == RIX_OP_RENDER_CONFIG) {
+                uint32_t value;
+                uint32_t relocated;
+
+                assert(parser_end - parser >= 8U);
+                value = read_le32(model->submitted + parser + 4U);
+                if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_COLOR_BUFFER_ADDR)) {
+                    assert(relocate_address(value, color_sources, 3U,
+                                            WIDTH * HEIGHT * sizeof(uint32_t),
+                                            CAPTURE_COLOR_ADDRESS, &relocated));
+                    write_le32(model->submitted + parser + 4U, relocated);
+                    ++*color_count;
+                } else if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_DEPTH_BUFFER_ADDR)) {
+                    assert(relocate_address(value, &depth_source, 1U,
+                                            WIDTH * HEIGHT * sizeof(uint32_t),
+                                            CAPTURE_DEPTH_ADDRESS, &relocated));
+                    write_le32(model->submitted + parser + 4U, relocated);
+                    ++*depth_count;
+                }
+                parser += 8U;
+            } else if (kind == RIX_OP_FRAMEBUFFER) {
+                parser += 4U;
+            } else if (kind == RIX_OP_TRIANGLE_STREAM) {
+                size_t bytes = command & 0x3ffU;
+
+                assert((bytes & 3U) == 0U && bytes <= parser_end - parser - 4U);
+                parser += 4U + bytes;
+            } else if (kind == RIX_OP_TEXTURE_STREAM) {
+                size_t pages = command & 0x7ffffU;
+
+                assert(pages <= (parser_end - parser - 4U) / 4U);
+                parser += 4U + pages * 4U;
+            } else if (kind == RIX_OP_FOG_LUT_STREAM) {
+                size_t bytes = command & 0xffffU;
+
+                assert((bytes & 3U) == 0U && bytes <= parser_end - parser - 4U);
+                parser += 4U + bytes;
+            } else {
+                assert(!"unknown RasterIX parser command");
+            }
+        }
+        assert(parser == parser_end);
+        stream = parser_end;
+    }
+    assert(stream == model->submitted_bytes);
 }
 
 static void write_words(const char *path, const uint8_t *bytes, size_t count)
@@ -624,6 +748,8 @@ static void capture_scene(const char *directory, const char *name)
 {
     struct capture_model model;
     char path[1024];
+    unsigned color_relocations;
+    unsigned depth_relocations;
 
     capture_model_init(&model);
     configure_capture_platform(&model);
@@ -634,13 +760,16 @@ static void capture_scene(const char *directory, const char *name)
     run_scene(name, c);
 
     assert(model.submitted_count >= 1U);
+    relocate_capture_targets(&model, c, &color_relocations, &depth_relocations);
+    assert(color_relocations != 0U && depth_relocations != 0U);
     assert(snprintf(path, sizeof(path), "%s/commands.hex", directory) > 0);
     write_words(path, model.submitted, model.submitted_bytes);
     assert(snprintf(path, sizeof(path), "%s/ddr.hex", directory) > 0);
     write_ddr(path, &model);
 
-    printf("captured scene=%s submissions=%u command_bytes=%zu\n",
-           name, model.submitted_count, model.submitted_bytes);
+    printf("captured scene=%s submissions=%u command_bytes=%zu targets=%u/%u\n",
+           name, model.submitted_count, model.submitted_bytes,
+           color_relocations, depth_relocations);
 
     mw_host_destroy(c);
     minigl_raster_set_rix_platform(NULL);
