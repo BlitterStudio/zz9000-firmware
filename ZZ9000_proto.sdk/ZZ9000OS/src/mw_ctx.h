@@ -48,6 +48,7 @@ struct mw_ctx {
     uint8_t   presented_request[24 + 16 * MW_BLIT_MAX_RECTS];
     uint32_t  presented_request_len;
     uint8_t  *presented_span;
+    uint32_t  presented_copy_address;
     uint32_t  presented_span_size;
     uint32_t  presented_span_capacity;
     uint8_t   presented_valid;

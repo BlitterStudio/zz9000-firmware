@@ -197,7 +197,7 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     c->width = width;
     c->height = height;
     mw_state_init(&c->state, width, height);
-    mw_texmgr_init(&c->texmgr);
+    mw_texmgr_init_owned(&c->texmgr, owner);
 
     for (i = 0; i < 3; ++i) {
         c->color_buffers[i] = (uint32_t *)mw_context_alloc(
@@ -218,7 +218,11 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
         return NULL;
     }
 
-    c->texture_pool_bytes = 16U * 1024U * 1024U;
+    /* GLQuake's working set includes full generated mip chains; 16 MiB
+     * exhausted before its resident textures settled, leaving the CPU
+     * rasterizer with incomplete white textures.  Keep the CPU residency
+     * aligned with the 24 MiB RasterIX texture budget. */
+    c->texture_pool_bytes = 24U * 1024U * 1024U;
     c->texture_pool = (uint8_t *)mw_context_alloc(
         c, c->texture_pool_bytes, &c->texture_pool_address);
     if (!c->texture_pool) {
@@ -269,7 +273,7 @@ void mw_host_destroy(mw_ctx *c)
         c->vertex_scratch = NULL;
     }
     if (c->presented_span) {
-        free(c->presented_span);
+        mw_context_free(c, c->presented_span, &c->presented_copy_address);
         c->presented_span = NULL;
     }
     mw_texmgr_destroy(&c->texmgr);
@@ -309,19 +313,22 @@ static int mw_ensure_scratch(mw_ctx *c, uint32_t needed_words)
  * rasterizer keeps an independent texture copy, so every generated level
  * must also be uploaded there -- the reference host regenerates the chain
  * on the GPU the same way. Level 0 is uploaded by the image commands. */
-static void mw_upload_generated_mips(mw_ctx *c, const mw_texture *t)
+static int mw_upload_generated_mips(mw_ctx *c, const mw_texture *t)
 {
     uint32_t lvl;
+
     (void)c;
     if (!t)
-        return;
+        return 0;
     for (lvl = 1; lvl < MW_MAX_MIP_LEVELS; ++lvl) {
-        if (t->pixels[lvl] && t->widths[lvl] && t->heights[lvl])
-            (void)minigl_raster_upload_rgba8(t->id, (uint16_t)lvl,
-                                             (uint16_t)t->widths[lvl],
-                                             (uint16_t)t->heights[lvl],
-                                             t->pixels[lvl], t->internal_rgb[lvl]);
+        if (t->pixels[lvl] && t->widths[lvl] && t->heights[lvl] &&
+            !minigl_raster_upload_rgba8(t->id, (uint16_t)lvl,
+                                        (uint16_t)t->widths[lvl],
+                                        (uint16_t)t->heights[lvl],
+                                        t->pixels[lvl], t->internal_rgb[lvl]))
+            return 0;
     }
+    return 1;
 }
 
 static int mw_execute_command(void *user, const mw_command *cmd)
@@ -575,40 +582,30 @@ static int mw_execute_command(void *user, const mw_command *cmd)
             return 0;
 
         t = mw_texmgr_find(&c->texmgr, name);
-        if (t && t->pixels[level]) {
-            (void)minigl_raster_upload_rgba8(name, (uint16_t)level, (uint16_t)width, (uint16_t)height,
-                                             t->pixels[level], t->internal_rgb[level]);
-        }
+        if (!t || !t->pixels[level] ||
+            !minigl_raster_upload_rgba8(name, (uint16_t)level,
+                                        (uint16_t)width, (uint16_t)height,
+                                        t->pixels[level], t->internal_rgb[level]))
+            return 0;
         break;
     }
 
     case MW_TEXTURE_SUB_RAW: {
         uint32_t name = mw_be32(p);
         uint32_t level = mw_be32(p + 4);
-        uint32_t xoffset = mw_be32(p + 8);
-        uint32_t yoffset = mw_be32(p + 12);
-        uint32_t width = mw_be32(p + 16);
-        uint32_t height = mw_be32(p + 20);
         mw_texture *t;
 
         if (!mw_texmgr_sub_raw(&c->texmgr, p, cmd->bytes, (const uint8_t (*)[4])c->palette, c->palette_width))
             return 0;
 
         t = mw_texmgr_find(&c->texmgr, name);
-        if (t && t->pixels[level]) {
-            uint32_t *sub = (uint32_t *)malloc((size_t)width * height * sizeof(uint32_t));
-            if (sub) {
-                uint32_t y;
-                for (y = 0; y < height; ++y)
-                    memcpy(sub + (size_t)y * width,
-                           t->pixels[level] + (size_t)(yoffset + y) * t->widths[level] + xoffset,
-                           (size_t)width * sizeof(uint32_t));
-                (void)minigl_raster_subimage_rgba8(name, (uint16_t)level, (uint16_t)xoffset, (uint16_t)yoffset,
-                                                   (uint16_t)width, (uint16_t)height, sub, t->internal_rgb[level]);
-                mw_upload_generated_mips(c, t);
-                free(sub);
-            }
-        }
+        if (!t || !t->pixels[level] ||
+            !minigl_raster_upload_rgba8(name, (uint16_t)level,
+                                        (uint16_t)t->widths[level],
+                                        (uint16_t)t->heights[level],
+                                        t->pixels[level], t->internal_rgb[level]) ||
+            !mw_upload_generated_mips(c, t))
+            return 0;
         break;
     }
     case MW_TEXTURE_PARAM: {
@@ -618,11 +615,14 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         float fval = mw_bef(p + 8);
         mw_texture *t;
 
-        (void)mw_texmgr_param(&c->texmgr, name, pname, val, fval);
+        if (!mw_texmgr_param(&c->texmgr, name, pname, val, fval))
+            return 0;
         t = mw_texmgr_find(&c->texmgr, name);
         if (t) {
-            minigl_raster_tex_params(name, t->min_filter, t->mag_filter, t->wrap_s, t->wrap_t);
-            mw_upload_generated_mips(c, t);
+            minigl_raster_tex_params(name, t->min_filter, t->mag_filter,
+                                     t->wrap_s, t->wrap_t);
+            if (!mw_upload_generated_mips(c, t))
+                return 0;
         }
         break;
     }
@@ -658,65 +658,57 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         if (!src_buf) return 0;
 
         if (define) {
-            if (t->widths[level] != w || t->heights[level] != h || !t->pixels[level]) {
-                if (t->pixels[level]) free(t->pixels[level]);
-                t->pixels[level] = (uint32_t *)malloc((size_t)w * h * sizeof(uint32_t));
-                if (!t->pixels[level]) return 0;
-                t->widths[level] = w;
-                t->heights[level] = h;
-            }
+            if (!mw_texmgr_allocate_level(&c->texmgr, t, level, w, h))
+                return 0;
             t->base_format[level] = internal_format;
             t->internal_rgb[level] = (internal_format == 3 || internal_format == 0x1907);
-
             uint32_t r, col;
             for (r = 0; r < h; ++r) {
                 int32_t src_y = (int32_t)c->height - 1 - (y + (int32_t)r);
                 for (col = 0; col < w; ++col) {
                     int32_t src_x = x + (int32_t)col;
                     uint32_t px = 0;
-                    if (src_x >= 0 && src_x < (int32_t)c->width && src_y >= 0 && src_y < (int32_t)c->height) {
+                    if (src_x >= 0 && src_x < (int32_t)c->width &&
+                        src_y >= 0 && src_y < (int32_t)c->height)
                         px = src_buf[(uint32_t)src_y * c->width + (uint32_t)src_x];
-                    }
-                    if (t->internal_rgb[level]) px |= 0xffU;
+                    if (t->internal_rgb[level])
+                        px |= 0xffU;
                     t->pixels[level][r * w + col] = px;
                 }
             }
-            (void)minigl_raster_upload_rgba8(name, (uint16_t)level, (uint16_t)w, (uint16_t)h,
-                                             t->pixels[level], t->internal_rgb[level]);
         } else {
-            if (level >= MW_MAX_MIP_LEVELS || !t->pixels[level] ||
-                xoffset + w > t->widths[level] || yoffset + h > t->heights[level])
-                return 0;
-
-            uint32_t *sub = (uint32_t *)malloc((size_t)w * h * sizeof(uint32_t));
-            if (!sub) return 0;
-
             uint32_t r, col;
+            if (!t->pixels[level] || xoffset + w > t->widths[level] ||
+                yoffset + h > t->heights[level])
+                return 0;
             for (r = 0; r < h; ++r) {
                 int32_t src_y = (int32_t)c->height - 1 - (y + (int32_t)r);
                 for (col = 0; col < w; ++col) {
                     int32_t src_x = x + (int32_t)col;
                     uint32_t px = 0;
-                    if (src_x >= 0 && src_x < (int32_t)c->width && src_y >= 0 && src_y < (int32_t)c->height) {
+                    if (src_x >= 0 && src_x < (int32_t)c->width &&
+                        src_y >= 0 && src_y < (int32_t)c->height)
                         px = src_buf[(uint32_t)src_y * c->width + (uint32_t)src_x];
-                    }
-                    if (t->internal_rgb[level]) px |= 0xffU;
-                    t->pixels[level][(yoffset + r) * t->widths[level] + (xoffset + col)] = px;
-                    sub[r * w + col] = px;
+                    if (t->internal_rgb[level])
+                        px |= 0xffU;
+                    t->pixels[level][(yoffset + r) * t->widths[level] +
+                                      (xoffset + col)] = px;
                 }
             }
-            (void)minigl_raster_subimage_rgba8(name, (uint16_t)level, (uint16_t)xoffset, (uint16_t)yoffset,
-                                               (uint16_t)w, (uint16_t)h, sub, t->internal_rgb[level]);
-            free(sub);
         }
-
+        if (!minigl_raster_upload_rgba8(name, (uint16_t)level,
+                                        (uint16_t)t->widths[level],
+                                        (uint16_t)t->heights[level],
+                                        t->pixels[level],
+                                        t->internal_rgb[level]))
+            return 0;
         if (level == 0 && t->generate_mipmap) {
-            mw_texmgr_generate_mips(t);
-            mw_upload_generated_mips(c, t);
+            if (!mw_texmgr_generate_mips(&c->texmgr, t) ||
+                !mw_upload_generated_mips(c, t))
+                return 0;
         }
         break;
     }
-
     case MW_COLOR_TABLE: {
         uint32_t width = mw_be32(p + 12);
         uint32_t format = mw_be32(p + 16);
@@ -749,8 +741,12 @@ static int mw_execute_command(void *user, const mw_command *cmd)
                             t->pixels[lvl][k] = 0x000000ffU;
                         }
                     }
-                    (void)minigl_raster_upload_rgba8(t->id, (uint16_t)lvl, (uint16_t)t->widths[lvl],
-                                                     (uint16_t)t->heights[lvl], t->pixels[lvl], t->internal_rgb[lvl]);
+                    if (!minigl_raster_upload_rgba8(t->id, (uint16_t)lvl,
+                                                    (uint16_t)t->widths[lvl],
+                                                    (uint16_t)t->heights[lvl],
+                                                    t->pixels[lvl],
+                                                    t->internal_rgb[lvl]))
+                        return 0;
                 }
             }
         }
@@ -841,23 +837,32 @@ static int mw_execute_command(void *user, const mw_command *cmd)
     return 1;
 }
 
-uint32_t mw_host_submit(mw_ctx *c, const uint8_t *packet, uint32_t bytes)
+uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
+                               uint32_t *failed_opcode)
 {
     uint32_t status;
 
+    if (failed_opcode)
+        *failed_opcode = 0U;
     if (!c || !packet || bytes < 16)
         return MW_STATUS_INVALID;
 
-    status = mw_validate_packet(packet, bytes);
+    status = mw_validate_packet_report(packet, bytes, failed_opcode);
     if (status != MW_STATUS_OK)
         return status;
 
     mw_ctx_bind_buffers(c);
     mw_ctx_sync_to_raster(c);
 
-    status = mw_parse_packet(packet, bytes, mw_execute_command, c);
+    status = mw_parse_packet_report(packet, bytes, mw_execute_command, c,
+                                    failed_opcode);
     (void)minigl_raster_finish();
     return status;
+}
+
+uint32_t mw_host_submit(mw_ctx *c, const uint8_t *packet, uint32_t bytes)
+{
+    return mw_host_submit_report(c, packet, bytes, NULL);
 }
 
 static inline uint8_t mw_widen5(uint32_t v) {
@@ -1172,12 +1177,18 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
     }
 
     if (total_rect_bytes > 0) {
+        if (total_rect_bytes > UINT32_MAX)
+            return 0;
         if (total_rect_bytes > c->presented_span_capacity) {
-            uint8_t *new_buf = (uint8_t *)realloc(c->presented_span, total_rect_bytes);
-            if (new_buf) {
-                c->presented_span = new_buf;
-                c->presented_span_capacity = (uint32_t)total_rect_bytes;
-            }
+            uint32_t new_address = 0U;
+            uint8_t *new_buf = (uint8_t *)mw_context_alloc(
+                c, (uint32_t)total_rect_bytes, &new_address);
+            if (!new_buf)
+                return 0;
+            mw_context_free(c, c->presented_span, &c->presented_copy_address);
+            c->presented_span = new_buf;
+            c->presented_copy_address = new_address;
+            c->presented_span_capacity = (uint32_t)total_rect_bytes;
         }
         if (c->presented_span && total_rect_bytes <= c->presented_span_capacity) {
             size_t at = 0;

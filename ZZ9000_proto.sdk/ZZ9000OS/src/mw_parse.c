@@ -581,13 +581,16 @@ uint32_t mw_validate_packet_report(const uint8_t *packet, uint32_t bytes,
     return mw_validate_packet_impl(packet, bytes, failed_opcode);
 }
 
-uint32_t mw_parse_packet(const uint8_t *packet, uint32_t bytes,
-                         mw_command_visitor visitor, void *user)
+uint32_t mw_parse_packet_report(const uint8_t *packet, uint32_t bytes,
+                                mw_command_visitor visitor, void *user,
+                                uint32_t *failed_opcode)
 {
     uint32_t val_status, count, i;
     size_t offset;
 
-    val_status = mw_validate_packet(packet, bytes);
+    if (failed_opcode)
+        *failed_opcode = 0U;
+    val_status = mw_validate_packet_report(packet, bytes, failed_opcode);
     if (val_status != MW_STATUS_OK)
         return val_status;
 
@@ -604,9 +607,18 @@ uint32_t mw_parse_packet(const uint8_t *packet, uint32_t bytes,
         cmd.payload = packet + offset + 8;
         offset += 8 + cmd.bytes;
 
-        if (!visitor(user, &cmd))
+        if (!visitor(user, &cmd)) {
+            if (failed_opcode)
+                *failed_opcode = cmd.opcode;
             return MW_STATUS_FAILED;
+        }
     }
 
     return MW_STATUS_OK;
+}
+
+uint32_t mw_parse_packet(const uint8_t *packet, uint32_t bytes,
+                         mw_command_visitor visitor, void *user)
+{
+    return mw_parse_packet_report(packet, bytes, visitor, user, NULL);
 }

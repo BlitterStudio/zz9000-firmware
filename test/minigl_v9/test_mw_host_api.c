@@ -254,6 +254,89 @@ static void test_requests(void)
     printf("PASS: test_requests\n");
 }
 
+static uint32_t texture_packet(uint8_t *packet, uint32_t opcode, uint32_t payload_bytes)
+{
+    memset(packet, 0, 24U + payload_bytes);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, 24U + payload_bytes);
+    mw_put_be32(packet + 12, 1U);
+    mw_put_be32(packet + 16, opcode);
+    mw_put_be32(packet + 20, payload_bytes);
+    return 24U + payload_bytes;
+}
+
+static uint32_t define_texture(uint8_t *packet, uint32_t name)
+{
+    uint32_t bytes = texture_packet(packet, MW_TEXTURE_IMAGE_RAW, 56U);
+
+    mw_put_be32(packet + 24, name);
+    mw_put_be32(packet + 28, 0U);
+    mw_put_be32(packet + 32, 4U);
+    mw_put_be32(packet + 36, 256U);
+    mw_put_be32(packet + 40, 256U);
+    mw_put_be32(packet + 44, 0x1908U);
+    mw_put_be32(packet + 48, 0x1401U);
+    mw_put_be32(packet + 52, 4U);
+    mw_put_be32(packet + 76, 0U);
+    return bytes;
+}
+
+static uint32_t texture_generate_mips(uint8_t *packet, uint32_t name)
+{
+    uint32_t bytes = texture_packet(packet, MW_TEXTURE_PARAM, 12U);
+
+    mw_put_be32(packet + 24, name);
+    mw_put_be32(packet + 28, 0x8191U);
+    mw_put_be32(packet + 32, 1U);
+    return bytes;
+}
+
+static uint32_t lightmap_subimage(uint8_t *packet, uint32_t name, uint8_t value)
+{
+    uint32_t bytes = texture_packet(packet, MW_TEXTURE_SUB_RAW, 60U + 16U * 16U * 4U);
+    uint8_t *pixels = packet + 84;
+
+    mw_put_be32(packet + 24, name);
+    mw_put_be32(packet + 28, 0U);
+    mw_put_be32(packet + 32, 0U);
+    mw_put_be32(packet + 36, 0U);
+    mw_put_be32(packet + 40, 16U);
+    mw_put_be32(packet + 44, 16U);
+    mw_put_be32(packet + 48, 0x1908U);
+    mw_put_be32(packet + 52, 0x1401U);
+    mw_put_be32(packet + 56, 4U);
+    mw_put_be32(packet + 80, 16U * 16U * 4U);
+    memset(pixels, value, 16U * 16U * 4U);
+    return bytes;
+}
+
+static void test_glquake_texture_soak(void)
+{
+    enum { texture_count = 64, frame_count = 2048 };
+    uint8_t packet[1108];
+    uint32_t failed_opcode = 0U;
+    mw_ctx *c = mw_host_create(640U, 480U);
+    uint32_t texture;
+
+    assert(c != NULL);
+    assert(mw_host_submit_report(c, packet,
+                                 lightmap_subimage(packet, 999U, 0U),
+                                 &failed_opcode) == MW_STATUS_FAILED);
+    assert(failed_opcode == MW_TEXTURE_SUB_RAW);
+    for (texture = 1U; texture <= texture_count; ++texture) {
+        assert(mw_host_submit(c, packet, define_texture(packet, texture)) == MW_STATUS_OK);
+        assert(mw_host_submit(c, packet, texture_generate_mips(packet, texture)) ==
+               MW_STATUS_OK);
+    }
+    for (texture = 0U; texture < frame_count; ++texture)
+        assert(mw_host_submit(c, packet,
+                              lightmap_subimage(packet, texture_count,
+                                                (uint8_t)texture)) == MW_STATUS_OK);
+    mw_host_destroy(c);
+    printf("PASS: test_glquake_texture_soak\n");
+}
+
 int main(void)
 {
     test_create_destroy();
@@ -261,6 +344,7 @@ int main(void)
     test_rejected_packet_changes_no_state();
     test_draw_triangle_golden();
     test_requests();
+    test_glquake_texture_soak();
     printf("All host API tests PASSED!\n");
     return 0;
 }

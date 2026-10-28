@@ -482,9 +482,8 @@ int mw_service_poll(void)
 
                 if (c && packet_bytes >= 16 && packet_bytes <= mw_wire_ld32(&g_ctrl->slot_capacity)) {
                     uint32_t opcode = 0U;
-                    uint32_t status = mw_validate_packet_report(slot_buf, packet_bytes, &opcode);
-                    if (status == MW_STATUS_OK)
-                        status = mw_host_submit(c, slot_buf, packet_bytes);
+                    uint32_t status = mw_host_submit_report(c, slot_buf, packet_bytes,
+                                                            &opcode);
                     mw_wire_st32(&g_ctrl->op_status, status);
                     if (status != MW_STATUS_OK)
                         mw_log_reject(status, opcode);

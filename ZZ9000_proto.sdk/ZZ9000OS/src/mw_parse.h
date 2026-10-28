@@ -34,10 +34,14 @@ uint32_t mw_validate_packet_report(const uint8_t *packet, uint32_t bytes,
                                    uint32_t *failed_opcode);
 
 /*
- * Validates and executes visitor on each command.
- * If validation fails, visitor is NEVER invoked.
- * If visitor returns 0 (false), execution aborts and returns MW_STATUS_FAILED.
+ * As mw_parse_packet(), also returns the opcode whose visitor rejected the
+ * packet.  Validation failures report the malformed command opcode.
  */
+uint32_t mw_parse_packet_report(const uint8_t *packet, uint32_t bytes,
+                                mw_command_visitor visitor, void *user,
+                                uint32_t *failed_opcode);
+
+/* Executes a packet without needing failure diagnostics. */
 uint32_t mw_parse_packet(const uint8_t *packet, uint32_t bytes,
                          mw_command_visitor visitor, void *user);
 

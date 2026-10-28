@@ -5,6 +5,12 @@
  */
 
 #include "mw_texture.h"
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#include "card_pool.h"
+#define MW_TEXMGR_CARD_POOL 1
+#else
+#define MW_TEXMGR_CARD_POOL 0
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -152,37 +158,96 @@ static uint32_t mw_tex_raw_pixel(const uint8_t *p, uint32_t format, uint32_t typ
     }
 }
 
+static void *mw_texmgr_alloc(mw_texture_manager *tm, size_t bytes,
+                             uint32_t *address)
+{
+#if MW_TEXMGR_CARD_POOL
+    uint32_t card_address;
+
+    if (bytes > UINT32_MAX)
+        return NULL;
+    card_address = card_pool_alloc(&card_pool, (uint32_t)bytes,
+                                   tm->card_pool_owner);
+    if (!card_address)
+        return NULL;
+    *address = card_address;
+    return (void *)(uintptr_t)card_address;
+#else
+    (void)tm;
+    *address = 0U;
+    return malloc(bytes);
+#endif
+}
+
+static void mw_texmgr_free(mw_texture_manager *tm, void *memory,
+                           uint32_t *address)
+{
+#if MW_TEXMGR_CARD_POOL
+    (void)memory;
+    if (*address)
+        (void)card_pool_free(&card_pool, *address, tm->card_pool_owner);
+    *address = 0U;
+#else
+    (void)tm;
+    (void)address;
+    free(memory);
+#endif
+}
+
+void mw_texmgr_init_owned(mw_texture_manager *tm, uint32_t card_pool_owner)
+{
+    uint32_t address = 0U;
+
+    memset(tm, 0, sizeof(*tm));
+    tm->card_pool_owner = card_pool_owner;
+#if MW_TEXMGR_CARD_POOL
+    tm->capacity = 1024U;
+#else
+    tm->capacity = 16U;
+#endif
+    tm->textures = (mw_texture *)mw_texmgr_alloc(
+        tm, (size_t)tm->capacity * sizeof(*tm->textures), &address);
+    if (!tm->textures) {
+        tm->capacity = 0U;
+        return;
+    }
+    tm->textures_address = address;
+    memset(tm->textures, 0, (size_t)tm->capacity * sizeof(*tm->textures));
+}
+
 void mw_texmgr_init(mw_texture_manager *tm)
 {
-    tm->capacity = 16;
-    tm->count = 0;
-    tm->textures = (mw_texture *)calloc(tm->capacity, sizeof(mw_texture));
+    mw_texmgr_init_owned(tm, 0U);
+}
+
+static void mw_texmgr_free_level(mw_texture_manager *tm, mw_texture *t,
+                                 uint32_t level)
+{
+    if (t->pixels[level]) {
+        mw_texmgr_free(tm, t->pixels[level], &t->pixel_addresses[level]);
+        t->pixels[level] = NULL;
+    }
+    if (t->indices[level]) {
+        mw_texmgr_free(tm, t->indices[level], &t->index_addresses[level]);
+        t->indices[level] = NULL;
+    }
+    t->widths[level] = 0U;
+    t->heights[level] = 0U;
 }
 
 void mw_texmgr_destroy(mw_texture_manager *tm)
 {
     uint32_t i, lvl;
+
     if (!tm || !tm->textures)
         return;
-
-    for (i = 0; i < tm->capacity; ++i) {
-        if (tm->textures[i].valid) {
-            for (lvl = 0; lvl < MW_MAX_MIP_LEVELS; ++lvl) {
-                if (tm->textures[i].pixels[lvl]) {
-                    free(tm->textures[i].pixels[lvl]);
-                    tm->textures[i].pixels[lvl] = NULL;
-                }
-                if (tm->textures[i].indices[lvl]) {
-                    free(tm->textures[i].indices[lvl]);
-                    tm->textures[i].indices[lvl] = NULL;
-                }
-            }
-        }
-    }
-    free(tm->textures);
+    for (i = 0; i < tm->capacity; ++i)
+        for (lvl = 0; lvl < MW_MAX_MIP_LEVELS; ++lvl)
+            mw_texmgr_free_level(tm, &tm->textures[i], lvl);
+    mw_texmgr_free(tm, tm->textures, &tm->textures_address);
     tm->textures = NULL;
-    tm->capacity = 0;
-    tm->count = 0;
+    tm->capacity = 0U;
+    tm->count = 0U;
 }
 
 mw_texture *mw_texmgr_find(mw_texture_manager *tm, uint32_t id)
@@ -199,40 +264,49 @@ mw_texture *mw_texmgr_find(mw_texture_manager *tm, uint32_t id)
 
 mw_texture *mw_texmgr_get_or_create(mw_texture_manager *tm, uint32_t id)
 {
-    mw_texture *t;
+    mw_texture *t = NULL;
     uint32_t i;
 
     t = mw_texmgr_find(tm, id);
     if (t)
         return t;
-
-    /* Find free slot */
     for (i = 0; i < tm->capacity; ++i) {
         if (!tm->textures[i].valid) {
             t = &tm->textures[i];
             break;
         }
     }
-
     if (!t) {
-        /* Grow capacity */
-        uint32_t new_cap = tm->capacity * 2;
-        mw_texture *new_textures = (mw_texture *)realloc(tm->textures, new_cap * sizeof(mw_texture));
+        uint32_t new_capacity = tm->capacity * 2U;
+        uint32_t new_address = 0U;
+        mw_texture *new_textures;
+#if MW_TEXMGR_CARD_POOL
+        return NULL;
+#endif
+        if (new_capacity <= tm->capacity ||
+            new_capacity > UINT32_MAX / sizeof(*new_textures))
+            return NULL;
+        new_textures = (mw_texture *)mw_texmgr_alloc(
+            tm, (size_t)new_capacity * sizeof(*new_textures), &new_address);
         if (!new_textures)
             return NULL;
-        memset(new_textures + tm->capacity, 0, (new_cap - tm->capacity) * sizeof(mw_texture));
+        memcpy(new_textures, tm->textures,
+               (size_t)tm->capacity * sizeof(*new_textures));
+        memset(new_textures + tm->capacity, 0,
+               (size_t)(new_capacity - tm->capacity) * sizeof(*new_textures));
+        mw_texmgr_free(tm, tm->textures, &tm->textures_address);
         tm->textures = new_textures;
+        tm->textures_address = new_address;
         t = &tm->textures[tm->capacity];
-        tm->capacity = new_cap;
+        tm->capacity = new_capacity;
     }
-
     memset(t, 0, sizeof(*t));
     t->id = id;
-    t->valid = 1;
-    t->min_filter = 0x2701; /* GL_LINEAR_MIPMAP_NEAREST */
-    t->mag_filter = 0x2601; /* GL_LINEAR */
-    t->wrap_s = 0x2901;     /* GL_REPEAT */
-    t->wrap_t = 0x2901;     /* GL_REPEAT */
+    t->valid = 1U;
+    t->min_filter = 0x2701U;
+    t->mag_filter = 0x2601U;
+    t->wrap_s = 0x2901U;
+    t->wrap_t = 0x2901U;
     tm->count++;
     return t;
 }
@@ -241,94 +315,96 @@ void mw_texmgr_delete(mw_texture_manager *tm, uint32_t id)
 {
     mw_texture *t = mw_texmgr_find(tm, id);
     uint32_t lvl;
+
     if (!t)
         return;
-
-    for (lvl = 0; lvl < MW_MAX_MIP_LEVELS; ++lvl) {
-        if (t->pixels[lvl]) {
-            free(t->pixels[lvl]);
-            t->pixels[lvl] = NULL;
-        }
-        if (t->indices[lvl]) {
-            free(t->indices[lvl]);
-            t->indices[lvl] = NULL;
-        }
-    }
+    for (lvl = 0; lvl < MW_MAX_MIP_LEVELS; ++lvl)
+        mw_texmgr_free_level(tm, t, lvl);
     memset(t, 0, sizeof(*t));
     tm->count--;
 }
 
-void mw_texmgr_generate_mips(mw_texture *t)
+int mw_texmgr_allocate_level(mw_texture_manager *tm, mw_texture *t,
+                             uint32_t level, uint32_t width, uint32_t height)
+{
+    uint32_t address = 0U;
+    uint32_t *pixels;
+    size_t bytes;
+
+    if (!t || level >= MW_MAX_MIP_LEVELS || !width || !height ||
+        width > SIZE_MAX / height ||
+        (size_t)width * height > SIZE_MAX / sizeof(*pixels))
+        return 0;
+    if (t->pixels[level] && t->widths[level] == width &&
+        t->heights[level] == height)
+        return 1;
+    bytes = (size_t)width * height * sizeof(*pixels);
+    pixels = (uint32_t *)mw_texmgr_alloc(tm, bytes, &address);
+    if (!pixels)
+        return 0;
+    if (t->pixels[level])
+        mw_texmgr_free(tm, t->pixels[level], &t->pixel_addresses[level]);
+    t->pixels[level] = pixels;
+    t->pixel_addresses[level] = address;
+    t->widths[level] = width;
+    t->heights[level] = height;
+    return 1;
+}
+
+int mw_texmgr_generate_mips(mw_texture_manager *tm, mw_texture *t)
 {
     uint32_t lvl;
-    if (!t || !t->pixels[0] || !t->widths[0] || !t->heights[0])
-        return;
 
+    if (!t || !t->pixels[0] || !t->widths[0] || !t->heights[0])
+        return 0;
     for (lvl = 1; lvl < MW_MAX_MIP_LEVELS; ++lvl) {
-        uint32_t pw = t->widths[lvl - 1];
-        uint32_t ph = t->heights[lvl - 1];
+        uint32_t pw = t->widths[lvl - 1U];
+        uint32_t ph = t->heights[lvl - 1U];
         uint32_t w, h;
-        uint32_t *src = t->pixels[lvl - 1];
+        uint32_t *src = t->pixels[lvl - 1U];
         uint32_t *dst;
         uint32_t y, x, rem;
 
-        if (!src || (pw <= 1 && ph <= 1)) {
-            for (rem = lvl; rem < MW_MAX_MIP_LEVELS; ++rem) {
-                if (t->pixels[rem]) {
-                    free(t->pixels[rem]);
-                    t->pixels[rem] = NULL;
-                }
-                if (t->indices[rem]) {
-                    free(t->indices[rem]);
-                    t->indices[rem] = NULL;
-                }
-                t->widths[rem] = 0;
-                t->heights[rem] = 0;
-            }
+        if (!src || (pw <= 1U && ph <= 1U)) {
+            for (rem = lvl; rem < MW_MAX_MIP_LEVELS; ++rem)
+                mw_texmgr_free_level(tm, t, rem);
             break;
         }
-
-        w = pw > 1 ? pw / 2 : 1;
-        h = ph > 1 ? ph / 2 : 1;
-
-        if (t->widths[lvl] != w || t->heights[lvl] != h || !t->pixels[lvl]) {
-            if (t->pixels[lvl]) free(t->pixels[lvl]);
-            t->pixels[lvl] = (uint32_t *)malloc((size_t)w * h * sizeof(uint32_t));
-            if (!t->pixels[lvl]) return;
-            t->widths[lvl] = w;
-            t->heights[lvl] = h;
+        w = pw > 1U ? pw / 2U : 1U;
+        h = ph > 1U ? ph / 2U : 1U;
+        if (!mw_texmgr_allocate_level(tm, t, lvl, w, h))
+            return 0;
+        if (t->indices[lvl]) {
+            mw_texmgr_free(tm, t->indices[lvl], &t->index_addresses[lvl]);
+            t->indices[lvl] = NULL;
         }
         dst = t->pixels[lvl];
         t->internal_rgb[lvl] = t->internal_rgb[0];
-
-        /* 2x2 box downsampling */
         for (y = 0; y < h; ++y) {
-            uint32_t sy0 = y * 2;
-            uint32_t sy1 = (sy0 + 1 < ph) ? sy0 + 1 : sy0;
+            uint32_t sy0 = y * 2U;
+            uint32_t sy1 = sy0 + 1U < ph ? sy0 + 1U : sy0;
             for (x = 0; x < w; ++x) {
-                uint32_t sx0 = x * 2;
-                uint32_t sx1 = (sx0 + 1 < pw) ? sx0 + 1 : sx0;
-
+                uint32_t sx0 = x * 2U;
+                uint32_t sx1 = sx0 + 1U < pw ? sx0 + 1U : sx0;
                 uint32_t p00 = src[sy0 * pw + sx0];
                 uint32_t p10 = src[sy0 * pw + sx1];
                 uint32_t p01 = src[sy1 * pw + sx0];
                 uint32_t p11 = src[sy1 * pw + sx1];
-
-                uint32_t r = (((p00 >> 24) & 0xff) + ((p10 >> 24) & 0xff) +
-                              ((p01 >> 24) & 0xff) + ((p11 >> 24) & 0xff) + 2) / 4;
-                uint32_t g = (((p00 >> 16) & 0xff) + ((p10 >> 16) & 0xff) +
-                              ((p01 >> 16) & 0xff) + ((p11 >> 16) & 0xff) + 2) / 4;
-                uint32_t b = (((p00 >> 8) & 0xff) + ((p10 >> 8) & 0xff) +
-                              ((p01 >> 8) & 0xff) + ((p11 >> 8) & 0xff) + 2) / 4;
-                uint32_t a = ((p00 & 0xff) + (p10 & 0xff) +
-                              (p01 & 0xff) + (p11 & 0xff) + 2) / 4;
-
+                uint32_t r = (((p00 >> 24) & 0xffU) + ((p10 >> 24) & 0xffU) +
+                              ((p01 >> 24) & 0xffU) + ((p11 >> 24) & 0xffU) + 2U) / 4U;
+                uint32_t g = (((p00 >> 16) & 0xffU) + ((p10 >> 16) & 0xffU) +
+                              ((p01 >> 16) & 0xffU) + ((p11 >> 16) & 0xffU) + 2U) / 4U;
+                uint32_t b = (((p00 >> 8) & 0xffU) + ((p10 >> 8) & 0xffU) +
+                              ((p01 >> 8) & 0xffU) + ((p11 >> 8) & 0xffU) + 2U) / 4U;
+                uint32_t a = ((p00 & 0xffU) + (p10 & 0xffU) +
+                              (p01 & 0xffU) + (p11 & 0xffU) + 2U) / 4U;
                 dst[y * w + x] = (r << 24) | (g << 16) | (b << 8) | a;
             }
         }
         t->max_level = (uint8_t)lvl;
     }
-    t->stale = 0;
+    t->stale = 0U;
+    return 1;
 }
 
 int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t bytes,
@@ -340,6 +416,7 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
     const uint8_t *src;
     mw_texture *t;
     uint32_t *dst;
+    uint32_t level_resize;
     uint32_t y, x;
 
     if (bytes < 56)
@@ -366,28 +443,35 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
     if (!t)
         return 0;
 
-    if (t->widths[level] != width || t->heights[level] != height || !t->pixels[level]) {
-        if (t->pixels[level]) free(t->pixels[level]);
-        t->pixels[level] = (uint32_t *)malloc((size_t)width * height * sizeof(uint32_t));
-        if (!t->pixels[level]) return 0;
-        t->widths[level] = width;
-        t->heights[level] = height;
-    }
+    level_resize = !t->pixels[level] || t->widths[level] != width ||
+                   t->heights[level] != height;
+    if (!mw_texmgr_allocate_level(tm, t, level, width, height))
+        return 0;
     t->base_format[level] = format;
     t->internal_rgb[level] = (internal_format == 3 || internal_format == 0x1907 ||
                               internal_format == 0x8050 || internal_format == 0x8051);
     dst = t->pixels[level];
     if (format == 0x1900) {
+        uint32_t index_address = 0U;
+
         t->indexed = 1;
         t->internal_rgb[level] = 0;
-        if (!t->indices[level] || t->widths[level] != width || t->heights[level] != height) {
-            if (t->indices[level]) free(t->indices[level]);
-            t->indices[level] = (uint8_t *)malloc((size_t)width * height);
-            if (!t->indices[level]) return 0;
+        if (!t->indices[level] || level_resize) {
+            uint8_t *indices = (uint8_t *)mw_texmgr_alloc(
+                tm, (size_t)width * height, &index_address);
+            if (!indices)
+                return 0;
+            if (t->indices[level])
+                mw_texmgr_free(tm, t->indices[level],
+                               &t->index_addresses[level]);
+            t->indices[level] = indices;
+            t->index_addresses[level] = index_address;
         }
         if (source == 0) {
             memset(t->indices[level], 0, (size_t)width * height);
             memset(dst, 0, (size_t)width * height * sizeof(uint32_t));
+            if (level == 0 && t->generate_mipmap)
+                return mw_texmgr_generate_mips(tm, t);
             return 1;
         }
         source_width = row_length ? row_length : width;
@@ -413,8 +497,14 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
     } else {
         t->indexed = 0;
         if (t->indices[level]) {
-            free(t->indices[level]);
+            mw_texmgr_free(tm, t->indices[level], &t->index_addresses[level]);
             t->indices[level] = NULL;
+        }
+        if (source == 0U) {
+            memset(dst, 0, (size_t)width * height * sizeof(*dst));
+            if (level == 0 && t->generate_mipmap)
+                return mw_texmgr_generate_mips(tm, t);
+            return 1;
         }
         pixel = (type == 0x8363 || type == 0x8033 || format == MW_RAW_ARGB_4444) ? 2U :
                 mw_tex_raw_components(format) * mw_tex_raw_scalar_bytes(type);
@@ -431,7 +521,7 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
     }
 
     if (level == 0 && t->generate_mipmap)
-        mw_texmgr_generate_mips(t);
+        return mw_texmgr_generate_mips(tm, t);
 
     return 1;
 }
@@ -512,7 +602,7 @@ int mw_texmgr_sub_raw(mw_texture_manager *tm, const uint8_t *payload, size_t byt
         }
     }
     if (level == 0 && t->generate_mipmap)
-        mw_texmgr_generate_mips(t);
+        return mw_texmgr_generate_mips(tm, t);
 
     return 1;
 }
@@ -539,8 +629,9 @@ int mw_texmgr_param(mw_texture_manager *tm, uint32_t id, uint32_t pname, uint32_
         break;
     case 0x8191: /* GL_GENERATE_MIPMAP */
         t->generate_mipmap = (value != 0);
-        if (t->generate_mipmap && t->pixels[0])
-            mw_texmgr_generate_mips(t);
+        if (t->generate_mipmap && t->pixels[0] &&
+            !mw_texmgr_generate_mips(tm, t))
+            return 0;
         break;
     default:
         break;

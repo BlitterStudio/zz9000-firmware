@@ -24,6 +24,10 @@ mw_ctx  *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner);
  * Status: 0 ok, 0xfffffffe INVALID, 0xfffffffd CAPACITY,
  *         0xfffffffc LOST, 0xfffffffb FAILED. */
 uint32_t mw_host_submit(mw_ctx *c, const uint8_t *packet, uint32_t bytes);
+/* As mw_host_submit(), also returns the command that failed execution or
+ * validation (zero only when framing fails before an opcode is available). */
+uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
+                               uint32_t *failed_opcode);
 
 /* Executes a synchronous request. */
 uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
