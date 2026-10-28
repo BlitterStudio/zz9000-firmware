@@ -98,9 +98,10 @@ static void assert_quad_and_polygon_boundaries(void)
     assert(red(32U, 24U) == 0U);
     begin(GL_POINT, 1);
     minigl_raster_draw_arrays(GL_QUADS, 0U, VSTRIDE, 0U, 4U, 0U);
-    /* GL point rule: floor(s+0.5) places points on row 42 and row 6 */
-    assert(red(8U, 42U) == 128U && red(56U, 42U) == 128U);
-    assert(red(56U, 6U) == 128U && red(8U, 6U) == 128U);
+    /* Point rule: a size-1 point on integer sx=8, sy=42 covers column 7,
+     * row 41, the same half-open convention as lines */
+    assert(red(7U, 41U) == 128U && red(55U, 41U) == 128U);
+    assert(red(55U, 5U) == 128U && red(7U, 5U) == 128U);
 
     begin(GL_LINE, 1);
     minigl_raster_draw_arrays(GL_POLYGON, 0U, VSTRIDE, 0U, 4U, 0U);
@@ -109,9 +110,10 @@ static void assert_quad_and_polygon_boundaries(void)
     assert(red(32U, 24U) == 0U);
     begin(GL_POINT, 1);
     minigl_raster_draw_arrays(GL_POLYGON, 0U, VSTRIDE, 0U, 4U, 0U);
-    /* GL point rule: floor(s+0.5) places points on row 42 and row 6 */
-    assert(red(8U, 42U) == 128U && red(56U, 42U) == 128U);
-    assert(red(56U, 6U) == 128U && red(8U, 6U) == 128U);
+    /* Point rule: a size-1 point on integer sx=8, sy=42 covers column 7,
+     * row 41, the same half-open convention as lines */
+    assert(red(7U, 41U) == 128U && red(55U, 41U) == 128U);
+    assert(red(55U, 5U) == 128U && red(7U, 5U) == 128U);
 }
 static void assert_clipped_polygon_boundary(void)
 {
@@ -142,8 +144,8 @@ static void assert_quad_strip_ownership(void)
     assert(red(31U, 24U) == 192U);
     begin(GL_POINT, 1);
     minigl_raster_draw_arrays(GL_QUAD_STRIP, 0U, VSTRIDE, 0U, 6U, 0U);
-    /* GL point rule: floor(s+0.5) places points on row 42 */
-    assert(red(8U, 42U) == 128U && red(32U, 42U) == 192U && red(56U, 42U) == 128U);
+    /* Point rule: points on integer sy=42 cover row 41 */
+    assert(red(7U, 41U) == 128U && red(31U, 41U) == 192U && red(55U, 41U) == 128U);
 }
 
 static void assert_triangle_fan_is_not_polygon(void)
@@ -155,9 +157,9 @@ static void assert_triangle_fan_is_not_polygon(void)
     assert(red(31U, 24U) == 192U);
     begin(GL_POINT, 1);
     minigl_raster_draw_arrays(GL_TRIANGLE_FAN, 0U, VSTRIDE, 0U, 4U, 0U);
-    /* GL point rule: floor(s+0.5) places points on row 42 and row 6 */
-    assert(red(8U, 42U) == 192U && red(56U, 6U) == 192U);
-    assert(red(56U, 42U) == 128U && red(8U, 6U) == 128U);
+    /* Point rule: points on integer coordinates cover the pixel below-left */
+    assert(red(7U, 41U) == 192U && red(55U, 5U) == 192U);
+    assert(red(55U, 41U) == 128U && red(7U, 5U) == 128U);
 }
 
 static void assert_line_end_ownership(void)
