@@ -101,6 +101,18 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends gcc-multilib
+      # Pinned third-party source archives (checked by SHA-256 in the
+      # build_*.sh scripts). gitlab.xiph.org and downloads.xiph.org go down
+      # for hours at a time; restoring the archives keeps CI off them.
+      - name: Cache third-party source archives
+        uses: actions/cache@v5
+        with:
+          path: |
+            ZZ9000_proto.sdk/ZZ9000OS/build/deps/**/*.tar.gz
+            ZZ9000_proto.sdk/ZZ9000OS/build/deps/**/*.tar.xz
+            ZZ9000_proto.sdk/ZZ9000OS/build/deps/**/*.tar.bz2
+          key: deps-archives-host-${{ hashFiles('build_dvd_codecs.sh', 'build_flac.sh', 'build_libjpeg_turbo.sh', 'build_libpng.sh', 'build_libvpx.sh', 'build_libwebp.sh', 'build_lzma_sdk.sh', 'build_opus.sh', 'build_vorbis.sh', 'build_zlib.sh') }}
+          restore-keys: deps-archives-host-
       - name: USB proxy and EHCI regression suite
         run: make -C test/usb test
       - name: RTG regression suite
@@ -196,6 +208,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Cache third-party source archives
+        uses: actions/cache@v5
+        with:
+          path: |
+            ZZ9000_proto.sdk/ZZ9000OS/build/deps/**/*.tar.gz
+            ZZ9000_proto.sdk/ZZ9000OS/build/deps/**/*.tar.xz
+            ZZ9000_proto.sdk/ZZ9000OS/build/deps/**/*.tar.bz2
+          key: deps-archives-firmware-${{ hashFiles('build_dvd_codecs.sh', 'build_flac.sh', 'build_libjpeg_turbo.sh', 'build_libpng.sh', 'build_libvpx.sh', 'build_libwebp.sh', 'build_lzma_sdk.sh', 'build_opus.sh', 'build_vorbis.sh', 'build_zlib.sh') }}
+          restore-keys: deps-archives-firmware-
 
       - name: Install build dependencies
         run: |
