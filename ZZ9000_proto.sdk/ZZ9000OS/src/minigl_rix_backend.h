@@ -107,7 +107,12 @@ typedef struct MiniGLRixRecordedOp {
     uint32_t color;
     uint32_t depth;
     uint32_t mask;
-    uint32_t texture_id;
+    uint32_t texture_incarnation;
+    uint16_t texture_slot;
+    uint16_t min_filter;
+    uint16_t mag_filter;
+    uint16_t wrap_s;
+    uint16_t wrap_t;
     uint8_t type;
 } MiniGLRixRecordedOp;
 
@@ -134,11 +139,13 @@ typedef struct MiniGLRixBackend {
     uint8_t error;
     uint32_t pending_fence[MINIGL_RIX_COMMAND_BUFFERS];
     uint32_t submitted_command_words[MINIGL_RIX_COMMAND_BUFFERS];
+    uint8_t pending[MINIGL_RIX_COMMAND_BUFFERS];
     uint8_t pending_pins[MINIGL_RIX_COMMAND_BUFFERS][MINIGL_RIX_MAX_TEXTURES];
     uint8_t recorded_pins[MINIGL_RIX_MAX_TEXTURES];
     MiniGLRixTexture textures[MINIGL_RIX_MAX_TEXTURES];
     uint32_t bound_texture;
     uint32_t lru_clock;
+    uint32_t texture_incarnation_clock;
     size_t triangle_count;
     size_t op_count;
     size_t command_words_estimate;
@@ -179,6 +186,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
                                     const MiniGLRixVertex *c);
 int minigl_rix_backend_end_draw(MiniGLRixBackend *backend, uint32_t color_address,
                                 uint32_t depth_address);
+void minigl_rix_backend_abort_draw(MiniGLRixBackend *backend);
 int minigl_rix_backend_clear(MiniGLRixBackend *backend, uint16_t width,
                              uint16_t height, uint32_t color_address,
                              uint32_t depth_address, uint32_t mask,

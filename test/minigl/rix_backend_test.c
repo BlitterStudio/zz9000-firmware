@@ -36,8 +36,11 @@ struct model {
     uint8_t textures[TEXTURE_SLOTS * MINIGL_RIX_TEXTURE_VIRTUAL_BYTES];
     size_t texture_bytes;
     unsigned csr_reads;
+    unsigned cleans;
     unsigned invalidates;
     unsigned complete_submissions;
+    uintptr_t cleaned_address;
+    size_t cleaned_bytes;
     uintptr_t invalidated_address;
     size_t invalidated_bytes;
     unsigned texture_pool_grows;
@@ -66,9 +69,11 @@ static void csr_write(void *context, uint32_t offset, uint32_t value)
 
 static void cache_clean(void *context, uintptr_t address, size_t bytes)
 {
-    (void)context;
-    (void)address;
-    (void)bytes;
+    struct model *model = context;
+
+    ++model->cleans;
+    model->cleaned_address = address;
+    model->cleaned_bytes = bytes;
 }
 static void cache_invalidate(void *context, uintptr_t address, size_t bytes)
 {
@@ -545,6 +550,92 @@ static void test_timeout_diagnostics(void)
     g_rix_test_log = NULL;
 }
 
+static void test_surface_handoff_and_recorded_texture_state(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
+    uint32_t image[4] = { 0xffffffffU, 0U, 0U, 0U };
+    uint32_t surface[2] = { 0xf80000ffU, 0x0000ffffU };
+    uint16_t old_slot;
+    uint32_t old_incarnation;
+    size_t slot;
+    unsigned cleans_before;
+
+    init_backend(&backend, &model, TEXTURE_SLOTS);
+    cleans_before = model.cleans;
+    assert(minigl_rix_backend_prepare_target(&backend, surface, 2U));
+    assert(model.cleans == cleans_before + 1U &&
+           model.cleaned_address == (uintptr_t)surface);
+    assert(model.cleaned_bytes == 2U * sizeof(uint16_t));
+    assert(minigl_rix_backend_make_cpu_visible(&backend, surface, 2U));
+    assert(surface[0] == 0xff0000ffU && surface[1] == 0x0000ffffU);
+
+    state.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_0;
+    state.tex_env_mode[0] = 0x1e01U;
+    minigl_rix_backend_set_state(&backend, &state);
+    minigl_rix_backend_bind_texture(&backend, 99U);
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U, 0x03100000U,
+                                    GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(backend.ops[0].texture_slot == UINT16_MAX);
+    assert(minigl_rix_backend_drain(&backend));
+
+    assert(minigl_rix_backend_upload_texture(&backend, 7U, 0U, image, 2U, 2U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 7U, GL_NEAREST, GL_NEAREST,
+                                  0x2901U, 0x2901U);
+    state.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_0;
+    state.tex_env_mode[0] = 0x1e01U;
+    minigl_rix_backend_set_state(&backend, &state);
+    minigl_rix_backend_bind_texture(&backend, 7U);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    old_slot = backend.ops[0].texture_slot;
+    old_incarnation = backend.ops[0].texture_incarnation;
+    minigl_rix_backend_tex_params(&backend, 7U, GL_LINEAR, GL_LINEAR,
+                                  0x812fU, 0x812fU);
+    assert(backend.ops[0].min_filter == GL_NEAREST &&
+           backend.ops[0].wrap_s == 0x2901U);
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    minigl_rix_backend_delete_texture(&backend, 7U);
+    assert(minigl_rix_backend_upload_texture(&backend, 7U, 0U, image, 2U, 2U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    assert(backend.textures[old_slot].deleted &&
+           backend.textures[old_slot].incarnation == old_incarnation);
+    for (slot = 0U; slot < MINIGL_RIX_MAX_TEXTURES; ++slot)
+        if (backend.textures[slot].valid && !backend.textures[slot].deleted &&
+            backend.textures[slot].id == 7U)
+            break;
+    assert(slot < MINIGL_RIX_MAX_TEXTURES &&
+           backend.textures[slot].incarnation != old_incarnation);
+    assert(backend.ops[0].texture_slot == old_slot &&
+           backend.ops[0].texture_incarnation == old_incarnation);
+    assert(minigl_rix_backend_drain(&backend));
+}
+
+static void test_zero_fence_remains_pending(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
+
+    init_backend(&backend, &model, TEXTURE_SLOTS);
+    model.csr[RIX_DRV_CSR_SUBMITTED / 4U] = UINT32_MAX;
+    model.csr[RIX_DRV_CSR_COMPLETED / 4U] = UINT32_MAX;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_drain(&backend));
+    assert(!backend.pending[0] && backend.pending_fence[0] == 0U);
+}
+
 static void test_disabled_backend_is_one_shot(void)
 {
     static struct model model;
@@ -640,6 +731,8 @@ int main(void)
     test_depth_mapping_and_ordering();
     test_fallback_reasons_and_logging();
     test_timeout_diagnostics();
+    test_zero_fence_remains_pending();
+    test_surface_handoff_and_recorded_texture_state();
     test_disabled_backend_is_one_shot();
     puts("RasterIX backend: frame recording, band replay and texture residency passed");
     return 0;
