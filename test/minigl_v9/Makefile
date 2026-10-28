@@ -5,7 +5,7 @@ ROOT := ../..
 FIRMWARE := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/src
 CPPFLAGS := -I$(FIRMWARE) -DMINIGL_HOST_TEST
 
-MW_OBJS := mw_parse.o mw_texture.o mw_draw.o mw_ctx.o mw_service.o \
+MW_OBJS := mw_parse.o mw_texture.o mw_draw.o mw_ctx.o mw_service.o sdk_palette.o \
            minigl_raster.o minigl_lighting.o minigl_present.o \
            minigl_rix_backend.o rix_cmd.o rix_texture.o rix_setup.o rix_bin.o rix_drv.o
 POOL_OBJS := $(addprefix pool_,$(MW_OBJS)) pool_card_pool.o \
@@ -43,7 +43,7 @@ CLIENTS_OBJS := client_guest_mock.o client_harness.o \
                 client_glut_shapes.o client_debug.o client_open.o \
                 client_guest_ops.o client_guest_v29.o client_guest_reopen.o \
                 client_fw_mw_parse.o client_fw_mw_texture.o client_fw_mw_draw.o \
-                client_fw_mw_ctx.o client_fw_mw_service.o client_fw_minigl_raster.o \
+                client_fw_mw_ctx.o client_fw_mw_service.o client_fw_sdk_palette.o client_fw_minigl_raster.o \
                 client_fw_minigl_lighting.o client_fw_minigl_present.o \
                 client_fw_minigl_rix_backend.o client_fw_rix_cmd.o \
                 client_fw_rix_texture.o client_fw_rix_setup.o \

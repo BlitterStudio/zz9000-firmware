@@ -12,15 +12,29 @@
  * handler, both 32-bit aligned word accesses, so no lock is needed: a racing
  * query sees either the old or the new entry, never a torn one. */
 static uint32_t g_palette[SDK_PALETTE_ENTRIES];
+static uint32_t g_palette_generation;
 
 void sdk_palette_set(uint32_t idx, uint32_t xrgb)
 {
-	g_palette[idx & (SDK_PALETTE_ENTRIES - 1U)] = xrgb & 0x00FFFFFFU;
+	uint32_t slot = idx & (SDK_PALETTE_ENTRIES - 1U);
+	uint32_t value = xrgb & 0x00FFFFFFU;
+
+	if (g_palette[slot] != value) {
+		g_palette[slot] = value;
+		++g_palette_generation;
+		if (g_palette_generation == 0U)
+			++g_palette_generation;
+	}
 }
 
 uint32_t sdk_palette_get(uint32_t idx)
 {
 	return g_palette[idx & (SDK_PALETTE_ENTRIES - 1U)];
+}
+
+uint32_t sdk_palette_generation(void)
+{
+	return g_palette_generation;
 }
 
 uint32_t sdk_palette_pack_be(void *dst, uint32_t start, uint32_t count)
@@ -53,4 +67,7 @@ void sdk_palette_reset(void)
 
 	for (i = 0U; i < SDK_PALETTE_ENTRIES; i++)
 		g_palette[i] = 0U;
+	++g_palette_generation;
+	if (g_palette_generation == 0U)
+		++g_palette_generation;
 }
