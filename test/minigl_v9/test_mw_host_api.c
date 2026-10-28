@@ -11,6 +11,8 @@
 #include "mw_ctx.h"
 #include "mw_host.h"
 #include "mw_types.h"
+#include "sdk_palette.h"
+
 
 static void test_create_destroy(void)
 {
@@ -76,6 +78,31 @@ static void test_clear_and_readback(void)
 
     mw_host_destroy(c);
     printf("PASS: test_clear_and_readback\n");
+}
+
+static void test_latest_readback_rows(void)
+{
+    mw_ctx *c = mw_host_create(2U, 3U);
+    uint8_t out[8];
+
+    assert(c != NULL);
+    c->state.target.latest = 0U;
+    c->color_buffers[0][0] = 0x01020304U;
+    c->color_buffers[0][1] = 0x05060708U;
+    c->color_buffers[0][2] = 0x11121314U;
+    c->color_buffers[0][3] = 0x15161718U;
+    c->color_buffers[0][4] = 0x21222324U;
+    c->color_buffers[0][5] = 0x25262728U;
+    assert(mw_host_readback_latest_rows(c, out, sizeof(out), 1U, 1U) ==
+           MW_STATUS_OK);
+    assert(out[0] == 0x11U && out[1] == 0x12U && out[2] == 0x13U &&
+           out[3] == 0x14U && out[4] == 0x15U && out[5] == 0x16U &&
+           out[6] == 0x17U && out[7] == 0x18U);
+    assert(mw_host_readback_latest_rows(c, out, sizeof(out), 3U, 1U) ==
+           MW_STATUS_INVALID);
+    assert(mw_host_readback_latest_rows(c, out, sizeof(out) - 1U, 1U, 1U) ==
+           MW_STATUS_CAPACITY);
+    mw_host_destroy(c);
 }
 
 static void test_rejected_packet_changes_no_state(void)
@@ -376,14 +403,30 @@ static void test_glquake_texture_soak(void)
     printf("PASS: test_glquake_texture_soak\n");
 }
 
+static void test_palette_snapshot(void)
+{
+    uint32_t palette[SDK_PALETTE_ENTRIES];
+    uint32_t generation;
+
+    sdk_palette_reset();
+    sdk_palette_set(3U, 0x00112233U);
+    sdk_palette_set(255U, 0x00aabbccU);
+    assert(sdk_palette_snapshot(palette, &generation));
+    assert(!(generation & 1U));
+    assert(palette[3] == 0x00112233U);
+    assert(palette[255] == 0x00aabbccU);
+}
+
 int main(void)
 {
     test_create_destroy();
     test_clear_and_readback();
+    test_latest_readback_rows();
     test_rejected_packet_changes_no_state();
     test_draw_triangle_golden();
     test_requests();
     test_glquake_texture_soak();
+    test_palette_snapshot();
     printf("All host API tests PASSED!\n");
     return 0;
 }

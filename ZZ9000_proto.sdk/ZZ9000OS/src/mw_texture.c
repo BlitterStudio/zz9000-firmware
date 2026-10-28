@@ -513,6 +513,30 @@ int mw_texmgr_allocate_level(mw_texture_manager *tm, mw_texture *t,
     return 1;
 }
 
+static int mw_texmgr_allocate_indices(mw_texture_manager *tm, mw_texture *t,
+                                      uint32_t level)
+{
+    uint32_t address = 0U;
+    size_t bytes;
+    uint8_t *indices;
+
+    if (!t || level >= MW_MAX_MIP_LEVELS || !t->widths[level] ||
+        !t->heights[level])
+        return 0;
+    if (t->indices[level])
+        return 1;
+    if (t->widths[level] > SIZE_MAX / t->heights[level])
+        return 0;
+    bytes = (size_t)t->widths[level] * t->heights[level];
+    indices = (uint8_t *)mw_texmgr_alloc(tm, bytes, &address);
+    if (!indices)
+        return 0;
+    memset(indices, 0, bytes);
+    t->indices[level] = indices;
+    t->index_addresses[level] = address;
+    return 1;
+}
+
 int mw_texmgr_generate_mips(mw_texture_manager *tm, mw_texture *t)
 {
     uint32_t lvl;
@@ -604,9 +628,14 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
     t = mw_texmgr_get_or_create(tm, name);
     if (!t)
         return 0;
-
     level_resize = !t->pixels[level] || t->widths[level] != width ||
                    t->heights[level] != height;
+
+
+    if (level_resize && t->indices[level]) {
+        mw_texmgr_free(tm, t->indices[level], &t->index_addresses[level]);
+        t->indices[level] = NULL;
+    }
     if (!mw_texmgr_allocate_level(tm, t, level, width, height))
         return 0;
     t->base_format[level] = format;
@@ -614,21 +643,10 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
                               internal_format == 0x8050 || internal_format == 0x8051);
     dst = t->pixels[level];
     if (format == 0x1900) {
-        uint32_t index_address = 0U;
-
         t->indexed = 1;
         t->internal_rgb[level] = 0;
-        if (!t->indices[level] || level_resize) {
-            uint8_t *indices = (uint8_t *)mw_texmgr_alloc(
-                tm, (size_t)width * height, &index_address);
-            if (!indices)
-                return 0;
-            if (t->indices[level])
-                mw_texmgr_free(tm, t->indices[level],
-                               &t->index_addresses[level]);
-            t->indices[level] = indices;
-            t->index_addresses[level] = index_address;
-        }
+        if (!mw_texmgr_allocate_indices(tm, t, level))
+            return 0;
         if (source == 0) {
             memset(t->indices[level], 0, (size_t)width * height);
             memset(dst, 0, (size_t)width * height * sizeof(uint32_t));
@@ -729,6 +747,8 @@ int mw_texmgr_sub_raw(mw_texture_manager *tm, const uint8_t *payload, size_t byt
 
     dst = t->pixels[level];
     if (t->indexed && format == 0x1900) {
+        if (!mw_texmgr_allocate_indices(tm, t, level))
+            return 0;
         source_width = row_length ? row_length : width;
         row = ((source_width + alignment - 1) / alignment) * alignment;
         src = payload + 60 + (size_t)skip_rows * row + (size_t)skip_pixels;

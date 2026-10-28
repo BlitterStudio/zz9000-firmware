@@ -19,6 +19,9 @@ extern "C" {
 #define MW_SERVICE_MAGIC            0x4D474C39UL /* 'MGL9' */
 #define MW_SERVICE_TRANSPORT_VER    1U
 #define MW_SERVICE_WIRE_VER         9U
+#define MW_CAP_WIRE_V9              (1U << 18)
+#define MW_CAP_LATEST_READBACK_ROWS (1U << 19)
+
 
 #define MW_DEFAULT_SLOT_CAPACITY_Z3 (256U * 1024U)
 #define MW_DEFAULT_SLOT_COUNT_Z3    2U
@@ -103,10 +106,10 @@ typedef struct ZZ9KMiniGLControlBlockV9 {
     const uint32_t producer_seq;
     const uint32_t active_slot;
     const uint32_t host_generation;
-    const uint32_t op_code;      /* 0=submit/none, 1=create, 3=readback, 4=destroy, 5=request, 6=blit */
+    const uint32_t op_code;      /* 0=submit/none, 1=create, 3=latest readback, 4=destroy, 5=request, 6=blit */
     const uint32_t op_handle;    /* context handle */
-    const uint32_t op_arg1;      /* create: width; req/blit: req bytes; readback: bytes */
-    const uint32_t op_arg2;      /* create: height; req/blit: desc[0] (reply/span ptr or offset) */
+    const uint32_t op_arg1;      /* create: width; latest readback: first row; req/blit: req bytes */
+    const uint32_t op_arg2;      /* create: height; latest readback: row count; req/blit: desc[0] */
     const uint32_t op_arg3;      /* req/blit: desc[1] (reply cap / span bytes) */
     const uint32_t op_seq;       /* incremented by 68k for each synchronous op */
     const uint8_t  host_reserved[28];
@@ -141,26 +144,29 @@ typedef struct ZZ9KMiniGLStatusV9 {
     uint8_t  host_reserved[52];
 } __attribute__((packed, aligned(64))) ZZ9KMiniGLStatusV9;
 
-/* Big-endian load/store for the shared control/status block fields: the
- * consumer is the big-endian 68k library, so the wire image is
- * big-endian (same convention as the transport descriptor and the wire
- * packets) even though the ARM (and host test builds) are little-endian.
- * Byte-wise access also works on any host, keeping the host tests
- * faithful to the hardware layout. */
+/* Shared control words are aligned. Read or publish each sequence as one
+ * volatile word; assembling four independently observable bytes can tear a
+ * m68k producer update at a byte boundary. */
 static inline uint32_t mw_wire_ld32(const volatile uint32_t *field)
 {
-	const volatile uint8_t *b = (const volatile uint8_t *)field;
-	return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
-	       ((uint32_t)b[2] << 8) | (uint32_t)b[3];
+	uint32_t value = *field;
+
+	__sync_synchronize();
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	return __builtin_bswap32(value);
+#else
+	return value;
+#endif
 }
 
 static inline void mw_wire_st32(volatile uint32_t *field, uint32_t value)
 {
-	volatile uint8_t *b = (volatile uint8_t *)field;
-	b[0] = (uint8_t)(value >> 24);
-	b[1] = (uint8_t)(value >> 16);
-	b[2] = (uint8_t)(value >> 8);
-	b[3] = (uint8_t)value;
+	__sync_synchronize();
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	*field = __builtin_bswap32(value);
+#else
+	*field = value;
+#endif
 }
 
 static inline uint16_t mw_wire_ld16(const volatile uint16_t *field)

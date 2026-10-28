@@ -571,12 +571,12 @@ static void test_reply_window_bounds(void)
         guard = reply + MW_DEFAULT_REPLY_CAPACITY;
         memset(guard, 0xa5, 64);
 
-        /* READBACK previously passed the guest's 1,228,800-byte request as
-         * the destination capacity. It must now fail before touching guard. */
+        /* A 640x480 latest-frame read does not fit the 64-KiB reply window
+         * and must fail before touching the adjacent guard. */
         seq = mw_wire_ld32(&ctrl->op_done_seq) + 1U;
         host_wire_st32(&ctrl->op_handle, handle);
-        host_wire_st32(&ctrl->op_arg1, 640U * 480U * 4U);
-        host_wire_st32(&ctrl->op_arg2, 0U);
+        host_wire_st32(&ctrl->op_arg1, 0U);
+        host_wire_st32(&ctrl->op_arg2, 480U);
         host_wire_st32(&ctrl->op_arg3, 0U);
         host_wire_st32(&ctrl->op_code, 3U);
         host_wire_st32(&ctrl->op_seq, seq);
@@ -813,11 +813,13 @@ static void test_mw_e2e_blit_and_capture(void)
     assert(transport->blit(handle, blit_req, sizeof(blit_req), desc) == MINIGL_BRIDGE_ERROR_INVALID);
     mw_put_be32(blit_req + 4, format); /* Restore format */
 
-    /* 4. MW_CAPTURE Fast Path:
+    /* 4. MW_CAPTURE:
      * - Overwrite back buffer with Green WITHOUT present
-     * - Call MW_CAPTURE on matching span -> fast path restores front buffer (Red)
-     * - Present and readback -> verifies Red was restored!
-     */
+     * - Capture the Red presentation span into back
+     * - Present and read back the decoded Red pixels
+     *
+     * Presentation deliberately does not retain a duplicate full-frame span:
+     * capture always decodes its caller-owned source. */
     uint8_t scribble[256];
     /* Clear to Green (0, 1, 0, 1) without present */
     mw_put_be32(scribble, MW_MAGIC);
@@ -852,7 +854,7 @@ static void test_mw_e2e_blit_and_capture(void)
     mw_put_be32(pres_pkt + 20, 0);
     assert(transport->submit(handle, pres_pkt, 24) == 0);
 
-    /* Read back: should be Red (front buffer restored by fast-path capture) */
+    /* Read back: the captured span decoded to Red. */
     uint8_t out_pixels[32 * 32 * 4];
     assert(transport->readback(handle, out_pixels, sizeof(out_pixels)) == 0);
     for (uint32_t i = 0; i < width * height; ++i) {
@@ -862,12 +864,11 @@ static void test_mw_e2e_blit_and_capture(void)
         assert(out_pixels[i * 4 + 3] == 255); /* A */
     }
 
-    /* 5. MW_CAPTURE Slow Path (span decode):
+    /* 5. MW_CAPTURE (span decode):
      * - Write Blue pixels into mock VRAM span (BGRA: B=255, G=0, R=0, A=255)
-     * - Redraw front buffer to invalidate fast-path snapshot
+     * - Redraw front buffer to White and present
      * - Call MW_CAPTURE -> decodes mock VRAM into back buffer
-     * - Present and readback -> verifies Blue was decoded from span!
-     */
+     * - Present and readback -> verifies Blue was decoded from span! */
     for (uint32_t i = 0; i < width * height; ++i) {
         mock_vram[i * 4 + 0] = 255; /* A */
         mock_vram[i * 4 + 1] = 0;   /* R */
@@ -875,7 +876,7 @@ static void test_mw_e2e_blit_and_capture(void)
         mock_vram[i * 4 + 3] = 255; /* B */
     }
 
-    /* Redraw front buffer to White and present (invalidates fast path) */
+    /* Redraw front buffer to White and present. */
     uint8_t white_pkt[256];
     uint32_t white_len = build_clear_present_packet(white_pkt, 1.0f, 1.0f, 1.0f, 1.0f);
     assert(transport->submit(handle, white_pkt, white_len) == 0);
@@ -1092,7 +1093,8 @@ static void test_scheduler_core1_initialization_preserves_wire_v9(void)
     assert(mw_wire_ld16(&ctrl->wire_version) == MW_SERVICE_WIRE_VER);
     assert(mw_wire_ld32(&ctrl->slot_capacity) == MW_DEFAULT_SLOT_CAPACITY_Z3);
     assert(mw_wire_ld32(&ctrl->slot_count) == MW_DEFAULT_SLOT_COUNT_Z3);
-    assert(mw_wire_ld32(&status->capabilities) == (1U << 18));
+    assert(mw_wire_ld32(&status->capabilities) ==
+           (MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS));
     assert(memcmp(control_host_bytes, (const uint8_t *)ctrl + 64,
                   sizeof(control_host_bytes)) == 0);
     assert(memcmp(status_host_bytes, (const uint8_t *)status + 64,

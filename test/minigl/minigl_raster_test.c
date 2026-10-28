@@ -50,6 +50,23 @@ static uint8_t depth[W * H * 3U];
 static uint8_t vertices[400U * VSTRIDE];
 static uint8_t staging[2048];
 static uint8_t textures[8192];
+static uint8_t fragmented_pool[32];
+static uint8_t grown_pool[64];
+static uint32_t grow_minimum;
+static uint32_t grow_live_bytes;
+
+static int grow_fragmented_pool(void *context, uint32_t minimum_bytes,
+                                uint32_t live_bytes, uint8_t **pool,
+                                uint32_t *pool_bytes)
+{
+    (void)context;
+    grow_minimum = minimum_bytes;
+    grow_live_bytes = live_bytes;
+    memcpy(grown_pool, *pool, live_bytes);
+    *pool = grown_pool;
+    *pool_bytes = sizeof(grown_pool);
+    return 1;
+}
 
 static void put16(uint8_t *p, uint16_t n) { p[0] = (uint8_t)(n >> 8); p[1] = (uint8_t)n; }
 static void put32(uint8_t *p, uint32_t n) { p[0] = (uint8_t)(n >> 24); p[1] = (uint8_t)(n >> 16); p[2] = (uint8_t)(n >> 8); p[3] = (uint8_t)n; }
@@ -576,6 +593,46 @@ static void assert_texture_compaction(void)
     mip_quad(0.125f, 4.0f); assert(pixel(32U, 24U) == 0x0000ffffU);
     buffers.texture_pool_bytes = sizeof(textures);
     assert(minigl_raster_configure_buffers(&buffers)); minigl_raster_reset();
+}
+
+static void assert_fragmented_pool_growth(void)
+{
+    MiniGLRasterBuffers buffers = {
+        color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
+        staging, sizeof(staging), fragmented_pool, sizeof(fragmented_pool), W, H
+    };
+    ZZ9KMiniGLPacketSetState s = state();
+    uint32_t id;
+
+    memset(fragmented_pool, 0, sizeof(fragmented_pool));
+    memset(grown_pool, 0, sizeof(grown_pool));
+    grow_minimum = 0U;
+    grow_live_bytes = 0U;
+    assert(minigl_raster_configure_buffers(&buffers));
+    minigl_raster_set_texture_pool(fragmented_pool, sizeof(fragmented_pool),
+                                   grow_fragmented_pool, NULL);
+    minigl_raster_reset();
+    for (id = 1U; id <= 4U; ++id)
+        mip_level(id, 0U, 2U, 1U, (id << 24) | 0xffU);
+    minigl_raster_delete_texture(1U);
+    mip_level(5U, 0U, 4U, 1U, 0x050000ffU);
+    assert(grow_minimum == 40U);
+    assert(grow_live_bytes == 32U);
+
+    s.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_0;
+    minigl_raster_set_state(&s);
+    minigl_raster_bind_texture(0U, GL_TEXTURE_2D, 4U);
+    minigl_raster_tex_params(4U, GL_NEAREST, GL_NEAREST, GL_REPEAT, GL_REPEAT);
+    vertex(0U, 0.0f, 0.0f, 0.0f, 0xffffffffU, 0.0f, 0.0f);
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    minigl_raster_draw_arrays(GL_POINTS, 0U, VSTRIDE, 0U, 1U, 0U);
+    assert(pixel(31U, 23U) == 0x040000ffU);
+
+    minigl_raster_set_texture_pool(textures, sizeof(textures), NULL, NULL);
+    buffers.texture_pool = textures;
+    buffers.texture_pool_bytes = sizeof(textures);
+    assert(minigl_raster_configure_buffers(&buffers));
+    minigl_raster_reset();
 }
 
 static void draw_point(uint32_t rgba)
@@ -1190,6 +1247,7 @@ int main(void)
     assert_integer_vertices();
     assert_texture_compaction();
     assert_rix_ownership_transitions();
+    assert_fragmented_pool_growth();
     minigl_raster_release_buffers();
     assert(minigl_raster_color_buffer() == NULL);
     assert(minigl_raster_width() == 0U && minigl_raster_height() == 0U);
