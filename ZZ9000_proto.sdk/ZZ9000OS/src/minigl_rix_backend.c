@@ -1015,8 +1015,7 @@ static int backend_emit_triangles(RixCmdWriter *writer, const MiniGLRixBackend *
     return 1;
 }
 
-static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer,
-                              int continue_frame)
+static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
 {
     uint16_t band_index;
 
@@ -1089,7 +1088,7 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
     if (buffer == NULL || backend->platform.command_capacity <= 8U)
         return 0;
     rix_cmd_init(&writer, buffer + 8U, backend->platform.command_capacity - 8U);
-    if (!backend_emit_frame(backend, &writer, continue_frame) ||
+    if (!backend_emit_frame(backend, &writer) ||
         writer.length / sizeof(uint32_t) > MINIGL_RIX_COMMAND_WORD_BUDGET ||
         !backend_submit(backend, &writer))
         return 0;
