@@ -17,9 +17,9 @@ updates the selected variant's qualification record without copying bitstreams.
 param(
     [Parameter(Mandatory = $true)]
     [string]$Variant,
-    [ValidatePattern('^[0-9A-Fa-f]{8}$')]
     [string]$BuildId,
-    [string]$VivadoBat
+    [string]$VivadoBat,
+    [switch]$RasterIX
 )
 
 Set-StrictMode -Version 3.0
@@ -142,8 +142,14 @@ function Update-QualificationRecord {
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not determine the source revision for the timing qualification.'
     }
+    $artifactName = if ($RasterIX) {
+        'bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga-rix.bit'
+    } else {
+        $Definition.Bitstream
+    }
+    $recordName = if ($RasterIX) { "$($Definition.Name)-rix" } else { $Definition.Name }
     $qualification = [pscustomobject][ordered]@{
-        bitstream = $Definition.Bitstream
+        bitstream = $artifactName
         sha256 = Get-Sha256 $SelectedBitstream
         source_revision = $sourceRevision
         build_id = $BuildId
@@ -154,7 +160,7 @@ function Update-QualificationRecord {
         sii9022_slack_ns = [ordered]@{ setup = $SelectedAttempt.Sii9022SetupNs; hold = $SelectedAttempt.Sii9022HoldNs }
         gate_passed = $true
     }
-    $record.variants | Add-Member -NotePropertyName $Definition.Name -NotePropertyValue $qualification -Force
+    $record.variants | Add-Member -NotePropertyName $recordName -NotePropertyValue $qualification -Force
     [IO.File]::WriteAllText(
         $recordPath,
         (($record | ConvertTo-Json -Depth 8) + [Environment]::NewLine),
@@ -194,6 +200,9 @@ function Write-AggregateSummary {
 }
 
 $variantDefinition = Get-VariantDefinition $Variant
+if ($RasterIX -and $Variant -ne 'zorro3-aga') {
+    throw 'RasterIX timing qualification is supported only for zorro3-aga.'
+}
 
 $timingRoot = Join-Path $repoRoot 'build\timing'
 $stageDir = Join-Path $timingRoot $Variant
@@ -243,6 +252,7 @@ try {
         $builderArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $snapshotRoot 'build_bitstream.ps1'), '-OutputBitstream', $bitstream)
         if ($VivadoBat) { $builderArgs += @('-VivadoBat', $VivadoBat) }
         if ($variantDefinition.CaptureC28 -eq 1) { $builderArgs += '-CaptureC28' }
+        if ($RasterIX) { $builderArgs += '-RasterIX' }
         Write-Host "[timing-sweep] ${Variant}: $directive"
         $savedErrorActionPreference = $ErrorActionPreference
         try {
