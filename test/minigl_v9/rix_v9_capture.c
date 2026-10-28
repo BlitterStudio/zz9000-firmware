@@ -49,12 +49,6 @@ struct capture_model {
     unsigned submitted_count;
 };
 
-static uint32_t mnt_read(void *context, uint32_t offset)
-{
-    (void)context;
-    (void)offset;
-    return RIX_DRV_IDENTITY_VALUE;
-}
 
 static uint32_t csr_read(void *context, uint32_t offset)
 {
@@ -133,7 +127,6 @@ static void configure_capture_platform(struct capture_model *model)
     MiniGLRixPlatform platform;
     memset(&platform, 0, sizeof(platform));
     platform.context = model;
-    platform.mntzorro_read = mnt_read;
     platform.csr_read = csr_read;
     platform.csr_write = csr_write;
     platform.cache_clean = cache_noop;

@@ -13,7 +13,6 @@
 #include "minigl_renderer.h"
 
 #define MINIGL_RIX_CSR_BASE 0x83c60000U
-#define MINIGL_RIX_MNTZORRO_IDENTITY_OFFSET 0x38U
 #define MINIGL_RIX_TEXTURE_PAGE_BYTES 2048U
 #define MINIGL_RIX_WHITE_TEXTURE_BYTES MINIGL_RIX_TEXTURE_PAGE_BYTES
 #define MINIGL_RIX_TEXTURE_VIRTUAL_BYTES (256U * 256U * 2U * 2U)
@@ -40,8 +39,6 @@ typedef void (*MiniGLRixCacheInvalidateFn)(void *context, uintptr_t address,
 
 typedef struct MiniGLRixPlatform {
     void *context;
-    /* This is the already-decoded MNTZorro slave, never the RasterIX CSR. */
-    MiniGLRixReadFn mntzorro_read;
     MiniGLRixReadFn csr_read;
     MiniGLRixWriteFn csr_write;
     MiniGLRixCacheCleanFn cache_clean;
@@ -132,10 +129,10 @@ typedef struct MiniGLRixBackend {
     size_t command_words_estimate;
 } MiniGLRixBackend;
 
-/* Probe only the versioned presence contract.  This is the sole CSR access
+/* Probe only the versioned CSR identity contract. This is the sole CSR access
  * permitted before the RasterIX ABI has been validated. */
 int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform);
-/* Validates MNTZorro identity before rix_drv_init can access the GP1 CSR. */
+/* Validates the RasterIX CSR identity before rix_drv_init can access it. */
 void minigl_rix_backend_init(MiniGLRixBackend *backend,
                              const MiniGLRixPlatform *platform);
 void minigl_rix_backend_reset(MiniGLRixBackend *backend);

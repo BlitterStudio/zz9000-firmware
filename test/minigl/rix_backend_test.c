@@ -18,29 +18,22 @@
 #define GL_LINEAR_MIPMAP_LINEAR 0x2703U
 
 struct model {
-    uint32_t mnt_identity;
     uint32_t csr[64];
     uint8_t command[2][COMMAND_BYTES];
     uint8_t white[2048];
     uint8_t textures[TEXTURE_SLOTS * MINIGL_RIX_TEXTURE_VIRTUAL_BYTES];
     size_t texture_bytes;
-    unsigned reads;
+    unsigned csr_reads;
     unsigned invalidates;
     uintptr_t invalidated_address;
     size_t invalidated_bytes;
 };
 
-static uint32_t mnt_read(void *context, uint32_t offset)
-{
-    struct model *model = context;
-    assert(offset == MINIGL_RIX_MNTZORRO_IDENTITY_OFFSET);
-    ++model->reads;
-    return model->mnt_identity;
-}
-
 static uint32_t csr_read(void *context, uint32_t offset)
 {
     struct model *model = context;
+
+    ++model->csr_reads;
     return model->csr[offset / 4U];
 }
 
@@ -78,7 +71,6 @@ static MiniGLRixPlatform platform(struct model *model)
 
     memset(&value, 0, sizeof(value));
     value.context = model;
-    value.mntzorro_read = mnt_read;
     value.csr_read = csr_read;
     value.csr_write = csr_write;
     value.command_buffer[0] = model->command[0];
@@ -127,7 +119,6 @@ static void init_backend(MiniGLRixBackend *backend, struct model *model,
 
     memset(model, 0, sizeof(*model));
     model->texture_bytes = slots * MINIGL_RIX_TEXTURE_VIRTUAL_BYTES;
-    model->mnt_identity = RIX_DRV_IDENTITY_VALUE;
     model->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     model->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
@@ -494,9 +485,8 @@ int main(void)
     io = platform(&model);
     minigl_rix_backend_init(&backend, &io);
     assert(!minigl_rix_backend_available(&backend));
-    assert(model.reads == 1U);
+    assert(model.csr_reads == 1U);
 
-    model.mnt_identity = RIX_DRV_IDENTITY_VALUE;
     model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;

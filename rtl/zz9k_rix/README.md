@@ -15,20 +15,12 @@ header (st0 input to st1 output), an address beat (zero for inline parser
 payload), then the raw RasterIX parser words.  The wrapper fetcher adds no DSE
 headers.  The final fetched word carries `tlast`.
 
-## Discovery and package binding
+## Discovery
 
-RasterIX is an opt-in bitstream feature.  The non-RasterIX project retains the
-master MNTZorro RTL and packaged IP byte-for-byte: it does not add a presence
-register, widen that AXI slave, or consume a REG7 capability bit.  REG7 already
-uses bits 31 and 30 for Fast RAM and gamma.
-
-`0x83c60000` is decoded only in a RasterIX bitstream, so probing it on an older
-image can fault.  Firmware must therefore select this backend only from a
-package/build-time RasterIX flag tied to the separately qualified
-`zz9000_ps_wrapper-zorro3-aga-rix.bit`; it must not probe this CSR to discover
-an optional engine.  After that binding is established, firmware reads
-`IDENTITY` and requires `RIX1` before issuing any other RasterIX CSR access.
-An identity mismatch or unavailable engine keeps the real CPU backend active.
+When `MINIGL_RASTERIX` is enabled, firmware discovers RasterIX through its CSR
+at `0x83c60000`. It reads `IDENTITY` and `VERSION`, requiring `RIX1` and a
+supported version before issuing any other RasterIX CSR access. An identity or
+version mismatch keeps the real CPU backend active.
 
 ## CSR map
 

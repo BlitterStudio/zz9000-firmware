@@ -562,31 +562,28 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
 int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform)
 {
     static int logged = 0;
-    uint32_t mntz_id;
     uint32_t csr_id;
     uint32_t csr_ver;
 
-    if (platform == NULL || platform->mntzorro_read == NULL ||
-        platform->csr_read == NULL || platform->csr_write == NULL) {
+    if (platform == NULL || platform->csr_read == NULL ||
+        platform->csr_write == NULL) {
         if (!logged) {
             RIX_LOG("[RasterIX] discovery: CPU fallback (platform unavailable)\r\n");
             logged = 1;
         }
         return 0;
     }
-    mntz_id = platform->mntzorro_read(platform->context,
-                                      MINIGL_RIX_MNTZORRO_IDENTITY_OFFSET);
-    if (mntz_id != RIX_DRV_IDENTITY_VALUE) {
+    csr_id = platform->csr_read(platform->context, RIX_DRV_CSR_IDENTITY);
+    if (csr_id != RIX_DRV_IDENTITY_VALUE) {
         if (!logged) {
-            RIX_LOG("[RasterIX] discovery: CPU fallback (MNTZorro=0x%08lx)\r\n",
-                    (unsigned long)mntz_id);
+            RIX_LOG("[RasterIX] discovery: CPU fallback (CSR id=0x%08lx)\r\n",
+                    (unsigned long)csr_id);
             logged = 1;
         }
         return 0;
     }
-    csr_id = platform->csr_read(platform->context, RIX_DRV_CSR_IDENTITY);
     csr_ver = platform->csr_read(platform->context, RIX_DRV_CSR_VERSION);
-    if (csr_id != RIX_DRV_IDENTITY_VALUE || csr_ver != RIX_DRV_VERSION_VALUE) {
+    if (csr_ver != RIX_DRV_VERSION_VALUE) {
         if (!logged) {
             RIX_LOG("[RasterIX] discovery: CPU fallback (CSR id=0x%08lx ver=0x%08lx)\r\n",
                     (unsigned long)csr_id, (unsigned long)csr_ver);

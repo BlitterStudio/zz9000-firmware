@@ -33,18 +33,11 @@ struct mock_platform {
     uint8_t cmd_buf[2][64 * 1024];
     uint8_t white_tex[MINIGL_RIX_WHITE_TEXTURE_BYTES];
     uint8_t tex_pool[MINIGL_RIX_TEXTURE_POOL_BYTES];
-    uint32_t mntz_identity;
     unsigned csr_reads;
     unsigned submissions;
 };
 static struct mock_platform s_mock;
 
-static uint32_t mock_mnt_read(void *ctx, uint32_t offset)
-{
-    struct mock_platform *p = (struct mock_platform *)ctx;
-    (void)offset;
-    return p->mntz_identity;
-}
 
 static uint32_t mock_csr_read(void *ctx, uint32_t offset)
 {
@@ -76,13 +69,11 @@ static void setup_mock_platform(struct mock_platform *p, MiniGLRixPlatform *out)
 {
     memset(p, 0, sizeof(*p));
     memset(out, 0, sizeof(*out));
-    p->mntz_identity = RIX_DRV_IDENTITY_VALUE;
     p->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     p->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     p->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
     p->csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
     out->context = p;
-    out->mntzorro_read = mock_mnt_read;
     out->csr_read = mock_csr_read;
     out->csr_write = mock_csr_write;
     out->cache_clean = mock_cache_noop;
@@ -105,9 +96,9 @@ static void test_platform_probe_guard(void)
     MiniGLRixPlatform platform;
 
     setup_mock_platform(&s_mock, &platform);
-    s_mock.mntz_identity = 0U;
+    s_mock.csr[RIX_DRV_CSR_IDENTITY / 4U] = 0U;
     assert(!minigl_rix_backend_probe_platform(&platform));
-    assert(s_mock.csr_reads == 0U);
+    assert(s_mock.csr_reads == 1U);
 
     setup_mock_platform(&s_mock, &platform);
     s_mock.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE + 1U;

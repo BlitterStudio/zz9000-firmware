@@ -14,7 +14,6 @@
 #include <math.h>
 
 #if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
-#include "mntzorro.h"
 #include "xil_cache.h"
 #include "xil_io.h"
 #endif
@@ -81,11 +80,6 @@ static uint8_t g_dummy_vertices[256];
 static uint8_t g_dummy_staging[256];
 
 #if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
-static uint32_t mw_rix_mntzorro_read(void *context, uint32_t offset)
-{
-    (void)context;
-    return mntzorro_read(MNTZ_BASE_ADDR, offset);
-}
 
 static uint32_t mw_rix_csr_read(void *context, uint32_t offset)
 {
@@ -139,13 +133,12 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     unsigned index;
 
     memset(&platform, 0, sizeof(platform));
-    platform.mntzorro_read = mw_rix_mntzorro_read;
     platform.csr_read = mw_rix_csr_read;
     platform.csr_write = mw_rix_csr_write;
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
-    /* This probe reads the MNTZorro signature and then exactly the versioned
-     * CSR identity pair.  No RIX address is touched by standard firmware. */
+    /* This probe reads only the versioned CSR identity pair. No RIX address is
+     * touched by standard firmware because this whole path is build-time opt-in. */
     if (!minigl_rix_backend_probe_platform(&platform)) {
         minigl_raster_set_rix_platform(NULL);
         return;
