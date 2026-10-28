@@ -451,21 +451,43 @@ static void backend_release_buffer(MiniGLRixBackend *backend, uint8_t index)
     }
 }
 
+static void backend_disable(MiniGLRixBackend *backend, const char *operation,
+                            int result)
+{
+    uint8_t index;
+
+    if (backend == NULL || backend->error)
+        return;
+    backend->error = 1U;
+    RIX_LOG("[RasterIX] backend disabled: %s error %d (status=0x%08lx err_status=0x%08lx err_addr=0x%08lx)\r\n",
+            operation, result, (unsigned long)backend->driver.last_status,
+            (unsigned long)backend->driver.last_error_status,
+            (unsigned long)backend->driver.last_error_address);
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        backend->pending_fence[index] = 0U;
+        backend_release_buffer(backend, index);
+    }
+    memset(backend->recorded_pins, 0, sizeof(backend->recorded_pins));
+    backend->collecting = 0U;
+    backend->frame_active = 0U;
+    backend->surface_rgb565 = 0U;
+    backend->triangle_count = 0U;
+    backend->op_count = 0U;
+}
+
+
 
 static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
 {
     int result;
 
+    if (backend->error)
+        return 0;
     if (backend->pending_fence[index] == 0U)
         return 1;
     result = rix_drv_poll(&backend->driver, backend->pending_fence[index], RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
-        backend->error = 1U;
-        RIX_LOG("[RasterIX] backend disabled: poll error %d (status=0x%08lx err_status=0x%08lx err_addr=0x%08lx)\r\n",
-                result,
-                (unsigned long)backend->driver.last_status,
-                (unsigned long)backend->driver.last_error_status,
-                (unsigned long)backend->driver.last_error_address);
+        backend_disable(backend, "poll", result);
         return 0;
     }
     backend->pending_fence[index] = 0U;
@@ -534,6 +556,8 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
     uint8_t *buffer = backend->platform.command_buffer[index];
     uint32_t raw_bytes;
     int result;
+    if (backend->error)
+        return 0;
 
     if (writer->failed || writer->length == 0U || writer->length > 0x00ffffffU ||
         buffer == NULL || backend->platform.command_address[index] == 0U) {
@@ -545,12 +569,7 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
     result = rix_drv_submit(&backend->driver, backend->platform.command_address[index],
                             (uint32_t)((raw_bytes + 8U) / 4U), RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
-        backend->error = 1U;
-        RIX_LOG("[RasterIX] backend disabled: submit error %d (status=0x%08lx err_status=0x%08lx err_addr=0x%08lx)\r\n",
-                result,
-                (unsigned long)backend->driver.last_status,
-                (unsigned long)backend->driver.last_error_status,
-                (unsigned long)backend->driver.last_error_address);
+        backend_disable(backend, "submit", result);
         return 0;
     }
     backend->pending_fence[index] = backend->driver.submitted_target;
@@ -1009,6 +1028,8 @@ int minigl_rix_backend_drain(MiniGLRixBackend *backend)
 
     if (backend == NULL || !backend->available)
         return 1;
+    if (backend->error)
+        return 0;
     if (backend->collecting || !backend_flush(backend, 0))
         return 0;
     for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index)
