@@ -28,9 +28,13 @@ OGG_SHA256="${LIBOGG_SHA256:-5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce8
 OGG_URL="${LIBOGG_URL:-https://github.com/xiph/ogg/releases/download/v${OGG_VERSION}/libogg-${OGG_VERSION}.tar.xz}"
 # Tremor has no release tarballs; pin the gitlab.xiph.org master commit of
 # 2025-04-03 (includes the CVE-2018-5147 codebook fix and the 2024 UB fixes).
+# gitlab.xiph.org is often unreachable, so the default URL is a byte-identical
+# copy of its archive for this commit, attached to this repository's
+# third-party-sources release. The upstream archive is
+# https://gitlab.xiph.org/xiph/tremor/-/archive/<commit>/tremor-<commit>.tar.gz
 TREMOR_COMMIT="${TREMOR_COMMIT:-820fb3237ea81af44c9cc468c8b4e20128e3e5ad}"
 TREMOR_SHA256="${TREMOR_SHA256:-3974455fe776a41615f60e05c85733c1bb78bff310794cbb0236f8af4b44f583}"
-TREMOR_URL="${TREMOR_URL:-https://gitlab.xiph.org/xiph/tremor/-/archive/${TREMOR_COMMIT}/tremor-${TREMOR_COMMIT}.tar.gz}"
+TREMOR_URL="${TREMOR_URL:-https://github.com/BlitterStudio/zz9000-firmware/releases/download/third-party-sources/tremor-${TREMOR_COMMIT}.tar.gz}"
 TARGET="${LIBVORBIS_TARGET:-arm}"
 
 usage() {
