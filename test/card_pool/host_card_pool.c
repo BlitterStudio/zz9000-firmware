@@ -13,7 +13,7 @@
 #include "card_pool.h"
 #include "host_card_pool.h"
 
-#define HOST_POOL_MAX (256U << 20)
+#define HOST_POOL_MAX (512U << 20)
 
 static uint32_t host_pool_base;
 

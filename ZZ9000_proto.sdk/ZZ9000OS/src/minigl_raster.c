@@ -177,6 +177,8 @@ static MiniGLRixPlatform g_rix_platform;
 static int g_rix_platform_set;
 static uint8_t *g_private_texture_pool;
 static uint32_t g_private_texture_pool_bytes;
+static MiniGLRasterTexturePoolGrowFn g_texture_pool_grow;
+static void *g_texture_pool_grow_context;
 /* Positive while assemble emits setup triangles, negative on capacity failure. */
 static int g_rix_collecting;
 static uint32_t g_frame_draws_hardware = 0U;
@@ -302,10 +304,14 @@ static uint32_t pixels(void) { return (uint32_t)g_buffers.width * g_buffers.heig
 static uint32_t depth_bytes_per_pixel(void) { return g_depth_bits == 16U ? 2U : 3U; }
 static uint32_t depth_max(void) { return g_depth_bits == 16U ? 0xffffU : 0xffffffU; }
 static int ready(void);
-void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes)
+void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes,
+                                    MiniGLRasterTexturePoolGrowFn grow,
+                                    void *grow_context)
 {
     g_private_texture_pool = pool;
     g_private_texture_pool_bytes = bytes;
+    g_texture_pool_grow = grow;
+    g_texture_pool_grow_context = grow_context;
 }
 
 void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
@@ -550,14 +556,30 @@ static void texture_unlink(TextureLevel *level)
     level->next = NULL;
 }
 
+static int texture_pool_ensure(uint32_t minimum_bytes, uint32_t used_bytes)
+{
+    if (minimum_bytes <= g_buffers.texture_pool_bytes)
+        return 1;
+    if (!g_texture_pool_grow ||
+        !g_texture_pool_grow(g_texture_pool_grow_context, minimum_bytes,
+                             used_bytes, &g_buffers.texture_pool,
+                             &g_buffers.texture_pool_bytes))
+        return 0;
+    g_private_texture_pool = g_buffers.texture_pool;
+    g_private_texture_pool_bytes = g_buffers.texture_pool_bytes;
+    return minimum_bytes <= g_buffers.texture_pool_bytes;
+}
+
 static int texture_alloc(TextureLevel *level, uint32_t size, uint32_t *out)
 {
     TextureLevel *current;
     TextureLevel **insert;
     uint32_t at = 0U;
     uint32_t old_size = level->size;
-    if (size > g_buffers.texture_pool_bytes ||
-        g_texture_used - old_size > g_buffers.texture_pool_bytes - size) return 0;
+    uint32_t minimum = g_texture_used - old_size + size;
+
+    if (!texture_pool_ensure(minimum, g_texture_used) ||
+        size > g_buffers.texture_pool_bytes) return 0;
     for (current = g_texture_allocations; current; current = current->next) {
         if (current == level) continue;
         if (size <= current->offset - at) break;
@@ -2746,7 +2768,7 @@ void minigl_raster_upload_texture(uint32_t id, uint16_t level, uint16_t width, u
     if (raw_size != size_bytes || raw_size > UINT32_MAX || output_size > UINT32_MAX ||
         staging_offset > g_buffers.texture_staging_bytes ||
         raw_size > (uint64_t)g_buffers.texture_staging_bytes - staging_offset ||
-        output_size > g_buffers.texture_pool_bytes) {
+        !texture_pool_ensure((uint32_t)output_size, g_texture_used)) {
         g_error |= RASTER_ERR_TEXTURE;
         return;
     }
@@ -3079,7 +3101,7 @@ int minigl_raster_upload_rgba8(uint32_t id, uint16_t level, uint16_t width, uint
     }
     texels = (uint64_t)width * height;
     output_size = texels * sizeof(uint32_t);
-    if (output_size > g_buffers.texture_pool_bytes) {
+    if (!texture_pool_ensure((uint32_t)output_size, g_texture_used)) {
         g_error |= RASTER_ERR_TEXTURE;
         return 0;
     }

@@ -25,6 +25,12 @@ typedef struct MiniGLRasterBuffers {
     uint16_t width;
     uint16_t height;
 } MiniGLRasterBuffers;
+typedef int (*MiniGLRasterTexturePoolGrowFn)(void *context,
+                                             uint32_t minimum_bytes,
+                                             uint32_t used_bytes,
+                                             uint8_t **pool,
+                                             uint32_t *pool_bytes);
+
 
 typedef struct MiniGLRasterDirtyRegion { uint16_t x, y, width, height; } MiniGLRasterDirtyRegion;
 
@@ -52,9 +58,11 @@ int minigl_raster_configure(uint32_t width, uint32_t height);
 void minigl_raster_reset(void);
 
 void minigl_raster_init(void);
-/* The core-1 service supplies the private, card-pool-owned CPU texture
- * residency before initialization. */
-void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes);
+/* The context-owned pool can relocate only between commands; the callback
+ * grows it before an upload while all residency is represented by offsets. */
+void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes,
+                                    MiniGLRasterTexturePoolGrowFn grow,
+                                    void *grow_context);
 /* Called by the core-1 service before initialization; it is safe to omit on
  * old bitstreams and host tests, which leaves RasterIX unavailable. */
 void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform);

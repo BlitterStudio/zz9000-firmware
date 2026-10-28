@@ -9,6 +9,7 @@
 #include "host_card_pool.h"
 #include "mw_host.h"
 #include "mw_types.h"
+#include "mw_texture.h"
 int smp_cpu_id(void) { return 0; }
 uint32_t smp_local_irq_save(void) { return 0U; }
 void smp_local_irq_restore(uint32_t flags) { (void)flags; }
@@ -91,6 +92,47 @@ static uint32_t lightmap_subimage(uint8_t *packet, uint32_t name,
     return bytes;
 }
 
+static void test_texture_arena_growth_and_cap(void)
+{
+    const uint32_t owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 7U);
+    mw_texture_manager manager;
+    uint32_t texture;
+    uint32_t image;
+    uint32_t minigl_fill;
+
+    host_card_pool_reset(512U << 20);
+    mw_texmgr_init_owned(&manager, owner);
+    assert(manager.arena_chunk_count == 1U);
+    assert(manager.arena_bytes == MINIGL_TEXTURE_CPU_ARENA_INITIAL_BYTES);
+    for (texture = 1U; texture < 1024U; ++texture) {
+        mw_texture *entry = mw_texmgr_get_or_create(&manager, texture);
+
+        assert(entry != NULL);
+        if (!mw_texmgr_allocate_level(&manager, entry, 0U, 1024U, 256U))
+            break;
+    }
+    assert(manager.arena_chunk_count ==
+           MINIGL_TEXTURE_CPU_ARENA_MAX_BYTES /
+           MINIGL_TEXTURE_ARENA_GROW_BYTES);
+    assert(manager.arena_bytes == MINIGL_TEXTURE_CPU_ARENA_MAX_BYTES);
+    assert(texture > 100U);
+    minigl_fill = card_pool_alloc(&card_pool,
+                                  CARD_POOL_LIMIT_MINIGL - manager.arena_bytes,
+                                  owner);
+    assert(minigl_fill != 0U);
+    assert(card_pool.class_used[CARD_POOL_CLASS_MINIGL] ==
+           CARD_POOL_LIMIT_MINIGL);
+    image = card_pool_alloc(&card_pool, CARD_POOL_PAGE_BYTES,
+                            CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, 7U));
+    assert(image != 0U);
+    assert(card_pool_free(&card_pool, image,
+                          CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, 7U)) == 1);
+    assert(card_pool_free(&card_pool, minigl_fill, owner) == 1);
+    mw_texmgr_destroy(&manager);
+    assert(card_pool.class_used[CARD_POOL_CLASS_MINIGL] == 0U);
+    assert(card_pool.block_count == 0U);
+}
+
 int main(void)
 {
     enum { texture_count = 64U, update_count = 2048U };
@@ -99,7 +141,9 @@ int main(void)
     uint32_t image, texture;
     mw_ctx *context;
 
+    test_texture_arena_growth_and_cap();
     host_card_pool_reset(128U << 20);
+    assert(card_pool.block_count == 0U);
     context = mw_host_create_owned(640U, 480U, owner);
     assert(context != NULL);
     assert(card_pool.block_count <= 4U);
@@ -116,9 +160,8 @@ int main(void)
                                                 (uint8_t)texture)) == MW_STATUS_OK);
     }
 
-    /* The mip chain remains in one MiniGL arena record, leaving records for
-     * unrelated card-pool users. */
-    assert(card_pool.block_count <= 4U);
+    /* Chunked CPU texture residency has at most eight card-pool records. */
+    assert(card_pool.block_count <= 8U);
     image = card_pool_alloc(&card_pool, CARD_POOL_PAGE_BYTES,
                             CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, 1U));
     assert(image != 0U);

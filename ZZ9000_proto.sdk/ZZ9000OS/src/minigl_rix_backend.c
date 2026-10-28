@@ -338,24 +338,66 @@ static int backend_range_available(const MiniGLRixBackend *backend,
     return 1;
 }
 
+static int backend_grow_texture_pool(MiniGLRixBackend *backend,
+                                     size_t minimum_bytes)
+{
+    uint8_t *memory;
+    uintptr_t address;
+    size_t bytes;
+
+    if (backend->platform.grow_texture_pool == NULL ||
+        !minigl_rix_backend_drain(backend))
+        return 0;
+    memory = backend->platform.texture_memory;
+    address = backend->platform.texture_address;
+    bytes = backend->platform.texture_bytes;
+    if (!backend->platform.grow_texture_pool(backend->platform.context,
+                                             minimum_bytes, &memory, &address,
+                                             &bytes))
+        return 0;
+    backend->platform.texture_memory = memory;
+    backend->platform.texture_address = address;
+    backend->platform.texture_bytes = bytes;
+    return 1;
+}
+
 static int backend_allocate_pages(MiniGLRixBackend *backend, MiniGLRixTexture *texture,
                                   uint16_t page_count)
 {
-    uint16_t total_pages;
-    uint16_t first_page;
+    uint32_t total_pages;
+    uint32_t first_page;
+    int grew = 0;
 
-    total_pages = (uint16_t)(backend->platform.texture_bytes /
+    total_pages = (uint32_t)(backend->platform.texture_bytes /
                              MINIGL_RIX_TEXTURE_PAGE_BYTES);
-    if (page_count == 0U || page_count > MINIGL_RIX_TEXTURE_PAGES ||
-        page_count > total_pages)
+    if (page_count == 0U || page_count > MINIGL_RIX_TEXTURE_PAGES)
         return 0;
+    if (page_count > total_pages) {
+        if (!backend_grow_texture_pool(backend,
+                (size_t)page_count * MINIGL_RIX_TEXTURE_PAGE_BYTES))
+            return 0;
+        total_pages = (uint32_t)(backend->platform.texture_bytes /
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES);
+        if (page_count > total_pages)
+            return 0;
+        grew = 1;
+    }
     for (;;) {
         for (first_page = 0U; first_page <= total_pages - page_count; ++first_page)
-            if (backend_range_available(backend, texture, first_page, page_count)) {
-                texture->first_page = first_page;
+            if (backend_range_available(backend, texture, (uint16_t)first_page,
+                                        page_count)) {
+                texture->first_page = (uint16_t)first_page;
                 texture->page_count = page_count;
                 return 1;
             }
+        if (!grew && backend_grow_texture_pool(backend,
+                backend->platform.texture_bytes +
+                (size_t)page_count * MINIGL_RIX_TEXTURE_PAGE_BYTES)) {
+            total_pages = (uint32_t)(backend->platform.texture_bytes /
+                                     MINIGL_RIX_TEXTURE_PAGE_BYTES);
+            grew = 1;
+            continue;
+        }
         {
             MiniGLRixTexture *victim = backend_evict_texture(backend, texture);
 
@@ -498,7 +540,10 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
     uint32_t bytes;
 
     if (backend == NULL || rgba == NULL || width == 0U || height == 0U ||
-        backend->platform.texture_memory == NULL || backend->error)
+        backend->error)
+        return 0;
+    if (backend->platform.texture_memory == NULL &&
+        !backend_grow_texture_pool(backend, MINIGL_RIX_TEXTURE_PAGE_BYTES))
         return 0;
     texture = backend_texture(backend, id);
     if (texture != NULL && texture->pin_count != 0U &&

@@ -11,6 +11,7 @@
 #include "rix_bin.h"
 #include "rix_drv.h"
 #include "minigl_renderer.h"
+#include "minigl_pool.h"
 
 #define MINIGL_RIX_CSR_BASE 0x83c60000U
 #define MINIGL_RIX_TEXTURE_PAGE_BYTES 2048U
@@ -20,8 +21,9 @@
 #define MINIGL_RIX_TEXTURE_VIRTUAL_BYTES (256U * 256U * 2U * 2U)
 #define MINIGL_RIX_TEXTURE_PAGES \
     (MINIGL_RIX_TEXTURE_VIRTUAL_BYTES / MINIGL_RIX_TEXTURE_PAGE_BYTES)
-/* GLQuake's working set needs the same 24 MiB as the native RasterIX port. */
-#define MINIGL_RIX_TEXTURE_POOL_BYTES (24U * 1024U * 1024U)
+/* RasterIX uses 2 KiB pages and a 32-bit external address space.  Backing
+ * begins only on first upload and grows to this card-pool bounded ceiling. */
+#define MINIGL_RIX_TEXTURE_POOL_BYTES MINIGL_RIX_TEXTURE_POOL_MAX_BYTES
 #define MINIGL_RIX_TEXTURE_POOL_PAGES \
     (MINIGL_RIX_TEXTURE_POOL_BYTES / MINIGL_RIX_TEXTURE_PAGE_BYTES)
 /* The CPU rasterizer can retain this many texture identities.  RasterIX
@@ -42,6 +44,11 @@ typedef void (*MiniGLRixCacheCleanFn)(void *context, uintptr_t address, size_t b
 typedef void (*MiniGLRixCacheInvalidateFn)(void *context, uintptr_t address,
                                            size_t bytes);
 
+typedef int (*MiniGLRixTexturePoolGrowFn)(void *context, size_t minimum_bytes,
+                                          uint8_t **memory,
+                                          uintptr_t *address,
+                                          size_t *bytes);
+
 typedef struct MiniGLRixPlatform {
     void *context;
     MiniGLRixReadFn csr_read;
@@ -57,6 +64,7 @@ typedef struct MiniGLRixPlatform {
     uintptr_t texture_address;
     size_t texture_bytes;
     size_t command_capacity;
+    MiniGLRixTexturePoolGrowFn grow_texture_pool;
 } MiniGLRixPlatform;
 
 typedef struct MiniGLRixVertex {

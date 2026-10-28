@@ -40,6 +40,7 @@ struct mw_ctx {
     uint32_t rix_command_buffer_addresses[2];
     uint32_t rix_white_texture_address;
     uint32_t rix_texture_pool_address;
+    uint32_t rix_texture_pool_bytes;
     uint8_t  rix_enabled;
 
     float *vertex_scratch;

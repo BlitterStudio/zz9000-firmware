@@ -37,6 +37,7 @@ struct model {
     unsigned complete_submissions;
     uintptr_t invalidated_address;
     size_t invalidated_bytes;
+    unsigned texture_pool_grows;
 };
 
 static uint32_t csr_read(void *context, uint32_t offset)
@@ -74,6 +75,23 @@ static void cache_invalidate(void *context, uintptr_t address, size_t bytes)
     model->invalidated_address = address;
     model->invalidated_bytes = bytes;
 }
+
+static int grow_texture_pool(void *context, size_t minimum_bytes,
+                             uint8_t **memory, uintptr_t *address,
+                             size_t *bytes)
+{
+    struct model *model = context;
+    size_t capacity = 2U * MINIGL_RIX_TEXTURE_VIRTUAL_BYTES;
+
+    if (minimum_bytes > capacity)
+        return 0;
+    ++model->texture_pool_grows;
+    *memory = model->textures;
+    *address = 0x03000000U;
+    *bytes = capacity;
+    return 1;
+}
+
 
 
 static MiniGLRixPlatform platform(struct model *model)
@@ -238,6 +256,24 @@ static void test_downscale_and_residency_lifetime(void)
     assert(minigl_rix_backend_drain(&backend));
     minigl_rix_backend_delete_texture(&backend, 1U);
     assert(!has_texture(&backend, 1U) && has_texture(&backend, 2U));
+}
+
+static void test_texture_pool_growth(void)
+{
+    MiniGLRixBackend backend;
+    static struct model model;
+    static uint32_t source[256U * 256U];
+
+    init_backend(&backend, &model, MINIGL_RIX_TEXTURE_PAGES);
+    backend.platform.grow_texture_pool = grow_texture_pool;
+    assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, source, 256U,
+                                              256U, ZZ9K_MGL_TEX_INTERNAL_RGB));
+    assert(minigl_rix_backend_upload_texture(&backend, 2U, 0U, source, 256U,
+                                              256U, ZZ9K_MGL_TEX_INTERNAL_RGB));
+    assert(model.texture_pool_grows == 1U);
+    assert(backend.platform.texture_bytes ==
+           2U * MINIGL_RIX_TEXTURE_VIRTUAL_BYTES);
+    assert(has_texture(&backend, 1U) && has_texture(&backend, 2U));
 }
 
 static void test_lru_eviction_and_subimage_reupload(void)
@@ -568,6 +604,7 @@ int main(void)
     test_mip_layout_and_filtering();
     test_downscale_and_residency_lifetime();
     test_lru_eviction_and_subimage_reupload();
+    test_texture_pool_growth();
     test_recorded_frame_replay();
     test_clear_preserves_depth_feature();
     test_overflow_splits_with_reload();
