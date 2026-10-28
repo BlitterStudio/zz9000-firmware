@@ -628,6 +628,54 @@ static void backend_release_buffer(MiniGLRixBackend *backend, uint8_t index)
     }
 }
 
+static uint8_t g_timeout_diagnostics_logged;
+
+static void backend_log_timeout_diagnostics(MiniGLRixBackend *backend, uint8_t index)
+{
+    uint32_t csr[14];
+    uint32_t words[16] = { 0U };
+    uint32_t command_words = backend->submitted_command_words[index];
+    size_t word_count = command_words < 16U ? command_words : 16U;
+    size_t word_index;
+    const uint8_t *buffer = backend->platform.command_buffer[index];
+
+    if (g_timeout_diagnostics_logged)
+        return;
+    g_timeout_diagnostics_logged = 1U;
+    for (word_index = 0U; word_index < 14U; ++word_index)
+        csr[word_index] = backend->platform.csr_read(backend->platform.context,
+                                                      (uint32_t)word_index * 4U);
+    if (buffer != NULL && word_count != 0U) {
+        if (backend->platform.cache_invalidate != NULL)
+            backend->platform.cache_invalidate(backend->platform.context,
+                                               (uintptr_t)buffer,
+                                               word_count * sizeof(words[0]));
+        memcpy(words, buffer, word_count * sizeof(words[0]));
+    }
+    RIX_LOG("[RasterIX] timeout snapshot csr=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx\r\n",
+            (unsigned long)csr[0], (unsigned long)csr[1], (unsigned long)csr[2],
+            (unsigned long)csr[3], (unsigned long)csr[4], (unsigned long)csr[5],
+            (unsigned long)csr[6]);
+    RIX_LOG("[RasterIX] timeout csr=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx\r\n",
+            (unsigned long)csr[7], (unsigned long)csr[8], (unsigned long)csr[9],
+            (unsigned long)csr[10], (unsigned long)csr[11], (unsigned long)csr[12],
+            (unsigned long)csr[13]);
+    RIX_LOG("[RasterIX] timeout cmd=%08lx/%08lx color=%08lx depth=%08lx tex=%08lx white=%08lx\r\n",
+            (unsigned long)backend->platform.command_address[index],
+            (unsigned long)command_words, (unsigned long)backend->color_address,
+            (unsigned long)backend->depth_address,
+            (unsigned long)backend->platform.texture_address,
+            (unsigned long)backend->platform.white_texture_address);
+    RIX_LOG("[RasterIX] timeout words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
+            (unsigned long)words[0], (unsigned long)words[1], (unsigned long)words[2],
+            (unsigned long)words[3], (unsigned long)words[4], (unsigned long)words[5],
+            (unsigned long)words[6], (unsigned long)words[7]);
+    RIX_LOG("[RasterIX] timeout words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
+            (unsigned long)words[8], (unsigned long)words[9], (unsigned long)words[10],
+            (unsigned long)words[11], (unsigned long)words[12], (unsigned long)words[13],
+            (unsigned long)words[14], (unsigned long)words[15]);
+}
+
 static void backend_disable(MiniGLRixBackend *backend, const char *operation, int result)
 {
     size_t index;
@@ -664,10 +712,13 @@ static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
         return 1;
     result = rix_drv_poll(&backend->driver, backend->pending_fence[index], RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
+        if (result == RIX_DRV_TIMEOUT)
+            backend_log_timeout_diagnostics(backend, index);
         backend_disable(backend, "poll", result);
         return 0;
     }
     backend->pending_fence[index] = 0U;
+    backend->submitted_command_words[index] = 0U;
     backend_release_buffer(backend, index);
     return 1;
 }
@@ -732,6 +783,7 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
     uint8_t index = backend->current_buffer;
     uint8_t *buffer = backend->platform.command_buffer[index];
     uint32_t raw_bytes;
+    uint32_t command_words;
     int result;
 
     if (backend->error || writer->failed || writer->length == 0U ||
@@ -740,15 +792,17 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
         return 0;
     }
     raw_bytes = (uint32_t)writer->length;
+    command_words = (raw_bytes + 8U) / 4U;
     ((uint32_t *)buffer)[0] = 0x90000000U | raw_bytes;
     ((uint32_t *)buffer)[1] = 0U;
     result = rix_drv_submit(&backend->driver, backend->platform.command_address[index],
-                            (uint32_t)((raw_bytes + 8U) / 4U), RIX_TIMEOUT);
+                            command_words, RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
         backend_disable(backend, "submit", result);
         return 0;
     }
     backend->pending_fence[index] = backend->driver.submitted_target;
+    backend->submitted_command_words[index] = command_words;
     memcpy(backend->pending_pins[index], backend->recorded_pins,
            sizeof(backend->pending_pins[index]));
     memset(backend->recorded_pins, 0, sizeof(backend->recorded_pins));

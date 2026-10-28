@@ -159,23 +159,26 @@ static void videocap_detection_reset() {
 	video_videocap_detection_reset(&vs.videocap_detection);
 }
 
-// Zynq S_AXI_HP0 carries the video scanout DMA and was widened to 64 bit
-// together with the 64-bit RTG scanout path. FSBLs built before that change
-// still program the port's AFI into 32-bit mode (AFI_RDCHAN_CTRL and
-// AFI_WRCHAN_CTRL bit 0 "32BIT_EN", UG585 B.5), which corrupts one half of
-// every 64-bit VDMA beat: every other pixel word is garbage in all modes.
-// Force both channels back to the 64-bit reset default before any VDMA
-// traffic runs, so a stale FSBL cannot break scanout.
+// S_AXI_HP0 carries video scanout DMA and S_AXI_HP1 carries capture plus
+// RasterIX. Both ports are 64-bit in the block design. Some FSBL images set
+// AFI_RDCHAN_CTRL and AFI_WRCHAN_CTRL bit 0 ("32BIT_EN", UG585 B.5), which
+// leaves a 64-bit PL master mismatched with its AFI channel. Clear it before
+// any of that traffic starts, so a stale FSBL cannot corrupt HP0 scanout or
+// stall an HP1 RasterIX command read.
 #define AFI0_RDCHAN_CTRL 0xF8008000
 #define AFI0_WRCHAN_CTRL 0xF8008014
+#define AFI1_RDCHAN_CTRL 0xF8009000
+#define AFI1_WRCHAN_CTRL 0xF8009014
 
-static void video_hp0_bus_width_init() {
+static void video_hp_bus_width_init(void) {
 	Xil_Out32(AFI0_RDCHAN_CTRL, Xil_In32(AFI0_RDCHAN_CTRL) & ~1u);
 	Xil_Out32(AFI0_WRCHAN_CTRL, Xil_In32(AFI0_WRCHAN_CTRL) & ~1u);
+	Xil_Out32(AFI1_RDCHAN_CTRL, Xil_In32(AFI1_RDCHAN_CTRL) & ~1u);
+	Xil_Out32(AFI1_WRCHAN_CTRL, Xil_In32(AFI1_WRCHAN_CTRL) & ~1u);
 }
 
 struct ZZ_VIDEO_STATE* video_init() {
-	video_hp0_bus_width_init();
+	video_hp_bus_width_init();
 
 	vs.framebuffer = (u32*) FRAMEBUFFER_ADDRESS;
 

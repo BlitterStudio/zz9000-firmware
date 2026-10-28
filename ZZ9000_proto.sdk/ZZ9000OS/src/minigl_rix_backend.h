@@ -133,6 +133,7 @@ typedef struct MiniGLRixBackend {
     uint8_t surface_rgb565;
     uint8_t error;
     uint32_t pending_fence[MINIGL_RIX_COMMAND_BUFFERS];
+    uint32_t submitted_command_words[MINIGL_RIX_COMMAND_BUFFERS];
     uint8_t pending_pins[MINIGL_RIX_COMMAND_BUFFERS][MINIGL_RIX_MAX_TEXTURES];
     uint8_t recorded_pins[MINIGL_RIX_MAX_TEXTURES];
     MiniGLRixTexture textures[MINIGL_RIX_MAX_TEXTURES];

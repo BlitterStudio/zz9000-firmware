@@ -9,11 +9,14 @@
 extern void (*g_rix_test_log)(const char *fmt, ...);
 
 static unsigned g_disabled_logs;
+static unsigned g_timeout_snapshots;
 
 static void count_log(const char *fmt, ...)
 {
     if (strstr(fmt, "backend disabled:") != NULL)
         ++g_disabled_logs;
+    if (strstr(fmt, "timeout snapshot") != NULL)
+        ++g_timeout_snapshots;
 }
 
 #define COMMAND_BYTES (256U * 1024U)
@@ -516,6 +519,32 @@ static void test_fallback_reasons_and_logging(void)
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT), "backend disabled/absent") == 0);
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_FORCED_CPU), "forced CPU") == 0);
 }
+static void test_timeout_diagnostics(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
+
+    init_backend(&backend, &model, TEXTURE_SLOTS);
+    model.complete_submissions = 0U;
+    g_timeout_snapshots = 0U;
+    g_rix_test_log = count_log;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(!minigl_rix_backend_drain(&backend));
+    assert(g_timeout_snapshots == 1U);
+    assert(model.invalidates == 1U);
+    assert(model.invalidated_address == (uintptr_t)model.command[0]);
+    assert(model.invalidated_bytes == 16U * sizeof(uint32_t));
+    assert(((uint32_t *)model.command[0])[0] > 0x90000000U);
+    g_rix_test_log = NULL;
+}
+
 static void test_disabled_backend_is_one_shot(void)
 {
     static struct model model;
@@ -610,6 +639,7 @@ int main(void)
     test_overflow_splits_with_reload();
     test_depth_mapping_and_ordering();
     test_fallback_reasons_and_logging();
+    test_timeout_diagnostics();
     test_disabled_backend_is_one_shot();
     puts("RasterIX backend: frame recording, band replay and texture residency passed");
     return 0;
