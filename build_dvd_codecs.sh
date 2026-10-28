@@ -72,7 +72,8 @@ fetch() {
     if [ ! -f "$archive" ]; then
         echo "[$name] downloading $url"
         if command -v curl >/dev/null 2>&1; then
-            curl --fail --location --silent --show-error "$url" -o "$archive"
+            curl --fail --location --silent --show-error --connect-timeout 30 \
+                --retry 5 --retry-delay 10 --retry-all-errors "$url" -o "$archive"
         elif command -v wget >/dev/null 2>&1; then
             wget -q "$url" -O "$archive"
         else
