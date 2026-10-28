@@ -156,6 +156,26 @@ module tb_zz9k_rasterix;
     reg write_active;
     reg write_error;
     reg [3:0] write_id;
+    // Shared HP-port model: both read masters share ONE in-order read stream
+    // with head-of-line blocking, which is the worst case of the AXI3
+    // interconnect/protocol-converter ordering the real hardware applies.
+    // SHARED=0 (default) keeps the two independent per-master models.
+    integer shared_channel;
+    reg shared_q_is_cmd [0:31];
+    reg [31:0] shared_q_addr [0:31];
+    integer shared_q_len [0:31];
+    reg [3:0] shared_q_id [0:31];
+    reg [2:0] shared_q_size [0:31];
+    integer shared_q_head;
+    integer shared_q_tail;
+    integer shared_q_count;
+    reg shared_active;
+    reg shared_is_cmd;
+    reg [31:0] shared_addr;
+    integer shared_left;
+    integer shared_delay;
+    reg [3:0] shared_id;
+    reg [2:0] shared_size;
 
     function [7:0] byte_at;
         input [31:0] address;
@@ -225,9 +245,17 @@ module tb_zz9k_rasterix;
 
     // The model accepts one transaction on each read path and one renderer
     // write burst.  READY is periodically withdrawn to exercise all wrappers.
+    // In shared mode one bounded queue serves both read masters so address
+    // requests stay realistic while the data stream stays strictly ordered.
     always @* begin
-        m_cmd_axi_arready = !cmd_read_active && !m_cmd_axi_rvalid && ((cycle_count % 7) != 0);
-        m_axi_arready = !render_read_active && !m_axi_rvalid && ((cycle_count % 5) != 0);
+        if (shared_channel) begin
+            m_cmd_axi_arready = (shared_q_count <= 26) && ((cycle_count % 7) != 0);
+            m_axi_arready = (shared_q_count <= 26) && ((cycle_count % 5) != 0) &&
+                            !(m_cmd_axi_arvalid && m_cmd_axi_arready);
+        end else begin
+            m_cmd_axi_arready = !cmd_read_active && !m_cmd_axi_rvalid && ((cycle_count % 7) != 0);
+            m_axi_arready = !render_read_active && !m_axi_rvalid && ((cycle_count % 5) != 0);
+        end
         m_axi_awready = !write_active && !m_axi_bvalid && ((cycle_count % 6) != 0);
         m_axi_wready = write_active && ((cycle_count % 4) != 0);
     end
@@ -344,6 +372,7 @@ module tb_zz9k_rasterix;
                      dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step5_texel);
 `endif
 
+        if (!shared_channel) begin : separate_read_models
         if (m_cmd_axi_arvalid && m_cmd_axi_arready) begin
             if (m_cmd_axi_arsize != 3'b011 || m_cmd_axi_arburst != 2'b01)
                 $fatal(1, "bad command AXI read");
@@ -410,6 +439,95 @@ module tb_zz9k_rasterix;
                 render_read_addr <= render_read_addr + (1 << render_read_size);
                 render_read_left <= render_read_left - 1;
                 render_read_delay <= latency;
+            end
+        end
+        end else begin : shared_read_model
+            // Accept reads from either master into one FIFO, then return the
+            // beats strictly in acceptance order.  Only the head entry's
+            // master sees RVALID, so a master that withholds RREADY blocks
+            // every read behind it -- exactly the shared-channel hazard the
+            // fetcher must not trigger.  At most one address is accepted per
+            // cycle (the ready gate for the renderer master also requires no
+            // command-master accept in the same cycle), so tail and count
+            // each have a single writer per cycle.
+            if (m_cmd_axi_arvalid && m_cmd_axi_arready) begin
+                if (m_cmd_axi_arsize != 3'b011 || m_cmd_axi_arburst != 2'b01)
+                    $fatal(1, "bad command AXI read");
+                shared_q_is_cmd[shared_q_tail] <= 1'b1;
+                shared_q_addr[shared_q_tail] <= m_cmd_axi_araddr;
+                shared_q_len[shared_q_tail] <= m_cmd_axi_arlen + 1;
+                shared_q_id[shared_q_tail] <= 4'd0;
+                shared_q_size[shared_q_tail] <= 3'd3;
+                shared_q_tail <= (shared_q_tail + 1) % 32;
+                shared_q_count <= shared_q_count + 1;
+            end else if (m_axi_arvalid && m_axi_arready) begin
+                if (trace_pipeline)
+                    $display("RENDER_AR cycle=%0d addr=%08x len=%0d id=%0d size=%0d",
+                             cycle_count, m_axi_araddr, m_axi_arlen, m_axi_arid, m_axi_arsize);
+                shared_q_is_cmd[shared_q_tail] <= 1'b0;
+                shared_q_addr[shared_q_tail] <= m_axi_araddr;
+                shared_q_len[shared_q_tail] <= m_axi_arlen + 1;
+                shared_q_id[shared_q_tail] <= m_axi_arid;
+                shared_q_size[shared_q_tail] <= m_axi_arsize;
+                shared_q_tail <= (shared_q_tail + 1) % 32;
+                shared_q_count <= shared_q_count + 1;
+            end
+
+            if (!shared_active && !m_cmd_axi_rvalid && !m_axi_rvalid &&
+                (shared_q_count != 0)) begin
+                shared_active <= 1'b1;
+                shared_is_cmd <= shared_q_is_cmd[shared_q_head];
+                shared_addr <= shared_q_addr[shared_q_head];
+                shared_left <= shared_q_len[shared_q_head];
+                shared_id <= shared_q_id[shared_q_head];
+                shared_size <= shared_q_size[shared_q_head];
+                shared_delay <= latency;
+            end else if (shared_active && !m_cmd_axi_rvalid && !m_axi_rvalid) begin
+                if (shared_delay != 0) shared_delay <= shared_delay - 1;
+                else if (shared_is_cmd) begin
+                    m_cmd_axi_rvalid <= 1;
+                    m_cmd_axi_rdata <= dword_at(shared_addr);
+                    m_cmd_axi_rid <= 0;
+                    m_cmd_axi_rresp <= 0;
+                    m_cmd_axi_rlast <= (shared_left == 1);
+                end else begin
+                    m_axi_rvalid <= 1;
+                    m_axi_rdata <= word_at(shared_addr);
+                    m_axi_rid <= shared_id;
+                    m_axi_rresp <= address_mapped(shared_addr) ? 0 : 2;
+                    if (!address_mapped(shared_addr))
+                        $error("renderer AXI read outside sparse DDR: %08x", shared_addr);
+                    m_axi_rlast <= (shared_left == 1);
+                end
+            end
+
+            if (m_cmd_axi_rvalid && m_cmd_axi_rready) begin
+                m_cmd_axi_rvalid <= 0;
+                shared_addr <= shared_addr + 8;
+                shared_left <= shared_left - 1;
+                if (shared_left == 1) begin
+                    m_cmd_axi_rlast <= 0;
+                    shared_active <= 1'b0;
+                    shared_q_head <= (shared_q_head + 1) % 32;
+                    if (!(m_axi_arvalid && m_axi_arready))
+                        shared_q_count <= shared_q_count - 1;
+                end else begin
+                    shared_delay <= latency;
+                end
+            end
+            if (m_axi_rvalid && m_axi_rready) begin
+                m_axi_rvalid <= 0;
+                shared_addr <= shared_addr + (1 << shared_size);
+                shared_left <= shared_left - 1;
+                if (shared_left == 1) begin
+                    m_axi_rlast <= 0;
+                    shared_active <= 1'b0;
+                    shared_q_head <= (shared_q_head + 1) % 32;
+                    if (!(m_cmd_axi_arvalid && m_cmd_axi_arready))
+                        shared_q_count <= shared_q_count - 1;
+                end else begin
+                    shared_delay <= latency;
+                end
             end
         end
         if (trace_pipeline && m_axi_rvalid && !m_axi_rready && ((cycle_count % 10000) == 0))
@@ -569,8 +687,9 @@ module tb_zz9k_rasterix;
     endtask
     task print_timeout;
         begin
-            $display("TIMEOUT cycle=%0d status=%08x fetch.state=%0d words_left=%0d fifo=%0d", cycle_count,
-                     s_axi_rdata, dut.command_fetcher.state, dut.command_fetcher.words_left, dut.command_count);
+            $display("TIMEOUT cycle=%0d status=%08x fetch.state=%0d fetch.fifo=%0d pio=%0d", cycle_count,
+                     s_axi_rdata, dut.command_fetcher.dbg_state,
+                     dut.command_fetcher.dbg_fifo_count, dut.command_count);
             $display("cmd-ddr active=%b left=%0d rvalid=%b rready=%b rlast=%b arvalid=%b arready=%b",
                      cmd_read_active, cmd_read_left, m_cmd_axi_rvalid, m_cmd_axi_rready,
                      m_cmd_axi_rlast, m_cmd_axi_arvalid, m_cmd_axi_arready);
@@ -641,10 +760,17 @@ module tb_zz9k_rasterix;
         m_cmd_axi_arready = 0; m_cmd_axi_rid = 0; m_cmd_axi_rdata = 0; m_cmd_axi_rresp = 0; m_cmd_axi_rlast = 0; m_cmd_axi_rvalid = 0;
         cmd_read_active = 0; render_read_active = 0; write_active = 0; write_error = 0; cmd_read_left = 0; render_read_left = 0; write_left = 0;
         render_read_id = 0; render_read_size = 0;
-        commands_file = "";
-        ddr_file = "";
-        patch_file = "";
-        patch_after = -1;
+        shared_channel = $test$plusargs("SHARED");
+        shared_q_head = 0; shared_q_tail = 0; shared_q_count = 0;
+        shared_active = 0; shared_is_cmd = 0; shared_addr = 0;
+        shared_left = 0; shared_delay = 0; shared_id = 0; shared_size = 0;
+        for (i = 0; i < 32; i = i + 1) begin
+            shared_q_is_cmd[i] = 0;
+            shared_q_addr[i] = 0;
+            shared_q_len[i] = 0;
+            shared_q_id[i] = 0;
+            shared_q_size[i] = 0;
+        end
         multi_command = $value$plusargs("CMDS=%s", commands_file);
         if (multi_command == 0) begin
             if (!$value$plusargs("CMD=%s", command_file)) $fatal(1, "CMD=<scene>.hex or CMDS=<capture>.hex is required");

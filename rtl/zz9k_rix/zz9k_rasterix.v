@@ -157,6 +157,20 @@ module zz9k_rasterix #(
     wire fetch_submission_done;
     wire fetch_read_error;
     wire [31:0] fetch_read_error_addr;
+    wire [2:0] fetch_dbg_state;
+    wire [4:0] fetch_dbg_fifo_count;
+
+    // Timeout diagnostics: AXI handshake progress counters and snapshots for
+    // the debug CSRs at 0x38..0x58.  Counters saturate and clear on soft
+    // reset so a dump taken after a hang reports activity since the last
+    // reset attempt.
+    reg [15:0] dbg_rix_ar_count;
+    reg [15:0] dbg_rix_rbeat_count;
+    reg [15:0] dbg_rix_rlast_count;
+    reg [15:0] dbg_cmd_ar_count;
+    reg [15:0] dbg_cmd_rlast_count;
+    reg [31:0] dbg_last_araddr;
+    reg [3:0] dbg_last_arid;
     wire completion_ack;
 
     wire [3:0] rix_m_axi_awid;
@@ -293,7 +307,13 @@ module zz9k_rasterix #(
             irq_status <= 1'b0;
             error_address <= 32'd0;
             pio_rejected <= 1'b0;
-            start_rejected <= 1'b0;
+            dbg_rix_ar_count <= 16'd0;
+            dbg_rix_rbeat_count <= 16'd0;
+            dbg_rix_rlast_count <= 16'd0;
+            dbg_cmd_ar_count <= 16'd0;
+            dbg_cmd_rlast_count <= 16'd0;
+            dbg_last_araddr <= 32'd0;
+            dbg_last_arid <= 4'd0;
         end else begin
             if (s_axi_awvalid && s_axi_awready) begin
                 write_addr <= s_axi_awaddr;
@@ -308,27 +328,44 @@ module zz9k_rasterix #(
                 write_response_valid <= 1'b0;
 
             if (s_axi_arvalid && s_axi_arready) begin
-                case (s_axi_araddr[5:2])
-                    4'h0: read_data <= IDENTITY;
-                    4'h1: read_data <= VERSION;
-                    4'h2: read_data <= {29'd0, error_sticky, soft_reset_pending, enable_requested};
-                    4'h3: read_data <= {read_transactions, write_transactions, 4'd0,
-                                         irq_status, start_rejected, pio_rejected, error_sticky,
-                                         completion_pending, fetch_submit_ready, fetch_busy,
-                                         renderer_stall, renderer_triangle_rendering,
-                                         renderer_busy, engine_idle, renderer_clock_enable};
-                    4'h4: read_data <= command_word;
-                    4'h5: read_data <= {27'd0, command_count};
-                    4'h6: read_data <= {16'd0, rix_response_data[15:0]};
-                    4'h7: read_data <= cmd_addr;
-                    4'h8: read_data <= cmd_words;
-                    4'h9: read_data <= {31'd0, fetch_submit_ready};
-                    4'hA: read_data <= submissions_accepted;
-                    4'hB: read_data <= submissions_completed;
-                    4'hC: read_data <= {29'd0, start_rejected, pio_rejected, error_sticky};
-                    4'hD: read_data <= error_address;
-                    default: read_data <= 32'd0;
-                endcase
+                case (s_axi_araddr[7:2])
+                    6'h0: read_data <= IDENTITY;
+                    6'h1: read_data <= VERSION;
+                    6'h2: read_data <= {29'd0, error_sticky, soft_reset_pending, enable_requested};
+                    6'h3: read_data <= {read_transactions, write_transactions, 4'd0,
+                                        irq_status, start_rejected, pio_rejected, error_sticky,
+                                        completion_pending, fetch_submit_ready, fetch_busy,
+                                        renderer_stall, renderer_triangle_rendering,
+                                        renderer_busy, engine_idle, renderer_clock_enable};
+                    6'h4: read_data <= command_word;
+                    6'h5: read_data <= {27'd0, command_count};
+                    6'h6: read_data <= {16'd0, rix_response_data[15:0]};
+                    6'h7: read_data <= cmd_addr;
+                    6'h8: read_data <= cmd_words;
+                    6'h9: read_data <= {31'd0, fetch_submit_ready};
+                    6'hA: read_data <= submissions_accepted;
+                    6'hB: read_data <= submissions_completed;
+                    6'hC: read_data <= {29'd0, start_rejected, pio_rejected, error_sticky};
+                    6'hD: read_data <= error_address;
+                    6'hE: read_data <= {18'd0, completion_pending, renderer_triangle_rendering,
+                                        renderer_stall, renderer_busy, engine_idle,
+                                        rix_command_ready, rix_command_valid,
+                                        renderer_clock_enable, m_axi_rlast, m_axi_rvalid,
+                                        m_axi_rready, rix_m_axi_rready, m_axi_arvalid,
+                                        m_axi_arready};
+                    6'hF: read_data <= {17'd0, fetch_busy, fetch_submit_ready,
+                                        m_cmd_axi_rlast, m_cmd_axi_rready, m_cmd_axi_rvalid,
+                                        m_cmd_axi_arready, m_cmd_axi_arvalid,
+                                        fetch_dbg_fifo_count, fetch_dbg_state};
+                    6'h10: read_data <= {16'd0, dbg_rix_ar_count};
+                    6'h11: read_data <= {16'd0, dbg_rix_rbeat_count};
+                    6'h12: read_data <= {16'd0, dbg_rix_rlast_count};
+                    6'h13: read_data <= {16'd0, dbg_cmd_ar_count};
+                    6'h14: read_data <= {16'd0, dbg_cmd_rlast_count};
+                    6'h15: read_data <= dbg_last_araddr;
+                    6'h16: read_data <= {28'd0, dbg_last_arid};
+                     default: read_data <= 32'd0;
+                 endcase
                 read_response_valid <= 1'b1;
             end else if (read_response_valid && s_axi_rready) begin
                 read_response_valid <= 1'b0;
@@ -432,6 +469,33 @@ module zz9k_rasterix #(
                 default: begin end
             endcase
 
+            if (soft_reset_active) begin
+                dbg_rix_ar_count <= 16'd0;
+                dbg_rix_rbeat_count <= 16'd0;
+                dbg_rix_rlast_count <= 16'd0;
+                dbg_cmd_ar_count <= 16'd0;
+                dbg_cmd_rlast_count <= 16'd0;
+            end
+
+            if (m_axi_arvalid && m_axi_arready) begin
+                if (dbg_rix_ar_count != 16'hffff)
+                    dbg_rix_ar_count <= dbg_rix_ar_count + 1'b1;
+                dbg_last_araddr <= m_axi_araddr;
+                dbg_last_arid <= m_axi_arid;
+            end
+            if (m_axi_rvalid && m_axi_rready) begin
+                if (dbg_rix_rbeat_count != 16'hffff)
+                    dbg_rix_rbeat_count <= dbg_rix_rbeat_count + 1'b1;
+                if (m_axi_rlast && dbg_rix_rlast_count != 16'hffff)
+                    dbg_rix_rlast_count <= dbg_rix_rlast_count + 1'b1;
+            end
+            if (m_cmd_axi_arvalid && m_cmd_axi_arready &&
+                dbg_cmd_ar_count != 16'hffff)
+                dbg_cmd_ar_count <= dbg_cmd_ar_count + 1'b1;
+            if (m_cmd_axi_rvalid && m_cmd_axi_rready && m_cmd_axi_rlast &&
+                dbg_cmd_rlast_count != 16'hffff)
+                dbg_cmd_rlast_count <= dbg_cmd_rlast_count + 1'b1;
+
             if (!enable_requested && engine_idle && !soft_reset_pending &&
                 !command_push && !fetch_submit_fire)
                 renderer_clock_enable <= 1'b0;
@@ -467,8 +531,10 @@ module zz9k_rasterix #(
         .m_axi_rresp(m_cmd_axi_rresp),
         .m_axi_rlast(m_cmd_axi_rlast),
         .m_axi_rvalid(m_cmd_axi_rvalid),
-        .m_axi_rready(m_cmd_axi_rready)
-    );
+        .m_axi_rready(m_cmd_axi_rready),
+        .dbg_state(fetch_dbg_state),
+        .dbg_fifo_count(fetch_dbg_fifo_count)
+     );
     assign m_cmd_axi_arid = 4'd0;
 
 `ifdef RASTERIX_VARIANT_EF

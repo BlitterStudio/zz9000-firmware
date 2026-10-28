@@ -20,6 +20,8 @@ if /I "%VARIANT%"=="ef" (
 if "%POLL_LIMIT%"=="" set POLL_LIMIT=2000000
 if "%TRACE_PIPE%"=="" set TRACE_PIPE=0
 set OUT_FWD=%OUT:\=/%
+set SHARED_ARG=
+if defined SHARED set SHARED_ARG=--testplusarg "SHARED=1"
 set CAPTURE_CMDS=
 set CAPTURE_DDR=
 if exist "%OUT%\%SCENE%\commands.hex" (
@@ -61,11 +63,11 @@ call xelab -debug typical -timescale 1ns/1ps -L xpm -L unisims_ver -top tb_zz9k_
 if errorlevel 1 exit /b %errorlevel%
 if defined CAPTURE_CMDS (
   if defined CAPTURE_PATCH (
-    call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PATCH=%CAPTURE_PATCH%" --testplusarg "PATCH_AFTER=0" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%"
+    call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PATCH=%CAPTURE_PATCH%" --testplusarg "PATCH_AFTER=0" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG%
   ) else (
-    call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%"
+    call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG%
   )
 ) else (
-  call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMD=%OUT_FWD%/%SCENE%.hex" --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%"
+  call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMD=%OUT_FWD%/%SCENE%.hex" --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG%
 )
 exit /b %errorlevel%

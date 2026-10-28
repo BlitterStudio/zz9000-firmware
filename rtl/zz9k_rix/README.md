@@ -40,12 +40,26 @@ version mismatch keeps the real CPU backend active.
 | `0x2c` | `COMPLETED` | completed submissions counter |
 | `0x30` | `ERROR_STATUS` | bit 0 sticky AXI read response, misalignment, or unsupported RasterIX framebuffer `SWAP`; bit 1 `PIO_REJECT`; bit 2 `START_REJECT` |
 | `0x34` | `ERROR_ADDR` | misaligned buffer address or failing AXI read-beat address (unchanged for an unsupported `SWAP`) |
+| `0x38` | `DBG_LIVE` | renderer m_axi handshake bits: 0 `ARREADY`, 1 `ARVALID`, 2 renderer-internal `RREADY` (pre-gate), 3 bus `RREADY`, 4 `RVALID`, 5 `RLAST`, 6 renderer clock enabled, 7 command `TVALID`, 8 command `TREADY`, 9 `IDLE`, 10 renderer busy, 11 renderer stall, 12 triangle rendering, 13 completion pending |
+| `0x3c` | `DBG_CMD` | fetcher state: 2:0 producer FSM state (0 idle, 1 address, 2 receive, 3 error-drain), 7:3 receive-FIFO beat count, 8 cmd `ARVALID`, 9 cmd `ARREADY`, 10 cmd `RVALID`, 11 cmd `RREADY`, 12 cmd `RLAST`, 13 submission queue ready, 14 fetcher busy |
+| `0x40` | `DBG_RIX_AR` | renderer m_axi accepted read-address count (saturating; clears on soft reset) |
+| `0x44` | `DBG_RIX_RBEAT` | renderer m_axi accepted read-data beat count (saturating) |
+| `0x48` | `DBG_RIX_RLAST` | renderer m_axi completed burst count (saturating) |
+| `0x4c` | `DBG_CMD_AR` | fetcher accepted read-address count (saturating) |
+| `0x50` | `DBG_CMD_RLAST` | fetcher completed burst count (saturating) |
+| `0x54` | `DBG_LAST_AR` | address of the most recent renderer m_axi read request |
+| `0x58` | `DBG_LAST_ARID` | 3:0 ID of the most recent renderer m_axi read request |
 
 The fetch queue holds two pending descriptors in addition to the active one.
 It deliberately waits for each submission's words to be consumed, RasterIX to
 be idle, and all renderer AXI writes to retire before releasing the next queued
 submission.  This makes `COMPLETED` a hardware completion point while allowing
-the ARM to prepare N+1 during N.
+the ARM to prepare N+1 during N.  The fetcher receives each DDR burst into a
+dedicated 16-beat FIFO and only issues a burst that fits entirely, so it never
+holds undelivered beats on the HP read channel it shares with the renderer —
+a fetcher that parked mid-burst read data while waiting for the renderer would
+deadlock the single in-order read channel as soon as the renderer itself
+stalled on a framebuffer read.
 
 `IRQ_STATUS` is a level status bit only; it is set by a completion or sticky
 error and cleared by `CONTROL[2]`.  It is intentionally not connected to a PS

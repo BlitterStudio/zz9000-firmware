@@ -53,7 +53,9 @@ function Get-VariantDefinition {
         $match = [regex]::Match($line, "^\s*'(?<row>[^']+)'\s*$")
         if (-not $match.Success) { continue }
         $fields = $match.Groups['row'].Value -split '\|'
-        if ($fields.Count -ne 10) {
+        # Rows carry an optional trailing firmware-flavor column (e.g. the
+        # rasterix-only zorro3-aga-rix variant); tolerate 10 or 11 fields.
+        if ($fields.Count -ne 10 -and $fields.Count -ne 11) {
             throw "Invalid canonical variant matrix row '$($match.Groups['row'].Value)'."
         }
         if ($fields[0] -ne $Name) { continue }
@@ -62,6 +64,7 @@ function Get-VariantDefinition {
             Zorro2 = [int]$fields[3]; Zorro3 = [int]$fields[4]; Zz9500 = [int]$fields[5]
             TwoMb = [int]$fields[6]; SuperDenise = [int]$fields[7]; Z3FastRam = [int]$fields[8]
             CaptureC28 = [int]$fields[9]
+            Flavor = if ($fields.Count -eq 11) { $fields[10] } else { '' }
         }
     }
     throw "Unknown release variant '$Name' in canonical variant matrix."
@@ -200,8 +203,8 @@ function Write-AggregateSummary {
 }
 
 $variantDefinition = Get-VariantDefinition $Variant
-if ($RasterIX -and $Variant -ne 'zorro3-aga') {
-    throw 'RasterIX timing qualification is supported only for zorro3-aga.'
+if ($RasterIX -and $Variant -ne 'zorro3-aga' -and $Variant -ne 'zorro3-aga-rix') {
+    throw 'RasterIX timing qualification is supported only for zorro3-aga and zorro3-aga-rix.'
 }
 
 $timingRoot = Join-Path $repoRoot 'build\timing'
