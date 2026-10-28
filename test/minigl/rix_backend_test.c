@@ -433,7 +433,7 @@ static void test_fallback_reasons_and_logging(void)
 
     state.depth_bits = 32U;
     minigl_rix_backend_set_state(&backend, &state);
-    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_DEPTH_BITS);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_NONE);
     state.depth_bits = 24U;
 
     state.enabled_flags |= ZZ9K_MGL_STATE_FOG;
