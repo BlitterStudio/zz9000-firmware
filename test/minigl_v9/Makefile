@@ -8,8 +8,11 @@ CPPFLAGS := -I$(FIRMWARE) -DMINIGL_HOST_TEST
 MW_OBJS := mw_parse.o mw_texture.o mw_draw.o mw_ctx.o mw_service.o \
            minigl_raster.o minigl_lighting.o minigl_present.o \
            minigl_rix_backend.o rix_cmd.o rix_texture.o rix_setup.o rix_bin.o rix_drv.o
+POOL_OBJS := $(addprefix pool_,$(MW_OBJS)) pool_card_pool.o \
+             pool_sdk_smp_lock.o pool_host_card_pool.o
 
-TESTS := test_mw_validate test_mw_state test_mw_draw test_mw_texture test_mw_host_api test_mw_rasterix_mapper test_mw_transport_guard
+TESTS := test_mw_validate test_mw_state test_mw_draw test_mw_texture test_mw_host_api \
+         test_mw_card_pool test_mw_rasterix_mapper test_mw_transport_guard
 # Prefer a library checkout with the descriptor-based transport: the zz9k
 # worktree, then the historical e2e checkout, then the plain checkout.
 AMIBERRY_DIR ?= $(patsubst %/src/amiberry_transport_zz9000.c,%,$(firstword $(wildcard \
@@ -70,6 +73,7 @@ test: all
 	./test_mw_draw
 	./test_mw_texture
 	./test_mw_host_api
+	./test_mw_card_pool
 	$(E2E_RUN)
 	./test_mw_transport_guard
 	./test_mw_rasterix_mapper
@@ -101,6 +105,16 @@ test_mw_transport_guard: test_mw_transport_guard.c libmw_host.a
 
 test_mw_host_api: test_mw_host_api.c libmw_host.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -lm -o $@
+pool_%.o: $(FIRMWARE)/%.c
+	$(CC) $(CPPFLAGS) -DMINIGL_CARD_POOL_TEST -I../card_pool $(CFLAGS) -c $< -o $@
+pool_card_pool.o: $(FIRMWARE)/card_pool.c
+	$(CC) $(CPPFLAGS) -DMINIGL_CARD_POOL_TEST -I../card_pool $(CFLAGS) -c $< -o $@
+pool_sdk_smp_lock.o: $(FIRMWARE)/sdk_smp_lock.c
+	$(CC) $(CPPFLAGS) -DMINIGL_CARD_POOL_TEST -DSMP_LOCK_HOST_TEST -I../card_pool $(CFLAGS) -c $< -o $@
+pool_host_card_pool.o: ../card_pool/host_card_pool.c
+	$(CC) $(CPPFLAGS) -DMINIGL_CARD_POOL_TEST -I../card_pool $(CFLAGS) -c $< -o $@
+test_mw_card_pool: test_mw_card_pool.c $(POOL_OBJS)
+	$(CC) $(CPPFLAGS) -DMINIGL_CARD_POOL_TEST -I../card_pool $(CFLAGS) $^ -lm -o $@
 test_mw_e2e: test_mw_e2e.c scheduler_arm_host.o amiberry_transport_zz9000.o libmw_host.a
 	$(CC) $(CPPFLAGS) -I$(MOCK_AMIGA) -I$(AMIBERRY_DIR)/include -I$(AMIBERRY_DIR)/src $(CFLAGS) $^ -lpthread -lm -o $@
 test_mw_rasterix_mapper: test_mw_rasterix_mapper.c libmw_host.a

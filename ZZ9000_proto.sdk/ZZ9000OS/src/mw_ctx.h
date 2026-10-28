@@ -22,10 +22,11 @@ struct mw_ctx {
     uint32_t width;
     uint32_t height;
     mw_state state;
+    /* First asynchronous command error; packet transport remains healthy. */
+    uint32_t error;
     mw_texture_manager texmgr;
     uint8_t  palette[256][4];
     uint32_t palette_width;
-
     uint32_t *color_buffers[3];
     uint8_t  *depth_buffer;
     uint8_t  *texture_pool;

@@ -177,8 +177,10 @@ a fixed base. Offsets inside the window:
 
 *Note*: Render targets, depth buffers, texture storage, and draw scratch
 are card-pool allocations (`CARD_POOL_CLASS_MINIGL`, 128 MiB class limit)
-created with the context and released on destroy/fault/reset. They consume
-no host-visible heap at firmware boot.
+created with the context and released on destroy/fault/reset. Texture tables,
+pixels, indexed data, and mip chains share one 24 MiB context arena, so they
+consume one card-pool allocation record rather than one record per level.
+They consume no host-visible heap at firmware boot.
 ### 3.3 Zorro II: service unavailable
 Zorro II cannot host the transport: the shared host window is 64 KiB total
 (16 KiB for clients on generation-2 bitstreams once the audio direct-ring
@@ -403,6 +405,12 @@ To match the performance of the Amiberry in-process submit, `BRIDGE_SUBMIT` does
      - All submission slots are full (flow control backpressure).
      - Explicit sync is requested: `glFinish()`, `MGLSwitchDisplay` (before unlocking the presentation bitmap), or `READBACK`.
 
+
+Wire framing is validated before execution. A valid command that encounters a
+GL-level condition (for example an incomplete texture, an allocation failure,
+or an unavailable raster upload) records the context's first GL error and
+skips that command; it does **not** reject the packet or prevent its later
+commands from retiring. Only malformed wire framing may reject a packet.
 ### 4.5 Drop-on-Failure Rule (No Resubmit Storms)
 If a packet fails submission or execution (returns non-zero status):
 - The 68k guest library **MUST immediately reset the packet buffer** (`packet_reset(context)`), resetting `packet_bytes = 16` and `command_count = 0`.

@@ -17,6 +17,15 @@
 
 static uint32_t g_next_handle = 1U;
 
+#define MW_GL_INVALID_OPERATION 0x0502U
+#define MW_GL_OUT_OF_MEMORY     0x0505U
+
+static void mw_ctx_set_error(mw_ctx *c, uint32_t error)
+{
+    if (c->error == 0U)
+        c->error = error;
+}
+
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
 #define MW_CONTEXT_CARD_POOL 1
 #else
@@ -198,6 +207,10 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     c->height = height;
     mw_state_init(&c->state, width, height);
     mw_texmgr_init_owned(&c->texmgr, owner);
+    if (!c->texmgr.textures) {
+        mw_host_destroy(c);
+        return NULL;
+    }
 
     for (i = 0; i < 3; ++i) {
         c->color_buffers[i] = (uint32_t *)mw_context_alloc(
@@ -344,30 +357,34 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         uint32_t depth_bits = mw_be32(p + 12);
         uint32_t pres_w = mw_be32(p + 16);
         uint32_t pres_h = mw_be32(p + 20);
+        uint32_t *new_colors[3] = { NULL, NULL, NULL };
+        uint8_t *new_depth = NULL;
+        uint32_t new_color_addresses[3] = { 0U, 0U, 0U };
+        uint32_t new_depth_address = 0U;
         int i;
-
-        c->state.target.buffer_count = buf_count;
-        c->state.target.depth_bits = depth_bits;
-        c->state.target.present_width = pres_w;
-        c->state.target.present_height = pres_h;
 
         if (w != c->width || h != c->height) {
             for (i = 0; i < 3; ++i) {
-                mw_context_free(c, c->color_buffers[i], &c->color_buffer_addresses[i]);
-                c->color_buffers[i] = (uint32_t *)mw_context_alloc(
-                    c, w * h * sizeof(*c->color_buffers[i]),
-                    &c->color_buffer_addresses[i]);
-                if (!c->color_buffers[i])
-                    return 0;
+                new_colors[i] = (uint32_t *)mw_context_alloc(
+                    c, w * h * sizeof(*new_colors[i]), &new_color_addresses[i]);
+                if (!new_colors[i])
+                    goto target_allocation_failed;
                 for (size_t px = 0; px < (size_t)w * h; ++px)
-                    c->color_buffers[i][px] = 0x000000ffU;
+                    new_colors[i][px] = 0x000000ffU;
+            }
+            new_depth = (uint8_t *)mw_context_alloc(
+                c, w * h * 4U, &new_depth_address);
+            if (!new_depth)
+                goto target_allocation_failed;
+            for (i = 0; i < 3; ++i) {
+                mw_context_free(c, c->color_buffers[i],
+                                &c->color_buffer_addresses[i]);
+                c->color_buffers[i] = new_colors[i];
+                c->color_buffer_addresses[i] = new_color_addresses[i];
             }
             mw_context_free(c, c->depth_buffer, &c->depth_buffer_address);
-            c->depth_buffer = (uint8_t *)mw_context_alloc(
-                c, w * h * 4U, &c->depth_buffer_address);
-            if (!c->depth_buffer)
-                return 0;
-
+            c->depth_buffer = new_depth;
+            c->depth_buffer_address = new_depth_address;
             c->width = w;
             c->height = h;
             c->state.target.width = w;
@@ -378,7 +395,18 @@ static int mw_execute_command(void *user, const mw_command *cmd)
             c->state.viewport_h = h;
             mw_ctx_bind_buffers(c);
         }
+        c->state.target.buffer_count = buf_count;
+        c->state.target.depth_bits = depth_bits;
+        c->state.target.present_width = pres_w;
+        c->state.target.present_height = pres_h;
         break;
+
+target_allocation_failed:
+        for (i = 0; i < 3; ++i)
+            mw_context_free(c, new_colors[i], &new_color_addresses[i]);
+        mw_context_free(c, new_depth, &new_depth_address);
+        mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+        goto command_complete;
     }
 
     case MW_CLEAR: {
@@ -578,15 +606,21 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         uint32_t height = mw_be32(p + 16);
         mw_texture *t;
 
-        if (!mw_texmgr_image_raw(&c->texmgr, p, cmd->bytes, (const uint8_t (*)[4])c->palette, c->palette_width))
-            return 0;
+        if (!mw_texmgr_image_raw(&c->texmgr, p, cmd->bytes,
+                                 (const uint8_t (*)[4])c->palette,
+                                 c->palette_width)) {
+            mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+            goto command_complete;
+        }
 
         t = mw_texmgr_find(&c->texmgr, name);
         if (!t || !t->pixels[level] ||
             !minigl_raster_upload_rgba8(name, (uint16_t)level,
                                         (uint16_t)width, (uint16_t)height,
-                                        t->pixels[level], t->internal_rgb[level]))
-            return 0;
+                                        t->pixels[level], t->internal_rgb[level])) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
         break;
     }
 
@@ -595,8 +629,12 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         uint32_t level = mw_be32(p + 4);
         mw_texture *t;
 
-        if (!mw_texmgr_sub_raw(&c->texmgr, p, cmd->bytes, (const uint8_t (*)[4])c->palette, c->palette_width))
-            return 0;
+        if (!mw_texmgr_sub_raw(&c->texmgr, p, cmd->bytes,
+                               (const uint8_t (*)[4])c->palette,
+                               c->palette_width)) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
 
         t = mw_texmgr_find(&c->texmgr, name);
         if (!t || !t->pixels[level] ||
@@ -604,8 +642,10 @@ static int mw_execute_command(void *user, const mw_command *cmd)
                                         (uint16_t)t->widths[level],
                                         (uint16_t)t->heights[level],
                                         t->pixels[level], t->internal_rgb[level]) ||
-            !mw_upload_generated_mips(c, t))
-            return 0;
+            !mw_upload_generated_mips(c, t)) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
         break;
     }
     case MW_TEXTURE_PARAM: {
@@ -615,14 +655,18 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         float fval = mw_bef(p + 8);
         mw_texture *t;
 
-        if (!mw_texmgr_param(&c->texmgr, name, pname, val, fval))
-            return 0;
+        if (!mw_texmgr_param(&c->texmgr, name, pname, val, fval)) {
+            mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+            goto command_complete;
+        }
         t = mw_texmgr_find(&c->texmgr, name);
         if (t) {
             minigl_raster_tex_params(name, t->min_filter, t->mag_filter,
                                      t->wrap_s, t->wrap_t);
-            if (!mw_upload_generated_mips(c, t))
-                return 0;
+            if (!mw_upload_generated_mips(c, t)) {
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
         }
         break;
     }
@@ -646,20 +690,31 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         uint32_t define = mw_be32(p + 36);
         mw_texture *t;
 
-        if (level >= MW_MAX_MIP_LEVELS || !w || !h || w > MW_MAX_DIMENSION || h > MW_MAX_DIMENSION)
-            return 0;
+        if (level >= MW_MAX_MIP_LEVELS || !w || !h ||
+            w > MW_MAX_DIMENSION || h > MW_MAX_DIMENSION) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
 
         t = mw_texmgr_get_or_create(&c->texmgr, name);
-        if (!t) return 0;
+        if (!t) {
+            mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+            goto command_complete;
+        }
 
         uint32_t read_idx = (c->state.read_buffer == 0x404 || c->state.read_buffer == 0x400) ?
                             c->state.target.front : c->state.target.back;
         const uint32_t *src_buf = c->color_buffers[read_idx];
-        if (!src_buf) return 0;
+        if (!src_buf) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
 
         if (define) {
-            if (!mw_texmgr_allocate_level(&c->texmgr, t, level, w, h))
-                return 0;
+            if (!mw_texmgr_allocate_level(&c->texmgr, t, level, w, h)) {
+                mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+                goto command_complete;
+            }
             t->base_format[level] = internal_format;
             t->internal_rgb[level] = (internal_format == 3 || internal_format == 0x1907);
             uint32_t r, col;
@@ -679,8 +734,10 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         } else {
             uint32_t r, col;
             if (!t->pixels[level] || xoffset + w > t->widths[level] ||
-                yoffset + h > t->heights[level])
-                return 0;
+                yoffset + h > t->heights[level]) {
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
             for (r = 0; r < h; ++r) {
                 int32_t src_y = (int32_t)c->height - 1 - (y + (int32_t)r);
                 for (col = 0; col < w; ++col) {
@@ -700,12 +757,15 @@ static int mw_execute_command(void *user, const mw_command *cmd)
                                         (uint16_t)t->widths[level],
                                         (uint16_t)t->heights[level],
                                         t->pixels[level],
-                                        t->internal_rgb[level]))
-            return 0;
-        if (level == 0 && t->generate_mipmap) {
-            if (!mw_texmgr_generate_mips(&c->texmgr, t) ||
-                !mw_upload_generated_mips(c, t))
-                return 0;
+                                        t->internal_rgb[level])) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
+        if (level == 0 && t->generate_mipmap &&
+            (!mw_texmgr_generate_mips(&c->texmgr, t) ||
+             !mw_upload_generated_mips(c, t))) {
+            mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+            goto command_complete;
         }
         break;
     }
@@ -713,7 +773,10 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         uint32_t width = mw_be32(p + 12);
         uint32_t format = mw_be32(p + 16);
         uint32_t i;
-        if (width > 256) return 0;
+        if (width > 256) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
         for (i = 0; i < width; ++i) {
             const uint8_t *src = p + 28 + i * (format == 0x1908 ? 4 : 3);
             c->palette[i][0] = src[0];
@@ -745,8 +808,10 @@ static int mw_execute_command(void *user, const mw_command *cmd)
                                                     (uint16_t)t->widths[lvl],
                                                     (uint16_t)t->heights[lvl],
                                                     t->pixels[lvl],
-                                                    t->internal_rgb[lvl]))
-                        return 0;
+                                                    t->internal_rgb[lvl])) {
+                        mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                        goto command_complete;
+                    }
                 }
             }
         }
@@ -763,26 +828,44 @@ static int mw_execute_command(void *user, const mw_command *cmd)
 
         if (cmd->opcode == MW_DRAW_PACKED) {
             uint32_t constants, words;
-            if (cmd->bytes < 12 || !mw_packed_layout(mw_be32(p + 8), &constants, &words))
-                return 0;
+            if (cmd->bytes < 12 ||
+                !mw_packed_layout(mw_be32(p + 8), &constants, &words)) {
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
             count = mw_be32(p + 4);
-            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) return 0;
+            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) {
+                mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+                goto command_complete;
+            }
             ok = mw_decode_draw_packed(p, cmd->bytes, c->vertex_scratch, &mode, &count);
         } else if (cmd->opcode == MW_DRAW_OBJECT) {
             count = mw_be32(p + 4);
-            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) return 0;
+            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) {
+                mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+                goto command_complete;
+            }
             ok = mw_decode_draw_object(p, cmd->bytes, c->vertex_scratch, &mode, &count);
         } else if (cmd->opcode == MW_DRAW_LOWERED) {
             count = mw_be32(p + 4);
-            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) return 0;
+            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) {
+                mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+                goto command_complete;
+            }
             ok = mw_decode_draw_lowered(p, cmd->bytes, c->vertex_scratch, &mode, &count, &flags, &edge_mask);
         } else if (cmd->opcode == MW_DRAW_ARRAY_RAW) {
             count = mw_be32(p + 4);
-            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) return 0;
+            if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) {
+                mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+                goto command_complete;
+            }
             ok = mw_decode_draw_array_raw(p, cmd->bytes, c->vertex_scratch, &mode, &count);
         }
 
-        if (!ok) return 0;
+        if (!ok) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
 
         mw_ctx_sync_to_raster(c);
         minigl_raster_draw_wire_v9((uint16_t)mode, c->vertex_scratch, count, flags, (const uint32_t *)edge_mask);
@@ -812,8 +895,11 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         uint32_t *dst_buffer = c->color_buffers[draw_front ? c->state.target.front : c->state.target.back];
         uint32_t r, col;
 
-        if (x > c->width || w > c->width - x || y > c->height || h > c->height - y)
-            return 0;
+        if (x > c->width || w > c->width - x ||
+            y > c->height || h > c->height - y) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
 
         for (r = 0; r < h; ++r) {
             const uint8_t *src_row = src_pixels + (size_t)r * w * 4;
@@ -833,6 +919,8 @@ static int mw_execute_command(void *user, const mw_command *cmd)
     default:
         break;
     }
+
+command_complete:
 
     return 1;
 }

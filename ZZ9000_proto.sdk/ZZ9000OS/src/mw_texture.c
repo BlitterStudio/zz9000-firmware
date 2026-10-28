@@ -5,7 +5,7 @@
  */
 
 #include "mw_texture.h"
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if (defined(__arm__) && !defined(MINIGL_HOST_TEST)) || defined(MINIGL_CARD_POOL_TEST)
 #include "card_pool.h"
 #define MW_TEXMGR_CARD_POOL 1
 #else
@@ -158,20 +158,99 @@ static uint32_t mw_tex_raw_pixel(const uint8_t *p, uint32_t format, uint32_t typ
     }
 }
 
+#if MW_TEXMGR_CARD_POOL
+#define MW_TEXMGR_ARENA_BYTES (24U * 1024U * 1024U)
+#define MW_TEXMGR_ARENA_ALIGN 8U
+#define MW_TEXMGR_ARENA_NONE UINT32_MAX
+
+typedef struct {
+    uint32_t bytes;
+    uint32_t next;
+} mw_texmgr_arena_block;
+
+static void *mw_texmgr_arena_alloc(mw_texture_manager *tm, size_t bytes)
+{
+    uint32_t needed, offset;
+    uint32_t *link = &tm->arena_free;
+
+    if (!tm->arena || !bytes || bytes > UINT32_MAX - sizeof(mw_texmgr_arena_block))
+        return NULL;
+    needed = (uint32_t)bytes + sizeof(mw_texmgr_arena_block);
+    if (needed > UINT32_MAX - (MW_TEXMGR_ARENA_ALIGN - 1U))
+        return NULL;
+    needed = (needed + MW_TEXMGR_ARENA_ALIGN - 1U) &
+             ~(MW_TEXMGR_ARENA_ALIGN - 1U);
+
+    for (offset = tm->arena_free; offset != MW_TEXMGR_ARENA_NONE;
+         offset = ((mw_texmgr_arena_block *)(tm->arena + offset))->next) {
+        mw_texmgr_arena_block *block = (mw_texmgr_arena_block *)(tm->arena + offset);
+        uint32_t remainder;
+
+        if (block->bytes < needed) {
+            link = &block->next;
+            continue;
+        }
+        remainder = block->bytes - needed;
+        if (remainder >= sizeof(*block) + MW_TEXMGR_ARENA_ALIGN) {
+            mw_texmgr_arena_block *next =
+                (mw_texmgr_arena_block *)(tm->arena + offset + needed);
+            next->bytes = remainder;
+            next->next = block->next;
+            *link = offset + needed;
+            block->bytes = needed;
+        } else {
+            *link = block->next;
+        }
+        return block + 1;
+    }
+    return NULL;
+}
+
+static void mw_texmgr_arena_free(mw_texture_manager *tm, void *memory)
+{
+    mw_texmgr_arena_block *block, *previous_block = NULL;
+    uint32_t offset, previous = MW_TEXMGR_ARENA_NONE;
+    uint32_t *link = &tm->arena_free;
+
+    if (!tm->arena || !memory ||
+        (uint8_t *)memory < tm->arena + sizeof(*block) ||
+        (uint8_t *)memory >= tm->arena + tm->arena_bytes)
+        return;
+    block = (mw_texmgr_arena_block *)memory - 1;
+    offset = (uint32_t)((uint8_t *)block - tm->arena);
+    if (offset >= tm->arena_bytes || block->bytes > tm->arena_bytes - offset)
+        return;
+    while (*link != MW_TEXMGR_ARENA_NONE && *link < offset) {
+        previous = *link;
+        previous_block = (mw_texmgr_arena_block *)(tm->arena + previous);
+        link = &previous_block->next;
+    }
+    block->next = *link;
+    *link = offset;
+    if (block->next != MW_TEXMGR_ARENA_NONE) {
+        mw_texmgr_arena_block *next =
+            (mw_texmgr_arena_block *)(tm->arena + block->next);
+        if (offset + block->bytes == block->next) {
+            block->bytes += next->bytes;
+            block->next = next->next;
+        }
+    }
+    if (previous != MW_TEXMGR_ARENA_NONE &&
+        previous + previous_block->bytes == offset) {
+        previous_block->bytes += block->bytes;
+        previous_block->next = block->next;
+    }
+}
+#endif
+
 static void *mw_texmgr_alloc(mw_texture_manager *tm, size_t bytes,
                              uint32_t *address)
 {
 #if MW_TEXMGR_CARD_POOL
-    uint32_t card_address;
+    void *memory = mw_texmgr_arena_alloc(tm, bytes);
 
-    if (bytes > UINT32_MAX)
-        return NULL;
-    card_address = card_pool_alloc(&card_pool, (uint32_t)bytes,
-                                   tm->card_pool_owner);
-    if (!card_address)
-        return NULL;
-    *address = card_address;
-    return (void *)(uintptr_t)card_address;
+    *address = 0U;
+    return memory;
 #else
     (void)tm;
     *address = 0U;
@@ -183,9 +262,7 @@ static void mw_texmgr_free(mw_texture_manager *tm, void *memory,
                            uint32_t *address)
 {
 #if MW_TEXMGR_CARD_POOL
-    (void)memory;
-    if (*address)
-        (void)card_pool_free(&card_pool, *address, tm->card_pool_owner);
+    mw_texmgr_arena_free(tm, memory);
     *address = 0U;
 #else
     (void)tm;
@@ -202,12 +279,29 @@ void mw_texmgr_init_owned(mw_texture_manager *tm, uint32_t card_pool_owner)
     tm->card_pool_owner = card_pool_owner;
 #if MW_TEXMGR_CARD_POOL
     tm->capacity = 1024U;
+    tm->arena_bytes = MW_TEXMGR_ARENA_BYTES;
+    tm->arena_address = card_pool_alloc(&card_pool, tm->arena_bytes,
+                                        tm->card_pool_owner);
+    if (!tm->arena_address) {
+        tm->capacity = 0U;
+        return;
+    }
+    tm->arena = (uint8_t *)(uintptr_t)tm->arena_address;
+    ((mw_texmgr_arena_block *)tm->arena)->bytes = tm->arena_bytes;
+    ((mw_texmgr_arena_block *)tm->arena)->next = MW_TEXMGR_ARENA_NONE;
+    tm->arena_free = 0U;
 #else
     tm->capacity = 16U;
 #endif
     tm->textures = (mw_texture *)mw_texmgr_alloc(
         tm, (size_t)tm->capacity * sizeof(*tm->textures), &address);
     if (!tm->textures) {
+#if MW_TEXMGR_CARD_POOL
+        (void)card_pool_free(&card_pool, tm->arena_address, tm->card_pool_owner);
+        tm->arena = NULL;
+        tm->arena_address = 0U;
+        tm->arena_bytes = 0U;
+#endif
         tm->capacity = 0U;
         return;
     }
@@ -237,9 +331,16 @@ static void mw_texmgr_free_level(mw_texture_manager *tm, mw_texture *t,
 
 void mw_texmgr_destroy(mw_texture_manager *tm)
 {
+    if (!tm)
+        return;
+#if MW_TEXMGR_CARD_POOL
+    if (tm->arena_address)
+        (void)card_pool_free(&card_pool, tm->arena_address, tm->card_pool_owner);
+    memset(tm, 0, sizeof(*tm));
+#else
     uint32_t i, lvl;
 
-    if (!tm || !tm->textures)
+    if (!tm->textures)
         return;
     for (i = 0; i < tm->capacity; ++i)
         for (lvl = 0; lvl < MW_MAX_MIP_LEVELS; ++lvl)
@@ -248,6 +349,7 @@ void mw_texmgr_destroy(mw_texture_manager *tm)
     tm->textures = NULL;
     tm->capacity = 0U;
     tm->count = 0U;
+#endif
 }
 
 mw_texture *mw_texmgr_find(mw_texture_manager *tm, uint32_t id)

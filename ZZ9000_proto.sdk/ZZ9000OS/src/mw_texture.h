@@ -45,6 +45,10 @@ typedef struct mw_texture_manager {
     uint32_t count;
     uint32_t card_pool_owner;
     uint32_t textures_address;
+    uint8_t *arena;
+    uint32_t arena_address;
+    uint32_t arena_bytes;
+    uint32_t arena_free;
 } mw_texture_manager;
 
 void mw_texmgr_init(mw_texture_manager *tm);

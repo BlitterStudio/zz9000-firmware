@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include "mw_ctx.h"
 #include "mw_host.h"
 #include "mw_types.h"
 
@@ -292,6 +293,17 @@ static uint32_t texture_generate_mips(uint8_t *packet, uint32_t name)
     return bytes;
 }
 
+static uint32_t texture_param(uint8_t *packet, uint32_t name,
+                              uint32_t pname, uint32_t value)
+{
+    uint32_t bytes = texture_packet(packet, MW_TEXTURE_PARAM, 12U);
+
+    mw_put_be32(packet + 24, name);
+    mw_put_be32(packet + 28, pname);
+    mw_put_be32(packet + 32, value);
+    return bytes;
+}
+
 static uint32_t lightmap_subimage(uint8_t *packet, uint32_t name, uint8_t value)
 {
     uint32_t bytes = texture_packet(packet, MW_TEXTURE_SUB_RAW, 60U + 16U * 16U * 4U);
@@ -314,25 +326,52 @@ static uint32_t lightmap_subimage(uint8_t *packet, uint32_t name, uint8_t value)
 static void test_glquake_texture_soak(void)
 {
     enum { texture_count = 64, frame_count = 2048 };
-    uint8_t packet[1108];
+    uint8_t packet[1128];
     uint32_t failed_opcode = 0U;
     mw_ctx *c = mw_host_create(640U, 480U);
     uint32_t texture;
 
     assert(c != NULL);
-    assert(mw_host_submit_report(c, packet,
-                                 lightmap_subimage(packet, 999U, 0U),
-                                 &failed_opcode) == MW_STATUS_FAILED);
-    assert(failed_opcode == MW_TEXTURE_SUB_RAW);
+    /* A GL command failure records an error but must not reject its packet. */
+    uint32_t bytes = lightmap_subimage(packet, 999U, 0U);
+    mw_put_be32(packet + bytes, MW_TEXTURE_PARAM);
+    mw_put_be32(packet + bytes + 4U, 12U);
+    mw_put_be32(packet + bytes + 8U, 998U);
+    mw_put_be32(packet + bytes + 12U, 0x2801U);
+    mw_put_be32(packet + bytes + 16U, 0x2703U);
+    bytes += 20U;
+    mw_put_be32(packet + 8U, bytes);
+    mw_put_be32(packet + 12U, 2U);
+    assert(mw_host_submit_report(c, packet, bytes, &failed_opcode) == MW_STATUS_OK);
+    assert(failed_opcode == 0U);
+    assert(mw_texmgr_find(&c->texmgr, 998U) != NULL);
+    assert(c->error == 0x0502U);
+    c->error = 0U;
+
     for (texture = 1U; texture <= texture_count; ++texture) {
-        assert(mw_host_submit(c, packet, define_texture(packet, texture)) == MW_STATUS_OK);
-        assert(mw_host_submit(c, packet, texture_generate_mips(packet, texture)) ==
+        /* GLQuake sets texture state before it defines the first level. */
+        assert(mw_host_submit(c, packet,
+                              texture_param(packet, texture, 0x2801U,
+                                            0x2703U)) == MW_STATUS_OK);
+        assert(mw_host_submit(c, packet,
+                              texture_generate_mips(packet, texture)) ==
+               MW_STATUS_OK);
+        assert(mw_host_submit(c, packet,
+                              define_texture(packet, texture)) ==
                MW_STATUS_OK);
     }
+    /* gl_texturemode changes every live texture after upload. */
+    for (texture = 1U; texture <= texture_count; ++texture)
+        assert(mw_host_submit(c, packet,
+                              texture_param(packet, texture, 0x2801U,
+                                            0x2701U)) == MW_STATUS_OK);
     for (texture = 0U; texture < frame_count; ++texture)
         assert(mw_host_submit(c, packet,
                               lightmap_subimage(packet, texture_count,
                                                 (uint8_t)texture)) == MW_STATUS_OK);
+    assert(c->error == 0U);
+    assert(mw_texmgr_find(&c->texmgr, texture_count)->pixels[0] != NULL);
+    assert(mw_texmgr_find(&c->texmgr, texture_count)->pixels[1] != NULL);
     mw_host_destroy(c);
     printf("PASS: test_glquake_texture_soak\n");
 }
