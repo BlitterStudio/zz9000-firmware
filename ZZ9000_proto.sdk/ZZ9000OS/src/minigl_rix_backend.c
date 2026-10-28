@@ -254,48 +254,173 @@ static uint16_t texture_required_levels(uint8_t width_log2, uint8_t height_log2)
     return (uint16_t)((1U << (last + 1U)) - 1U);
 }
 
-static size_t backend_texture_slots(const MiniGLRixBackend *backend)
+static uint16_t texture_page_count(uint8_t width_log2, uint8_t height_log2)
 {
-    size_t slots = backend->platform.texture_bytes / MINIGL_RIX_TEXTURE_VIRTUAL_BYTES;
+    uint8_t level;
+    uint8_t last = width_log2 > height_log2 ? width_log2 : height_log2;
+    uint32_t bytes = 0U;
 
-    return slots < MINIGL_RIX_MAX_TEXTURES ? slots : MINIGL_RIX_MAX_TEXTURES;
+    for (level = 0U; level <= last; ++level) {
+        uint8_t active_width = 0U;
+        uint8_t active_height = 0U;
+        uint32_t offset = rix_texture_mip_offset(width_log2, height_log2, level);
+        uint32_t width;
+        uint32_t height;
+        uint32_t end;
+
+        if (level < width_log2)
+            active_width = (uint8_t)(width_log2 - level);
+        if (level < height_log2)
+            active_height = (uint8_t)(height_log2 - level);
+        width = 1U << active_width;
+        height = 1U << active_height;
+        end = offset + width * height;
+        if (offset == UINT32_MAX || end < offset || end > UINT32_MAX / 2U)
+            return 0U;
+        end *= 2U;
+        if (end > bytes)
+            bytes = end;
+    }
+    return (uint16_t)((bytes + MINIGL_RIX_TEXTURE_PAGE_BYTES - 1U) /
+                      MINIGL_RIX_TEXTURE_PAGE_BYTES);
 }
 
-static MiniGLRixTexture *backend_alloc_texture(MiniGLRixBackend *backend, uint32_t id)
+static void backend_touch_texture(MiniGLRixBackend *backend, MiniGLRixTexture *texture)
+{
+    ++backend->lru_clock;
+    if (backend->lru_clock == 0U)
+        ++backend->lru_clock;
+    texture->lru_stamp = backend->lru_clock;
+}
+
+static void backend_release_texture(MiniGLRixBackend *backend, MiniGLRixTexture *texture)
+{
+    size_t index;
+    uint16_t owner = (uint16_t)(texture - backend->textures) + 1U;
+
+    for (index = 0U; index < texture->page_count; ++index)
+        if (backend->page_owner[texture->pages[index]] == owner)
+            backend->page_owner[texture->pages[index]] = 0U;
+    memset(texture, 0, sizeof(*texture));
+}
+
+static MiniGLRixTexture *backend_evict_texture(MiniGLRixBackend *backend,
+                                                const MiniGLRixTexture *excluded)
 {
     MiniGLRixTexture *candidate = NULL;
     size_t index;
-    size_t slots = backend_texture_slots(backend);
 
-    for (index = 0U; index < slots; ++index)
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index) {
+        MiniGLRixTexture *texture = &backend->textures[index];
+
+        if (texture == excluded || !texture->valid || texture->pin_count != 0U)
+            continue;
+        if (candidate == NULL || (texture->deleted && !candidate->deleted) ||
+            (texture->deleted == candidate->deleted &&
+             texture->lru_stamp < candidate->lru_stamp))
+            candidate = texture;
+    }
+    return candidate;
+}
+
+static int backend_allocate_pages(MiniGLRixBackend *backend, MiniGLRixTexture *texture,
+                                  uint16_t page_count)
+{
+    size_t index;
+    uint16_t free_pages;
+    uint16_t owner = (uint16_t)(texture - backend->textures) + 1U;
+
+    if (page_count == 0U || page_count > MINIGL_RIX_TEXTURE_PAGES ||
+        page_count > backend->platform.texture_bytes / MINIGL_RIX_TEXTURE_PAGE_BYTES)
+        return 0;
+    for (;;) {
+        free_pages = 0U;
+        for (index = 0U; index < backend->platform.texture_bytes / MINIGL_RIX_TEXTURE_PAGE_BYTES;
+             ++index)
+            if (backend->page_owner[index] == 0U)
+                ++free_pages;
+        if (free_pages >= page_count)
+            break;
+        {
+            MiniGLRixTexture *victim = backend_evict_texture(backend, texture);
+
+            if (victim == NULL)
+                return 0;
+            backend_release_texture(backend, victim);
+        }
+    }
+    texture->page_count = page_count;
+    for (index = 0U, free_pages = 0U;
+         index < backend->platform.texture_bytes / MINIGL_RIX_TEXTURE_PAGE_BYTES &&
+         free_pages < page_count; ++index) {
+        if (backend->page_owner[index] == 0U) {
+            backend->page_owner[index] = owner;
+            texture->pages[free_pages++] = (uint16_t)index;
+        }
+    }
+    return 1;
+}
+
+static MiniGLRixTexture *backend_alloc_texture(MiniGLRixBackend *backend, uint32_t id,
+                                                uint16_t page_count)
+{
+    MiniGLRixTexture *candidate = NULL;
+    size_t index;
+
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
         if (!backend->textures[index].valid) {
             candidate = &backend->textures[index];
             break;
         }
     if (candidate == NULL) {
-        for (index = 0U; index < slots; ++index) {
-            MiniGLRixTexture *texture = &backend->textures[index];
-
-            if (texture->pin_count != 0U)
-                continue;
-            if (candidate == NULL || (texture->deleted && !candidate->deleted) ||
-                (texture->deleted == candidate->deleted &&
-                 texture->lru_stamp < candidate->lru_stamp))
-                candidate = texture;
-        }
+        candidate = backend_evict_texture(backend, NULL);
+        if (candidate == NULL)
+            return NULL;
+        backend_release_texture(backend, candidate);
     }
-    if (candidate == NULL)
-        return NULL;
     memset(candidate, 0, sizeof(*candidate));
     candidate->id = id;
-    candidate->offset = (uint32_t)(candidate - backend->textures) *
-                        MINIGL_RIX_TEXTURE_VIRTUAL_BYTES;
     candidate->valid = 1U;
     candidate->min_filter = GL_NEAREST_MIPMAP_LINEAR;
     candidate->mag_filter = GL_LINEAR;
     candidate->wrap_s = GL_REPEAT;
     candidate->wrap_t = GL_REPEAT;
+    if (!backend_allocate_pages(backend, candidate, page_count)) {
+        memset(candidate, 0, sizeof(*candidate));
+        return NULL;
+    }
+    backend_touch_texture(backend, candidate);
     return candidate;
+}
+
+static int backend_write_texture(MiniGLRixBackend *backend, MiniGLRixTexture *texture,
+                                 uint32_t offset, const uint32_t *rgba, uint32_t texels)
+{
+    uint32_t byte_offset = offset * 2U;
+    uint32_t written = 0U;
+
+    while (written < texels) {
+        uint32_t page = byte_offset / MINIGL_RIX_TEXTURE_PAGE_BYTES;
+        uint32_t page_offset = byte_offset % MINIGL_RIX_TEXTURE_PAGE_BYTES;
+        uint32_t chunk = (MINIGL_RIX_TEXTURE_PAGE_BYTES - page_offset) / 2U;
+        uint8_t *destination;
+
+        if (page >= texture->page_count)
+            return 0;
+        if (chunk > texels - written)
+            chunk = texels - written;
+        destination = backend->platform.texture_memory +
+            (size_t)texture->pages[page] * MINIGL_RIX_TEXTURE_PAGE_BYTES + page_offset;
+        if (!rix_texture_convert_rgba8_le(destination, (size_t)chunk * 2U,
+                                           rgba + written, chunk, texture->format))
+            return 0;
+        if (backend->platform.cache_clean != NULL)
+            backend->platform.cache_clean(backend->platform.context,
+                                          (uintptr_t)destination, (size_t)chunk * 2U);
+        written += chunk;
+        byte_offset += chunk * 2U;
+    }
+    return 1;
 }
 
 static void backend_fill_white_texture(MiniGLRixBackend *backend)
@@ -320,6 +445,12 @@ void minigl_rix_backend_bind_texture(MiniGLRixBackend *backend, uint32_t id)
     if (backend != NULL) backend->bound_texture = id;
 }
 
+int minigl_rix_backend_texture_resident(const MiniGLRixBackend *backend, uint32_t id)
+{
+    return backend != NULL &&
+           backend_texture((MiniGLRixBackend *)backend, id) != NULL;
+}
+
 void minigl_rix_backend_tex_params(MiniGLRixBackend *backend, uint32_t id,
                                    uint16_t min_filter, uint16_t mag_filter,
                                    uint16_t wrap_s, uint16_t wrap_t)
@@ -342,6 +473,8 @@ void minigl_rix_backend_delete_texture(MiniGLRixBackend *backend, uint32_t id)
         texture->deleted = 1U;
         if (backend->bound_texture == id)
             backend->bound_texture = 0U;
+        if (texture->pin_count == 0U)
+            backend_release_texture(backend, texture);
     }
 }
 
@@ -360,45 +493,43 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
     uint32_t bytes;
 
     if (backend == NULL || rgba == NULL || width == 0U || height == 0U ||
-        backend->platform.texture_memory == NULL ||
-        backend_texture_slots(backend) == 0U)
+        backend->platform.texture_memory == NULL || backend->error)
         return 0;
     texture = backend_texture(backend, id);
     if (texture != NULL && texture->pin_count != 0U &&
         !minigl_rix_backend_drain(backend))
         return 0;
     if (level == 0U) {
+        uint8_t width_log2;
+        uint8_t height_log2;
+        uint16_t page_count;
+
         out_width = texture_dimension(width);
         out_height = texture_dimension(height);
-        if (texture == NULL)
-            texture = backend_alloc_texture(backend, id);
+        width_log2 = texture_log2(out_width);
+        height_log2 = texture_log2(out_height);
+        page_count = texture_page_count(width_log2, height_log2);
+        if (texture != NULL)
+            backend_release_texture(backend, texture);
+        texture = backend_alloc_texture(backend, id, page_count);
         if (texture == NULL)
             return 0;
         texture->width = out_width;
         texture->height = out_height;
-        texture->width_log2 = texture_log2(out_width);
-        texture->height_log2 = texture_log2(out_height);
-        texture->required_levels =
-            texture_required_levels(texture->width_log2, texture->height_log2);
-        texture->levels = 0U;
+        texture->width_log2 = width_log2;
+        texture->height_log2 = height_log2;
+        texture->required_levels = texture_required_levels(width_log2, height_log2);
         texture->format = (format & ZZ9K_MGL_TEX_INTERNAL_RGB) != 0U ?
                           RIX_TEXTURE_RGB565 : RIX_TEXTURE_RGBA4444;
-        /* RGBA4444 drops four bits per channel; RGB565 drops three or two
-         * and matches the target surface exactly.  Fully opaque RGBA data
-         * loses nothing by storing RGB565: REPLACE/MODULATE alpha stays 1.0
-         * either way. */
         if (texture->format == RIX_TEXTURE_RGBA4444) {
             size_t texel;
 
-            for (texel = 0U; texel < (size_t)width * height; ++texel) {
+            for (texel = 0U; texel < (size_t)width * height; ++texel)
                 if ((rgba[texel] & 0xffU) != 0xffU)
                     break;
-            }
             if (texel == (size_t)width * height)
                 texture->format = RIX_TEXTURE_RGB565;
         }
-        memset(backend->platform.texture_memory + texture->offset, 0,
-               MINIGL_RIX_TEXTURE_VIRTUAL_BYTES);
     } else {
         if (texture == NULL || level >= 16U ||
             (texture->required_levels & (uint16_t)(1U << level)) == 0U)
@@ -416,21 +547,14 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
     offset = rix_texture_mip_offset(texture->width_log2, texture->height_log2,
                                     (uint8_t)level);
     bytes = (uint32_t)out_width * out_height * 2U;
-    if (offset == UINT32_MAX || offset > MINIGL_RIX_TEXTURE_VIRTUAL_BYTES / 2U ||
-        bytes > MINIGL_RIX_TEXTURE_VIRTUAL_BYTES - offset * 2U ||
-        !rix_texture_convert_rgba8_le(backend->platform.texture_memory +
-                                       texture->offset + offset * 2U, bytes, scaled,
-                                       (size_t)out_width * out_height, texture->format))
+    if (offset == UINT32_MAX || bytes / 2U > UINT32_MAX - offset ||
+        !backend_write_texture(backend, texture, offset, scaled, bytes / 2U))
         return 0;
-    if (backend->platform.cache_clean != NULL)
-        backend->platform.cache_clean(backend->platform.context,
-                                      (uintptr_t)(backend->platform.texture_memory +
-                                                  texture->offset + offset * 2U),
-                                      bytes);
     texture->levels |= (uint16_t)(1U << level);
     ++texture->incarnation;
     if (texture->incarnation == 0U)
         ++texture->incarnation;
+    backend_touch_texture(backend, texture);
     return 1;
 }
 
@@ -444,28 +568,53 @@ static void backend_release_buffer(MiniGLRixBackend *backend, uint8_t index)
         if (backend->pending_pins[index][texture_index] != 0U &&
             texture->valid && texture->pin_count != 0U) {
             --texture->pin_count;
-            if (texture->pin_count == 0U)
+            if (texture->pin_count == 0U) {
                 texture->last_used_fence = 0U;
+                if (texture->deleted)
+                    backend_release_texture(backend, texture);
+            }
         }
         backend->pending_pins[index][texture_index] = 0U;
     }
 }
 
+static void backend_disable(MiniGLRixBackend *backend, const char *operation, int result)
+{
+    size_t index;
+
+    if (backend->error)
+        return;
+    backend->error = 1U;
+    RIX_LOG("[RasterIX] backend disabled: %s error %d (status=0x%08lx err_status=0x%08lx err_addr=0x%08lx)\r\n",
+            operation, result, (unsigned long)backend->driver.last_status,
+            (unsigned long)backend->driver.last_error_status,
+            (unsigned long)backend->driver.last_error_address);
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        backend->pending_fence[index] = 0U;
+        backend_release_buffer(backend, index);
+    }
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
+        if (backend->recorded_pins[index] != 0U && backend->textures[index].pin_count != 0U)
+            --backend->textures[index].pin_count;
+    memset(backend->recorded_pins, 0, sizeof(backend->recorded_pins));
+    backend->collecting = 0U;
+    backend->frame_active = 0U;
+    backend->triangle_count = 0U;
+    backend->op_count = 0U;
+    backend->surface_rgb565 = 0U;
+}
 
 static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
 {
     int result;
 
+    if (backend->error)
+        return 0;
     if (backend->pending_fence[index] == 0U)
         return 1;
     result = rix_drv_poll(&backend->driver, backend->pending_fence[index], RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
-        backend->error = 1U;
-        RIX_LOG("[RasterIX] backend disabled: poll error %d (status=0x%08lx err_status=0x%08lx err_addr=0x%08lx)\r\n",
-                result,
-                (unsigned long)backend->driver.last_status,
-                (unsigned long)backend->driver.last_error_status,
-                (unsigned long)backend->driver.last_error_address);
+        backend_disable(backend, "poll", result);
         return 0;
     }
     backend->pending_fence[index] = 0U;
@@ -481,7 +630,7 @@ static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
     RixTexEnvState environment;
     RixTextureState texture;
     uint32_t features;
-    uint32_t pages[MINIGL_RIX_TEXTURE_PAGES];
+    uint32_t pages[MINIGL_RIX_TEXTURE_PAGES] = { 0U };
     size_t page_count;
     size_t page_index;
     MiniGLRixTexture *image = NULL;
@@ -504,10 +653,10 @@ static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
         /* RasterIX exposes one minification bit: it enables its discrete LOD
          * calculator for every GL mipmap mode. */
         texture.min_linear = mip_filter(image->min_filter);
-        page_count = MINIGL_RIX_TEXTURE_PAGES;
+        page_count = image->page_count;
         for (page_index = 0U; page_index < page_count; ++page_index)
             pages[page_index] = (uint32_t)(backend->platform.texture_address +
-                image->offset + page_index * MINIGL_RIX_TEXTURE_PAGE_BYTES);
+                (size_t)image->pages[page_index] * MINIGL_RIX_TEXTURE_PAGE_BYTES);
     } else {
         texture.width_log2 = 3U;
         texture.height_log2 = 3U;
@@ -535,7 +684,8 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
     uint32_t raw_bytes;
     int result;
 
-    if (writer->failed || writer->length == 0U || writer->length > 0x00ffffffU ||
+    if (backend->error || writer->failed || writer->length == 0U ||
+        writer->length > 0x00ffffffU ||
         buffer == NULL || backend->platform.command_address[index] == 0U) {
         return 0;
     }
@@ -545,12 +695,7 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
     result = rix_drv_submit(&backend->driver, backend->platform.command_address[index],
                             (uint32_t)((raw_bytes + 8U) / 4U), RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
-        backend->error = 1U;
-        RIX_LOG("[RasterIX] backend disabled: submit error %d (status=0x%08lx err_status=0x%08lx err_addr=0x%08lx)\r\n",
-                result,
-                (unsigned long)backend->driver.last_status,
-                (unsigned long)backend->driver.last_error_status,
-                (unsigned long)backend->driver.last_error_address);
+        backend_disable(backend, "submit", result);
         return 0;
     }
     backend->pending_fence[index] = backend->driver.submitted_target;
@@ -671,7 +816,7 @@ static int backend_start_frame(MiniGLRixBackend *backend, uint16_t width,
     if (!rix_band_list_init(&backend->bands, width, height,
                             backend->references, MINIGL_RIX_MAX_TRIANGLES))
         return 0;
-    backend->command_words_estimate = 2U + (size_t)backend->bands.count * 8U;
+    backend->command_words_estimate = 2U + (size_t)backend->bands.count * 10U;
     return 1;
 }
 
@@ -767,6 +912,7 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
         return 0;
     rix_cmd_init(&writer, buffer + 8U, backend->platform.command_capacity - 8U);
     if (!backend_emit_frame(backend, &writer, continue_frame) ||
+        writer.length / sizeof(uint32_t) > MINIGL_RIX_COMMAND_WORD_BUDGET ||
         !backend_submit(backend, &writer))
         return 0;
     backend->triangle_count = 0U;
@@ -774,7 +920,7 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
     backend->needs_color_read = 1U;
     backend->needs_depth_read = 1U;
     backend->command_words_estimate = continue_frame ?
-        2U + (size_t)backend->bands.count * 8U : 0U;
+        2U + (size_t)backend->bands.count * 10U : 0U;
     if (!continue_frame)
         backend->frame_active = 0U;
     return 1;
@@ -802,9 +948,13 @@ static int backend_record_draw(MiniGLRixBackend *backend)
             backend->recorded_pins[texture - backend->textures] = 1U;
             ++texture->pin_count;
         }
+        backend_touch_texture(backend, texture);
+        backend->command_words_estimate += (size_t)backend->bands.count *
+                                           (32U + texture->page_count);
+    } else {
+        backend->command_words_estimate += (size_t)backend->bands.count * 33U;
     }
     ++backend->op_count;
-    backend->command_words_estimate += (size_t)backend->bands.count * 16U;
     return 1;
 }
 
@@ -948,8 +1098,12 @@ int minigl_rix_backend_clear(MiniGLRixBackend *backend, uint16_t width,
     if (!backend->frame_active &&
         !backend_start_frame(backend, width, height, color_address, depth_address))
         return 0;
-    if (backend->op_count == MINIGL_RIX_MAX_OPS && !backend_flush(backend, 1))
-        return 0;
+    if (backend->op_count == MINIGL_RIX_MAX_OPS ||
+        backend->command_words_estimate + (size_t)backend->bands.count *
+            (32U + MINIGL_RIX_TEXTURE_PAGES) > MINIGL_RIX_COMMAND_WORD_BUDGET) {
+        if (!backend_flush(backend, 1))
+            return 0;
+    }
     if (backend->op_count == 0U) {
         if (mask & GL_COLOR_BUFFER_BIT) backend->needs_color_read = 0U;
         if (mask & GL_DEPTH_BUFFER_BIT) backend->needs_depth_read = 0U;
@@ -1020,10 +1174,12 @@ int minigl_rix_backend_surface_is_rgb565(const MiniGLRixBackend *backend)
 
 int minigl_rix_backend_drain(MiniGLRixBackend *backend)
 {
-    uint8_t index;
+    size_t index;
 
     if (backend == NULL || !backend->available)
         return 1;
+    if (backend->error)
+        return 0;
     if (backend->collecting || !backend_flush(backend, 0))
         return 0;
     for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index)

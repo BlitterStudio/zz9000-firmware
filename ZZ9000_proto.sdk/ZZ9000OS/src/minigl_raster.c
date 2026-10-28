@@ -2676,13 +2676,38 @@ int minigl_raster_pop_matrix(uint16_t mode)
 
 void minigl_raster_bind_texture(uint16_t unit, uint16_t target, uint32_t id)
 {
+    Texture *texture_info;
+    unsigned level;
+
     if (unit >= MAX_TMU || target != GL_TEXTURE_2D) {
         g_error |= RASTER_ERR_TEXTURE;
         return;
     }
     g_bound_texture[unit] = id;
-    g_bound_texture_info[unit] = texture_create(id);
-    if (unit == 0U) minigl_rix_backend_bind_texture(&g_rix, id);
+    texture_info = texture_create(id);
+    g_bound_texture_info[unit] = texture_info;
+    if (unit != 0U)
+        return;
+    if (texture_info != NULL && texture_info->levels[0].size != 0U &&
+        !minigl_rix_backend_texture_resident(&g_rix, id)) {
+        for (level = 0U; level < ZZ9K_MINIGL_MAX_MIP_LEVELS; ++level) {
+            TextureLevel *image = &texture_info->levels[level];
+
+            if (!image->size)
+                break;
+            if (!minigl_rix_backend_upload_texture(&g_rix, id, (uint16_t)level,
+                (const uint32_t *)(g_buffers.texture_pool + image->offset),
+                image->width, image->height, image->format)) {
+                level = 0U;
+                break;
+            }
+        }
+        if (level != 0U)
+            minigl_rix_backend_tex_params(&g_rix, id, texture_info->min_filter,
+                                          texture_info->mag_filter, texture_info->wrap_s,
+                                          texture_info->wrap_t);
+    }
+    minigl_rix_backend_bind_texture(&g_rix, id);
 }
 
 void minigl_raster_upload_texture(uint32_t id, uint16_t level, uint16_t width, uint16_t height,

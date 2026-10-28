@@ -15,13 +15,18 @@
 #define MINIGL_RIX_CSR_BASE 0x83c60000U
 #define MINIGL_RIX_TEXTURE_PAGE_BYTES 2048U
 #define MINIGL_RIX_WHITE_TEXTURE_BYTES MINIGL_RIX_TEXTURE_PAGE_BYTES
+/* TextureSampler's sparse mip layout uses a 256x256x16-bit level-zero
+ * address space plus a second half for the lower levels. */
 #define MINIGL_RIX_TEXTURE_VIRTUAL_BYTES (256U * 256U * 2U * 2U)
 #define MINIGL_RIX_TEXTURE_PAGES \
     (MINIGL_RIX_TEXTURE_VIRTUAL_BYTES / MINIGL_RIX_TEXTURE_PAGE_BYTES)
 /* GLQuake's working set needs the same 24 MiB as the native RasterIX port. */
 #define MINIGL_RIX_TEXTURE_POOL_BYTES (24U * 1024U * 1024U)
-#define MINIGL_RIX_MAX_TEXTURES \
-    (MINIGL_RIX_TEXTURE_POOL_BYTES / MINIGL_RIX_TEXTURE_VIRTUAL_BYTES)
+#define MINIGL_RIX_TEXTURE_POOL_PAGES \
+    (MINIGL_RIX_TEXTURE_POOL_BYTES / MINIGL_RIX_TEXTURE_PAGE_BYTES)
+/* The CPU rasterizer can retain this many texture identities.  RasterIX
+ * residency is page-based and evicts unpinned LRU images on demand. */
+#define MINIGL_RIX_MAX_TEXTURES ZZ9K_MINIGL_MAX_TEXTURES
 /* A complete 20-band 640x480 replay is below the 7,000-word budget.  One
  * card-pool page per in-flight DSE stream keeps context allocation bounded. */
 #define MINIGL_RIX_COMMAND_BYTES 0x00010000U
@@ -61,12 +66,13 @@ typedef struct MiniGLRixVertex {
 } MiniGLRixVertex;
 typedef struct MiniGLRixTexture {
     uint32_t id;
-    uint32_t offset;
     uint32_t last_used_fence;
     uint32_t incarnation;
     uint32_t lru_stamp;
     uint16_t levels;
     uint16_t required_levels;
+    uint16_t page_count;
+    uint16_t pages[MINIGL_RIX_TEXTURE_PAGES];
     uint16_t min_filter;
     uint16_t mag_filter;
     uint16_t wrap_s;
@@ -121,6 +127,7 @@ typedef struct MiniGLRixBackend {
     uint32_t pending_fence[MINIGL_RIX_COMMAND_BUFFERS];
     uint8_t pending_pins[MINIGL_RIX_COMMAND_BUFFERS][MINIGL_RIX_MAX_TEXTURES];
     uint8_t recorded_pins[MINIGL_RIX_MAX_TEXTURES];
+    uint16_t page_owner[MINIGL_RIX_TEXTURE_POOL_PAGES];
     MiniGLRixTexture textures[MINIGL_RIX_MAX_TEXTURES];
     uint32_t bound_texture;
     uint32_t lru_clock;
@@ -153,6 +160,8 @@ void minigl_rix_backend_tex_params(MiniGLRixBackend *backend, uint32_t id,
                                    uint16_t min_filter, uint16_t mag_filter,
                                    uint16_t wrap_s, uint16_t wrap_t);
 void minigl_rix_backend_delete_texture(MiniGLRixBackend *backend, uint32_t id);
+/* True only while all RasterIX page mappings for this texture are resident. */
+int minigl_rix_backend_texture_resident(const MiniGLRixBackend *backend, uint32_t id);
 int minigl_rix_backend_begin_draw(MiniGLRixBackend *backend, uint16_t width,
                                   uint16_t height, uint32_t color_address,
                                   uint32_t depth_address);

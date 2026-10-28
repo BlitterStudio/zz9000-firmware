@@ -95,3 +95,8 @@ and wait for `STATUS.IDLE`.  Write `CONTROL[2]=1` to clear sticky/error
 notification state; then either retry with a corrected and flushed buffer or
 request the idle-only soft reset with `CONTROL[1]`.  Misaligned and zero-length
 starts are not accepted; a full two-entry queue sets `START_REJECT` instead.
+**Firmware fail-stop and texture residency.** A completion timeout means the
+backend must become permanently unavailable for its context: do not poll,
+submit, or log again from a draw loop.  TMU0 pages are physical 2 KiB
+card-pool pages; clients may map only the populated sparse-mip pages and must
+keep every page referenced by an in-flight command pinned until its completion.

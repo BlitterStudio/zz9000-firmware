@@ -6,6 +6,15 @@
 
 #include "minigl_rix_backend.h"
 #include "rix_texture.h"
+extern void (*g_rix_test_log)(const char *fmt, ...);
+
+static unsigned g_disabled_logs;
+
+static void count_log(const char *fmt, ...)
+{
+    if (strstr(fmt, "backend disabled:") != NULL)
+        ++g_disabled_logs;
+}
 
 #define COMMAND_BYTES (256U * 1024U)
 #define TEXTURE_SLOTS 4U
@@ -25,6 +34,7 @@ struct model {
     size_t texture_bytes;
     unsigned csr_reads;
     unsigned invalidates;
+    unsigned complete_submissions;
     uintptr_t invalidated_address;
     size_t invalidated_bytes;
 };
@@ -44,8 +54,9 @@ static void csr_write(void *context, uint32_t offset, uint32_t value)
     model->csr[offset / 4U] = value;
     if (offset == RIX_DRV_CSR_CMD_START && value != 0U) {
         ++model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
-        model->csr[RIX_DRV_CSR_COMPLETED / 4U] =
-            model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
+        if (model->complete_submissions != 0U)
+            model->csr[RIX_DRV_CSR_COMPLETED / 4U] =
+                model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
     }
 }
 
@@ -113,12 +124,13 @@ static MiniGLRixVertex vertex(float x, float y, uint32_t color)
 }
 
 static void init_backend(MiniGLRixBackend *backend, struct model *model,
-                         size_t slots)
+                         size_t pages)
 {
     MiniGLRixPlatform io;
 
     memset(model, 0, sizeof(*model));
-    model->texture_bytes = slots * MINIGL_RIX_TEXTURE_VIRTUAL_BYTES;
+    model->texture_bytes = pages * MINIGL_RIX_TEXTURE_PAGE_BYTES;
+    model->complete_submissions = 1U;
     model->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     model->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
@@ -168,7 +180,7 @@ static void test_mip_layout_and_filtering(void)
     size_t word;
     int stream = 0;
 
-    init_backend(&backend, &model, TEXTURE_SLOTS);
+    init_backend(&backend, &model, MINIGL_RIX_TEXTURE_PAGES);
     for (level = 0U; level < sizeof(expected) / sizeof(expected[0]); ++level)
         assert(rix_texture_mip_offset(8U, 8U, (uint8_t)level) == expected[level]);
     source[0] = 0xff0000ffU;
@@ -194,7 +206,7 @@ static void test_mip_layout_and_filtering(void)
     for (word = 2U; word < COMMAND_BYTES / sizeof(uint32_t); ++word) {
         uint32_t *command = (uint32_t *)model.command[backend.current_buffer];
 
-        if (command[word] == 0x50000080U)
+        if (command[word] == (RIX_OP_TEXTURE_STREAM | backend.textures[0].page_count))
             stream = 1;
         if (command[word] == (RIX_OP_RENDER_CONFIG | RIX_REG_TMU0_TEXTURE))
             assert(command[word + 1U] == 0x00002c88U);
@@ -208,7 +220,7 @@ static void test_downscale_and_residency_lifetime(void)
     static struct model model;
     static uint32_t source[300U * 130U];
 
-    init_backend(&backend, &model, 1U);
+    init_backend(&backend, &model, 64U);
     source[0] = 0xff8040ffU;
     assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, source, 300U, 130U,
                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
@@ -217,16 +229,14 @@ static void test_downscale_and_residency_lifetime(void)
                                   0x2901U, 0x2901U);
     assert(submit_texture(&backend, 1U));
     assert(backend.textures[0].pin_count == 1U);
-    assert(!minigl_rix_backend_upload_texture(&backend, 2U, 0U, source, 3U, 5U,
-                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
-    minigl_rix_backend_bind_texture(&backend, 2U);
-    assert(!submit_texture(&backend, 2U));
-    minigl_rix_backend_delete_texture(&backend, 1U);
-    assert(!minigl_rix_backend_upload_texture(&backend, 2U, 0U, source, 3U, 5U,
-                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
-    assert(minigl_rix_backend_drain(&backend));
     assert(minigl_rix_backend_upload_texture(&backend, 2U, 0U, source, 3U, 5U,
                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 2U, GL_NEAREST, GL_NEAREST,
+                                  0x2901U, 0x2901U);
+    minigl_rix_backend_bind_texture(&backend, 2U);
+    assert(submit_texture(&backend, 2U));
+    assert(minigl_rix_backend_drain(&backend));
+    minigl_rix_backend_delete_texture(&backend, 1U);
     assert(!has_texture(&backend, 1U) && has_texture(&backend, 2U));
 }
 
@@ -253,7 +263,8 @@ static void test_lru_eviction_and_subimage_reupload(void)
     assert(minigl_rix_backend_upload_texture(&backend, 2U, 0U, source, 16U, 16U,
                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
     assert(backend.textures[1].pin_count == 0U);
-    assert(model.textures[backend.textures[1].offset] == 0xe0U);
+    assert(model.textures[(size_t)backend.textures[1].pages[0] *
+                          MINIGL_RIX_TEXTURE_PAGE_BYTES] == 0xe0U);
     assert(minigl_rix_backend_upload_texture(&backend, 3U, 0U, source, 16U, 16U,
                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
     assert(!has_texture(&backend, 1U) && has_texture(&backend, 2U) &&
@@ -469,6 +480,32 @@ static void test_fallback_reasons_and_logging(void)
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT), "backend disabled/absent") == 0);
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_FORCED_CPU), "forced CPU") == 0);
 }
+static void test_disabled_backend_is_one_shot(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
+    unsigned reads_after_disable;
+
+    init_backend(&backend, &model, TEXTURE_SLOTS);
+    model.complete_submissions = 0U;
+    g_disabled_logs = 0U;
+    g_rix_test_log = count_log;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(!minigl_rix_backend_drain(&backend));
+    assert(!minigl_rix_backend_available(&backend));
+    reads_after_disable = model.csr_reads;
+    assert(!minigl_rix_backend_drain(&backend));
+    assert(model.csr_reads == reads_after_disable);
+    assert(g_disabled_logs == 1U);
+    g_rix_test_log = NULL;
+}
 
 int main(void)
 {
@@ -491,6 +528,7 @@ int main(void)
     model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
     model.csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
+    model.complete_submissions = 1U;
     minigl_rix_backend_init(&backend, &io);
     assert(minigl_rix_backend_available(&backend));
     assert(model.white[0] == 0xffU && model.white[1] == 0xffU);
@@ -535,6 +573,7 @@ int main(void)
     test_overflow_splits_with_reload();
     test_depth_mapping_and_ordering();
     test_fallback_reasons_and_logging();
+    test_disabled_backend_is_one_shot();
     puts("RasterIX backend: frame recording, band replay and texture residency passed");
     return 0;
 }
