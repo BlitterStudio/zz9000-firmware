@@ -798,11 +798,21 @@ static void test_mw_e2e_blit_and_capture(void)
     }
 
     /* 3. Negative blit cases:
-     * - Off-card span address (e.g. host heap) returns MINIGL_BRIDGE_ERROR_UNAVAILABLE
+     * - Off-card span address returns MINIGL_BRIDGE_ERROR_UNAVAILABLE
      * - Past VRAM limit returns MINIGL_BRIDGE_ERROR_UNAVAILABLE
      * - Invalid format returns MINIGL_BRIDGE_ERROR_INVALID
-     */
-    uint8_t heap_buf[4096];
+     *
+     * The real descriptor transports a 32-bit Amiga pointer.  Keep this
+     * host allocation representable before narrowing it to ULONG. */
+    uint8_t *heap_buf;
+#ifdef MAP_32BIT
+    heap_buf = mmap(NULL, 4096U, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    assert(heap_buf != MAP_FAILED);
+#else
+    heap_buf = malloc(4096U);
+    assert(heap_buf != NULL);
+#endif
     ULONG bad_desc1[2] = {(ULONG)(uintptr_t)heap_buf, span_total};
     assert(transport->blit(handle, blit_req, sizeof(blit_req), bad_desc1) == MINIGL_BRIDGE_ERROR_UNAVAILABLE);
 
@@ -1006,6 +1016,12 @@ static void test_mw_e2e_blit_and_capture(void)
         assert(st == 0U);
         assert(clut_vram[0] == 9U);
     }
+#ifdef MAP_32BIT
+    munmap(heap_buf, 4096U);
+#else
+    free(heap_buf);
+#endif
+
 
     transport->destroy(handle);
     transport->term();
