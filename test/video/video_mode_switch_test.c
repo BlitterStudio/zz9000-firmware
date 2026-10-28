@@ -313,12 +313,27 @@ int main(void)
 	 * never carried an override. */
 	vs.videocap_geometry_request_serial = 0;
 
-	/* The FPGA can signal vblank before the host selects an RTG mode.
-	 * That interrupt must not attempt a zero-geometry VDMA configuration. */
+	/* An idle VDMA must stay idle before a host mode exists. */
 	clear_measurements();
 	videocap_zstate = 1U << 21;
 	isr_video(NULL);
 	assert(dma_configs == 0 && dma_starts == 0);
+	videocap_zstate = 0;
+
+	/* Native capture must initialize the output without first loading the
+	 * RTG driver. The backing is armed after the Zorro reset releases,
+	 * then stable capture vblanks select the default native mode. */
+	clear_measurements();
+	vs.framebuffer = capture_framebuffer;
+	assert(video_videocap_backing_reserve());
+	assert(video_videocap_backing_arm());
+	videocap_zstate = (1U << 21) | (1U << 23);
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_DIMENSIONS & 31U] == (600U << 16 | 800U));
+	assert(vs.vmode_hsize != 0U && vs.vmode_vdma_rows != 0U &&
+	       vs.vmode_hdiv != 0U);
+	assert(dma_configs == 1 && dma_starts == 1);
+	clear_measurements();
 	videocap_zstate = 0;
 
 	/* Cold start must initialize the physical output. */
