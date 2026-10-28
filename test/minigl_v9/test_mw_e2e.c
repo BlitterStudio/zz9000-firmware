@@ -541,6 +541,72 @@ static void test_readback(void)
     printf("PASS: test_readback\n");
 }
 
+static void host_wire_st32(const volatile uint32_t *field, uint32_t value)
+{
+    mw_wire_st32((volatile uint32_t *)(uintptr_t)field, value);
+}
+
+
+/* The synchronous reply window ends immediately before other host-visible
+ * allocations. A hostile host must not turn op_arg1/op_arg3 into a write
+ * capacity beyond that window. */
+static void test_reply_window_bounds(void)
+{
+    volatile ZZ9KMiniGLControlBlockV9 *ctrl;
+    uint8_t *reply, *guard;
+    uint32_t seq, i;
+    ULONG handle;
+
+    setup_mock_card(1);
+    {
+        const struct MiniGLTransport *transport = amiberry_transport_zz9000_probe();
+        assert(transport != NULL);
+        handle = transport->create(640, 480);
+        assert(handle != 0);
+
+        g_core1_paused = 1;
+        ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)g_active_ctrl_base;
+        reply = g_card_mem + 0x06E10000UL + MW_WINDOW_REPLY_OFFSET_Z3;
+        guard = reply + MW_DEFAULT_REPLY_CAPACITY;
+        memset(guard, 0xa5, 64);
+
+        /* READBACK previously passed the guest's 1,228,800-byte request as
+         * the destination capacity. It must now fail before touching guard. */
+        seq = mw_wire_ld32(&ctrl->op_done_seq) + 1U;
+        host_wire_st32(&ctrl->op_handle, handle);
+        host_wire_st32(&ctrl->op_arg1, 640U * 480U * 4U);
+        host_wire_st32(&ctrl->op_arg2, 0U);
+        host_wire_st32(&ctrl->op_arg3, 0U);
+        host_wire_st32(&ctrl->op_code, 3U);
+        host_wire_st32(&ctrl->op_seq, seq);
+        assert(mw_service_poll() > 0);
+        assert(mw_wire_ld32(&ctrl->op_status) == MW_STATUS_CAPACITY);
+        assert(mw_wire_ld32(&ctrl->op_reply_bytes) == 0U);
+        for (i = 0; i < 64U; ++i)
+            assert(guard[i] == 0xa5);
+
+        /* REQUEST must similarly clamp the guest's claimed reply capacity
+         * to the actual window before the host handler writes a reply. */
+        mw_put_be32(reply, MW_PLUGIN_VERSION);
+        seq = mw_wire_ld32(&ctrl->op_done_seq) + 1U;
+        host_wire_st32(&ctrl->op_handle, handle);
+        host_wire_st32(&ctrl->op_arg1, 4U);
+        host_wire_st32(&ctrl->op_arg2, 0U);
+        host_wire_st32(&ctrl->op_arg3, 640U * 480U * 4U);
+        host_wire_st32(&ctrl->op_code, 5U);
+        host_wire_st32(&ctrl->op_seq, seq);
+        assert(mw_service_poll() > 0);
+        assert(mw_wire_ld32(&ctrl->op_status) == MW_STATUS_OK);
+        for (i = 0; i < 64U; ++i)
+            assert(guard[i] == 0xa5);
+
+        g_core1_paused = 0;
+        transport->destroy(handle);
+        transport->term();
+    }
+    printf("PASS: test_reply_window_bounds\n");
+}
+
 static void test_z2_unavailable(void)
 {
     struct ZZ9KMiniGLProbeReport report;
@@ -966,6 +1032,7 @@ int main(void)
     test_lost_on_generation_change();
     test_request_with_reply();
     test_readback();
+    test_reply_window_bounds();
     test_z2_unavailable();
     test_descriptor_geometry_64k_slots();
     test_back_to_back_and_pipeline();
