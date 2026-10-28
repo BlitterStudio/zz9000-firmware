@@ -161,6 +161,29 @@
                                                                "hold":  0.714
                                                            },
                                       "gate_passed":  true
-                                  }
+                                  },
+                     "zorro3-aga-rix":  {
+                                            "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga-rix.bit",
+                                            "sha256":  "b588ce704d24d8edca29502d78f3d31949cb1c6ebc30b5f15892c7254f086d45",
+                                            "source_revision":  "ffbc0b8f46d56b65b3326278f0f6b2596f515641",
+                                            "build_id":  "ffbc0b8f",
+                                            "placement_directive":  "Default",
+                                            "pixel_slack_ns":  {
+                                                                   "setup":  0.289,
+                                                                   "hold":  0.011
+                                                               },
+                                            "overall_slack_ns":  {
+                                                                     "setup":  0.259,
+                                                                     "hold":  0.01
+                                                                 },
+                                            "i2s_slack_ns":  {
+                                                                 "setup":  1.099
+                                                             },
+                                            "sii9022_slack_ns":  {
+                                                                     "setup":  2.279,
+                                                                     "hold":  0.714
+                                                                 },
+                                            "gate_passed":  true
+                                        }
                  }
 }

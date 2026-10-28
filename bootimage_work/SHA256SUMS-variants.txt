@@ -1,5 +1,5 @@
-# ZZ9000 variant matrix - 7 bitstreams
-# canonical zorro3 (top-level) + 6 variant bitstreams
+# ZZ9000 variant matrix - 7 release bitstreams + 1 opt-in RasterIX image
+# canonical zorro3 (top-level) + 6 release variant bitstreams
 a43be92be0b5f404296e10b64ed3e37095896b3347027a247fa9a00a5acb057f  zz9000_ps_wrapper.bit
 41206b04d2f27af0d90605561010ed77c8364b6509f2e383964924511903d0cf  variants/zz9000_ps_wrapper-a500-2mb.bit
 381f16c12fb1a061bbe26b2d42617e318b88f3d735f2de7ddf4c843a83c0eeaf  variants/zz9000_ps_wrapper-a500.bit
@@ -7,3 +7,4 @@ a43be92be0b5f404296e10b64ed3e37095896b3347027a247fa9a00a5acb057f  zz9000_ps_wrap
 52513290ddff15ac8cb570d389018c4b621ed5a8fdf5924660b3cba00cc15475  variants/zz9000_ps_wrapper-zorro2-2mb.bit
 431706bd2275dcb501ca2dc5b5954055801f41609b4c651dceb17c7860dbd4a7  variants/zz9000_ps_wrapper-zorro2.bit
 fcb60ba8b01f7ec537edb914fbe547087084317a5afb6b092b1737a3ca0ba8bd  variants/zz9000_ps_wrapper-zorro3-aga.bit
+b588ce704d24d8edca29502d78f3d31949cb1c6ebc30b5f15892c7254f086d45  variants/zz9000_ps_wrapper-zorro3-aga-rix.bit
