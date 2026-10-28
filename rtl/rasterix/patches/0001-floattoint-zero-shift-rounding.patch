@@ -1,0 +1,19 @@
+diff --git a/Float/rtl/float/FloatToInt.v b/Float/rtl/float/FloatToInt.v
+index f9cb6366..523b3b5f 100644
+--- a/Float/rtl/float/FloatToInt.v
++++ b/Float/rtl/float/FloatToInt.v
+@@ -106,7 +106,13 @@ module FloatToInt
+         end
+         else 
+         begin
+-            one_round <= number[shiftSize - 1];
++            /* A fixed-point value with no right shift has no discarded bit.
++             * Indexing number[-1] turns its rounding bit into X, which
++             * corrupts normalized values in [0.5, 1.0) such as colours. */
++            if (shiftSize == 0)
++                one_round <= 0;
++            else
++                one_round <= number[shiftSize - 1'b1];
+             one_number <= number >> shiftSize;
+         end
+     end

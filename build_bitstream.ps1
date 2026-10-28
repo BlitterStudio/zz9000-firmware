@@ -22,6 +22,19 @@ Build a diagnostic bitstream that does not advertise the Zorro autoboot ROM.
 Build the opt-in A4000 C28 capture candidate. Its default output is
 bootimage_work/capture-c28/zz9000_ps_wrapper.bit, separate from packaged builds.
 
+.PARAMETER RasterIX
+Build the opt-in RasterIX renderer fit trial.
+
+.PARAMETER RasterIXTMUCount
+RasterIX texture-mapping units (1 or 2; default 1; EF requires 1).
+
+.PARAMETER RasterIXVariant
+RasterIX implementation: internal framebuffer IF (default) or external
+framebuffer EF.
+
+.PARAMETER RasterIXFramebufferSizeLog2
+RasterIX internal framebuffer band size in pixels (14 or 15; IF only, default 14).
+
 .PARAMETER OutputBitstream
 Optional output bitstream path, relative to the repository or absolute.
 A C28 build cannot overwrite bootimage_work/zz9000_ps_wrapper.bit.
@@ -32,6 +45,13 @@ param(
     [string]$VivadoBat,
     [switch]$NoAutoboot,
     [switch]$CaptureC28,
+    [switch]$RasterIX,
+    [ValidateSet(1, 2)]
+    [int]$RasterIXTMUCount = 1,
+    [ValidateSet('if', 'ef')]
+    [string]$RasterIXVariant = 'if',
+    [ValidateSet(14, 15)]
+    [int]$RasterIXFramebufferSizeLog2 = 14,
     [string]$OutputBitstream
 )
 
@@ -158,6 +178,10 @@ if ($CaptureC28 -and [string]::Equals($output, $packagedOutput,
     throw 'A C28 candidate must use a separate output path from the packaged default.'
 }
 
+if ($RasterIXVariant -eq 'ef' -and $RasterIXTMUCount -ne 1) {
+    throw 'RasterIX EF supports the TMU1 fit configuration only.'
+}
+
 $vivado = Resolve-VivadoBat -RequestedPath $VivadoBat
 Write-Host "[bitstream] Vivado: $vivado"
 if ($NoAutoboot) {
@@ -166,6 +190,10 @@ if ($NoAutoboot) {
 if ($CaptureC28) {
     Write-Host '[bitstream] native capture clock: opt-in C28 candidate'
 }
+if ($RasterIX) {
+    Write-Host "[bitstream] RasterIX: variant=$RasterIXVariant TMUs=$RasterIXTMUCount framebuffer_band_log2=$RasterIXFramebufferSizeLog2"
+}
+
 
 $projectArgs = @('--origin_dir', '.')
 if ($NoAutoboot) {
@@ -173,6 +201,15 @@ if ($NoAutoboot) {
 }
 if ($CaptureC28) {
     $projectArgs += '--capture-c28'
+}
+if ($RasterIX) {
+    $projectArgs += '--rasterix'
+    $projectArgs += '--rasterix-tmu-count'
+    $projectArgs += $RasterIXTMUCount
+    $projectArgs += '--rasterix-variant'
+    $projectArgs += $RasterIXVariant
+    $projectArgs += '--rasterix-framebuffer-size-lg'
+    $projectArgs += $RasterIXFramebufferSizeLog2
 }
 
 $projectDir = Join-Path $repoRoot 'ZZ9000_proto'
