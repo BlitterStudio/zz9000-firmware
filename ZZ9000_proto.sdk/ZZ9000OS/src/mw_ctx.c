@@ -1079,6 +1079,18 @@ static inline uint8_t mw_clut_index(const mw_ctx *c, const uint8_t *p)
                              (uint32_t)(p[2] >> 3)];
 }
 
+static inline uint32_t mw_present_source_pixel(const uint32_t *rgba,
+                                               int source_rgb565, size_t index)
+{
+    if (source_rgb565) {
+        uint16_t value = ((const uint16_t *)rgba)[index];
+        return ((uint32_t)mw_widen5(value >> 11) << 24) |
+               ((uint32_t)mw_widen6((value >> 5) & 63U) << 16) |
+               ((uint32_t)mw_widen5(value & 31U) << 8) | 0xffU;
+    }
+    return rgba[index];
+}
+
 static inline void mw_encode_pixel(uint32_t format, const uint8_t *p, uint8_t *d)
 {
     switch (format) {
@@ -1284,9 +1296,13 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
     if (status != MW_STATUS_OK)
         return status;
 
-    (void)minigl_raster_finish();
+    const uint32_t *src_buf;
+    int source_rgb565;
 
-    const uint32_t *src_buf = c->color_buffers[c->state.target.latest];
+    if (!minigl_raster_prepare_present())
+        return MW_STATUS_FAILED;
+    source_rgb565 = minigl_raster_present_is_rgb565();
+    src_buf = c->color_buffers[c->state.target.latest];
     if (!src_buf)
         return MW_STATUS_FAILED;
     if (r.format == 1U)
@@ -1335,7 +1351,8 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                             int64_t sx = (fx - bx0) * (int64_t)c->width / (bx1 - bx0);
                             int64_t sy = (fy - by0) * (int64_t)c->height / (by1 - by0);
                             if (sx >= 0 && sx < (int64_t)c->width && sy >= 0 && sy < (int64_t)c->height) {
-                                pix = src_buf[(size_t)sy * c->width + sx];
+                                pix = mw_present_source_pixel(src_buf, source_rgb565,
+                                                              (size_t)sy * c->width + sx);
                             } else {
                                 pix = 0x000000ffU;
                             }
@@ -1343,7 +1360,8 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                             pix = 0x000000ffU;
                         }
                     } else {
-                        pix = src_buf[(size_t)fy * c->width + fx];
+                        pix = mw_present_source_pixel(src_buf, source_rgb565,
+                                                      (size_t)fy * c->width + fx);
                     }
 
                     uint8_t p_col[4];

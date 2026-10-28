@@ -66,6 +66,10 @@ void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes,
 /* Called by the core-1 service before initialization; it is safe to omit on
  * old bitstreams and host tests, which leaves RasterIX unavailable. */
 void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform);
+/* Retires the RasterIX command stream for card-side presentation without
+ * expanding its RGB565 surface to RGBA. */
+int minigl_raster_prepare_present(void);
+int minigl_raster_present_is_rgb565(void);
 /* Drains RasterIX and restores the shared target to CPU RGBA before readback. */
 int minigl_raster_finish(void);
 void minigl_raster_clear(uint32_t mask, uint32_t color_rgba, uint32_t depth_value);
