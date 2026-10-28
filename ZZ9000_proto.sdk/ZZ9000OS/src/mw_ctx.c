@@ -756,7 +756,6 @@ target_allocation_failed:
             uint32_t draw_buffer = mw_be32(v);
             uint32_t old_draw_buffer = s->draw_buffer;
             uint32_t old_latest = s->target.latest;
-            uint8_t old_presented_valid = c->presented_valid;
 
             if (draw_buffer == old_draw_buffer)
                 break;
@@ -769,7 +768,6 @@ target_allocation_failed:
             if (!mw_ctx_bind_buffers(c)) {
                 s->draw_buffer = old_draw_buffer;
                 s->target.latest = old_latest;
-                c->presented_valid = old_presented_valid;
                 mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
                 goto command_complete;
             }
