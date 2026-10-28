@@ -140,9 +140,10 @@ static void mw_service_cache_maintain_span(uint32_t arm_base, const uint8_t *req
     if (req_bytes < 24)
         return;
     format = mw_be32(req + 4);
-    if (format < 2 || format > 13)
+    if (format < 1 || format > 13)
         return;
-    bpp = (format <= 3) ? 3U : (format >= 6 && format <= 9) ? 4U : 2U;
+    bpp = format == 1 ? 1U :
+          (format <= 3) ? 3U : (format >= 6 && format <= 9) ? 4U : 2U;
     pitch = mw_be32(req + 8);
     count = mw_be32(req + 20);
     if (!count || count > MW_BLIT_MAX_RECTS || req_bytes != 24 + 16 * count)

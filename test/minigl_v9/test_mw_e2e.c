@@ -22,6 +22,7 @@
 #include "mw_types.h"
 #include "mw_service.h"
 #include "scheduler.h"
+#include "sdk_palette.h"
 #include "amiberry_transport.h"
 
 #include <exec/types.h>
@@ -967,11 +968,92 @@ static void test_mw_e2e_blit_and_capture(void)
         }
     }
 
+    /* 8. CLUT8 presentation uses the card's primary palette shadow, clips
+     * exactly, and rebuilds the RGB555 inverse table after a palette change. */
+    {
+        const uint32_t clut_pitch = 37U;
+        uint8_t clut_request[40];
+        uint8_t *clut_vram = g_card_mem + 0x00040000UL;
+        ULONG clut_desc[2] = {(ULONG)(uintptr_t)clut_vram, 32U * clut_pitch};
+
+        sdk_palette_reset();
+        sdk_palette_set(7U, 0x00ff0000U);
+        memset(clut_vram, 0, 32U * clut_pitch);
+        memset(clut_request, 0, sizeof(clut_request));
+        mw_put_be32(clut_request, MW_BLIT);
+        mw_put_be32(clut_request + 4, 1U); /* RGBFB_CLUT */
+        mw_put_be32(clut_request + 8, clut_pitch);
+        mw_put_be32(clut_request + 20, 1U);
+        mw_put_be32(clut_request + 24, 1U);
+        mw_put_be32(clut_request + 28, 2U);
+        mw_put_be32(clut_request + 32, 31U);
+        mw_put_be32(clut_request + 36, 30U);
+        st = transport->blit(handle, clut_request, sizeof(clut_request), clut_desc);
+        assert(st == 0U);
+        assert(clut_vram[2U * clut_pitch] == 0U);
+        assert(clut_vram[2U * clut_pitch + 1U] == 7U);
+        assert(clut_vram[29U * clut_pitch + 30U] == 7U);
+        assert(clut_vram[30U * clut_pitch + 1U] == 0U);
+
+        sdk_palette_set(7U, 0U);
+        sdk_palette_set(9U, 0x00ff0000U);
+        mw_put_be32(clut_request + 24, 0U);
+        mw_put_be32(clut_request + 28, 0U);
+        mw_put_be32(clut_request + 32, 32U);
+        mw_put_be32(clut_request + 36, 32U);
+        st = transport->blit(handle, clut_request, sizeof(clut_request), clut_desc);
+        assert(st == 0U);
+        assert(clut_vram[0] == 9U);
+    }
+
     transport->destroy(handle);
     transport->term();
     printf("PASS: test_mw_e2e_blit_and_capture\n");
 }
 
+
+static void test_mw_e2e_blit_rgb565pc_640x480(void)
+{
+    const uint32_t width = 640U, height = 480U, pitch = width * 2U;
+    const uint32_t span_total = height * pitch;
+    uint8_t request[40];
+    uint8_t *vram;
+    ULONG descriptor[2];
+    ULONG handle;
+
+    setup_mock_card(1);
+    assert(amiberry_transport_zz9000_probe() != NULL);
+    handle = amiberry_transport_zz9000_probe()->create(width, height);
+    assert(handle != 0U);
+
+    vram = g_card_mem + 0x00100000UL;
+    memset(vram, 0, span_total);
+    memset(request, 0, sizeof(request));
+    mw_put_be32(request, MW_BLIT);
+    mw_put_be32(request + 4, 4U); /* RGBFB_R5G6B5PC */
+    mw_put_be32(request + 8, pitch);
+    mw_put_be32(request + 20, 1U);
+    mw_put_be32(request + 24, 3U);
+    mw_put_be32(request + 28, 4U);
+    mw_put_be32(request + 32, width - 1U);
+    mw_put_be32(request + 36, height);
+    descriptor[0] = (ULONG)(uintptr_t)vram;
+    descriptor[1] = span_total;
+    assert(amiberry_transport_zz9000_probe()->blit(handle, request,
+        sizeof(request), descriptor) == 0U);
+
+    /* The 640x480 RGB565PC span is accepted card-side and respects the
+     * half-open clip; source conversion is covered by the format tests above. */
+    assert(vram[0] == 0U && vram[1] == 0U);
+    assert(vram[4U * pitch + 3U * 2U] == 0U);
+    assert(vram[4U * pitch + 4U * 2U] == 0U);
+    assert(vram[4U * pitch + 4U * 2U + 1U] == 0U);
+    assert(vram[(height - 1U) * pitch + (width - 2U) * 2U] == 0U);
+
+    amiberry_transport_zz9000_probe()->destroy(handle);
+    amiberry_transport_zz9000_probe()->term();
+    printf("PASS: test_mw_e2e_blit_rgb565pc_640x480\n");
+}
 
 static void test_scheduler_core1_initialization_preserves_wire_v9(void)
 {
@@ -1037,6 +1119,7 @@ int main(void)
     test_descriptor_geometry_64k_slots();
     test_back_to_back_and_pipeline();
     test_mw_e2e_blit_and_capture();
+    test_mw_e2e_blit_rgb565pc_640x480();
 
     stop_core1();
     free_card_memory();

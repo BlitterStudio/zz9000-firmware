@@ -53,6 +53,10 @@ struct mw_ctx {
     uint32_t  presented_span_size;
     uint32_t  presented_span_capacity;
     uint8_t   presented_valid;
+    /* Indexed P96 presentation cache.  Each byte maps one RGB555 colour to
+     * the closest current primary-display CLUT entry. */
+    uint8_t   presented_clut[32U * 32U * 32U];
+    uint32_t  presented_clut_generation;
 };
 
 #ifdef __cplusplus

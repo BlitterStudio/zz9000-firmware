@@ -10,6 +10,7 @@
 #include "minigl_raster.h"
 #include "minigl_lighting.h"
 #include "card_pool.h"
+#include "sdk_palette.h"
 #include <stdlib.h>
 #include <math.h>
 
@@ -1033,6 +1034,51 @@ static void mw_letterbox_rect(uint32_t width, uint32_t height,
     *dy1 = *dy0 + dh;
 }
 
+static void mw_refresh_presented_clut(mw_ctx *c)
+{
+    uint32_t generation = sdk_palette_generation();
+    uint32_t r5, g5, b5;
+
+    if (c->presented_clut_generation == generation)
+        return;
+
+    for (r5 = 0; r5 < 32U; ++r5) {
+        const int r = (int)mw_widen5(r5);
+        for (g5 = 0; g5 < 32U; ++g5) {
+            const int g = (int)mw_widen5(g5);
+            for (b5 = 0; b5 < 32U; ++b5) {
+                const int b = (int)mw_widen5(b5);
+                uint32_t best = 0U;
+                uint32_t best_distance = UINT32_MAX;
+                uint32_t entry;
+
+                for (entry = 0; entry < SDK_PALETTE_ENTRIES; ++entry) {
+                    uint32_t xrgb = sdk_palette_get(entry);
+                    int dr = r - (int)(xrgb >> 16);
+                    int dg = g - (int)((xrgb >> 8) & 0xffU);
+                    int db = b - (int)(xrgb & 0xffU);
+                    uint32_t distance = (uint32_t)(dr * dr + dg * dg + db * db);
+                    if (distance < best_distance) {
+                        best_distance = distance;
+                        best = entry;
+                        if (distance == 0U)
+                            break;
+                    }
+                }
+                c->presented_clut[(r5 << 10) | (g5 << 5) | b5] = (uint8_t)best;
+            }
+        }
+    }
+    c->presented_clut_generation = generation;
+}
+
+static inline uint8_t mw_clut_index(const mw_ctx *c, const uint8_t *p)
+{
+    return c->presented_clut[((uint32_t)(p[0] >> 3) << 10) |
+                             ((uint32_t)(p[1] >> 3) << 5) |
+                             (uint32_t)(p[2] >> 3)];
+}
+
 static inline void mw_encode_pixel(uint32_t format, const uint8_t *p, uint8_t *d)
 {
     switch (format) {
@@ -1100,6 +1146,13 @@ static inline void mw_encode_pixel(uint32_t format, const uint8_t *p, uint8_t *d
 static inline void mw_decode_pixel(uint32_t format, const uint8_t *d, uint8_t *o)
 {
     switch (format) {
+    case 1: { /* RGBFB_CLUT */
+        const uint32_t xrgb = sdk_palette_get(d[0]);
+        o[0] = (uint8_t)(xrgb >> 16);
+        o[1] = (uint8_t)(xrgb >> 8);
+        o[2] = (uint8_t)xrgb;
+        break;
+    }
     case 2: /* RGBFB_R8G8B8 */
         o[0] = d[0]; o[1] = d[1]; o[2] = d[2];
         break;
@@ -1180,10 +1233,11 @@ static uint32_t mw_parse_span(const uint8_t *p, uint32_t bytes,
         return MW_STATUS_INVALID;
 
     r->format = mw_be32(p + 4);
-    if (r->format < 2 || r->format > 13)
+    if (r->format < 1 || r->format > 13)
         return MW_STATUS_INVALID;
 
-    r->bytes_per_pixel = (r->format <= 3) ? 3U :
+    r->bytes_per_pixel = r->format == 1 ? 1U :
+                         (r->format <= 3) ? 3U :
                          (r->format >= 6 && r->format <= 9) ? 4U : 2U;
     r->pitch = mw_be32(p + 8);
     if (!r->pitch || r->pitch < r->bytes_per_pixel)
@@ -1235,6 +1289,8 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
     const uint32_t *src_buf = c->color_buffers[c->state.target.latest];
     if (!src_buf)
         return MW_STATUS_FAILED;
+    if (r.format == 1U)
+        mw_refresh_presented_clut(c);
 
     int scaled = (c->state.target.present_width != c->width || c->state.target.present_height != c->height);
     uint32_t frame_w = scaled ? c->state.target.present_width : c->width;
@@ -1297,7 +1353,10 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                     p_col[3] = (uint8_t)pix;
 
                     uint8_t *dst = dst_row + (size_t)col * r.bytes_per_pixel;
-                    mw_encode_pixel(r.format, p_col, dst);
+                    if (r.format == 1U)
+                        *dst = mw_clut_index(c, p_col);
+                    else
+                        mw_encode_pixel(r.format, p_col, dst);
                 }
             }
         }
