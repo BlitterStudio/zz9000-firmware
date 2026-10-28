@@ -117,8 +117,12 @@ module fastram_memmap_tb;
   initial begin
     clocks(5); resetn = 1; clocks(20);
     axir(5'h1c);
-    ck(read_value === 32'h80000000,
+    ck(read_value[31] === 1'b1,
        "REG7 advertises the relocated Fast-RAM DDR base to firmware");
+    ck(read_value[30] === 1'b1,
+       "REG7 advertises the output gamma LUT to firmware");
+    ck(read_value[29:0] === 30'h0,
+       "REG7 reports no Z2 aperture size on Zorro III");
     ck(dut.VCAP_DIAG_VARIANT_VALUE[8] === 1'b1,
        "host diagnostic variant bit records the relocated Fast-RAM base");
 

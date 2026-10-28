@@ -1089,6 +1089,47 @@ static void test_fastram_warm_reload_preserves_other_keys(void) {
     CHECK(zz_config_query(ZZ_CONFIG_KEY_INT2, &present) == 1 && present);
 }
 
+static void test_gamma_key(void) {
+    /* decimal forms all land in hundredths */
+    zz_config_reset();
+    CHECK(parse_str(
+        "gamma = 1.8\n"
+        "scanline_mode = 1\n") == 2);
+    CHECK(zz_config_get()->gamma_present &&
+          zz_config_get()->gamma == 180);
+
+    zz_config_reset();
+    CHECK(parse_str("gamma = 2\n") == 1);
+    CHECK(zz_config_get()->gamma == 200);
+
+    zz_config_reset();
+    CHECK(parse_str("gamma = 0.50\n") == 1);
+    CHECK(zz_config_get()->gamma == 50);
+
+    zz_config_reset();
+    CHECK(parse_str("GAMMA=1.05\n") == 1);
+    CHECK(zz_config_get()->gamma == 105);
+
+    /* range and format rejects leave the key absent */
+    static const char *bad[] = {
+        "gamma = 0.19\n", "gamma = 5.01\n", "gamma = 6\n",
+        "gamma = 1.\n", "gamma = 1.805\n", "gamma = 1.8.2\n",
+        "gamma = -1\n", "gamma = on\n"
+    };
+    for (size_t k = 0; k < sizeof(bad) / sizeof(bad[0]); k++) {
+        zz_config_reset();
+        CHECK(parse_str(bad[k]) == 0);
+        CHECK(!zz_config_get()->gamma_present);
+    }
+
+    /* serializer round trip keeps the value with two decimals */
+    zz_config_reset();
+    CHECK(parse_str("gamma = 1.8\n") == 1);
+    static char out[ZZ_CONFIG_MAX_SIZE];
+    CHECK(zz_config_emit_present_keys(out, sizeof(out), 0) > 0);
+    CHECK(strstr(out, "gamma = 1.80\n") != NULL);
+}
+
 static void test_fastram_colon_key_with_equals_poison(void) {
     /* `fast_ram:off = x` carries an '=', so the lexer dispatches it as
      * an unknown key named fast_ram:off -- the boundary rule must
@@ -1138,6 +1179,7 @@ int main(void) {
     test_no_trailing_newline();
     test_hdf_name_length();
     test_overlong_line();
+    test_gamma_key();
     test_mac_dash_separator();
     test_query_interface();
     test_loader_success();

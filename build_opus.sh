@@ -37,7 +37,8 @@ mkdir -p "$DEPS_DIR"
 if [ ! -f "$DEPS_DIR/opus-${VERSION}.tar.gz" ]; then
     echo "[opus] downloading $URL"
     if command -v curl >/dev/null 2>&1; then
-        curl --fail --location --silent --show-error "$URL" -o "$DEPS_DIR/opus-${VERSION}.tar.gz"
+        curl --fail --location --silent --show-error --connect-timeout 30 \
+            --retry 5 --retry-delay 10 --retry-all-errors "$URL" -o "$DEPS_DIR/opus-${VERSION}.tar.gz"
     else
         wget -q "$URL" -O "$DEPS_DIR/opus-${VERSION}.tar.gz"
     fi

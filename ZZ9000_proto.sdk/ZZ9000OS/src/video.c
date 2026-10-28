@@ -5,6 +5,7 @@
 #include "video_vdma.h"
 #include "zz_config.h"
 #include "mntzorro.h"
+#include "gamma.h"
 #include "interrupt.h"
 #include "zz_custom_mode.h"
 #include "xaxivdma.h"
@@ -458,6 +459,13 @@ int video_set_videocap_geometry(uint16_t width, uint16_t height)
 	return 1;
 }
 
+/* Report a malformed request (a geometry commit with no staged width)
+ * through the same REJECTED status bit, leaving the applied geometry. */
+void video_reject_videocap_geometry(void)
+{
+	vs.videocap_geometry_rejected = 1;
+}
+
 uint16_t video_videocap_geometry_value(uint16_t key, uint16_t *present)
 {
 	uint16_t value = 0;
@@ -668,6 +676,51 @@ void video_set_dpms(uint8_t level) {
 
 	vs.card_feature_enabled[CARD_FEATURE_DPMS] = level;
 	video_formatter_write(level, MNTVF_OP_DPMS);
+}
+
+static uint16_t gamma_applied = GAMMA_HUNDREDTHS_IDENTITY;
+
+static int gamma_hw_present(void)
+{
+	return (mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7) &
+	        MNTZORRO_CAP_GAMMA_LUT) != 0U;
+}
+
+int video_set_gamma(uint16_t gamma_hundredths)
+{
+	uint8_t lut[GAMMA_LUT_ENTRIES];
+	uint32_t i;
+
+	/* A bitstream without the LUT stage must stay untouched: the op
+	 * would land in an unknown decode on some future renumbering. */
+	if (!gamma_hw_present())
+		return 0;
+	if (gamma_hundredths == 0U)
+		gamma_hundredths = GAMMA_HUNDREDTHS_IDENTITY;
+	if (!gamma_table_build(lut, gamma_hundredths))
+		return 0;
+
+	/* One entry per control word: index plus the same curve in the red,
+	 * green and blue byte lanes. Streaming 256 entries costs about as
+	 * much bus time as the RTG palette load in the same op path. */
+	for (i = 0; i < GAMMA_LUT_ENTRIES; i++) {
+		uint32_t entry = (uint32_t)lut[i];
+
+		video_formatter_write(
+			(entry << 24) | (entry << 16) | (entry << 8) | i,
+			MNTVF_OP_GAMMA);
+	}
+	gamma_applied = gamma_hundredths;
+	return 1;
+}
+
+uint16_t video_gamma_query(uint16_t *present)
+{
+	int available = gamma_hw_present();
+
+	if (present != NULL)
+		*present = (uint16_t)available;
+	return available ? gamma_applied : 0;
 }
 
 // interrupt service routine for IRQ_F2P[0:0]

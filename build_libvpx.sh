@@ -47,7 +47,8 @@ fetch() {
     if [ ! -f "$dest" ]; then
         echo "[vpx] downloading $URL"
         if command -v curl >/dev/null 2>&1; then
-            curl --fail --location --silent --show-error "$URL" -o "$dest"
+            curl --fail --location --silent --show-error --connect-timeout 30 \
+                --retry 5 --retry-delay 10 --retry-all-errors "$URL" -o "$dest"
         else
             wget -q "$URL" -O "$dest"
         fi
