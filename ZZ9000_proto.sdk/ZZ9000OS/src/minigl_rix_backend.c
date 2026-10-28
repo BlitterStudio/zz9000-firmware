@@ -295,12 +295,7 @@ static void backend_touch_texture(MiniGLRixBackend *backend, MiniGLRixTexture *t
 
 static void backend_release_texture(MiniGLRixBackend *backend, MiniGLRixTexture *texture)
 {
-    size_t index;
-    uint16_t owner = (uint16_t)(texture - backend->textures) + 1U;
-
-    for (index = 0U; index < texture->page_count; ++index)
-        if (backend->page_owner[texture->pages[index]] == owner)
-            backend->page_owner[texture->pages[index]] = 0U;
+    (void)backend;
     memset(texture, 0, sizeof(*texture));
 }
 
@@ -323,24 +318,44 @@ static MiniGLRixTexture *backend_evict_texture(MiniGLRixBackend *backend,
     return candidate;
 }
 
+static int backend_range_available(const MiniGLRixBackend *backend,
+                                   const MiniGLRixTexture *excluded,
+                                   uint16_t first_page, uint16_t page_count)
+{
+    uint32_t end_page = (uint32_t)first_page + page_count;
+    size_t index;
+
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index) {
+        const MiniGLRixTexture *texture = &backend->textures[index];
+        uint32_t texture_end;
+
+        if (texture == excluded || !texture->valid)
+            continue;
+        texture_end = (uint32_t)texture->first_page + texture->page_count;
+        if (first_page < texture_end && texture->first_page < end_page)
+            return 0;
+    }
+    return 1;
+}
+
 static int backend_allocate_pages(MiniGLRixBackend *backend, MiniGLRixTexture *texture,
                                   uint16_t page_count)
 {
-    size_t index;
-    uint16_t free_pages;
-    uint16_t owner = (uint16_t)(texture - backend->textures) + 1U;
+    uint16_t total_pages;
+    uint16_t first_page;
 
+    total_pages = (uint16_t)(backend->platform.texture_bytes /
+                             MINIGL_RIX_TEXTURE_PAGE_BYTES);
     if (page_count == 0U || page_count > MINIGL_RIX_TEXTURE_PAGES ||
-        page_count > backend->platform.texture_bytes / MINIGL_RIX_TEXTURE_PAGE_BYTES)
+        page_count > total_pages)
         return 0;
     for (;;) {
-        free_pages = 0U;
-        for (index = 0U; index < backend->platform.texture_bytes / MINIGL_RIX_TEXTURE_PAGE_BYTES;
-             ++index)
-            if (backend->page_owner[index] == 0U)
-                ++free_pages;
-        if (free_pages >= page_count)
-            break;
+        for (first_page = 0U; first_page <= total_pages - page_count; ++first_page)
+            if (backend_range_available(backend, texture, first_page, page_count)) {
+                texture->first_page = first_page;
+                texture->page_count = page_count;
+                return 1;
+            }
         {
             MiniGLRixTexture *victim = backend_evict_texture(backend, texture);
 
@@ -349,16 +364,6 @@ static int backend_allocate_pages(MiniGLRixBackend *backend, MiniGLRixTexture *t
             backend_release_texture(backend, victim);
         }
     }
-    texture->page_count = page_count;
-    for (index = 0U, free_pages = 0U;
-         index < backend->platform.texture_bytes / MINIGL_RIX_TEXTURE_PAGE_BYTES &&
-         free_pages < page_count; ++index) {
-        if (backend->page_owner[index] == 0U) {
-            backend->page_owner[index] = owner;
-            texture->pages[free_pages++] = (uint16_t)index;
-        }
-    }
-    return 1;
 }
 
 static MiniGLRixTexture *backend_alloc_texture(MiniGLRixBackend *backend, uint32_t id,
@@ -410,7 +415,7 @@ static int backend_write_texture(MiniGLRixBackend *backend, MiniGLRixTexture *te
         if (chunk > texels - written)
             chunk = texels - written;
         destination = backend->platform.texture_memory +
-            (size_t)texture->pages[page] * MINIGL_RIX_TEXTURE_PAGE_BYTES + page_offset;
+            (size_t)(texture->first_page + page) * MINIGL_RIX_TEXTURE_PAGE_BYTES + page_offset;
         if (!rix_texture_convert_rgba8_le(destination, (size_t)chunk * 2U,
                                            rgba + written, chunk, texture->format))
             return 0;
@@ -656,7 +661,7 @@ static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
         page_count = image->page_count;
         for (page_index = 0U; page_index < page_count; ++page_index)
             pages[page_index] = (uint32_t)(backend->platform.texture_address +
-                (size_t)image->pages[page_index] * MINIGL_RIX_TEXTURE_PAGE_BYTES);
+                (size_t)(image->first_page + page_index) * MINIGL_RIX_TEXTURE_PAGE_BYTES);
     } else {
         texture.width_log2 = 3U;
         texture.height_log2 = 3U;

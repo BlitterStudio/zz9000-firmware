@@ -263,7 +263,7 @@ static void test_lru_eviction_and_subimage_reupload(void)
     assert(minigl_rix_backend_upload_texture(&backend, 2U, 0U, source, 16U, 16U,
                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
     assert(backend.textures[1].pin_count == 0U);
-    assert(model.textures[(size_t)backend.textures[1].pages[0] *
+    assert(model.textures[(size_t)backend.textures[1].first_page *
                           MINIGL_RIX_TEXTURE_PAGE_BYTES] == 0xe0U);
     assert(minigl_rix_backend_upload_texture(&backend, 3U, 0U, source, 16U, 16U,
                                               ZZ9K_MGL_TEX_INTERNAL_RGB));

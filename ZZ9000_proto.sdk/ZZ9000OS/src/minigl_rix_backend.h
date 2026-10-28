@@ -72,7 +72,7 @@ typedef struct MiniGLRixTexture {
     uint16_t levels;
     uint16_t required_levels;
     uint16_t page_count;
-    uint16_t pages[MINIGL_RIX_TEXTURE_PAGES];
+    uint16_t first_page;
     uint16_t min_filter;
     uint16_t mag_filter;
     uint16_t wrap_s;
@@ -127,7 +127,6 @@ typedef struct MiniGLRixBackend {
     uint32_t pending_fence[MINIGL_RIX_COMMAND_BUFFERS];
     uint8_t pending_pins[MINIGL_RIX_COMMAND_BUFFERS][MINIGL_RIX_MAX_TEXTURES];
     uint8_t recorded_pins[MINIGL_RIX_MAX_TEXTURES];
-    uint16_t page_owner[MINIGL_RIX_TEXTURE_POOL_PAGES];
     MiniGLRixTexture textures[MINIGL_RIX_MAX_TEXTURES];
     uint32_t bound_texture;
     uint32_t lru_clock;
