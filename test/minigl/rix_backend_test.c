@@ -531,9 +531,11 @@ int main(void)
     state.depth_bits = 24U;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    /* MiniGL's default 32-bit request runs on RasterIX's documented Z16
+     * surface instead of forcing the whole context back to CPU. */
     state.depth_bits = 32U;
     minigl_rix_backend_set_state(&backend, &state);
-    assert(!minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
 
     test_mip_layout_and_filtering();
     test_downscale_and_residency_lifetime();
