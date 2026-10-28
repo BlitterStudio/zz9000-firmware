@@ -1240,7 +1240,7 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.PCW_SMC_PERIPHERAL_DIVISOR0 {1} \
    CONFIG.PCW_SPI_PERIPHERAL_DIVISOR0 {1} \
    CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64} \
-   CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {64} \
+   CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {32} \
    CONFIG.PCW_S_AXI_HP2_DATA_WIDTH {32} \
    CONFIG.PCW_S_AXI_HP3_DATA_WIDTH {32} \
    CONFIG.PCW_TPIU_PERIPHERAL_DIVISOR0 {1} \
@@ -1314,6 +1314,15 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.PCW_WDT_PERIPHERAL_FREQMHZ {133.333333} \
    CONFIG.PCW_WDT_WDT_IO {<Select>} \
  ] $processing_system7_0
+  if { $rasterix } {
+    # RasterIX's render and command masters are 64-bit on HP1. Default
+    # images keep master's 32-bit HP1 so their netlist and the FSBL's AFI1
+    # setting stay unchanged; the RasterIX firmware flavor clears AFI1's
+    # 32BIT_EN to match this.
+    set_property -dict [ list \
+      CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {64} \
+    ] $processing_system7_0
+  }
 
   # Create instance: ps7_0_axi_periph, and set properties
   set ps7_0_axi_periph [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 ps7_0_axi_periph ]

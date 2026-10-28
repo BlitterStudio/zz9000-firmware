@@ -159,12 +159,13 @@ static void videocap_detection_reset() {
 	video_videocap_detection_reset(&vs.videocap_detection);
 }
 
-// S_AXI_HP0 carries video scanout DMA and S_AXI_HP1 carries capture plus
-// RasterIX. Both ports are 64-bit in the block design. Some FSBL images set
-// AFI_RDCHAN_CTRL and AFI_WRCHAN_CTRL bit 0 ("32BIT_EN", UG585 B.5), which
-// leaves a 64-bit PL master mismatched with its AFI channel. Clear it before
-// any of that traffic starts, so a stale FSBL cannot corrupt HP0 scanout or
-// stall an HP1 RasterIX command read.
+// S_AXI_HP0 carries video scanout DMA and is 64-bit in every block design.
+// Some FSBL images set AFI_RDCHAN_CTRL and AFI_WRCHAN_CTRL bit 0 ("32BIT_EN",
+// UG585 B.5), which corrupts one half of every 64-bit VDMA beat, so clear it
+// before any VDMA traffic runs. S_AXI_HP1 (capture, and RasterIX in RasterIX
+// images) is 32-bit in default images and 64-bit only in RasterIX images,
+// where a 32-bit AFI1 leaves the 64-bit RasterIX reads outstanding forever;
+// only the RasterIX firmware flavor, which ships with those images, widens it.
 #define AFI0_RDCHAN_CTRL 0xF8008000
 #define AFI0_WRCHAN_CTRL 0xF8008014
 #define AFI1_RDCHAN_CTRL 0xF8009000
@@ -173,8 +174,10 @@ static void videocap_detection_reset() {
 static void video_hp_bus_width_init(void) {
 	Xil_Out32(AFI0_RDCHAN_CTRL, Xil_In32(AFI0_RDCHAN_CTRL) & ~1u);
 	Xil_Out32(AFI0_WRCHAN_CTRL, Xil_In32(AFI0_WRCHAN_CTRL) & ~1u);
+#if defined(MINIGL_RASTERIX) && MINIGL_RASTERIX
 	Xil_Out32(AFI1_RDCHAN_CTRL, Xil_In32(AFI1_RDCHAN_CTRL) & ~1u);
 	Xil_Out32(AFI1_WRCHAN_CTRL, Xil_In32(AFI1_WRCHAN_CTRL) & ~1u);
+#endif
 }
 
 struct ZZ_VIDEO_STATE* video_init() {
