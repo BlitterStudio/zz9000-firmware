@@ -67,7 +67,8 @@ mkdir -p "$DEPS_DIR"
 if [ ! -f "$ARCHIVE" ]; then
     echo "[libFLAC] downloading $URL"
     if command -v curl >/dev/null 2>&1; then
-        curl --fail --location --silent --show-error "$URL" -o "$ARCHIVE"
+        curl --fail --location --silent --show-error --connect-timeout 30 \
+            --retry 5 --retry-delay 10 --retry-all-errors "$URL" -o "$ARCHIVE"
     elif command -v wget >/dev/null 2>&1; then
         wget -q "$URL" -O "$ARCHIVE"
     else

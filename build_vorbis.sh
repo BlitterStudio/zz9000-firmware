@@ -22,10 +22,10 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 OS_DIR="$SCRIPT_DIR/ZZ9000_proto.sdk/ZZ9000OS"
 OGG_VERSION="${LIBOGG_VERSION:-1.3.6}"
-# Release 1.3.6 (2025-06-16); hash of the downloads.xiph.org tarball, which
-# is byte-identical to the GitHub xiph/ogg v1.3.6 release asset.
+# Release 1.3.6 (2025-06-16), from the GitHub xiph/ogg release, which is
+# byte-identical to the downloads.xiph.org tarball and far more available.
 OGG_SHA256="${LIBOGG_SHA256:-5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061}"
-OGG_URL="${LIBOGG_URL:-https://downloads.xiph.org/releases/ogg/libogg-${OGG_VERSION}.tar.xz}"
+OGG_URL="${LIBOGG_URL:-https://github.com/xiph/ogg/releases/download/v${OGG_VERSION}/libogg-${OGG_VERSION}.tar.xz}"
 # Tremor has no release tarballs; pin the gitlab.xiph.org master commit of
 # 2025-04-03 (includes the CVE-2018-5147 codebook fix and the 2024 UB fixes).
 TREMOR_COMMIT="${TREMOR_COMMIT:-820fb3237ea81af44c9cc468c8b4e20128e3e5ad}"
@@ -78,7 +78,8 @@ fetch() {
     if [ ! -f "$dest" ]; then
         echo "[vorbis] downloading $url"
         if command -v curl >/dev/null 2>&1; then
-            curl --fail --location --silent --show-error "$url" -o "$dest"
+            curl --fail --location --silent --show-error --connect-timeout 30 \
+                --retry 5 --retry-delay 10 --retry-all-errors "$url" -o "$dest"
         elif command -v wget >/dev/null 2>&1; then
             wget -q "$url" -O "$dest"
         else
