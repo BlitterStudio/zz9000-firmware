@@ -3020,11 +3020,11 @@ int minigl_raster_get_rix_diagnostics(MiniGLRasterRixDiagnostics *out)
         return 0;
     out->active = (uint8_t)minigl_rix_backend_available(&g_rix);
     out->last_fence = g_rix.driver.submitted_target;
-    out->status = g_rix.platform.read ?
-        g_rix.platform.read(g_rix.platform.context, RIX_DRV_CSR_STATUS) :
+    out->status = g_rix.platform.csr_read ?
+        g_rix.platform.csr_read(g_rix.platform.context, RIX_DRV_CSR_STATUS) :
         g_rix.driver.last_status;
-    out->completed_fence = g_rix.platform.read ?
-        g_rix.platform.read(g_rix.platform.context, RIX_DRV_CSR_COMPLETED) : 0U;
+    out->completed_fence = g_rix.platform.csr_read ?
+        g_rix.platform.csr_read(g_rix.platform.context, RIX_DRV_CSR_COMPLETED) : 0U;
     return 1;
 }
 
