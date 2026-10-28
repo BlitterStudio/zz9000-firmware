@@ -1273,6 +1273,39 @@ int minigl_rix_backend_end_draw(MiniGLRixBackend *backend, uint32_t color_addres
     backend->collecting = 0U;
     return 1;
 }
+static void backend_recalculate_command_words(MiniGLRixBackend *backend)
+{
+    size_t op_index;
+
+    backend->command_words_estimate = 2U + (size_t)backend->bands.count * 10U;
+    for (op_index = 0U; op_index < backend->op_count; ++op_index) {
+        const MiniGLRixRecordedOp *op = &backend->ops[op_index];
+
+        if (op->type == MINIGL_RIX_OP_CLEAR) {
+            backend->command_words_estimate += (size_t)backend->bands.count * 37U;
+        } else {
+            size_t triangle_index;
+
+            backend->command_words_estimate += (size_t)backend->bands.count * 33U;
+            if (op->texture_slot < MINIGL_RIX_MAX_TEXTURES)
+                backend->command_words_estimate += (size_t)backend->bands.count *
+                    backend->textures[op->texture_slot].page_count;
+            for (triangle_index = 0U; triangle_index < op->triangle_count;
+                 ++triangle_index) {
+                size_t band_index;
+                const RixTriangle *triangle =
+                    &backend->triangles[op->first_triangle + triangle_index];
+
+                for (band_index = 0U; band_index < backend->bands.count; ++band_index)
+                    if (rix_triangle_in_band(triangle,
+                                             backend->bands.band[band_index].y_start,
+                                             backend->bands.band[band_index].y_end))
+                        backend->command_words_estimate += RIX_TRIANGLE_WORDS + 1U;
+            }
+        }
+    }
+}
+
 void minigl_rix_backend_abort_draw(MiniGLRixBackend *backend)
 {
     MiniGLRixRecordedOp *op;
@@ -1305,6 +1338,7 @@ void minigl_rix_backend_abort_draw(MiniGLRixBackend *backend)
             --backend->textures[slot].pin_count;
     }
     backend->triangle_count = retained_triangles;
+    backend_recalculate_command_words(backend);
     if (!rix_band_list_init(&backend->bands, backend->width, backend->height,
                             backend->references, MINIGL_RIX_MAX_TRIANGLES))
         backend_disable(backend, "abort", RIX_DRV_ERROR);
