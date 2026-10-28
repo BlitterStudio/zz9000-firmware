@@ -140,10 +140,10 @@ static void test_state_mapper_fallback_rules(void)
     assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_FORCED_CPU);
     state.reserved = 0U;
 
-    /* 1b. Depth bits */
+    /* 1b. Z16 backend accepts MiniGL's 24/32-bit requests. */
     state.depth_bits = 32U;
     minigl_rix_backend_set_state(&backend, &state);
-    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_DEPTH_BITS);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_NONE);
     state.depth_bits = 16U;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_NONE);

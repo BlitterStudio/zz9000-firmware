@@ -14,6 +14,7 @@
 
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
 #include "xil_cache.h"
+#include "xtime_l.h"
 #endif
 
 
@@ -55,6 +56,45 @@ static uint32_t mw_packet_first_opcode(const uint8_t *packet, uint32_t bytes)
 static uint32_t g_reject_total;
 static uint32_t g_reject_since_log;
 static uint32_t g_reject_log_events;
+
+static MWPacketDiagnostic g_packet_diagnostics[MW_PACKET_DIAG_RING_SIZE];
+static uint32_t g_packet_diagnostic_write;
+static uint32_t g_packets_processed;
+
+static uint32_t mw_diag_now_ms(void)
+{
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+    XTime now;
+
+    XTime_GetTime(&now);
+    return (uint32_t)((uint64_t)now * 1000U / COUNTS_PER_SECOND);
+#else
+    return g_packets_processed;
+#endif
+}
+
+static void mw_diag_record(uint32_t sequence, const uint8_t *packet,
+                           uint32_t bytes, uint32_t status)
+{
+    MWPacketDiagnostic *entry =
+        &g_packet_diagnostics[g_packet_diagnostic_write % MW_PACKET_DIAG_RING_SIZE];
+
+    entry->sequence = sequence;
+    entry->first_opcode = mw_packet_first_opcode(packet, bytes);
+    entry->command_count = bytes >= 16U ? mw_be32(packet + 12U) : 0U;
+    entry->bytes = bytes;
+    entry->status = status;
+    entry->timestamp_ms = mw_diag_now_ms();
+    g_packet_diagnostic_write++;
+    g_packets_processed++;
+}
+
+static void mw_diag_clear(void)
+{
+    memset(g_packet_diagnostics, 0, sizeof(g_packet_diagnostics));
+    g_packet_diagnostic_write = 0U;
+    g_packets_processed = 0U;
+}
 
 static void mw_log_reject(uint32_t status, uint32_t opcode)
 {
@@ -166,6 +206,7 @@ int mw_service_bind_region(volatile void *region, uint32_t size)
         g_is_bound = 0;
         return 0;
     }
+    mw_diag_clear();
 
     g_ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)region;
 
@@ -418,6 +459,7 @@ void mw_service_reset_local(void)
     }
     g_active_handle = 0;
     mw_service_init();
+    mw_diag_clear();
 }
 
 void mw_service_reset(void)
@@ -434,6 +476,67 @@ void mw_service_on_core1_fault(void)
         mw_wire_st32(&g_status->error, 3U); /* Reset error */
     }
     mw_service_reset_local();
+}
+
+size_t mw_service_packet_diagnostics(MWPacketDiagnostic *out, size_t capacity,
+                                     uint32_t *packets_processed)
+{
+    uint32_t count = g_packet_diagnostic_write < MW_PACKET_DIAG_RING_SIZE ?
+        g_packet_diagnostic_write : MW_PACKET_DIAG_RING_SIZE;
+    uint32_t first = g_packet_diagnostic_write - count;
+    uint32_t index;
+
+    if (packets_processed)
+        *packets_processed = g_packets_processed;
+    if (!out || capacity == 0U)
+        return count;
+    if (capacity < count) {
+        first += count - (uint32_t)capacity;
+        count = (uint32_t)capacity;
+    }
+    for (index = 0U; index < count; ++index)
+        out[index] = g_packet_diagnostics[(first + index) % MW_PACKET_DIAG_RING_SIZE];
+    return count;
+}
+
+void mw_service_report_amiga_reset(void)
+{
+    mw_ctx *context = mw_service_find_context(g_active_handle);
+    MiniGLRasterRixDiagnostics rix;
+    uint32_t producer;
+    uint32_t consumer;
+    uint32_t processed;
+    uint32_t count;
+    uint32_t index;
+    uint32_t now;
+
+    if (!context || !g_ctrl)
+        return;
+    producer = mw_wire_ld32(&g_ctrl->producer_seq);
+    consumer = mw_wire_ld32(&g_ctrl->consumer_seq);
+    now = mw_diag_now_ms();
+    count = (uint32_t)mw_service_packet_diagnostics(NULL, 0U, &processed);
+    MW_DIAG("[MGL9] reset handle=%08lx size=%lux%lu backend=%s seq=%lu/%lu packets=%lu last=%lums\n",
+            (unsigned long)context->handle, (unsigned long)context->width,
+            (unsigned long)context->height, mw_backend_name(context),
+            (unsigned long)producer, (unsigned long)consumer,
+            (unsigned long)processed,
+            (unsigned long)(count ? now - g_packet_diagnostics[
+                (g_packet_diagnostic_write - 1U) % MW_PACKET_DIAG_RING_SIZE].timestamp_ms : 0U));
+    for (index = 0U; index < count; ++index) {
+        const MWPacketDiagnostic *entry = &g_packet_diagnostics[
+            (g_packet_diagnostic_write - count + index) % MW_PACKET_DIAG_RING_SIZE];
+        MW_DIAG("[MGL9] packet seq=%lu op=%08lx commands=%lu bytes=%lu status=%08lx t=%lums\n",
+                (unsigned long)entry->sequence, (unsigned long)entry->first_opcode,
+                (unsigned long)entry->command_count, (unsigned long)entry->bytes,
+                (unsigned long)entry->status, (unsigned long)entry->timestamp_ms);
+    }
+    if (minigl_raster_get_rix_diagnostics(&rix)) {
+        MW_DIAG("[RasterIX] reset engine=%s status=%08lx fence=%lu/%lu\n",
+                (rix.status & RIX_DRV_STATUS_IDLE) ? "idle" : "busy",
+                (unsigned long)rix.status, (unsigned long)rix.completed_fence,
+                (unsigned long)rix.last_fence);
+    }
 }
 
 int mw_service_poll(void)
@@ -496,6 +599,8 @@ int mw_service_poll(void)
                     mw_log_reject(MW_STATUS_INVALID,
                                   mw_packet_first_opcode(slot_buf, packet_bytes));
                 }
+                mw_diag_record(mw_wire_ld32(&g_ctrl->consumer_seq), slot_buf,
+                               packet_bytes, mw_wire_ld32(&g_ctrl->op_status));
             }
 
             mw_wire_st32(&g_ctrl->consumer_seq, mw_wire_ld32(&g_ctrl->consumer_seq) + 1U);

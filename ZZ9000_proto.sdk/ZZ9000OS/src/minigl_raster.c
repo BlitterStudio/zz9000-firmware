@@ -188,6 +188,13 @@ static uint32_t g_last_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
 static uint32_t g_logged_fallback_mask = 0U;
 static int g_context_backend_logged = 0;
 
+/* A CPU fallback drains and converts the whole shared target.  Finish that
+ * hand-off once, then keep the frame on CPU; bouncing after every primitive
+ * would cost a full target READ/format conversion per draw. */
+#define MINIGL_RIX_CPU_FALLBACKS_PER_FRAME 1U
+static uint32_t g_rix_cpu_fallbacks;
+static int g_rix_cpu_frame;
+
 static uint32_t be32(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
@@ -444,6 +451,8 @@ int minigl_raster_configure(uint32_t width, uint32_t height)
     g_last_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
     g_logged_fallback_mask = 0U;
     g_context_backend_logged = 0;
+    g_rix_cpu_fallbacks = 0U;
+    g_rix_cpu_frame = 0;
     buffers = g_buffers;
     buffers.width = (uint16_t)width;
     buffers.height = (uint16_t)height;
@@ -463,6 +472,8 @@ void minigl_raster_reset(void)
     g_last_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
     g_logged_fallback_mask = 0U;
     g_context_backend_logged = 0;
+    g_rix_cpu_fallbacks = 0U;
+    g_rix_cpu_frame = 0;
     minigl_raster_init();
 }
 
@@ -2591,9 +2602,12 @@ void minigl_raster_set_state(const ZZ9KMiniGLPacketSetState *state)
     if (!state)
         return;
     memcpy(&g_state, state, sizeof(g_state));
+    minigl_rix_backend_set_state(&g_rix, &g_state);
 
     if (state->depth_bits == 16U || state->depth_bits == 24U)
         g_depth_bits = (uint8_t)state->depth_bits;
+    else if (state->depth_bits == 32U && minigl_rix_backend_available(&g_rix))
+        g_depth_bits = 16U; /* RasterIX Z16; forced CPU retains its 24-bit path. */
     else {
         g_error |= RASTER_ERR_STATE;
         g_depth_bits = 24U;
@@ -2602,7 +2616,8 @@ void minigl_raster_set_state(const ZZ9KMiniGLPacketSetState *state)
     g_polygon_depth_scale = ((float)g_state.depth_far - (float)g_state.depth_near) / 16777215.0f;
     if (pixels() > g_buffers.depth_bytes / depth_bytes_per_pixel())
         g_error |= RASTER_ERR_MEMORY;
-    minigl_rix_backend_set_state(&g_rix, &g_state);
+    /* State is sent before selecting the CPU representation: RasterIX accepts
+     * 24/32 requests as Z16, while a forced CPU context remains unchanged. */
     if (!g_context_backend_logged) {
         g_context_backend_logged = 1;
         minigl_rix_backend_log_context_backend(&g_rix);
@@ -2859,7 +2874,7 @@ static int rix_mode_supported(uint16_t mode)
 static int rix_draw(uint16_t mode, uint16_t stride, uint32_t base,
                     const uint8_t *indices, uint32_t first, uint32_t count)
 {
-    if (!rix_mode_supported(mode) ||
+    if (g_rix_cpu_frame || !rix_mode_supported(mode) ||
         !minigl_rix_backend_begin_draw(&g_rix, g_buffers.width, g_buffers.height,
                                        (uintptr_t)g_buffers.color, (uintptr_t)g_buffers.depth) ||
         !minigl_rix_backend_prepare_target(&g_rix, g_buffers.color, pixels())) {
@@ -2903,6 +2918,8 @@ void minigl_raster_draw_arrays(uint16_t mode, uint16_t attr_code, uint16_t verte
             g_logged_fallback_mask |= (1U << reason);
             minigl_rix_backend_log_fallback(reason);
         }
+        if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
+            g_rix_cpu_frame = 1;
         if (!rix_cpu_visible()) return;
         assemble(mode, vertex_stride, vertex_base_offset, NULL, first, count);
     }
@@ -2946,6 +2963,8 @@ void minigl_raster_draw_elements(uint16_t mode, uint16_t attr_code, uint16_t ver
             g_logged_fallback_mask |= (1U << reason);
             minigl_rix_backend_log_fallback(reason);
         }
+        if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
+            g_rix_cpu_frame = 1;
         if (!rix_cpu_visible()) return;
         assemble(mode, vertex_stride, vertex_base_offset, indices, 0U, count);
     }
@@ -2959,6 +2978,8 @@ void minigl_raster_present(const ZZ9KMiniGLPacketPresent *present)
     g_frame_draws_hardware = 0U;
     g_frame_draws_software = 0U;
     g_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
+    g_rix_cpu_fallbacks = 0U;
+    g_rix_cpu_frame = 0;
     if (!present || !ready() ||
         (minigl_rix_backend_surface_is_rgb565(&g_rix) ?
          (!minigl_rix_backend_drain(&g_rix) ||
@@ -2988,6 +3009,23 @@ uint32_t minigl_raster_first_fallback_reason(void)
 int minigl_raster_hardware_available(void)
 {
     return minigl_rix_backend_available(&g_rix);
+}
+
+int minigl_raster_get_rix_diagnostics(MiniGLRasterRixDiagnostics *out)
+{
+    if (!out)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    if (!g_rix.available)
+        return 0;
+    out->active = (uint8_t)minigl_rix_backend_available(&g_rix);
+    out->last_fence = g_rix.driver.submitted_target;
+    out->status = g_rix.platform.read ?
+        g_rix.platform.read(g_rix.platform.context, RIX_DRV_CSR_STATUS) :
+        g_rix.driver.last_status;
+    out->completed_fence = g_rix.platform.read ?
+        g_rix.platform.read(g_rix.platform.context, RIX_DRV_CSR_COMPLETED) : 0U;
+    return 1;
 }
 
 void minigl_raster_reset_frame_counters(void)
@@ -3519,7 +3557,7 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
         style = (flags >> (front ? MW_LOWERED_FRONT_SHIFT : MW_LOWERED_BACK_SHIFT)) & 3U;
     }
 
-    if (style == 0U && rix_mode_supported(mode) &&
+    if (!g_rix_cpu_frame && style == 0U && rix_mode_supported(mode) &&
         minigl_rix_backend_available(&g_rix) &&
         minigl_rix_backend_begin_draw(&g_rix, g_buffers.width, g_buffers.height,
                                       (uintptr_t)g_buffers.color, (uintptr_t)g_buffers.depth) &&
@@ -3549,6 +3587,8 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
         g_logged_fallback_mask |= (1U << reason);
         minigl_rix_backend_log_fallback(reason);
     }
+    if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
+        g_rix_cpu_frame = 1;
     (void)minigl_raster_finish();
     g_rix_collecting = 0;
     assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);

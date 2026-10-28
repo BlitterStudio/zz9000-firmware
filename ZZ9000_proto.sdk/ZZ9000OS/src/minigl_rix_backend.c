@@ -84,8 +84,11 @@ static int backend_maps_state(const ZZ9KMiniGLPacketSetState *state,
     uint32_t enabled;
     uint16_t environment_mode;
 
+    /* RasterIX always stores depth as Z16.  MiniGL's 24/32-bit requests
+     * are accepted with that documented precision on this backend. */
     if (state == NULL || fragment == NULL || environment == NULL || features == NULL ||
-        (state->depth_bits != 16U && state->depth_bits != 24U) ||
+        (state->depth_bits != 16U && state->depth_bits != 24U &&
+         state->depth_bits != 32U) ||
         (state->enabled_flags & (ZZ9K_MGL_STATE_TEXTURE_2D_1 |
                                  ZZ9K_MGL_STATE_FOG |
                                  ZZ9K_MGL_STATE_POLYGON_OFFSET_FILL |
@@ -1053,7 +1056,8 @@ uint32_t minigl_rix_backend_eval_fallback(const MiniGLRixBackend *backend)
         return ZZ9K_MGL_FALLBACK_FORCED_CPU;
     if (backend == NULL || !backend->available || backend->error)
         return ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT;
-    if (backend->state.depth_bits != 16U && backend->state.depth_bits != 24U)
+    if (backend->state.depth_bits != 16U && backend->state.depth_bits != 24U &&
+        backend->state.depth_bits != 32U)
         return ZZ9K_MGL_FALLBACK_DEPTH_BITS;
     if ((backend->state.enabled_flags & ZZ9K_MGL_STATE_FOG) != 0U)
         return ZZ9K_MGL_FALLBACK_FOG;

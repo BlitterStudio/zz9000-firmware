@@ -2556,6 +2556,7 @@ int main() {
 
 			if ((zstate & 0xff) == 0) {
 				if (!amiga_reset_seen) {
+					mw_service_report_amiga_reset();
 					handle_amiga_reset(AMIGA_RESET_FAST);
 					mw_service_reset();
 					amiga_reset_seen = 1;
