@@ -2005,26 +2005,6 @@
     <spirit:fileSet>
       <spirit:name>xilinx_anylanguagesynthesis_view_fileset</spirit:name>
       <spirit:file>
-        <spirit:name>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX/InternalFramebufferScissorFunc.vh</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:isIncludeFile>true</spirit:isIncludeFile>
-      </spirit:file>
-      <spirit:file>
-        <spirit:name>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX/PixelUtil.vh</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:isIncludeFile>true</spirit:isIncludeFile>
-      </spirit:file>
-      <spirit:file>
-        <spirit:name>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX/RegisterAndDescriptorDefines.vh</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:isIncludeFile>true</spirit:isIncludeFile>
-      </spirit:file>
-      <spirit:file>
-        <spirit:name>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX/RasterizerCommands.vh</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:isIncludeFile>true</spirit:isIncludeFile>
-      </spirit:file>
-      <spirit:file>
         <spirit:name>../../../rtl/rasterix/RasterIX/RasterizerCommands.vh</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
@@ -2422,30 +2402,9 @@
         <spirit:fileType>verilogSource</spirit:fileType>
         <spirit:userFileType>CHECKSUM_9019ec72</spirit:userFileType>
       </spirit:file>
-      <spirit:dependency>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX</spirit:dependency>
     </spirit:fileSet>
     <spirit:fileSet>
       <spirit:name>xilinx_anylanguagebehavioralsimulation_view_fileset</spirit:name>
-      <spirit:file>
-        <spirit:name>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX/InternalFramebufferScissorFunc.vh</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:isIncludeFile>true</spirit:isIncludeFile>
-      </spirit:file>
-      <spirit:file>
-        <spirit:name>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX/PixelUtil.vh</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:isIncludeFile>true</spirit:isIncludeFile>
-      </spirit:file>
-      <spirit:file>
-        <spirit:name>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX/RegisterAndDescriptorDefines.vh</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:isIncludeFile>true</spirit:isIncludeFile>
-      </spirit:file>
-      <spirit:file>
-        <spirit:name>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX/RasterizerCommands.vh</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:isIncludeFile>true</spirit:isIncludeFile>
-      </spirit:file>
       <spirit:file>
         <spirit:name>../../../rtl/rasterix/RasterIX/RasterizerCommands.vh</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
@@ -2843,7 +2802,6 @@
         <spirit:fileType>verilogSource</spirit:fileType>
         <spirit:userFileType>USED_IN_ipstatic</spirit:userFileType>
       </spirit:file>
-      <spirit:dependency>d:/Github/zz9000-rasterix-fit/rtl/rasterix/RasterIX</spirit:dependency>
     </spirit:fileSet>
     <spirit:fileSet>
       <spirit:name>xilinx_xpgui_view_fileset</spirit:name>
