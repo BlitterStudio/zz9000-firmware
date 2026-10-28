@@ -502,6 +502,12 @@ size_t mw_service_packet_diagnostics(MWPacketDiagnostic *out, size_t capacity,
 void mw_service_report_amiga_reset(void)
 {
     mw_ctx *context = mw_service_find_context(g_active_handle);
+
+    if (!context || !g_ctrl)
+        return;
+#if defined(MINIGL_HOST_TEST)
+    (void)context;
+#else
     MiniGLRasterRixDiagnostics rix;
     uint32_t producer;
     uint32_t consumer;
@@ -509,9 +515,6 @@ void mw_service_report_amiga_reset(void)
     uint32_t count;
     uint32_t index;
     uint32_t now;
-
-    if (!context || !g_ctrl)
-        return;
     producer = mw_wire_ld32(&g_ctrl->producer_seq);
     consumer = mw_wire_ld32(&g_ctrl->consumer_seq);
     now = mw_diag_now_ms();
@@ -537,6 +540,7 @@ void mw_service_report_amiga_reset(void)
                 (unsigned long)rix.status, (unsigned long)rix.completed_fence,
                 (unsigned long)rix.last_fence);
     }
+#endif
 }
 
 int mw_service_poll(void)
