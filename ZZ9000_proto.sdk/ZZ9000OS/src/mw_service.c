@@ -672,18 +672,28 @@ int mw_service_poll(void)
             break;
         }
 
-        case 3: { /* Latest-frame RGBA8 rows: op_arg1 = first, op_arg2 = count */
+        case 3: { /* Latest rows, or legacy full-frame readback when arg2 is 0 */
             mw_ctx *c = mw_service_find_context(handle);
             uint32_t first_row = mw_wire_ld32(&g_ctrl->op_arg1);
             uint32_t row_count = mw_wire_ld32(&g_ctrl->op_arg2);
             if (!c || !g_reply_ptr || !g_reply_capacity) {
                 mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
             } else {
-                uint32_t status = mw_host_readback_latest_rows(
-                    c, g_reply_ptr, g_reply_capacity, first_row, row_count);
+                uint32_t status;
+                uint32_t reply_bytes;
+
+                if (row_count == 0U) {
+                    status = mw_host_readback_rgba8(c, g_reply_ptr,
+                                                    g_reply_capacity);
+                    reply_bytes = c->width * c->height * 4U;
+                } else {
+                    status = mw_host_readback_latest_rows(
+                        c, g_reply_ptr, g_reply_capacity, first_row, row_count);
+                    reply_bytes = c->width * row_count * 4U;
+                }
                 mw_wire_st32(&g_ctrl->op_status, status);
                 mw_wire_st32(&g_ctrl->op_reply_bytes,
-                             status == MW_STATUS_OK ? c->width * row_count * 4U : 0U);
+                             status == MW_STATUS_OK ? reply_bytes : 0U);
             }
             break;
         }
