@@ -35,9 +35,9 @@ framebuffer EF.
 .PARAMETER RasterIXFramebufferSizeLog2
 RasterIX internal framebuffer band size in pixels (14 or 15; IF only, default 14).
 
-.PARAMETER OutputBitstream
-Optional output bitstream path, relative to the repository or absolute.
-A C28 build cannot overwrite bootimage_work/zz9000_ps_wrapper.bit.
+ .PARAMETER OutputBitstream
+ Optional output bitstream path, relative to the repository or absolute.
+ C28 and RasterIX candidates cannot overwrite bootimage_work/zz9000_ps_wrapper.bit.
 #>
 
 [CmdletBinding()]
@@ -168,14 +168,16 @@ if ($OutputBitstream) {
     } else {
         $output = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputBitstream))
     }
+} elseif ($RasterIX) {
+    $output = Join-Path $repoRoot 'bootimage_work\variants\zz9000_ps_wrapper-zorro3-aga-rix.bit'
 } elseif ($CaptureC28) {
     $output = Join-Path $repoRoot 'bootimage_work\capture-c28\zz9000_ps_wrapper.bit'
 } else {
     $output = $packagedOutput
 }
-if ($CaptureC28 -and [string]::Equals($output, $packagedOutput,
+if (($CaptureC28 -or $RasterIX) -and [string]::Equals($output, $packagedOutput,
         [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw 'A C28 candidate must use a separate output path from the packaged default.'
+    throw 'A C28 or RasterIX candidate must use a separate output path from the packaged default.'
 }
 
 if ($RasterIXVariant -eq 'ef' -and $RasterIXTMUCount -ne 1) {
