@@ -27,6 +27,13 @@ typedef struct MiniGLRasterBuffers {
 } MiniGLRasterBuffers;
 
 typedef struct MiniGLRasterDirtyRegion { uint16_t x, y, width, height; } MiniGLRasterDirtyRegion;
+
+typedef struct MiniGLRasterRixDiagnostics {
+    uint32_t status;
+    uint32_t completed_fence;
+    uint32_t last_fence;
+    uint8_t active;
+} MiniGLRasterRixDiagnostics;
 typedef void (*MiniGLRasterTraceHook)(uint32_t phase);
 
 /* Trace hook phase 1 brackets a vertex transform and attribute preparation. */
@@ -79,6 +86,8 @@ uint32_t minigl_raster_draws_software(void);
 uint32_t minigl_raster_first_fallback_reason(void);
 void minigl_raster_reset_frame_counters(void);
 int minigl_raster_hardware_available(void);
+/* Snapshot the RasterIX CSR state without changing command ownership. */
+int minigl_raster_get_rix_diagnostics(MiniGLRasterRixDiagnostics *out);
 int minigl_raster_upload_rgba8(uint32_t id, uint16_t level, uint16_t width, uint16_t height,
                                const uint32_t *rgba_pixels, int internal_rgb);
 int minigl_raster_subimage_rgba8(uint32_t id, uint16_t level, uint16_t xoffset, uint16_t yoffset,

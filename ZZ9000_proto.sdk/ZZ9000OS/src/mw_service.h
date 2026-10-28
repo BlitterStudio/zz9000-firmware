@@ -67,6 +67,19 @@ extern "C" {
 /* Reject diagnostics: log the first reject, then one line per this many. */
 #define MW_REJECT_LOG_INTERVAL  1024U
 
+/* Reset diagnostics retain only a bounded packet history: printing remains a
+ * reset-only operation because core 0 and the worker share an unarbitrated
+ * UART. */
+#define MW_PACKET_DIAG_RING_SIZE 8U
+typedef struct MWPacketDiagnostic {
+    uint32_t sequence;
+    uint32_t first_opcode;
+    uint32_t command_count;
+    uint32_t bytes;
+    uint32_t status;
+    uint32_t timestamp_ms;
+} MWPacketDiagnostic;
+
 /* Control Block: Exactly 128 bytes, 64-byte ownership partition. All
  * multi-byte fields are big-endian wire values (the 68k library reads
  * them directly), so use the mw_wire_* helpers below. */
@@ -253,6 +266,8 @@ void mw_service_doorbell(void);
 int  mw_service_poll(void);
 int  mw_service_has_work(void);
 void mw_service_reset(void);
+/* Print the bounded packet history before reset tears down a live context. */
+void mw_service_report_amiga_reset(void);
 void mw_service_reset_local(void);
 void mw_service_on_core1_fault(void);
 int  mw_service_is_bound(void);
@@ -271,6 +286,9 @@ void mw_service_set_host_vram(void *base, uint32_t limit_arm);
  * MW_REJECT_LOG_INTERVAL); observable so host tests can prove a reject
  * storm cannot flood the UART. */
 uint32_t mw_service_reject_log_events(void);
+/* Oldest-to-newest packet summaries, for the host mapper/service tests. */
+size_t mw_service_packet_diagnostics(MWPacketDiagnostic *out, size_t capacity,
+                                     uint32_t *packets_processed);
 
 #ifdef __cplusplus
 }

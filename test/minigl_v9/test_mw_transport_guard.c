@@ -150,6 +150,27 @@ static void test_reject_log_is_throttled(void)
            (unsigned)(4U * MW_REJECT_LOG_INTERVAL));
 }
 
+static void test_packet_diagnostics_ring(void)
+{
+    volatile ZZ9KMiniGLControlBlockV9 *ctrl = bind_all_ones();
+    MWPacketDiagnostic entries[MW_PACKET_DIAG_RING_SIZE];
+    uint32_t processed;
+    size_t count;
+
+    set_host_u32((volatile uint32_t *)&ctrl->producer_seq,
+                 MW_PACKET_DIAG_RING_SIZE + 3U);
+    (void)mw_service_poll();
+    count = mw_service_packet_diagnostics(entries, MW_PACKET_DIAG_RING_SIZE,
+                                          &processed);
+    assert(count == MW_PACKET_DIAG_RING_SIZE);
+    assert(processed == MW_PACKET_DIAG_RING_SIZE + 3U);
+    assert(entries[0].sequence == 3U);
+    assert(entries[count - 1U].sequence == MW_PACKET_DIAG_RING_SIZE + 2U);
+    assert(entries[0].bytes == 0xffffffffU);
+    assert(entries[0].status == MW_STATUS_CONTEXT_LOST);
+    printf("PASS: test_packet_diagnostics_ring\n");
+}
+
 int main(void)
 {
     printf("Starting ZZ9000 MiniGL Wire-v9 Transport Guard Tests...\n");
@@ -158,6 +179,7 @@ int main(void)
     test_poll_garbage_producer_resyncs_once();
     test_poll_ring_drain_is_batched();
     test_reject_log_is_throttled();
+    test_packet_diagnostics_ring();
     printf("All transport guard tests passed.\n");
     return 0;
 }
