@@ -169,17 +169,25 @@ if [ "$CHECK_QUALIFICATION" -eq 1 ]; then
     exit 0
 fi
 
+FIRMWARE_ELF=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+if [ "$FIRMWARE_FLAVOR" = rasterix ] &&
+   { [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/.minigl-rasterix ] ||
+     [ "$(cat ZZ9000_proto.sdk/ZZ9000OS/build/.minigl-rasterix)" != 1 ]; }; then
+    echo "ERROR: RasterIX package requires ./build_firmware.sh --rasterix." >&2
+    exit 1
+fi
+
 if ! command -v zip >/dev/null 2>&1; then
     echo "ERROR: zip not found on PATH." >&2
     exit 1
 fi
 
-if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
+if [ ! -f "$FIRMWARE_ELF" ]; then
     echo "ERROR: missing ZZ9000OS.elf; run ./build_firmware.sh first." >&2
     exit 1
 fi
 
-bash ./util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+bash ./util/check_elf_vectors.sh "$FIRMWARE_ELF"
 
 MODULE_DIR=ZZ9000_proto.sdk/ZZ9000OS/build/modules
 make -C ZZ9000_proto.sdk/ZZ9000OS modules
@@ -244,7 +252,7 @@ for def in "${variant_defs[@]}"; do
 
     echo "[release] building $variant${flavor_label}: $label"
     mkdir -p "$archive_root"
-    ./build_bootimage.sh --bitstream "$bitstream" --firmware ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
+    ./build_bootimage.sh --bitstream "$bitstream" --firmware "$FIRMWARE_ELF" \
         --output "$boot_bin"
     # Ship the (all-commented) sample config next to BOOT.bin so users
     # discover it; copying it to the SD card as-is changes nothing.
