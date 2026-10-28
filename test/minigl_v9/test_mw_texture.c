@@ -252,6 +252,60 @@ static void test_texture_indexed_palette(void)
     printf("PASS: test_texture_indexed_palette\n");
 }
 
+static void test_indexed_subupdate_after_mipmap_regeneration(void)
+{
+    mw_texture_manager tm;
+    uint8_t image[128] = {0};
+    uint8_t subimage[128] = {0};
+    uint8_t palette[256][4] = {{0}};
+    mw_texture *t;
+    uint32_t i;
+
+    palette[1][0] = 0xffU; palette[1][3] = 0xffU;
+    palette[2][1] = 0xffU; palette[2][3] = 0xffU;
+    mw_texmgr_init(&tm);
+
+    mw_put_be32(image, 6U);
+    mw_put_be32(image + 4, 0U);
+    mw_put_be32(image + 8, 4U);
+    mw_put_be32(image + 12, 4U);
+    mw_put_be32(image + 16, 4U);
+    mw_put_be32(image + 20, 0x1900U);
+    mw_put_be32(image + 24, 0x1401U);
+    mw_put_be32(image + 28, 1U);
+    mw_put_be32(image + 52, 16U);
+    for (i = 0U; i < 16U; ++i)
+        image[56U + i] = 1U;
+    assert(mw_texmgr_image_raw(&tm, image, 72U, palette, 3U));
+
+    mw_put_be32(image + 4, 1U);
+    mw_put_be32(image + 12, 2U);
+    mw_put_be32(image + 16, 2U);
+    mw_put_be32(image + 52, 4U);
+    memset(image + 56, 1, 4U);
+    assert(mw_texmgr_image_raw(&tm, image, 60U, palette, 3U));
+    assert(mw_texmgr_param(&tm, 6U, 0x8191U, 1U, 0.0f));
+    t = mw_texmgr_find(&tm, 6U);
+    assert(t != NULL && t->indices[1] == NULL);
+
+    mw_put_be32(subimage, 6U);
+    mw_put_be32(subimage + 4, 1U);
+    mw_put_be32(subimage + 16, 1U);
+    mw_put_be32(subimage + 20, 1U);
+    mw_put_be32(subimage + 24, 0x1900U);
+    mw_put_be32(subimage + 28, 0x1401U);
+    mw_put_be32(subimage + 32, 1U);
+    mw_put_be32(subimage + 56, 1U);
+    subimage[60] = 2U;
+    assert(mw_texmgr_sub_raw(&tm, subimage, 61U, palette, 3U));
+    assert(t->indices[1] != NULL);
+    assert(t->indices[1][0] == 2U);
+    assert(t->pixels[1][0] == 0x00ff00ffU);
+
+    mw_texmgr_destroy(&tm);
+    printf("PASS: test_indexed_subupdate_after_mipmap_regeneration\n");
+}
+
 
 int main(void)
 {
@@ -260,6 +314,7 @@ int main(void)
     test_texture_generate_mipmap();
     test_texture_sub_raw();
     test_texture_indexed_palette();
+    test_indexed_subupdate_after_mipmap_regeneration();
     printf("All texture tests PASSED!\n");
     return 0;
 }

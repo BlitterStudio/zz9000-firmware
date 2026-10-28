@@ -25,9 +25,11 @@ typedef struct MiniGLRasterBuffers {
     uint16_t width;
     uint16_t height;
 } MiniGLRasterBuffers;
+/* `live_bytes` reaches the highest live allocation offset, not the sum of
+ * allocations, so a relocating grow callback preserves fragmented residency. */
 typedef int (*MiniGLRasterTexturePoolGrowFn)(void *context,
                                              uint32_t minimum_bytes,
-                                             uint32_t used_bytes,
+                                             uint32_t live_bytes,
                                              uint8_t **pool,
                                              uint32_t *pool_bytes);
 

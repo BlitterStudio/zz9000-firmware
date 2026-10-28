@@ -54,7 +54,8 @@ static void test_bind_zeroes_control_memory(void)
     assert(mw_wire_ld32(&ctrl->op_handle) == 0);
     assert(mw_wire_ld32(&ctrl->op_seq) == 0);
 
-    assert(mw_wire_ld32(&status->capabilities) == (1U << 18));
+    assert(mw_wire_ld32(&status->capabilities) ==
+           (MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS));
     assert(mw_service_has_work() == 0);
     printf("PASS: test_bind_zeroes_control_memory\n");
 }

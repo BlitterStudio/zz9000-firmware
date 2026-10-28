@@ -35,6 +35,11 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
 
 /* Reads back latest presented frame as top-row-first RGBA8. */
 uint32_t mw_host_readback_rgba8(mw_ctx *c, uint8_t *out, uint32_t capacity);
+/* Reads rows [first_row, first_row + row_count) of the latest frame as
+ * top-row-first RGBA8. */
+uint32_t mw_host_readback_latest_rows(mw_ctx *c, uint8_t *out,
+                                      uint32_t capacity, uint32_t first_row,
+                                      uint32_t row_count);
 
 /* Destroys renderer context and frees allocated memory. */
 void     mw_host_destroy(mw_ctx *c);

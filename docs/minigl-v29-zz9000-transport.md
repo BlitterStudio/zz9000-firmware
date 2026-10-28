@@ -128,10 +128,14 @@ To confirm the board runs firmware capable of Wire Protocol v9 without triggerin
    addresses by arithmetic on a fixed base. The live control block may
    narrow the descriptor geometry (a constrained session) but never
    widen it.
-5. **MiniGL Wire-v9 Capability Bit**:
-   Firmware advertises Wire-v9 support via bit 18 in
-   `ZZ9KMiniGLStatus.capabilities`:
+5. **MiniGL Wire-v9 Capability Bits**:
+   Firmware advertises Wire-v9 support and optional sliced latest-frame
+   readback in `ZZ9KMiniGLStatus.capabilities`:
    - `#define ZZ9K_CAP_MINIGL_WIRE_V9 (1U << 18)`
+   - `#define ZZ9K_CAP_MINIGL_LATEST_READBACK_ROWS (1U << 19)`
+     makes Op 3 use `op_arg1 = first_row`, `op_arg2 = row_count` and return
+     top-row-first RGBA8 rows through the bounded reply window.
+     Without bit 19, the library uses the compatible `MW_READ_PIXELS` path.
 6. **Transport Handshake (`BRIDGE_QUERY`)**:
    The library inspects the MiniGL Control Block at the descriptor's
    address:
@@ -228,11 +232,11 @@ typedef struct ZZ9KMiniGLControlBlock {
     uint32_t producer_seq;       /* Submitted packet sequence */
     uint32_t active_slot;        /* Index of slot being submitted */
     uint32_t host_generation;    /* Current host session generation */
-    uint32_t op_code;            /* 0=none/submit, 1=create, 3=readback, 4=destroy, 5=request, 6=blit */
+    uint32_t op_code;            /* 0=none/submit, 1=create, 3=latest rows, 4=destroy, 5=request, 6=blit */
     uint32_t op_handle;          /* Context handle */
-    uint32_t op_arg1;            /* Argument 1 (width / req_bytes / readback_bytes) */
-    uint32_t op_arg2;            /* Argument 2 (height / card_offset) */
-    uint32_t op_arg3;            /* Argument 3 (reply_cap / span_total) */
+    uint32_t op_arg1;            /* Width / request bytes / Op 3 first row */
+    uint32_t op_arg2;            /* Height / card offset / Op 3 row count */
+    uint32_t op_arg3;            /* Reply capacity / span total */
     uint32_t op_seq;             /* Sequence counter incremented on each synchronous op */
     uint8_t  host_reserved[28];
 } __attribute__((packed, aligned(64))) ZZ9KMiniGLControlBlock;
@@ -430,7 +434,7 @@ The ZZ9000 transport implements the 7 standard bridge operations matching Amiber
 | `0` | `BRIDGE_QUERY` | None | Returns wire version (must be 9) |
 | `1` | `BRIDGE_CREATE` | `width`, `height` | Allocates renderer context; returns handle |
 | `2` | `BRIDGE_SUBMIT` | `handle`, `packet`, `bytes` | Submits wire-v9 command packet |
-| `3` | `BRIDGE_READBACK` | `handle`, `pixels`, `bytes` | Reads latest presented frame as RGBA8 |
+| `3` | `BRIDGE_READBACK` | `handle`, `first_row`, `row_count` | Capability-gated latest-frame RGBA8 row slices |
 | `4` | `BRIDGE_DESTROY` | `handle` | Destroys context and releases card memory |
 | `5` | `BRIDGE_REQUEST` | `handle`, `req`, `req_b`, `desc` | Synchronous request with bounded reply |
 | `6` | `BRIDGE_BLIT` | `handle`, `req`, `req_b`, `desc` | In-place reply: presentation into P96 bitmap |
@@ -444,10 +448,15 @@ The ZZ9000 transport implements the 7 standard bridge operations matching Amiber
   - If `reply_ptr` points to card memory inside the host-visible window, the ARM writes the reply directly into the destination and executes `Xil_DCacheFlushRange()`.
   - If `reply_ptr` is in Amiga motherboard FastRAM, the ARM writes into the card-side Reply Buffer (`0x07081000` on Z3). The 68k transport waits for completion, then copies the reply from card DDR to `reply_ptr` using `CopyMem()`.
 
-### 5.3 Frame Readback (`BRIDGE_READBACK` / Op 3) & `GLReadPixels`
-- Reads the latest presented frame as top-row-first RGBA8 into `dest_pixels`.
-- If RasterIX rendered to RGB565, the ARM Core 1 software expands RGB565 to RGBA8888 during the readback copy.
-- The 68k invalidates its data cache over `dest_pixels` before returning to the application.
+### 5.3 Latest-Frame Readback (`BRIDGE_READBACK` / Op 3)
+With capability bit 19, Op 3 reads `row_count` rows starting at `first_row`
+from `target.latest`, produces top-row-first RGBA8 in the Reply Buffer, and
+returns the exact byte count in `op_reply_bytes`. Each request must fit the
+bounded Reply Buffer. This permits presentation and screenshots to select the
+latest rendered frame without depending on GL read-buffer state.
+
+Without bit 19, the library uses bounded `MW_READ_PIXELS` requests while
+explicitly selecting and restoring the read buffer.
 
 ### 5.4 In-Place Presentation (`BRIDGE_BLIT` / Op 6)
 Frame presentation (`MGLSwitchDisplay()`) issues `BRIDGE_BLIT` with request opcode `MW_BLIT`.

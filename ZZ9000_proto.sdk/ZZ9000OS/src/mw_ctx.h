@@ -44,15 +44,6 @@ struct mw_ctx {
     uint32_t vertex_scratch_address;
     uint8_t card_pool_backed;
 
-    /* BLIT / CAPTURE state for fast path */
-    uint8_t  *presented_span_address;
-    uint8_t   presented_request[24 + 16 * MW_BLIT_MAX_RECTS];
-    uint32_t  presented_request_len;
-    uint8_t  *presented_span;
-    uint32_t  presented_copy_address;
-    uint32_t  presented_span_size;
-    uint32_t  presented_span_capacity;
-    uint8_t   presented_valid;
     /* Indexed P96 presentation cache.  Each byte maps one RGB555 colour to
      * the closest current primary-display CLUT entry. */
     uint8_t   presented_clut[32U * 32U * 32U];

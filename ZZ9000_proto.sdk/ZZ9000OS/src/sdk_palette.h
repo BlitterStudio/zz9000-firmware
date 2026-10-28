@@ -32,6 +32,12 @@ uint32_t sdk_palette_get(uint32_t idx);
  * necessary. */
 uint32_t sdk_palette_generation(void);
 
+/* Copies the whole primary CLUT only if it remained unchanged for the
+ * duration of the copy. Returns 1 and its stable generation on success, or
+ * 0 when a writer was active or changed the CLUT concurrently. */
+int sdk_palette_snapshot(uint32_t entries[SDK_PALETTE_ENTRIES],
+                         uint32_t *generation);
+
 /* Writes `count` entries from `start` to `dst` as consecutive big-endian
  * 0x00RRGGBB words, matching the mailbox wire format. Returns the number of
  * bytes written, or 0 if the window is out of bounds or `dst` is NULL --

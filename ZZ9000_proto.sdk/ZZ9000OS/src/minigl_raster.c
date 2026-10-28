@@ -577,6 +577,19 @@ static int texture_pool_ensure(uint32_t minimum_bytes, uint32_t used_bytes)
     return minimum_bytes <= g_buffers.texture_pool_bytes;
 }
 
+static uint32_t texture_pool_live_bytes(void)
+{
+    TextureLevel *current;
+    uint32_t live_bytes = 0U;
+
+    for (current = g_texture_allocations; current; current = current->next) {
+        uint32_t end = current->offset + current->size;
+        if (end > live_bytes)
+            live_bytes = end;
+    }
+    return live_bytes;
+}
+
 static int texture_alloc(TextureLevel *level, uint32_t size, uint32_t *out)
 {
     TextureLevel *current;
@@ -585,7 +598,7 @@ static int texture_alloc(TextureLevel *level, uint32_t size, uint32_t *out)
     uint32_t old_size = level->size;
     uint32_t minimum = g_texture_used - old_size + size;
 
-    if (!texture_pool_ensure(minimum, g_texture_used) ||
+    if (!texture_pool_ensure(minimum, texture_pool_live_bytes()) ||
         size > g_buffers.texture_pool_bytes) return 0;
     for (current = g_texture_allocations; current; current = current->next) {
         if (current == level) continue;

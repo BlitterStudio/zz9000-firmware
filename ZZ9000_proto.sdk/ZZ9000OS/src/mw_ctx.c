@@ -93,6 +93,10 @@ static uint32_t mw_color_from_floats(float r, float g, float b, float a)
 static uint8_t g_dummy_vertices[256];
 static uint8_t g_dummy_staging[256];
 static uint8_t g_dummy_texture[1];
+/* Core 1 builds one CLUT table at a time; staging prevents a rejected
+ * palette generation from replacing a context's last known-good table. */
+static uint8_t g_presented_clut_staging[32U * 32U * 32U];
+
 
 static int mw_ctx_grow_texture_pool(void *context, uint32_t minimum_bytes,
                                     uint32_t used_bytes, uint8_t **pool,
@@ -120,10 +124,10 @@ static int mw_ctx_grow_texture_pool(void *context, uint32_t minimum_bytes,
                                                           &new_address);
     if (!new_pool)
         return 0;
-    if (c->texture_pool != g_dummy_texture)
+    if (c->texture_pool != g_dummy_texture) {
         memcpy(new_pool, c->texture_pool, used_bytes);
-    if (c->texture_pool != g_dummy_texture)
         mw_context_free(c, c->texture_pool, &c->texture_pool_address);
+    }
     c->texture_pool = new_pool;
     c->texture_pool_address = new_address;
     c->texture_pool_bytes = new_bytes;
@@ -137,9 +141,6 @@ static inline void mw_ctx_update_latest(mw_ctx *c)
     if (c->state.draw_buffer == 0) return; /* GL_NONE */
     int front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400);
     c->state.target.latest = front ? c->state.target.front : c->state.target.back;
-    if (front || c->state.draw_buffer == 0x408) {
-        c->presented_valid = 0;
-    }
 }
 
 static void mw_ctx_bind_buffers(mw_ctx *c)
@@ -338,10 +339,6 @@ void mw_host_destroy(mw_ctx *c)
     if (c->vertex_scratch) {
         mw_context_free(c, c->vertex_scratch, &c->vertex_scratch_address);
         c->vertex_scratch = NULL;
-    }
-    if (c->presented_span) {
-        mw_context_free(c, c->presented_span, &c->presented_copy_address);
-        c->presented_span = NULL;
     }
     mw_texmgr_destroy(&c->texmgr);
 #if MW_CONTEXT_CARD_POOL
@@ -1036,10 +1033,13 @@ static void mw_letterbox_rect(uint32_t width, uint32_t height,
 
 static void mw_refresh_presented_clut(mw_ctx *c)
 {
+    uint32_t palette[SDK_PALETTE_ENTRIES];
     uint32_t generation = sdk_palette_generation();
     uint32_t r5, g5, b5;
 
-    if (c->presented_clut_generation == generation)
+    if (!(generation & 1U) && c->presented_clut_generation == generation)
+        return;
+    if (!sdk_palette_snapshot(palette, &generation))
         return;
 
     for (r5 = 0; r5 < 32U; ++r5) {
@@ -1053,7 +1053,7 @@ static void mw_refresh_presented_clut(mw_ctx *c)
                 uint32_t entry;
 
                 for (entry = 0; entry < SDK_PALETTE_ENTRIES; ++entry) {
-                    uint32_t xrgb = sdk_palette_get(entry);
+                    uint32_t xrgb = palette[entry];
                     int dr = r - (int)(xrgb >> 16);
                     int dg = g - (int)((xrgb >> 8) & 0xffU);
                     int db = b - (int)(xrgb & 0xffU);
@@ -1065,10 +1065,15 @@ static void mw_refresh_presented_clut(mw_ctx *c)
                             break;
                     }
                 }
-                c->presented_clut[(r5 << 10) | (g5 << 5) | b5] = (uint8_t)best;
+                g_presented_clut_staging[(r5 << 10) | (g5 << 5) | b5] =
+                    (uint8_t)best;
             }
         }
     }
+    if (sdk_palette_generation() != generation)
+        return;
+    memcpy(c->presented_clut, g_presented_clut_staging,
+           sizeof(c->presented_clut));
     c->presented_clut_generation = generation;
 }
 
@@ -1380,48 +1385,6 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
         }
     }
 
-    /* Save snapshot for MW_CAPTURE fast path */
-    c->presented_valid = 0;
-    c->presented_span_address = span;
-    c->presented_request_len = bytes - 4;
-    if (bytes - 4 <= sizeof(c->presented_request)) {
-        memcpy(c->presented_request, p + 4, bytes - 4);
-    }
-
-    size_t total_rect_bytes = 0;
-    for (uint32_t i = 0; i < r.count; ++i) {
-        total_rect_bytes += (size_t)(r.rects[i * 4 + 3] - r.rects[i * 4 + 1]) *
-                            (size_t)(r.rects[i * 4 + 2] - r.rects[i * 4]) * r.bytes_per_pixel;
-    }
-
-    if (total_rect_bytes > 0) {
-        if (total_rect_bytes > UINT32_MAX)
-            return 0;
-        if (total_rect_bytes > c->presented_span_capacity) {
-            uint32_t new_address = 0U;
-            uint8_t *new_buf = (uint8_t *)mw_context_alloc(
-                c, (uint32_t)total_rect_bytes, &new_address);
-            if (!new_buf)
-                return 0;
-            mw_context_free(c, c->presented_span, &c->presented_copy_address);
-            c->presented_span = new_buf;
-            c->presented_copy_address = new_address;
-            c->presented_span_capacity = (uint32_t)total_rect_bytes;
-        }
-        if (c->presented_span && total_rect_bytes <= c->presented_span_capacity) {
-            size_t at = 0;
-            for (uint32_t i = 0; i < r.count; ++i) {
-                const uint32_t *rc = &r.rects[i * 4];
-                size_t row_len = (size_t)(rc[2] - rc[0]) * r.bytes_per_pixel;
-                for (uint32_t y = rc[1]; y < rc[3]; ++y) {
-                    memcpy(c->presented_span + at, span + (size_t)y * r.pitch + (size_t)rc[0] * r.bytes_per_pixel, row_len);
-                    at += row_len;
-                }
-            }
-            c->presented_span_size = (uint32_t)total_rect_bytes;
-            c->presented_valid = 1;
-        }
-    }
 
     return MW_STATUS_OK;
 }
@@ -1440,38 +1403,6 @@ static uint32_t mw_capture(mw_ctx *c, const uint8_t *p, uint32_t bytes,
     uint32_t frame_w = scaled ? c->state.target.present_width : c->width;
     uint32_t frame_h = scaled ? c->state.target.present_height : c->height;
 
-    /* Fast path */
-    const uint32_t *cover = r.rects;
-    if (!scaled && c->state.target.buffer_count > 1 && span == c->presented_span_address && r.count == 1 &&
-        (int64_t)cover[0] <= r.frame_x && (int64_t)cover[1] <= r.frame_y &&
-        (int64_t)cover[2] >= r.frame_x + (int64_t)c->width &&
-        (int64_t)cover[3] >= r.frame_y + (int64_t)c->height &&
-        c->presented_valid &&
-        c->presented_request_len == (bytes - 4) &&
-        memcmp(p + 4, c->presented_request, bytes - 4) == 0) {
-
-        int same = 1;
-        size_t at = 0;
-        size_t row_len = (size_t)(cover[2] - cover[0]) * r.bytes_per_pixel;
-        for (uint32_t y = cover[1]; y < cover[3]; ++y) {
-            if (at + row_len > c->presented_span_size ||
-                memcmp(span + (size_t)y * r.pitch + (size_t)cover[0] * r.bytes_per_pixel,
-                       c->presented_span + at, row_len) != 0) {
-                same = 0;
-                break;
-            }
-            at += row_len;
-        }
-
-        if (same) {
-            /* Fast path hit: copy front buffer to back buffer */
-            memcpy(c->color_buffers[c->state.target.back],
-                   c->color_buffers[c->state.target.front],
-                   (size_t)c->width * c->height * sizeof(uint32_t));
-            c->state.target.latest = c->state.target.back;
-            return MW_STATUS_OK;
-        }
-    }
 
     /* Slow path: decode span into back buffer */
     memset(c->color_buffers[c->state.target.back], 0, (size_t)c->width * c->height * sizeof(uint32_t));
@@ -1671,7 +1602,9 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
     return MW_STATUS_INVALID;
 }
 
-uint32_t mw_host_readback_rgba8(mw_ctx *c, uint8_t *out, uint32_t capacity)
+uint32_t mw_host_readback_latest_rows(mw_ctx *c, uint8_t *out,
+                                      uint32_t capacity, uint32_t first_row,
+                                      uint32_t row_count)
 {
     uint64_t req_bytes;
     const uint32_t *color_buffer;
@@ -1679,26 +1612,32 @@ uint32_t mw_host_readback_rgba8(mw_ctx *c, uint8_t *out, uint32_t capacity)
 
     if (!c || !out)
         return MW_STATUS_UNAVAILABLE;
-
-    req_bytes = (uint64_t)c->width * c->height * 4;
+    if (first_row > c->height || row_count > c->height - first_row)
+        return MW_STATUS_INVALID;
+    req_bytes = (uint64_t)c->width * row_count * 4U;
     if (capacity < req_bytes)
         return MW_STATUS_CAPACITY;
 
     (void)minigl_raster_finish();
     color_buffer = c->color_buffers[c->state.target.latest];
-
-    /* Output top-row-first RGBA8 */
-    for (y = 0; y < c->height; ++y) {
-        const uint32_t *src_row = color_buffer + (size_t)y * c->width;
-        uint8_t *dst_row = out + (size_t)y * c->width * 4;
+    for (y = 0; y < row_count; ++y) {
+        const uint32_t *src_row =
+            color_buffer + (size_t)(first_row + y) * c->width;
+        uint8_t *dst_row = out + (size_t)y * c->width * 4U;
         for (x = 0; x < c->width; ++x) {
             uint32_t pix = src_row[x];
-            dst_row[x * 4]     = (uint8_t)(pix >> 24);
-            dst_row[x * 4 + 1] = (uint8_t)(pix >> 16);
-            dst_row[x * 4 + 2] = (uint8_t)(pix >> 8);
-            dst_row[x * 4 + 3] = (uint8_t)pix;
+            dst_row[x * 4U]     = (uint8_t)(pix >> 24);
+            dst_row[x * 4U + 1U] = (uint8_t)(pix >> 16);
+            dst_row[x * 4U + 2U] = (uint8_t)(pix >> 8);
+            dst_row[x * 4U + 3U] = (uint8_t)pix;
         }
     }
-
     return MW_STATUS_OK;
+}
+
+uint32_t mw_host_readback_rgba8(mw_ctx *c, uint8_t *out, uint32_t capacity)
+{
+    if (!c)
+        return MW_STATUS_UNAVAILABLE;
+    return mw_host_readback_latest_rows(c, out, capacity, 0U, c->height);
 }

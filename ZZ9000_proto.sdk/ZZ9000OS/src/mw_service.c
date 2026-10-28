@@ -311,7 +311,8 @@ void mw_service_init(void)
         mw_wire_st32(&g_status->error_sequence_lo, 0);
         mw_wire_st32(&g_status->firmware_epoch, 0);
         mw_wire_st32(&g_status->heartbeat, 0);
-        mw_wire_st32(&g_status->capabilities, (1U << 18)); /* Wire v9 capability bit */
+        mw_wire_st32(&g_status->capabilities,
+                     MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS);
     }
     g_doorbell_pending = 0;
     MW_DIAG("[MGL9] publish magic=%08lx wire=%u transport=%u slot_bytes=%lu slots=%lu caps=%08lx\n",
@@ -671,16 +672,18 @@ int mw_service_poll(void)
             break;
         }
 
-        case 3: { /* READBACK: op_handle, op_arg1 = bytes */
+        case 3: { /* Latest-frame RGBA8 rows: op_arg1 = first, op_arg2 = count */
             mw_ctx *c = mw_service_find_context(handle);
+            uint32_t first_row = mw_wire_ld32(&g_ctrl->op_arg1);
+            uint32_t row_count = mw_wire_ld32(&g_ctrl->op_arg2);
             if (!c || !g_reply_ptr || !g_reply_capacity) {
                 mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
             } else {
-                uint32_t status = mw_host_readback_rgba8(c, g_reply_ptr,
-                                                          g_reply_capacity);
+                uint32_t status = mw_host_readback_latest_rows(
+                    c, g_reply_ptr, g_reply_capacity, first_row, row_count);
                 mw_wire_st32(&g_ctrl->op_status, status);
                 mw_wire_st32(&g_ctrl->op_reply_bytes,
-                             status == MW_STATUS_OK ? c->width * c->height * 4U : 0U);
+                             status == MW_STATUS_OK ? c->width * row_count * 4U : 0U);
             }
             break;
         }
