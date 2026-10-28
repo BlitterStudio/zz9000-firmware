@@ -673,12 +673,6 @@ void video_set_dpms(uint8_t level) {
 // interrupt service routine for IRQ_F2P[0:0]
 // vblank + raster position interrupt
 void isr_video(void *dummy) {
-	/* FPGA vblank can arrive during boot before the host selects an RTG
-	 * mode. A zero geometry makes XAxiVdma_DmaConfig reject the request
-	 * (XST_INVALID_PARAM), which used to print several spurious failures. */
-	if (vs.vmode_hsize == 0U || vs.vmode_vdma_rows == 0U ||
-			vs.vmode_hdiv == 0U)
-		return;
 
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 	u32 live_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG2);
@@ -714,6 +708,13 @@ void isr_video(void *dummy) {
 	int videocap_output_profile = videocap_effective_output_profile(zstate);
 	int videocap_active = videocap_enabled &&
 		vs.videocap_backing_programmed != 0U;
+	/* An RTG-less cold boot has no VDMA geometry yet, but capture must
+	 * still reach its native mode initialization below.  Suppress only
+	 * non-capture VDMA reconfiguration until a host mode exists. */
+	if (!videocap_active &&
+			(vs.vmode_hsize == 0U || vs.vmode_vdma_rows == 0U ||
+			 vs.vmode_hdiv == 0U))
+		return;
 
 	if (!videocap_active) {
 		/* Capture overwrote framebuffer_pan_* with its own origin and
