@@ -327,7 +327,13 @@ void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
 
 int minigl_raster_prepare_present(void)
 {
-    return ready() && minigl_rix_backend_drain(&g_rix);
+    if (!ready() || !minigl_rix_backend_drain(&g_rix))
+        return 0;
+    if (minigl_rix_backend_surface_is_rgb565(&g_rix) &&
+        g_rix.platform.cache_invalidate != NULL)
+        g_rix.platform.cache_invalidate(g_rix.platform.context, (uintptr_t)g_buffers.color,
+                                        pixels() * 2U);
+    return 1;
 }
 
 int minigl_raster_present_is_rgb565(void)
