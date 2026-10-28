@@ -678,6 +678,126 @@ static void assert_fragment_extensions(void)
     }
 }
 
+struct rix_raster_model {
+    uint32_t csr[16];
+    uint8_t command[MINIGL_RIX_COMMAND_BUFFERS][MINIGL_RIX_COMMAND_BYTES];
+    uint8_t white[MINIGL_RIX_WHITE_TEXTURE_BYTES];
+    unsigned csr_reads;
+    unsigned cache_cleans;
+    unsigned cache_invalidates;
+    int complete;
+};
+
+static uint32_t rix_raster_read(void *context, uint32_t offset)
+{
+    struct rix_raster_model *model = context;
+
+    ++model->csr_reads;
+    return model->csr[offset / 4U];
+}
+
+static void rix_raster_write(void *context, uint32_t offset, uint32_t value)
+{
+    struct rix_raster_model *model = context;
+
+    model->csr[offset / 4U] = value;
+    if (offset == RIX_DRV_CSR_CMD_START && value != 0U) {
+        ++model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
+        if (model->complete)
+            model->csr[RIX_DRV_CSR_COMPLETED / 4U] =
+                model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
+    }
+}
+
+static void rix_raster_cache_clean(void *context, uintptr_t address, size_t bytes)
+{
+    struct rix_raster_model *model = context;
+
+    (void)address;
+    (void)bytes;
+    ++model->cache_cleans;
+}
+
+static void rix_raster_cache_invalidate(void *context, uintptr_t address, size_t bytes)
+{
+    struct rix_raster_model *model = context;
+
+    (void)address;
+    (void)bytes;
+    ++model->cache_invalidates;
+}
+
+static void assert_rix_ownership_transitions(void)
+{
+    static struct rix_raster_model model;
+    MiniGLRixPlatform platform;
+    MiniGLRasterRixDiagnostics diagnostics;
+    ZZ9KMiniGLPacketSetState s = state();
+    unsigned reads_after_fail;
+    memset(&model, 0, sizeof(model));
+    model.complete = 1;
+    model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    model.csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
+    memset(&platform, 0, sizeof(platform));
+    platform.context = &model;
+    platform.csr_read = rix_raster_read;
+    platform.csr_write = rix_raster_write;
+    platform.cache_clean = rix_raster_cache_clean;
+    platform.cache_invalidate = rix_raster_cache_invalidate;
+    platform.command_buffer[0] = model.command[0];
+    platform.command_buffer[1] = model.command[1];
+    platform.command_address[0] = 0x01000000U;
+    platform.command_address[1] = 0x01010000U;
+    platform.command_capacity = MINIGL_RIX_COMMAND_BYTES;
+    platform.white_texture = model.white;
+    platform.white_texture_address = 0x02000000U;
+    platform.white_texture_bytes = sizeof(model.white);
+
+    minigl_raster_set_rix_platform(&platform);
+    minigl_raster_init();
+    s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_DEPTH_WRITE;
+    minigl_raster_set_state(&s);
+    memset(depth, 0, sizeof(depth));
+    depth[0] = 0x12U;
+    depth[1] = 0x34U;
+    depth[2] = 0x56U;
+    vertex(0U, -0.8f, -0.8f, 0.0f, 0xff0000ffU, 0.0f, 0.0f);
+    vertex(1U, 0.8f, -0.8f, 0.0f, 0xff0000ffU, 0.0f, 0.0f);
+    vertex(2U, 0.0f, 0.8f, 0.0f, 0xff0000ffU, 0.0f, 0.0f);
+    minigl_raster_draw_arrays(GL_TRIANGLES, 0U, VSTRIDE, 0U, 3U, 0U);
+    assert(minigl_raster_finish());
+    assert(depth[0] == 0x12U && depth[1] == 0x34U && depth[2] == 0U);
+    assert(model.cache_cleans != 0U && model.cache_invalidates != 0U);
+
+    s.scissor_x = W;
+    s.scissor_w = 1U;
+    s.scissor_h = H;
+    s.enabled_flags |= ZZ9K_MGL_STATE_SCISSOR_TEST;
+    minigl_raster_set_state(&s);
+    minigl_raster_draw_arrays(GL_TRIANGLES, 0U, VSTRIDE, 0U, 3U, 0U);
+    assert(minigl_raster_hardware_available());
+    assert(minigl_raster_finish());
+    assert(minigl_raster_quiesce());
+    assert(!minigl_raster_hardware_available());
+
+    minigl_raster_set_rix_platform(&platform);
+    minigl_raster_init();
+    s = state();
+    s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_DEPTH_WRITE;
+    minigl_raster_set_state(&s);
+    assert(minigl_raster_get_rix_diagnostics(&diagnostics));
+    model.complete = 0;
+    minigl_raster_draw_arrays(GL_TRIANGLES, 0U, VSTRIDE, 0U, 3U, 0U);
+    assert(!minigl_raster_finish());
+    reads_after_fail = model.csr_reads;
+    assert(minigl_raster_get_rix_diagnostics(&diagnostics));
+    assert(diagnostics.active == 0U);
+    assert(model.csr_reads == reads_after_fail);
+    minigl_raster_set_rix_platform(NULL);
+}
+
 int main(void)
 {
     ZZ9KMiniGLPacketSetState s;
@@ -1069,6 +1189,7 @@ int main(void)
     assert_sampler_defaults();
     assert_integer_vertices();
     assert_texture_compaction();
+    assert_rix_ownership_transitions();
     minigl_raster_release_buffers();
     assert(minigl_raster_color_buffer() == NULL);
     assert(minigl_raster_width() == 0U && minigl_raster_height() == 0U);
