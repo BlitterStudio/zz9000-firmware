@@ -69,7 +69,11 @@ void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform);
 /* Retires the RasterIX command stream for card-side presentation without
  * expanding its RGB565 surface to RGBA. */
 int minigl_raster_prepare_present(void);
+/* These describe the bytes currently authored in the bound color target. */
 int minigl_raster_present_is_rgb565(void);
+/* Marks a completed wire-protocol frame without presenting it. */
+void minigl_raster_frame_boundary(void);
+int minigl_raster_present_is_bottom_up(void);
 /* Drains RasterIX and restores the shared target to CPU RGBA before readback. */
 int minigl_raster_finish(void);
 /* Retires all queued engine work before its card-pool buffers are released. */

@@ -35,6 +35,7 @@ struct mock_platform {
     uint8_t tex_pool[MINIGL_RIX_TEXTURE_POOL_BYTES];
     unsigned csr_reads;
     unsigned submissions;
+    int complete_submissions;
 };
 static struct mock_platform s_mock;
 
@@ -53,7 +54,8 @@ static void mock_csr_write(void *ctx, uint32_t offset, uint32_t value)
     if (offset == RIX_DRV_CSR_CMD_START && value != 0U) {
         ++p->submissions;
         ++p->csr[RIX_DRV_CSR_SUBMITTED / 4U];
-        p->csr[RIX_DRV_CSR_COMPLETED / 4U] = p->csr[RIX_DRV_CSR_SUBMITTED / 4U];
+        if (p->complete_submissions)
+            p->csr[RIX_DRV_CSR_COMPLETED / 4U] = p->csr[RIX_DRV_CSR_SUBMITTED / 4U];
         p->csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
     }
 }
@@ -69,6 +71,7 @@ static void setup_mock_platform(struct mock_platform *p, MiniGLRixPlatform *out)
 {
     memset(p, 0, sizeof(*p));
     memset(out, 0, sizeof(*out));
+    p->complete_submissions = 1;
     p->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     p->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     p->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
@@ -321,6 +324,29 @@ static void test_wire_v9_draw_routing_and_fallback(void)
     assert(minigl_raster_first_fallback_reason() == ZZ9K_MGL_FALLBACK_FOG);
     minigl_raster_reset_frame_counters();
 
+    /* A CPU fallback holds the hardware path until the actual wire frame
+     * boundary, not merely until the unsupported state is removed. */
+    mw_put_be32(fog_packet + 32, 0);
+    assert(mw_host_submit(c, fog_packet, fog_bytes) == MW_STATUS_OK);
+    sw_before = minigl_raster_draws_software();
+    assert(mw_host_submit(c, packet, packet_bytes) == MW_STATUS_OK);
+    assert(minigl_raster_draws_software() > sw_before);
+    {
+        uint8_t present_packet[24];
+        memset(present_packet, 0, sizeof(present_packet));
+        mw_put_be32(present_packet, MW_MAGIC);
+        mw_put_be32(present_packet + 4, MW_VERSION);
+        mw_put_be32(present_packet + 8, sizeof(present_packet));
+        mw_put_be32(present_packet + 12, 1);
+        mw_put_be32(present_packet + 16, MW_PRESENT);
+        assert(mw_host_submit(c, present_packet, sizeof(present_packet)) == MW_STATUS_OK);
+    }
+    {
+        uint32_t hw_before = minigl_raster_draws_hardware();
+        assert(mw_host_submit(c, packet, packet_bytes) == MW_STATUS_OK);
+        assert(minigl_raster_draws_hardware() > hw_before);
+    }
+
     /* Test forced CPU */
     c->state.force_cpu = 1;
     status = mw_host_submit(c, packet, packet_bytes);
@@ -330,6 +356,190 @@ static void test_wire_v9_draw_routing_and_fallback(void)
     minigl_raster_set_rix_platform(NULL);
 
     printf("PASS: test_wire_v9_draw_routing_and_fallback\n");
+}
+
+static void put_blit_request(uint8_t *request)
+{
+    memset(request, 0, 40U);
+    mw_put_be32(request, MW_BLIT);
+    mw_put_be32(request + 4, 8U); /* RGBFB_R8G8B8A8 */
+    mw_put_be32(request + 8, 8U);
+    mw_put_be32(request + 20, 1U);
+    mw_put_be32(request + 32, 2U);
+    mw_put_be32(request + 36, 2U);
+}
+
+static void assert_blit_pixels(mw_ctx *c, const uint8_t expected[16])
+{
+    uint8_t request[40];
+    uint8_t span[16];
+    uint32_t reply_bytes = 0U;
+
+    put_blit_request(request);
+    memset(span, 0, sizeof(span));
+    assert(mw_host_request(c, request, sizeof(request), span, sizeof(span),
+                           &reply_bytes) == MW_STATUS_OK);
+    assert(reply_bytes == sizeof(span));
+    assert(memcmp(span, expected, sizeof(span)) == 0);
+}
+
+static void test_cpu_present_orientation(void)
+{
+    static const uint8_t expected[16] = {
+        0xffU, 0x00U, 0x00U, 0xffU, 0x00U, 0xffU, 0x00U, 0xffU,
+        0x00U, 0x00U, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU
+    };
+    mw_ctx *c;
+
+    minigl_raster_set_rix_platform(NULL);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+    c->color_buffers[c->state.target.latest][0] = 0xff0000ffU;
+    c->color_buffers[c->state.target.latest][1] = 0x00ff00ffU;
+    c->color_buffers[c->state.target.latest][2] = 0x0000ffffU;
+    c->color_buffers[c->state.target.latest][3] = 0xffffffffU;
+    assert_blit_pixels(c, expected);
+    mw_host_destroy(c);
+    printf("PASS: test_cpu_present_orientation\n");
+}
+
+static void test_rasterix_rgb565_present_orientation(void)
+{
+    static const uint8_t expected[16] = {
+        0xffU, 0x00U, 0x00U, 0xffU, 0x00U, 0xffU, 0x00U, 0xffU,
+        0x00U, 0x00U, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU
+    };
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+    uint16_t *surface;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+    c->state.target.latest = c->state.target.back;
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    assert(minigl_raster_present_is_bottom_up());
+    surface = (uint16_t *)c->color_buffers[c->state.target.latest];
+    surface[0] = 0x001fU; /* RasterIX bottom row: blue, white. */
+    surface[1] = 0xffffU;
+    surface[2] = 0xf800U; /* RasterIX top row: red, green. */
+    surface[3] = 0x07e0U;
+    assert_blit_pixels(c, expected);
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_rasterix_rgb565_present_orientation\n");
+}
+
+static void test_backend_disable_cpu_rerender_present(void)
+{
+    static const uint8_t expected[16] = {
+        0xffU, 0x00U, 0x00U, 0xffU, 0x00U, 0xffU, 0x00U, 0xffU,
+        0x00U, 0x00U, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU
+    };
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+
+    setup_mock_platform(&s_mock, &platform);
+    s_mock.complete_submissions = 0;
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+    c->state.target.latest = c->state.target.back;
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    assert(!minigl_raster_prepare_present()); /* Timeout disables RasterIX. */
+    minigl_raster_clear(0x4000U, 0U, 0U); /* CPU re-renders the target. */
+    assert(!minigl_raster_present_is_rgb565());
+    assert(!minigl_raster_present_is_bottom_up());
+    c->color_buffers[c->state.target.latest][0] = 0xff0000ffU;
+    c->color_buffers[c->state.target.latest][1] = 0x00ff00ffU;
+    c->color_buffers[c->state.target.latest][2] = 0x0000ffffU;
+    c->color_buffers[c->state.target.latest][3] = 0xffffffffU;
+    assert_blit_pixels(c, expected);
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_backend_disable_cpu_rerender_present\n");
+}
+
+static uint32_t submit_single_command(mw_ctx *c, uint32_t opcode,
+                                      const uint8_t *payload, uint32_t payload_bytes)
+{
+    uint8_t packet[64];
+    uint32_t packet_bytes = 24U + payload_bytes;
+
+    assert(packet_bytes <= sizeof(packet));
+    memset(packet, 0, sizeof(packet));
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, packet_bytes);
+    mw_put_be32(packet + 12, 1U);
+    mw_put_be32(packet + 16, opcode);
+    mw_put_be32(packet + 20, payload_bytes);
+    if (payload_bytes != 0U)
+        memcpy(packet + 24, payload, payload_bytes);
+    return mw_host_submit(c, packet, packet_bytes);
+}
+
+static void test_wire_cpu_handoffs(void)
+{
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+    uint8_t upload[20] = { 0 };
+    uint8_t copy[40] = { 0 };
+    uint8_t target[24] = { 0 };
+    uint8_t draw_buffer[12] = { 0 };
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    mw_put_be32(upload + 8, 1U);
+    mw_put_be32(upload + 12, 1U);
+    upload[16] = 0x12U;
+    upload[17] = 0x34U;
+    upload[18] = 0x56U;
+    upload[19] = 0x78U;
+    assert(submit_single_command(c, MW_UPLOAD, upload, sizeof(upload)) == MW_STATUS_OK);
+    assert(!minigl_raster_present_is_rgb565());
+    assert(c->color_buffers[c->state.target.back][0] == 0x12345678U);
+
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    mw_put_be32(copy, 1U);
+    mw_put_be32(copy + 8, 0x1908U);
+    mw_put_be32(copy + 28, 1U);
+    mw_put_be32(copy + 32, 1U);
+    mw_put_be32(copy + 36, 1U);
+    assert(submit_single_command(c, MW_TEXTURE_COPY, copy, sizeof(copy)) == MW_STATUS_OK);
+    assert(!minigl_raster_present_is_rgb565());
+
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    mw_put_be32(target, 3U);
+    mw_put_be32(target + 4, 2U);
+    mw_put_be32(target + 8, 2U);
+    mw_put_be32(target + 12, 24U);
+    mw_put_be32(target + 16, 3U);
+    mw_put_be32(target + 20, 2U);
+    assert(submit_single_command(c, MW_TARGET, target, sizeof(target)) == MW_STATUS_OK);
+    assert(c->width == 3U && c->height == 2U);
+    assert(!minigl_raster_present_is_rgb565());
+
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    mw_put_be32(draw_buffer, MW_DRAW_BUFFER);
+    mw_put_be32(draw_buffer + 8, 0x404U);
+    assert(submit_single_command(c, MW_STATE, draw_buffer, sizeof(draw_buffer)) == MW_STATUS_OK);
+    assert(!minigl_raster_present_is_rgb565());
+
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_wire_cpu_handoffs\n");
 }
 
 /* 4. Watertight tessellated grid test */
@@ -421,6 +631,10 @@ int main(void)
     test_state_mapper_fallback_rules();
     test_texture_env_modes();
     test_wire_v9_draw_routing_and_fallback();
+    test_cpu_present_orientation();
+    test_rasterix_rgb565_present_orientation();
+    test_backend_disable_cpu_rerender_present();
+    test_wire_cpu_handoffs();
     test_watertight_tessellation();
     printf("ALL Wire-v9 RasterIX Mapper Tests PASSED!\n");
     return 0;

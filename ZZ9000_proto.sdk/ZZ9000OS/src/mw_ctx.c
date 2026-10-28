@@ -293,7 +293,7 @@ static inline void mw_ctx_update_latest(mw_ctx *c)
     }
 }
 
-static void mw_ctx_bind_buffers(mw_ctx *c)
+static int mw_ctx_bind_buffers(mw_ctx *c)
 {
     MiniGLRasterBuffers buffers;
     int draw_front;
@@ -313,7 +313,7 @@ static void mw_ctx_bind_buffers(mw_ctx *c)
     buffers.texture_pool_bytes = c->texture_pool_bytes;
     buffers.width = (uint16_t)c->width;
     buffers.height = (uint16_t)c->height;
-    (void)minigl_raster_configure_buffers(&buffers);
+    return minigl_raster_configure_buffers(&buffers);
 }
 
 static void mw_ctx_sync_to_raster(mw_ctx *c)
@@ -460,7 +460,10 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     mw_ctx_configure_rix(c);
     minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes,
                                    mw_ctx_grow_texture_pool, c);
-    mw_ctx_bind_buffers(c);
+    if (!mw_ctx_bind_buffers(c)) {
+        mw_host_destroy(c);
+        return NULL;
+    }
     minigl_raster_init();
     mw_ctx_sync_to_raster(c);
 
@@ -472,7 +475,8 @@ void mw_host_destroy(mw_ctx *c)
     int i;
     if (!c)
         return;
-    (void)minigl_raster_quiesce();
+    if (!minigl_raster_quiesce() && c->rix_enabled)
+        return;
     mw_ctx_release_rix(c);
 
     for (i = 0; i < 3; ++i) {
@@ -566,13 +570,34 @@ static int mw_execute_command(void *user, const mw_command *cmd)
         uint32_t pres_w = mw_be32(p + 16);
         uint32_t pres_h = mw_be32(p + 20);
         uint32_t *new_colors[3] = { NULL, NULL, NULL };
+        uint32_t *old_colors[3];
         uint8_t *new_depth = NULL;
+        uint8_t *old_depth;
         uint32_t new_color_addresses[3] = { 0U, 0U, 0U };
+        uint32_t old_color_addresses[3];
         uint32_t new_depth_address = 0U;
+        uint32_t old_depth_address;
+        uint32_t old_width = c->width;
+        uint32_t old_height = c->height;
+        uint32_t old_target_width = c->state.target.width;
+        uint32_t old_target_height = c->state.target.height;
+        uint32_t old_buffer_count = c->state.target.buffer_count;
+        int32_t old_viewport_x = c->state.viewport_x;
+        int32_t old_viewport_y = c->state.viewport_y;
+        uint32_t old_viewport_w = c->state.viewport_w;
+        uint32_t old_viewport_h = c->state.viewport_h;
+        int resize = w != c->width || h != c->height;
+        int rebind = resize || buf_count != c->state.target.buffer_count;
         int i;
 
-        if (w != c->width || h != c->height) {
+        if (rebind && !minigl_raster_finish()) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
+        if (resize) {
             for (i = 0; i < 3; ++i) {
+                old_colors[i] = c->color_buffers[i];
+                old_color_addresses[i] = c->color_buffer_addresses[i];
                 new_colors[i] = (uint32_t *)mw_context_alloc(
                     c, w * h * sizeof(*new_colors[i]), &new_color_addresses[i]);
                 if (!new_colors[i])
@@ -580,17 +605,16 @@ static int mw_execute_command(void *user, const mw_command *cmd)
                 for (size_t px = 0; px < (size_t)w * h; ++px)
                     new_colors[i][px] = 0x000000ffU;
             }
+            old_depth = c->depth_buffer;
+            old_depth_address = c->depth_buffer_address;
             new_depth = (uint8_t *)mw_context_alloc(
                 c, w * h * 4U, &new_depth_address);
             if (!new_depth)
                 goto target_allocation_failed;
             for (i = 0; i < 3; ++i) {
-                mw_context_free(c, c->color_buffers[i],
-                                &c->color_buffer_addresses[i]);
                 c->color_buffers[i] = new_colors[i];
                 c->color_buffer_addresses[i] = new_color_addresses[i];
             }
-            mw_context_free(c, c->depth_buffer, &c->depth_buffer_address);
             c->depth_buffer = new_depth;
             c->depth_buffer_address = new_depth_address;
             c->width = w;
@@ -601,13 +625,44 @@ static int mw_execute_command(void *user, const mw_command *cmd)
             c->state.viewport_y = 0;
             c->state.viewport_w = w;
             c->state.viewport_h = h;
-            mw_ctx_bind_buffers(c);
         }
         c->state.target.buffer_count = buf_count;
+        if (rebind && !mw_ctx_bind_buffers(c)) {
+            if (resize) {
+                for (i = 0; i < 3; ++i) {
+                    c->color_buffers[i] = old_colors[i];
+                    c->color_buffer_addresses[i] = old_color_addresses[i];
+                }
+                c->depth_buffer = old_depth;
+                c->depth_buffer_address = old_depth_address;
+                c->width = old_width;
+                c->height = old_height;
+                c->state.target.width = old_target_width;
+                c->state.target.height = old_target_height;
+                c->state.viewport_x = old_viewport_x;
+                c->state.viewport_y = old_viewport_y;
+                c->state.viewport_w = old_viewport_w;
+                c->state.viewport_h = old_viewport_h;
+            }
+            c->state.target.buffer_count = old_buffer_count;
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto target_rebind_failed;
+        }
+        if (resize) {
+            for (i = 0; i < 3; ++i)
+                mw_context_free(c, old_colors[i], &old_color_addresses[i]);
+            mw_context_free(c, old_depth, &old_depth_address);
+        }
         c->state.target.depth_bits = depth_bits;
         c->state.target.present_width = pres_w;
         c->state.target.present_height = pres_h;
         break;
+
+target_rebind_failed:
+        for (i = 0; i < 3; ++i)
+            mw_context_free(c, new_colors[i], &new_color_addresses[i]);
+        mw_context_free(c, new_depth, &new_depth_address);
+        goto command_complete;
 
 target_allocation_failed:
         for (i = 0; i < 3; ++i)
@@ -700,11 +755,29 @@ target_allocation_failed:
             }
             break;
         }
-        case MW_DRAW_BUFFER:
-            s->draw_buffer = mw_be32(v);
+        case MW_DRAW_BUFFER: {
+            uint32_t draw_buffer = mw_be32(v);
+            uint32_t old_draw_buffer = s->draw_buffer;
+            uint32_t old_latest = s->target.latest;
+            uint8_t old_presented_valid = c->presented_valid;
+
+            if (draw_buffer == old_draw_buffer)
+                break;
+            if (!minigl_raster_finish()) {
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
+            s->draw_buffer = draw_buffer;
             mw_ctx_update_latest(c);
-            mw_ctx_bind_buffers(c);
+            if (!mw_ctx_bind_buffers(c)) {
+                s->draw_buffer = old_draw_buffer;
+                s->target.latest = old_latest;
+                c->presented_valid = old_presented_valid;
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
             break;
+        }
         case MW_READ_BUFFER: s->read_buffer = mw_be32(v); break;
         case MW_DITHER: s->dither = (uint8_t)(mw_be32(v) != 0); break;
         case MW_POINT_SMOOTH: s->point_smooth = (uint8_t)(mw_be32(v) != 0); break;
@@ -904,6 +977,10 @@ target_allocation_failed:
             goto command_complete;
         }
 
+        if (!minigl_raster_finish()) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
         t = mw_texmgr_get_or_create(&c->texmgr, name);
         if (!t) {
             mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
@@ -1081,16 +1158,32 @@ target_allocation_failed:
         break;
     }
 
-    case MW_PRESENT:
+    case MW_PRESENT: {
+        uint32_t old_front = c->state.target.front;
+        uint32_t old_latest = c->state.target.latest;
+        uint32_t old_back = c->state.target.back;
+
+        if (!minigl_raster_finish()) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
         c->state.target.front = c->state.target.back;
         c->state.target.latest = c->state.target.front;
         c->state.target.back = (c->state.target.back + 1U) % c->state.target.buffer_count;
-        (void)minigl_raster_finish();
-        mw_ctx_bind_buffers(c);
+        if (!mw_ctx_bind_buffers(c)) {
+            c->state.target.front = old_front;
+            c->state.target.latest = old_latest;
+            c->state.target.back = old_back;
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
+        minigl_raster_frame_boundary();
         break;
+    }
 
     case MW_SYNC:
-        (void)minigl_raster_finish();
+        if (!minigl_raster_finish())
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
         break;
 
     case MW_UPLOAD: {
@@ -1099,8 +1192,8 @@ target_allocation_failed:
         uint32_t w = mw_be32(p + 8);
         uint32_t h = mw_be32(p + 12);
         const uint8_t *src_pixels = p + 16;
-        int draw_front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400) && (c->state.target.buffer_count > 1);
-        uint32_t *dst_buffer = c->color_buffers[draw_front ? c->state.target.front : c->state.target.back];
+        int draw_front;
+        uint32_t *dst_buffer;
         uint32_t r, col;
 
         if (x > c->width || w > c->width - x ||
@@ -1108,6 +1201,15 @@ target_allocation_failed:
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }
+
+        if (!minigl_raster_finish()) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
+        draw_front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400) &&
+                     c->state.target.buffer_count > 1;
+        dst_buffer = c->color_buffers[draw_front ? c->state.target.front :
+                                      c->state.target.back];
 
         for (r = 0; r < h; ++r) {
             const uint8_t *src_row = src_pixels + (size_t)r * w * 4;
@@ -1117,7 +1219,8 @@ target_allocation_failed:
                 uint8_t pg = src_row[col * 4 + 1];
                 uint8_t pb = src_row[col * 4 + 2];
                 uint8_t pa = src_row[col * 4 + 3];
-                dst_row[col] = ((uint32_t)pr << 24) | ((uint32_t)pg << 16) | ((uint32_t)pb << 8) | (uint32_t)pa;
+                dst_row[col] = ((uint32_t)pr << 24) | ((uint32_t)pg << 16) |
+                               ((uint32_t)pb << 8) | (uint32_t)pa;
             }
         }
         mw_ctx_update_latest(c);
@@ -1147,12 +1250,16 @@ uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
     if (status != MW_STATUS_OK)
         return status;
 
-    mw_ctx_bind_buffers(c);
+    if (!mw_ctx_bind_buffers(c)) {
+        mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+        return MW_STATUS_FAILED;
+    }
     mw_ctx_sync_to_raster(c);
 
     status = mw_parse_packet_report(packet, bytes, mw_execute_command, c,
                                     failed_opcode);
-    (void)minigl_raster_finish();
+    if (!minigl_raster_finish())
+        mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
     return status;
 }
 
@@ -1452,10 +1559,12 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
 
     const uint32_t *src_buf;
     int source_rgb565;
+    int source_bottom_up;
 
     if (!minigl_raster_prepare_present())
         return MW_STATUS_FAILED;
     source_rgb565 = minigl_raster_present_is_rgb565();
+    source_bottom_up = minigl_raster_present_is_bottom_up();
     src_buf = c->color_buffers[c->state.target.latest];
     if (!src_buf)
         return MW_STATUS_FAILED;
@@ -1505,6 +1614,8 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                             int64_t sx = (fx - bx0) * (int64_t)c->width / (bx1 - bx0);
                             int64_t sy = (fy - by0) * (int64_t)c->height / (by1 - by0);
                             if (sx >= 0 && sx < (int64_t)c->width && sy >= 0 && sy < (int64_t)c->height) {
+                                if (source_bottom_up)
+                                    sy = (int64_t)c->height - 1 - sy;
                                 pix = mw_present_source_pixel(src_buf, source_rgb565,
                                                               (size_t)sy * c->width + sx);
                             } else {
@@ -1514,8 +1625,9 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                             pix = 0x000000ffU;
                         }
                     } else {
+                        int64_t sy = source_bottom_up ? (int64_t)c->height - 1 - fy : fy;
                         pix = mw_present_source_pixel(src_buf, source_rgb565,
-                                                      (size_t)fy * c->width + fx);
+                                                      (size_t)sy * c->width + fx);
                     }
 
                     uint8_t p_col[4];
@@ -1588,7 +1700,8 @@ static uint32_t mw_capture(mw_ctx *c, const uint8_t *p, uint32_t bytes,
     if (status != MW_STATUS_OK)
         return status;
 
-    (void)minigl_raster_finish();
+    if (!minigl_raster_finish())
+        return MW_STATUS_FAILED;
 
     int scaled = (c->state.target.present_width != c->width || c->state.target.present_height != c->height);
     uint32_t frame_w = scaled ? c->state.target.present_width : c->width;
@@ -1751,7 +1864,8 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
             return MW_STATUS_OK;
         }
 
-        (void)minigl_raster_finish();
+        if (!minigl_raster_finish())
+            return MW_STATUS_FAILED;
 
         read_idx = c->state.target.back;
         /* GL semantics: a GL_FRONT read answers the front buffer -- the
@@ -1838,7 +1952,8 @@ uint32_t mw_host_readback_rgba8(mw_ctx *c, uint8_t *out, uint32_t capacity)
     if (capacity < req_bytes)
         return MW_STATUS_CAPACITY;
 
-    (void)minigl_raster_finish();
+    if (!minigl_raster_finish())
+        return MW_STATUS_FAILED;
     color_buffer = c->color_buffers[c->state.target.latest];
 
     /* Output top-row-first RGBA8 */

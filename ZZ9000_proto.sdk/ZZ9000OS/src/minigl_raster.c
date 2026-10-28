@@ -190,6 +190,13 @@ static uint32_t g_last_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
 static uint32_t g_logged_fallback_mask = 0U;
 static int g_context_backend_logged = 0;
 
+/* These track ownership independently of backend fail-stop, which clears its
+ * own surface flag before the CPU can safely recover the target. */
+static uint32_t *g_rix_surface;
+static int g_rix_surface_rgb565;
+static int g_rix_depth_z16;
+static MiniGLRasterRixDiagnostics g_rix_diagnostics;
+
 /* A CPU fallback drains and converts the whole shared target.  Finish that
  * hand-off once, then keep the frame on CPU; bouncing after every primitive
  * would cost a full target READ/format conversion per draw. */
@@ -317,7 +324,12 @@ void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes,
 void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
 {
     if (platform == NULL) {
+        /* Do not retain callbacks or card-pool addresses owned by a destroyed
+         * context.  A surviving context must explicitly register its platform
+         * again before it can use RasterIX. */
+        minigl_rix_backend_init(&g_rix, NULL);
         memset(&g_rix_platform, 0, sizeof(g_rix_platform));
+        memset(&g_rix_diagnostics, 0, sizeof(g_rix_diagnostics));
         g_rix_platform_set = 0;
         return;
     }
@@ -325,12 +337,106 @@ void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
     g_rix_platform_set = 1;
 }
 
+static int rix_target_is_rgb565(void)
+{
+    return g_rix_surface_rgb565 && g_rix_surface == g_buffers.color;
+}
+
+static int rix_prepare_depth(void)
+{
+    size_t index;
+    uint8_t *depth = g_buffers.depth;
+
+    if (g_rix_depth_z16)
+        return 1;
+    if (g_depth_bits == 16U) {
+        for (index = 0U; index < pixels(); ++index) {
+            uint8_t high = depth[index * 2U];
+
+            depth[index * 2U] = depth[index * 2U + 1U];
+            depth[index * 2U + 1U] = high;
+        }
+    } else {
+        for (index = 0U; index < pixels(); ++index) {
+            uint32_t value = ((uint32_t)depth[index * 3U] << 16U) |
+                             ((uint32_t)depth[index * 3U + 1U] << 8U) |
+                             depth[index * 3U + 2U];
+            uint16_t z16 = (uint16_t)(value >> 8U);
+
+            depth[index * 2U] = (uint8_t)z16;
+            depth[index * 2U + 1U] = (uint8_t)(z16 >> 8U);
+        }
+    }
+    if (g_rix.platform.cache_clean != NULL)
+        g_rix.platform.cache_clean(g_rix.platform.context, (uintptr_t)depth,
+                                   pixels() * 2U);
+    g_rix_depth_z16 = 1;
+    return 1;
+}
+
+static int rix_make_cpu_depth_visible(void)
+{
+    size_t index;
+    uint8_t *depth = g_buffers.depth;
+
+    if (!g_rix_depth_z16)
+        return 1;
+    if (g_rix.platform.cache_invalidate != NULL)
+        g_rix.platform.cache_invalidate(g_rix.platform.context, (uintptr_t)depth,
+                                        pixels() * 2U);
+    if (g_depth_bits == 16U) {
+        for (index = 0U; index < pixels(); ++index) {
+            uint8_t low = depth[index * 2U];
+
+            depth[index * 2U] = depth[index * 2U + 1U];
+            depth[index * 2U + 1U] = low;
+        }
+    } else {
+        for (index = pixels(); index != 0U; --index) {
+            uint16_t z16 = (uint16_t)depth[(index - 1U) * 2U] |
+                           (uint16_t)((uint16_t)depth[(index - 1U) * 2U + 1U] << 8U);
+            uint32_t value = (uint32_t)z16 << 8U;
+
+            depth[(index - 1U) * 3U] = (uint8_t)(value >> 16U);
+            depth[(index - 1U) * 3U + 1U] = (uint8_t)(value >> 8U);
+            depth[(index - 1U) * 3U + 2U] = (uint8_t)value;
+        }
+    }
+    g_rix_depth_z16 = 0;
+    return 1;
+}
+
+static int rix_prepare_target(void)
+{
+    if (!minigl_rix_backend_prepare_target(&g_rix, g_buffers.color, pixels()) ||
+        !rix_prepare_depth())
+        return 0;
+    g_rix_surface = g_buffers.color;
+    g_rix_surface_rgb565 = 1;
+    return 1;
+}
+
+static int rix_make_cpu_visible(void)
+{
+    if (!rix_target_is_rgb565())
+        return 1;
+    if (!minigl_rix_backend_surface_is_rgb565(&g_rix) ||
+        !minigl_rix_backend_make_cpu_visible(&g_rix, g_buffers.color, pixels()) ||
+        !rix_make_cpu_depth_visible())
+        return 0;
+    g_rix_surface_rgb565 = 0;
+    return 1;
+}
+
 int minigl_raster_prepare_present(void)
 {
-    if (!ready() || !minigl_rix_backend_drain(&g_rix))
+    if (!ready())
         return 0;
-    if (minigl_rix_backend_surface_is_rgb565(&g_rix) &&
-        g_rix.platform.cache_invalidate != NULL)
+    if (!rix_target_is_rgb565())
+        return 1;
+    if (!minigl_rix_backend_drain(&g_rix))
+        return 0;
+    if (g_rix.platform.cache_invalidate != NULL)
         g_rix.platform.cache_invalidate(g_rix.platform.context, (uintptr_t)g_buffers.color,
                                         pixels() * 2U);
     return 1;
@@ -338,14 +444,25 @@ int minigl_raster_prepare_present(void)
 
 int minigl_raster_present_is_rgb565(void)
 {
-    return minigl_rix_backend_surface_is_rgb565(&g_rix);
+    return rix_target_is_rgb565();
+}
+
+void minigl_raster_frame_boundary(void)
+{
+    g_rix_cpu_fallbacks = 0U;
+    g_rix_cpu_frame = 0;
+}
+
+int minigl_raster_present_is_bottom_up(void)
+{
+    return rix_target_is_rgb565();
 }
 
 int minigl_raster_finish(void)
 {
     if (!ready())
         return 0;
-    if (!minigl_rix_backend_make_cpu_visible(&g_rix, g_buffers.color, pixels())) {
+    if (!rix_make_cpu_visible()) {
         g_error |= RASTER_ERR_MEMORY;
         return 0;
     }
@@ -356,8 +473,10 @@ int minigl_raster_quiesce(void)
 {
     int result = minigl_raster_finish();
 
-    minigl_rix_backend_reset(&g_rix);
-    minigl_raster_set_rix_platform(NULL);
+    if (result) {
+        minigl_rix_backend_reset(&g_rix);
+        minigl_raster_set_rix_platform(NULL);
+    }
     return result;
 }
 
@@ -428,13 +547,24 @@ int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers)
         g_error |= RASTER_ERR_MEMORY;
         return 0;
     }
+    if (g_buffers.color != NULL && g_buffers.color != buffers->color &&
+        !minigl_raster_finish())
+        return 0;
     g_buffers = *buffers;
+    if (g_rix_surface != g_buffers.color) {
+        g_rix_surface = NULL;
+        g_rix_surface_rgb565 = 0;
+        g_rix_depth_z16 = 0;
+    }
     return 1;
 }
 
 void minigl_raster_release_buffers(void)
 {
     memset(&g_buffers, 0, sizeof(g_buffers));
+    g_rix_surface = NULL;
+    g_rix_surface_rgb565 = 0;
+    g_rix_depth_z16 = 0;
     memset(g_textures, 0, sizeof(g_textures));
     memset(&g_default_texture, 0, sizeof(g_default_texture));
     g_texture_allocations = NULL;
@@ -2476,6 +2606,8 @@ void minigl_raster_init(void)
         return;
     }
     minigl_rix_backend_init(&g_rix, g_rix_platform_set ? &g_rix_platform : NULL);
+    memset(&g_rix_diagnostics, 0, sizeof(g_rix_diagnostics));
+    g_rix_depth_z16 = 0;
     for (index = 0U; index < 4U; ++index)
         identity(g_matrix[index]);
     update_mvp();
@@ -2529,7 +2661,7 @@ void minigl_raster_clear(uint32_t mask, uint32_t color, uint32_t depth)
         minigl_rix_backend_log_context_backend(&g_rix);
     }
     if (minigl_rix_backend_available(&g_rix) &&
-        minigl_rix_backend_prepare_target(&g_rix, g_buffers.color, pixels()) &&
+        rix_prepare_target() &&
         minigl_rix_backend_clear(&g_rix, g_buffers.width, g_buffers.height,
                                  (uintptr_t)g_buffers.color, (uintptr_t)g_buffers.depth,
                                  mask, color, depth)) {
@@ -2933,16 +3065,24 @@ static int rix_mode_supported(uint16_t mode)
            mode == GL_TRIANGLE_FAN || mode == GL_QUADS ||
            mode == GL_QUAD_STRIP || mode == GL_POLYGON;
 }
+static int rix_begin_draw(void)
+{
+    if (!minigl_rix_backend_begin_draw(&g_rix, g_buffers.width, g_buffers.height,
+                                       (uintptr_t)g_buffers.color,
+                                       (uintptr_t)g_buffers.depth))
+        return 0;
+    if (rix_prepare_target())
+        return 1;
+    minigl_rix_backend_abort_draw(&g_rix);
+    return 0;
+}
+
 
 static int rix_draw(uint16_t mode, uint16_t stride, uint32_t base,
                     const uint8_t *indices, uint32_t first, uint32_t count)
 {
-    if (g_rix_cpu_frame || !rix_mode_supported(mode) ||
-        !minigl_rix_backend_begin_draw(&g_rix, g_buffers.width, g_buffers.height,
-                                       (uintptr_t)g_buffers.color, (uintptr_t)g_buffers.depth) ||
-        !minigl_rix_backend_prepare_target(&g_rix, g_buffers.color, pixels())) {
+    if (g_rix_cpu_frame || !rix_mode_supported(mode) || !rix_begin_draw())
         return 0;
-    }
     g_rix_collecting = 1;
     assemble(mode, stride, base, indices, first, count);
     if (g_rix_collecting > 0 &&
@@ -2952,8 +3092,8 @@ static int rix_draw(uint16_t mode, uint16_t stride, uint32_t base,
         mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
         return 1;
     }
+    minigl_rix_backend_abort_draw(&g_rix);
     g_rix_collecting = 0;
-    (void)minigl_rix_backend_make_cpu_visible(&g_rix, g_buffers.color, pixels());
     return 0;
 }
 
@@ -3078,9 +3218,16 @@ int minigl_raster_get_rix_diagnostics(MiniGLRasterRixDiagnostics *out)
 {
     if (!out)
         return 0;
-    memset(out, 0, sizeof(*out));
     if (!g_rix.available)
         return 0;
+    if (g_rix.error) {
+        *out = g_rix_diagnostics;
+        out->active = 0U;
+        out->last_fence = g_rix.driver.submitted_target;
+        out->status = g_rix.driver.last_status;
+        return 1;
+    }
+    memset(out, 0, sizeof(*out));
     out->active = (uint8_t)minigl_rix_backend_available(&g_rix);
     out->last_fence = g_rix.driver.submitted_target;
     out->status = g_rix.platform.csr_read ?
@@ -3088,6 +3235,7 @@ int minigl_raster_get_rix_diagnostics(MiniGLRasterRixDiagnostics *out)
         g_rix.driver.last_status;
     out->completed_fence = g_rix.platform.csr_read ?
         g_rix.platform.csr_read(g_rix.platform.context, RIX_DRV_CSR_COMPLETED) : 0U;
+    g_rix_diagnostics = *out;
     return 1;
 }
 
@@ -3621,10 +3769,7 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
     }
 
     if (!g_rix_cpu_frame && style == 0U && rix_mode_supported(mode) &&
-        minigl_rix_backend_available(&g_rix) &&
-        minigl_rix_backend_begin_draw(&g_rix, g_buffers.width, g_buffers.height,
-                                      (uintptr_t)g_buffers.color, (uintptr_t)g_buffers.depth) &&
-        minigl_rix_backend_prepare_target(&g_rix, g_buffers.color, pixels())) {
+        minigl_rix_backend_available(&g_rix) && rix_begin_draw()) {
 
         g_rix_collecting = 1;
         assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
@@ -3636,8 +3781,8 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
             mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
             return;
         }
+        minigl_rix_backend_abort_draw(&g_rix);
         g_rix_collecting = 0;
-        (void)minigl_rix_backend_make_cpu_visible(&g_rix, g_buffers.color, pixels());
     }
 
     /* Fallback to software rasterizer */
@@ -3652,7 +3797,8 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
     }
     if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
         g_rix_cpu_frame = 1;
-    (void)minigl_raster_finish();
+    if (!minigl_raster_finish())
+        return;
     g_rix_collecting = 0;
     assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
 }
