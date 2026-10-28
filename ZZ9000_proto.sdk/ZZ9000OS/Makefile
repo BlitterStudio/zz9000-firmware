@@ -310,6 +310,21 @@ TARGET = $(BUILD_DIR)/ZZ9000OS.elf
 FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 
+# The two bitstream flavors compile common source with different preprocessor
+# inputs.  One stable stamp forces every source object to rebuild whenever the
+# requested flavor changes, while preserving incremental builds of one flavor.
+BUILD_CONFIG_STAMP = $(BUILD_DIR)/.minigl-rasterix
+
+$(BUILD_CONFIG_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@if test ! -f "$@" || test "$$(cat "$@")" != "$(MINIGL_RASTERIX)"; then \
+		printf '%s\n' "$(MINIGL_RASTERIX)" > "$@"; \
+	fi
+
+$(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS)) \
+$(BSP_SDPS_OBJ) $(BSP_SDPSOPT_OBJ) $(BSP_DISKIO_OBJ) \
+$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP)
+
 .DEFAULT_GOAL := all
 
 include modules/module.mk
