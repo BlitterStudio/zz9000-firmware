@@ -545,10 +545,8 @@ target_allocation_failed:
         }
         case MW_DRAW_BUFFER: {
             uint32_t draw_buffer = mw_be32(v);
-            uint32_t old_draw_buffer = s->draw_buffer;
-            uint32_t old_latest = s->target.latest;
 
-            if (draw_buffer == old_draw_buffer)
+            if (draw_buffer == s->draw_buffer)
                 break;
             if (!minigl_raster_finish()) {
                 mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
@@ -556,13 +554,9 @@ target_allocation_failed:
             }
             s->draw_buffer = draw_buffer;
             mw_ctx_update_latest(c);
-            if (!mw_ctx_bind_buffers(c)) {
-                s->draw_buffer = old_draw_buffer;
-                s->target.latest = old_latest;
-                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
-                goto command_complete;
-            }
+            mw_ctx_bind_buffers(c);
             break;
+        }
         case MW_READ_BUFFER: s->read_buffer = mw_be32(v); break;
         case MW_DITHER: s->dither = (uint8_t)(mw_be32(v) != 0); break;
         case MW_POINT_SMOOTH: s->point_smooth = (uint8_t)(mw_be32(v) != 0); break;
