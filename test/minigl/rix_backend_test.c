@@ -19,7 +19,10 @@ static void count_log(const char *fmt, ...)
         ++g_timeout_snapshots;
 }
 
-#define COMMAND_BYTES (256U * 1024U)
+#define COMMAND_BYTES MINIGL_RIX_COMMAND_BYTES
+#define FIFO_CAPACITY 508U
+#define FIFO_PACKET_WORDS (RIX_DRV_FIFO_PACKET_WORDS + 2U)
+#define COMMAND_WORDS ((COMMAND_BYTES - MINIGL_RIX_TEXTURE_PAGE_BYTES) / sizeof(uint32_t))
 #define TEXTURE_SLOTS 4U
 #define GL_NEAREST 0x2600U
 #define GL_LINEAR 0x2601U
@@ -35,14 +38,22 @@ static void count_log(const char *fmt, ...)
 
 struct model {
     uint32_t csr[64];
+    uint32_t fifo[6];
+    uint32_t packet[FIFO_PACKET_WORDS];
     uint8_t command[2][COMMAND_BYTES];
     uint8_t white[2048];
     uint8_t textures[TEXTURE_SLOTS * MINIGL_RIX_TEXTURE_VIRTUAL_BYTES];
     size_t texture_bytes;
+    uintptr_t command_address[2];
+    uint32_t color_address;
+    uint32_t clear_color;
     unsigned csr_reads;
+    unsigned fifo_words;
+    unsigned packet_count;
     unsigned cleans;
     unsigned invalidates;
-    unsigned complete_submissions;
+    unsigned complete_packets;
+    uint32_t fifo_vacancy;
     uintptr_t cleaned_address;
     size_t cleaned_bytes;
     uintptr_t invalidated_address;
@@ -50,26 +61,112 @@ struct model {
     unsigned texture_pool_grows;
 };
 
+static uint16_t rgba_to_rgb565(uint32_t rgba)
+{
+    return (uint16_t)(((rgba >> 27U) << 11U) |
+                      ((rgba >> 18U & 63U) << 5U) |
+                      (rgba >> 11U & 31U));
+}
+
+static void render_packet(struct model *model)
+{
+    size_t word = 2U;
+
+    while (word < model->fifo_words) {
+        uint32_t command = model->packet[word++];
+        uint32_t command_words = 1U;
+
+        switch (command >> 28U) {
+        case 1U:
+            assert(word < model->fifo_words);
+            if ((command & 0xffU) == RIX_REG_COLOR_BUFFER_ADDR)
+                model->color_address = model->packet[word];
+            else if ((command & 0xffU) == RIX_REG_CLEAR_COLOR)
+                model->clear_color = model->packet[word];
+            command_words = 2U;
+            break;
+        case 2U:
+            if ((command & (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR)) ==
+                (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR) &&
+                model->complete_packets != 0U) {
+                size_t index;
+
+                for (index = 0U; index < 2U; ++index)
+                    if (model->color_address ==
+                        model->command_address[index] + COMMAND_BYTES -
+                        MINIGL_RIX_TEXTURE_PAGE_BYTES)
+                        *(uint16_t *)(void *)(model->command[index] +
+                            COMMAND_BYTES - MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+                            rgba_to_rgb565(model->clear_color);
+            }
+            break;
+        case 3U:
+            command_words += (command & 0x3ffU) / sizeof(uint32_t);
+            break;
+        case 4U:
+            command_words = 65U;
+            break;
+        case 5U:
+            command_words += command & 0x7ffffU;
+            break;
+        default:
+            break;
+        }
+        assert(command_words <= model->fifo_words - word + 1U);
+        word += command_words - 1U;
+    }
+}
+
+static uint32_t fifo_read(void *context, uint32_t offset)
+{
+    struct model *model = context;
+
+    if (offset == RIX_DRV_FIFO_TDFV)
+        return model->fifo_vacancy;
+    return model->fifo[offset / sizeof(uint32_t)];
+}
+
+static void fifo_write(void *context, uint32_t offset, uint32_t value)
+{
+    struct model *model = context;
+
+    model->fifo[offset / sizeof(uint32_t)] = value;
+    if (offset == RIX_DRV_FIFO_TDFR) {
+        assert(value == RIX_DRV_FIFO_RESET_KEY);
+        model->fifo_words = 0U;
+        model->fifo_vacancy = FIFO_CAPACITY;
+    } else if (offset == RIX_DRV_FIFO_TDFD) {
+        assert(model->fifo_vacancy != 0U);
+        assert(model->fifo_words < FIFO_PACKET_WORDS);
+        model->packet[model->fifo_words++] = value;
+        --model->fifo_vacancy;
+    } else if (offset == RIX_DRV_FIFO_TLF) {
+        assert(model->fifo_words >= 2U);
+        assert(value == model->fifo_words * sizeof(uint32_t));
+        assert(model->packet[0] == (0x90000000U |
+                                    (model->fifo_words - 2U) * sizeof(uint32_t)));
+        assert(model->packet[1] == 0U);
+        render_packet(model);
+        ++model->packet_count;
+        model->fifo_words = 0U;
+        model->fifo_vacancy = FIFO_CAPACITY;
+    }
+}
 static uint32_t csr_read(void *context, uint32_t offset)
 {
     struct model *model = context;
 
     ++model->csr_reads;
-    return model->csr[offset / 4U];
+    return model->csr[offset / sizeof(uint32_t)];
 }
 
 static void csr_write(void *context, uint32_t offset, uint32_t value)
 {
     struct model *model = context;
 
-    model->csr[offset / 4U] = value;
-    if (offset == RIX_DRV_CSR_CMD_START && value != 0U) {
-        ++model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
-        if (model->complete_submissions != 0U)
-            model->csr[RIX_DRV_CSR_COMPLETED / 4U] =
-                model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
-    }
+    model->csr[offset / sizeof(uint32_t)] = value;
 }
+
 
 static void cache_clean(void *context, uintptr_t address, size_t bytes)
 {
@@ -114,10 +211,14 @@ static MiniGLRixPlatform platform(struct model *model)
     value.context = model;
     value.csr_read = csr_read;
     value.csr_write = csr_write;
+    value.fifo_read = fifo_read;
+    value.fifo_write = fifo_write;
     value.command_buffer[0] = model->command[0];
     value.command_buffer[1] = model->command[1];
-    value.command_address[0] = 0x01000000U;
-    value.command_address[1] = 0x01040000U;
+    model->command_address[0] = 0x01000000U;
+    model->command_address[1] = model->command_address[0] + COMMAND_BYTES;
+    value.command_address[0] = model->command_address[0];
+    value.command_address[1] = model->command_address[1];
     value.command_capacity = COMMAND_BYTES;
     value.white_texture = model->white;
     value.white_texture_address = 0x02000000U;
@@ -161,11 +262,11 @@ static void init_backend(MiniGLRixBackend *backend, struct model *model,
 
     memset(model, 0, sizeof(*model));
     model->texture_bytes = pages * MINIGL_RIX_TEXTURE_PAGE_BYTES;
-    model->complete_submissions = 1U;
+    model->complete_packets = 1U;
+    model->fifo_vacancy = FIFO_CAPACITY;
     model->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     model->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
-    model->csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
     io = platform(model);
     minigl_rix_backend_init(backend, &io);
     assert(minigl_rix_backend_available(backend));
@@ -234,7 +335,7 @@ static void test_mip_layout_and_filtering(void)
                                   0x2901U, 0x2901U);
     assert(submit_texture(&backend, 7U));
     assert(minigl_rix_backend_drain(&backend));
-    for (word = 2U; word < COMMAND_BYTES / sizeof(uint32_t); ++word) {
+    for (word = 0U; word < COMMAND_WORDS; ++word) {
         uint32_t *command = (uint32_t *)model.command[backend.current_buffer];
 
         if (command[word] == (RIX_OP_TEXTURE_STREAM | backend.textures[0].page_count))
@@ -344,7 +445,7 @@ static void test_recorded_frame_replay(void)
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_drain(&backend));
     command = (uint32_t *)model.command[0];
-    for (word = 2U; word < 2U + (command[0] - 0x90000000U) / sizeof(uint32_t); ++word) {
+    for (word = 0U; word < COMMAND_WORDS; ++word) {
         if ((command[word] & 0xf0000000U) != RIX_OP_FRAMEBUFFER)
             continue;
         if (command[word] & RIX_FRAMEBUFFER_READ)
@@ -364,7 +465,7 @@ static void test_recorded_frame_replay(void)
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_drain(&backend));
     command = (uint32_t *)model.command[1];
-    for (word = 2U; word < 2U + (command[0] - 0x90000000U) / sizeof(uint32_t); ++word)
+    for (word = 0U; word < COMMAND_WORDS; ++word)
         if ((command[word] & 0xf0000000U) == RIX_OP_FRAMEBUFFER &&
             (command[word] & RIX_FRAMEBUFFER_READ) != 0U)
             ++reads;
@@ -387,7 +488,7 @@ static void test_clear_preserves_depth_feature(void)
                                     0x102030ffU, 0xffffffffU));
     assert(minigl_rix_backend_drain(&backend));
     command = (uint32_t *)model.command[0];
-    for (word = 2U; word < 2U + (command[0] - 0x90000000U) / sizeof(uint32_t); ++word)
+    for (word = 0U; word < COMMAND_WORDS; ++word)
         if (command[word] == (RIX_OP_RENDER_CONFIG | RIX_REG_FEATURE_ENABLE))
             assert(command[word + 1U] == (RIX_FEATURE_TMU0 | RIX_FEATURE_DEPTH));
 }
@@ -409,7 +510,7 @@ static void test_overflow_splits_with_reload(void)
         assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_drain(&backend));
-    assert(model.csr[RIX_DRV_CSR_SUBMITTED / 4U] >= 2U);
+    assert(model.packet_count >= 2U);
 }
 static void test_depth_mapping_and_ordering(void)
 {
@@ -539,7 +640,7 @@ static void test_timeout_diagnostics(void)
     MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
 
     init_backend(&backend, &model, TEXTURE_SLOTS);
-    model.complete_submissions = 0U;
+    model.complete_packets = 0U;
     g_timeout_snapshots = 0U;
     g_rix_test_log = count_log;
     minigl_rix_backend_set_state(&backend, &state);
@@ -551,7 +652,8 @@ static void test_timeout_diagnostics(void)
     assert(model.invalidates == 1U);
     assert(model.invalidated_address == (uintptr_t)model.command[0]);
     assert(model.invalidated_bytes == 16U * sizeof(uint32_t));
-    assert(((uint32_t *)model.command[0])[0] > 0x90000000U);
+    assert((((uint32_t *)model.command[0])[0] & 0xf0000000U) ==
+           RIX_OP_RENDER_CONFIG);
     g_rix_test_log = NULL;
 }
 
@@ -631,8 +733,7 @@ static void test_zero_fence_remains_pending(void)
     MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
 
     init_backend(&backend, &model, TEXTURE_SLOTS);
-    model.csr[RIX_DRV_CSR_SUBMITTED / 4U] = UINT32_MAX;
-    model.csr[RIX_DRV_CSR_COMPLETED / 4U] = UINT32_MAX;
+    backend.driver.submitted_target = UINT32_MAX;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
@@ -656,7 +757,7 @@ static void test_abort_draw_rolls_back_recording(void)
     assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
     minigl_rix_backend_abort_draw(&backend);
     assert(!backend.collecting && backend.op_count == 0U && backend.triangle_count == 0U);
-    assert(backend.command_words_estimate == 2U + (size_t)backend.bands.count * 10U);
+    assert(backend.command_words_estimate == 12U);
     assert(minigl_rix_backend_drain(&backend));
 }
 
@@ -671,7 +772,7 @@ static void test_disabled_backend_is_one_shot(void)
     unsigned reads_after_disable;
 
     init_backend(&backend, &model, TEXTURE_SLOTS);
-    model.complete_submissions = 0U;
+    model.complete_packets = 0U;
     g_disabled_logs = 0U;
     g_rix_test_log = count_log;
     minigl_rix_backend_set_state(&backend, &state);
@@ -730,7 +831,7 @@ static void test_two_texture_multipass_recording(void)
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_drain(&backend));
     command = (uint32_t *)model.command[0];
-    for (word = 2U; word < 2U + (command[0] - 0x90000000U) / sizeof(uint32_t); ++word)
+    for (word = 0U; word < COMMAND_WORDS; ++word)
         if (command[word] == (RIX_OP_TRIANGLE_STREAM | RIX_TRIANGLE_WORDS * 4U))
             ++triangles;
     assert(triangles == 2U);
@@ -764,8 +865,8 @@ int main(void)
     model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
-    model.csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
-    model.complete_submissions = 1U;
+    model.fifo_vacancy = FIFO_CAPACITY;
+    model.complete_packets = 1U;
     minigl_rix_backend_init(&backend, &io);
     assert(minigl_rix_backend_available(&backend));
     assert(model.white[0] == 0xffU && model.white[1] == 0xffU);
@@ -776,8 +877,11 @@ int main(void)
     assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_drain(&backend));
-    assert(((uint32_t *)model.command[0])[0] > 0x90000000U);
-    assert(model.csr[RIX_DRV_CSR_SUBMITTED / 4U] == 1U);
+    assert((((uint32_t *)model.command[0])[0] & 0xf0000000U) ==
+           RIX_OP_RENDER_CONFIG);
+    assert(model.packet_count >= 1U);
+    assert(*(uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES) == 1U);
     {
         uint32_t surface[64U * 64U];
 

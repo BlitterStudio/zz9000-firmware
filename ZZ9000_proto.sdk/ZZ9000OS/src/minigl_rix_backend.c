@@ -803,15 +803,37 @@ static void backend_disable(MiniGLRixBackend *backend, const char *operation, in
     backend->surface_rgb565 = 0U;
 }
 
+static volatile uint16_t *backend_fence_pixel(MiniGLRixBackend *backend, uint8_t index)
+{
+    return (volatile uint16_t *)(backend->platform.command_buffer[index] +
+                                 backend->platform.command_capacity -
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES);
+}
+
 static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
 {
+    volatile uint16_t *pixel;
+    uint32_t attempt = 0U;
     int result;
 
     if (backend->error)
         return 0;
     if (!backend->pending[index])
         return 1;
-    result = rix_drv_poll(&backend->driver, backend->pending_fence[index], RIX_TIMEOUT);
+    pixel = backend_fence_pixel(backend, index);
+    for (;;) {
+        if (backend->platform.cache_invalidate != NULL)
+            backend->platform.cache_invalidate(backend->platform.context,
+                                               (uintptr_t)pixel, sizeof(*pixel));
+        if (*pixel == (uint16_t)backend->pending_fence[index])
+            break;
+        if (attempt++ >= RIX_TIMEOUT) {
+            backend_log_timeout_diagnostics(backend, index);
+            backend_disable(backend, "fence", RIX_DRV_TIMEOUT);
+            return 0;
+        }
+    }
+    result = rix_drv_poll(&backend->driver, RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
         if (result == RIX_DRV_TIMEOUT)
             backend_log_timeout_diagnostics(backend, index);
@@ -898,40 +920,66 @@ static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
         pages[0] = (uint32_t)backend->platform.white_texture_address;
         page_count = 1U;
     }
-    if (pages[0] == 0U || !rix_cmd_feature_enable(writer, features) ||
-        !rix_cmd_fragment_state(writer, &fragment) ||
-        !rix_cmd_texture_state(writer, 0U, &texture) ||
-        !rix_cmd_tex_env(writer, 0U, &environment) ||
-        !rix_cmd_tex_env_color(writer, 0U, state.tex_env_color[0]) ||
-        !rix_cmd_texture_pages(writer, 0U, pages, page_count))
-        return 0;
-    return 1;
+    return pages[0] != 0U && rix_cmd_feature_enable(writer, features) &&
+           rix_cmd_fragment_state(writer, &fragment) &&
+           rix_cmd_texture_state(writer, 0U, &texture) &&
+           rix_cmd_tex_env(writer, 0U, &environment) &&
+           rix_cmd_tex_env_color(writer, 0U, state.tex_env_color[0]) &&
+           rix_cmd_texture_pages(writer, 0U, pages, page_count);
 }
 
-static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer)
+static uint32_t backend_fence_rgba(uint16_t value)
+{
+    uint32_t red = (value >> 11U) & 31U;
+    uint32_t green = (value >> 5U) & 63U;
+    uint32_t blue = value & 31U;
+
+    return (((red << 3U) | (red >> 2U)) << 24U) |
+           (((green << 2U) | (green >> 4U)) << 16U) |
+           (((blue << 3U) | (blue >> 2U)) << 8U) | 0xffU;
+}
+
+static int backend_emit_fence(MiniGLRixBackend *backend, RixCmdWriter *writer,
+                              uint8_t index, uint16_t value)
+{
+    RixFragmentState fragment;
+    uint32_t address = (uint32_t)(backend->platform.command_address[index] +
+                                  backend->platform.command_capacity -
+                                  MINIGL_RIX_TEXTURE_PAGE_BYTES);
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.color_mask_r = fragment.color_mask_g = 1U;
+    fragment.color_mask_b = fragment.color_mask_a = 1U;
+    return (address & (MINIGL_RIX_TEXTURE_PAGE_BYTES - 1U)) == 0U &&
+           rix_cmd_feature_enable(writer, 0U) &&
+           rix_cmd_fragment_state(writer, &fragment) &&
+           rix_cmd_resolution(writer, 64U, 1U) &&
+           rix_cmd_buffer_address(writer, RIX_REG_COLOR_BUFFER_ADDR, address) &&
+           rix_cmd_clear_color(writer, backend_fence_rgba(value)) &&
+           rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET |
+                               RIX_FRAMEBUFFER_COLOR, 1U);
+}
+
+static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer,
+                          uint16_t fence)
 {
     uint8_t index = backend->current_buffer;
     uint8_t *buffer = backend->platform.command_buffer[index];
-    uint32_t raw_bytes;
     uint32_t command_words;
     int result;
 
     if (backend->error || writer->failed || writer->length == 0U ||
-        writer->length > 0x00ffffffU ||
-        buffer == NULL || backend->platform.command_address[index] == 0U) {
+        buffer == NULL || backend->platform.command_address[index] == 0U)
         return 0;
-    }
-    raw_bytes = (uint32_t)writer->length;
-    command_words = (raw_bytes + 8U) / 4U;
-    ((uint32_t *)buffer)[0] = 0x90000000U | raw_bytes;
-    ((uint32_t *)buffer)[1] = 0U;
-    result = rix_drv_submit(&backend->driver, backend->platform.command_address[index],
+    command_words = (uint32_t)(writer->length / sizeof(uint32_t));
+    result = rix_drv_submit(&backend->driver, (const uint32_t *)buffer,
+                            backend->platform.command_address[index],
                             command_words, RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
         backend_disable(backend, "submit", result);
         return 0;
     }
-    backend->pending_fence[index] = backend->driver.submitted_target;
+    backend->pending_fence[index] = fence;
     backend->pending[index] = 1U;
     backend->submitted_command_words[index] = command_words;
     memcpy(backend->pending_pins[index], backend->recorded_pins,
@@ -949,7 +997,8 @@ int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform)
     uint32_t csr_ver;
 
     if (platform == NULL || platform->csr_read == NULL ||
-        platform->csr_write == NULL) {
+        platform->csr_write == NULL || platform->fifo_read == NULL ||
+        platform->fifo_write == NULL) {
         if (!logged) {
             RIX_LOG("[RasterIX] discovery: CPU fallback (platform unavailable)\r\n");
             logged = 1;
@@ -975,7 +1024,7 @@ int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform)
         return 0;
     }
     if (!logged) {
-        RIX_LOG("[RasterIX] discovery: RasterIX ABI 0x%08lx (TMU=1, band=16k)\r\n",
+        RIX_LOG("[RasterIX] discovery: RasterIX EF FIFO ABI 0x%08lx (TMU=1)\r\n",
                 (unsigned long)csr_ver);
         logged = 1;
     }
@@ -997,7 +1046,10 @@ void minigl_rix_backend_init(MiniGLRixBackend *backend,
     config.context = platform->context;
     config.read = platform->csr_read;
     config.write = platform->csr_write;
+    config.fifo_read = platform->fifo_read;
+    config.fifo_write = platform->fifo_write;
     config.clean_dcache = platform->cache_clean;
+    config.dma_stream = platform->dma_stream;
     config.hardware_present = 1;
     if (rix_drv_init(&backend->driver, &config) != RIX_DRV_OK ||
         rix_drv_enable(&backend->driver) != RIX_DRV_OK) {
@@ -1039,6 +1091,9 @@ static int backend_start_frame(MiniGLRixBackend *backend, uint16_t width,
                                uint16_t height, uint32_t color_address,
                                uint32_t depth_address)
 {
+    if ((color_address & (MINIGL_RIX_TEXTURE_PAGE_BYTES - 1U)) != 0U ||
+        (depth_address & (MINIGL_RIX_TEXTURE_PAGE_BYTES - 1U)) != 0U)
+        return 0;
     backend->width = width;
     backend->height = height;
     backend->color_address = color_address;
@@ -1046,29 +1101,20 @@ static int backend_start_frame(MiniGLRixBackend *backend, uint16_t width,
     backend->triangle_count = 0U;
     backend->op_count = 0U;
     backend->frame_active = 1U;
-    backend->needs_color_read = 1U;
-    backend->needs_depth_read = 1U;
-    if (!rix_band_list_init(&backend->bands, width, height,
-                            backend->references, MINIGL_RIX_MAX_TRIANGLES))
-        return 0;
-    backend->command_words_estimate = 2U + (size_t)backend->bands.count * 10U;
+    backend->command_words_estimate = 12U;
     return 1;
 }
 
 static int backend_emit_triangles(RixCmdWriter *writer, const MiniGLRixBackend *backend,
-                                  const MiniGLRixRecordedOp *op, const RixBand *band,
-                                  unsigned int pass)
+                                  const MiniGLRixRecordedOp *op, unsigned int pass)
 {
     size_t index;
 
     for (index = 0U; index < op->triangle_count; ++index) {
-        RixTriangle triangle = (pass == 0U ? backend->triangles :
-                                 backend->texture1_triangles)[op->first_triangle + index];
+        const RixTriangle *triangle = &(pass == 0U ? backend->triangles :
+                                       backend->texture1_triangles)[op->first_triangle + index];
 
-        if (!rix_triangle_in_band(&triangle, band->y_start, band->y_end))
-            continue;
-        if (!rix_triangle_increment(&triangle, band->y_start, band->y_end) ||
-            !rix_cmd_triangle(writer, triangle.words, RIX_TRIANGLE_WORDS))
+        if (!rix_cmd_triangle(writer, triangle->words, RIX_TRIANGLE_WORDS))
             return 0;
     }
     return 1;
@@ -1076,62 +1122,37 @@ static int backend_emit_triangles(RixCmdWriter *writer, const MiniGLRixBackend *
 
 static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
 {
-    uint16_t band_index;
+    size_t op_index;
+    uint32_t pixels = (uint32_t)backend->width * (uint32_t)backend->height;
 
-    /* One RasterIX_IF band per iteration: band-local resolution, Y offset,
-     * buffer addresses, and transfer sizes come from rix_band_setup(). */
-    for (band_index = 0U; band_index < backend->bands.count; ++band_index) {
-        const RixBand *band = &backend->bands.band[band_index];
-        RixBandConfig config;
-        RixBandSetup setup;
-        size_t op_index;
-        uint32_t read_flags = 0U;
+    if (pixels == 0U || pixels > 0x000fffffU ||
+        !rix_cmd_resolution(writer, backend->width, backend->height) ||
+        !rix_cmd_buffer_address(writer, RIX_REG_COLOR_BUFFER_ADDR, backend->color_address) ||
+        !rix_cmd_buffer_address(writer, RIX_REG_DEPTH_BUFFER_ADDR, backend->depth_address))
+        return 0;
+    for (op_index = 0U; op_index < backend->op_count; ++op_index) {
+        const MiniGLRixRecordedOp *op = &backend->ops[op_index];
 
-        memset(&config, 0, sizeof(config));
-        config.width = backend->width;
-        config.height = backend->height;
-        config.color_addr = backend->color_address;
-        config.depth_addr = backend->depth_address;
-        config.color_pitch = (uint32_t)backend->width * 2U;
-        config.depth_pitch = (uint32_t)backend->width * 2U;
-        rix_band_setup(&setup, &backend->bands, &config, band_index);
-        if (!rix_band_emit_header(writer, &setup))
-            return 0;
-        if (backend->needs_color_read)
-            read_flags |= RIX_FRAMEBUFFER_COLOR;
-        if (backend->needs_depth_read)
-            read_flags |= RIX_FRAMEBUFFER_DEPTH;
-        if (read_flags != 0U &&
-            !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_READ | read_flags, setup.pixels))
-            return 0;
-        for (op_index = 0U; op_index < backend->op_count; ++op_index) {
-            const MiniGLRixRecordedOp *op = &backend->ops[op_index];
+        if (op->type == MINIGL_RIX_OP_CLEAR) {
+            uint32_t clear_flags = 0U;
 
-            if (op->type == MINIGL_RIX_OP_CLEAR) {
-                uint32_t clear_flags = 0U;
-
-                if (!backend_emit_state(backend, writer, op, 0U))
-                    return 0;
-                if (op->mask & GL_COLOR_BUFFER_BIT)
-                    clear_flags |= RIX_FRAMEBUFFER_COLOR;
-                if (op->mask & GL_DEPTH_BUFFER_BIT)
-                    clear_flags |= RIX_FRAMEBUFFER_DEPTH;
-                if (!rix_cmd_clear_color(writer, op->color) ||
-                    !rix_cmd_clear_depth(writer, (uint16_t)(op->depth >> 8U)) ||
-                    !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET | clear_flags,
-                                         setup.pixels))
-                    return 0;
-            } else if (!backend_emit_state(backend, writer, op, 0U) ||
-                       !backend_emit_triangles(writer, backend, op, band, 0U) ||
-                       (op->two_pass &&
-                        (!backend_emit_state(backend, writer, op, 1U) ||
-                         !backend_emit_triangles(writer, backend, op, band, 1U)))) {
+            if (!backend_emit_state(backend, writer, op, 0U))
                 return 0;
-            }
-        }
-        if (!rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_COMMIT | RIX_FRAMEBUFFER_COLOR |
-                                 RIX_FRAMEBUFFER_DEPTH, setup.pixels))
+            if (op->mask & GL_COLOR_BUFFER_BIT)
+                clear_flags |= RIX_FRAMEBUFFER_COLOR;
+            if (op->mask & GL_DEPTH_BUFFER_BIT)
+                clear_flags |= RIX_FRAMEBUFFER_DEPTH;
+            if (!rix_cmd_clear_color(writer, op->color) ||
+                !rix_cmd_clear_depth(writer, (uint16_t)(op->depth >> 8U)) ||
+                !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET | clear_flags, pixels))
+                return 0;
+        } else if (!backend_emit_state(backend, writer, op, 0U) ||
+                   !backend_emit_triangles(writer, backend, op, 0U) ||
+                   (op->two_pass &&
+                    (!backend_emit_state(backend, writer, op, 1U) ||
+                     !backend_emit_triangles(writer, backend, op, 1U)))) {
             return 0;
+        }
     }
     return !writer->failed;
 }
@@ -1140,6 +1161,8 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
 {
     RixCmdWriter writer;
     uint8_t *buffer;
+    volatile uint16_t *pixel;
+    uint16_t fence;
 
     if (!backend->frame_active || backend->op_count == 0U)
         return 1;
@@ -1147,23 +1170,27 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
         return 0;
     backend->current_buffer = backend->next_buffer;
     buffer = backend->platform.command_buffer[backend->current_buffer];
-    if (buffer == NULL || backend->platform.command_capacity <= 8U)
+    if (buffer == NULL || backend->platform.command_capacity <=
+                       MINIGL_RIX_TEXTURE_PAGE_BYTES)
         return 0;
-    rix_cmd_init(&writer, buffer + 8U, backend->platform.command_capacity - 8U);
+    fence = (uint16_t)(backend->driver.submitted_target + 1U);
+    if (fence == 0U)
+        fence = 1U;
+    pixel = backend_fence_pixel(backend, backend->current_buffer);
+    *pixel = 0U;
+    if (backend->platform.cache_clean != NULL)
+        backend->platform.cache_clean(backend->platform.context, (uintptr_t)pixel,
+                                      sizeof(*pixel));
+    rix_cmd_init(&writer, buffer, backend->platform.command_capacity -
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES);
     if (!backend_emit_frame(backend, &writer) ||
+        !backend_emit_fence(backend, &writer, backend->current_buffer, fence) ||
         writer.length / sizeof(uint32_t) > MINIGL_RIX_COMMAND_WORD_BUDGET ||
-        !backend_submit(backend, &writer))
+        !backend_submit(backend, &writer, fence))
         return 0;
     backend->triangle_count = 0U;
-    if (continue_frame &&
-        !rix_band_list_init(&backend->bands, backend->width, backend->height,
-                            backend->references, MINIGL_RIX_MAX_TRIANGLES))
-        return 0;
     backend->op_count = 0U;
-    backend->needs_color_read = 1U;
-    backend->needs_depth_read = 1U;
-    backend->command_words_estimate = continue_frame ?
-        2U + (size_t)backend->bands.count * 10U : 0U;
+    backend->command_words_estimate = continue_frame ? 12U : 0U;
     if (!continue_frame)
         backend->frame_active = 0U;
     return 1;
@@ -1198,11 +1225,11 @@ static int backend_record_draw(MiniGLRixBackend *backend)
             (mip_filter(texture1->min_filter) && texture1->levels != texture1->required_levels))
             return 0;
     }
-    state_words = (size_t)backend->bands.count * 33U;
+    state_words = 33U;
     if (texture0 != NULL)
-        state_words += (size_t)backend->bands.count * texture0->page_count;
+        state_words += texture0->page_count;
     if (texture1 != NULL)
-        state_words += (size_t)backend->bands.count * (33U + texture1->page_count);
+        state_words += 33U + texture1->page_count;
     if (backend->command_words_estimate + state_words > MINIGL_RIX_COMMAND_WORD_BUDGET)
         return 0;
     if (texture0 != NULL) {
@@ -1284,8 +1311,6 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     RixTriangle prepared_texture1;
     RixTriangle *triangle;
     MiniGLRixRecordedOp *op;
-    size_t band_index;
-    size_t touched_bands = 0U;
     unsigned int passes;
 
     if (backend == NULL || !backend->collecting || a == NULL || b == NULL || c == NULL)
@@ -1342,20 +1367,16 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
          !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
                              &texture1_vertices[1], &texture1_vertices[2], &scissor)))
         return 0;
-    for (band_index = 0U; band_index < backend->bands.count; ++band_index)
-        if (rix_triangle_in_band(&prepared, backend->bands.band[band_index].y_start,
-                                 backend->bands.band[band_index].y_end))
-            ++touched_bands;
     if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
         backend->command_words_estimate +
-            passes * touched_bands * (RIX_TRIANGLE_WORDS + 1U) >
+            passes * (RIX_TRIANGLE_WORDS + 1U) >
                 MINIGL_RIX_COMMAND_WORD_BUDGET) {
         if (backend->triangle_count == 0U &&
             backend->ops[backend->op_count - 1U].triangle_count == 0U)
             return 0;
         if (!backend_flush(backend, 1) || !backend_record_draw(backend) ||
             backend->command_words_estimate +
-                passes * touched_bands * (RIX_TRIANGLE_WORDS + 1U) >
+                passes * (RIX_TRIANGLE_WORDS + 1U) >
                     MINIGL_RIX_COMMAND_WORD_BUDGET)
             return 0;
     }
@@ -1364,11 +1385,9 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     *triangle = prepared;
     if (passes == 2U)
         backend->texture1_triangles[backend->triangle_count] = prepared_texture1;
-    if (!rix_band_list_add(&backend->bands, triangle))
-        return 0;
     ++backend->triangle_count;
     ++op->triangle_count;
-    backend->command_words_estimate += passes * touched_bands * (RIX_TRIANGLE_WORDS + 1U);
+    backend->command_words_estimate += passes * (RIX_TRIANGLE_WORDS + 1U);
     return 1;
 }
 
@@ -1385,38 +1404,25 @@ static void backend_recalculate_command_words(MiniGLRixBackend *backend)
 {
     size_t op_index;
 
-    backend->command_words_estimate = 2U + (size_t)backend->bands.count * 10U;
+    backend->command_words_estimate = 12U;
     for (op_index = 0U; op_index < backend->op_count; ++op_index) {
         const MiniGLRixRecordedOp *op = &backend->ops[op_index];
 
         if (op->type == MINIGL_RIX_OP_CLEAR) {
-            backend->command_words_estimate += (size_t)backend->bands.count * 37U;
+            backend->command_words_estimate += 37U;
         } else {
-            size_t triangle_index;
-
-            backend->command_words_estimate += (size_t)backend->bands.count * 33U;
+            backend->command_words_estimate += 33U;
             if (op->texture_slot < MINIGL_RIX_MAX_TEXTURES)
-                backend->command_words_estimate += (size_t)backend->bands.count *
+                backend->command_words_estimate +=
                     backend->textures[op->texture_slot].page_count;
             if (op->two_pass) {
-                backend->command_words_estimate += (size_t)backend->bands.count * 33U;
+                backend->command_words_estimate += 33U;
                 if (op->texture1_slot < MINIGL_RIX_MAX_TEXTURES)
-                    backend->command_words_estimate += (size_t)backend->bands.count *
+                    backend->command_words_estimate +=
                         backend->textures[op->texture1_slot].page_count;
             }
-            for (triangle_index = 0U; triangle_index < op->triangle_count;
-                 ++triangle_index) {
-                size_t band_index;
-                const RixTriangle *triangle =
-                    &backend->triangles[op->first_triangle + triangle_index];
-
-                for (band_index = 0U; band_index < backend->bands.count; ++band_index)
-                    if (rix_triangle_in_band(triangle,
-                                             backend->bands.band[band_index].y_start,
-                                             backend->bands.band[band_index].y_end))
-                        backend->command_words_estimate +=
-                            (op->two_pass ? 2U : 1U) * (RIX_TRIANGLE_WORDS + 1U);
-            }
+            backend->command_words_estimate += op->triangle_count *
+                (op->two_pass ? 2U : 1U) * (RIX_TRIANGLE_WORDS + 1U);
         }
     }
 }
@@ -1463,12 +1469,6 @@ void minigl_rix_backend_abort_draw(MiniGLRixBackend *backend)
     }
     backend->triangle_count = retained_triangles;
     backend_recalculate_command_words(backend);
-    if (!rix_band_list_init(&backend->bands, backend->width, backend->height,
-                            backend->references, MINIGL_RIX_MAX_TRIANGLES))
-        backend_disable(backend, "abort", RIX_DRV_ERROR);
-    for (index = 0U; index < retained_triangles && !backend->error; ++index)
-        if (!rix_band_list_add(&backend->bands, &backend->triangles[index]))
-            backend_disable(backend, "abort", RIX_DRV_ERROR);
 }
 
 int minigl_rix_backend_clear(MiniGLRixBackend *backend, uint16_t width,
@@ -1496,14 +1496,10 @@ int minigl_rix_backend_clear(MiniGLRixBackend *backend, uint16_t width,
         !backend_start_frame(backend, width, height, color_address, depth_address))
         return 0;
     if (backend->op_count == MINIGL_RIX_MAX_OPS ||
-        backend->command_words_estimate + (size_t)backend->bands.count * 37U >
+        backend->command_words_estimate + 37U >
             MINIGL_RIX_COMMAND_WORD_BUDGET) {
         if (!backend_flush(backend, 1))
             return 0;
-    }
-    if (backend->op_count == 0U) {
-        if (mask & GL_COLOR_BUFFER_BIT) backend->needs_color_read = 0U;
-        if (mask & GL_DEPTH_BUFFER_BIT) backend->needs_depth_read = 0U;
     }
     op = &backend->ops[backend->op_count++];
     memset(op, 0, sizeof(*op));
@@ -1513,7 +1509,7 @@ int minigl_rix_backend_clear(MiniGLRixBackend *backend, uint16_t width,
     op->mask = mask;
     op->color = rgba;
     op->depth = depth;
-    backend->command_words_estimate += (size_t)backend->bands.count * 37U;
+    backend->command_words_estimate += 37U;
     return 1;
 }
 int minigl_rix_backend_prepare_target(MiniGLRixBackend *backend,

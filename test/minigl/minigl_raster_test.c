@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include "../../ZZ9000_proto.sdk/ZZ9000OS/src/rix_cmd.h"
 #include "../../ZZ9000_proto.sdk/ZZ9000OS/src/minigl_raster.h"
 #include "../../ZZ9000_proto.sdk/ZZ9000OS/src/mw_types.h"
 
@@ -45,8 +46,8 @@ int minigl_present_frame(const ZZ9KMiniGLPacketPresent *present, const uint32_t 
 int minigl_present_frame_rgb565(const ZZ9KMiniGLPacketPresent *present, const uint16_t *pixels)
 { (void)present; (void)pixels; return 1; }
 
-static uint32_t color[W * H];
-static uint8_t depth[W * H * 3U];
+static uint32_t color[W * H] __attribute__((aligned(2048)));
+static uint8_t depth[W * H * 3U] __attribute__((aligned(2048)));
 static uint8_t vertices[400U * VSTRIDE];
 static uint8_t staging[2048];
 static uint8_t textures[8192];
@@ -737,13 +738,76 @@ static void assert_fragment_extensions(void)
 
 struct rix_raster_model {
     uint32_t csr[16];
+    uint32_t fifo[6];
+    uint32_t fifo_packet[RIX_DRV_FIFO_PACKET_WORDS + 2U];
     uint8_t command[MINIGL_RIX_COMMAND_BUFFERS][MINIGL_RIX_COMMAND_BYTES];
     uint8_t white[MINIGL_RIX_WHITE_TEXTURE_BYTES];
+    uintptr_t command_address[MINIGL_RIX_COMMAND_BUFFERS];
+    uint32_t color_address;
+    uint32_t clear_color;
+    unsigned fifo_packet_words;
     unsigned csr_reads;
     unsigned cache_cleans;
     unsigned cache_invalidates;
     int complete;
 };
+
+static uint16_t rix_raster_rgb565(uint32_t rgba)
+{
+    return (uint16_t)((((rgba >> 27U) & 0x1fU) << 11U) |
+                      (((rgba >> 18U) & 0x3fU) << 5U) |
+                      ((rgba >> 11U) & 0x1fU));
+}
+
+static void rix_raster_complete_fifo_packet(struct rix_raster_model *model)
+{
+    unsigned word = 2U;
+
+    while (word < model->fifo_packet_words) {
+        uint32_t command = model->fifo_packet[word++];
+
+        switch (command >> 28U) {
+        case 1U:
+            if (word == model->fifo_packet_words)
+                return;
+            if ((command & 0x0fffffffU) == RIX_REG_COLOR_BUFFER_ADDR)
+                model->color_address = model->fifo_packet[word];
+            else if ((command & 0x0fffffffU) == RIX_REG_CLEAR_COLOR)
+                model->clear_color = model->fifo_packet[word];
+            ++word;
+            break;
+        case 2U:
+            if ((command & (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR)) ==
+                (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR)) {
+                unsigned index;
+
+                for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+                    if (model->color_address ==
+                        (uint32_t)(model->command_address[index] +
+                                   MINIGL_RIX_COMMAND_BYTES -
+                                   MINIGL_RIX_TEXTURE_PAGE_BYTES)) {
+                        uint16_t pixel = rix_raster_rgb565(model->clear_color);
+
+                        memcpy(model->command[index] + MINIGL_RIX_COMMAND_BYTES -
+                               MINIGL_RIX_TEXTURE_PAGE_BYTES, &pixel, sizeof(pixel));
+                    }
+                }
+            }
+            break;
+        case 3U:
+            word += (command & 0x3ffU) / sizeof(uint32_t);
+            break;
+        case 4U:
+            word += 65U;
+            break;
+        case 5U:
+            word += command & 0x7ffffU;
+            break;
+        default:
+            break;
+        }
+    }
+}
 
 static uint32_t rix_raster_read(void *context, uint32_t offset)
 {
@@ -758,11 +822,33 @@ static void rix_raster_write(void *context, uint32_t offset, uint32_t value)
     struct rix_raster_model *model = context;
 
     model->csr[offset / 4U] = value;
-    if (offset == RIX_DRV_CSR_CMD_START && value != 0U) {
-        ++model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
+}
+
+static uint32_t rix_raster_fifo_read(void *context, uint32_t offset)
+{
+    struct rix_raster_model *model = context;
+
+    if (offset == RIX_DRV_FIFO_TDFV)
+        return 508U;
+    return model->fifo[offset / 4U];
+}
+
+static void rix_raster_fifo_write(void *context, uint32_t offset, uint32_t value)
+{
+    struct rix_raster_model *model = context;
+
+    model->fifo[offset / 4U] = value;
+    if (offset == RIX_DRV_FIFO_TDFR) {
+        model->fifo_packet_words = 0U;
+    } else if (offset == RIX_DRV_FIFO_TDFD) {
+        assert(model->fifo_packet_words <
+               sizeof(model->fifo_packet) / sizeof(model->fifo_packet[0]));
+        model->fifo_packet[model->fifo_packet_words++] = value;
+    } else if (offset == RIX_DRV_FIFO_TLF) {
+        assert(value == model->fifo_packet_words * sizeof(model->fifo_packet[0]));
         if (model->complete)
-            model->csr[RIX_DRV_CSR_COMPLETED / 4U] =
-                model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
+            rix_raster_complete_fifo_packet(model);
+        model->fifo_packet_words = 0U;
     }
 }
 
@@ -796,17 +882,20 @@ static void assert_rix_ownership_transitions(void)
     model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
-    model.csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
+    model.command_address[0] = 0x01000000U;
+    model.command_address[1] = 0x01010000U;
     memset(&platform, 0, sizeof(platform));
     platform.context = &model;
     platform.csr_read = rix_raster_read;
     platform.csr_write = rix_raster_write;
+    platform.fifo_read = rix_raster_fifo_read;
+    platform.fifo_write = rix_raster_fifo_write;
     platform.cache_clean = rix_raster_cache_clean;
     platform.cache_invalidate = rix_raster_cache_invalidate;
     platform.command_buffer[0] = model.command[0];
     platform.command_buffer[1] = model.command[1];
-    platform.command_address[0] = 0x01000000U;
-    platform.command_address[1] = 0x01010000U;
+    platform.command_address[0] = model.command_address[0];
+    platform.command_address[1] = model.command_address[1];
     platform.command_capacity = MINIGL_RIX_COMMAND_BYTES;
     platform.white_texture = model.white;
     platform.white_texture_address = 0x02000000U;

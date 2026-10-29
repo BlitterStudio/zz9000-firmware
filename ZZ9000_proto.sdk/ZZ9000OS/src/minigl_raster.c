@@ -3275,8 +3275,8 @@ int minigl_raster_get_rix_diagnostics(MiniGLRasterRixDiagnostics *out)
     out->status = g_rix.platform.csr_read ?
         g_rix.platform.csr_read(g_rix.platform.context, RIX_DRV_CSR_STATUS) :
         g_rix.driver.last_status;
-    out->completed_fence = g_rix.platform.csr_read ?
-        g_rix.platform.csr_read(g_rix.platform.context, RIX_DRV_CSR_COMPLETED) : 0U;
+    out->completed_fence = (!g_rix.pending[0] && !g_rix.pending[1]) ?
+        g_rix.driver.submitted_target : 0U;
     g_rix_diagnostics = *out;
     return 1;
 }

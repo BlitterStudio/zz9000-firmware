@@ -14,6 +14,7 @@
 #include "mw_ctx.h"
 #include "minigl_raster.h"
 #include "minigl_rix_backend.h"
+#include "rix_cmd.h"
 extern void (*g_rix_test_log)(const char *fmt, ...);
 #include <stdarg.h>
 static void test_log_wrapper(const char *fmt, ...)
@@ -30,6 +31,11 @@ static void test_log_wrapper(const char *fmt, ...)
 /* Mock platform for capture & hardware path routing */
 struct mock_platform {
     uint32_t csr[16];
+    uint32_t fifo[6];
+    uint32_t packet[RIX_DRV_FIFO_PACKET_WORDS + 2U];
+    unsigned packet_words;
+    uint32_t color_address;
+    uint16_t clear_color;
     uint8_t cmd_buf[2][64 * 1024];
     uint8_t white_tex[MINIGL_RIX_WHITE_TEXTURE_BYTES];
     uint8_t tex_pool[MINIGL_RIX_TEXTURE_POOL_BYTES];
@@ -51,12 +57,68 @@ static void mock_csr_write(void *ctx, uint32_t offset, uint32_t value)
 {
     struct mock_platform *p = (struct mock_platform *)ctx;
     p->csr[offset / 4U] = value;
-    if (offset == RIX_DRV_CSR_CMD_START && value != 0U) {
+}
+
+static uint16_t mock_fence_color(uint32_t rgba)
+{
+    return (uint16_t)(((rgba >> 27U) << 11U) |
+                      ((rgba >> 18U) << 5U) | (rgba >> 11U));
+}
+
+static void mock_render_packet(struct mock_platform *p)
+{
+    unsigned index;
+
+    for (index = 2U; index < p->packet_words; ++index) {
+        uint32_t command = p->packet[index];
+
+        if ((command & 0xf0000000U) == RIX_OP_RENDER_CONFIG) {
+            assert(index + 1U < p->packet_words);
+            if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_COLOR_BUFFER_ADDR))
+                p->color_address = p->packet[index + 1U];
+            else if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_CLEAR_COLOR))
+                p->clear_color = mock_fence_color(p->packet[index + 1U]);
+            ++index;
+        } else if ((command & 0xf0000000U) == RIX_OP_FRAMEBUFFER &&
+                   (command & 0xffU) == (RIX_FRAMEBUFFER_MEMSET |
+                                         RIX_FRAMEBUFFER_COLOR) &&
+                   (command >> 8U) == 1U && p->complete_submissions) {
+            if (p->color_address == 0x100000U + sizeof(p->cmd_buf[0]) -
+                                    MINIGL_RIX_TEXTURE_PAGE_BYTES)
+                *(uint16_t *)(p->cmd_buf[0] + sizeof(p->cmd_buf[0]) -
+                              MINIGL_RIX_TEXTURE_PAGE_BYTES) = p->clear_color;
+            else if (p->color_address == 0x110000U + sizeof(p->cmd_buf[1]) -
+                                         MINIGL_RIX_TEXTURE_PAGE_BYTES)
+                *(uint16_t *)(p->cmd_buf[1] + sizeof(p->cmd_buf[1]) -
+                              MINIGL_RIX_TEXTURE_PAGE_BYTES) = p->clear_color;
+        }
+    }
+}
+
+static uint32_t mock_fifo_read(void *ctx, uint32_t offset)
+{
+    return ((struct mock_platform *)ctx)->fifo[offset / 4U];
+}
+
+static void mock_fifo_write(void *ctx, uint32_t offset, uint32_t value)
+{
+    struct mock_platform *p = (struct mock_platform *)ctx;
+
+    p->fifo[offset / 4U] = value;
+    if (offset == RIX_DRV_FIFO_TDFR) {
+        p->packet_words = 0U;
+    } else if (offset == RIX_DRV_FIFO_TDFD) {
+        assert(p->packet_words < RIX_DRV_FIFO_PACKET_WORDS + 2U);
+        p->packet[p->packet_words++] = value;
+    } else if (offset == RIX_DRV_FIFO_TLF) {
+        assert(value == p->packet_words * sizeof(p->packet[0]));
+        assert(p->packet_words >= 2U);
+        assert(p->packet[0] == (0x90000000U |
+                                ((p->packet_words - 2U) * sizeof(uint32_t))));
+        assert(p->packet[1] == 0U);
+        mock_render_packet(p);
         ++p->submissions;
-        ++p->csr[RIX_DRV_CSR_SUBMITTED / 4U];
-        if (p->complete_submissions)
-            p->csr[RIX_DRV_CSR_COMPLETED / 4U] = p->csr[RIX_DRV_CSR_SUBMITTED / 4U];
-        p->csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
+        p->packet_words = 0U;
     }
 }
 
@@ -75,10 +137,12 @@ static void setup_mock_platform(struct mock_platform *p, MiniGLRixPlatform *out)
     p->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     p->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     p->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
-    p->csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
+    p->fifo[RIX_DRV_FIFO_TDFV / 4U] = RIX_DRV_FIFO_PACKET_WORDS + 2U;
     out->context = p;
     out->csr_read = mock_csr_read;
     out->csr_write = mock_csr_write;
+    out->fifo_read = mock_fifo_read;
+    out->fifo_write = mock_fifo_write;
     out->cache_clean = mock_cache_noop;
     out->cache_invalidate = mock_cache_noop;
     out->command_buffer[0] = p->cmd_buf[0];

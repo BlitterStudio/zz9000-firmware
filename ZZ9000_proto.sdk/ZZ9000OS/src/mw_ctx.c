@@ -19,6 +19,27 @@
 #include "xil_io.h"
 #endif
 
+#define MW_RIX_DMAC_BASE 0xf8004000U
+#define MW_RIX_DMAC_CSR(channel) (0x100U + (channel) * 8U)
+#define MW_RIX_DMAC_DBGSTATUS 0xd00U
+#define MW_RIX_DMAC_DBGCMD 0xd04U
+#define MW_RIX_DMAC_DBGINST0 0xd08U
+#define MW_RIX_DMAC_DBGINST1 0xd0cU
+#define MW_RIX_DMAC_CHANNEL 6U
+#define MW_RIX_DMAC_STOPPED 0U
+#define MW_RIX_PL330_DMAMOV 0xbcu
+#define MW_RIX_PL330_DMALP 0x20u
+#define MW_RIX_PL330_DMALPEND 0x28u
+#define MW_RIX_PL330_DMALD 0x04u
+#define MW_RIX_PL330_DMAST 0x08u
+#define MW_RIX_PL330_DMAWMB 0x13u
+#define MW_RIX_PL330_DMAEND 0x00u
+#define MW_RIX_PL330_DMAGO 0xa0u
+#define MW_RIX_PL330_DMAKILL 0x01u
+#define MW_RIX_PL330_RD_SAR 0u
+#define MW_RIX_PL330_RD_CCR 1u
+#define MW_RIX_PL330_RD_DAR 2u
+
 #define GL_TEXTURE_2D 0x0de1U
 
 static uint32_t g_next_handle = 1U;
@@ -155,6 +176,109 @@ static void mw_rix_csr_write(void *context, uint32_t offset, uint32_t value)
     Xil_Out32(MINIGL_RIX_CSR_BASE + offset, value);
 }
 
+static uint32_t mw_rix_fifo_read(void *context, uint32_t offset)
+{
+    (void)context;
+    return Xil_In32(MINIGL_RIX_FIFO_BASE + offset);
+}
+
+static void mw_rix_fifo_write(void *context, uint32_t offset, uint32_t value)
+{
+    (void)context;
+    Xil_Out32(MINIGL_RIX_FIFO_BASE + offset, value);
+}
+
+/* Core1 owns this program.  Commands are cache-cleaned by rix_drv; the
+ * conservative single-store path remains in force until a FIFO integrity test
+ * qualifies 16-beat fixed-destination bursts. */
+static uint8_t mw_rix_dma_program[128] __attribute__((aligned(64)));
+
+static void mw_rix_dma_barrier(void)
+{
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static unsigned mw_rix_dma_word(uint8_t *program, unsigned offset, uint32_t value)
+{
+    program[offset++] = (uint8_t)value;
+    program[offset++] = (uint8_t)(value >> 8U);
+    program[offset++] = (uint8_t)(value >> 16U);
+    program[offset++] = (uint8_t)(value >> 24U);
+    return offset;
+}
+
+static uint32_t mw_rix_dma_ccr(uint32_t words)
+{
+    return 1U | (2U << 1U) | ((words - 1U) << 4U) | (2U << 15U);
+}
+
+static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
+                             uint32_t burst_words)
+{
+    uint8_t *program = mw_rix_dma_program;
+    uint32_t blocks = words / 16U, tail = words % 16U, attempt;
+    unsigned offset = 0U, body, store, loop;
+
+    (void)context;
+    if (source == 0U || words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS ||
+        burst_words != 16U)
+        return 0;
+    program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_SAR;
+    offset = mw_rix_dma_word(program, offset, (uint32_t)source);
+    program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_DAR;
+    offset = mw_rix_dma_word(program, offset, MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFD);
+    if (blocks != 0U) {
+        program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_CCR;
+        offset = mw_rix_dma_word(program, offset, mw_rix_dma_ccr(16U));
+        program[offset++] = MW_RIX_PL330_DMALP | 2U; program[offset++] = (uint8_t)(blocks - 1U);
+        body = offset; program[offset++] = MW_RIX_PL330_DMALD;
+        program[offset++] = MW_RIX_PL330_DMALP; program[offset++] = 15U;
+        store = offset; program[offset++] = MW_RIX_PL330_DMAST;
+        loop = offset; program[offset++] = MW_RIX_PL330_DMALPEND | 0x10U;
+        program[offset++] = (uint8_t)(loop - store);
+        loop = offset; program[offset++] = MW_RIX_PL330_DMALPEND | 0x14U;
+        program[offset++] = (uint8_t)(loop - body);
+    }
+    if (tail != 0U) {
+        program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_CCR;
+        offset = mw_rix_dma_word(program, offset, mw_rix_dma_ccr(tail));
+        program[offset++] = MW_RIX_PL330_DMALD;
+        program[offset++] = MW_RIX_PL330_DMALP; program[offset++] = (uint8_t)(tail - 1U);
+        store = offset; program[offset++] = MW_RIX_PL330_DMAST;
+        loop = offset; program[offset++] = MW_RIX_PL330_DMALPEND | 0x10U;
+        program[offset++] = (uint8_t)(loop - store);
+    }
+    program[offset++] = MW_RIX_PL330_DMAWMB; program[offset++] = MW_RIX_PL330_DMAEND;
+    if (offset > sizeof(mw_rix_dma_program))
+        return 0;
+    Xil_DCacheFlushRange((INTPTR)program, (u32)sizeof(mw_rix_dma_program));
+    mw_rix_dma_barrier();
+    for (attempt = 0U; attempt < 100000U; ++attempt)
+        if ((Xil_In32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
+            break;
+    if (attempt == 100000U)
+        return 0;
+    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
+              (MW_RIX_PL330_DMAGO << 16U) | (MW_RIX_DMAC_CHANNEL << 24U));
+    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, (uint32_t)(uintptr_t)program);
+    mw_rix_dma_barrier();
+    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
+    mw_rix_dma_barrier();
+    for (attempt = 0U; attempt < 1000000U; ++attempt) {
+        uint32_t state = Xil_In32(MW_RIX_DMAC_BASE +
+                                  MW_RIX_DMAC_CSR(MW_RIX_DMAC_CHANNEL)) & 15U;
+        if (state == MW_RIX_DMAC_STOPPED)
+            return 1;
+        if (state == 14U || state == 15U)
+            break;
+    }
+    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
+              (MW_RIX_PL330_DMAKILL << 16U) | (MW_RIX_DMAC_CHANNEL << 8U) | 1U);
+    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, 0U);
+    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
+    return 0;
+}
+
 static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
 {
     (void)context;
@@ -239,6 +363,9 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.context = c;
     platform.csr_read = mw_rix_csr_read;
     platform.csr_write = mw_rix_csr_write;
+    platform.fifo_read = mw_rix_fifo_read;
+    platform.fifo_write = mw_rix_fifo_write;
+    platform.dma_stream = mw_rix_dma_stream;
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
     /* This probe reads only the versioned CSR identity pair. No RIX address is

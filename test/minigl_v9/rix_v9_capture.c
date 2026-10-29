@@ -19,6 +19,7 @@
 #include "mw_types.h"
 #include "minigl_raster.h"
 #include "minigl_rix_backend.h"
+#include "rix_cmd.h"
 
 #define WIDTH 640U
 #define HEIGHT 480U
@@ -37,6 +38,11 @@
 
 struct capture_model {
     uint32_t csr[16];
+    uint32_t fifo[6];
+    uint32_t packet[RIX_DRV_FIFO_PACKET_WORDS + 2U];
+    unsigned packet_words;
+    uint32_t color_address;
+    uint16_t clear_color;
     uint8_t *command[MINIGL_RIX_COMMAND_BUFFERS];
     uintptr_t command_address[MINIGL_RIX_COMMAND_BUFFERS];
     uint8_t *white;
@@ -56,35 +62,94 @@ static uint32_t csr_read(void *context, uint32_t offset)
     return model->csr[offset / 4U];
 }
 
-static void append_submission(struct capture_model *model, uint32_t address, uint32_t words)
-{
-    unsigned index;
-    const uint8_t *source = NULL;
-    size_t bytes = (size_t)words * 4U;
-
-    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
-        if (model->command_address[index] == address) {
-            source = model->command[index];
-            break;
-        }
-    }
-    assert(source != NULL);
-    assert(model->submitted_bytes + bytes <= model->submitted_capacity);
-    memcpy(model->submitted + model->submitted_bytes, source, bytes);
-    model->submitted_bytes += bytes;
-    ++model->submitted_count;
-}
-
 static void csr_write(void *context, uint32_t offset, uint32_t value)
 {
     struct capture_model *model = (struct capture_model *)context;
     model->csr[offset / 4U] = value;
-    if (offset == RIX_DRV_CSR_CMD_START && value != 0U) {
-        append_submission(model, model->csr[RIX_DRV_CSR_CMD_ADDR / 4U],
-                          model->csr[RIX_DRV_CSR_CMD_WORDS / 4U]);
-        ++model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
-        model->csr[RIX_DRV_CSR_COMPLETED / 4U] = model->csr[RIX_DRV_CSR_SUBMITTED / 4U];
-        model->csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
+}
+
+static uint16_t fence_color(uint32_t rgba)
+{
+    return (uint16_t)(((rgba >> 27U) << 11U) |
+                      ((rgba >> 18U) << 5U) | (rgba >> 11U));
+}
+
+static void render_packet(struct capture_model *model)
+{
+    unsigned index;
+
+    for (index = 2U; index < model->packet_words; ++index) {
+        uint32_t command = model->packet[index];
+
+        if ((command & 0xf0000000U) == RIX_OP_RENDER_CONFIG) {
+            assert(index + 1U < model->packet_words);
+            if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_COLOR_BUFFER_ADDR))
+                model->color_address = model->packet[index + 1U];
+            else if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_CLEAR_COLOR))
+                model->clear_color = fence_color(model->packet[index + 1U]);
+            ++index;
+        } else if ((command & 0xf0000000U) == RIX_OP_FRAMEBUFFER &&
+                   (command & 0xffU) == (RIX_FRAMEBUFFER_MEMSET |
+                                         RIX_FRAMEBUFFER_COLOR) &&
+                   (command >> 8U) == 1U) {
+            for (unsigned buffer = 0U; buffer < MINIGL_RIX_COMMAND_BUFFERS; ++buffer) {
+                if (model->color_address == model->command_address[buffer] +
+                                            COMMAND_BYTES -
+                                            MINIGL_RIX_TEXTURE_PAGE_BYTES) {
+                    *(uint16_t *)(model->command[buffer] + COMMAND_BYTES -
+                                  MINIGL_RIX_TEXTURE_PAGE_BYTES) = model->clear_color;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+static void append_packet(struct capture_model *model)
+{
+    unsigned index;
+    size_t bytes = (size_t)model->packet_words * sizeof(model->packet[0]);
+
+    assert(model->packet_words >= 2U);
+    assert(model->packet[0] == (0x90000000U |
+                                ((model->packet_words - 2U) * sizeof(uint32_t))));
+    assert(model->packet[1] == 0U);
+    assert(model->submitted_bytes + bytes <= model->submitted_capacity);
+    for (index = 0U; index < model->packet_words; ++index) {
+        uint32_t word = model->packet[index];
+        uint8_t *destination = model->submitted + model->submitted_bytes +
+                               (size_t)index * sizeof(word);
+
+        destination[0] = (uint8_t)word;
+        destination[1] = (uint8_t)(word >> 8U);
+        destination[2] = (uint8_t)(word >> 16U);
+        destination[3] = (uint8_t)(word >> 24U);
+    }
+    model->submitted_bytes += bytes;
+    ++model->submitted_count;
+}
+
+static uint32_t fifo_read(void *context, uint32_t offset)
+{
+    struct capture_model *model = (struct capture_model *)context;
+    return model->fifo[offset / 4U];
+}
+
+static void fifo_write(void *context, uint32_t offset, uint32_t value)
+{
+    struct capture_model *model = (struct capture_model *)context;
+
+    model->fifo[offset / 4U] = value;
+    if (offset == RIX_DRV_FIFO_TDFR) {
+        model->packet_words = 0U;
+    } else if (offset == RIX_DRV_FIFO_TDFD) {
+        assert(model->packet_words < RIX_DRV_FIFO_PACKET_WORDS + 2U);
+        model->packet[model->packet_words++] = value;
+    } else if (offset == RIX_DRV_FIFO_TLF) {
+        assert(value == model->packet_words * sizeof(model->packet[0]));
+        render_packet(model);
+        append_packet(model);
+        model->packet_words = 0U;
     }
 }
 
@@ -97,7 +162,7 @@ static void capture_model_init(struct capture_model *model)
     model->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     model->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
-    model->csr[RIX_DRV_CSR_CMD_START / 4U] = RIX_DRV_CMD_START_QUEUE_READY;
+    model->fifo[RIX_DRV_FIFO_TDFV / 4U] = RIX_DRV_FIFO_PACKET_WORDS + 2U;
     for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
         model->command[index] = (uint8_t *)calloc(1U, COMMAND_BYTES);
         assert(model->command[index] != NULL);
@@ -129,6 +194,8 @@ static void configure_capture_platform(struct capture_model *model)
     platform.context = model;
     platform.csr_read = csr_read;
     platform.csr_write = csr_write;
+    platform.fifo_read = fifo_read;
+    platform.fifo_write = fifo_write;
     platform.cache_clean = cache_noop;
     platform.cache_invalidate = cache_noop;
     platform.command_buffer[0] = model->command[0];

@@ -181,7 +181,6 @@ C_SRCS = \
 	$(SRC_DIR)/rix_cmd.c \
 	$(SRC_DIR)/rix_texture.c \
 	$(SRC_DIR)/rix_setup.c \
-	$(SRC_DIR)/rix_bin.c \
 	$(SRC_DIR)/rix_drv.c \
 	$(SRC_DIR)/minigl_rix_backend.c \
 	$(SRC_DIR)/mw_parse.c \

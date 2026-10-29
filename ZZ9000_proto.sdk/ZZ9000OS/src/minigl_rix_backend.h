@@ -8,12 +8,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "rix_bin.h"
+#include "rix_setup.h"
 #include "rix_drv.h"
 #include "minigl_renderer.h"
 #include "minigl_pool.h"
 
 #define MINIGL_RIX_CSR_BASE 0x83c60000U
+#define MINIGL_RIX_FIFO_BASE 0x83c70000U
 #define MINIGL_RIX_TEXTURE_PAGE_BYTES 2048U
 #define MINIGL_RIX_WHITE_TEXTURE_BYTES MINIGL_RIX_TEXTURE_PAGE_BYTES
 /* TextureSampler's sparse mip layout uses a 256x256x16-bit level-zero
@@ -29,13 +30,12 @@
 /* The CPU rasterizer can retain this many texture identities.  RasterIX
  * residency is page-based and evicts unpinned LRU images on demand. */
 #define MINIGL_RIX_MAX_TEXTURES ZZ9K_MINIGL_MAX_TEXTURES
-/* A complete 20-band 640x480 replay is below the 7,000-word budget.  One
- * card-pool page per in-flight DSE stream keeps context allocation bounded. */
+/* Commands are broken at parser-command boundaries into 248-word FIFO packets. */
 #define MINIGL_RIX_COMMAND_BYTES 0x00010000U
 #define MINIGL_RIX_COMMAND_BUFFERS 2U
 #define MINIGL_RIX_MAX_TRIANGLES 1024U
 #define MINIGL_RIX_MAX_OPS 1024U
-#define MINIGL_RIX_COMMAND_WORD_BUDGET 7000U
+#define MINIGL_RIX_COMMAND_WORD_BUDGET 15000U
 
 
 typedef uint32_t (*MiniGLRixReadFn)(void *context, uint32_t offset);
@@ -43,6 +43,9 @@ typedef void (*MiniGLRixWriteFn)(void *context, uint32_t offset, uint32_t value)
 typedef void (*MiniGLRixCacheCleanFn)(void *context, uintptr_t address, size_t bytes);
 typedef void (*MiniGLRixCacheInvalidateFn)(void *context, uintptr_t address,
                                            size_t bytes);
+typedef int (*MiniGLRixDmaStreamFn)(void *context, uintptr_t source,
+                                    uint32_t words, uint32_t burst_words);
+
 
 typedef int (*MiniGLRixTexturePoolGrowFn)(void *context, size_t minimum_bytes,
                                           uint8_t **memory,
@@ -53,6 +56,9 @@ typedef struct MiniGLRixPlatform {
     void *context;
     MiniGLRixReadFn csr_read;
     MiniGLRixWriteFn csr_write;
+    MiniGLRixReadFn fifo_read;
+    MiniGLRixWriteFn fifo_write;
+    MiniGLRixDmaStreamFn dma_stream;
     MiniGLRixCacheCleanFn cache_clean;
     MiniGLRixCacheInvalidateFn cache_invalidate;
     uint8_t *command_buffer[MINIGL_RIX_COMMAND_BUFFERS];
@@ -130,8 +136,6 @@ typedef struct MiniGLRixBackend {
     MiniGLRixPlatform platform;
     RixTriangle triangles[MINIGL_RIX_MAX_TRIANGLES];
     RixTriangle texture1_triangles[MINIGL_RIX_MAX_TRIANGLES];
-    RixTriangle *references[MINIGL_RIX_MAX_TRIANGLES];
-    RixBandList bands;
     MiniGLRixRecordedOp ops[MINIGL_RIX_MAX_OPS];
     ZZ9KMiniGLPacketSetState state;
     uint32_t color_address, depth_address;
