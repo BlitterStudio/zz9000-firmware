@@ -82,7 +82,7 @@ static void mock_render_packet(struct mock_platform *p)
         } else if ((command & 0xf0000000U) == RIX_OP_FRAMEBUFFER &&
                    (command & 0xffU) == (RIX_FRAMEBUFFER_MEMSET |
                                          RIX_FRAMEBUFFER_COLOR) &&
-                   (command >> 8U) == 1U && p->complete_submissions) {
+                   ((command >> 8U) & 0xfffffU) == 1U && p->complete_submissions) {
             if (p->color_address == 0x100000U + sizeof(p->cmd_buf[0]) -
                                     MINIGL_RIX_TEXTURE_PAGE_BYTES)
                 *(uint16_t *)(p->cmd_buf[0] + sizeof(p->cmd_buf[0]) -
