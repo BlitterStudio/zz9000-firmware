@@ -847,10 +847,25 @@ module tb_zz9k_rasterix;
             while ((timeout < poll_limit) && (command_complete == 0)) begin
                 axi_read(16'h000c, status);
                 if (status[1]) begin
-                    $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d transport=%0s",
-                             scene, submission_index, cycle_count, submission_words,
-                             $test$plusargs("DMA_BURST") ? "dma-fixed" : "mmio");
-                    command_complete = 1;
+`ifndef RASTERIX_VARIANT_EF
+                    /* FIFO acceptance is not the IF framebuffer drain point:
+                     * wait for the final commit before dumping a replay. */
+                    while ((timeout < poll_limit) &&
+                           (((last_fb_word & 32'h1) == 0) ||
+                            dut.renderer.framebuffer_avalid != 0 ||
+                            dut.renderer.rixif.colorBuffer.commandHandler.cmdState != 0 ||
+                            dut.renderer.rixif.genDepthBuffer.depthBuffer.commandHandler.cmdState != 0 ||
+                            dut.renderer.axisToAxiCrossbar.transferActive != 0)) begin
+                        @(posedge clk);
+                        timeout = timeout + 1;
+                    end
+`endif
+                    if (timeout < poll_limit) begin
+                        $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d transport=%0s",
+                                 scene, submission_index, cycle_count, submission_words,
+                                 $test$plusargs("DMA_BURST") ? "dma-fixed" : "mmio");
+                        command_complete = 1;
+                    end
                 end
                 timeout = timeout + 1;
             end
