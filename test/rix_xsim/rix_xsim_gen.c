@@ -573,7 +573,8 @@ int main(int argc, char **argv)
         !generate_scene(argv[1], "ef-s1", 1U, 1) ||
         !generate_scene(argv[1], "ef-s2", 2U, 1) ||
         !generate_scene(argv[1], "ef-s3", 3U, 1) ||
-        !generate_scene(argv[1], "ef-s4", 4U, 1)) {
+        !generate_scene(argv[1], "ef-s4", 4U, 1) ||
+        !generate_scene(argv[1], "ef-probe", 5U, 1)) {
         fprintf(stderr, "failed to write RasterIX XSim scene output to %s\n", argv[1]);
         return 1;
     }

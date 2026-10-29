@@ -43,7 +43,7 @@ docker run --rm -v "$IF_DOCKER:/if:ro" -v "$MG_DOCKER:/mg:ro" -v "$OUT_DOCKER:/o
   /tmp/rix_xsim_gen /out
 '
 
-for scene in probe s1 s2 s3 s4; do
+for scene in ef-s1 ef-s2 ef-s3 ef-s4 ef-probe; do
   echo "=== xsim $scene (latency $LATENCY) ==="
   rm -f "$OUT/$scene.ppm"
   cmd.exe /c "$WINIF\\test\\rix_xsim\\run_xsim.bat" "$WINIF" "$WINOUT" "$scene" "$LATENCY" >"$OUT/${scene}_xsim.log" 2>&1
