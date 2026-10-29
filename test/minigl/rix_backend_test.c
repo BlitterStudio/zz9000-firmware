@@ -9,14 +9,17 @@
 extern void (*g_rix_test_log)(const char *fmt, ...);
 
 static unsigned g_disabled_logs;
-static unsigned g_timeout_snapshots;
+static unsigned g_diagnostic_snapshots;
+static unsigned g_self_test_failures;
 
 static void count_log(const char *fmt, ...)
 {
     if (strstr(fmt, "backend disabled:") != NULL)
         ++g_disabled_logs;
-    if (strstr(fmt, "timeout snapshot") != NULL)
-        ++g_timeout_snapshots;
+    if (strstr(fmt, "diag csr") != NULL)
+        ++g_diagnostic_snapshots;
+    if (strstr(fmt, "self-test failed") != NULL)
+        ++g_self_test_failures;
 }
 
 #define COMMAND_BYTES MINIGL_RIX_COMMAND_BYTES
@@ -59,6 +62,8 @@ struct model {
     uintptr_t invalidated_address;
     size_t invalidated_bytes;
     unsigned texture_pool_grows;
+    unsigned dma_packets;
+    int dma_fail;
 };
 
 static uint16_t rgba_to_rgb565(uint32_t rgba)
@@ -229,6 +234,29 @@ static MiniGLRixPlatform platform(struct model *model)
     value.cache_invalidate = cache_invalidate;
     value.white_texture_bytes = sizeof(model->white);
     return value;
+}
+
+/* PL330 stand-in: the payload reaches TDFD exactly as single stores would. */
+static int dma_stream(void *context, uintptr_t source, uint32_t words,
+                      uint32_t burst_words)
+{
+    struct model *model = context;
+    const uint32_t *payload = NULL;
+    size_t index;
+
+    assert(burst_words == 16U && words >= 16U);
+    ++model->dma_packets;
+    if (model->dma_fail)
+        return 0;
+    for (index = 0U; index < 2U; ++index)
+        if (source >= model->command_address[index] &&
+            source < model->command_address[index] + COMMAND_BYTES)
+            payload = (const uint32_t *)(void *)(model->command[index] +
+                (source - model->command_address[index]));
+    assert(payload != NULL);
+    for (index = 0U; index < words; ++index)
+        fifo_write(model, RIX_DRV_FIFO_TDFD, payload[index]);
+    return 1;
 }
 
 static ZZ9KMiniGLPacketSetState state16(void)
@@ -644,15 +672,79 @@ static void test_timeout_diagnostics(void)
 
     init_backend(&backend, &model, TEXTURE_SLOTS);
     model.complete_packets = 0U;
-    g_timeout_snapshots = 0U;
+    g_diagnostic_snapshots = 0U;
     g_rix_test_log = count_log;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(!minigl_rix_backend_drain(&backend));
-    assert(g_timeout_snapshots == 1U);
+    assert(g_diagnostic_snapshots == 1U);
     assert(model.invalidates != 0U);
+    g_rix_test_log = NULL;
+}
+
+static void init_dma_backend(MiniGLRixBackend *backend, struct model *model,
+                             int fail)
+{
+    MiniGLRixPlatform io;
+
+    memset(model, 0, sizeof(*model));
+    model->texture_bytes = TEXTURE_SLOTS * MINIGL_RIX_TEXTURE_PAGE_BYTES;
+    model->complete_packets = 1U;
+    model->fifo_vacancy = FIFO_CAPACITY;
+    model->dma_fail = fail;
+    model->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    io = platform(model);
+    io.dma_stream = dma_stream;
+    minigl_rix_backend_init(backend, &io);
+    assert(minigl_rix_backend_available(backend));
+}
+
+static void test_dma_self_test_gates_transport(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
+    unsigned dma_packets;
+
+    g_self_test_failures = 0U;
+    g_diagnostic_snapshots = 0U;
+    g_rix_test_log = count_log;
+
+    /* A delivered DMA packet lands the self-test fence and keeps the PL330. */
+    init_dma_backend(&backend, &model, 0);
+    assert(backend.driver.dma_stream != NULL);
+    assert(model.dma_packets == 1U && model.packet_count == 1U);
+    assert(*(uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES) == 0xa55aU);
+    assert(g_self_test_failures == 0U && g_diagnostic_snapshots == 0U);
+    dma_packets = model.dma_packets;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_drain(&backend));
+    assert(model.dma_packets > dma_packets);
+
+    /* A failed DMA packet falls back to MMIO after a reset, not to the CPU. */
+    init_dma_backend(&backend, &model, 1);
+    assert(backend.driver.dma_stream == NULL);
+    assert(model.dma_packets == 1U && model.packet_count == 0U);
+    assert(g_self_test_failures == 1U && g_diagnostic_snapshots == 1U);
+    assert(model.csr[RIX_DRV_CSR_CONTROL / 4U] == RIX_DRV_CONTROL_ENABLE);
+    assert(model.fifo_words == 0U && model.fifo_vacancy == FIFO_CAPACITY);
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_drain(&backend));
+    assert(model.dma_packets == 1U && model.packet_count >= 1U);
     g_rix_test_log = NULL;
 }
 
@@ -930,6 +1022,7 @@ int main(void)
     test_surface_handoff_and_recorded_texture_state();
     test_disabled_backend_is_one_shot();
     test_two_texture_multipass_recording();
+    test_dma_self_test_gates_transport();
     puts("RasterIX EF backend: frame recording, FIFO replay and texture residency passed");
     return 0;
 }

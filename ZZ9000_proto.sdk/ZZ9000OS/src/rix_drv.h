@@ -36,6 +36,13 @@
 #define RIX_DRV_FIFO_RESET_KEY   0xa5U
 #define RIX_DRV_FIFO_PACKET_WORDS 248U
 
+/* PG080 ISR bits.  A TLF value that differs from the bytes written to TDFD
+ * since the last accepted TLF is dropped and sets TSE; the staged words then
+ * never reach the stream, and every later TLF mismatches too. */
+#define RIX_DRV_FIFO_ISR_TPOE    (1U << 28)
+#define RIX_DRV_FIFO_ISR_TSE     (1U << 25)
+#define RIX_DRV_FIFO_ISR_ERRORS  (RIX_DRV_FIFO_ISR_TPOE | RIX_DRV_FIFO_ISR_TSE)
+
 #define RIX_DRV_CONTROL_ENABLE     (1U << 0)
 #define RIX_DRV_CONTROL_SOFT_RESET (1U << 1)
 
@@ -79,9 +86,16 @@ struct rix_drv {
     rix_drv_cache_clean_fn clean_dcache;
     rix_drv_dma_stream_fn dma_stream;
     uint32_t last_status;
+    /* FIFO ISR after a rejected packet commit, else zero. */
     uint32_t last_error_status;
+    /* Source address of the rejected packet, else zero. */
     uint32_t last_error_address;
     uint32_t submitted_target;
+    /* Transport record of the last packet started, for diagnostics. */
+    uint32_t last_packet_bytes;
+    uint32_t packets;
+    uint32_t dma_packets;
+    int last_packet_dma;
     int available;
     int enabled;
 };

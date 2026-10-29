@@ -80,8 +80,9 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
                                uintptr_t command_address, uint32_t words,
                                uint32_t timeout)
 {
-    uint32_t index;
+    uint32_t index, isr;
     int result;
+    int dma;
 
     if (words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS)
         return RIX_DRV_BAD_ARGUMENT;
@@ -89,20 +90,37 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
     if (result != RIX_DRV_OK)
         return result;
 
+    dma = driver->dma_stream != NULL && command_address != (uintptr_t)0U &&
+          words >= 16U;
+    driver->last_packet_bytes = (words + 2U) * sizeof(*commands);
+    driver->last_packet_dma = dma;
+    ++driver->packets;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD,
                        RIX_DSE_STREAM | (words * sizeof(*commands)));
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, 0U);
-    if (driver->dma_stream != NULL && command_address != (uintptr_t)0U &&
-        words >= 16U) {
-        if (!driver->dma_stream(driver->context, command_address, words, 16U))
+    if (dma) {
+        ++driver->dma_packets;
+        if (!driver->dma_stream(driver->context, command_address, words, 16U)) {
+            driver->last_error_address = (uint32_t)command_address;
             return RIX_DRV_ERROR;
+        }
     } else {
         for (index = 0U; index < words; ++index)
             rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, commands[index]);
     }
     /* TLF is the packet boundary.  The callback has completed every fixed
-     * destination write before this commit, as required by PG080. */
-    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, (words + 2U) * sizeof(*commands));
+     * destination write before this commit, as required by PG080.  The FIFO
+     * drops a TLF whose length differs from the staged bytes, so check that
+     * the commit was accepted rather than discovering it as a fence timeout. */
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, driver->last_packet_bytes);
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR);
+    if ((isr & RIX_DRV_FIFO_ISR_ERRORS) != 0U) {
+        driver->last_error_status = isr;
+        driver->last_error_address = (uint32_t)(command_address != (uintptr_t)0U ?
+                                                command_address :
+                                                (uintptr_t)commands);
+        return RIX_DRV_ERROR;
+    }
     return RIX_DRV_OK;
 }
 
@@ -123,6 +141,10 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
     driver->last_error_status = 0U;
     driver->last_error_address = 0U;
     driver->submitted_target = 0U;
+    driver->last_packet_bytes = 0U;
+    driver->packets = 0U;
+    driver->dma_packets = 0U;
+    driver->last_packet_dma = 0;
     driver->available = 0;
     driver->enabled = 0;
 
@@ -139,9 +161,16 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
 
 int rix_drv_enable(struct rix_drv *driver)
 {
+    uint32_t isr;
+
     if (!rix_drv_usable(driver))
         return RIX_DRV_UNAVAILABLE;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    /* TDFR leaves ISR intact; clear a previous context's sticky errors so the
+     * per-packet commit check only sees this context's packets. */
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR) & RIX_DRV_FIFO_ISR_ERRORS;
+    if (isr != 0U)
+        rix_drv_fifo_write(driver, RIX_DRV_FIFO_ISR, isr);
     rix_drv_write(driver, RIX_DRV_CSR_CONTROL, RIX_DRV_CONTROL_ENABLE);
     driver->enabled = 1;
     return RIX_DRV_OK;

@@ -15,6 +15,21 @@
 
 #define MINIGL_RIX_CSR_BASE 0x83c60000U
 #define MINIGL_RIX_FIFO_BASE 0x83c70000U
+/* PL330 DMAC (secure APB view) and the channel used by MINIGL_RIX_DMA=1
+ * builds to stream packet payloads into TDFD; UG585 Appendix B. */
+#define MINIGL_RIX_DMAC_BASE 0xf8004000U
+#define MINIGL_RIX_DMAC_CHANNEL 6U
+#define MINIGL_RIX_DMAC_DS 0x000U
+#define MINIGL_RIX_DMAC_FSRC 0x034U
+#define MINIGL_RIX_DMAC_FTR(channel) (0x040U + (channel) * 4U)
+#define MINIGL_RIX_DMAC_CSR(channel) (0x100U + (channel) * 8U)
+#define MINIGL_RIX_DMAC_CPC(channel) (0x104U + (channel) * 8U)
+#define MINIGL_RIX_DMAC_SAR(channel) (0x400U + (channel) * 0x20U)
+#define MINIGL_RIX_DMAC_DAR(channel) (0x404U + (channel) * 0x20U)
+#define MINIGL_RIX_DMAC_CCR(channel) (0x408U + (channel) * 0x20U)
+#define MINIGL_RIX_DMAC_DBGSTATUS 0xd00U
+/* S_AXI_HP3 AFI, the RasterIX EF memory port. */
+#define MINIGL_RIX_AFI_BASE 0xf800b000U
 #define MINIGL_RIX_TEXTURE_PAGE_BYTES 2048U
 #define MINIGL_RIX_WHITE_TEXTURE_BYTES MINIGL_RIX_TEXTURE_PAGE_BYTES
 /* TextureSampler's sparse mip layout uses a 256x256x16-bit level-zero

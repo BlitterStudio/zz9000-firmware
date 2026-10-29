@@ -9,18 +9,20 @@
 #include "xil_io.h"
 #include "xil_printf.h"
 #define RIX_LOG(...) xil_printf(__VA_ARGS__)
-#define RIX_AFI_DIAGNOSTICS 1
+#define RIX_PS_DIAGNOSTICS 1
 #else
 void (*g_rix_test_log)(const char *fmt, ...) = NULL;
 #define RIX_LOG(...) do { if (g_rix_test_log) g_rix_test_log(__VA_ARGS__); } while (0)
-#define RIX_AFI_DIAGNOSTICS 0
+#define RIX_PS_DIAGNOSTICS 0
 #endif
 
 #include <string.h>
 
 #define RIX_TIMEOUT 1000000U
-#define RIX_AFI0_BASE 0xf8008000U
-#define RIX_AFI1_BASE 0xf8009000U
+/* Start-up PL330 self-test: leading parser NOPs put the packet past one
+ * 16-word burst plus a tail before the fence MEMSET that proves delivery. */
+#define RIX_DMA_SELF_TEST_NOPS 24U
+#define RIX_DMA_SELF_TEST_FENCE 0xa55aU
 #define RIX_AFI_RD_CTRL 0x00U
 #define RIX_AFI_RD_ISSUING_CAP 0x04U
 #define RIX_AFI_RD_QOS 0x08U
@@ -704,83 +706,100 @@ static void backend_release_buffer(MiniGLRixBackend *backend, uint8_t index)
     }
 }
 
-static uint8_t g_timeout_diagnostics_logged;
-
-#if RIX_AFI_DIAGNOSTICS
-static void backend_log_afi_timeout_diagnostics(uint32_t base, const char *name)
+#if RIX_PS_DIAGNOSTICS
+static void backend_log_ps_diagnostics(void)
 {
-    RIX_LOG("[RasterIX] timeout %s-r=%08lx/%08lx/%08lx/%08lx/%08lx %s-w=%08lx/%08lx/%08lx/%08lx/%08lx\r\n",
-            name, (unsigned long)Xil_In32(base + RIX_AFI_RD_CTRL),
-            (unsigned long)Xil_In32(base + RIX_AFI_RD_ISSUING_CAP),
-            (unsigned long)Xil_In32(base + RIX_AFI_RD_QOS),
-            (unsigned long)Xil_In32(base + RIX_AFI_RD_DATAFIFO_LEVEL),
-            (unsigned long)Xil_In32(base + RIX_AFI_RD_DEBUG),
-            name, (unsigned long)Xil_In32(base + RIX_AFI_WR_CTRL),
-            (unsigned long)Xil_In32(base + RIX_AFI_WR_ISSUING_CAP),
-            (unsigned long)Xil_In32(base + RIX_AFI_WR_QOS),
-            (unsigned long)Xil_In32(base + RIX_AFI_WR_DATAFIFO_LEVEL),
-            (unsigned long)Xil_In32(base + RIX_AFI_WR_DEBUG));
+    const uint32_t afi = MINIGL_RIX_AFI_BASE;
+    const uint32_t dmac = MINIGL_RIX_DMAC_BASE;
+    const uint32_t channel = MINIGL_RIX_DMAC_CHANNEL;
+
+    RIX_LOG("[RasterIX] diag afi3-r=%08lx/%08lx/%08lx/%08lx/%08lx afi3-w=%08lx/%08lx/%08lx/%08lx/%08lx\r\n",
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_CTRL),
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_ISSUING_CAP),
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_QOS),
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_DATAFIFO_LEVEL),
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_DEBUG),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_CTRL),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_ISSUING_CAP),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_QOS),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_DATAFIFO_LEVEL),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_DEBUG));
+    RIX_LOG("[RasterIX] diag pl330 ds=%08lx fsrc=%08lx dbg=%08lx ch%lu csr=%08lx cpc=%08lx ftr=%08lx sar=%08lx dar=%08lx ccr=%08lx\r\n",
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_DS),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_FSRC),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_DBGSTATUS),
+            (unsigned long)channel,
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_CSR(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_CPC(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_FTR(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_SAR(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_DAR(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_CCR(channel)));
 }
 #endif
 
-static void backend_log_timeout_diagnostics(MiniGLRixBackend *backend, uint8_t index)
+/* One snapshot per backend failure: the EF CSR map, the command FIFO's
+ * readable registers (TDFD/TLF/TDFR are write-only), the transport of the
+ * last packet, the failed buffer and, on hardware, AFI3 and the PL330. */
+static void backend_log_diagnostics(MiniGLRixBackend *backend, uint8_t index)
 {
-    uint32_t csr[23];
+    const MiniGLRixPlatform *platform = &backend->platform;
+    const struct rix_drv *driver = &backend->driver;
     uint32_t words[16] = { 0U };
     uint32_t command_words = backend->submitted_command_words[index];
     size_t word_count = command_words < 16U ? command_words : 16U;
-    size_t word_index;
-    const uint8_t *buffer = backend->platform.command_buffer[index];
+    const uint8_t *buffer = platform->command_buffer[index];
 
-    if (g_timeout_diagnostics_logged)
-        return;
-    g_timeout_diagnostics_logged = 1U;
-    for (word_index = 0U; word_index < 23U; ++word_index)
-        csr[word_index] = backend->platform.csr_read(backend->platform.context,
-                                                      (uint32_t)word_index * 4U);
+    RIX_LOG("[RasterIX] diag csr id=%08lx ver=%08lx ctl=%08lx st=%08lx stream=%08lx resp=%08lx\r\n",
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_IDENTITY),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_VERSION),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_CONTROL),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_STATUS),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_STREAM),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_RESPONSE));
+    RIX_LOG("[RasterIX] diag mem aw=%lu w=%lu b=%lu ar=%lu r=%lu last_ar=%08lx arid=%02lx\r\n",
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_AW),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_W),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_B),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_AR),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_R),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_LAST_AR),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_LAST_ARID));
+    RIX_LOG("[RasterIX] diag fifo isr=%08lx ier=%08lx tdfv=%lu last=%s/%lu bytes packets=%lu dma=%lu transport=%s\r\n",
+            (unsigned long)platform->fifo_read(platform->context, RIX_DRV_FIFO_ISR),
+            (unsigned long)platform->fifo_read(platform->context, RIX_DRV_FIFO_IER),
+            (unsigned long)platform->fifo_read(platform->context, RIX_DRV_FIFO_TDFV),
+            driver->last_packet_dma ? "dma" : "mmio",
+            (unsigned long)driver->last_packet_bytes, (unsigned long)driver->packets,
+            (unsigned long)driver->dma_packets,
+            driver->dma_stream != NULL ? "dma" : "mmio");
     if (buffer != NULL && word_count != 0U) {
-        if (backend->platform.cache_invalidate != NULL)
-            backend->platform.cache_invalidate(backend->platform.context,
-                                               (uintptr_t)buffer,
-                                               word_count * sizeof(words[0]));
+        if (platform->cache_invalidate != NULL)
+            platform->cache_invalidate(platform->context, (uintptr_t)buffer,
+                                       word_count * sizeof(words[0]));
         memcpy(words, buffer, word_count * sizeof(words[0]));
     }
-    RIX_LOG("[RasterIX] timeout snapshot csr=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx\r\n",
-            (unsigned long)csr[0], (unsigned long)csr[1], (unsigned long)csr[2],
-            (unsigned long)csr[3], (unsigned long)csr[4], (unsigned long)csr[5],
-            (unsigned long)csr[6]);
-    RIX_LOG("[RasterIX] timeout csr=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx\r\n",
-            (unsigned long)csr[7], (unsigned long)csr[8], (unsigned long)csr[9],
-            (unsigned long)csr[10], (unsigned long)csr[11], (unsigned long)csr[12],
-            (unsigned long)csr[13]);
-    RIX_LOG("[RasterIX] timeout cmd=%08lx/%08lx color=%08lx depth=%08lx tex=%08lx white=%08lx\r\n",
-            (unsigned long)backend->platform.command_address[index],
+    RIX_LOG("[RasterIX] diag cmd=%08lx/%lu color=%08lx depth=%08lx tex=%08lx white=%08lx\r\n",
+            (unsigned long)platform->command_address[index],
             (unsigned long)command_words, (unsigned long)backend->color_address,
             (unsigned long)backend->depth_address,
-            (unsigned long)backend->platform.texture_address,
-            (unsigned long)backend->platform.white_texture_address);
-    RIX_LOG("[RasterIX] timeout words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
+            (unsigned long)platform->texture_address,
+            (unsigned long)platform->white_texture_address);
+    RIX_LOG("[RasterIX] diag words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
             (unsigned long)words[0], (unsigned long)words[1], (unsigned long)words[2],
             (unsigned long)words[3], (unsigned long)words[4], (unsigned long)words[5],
             (unsigned long)words[6], (unsigned long)words[7]);
-    RIX_LOG("[RasterIX] timeout words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
+    RIX_LOG("[RasterIX] diag words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
             (unsigned long)words[8], (unsigned long)words[9], (unsigned long)words[10],
             (unsigned long)words[11], (unsigned long)words[12], (unsigned long)words[13],
             (unsigned long)words[14], (unsigned long)words[15]);
-    RIX_LOG("[RasterIX] timeout dbg live=%08lx/%08lx ar=%08lx rb=%08lx\r\n",
-            (unsigned long)csr[14], (unsigned long)csr[15],
-            (unsigned long)csr[16], (unsigned long)csr[17]);
-    RIX_LOG("[RasterIX] timeout dbg rl=%08lx car=%08lx crl=%08lx addr=%08lx id=%08lx\r\n",
-            (unsigned long)csr[18], (unsigned long)csr[19],
-            (unsigned long)csr[20], (unsigned long)csr[21],
-            (unsigned long)csr[22]);
-#if RIX_AFI_DIAGNOSTICS
-    backend_log_afi_timeout_diagnostics(RIX_AFI0_BASE, "afi0");
-    backend_log_afi_timeout_diagnostics(RIX_AFI1_BASE, "afi1");
+#if RIX_PS_DIAGNOSTICS
+    backend_log_ps_diagnostics();
 #endif
 }
 
-static void backend_disable(MiniGLRixBackend *backend, const char *operation, int result)
+static void backend_disable(MiniGLRixBackend *backend, const char *operation,
+                            int result, uint8_t buffer_index)
 {
     size_t index;
 
@@ -791,6 +810,7 @@ static void backend_disable(MiniGLRixBackend *backend, const char *operation, in
             operation, result, (unsigned long)backend->driver.last_status,
             (unsigned long)backend->driver.last_error_status,
             (unsigned long)backend->driver.last_error_address);
+    backend_log_diagnostics(backend, buffer_index);
     for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
         backend->pending[index] = 0U;
         backend->pending_fence[index] = 0U;
@@ -814,34 +834,38 @@ static volatile uint16_t *backend_fence_pixel(MiniGLRixBackend *backend, uint8_t
                                  MINIGL_RIX_TEXTURE_PAGE_BYTES);
 }
 
+static int backend_wait_fence(MiniGLRixBackend *backend, uint8_t index,
+                              uint16_t value)
+{
+    volatile uint16_t *pixel = backend_fence_pixel(backend, index);
+    uint32_t attempt = 0U;
+
+    for (;;) {
+        if (backend->platform.cache_invalidate != NULL)
+            backend->platform.cache_invalidate(backend->platform.context,
+                                               (uintptr_t)pixel, sizeof(*pixel));
+        if (*pixel == value)
+            return 1;
+        if (attempt++ >= RIX_TIMEOUT)
+            return 0;
+    }
+}
+
 static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
 {
-    volatile uint16_t *pixel;
-    uint32_t attempt = 0U;
     int result;
 
     if (backend->error)
         return 0;
     if (!backend->pending[index])
         return 1;
-    pixel = backend_fence_pixel(backend, index);
-    for (;;) {
-        if (backend->platform.cache_invalidate != NULL)
-            backend->platform.cache_invalidate(backend->platform.context,
-                                               (uintptr_t)pixel, sizeof(*pixel));
-        if (*pixel == (uint16_t)backend->pending_fence[index])
-            break;
-        if (attempt++ >= RIX_TIMEOUT) {
-            backend_log_timeout_diagnostics(backend, index);
-            backend_disable(backend, "fence", RIX_DRV_TIMEOUT);
-            return 0;
-        }
+    if (!backend_wait_fence(backend, index, (uint16_t)backend->pending_fence[index])) {
+        backend_disable(backend, "fence", RIX_DRV_TIMEOUT, index);
+        return 0;
     }
     result = rix_drv_poll(&backend->driver, RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
-        if (result == RIX_DRV_TIMEOUT)
-            backend_log_timeout_diagnostics(backend, index);
-        backend_disable(backend, "poll", result);
+        backend_disable(backend, "poll", result, index);
         return 0;
     }
     backend->pending[index] = 0U;
@@ -976,16 +1000,16 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer,
         buffer == NULL || backend->platform.command_address[index] == 0U)
         return 0;
     command_words = (uint32_t)(writer->length / sizeof(uint32_t));
+    backend->submitted_command_words[index] = command_words;
     result = rix_drv_submit(&backend->driver, (const uint32_t *)buffer,
                             backend->platform.command_address[index],
                             command_words, RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
-        backend_disable(backend, "submit", result);
+        backend_disable(backend, "submit", result, index);
         return 0;
     }
     backend->pending_fence[index] = fence;
     backend->pending[index] = 1U;
-    backend->submitted_command_words[index] = command_words;
     memcpy(backend->pending_pins[index], backend->recorded_pins,
            sizeof(backend->pending_pins[index]));
     memset(backend->recorded_pins, 0, sizeof(backend->recorded_pins));
@@ -1035,6 +1059,72 @@ int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform)
     return 1;
 }
 
+/* README contract: PL330 transport may carry packets only after a start-up
+ * test proves the count and content of a DMA packet end to end.  One packet
+ * of parser NOPs plus a fence MEMSET goes out through the DMA path; the
+ * commit must be accepted, the fence pixel must land and the renderer must
+ * drain. */
+static int backend_dma_self_test(MiniGLRixBackend *backend)
+{
+    RixCmdWriter writer;
+    volatile uint16_t *pixel = backend_fence_pixel(backend, 0U);
+    uint8_t *buffer = backend->platform.command_buffer[0];
+    uint32_t packets = backend->driver.dma_packets;
+    uint32_t index;
+
+    if (buffer == NULL || backend->platform.command_address[0] == 0U ||
+        backend->platform.command_capacity <= MINIGL_RIX_TEXTURE_PAGE_BYTES)
+        return 0;
+    *pixel = 0U;
+    if (backend->platform.cache_clean != NULL)
+        backend->platform.cache_clean(backend->platform.context, (uintptr_t)pixel,
+                                      sizeof(*pixel));
+    rix_cmd_init(&writer, buffer, backend->platform.command_capacity -
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES);
+    for (index = 0U; index < RIX_DMA_SELF_TEST_NOPS; ++index)
+        (void)rix_cmd_word(&writer, 0U);
+    if (!backend_emit_fence(backend, &writer, 0U, RIX_DMA_SELF_TEST_FENCE) ||
+        writer.failed)
+        return 0;
+    backend->submitted_command_words[0] = (uint32_t)(writer.length / sizeof(uint32_t));
+    if (rix_drv_submit(&backend->driver, (const uint32_t *)buffer,
+                       backend->platform.command_address[0],
+                       backend->submitted_command_words[0], RIX_TIMEOUT) != RIX_DRV_OK ||
+        backend->driver.dma_packets == packets ||
+        !backend_wait_fence(backend, 0U, RIX_DMA_SELF_TEST_FENCE) ||
+        rix_drv_poll(&backend->driver, RIX_TIMEOUT) != RIX_DRV_OK)
+        return 0;
+    backend->submitted_command_words[0] = 0U;
+    return 1;
+}
+
+static int backend_select_transport(MiniGLRixBackend *backend)
+{
+    static int logged = 0;
+
+    if (backend->driver.dma_stream == NULL) {
+        if (!logged)
+            RIX_LOG("[RasterIX] transport: MMIO\r\n");
+        logged = 1;
+        return 1;
+    }
+    if (backend_dma_self_test(backend)) {
+        if (!logged)
+            RIX_LOG("[RasterIX] transport: PL330 DMA (self-test passed)\r\n");
+        logged = 1;
+        return 1;
+    }
+    RIX_LOG("[RasterIX] transport: PL330 self-test failed (err_status=0x%08lx); using MMIO\r\n",
+            (unsigned long)backend->driver.last_error_status);
+    backend_log_diagnostics(backend, 0U);
+    backend->submitted_command_words[0] = 0U;
+    backend->driver.dma_stream = NULL;
+    /* Discard the renderer and FIFO state of the failed packet, then clear
+     * the FIFO's sticky errors before MMIO packets are committed. */
+    return rix_drv_recover(&backend->driver, RIX_TIMEOUT, 1) == RIX_DRV_OK &&
+           rix_drv_enable(&backend->driver) == RIX_DRV_OK;
+}
+
 void minigl_rix_backend_init(MiniGLRixBackend *backend,
                              const MiniGLRixPlatform *platform)
 {
@@ -1062,6 +1152,11 @@ void minigl_rix_backend_init(MiniGLRixBackend *backend,
         return;
     }
     backend_fill_white_texture(backend);
+    if (!backend_select_transport(backend)) {
+        RIX_LOG("[RasterIX] backend enable failed (status=0x%08lx)\r\n",
+                (unsigned long)backend->driver.last_status);
+        return;
+    }
     backend->available = 1U;
 }
 

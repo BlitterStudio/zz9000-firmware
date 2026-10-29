@@ -39,6 +39,10 @@ static void fifo_write(void *context, uint32_t offset, uint32_t value)
 {
     struct model *model = context;
 
+    if (offset == RIX_DRV_FIFO_ISR) {
+        model->fifo[0] &= ~value;
+        return;
+    }
     model->fifo[offset / 4U] = value;
     if (offset == RIX_DRV_FIFO_TDFD) {
         assert(model->word_count < LOG_WORDS);
@@ -155,7 +159,36 @@ static void test_dma_chunking(void)
     assert(model.lengths[1] == (52U + 2U) * 4U);
     assert(model.dma_count == 2U);
     assert(model.dma_words[0] == 248U && model.dma_words[1] == 52U);
+    assert(driver.packets == 2U && driver.dma_packets == 2U);
+    assert(driver.last_packet_dma && driver.last_packet_bytes == (52U + 2U) * 4U);
     assert(rix_drv_poll(&driver, 0U) == RIX_DRV_OK);
+}
+
+/* A TLF that disagrees with the staged byte count is dropped by the FIFO
+ * (ISR.TSE); the driver must report it on that packet, and enable must clear
+ * a previous context's sticky errors without touching other ISR bits. */
+static void test_rejected_commit(void)
+{
+    struct model model;
+    struct rix_drv driver;
+    struct rix_drv_config io;
+    static const uint32_t commands[] = { 0x10000000U, 0x12345678U, 0U };
+    const uint32_t trc = 1U << 24;
+
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    model.fifo[RIX_DRV_FIFO_ISR / 4U] = RIX_DRV_FIFO_ISR_TSE | trc;
+    io = config(&model, 1);
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(model.fifo[RIX_DRV_FIFO_ISR / 4U] == trc);
+    assert(rix_drv_submit(&driver, commands, (uintptr_t)commands, 3U, 0U) == RIX_DRV_OK);
+    assert(driver.last_error_status == 0U && !driver.last_packet_dma);
+    model.fifo[RIX_DRV_FIFO_ISR / 4U] |= RIX_DRV_FIFO_ISR_TSE;
+    assert(rix_drv_submit(&driver, commands, (uintptr_t)commands, 3U, 0U) == RIX_DRV_ERROR);
+    assert(driver.last_error_status == (RIX_DRV_FIFO_ISR_TSE | trc));
+    assert(driver.last_error_address == (uint32_t)(uintptr_t)commands);
+    assert(driver.packets == 2U && driver.dma_packets == 0U);
 }
 
 static void test_recovery_and_disable(void)
@@ -181,6 +214,7 @@ int main(void)
     test_discovery_and_enable();
     test_cpu_packet_and_backpressure();
     test_dma_chunking();
+    test_rejected_commit();
     test_recovery_and_disable();
     return 0;
 }

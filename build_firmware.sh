@@ -12,6 +12,8 @@
 # Pass --rasterix to compile the firmware that is safe to package only with
 # the qualified RasterIX bitstream.  The normal build contains no platform
 # registration and therefore cannot issue a GP1 access to 0x83c60000.
+# RasterIX command packets go over MMIO; append MINIGL_RIX_DMA=1 (after
+# --rasterix) to stream them with the PL330 once its start-up self-test passes.
 
 set -euo pipefail
 

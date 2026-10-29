@@ -19,14 +19,17 @@
 #include "xil_io.h"
 #endif
 
-#define MW_RIX_DMAC_BASE 0xf8004000U
-#define MW_RIX_DMAC_CSR(channel) (0x100U + (channel) * 8U)
-#define MW_RIX_DMAC_DBGSTATUS 0xd00U
+/* MINIGL_RIX_DMA=1 builds stream FIFO packet payloads with PL330 channel
+ * MINIGL_RIX_DMAC_CHANNEL; the default build writes every word over MMIO. */
+#ifndef MINIGL_RIX_DMA
+#define MINIGL_RIX_DMA 0
+#endif
 #define MW_RIX_DMAC_DBGCMD 0xd04U
 #define MW_RIX_DMAC_DBGINST0 0xd08U
 #define MW_RIX_DMAC_DBGINST1 0xd0cU
-#define MW_RIX_DMAC_CHANNEL 6U
 #define MW_RIX_DMAC_STOPPED 0U
+#define MW_RIX_DMAC_FAULTING_COMPLETING 14U
+#define MW_RIX_DMAC_FAULTING 15U
 #define MW_RIX_PL330_DMAMOV 0xbcu
 #define MW_RIX_PL330_DMALP 0x20u
 #define MW_RIX_PL330_DMALPEND 0x28u
@@ -211,9 +214,10 @@ static void mw_rix_fifo_write(void *context, uint32_t offset, uint32_t value)
     Xil_Out32(MINIGL_RIX_FIFO_BASE + offset, value);
 }
 
-/* Core1 owns this program.  Commands are cache-cleaned by rix_drv; the
- * conservative single-store path remains in force until a FIFO integrity test
- * qualifies 16-beat fixed-destination bursts. */
+#if MINIGL_RIX_DMA
+/* Core1 owns this program.  Commands are cache-cleaned by rix_drv.  Each
+ * 16-word source burst is stored as single-beat fixed-destination writes;
+ * the backend's start-up self-test must pass before any packet uses it. */
 static uint8_t mw_rix_dma_program[128] __attribute__((aligned(64)));
 
 static void mw_rix_dma_barrier(void)
@@ -277,30 +281,44 @@ static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
     Xil_DCacheFlushRange((INTPTR)program, (u32)sizeof(mw_rix_dma_program));
     mw_rix_dma_barrier();
     for (attempt = 0U; attempt < 100000U; ++attempt)
-        if ((Xil_In32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
+        if ((Xil_In32(MINIGL_RIX_DMAC_BASE + MINIGL_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
             break;
     if (attempt == 100000U)
         return 0;
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
-              (MW_RIX_PL330_DMAGO << 16U) | (MW_RIX_DMAC_CHANNEL << 24U));
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, (uint32_t)(uintptr_t)program);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
+              (MW_RIX_PL330_DMAGO << 16U) | (MINIGL_RIX_DMAC_CHANNEL << 24U));
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, (uint32_t)(uintptr_t)program);
     mw_rix_dma_barrier();
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
     mw_rix_dma_barrier();
+    /* Until the manager has executed DMAGO the channel still reads Stopped
+     * from its previous run, so wait for the debug interface to go idle
+     * before treating Stopped as completion. */
+    for (attempt = 0U; attempt < 100000U; ++attempt)
+        if ((Xil_In32(MINIGL_RIX_DMAC_BASE + MINIGL_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
+            break;
+    if (attempt == 100000U)
+        goto kill;
     for (attempt = 0U; attempt < 1000000U; ++attempt) {
-        uint32_t state = Xil_In32(MW_RIX_DMAC_BASE +
-                                  MW_RIX_DMAC_CSR(MW_RIX_DMAC_CHANNEL)) & 15U;
+        uint32_t state = Xil_In32(MINIGL_RIX_DMAC_BASE +
+                                  MINIGL_RIX_DMAC_CSR(MINIGL_RIX_DMAC_CHANNEL)) & 15U;
+        /* DMAWMB precedes DMAEND, so Stopped means every store has its write
+         * response.  SAR proves every load was issued. */
         if (state == MW_RIX_DMAC_STOPPED)
-            return 1;
-        if (state == 14U || state == 15U)
+            return Xil_In32(MINIGL_RIX_DMAC_BASE +
+                            MINIGL_RIX_DMAC_SAR(MINIGL_RIX_DMAC_CHANNEL)) ==
+                   (uint32_t)source + words * sizeof(uint32_t);
+        if (state == MW_RIX_DMAC_FAULTING_COMPLETING || state == MW_RIX_DMAC_FAULTING)
             break;
     }
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
-              (MW_RIX_PL330_DMAKILL << 16U) | (MW_RIX_DMAC_CHANNEL << 8U) | 1U);
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, 0U);
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
+kill:
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
+              (MW_RIX_PL330_DMAKILL << 16U) | (MINIGL_RIX_DMAC_CHANNEL << 8U) | 1U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, 0U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
     return 0;
 }
+#endif
 
 static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
 {
@@ -388,7 +406,9 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.csr_write = mw_rix_csr_write;
     platform.fifo_read = mw_rix_fifo_read;
     platform.fifo_write = mw_rix_fifo_write;
+#if MINIGL_RIX_DMA
     platform.dma_stream = mw_rix_dma_stream;
+#endif
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
     /* This probe reads only the versioned CSR identity pair. No RIX address is
