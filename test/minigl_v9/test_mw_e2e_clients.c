@@ -197,16 +197,17 @@ static void setup_mock_card(void)
 static int g_total_fail;
 static int g_non_target_fail;
 
-static int is_target_failure(const char *name, const char *line, size_t len)
+static int is_known_host_mock_failure(const char *name, const char *line,
+                                      size_t len)
 {
-    if (strncmp(line, "FAIL ", 5) != 0)
-        return 0;
     if (strcmp(name, "amiberry_ops") != 0)
-        return 1;
-    return (len >= 19 && memcmp(line, "FAIL context-resize", 19) == 0) ||
-           (len >= 28 && memcmp(line, "FAIL raster-primitive-points", 28) == 0) ||
-           (len >= 22 && memcmp(line, "FAIL raster-edge-flags", 22) == 0) ||
-           (len >= 23 && memcmp(line, "FAIL raster-depth-range", 23) == 0);
+        return 0;
+    return (len >= 24 &&
+            memcmp(line, "FAIL context-from-bitmap", 24) == 0) ||
+           (len >= 25 &&
+            memcmp(line, "FAIL context-screen-modes", 25) == 0) ||
+           (len >= 22 &&
+            memcmp(line, "FAIL texture-packed-565", 22) == 0);
 }
 
 static void run_guest(const char *name, int (*guest_main)(void))
@@ -227,17 +228,18 @@ static void run_guest(const char *name, int (*guest_main)(void))
     for (scan = log; scan && *scan;) {
         const char *line_end = strchr(scan, '\n');
         size_t len = line_end ? (size_t)(line_end - scan) : strlen(scan);
-        if (len >= 4 && memcmp(scan, "FAIL", 4) == 0) {
-            if (is_target_failure(name, scan, len))
-                ++fails;
-            else
+        if (len >= 5 && memcmp(scan, "FAIL ", 5) == 0) {
+            if (is_known_host_mock_failure(name, scan, len))
                 ++non_target_fails;
+            else
+                ++fails;
         }
         if (!line_end)
             break;
         scan = line_end + 1;
     }
-    printf("=== guest %s: exit %d, %d targeted FAIL line(s), %d non-target host-mock FAIL line(s) ===\n\n",
+    printf("=== guest %s: exit %d, %d unexpected FAIL line(s), %d known "
+           "host-mock FAIL line(s) ===\n\n",
            name, rc, fails, non_target_fails);
     fflush(stdout);
     g_total_fail += fails;
