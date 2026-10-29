@@ -2398,9 +2398,8 @@
         <spirit:userFileType>CHECKSUM_ed224369</spirit:userFileType>
       </spirit:file>
       <spirit:file>
-        <spirit:name>../../../rtl/zz9k_rix/zz9k_cmd_fetcher.v</spirit:name>
+        <spirit:name>../../../rtl/rasterix/RasterIX/XACPCommandReadCredit.v</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:userFileType>CHECKSUM_9019ec72</spirit:userFileType>
       </spirit:file>
     </spirit:fileSet>
     <spirit:fileSet>
@@ -2798,7 +2797,7 @@
         <spirit:fileType>verilogSource</spirit:fileType>
       </spirit:file>
       <spirit:file>
-        <spirit:name>../../../rtl/zz9k_rix/zz9k_cmd_fetcher.v</spirit:name>
+        <spirit:name>../../../rtl/rasterix/RasterIX/XACPCommandReadCredit.v</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
         <spirit:userFileType>USED_IN_ipstatic</spirit:userFileType>
       </spirit:file>

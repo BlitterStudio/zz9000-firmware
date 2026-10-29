@@ -44,8 +44,12 @@ module tb_zz9k_rasterix;
     wire [1:0] s_axi_rresp;
     wire s_axi_rvalid;
     reg s_axi_rready;
+    reg s_cmd_axis_tvalid;
+    wire s_cmd_axis_tready;
+    reg s_cmd_axis_tlast;
+    reg [31:0] s_cmd_axis_tdata;
 
-    wire [3:0] m_axi_awid;
+    wire [5:0] m_axi_awid;
     wire [31:0] m_axi_awaddr;
     wire [7:0] m_axi_awlen;
     wire [2:0] m_axi_awsize;
@@ -55,16 +59,16 @@ module tb_zz9k_rasterix;
     wire [2:0] m_axi_awprot;
     wire m_axi_awvalid;
     reg m_axi_awready;
-    wire [31:0] m_axi_wdata;
-    wire [3:0] m_axi_wstrb;
+    wire [63:0] m_axi_wdata;
+    wire [7:0] m_axi_wstrb;
     wire m_axi_wlast;
     wire m_axi_wvalid;
     reg m_axi_wready;
-    reg [3:0] m_axi_bid;
+    reg [5:0] m_axi_bid;
     reg [1:0] m_axi_bresp;
     reg m_axi_bvalid;
     wire m_axi_bready;
-    wire [3:0] m_axi_arid;
+    wire [5:0] m_axi_arid;
     wire [31:0] m_axi_araddr;
     wire [7:0] m_axi_arlen;
     wire [2:0] m_axi_arsize;
@@ -74,8 +78,8 @@ module tb_zz9k_rasterix;
     wire [2:0] m_axi_arprot;
     wire m_axi_arvalid;
     reg m_axi_arready;
-    reg [3:0] m_axi_rid;
-    reg [31:0] m_axi_rdata;
+    reg [5:0] m_axi_rid;
+    reg [63:0] m_axi_rdata;
     reg [1:0] m_axi_rresp;
     reg m_axi_rlast;
     reg m_axi_rvalid;
@@ -110,6 +114,8 @@ module tb_zz9k_rasterix;
         .s_axi_rdata(s_axi_rdata), .s_axi_rresp(s_axi_rresp),
         .s_axi_rvalid(s_axi_rvalid), .s_axi_rready(s_axi_rready),
         .m_axi_aclk(clk), .m_axi_aresetn(resetn),
+        .s_cmd_axis_tvalid(s_cmd_axis_tvalid), .s_cmd_axis_tready(s_cmd_axis_tready),
+        .s_cmd_axis_tlast(s_cmd_axis_tlast), .s_cmd_axis_tdata(s_cmd_axis_tdata),
         .m_axi_awid(m_axi_awid), .m_axi_awaddr(m_axi_awaddr), .m_axi_awlen(m_axi_awlen),
         .m_axi_awsize(m_axi_awsize), .m_axi_awburst(m_axi_awburst), .m_axi_awlock(m_axi_awlock),
         .m_axi_awcache(m_axi_awcache), .m_axi_awprot(m_axi_awprot), .m_axi_awvalid(m_axi_awvalid),
@@ -121,14 +127,7 @@ module tb_zz9k_rasterix;
         .m_axi_arlock(m_axi_arlock), .m_axi_arcache(m_axi_arcache), .m_axi_arprot(m_axi_arprot),
         .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready), .m_axi_rid(m_axi_rid),
         .m_axi_rdata(m_axi_rdata), .m_axi_rresp(m_axi_rresp), .m_axi_rlast(m_axi_rlast),
-        .m_axi_rvalid(m_axi_rvalid), .m_axi_rready(m_axi_rready),
-        .m_cmd_axi_arid(m_cmd_axi_arid), .m_cmd_axi_araddr(m_cmd_axi_araddr),
-        .m_cmd_axi_arlen(m_cmd_axi_arlen), .m_cmd_axi_arsize(m_cmd_axi_arsize),
-        .m_cmd_axi_arburst(m_cmd_axi_arburst), .m_cmd_axi_arlock(m_cmd_axi_arlock),
-        .m_cmd_axi_arcache(m_cmd_axi_arcache), .m_cmd_axi_arprot(m_cmd_axi_arprot),
-        .m_cmd_axi_arvalid(m_cmd_axi_arvalid), .m_cmd_axi_arready(m_cmd_axi_arready),
-        .m_cmd_axi_rid(m_cmd_axi_rid), .m_cmd_axi_rdata(m_cmd_axi_rdata), .m_cmd_axi_rresp(m_cmd_axi_rresp),
-        .m_cmd_axi_rlast(m_cmd_axi_rlast), .m_cmd_axi_rvalid(m_cmd_axi_rvalid), .m_cmd_axi_rready(m_cmd_axi_rready)
+        .m_axi_rvalid(m_axi_rvalid), .m_axi_rready(m_axi_rready)
     );
 
     reg [7:0] memory [0:MEM_BYTES-1];
@@ -418,7 +417,7 @@ module tb_zz9k_rasterix;
             if (render_read_delay != 0) render_read_delay <= render_read_delay - 1;
             else begin
                 m_axi_rvalid <= 1;
-                m_axi_rdata <= word_at(render_read_addr);
+                m_axi_rdata <= dword_at(render_read_addr);
                 m_axi_rid <= render_read_id;
                 m_axi_rresp <= address_mapped(render_read_addr) ? 0 : 2;
                 if (!address_mapped(render_read_addr))
@@ -492,7 +491,7 @@ module tb_zz9k_rasterix;
                     m_cmd_axi_rlast <= (shared_left == 1);
                 end else begin
                     m_axi_rvalid <= 1;
-                    m_axi_rdata <= word_at(shared_addr);
+                    m_axi_rdata <= dword_at(shared_addr);
                     m_axi_rid <= shared_id;
                     m_axi_rresp <= address_mapped(shared_addr) ? 0 : 2;
                     if (!address_mapped(shared_addr))
@@ -543,26 +542,28 @@ module tb_zz9k_rasterix;
             write_id <= m_axi_awid;
         end
         if (m_axi_wvalid && m_axi_wready) begin
-            if (!write_word_mapped(write_addr, m_axi_wstrb)) begin
+            if (!write_word_mapped(write_addr, m_axi_wstrb[3:0]) ||
+                !write_word_mapped(write_addr + 4, m_axi_wstrb[7:4])) begin
                 $error("renderer AXI write outside sparse DDR: %08x strb=%x",
                        write_addr, m_axi_wstrb);
                 write_error <= 1;
             end
-            if (write_addr == 32'h0021_7a2c)
-                $display("S4_X_DDR_WRITE cycle=%0d addr=%08x data=%08x strb=%x",
-                         cycle_count, write_addr, m_axi_wdata, m_axi_wstrb);
             if (m_axi_wstrb[0]) write_byte(write_addr, m_axi_wdata[7:0]);
             if (m_axi_wstrb[1]) write_byte(write_addr + 1, m_axi_wdata[15:8]);
             if (m_axi_wstrb[2]) write_byte(write_addr + 2, m_axi_wdata[23:16]);
             if (m_axi_wstrb[3]) write_byte(write_addr + 3, m_axi_wdata[31:24]);
-            write_addr <= write_addr + 4;
+            if (m_axi_wstrb[4]) write_byte(write_addr + 4, m_axi_wdata[39:32]);
+            if (m_axi_wstrb[5]) write_byte(write_addr + 5, m_axi_wdata[47:40]);
+            if (m_axi_wstrb[6]) write_byte(write_addr + 6, m_axi_wdata[55:48]);
+            if (m_axi_wstrb[7]) write_byte(write_addr + 7, m_axi_wdata[63:56]);
+            write_addr <= write_addr + (1 << m_axi_awsize);
             write_left <= write_left - 1;
             if (m_axi_wlast) begin
                 if (write_left != 1) $fatal(1, "early renderer WLAST left=%0d addr=%08x awlen=%0d", write_left, write_addr, m_axi_awlen);
                 write_active <= 0;
                 m_axi_bvalid <= 1;
                 m_axi_bid <= write_id;
-                m_axi_bresp <= (write_error || !write_word_mapped(write_addr, m_axi_wstrb)) ? 2 : 0;
+                m_axi_bresp <= (write_error || !write_word_mapped(write_addr, m_axi_wstrb[3:0]) || !write_word_mapped(write_addr + 4, m_axi_wstrb[7:4])) ? 2 : 0;
             end
         end
         if (m_axi_bvalid && m_axi_bready) m_axi_bvalid <= 0;
@@ -638,6 +639,26 @@ module tb_zz9k_rasterix;
             @(posedge clk);
         end
     endtask
+    // Models the AXI FIFO MM-S TX stream after a complete TDFD/TLF packet.
+    // DMA_BURST preserves these packet boundaries while changing only producer
+    // writes, so both transports share this sink-side model.
+    task fifo_submit;
+        input integer start_word;
+        input integer word_count;
+        integer n;
+        begin
+            for (n = 0; n < word_count; n = n + 1) begin
+                @(posedge clk);
+                s_cmd_axis_tdata <= command_words[start_word + n];
+                s_cmd_axis_tlast <= (n == word_count - 1);
+                s_cmd_axis_tvalid <= 1;
+                while (!s_cmd_axis_tready) @(posedge clk);
+            end
+            @(posedge clk);
+            s_cmd_axis_tvalid <= 0;
+            s_cmd_axis_tlast <= 0;
+        end
+    endtask
     task dump_ppm;
         input [8*512-1:0] name;
         integer fd, x, y;
@@ -687,12 +708,9 @@ module tb_zz9k_rasterix;
     endtask
     task print_timeout;
         begin
-            $display("TIMEOUT cycle=%0d status=%08x fetch.state=%0d fetch.fifo=%0d pio=%0d", cycle_count,
-                     s_axi_rdata, dut.command_fetcher.dbg_state,
-                     dut.command_fetcher.dbg_fifo_count, dut.command_count);
-            $display("cmd-ddr active=%b left=%0d rvalid=%b rready=%b rlast=%b arvalid=%b arready=%b",
-                     cmd_read_active, cmd_read_left, m_cmd_axi_rvalid, m_cmd_axi_rready,
-                     m_cmd_axi_rlast, m_cmd_axi_arvalid, m_cmd_axi_arready);
+            $display("TIMEOUT cycle=%0d status=%08x stream=%b/%b renderer busy=%b",
+                     cycle_count, s_axi_rdata, s_cmd_axis_tvalid, s_cmd_axis_tready,
+                     dut.renderer.perfBusy);
 `ifdef RASTERIX_VARIANT_EF
             $display("DSE state=%0d EF parser state=%0d fbctl=%0d color apply/applied=%b/%b depth=%b/%b", 
                      dut.renderer.dma.state, dut.renderer.rixef.graphicCore.commandParser.state,
@@ -754,7 +772,7 @@ module tb_zz9k_rasterix;
     initial begin
         clk = 0; resetn = 0; cycle_count = 0; latency = 2;
         s_axi_awaddr = 0; s_axi_awprot = 0; s_axi_awvalid = 0; s_axi_wdata = 0; s_axi_wstrb = 0; s_axi_wvalid = 0; s_axi_bready = 1;
-        s_axi_araddr = 0; s_axi_arprot = 0; s_axi_arvalid = 0; s_axi_rready = 1;
+        s_axi_araddr = 0; s_axi_arprot = 0; s_axi_arvalid = 0; s_axi_rready = 1; s_cmd_axis_tvalid = 0; s_cmd_axis_tlast = 0; s_cmd_axis_tdata = 0;
         m_axi_awready = 0; m_axi_wready = 0; m_axi_bid = 0; m_axi_bresp = 0; m_axi_bvalid = 0;
         m_axi_arready = 0; m_axi_rid = 0; m_axi_rdata = 0; m_axi_rresp = 0; m_axi_rlast = 0; m_axi_rvalid = 0;
         m_cmd_axi_arready = 0; m_cmd_axi_rid = 0; m_cmd_axi_rdata = 0; m_cmd_axi_rresp = 0; m_cmd_axi_rlast = 0; m_cmd_axi_rvalid = 0;
@@ -814,12 +832,6 @@ module tb_zz9k_rasterix;
             if (cmd_count == 0) $fatal(1, "CMDS contains no DSE buffers");
         end else
             cmd_count = (command_words[0] & 28'h0fff_ffff) / 4 + 2;
-        for (i = 0; i < cmd_count; i = i + 1) begin
-            write_byte(CMD_ADDR + i * 4, command_words[i][7:0]);
-            write_byte(CMD_ADDR + i * 4 + 1, command_words[i][15:8]);
-            write_byte(CMD_ADDR + i * 4 + 2, command_words[i][23:16]);
-            write_byte(CMD_ADDR + i * 4 + 3, command_words[i][31:24]);
-        end
         repeat (8) @(posedge clk);
         resetn = 1;
         axi_read(16'h0000, status);
@@ -829,24 +841,15 @@ module tb_zz9k_rasterix;
         submission_index = 0;
         while (submission_offset < cmd_count) begin
             submission_words = (command_words[submission_offset] & 28'h0fff_ffff) / 4 + 2;
-            axi_read(16'h002c, completed_before);
-            axi_write(16'h001c, CMD_ADDR + submission_offset * 4);
-            axi_write(16'h0020, submission_words);
-            axi_write(16'h0024, 1);
+            fifo_submit(submission_offset, submission_words);
             timeout = 0;
             command_complete = 0;
             while ((timeout < poll_limit) && (command_complete == 0)) begin
-                axi_read(16'h002c, status);
-                if (status == completed_before + 1) begin
-                    $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d",
-                             scene, submission_index, cycle_count, submission_words);
-`ifndef RASTERIX_VARIANT_EF
-                    $display("IF_COUNTERS adapter=%0d handler_state=%0d handler_addr=%0d handler_beats=%0d",
-                             dut.renderer.axisToAxiCrossbar.axisToAxiAdapter.counter,
-                             dut.renderer.rixif.colorBuffer.commandHandler.cmdState,
-                             dut.renderer.rixif.colorBuffer.commandHandler.cmdMemAddr,
-                             dut.renderer.rixif.colorBuffer.commandHandler.cmdFbSizeInBeats);
-`endif
+                axi_read(16'h000c, status);
+                if (status[1]) begin
+                    $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d transport=%0s",
+                             scene, submission_index, cycle_count, submission_words,
+                             $test$plusargs("DMA_BURST") ? "dma-fixed" : "mmio");
                     command_complete = 1;
                 end
                 timeout = timeout + 1;

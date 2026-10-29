@@ -112,3 +112,27 @@ The eight files below intentionally differ from those blobs; every other file in
   generation, the pop condition, and every per-stream fifo are unchanged.
 - Synthesis safety: adds one hold register with reset and an output mux; no
   timing, latency, or handshake change on any accepted transfer.
+
+## XACP G4C EF comparison and adopted read-credit fix
+
+On 2026-10-29 the EF-sensitive files were blob-compared with Xanxi-Amiga's
+published `XACP-ZZ9000` `2646a23` tree.  The local/XACP SHA-256 pairs are:
+
+| File | Local | XACP |
+| --- | --- | --- |
+| `RasterIX_EF.v` | `fcbce77fdd3b93b8c2369fd1c9bf6917ce582b4683a6d200e16942c423573e5f` | `91336062f48183e099bacd2121884cf6ffffc952d159fa7cbf24ff6d1e7354de` |
+| `RasterIXCoreEF.v` | `8e0efe4ba93ceb4c6c47fc5f2f957705c49fcf01aa366faffca34401fd232c7f` | `10023fbce176daad34860ee74bbff61bad3a7ec194dee2dc0aaf1ffbc769d8d0` |
+| `FrameStreamingCore.v` | `6a2bf1948292b728f2bd0d7b8c7a0d5ffc759a8bbd5f261182c1e26c2bea0941` | `ce8fcfd492f36760540a35cc9e8cc936319ec37d779a90e6dc032198d05a3a51` |
+| `CommandParser.v` | `6aa12d1d8104a08e4b0ac9d81616a0d9640b1448b47812fe442127cde1337220` | `2882f15f99d764d9b1392839bca98aecb489facfda70fccf14e97f2056866429` |
+| `InternalFramebufferCommandHandler.v` | `bcf8757757b89d3f115c926818389172b00b89d26b55c5ecc0480e461239652f` | `853cee9950255486feb95cdf51c00e9ce9d58cd12b6cfb212a431840b2dd4419` |
+| `AxisToAxiAdapter.v` | `03c93b8345ca5cc5c893943cd5c8ee0bb38e2e529ac7dc5da091866e4b435adc` | `686f4b2ab13ded10d7e61a571e46989c419ff61f6451966e46017dea03c2dc30` |
+
+XACP is an older RasterIX snapshot and lacks this tree's external-texture
+cache family, so its divergent EF files were not copied wholesale.  The
+verified independent change is `RasterIX/XACPCommandReadCredit.v`
+(`b80c25957169593eed5cb3270dad52cd1af2582ff7db53d4a69b00827dcb10be`
+in XACP): it is GPL-3.0-or-later and is inserted after the 64-bit
+FrameStreamingCore `commonAxiAdapter` and before crossbar port 0.  Its
+64-beat reserved-response queue keeps list-read backpressure from holding the
+fragment-memory read channel.  This preserves the newer external texture
+cache and all local fixes above while taking the specific silicon-proven fix.
