@@ -8,6 +8,7 @@
 #include "mw_parse.h"
 #include "mw_draw.h"
 #include "minigl_raster.h"
+#include "minigl_profile.h"
 #include "minigl_lighting.h"
 #include "card_pool.h"
 #include "sdk_palette.h"
@@ -803,7 +804,7 @@ static int mw_upload_generated_mips(mw_ctx *c, const mw_texture *t)
     return 1;
 }
 
-static int mw_execute_command(void *user, const mw_command *cmd)
+static int mw_execute_command_body(void *user, const mw_command *cmd)
 {
     mw_ctx *c = (mw_ctx *)user;
     const uint8_t *p = cmd->payload;
@@ -1398,7 +1399,9 @@ target_allocation_failed:
         }
 
         mw_ctx_sync_to_raster(c);
+        minigl_profile_push(MGLP_GEOM);
         minigl_raster_draw_wire_v9((uint16_t)mode, c->vertex_scratch, count, flags, (const uint32_t *)edge_mask);
+        minigl_profile_pop();
         mw_ctx_update_latest(c);
         break;
     }
@@ -1479,6 +1482,27 @@ target_allocation_failed:
 command_complete:
 
     return 1;
+}
+
+/* Texture uploads are charged to TEX (conversion, mip generation, RasterIX
+ * residency); everything else stays in the packet's PARSE stage, with the
+ * draw path's own GEOM/CPU/RasterIX stages nested inside. */
+static int mw_execute_command(void *user, const mw_command *cmd)
+{
+    int texture = cmd->opcode == MW_TEXTURE_IMAGE_RAW ||
+                  cmd->opcode == MW_TEXTURE_SUB_RAW ||
+                  cmd->opcode == MW_TEXTURE_COPY ||
+                  cmd->opcode == MW_COLOR_TABLE;
+    int result;
+
+    if (texture) {
+        minigl_profile_push(MGLP_TEX);
+        minigl_profile_count(MGLP_N_TEX_UPLOADS, 1U);
+    }
+    result = mw_execute_command_body(user, cmd);
+    if (texture)
+        minigl_profile_pop();
+    return result;
 }
 
 uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,

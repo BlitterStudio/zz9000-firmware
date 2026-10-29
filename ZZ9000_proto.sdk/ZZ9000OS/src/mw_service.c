@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "minigl_raster.h"
+#include "minigl_profile.h"
 
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
 #include "xil_cache.h"
@@ -60,6 +61,12 @@ static uint32_t g_reject_log_events;
 static MWPacketDiagnostic g_packet_diagnostics[MW_PACKET_DIAG_RING_SIZE];
 static uint32_t g_packet_diagnostic_write;
 static uint32_t g_packets_processed;
+/* Synchronous-op breadcrumbs for the Amiga-reset report: a host that dies
+ * inside a bridge wait leaves op_seq ahead of op_done_seq; one that dies
+ * between frames leaves them equal with a recent completion. */
+static uint32_t g_ops_processed;
+static uint32_t g_last_op_code;
+static uint32_t g_last_op_ms;
 
 static uint32_t mw_diag_now_ms(void)
 {
@@ -548,6 +555,16 @@ void mw_service_report_amiga_reset(void)
                 (unsigned long)rix.status, (unsigned long)rix.completed_fence,
                 (unsigned long)rix.last_fence);
     }
+    {
+        uint32_t op_seq = mw_wire_ld32(&g_ctrl->op_seq);
+        uint32_t op_done = mw_wire_ld32(&g_ctrl->op_done_seq);
+
+        MW_DIAG("[MGL9] reset ops seq=%lu/%lu pending=%lu processed=%lu last=%lu %lums ago\n",
+                (unsigned long)op_seq, (unsigned long)op_done,
+                (unsigned long)(op_seq != op_done ? mw_wire_ld32(&g_ctrl->op_code) : 0U),
+                (unsigned long)g_ops_processed, (unsigned long)g_last_op_code,
+                (unsigned long)(g_ops_processed ? now - g_last_op_ms : 0U));
+    }
 #endif
 }
 
@@ -560,6 +577,8 @@ int mw_service_poll(void)
 
     g_doorbell_pending = 0;
     mw_wire_st32(&g_ctrl->firmware_heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat) + 1U);
+    minigl_profile_set_enabled(g_status != NULL &&
+                               mw_wire_ld32(&g_status->trace_enabled) != 0U);
     if (g_status) {
         mw_wire_st32(&g_status->heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat));
         mw_wire_st32(&g_status->trace_draws_hardware, minigl_raster_draws_hardware());
@@ -597,8 +616,11 @@ int mw_service_poll(void)
 
                 if (c && packet_bytes >= 16 && packet_bytes <= mw_wire_ld32(&g_ctrl->slot_capacity)) {
                     uint32_t opcode = 0U;
-                    uint32_t status = mw_host_submit_report(c, slot_buf, packet_bytes,
-                                                            &opcode);
+                    uint32_t status;
+
+                    minigl_profile_packet_begin();
+                    status = mw_host_submit_report(c, slot_buf, packet_bytes, &opcode);
+                    minigl_profile_packet_end(packet_bytes, mw_be32(slot_buf + 12U));
                     mw_wire_st32(&g_ctrl->op_status, status);
                     if (status != MW_STATUS_OK)
                         mw_log_reject(status, opcode);
@@ -626,6 +648,8 @@ int mw_service_poll(void)
         uint32_t op = mw_wire_ld32(&g_ctrl->op_code);
         uint32_t handle = mw_wire_ld32(&g_ctrl->op_handle);
 
+        minigl_profile_push(op == 6U ? MGLP_PRESENT : MGLP_OP);
+        minigl_profile_count(MGLP_N_OPS, 1U);
         switch (op) {
         case 1: { /* CREATE: width = op_arg1, height = op_arg2 */
             uint32_t width = mw_wire_ld32(&g_ctrl->op_arg1);
@@ -811,9 +835,16 @@ int mw_service_poll(void)
             break;
         }
 
+        minigl_profile_pop();
         mw_wire_st32(&g_ctrl->op_done_seq, mw_wire_ld32(&g_ctrl->op_seq)); /* Publish completion in firmware block */
+        g_ops_processed++;
+        g_last_op_code = op;
+        g_last_op_ms = mw_diag_now_ms();
         work_done++;
     }
 
+    /* After every completion is published: the summary print blocks this
+     * core on the UART, never the host. */
+    minigl_profile_report();
     return work_done;
 }

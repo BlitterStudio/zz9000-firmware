@@ -541,6 +541,15 @@ Hardware stability is protected against Amiga reboots and ARM faults:
    - Increments `g_session_generation`.
    - Halts Core 1, resets RasterIX engine, revokes revocable card-pool ranges (`card_pool_take_back_lent()`), and releases all context owners.
    - Restarts Core 1.
+   - Before that, `mw_service_report_amiga_reset()` prints what the host
+     was doing when it went away: `[MGL9] reset ... seq=<producer>/<consumer>
+     packets=<n> last=<ms since the last packet>`, the last eight ring
+     packets, the RasterIX fence state, and
+     `[MGL9] reset ops seq=<op_seq>/<op_done_seq> pending=<op code still
+     outstanding, 0 if none> processed=<n> last=<last completed op code>
+     <ms> ago`. A host that died inside a synchronous wait leaves
+     `pending` non-zero; one that died while building a frame leaves it 0
+     with a recent completion.
 2. **Core 1 Fault Watchdog**:
    - `core2.c` monitors Core 1 execution. If Core 1 faults while `sh->minigl_in_flight` is asserted:
    - Core 0 executes `mw_service_on_core1_fault()`:
@@ -608,6 +617,43 @@ To keep the 68060 CPU feeding geometry at maximum speed:
    - `MGLSwitchDisplay`: 68k waits for `completion_fence` to ensure rendering has finished before Intuition / Picasso96 layer unlock.
    - `glFinish` / `glReadPixels`: 68k waits for Core 1 fence.
    - Flow Control: 68k waits only if it generates two full packets before the ARM finishes the previous packet.
+
+### 8.4 Pipeline Profiling (`[MGLP]`)
+The firmware keeps exclusive per-stage timers (Cortex-A9 global timer) on
+the core that runs `mw_service_poll`. They are off until the host writes a
+non-zero `trace_enabled` in the status block; the profiling
+`minigl.library` build does that when `MGL_PROFILE=1` and clears it when the
+last context goes away, and every transport bind (Amiga reset) zeroes it.
+While on, one line is printed every 5 s or more, only when packets or
+synchronous ops were processed in the window:
+
+```
+[MGLP] 5.0s pk=15 op=15 kB=2100 cmd=4800 tri=18000 cull=12 hw=4700 sw=0 fb=0 fw=1200000 sub=80 tx=30 up=30 pin=4 ev=0 | parse=1.2 geom=3.0 cpu=0.0 emit=0.3 fifo=2.5 stall=0.1 fence=4.0 tgt=3.0 tex=0.5 pres=2.0 op=0.1 idle=300.0 | max=25.1 log=22.0 ms
+```
+
+- Counters for the window: ring packets (`pk`), synchronous ops (`op`),
+  packet kilobytes, wire commands, triangles queued for RasterIX (`tri`),
+  triangles RasterIX setup found empty and dropped (`cull`), draws on
+  RasterIX (`hw`) and on the CPU rasterizer (`sw`), the first non-zero
+  fallback reason (`fb`, `ZZ9K_MGL_FALLBACK_*`; `sw` > 0 with `fb=0`
+  means a draw left RasterIX for a reason the fallback evaluator does not
+  name), FIFO command words (`fw`) and command-buffer submissions (`sub`),
+  texture upload commands (`tx`), texture levels written to RasterIX
+  memory (`up`, including re-uploads after eviction), uploads that had to
+  drain RasterIX because the texture was still queued for drawing
+  (`pin`), and textures evicted from the RasterIX pool (`ev`).
+- Stage columns are milliseconds per ring packet (one frame for GLQuake),
+  or window totals when no packet arrived. Each region charges only its own
+  time: `parse` (validate, command walk, decode, state), `geom` (vertex
+  convert, clip, RasterIX setup), `cpu` (software-rasterized draws),
+  `emit` (command buffer build), `fifo` (buffer clean and FIFO push),
+  `stall` (TDFV vacancy waits), `fence` (RasterIX completion waits), `tgt`
+  (RGB565/Z16 to RGBA8/Z24 target conversions), `tex` (texture uploads),
+  `pres` (BLIT/CAPTURE op), `op` (other ops), `idle` (worker outside
+  MiniGL work: waiting for the host).
+- `max` is the longest single packet; `log` is how long the previous
+  summary line held the worker on the UART (it is excluded from every
+  stage).
 
 ---
 

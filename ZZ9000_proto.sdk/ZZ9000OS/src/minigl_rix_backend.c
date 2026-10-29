@@ -4,6 +4,7 @@
  */
 #include "minigl_rix_backend.h"
 #include "rix_texture.h"
+#include "minigl_profile.h"
 
 #if !defined(MINIGL_HOST_TEST) && !defined(MINIGL_SERVICE_HOST_TEST)
 #include "xil_io.h"
@@ -459,6 +460,7 @@ static int backend_allocate_pages(MiniGLRixBackend *backend, MiniGLRixTexture *t
 
             if (victim == NULL)
                 return 0;
+            minigl_profile_count(MGLP_N_EVICTIONS, 1U);
             backend_release_texture(backend, victim);
         }
     }
@@ -613,9 +615,11 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
         !backend_grow_texture_pool(backend, MINIGL_RIX_TEXTURE_PAGE_BYTES))
         return 0;
     texture = backend_texture(backend, id);
-    if (texture != NULL && texture->pin_count != 0U &&
-        !minigl_rix_backend_drain(backend))
-        return 0;
+    if (texture != NULL && texture->pin_count != 0U) {
+        minigl_profile_count(MGLP_N_PIN_DRAINS, 1U);
+        if (!minigl_rix_backend_drain(backend))
+            return 0;
+    }
     if (level == 0U) {
         uint8_t width_log2;
         uint8_t height_log2;
@@ -682,6 +686,7 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
         !backend_write_texture(backend, texture, offset, scaled, bytes / 2U))
         return 0;
     texture->levels |= (uint16_t)(1U << level);
+    minigl_profile_count(MGLP_N_RIX_UPLOADS, 1U);
     backend_touch_texture(backend, texture);
     return 1;
 }
@@ -851,7 +856,7 @@ static int backend_wait_fence(MiniGLRixBackend *backend, uint8_t index,
     }
 }
 
-static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
+static int backend_wait_buffer_now(MiniGLRixBackend *backend, uint8_t index)
 {
     int result;
 
@@ -873,6 +878,18 @@ static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
     backend->submitted_command_words[index] = 0U;
     backend_release_buffer(backend, index);
     return 1;
+}
+
+static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
+{
+    int ok;
+
+    if (!backend->pending[index])
+        return backend->error ? 0 : 1;
+    minigl_profile_push(MGLP_FENCE);
+    ok = backend_wait_buffer_now(backend, index);
+    minigl_profile_pop();
+    return ok;
 }
 
 static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
@@ -1281,7 +1298,7 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
     return !writer->failed;
 }
 
-static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
+static int backend_flush_now(MiniGLRixBackend *backend, int continue_frame)
 {
     RixCmdWriter writer;
     uint8_t *buffer;
@@ -1318,6 +1335,20 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
     if (!continue_frame)
         backend->frame_active = 0U;
     return 1;
+}
+
+/* EMIT is the command build; the fence wait for the reused buffer and the
+ * FIFO push inside are charged to FENCE and FIFO/STALL. */
+static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
+{
+    int ok;
+
+    if (!backend->frame_active || backend->op_count == 0U)
+        return 1;
+    minigl_profile_push(MGLP_EMIT);
+    ok = backend_flush_now(backend, continue_frame);
+    minigl_profile_pop();
+    return ok;
 }
 
 static int backend_record_draw(MiniGLRixBackend *backend)
@@ -1516,6 +1547,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     ++backend->triangle_count;
     ++op->triangle_count;
     backend->command_words_estimate += triangle_words;
+    minigl_profile_count(MGLP_N_TRIANGLES, 1U);
     return 1;
 }
 

@@ -5,6 +5,7 @@
 #include "mw_types.h"
 #include "mw_state.h"
 #include "mw_draw.h"
+#include "minigl_profile.h"
 
 #include <limits.h>
 #include <math.h>
@@ -414,15 +415,20 @@ static int rix_make_cpu_depth_visible(void)
 
 static int rix_prepare_target(void)
 {
-    if (!minigl_rix_backend_prepare_target(&g_rix, g_buffers.color, pixels()) ||
-        !rix_prepare_depth())
-        return 0;
-    g_rix_surface = g_buffers.color;
-    g_rix_surface_rgb565 = 1;
-    return 1;
+    int ok;
+
+    minigl_profile_push(MGLP_TARGET);
+    ok = minigl_rix_backend_prepare_target(&g_rix, g_buffers.color, pixels()) &&
+         rix_prepare_depth();
+    if (ok) {
+        g_rix_surface = g_buffers.color;
+        g_rix_surface_rgb565 = 1;
+    }
+    minigl_profile_pop();
+    return ok;
 }
 
-static int rix_make_cpu_visible(void)
+static int rix_make_cpu_visible_now(void)
 {
     MiniGLRasterBuffers replacement;
 
@@ -444,6 +450,18 @@ static int rix_make_cpu_visible(void)
         return 0;
     g_rix_surface_rgb565 = 0;
     return 1;
+}
+
+/* The RasterIX drain inside is charged to its own stages; TARGET keeps the
+ * 565->RGBA8 and Z16->Z24 conversions and their cache maintenance. */
+static int rix_make_cpu_visible(void)
+{
+    int ok;
+
+    minigl_profile_push(MGLP_TARGET);
+    ok = rix_make_cpu_visible_now();
+    minigl_profile_pop();
+    return ok;
 }
 
 int minigl_raster_prepare_present(void)
@@ -3820,6 +3838,7 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
                                         (uintptr_t)g_buffers.depth)) {
             g_rix_collecting = 0;
             ++g_frame_draws_hardware;
+            minigl_profile_count(MGLP_N_DRAW_HW, 1U);
             mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
             return;
         }
@@ -3831,6 +3850,8 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
     uint32_t reason = (style != 0U) ? ZZ9K_MGL_FALLBACK_POLYGON_MODE
                                     : minigl_rix_backend_eval_fallback(&g_rix);
     ++g_frame_draws_software;
+    minigl_profile_count(MGLP_N_DRAW_SW, 1U);
+    minigl_profile_fallback(reason);
     if (g_frame_fallback_reason == ZZ9K_MGL_FALLBACK_NONE && reason != ZZ9K_MGL_FALLBACK_NONE)
         g_frame_fallback_reason = reason;
     if (reason != ZZ9K_MGL_FALLBACK_NONE && !(g_logged_fallback_mask & (1U << reason))) {
@@ -3839,8 +3860,10 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
     }
     if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
         g_rix_cpu_frame = 1;
-    if (!minigl_raster_finish())
-        return;
-    g_rix_collecting = 0;
-    assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
+    minigl_profile_push(MGLP_CPU);
+    if (minigl_raster_finish()) {
+        g_rix_collecting = 0;
+        assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
+    }
+    minigl_profile_pop();
 }

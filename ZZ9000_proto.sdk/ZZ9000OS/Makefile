@@ -181,6 +181,7 @@ C_SRCS = \
 	$(SRC_DIR)/minigl_raster.c \
 	$(SRC_DIR)/minigl_lighting.c \
 	$(SRC_DIR)/minigl_present.c \
+	$(SRC_DIR)/minigl_profile.c \
 	$(SRC_DIR)/rix_cmd.c \
 	$(SRC_DIR)/rix_texture.c \
 	$(SRC_DIR)/rix_setup.c \
