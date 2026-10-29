@@ -48,6 +48,8 @@ CLIENTS_OBJS := client_guest_mock.o client_harness.o \
                 client_fw_minigl_rix_backend.o client_fw_rix_cmd.o \
                 client_fw_rix_texture.o client_fw_rix_setup.o \
                 client_fw_rix_bin.o client_fw_rix_drv.o
+# MiniGL V30 moved buffer objects into their own source file.
+CLIENTS_OBJS += $(if $(wildcard $(AMIBERRY_DIR)/src/amiberry_gl_buffer.c),client_buffer.o)
 ifneq ($(wildcard $(AMIBERRY_DIR)/src/amiberry_transport_zz9000.c),)
 TESTS += test_mw_e2e
 E2E_RUN = ./test_mw_e2e
@@ -164,6 +166,8 @@ client_state.o: $(AMIBERRY_DIR)/src/amiberry_gl_state.c
 client_draw.o: $(AMIBERRY_DIR)/src/amiberry_gl_draw.c
 	$(CC) $(CLIENTS_LIB_CFLAGS) -c $< -o $@
 client_texture.o: $(AMIBERRY_DIR)/src/amiberry_gl_texture.c
+	$(CC) $(CLIENTS_LIB_CFLAGS) -c $< -o $@
+client_buffer.o: $(AMIBERRY_DIR)/src/amiberry_gl_buffer.c
 	$(CC) $(CLIENTS_LIB_CFLAGS) -c $< -o $@
 client_light.o: $(AMIBERRY_DIR)/src/amiberry_gl_light.c
 	$(CC) $(CLIENTS_LIB_CFLAGS) -c $< -o $@
