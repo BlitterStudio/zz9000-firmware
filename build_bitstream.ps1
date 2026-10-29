@@ -28,12 +28,11 @@ Build the opt-in RasterIX renderer fit trial.
 .PARAMETER RasterIXTMUCount
 RasterIX texture-mapping units (1 or 2; default 1; EF requires 1).
 
-.PARAMETER RasterIXVariant
-RasterIX implementation: internal framebuffer IF (default) or external
-framebuffer EF.
+ .PARAMETER RasterIXVariant
+RasterIX implementation: external framebuffer EF (the only supported variant).
 
-.PARAMETER RasterIXFramebufferSizeLog2
-RasterIX internal framebuffer band size in pixels (14 or 15; IF only, default 14).
+ .PARAMETER RasterIXFramebufferSizeLog2
+Deprecated compatibility option; ignored by EF.
 
  .PARAMETER OutputBitstream
  Optional output bitstream path, relative to the repository or absolute.
@@ -48,8 +47,8 @@ param(
     [switch]$RasterIX,
     [ValidateSet(1, 2)]
     [int]$RasterIXTMUCount = 1,
-    [ValidateSet('if', 'ef')]
-    [string]$RasterIXVariant = 'if',
+    [ValidateSet('ef')]
+    [string]$RasterIXVariant = 'ef',
     [ValidateSet(14, 15)]
     [int]$RasterIXFramebufferSizeLog2 = 14,
     [string]$OutputBitstream
