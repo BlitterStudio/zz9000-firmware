@@ -628,16 +628,17 @@ While on, one line is printed every 5 s or more, only when packets or
 synchronous ops were processed in the window:
 
 ```
-[MGLP] 5.0s pk=15 op=15 kB=2100 cmd=4800 tri=18000 cull=12 hw=4700 sw=0 fb=0 fw=1200000 sub=80 tx=30 up=30 pin=4 ev=0 | parse=1.2 geom=3.0 cpu=0.0 emit=0.3 fifo=2.5 stall=0.1 fence=4.0 tgt=3.0 tex=0.5 pres=2.0 op=0.1 idle=300.0 | max=25.1 log=22.0 ms
+[MGLP] 5.0s pk=15 op=15 kB=2100 cmd=4800 tri=18000 cull=12 hw=4700 sw=0 fb=0 fw=1200000 sub=80 tx=30 up=30 pin=4 ev=0 fbk= | parse=1.2 geom=3.0 cpu=0.0 emit=0.3 fifo=2.5 stall=0.1 fence=4.0 tgt=3.0 tex=0.5 pres=2.0 op=0.1 idle=300.0 | max=25.1 log=22.0 ms
 ```
 
 - Counters for the window: ring packets (`pk`), synchronous ops (`op`),
   packet kilobytes, wire commands, triangles queued for RasterIX (`tri`),
   triangles RasterIX setup found empty and dropped (`cull`), draws on
-  RasterIX (`hw`) and on the CPU rasterizer (`sw`), the first non-zero
-  fallback reason (`fb`, `ZZ9K_MGL_FALLBACK_*`; `sw` > 0 with `fb=0`
-  means a draw left RasterIX for a reason the fallback evaluator does not
-  name), FIFO command words (`fw`) and command-buffer submissions (`sub`),
+  RasterIX (`hw`) and on the CPU rasterizer (`sw`), the first fallback
+  reason (`fb`, `ZZ9K_MGL_FALLBACK_*`; `11` is an otherwise unmapped draw
+  rejection), and the compact per-reason CPU fallback histogram
+  (`fbk=reason:draws/triangles,...`), FIFO command words (`fw`) and
+  command-buffer submissions (`sub`),
   texture upload commands (`tx`), texture levels written to RasterIX
   memory (`up`, including re-uploads after eviction), uploads that had to
   drain RasterIX because the texture was still queued for drawing

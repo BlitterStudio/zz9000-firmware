@@ -660,6 +660,7 @@ static void test_fallback_reasons_and_logging(void)
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_RESIDENCY_EXHAUSTED), "residency exhausted") == 0);
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT), "backend disabled/absent") == 0);
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_FORCED_CPU), "forced CPU") == 0);
+    assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_DRAW_REJECTED), "draw rejected") == 0);
 }
 static void test_timeout_diagnostics(void)
 {

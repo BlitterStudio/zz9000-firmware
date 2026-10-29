@@ -1178,6 +1178,7 @@ static void submit_glquake_alias(mw_ctx *c)
 
     put_texture_stage(&q, 1U, 0U, 0U, 0x1e01U);
     put_texture_stage(&q, 0U, GLQUAKE_ALIAS_TEXTURE, 1U, 0x2100U);
+    /* Polygon offset has no exact RasterIX equivalent; this draw remains CPU. */
     put_state_u32(&q, MW_DEPTH_TEST, 1U);
     put_state_u32(&q, MW_DEPTH_FUNC, 0x0203U);
     put_state_u32(&q, MW_DEPTH_MASK, 1U);

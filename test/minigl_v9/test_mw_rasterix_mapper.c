@@ -265,6 +265,7 @@ static void test_state_mapper_fallback_rules(void)
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_RESIDENCY_EXHAUSTED), "residency exhausted") == 0);
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT), "backend disabled/absent") == 0);
     assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_FORCED_CPU), "forced CPU") == 0);
+    assert(strcmp(minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_DRAW_REJECTED), "draw rejected") == 0);
 
     printf("PASS: test_state_mapper_fallback_rules\n");
 }
