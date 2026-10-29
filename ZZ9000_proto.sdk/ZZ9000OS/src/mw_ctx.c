@@ -41,6 +41,8 @@
 #define MW_RIX_PL330_RD_DAR 2u
 
 #define GL_TEXTURE_2D 0x0de1U
+#define MW_RIX_TARGET_ALIGNMENT 2048U
+
 
 static uint32_t g_next_handle = 1U;
 
@@ -67,13 +69,24 @@ static void *mw_context_alloc(mw_ctx *c, uint32_t bytes, uint32_t *address)
     uint32_t card_address = card_pool_alloc(&card_pool, bytes, c->card_pool_owner);
     if (!card_address)
         return NULL;
+    /* card_pool_alloc() returns 64 KiB pages, stronger than EF's 2 KiB
+     * colour/depth alignment requirement. */
     *address = card_address;
     memset((void *)(uintptr_t)card_address, 0, bytes);
     return (void *)(uintptr_t)card_address;
 #else
+    uintptr_t aligned;
+    void *raw;
+
     (void)c;
-    (void)address;
-    return calloc(1, bytes);
+    raw = calloc(1, (size_t)bytes + MW_RIX_TARGET_ALIGNMENT - 1U + sizeof(raw));
+    if (raw == NULL)
+        return NULL;
+    aligned = ((uintptr_t)raw + sizeof(raw) + MW_RIX_TARGET_ALIGNMENT - 1U) &
+              ~(uintptr_t)(MW_RIX_TARGET_ALIGNMENT - 1U);
+    ((void **)aligned)[-1] = raw;
+    *address = (uint32_t)aligned;
+    return (void *)aligned;
 #endif
 }
 
@@ -87,9 +100,18 @@ static void *mw_context_alloc_uninitialized(mw_ctx *c, uint32_t bytes,
     *address = card_address;
     return (void *)(uintptr_t)card_address;
 #else
+    uintptr_t aligned;
+    void *raw;
+
     (void)c;
-    (void)address;
-    return malloc(bytes);
+    raw = malloc((size_t)bytes + MW_RIX_TARGET_ALIGNMENT - 1U + sizeof(raw));
+    if (raw == NULL)
+        return NULL;
+    aligned = ((uintptr_t)raw + sizeof(raw) + MW_RIX_TARGET_ALIGNMENT - 1U) &
+              ~(uintptr_t)(MW_RIX_TARGET_ALIGNMENT - 1U);
+    ((void **)aligned)[-1] = raw;
+    *address = (uint32_t)aligned;
+    return (void *)aligned;
 #endif
 }
 
@@ -103,7 +125,8 @@ static void mw_context_free(mw_ctx *c, void *memory, uint32_t *address)
 #else
     (void)c;
     (void)address;
-    free(memory);
+    if (memory != NULL)
+        free(((void **)memory)[-1]);
 #endif
 }
 
@@ -722,22 +745,17 @@ void mw_host_destroy(mw_ctx *c)
 static int mw_ensure_scratch(mw_ctx *c, uint32_t needed_words)
 {
     if (c->vertex_scratch_capacity < needed_words) {
-        if (c->card_pool_backed) {
-            uint32_t new_address = 0;
-            float *new_scratch = (float *)mw_context_alloc(
-                c, needed_words * sizeof(*new_scratch), &new_address);
-            if (!new_scratch)
-                return 0;
-            mw_context_free(c, c->vertex_scratch, &c->vertex_scratch_address);
-            c->vertex_scratch = new_scratch;
-            c->vertex_scratch_address = new_address;
-        } else {
-            float *new_scratch = (float *)realloc(
-                c->vertex_scratch, needed_words * sizeof(*new_scratch));
-            if (!new_scratch)
-                return 0;
-            c->vertex_scratch = new_scratch;
-        }
+        uint32_t new_address = 0;
+        float *new_scratch = (float *)mw_context_alloc_uninitialized(
+            c, needed_words * sizeof(*new_scratch), &new_address);
+
+        if (!new_scratch)
+            return 0;
+        memcpy(new_scratch, c->vertex_scratch,
+               c->vertex_scratch_capacity * sizeof(*new_scratch));
+        mw_context_free(c, c->vertex_scratch, &c->vertex_scratch_address);
+        c->vertex_scratch = new_scratch;
+        c->vertex_scratch_address = new_address;
         c->vertex_scratch_capacity = needed_words;
     }
     return 1;

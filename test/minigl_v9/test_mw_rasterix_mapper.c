@@ -355,6 +355,8 @@ static void test_wire_v9_draw_routing_and_fallback(void)
 
     mw_ctx *c = mw_host_create(WIDTH, HEIGHT);
     assert(c != NULL);
+    minigl_raster_reset_frame_counters();
+
 
     /* Construct wire-v9 packet with a single packed triangle */
     uint8_t packet[512];
