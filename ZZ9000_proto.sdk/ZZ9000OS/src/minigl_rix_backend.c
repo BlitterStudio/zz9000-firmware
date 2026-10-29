@@ -1514,10 +1514,19 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         scissor.end_y = (uint16_t)((uint32_t)bottom + backend->state.scissor_h);
     }
     scissor.enabled = 1U;
-    if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor) ||
-        (passes == 2U &&
-         !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
-                             &texture1_vertices[1], &texture1_vertices[2], &scissor)))
+    if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor)) {
+        /* Zero area at RasterIX's 1/32-pixel precision, or no pixel inside
+         * the scissor: the engine would draw nothing. Failing here aborted
+         * the whole draw and, through MINIGL_RIX_CPU_FALLBACKS_PER_FRAME,
+         * put the rest of the frame on the CPU rasterizer with no logged
+         * reason. Slivers from polygon fans and distant models produce
+         * such triangles. */
+        minigl_profile_count(MGLP_N_CULLED, 1U);
+        return 1;
+    }
+    if (passes == 2U &&
+        !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
+                            &texture1_vertices[1], &texture1_vertices[2], &scissor))
         return 0;
     op = &backend->ops[backend->op_count - 1U];
     triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);

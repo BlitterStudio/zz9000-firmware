@@ -945,6 +945,32 @@ static void test_two_texture_multipass_recording(void)
     assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_MULTITEXTURE);
 }
 
+/* A triangle RasterIX setup finds empty (collinear at 1/32 px) draws
+ * nothing on the engine: it is dropped and the draw stays on RasterIX
+ * instead of failing over to the CPU for the rest of the frame. */
+static void test_empty_triangle_stays_on_rasterix(void)
+{
+    MiniGLRixBackend backend;
+    static struct model model;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
+    MiniGLRixVertex sliver = vertex(35.0f, 10.001f, 0x0000ffffU);
+
+    init_backend(&backend, &model, TEXTURE_SLOTS);
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &sliver));
+    assert(backend.triangle_count == 0U);
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(backend.triangle_count == 1U);
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_drain(&backend));
+    assert(minigl_rix_backend_available(&backend));
+    assert(model.packet_count >= 1U);
+}
+
 int main(void)
 {
     MiniGLRixBackend backend;
@@ -1023,6 +1049,7 @@ int main(void)
     test_disabled_backend_is_one_shot();
     test_two_texture_multipass_recording();
     test_dma_self_test_gates_transport();
+    test_empty_triangle_stays_on_rasterix();
     puts("RasterIX EF backend: frame recording, FIFO replay and texture residency passed");
     return 0;
 }
