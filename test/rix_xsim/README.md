@@ -40,9 +40,30 @@ flat-primary-colour rendering.
 ## Captured MiniGL scenes
 
 Build real wire-v9 captures with `make -C test/minigl_v9 rix_v9_capture`, then
-run `test/minigl_v9/rix_v9_capture OUT`. It emits `blended_quad`, `gears`, and
-`textured_lightmap` directories containing `commands.hex`, `ddr.hex`, and
-`cpu.ppm`; replay each directory with `run_xsim.bat ROOT OUT SCENE LATENCY`.
+run `test/minigl_v9/rix_v9_capture OUT`. It emits `blended_quad`, `gears`,
+`textured_lightmap`, `plain_textured`, and `glquake_like` directories
+containing `commands.hex`, `ddr.hex`, and `cpu.ppm`; replay each directory
+with `run_xsim.bat ROOT OUT SCENE LATENCY`.
+
+`plain_textured` is one unit-0 texture draw. `textured_lightmap` is the
+two-pass lightmap mapping (unit 0, then `GL_EQUAL` with `DST_COLOR,ZERO`).
+Both use uniform non-white texels: RasterIX's fixed-point texture
+interpolation differs from the float CPU reference by up to 0.083 texel, so
+patterned nearest-filtered texels flip only in pixels whose centres lie that
+close to a texel edge.  Uniform texels measure fetch, blend and coverage
+without that edge band.  RasterIX stores textures as RGB565, so modulated
+results can differ from the RGBA8888 CPU reference by one LSB.
+
+`glquake_like` is one frame: an accelerated two-pass lightmapped world, then
+an opaque alias model with polygon offset, alpha-blended particles with
+depth writes off, and an alpha-tested HUD.  The alias fallback holds the rest
+of the frame on the CPU.  The capture asserts one RasterIX submission, one
+hardware and three software draws, with polygon offset as the first reason.
+The EF replay ends at the CPU hand-off, so compare `frame.ppm` with
+`cpu_world.ppm`.  Then run `rix_v9_capture --compose OUT/glquake_like`: it
+loads the replayed `frame.ppm` into the live RGB565 target and finishes the
+frame through the production drain/convert and CPU fallback path into
+`composite.ppm`, which is compared with `cpu.ppm`.
 
 `run_xsim.bat ROOT OUT SCENE LATENCY` automatically selects capture mode when
 `OUT\SCENE\commands.hex` (or the singular `command.hex`) and `ddr.hex` exist.
@@ -77,9 +98,10 @@ and maps the capture's 24 MiB texture pool from `0x00380000`; the sparse
 preload represents omitted bytes as zero. It writes the PPM from the physical
 color location. Direct single-buffer `CMD`/`TEXTURE` operation remains the
 S1–S4 path.
-For a mixed CPU/FPGA frame, an optional `handoff.ddr` is a sparse target
-snapshot written by the CPU fallback. The launcher applies it after captured
-submission 1 and before submission 2, preserving the real target hand-off.
+For a mixed CPU/FPGA frame with RasterIX work after a CPU hand-off, an
+optional `handoff.ddr` is a sparse target snapshot written by the CPU
+fallback. The launcher applies it after captured submission 1 and before
+submission 2, preserving the real target hand-off.
 `compare_frames.py cpu.ppm frame.ppm diff.png comparison.json` quantizes the
 CPU RGBA reference to RGB565 before comparing it. Its pass limits are a
 one-LSB channel maximum, mean at most 0.02 LSB, and at most 0.25% of pixels

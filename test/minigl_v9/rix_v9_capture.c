@@ -1,7 +1,8 @@
 /*
  * Wire-v9 RasterIX Scene Capture Tool.
  * Captures RasterIX command streams (commands.hex) and DDR textures (ddr.hex)
- * from wire-v9 streams, and writes CPU reference frames (cpu.ppm).
+ * from wire-v9 streams, and writes CPU reference frames (cpu.ppm).  With
+ * --compose it finishes the mixed GLQuake-like frame from an EF replay.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -53,6 +54,12 @@ struct capture_model {
     size_t submitted_bytes;
     size_t submitted_capacity;
     unsigned submitted_count;
+    /* Optional EF replay result written into the target as the hardware's
+     * output when a packet draws to it (compose mode only). */
+    const uint16_t *replay_color;
+    const uint16_t *replay_depth;
+    mw_ctx *replay_context;
+    unsigned replayed;
 };
 
 
@@ -74,34 +81,80 @@ static uint16_t fence_color(uint32_t rgba)
                       ((rgba >> 18U) << 5U) | (rgba >> 11U));
 }
 
+static int is_fence_address(const struct capture_model *model, uint32_t address)
+{
+    unsigned buffer;
+
+    for (buffer = 0U; buffer < MINIGL_RIX_COMMAND_BUFFERS; ++buffer)
+        if (address == (uint32_t)(model->command_address[buffer] + COMMAND_BYTES -
+                                  MINIGL_RIX_TEXTURE_PAGE_BYTES))
+            return 1;
+    return 0;
+}
+
 static void render_packet(struct capture_model *model)
 {
-    unsigned index;
+    unsigned index = 2U;
+    unsigned parser_words;
+    int target_drawn = 0;
 
-    for (index = 2U; index < model->packet_words; ++index) {
+    assert(model->packet_words >= 2U);
+    parser_words = (model->packet[0] & 0x0fffffffU) / sizeof(uint32_t);
+    assert(parser_words + 2U == model->packet_words);
+    while (index < model->packet_words) {
         uint32_t command = model->packet[index];
+        uint32_t kind = command & 0xf0000000U;
 
-        if ((command & 0xf0000000U) == RIX_OP_RENDER_CONFIG) {
+        if (kind == RIX_OP_RENDER_CONFIG) {
             assert(index + 1U < model->packet_words);
             if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_COLOR_BUFFER_ADDR))
                 model->color_address = model->packet[index + 1U];
             else if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_CLEAR_COLOR))
                 model->clear_color = fence_color(model->packet[index + 1U]);
-            ++index;
-        } else if ((command & 0xf0000000U) == RIX_OP_FRAMEBUFFER &&
-                   (command & 0xffU) == (RIX_FRAMEBUFFER_MEMSET |
-                                         RIX_FRAMEBUFFER_COLOR) &&
-                   (command >> 8U) == 1U) {
-            for (unsigned buffer = 0U; buffer < MINIGL_RIX_COMMAND_BUFFERS; ++buffer) {
-                if (model->color_address == model->command_address[buffer] +
-                                            COMMAND_BYTES -
-                                            MINIGL_RIX_TEXTURE_PAGE_BYTES) {
-                    *(uint16_t *)(model->command[buffer] + COMMAND_BYTES -
-                                  MINIGL_RIX_TEXTURE_PAGE_BYTES) = model->clear_color;
-                    break;
+            index += 2U;
+        } else if (kind == RIX_OP_FRAMEBUFFER) {
+            if ((command & 0xffU) == (RIX_FRAMEBUFFER_MEMSET |
+                                      RIX_FRAMEBUFFER_COLOR) &&
+                ((command >> 8U) & 0xfffffU) == 1U) {
+                unsigned buffer;
+                for (buffer = 0U; buffer < MINIGL_RIX_COMMAND_BUFFERS; ++buffer) {
+                    if (model->color_address == model->command_address[buffer] +
+                                                COMMAND_BYTES -
+                                                MINIGL_RIX_TEXTURE_PAGE_BYTES) {
+                        *(uint16_t *)(model->command[buffer] + COMMAND_BYTES -
+                                      MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+                            model->clear_color;
+                        break;
+                    }
                 }
             }
+            ++index;
+        } else if (kind == RIX_OP_TRIANGLE_STREAM) {
+            unsigned words = (command & 0x3ffU) / sizeof(uint32_t);
+            assert((command & 3U) == 0U && index + 1U + words <= model->packet_words);
+            if (!is_fence_address(model, model->color_address))
+                target_drawn = 1;
+            index += 1U + words;
+        } else if (kind == RIX_OP_TEXTURE_STREAM) {
+            unsigned pages = command & 0x7ffffU;
+            assert(index + 1U + pages <= model->packet_words);
+            index += 1U + pages;
+        } else if (kind == RIX_OP_FOG_LUT_STREAM) {
+            unsigned words = (command & 0xffffU) / sizeof(uint32_t);
+            assert((command & 3U) == 0U && index + 1U + words <= model->packet_words);
+            index += 1U + words;
+        } else {
+            assert(!"unknown RasterIX parser command");
         }
+    }
+    if (target_drawn && model->replay_color != NULL) {
+        uint16_t *color = (uint16_t *)(uintptr_t)minigl_raster_color_buffer();
+
+        assert(model->replay_context != NULL && model->replayed == 0U);
+        memcpy(color, model->replay_color, WIDTH * HEIGHT * sizeof(*color));
+        memcpy(model->replay_context->depth_buffer, model->replay_depth,
+               WIDTH * HEIGHT * sizeof(*model->replay_depth));
+        ++model->replayed;
     }
 }
 
@@ -288,11 +341,15 @@ static void relocate_capture_targets(struct capture_model *model,
                 assert(parser_end - parser >= 8U);
                 value = read_le32(model->submitted + parser + 4U);
                 if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_COLOR_BUFFER_ADDR)) {
-                    assert(relocate_address(value, color_sources, 3U,
-                                            WIDTH * HEIGHT * sizeof(uint32_t),
-                                            CAPTURE_COLOR_ADDRESS, &relocated));
-                    write_le32(model->submitted + parser + 4U, relocated);
-                    ++*color_count;
+                    /* The fence page lives in the command buffer, which the
+                     * harness loads at its captured physical address. */
+                    if (!is_fence_address(model, value)) {
+                        assert(relocate_address(value, color_sources, 3U,
+                                                WIDTH * HEIGHT * sizeof(uint32_t),
+                                                CAPTURE_COLOR_ADDRESS, &relocated));
+                        write_le32(model->submitted + parser + 4U, relocated);
+                        ++*color_count;
+                    }
                 } else if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_DEPTH_BUFFER_ADDR)) {
                     assert(relocate_address(value, &depth_source, 1U,
                                             WIDTH * HEIGHT * sizeof(uint32_t),
@@ -498,6 +555,139 @@ static void packet_finish(uint8_t *buf, uint8_t *q)
     mw_put_be32(buf + 8, total);
 }
 
+static void put_state_u32(uint8_t **cursor, uint32_t key, uint32_t value)
+{
+    uint8_t *q = *cursor;
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4, 12U);
+    mw_put_be32(q + 8, key);
+    mw_put_be32(q + 12, 1U);
+    mw_put_be32(q + 16, value);
+    *cursor = q + 20;
+}
+
+static void put_state_float2(uint8_t **cursor, uint32_t key, float first, float second)
+{
+    uint8_t *q = *cursor;
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4, 16U);
+    mw_put_be32(q + 8, key);
+    mw_put_be32(q + 12, 2U);
+    mw_put_bef(q + 16, first);
+    mw_put_bef(q + 20, second);
+    *cursor = q + 24;
+}
+
+static void put_state_u32_float(uint8_t **cursor, uint32_t key,
+                                uint32_t first, float second)
+{
+    uint8_t *q = *cursor;
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4, 16U);
+    mw_put_be32(q + 8, key);
+    mw_put_be32(q + 12, 2U);
+    mw_put_be32(q + 16, first);
+    mw_put_bef(q + 20, second);
+    *cursor = q + 24;
+}
+
+static void put_texture_stage(uint8_t **cursor, uint32_t unit, uint32_t name,
+                              uint32_t enabled, uint32_t environment)
+{
+    uint8_t *q = *cursor;
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4, 24U);
+    mw_put_be32(q + 8, MW_TEXTURE_STAGE);
+    mw_put_be32(q + 12, 4U);
+    mw_put_be32(q + 16, unit);
+    mw_put_be32(q + 20, name);
+    mw_put_be32(q + 24, enabled);
+    mw_put_be32(q + 28, environment);
+    *cursor = q + 32;
+}
+
+static void put_blend_factors(uint8_t **cursor, uint32_t source, uint32_t destination)
+{
+    uint8_t *q = *cursor;
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4, 24U);
+    mw_put_be32(q + 8, MW_BLEND_FACTORS);
+    mw_put_be32(q + 12, 4U);
+    mw_put_be32(q + 16, source);
+    mw_put_be32(q + 20, destination);
+    mw_put_be32(q + 24, source);
+    mw_put_be32(q + 28, destination);
+    *cursor = q + 32;
+}
+
+static void put_texture_image(uint8_t **cursor, uint32_t name,
+                              unsigned width, unsigned height,
+                              const uint8_t *rgba)
+{
+    uint8_t *q = *cursor;
+    uint32_t source_bytes = width * height * 4U;
+    uint32_t payload_bytes = 56U + source_bytes;
+
+    mw_put_be32(q, MW_TEXTURE_IMAGE_RAW);
+    mw_put_be32(q + 4, payload_bytes);
+    mw_put_be32(q + 8, name);
+    mw_put_be32(q + 12, 0U);
+    mw_put_be32(q + 16, 4U);
+    mw_put_be32(q + 20, width);
+    mw_put_be32(q + 24, height);
+    mw_put_be32(q + 28, 0x1908U);
+    mw_put_be32(q + 32, 0x1401U);
+    mw_put_be32(q + 36, 4U);
+    mw_put_be32(q + 40, 0U);
+    mw_put_be32(q + 44, 0U);
+    mw_put_be32(q + 48, 0U);
+    mw_put_be32(q + 52, 0U);
+    mw_put_be32(q + 56, 0U);
+    mw_put_be32(q + 60, source_bytes);
+    memcpy(q + 64, rgba, source_bytes);
+    *cursor = q + 8U + payload_bytes;
+}
+
+static void put_texture_filter(uint8_t **cursor, uint32_t name,
+                               uint32_t pname, uint32_t value)
+{
+    uint8_t *q = *cursor;
+    mw_put_be32(q, MW_TEXTURE_PARAM);
+    mw_put_be32(q + 4, 12U);
+    mw_put_be32(q + 8, name);
+    mw_put_be32(q + 12, pname);
+    mw_put_be32(q + 16, value);
+    *cursor = q + 20;
+}
+
+static void put_vertex(uint8_t **cursor, float x, float y, float z,
+                       float red, float green, float blue, float alpha,
+                       float s0, float t0, float s1, float t1)
+{
+    uint8_t *q = *cursor;
+
+    mw_put_bef(q, x);
+    mw_put_bef(q + 4, y);
+    mw_put_bef(q + 8, z);
+    mw_put_bef(q + 12, 1.0f);
+    mw_put_bef(q + 16, red);
+    mw_put_bef(q + 20, green);
+    mw_put_bef(q + 24, blue);
+    mw_put_bef(q + 28, alpha);
+    mw_put_bef(q + 32, s0);
+    mw_put_bef(q + 36, t0);
+    mw_put_bef(q + 40, 0.0f);
+    mw_put_bef(q + 44, 1.0f);
+    mw_put_bef(q + 48, s1);
+    mw_put_bef(q + 52, t1);
+    mw_put_bef(q + 56, 0.0f);
+    mw_put_bef(q + 60, 1.0f);
+    mw_put_bef(q + 64, 0.0f);
+    mw_put_bef(q + 68, 0.0f);
+    mw_put_bef(q + 72, 1.0f);
+    *cursor = q + 76;
+}
+
 /* SCENE 1: Blended quad (two triangles sharing diagonal) */
 static void submit_blended_quad(mw_ctx *c)
 {
@@ -632,17 +822,14 @@ static void submit_textured_lightmap(mw_ctx *c)
     static uint8_t tex_lightmap[64 * 64 * 4];
     unsigned x, y;
 
+    /* Solid, non-white inputs isolate texture upload/fetch and the second
+     * pass blend from the two renderers' different texel-boundary rounding. */
     for (y = 0; y < 64; ++y) {
         for (x = 0; x < 64; ++x) {
             uint8_t *p = tex_diffuse + (y * 64 + x) * 4;
-            int check = ((x >> 3) ^ (y >> 3)) & 1;
-            p[0] = check ? 220 : 40; p[1] = check ? 80 : 180;
-            p[2] = check ? 30 : 220; p[3] = 255;
             uint8_t *lm = tex_lightmap + (y * 64 + x) * 4;
-            float dx = (float)x - 32.0f, dy = (float)y - 32.0f;
-            float dist = sqrtf(dx * dx + dy * dy) / 32.0f;
-            uint8_t val = (uint8_t)(fmaxf(0.0f, 1.0f - dist) * 255.0f);
-            lm[0] = val; lm[1] = val; lm[2] = val; lm[3] = val;
+            p[0] = 198U; p[1] = 132U; p[2] = 66U; p[3] = 255U;
+            lm[0] = 160U; lm[1] = 160U; lm[2] = 160U; lm[3] = 255U;
         }
     }
 
@@ -751,12 +938,12 @@ static void submit_textured_lightmap(mw_ctx *c)
     mw_put_bef(q + 64, 0.0f); mw_put_bef(q + 68, 0.0f); mw_put_bef(q + 72, 1.0f); \
     q += 76; \
 } while(0)
-        EMIT_V(-0.8f, -0.8f, 0.0f, 0.0f);
-        EMIT_V( 0.8f, -0.8f, 1.0f, 0.0f);
-        EMIT_V( 0.8f,  0.8f, 1.0f, 1.0f);
-        EMIT_V(-0.8f, -0.8f, 0.0f, 0.0f);
-        EMIT_V( 0.8f,  0.8f, 1.0f, 1.0f);
-        EMIT_V(-0.8f,  0.8f, 0.0f, 1.0f);
+        EMIT_V(-0.8f, -0.8f, 0.001953125f, 0.001953125f);
+        EMIT_V( 0.8f, -0.8f, 0.998046875f, 0.001953125f);
+        EMIT_V( 0.8f,  0.8f, 0.998046875f, 0.998046875f);
+        EMIT_V(-0.8f, -0.8f, 0.001953125f, 0.001953125f);
+        EMIT_V( 0.8f,  0.8f, 0.998046875f, 0.998046875f);
+        EMIT_V(-0.8f,  0.8f, 0.001953125f, 0.998046875f);
 #undef EMIT_V
     }
 
@@ -766,17 +953,449 @@ static void submit_textured_lightmap(mw_ctx *c)
     (void)minigl_raster_finish();
 }
 
+/* SCENE 4: Single diffuse texture (plain textured quad) */
+static void submit_plain_textured(mw_ctx *c)
+{
+    static uint8_t tex_diffuse[64 * 64 * 4];
+    unsigned x, y;
+
+    /* The plain case deliberately uses one non-white texel value throughout:
+     * it proves the texture path without conflating fetch correctness with
+     * the known CPU/RasterIX nearest-coordinate boundary convention. */
+    for (y = 0; y < 64; ++y) {
+        for (x = 0; x < 64; ++x) {
+            uint8_t *p = tex_diffuse + (y * 64 + x) * 4;
+            p[0] = 198U; p[1] = 132U; p[2] = 66U; p[3] = 255U;
+        }
+    }
+
+    static uint8_t up_packet[32 * 1024];
+    uint8_t *q = packet_init(up_packet, 3);
+
+    mw_put_be32(q, MW_TEXTURE_IMAGE_RAW);
+    uint32_t up_bytes = 56 + 64 * 64 * 4;
+    mw_put_be32(q + 4, up_bytes);
+    mw_put_be32(q + 8, 1);       /* name */
+    mw_put_be32(q + 12, 0);      /* level */
+    mw_put_be32(q + 16, 4);      /* internal 4 (RGBA) */
+    mw_put_be32(q + 20, 64);     /* width */
+    mw_put_be32(q + 24, 64);     /* height */
+    mw_put_be32(q + 28, 0x1908); /* format GL_RGBA */
+    mw_put_be32(q + 32, 0x1401); /* type GL_UNSIGNED_BYTE */
+    mw_put_be32(q + 36, 4);      /* alignment */
+    mw_put_be32(q + 40, 0);      /* row_length */
+    mw_put_be32(q + 44, 0);      /* skip_rows */
+    mw_put_be32(q + 48, 0);      /* skip_pixels */
+    mw_put_be32(q + 52, 0);      /* swap */
+    mw_put_be32(q + 56, 0);      /* lsb */
+    mw_put_be32(q + 60, 64 * 64 * 4); /* source bytes */
+    memcpy(q + 64, tex_diffuse, 64 * 64 * 4);
+    q += 8 + up_bytes;
+
+    mw_put_be32(q, MW_TEXTURE_PARAM); mw_put_be32(q + 4, 12);
+    mw_put_be32(q + 8, 1); mw_put_be32(q + 12, 0x2801); mw_put_be32(q + 16, 0x2600);
+    q += 20;
+    mw_put_be32(q, MW_TEXTURE_PARAM); mw_put_be32(q + 4, 12);
+    mw_put_be32(q + 8, 1); mw_put_be32(q + 12, 0x2800); mw_put_be32(q + 16, 0x2600);
+    q += 20;
+
+    packet_finish(up_packet, q);
+    uint32_t status = mw_host_submit(c, up_packet, (uint32_t)(q - up_packet));
+    assert(status == MW_STATUS_OK);
+
+    static uint8_t draw_packet[4096];
+    q = packet_init(draw_packet, 7);
+
+    /* Clear */
+    mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24);
+    mw_put_be32(q + 8, 3);
+    mw_put_bef(q + 12, 0.02f); mw_put_bef(q + 16, 0.03f); mw_put_bef(q + 20, 0.06f); mw_put_bef(q + 24, 1.0f);
+    mw_put_bef(q + 28, 1.0f);
+    q += 32;
+
+    /* Texture stage 0 enabled */
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 24);
+    mw_put_be32(q + 8, MW_TEXTURE_STAGE); mw_put_be32(q + 12, 4);
+    mw_put_be32(q + 16, 0); mw_put_be32(q + 20, 1); mw_put_be32(q + 24, 1); mw_put_be32(q + 28, 0x1e01);
+    q += 32;
+
+    /* Texture stage 1 disabled */
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 24);
+    mw_put_be32(q + 8, MW_TEXTURE_STAGE); mw_put_be32(q + 12, 4);
+    mw_put_be32(q + 16, 1); mw_put_be32(q + 20, 0); mw_put_be32(q + 24, 0); mw_put_be32(q + 28, 0x1e01);
+    q += 32;
+
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
+    mw_put_be32(q + 8, MW_DEPTH_TEST); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 1);
+    q += 20;
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
+    mw_put_be32(q + 8, MW_DEPTH_FUNC); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 0x0203);
+    q += 20;
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
+    mw_put_be32(q + 8, MW_DEPTH_MASK); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 1);
+    q += 20;
+
+    {
+        uint32_t obj_payload = 8 + 6 * 76;
+        mw_put_be32(q, MW_DRAW_OBJECT); mw_put_be32(q + 4, obj_payload);
+        mw_put_be32(q + 8, 4); mw_put_be32(q + 12, 6);
+        q += 16;
+#define EMIT_V(px, py, s, t) do { \
+    mw_put_bef(q, px); mw_put_bef(q + 4, py); mw_put_bef(q + 8, 0.0f); mw_put_bef(q + 12, 1.0f); \
+    mw_put_bef(q + 16, 1.0f); mw_put_bef(q + 20, 1.0f); mw_put_bef(q + 24, 1.0f); mw_put_bef(q + 28, 1.0f); \
+    mw_put_bef(q + 32, s); mw_put_bef(q + 36, t); mw_put_bef(q + 40, 0.0f); mw_put_bef(q + 44, 1.0f); \
+    mw_put_bef(q + 48, 0.0f); mw_put_bef(q + 52, 0.0f); mw_put_bef(q + 56, 0.0f); mw_put_bef(q + 60, 1.0f); \
+    mw_put_bef(q + 64, 0.0f); mw_put_bef(q + 68, 0.0f); mw_put_bef(q + 72, 1.0f); \
+    q += 76; \
+} while(0)
+        /* Keep interpolated texel coordinates off exact texel boundaries:
+         * the hardware interpolator rounds boundary-adjacent coordinates
+         * down, which a knife-edge 1.0 mapping turns into whole-row
+         * off-by-one sampling under NEAREST filtering. */
+        EMIT_V(-0.8f, -0.8f, 0.001953125f, 0.001953125f);
+        EMIT_V( 0.8f, -0.8f, 0.998046875f, 0.001953125f);
+        EMIT_V( 0.8f,  0.8f, 0.998046875f, 0.998046875f);
+        EMIT_V(-0.8f, -0.8f, 0.001953125f, 0.001953125f);
+        EMIT_V( 0.8f,  0.8f, 0.998046875f, 0.998046875f);
+        EMIT_V(-0.8f,  0.8f, 0.001953125f, 0.998046875f);
+#undef EMIT_V
+    }
+
+    packet_finish(draw_packet, q);
+    status = mw_host_submit(c, draw_packet, (uint32_t)(q - draw_packet));
+    assert(status == MW_STATUS_OK);
+    (void)minigl_raster_finish();
+}
+
+
+#define GLQUAKE_WORLD_TEXTURE 11U
+#define GLQUAKE_LIGHTMAP_TEXTURE 12U
+#define GLQUAKE_ALIAS_TEXTURE 13U
+#define GLQUAKE_HUD_TEXTURE 14U
+
+static void submit_glquake_textures(mw_ctx *c)
+{
+    static uint8_t packet[8192];
+    uint8_t world[8U * 8U * 4U];
+    uint8_t lightmap[8U * 8U * 4U];
+    uint8_t alias[8U * 8U * 4U];
+    uint8_t hud[8U * 8U * 4U];
+    uint8_t *q;
+    unsigned x;
+    unsigned y;
+
+    /* The RasterIX-rendered world uses uniform texels (see
+     * submit_plain_textured); the CPU-only alias and HUD keep patterns. */
+    for (y = 0U; y < 8U; ++y) {
+        for (x = 0U; x < 8U; ++x) {
+            size_t offset = (y * 8U + x) * 4U;
+            int check = ((x >> 1U) ^ (y >> 1U)) & 1U;
+            world[offset] = 66U;
+            world[offset + 1U] = 99U;
+            world[offset + 2U] = 165U;
+            world[offset + 3U] = 255U;
+            lightmap[offset] = 192U;
+            lightmap[offset + 1U] = 192U;
+            lightmap[offset + 2U] = 192U;
+            lightmap[offset + 3U] = 255U;
+            alias[offset] = check ? 230U : 80U;
+            alias[offset + 1U] = check ? 80U : 190U;
+            alias[offset + 2U] = 48U;
+            alias[offset + 3U] = 255U;
+            hud[offset] = 255U;
+            hud[offset + 1U] = (uint8_t)(160U + y * 8U);
+            hud[offset + 2U] = 32U;
+            hud[offset + 3U] = (x == 0U || y == 0U || x == 7U || y == 7U) ? 0U : 255U;
+        }
+    }
+
+    q = packet_init(packet, 12U);
+    put_texture_image(&q, GLQUAKE_WORLD_TEXTURE, 8U, 8U, world);
+    put_texture_filter(&q, GLQUAKE_WORLD_TEXTURE, 0x2801U, 0x2600U);
+    put_texture_filter(&q, GLQUAKE_WORLD_TEXTURE, 0x2800U, 0x2600U);
+    put_texture_image(&q, GLQUAKE_LIGHTMAP_TEXTURE, 8U, 8U, lightmap);
+    put_texture_filter(&q, GLQUAKE_LIGHTMAP_TEXTURE, 0x2801U, 0x2600U);
+    put_texture_filter(&q, GLQUAKE_LIGHTMAP_TEXTURE, 0x2800U, 0x2600U);
+    put_texture_image(&q, GLQUAKE_ALIAS_TEXTURE, 8U, 8U, alias);
+    put_texture_filter(&q, GLQUAKE_ALIAS_TEXTURE, 0x2801U, 0x2600U);
+    put_texture_filter(&q, GLQUAKE_ALIAS_TEXTURE, 0x2800U, 0x2600U);
+    put_texture_image(&q, GLQUAKE_HUD_TEXTURE, 8U, 8U, hud);
+    put_texture_filter(&q, GLQUAKE_HUD_TEXTURE, 0x2801U, 0x2600U);
+    put_texture_filter(&q, GLQUAKE_HUD_TEXTURE, 0x2800U, 0x2600U);
+    packet_finish(packet, q);
+    assert(mw_host_submit(c, packet, (uint32_t)(q - packet)) == MW_STATUS_OK);
+}
+
+static void submit_glquake_world(mw_ctx *c)
+{
+    static uint8_t packet[4096];
+    uint8_t *q = packet_init(packet, 7U);
+    uint32_t payload_bytes = 8U + 6U * 76U;
+
+    mw_put_be32(q, MW_CLEAR);
+    mw_put_be32(q + 4, 24U);
+    mw_put_be32(q + 8, 3U);
+    mw_put_bef(q + 12, 0.0f);
+    mw_put_bef(q + 16, 0.0f);
+    mw_put_bef(q + 20, 0.0f);
+    mw_put_bef(q + 24, 1.0f);
+    mw_put_bef(q + 28, 1.0f);
+    q += 32;
+
+    put_texture_stage(&q, 0U, GLQUAKE_WORLD_TEXTURE, 1U, 0x1e01U);
+    put_texture_stage(&q, 1U, GLQUAKE_LIGHTMAP_TEXTURE, 1U, 0x2100U);
+    put_state_u32(&q, MW_DEPTH_TEST, 1U);
+    put_state_u32(&q, MW_DEPTH_FUNC, 0x0203U);
+    put_state_u32(&q, MW_DEPTH_MASK, 1U);
+
+    mw_put_be32(q, MW_DRAW_OBJECT);
+    mw_put_be32(q + 4, payload_bytes);
+    mw_put_be32(q + 8, 4U);
+    mw_put_be32(q + 12, 6U);
+    q += 16;
+    put_vertex(&q, -0.95f, -0.85f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.0625f, 0.0625f, 0.0625f, 0.0625f);
+    put_vertex(&q, 0.95f, -0.85f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.9375f, 0.0625f, 0.9375f, 0.0625f);
+    put_vertex(&q, 0.95f, 0.85f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.9375f, 0.9375f, 0.9375f, 0.9375f);
+    put_vertex(&q, -0.95f, -0.85f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.0625f, 0.0625f, 0.0625f, 0.0625f);
+    put_vertex(&q, 0.95f, 0.85f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.9375f, 0.9375f, 0.9375f, 0.9375f);
+    put_vertex(&q, -0.95f, 0.85f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.0625f, 0.9375f, 0.0625f, 0.9375f);
+
+    packet_finish(packet, q);
+    assert(mw_host_submit(c, packet, (uint32_t)(q - packet)) == MW_STATUS_OK);
+}
+
+static void submit_glquake_alias(mw_ctx *c)
+{
+    static uint8_t packet[4096];
+    uint8_t *q = packet_init(packet, 9U);
+    uint32_t payload_bytes = 8U + 12U * 76U;
+
+    put_texture_stage(&q, 1U, 0U, 0U, 0x1e01U);
+    put_texture_stage(&q, 0U, GLQUAKE_ALIAS_TEXTURE, 1U, 0x2100U);
+    put_state_u32(&q, MW_DEPTH_TEST, 1U);
+    put_state_u32(&q, MW_DEPTH_FUNC, 0x0203U);
+    put_state_u32(&q, MW_DEPTH_MASK, 1U);
+    put_state_u32(&q, MW_BLEND, 0U);
+    put_state_float2(&q, MW_POLYGON_OFFSET, 1.0f, 1.0f);
+    put_state_u32(&q, MW_OFFSET_FILL, 1U);
+
+    mw_put_be32(q, MW_DRAW_OBJECT);
+    mw_put_be32(q + 4, payload_bytes);
+    mw_put_be32(q + 8, 4U);
+    mw_put_be32(q + 12, 12U);
+    q += 16;
+#define ALIAS_VERTEX(px, py, s, t, r, g, b) \
+    put_vertex(&q, px, py, -0.4f, r, g, b, 1.0f, s, t, 0.0f, 0.0f)
+    ALIAS_VERTEX(0.0f, 0.55f, 0.5f, 0.0625f, 1.0f, 0.9f, 0.8f);
+    ALIAS_VERTEX(-0.34f, -0.2f, 0.0625f, 0.9375f, 0.7f, 0.8f, 1.0f);
+    ALIAS_VERTEX(0.0f, 0.0f, 0.5f, 0.5f, 1.0f, 1.0f, 1.0f);
+    ALIAS_VERTEX(-0.34f, -0.2f, 0.0625f, 0.9375f, 0.7f, 0.8f, 1.0f);
+    ALIAS_VERTEX(0.0f, -0.58f, 0.5f, 0.9375f, 1.0f, 0.8f, 0.7f);
+    ALIAS_VERTEX(0.0f, 0.0f, 0.5f, 0.5f, 1.0f, 1.0f, 1.0f);
+    ALIAS_VERTEX(0.0f, -0.58f, 0.5f, 0.9375f, 1.0f, 0.8f, 0.7f);
+    ALIAS_VERTEX(0.34f, -0.2f, 0.9375f, 0.9375f, 0.8f, 1.0f, 0.7f);
+    ALIAS_VERTEX(0.0f, 0.0f, 0.5f, 0.5f, 1.0f, 1.0f, 1.0f);
+    ALIAS_VERTEX(0.34f, -0.2f, 0.9375f, 0.9375f, 0.8f, 1.0f, 0.7f);
+    ALIAS_VERTEX(0.0f, 0.55f, 0.5f, 0.0625f, 1.0f, 0.9f, 0.8f);
+    ALIAS_VERTEX(0.0f, 0.0f, 0.5f, 0.5f, 1.0f, 1.0f, 1.0f);
+#undef ALIAS_VERTEX
+
+    packet_finish(packet, q);
+    assert(mw_host_submit(c, packet, (uint32_t)(q - packet)) == MW_STATUS_OK);
+}
+
+static void submit_glquake_particles(mw_ctx *c)
+{
+    static uint8_t packet[2048];
+    uint8_t *q = packet_init(packet, 7U);
+    uint32_t payload_bytes = 8U + 9U * 76U;
+
+    put_state_u32(&q, MW_OFFSET_FILL, 0U);
+    put_state_float2(&q, MW_POLYGON_OFFSET, 0.0f, 0.0f);
+    put_texture_stage(&q, 0U, 0U, 0U, 0x1e01U);
+    put_state_u32(&q, MW_DEPTH_MASK, 0U);
+    put_state_u32(&q, MW_BLEND, 1U);
+    put_blend_factors(&q, 0x0302U, 0x0303U);
+
+    mw_put_be32(q, MW_DRAW_OBJECT);
+    mw_put_be32(q + 4, payload_bytes);
+    mw_put_be32(q + 8, 4U);
+    mw_put_be32(q + 12, 9U);
+    q += 16;
+#define PARTICLE(px, py, r, g, b) do { \
+    put_vertex(&q, (px) - 0.06f, (py) - 0.05f, -0.6f, r, g, b, 0.55f, 0.0f, 0.0f, 0.0f, 0.0f); \
+    put_vertex(&q, (px) + 0.06f, (py) - 0.05f, -0.6f, r, g, b, 0.55f, 0.0f, 0.0f, 0.0f, 0.0f); \
+    put_vertex(&q, (px), (py) + 0.07f, -0.6f, r, g, b, 0.55f, 0.0f, 0.0f, 0.0f, 0.0f); \
+} while (0)
+    PARTICLE(-0.55f, 0.20f, 1.0f, 0.2f, 0.1f);
+    PARTICLE(0.52f, 0.28f, 0.1f, 0.8f, 1.0f);
+    PARTICLE(0.43f, -0.45f, 1.0f, 0.8f, 0.1f);
+#undef PARTICLE
+
+    packet_finish(packet, q);
+    assert(mw_host_submit(c, packet, (uint32_t)(q - packet)) == MW_STATUS_OK);
+}
+
+static void submit_glquake_hud(mw_ctx *c)
+{
+    static uint8_t packet[2048];
+    uint8_t *q = packet_init(packet, 6U);
+    uint32_t payload_bytes = 8U + 6U * 76U;
+
+    put_state_u32(&q, MW_BLEND, 0U);
+    put_state_u32(&q, MW_DEPTH_TEST, 0U);
+    put_texture_stage(&q, 0U, GLQUAKE_HUD_TEXTURE, 1U, 0x1e01U);
+    put_state_u32(&q, MW_ALPHA_TEST, 1U);
+    put_state_u32_float(&q, MW_ALPHA_FUNC, 0x0204U, 0.5f);
+
+    mw_put_be32(q, MW_DRAW_OBJECT);
+    mw_put_be32(q + 4, payload_bytes);
+    mw_put_be32(q + 8, 4U);
+    mw_put_be32(q + 12, 6U);
+    q += 16;
+    put_vertex(&q, -0.90f, 0.67f, -0.9f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.0625f, 0.0625f, 0.0f, 0.0f);
+    put_vertex(&q, -0.25f, 0.67f, -0.9f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.9375f, 0.0625f, 0.0f, 0.0f);
+    put_vertex(&q, -0.25f, 0.90f, -0.9f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.9375f, 0.9375f, 0.0f, 0.0f);
+    put_vertex(&q, -0.90f, 0.67f, -0.9f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.0625f, 0.0625f, 0.0f, 0.0f);
+    put_vertex(&q, -0.25f, 0.90f, -0.9f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.9375f, 0.9375f, 0.0f, 0.0f);
+    put_vertex(&q, -0.90f, 0.90f, -0.9f, 1.0f, 1.0f, 1.0f, 1.0f,
+               0.0625f, 0.9375f, 0.0f, 0.0f);
+
+    packet_finish(packet, q);
+    assert(mw_host_submit(c, packet, (uint32_t)(q - packet)) == MW_STATUS_OK);
+}
+
+static void submit_glquake_like(mw_ctx *c)
+{
+    submit_glquake_textures(c);
+    submit_glquake_world(c);
+    submit_glquake_alias(c);
+    submit_glquake_particles(c);
+    submit_glquake_hud(c);
+    (void)minigl_raster_finish();
+}
+
 static void run_scene(const char *name, mw_ctx *c)
 {
     if (strcmp(name, "blended_quad") == 0) submit_blended_quad(c);
     else if (strcmp(name, "gears") == 0) submit_gears(c);
     else if (strcmp(name, "textured_lightmap") == 0) submit_textured_lightmap(c);
+    else if (strcmp(name, "plain_textured") == 0) submit_plain_textured(c);
+    else if (strcmp(name, "glquake_like") == 0) submit_glquake_like(c);
     else assert(!"unknown scene");
+}
+
+/* Read a replayed RasterIX frame as RGB565.  PPM row 0 is the top of the
+ * image; the MiniGL target, like write_ppm(), is bottom-up. */
+static void load_rgb565_ppm(const char *path, uint16_t *destination)
+{
+    FILE *file = fopen(path, "rb");
+    unsigned width;
+    unsigned height;
+    unsigned maximum;
+    unsigned x;
+    unsigned y;
+
+    assert(file != NULL && destination != NULL);
+    assert(fscanf(file, "P6 %u %u %u", &width, &height, &maximum) == 3);
+    assert(width == WIDTH && height == HEIGHT && maximum == 255U);
+    assert(fgetc(file) != EOF);
+    for (y = 0U; y < HEIGHT; ++y) {
+        for (x = 0U; x < WIDTH; ++x) {
+            int red = fgetc(file);
+            int green = fgetc(file);
+            int blue = fgetc(file);
+
+            assert(red != EOF && green != EOF && blue != EOF);
+            destination[(HEIGHT - 1U - y) * WIDTH + x] =
+                (uint16_t)((((unsigned)red >> 3U) << 11U) |
+                           (((unsigned)green >> 2U) << 5U) |
+                           ((unsigned)blue >> 3U));
+        }
+    }
+    assert(fgetc(file) == EOF);
+    assert(fclose(file) == 0);
+}
+
+/* RasterIX's Z16 target for the world, taken from the CPU reference: the
+ * testbench PPM carries colour only.  Layout matches rix_prepare_depth(). */
+static void glquake_world_depth(uint16_t *destination)
+{
+    mw_ctx *c;
+    size_t index;
+
+    minigl_raster_set_rix_platform(NULL);
+    c = mw_host_create(WIDTH, HEIGHT);
+    assert(c != NULL && c->state.target.depth_bits == 24U);
+    submit_glquake_textures(c);
+    submit_glquake_world(c);
+    (void)minigl_raster_finish();
+    for (index = 0U; index < WIDTH * HEIGHT; ++index) {
+        const uint8_t *depth = c->depth_buffer + index * 3U;
+        destination[index] = (uint16_t)(((uint32_t)depth[0] << 8U) | depth[1]);
+    }
+    mw_host_destroy(c);
+}
+
+/*
+ * Finish a GLQuake-like frame on the real firmware path with the EF xsim
+ * result standing in for the hardware: the capture model writes the replayed
+ * RGB565 world into the target when the world packet is committed.  The
+ * alias fallback then performs the production drain/convert hand-off before
+ * the remaining CPU draws, so composite.ppm proves order and composition.
+ */
+static void compose_glquake(const char *directory)
+{
+    struct capture_model model;
+    uint16_t *world = (uint16_t *)malloc(WIDTH * HEIGHT * sizeof(*world));
+    uint16_t *depth = (uint16_t *)malloc(WIDTH * HEIGHT * sizeof(*depth));
+    mw_ctx *c;
+    char path[1024];
+
+    assert(world != NULL && depth != NULL);
+    assert(snprintf(path, sizeof(path), "%s/frame.ppm", directory) > 0);
+    load_rgb565_ppm(path, world);
+    glquake_world_depth(depth);
+    capture_model_init(&model);
+    model.replay_color = world;
+    model.replay_depth = depth;
+    configure_capture_platform(&model);
+    c = mw_host_create(WIDTH, HEIGHT);
+    assert(c != NULL);
+    model.replay_context = c;
+    minigl_raster_reset_frame_counters();
+    submit_glquake_like(c);
+    assert(model.submitted_count == 1U && model.replayed == 1U);
+    assert(minigl_raster_draws_hardware() == 1U);
+    assert(minigl_raster_draws_software() == 3U);
+    assert(minigl_raster_first_fallback_reason() ==
+           ZZ9K_MGL_FALLBACK_POLYGON_OFFSET);
+    assert(snprintf(path, sizeof(path), "%s/composite.ppm", directory) > 0);
+    write_ppm(path);
+    printf("composed scene=glquake_like hardware=1 software=3 first_fallback=%s\n",
+           minigl_rix_backend_fallback_name(ZZ9K_MGL_FALLBACK_POLYGON_OFFSET));
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    capture_model_destroy(&model);
+    free(world);
+    free(depth);
 }
 
 static void capture_scene(const char *directory, const char *name)
 {
     struct capture_model model;
+    mw_ctx *c;
     char path[1024];
     unsigned color_relocations;
     unsigned depth_relocations;
@@ -784,8 +1403,9 @@ static void capture_scene(const char *directory, const char *name)
     capture_model_init(&model);
     configure_capture_platform(&model);
 
-    mw_ctx *c = mw_host_create(WIDTH, HEIGHT);
+    c = mw_host_create(WIDTH, HEIGHT);
     assert(c != NULL);
+    minigl_raster_reset_frame_counters();
 
     run_scene(name, c);
 
@@ -796,6 +1416,15 @@ static void capture_scene(const char *directory, const char *name)
     write_words(path, model.submitted, model.submitted_bytes);
     assert(snprintf(path, sizeof(path), "%s/ddr.hex", directory) > 0);
     write_ddr(path, &model);
+    if (strcmp(name, "glquake_like") == 0) {
+        /* One accelerated world draw, then polygon offset forces the alias
+         * model and everything after it onto the CPU for the frame. */
+        assert(model.submitted_count == 1U);
+        assert(minigl_raster_draws_hardware() == 1U);
+        assert(minigl_raster_draws_software() == 3U);
+        assert(minigl_raster_first_fallback_reason() ==
+               ZZ9K_MGL_FALLBACK_POLYGON_OFFSET);
+    }
 
     printf("captured scene=%s submissions=%u command_bytes=%zu targets=%u/%u\n",
            name, model.submitted_count, model.submitted_bytes,
@@ -814,6 +1443,18 @@ static void reference_scene(const char *directory, const char *name)
     mw_ctx *c = mw_host_create(WIDTH, HEIGHT);
     assert(c != NULL);
 
+    if (strcmp(name, "glquake_like") == 0) {
+        /* World-only CPU reference for the EF replay, which ends at the
+         * hand-off; cpu.ppm below is the complete frame. */
+        submit_glquake_textures(c);
+        submit_glquake_world(c);
+        (void)minigl_raster_finish();
+        assert(snprintf(path, sizeof(path), "%s/cpu_world.ppm", directory) > 0);
+        write_ppm(path);
+        mw_host_destroy(c);
+        c = mw_host_create(WIDTH, HEIGHT);
+        assert(c != NULL);
+    }
     run_scene(name, c);
 
     assert(snprintf(path, sizeof(path), "%s/cpu.ppm", directory) > 0);
@@ -824,11 +1465,20 @@ static void reference_scene(const char *directory, const char *name)
 
 int main(int argc, char **argv)
 {
-    static const char *const scenes[] = { "blended_quad", "gears", "textured_lightmap" };
+    static const char *const scenes[] = {
+        "blended_quad", "gears", "textured_lightmap", "plain_textured",
+        "glquake_like"
+    };
     size_t index;
 
+    if (argc == 3 && strcmp(argv[1], "--compose") == 0) {
+        compose_glquake(argv[2]);
+        return 0;
+    }
     if (argc != 2) {
-        fprintf(stderr, "usage: %s <output-directory>\n", argv[0]);
+        fprintf(stderr, "usage: %s <output-directory>\n"
+                        "       %s --compose <glquake_like-directory>\n",
+                argv[0], argv[0]);
         return 2;
     }
 
