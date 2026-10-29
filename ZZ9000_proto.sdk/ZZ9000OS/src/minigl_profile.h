@@ -51,6 +51,7 @@ typedef enum {
     MGLP_N_PIN_DRAINS,    /* uploads that drained RasterIX (texture in use) */
     MGLP_N_EVICTIONS,     /* textures evicted from the RasterIX pool */
     MGLP_N_OPS,           /* synchronous bridge ops */
+    MGLP_N_ASYNC_PRESENTS,/* packet-owned direct P96 presentations */
     MGLP_COUNTERS
 } MiniGLProfileCounter;
 

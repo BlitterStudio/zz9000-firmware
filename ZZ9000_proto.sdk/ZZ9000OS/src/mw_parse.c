@@ -528,6 +528,16 @@ static int mw_valid_command(uint32_t opcode, const uint8_t *p, size_t bytes)
     case MW_PRESENT:
         return bytes == 0;
 
+    case MW_PRESENT_SPAN:
+        /* Nested MW_BLIT request (six header words plus clip rectangles)
+         * followed by card offset and span length. */
+        return bytes >= 32U && mw_be32(p) == MW_BLIT &&
+               mw_be32(p + 4) >= 1U && mw_be32(p + 4) <= 13U &&
+               mw_be32(p + 8) != 0U && mw_be32(p + 20) >= 1U &&
+               mw_be32(p + 20) <= MW_BLIT_MAX_RECTS &&
+               bytes == 32U + 16U * mw_be32(p + 20) &&
+               mw_be32(p + bytes - 4U) != 0U;
+
     default:
         return 0;
     }

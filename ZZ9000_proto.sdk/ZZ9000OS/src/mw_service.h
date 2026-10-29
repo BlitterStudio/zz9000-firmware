@@ -21,7 +21,9 @@ extern "C" {
 #define MW_SERVICE_WIRE_VER         9U
 #define MW_CAP_WIRE_V9              (1U << 18)
 #define MW_CAP_LATEST_READBACK_ROWS (1U << 19)
-
+/* MW_PRESENT_SPAN is an additive v9 extension; it is never inferred from
+ * the wire version because an older v9 peer must keep synchronous BLIT. */
+#define MW_CAP_ASYNC_PRESENT        (1U << 20)
 
 #define MW_DEFAULT_SLOT_CAPACITY_Z3 (256U * 1024U)
 #define MW_DEFAULT_SLOT_COUNT_Z3    2U
