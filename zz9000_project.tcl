@@ -419,7 +419,7 @@ proc cr_bd_zz9000_ps { parentCell } {
   "
    if { $rasterix } {
      append list_check_ips "  zz9k.org:user:zz9k_rasterix:1.0\n"
-     append list_check_ips "  xilinx.com:ip:axi_fifo_mm_s:4.3\n"
+     append list_check_ips "  xilinx.com:ip:axi_fifo_mm_s:4.2\n"
    }
 
    set list_ips_missing ""
@@ -748,7 +748,7 @@ proc create_hier_cell_video { parentCell nameHier } {
     }
     # Xilinx AXI FIFO MM-S is the PS/PL330 command ingress.  It packetizes
     # TDFD writes only after TLF and drives RasterIX FrameStreamingCore ST0.
-    set gpu_cmd_fifo [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_fifo_mm_s:4.3 gpu_cmd_fifo]
+    set gpu_cmd_fifo [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_fifo_mm_s:4.2 gpu_cmd_fifo]
     set_property -dict [list \
       CONFIG.C_S_AXI_PROTOCOL {AXI4LITE} \
       CONFIG.C_DATA_INTERFACE_TYPE {0} \
@@ -1533,8 +1533,11 @@ proc create_hier_cell_video { parentCell nameHier } {
   if { $rasterix } {
     # The renderer, command FIFO and both peripheral targets are all FCLK0
     # (100 MHz); no command CDC or renderer-specific clock domain exists.
-    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins gpu_cmd_fifo/s_axi_aresetn] [get_bd_pins axi_interconnect_3/S01_ARESETN] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN] [get_bd_pins ps7_0_axi_periph/M07_ARESETN] [get_bd_pins ps7_0_axi_periph/M08_ARESETN]
-    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins gpu_cmd_fifo/s_axi_aclk] [get_bd_pins axi_interconnect_3/S01_ACLK] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK] [get_bd_pins ps7_0_axi_periph/M07_ACLK] [get_bd_pins ps7_0_axi_periph/M08_ACLK]
+    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins gpu_cmd_fifo/s_axi_aresetn] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN] [get_bd_pins ps7_0_axi_periph/M07_ARESETN] [get_bd_pins ps7_0_axi_periph/M08_ARESETN]
+    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins gpu_cmd_fifo/s_axi_aclk] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK] [get_bd_pins ps7_0_axi_periph/M07_ACLK] [get_bd_pins ps7_0_axi_periph/M08_ACLK]
+    # Audio RX remains in the 25 MHz audio domain while sharing HP2.
+    connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins axi_interconnect_3/S01_ARESETN]
+    connect_bd_net -net S00_ACLK_1 [get_bd_pins axi_interconnect_3/S01_ACLK]
   }
 
 

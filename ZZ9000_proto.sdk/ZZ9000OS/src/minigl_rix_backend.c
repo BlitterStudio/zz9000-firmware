@@ -265,7 +265,11 @@ static int backend_multitexture_supported(const MiniGLRixBackend *backend)
     if ((state->enabled_flags & required) != required ||
         (state->enabled_flags & (ZZ9K_MGL_STATE_BLEND | ZZ9K_MGL_STATE_ALPHA_TEST)) != 0U ||
         (state->color_mask & 7U) != 7U ||
-        state->tex_env_mode[1] != GL_MODULATE)
+        state->tex_env_mode[1] != GL_MODULATE ||
+        (state->depth_func != ZZ9K_MGL_WIRE_LEQUAL &&
+         state->depth_func != ZZ9K_MGL_WIRE_EQUAL &&
+         state->depth_func != ZZ9K_MGL_WIRE_GEQUAL &&
+         state->depth_func != ZZ9K_MGL_WIRE_ALWAYS))
         return 0;
     texture0 = backend_texture((MiniGLRixBackend *)backend, backend->bound_texture);
     texture1 = backend_texture((MiniGLRixBackend *)backend, backend->bound_texture1);
@@ -1105,19 +1109,36 @@ static int backend_start_frame(MiniGLRixBackend *backend, uint16_t width,
     return 1;
 }
 
+static int backend_emit_triangle(RixCmdWriter *writer, const MiniGLRixBackend *backend,
+                                 const MiniGLRixRecordedOp *op, size_t index,
+                                 unsigned int pass)
+{
+    const RixTriangle *triangle = &(pass == 0U ? backend->triangles :
+                                   backend->texture1_triangles)[op->first_triangle + index];
+
+    return rix_cmd_triangle(writer, triangle->words, RIX_TRIANGLE_WORDS);
+}
+
 static int backend_emit_triangles(RixCmdWriter *writer, const MiniGLRixBackend *backend,
                                   const MiniGLRixRecordedOp *op, unsigned int pass)
 {
     size_t index;
 
-    for (index = 0U; index < op->triangle_count; ++index) {
-        const RixTriangle *triangle = &(pass == 0U ? backend->triangles :
-                                       backend->texture1_triangles)[op->first_triangle + index];
-
-        if (!rix_cmd_triangle(writer, triangle->words, RIX_TRIANGLE_WORDS))
+    for (index = 0U; index < op->triangle_count; ++index)
+        if (!backend_emit_triangle(writer, backend, op, index, pass))
             return 0;
-    }
     return 1;
+}
+
+static size_t backend_draw_state_words(const MiniGLRixBackend *backend,
+                                       const MiniGLRixRecordedOp *op, unsigned int pass)
+{
+    uint16_t slot = pass == 0U ? op->texture_slot : op->texture1_slot;
+    size_t words = 33U;
+
+    if (slot < MINIGL_RIX_MAX_TEXTURES)
+        words += backend->textures[slot].page_count;
+    return words;
 }
 
 static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
@@ -1146,12 +1167,20 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
                 !rix_cmd_clear_depth(writer, (uint16_t)(op->depth >> 8U)) ||
                 !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET | clear_flags, pixels))
                 return 0;
-        } else if (!backend_emit_state(backend, writer, op, 0U) ||
-                   !backend_emit_triangles(writer, backend, op, 0U) ||
-                   (op->two_pass &&
-                    (!backend_emit_state(backend, writer, op, 1U) ||
-                     !backend_emit_triangles(writer, backend, op, 1U)))) {
-            return 0;
+        } else if (!op->two_pass) {
+            if (!backend_emit_state(backend, writer, op, 0U) ||
+                !backend_emit_triangles(writer, backend, op, 0U))
+                return 0;
+        } else {
+            size_t triangle_index;
+
+            for (triangle_index = 0U; triangle_index < op->triangle_count;
+                 ++triangle_index)
+                if (!backend_emit_state(backend, writer, op, 0U) ||
+                    !backend_emit_triangle(writer, backend, op, triangle_index, 0U) ||
+                    !backend_emit_state(backend, writer, op, 1U) ||
+                    !backend_emit_triangle(writer, backend, op, triangle_index, 1U))
+                    return 0;
         }
     }
     return !writer->failed;
@@ -1225,11 +1254,8 @@ static int backend_record_draw(MiniGLRixBackend *backend)
             (mip_filter(texture1->min_filter) && texture1->levels != texture1->required_levels))
             return 0;
     }
-    state_words = 33U;
-    if (texture0 != NULL)
-        state_words += texture0->page_count;
-    if (texture1 != NULL)
-        state_words += 33U + texture1->page_count;
+    state_words = op->two_pass ? 0U : 33U +
+        (texture0 != NULL ? texture0->page_count : 0U);
     if (backend->command_words_estimate + state_words > MINIGL_RIX_COMMAND_WORD_BUDGET)
         return 0;
     if (texture0 != NULL) {
@@ -1311,8 +1337,8 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     RixTriangle prepared_texture1;
     RixTriangle *triangle;
     MiniGLRixRecordedOp *op;
+    size_t triangle_words;
     unsigned int passes;
-
     if (backend == NULL || !backend->collecting || a == NULL || b == NULL || c == NULL)
         return 0;
     /* RasterIX descriptors use the OpenGL bottom-up y axis; the raster
@@ -1367,27 +1393,34 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
          !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
                              &texture1_vertices[1], &texture1_vertices[2], &scissor)))
         return 0;
+    op = &backend->ops[backend->op_count - 1U];
+    triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
+    if (op->two_pass)
+        triangle_words += backend_draw_state_words(backend, op, 0U) +
+                          backend_draw_state_words(backend, op, 1U);
     if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
-        backend->command_words_estimate +
-            passes * (RIX_TRIANGLE_WORDS + 1U) >
-                MINIGL_RIX_COMMAND_WORD_BUDGET) {
-        if (backend->triangle_count == 0U &&
-            backend->ops[backend->op_count - 1U].triangle_count == 0U)
+        backend->command_words_estimate + triangle_words >
+            MINIGL_RIX_COMMAND_WORD_BUDGET) {
+        if (backend->triangle_count == 0U && op->triangle_count == 0U)
             return 0;
-        if (!backend_flush(backend, 1) || !backend_record_draw(backend) ||
-            backend->command_words_estimate +
-                passes * (RIX_TRIANGLE_WORDS + 1U) >
-                    MINIGL_RIX_COMMAND_WORD_BUDGET)
+        if (!backend_flush(backend, 1) || !backend_record_draw(backend))
+            return 0;
+        op = &backend->ops[backend->op_count - 1U];
+        triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
+        if (op->two_pass)
+            triangle_words += backend_draw_state_words(backend, op, 0U) +
+                              backend_draw_state_words(backend, op, 1U);
+        if (backend->command_words_estimate + triangle_words >
+            MINIGL_RIX_COMMAND_WORD_BUDGET)
             return 0;
     }
-    op = &backend->ops[backend->op_count - 1U];
     triangle = &backend->triangles[backend->triangle_count];
     *triangle = prepared;
     if (passes == 2U)
         backend->texture1_triangles[backend->triangle_count] = prepared_texture1;
     ++backend->triangle_count;
     ++op->triangle_count;
-    backend->command_words_estimate += passes * (RIX_TRIANGLE_WORDS + 1U);
+    backend->command_words_estimate += triangle_words;
     return 1;
 }
 
@@ -1411,18 +1444,17 @@ static void backend_recalculate_command_words(MiniGLRixBackend *backend)
         if (op->type == MINIGL_RIX_OP_CLEAR) {
             backend->command_words_estimate += 37U;
         } else {
-            backend->command_words_estimate += 33U;
-            if (op->texture_slot < MINIGL_RIX_MAX_TEXTURES)
+            if (!op->two_pass) {
                 backend->command_words_estimate +=
-                    backend->textures[op->texture_slot].page_count;
-            if (op->two_pass) {
-                backend->command_words_estimate += 33U;
-                if (op->texture1_slot < MINIGL_RIX_MAX_TEXTURES)
-                    backend->command_words_estimate +=
-                        backend->textures[op->texture1_slot].page_count;
+                    backend_draw_state_words(backend, op, 0U);
+                backend->command_words_estimate += op->triangle_count *
+                    (RIX_TRIANGLE_WORDS + 1U);
+            } else {
+                backend->command_words_estimate += op->triangle_count *
+                    (2U * (RIX_TRIANGLE_WORDS + 1U) +
+                     backend_draw_state_words(backend, op, 0U) +
+                     backend_draw_state_words(backend, op, 1U));
             }
-            backend->command_words_estimate += op->triangle_count *
-                (op->two_pass ? 2U : 1U) * (RIX_TRIANGLE_WORDS + 1U);
         }
     }
 }

@@ -325,12 +325,16 @@ static void test_texture_env_modes(void)
                           ZZ9K_MGL_STATE_TEXTURE_2D_1 |
                           ZZ9K_MGL_STATE_DEPTH_TEST |
                           ZZ9K_MGL_STATE_DEPTH_WRITE;
-    state.depth_func = 0x0201U;
+    state.depth_func = 0x0203U;
     state.color_mask = 7U;
     state.tex_env_mode[0] = 0x1e01U;
     state.tex_env_mode[1] = 0x2100U;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_NONE);
+    state.depth_func = 0x0201U;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_MULTITEXTURE);
+    state.depth_func = 0x0203U;
     state.enabled_flags |= ZZ9K_MGL_STATE_BLEND;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_MULTITEXTURE);

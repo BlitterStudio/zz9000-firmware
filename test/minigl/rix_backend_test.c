@@ -796,6 +796,7 @@ static void test_two_texture_multipass_recording(void)
     MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xffffffffU);
     MiniGLRixVertex b = vertex(60.0f, 10.0f, 0xffffffffU);
     MiniGLRixVertex c = vertex(10.0f, 60.0f, 0xffffffffU);
+    MiniGLRixVertex d = vertex(60.0f, 60.0f, 0xffffffffU);
     uint32_t diffuse[16] = { 0xff8040ffU };
     uint32_t lightmap[16] = { 0x808080ffU };
     uint32_t *command;
@@ -817,15 +818,23 @@ static void test_two_texture_multipass_recording(void)
                           ZZ9K_MGL_STATE_TEXTURE_2D_1 |
                           ZZ9K_MGL_STATE_DEPTH_TEST |
                           ZZ9K_MGL_STATE_DEPTH_WRITE;
+    state.depth_func = ZZ9K_MGL_WIRE_LEQUAL;
     state.tex_env_mode[0] = GL_REPLACE;
     state.tex_env_mode[1] = GL_MODULATE;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_NONE);
+    state.depth_func = ZZ9K_MGL_WIRE_LESS;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_MULTITEXTURE);
+    state.depth_func = ZZ9K_MGL_WIRE_LEQUAL;
+    minigl_rix_backend_set_state(&backend, &state);
     a.s1 = 0.0f; a.t1 = 0.0f;
     b.s1 = 1.0f; b.t1 = 0.0f;
     c.s1 = 0.0f; c.t1 = 1.0f;
+    d.s1 = 1.0f; d.t1 = 1.0f;
     assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_add_triangle(&backend, &b, &d, &c));
     assert(backend.ops[0].two_pass);
     assert(backend.ops[0].texture_slot != backend.ops[0].texture1_slot);
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
@@ -834,7 +843,7 @@ static void test_two_texture_multipass_recording(void)
     for (word = 0U; word < COMMAND_WORDS; ++word)
         if (command[word] == (RIX_OP_TRIANGLE_STREAM | RIX_TRIANGLE_WORDS * 4U))
             ++triangles;
-    assert(triangles == 2U);
+    assert(triangles == 4U);
 
     state.enabled_flags |= ZZ9K_MGL_STATE_BLEND;
     minigl_rix_backend_set_state(&backend, &state);

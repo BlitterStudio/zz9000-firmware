@@ -710,7 +710,7 @@ static void submit_textured_lightmap(mw_ctx *c)
 
     /* One GL draw: unit 0 replaces primary colour; unit 1 modulates it. */
     static uint8_t draw_packet[4096];
-    q = packet_init(draw_packet, 6);
+    q = packet_init(draw_packet, 7);
 
     /* Clear */
     mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24);
@@ -730,6 +730,9 @@ static void submit_textured_lightmap(mw_ctx *c)
 
     mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
     mw_put_be32(q + 8, MW_DEPTH_TEST); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 1);
+    q += 20;
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
+    mw_put_be32(q + 8, MW_DEPTH_FUNC); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 0x0203);
     q += 20;
     mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
     mw_put_be32(q + 8, MW_DEPTH_MASK); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 1);
