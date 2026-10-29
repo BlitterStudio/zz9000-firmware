@@ -37,7 +37,6 @@ docker run --rm -v "$IF_DOCKER:/if:ro" -v "$MG_DOCKER:/mg:ro" -v "$OUT_DOCKER:/o
       /if/test/rix_xsim/rix_xsim_gen.c \
       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_cmd.c \
       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_setup.c \
-      /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_bin.c \
       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_texture.c \
       -lm -o /tmp/rix_xsim_gen
   /tmp/rix_xsim_gen /out

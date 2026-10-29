@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "rix_bin.h"
+#include "rix_cmd.h"
 #include "rix_cmd.h"
 #include "rix_setup.h"
 #include "rix_texture.h"
@@ -109,14 +109,18 @@ static int write_dse_hex(const char *path, const uint8_t *raw, size_t raw_bytes)
     return ok;
 }
 
-/*
- * EF owns full color and depth targets in external DDR.  StreamFramebuffer
- * derives the transfer extent from resolution, not the framebuffer command's
- * size field; the field remains the visible pixel count for parser ABI
- * compatibility.  It needs no band offset, COMMIT, or READ command.
- */
+typedef struct EfFrameConfig {
+    uint16_t width;
+    uint16_t height;
+    uint32_t color_addr;
+    uint32_t depth_addr;
+    uint32_t clear_color;
+    uint16_t clear_depth;
+} EfFrameConfig;
+
+/* EF owns full color and depth targets in external DDR. */
 static int emit_external_frame(RixCmdWriter *writer, const RixTriangle *triangles,
-                               size_t triangle_count, const RixBandConfig *config)
+                               size_t triangle_count, const EfFrameConfig *config)
 {
     size_t index;
     uint32_t pixels = (uint32_t)config->width * (uint32_t)config->height;
@@ -138,11 +142,6 @@ static int emit_external_frame(RixCmdWriter *writer, const RixTriangle *triangle
                               RIX_TRIANGLE_WORDS)) {
             return 0;
         }
-    }
-    if (!rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_COMMIT |
-                              RIX_FRAMEBUFFER_COLOR |
-                              RIX_FRAMEBUFFER_DEPTH, pixels)) {
-        return 0;
     }
     return 1;
 }
@@ -170,9 +169,9 @@ typedef struct SceneTriangle {
 static SceneTriangle scene_triangles[MAX_TRIANGLES];
 static size_t scene_triangle_count;
 
-static int add_triangle(RixBandList *bands, RixTriangle *triangles,
-                        size_t *triangle_count, const RixVertex *v0,
-                        const RixVertex *v1, const RixVertex *v2)
+static int add_triangle(RixTriangle *triangles, size_t *triangle_count,
+                        const RixVertex *v0, const RixVertex *v1,
+                        const RixVertex *v2)
 {
     RixScissor scissor;
     RixVertex f0, f1, f2;
@@ -190,8 +189,7 @@ static int add_triangle(RixBandList *bands, RixTriangle *triangles,
     f1 = *v1; f1.y = (float)SCREEN_HEIGHT - f1.y;
     f2 = *v2; f2.y = (float)SCREEN_HEIGHT - f2.y;
     triangle = &triangles[*triangle_count];
-    if (!rix_setup_triangle(triangle, &f0, &f1, &f2, &scissor) ||
-        !rix_band_list_add(bands, triangle)) {
+    if (!rix_setup_triangle(triangle, &f0, &f1, &f2, &scissor)) {
         return 0;
     }
     scene_triangles[*triangle_count].prepared = *triangle;
@@ -353,23 +351,23 @@ static int setup_state(RixCmdWriter *writer, int textured)
     return 1;
 }
 
-static int build_s2(RixBandList *bands, RixTriangle *triangles, size_t *count)
+static int build_s2(RixTriangle *triangles, size_t *count)
 {
     RixVertex v0 = vertex(220.0f, 140.0f, 0.5f, 0x00ff00ffU, 0.0f, 0.0f);
     RixVertex v1 = vertex(420.0f, 160.0f, 0.5f, 0x00ff00ffU, 1.0f, 0.0f);
     RixVertex v2 = vertex(320.0f, 360.0f, 0.5f, 0x00ff00ffU, 0.5f, 1.0f);
-    return add_triangle(bands, triangles, count, &v0, &v1, &v2);
+    return add_triangle(triangles, count, &v0, &v1, &v2);
 }
 
-static int build_s3(RixBandList *bands, RixTriangle *triangles, size_t *count)
+static int build_s3(RixTriangle *triangles, size_t *count)
 {
     RixVertex v0 = vertex(220.0f, 140.0f, 0.5f, 0xffffffffU, 0.0f, 0.0f);
     RixVertex v1 = vertex(420.0f, 160.0f, 0.5f, 0xffffffffU, 1.0f, 0.0f);
     RixVertex v2 = vertex(320.0f, 360.0f, 0.5f, 0xffffffffU, 0.5f, 1.0f);
-    return add_triangle(bands, triangles, count, &v0, &v1, &v2);
+    return add_triangle(triangles, count, &v0, &v1, &v2);
 }
 
-static int build_s4(RixBandList *bands, RixTriangle *triangles, size_t *count)
+static int build_s4(RixTriangle *triangles, size_t *count)
 {
     unsigned int tooth;
 
@@ -392,8 +390,8 @@ static int build_s4(RixBandList *bands, RixTriangle *triangles, size_t *count)
                               (float)(240.0 + inner * sin(a1)), 0.5f,
                               color, 0.0f, 0.0f);
 
-        if (!add_triangle(bands, triangles, count, &i0, &o0, &o1) ||
-            !add_triangle(bands, triangles, count, &i0, &o1, &i1)) {
+        if (!add_triangle(triangles, count, &i0, &o0, &o1) ||
+            !add_triangle(triangles, count, &i0, &o1, &i1)) {
             return 0;
         }
     }
@@ -407,7 +405,7 @@ static int build_s4(RixBandList *bands, RixTriangle *triangles, size_t *count)
  * vertical flip swaps the corner triangles; a wrong Y offset, band-local
  * rebase, or DDR row order shifts or mirrors individual 25-line bands.
  */
-static int build_probe(RixBandList *bands, RixTriangle *triangles, size_t *count)
+static int build_probe(RixTriangle *triangles, size_t *count)
 {
     RixVertex t0 = vertex(8.0f, 6.0f, 0.5f, 0x00ff00ffU, 0.0f, 0.0f);
     RixVertex t1 = vertex(60.0f, 6.0f, 0.5f, 0x00ff00ffU, 1.0f, 0.0f);
@@ -419,9 +417,9 @@ static int build_probe(RixBandList *bands, RixTriangle *triangles, size_t *count
     RixVertex l1 = vertex(320.0f, 475.0f, 0.5f, 0xffff00ffU, 0.0f, 0.0f);
     RixVertex l2 = vertex(321.0f, 475.0f, 0.5f, 0xffff00ffU, 0.0f, 0.0f);
 
-    return add_triangle(bands, triangles, count, &t0, &t1, &t2) &&
-           add_triangle(bands, triangles, count, &b0, &b1, &b2) &&
-           add_triangle(bands, triangles, count, &l0, &l1, &l2);
+    return add_triangle(triangles, count, &t0, &t1, &t2) &&
+           add_triangle(triangles, count, &b0, &b1, &b2) &&
+           add_triangle(triangles, count, &l0, &l1, &l2);
 }
 
 static void make_texture(uint8_t texture[TEXTURE_BYTES])
@@ -483,13 +481,11 @@ static int write_texture_files(const char *directory, const uint8_t texture[TEXT
 }
 
 static int generate_scene(const char *directory, const char *name,
-                          unsigned int scene, int external_framebuffer)
+                          unsigned int scene)
 {
     static uint8_t raw[COMMAND_CAPACITY];
     RixTriangle triangles[MAX_TRIANGLES];
-    RixTriangle *references[MAX_TRIANGLES];
-    RixBandList bands;
-    RixBandConfig config;
+    EfFrameConfig config;
     RixCmdWriter writer;
     size_t triangle_count = 0U;
     char binary_path[1024];
@@ -498,33 +494,24 @@ static int generate_scene(const char *directory, const char *name,
     int valid_scene;
 
     memset(triangles, 0, sizeof(triangles));
-    memset(references, 0, sizeof(references));
     scene_triangle_count = 0U;
-    if (!rix_band_list_init(&bands, SCREEN_WIDTH, SCREEN_HEIGHT,
-                            references, MAX_TRIANGLES)) {
-        return 0;
-    }
-    memset(&config, 0, sizeof(config));
     config.width = SCREEN_WIDTH;
     config.height = SCREEN_HEIGHT;
     config.color_addr = COLOR_ADDRESS;
     config.depth_addr = DEPTH_ADDRESS;
-    config.color_pitch = COLOR_PITCH;
-    config.depth_pitch = DEPTH_PITCH;
     config.clear_color = CLEAR_RGBA;
     config.clear_depth = 0xffffU;
-    config.clear_mask = RIX_CLEAR_COLOR | RIX_CLEAR_DEPTH;
 
     if (scene == 1U) {
         valid_scene = 1;
     } else if (scene == 2U) {
-        valid_scene = build_s2(&bands, triangles, &triangle_count);
+        valid_scene = build_s2(triangles, &triangle_count);
     } else if (scene == 3U) {
-        valid_scene = build_s3(&bands, triangles, &triangle_count);
+        valid_scene = build_s3(triangles, &triangle_count);
     } else if (scene == 4U) {
-        valid_scene = build_s4(&bands, triangles, &triangle_count);
+        valid_scene = build_s4(triangles, &triangle_count);
     } else if (scene == 5U) {
-        valid_scene = build_probe(&bands, triangles, &triangle_count);
+        valid_scene = build_probe(triangles, &triangle_count);
     } else {
         valid_scene = 0;
     }
@@ -535,9 +522,7 @@ static int generate_scene(const char *directory, const char *name,
 
     rix_cmd_init(&writer, raw, sizeof(raw));
     if (!setup_state(&writer, textured) ||
-        !(external_framebuffer ?
-              emit_external_frame(&writer, triangles, triangle_count, &config) :
-              rix_band_emit_frame(&writer, &bands, &config)) ||
+        !emit_external_frame(&writer, triangles, triangle_count, &config) ||
         writer.failed || writer.length == 0U || writer.length > 0x00ffffffU ||
         writer.length % 4U != 0U ||
         !write_reference(directory, name, CLEAR_RGBA, textured) ||
@@ -547,9 +532,8 @@ static int generate_scene(const char *directory, const char *name,
         !write_dse_hex(hex_path, raw, writer.length)) {
         return 0;
     }
-    printf("%s: words=%zu bytes=%zu bands=%u triangles=%zu\n", name,
-           writer.length / 4U + 2U, writer.length + 8U,
-           external_framebuffer ? 0U : bands.count, triangle_count);
+    printf("%s: words=%zu bytes=%zu triangles=%zu\n", name,
+           writer.length / 4U + 2U, writer.length + 8U, triangle_count);
     return 1;
 }
 
@@ -565,16 +549,11 @@ int main(int argc, char **argv)
     printf("layout: commands=0x%08x color=0x%08x depth=0x%08x texture=0x%08x\n",
            COMMAND_ADDRESS, COLOR_ADDRESS, DEPTH_ADDRESS, TEXTURE_ADDRESS);
     if (!write_texture_files(argv[1], texture) ||
-        !generate_scene(argv[1], "s1", 1U, 0) ||
-        !generate_scene(argv[1], "s2", 2U, 0) ||
-        !generate_scene(argv[1], "s3", 3U, 0) ||
-        !generate_scene(argv[1], "s4", 4U, 0) ||
-        !generate_scene(argv[1], "probe", 5U, 0) ||
-        !generate_scene(argv[1], "ef-s1", 1U, 1) ||
-        !generate_scene(argv[1], "ef-s2", 2U, 1) ||
-        !generate_scene(argv[1], "ef-s3", 3U, 1) ||
-        !generate_scene(argv[1], "ef-s4", 4U, 1) ||
-        !generate_scene(argv[1], "ef-probe", 5U, 1)) {
+        !generate_scene(argv[1], "ef-s1", 1U) ||
+        !generate_scene(argv[1], "ef-s2", 2U) ||
+        !generate_scene(argv[1], "ef-s3", 3U) ||
+        !generate_scene(argv[1], "ef-s4", 4U) ||
+        !generate_scene(argv[1], "ef-probe", 5U)) {
         fprintf(stderr, "failed to write RasterIX XSim scene output to %s\n", argv[1]);
         return 1;
     }
