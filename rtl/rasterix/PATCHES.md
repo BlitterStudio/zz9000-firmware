@@ -136,3 +136,20 @@ FrameStreamingCore `commonAxiAdapter` and before crossbar port 0.  Its
 64-beat reserved-response queue keeps list-read backpressure from holding the
 fragment-memory read channel.  This preserves the newer external texture
 cache and all local fixes above while taking the specific silicon-proven fix.
+
+## EF memory coalescing stays disabled
+
+The EF wrapper instantiates RasterIX with `ENABLE_MEMORY_COALESCING(0)`
+(`rtl/zz9k_rix/zz9k_rasterix.v`).  Measured on the textured scene
+(`ef-s3`, LATENCY=2, 2026-10-29):
+
+| Configuration | Result cycles | Frame |
+| --- | --- | --- |
+| coalescing off (bypass) | 412,053 | bit-exact vs reference |
+| coalescing on | 330,230 | corrupted: clear/exterior pixels 0x0000 |
+
+The 20% cycle win is not usable: `Coalescer.v` hardwires `s_mem_axi_rlast =
+1` ("we always return one beat") and `CoalesceAddrGen.v` fatals on any
+incoming `axlen != 0`, so the merged EF framebuffer traffic silently loses
+write data.  Making coalescing safe requires redesigning both modules for
+multi-beat INCR transactions; the bypass is silicon-proven and is kept.

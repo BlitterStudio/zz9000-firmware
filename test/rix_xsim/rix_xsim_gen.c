@@ -21,8 +21,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "rix_cmd.h"
-#include "rix_cmd.h"
 #include "rix_setup.h"
 #include "rix_texture.h"
 
@@ -38,10 +36,14 @@
 #define COMMAND_CAPACITY (256U * 1024U)
 #define TEXTURE_WIDTH 8U
 #define TEXTURE_HEIGHT 8U
-#define TEXTURE_BYTES 2048U
 #define TEXTURE_WORDS (TEXTURE_BYTES / 4U)
 #define MAX_TRIANGLES 64U
 #define PI 3.14159265358979323846
+#define TEXTURE_PAGE_BYTES 2048U
+#define TEXTURE_PAGES 2U
+#define TEXTURE_BYTES (TEXTURE_PAGE_BYTES * TEXTURE_PAGES)
+#define LIGHTMAP_ADDRESS (TEXTURE_ADDRESS + TEXTURE_PAGE_BYTES)
+#define LIGHTMAP_RGB565 0x8410U
 
 static int put_le32(FILE *file, uint32_t value)
 {
@@ -304,8 +306,7 @@ static int setup_state(RixCmdWriter *writer, int textured)
     RixFragmentState fragment;
     RixTextureState state;
     RixTexEnvState environment;
-    uint32_t pages[TEXTURE_BYTES / 2048U];
-    size_t index;
+    uint32_t pages[1];
 
     memset(&fragment, 0, sizeof(fragment));
     fragment.depth_func = RIX_FUNC_ALWAYS;
@@ -340,12 +341,10 @@ static int setup_state(RixCmdWriter *writer, int textured)
     environment.src_alpha[0] = textured ? RIX_TEXSRC_TEXTURE : RIX_TEXSRC_PRIMARY_COLOR;
     environment.operand_rgb[0] = RIX_TEXOP_SRC_COLOR;
     environment.operand_alpha[0] = RIX_TEXAOP_SRC_ALPHA;
-    for (index = 0U; index < TEXTURE_BYTES / 2048U; ++index) {
-        pages[index] = TEXTURE_ADDRESS + (uint32_t)index * 2048U;
-    }
+    pages[0] = TEXTURE_ADDRESS;
     if (!rix_cmd_texture_state(writer, 0U, &state) ||
         !rix_cmd_tex_env(writer, 0U, &environment) ||
-        !rix_cmd_texture_pages(writer, 0U, pages, TEXTURE_BYTES / 2048U)) {
+        !rix_cmd_texture_pages(writer, 0U, pages, 1U)) {
         return 0;
     }
     return 1;
@@ -364,6 +363,18 @@ static int build_s3(RixTriangle *triangles, size_t *count)
     RixVertex v0 = vertex(220.0f, 140.0f, 0.5f, 0xffffffffU, 0.0f, 0.0f);
     RixVertex v1 = vertex(420.0f, 160.0f, 0.5f, 0xffffffffU, 1.0f, 0.0f);
     RixVertex v2 = vertex(320.0f, 360.0f, 0.5f, 0xffffffffU, 0.5f, 1.0f);
+    return add_triangle(triangles, count, &v0, &v1, &v2);
+}
+
+/* Two-pass lightmap geometry: same footprint as ef-s3.  paint_rgba is the
+ * 8-bit channel expansion of LIGHTMAP_RGB565, so the analytic reference of
+ * the blended second pass (white base x uniform lightmap) re-quantizes to
+ * exactly the lightmap texel. */
+static int build_lm(RixTriangle *triangles, size_t *count)
+{
+    RixVertex v0 = vertex(220.0f, 140.0f, 0.5f, 0x848284ffU, 0.0f, 0.0f);
+    RixVertex v1 = vertex(420.0f, 160.0f, 0.5f, 0x848284ffU, 1.0f, 0.0f);
+    RixVertex v2 = vertex(320.0f, 360.0f, 0.5f, 0x848284ffU, 0.5f, 1.0f);
     return add_triangle(triangles, count, &v0, &v1, &v2);
 }
 
@@ -422,22 +433,77 @@ static int build_probe(RixTriangle *triangles, size_t *count)
            add_triangle(triangles, count, &l0, &l1, &l2);
 }
 
-static void make_texture(uint8_t texture[TEXTURE_BYTES])
+static void fill_texture_page(uint8_t *page, uint32_t rgba_value)
 {
     uint32_t rgba[TEXTURE_WIDTH * TEXTURE_HEIGHT];
     unsigned int x;
     unsigned int y;
 
-    memset(texture, 0, TEXTURE_BYTES);
     for (y = 0U; y < TEXTURE_HEIGHT; ++y) {
         for (x = 0U; x < TEXTURE_WIDTH; ++x) {
-            /* Flat scenes keep TMU0 live with this deterministic white texel. */
-            rgba[y * TEXTURE_WIDTH + x] = 0xffffffffU;
+            rgba[y * TEXTURE_WIDTH + x] = rgba_value;
         }
     }
-    (void)rix_texture_convert_rgba8_le(texture, TEXTURE_BYTES, rgba,
+    (void)rix_texture_convert_rgba8_le(page, TEXTURE_PAGE_BYTES, rgba,
                                        TEXTURE_WIDTH * TEXTURE_HEIGHT,
                                        RIX_TEXTURE_RGB565);
+}
+
+static void make_texture(uint8_t texture[TEXTURE_BYTES])
+{
+    uint8_t r = (uint8_t)((LIGHTMAP_RGB565 >> 11) & 0x1fU);
+    uint8_t g = (uint8_t)((LIGHTMAP_RGB565 >> 5) & 0x3fU);
+    uint8_t b = (uint8_t)(LIGHTMAP_RGB565 & 0x1fU);
+    uint32_t lightmap_rgba;
+
+    memset(texture, 0, TEXTURE_BYTES);
+    /* Page 0 keeps TMU0 live for flat scenes with a deterministic white texel;
+     * page 1 is the uniform lightmap sampled by the ef-lm second pass. */
+    fill_texture_page(&texture[0], 0xffffffffU);
+    /* Expand the quantized lightmap back to the 8-bit channels the RGBA
+     * conversion expects, so the RTL texel equals LIGHTMAP_RGB565 exactly. */
+    lightmap_rgba = ((uint32_t)((r << 3) | (r >> 2)) << 24) |
+                    ((uint32_t)((g << 2) | (g >> 4)) << 16) |
+                    ((uint32_t)((b << 3) | (b >> 2)) << 8) | 0xffU;
+    fill_texture_page(&texture[TEXTURE_PAGE_BYTES], lightmap_rgba);
+}
+
+/*
+ * Two-pass lightmap frame: pass one draws the textured base (uniform white
+ * page 0, REPLACE, blending off), pass two redraws the same triangle with the
+ * uniform lightmap page bound and ZERO,SRC_COLOR blending.  With a white
+ * base the blender computes floor((src*255+255)/256) per channel, which
+ * re-quantizes to exactly the lightmap texel's RGB565 value.
+ */
+static int emit_lightmap_pass(RixCmdWriter *writer, const RixTriangle *triangles,
+                              size_t triangle_count)
+{
+    RixFragmentState fragment;
+    uint32_t pages[1];
+    size_t index;
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_ALWAYS;
+    fragment.depth_mask = 0U;
+    fragment.color_mask_r = 1U;
+    fragment.color_mask_g = 1U;
+    fragment.color_mask_b = 1U;
+    fragment.color_mask_a = 1U;
+    fragment.src_factor = RIX_BLEND_ZERO;
+    fragment.dst_factor = RIX_BLEND_SRC_COLOR;
+    pages[0] = LIGHTMAP_ADDRESS;
+    if (!rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0 | RIX_FEATURE_BLEND) ||
+        !rix_cmd_fragment_state(writer, &fragment) ||
+        !rix_cmd_texture_pages(writer, 0U, pages, 1U)) {
+        return 0;
+    }
+    for (index = 0U; index < triangle_count; ++index) {
+        if (!rix_cmd_triangle(writer, triangles[index].words,
+                              RIX_TRIANGLE_WORDS)) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int write_texture_files(const char *directory, const uint8_t texture[TEXTURE_BYTES])
@@ -490,7 +556,7 @@ static int generate_scene(const char *directory, const char *name,
     size_t triangle_count = 0U;
     char binary_path[1024];
     char hex_path[1024];
-    int textured = scene == 3U || scene == 4U;
+    int textured = scene == 3U || scene == 4U || scene == 6U;
     int valid_scene;
 
     memset(triangles, 0, sizeof(triangles));
@@ -512,6 +578,8 @@ static int generate_scene(const char *directory, const char *name,
         valid_scene = build_s4(triangles, &triangle_count);
     } else if (scene == 5U) {
         valid_scene = build_probe(triangles, &triangle_count);
+    } else if (scene == 6U) {
+        valid_scene = build_lm(triangles, &triangle_count);
     } else {
         valid_scene = 0;
     }
@@ -523,9 +591,11 @@ static int generate_scene(const char *directory, const char *name,
     rix_cmd_init(&writer, raw, sizeof(raw));
     if (!setup_state(&writer, textured) ||
         !emit_external_frame(&writer, triangles, triangle_count, &config) ||
+        (scene == 6U && !emit_lightmap_pass(&writer, triangles, triangle_count)) ||
         writer.failed || writer.length == 0U || writer.length > 0x00ffffffU ||
         writer.length % 4U != 0U ||
-        !write_reference(directory, name, CLEAR_RGBA, textured) ||
+        !write_reference(directory, name, CLEAR_RGBA,
+                         textured && scene != 6U) ||
         !make_path(binary_path, sizeof(binary_path), directory, name, ".bin") ||
         !make_path(hex_path, sizeof(hex_path), directory, name, ".hex") ||
         !write_dse_bin(binary_path, raw, writer.length) ||
@@ -553,7 +623,8 @@ int main(int argc, char **argv)
         !generate_scene(argv[1], "ef-s2", 2U) ||
         !generate_scene(argv[1], "ef-s3", 3U) ||
         !generate_scene(argv[1], "ef-s4", 4U) ||
-        !generate_scene(argv[1], "ef-probe", 5U)) {
+        !generate_scene(argv[1], "ef-probe", 5U) ||
+        !generate_scene(argv[1], "ef-lm", 6U)) {
         fprintf(stderr, "failed to write RasterIX XSim scene output to %s\n", argv[1]);
         return 1;
     }

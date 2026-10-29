@@ -19,7 +19,7 @@ module tb_zz9k_rasterix;
     localparam integer MINIGL_COLOR_MEMORY_BYTES = 3 * 1024 * 1024;
     localparam integer MINIGL_DEPTH_MEMORY_BYTES = 3 * 1024 * 1024;
     localparam integer TEXTURE_POOL_BYTES = 24 * 1024 * 1024;
-    localparam integer TEXTURE_BYTES = 2048;
+    localparam integer TEXTURE_BYTES = 4096;
 
     reg clk;
     reg resetn;
@@ -148,13 +148,13 @@ module tb_zz9k_rasterix;
     integer render_read_left;
     integer render_read_delay;
     reg render_read_active;
-    reg [3:0] render_read_id;
+    reg [5:0] render_read_id;
     reg [2:0] render_read_size;
     reg [31:0] write_addr;
     integer write_left;
     reg write_active;
     reg write_error;
-    reg [3:0] write_id;
+    reg [5:0] write_id;
     // Shared HP-port model: both read masters share ONE in-order read stream
     // with head-of-line blocking, which is the worst case of the AXI3
     // interconnect/protocol-converter ordering the real hardware applies.
@@ -163,7 +163,7 @@ module tb_zz9k_rasterix;
     reg shared_q_is_cmd [0:31];
     reg [31:0] shared_q_addr [0:31];
     integer shared_q_len [0:31];
-    reg [3:0] shared_q_id [0:31];
+    reg [5:0] shared_q_id [0:31];
     reg [2:0] shared_q_size [0:31];
     integer shared_q_head;
     integer shared_q_tail;
@@ -173,7 +173,7 @@ module tb_zz9k_rasterix;
     reg [31:0] shared_addr;
     integer shared_left;
     integer shared_delay;
-    reg [3:0] shared_id;
+    reg [5:0] shared_id;
     reg [2:0] shared_size;
 
     function [7:0] byte_at;
@@ -455,7 +455,7 @@ module tb_zz9k_rasterix;
                 shared_q_is_cmd[shared_q_tail] <= 1'b1;
                 shared_q_addr[shared_q_tail] <= m_cmd_axi_araddr;
                 shared_q_len[shared_q_tail] <= m_cmd_axi_arlen + 1;
-                shared_q_id[shared_q_tail] <= 4'd0;
+                shared_q_id[shared_q_tail] <= 6'd0;
                 shared_q_size[shared_q_tail] <= 3'd3;
                 shared_q_tail <= (shared_q_tail + 1) % 32;
                 shared_q_count <= shared_q_count + 1;
@@ -640,6 +640,10 @@ module tb_zz9k_rasterix;
         end
     endtask
     // Models the AXI FIFO MM-S TX stream after a complete TDFD/TLF packet.
+    // The producer advances strictly on completed AXI-Stream handshakes: the
+    // wait condition samples tvalid/tready of the cycle each posedge closes,
+    // so a word can never be replaced before its acceptance edge nor held
+    // across one (which the DUT reads as a dropped or duplicated command).
     // DMA_BURST preserves these packet boundaries while changing only producer
     // writes, so both transports share this sink-side model.
     task fifo_submit;
@@ -647,14 +651,14 @@ module tb_zz9k_rasterix;
         input integer word_count;
         integer n;
         begin
+            @(posedge clk);
             for (n = 0; n < word_count; n = n + 1) begin
-                @(posedge clk);
                 s_cmd_axis_tdata <= command_words[start_word + n];
                 s_cmd_axis_tlast <= (n == word_count - 1);
                 s_cmd_axis_tvalid <= 1;
-                while (!s_cmd_axis_tready) @(posedge clk);
+                do @(posedge clk);
+                while (!(s_cmd_axis_tvalid && s_cmd_axis_tready));
             end
-            @(posedge clk);
             s_cmd_axis_tvalid <= 0;
             s_cmd_axis_tlast <= 0;
         end
@@ -847,7 +851,24 @@ module tb_zz9k_rasterix;
             while ((timeout < poll_limit) && (command_complete == 0)) begin
                 axi_read(16'h000c, status);
                 if (status[1]) begin
-`ifndef RASTERIX_VARIANT_EF
+`ifdef RASTERIX_VARIANT_EF
+                    /* EF STATUS.IDLE only reports the command FIFO and the
+                     * memory-transaction counters drained; the StreamFramebuffer
+                     * memset engines start a few cycles after FIFO acceptance
+                     * and keep running past it.  The parser holds
+                     * FB_CONTROL_WAITFOREND until every selected buffer
+                     * reported applied, so settle first, then gate on the
+                     * parser being back between commands with idle still set. */
+                    command_complete = 0;
+                    while ((timeout < poll_limit) && (command_complete == 0)) begin
+                        repeat (16) @(posedge clk);
+                        timeout = timeout + 16;
+                        axi_read(16'h000c, status);
+                        if (status[1] &&
+                            (dut.renderer.rixef.graphicCore.commandParser.fbControlState == 0))
+                            command_complete = 1;
+                    end
+`else
                     /* FIFO acceptance is not the IF framebuffer drain point:
                      * wait for the final commit before dumping a replay. */
                     while ((timeout < poll_limit) &&
