@@ -167,9 +167,10 @@ int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
         while (first + count < command_words) {
             uint32_t words = rix_drv_command_words(commands[first + count]);
 
-            if (words == 0U || words > command_words - first - count ||
-                words > RIX_DRV_FIFO_PACKET_WORDS - count)
+            if (words == 0U || words > command_words - first - count)
                 return RIX_DRV_BAD_ARGUMENT;
+            if (words > RIX_DRV_FIFO_PACKET_WORDS - count)
+                break;
             count += words;
         }
         result = rix_drv_send_packet(driver, commands + first,

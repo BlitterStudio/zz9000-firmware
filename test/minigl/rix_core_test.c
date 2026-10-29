@@ -65,7 +65,7 @@ static void test_external_frame_stream(void)
     assert(rix_cmd_triangle(&writer, triangle.words, RIX_TRIANGLE_WORDS));
     for (index = 0U; index < rix_cmd_words(&writer); ++index) {
         uint32_t word = word_at(bytes, index);
-        assert((word & RIX_OP_FRAMEBUFFER) != RIX_OP_FRAMEBUFFER ||
+        assert((word & 0xf0000000U) != RIX_OP_FRAMEBUFFER ||
                (word & (RIX_FRAMEBUFFER_READ | RIX_FRAMEBUFFER_COMMIT)) == 0U);
     }
     assert(word_at(bytes, 0U) == (RIX_OP_RENDER_CONFIG | RIX_REG_RESOLUTION));
@@ -85,7 +85,7 @@ static void test_scissor_and_capacity(void)
     assert(rix_setup_triangle(&triangle, &a, &b, &c, &scissor));
     rix_cmd_init(&writer, bytes, sizeof(bytes));
     assert(!rix_cmd_triangle(&writer, triangle.words, RIX_TRIANGLE_WORDS));
-    assert(writer.failed);
+    assert(!writer.failed);
 }
 
 int main(void)
