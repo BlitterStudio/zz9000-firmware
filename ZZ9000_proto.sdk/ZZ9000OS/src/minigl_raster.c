@@ -1778,7 +1778,7 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
     int x;
     int y;
     int endpoint_depth = (a.sz == 0.0f || a.sz == 1.0f) && a.sz == b.sz && a.sz == c.sz;
-    unsigned units = gradient_units();
+    unsigned units;
     unsigned unit;
     TextureSlope slopes[MAX_TMU];
 
@@ -1790,11 +1790,6 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
         c = swap;
         area = -area;
     }
-    for (unit = 0U; unit < MAX_TMU; ++unit)
-        if (units & (1U << unit))
-            slopes[unit] = texture_slope(&a, &b, &c, unit,
-                -(c.sy - b.sy) / area, -(a.sy - c.sy) / area, -(b.sy - a.sy) / area,
-                (c.sx - b.sx) / area, (a.sx - c.sx) / area, (b.sx - a.sx) / area);
     x0 = (int)floorf(fminf(a.sx, fminf(b.sx, c.sx)));
     x1 = (int)ceilf(fmaxf(a.sx, fmaxf(b.sx, c.sx)));
     y0 = (int)floorf(fminf(a.sy, fminf(b.sy, c.sy)));
@@ -1817,6 +1812,14 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
         }
         return;
     }
+    /* Per-pixel mip gradients exist only for the CPU loop below; a
+     * triangle queued for RasterIX above never reads them. */
+    units = gradient_units();
+    for (unit = 0U; unit < MAX_TMU; ++unit)
+        if (units & (1U << unit))
+            slopes[unit] = texture_slope(&a, &b, &c, unit,
+                -(c.sy - b.sy) / area, -(a.sy - c.sy) / area, -(b.sy - a.sy) / area,
+                (c.sx - b.sx) / area, (a.sx - c.sx) / area, (b.sx - a.sx) / area);
     mark_dirty(x0, y0, x1, y1);
     int is_fast_world = 0;
     int is_fast_lm_mt = 0;
