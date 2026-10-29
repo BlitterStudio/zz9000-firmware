@@ -218,7 +218,7 @@ static void test_texture_env_modes(void)
 
     memset(texels, 0xff, sizeof(texels));
     assert(minigl_rix_backend_upload_texture(&backend, 1, 0, texels, 64, 64, 0));
-    minigl_rix_backend_bind_texture(&backend, 1);
+    minigl_rix_backend_bind_texture(&backend, 0U, 1U);
     minigl_rix_backend_tex_params(&backend, 1, 0x2600U, 0x2600U, 0x2901U, 0x2901U);
 
     memset(&state, 0, sizeof(state));
@@ -251,6 +251,29 @@ static void test_texture_env_modes(void)
     state.tex_env_color[0] = 0x808080ffU;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_NONE);
+
+    /* A unit-0 REPLACE plus unit-1 MODULATE draw maps to RasterIX as two
+     * depth-coupled passes; blending and unsupported unit-1 env modes do not. */
+    assert(minigl_rix_backend_upload_texture(&backend, 2U, 0U, texels, 64U, 64U, 0));
+    minigl_rix_backend_tex_params(&backend, 2U, 0x2600U, 0x2600U, 0x2901U, 0x2901U);
+    minigl_rix_backend_bind_texture(&backend, 1U, 2U);
+    state.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_0 |
+                          ZZ9K_MGL_STATE_TEXTURE_2D_1 |
+                          ZZ9K_MGL_STATE_DEPTH_TEST |
+                          ZZ9K_MGL_STATE_DEPTH_WRITE;
+    state.depth_func = 0x0201U;
+    state.color_mask = 7U;
+    state.tex_env_mode[0] = 0x1e01U;
+    state.tex_env_mode[1] = 0x2100U;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_NONE);
+    state.enabled_flags |= ZZ9K_MGL_STATE_BLEND;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_MULTITEXTURE);
+    state.enabled_flags &= ~ZZ9K_MGL_STATE_BLEND;
+    state.tex_env_mode[1] = 0x2101U;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_MULTITEXTURE);
 
     printf("PASS: test_texture_env_modes\n");
 }

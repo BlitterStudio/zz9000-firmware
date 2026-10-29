@@ -1788,9 +1788,12 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
     if (x0 > x1 || y0 > y1) return;
     if (g_rix_collecting != 0) {
         if (g_rix_collecting > 0) {
-            MiniGLRixVertex va = { a.sx, a.sy, a.sz, a.inv_w, a.color, a.u0, a.v0, a.q0 };
-            MiniGLRixVertex vb = { b.sx, b.sy, b.sz, b.inv_w, b.color, b.u0, b.v0, b.q0 };
-            MiniGLRixVertex vc = { c.sx, c.sy, c.sz, c.inv_w, c.color, c.u0, c.v0, c.q0 };
+            MiniGLRixVertex va = { a.sx, a.sy, a.sz, a.inv_w, a.color,
+                                   a.u0, a.v0, a.q0, a.u1, a.v1, a.q1 };
+            MiniGLRixVertex vb = { b.sx, b.sy, b.sz, b.inv_w, b.color,
+                                   b.u0, b.v0, b.q0, b.u1, b.v1, b.q1 };
+            MiniGLRixVertex vc = { c.sx, c.sy, c.sz, c.inv_w, c.color,
+                                   c.u0, c.v0, c.q0, c.u1, c.v1, c.q1 };
             if (!minigl_rix_backend_add_triangle(&g_rix, &va, &vb, &vc))
                 g_rix_collecting = -1;
         }
@@ -2896,8 +2899,6 @@ void minigl_raster_bind_texture(uint16_t unit, uint16_t target, uint32_t id)
     g_bound_texture[unit] = id;
     texture_info = texture_create(id);
     g_bound_texture_info[unit] = texture_info;
-    if (unit != 0U)
-        return;
     if (texture_info != NULL && texture_info->levels[0].size != 0U &&
         !minigl_rix_backend_texture_resident(&g_rix, id)) {
         for (level = 0U; level < ZZ9K_MINIGL_MAX_MIP_LEVELS; ++level) {
@@ -2917,7 +2918,7 @@ void minigl_raster_bind_texture(uint16_t unit, uint16_t target, uint32_t id)
                                           texture_info->mag_filter, texture_info->wrap_s,
                                           texture_info->wrap_t);
     }
-    minigl_rix_backend_bind_texture(&g_rix, id);
+    minigl_rix_backend_bind_texture(&g_rix, unit, id);
 }
 
 void minigl_raster_upload_texture(uint32_t id, uint16_t level, uint16_t width, uint16_t height,
@@ -2982,7 +2983,8 @@ void minigl_raster_upload_texture(uint32_t id, uint16_t level, uint16_t width, u
                                            (const uint32_t *)(g_buffers.texture_pool + pool_offset),
                                            width, height, format)) {
         /* CPU residency remains valid; this draw will take the ordered fallback. */
-        minigl_rix_backend_bind_texture(&g_rix, 0U);
+        minigl_rix_backend_bind_texture(&g_rix, 0U, 0U);
+        minigl_rix_backend_bind_texture(&g_rix, 1U, 0U);
     } else {
         minigl_rix_backend_tex_params(&g_rix, id, texture_info->min_filter,
                                       texture_info->mag_filter, texture_info->wrap_s,

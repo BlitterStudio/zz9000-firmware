@@ -28,6 +28,10 @@ static void count_log(const char *fmt, ...)
 #define GL_COLOR_BUFFER_BIT 0x00004000U
 #define GL_DEPTH_BUFFER_BIT 0x00000100U
 #define GL_LINEAR_MIPMAP_LINEAR 0x2703U
+#define GL_DECAL 0x2101U
+#define GL_REPLACE 0x1e01U
+#define GL_MODULATE 0x2100U
+#define GL_REPEAT 0x2901U
 
 struct model {
     uint32_t csr[64];
@@ -145,7 +149,8 @@ static ZZ9KMiniGLPacketSetState state16(void)
 
 static MiniGLRixVertex vertex(float x, float y, uint32_t color)
 {
-    MiniGLRixVertex value = { x, y, 0.5f, 1.0f, color, 0.0f, 0.0f, 1.0f };
+    MiniGLRixVertex value = { x, y, 0.5f, 1.0f, color,
+                              0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f };
     return value;
 }
 
@@ -186,7 +191,7 @@ static int submit_texture(MiniGLRixBackend *backend, uint32_t id)
 
     state.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_0;
     state.tex_env_mode[0] = 0x1e01U;
-    minigl_rix_backend_bind_texture(backend, id);
+    minigl_rix_backend_bind_texture(backend, 0U, id);
     minigl_rix_backend_set_state(backend, &state);
     return minigl_rix_backend_begin_draw(backend, 64U, 64U, 0x03000000U, 0x03100000U) &&
            minigl_rix_backend_add_triangle(backend, &a, &b, &c) &&
@@ -259,7 +264,7 @@ static void test_downscale_and_residency_lifetime(void)
                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
     minigl_rix_backend_tex_params(&backend, 2U, GL_NEAREST, GL_NEAREST,
                                   0x2901U, 0x2901U);
-    minigl_rix_backend_bind_texture(&backend, 2U);
+    minigl_rix_backend_bind_texture(&backend, 0U, 2U);
     assert(submit_texture(&backend, 2U));
     assert(minigl_rix_backend_drain(&backend));
     minigl_rix_backend_delete_texture(&backend, 1U);
@@ -508,7 +513,7 @@ static void test_fallback_reasons_and_logging(void)
     state.blend_equation = ZZ9K_MGL_WIRE_FUNC_ADD;
 
     state.enabled_flags |= ZZ9K_MGL_STATE_TEXTURE_2D_0;
-    minigl_rix_backend_bind_texture(&backend, 99U);
+    minigl_rix_backend_bind_texture(&backend, 0U, 99U);
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_RESIDENCY_EXHAUSTED);
 
@@ -577,7 +582,7 @@ static void test_surface_handoff_and_recorded_texture_state(void)
     state.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_0;
     state.tex_env_mode[0] = 0x1e01U;
     minigl_rix_backend_set_state(&backend, &state);
-    minigl_rix_backend_bind_texture(&backend, 99U);
+    minigl_rix_backend_bind_texture(&backend, 0U, 99U);
     assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U, 0x03100000U,
                                     GL_COLOR_BUFFER_BIT, 0U, 0U));
     assert(backend.ops[0].texture_slot == UINT16_MAX);
@@ -590,7 +595,7 @@ static void test_surface_handoff_and_recorded_texture_state(void)
     state.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_0;
     state.tex_env_mode[0] = 0x1e01U;
     minigl_rix_backend_set_state(&backend, &state);
-    minigl_rix_backend_bind_texture(&backend, 7U);
+    minigl_rix_backend_bind_texture(&backend, 0U, 7U);
     assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
     old_slot = backend.ops[0].texture_slot;
     old_incarnation = backend.ops[0].texture_incarnation;
@@ -682,6 +687,63 @@ static void test_disabled_backend_is_one_shot(void)
     g_rix_test_log = NULL;
 }
 
+static void test_two_texture_multipass_recording(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xffffffffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0xffffffffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0xffffffffU);
+    uint32_t diffuse[16] = { 0xff8040ffU };
+    uint32_t lightmap[16] = { 0x808080ffU };
+    uint32_t *command;
+    size_t word;
+    unsigned triangles = 0U;
+
+    init_backend(&backend, &model, TEXTURE_SLOTS);
+    assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, diffuse, 4U, 4U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    assert(minigl_rix_backend_upload_texture(&backend, 2U, 0U, lightmap, 4U, 4U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 1U, GL_NEAREST, GL_NEAREST,
+                                  GL_REPEAT, GL_REPEAT);
+    minigl_rix_backend_tex_params(&backend, 2U, GL_NEAREST, GL_NEAREST,
+                                  GL_REPEAT, GL_REPEAT);
+    minigl_rix_backend_bind_texture(&backend, 0U, 1U);
+    minigl_rix_backend_bind_texture(&backend, 1U, 2U);
+    state.enabled_flags = ZZ9K_MGL_STATE_TEXTURE_2D_0 |
+                          ZZ9K_MGL_STATE_TEXTURE_2D_1 |
+                          ZZ9K_MGL_STATE_DEPTH_TEST |
+                          ZZ9K_MGL_STATE_DEPTH_WRITE;
+    state.tex_env_mode[0] = GL_REPLACE;
+    state.tex_env_mode[1] = GL_MODULATE;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_NONE);
+    a.s1 = 0.0f; a.t1 = 0.0f;
+    b.s1 = 1.0f; b.t1 = 0.0f;
+    c.s1 = 0.0f; c.t1 = 1.0f;
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(backend.ops[0].two_pass);
+    assert(backend.ops[0].texture_slot != backend.ops[0].texture1_slot);
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_drain(&backend));
+    command = (uint32_t *)model.command[0];
+    for (word = 2U; word < 2U + (command[0] - 0x90000000U) / sizeof(uint32_t); ++word)
+        if (command[word] == (RIX_OP_TRIANGLE_STREAM | RIX_TRIANGLE_WORDS * 4U))
+            ++triangles;
+    assert(triangles == 2U);
+
+    state.enabled_flags |= ZZ9K_MGL_STATE_BLEND;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_MULTITEXTURE);
+    state.enabled_flags &= ~ZZ9K_MGL_STATE_BLEND;
+    state.tex_env_mode[1] = GL_DECAL;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_eval_fallback(&backend) == ZZ9K_MGL_FALLBACK_MULTITEXTURE);
+}
+
 int main(void)
 {
     MiniGLRixBackend backend;
@@ -754,6 +816,7 @@ int main(void)
     test_zero_fence_remains_pending();
     test_surface_handoff_and_recorded_texture_state();
     test_disabled_backend_is_one_shot();
+    test_two_texture_multipass_recording();
     puts("RasterIX backend: frame recording, band replay and texture residency passed");
     return 0;
 }

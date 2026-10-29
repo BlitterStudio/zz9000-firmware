@@ -71,6 +71,7 @@ typedef struct MiniGLRixVertex {
     float x, y, z, reciprocal_w;
     uint32_t rgba;
     float s, t, q;
+    float s1, t1, q1;
 } MiniGLRixVertex;
 typedef struct MiniGLRixTexture {
     uint32_t id;
@@ -108,11 +109,18 @@ typedef struct MiniGLRixRecordedOp {
     uint32_t depth;
     uint32_t mask;
     uint32_t texture_incarnation;
+    uint32_t texture1_incarnation;
     uint16_t texture_slot;
+    uint16_t texture1_slot;
     uint16_t min_filter;
     uint16_t mag_filter;
     uint16_t wrap_s;
     uint16_t wrap_t;
+    uint16_t texture1_min_filter;
+    uint16_t texture1_mag_filter;
+    uint16_t texture1_wrap_s;
+    uint16_t texture1_wrap_t;
+    uint8_t two_pass;
     uint8_t type;
 } MiniGLRixRecordedOp;
 
@@ -121,6 +129,7 @@ typedef struct MiniGLRixBackend {
     struct rix_drv driver;
     MiniGLRixPlatform platform;
     RixTriangle triangles[MINIGL_RIX_MAX_TRIANGLES];
+    RixTriangle texture1_triangles[MINIGL_RIX_MAX_TRIANGLES];
     RixTriangle *references[MINIGL_RIX_MAX_TRIANGLES];
     RixBandList bands;
     MiniGLRixRecordedOp ops[MINIGL_RIX_MAX_OPS];
@@ -144,6 +153,7 @@ typedef struct MiniGLRixBackend {
     uint8_t recorded_pins[MINIGL_RIX_MAX_TEXTURES];
     MiniGLRixTexture textures[MINIGL_RIX_MAX_TEXTURES];
     uint32_t bound_texture;
+    uint32_t bound_texture1;
     uint32_t lru_clock;
     uint32_t texture_incarnation_clock;
     size_t triangle_count;
@@ -161,7 +171,7 @@ void minigl_rix_backend_reset(MiniGLRixBackend *backend);
 int minigl_rix_backend_available(const MiniGLRixBackend *backend);
 void minigl_rix_backend_set_state(MiniGLRixBackend *backend,
                                   const ZZ9KMiniGLPacketSetState *state);
-void minigl_rix_backend_bind_texture(MiniGLRixBackend *backend, uint32_t id);
+void minigl_rix_backend_bind_texture(MiniGLRixBackend *backend, uint16_t unit, uint32_t id);
 
 /* begin_draw/add_triangle/end_draw record a draw in the active frame.  The
  * frame is band-replayed and submitted at drain or the next required hand-off. */

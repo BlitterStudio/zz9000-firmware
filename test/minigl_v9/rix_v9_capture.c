@@ -558,7 +558,7 @@ static void submit_gears(mw_ctx *c)
     (void)minigl_raster_finish();
 }
 
-/* SCENE 3: Textured + Lightmap (two-pass) */
+/* SCENE 3: Unit-0 diffuse plus unit-1 lightmap in one GL draw. */
 static void submit_textured_lightmap(mw_ctx *c)
 {
     static uint8_t tex_diffuse[64 * 64 * 4];
@@ -641,9 +641,9 @@ static void submit_textured_lightmap(mw_ctx *c)
     uint32_t status = mw_host_submit(c, up_packet, (uint32_t)(q - up_packet));
     assert(status == MW_STATUS_OK);
 
-    /* 2. Render Pass 1: Diffuse Quad (REPLACE) */
+    /* One GL draw: unit 0 replaces primary colour; unit 1 modulates it. */
     static uint8_t draw_packet[4096];
-    q = packet_init(draw_packet, 11);
+    q = packet_init(draw_packet, 6);
 
     /* Clear */
     mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24);
@@ -652,13 +652,15 @@ static void submit_textured_lightmap(mw_ctx *c)
     mw_put_bef(q + 28, 1.0f);
     q += 32;
 
-    /* Bind texture 1 */
     mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 24);
     mw_put_be32(q + 8, MW_TEXTURE_STAGE); mw_put_be32(q + 12, 4);
-    mw_put_be32(q + 16, 0); mw_put_be32(q + 20, 1); mw_put_be32(q + 24, 1); mw_put_be32(q + 28, 0x1e01); /* GL_REPLACE */
+    mw_put_be32(q + 16, 0); mw_put_be32(q + 20, 1); mw_put_be32(q + 24, 1); mw_put_be32(q + 28, 0x1e01);
+    q += 32;
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 24);
+    mw_put_be32(q + 8, MW_TEXTURE_STAGE); mw_put_be32(q + 12, 4);
+    mw_put_be32(q + 16, 1); mw_put_be32(q + 20, 2); mw_put_be32(q + 24, 1); mw_put_be32(q + 28, 0x2100);
     q += 32;
 
-    /* Depth write on */
     mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
     mw_put_be32(q + 8, MW_DEPTH_TEST); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 1);
     q += 20;
@@ -666,62 +668,27 @@ static void submit_textured_lightmap(mw_ctx *c)
     mw_put_be32(q + 8, MW_DEPTH_MASK); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 1);
     q += 20;
 
-    /* Draw Quad 1 */
-    uint32_t obj_payload = 8 + 6 * 76;
-    mw_put_be32(q, MW_DRAW_OBJECT); mw_put_be32(q + 4, obj_payload);
-    mw_put_be32(q + 8, 4); mw_put_be32(q + 12, 6);
-    q += 16;
+    {
+        uint32_t obj_payload = 8 + 6 * 76;
+        mw_put_be32(q, MW_DRAW_OBJECT); mw_put_be32(q + 4, obj_payload);
+        mw_put_be32(q + 8, 4); mw_put_be32(q + 12, 6);
+        q += 16;
 #define EMIT_V(px, py, s, t) do { \
     mw_put_bef(q, px); mw_put_bef(q + 4, py); mw_put_bef(q + 8, 0.0f); mw_put_bef(q + 12, 1.0f); \
     mw_put_bef(q + 16, 1.0f); mw_put_bef(q + 20, 1.0f); mw_put_bef(q + 24, 1.0f); mw_put_bef(q + 28, 1.0f); \
     mw_put_bef(q + 32, s); mw_put_bef(q + 36, t); mw_put_bef(q + 40, 0.0f); mw_put_bef(q + 44, 1.0f); \
+    mw_put_bef(q + 48, s); mw_put_bef(q + 52, t); mw_put_bef(q + 56, 0.0f); mw_put_bef(q + 60, 1.0f); \
+    mw_put_bef(q + 64, 0.0f); mw_put_bef(q + 68, 0.0f); mw_put_bef(q + 72, 1.0f); \
     q += 76; \
 } while(0)
-    EMIT_V(-0.8f, -0.8f, 0.0f, 0.0f);
-    EMIT_V( 0.8f, -0.8f, 1.0f, 0.0f);
-    EMIT_V( 0.8f,  0.8f, 1.0f, 1.0f);
-    EMIT_V(-0.8f, -0.8f, 0.0f, 0.0f);
-    EMIT_V( 0.8f,  0.8f, 1.0f, 1.0f);
-    EMIT_V(-0.8f,  0.8f, 0.0f, 1.0f);
-
-    /* Render Pass 2: Lightmap Quad with Blending (GL_MODULATE, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA) */
-    /* Bind texture 2 */
-    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 24);
-    mw_put_be32(q + 8, MW_TEXTURE_STAGE); mw_put_be32(q + 12, 4);
-    mw_put_be32(q + 16, 0); mw_put_be32(q + 20, 2); mw_put_be32(q + 24, 1); mw_put_be32(q + 28, 0x2100); /* GL_MODULATE */
-    q += 32;
-
-    /* Blend on */
-    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
-    mw_put_be32(q + 8, MW_BLEND); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 1);
-    q += 20;
-
-    /* Blend factors */
-    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 24);
-    mw_put_be32(q + 8, MW_BLEND_FACTORS); mw_put_be32(q + 12, 4);
-    mw_put_be32(q + 16, 0x0302); mw_put_be32(q + 20, 0x0303);
-    mw_put_be32(q + 24, 0x0302); mw_put_be32(q + 28, 0x0303);
-    q += 32;
-
-    /* Depth test LEQUAL, depth write off */
-    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
-    mw_put_be32(q + 8, MW_DEPTH_FUNC); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 0x0203); /* GL_LEQUAL */
-    q += 20;
-    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12);
-    mw_put_be32(q + 8, MW_DEPTH_MASK); mw_put_be32(q + 12, 1); mw_put_be32(q + 16, 0);
-    q += 20;
-
-    /* Draw Quad 2 (lightmap) */
-    mw_put_be32(q, MW_DRAW_OBJECT); mw_put_be32(q + 4, obj_payload);
-    mw_put_be32(q + 8, 4); mw_put_be32(q + 12, 6);
-    q += 16;
-    EMIT_V(-0.8f, -0.8f, 0.0f, 0.0f);
-    EMIT_V( 0.8f, -0.8f, 1.0f, 0.0f);
-    EMIT_V( 0.8f,  0.8f, 1.0f, 1.0f);
-    EMIT_V(-0.8f, -0.8f, 0.0f, 0.0f);
-    EMIT_V( 0.8f,  0.8f, 1.0f, 1.0f);
-    EMIT_V(-0.8f,  0.8f, 0.0f, 1.0f);
+        EMIT_V(-0.8f, -0.8f, 0.0f, 0.0f);
+        EMIT_V( 0.8f, -0.8f, 1.0f, 0.0f);
+        EMIT_V( 0.8f,  0.8f, 1.0f, 1.0f);
+        EMIT_V(-0.8f, -0.8f, 0.0f, 0.0f);
+        EMIT_V( 0.8f,  0.8f, 1.0f, 1.0f);
+        EMIT_V(-0.8f,  0.8f, 0.0f, 1.0f);
 #undef EMIT_V
+    }
 
     packet_finish(draw_packet, q);
     status = mw_host_submit(c, draw_packet, (uint32_t)(q - draw_packet));

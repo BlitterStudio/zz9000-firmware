@@ -220,15 +220,18 @@ static MiniGLRixTexture *backend_texture(MiniGLRixBackend *backend, uint32_t id)
 }
 
 static MiniGLRixTexture *backend_recorded_texture(MiniGLRixBackend *backend,
-                                                   const MiniGLRixRecordedOp *op)
+                                                   const MiniGLRixRecordedOp *op,
+                                                   unsigned int unit)
 {
     MiniGLRixTexture *texture;
+    uint16_t slot = unit == 0U ? op->texture_slot : op->texture1_slot;
+    uint32_t incarnation = unit == 0U ? op->texture_incarnation :
+                                         op->texture1_incarnation;
 
-    if (op->texture_slot >= MINIGL_RIX_MAX_TEXTURES)
+    if (slot >= MINIGL_RIX_MAX_TEXTURES)
         return NULL;
-    texture = &backend->textures[op->texture_slot];
-    return texture->valid && texture->incarnation == op->texture_incarnation ?
-        texture : NULL;
+    texture = &backend->textures[slot];
+    return texture->valid && texture->incarnation == incarnation ? texture : NULL;
 }
 
 static int mip_filter(uint16_t filter)
@@ -245,6 +248,33 @@ static int texture_filter_supported(const MiniGLRixTexture *texture)
             texture->mag_filter == GL_NEAREST) ||
            (texture->min_filter == GL_LINEAR_MIPMAP_NEAREST &&
             texture->mag_filter == GL_LINEAR);
+}
+
+static int backend_multitexture_supported(const MiniGLRixBackend *backend)
+{
+    const ZZ9KMiniGLPacketSetState *state;
+    const MiniGLRixTexture *texture0;
+    const MiniGLRixTexture *texture1;
+    uint32_t required;
+
+    if (backend == NULL)
+        return 0;
+    state = &backend->state;
+    required = ZZ9K_MGL_STATE_TEXTURE_2D_0 | ZZ9K_MGL_STATE_TEXTURE_2D_1 |
+               ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_DEPTH_WRITE;
+    if ((state->enabled_flags & required) != required ||
+        (state->enabled_flags & (ZZ9K_MGL_STATE_BLEND | ZZ9K_MGL_STATE_ALPHA_TEST)) != 0U ||
+        (state->color_mask & 7U) != 7U ||
+        state->tex_env_mode[1] != GL_MODULATE)
+        return 0;
+    texture0 = backend_texture((MiniGLRixBackend *)backend, backend->bound_texture);
+    texture1 = backend_texture((MiniGLRixBackend *)backend, backend->bound_texture1);
+    return texture0 != NULL && texture1 != NULL &&
+           texture_filter_supported(texture0) && texture_filter_supported(texture1) &&
+           (!mip_filter(texture0->min_filter) ||
+            texture0->levels == texture0->required_levels) &&
+           (!mip_filter(texture1->min_filter) ||
+            texture1->levels == texture1->required_levels);
 }
 
 static uint16_t texture_dimension(uint16_t value)
@@ -511,9 +541,14 @@ static void backend_fill_white_texture(MiniGLRixBackend *backend)
     }
 }
 
-void minigl_rix_backend_bind_texture(MiniGLRixBackend *backend, uint32_t id)
+void minigl_rix_backend_bind_texture(MiniGLRixBackend *backend, uint16_t unit, uint32_t id)
 {
-    if (backend != NULL) backend->bound_texture = id;
+    if (backend == NULL || unit > 1U)
+        return;
+    if (unit == 0U)
+        backend->bound_texture = id;
+    else
+        backend->bound_texture1 = id;
 }
 
 int minigl_rix_backend_texture_resident(const MiniGLRixBackend *backend, uint32_t id)
@@ -544,6 +579,8 @@ void minigl_rix_backend_delete_texture(MiniGLRixBackend *backend, uint32_t id)
         texture->deleted = 1U;
         if (backend->bound_texture == id)
             backend->bound_texture = 0U;
+        if (backend->bound_texture1 == id)
+            backend->bound_texture1 = 0U;
         if (texture->pin_count == 0U)
             backend_release_texture(backend, texture);
     }
@@ -789,38 +826,55 @@ static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
 }
 
 static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
-                              const MiniGLRixRecordedOp *op,
-                              uint32_t disabled_features)
+                              const MiniGLRixRecordedOp *op, unsigned int pass)
 {
     ZZ9KMiniGLPacketSetState state = op->state;
     RixFragmentState fragment;
     RixTexEnvState environment;
     RixTextureState texture;
     MiniGLRixTexture sampled;
-    MiniGLRixTexture *image = NULL;
+    MiniGLRixTexture *image;
     uint32_t features;
     uint32_t pages[MINIGL_RIX_TEXTURE_PAGES] = { 0U };
     size_t page_count;
     size_t page_index;
-    int textured;
+    uint16_t slot;
 
-    textured = (state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_0) != 0U &&
-               op->texture_slot != UINT16_MAX;
-    if (!textured)
+    state.enabled_flags &= ~ZZ9K_MGL_STATE_TEXTURE_2D_1;
+    if (pass != 0U) {
+        state.enabled_flags |= ZZ9K_MGL_STATE_TEXTURE_2D_0 |
+                               ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_BLEND;
+        state.enabled_flags &= ~(ZZ9K_MGL_STATE_DEPTH_WRITE |
+                                 ZZ9K_MGL_STATE_ALPHA_TEST);
+        state.depth_func = ZZ9K_MGL_WIRE_EQUAL;
+        state.blend_src = ZZ9K_MGL_WIRE_DST_COLOR;
+        state.blend_dst = ZZ9K_MGL_WIRE_ZERO;
+        state.tex_env_mode[0] = GL_REPLACE;
+        state.tex_env_color[0] = state.tex_env_color[1];
+    }
+    slot = pass == 0U ? op->texture_slot : op->texture1_slot;
+    if ((state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_0) == 0U ||
+        slot == UINT16_MAX)
         state.enabled_flags &= ~ZZ9K_MGL_STATE_TEXTURE_2D_0;
     if (!backend_maps_state(&state, &fragment, &environment, &features))
         return 0;
-    features &= ~disabled_features;
     memset(&texture, 0, sizeof(texture));
-    if (textured) {
-        image = backend_recorded_texture(backend, op);
+    if ((state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_0) != 0U) {
+        image = backend_recorded_texture(backend, op, pass);
         if (image == NULL)
             return 0;
         sampled = *image;
-        sampled.min_filter = op->min_filter;
-        sampled.mag_filter = op->mag_filter;
-        sampled.wrap_s = op->wrap_s;
-        sampled.wrap_t = op->wrap_t;
+        if (pass == 0U) {
+            sampled.min_filter = op->min_filter;
+            sampled.mag_filter = op->mag_filter;
+            sampled.wrap_s = op->wrap_s;
+            sampled.wrap_t = op->wrap_t;
+        } else {
+            sampled.min_filter = op->texture1_min_filter;
+            sampled.mag_filter = op->texture1_mag_filter;
+            sampled.wrap_s = op->texture1_wrap_s;
+            sampled.wrap_t = op->texture1_wrap_t;
+        }
         if (!texture_filter_supported(&sampled) ||
             (mip_filter(sampled.min_filter) && sampled.levels != sampled.required_levels))
             return 0;
@@ -1002,12 +1056,14 @@ static int backend_start_frame(MiniGLRixBackend *backend, uint16_t width,
 }
 
 static int backend_emit_triangles(RixCmdWriter *writer, const MiniGLRixBackend *backend,
-                                  const MiniGLRixRecordedOp *op, const RixBand *band)
+                                  const MiniGLRixRecordedOp *op, const RixBand *band,
+                                  unsigned int pass)
 {
     size_t index;
 
     for (index = 0U; index < op->triangle_count; ++index) {
-        RixTriangle triangle = backend->triangles[op->first_triangle + index];
+        RixTriangle triangle = (pass == 0U ? backend->triangles :
+                                 backend->texture1_triangles)[op->first_triangle + index];
 
         if (!rix_triangle_in_band(&triangle, band->y_start, band->y_end))
             continue;
@@ -1066,7 +1122,10 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
                                          setup.pixels))
                     return 0;
             } else if (!backend_emit_state(backend, writer, op, 0U) ||
-                       !backend_emit_triangles(writer, backend, op, band)) {
+                       !backend_emit_triangles(writer, backend, op, band, 0U) ||
+                       (op->two_pass &&
+                        (!backend_emit_state(backend, writer, op, 1U) ||
+                         !backend_emit_triangles(writer, backend, op, band, 1U)))) {
                 return 0;
             }
         }
@@ -1113,7 +1172,8 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
 static int backend_record_draw(MiniGLRixBackend *backend)
 {
     MiniGLRixRecordedOp *op;
-    MiniGLRixTexture *texture;
+    MiniGLRixTexture *texture0 = NULL;
+    MiniGLRixTexture *texture1 = NULL;
     size_t state_words;
 
     if (backend->op_count == MINIGL_RIX_MAX_OPS)
@@ -1123,31 +1183,53 @@ static int backend_record_draw(MiniGLRixBackend *backend)
     op->type = MINIGL_RIX_OP_DRAW;
     op->state = backend->state;
     op->texture_slot = UINT16_MAX;
+    op->texture1_slot = UINT16_MAX;
     op->first_triangle = backend->triangle_count;
-    state_words = (size_t)backend->bands.count * 33U;
+    op->two_pass = (op->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U;
     if ((op->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_0) != 0U) {
-        texture = backend_texture(backend, backend->bound_texture);
-        if (texture == NULL || !texture_filter_supported(texture) ||
-            (mip_filter(texture->min_filter) && texture->levels != texture->required_levels))
+        texture0 = backend_texture(backend, backend->bound_texture);
+        if (texture0 == NULL || !texture_filter_supported(texture0) ||
+            (mip_filter(texture0->min_filter) && texture0->levels != texture0->required_levels))
             return 0;
-        state_words += (size_t)backend->bands.count * texture->page_count;
-        if (backend->command_words_estimate + state_words >
-            MINIGL_RIX_COMMAND_WORD_BUDGET)
+    }
+    if (op->two_pass) {
+        texture1 = backend_texture(backend, backend->bound_texture1);
+        if (texture1 == NULL || !texture_filter_supported(texture1) ||
+            (mip_filter(texture1->min_filter) && texture1->levels != texture1->required_levels))
             return 0;
-        op->texture_slot = (uint16_t)(texture - backend->textures);
-        op->texture_incarnation = texture->incarnation;
-        op->min_filter = texture->min_filter;
-        op->mag_filter = texture->mag_filter;
-        op->wrap_s = texture->wrap_s;
-        op->wrap_t = texture->wrap_t;
+    }
+    state_words = (size_t)backend->bands.count * 33U;
+    if (texture0 != NULL)
+        state_words += (size_t)backend->bands.count * texture0->page_count;
+    if (texture1 != NULL)
+        state_words += (size_t)backend->bands.count * (33U + texture1->page_count);
+    if (backend->command_words_estimate + state_words > MINIGL_RIX_COMMAND_WORD_BUDGET)
+        return 0;
+    if (texture0 != NULL) {
+        op->texture_slot = (uint16_t)(texture0 - backend->textures);
+        op->texture_incarnation = texture0->incarnation;
+        op->min_filter = texture0->min_filter;
+        op->mag_filter = texture0->mag_filter;
+        op->wrap_s = texture0->wrap_s;
+        op->wrap_t = texture0->wrap_t;
         if (backend->recorded_pins[op->texture_slot] == 0U) {
             backend->recorded_pins[op->texture_slot] = 1U;
-            ++texture->pin_count;
+            ++texture0->pin_count;
         }
-        backend_touch_texture(backend, texture);
-    } else if (backend->command_words_estimate + state_words >
-               MINIGL_RIX_COMMAND_WORD_BUDGET) {
-        return 0;
+        backend_touch_texture(backend, texture0);
+    }
+    if (texture1 != NULL) {
+        op->texture1_slot = (uint16_t)(texture1 - backend->textures);
+        op->texture1_incarnation = texture1->incarnation;
+        op->texture1_min_filter = texture1->min_filter;
+        op->texture1_mag_filter = texture1->mag_filter;
+        op->texture1_wrap_s = texture1->wrap_s;
+        op->texture1_wrap_t = texture1->wrap_t;
+        if (backend->recorded_pins[op->texture1_slot] == 0U) {
+            backend->recorded_pins[op->texture1_slot] = 1U;
+            ++texture1->pin_count;
+        }
+        backend_touch_texture(backend, texture1);
     }
     backend->command_words_estimate += state_words;
     ++backend->op_count;
@@ -1160,10 +1242,18 @@ int minigl_rix_backend_begin_draw(MiniGLRixBackend *backend, uint16_t width,
 {
     RixFragmentState fragment;
     RixTexEnvState environment;
+    ZZ9KMiniGLPacketSetState mapped_state;
     uint32_t features;
 
-    if (!minigl_rix_backend_available(backend) || width == 0U || height == 0U ||
-        !backend_maps_state(&backend->state, &fragment, &environment, &features))
+    if (!minigl_rix_backend_available(backend) || width == 0U || height == 0U)
+        return 0;
+    mapped_state = backend->state;
+    if ((mapped_state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U) {
+        if (!backend_multitexture_supported(backend))
+            return 0;
+        mapped_state.enabled_flags &= ~ZZ9K_MGL_STATE_TEXTURE_2D_1;
+    }
+    if (!backend_maps_state(&mapped_state, &fragment, &environment, &features))
         return 0;
     if (backend->frame_active &&
         (backend->width != width || backend->height != height ||
@@ -1188,12 +1278,15 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
                                     const MiniGLRixVertex *c)
 {
     RixVertex vertices[3];
+    RixVertex texture1_vertices[3];
     RixScissor scissor;
     RixTriangle prepared;
+    RixTriangle prepared_texture1;
     RixTriangle *triangle;
     MiniGLRixRecordedOp *op;
     size_t band_index;
     size_t touched_bands = 0U;
+    unsigned int passes;
 
     if (backend == NULL || !backend->collecting || a == NULL || b == NULL || c == NULL)
         return 0;
@@ -1216,7 +1309,14 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
                                   b->rgba, b->s, b->t, b->q};
         vertices[2] = (RixVertex){c->x, (float)backend->height - c->y, zc, c->reciprocal_w,
                                   c->rgba, c->s, c->t, c->q};
+        texture1_vertices[0] = (RixVertex){a->x, (float)backend->height - a->y, za,
+                                           a->reciprocal_w, a->rgba, a->s1, a->t1, a->q1};
+        texture1_vertices[1] = (RixVertex){b->x, (float)backend->height - b->y, zb,
+                                           b->reciprocal_w, b->rgba, b->s1, b->t1, b->q1};
+        texture1_vertices[2] = (RixVertex){c->x, (float)backend->height - c->y, zc,
+                                           c->reciprocal_w, c->rgba, c->s1, c->t1, c->q1};
     }
+    passes = (backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U ? 2U : 1U;
     scissor.start_x = 0U;
     scissor.start_y = 0U;
     scissor.end_x = backend->width;
@@ -1237,7 +1337,10 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         scissor.end_y = (uint16_t)((uint32_t)bottom + backend->state.scissor_h);
     }
     scissor.enabled = 1U;
-    if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor))
+    if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor) ||
+        (passes == 2U &&
+         !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
+                             &texture1_vertices[1], &texture1_vertices[2], &scissor)))
         return 0;
     for (band_index = 0U; band_index < backend->bands.count; ++band_index)
         if (rix_triangle_in_band(&prepared, backend->bands.band[band_index].y_start,
@@ -1245,24 +1348,27 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
             ++touched_bands;
     if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
         backend->command_words_estimate +
-            touched_bands * (RIX_TRIANGLE_WORDS + 1U) > MINIGL_RIX_COMMAND_WORD_BUDGET) {
+            passes * touched_bands * (RIX_TRIANGLE_WORDS + 1U) >
+                MINIGL_RIX_COMMAND_WORD_BUDGET) {
         if (backend->triangle_count == 0U &&
             backend->ops[backend->op_count - 1U].triangle_count == 0U)
             return 0;
         if (!backend_flush(backend, 1) || !backend_record_draw(backend) ||
             backend->command_words_estimate +
-                touched_bands * (RIX_TRIANGLE_WORDS + 1U) >
-                MINIGL_RIX_COMMAND_WORD_BUDGET)
+                passes * touched_bands * (RIX_TRIANGLE_WORDS + 1U) >
+                    MINIGL_RIX_COMMAND_WORD_BUDGET)
             return 0;
     }
     op = &backend->ops[backend->op_count - 1U];
     triangle = &backend->triangles[backend->triangle_count];
     *triangle = prepared;
+    if (passes == 2U)
+        backend->texture1_triangles[backend->triangle_count] = prepared_texture1;
     if (!rix_band_list_add(&backend->bands, triangle))
         return 0;
     ++backend->triangle_count;
     ++op->triangle_count;
-    backend->command_words_estimate += touched_bands * (RIX_TRIANGLE_WORDS + 1U);
+    backend->command_words_estimate += passes * touched_bands * (RIX_TRIANGLE_WORDS + 1U);
     return 1;
 }
 
@@ -1292,6 +1398,12 @@ static void backend_recalculate_command_words(MiniGLRixBackend *backend)
             if (op->texture_slot < MINIGL_RIX_MAX_TEXTURES)
                 backend->command_words_estimate += (size_t)backend->bands.count *
                     backend->textures[op->texture_slot].page_count;
+            if (op->two_pass) {
+                backend->command_words_estimate += (size_t)backend->bands.count * 33U;
+                if (op->texture1_slot < MINIGL_RIX_MAX_TEXTURES)
+                    backend->command_words_estimate += (size_t)backend->bands.count *
+                        backend->textures[op->texture1_slot].page_count;
+            }
             for (triangle_index = 0U; triangle_index < op->triangle_count;
                  ++triangle_index) {
                 size_t band_index;
@@ -1302,7 +1414,8 @@ static void backend_recalculate_command_words(MiniGLRixBackend *backend)
                     if (rix_triangle_in_band(triangle,
                                              backend->bands.band[band_index].y_start,
                                              backend->bands.band[band_index].y_end))
-                        backend->command_words_estimate += RIX_TRIANGLE_WORDS + 1U;
+                        backend->command_words_estimate +=
+                            (op->two_pass ? 2U : 1U) * (RIX_TRIANGLE_WORDS + 1U);
             }
         }
     }
@@ -1313,8 +1426,8 @@ void minigl_rix_backend_abort_draw(MiniGLRixBackend *backend)
     MiniGLRixRecordedOp *op;
     size_t index;
     size_t retained_triangles;
-    uint16_t slot;
-    int still_pinned = 0;
+    uint16_t slots[2];
+    unsigned int unit;
 
     if (backend == NULL || !backend->collecting)
         return;
@@ -1325,19 +1438,28 @@ void minigl_rix_backend_abort_draw(MiniGLRixBackend *backend)
     if (op->type != MINIGL_RIX_OP_DRAW)
         return;
     retained_triangles = op->first_triangle;
-    slot = op->texture_slot;
+    slots[0] = op->texture_slot;
+    slots[1] = op->texture1_slot;
     --backend->op_count;
-    for (index = 0U; index < backend->op_count; ++index)
-        if (backend->ops[index].type == MINIGL_RIX_OP_DRAW &&
-            backend->ops[index].texture_slot == slot) {
-            still_pinned = 1;
-            break;
+    for (unit = 0U; unit < 2U; ++unit) {
+        int still_pinned = 0;
+
+        for (index = 0U; index < backend->op_count; ++index) {
+            const MiniGLRixRecordedOp *recorded = &backend->ops[index];
+
+            if (recorded->type == MINIGL_RIX_OP_DRAW &&
+                (recorded->texture_slot == slots[unit] ||
+                 recorded->texture1_slot == slots[unit])) {
+                still_pinned = 1;
+                break;
+            }
         }
-    if (!still_pinned && slot < MINIGL_RIX_MAX_TEXTURES &&
-        backend->recorded_pins[slot] != 0U) {
-        backend->recorded_pins[slot] = 0U;
-        if (backend->textures[slot].pin_count != 0U)
-            --backend->textures[slot].pin_count;
+        if (!still_pinned && slots[unit] < MINIGL_RIX_MAX_TEXTURES &&
+            backend->recorded_pins[slots[unit]] != 0U) {
+            backend->recorded_pins[slots[unit]] = 0U;
+            if (backend->textures[slots[unit]].pin_count != 0U)
+                --backend->textures[slots[unit]].pin_count;
+        }
     }
     backend->triangle_count = retained_triangles;
     backend_recalculate_command_words(backend);
@@ -1499,7 +1621,8 @@ uint32_t minigl_rix_backend_eval_fallback(const MiniGLRixBackend *backend)
         return ZZ9K_MGL_FALLBACK_DEPTH_BITS;
     if ((backend->state.enabled_flags & ZZ9K_MGL_STATE_FOG) != 0U)
         return ZZ9K_MGL_FALLBACK_FOG;
-    if ((backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U)
+    if ((backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U &&
+        !backend_multitexture_supported(backend))
         return ZZ9K_MGL_FALLBACK_MULTITEXTURE;
     if ((backend->state.enabled_flags & (ZZ9K_MGL_STATE_POLYGON_OFFSET_FILL |
                                          ZZ9K_MGL_STATE_POLYGON_OFFSET_LINE |
