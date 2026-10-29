@@ -61,6 +61,9 @@ typedef void (*rix_drv_write_fn)(void *context, uint32_t offset,
                                  uint32_t value);
 typedef void (*rix_drv_cache_clean_fn)(void *context, uintptr_t address,
                                        size_t bytes);
+typedef void (*rix_drv_fifo_words_fn)(void *context, const uint32_t *words,
+                                      uint32_t count);
+typedef void (*rix_drv_barrier_fn)(void *context);
 typedef int (*rix_drv_dma_stream_fn)(void *context, uintptr_t source,
                                      uint32_t words, uint32_t burst_words);
 
@@ -72,6 +75,8 @@ struct rix_drv_config {
     rix_drv_write_fn write;
     rix_drv_read_fn fifo_read;
     rix_drv_write_fn fifo_write;
+    rix_drv_fifo_words_fn fifo_write_words;
+    rix_drv_barrier_fn fifo_drain;
     rix_drv_cache_clean_fn clean_dcache;
     rix_drv_dma_stream_fn dma_stream;
     int hardware_present;
@@ -83,6 +88,8 @@ struct rix_drv {
     rix_drv_write_fn write;
     rix_drv_read_fn fifo_read;
     rix_drv_write_fn fifo_write;
+    rix_drv_fifo_words_fn fifo_write_words;
+    rix_drv_barrier_fn fifo_drain;
     rix_drv_cache_clean_fn clean_dcache;
     rix_drv_dma_stream_fn dma_stream;
     uint32_t last_status;

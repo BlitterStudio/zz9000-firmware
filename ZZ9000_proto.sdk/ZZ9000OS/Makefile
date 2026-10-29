@@ -117,10 +117,10 @@ COMMON_FLAGS += -DCONFIG_USB_EHCI_TXFIFO_THRESH=4
 
 # RasterIX is physically absent from ordinary bitstreams.  Keep every CSR
 # access out of their firmware by making the platform registration opt-in.
-# MINIGL_RIX_DMA=1 additionally streams command FIFO payloads with the PL330
-# (after a start-up self-test); the default writes every word over MMIO.
+# RasterIX command payloads use PL330 after its start-up self-test; short
+# packets retain the cheaper MMIO path.
 MINIGL_RASTERIX ?= 0
-MINIGL_RIX_DMA ?= 0
+MINIGL_RIX_DMA ?= 1
 ifeq ($(MINIGL_RASTERIX),1)
 EXTRA_CFLAGS += -DMINIGL_RASTERIX=1 -DMINIGL_RIX_DMA=$(MINIGL_RIX_DMA)
 endif

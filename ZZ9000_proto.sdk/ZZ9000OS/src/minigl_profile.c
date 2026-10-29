@@ -191,7 +191,7 @@ void minigl_profile_report(void)
     written = snprintf(line, sizeof(line),
                        "[MGLP] %lu.%lus pk=%lu op=%lu kB=%lu cmd=%lu tri=%lu "
                        "cull=%lu hw=%lu sw=%lu fb=%lu fw=%lu sub=%lu tx=%lu "
-                       "up=%lu pin=%lu ev=%lu |",
+                       "up=%lu ub=%lu pin=%lu ev=%lu |",
                        (unsigned long)(window / 10U), (unsigned long)(window % 10U),
                        (unsigned long)g_mglp.packets, (unsigned long)n[MGLP_N_OPS],
                        (unsigned long)(g_mglp.bytes / 1024U),
@@ -205,6 +205,7 @@ void minigl_profile_report(void)
                        (unsigned long)n[MGLP_N_FIFO_SUBMITS],
                        (unsigned long)n[MGLP_N_TEX_UPLOADS],
                        (unsigned long)n[MGLP_N_RIX_UPLOADS],
+                       (unsigned long)(n[MGLP_N_RIX_UPLOAD_BYTES] / 1024U),
                        (unsigned long)n[MGLP_N_PIN_DRAINS],
                        (unsigned long)n[MGLP_N_EVICTIONS]);
     used = written > 0 ? (size_t)written : 0U;

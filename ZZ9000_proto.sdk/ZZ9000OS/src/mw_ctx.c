@@ -18,6 +18,7 @@
 #if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
 #include "xil_cache.h"
 #include "xil_io.h"
+#include "xil_mmu.h"
 #endif
 
 /* MINIGL_RIX_DMA=1 builds stream FIFO packet payloads with PL330 channel
@@ -215,6 +216,31 @@ static void mw_rix_fifo_write(void *context, uint32_t offset, uint32_t value)
     Xil_Out32(MINIGL_RIX_FIFO_BASE + offset, value);
 }
 
+static void mw_rix_fifo_write_words(void *context, const uint32_t *words,
+                                    uint32_t count)
+{
+    volatile uint32_t *const data = (volatile uint32_t *)(uintptr_t)
+        (MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFD);
+    uint32_t index = 0U;
+
+    (void)context;
+    while (index + 4U <= count) {
+        data[0] = words[index];
+        data[0] = words[index + 1U];
+        data[0] = words[index + 2U];
+        data[0] = words[index + 3U];
+        index += 4U;
+    }
+    while (index < count)
+        data[0] = words[index++];
+}
+
+static void mw_rix_fifo_drain(void *context)
+{
+    (void)context;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
 #if MINIGL_RIX_DMA
 /* Core1 owns this program.  Commands are cache-cleaned by rix_drv.  Each
  * 16-word source burst is stored as single-beat fixed-destination writes;
@@ -407,6 +433,12 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.csr_write = mw_rix_csr_write;
     platform.fifo_read = mw_rix_fifo_read;
     platform.fifo_write = mw_rix_fifo_write;
+    /* GP1's RasterIX section is strongly ordered in the BSP table.  The FIFO
+     * accepts posted Device writes; map it Device-bufferable and pair every
+     * packet commit with a DSB in the driver. */
+    Xil_SetTlbAttributes((INTPTR)MINIGL_RIX_FIFO_BASE, DEVICE_MEMORY);
+    platform.fifo_write_words = mw_rix_fifo_write_words;
+    platform.fifo_drain = mw_rix_fifo_drain;
 #if MINIGL_RIX_DMA
     platform.dma_stream = mw_rix_dma_stream;
 #endif
@@ -1164,14 +1196,22 @@ target_allocation_failed:
         }
 
         t = mw_texmgr_find(&c->texmgr, name);
-        if (!t || !t->pixels[level] ||
-            !minigl_raster_upload_rgba8(name, (uint16_t)level,
-                                        (uint16_t)t->widths[level],
-                                        (uint16_t)t->heights[level],
-                                        t->pixels[level], t->internal_rgb[level]) ||
-            !mw_upload_generated_mips(c, t)) {
-            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
-            goto command_complete;
+        {
+            uint32_t xoffset = mw_be32(p + 8);
+            uint32_t yoffset = mw_be32(p + 12);
+            uint32_t width = mw_be32(p + 16);
+            uint32_t height = mw_be32(p + 20);
+
+            if (!t || !t->pixels[level] ||
+                !minigl_raster_subimage_rgba8(name, (uint16_t)level,
+                                               (uint16_t)xoffset, (uint16_t)yoffset,
+                                               (uint16_t)width, (uint16_t)height,
+                                               t->pixels[level],
+                                               t->internal_rgb[level]) ||
+                !mw_upload_generated_mips(c, t)) {
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
         }
         break;
     }
