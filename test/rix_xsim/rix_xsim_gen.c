@@ -12,9 +12,14 @@
  *       /if/test/rix_xsim/rix_xsim_gen.c \
  *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_cmd.c \
  *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_setup.c \
- *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_bin.c \
  *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_texture.c \
+ *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_drv.c \
  *       -lm -o rix_xsim_gen && rix_xsim_gen <output-dir>
+ *
+ * Besides <scene>.hex (one DSE buffer for the stream-level harness) each
+ * scene gets <scene>.fifo: the exact FIFO packets the firmware driver
+ * (rix_drv.c) commits for it, for the harness that drives the real
+ * axi_fifo_mm_s through the GP1 interconnect.
  */
 #include <math.h>
 #include <stdint.h>
@@ -23,6 +28,7 @@
 
 #include "rix_setup.h"
 #include "rix_texture.h"
+#include "rix_drv.h"
 
 #define SCREEN_WIDTH 640U
 #define SCREEN_HEIGHT 480U
@@ -118,6 +124,118 @@ static int write_dse_hex(const char *path, const uint8_t *raw, size_t raw_bytes)
     if (fclose(file) != 0) {
         ok = 0;
     }
+    return ok;
+}
+
+/* rix_drv.c against a recording FIFO.  Each committed packet becomes
+ *   P <words> <dma-first> <dma-words>
+ * followed by its <words> TDFD words in hex; <dma-first>/<dma-words> mark the
+ * payload the firmware hands to its PL330 callback (0/0 for pure MMIO). */
+typedef struct FifoTrace {
+    FILE *file;
+    uint32_t words[RIX_DRV_FIFO_PACKET_WORDS + 2U];
+    uint32_t count;
+    uint32_t dma_first;
+    uint32_t dma_words;
+    int ok;
+} FifoTrace;
+
+static uint32_t trace_csr_read(void *context, uint32_t offset)
+{
+    (void)context;
+    if (offset == RIX_DRV_CSR_IDENTITY)
+        return RIX_DRV_IDENTITY_VALUE;
+    if (offset == RIX_DRV_CSR_VERSION)
+        return RIX_DRV_VERSION_VALUE;
+    return offset == RIX_DRV_CSR_STATUS ? RIX_DRV_STATUS_IDLE : 0U;
+}
+
+static void trace_csr_write(void *context, uint32_t offset, uint32_t value)
+{
+    (void)context;
+    (void)offset;
+    (void)value;
+}
+
+static uint32_t trace_fifo_read(void *context, uint32_t offset)
+{
+    (void)context;
+    return offset == RIX_DRV_FIFO_TDFV ? 508U : 0U;
+}
+
+static void trace_word(FifoTrace *trace, uint32_t value)
+{
+    if (trace->count >= sizeof(trace->words) / sizeof(trace->words[0]))
+        trace->ok = 0;
+    else
+        trace->words[trace->count++] = value;
+}
+
+static void trace_fifo_write(void *context, uint32_t offset, uint32_t value)
+{
+    FifoTrace *trace = context;
+    uint32_t index;
+
+    if (offset == RIX_DRV_FIFO_TDFD) {
+        trace_word(trace, value);
+    } else if (offset == RIX_DRV_FIFO_TLF) {
+        if (value != trace->count * 4U ||
+            fprintf(trace->file, "P %u %u %u\n", (unsigned)trace->count,
+                    (unsigned)trace->dma_first, (unsigned)trace->dma_words) < 0)
+            trace->ok = 0;
+        for (index = 0U; trace->ok && index < trace->count; ++index)
+            if (fprintf(trace->file, "%08x\n", (unsigned)trace->words[index]) < 0)
+                trace->ok = 0;
+        trace->count = 0U;
+        trace->dma_first = 0U;
+        trace->dma_words = 0U;
+    }
+}
+
+static int trace_dma_stream(void *context, uintptr_t source, uint32_t words,
+                            uint32_t burst_words)
+{
+    FifoTrace *trace = context;
+    const uint32_t *payload = (const uint32_t *)source;
+    uint32_t index;
+
+    (void)burst_words;
+    trace->dma_first = trace->count;
+    trace->dma_words = words;
+    for (index = 0U; index < words; ++index)
+        trace_word(trace, payload[index]);
+    return 1;
+}
+
+static int write_fifo_trace(const char *path, const uint8_t *raw, size_t raw_bytes)
+{
+    static uint32_t commands[COMMAND_CAPACITY / 4U];
+    static FifoTrace trace;
+    struct rix_drv_config config;
+    struct rix_drv driver;
+    int ok;
+
+    memset(&trace, 0, sizeof(trace));
+    trace.file = fopen(path, "w");
+    if (trace.file == NULL)
+        return 0;
+    trace.ok = 1;
+    memcpy(commands, raw, raw_bytes);
+    memset(&config, 0, sizeof(config));
+    config.context = &trace;
+    config.read = trace_csr_read;
+    config.write = trace_csr_write;
+    config.fifo_read = trace_fifo_read;
+    config.fifo_write = trace_fifo_write;
+    config.dma_stream = trace_dma_stream;
+    config.hardware_present = 1;
+    ok = rix_drv_init(&driver, &config) == RIX_DRV_OK &&
+         rix_drv_enable(&driver) == RIX_DRV_OK &&
+         rix_drv_submit(&driver, commands, (uintptr_t)commands,
+                        (uint32_t)(raw_bytes / 4U), 0U) == RIX_DRV_OK &&
+         trace.ok && trace.count == 0U;
+    if (fclose(trace.file) != 0)
+        ok = 0;
     return ok;
 }
 
@@ -829,6 +947,7 @@ static int generate_scene(const char *directory, const char *name,
     size_t triangle_count = 0U;
     char binary_path[1024];
     char hex_path[1024];
+    char fifo_path[1024];
     int textured = scene == 3U || scene == 4U || scene == 6U;
     int valid_scene;
 
@@ -878,8 +997,10 @@ static int generate_scene(const char *directory, const char *name,
         writer.length % 4U != 0U ||
         !make_path(binary_path, sizeof(binary_path), directory, name, ".bin") ||
         !make_path(hex_path, sizeof(hex_path), directory, name, ".hex") ||
+        !make_path(fifo_path, sizeof(fifo_path), directory, name, ".fifo") ||
         !write_dse_bin(binary_path, raw, writer.length) ||
-        !write_dse_hex(hex_path, raw, writer.length)) {
+        !write_dse_hex(hex_path, raw, writer.length) ||
+        !write_fifo_trace(fifo_path, raw, writer.length)) {
         return 0;
     }
     printf("%s: words=%zu bytes=%zu triangles=%zu\n", name,

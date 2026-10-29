@@ -27,6 +27,34 @@ module tb_zz9k_rasterix;
     reg resetn;
     always #5 clk = ~clk;
 
+`ifdef FIFO_PATH
+    // FIFO_PATH: the CSR and the command stream come from the real GP1
+    // interconnect and axi_fifo_mm_s (fifo_path/fifo_path.tcl), driven by
+    // the AXI3 GP1 master tasks below.
+    wire [15:0] s_axi_awaddr;
+    wire [2:0] s_axi_awprot;
+    wire s_axi_awvalid;
+    wire s_axi_awready;
+    wire [31:0] s_axi_wdata;
+    wire [3:0] s_axi_wstrb;
+    wire s_axi_wvalid;
+    wire s_axi_wready;
+    wire [1:0] s_axi_bresp;
+    wire s_axi_bvalid;
+    wire s_axi_bready;
+    wire [15:0] s_axi_araddr;
+    wire [2:0] s_axi_arprot;
+    wire s_axi_arvalid;
+    wire s_axi_arready;
+    wire [31:0] s_axi_rdata;
+    wire [1:0] s_axi_rresp;
+    wire s_axi_rvalid;
+    wire s_axi_rready;
+    wire s_cmd_axis_tvalid;
+    wire s_cmd_axis_tready;
+    wire s_cmd_axis_tlast;
+    wire [31:0] s_cmd_axis_tdata;
+`else
     reg [15:0] s_axi_awaddr;
     reg [2:0] s_axi_awprot;
     reg s_axi_awvalid;
@@ -50,6 +78,7 @@ module tb_zz9k_rasterix;
     wire s_cmd_axis_tready;
     reg s_cmd_axis_tlast;
     reg [31:0] s_cmd_axis_tdata;
+`endif
 
     wire [5:0] m_axi_awid;
     wire [31:0] m_axi_awaddr;
@@ -145,6 +174,255 @@ module tb_zz9k_rasterix;
         .m_axi_rdata(m_axi_rdata), .m_axi_rresp(m_axi_rresp), .m_axi_rlast(m_axi_rlast),
         .m_axi_rvalid(m_axi_rvalid), .m_axi_rready(m_axi_rready)
     );
+
+`ifdef FIFO_PATH
+    // The real command ingress of the EF image: GP1 (AXI3, FCLK1 25 MHz)
+    // -> ps7_0_axi_periph -> M07 RasterIX CSR / M08 axi_fifo_mm_s -> TX
+    // stream, generated from zz9000_project.tcl by fifo_path/fifo_path.tcl.
+    // The GP1 master replays <scene>.fifo, the packets rix_drv.c commits,
+    // as FIFO_TRANSPORT=mmio (single INCR stores, each waiting for its
+    // response like strongly-ordered CPU stores), pl330 (the firmware's
+    // PL330 program: single-beat FIXED stores to TDFD, posted, then the
+    // DMAWMB wait), burst16 (16-beat FIXED bursts to TDFD) or pl330-early
+    // (the pre-fix completion race: TLF written before the DMA payload).
+    localparam [31:0] GP_CSR = 32'h83c6_0000;
+    localparam [31:0] GP_FIFO = 32'h83c7_0000;
+    localparam [31:0] FIFO_ISR = 32'h00;
+    localparam [31:0] FIFO_TDFR = 32'h08;
+    localparam [31:0] FIFO_TDFV = 32'h0c;
+    localparam [31:0] FIFO_TDFD = 32'h10;
+    localparam [31:0] FIFO_TLF = 32'h14;
+    localparam [31:0] FIFO_ISR_TSE = 32'h0200_0000;
+    localparam [31:0] FIFO_ISR_ERRORS = 32'h1200_0000;
+    localparam [1:0] BURST_FIXED = 2'b00;
+    localparam [1:0] BURST_INCR = 2'b01;
+    localparam integer FIFO_TRACE_WORDS = 65536;
+    localparam integer FIFO_TRACE_PACKETS = 1024;
+
+    reg gp_clk;
+    reg gp_resetn;
+    always #20 gp_clk = ~gp_clk;
+
+    reg [31:0] gp_awaddr;
+    reg [3:0] gp_awlen;
+    reg [1:0] gp_awburst;
+    reg gp_awvalid;
+    wire gp_awready;
+    reg [31:0] gp_wdata;
+    reg gp_wlast;
+    reg gp_wvalid;
+    wire gp_wready;
+    wire [11:0] gp_bid;
+    wire [1:0] gp_bresp;
+    wire gp_bvalid;
+    reg [31:0] gp_araddr;
+    reg gp_arvalid;
+    wire gp_arready;
+    wire [11:0] gp_rid;
+    wire [31:0] gp_rdata;
+    wire [1:0] gp_rresp;
+    wire gp_rlast;
+    wire gp_rvalid;
+    integer gp_writes_issued;
+    integer gp_writes_done;
+
+    reg [31:0] fifo_words [0:FIFO_TRACE_WORDS-1];
+    integer fifo_packet_words [0:FIFO_TRACE_PACKETS-1];
+    integer fifo_packet_dma_first [0:FIFO_TRACE_PACKETS-1];
+    integer fifo_packet_dma_words [0:FIFO_TRACE_PACKETS-1];
+    integer fifo_packets;
+    integer fifo_total_words;
+    integer fifo_stream_beats;
+    integer fifo_stream_packet;
+    integer fifo_packet_end;
+    reg [8*16-1:0] fifo_transport;
+    reg [8*512-1:0] fifo_file;
+
+`define FIFO_PATH_TIE_LITE(p) \
+        .p``_awready(1'b0), .p``_wready(1'b0), .p``_bresp(2'b00), .p``_bvalid(1'b0), \
+        .p``_arready(1'b0), .p``_rdata(32'h0), .p``_rresp(2'b00), .p``_rvalid(1'b0)
+
+    rix_fifo_path_wrapper fifo_path (
+        .gp_aclk(gp_clk), .gp_aresetn(gp_resetn), .rix_aclk(clk), .rix_aresetn(resetn),
+        .S_AXI_GP1_awid(12'h000), .S_AXI_GP1_awaddr(gp_awaddr), .S_AXI_GP1_awlen(gp_awlen),
+        .S_AXI_GP1_awsize(3'd2), .S_AXI_GP1_awburst(gp_awburst), .S_AXI_GP1_awlock(2'b00),
+        .S_AXI_GP1_awcache(4'b0000), .S_AXI_GP1_awprot(3'b000), .S_AXI_GP1_awqos(4'h0),
+        .S_AXI_GP1_awvalid(gp_awvalid), .S_AXI_GP1_awready(gp_awready),
+        .S_AXI_GP1_wid(12'h000), .S_AXI_GP1_wdata(gp_wdata), .S_AXI_GP1_wstrb(4'hf),
+        .S_AXI_GP1_wlast(gp_wlast), .S_AXI_GP1_wvalid(gp_wvalid), .S_AXI_GP1_wready(gp_wready),
+        .S_AXI_GP1_bid(gp_bid), .S_AXI_GP1_bresp(gp_bresp), .S_AXI_GP1_bvalid(gp_bvalid),
+        .S_AXI_GP1_bready(1'b1),
+        .S_AXI_GP1_arid(12'h000), .S_AXI_GP1_araddr(gp_araddr), .S_AXI_GP1_arlen(4'h0),
+        .S_AXI_GP1_arsize(3'd2), .S_AXI_GP1_arburst(BURST_INCR), .S_AXI_GP1_arlock(2'b00),
+        .S_AXI_GP1_arcache(4'b0000), .S_AXI_GP1_arprot(3'b000), .S_AXI_GP1_arqos(4'h0),
+        .S_AXI_GP1_arvalid(gp_arvalid), .S_AXI_GP1_arready(gp_arready),
+        .S_AXI_GP1_rid(gp_rid), .S_AXI_GP1_rdata(gp_rdata), .S_AXI_GP1_rresp(gp_rresp),
+        .S_AXI_GP1_rlast(gp_rlast), .S_AXI_GP1_rvalid(gp_rvalid), .S_AXI_GP1_rready(1'b1),
+        `FIFO_PATH_TIE_LITE(M00_AXI), `FIFO_PATH_TIE_LITE(M01_AXI),
+        `FIFO_PATH_TIE_LITE(M02_AXI), `FIFO_PATH_TIE_LITE(M03_AXI),
+        `FIFO_PATH_TIE_LITE(M04_AXI), `FIFO_PATH_TIE_LITE(M05_AXI),
+        `FIFO_PATH_TIE_LITE(M06_AXI),
+        .M07_AXI_awaddr(s_axi_awaddr), .M07_AXI_awprot(s_axi_awprot),
+        .M07_AXI_awvalid(s_axi_awvalid), .M07_AXI_awready(s_axi_awready),
+        .M07_AXI_wdata(s_axi_wdata), .M07_AXI_wstrb(s_axi_wstrb),
+        .M07_AXI_wvalid(s_axi_wvalid), .M07_AXI_wready(s_axi_wready),
+        .M07_AXI_bresp(s_axi_bresp), .M07_AXI_bvalid(s_axi_bvalid), .M07_AXI_bready(s_axi_bready),
+        .M07_AXI_araddr(s_axi_araddr), .M07_AXI_arprot(s_axi_arprot),
+        .M07_AXI_arvalid(s_axi_arvalid), .M07_AXI_arready(s_axi_arready),
+        .M07_AXI_rdata(s_axi_rdata), .M07_AXI_rresp(s_axi_rresp),
+        .M07_AXI_rvalid(s_axi_rvalid), .M07_AXI_rready(s_axi_rready),
+        .M_AXIS_CMD_tdata(s_cmd_axis_tdata), .M_AXIS_CMD_tlast(s_cmd_axis_tlast),
+        .M_AXIS_CMD_tvalid(s_cmd_axis_tvalid), .M_AXIS_CMD_tready(s_cmd_axis_tready)
+    );
+
+    always @(posedge gp_clk) begin
+        if (gp_resetn && gp_bvalid) begin
+            if (gp_bresp != 2'b00) $fatal(1, "FIFO_PATH GP1 write response %0d", gp_bresp);
+            gp_writes_done = gp_writes_done + 1;
+        end
+    end
+
+    // Every accepted stream beat must be the next committed TDFD word, with
+    // TLAST exactly on each packet's final word.
+    always @(posedge clk) begin
+        if (resetn && s_cmd_axis_tvalid && s_cmd_axis_tready) begin
+            if (fifo_stream_beats >= fifo_total_words)
+                $fatal(1, "FIFO_PATH stream beat %0d beyond the %0d committed words",
+                       fifo_stream_beats, fifo_total_words);
+            if (s_cmd_axis_tdata !== fifo_words[fifo_stream_beats])
+                $fatal(1, "FIFO_PATH stream word %0d is %08x, committed %08x",
+                       fifo_stream_beats, s_cmd_axis_tdata, fifo_words[fifo_stream_beats]);
+            if (s_cmd_axis_tlast !== (fifo_stream_beats == fifo_packet_end))
+                $fatal(1, "FIFO_PATH stream word %0d has TLAST=%b", fifo_stream_beats,
+                       s_cmd_axis_tlast);
+            if (fifo_stream_beats == fifo_packet_end) begin
+                fifo_stream_packet = fifo_stream_packet + 1;
+                if (fifo_stream_packet < fifo_packets)
+                    fifo_packet_end = fifo_packet_end + fifo_packet_words[fifo_stream_packet];
+            end
+            fifo_stream_beats = fifo_stream_beats + 1;
+        end
+    end
+
+    task load_fifo_trace;
+        input [8*512-1:0] name;
+        integer fd, k, words, first, dma;
+        reg [31:0] value;
+        begin
+            fd = $fopen(name, "r");
+            if (fd == 0) $fatal(1, "cannot open FIFO trace %0s", name);
+            fifo_packets = 0;
+            fifo_total_words = 0;
+            while ($fscanf(fd, " P %d %d %d", words, first, dma) == 3) begin
+                if ((fifo_packets >= FIFO_TRACE_PACKETS) ||
+                    (fifo_total_words + words > FIFO_TRACE_WORDS))
+                    $fatal(1, "FIFO trace %0s is too large", name);
+                fifo_packet_words[fifo_packets] = words;
+                fifo_packet_dma_first[fifo_packets] = first;
+                fifo_packet_dma_words[fifo_packets] = dma;
+                for (k = 0; k < words; k = k + 1) begin
+                    if ($fscanf(fd, " %h", value) != 1)
+                        $fatal(1, "FIFO trace %0s packet %0d is truncated", name, fifo_packets);
+                    fifo_words[fifo_total_words + k] = value;
+                end
+                fifo_total_words = fifo_total_words + words;
+                fifo_packets = fifo_packets + 1;
+            end
+            $fclose(fd);
+            if (fifo_packets == 0) $fatal(1, "FIFO trace %0s holds no packets", name);
+            fifo_stream_beats = 0;
+            fifo_stream_packet = 0;
+            fifo_packet_end = fifo_packet_words[0] - 1;
+        end
+    endtask
+
+    // One AXI3 write on GP1: `beats` words from fifo_words[first...], or
+    // `value` when first < 0.  AW and W proceed independently; the response
+    // is counted by the B monitor.
+    task gp_write;
+        input [31:0] addr;
+        input [1:0] burst;
+        input integer beats;
+        input integer first;
+        input [31:0] value;
+        integer n;
+        begin
+            @(posedge gp_clk);
+            gp_awaddr <= addr;
+            gp_awlen <= beats - 1;
+            gp_awburst <= burst;
+            gp_awvalid <= 1;
+            fork
+                begin
+                    do @(posedge gp_clk); while (!gp_awready);
+                    gp_awvalid <= 0;
+                end
+                begin
+                    for (n = 0; n < beats; n = n + 1) begin
+                        gp_wdata <= (first < 0) ? value : fifo_words[first + n];
+                        gp_wlast <= (n == beats - 1);
+                        gp_wvalid <= 1;
+                        do @(posedge gp_clk); while (!gp_wready);
+                    end
+                    gp_wvalid <= 0;
+                    gp_wlast <= 0;
+                end
+            join
+            gp_writes_issued = gp_writes_issued + 1;
+        end
+    endtask
+    task gp_wait_writes;
+        begin
+            while (gp_writes_done != gp_writes_issued) @(posedge gp_clk);
+        end
+    endtask
+    task gp_store;
+        input [31:0] addr;
+        input [31:0] value;
+        begin
+            gp_write(addr, BURST_INCR, 1, -1, value);
+            gp_wait_writes;
+        end
+    endtask
+    task gp_read;
+        input [31:0] addr;
+        output [31:0] data;
+        begin
+            @(posedge gp_clk);
+            gp_araddr <= addr;
+            gp_arvalid <= 1;
+            do @(posedge gp_clk); while (!gp_arready);
+            gp_arvalid <= 0;
+            while (!gp_rvalid) @(posedge gp_clk);
+            if (gp_rresp != 2'b00) $fatal(1, "FIFO_PATH GP1 read response %0d at %08x", gp_rresp, addr);
+            data = gp_rdata;
+        end
+    endtask
+    // The payload the firmware hands to its PL330 callback.
+    task fifo_dma;
+        input integer first;
+        input integer words;
+        integer n, beats;
+        begin
+            n = 0;
+            while (n < words) begin
+                beats = (fifo_transport == "burst16") ? ((words - n) < 16 ? (words - n) : 16) : 1;
+                gp_write(GP_FIFO | FIFO_TDFD, BURST_FIXED, beats, first + n, 0);
+                n = n + beats;
+            end
+            gp_wait_writes;
+        end
+    endtask
+    // rix_drv_enable: discard staged words, clear sticky errors.
+    task fifo_enable;
+        reg [31:0] isr;
+        begin
+            gp_store(GP_FIFO | FIFO_TDFR, 32'h0000_00a5);
+            gp_read(GP_FIFO | FIFO_ISR, isr);
+            if ((isr & FIFO_ISR_ERRORS) != 0) gp_store(GP_FIFO | FIFO_ISR, isr & FIFO_ISR_ERRORS);
+        end
+    endtask
+`endif
 
     reg [7:0] memory [0:MEM_BYTES-1];
     reg [7:0] color_memory [0:MINIGL_COLOR_MEMORY_BYTES-1];
@@ -744,6 +1022,73 @@ module tb_zz9k_rasterix;
     end
 `endif
 
+`ifdef FIFO_PATH
+    task axi_write;
+        input [15:0] addr;
+        input [31:0] data;
+        begin
+            gp_store(GP_CSR | addr, data);
+        end
+    endtask
+    task axi_read;
+        input [15:0] addr;
+        output [31:0] data;
+        begin
+            gp_read(GP_CSR | addr, data);
+        end
+    endtask
+    // Replays every packet rix_drv.c commits for the scene: wait for TDFV,
+    // stage the words over the selected transport, commit with TLF and
+    // require ISR free of TSE/TPOE, as the firmware does.
+    task fifo_submit;
+        input integer start_word;
+        input integer word_count;
+        integer packet, base, n, words, first, dma;
+        reg [31:0] value;
+        begin
+            base = 0;
+            for (packet = 0; packet < fifo_packets; packet = packet + 1) begin
+                words = fifo_packet_words[packet];
+                first = fifo_packet_dma_first[packet];
+                dma = fifo_packet_dma_words[packet];
+                value = 0;
+                while (value < words) gp_read(GP_FIFO | FIFO_TDFV, value);
+                if (fifo_transport == "pl330-early") begin
+                    if (dma == 0) $fatal(1, "pl330-early needs a DMA packet");
+                    for (n = 0; n < first; n = n + 1)
+                        gp_write(GP_FIFO | FIFO_TDFD, BURST_INCR, 1, base + n, 0);
+                    gp_wait_writes;
+                    gp_store(GP_FIFO | FIFO_TLF, words * 4);
+                    fifo_dma(base + first, dma);
+                    gp_read(GP_FIFO | FIFO_ISR, value);
+                    repeat (2000) @(posedge clk);
+                    $display("RESULT scene=%0s transport=pl330-early isr=%08x tdfd_words=%0d stream_beats=%0d",
+                             scene, value, words, fifo_stream_beats);
+                    if ((value & FIFO_ISR_TSE) == 0 || fifo_stream_beats != 0)
+                        $fatal(1, "an early TLF was not rejected");
+                    $display("PASS scene=%0s early TLF rejected (ISR.TSE), nothing streamed", scene);
+                    $finish;
+                end
+                n = 0;
+                while (n < words) begin
+                    if (fifo_transport != "mmio" && dma != 0 && n == first) begin
+                        fifo_dma(base + n, dma);
+                        n = n + dma;
+                    end else begin
+                        gp_write(GP_FIFO | FIFO_TDFD, BURST_INCR, 1, base + n, 0);
+                        gp_wait_writes;
+                        n = n + 1;
+                    end
+                end
+                gp_store(GP_FIFO | FIFO_TLF, words * 4);
+                gp_read(GP_FIFO | FIFO_ISR, value);
+                if ((value & FIFO_ISR_ERRORS) != 0)
+                    $fatal(1, "FIFO_PATH packet %0d rejected: ISR=%08x", packet, value);
+                base = base + words;
+            end
+        end
+    endtask
+`else
     task axi_write;
         input [15:0] addr;
         input [31:0] data;
@@ -796,6 +1141,7 @@ module tb_zz9k_rasterix;
             s_cmd_axis_tlast <= 0;
         end
     endtask
+`endif
     task dump_ppm;
         input [8*512-1:0] name;
         integer fd, x, y;
@@ -909,8 +1255,20 @@ module tb_zz9k_rasterix;
 
     initial begin
         clk = 0; resetn = 0; cycle_count = 0; latency = 2;
+`ifdef FIFO_PATH
+        gp_clk = 0; gp_resetn = 0; gp_awaddr = 0; gp_awlen = 0; gp_awburst = BURST_INCR;
+        gp_awvalid = 0; gp_wdata = 0; gp_wlast = 0; gp_wvalid = 0; gp_araddr = 0; gp_arvalid = 0;
+        gp_writes_issued = 0; gp_writes_done = 0;
+        if (!$value$plusargs("FIFO=%s", fifo_file)) $fatal(1, "FIFO_PATH needs FIFO=<scene>.fifo");
+        if (!$value$plusargs("FIFO_TRANSPORT=%s", fifo_transport)) fifo_transport = "mmio";
+        if (fifo_transport != "mmio" && fifo_transport != "pl330" &&
+            fifo_transport != "burst16" && fifo_transport != "pl330-early")
+            $fatal(1, "FIFO_TRANSPORT must be mmio, pl330, burst16 or pl330-early");
+        load_fifo_trace(fifo_file);
+`else
         s_axi_awaddr = 0; s_axi_awprot = 0; s_axi_awvalid = 0; s_axi_wdata = 0; s_axi_wstrb = 0; s_axi_wvalid = 0; s_axi_bready = 1;
         s_axi_araddr = 0; s_axi_arprot = 0; s_axi_arvalid = 0; s_axi_rready = 1; s_cmd_axis_tvalid = 0; s_cmd_axis_tlast = 0; s_cmd_axis_tdata = 0;
+`endif
         m_axi_awready = 0; m_axi_wready = 0; m_axi_bid = 0; m_axi_bresp = 0; m_axi_bvalid = 0;
         m_axi_arready = 0; m_axi_rid = 0; m_axi_rdata = 0; m_axi_rresp = 0; m_axi_rlast = 0; m_axi_rvalid = 0;
         m_cmd_axi_arready = 0; m_cmd_axi_rid = 0; m_cmd_axi_rdata = 0; m_cmd_axi_rresp = 0; m_cmd_axi_rlast = 0; m_cmd_axi_rvalid = 0;
@@ -980,10 +1338,21 @@ module tb_zz9k_rasterix;
             if (cmd_count == 0) $fatal(1, "CMDS contains no DSE buffers");
         end else
             cmd_count = (command_words[0] & 28'h0fff_ffff) / 4 + 2;
+`ifdef FIFO_PATH
+        if (multi_command != 0) $fatal(1, "FIFO_PATH replays single-buffer scene traces only");
+        // Interconnect, clock converters and FIFO reset for 32 FCLK1 cycles.
+        repeat (32) @(posedge gp_clk);
+        resetn = 1;
+        gp_resetn = 1;
+`else
         repeat (8) @(posedge clk);
         resetn = 1;
+`endif
         axi_read(16'h0000, status);
         if (status != 32'h52495831) $fatal(1, "bad RIX identity %08x", status);
+`ifdef FIFO_PATH
+        fifo_enable;
+`endif
         axi_write(16'h0008, 1);
         submission_offset = 0;
         submission_index = 0;
@@ -1028,7 +1397,16 @@ module tb_zz9k_rasterix;
                     if (timeout < poll_limit) begin
                         $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d transport=%0s",
                                  scene, submission_index, cycle_count, submission_words,
+`ifdef FIFO_PATH
+                                 fifo_transport);
+                        if (fifo_stream_beats != fifo_total_words)
+                            $fatal(1, "FIFO_PATH streamed %0d of %0d committed words",
+                                   fifo_stream_beats, fifo_total_words);
+                        $display("FIFO_PATH packets=%0d words=%0d streamed exactly",
+                                 fifo_packets, fifo_total_words);
+`else
                                  $test$plusargs("DMA_BURST") ? "dma-fixed" : "mmio");
+`endif
                         if (shared_channel)
                             $display("SHARED_READS served=%0d reordered=%0d rand_seed=%0d",
                                      shared_served, shared_reordered, rand_seed);

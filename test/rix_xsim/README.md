@@ -5,8 +5,11 @@
 per scene with the exact `Rasterizer.v` edge rules, and gates replay through
 `compare_frames.py` full-image comparison via `run_scenes.sh` (builds the
 generator in gcc:13, replays every scene below over MMIO, `SHARED=1` and
-`DMA_BURST=1`, replays `ef-stress` with three randomized seeds, and fails on
-any mismatch).
+`DMA_BURST=1`, replays `ef-stress` with three randomized seeds, then replays
+every scene through the real FIFO command path (see below), and fails on any
+mismatch).  `run_scenes.sh OUT LATENCY stream` runs only the stream-level
+matrix, `run_scenes.sh OUT LATENCY fifo` (or `run_fifo_path.sh [OUT]
+[LATENCY]`) only the FIFO path.
 
 | Scene | Workload | TMU0 state |
 | --- | --- | --- |
@@ -57,6 +60,44 @@ handshake before final colour selection, while
 TMU0 and a texture source are configured. A MiniGL state mapper therefore must
 provide a valid texture state/page and retain a texture texenv source even for
 flat-primary-colour rendering.
+
+## Real FIFO command path
+
+The stream-level harness feeds the RasterIX command stream directly.  With
+`FIFO_PATH` defined, the testbench instead drives the real EF command ingress
+from an AXI3 GP1 master: `ps7_0_axi_periph` (AXI3 to AXI4-Lite protocol
+converter, crossbar, and the clock converters to the 100 MHz RasterIX clock on
+M07/M08) and `gpu_cmd_fifo` (`axi_fifo_mm_s`), whose TX stream feeds the
+wrapper.  GP1 runs at 25 MHz.  `fifo_path/fifo_path.tcl` builds that block
+design from `zz9000_project.tcl --rasterix --rasterix-variant ef`, copying both
+cells from the real `zz9000_ps` design; it fails unless the copied
+interconnect matches the real one cell for cell and configuration for
+configuration.  CSR accesses go through M07 at the real `0x83c60000` window,
+FIFO accesses through M08 at `0x83c70000`.
+
+The generator also writes `<scene>.fifo`: the exact FIFO packets
+`rix_drv.c` commits for the scene (`P <words> <dma-first> <dma-words>` plus
+the TDFD words), including which payload the firmware hands to its PL330
+callback.  The testbench waits for `TDFV`, stages each packet, commits it with
+`TLF`, and fails if `ISR` then reports `TSE` or `TPOE`; it also checks every
+accepted stream beat and its `TLAST` against the committed packets and that
+every committed word streamed.  `FIFO_TRANSPORT` selects how the payload
+reaches `TDFD`:
+
+| Transport | GP1 traffic |
+| --- | --- |
+| `mmio` | One single-beat INCR store per word, each waiting for its response (strongly ordered CPU stores). |
+| `pl330` | The firmware's PL330 program: single-beat FIXED stores, posted back to back, then the DMAWMB wait before `TLF`. |
+| `burst16` | 16-beat FIXED bursts (shorter tail), posted, then the wait before `TLF`. |
+| `pl330-early` | The pre-fix completion race: `TLF` written after the header words, before the DMA payload.  The run passes only if `ISR.TSE` is set and nothing streamed, the failure mode observed on hardware. |
+
+`run_scenes.sh` (or `run_fifo_path.sh`) builds the design once with
+`fifo_path\run_fifo_path.bat build ROOT WORK` (Vivado 2018.3 batch, about
+two minutes) into `OUT/fifo_path_work`, then runs `run_fifo_path.bat run
+WORK OUT SCENE LATENCY TRANSPORT` for every scene and transport.  Frames land
+in `OUT/<scene>_fifo-<transport>.ppm`; each must pass `compare_frames.py`
+against the analytic reference and equal the `fifo-mmio` frame (and, in the
+full matrix, the stream-level MMIO frame) byte for byte.
 
 ## Captured MiniGL scenes
 
