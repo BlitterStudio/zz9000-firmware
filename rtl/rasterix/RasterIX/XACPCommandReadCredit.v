@@ -3,12 +3,17 @@
 // Inspired by the read-credit architecture used by Ruben Aparicio's BigMig
 // (bm_axi_rd_credit.v); no BigMig source code is copied.
 //
-// AXI4 read channels only. Insert after command commonAxiAdapter (64-bit master),
-// before S0 of RasterIX's mainXBar. All non-command channels are unchanged.
-// Capacity is reserved on accepted AR for every expected R beat (ARLEN+1).
-// The downstream R channel is always ready while out of reset. With a compliant
-// AXI responder, reservations ensure the FIFO cannot overflow even if the
-// command consumer remains blocked indefinitely.
+// AXI4 read channels only. Capacity is reserved on accepted AR for every
+// expected R beat (ARLEN+1); an AR whose burst does not fit is held, not
+// issued. The downstream R channel is always ready while out of reset. With a
+// compliant AXI responder, reservations ensure the FIFO cannot overflow even
+// if the consumer remains blocked indefinitely.
+//
+// Modified 2026 for the ZZ9000 RasterIX EF integration: generalized from the
+// command port to any read master and data width, and installed in front of
+// every RasterIX mainXBar read port (command, colour, depth, stencil, both
+// TMUs), so no read client can hold the shared HP read channel by refusing a
+// response. See rtl/rasterix/PATCHES.md.
 module XACPCommandReadCredit #(
     parameter integer ID_WIDTH = 5,
     parameter integer ADDR_WIDTH = 32,
@@ -101,9 +106,7 @@ module XACPCommandReadCredit #(
     end
 
     initial begin
-        if (DEPTH_LOG2 < 3 || DEPTH_LOG2 > 8)
-            $error("XACPCommandReadCredit: DEPTH_LOG2 out of supported range 3..8");
-        if (DATA_WIDTH != 64)
-            $error("XACPCommandReadCredit: G4C expects 64-bit post-adapter AXI");
+        if (DEPTH_LOG2 < 2 || DEPTH_LOG2 > 8)
+            $error("XACPCommandReadCredit: DEPTH_LOG2 out of supported range 2..8");
     end
 endmodule

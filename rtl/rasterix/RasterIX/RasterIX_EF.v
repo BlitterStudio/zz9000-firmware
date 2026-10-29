@@ -184,6 +184,80 @@ module RasterIX_EF #(
     wire [NRS - 1 : 0]                      xbar_axi_rvalid;
     wire [NRS - 1 : 0]                      xbar_axi_rready;
 
+    // Read masters ahead of their response reservations (readReservation).
+    wire [(NRS * ID_WIDTH_LOC) - 1 : 0]     rd_axi_arid;
+    wire [(NRS * ADDR_WIDTH) - 1 : 0]       rd_axi_araddr;
+    wire [(NRS * 8) - 1 : 0]                rd_axi_arlen;
+    wire [(NRS * 3) - 1 : 0]                rd_axi_arsize;
+    wire [(NRS * 2) - 1 : 0]                rd_axi_arburst;
+    wire [NRS - 1 : 0]                      rd_axi_arlock;
+    wire [(NRS * 4) - 1 : 0]                rd_axi_arcache;
+    wire [(NRS * 3) - 1 : 0]                rd_axi_arprot;
+    wire [NRS - 1 : 0]                      rd_axi_arvalid;
+    wire [NRS - 1 : 0]                      rd_axi_arready;
+
+    wire [(NRS * ID_WIDTH_LOC) - 1 : 0]     rd_axi_rid;
+    wire [(NRS * DATA_WIDTH) - 1 : 0]       rd_axi_rdata;
+    wire [(NRS * 2) - 1 : 0]                rd_axi_rresp;
+    wire [NRS - 1 : 0]                      rd_axi_rlast;
+    wire [NRS - 1 : 0]                      rd_axi_rvalid;
+    wire [NRS - 1 : 0]                      rd_axi_rready;
+
+    // The crossbar has one master (PS HP3), whose read data returns in order
+    // and is routed per beat to the issuing port; a port that refuses a beat
+    // stalls every response behind it.  Every read master therefore reserves
+    // response space for its whole burst before its AR reaches the crossbar,
+    // so each crossbar port accepts R unconditionally.  Depths: the crossbar
+    // issues at most M_ISSUE (8) reads; framebuffer reads are single beats
+    // (16 >= 8), texture cache lines 4 beats (32 = 8 x 4), and the command
+    // port keeps the 64 of the original XACP credit buffer.
+    genvar rdPort;
+    generate
+        for (rdPort = 0; rdPort < NRS; rdPort = rdPort + 1)
+        begin : readReservation
+            XACPCommandReadCredit #(
+                .ID_WIDTH(ID_WIDTH_LOC),
+                .ADDR_WIDTH(ADDR_WIDTH),
+                .DATA_WIDTH(DATA_WIDTH),
+                .DEPTH_LOG2((rdPort == 0) ? 6 : ((rdPort >= 4) ? 5 : 4))
+            ) credit (
+                .clk(aclk), .resetn(resetn),
+                .s_arid(rd_axi_arid[rdPort * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+                .s_araddr(rd_axi_araddr[rdPort * ADDR_WIDTH +: ADDR_WIDTH]),
+                .s_arlen(rd_axi_arlen[rdPort * 8 +: 8]),
+                .s_arsize(rd_axi_arsize[rdPort * 3 +: 3]),
+                .s_arburst(rd_axi_arburst[rdPort * 2 +: 2]),
+                .s_arlock(rd_axi_arlock[rdPort]),
+                .s_arcache(rd_axi_arcache[rdPort * 4 +: 4]),
+                .s_arprot(rd_axi_arprot[rdPort * 3 +: 3]),
+                .s_arvalid(rd_axi_arvalid[rdPort]),
+                .s_arready(rd_axi_arready[rdPort]),
+                .s_rid(rd_axi_rid[rdPort * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+                .s_rdata(rd_axi_rdata[rdPort * DATA_WIDTH +: DATA_WIDTH]),
+                .s_rresp(rd_axi_rresp[rdPort * 2 +: 2]),
+                .s_rlast(rd_axi_rlast[rdPort]),
+                .s_rvalid(rd_axi_rvalid[rdPort]),
+                .s_rready(rd_axi_rready[rdPort]),
+                .m_arid(xbar_axi_arid[rdPort * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+                .m_araddr(xbar_axi_araddr[rdPort * ADDR_WIDTH +: ADDR_WIDTH]),
+                .m_arlen(xbar_axi_arlen[rdPort * 8 +: 8]),
+                .m_arsize(xbar_axi_arsize[rdPort * 3 +: 3]),
+                .m_arburst(xbar_axi_arburst[rdPort * 2 +: 2]),
+                .m_arlock(xbar_axi_arlock[rdPort]),
+                .m_arcache(xbar_axi_arcache[rdPort * 4 +: 4]),
+                .m_arprot(xbar_axi_arprot[rdPort * 3 +: 3]),
+                .m_arvalid(xbar_axi_arvalid[rdPort]),
+                .m_arready(xbar_axi_arready[rdPort]),
+                .m_rid(xbar_axi_rid[rdPort * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+                .m_rdata(xbar_axi_rdata[rdPort * DATA_WIDTH +: DATA_WIDTH]),
+                .m_rresp(xbar_axi_rresp[rdPort * 2 +: 2]),
+                .m_rlast(xbar_axi_rlast[rdPort]),
+                .m_rvalid(xbar_axi_rvalid[rdPort]),
+                .m_rready(xbar_axi_rready[rdPort])
+            );
+        end
+    endgenerate
+
     axi_crossbar #(
         .DATA_WIDTH(DATA_WIDTH),
         .ADDR_WIDTH(ADDR_WIDTH),
@@ -331,25 +405,6 @@ module RasterIX_EF #(
     wire                                    common_axi_rlast;
     wire                                    common_axi_rvalid;
     wire                                    common_axi_rready;
-    // XACP-GPU G4C: buffer FrameStreamingCore list-read responses before the
-    // shared RasterIX crossbar so fragment traffic cannot be held behind a
-    // parser-stalled command consumer.
-    wire [ID_WIDTH_LOC - 1 : 0] cmd_rcredit_arid;
-    wire [ADDR_WIDTH - 1 : 0] cmd_rcredit_araddr;
-    wire [7 : 0] cmd_rcredit_arlen;
-    wire [2 : 0] cmd_rcredit_arsize;
-    wire [1 : 0] cmd_rcredit_arburst;
-    wire cmd_rcredit_arlock;
-    wire [3 : 0] cmd_rcredit_arcache;
-    wire [2 : 0] cmd_rcredit_arprot;
-    wire cmd_rcredit_arvalid;
-    wire cmd_rcredit_arready;
-    wire [ID_WIDTH_LOC - 1 : 0] cmd_rcredit_rid;
-    wire [DATA_WIDTH - 1 : 0] cmd_rcredit_rdata;
-    wire [1 : 0] cmd_rcredit_rresp;
-    wire cmd_rcredit_rlast;
-    wire cmd_rcredit_rvalid;
-    wire cmd_rcredit_rready;
 
     axi_adapter #(
         .ADDR_WIDTH(ADDR_WIDTH),
@@ -388,26 +443,26 @@ module RasterIX_EF #(
         .m_axi_buser(0),
         .m_axi_bvalid(xbar_axi_bvalid[0 * 1 +: 1]),
         .m_axi_bready(xbar_axi_bready[0 * 1 +: 1]),
-        .m_axi_arid(cmd_rcredit_arid),
-        .m_axi_araddr(cmd_rcredit_araddr),
-        .m_axi_arlen(cmd_rcredit_arlen),
-        .m_axi_arsize(cmd_rcredit_arsize),
-        .m_axi_arburst(cmd_rcredit_arburst),
-        .m_axi_arlock(cmd_rcredit_arlock),
-        .m_axi_arcache(cmd_rcredit_arcache),
-        .m_axi_arprot(cmd_rcredit_arprot),
+        .m_axi_arid(rd_axi_arid[0 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_axi_araddr(rd_axi_araddr[0 * ADDR_WIDTH +: ADDR_WIDTH]),
+        .m_axi_arlen(rd_axi_arlen[0 * 8 +: 8]),
+        .m_axi_arsize(rd_axi_arsize[0 * 3 +: 3]),
+        .m_axi_arburst(rd_axi_arburst[0 * 2 +: 2]),
+        .m_axi_arlock(rd_axi_arlock[0 * 1 +: 1]),
+        .m_axi_arcache(rd_axi_arcache[0 * 4 +: 4]),
+        .m_axi_arprot(rd_axi_arprot[0 * 3 +: 3]),
         .m_axi_arqos(),
         .m_axi_arregion(),
         .m_axi_aruser(),
-        .m_axi_arvalid(cmd_rcredit_arvalid),
-        .m_axi_arready(cmd_rcredit_arready),
-        .m_axi_rid(cmd_rcredit_rid),
-        .m_axi_rdata(cmd_rcredit_rdata),
-        .m_axi_rresp(cmd_rcredit_rresp),
-        .m_axi_rlast(cmd_rcredit_rlast),
+        .m_axi_arvalid(rd_axi_arvalid[0 * 1 +: 1]),
+        .m_axi_arready(rd_axi_arready[0 * 1 +: 1]),
+        .m_axi_rid(rd_axi_rid[0 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_axi_rdata(rd_axi_rdata[0 * DATA_WIDTH +: DATA_WIDTH]),
+        .m_axi_rresp(rd_axi_rresp[0 * 2 +: 2]),
+        .m_axi_rlast(rd_axi_rlast[0 * 1 +: 1]),
         .m_axi_ruser(0),
-        .m_axi_rvalid(cmd_rcredit_rvalid),
-        .m_axi_rready(cmd_rcredit_rready),
+        .m_axi_rvalid(rd_axi_rvalid[0 * 1 +: 1]),
+        .m_axi_rready(rd_axi_rready[0 * 1 +: 1]),
 
         .s_axi_awid(common_axi_awid),
         .s_axi_awaddr(common_axi_awaddr),
@@ -453,39 +508,6 @@ module RasterIX_EF #(
         .s_axi_ruser(),
         .s_axi_rvalid(common_axi_rvalid),
         .s_axi_rready(common_axi_rready)
-    );
-
-    XACPCommandReadCredit #(
-        .ID_WIDTH(ID_WIDTH_LOC),
-        .ADDR_WIDTH(ADDR_WIDTH),
-        .DATA_WIDTH(DATA_WIDTH),
-        .DEPTH_LOG2(6)
-    ) cmdReadCredit (
-        .clk(aclk), .resetn(resetn),
-        .s_arid(cmd_rcredit_arid), .s_araddr(cmd_rcredit_araddr),
-        .s_arlen(cmd_rcredit_arlen), .s_arsize(cmd_rcredit_arsize),
-        .s_arburst(cmd_rcredit_arburst), .s_arlock(cmd_rcredit_arlock),
-        .s_arcache(cmd_rcredit_arcache), .s_arprot(cmd_rcredit_arprot),
-        .s_arvalid(cmd_rcredit_arvalid), .s_arready(cmd_rcredit_arready),
-        .s_rid(cmd_rcredit_rid), .s_rdata(cmd_rcredit_rdata),
-        .s_rresp(cmd_rcredit_rresp), .s_rlast(cmd_rcredit_rlast),
-        .s_rvalid(cmd_rcredit_rvalid), .s_rready(cmd_rcredit_rready),
-        .m_arid(xbar_axi_arid[0 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_araddr(xbar_axi_araddr[0 * ADDR_WIDTH +: ADDR_WIDTH]),
-        .m_arlen(xbar_axi_arlen[0 * 8 +: 8]),
-        .m_arsize(xbar_axi_arsize[0 * 3 +: 3]),
-        .m_arburst(xbar_axi_arburst[0 * 2 +: 2]),
-        .m_arlock(xbar_axi_arlock[0 * 1 +: 1]),
-        .m_arcache(xbar_axi_arcache[0 * 4 +: 4]),
-        .m_arprot(xbar_axi_arprot[0 * 3 +: 3]),
-        .m_arvalid(xbar_axi_arvalid[0 * 1 +: 1]),
-        .m_arready(xbar_axi_arready[0 * 1 +: 1]),
-        .m_rid(xbar_axi_rid[0 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_rdata(xbar_axi_rdata[0 * DATA_WIDTH +: DATA_WIDTH]),
-        .m_rresp(xbar_axi_rresp[0 * 2 +: 2]),
-        .m_rlast(xbar_axi_rlast[0 * 1 +: 1]),
-        .m_rvalid(xbar_axi_rvalid[0 * 1 +: 1]),
-        .m_rready(xbar_axi_rready[0 * 1 +: 1])
     );
 
     wire                             cmd_axis_tvalid;
@@ -618,23 +640,23 @@ module RasterIX_EF #(
         .m_color_axi_bvalid(xbar_axi_bvalid[1 * 1 +: 1]),
         .m_color_axi_bready(xbar_axi_bready[1 * 1 +: 1]),
 
-        .m_color_axi_arid(xbar_axi_arid[1 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_color_axi_araddr(xbar_axi_araddr[1 * ADDR_WIDTH +: ADDR_WIDTH]),
-        .m_color_axi_arlen(xbar_axi_arlen[1 * 8 +: 8]),
-        .m_color_axi_arsize(xbar_axi_arsize[1 * 3 +: 3]),
-        .m_color_axi_arburst(xbar_axi_arburst[1 * 2 +: 2]),
-        .m_color_axi_arlock(xbar_axi_arlock[1 * 1 +: 1]),
-        .m_color_axi_arcache(xbar_axi_arcache[1 * 4 +: 4]),
-        .m_color_axi_arprot(xbar_axi_arprot[1 * 3 +: 3]),
-        .m_color_axi_arvalid(xbar_axi_arvalid[1 * 1 +: 1]),
-        .m_color_axi_arready(xbar_axi_arready[1 * 1 +: 1]),
+        .m_color_axi_arid(rd_axi_arid[1 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_color_axi_araddr(rd_axi_araddr[1 * ADDR_WIDTH +: ADDR_WIDTH]),
+        .m_color_axi_arlen(rd_axi_arlen[1 * 8 +: 8]),
+        .m_color_axi_arsize(rd_axi_arsize[1 * 3 +: 3]),
+        .m_color_axi_arburst(rd_axi_arburst[1 * 2 +: 2]),
+        .m_color_axi_arlock(rd_axi_arlock[1 * 1 +: 1]),
+        .m_color_axi_arcache(rd_axi_arcache[1 * 4 +: 4]),
+        .m_color_axi_arprot(rd_axi_arprot[1 * 3 +: 3]),
+        .m_color_axi_arvalid(rd_axi_arvalid[1 * 1 +: 1]),
+        .m_color_axi_arready(rd_axi_arready[1 * 1 +: 1]),
 
-        .m_color_axi_rid(xbar_axi_rid[1 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_color_axi_rdata(xbar_axi_rdata[1 * DATA_WIDTH +: DATA_WIDTH]),
-        .m_color_axi_rresp(xbar_axi_rresp[1 * 2 +: 2]),
-        .m_color_axi_rlast(xbar_axi_rlast[1 * 1 +: 1]),
-        .m_color_axi_rvalid(xbar_axi_rvalid[1 * 1 +: 1]),
-        .m_color_axi_rready(xbar_axi_rready[1 * 1 +: 1]),
+        .m_color_axi_rid(rd_axi_rid[1 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_color_axi_rdata(rd_axi_rdata[1 * DATA_WIDTH +: DATA_WIDTH]),
+        .m_color_axi_rresp(rd_axi_rresp[1 * 2 +: 2]),
+        .m_color_axi_rlast(rd_axi_rlast[1 * 1 +: 1]),
+        .m_color_axi_rvalid(rd_axi_rvalid[1 * 1 +: 1]),
+        .m_color_axi_rready(rd_axi_rready[1 * 1 +: 1]),
 
         .m_depth_axi_awid(xbar_axi_awid[2 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
         .m_depth_axi_awaddr(xbar_axi_awaddr[2 * ADDR_WIDTH +: ADDR_WIDTH]),
@@ -658,23 +680,23 @@ module RasterIX_EF #(
         .m_depth_axi_bvalid(xbar_axi_bvalid[2 * 1 +: 1]),
         .m_depth_axi_bready(xbar_axi_bready[2 * 1 +: 1]),
 
-        .m_depth_axi_arid(xbar_axi_arid[2 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_depth_axi_araddr(xbar_axi_araddr[2 * ADDR_WIDTH +: ADDR_WIDTH]),
-        .m_depth_axi_arlen(xbar_axi_arlen[2 * 8 +: 8]),
-        .m_depth_axi_arsize(xbar_axi_arsize[2 * 3 +: 3]),
-        .m_depth_axi_arburst(xbar_axi_arburst[2 * 2 +: 2]),
-        .m_depth_axi_arlock(xbar_axi_arlock[2 * 1 +: 1]),
-        .m_depth_axi_arcache(xbar_axi_arcache[2 * 4 +: 4]),
-        .m_depth_axi_arprot(xbar_axi_arprot[2 * 3 +: 3]),
-        .m_depth_axi_arvalid(xbar_axi_arvalid[2 * 1 +: 1]),
-        .m_depth_axi_arready(xbar_axi_arready[2 * 1 +: 1]),
+        .m_depth_axi_arid(rd_axi_arid[2 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_depth_axi_araddr(rd_axi_araddr[2 * ADDR_WIDTH +: ADDR_WIDTH]),
+        .m_depth_axi_arlen(rd_axi_arlen[2 * 8 +: 8]),
+        .m_depth_axi_arsize(rd_axi_arsize[2 * 3 +: 3]),
+        .m_depth_axi_arburst(rd_axi_arburst[2 * 2 +: 2]),
+        .m_depth_axi_arlock(rd_axi_arlock[2 * 1 +: 1]),
+        .m_depth_axi_arcache(rd_axi_arcache[2 * 4 +: 4]),
+        .m_depth_axi_arprot(rd_axi_arprot[2 * 3 +: 3]),
+        .m_depth_axi_arvalid(rd_axi_arvalid[2 * 1 +: 1]),
+        .m_depth_axi_arready(rd_axi_arready[2 * 1 +: 1]),
 
-        .m_depth_axi_rid(xbar_axi_rid[2 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_depth_axi_rdata(xbar_axi_rdata[2 * DATA_WIDTH +: DATA_WIDTH]),
-        .m_depth_axi_rresp(xbar_axi_rresp[2 * 2 +: 2]),
-        .m_depth_axi_rlast(xbar_axi_rlast[2 * 1 +: 1]),
-        .m_depth_axi_rvalid(xbar_axi_rvalid[2 * 1 +: 1]),
-        .m_depth_axi_rready(xbar_axi_rready[2 * 1 +: 1]),
+        .m_depth_axi_rid(rd_axi_rid[2 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_depth_axi_rdata(rd_axi_rdata[2 * DATA_WIDTH +: DATA_WIDTH]),
+        .m_depth_axi_rresp(rd_axi_rresp[2 * 2 +: 2]),
+        .m_depth_axi_rlast(rd_axi_rlast[2 * 1 +: 1]),
+        .m_depth_axi_rvalid(rd_axi_rvalid[2 * 1 +: 1]),
+        .m_depth_axi_rready(rd_axi_rready[2 * 1 +: 1]),
 
         .m_stencil_axi_awid(xbar_axi_awid[3 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
         .m_stencil_axi_awaddr(xbar_axi_awaddr[3 * ADDR_WIDTH +: ADDR_WIDTH]),
@@ -698,59 +720,59 @@ module RasterIX_EF #(
         .m_stencil_axi_bvalid(xbar_axi_bvalid[3 * 1 +: 1]),
         .m_stencil_axi_bready(xbar_axi_bready[3 * 1 +: 1]),
 
-        .m_stencil_axi_arid(xbar_axi_arid[3 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_stencil_axi_araddr(xbar_axi_araddr[3 * ADDR_WIDTH +: ADDR_WIDTH]),
-        .m_stencil_axi_arlen(xbar_axi_arlen[3 * 8 +: 8]),
-        .m_stencil_axi_arsize(xbar_axi_arsize[3 * 3 +: 3]),
-        .m_stencil_axi_arburst(xbar_axi_arburst[3 * 2 +: 2]),
-        .m_stencil_axi_arlock(xbar_axi_arlock[3 * 1 +: 1]),
-        .m_stencil_axi_arcache(xbar_axi_arcache[3 * 4 +: 4]),
-        .m_stencil_axi_arprot(xbar_axi_arprot[3 * 3 +: 3]),
-        .m_stencil_axi_arvalid(xbar_axi_arvalid[3 * 1 +: 1]),
-        .m_stencil_axi_arready(xbar_axi_arready[3 * 1 +: 1]),
+        .m_stencil_axi_arid(rd_axi_arid[3 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_stencil_axi_araddr(rd_axi_araddr[3 * ADDR_WIDTH +: ADDR_WIDTH]),
+        .m_stencil_axi_arlen(rd_axi_arlen[3 * 8 +: 8]),
+        .m_stencil_axi_arsize(rd_axi_arsize[3 * 3 +: 3]),
+        .m_stencil_axi_arburst(rd_axi_arburst[3 * 2 +: 2]),
+        .m_stencil_axi_arlock(rd_axi_arlock[3 * 1 +: 1]),
+        .m_stencil_axi_arcache(rd_axi_arcache[3 * 4 +: 4]),
+        .m_stencil_axi_arprot(rd_axi_arprot[3 * 3 +: 3]),
+        .m_stencil_axi_arvalid(rd_axi_arvalid[3 * 1 +: 1]),
+        .m_stencil_axi_arready(rd_axi_arready[3 * 1 +: 1]),
 
-        .m_stencil_axi_rid(xbar_axi_rid[3 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_stencil_axi_rdata(xbar_axi_rdata[3 * DATA_WIDTH +: DATA_WIDTH]),
-        .m_stencil_axi_rresp(xbar_axi_rresp[3 * 2 +: 2]),
-        .m_stencil_axi_rlast(xbar_axi_rlast[3 * 1 +: 1]),
-        .m_stencil_axi_rvalid(xbar_axi_rvalid[3 * 1 +: 1]),
-        .m_stencil_axi_rready(xbar_axi_rready[3 * 1 +: 1]),
+        .m_stencil_axi_rid(rd_axi_rid[3 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_stencil_axi_rdata(rd_axi_rdata[3 * DATA_WIDTH +: DATA_WIDTH]),
+        .m_stencil_axi_rresp(rd_axi_rresp[3 * 2 +: 2]),
+        .m_stencil_axi_rlast(rd_axi_rlast[3 * 1 +: 1]),
+        .m_stencil_axi_rvalid(rd_axi_rvalid[3 * 1 +: 1]),
+        .m_stencil_axi_rready(rd_axi_rready[3 * 1 +: 1]),
 
-        .m_tmu0_axi_arid(xbar_axi_arid[4 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_tmu0_axi_araddr(xbar_axi_araddr[4 * ADDR_WIDTH +: ADDR_WIDTH]),
-        .m_tmu0_axi_arlen(xbar_axi_arlen[4 * 8 +: 8]),
-        .m_tmu0_axi_arsize(xbar_axi_arsize[4 * 3 +: 3]),
-        .m_tmu0_axi_arburst(xbar_axi_arburst[4 * 2 +: 2]),
-        .m_tmu0_axi_arlock(xbar_axi_arlock[4 * 1 +: 1]),
-        .m_tmu0_axi_arcache(xbar_axi_arcache[4 * 4 +: 4]),
-        .m_tmu0_axi_arprot(xbar_axi_arprot[4 * 3 +: 3]),
-        .m_tmu0_axi_arvalid(xbar_axi_arvalid[4 * 1 +: 1]),
-        .m_tmu0_axi_arready(xbar_axi_arready[4 * 1 +: 1]),
+        .m_tmu0_axi_arid(rd_axi_arid[4 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_tmu0_axi_araddr(rd_axi_araddr[4 * ADDR_WIDTH +: ADDR_WIDTH]),
+        .m_tmu0_axi_arlen(rd_axi_arlen[4 * 8 +: 8]),
+        .m_tmu0_axi_arsize(rd_axi_arsize[4 * 3 +: 3]),
+        .m_tmu0_axi_arburst(rd_axi_arburst[4 * 2 +: 2]),
+        .m_tmu0_axi_arlock(rd_axi_arlock[4 * 1 +: 1]),
+        .m_tmu0_axi_arcache(rd_axi_arcache[4 * 4 +: 4]),
+        .m_tmu0_axi_arprot(rd_axi_arprot[4 * 3 +: 3]),
+        .m_tmu0_axi_arvalid(rd_axi_arvalid[4 * 1 +: 1]),
+        .m_tmu0_axi_arready(rd_axi_arready[4 * 1 +: 1]),
 
-        .m_tmu0_axi_rid(xbar_axi_rid[4 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_tmu0_axi_rdata(xbar_axi_rdata[4 * DATA_WIDTH +: DATA_WIDTH]),
-        .m_tmu0_axi_rresp(xbar_axi_rresp[4 * 2 +: 2]),
-        .m_tmu0_axi_rlast(xbar_axi_rlast[4 * 1 +: 1]),
-        .m_tmu0_axi_rvalid(xbar_axi_rvalid[4 * 1 +: 1]),
-        .m_tmu0_axi_rready(xbar_axi_rready[4 * 1 +: 1]),
+        .m_tmu0_axi_rid(rd_axi_rid[4 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_tmu0_axi_rdata(rd_axi_rdata[4 * DATA_WIDTH +: DATA_WIDTH]),
+        .m_tmu0_axi_rresp(rd_axi_rresp[4 * 2 +: 2]),
+        .m_tmu0_axi_rlast(rd_axi_rlast[4 * 1 +: 1]),
+        .m_tmu0_axi_rvalid(rd_axi_rvalid[4 * 1 +: 1]),
+        .m_tmu0_axi_rready(rd_axi_rready[4 * 1 +: 1]),
 
-        .m_tmu1_axi_arid(xbar_axi_arid[5 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_tmu1_axi_araddr(xbar_axi_araddr[5 * ADDR_WIDTH +: ADDR_WIDTH]),
-        .m_tmu1_axi_arlen(xbar_axi_arlen[5 * 8 +: 8]),
-        .m_tmu1_axi_arsize(xbar_axi_arsize[5 * 3 +: 3]),
-        .m_tmu1_axi_arburst(xbar_axi_arburst[5 * 2 +: 2]),
-        .m_tmu1_axi_arlock(xbar_axi_arlock[5 * 1 +: 1]),
-        .m_tmu1_axi_arcache(xbar_axi_arcache[5 * 4 +: 4]),
-        .m_tmu1_axi_arprot(xbar_axi_arprot[5 * 3 +: 3]),
-        .m_tmu1_axi_arvalid(xbar_axi_arvalid[5 * 1 +: 1]),
-        .m_tmu1_axi_arready(xbar_axi_arready[5 * 1 +: 1]),
+        .m_tmu1_axi_arid(rd_axi_arid[5 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_tmu1_axi_araddr(rd_axi_araddr[5 * ADDR_WIDTH +: ADDR_WIDTH]),
+        .m_tmu1_axi_arlen(rd_axi_arlen[5 * 8 +: 8]),
+        .m_tmu1_axi_arsize(rd_axi_arsize[5 * 3 +: 3]),
+        .m_tmu1_axi_arburst(rd_axi_arburst[5 * 2 +: 2]),
+        .m_tmu1_axi_arlock(rd_axi_arlock[5 * 1 +: 1]),
+        .m_tmu1_axi_arcache(rd_axi_arcache[5 * 4 +: 4]),
+        .m_tmu1_axi_arprot(rd_axi_arprot[5 * 3 +: 3]),
+        .m_tmu1_axi_arvalid(rd_axi_arvalid[5 * 1 +: 1]),
+        .m_tmu1_axi_arready(rd_axi_arready[5 * 1 +: 1]),
 
-        .m_tmu1_axi_rid(xbar_axi_rid[5 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
-        .m_tmu1_axi_rdata(xbar_axi_rdata[5 * DATA_WIDTH +: DATA_WIDTH]),
-        .m_tmu1_axi_rresp(xbar_axi_rresp[5 * 2 +: 2]),
-        .m_tmu1_axi_rlast(xbar_axi_rlast[5 * 1 +: 1]),
-        .m_tmu1_axi_rvalid(xbar_axi_rvalid[5 * 1 +: 1]),
-        .m_tmu1_axi_rready(xbar_axi_rready[5 * 1 +: 1]),
+        .m_tmu1_axi_rid(rd_axi_rid[5 * ID_WIDTH_LOC +: ID_WIDTH_LOC]),
+        .m_tmu1_axi_rdata(rd_axi_rdata[5 * DATA_WIDTH +: DATA_WIDTH]),
+        .m_tmu1_axi_rresp(rd_axi_rresp[5 * 2 +: 2]),
+        .m_tmu1_axi_rlast(rd_axi_rlast[5 * 1 +: 1]),
+        .m_tmu1_axi_rvalid(rd_axi_rvalid[5 * 1 +: 1]),
+        .m_tmu1_axi_rready(rd_axi_rready[5 * 1 +: 1]),
 
         .perfBusy(perfBusy),
         .perfTriangleRendering(perfTriangleRendering),

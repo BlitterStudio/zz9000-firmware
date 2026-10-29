@@ -60,38 +60,57 @@ sys.exit(0 if report["pass"] else 1)
 EOF
 }
 
+# run_scene SCENE OUT_DIR LOG_TAG [VAR=value ...]: the VAR=value pairs become
+# run_xsim.bat environment (SHARED, DMA_BURST, RAND_SEED, ...).
 run_scene() {
   scene=$1
   out_dir=$2
   log_tag=$3
+  shift 3
+  envs=""
+  for kv in "$@"; do envs="${envs}set ${kv}&& "; done
   echo "=== xsim $scene ($log_tag, latency $LATENCY) ==="
   rm -f "$out_dir/$scene.ppm"
-  cmd.exe /c "$WINIF\\test\\rix_xsim\\run_xsim.bat" "$WINIF" "$(cygpath -m "$out_dir" 2>/dev/null || printf '%s' "$out_dir")" "$scene" "$LATENCY" >"$out_dir/${scene}_${log_tag}.log" 2>&1
+  out_win=$(cygpath -m "$out_dir" 2>/dev/null || printf '%s' "$out_dir")
+  # One command string so the leading `set` clauses parse; paths contain no spaces.
+  cmd.exe /c "${envs}$WINIF\\test\\rix_xsim\\run_xsim.bat $WINIF $out_win $scene $LATENCY" >"$out_dir/${scene}_${log_tag}.log" 2>&1
+  grep -E "^RESULT" "$out_dir/${scene}_${log_tag}.log" || true
   test -f "$out_dir/$scene.ppm"
 }
 
-for scene in ef-s1 ef-s2 ef-s3 ef-s4 ef-probe ef-lm; do
+SCENES="ef-s1 ef-s2 ef-s3 ef-s4 ef-probe ef-lm ef-stress"
+for scene in $SCENES; do
   run_scene "$scene" "$OUT" mmio
   compare_scene "$scene" "$OUT_WIN/$scene.ppm" mmio
 done
 
-
 # Transport coverage beyond plain MMIO-paced submission:
-#  - SHARED=1 routes both read masters through the single in-order read
-#    channel model with head-of-line blocking, exercising the XACP read-credit
-#    fix while texture fetches race fragment traffic (textured + stress +
-#    lightmap scenes).
+#  - SHARED=1 routes every renderer read through one in-order response
+#    stream with head-of-line blocking (the HP-port hazard the per-port
+#    response reservations in RasterIX_EF.v remove); ef-stress additionally
+#    runs with randomized per-beat latency and AXI-legal cross-ID reordering.
 #  - DMA_BURST labels the same committed packet boundaries as a PL330
 #    fixed-destination producer; the frame must stay byte-identical to the
 #    MMIO submission.
-mkdir -p "$OUT/shared" "$OUT/dma"
-cp "$OUT/ef-s3.hex" "$OUT/ef-s4.hex" "$OUT/ef-lm.hex" "$OUT/textures.hex" "$OUT/shared/"
-cp "$OUT/ef-s3.hex" "$OUT/textures.hex" "$OUT/dma/"
-for scene in ef-s3 ef-s4 ef-lm; do
-  SHARED=1 run_scene "$scene" "$OUT/shared" shared
-  compare_scene "$scene" "$OUT_WIN/shared/$scene.ppm" shared
+mkdir -p "$OUT/shared" "$OUT/dma" "$OUT/random"
+for scene in $SCENES; do
+  cp "$OUT/$scene.hex" "$OUT/shared/"
+  cp "$OUT/$scene.hex" "$OUT/dma/"
 done
-DMA_BURST=1 run_scene ef-s3 "$OUT/dma" dma
-cmp "$OUT/ef-s3.ppm" "$OUT/dma/ef-s3.ppm"
-echo "dma-fixed transport reproduces the mmio frame bit-exactly"
+cp "$OUT/textures.hex" "$OUT/shared/"
+cp "$OUT/textures.hex" "$OUT/dma/"
+cp "$OUT/ef-stress.hex" "$OUT/textures.hex" "$OUT/random/"
+for scene in $SCENES; do
+  run_scene "$scene" "$OUT/shared" shared SHARED=1
+  compare_scene "$scene" "$OUT_WIN/shared/$scene.ppm" shared
+  run_scene "$scene" "$OUT/dma" dma DMA_BURST=1
+  compare_scene "$scene" "$OUT_WIN/dma/$scene.ppm" dma
+  cmp "$OUT/$scene.ppm" "$OUT/dma/$scene.ppm"
+done
+for seed in 1 2 3; do
+  run_scene ef-stress "$OUT/random" "seed$seed" SHARED=1 RAND_SEED=$seed
+  mv "$OUT/random/ef-stress.ppm" "$OUT/random/ef-stress-seed$seed.ppm"
+  compare_scene ef-stress "$OUT_WIN/random/ef-stress-seed$seed.ppm" "seed$seed"
+done
+echo "dma-fixed transport reproduces every mmio frame bit-exactly"
 echo "all scenes match their references"

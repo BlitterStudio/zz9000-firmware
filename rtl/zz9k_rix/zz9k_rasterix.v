@@ -105,6 +105,10 @@ module zz9k_rasterix #(
     wire [19:0] rix_fb_size;
     wire rix_swap_fb;
     wire rix_swap_fb_enable_vsync;
+    wire write_issue = m_axi_awvalid && m_axi_awready;
+    wire write_complete = m_axi_bvalid && m_axi_bready;
+    wire read_issue = m_axi_arvalid && m_axi_arready;
+    wire read_complete = m_axi_rvalid && m_axi_rready && m_axi_rlast;
     wire idle = !renderer_busy && (writes_outstanding == 0) && (reads_outstanding == 0);
 
     assign s_axi_awready = !write_addr_valid && !write_response_valid;
@@ -121,8 +125,8 @@ module zz9k_rasterix #(
             6'h00: read_data = IDENTITY;
             6'h01: read_data = VERSION;
             6'h02: read_data = {29'd0, soft_reset, 1'b0, enable_requested};
-            6'h03: read_data = {18'd0, reads_outstanding[7:0], writes_outstanding[7:0],
-                                 1'b0, renderer_stall, renderer_triangle_rendering,
+            6'h03: read_data = {8'd0, reads_outstanding[7:0], writes_outstanding[7:0],
+                                 3'd0, renderer_stall, renderer_triangle_rendering,
                                  renderer_busy, idle, enable_requested};
             6'h04: read_data = {28'd0, rix_response_last, rix_response_valid,
                                  s_cmd_axis_tready, s_cmd_axis_tvalid};
@@ -185,27 +189,28 @@ module zz9k_rasterix #(
             if (read_response_valid && s_axi_rready)
                 read_response_valid <= 0;
 
-            if (m_axi_awvalid && m_axi_awready) begin
+            // An address and a completing response in the same cycle cancel.
+            if (write_issue && !write_complete)
                 writes_outstanding <= writes_outstanding + 1'b1;
+            else if (write_complete && !write_issue && (writes_outstanding != 0))
+                writes_outstanding <= writes_outstanding - 1'b1;
+            if (read_issue && !read_complete)
+                reads_outstanding <= reads_outstanding + 1'b1;
+            else if (read_complete && !read_issue && (reads_outstanding != 0))
+                reads_outstanding <= reads_outstanding - 1'b1;
+            if (write_issue)
                 dbg_aw_count <= dbg_aw_count + 1'b1;
-            end
             if (m_axi_wvalid && m_axi_wready)
                 dbg_w_count <= dbg_w_count + 1'b1;
-            if (m_axi_bvalid && m_axi_bready) begin
-                if (writes_outstanding != 0) writes_outstanding <= writes_outstanding - 1'b1;
+            if (write_complete)
                 dbg_b_count <= dbg_b_count + 1'b1;
-            end
-            if (m_axi_arvalid && m_axi_arready) begin
-                reads_outstanding <= reads_outstanding + 1'b1;
+            if (read_issue) begin
                 dbg_ar_count <= dbg_ar_count + 1'b1;
                 dbg_last_araddr <= m_axi_araddr;
                 dbg_last_arid <= m_axi_arid;
             end
-            if (m_axi_rvalid && m_axi_rready) begin
+            if (m_axi_rvalid && m_axi_rready)
                 dbg_r_count <= dbg_r_count + 1'b1;
-                if (m_axi_rlast && reads_outstanding != 0)
-                    reads_outstanding <= reads_outstanding - 1'b1;
-            end
             if (soft_reset) begin
                 writes_outstanding <= 0;
                 reads_outstanding <= 0;

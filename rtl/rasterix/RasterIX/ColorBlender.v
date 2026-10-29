@@ -106,79 +106,82 @@ module ColorBlender
         bd = destColor[COLOR_B_POS +: SUB_PIXEL_WIDTH];
         ad = destColor[COLOR_A_POS +: SUB_PIXEL_WIDTH];
 
-        v10 = rs;
-        v11 = gs;
-        v12 = bs;
-        v13 = as;
+        // ZZ9000 local patch: v00..v33 are this stage's pipeline registers
+        // and ColorMixer samples them on the same edge, so they take
+        // nonblocking assignments (see rtl/rasterix/PATCHES.md).
+        v10 <= rs;
+        v11 <= gs;
+        v12 <= bs;
+        v13 <= as;
 
-        v30 = rd;
-        v31 = gd;
-        v32 = bd;
-        v33 = ad;
+        v30 <= rd;
+        v31 <= gd;
+        v32 <= bd;
+        v33 <= ad;
 
         case (funcSFactor)
             ZERO:
             begin
-                v00 = 0;
-                v01 = 0;
-                v02 = 0;
-                v03 = 0;
+                v00 <= 0;
+                v01 <= 0;
+                v02 <= 0;
+                v03 <= 0;
             end
             ONE:
             begin
-                v00 = ONE_POINT_ZERO;
-                v01 = ONE_POINT_ZERO;
-                v02 = ONE_POINT_ZERO;
-                v03 = ONE_POINT_ZERO;
+                v00 <= ONE_POINT_ZERO;
+                v01 <= ONE_POINT_ZERO;
+                v02 <= ONE_POINT_ZERO;
+                v03 <= ONE_POINT_ZERO;
             end 
             DST_COLOR:
             begin
-                v00 = rd;
-                v01 = gd;
-                v02 = bd;
-                v03 = ad;
+                v00 <= rd;
+                v01 <= gd;
+                v02 <= bd;
+                v03 <= ad;
             end 
             ONE_MINUS_DST_COLOR:
             begin
-                v00 = ONE_POINT_ZERO - rd;
-                v01 = ONE_POINT_ZERO - gd;
-                v02 = ONE_POINT_ZERO - bd;
-                v03 = ONE_POINT_ZERO - ad;
+                v00 <= ONE_POINT_ZERO - rd;
+                v01 <= ONE_POINT_ZERO - gd;
+                v02 <= ONE_POINT_ZERO - bd;
+                v03 <= ONE_POINT_ZERO - ad;
             end 
             SRC_ALPHA:
             begin
-                v00 = as;
-                v01 = as;
-                v02 = as;
-                v03 = as;
+                v00 <= as;
+                v01 <= as;
+                v02 <= as;
+                v03 <= as;
             end 
             ONE_MINUS_SRC_ALPHA:
             begin
-                v00 = ONE_POINT_ZERO - as;
-                v01 = ONE_POINT_ZERO - as;
-                v02 = ONE_POINT_ZERO - as;
-                v03 = ONE_POINT_ZERO - as;
+                v00 <= ONE_POINT_ZERO - as;
+                v01 <= ONE_POINT_ZERO - as;
+                v02 <= ONE_POINT_ZERO - as;
+                v03 <= ONE_POINT_ZERO - as;
             end 
             DST_ALPHA:
             begin
-                v00 = ad;
-                v01 = ad;
-                v02 = ad;
-                v03 = ad;
+                v00 <= ad;
+                v01 <= ad;
+                v02 <= ad;
+                v03 <= ad;
             end 
             ONE_MINUS_DST_ALPHA:
             begin
-                v00 = ONE_POINT_ZERO - ad;
-                v01 = ONE_POINT_ZERO - ad;
-                v02 = ONE_POINT_ZERO - ad;
-                v03 = ONE_POINT_ZERO - ad;
+                v00 <= ONE_POINT_ZERO - ad;
+                v01 <= ONE_POINT_ZERO - ad;
+                v02 <= ONE_POINT_ZERO - ad;
+                v03 <= ONE_POINT_ZERO - ad;
             end 
             SRC_ALPHA_SATURATE:
             begin
-                v00 = (as < (ONE_POINT_ZERO - ad)) ? as : (ONE_POINT_ZERO - ad);
-                v01 = (as < (ONE_POINT_ZERO - ad)) ? as : (ONE_POINT_ZERO - ad);
-                v02 = (as < (ONE_POINT_ZERO - ad)) ? as : (ONE_POINT_ZERO - ad);
-                v03 = ONE_POINT_ZERO;
+                v00 <= (as < (ONE_POINT_ZERO - ad)) ? as : (ONE_POINT_ZERO - ad);
+                v01 <= (as < (ONE_POINT_ZERO - ad)) ? as : (ONE_POINT_ZERO - ad);
+                v02 <= (as < (ONE_POINT_ZERO - ad)) ? as : (ONE_POINT_ZERO - ad);
+                v03 <= ONE_POINT_ZERO;
             end 
             default:
             begin
@@ -189,59 +192,59 @@ module ColorBlender
         case (funcDFactor)
             ZERO:
             begin
-                v20 = 0;
-                v21 = 0;
-                v22 = 0;
-                v23 = 0;
+                v20 <= 0;
+                v21 <= 0;
+                v22 <= 0;
+                v23 <= 0;
             end
             ONE:
             begin
-                v20 = ONE_POINT_ZERO;
-                v21 = ONE_POINT_ZERO;
-                v22 = ONE_POINT_ZERO;
-                v23 = ONE_POINT_ZERO;
+                v20 <= ONE_POINT_ZERO;
+                v21 <= ONE_POINT_ZERO;
+                v22 <= ONE_POINT_ZERO;
+                v23 <= ONE_POINT_ZERO;
             end 
             SRC_COLOR:
             begin
-                v20 = rs;
-                v21 = gs;
-                v22 = bs;
-                v23 = as;
+                v20 <= rs;
+                v21 <= gs;
+                v22 <= bs;
+                v23 <= as;
             end 
             ONE_MINUS_SRC_COLOR:
             begin
-                v20 = ONE_POINT_ZERO - rs;
-                v21 = ONE_POINT_ZERO - gs;
-                v22 = ONE_POINT_ZERO - bs;
-                v23 = ONE_POINT_ZERO - as;
+                v20 <= ONE_POINT_ZERO - rs;
+                v21 <= ONE_POINT_ZERO - gs;
+                v22 <= ONE_POINT_ZERO - bs;
+                v23 <= ONE_POINT_ZERO - as;
             end 
             SRC_ALPHA:
             begin
-                v20 = as;
-                v21 = as;
-                v22 = as;
-                v23 = as;
+                v20 <= as;
+                v21 <= as;
+                v22 <= as;
+                v23 <= as;
             end 
             ONE_MINUS_SRC_ALPHA:
             begin
-                v20 = ONE_POINT_ZERO - as;
-                v21 = ONE_POINT_ZERO - as;
-                v22 = ONE_POINT_ZERO - as;
-                v23 = ONE_POINT_ZERO - as;
+                v20 <= ONE_POINT_ZERO - as;
+                v21 <= ONE_POINT_ZERO - as;
+                v22 <= ONE_POINT_ZERO - as;
+                v23 <= ONE_POINT_ZERO - as;
             end 
             DST_ALPHA:
             begin
-                v20 = ad;
-                v21 = ad;
-                v22 = ad;
-                v23 = ad;
+                v20 <= ad;
+                v21 <= ad;
+                v22 <= ad;
+                v23 <= ad;
             end 
             ONE_MINUS_DST_ALPHA:
             begin
-                v20 = ONE_POINT_ZERO - ad;
-                v21 = ONE_POINT_ZERO - ad;
-                v22 = ONE_POINT_ZERO - ad;
-                v23 = ONE_POINT_ZERO - ad;
+                v20 <= ONE_POINT_ZERO - ad;
+                v21 <= ONE_POINT_ZERO - ad;
+                v22 <= ONE_POINT_ZERO - ad;
+                v23 <= ONE_POINT_ZERO - ad;
             end 
             default:
             begin

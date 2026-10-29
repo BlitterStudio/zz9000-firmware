@@ -4,7 +4,8 @@
 `tb_zz9k_rasterix.sv` and `run_xsim.bat`, renders an analytic reference frame
 per scene with the exact `Rasterizer.v` edge rules, and gates replay through
 `compare_frames.py` full-image comparison via `run_scenes.sh` (builds the
-generator in gcc:13, replays `ef-probe ef-s1 ef-s2 ef-s3 ef-s4`, and fails on
+generator in gcc:13, replays every scene below over MMIO, `SHARED=1` and
+`DMA_BURST=1`, replays `ef-stress` with three randomized seeds, and fails on
 any mismatch).
 
 | Scene | Workload | TMU0 state |
@@ -14,6 +15,8 @@ any mismatch).
 | `ef-s2` | Flat-shaded green triangle | Enabled with the 8x8 white texture; texenv replaces with primary colour. |
 | `ef-s3` | Textured triangle | Enabled with deterministic 8x8 white texture. |
 | `ef-s4` | 48-triangle radial stress scene | Enabled with deterministic 8x8 white texture. |
+| `ef-lm` | Two-pass lightmap: white textured base, then `ZERO,SRC_COLOR` with the uniform `0x8410` lightmap page | 8x8 white page, then the 8x8 lightmap page. |
+| `ef-stress` | Read-channel stress: 40 large overlapping triangles in shuffled depth order (`LESS`, depth writes), then six disjoint `ZERO,SRC_COLOR` lightmap triangles with the depth test still on | 256x256 RGB565 texture of uniform 64x64 blocks (zero/full channels, UVs 4 texels inside each block) so the texture cache keeps missing; then the 8x8 lightmap page. |
 
 Each scene sets the 640×480 RGB565 color target and Z16 depth target, then
 performs a single full-target color/depth `MEMSET` and renders directly to
@@ -22,12 +25,30 @@ The testbench submits each DSE packet through the FIFO TX stream model; the
 `DMA_BURST` plusarg uses the same committed packet boundaries as a fixed-
 destination PL330 producer.
 
-The DDR model accepts one render read or write transaction at a time.  It
-deasserts read-address readiness every fifth cycle, write-address readiness
-every sixth, and write-data readiness every fourth; each read beat has the
-selected `LATENCY` idle cycles before becoming valid.  Cycle reports are at
-the 100 MHz renderer clock, so `LATENCY=2` is the nominal model and a larger
-latency is a shared-DDR sensitivity bound, not a board bandwidth measurement.
+The default DDR model accepts one render read or write transaction at a time.
+It deasserts read-address readiness every fifth cycle, write-address
+readiness every sixth, and write-data readiness every fourth; each read beat
+has the selected `LATENCY` idle cycles before becoming valid.  Cycle reports
+are at the 100 MHz renderer clock, so `LATENCY=2` is the nominal model and a
+larger latency is a shared-DDR sensitivity bound, not a board bandwidth
+measurement.
+
+`SHARED=1` replaces the read model with the PS HP-port shape: up to 27
+accepted read addresses queue in front of one response stream that never
+interleaves bursts, so a crossbar port that refuses a beat blocks every
+response behind it.  `RAND_SEED=n` (nonzero) adds 0..`RAND_LATENCY` (default
+16) extra cycles before every beat and serves next the oldest queued request
+with the ID of a randomly chosen one, reordering responses across IDs as AXI
+allows.  The EF wrapper has no command-read master; the testbench ties the
+legacy model's master side idle and fails on any unknown renderer AXI
+handshake.  When the renderer is busy and no memory or command handshake
+happens for `DEADLOCK_LIMIT` cycles (default 200000; 0 disables), the run
+prints the presented read beat's owning crossbar port, the queued responses,
+the last 48 accepted read addresses and the per-port and fragment-pipeline
+handshakes, then fails; the same dump accompanies a completion timeout.
+`TRACE_AXI=1` adds a 250000-cycle counter heartbeat and `TRACE_AXI=2` prints
+every accepted read address.  All of these are `run_xsim.bat` environment
+variables.
 
 TMU0 MUST remain enabled for every scene that reaches the pixel pipeline.
 `TextureMappingUnit.v:275-339` always sends and joins the texture-read

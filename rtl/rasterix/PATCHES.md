@@ -1,6 +1,6 @@
 # Local RasterIX patches
 
-The eight files below intentionally differ from those blobs; every other file in `RasterIX`, `Float`, and `3rdParty` remains byte-identical and is checked by `test/rasterix/run.sh`.
+The files below intentionally differ from those blobs; every other file in `RasterIX`, `Float`, and `3rdParty` remains byte-identical and is checked by `test/rasterix/run.sh`.
 
 ## FloatToInt zero-shift rounding
 
@@ -113,6 +113,31 @@ The eight files below intentionally differ from those blobs; every other file in
 - Synthesis safety: adds one hold register with reset and an output mux; no
   timing, latency, or handshake change on any accepted transfer.
 
+## ColorBlender select stage is nonblocking
+
+- File: `RasterIX/ColorBlender.v`
+- Upstream blob: `4d72c911`
+- Local blob: `1d78b4c2`
+- Patch: `patches/0009-colorblender-nonblocking-select-stage.patch`
+- Evidence: the `ef-stress` xsim scene (overlapping depth-tested block-
+  textured triangles, then a `ZERO,SRC_COLOR` lightmap pass) rendered 1,756
+  pixels with the destination colour of the pixel to their right, all along
+  colour edges and never at `x % 4 == 3`.  The fragment/destination join was
+  correct (`StreamConcatFifo` output pairs index 216477 with its own
+  `0xffff` read), but the blended result for that fragment used the next
+  fragment's destination.  The `Select` stage writes the module-level
+  `v00..v33` with blocking assignments while `ColorMixer` samples them on the
+  same edge, so in simulation the select and first multiply stages collapse
+  into one and back-to-back fragments read their successor's operands; the
+  last fragment of each 4-pixel read burst is followed by a gap and is
+  correct.  The same race made drained-FIFO X reach the blender before
+  patch 0008.
+- Synthesis safety: `v00..v33` are only written in this block and only read
+  by `ColorMixer`, so they were already inferred as the stage's registers;
+  nonblocking assignment makes simulation match that 3-cycle netlist and does
+  not change any synthesized logic.  With the patch `ef-stress` and `ef-lm`
+  are bit-exact.
+
 ## XACP G4C EF comparison and adopted read-credit fix
 
 On 2026-10-29 the EF-sensitive files were blob-compared with Xanxi-Amiga's
@@ -136,6 +161,57 @@ FrameStreamingCore `commonAxiAdapter` and before crossbar port 0.  Its
 64-beat reserved-response queue keeps list-read backpressure from holding the
 fragment-memory read channel.  This preserves the newer external texture
 cache and all local fixes above while taking the specific silicon-proven fix.
+
+## Every read master reserves its responses
+
+- Files: `RasterIX/RasterIX_EF.v`, `RasterIX/XACPCommandReadCredit.v`
+  (generalized from the command port to any read master; GPL-3.0-or-later
+  header and XACP/BigMig attribution kept, modification notice added).
+- Hazard: `mainXBar` has one master, PS7 `S_AXI_HP3`, whose read data
+  returns in order through the AFI read FIFO and is routed per beat to the
+  issuing port by RID.  A port that withholds RREADY stalls the crossbar's
+  master R channel and every response queued behind it.  Before this change
+  only the command port reserved space.  Colour and depth readers accept a
+  beat only as fragments drain into `StreamConcatFifo`, and the TMU only
+  while its 32-entry R FIFO has room.  The concat semaphore keeps that
+  acyclic today, but nothing at the AXI boundary guaranteed it.
+- Change: a `readReservation` generate installs `XACPCommandReadCredit` in
+  front of every crossbar read port (command 64 beats, colour/depth/stencil
+  16, TMU0/TMU1 32).  An AR is issued only once its whole burst fits, and R
+  is accepted unconditionally, so `m_axi_rready` never depends on a client.
+  Depths cover `M_ISSUE` (8) single-beat framebuffer reads and 8 four-beat
+  texture lines; idle stencil/TMU1 ports have constant-zero AR and trim away.
+- Write side: `FramebufferPacker` raises AWVALID and WVALID together from a
+  registered line with BREADY tied high and the coalescer is bypassed, so no
+  framebuffer AW waits for data.  Only the DSE memory-write operation (not
+  used by the EF FIFO contract) issues AW ahead of W.  Its W data comes from
+  the committed FIFO packet or port 0's reserved read buffer, never from a
+  response a client could refuse.
+- The earlier xsim "ef-s3 SHARED deadlock" (STATUS `0x401d`) was a testbench
+  artefact, not this hazard.  EF has no command-read master, so the
+  testbench's `m_cmd_axi_arvalid` floated, `m_axi_arready` was X except on
+  cycles divisible by 7, and the shared queue count never decremented.  The
+  model then replayed a stale zero-length entry as RID 0 (port 0, which
+  always accepts) forever: two ARs, 249,859 R beats, the TMU's second line
+  never returned.  STATUS also packed the outstanding counters at bits
+  13:6/21:14 instead of the documented 15:8/23:16 (that read as 64 writes
+  outstanding) and dropped an increment when an address and a completion
+  coincided.  Both are fixed in `rtl/zz9k_rix/zz9k_rasterix.v`.  With the
+  testbench fixed, the unreserved RTL also passes every scene, so the
+  reservation is a guarantee, not a fix for an observed hang.
+- Cost (xsim, `LATENCY=2`, cycles to completion, unreserved -> reserved;
+  every frame bit-exact against its analytic reference, DMA frames
+  byte-identical to MMIO):
+
+| Scene | MMIO | `SHARED=1` | `SHARED=1 RAND_SEED=1..4` |
+| --- | --- | --- | --- |
+| `ef-s1` | 384,082 -> 384,082 | 384,082 -> 384,082 | |
+| `ef-s2` | 412,053 -> 412,053 | 412,053 -> 412,057 | |
+| `ef-s3` | 412,053 -> 412,053 | 412,053 -> 412,057 | |
+| `ef-s4` | 465,121 -> 465,121 | 465,121 -> 465,121 | |
+| `ef-probe` | 390,346 -> 390,347 | 390,347 -> 390,348 | |
+| `ef-lm` | 446,881 -> 446,882 | 445,494 -> 445,495 | |
+| `ef-stress` | 2,130,582 -> 2,130,632 | 2,089,514 -> 2,089,551 | 3,954,218 / 3,951,971 / 3,954,161 / 3,948,128 -> 3,954,498 / 3,951,871 / 3,953,652 / 3,948,588 |
 
 ## EF memory coalescing stays disabled
 

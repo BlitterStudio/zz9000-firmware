@@ -635,7 +635,7 @@
         <spirit:parameters>
           <spirit:parameter>
             <spirit:name>viewChecksum</spirit:name>
-            <spirit:value>9a04f91e</spirit:value>
+            <spirit:value>709097a4</spirit:value>
           </spirit:parameter>
         </spirit:parameters>
       </spirit:view>
@@ -651,7 +651,7 @@
         <spirit:parameters>
           <spirit:parameter>
             <spirit:name>viewChecksum</spirit:name>
-            <spirit:value>9a04f91e</spirit:value>
+            <spirit:value>709097a4</spirit:value>
           </spirit:parameter>
         </spirit:parameters>
       </spirit:view>
@@ -2099,7 +2099,7 @@
       <spirit:file>
         <spirit:name>../../../rtl/rasterix/RasterIX/XACPCommandReadCredit.v</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
-        <spirit:userFileType>CHECKSUM_d5ae935f</spirit:userFileType>
+        <spirit:userFileType>CHECKSUM_f1379b8e</spirit:userFileType>
       </spirit:file>
     </spirit:fileSet>
     <spirit:fileSet>
@@ -2554,15 +2554,15 @@
         <xilinx:xpmLibrary>XPM_MEMORY</xilinx:xpmLibrary>
       </xilinx:xpmLibraries>
       <xilinx:coreRevision>1</xilinx:coreRevision>
-      <xilinx:coreCreationDateTime>2026-10-29T07:10:53Z</xilinx:coreCreationDateTime>
+      <xilinx:coreCreationDateTime>2026-10-29T12:41:40Z</xilinx:coreCreationDateTime>
     </xilinx:coreExtensions>
     <xilinx:packagingInfo>
       <xilinx:xilinxVersion>2018.3</xilinx:xilinxVersion>
-      <xilinx:checksum xilinx:scope="busInterfaces" xilinx:value="2d5bae00"/>
+      <xilinx:checksum xilinx:scope="busInterfaces" xilinx:value="3e4ae456"/>
       <xilinx:checksum xilinx:scope="addressSpaces" xilinx:value="1387f2f3"/>
-      <xilinx:checksum xilinx:scope="memoryMaps" xilinx:value="475749a7"/>
-      <xilinx:checksum xilinx:scope="fileGroups" xilinx:value="75f33a82"/>
-      <xilinx:checksum xilinx:scope="ports" xilinx:value="939e1fae"/>
+      <xilinx:checksum xilinx:scope="memoryMaps" xilinx:value="80da0bd3"/>
+      <xilinx:checksum xilinx:scope="fileGroups" xilinx:value="ac11362a"/>
+      <xilinx:checksum xilinx:scope="ports" xilinx:value="8e6a377b"/>
       <xilinx:checksum xilinx:scope="hdlParameters" xilinx:value="ee665cf5"/>
       <xilinx:checksum xilinx:scope="parameters" xilinx:value="c2444c3d"/>
     </xilinx:packagingInfo>

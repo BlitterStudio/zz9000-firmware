@@ -36,14 +36,24 @@
 #define COMMAND_CAPACITY (256U * 1024U)
 #define TEXTURE_WIDTH 8U
 #define TEXTURE_HEIGHT 8U
-#define TEXTURE_WORDS (TEXTURE_BYTES / 4U)
 #define MAX_TRIANGLES 64U
 #define PI 3.14159265358979323846
 #define TEXTURE_PAGE_BYTES 2048U
-#define TEXTURE_PAGES 2U
+#define SMALL_TEXTURE_PAGES 2U
+#define STRESS_TEXTURE_LOG2 8U
+#define STRESS_TEXTURE_SIZE (1U << STRESS_TEXTURE_LOG2)
+#define STRESS_TEXTURE_PAGES \
+    (STRESS_TEXTURE_SIZE * STRESS_TEXTURE_SIZE * 2U / TEXTURE_PAGE_BYTES)
+#define TEXTURE_PAGES (SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES)
 #define TEXTURE_BYTES (TEXTURE_PAGE_BYTES * TEXTURE_PAGES)
 #define LIGHTMAP_ADDRESS (TEXTURE_ADDRESS + TEXTURE_PAGE_BYTES)
 #define LIGHTMAP_RGB565 0x8410U
+#define STRESS_TEXTURE_ADDRESS \
+    (TEXTURE_ADDRESS + SMALL_TEXTURE_PAGES * TEXTURE_PAGE_BYTES)
+#define STRESS_BLOCK 64U
+#define STRESS_BLOCK_MARGIN 4U
+#define STRESS_BASE_TRIANGLES 40U
+#define STRESS_LIGHT_TRIANGLES 6U
 
 static int put_le32(FILE *file, uint32_t value)
 {
@@ -219,58 +229,53 @@ static uint16_t rgba_to_rgb565(uint32_t rgba)
     return (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
 }
 
-static void paint_reference(uint16_t *frame, const RixTriangle *triangle,
-                            uint16_t color565)
+static int triangle_covers(const RixTriangle *triangle, int32_t x, int32_t y)
 {
     int32_t bx = (int32_t)(triangle->words[RIX_WORD_BB_START] & 0xffffU);
     int32_t by = (int32_t)(triangle->words[RIX_WORD_BB_START] >> 16);
     int32_t ex = (int32_t)(triangle->words[RIX_WORD_BB_END] & 0xffffU);
     int32_t ey = (int32_t)(triangle->words[RIX_WORD_BB_END] >> 16);
+    unsigned int edge;
+
+    if (x < bx || x >= ex || y < by || y >= ey) {
+        return 0;
+    }
+    for (edge = 0U; edge < 3U; ++edge) {
+        int32_t wx = (int32_t)triangle->words[RIX_WORD_W_X + edge];
+        int32_t wy = (int32_t)triangle->words[RIX_WORD_W_Y + edge];
+        int32_t value = (int32_t)triangle->words[RIX_WORD_W_INIT + edge] +
+                        wx * (x - bx) + wy * (y - by);
+        int inclusive = wx > 0 || (wx == 0 && wy > 0);
+
+        if (value < 0 || (value == 0 && !inclusive)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void paint_reference(uint16_t *frame, const RixTriangle *triangle,
+                            uint16_t color565)
+{
     int32_t x;
     int32_t y;
 
-    for (y = by; y < ey; ++y) {
-        for (x = bx; x < ex; ++x) {
-            unsigned int edge;
-            int inside = 1;
-
-            for (edge = 0U; edge < 3U; ++edge) {
-                int32_t wx = (int32_t)triangle->words[RIX_WORD_W_X + edge];
-                int32_t wy = (int32_t)triangle->words[RIX_WORD_W_Y + edge];
-                int32_t value = (int32_t)triangle->words[RIX_WORD_W_INIT + edge] +
-                                wx * (x - bx) + wy * (y - by);
-                int inclusive = wx > 0 || (wx == 0 && wy > 0);
-
-                if (value < 0 || (value == 0 && !inclusive)) {
-                    inside = 0;
-                    break;
-                }
-            }
-            if (inside) {
+    for (y = 0; y < (int32_t)SCREEN_HEIGHT; ++y) {
+        for (x = 0; x < (int32_t)SCREEN_WIDTH; ++x) {
+            if (triangle_covers(triangle, x, y)) {
                 frame[y * (int32_t)SCREEN_WIDTH + x] = color565;
             }
         }
     }
 }
 
-static int write_reference(const char *directory, const char *name,
-                           uint32_t clear_rgba, int textured)
+static int write_frame(const char *directory, const char *name,
+                       const uint16_t *frame)
 {
-    static uint16_t frame[SCREEN_WIDTH * SCREEN_HEIGHT];
     char path[1024];
     FILE *file;
     unsigned int index;
 
-    for (index = 0U; index < SCREEN_WIDTH * SCREEN_HEIGHT; ++index) {
-        frame[index] = rgba_to_rgb565(clear_rgba);
-    }
-    for (index = 0U; index < scene_triangle_count; ++index) {
-        /* Textured scenes use the uniform white 8x8 texture with
-         * RIX_TEX_REPLACE, so every covered pixel is white. */
-        paint_reference(frame, &scene_triangles[index].prepared,
-                        textured ? 0xffffU
-                                 : rgba_to_rgb565(scene_triangles[index].paint_rgba));
-    }
     if (!make_path(path, sizeof(path), directory, name, "_ref.ppm")) {
         return 0;
     }
@@ -295,10 +300,26 @@ static int write_reference(const char *directory, const char *name,
             return 0;
         }
     }
-    if (fclose(file) != 0) {
-        return 0;
+    return fclose(file) == 0;
+}
+
+static int write_reference(const char *directory, const char *name,
+                           uint32_t clear_rgba, int textured)
+{
+    static uint16_t frame[SCREEN_WIDTH * SCREEN_HEIGHT];
+    unsigned int index;
+
+    for (index = 0U; index < SCREEN_WIDTH * SCREEN_HEIGHT; ++index) {
+        frame[index] = rgba_to_rgb565(clear_rgba);
     }
-    return 1;
+    for (index = 0U; index < scene_triangle_count; ++index) {
+        /* Textured scenes use the uniform white 8x8 texture with
+         * RIX_TEX_REPLACE, so every covered pixel is white. */
+        paint_reference(frame, &scene_triangles[index].prepared,
+                        textured ? 0xffffU
+                                 : rgba_to_rgb565(scene_triangles[index].paint_rgba));
+    }
+    return write_frame(directory, name, frame);
 }
 
 static int setup_state(RixCmdWriter *writer, int textured)
@@ -433,6 +454,256 @@ static int build_probe(RixTriangle *triangles, size_t *count)
            add_triangle(triangles, count, &l0, &l1, &l2);
 }
 
+/*
+ * ef-stress: shared-read-channel stress.  Pass one draws STRESS_BASE_TRIANGLES
+ * large overlapping triangles in shuffled depth order with LESS depth test
+ * and depth writes.  Each samples its own uniform 64x64 block of a 256x256
+ * RGB565 texture (nearest, clamped, UVs at least STRESS_BLOCK_MARGIN texels
+ * inside the block), so the 8 KiB texture cache keeps missing while every
+ * fragment reads and writes depth.  Pass two binds the uniform lightmap and
+ * blends ZERO,SRC_COLOR over STRESS_LIGHT_TRIANGLES disjoint triangles with
+ * the depth test still on (LEQUAL, no write), adding a colour read and write
+ * per fragment.  Block colours only use zero or full channels, so each
+ * blended channel is exactly zero or the lightmap channel (the ef-lm
+ * identity) and the analytic reference stays exact.
+ */
+static const uint32_t stress_palette[7] = {
+    0xffffffffU, 0xffff00ffU, 0x00ffffffU, 0x00ff00ffU,
+    0xff00ffffU, 0x0000ffffU, 0x000000ffU
+};
+static float stress_depth[MAX_TRIANGLES];
+static size_t stress_base_count;
+
+static uint32_t stress_random(uint32_t *state)
+{
+    *state = *state * 1664525U + 1013904223U;
+    return *state >> 8;
+}
+
+static float stress_range(uint32_t *state, float low, float high)
+{
+    return low + (high - low) * (float)(stress_random(state) & 0xffffU) / 65535.0f;
+}
+
+static float stress_clamp(float value, float low, float high)
+{
+    return value < low ? low : (value > high ? high : value);
+}
+
+static void fill_stress_texture(uint8_t *texture)
+{
+    static uint32_t rgba[STRESS_TEXTURE_SIZE * STRESS_TEXTURE_SIZE];
+    unsigned int x;
+    unsigned int y;
+
+    for (y = 0U; y < STRESS_TEXTURE_SIZE; ++y) {
+        for (x = 0U; x < STRESS_TEXTURE_SIZE; ++x) {
+            unsigned int block = (y / STRESS_BLOCK) * (STRESS_TEXTURE_SIZE / STRESS_BLOCK) +
+                                 x / STRESS_BLOCK;
+            rgba[y * STRESS_TEXTURE_SIZE + x] = stress_palette[block % 7U];
+        }
+    }
+    (void)rix_texture_convert_rgba8_le(texture, STRESS_TEXTURE_PAGES * TEXTURE_PAGE_BYTES,
+                                       rgba, STRESS_TEXTURE_SIZE * STRESS_TEXTURE_SIZE,
+                                       RIX_TEXTURE_RGB565);
+}
+
+static int build_stress(RixTriangle *triangles, size_t *count)
+{
+    uint32_t state = 0x5eed1234U;
+    unsigned int order[STRESS_BASE_TRIANGLES];
+    unsigned int blocks_per_row = STRESS_TEXTURE_SIZE / STRESS_BLOCK;
+    unsigned int i;
+
+    for (i = 0U; i < STRESS_BASE_TRIANGLES; ++i) {
+        order[i] = i;
+    }
+    for (i = STRESS_BASE_TRIANGLES - 1U; i > 0U; --i) {
+        unsigned int j = stress_random(&state) % (i + 1U);
+        unsigned int swap = order[i];
+        order[i] = order[j];
+        order[j] = swap;
+    }
+    for (i = 0U; i < STRESS_BASE_TRIANGLES; ++i) {
+        unsigned int block = i % (blocks_per_row * blocks_per_row);
+        float size = (float)STRESS_TEXTURE_SIZE;
+        float s0 = (float)((block % blocks_per_row) * STRESS_BLOCK + STRESS_BLOCK_MARGIN) / size;
+        float s1 = (float)((block % blocks_per_row + 1U) * STRESS_BLOCK - STRESS_BLOCK_MARGIN) / size;
+        float t0 = (float)((block / blocks_per_row) * STRESS_BLOCK + STRESS_BLOCK_MARGIN) / size;
+        float t1 = (float)((block / blocks_per_row + 1U) * STRESS_BLOCK - STRESS_BLOCK_MARGIN) / size;
+        float z = 0.1f + 0.02f * (float)order[i];
+        RixVertex v[3];
+        float area;
+        unsigned int attempts = 0U;
+
+        do {
+            float cx = stress_range(&state, 140.0f, 500.0f);
+            float cy = stress_range(&state, 110.0f, 370.0f);
+            unsigned int k;
+
+            for (k = 0U; k < 3U; ++k) {
+                float angle = stress_range(&state, 0.0f, (float)(2.0 * PI));
+                float radius = stress_range(&state, 80.0f, 170.0f);
+
+                v[k] = vertex(stress_clamp(cx + radius * cosf(angle), 20.0f, 620.0f),
+                              stress_clamp(cy + radius * sinf(angle), 20.0f, 460.0f),
+                              z, stress_palette[block % 7U],
+                              stress_range(&state, s0, s1), stress_range(&state, t0, t1));
+            }
+            area = (v[1].x - v[0].x) * (v[2].y - v[0].y) -
+                   (v[2].x - v[0].x) * (v[1].y - v[0].y);
+        } while (fabsf(area) < 12000.0f && ++attempts < 1000U);
+        if (!add_triangle(triangles, count, &v[0], &v[1], &v[2])) {
+            return 0;
+        }
+        stress_depth[*count - 1U] = z;
+    }
+    stress_base_count = *count;
+    /* Disjoint 3x2 grid cells keep every lightmapped pixel blended once. */
+    for (i = 0U; i < STRESS_LIGHT_TRIANGLES; ++i) {
+        float x0 = 20.0f + (float)(i % 3U) * 200.0f;
+        float y0 = 20.0f + (float)(i / 3U) * 220.0f;
+        RixVertex a = vertex(x0 + 6.0f, y0 + 6.0f, 0.0f, 0xffffffffU, 0.0f, 0.0f);
+        RixVertex b = vertex(x0 + 194.0f, y0 + 6.0f, 0.0f, 0xffffffffU, 1.0f, 0.0f);
+        RixVertex c = vertex((i % 2U) ? x0 + 194.0f : x0 + 6.0f, y0 + 214.0f, 0.0f,
+                             0xffffffffU, 0.5f, 1.0f);
+
+        if (!add_triangle(triangles, count, &a, &b, &c)) {
+            return 0;
+        }
+        stress_depth[*count - 1U] = 0.0f;
+    }
+    return 1;
+}
+
+/* ZERO,SRC_COLOR with the uniform lightmap: zero channels stay zero, full
+ * channels become the lightmap channel; anything else is outside the exact
+ * identity the reference relies on. */
+static int stress_lightmap(uint16_t *pixel)
+{
+    uint16_t value = *pixel;
+    uint16_t result = 0U;
+    unsigned int r = value >> 11;
+    unsigned int g = (value >> 5) & 0x3fU;
+    unsigned int b = value & 0x1fU;
+
+    if ((r != 0U && r != 0x1fU) || (g != 0U && g != 0x3fU) || (b != 0U && b != 0x1fU)) {
+        return 0;
+    }
+    if (r != 0U) result |= LIGHTMAP_RGB565 & 0xf800U;
+    if (g != 0U) result |= LIGHTMAP_RGB565 & 0x07e0U;
+    if (b != 0U) result |= LIGHTMAP_RGB565 & 0x001fU;
+    *pixel = result;
+    return 1;
+}
+
+static int write_stress_reference(const char *directory, const char *name)
+{
+    static uint16_t frame[SCREEN_WIDTH * SCREEN_HEIGHT];
+    static float depth[SCREEN_WIDTH * SCREEN_HEIGHT];
+    uint16_t clear = rgba_to_rgb565(CLEAR_RGBA);
+    unsigned int index;
+    int32_t x;
+    int32_t y;
+
+    for (index = 0U; index < SCREEN_WIDTH * SCREEN_HEIGHT; ++index) {
+        frame[index] = clear;
+        depth[index] = 1.0f;
+    }
+    for (index = 0U; index < scene_triangle_count; ++index) {
+        const RixTriangle *triangle = &scene_triangles[index].prepared;
+        int lightmap = index >= stress_base_count;
+
+        for (y = 0; y < (int32_t)SCREEN_HEIGHT; ++y) {
+            for (x = 0; x < (int32_t)SCREEN_WIDTH; ++x) {
+                size_t pixel = (size_t)y * SCREEN_WIDTH + (size_t)x;
+
+                if (!triangle_covers(triangle, x, y)) {
+                    continue;
+                }
+                if (lightmap) {
+                    if (!stress_lightmap(&frame[pixel])) {
+                        return 0;
+                    }
+                } else if (stress_depth[index] < depth[pixel]) {
+                    frame[pixel] = rgba_to_rgb565(scene_triangles[index].paint_rgba);
+                    depth[pixel] = stress_depth[index];
+                }
+            }
+        }
+    }
+    /* The harness requires the screen centre to be rendered (not clear). */
+    if (frame[240U * SCREEN_WIDTH + 320U] == clear ||
+        frame[239U * SCREEN_WIDTH + 320U] == clear) {
+        return 0;
+    }
+    return write_frame(directory, name, frame);
+}
+
+static int emit_stress(RixCmdWriter *writer, const RixTriangle *triangles,
+                       const EfFrameConfig *config)
+{
+    RixFragmentState fragment;
+    RixTextureState state;
+    RixTexEnvState environment;
+    uint32_t pages[STRESS_TEXTURE_PAGES];
+    size_t index;
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_LESS;
+    fragment.depth_mask = 1U;
+    fragment.color_mask_r = 1U;
+    fragment.color_mask_g = 1U;
+    fragment.color_mask_b = 1U;
+    fragment.color_mask_a = 1U;
+    fragment.src_factor = RIX_BLEND_ONE;
+    fragment.dst_factor = RIX_BLEND_ZERO;
+    memset(&state, 0, sizeof(state));
+    state.width_log2 = STRESS_TEXTURE_LOG2;
+    state.height_log2 = STRESS_TEXTURE_LOG2;
+    state.clamp_s = 1U;
+    state.clamp_t = 1U;
+    state.pixel_format = RIX_TEXTURE_RGB565;
+    memset(&environment, 0, sizeof(environment));
+    environment.combine_rgb = RIX_TEX_REPLACE;
+    environment.combine_alpha = RIX_TEX_REPLACE;
+    environment.src_rgb[0] = RIX_TEXSRC_TEXTURE;
+    environment.src_alpha[0] = RIX_TEXSRC_TEXTURE;
+    environment.operand_rgb[0] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_alpha[0] = RIX_TEXAOP_SRC_ALPHA;
+    for (index = 0U; index < STRESS_TEXTURE_PAGES; ++index) {
+        pages[index] = STRESS_TEXTURE_ADDRESS + (uint32_t)index * TEXTURE_PAGE_BYTES;
+    }
+    if (!rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0 | RIX_FEATURE_DEPTH) ||
+        !rix_cmd_fragment_state(writer, &fragment) ||
+        !rix_cmd_texture_state(writer, 0U, &state) ||
+        !rix_cmd_tex_env(writer, 0U, &environment) ||
+        !rix_cmd_texture_pages(writer, 0U, pages, STRESS_TEXTURE_PAGES) ||
+        !emit_external_frame(writer, triangles, stress_base_count, config)) {
+        return 0;
+    }
+    fragment.depth_func = RIX_FUNC_LEQUAL;
+    fragment.depth_mask = 0U;
+    fragment.src_factor = RIX_BLEND_ZERO;
+    fragment.dst_factor = RIX_BLEND_SRC_COLOR;
+    state.width_log2 = 3U;
+    state.height_log2 = 3U;
+    pages[0] = LIGHTMAP_ADDRESS;
+    if (!rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0 | RIX_FEATURE_BLEND |
+                                        RIX_FEATURE_DEPTH) ||
+        !rix_cmd_fragment_state(writer, &fragment) ||
+        !rix_cmd_texture_state(writer, 0U, &state) ||
+        !rix_cmd_texture_pages(writer, 0U, pages, 1U)) {
+        return 0;
+    }
+    for (index = stress_base_count; index < scene_triangle_count; ++index) {
+        if (!rix_cmd_triangle(writer, triangles[index].words, RIX_TRIANGLE_WORDS)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void fill_texture_page(uint8_t *page, uint32_t rgba_value)
 {
     uint32_t rgba[TEXTURE_WIDTH * TEXTURE_HEIGHT];
@@ -466,6 +737,8 @@ static void make_texture(uint8_t texture[TEXTURE_BYTES])
                     ((uint32_t)((g << 2) | (g >> 4)) << 16) |
                     ((uint32_t)((b << 3) | (b >> 2)) << 8) | 0xffU;
     fill_texture_page(&texture[TEXTURE_PAGE_BYTES], lightmap_rgba);
+    /* Pages 2.. hold the 256x256 ef-stress block texture. */
+    fill_stress_texture(&texture[SMALL_TEXTURE_PAGES * TEXTURE_PAGE_BYTES]);
 }
 
 /*
@@ -580,6 +853,8 @@ static int generate_scene(const char *directory, const char *name,
         valid_scene = build_probe(triangles, &triangle_count);
     } else if (scene == 6U) {
         valid_scene = build_lm(triangles, &triangle_count);
+    } else if (scene == 7U) {
+        valid_scene = build_stress(triangles, &triangle_count);
     } else {
         valid_scene = 0;
     }
@@ -589,13 +864,18 @@ static int generate_scene(const char *directory, const char *name,
     scene_triangle_count = triangle_count;
 
     rix_cmd_init(&writer, raw, sizeof(raw));
-    if (!setup_state(&writer, textured) ||
-        !emit_external_frame(&writer, triangles, triangle_count, &config) ||
-        (scene == 6U && !emit_lightmap_pass(&writer, triangles, triangle_count)) ||
+    if (scene == 7U) {
+        valid_scene = emit_stress(&writer, triangles, &config) &&
+                      write_stress_reference(directory, name);
+    } else {
+        valid_scene = setup_state(&writer, textured) &&
+                      emit_external_frame(&writer, triangles, triangle_count, &config) &&
+                      (scene != 6U || emit_lightmap_pass(&writer, triangles, triangle_count)) &&
+                      write_reference(directory, name, CLEAR_RGBA, textured && scene != 6U);
+    }
+    if (!valid_scene ||
         writer.failed || writer.length == 0U || writer.length > 0x00ffffffU ||
         writer.length % 4U != 0U ||
-        !write_reference(directory, name, CLEAR_RGBA,
-                         textured && scene != 6U) ||
         !make_path(binary_path, sizeof(binary_path), directory, name, ".bin") ||
         !make_path(hex_path, sizeof(hex_path), directory, name, ".hex") ||
         !write_dse_bin(binary_path, raw, writer.length) ||
@@ -609,7 +889,7 @@ static int generate_scene(const char *directory, const char *name,
 
 int main(int argc, char **argv)
 {
-    uint8_t texture[TEXTURE_BYTES];
+    static uint8_t texture[TEXTURE_BYTES];
 
     if (argc != 2) {
         fprintf(stderr, "usage: %s <output-dir>\n", argv[0]);
@@ -624,7 +904,8 @@ int main(int argc, char **argv)
         !generate_scene(argv[1], "ef-s3", 3U) ||
         !generate_scene(argv[1], "ef-s4", 4U) ||
         !generate_scene(argv[1], "ef-probe", 5U) ||
-        !generate_scene(argv[1], "ef-lm", 6U)) {
+        !generate_scene(argv[1], "ef-lm", 6U) ||
+        !generate_scene(argv[1], "ef-stress", 7U)) {
         fprintf(stderr, "failed to write RasterIX XSim scene output to %s\n", argv[1]);
         return 1;
     }

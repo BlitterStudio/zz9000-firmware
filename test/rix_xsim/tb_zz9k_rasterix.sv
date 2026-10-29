@@ -19,7 +19,9 @@ module tb_zz9k_rasterix;
     localparam integer MINIGL_COLOR_MEMORY_BYTES = 3 * 1024 * 1024;
     localparam integer MINIGL_DEPTH_MEMORY_BYTES = 3 * 1024 * 1024;
     localparam integer TEXTURE_POOL_BYTES = 24 * 1024 * 1024;
-    localparam integer TEXTURE_BYTES = 4096;
+    // textures.hex: white and lightmap 8x8 pages plus the 256x256 ef-stress
+    // block texture (66 pages of 2 KiB at 0x00340000).
+    localparam integer TEXTURE_BYTES = 66 * 2048;
 
     reg clk;
     reg resetn;
@@ -101,6 +103,20 @@ module tb_zz9k_rasterix;
     reg m_cmd_axi_rlast;
     reg m_cmd_axi_rvalid;
     wire m_cmd_axi_rready;
+`ifdef RASTERIX_VARIANT_EF
+    // EF has no command-read master (commands arrive on s_cmd_axis).  Tie the
+    // legacy model's master side idle so no X reaches the memory models.
+    assign m_cmd_axi_arid = 0;
+    assign m_cmd_axi_araddr = 0;
+    assign m_cmd_axi_arlen = 0;
+    assign m_cmd_axi_arsize = 0;
+    assign m_cmd_axi_arburst = 0;
+    assign m_cmd_axi_arlock = 0;
+    assign m_cmd_axi_arcache = 0;
+    assign m_cmd_axi_arprot = 0;
+    assign m_cmd_axi_arvalid = 0;
+    assign m_cmd_axi_rready = 1;
+`endif
 
     zz9k_rasterix dut (
         .s_axi_aclk(clk), .s_axi_aresetn(resetn),
@@ -155,26 +171,57 @@ module tb_zz9k_rasterix;
     reg write_active;
     reg write_error;
     reg [5:0] write_id;
-    // Shared HP-port model: both read masters share ONE in-order read stream
-    // with head-of-line blocking, which is the worst case of the AXI3
-    // interconnect/protocol-converter ordering the real hardware applies.
-    // SHARED=0 (default) keeps the two independent per-master models.
+    // Shared HP-port model (SHARED=1): accepted renderer read addresses wait
+    // in one bounded queue that feeds ONE response stream.  Beats of a burst
+    // are never interleaved with another burst, so a crossbar port that
+    // withholds RREADY blocks every response queued behind it -- the PS7 HP
+    // AFI/interconnect head-of-line hazard.  RAND_SEED=n (n != 0) adds
+    // 0..RAND_LATENCY extra cycles before every beat and serves next the
+    // oldest request carrying the ID of a randomly chosen queued request, so
+    // responses with different IDs are reordered as AXI permits while
+    // same-ID order is kept.  SHARED=0 (default) keeps the one-transaction
+    // separate model.
     integer shared_channel;
-    reg shared_q_is_cmd [0:31];
+    integer rand_seed;
+    integer rand_latency;
+    integer rand_pick;
+    // Seeded LCG owned by the shared read model's process ($urandom streams
+    // are per process, so a seed applied in the initial block would not
+    // reach it).
+    reg [31:0] rand_state;
+    integer shared_sel;
+    integer shared_served;
+    integer shared_reordered;
+    integer shared_pop;
+    integer shared_k;
     reg [31:0] shared_q_addr [0:31];
     integer shared_q_len [0:31];
     reg [5:0] shared_q_id [0:31];
     reg [2:0] shared_q_size [0:31];
-    integer shared_q_head;
-    integer shared_q_tail;
     integer shared_q_count;
     reg shared_active;
-    reg shared_is_cmd;
     reg [31:0] shared_addr;
     integer shared_left;
     integer shared_delay;
     reg [5:0] shared_id;
     reg [2:0] shared_size;
+
+    function [15:0] rand_next;
+        input integer dummy;
+        begin
+            rand_state = rand_state * 32'd1664525 + 32'd1013904223;
+            rand_next = rand_state[31:16];
+        end
+    endfunction
+
+    function integer beat_latency;
+        input integer dummy;
+        begin
+            beat_latency = latency;
+            if (rand_seed != 0)
+                beat_latency = latency + (rand_next(0) % (rand_latency + 1));
+        end
+    endfunction
 
     function [7:0] byte_at;
         input [31:0] address;
@@ -248,9 +295,8 @@ module tb_zz9k_rasterix;
     // requests stay realistic while the data stream stays strictly ordered.
     always @* begin
         if (shared_channel) begin
-            m_cmd_axi_arready = (shared_q_count <= 26) && ((cycle_count % 7) != 0);
-            m_axi_arready = (shared_q_count <= 26) && ((cycle_count % 5) != 0) &&
-                            !(m_cmd_axi_arvalid && m_cmd_axi_arready);
+            m_cmd_axi_arready = 0;
+            m_axi_arready = (shared_q_count <= 26) && ((cycle_count % 5) != 0);
         end else begin
             m_cmd_axi_arready = !cmd_read_active && !m_cmd_axi_rvalid && ((cycle_count % 7) != 0);
             m_axi_arready = !render_read_active && !m_axi_rvalid && ((cycle_count % 5) != 0);
@@ -441,55 +487,36 @@ module tb_zz9k_rasterix;
             end
         end
         end else begin : shared_read_model
-            // Accept reads from either master into one FIFO, then return the
-            // beats strictly in acceptance order.  Only the head entry's
-            // master sees RVALID, so a master that withholds RREADY blocks
-            // every read behind it -- exactly the shared-channel hazard the
-            // fetcher must not trigger.  At most one address is accepted per
-            // cycle (the ready gate for the renderer master also requires no
-            // command-master accept in the same cycle), so tail and count
-            // each have a single writer per cycle.
-            if (m_cmd_axi_arvalid && m_cmd_axi_arready) begin
-                if (m_cmd_axi_arsize != 3'b011 || m_cmd_axi_arburst != 2'b01)
-                    $fatal(1, "bad command AXI read");
-                shared_q_is_cmd[shared_q_tail] <= 1'b1;
-                shared_q_addr[shared_q_tail] <= m_cmd_axi_araddr;
-                shared_q_len[shared_q_tail] <= m_cmd_axi_arlen + 1;
-                shared_q_id[shared_q_tail] <= 6'd0;
-                shared_q_size[shared_q_tail] <= 3'd3;
-                shared_q_tail <= (shared_q_tail + 1) % 32;
-                shared_q_count <= shared_q_count + 1;
-            end else if (m_axi_arvalid && m_axi_arready) begin
-                if (trace_pipeline)
-                    $display("RENDER_AR cycle=%0d addr=%08x len=%0d id=%0d size=%0d",
-                             cycle_count, m_axi_araddr, m_axi_arlen, m_axi_arid, m_axi_arsize);
-                shared_q_is_cmd[shared_q_tail] <= 1'b0;
-                shared_q_addr[shared_q_tail] <= m_axi_araddr;
-                shared_q_len[shared_q_tail] <= m_axi_arlen + 1;
-                shared_q_id[shared_q_tail] <= m_axi_arid;
-                shared_q_size[shared_q_tail] <= m_axi_arsize;
-                shared_q_tail <= (shared_q_tail + 1) % 32;
-                shared_q_count <= shared_q_count + 1;
-            end
-
-            if (!shared_active && !m_cmd_axi_rvalid && !m_axi_rvalid &&
-                (shared_q_count != 0)) begin
+            // Select the next transaction once the previous one has fully
+            // returned; selecting pops it from the queue.  A same-cycle AR is
+            // appended behind the compacted queue (its write comes last, so
+            // it overrides the shift of the vacated tail slot).
+            shared_pop = 0;
+            if (!shared_active && !m_axi_rvalid && (shared_q_count != 0)) begin
+                shared_sel = 0;
+                if (rand_seed != 0) begin
+                    rand_pick = rand_next(0) % shared_q_count;
+                    while (shared_q_id[shared_sel] != shared_q_id[rand_pick])
+                        shared_sel = shared_sel + 1;
+                end
                 shared_active <= 1'b1;
-                shared_is_cmd <= shared_q_is_cmd[shared_q_head];
-                shared_addr <= shared_q_addr[shared_q_head];
-                shared_left <= shared_q_len[shared_q_head];
-                shared_id <= shared_q_id[shared_q_head];
-                shared_size <= shared_q_size[shared_q_head];
-                shared_delay <= latency;
-            end else if (shared_active && !m_cmd_axi_rvalid && !m_axi_rvalid) begin
+                shared_addr <= shared_q_addr[shared_sel];
+                shared_left <= shared_q_len[shared_sel];
+                shared_id <= shared_q_id[shared_sel];
+                shared_size <= shared_q_size[shared_sel];
+                shared_delay <= beat_latency(0);
+                for (shared_k = shared_sel; shared_k < 31; shared_k = shared_k + 1) begin
+                    shared_q_addr[shared_k] <= shared_q_addr[shared_k + 1];
+                    shared_q_len[shared_k] <= shared_q_len[shared_k + 1];
+                    shared_q_id[shared_k] <= shared_q_id[shared_k + 1];
+                    shared_q_size[shared_k] <= shared_q_size[shared_k + 1];
+                end
+                shared_pop = 1;
+                shared_served = shared_served + 1;
+                if (shared_sel != 0) shared_reordered = shared_reordered + 1;
+            end else if (shared_active && !m_axi_rvalid) begin
                 if (shared_delay != 0) shared_delay <= shared_delay - 1;
-                else if (shared_is_cmd) begin
-                    m_cmd_axi_rvalid <= 1;
-                    m_cmd_axi_rdata <= dword_at(shared_addr);
-                    m_cmd_axi_rid <= 0;
-                    m_cmd_axi_rresp <= 0;
-                    m_cmd_axi_rlast <= (shared_left == 1);
-                end else begin
+                else begin
                     m_axi_rvalid <= 1;
                     m_axi_rdata <= dword_at(shared_addr);
                     m_axi_rid <= shared_id;
@@ -500,20 +527,17 @@ module tb_zz9k_rasterix;
                 end
             end
 
-            if (m_cmd_axi_rvalid && m_cmd_axi_rready) begin
-                m_cmd_axi_rvalid <= 0;
-                shared_addr <= shared_addr + 8;
-                shared_left <= shared_left - 1;
-                if (shared_left == 1) begin
-                    m_cmd_axi_rlast <= 0;
-                    shared_active <= 1'b0;
-                    shared_q_head <= (shared_q_head + 1) % 32;
-                    if (!(m_axi_arvalid && m_axi_arready))
-                        shared_q_count <= shared_q_count - 1;
-                end else begin
-                    shared_delay <= latency;
-                end
+            if (m_axi_arvalid && m_axi_arready) begin
+                if (trace_pipeline)
+                    $display("RENDER_AR cycle=%0d addr=%08x len=%0d id=%0d size=%0d",
+                             cycle_count, m_axi_araddr, m_axi_arlen, m_axi_arid, m_axi_arsize);
+                shared_q_addr[shared_q_count - shared_pop] <= m_axi_araddr;
+                shared_q_len[shared_q_count - shared_pop] <= m_axi_arlen + 1;
+                shared_q_id[shared_q_count - shared_pop] <= m_axi_arid;
+                shared_q_size[shared_q_count - shared_pop] <= m_axi_arsize;
             end
+            shared_q_count <= shared_q_count - shared_pop + ((m_axi_arvalid && m_axi_arready) ? 1 : 0);
+
             if (m_axi_rvalid && m_axi_rready) begin
                 m_axi_rvalid <= 0;
                 shared_addr <= shared_addr + (1 << shared_size);
@@ -521,11 +545,8 @@ module tb_zz9k_rasterix;
                 if (shared_left == 1) begin
                     m_axi_rlast <= 0;
                     shared_active <= 1'b0;
-                    shared_q_head <= (shared_q_head + 1) % 32;
-                    if (!(m_cmd_axi_arvalid && m_cmd_axi_arready))
-                        shared_q_count <= shared_q_count - 1;
                 end else begin
-                    shared_delay <= latency;
+                    shared_delay <= beat_latency(0);
                 end
             end
         end
@@ -568,6 +589,118 @@ module tb_zz9k_rasterix;
         end
         if (m_axi_bvalid && m_axi_bready) m_axi_bvalid <= 0;
     end
+
+`ifdef RASTERIX_VARIANT_EF
+    // Memory deadlock evidence.  Every accepted renderer read address goes
+    // into a 48-entry history (TRACE_AXI=2 also prints it live).  When the
+    // renderer is busy and no handshake on any memory channel or the command
+    // stream has happened for DEADLOCK_LIMIT cycles, the run dumps which
+    // crossbar port owns the presented read beat, the in-order response
+    // queue, per-port channel state and the fragment-pipeline joins, then
+    // fails instead of polling to the completion timeout.
+    integer trace_axi;
+    integer deadlock_limit;
+    integer idle_cycles;
+    integer ar_hist_n;
+    integer dump_k;
+    reg [5:0] ar_hist_id [0:47];
+    reg [31:0] ar_hist_addr [0:47];
+    reg [7:0] ar_hist_len [0:47];
+    integer ar_hist_cycle [0:47];
+    wire memory_progress = (m_axi_arvalid && m_axi_arready) || (m_axi_rvalid && m_axi_rready) ||
+                           (m_axi_awvalid && m_axi_awready) || (m_axi_wvalid && m_axi_wready) ||
+                           (m_axi_bvalid && m_axi_bready) || (s_cmd_axis_tvalid && s_cmd_axis_tready);
+    task dump_memory_state;
+        begin
+            $display("MEMSTATE cycle=%0d idle_for=%0d counters ar=%0d r=%0d aw=%0d w=%0d b=%0d",
+                     cycle_count, idle_cycles, dut.dbg_ar_count, dut.dbg_r_count,
+                     dut.dbg_aw_count, dut.dbg_w_count, dut.dbg_b_count);
+            $display("MEMSTATE m_axi ar=%b/%b r=%b/%b rid=%0d (xbar port %0d) rlast=%b aw=%b/%b w=%b/%b b=%b/%b tb_write_active=%b",
+                     m_axi_arvalid, m_axi_arready, m_axi_rvalid, m_axi_rready, m_axi_rid, m_axi_rid[5:3],
+                     m_axi_rlast, m_axi_awvalid, m_axi_awready, m_axi_wvalid, m_axi_wready,
+                     m_axi_bvalid, m_axi_bready, write_active);
+            $display("MEMSTATE xbar ports[5:0] ar=%b/%b r=%b/%b aw=%b/%b w=%b/%b b=%b/%b",
+                     dut.renderer.xbar_axi_arvalid, dut.renderer.xbar_axi_arready,
+                     dut.renderer.xbar_axi_rvalid, dut.renderer.xbar_axi_rready,
+                     dut.renderer.xbar_axi_awvalid, dut.renderer.xbar_axi_awready,
+                     dut.renderer.xbar_axi_wvalid, dut.renderer.xbar_axi_wready,
+                     dut.renderer.xbar_axi_bvalid, dut.renderer.xbar_axi_bready);
+            if (shared_channel) begin
+                $display("MEMSTATE shared response engine active=%b id=%0d (port %0d) addr=%08x beats_left=%0d queued=%0d",
+                         shared_active, shared_id, shared_id[5:3], shared_addr, shared_left, shared_q_count);
+                for (dump_k = 0; dump_k < shared_q_count; dump_k = dump_k + 1)
+                    $display("MEMSTATE   queue[%0d] id=%0d (port %0d) addr=%08x beats=%0d", dump_k,
+                             shared_q_id[dump_k], shared_q_id[dump_k] >> 3,
+                             shared_q_addr[dump_k], shared_q_len[dump_k]);
+            end
+            for (dump_k = (ar_hist_n > 48) ? ar_hist_n - 48 : 0; dump_k < ar_hist_n; dump_k = dump_k + 1)
+                $display("MEMSTATE   ar_history cycle=%0d port=%0d id=%0d addr=%08x len=%0d",
+                         ar_hist_cycle[dump_k % 48], ar_hist_id[dump_k % 48] >> 3,
+                         ar_hist_id[dump_k % 48], ar_hist_addr[dump_k % 48], ar_hist_len[dump_k % 48]);
+            $display("MEMSTATE pipeline sem=%b/%b semcount=%0d bc2=%b/%b color_ar=%b/%b depth_ar=%b/%b tmu_req=%b/%b tmu_texel=%b/%b frag=%b/%b color_r=%b/%b depth_r=%b/%b concat_out=%b/%b concat_full=%b concat_empty=%b color_w=%b/%b depth_w=%b/%b",
+                     dut.renderer.rixef.graphicCore.semaphoreRasterizerValid,
+                     dut.renderer.rixef.graphicCore.semaphoreRasterizerReady,
+                     dut.renderer.rixef.graphicCore.concatSem.valuesCounter,
+                     dut.renderer.rixef.graphicCore.bc2_valid,
+                     dut.renderer.rixef.graphicCore.bc2_ready,
+                     dut.renderer.rixef.graphicCore.m_color_arvalid,
+                     dut.renderer.rixef.graphicCore.m_color_arready,
+                     dut.renderer.rixef.graphicCore.m_depth_arvalid,
+                     dut.renderer.rixef.graphicCore.m_depth_arready,
+                     dut.renderer.rixef.graphicCore.tr0_valid,
+                     dut.renderer.rixef.graphicCore.tr0_ready,
+                     dut.renderer.rixef.graphicCore.tr0_texel_valid,
+                     dut.renderer.rixef.graphicCore.tr0_texel_ready,
+                     dut.renderer.rixef.graphicCore.framebuffer_tvalid,
+                     dut.renderer.rixef.graphicCore.framebuffer_tready,
+                     dut.renderer.rixef.graphicCore.m_color_rvalid,
+                     dut.renderer.rixef.graphicCore.m_color_rready,
+                     dut.renderer.rixef.graphicCore.m_depth_rvalid,
+                     dut.renderer.rixef.graphicCore.m_depth_rready,
+                     dut.renderer.rixef.graphicCore.fragment_stream_out_tvalid,
+                     dut.renderer.rixef.graphicCore.fragment_stream_out_tready,
+                     dut.renderer.rixef.graphicCore.streamConcatFifo.stream_full,
+                     dut.renderer.rixef.graphicCore.streamConcatFifo.stream_empty,
+                     dut.renderer.rixef.graphicCore.m_color_wvalid,
+                     dut.renderer.rixef.graphicCore.m_color_wready,
+                     dut.renderer.rixef.graphicCore.m_depth_wvalid,
+                     dut.renderer.rixef.graphicCore.m_depth_wready);
+        end
+    endtask
+    always @(posedge clk) begin
+        if (!resetn) begin
+            idle_cycles <= 0;
+            ar_hist_n <= 0;
+        end else begin
+            if (m_axi_arvalid && m_axi_arready) begin
+                ar_hist_id[ar_hist_n % 48] <= m_axi_arid;
+                ar_hist_addr[ar_hist_n % 48] <= m_axi_araddr;
+                ar_hist_len[ar_hist_n % 48] <= m_axi_arlen;
+                ar_hist_cycle[ar_hist_n % 48] <= cycle_count;
+                ar_hist_n <= ar_hist_n + 1;
+                if (trace_axi > 1)
+                    $display("AXI_AR cycle=%0d port=%0d id=%0d addr=%08x len=%0d",
+                             cycle_count, m_axi_arid[5:3], m_axi_arid, m_axi_araddr, m_axi_arlen);
+            end
+            if (^{m_axi_arvalid, m_axi_arready, m_axi_rvalid, m_axi_rready,
+                  m_axi_awvalid, m_axi_awready, m_axi_wvalid, m_axi_wready,
+                  m_axi_bvalid, m_axi_bready} === 1'bx)
+                $fatal(1, "unknown renderer AXI handshake at cycle %0d", cycle_count);
+            if (memory_progress || !dut.renderer.perfBusy) idle_cycles <= 0;
+            else idle_cycles <= idle_cycles + 1;
+            if (trace_axi && (cycle_count % 250000) == 0)
+                $display("HEARTBEAT cycle=%0d busy=%b ar=%0d r=%0d aw=%0d w=%0d b=%0d", cycle_count,
+                         dut.renderer.perfBusy, dut.dbg_ar_count, dut.dbg_r_count,
+                         dut.dbg_aw_count, dut.dbg_w_count, dut.dbg_b_count);
+            if ((deadlock_limit != 0) && (idle_cycles == deadlock_limit)) begin
+                $display("DEADLOCK cycle=%0d: renderer busy with no memory or command handshake for %0d cycles",
+                         cycle_count, idle_cycles);
+                dump_memory_state;
+                $fatal(1, "memory deadlock");
+            end
+        end
+    end
+`endif
 
     // Framebuffer command evidence: correlate every OP_FRAMEBUFFER the parser
     // accepts with the per-port address requests the handlers raise, so a
@@ -726,6 +859,7 @@ module tb_zz9k_rasterix;
             $display("EF renderer busy=%b triangle=%b stall=%b",
                      dut.renderer.perfBusy, dut.renderer.perfTriangleRendering,
                      dut.renderer.perfRasterizerStall);
+            dump_memory_state;
 `else
             $display("DSE state=%0d cmd parser state=%0d fbctl=%0d color apply/applied=%b/%b depth=%b/%b", 
                      dut.renderer.dma.state, dut.renderer.rixif.graphicCore.commandParser.state,
@@ -783,11 +917,15 @@ module tb_zz9k_rasterix;
         cmd_read_active = 0; render_read_active = 0; write_active = 0; write_error = 0; cmd_read_left = 0; render_read_left = 0; write_left = 0;
         render_read_id = 0; render_read_size = 0;
         shared_channel = $test$plusargs("SHARED");
-        shared_q_head = 0; shared_q_tail = 0; shared_q_count = 0;
-        shared_active = 0; shared_is_cmd = 0; shared_addr = 0;
+        rand_seed = 0;
+        if ($value$plusargs("RAND_SEED=%d", rand_seed)) ;
+        rand_state = rand_seed;
+        rand_latency = 16;
+        if ($value$plusargs("RAND_LATENCY=%d", rand_latency)) ;
+        shared_q_count = 0; shared_served = 0; shared_reordered = 0;
+        shared_active = 0; shared_addr = 0;
         shared_left = 0; shared_delay = 0; shared_id = 0; shared_size = 0;
         for (i = 0; i < 32; i = i + 1) begin
-            shared_q_is_cmd[i] = 0;
             shared_q_addr[i] = 0;
             shared_q_len[i] = 0;
             shared_q_id[i] = 0;
@@ -811,6 +949,12 @@ module tb_zz9k_rasterix;
         if ($value$plusargs("LATENCY=%d", latency)) ;
         trace_pipeline = 0;
         if ($value$plusargs("TRACE_PIPE=%d", trace_pipeline)) ;
+`ifdef RASTERIX_VARIANT_EF
+        trace_axi = 0;
+        if ($value$plusargs("TRACE_AXI=%d", trace_axi)) ;
+        deadlock_limit = 200000;
+        if ($value$plusargs("DEADLOCK_LIMIT=%d", deadlock_limit)) ;
+`endif
         poll_limit = 2000000;
         if ($value$plusargs("POLL_LIMIT=%d", poll_limit)) ;
         for (i = 0; i < MEM_BYTES; i = i + 1) memory[i] = 0;
@@ -885,6 +1029,9 @@ module tb_zz9k_rasterix;
                         $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d transport=%0s",
                                  scene, submission_index, cycle_count, submission_words,
                                  $test$plusargs("DMA_BURST") ? "dma-fixed" : "mmio");
+                        if (shared_channel)
+                            $display("SHARED_READS served=%0d reordered=%0d rand_seed=%0d",
+                                     shared_served, shared_reordered, rand_seed);
                         command_complete = 1;
                     end
                 end

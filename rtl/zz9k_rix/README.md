@@ -75,7 +75,10 @@ The command stream sets resolution and target addresses, clears with full
 color/depth `MEMSET`, and then submits triangles.  A one-TMU lightmapped draw
 is two passes: base texture, then lightmap with `ZERO,SRC_COLOR` blending.
 
-`XACPCommandReadCredit.v` is GPL-3.0-or-later and is installed between the
-FrameStreamingCore list-read adapter and RasterIX's shared crossbar.  It
-reserves response FIFO capacity on AR acceptance, so parser backpressure cannot
-block fragment-memory responses.  It does not change the FIFO transport rules.
+`XACPCommandReadCredit.v` is GPL-3.0-or-later and is installed in front of
+every RasterIX crossbar read port (command list reads, colour, depth,
+stencil and both TMUs).  Each reserves response space for a whole burst
+before its AR is issued and accepts R unconditionally, so no read client can
+stall the single in-order HP3 read channel for the others; framebuffer
+writes present W together with AW.  It does not change the FIFO transport
+rules.
