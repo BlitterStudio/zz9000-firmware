@@ -66,8 +66,10 @@ module CoalesceAddrGen #(
     reg [ 7 : 0]                timeout;
     reg                         mem_req_pending;
     reg                         coalescer_valid;
+    reg [ID_WIDTH - 1 : 0]      axid;
 
     reg [ADDR_WIDTH - 1 : 0]    skid_addr;
+    reg [ID_WIDTH - 1 : 0]      skid_id;
     reg                         skid_valid;
 
     assign m_mem_axi_axburst = 1; // INCR burst
@@ -96,6 +98,7 @@ module CoalesceAddrGen #(
             reg timeout_occurred;
             reg max_beats_reached;
             reg addr_order_failed;
+            reg id_check_failed;
             reg trigger_active;
             reg master_ready;
 
@@ -105,6 +108,7 @@ module CoalesceAddrGen #(
             timeout_occurred = 0;
             max_beats_reached = 0;
             addr_order_failed = 0;
+            id_check_failed = 0;
 
             timeout <= timeout + 1;
 
@@ -132,10 +136,15 @@ module CoalesceAddrGen #(
                 begin
                     boundary_check_failed = 1;
                 end
+                // A merged burst carries one ID: start a new group when it changes
+                if (coalescer_valid && (s_mem_axi_axid != axid))
+                begin
+                    id_check_failed = 1;
+                end
             end
 
             // Trigger Handling
-            trigger_active = (boundary_check_failed || timeout_occurred || max_beats_reached || addr_order_failed) && coalescer_valid;
+            trigger_active = (boundary_check_failed || timeout_occurred || max_beats_reached || addr_order_failed || id_check_failed) && coalescer_valid;
             if (coalescing_running && !trigger_active && s_mem_axi_axvalid && s_mem_axi_axready)
             begin
                 timeout <= 0;
@@ -144,6 +153,7 @@ module CoalesceAddrGen #(
                 if (coalescer_valid == 0)
                 begin
                     axaddr <= s_mem_axi_axaddr;
+                    axid <= s_mem_axi_axid;
                     axlen <= 1;
                     coalescer_valid <= 1;
                 end
@@ -155,6 +165,7 @@ module CoalesceAddrGen #(
                 begin
                     m_mem_axi_axaddr <= axaddr;
                     m_mem_axi_axlen <= axlen - 1;
+                    m_mem_axi_axid <= axid;
                     m_mem_axi_axvalid <= 1;
                     mem_req_pending <= 0;
                     
@@ -164,6 +175,7 @@ module CoalesceAddrGen #(
                     begin
                         axaddr <= skid_addr;
                         axaddr_last <= skid_addr;
+                        axid <= skid_id;
                         axlen <= 1;
                         skid_valid <= 0;
                         coalescer_valid <= 1;
@@ -172,6 +184,7 @@ module CoalesceAddrGen #(
                     begin
                         axaddr <= s_mem_axi_axaddr;
                         axaddr_last <= s_mem_axi_axaddr;
+                        axid <= s_mem_axi_axid;
                         axlen <= 1;
                         coalescer_valid <= 1;
                     end
@@ -187,6 +200,7 @@ module CoalesceAddrGen #(
                     if (s_mem_axi_axvalid && s_mem_axi_axready)
                     begin
                         skid_addr <= s_mem_axi_axaddr;
+                        skid_id <= s_mem_axi_axid;
                         skid_valid <= s_mem_axi_axvalid;
                     end
 

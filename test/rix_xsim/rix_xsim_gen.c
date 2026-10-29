@@ -44,7 +44,14 @@
 #define STRESS_TEXTURE_SIZE (1U << STRESS_TEXTURE_LOG2)
 #define STRESS_TEXTURE_PAGES \
     (STRESS_TEXTURE_SIZE * STRESS_TEXTURE_SIZE * 2U / TEXTURE_PAGE_BYTES)
-#define TEXTURE_PAGES (SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES)
+#define TEXENV_TEXTURE_LOG2 6U
+#define TEXENV_TEXTURE_SIZE (1U << TEXENV_TEXTURE_LOG2)
+#define TEXENV_TEXTURE_PAGES \
+    (TEXENV_TEXTURE_SIZE * TEXENV_TEXTURE_SIZE * 2U / TEXTURE_PAGE_BYTES)
+#define TEXENV_TEXTURE_ADDRESS \
+    (STRESS_TEXTURE_ADDRESS + STRESS_TEXTURE_PAGES * TEXTURE_PAGE_BYTES)
+#define TEXTURE_PAGES \
+    (SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES + TEXENV_TEXTURE_PAGES)
 #define TEXTURE_BYTES (TEXTURE_PAGE_BYTES * TEXTURE_PAGES)
 #define LIGHTMAP_ADDRESS (TEXTURE_ADDRESS + TEXTURE_PAGE_BYTES)
 #define LIGHTMAP_RGB565 0x8410U
@@ -507,7 +514,27 @@ static void fill_stress_texture(uint8_t *texture)
                                        rgba, STRESS_TEXTURE_SIZE * STRESS_TEXTURE_SIZE,
                                        RIX_TEXTURE_RGB565);
 }
+/* Per-texel gradient page for ef-texenv: every texel differs from its
+ * neighbours so adjacent fragments present different TexEnv operands. */
+static void fill_texenv_texture(uint8_t *texture)
+{
+    static uint32_t rgba[TEXENV_TEXTURE_SIZE * TEXENV_TEXTURE_SIZE];
+    unsigned int x;
+    unsigned int y;
 
+    for (y = 0U; y < TEXENV_TEXTURE_SIZE; ++y) {
+        for (x = 0U; x < TEXENV_TEXTURE_SIZE; ++x) {
+            uint32_t r = (x * 5U) & 0xffU;
+            uint32_t g = (y * 4U) & 0xffU;
+            uint32_t b = ((x + y) * 3U) & 0xffU;
+
+            rgba[y * TEXENV_TEXTURE_SIZE + x] = (r << 24) | (g << 16) | (b << 8) | 0xffU;
+        }
+    }
+    (void)rix_texture_convert_rgba8_le(texture, TEXENV_TEXTURE_PAGES * TEXTURE_PAGE_BYTES,
+                                       rgba, TEXENV_TEXTURE_SIZE * TEXENV_TEXTURE_SIZE,
+                                       RIX_TEXTURE_RGB565);
+}
 static int build_stress(RixTriangle *triangles, size_t *count)
 {
     uint32_t state = 0x5eed1234U;
@@ -739,6 +766,96 @@ static void make_texture(uint8_t texture[TEXTURE_BYTES])
     fill_texture_page(&texture[TEXTURE_PAGE_BYTES], lightmap_rgba);
     /* Pages 2.. hold the 256x256 ef-stress block texture. */
     fill_stress_texture(&texture[SMALL_TEXTURE_PAGES * TEXTURE_PAGE_BYTES]);
+    /* Pages 18.. hold the 64x64 ef-texenv gradient texture. */
+    fill_texenv_texture(&texture[(SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES) * TEXTURE_PAGE_BYTES]);
+}
+
+/*
+ * ef-texenv: TexEnv operand-timing coverage.  A large triangle samples the
+ * 64x64 gradient texture (nearest, clamped) so every fragment row presents a
+ * different texel to MODULATE (texture x per-vertex interpolated primary
+ * colour).  A second overlapping triangle uses INTERPOLATE with the constant
+ * env colour as the blend factor, exercising all four operand registers with
+ * per-pixel varying inputs.  The reference frame is the committed post-fix
+ * RTL baseline (refs/ef-texenv_ref.ppm.gz); the analytic renderer cannot
+ * reproduce perspective texture-coordinate interpolation bit-exactly.
+ */
+static int build_texenv(RixTriangle *triangles, size_t *count)
+{
+    RixVertex m0 = vertex(120.0f, 100.0f, 0.5f, 0xffffffffU, 0.0f, 0.0f);
+    RixVertex m1 = vertex(520.0f, 140.0f, 0.5f, 0x40ff8000U, 1.0f, 0.0f);
+    RixVertex m2 = vertex(320.0f, 420.0f, 0.5f, 0xff00c040U, 0.0f, 1.0f);
+    RixVertex i0 = vertex(140.0f, 380.0f, 0.5f, 0xffffffffU, 1.0f, 1.0f);
+    RixVertex i1 = vertex(500.0f, 400.0f, 0.5f, 0xffffffffU, 1.0f, 0.0f);
+    RixVertex i2 = vertex(320.0f, 120.0f, 0.5f, 0xffffffffU, 0.0f, 1.0f);
+
+    return add_triangle(triangles, count, &m0, &m1, &m2) &&
+           add_triangle(triangles, count, &i0, &i1, &i2);
+}
+
+static int emit_texenv(RixCmdWriter *writer, const RixTriangle *triangles,
+                       const EfFrameConfig *config)
+{
+    RixFragmentState fragment;
+    RixTextureState state;
+    RixTexEnvState environment;
+    uint32_t pages[TEXENV_TEXTURE_PAGES];
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_ALWAYS;
+    fragment.depth_mask = 0U;
+    fragment.color_mask_r = 1U;
+    fragment.color_mask_g = 1U;
+    fragment.color_mask_b = 1U;
+    fragment.color_mask_a = 1U;
+    fragment.src_factor = RIX_BLEND_ONE;
+    fragment.dst_factor = RIX_BLEND_ZERO;
+    memset(&state, 0, sizeof(state));
+    state.width_log2 = TEXENV_TEXTURE_LOG2;
+    state.height_log2 = TEXENV_TEXTURE_LOG2;
+    state.clamp_s = 1U;
+    state.clamp_t = 1U;
+    state.pixel_format = RIX_TEXTURE_RGB565;
+    memset(&environment, 0, sizeof(environment));
+    environment.combine_rgb = RIX_TEX_MODULATE;
+    environment.combine_alpha = RIX_TEX_MODULATE;
+    environment.src_rgb[0] = RIX_TEXSRC_TEXTURE;
+    environment.src_rgb[1] = RIX_TEXSRC_PRIMARY_COLOR;
+    environment.src_alpha[0] = RIX_TEXSRC_TEXTURE;
+    environment.src_alpha[1] = RIX_TEXSRC_PRIMARY_COLOR;
+    environment.operand_rgb[0] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_rgb[1] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_alpha[0] = RIX_TEXAOP_SRC_ALPHA;
+    environment.operand_alpha[1] = RIX_TEXAOP_SRC_ALPHA;
+    for (unsigned int index = 0U; index < TEXENV_TEXTURE_PAGES; ++index) {
+        pages[index] = TEXENV_TEXTURE_ADDRESS + (uint32_t)index * TEXTURE_PAGE_BYTES;
+    }
+    if (!rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0) ||
+        !rix_cmd_fragment_state(writer, &fragment) ||
+        !rix_cmd_tex_env_color(writer, 0U, 0x3080ff40U) ||
+        !rix_cmd_texture_state(writer, 0U, &state) ||
+        !rix_cmd_tex_env(writer, 0U, &environment) ||
+        !rix_cmd_texture_pages(writer, 0U, pages, TEXENV_TEXTURE_PAGES) ||
+        !emit_external_frame(writer, triangles, 1U, config)) {
+        return 0;
+    }
+    memset(&environment, 0, sizeof(environment));
+    environment.combine_rgb = RIX_TEX_INTERPOLATE;
+    environment.combine_alpha = RIX_TEX_INTERPOLATE;
+    environment.src_rgb[0] = RIX_TEXSRC_TEXTURE;
+    environment.src_rgb[1] = RIX_TEXSRC_PRIMARY_COLOR;
+    environment.src_rgb[2] = RIX_TEXSRC_CONSTANT;
+    environment.src_alpha[0] = RIX_TEXSRC_TEXTURE;
+    environment.src_alpha[1] = RIX_TEXSRC_PRIMARY_COLOR;
+    environment.src_alpha[2] = RIX_TEXSRC_CONSTANT;
+    environment.operand_rgb[0] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_rgb[1] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_rgb[2] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_alpha[0] = RIX_TEXAOP_SRC_ALPHA;
+    environment.operand_alpha[1] = RIX_TEXAOP_SRC_ALPHA;
+    environment.operand_alpha[2] = RIX_TEXAOP_SRC_ALPHA;
+    return rix_cmd_tex_env(writer, 0U, &environment) &&
+           rix_cmd_triangle(writer, triangles[1].words, RIX_TRIANGLE_WORDS);
 }
 
 /*
@@ -855,6 +972,8 @@ static int generate_scene(const char *directory, const char *name,
         valid_scene = build_lm(triangles, &triangle_count);
     } else if (scene == 7U) {
         valid_scene = build_stress(triangles, &triangle_count);
+    } else if (scene == 8U) {
+        valid_scene = build_texenv(triangles, &triangle_count);
     } else {
         valid_scene = 0;
     }
@@ -867,6 +986,10 @@ static int generate_scene(const char *directory, const char *name,
     if (scene == 7U) {
         valid_scene = emit_stress(&writer, triangles, &config) &&
                       write_stress_reference(directory, name);
+    } else if (scene == 8U) {
+        /* No analytic reference: the runner restores the committed post-fix
+         * RTL baseline from refs/ef-texenv_ref.ppm.gz. */
+        valid_scene = emit_texenv(&writer, triangles, &config);
     } else {
         valid_scene = setup_state(&writer, textured) &&
                       emit_external_frame(&writer, triangles, triangle_count, &config) &&
@@ -905,7 +1028,8 @@ int main(int argc, char **argv)
         !generate_scene(argv[1], "ef-s4", 4U) ||
         !generate_scene(argv[1], "ef-probe", 5U) ||
         !generate_scene(argv[1], "ef-lm", 6U) ||
-        !generate_scene(argv[1], "ef-stress", 7U)) {
+        !generate_scene(argv[1], "ef-stress", 7U) ||
+        !generate_scene(argv[1], "ef-texenv", 8U)) {
         fprintf(stderr, "failed to write RasterIX XSim scene output to %s\n", argv[1]);
         return 1;
     }

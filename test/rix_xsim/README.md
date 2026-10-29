@@ -5,7 +5,7 @@
 per scene with the exact `Rasterizer.v` edge rules, and gates replay through
 `compare_frames.py` full-image comparison via `run_scenes.sh` (builds the
 generator in gcc:13, replays every scene below over MMIO, `SHARED=1` and
-`DMA_BURST=1`, replays `ef-stress` with three randomized seeds, and fails on
+`DMA_BURST=1`, replays `ef-stress` with four randomized seeds, and fails on
 any mismatch).
 
 | Scene | Workload | TMU0 state |
@@ -17,6 +17,7 @@ any mismatch).
 | `ef-s4` | 48-triangle radial stress scene | Enabled with deterministic 8x8 white texture. |
 | `ef-lm` | Two-pass lightmap: white textured base, then `ZERO,SRC_COLOR` with the uniform `0x8410` lightmap page | 8x8 white page, then the 8x8 lightmap page. |
 | `ef-stress` | Read-channel stress: 40 large overlapping triangles in shuffled depth order (`LESS`, depth writes), then six disjoint `ZERO,SRC_COLOR` lightmap triangles with the depth test still on | 256x256 RGB565 texture of uniform 64x64 blocks (zero/full channels, UVs 4 texels inside each block) so the texture cache keeps missing; then the 8x8 lightmap page. |
+| `ef-texenv` | TexEnv operand timing: one triangle with `MODULATE` (gradient texel x interpolated primary colour) under a second `INTERPOLATE` triangle using the constant env colour. | 64x64 RGB565 per-texel gradient page; reference frame is the committed RTL-derived baseline `refs/ef-texenv_ref.ppm.gz` (perspective texture-coordinate interpolation is not bit-exactly reproducible in C). |
 
 Each scene sets the 640×480 RGB565 color target and Z16 depth target, then
 performs a single full-target color/depth `MEMSET` and renders directly to
@@ -49,6 +50,24 @@ handshakes, then fails; the same dump accompanies a completion timeout.
 `TRACE_AXI=1` adds a 250000-cycle counter heartbeat and `TRACE_AXI=2` prints
 every accepted read address.  All of these are `run_xsim.bat` environment
 variables.
+
+## Coalescing cycle matrix (LATENCY=2, 2026-10-29)
+
+Cycles to completion with the framebuffer coalescer bypassed vs enabled;
+every frame is bit-exact against its reference (MMIO transport; the
+committed `run_scenes.sh` gates the same scenes over SHARED, DMA_BURST and
+randomized SHARED seeds 1-4):
+
+| Scene | off | on | saving |
+| --- | --- | --- | --- |
+| `ef-s1` | 384,082 | 307,282 | 20.0% |
+| `ef-s2` | 412,053 | 330,230 | 19.9% |
+| `ef-s3` | 412,053 | 330,230 | 19.9% |
+| `ef-s4` | 465,121 | 380,558 | 18.2% |
+| `ef-probe` | 390,346 | 313,239 | 19.8% |
+| `ef-lm` | 446,882 | 356,177 | 20.3% |
+
+The "off" column is the reserved-read baseline (PATCHES.md).
 
 TMU0 MUST remain enabled for every scene that reaches the pixel pipeline.
 `TextureMappingUnit.v:275-339` always sends and joins the texture-read

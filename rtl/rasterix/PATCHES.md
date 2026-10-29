@@ -213,19 +213,76 @@ cache and all local fixes above while taking the specific silicon-proven fix.
 | `ef-lm` | 446,881 -> 446,882 | 445,494 -> 445,495 | |
 | `ef-stress` | 2,130,582 -> 2,130,632 | 2,089,514 -> 2,089,551 | 3,954,218 / 3,951,971 / 3,954,161 / 3,948,128 -> 3,954,498 / 3,951,871 / 3,953,652 / 3,948,588 |
 
-## EF memory coalescing stays disabled
+## EF memory coalescing enabled
 
-The EF wrapper instantiates RasterIX with `ENABLE_MEMORY_COALESCING(0)`
-(`rtl/zz9k_rix/zz9k_rasterix.v`).  Measured on the textured scene
-(`ef-s3`, LATENCY=2, 2026-10-29):
+The EF wrapper instantiates RasterIX with `ENABLE_MEMORY_COALESCING(1)`
+(`rtl/zz9k_rix/zz9k_rasterix.v`).  `FramebufferAdapter` issues only
+single-beat AR/AW transactions, and `CoalesceAddrGen` merges runs of
+consecutive ones into INCR bursts of up to `NR_OF_COALESCED_BEATS_*` beats
+(colour 4, depth 4, stencil 2 at `DATA_WIDTH=64`), which `CoalesceFiFo`
+replays on the write channel beat-exact (wlast on the final beat of each
+merged burst).
 
-| Configuration | Result cycles | Frame |
-| --- | --- | --- |
-| coalescing off (bypass) | 412,053 | bit-exact vs reference |
-| coalescing on | 330,230 | corrupted: clear/exterior pixels 0x0000 |
+The corruption that kept coalescing disabled was not in the coalescer.
+Instrumented counters prove the merge pipeline lossless (ef-s1 clear:
+76,800 single writes in, 19,200 four-beat AW + 76,800 W beats + 19,200
+wlast out).  The xsim memory model computed each W beat's address as
+`write_addr + (1 << m_axi_awsize)` while a burst was in flight; AWSIZE is
+only defined during the AW handshake, and between handshakes the
+crossbar's bypassed M-side register slice follows the write arbiter, so
+a stray size 0 advanced the model's address by one byte per beat.  The
+testbench now latches the beat stride on the AW handshake (like the read
+model always latched `render_read_size`), and every scene is bit-exact
+with coalescing on.
 
-The 20% cycle win is not usable: `Coalescer.v` hardwires `s_mem_axi_rlast =
-1` ("we always return one beat") and `CoalesceAddrGen.v` fatals on any
-incoming `axlen != 0`, so the merged EF framebuffer traffic silently loses
-write data.  Making coalescing safe requires redesigning both modules for
-multi-beat INCR transactions; the bypass is silicon-proven and is kept.
+`CoalesceAddrGen` additionally carries the group's first AXI ID onto the
+merged burst and closes the group when the ID changes, so a merged burst
+never answers with a foreign ID (the EF framebuffer masters drive ID 0, so
+this is inert here but keeps the module correct for other integrations).
+The read path keeps `s_mem_axi_rlast = 1`: every merged read beat completes
+one of the client's single-beat AR transactions, so each beat is its own
+last beat; `FramebufferSerializer` consumes one beat per vector fetch.
+
+Reservation interaction: the per-port `XACPCommandReadCredit` buffers
+reserve `ARLEN+1` beats per accepted AR and issue an AR only when the whole
+merged burst fits, so merged 4-beat colour/depth (2-beat stencil) bursts
+need 4 of the 16 reserved beats and can never wedge the shared HP3 read
+channel; the reservation accepts R unconditionally while the serializer
+drains its buffer one beat per vector fetch.
+
+Cycles to completion, LATENCY=2, coalescing off -> on (2026-10-29): see
+the matrix in `test/rix_xsim/README.md`; every frame is bit-exact against
+its reference in MMIO, DMA_BURST and SHARED (including randomized
+reordering, seeds 1-4).
+
+## TexEnv select stage is nonblocking
+
+- File: `RasterIX/TexEnv.v`
+- Hazard: the same class as the ColorBlender select stage (patch 0009).
+  `v00..v33` are the select stage's operand registers, written with
+  blocking assignments inside `always @(posedge aclk) if (ce && s_valid)`,
+  while the `ColorMixerSigned` instance samples them as its colorA..D
+  inputs on the same edge.  In simulation the select stage and the mixer's
+  first multiply stage collapse into one, so back-to-back fragments can be
+  blended with their successor's operands; synthesis builds the registers
+  and samples the previous cycle's values.
+- Evidence: the new `ef-texenv` scene (64x64 per-texel gradient texture,
+  MODULATE with per-vertex interpolated primary colour, then INTERPOLATE
+  with the constant env colour) renders 13,114 differing bytes (454 pixels
+  beyond one LSB, channel deltas up to full scale) between the blocking
+  and nonblocking versions of the stage.  Earlier scenes could not expose
+  it: they use REPLACE with uniform textures, so every fragment presents
+  identical operands.  The committed reference frame
+  (`test/rix_xsim/refs/ef-texenv_ref.ppm.gz`) is the post-fix frame, i.e.
+  the synthesized semantics.
+- Change: the 120 `v00..v33` assignments take `<=`; the block-local
+  operand temporaries keep blocking assignment.  No synthesized logic
+  changes: `v00..v33` were already the stage's registers.
+- Audit: the rest of `rtl/rasterix` was scanned for module-level
+  registers blocking-written inside clocked blocks and read by another
+  clocked block, a submodule port, or an assign.  `TextureSampler.v`'s
+  `step1_texelU*` blocking writes are read only later inside the same
+  block (same-edge semantics identical in simulation and synthesis), and
+  no other module in `RasterIX`, `Float` or `3rdParty` has the pattern;
+  the remaining hits (`sfifo.v`, `skidbuffer.v`) are `initial`-block
+  initializers of registers whose clocked writes are nonblocking.

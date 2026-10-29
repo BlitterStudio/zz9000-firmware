@@ -42,6 +42,15 @@ docker run --rm -v "$IF_DOCKER:/if:ro" -v "$MG_DOCKER:/mg:ro" -v "$OUT_DOCKER:/o
   /tmp/rix_xsim_gen /out
 '
 
+# ef-texenv has no analytic reference (perspective texture-coordinate
+# interpolation is not bit-exactly reproducible in C): restore the committed
+# RTL-derived baseline frame.
+if [ ! -f "$OUT/ef-texenv_ref.ppm" ] && [ -f "$HERE/refs/ef-texenv_ref.ppm.gz" ]; then
+  py -3 -c "import gzip, shutil, sys; \
+shutil.copyfileobj(gzip.open(sys.argv[1], 'rb'), open(sys.argv[2], 'wb'))" \
+      "$HERE/refs/ef-texenv_ref.ppm.gz" "$OUT/ef-texenv_ref.ppm"
+fi
+
 compare_scene() {
   scene=$1
   actual=$2
@@ -78,7 +87,7 @@ run_scene() {
   test -f "$out_dir/$scene.ppm"
 }
 
-SCENES="ef-s1 ef-s2 ef-s3 ef-s4 ef-probe ef-lm ef-stress"
+SCENES="ef-s1 ef-s2 ef-s3 ef-s4 ef-probe ef-lm ef-stress ef-texenv"
 for scene in $SCENES; do
   run_scene "$scene" "$OUT" mmio
   compare_scene "$scene" "$OUT_WIN/$scene.ppm" mmio
@@ -107,7 +116,7 @@ for scene in $SCENES; do
   compare_scene "$scene" "$OUT_WIN/dma/$scene.ppm" dma
   cmp "$OUT/$scene.ppm" "$OUT/dma/$scene.ppm"
 done
-for seed in 1 2 3; do
+for seed in 1 2 3 4; do
   run_scene ef-stress "$OUT/random" "seed$seed" SHARED=1 RAND_SEED=$seed
   mv "$OUT/random/ef-stress.ppm" "$OUT/random/ef-stress-seed$seed.ppm"
   compare_scene ef-stress "$OUT_WIN/random/ef-stress-seed$seed.ppm" "seed$seed"

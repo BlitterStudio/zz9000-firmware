@@ -340,168 +340,171 @@ module TexEnv
         b2 = {1'b0, bu2};
         a2 = {1'b0, au2};
 
+        // ZZ9000 local patch: v00..v33 are this stage's pipeline registers
+        // and ColorMixerSigned samples them on the same edge, so they take
+        // nonblocking assignments (see rtl/rasterix/PATCHES.md).
         case (combineRgb)
             REPLACE:
             begin
                 // (x0 * 1.0) + (0.0 * 0.0)
 
-                v00 = r0;
-                v01 = g0;
-                v02 = b0;
+                v00 <= r0;
+                v01 <= g0;
+                v02 <= b0;
 
-                v10 = ONE_DOT_ZERO;
-                v11 = ONE_DOT_ZERO;
-                v12 = ONE_DOT_ZERO;
+                v10 <= ONE_DOT_ZERO;
+                v11 <= ONE_DOT_ZERO;
+                v12 <= ONE_DOT_ZERO;
 
-                v20 = 0;
-                v21 = 0;
-                v22 = 0;
+                v20 <= 0;
+                v21 <= 0;
+                v22 <= 0;
 
-                v30 = 0;
-                v31 = 0;
-                v32 = 0;
+                v30 <= 0;
+                v31 <= 0;
+                v32 <= 0;
             end
             MODULATE:
             begin
                 // (x0 * x1) + (0 * 0)
 
-                v00 = r0;
-                v01 = g0;
-                v02 = b0;
+                v00 <= r0;
+                v01 <= g0;
+                v02 <= b0;
 
-                v10 = r1;
-                v11 = g1;
-                v12 = b1;
+                v10 <= r1;
+                v11 <= g1;
+                v12 <= b1;
 
-                v20 = 0;
-                v21 = 0;
-                v22 = 0;
+                v20 <= 0;
+                v21 <= 0;
+                v22 <= 0;
 
-                v30 = 0;
-                v31 = 0;
-                v32 = 0;
+                v30 <= 0;
+                v31 <= 0;
+                v32 <= 0;
             end
             ADD:
             begin 
                 // (x0 * 1.0) + (x1 * 1.0)
 
-                v00 = r0;
-                v01 = g0;
-                v02 = b0;
+                v00 <= r0;
+                v01 <= g0;
+                v02 <= b0;
 
-                v10 = ONE_DOT_ZERO;
-                v11 = ONE_DOT_ZERO;
-                v12 = ONE_DOT_ZERO;
+                v10 <= ONE_DOT_ZERO;
+                v11 <= ONE_DOT_ZERO;
+                v12 <= ONE_DOT_ZERO;
 
-                v20 = r1;
-                v21 = g1;
-                v22 = b1;
+                v20 <= r1;
+                v21 <= g1;
+                v22 <= b1;
 
-                v30 = ONE_DOT_ZERO;
-                v31 = ONE_DOT_ZERO;
-                v32 = ONE_DOT_ZERO;
+                v30 <= ONE_DOT_ZERO;
+                v31 <= ONE_DOT_ZERO;
+                v32 <= ONE_DOT_ZERO;
 
             end
             ADD_SIGNED:
             begin 
                 // (x0 * 1.0) + ((x1 - 0.5) * 1.0)
 
-                v00 = r0;
-                v01 = g0;
-                v02 = b0;
+                v00 <= r0;
+                v01 <= g0;
+                v02 <= b0;
 
-                v10 = ONE_DOT_ZERO;
-                v11 = ONE_DOT_ZERO;
-                v12 = ONE_DOT_ZERO;
+                v10 <= ONE_DOT_ZERO;
+                v11 <= ONE_DOT_ZERO;
+                v12 <= ONE_DOT_ZERO;
 
-                v20 = r1 - ZERO_DOT_FIVE;
-                v21 = g1 - ZERO_DOT_FIVE;
-                v22 = b1 - ZERO_DOT_FIVE;
+                v20 <= r1 - ZERO_DOT_FIVE;
+                v21 <= g1 - ZERO_DOT_FIVE;
+                v22 <= b1 - ZERO_DOT_FIVE;
 
-                v30 = ONE_DOT_ZERO;
-                v31 = ONE_DOT_ZERO;
-                v32 = ONE_DOT_ZERO;
+                v30 <= ONE_DOT_ZERO;
+                v31 <= ONE_DOT_ZERO;
+                v32 <= ONE_DOT_ZERO;
 
             end
             INTERPOLATE:
             begin
                 // (x0 * x2) + (x1 * (1.0 - x2))   
                 
-                v00 = r0;
-                v01 = g0;
-                v02 = b0;
+                v00 <= r0;
+                v01 <= g0;
+                v02 <= b0;
 
-                v10 = r2;
-                v11 = g2;
-                v12 = b2;
+                v10 <= r2;
+                v11 <= g2;
+                v12 <= b2;
 
-                v20 = r1;
-                v21 = g1;
-                v22 = b1;
+                v20 <= r1;
+                v21 <= g1;
+                v22 <= b1;
 
-                v30 = ONE_DOT_ZERO - r2;
-                v31 = ONE_DOT_ZERO - g2;
-                v32 = ONE_DOT_ZERO - b2;
+                v30 <= ONE_DOT_ZERO - r2;
+                v31 <= ONE_DOT_ZERO - g2;
+                v32 <= ONE_DOT_ZERO - b2;
             end 
             SUBTRACT:
             begin
                 // (x0 * 1.0) + (x1 * -1.0)
 
-                v00 = r0;
-                v01 = g0;
-                v02 = b0;
+                v00 <= r0;
+                v01 <= g0;
+                v02 <= b0;
 
-                v10 = ONE_DOT_ZERO;
-                v11 = ONE_DOT_ZERO;
-                v12 = ONE_DOT_ZERO;
+                v10 <= ONE_DOT_ZERO;
+                v11 <= ONE_DOT_ZERO;
+                v12 <= ONE_DOT_ZERO;
 
-                v20 = r1;
-                v21 = g1;
-                v22 = b1;
+                v20 <= r1;
+                v21 <= g1;
+                v22 <= b1;
 
-                v30 = -ONE_DOT_ZERO;
-                v31 = -ONE_DOT_ZERO;
-                v32 = -ONE_DOT_ZERO;
+                v30 <= -ONE_DOT_ZERO;
+                v31 <= -ONE_DOT_ZERO;
+                v32 <= -ONE_DOT_ZERO;
             end
             DOT3_RGB:
             begin
                 // ((x0 - 0.5) * (x1 - 0.5)) + (0 * 0)
 
-                v00 = r0 - ZERO_DOT_FIVE;
-                v01 = g0 - ZERO_DOT_FIVE;
-                v02 = b0 - ZERO_DOT_FIVE;
+                v00 <= r0 - ZERO_DOT_FIVE;
+                v01 <= g0 - ZERO_DOT_FIVE;
+                v02 <= b0 - ZERO_DOT_FIVE;
 
-                v10 = r1 - ZERO_DOT_FIVE;
-                v11 = g1 - ZERO_DOT_FIVE;
-                v12 = b1 - ZERO_DOT_FIVE;
+                v10 <= r1 - ZERO_DOT_FIVE;
+                v11 <= g1 - ZERO_DOT_FIVE;
+                v12 <= b1 - ZERO_DOT_FIVE;
 
-                v20 = 0;
-                v21 = 0;
-                v22 = 0;
+                v20 <= 0;
+                v21 <= 0;
+                v22 <= 0;
 
-                v30 = 0;
-                v31 = 0;
-                v32 = 0;
+                v30 <= 0;
+                v31 <= 0;
+                v32 <= 0;
             end
             DOT3_RGBA:
             begin
                 // ((x0 - 0.5) * (x1 - 0.5)) + (0 * 0)
 
-                v00 = r0 - ZERO_DOT_FIVE;
-                v01 = g0 - ZERO_DOT_FIVE;
-                v02 = b0 - ZERO_DOT_FIVE;
+                v00 <= r0 - ZERO_DOT_FIVE;
+                v01 <= g0 - ZERO_DOT_FIVE;
+                v02 <= b0 - ZERO_DOT_FIVE;
 
-                v10 = r1 - ZERO_DOT_FIVE;
-                v11 = g1 - ZERO_DOT_FIVE;
-                v12 = b1 - ZERO_DOT_FIVE;
+                v10 <= r1 - ZERO_DOT_FIVE;
+                v11 <= g1 - ZERO_DOT_FIVE;
+                v12 <= b1 - ZERO_DOT_FIVE;
 
-                v20 = 0;
-                v21 = 0;
-                v22 = 0;
+                v20 <= 0;
+                v21 <= 0;
+                v22 <= 0;
 
-                v30 = 0;
-                v31 = 0;
-                v32 = 0;
+                v30 <= 0;
+                v31 <= 0;
+                v32 <= 0;
             end
             default:
             begin
@@ -514,57 +517,57 @@ module TexEnv
             begin
                 // (x0 * 1.0) + (0.0 * 0.0)
 
-                v03 = a0;
-                v13 = ONE_DOT_ZERO;
-                v23 = 0;
-                v33 = 0;
+                v03 <= a0;
+                v13 <= ONE_DOT_ZERO;
+                v23 <= 0;
+                v33 <= 0;
             end
             MODULATE:
             begin
                 // (x0 * x1) + (0 * 0)
 
-                v03 = a0;
-                v13 = a1;
-                v23 = 0;
-                v33 = 0;
+                v03 <= a0;
+                v13 <= a1;
+                v23 <= 0;
+                v33 <= 0;
             end
             ADD:
             begin 
                 // (x0 * 1.0) + (x1 * 1.0)
 
-                v03 = a0;
-                v13 = ONE_DOT_ZERO;
-                v23 = a1;
-                v33 = ONE_DOT_ZERO;
+                v03 <= a0;
+                v13 <= ONE_DOT_ZERO;
+                v23 <= a1;
+                v33 <= ONE_DOT_ZERO;
 
             end
             ADD_SIGNED:
             begin 
                 // (x0 * 1.0) + ((x1 - 0.5) * 1.0)
 
-                v03 = a0;
-                v13 = ONE_DOT_ZERO;
-                v23 = a1 - ZERO_DOT_FIVE;
-                v33 = ONE_DOT_ZERO;
+                v03 <= a0;
+                v13 <= ONE_DOT_ZERO;
+                v23 <= a1 - ZERO_DOT_FIVE;
+                v33 <= ONE_DOT_ZERO;
 
             end
             INTERPOLATE:
             begin
                 // (x0 * x2) + (x1 * (1.0 - x2))   
                 
-                v03 = a0;
-                v13 = a2;
-                v23 = a1;
-                v33 = ONE_DOT_ZERO - a2;
+                v03 <= a0;
+                v13 <= a2;
+                v23 <= a1;
+                v33 <= ONE_DOT_ZERO - a2;
             end 
             SUBTRACT:
             begin
                 // (x0 * 1.0) + (x1 * -1.0)
 
-                v03 = a0;
-                v13 = ONE_DOT_ZERO;
-                v23 = a1;
-                v33 = -ONE_DOT_ZERO;
+                v03 <= a0;
+                v13 <= ONE_DOT_ZERO;
+                v23 <= a1;
+                v33 <= -ONE_DOT_ZERO;
             end
             default:
             begin

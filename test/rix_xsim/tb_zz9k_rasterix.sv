@@ -19,9 +19,10 @@ module tb_zz9k_rasterix;
     localparam integer MINIGL_COLOR_MEMORY_BYTES = 3 * 1024 * 1024;
     localparam integer MINIGL_DEPTH_MEMORY_BYTES = 3 * 1024 * 1024;
     localparam integer TEXTURE_POOL_BYTES = 24 * 1024 * 1024;
-    // textures.hex: white and lightmap 8x8 pages plus the 256x256 ef-stress
-    // block texture (66 pages of 2 KiB at 0x00340000).
-    localparam integer TEXTURE_BYTES = 66 * 2048;
+    // textures.hex: white and lightmap 8x8 pages, the 256x256 ef-stress
+    // block texture and the 64x64 ef-texenv gradient (70 pages of 2 KiB at
+    // 0x00340000), one little-endian byte per line.
+    localparam integer TEXTURE_BYTES = 70 * 2048;
 
     reg clk;
     reg resetn;
@@ -168,6 +169,7 @@ module tb_zz9k_rasterix;
     reg [2:0] render_read_size;
     reg [31:0] write_addr;
     integer write_left;
+    reg [31:0] write_step;
     reg write_active;
     reg write_error;
     reg [5:0] write_id;
@@ -559,6 +561,9 @@ module tb_zz9k_rasterix;
             write_active <= 1;
             write_addr <= m_axi_awaddr;
             write_left <= m_axi_awlen + 1;
+            // AXI only defines AWSIZE during the AW handshake; latch the beat
+            // stride like the read model latches render_read_size.
+            write_step <= 32'd1 << m_axi_awsize;
             write_error <= 0;
             write_id <= m_axi_awid;
         end
@@ -577,7 +582,7 @@ module tb_zz9k_rasterix;
             if (m_axi_wstrb[5]) write_byte(write_addr + 5, m_axi_wdata[47:40]);
             if (m_axi_wstrb[6]) write_byte(write_addr + 6, m_axi_wdata[55:48]);
             if (m_axi_wstrb[7]) write_byte(write_addr + 7, m_axi_wdata[63:56]);
-            write_addr <= write_addr + (1 << m_axi_awsize);
+            write_addr <= write_addr + write_step;
             write_left <= write_left - 1;
             if (m_axi_wlast) begin
                 if (write_left != 1) $fatal(1, "early renderer WLAST left=%0d addr=%08x awlen=%0d", write_left, write_addr, m_axi_awlen);
