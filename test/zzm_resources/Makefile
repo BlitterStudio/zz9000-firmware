@@ -18,7 +18,4 @@ test: $(TARGET)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Dprintf=zzm_test_printf -o $@ $(SOURCES)
-
-clean:
-	rm -rf $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES)
