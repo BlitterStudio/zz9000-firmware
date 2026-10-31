@@ -33,6 +33,7 @@ typedef struct zzm_minigl_worker_ops {
 } zzm_minigl_worker_ops_t;
 
 
+
 typedef struct zzm_minigl_wire_open {
     uint32_t width;
     uint32_t height;
@@ -60,6 +61,17 @@ typedef struct zzm_minigl_ops_v1 {
     void (*app_unbind)(void *context);
     void (*app_reclaim)(void *context, uint32_t generation);
 } zzm_minigl_ops_v1_t;
+/* The generic v3 register_ops() callback carries this envelope rather than a
+ * bare function table, so the host can keep the module-owned context and
+ * worker lifetime coupled to the registered MiniGL ABI. */
+#define ZZM_MINIGL_REGISTRATION_V1 0x00010000U
+typedef struct zzm_minigl_registration_v1 {
+    uint32_t version;
+    uint32_t size;
+    const zzm_minigl_ops_v1_t *ops;
+    void *context;
+    const zzm_minigl_worker_ops_t *worker_ops;
+} zzm_minigl_registration_v1_t;
 
 typedef struct zzm_minigl_boot_caps {
     uint32_t version;
@@ -98,6 +110,10 @@ typedef struct zzm_graphics_hw {
  * contribute to the module loader's external-use reference count. */
 int zzm_minigl_register(const zzm_minigl_ops_v1_t *ops, void *context,
                         const zzm_minigl_worker_ops_t *worker_ops);
+
+/* Runtime v3 bridge for the generic register_ops callback. */
+int zzm_minigl_register_ops(uint32_t module_id, const void *ops,
+                            uint32_t ops_size);
 void zzm_minigl_unregister(void);
 const zzm_minigl_ops_v1_t *zzm_minigl_ops(void **context);
 int zzm_minigl_worker_registered(void);
