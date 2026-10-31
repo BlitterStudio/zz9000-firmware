@@ -7,6 +7,8 @@
 #include "mw_service.h"
 #include "mw_host.h"
 #include "mw_parse.h"
+#include "minigl_platform.h"
+
 #include "memorymap.h"
 #include "card_pool.h"
 #include <string.h>
@@ -14,7 +16,7 @@
 #include "minigl_raster.h"
 #include "minigl_profile.h"
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)
 #include "xil_cache.h"
 #include "xtime_l.h"
 #endif
@@ -39,16 +41,12 @@ typedef char mw_v9_reply_matches_window[
 
 #if defined(MINIGL_HOST_TEST)
 #define MW_DIAG(...) do { } while (0)
+#elif defined(MINIGL_MODULE)
+#define MW_DIAG(...) minigl_platform_logf(__VA_ARGS__)
 #else
 #define MW_DIAG(...) printf(__VA_ARGS__)
 #endif
 
-static const char *mw_backend_name(const mw_ctx *context)
-{
-    if (context && context->state.force_cpu)
-        return "cpu";
-    return minigl_raster_hardware_available() ? "rasterix" : "cpu";
-}
 
 static uint32_t mw_packet_first_opcode(const uint8_t *packet, uint32_t bytes)
 {
@@ -71,7 +69,9 @@ static uint32_t g_last_op_ms;
 
 static uint32_t mw_diag_now_ms(void)
 {
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if defined(MINIGL_MODULE)
+    return (uint32_t)(minigl_platform_time_us() / 1000U);
+#elif defined(__arm__) && !defined(MINIGL_HOST_TEST)
     XTime now;
 
     XTime_GetTime(&now);
@@ -142,8 +142,9 @@ void mw_service_set_host_vram(void *base, uint32_t limit_arm)
 }
 #endif
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-static void mw_service_cache_maintain_span(uint32_t arm_base, const uint8_t *req, uint32_t req_bytes, int is_flush)
+#if (defined(__arm__) && !defined(MINIGL_HOST_TEST)) || defined(MINIGL_MODULE)
+static void mw_service_cache_maintain_span(uint32_t arm_base, const uint8_t *req,
+                                           uint32_t req_bytes, int is_flush)
 {
     uint32_t format, bpp, pitch, count, i;
     if (req_bytes < 24)
@@ -166,15 +167,16 @@ static void mw_service_cache_maintain_span(uint32_t arm_base, const uint8_t *req
             continue;
         uint32_t row_bytes = (rx1 - rx0) * bpp;
         for (uint32_t y = ry0; y < ry1; ++y) {
-            UINTPTR address = (UINTPTR)(arm_base + (uint64_t)y * pitch + (uint64_t)rx0 * bpp);
+            uintptr_t address = (uintptr_t)(arm_base + (uint64_t)y * pitch +
+                                            (uint64_t)rx0 * bpp);
             if (is_flush)
-                Xil_DCacheFlushRange(address, row_bytes);
+                minigl_platform_cache_clean(NULL, address, row_bytes);
             else
-                Xil_DCacheInvalidateRange(address, row_bytes);
+                minigl_platform_cache_invalidate(NULL, address, row_bytes);
         }
     }
     if (is_flush)
-        __asm__ volatile ("dsb sy" ::: "memory");
+        minigl_platform_barrier(NULL);
 }
 #endif
 
@@ -467,6 +469,54 @@ int mw_service_has_work(void)
            (mw_wire_ld32(&g_ctrl->op_seq) != mw_wire_ld32(&g_ctrl->op_done_seq));
 }
 
+int mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
+                    uint32_t *handle)
+{
+    uint32_t slot;
+    uint32_t new_handle;
+    mw_ctx *context;
+
+    if (handle)
+        *handle = 0;
+    for (slot = 0; slot < MW_MAX_CONTEXTS; ++slot)
+        if (!g_contexts[slot])
+            break;
+    if (slot == MW_MAX_CONTEXTS)
+        return MW_STATUS_CAPACITY;
+
+    new_handle = (g_generation << 16) | (slot + 1U);
+    context = mw_host_create_owned(width, height,
+                                   CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL,
+                                                   new_handle));
+    if (!context)
+        return MW_STATUS_FAILED;
+    if (flags & 1U)
+        context->state.force_cpu = 1;
+    context->handle = new_handle;
+    g_contexts[slot] = context;
+    g_active_handle = new_handle;
+    if (handle)
+        *handle = new_handle;
+    return MW_STATUS_OK;
+}
+
+int mw_service_close(uint32_t handle)
+{
+    uint32_t slot = handle & 0xffffU;
+    mw_ctx *context;
+
+    if (slot < 1U || slot > MW_MAX_CONTEXTS)
+        return MW_STATUS_UNAVAILABLE;
+    context = g_contexts[slot - 1U];
+    if (!context || context->handle != handle)
+        return MW_STATUS_UNAVAILABLE;
+    mw_host_destroy(context);
+    g_contexts[slot - 1U] = NULL;
+    if (g_active_handle == handle)
+        g_active_handle = 0;
+    return MW_STATUS_OK;
+}
+
 void mw_service_reset_local(void)
 {
     uint32_t i;
@@ -656,47 +706,14 @@ int mw_service_poll(void)
         minigl_profile_count(MGLP_N_OPS, 1U);
         switch (op) {
         case 1: { /* CREATE: width = op_arg1, height = op_arg2 */
-            uint32_t width = mw_wire_ld32(&g_ctrl->op_arg1);
-            uint32_t height = mw_wire_ld32(&g_ctrl->op_arg2);
-            uint32_t slot;
-            mw_ctx *c;
+            uint32_t new_handle = 0;
+            uint32_t status = mw_service_open(mw_wire_ld32(&g_ctrl->op_arg1),
+                                              mw_wire_ld32(&g_ctrl->op_arg2),
+                                              mw_wire_ld32(&g_ctrl->op_arg3),
+                                              &new_handle);
 
-            /* Find empty slot */
-            for (slot = 0; slot < MW_MAX_CONTEXTS; ++slot) {
-                if (!g_contexts[slot])
-                    break;
-            }
-
-            if (slot < MW_MAX_CONTEXTS) {
-                uint32_t new_handle = (g_generation << 16) | (slot + 1U);
-                c = mw_host_create_owned(width, height,
-                    CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, new_handle));
-                if (c) {
-                    uint32_t flags = mw_wire_ld32(&g_ctrl->op_arg3);
-                    if (flags & 1U)
-                        c->state.force_cpu = 1;
-                    c->handle = new_handle;
-                    g_contexts[slot] = c;
-                    g_active_handle = new_handle;
-                    mw_wire_st32(&g_ctrl->op_reply_handle, new_handle);
-                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_OK);
-                    const char *backend = mw_backend_name(c);
-                    (void)backend;
-                    MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=%s\n",
-                            (unsigned long)new_handle, (unsigned long)width,
-                            (unsigned long)height, backend);
-                } else {
-                    mw_wire_st32(&g_ctrl->op_reply_handle, 0);
-                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_FAILED);
-                    MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=none\n",
-                            0UL, (unsigned long)width, (unsigned long)height);
-                }
-            } else {
-                mw_wire_st32(&g_ctrl->op_reply_handle, 0);
-                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_CAPACITY);
-                MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=none\n",
-                        0UL, (unsigned long)width, (unsigned long)height);
-            }
+            mw_wire_st32(&g_ctrl->op_reply_handle, new_handle);
+            mw_wire_st32(&g_ctrl->op_status, status);
             break;
         }
 
@@ -726,37 +743,9 @@ int mw_service_poll(void)
             break;
         }
 
-        case 4: { /* DESTROY: op_handle */
-            uint32_t slot = (handle & 0xffffU);
-            if (slot >= 1U && slot <= MW_MAX_CONTEXTS) {
-                mw_ctx *c = g_contexts[slot - 1U];
-                if (c && c->handle == handle) {
-                    uint32_t width = c->width;
-                    uint32_t height = c->height;
-                    const char *backend = mw_backend_name(c);
-                    (void)width;
-                    (void)height;
-                    (void)backend;
-                    mw_host_destroy(c);
-                    g_contexts[slot - 1U] = NULL;
-                    if (g_active_handle == handle)
-                        g_active_handle = 0;
-                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_OK);
-                    MW_DIAG("[MGL9] destroy handle=%08lx size=%lux%lu backend=%s\n",
-                            (unsigned long)handle, (unsigned long)width,
-                            (unsigned long)height, backend);
-                } else {
-                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
-                    MW_DIAG("[MGL9] destroy handle=%08lx size=0x0 backend=none\n",
-                            (unsigned long)handle);
-                }
-            } else {
-                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
-                MW_DIAG("[MGL9] destroy handle=%08lx size=0x0 backend=none\n",
-                        (unsigned long)handle);
-            }
+        case 4: /* DESTROY: op_handle */
+            mw_wire_st32(&g_ctrl->op_status, mw_service_close(handle));
             break;
-        }
 
         case 5: { /* REQUEST: op_handle, op_arg1 = req bytes, op_arg3 = reply capacity */
             mw_ctx *c = mw_service_find_context(handle);
@@ -797,7 +786,10 @@ int mw_service_poll(void)
                 } else if (req_bytes < 24) {
                     mw_wire_st32(&g_ctrl->op_status, MW_STATUS_INVALID);
                 } else {
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if defined(MINIGL_MODULE)
+                    minigl_platform_cache_invalidate(NULL, (uintptr_t)g_reply_ptr,
+                                                      req_bytes);
+#elif defined(__arm__) && !defined(MINIGL_HOST_TEST)
                     Xil_DCacheInvalidateRange((INTPTR)g_reply_ptr, req_bytes);
 #endif
                     uint32_t req_id = mw_be32(g_reply_ptr);
@@ -811,10 +803,10 @@ int mw_service_poll(void)
                         uint8_t *span = (uint8_t *)(uintptr_t)arm;
 #endif
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-                        if (req_id == MW_CAPTURE) {
-                            mw_service_cache_maintain_span(arm, g_reply_ptr, req_bytes, 0 /* invalidate */);
-                        }
+#if (defined(__arm__) && !defined(MINIGL_HOST_TEST)) || defined(MINIGL_MODULE)
+                        if (req_id == MW_CAPTURE)
+                            mw_service_cache_maintain_span(arm, g_reply_ptr,
+                                                           req_bytes, 0);
 #endif
                         uint32_t reply_written = 0;
                         uint32_t status = mw_host_request(c, g_reply_ptr, req_bytes,
@@ -822,10 +814,10 @@ int mw_service_poll(void)
                         mw_wire_st32(&g_ctrl->op_status, status);
                         mw_wire_st32(&g_ctrl->op_reply_bytes, reply_written);
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-                        if (req_id == MW_BLIT && status == MW_STATUS_OK) {
-                            mw_service_cache_maintain_span(arm, g_reply_ptr, req_bytes, 1 /* clean + dsb */);
-                        }
+#if (defined(__arm__) && !defined(MINIGL_HOST_TEST)) || defined(MINIGL_MODULE)
+                        if (req_id == MW_BLIT && status == MW_STATUS_OK)
+                            mw_service_cache_maintain_span(arm, g_reply_ptr,
+                                                           req_bytes, 1);
 #endif
                     }
                 }

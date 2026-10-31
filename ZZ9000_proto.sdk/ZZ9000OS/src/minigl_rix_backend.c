@@ -4,16 +4,21 @@
  */
 #include "minigl_rix_backend.h"
 #include "rix_texture.h"
+#include "minigl_platform.h"
 #include "minigl_profile.h"
 
-#if !defined(MINIGL_HOST_TEST) && !defined(MINIGL_SERVICE_HOST_TEST)
-#include "xil_io.h"
-#include "xil_printf.h"
-#define RIX_LOG(...) xil_printf(__VA_ARGS__)
-#define RIX_PS_DIAGNOSTICS 1
-#else
+#if defined(MINIGL_HOST_TEST) || defined(MINIGL_SERVICE_HOST_TEST)
 void (*g_rix_test_log)(const char *fmt, ...) = NULL;
 #define RIX_LOG(...) do { if (g_rix_test_log) g_rix_test_log(__VA_ARGS__); } while (0)
+#else
+#define RIX_LOG(...) minigl_platform_logf(__VA_ARGS__)
+#endif
+
+#if !defined(MINIGL_HOST_TEST) && !defined(MINIGL_SERVICE_HOST_TEST) && \
+    !defined(MINIGL_MODULE)
+#include "xil_io.h"
+#define RIX_PS_DIAGNOSTICS 1
+#else
 #define RIX_PS_DIAGNOSTICS 0
 #endif
 

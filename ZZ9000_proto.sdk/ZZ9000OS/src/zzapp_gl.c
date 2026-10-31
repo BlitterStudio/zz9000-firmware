@@ -104,10 +104,10 @@ typedef struct zzapp_gl {
     int32_t (*Build2DMipmaps)(uint32_t target, int32_t internalFormat, int32_t width, int32_t height, uint32_t format, uint32_t type, const void *data);
 } zzapp_gl;
 #endif
+#include "minigl_platform.h"
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-#include "xil_cache.h"
-#endif
+
+
 
 extern int amiberry_inproc_open(uint32_t width, uint32_t height);
 extern void amiberry_inproc_close(void);
@@ -176,7 +176,49 @@ extern void GLHint(GLcontext, GLenum, GLenum);
 extern void GLPixelStorei(GLcontext, GLenum, GLint);
 extern void GLUPerspective(GLfloat, GLfloat, GLfloat, GLfloat);
 extern GLint GLUBuild2DMipmaps(GLcontext, GLenum, GLint, GLsizei, GLsizei, GLenum, GLenum, const GLvoid *);
+#if defined(MINIGL_MODULE)
+#include "zzm_runtime.h"
 
+static const zzm_app_gl_host_service_t *g_module_app_host;
+
+int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
+{
+    if (!host || !host->api_enter || !host->api_leave ||
+        !host->bound_display || !host->flip_bound || !host->generation)
+        return ZZ_EINVAL;
+    g_module_app_host = host;
+    return ZZ_OK;
+}
+
+void zzapp_api_enter(void)
+{
+    g_module_app_host->api_enter();
+}
+
+void zzapp_api_leave(void)
+{
+    g_module_app_host->api_leave();
+}
+
+int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
+                        uint32_t *format, uint32_t *card_front,
+                        uint32_t *card_back)
+{
+    return g_module_app_host->bound_display(w, h, pitch, format, card_front,
+                                             card_back);
+}
+
+int zzapp_display_flip_bound(void)
+{
+    return g_module_app_host->flip_bound(g_module_app_host->generation());
+}
+
+int zzapp_svc_display_flip(uint32_t surface_id)
+{
+    (void)surface_id;
+    return zzapp_display_flip_bound();
+}
+#else
 __attribute__((weak)) void zzapp_api_enter(void) {}
 __attribute__((weak)) void zzapp_api_leave(void) {}
 
@@ -198,6 +240,7 @@ __attribute__((weak)) int zzapp_svc_display_flip(uint32_t surface_id)
     (void)surface_id;
     return zzapp_display_flip_bound();
 }
+#endif
 
 #if defined(MINIGL_HOST_TEST)
 static uint8_t *g_test_p96;
@@ -522,10 +565,8 @@ void zzapp_gl_swap(void)
     if (!copy_bound(src, rgb565, minigl_raster_present_is_bottom_up(),
                     w, h, pitch, format, card))
         goto done;
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-    Xil_DCacheFlushRange((INTPTR)card, pitch * h);
-    __asm__ volatile ("dsb sy" ::: "memory");
-#endif
+    minigl_platform_cache_clean(NULL, card, pitch * h);
+    minigl_platform_barrier(NULL);
     (void)zzapp_svc_display_flip(g_surface_id);
 done:
     zzapp_api_leave();

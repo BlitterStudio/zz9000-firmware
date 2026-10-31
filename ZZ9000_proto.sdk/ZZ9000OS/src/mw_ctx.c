@@ -11,9 +11,14 @@
 #include "minigl_raster.h"
 #include "minigl_profile.h"
 #include "minigl_lighting.h"
+#include "minigl_platform.h"
+
 #include "card_pool.h"
 #include "sdk_palette.h"
 #include "memorymap.h"
+#if defined(MINIGL_MODULE)
+#include "zzm_runtime.h"
+#endif
 #include <stdlib.h>
 #include <math.h>
 
@@ -72,7 +77,41 @@ static void mw_ctx_set_error(mw_ctx *c, uint32_t error)
         c->error = error;
 }
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+static uint32_t mw_palette_generation(void)
+{
+#if defined(MINIGL_MODULE)
+    const zzm_palette_service_t *palette = zzm_rt_get_service(
+        ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
+    return palette && palette->generation ? palette->generation() : 0U;
+#else
+    return sdk_palette_generation();
+#endif
+}
+
+static int mw_palette_snapshot(uint32_t entries[SDK_PALETTE_ENTRIES],
+                               uint32_t *generation)
+{
+#if defined(MINIGL_MODULE)
+    const zzm_palette_service_t *palette = zzm_rt_get_service(
+        ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
+    return palette && palette->snapshot && palette->snapshot(entries, generation);
+#else
+    return sdk_palette_snapshot(entries, generation);
+#endif
+}
+
+static uint32_t mw_palette_get(uint32_t index)
+{
+#if defined(MINIGL_MODULE)
+    const zzm_palette_service_t *palette = zzm_rt_get_service(
+        ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
+    return palette && palette->lookup ? palette->lookup(index) : 0U;
+#else
+    return sdk_palette_get(index);
+#endif
+}
+
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)
 #define MW_CONTEXT_CARD_POOL 1
 #else
 #define MW_CONTEXT_CARD_POOL 0
@@ -202,7 +241,7 @@ static int mw_ctx_grow_texture_pool(void *context, uint32_t minimum_bytes,
     return 1;
 }
 
-#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)
 
 static uint32_t mw_rix_csr_read(void *context, uint32_t offset)
 {
@@ -490,6 +529,165 @@ unavailable:
     mw_ctx_release_rix(c);
     minigl_raster_set_rix_platform(NULL);
 }
+#elif defined(MINIGL_RASTERIX) && defined(MINIGL_MODULE)
+static uint32_t mw_rix_csr_read(void *context, uint32_t offset)
+{
+    return minigl_platform_csr_read(context, offset);
+}
+
+static void mw_rix_csr_write(void *context, uint32_t offset, uint32_t value)
+{
+    minigl_platform_csr_write(context, offset, value);
+}
+
+static uint32_t mw_rix_fifo_read(void *context, uint32_t offset)
+{
+    return minigl_platform_fifo_read(context, offset);
+}
+
+static void mw_rix_fifo_write(void *context, uint32_t offset, uint32_t value)
+{
+    minigl_platform_fifo_write(context, offset, value);
+}
+
+static void mw_rix_fifo_write_words(void *context, const uint32_t *words,
+                                    uint32_t count)
+{
+    minigl_platform_fifo_write_words(context, words, count);
+}
+
+static void mw_rix_fifo_drain(void *context)
+{
+    minigl_platform_barrier(context);
+}
+
+static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
+                             uint32_t burst_words)
+{
+    return minigl_platform_dma_stream(context, source, words, burst_words);
+}
+
+static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
+{
+    minigl_platform_cache_clean(context, address, bytes);
+}
+
+static void mw_rix_cache_invalidate(void *context, uintptr_t address,
+                                    size_t bytes)
+{
+    minigl_platform_cache_invalidate(context, address, bytes);
+}
+
+static int mw_ctx_grow_rix_texture_pool(void *context, size_t minimum_bytes,
+                                        uint8_t **memory, uintptr_t *address,
+                                        size_t *bytes)
+{
+    mw_ctx *c = (mw_ctx *)context;
+    uint32_t new_bytes = c->rix_texture_pool_bytes;
+    uint32_t new_address = 0U;
+    uint8_t *new_pool;
+
+    if (minimum_bytes > MINIGL_RIX_TEXTURE_POOL_MAX_BYTES)
+        return 0;
+    if (new_bytes == 0U)
+        new_bytes = MINIGL_RIX_TEXTURE_POOL_INITIAL_BYTES;
+    while (new_bytes < minimum_bytes) {
+        if (new_bytes > MINIGL_RIX_TEXTURE_POOL_MAX_BYTES -
+                        MINIGL_TEXTURE_ARENA_GROW_BYTES) {
+            new_bytes = MINIGL_RIX_TEXTURE_POOL_MAX_BYTES;
+            break;
+        }
+        new_bytes += MINIGL_TEXTURE_ARENA_GROW_BYTES;
+    }
+    new_pool = (uint8_t *)mw_context_alloc_uninitialized(c, new_bytes,
+                                                          &new_address);
+    if (!new_pool)
+        return 0;
+    if (c->rix_texture_pool) {
+        memcpy(new_pool, c->rix_texture_pool, c->rix_texture_pool_bytes);
+        mw_rix_cache_clean(NULL, (uintptr_t)new_pool,
+                           c->rix_texture_pool_bytes);
+        mw_context_free(c, c->rix_texture_pool, &c->rix_texture_pool_address);
+    }
+    c->rix_texture_pool = new_pool;
+    c->rix_texture_pool_address = new_address;
+    c->rix_texture_pool_bytes = new_bytes;
+    *memory = new_pool;
+    *address = new_address;
+    *bytes = new_bytes;
+    return 1;
+}
+
+static void mw_ctx_release_rix(mw_ctx *c)
+{
+    unsigned index;
+
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        if (c->rix_command_buffers[index]) {
+            mw_context_free(c, c->rix_command_buffers[index],
+                            &c->rix_command_buffer_addresses[index]);
+            c->rix_command_buffers[index] = NULL;
+        }
+    }
+    if (c->rix_white_texture) {
+        mw_context_free(c, c->rix_white_texture, &c->rix_white_texture_address);
+        c->rix_white_texture = NULL;
+    }
+    if (c->rix_texture_pool) {
+        mw_context_free(c, c->rix_texture_pool, &c->rix_texture_pool_address);
+        c->rix_texture_pool = NULL;
+        c->rix_texture_pool_bytes = 0U;
+    }
+    c->rix_enabled = 0U;
+}
+
+static void mw_ctx_configure_rix(mw_ctx *c)
+{
+    MiniGLRixPlatform platform;
+    unsigned index;
+
+    if (!minigl_platform_has_rasterix())
+        return;
+    memset(&platform, 0, sizeof(platform));
+    platform.context = c;
+    platform.csr_read = mw_rix_csr_read;
+    platform.csr_write = mw_rix_csr_write;
+    platform.fifo_read = mw_rix_fifo_read;
+    platform.fifo_write = mw_rix_fifo_write;
+    platform.fifo_write_words = mw_rix_fifo_write_words;
+    platform.fifo_drain = mw_rix_fifo_drain;
+    platform.dma_stream = mw_rix_dma_stream;
+    platform.cache_clean = mw_rix_cache_clean;
+    platform.cache_invalidate = mw_rix_cache_invalidate;
+    if (!minigl_rix_backend_probe_platform(&platform)) {
+        minigl_raster_set_rix_platform(NULL);
+        return;
+    }
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        c->rix_command_buffers[index] = (uint8_t *)mw_context_alloc(
+            c, MINIGL_RIX_COMMAND_BYTES, &c->rix_command_buffer_addresses[index]);
+        if (!c->rix_command_buffers[index])
+            goto unavailable;
+        platform.command_buffer[index] = c->rix_command_buffers[index];
+        platform.command_address[index] = c->rix_command_buffer_addresses[index];
+    }
+    c->rix_white_texture = (uint8_t *)mw_context_alloc(
+        c, MINIGL_RIX_WHITE_TEXTURE_BYTES, &c->rix_white_texture_address);
+    if (!c->rix_white_texture)
+        goto unavailable;
+    platform.command_capacity = MINIGL_RIX_COMMAND_BYTES;
+    platform.white_texture = c->rix_white_texture;
+    platform.white_texture_address = c->rix_white_texture_address;
+    platform.white_texture_bytes = MINIGL_RIX_WHITE_TEXTURE_BYTES;
+    platform.grow_texture_pool = mw_ctx_grow_rix_texture_pool;
+    minigl_raster_set_rix_platform(&platform);
+    c->rix_enabled = 1U;
+    return;
+
+unavailable:
+    mw_ctx_release_rix(c);
+    minigl_raster_set_rix_platform(NULL);
+}
 #else
 static void mw_ctx_release_rix(mw_ctx *c)
 {
@@ -502,9 +700,10 @@ static void mw_ctx_configure_rix(mw_ctx *c)
 }
 #endif
 
+
 void mw_rix_abort_engines(void)
 {
-#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)
 #if MINIGL_RIX_DMA
     /* One debug instruction. Do not poll: core 0 must not wait on the DMAC. */
     Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
@@ -516,6 +715,8 @@ void mw_rix_abort_engines(void)
     Xil_Out32(MINIGL_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
     Xil_Out32(MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     __asm__ volatile("dsb sy" ::: "memory");
+#elif defined(MINIGL_RASTERIX) && defined(MINIGL_MODULE)
+    minigl_platform_abort_graphics();
 #endif
     minigl_raster_abandon();
 }
@@ -1646,12 +1847,12 @@ static void mw_letterbox_rect(uint32_t width, uint32_t height,
 static void mw_refresh_presented_clut(mw_ctx *c)
 {
     uint32_t palette[SDK_PALETTE_ENTRIES];
-    uint32_t generation = sdk_palette_generation();
+    uint32_t generation = mw_palette_generation();
     uint32_t r5, g5, b5;
 
     if (!(generation & 1U) && c->presented_clut_generation == generation)
         return;
-    if (!sdk_palette_snapshot(palette, &generation))
+    if (!mw_palette_snapshot(palette, &generation))
         return;
 
     for (r5 = 0; r5 < 32U; ++r5) {
@@ -1682,7 +1883,7 @@ static void mw_refresh_presented_clut(mw_ctx *c)
             }
         }
     }
-    if (sdk_palette_generation() != generation)
+    if (mw_palette_generation() != generation)
         return;
     memcpy(c->presented_clut, g_presented_clut_staging,
            sizeof(c->presented_clut));
@@ -1776,7 +1977,7 @@ static inline void mw_decode_pixel(uint32_t format, const uint8_t *d, uint8_t *o
 {
     switch (format) {
     case 1: { /* RGBFB_CLUT */
-        const uint32_t xrgb = sdk_palette_get(d[0]);
+        const uint32_t xrgb = mw_palette_get(d[0]);
         o[0] = (uint8_t)(xrgb >> 16);
         o[1] = (uint8_t)(xrgb >> 8);
         o[2] = (uint8_t)xrgb;
@@ -2028,12 +2229,10 @@ uint32_t mw_host_present_span(mw_ctx *c, const uint8_t *payload, uint32_t bytes)
     span = g_present_vram_base ? g_present_vram_base + card_offset :
                                  (uint8_t *)(uintptr_t)arm;
     status = mw_blit(c, payload, request_bytes, span, span_bytes);
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
     if (status == MW_STATUS_OK) {
-        Xil_DCacheFlushRange((INTPTR)span, span_bytes);
-        __asm__ volatile ("dsb sy" ::: "memory");
+        minigl_platform_cache_clean(NULL, (uintptr_t)span, span_bytes);
+        minigl_platform_barrier(NULL);
     }
-#endif
     return status;
 }
 

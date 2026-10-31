@@ -1,25 +1,25 @@
 /*
  * MiniGL wire-v9 pipeline stage profiler (see minigl_profile.h).
  *
- * Clock: the Cortex-A9 global timer (XTime_GetTime, COUNTS_PER_SECOND =
- * CPU clock / 2). Single writer: the core running mw_service_poll (the
- * MiniGL worker, or core 0 when no worker exists; never both at once).
+ * Clock: the service-owned monotonic microsecond clock. Single writer: the
+ * core running mw_service_poll (the MiniGL worker, or core 0 when no worker
+ * exists; never both at once).
  *
- * The summary printf blocks the worker for the length of the line on the
- * polled UART, so it runs between windows: its own duration is reported
+ * The rate-limited summary runs between windows: its own duration is reported
  * in the next line as log= and never lands in a stage.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "minigl_profile.h"
 #include "minigl_renderer.h"
+
+#include "minigl_platform.h"
 #if defined(MINIGL_PROFILE_ACTIVE)
 #include <stdio.h>
 #include <string.h>
-#include "xtime_l.h"
 
 #define MGLP_STACK_DEPTH 16U
-#define MGLP_WINDOW_TICKS (5ULL * (uint64_t)COUNTS_PER_SECOND)
+#define MGLP_WINDOW_TICKS (5ULL * 1000000ULL)
 
 volatile int g_minigl_profile_on;
 uint32_t g_minigl_profile_counts[MGLP_COUNTERS];
@@ -44,10 +44,7 @@ static struct {
 
 static uint64_t mglp_now(void)
 {
-    XTime now;
-
-    XTime_GetTime(&now);
-    return (uint64_t)now;
+    return minigl_platform_time_us();
 }
 
 static void mglp_charge(void)
@@ -152,7 +149,7 @@ void minigl_profile_fallback(uint32_t reason, uint32_t triangles)
 /* Tenths of a millisecond, divided over count events (0 = total). */
 static uint32_t mglp_tenth_ms(uint64_t ticks, uint32_t count)
 {
-    uint64_t value = ticks * 10000U / (uint64_t)COUNTS_PER_SECOND;
+    uint64_t value = ticks / 100U;
 
     if (count != 0U)
         value /= count;
@@ -242,9 +239,8 @@ void minigl_profile_report(void)
                           g_mglp.ticks[MGLP_IDLE], g_mglp.packets);
     used = mglp_append_ms(line, used, sizeof(line), " | max=",
                           g_mglp.packet_max, 0U);
-    (void)mglp_append_ms(line, used, sizeof(line), " log=", g_mglp.last_log, 0U);
-    /* One printf per line: the UART is shared with core 0 unarbitrated. */
-    printf("%s ms\n", line);
+    /* One rate-limited line: core 0 and the worker share the UART. */
+    minigl_platform_log(line);
     mglp_window_reset();
     g_mglp.last_log = g_mglp.mark - print_start;
 }

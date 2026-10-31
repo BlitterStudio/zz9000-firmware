@@ -17,6 +17,16 @@
 
 #include <stdint.h>
 
+#if defined(MINIGL_MODULE)
+#include "zzm_runtime.h"
+
+/* Set once by the module entry before the transport is acquired. */
+int minigl_transport_set_module_services(
+    const zzm_host_window_service_t *host_window,
+    const zzm_transport_service_t *transport, uint32_t owner);
+void minigl_transport_fini(void);
+#endif
+
 /* Allocate + bind + publish. 0 on success, nonzero when unavailable. */
 int minigl_transport_init(void);
 

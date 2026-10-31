@@ -5,7 +5,7 @@
  */
 
 #include "mw_texture.h"
-#if (defined(__arm__) && !defined(MINIGL_HOST_TEST)) || defined(MINIGL_CARD_POOL_TEST)
+#if (defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)) || defined(MINIGL_CARD_POOL_TEST)
 #include "card_pool.h"
 #define MW_TEXMGR_CARD_POOL 1
 #else

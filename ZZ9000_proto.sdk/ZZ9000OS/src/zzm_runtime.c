@@ -26,7 +26,6 @@ extern int zzm_test_printf(const char *format, ...);
 #define ZZM_RUNTIME_LOG printf
 #endif
 
-
 #define ZZM_RUNTIME_MAX_OWNERS 32U
 #define ZZM_RUNTIME_MAX_WINDOWS 4U
 #define ZZM_RUNTIME_MAX_COUNTERS 16U
