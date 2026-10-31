@@ -229,6 +229,14 @@ static void yield_once(void)
 		zzapp_host_yield();
 }
 
+static void yield_wait_once(void)
+{
+	if (yield_hook)
+		yield_hook();
+	else
+		zzapp_host_yield_wait();
+}
+
 static uint64_t now_us(void)
 {
 	if (time_hook)
@@ -508,7 +516,7 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 			return ZZ_ETIMEDOUT;
 		/* File completion polling holds no GL lock, so it is an intentional
 		 * service-tick exception while its enclosing API remains active. */
-		zzapp_host_yield_wait();
+		yield_wait_once();
 	}
 }
 
