@@ -121,10 +121,13 @@ int zzm_minigl_register(const zzm_minigl_ops_v1_t *ops, void *context,
 {
     if (ops == 0 || worker_ops == 0 || ops->version != ZZM_MINIGL_OPS_V1 ||
         worker_ops->version != ZZM_MINIGL_WORKER_OPS_V1 ||
-        !table_has(ops->size, offsetof(zzm_minigl_ops_v1_t, fini) + sizeof(ops->fini)) ||
+        !table_has(ops->size, offsetof(zzm_minigl_ops_v1_t, app_reclaim) +
+                              sizeof(ops->app_reclaim)) ||
         !table_has(worker_ops->size, offsetof(zzm_minigl_worker_ops_t, poll) +
                                       sizeof(worker_ops->poll)) ||
-        worker_ops->has_work == 0 || worker_ops->poll == 0) {
+        worker_ops->has_work == 0 || worker_ops->poll == 0 ||
+        ops->app_bind == 0 || ops->app_swap == 0 || ops->app_unbind == 0 ||
+        ops->app_reclaim == 0) {
         return 0;
     }
     if (g_ops != 0)

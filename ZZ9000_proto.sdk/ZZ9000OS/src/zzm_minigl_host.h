@@ -55,7 +55,7 @@ typedef struct zzm_minigl_ops_v1 {
     void (*abort_reset)(void *context);
     int (*begin_unload)(void *context);
     void (*fini)(void *context);
-    int (*app_bind)(void *context, void *surface, const void **out_gl);
+    int (*app_bind)(void *context, uint32_t surface_id, const void **out_gl);
     int (*app_swap)(void *context);
     void (*app_unbind)(void *context);
     void (*app_reclaim)(void *context, uint32_t generation);
