@@ -33,6 +33,8 @@ void card_pool_init(card_pool_t *pool)
     pool->class_limit[CARD_POOL_CLASS_MEDIA] = CARD_POOL_LIMIT_MEDIA;
     pool->class_limit[CARD_POOL_CLASS_MEDIA_INPUT] =
         CARD_POOL_LIMIT_MEDIA_INPUT;
+    pool->class_limit[CARD_POOL_CLASS_SDK_SURFACE] =
+        CARD_POOL_LIMIT_SDK_SURFACE;
     pool->class_limit[CARD_POOL_CLASS_CONSOLE] = CARD_POOL_LIMIT_CONSOLE;
     pool->class_limit[CARD_POOL_CLASS_MINIGL] = CARD_POOL_LIMIT_MINIGL;
     pool->class_limit[CARD_POOL_CLASS_IMAGE] = CARD_POOL_LIMIT_IMAGE;
