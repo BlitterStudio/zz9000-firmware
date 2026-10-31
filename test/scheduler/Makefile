@@ -43,8 +43,9 @@ LZH_DECODE_CONTRACT_DEPS := $(SRC_DIR)/lzh/zz9k_lzh.h
 
 .PHONY: test clean host smp_lock offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract
 
-test: $(TARGET)
+test: $(TARGET) $(HOST_TARGET)
 	$(TARGET)
+	$(HOST_TARGET)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
