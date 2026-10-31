@@ -561,3 +561,24 @@ No further architectural decision is required to begin ABI v3 and the module
 host build. The wire-v9 protocol, single MiniGL implementation, ARM app GL
 through the module, CPU fallback, and firmware ownership of the doorbell,
 boot configuration, and reset coordination are fixed by this design.
+
+## Confirmed decisions (maintainer, 2026-11-01)
+
+1. Option A: the library repository builds `MINIGL.ZZM` from a pinned public
+   firmware revision (backend sources and module SDK) plus its own front end.
+2. Every published module binary has a source tarball attached to the same
+   GitHub release: pinned firmware commit, front-end files, build files and
+   the source manifest.
+3. 4 MiB fixed slot as the gate; if the linked module exceeds it, one fixed
+   8 MiB manifest layout. No relocatable or variable placement.
+4. On demand after a header-only boot scan; pinned while any 68k transport
+   lease or app context holds it; 30-second idle unload afterwards; Amiga reset
+   releases it.
+5. One module for both images: CPU rendering on standard firmware, RasterIX
+   only when the image capability record reports the EF RasterIX CSR ABI.
+6. Missing or mismatched module: public app `gl_bind` returns `NULL` (internal
+   `ZZ_ENOSYS`) and 68k clients get the existing unavailable result. No
+   resident fallback.
+7. ARM and host builds compile out the quadric include in `amiberry_glu.c`
+   (stubs already exist), so the module's GPL source set does not depend on
+   the PolyForm-only `amiberry_glu_quad.h`.
