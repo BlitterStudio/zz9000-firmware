@@ -6686,6 +6686,20 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		(void)zzm_loader_load_on_owner(module_id);
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_MINIGL_MODULE_ACQUIRE: {
+		uint32_t generation = 0U;
+
+		*result_len = 0U;
+		if (!zzm_loader_acquire(ZZM_MODULE_MINIGL))
+			return SDK_STATUS_MODULE_MISSING;
+		if (!zzm_minigl_transport_acquire(&generation)) {
+			zzm_loader_release(ZZM_MODULE_MINIGL);
+			return SDK_STATUS_MODULE_MISMATCH;
+		}
+		put_be32(result_payload, generation);
+		*result_len = sizeof(generation);
+		return SDK_STATUS_OK;
+	}
 	case SDK_OP_IMAGE_SESSION_BEGIN: {
 		const struct image_begin_op_params *p =
 		    (const struct image_begin_op_params *)d->op_params;
@@ -8562,6 +8576,7 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 	case SDK_OP_APP_LOAD_CHUNK:
 	case SDK_OP_APP_LOAD_END:
 	case SDK_OP_APP_START:
+	case SDK_OP_MINIGL_MODULE_ACQUIRE:
 		return 1;
 	default:
 		return 0;
@@ -8769,27 +8784,23 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		memcpy((void *)reply->name, status.name, sizeof(reply->name));
 		return SDK_STATUS_OK;
 	}
-	case SDK_OP_MINIGL_MODULE_ACQUIRE: {
-		uint32_t generation;
-		zzm_status_t status;
+	case SDK_OP_MINIGL_MODULE_ACQUIRE:
 		if (payload_len != 0U)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-		if (!sdk_aperture_runtime_is_zorro3())
+		if (!sdk_aperture_runtime_is_zorro3() || !scheduler_core1_available())
 			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-		if (!zzm_loader_acquire(ZZM_MODULE_MINIGL)) {
-			if (zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status) &&
-			    status.state == ZZM_STATE_LOADING)
+		{
+			taskq_shared_t *sh = scheduler_shared();
+			int slot = taskq_enqueue(&sh->queue, SDK_OP_MINIGL_MODULE_ACQUIRE,
+			                         TASK_LONG, 0U, 0U, 0U, 0U,
+			                         get_be32(req->request_id),
+			                         get_be32(req->user_cookie), 0, 0U);
+			if (slot < 0)
 				return complete_status(req, comp, SDK_STATUS_BUSY);
-			return complete_status(req, comp, SDK_STATUS_MODULE_MISSING);
+			g_task_generation[slot] = sdk_mailbox_generation;
+			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			return SDK_STATUS_QUEUED;
 		}
-		if (!zzm_minigl_transport_acquire(&generation)) {
-			zzm_loader_release(ZZM_MODULE_MINIGL);
-			return complete_status(req, comp, SDK_STATUS_MODULE_MISMATCH);
-		}
-		write_completion(comp, req, SDK_STATUS_OK, sizeof(generation));
-		put_be32(comp->payload, generation);
-		return SDK_STATUS_OK;
-	}
 	case SDK_OP_MINIGL_MODULE_RELEASE:
 		if (payload_len != 0U)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
