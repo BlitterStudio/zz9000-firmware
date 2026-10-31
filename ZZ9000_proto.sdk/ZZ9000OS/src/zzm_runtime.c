@@ -19,6 +19,13 @@ extern const void *zzm_minigl_host_get_service(uint32_t id,
 
 extern int zzm_minigl_register_ops(uint32_t module_id, const void *ops,
                                    uint32_t ops_size) __attribute__((weak));
+#ifdef MINIGL_HOST_TEST
+extern int zzm_test_printf(const char *format, ...);
+#define ZZM_RUNTIME_LOG zzm_test_printf
+#else
+#define ZZM_RUNTIME_LOG printf
+#endif
+
 
 #define ZZM_RUNTIME_MAX_OWNERS 32U
 #define ZZM_RUNTIME_MAX_WINDOWS 4U
@@ -340,12 +347,12 @@ static int module_instruction_sync_owned(uint32_t owner, uint32_t address,
 
 static void module_log(const char *message)
 {
-    printf("[ZZM] %s\n", message ? message : "");
+    ZZM_RUNTIME_LOG("[ZZM] %s\n", message ? message : "");
 }
 
 static void module_fault(const char *reason)
 {
-    printf("[ZZM] module fault: %s\n", reason ? reason : "");
+    ZZM_RUNTIME_LOG("[ZZM] module fault: %s\n", reason ? reason : "");
 }
 
 static void module_fault_by_id(uint32_t module_id, const char *reason)
@@ -382,7 +389,7 @@ static void module_log_limited(uint32_t module_id, uint32_t level,
         state->module_id = module_id;
     if (now - state->window_start >= 1000000U) {
         if (state->suppressed != 0U)
-            printf("[ZZM] module %lu: suppressed %lu logs\n",
+            ZZM_RUNTIME_LOG("[ZZM] module %lu: suppressed %lu logs\n",
                    (unsigned long)module_id, (unsigned long)state->suppressed);
         state->window_start = now;
         state->emitted = 0U;
@@ -549,7 +556,7 @@ uint32_t zzm_runtime_release_module(uint32_t module_id)
     for (i = 0U; i < sizeof(classes) / sizeof(classes[0]); i++)
         released += module_release_owner(module_card_owner(owner, classes[i]));
     if (released)
-        printf("[ZZM] module %lu reclaimed %lu bytes\n",
+        ZZM_RUNTIME_LOG("[ZZM] module %lu reclaimed %lu bytes\n",
                (unsigned long)module_id, (unsigned long)released);
     return released;
 }
