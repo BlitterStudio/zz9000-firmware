@@ -14,6 +14,9 @@
 #include "card_pool.h"
 #include "sdk_palette.h"
 #include "memorymap.h"
+#if defined(MINIGL_MODULE)
+#include "zzm_runtime.h"
+#endif
 #include <stdlib.h>
 #include <math.h>
 
@@ -72,7 +75,41 @@ static void mw_ctx_set_error(mw_ctx *c, uint32_t error)
         c->error = error;
 }
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+static uint32_t mw_palette_generation(void)
+{
+#if defined(MINIGL_MODULE)
+    const zzm_palette_service_t *palette = zzm_rt_get_service(
+        ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
+    return palette && palette->generation ? palette->generation() : 0U;
+#else
+    return sdk_palette_generation();
+#endif
+}
+
+static int mw_palette_snapshot(uint32_t entries[SDK_PALETTE_ENTRIES],
+                               uint32_t *generation)
+{
+#if defined(MINIGL_MODULE)
+    const zzm_palette_service_t *palette = zzm_rt_get_service(
+        ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
+    return palette && palette->snapshot && palette->snapshot(entries, generation);
+#else
+    return sdk_palette_snapshot(entries, generation);
+#endif
+}
+
+static uint32_t mw_palette_get(uint32_t index)
+{
+#if defined(MINIGL_MODULE)
+    const zzm_palette_service_t *palette = zzm_rt_get_service(
+        ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
+    return palette && palette->lookup ? palette->lookup(index) : 0U;
+#else
+    return sdk_palette_get(index);
+#endif
+}
+
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)
 #define MW_CONTEXT_CARD_POOL 1
 #else
 #define MW_CONTEXT_CARD_POOL 0
@@ -1646,12 +1683,12 @@ static void mw_letterbox_rect(uint32_t width, uint32_t height,
 static void mw_refresh_presented_clut(mw_ctx *c)
 {
     uint32_t palette[SDK_PALETTE_ENTRIES];
-    uint32_t generation = sdk_palette_generation();
+    uint32_t generation = mw_palette_generation();
     uint32_t r5, g5, b5;
 
     if (!(generation & 1U) && c->presented_clut_generation == generation)
         return;
-    if (!sdk_palette_snapshot(palette, &generation))
+    if (!mw_palette_snapshot(palette, &generation))
         return;
 
     for (r5 = 0; r5 < 32U; ++r5) {
@@ -1682,7 +1719,7 @@ static void mw_refresh_presented_clut(mw_ctx *c)
             }
         }
     }
-    if (sdk_palette_generation() != generation)
+    if (mw_palette_generation() != generation)
         return;
     memcpy(c->presented_clut, g_presented_clut_staging,
            sizeof(c->presented_clut));
@@ -1776,7 +1813,7 @@ static inline void mw_decode_pixel(uint32_t format, const uint8_t *d, uint8_t *o
 {
     switch (format) {
     case 1: { /* RGBFB_CLUT */
-        const uint32_t xrgb = sdk_palette_get(d[0]);
+        const uint32_t xrgb = mw_palette_get(d[0]);
         o[0] = (uint8_t)(xrgb >> 16);
         o[1] = (uint8_t)(xrgb >> 8);
         o[2] = (uint8_t)xrgb;

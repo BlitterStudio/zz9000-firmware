@@ -188,6 +188,7 @@ int zzm_module_init(const zzm_services_t *services)
     const zzm_host_window_service_t *host_window;
     const zzm_transport_service_t *transport;
     const zzm_app_gl_host_service_t *app_host;
+    const zzm_palette_service_t *palette;
     const zzm_graphics_hw_service_t *graphics;
     zzm_graphics_hw_caps_t graphics_caps;
 
@@ -202,9 +203,10 @@ int zzm_module_init(const zzm_services_t *services)
                                    ZZM_SERVICE_TRANSPORT_V3);
     app_host = zzm_rt_get_service(ZZM_SERVICE_APP_GL_HOST,
                                   ZZM_SERVICE_APP_GL_HOST_V3);
+    palette = zzm_rt_get_service(ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
     graphics = zzm_rt_get_service(ZZM_SERVICE_GRAPHICS_HW,
                                   ZZM_SERVICE_GRAPHICS_HW_V3);
-    if (!host_window || !transport || !app_host || !graphics ||
+    if (!host_window || !transport || !app_host || !palette || !graphics ||
         !minigl_table_compatible(host_window->version, host_window->size,
                                  ZZM_SERVICE_HOST_WINDOW_V3,
                                  sizeof(*host_window)) ||
@@ -214,6 +216,9 @@ int zzm_module_init(const zzm_services_t *services)
         !minigl_table_compatible(app_host->version, app_host->size,
                                  ZZM_SERVICE_APP_GL_HOST_V3,
                                  sizeof(*app_host)) ||
+        !minigl_table_compatible(palette->version, palette->size,
+                                 ZZM_SERVICE_PALETTE_V3,
+                                 sizeof(*palette)) ||
         !minigl_table_compatible(graphics->version, graphics->size,
                                  ZZM_SERVICE_GRAPHICS_HW_V3,
                                  sizeof(*graphics)) || !graphics->caps ||
