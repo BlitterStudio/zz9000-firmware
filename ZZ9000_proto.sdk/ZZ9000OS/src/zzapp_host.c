@@ -55,8 +55,6 @@ static uint32_t g_image_end;
 static uint32_t g_stack_bytes;
 static uint32_t g_note_flags;
 static uint64_t g_stop_mark;
-static uint64_t g_heartbeat_mark;
-static uint32_t g_last_heartbeat;
 static uint64_t g_fault_mark;
 static uint32_t g_exit_code;
 static uint32_t g_heap_off;
