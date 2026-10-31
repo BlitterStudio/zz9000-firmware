@@ -143,6 +143,8 @@ jobs:
         run: make -C test/modules test
       - name: Module runtime allocation bridge suite
         run: make -C test/zzm_rt test
+      - name: Module runtime resource service suite
+        run: make -C test/zzm_resources test
       - name: SD activity LED suite
         run: make -C test/sd_activity_led test
       - name: SD boot metadata suite
