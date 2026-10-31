@@ -893,7 +893,8 @@ static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
 }
 
 static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
-                              const MiniGLRixRecordedOp *op, unsigned int pass)
+                              const MiniGLRixRecordedOp *op, unsigned int pass,
+                              int emit_texenv)
 {
     ZZ9KMiniGLPacketSetState state = op->state;
     RixFragmentState fragment;
@@ -968,8 +969,9 @@ static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
     return pages[0] != 0U && rix_cmd_feature_enable(writer, features) &&
            rix_cmd_fragment_state(writer, &fragment) &&
            rix_cmd_texture_state(writer, 0U, &texture) &&
-           rix_cmd_tex_env(writer, 0U, &environment) &&
-           rix_cmd_tex_env_color(writer, 0U, state.tex_env_color[0]) &&
+           (!emit_texenv ||
+            (rix_cmd_tex_env(writer, 0U, &environment) &&
+             rix_cmd_tex_env_color(writer, 0U, state.tex_env_color[0]))) &&
            rix_cmd_texture_pages(writer, 0U, pages, page_count);
 }
 
@@ -1252,6 +1254,20 @@ static size_t backend_draw_state_words(const MiniGLRixBackend *backend,
         words += backend->textures[slot].page_count;
     return words;
 }
+static int backend_two_pass_texenv_same(const MiniGLRixRecordedOp *op)
+{
+    return op->state.tex_env_mode[0] == GL_REPLACE &&
+           op->state.tex_env_color[0] == op->state.tex_env_color[1];
+}
+
+static size_t backend_two_pass_state_words(const MiniGLRixBackend *backend,
+                                           const MiniGLRixRecordedOp *op,
+                                           unsigned int pass, int transition)
+{
+    size_t words = backend_draw_state_words(backend, op, pass);
+
+    return transition && backend_two_pass_texenv_same(op) ? words - 4U : words;
+}
 
 static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
 {
@@ -1269,7 +1285,7 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
         if (op->type == MINIGL_RIX_OP_CLEAR) {
             uint32_t clear_flags = 0U;
 
-            if (!backend_emit_state(backend, writer, op, 0U))
+            if (!backend_emit_state(backend, writer, op, 0U, 1))
                 return 0;
             if (op->mask & GL_COLOR_BUFFER_BIT)
                 clear_flags |= RIX_FRAMEBUFFER_COLOR;
@@ -1280,19 +1296,22 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
                 !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET | clear_flags, pixels))
                 return 0;
         } else if (!op->two_pass) {
-            if (!backend_emit_state(backend, writer, op, 0U) ||
+            if (!backend_emit_state(backend, writer, op, 0U, 1) ||
                 !backend_emit_triangles(writer, backend, op, 0U))
                 return 0;
         } else {
             size_t triangle_index;
+            int omit_texenv = backend_two_pass_texenv_same(op);
 
             for (triangle_index = 0U; triangle_index < op->triangle_count;
-                 ++triangle_index)
-                if (!backend_emit_state(backend, writer, op, 0U) ||
+                 ++triangle_index) {
+                if (!backend_emit_state(backend, writer, op, 0U,
+                                        triangle_index == 0U || !omit_texenv) ||
                     !backend_emit_triangle(writer, backend, op, triangle_index, 0U) ||
-                    !backend_emit_state(backend, writer, op, 1U) ||
+                    !backend_emit_state(backend, writer, op, 1U, !omit_texenv) ||
                     !backend_emit_triangle(writer, backend, op, triangle_index, 1U))
                     return 0;
+            }
         }
     }
     return !writer->failed;
@@ -1531,8 +1550,9 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     op = &backend->ops[backend->op_count - 1U];
     triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
     if (op->two_pass)
-        triangle_words += backend_draw_state_words(backend, op, 0U) +
-                          backend_draw_state_words(backend, op, 1U);
+        triangle_words += backend_two_pass_state_words(backend, op, 0U,
+                                                       op->triangle_count != 0U) +
+                          backend_two_pass_state_words(backend, op, 1U, 1);
     if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
         backend->command_words_estimate + triangle_words >
             MINIGL_RIX_COMMAND_WORD_BUDGET) {
@@ -1543,8 +1563,8 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         op = &backend->ops[backend->op_count - 1U];
         triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
         if (op->two_pass)
-            triangle_words += backend_draw_state_words(backend, op, 0U) +
-                              backend_draw_state_words(backend, op, 1U);
+            triangle_words += backend_two_pass_state_words(backend, op, 0U, 0) +
+                              backend_two_pass_state_words(backend, op, 1U, 1);
         if (backend->command_words_estimate + triangle_words >
             MINIGL_RIX_COMMAND_WORD_BUDGET)
             return 0;
@@ -1586,10 +1606,17 @@ static void backend_recalculate_command_words(MiniGLRixBackend *backend)
                 backend->command_words_estimate += op->triangle_count *
                     (RIX_TRIANGLE_WORDS + 1U);
             } else {
-                backend->command_words_estimate += op->triangle_count *
-                    (2U * (RIX_TRIANGLE_WORDS + 1U) +
-                     backend_draw_state_words(backend, op, 0U) +
-                     backend_draw_state_words(backend, op, 1U));
+                size_t triangle_index;
+
+                for (triangle_index = 0U; triangle_index < op->triangle_count;
+                     ++triangle_index) {
+                    backend->command_words_estimate += 2U * (RIX_TRIANGLE_WORDS + 1U);
+                    backend->command_words_estimate +=
+                        backend_two_pass_state_words(backend, op, 0U,
+                                                     triangle_index != 0U);
+                    backend->command_words_estimate +=
+                        backend_two_pass_state_words(backend, op, 1U, 1);
+                }
             }
         }
     }
@@ -1770,6 +1797,7 @@ const char *minigl_rix_backend_fallback_name(uint32_t reason)
     case ZZ9K_MGL_FALLBACK_RESIDENCY_EXHAUSTED: return "residency exhausted";
     case ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT: return "backend disabled/absent";
     case ZZ9K_MGL_FALLBACK_FORCED_CPU: return "forced CPU";
+    case ZZ9K_MGL_FALLBACK_DRAW_REJECTED: return "draw rejected";
     default: return "unknown";
     }
 }

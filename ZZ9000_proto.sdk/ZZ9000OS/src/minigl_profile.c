@@ -12,7 +12,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "minigl_profile.h"
-
+#include "minigl_renderer.h"
 #if defined(MINIGL_PROFILE_ACTIVE)
 #include <stdio.h>
 #include <string.h>
@@ -37,6 +37,8 @@ static struct {
     uint32_t bytes;
     uint32_t commands;
     uint32_t fallback_reason;
+    uint32_t fallback_draws[ZZ9K_MGL_FALLBACK_MAX];
+    uint32_t fallback_triangles[ZZ9K_MGL_FALLBACK_MAX];
     uint8_t stack[MGLP_STACK_DEPTH];
 } g_mglp;
 
@@ -76,7 +78,9 @@ static void mglp_window_reset(void)
     g_mglp.packets = 0U;
     g_mglp.bytes = 0U;
     g_mglp.commands = 0U;
-    g_mglp.fallback_reason = 0U;
+    g_mglp.fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
+    memset(g_mglp.fallback_draws, 0, sizeof(g_mglp.fallback_draws));
+    memset(g_mglp.fallback_triangles, 0, sizeof(g_mglp.fallback_triangles));
     g_mglp.mark = mglp_now();
     g_mglp.window_start = g_mglp.mark;
 }
@@ -135,10 +139,14 @@ void minigl_profile_packet_end(uint32_t bytes, uint32_t commands)
     g_mglp.commands += commands;
 }
 
-void minigl_profile_fallback(uint32_t reason)
+void minigl_profile_fallback(uint32_t reason, uint32_t triangles)
 {
-    if (g_minigl_profile_on && g_mglp.fallback_reason == 0U)
+    if (!g_minigl_profile_on || reason >= ZZ9K_MGL_FALLBACK_MAX)
+        return;
+    if (g_mglp.fallback_reason == ZZ9K_MGL_FALLBACK_NONE)
         g_mglp.fallback_reason = reason;
+    ++g_mglp.fallback_draws[reason];
+    g_mglp.fallback_triangles[reason] += triangles;
 }
 
 /* Tenths of a millisecond, divided over count events (0 = total). */
@@ -170,7 +178,7 @@ void minigl_profile_report(void)
         " idle=", " parse=", " geom=", " cpu=", " emit=", " fifo=", " stall=",
         " fence=", " tgt=", " tex=", " pres=", " op="
     };
-    static char line[384];
+    static char line[768];
     const uint32_t *n = g_minigl_profile_counts;
     uint64_t print_start;
     uint32_t window;
@@ -178,6 +186,7 @@ void minigl_profile_report(void)
     int written;
     unsigned int stage;
 
+    unsigned int reason;
     if (!g_minigl_profile_on || g_mglp.depth != 0U || g_mglp.overflow != 0U ||
         mglp_now() - g_mglp.window_start < MGLP_WINDOW_TICKS)
         return;
@@ -191,7 +200,7 @@ void minigl_profile_report(void)
     written = snprintf(line, sizeof(line),
                        "[MGLP] %lu.%lus pk=%lu op=%lu kB=%lu cmd=%lu tri=%lu "
                        "cull=%lu hw=%lu sw=%lu fb=%lu fw=%lu sub=%lu tx=%lu "
-                       "up=%lu pin=%lu ev=%lu |",
+                       "up=%lu pin=%lu ev=%lu fbk=",
                        (unsigned long)(window / 10U), (unsigned long)(window % 10U),
                        (unsigned long)g_mglp.packets, (unsigned long)n[MGLP_N_OPS],
                        (unsigned long)(g_mglp.bytes / 1024U),
@@ -208,6 +217,20 @@ void minigl_profile_report(void)
                        (unsigned long)n[MGLP_N_PIN_DRAINS],
                        (unsigned long)n[MGLP_N_EVICTIONS]);
     used = written > 0 ? (size_t)written : 0U;
+    for (reason = 1U; reason < ZZ9K_MGL_FALLBACK_MAX; ++reason)
+        if (g_mglp.fallback_draws[reason] != 0U) {
+            written = snprintf(line + used, sizeof(line) - used, "%u:%lu/%lu,",
+                               reason, (unsigned long)g_mglp.fallback_draws[reason],
+                               (unsigned long)g_mglp.fallback_triangles[reason]);
+            if (written <= 0 || (size_t)written >= sizeof(line) - used)
+                break;
+            used += (size_t)written;
+        }
+    if (used != 0U && line[used - 1U] == ',')
+        --used;
+    written = snprintf(line + used, sizeof(line) - used, " |");
+    if (written > 0 && (size_t)written < sizeof(line) - used)
+        used += (size_t)written;
     /* Stage columns are milliseconds per ring packet (one GLQuake frame);
      * an op-only window prints window totals instead. */
     for (stage = MGLP_PARSE; stage < MGLP_STAGES; ++stage)

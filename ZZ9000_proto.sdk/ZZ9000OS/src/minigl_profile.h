@@ -88,8 +88,8 @@ void minigl_profile_set_enabled(int enabled);
 /* One ring packet: PARSE envelope, per-packet maximum, byte counters. */
 void minigl_profile_packet_begin(void);
 void minigl_profile_packet_end(uint32_t bytes, uint32_t commands);
-/* First CPU-fallback reason seen in the window (0 = none). */
-void minigl_profile_fallback(uint32_t reason);
+/* Counts CPU draws and triangles by their normalized fallback reason. */
+void minigl_profile_fallback(uint32_t reason, uint32_t triangles);
 /* Service poll exit: prints the summary once 5 s have elapsed. */
 void minigl_profile_report(void);
 #else
@@ -108,7 +108,11 @@ static inline void minigl_profile_packet_end(uint32_t bytes, uint32_t commands)
     (void)bytes;
     (void)commands;
 }
-static inline void minigl_profile_fallback(uint32_t reason) { (void)reason; }
+static inline void minigl_profile_fallback(uint32_t reason, uint32_t triangles)
+{
+    (void)reason;
+    (void)triangles;
+}
 static inline void minigl_profile_report(void) { }
 #endif
 

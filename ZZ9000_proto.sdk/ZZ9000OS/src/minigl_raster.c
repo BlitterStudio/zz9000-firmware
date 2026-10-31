@@ -205,6 +205,7 @@ static MiniGLRasterRixDiagnostics g_rix_diagnostics;
  * would cost a full target READ/format conversion per draw. */
 #define MINIGL_RIX_CPU_FALLBACKS_PER_FRAME 1U
 static uint32_t g_rix_cpu_fallbacks;
+static uint32_t g_rix_cpu_reason;
 static int g_rix_cpu_frame;
 
 static uint32_t be32(const uint8_t *p)
@@ -427,6 +428,21 @@ static int rix_prepare_target(void)
     minigl_profile_pop();
     return ok;
 }
+static int rix_clear_replaces_targets(uint32_t mask)
+{
+    return !rix_target_is_rgb565() &&
+           (g_state.enabled_flags & ZZ9K_MGL_STATE_SCISSOR_TEST) == 0U &&
+           (mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)) ==
+               (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+static void rix_adopt_cleared_targets(void)
+{
+    g_rix_surface = g_buffers.color;
+    g_rix_surface_rgb565 = 1;
+    g_rix_depth_z16 = 1;
+}
+
 
 static int rix_make_cpu_visible_now(void)
 {
@@ -486,6 +502,7 @@ int minigl_raster_present_is_rgb565(void)
 void minigl_raster_frame_boundary(void)
 {
     g_rix_cpu_fallbacks = 0U;
+    g_rix_cpu_reason = ZZ9K_MGL_FALLBACK_NONE;
     g_rix_cpu_frame = 0;
 }
 
@@ -2725,10 +2742,12 @@ void minigl_raster_clear(uint32_t mask, uint32_t color, uint32_t depth)
         minigl_rix_backend_log_context_backend(&g_rix);
     }
     if (minigl_rix_backend_available(&g_rix) &&
-        rix_prepare_target() &&
+        (rix_clear_replaces_targets(mask) || rix_prepare_target()) &&
         minigl_rix_backend_clear(&g_rix, g_buffers.width, g_buffers.height,
                                  (uintptr_t)g_buffers.color, (uintptr_t)g_buffers.depth,
                                  mask, color, depth)) {
+        if (!rix_target_is_rgb565())
+            rix_adopt_cleared_targets();
         if (((mask & GL_COLOR_BUFFER_BIT) != 0U) || ((mask & 1U) != 0U))
             mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
         return;
@@ -2840,8 +2859,8 @@ void minigl_raster_set_state(const ZZ9KMiniGLPacketSetState *state)
 
     if (state->depth_bits == 16U || state->depth_bits == 24U)
         g_depth_bits = (uint8_t)state->depth_bits;
-    else if (state->depth_bits == 32U && minigl_rix_backend_available(&g_rix))
-        g_depth_bits = 16U; /* RasterIX Z16; forced CPU retains its 24-bit path. */
+    else if (state->depth_bits == 32U)
+        g_depth_bits = minigl_rix_backend_available(&g_rix) ? 16U : 24U;
     else {
         g_error |= RASTER_ERR_STATE;
         g_depth_bits = 24U;
@@ -3128,6 +3147,29 @@ static int rix_mode_supported(uint16_t mode)
            mode == GL_TRIANGLE_FAN || mode == GL_QUADS ||
            mode == GL_QUAD_STRIP || mode == GL_POLYGON;
 }
+static uint32_t rix_draw_triangles(uint16_t mode, uint32_t count)
+{
+    switch (mode) {
+    case GL_TRIANGLES: return count / 3U;
+    case GL_TRIANGLE_STRIP:
+    case GL_TRIANGLE_FAN:
+    case GL_POLYGON: return count >= 3U ? count - 2U : 0U;
+    case GL_QUADS: return count / 2U;
+    case GL_QUAD_STRIP: return count >= 4U ? count - 2U : 0U;
+    default: return 0U;
+    }
+}
+
+static uint32_t rix_fallback_reason(uint32_t reason)
+{
+    if ((g_state.reserved & ZZ9K_MGL_STATE_FLAG_FORCE_CPU) != 0U)
+        return ZZ9K_MGL_FALLBACK_FORCED_CPU;
+    if (reason == ZZ9K_MGL_FALLBACK_NONE && g_rix_cpu_frame &&
+        g_rix_cpu_reason != ZZ9K_MGL_FALLBACK_NONE)
+        return g_rix_cpu_reason;
+    return reason == ZZ9K_MGL_FALLBACK_NONE ?
+        ZZ9K_MGL_FALLBACK_DRAW_REJECTED : reason;
+}
 static int rix_begin_draw(void)
 {
     if (!minigl_rix_backend_begin_draw(&g_rix, g_buffers.width, g_buffers.height,
@@ -3174,16 +3216,20 @@ void minigl_raster_draw_arrays(uint16_t mode, uint16_t attr_code, uint16_t verte
         minigl_rix_backend_log_context_backend(&g_rix);
     }
     if (rix_draw(mode, vertex_stride, vertex_base_offset, NULL, first, count)) {
+        minigl_profile_count(MGLP_N_DRAW_HW, 1U);
         ++g_frame_draws_hardware;
     } else {
-        uint32_t reason = minigl_rix_backend_eval_fallback(&g_rix);
+        uint32_t reason = rix_fallback_reason(minigl_rix_backend_eval_fallback(&g_rix));
         ++g_frame_draws_software;
-        if (g_frame_fallback_reason == ZZ9K_MGL_FALLBACK_NONE && reason != ZZ9K_MGL_FALLBACK_NONE)
+        minigl_profile_count(MGLP_N_DRAW_SW, 1U);
+        minigl_profile_fallback(reason, rix_draw_triangles(mode, count));
+        if (g_frame_fallback_reason == ZZ9K_MGL_FALLBACK_NONE)
             g_frame_fallback_reason = reason;
-        if (reason != ZZ9K_MGL_FALLBACK_NONE && !(g_logged_fallback_mask & (1U << reason))) {
-            g_logged_fallback_mask |= (1U << reason);
+        if (!(g_logged_fallback_mask & (1U << reason))) {
+            g_logged_fallback_mask |= 1U << reason;
             minigl_rix_backend_log_fallback(reason);
         }
+        g_rix_cpu_reason = reason;
         if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
             g_rix_cpu_frame = 1;
         if (!rix_cpu_visible()) return;
@@ -3219,16 +3265,20 @@ void minigl_raster_draw_elements(uint16_t mode, uint16_t attr_code, uint16_t ver
         minigl_rix_backend_log_context_backend(&g_rix);
     }
     if (rix_draw(mode, vertex_stride, vertex_base_offset, indices, 0U, count)) {
+        minigl_profile_count(MGLP_N_DRAW_HW, 1U);
         ++g_frame_draws_hardware;
     } else {
-        uint32_t reason = minigl_rix_backend_eval_fallback(&g_rix);
+        uint32_t reason = rix_fallback_reason(minigl_rix_backend_eval_fallback(&g_rix));
         ++g_frame_draws_software;
-        if (g_frame_fallback_reason == ZZ9K_MGL_FALLBACK_NONE && reason != ZZ9K_MGL_FALLBACK_NONE)
+        minigl_profile_count(MGLP_N_DRAW_SW, 1U);
+        minigl_profile_fallback(reason, rix_draw_triangles(mode, count));
+        if (g_frame_fallback_reason == ZZ9K_MGL_FALLBACK_NONE)
             g_frame_fallback_reason = reason;
-        if (reason != ZZ9K_MGL_FALLBACK_NONE && !(g_logged_fallback_mask & (1U << reason))) {
-            g_logged_fallback_mask |= (1U << reason);
+        if (!(g_logged_fallback_mask & (1U << reason))) {
+            g_logged_fallback_mask |= 1U << reason;
             minigl_rix_backend_log_fallback(reason);
         }
+        g_rix_cpu_reason = reason;
         if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
             g_rix_cpu_frame = 1;
         if (!rix_cpu_visible()) return;
@@ -3245,6 +3295,7 @@ void minigl_raster_present(const ZZ9KMiniGLPacketPresent *present)
     g_frame_draws_software = 0U;
     g_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
     g_rix_cpu_fallbacks = 0U;
+    g_rix_cpu_reason = ZZ9K_MGL_FALLBACK_NONE;
     g_rix_cpu_frame = 0;
     if (!present || !ready() ||
         (minigl_rix_backend_surface_is_rgb565(&g_rix) ?
@@ -3256,20 +3307,22 @@ void minigl_raster_present(const ZZ9KMiniGLPacketPresent *present)
 }
 uint32_t minigl_raster_draws_hardware(void)
 {
-    return (g_last_frame_draws_hardware || g_last_frame_draws_software) ?
-        g_last_frame_draws_hardware : g_frame_draws_hardware;
+    return (g_frame_draws_hardware || g_frame_draws_software) ?
+        g_frame_draws_hardware : g_last_frame_draws_hardware;
 }
 
 uint32_t minigl_raster_draws_software(void)
 {
-    return (g_last_frame_draws_hardware || g_last_frame_draws_software) ?
-        g_last_frame_draws_software : g_frame_draws_software;
+    return (g_frame_draws_hardware || g_frame_draws_software) ?
+        g_frame_draws_software : g_last_frame_draws_software;
 }
 
 uint32_t minigl_raster_first_fallback_reason(void)
 {
-    return (g_last_frame_draws_hardware || g_last_frame_draws_software) ?
-        g_last_frame_fallback_reason : g_frame_fallback_reason;
+    if (g_rix.force_cpu)
+        return ZZ9K_MGL_FALLBACK_FORCED_CPU;
+    return (g_frame_draws_hardware || g_frame_draws_software) ?
+        g_frame_fallback_reason : g_last_frame_fallback_reason;
 }
 
 int minigl_raster_hardware_available(void)
@@ -3850,17 +3903,18 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
     }
 
     /* Fallback to software rasterizer */
-    uint32_t reason = (style != 0U) ? ZZ9K_MGL_FALLBACK_POLYGON_MODE
-                                    : minigl_rix_backend_eval_fallback(&g_rix);
+    uint32_t reason = rix_fallback_reason((style != 0U) ? ZZ9K_MGL_FALLBACK_POLYGON_MODE
+                                                         : minigl_rix_backend_eval_fallback(&g_rix));
     ++g_frame_draws_software;
     minigl_profile_count(MGLP_N_DRAW_SW, 1U);
-    minigl_profile_fallback(reason);
+    minigl_profile_fallback(reason, rix_draw_triangles(mode, count));
     if (g_frame_fallback_reason == ZZ9K_MGL_FALLBACK_NONE && reason != ZZ9K_MGL_FALLBACK_NONE)
         g_frame_fallback_reason = reason;
     if (reason != ZZ9K_MGL_FALLBACK_NONE && !(g_logged_fallback_mask & (1U << reason))) {
         g_logged_fallback_mask |= (1U << reason);
         minigl_rix_backend_log_fallback(reason);
     }
+    g_rix_cpu_reason = reason;
     if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
         g_rix_cpu_frame = 1;
     minigl_profile_push(MGLP_CPU);
