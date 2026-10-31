@@ -267,8 +267,11 @@ void zzm_rt_get_context(zzm_allocation_context_t *out);
 void zzm_rt_log(const char *message);
 void zzm_rt_fault(const char *reason);
 void zzm_rt_dcache_clean(uint32_t address, uint32_t length);
+void zzm_rt_dcache_invalidate(uint32_t address, uint32_t length);
 int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address,
                                uint32_t length);
+void zzm_rt_barrier(void);
+uint64_t zzm_rt_time_us(void);
 
 /* Codec plug-in contracts. Payload addresses are card addresses; formats are
  * intentionally fixed to 8-bit 4:2:0 video and interleaved signed PCM. */
