@@ -304,6 +304,34 @@ static int graphics_v3_csr_write(uint32_t offset, uint32_t value)
     (void)value;
     return 0;
 #endif
+
+static int graphics_v3_fifo_read(uint32_t offset, uint32_t *value_out)
+{
+#if !defined(TASKQ_HOST_TEST)
+    if (!g_caps.has_rasterix_ef || value_out == 0)
+        return 0;
+    *value_out = graphics_fifo_read(0, offset);
+    return 1;
+#else
+    (void)offset;
+    (void)value_out;
+    return 0;
+#endif
+}
+
+static int graphics_v3_fifo_write(uint32_t offset, uint32_t value)
+{
+#if !defined(TASKQ_HOST_TEST)
+    if (!g_caps.has_rasterix_ef)
+        return 0;
+    graphics_fifo_write(0, offset, value);
+    return 1;
+#else
+    (void)offset;
+    (void)value;
+    return 0;
+#endif
+}
 }
 
 static int graphics_v3_fifo_write_words(const uint32_t *words,
@@ -364,7 +392,8 @@ static void graphics_v3_barrier(void)
 static const zzm_graphics_hw_service_t graphics_hw_service = {
     ZZM_SERVICE_GRAPHICS_HW_V3, sizeof(graphics_hw_service),
     graphics_v3_caps, graphics_v3_csr_read, graphics_v3_csr_write,
-    graphics_v3_fifo_write_words, graphics_v3_pl330_claim,
+    graphics_v3_fifo_read, graphics_v3_fifo_write, graphics_v3_fifo_write_words,
+    graphics_v3_pl330_claim,
     graphics_v3_pl330_start, graphics_v3_pl330_abort,
     graphics_v3_pl330_release, graphics_v3_barrier
 };
