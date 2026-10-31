@@ -698,6 +698,8 @@ static void mw_ctx_configure_rix(mw_ctx *c)
 {
     (void)c;
 }
+#endif
+
 
 void mw_rix_abort_engines(void)
 {

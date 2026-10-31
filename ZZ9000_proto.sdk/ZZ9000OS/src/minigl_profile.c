@@ -11,11 +11,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "minigl_profile.h"
+#include "minigl_renderer.h"
+
 #include "minigl_platform.h"
 #if defined(MINIGL_PROFILE_ACTIVE)
 #include <stdio.h>
 #include <string.h>
 
+#define MGLP_STACK_DEPTH 16U
 #define MGLP_WINDOW_TICKS (5ULL * 1000000ULL)
 
 volatile int g_minigl_profile_on;
