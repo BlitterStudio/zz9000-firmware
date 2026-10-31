@@ -15,6 +15,7 @@
 #include "mw_service.h"
 #include "zzm_loader.h"
 #include "zzapp_runtime.h"
+#include "zzapp_proto.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
 #define A9_CLKSTOP1_MASK	0x00000020
