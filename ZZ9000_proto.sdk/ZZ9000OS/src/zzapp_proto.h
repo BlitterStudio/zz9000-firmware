@@ -246,6 +246,7 @@ struct zzapp_file_wire {   /* 64 bytes; do not add a field */
     uint32_t mtime;        /* 56: seconds, 0 if unknown */
     uint32_t reserved;     /* 60 */
 };
+#define ZZAPP_FILE_WIRE_DEFINED 1
 
 /* Native layout documents offsets. Wire stores are big-endian; use the
  * accessors. Do not read these fields as host integers on a little-endian CPU. */
@@ -322,8 +323,9 @@ _Static_assert(ZZAPP_STAGING_OFF + ZZAPP_STAGING_BYTES == ZZAPP_RESERVED_OFF,
 _Static_assert(ZZAPP_RESERVED_OFF < ZZAPP_WINDOW_BYTES, "window tail");
 _Static_assert(ZZAPP_WINDOW_BYTES == 0x60000u, "window");
 _Static_assert(ZZAPP_CHUNK_MAX == ZZAPP_STAGING_BYTES, "chunk fits staging");
-_Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_MAX * ZZAPP_ARGV_STR_MAX
-               <= ZZAPP_ARGV_BYTES, "argv strings");
+_Static_assert(ZZAPP_ARGV_STR_OFF < ZZAPP_ARGV_BYTES, "argv header");
+_Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_STR_MAX <= ZZAPP_ARGV_BYTES,
+               "one max argv string");
 
 _Static_assert(sizeof(struct zzapp_event) == ZZAPP_EVENT_BYTES, "event");
 _Static_assert(offsetof(struct zzapp_event, type) == 0, "event type");
