@@ -29,13 +29,6 @@ SECTIONS {
 		*(.rodata*)
 		*(.rodata.*)
 	} :text
-	.ARM.extab : { *(.ARM.extab*) } :text
-	.ARM.exidx : {
-		__exidx_start = .;
-		*(.ARM.exidx*)
-		__exidx_end = .;
-	} :text
-	.eh_frame : { *(.eh_frame*) } :text
 
 	/*
 	 * Arm GNU ld 13.2 emits SHT_REL into .rel.dyn. rela_dyn.py rewrites that
@@ -72,6 +65,10 @@ SECTIONS {
 	/DISCARD/ : {
 		*(.interp)
 		*(.comment)
+		/* Apps disable unwinding; unwinder archives carry absolute relocs. */
+		*(.ARM.exidx*)
+		*(.ARM.extab*)
+		*(.eh_frame*)
 		*(.note.GNU-stack)
 	}
 }
