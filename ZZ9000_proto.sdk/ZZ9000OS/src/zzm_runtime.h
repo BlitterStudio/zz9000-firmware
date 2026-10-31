@@ -225,6 +225,8 @@ typedef struct zzm_graphics_hw_service {
     int (*caps)(zzm_graphics_hw_caps_t *out);
     int (*csr_read)(uint32_t offset, uint32_t *value_out);
     int (*csr_write)(uint32_t offset, uint32_t value);
+    int (*fifo_read)(uint32_t offset, uint32_t *value_out);
+    int (*fifo_write)(uint32_t offset, uint32_t value);
     int (*fifo_write_words)(const uint32_t *words, uint32_t word_count);
     int (*pl330_claim)(uint32_t owner, uint32_t *channel_out);
     int (*pl330_start)(uint32_t channel, uint32_t source_address,
