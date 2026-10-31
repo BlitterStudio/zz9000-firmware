@@ -68,6 +68,46 @@ static int g_cold_restarts;
 static void (*g_test_entry)(const void *api, int argc, char **argv);
 #endif
 
+#ifndef ZZAPP_HOST_TEST
+static volatile uint32_t g_app_return_sp;
+
+/*
+ * Keep core 1's complete VFP/NEON context outside the app arena.  A trusted
+ * app receives the normal hard-float entry registers, but its stack is the
+ * requested tail of its private card arena.  Returning is supported solely
+ * to turn an accidental return into the normal host-side state transition.
+ */
+__attribute__((naked)) void zzapp_enter_arm(uint32_t entry, const void *api,
+                                            uint32_t argc, char **argv,
+                                            uint32_t sp)
+{
+    (void)entry; (void)api; (void)argc; (void)argv; (void)sp;
+    __asm__ volatile (
+        "push {r4-r11, lr}\n"
+        "vmrs r4, fpscr\n"
+        "push {r4}\n"
+        "vpush {d0-d15}\n"
+        "vpush {d16-d31}\n"
+        "ldr r4, [sp, #296]\n"
+        "ldr r12, =g_app_return_sp\n"
+        "str sp, [r12]\n"
+        "mov r12, r0\n"
+        "mov r0, r2\n"
+        "mov r2, r1\n"
+        "mov r1, r3\n"
+        "mov sp, r4\n"
+        "blx r12\n"
+        "ldr r12, =g_app_return_sp\n"
+        "ldr sp, [r12]\n"
+        "vpop {d16-d31}\n"
+        "vpop {d0-d15}\n"
+        "pop {r4}\n"
+        "vmsr fpscr, r4\n"
+        "pop {r4-r11, lr}\n"
+        "bx lr\n");
+}
+#endif
+
 static uint64_t now_ticks(void)
 {
 #ifdef ZZAPP_HOST_TEST
