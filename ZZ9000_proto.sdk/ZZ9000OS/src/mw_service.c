@@ -43,12 +43,6 @@ typedef char mw_v9_reply_matches_window[
 #define MW_DIAG(...) printf(__VA_ARGS__)
 #endif
 
-static const char *mw_backend_name(const mw_ctx *context)
-{
-    if (context && context->state.force_cpu)
-        return "cpu";
-    return minigl_raster_hardware_available() ? "rasterix" : "cpu";
-}
 
 static uint32_t mw_packet_first_opcode(const uint8_t *packet, uint32_t bytes)
 {

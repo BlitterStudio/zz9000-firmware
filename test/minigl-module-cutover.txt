@@ -1,0 +1,30 @@
+MiniGL stage-4 cutover inventory
+=================================
+
+This is deliberately a separate coordinator-owned link change.  It must remove
+all resident MiniGL inputs in one commit, after MINIGL.ZZM is packed and
+installed in the fixed module slot.  Do not link this list and the module in
+one intermediate firmware image.
+
+Remove from ZZ9000OS resident C_SRCS:
+  mw_service.c mw_parse.c mw_draw.c mw_texture.c mw_ctx.c
+  minigl_transport.c minigl_present.c minigl_raster.c minigl_lighting.c
+  minigl_profile.c minigl_rix_backend.c
+  rix_cmd.c rix_drv.c rix_setup.c rix_texture.c
+  zzapp_gl.c
+
+Remove the resident private-library front-end MGL_FRONT_SRCS/MGL_FRONT_OBJS:
+  amiberry_gl_state.c amiberry_gl_draw.c amiberry_gl_texture.c
+  amiberry_gl_light.c amiberry_gl_light_get.c amiberry_gl_list.c
+  amiberry_gl_buffer.c amiberry_glu.c
+  amiberry_backend_inproc.c amiberry_transport_inproc.c
+
+The replacement call paths are the registered zzm_minigl_ops_v1 worker and
+lifecycle operations, module transport acquire/release, and app_bind/swap/
+unbind/reclaim.  Remove direct scheduler MiniGL polling, direct transport
+initialization/descriptor publication, and direct zzapp_gl resident calls at
+the same time.  There is no resident fallback.
+
+Stage four acceptance is both standard and RasterIX-EF firmware links within
+the 4 MiB high-image gate, plus module size at or below its independent 4 MiB
+slot.  The module source/build contract is modules/minigl/module.mk.

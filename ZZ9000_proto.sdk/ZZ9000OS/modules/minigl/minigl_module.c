@@ -141,14 +141,14 @@ static int minigl_app_bind(void *context, uint32_t surface_id,
     status = zzapp_gl_bind(surface_id, &gl);
     if (out_gl)
         *out_gl = gl;
-    return status == 0;
+    return status;
 }
 
 static int minigl_app_swap(void *context)
 {
     (void)context;
     zzapp_gl_swap();
-    return 1;
+    return 0;
 }
 
 static void minigl_app_unbind(void *context)
