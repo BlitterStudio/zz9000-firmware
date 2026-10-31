@@ -19,7 +19,9 @@ static zzm_allocation_context_t host_context;
 int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
                 uint32_t memory_class, uint32_t quota)
 {
-    if (!services || services->abi_version != ZZM_MODULE_ABI_VERSION ||
+    if (!services ||
+        (services->abi_version != ZZM_MODULE_ABI_VERSION &&
+         services->abi_version != ZZM_V3_ABI_MAJOR) ||
         services->size < sizeof(*services) || !services->get_service)
         return 0;
     host_context.owner = module_id;
