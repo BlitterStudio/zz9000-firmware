@@ -59,6 +59,7 @@
 #include "sdk_audio_flac.h"
 #include "sdk_audio_vorbis.h"
 #include "zzm_loader.h"
+#include "zzm_minigl_host.h"
 
 /* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
  * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
@@ -8768,6 +8769,35 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		memcpy((void *)reply->name, status.name, sizeof(reply->name));
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_MINIGL_MODULE_ACQUIRE: {
+		uint32_t generation;
+		zzm_status_t status;
+		if (payload_len != 0U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		if (!sdk_aperture_runtime_is_zorro3())
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+		if (!zzm_loader_acquire(ZZM_MODULE_MINIGL)) {
+			if (zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status) &&
+			    status.state == ZZM_STATE_LOADING)
+				return complete_status(req, comp, SDK_STATUS_BUSY);
+			return complete_status(req, comp, SDK_STATUS_MODULE_MISSING);
+		}
+		if (!zzm_minigl_transport_acquire(&generation)) {
+			zzm_loader_release(ZZM_MODULE_MINIGL);
+			return complete_status(req, comp, SDK_STATUS_MODULE_MISMATCH);
+		}
+		write_completion(comp, req, SDK_STATUS_OK, sizeof(generation));
+		put_be32(comp->payload, generation);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_MINIGL_MODULE_RELEASE:
+		if (payload_len != 0U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		if (!zzm_minigl_transport_release())
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		zzm_loader_release(ZZM_MODULE_MINIGL);
+		write_completion(comp, req, SDK_STATUS_OK, 0);
+		return SDK_STATUS_OK;
 	case SDK_OP_QUERY_APERTURE_LAYOUT:
 		return handle_query_aperture_layout(req, comp);
 	case SDK_OP_QUERY_SERVICE:
