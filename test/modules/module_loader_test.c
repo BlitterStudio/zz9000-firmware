@@ -4,6 +4,7 @@
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
 #include "ff.h"
+#include "zzm_runtime.h"
 
 
 /* Single-threaded host backing for the loader's cross-core session lock. */
