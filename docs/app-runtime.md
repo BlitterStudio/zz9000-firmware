@@ -615,7 +615,7 @@ Dimension cap remains `MW_MAX_DIMENSION` 4096 (`mw_types.h`). Reject a display b
 
 | Piece | Where |
 |---|---|
-| `zzapp.h`, `libzzapp`, crt0, `zzapp.ld`, templates `hello` and `pixels` | firmware repo `sdk/zzapp/`, MIT, ships with the SDK |
+| `zzapp.h`, `libzzapp`, crt0, `zzapp.ld`, templates `hello`, `pixels`, and `fault` | firmware repo `sdk/zzapp/`, MIT, ships with the SDK |
 | `zzapp_proto.h` | firmware `ZZ9000OS/src/zzapp_proto.h`, GPL. Drivers build picks it up through the existing header stage (`zz9000-drivers/tools/stage-zz9k-headers.sh`), not a second copy maintained by hand |
 | Runtime, loader, faults, rings, mailbox ops | firmware `ZZ9000OS/src/zzapp_*.c`, GPL |
 | GL front end | stays in `amiberry-minigl-library-zz9k`. Firmware compiles the listed `.c` files with `-DMGL_PLATFORM_ZZARM` and `-I` that tree. Do not vendor-copy them into the firmware tree |
@@ -640,7 +640,7 @@ Linker script: PHDRs for RX and RW, `.rela.dyn` kept and allocated so the loader
 
 68k launcher: container `sacredbanana/amiga-compiler:m68k-amigaos`, never a gcc10 image.
 
-Templates, each a few dozen lines, MIT: `hello` logs a line and exits; `pixels` opens 320×240 RGB565, fills the back buffer, flips until `ZZ_EV_STOP` or a key. No third template in v0. `pixels` draws the CPU mapping from `zz_display_open`. It does not go through GL. That is how the kit separates a bad present-copy from a bad launcher screen.
+Templates, each a few dozen lines, MIT: `hello` logs a line and exits; `pixels` opens 320×240 RGB565, fills the back buffer, flips until `ZZ_EV_STOP` or a key; `fault` logs then deliberately stores to address zero for the fault-path hardware check. `pixels` draws the CPU mapping from `zz_display_open`. It does not go through GL. That is how the kit separates a bad present-copy from a bad launcher screen.
 
 ## 8. Quake port
 
