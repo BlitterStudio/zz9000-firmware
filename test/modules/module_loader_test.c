@@ -1,9 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
 #include "ff.h"
-#include "zzm_runtime.h"
 
 
 /* Single-threaded host backing for the loader's cross-core session lock. */
@@ -164,7 +164,49 @@ static zzm_v3_capabilities_t valid_v3_capabilities(void)
     return caps;
 }
 
-int main(void)
+static void check_kit_minigl(const char *path)
+{
+    FILE *file;
+    long size;
+    uint8_t *contents;
+    zzm_v3_capabilities_t caps = valid_v3_capabilities();
+    zzm_status_t status;
+
+    file = fopen(path, "rb");
+    CHECK(file != NULL);
+    if (!file)
+        return;
+    CHECK(fseek(file, 0L, SEEK_END) == 0);
+    size = ftell(file);
+    CHECK(size >= ZZM_V3_HEADER_SIZE);
+    CHECK(size <= UINT32_MAX);
+    CHECK(fseek(file, 0L, SEEK_SET) == 0);
+    if (size < (long)ZZM_V3_HEADER_SIZE || size > (long)UINT32_MAX ||
+        fseek(file, 0L, SEEK_SET) != 0) {
+        fclose(file);
+        return;
+    }
+    contents = malloc((size_t)size);
+    CHECK(contents != NULL);
+    if (!contents) {
+        fclose(file);
+        return;
+    }
+    CHECK(fread(contents, 1U, (size_t)size, file) == (size_t)size);
+    fclose(file);
+
+    loader_open_calls = 0U;
+    loader_close_calls = 0U;
+    loader_open_result = FR_OK;
+    set_loader_file(contents, (uint32_t)size, 1);
+    zzm_loader_set_v3_capabilities(&caps);
+    zzm_loader_boot_load();
+    CHECK(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    CHECK(status.state == ZZM_STATE_AVAILABLE);
+    free(contents);
+}
+
+int main(int argc, char **argv)
 {
     uint8_t image[16] = { 1, 2, 3, 4 };
     zzm_header_t header = valid_header(sizeof(image));
@@ -251,6 +293,8 @@ int main(void)
     header = valid_header(sizeof(image));
     test_hash(image, sizeof(image), header.image_sha256);
     CHECK(zzm_verify_image(&header, image, ZZM_HEADER_SIZE + sizeof(image) - 1, test_hash) == ZZM_STATE_REJECTED_SLOT);
+    if (argc == 2)
+        check_kit_minigl(argv[1]);
     loader_open_calls = 0U;
     loader_close_calls = 0U;
     set_loader_file(0, 0U, 0);
