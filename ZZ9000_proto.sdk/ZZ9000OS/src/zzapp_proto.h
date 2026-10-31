@@ -220,7 +220,7 @@
 #define ZZAPP_ARGV_OFFS_OFF        4u
 #define ZZAPP_ARGV_STR_OFF         (4u + ZZAPP_ARGV_MAX * 4u)
 
-struct zzapp_event {
+struct zzapp_wire_event {
     uint16_t type;
     uint16_t code;         /* Amiga rawkey, or button id */
     int16_t  dx;
@@ -327,14 +327,14 @@ _Static_assert(ZZAPP_ARGV_STR_OFF < ZZAPP_ARGV_BYTES, "argv header");
 _Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_STR_MAX <= ZZAPP_ARGV_BYTES,
                "one max argv string");
 
-_Static_assert(sizeof(struct zzapp_event) == ZZAPP_EVENT_BYTES, "event");
-_Static_assert(offsetof(struct zzapp_event, type) == 0, "event type");
-_Static_assert(offsetof(struct zzapp_event, code) == 2, "event code");
-_Static_assert(offsetof(struct zzapp_event, dx) == 4, "event dx");
-_Static_assert(offsetof(struct zzapp_event, dy) == 6, "event dy");
-_Static_assert(offsetof(struct zzapp_event, buttons) == 8, "event buttons");
-_Static_assert(offsetof(struct zzapp_event, reserved) == 10, "event reserved");
-_Static_assert(offsetof(struct zzapp_event, time_ms) == 12, "event time");
+_Static_assert(sizeof(struct zzapp_wire_event) == ZZAPP_EVENT_BYTES, "event");
+_Static_assert(offsetof(struct zzapp_wire_event, type) == 0, "event type");
+_Static_assert(offsetof(struct zzapp_wire_event, code) == 2, "event code");
+_Static_assert(offsetof(struct zzapp_wire_event, dx) == 4, "event dx");
+_Static_assert(offsetof(struct zzapp_wire_event, dy) == 6, "event dy");
+_Static_assert(offsetof(struct zzapp_wire_event, buttons) == 8, "event buttons");
+_Static_assert(offsetof(struct zzapp_wire_event, reserved) == 10, "event reserved");
+_Static_assert(offsetof(struct zzapp_wire_event, time_ms) == 12, "event time");
 
 _Static_assert(sizeof(struct zzapp_file_wire) == ZZAPP_FILE_BYTES, "file wire");
 _Static_assert(offsetof(struct zzapp_file_wire, seq) == 0, "file seq");
