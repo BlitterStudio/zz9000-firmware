@@ -172,11 +172,10 @@ void zzm_rt_dcache_clean(uint32_t address, uint32_t length)
     (void)length;
 }
 
-int zzm_rt_dcache_invalidate(uint32_t address, uint32_t length)
+void zzm_rt_dcache_invalidate(uint32_t address, uint32_t length)
 {
     (void)address;
     (void)length;
-    return 1;
 }
 
 void zzm_rt_barrier(void) { }
