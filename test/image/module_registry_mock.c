@@ -81,14 +81,21 @@ static void host_fault(const char *reason)
 }
 
 static const zzm_core_service_t core_service = {
-    ZZM_SERVICE_CORE_V1, sizeof(core_service), host_log, host_fault, 0, 0
+    .version = ZZM_SERVICE_CORE_V1,
+    .size = sizeof(core_service),
+    .log = host_log,
+    .fault = host_fault,
 };
 static const zzm_memory_service_t memory_service = {
-    ZZM_SERVICE_MEMORY_V1, sizeof(memory_service),
-    host_card_alloc, host_card_free, host_card_realloc
+    .version = ZZM_SERVICE_MEMORY_V1,
+    .size = sizeof(memory_service),
+    .alloc = host_card_alloc,
+    .free = host_card_free,
+    .realloc = host_card_realloc,
 };
 static const zzm_cache_service_t cache_service = {
-    ZZM_SERVICE_CACHE_V1, sizeof(cache_service), 0, 0
+    .version = ZZM_SERVICE_CACHE_V1,
+    .size = sizeof(cache_service),
 };
 
 static const void *host_get_service(uint32_t id, uint32_t min_version)

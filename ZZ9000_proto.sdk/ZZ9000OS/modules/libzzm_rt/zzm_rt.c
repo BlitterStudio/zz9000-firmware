@@ -159,6 +159,14 @@ void zzm_rt_dcache_clean(uint32_t address, uint32_t length)
         cache->dcache_clean(address, length);
 }
 
+void zzm_rt_dcache_invalidate(uint32_t address, uint32_t length)
+{
+    if (cache && cache->size >=
+            offsetof(zzm_cache_service_t, dcache_invalidate_owned) +
+            sizeof(cache->dcache_invalidate_owned) &&
+        cache->dcache_invalidate_owned)
+        (void)cache->dcache_invalidate_owned(context.owner, address, length);
+}
 int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address, uint32_t length)
 {
     if (cache && cache->size >=
@@ -169,6 +177,25 @@ int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address, uint32_t length)
     return 0;
 }
 
+void zzm_rt_barrier(void)
+{
+    const zzm_graphics_hw_service_t *graphics =
+        (const zzm_graphics_hw_service_t *)zzm_rt_get_service(
+            ZZM_SERVICE_GRAPHICS_HW, ZZM_SERVICE_GRAPHICS_HW_V3);
+
+    if (graphics && graphics->size >=
+            offsetof(zzm_graphics_hw_service_t, barrier) +
+            sizeof(graphics->barrier) && graphics->barrier)
+        graphics->barrier();
+}
+
+uint64_t zzm_rt_time_us(void)
+{
+    if (core && core->size >= offsetof(zzm_core_service_t, time_us) +
+                               sizeof(core->time_us) && core->time_us)
+        return core->time_us();
+    return 0U;
+}
 void *memalign(size_t alignment, size_t bytes)
 {
     struct zzm_rt_allocation *header;

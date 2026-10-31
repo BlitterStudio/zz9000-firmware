@@ -158,6 +158,9 @@ static const void *mock_get_service(uint32_t id, uint32_t min_version)
 static const zzm_services_t services = {
     ZZM_MODULE_ABI_VERSION, sizeof(services), mock_get_service, 0, 0
 };
+static const zzm_services_t services_v3 = {
+    ZZM_V3_ABI_MAJOR, sizeof(services_v3), mock_get_service, 0, 0
+};
 
 /* This models a newlib helper: the allocation must use the reentrant bridge. */
 static char *newlib_style_strdup(const char *source)
@@ -181,6 +184,13 @@ static void reset_runtime(uint32_t quota)
     last_log = 0;
     last_fault = 0;
     CHECK(zzm_rt_bind(&services, 0x55U, ZZM_MEMORY_CLASS_MEDIA, quota) == 1);
+}
+
+static void test_v3_binding(void)
+{
+    pool_used = 0U;
+    CHECK(zzm_rt_bind(&services_v3, 0x55U, ZZM_MEMORY_CLASS_MEDIA, 0U) == 1);
+    CHECK(malloc(1U) != 0);
 }
 
 static void test_allocator_entry_points(void)
@@ -337,6 +347,7 @@ static void test_faults_cpp_and_guards(void)
 
 int main(void)
 {
+    test_v3_binding();
     test_allocator_entry_points();
     test_calloc_and_realloc_failures();
     test_alignment_and_quota();

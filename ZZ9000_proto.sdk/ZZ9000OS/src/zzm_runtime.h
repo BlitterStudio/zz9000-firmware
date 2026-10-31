@@ -20,6 +20,8 @@ enum zzm_service_id {
     ZZM_SERVICE_PROFILE = 9U,
     /* Provider implementation is the scheduler/mailbox host. */
     ZZM_SERVICE_TRANSPORT = 10U,
+    /* Provider implementation is the scheduler/hardware host. */
+    ZZM_SERVICE_GRAPHICS_HW = 11U,
 };
 
 #define ZZM_SERVICE_VERSION(major, minor) \
@@ -44,6 +46,7 @@ enum zzm_service_id {
 #define ZZM_SERVICE_APP_GL_HOST_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_PROFILE_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_TRANSPORT_V3 ZZM_SERVICE_VERSION(3U, 0U)
+#define ZZM_SERVICE_GRAPHICS_HW_V3 ZZM_SERVICE_VERSION(3U, 0U)
 
 enum zzm_memory_class {
     ZZM_MEMORY_CLASS_MEDIA = 1U,
@@ -203,6 +206,35 @@ typedef struct zzm_transport_service {
     void (*publish_capabilities)(uint32_t module_id, uint32_t capabilities);
 } zzm_transport_service_t;
 
+typedef struct zzm_graphics_hw_caps {
+    uint32_t has_rasterix_ef;
+    uint32_t rasterix_csr_abi_major;
+    uint32_t rasterix_csr_abi_minor;
+    uint32_t afi3_ready;
+    uint32_t pl330_available;
+} zzm_graphics_hw_caps_t;
+
+/*
+ * The scheduler/hardware host owns MMU attributes, AFI3 setup, RasterIX
+ * image selection, and PL330 arbitration. A module receives no raw MMIO
+ * address and validates `caps` before using any optional RasterIX path.
+ */
+typedef struct zzm_graphics_hw_service {
+    uint32_t version;
+    uint32_t size;
+    int (*caps)(zzm_graphics_hw_caps_t *out);
+    int (*csr_read)(uint32_t offset, uint32_t *value_out);
+    int (*csr_write)(uint32_t offset, uint32_t value);
+    int (*fifo_read)(uint32_t offset, uint32_t *value_out);
+    int (*fifo_write)(uint32_t offset, uint32_t value);
+    int (*fifo_write_words)(const uint32_t *words, uint32_t word_count);
+    int (*pl330_claim)(uint32_t owner, uint32_t *channel_out);
+    int (*pl330_start)(uint32_t channel, uint32_t source_address,
+                       uint32_t bytes);
+    void (*pl330_abort)(uint32_t channel);
+    void (*pl330_release)(uint32_t channel);
+    void (*barrier)(void);
+} zzm_graphics_hw_service_t;
 typedef const void *(*zzm_get_service_fn)(uint32_t id, uint32_t min_version);
 
 typedef struct zzm_services {
@@ -234,8 +266,11 @@ void zzm_rt_get_context(zzm_allocation_context_t *out);
 void zzm_rt_log(const char *message);
 void zzm_rt_fault(const char *reason);
 void zzm_rt_dcache_clean(uint32_t address, uint32_t length);
+void zzm_rt_dcache_invalidate(uint32_t address, uint32_t length);
 int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address,
                                uint32_t length);
+void zzm_rt_barrier(void);
+uint64_t zzm_rt_time_us(void);
 
 /* Codec plug-in contracts. Payload addresses are card addresses; formats are
  * intentionally fixed to 8-bit 4:2:0 video and interleaved signed PCM. */
