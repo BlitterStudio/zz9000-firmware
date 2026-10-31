@@ -110,11 +110,11 @@ int zzapp_svc_input_poll(struct zzapp_event *out, uint32_t max, uint32_t *out_n)
 int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, struct zzapp_audio *out);
 int zzapp_svc_audio_close(void);
 
-/* ---- C defines these. Weak ENOSYS / empty here. ---- */
-void zzapp_test_mark_running(void);
-void zzapp_gl_swap(void);
-void zzapp_gl_unbind(void);
-void zzapp_gl_reclaim(void);
+/* ---- MiniGL module binding. ---- */
+int zzapp_minigl_bind(uint32_t surface_id, const struct zzapp_gl **out);
+void zzapp_minigl_swap(void);
+void zzapp_minigl_unbind(void);
+void zzapp_minigl_reclaim(uint32_t generation);
 
 #ifdef ZZAPP_HOST_TEST
 void zzapp_test_set_xtime(uint64_t ticks);

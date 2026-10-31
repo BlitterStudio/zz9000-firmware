@@ -255,7 +255,7 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
     life32(ZZAPP_LIFE_CPSR_OFF, cpsr);
     publish_state(ZZAPP_ST_FAULTED);
     g_fault_mark = now_ticks();
-    zzapp_gl_reclaim();
+    zzapp_minigl_reclaim(g_coh->generation);
 #ifndef ZZAPP_HOST_TEST
     if (g_owner)
         card_pool_release_owner(&card_pool, g_owner);
@@ -540,6 +540,7 @@ static void run_app(uint32_t argc)
     g_coh->running = 0;
     if (!g_faulted) {
         life32(ZZAPP_LIFE_EXIT_OFF, g_exit_code);
+        zzapp_minigl_reclaim(g_coh->generation);
         publish_state(ZZAPP_ST_IDLE);
         zzapp_loader_release();
     }

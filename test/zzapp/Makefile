@@ -1,7 +1,6 @@
 # GPL test driver for the app runtime host harness. Slices may either drop a
 # self-contained <slice>/*_test.c (auto-discovered) or add <slice>/tests.mk
-# and append targets to ZZAPP_TESTS. c/tests.mk uses the latter for the real
-# MiniGL front end and host mw_* objects.
+# and append targets to ZZAPP_TESTS.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -23,10 +22,21 @@ AUTO_TESTS := $(patsubst %.c,$(BUILD)/%,$(AUTO_TEST_SOURCES))
 ZZAPP_TESTS ?=
 ALL_TESTS := $(AUTO_TESTS) $(ZZAPP_TESTS)
 
-.PHONY: test clean
+.PHONY: test clean module-harness
 
 test: $(ALL_TESTS)
 	@set -e; for test in $(ALL_TESTS); do $$test; done
+
+# Library CI links this host-only runtime archive with the pinned module and
+# front-end objects, then supplies registry fakes from its test driver.
+MODULE_HARNESS := $(BUILD)/libzzapp_module_harness.a
+MODULE_HARNESS_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
+	$(BUILD)/a/zzapp_api.o
+
+module-harness: $(MODULE_HARNESS)
+
+$(MODULE_HARNESS): $(MODULE_HARNESS_OBJS) | $(BUILD)
+	$(AR) rcs $@ $^
 
 $(BUILD):
 	mkdir -p $(BUILD)
