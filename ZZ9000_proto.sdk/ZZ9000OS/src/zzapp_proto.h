@@ -59,6 +59,7 @@
 #define ZZAPP_CHUNK_REQ_BYTES      12u
 #define ZZAPP_CHUNK_MIN            1u
 #define ZZAPP_CHUNK_MAX            65536u
+#define ZZAPP_IMAGE_MAX_BYTES      0x01000000u
 
 #define ZZAPP_START_ARGC           0u
 #define ZZAPP_START_REQ_BYTES      4u

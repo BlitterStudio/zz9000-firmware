@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 
+#include "zzapp_proto.h"
 #define ZZAPP_TICK_US          5000u
 #define ZZAPP_WATCHDOG_US      2000000u
 #define ZZAPP_STOP_GRACE_US    500000u
@@ -24,7 +25,7 @@
 #define ZZAPP_ARENA_BYTES      (96u << 20)
 #define ZZAPP_STACK_DEFAULT    (1u << 20)
 #define ZZAPP_STACK_MIN        (64u << 10)
-#define ZZAPP_FILE_MAX         (16u << 20)
+#define ZZAPP_FILE_MAX         ZZAPP_IMAGE_MAX_BYTES
 #define ZZAPP_CANARY_BYTES     64u
 #define ZZAPP_IMAGE_SLACK      (64u << 10)
 #define ZZAPP_LOG_RING_PER_SEC 32u
