@@ -4,23 +4,26 @@
  */
 #include "minigl_rix_backend.h"
 #include "rix_texture.h"
+#include "minigl_profile.h"
 
 #if !defined(MINIGL_HOST_TEST) && !defined(MINIGL_SERVICE_HOST_TEST)
 #include "xil_io.h"
 #include "xil_printf.h"
 #define RIX_LOG(...) xil_printf(__VA_ARGS__)
-#define RIX_AFI_DIAGNOSTICS 1
+#define RIX_PS_DIAGNOSTICS 1
 #else
 void (*g_rix_test_log)(const char *fmt, ...) = NULL;
 #define RIX_LOG(...) do { if (g_rix_test_log) g_rix_test_log(__VA_ARGS__); } while (0)
-#define RIX_AFI_DIAGNOSTICS 0
+#define RIX_PS_DIAGNOSTICS 0
 #endif
 
 #include <string.h>
 
 #define RIX_TIMEOUT 1000000U
-#define RIX_AFI0_BASE 0xf8008000U
-#define RIX_AFI1_BASE 0xf8009000U
+/* Start-up PL330 self-test: leading parser NOPs put the packet past one
+ * 16-word burst plus a tail before the fence MEMSET that proves delivery. */
+#define RIX_DMA_SELF_TEST_NOPS 24U
+#define RIX_DMA_SELF_TEST_FENCE 0xa55aU
 #define RIX_AFI_RD_CTRL 0x00U
 #define RIX_AFI_RD_ISSUING_CAP 0x04U
 #define RIX_AFI_RD_QOS 0x08U
@@ -457,6 +460,7 @@ static int backend_allocate_pages(MiniGLRixBackend *backend, MiniGLRixTexture *t
 
             if (victim == NULL)
                 return 0;
+            minigl_profile_count(MGLP_N_EVICTIONS, 1U);
             backend_release_texture(backend, victim);
         }
     }
@@ -611,9 +615,11 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
         !backend_grow_texture_pool(backend, MINIGL_RIX_TEXTURE_PAGE_BYTES))
         return 0;
     texture = backend_texture(backend, id);
-    if (texture != NULL && texture->pin_count != 0U &&
-        !minigl_rix_backend_drain(backend))
-        return 0;
+    if (texture != NULL && texture->pin_count != 0U) {
+        minigl_profile_count(MGLP_N_PIN_DRAINS, 1U);
+        if (!minigl_rix_backend_drain(backend))
+            return 0;
+    }
     if (level == 0U) {
         uint8_t width_log2;
         uint8_t height_log2;
@@ -680,6 +686,136 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
         !backend_write_texture(backend, texture, offset, scaled, bytes / 2U))
         return 0;
     texture->levels |= (uint16_t)(1U << level);
+    minigl_profile_count(MGLP_N_RIX_UPLOADS, 1U);
+    minigl_profile_count(MGLP_N_RIX_UPLOAD_BYTES, bytes);
+    backend_touch_texture(backend, texture);
+    return 1;
+}
+
+static int backend_allocate_pages_without_drain(MiniGLRixBackend *backend,
+                                                MiniGLRixTexture *texture,
+                                                uint16_t page_count)
+{
+    MiniGLRixTexture *victim;
+    uint32_t total_pages = (uint32_t)(backend->platform.texture_bytes /
+                                      MINIGL_RIX_TEXTURE_PAGE_BYTES);
+    uint32_t first_page;
+
+    if (page_count == 0U || page_count > total_pages)
+        return 0;
+    for (;;) {
+        for (first_page = 0U; first_page <= total_pages - page_count; ++first_page) {
+            if (backend_range_available(backend, texture, (uint16_t)first_page,
+                                        page_count)) {
+                texture->first_page = (uint16_t)first_page;
+                texture->page_count = page_count;
+                return 1;
+            }
+        }
+        victim = backend_evict_texture(backend, texture);
+        if (victim == NULL)
+            return 0;
+        minigl_profile_count(MGLP_N_EVICTIONS, 1U);
+        backend_release_texture(backend, victim);
+    }
+}
+
+static MiniGLRixTexture *backend_clone_texture(MiniGLRixBackend *backend,
+                                                MiniGLRixTexture *source)
+{
+    MiniGLRixTexture *copy = NULL;
+    uint32_t incarnation;
+    size_t index;
+    size_t bytes;
+
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
+        if (!backend->textures[index].valid) {
+            copy = &backend->textures[index];
+            break;
+        }
+    if (copy == NULL) {
+        copy = backend_evict_texture(backend, source);
+        if (copy == NULL)
+            return NULL;
+        minigl_profile_count(MGLP_N_EVICTIONS, 1U);
+        backend_release_texture(backend, copy);
+    }
+    memcpy(copy, source, sizeof(*copy));
+    ++backend->texture_incarnation_clock;
+    if (backend->texture_incarnation_clock == 0U)
+        ++backend->texture_incarnation_clock;
+    incarnation = backend->texture_incarnation_clock;
+    copy->incarnation = incarnation;
+    copy->pin_count = 0U;
+    copy->deleted = 0U;
+    if (!backend_allocate_pages_without_drain(backend, copy, source->page_count)) {
+        memset(copy, 0, sizeof(*copy));
+        return NULL;
+    }
+    bytes = (size_t)source->page_count * MINIGL_RIX_TEXTURE_PAGE_BYTES;
+    memcpy(backend->platform.texture_memory +
+               (size_t)copy->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES,
+           backend->platform.texture_memory +
+               (size_t)source->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES,
+           bytes);
+    if (backend->platform.cache_clean != NULL)
+        backend->platform.cache_clean(backend->platform.context,
+            (uintptr_t)(backend->platform.texture_memory +
+                (size_t)copy->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES), bytes);
+    source->deleted = 1U;
+    backend_touch_texture(backend, copy);
+    return copy;
+}
+
+int minigl_rix_backend_subimage_texture(MiniGLRixBackend *backend, uint32_t id,
+                                        uint16_t level, uint16_t xoffset,
+                                        uint16_t yoffset, uint16_t width,
+                                        uint16_t height, const uint32_t *rgba,
+                                        uint16_t source_width,
+                                        uint16_t source_height)
+{
+    MiniGLRixTexture *texture;
+    uint16_t level_width;
+    uint16_t level_height;
+    uint32_t offset;
+    uint16_t row;
+
+    if (backend == NULL || rgba == NULL || width == 0U || height == 0U ||
+        backend->error)
+        return 0;
+    texture = backend_texture(backend, id);
+    if (texture == NULL || level >= 16U ||
+        (texture->levels & (uint16_t)(1U << level)) == 0U)
+        return 0;
+    level_width = texture->width >> level;
+    level_height = texture->height >> level;
+    if (level_width == 0U) level_width = 1U;
+    if (level_height == 0U) level_height = 1U;
+    if (source_width != level_width || source_height != level_height ||
+        xoffset > level_width - width || yoffset > level_height - height)
+        return 0;
+    if (texture->pin_count != 0U) {
+        MiniGLRixTexture *copy = backend_clone_texture(backend, texture);
+
+        if (copy != NULL)
+            texture = copy;
+        else {
+            minigl_profile_count(MGLP_N_PIN_DRAINS, 1U);
+            if (!minigl_rix_backend_drain(backend))
+                return 0;
+        }
+    }
+    offset = rix_texture_mip_offset(texture->width_log2, texture->height_log2,
+                                    (uint8_t)level);
+    if (offset == UINT32_MAX)
+        return 0;
+    for (row = 0U; row < height; ++row)
+        if (!backend_write_texture(backend, texture,
+            offset + (uint32_t)(yoffset + row) * level_width + xoffset,
+            rgba + (size_t)(yoffset + row) * source_width + xoffset, width))
+            return 0;
+    minigl_profile_count(MGLP_N_RIX_UPLOADS, 1U);
+    minigl_profile_count(MGLP_N_RIX_UPLOAD_BYTES, (uint32_t)width * height * 2U);
     backend_touch_texture(backend, texture);
     return 1;
 }
@@ -704,83 +840,100 @@ static void backend_release_buffer(MiniGLRixBackend *backend, uint8_t index)
     }
 }
 
-static uint8_t g_timeout_diagnostics_logged;
-
-#if RIX_AFI_DIAGNOSTICS
-static void backend_log_afi_timeout_diagnostics(uint32_t base, const char *name)
+#if RIX_PS_DIAGNOSTICS
+static void backend_log_ps_diagnostics(void)
 {
-    RIX_LOG("[RasterIX] timeout %s-r=%08lx/%08lx/%08lx/%08lx/%08lx %s-w=%08lx/%08lx/%08lx/%08lx/%08lx\r\n",
-            name, (unsigned long)Xil_In32(base + RIX_AFI_RD_CTRL),
-            (unsigned long)Xil_In32(base + RIX_AFI_RD_ISSUING_CAP),
-            (unsigned long)Xil_In32(base + RIX_AFI_RD_QOS),
-            (unsigned long)Xil_In32(base + RIX_AFI_RD_DATAFIFO_LEVEL),
-            (unsigned long)Xil_In32(base + RIX_AFI_RD_DEBUG),
-            name, (unsigned long)Xil_In32(base + RIX_AFI_WR_CTRL),
-            (unsigned long)Xil_In32(base + RIX_AFI_WR_ISSUING_CAP),
-            (unsigned long)Xil_In32(base + RIX_AFI_WR_QOS),
-            (unsigned long)Xil_In32(base + RIX_AFI_WR_DATAFIFO_LEVEL),
-            (unsigned long)Xil_In32(base + RIX_AFI_WR_DEBUG));
+    const uint32_t afi = MINIGL_RIX_AFI_BASE;
+    const uint32_t dmac = MINIGL_RIX_DMAC_BASE;
+    const uint32_t channel = MINIGL_RIX_DMAC_CHANNEL;
+
+    RIX_LOG("[RasterIX] diag afi3-r=%08lx/%08lx/%08lx/%08lx/%08lx afi3-w=%08lx/%08lx/%08lx/%08lx/%08lx\r\n",
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_CTRL),
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_ISSUING_CAP),
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_QOS),
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_DATAFIFO_LEVEL),
+            (unsigned long)Xil_In32(afi + RIX_AFI_RD_DEBUG),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_CTRL),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_ISSUING_CAP),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_QOS),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_DATAFIFO_LEVEL),
+            (unsigned long)Xil_In32(afi + RIX_AFI_WR_DEBUG));
+    RIX_LOG("[RasterIX] diag pl330 ds=%08lx fsrc=%08lx dbg=%08lx ch%lu csr=%08lx cpc=%08lx ftr=%08lx sar=%08lx dar=%08lx ccr=%08lx\r\n",
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_DS),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_FSRC),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_DBGSTATUS),
+            (unsigned long)channel,
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_CSR(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_CPC(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_FTR(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_SAR(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_DAR(channel)),
+            (unsigned long)Xil_In32(dmac + MINIGL_RIX_DMAC_CCR(channel)));
 }
 #endif
 
-static void backend_log_timeout_diagnostics(MiniGLRixBackend *backend, uint8_t index)
+/* One snapshot per backend failure: the EF CSR map, the command FIFO's
+ * readable registers (TDFD/TLF/TDFR are write-only), the transport of the
+ * last packet, the failed buffer and, on hardware, AFI3 and the PL330. */
+static void backend_log_diagnostics(MiniGLRixBackend *backend, uint8_t index)
 {
-    uint32_t csr[23];
+    const MiniGLRixPlatform *platform = &backend->platform;
+    const struct rix_drv *driver = &backend->driver;
     uint32_t words[16] = { 0U };
     uint32_t command_words = backend->submitted_command_words[index];
     size_t word_count = command_words < 16U ? command_words : 16U;
-    size_t word_index;
-    const uint8_t *buffer = backend->platform.command_buffer[index];
+    const uint8_t *buffer = platform->command_buffer[index];
 
-    if (g_timeout_diagnostics_logged)
-        return;
-    g_timeout_diagnostics_logged = 1U;
-    for (word_index = 0U; word_index < 23U; ++word_index)
-        csr[word_index] = backend->platform.csr_read(backend->platform.context,
-                                                      (uint32_t)word_index * 4U);
+    RIX_LOG("[RasterIX] diag csr id=%08lx ver=%08lx ctl=%08lx st=%08lx stream=%08lx resp=%08lx\r\n",
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_IDENTITY),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_VERSION),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_CONTROL),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_STATUS),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_STREAM),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_RESPONSE));
+    RIX_LOG("[RasterIX] diag mem aw=%lu w=%lu b=%lu ar=%lu r=%lu last_ar=%08lx arid=%02lx\r\n",
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_AW),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_W),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_B),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_AR),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_R),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_LAST_AR),
+            (unsigned long)platform->csr_read(platform->context, RIX_DRV_CSR_DBG_LAST_ARID));
+    RIX_LOG("[RasterIX] diag fifo isr=%08lx ier=%08lx tdfv=%lu last=%s/%lu bytes packets=%lu dma=%lu transport=%s\r\n",
+            (unsigned long)platform->fifo_read(platform->context, RIX_DRV_FIFO_ISR),
+            (unsigned long)platform->fifo_read(platform->context, RIX_DRV_FIFO_IER),
+            (unsigned long)platform->fifo_read(platform->context, RIX_DRV_FIFO_TDFV),
+            driver->last_packet_dma ? "dma" : "mmio",
+            (unsigned long)driver->last_packet_bytes, (unsigned long)driver->packets,
+            (unsigned long)driver->dma_packets,
+            driver->dma_stream != NULL ? "dma" : "mmio");
     if (buffer != NULL && word_count != 0U) {
-        if (backend->platform.cache_invalidate != NULL)
-            backend->platform.cache_invalidate(backend->platform.context,
-                                               (uintptr_t)buffer,
-                                               word_count * sizeof(words[0]));
+        if (platform->cache_invalidate != NULL)
+            platform->cache_invalidate(platform->context, (uintptr_t)buffer,
+                                       word_count * sizeof(words[0]));
         memcpy(words, buffer, word_count * sizeof(words[0]));
     }
-    RIX_LOG("[RasterIX] timeout snapshot csr=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx\r\n",
-            (unsigned long)csr[0], (unsigned long)csr[1], (unsigned long)csr[2],
-            (unsigned long)csr[3], (unsigned long)csr[4], (unsigned long)csr[5],
-            (unsigned long)csr[6]);
-    RIX_LOG("[RasterIX] timeout csr=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx\r\n",
-            (unsigned long)csr[7], (unsigned long)csr[8], (unsigned long)csr[9],
-            (unsigned long)csr[10], (unsigned long)csr[11], (unsigned long)csr[12],
-            (unsigned long)csr[13]);
-    RIX_LOG("[RasterIX] timeout cmd=%08lx/%08lx color=%08lx depth=%08lx tex=%08lx white=%08lx\r\n",
-            (unsigned long)backend->platform.command_address[index],
+    RIX_LOG("[RasterIX] diag cmd=%08lx/%lu color=%08lx depth=%08lx tex=%08lx white=%08lx\r\n",
+            (unsigned long)platform->command_address[index],
             (unsigned long)command_words, (unsigned long)backend->color_address,
             (unsigned long)backend->depth_address,
-            (unsigned long)backend->platform.texture_address,
-            (unsigned long)backend->platform.white_texture_address);
-    RIX_LOG("[RasterIX] timeout words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
+            (unsigned long)platform->texture_address,
+            (unsigned long)platform->white_texture_address);
+    RIX_LOG("[RasterIX] diag words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
             (unsigned long)words[0], (unsigned long)words[1], (unsigned long)words[2],
             (unsigned long)words[3], (unsigned long)words[4], (unsigned long)words[5],
             (unsigned long)words[6], (unsigned long)words[7]);
-    RIX_LOG("[RasterIX] timeout words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
+    RIX_LOG("[RasterIX] diag words=%08lx/%08lx/%08lx/%08lx %08lx/%08lx/%08lx/%08lx\r\n",
             (unsigned long)words[8], (unsigned long)words[9], (unsigned long)words[10],
             (unsigned long)words[11], (unsigned long)words[12], (unsigned long)words[13],
             (unsigned long)words[14], (unsigned long)words[15]);
-    RIX_LOG("[RasterIX] timeout dbg live=%08lx/%08lx ar=%08lx rb=%08lx\r\n",
-            (unsigned long)csr[14], (unsigned long)csr[15],
-            (unsigned long)csr[16], (unsigned long)csr[17]);
-    RIX_LOG("[RasterIX] timeout dbg rl=%08lx car=%08lx crl=%08lx addr=%08lx id=%08lx\r\n",
-            (unsigned long)csr[18], (unsigned long)csr[19],
-            (unsigned long)csr[20], (unsigned long)csr[21],
-            (unsigned long)csr[22]);
-#if RIX_AFI_DIAGNOSTICS
-    backend_log_afi_timeout_diagnostics(RIX_AFI0_BASE, "afi0");
-    backend_log_afi_timeout_diagnostics(RIX_AFI1_BASE, "afi1");
+#if RIX_PS_DIAGNOSTICS
+    backend_log_ps_diagnostics();
 #endif
 }
 
-static void backend_disable(MiniGLRixBackend *backend, const char *operation, int result)
+static void backend_disable(MiniGLRixBackend *backend, const char *operation,
+                            int result, uint8_t buffer_index)
 {
     size_t index;
 
@@ -791,6 +944,7 @@ static void backend_disable(MiniGLRixBackend *backend, const char *operation, in
             operation, result, (unsigned long)backend->driver.last_status,
             (unsigned long)backend->driver.last_error_status,
             (unsigned long)backend->driver.last_error_address);
+    backend_log_diagnostics(backend, buffer_index);
     for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
         backend->pending[index] = 0U;
         backend->pending_fence[index] = 0U;
@@ -814,34 +968,38 @@ static volatile uint16_t *backend_fence_pixel(MiniGLRixBackend *backend, uint8_t
                                  MINIGL_RIX_TEXTURE_PAGE_BYTES);
 }
 
-static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
+static int backend_wait_fence(MiniGLRixBackend *backend, uint8_t index,
+                              uint16_t value)
 {
-    volatile uint16_t *pixel;
+    volatile uint16_t *pixel = backend_fence_pixel(backend, index);
     uint32_t attempt = 0U;
+
+    for (;;) {
+        if (backend->platform.cache_invalidate != NULL)
+            backend->platform.cache_invalidate(backend->platform.context,
+                                               (uintptr_t)pixel, sizeof(*pixel));
+        if (*pixel == value)
+            return 1;
+        if (attempt++ >= RIX_TIMEOUT)
+            return 0;
+    }
+}
+
+static int backend_wait_buffer_now(MiniGLRixBackend *backend, uint8_t index)
+{
     int result;
 
     if (backend->error)
         return 0;
     if (!backend->pending[index])
         return 1;
-    pixel = backend_fence_pixel(backend, index);
-    for (;;) {
-        if (backend->platform.cache_invalidate != NULL)
-            backend->platform.cache_invalidate(backend->platform.context,
-                                               (uintptr_t)pixel, sizeof(*pixel));
-        if (*pixel == (uint16_t)backend->pending_fence[index])
-            break;
-        if (attempt++ >= RIX_TIMEOUT) {
-            backend_log_timeout_diagnostics(backend, index);
-            backend_disable(backend, "fence", RIX_DRV_TIMEOUT);
-            return 0;
-        }
+    if (!backend_wait_fence(backend, index, (uint16_t)backend->pending_fence[index])) {
+        backend_disable(backend, "fence", RIX_DRV_TIMEOUT, index);
+        return 0;
     }
     result = rix_drv_poll(&backend->driver, RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
-        if (result == RIX_DRV_TIMEOUT)
-            backend_log_timeout_diagnostics(backend, index);
-        backend_disable(backend, "poll", result);
+        backend_disable(backend, "poll", result, index);
         return 0;
     }
     backend->pending[index] = 0U;
@@ -851,8 +1009,21 @@ static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
     return 1;
 }
 
+static int backend_wait_buffer(MiniGLRixBackend *backend, uint8_t index)
+{
+    int ok;
+
+    if (!backend->pending[index])
+        return backend->error ? 0 : 1;
+    minigl_profile_push(MGLP_FENCE);
+    ok = backend_wait_buffer_now(backend, index);
+    minigl_profile_pop();
+    return ok;
+}
+
 static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
-                              const MiniGLRixRecordedOp *op, unsigned int pass)
+                              const MiniGLRixRecordedOp *op, unsigned int pass,
+                              int emit_texenv)
 {
     ZZ9KMiniGLPacketSetState state = op->state;
     RixFragmentState fragment;
@@ -927,8 +1098,9 @@ static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
     return pages[0] != 0U && rix_cmd_feature_enable(writer, features) &&
            rix_cmd_fragment_state(writer, &fragment) &&
            rix_cmd_texture_state(writer, 0U, &texture) &&
-           rix_cmd_tex_env(writer, 0U, &environment) &&
-           rix_cmd_tex_env_color(writer, 0U, state.tex_env_color[0]) &&
+           (!emit_texenv ||
+            (rix_cmd_tex_env(writer, 0U, &environment) &&
+             rix_cmd_tex_env_color(writer, 0U, state.tex_env_color[0]))) &&
            rix_cmd_texture_pages(writer, 0U, pages, page_count);
 }
 
@@ -976,16 +1148,16 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer,
         buffer == NULL || backend->platform.command_address[index] == 0U)
         return 0;
     command_words = (uint32_t)(writer->length / sizeof(uint32_t));
+    backend->submitted_command_words[index] = command_words;
     result = rix_drv_submit(&backend->driver, (const uint32_t *)buffer,
                             backend->platform.command_address[index],
                             command_words, RIX_TIMEOUT);
     if (result != RIX_DRV_OK) {
-        backend_disable(backend, "submit", result);
+        backend_disable(backend, "submit", result, index);
         return 0;
     }
     backend->pending_fence[index] = fence;
     backend->pending[index] = 1U;
-    backend->submitted_command_words[index] = command_words;
     memcpy(backend->pending_pins[index], backend->recorded_pins,
            sizeof(backend->pending_pins[index]));
     memset(backend->recorded_pins, 0, sizeof(backend->recorded_pins));
@@ -1035,6 +1207,72 @@ int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform)
     return 1;
 }
 
+/* README contract: PL330 transport may carry packets only after a start-up
+ * test proves the count and content of a DMA packet end to end.  One packet
+ * of parser NOPs plus a fence MEMSET goes out through the DMA path; the
+ * commit must be accepted, the fence pixel must land and the renderer must
+ * drain. */
+static int backend_dma_self_test(MiniGLRixBackend *backend)
+{
+    RixCmdWriter writer;
+    volatile uint16_t *pixel = backend_fence_pixel(backend, 0U);
+    uint8_t *buffer = backend->platform.command_buffer[0];
+    uint32_t packets = backend->driver.dma_packets;
+    uint32_t index;
+
+    if (buffer == NULL || backend->platform.command_address[0] == 0U ||
+        backend->platform.command_capacity <= MINIGL_RIX_TEXTURE_PAGE_BYTES)
+        return 0;
+    *pixel = 0U;
+    if (backend->platform.cache_clean != NULL)
+        backend->platform.cache_clean(backend->platform.context, (uintptr_t)pixel,
+                                      sizeof(*pixel));
+    rix_cmd_init(&writer, buffer, backend->platform.command_capacity -
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES);
+    for (index = 0U; index < RIX_DMA_SELF_TEST_NOPS; ++index)
+        (void)rix_cmd_word(&writer, 0U);
+    if (!backend_emit_fence(backend, &writer, 0U, RIX_DMA_SELF_TEST_FENCE) ||
+        writer.failed)
+        return 0;
+    backend->submitted_command_words[0] = (uint32_t)(writer.length / sizeof(uint32_t));
+    if (rix_drv_submit(&backend->driver, (const uint32_t *)buffer,
+                       backend->platform.command_address[0],
+                       backend->submitted_command_words[0], RIX_TIMEOUT) != RIX_DRV_OK ||
+        backend->driver.dma_packets == packets ||
+        !backend_wait_fence(backend, 0U, RIX_DMA_SELF_TEST_FENCE) ||
+        rix_drv_poll(&backend->driver, RIX_TIMEOUT) != RIX_DRV_OK)
+        return 0;
+    backend->submitted_command_words[0] = 0U;
+    return 1;
+}
+
+static int backend_select_transport(MiniGLRixBackend *backend)
+{
+    static int logged = 0;
+
+    if (backend->driver.dma_stream == NULL) {
+        if (!logged)
+            RIX_LOG("[RasterIX] transport: MMIO\r\n");
+        logged = 1;
+        return 1;
+    }
+    if (backend_dma_self_test(backend)) {
+        if (!logged)
+            RIX_LOG("[RasterIX] transport: PL330 DMA (self-test passed)\r\n");
+        logged = 1;
+        return 1;
+    }
+    RIX_LOG("[RasterIX] transport: PL330 self-test failed (err_status=0x%08lx); using MMIO\r\n",
+            (unsigned long)backend->driver.last_error_status);
+    backend_log_diagnostics(backend, 0U);
+    backend->submitted_command_words[0] = 0U;
+    backend->driver.dma_stream = NULL;
+    /* Discard the renderer and FIFO state of the failed packet, then clear
+     * the FIFO's sticky errors before MMIO packets are committed. */
+    return rix_drv_recover(&backend->driver, RIX_TIMEOUT, 1) == RIX_DRV_OK &&
+           rix_drv_enable(&backend->driver) == RIX_DRV_OK;
+}
+
 void minigl_rix_backend_init(MiniGLRixBackend *backend,
                              const MiniGLRixPlatform *platform)
 {
@@ -1052,6 +1290,8 @@ void minigl_rix_backend_init(MiniGLRixBackend *backend,
     config.write = platform->csr_write;
     config.fifo_read = platform->fifo_read;
     config.fifo_write = platform->fifo_write;
+    config.fifo_write_words = platform->fifo_write_words;
+    config.fifo_drain = platform->fifo_drain;
     config.clean_dcache = platform->cache_clean;
     config.dma_stream = platform->dma_stream;
     config.hardware_present = 1;
@@ -1062,6 +1302,11 @@ void minigl_rix_backend_init(MiniGLRixBackend *backend,
         return;
     }
     backend_fill_white_texture(backend);
+    if (!backend_select_transport(backend)) {
+        RIX_LOG("[RasterIX] backend enable failed (status=0x%08lx)\r\n",
+                (unsigned long)backend->driver.last_status);
+        return;
+    }
     backend->available = 1U;
 }
 
@@ -1140,6 +1385,20 @@ static size_t backend_draw_state_words(const MiniGLRixBackend *backend,
         words += backend->textures[slot].page_count;
     return words;
 }
+static int backend_two_pass_texenv_same(const MiniGLRixRecordedOp *op)
+{
+    return op->state.tex_env_mode[0] == GL_REPLACE &&
+           op->state.tex_env_color[0] == op->state.tex_env_color[1];
+}
+
+static size_t backend_two_pass_state_words(const MiniGLRixBackend *backend,
+                                           const MiniGLRixRecordedOp *op,
+                                           unsigned int pass, int transition)
+{
+    size_t words = backend_draw_state_words(backend, op, pass);
+
+    return transition && backend_two_pass_texenv_same(op) ? words - 4U : words;
+}
 
 static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
 {
@@ -1157,7 +1416,7 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
         if (op->type == MINIGL_RIX_OP_CLEAR) {
             uint32_t clear_flags = 0U;
 
-            if (!backend_emit_state(backend, writer, op, 0U))
+            if (!backend_emit_state(backend, writer, op, 0U, 1))
                 return 0;
             if (op->mask & GL_COLOR_BUFFER_BIT)
                 clear_flags |= RIX_FRAMEBUFFER_COLOR;
@@ -1168,25 +1427,28 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
                 !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET | clear_flags, pixels))
                 return 0;
         } else if (!op->two_pass) {
-            if (!backend_emit_state(backend, writer, op, 0U) ||
+            if (!backend_emit_state(backend, writer, op, 0U, 1) ||
                 !backend_emit_triangles(writer, backend, op, 0U))
                 return 0;
         } else {
             size_t triangle_index;
+            int omit_texenv = backend_two_pass_texenv_same(op);
 
             for (triangle_index = 0U; triangle_index < op->triangle_count;
-                 ++triangle_index)
-                if (!backend_emit_state(backend, writer, op, 0U) ||
+                 ++triangle_index) {
+                if (!backend_emit_state(backend, writer, op, 0U,
+                                        triangle_index == 0U || !omit_texenv) ||
                     !backend_emit_triangle(writer, backend, op, triangle_index, 0U) ||
-                    !backend_emit_state(backend, writer, op, 1U) ||
+                    !backend_emit_state(backend, writer, op, 1U, !omit_texenv) ||
                     !backend_emit_triangle(writer, backend, op, triangle_index, 1U))
                     return 0;
+            }
         }
     }
     return !writer->failed;
 }
 
-static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
+static int backend_flush_now(MiniGLRixBackend *backend, int continue_frame)
 {
     RixCmdWriter writer;
     uint8_t *buffer;
@@ -1223,6 +1485,20 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
     if (!continue_frame)
         backend->frame_active = 0U;
     return 1;
+}
+
+/* EMIT is the command build; the fence wait for the reused buffer and the
+ * FIFO push inside are charged to FENCE and FIFO/STALL. */
+static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
+{
+    int ok;
+
+    if (!backend->frame_active || backend->op_count == 0U)
+        return 1;
+    minigl_profile_push(MGLP_EMIT);
+    ok = backend_flush_now(backend, continue_frame);
+    minigl_profile_pop();
+    return ok;
 }
 
 static int backend_record_draw(MiniGLRixBackend *backend)
@@ -1388,16 +1664,26 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         scissor.end_y = (uint16_t)((uint32_t)bottom + backend->state.scissor_h);
     }
     scissor.enabled = 1U;
-    if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor) ||
-        (passes == 2U &&
-         !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
-                             &texture1_vertices[1], &texture1_vertices[2], &scissor)))
+    if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor)) {
+        /* Zero area at RasterIX's 1/32-pixel precision, or no pixel inside
+         * the scissor: the engine would draw nothing. Failing here aborted
+         * the whole draw and, through MINIGL_RIX_CPU_FALLBACKS_PER_FRAME,
+         * put the rest of the frame on the CPU rasterizer with no logged
+         * reason. Slivers from polygon fans and distant models produce
+         * such triangles. */
+        minigl_profile_count(MGLP_N_CULLED, 1U);
+        return 1;
+    }
+    if (passes == 2U &&
+        !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
+                            &texture1_vertices[1], &texture1_vertices[2], &scissor))
         return 0;
     op = &backend->ops[backend->op_count - 1U];
     triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
     if (op->two_pass)
-        triangle_words += backend_draw_state_words(backend, op, 0U) +
-                          backend_draw_state_words(backend, op, 1U);
+        triangle_words += backend_two_pass_state_words(backend, op, 0U,
+                                                       op->triangle_count != 0U) +
+                          backend_two_pass_state_words(backend, op, 1U, 1);
     if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
         backend->command_words_estimate + triangle_words >
             MINIGL_RIX_COMMAND_WORD_BUDGET) {
@@ -1408,8 +1694,8 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         op = &backend->ops[backend->op_count - 1U];
         triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
         if (op->two_pass)
-            triangle_words += backend_draw_state_words(backend, op, 0U) +
-                              backend_draw_state_words(backend, op, 1U);
+            triangle_words += backend_two_pass_state_words(backend, op, 0U, 0) +
+                              backend_two_pass_state_words(backend, op, 1U, 1);
         if (backend->command_words_estimate + triangle_words >
             MINIGL_RIX_COMMAND_WORD_BUDGET)
             return 0;
@@ -1421,6 +1707,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     ++backend->triangle_count;
     ++op->triangle_count;
     backend->command_words_estimate += triangle_words;
+    minigl_profile_count(MGLP_N_TRIANGLES, 1U);
     return 1;
 }
 
@@ -1450,10 +1737,17 @@ static void backend_recalculate_command_words(MiniGLRixBackend *backend)
                 backend->command_words_estimate += op->triangle_count *
                     (RIX_TRIANGLE_WORDS + 1U);
             } else {
-                backend->command_words_estimate += op->triangle_count *
-                    (2U * (RIX_TRIANGLE_WORDS + 1U) +
-                     backend_draw_state_words(backend, op, 0U) +
-                     backend_draw_state_words(backend, op, 1U));
+                size_t triangle_index;
+
+                for (triangle_index = 0U; triangle_index < op->triangle_count;
+                     ++triangle_index) {
+                    backend->command_words_estimate += 2U * (RIX_TRIANGLE_WORDS + 1U);
+                    backend->command_words_estimate +=
+                        backend_two_pass_state_words(backend, op, 0U,
+                                                     triangle_index != 0U);
+                    backend->command_words_estimate +=
+                        backend_two_pass_state_words(backend, op, 1U, 1);
+                }
             }
         }
     }
@@ -1620,6 +1914,33 @@ int minigl_rix_backend_drain(MiniGLRixBackend *backend)
         backend->textures[index].last_used_fence = 0U;
     return 1;
 }
+
+void minigl_rix_backend_abandon(MiniGLRixBackend *backend)
+{
+    size_t index;
+
+    if (backend == NULL)
+        return;
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        backend->pending[index] = 0U;
+        backend->pending_fence[index] = 0U;
+        backend->submitted_command_words[index] = 0U;
+        backend_release_buffer(backend, (uint8_t)index);
+    }
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index) {
+        MiniGLRixTexture *texture = &backend->textures[index];
+
+        if (backend->recorded_pins[index] != 0U && texture->pin_count != 0U)
+            --texture->pin_count;
+        if (texture->valid && texture->deleted && texture->pin_count == 0U)
+            backend_release_texture(backend, texture);
+    }
+    memset(backend->recorded_pins, 0, sizeof(backend->recorded_pins));
+    backend->collecting = 0U;
+    backend->frame_active = 0U;
+    backend->surface_rgb565 = 0U;
+    backend->driver.dma_stream = NULL;
+}
 const char *minigl_rix_backend_fallback_name(uint32_t reason)
 {
     switch (reason) {
@@ -1634,6 +1955,7 @@ const char *minigl_rix_backend_fallback_name(uint32_t reason)
     case ZZ9K_MGL_FALLBACK_RESIDENCY_EXHAUSTED: return "residency exhausted";
     case ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT: return "backend disabled/absent";
     case ZZ9K_MGL_FALLBACK_FORCED_CPU: return "forced CPU";
+    case ZZ9K_MGL_FALLBACK_DRAW_REJECTED: return "draw rejected";
     default: return "unknown";
     }
 }

@@ -313,7 +313,9 @@ void scheduler_core1_worker(void)
 
     switch (action) {
     case SCHED_WORKER_ACTION_RESET:
-      mw_service_reset_local();
+      /* Bump generation and free only after the in-flight packet, including
+       * its PL330 stream and present blit, has returned. */
+      mw_service_reset();
       sh->minigl_reset_request = 0;
       sh->minigl_reset_ack = 1;
       dmb();
@@ -359,6 +361,28 @@ void scheduler_core1_worker(void)
       break;
     }
   }
+}
+
+void scheduler_request_minigl_reset(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  sh->minigl_reset_ack = 0;
+  dmb();
+  sh->minigl_reset_request = 1;
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
+}
+
+void scheduler_cancel_minigl_reset(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  /* The restarted worker must not also run the reset. */
+  sh->minigl_reset_request = 0;
+  dsb();
+  if (scheduler_core1_available())
+    core1_cold_restart();
 }
 
 

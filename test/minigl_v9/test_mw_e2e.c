@@ -279,6 +279,33 @@ static uint32_t build_clear_present_packet(uint8_t *buf, float r, float g, float
     return total;
 }
 
+static uint32_t build_async_present_packet(const struct MiniGLTransport *transport,
+                                           ULONG handle, uint8_t *buf,
+                                           const ULONG descriptor[2],
+                                           float r, float g, float b, float a)
+{
+    uint8_t request[40];
+    uint32_t request_bytes = sizeof(request);
+
+    (void)build_clear_present_packet(buf, r, g, b, a);
+    memset(request, 0, sizeof(request));
+    mw_put_be32(request, MW_BLIT);
+    mw_put_be32(request + 4, 4U); /* RGBFB_R5G6B5PC */
+    mw_put_be32(request + 8, 64U * 2U);
+    mw_put_be32(request + 20, 1U);
+    mw_put_be32(request + 24, 0U);
+    mw_put_be32(request + 28, 0U);
+    mw_put_be32(request + 32, 64U);
+    mw_put_be32(request + 36, 48U);
+    mw_put_be32(buf + 12, 3U);
+    mw_put_be32(buf + 56, MW_PRESENT_SPAN);
+    mw_put_be32(buf + 60, request_bytes + 8U);
+    assert(transport->queue_present(handle, buf + 64, request_bytes + 8U,
+                                    request, request_bytes, descriptor) == 0U);
+    mw_put_be32(buf + 8, 64U + request_bytes + 8U);
+    return 64U + request_bytes + 8U;
+}
+
 /* --- Test Suites --- */
 
 static void test_probe_and_handshake(void)
@@ -1072,6 +1099,58 @@ static void test_mw_e2e_blit_rgb565pc_640x480(void)
     printf("PASS: test_mw_e2e_blit_rgb565pc_640x480\n");
 }
 
+static void test_async_present_overlap_and_teardown(void)
+{
+    const struct MiniGLTransport *transport;
+    volatile ZZ9KMiniGLControlBlockV9 *ctrl;
+    uint8_t packet[128];
+    uint8_t *vram;
+    ULONG descriptor[2];
+    ULONG handle;
+    uint32_t bytes;
+
+    setup_mock_card(1);
+    transport = amiberry_transport_zz9000_probe();
+    assert(transport != NULL);
+    assert(transport->queue_present != NULL);
+    handle = transport->create(64, 48);
+    assert(handle != 0U);
+    vram = g_card_mem + 0x00080000UL;
+    descriptor[0] = (ULONG)(uintptr_t)vram;
+    descriptor[1] = 64U * 48U * 2U;
+    memset(vram, 0, descriptor[1]);
+
+    /* Submission is accepted with Core 1 parked: the caller returned before
+     * either MW_PRESENT or the direct P96 write could complete. */
+    g_core1_paused = 1;
+    bytes = build_async_present_packet(transport, handle, packet, descriptor,
+                                       0.0f, 1.0f, 0.0f, 1.0f);
+    assert(transport->submit(handle, packet, bytes) == 0U);
+    ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)g_active_ctrl_base;
+    assert(mw_wire_ld32(&ctrl->completion_fence) < mw_wire_ld32(&ctrl->producer_seq));
+    assert(vram[0] == 0U && vram[1] == 0U);
+
+    /* Readback is an observation boundary: it retires the presentation and
+     * proves the card-side span has the same frame. */
+    g_core1_paused = 0;
+    {
+        uint8_t pixels[64U * 48U * 4U];
+        assert(transport->readback(handle, pixels, sizeof(pixels)) == 0U);
+        assert(pixels[0] == 0U && pixels[1] == 255U &&
+               pixels[2] == 0U && pixels[3] == 255U);
+    }
+    assert(vram[0] == 0xe0U && vram[1] == 0x07U);
+
+    /* Destroy immediately after another queued frame. The firmware drains
+     * packet work before the synchronous DESTROY op releases its buffers. */
+    bytes = build_async_present_packet(transport, handle, packet, descriptor,
+                                       1.0f, 0.0f, 0.0f, 1.0f);
+    assert(transport->submit(handle, packet, bytes) == 0U);
+    transport->destroy(handle);
+    transport->term();
+    printf("PASS: test_async_present_overlap_and_teardown\n");
+}
+
 static void test_scheduler_core1_initialization_preserves_wire_v9(void)
 {
     taskq_shared_t scheduler_shared;
@@ -1110,7 +1189,8 @@ static void test_scheduler_core1_initialization_preserves_wire_v9(void)
     assert(mw_wire_ld32(&ctrl->slot_capacity) == MW_DEFAULT_SLOT_CAPACITY_Z3);
     assert(mw_wire_ld32(&ctrl->slot_count) == MW_DEFAULT_SLOT_COUNT_Z3);
     assert(mw_wire_ld32(&status->capabilities) ==
-           (MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS));
+           (MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS |
+            MW_CAP_ASYNC_PRESENT));
     assert(memcmp(control_host_bytes, (const uint8_t *)ctrl + 64,
                   sizeof(control_host_bytes)) == 0);
     assert(memcmp(status_host_bytes, (const uint8_t *)status + 64,
@@ -1138,6 +1218,7 @@ int main(void)
     test_back_to_back_and_pipeline();
     test_mw_e2e_blit_and_capture();
     test_mw_e2e_blit_rgb565pc_640x480();
+    test_async_present_overlap_and_teardown();
 
     stop_core1();
     free_card_memory();

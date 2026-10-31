@@ -57,12 +57,29 @@ required ARM barrier, then write the byte count to `TLF`.  Producers MUST wait
 until `TDFV` covers the entire packet, never overrun the FIFO, and limit normal
 packets to 248 words so two packets fit while one drains.
 
+`TLF` MUST equal the bytes written to `TDFD` since the last accepted `TLF`,
+header words included.  The FIFO drops any other value and sets `ISR.TSE`
+(bit 25); the staged words then never reach RasterIX and every later `TLF`
+mismatches too, until `TDFR`.  Firmware reads `ISR` after each `TLF` and
+fails the packet on `TSE` or `TPOE` (bit 28).  `TDFR` leaves `ISR` intact, so
+enable clears stale error bits (W1C).
+
 PL330 transport uses a non-cacheable DDR source and fixed destination
 `0x83c70010` (`TDFD`), with no peripheral handshake.  Firmware MUST first run
 an integrity/count self-test.  It MAY use 16-beat, 32-bit fixed-destination
 bursts only if that test passes; otherwise it MUST use single-beat stores.
 It MUST wait for DMA completion and only then write `TLF`.  FIFO reset is
 separate from CSR soft reset.
+
+Firmware (`rix_drv.c`, `mw_ctx.c`) writes every word over MMIO by default.
+`./build_firmware.sh --rasterix MINIGL_RIX_DMA=1` builds the PL330 variant:
+it streams payloads of at least 16 words with PL330 channel 6 as 16-word
+source bursts stored as single-beat fixed-destination writes, waits for the
+debug interface to go idle (DMAGO executed), then for channel Stopped with
+`SAR` at the end of the source, and only then writes `TLF`.  At backend
+start-up it sends one DMA packet of parser NOPs plus a fence `MEMSET`; unless
+the commit is accepted, the fence pixel lands and the renderer drains, it
+soft-resets the renderer, resets the FIFO and uses MMIO.
 
 ## EF target rules
 

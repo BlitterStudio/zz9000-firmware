@@ -5,28 +5,35 @@
  */
 
 #include "mw_ctx.h"
+#include "mw_host.h"
 #include "mw_parse.h"
 #include "mw_draw.h"
 #include "minigl_raster.h"
+#include "minigl_profile.h"
 #include "minigl_lighting.h"
 #include "card_pool.h"
 #include "sdk_palette.h"
+#include "memorymap.h"
 #include <stdlib.h>
 #include <math.h>
 
-#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
 #include "xil_cache.h"
 #include "xil_io.h"
+#include "xil_mmu.h"
 #endif
 
-#define MW_RIX_DMAC_BASE 0xf8004000U
-#define MW_RIX_DMAC_CSR(channel) (0x100U + (channel) * 8U)
-#define MW_RIX_DMAC_DBGSTATUS 0xd00U
+/* MINIGL_RIX_DMA=1 builds stream FIFO packet payloads with PL330 channel
+ * MINIGL_RIX_DMAC_CHANNEL; the default build writes every word over MMIO. */
+#ifndef MINIGL_RIX_DMA
+#define MINIGL_RIX_DMA 0
+#endif
 #define MW_RIX_DMAC_DBGCMD 0xd04U
 #define MW_RIX_DMAC_DBGINST0 0xd08U
 #define MW_RIX_DMAC_DBGINST1 0xd0cU
-#define MW_RIX_DMAC_CHANNEL 6U
 #define MW_RIX_DMAC_STOPPED 0U
+#define MW_RIX_DMAC_FAULTING_COMPLETING 14U
+#define MW_RIX_DMAC_FAULTING 15U
 #define MW_RIX_PL330_DMAMOV 0xbcu
 #define MW_RIX_PL330_DMALP 0x20u
 #define MW_RIX_PL330_DMALPEND 0x28u
@@ -45,6 +52,16 @@
 
 
 static uint32_t g_next_handle = 1U;
+/* Board-relative P96 VRAM mapping for the packet-owned asynchronous present.
+ * Hardware uses the fixed ARM aperture; host tests supply their card image. */
+static uint8_t *g_present_vram_base;
+static uint32_t g_present_vram_limit_arm;
+
+void mw_host_set_present_vram(uint8_t *base, uint32_t limit_arm)
+{
+    g_present_vram_base = base;
+    g_present_vram_limit_arm = limit_arm;
+}
 
 #define MW_GL_INVALID_OPERATION 0x0502U
 #define MW_GL_OUT_OF_MEMORY     0x0505U
@@ -211,9 +228,35 @@ static void mw_rix_fifo_write(void *context, uint32_t offset, uint32_t value)
     Xil_Out32(MINIGL_RIX_FIFO_BASE + offset, value);
 }
 
-/* Core1 owns this program.  Commands are cache-cleaned by rix_drv; the
- * conservative single-store path remains in force until a FIFO integrity test
- * qualifies 16-beat fixed-destination bursts. */
+static void mw_rix_fifo_write_words(void *context, const uint32_t *words,
+                                    uint32_t count)
+{
+    volatile uint32_t *const data = (volatile uint32_t *)(uintptr_t)
+        (MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFD);
+    uint32_t index = 0U;
+
+    (void)context;
+    while (index + 4U <= count) {
+        data[0] = words[index];
+        data[0] = words[index + 1U];
+        data[0] = words[index + 2U];
+        data[0] = words[index + 3U];
+        index += 4U;
+    }
+    while (index < count)
+        data[0] = words[index++];
+}
+
+static void mw_rix_fifo_drain(void *context)
+{
+    (void)context;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+#if MINIGL_RIX_DMA
+/* Core1 owns this program.  Commands are cache-cleaned by rix_drv.  Each
+ * 16-word source burst is stored as single-beat fixed-destination writes;
+ * the backend's start-up self-test must pass before any packet uses it. */
 static uint8_t mw_rix_dma_program[128] __attribute__((aligned(64)));
 
 static void mw_rix_dma_barrier(void)
@@ -277,30 +320,44 @@ static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
     Xil_DCacheFlushRange((INTPTR)program, (u32)sizeof(mw_rix_dma_program));
     mw_rix_dma_barrier();
     for (attempt = 0U; attempt < 100000U; ++attempt)
-        if ((Xil_In32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
+        if ((Xil_In32(MINIGL_RIX_DMAC_BASE + MINIGL_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
             break;
     if (attempt == 100000U)
         return 0;
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
-              (MW_RIX_PL330_DMAGO << 16U) | (MW_RIX_DMAC_CHANNEL << 24U));
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, (uint32_t)(uintptr_t)program);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
+              (MW_RIX_PL330_DMAGO << 16U) | (MINIGL_RIX_DMAC_CHANNEL << 24U));
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, (uint32_t)(uintptr_t)program);
     mw_rix_dma_barrier();
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
     mw_rix_dma_barrier();
+    /* Until the manager has executed DMAGO the channel still reads Stopped
+     * from its previous run, so wait for the debug interface to go idle
+     * before treating Stopped as completion. */
+    for (attempt = 0U; attempt < 100000U; ++attempt)
+        if ((Xil_In32(MINIGL_RIX_DMAC_BASE + MINIGL_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
+            break;
+    if (attempt == 100000U)
+        goto kill;
     for (attempt = 0U; attempt < 1000000U; ++attempt) {
-        uint32_t state = Xil_In32(MW_RIX_DMAC_BASE +
-                                  MW_RIX_DMAC_CSR(MW_RIX_DMAC_CHANNEL)) & 15U;
+        uint32_t state = Xil_In32(MINIGL_RIX_DMAC_BASE +
+                                  MINIGL_RIX_DMAC_CSR(MINIGL_RIX_DMAC_CHANNEL)) & 15U;
+        /* DMAWMB precedes DMAEND, so Stopped means every store has its write
+         * response.  SAR proves every load was issued. */
         if (state == MW_RIX_DMAC_STOPPED)
-            return 1;
-        if (state == 14U || state == 15U)
+            return Xil_In32(MINIGL_RIX_DMAC_BASE +
+                            MINIGL_RIX_DMAC_SAR(MINIGL_RIX_DMAC_CHANNEL)) ==
+                   (uint32_t)source + words * sizeof(uint32_t);
+        if (state == MW_RIX_DMAC_FAULTING_COMPLETING || state == MW_RIX_DMAC_FAULTING)
             break;
     }
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
-              (MW_RIX_PL330_DMAKILL << 16U) | (MW_RIX_DMAC_CHANNEL << 8U) | 1U);
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, 0U);
-    Xil_Out32(MW_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
+kill:
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
+              (MW_RIX_PL330_DMAKILL << 16U) | (MINIGL_RIX_DMAC_CHANNEL << 8U) | 1U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, 0U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
     return 0;
 }
+#endif
 
 static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
 {
@@ -388,7 +445,15 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.csr_write = mw_rix_csr_write;
     platform.fifo_read = mw_rix_fifo_read;
     platform.fifo_write = mw_rix_fifo_write;
+    /* GP1's RasterIX section is strongly ordered in the BSP table.  The FIFO
+     * accepts posted Device writes; map it Device-bufferable and pair every
+     * packet commit with a DSB in the driver. */
+    Xil_SetTlbAttributes((INTPTR)MINIGL_RIX_FIFO_BASE, DEVICE_MEMORY);
+    platform.fifo_write_words = mw_rix_fifo_write_words;
+    platform.fifo_drain = mw_rix_fifo_drain;
+#if MINIGL_RIX_DMA
     platform.dma_stream = mw_rix_dma_stream;
+#endif
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
     /* This probe reads only the versioned CSR identity pair. No RIX address is
@@ -436,6 +501,24 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     (void)c;
 }
 #endif
+
+void mw_rix_abort_engines(void)
+{
+#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if MINIGL_RIX_DMA
+    /* One debug instruction. Do not poll: core 0 must not wait on the DMAC. */
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
+              (MW_RIX_PL330_DMAKILL << 16U) | (MINIGL_RIX_DMAC_CHANNEL << 8U) | 1U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, 0U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
+    __asm__ volatile("dsb sy" ::: "memory");
+#endif
+    Xil_Out32(MINIGL_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
+    Xil_Out32(MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    __asm__ volatile("dsb sy" ::: "memory");
+#endif
+    minigl_raster_abandon();
+}
 
 static inline void mw_ctx_update_latest(mw_ctx *c)
 {
@@ -783,7 +866,7 @@ static int mw_upload_generated_mips(mw_ctx *c, const mw_texture *t)
     return 1;
 }
 
-static int mw_execute_command(void *user, const mw_command *cmd)
+static int mw_execute_command_body(void *user, const mw_command *cmd)
 {
     mw_ctx *c = (mw_ctx *)user;
     const uint8_t *p = cmd->payload;
@@ -1143,14 +1226,22 @@ target_allocation_failed:
         }
 
         t = mw_texmgr_find(&c->texmgr, name);
-        if (!t || !t->pixels[level] ||
-            !minigl_raster_upload_rgba8(name, (uint16_t)level,
-                                        (uint16_t)t->widths[level],
-                                        (uint16_t)t->heights[level],
-                                        t->pixels[level], t->internal_rgb[level]) ||
-            !mw_upload_generated_mips(c, t)) {
-            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
-            goto command_complete;
+        {
+            uint32_t xoffset = mw_be32(p + 8);
+            uint32_t yoffset = mw_be32(p + 12);
+            uint32_t width = mw_be32(p + 16);
+            uint32_t height = mw_be32(p + 20);
+
+            if (!t || !t->pixels[level] ||
+                !minigl_raster_subimage_rgba8(name, (uint16_t)level,
+                                               (uint16_t)xoffset, (uint16_t)yoffset,
+                                               (uint16_t)width, (uint16_t)height,
+                                               t->pixels[level],
+                                               t->internal_rgb[level]) ||
+                !mw_upload_generated_mips(c, t)) {
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
         }
         break;
     }
@@ -1378,7 +1469,9 @@ target_allocation_failed:
         }
 
         mw_ctx_sync_to_raster(c);
+        minigl_profile_push(MGLP_GEOM);
         minigl_raster_draw_wire_v9((uint16_t)mode, c->vertex_scratch, count, flags, (const uint32_t *)edge_mask);
+        minigl_profile_pop();
         mw_ctx_update_latest(c);
         break;
     }
@@ -1405,6 +1498,15 @@ target_allocation_failed:
         minigl_raster_frame_boundary();
         break;
     }
+
+    case MW_PRESENT_SPAN:
+        minigl_profile_push(MGLP_PRESENT);
+        if (mw_host_present_span(c, p, cmd->bytes) != MW_STATUS_OK)
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+        else
+            minigl_profile_count(MGLP_N_ASYNC_PRESENTS, 1U);
+        minigl_profile_pop();
+        break;
 
     case MW_SYNC:
         if (!minigl_raster_finish())
@@ -1459,6 +1561,27 @@ target_allocation_failed:
 command_complete:
 
     return 1;
+}
+
+/* Texture uploads are charged to TEX (conversion, mip generation, RasterIX
+ * residency); everything else stays in the packet's PARSE stage, with the
+ * draw path's own GEOM/CPU/RasterIX stages nested inside. */
+static int mw_execute_command(void *user, const mw_command *cmd)
+{
+    int texture = cmd->opcode == MW_TEXTURE_IMAGE_RAW ||
+                  cmd->opcode == MW_TEXTURE_SUB_RAW ||
+                  cmd->opcode == MW_TEXTURE_COPY ||
+                  cmd->opcode == MW_COLOR_TABLE;
+    int result;
+
+    if (texture) {
+        minigl_profile_push(MGLP_TEX);
+        minigl_profile_count(MGLP_N_TEX_UPLOADS, 1U);
+    }
+    result = mw_execute_command_body(user, cmd);
+    if (texture)
+        minigl_profile_pop();
+    return result;
 }
 
 uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
@@ -1869,6 +1992,7 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                     p_col[2] = (uint8_t)(pix >> 8);
                     p_col[3] = (uint8_t)pix;
 
+
                     uint8_t *dst = dst_row + (size_t)col * r.bytes_per_pixel;
                     if (r.format == 1U)
                         *dst = mw_clut_index(c, p_col);
@@ -1881,6 +2005,36 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
 
 
     return MW_STATUS_OK;
+}
+uint32_t mw_host_present_span(mw_ctx *c, const uint8_t *payload, uint32_t bytes)
+{
+    uint32_t request_bytes;
+    uint32_t card_offset;
+    uint32_t span_bytes;
+    uint32_t arm;
+    uint8_t *span;
+    uint32_t status;
+
+    if (!c || !payload || bytes < 32U)
+        return MW_STATUS_INVALID;
+    request_bytes = bytes - 8U;
+    card_offset = mw_be32(payload + request_bytes);
+    span_bytes = mw_be32(payload + request_bytes + 4U);
+    arm = card_offset + ADDR_ADJ;
+    if (card_offset < MNT_FB_BASE || span_bytes == 0U || arm < card_offset ||
+        !g_present_vram_limit_arm ||
+        (uint64_t)arm + span_bytes > g_present_vram_limit_arm)
+        return MW_STATUS_UNAVAILABLE;
+    span = g_present_vram_base ? g_present_vram_base + card_offset :
+                                 (uint8_t *)(uintptr_t)arm;
+    status = mw_blit(c, payload, request_bytes, span, span_bytes);
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+    if (status == MW_STATUS_OK) {
+        Xil_DCacheFlushRange((INTPTR)span, span_bytes);
+        __asm__ volatile ("dsb sy" ::: "memory");
+    }
+#endif
+    return status;
 }
 
 static uint32_t mw_capture(mw_ctx *c, const uint8_t *p, uint32_t bytes,

@@ -534,6 +534,73 @@ static int fastram_can_advertise(void)
 	        MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000) != 0U;
 }
 
+/* Same bound as scheduler_quiesce_for_reset, checked across loop iterations
+ * so core 0 keeps servicing the bus while a present or PL330 stream finishes. */
+#define MINIGL_RESET_BUDGET_MS 50
+
+static int mgl_reset_posted;
+static XTime mgl_reset_mark;
+
+static int mgl_reset_elapsed_ms(void)
+{
+	XTime now;
+	uint64_t ms;
+
+	XTime_GetTime(&now);
+	ms = (uint64_t)(now - mgl_reset_mark) / (COUNTS_PER_SECOND / 1000U);
+	return ms > 1000000ULL ? 1000000 : (int)ms;
+}
+
+static void minigl_reset_abort_and_free(void)
+{
+	scheduler_cancel_minigl_reset();
+	mw_rix_abort_engines();
+	mw_service_reset();
+	mgl_reset_posted = 0;
+}
+
+static void minigl_reset_poll(void)
+{
+	taskq_shared_t *sh;
+	sched_minigl_reset_phase_t phase;
+
+	if (!mgl_reset_posted)
+		return;
+	sh = scheduler_shared();
+	phase = sched_minigl_reset_phase(scheduler_core1_available(), 1,
+	                                 sh->minigl_reset_ack != 0,
+	                                 mgl_reset_elapsed_ms(),
+	                                 MINIGL_RESET_BUDGET_MS);
+	if (phase == SCHED_MINIGL_RESET_ACKED)
+		mgl_reset_posted = 0;
+	else if (phase == SCHED_MINIGL_RESET_ABORT)
+		minigl_reset_abort_and_free();
+}
+
+static void minigl_begin_amiga_reset(void)
+{
+	sched_minigl_reset_phase_t phase;
+	int acked = 0;
+
+	mw_service_report_amiga_reset();
+	if (scheduler_core1_available()) {
+		scheduler_request_minigl_reset();
+		mgl_reset_posted = 1;
+		XTime_GetTime(&mgl_reset_mark);
+		acked = scheduler_shared()->minigl_reset_ack != 0;
+	}
+	handle_amiga_reset(AMIGA_RESET_FAST);
+	phase = sched_minigl_reset_phase(scheduler_core1_available(),
+	                                 mgl_reset_posted, acked, 0,
+	                                 MINIGL_RESET_BUDGET_MS);
+	if (phase == SCHED_MINIGL_RESET_LOCAL)
+		mw_service_reset();
+	else if (phase == SCHED_MINIGL_RESET_ACKED)
+		mgl_reset_posted = 0;
+	else if (phase == SCHED_MINIGL_RESET_ABORT)
+		minigl_reset_abort_and_free();
+}
+
 void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* amiga_boot_reset_pass is consumed by the Fast-RAM step below. */
 	const int boot_pass = amiga_boot_reset_pass;
@@ -2554,11 +2621,10 @@ int main() {
 				}
 			}
 
+			minigl_reset_poll();
 			if ((zstate & 0xff) == 0) {
 				if (!amiga_reset_seen) {
-					mw_service_report_amiga_reset();
-					handle_amiga_reset(AMIGA_RESET_FAST);
-					mw_service_reset();
+					minigl_begin_amiga_reset();
 					amiga_reset_seen = 1;
 					videocap_backing_arm_pending = 1;
 				}

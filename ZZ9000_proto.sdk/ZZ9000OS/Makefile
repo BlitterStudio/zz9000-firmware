@@ -117,9 +117,12 @@ COMMON_FLAGS += -DCONFIG_USB_EHCI_TXFIFO_THRESH=4
 
 # RasterIX is physically absent from ordinary bitstreams.  Keep every CSR
 # access out of their firmware by making the platform registration opt-in.
+# RasterIX command payloads use PL330 after its start-up self-test; short
+# packets retain the cheaper MMIO path.
 MINIGL_RASTERIX ?= 0
+MINIGL_RIX_DMA ?= 1
 ifeq ($(MINIGL_RASTERIX),1)
-EXTRA_CFLAGS += -DMINIGL_RASTERIX=1
+EXTRA_CFLAGS += -DMINIGL_RASTERIX=1 -DMINIGL_RIX_DMA=$(MINIGL_RIX_DMA)
 endif
 
 # -O2 flags (default for all files)
@@ -178,6 +181,7 @@ C_SRCS = \
 	$(SRC_DIR)/minigl_raster.c \
 	$(SRC_DIR)/minigl_lighting.c \
 	$(SRC_DIR)/minigl_present.c \
+	$(SRC_DIR)/minigl_profile.c \
 	$(SRC_DIR)/rix_cmd.c \
 	$(SRC_DIR)/rix_texture.c \
 	$(SRC_DIR)/rix_setup.c \
@@ -310,9 +314,11 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 
 # The two bitstream flavors compile common source with different preprocessor
-# inputs.  One stable stamp forces every source object to rebuild whenever the
-# requested flavor changes, while preserving incremental builds of one flavor.
+# inputs.  Stable stamps force every source object to rebuild whenever the
+# requested flavor or RasterIX transport changes, while preserving incremental
+# builds of one configuration.
 BUILD_CONFIG_STAMP = $(BUILD_DIR)/.minigl-rasterix
+BUILD_TRANSPORT_STAMP = $(BUILD_DIR)/.minigl-rix-dma
 
 $(BUILD_CONFIG_STAMP): FORCE
 	@mkdir -p $(dir $@)
@@ -320,9 +326,15 @@ $(BUILD_CONFIG_STAMP): FORCE
 		printf '%s\n' "$(MINIGL_RASTERIX)" > "$@"; \
 	fi
 
+$(BUILD_TRANSPORT_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@if test ! -f "$@" || test "$$(cat "$@")" != "$(MINIGL_RIX_DMA)"; then \
+		printf '%s\n' "$(MINIGL_RIX_DMA)" > "$@"; \
+	fi
+
 $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS)) \
 $(BSP_SDPS_OBJ) $(BSP_SDPSOPT_OBJ) $(BSP_DISKIO_OBJ) \
-$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP)
+$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP) $(BUILD_TRANSPORT_STAMP)
 
 .DEFAULT_GOAL := all
 

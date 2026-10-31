@@ -21,7 +21,9 @@ extern "C" {
 #define MW_SERVICE_WIRE_VER         9U
 #define MW_CAP_WIRE_V9              (1U << 18)
 #define MW_CAP_LATEST_READBACK_ROWS (1U << 19)
-
+/* MW_PRESENT_SPAN is an additive v9 extension; it is never inferred from
+ * the wire version because an older v9 peer must keep synchronous BLIT. */
+#define MW_CAP_ASYNC_PRESENT        (1U << 20)
 
 #define MW_DEFAULT_SLOT_CAPACITY_Z3 (256U * 1024U)
 #define MW_DEFAULT_SLOT_COUNT_Z3    2U
@@ -275,6 +277,10 @@ void mw_service_reset(void);
 /* Print the bounded packet history before reset tears down a live context. */
 void mw_service_report_amiga_reset(void);
 void mw_service_reset_local(void);
+/* Stop PL330 and RasterIX without waiting, then mark the rasterizer so the
+ * following destroy does not spin on a fence. Core 0 calls this only after
+ * core 1 has been stopped or was never running. */
+void mw_rix_abort_engines(void);
 void mw_service_on_core1_fault(void);
 int  mw_service_is_bound(void);
 /* Snapshot the current binding into a host-endian descriptor record.

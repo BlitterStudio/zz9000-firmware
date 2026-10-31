@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "rix_drv.h"
+#include "minigl_profile.h"
 
 #define RIX_DSE_STREAM 0x90000000U
 
@@ -55,13 +56,25 @@ static int rix_drv_wait_vacancy(struct rix_drv *driver, uint32_t words,
                                 uint32_t timeout)
 {
     uint32_t attempt = 0U;
+    int result;
 
+    if (rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV) >= words)
+        return RIX_DRV_OK;
+    /* Back-pressure: RasterIX consumes slower than the ARM pushes. Same
+     * read/attempt sequence as a plain poll loop. */
+    minigl_profile_push(MGLP_STALL);
     for (;;) {
-        if (rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV) >= words)
-            return RIX_DRV_OK;
-        if (attempt++ >= timeout)
-            return RIX_DRV_TIMEOUT;
+        if (attempt++ >= timeout) {
+            result = RIX_DRV_TIMEOUT;
+            break;
+        }
+        if (rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV) >= words) {
+            result = RIX_DRV_OK;
+            break;
+        }
     }
+    minigl_profile_pop();
+    return result;
 }
 
 static uint32_t rix_drv_command_words(uint32_t word)
@@ -80,8 +93,9 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
                                uintptr_t command_address, uint32_t words,
                                uint32_t timeout)
 {
-    uint32_t index;
+    uint32_t index, isr;
     int result;
+    int dma;
 
     if (words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS)
         return RIX_DRV_BAD_ARGUMENT;
@@ -89,20 +103,40 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
     if (result != RIX_DRV_OK)
         return result;
 
+    dma = driver->dma_stream != NULL && command_address != (uintptr_t)0U &&
+          words >= 16U;
+    driver->last_packet_bytes = (words + 2U) * sizeof(*commands);
+    driver->last_packet_dma = dma;
+    ++driver->packets;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD,
                        RIX_DSE_STREAM | (words * sizeof(*commands)));
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, 0U);
-    if (driver->dma_stream != NULL && command_address != (uintptr_t)0U &&
-        words >= 16U) {
-        if (!driver->dma_stream(driver->context, command_address, words, 16U))
+    if (dma) {
+        ++driver->dma_packets;
+        if (!driver->dma_stream(driver->context, command_address, words, 16U)) {
+            driver->last_error_address = (uint32_t)command_address;
             return RIX_DRV_ERROR;
+        }
+    } else if (driver->fifo_write_words != NULL) {
+        driver->fifo_write_words(driver->context, commands, words);
     } else {
         for (index = 0U; index < words; ++index)
             rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, commands[index]);
     }
-    /* TLF is the packet boundary.  The callback has completed every fixed
-     * destination write before this commit, as required by PG080. */
-    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, (words + 2U) * sizeof(*commands));
+    /* The FIFO data aperture is Device bufferable on hardware.  Ensure all
+     * TDFD writes have reached the GP1 interconnect before TLF establishes
+     * the packet boundary required by PG080. */
+    if (driver->fifo_drain != NULL)
+        driver->fifo_drain(driver->context);
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, driver->last_packet_bytes);
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR);
+    if ((isr & RIX_DRV_FIFO_ISR_ERRORS) != 0U) {
+        driver->last_error_status = isr;
+        driver->last_error_address = (uint32_t)(command_address != (uintptr_t)0U ?
+                                                command_address :
+                                                (uintptr_t)commands);
+        return RIX_DRV_ERROR;
+    }
     return RIX_DRV_OK;
 }
 
@@ -117,12 +151,18 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
     driver->write = config->write;
     driver->fifo_read = config->fifo_read;
     driver->fifo_write = config->fifo_write;
+    driver->fifo_write_words = config->fifo_write_words;
+    driver->fifo_drain = config->fifo_drain;
     driver->clean_dcache = config->clean_dcache;
     driver->dma_stream = config->dma_stream;
     driver->last_status = 0U;
     driver->last_error_status = 0U;
     driver->last_error_address = 0U;
     driver->submitted_target = 0U;
+    driver->last_packet_bytes = 0U;
+    driver->packets = 0U;
+    driver->dma_packets = 0U;
+    driver->last_packet_dma = 0;
     driver->available = 0;
     driver->enabled = 0;
 
@@ -139,27 +179,27 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
 
 int rix_drv_enable(struct rix_drv *driver)
 {
+    uint32_t isr;
+
     if (!rix_drv_usable(driver))
         return RIX_DRV_UNAVAILABLE;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    /* TDFR leaves ISR intact; clear a previous context's sticky errors so the
+     * per-packet commit check only sees this context's packets. */
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR) & RIX_DRV_FIFO_ISR_ERRORS;
+    if (isr != 0U)
+        rix_drv_fifo_write(driver, RIX_DRV_FIFO_ISR, isr);
     rix_drv_write(driver, RIX_DRV_CSR_CONTROL, RIX_DRV_CONTROL_ENABLE);
     driver->enabled = 1;
     return RIX_DRV_OK;
 }
 
-int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
-                   uintptr_t command_address, uint32_t command_words,
-                   uint32_t timeout)
+static int rix_drv_submit_packets(struct rix_drv *driver, const uint32_t *commands,
+                                  uintptr_t command_address, uint32_t command_words,
+                                  uint32_t timeout)
 {
     uint32_t first, count;
     int result;
-
-    if (!rix_drv_usable(driver) || !driver->enabled || commands == NULL ||
-        command_words == 0U)
-        return RIX_DRV_BAD_ARGUMENT;
-    if (driver->clean_dcache != NULL && command_address != (uintptr_t)0U)
-        driver->clean_dcache(driver->context, command_address,
-                             (size_t)command_words * sizeof(*commands));
 
     first = 0U;
     while (first < command_words) {
@@ -181,6 +221,29 @@ int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
             return result;
         first += count;
     }
+    return RIX_DRV_OK;
+}
+
+int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
+                   uintptr_t command_address, uint32_t command_words,
+                   uint32_t timeout)
+{
+    int result;
+
+    if (!rix_drv_usable(driver) || !driver->enabled || commands == NULL ||
+        command_words == 0U)
+        return RIX_DRV_BAD_ARGUMENT;
+    minigl_profile_push(MGLP_FIFO);
+    minigl_profile_count(MGLP_N_FIFO_WORDS, command_words);
+    minigl_profile_count(MGLP_N_FIFO_SUBMITS, 1U);
+    if (driver->clean_dcache != NULL && command_address != (uintptr_t)0U)
+        driver->clean_dcache(driver->context, command_address,
+                             (size_t)command_words * sizeof(*commands));
+    result = rix_drv_submit_packets(driver, commands, command_address,
+                                    command_words, timeout);
+    minigl_profile_pop();
+    if (result != RIX_DRV_OK)
+        return result;
     ++driver->submitted_target;
     return RIX_DRV_OK;
 }

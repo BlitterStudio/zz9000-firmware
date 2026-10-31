@@ -36,6 +36,13 @@
 #define RIX_DRV_FIFO_RESET_KEY   0xa5U
 #define RIX_DRV_FIFO_PACKET_WORDS 248U
 
+/* PG080 ISR bits.  A TLF value that differs from the bytes written to TDFD
+ * since the last accepted TLF is dropped and sets TSE; the staged words then
+ * never reach the stream, and every later TLF mismatches too. */
+#define RIX_DRV_FIFO_ISR_TPOE    (1U << 28)
+#define RIX_DRV_FIFO_ISR_TSE     (1U << 25)
+#define RIX_DRV_FIFO_ISR_ERRORS  (RIX_DRV_FIFO_ISR_TPOE | RIX_DRV_FIFO_ISR_TSE)
+
 #define RIX_DRV_CONTROL_ENABLE     (1U << 0)
 #define RIX_DRV_CONTROL_SOFT_RESET (1U << 1)
 
@@ -54,6 +61,9 @@ typedef void (*rix_drv_write_fn)(void *context, uint32_t offset,
                                  uint32_t value);
 typedef void (*rix_drv_cache_clean_fn)(void *context, uintptr_t address,
                                        size_t bytes);
+typedef void (*rix_drv_fifo_words_fn)(void *context, const uint32_t *words,
+                                      uint32_t count);
+typedef void (*rix_drv_barrier_fn)(void *context);
 typedef int (*rix_drv_dma_stream_fn)(void *context, uintptr_t source,
                                      uint32_t words, uint32_t burst_words);
 
@@ -65,6 +75,8 @@ struct rix_drv_config {
     rix_drv_write_fn write;
     rix_drv_read_fn fifo_read;
     rix_drv_write_fn fifo_write;
+    rix_drv_fifo_words_fn fifo_write_words;
+    rix_drv_barrier_fn fifo_drain;
     rix_drv_cache_clean_fn clean_dcache;
     rix_drv_dma_stream_fn dma_stream;
     int hardware_present;
@@ -76,12 +88,21 @@ struct rix_drv {
     rix_drv_write_fn write;
     rix_drv_read_fn fifo_read;
     rix_drv_write_fn fifo_write;
+    rix_drv_fifo_words_fn fifo_write_words;
+    rix_drv_barrier_fn fifo_drain;
     rix_drv_cache_clean_fn clean_dcache;
     rix_drv_dma_stream_fn dma_stream;
     uint32_t last_status;
+    /* FIFO ISR after a rejected packet commit, else zero. */
     uint32_t last_error_status;
+    /* Source address of the rejected packet, else zero. */
     uint32_t last_error_address;
     uint32_t submitted_target;
+    /* Transport record of the last packet started, for diagnostics. */
+    uint32_t last_packet_bytes;
+    uint32_t packets;
+    uint32_t dma_packets;
+    int last_packet_dma;
     int available;
     int enabled;
 };
