@@ -90,7 +90,9 @@ static zzm_rt_usage_t *usage_for(uint32_t owner, uint32_t memory_class,
 int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
                 uint32_t memory_class, uint32_t quota)
 {
-    if (!services || services->abi_version != ZZM_MODULE_ABI_VERSION ||
+    if (!services ||
+        (services->abi_version != ZZM_MODULE_ABI_VERSION &&
+         services->abi_version != ZZM_V3_ABI_MAJOR) ||
         services->size < sizeof(*services) || !services->get_service)
         return 0;
     runtime = services;
@@ -125,9 +127,19 @@ void zzm_rt_get_context(zzm_allocation_context_t *out)
         *out = context;
 }
 
+const void *zzm_rt_get_service(uint32_t id, uint32_t min_version)
+{
+    return runtime && runtime->get_service ?
+        runtime->get_service(id, min_version) : 0;
+}
+
 void zzm_rt_log(const char *message)
 {
-    if (core && core->log)
+    if (core && core->size >= offsetof(zzm_core_service_t, log_limited) +
+                                   sizeof(core->log_limited) &&
+        core->log_limited)
+        core->log_limited(bound_module_id, 0U, message);
+    else if (core && core->log)
         core->log(message);
 }
 
@@ -145,6 +157,16 @@ void zzm_rt_dcache_clean(uint32_t address, uint32_t length)
 {
     if (cache && cache->dcache_clean)
         cache->dcache_clean(address, length);
+}
+
+int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address, uint32_t length)
+{
+    if (cache && cache->size >=
+            offsetof(zzm_cache_service_t, dcache_clean_owned) +
+            sizeof(cache->dcache_clean_owned) &&
+        cache->dcache_clean_owned)
+        return cache->dcache_clean_owned(owner, address, length);
+    return 0;
 }
 
 void *memalign(size_t alignment, size_t bytes)
