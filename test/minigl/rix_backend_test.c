@@ -449,6 +449,43 @@ static void test_lru_eviction_and_subimage_reupload(void)
            has_texture(&backend, 3U));
 }
 
+static void test_subimage_writes_only_rectangle_and_copy_on_writes(void)
+{
+    MiniGLRixBackend backend;
+    static struct model model;
+    static uint32_t source[16U * 16U];
+    MiniGLRixTexture *updated;
+    uint16_t old_page;
+    uint32_t y;
+
+    init_backend(&backend, &model, 4U);
+    for (y = 0U; y < 16U * 16U; ++y)
+        source[y] = 0xff0000ffU;
+    assert(minigl_rix_backend_upload_texture(&backend, 9U, 0U, source, 16U, 16U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 9U, GL_NEAREST, GL_NEAREST,
+                                  0x2901U, 0x2901U);
+    assert(submit_texture(&backend, 9U));
+    assert(backend.textures[0].pin_count == 1U);
+    old_page = backend.textures[0].first_page;
+    source[3U * 16U + 2U] = 0x00ff00ffU;
+    source[3U * 16U + 3U] = 0x00ff00ffU;
+    source[4U * 16U + 2U] = 0x00ff00ffU;
+    source[4U * 16U + 3U] = 0x00ff00ffU;
+    assert(minigl_rix_backend_subimage_texture(&backend, 9U, 0U, 2U, 3U, 2U, 2U,
+                                                source, 16U, 16U));
+    assert(backend.textures[0].deleted);
+    assert(backend.textures[0].first_page == old_page);
+    updated = &backend.textures[1];
+    assert(updated->valid && !updated->deleted && updated->first_page != old_page);
+    assert(model.textures[(size_t)updated->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES] ==
+           0U);
+    assert(model.textures[(size_t)updated->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES +
+                          (3U * 16U + 2U) * 2U] == 0xe0U);
+    assert(minigl_rix_backend_drain(&backend));
+    assert(!backend.textures[0].valid);
+}
+
 static void test_recorded_frame_replay(void)
 {
     MiniGLRixBackend backend;
@@ -1037,6 +1074,7 @@ int main(void)
     test_mip_layout_and_filtering();
     test_downscale_and_residency_lifetime();
     test_lru_eviction_and_subimage_reupload();
+    test_subimage_writes_only_rectangle_and_copy_on_writes();
     test_texture_pool_growth();
     test_recorded_frame_replay();
     test_clear_preserves_depth_feature();

@@ -47,7 +47,8 @@ typedef enum {
     MGLP_N_FIFO_WORDS,    /* command words pushed */
     MGLP_N_FIFO_SUBMITS,  /* command buffer submissions */
     MGLP_N_TEX_UPLOADS,   /* texture upload commands */
-    MGLP_N_RIX_UPLOADS,   /* texture levels written to RasterIX memory */
+    MGLP_N_RIX_UPLOADS,   /* texture levels/rectangles written to RasterIX */
+    MGLP_N_RIX_UPLOAD_BYTES, /* bytes written to RasterIX texture pages */
     MGLP_N_PIN_DRAINS,    /* uploads that drained RasterIX (texture in use) */
     MGLP_N_EVICTIONS,     /* textures evicted from the RasterIX pool */
     MGLP_N_OPS,           /* synchronous bridge ops */

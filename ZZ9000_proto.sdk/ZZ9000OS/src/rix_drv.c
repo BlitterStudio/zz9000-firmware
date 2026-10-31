@@ -117,14 +117,17 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
             driver->last_error_address = (uint32_t)command_address;
             return RIX_DRV_ERROR;
         }
+    } else if (driver->fifo_write_words != NULL) {
+        driver->fifo_write_words(driver->context, commands, words);
     } else {
         for (index = 0U; index < words; ++index)
             rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, commands[index]);
     }
-    /* TLF is the packet boundary.  The callback has completed every fixed
-     * destination write before this commit, as required by PG080.  The FIFO
-     * drops a TLF whose length differs from the staged bytes, so check that
-     * the commit was accepted rather than discovering it as a fence timeout. */
+    /* The FIFO data aperture is Device bufferable on hardware.  Ensure all
+     * TDFD writes have reached the GP1 interconnect before TLF establishes
+     * the packet boundary required by PG080. */
+    if (driver->fifo_drain != NULL)
+        driver->fifo_drain(driver->context);
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, driver->last_packet_bytes);
     isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR);
     if ((isr & RIX_DRV_FIFO_ISR_ERRORS) != 0U) {
@@ -148,6 +151,8 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
     driver->write = config->write;
     driver->fifo_read = config->fifo_read;
     driver->fifo_write = config->fifo_write;
+    driver->fifo_write_words = config->fifo_write_words;
+    driver->fifo_drain = config->fifo_drain;
     driver->clean_dcache = config->clean_dcache;
     driver->dma_stream = config->dma_stream;
     driver->last_status = 0U;

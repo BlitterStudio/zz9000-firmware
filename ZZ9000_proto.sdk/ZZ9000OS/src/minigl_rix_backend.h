@@ -58,6 +58,9 @@ typedef void (*MiniGLRixWriteFn)(void *context, uint32_t offset, uint32_t value)
 typedef void (*MiniGLRixCacheCleanFn)(void *context, uintptr_t address, size_t bytes);
 typedef void (*MiniGLRixCacheInvalidateFn)(void *context, uintptr_t address,
                                            size_t bytes);
+typedef void (*MiniGLRixFifoWordsFn)(void *context, const uint32_t *words,
+                                     uint32_t count);
+typedef void (*MiniGLRixBarrierFn)(void *context);
 typedef int (*MiniGLRixDmaStreamFn)(void *context, uintptr_t source,
                                     uint32_t words, uint32_t burst_words);
 
@@ -73,6 +76,8 @@ typedef struct MiniGLRixPlatform {
     MiniGLRixWriteFn csr_write;
     MiniGLRixReadFn fifo_read;
     MiniGLRixWriteFn fifo_write;
+    MiniGLRixFifoWordsFn fifo_write_words;
+    MiniGLRixBarrierFn fifo_drain;
     MiniGLRixDmaStreamFn dma_stream;
     MiniGLRixCacheCleanFn cache_clean;
     MiniGLRixCacheInvalidateFn cache_invalidate;
@@ -200,6 +205,15 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
                                       uint16_t level, const uint32_t *rgba,
                                       uint16_t width, uint16_t height,
                                       uint16_t format);
+/* Writes an unscaled sub-rectangle to a resident texture.  A pinned texture
+ * is copy-on-written where spare pages permit, so earlier command buffers
+ * retain their original version. */
+int minigl_rix_backend_subimage_texture(MiniGLRixBackend *backend, uint32_t id,
+                                        uint16_t level, uint16_t xoffset,
+                                        uint16_t yoffset, uint16_t width,
+                                        uint16_t height, const uint32_t *rgba,
+                                        uint16_t source_width,
+                                        uint16_t source_height);
 void minigl_rix_backend_tex_params(MiniGLRixBackend *backend, uint32_t id,
                                    uint16_t min_filter, uint16_t mag_filter,
                                    uint16_t wrap_s, uint16_t wrap_t);

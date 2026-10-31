@@ -3440,7 +3440,8 @@ int minigl_raster_subimage_rgba8(uint32_t id, uint16_t level, uint16_t xoffset, 
     dest = (uint32_t *)(g_buffers.texture_pool + image->offset);
     for (y = 0; y < height; ++y) {
         uint32_t *dst_row = dest + (size_t)(yoffset + y) * image->width + xoffset;
-        const uint32_t *src_row = rgba_pixels + (size_t)y * width;
+        const uint32_t *src_row = rgba_pixels +
+            (size_t)(yoffset + y) * image->width + xoffset;
         if (internal_rgb) {
             uint32_t x;
             for (x = 0; x < width; ++x)
@@ -3449,8 +3450,12 @@ int minigl_raster_subimage_rgba8(uint32_t id, uint16_t level, uint16_t xoffset, 
             memcpy(dst_row, src_row, (size_t)width * sizeof(uint32_t));
         }
     }
-    (void)minigl_rix_backend_upload_texture(&g_rix, id, level, dest,
-                                           image->width, image->height, image->format);
+    if (!minigl_rix_backend_subimage_texture(&g_rix, id, level, xoffset, yoffset,
+                                             width, height, rgba_pixels,
+                                             image->width, image->height))
+        (void)minigl_rix_backend_upload_texture(&g_rix, id, level, dest,
+                                                image->width, image->height,
+                                                image->format);
     return 1;
 }
 

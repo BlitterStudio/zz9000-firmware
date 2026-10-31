@@ -687,6 +687,135 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
         return 0;
     texture->levels |= (uint16_t)(1U << level);
     minigl_profile_count(MGLP_N_RIX_UPLOADS, 1U);
+    minigl_profile_count(MGLP_N_RIX_UPLOAD_BYTES, bytes);
+    backend_touch_texture(backend, texture);
+    return 1;
+}
+
+static int backend_allocate_pages_without_drain(MiniGLRixBackend *backend,
+                                                MiniGLRixTexture *texture,
+                                                uint16_t page_count)
+{
+    MiniGLRixTexture *victim;
+    uint32_t total_pages = (uint32_t)(backend->platform.texture_bytes /
+                                      MINIGL_RIX_TEXTURE_PAGE_BYTES);
+    uint32_t first_page;
+
+    if (page_count == 0U || page_count > total_pages)
+        return 0;
+    for (;;) {
+        for (first_page = 0U; first_page <= total_pages - page_count; ++first_page) {
+            if (backend_range_available(backend, texture, (uint16_t)first_page,
+                                        page_count)) {
+                texture->first_page = (uint16_t)first_page;
+                texture->page_count = page_count;
+                return 1;
+            }
+        }
+        victim = backend_evict_texture(backend, texture);
+        if (victim == NULL)
+            return 0;
+        minigl_profile_count(MGLP_N_EVICTIONS, 1U);
+        backend_release_texture(backend, victim);
+    }
+}
+
+static MiniGLRixTexture *backend_clone_texture(MiniGLRixBackend *backend,
+                                                MiniGLRixTexture *source)
+{
+    MiniGLRixTexture *copy = NULL;
+    uint32_t incarnation;
+    size_t index;
+    size_t bytes;
+
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
+        if (!backend->textures[index].valid) {
+            copy = &backend->textures[index];
+            break;
+        }
+    if (copy == NULL) {
+        copy = backend_evict_texture(backend, source);
+        if (copy == NULL)
+            return NULL;
+        minigl_profile_count(MGLP_N_EVICTIONS, 1U);
+        backend_release_texture(backend, copy);
+    }
+    memcpy(copy, source, sizeof(*copy));
+    ++backend->texture_incarnation_clock;
+    if (backend->texture_incarnation_clock == 0U)
+        ++backend->texture_incarnation_clock;
+    incarnation = backend->texture_incarnation_clock;
+    copy->incarnation = incarnation;
+    copy->pin_count = 0U;
+    copy->deleted = 0U;
+    if (!backend_allocate_pages_without_drain(backend, copy, source->page_count)) {
+        memset(copy, 0, sizeof(*copy));
+        return NULL;
+    }
+    bytes = (size_t)source->page_count * MINIGL_RIX_TEXTURE_PAGE_BYTES;
+    memcpy(backend->platform.texture_memory +
+               (size_t)copy->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES,
+           backend->platform.texture_memory +
+               (size_t)source->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES,
+           bytes);
+    if (backend->platform.cache_clean != NULL)
+        backend->platform.cache_clean(backend->platform.context,
+            (uintptr_t)(backend->platform.texture_memory +
+                (size_t)copy->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES), bytes);
+    source->deleted = 1U;
+    backend_touch_texture(backend, copy);
+    return copy;
+}
+
+int minigl_rix_backend_subimage_texture(MiniGLRixBackend *backend, uint32_t id,
+                                        uint16_t level, uint16_t xoffset,
+                                        uint16_t yoffset, uint16_t width,
+                                        uint16_t height, const uint32_t *rgba,
+                                        uint16_t source_width,
+                                        uint16_t source_height)
+{
+    MiniGLRixTexture *texture;
+    uint16_t level_width;
+    uint16_t level_height;
+    uint32_t offset;
+    uint16_t row;
+
+    if (backend == NULL || rgba == NULL || width == 0U || height == 0U ||
+        backend->error)
+        return 0;
+    texture = backend_texture(backend, id);
+    if (texture == NULL || level >= 16U ||
+        (texture->levels & (uint16_t)(1U << level)) == 0U)
+        return 0;
+    level_width = texture->width >> level;
+    level_height = texture->height >> level;
+    if (level_width == 0U) level_width = 1U;
+    if (level_height == 0U) level_height = 1U;
+    if (source_width != level_width || source_height != level_height ||
+        xoffset > level_width - width || yoffset > level_height - height)
+        return 0;
+    if (texture->pin_count != 0U) {
+        MiniGLRixTexture *copy = backend_clone_texture(backend, texture);
+
+        if (copy != NULL)
+            texture = copy;
+        else {
+            minigl_profile_count(MGLP_N_PIN_DRAINS, 1U);
+            if (!minigl_rix_backend_drain(backend))
+                return 0;
+        }
+    }
+    offset = rix_texture_mip_offset(texture->width_log2, texture->height_log2,
+                                    (uint8_t)level);
+    if (offset == UINT32_MAX)
+        return 0;
+    for (row = 0U; row < height; ++row)
+        if (!backend_write_texture(backend, texture,
+            offset + (uint32_t)(yoffset + row) * level_width + xoffset,
+            rgba + (size_t)(yoffset + row) * source_width + xoffset, width))
+            return 0;
+    minigl_profile_count(MGLP_N_RIX_UPLOADS, 1U);
+    minigl_profile_count(MGLP_N_RIX_UPLOAD_BYTES, (uint32_t)width * height * 2U);
     backend_touch_texture(backend, texture);
     return 1;
 }
@@ -1161,6 +1290,8 @@ void minigl_rix_backend_init(MiniGLRixBackend *backend,
     config.write = platform->csr_write;
     config.fifo_read = platform->fifo_read;
     config.fifo_write = platform->fifo_write;
+    config.fifo_write_words = platform->fifo_write_words;
+    config.fifo_drain = platform->fifo_drain;
     config.clean_dcache = platform->cache_clean;
     config.dma_stream = platform->dma_stream;
     config.hardware_present = 1;
