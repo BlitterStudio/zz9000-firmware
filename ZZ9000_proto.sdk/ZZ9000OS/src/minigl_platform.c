@@ -11,11 +11,13 @@
 #include "xtime_l.h"
 #endif
 
+#if defined(MINIGL_MODULE)
 static const zzm_graphics_hw_service_t *g_graphics;
 static zzm_graphics_hw_caps_t g_graphics_caps;
 static uint32_t g_graphics_owner;
 static uint32_t g_pl330_channel;
 static int g_pl330_claimed;
+#endif
 
 int minigl_platform_set_graphics(const zzm_graphics_hw_service_t *graphics,
                                  const zzm_graphics_hw_caps_t *caps,
