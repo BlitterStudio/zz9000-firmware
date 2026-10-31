@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "zzm_minigl_host.h"
+#include "zzm_format.h"
 #include <stdio.h>
 
 static int failures;
@@ -79,8 +80,14 @@ int main(void)
         .app_bind = app_bind, .app_swap = app_swap, .app_unbind = app_unbind,
         .app_reclaim = app_reclaim
     };
+    zzm_minigl_registration_v1_t registration = {
+        .version = ZZM_MINIGL_REGISTRATION_V1, .size = sizeof(registration),
+        .ops = &ops, .context = 0, .worker_ops = &worker
+    };
 
-    expect_int("register", zzm_minigl_register(&ops, 0, &worker), 1);
+    expect_int("register", zzm_minigl_register_ops(ZZM_MODULE_MINIGL,
+                                                    &registration,
+                                                    sizeof(registration)), 1);
     expect_int("registered", zzm_minigl_worker_registered(), 1);
     zzm_minigl_doorbell();
     expect_int("doorbell_no_parser", doorbells, 1);

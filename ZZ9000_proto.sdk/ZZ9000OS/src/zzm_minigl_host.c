@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "zzm_minigl_host.h"
+#include "zzm_format.h"
+#include "zzm_runtime.h"
+
 
 #include <string.h>
 
@@ -111,6 +114,123 @@ static const zzm_graphics_hw_t g_graphics_hw = {
 #endif
 };
 
+#if defined(ZZM_SERVICE_GRAPHICS_HW)
+static int graphics_v3_caps(zzm_graphics_hw_caps_t *out)
+{
+    if (out == 0)
+        return 0;
+    out->has_rasterix_ef = g_caps.has_rasterix_ef;
+    out->rasterix_csr_abi_major = g_caps.rasterix_csr_abi >> 16U;
+    out->rasterix_csr_abi_minor = g_caps.rasterix_csr_abi & 0xffffU;
+    out->afi3_ready = g_caps.afi3_64bit;
+    out->pl330_available = g_caps.has_pl330;
+    return 1;
+}
+
+static int graphics_v3_csr_read(uint32_t offset, uint32_t *value_out)
+{
+#if !defined(TASKQ_HOST_TEST)
+    if (!g_caps.has_rasterix_ef || value_out == 0)
+        return 0;
+    *value_out = graphics_csr_read(0, offset);
+    return 1;
+#else
+    (void)offset;
+    (void)value_out;
+    return 0;
+#endif
+}
+
+static int graphics_v3_csr_write(uint32_t offset, uint32_t value)
+{
+#if !defined(TASKQ_HOST_TEST)
+    if (!g_caps.has_rasterix_ef)
+        return 0;
+    graphics_csr_write(0, offset, value);
+    return 1;
+#else
+    (void)offset;
+    (void)value;
+    return 0;
+#endif
+}
+
+static int graphics_v3_fifo_write_words(const uint32_t *words,
+                                        uint32_t word_count)
+{
+#if !defined(TASKQ_HOST_TEST)
+    uint32_t i;
+    if (!g_caps.has_rasterix_ef || words == 0 || word_count == 0)
+        return 0;
+    for (i = 0U; i < word_count; ++i)
+        graphics_fifo_write(0, 0U, words[i]);
+    return 1;
+#else
+    (void)words;
+    (void)word_count;
+    return 0;
+#endif
+}
+
+static int graphics_v3_pl330_claim(uint32_t owner, uint32_t *channel_out)
+{
+    (void)owner;
+    (void)channel_out;
+    /* This image does not advertise PL330 until its firmware-owned driver is
+     * built here. The module must fall back to the bounded FIFO path. */
+    return 0;
+}
+
+static int graphics_v3_pl330_start(uint32_t channel, uint32_t source_address,
+                                   uint32_t bytes)
+{
+    (void)channel;
+    (void)source_address;
+    (void)bytes;
+    return 0;
+}
+
+static void graphics_v3_pl330_abort(uint32_t channel)
+{
+    (void)channel;
+    graphics_pl330_abort(0);
+}
+
+static void graphics_v3_pl330_release(uint32_t channel)
+{
+    (void)channel;
+    graphics_pl330_release(0);
+}
+
+static void graphics_v3_barrier(void)
+{
+#if !defined(TASKQ_HOST_TEST)
+    graphics_barrier(0);
+#endif
+}
+
+static const zzm_graphics_hw_service_t graphics_hw_service = {
+    ZZM_SERVICE_GRAPHICS_HW_V3, sizeof(graphics_hw_service),
+    graphics_v3_caps, graphics_v3_csr_read, graphics_v3_csr_write,
+    graphics_v3_fifo_write_words, graphics_v3_pl330_claim,
+    graphics_v3_pl330_start, graphics_v3_pl330_abort,
+    graphics_v3_pl330_release, graphics_v3_barrier
+};
+#endif
+
+const void *zzm_minigl_host_get_service(uint32_t id, uint32_t min_version)
+{
+#if defined(ZZM_SERVICE_GRAPHICS_HW)
+    if (id == ZZM_SERVICE_GRAPHICS_HW &&
+        min_version <= ZZM_SERVICE_GRAPHICS_HW_V3)
+        return &graphics_hw_service;
+#else
+    (void)id;
+    (void)min_version;
+#endif
+    return 0;
+}
+
 static int table_has(uint32_t size, size_t end)
 {
     return size >= end;
@@ -137,6 +257,21 @@ int zzm_minigl_register(const zzm_minigl_ops_v1_t *ops, void *context,
     g_context = context;
     g_reset_active = 0;
     return 1;
+}
+
+int zzm_minigl_register_ops(uint32_t module_id, const void *ops,
+                            uint32_t ops_size)
+{
+    const zzm_minigl_registration_v1_t *registration = ops;
+
+    if (module_id != ZZM_MODULE_MINIGL || registration == 0 ||
+        ops_size < sizeof(*registration) ||
+        registration->version != ZZM_MINIGL_REGISTRATION_V1 ||
+        registration->size < sizeof(*registration)) {
+        return 0;
+    }
+    return zzm_minigl_register(registration->ops, registration->context,
+                               registration->worker_ops);
 }
 
 void zzm_minigl_unregister(void)
