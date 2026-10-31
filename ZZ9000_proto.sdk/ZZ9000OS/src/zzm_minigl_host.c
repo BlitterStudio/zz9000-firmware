@@ -47,6 +47,7 @@
 #define ZZM_RIX_PL330_RD_DAR 2u
 #define ZZM_RIX_FIFO_TDFD 0x10U
 #define ZZM_RIX_DMA_MAX_WORDS 248U
+#define ZZM_MINIGL_DESCRIPTOR_WIRE_BYTES 80U
 #define ZZM_RIX_IDENTITY 0x52495831U
 #define ZZM_RIX_CSR_ABI_V2 0x00020000U
 
@@ -380,7 +381,7 @@ static int transport_publish_descriptor(uint32_t module_id,
     uint32_t i;
 
     if (module_id != ZZM_MODULE_MINIGL || descriptor == 0 ||
-        descriptor_bytes == 0U || descriptor_bytes > 256U ||
+        descriptor_bytes != ZZM_MINIGL_DESCRIPTOR_WIRE_BYTES ||
         !sdk_aperture_runtime_is_zorro3())
         return 0;
     slot = (volatile uint8_t *)(uintptr_t)(SDK_MAILBOX_Z3_ADDRESS +
