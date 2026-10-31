@@ -16,9 +16,88 @@
 #include "xil_cache.h"
 #endif
 
+#if defined(MINIGL_MODULE)
+
+static const zzm_host_window_service_t *g_host_window;
+static const zzm_transport_service_t *g_transport;
+static uint32_t g_owner;
+static uint32_t g_window_base;
+static uint32_t g_window_generation;
+
+int minigl_transport_set_module_services(
+    const zzm_host_window_service_t *host_window,
+    const zzm_transport_service_t *transport, uint32_t owner)
+{
+    if (!host_window || !transport || !owner || !host_window->alloc ||
+        !host_window->free || !transport->publish_descriptor ||
+        !transport->retract_descriptor)
+        return -1;
+    g_host_window = host_window;
+    g_transport = transport;
+    g_owner = owner;
+    return 0;
+}
+
+uint32_t minigl_transport_window_base(void)
+{
+    return g_window_base;
+}
+
+void minigl_transport_publish_descriptor(void)
+{
+    ZZ9KMiniGLTransportDescriptor snapshot;
+    ZZ9KMiniGLTransportDescriptorWire wire;
+
+    if (!g_transport)
+        return;
+    if (mw_service_get_transport_descriptor(&snapshot) != 0) {
+        g_transport->retract_descriptor(ZZM_MODULE_MINIGL);
+        return;
+    }
+    mw_service_serialize_transport_descriptor(&snapshot, &wire);
+    (void)g_transport->publish_descriptor(ZZM_MODULE_MINIGL, &wire,
+                                           sizeof(wire));
+}
+
+int minigl_transport_init(void)
+{
+    zzm_host_window_t window;
+
+    if (!g_host_window || !g_transport || g_window_base)
+        return g_window_base ? 0 : -1;
+    if (g_host_window->alloc(g_owner, MW_WINDOW_SIZE_Z3,
+                             MW_TRANSPORT_WINDOW_ALIGNMENT, &window) != 0)
+        return -1;
+    if (!mw_service_bind_region((volatile void *)(uintptr_t)window.arm_address,
+                                window.bytes)) {
+        (void)g_host_window->free(g_owner, window.arm_address,
+                                  window.generation);
+        return -1;
+    }
+    mw_service_set_vram_limit_arm(window.arm_address);
+    g_window_base = window.arm_address;
+    g_window_generation = window.generation;
+    minigl_transport_publish_descriptor();
+    return 0;
+}
+
+void minigl_transport_fini(void)
+{
+    if (g_transport)
+        g_transport->retract_descriptor(ZZM_MODULE_MINIGL);
+    mw_service_bind_region(NULL, 0);
+    if (g_window_base && g_host_window)
+        (void)g_host_window->free(g_owner, g_window_base,
+                                  g_window_generation);
+    g_window_base = 0;
+    g_window_generation = 0;
+}
+
+#elif !defined(MINIGL_HOST_TEST)
+
 /* The transport window is not host-testable here: host tests bind explicit
  * regions through mw_service_bind_region() instead. */
-#ifndef MINIGL_HOST_TEST
+/* Non-module firmware retains the resident transport implementation. */
 
 static uint32_t g_window_base;
 

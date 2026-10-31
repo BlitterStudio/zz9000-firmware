@@ -467,6 +467,54 @@ int mw_service_has_work(void)
            (mw_wire_ld32(&g_ctrl->op_seq) != mw_wire_ld32(&g_ctrl->op_done_seq));
 }
 
+int mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
+                    uint32_t *handle)
+{
+    uint32_t slot;
+    uint32_t new_handle;
+    mw_ctx *context;
+
+    if (handle)
+        *handle = 0;
+    for (slot = 0; slot < MW_MAX_CONTEXTS; ++slot)
+        if (!g_contexts[slot])
+            break;
+    if (slot == MW_MAX_CONTEXTS)
+        return MW_STATUS_CAPACITY;
+
+    new_handle = (g_generation << 16) | (slot + 1U);
+    context = mw_host_create_owned(width, height,
+                                   CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL,
+                                                   new_handle));
+    if (!context)
+        return MW_STATUS_FAILED;
+    if (flags & 1U)
+        context->state.force_cpu = 1;
+    context->handle = new_handle;
+    g_contexts[slot] = context;
+    g_active_handle = new_handle;
+    if (handle)
+        *handle = new_handle;
+    return MW_STATUS_OK;
+}
+
+int mw_service_close(uint32_t handle)
+{
+    uint32_t slot = handle & 0xffffU;
+    mw_ctx *context;
+
+    if (slot < 1U || slot > MW_MAX_CONTEXTS)
+        return MW_STATUS_UNAVAILABLE;
+    context = g_contexts[slot - 1U];
+    if (!context || context->handle != handle)
+        return MW_STATUS_UNAVAILABLE;
+    mw_host_destroy(context);
+    g_contexts[slot - 1U] = NULL;
+    if (g_active_handle == handle)
+        g_active_handle = 0;
+    return MW_STATUS_OK;
+}
+
 void mw_service_reset_local(void)
 {
     uint32_t i;
@@ -656,47 +704,14 @@ int mw_service_poll(void)
         minigl_profile_count(MGLP_N_OPS, 1U);
         switch (op) {
         case 1: { /* CREATE: width = op_arg1, height = op_arg2 */
-            uint32_t width = mw_wire_ld32(&g_ctrl->op_arg1);
-            uint32_t height = mw_wire_ld32(&g_ctrl->op_arg2);
-            uint32_t slot;
-            mw_ctx *c;
+            uint32_t new_handle = 0;
+            uint32_t status = mw_service_open(mw_wire_ld32(&g_ctrl->op_arg1),
+                                              mw_wire_ld32(&g_ctrl->op_arg2),
+                                              mw_wire_ld32(&g_ctrl->op_arg3),
+                                              &new_handle);
 
-            /* Find empty slot */
-            for (slot = 0; slot < MW_MAX_CONTEXTS; ++slot) {
-                if (!g_contexts[slot])
-                    break;
-            }
-
-            if (slot < MW_MAX_CONTEXTS) {
-                uint32_t new_handle = (g_generation << 16) | (slot + 1U);
-                c = mw_host_create_owned(width, height,
-                    CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, new_handle));
-                if (c) {
-                    uint32_t flags = mw_wire_ld32(&g_ctrl->op_arg3);
-                    if (flags & 1U)
-                        c->state.force_cpu = 1;
-                    c->handle = new_handle;
-                    g_contexts[slot] = c;
-                    g_active_handle = new_handle;
-                    mw_wire_st32(&g_ctrl->op_reply_handle, new_handle);
-                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_OK);
-                    const char *backend = mw_backend_name(c);
-                    (void)backend;
-                    MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=%s\n",
-                            (unsigned long)new_handle, (unsigned long)width,
-                            (unsigned long)height, backend);
-                } else {
-                    mw_wire_st32(&g_ctrl->op_reply_handle, 0);
-                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_FAILED);
-                    MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=none\n",
-                            0UL, (unsigned long)width, (unsigned long)height);
-                }
-            } else {
-                mw_wire_st32(&g_ctrl->op_reply_handle, 0);
-                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_CAPACITY);
-                MW_DIAG("[MGL9] create handle=%08lx size=%lux%lu backend=none\n",
-                        0UL, (unsigned long)width, (unsigned long)height);
-            }
+            mw_wire_st32(&g_ctrl->op_reply_handle, new_handle);
+            mw_wire_st32(&g_ctrl->op_status, status);
             break;
         }
 
@@ -726,37 +741,9 @@ int mw_service_poll(void)
             break;
         }
 
-        case 4: { /* DESTROY: op_handle */
-            uint32_t slot = (handle & 0xffffU);
-            if (slot >= 1U && slot <= MW_MAX_CONTEXTS) {
-                mw_ctx *c = g_contexts[slot - 1U];
-                if (c && c->handle == handle) {
-                    uint32_t width = c->width;
-                    uint32_t height = c->height;
-                    const char *backend = mw_backend_name(c);
-                    (void)width;
-                    (void)height;
-                    (void)backend;
-                    mw_host_destroy(c);
-                    g_contexts[slot - 1U] = NULL;
-                    if (g_active_handle == handle)
-                        g_active_handle = 0;
-                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_OK);
-                    MW_DIAG("[MGL9] destroy handle=%08lx size=%lux%lu backend=%s\n",
-                            (unsigned long)handle, (unsigned long)width,
-                            (unsigned long)height, backend);
-                } else {
-                    mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
-                    MW_DIAG("[MGL9] destroy handle=%08lx size=0x0 backend=none\n",
-                            (unsigned long)handle);
-                }
-            } else {
-                mw_wire_st32(&g_ctrl->op_status, MW_STATUS_UNAVAILABLE);
-                MW_DIAG("[MGL9] destroy handle=%08lx size=0x0 backend=none\n",
-                        (unsigned long)handle);
-            }
+        case 4: /* DESTROY: op_handle */
+            mw_wire_st32(&g_ctrl->op_status, mw_service_close(handle));
             break;
-        }
 
         case 5: { /* REQUEST: op_handle, op_arg1 = req bytes, op_arg3 = reply capacity */
             mw_ctx *c = mw_service_find_context(handle);
