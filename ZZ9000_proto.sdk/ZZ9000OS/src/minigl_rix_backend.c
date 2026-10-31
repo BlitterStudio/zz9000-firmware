@@ -1927,10 +1927,14 @@ void minigl_rix_backend_abandon(MiniGLRixBackend *backend)
         backend->submitted_command_words[index] = 0U;
         backend_release_buffer(backend, (uint8_t)index);
     }
-    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
-        if (backend->recorded_pins[index] != 0U &&
-            backend->textures[index].pin_count != 0U)
-            --backend->textures[index].pin_count;
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index) {
+        MiniGLRixTexture *texture = &backend->textures[index];
+
+        if (backend->recorded_pins[index] != 0U && texture->pin_count != 0U)
+            --texture->pin_count;
+        if (texture->valid && texture->deleted && texture->pin_count == 0U)
+            backend_release_texture(backend, texture);
+    }
     memset(backend->recorded_pins, 0, sizeof(backend->recorded_pins));
     backend->collecting = 0U;
     backend->frame_active = 0U;
