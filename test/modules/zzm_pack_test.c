@@ -237,47 +237,6 @@ static void test_v3_success(const char *packer)
     remove(output);
 }
 
-static void test_v3_success(const char *packer)
-{
-    const char *input = "build/zzm_pack_v3.elf";
-    const char *output = "build/zzm_pack_v3.ZZM";
-    const uint8_t expected_image[] = {
-        0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 1, 2, 3
-    };
-    uint8_t packed[ZZM_V3_HEADER_SIZE + sizeof(expected_image)];
-    zzm_v3_header_t header;
-
-    remove(input);
-    remove(output);
-    CHECK(write_elf(input, 0, 0));
-    CHECK(run_v3_packer(packer, input, output));
-    if (!read_file(output, packed, sizeof(packed))) {
-        CHECK(0);
-        remove(input);
-        remove(output);
-        return;
-    }
-    memcpy(&header, packed, sizeof(header));
-    CHECK(memcmp(header.magic, ZZM_V3_MAGIC, sizeof(header.magic)) == 0);
-    CHECK(header.header_size == ZZM_V3_HEADER_SIZE);
-    CHECK(header.format_version == ZZM_V3_FORMAT_VERSION);
-    CHECK(header.module_id == ZZM_MODULE_MPEG2);
-    CHECK(header.abi_major == ZZM_V3_ABI_MAJOR);
-    CHECK(header.abi_minor == ZZM_V3_ABI_MINOR);
-    CHECK(header.image_flags == 7U);
-    CHECK(header.owner_class_mask == 15U);
-    CHECK(header.hardware_requirement == ZZM_HARDWARE_RASTERIX_EF_OPTIONAL);
-    CHECK(header.required_caps.wire_version == 9U);
-    CHECK(header.required_caps.transport_descriptor_major == 1U);
-    CHECK(header.required_caps.host_window_layout_major == 1U);
-    CHECK(header.resident_quota == 1048576U);
-    CHECK(header.per_context_quota == 8388608U);
-    CHECK(header.worker_ops_version == 1U);
-    CHECK(memcmp(packed + ZZM_V3_HEADER_SIZE, expected_image,
-                 sizeof(expected_image)) == 0);
-    remove(input);
-    remove(output);
-}
 
 static void test_relocation_rejection(const char *packer)
 {
