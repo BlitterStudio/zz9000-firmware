@@ -44,9 +44,11 @@ enum card_pool_class {
     CARD_POOL_CLASS_CONSOLE = 6,
     /* MiniGL wire-v9 render contexts: colour/depth/texture working sets.
      * Released per context destroy, by owner on fault recovery, and on
-     * every Amiga reset. Host-visible transport memory never comes from
-     * here -- only card-private render data. */
+     * every Amiga reset. */
     CARD_POOL_CLASS_MINIGL = 7,
+    /* Trusted PIE app arena and its optional present back-buffer. App
+     * allocations are permanent-prefix-only and reset reclaimable. */
+    CARD_POOL_CLASS_APP = 8,
     CARD_POOL_CLASS_COUNT
 };
 
@@ -62,6 +64,7 @@ enum card_pool_class {
 /* Matches the image decode budget all image sessions share
  * (SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES). */
 #define CARD_POOL_LIMIT_IMAGE       (72u << 20)
+#define CARD_POOL_LIMIT_APP         (96u << 20)
 
 #define CARD_POOL_OWNER(cls, instance) \
     (((uint32_t)(cls) << 24) | ((uint32_t)(instance) & 0x00FFFFFFu))

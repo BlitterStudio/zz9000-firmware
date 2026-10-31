@@ -39,6 +39,7 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "xpseudo_asm.h"
 #include "xreg_cortexa9.h"
 #include "scheduler_core1_minigl_init.h"
+#include "zzapp_runtime.h"
 #include <stdio.h>
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
@@ -122,6 +123,7 @@ void scheduler_boot_init(void)
   sh->minigl_packets_on_core1 = 0;
   sh->minigl_packets_on_core0 = 0;
   taskq_watchdog_init(&g_sched_watchdog, 3u);
+  zzapp_boot_init();
   g_core1_started = 0;
 }
 
@@ -273,6 +275,28 @@ static uint16_t scheduler_run_slot(taskq_desc_t *d)
   taskq_complete(&sh->queue, slot, status, payload, (uint16_t)len);
   return status;
 }
+/* Bounded service body used between app calls. It never sleeps: while an
+ * app is live the next timer tick or cooperative yield returns here. */
+void scheduler_core1_service_once(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  int slot = taskq_claim_any(&sh->queue);
+
+  if (slot >= 0) {
+    sh->core1_current_slot = slot;
+    (void)scheduler_run_slot(&sh->queue.descs[slot]);
+    sh->core1_current_slot = -1;
+    sh->tasks_on_core1++;
+  }
+  if (mw_service_has_work()) {
+    sh->minigl_in_flight = 1;
+    dmb();
+    (void)mw_service_poll();
+    sh->minigl_in_flight = 0;
+    dmb();
+  }
+}
+
 
 /*
  * Core-1 dedicated worker. Entered from core1_loop (core2.c) after coherency
@@ -303,6 +327,7 @@ void scheduler_core1_worker(void)
     scheduler_core1_reclaim_if_requested(sh);
     scheduler_core1_clean_if_requested(sh);
     scheduler_core1_park_if_requested();
+    zzapp_worker_hook();
 
     reset_req = (sh->minigl_reset_request != 0);
     task_slot = taskq_claim_any(&sh->queue);
@@ -538,6 +563,7 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     }
     taskq_release(&sh->queue, slot);
   }
+  zzapp_core0_poll();
 
   if (sh->core1_restart_request) {
     sh->core1_restart_request = 0;
@@ -547,6 +573,7 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
      * pool, its lock is still held; free it before the poison handlers
      * below release their sessions' pool memory. */
     card_pool_reset_lock(&card_pool);
+    zzapp_on_core1_restart();
     /* Core-1-affine image sessions lost their codec heap objects with the
      * fault; both branches below reclaim the decode blocks core 1 left
      * allocated (the cold restart inside core1_cold_restart, the
