@@ -18,6 +18,13 @@
 
 static int failures;
 
+static const uint8_t expected_image_sha256[ZZM_SHA256_SIZE] = {
+    0xa9, 0x28, 0x17, 0x9b, 0xf8, 0x9b, 0xab, 0xa7,
+    0x81, 0xcc, 0x9d, 0xec, 0xbf, 0xe4, 0x9f, 0xa4,
+    0x8e, 0xaa, 0xbb, 0xbe, 0x63, 0xfb, 0xda, 0x75,
+    0x06, 0x59, 0x78, 0xc4, 0x0b, 0x0c, 0xc2, 0xc3
+};
+
 #define CHECK(condition) do { \
     if (!(condition)) { \
         failures++; \
@@ -149,12 +156,7 @@ static void test_success(const char *packer)
     const uint8_t expected_image[] = {
         0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 1, 2, 3
     };
-    const uint8_t expected_sha256[ZZM_SHA256_SIZE] = {
-        0xa9, 0x28, 0x17, 0x9b, 0xf8, 0x9b, 0xab, 0xa7,
-        0x81, 0xcc, 0x9d, 0xec, 0xbf, 0xe4, 0x9f, 0xa4,
-        0x8e, 0xaa, 0xbb, 0xbe, 0x63, 0xfb, 0xda, 0x75,
-        0x06, 0x59, 0x78, 0xc4, 0x0b, 0x0c, 0xc2, 0xc3
-    };
+    const uint8_t *expected_sha256 = expected_image_sha256;
     uint8_t packed[ZZM_HEADER_SIZE + sizeof(expected_image)];
     zzm_header_t header;
 
@@ -182,7 +184,8 @@ static void test_success(const char *packer)
     CHECK(strcmp(header.name, "MPEG2") == 0);
     CHECK(memcmp(packed + ZZM_HEADER_SIZE, expected_image,
                  sizeof(expected_image)) == 0);
-    CHECK(memcmp(header.image_sha256, expected_sha256, sizeof(expected_sha256)) == 0);
+    CHECK(memcmp(header.image_sha256, expected_sha256,
+                 sizeof(expected_image_sha256)) == 0);
     remove(input);
     remove(output);
 }
@@ -214,6 +217,9 @@ static void test_v3_success(const char *packer)
     CHECK(header.module_id == ZZM_MODULE_MPEG2);
     CHECK(header.abi_major == ZZM_V3_ABI_MAJOR);
     CHECK(header.abi_minor == ZZM_V3_ABI_MINOR);
+    CHECK(packed[4] == 0U && packed[5] == 2U);
+    CHECK(packed[64] == 0U && packed[65] == 0U &&
+          packed[66] == 16U && packed[67] == 0U);
     CHECK(header.image_flags == 7U);
     CHECK(header.owner_class_mask == 15U);
     CHECK(header.hardware_requirement == ZZM_HARDWARE_RASTERIX_EF_OPTIONAL);
@@ -223,6 +229,8 @@ static void test_v3_success(const char *packer)
     CHECK(header.resident_quota == 1048576U);
     CHECK(header.per_context_quota == 8388608U);
     CHECK(header.worker_ops_version == 1U);
+    CHECK(memcmp(header.image_sha256, expected_image_sha256,
+                 sizeof(expected_image_sha256)) == 0);
     CHECK(memcmp(packed + ZZM_V3_HEADER_SIZE, expected_image,
                  sizeof(expected_image)) == 0);
     remove(input);

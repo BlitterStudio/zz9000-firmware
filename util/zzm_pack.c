@@ -1,10 +1,10 @@
+#include <stddef.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include "zzm_format.h"
 #include "zzm_manifest.h"
 #include "zzm_runtime.h"
@@ -457,35 +457,56 @@ static int pack_elf(uint32_t module_id, uint32_t module_version,
 
     image_size = image_end - slot->address;
     bss_size = allocation_end - image_end;
-    memset(header, 0, sizeof(header));
+    memset(header, 0, header_size);
     if (v3) {
-        zzm_v3_header_t *v3_header = (zzm_v3_header_t *)(void *)header;
-
-        memcpy(v3_header->magic, ZZM_V3_MAGIC, sizeof(v3_header->magic));
-        v3_header->header_size = ZZM_V3_HEADER_SIZE;
-        v3_header->format_version = ZZM_V3_FORMAT_VERSION;
-        v3_header->module_id = module_id;
-        v3_header->module_version = module_version;
-        v3_header->abi_major = ZZM_V3_ABI_MAJOR;
-        v3_header->abi_minor = ZZM_V3_ABI_MINOR;
-        v3_header->slot_load_address = slot->address;
-        v3_header->image_size = image_size;
-        v3_header->bss_size = bss_size;
-        v3_header->init_entry = entry;
-        v3_header->fini_entry = fini_entry;
-        memcpy(v3_header->name, slot->name, strlen(slot->name) + 1U);
-        v3_header->load_policy = ZZM_LOAD_ON_DEMAND;
-        v3_header->idle_unload_ms = ZZM_DEFAULT_IDLE_UNLOAD_MS;
-        v3_header->resident_quota = v3->resident_quota;
-        v3_header->per_context_quota = v3->per_context_quota;
-        v3_header->owner_class_mask = v3->owner_class_mask;
-        v3_header->image_flags = v3->image_flags;
-        v3_header->hardware_requirement = v3->hardware_requirement;
-        v3_header->worker_ops_version = v3->worker_ops_version;
-        v3_header->required_caps = v3->required_caps;
+        memcpy(header + offsetof(zzm_v3_header_t, magic), ZZM_V3_MAGIC, 4);
+        write_le16(header + offsetof(zzm_v3_header_t, header_size),
+                   ZZM_V3_HEADER_SIZE);
+        write_le16(header + offsetof(zzm_v3_header_t, format_version),
+                   ZZM_V3_FORMAT_VERSION);
+        write_le32(header + offsetof(zzm_v3_header_t, module_id), module_id);
+        write_le32(header + offsetof(zzm_v3_header_t, module_version), module_version);
+        write_le16(header + offsetof(zzm_v3_header_t, abi_major), ZZM_V3_ABI_MAJOR);
+        write_le16(header + offsetof(zzm_v3_header_t, abi_minor), ZZM_V3_ABI_MINOR);
+        write_le32(header + offsetof(zzm_v3_header_t, slot_load_address), slot->address);
+        write_le32(header + offsetof(zzm_v3_header_t, image_size), image_size);
+        write_le32(header + offsetof(zzm_v3_header_t, bss_size), bss_size);
+        write_le32(header + offsetof(zzm_v3_header_t, init_entry), entry);
+        write_le32(header + offsetof(zzm_v3_header_t, fini_entry), fini_entry);
+        memcpy(header + offsetof(zzm_v3_header_t, name), slot->name,
+               strlen(slot->name) + 1U);
+        write_le32(header + offsetof(zzm_v3_header_t, load_policy), ZZM_LOAD_ON_DEMAND);
+        write_le32(header + offsetof(zzm_v3_header_t, idle_unload_ms),
+                   ZZM_DEFAULT_IDLE_UNLOAD_MS);
+        write_le32(header + offsetof(zzm_v3_header_t, resident_quota),
+                   v3->resident_quota);
+        write_le32(header + offsetof(zzm_v3_header_t, per_context_quota),
+                   v3->per_context_quota);
+        write_le32(header + offsetof(zzm_v3_header_t, owner_class_mask),
+                   v3->owner_class_mask);
+        write_le32(header + offsetof(zzm_v3_header_t, image_flags), v3->image_flags);
+        write_le32(header + offsetof(zzm_v3_header_t, hardware_requirement),
+                   v3->hardware_requirement);
+        write_le32(header + offsetof(zzm_v3_header_t, worker_ops_version),
+                   v3->worker_ops_version);
+        write_le32(header + offsetof(zzm_v3_header_t, required_caps.wire_version),
+                   v3->required_caps.wire_version);
+        write_le32(header + offsetof(zzm_v3_header_t,
+                                     required_caps.transport_descriptor_major),
+                   v3->required_caps.transport_descriptor_major);
+        write_le32(header + offsetof(zzm_v3_header_t,
+                                     required_caps.rasterix_csr_abi_major),
+                   v3->required_caps.rasterix_csr_abi_major);
+        write_le32(header + offsetof(zzm_v3_header_t,
+                                     required_caps.rasterix_csr_abi_minor),
+                   v3->required_caps.rasterix_csr_abi_minor);
+        write_le32(header + offsetof(zzm_v3_header_t,
+                                     required_caps.host_window_layout_major),
+                   v3->required_caps.host_window_layout_major);
         sha256_init(&sha256);
         sha256_update(&sha256, image, image_size);
-        sha256_final(&sha256, v3_header->image_sha256);
+        sha256_final(&sha256,
+                     header + offsetof(zzm_v3_header_t, image_sha256));
     } else {
         memcpy(header, ZZM_MAGIC, 4);
         write_le16(header + 4, ZZM_HEADER_SIZE);
