@@ -32,13 +32,21 @@ typedef struct zzm_minigl_worker_ops {
     int (*poll)(void *context, uint32_t budget);
 } zzm_minigl_worker_ops_t;
 
+
+typedef struct zzm_minigl_wire_open {
+    uint32_t width;
+    uint32_t height;
+    uint32_t flags;
+} zzm_minigl_wire_open_t;
+
 typedef struct zzm_minigl_ops_v1 {
     uint32_t version;
     uint32_t size;
     void (*doorbell)(void *context);
     int (*has_work)(void *context);
     int (*poll)(void *context, uint32_t budget);
-    int (*open_68k)(void *context, uint32_t *handle);
+    int (*open_68k)(void *context, const zzm_minigl_wire_open_t *request,
+                    uint32_t *handle);
     void (*close_68k)(void *context, uint32_t handle);
     int (*transport_acquire)(void *context, uint32_t *generation);
     int (*transport_release)(void *context);
@@ -47,6 +55,10 @@ typedef struct zzm_minigl_ops_v1 {
     void (*abort_reset)(void *context);
     int (*begin_unload)(void *context);
     void (*fini)(void *context);
+    int (*app_bind)(void *context, void *surface, const void **out_gl);
+    int (*app_swap)(void *context);
+    void (*app_unbind)(void *context);
+    void (*app_reclaim)(void *context, uint32_t generation);
 } zzm_minigl_ops_v1_t;
 
 typedef struct zzm_minigl_boot_caps {
@@ -89,7 +101,11 @@ int zzm_minigl_register(const zzm_minigl_ops_v1_t *ops, void *context,
 void zzm_minigl_unregister(void);
 const zzm_minigl_ops_v1_t *zzm_minigl_ops(void **context);
 int zzm_minigl_worker_registered(void);
+int zzm_minigl_has_work(void);
 void zzm_minigl_doorbell(void);
+int zzm_minigl_transport_acquire(uint32_t *generation);
+int zzm_minigl_transport_release(void);
+/* Called only from core 1's worker/service tick. */
 void zzm_minigl_service_tick(int in_api);
 int zzm_minigl_begin_reset(void);
 int zzm_minigl_reset_poll(void);

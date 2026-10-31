@@ -30,7 +30,7 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "sdk_media_session.h"
 #include "sdk_smp_lock.h"
 #include "card_pool.h"
-#include "mw_service.h"
+#include "zzm_minigl_host.h"
 #include "core2.h"
 #include "sleep.h"
 #include "xil_types.h"
@@ -288,13 +288,7 @@ void scheduler_core1_service_once(void)
     sh->core1_current_slot = -1;
     sh->tasks_on_core1++;
   }
-  if (mw_service_has_work()) {
-    sh->minigl_in_flight = 1;
-    dmb();
-    (void)mw_service_poll();
-    sh->minigl_in_flight = 0;
-    dmb();
-  }
+  zzm_minigl_service_tick(0);
 }
 
 
@@ -330,25 +324,21 @@ void scheduler_core1_worker(void)
     zzapp_worker_hook();
 
     reset_req = (sh->minigl_reset_request != 0);
-    task_slot = taskq_claim_any(&sh->queue);
+    task_slot = reset_req ? -1 : taskq_claim_any(&sh->queue);
     task_avail = (task_slot >= 0);
-    mgl_avail = mw_service_has_work();
-    mgl_bound = mw_service_is_bound();
+    mgl_avail = zzm_minigl_has_work();
+    mgl_bound = zzm_minigl_worker_registered();
     action = sched_worker_decide(reset_req, task_avail, mgl_avail, mgl_bound);
 
     switch (action) {
     case SCHED_WORKER_ACTION_RESET:
-      /* Bump generation and free only after the in-flight packet, including
-       * its PL330 stream and present blit, has returned. */
-      mw_service_reset();
-      sh->minigl_reset_request = 0;
-      sh->minigl_reset_ack = 1;
-      dmb();
-      if (task_slot >= 0) {
-        sh->core1_current_slot = task_slot;
-        (void)scheduler_run_slot(&sh->queue.descs[task_slot]);
-        sh->core1_current_slot = -1;
-        sh->tasks_on_core1++;
+      /* The module owns context draining.  It is polled only on core 1 and
+       * acknowledges after it has stopped its worker-facing resources. */
+      if (zzm_minigl_begin_reset() != ZZM_MINIGL_RESET_BUSY &&
+          zzm_minigl_reset_poll() == ZZM_MINIGL_RESET_QUIESCENT) {
+        sh->minigl_reset_request = 0;
+        sh->minigl_reset_ack = 1;
+        dmb();
       }
       break;
 
@@ -360,20 +350,12 @@ void scheduler_core1_worker(void)
       break;
 
     case SCHED_WORKER_ACTION_MINIGL:
+    case SCHED_WORKER_ACTION_POLL_IDLE:
       sh->minigl_in_flight = 1;
       dmb();
-      if (mw_service_has_work()) {
-        int mw_res = mw_service_poll();
-        if (mw_res > 0)
-          sh->minigl_packets_on_core1 += (uint32_t)mw_res;
-      }
+      zzm_minigl_service_tick(0);
       sh->minigl_in_flight = 0;
       dmb();
-      break;
-
-    case SCHED_WORKER_ACTION_POLL_IDLE:
-      if (mw_service_has_work())
-        (void)mw_service_poll();
       break;
 
     case SCHED_WORKER_ACTION_WFE:
@@ -381,7 +363,7 @@ void scheduler_core1_worker(void)
       if (!taskq_has_active(&sh->queue) &&
           !sh->minigl_reset_request &&
           !sh->minigl_doorbell &&
-          !mw_service_is_bound())
+          !zzm_minigl_worker_registered())
         __asm__ __volatile__("wfe" ::: "memory");
       break;
     }
@@ -600,8 +582,8 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
       sdk_image_stream_reset_locks();
       sdk_compression_reclaim_core1_decode();
       g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
-      /* Re-initialize Wire-v9 on core 0 so fallback main-loop polling works. */
-      mw_service_init();
+      /* MiniGL is never parsed on core 0.  A module worker can only resume
+       * after core 1 returns; its transport remains unavailable meanwhile. */
     }
   }
 

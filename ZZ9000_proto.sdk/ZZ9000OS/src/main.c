@@ -78,7 +78,7 @@ void Xil_AssertNonVoid() {}
 #include "card_pool.h"
 #include "overlay.h"
 #include "mw_service.h"
-#include "minigl_transport.h"
+#include "zzm_minigl_host.h"
 #include "newlib_heap.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
@@ -573,8 +573,7 @@ static int mgl_reset_elapsed_ms(void)
 static void minigl_reset_abort_and_free(void)
 {
 	scheduler_cancel_minigl_reset();
-	mw_rix_abort_engines();
-	mw_service_reset();
+	zzm_minigl_abort_reset();
 	mgl_reset_posted = 0;
 }
 
@@ -602,8 +601,7 @@ static void minigl_begin_amiga_reset(void)
 	int acked = 0;
 	zzapp_on_amiga_reset();
 
-	mw_service_report_amiga_reset();
-	if (scheduler_core1_available()) {
+	if (scheduler_core1_available() && zzm_minigl_worker_registered()) {
 		scheduler_request_minigl_reset();
 		mgl_reset_posted = 1;
 		XTime_GetTime(&mgl_reset_mark);
@@ -614,7 +612,7 @@ static void minigl_begin_amiga_reset(void)
 	                                 mgl_reset_posted, acked, 0,
 	                                 MINIGL_RESET_BUDGET_MS);
 	if (phase == SCHED_MINIGL_RESET_LOCAL)
-		mw_service_reset();
+		zzm_minigl_abort_reset();
 	else if (phase == SCHED_MINIGL_RESET_ACKED)
 		mgl_reset_posted = 0;
 	else if (phase == SCHED_MINIGL_RESET_ABORT)
@@ -873,6 +871,12 @@ int main() {
 		// driver can still override it later via REG_ZZ_ETH_MAC_*
 		memcpy(ethernet_get_mac_address_ptr(), zz_config_get()->mac, 6);
 	}
+
+#if defined(MINIGL_RASTERIX) && MINIGL_RASTERIX
+	zzm_minigl_boot_caps_init(ZZM_MINIGL_IMAGE_RASTERIX_EF);
+#else
+	zzm_minigl_boot_caps_init(ZZM_MINIGL_IMAGE_STANDARD);
+#endif
 
 	video_state = video_init();
 

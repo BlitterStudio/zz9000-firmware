@@ -167,6 +167,7 @@ C_SRCS = \
 	$(SRC_DIR)/core2.c \
 	$(SRC_DIR)/scheduler.c \
 	$(SRC_DIR)/scheduler_arm.c \
+	$(SRC_DIR)/zzm_minigl_host.c \
 	$(SRC_DIR)/scheduler_stress.c \
 	$(SRC_DIR)/sdk_smp_lock.c \
 	$(SRC_DIR)/sdk_smp_lock_arm.c \

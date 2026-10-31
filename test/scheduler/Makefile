@@ -10,6 +10,11 @@ CPPFLAGS += -DTASKQ_HOST_TEST -I$(SRC_DIR)
 SOURCES := scheduler_test.c $(SRC_DIR)/scheduler.c
 DEPS := $(SRC_DIR)/scheduler.h
 
+HOST_TARGET := $(BUILD_DIR)/minigl_host_test
+HOST_CPPFLAGS := -DTASKQ_HOST_TEST -I$(SRC_DIR)
+HOST_SOURCES := minigl_host_test.c $(SRC_DIR)/zzm_minigl_host.c
+HOST_DEPS := $(SRC_DIR)/zzm_minigl_host.h
+
 SMP_LOCK_TARGET := $(BUILD_DIR)/smp_lock_test
 SMP_LOCK_CPPFLAGS := -DSMP_LOCK_HOST_TEST -I$(SRC_DIR)
 SMP_LOCK_SOURCES := smp_lock_test.c $(SRC_DIR)/sdk_smp_lock.c
@@ -36,7 +41,7 @@ LZH_DECODE_CONTRACT_CPPFLAGS := -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H -I$(SRC_DIR)
 LZH_DECODE_CONTRACT_SOURCES := lzh_decode_contract_test.c $(SRC_DIR)/lzh/sdk_decompress_lzh.c
 LZH_DECODE_CONTRACT_DEPS := $(SRC_DIR)/lzh/zz9k_lzh.h
 
-.PHONY: test clean smp_lock offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract
+.PHONY: test clean host smp_lock offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract
 
 test: $(TARGET)
 	$(TARGET)
@@ -44,6 +49,13 @@ test: $(TARGET)
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SOURCES)
+
+host: $(HOST_TARGET)
+	$(HOST_TARGET)
+
+$(HOST_TARGET): $(HOST_SOURCES) $(HOST_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(HOST_CPPFLAGS) $(CFLAGS) -o $@ $(HOST_SOURCES)
 
 smp_lock: $(SMP_LOCK_TARGET)
 	$(SMP_LOCK_TARGET)
