@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blitterstudio.com/schemas/zz9000/minigl-kit/v1",
+  "title": "ZZ9000 MiniGL kit compatibility manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "firmware", "module", "bitstream", "library"],
+  "properties": {
+    "schema": { "const": "zz9000-minigl-kit/v1" },
+    "firmware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["build_id", "module_abi"],
+      "properties": {
+        "build_id": { "type": "string", "minLength": 1 },
+        "module_abi": { "$ref": "#/$defs/version" }
+      }
+    },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "zzm3_sha256", "required"],
+      "properties": {
+        "id": { "const": 4 },
+        "version": { "type": "string", "minLength": 1 },
+        "zzm3_sha256": { "$ref": "#/$defs/sha256" },
+        "source_tarball_sha256": { "$ref": "#/$defs/sha256" },
+        "required": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["wire_version", "transport_descriptor_major", "rasterix_csr_abi", "hardware_requirement"],
+          "properties": {
+            "wire_version": { "const": 9 },
+            "transport_descriptor_major": { "type": "integer", "minimum": 1 },
+            "rasterix_csr_abi": { "$ref": "#/$defs/abiRange" },
+            "hardware_requirement": { "enum": ["CPU_ONLY", "RASTERIX_EF_OPTIONAL", "RASTERIX_EF_REQUIRED"] }
+          }
+        }
+      }
+    },
+    "bitstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flavour", "rasterix_ef", "rasterix_csr_abi"],
+      "properties": {
+        "flavour": { "type": "string", "minLength": 1 },
+        "rasterix_ef": { "type": "boolean" },
+        "rasterix_csr_abi": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/version" }] }
+      }
+    },
+    "library": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "expected_capability_bits"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "expected_capability_bits": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor"],
+      "properties": {
+        "major": { "type": "integer", "minimum": 0 },
+        "minor": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "abiRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "min_minor", "max_minor"],
+      "properties": {
+        "major": { "type": "integer", "minimum": 0 },
+        "min_minor": { "type": "integer", "minimum": 0 },
+        "max_minor": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

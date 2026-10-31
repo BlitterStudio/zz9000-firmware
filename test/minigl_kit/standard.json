@@ -1,0 +1,18 @@
+{
+  "schema": "zz9000-minigl-kit/v1",
+  "firmware": { "build_id": "firmware-test", "module_abi": { "major": 3, "minor": 0 } },
+  "module": {
+    "id": 4,
+    "version": "test",
+    "zzm3_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "source_tarball_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "required": {
+      "wire_version": 9,
+      "transport_descriptor_major": 1,
+      "rasterix_csr_abi": { "major": 1, "min_minor": 0, "max_minor": 1 },
+      "hardware_requirement": "RASTERIX_EF_OPTIONAL"
+    }
+  },
+  "bitstream": { "flavour": "standard", "rasterix_ef": false, "rasterix_csr_abi": null },
+  "library": { "version": "test", "expected_capability_bits": 0 }
+}
