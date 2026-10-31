@@ -206,6 +206,26 @@ int zzapp_loader_begin(void)
     g_mem = (uint8_t *)(uintptr_t)addr;
 #endif
     zzapp_loader_bound(g_card, g_mem, g_bytes, owner, gen);
+    {
+        uint8_t *life = (uint8_t *)zzapp_services_window();
+        if (life) {
+            zzapp_put_be32(life + ZZAPP_LIFE_STOP_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_NONE);
+            zzapp_put_be32(life + ZZAPP_LIFE_EXIT_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_FLAGS_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_INPUT_DROPS_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_LOG_DROPS_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_GEN_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_ACK_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_SHOWING_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_WIDTH_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_HEIGHT_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_PITCH_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_FORMAT_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_CARD_FRONT_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_CARD_BACK_OFF, 0);
+        }
+    }
     zzapp_loader_set_state(ZZAPP_ST_LOADING);
     return ZZ_OK;
 }
