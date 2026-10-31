@@ -9,7 +9,6 @@
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
 #include "sdk_aperture_layout.h"
-#include "sdk_mailbox.h"
 #include "zzm_registry.h"
 #include "zzm_loader.h"
 
@@ -17,6 +16,9 @@ extern const void *zzm_minigl_host_get_service(uint32_t id,
                                                 uint32_t min_version)
     __attribute__((weak));
 #include "zzm_runtime.h"
+
+extern int zzm_minigl_register_ops(uint32_t module_id, const void *ops,
+                                   uint32_t ops_size) __attribute__((weak));
 
 #define ZZM_RUNTIME_MAX_OWNERS 32U
 #define ZZM_RUNTIME_MAX_WINDOWS 4U
@@ -575,7 +577,12 @@ int zzm_runtime_quota_available(uint32_t memory_class, uint32_t quota)
 static int module_register_ops(uint32_t module_id, const void *ops,
                                uint32_t ops_size)
 {
-    return zzm_registry_register_ops(module_id, ops, ops_size);
+    if (!zzm_registry_register_ops(module_id, ops, ops_size))
+        return 0;
+    if (module_id == ZZM_MODULE_MINIGL && zzm_minigl_register_ops &&
+        !zzm_minigl_register_ops(module_id, ops, ops_size))
+        return 0;
+    return 1;
 }
 
 static int module_register_service(uint32_t module_id, uint32_t id,
@@ -662,12 +669,17 @@ static const void *module_get_service(uint32_t id, uint32_t min_version)
     }
 }
 
-static const zzm_services_t services = {
-    ZZM_MODULE_ABI_VERSION, sizeof(services), module_get_service,
+static const zzm_services_t services_v2 = {
+    ZZM_MODULE_ABI_VERSION, sizeof(services_v2), module_get_service,
+    module_register_ops, module_register_service
+};
+static const zzm_services_t services_v3 = {
+    ZZM_V3_ABI_MAJOR, sizeof(services_v3), module_get_service,
     module_register_ops, module_register_service
 };
 
-const zzm_services_t *zzm_runtime_services(void) { return &services; }
+const zzm_services_t *zzm_runtime_services(void) { return &services_v2; }
+const zzm_services_t *zzm_runtime_services_v3(void) { return &services_v3; }
 
 int zzm_runtime_register_ops(uint32_t module_id, const void *ops,
                              uint32_t ops_size)

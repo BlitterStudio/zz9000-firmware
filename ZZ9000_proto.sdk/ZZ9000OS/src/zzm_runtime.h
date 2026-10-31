@@ -218,6 +218,7 @@ typedef int (*zzm_init_fn)(const zzm_services_t *services);
 typedef void (*zzm_fini_fn)(void);
 
 const zzm_services_t *zzm_runtime_services(void);
+const zzm_services_t *zzm_runtime_services_v3(void);
 int zzm_runtime_register_ops(uint32_t module_id, const void *ops,
                              uint32_t ops_size);
 void zzm_runtime_module_fault(uint32_t module_id, const char *reason);
