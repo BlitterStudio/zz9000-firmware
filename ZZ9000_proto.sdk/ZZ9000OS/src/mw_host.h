@@ -32,6 +32,12 @@ uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
 /* Executes a synchronous request. */
 uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
                          uint8_t *reply, uint32_t reply_capacity, uint32_t *reply_bytes);
+/* Configures the board-relative VRAM mapping used by MW_PRESENT_SPAN. On
+ * hardware base is NULL and the fixed ARM mapping is used; host tests pass
+ * their in-memory board aperture. */
+void mw_host_set_present_vram(uint8_t *base, uint32_t limit_arm);
+/* Executes a capability-gated direct-card presentation embedded in a packet. */
+uint32_t mw_host_present_span(mw_ctx *c, const uint8_t *payload, uint32_t bytes);
 
 /* Reads back latest presented frame as top-row-first RGBA8. */
 uint32_t mw_host_readback_rgba8(mw_ctx *c, uint8_t *out, uint32_t capacity);

@@ -5,6 +5,7 @@
  */
 
 #include "mw_service.h"
+#include "mw_host.h"
 #include "mw_parse.h"
 #include "memorymap.h"
 #include "card_pool.h"
@@ -137,6 +138,7 @@ void mw_service_set_host_vram(void *base, uint32_t limit_arm)
         g_vram_limit_arm = limit_arm;
     else
         g_vram_limit_arm = mw_service_transport_window_base();
+    mw_host_set_present_vram(g_host_vram_base, g_vram_limit_arm);
 }
 #endif
 
@@ -319,7 +321,8 @@ void mw_service_init(void)
         mw_wire_st32(&g_status->firmware_epoch, 0);
         mw_wire_st32(&g_status->heartbeat, 0);
         mw_wire_st32(&g_status->capabilities,
-                     MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS);
+                     MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS |
+                     MW_CAP_ASYNC_PRESENT);
     }
     g_doorbell_pending = 0;
     MW_DIAG("[MGL9] publish magic=%08lx wire=%u transport=%u slot_bytes=%lu slots=%lu caps=%08lx\n",
@@ -352,6 +355,7 @@ uint32_t mw_service_transport_window_size(void)
 void mw_service_set_vram_limit_arm(uint32_t limit_arm)
 {
     g_vram_limit_arm = limit_arm;
+    mw_host_set_present_vram(NULL, limit_arm);
 }
 
 int mw_service_get_transport_descriptor(ZZ9KMiniGLTransportDescriptor *out)

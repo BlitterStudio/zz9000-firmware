@@ -5,6 +5,7 @@
  */
 
 #include "mw_ctx.h"
+#include "mw_host.h"
 #include "mw_parse.h"
 #include "mw_draw.h"
 #include "minigl_raster.h"
@@ -12,10 +13,11 @@
 #include "minigl_lighting.h"
 #include "card_pool.h"
 #include "sdk_palette.h"
+#include "memorymap.h"
 #include <stdlib.h>
 #include <math.h>
 
-#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
 #include "xil_cache.h"
 #include "xil_io.h"
 #include "xil_mmu.h"
@@ -50,6 +52,16 @@
 
 
 static uint32_t g_next_handle = 1U;
+/* Board-relative P96 VRAM mapping for the packet-owned asynchronous present.
+ * Hardware uses the fixed ARM aperture; host tests supply their card image. */
+static uint8_t *g_present_vram_base;
+static uint32_t g_present_vram_limit_arm;
+
+void mw_host_set_present_vram(uint8_t *base, uint32_t limit_arm)
+{
+    g_present_vram_base = base;
+    g_present_vram_limit_arm = limit_arm;
+}
 
 #define MW_GL_INVALID_OPERATION 0x0502U
 #define MW_GL_OUT_OF_MEMORY     0x0505U
@@ -1469,6 +1481,15 @@ target_allocation_failed:
         break;
     }
 
+    case MW_PRESENT_SPAN:
+        minigl_profile_push(MGLP_PRESENT);
+        if (mw_host_present_span(c, p, cmd->bytes) != MW_STATUS_OK)
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+        else
+            minigl_profile_count(MGLP_N_ASYNC_PRESENTS, 1U);
+        minigl_profile_pop();
+        break;
+
     case MW_SYNC:
         if (!minigl_raster_finish())
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
@@ -1953,6 +1974,7 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                     p_col[2] = (uint8_t)(pix >> 8);
                     p_col[3] = (uint8_t)pix;
 
+
                     uint8_t *dst = dst_row + (size_t)col * r.bytes_per_pixel;
                     if (r.format == 1U)
                         *dst = mw_clut_index(c, p_col);
@@ -1965,6 +1987,36 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
 
 
     return MW_STATUS_OK;
+}
+uint32_t mw_host_present_span(mw_ctx *c, const uint8_t *payload, uint32_t bytes)
+{
+    uint32_t request_bytes;
+    uint32_t card_offset;
+    uint32_t span_bytes;
+    uint32_t arm;
+    uint8_t *span;
+    uint32_t status;
+
+    if (!c || !payload || bytes < 32U)
+        return MW_STATUS_INVALID;
+    request_bytes = bytes - 8U;
+    card_offset = mw_be32(payload + request_bytes);
+    span_bytes = mw_be32(payload + request_bytes + 4U);
+    arm = card_offset + ADDR_ADJ;
+    if (card_offset < MNT_FB_BASE || span_bytes == 0U || arm < card_offset ||
+        !g_present_vram_limit_arm ||
+        (uint64_t)arm + span_bytes > g_present_vram_limit_arm)
+        return MW_STATUS_UNAVAILABLE;
+    span = g_present_vram_base ? g_present_vram_base + card_offset :
+                                 (uint8_t *)(uintptr_t)arm;
+    status = mw_blit(c, payload, request_bytes, span, span_bytes);
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+    if (status == MW_STATUS_OK) {
+        Xil_DCacheFlushRange((INTPTR)span, span_bytes);
+        __asm__ volatile ("dsb sy" ::: "memory");
+    }
+#endif
+    return status;
 }
 
 static uint32_t mw_capture(mw_ctx *c, const uint8_t *p, uint32_t bytes,

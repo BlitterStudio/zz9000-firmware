@@ -198,11 +198,12 @@ void minigl_profile_report(void)
     print_start = g_mglp.mark;
     window = mglp_tenth_ms(g_mglp.mark - g_mglp.window_start, 0U) / 1000U;
     written = snprintf(line, sizeof(line),
-                       "[MGLP] %lu.%lus pk=%lu op=%lu kB=%lu cmd=%lu tri=%lu "
+                       "[MGLP] %lu.%lus pk=%lu op=%lu ap=%lu kB=%lu cmd=%lu tri=%lu "
                        "cull=%lu hw=%lu sw=%lu fb=%lu fw=%lu sub=%lu tx=%lu "
                        "up=%lu ub=%lu pin=%lu ev=%lu fbk=",
                        (unsigned long)(window / 10U), (unsigned long)(window % 10U),
                        (unsigned long)g_mglp.packets, (unsigned long)n[MGLP_N_OPS],
+                       (unsigned long)n[MGLP_N_ASYNC_PRESENTS],
                        (unsigned long)(g_mglp.bytes / 1024U),
                        (unsigned long)g_mglp.commands,
                        (unsigned long)n[MGLP_N_TRIANGLES],

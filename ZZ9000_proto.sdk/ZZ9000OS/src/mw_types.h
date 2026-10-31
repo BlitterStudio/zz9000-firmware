@@ -39,7 +39,10 @@
 #define MW_TEXTURE_SUB_RAW          17UL
 #define MW_DRAW_ARRAY_RAW           18UL
 #define MW_COLOR_TABLE              20UL
-
+/* Capability-gated direct-card presentation. Its payload is an MW_BLIT
+ * request followed by the board-relative destination offset and span bytes,
+ * so old v9 implementations reject it and the library keeps BRIDGE_BLIT. */
+#define MW_PRESENT_SPAN             51UL
 /* Custom raw texture format tokens */
 #define MW_RAW_ARGB_4444            0x4d574001UL
 #define MW_RAW_UBYTE_ARGB           0x4d574002UL

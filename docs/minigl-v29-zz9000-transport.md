@@ -129,12 +129,17 @@ To confirm the board runs firmware capable of Wire Protocol v9 without triggerin
    narrow the descriptor geometry (a constrained session) but never
    widen it.
 5. **MiniGL Wire-v9 Capability Bits**:
-   Firmware advertises Wire-v9 support and optional sliced latest-frame
-   readback in `ZZ9KMiniGLStatus.capabilities`:
+   Firmware advertises Wire-v9 support and optional transport extensions in
+   `ZZ9KMiniGLStatus.capabilities`:
    - `#define ZZ9K_CAP_MINIGL_WIRE_V9 (1U << 18)`
    - `#define ZZ9K_CAP_MINIGL_LATEST_READBACK_ROWS (1U << 19)`
      makes Op 3 use `op_arg1 = first_row`, `op_arg2 = row_count` and return
      top-row-first RGBA8 rows through the bounded reply window.
+   - `#define ZZ9K_CAP_MINIGL_ASYNC_PRESENT (1U << 20)` permits the additive
+     `MW_PRESENT_SPAN` packet command. A library MUST emit it only when this
+     bit is observed; otherwise it uses the compatible synchronous Op 6 path.
+     An old library ignores the bit and continues using Op 6, while a new
+     library paired with old firmware sees no bit and does the same.
      Without bit 19, the library uses the compatible `MW_READ_PIXELS` path.
 6. **Transport Handshake (`BRIDGE_QUERY`)**:
    The library inspects the MiniGL Control Block at the descriptor's
@@ -404,11 +409,14 @@ To match the performance of the Amiberry in-process submit, `BRIDGE_SUBMIT` does
    - If card reset occurred: returns `0xfffffffc` (`CONTEXT_LOST`).
 2. **Retired (Asynchronous Fence Advance)**:
    - Rendering executes asynchronously on Core 1 / RasterIX.
-   - When all commands in the packet are completed, Core 1 increments `completion_fence`.
-   - The 68k waits for packet retirement **only** when:
-     - All submission slots are full (flow control backpressure).
-     - Explicit sync is requested: `glFinish()`, `MGLSwitchDisplay` (before unlocking the presentation bitmap), or `READBACK`.
-
+   - When `MW_PRESENT_SPAN` capability is negotiated, one packet-owned
+     presentation is in flight by default. The 68k returns after the packet
+     is accepted, not after the RasterIX fence or P96 write. A build for a
+     verified double-buffered screen MAY set `MINIGL_ASYNC_PRESENT_FRAMES=2`;
+     the library MUST otherwise retire the oldest presentation fence before
+     queuing another. `glFinish`, readback, `MGLLockBack`, context destruction,
+     target/mode changes, and synchronous fallback presentation all retire
+     outstanding fences before observing or reusing their result.
 
 Wire framing is validated before execution. A valid command that encounters a
 GL-level condition (for example an incomplete texture, an allocation failure,
@@ -424,8 +432,6 @@ If a packet fails submission or execution (returns non-zero status):
 
 ---
 
-## 5. Request Operations, Readback, and In-Place Presentation
-
 ### 5.1 Transport Operation Table
 The ZZ9000 transport implements the 7 standard bridge operations matching Amiberry trap 120:
 
@@ -439,7 +445,20 @@ The ZZ9000 transport implements the 7 standard bridge operations matching Amiber
 | `5` | `BRIDGE_REQUEST` | `handle`, `req`, `req_b`, `desc` | Synchronous request with bounded reply |
 | `6` | `BRIDGE_BLIT` | `handle`, `req`, `req_b`, `desc` | In-place reply: presentation into P96 bitmap |
 
-### 5.2 Synchronous Requests (`BRIDGE_REQUEST` / Op 5)
+### 5.2 Packet-Owned Asynchronous Presentation (`MW_PRESENT_SPAN`)
+When capability bit 20 is negotiated, `MGLSwitchDisplay` places
+`MW_PRESENT_SPAN` immediately after `MW_PRESENT` in the submitted ring packet.
+Its payload is the complete `MW_BLIT` request (format, pitch, origin and
+clip rects), followed by the board-relative P96 destination offset and its
+validated span length. The worker executes it in packet order, so the
+destination description remains owned by the slot until `completion_fence`
+retires that packet. It writes directly to card VRAM; no reply buffer or Op 6
+handshake is involved. The worker flushes the completed span before publishing
+its fence. Unsupported, clipped, non-card, or unaligned targets retain the
+synchronous Op 6/readback fallbacks.
+
+### 5.3 Synchronous Requests (`BRIDGE_REQUEST` / Op 5)
+
 `BRIDGE_REQUEST` executes synchronous queries that return data to the guest:
 - Parameter `desc` is a pointer to an 8-byte descriptor:
   - Word 0: `reply_ptr` (guest memory address).
@@ -448,7 +467,7 @@ The ZZ9000 transport implements the 7 standard bridge operations matching Amiber
   - If `reply_ptr` points to card memory inside the host-visible window, the ARM writes the reply directly into the destination and executes `Xil_DCacheFlushRange()`.
   - If `reply_ptr` is in Amiga motherboard FastRAM, the ARM writes into the card-side Reply Buffer (`0x07081000` on Z3). The 68k transport waits for completion, then copies the reply from card DDR to `reply_ptr` using `CopyMem()`.
 
-### 5.3 Latest-Frame Readback (`BRIDGE_READBACK` / Op 3)
+### 5.4 Latest-Frame Readback (`BRIDGE_READBACK` / Op 3)
 With capability bit 19, Op 3 reads `row_count` rows starting at `first_row`
 from `target.latest`, produces top-row-first RGBA8 in the Reply Buffer, and
 returns the exact byte count in `op_reply_bytes`. Each request must fit the
@@ -458,7 +477,7 @@ latest rendered frame without depending on GL read-buffer state.
 Without bit 19, the library uses bounded `MW_READ_PIXELS` requests while
 explicitly selecting and restoring the read buffer.
 
-### 5.4 In-Place Presentation (`BRIDGE_BLIT` / Op 6)
+### 5.5 In-Place Presentation (`BRIDGE_BLIT` / Op 6)
 Frame presentation (`MGLSwitchDisplay()`) issues `BRIDGE_BLIT` with request opcode `MW_BLIT`.
 The request carries:
 - Destination RGB format (`RGBFTYPE` 2..13)
@@ -490,7 +509,7 @@ If the target window is not on a ZZ9000 RTG screen (e.g. AGA screen, native chip
    - Calls `BRIDGE_READBACK` into a guest-allocated RGBA8 buffer.
    - Calls `p96WritePixelArray()` to transfer the pixels through Picasso96 to the non-ZZ9000 surface.
 
-### 5.5 Window Capture (`MW_CAPTURE`)
+### 5.6 Window Capture (`MW_CAPTURE`)
 The reverse of `MW_BLIT`: captures the current background of a window into the MiniGL draw buffer (used when a window context begins rendering without a full color clear).
 - If the bitmap is in ZZ9000 VRAM, Core 1 copies from VRAM into the 3D render buffer.
 - If outside, the library stages the capture via `p96ReadPixelArray()` followed by `MW_UPLOAD`.
