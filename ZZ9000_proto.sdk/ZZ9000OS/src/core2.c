@@ -514,6 +514,9 @@ void core1_loop() {
 	// reaches record_fault() (which fails the task and requests a cold restart)
 	// instead of vectoring through stale state or dying on a garbage SP.
 	core1_init_exception_state();
+	/* PPI 29 is configured locally on core 1. It remains disabled until an
+	 * app runs; core 0 never enables or handles this private timer. */
+	zzapp_private_timer_init_core1();
 	C1_TRACE("[c1] R2b exc-state-ok\r\n");
 
 #ifdef SCHED_STRESS_TEST

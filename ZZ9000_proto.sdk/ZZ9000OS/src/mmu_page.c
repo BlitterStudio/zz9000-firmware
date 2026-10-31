@@ -39,6 +39,7 @@
 /* Small pages with the same memory types: S [10], TEX [8:6], AP [5:4],
  * C [3], B [2], type 0b1x [1], XN [0] clear. */
 #define MMU_PAGE_DDR_WB        0x00000576U /* S=1 TEX=101 AP=11 C=0 B=1 */
+#define MMU_PAGE_DDR_RO_X      0x00000756U /* S=1 TEX=101 privileged RO, X */
 #define MMU_PAGE_NONCACHE      0x00000472U /* S=1 TEX=001 AP=11 C=0 B=0 */
 
 /* Page-table descriptor: table base [31:10], domain [8:5], type 0b01. */
@@ -61,6 +62,15 @@ static uint32_t page_table[MMU_PAGES_PER_SECTION]
 	__attribute__((aligned(1024)));
 #endif
 static uint32_t page_table_section = MMU_SECTION_COUNT;
+
+/* Firmware text uses a separate L2 table from the host-window page split.
+ * The sections therefore coexist in the one translation table core 0 and
+ * core 1 share. */
+/* Firmware text uses private L2 tables rather than the host-window table.
+ * The cores share one L1 table, so every changed mapping is global. */
+#define MMU_RO_TEXT_SECTIONS 4U
+static uint32_t ro_page_table[MMU_RO_TEXT_SECTIONS][MMU_PAGES_PER_SECTION]
+	__attribute__((aligned(1024)));
 
 #ifdef MMU_PAGE_HOST_TEST
 uint32_t mmu_page_test_l1[MMU_SECTION_COUNT];
@@ -98,10 +108,15 @@ static void sync_translation(void)
 }
 #endif
 
+static uint32_t page_table_descriptor_for(const uint32_t *table)
+{
+	return ((uint32_t)(uintptr_t)table & MMU_L1_TABLE_BASE_MASK) |
+		MMU_L1_DOMAIN_15 | MMU_L1_TYPE_PAGE_TABLE;
+}
+
 static uint32_t page_table_descriptor(void)
 {
-	return ((uint32_t)(uintptr_t)page_table & MMU_L1_TABLE_BASE_MASK) |
-		MMU_L1_DOMAIN_15 | MMU_L1_TYPE_PAGE_TABLE;
+	return page_table_descriptor_for(page_table);
 }
 
 int mmu_page_set_noncacheable(uintptr_t page_addr)
@@ -179,5 +194,55 @@ int mmu_page_set_noncacheable(uintptr_t page_addr)
 	/* Drop any clean line a speculative fill brought in under the old
 	 * cacheable entry before the TLB invalidate took effect. */
 	Xil_DCacheFlushRange((INTPTR)page_addr, MMU_PAGE_SIZE);
+	return 1;
+}
+
+int mmu_page_set_readonly_executable(uintptr_t start, uintptr_t end)
+{
+	uint32_t *l1 = l1_table();
+	uint32_t first_section;
+	uint32_t last_section;
+	uint32_t section;
+	uint32_t table_index;
+
+	if ((start & (MMU_PAGE_SIZE - 1U)) != 0U ||
+	    (end & (MMU_PAGE_SIZE - 1U)) != 0U || end <= start)
+		return 0;
+
+	first_section = (uint32_t)(start >> MMU_SECTION_SHIFT);
+	last_section = (uint32_t)((end - 1U) >> MMU_SECTION_SHIFT);
+	if (last_section >= MMU_SECTION_COUNT ||
+	    last_section - first_section + 1U > MMU_RO_TEXT_SECTIONS)
+		return 0;
+
+	for (section = first_section, table_index = 0U;
+	     section <= last_section; section++, table_index++) {
+		uint32_t *table = ro_page_table[table_index];
+		uint32_t entry = l1[section];
+		uint32_t i;
+
+		if ((entry & MMU_L1_TYPE_MASK) != MMU_L1_TYPE_SECTION ||
+		    (entry & MMU_L1_SUPERSECTION) != 0U ||
+		    (entry >> MMU_SECTION_SHIFT) != section ||
+		    (entry & MMU_L1_ATTR_MASK) != MMU_SECTION_DDR_WB)
+			return 0;
+
+		for (i = 0U; i < MMU_PAGES_PER_SECTION; i++) {
+			uintptr_t page = ((uintptr_t)section << MMU_SECTION_SHIFT) |
+				((uintptr_t)i << MMU_PAGE_SHIFT);
+			uint32_t attr = (page >= start && page < end) ?
+				MMU_PAGE_DDR_RO_X : MMU_PAGE_DDR_WB;
+
+			table[i] = (uint32_t)page | attr;
+		}
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)table, PAGE_TABLE_BYTES);
+
+		/* The table is complete and clean before replacing the section.
+		 * Never expose an unmapped executable page while switching it. */
+		l1[section] = page_table_descriptor_for(table);
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&l1[section],
+		                     sizeof(l1[section]));
+		sync_translation();
+	}
 	return 1;
 }

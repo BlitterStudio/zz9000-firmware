@@ -45,6 +45,10 @@ SECTIONS
 {
 /* VBAR on both cores points here. Keep the vector branches in range of
  * the high firmware image rather than pinning the whole boot path low. */
+/* Firmware text is page-aligned so core 1 can mark it read-only before the
+ * first hosted-app entry without covering writable firmware data. */
+. = ALIGN(0x1000);
+__firmware_text_start = .;
 .text : {
    . = ALIGN(32);
    KEEP (*(.vectors))
@@ -69,7 +73,8 @@ SECTIONS
 .fini : {
    KEEP (*(.fini))
 } > ps7_ddr_hi
-
+. = ALIGN(0x1000);
+__firmware_text_end = .;
 .rodata : {
    __rodata_start = .;
    *(EXCLUDE_FILE (*minigl_lighting.o *minigl_raster.o *minigl_present.o *mw_parse.o *mw_texture.o *mw_draw.o *mw_ctx.o *mw_service.o *LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o *sdk_console_encode.o *rfb_encode.o *rfb_words.o *deflate.c.obj *trees.c.obj) .rodata)
