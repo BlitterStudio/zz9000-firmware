@@ -341,6 +341,8 @@ struct SDKCryptoVerifyPayload {
 #define SDK_OP_DIAG_MEMORY             0x0903U
 
 #define SDK_OP_MODULE_STATUS           0x0a00U
+#define SDK_OP_MINIGL_MODULE_ACQUIRE   0x0a01U
+#define SDK_OP_MINIGL_MODULE_RELEASE   0x0a02U
 #define SDK_MODULE_LOADED               0U
 #define SDK_MODULE_MISSING              1U
 #define SDK_MODULE_REJECTED_ABI         2U

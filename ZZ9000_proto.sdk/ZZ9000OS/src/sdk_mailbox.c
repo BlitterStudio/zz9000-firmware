@@ -59,6 +59,7 @@
 #include "sdk_audio_flac.h"
 #include "sdk_audio_vorbis.h"
 #include "zzm_loader.h"
+#include "zzm_minigl_host.h"
 
 /* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
  * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
