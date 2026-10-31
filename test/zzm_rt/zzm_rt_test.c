@@ -133,13 +133,14 @@ static uint64_t mock_time_us(void)
 
 static const zzm_core_service_t core_service = {
     ZZM_SERVICE_CORE_V1, sizeof(core_service), mock_log, mock_fault, mock_time_us,
-    mock_module_fault
+    mock_module_fault, 0
 };
 static const zzm_memory_service_t memory_service = {
-    ZZM_SERVICE_MEMORY_V1, sizeof(memory_service), mock_alloc, mock_free, mock_realloc
+    ZZM_SERVICE_MEMORY_V1, sizeof(memory_service), mock_alloc, mock_free, mock_realloc,
+    0, 0, 0
 };
 static const zzm_cache_service_t cache_service = {
-    ZZM_SERVICE_CACHE_V1, sizeof(cache_service), 0, 0
+    ZZM_SERVICE_CACHE_V1, sizeof(cache_service), 0, 0, 0, 0, 0
 };
 
 static const void *mock_get_service(uint32_t id, uint32_t min_version)

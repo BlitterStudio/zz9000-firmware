@@ -18,6 +18,13 @@
 
 static int failures;
 
+static const uint8_t expected_image_sha256[ZZM_SHA256_SIZE] = {
+    0xa9, 0x28, 0x17, 0x9b, 0xf8, 0x9b, 0xab, 0xa7,
+    0x81, 0xcc, 0x9d, 0xec, 0xbf, 0xe4, 0x9f, 0xa4,
+    0x8e, 0xaa, 0xbb, 0xbe, 0x63, 0xfb, 0xda, 0x75,
+    0x06, 0x59, 0x78, 0xc4, 0x0b, 0x0c, 0xc2, 0xc3
+};
+
 #define CHECK(condition) do { \
     if (!(condition)) { \
         failures++; \
@@ -110,6 +117,18 @@ static int run_packer(const char *packer, const char *input, const char *output)
     return system(command) == 0;
 }
 
+static int run_v3_packer(const char *packer, const char *input,
+                         const char *output)
+{
+    char command[1024];
+
+    if (snprintf(command, sizeof(command),
+                 "\"%s\" --v3 1 7 7 15 1 9 1 0 0 1 1048576 8388608 1 \"%s\" \"%s\"",
+                 packer, input, output) >= (int)sizeof(command))
+        return 0;
+    return system(command) == 0;
+}
+
 static int read_file(const char *path, uint8_t *buffer, size_t size)
 {
     FILE *file = fopen(path, "rb");
@@ -137,12 +156,7 @@ static void test_success(const char *packer)
     const uint8_t expected_image[] = {
         0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 1, 2, 3
     };
-    const uint8_t expected_sha256[ZZM_SHA256_SIZE] = {
-        0xa9, 0x28, 0x17, 0x9b, 0xf8, 0x9b, 0xab, 0xa7,
-        0x81, 0xcc, 0x9d, 0xec, 0xbf, 0xe4, 0x9f, 0xa4,
-        0x8e, 0xaa, 0xbb, 0xbe, 0x63, 0xfb, 0xda, 0x75,
-        0x06, 0x59, 0x78, 0xc4, 0x0b, 0x0c, 0xc2, 0xc3
-    };
+    const uint8_t *expected_sha256 = expected_image_sha256;
     uint8_t packed[ZZM_HEADER_SIZE + sizeof(expected_image)];
     zzm_header_t header;
 
@@ -170,7 +184,55 @@ static void test_success(const char *packer)
     CHECK(strcmp(header.name, "MPEG2") == 0);
     CHECK(memcmp(packed + ZZM_HEADER_SIZE, expected_image,
                  sizeof(expected_image)) == 0);
-    CHECK(memcmp(header.image_sha256, expected_sha256, sizeof(expected_sha256)) == 0);
+    CHECK(memcmp(header.image_sha256, expected_sha256,
+                 sizeof(expected_image_sha256)) == 0);
+    remove(input);
+    remove(output);
+}
+
+static void test_v3_success(const char *packer)
+{
+    const char *input = "build/zzm_pack_v3.elf";
+    const char *output = "build/zzm_pack_v3.ZZM";
+    const uint8_t expected_image[] = {
+        0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 1, 2, 3
+    };
+    uint8_t packed[ZZM_V3_HEADER_SIZE + sizeof(expected_image)];
+    zzm_v3_header_t header;
+
+    remove(input);
+    remove(output);
+    CHECK(write_elf(input, 0, 0));
+    CHECK(run_v3_packer(packer, input, output));
+    if (!read_file(output, packed, sizeof(packed))) {
+        CHECK(0);
+        remove(input);
+        remove(output);
+        return;
+    }
+    memcpy(&header, packed, sizeof(header));
+    CHECK(memcmp(header.magic, ZZM_V3_MAGIC, sizeof(header.magic)) == 0);
+    CHECK(header.header_size == ZZM_V3_HEADER_SIZE);
+    CHECK(header.format_version == ZZM_V3_FORMAT_VERSION);
+    CHECK(header.module_id == ZZM_MODULE_MPEG2);
+    CHECK(header.abi_major == ZZM_V3_ABI_MAJOR);
+    CHECK(header.abi_minor == ZZM_V3_ABI_MINOR);
+    CHECK(packed[4] == 0U && packed[5] == 2U);
+    CHECK(packed[64] == 0U && packed[65] == 0U &&
+          packed[66] == 16U && packed[67] == 0U);
+    CHECK(header.image_flags == 7U);
+    CHECK(header.owner_class_mask == 15U);
+    CHECK(header.hardware_requirement == ZZM_HARDWARE_RASTERIX_EF_OPTIONAL);
+    CHECK(header.required_caps.wire_version == 9U);
+    CHECK(header.required_caps.transport_descriptor_major == 1U);
+    CHECK(header.required_caps.host_window_layout_major == 1U);
+    CHECK(header.resident_quota == 1048576U);
+    CHECK(header.per_context_quota == 8388608U);
+    CHECK(header.worker_ops_version == 1U);
+    CHECK(memcmp(header.image_sha256, expected_image_sha256,
+                 sizeof(expected_image_sha256)) == 0);
+    CHECK(memcmp(packed + ZZM_V3_HEADER_SIZE, expected_image,
+                 sizeof(expected_image)) == 0);
     remove(input);
     remove(output);
 }
@@ -210,6 +272,7 @@ int main(int argc, char **argv)
         return 2;
     }
     test_success(argv[1]);
+    test_v3_success(argv[1]);
     test_relocation_rejection(argv[1]);
     test_outside_slot_rejection(argv[1]);
     return failures != 0;

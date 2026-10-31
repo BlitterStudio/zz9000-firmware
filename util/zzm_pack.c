@@ -1,10 +1,10 @@
+#include <stddef.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include "zzm_format.h"
 #include "zzm_manifest.h"
 #include "zzm_runtime.h"
@@ -28,6 +28,16 @@ typedef struct {
     uint8_t block[64];
     size_t block_used;
 } sha256_ctx_t;
+
+typedef struct zzm_v3_pack_options {
+    uint32_t image_flags;
+    uint32_t owner_class_mask;
+    uint32_t hardware_requirement;
+    zzm_v3_required_caps_t required_caps;
+    uint32_t resident_quota;
+    uint32_t per_context_quota;
+    uint32_t worker_ops_version;
+} zzm_v3_pack_options_t;
 
 static uint16_t read_le16(const uint8_t *data)
 {
@@ -299,6 +309,7 @@ static int section_in_slot(uint32_t address, uint32_t size,
 }
 
 static int pack_elf(uint32_t module_id, uint32_t module_version,
+                    const zzm_v3_pack_options_t *v3,
                     const char *input_path, const char *output_path)
 {
     uint8_t elf_header[ELF32_EHDR_SIZE];
@@ -317,7 +328,8 @@ static int pack_elf(uint32_t module_id, uint32_t module_version,
     uint16_t section_size;
     uint16_t index;
     uint8_t *image = 0;
-    uint8_t header[ZZM_HEADER_SIZE];
+    uint8_t header[ZZM_V3_HEADER_SIZE];
+    uint32_t header_size = v3 ? ZZM_V3_HEADER_SIZE : ZZM_HEADER_SIZE;
     uint32_t image_size;
     uint32_t bss_size;
     sha256_ctx_t sha256;
@@ -445,40 +457,91 @@ static int pack_elf(uint32_t module_id, uint32_t module_version,
 
     image_size = image_end - slot->address;
     bss_size = allocation_end - image_end;
-    memset(header, 0, sizeof(header));
-    memcpy(header, ZZM_MAGIC, 4);
-    write_le16(header + 4, ZZM_HEADER_SIZE);
-    write_le16(header + 6, ZZM_FORMAT_VERSION);
-    write_le32(header + 8, module_id);
-    write_le32(header + 12, module_version);
-    write_le32(header + 16, ZZM_MODULE_ABI_VERSION);
-    write_le32(header + 20, slot->address);
-    write_le32(header + 24, image_size);
-    write_le32(header + 28, bss_size);
-    write_le32(header + 32, entry);
-    write_le32(header + 36, fini_entry);
-    memcpy(header + 40, slot->name, strlen(slot->name) + 1);
-    /* v2 modules are loaded only when a media path needs them. The first
-     * four requirements are the firmware-provided core runtime interfaces. */
-    write_le32(header + 56, ZZM_LOAD_ON_DEMAND);
-    write_le32(header + 60, ZZM_DEFAULT_IDLE_UNLOAD_MS);
-    write_le32(header + 64, module_id == 3U ? ZZM_MEMORY_CLASS_IMAGE :
-               ZZM_MEMORY_CLASS_MEDIA);
-    write_le32(header + 68, module_id == 2U ? (64U << 20) : (32U << 20));
-    write_le16(header + 72, 4U);
-    write_le32(header + 76, 1U);  write_le32(header + 80, 1U);
-    write_le32(header + 84, 2U);  write_le32(header + 88, 1U);
-    write_le32(header + 92, 3U);  write_le32(header + 96, 1U);
-    write_le32(header + 100, 4U); write_le32(header + 104, 1U);
-    sha256_init(&sha256);
-    sha256_update(&sha256, image, image_size);
-    sha256_final(&sha256, header + 140);
+    memset(header, 0, header_size);
+    if (v3) {
+        memcpy(header + offsetof(zzm_v3_header_t, magic), ZZM_V3_MAGIC, 4);
+        write_le16(header + offsetof(zzm_v3_header_t, header_size),
+                   ZZM_V3_HEADER_SIZE);
+        write_le16(header + offsetof(zzm_v3_header_t, format_version),
+                   ZZM_V3_FORMAT_VERSION);
+        write_le32(header + offsetof(zzm_v3_header_t, module_id), module_id);
+        write_le32(header + offsetof(zzm_v3_header_t, module_version), module_version);
+        write_le16(header + offsetof(zzm_v3_header_t, abi_major), ZZM_V3_ABI_MAJOR);
+        write_le16(header + offsetof(zzm_v3_header_t, abi_minor), ZZM_V3_ABI_MINOR);
+        write_le32(header + offsetof(zzm_v3_header_t, slot_load_address), slot->address);
+        write_le32(header + offsetof(zzm_v3_header_t, image_size), image_size);
+        write_le32(header + offsetof(zzm_v3_header_t, bss_size), bss_size);
+        write_le32(header + offsetof(zzm_v3_header_t, init_entry), entry);
+        write_le32(header + offsetof(zzm_v3_header_t, fini_entry), fini_entry);
+        memcpy(header + offsetof(zzm_v3_header_t, name), slot->name,
+               strlen(slot->name) + 1U);
+        write_le32(header + offsetof(zzm_v3_header_t, load_policy), ZZM_LOAD_ON_DEMAND);
+        write_le32(header + offsetof(zzm_v3_header_t, idle_unload_ms),
+                   ZZM_DEFAULT_IDLE_UNLOAD_MS);
+        write_le32(header + offsetof(zzm_v3_header_t, resident_quota),
+                   v3->resident_quota);
+        write_le32(header + offsetof(zzm_v3_header_t, per_context_quota),
+                   v3->per_context_quota);
+        write_le32(header + offsetof(zzm_v3_header_t, owner_class_mask),
+                   v3->owner_class_mask);
+        write_le32(header + offsetof(zzm_v3_header_t, image_flags), v3->image_flags);
+        write_le32(header + offsetof(zzm_v3_header_t, hardware_requirement),
+                   v3->hardware_requirement);
+        write_le32(header + offsetof(zzm_v3_header_t, worker_ops_version),
+                   v3->worker_ops_version);
+        write_le32(header + offsetof(zzm_v3_header_t, required_caps.wire_version),
+                   v3->required_caps.wire_version);
+        write_le32(header + offsetof(zzm_v3_header_t,
+                                     required_caps.transport_descriptor_major),
+                   v3->required_caps.transport_descriptor_major);
+        write_le32(header + offsetof(zzm_v3_header_t,
+                                     required_caps.rasterix_csr_abi_major),
+                   v3->required_caps.rasterix_csr_abi_major);
+        write_le32(header + offsetof(zzm_v3_header_t,
+                                     required_caps.rasterix_csr_abi_minor),
+                   v3->required_caps.rasterix_csr_abi_minor);
+        write_le32(header + offsetof(zzm_v3_header_t,
+                                     required_caps.host_window_layout_major),
+                   v3->required_caps.host_window_layout_major);
+        sha256_init(&sha256);
+        sha256_update(&sha256, image, image_size);
+        sha256_final(&sha256,
+                     header + offsetof(zzm_v3_header_t, image_sha256));
+    } else {
+        memcpy(header, ZZM_MAGIC, 4);
+        write_le16(header + 4, ZZM_HEADER_SIZE);
+        write_le16(header + 6, ZZM_FORMAT_VERSION);
+        write_le32(header + 8, module_id);
+        write_le32(header + 12, module_version);
+        write_le32(header + 16, ZZM_MODULE_ABI_VERSION);
+        write_le32(header + 20, slot->address);
+        write_le32(header + 24, image_size);
+        write_le32(header + 28, bss_size);
+        write_le32(header + 32, entry);
+        write_le32(header + 36, fini_entry);
+        memcpy(header + 40, slot->name, strlen(slot->name) + 1);
+        /* v2 modules are loaded only when a media path needs them. The first
+         * four requirements are the firmware-provided core runtime interfaces. */
+        write_le32(header + 56, ZZM_LOAD_ON_DEMAND);
+        write_le32(header + 60, ZZM_DEFAULT_IDLE_UNLOAD_MS);
+        write_le32(header + 64, module_id == 3U ? ZZM_MEMORY_CLASS_IMAGE :
+                   ZZM_MEMORY_CLASS_MEDIA);
+        write_le32(header + 68, module_id == 2U ? (64U << 20) : (32U << 20));
+        write_le16(header + 72, 4U);
+        write_le32(header + 76, 1U);  write_le32(header + 80, 1U);
+        write_le32(header + 84, 2U);  write_le32(header + 88, 1U);
+        write_le32(header + 92, 3U);  write_le32(header + 96, 1U);
+        write_le32(header + 100, 4U); write_le32(header + 104, 1U);
+        sha256_init(&sha256);
+        sha256_update(&sha256, image, image_size);
+        sha256_final(&sha256, header + 140);
+    }
     output = fopen(output_path, "wb");
     if (!output) {
         fprintf(stderr, "zzm_pack: cannot write %s\n", output_path);
         goto done;
     }
-    if (fwrite(header, 1, sizeof(header), output) != sizeof(header) ||
+    if (fwrite(header, 1, header_size, output) != header_size ||
         fwrite(image, 1, image_size, output) != image_size) {
         fprintf(stderr, "zzm_pack: cannot write %s\n", output_path);
         goto done;
@@ -503,11 +566,42 @@ int main(int argc, char **argv)
     uint32_t module_id;
     uint32_t module_version;
 
+    if (argc == 17 && strcmp(argv[1], "--v3") == 0) {
+        zzm_v3_pack_options_t v3;
+        uint32_t wire_version, descriptor_major, csr_major, csr_minor, host_layout;
+
+        memset(&v3, 0, sizeof(v3));
+        if (!parse_u32(argv[2], &module_id) ||
+            !parse_u32(argv[3], &module_version) ||
+            !parse_u32(argv[4], &v3.image_flags) ||
+            !parse_u32(argv[5], &v3.owner_class_mask) ||
+            !parse_u32(argv[6], &v3.hardware_requirement) ||
+            !parse_u32(argv[7], &wire_version) ||
+            !parse_u32(argv[8], &descriptor_major) ||
+            !parse_u32(argv[9], &csr_major) ||
+            !parse_u32(argv[10], &csr_minor) ||
+            !parse_u32(argv[11], &host_layout) ||
+            !parse_u32(argv[12], &v3.resident_quota) ||
+            !parse_u32(argv[13], &v3.per_context_quota) ||
+            !parse_u32(argv[14], &v3.worker_ops_version)) {
+            fprintf(stderr, "zzm_pack: invalid --v3 value\n");
+            return 2;
+        }
+        v3.required_caps.wire_version = wire_version;
+        v3.required_caps.transport_descriptor_major = descriptor_major;
+        v3.required_caps.rasterix_csr_abi_major = csr_major;
+        v3.required_caps.rasterix_csr_abi_minor = csr_minor;
+        v3.required_caps.host_window_layout_major = host_layout;
+        return pack_elf(module_id, module_version, &v3, argv[15], argv[16]) ?
+            0 : 1;
+    }
     if (argc != 5 || !parse_u32(argv[1], &module_id) ||
         !parse_u32(argv[2], &module_version)) {
-        fprintf(stderr, "usage: %s MODULE_ID MODULE_VERSION INPUT.elf OUTPUT.ZZM\n",
-                argv[0]);
+        fprintf(stderr, "usage: %s MODULE_ID MODULE_VERSION INPUT.elf OUTPUT.ZZM\n"
+                "   or: %s --v3 MODULE_ID MODULE_VERSION IMAGE_FLAGS OWNER_MASK "
+                "HARDWARE WIRE DESC CSR_MAJOR CSR_MINOR HOST_LAYOUT RESIDENT "
+                "CONTEXT WORKER INPUT.elf OUTPUT.ZZM\n", argv[0], argv[0]);
         return 2;
     }
-    return pack_elf(module_id, module_version, argv[3], argv[4]) ? 0 : 1;
+    return pack_elf(module_id, module_version, 0, argv[3], argv[4]) ? 0 : 1;
 }
