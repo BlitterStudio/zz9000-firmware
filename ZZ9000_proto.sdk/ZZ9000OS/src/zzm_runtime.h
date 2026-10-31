@@ -18,6 +18,8 @@ enum zzm_service_id {
     ZZM_SERVICE_PALETTE = 7U,
     ZZM_SERVICE_APP_GL_HOST = 8U,
     ZZM_SERVICE_PROFILE = 9U,
+    /* Provider implementation is the scheduler/mailbox host. */
+    ZZM_SERVICE_TRANSPORT = 10U,
 };
 
 #define ZZM_SERVICE_VERSION(major, minor) \
@@ -41,6 +43,7 @@ enum zzm_service_id {
 #define ZZM_SERVICE_PALETTE_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_APP_GL_HOST_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_PROFILE_V3 ZZM_SERVICE_VERSION(3U, 0U)
+#define ZZM_SERVICE_TRANSPORT_V3 ZZM_SERVICE_VERSION(3U, 0U)
 
 enum zzm_memory_class {
     ZZM_MEMORY_CLASS_MEDIA = 1U,
@@ -54,12 +57,13 @@ enum zzm_memory_class {
     ZZM_MEMORY_CLASS_MINIGL_RIX = 9U,
 };
 
-enum zzm_owner_class {
-    ZZM_OWNER_CLASS_MINIGL_MODULE = 1U << 0,
-    ZZM_OWNER_CLASS_MINIGL_TRANSPORT = 1U << 1,
-    ZZM_OWNER_CLASS_MINIGL_CONTEXT = 1U << 2,
-    ZZM_OWNER_CLASS_MINIGL_APP_CONTEXT = 1U << 3,
-    ZZM_OWNER_CLASS_MINIGL_RIX = 1U << 4,
+enum zzm_runtime_owner_class {
+    /* Module bookkeeping is runtime-internal, not a v3 header owner mask. */
+    ZZM_RUNTIME_OWNER_CLASS_MINIGL_MODULE = 1U << 4,
+    ZZM_RUNTIME_OWNER_CLASS_MINIGL_CONTEXT = 1U << 0,
+    ZZM_RUNTIME_OWNER_CLASS_MINIGL_APP_CONTEXT = 1U << 1,
+    ZZM_RUNTIME_OWNER_CLASS_MINIGL_TRANSPORT = 1U << 2,
+    ZZM_RUNTIME_OWNER_CLASS_MINIGL_RIX = 1U << 3,
 };
 
 enum zzm_memory_attributes {
@@ -183,6 +187,22 @@ typedef struct zzm_profile_service {
     int (*snapshot)(uint32_t module_id, void *out, uint32_t *bytes_inout);
 } zzm_profile_service_t;
 
+/*
+ * The scheduler/mailbox host provides this table.  The module supplies only
+ * descriptor bytes and its registered MiniGL operation table; it never
+ * reaches into the mailbox reservation or installs a raw interrupt target.
+ */
+typedef struct zzm_transport_service {
+    uint32_t version;
+    uint32_t size;
+    int (*publish_descriptor)(uint32_t module_id, const void *descriptor,
+                              uint32_t descriptor_bytes);
+    void (*retract_descriptor)(uint32_t module_id);
+    int (*install_doorbell)(uint32_t module_id);
+    void (*remove_doorbell)(uint32_t module_id);
+    void (*publish_capabilities)(uint32_t module_id, uint32_t capabilities);
+} zzm_transport_service_t;
+
 typedef const void *(*zzm_get_service_fn)(uint32_t id, uint32_t min_version);
 
 typedef struct zzm_services {
@@ -207,11 +227,14 @@ int zzm_runtime_quota_available(uint32_t memory_class, uint32_t quota);
 /* libzzm_rt public module-side binding and context API. */
 int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
                 uint32_t memory_class, uint32_t quota);
+const void *zzm_rt_get_service(uint32_t id, uint32_t min_version);
 void zzm_rt_set_context(uint32_t owner, uint32_t memory_class, uint32_t quota);
 void zzm_rt_get_context(zzm_allocation_context_t *out);
 void zzm_rt_log(const char *message);
 void zzm_rt_fault(const char *reason);
 void zzm_rt_dcache_clean(uint32_t address, uint32_t length);
+int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address,
+                               uint32_t length);
 
 /* Codec plug-in contracts. Payload addresses are card addresses; formats are
  * intentionally fixed to 8-bit 4:2:0 video and interleaved signed PCM. */
