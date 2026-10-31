@@ -50,6 +50,7 @@ int zzapp_loader_abort(void);
 int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr_out);
 void zzapp_loader_free_back(uint32_t addr);
 void zzapp_host_yield(void);
+void zzapp_host_yield_wait(void);
 uint64_t zzapp_host_time_us(void);
 void zzapp_loader_release(void);
 
@@ -59,6 +60,7 @@ void zzapp_worker_hook(void);
 void zzapp_core0_poll(void);
 void zzapp_on_core1_restart(void);
 void zzapp_on_amiga_reset(void);
+void zzapp_private_timer_init_core1(void);
 void scheduler_core1_service_once(void);
 
 int zzapp_fault_is_app(uint32_t pc, uint32_t abort_lr);
@@ -118,6 +120,9 @@ void zzapp_gl_reclaim(void);
 void zzapp_test_set_xtime(uint64_t ticks);
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv));
 void zzapp_host_tick_at(uint64_t now);
+void zzapp_test_mark_running(void);
+uint32_t zzapp_test_service_calls(void);
+uint32_t zzapp_test_in_api(void);
 uint32_t zzapp_test_arena_card(void);
 uint8_t *zzapp_test_arena_mem(void);
 int zzapp_test_cold_restarts(void);

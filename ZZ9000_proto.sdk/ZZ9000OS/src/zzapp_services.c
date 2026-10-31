@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "zzapp_proto.h"
+void zzapp_host_yield_wait(void);
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
 #include "zzapp.h"
@@ -275,6 +276,11 @@ __attribute__((weak)) void zzapp_host_yield(void)
 {
 }
 
+__attribute__((weak)) void zzapp_host_yield_wait(void)
+{
+	zzapp_host_yield();
+}
+
 __attribute__((weak)) uint64_t zzapp_host_time_us(void)
 {
 	return 0U;
@@ -500,7 +506,9 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 		}
 		if (now_us() - start >= ZZAPP_FILE_TIMEOUT_US)
 			return ZZ_ETIMEDOUT;
-		yield_once();
+		/* File completion polling holds no GL lock, so it is an intentional
+		 * service-tick exception while its enclosing API remains active. */
+		zzapp_host_yield_wait();
 	}
 }
 

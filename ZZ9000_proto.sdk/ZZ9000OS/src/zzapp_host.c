@@ -12,10 +12,16 @@
 #include "zzapp_runtime.h"
 #ifndef ZZAPP_HOST_TEST
 #include "memorymap.h"
+#include "mmu_page.h"
 #include "xtime_l.h"
 #include "xil_cache.h"
+#include "xil_io.h"
+#include "xparameters_ps.h"
+#include "xparameters.h"
+#include "xscutimer_hw.h"
 #include "card_pool.h"
 #include "core2.h"
+#include "interrupt.h"
 #include "sleep.h"
 #else
 #include <stdlib.h>
@@ -28,13 +34,15 @@ struct zzapp_coherent {
     volatile uint32_t fault;
     volatile uint64_t progress;
     volatile uint64_t tick_seen;
+    volatile uint64_t service_seen;
     volatile uint32_t arena_card;
     volatile uint32_t arena_bytes;
     volatile uint32_t owner;
     volatile uint32_t reset_request;
 };
 #ifdef ZZAPP_HOST_TEST
-void scheduler_core1_service_once(void) {}
+static uint32_t g_test_service_calls;
+void scheduler_core1_service_once(void) { g_test_service_calls++; }
 #endif
 
 #ifndef ZZAPP_HOST_TEST
@@ -64,19 +72,20 @@ static int g_exited;
 static int g_faulted;
 static int g_cold_restarts;
 
+static void zzapp_private_timer_enable(void);
+static void zzapp_private_timer_disable(void);
+
 #ifdef ZZAPP_HOST_TEST
 static void (*g_test_entry)(const void *api, int argc, char **argv);
-#endif
+#else
+/* Saved SVC stack below the worker's app-entry VFP frame. Every app service
+ * tick runs on this firmware stack, never on the app arena or IRQ stack. */
+volatile uint32_t app_host_sp;
+static int g_private_timer_ready;
+static int g_firmware_text_readonly;
+extern char __firmware_text_start[];
+extern char __firmware_text_end[];
 
-#ifndef ZZAPP_HOST_TEST
-static volatile uint32_t g_app_return_sp;
-
-/*
- * Keep core 1's complete VFP/NEON context outside the app arena.  A trusted
- * app receives the normal hard-float entry registers, but its stack is the
- * requested tail of its private card arena.  Returning is supported solely
- * to turn an accidental return into the normal host-side state transition.
- */
 __attribute__((naked)) void zzapp_enter_arm(uint32_t entry, const void *api,
                                             uint32_t argc, char **argv,
                                             uint32_t sp)
@@ -89,7 +98,7 @@ __attribute__((naked)) void zzapp_enter_arm(uint32_t entry, const void *api,
         "vpush {d0-d15}\n"
         "vpush {d16-d31}\n"
         "ldr r4, [sp, #296]\n"
-        "ldr r12, =g_app_return_sp\n"
+        "ldr r12, =app_host_sp\n"
         "str sp, [r12]\n"
         "mov r12, r0\n"
         "mov r0, r2\n"
@@ -97,7 +106,7 @@ __attribute__((naked)) void zzapp_enter_arm(uint32_t entry, const void *api,
         "mov r1, r3\n"
         "mov sp, r4\n"
         "blx r12\n"
-        "ldr r12, =g_app_return_sp\n"
+        "ldr r12, =app_host_sp\n"
         "ldr sp, [r12]\n"
         "vpop {d16-d31}\n"
         "vpop {d0-d15}\n"
@@ -105,6 +114,24 @@ __attribute__((naked)) void zzapp_enter_arm(uint32_t entry, const void *api,
         "vmsr fpscr, r4\n"
         "pop {r4-r11, lr}\n"
         "bx lr\n");
+}
+
+/* An abort handler cannot return through the vector: that would reexecute
+ * the faulting app instruction. Drop the app-entry frame and branch directly
+ * to the normal worker loop on its SVC stack. */
+__attribute__((naked, noreturn)) static void zzapp_resume_worker_from_fault(void)
+{
+    __asm__ volatile (
+        "cpsid if\n"
+        "cps #0x13\n"
+        "ldr r12, =app_host_sp\n"
+        "ldr sp, [r12]\n"
+        "vpop {d16-d31}\n"
+        "vpop {d0-d15}\n"
+        "pop {r4}\n"
+        "vmsr fpscr, r4\n"
+        "pop {r4-r11, lr}\n"
+        "b scheduler_core1_worker\n");
 }
 #endif
 
@@ -215,6 +242,7 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
 {
     if (g_faulted)
         return;
+    zzapp_private_timer_disable();
     g_faulted = 1;
     g_coh->running = 0;
     g_coh->fault = fault;
@@ -242,12 +270,18 @@ static void maybe_expire_fault(uint64_t now)
         publish_state(ZZAPP_ST_IDLE);
 }
 
-static void service_tick(uint64_t now, int allow_scheduler)
+static void service_tick(uint64_t now, int permit_reentry)
 {
     g_coh->tick_seen = now;
     zzapp_services_poll();
-    if (allow_scheduler)
+    /*
+     * A tick must not acquire MiniGL or SDK work below an app API call.
+     * File waits and sleep explicitly pass permit_reentry between polls.
+     */
+    if (g_coh->in_api == 0u || permit_reentry) {
+        g_coh->service_seen = now;
         scheduler_core1_service_once();
+    }
     if (stop_requested()) {
         if (!g_stop_mark)
             g_stop_mark = now;
@@ -262,13 +296,121 @@ static void service_tick(uint64_t now, int allow_scheduler)
     maybe_expire_fault(now);
 }
 
+#ifndef ZZAPP_HOST_TEST
+static void zzapp_private_timer_service(void)
+{
+    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_ISR_OFFSET,
+              XSCUTIMER_ISR_EVENT_FLAG_MASK);
+    if (g_coh->running)
+        service_tick(now_ticks(), 0);
+}
+
+/* The BSP vector saves d0-d7/d16-d31 and FPSCR. Preserve the remaining
+ * d8-d15 before switching from its 8 KiB IRQ stack to app_host_sp. */
+__attribute__((naked)) static void zzapp_private_timer_irq(void *unused)
+{
+    (void)unused;
+    __asm__ volatile (
+        "push {r4, lr}\n"
+        "vpush {d8-d15}\n"
+        "mov r4, sp\n"
+        "ldr r12, =app_host_sp\n"
+        "ldr sp, [r12]\n"
+        "bl zzapp_private_timer_service\n"
+        "mov sp, r4\n"
+        "vpop {d8-d15}\n"
+        "pop {r4, pc}\n");
+}
+
+static void zzapp_private_timer_disable(void)
+{
+    if (!g_private_timer_ready)
+        return;
+    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_CONTROL_OFFSET, 0u);
+    XScuGic_Disable(interrupt_get_intc(), XPAR_PS7_SCUTIMER_0_INTR);
+}
+
+static void zzapp_private_timer_enable(void)
+{
+    if (!g_private_timer_ready)
+        return;
+    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_ISR_OFFSET,
+              XSCUTIMER_ISR_EVENT_FLAG_MASK);
+    XScuGic_Enable(interrupt_get_intc(), XPAR_PS7_SCUTIMER_0_INTR);
+    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_CONTROL_OFFSET,
+              XSCUTIMER_CONTROL_IRQ_ENABLE_MASK |
+              XSCUTIMER_CONTROL_AUTO_RELOAD_MASK |
+              XSCUTIMER_CONTROL_ENABLE_MASK);
+}
+
+void zzapp_private_timer_init_core1(void)
+{
+    XScuGic *intc = interrupt_get_intc();
+
+    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_CONTROL_OFFSET, 0u);
+    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_LOAD_OFFSET,
+              (uint32_t)(COUNTS_PER_SECOND / (1000000u / ZZAPP_TICK_US)));
+    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_ISR_OFFSET,
+              XSCUTIMER_ISR_EVENT_FLAG_MASK);
+    if (XScuGic_Connect(intc, XPAR_PS7_SCUTIMER_0_INTR,
+                        (Xil_InterruptHandler)zzapp_private_timer_irq, NULL)
+        != XST_SUCCESS)
+        return;
+    g_private_timer_ready = 1;
+    zzapp_private_timer_disable();
+    /* The distributor is shared, but its CPU interface and PPIs are banked.
+     * This is the same local setup XScuGic_CfgInitialize performs on core 0. */
+    XScuGic_CPUWriteReg(intc, XSCUGIC_CPU_PRIOR_OFFSET, 0xf0u);
+    XScuGic_CPUWriteReg(intc, XSCUGIC_CONTROL_OFFSET, 0x07u);
+    /* PPI 29 is enabled only on this core, and only for a running app. */
+    Xil_ExceptionEnable();
+}
+#else
+void zzapp_private_timer_init_core1(void) {}
+static void zzapp_private_timer_enable(void) {}
+static void zzapp_private_timer_disable(void) {}
+#endif
+
 void zzapp_host_yield(void)
+{
+    zzapp_note_progress();
+    service_tick(now_ticks(), 0);
+}
+
+void zzapp_host_yield_wait(void)
 {
     zzapp_note_progress();
     service_tick(now_ticks(), 1);
 }
 
 uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
+
+#ifndef ZZAPP_HOST_TEST
+static void zzapp_api_tick_body(void)
+{
+    service_tick(now_ticks(), 0);
+}
+
+__attribute__((naked)) static void zzapp_api_tick_on_host_stack(void)
+{
+    __asm__ volatile (
+        "push {r4, lr}\n"
+        "vmrs r4, fpscr\n"
+        "push {r4}\n"
+        "vpush {d0-d15}\n"
+        "vpush {d16-d31}\n"
+        "mov r4, sp\n"
+        "ldr r12, =app_host_sp\n"
+        "ldr sp, [r12]\n"
+        "bl zzapp_api_tick_body\n"
+        "mov sp, r4\n"
+        "vpop {d16-d31}\n"
+        "vpop {d0-d15}\n"
+        "pop {r4}\n"
+        "vmsr fpscr, r4\n"
+        "pop {r4, pc}\n");
+}
+#endif
 
 void zzapp_api_enter(void)
 {
@@ -279,8 +421,22 @@ void zzapp_api_leave(void)
 {
     if (g_coh->in_api)
         g_coh->in_api--;
-    if (!g_coh->in_api)
+    if (!g_coh->in_api) {
+        uint64_t now = now_ticks();
+
         zzapp_note_progress();
+        /*
+         * Skip epilogue service work until one timer period elapsed. The
+         * private timer provides the same 5 ms bound without taxing GL calls.
+         */
+        if (ticks_to_us(now - g_coh->service_seen) >= ZZAPP_TICK_US) {
+#ifdef ZZAPP_HOST_TEST
+            service_tick(now, 0);
+#else
+            zzapp_api_tick_on_host_stack();
+#endif
+        }
+    }
 }
 
 static int copy_argv(uint32_t argc, char ***argv_out)
@@ -324,6 +480,24 @@ static int copy_argv(uint32_t argc, char ***argv_out)
     return ZZ_OK;
 }
 
+#ifndef ZZAPP_HOST_TEST
+static int protect_firmware_text(void)
+{
+    if (g_firmware_text_readonly)
+        return 1;
+    /*
+     * Core 0 and core 1 walk the shared MMUTable. The linker range is
+     * page-aligned and excludes writable firmware data and literal pools.
+     */
+    if (!mmu_page_set_readonly_executable(
+            (uintptr_t)__firmware_text_start,
+            (uintptr_t)__firmware_text_end))
+        return 0;
+    g_firmware_text_readonly = 1;
+    return 1;
+}
+#endif
+
 static void run_app(uint32_t argc)
 {
     char **argv = NULL;
@@ -336,6 +510,12 @@ static void run_app(uint32_t argc)
     if (g_heap_end <= g_heap_off) { zzapp_services_start_entered(ZZ_ENOMEM); return; }
     rc = copy_argv(argc, &argv);
     if (rc != ZZ_OK) { zzapp_services_start_entered(rc); return; }
+#ifndef ZZAPP_HOST_TEST
+    if (!protect_firmware_text()) {
+        zzapp_services_start_entered(ZZ_EIO);
+        return;
+    }
+#endif
     memset(g_mem + g_heap_end, 0xA5, ZZAPP_CANARY_BYTES);
     g_exited = 0;
     g_faulted = 0;
@@ -344,6 +524,7 @@ static void run_app(uint32_t argc)
     zzapp_note_progress();
     publish_state(ZZAPP_ST_RUNNING);
     zzapp_services_start_entered(ZZ_OK);
+    zzapp_private_timer_enable();
 #ifdef ZZAPP_HOST_TEST
     if (g_test_entry)
         g_test_entry(zzapp_api_table(), (int)argc, argv);
@@ -355,6 +536,7 @@ static void run_app(uint32_t argc)
     zzapp_enter_arm(g_card + g_entry, zzapp_api_table(), argc, argv,
                     g_card + ZZAPP_ARENA_BYTES);
 #endif
+    zzapp_private_timer_disable();
     g_coh->running = 0;
     if (!g_faulted) {
         life32(ZZAPP_LIFE_EXIT_OFF, g_exit_code);
@@ -395,6 +577,9 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
                           uint32_t cpsr)
 {
     force_stop(fault, pc, sp, lr, far, fsr, cpsr);
+#ifndef ZZAPP_HOST_TEST
+    zzapp_resume_worker_from_fault();
+#endif
 }
 
 void zzapp_core0_poll(void)
@@ -402,8 +587,17 @@ void zzapp_core0_poll(void)
     uint64_t now = now_ticks();
     uint64_t age = ticks_to_us(now - g_coh->progress);
     uint64_t tick_age = ticks_to_us(now - g_coh->tick_seen);
+    uint32_t heartbeat = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
 
     maybe_expire_fault(now);
+    /*
+     * The launcher lease is independent of app progress. A vanished ZZRun
+     * asks the normal timer-side stop path to apply its 500 ms grace.
+     */
+    if (g_coh->running && g_state == ZZAPP_ST_RUNNING &&
+        (uint32_t)(ticks_to_us(now) / 1000u - heartbeat) >=
+            (ZZAPP_LEASE_US / 1000u))
+        life32(ZZAPP_LIFE_STOP_OFF, 1u);
     if (g_coh->running && age >= ZZAPP_WATCHDOG_US &&
         tick_age >= ZZAPP_WATCHDOG_US) {
         force_stop(ZZAPP_FAULT_WATCHDOG_RESTART, 0, 0, 0, 0, 0, 0);
@@ -447,6 +641,13 @@ void zzapp_boot_init(void)
 {
     memset((void *)g_coh, 0, sizeof(*g_coh));
     g_state = ZZAPP_ST_IDLE;
+    g_faulted = 0;
+    g_stop_mark = 0;
+    g_fault_mark = 0;
+    g_cold_restarts = 0;
+#ifdef ZZAPP_HOST_TEST
+    g_test_service_calls = 0;
+#endif
 }
 
 void zzapp_host_exit(int code)
@@ -483,6 +684,8 @@ void zzapp_test_set_xtime(uint64_t ticks) { g_test_ticks = ticks; }
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv)) { g_test_entry = fn; }
 void zzapp_host_tick_at(uint64_t now) { g_test_ticks = now; service_tick(now, 0); }
 void zzapp_test_mark_running(void) { g_coh->running = 1; g_state = ZZAPP_ST_RUNNING; zzapp_note_progress(); }
+uint32_t zzapp_test_service_calls(void) { return g_test_service_calls; }
+uint32_t zzapp_test_in_api(void) { return g_coh->in_api; }
 
 int zzapp_test_cold_restarts(void) { return g_cold_restarts; }
 uint32_t zzapp_test_exit_code(void) { return g_exit_code; }
