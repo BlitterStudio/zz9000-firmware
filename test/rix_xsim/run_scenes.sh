@@ -56,7 +56,7 @@ docker run --rm -v "$IF_DOCKER:/if:ro" -v "$MG_DOCKER:/mg:ro" -v "$OUT_DOCKER:/o
 if [ ! -f "$OUT/ef-texenv_ref.ppm" ] && [ -f "$HERE/refs/ef-texenv_ref.ppm.gz" ]; then
   py -3 -c "import gzip, shutil, sys; \
 shutil.copyfileobj(gzip.open(sys.argv[1], 'rb'), open(sys.argv[2], 'wb'))" \
-      "$HERE/refs/ef-texenv_ref.ppm.gz" "$OUT/ef-texenv_ref.ppm"
+      "$HERE_WIN/refs/ef-texenv_ref.ppm.gz" "$OUT_WIN/ef-texenv_ref.ppm"
 fi
 
 compare_scene() {
