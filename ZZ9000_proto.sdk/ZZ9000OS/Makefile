@@ -90,8 +90,8 @@ LIBOPUS_DIR ?= $(BUILD_DIR)/deps/opus/$(LIBOPUS_VERSION)
 LIBOPUS_LIB ?= $(LIBOPUS_DIR)/arm/libopusdec.a
 LIBOPUS_INCLUDE_DIR ?= $(LIBOPUS_DIR)/arm/include
 
-# Include paths
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
+INCLUDES += -I../../sdk/zzapp/include
 INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
 INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
@@ -176,7 +176,9 @@ C_SRCS = \
 	$(SRC_DIR)/dma_rtg.c \
 	$(SRC_DIR)/surface_allocator.c \
 	$(SRC_DIR)/card_pool.c \
-	$(SRC_DIR)/sdk_palette.c \
+	$(SRC_DIR)/zzapp_loader.c \
+	$(SRC_DIR)/zzapp_host.c \
+	$(SRC_DIR)/zzapp_api.c \
 	$(SRC_DIR)/overlay.c \
 	$(SRC_DIR)/minigl_raster.c \
 	$(SRC_DIR)/minigl_lighting.c \

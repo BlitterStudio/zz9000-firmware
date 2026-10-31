@@ -14,6 +14,7 @@
 #include "sdk_image_stream.h"
 #include "mw_service.h"
 #include "zzm_loader.h"
+#include "zzapp_runtime.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
 #define A9_CLKSTOP1_MASK	0x00000020
@@ -593,17 +594,52 @@ void arm_exception_handler_id_reset(void *callback) {
 }
 
 void arm_exception_handler_id_data_abort(void *callback) {
+	uint32_t far, fsr, lr = 0, sp = 0, cpsr = 0;
+	(void)callback;
+	__asm__ __volatile__("mrc p15, 0, %0, c6, c0, 0" : "=r"(far));
+	__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 0" : "=r"(fsr));
+	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
+	(void)read_interrupted_lr_sp(&lr, &sp);
+	if (!zzapp_fault_wants_restart(DataAbortAddr, DataAbortAddr + 8u)) {
+		sdk_smp_lock_reset_malloc_if_owned();
+		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		zzapp_take_app_fault(ZZAPP_FAULT_DATA, DataAbortAddr, sp, lr, far, fsr, cpsr);
+		return;
+	}
 	record_fault(CORE_FAULT_DATA_ABORT, "id_data_abort");
 }
 
 void arm_exception_handler_id_prefetch_abort(void *callback) {
+	uint32_t far, fsr, lr = 0, sp = 0, cpsr = 0;
+	(void)callback;
+	__asm__ __volatile__("mrc p15, 0, %0, c6, c0, 2" : "=r"(far));
+	__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 1" : "=r"(fsr));
+	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
+	(void)read_interrupted_lr_sp(&lr, &sp);
+	if (!zzapp_fault_wants_restart(PrefetchAbortAddr, PrefetchAbortAddr + 4u)) {
+		sdk_smp_lock_reset_malloc_if_owned();
+		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		zzapp_take_app_fault(ZZAPP_FAULT_PREFETCH, PrefetchAbortAddr, sp, lr, far, fsr, cpsr);
+		return;
+	}
 	record_fault(CORE_FAULT_PREFETCH_ABORT, "id_prefetch_abort");
 }
 
 void arm_exception_handler(void *callback) {
+	(void)callback;
 	record_fault(CORE_FAULT_GENERIC, "generic");
 }
 
 void arm_exception_handler_illinst(void *callback) {
+	uint32_t lr = 0, sp = 0, cpsr = 0;
+	(void)callback;
+	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
+	(void)read_interrupted_lr_sp(&lr, &sp);
+	if (!zzapp_fault_wants_restart(UndefinedExceptionAddr, UndefinedExceptionAddr + 4u)) {
+		sdk_smp_lock_reset_malloc_if_owned();
+		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		zzapp_take_app_fault(ZZAPP_FAULT_UNDEF, UndefinedExceptionAddr, sp, lr, 0, 0, cpsr);
+		return;
+	}
 	record_fault(CORE_FAULT_UNDEF, "illinst");
 }

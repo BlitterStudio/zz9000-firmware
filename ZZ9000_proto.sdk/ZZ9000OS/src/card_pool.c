@@ -38,6 +38,7 @@ void card_pool_init(card_pool_t *pool)
         CARD_POOL_LIMIT_SDK_SURFACE;
     pool->class_limit[CARD_POOL_CLASS_MINIGL] = CARD_POOL_LIMIT_MINIGL;
     pool->class_limit[CARD_POOL_CLASS_IMAGE] = CARD_POOL_LIMIT_IMAGE;
+    pool->class_limit[CARD_POOL_CLASS_APP] = CARD_POOL_LIMIT_APP;
 }
 
 void card_pool_setup_card(card_pool_t *pool)
@@ -153,7 +154,8 @@ uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner)
             const card_pool_range_t *range = &pool->ranges[r];
             uint32_t insert_at;
             if (!range->open ||
-                (range->revocable && cls == CARD_POOL_CLASS_FIRMWARE))
+                (range->revocable &&
+                 (cls == CARD_POOL_CLASS_FIRMWARE || cls == CARD_POOL_CLASS_APP)))
                 continue;
             addr = find_gap(pool, range, rounded, &insert_at);
             if (addr) {

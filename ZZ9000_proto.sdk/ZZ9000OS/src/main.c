@@ -57,6 +57,7 @@ void Xil_AssertNonVoid() {}
 #include "bootrom.h"
 #include "core2.h"
 #include "scheduler.h"
+#include "zzapp_runtime.h"
 #include "adc.h"
 #include "ax.h"
 #include "audio_capture.h"
@@ -581,6 +582,7 @@ static void minigl_begin_amiga_reset(void)
 {
 	sched_minigl_reset_phase_t phase;
 	int acked = 0;
+	zzapp_on_amiga_reset();
 
 	mw_service_report_amiga_reset();
 	if (scheduler_core1_available()) {
