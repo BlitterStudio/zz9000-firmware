@@ -90,7 +90,7 @@ int main(void)
                                                     sizeof(registration)), 1);
     expect_int("registered", zzm_minigl_worker_registered(), 1);
     zzm_minigl_doorbell();
-    expect_int("doorbell_no_parser", doorbells, 1);
+    expect_int("uninstalled_doorbell_ignored", doorbells, 0);
     work = 1;
     zzm_minigl_service_tick(1);
     expect_int("in_api_gates_poll", polls, 0);
