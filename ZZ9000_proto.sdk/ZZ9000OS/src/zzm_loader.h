@@ -20,6 +20,7 @@ enum zzm_state {
     ZZM_STATE_AVAILABLE = 7,
     ZZM_STATE_LOADING = 8,
     ZZM_STATE_LOAD_FAILED = 9,
+    ZZM_STATE_REJECTED_CAPABILITY = 10,
 };
 
 enum zzm_load_reason {
@@ -38,6 +39,15 @@ enum zzm_load_reason {
 typedef void (*zzm_sha256_fn)(const uint8_t *data, uint32_t length,
                               uint8_t digest[ZZM_SHA256_SIZE]);
 
+typedef struct zzm_v3_capabilities {
+    uint32_t image_flags;
+    uint32_t wire_version;
+    uint32_t transport_descriptor_major;
+    uint32_t rasterix_csr_abi_major;
+    uint32_t rasterix_csr_abi_minor;
+    uint32_t host_window_layout_major;
+} zzm_v3_capabilities_t;
+
 typedef struct zzm_status {
     uint32_t id;
     uint32_t version;
@@ -52,10 +62,15 @@ typedef struct zzm_status {
 } zzm_status_t;
 
 
-/* Host-buildable verifier. `file_size` includes the header. */
+/* Host-buildable verifiers. `file_size` includes the selected header. */
 enum zzm_state zzm_verify_image(const zzm_header_t *header,
                                 const uint8_t *image, uint32_t file_size,
                                 zzm_sha256_fn sha256);
+enum zzm_state zzm_verify_v3_image(const zzm_v3_header_t *header,
+                                   const uint8_t *image, uint32_t file_size,
+                                   const zzm_v3_capabilities_t *caps,
+                                   zzm_sha256_fn sha256);
+void zzm_loader_set_v3_capabilities(const zzm_v3_capabilities_t *caps);
 void zzm_loader_boot_load(void);
 /*
  * Keep the lookup, module callbacks, and reference acquire of a session
