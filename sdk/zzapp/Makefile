@@ -28,10 +28,10 @@ LIB_OBJS := $(BUILD)/zzapp.o $(BUILD)/gl_wrap.o $(BUILD)/syscalls.o
 
 .PHONY: all check-relocs clean
 
-all: $(BUILD)/hello.elf $(BUILD)/pixels.elf
+all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf
 
-check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/sbrk_smoke.elf
-	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/sbrk_smoke.elf
+check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf
+	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -57,6 +57,12 @@ $(BUILD)/hello.o: templates/hello.c | $(BUILD)
 $(BUILD)/pixels.o: templates/pixels.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(BUILD)/note_fault.o: zzapp_note.S | $(BUILD)
+	$(CC) $(ASMFLAGS) -DZZAPP_NOTE_FLAGS=0 -c -o $@ $<
+
+$(BUILD)/fault.o: templates/fault.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(BUILD)/sbrk_smoke.o: sbrk_smoke.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -68,6 +74,10 @@ $(BUILD)/hello.elf: $(BUILD)/crt0.o $(BUILD)/note_hello.o $(BUILD)/hello.o $(BUI
 	$(PYTHON) rela_dyn.py $@
 
 $(BUILD)/pixels.elf: $(BUILD)/crt0.o $(BUILD)/note_pixels.o $(BUILD)/pixels.o $(BUILD)/libzzapp.a
+	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
+	$(PYTHON) rela_dyn.py $@
+
+$(BUILD)/fault.elf: $(BUILD)/crt0.o $(BUILD)/note_fault.o $(BUILD)/fault.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
 	$(PYTHON) rela_dyn.py $@
 

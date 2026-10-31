@@ -310,8 +310,8 @@ COMMON_OBJS += $(BSP_SDPSOPT_OBJ)
 COMMON_OBJS += $(BSP_DISKIO_OBJ)
 OVERLAY_HW_OBJ = $(BUILD_DIR)/overlay_hw.o
 OVERLAY_HW_FALLBACK_OBJ = $(BUILD_DIR)/overlay_hw_fallback.o
-# GL front end pin: f58e022f0173a9e77c8239d9a6ddfbd6539d4a1d
-# (amiberry-minigl-library app/gl-platform).
+# GL front end pin: d7f18764448fe2c3e44e177f01285d15c59c4fa4
+# (amiberry-minigl-library feature/zz9000-v29-base after app/gl-platform merge).
 # Doc default ../amiberry-minigl-library-zz9k is from the firmware repo root.
 # This makefile runs two directories below that root.
 MINIGL_LIB_DIR ?= ../../../amiberry-minigl-library-zz9k
