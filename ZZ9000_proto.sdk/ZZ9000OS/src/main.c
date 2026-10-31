@@ -73,6 +73,8 @@ void Xil_AssertNonVoid() {}
 #include "sdk_mailbox.h"
 #include "sdk_aperture_layout.h"
 #include "surface_allocator.h"
+#include "mmu_page.h"
+#include "zzapp_services.h"
 #include "card_pool.h"
 #include "overlay.h"
 #include "mw_service.h"
@@ -447,6 +449,22 @@ static int reserve_host_control_ranges(void)
 	&& surface_allocator_reserve((address), (size)) == 0
 	return 1 Z3_HOST_CONTROL_RANGES(RESERVE_HOST_CONTROL_RANGE);
 #undef RESERVE_HOST_CONTROL_RANGE
+}
+
+/* The app window is allocated on demand, but every possible page must be
+ * non-cacheable before core 1 and interrupts can observe the mapping. */
+static int map_zzapp_window_pages(void)
+{
+	uint32_t address;
+
+	if (!sdk_aperture_runtime_is_zorro3())
+		return 0;
+	for (address = ZZAPP_WINDOW_Z3_ADDRESS;
+	     address < ZZAPP_WINDOW_Z3_END; address += 0x1000U) {
+		if (!mmu_page_set_noncacheable((uintptr_t)address))
+			return 0;
+	}
+	return 1;
 }
 
 static void apply_aperture_framebuffer_limit(void)
@@ -840,9 +858,11 @@ int main() {
 	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
 			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
-	/* The section split is break-before-make: do it while core 1 is still
-	 * held and no interrupt can touch the framebuffer/PIP section. */
+	/* Both host-written command regions must be mapped before core 1 and
+	 * interrupts run. Z2 keeps its existing mailbox page; Z3 maps the
+	 * app-window placement separately. */
 	sdk_mailbox_map_z2_page();
+	zzapp_services_set_window_mapping_available(map_zzapp_window_pages());
 
 	boot_rom_init();
 

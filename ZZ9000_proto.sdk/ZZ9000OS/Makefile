@@ -287,6 +287,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_aperture_layout.c \
 	$(SRC_DIR)/mmu_page.c \
 	$(SRC_DIR)/sdk_mailbox.c \
+	$(SRC_DIR)/zzapp_services.c \
 	$(SRC_DIR)/sdk_console_encode.c \
 	$(SRC_DIR)/rfb/rfb_encode.c \
 	$(SRC_DIR)/rfb/rfb_words.c \

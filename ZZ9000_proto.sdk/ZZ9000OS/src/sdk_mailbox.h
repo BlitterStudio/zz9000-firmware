@@ -130,6 +130,7 @@
 #define SDK_SERVICE_CRYPTO             0x0800U
 #define SDK_SERVICE_DIAG               0x0900U
 #define SDK_SERVICE_VIDEO              0x0b00U
+#define SDK_SERVICE_APP                0x0c00U
 #define SDK_SERVICE_CONSOLE            0x8200U   /* AmiNetXDuo console encoder */
 
 #define SDK_SERVICE_FLAG_FIRMWARE      (1U << 0)
@@ -383,6 +384,16 @@ struct SDKModuleStatusPayload {
 #define SDK_OP_MEDIA_SESSION_AUDIO_BIND 0x0b0bU
 #define SDK_OP_MEDIA_SESSION_AUDIO_UNBIND 0x0b0cU
 #define SDK_OP_MEDIA_SESSION_CLOSE     0x0b0dU
+
+#define SDK_OP_APP_QUERY               0x0c00U
+#define SDK_OP_APP_ALLOC_WINDOW        0x0c01U
+#define SDK_OP_APP_LOAD_BEGIN          0x0c02U
+#define SDK_OP_APP_LOAD_CHUNK          0x0c03U
+#define SDK_OP_APP_LOAD_END            0x0c04U
+#define SDK_OP_APP_START               0x0c05U
+#define SDK_OP_APP_STOP                0x0c06U
+#define SDK_OP_APP_STATUS              0x0c07U
+#define SDK_OP_APP_DISPLAY_BIND        0x0c08U
 
 struct SDKMediaSessionBeginPayload {
 	uint8_t video_codec[4];

@@ -175,6 +175,15 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		.name = "video"
 	},
 	{
+		.service_id = SDK_SERVICE_APP,
+		.version = 0x00020000U,
+		.capability_bits = 0U,
+		.flags = SDK_SERVICE_FLAG_FIRMWARE,
+		.opcode_base = SDK_SERVICE_APP,
+		.opcode_count = 9,	/* 0x0c00..0x0c08 */
+		.name = "app"
+	},
+	{
 		.service_id = SDK_SERVICE_CONSOLE,
 		.version = 0x00020000U,
 		.capability_bits = 0U,
