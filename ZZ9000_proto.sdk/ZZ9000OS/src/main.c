@@ -77,8 +77,7 @@ void Xil_AssertNonVoid() {}
 #include "zzapp_services.h"
 #include "card_pool.h"
 #include "overlay.h"
-#include "mw_service.h"
-#include "minigl_transport.h"
+#include "zzm_minigl_host.h"
 #include "newlib_heap.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
@@ -573,8 +572,7 @@ static int mgl_reset_elapsed_ms(void)
 static void minigl_reset_abort_and_free(void)
 {
 	scheduler_cancel_minigl_reset();
-	mw_rix_abort_engines();
-	mw_service_reset();
+	zzm_minigl_abort_reset();
 	mgl_reset_posted = 0;
 }
 
@@ -602,8 +600,7 @@ static void minigl_begin_amiga_reset(void)
 	int acked = 0;
 	zzapp_on_amiga_reset();
 
-	mw_service_report_amiga_reset();
-	if (scheduler_core1_available()) {
+	if (scheduler_core1_available() && zzm_minigl_worker_registered()) {
 		scheduler_request_minigl_reset();
 		mgl_reset_posted = 1;
 		XTime_GetTime(&mgl_reset_mark);
@@ -614,7 +611,7 @@ static void minigl_begin_amiga_reset(void)
 	                                 mgl_reset_posted, acked, 0,
 	                                 MINIGL_RESET_BUDGET_MS);
 	if (phase == SCHED_MINIGL_RESET_LOCAL)
-		mw_service_reset();
+		zzm_minigl_abort_reset();
 	else if (phase == SCHED_MINIGL_RESET_ACKED)
 		mgl_reset_posted = 0;
 	else if (phase == SCHED_MINIGL_RESET_ABORT)
@@ -784,10 +781,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 	sdk_mailbox_init();
 
-	/* Bind the MiniGL transport after the mailbox placement made its MMU
-	 * section non-cacheable; publishes the descriptor or reports the
-	 * service unavailable (Zorro II, no heap room). */
-	minigl_transport_init();
+	/* MiniGL transport is module-owned and is bound only by its successful
+	 * on-demand acquire on core 1.  Reset never manufactures a descriptor. */
 	sdk_diag_last_reg_write_addr = 0;
 	sdk_diag_last_reg_write_raw_addr = 0;
 	sdk_diag_last_reg_write_data = 0;
@@ -873,6 +868,12 @@ int main() {
 		// driver can still override it later via REG_ZZ_ETH_MAC_*
 		memcpy(ethernet_get_mac_address_ptr(), zz_config_get()->mac, 6);
 	}
+
+#if defined(MINIGL_RASTERIX) && MINIGL_RASTERIX
+	zzm_minigl_boot_caps_init(ZZM_MINIGL_IMAGE_RASTERIX_EF);
+#else
+	zzm_minigl_boot_caps_init(ZZM_MINIGL_IMAGE_STANDARD);
+#endif
 
 	video_state = video_init();
 
@@ -1177,8 +1178,7 @@ int main() {
 		 * job that owns the SD card. */
 		if (!fw_update_busy())
 			audio_scene_poll();
-		if (!scheduler_core1_available())
-			(void)mw_service_poll();
+		/* MiniGL packet polling is core-1-only. */
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		u32 aperture_flags = sdk_aperture_runtime_flags();
 		/* Acknowledge late: firmware normally boots before the RTG driver.
@@ -2603,7 +2603,7 @@ int main() {
 				sdk_mailbox_task();
 				if (events & SDK_MAILBOX_EVENT_DOORBELL) {
 					sdk_mailbox_doorbell();
-					mw_service_doorbell();
+					zzm_minigl_doorbell();
 				}
 				sdk_diag_task_count++;
 			}
@@ -2617,15 +2617,14 @@ int main() {
 			}
 			if (zstate & MNTZORRO_STATUS_SDK_DOORBELL) {
 				sdk_mailbox_doorbell();
-				mw_service_doorbell();
+				zzm_minigl_doorbell();
 				mntzorro_pulse_control(MNTZORRO_CTRL_SDK_DOORBELL_CLEAR);
+				/* Core 0 records the doorbell and wakes core 1; it never
+				 * parses wire packets, including after a core-1 fault. */
 				sdk_mailbox_task();
 				sdk_diag_task_count++;
 			}
 #endif
-			/* Core 1 owns Wire-v9 execution whenever it is available. */
-			if (!scheduler_core1_available())
-				(void)mw_service_poll();
 			sdk_mailbox_poll_divider++;
 			if ((sdk_mailbox_poll_divider & 0xffU) == 0) {
 				sdk_mailbox_task();
