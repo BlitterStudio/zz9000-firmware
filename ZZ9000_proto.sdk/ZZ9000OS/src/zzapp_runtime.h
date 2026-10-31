@@ -84,7 +84,7 @@ const struct zzapp_api *zzapp_api_table(void);
 /* ---- B defines these. Weak no-ops here. ---- */
 void zzapp_services_poll(void);
 int zzapp_services_take_start(uint32_t *argc);
-void *zzapp_services_window(void);
+uint8_t *zzapp_services_window(void);
 void zzapp_services_start_entered(int status);
 void zzapp_services_on_reset(void);
 
