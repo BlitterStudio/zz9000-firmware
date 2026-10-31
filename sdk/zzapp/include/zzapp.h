@@ -254,9 +254,10 @@ typedef struct zzapp_api {
 
 /*
  * crt0 stores r0 here before calling zz_main. The table is const; the
- * pointer is not. Apps may read it. Do not replace it.
+ * pointer is not. The name is not zzapp_api: that is the typedef, and C
+ * will not allow both. Apps may read this. Do not replace it.
  */
-extern const zzapp_api *zzapp_api;
+extern const zzapp_api *zzapp_api_ptr;
 
 /* The app defines this. crt0 calls it and then zz_exit of the status. */
 int zz_main(int argc, char **argv);
