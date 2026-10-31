@@ -167,7 +167,6 @@ void zzm_rt_dcache_invalidate(uint32_t address, uint32_t length)
         cache->dcache_invalidate_owned)
         (void)cache->dcache_invalidate_owned(context.owner, address, length);
 }
-
 int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address, uint32_t length)
 {
     if (cache && cache->size >=
@@ -197,7 +196,6 @@ uint64_t zzm_rt_time_us(void)
         return core->time_us();
     return 0U;
 }
-
 void *memalign(size_t alignment, size_t bytes)
 {
     struct zzm_rt_allocation *header;

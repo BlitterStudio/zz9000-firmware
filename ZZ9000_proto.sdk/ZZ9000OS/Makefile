@@ -296,8 +296,7 @@ C_SRCS = \
 	$(SRC_DIR)/watchdog.c \
 	$(SRC_DIR)/newlib_compat.c \
 	$(SRC_DIR)/newlib_heap.c \
-	$(SRC_DIR)/sd_boot_deadline.c \
-	$(SRC_DIR)/zzapp_gl.c
+	$(SRC_DIR)/sd_boot_deadline.c
 
 # Object files shared by both bitstream-capability firmware images.
 COMMON_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
@@ -312,19 +311,6 @@ COMMON_OBJS += $(BSP_SDPSOPT_OBJ)
 COMMON_OBJS += $(BSP_DISKIO_OBJ)
 OVERLAY_HW_OBJ = $(BUILD_DIR)/overlay_hw.o
 OVERLAY_HW_FALLBACK_OBJ = $(BUILD_DIR)/overlay_hw_fallback.o
-# GL front end pin: d7f18764448fe2c3e44e177f01285d15c59c4fa4
-# (amiberry-minigl-library feature/zz9000-v29-base after app/gl-platform merge).
-# Doc default ../amiberry-minigl-library-zz9k is from the firmware repo root.
-# This makefile runs two directories below that root.
-MINIGL_LIB_DIR ?= ../../../amiberry-minigl-library-zz9k
-MINIGL_LIB_CFLAGS = -DMGL_PLATFORM_ZZARM -I$(MINIGL_LIB_DIR)/src -I$(MINIGL_LIB_DIR)/include
-# Do not add amiberry_glu_quad.c, amiberry_backend.c, or vendor/.
-MGL_FRONT_SRCS = amiberry_gl_state.c amiberry_gl_draw.c amiberry_gl_texture.c \
-	amiberry_gl_light.c amiberry_gl_light_get.c amiberry_gl_list.c \
-	amiberry_gl_buffer.c amiberry_glu.c \
-	amiberry_backend_inproc.c amiberry_transport_inproc.c
-MGL_FRONT_OBJS = $(addprefix $(BUILD_DIR)/mgl/,$(MGL_FRONT_SRCS:.c=.o))
-COMMON_OBJS += $(MGL_FRONT_OBJS)
 OBJS = $(COMMON_OBJS) $(OVERLAY_HW_OBJ)
 FALLBACK_OBJS = $(COMMON_OBJS) $(OVERLAY_HW_FALLBACK_OBJ)
 
@@ -548,15 +534,6 @@ $(BUILD_DIR)/lzh/%.o: $(SRC_DIR)/lzh/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H $(CFLAGS) -MMD -MP -o $@ $<
 
-# App GL table needs the library types header. The front-end objects are
-# compiled from MINIGL_LIB_DIR and are not vendored.
-$(BUILD_DIR)/zzapp_gl.o: $(SRC_DIR)/zzapp_gl.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(MINIGL_LIB_CFLAGS) -I../../sdk/zzapp/include -MMD -MP -o $@ $<
-
-$(BUILD_DIR)/mgl/%.o: $(MINIGL_LIB_DIR)/src/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(MINIGL_LIB_CFLAGS) -MMD -MP -o $@ $<
 
 # Default rule for all other files (-O2).
 # -MMD emits a .d file next to the .o listing every header the source

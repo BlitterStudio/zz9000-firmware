@@ -4,7 +4,6 @@
 
 #include "minigl_transport.h"
 #include "minigl_platform.h"
-
 #include "mw_service.h"
 #include "zzapp_services.h"
 #include "zzm_minigl_host.h"

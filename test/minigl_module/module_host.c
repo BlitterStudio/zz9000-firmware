@@ -105,6 +105,7 @@ static const zzm_palette_service_t palette = {
 static int graphics_caps(zzm_graphics_hw_caps_t *caps)
 {
     memset(caps, 0, sizeof(*caps));
+<<<<<<< HEAD
     return 1;
 }
 
@@ -135,6 +136,14 @@ static const zzm_graphics_hw_service_t graphics = {
     ZZM_SERVICE_GRAPHICS_HW_V3, sizeof(graphics), graphics_caps,
     graphics_read, graphics_write, graphics_read, graphics_write,
     graphics_words, 0, 0, 0, 0, graphics_barrier
+=======
+    return 0;
+}
+
+static const zzm_graphics_hw_service_t graphics = {
+    ZZM_SERVICE_GRAPHICS_HW_V3, sizeof(graphics), graphics_caps,
+    0, 0, 0, 0, 0, 0, 0, 0
+>>>>>>> mod/app-gl
 };
 
 int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
@@ -166,6 +175,7 @@ const void *zzm_rt_get_service(uint32_t id, uint32_t version)
     }
 }
 
+<<<<<<< HEAD
 void zzm_rt_dcache_clean(uint32_t address, uint32_t length)
 {
     (void)address;
@@ -182,6 +192,8 @@ void zzm_rt_barrier(void) { }
 uint64_t zzm_rt_time_us(void) { return 0U; }
 void zzm_rt_log(const char *message) { (void)message; }
 
+=======
+>>>>>>> mod/app-gl
 int minigl_transport_set_module_services(const zzm_host_window_service_t *window,
                                          const zzm_transport_service_t *link,
                                          uint32_t owner)

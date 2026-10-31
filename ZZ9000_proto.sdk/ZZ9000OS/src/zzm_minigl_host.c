@@ -232,7 +232,6 @@ static void graphics_pl330_abort(void *context)
     (void)context;
     g_pl330_claimed = 0;
 }
-
 static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
                                 uint32_t burst_words)
 {
@@ -472,7 +471,6 @@ static const zzm_transport_service_t transport_service = {
     transport_publish_capabilities
 };
 #endif
-
 const void *zzm_minigl_host_get_service(uint32_t id, uint32_t min_version)
 {
 #if defined(ZZM_SERVICE_GRAPHICS_HW)

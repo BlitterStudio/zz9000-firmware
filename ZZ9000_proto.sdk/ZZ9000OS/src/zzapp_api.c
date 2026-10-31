@@ -10,8 +10,19 @@
 #endif
 #include "zzapp.h"
 #include "zzapp_runtime.h"
+#include "zzm_format.h"
+#include "zzm_loader.h"
+#include "zzm_minigl_host.h"
+#include "zzm_registry.h"
 
 #define WEAK __attribute__((weak))
+
+#ifdef ZZAPP_HOST_TEST
+extern int zzm_loader_acquire(uint32_t module_id) WEAK;
+extern void zzm_loader_release(uint32_t module_id) WEAK;
+extern const void *zzm_registry_ops(uint32_t module_id, uint32_t min_size) WEAK;
+extern const zzm_minigl_ops_v1_t *zzm_minigl_ops(void **context) WEAK;
+#endif
 
 WEAK void zzapp_services_poll(void) {}
 WEAK int zzapp_services_take_start(uint32_t *argc) { (void)argc; return 0; }
@@ -36,10 +47,107 @@ WEAK int zzapp_svc_display_close(uint32_t id) { (void)id; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_input_poll(zzapp_event *o,uint32_t n,uint32_t *out) { (void)o;(void)n; if(out)*out=0; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_audio_open(uint32_t r,uint32_t c,zzapp_audio *o) { (void)r;(void)c;(void)o; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_audio_close(void) { return ZZ_ENOSYS; }
-WEAK int zzapp_gl_bind(uint32_t id, const zzapp_gl **out) { (void)id; if(out)*out=NULL; return ZZ_ENOSYS; }
-WEAK void zzapp_gl_swap(void) {}
-WEAK void zzapp_gl_unbind(void) {}
-WEAK void zzapp_gl_reclaim(void) {}
+struct zzapp_minigl_binding {
+    const zzm_minigl_ops_v1_t *ops;
+    void *context;
+};
+
+static struct zzapp_minigl_binding g_minigl;
+
+static int minigl_app_ops_ready(const zzm_minigl_ops_v1_t *ops)
+{
+    return ops && ops->version == ZZM_MINIGL_OPS_V1 &&
+           ops->size >= offsetof(zzm_minigl_ops_v1_t, app_reclaim) +
+                            sizeof(ops->app_reclaim) &&
+           ops->app_bind && ops->app_swap && ops->app_unbind &&
+           ops->app_reclaim;
+}
+
+static int minigl_registration_ready(const zzm_minigl_registration_v1_t *registration)
+{
+    return registration &&
+           registration->version == ZZM_MINIGL_REGISTRATION_V1 &&
+           registration->size >= offsetof(zzm_minigl_registration_v1_t, worker_ops) +
+                                 sizeof(registration->worker_ops) &&
+           registration->ops && registration->worker_ops;
+}
+
+int zzapp_minigl_bind(uint32_t surface_id, const zzapp_gl **out)
+{
+    const zzm_minigl_registration_v1_t *registration;
+    const zzm_minigl_ops_v1_t *ops;
+    const void *module_gl = NULL;
+    int status;
+    void *context = NULL;
+
+    if (out)
+        *out = NULL;
+    if (!surface_id)
+        return ZZ_EINVAL;
+    if (g_minigl.ops)
+        return ZZ_EBUSY;
+#ifdef ZZAPP_HOST_TEST
+    if (!zzm_loader_acquire || !zzm_loader_release || !zzm_registry_ops ||
+        !zzm_minigl_ops)
+        return ZZ_ENOSYS;
+#endif
+    if (!zzm_loader_acquire(ZZM_MODULE_MINIGL))
+        return ZZ_ENOSYS;
+    registration = (const zzm_minigl_registration_v1_t *)zzm_registry_ops(
+        ZZM_MODULE_MINIGL,
+        offsetof(zzm_minigl_registration_v1_t, worker_ops) +
+            sizeof(registration->worker_ops));
+    if (!minigl_registration_ready(registration) ||
+        !minigl_app_ops_ready(registration->ops) ||
+        zzm_minigl_ops(&context) != registration->ops ||
+        context != registration->context)
+        goto unavailable;
+    ops = registration->ops;
+    status = ops->app_bind(context, surface_id, &module_gl);
+    if (status != ZZ_OK)
+        goto failed;
+    if (!module_gl)
+        goto unavailable;
+    g_minigl.ops = ops;
+    g_minigl.context = context;
+    if (out)
+        *out = (const zzapp_gl *)module_gl;
+    return ZZ_OK;
+
+failed:
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    return status;
+
+unavailable:
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    return ZZ_ENOSYS;
+}
+
+void zzapp_minigl_swap(void)
+{
+    if (g_minigl.ops)
+        (void)g_minigl.ops->app_swap(g_minigl.context);
+}
+
+void zzapp_minigl_unbind(void)
+{
+    if (!g_minigl.ops)
+        return;
+    g_minigl.ops->app_unbind(g_minigl.context);
+    g_minigl.ops = NULL;
+    g_minigl.context = NULL;
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+}
+
+void zzapp_minigl_reclaim(uint32_t generation)
+{
+    if (!g_minigl.ops)
+        return;
+    g_minigl.ops->app_reclaim(g_minigl.context, generation);
+    g_minigl.ops = NULL;
+    g_minigl.context = NULL;
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+}
 
 static void api_exit(int code)
 {
@@ -91,9 +199,9 @@ static int api_list_next(int l,zzapp_dirent*out){zzapp_api_enter();int r=zzapp_s
 static int api_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,zzapp_surface*out){zzapp_api_enter();int r=zzapp_svc_display_open(w,h,f,fl,out);zzapp_api_leave();return r;}
 static int api_input(zzapp_event*out,uint32_t n,uint32_t*got){zzapp_api_enter();int r=zzapp_svc_input_poll(out,n,got);zzapp_api_leave();return r;}
 static int api_audio_open(uint32_t r,uint32_t c,zzapp_audio*out){zzapp_api_enter();int x=zzapp_svc_audio_open(r,c,out);zzapp_api_leave();return x;}
-static const zzapp_gl *api_gl_bind(uint32_t id){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_gl_bind(id,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
-static void api_gl_swap(void){zzapp_api_enter();zzapp_gl_swap();zzapp_api_leave();}
-static void api_gl_unbind(void){zzapp_api_enter();zzapp_gl_unbind();zzapp_api_leave();}
+static const zzapp_gl *api_gl_bind(uint32_t id){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
+static void api_gl_swap(void){zzapp_api_enter();zzapp_minigl_swap();zzapp_api_leave();}
+static void api_gl_unbind(void){zzapp_api_enter();zzapp_minigl_unbind();zzapp_api_leave();}
 
 static const zzapp_api g_api = {
     .size=sizeof(g_api), .version=ZZAPP_API_VERSION,
