@@ -196,6 +196,9 @@ jobs:
             ZZ9000_proto.sdk/ZZ9000OS/src/sdk_service_catalog.h
       - name: SDK service discovery descriptors
         run: make -C test/sdk_service test
+      - name: ZZApp host harness
+        run: make -C test/zzapp test
+
 
   build:
     name: Build & package firmware
@@ -223,7 +226,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            wget xz-utils make cmake perl ca-certificates python3 g++ libssl-dev flex bison zip
+            wget xz-utils make cmake perl ca-certificates python3 g++ libssl-dev flex bison zip gawk texinfo
 
       # Arm GNU Toolchain with newlib. Ubuntu's gcc-arm-none-eabi package
       # uses picolibc, which is incompatible with the Xilinx BSP (references
@@ -253,6 +256,25 @@ jobs:
 
       - name: Add toolchain to PATH
         run: echo "${ARM_TOOLCHAIN_DIR}/bin" >> "$GITHUB_PATH"
+      - name: Cache ZZApp PIC newlib
+        id: zzapp-pic-newlib-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/.toolchain/zzapp-pic-newlib
+          key: zzapp-pic-newlib-4.3.0.20230120-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sdk/zzapp/build_pic_newlib.sh') }}
+
+      - name: Build ZZApp PIC newlib
+        if: steps.zzapp-pic-newlib-cache.outputs.cache-hit != 'true'
+        env:
+          ZZAPP_PIC_SYSROOT: ${{ github.workspace }}/.toolchain/zzapp-pic-newlib
+          ZZAPP_NEWLIB_CACHE: ${{ github.workspace }}/.toolchain/zzapp-newlib-cache
+        run: sh sdk/zzapp/build_pic_newlib.sh
+
+      - name: ZZApp PIE link and relocation check
+        env:
+          ZZAPP_PIC_SYSROOT: ${{ github.workspace }}/.toolchain/zzapp-pic-newlib
+        run: make -C sdk/zzapp check-relocs
+
 
       # bootgen is Xilinx's boot image packager. Not packaged by any distro,
       # so we build from source and cache the binary between runs.
