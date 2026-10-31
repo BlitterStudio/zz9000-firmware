@@ -633,9 +633,13 @@ To keep the 68060 CPU feeding geometry at maximum speed:
 2. **Pipelined Submission**:
    - Double-buffered packet slots allow the 68k to assemble Slot 1 while the ARM renders Slot 0.
 3. **Where Waiting Occurs**:
-   - `MGLSwitchDisplay`: 68k waits for `completion_fence` to ensure rendering has finished before Intuition / Picasso96 layer unlock.
-   - `glFinish` / `glReadPixels`: 68k waits for Core 1 fence.
-   - Flow Control: 68k waits only if it generates two full packets before the ARM finishes the previous packet.
+   - `MGLSwitchDisplay`: without `MW_PRESENT_SPAN`, the 68k waits for
+     `completion_fence` before unlocking the Picasso96 bitmap. With the
+     capability negotiated, it returns after the packet is accepted and
+     retires the oldest presentation fence before queuing another beyond
+     `MINIGL_ASYNC_PRESENT_FRAMES` (default 1).
+   - `glFinish` / `glReadPixels` / back-buffer lock: the 68k waits for the
+     Core 1 fence, including any presentation still in flight.
 
 ### 8.4 Pipeline Profiling (`[MGLP]`)
 The firmware keeps exclusive per-stage timers (Cortex-A9 global timer) on
@@ -647,10 +651,11 @@ While on, one line is printed every 5 s or more, only when packets or
 synchronous ops were processed in the window:
 
 ```
-[MGLP] 5.0s pk=15 op=15 kB=2100 cmd=4800 tri=18000 cull=12 hw=4700 sw=0 fb=0 fw=1200000 sub=80 tx=30 up=30 pin=4 ev=0 fbk= | parse=1.2 geom=3.0 cpu=0.0 emit=0.3 fifo=2.5 stall=0.1 fence=4.0 tgt=3.0 tex=0.5 pres=2.0 op=0.1 idle=300.0 | max=25.1 log=22.0 ms
+[MGLP] 5.0s pk=15 op=15 ap=15 kB=2100 cmd=4800 tri=18000 cull=12 hw=4700 sw=0 fb=0 fw=1200000 sub=80 tx=30 up=30 ub=120 pin=4 ev=0 fbk= | parse=1.2 geom=3.0 cpu=0.0 emit=0.3 fifo=2.5 stall=0.1 fence=4.0 tgt=3.0 tex=0.5 pres=2.0 op=0.1 idle=300.0 | max=25.1 log=22.0 ms
 ```
 
 - Counters for the window: ring packets (`pk`), synchronous ops (`op`),
+  packet-owned direct presentations (`ap`),
   packet kilobytes, wire commands, triangles queued for RasterIX (`tri`),
   triangles RasterIX setup found empty and dropped (`cull`), draws on
   RasterIX (`hw`) and on the CPU rasterizer (`sw`), the first fallback
@@ -658,8 +663,9 @@ synchronous ops were processed in the window:
   rejection), and the compact per-reason CPU fallback histogram
   (`fbk=reason:draws/triangles,...`), FIFO command words (`fw`) and
   command-buffer submissions (`sub`),
-  texture upload commands (`tx`), texture levels written to RasterIX
-  memory (`up`, including re-uploads after eviction), uploads that had to
+  texture upload commands (`tx`), texture levels or sub-rectangles written
+  to RasterIX memory (`up`, including re-uploads after eviction), kilobytes
+  written to those pages (`ub`), uploads that had to
   drain RasterIX because the texture was still queued for drawing
   (`pin`), and textures evicted from the RasterIX pool (`ev`).
 - Stage columns are milliseconds per ring packet (one frame for GLQuake),
