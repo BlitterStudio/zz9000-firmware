@@ -89,7 +89,7 @@ A stop request (Ctrl-C, close gadget, `APP_STOP`) sets the stop word. The app se
 
 ### Amiga reset and client loss
 
-`minigl_begin_amiga_reset` (`main.c` line 580) is the existing entry. Call `zzapp_on_amiga_reset` at the start of that path, before transport and card-pool teardown: request stop, and if the app has not left within the grace, force-stop or cold-restart as above, then let the existing reset continue. `scheduler_quiesce_for_reset` waits for core 1 to be idle. An app that is still on the arena stack will hang that wait. Force-stop the app before quiesce. App card-pool blocks use a reset-reclaimable class, never `CARD_POOL_CLASS_FIRMWARE` (that class survives reset, `card_pool.h`).
+`minigl_begin_amiga_reset` (`main.c` line 580) is the existing entry. Call `zzapp_on_amiga_reset` at the start of that path, before transport and card-pool teardown. `scheduler_quiesce_for_reset` (`scheduler_arm.c`) only drains for a bounded time and then cold-restarts core 1 if a task is still active. Force-stop the app before that wait, or a live app becomes a firmware restart. App card-pool blocks use a reset-reclaimable class, never `CARD_POOL_CLASS_FIRMWARE` (that class survives reset, `card_pool.h`).
 
 Client loss without a reset: ZZRun writes `heartbeat_ms` in the lifecycle block on every pass of its loop. If that word is stale for 2 seconds while state is RUNNING, treat it as stop. Firmware progress does not refresh the launcher heartbeat. The launcher heartbeat does not refresh the app watchdog.
 
@@ -345,7 +345,7 @@ Argv area: `u32` argc, then 16 offsets from the window base, then the strings, e
 
 Display open is an app API call. Firmware sets `flags` bit 8 and writes the requested width, height, and format into the lifecycle fields. ZZRun sees that on its poll, opens the P96 screen, binds with `APP_DISPLAY_BIND`, and clears bit 8 only after bind succeeds. If it cannot open the mode, it sets the stop word. The app's `zz_display_open` returns `ZZ_EIO`.
 
-Default Quake request, issued by the port, not hardcoded in ZZRun: 640×480, `ZZ_FMT_RGB565`, two P96 bitmaps if the screen can allocate them, otherwise one. Pitch is the bitmap's byte stride, not `width * bytes_per_pixel` assumed. RasterIX renders into the context-owned card-pool target (`minigl_present.h`: that target is packed RGB565). Present always copies that target into the bound P96 bitmap (`minigl_present_copy_rgb565`, or `minigl_present_copy` for ARGB8888). v0 does not point RasterIX at the scanout address.
+Default Quake request, issued by the port, not hardcoded in ZZRun: 640×480, `ZZ_FMT_RGB565`, two P96 bitmaps if the screen can allocate them, otherwise one. Pitch is the bitmap's byte stride, not `width * bytes_per_pixel` assumed. A P96 bitmap's ARM address is `(Planes[0] - MemoryBase) + 0x00200000`, the same `board_offset + ADDR_ADJ` the mailbox already uses. ZZRun passes that address and does not invent a second conversion. RasterIX renders into the context-owned card-pool target (`minigl_present.h`: that target is packed RGB565). Present always copies that target into the bound P96 bitmap (`minigl_present_copy_rgb565`, or `minigl_present_copy` for a 32-bit screen). v0 does not point RasterIX at the scanout address.
 
 Flip: the app calls `zz_display_flip` or `zz_gl_swap`. Firmware drains the context, copies the RasterIX target into the back P96 bitmap (or the only bitmap), publishes `flip_gen`, and yields until `flip_ack == flip_gen` or stop. ZZRun sees the new generation, points the screen at the completed bitmap when it has two, then `WaitTOF` if bit 9 is set, and writes `flip_ack`. The firmware updates `flip_showing`. A late ack for a previous generation is ignored. The next present copies into the buffer whose previous flip has been acked. A CPU-drawn surface (`pixels`) writes `surface.back` itself; GL does not.
 
@@ -383,7 +383,7 @@ Header: `sdk/zzapp/include/zzapp.h`, MIT. Apps include it and link `libzzapp`. T
 #define ZZ_EBADF     -12
 
 #define ZZ_FMT_RGB565   1u
-#define ZZ_FMT_ARGB8888 2u
+#define ZZ_FMT_BGRA8888 2u   /* P96 32-bit; memory bytes B,G,R,A. Not ARGB. */
 
 #define ZZ_EV_KEY_DOWN 1u
 #define ZZ_EV_KEY_UP   2u
@@ -501,7 +501,7 @@ typedef struct zzapp_api {
 
 `audio_open` negotiates rate. Channels must be 2. The ring is stereo S16LE, 8192 frames, in a non-cacheable mapping so the fabric snapshot does not depend on the app cleaning the cache. `read_frame` is the device position. Quake's `SNDDMA_GetDMAPos` returns `*read_frame * channels` (mono samples), matching `shm->samplepos`. The firmware side attaches `audio_fabric_producer_ops` (`audio_fabric.h`) and calls `audio_fabric_producer_rate_set`. It does not write the formatter ring itself.
 
-Audio slots today: pump `0`, mailbox `1`, reserved `2` (`AUDIO_FABRIC_SLOT_*` in `audio_fabric.h`). Slot 0 stays the SDK/media pump. The app takes slot 2 if it is free, else slot 1. If both are live, `audio_open` returns `ZZ_EBUSY` and the Quake port runs silent. Do not steal a lease. Do not add a fourth slot in v0. The fabric's converted rates are 8000, 12000, 24000, 32000, 44100, 48000 (`sdk_mailbox.h` comment above `SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE`). 11025 and 22050 are not in that table. Grant the smallest supported rate greater than or equal to the request, capped at 48000. Quake's 22050 request becomes 24000. The app must use `out->rate`, not the rate it asked for. A fabric period is `AUDIO_BYTES_PER_PERIOD` 3840 bytes, 20 ms of 48 kHz stereo S16 (`memorymap.h` lines 13–14, `audio_fabric.c` ISR comment). The app ring is not that period; the producer slices it.
+Audio slots today: pump `0`, mailbox `1`, reserved `2` (`AUDIO_FABRIC_SLOT_*` in `audio_fabric.h`). Slot 0 stays the SDK/media pump. The app takes slot 2 if it is free, else slot 1. If both are live, `audio_open` returns `ZZ_EBUSY` and the Quake port runs silent. Do not steal a lease. Do not add a fourth slot in v0. Do not open the app stream with `SDK_OP_AUDIO_RING_ACQUIRE`: that dispatch accepts only 8000/12000/24000/32000/44100/48000. The app is an in-firmware producer (`audio_fabric_producer_attach` / `audio_fabric_producer_rate_set`). `fabric_rate_known` (`audio_fabric_lease.c`) includes 22050, and `audio_convert.c` has the 22050 to 48000 ratio. Grant 22050 when asked. 11025 is pump-only (comment above `fabric_rate_known`); do not grant it on this producer. The app must use `out->rate`. A fabric period is `AUDIO_BYTES_PER_PERIOD` 3840 bytes, 20 ms of 48 kHz stereo S16 (`memorymap.h` lines 13-14). The app ring is not that period; the producer slices it.
 
 `gl_swap` flushes the front end, drains RasterIX, copies the context target into the bound P96 bitmap (section 6), and `display_flip`s. It is the `MGLSwitchDisplay` equivalent (`amiberry_backend.c` line 1726). It is not a wire present to a 68k-owned bitmap, and it does not retarget RasterIX at the scanout address.
 
@@ -708,7 +708,7 @@ Shared text lives in this document. Nobody invents a second layout. Firmware fil
 | Slice | Owns | Does not touch |
 |---|---|---|
 | A runtime core | `zzapp_loader.c`, `zzapp_host.c` (stack switch, timer, fault classify, watchdog), `zzapp_api.c` (non-GL slots), `zzapp_runtime.h`, `card_pool.h` class 8, fault classify in `core2.c`, worker hook in `scheduler_arm.c`, reset hook at the start of `minigl_begin_amiga_reset` | `sdk_mailbox.c`, GL front end, drivers, Quake |
-| B services | `zzapp_proto.h` (byte-for-byte with section 4), `zzapp_services.c` (rings, files, input, log, display bind, audio attach), `SDK_OP_APP_*` in `sdk_mailbox.c` / `sdk_mailbox.h`, `ZZ9K_SERVICE_APP` in `abi.h` | loader, `core2.c`, `scheduler_arm.c` except the weak `zzapp_services_poll` that A calls and B defines |
+| B services | `zzapp_proto.h` (byte-for-byte with section 4), `zzapp_services.c` (rings, files, input, log, display bind, audio attach), `SDK_OP_APP_*` in `sdk_mailbox.c` / `sdk_mailbox.h`, the same ids in `sdk/include/zz9k/abi.h` and `sdk/host/include/zz9k/reply.h` | loader, `core2.c`, `scheduler_arm.c` except the weak `zzapp_services_poll` that A calls and B defines |
 | C GL | library licence lines, `mgl_platform.h`, types, in-proc backend and transport, firmware `zzapp_gl.c` that fills `zzapp_gl` and performs the present-copy into the bound surface | mailbox ops, scheduler, Quake |
 | D ZZRun | `zz9000-drivers/ZZRun/` only | firmware sources; consumes the staged `zzapp_proto.h` |
 | E libzzapp | `sdk/zzapp/**` MIT, `test/zzapp/` harness | `sdk_mailbox.c`, drivers |
@@ -738,9 +738,8 @@ Slice acceptance:
 - A privileged app can mask IRQs. The cold restart then fires, and 68k MiniGL clients die with it, as they do on any core-1 restart today.
 - A long GL call stalls 68k MiniGL until it returns. Logging at 50 ms is the only mitigation in v0.
 - The card-pool caps already sum to more than the permanent prefix (MiniGL ceiling alone is 384 MiB, `minigl_pool.h`). A 96 MiB app plus a large GL context can fail an allocation that looks fine on paper. Fail closed. Do not borrow the Fast RAM tail.
-- Every frame copies the RasterIX target into the P96 bitmap. 640×480 RGB565 is about 600 KiB. A 1920×1080 ARGB8888 copy is a different cost and is not the first kit.
-- Audio is best-effort if both lease slots are taken.
-- Rate substitution 22050 → 24000 changes Quake's mixer rate relative to a PC. The granted rate is what the engine is told, so the mix is consistent. It is not bit-identical to a 22050 PC.
+- Every frame copies the RasterIX target into the P96 bitmap. 640x480 RGB565 is about 600 KiB. A 32-bit screen is BGRA8888 (`SDK_SURFACE_FORMAT_BGRA8888`, 7) and is not the first kit.
+- Audio is best-effort if both lease slots are taken. 11025 is not a fabric-producer rate.
 - Dual-licensing the front end requires the copyright holder's actual grant before the firmware link. Until that lands, slice C stops at the library edits and the host build.
 - The function-table boundary is the project's rule for closed apps. It has not been reviewed as a GPL linking opinion. No closed app ships on v0.
 - `docs/memory-map.md` disagrees with `memorymap.h`. Slices that copy an address out of that doc will place the arena on top of a module slot.
@@ -754,7 +753,7 @@ These are choices this contract makes so the slices do not each make them. They 
 3. Service tick from the private timer, plus cooperative yields, rather than making Quake return every frame. Cold restart only if IRQs never arrive. Full preemptive app slicing waits for user mode.
 4. 68k MiniGL stays queued and is drained between app GL calls, rather than being suspended for the whole Quake session.
 5. App audio uses a free fabric slot or runs silent. A fourth slot is a fabric change (ISR budget, lease plane) and is not in v0.
-6. Sample-rate grant snaps up to the fabric table. Extending that table with 11025 and 22050 was the alternative.
+6. App audio is an internal fabric producer and is granted 22050, because `fabric_rate_known` and the conversion table already have it. The mailbox acquire path does not. Routing the app through `SDK_OP_AUDIO_RING_ACQUIRE` would force 24000 and was rejected.
 7. Present is a copy from the context-owned RasterIX target into the P96 bitmap, then a launcher flip ack. Firmware does not allocate P96 VRAM, does not point RasterIX at the scanout bitmap, and does not write the RTG scanout register behind the driver.
 8. GL sources stay in the library repo and are compiled into the firmware. They are not vendored and not a submodule in v0.
 9. Quake is ported from id's `WinQuake`, not from the PiStorm tree that already has Amiga input. The PiStorm tree has a wider licence inventory than this slice should take on.
