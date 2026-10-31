@@ -7,7 +7,7 @@ FIRMWARE := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/src
 MINIGL_MODULE_BACKEND ?= $(FIRMWARE)
 CPPFLAGS := -I$(FIRMWARE) -DMINIGL_HOST_TEST
 
-MW_OBJS := mw_parse.o mw_texture.o mw_draw.o mw_ctx.o mw_service.o sdk_palette.o \
+MW_OBJS := minigl_platform.o mw_parse.o mw_texture.o mw_draw.o mw_ctx.o mw_service.o sdk_palette.o \
            minigl_raster.o minigl_lighting.o minigl_present.o \
            minigl_rix_backend.o rix_cmd.o rix_texture.o rix_setup.o rix_drv.o
 POOL_OBJS := $(addprefix pool_,$(MW_OBJS)) pool_card_pool.o \

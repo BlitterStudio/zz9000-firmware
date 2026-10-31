@@ -332,7 +332,6 @@ static int graphics_v3_fifo_write(uint32_t offset, uint32_t value)
     return 0;
 #endif
 }
-}
 
 static int graphics_v3_fifo_write_words(const uint32_t *words,
                                         uint32_t word_count)

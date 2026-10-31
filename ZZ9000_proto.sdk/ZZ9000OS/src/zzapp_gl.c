@@ -104,10 +104,10 @@ typedef struct zzapp_gl {
     int32_t (*Build2DMipmaps)(uint32_t target, int32_t internalFormat, int32_t width, int32_t height, uint32_t format, uint32_t type, const void *data);
 } zzapp_gl;
 #endif
+#include "minigl_platform.h"
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-#include "xil_cache.h"
-#endif
+
+
 
 extern int amiberry_inproc_open(uint32_t width, uint32_t height);
 extern void amiberry_inproc_close(void);
@@ -565,10 +565,8 @@ void zzapp_gl_swap(void)
     if (!copy_bound(src, rgb565, minigl_raster_present_is_bottom_up(),
                     w, h, pitch, format, card))
         goto done;
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-    Xil_DCacheFlushRange((INTPTR)card, pitch * h);
-    __asm__ volatile ("dsb sy" ::: "memory");
-#endif
+    minigl_platform_cache_clean(NULL, card, pitch * h);
+    minigl_platform_barrier(NULL);
     (void)zzapp_svc_display_flip(g_surface_id);
 done:
     zzapp_api_leave();

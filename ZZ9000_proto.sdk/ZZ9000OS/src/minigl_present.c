@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "minigl_present.h"
+#include "minigl_platform.h"
+
 #include "memorymap.h"
 #include <stddef.h>
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-#include "xil_cache.h"
-#endif
+
 
 static uint32_t pixel_bytes(uint32_t format)
 {
@@ -164,32 +164,28 @@ int minigl_present_frame(const ZZ9KMiniGLPacketPresent *p,
                          const uint32_t *color_buffer)
 {
     const uint32_t length = HOST_VISIBLE_HEAP_ADDRESS - FRAMEBUFFER_ADDRESS;
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-    uint32_t y, bytes;
-#endif
+    uint32_t y;
+    uint32_t bytes;
+
     if (!color_buffer || !valid_rectangle(p, length))
         return 0;
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
     bytes = p->window_w * pixel_bytes(p->dest_format);
     for (y = 0; bytes != 0 && y < p->window_h; ++y) {
-        UINTPTR address = (UINTPTR)p->dest_offset + ADDR_ADJ +
-                          (p->window_y + y) * p->dest_pitch +
-                          p->window_x * pixel_bytes(p->dest_format);
-        Xil_DCacheInvalidateRange(address, bytes);
+        uintptr_t address = (uintptr_t)p->dest_offset + ADDR_ADJ +
+                            (p->window_y + y) * p->dest_pitch +
+                            p->window_x * pixel_bytes(p->dest_format);
+        minigl_platform_cache_invalidate(NULL, address, bytes);
     }
-#endif
     if (!minigl_present_copy(p, color_buffer,
                              (uint8_t *)(uintptr_t)FRAMEBUFFER_ADDRESS, length))
         return 0;
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
     for (y = 0; bytes != 0 && y < p->window_h; ++y) {
-        UINTPTR address = (UINTPTR)p->dest_offset + ADDR_ADJ +
-                          (p->window_y + y) * p->dest_pitch +
-                          p->window_x * pixel_bytes(p->dest_format);
-        Xil_DCacheFlushRange(address, bytes);
+        uintptr_t address = (uintptr_t)p->dest_offset + ADDR_ADJ +
+                            (p->window_y + y) * p->dest_pitch +
+                            p->window_x * pixel_bytes(p->dest_format);
+        minigl_platform_cache_clean(NULL, address, bytes);
     }
-    __asm__ volatile ("dsb sy" ::: "memory");
-#endif
+    minigl_platform_barrier(NULL);
     return 1;
 }
 
@@ -197,32 +193,28 @@ int minigl_present_frame_rgb565(const ZZ9KMiniGLPacketPresent *p,
                                 const uint16_t *color_buffer)
 {
     const uint32_t length = HOST_VISIBLE_HEAP_ADDRESS - FRAMEBUFFER_ADDRESS;
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
-    uint32_t y, bytes;
-#endif
+    uint32_t y;
+    uint32_t bytes;
 
     if (!color_buffer || !valid_rectangle(p, length))
         return 0;
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
     bytes = p->window_w * pixel_bytes(p->dest_format);
     for (y = 0U; bytes != 0U && y < p->window_h; ++y) {
-        UINTPTR address = (UINTPTR)p->dest_offset + ADDR_ADJ +
-                          (p->window_y + y) * p->dest_pitch +
-                          p->window_x * pixel_bytes(p->dest_format);
-        Xil_DCacheInvalidateRange(address, bytes);
+        uintptr_t address = (uintptr_t)p->dest_offset + ADDR_ADJ +
+                            (p->window_y + y) * p->dest_pitch +
+                            p->window_x * pixel_bytes(p->dest_format);
+        minigl_platform_cache_invalidate(NULL, address, bytes);
     }
-#endif
     if (!minigl_present_copy_rgb565(p, color_buffer,
-                                    (uint8_t *)(uintptr_t)FRAMEBUFFER_ADDRESS, length))
+                                    (uint8_t *)(uintptr_t)FRAMEBUFFER_ADDRESS,
+                                    length))
         return 0;
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
     for (y = 0U; bytes != 0U && y < p->window_h; ++y) {
-        UINTPTR address = (UINTPTR)p->dest_offset + ADDR_ADJ +
-                          (p->window_y + y) * p->dest_pitch +
-                          p->window_x * pixel_bytes(p->dest_format);
-        Xil_DCacheFlushRange(address, bytes);
+        uintptr_t address = (uintptr_t)p->dest_offset + ADDR_ADJ +
+                            (p->window_y + y) * p->dest_pitch +
+                            p->window_x * pixel_bytes(p->dest_format);
+        minigl_platform_cache_clean(NULL, address, bytes);
     }
-    __asm__ volatile ("dsb sy" ::: "memory");
-#endif
+    minigl_platform_barrier(NULL);
     return 1;
 }

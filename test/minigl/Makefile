@@ -41,7 +41,7 @@ rix_backend_test: rix_backend_test.c $(RIX_BACKEND)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -lm -o $@
 
 
-minigl_present_test: test_minigl_present.c $(MINIGL_MODULE_BACKEND)/minigl_present.c
+minigl_present_test: test_minigl_present.c $(MINIGL_MODULE_BACKEND)/minigl_present.c $(MINIGL_MODULE_BACKEND)/minigl_platform.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@
 
 minigl_lighting_test: minigl_lighting_test.c $(MINIGL_MODULE_BACKEND)/minigl_lighting.c
@@ -51,7 +51,7 @@ minigl_lighting_test: minigl_lighting_test.c $(MINIGL_MODULE_BACKEND)/minigl_lig
 minigl_raster_ref.o: minigl_raster_ref.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -O3 -c $< -o $@
 
-minigl_oracle_test: minigl_oracle_test.c $(MINIGL_MODULE_BACKEND)/minigl_raster.c $(MINIGL_MODULE_BACKEND)/minigl_lighting.c $(MINIGL_MODULE_BACKEND)/minigl_present.c minigl_raster_ref.o $(RIX_BACKEND)
+minigl_oracle_test: minigl_oracle_test.c $(MINIGL_MODULE_BACKEND)/minigl_raster.c $(MINIGL_MODULE_BACKEND)/minigl_lighting.c $(MINIGL_MODULE_BACKEND)/minigl_present.c $(MINIGL_MODULE_BACKEND)/minigl_platform.c minigl_raster_ref.o $(RIX_BACKEND)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -lm -o $@
 
 

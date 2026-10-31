@@ -105,12 +105,36 @@ static const zzm_palette_service_t palette = {
 static int graphics_caps(zzm_graphics_hw_caps_t *caps)
 {
     memset(caps, 0, sizeof(*caps));
-    return 0;
+    return 1;
 }
+
+static int graphics_read(uint32_t offset, uint32_t *value)
+{
+    (void)offset;
+    *value = 0U;
+    return 1;
+}
+
+static int graphics_write(uint32_t offset, uint32_t value)
+{
+    (void)offset;
+    (void)value;
+    return 1;
+}
+
+static int graphics_words(const uint32_t *words, uint32_t count)
+{
+    (void)words;
+    (void)count;
+    return 1;
+}
+
+static void graphics_barrier(void) { }
 
 static const zzm_graphics_hw_service_t graphics = {
     ZZM_SERVICE_GRAPHICS_HW_V3, sizeof(graphics), graphics_caps,
-    0, 0, 0, 0, 0, 0, 0, 0
+    graphics_read, graphics_write, graphics_read, graphics_write,
+    graphics_words, 0, 0, 0, 0, graphics_barrier
 };
 
 int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
@@ -141,6 +165,23 @@ const void *zzm_rt_get_service(uint32_t id, uint32_t version)
         return 0;
     }
 }
+
+void zzm_rt_dcache_clean(uint32_t address, uint32_t length)
+{
+    (void)address;
+    (void)length;
+}
+
+int zzm_rt_dcache_invalidate(uint32_t address, uint32_t length)
+{
+    (void)address;
+    (void)length;
+    return 1;
+}
+
+void zzm_rt_barrier(void) { }
+uint64_t zzm_rt_time_us(void) { return 0U; }
+void zzm_rt_log(const char *message) { (void)message; }
 
 int minigl_transport_set_module_services(const zzm_host_window_service_t *window,
                                          const zzm_transport_service_t *link,

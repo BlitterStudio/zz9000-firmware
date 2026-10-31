@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 #include "minigl_transport.h"
+#include "minigl_platform.h"
+
 #include "mw_service.h"
 #include "zzapp_services.h"
 #include "zzm_minigl_host.h"
@@ -222,7 +224,7 @@ int zzm_module_init(const zzm_services_t *services)
         !minigl_table_compatible(graphics->version, graphics->size,
                                  ZZM_SERVICE_GRAPHICS_HW_V3,
                                  sizeof(*graphics)) || !graphics->caps ||
-        graphics->caps(&graphics_caps) != 0)
+        graphics->caps(&graphics_caps) <= 0)
         return -1;
 
     g_module.host_window = host_window;
@@ -230,7 +232,8 @@ int zzm_module_init(const zzm_services_t *services)
     g_module.app_host = app_host;
     g_module.graphics = graphics;
     g_module.owner = ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL);
-    if (zzapp_gl_set_module_host(app_host) != 0 ||
+    if (!minigl_platform_set_graphics(graphics, &graphics_caps, g_module.owner) ||
+        zzapp_gl_set_module_host(app_host) != 0 ||
         minigl_transport_set_module_services(host_window, transport,
                                              g_module.owner) != 0 ||
         !transport->install_doorbell ||

@@ -182,6 +182,7 @@ C_SRCS = \
 	$(SRC_DIR)/zzapp_host.c \
 	$(SRC_DIR)/zzapp_api.c \
 	$(SRC_DIR)/overlay.c \
+	$(SRC_DIR)/minigl_platform.c \
 	$(SRC_DIR)/minigl_raster.c \
 	$(SRC_DIR)/minigl_lighting.c \
 	$(SRC_DIR)/minigl_present.c \

@@ -49,6 +49,7 @@ ZZM_MINIGL_PACK_RASTERIX_ARGS := $(ZZM_MINIGL_MODULE_ID) 1 \
 ZZM_MINIGL_ENTRY_SRC := $(ZZM_MINIGL_DIR)/minigl_module.c
 
 ZZM_MINIGL_BACKEND_SRCS := \
+	$(SRC_DIR)/minigl_platform.c \
 	$(SRC_DIR)/mw_service.c \
 	$(SRC_DIR)/mw_parse.c \
 	$(SRC_DIR)/mw_draw.c \
