@@ -18,11 +18,7 @@ test: $(TARGET)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
-<<<<<<< HEAD
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES)
-=======
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Dprintf=zzm_test_printf -o $@ $(SOURCES)
->>>>>>> mod/app-gl
 
 clean:
 	rm -rf $(BUILD_DIR)

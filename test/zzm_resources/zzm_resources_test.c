@@ -21,11 +21,7 @@ static uint32_t log_lines;
 #define CHECK(expr) do { \
     if (!(expr)) { \
         ++failures; \
-<<<<<<< HEAD
-        fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); \
-=======
         printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); \
->>>>>>> mod/app-gl
     } \
 } while (0)
 

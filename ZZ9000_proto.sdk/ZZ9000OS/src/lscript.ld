@@ -275,22 +275,6 @@ ASSERT(__z2_direct_ring_start >= __framebuffer_start,
 ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
        "Z2 direct-ring reservation exceeds the board-window DDR")
 
-/* MiniGL is not boot-path code. Keep its pipeline and conversion routines
- * in high DDR using the same placement as the SDK codecs below. */
-.minigl_text : {
-   . = ALIGN(16);
-   __minigl_text_start = .;
-   *minigl_raster.o(.text .text.* .rodata .rodata.*)
-   *minigl_present.o(.text .text.* .rodata .rodata.*)
-   *minigl_lighting.o(.text .text.* .rodata .rodata.*)
-   *mw_parse.o(.text .text.* .rodata .rodata.*)
-   *mw_texture.o(.text .text.* .rodata .rodata.*)
-   *mw_draw.o(.text .text.* .rodata .rodata.*)
-   *mw_ctx.o(.text .text.* .rodata .rodata.*)
-   *mw_service.o(.text .text.* .rodata .rodata.*)
-   . = ALIGN(16);
-   __minigl_text_end = .;
-} > ps7_ddr_hi
 
 .sdk_codec_text : {
    . = ALIGN(16);

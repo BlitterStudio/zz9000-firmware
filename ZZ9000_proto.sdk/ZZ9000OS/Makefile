@@ -182,22 +182,6 @@ C_SRCS = \
 	$(SRC_DIR)/zzapp_host.c \
 	$(SRC_DIR)/zzapp_api.c \
 	$(SRC_DIR)/overlay.c \
-	$(SRC_DIR)/minigl_platform.c \
-	$(SRC_DIR)/minigl_raster.c \
-	$(SRC_DIR)/minigl_lighting.c \
-	$(SRC_DIR)/minigl_present.c \
-	$(SRC_DIR)/minigl_profile.c \
-	$(SRC_DIR)/rix_cmd.c \
-	$(SRC_DIR)/rix_texture.c \
-	$(SRC_DIR)/rix_setup.c \
-	$(SRC_DIR)/rix_drv.c \
-	$(SRC_DIR)/minigl_rix_backend.c \
-	$(SRC_DIR)/mw_parse.c \
-	$(SRC_DIR)/mw_texture.c \
-	$(SRC_DIR)/mw_draw.c \
-	$(SRC_DIR)/mw_ctx.c \
-	$(SRC_DIR)/mw_service.c \
-	$(SRC_DIR)/minigl_transport.c \
 	$(SRC_DIR)/usb.c \
 	$(SRC_DIR)/mp3/decode_mp3.c \
 	$(SRC_DIR)/usb/ehci-hcd.c \
@@ -513,11 +497,6 @@ $(BUILD_DIR)/sdk_video_webm.o: $(SRC_DIR)/sdk_video_webm.c $(LIBVPX_LIB) $(LIBOP
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -O3 -MMD -MP -o $@ $<
 
-# MiniGL fill path: measured textured-world loops benefit from -O3.
-# Keep lighting, service and present at -O2; retain normal IEEE arithmetic.
-$(BUILD_DIR)/minigl_raster.o: $(SRC_DIR)/minigl_raster.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 $(EXTRA_CFLAGS) -MMD -MP -o $@ $<
 
 # Vendored LZH decode core (LHa for UNIX) + firmware I/O shim: every TU here
 # includes lha.h, which does `#include <config.h>` (angle-bracket). Two flags

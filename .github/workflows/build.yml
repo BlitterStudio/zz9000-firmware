@@ -338,11 +338,7 @@ jobs:
           # v3 fixtures to the same conformance suite.
           make -C test/zzm_conformance test
 
-      # This deliberate expected-red makes the remaining resident MiniGL link
-      # visible on intermediate branches. The stage-4 clean cutover removes
-      # continue-on-error; the script itself rejects objects and MINIGL_LIB_DIR.
-      - name: Reject resident MiniGL firmware link (expected red until cutover)
-        continue-on-error: true
+      - name: Reject resident MiniGL firmware link
         run: |
           sh util/check_no_resident_minigl.sh \
             ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \

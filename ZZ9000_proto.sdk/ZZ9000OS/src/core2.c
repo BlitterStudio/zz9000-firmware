@@ -12,8 +12,7 @@
 #include "card_pool.h"
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
-#include "mw_service.h"
-#include "zzm_loader.h"
+#include "zzm_minigl_host.h"
 #include "zzapp_runtime.h"
 #include "zzapp_proto.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
@@ -213,9 +212,8 @@ static void record_fault(uint32_t code, const char *name)
 	print_fault_detail(code);
 
 	if (sh->minigl_in_flight) {
-		/* Core 1 faulted during a Wire-v9 operation. Publish the v9
-		 * generation change before the scheduler recovery path restarts it. */
-		mw_service_on_core1_fault();
+		/* Never call module code on the faulting stack. */
+		zzm_minigl_on_core1_fault();
 		sh->minigl_in_flight = 0;
 	}
 
@@ -339,10 +337,8 @@ void core1_cold_restart(void)
 	sh->core1_park_request = 0U;
 	sh->core1_parked = 0U;
 	dsb();
-	/* CPU1 is halted, so it cannot race these writes. A cold restart can
-	 * land inside a PL330 stream or a RasterIX draw; stop both before the
-	 * command buffer or color target is freed. */
-	mw_rix_abort_engines();
+	/* Core 1 is halted; the module host owns any active graphics abort. */
+	zzm_minigl_abort_reset();
 
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
