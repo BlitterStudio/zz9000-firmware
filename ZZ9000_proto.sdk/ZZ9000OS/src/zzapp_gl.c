@@ -176,7 +176,49 @@ extern void GLHint(GLcontext, GLenum, GLenum);
 extern void GLPixelStorei(GLcontext, GLenum, GLint);
 extern void GLUPerspective(GLfloat, GLfloat, GLfloat, GLfloat);
 extern GLint GLUBuild2DMipmaps(GLcontext, GLenum, GLint, GLsizei, GLsizei, GLenum, GLenum, const GLvoid *);
+#if defined(MINIGL_MODULE)
+#include "zzm_runtime.h"
 
+static const zzm_app_gl_host_service_t *g_module_app_host;
+
+int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
+{
+    if (!host || !host->api_enter || !host->api_leave ||
+        !host->bound_display || !host->flip_bound || !host->generation)
+        return ZZ_EINVAL;
+    g_module_app_host = host;
+    return ZZ_OK;
+}
+
+void zzapp_api_enter(void)
+{
+    g_module_app_host->api_enter();
+}
+
+void zzapp_api_leave(void)
+{
+    g_module_app_host->api_leave();
+}
+
+int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
+                        uint32_t *format, uint32_t *card_front,
+                        uint32_t *card_back)
+{
+    return g_module_app_host->bound_display(w, h, pitch, format, card_front,
+                                             card_back);
+}
+
+int zzapp_display_flip_bound(void)
+{
+    return g_module_app_host->flip_bound(g_module_app_host->generation());
+}
+
+int zzapp_svc_display_flip(uint32_t surface_id)
+{
+    (void)surface_id;
+    return zzapp_display_flip_bound();
+}
+#else
 __attribute__((weak)) void zzapp_api_enter(void) {}
 __attribute__((weak)) void zzapp_api_leave(void) {}
 
@@ -198,6 +240,7 @@ __attribute__((weak)) int zzapp_svc_display_flip(uint32_t surface_id)
     (void)surface_id;
     return zzapp_display_flip_bound();
 }
+#endif
 
 #if defined(MINIGL_HOST_TEST)
 static uint8_t *g_test_p96;

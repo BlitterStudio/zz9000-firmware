@@ -3,6 +3,8 @@ AR ?= ar
 CFLAGS ?= -std=c99 -Wall -Wextra -Werror -O2
 ROOT := ../..
 FIRMWARE := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/src
+# Keep host coverage on the same backend inventory as the module build.
+MINIGL_MODULE_BACKEND ?= $(FIRMWARE)
 CPPFLAGS := -I$(FIRMWARE) -DMINIGL_HOST_TEST
 
 MW_OBJS := mw_parse.o mw_texture.o mw_draw.o mw_ctx.o mw_service.o sdk_palette.o \
@@ -87,7 +89,7 @@ asan: clean test
 libmw_host.a: $(MW_OBJS)
 	$(AR) rcs $@ $^
 
-%.o: $(FIRMWARE)/%.c
+%.o: $(MINIGL_MODULE_BACKEND)/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 test_mw_validate: test_mw_validate.c libmw_host.a
@@ -106,7 +108,7 @@ test_mw_transport_guard: test_mw_transport_guard.c libmw_host.a
 
 test_mw_host_api: test_mw_host_api.c libmw_host.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -lm -o $@
-pool_%.o: $(FIRMWARE)/%.c
+pool_%.o: $(MINIGL_MODULE_BACKEND)/%.c
 	$(CC) $(CPPFLAGS) -DMINIGL_CARD_POOL_TEST -I../card_pool $(CFLAGS) -c $< -o $@
 pool_card_pool.o: $(FIRMWARE)/card_pool.c
 	$(CC) $(CPPFLAGS) -DMINIGL_CARD_POOL_TEST -I../card_pool $(CFLAGS) -c $< -o $@
@@ -199,7 +201,7 @@ client_guest_reopen.o: $(AMIBERRY_DIR)/tests/amiberry_reopen.c
 	$(CC) $(CLIENTS_GUEST_CFLAGS) -Dmain=amiberry_reopen_main -c $< -o $@
 
 # Firmware service objects, built 32-bit for the guest harness link.
-client_fw_%.o: $(FIRMWARE)/%.c
+client_fw_%.o: $(MINIGL_MODULE_BACKEND)/%.c
 	$(CC) $(CLIENTS_M32) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 clean:
 	rm -f *.o libmw_host.a $(TESTS)

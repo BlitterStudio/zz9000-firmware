@@ -270,6 +270,10 @@ void mw_service_deserialize_transport_descriptor(
     ZZ9KMiniGLTransportDescriptor *out);
 int  mw_service_bind_region(volatile void *region, uint32_t size);
 void mw_service_init(void);
+/* Lifecycle operations used by the module host ABI and the wire bridge. */
+int  mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
+                     uint32_t *handle);
+int  mw_service_close(uint32_t handle);
 void mw_service_doorbell(void);
 int  mw_service_poll(void);
 int  mw_service_has_work(void);
