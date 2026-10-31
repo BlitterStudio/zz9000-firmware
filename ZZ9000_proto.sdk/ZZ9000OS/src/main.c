@@ -77,7 +77,6 @@ void Xil_AssertNonVoid() {}
 #include "zzapp_services.h"
 #include "card_pool.h"
 #include "overlay.h"
-#include "mw_service.h"
 #include "zzm_minigl_host.h"
 #include "newlib_heap.h"
 
@@ -782,10 +781,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 	sdk_mailbox_init();
 
-	/* Bind the MiniGL transport after the mailbox placement made its MMU
-	 * section non-cacheable; publishes the descriptor or reports the
-	 * service unavailable (Zorro II, no heap room). */
-	minigl_transport_init();
+	/* MiniGL transport is module-owned and is bound only by its successful
+	 * on-demand acquire on core 1.  Reset never manufactures a descriptor. */
 	sdk_diag_last_reg_write_addr = 0;
 	sdk_diag_last_reg_write_raw_addr = 0;
 	sdk_diag_last_reg_write_data = 0;
@@ -1181,8 +1178,7 @@ int main() {
 		 * job that owns the SD card. */
 		if (!fw_update_busy())
 			audio_scene_poll();
-		if (!scheduler_core1_available())
-			(void)mw_service_poll();
+		/* MiniGL packet polling is core-1-only. */
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		u32 aperture_flags = sdk_aperture_runtime_flags();
 		/* Acknowledge late: firmware normally boots before the RTG driver.
@@ -2607,7 +2603,7 @@ int main() {
 				sdk_mailbox_task();
 				if (events & SDK_MAILBOX_EVENT_DOORBELL) {
 					sdk_mailbox_doorbell();
-					mw_service_doorbell();
+					zzm_minigl_doorbell();
 				}
 				sdk_diag_task_count++;
 			}
@@ -2621,15 +2617,14 @@ int main() {
 			}
 			if (zstate & MNTZORRO_STATUS_SDK_DOORBELL) {
 				sdk_mailbox_doorbell();
-				mw_service_doorbell();
+				zzm_minigl_doorbell();
 				mntzorro_pulse_control(MNTZORRO_CTRL_SDK_DOORBELL_CLEAR);
+				/* Core 0 records the doorbell and wakes core 1; it never
+				 * parses wire packets, including after a core-1 fault. */
 				sdk_mailbox_task();
 				sdk_diag_task_count++;
 			}
 #endif
-			/* Core 1 owns Wire-v9 execution whenever it is available. */
-			if (!scheduler_core1_available())
-				(void)mw_service_poll();
 			sdk_mailbox_poll_divider++;
 			if ((sdk_mailbox_poll_divider & 0xffU) == 0) {
 				sdk_mailbox_task();

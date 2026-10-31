@@ -49,6 +49,20 @@ static int reset_poll(void *context)
 static void abort_reset(void *context) { (void)context; }
 static int unload(void *context) { (void)context; return 1; }
 static void fini(void *context) { (void)context; }
+static int app_bind(void *context, uint32_t surface_id, const void **out_gl)
+{
+    (void)context;
+    (void)surface_id;
+    *out_gl = 0;
+    return 1;
+}
+static int app_swap(void *context) { (void)context; return 1; }
+static void app_unbind(void *context) { (void)context; }
+static void app_reclaim(void *context, uint32_t generation)
+{
+    (void)context;
+    (void)generation;
+}
 
 int main(void)
 {
@@ -61,7 +75,9 @@ int main(void)
         .doorbell = doorbell, .has_work = has_work, .poll = poll,
         .transport_acquire = transport_acquire, .transport_release = transport_release,
         .begin_reset = begin_reset, .reset_poll = reset_poll,
-        .abort_reset = abort_reset, .begin_unload = unload, .fini = fini
+        .abort_reset = abort_reset, .begin_unload = unload, .fini = fini,
+        .app_bind = app_bind, .app_swap = app_swap, .app_unbind = app_unbind,
+        .app_reclaim = app_reclaim
     };
 
     expect_int("register", zzm_minigl_register(&ops, 0, &worker), 1);
