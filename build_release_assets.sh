@@ -25,6 +25,7 @@ usage() {
     cat >&2 <<'EOF'
 Usage: ./build_release_assets.sh [--tag TAG] [--output DIR] [--require-all]
                                  [--firmware-flavor SUFFIX]
+                                 [--minigl-kit DIRECTORY]
 
 Options:
   --tag TAG               Release/build label used in archive names
@@ -47,6 +48,8 @@ Options:
                           default.
                           CI should not use this for PAL/native-video
                           defaults; use ZZ9000.CFG instead.
+  --minigl-kit DIRECTORY  Verified module-release directory containing
+                          MINIGL.ZZM, MINIGL.KIT.json, and its source tarball.
 EOF
 }
 
@@ -55,6 +58,7 @@ OUT_DIR=release
 REQUIRE_ALL=0
 CHECK_QUALIFICATION=0
 FIRMWARE_FLAVOR=
+MINIGL_KIT_DIR=
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -91,6 +95,15 @@ while [ "$#" -gt 0 ]; do
                 exit 1
             fi
             FIRMWARE_FLAVOR=$2
+            shift 2
+            ;;
+        --minigl-kit)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --minigl-kit needs a directory." >&2
+                usage
+                exit 1
+            fi
+            MINIGL_KIT_DIR=$2
             shift 2
             ;;
         -h|--help)
@@ -212,6 +225,9 @@ done
 # firmware artifact directly rather than unpacking a release ZIP.
 mkdir -p "$OUT_DIR/ZZ9K"
 cp "$MODULE_DIR"/*.ZZM "$OUT_DIR/ZZ9K/"
+if [ -n "$MINIGL_KIT_DIR" ]; then
+    sh ./util/stage_minigl_kit.sh "$MINIGL_KIT_DIR" "$OUT_DIR" --require-source
+fi
 
 variant_defs=()
 while IFS= read -r def; do
@@ -264,6 +280,10 @@ for def in "${variant_defs[@]}"; do
     # discover it; copying it to the SD card as-is changes nothing.
     cp ZZ9000.CFG "$archive_root/ZZ9000.CFG"
     mkdir -p "$archive_root/ZZ9K"
+    if [ -n "$MINIGL_KIT_DIR" ]; then
+        cp "$OUT_DIR/ZZ9K/MINIGL.ZZM" "$archive_root/ZZ9K/MINIGL.ZZM"
+        cp "$OUT_DIR/ZZ9K/MINIGL.KIT.json" "$archive_root/ZZ9K/MINIGL.KIT.json"
+    fi
     cp "$MODULE_DIR"/*.ZZM "$archive_root/ZZ9K/"
 
     rm -f "$zip_path"

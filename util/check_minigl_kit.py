@@ -142,6 +142,13 @@ def command_validate(args):
         digest = hashlib.sha256(args.module.read_bytes()).hexdigest()
         if digest != manifest["module"]["zzm3_sha256"]:
             fail(f"{args.module} SHA-256 does not match module.zzm3_sha256")
+    if args.source_tarball is not None:
+        expected = manifest["module"].get("source_tarball_sha256")
+        if expected is None:
+            fail("manifest does not declare module.source_tarball_sha256")
+        digest = hashlib.sha256(args.source_tarball.read_bytes()).hexdigest()
+        if digest != expected:
+            fail(f"{args.source_tarball} SHA-256 does not match module.source_tarball_sha256")
 
 
 def command_matrix(args):
@@ -164,6 +171,7 @@ def main():
     validate = subcommands.add_parser("validate")
     validate.add_argument("manifest", type=pathlib.Path)
     validate.add_argument("--module", type=pathlib.Path)
+    validate.add_argument("--source-tarball", type=pathlib.Path)
     matrix = subcommands.add_parser("matrix")
     matrix.add_argument("matrix", type=pathlib.Path)
     args = parser.parse_args()

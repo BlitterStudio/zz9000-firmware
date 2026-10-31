@@ -143,6 +143,8 @@ jobs:
         run: make -C test/modules test
       - name: Module runtime allocation bridge suite
         run: make -C test/zzm_rt test
+      - name: MiniGL kit compatibility matrix
+        run: python3 -m unittest discover -s test/minigl_kit
       - name: SD activity LED suite
         run: make -C test/sd_activity_led test
       - name: SD boot metadata suite
@@ -330,7 +332,34 @@ jobs:
       - name: Build and check firmware module ELFs
         run: |
           make -C ZZ9000_proto.sdk/ZZ9000OS modules
+          # This target retains v2 coverage while the ABI-format owner adds
+          # v3 fixtures to the same conformance suite.
           make -C test/zzm_conformance test
+
+      # This deliberate expected-red makes the remaining resident MiniGL link
+      # visible on intermediate branches. The stage-4 clean cutover removes
+      # continue-on-error; the script itself rejects objects and MINIGL_LIB_DIR.
+      - name: Reject resident MiniGL firmware link (expected red until cutover)
+        continue-on-error: true
+        run: |
+          sh util/check_no_resident_minigl.sh \
+            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
+            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.map \
+            ZZ9000_proto.sdk/ZZ9000OS/Makefile
+
+      - name: Download matching MiniGL release kit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.MINIGL_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir minigl-kit
+          gh release download "$GITHUB_REF_NAME" \
+            --repo BlitterStudio/amiberry-minigl-library \
+            --dir minigl-kit \
+            --pattern 'MINIGL.ZZM' \
+            --pattern 'MINIGL.KIT.json' \
+            --pattern 'MINIGL-source-*.tar.gz'
 
       - name: Check exception-vector placement
         run: bash util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
@@ -341,11 +370,11 @@ jobs:
           BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
           ARGS=(--tag "$BUILD_LABEL" --output release_assets)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            ARGS+=(--require-all)
+            ARGS+=(--require-all --minigl-kit minigl-kit)
           fi
           ./build_release_assets.sh "${ARGS[@]}"
 
-      - name: Check firmware DDR and BOOT.bin budgets
+      - name: Enforce 4 MiB high-image and BOOT.bin budgets
         run: |
           python3 util/check_firmware_size.py \
             ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
@@ -369,6 +398,9 @@ jobs:
           path: |
             release_assets/*.zip
             release_assets/ZZ9K/*.ZZM
+            release_assets/MINIGL.ZZM
+            release_assets/MINIGL.KIT.json
+            release_assets/MINIGL-source-*.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -399,6 +431,8 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           mkdir -p release
           find dist -type f -name 'zz9000-firmware-*.zip' -exec cp {} release/ \;
+          find dist -type f \( -name 'MINIGL.ZZM' -o -name 'MINIGL.KIT.json' -o -name 'MINIGL-source-*.tar.gz' \) \
+            -exec cp {} release/ \;
           if ! find release -maxdepth 1 -type f | grep -q .; then
             echo "ERROR: no release assets staged." >&2
             exit 1
