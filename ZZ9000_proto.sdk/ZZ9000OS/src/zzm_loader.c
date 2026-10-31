@@ -117,6 +117,39 @@ static void status_from_v3_slot(uint32_t index, enum zzm_state state,
         status->bss_size = header->bss_size;
     }
 }
+
+static const char *boot_status_reason(enum zzm_state state)
+{
+    switch (state) {
+    case ZZM_STATE_AVAILABLE:
+        return "available";
+    case ZZM_STATE_MISSING:
+        return "absent: file not found";
+    case ZZM_STATE_REJECTED_ABI:
+        return "incompatible: ABI";
+    case ZZM_STATE_REJECTED_CAPABILITY:
+        return "incompatible: capability";
+    case ZZM_STATE_REJECTED_SERVICE:
+        return "incompatible: service";
+    case ZZM_STATE_REJECTED_HASH:
+        return "incompatible: hash";
+    case ZZM_STATE_REJECTED_SLOT:
+        return "incompatible: image";
+    case ZZM_STATE_LOAD_FAILED:
+        return "incompatible: storage";
+    default:
+        return "incompatible: unknown";
+    }
+}
+
+static void report_boot_status(const zzm_slot_t *slot, enum zzm_state state,
+                               uint32_t version)
+{
+    printf("[ZZM] %s %s", slot->name, boot_status_reason(state));
+    if (state == ZZM_STATE_AVAILABLE)
+        printf(" v%lu", (unsigned long)version);
+    printf("\n");
+}
 static int runtime_service_present(uint32_t id, uint32_t version)
 {
     const zzm_services_t *services = zzm_runtime_services();
@@ -614,15 +647,19 @@ void zzm_loader_boot_load(void)
         status_from_slot(i, ZZM_STATE_MISSING, 0, ZZM_REASON_NONE);
         if (storage_idle && !storage_idle()) {
             status_from_slot(i, ZZM_STATE_LOAD_FAILED, 0, ZZM_REASON_STORAGE_BUSY);
+            report_boot_status(slot, ZZM_STATE_LOAD_FAILED, 0U);
             continue;
         }
         snprintf(path, sizeof(path), "0:/ZZ9K/%s.ZZM", slot->name);
-        if (f_open(&file, path, FA_READ) != FR_OK)
+        if (f_open(&file, path, FA_READ) != FR_OK) {
+            report_boot_status(slot, ZZM_STATE_MISSING, 0U);
             continue;
+        }
         if (f_read(&file, prefix, sizeof(prefix), &read) != FR_OK ||
             read != sizeof(prefix) || f_lseek(&file, 0U) != FR_OK) {
             (void)f_close(&file);
             status_from_slot(i, ZZM_STATE_REJECTED_SLOT, 0, ZZM_REASON_FILE_READ);
+            report_boot_status(slot, ZZM_STATE_REJECTED_SLOT, 0U);
             continue;
         }
         if (memcmp(prefix, ZZM_V3_MAGIC, 4) == 0) {
@@ -631,6 +668,7 @@ void zzm_loader_boot_load(void)
                 (void)f_close(&file);
                 status_from_slot(i, ZZM_STATE_REJECTED_SLOT, 0,
                                  ZZM_REASON_FILE_READ);
+                report_boot_status(slot, ZZM_STATE_REJECTED_SLOT, 0U);
                 continue;
             }
             state = verify_v3_header_shape(&v3_header,
@@ -646,15 +684,15 @@ void zzm_loader_boot_load(void)
                 module_v3_header[i] = v3_header;
                 module_format[i] = ZZM_V3_FORMAT_VERSION;
                 module_header_valid[i] = 1U;
-                printf("[ZZM] %s available v%lu\n", slot->name,
-                       (unsigned long)v3_header.module_version);
             }
+            report_boot_status(slot, state, v3_header.module_version);
         } else {
             if (f_read(&file, &header, sizeof(header), &read) != FR_OK ||
                 read != sizeof(header)) {
                 (void)f_close(&file);
                 status_from_slot(i, ZZM_STATE_REJECTED_SLOT, 0,
                                  ZZM_REASON_FILE_READ);
+                report_boot_status(slot, ZZM_STATE_REJECTED_SLOT, 0U);
                 continue;
             }
             state = verify_header_shape(&header, (uint32_t)f_size(&file));
@@ -668,9 +706,8 @@ void zzm_loader_boot_load(void)
                 module_header[i] = header;
                 module_format[i] = ZZM_FORMAT_VERSION;
                 module_header_valid[i] = 1U;
-                printf("[ZZM] %s available v%lu\n", slot->name,
-                       (unsigned long)header.module_version);
             }
+            report_boot_status(slot, state, header.module_version);
         }
     }
     resolve_dependencies();

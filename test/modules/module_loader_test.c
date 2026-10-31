@@ -204,6 +204,15 @@ int main(void)
         test_hash(image, sizeof(image), v3.image_sha256);
         memcpy(boot_file, &v3, sizeof(v3));
         memcpy(boot_file + sizeof(v3), image, sizeof(image));
+        zzm_loader_set_v3_capabilities(NULL);
+        loader_open_calls = 0U;
+        loader_close_calls = 0U;
+        loader_open_result = FR_OK;
+        set_loader_file(boot_file, sizeof(boot_file), 1);
+        zzm_loader_boot_load();
+        CHECK(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+        CHECK(status.state == ZZM_STATE_REJECTED_CAPABILITY);
+
         zzm_loader_set_v3_capabilities(&caps);
         loader_open_calls = 0U;
         loader_close_calls = 0U;

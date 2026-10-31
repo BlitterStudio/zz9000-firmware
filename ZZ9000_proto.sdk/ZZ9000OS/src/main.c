@@ -78,6 +78,7 @@ void Xil_AssertNonVoid() {}
 #include "card_pool.h"
 #include "overlay.h"
 #include "zzm_minigl_host.h"
+#include "mw_service.h"
 #include "newlib_heap.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
@@ -377,6 +378,26 @@ static int fwup_wait_idle(void) {
 static int zzm_storage_idle(void)
 {
 	return !fw_update_busy();
+}
+
+static void zzm_configure_v3_capabilities(void)
+{
+	const zzm_minigl_boot_caps_t *graphics = zzm_minigl_boot_caps();
+	zzm_v3_capabilities_t caps;
+
+	memset(&caps, 0, sizeof(caps));
+	caps.image_flags = ZZM_IMAGE_NEEDS_CORE1 |
+		ZZM_IMAGE_NEEDS_HOST_VISIBLE | ZZM_IMAGE_NEEDS_VFP_NEON;
+	caps.wire_version = MW_SERVICE_WIRE_VER;
+	caps.transport_descriptor_major = MW_TRANSPORT_DESCRIPTOR_VERSION;
+	caps.host_window_layout_major = ZZM_HOST_WINDOW_LAYOUT_MAJOR;
+	if (graphics && graphics->has_rasterix_ef) {
+		caps.image_flags |= ZZM_IMAGE_NEEDS_RASTERIX_EF |
+			ZZM_IMAGE_NEEDS_PL330;
+		caps.rasterix_csr_abi_major = graphics->rasterix_csr_abi >> 16;
+		caps.rasterix_csr_abi_minor = graphics->rasterix_csr_abi & 0xffffU;
+	}
+	zzm_loader_set_v3_capabilities(&caps);
 }
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
@@ -1007,6 +1028,7 @@ int main() {
 #else
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
 	zzm_loader_set_storage_idle(zzm_storage_idle);
+	zzm_configure_v3_capabilities();
 	/* The initial media reset mounted SD. The scan validates headers only;
 	 * payload reads and initialization run on core 1 at first use. */
 	if (sd_storage_available_flag) {

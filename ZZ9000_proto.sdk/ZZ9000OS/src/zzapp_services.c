@@ -142,6 +142,8 @@ static uint64_t log_ring_window;
 #ifndef ZZAPP_HOST_TEST
 static uint32_t log_uart_count;
 static uint64_t log_uart_window;
+static uint32_t reject_uart_count;
+static uint64_t reject_uart_window;
 #endif
 static volatile int audio_open;
 static uint32_t audio_slot;
@@ -244,6 +246,27 @@ static uint64_t now_us(void)
 	return zzapp_host_time_us();
 }
 
+static void report_rejected_app_op(uint16_t opcode, const char *reason)
+{
+#ifndef ZZAPP_HOST_TEST
+	uint64_t t = now_us();
+
+	if (t - reject_uart_window >= 1000000ull) {
+		reject_uart_window = t;
+		reject_uart_count = 0U;
+	}
+	if (reject_uart_count == 0U) {
+		printf("[app] reject op 0x%04x: %s\r\n", (unsigned)opcode, reason);
+		reject_uart_count++;
+	}
+#else
+	(void)opcode;
+	(void)reason;
+#endif
+}
+
+#ifndef ZZAPP_SERVICES_TEST_LOADER_STUBS
+
 __attribute__((weak)) int zzapp_loader_begin(void)
 {
 	return ZZ_ENOSYS;
@@ -279,6 +302,7 @@ __attribute__((weak)) void zzapp_loader_free_back(uint32_t addr)
 {
 	(void)addr;
 }
+#endif
 
 __attribute__((weak)) void zzapp_host_yield(void)
 {
@@ -1443,6 +1467,7 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 static void run_deferred(void)
 {
 	int rc = ZZ_EINVAL;
+	const char *reject_reason = NULL;
 	const uint8_t *req = defer_req;
 	uint16_t len = defer_req_len;
 
@@ -1463,24 +1488,37 @@ static void run_deferred(void)
 		uint32_t staging;
 
 		if (len < ZZAPP_CHUNK_REQ_BYTES) {
+			reject_reason = "chunk payload is shorter than 12 bytes";
 			rc = ZZ_EINVAL;
 			break;
 		}
 		off = zzapp_get_be32(req + ZZAPP_CHUNK_FILE_OFF);
 		n = zzapp_get_be32(req + ZZAPP_CHUNK_LENGTH);
 		staging = zzapp_get_be32(req + ZZAPP_CHUNK_STAGING);
-		if (n < ZZAPP_CHUNK_MIN || n > ZZAPP_CHUNK_MAX ||
-		    staging != ZZAPP_STAGING_OFF ||
-		    zzapp_services_state() != ZZAPP_ST_LOADING) {
+		if (n < ZZAPP_CHUNK_MIN || n > ZZAPP_CHUNK_MAX) {
+			reject_reason = "chunk length is outside staging bounds";
+			rc = ZZ_EINVAL;
+			break;
+		}
+		if (staging != ZZAPP_STAGING_OFF) {
+			reject_reason = "chunk staging offset does not match";
+			rc = ZZ_EINVAL;
+			break;
+		}
+		if (zzapp_services_state() != ZZAPP_ST_LOADING) {
+			reject_reason = "chunk received outside loading state";
 			rc = ZZ_EINVAL;
 			break;
 		}
 		win_inval(ZZAPP_STAGING_OFF, n);
 		rc = zzapp_loader_chunk(off, window + ZZAPP_STAGING_OFF, n);
+		if (rc == ZZ_EINVAL)
+			reject_reason = "loader rejected chunk offset or range";
 		break;
 	}
 	case ZZAPP_OP_LOAD_END:
 		if (zzapp_services_state() != ZZAPP_ST_LOADING) {
+			reject_reason = "load end received outside loading state";
 			rc = ZZ_EINVAL;
 			break;
 		}
@@ -1491,12 +1529,14 @@ static void run_deferred(void)
 	case ZZAPP_OP_START:
 		if (zzapp_services_state() != ZZAPP_ST_LOADING &&
 		    zzapp_services_state() != ZZAPP_ST_STARTING) {
+			reject_reason = "start received outside loading state";
 			rc = ZZ_EINVAL;
 			break;
 		}
 		start_argc = len >= ZZAPP_START_REQ_BYTES
 			? zzapp_get_be32(req + ZZAPP_START_ARGC) : 0U;
 		if (start_argc > ZZAPP_ARGV_MAX) {
+			reject_reason = "start argc exceeds argv capacity";
 			rc = ZZ_EINVAL;
 			break;
 		}
@@ -1507,6 +1547,8 @@ static void run_deferred(void)
 		rc = ZZ_ENOSYS;
 		break;
 	}
+	if (zz_to_sdk(rc) == SDK_STATUS_BAD_REQUEST && reject_reason)
+		report_rejected_app_op(defer_opcode, reject_reason);
 	defer_status = zz_to_sdk(rc);
 	barrier();
 	defer_state = DEFER_DONE;
@@ -1630,13 +1672,17 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		return SDK_STATUS_OK;
 	case ZZAPP_OP_DISPLAY_BIND:
 		rc = bind_surface(req, req_len);
+		if (zz_to_sdk(rc) == SDK_STATUS_BAD_REQUEST)
+			report_rejected_app_op(opcode, "display bind fields rejected");
 		return zz_to_sdk(rc);
 	case ZZAPP_OP_LOAD_BEGIN:
 	case ZZAPP_OP_LOAD_CHUNK:
 	case ZZAPP_OP_LOAD_END:
 	case ZZAPP_OP_START:
-		if (request_id == 0U)
+		if (request_id == 0U) {
+			report_rejected_app_op(opcode, "deferred operation has request id zero");
 			return SDK_STATUS_BAD_REQUEST;
+		}
 		if (!queue_deferred(opcode, req, req_len, request_id, user_cookie))
 			return SDK_STATUS_BUSY;
 #ifdef ZZAPP_HOST_TEST

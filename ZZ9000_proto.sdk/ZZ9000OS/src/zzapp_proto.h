@@ -63,6 +63,7 @@
 #define ZZAPP_START_ARGC           0u
 #define ZZAPP_START_REQ_BYTES      4u
 
+
 #define ZZAPP_BIND_WIDTH           0u
 #define ZZAPP_BIND_HEIGHT          4u
 #define ZZAPP_BIND_PITCH           8u
@@ -437,6 +438,32 @@ static inline int32_t zzapp_get_be32s(const void *p)
 static inline int16_t zzapp_get_be16s(const void *p)
 {
     return (int16_t)zzapp_get_be16(p);
+}
+
+static inline void zzapp_build_chunk_request(
+    uint8_t payload[ZZAPP_CHUNK_REQ_BYTES], uint32_t file_off, uint32_t length)
+{
+    zzapp_put_be32(payload + ZZAPP_CHUNK_FILE_OFF, file_off);
+    zzapp_put_be32(payload + ZZAPP_CHUNK_LENGTH, length);
+    zzapp_put_be32(payload + ZZAPP_CHUNK_STAGING, ZZAPP_STAGING_OFF);
+}
+
+static inline void zzapp_build_start_request(
+    uint8_t payload[ZZAPP_START_REQ_BYTES], uint32_t argc)
+{
+    zzapp_put_be32(payload + ZZAPP_START_ARGC, argc);
+}
+
+static inline void zzapp_build_display_bind_request(
+    uint8_t payload[ZZAPP_BIND_REQ_BYTES], uint32_t width, uint32_t height,
+    uint32_t pitch, uint32_t format, uint32_t card_front, uint32_t card_back)
+{
+    zzapp_put_be32(payload + ZZAPP_BIND_WIDTH, width);
+    zzapp_put_be32(payload + ZZAPP_BIND_HEIGHT, height);
+    zzapp_put_be32(payload + ZZAPP_BIND_PITCH, pitch);
+    zzapp_put_be32(payload + ZZAPP_BIND_FORMAT, format);
+    zzapp_put_be32(payload + ZZAPP_BIND_CARD_FRONT, card_front);
+    zzapp_put_be32(payload + ZZAPP_BIND_CARD_BACK, card_back);
 }
 
 #endif /* ZZAPP_PROTO_H */

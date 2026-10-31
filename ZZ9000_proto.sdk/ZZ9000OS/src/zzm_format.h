@@ -23,6 +23,7 @@
 #define ZZM_LOAD_ON_DEMAND 0U
 #define ZZM_LOAD_BOOT 1U
 #define ZZM_DEFAULT_IDLE_UNLOAD_MS 30000U
+#define ZZM_HOST_WINDOW_LAYOUT_MAJOR 1U
 
 enum zzm_module_id {
     ZZM_MODULE_MPEG2 = 1,
