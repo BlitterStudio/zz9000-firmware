@@ -82,9 +82,9 @@ core-0 table into core 1), so the write-protect is global rather than a
 core-1-only mapping. The app host splits only the page-aligned firmware
 `.text` section, marks those pages privileged read-only and executable before
 the first entry, and leaves firmware data, vectors, card pool, and the app
-arena writable. The linker keeps `.text` within one section and aligns it so
-the split cannot cover writable data. Firmware does not self-modify that
-section; vector patching uses the low vector stubs and mutable reset-vector
+arena writable. The linker page-aligns `.text`; the host replaces every
+covered section with a private small-page table, so the split cannot cover
+writable data. Firmware does not self-modify that section; vector patching uses the low vector stubs and mutable reset-vector
 word outside it.
 
 The handler still frees a card-pool or malloc lock only if this core owns it (`sdk_smp_lock_reset_*_if_owned` in `record_fault`). An app fault that interrupted an API call owns those locks the same way a task fault does. Free them only with the owner check, then reclaim the app owner. Do not free a lock core 0 holds.

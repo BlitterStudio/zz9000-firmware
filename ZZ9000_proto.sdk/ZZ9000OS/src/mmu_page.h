@@ -24,6 +24,7 @@
  * split, or inside a section firmware already mapped non-cacheable or
  * strongly ordered. Returns 0 (and changes nothing) for an unaligned
  * address, a section with any other mapping, or a second cached section.
+ */
 int mmu_page_set_noncacheable(uintptr_t page_addr);
 /* Change whole 4 KiB pages of firmware code to privileged read-only,
  * executable mappings. start/end must be page aligned. */

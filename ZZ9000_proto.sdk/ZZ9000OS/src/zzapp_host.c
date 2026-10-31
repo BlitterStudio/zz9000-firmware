@@ -297,7 +297,7 @@ static void service_tick(uint64_t now, int permit_reentry)
 }
 
 #ifndef ZZAPP_HOST_TEST
-static void zzapp_private_timer_service(void)
+static __attribute__((noinline, used)) void zzapp_private_timer_service(void)
 {
     Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_ISR_OFFSET,
               XSCUTIMER_ISR_EVENT_FLAG_MASK);
@@ -386,7 +386,7 @@ void zzapp_host_yield_wait(void)
 uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
 
 #ifndef ZZAPP_HOST_TEST
-static void zzapp_api_tick_body(void)
+static __attribute__((noinline, used)) void zzapp_api_tick_body(void)
 {
     service_tick(now_ticks(), 0);
 }
