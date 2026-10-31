@@ -522,10 +522,25 @@ int minigl_raster_finish(void)
     return 1;
 }
 
+static int g_rix_abandoned;
+
+void minigl_raster_abandon(void)
+{
+    g_rix_abandoned = 1;
+    minigl_rix_backend_abandon(&g_rix);
+}
+
 int minigl_raster_quiesce(void)
 {
-    int result = minigl_raster_finish();
+    int result;
 
+    if (g_rix_abandoned) {
+        minigl_rix_backend_abandon(&g_rix);
+        minigl_raster_set_rix_platform(NULL);
+        g_rix_abandoned = 0;
+        return 1;
+    }
+    result = minigl_raster_finish();
     if (result) {
         minigl_rix_backend_reset(&g_rix);
         minigl_raster_set_rix_platform(NULL);

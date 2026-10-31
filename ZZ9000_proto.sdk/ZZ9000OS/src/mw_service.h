@@ -277,6 +277,10 @@ void mw_service_reset(void);
 /* Print the bounded packet history before reset tears down a live context. */
 void mw_service_report_amiga_reset(void);
 void mw_service_reset_local(void);
+/* Stop PL330 and RasterIX without waiting, then mark the rasterizer so the
+ * following destroy does not spin on a fence. Core 0 calls this only after
+ * core 1 has been stopped or was never running. */
+void mw_rix_abort_engines(void);
 void mw_service_on_core1_fault(void);
 int  mw_service_is_bound(void);
 /* Snapshot the current binding into a host-endian descriptor record.

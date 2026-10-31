@@ -243,6 +243,10 @@ int minigl_rix_backend_make_cpu_visible(MiniGLRixBackend *backend,
 int minigl_rix_backend_surface_is_rgb565(const MiniGLRixBackend *backend);
 /* Completion is the ownership hand-off: no CPU access may occur before it. */
 int minigl_rix_backend_drain(MiniGLRixBackend *backend);
+/* Releases pins and retired copy-on-write pages without waiting. The caller
+ * must already have stopped PL330 and RasterIX; a live engine may still
+ * sample those pages. */
+void minigl_rix_backend_abandon(MiniGLRixBackend *backend);
 uint32_t minigl_rix_backend_eval_fallback(const MiniGLRixBackend *backend);
 const char *minigl_rix_backend_fallback_name(uint32_t reason);
 void minigl_rix_backend_log_fallback(uint32_t reason);

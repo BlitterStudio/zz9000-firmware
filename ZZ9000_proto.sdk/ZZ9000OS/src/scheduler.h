@@ -190,6 +190,21 @@ typedef enum {
 sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
                                           int minigl_work_available, int minigl_bound);
 
+/* Core 0's Amiga-reset decision for MiniGL. Core 0 must not free command
+ * or present buffers while core 1 may still be streaming them. The caller
+ * posts the request and polls this; it does not spin. */
+typedef enum {
+  SCHED_MINIGL_RESET_IDLE = 0,  /* nothing posted */
+  SCHED_MINIGL_RESET_WAIT,      /* core 1 will free after its current packet */
+  SCHED_MINIGL_RESET_ACKED,     /* core 1 already freed; do not free again */
+  SCHED_MINIGL_RESET_LOCAL,     /* no core 1; caller frees now */
+  SCHED_MINIGL_RESET_ABORT      /* deadline or dead worker: stop engines, then free */
+} sched_minigl_reset_phase_t;
+
+sched_minigl_reset_phase_t sched_minigl_reset_phase(int core1_up, int posted,
+                                                    int acked, int elapsed_ms,
+                                                    int budget_ms);
+
 /* ---- fault watchdog (portable) ---- */
 void taskq_watchdog_init(taskq_watchdog_t *w, uint32_t threshold);
 void taskq_watchdog_on_fault(taskq_watchdog_t *w);
@@ -222,6 +237,11 @@ void scheduler_core1_worker(void);         /* core 1: dedicated task worker; nev
 void scheduler_core1_park_if_requested(void); /* core 1: clean L1 + park for a cold restart */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
 void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tasks + reset queue before a mailbox teardown */
+/* Post the MiniGL reset and wake core 1. It runs after the current packet,
+ * including an in-flight PL330 stream or present blit. */
+void scheduler_request_minigl_reset(void);
+/* Drop the request and cold-restart core 1 so it cannot also free. */
+void scheduler_cancel_minigl_reset(void);
 /* core 0, after the quiesce: have the idle core 1 free its tracked decode
  * blocks itself. 0 on success; nonzero means the caller must cold-restart. */
 int  scheduler_core1_reclaim(void);

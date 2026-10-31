@@ -313,6 +313,21 @@ sched_worker_action_t sched_worker_decide(int reset_requested, int task_availabl
   return SCHED_WORKER_ACTION_WFE;
 }
 
+sched_minigl_reset_phase_t sched_minigl_reset_phase(int core1_up, int posted,
+                                                    int acked, int elapsed_ms,
+                                                    int budget_ms)
+{
+  if (acked)
+    return SCHED_MINIGL_RESET_ACKED;
+  if (!core1_up)
+    return posted ? SCHED_MINIGL_RESET_ABORT : SCHED_MINIGL_RESET_LOCAL;
+  if (!posted)
+    return SCHED_MINIGL_RESET_IDLE;
+  if (budget_ms >= 0 && elapsed_ms >= budget_ms)
+    return SCHED_MINIGL_RESET_ABORT;
+  return SCHED_MINIGL_RESET_WAIT;
+}
+
 /* ---- fault watchdog: trips core 1 off after too many consecutive faults ---- */
 void taskq_watchdog_init(taskq_watchdog_t *w, uint32_t threshold)
 {

@@ -502,6 +502,24 @@ static void mw_ctx_configure_rix(mw_ctx *c)
 }
 #endif
 
+void mw_rix_abort_engines(void)
+{
+#if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST)
+#if MINIGL_RIX_DMA
+    /* One debug instruction. Do not poll: core 0 must not wait on the DMAC. */
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST0,
+              (MW_RIX_PL330_DMAKILL << 16U) | (MINIGL_RIX_DMAC_CHANNEL << 8U) | 1U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGINST1, 0U);
+    Xil_Out32(MINIGL_RIX_DMAC_BASE + MW_RIX_DMAC_DBGCMD, 0U);
+    __asm__ volatile("dsb sy" ::: "memory");
+#endif
+    Xil_Out32(MINIGL_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
+    Xil_Out32(MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    __asm__ volatile("dsb sy" ::: "memory");
+#endif
+    minigl_raster_abandon();
+}
+
 static inline void mw_ctx_update_latest(mw_ctx *c)
 {
     if (c->state.draw_buffer == 0) return; /* GL_NONE */

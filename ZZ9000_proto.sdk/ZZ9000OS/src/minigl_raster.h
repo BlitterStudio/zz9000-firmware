@@ -82,6 +82,9 @@ int minigl_raster_present_is_bottom_up(void);
 int minigl_raster_finish(void);
 /* Retires all queued engine work before its card-pool buffers are released. */
 int minigl_raster_quiesce(void);
+/* Engines have been stopped from outside. The next quiesce must not wait
+ * for a fence that will never arrive. */
+void minigl_raster_abandon(void);
 /* Replaces a target after a RasterIX fail-stop without reusing memory that
  * may still be subject to an unbounded DMA write. */
 void minigl_raster_set_fail_stop_target_handler(MiniGLRasterFailStopTargetFn handler,

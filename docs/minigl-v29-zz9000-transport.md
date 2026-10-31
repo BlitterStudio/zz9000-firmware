@@ -417,6 +417,11 @@ To match the performance of the Amiberry in-process submit, `BRIDGE_SUBMIT` does
      queuing another. `glFinish`, readback, `MGLLockBack`, context destruction,
      target/mode changes, and synchronous fallback presentation all retire
      outstanding fences before observing or reusing their result.
+     An Amiga reset does not free those buffers from core 0 while core 1
+     may still be streaming a PL330 packet or writing the present. Core 1
+     finishes the current packet and resets the service; if it does not
+     answer, core 0 stops the DMAC and RasterIX and only then releases the
+     buffers.
 
 Wire framing is validated before execution. A valid command that encounters a
 GL-level condition (for example an incomplete texture, an allocation failure,

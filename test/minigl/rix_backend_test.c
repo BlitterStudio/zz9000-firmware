@@ -486,6 +486,39 @@ static void test_subimage_writes_only_rectangle_and_copy_on_writes(void)
     assert(!backend.textures[0].valid);
 }
 
+static void test_abandon_retires_copy_only_after_engine_stop(void)
+{
+    MiniGLRixBackend backend;
+    static struct model model;
+    static uint32_t source[16U * 16U];
+    uint16_t old_page;
+    uint32_t y;
+
+    init_backend(&backend, &model, 4U);
+    for (y = 0U; y < 16U * 16U; ++y)
+        source[y] = 0xff0000ffU;
+    assert(minigl_rix_backend_upload_texture(&backend, 9U, 0U, source, 16U, 16U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 9U, GL_NEAREST, GL_NEAREST,
+                                  0x2901U, 0x2901U);
+    assert(submit_texture(&backend, 9U));
+    assert(backend.textures[0].pin_count == 1U);
+    old_page = backend.textures[0].first_page;
+    source[0] = 0x00ff00ffU;
+    assert(minigl_rix_backend_subimage_texture(&backend, 9U, 0U, 0U, 0U, 1U, 1U,
+                                                source, 16U, 16U));
+    /* The in-flight command buffer, and any present still reading that frame,
+     * still owns the original pages. Abandon is only legal once PL330 and
+     * RasterIX have been stopped. */
+    assert(backend.textures[0].deleted && backend.textures[0].valid);
+    assert(backend.textures[0].first_page == old_page);
+    assert(backend.pending[0] || backend.textures[0].pin_count != 0U);
+    minigl_rix_backend_abandon(&backend);
+    assert(!backend.pending[0]);
+    assert(!backend.textures[0].valid);
+    assert(backend.driver.dma_stream == NULL);
+}
+
 static void test_recorded_frame_replay(void)
 {
     MiniGLRixBackend backend;
@@ -1075,6 +1108,7 @@ int main(void)
     test_downscale_and_residency_lifetime();
     test_lru_eviction_and_subimage_reupload();
     test_subimage_writes_only_rectangle_and_copy_on_writes();
+    test_abandon_retires_copy_only_after_engine_stop();
     test_texture_pool_growth();
     test_recorded_frame_replay();
     test_clear_preserves_depth_feature();

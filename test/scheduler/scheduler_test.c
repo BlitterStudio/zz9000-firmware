@@ -402,6 +402,28 @@ static void test_minigl_reset_handshake_flow(void)
              SCHED_WORKER_ACTION_POLL_IDLE);
 }
 
+static void test_minigl_reset_phase_keeps_inflight_buffers(void)
+{
+  /* Core 1 owns the packet: do not free while it can still be in PL330 or a present. */
+  expect_int("phase_wait", sched_minigl_reset_phase(1, 1, 0, 0, 50),
+             SCHED_MINIGL_RESET_WAIT);
+  expect_int("phase_wait_late", sched_minigl_reset_phase(1, 1, 0, 49, 50),
+             SCHED_MINIGL_RESET_WAIT);
+  /* Ack means core 1 already freed. A second free would be a double release. */
+  expect_int("phase_acked", sched_minigl_reset_phase(1, 1, 1, 10, 50),
+             SCHED_MINIGL_RESET_ACKED);
+  /* Deadline or a dead worker: stop the engines, then the caller may free. */
+  expect_int("phase_abort_deadline", sched_minigl_reset_phase(1, 1, 0, 50, 50),
+             SCHED_MINIGL_RESET_ABORT);
+  expect_int("phase_abort_dead", sched_minigl_reset_phase(0, 1, 0, 0, 50),
+             SCHED_MINIGL_RESET_ABORT);
+  /* No worker was ever running this service. */
+  expect_int("phase_local", sched_minigl_reset_phase(0, 0, 0, 0, 50),
+             SCHED_MINIGL_RESET_LOCAL);
+  expect_int("phase_idle", sched_minigl_reset_phase(1, 0, 0, 0, 50),
+             SCHED_MINIGL_RESET_IDLE);
+}
+
 int main(void)
 {
   test_stress_fill_is_deterministic();
@@ -433,6 +455,7 @@ int main(void)
   test_watchdog_success_resets_counter();
   test_sched_worker_decide_priorities();
   test_minigl_reset_handshake_flow();
+  test_minigl_reset_phase_keeps_inflight_buffers();
 
   if (failures) {
     printf("scheduler_test: %d failure(s)\n", failures);

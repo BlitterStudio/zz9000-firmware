@@ -337,6 +337,10 @@ void core1_cold_restart(void)
 	sh->core1_park_request = 0U;
 	sh->core1_parked = 0U;
 	dsb();
+	/* CPU1 is halted, so it cannot race these writes. A cold restart can
+	 * land inside a PL330 stream or a RasterIX draw; stop both before the
+	 * command buffer or color target is freed. */
+	mw_rix_abort_engines();
 
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);

@@ -1914,6 +1914,29 @@ int minigl_rix_backend_drain(MiniGLRixBackend *backend)
         backend->textures[index].last_used_fence = 0U;
     return 1;
 }
+
+void minigl_rix_backend_abandon(MiniGLRixBackend *backend)
+{
+    size_t index;
+
+    if (backend == NULL)
+        return;
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        backend->pending[index] = 0U;
+        backend->pending_fence[index] = 0U;
+        backend->submitted_command_words[index] = 0U;
+        backend_release_buffer(backend, (uint8_t)index);
+    }
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
+        if (backend->recorded_pins[index] != 0U &&
+            backend->textures[index].pin_count != 0U)
+            --backend->textures[index].pin_count;
+    memset(backend->recorded_pins, 0, sizeof(backend->recorded_pins));
+    backend->collecting = 0U;
+    backend->frame_active = 0U;
+    backend->surface_rgb565 = 0U;
+    backend->driver.dma_stream = NULL;
+}
 const char *minigl_rix_backend_fallback_name(uint32_t reason)
 {
     switch (reason) {
