@@ -199,7 +199,9 @@ static uint64_t ticks_to_us(uint64_t ticks)
 #ifdef ZZAPP_HOST_TEST
     return ticks;
 #else
-    return ticks * 1000000ULL / (uint64_t)COUNTS_PER_SECOND;
+    return (ticks / (uint64_t)COUNTS_PER_SECOND) * 1000000ULL +
+           ((ticks % (uint64_t)COUNTS_PER_SECOND) * 1000000ULL) /
+           (uint64_t)COUNTS_PER_SECOND;
 #endif
 }
 
@@ -584,10 +586,16 @@ static int protect_firmware_text(void)
      * Core 0 and core 1 walk the shared MMUTable. The linker range is
      * page-aligned and excludes writable firmware data and literal pools.
      */
-    if (!mmu_page_set_readonly_executable(
+    if ((uintptr_t)__firmware_text_start < 0x08200000U ||
+        (uintptr_t)__firmware_text_end <= (uintptr_t)__firmware_text_start ||
+        !mmu_page_set_readonly_executable(
             (uintptr_t)__firmware_text_start,
-            (uintptr_t)__firmware_text_end))
+            (uintptr_t)__firmware_text_end)) {
+        printf("[zzapp] invalid firmware text range %08lx-%08lx\n",
+               (unsigned long)__firmware_text_start,
+               (unsigned long)__firmware_text_end);
         return 0;
+    }
     g_firmware_text_readonly = 1;
     return 1;
 }
