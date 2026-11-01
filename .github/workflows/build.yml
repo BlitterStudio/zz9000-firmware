@@ -100,7 +100,7 @@ jobs:
       - name: Checkout MiniGL module front end
         uses: actions/checkout@v6
         with:
-          repository: BlitterStudio/amiberry-minigl-library-zz9k
+          repository: BlitterStudio/amiberry-minigl-library
           ref: fix/module-review-b
           path: amiberry-minigl-library-zz9k
       - name: Install host-test multilib support
