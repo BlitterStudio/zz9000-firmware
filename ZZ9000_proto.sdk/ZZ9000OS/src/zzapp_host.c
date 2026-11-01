@@ -665,6 +665,12 @@ static void run_app(uint32_t argc)
                     g_card + ZZAPP_ARENA_BYTES);
 #endif
     zzapp_private_timer_disable();
+#ifndef ZZAPP_HOST_TEST
+    /* The unwind (exit, force-stop or fault) has landed here.  A pending
+     * flag left set would make any later host yield unwind onto this
+     * worker frame again after it has been reused. */
+    g_unwind_pending = 0;
+#endif
     g_coh->running = 0;
     if (!g_faulted) {
         life32(ZZAPP_LIFE_EXIT_OFF, g_exit_code);
