@@ -76,7 +76,11 @@ static uint32_t g_heap_bump;
 static int g_faulted;
 static int g_cold_restarts;
 #ifndef ZZAPP_HOST_TEST
-static volatile int g_host_tick_active;
+/* Set while a task-context service tick runs (API epilogue on app_host_sp,
+ * or a yield on the app stack).  The private-timer IRQ then neither nests
+ * service_tick nor switches to app_host_sp.  Global: the IRQ entry reads it
+ * from assembly. */
+volatile int g_host_tick_active;
 static volatile int g_unwind_pending;
 #endif
 
@@ -248,6 +252,16 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
     life32(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
     life32(ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
     life32(ZZAPP_LIFE_GENERATION_OFF, generation);
+    /* The window outlives sessions; a fault without registers (watchdog
+     * restart) must not report the previous app's pc/far/fsr. */
+    life32(ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_NONE);
+    life32(ZZAPP_LIFE_PC_OFF, 0u);
+    life32(ZZAPP_LIFE_SP_OFF, 0u);
+    life32(ZZAPP_LIFE_LR_OFF, 0u);
+    life32(ZZAPP_LIFE_FAR_OFF, 0u);
+    life32(ZZAPP_LIFE_FSR_OFF, 0u);
+    life32(ZZAPP_LIFE_CPSR_OFF, 0u);
+    life32(ZZAPP_LIFE_EXIT_OFF, 0u);
 }
 
 void zzapp_loader_unbound(void)
@@ -389,8 +403,14 @@ static __attribute__((noinline, used)) void zzapp_private_timer_service(void)
 {
     Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_ISR_OFFSET,
               XSCUTIMER_ISR_EVENT_FLAG_MASK);
-    if (g_coh->running && !g_host_tick_active)
-        service_tick(now_ticks(), 0);
+    if (g_coh->running) {
+        if (!g_host_tick_active)
+            service_tick(now_ticks(), 0);
+        else
+            /* A task-context tick is still running (possibly a long SDK
+             * task); core 1 is alive and taking interrupts. */
+            g_coh->tick_seen = now_ticks();
+    }
     if (g_unwind_pending) {
         /* We discard the IRQ frame below, so acknowledge the GIC before
          * restoring run_app's saved worker context. */
@@ -400,7 +420,11 @@ static __attribute__((noinline, used)) void zzapp_private_timer_service(void)
 }
 
 /* The BSP vector saves d0-d7/d16-d31 and FPSCR. Preserve the remaining
- * d8-d15 before switching from its 8 KiB IRQ stack to app_host_sp. */
+ * d8-d15 before switching from its 8 KiB IRQ stack to app_host_sp.  While a
+ * task-context tick is active, app_host_sp is already in use by
+ * zzapp_api_tick_body; switching to it would overwrite that live frame
+ * (its saved return address came back as 0x42a00028 on hardware), so stay
+ * on the IRQ stack: the service routine then does no deep work. */
 __attribute__((naked)) static void zzapp_private_timer_irq(void *unused)
 {
     (void)unused;
@@ -408,8 +432,13 @@ __attribute__((naked)) static void zzapp_private_timer_irq(void *unused)
         "push {r4, lr}\n"
         "vpush {d8-d15}\n"
         "mov r4, sp\n"
+        "ldr r12, =g_host_tick_active\n"
+        "ldr r12, [r12]\n"
+        "cmp r12, #0\n"
+        "bne 1f\n"
         "ldr r12, =app_host_sp\n"
         "ldr sp, [r12]\n"
+        "1:\n"
         "bl zzapp_private_timer_service\n"
         "mov sp, r4\n"
         "vpop {d8-d15}\n"
@@ -465,10 +494,27 @@ static void zzapp_private_timer_enable(void) {}
 static void zzapp_private_timer_disable(void) {}
 #endif
 
+#ifndef ZZAPP_HOST_TEST
+/* A service tick from task context.  The flag keeps the private-timer IRQ
+ * from running a nested service_tick on top of this one. */
+static void service_tick_in_task(uint64_t now, int permit_reentry)
+{
+    int outer = g_host_tick_active;
+
+    g_host_tick_active = 1;
+    __asm__ __volatile__("" ::: "memory");
+    service_tick(now, permit_reentry);
+    __asm__ __volatile__("" ::: "memory");
+    g_host_tick_active = outer;
+}
+#else
+#define service_tick_in_task service_tick
+#endif
+
 void zzapp_host_yield(void)
 {
     zzapp_note_progress();
-    service_tick(now_ticks(), 0);
+    service_tick_in_task(now_ticks(), 0);
 #ifndef ZZAPP_HOST_TEST
     zzapp_unwind_if_needed();
 #endif
@@ -487,7 +533,7 @@ void zzapp_host_yield_wait(void)
     if (g_coh->in_api != 0u)
         g_coh->api_entered = now;
     zzapp_note_progress();
-    service_tick(now, 1);
+    service_tick_in_task(now, 1);
 #ifndef ZZAPP_HOST_TEST
     zzapp_unwind_if_needed();
 #endif
@@ -499,7 +545,8 @@ uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
 static __attribute__((noinline, used)) void zzapp_api_tick_body(void)
 {
     service_tick(now_ticks(), 0);
-    g_host_tick_active = 0;
+    /* g_host_tick_active stays set: this frame on app_host_sp is live until
+     * the wrapper has switched back, and an IRQ must not reuse that stack. */
     zzapp_unwind_if_needed();
 }
 
@@ -546,8 +593,12 @@ void zzapp_api_leave(void)
 #ifdef ZZAPP_HOST_TEST
             service_tick(now, 0);
 #else
-            g_host_tick_active = 1;
-            zzapp_api_tick_on_host_stack();
+            /* Never nest: an active tick may own app_host_sp. */
+            if (!g_host_tick_active) {
+                g_host_tick_active = 1;
+                zzapp_api_tick_on_host_stack();
+                g_host_tick_active = 0;
+            }
 #endif
         }
     }
