@@ -244,8 +244,13 @@ static void win_put32(uint32_t off, uint32_t value)
 
 static uint32_t win_get32(uint32_t off)
 {
+	volatile const uint32_t *word = (volatile const uint32_t *)(window + off);
+	uint32_t value;
+
 	win_inval(off, 4U);
-	return zzapp_get_be32(window + off);
+	value = __builtin_bswap32(*word);
+	barrier();
+	return value;
 }
 
 static void life_put(uint32_t off, uint32_t value)
@@ -525,12 +530,25 @@ void zzapp_services_on_launch(void)
 #endif
 }
 
-void zzapp_services_on_reset(void)
+void zzapp_services_on_app_end(void)
 {
 	audio_detach();
 	audio_request = AUDIO_REQUEST_NONE;
 	if (display_back_owned)
 		zzapp_loader_free_back(life_get(ZZAPP_LIFE_CARD_BACK_OFF));
+	display_bound = 0;
+	display_back_owned = 0;
+	display_id = 0U;
+	memset(file_open_slot, 0, sizeof(file_open_slot));
+	memset(list_open_slot, 0, sizeof(list_open_slot));
+	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC));
+	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, 0U);
+	life_put(ZZAPP_LIFE_CARD_BACK_OFF, 0U);
+}
+
+void zzapp_services_on_reset(void)
+{
+	zzapp_services_on_app_end();
 #ifndef ZZAPP_HOST_TEST
 	printf("[app] reset: window forgotten\r\n");
 #endif
@@ -635,13 +653,16 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 		    zzapp_services_stop_requested())
 			return ZZ_EIO;
 		win_inval(ZZAPP_FILE_OFF, ZZAPP_FILE_BYTES);
-		s1 = zzapp_get_be32(window + ZZAPP_FILE_OFF);
+		barrier();
+		s1 = win_get32(ZZAPP_FILE_OFF + 0U);
 		if ((s1 & 1U) == 0U && s1 != file_seq) {
-			n = zzapp_get_be32(window + ZZAPP_FILE_OFF + 32U);
-			pos = zzapp_get_be64(window + ZZAPP_FILE_OFF + 48U);
-			reply_mode = zzapp_get_be32(window + ZZAPP_FILE_OFF + 36U);
-			reply_mtime = zzapp_get_be32(window + ZZAPP_FILE_OFF + 56U);
-			reply_err = zzapp_get_be32s(window + ZZAPP_FILE_OFF + 20U);
+			n = win_get32(ZZAPP_FILE_OFF + 32U);
+			pos = ((uint64_t)win_get32(ZZAPP_FILE_OFF + 48U) << 32) |
+			      win_get32(ZZAPP_FILE_OFF + 52U);
+			reply_mode = win_get32(ZZAPP_FILE_OFF + 36U);
+			reply_mtime = win_get32(ZZAPP_FILE_OFF + 56U);
+			reply_err = (int32_t)win_get32(ZZAPP_FILE_OFF + 20U);
+			barrier();
 			s2 = win_get32(ZZAPP_FILE_OFF + 0U);
 			if (s1 == s2 && zzapp_services_generation() == generation) {
 				if (out_n)
@@ -658,8 +679,14 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 				return ZZ_OK;
 			}
 		}
-		if (now_us() - start >= ZZAPP_FILE_TIMEOUT_US)
+		if (now_us() - start >= ZZAPP_FILE_TIMEOUT_US) {
+			/* Retire this request on the wire before another one reuses
+			 * file_seq; a late reply can no longer satisfy the next wait. */
+			file_seq += 2U;
+			win_put32(ZZAPP_FILE_OFF + 0U, file_seq);
+			barrier();
 			return ZZ_ETIMEDOUT;
+		}
 		/* File completion polling holds no GL lock, so it is an intentional
 		 * service-tick exception while its enclosing API remains active. */
 		yield_wait_once();
@@ -1027,6 +1054,7 @@ int zzapp_svc_input_poll(zzapp_event *out, uint32_t max, uint32_t *out_n)
 		return ZZ_EINVAL;
 	head = win_get32(ZZAPP_INPUT_OFF + 0U);
 	tail = win_get32(ZZAPP_INPUT_OFF + 4U);
+	barrier();
 	if (head - tail > ZZAPP_INPUT_CAP)
 		tail = head - ZZAPP_INPUT_CAP;
 	while (n < max && tail != head) {
@@ -1036,6 +1064,7 @@ int zzapp_svc_input_poll(zzapp_event *out, uint32_t max, uint32_t *out_n)
 		zzapp_event *ev = &out[n];
 
 		win_inval(off, ZZAPP_EVENT_BYTES);
+		barrier();
 		ev->type = zzapp_get_be16(window + off + 0U);
 		ev->code = zzapp_get_be16(window + off + 2U);
 		ev->dx = zzapp_get_be16s(window + off + 4U);
@@ -1723,6 +1752,16 @@ void zzapp_services_start_entered(int status)
 	defer_status = zz_to_sdk(status);
 	defer_reply_len = 0U;
 	defer_store(DEFER_DONE);
+}
+
+void zzapp_services_cancel_start(int status)
+{
+	start_pending = 0U;
+	if (defer_load() == DEFER_RUNNING && defer_opcode == ZZAPP_OP_START) {
+		defer_status = zz_to_sdk(status);
+		defer_reply_len = 0U;
+		defer_store(DEFER_DONE);
+	}
 }
 
 static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,

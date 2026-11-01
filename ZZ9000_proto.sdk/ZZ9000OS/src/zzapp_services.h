@@ -33,6 +33,9 @@ struct zzapp_audio;
 
 /* Amiga reset: forget the window (the host heap is already reset) and detach audio. */
 void zzapp_services_on_reset(void);
+/* App lifetime cleanup retains the launch window so status remains readable. */
+void zzapp_services_on_app_end(void);
+void zzapp_services_cancel_start(int status);
 void zzapp_services_on_launch(void);
 
 void zzapp_services_poll(void);

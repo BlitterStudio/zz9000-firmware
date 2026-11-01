@@ -549,9 +549,6 @@ static int place_segments(const struct load_image *img)
             if (img->seg[i].filesz && img->seg[i].vaddr != img->seg[i].off)
                 memmove(g_mem + img->seg[i].vaddr, g_mem + img->seg[i].off,
                         img->seg[i].filesz);
-            if (img->seg[i].memsz > img->seg[i].filesz)
-                memset(g_mem + img->seg[i].vaddr + img->seg[i].filesz, 0,
-                       img->seg[i].memsz - img->seg[i].filesz);
             done[i] = 1;
             left--;
             moved = 1;
@@ -559,7 +556,16 @@ static int place_segments(const struct load_image *img)
         if (!moved)
             return ZZ_ENOMEM;
     }
-    return left ? ZZ_ENOMEM : ZZ_OK;
+    if (left)
+        return ZZ_ENOMEM;
+    /* Zero only after every source byte has moved: a BSS tail can overlap a
+     * not-yet-copied file image even when PT_LOAD destinations do not overlap. */
+    for (i = 0; i < img->nseg; i++) {
+        if (img->seg[i].memsz > img->seg[i].filesz)
+            memset(g_mem + img->seg[i].vaddr + img->seg[i].filesz, 0,
+                   img->seg[i].memsz - img->seg[i].filesz);
+    }
+    return ZZ_OK;
 }
 
 int zzapp_loader_end(void)

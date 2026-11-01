@@ -29,6 +29,8 @@ WEAK int zzapp_services_take_start(uint32_t *argc) { (void)argc; return 0; }
 WEAK uint8_t *zzapp_services_window(void) { return NULL; }
 WEAK void zzapp_services_start_entered(int status) { (void)status; }
 WEAK void zzapp_services_on_reset(void) {}
+WEAK void zzapp_services_on_app_end(void) {}
+WEAK void zzapp_services_cancel_start(int status) { (void)status; }
 WEAK void zzapp_services_on_launch(void) {}
 WEAK void zzapp_svc_log(const char *msg, uint32_t len) { (void)msg; (void)len; }
 WEAK int zzapp_svc_should_stop(void) { return 0; }

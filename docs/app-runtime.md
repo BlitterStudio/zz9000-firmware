@@ -50,7 +50,7 @@ The tick is the body the worker already has, bounded: honour a pending reset or 
 
 `in_api` counts entries into firmware API functions. The timer tick runs MiniGL and SDK work only when `in_api == 0`, so it cannot re-enter RasterIX or the card-pool lock under an app GL call. Two firmware paths may call the tick while `in_api` is set, because they are not holding the GL lock: the file-wait loop and `zz_sleep_us`. They call it between polls. A GL call does not return until that call's RasterIX work is drained (`minigl_rix_backend_drain` / `minigl_raster_finish`, as the format requires). Between GL calls the engine is idle and a 68k packet may run.
 
-Before entering the app, the worker saves its SVC `sp` in `app_host_sp` and switches to the arena stack. Yield and the timer tick switch back to `app_host_sp` to run services, then back to the app `sp`. The app context record holds the SVC registers and the full VFP state. A tick that used NEON must restore that state or Quake's floats are garbage.
+Before entering the app, the worker saves its SVC callee-saved registers, `sp`, `lr`, `d0`–`d31`, and `fpscr` in the `zzapp_enter_arm` frame. Normal `zz_exit`, forced stop, watchdog expiry, and app aborts restore that one frame and return to `run_app`'s completion path; they never branch into a fresh worker. The fault unwind resets the abort and undefined banked stacks and re-enables IRQs. A timer-triggered unwind explicitly writes the GIC EOI before discarding the IRQ frame. The API epilogue marks its host-stack tick active, so a private timer IRQ only acknowledges while that stack is in use.
 
 ### 68k MiniGL clients while an app runs
 
@@ -70,38 +70,38 @@ Zorro II: `APP_QUERY` returns unsupported. Do not allocate the rings window. The
 
 Classify in the data-abort, prefetch-abort, and undefined handlers (`arm_exception_handler_id_*` in `core2.c`) before `record_fault`'s park:
 
-- Faulting PC (the address those handlers already print from `DataAbortAddr`, `PrefetchAbortAddr`, `UndefinedExceptionAddr`) lies in the app arena, or the abort mode's return address lies in the app arena: this is an app fault. Capture `pc`, `sp`, `lr`, DFAR/IFAR, DFSR/IFSR, `cpsr` into the lifecycle block. Switch to the firmware SVC stack. Do not return to the faulting instruction. Do not set `core1_restart_request`. Enter `zzapp_force_stop` with `ZZ_FAULT_DATA`, `ZZ_FAULT_PREFETCH`, or `ZZ_FAULT_UNDEF`, reclaim, and resume `scheduler_core1_worker`. Firmware services keep running. 68k MiniGL contexts that were not the app context stay up. The app context is destroyed.
+- Faulting PC (the address those handlers already print from `DataAbortAddr`, `PrefetchAbortAddr`, `UndefinedExceptionAddr`) lies in the app arena, or the abort mode's return address lies in the app arena: this is an app fault. Capture `pc`, `sp`, `lr`, DFAR/IFAR, DFSR/IFSR, `cpsr` into the lifecycle block. Switch to the saved firmware context and return through `run_app`; do not return to the faulting instruction and do not set `core1_restart_request`. The unwind resets the abort/undefined stacks before re-enabling IRQs. Firmware services keep running. 68k MiniGL contexts that were not the app context stay up. The app context is destroyed.
 - Any other fault, including a fault inside an API call or the GL front end: existing `record_fault` path, cold restart, existing poison and reclaim. The app is not restarted after that restart. Core 0 clears the app-running flag in the coherent task-queue block and reclaims `CARD_POOL_CLASS_APP`.
 
 The app-running flag and the progress timestamp live in the coherent task-queue region (`SDK_TASKQ_REGION_ADDRESS`, `0x08600000`), which core 0 owns. They do not live in core-1 BSS. `core1_cold_restart` does not zero firmware BSS, and a stale BSS flag would relaunch a dead app or skip reclaim.
 
-Write-protect firmware `.text` (read-execute, not writable) on the core-1 translation tables before the first app entry, if the current tables are writable there. That is an attribute change, not user mode. Firmware `.data` and the card pool stay writable. A wild store into those will not abort. Do not claim the app was contained.
+Write-protect firmware `.text` (read-execute, not writable) on the shared translation table before the first app entry. Its L2 mappings use domain 14 and both cores set domain 14 to **Client**, so AP=privileged-read-only is enforced; all unrelated BSP mappings remain in manager domains. This is an attribute change, not user mode. Firmware `.data` and the card pool stay writable. A wild store into those will not abort. Do not claim the app was contained.
 
 Both cores use the same `MMUTable` (`scheduler_coherency_init_core1` loads the
 core-0 table into core 1), so the write-protect is global rather than a
 core-1-only mapping. The app host splits only the page-aligned firmware
 `.text` section, marks those pages privileged read-only and executable before
 the first entry, and leaves firmware data, vectors, card pool, and the app
-arena writable. The linker page-aligns `.text`; the host replaces every
-covered section with a private small-page table, so the split cannot cover
-writable data. Firmware does not self-modify that section; vector patching uses the low vector stubs and mutable reset-vector
+arena writable. The linker anchors `__firmware_text_start` at `0x08200000`;
+the linked ELF must retain that value. Firmware does not self-modify that
+section; vector patching uses the low vector stubs and mutable reset-vector
 word outside it.
 
 The handler still frees a card-pool or malloc lock only if this core owns it (`sdk_smp_lock_reset_*_if_owned` in `record_fault`). An app fault that interrupted an API call owns those locks the same way a task fault does. Free them only with the owner check, then reclaim the app owner. Do not free a lock core 0 holds.
 
 ### Watchdog
 
-App progress is any yield or API epilogue, which stores `XTime_GetTime()` into the coherent shared word. The 5 ms timer IRQ checks it. If 2 seconds pass with no progress and `in_api == 0`, the IRQ does not return to the app: it force-stops with `ZZ_FAULT_WATCHDOG`, same reclaim as an abort, no cold restart.
+App progress is any yield or API epilogue, which stores `XTime_GetTime()` into the coherent shared word. The 5 ms timer IRQ checks it. If 2 seconds pass with no progress, including while an API is entered, the IRQ force-stops and unwinds through `run_app`; it never resumes the app.
 
-If the app has executed `cpsid` (it can; v0 is privileged), the timer IRQ does not run and the progress word goes stale. Core 0's existing poll sees that. After 2 seconds stale, core 0 takes the existing cold-restart path. That is the backstop, not the normal stop. The status report must say watchdog-plus-restart, so a hung Quake is not mistaken for a firmware crash that happened to lose 68k clients. After this restart, 68k MiniGL contexts are gone, as they are today after any core-1 restart (`mw_service_on_core1_fault`).
+If the app has executed `cpsid` (it can; v0 is privileged), the timer IRQ does not run and the progress word goes stale. Core 0's existing poll sees that. After 2 seconds stale, core 0 cold-restarts core 1 before reclaiming app state, so it cannot wait on a card-pool or module lock held by the old worker. That is the backstop, not the normal stop. The status report must say watchdog-plus-restart, so a hung Quake is not mistaken for a firmware crash that happened to lose 68k clients. After this restart, 68k MiniGL contexts are gone, as they are today after any core-1 restart (`mw_service_on_core1_fault`).
 
 A stop request (Ctrl-C, close gadget, `APP_STOP`) sets the stop word. The app sees `zz_should_stop` and a `ZZ_EV_STOP` input. Grace is 500 ms from the stop word, then the same force-stop as the watchdog. Normal stop does not cold-restart.
 
 ### Amiga reset and client loss
 
-`minigl_begin_amiga_reset` (`main.c` line 580) is the existing entry. Call `zzapp_on_amiga_reset` at the start of that path, before transport and card-pool teardown. `scheduler_quiesce_for_reset` (`scheduler_arm.c`) only drains for a bounded time and then cold-restarts core 1 if a task is still active. Force-stop the app before that wait, or a live app becomes a firmware restart. App card-pool blocks use a reset-reclaimable class, never `CARD_POOL_CLASS_FIRMWARE` (that class survives reset, `card_pool.h`).
+`minigl_begin_amiga_reset` (`main.c` line 580) is the existing entry. `zzapp_on_amiga_reset` first publishes `reset_request` and wakes core 1. The worker cancels a pending START with a terminal completion, then tears down display, audio, and file/list state and publishes `reset_ack`; it is the only core that clears a running deferred operation. Core 0 never blocks in the reset entry and the scheduler cold-restart timeout remains the fallback before any reset reclaim.
 
-Client loss without a reset: ZZRun writes `heartbeat_ms` in the lifecycle block on every pass of its loop. If that word is stale for 2 seconds while state is RUNNING, treat it as stop. Firmware progress does not refresh the launcher heartbeat. The launcher heartbeat does not refresh the app watchdog.
+Client loss without a reset: ZZRun writes `heartbeat_ms` in the lifecycle block on every pass of its loop. Firmware timestamps **changes** to that value with its own clock and expires only the time since the last change; it never subtracts the Amiga clock from ARM uptime. Firmware progress does not refresh the launcher heartbeat. The launcher heartbeat does not refresh the app watchdog.
 
 ### Constants
 
@@ -650,7 +650,7 @@ Linker script: PHDRs for RX and RW, `.rela.dyn` kept and allocated so the loader
 
 68k launcher: container `sacredbanana/amiga-compiler:m68k-amigaos`, never a gcc10 image.
 
-Templates, each a few dozen lines, MIT: `hello` logs a line and exits; `pixels` opens 320×240 RGB565, fills the back buffer, flips until `ZZ_EV_STOP` or a key; `fault` logs then deliberately stores to address zero for the fault-path hardware check. `pixels` draws the CPU mapping from `zz_display_open`. It does not go through GL. That is how the kit separates a bad present-copy from a bad launcher screen.
+Templates, each a few dozen lines, MIT: `hello` logs a line and exits; `pixels` opens 320×240 RGB565, initializes both display bitmaps in P96's big-endian R5G6B5 byte order, then flips until `ZZ_EV_STOP` or a key; `fault` logs then executes ARM `UDF`, so hardware must report the **undefined-instruction** fault (`fault_code == 3`). `pixels` draws the CPU mapping from `zz_display_open`. It does not go through GL. That is how the kit separates a bad present-copy from a bad launcher screen.
 
 ## 8. Quake port
 
