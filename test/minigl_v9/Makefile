@@ -3,7 +3,7 @@ AR ?= ar
 CFLAGS ?= -std=c99 -Wall -Wextra -Werror -O2
 ROOT := ../..
 FIRMWARE := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/src
-CPPFLAGS := -I$(FIRMWARE) -DMINIGL_HOST_TEST
+CPPFLAGS := -I$(FIRMWARE) -I$(ROOT)/sdk/include -I$(ROOT)/sdk/host/include -DMINIGL_HOST_TEST
 
 MW_OBJS := mw_parse.o mw_texture.o mw_draw.o mw_ctx.o mw_service.o sdk_palette.o \
            minigl_raster.o minigl_lighting.o minigl_present.o \
@@ -127,7 +127,7 @@ scheduler_arm_host.o: $(FIRMWARE)/scheduler_arm.c $(FIRMWARE)/scheduler_core1_mi
 	$(CC) $(CPPFLAGS) -DTASKQ_HOST_TEST $(CFLAGS) -c $< -o $@
 
 amiberry_transport_zz9000.o: $(AMIBERRY_DIR)/src/amiberry_transport_zz9000.c
-	$(CC) -I$(MOCK_AMIGA) -I$(AMIBERRY_DIR)/include -I$(AMIBERRY_DIR)/src $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) -I$(MOCK_AMIGA) -I$(AMIBERRY_DIR)/include -I$(AMIBERRY_DIR)/src $(CFLAGS) -c $< -o $@
 
 
 # --- Guest-client harness: the real library + real guest clients, driven
@@ -148,7 +148,7 @@ client_harness.o: test_mw_e2e_clients.c
 # Host-compat: -fno-strict-aliasing matches the library's own build (float
 # bit-punning in the packed emitter). The relaxed diagnostics only cover
 # host-compiler noise; behaviour matches the m68k build.
-CLIENTS_LIB_CFLAGS := $(CLIENTS_CPPFLAGS) $(CFLAGS) -fno-builtin \
+CLIENTS_LIB_CFLAGS := $(CLIENTS_CPPFLAGS) $(CPPFLAGS) $(CFLAGS) -fno-builtin \
                       -fno-strict-aliasing -Wno-error=overflow -Wno-error=type-limits \
                       -Wno-error=implicit-fallthrough \
                       -DMINIGL_LIBRARY_BUILD -DMINIGL_BACKEND_AMIBERRY \
