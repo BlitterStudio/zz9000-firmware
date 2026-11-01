@@ -107,6 +107,7 @@ uint64_t zzapp_host_time_us(void);
 
 #ifdef ZZAPP_HOST_TEST
 void zzapp_services_test_reset(void);
+void zzapp_services_test_set_core(int core);
 void zzapp_services_test_set_window(void *window, uint32_t bytes);
 void zzapp_services_test_set_yield(void (*fn)(void));
 void zzapp_services_test_set_time(uint64_t (*fn)(void));

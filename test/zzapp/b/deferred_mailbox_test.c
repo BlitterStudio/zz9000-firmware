@@ -131,6 +131,7 @@ static void post_deferred_completion(uint32_t request_index)
         memcpy(completion->payload, payload, payload_len);
     zz9k_put_be32(mailbox.descriptor.completion_tail, (tail + 1U) % 4U);
     zzapp_mailbox_harvest_ack();
+    assert(!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL));
 }
 
 static void run_deferred_call(struct call_args *args)
@@ -141,6 +142,13 @@ static void run_deferred_call(struct call_args *args)
     assert(pthread_create(&thread, NULL, call_on_host, args) == 0);
     wait_for_request();
     request_index = dispatch_request();
+    /* Core 0 can harvest before or after core 1 runs, but never execute. */
+    assert(!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL));
+    zzapp_services_test_set_core(0);
+    zzapp_services_poll();
+    assert(!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL));
+    zzapp_services_test_set_core(1);
+    zzapp_services_poll();
     zzapp_services_poll();
     post_deferred_completion(request_index);
     assert(pthread_join(thread, NULL) == 0);
@@ -173,6 +181,8 @@ int main(void)
     zz9k_request_init(&begin.request, ZZAPP_OP_LOAD_BEGIN);
     run_deferred_call(&begin);
     assert(zzapp_services_state() == ZZAPP_ST_LOADING);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_STATE_OFF) ==
+           ZZAPP_ST_LOADING);
     /* The launcher-visible state is diagnostic only: a stale host cache line
      * must not change the loader's private state machine. */
     zzapp_put_be32(launcher_window + ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);

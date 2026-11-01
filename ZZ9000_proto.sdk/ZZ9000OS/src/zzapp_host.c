@@ -198,9 +198,11 @@ static void life_progress(uint64_t ticks)
     life32(ZZAPP_LIFE_PROGRESS_HI_OFF, (uint32_t)(ticks >> 32));
 }
 
+/* g_state is the runtime authority; this is its sole lifecycle-state mirror. */
 static void publish_state(uint32_t state)
 {
     g_state = state;
+    coherent_publish();
     life32(ZZAPP_LIFE_STATE_OFF, state);
 }
 

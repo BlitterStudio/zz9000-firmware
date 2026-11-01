@@ -18,6 +18,7 @@ void __attribute__((weak)) zzapp_status_observed(void) {}
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
 #include "zzapp.h"
+__attribute__((weak)) int scheduler_core1_available(void) { return 1; }
 #else
 #undef SDK_STATUS_OK
 #undef SDK_STATUS_QUEUED
@@ -31,9 +32,10 @@ void __attribute__((weak)) zzapp_status_observed(void) {}
 #include "audio_fabric.h"
 #include "audio_fabric_internal.h"
 #include "memorymap.h"
+#include "scheduler.h"
 #include "sdk_aperture_layout.h"
-#include "surface_allocator.h"
 #include "sdk_smp_lock.h"
+#include "surface_allocator.h"
 #include "xil_cache.h"
 #ifndef ZZAPP_HOST_TEST
 typedef char zzapp_window_size_matches_memorymap[
@@ -114,8 +116,10 @@ typedef struct zzapp_audio {
 
 enum {
 	DEFER_IDLE = 0,
-	DEFER_POSTED = 1,
-	DEFER_DONE = 2,
+	DEFER_FILLING = 1,
+	DEFER_POSTED = 2,
+	DEFER_RUNNING = 3,
+	DEFER_DONE = 4,
 	AUDIO_REQUEST_NONE = 0,
 	AUDIO_REQUEST_OPEN = 1,
 	AUDIO_REQUEST_CLOSE = 2
@@ -165,12 +169,43 @@ static int slot_busy_test[4];
 static void (*yield_hook)(void);
 static uint64_t (*time_hook)(void);
 
+#ifdef ZZAPP_HOST_TEST
+static int defer_test_core = 1;
+#else
+static uint32_t defer_wrong_core_logged;
+#endif
+
 static void barrier(void)
 {
 #if defined(__arm__) && !defined(ZZAPP_HOST_TEST)
 	__asm__ __volatile__("dsb sy" ::: "memory");
 #else
 	__asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+static uint32_t defer_load(void)
+{
+	return __atomic_load_n(&defer_state, __ATOMIC_ACQUIRE);
+}
+
+static void defer_store(uint32_t state)
+{
+	__atomic_store_n(&defer_state, state, __ATOMIC_RELEASE);
+}
+
+static int defer_claim(uint32_t expected, uint32_t desired)
+{
+	return __atomic_compare_exchange_n(&defer_state, &expected, desired, 0,
+					   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+static int defer_on_core1(void)
+{
+#ifdef ZZAPP_HOST_TEST
+	return defer_test_core == 1;
+#else
+	return smp_cpu_id() == 1;
 #endif
 }
 
@@ -500,7 +535,7 @@ void zzapp_services_on_reset(void)
 	printf("[app] reset: window forgotten\r\n");
 #endif
 	forget_window();
-	defer_state = DEFER_IDLE;
+	defer_store(DEFER_IDLE);
 	start_pending = 0U;
 	zzapp_services_on_launch();
 }
@@ -1649,13 +1684,21 @@ static void run_deferred(void)
 			report_rejected_app_op(defer_opcode, reject_reason);
 	}
 	defer_status = zz_to_sdk(rc);
-	barrier();
-	defer_state = DEFER_DONE;
+	defer_store(DEFER_DONE);
 }
 
 void zzapp_services_poll(void)
 {
-	if (defer_state == DEFER_POSTED)
+	if (!defer_on_core1()) {
+#ifndef ZZAPP_HOST_TEST
+		if (!defer_wrong_core_logged) {
+			defer_wrong_core_logged = 1U;
+			printf("[app] deferred poll ignored on core 0\r\n");
+		}
+#endif
+		return;
+	}
+	if (defer_claim(DEFER_POSTED, DEFER_RUNNING))
 		run_deferred();
 }
 
@@ -1679,14 +1722,13 @@ void zzapp_services_start_entered(int status)
 	}
 	defer_status = zz_to_sdk(status);
 	defer_reply_len = 0U;
-	barrier();
-	defer_state = DEFER_DONE;
+	defer_store(DEFER_DONE);
 }
 
 static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 			  uint32_t request_id, uint32_t user_cookie)
 {
-	if (defer_state != DEFER_IDLE)
+	if (!defer_claim(DEFER_IDLE, DEFER_FILLING))
 		return 0;
 	if (req_len > sizeof(defer_req))
 		req_len = sizeof(defer_req);
@@ -1698,8 +1740,10 @@ static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 	defer_request_id = request_id;
 	defer_cookie = user_cookie;
 	defer_reply_len = 0U;
-	barrier();
-	defer_state = DEFER_POSTED;
+	defer_store(DEFER_POSTED);
+#ifndef ZZAPP_HOST_TEST
+	scheduler_core1_wake();
+#endif
 	return 1;
 }
 
@@ -1783,15 +1827,10 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 			report_rejected_app_op(opcode, "deferred operation has request id zero");
 			return SDK_STATUS_BAD_REQUEST;
 		}
+		if (!scheduler_core1_available())
+			return SDK_STATUS_UNSUPPORTED;
 		if (!queue_deferred(opcode, req, req_len, request_id, user_cookie))
 			return SDK_STATUS_BUSY;
-#if !defined(ZZAPP_HOST_DEFERRED_TEST)
-		run_deferred();
-		if (opcode != ZZAPP_OP_START && defer_state == DEFER_DONE) {
-			defer_state = DEFER_IDLE;
-			return defer_status;
-		}
-#endif
 		return SDK_STATUS_QUEUED;
 	default:
 		return SDK_STATUS_UNSUPPORTED;
@@ -1802,7 +1841,7 @@ int zzapp_mailbox_harvest(uint32_t *request_id, uint32_t *user_cookie,
 			  uint16_t *opcode, uint16_t *status,
 			  uint8_t *payload, uint16_t *payload_len)
 {
-	if (defer_state != DEFER_DONE)
+	if (defer_load() != DEFER_DONE)
 		return 0;
 	if (request_id)
 		*request_id = defer_request_id;
@@ -1821,10 +1860,7 @@ int zzapp_mailbox_harvest(uint32_t *request_id, uint32_t *user_cookie,
 
 void zzapp_mailbox_harvest_ack(void)
 {
-	if (defer_state == DEFER_DONE) {
-		barrier();
-		defer_state = DEFER_IDLE;
-	}
+	(void)defer_claim(DEFER_DONE, DEFER_IDLE);
 }
 
 #ifdef ZZAPP_HOST_TEST
@@ -1832,12 +1868,18 @@ void zzapp_services_test_reset(void)
 {
 	audio_detach();
 	forget_window();
-	defer_state = DEFER_IDLE;
+	defer_store(DEFER_IDLE);
 	start_pending = 0U;
+	defer_test_core = 1;
 	yield_hook = NULL;
 	time_hook = NULL;
 	memset(slot_busy_test, 0, sizeof(slot_busy_test));
 	zzapp_services_on_launch();
+}
+
+void zzapp_services_test_set_core(int core)
+{
+	defer_test_core = core;
 }
 
 void zzapp_services_test_set_window(void *base, uint32_t bytes)

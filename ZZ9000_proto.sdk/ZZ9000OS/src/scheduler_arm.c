@@ -133,6 +133,13 @@ int scheduler_core1_available(void)
           taskq_watchdog_core1_enabled(&g_sched_watchdog)) ? 1 : 0;
 }
 
+void scheduler_core1_wake(void)
+{
+  /* The producer's release-store publishes its payload before this event. */
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
+}
+
 /* Bounded wait for core 1's worker to come up, ~100 ms total. */
 #define SCHED_CORE1_BOOT_SPINS   1000u
 #define SCHED_CORE1_BOOT_US       100u
