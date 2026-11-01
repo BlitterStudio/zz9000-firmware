@@ -1685,7 +1685,7 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		}
 		if (!queue_deferred(opcode, req, req_len, request_id, user_cookie))
 			return SDK_STATUS_BUSY;
-#ifdef ZZAPP_HOST_TEST
+#if !defined(ZZAPP_HOST_DEFERRED_TEST)
 		run_deferred();
 		if (opcode != ZZAPP_OP_START && defer_state == DEFER_DONE) {
 			defer_state = DEFER_IDLE;
