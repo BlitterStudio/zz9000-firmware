@@ -54,6 +54,9 @@ void zzapp_host_yield(void);
 void zzapp_host_yield_wait(void);
 uint64_t zzapp_host_time_us(void);
 void zzapp_loader_release(void);
+uint32_t zzapp_loader_state(void);
+void zzapp_loader_set_state(uint32_t state);
+uint32_t zzapp_loader_reset_requested(void);
 
 /* ---- firmware hooks ---- */
 void zzapp_boot_init(void);

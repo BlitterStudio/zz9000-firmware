@@ -8,6 +8,7 @@
 #define _Static_assert(cond, msg) typedef char zzapp_sa_##__LINE__[(cond) ? 1 : -1]
 #endif
 
+#define ZZAPP_SERVICES_STANDALONE_TEST
 #include "zzapp_services.c"
 
 #include <stdio.h>

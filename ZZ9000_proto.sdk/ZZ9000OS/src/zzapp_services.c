@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "zzapp_proto.h"
+#include "zzapp_runtime.h"
 void zzapp_host_yield_wait(void);
 void __attribute__((weak)) zzapp_status_observed(void) {}
 #ifdef ZZAPP_HOST_TEST
@@ -32,6 +33,7 @@ void __attribute__((weak)) zzapp_status_observed(void) {}
 #include "memorymap.h"
 #include "sdk_aperture_layout.h"
 #include "surface_allocator.h"
+#include "sdk_smp_lock.h"
 #include "xil_cache.h"
 #ifndef ZZAPP_HOST_TEST
 typedef char zzapp_window_size_matches_memorymap[
@@ -91,7 +93,9 @@ typedef struct zzapp_audio {
 } zzapp_audio;
 #endif
 
+#ifndef ZZAPP_FILE_TIMEOUT_US
 #define ZZAPP_FILE_TIMEOUT_US 30000000ull
+#endif
 #define ZZAPP_LOG_RING_HZ     32u
 #define ZZAPP_LOG_UART_HZ     8u
 #define ZZAPP_AUDIO_FRAMES    8192u
@@ -143,9 +147,8 @@ static uint64_t log_ring_window;
 #ifndef ZZAPP_HOST_TEST
 static uint32_t log_uart_count;
 static uint64_t log_uart_window;
-static uint32_t reject_uart_count;
-static uint64_t reject_uart_window;
 #endif
+static uint32_t load_diag_seen;
 static volatile int audio_open;
 static uint32_t audio_slot;
 static volatile uint32_t *audio_read_frame;
@@ -224,6 +227,64 @@ static uint32_t life_get(uint32_t off)
 	return win_get32(ZZAPP_LIFE_OFF + off);
 }
 
+#ifndef ZZAPP_HOST_TEST
+static int raw_life_get(uint32_t off, uint32_t *value)
+{
+	if (!window || window_bytes < ZZAPP_LIFE_OFF + off + 4U)
+		return 0;
+	*value = win_get32(ZZAPP_LIFE_OFF + off);
+	return 1;
+}
+
+static int load_diag_once(uint16_t opcode)
+{
+	uint32_t bit;
+
+	if (opcode < ZZAPP_OP_FIRST || opcode - ZZAPP_OP_FIRST >= 32U)
+		return 1;
+	bit = 1U << (opcode - ZZAPP_OP_FIRST);
+	if (load_diag_seen & bit)
+		return 0;
+	load_diag_seen |= bit;
+	return 1;
+}
+#endif
+
+static void report_load_snapshot(const char *event, uint16_t opcode,
+					 const char *reason)
+{
+#ifndef ZZAPP_HOST_TEST
+	uint32_t life_state;
+	uint32_t life_stop;
+	int raw_life;
+
+	if (!load_diag_once(opcode))
+		return;
+	raw_life = raw_life_get(ZZAPP_LIFE_STATE_OFF, &life_state) &&
+		raw_life_get(ZZAPP_LIFE_STOP_OFF, &life_stop);
+	if (raw_life) {
+		printf("[app] %s op 0x%04x%s%s%s: have_window=%d window=%p bytes=%lu uncached=%d life_state=0x%08lx life_stop=0x%08lx loader_state=0x%08lx reset_request=0x%08lx core=%d\r\n",
+		       event, (unsigned)opcode, reason ? " (" : "",
+		       reason ? reason : "", reason ? ")" : "", have_window(), (void *)window,
+		       (unsigned long)window_bytes, window_uncached,
+		       (unsigned long)life_state, (unsigned long)life_stop,
+		       (unsigned long)zzapp_loader_state(),
+		       (unsigned long)zzapp_loader_reset_requested(), smp_cpu_id());
+	} else {
+		printf("[app] %s op 0x%04x%s%s%s: have_window=%d window=%p bytes=%lu uncached=%d life_state=n/a life_stop=n/a loader_state=0x%08lx reset_request=0x%08lx core=%d\r\n",
+		       event, (unsigned)opcode, reason ? " (" : "",
+		       reason ? reason : "", reason ? ")" : "", have_window(), (void *)window,
+		       (unsigned long)window_bytes, window_uncached,
+		       (unsigned long)zzapp_loader_state(),
+		       (unsigned long)zzapp_loader_reset_requested(), smp_cpu_id());
+	}
+#else
+	(void)event;
+	(void)opcode;
+	(void)reason;
+#endif
+}
+
 static void yield_once(void)
 {
 	if (yield_hook)
@@ -250,23 +311,32 @@ static uint64_t now_us(void)
 static void report_rejected_app_op(uint16_t opcode, const char *reason)
 {
 #ifndef ZZAPP_HOST_TEST
-	uint64_t t = now_us();
-
-	if (t - reject_uart_window >= 1000000ull) {
-		reject_uart_window = t;
-		reject_uart_count = 0U;
-	}
-	if (reject_uart_count == 0U) {
+	if (load_diag_once(opcode))
 		printf("[app] reject op 0x%04x: %s\r\n", (unsigned)opcode, reason);
-		reject_uart_count++;
-	}
 #else
 	(void)opcode;
 	(void)reason;
 #endif
 }
 
-#ifndef ZZAPP_SERVICES_TEST_LOADER_STUBS
+#ifdef ZZAPP_SERVICES_STANDALONE_TEST
+
+static uint32_t service_loader_state;
+
+__attribute__((weak)) uint32_t zzapp_runtime_state(void)
+{
+	return service_loader_state;
+}
+
+__attribute__((weak)) void zzapp_loader_set_state(uint32_t state)
+{
+	service_loader_state = state;
+}
+
+__attribute__((weak)) uint32_t zzapp_loader_reset_requested(void)
+{
+	return 0U;
+}
 
 __attribute__((weak)) int zzapp_loader_begin(void)
 {
@@ -305,6 +375,7 @@ __attribute__((weak)) void zzapp_loader_free_back(uint32_t addr)
 }
 #endif
 
+
 __attribute__((weak)) void zzapp_host_yield(void)
 {
 }
@@ -336,7 +407,7 @@ uint32_t zzapp_services_generation(void)
 
 uint32_t zzapp_services_state(void)
 {
-	return have_window() ? life_get(ZZAPP_LIFE_STATE_OFF) : ZZAPP_ST_IDLE;
+	return zzapp_runtime_state();
 }
 
 int zzapp_services_stop_requested(void)
@@ -346,7 +417,7 @@ int zzapp_services_stop_requested(void)
 
 void zzapp_services_set_state(uint32_t state)
 {
-	life_put(ZZAPP_LIFE_STATE_OFF, state);
+	zzapp_loader_set_state(state);
 }
 
 void zzapp_services_set_generation(uint32_t generation)
@@ -412,11 +483,10 @@ void zzapp_services_on_launch(void)
 {
 	log_ring_count = 0U;
 	log_ring_window = 0U;
+	load_diag_seen = 0U;
 #ifndef ZZAPP_HOST_TEST
 	log_uart_count = 0U;
 	log_uart_window = 0U;
-	reject_uart_count = 0U;
-	reject_uart_window = 0U;
 #endif
 }
 
@@ -426,6 +496,9 @@ void zzapp_services_on_reset(void)
 	audio_request = AUDIO_REQUEST_NONE;
 	if (display_back_owned)
 		zzapp_loader_free_back(life_get(ZZAPP_LIFE_CARD_BACK_OFF));
+#ifndef ZZAPP_HOST_TEST
+	printf("[app] reset: window forgotten\r\n");
+#endif
 	forget_window();
 	defer_state = DEFER_IDLE;
 	start_pending = 0U;
@@ -1410,18 +1483,25 @@ static int alloc_window(uint32_t *arm_addr, uint32_t *host_off)
 	if (have_window()) {
 		*arm_addr = (uint32_t)(uintptr_t)window;
 		*host_off = *arm_addr - ADDR_ADJ;
+		printf("[app] alloc window: reused address=%p\r\n", (void *)window);
 		return ZZ_OK;
 	}
-	if (!window_mapping_available)
+	if (!window_mapping_available) {
+		printf("[app] alloc window: allocator failed address=0x00000000\r\n");
 		return ZZ_ENOMEM;
+	}
 	addr = surface_allocator_alloc_range(ZZAPP_WINDOW_BYTES, 4096U,
 					    ZZAPP_WINDOW_Z3_ADDRESS,
 					    ZZAPP_WINDOW_Z3_END);
-	if (addr == 0U)
+	if (addr == 0U) {
+		printf("[app] alloc window: allocator failed address=0x00000000\r\n");
 		return ZZ_ENOMEM;
+	}
 	init_window((uint8_t *)(uintptr_t)addr, ZZAPP_WINDOW_BYTES, 1);
 	*arm_addr = addr;
 	*host_off = addr - ADDR_ADJ;
+	printf("[app] alloc window: newly allocated address=0x%08lx\r\n",
+	       (unsigned long)addr);
 	return ZZ_OK;
 #endif
 }
@@ -1495,6 +1575,8 @@ static void run_deferred(void)
 		rc = zzapp_loader_begin();
 		if (rc == ZZ_OK && zzapp_services_state() == ZZAPP_ST_IDLE)
 			zzapp_services_set_state(ZZAPP_ST_LOADING);
+		if (rc == ZZ_OK)
+			report_load_snapshot("load begin", defer_opcode, NULL);
 		break;
 	case ZZAPP_OP_LOAD_CHUNK: {
 		uint32_t off;
@@ -1554,15 +1636,18 @@ static void run_deferred(void)
 			rc = ZZ_EINVAL;
 			break;
 		}
-		zzapp_services_set_state(ZZAPP_ST_STARTING);
 		start_pending = 1U;
 		return;
 	default:
 		rc = ZZ_ENOSYS;
 		break;
 	}
-	if (zz_to_sdk(rc) == SDK_STATUS_BAD_REQUEST && reject_reason)
-		report_rejected_app_op(defer_opcode, reject_reason);
+	if (zz_to_sdk(rc) == SDK_STATUS_BAD_REQUEST && reject_reason) {
+		if (defer_opcode == ZZAPP_OP_LOAD_CHUNK)
+			report_load_snapshot("reject", defer_opcode, reject_reason);
+		else
+			report_rejected_app_op(defer_opcode, reject_reason);
+	}
 	defer_status = zz_to_sdk(rc);
 	barrier();
 	defer_state = DEFER_DONE;

@@ -11,6 +11,7 @@
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
 #ifndef ZZAPP_HOST_TEST
+#include <stdio.h>
 #include "memorymap.h"
 #include "mmu_page.h"
 #include "xtime_l.h"
@@ -237,6 +238,7 @@ void zzapp_loader_unbound(void)
 uint32_t zzapp_loader_generation(void) { return g_coh->generation; }
 uint32_t zzapp_loader_state(void) { return g_state; }
 void zzapp_loader_set_state(uint32_t state) { publish_state(state); }
+uint32_t zzapp_loader_reset_requested(void) { return g_coh->reset_request; }
 int zzapp_loader_have_image(void) { return g_entry != 0; }
 
 void zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
@@ -600,6 +602,12 @@ void zzapp_worker_hook(void)
     }
     zzapp_services_poll();
     if (g_state == ZZAPP_ST_LOADING && stop_requested()) {
+#ifndef ZZAPP_HOST_TEST
+        printf("[app] load abort: reset_request=%lu life_stop=%lu service_stop=%d\r\n",
+               (unsigned long)g_coh->reset_request,
+               (unsigned long)life_get32(ZZAPP_LIFE_STOP_OFF),
+               zzapp_svc_should_stop());
+#endif
         (void)zzapp_loader_abort();
         return;
     }

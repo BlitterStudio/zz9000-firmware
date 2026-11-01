@@ -10,6 +10,18 @@ static unsigned begun;
 static unsigned chunks;
 static unsigned ended;
 
+
+static uint32_t wire_loader_state;
+
+uint32_t zzapp_runtime_state(void)
+{
+    return wire_loader_state;
+}
+
+void zzapp_loader_set_state(uint32_t state)
+{
+    wire_loader_state = state;
+}
 int zzapp_loader_begin(void)
 {
     begun++;

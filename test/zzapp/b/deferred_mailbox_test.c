@@ -173,6 +173,9 @@ int main(void)
     zz9k_request_init(&begin.request, ZZAPP_OP_LOAD_BEGIN);
     run_deferred_call(&begin);
     assert(zzapp_services_state() == ZZAPP_ST_LOADING);
+    /* The launcher-visible state is diagnostic only: a stale host cache line
+     * must not change the loader's private state machine. */
+    zzapp_put_be32(launcher_window + ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
 
     memcpy(launcher_window + ZZAPP_STAGING_OFF, "hello", 5U);
     memset(&chunk, 0, sizeof(chunk));

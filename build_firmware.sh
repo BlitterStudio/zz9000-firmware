@@ -20,6 +20,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    export ZZ9000_BUILD_GIT="$(git rev-parse --short=12 HEAD)"
+    if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+        export ZZ9000_BUILD_DIRTY=dirty
+    else
+        export ZZ9000_BUILD_DIRTY=clean
+    fi
+else
+    export ZZ9000_BUILD_GIT=unknown
+    export ZZ9000_BUILD_DIRTY=unknown
+fi
+export ZZ9000_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 MAKE_ARGS=("$@")
 if [ "${1:-}" = "--rasterix" ]; then
     MAKE_ARGS=("MINIGL_RASTERIX=1" "${@:2}")

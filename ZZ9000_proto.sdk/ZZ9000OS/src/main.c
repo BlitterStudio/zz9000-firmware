@@ -826,6 +826,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 int main() {
 	init_platform();
+	printf("[boot] build git=%s dirty=%s date=%s\r\n", ZZ9000_BUILD_GIT,
+	       ZZ9000_BUILD_DIRTY, ZZ9000_BUILD_DATE);
 	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_DATA_ABORT_INT,
 		(Xil_ExceptionHandler)arm_exception_handler_id_data_abort, NULL);
 	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_PREFETCH_ABORT_INT,
