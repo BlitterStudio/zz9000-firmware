@@ -143,7 +143,10 @@ static void stop_core1(void)
 
 static void free_card_memory(void)
 {
+    mw_service_bind_region(NULL, 0);
     mw_service_set_host_vram(NULL, 0);
+    g_doorbell_ptr = NULL;
+    g_active_ctrl_base = NULL;
     if (g_card_mem) {
         munmap(g_card_mem, g_card_size);
         g_card_mem = NULL;
