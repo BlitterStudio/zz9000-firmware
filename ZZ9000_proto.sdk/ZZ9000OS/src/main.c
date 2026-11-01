@@ -1037,8 +1037,8 @@ int main() {
 		printf("[ZZM] skipped: SD volume not mounted\n");
 	}
 #endif
-	printf("[boot] build git=%s dirty=%s date=%s\r\n", ZZ9000_BUILD_GIT,
-	       ZZ9000_BUILD_DIRTY, ZZ9000_BUILD_DATE);
+	printf("[boot] build git=" ZZ9000_BUILD_GIT " dirty="
+	       ZZ9000_BUILD_DIRTY " date=" ZZ9000_BUILD_DATE "\r\n");
 
 	// Mark the task-queue region shareable-cacheable in the shared MMU table
 	// before core 1 starts, so the SCU keeps it coherent once core 1 brings up
