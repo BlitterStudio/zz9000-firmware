@@ -190,33 +190,33 @@ int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
     return ZZ_OK;
 }
 
-void zzapp_api_enter(void)
+void zzm_module_api_enter(void)
 {
     g_module_app_host->api_enter();
 }
 
-void zzapp_api_leave(void)
+void zzm_module_api_leave(void)
 {
     g_module_app_host->api_leave();
 }
 
-int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
-                        uint32_t *format, uint32_t *card_front,
-                        uint32_t *card_back)
+int zzm_module_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
+                             uint32_t *format, uint32_t *card_front,
+                             uint32_t *card_back)
 {
     return g_module_app_host->bound_display(w, h, pitch, format, card_front,
                                              card_back);
 }
 
-int zzapp_display_flip_bound(void)
+int zzm_module_display_flip_bound(void)
 {
     return g_module_app_host->flip_bound(g_module_app_host->generation());
 }
 
-int zzapp_svc_display_flip(uint32_t surface_id)
+int zzm_module_svc_display_flip(uint32_t surface_id)
 {
     (void)surface_id;
-    return zzapp_display_flip_bound();
+    return zzm_module_display_flip_bound();
 }
 #else
 __attribute__((weak)) void zzapp_api_enter(void) {}
@@ -240,6 +240,20 @@ __attribute__((weak)) int zzapp_svc_display_flip(uint32_t surface_id)
     (void)surface_id;
     return zzapp_display_flip_bound();
 }
+#endif
+
+#if defined(MINIGL_MODULE)
+/*
+ * The module has its own wrappers around the resident app host table.  Keep
+ * them module-local by name: the resident runtime exports the same generic
+ * names, and a host link of both images must not turn the service callbacks
+ * into recursive calls back into this module.
+ */
+#define zzapp_api_enter zzm_module_api_enter
+#define zzapp_api_leave zzm_module_api_leave
+#define zzapp_display_bound zzm_module_display_bound
+#define zzapp_display_flip_bound zzm_module_display_flip_bound
+#define zzapp_svc_display_flip zzm_module_svc_display_flip
 #endif
 
 #if defined(MINIGL_HOST_TEST)

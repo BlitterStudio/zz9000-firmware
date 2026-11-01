@@ -442,7 +442,13 @@ static void transport_retract_descriptor(uint32_t module_id)
 
 static int transport_install_doorbell(uint32_t module_id)
 {
-    if (module_id != ZZM_MODULE_MINIGL || !g_ops)
+    /*
+     * Module initialization installs its firmware-owned route before it
+     * publishes the operation table through register_ops().  The route is
+     * inert until registration completes, so rejecting that ordering made
+     * every real MiniGL module load fail.
+     */
+    if (module_id != ZZM_MODULE_MINIGL)
         return 0;
     g_doorbell_installed = 1;
     return 1;
