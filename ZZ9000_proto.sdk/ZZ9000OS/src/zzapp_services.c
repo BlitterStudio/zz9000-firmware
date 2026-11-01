@@ -1185,7 +1185,7 @@ static int wait_flip(uint32_t gen)
 					 : 0U);
 			return ZZ_OK;
 		}
-		yield_once();
+		yield_wait_once();
 	}
 }
 
@@ -1216,7 +1216,7 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 		if ((life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_DISPLAY_UNBOUND) == 0U &&
 		    display_bound)
 			break;
-		yield_once();
+		yield_wait_once();
 	}
 	out->id = display_id;
 	out->width = life_get(ZZAPP_LIFE_WIDTH_OFF);
@@ -1233,8 +1233,14 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 static void flush_presented(uint32_t addr, uint32_t bytes)
 {
 #ifndef ZZAPP_HOST_TEST
+	/*
+	 * Core 1 must not submit line-by-line PL310 operations while core 0's
+	 * vblank ISR owns the full L2 flush.  It is enough to clean this core's
+	 * L1; the next vblank carries the P96 scanout lines from shared L2 to
+	 * DDR before the display consumes them.
+	 */
 	if (addr != 0U && bytes != 0U)
-		Xil_DCacheFlushRange((INTPTR)(uintptr_t)addr, bytes);
+		Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)addr, bytes);
 #else
 	(void)addr;
 	(void)bytes;

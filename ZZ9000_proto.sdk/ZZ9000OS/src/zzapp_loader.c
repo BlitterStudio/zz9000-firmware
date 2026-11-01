@@ -123,7 +123,13 @@ static void cache_image(const struct load_image *img)
 {
     uint32_t i;
 
-    Xil_DCacheFlushRange((INTPTR)g_card, g_bytes);
+    /*
+     * The app executes on core 1.  Cleaning its private L1 exposes the
+     * completed image to its I-side through the shared L2 without racing
+     * core 0's vblank-owned PL310 flush.  Only loaded segments need
+     * cleaning; g_bytes is the 96 MiB reservation, not image length.
+     */
+    Xil_L1DCacheFlushRange((INTPTR)g_card, img->image_end);
     for (i = 0; i < img->nseg; i++) {
         if (img->seg[i].flags & PF_X) {
             Xil_ICacheInvalidateRange((INTPTR)(g_card + img->seg[i].vaddr),

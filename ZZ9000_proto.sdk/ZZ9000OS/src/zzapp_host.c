@@ -469,8 +469,18 @@ void zzapp_host_yield(void)
 
 void zzapp_host_yield_wait(void)
 {
+    uint64_t now = now_ticks();
+
+    /*
+     * This is a declared blocking service wait (display/file/timeout), not
+     * an API that wedged in host code.  Renew the API-stall deadline before
+     * servicing the wait so a delayed launcher acknowledgement cannot turn
+     * into a false watchdog fault.
+     */
+    if (g_coh->in_api != 0u)
+        g_coh->api_entered = now;
     zzapp_note_progress();
-    service_tick(now_ticks(), 1);
+    service_tick(now, 1);
 #ifndef ZZAPP_HOST_TEST
     zzapp_unwind_if_needed();
 #endif

@@ -21,6 +21,20 @@ int main(void)
     assert(zzapp_test_in_api() == 0u);
     assert(zzapp_test_service_calls() == 1u);
 
+    /*
+     * A display flip can wait for ZZRun's SafeMessage longer than the
+     * ordinary API deadline.  Each declared wait renews that deadline,
+     * unlike a wedged API call below.
+     */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    zzapp_api_enter();
+    zzapp_test_set_xtime(ZZAPP_API_STUCK_US + ZZAPP_TICK_US);
+    zzapp_host_yield_wait();
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    zzapp_api_leave();
+
     zzapp_boot_init();
     zzapp_test_set_xtime(0);
     zzapp_test_mark_running();
