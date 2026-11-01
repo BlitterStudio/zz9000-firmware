@@ -854,6 +854,38 @@ void zzm_loader_poll(uint64_t now_ms)
     zzm_loader_session_begin_unlock();
 }
 
+/*
+ * Core 0, with core 1 held in reset by core1_cold_restart.  A v3 module's
+ * state lives on core 1 and the host has already dropped its MiniGL entry
+ * points (zzm_minigl_on_core1_fault), so a module left LOADED would accept
+ * every later acquire and then fail it (68k minigl.library could not open
+ * until reboot).  Discard the image without entering module code; the next
+ * acquire loads it afresh from SD.
+ */
+void zzm_loader_forget_core1_modules(void)
+{
+    uint32_t i;
+
+    for (i = 0; i < zzm_slot_count; i++) {
+        if (module_format[i] != ZZM_V3_FORMAT_VERSION ||
+            module_status[i].state != ZZM_STATE_LOADED)
+            continue;
+        unregister_module(i);
+        if (module_status[i].id == ZZM_MODULE_MINIGL &&
+            zzm_minigl_on_core1_fault)
+            zzm_minigl_on_core1_fault();
+        if (zzm_runtime_release_module)
+            (void)zzm_runtime_release_module(module_status[i].id);
+        poison_v3_slot(i);
+        status_from_v3_slot(i, ZZM_STATE_AVAILABLE, &module_v3_header[i],
+                            ZZM_REASON_NONE);
+        module_status[i].ref_count = 0U;
+        module_idle_since[i] = 0U;
+        release_dependencies(i);
+        printf("[ZZM] %s discarded after core 1 restart\n", zzm_slots[i].name);
+    }
+}
+
 void zzm_loader_mark_faulted(uint32_t module_id, const char *reason)
 {
     int index = module_index(module_id);

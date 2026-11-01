@@ -14,6 +14,7 @@
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
 #include "zzm_minigl_host.h"
+#include "zzm_loader.h"
 #include "zzapp_runtime.h"
 #include "zzapp_proto.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
@@ -354,6 +355,8 @@ void core1_cold_restart(void)
 	dsb();
 	/* Core 1 is halted; the module host owns any active graphics abort. */
 	zzm_minigl_abort_reset();
+	/* Its module state died with core 1: reload it on the next acquire. */
+	zzm_loader_forget_core1_modules();
 
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);

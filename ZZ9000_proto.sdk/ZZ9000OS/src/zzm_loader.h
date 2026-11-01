@@ -87,6 +87,8 @@ int zzm_loader_acquire(uint32_t module_id);
 void zzm_loader_release(uint32_t module_id);
 void zzm_loader_poll(uint64_t now_ms);
 void zzm_loader_mark_faulted(uint32_t module_id, const char *reason);
+/* Core 0 only, while core1_cold_restart holds core 1 in reset. */
+void zzm_loader_forget_core1_modules(void);
 void zzm_loader_mark_load_failed(uint32_t module_id, uint32_t reason);
 uint32_t zzm_loader_count(void);
 int zzm_loader_status_by_id(uint32_t module_id, zzm_status_t *out);
