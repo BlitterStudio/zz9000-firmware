@@ -1,6 +1,6 @@
 A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o
 ZZAPP_TESTS += $(BUILD)/a/loader_smoke $(BUILD)/a/runtime_host_test \
-	$(BUILD)/a/loader_elf_test
+	$(BUILD)/a/loader_elf_test $(BUILD)/a/display_fallback_test
 
 $(BUILD)/a/zzapp_loader.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
@@ -9,6 +9,9 @@ $(BUILD)/a/zzapp_host.o: $(FW)/zzapp_host.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
 $(BUILD)/a/zzapp_api.o: $(FW)/zzapp_api.c $(FW)/zzapp_runtime.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
+$(BUILD)/a/zzapp_services.o: $(FW)/zzapp_services.c $(FW)/zzapp_services.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
 $(BUILD)/a/loader_smoke: a/loader_smoke.c $(A_RUNTIME_OBJS) | $(BUILD)
@@ -20,3 +23,6 @@ $(BUILD)/a/runtime_host_test: a/runtime_host_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 $(BUILD)/a/loader_elf_test: a/loader_elf_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
+$(BUILD)/a/display_fallback_test: a/display_fallback_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o

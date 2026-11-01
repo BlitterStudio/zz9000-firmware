@@ -39,6 +39,8 @@ void card_pool_init(card_pool_t *pool)
     pool->class_limit[CARD_POOL_CLASS_MINIGL] = CARD_POOL_LIMIT_MINIGL;
     pool->class_limit[CARD_POOL_CLASS_IMAGE] = CARD_POOL_LIMIT_IMAGE;
     pool->class_limit[CARD_POOL_CLASS_APP] = CARD_POOL_LIMIT_APP;
+    pool->class_limit[CARD_POOL_CLASS_APP_DISPLAY] =
+        CARD_POOL_LIMIT_APP_DISPLAY;
     pool->class_limit[CARD_POOL_CLASS_MINIGL_MODULE] =
         CARD_POOL_LIMIT_MINIGL_MODULE;
     pool->class_limit[CARD_POOL_CLASS_MINIGL_TRANSPORT] =

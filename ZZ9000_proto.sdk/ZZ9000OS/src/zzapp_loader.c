@@ -152,6 +152,7 @@ static void cache_image(const struct load_image *img)
     (void)img;
 }
 #define CARD_POOL_CLASS_APP 8
+#define CARD_POOL_CLASS_APP_DISPLAY 14
 #endif
 
 static void drop_arena(void)
@@ -676,13 +677,16 @@ int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr_out)
         return ZZ_EBUSY;
     if (!g_owner)
         return ZZ_EINVAL;
-    /* Same class cap as the arena. A live 96 MiB arena leaves no room;
-     * fail closed rather than borrow the Fast RAM tail. */
-    addr = pool_alloc(bytes, g_owner);
-    if (!addr)
+    /* A firmware-owned display allocation cannot consume the app arena's
+     * class budget, which is already fully reserved by the live arena. */
+    g_back_owner = ((uint32_t)CARD_POOL_CLASS_APP_DISPLAY << 24) |
+                   (g_owner & 0x00FFFFFFu);
+    addr = pool_alloc(bytes, g_back_owner);
+    if (!addr) {
+        g_back_owner = 0;
         return ZZ_ENOMEM;
+    }
     g_back = addr;
-    g_back_owner = g_owner;
     *addr_out = addr;
     return ZZ_OK;
 }

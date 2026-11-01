@@ -46,8 +46,7 @@ enum card_pool_class {
      * Released per context destroy, by owner on fault recovery, and on
      * every Amiga reset. */
     CARD_POOL_CLASS_MINIGL = 7,
-    /* Trusted PIE app arena and its optional present back-buffer. App
-     * allocations are permanent-prefix-only and reset reclaimable. */
+    /* Trusted PIE app arena. */
     CARD_POOL_CLASS_APP = 8,
     /* Module-ABI v3 MiniGL resources are distinct so reclaim cannot free a
      * transport lease while closing a render context. */
@@ -56,6 +55,8 @@ enum card_pool_class {
     CARD_POOL_CLASS_MINIGL_CONTEXT = 11,
     CARD_POOL_CLASS_MINIGL_APP_CONTEXT = 12,
     CARD_POOL_CLASS_MINIGL_RIX = 13,
+    /* Firmware-owned back buffers for a trusted app's single-buffer bind. */
+    CARD_POOL_CLASS_APP_DISPLAY = 14,
     CARD_POOL_CLASS_COUNT
 };
 
@@ -72,6 +73,7 @@ enum card_pool_class {
  * (SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES). */
 #define CARD_POOL_LIMIT_IMAGE       (72u << 20)
 #define CARD_POOL_LIMIT_APP         (96u << 20)
+#define CARD_POOL_LIMIT_APP_DISPLAY (32u << 20)
 #define CARD_POOL_LIMIT_MINIGL_MODULE    (4u << 20)
 #define CARD_POOL_LIMIT_MINIGL_TRANSPORT (4u << 20)
 #define CARD_POOL_LIMIT_MINIGL_CONTEXT   MINIGL_CARD_POOL_LIMIT_BYTES
