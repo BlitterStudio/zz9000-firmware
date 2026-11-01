@@ -9,6 +9,7 @@
 #include <string.h>
 
 #if !defined(TASKQ_HOST_TEST)
+#include <stdio.h>
 #include "xil_cache.h"
 #include "xil_io.h"
 #include "xil_mmu.h"
@@ -62,6 +63,24 @@ static int g_pl330_claimed;
 static zzm_minigl_boot_caps_t g_caps;
 
 #if !defined(TASKQ_HOST_TEST)
+static int graphics_p96_span(uintptr_t address, size_t bytes)
+{
+    return address >= Z3_P96_VRAM_ADDRESS && address < Z3_P96_VRAM_END &&
+           bytes <= Z3_P96_VRAM_END - address;
+}
+
+static uint32_t g_recovery_trace;
+
+static void graphics_recovery_step(uint32_t bit, const char *name)
+{
+    if ((g_recovery_trace & bit) == 0U) {
+        g_recovery_trace |= bit;
+        printf("[recovery] %s\r\n", name);
+    }
+}
+#endif
+
+#if !defined(TASKQ_HOST_TEST)
 static uint32_t graphics_csr_read(void *context, uint32_t offset)
 {
     (void)context;
@@ -89,13 +108,19 @@ static void graphics_fifo_write(void *context, uint32_t offset, uint32_t value)
 static void graphics_cache_clean(void *context, uintptr_t address, size_t bytes)
 {
     (void)context;
-    Xil_DCacheFlushRange((INTPTR)address, (u32)bytes);
+    if (graphics_p96_span(address, bytes))
+        Xil_L1DCacheFlushRange((INTPTR)address, (u32)bytes);
+    else
+        Xil_DCacheFlushRange((INTPTR)address, (u32)bytes);
 }
 
 static void graphics_cache_invalidate(void *context, uintptr_t address, size_t bytes)
 {
     (void)context;
-    Xil_DCacheInvalidateRange((INTPTR)address, (u32)bytes);
+    if (graphics_p96_span(address, bytes))
+        Xil_L1DCacheInvalidateRange((INTPTR)address, (u32)bytes);
+    else
+        Xil_DCacheInvalidateRange((INTPTR)address, (u32)bytes);
 }
 
 static void graphics_barrier(void *context)
@@ -127,7 +152,8 @@ static uint32_t pl330_ccr(uint32_t words)
 static void graphics_pl330_abort(void *context)
 {
     (void)context;
-    if (g_pl330_claimed) {
+    if (g_pl330_claimed && g_caps.has_pl330) {
+        graphics_recovery_step(1U, "PL330 abort");
         Xil_Out32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGINST0,
                   (ZZM_RIX_PL330_DMAKILL << 16U) |
                   (ZZM_RIX_DMAC_CHANNEL << 8U) | 1U);
@@ -610,16 +636,21 @@ int zzm_minigl_reset_poll(void)
 void zzm_minigl_abort_reset(void)
 {
     /*
-     * Reset recovery can run on core 0 after core 1 faulted. Module cleanup
-     * may wait for a fence owned by that dead worker, so abort every
-     * firmware-owned engine and withdraw callbacks without entering module
-     * code.
+     * Recovery can run on core 0 after core 1 faulted.  Pixels and other
+     * non-GL apps never initialise RasterIX, so never write its windows
+     * merely because this image supports them.  A registered module plus
+     * the boot identity probe is the required ownership proof.
      */
     graphics_pl330_abort(0);
 #if !defined(TASKQ_HOST_TEST)
-    Xil_Out32(ZZM_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
-    Xil_Out32(ZZM_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
-    __asm__ volatile("dsb sy" ::: "memory");
+    if (g_ops != 0 && g_caps.has_rasterix_ef) {
+        graphics_recovery_step(2U, "RasterIX control disable");
+        Xil_Out32(ZZM_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
+        __asm__ volatile("dsb sy" ::: "memory");
+        graphics_recovery_step(4U, "RasterIX FIFO reset");
+        Xil_Out32(ZZM_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
 #endif
     zzm_minigl_on_core1_fault();
 }

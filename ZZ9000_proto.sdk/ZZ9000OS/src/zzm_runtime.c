@@ -287,8 +287,23 @@ static uint32_t module_owner_refcount(uint32_t owner)
     return record ? record->refs : 0U;
 }
 
+#if !defined(MINIGL_HOST_TEST)
+static int module_p96_span(uint32_t address, uint32_t length)
+{
+    return address >= Z3_P96_VRAM_ADDRESS &&
+           address < Z3_P96_VRAM_END &&
+           length <= Z3_P96_VRAM_END - address;
+}
+#endif
+
 static void module_dcache_clean(uint32_t address, uint32_t length)
 {
+#if !defined(MINIGL_HOST_TEST)
+    if (module_p96_span(address, length)) {
+        Xil_L1DCacheFlushRange(address, length);
+        return;
+    }
+#endif
     Xil_DCacheFlushRange(address, length);
 }
 
@@ -321,7 +336,12 @@ static int module_dcache_clean_owned(uint32_t owner, uint32_t address,
 {
     if (!module_range_owned(owner, address, length))
         return 0;
-    Xil_DCacheFlushRange(address, length);
+#if !defined(MINIGL_HOST_TEST)
+    if (module_p96_span(address, length))
+        Xil_L1DCacheFlushRange(address, length);
+    else
+#endif
+        Xil_DCacheFlushRange(address, length);
     return 1;
 }
 
@@ -330,7 +350,12 @@ static int module_dcache_invalidate_owned(uint32_t owner, uint32_t address,
 {
     if (!module_range_owned(owner, address, length))
         return 0;
-    Xil_DCacheInvalidateRange(address, length);
+#if !defined(MINIGL_HOST_TEST)
+    if (module_p96_span(address, length))
+        Xil_L1DCacheInvalidateRange(address, length);
+    else
+#endif
+        Xil_DCacheInvalidateRange(address, length);
     return 1;
 }
 
