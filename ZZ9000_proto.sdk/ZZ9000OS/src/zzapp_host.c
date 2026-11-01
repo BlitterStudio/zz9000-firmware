@@ -647,10 +647,16 @@ static void run_app(uint32_t argc)
     g_unwind_pending = 0;
     g_host_tick_active = 0;
 #endif
-    g_coh->running = 1;
+    /* Core 0's watchdog and lease checks trust these stamps whenever it sees
+     * running == 1, so they must be fresh before running is published. The
+     * first app after boot otherwise met stamps from power-on (0) and was
+     * cold-restarted while starting. */
     g_coh->heartbeat_value = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
     g_coh->heartbeat_seen = now_ticks();
+    g_coh->tick_seen = now_ticks();
     zzapp_note_progress();
+    coherent_barrier();
+    g_coh->running = 1;
     publish_state(ZZAPP_ST_RUNNING);
     zzapp_services_start_entered(ZZ_OK);
     zzapp_private_timer_enable();
@@ -763,10 +769,18 @@ static uint64_t core1_stamp_age_us(const volatile uint64_t *stamp)
 
 void zzapp_core0_poll(void)
 {
-    uint64_t age = core1_stamp_age_us(&g_coh->progress);
-    uint64_t tick_age = core1_stamp_age_us(&g_coh->tick_seen);
-    uint64_t now = now_ticks();
-    uint32_t heartbeat = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
+    /* Pairs with run_app's barrier: stamps are fresh once running reads 1. */
+    uint32_t running = g_coh->running;
+    uint64_t age;
+    uint64_t tick_age;
+    uint64_t now;
+    uint32_t heartbeat;
+
+    coherent_barrier();
+    age = core1_stamp_age_us(&g_coh->progress);
+    tick_age = core1_stamp_age_us(&g_coh->tick_seen);
+    now = now_ticks();
+    heartbeat = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
 
     maybe_expire_fault(now);
     if (heartbeat != g_coh->heartbeat_value) {
@@ -774,10 +788,10 @@ void zzapp_core0_poll(void)
         g_coh->heartbeat_seen = now;
     }
     /* Heartbeat is an Amiga clock value; only its change is meaningful here. */
-    if (g_coh->running && g_state == ZZAPP_ST_RUNNING &&
-        ticks_to_us(now - g_coh->heartbeat_seen) >= ZZAPP_LEASE_US)
+    if (running && g_state == ZZAPP_ST_RUNNING &&
+        core1_stamp_age_us(&g_coh->heartbeat_seen) >= ZZAPP_LEASE_US)
         life32(ZZAPP_LIFE_STOP_OFF, 1u);
-    if (g_coh->running && age >= ZZAPP_WATCHDOG_US &&
+    if (running && age >= ZZAPP_WATCHDOG_US &&
         tick_age >= ZZAPP_WATCHDOG_US) {
         /* Do not reclaim app state until the stopped worker cannot own a lock. */
         g_coh->running = 0;
