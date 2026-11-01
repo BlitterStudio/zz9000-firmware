@@ -23,7 +23,7 @@
 #ifdef SDK_VIDEO_WEBM_MODULE
 #include "webm_module_alloc.h"
 #endif
-#include "xil_cache.h"
+#include "zzm_runtime.h"
 #define WEBM_ALLOC(n) sdk_decode_heap_alloc(n)
 #define WEBM_FREE(p) sdk_decode_heap_free(p)
 #else
@@ -463,11 +463,11 @@ static void flush_pcm(struct sdk_video_webm *d, uint32_t offset, uint32_t bytes)
 
 	if (first > bytes)
 		first = bytes;
-	Xil_DCacheFlushRange(
-		(INTPTR)(uintptr_t)(d->media.pcm_ring + offset), first);
+	zzm_rt_dcache_clean((uint32_t)(uintptr_t)(d->media.pcm_ring + offset),
+			    first);
 	if (bytes > first)
-		Xil_DCacheFlushRange(
-			(INTPTR)(uintptr_t)d->media.pcm_ring, bytes - first);
+		zzm_rt_dcache_clean((uint32_t)(uintptr_t)d->media.pcm_ring,
+				    bytes - first);
 #else
 	(void)d;
 	(void)offset;

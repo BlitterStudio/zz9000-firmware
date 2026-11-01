@@ -373,7 +373,8 @@ static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
     program[offset++] = MW_RIX_PL330_DMAWMB; program[offset++] = MW_RIX_PL330_DMAEND;
     if (offset > sizeof(mw_rix_dma_program))
         return 0;
-    Xil_DCacheFlushRange((INTPTR)program, (u32)sizeof(mw_rix_dma_program));
+    minigl_platform_cache_clean(NULL, (uintptr_t)program,
+                                sizeof(mw_rix_dma_program));
     mw_rix_dma_barrier();
     for (attempt = 0U; attempt < 100000U; ++attempt)
         if ((Xil_In32(MINIGL_RIX_DMAC_BASE + MINIGL_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
@@ -417,14 +418,12 @@ kill:
 
 static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
 {
-    (void)context;
-    Xil_DCacheFlushRange((INTPTR)address, (u32)bytes);
+    minigl_platform_cache_clean(context, address, bytes);
 }
 
 static void mw_rix_cache_invalidate(void *context, uintptr_t address, size_t bytes)
 {
-    (void)context;
-    Xil_DCacheInvalidateRange((INTPTR)address, (u32)bytes);
+    minigl_platform_cache_invalidate(context, address, bytes);
 }
 
 static int mw_ctx_grow_rix_texture_pool(void *context, size_t minimum_bytes,

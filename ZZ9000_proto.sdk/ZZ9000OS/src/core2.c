@@ -310,11 +310,10 @@ void core1_cold_restart(void)
 	 * restart paths: the fault path (record_fault -> scheduler_core0_poll)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
-	/* The card pool lock has the same exposure. Reset it first so the
-	 * dsb/sev in the malloc reset below publishes both. */
+	/* The card pool and PL310 locks have the same exposure. */
 	card_pool_reset_lock(&card_pool);
+	l2_maint_reset_core1_lock();
 	sdk_smp_lock_reset_malloc();
-
 	/*
 	 * Same orphan-lock exposure as the malloc lock: the cold reset
 	 * can land inside the image-stream decode-state budget

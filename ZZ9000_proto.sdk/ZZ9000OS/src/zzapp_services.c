@@ -1234,10 +1234,9 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 {
 #ifndef ZZAPP_HOST_TEST
 	/*
-	 * Core 1 must not submit line-by-line PL310 operations while core 0's
-	 * vblank ISR owns the full L2 flush.  It is enough to clean this core's
-	 * L1; the next vblank carries the P96 scanout lines from shared L2 to
-	 * DDR before the display consumes them.
+	 * Scanout is consumed only after core 0's mandatory vblank L2 way
+	 * flush.  Keep this L1-only to avoid a redundant, multi-megabyte L2
+	 * walk on the producer; non-scanout cache maintenance uses l2_maint_*.
 	 */
 	if (addr != 0U && bytes != 0U)
 		Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)addr, bytes);

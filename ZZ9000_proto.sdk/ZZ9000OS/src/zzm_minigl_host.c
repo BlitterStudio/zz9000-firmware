@@ -108,6 +108,8 @@ static void graphics_fifo_write(void *context, uint32_t offset, uint32_t value)
 static void graphics_cache_clean(void *context, uintptr_t address, size_t bytes)
 {
     (void)context;
+    /* P96 scanout is completed by vblank's way flush; avoid a redundant L2
+     * walk here. Other MiniGL buffers use the serialized l2_maint path. */
     if (graphics_p96_span(address, bytes))
         Xil_L1DCacheFlushRange((INTPTR)address, (u32)bytes);
     else

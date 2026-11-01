@@ -131,6 +131,7 @@ ZZ9000_BUILD_GIT ?= unknown
 ZZ9000_BUILD_DIRTY ?= unknown
 ZZ9000_BUILD_DATE ?= unknown
 CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2 $(EXTRA_CFLAGS)
+CFLAGS += -include $(SRC_DIR)/l2_maint.h
 CFLAGS += -DZZ9000_BUILD_GIT=\"$(ZZ9000_BUILD_GIT)\"
 CFLAGS += -DZZ9000_BUILD_DIRTY=\"$(ZZ9000_BUILD_DIRTY)\"
 CFLAGS += -DZZ9000_BUILD_DATE=\"$(ZZ9000_BUILD_DATE)\"
@@ -177,6 +178,7 @@ C_SRCS = \
 	$(SRC_DIR)/scheduler_stress.c \
 	$(SRC_DIR)/sdk_smp_lock.c \
 	$(SRC_DIR)/sdk_smp_lock_arm.c \
+	$(SRC_DIR)/l2_maint.c \
 	$(SRC_DIR)/sdk_decode_reclaim.c \
 	$(SRC_DIR)/sdk_decode_reclaim_arm.c \
 	$(SRC_DIR)/dma_acc.c \

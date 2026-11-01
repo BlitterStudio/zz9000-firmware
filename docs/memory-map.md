@@ -110,6 +110,13 @@ non-coherent control pages, which use the existing second-level 4 KiB
 non-cacheable mappings. The RTL-pinned audio belt is non-cacheable; Ethernet
 descriptor/backlog storage uses its required strongly ordered mapping.
 
+The PL310 is shared by both Cortex-A9 cores. Its r3p3 TRM “Background
+operations” rule forbids a maintenance-register write while a way operation is
+active. Firmware cache maintenance must therefore use `l2_maint_*`; the wrapper
+keeps L1 work core-local and serializes L2 work in 4 KiB chunks, while vblank's
+way flush takes priority after the current chunk. Modules request cache work
+through the cache service rather than calling the BSP.
+
 ## Adding a fixed range
 
 Use the card pool or the host-visible interval allocator unless hardware or
