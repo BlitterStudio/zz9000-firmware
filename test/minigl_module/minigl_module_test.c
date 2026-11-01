@@ -70,6 +70,11 @@ int zzapp_display_bound(uint32_t *width, uint32_t *height, uint32_t *pitch,
     return 0;
 }
 int zzapp_display_flip_bound(void) { return 0; }
+int zzapp_svc_display_flip(uint32_t surface_id)
+{
+    (void)surface_id;
+    return zzapp_display_flip_bound();
+}
 
 int zzm_registry_register_ops(uint32_t module_id, const void *ops, uint32_t bytes)
 {
