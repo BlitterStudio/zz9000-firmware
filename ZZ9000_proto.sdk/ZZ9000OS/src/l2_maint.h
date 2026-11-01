@@ -21,6 +21,15 @@ void l2_maint_l2_flush(void);
 /* L2-only invalidation for aligned DMA-owned lines. */
 void l2_maint_l2_invalidate_range(intptr_t address, uint32_t length);
 
+/*
+ * Instruction-side invalidation after the caller has cleaned the code to
+ * at least the point of unification (L1 D clean or a full D flush).  L2 is
+ * unified, so only the executing core's L1 I-cache needs invalidating.  The
+ * BSP's Xil_ICacheInvalidateRange also invalidates the L2 lines, unlocked:
+ * that races core 0's vblank way flush and discards code still dirty in L2.
+ */
+void l2_maint_icache_invalidate_range(intptr_t address, uint32_t length);
+
 /* Call only after core 1 is known halted during a cold restart. */
 void l2_maint_reset_core1_lock(void);
 
@@ -30,6 +39,7 @@ void l2_maint_reset_core1_lock(void);
 #define Xil_DCacheInvalidateRange l2_maint_dcache_invalidate_range
 #define Xil_DCacheFlush l2_maint_dcache_flush
 #define Xil_L2CacheFlush l2_maint_l2_flush
+#define Xil_ICacheInvalidateRange l2_maint_icache_invalidate_range
 #endif
 
 #endif

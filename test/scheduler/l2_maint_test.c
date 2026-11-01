@@ -198,6 +198,27 @@ void l2_maint_platform_l2_flush(void)
         l2_clean_inv(i);
 }
 
+/* The model has no separate I-cache: invalidating the core's L1 I-side
+ * only has to leave L1 D and L2 untouched. */
+static unsigned l1_icache_invalidates;
+void l2_maint_platform_l1_icache_invalidate_range(INTPTR address, u32 length)
+{
+    (void)address;
+    (void)length;
+    l1_icache_invalidates++;
+}
+
+/* An instruction fetch after an L1 I-cache miss reads the unified L2,
+ * then DDR. */
+static uint8_t fetch(u32 address)
+{
+    unsigned i = index_of((INTPTR)(address & ~(LINE - 1U)));
+
+    if (l2[i].valid)
+        return l2[i].data[address & (LINE - 1U)];
+    return ddr[address - BASE];
+}
+
 static void reset_model(void)
 {
     memset(ddr, 0, sizeof(ddr));
@@ -297,6 +318,25 @@ static void test_whole_cache_flush(void)
     test_cpu = 1;
 }
 
+/* The app loader: copy code on core 1, clean L1 to the unified L2 only,
+ * then invalidate the I-side.  The fetched code must be what was written
+ * (the BSP's Xil_ICacheInvalidateRange also invalidated L2 and fetched
+ * power-on DDR instead). */
+static void test_loader_code_visible(void)
+{
+    u32 a;
+
+    reset_model();
+    for (a = 0x8000U; a < 0x8100U; a++)
+        cpu_store(a, (uint8_t)(a ^ 0x5AU));
+    l2_maint_platform_l1_flush_range((INTPTR)0x8000U, 0x100U);
+    l2_maint_icache_invalidate_range((INTPTR)0x8000U, 0x100U);
+    for (a = 0x8000U; a < 0x8100U; a++)
+        assert(fetch(a) == (uint8_t)(a ^ 0x5AU));
+    assert(l1_icache_invalidates == 1U);
+    assert(l2_ops_unlocked == 0U);
+}
+
 int main(void)
 {
     test_cpu = 1;
@@ -305,6 +345,7 @@ int main(void)
     test_l2_invalidate_keeps_neighbours();
     test_flush_reaches_ddr();
     test_whole_cache_flush();
+    test_loader_code_visible();
     puts("l2 maintenance tests passed");
     return 0;
 }

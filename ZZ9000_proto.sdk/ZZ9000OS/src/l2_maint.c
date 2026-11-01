@@ -6,6 +6,7 @@
 #undef Xil_DCacheInvalidateRange
 #undef Xil_DCacheFlush
 #undef Xil_L2CacheFlush
+#undef Xil_ICacheInvalidateRange
 #endif
 
 
@@ -78,6 +79,7 @@ extern void l2_maint_platform_l2_clean_inv_line(INTPTR address);
 extern void l2_maint_platform_l2_inv_line(INTPTR address);
 extern void l2_maint_platform_l2_sync(void);
 extern void l2_maint_platform_l2_flush(void);
+extern void l2_maint_platform_l1_icache_invalidate_range(INTPTR address, u32 length);
 #else
 static void l2_maint_platform_l1_flush_range(INTPTR address, u32 length)
 {
@@ -131,6 +133,11 @@ static void l2_maint_platform_l2_sync(void)
 static void l2_maint_platform_l2_flush(void)
 {
     Xil_L2CacheFlush();
+}
+
+static void l2_maint_platform_l1_icache_invalidate_range(INTPTR address, u32 length)
+{
+    Xil_L1ICacheInvalidateRange((u32)address, length);
 }
 #endif
 
@@ -239,6 +246,13 @@ void l2_maint_l2_invalidate_range(INTPTR address, u32 length)
     if (length == 0U)
         return;
     l2_maint_invalidate_lines(address, length, 0);
+}
+
+void l2_maint_icache_invalidate_range(INTPTR address, u32 length)
+{
+    if (length == 0U)
+        return;
+    l2_maint_platform_l1_icache_invalidate_range(address, length);
 }
 
 void l2_maint_reset_core1_lock(void)
