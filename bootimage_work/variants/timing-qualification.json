@@ -164,17 +164,17 @@
                                   },
                      "zorro3-aga-rix":  {
                                             "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga-rix.bit",
-                                            "sha256":  "636416f4b95debe1ecc0a7b9f65a07c33c8086d2fd3cc5211748df7a938585ff",
-                                            "source_revision":  "94b6b1326f6f43f3f4135beb8e141b9cd9a23f75",
-                                            "build_id":  "94b6b132",
-                                            "placement_directive":  "Explore",
+                                            "sha256":  "fcbb126a5ea2b624a547583dfb36dfcaad6acf1aec855911903bedc721b7abc7",
+                                            "source_revision":  "8420b284ab9311e6a15990160451cde9e94ef21c",
+                                            "build_id":  "8420b284",
+                                            "placement_directive":  "Default",
                                             "pixel_slack_ns":  {
-                                                                   "setup":  0.177,
-                                                                   "hold":  0.03
+                                                                   "setup":  0.101,
+                                                                   "hold":  0.025
                                                                },
                                             "overall_slack_ns":  {
-                                                                     "setup":  0.177,
-                                                                     "hold":  0.023
+                                                                     "setup":  0.101,
+                                                                     "hold":  0.011
                                                                  },
                                             "i2s_slack_ns":  {
                                                                  "setup":  1.099
