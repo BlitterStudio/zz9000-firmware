@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "card_pool.h"
 #include "sdk_palette.h"
@@ -190,6 +191,68 @@ static void test_owned_ops_cover_the_whole_module(void)
     CHECK(cache_invalidate_calls == 2U);
 }
 
+/*
+ * Module malloc goes through memory->alloc.  GLQuake makes thousands of
+ * small allocations (texture levels, objects); with one 64 KiB card-pool
+ * block per call the card's CARD_POOL_MAX_BLOCKS ran out and every later
+ * allocation failed.  Small allocations must share chunks, stay disjoint,
+ * and give the chunks back.
+ */
+static void test_small_allocations_share_chunks(void)
+{
+    const zzm_services_t *services = zzm_runtime_services_v3();
+    const zzm_reclaim_service_t *reclaim;
+    const zzm_memory_service_t *memory;
+    static uint32_t addresses[2000];
+    uint32_t context;
+    uint32_t i;
+    int ok = 1;
+
+    reset_resources();
+    /* The allocator writes its block headers into card memory. */
+    CHECK(mmap((void *)0x10000000UL, 0x04000000UL, PROT_READ | PROT_WRITE,
+               MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) ==
+          (void *)0x10000000UL);
+    reclaim = services->get_service(ZZM_SERVICE_RECLAIM, ZZM_SERVICE_RECLAIM_V3);
+    memory = services->get_service(ZZM_SERVICE_MEMORY, ZZM_SERVICE_MEMORY_V3);
+    CHECK(reclaim->create_owner(4U, ZZM_RUNTIME_OWNER_CLASS_MINIGL_CONTEXT,
+                                0U, 32U << 20, &context));
+    for (i = 0U; i < 2000U; ++i) {
+        addresses[i] = memory->alloc(context, ZZM_MEMORY_CLASS_MINIGL_CONTEXT,
+                                     32U << 20, 100U + (i % 7U) * 300U, 8U);
+        if (!addresses[i]) {
+            ok = 0;
+            break;
+        }
+        memset((void *)(uintptr_t)addresses[i], (int)(i & 0xffU),
+               100U + (i % 7U) * 300U);
+    }
+    CHECK(ok);
+    CHECK(card_pool.block_count < 16U);
+    for (i = 0U; ok && i < 2000U; ++i) {
+        const uint8_t *bytes = (const uint8_t *)(uintptr_t)addresses[i];
+        uint32_t n;
+
+        CHECK((addresses[i] & 63U) == 0U);
+        for (n = 0U; n < 100U + (i % 7U) * 300U; ++n)
+            if (bytes[n] != (uint8_t)(i & 0xffU)) {
+                CHECK(!"allocations overlap");
+                ok = 0;
+                break;
+            }
+    }
+    for (i = 0U; ok && i < 2000U; i += 2U)
+        CHECK(memory->free(addresses[i], context));
+    for (i = 1U; ok && i < 2000U; i += 2U)
+        CHECK(memory->free(addresses[i], context));
+    CHECK(card_pool.block_count == 0U);
+    /* Closing an owner must not leave chunk records that a new owner hits. */
+    CHECK(memory->alloc(context, ZZM_MEMORY_CLASS_MINIGL_CONTEXT, 32U << 20,
+                        64U, 8U) != 0U);
+    CHECK(reclaim->close_owner(context) != 0U);
+    CHECK(card_pool.block_count == 0U);
+}
+
 static void test_host_window_palette_and_app_guard(void)
 {
     const zzm_services_t *services = zzm_runtime_services_v3();
@@ -250,6 +313,7 @@ static void test_log_rate_limit(void)
 int main(void)
 {
     test_typed_owner_quota_and_reclaim();
+    test_small_allocations_share_chunks();
     test_owned_ops_cover_the_whole_module();
     test_host_window_palette_and_app_guard();
     test_log_rate_limit();

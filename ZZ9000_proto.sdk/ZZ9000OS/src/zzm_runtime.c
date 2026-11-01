@@ -148,20 +148,239 @@ static uint32_t module_owner_used(uint32_t owner)
     return used;
 }
 
+/*
+ * Module malloc (libzzm_rt) reaches the card pool through alloc/free.  The
+ * pool hands out 64 KiB pages and holds only CARD_POOL_MAX_BLOCKS blocks for
+ * the whole card, so one block per malloc let MiniGL's texture levels and
+ * small objects exhaust it after a few hundred allocations: every later
+ * allocation failed (GLQuake rendered untextured).  Small requests are
+ * carved from 1 MiB chunks owned by the same card owner.  Blocks start and
+ * end on 64-byte boundaries with a 64-byte header of their own, so no cache
+ * line is shared between two allocations or with allocator metadata.
+ */
+#define ZZM_HEAP_CHUNK_BYTES  0x00100000U
+#define ZZM_HEAP_DIRECT_BYTES 0x00020000U
+#define ZZM_HEAP_MAX_CHUNKS   128U
+#define ZZM_HEAP_GRANULE      64U
+#define ZZM_HEAP_NONE         0xffffffffU
+#define ZZM_HEAP_USED_MAGIC   0x5a484155U /* 'ZHAU' */
+#define ZZM_HEAP_FREE_MAGIC   0x5a484146U /* 'ZHAF' */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t bytes; /* whole block including this header */
+    uint32_t next;  /* free list: offset of the next free block */
+    uint32_t pad[13];
+} zzm_heap_block_t;
+
+typedef struct {
+    uint32_t card_owner;
+    uint32_t address;
+    uint32_t bytes;
+    uint32_t free_head;
+    uint32_t used;
+} zzm_heap_chunk_t;
+
+static zzm_heap_chunk_t heap_chunks[ZZM_HEAP_MAX_CHUNKS];
+static sdk_smp_lock_t heap_lock = SDK_SMP_LOCK_INIT;
+
+static zzm_heap_block_t *heap_block(const zzm_heap_chunk_t *chunk,
+                                    uint32_t offset)
+{
+    return (zzm_heap_block_t *)(uintptr_t)(chunk->address + offset);
+}
+
+/* Caller holds heap_lock.  Drops the records of chunks the pool no longer
+ * lists for this owner (an owner close or reclaim freed them). */
+static void heap_forget_owner_locked(uint32_t card_owner)
+{
+    uint32_t i;
+
+    for (i = 0U; i < ZZM_HEAP_MAX_CHUNKS; ++i)
+        if (heap_chunks[i].card_owner == card_owner)
+            memset(&heap_chunks[i], 0, sizeof(heap_chunks[i]));
+}
+
+static void heap_forget_owner(uint32_t card_owner)
+{
+    sdk_smp_lock_acquire(&heap_lock);
+    heap_forget_owner_locked(card_owner);
+    sdk_smp_lock_release(&heap_lock);
+}
+
+static uint32_t heap_take(zzm_heap_chunk_t *chunk, uint32_t need)
+{
+    uint32_t *link = &chunk->free_head;
+    uint32_t offset;
+
+    for (offset = chunk->free_head; offset != ZZM_HEAP_NONE;
+         offset = heap_block(chunk, offset)->next) {
+        zzm_heap_block_t *block = heap_block(chunk, offset);
+
+        if (block->magic != ZZM_HEAP_FREE_MAGIC)
+            return 0U;
+        if (block->bytes < need) {
+            link = &block->next;
+            continue;
+        }
+        if (block->bytes - need >= 2U * ZZM_HEAP_GRANULE) {
+            zzm_heap_block_t *rest = heap_block(chunk, offset + need);
+
+            rest->magic = ZZM_HEAP_FREE_MAGIC;
+            rest->bytes = block->bytes - need;
+            rest->next = block->next;
+            *link = offset + need;
+            block->bytes = need;
+        } else {
+            *link = block->next;
+        }
+        block->magic = ZZM_HEAP_USED_MAGIC;
+        block->next = ZZM_HEAP_NONE;
+        chunk->used += block->bytes;
+        return chunk->address + offset + (uint32_t)sizeof(*block);
+    }
+    return 0U;
+}
+
+static uint32_t heap_alloc(uint32_t card_owner, uint32_t quota, uint32_t bytes)
+{
+    uint32_t need = (bytes + (uint32_t)sizeof(zzm_heap_block_t) +
+                     ZZM_HEAP_GRANULE - 1U) & ~(ZZM_HEAP_GRANULE - 1U);
+    uint32_t address = 0U;
+    uint32_t i;
+
+    sdk_smp_lock_acquire(&heap_lock);
+    for (i = 0U; i < ZZM_HEAP_MAX_CHUNKS && !address; ++i) {
+        zzm_heap_chunk_t *chunk = &heap_chunks[i];
+
+        if (chunk->card_owner != card_owner)
+            continue;
+        if (!card_pool_block_owned(&card_pool, chunk->address, chunk->bytes,
+                                   card_owner)) {
+            heap_forget_owner_locked(card_owner);
+            break;
+        }
+        address = heap_take(chunk, need);
+    }
+    if (!address) {
+        uint32_t used = module_owner_used(card_owner);
+        uint32_t chunk_bytes = ZZM_HEAP_CHUNK_BYTES;
+
+        /* An owner with a quota below one chunk gets a smaller chunk. */
+        if (used > quota)
+            chunk_bytes = 0U;
+        else if (quota - used < chunk_bytes)
+            chunk_bytes = (quota - used) & ~(CARD_POOL_PAGE_BYTES - 1U);
+        for (i = 0U; i < ZZM_HEAP_MAX_CHUNKS; ++i)
+            if (heap_chunks[i].card_owner == 0U)
+                break;
+        if (chunk_bytes >= need && i < ZZM_HEAP_MAX_CHUNKS) {
+            uint32_t base = card_pool_alloc(&card_pool, chunk_bytes,
+                                            card_owner);
+
+            if (base) {
+                zzm_heap_chunk_t *chunk = &heap_chunks[i];
+                zzm_heap_block_t *block = (zzm_heap_block_t *)(uintptr_t)base;
+
+                block->magic = ZZM_HEAP_FREE_MAGIC;
+                block->bytes = chunk_bytes;
+                block->next = ZZM_HEAP_NONE;
+                chunk->card_owner = card_owner;
+                chunk->address = base;
+                chunk->bytes = chunk_bytes;
+                chunk->free_head = 0U;
+                chunk->used = 0U;
+                address = heap_take(chunk, need);
+            }
+        }
+    }
+    sdk_smp_lock_release(&heap_lock);
+    return address;
+}
+
+/* 1: freed from a chunk, 0: not a chunk allocation of this owner. */
+static int heap_free(uint32_t address, uint32_t owner)
+{
+    uint32_t i;
+    int freed = 0;
+
+    sdk_smp_lock_acquire(&heap_lock);
+    for (i = 0U; i < ZZM_HEAP_MAX_CHUNKS; ++i) {
+        zzm_heap_chunk_t *chunk = &heap_chunks[i];
+        zzm_heap_block_t *block;
+        uint32_t offset;
+        uint32_t *link;
+        uint32_t previous = ZZM_HEAP_NONE;
+
+        if (chunk->card_owner == 0U ||
+            (chunk->card_owner & 0x00ffffffU) != (owner & 0x00ffffffU) ||
+            address < chunk->address + sizeof(zzm_heap_block_t) ||
+            address >= chunk->address + chunk->bytes)
+            continue;
+        if (!card_pool_block_owned(&card_pool, chunk->address, chunk->bytes,
+                                   chunk->card_owner)) {
+            heap_forget_owner_locked(chunk->card_owner);
+            break;
+        }
+        offset = address - chunk->address - (uint32_t)sizeof(*block);
+        block = heap_block(chunk, offset);
+        if ((offset & (ZZM_HEAP_GRANULE - 1U)) != 0U ||
+            block->magic != ZZM_HEAP_USED_MAGIC)
+            break;
+        chunk->used -= block->bytes;
+        block->magic = ZZM_HEAP_FREE_MAGIC;
+        link = &chunk->free_head;
+        while (*link != ZZM_HEAP_NONE && *link < offset) {
+            previous = *link;
+            link = &heap_block(chunk, previous)->next;
+        }
+        block->next = *link;
+        *link = offset;
+        if (block->next != ZZM_HEAP_NONE &&
+            offset + block->bytes == block->next) {
+            zzm_heap_block_t *next = heap_block(chunk, block->next);
+
+            block->bytes += next->bytes;
+            block->next = next->next;
+        }
+        if (previous != ZZM_HEAP_NONE) {
+            zzm_heap_block_t *prior = heap_block(chunk, previous);
+
+            if (previous + prior->bytes == offset) {
+                prior->bytes += block->bytes;
+                prior->next = block->next;
+            }
+        }
+        if (chunk->used == 0U) {
+            (void)card_pool_free(&card_pool, chunk->address, chunk->card_owner);
+            memset(chunk, 0, sizeof(*chunk));
+        }
+        freed = 1;
+        break;
+    }
+    sdk_smp_lock_release(&heap_lock);
+    return freed;
+}
+
 static uint32_t module_card_alloc(uint32_t owner, uint32_t memory_class,
                                   uint32_t quota, uint32_t bytes,
                                   uint32_t alignment)
 {
     uint32_t card_owner = module_card_owner(owner, memory_class);
-    (void)alignment; /* Card-pool pages are 64 KiB aligned. */
-    if (!bytes || !quota || bytes > quota ||
-        module_owner_used(card_owner) > quota - bytes)
+    (void)alignment; /* libzzm_rt aligns inside its over-allocation. */
+    if (!bytes || !quota || bytes > quota)
+        return 0U;
+    if (bytes < ZZM_HEAP_DIRECT_BYTES)
+        return heap_alloc(card_owner, quota, bytes);
+    if (module_owner_used(card_owner) > quota - bytes)
         return 0U;
     return card_pool_alloc(&card_pool, bytes, card_owner);
 }
 
 static int module_card_free(uint32_t address, uint32_t owner)
 {
+    if (heap_free(address, owner))
+        return 1;
     for (uint32_t i = 0; i < card_pool.block_count; i++) {
         if (card_pool.blocks[i].addr == address &&
             (card_pool.blocks[i].owner & 0x00ffffffU) ==
@@ -275,6 +494,7 @@ static uint32_t module_close_owner(uint32_t owner)
             memset(&runtime_windows[i], 0, sizeof(runtime_windows[i]));
         }
     }
+    heap_forget_owner(owner);
     released += card_pool_release_owner(&card_pool, owner);
     for (i = 0U; i < ZZM_RUNTIME_MAX_OWNERS; ++i) {
         if (runtime_owners[i].owner == owner) {
@@ -628,6 +848,7 @@ static int module_profile_snapshot(uint32_t module_id, void *out,
 
 static uint32_t module_release_owner(uint32_t owner)
 {
+    heap_forget_owner(owner);
     return card_pool_release_owner(&card_pool, owner);
 }
 
