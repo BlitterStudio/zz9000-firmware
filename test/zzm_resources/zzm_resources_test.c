@@ -82,7 +82,12 @@ int zzapp_display_bound(uint32_t *width, uint32_t *height, uint32_t *pitch,
     if (card_back) *card_back = 0x210000U;
     return 0;
 }
-int zzapp_display_flip_bound(void) { ++flip_calls; return 0; }
+int zzapp_svc_display_flip(uint32_t surface_id)
+{
+    (void)surface_id;
+    ++flip_calls;
+    return 0;
+}
 int sdk_aperture_runtime_is_zorro3(void) { return 1; }
 
 int zzm_registry_register_ops(uint32_t module_id, const void *ops, uint32_t size)
