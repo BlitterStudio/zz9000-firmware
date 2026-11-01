@@ -103,6 +103,7 @@ jobs:
           repository: BlitterStudio/amiberry-minigl-library
           ref: fix/module-review-b
           path: amiberry-minigl-library-zz9k
+          token: ${{ secrets.MINIGL_RELEASE_TOKEN }}
       - name: Install host-test multilib support
         run: |
           sudo apt-get update -qq
