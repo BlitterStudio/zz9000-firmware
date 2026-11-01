@@ -66,7 +66,7 @@ int minigl_transport_init(void)
     if (!g_host_window || !g_transport || g_window_base)
         return g_window_base ? 0 : -1;
     if (g_host_window->alloc(g_owner, MW_WINDOW_SIZE_Z3,
-                             MW_TRANSPORT_WINDOW_ALIGNMENT, &window) != 0)
+                             MW_TRANSPORT_WINDOW_ALIGNMENT, &window) <= 0)
         return -1;
     if (!mw_service_bind_region((volatile void *)(uintptr_t)window.arm_address,
                                 window.bytes)) {

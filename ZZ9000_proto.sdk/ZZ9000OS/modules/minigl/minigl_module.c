@@ -10,6 +10,7 @@
 #include "zzm_runtime.h"
 
 #define ZZM_MINIGL_MODULE_QUOTA (4U * 1024U * 1024U)
+#define ZZM_MINIGL_TRANSPORT_QUOTA (4U * 1024U * 1024U)
 #define ZZM_MINIGL_CAP_RASTERIX 1U
 
 struct zzapp_gl;
@@ -23,9 +24,11 @@ void zzapp_gl_reclaim(void);
 typedef struct minigl_module_context {
     const zzm_host_window_service_t *host_window;
     const zzm_transport_service_t *transport;
+    const zzm_reclaim_service_t *reclaim;
     const zzm_app_gl_host_service_t *app_host;
     const zzm_graphics_hw_service_t *graphics;
     uint32_t owner;
+    uint32_t transport_owner;
     int initialized;
 } minigl_module_context_t;
 
@@ -75,12 +78,42 @@ static void minigl_close_68k(void *context, uint32_t handle)
     (void)mw_service_close(handle);
 }
 
+static int minigl_create_transport_owner(minigl_module_context_t *module)
+{
+    uint32_t owner = 0U;
+
+    if (!module || !module->reclaim || !module->reclaim->create_owner)
+        return 0;
+    if (module->transport_owner != 0U)
+        return 1;
+    if (!module->reclaim->create_owner(
+            ZZM_MODULE_MINIGL, ZZM_RUNTIME_OWNER_CLASS_MINIGL_TRANSPORT,
+            0U, ZZM_MINIGL_TRANSPORT_QUOTA, &owner))
+        return 0;
+    module->transport_owner = owner;
+    return 1;
+}
+
+static void minigl_release_transport(minigl_module_context_t *module)
+{
+    if (!module || module->transport_owner == 0U)
+        return;
+    minigl_transport_fini();
+    if (module->reclaim && module->reclaim->close_owner)
+        (void)module->reclaim->close_owner(module->transport_owner);
+    module->transport_owner = 0U;
+}
+
 static int minigl_transport_acquire(void *context, uint32_t *generation)
 {
     ZZ9KMiniGLTransportDescriptor descriptor;
     minigl_module_context_t *module = context;
 
-    if (!module || minigl_transport_init() != 0 ||
+    if (!module || !minigl_create_transport_owner(module) ||
+        minigl_transport_set_module_services(module->host_window,
+                                             module->transport,
+                                             module->transport_owner) != 0 ||
+        minigl_transport_init() != 0 ||
         mw_service_get_transport_descriptor(&descriptor) != 0)
         return 0;
     if (generation)
@@ -90,14 +123,13 @@ static int minigl_transport_acquire(void *context, uint32_t *generation)
 
 static int minigl_transport_release(void *context)
 {
-    (void)context;
-    minigl_transport_fini();
+    minigl_release_transport(context);
     return 1;
 }
 
 static int minigl_begin_reset(void *context)
 {
-    (void)context;
+    minigl_release_transport(context);
     mw_service_reset();
     return ZZM_MINIGL_RESET_QUIESCENT;
 }
@@ -124,7 +156,7 @@ static void minigl_fini(void *context)
 {
     minigl_module_context_t *module = context;
 
-    minigl_transport_fini();
+    minigl_release_transport(module);
     if (module && module->transport && module->transport->remove_doorbell)
         module->transport->remove_doorbell(ZZM_MODULE_MINIGL);
     mw_service_reset_local();
@@ -188,6 +220,7 @@ int zzm_module_init(const zzm_services_t *services)
 {
     const zzm_host_window_service_t *host_window;
     const zzm_transport_service_t *transport;
+    const zzm_reclaim_service_t *reclaim;
     const zzm_app_gl_host_service_t *app_host;
     const zzm_palette_service_t *palette;
     const zzm_graphics_hw_service_t *graphics;
@@ -202,18 +235,25 @@ int zzm_module_init(const zzm_services_t *services)
                                      ZZM_SERVICE_HOST_WINDOW_V3);
     transport = zzm_rt_get_service(ZZM_SERVICE_TRANSPORT,
                                    ZZM_SERVICE_TRANSPORT_V3);
+    reclaim = zzm_rt_get_service(ZZM_SERVICE_RECLAIM,
+                                 ZZM_SERVICE_RECLAIM_V3);
     app_host = zzm_rt_get_service(ZZM_SERVICE_APP_GL_HOST,
                                   ZZM_SERVICE_APP_GL_HOST_V3);
     palette = zzm_rt_get_service(ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
     graphics = zzm_rt_get_service(ZZM_SERVICE_GRAPHICS_HW,
                                   ZZM_SERVICE_GRAPHICS_HW_V3);
-    if (!host_window || !transport || !app_host || !palette || !graphics ||
+    if (!host_window || !transport || !reclaim || !app_host || !palette ||
+        !graphics ||
         !minigl_table_compatible(host_window->version, host_window->size,
                                  ZZM_SERVICE_HOST_WINDOW_V3,
                                  sizeof(*host_window)) ||
         !minigl_table_compatible(transport->version, transport->size,
                                  ZZM_SERVICE_TRANSPORT_V3,
                                  sizeof(*transport)) ||
+        !minigl_table_compatible(reclaim->version, reclaim->size,
+                                 ZZM_SERVICE_RECLAIM_V3,
+                                 sizeof(*reclaim)) ||
+        !reclaim->create_owner || !reclaim->close_owner ||
         !minigl_table_compatible(app_host->version, app_host->size,
                                  ZZM_SERVICE_APP_GL_HOST_V3,
                                  sizeof(*app_host)) ||
@@ -228,15 +268,14 @@ int zzm_module_init(const zzm_services_t *services)
 
     g_module.host_window = host_window;
     g_module.transport = transport;
+    g_module.reclaim = reclaim;
     g_module.app_host = app_host;
     g_module.graphics = graphics;
     g_module.owner = ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL);
     if (!minigl_platform_set_graphics(graphics, &graphics_caps, g_module.owner) ||
         zzapp_gl_set_module_host(app_host) != 0 ||
-        minigl_transport_set_module_services(host_window, transport,
-                                             g_module.owner) != 0 ||
         !transport->install_doorbell ||
-        transport->install_doorbell(ZZM_MODULE_MINIGL) != 0)
+        !transport->install_doorbell(ZZM_MODULE_MINIGL))
         return -1;
     if (transport->publish_capabilities)
         transport->publish_capabilities(ZZM_MODULE_MINIGL,

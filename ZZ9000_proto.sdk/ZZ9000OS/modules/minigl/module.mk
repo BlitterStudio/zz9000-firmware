@@ -13,8 +13,8 @@ ZZM_MINIGL_WIRE_VERSION := 9
 ZZM_MINIGL_TRANSPORT_DESCRIPTOR_VERSION := 1
 
 # Explicit ZZM3 manifest inputs for `zzm_pack --v3`.  The 64 KiB resident
-# domain covers only module bookkeeping/descriptor state; each render context
-# is separately bounded at 32 MiB by the runtime owner quota.
+# domain covers only module bookkeeping/descriptor state.  Render contexts
+# use typed owners beneath the shared 384 MiB MiniGL card-pool budget.
 ZZM_MINIGL_V3_CPU_FLAGS := 7
 ZZM_MINIGL_V3_RASTERIX_FLAGS := 31
 ZZM_MINIGL_V3_OWNER_MASK := 15
@@ -27,7 +27,7 @@ ZZM_MINIGL_V3_RASTERIX_CSR_MAJOR := 2
 ZZM_MINIGL_V3_RASTERIX_CSR_MINOR := 0
 ZZM_MINIGL_V3_HOST_LAYOUT := 1
 ZZM_MINIGL_V3_RESIDENT_QUOTA := 65536
-ZZM_MINIGL_V3_CONTEXT_QUOTA := 33554432
+ZZM_MINIGL_V3_CONTEXT_QUOTA := 402653184
 ZZM_MINIGL_V3_WORKER_OPS := 0x00010000
 ZZM_MINIGL_PACK_CPU_ARGS := $(ZZM_MINIGL_MODULE_ID) 1 \
 	$(ZZM_MINIGL_V3_CPU_FLAGS) $(ZZM_MINIGL_V3_OWNER_MASK) \

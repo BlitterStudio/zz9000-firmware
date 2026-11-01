@@ -159,13 +159,40 @@ void zzm_rt_dcache_clean(uint32_t address, uint32_t length)
         cache->dcache_clean(address, length);
 }
 
+static uint32_t zzm_rt_card_owner(void)
+{
+    uint32_t owner_class;
+
+    switch (context.memory_class) {
+    case ZZM_MEMORY_CLASS_MINIGL_MODULE:
+        owner_class = 9U;
+        break;
+    case ZZM_MEMORY_CLASS_MINIGL_TRANSPORT:
+        owner_class = 10U;
+        break;
+    case ZZM_MEMORY_CLASS_MINIGL_CONTEXT:
+        owner_class = 11U;
+        break;
+    case ZZM_MEMORY_CLASS_MINIGL_APP_CONTEXT:
+        owner_class = 12U;
+        break;
+    case ZZM_MEMORY_CLASS_MINIGL_RIX:
+        owner_class = 13U;
+        break;
+    default:
+        return context.owner;
+    }
+    return (owner_class << 24U) | (context.owner & 0x00ffffffU);
+}
+
 void zzm_rt_dcache_invalidate(uint32_t address, uint32_t length)
 {
     if (cache && cache->size >=
             offsetof(zzm_cache_service_t, dcache_invalidate_owned) +
             sizeof(cache->dcache_invalidate_owned) &&
         cache->dcache_invalidate_owned)
-        (void)cache->dcache_invalidate_owned(context.owner, address, length);
+        (void)cache->dcache_invalidate_owned(zzm_rt_card_owner(), address,
+                                             length);
 }
 int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address, uint32_t length)
 {

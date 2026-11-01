@@ -14,24 +14,51 @@ static unsigned int doorbells;
 static unsigned int resets;
 static unsigned int transport_fini;
 static uint32_t next_handle = 0x10001U;
+static uint32_t transport_owner;
+static uint32_t next_owner = 0x0a000001U;
+
+static int create_owner(uint32_t module_id, uint32_t owner_class,
+                        uint32_t parent_owner, uint32_t quota,
+                        uint32_t *owner)
+{
+    if (module_id != ZZM_MODULE_MINIGL ||
+        owner_class != ZZM_RUNTIME_OWNER_CLASS_MINIGL_TRANSPORT ||
+        parent_owner != 0U || quota == 0U || !owner)
+        return 0;
+    transport_owner = next_owner++;
+    *owner = transport_owner;
+    return 1;
+}
+
+static uint32_t close_owner(uint32_t owner)
+{
+    if (owner != transport_owner)
+        return 0U;
+    transport_owner = 0U;
+    return 1U;
+}
+
+static const zzm_reclaim_service_t reclaim = {
+    ZZM_SERVICE_RECLAIM_V3, sizeof(reclaim), 0, create_owner, close_owner,
+    close_owner, 0
+};
+
 
 static int window_alloc(uint32_t owner, uint32_t bytes, uint32_t alignment,
                         zzm_host_window_t *out)
 {
-    (void)owner;
-    (void)bytes;
-    (void)alignment;
+    if (owner != transport_owner || bytes == 0U || alignment == 0U || !out)
+        return 0;
     out->arm_address = 0x08400000U;
     out->generation = 1U;
-    return 0;
+    out->bytes = bytes;
+    return 1;
 }
 
 static int window_free(uint32_t owner, uint32_t address, uint32_t generation)
 {
-    (void)owner;
-    (void)address;
-    (void)generation;
-    return 0;
+    return owner == transport_owner && address == 0x08400000U &&
+           generation == 1U;
 }
 
 static const zzm_host_window_service_t host_window = {
@@ -40,16 +67,13 @@ static const zzm_host_window_service_t host_window = {
 
 static int transport_publish(uint32_t module_id, const void *data, uint32_t bytes)
 {
-    (void)module_id;
-    (void)data;
-    (void)bytes;
-    return 0;
+    return module_id == ZZM_MODULE_MINIGL && data != 0 && bytes != 0U;
 }
 
 static void transport_retract(uint32_t module_id) { (void)module_id; }
 static int transport_install(uint32_t module_id)
 {
-    return module_id == ZZM_MODULE_MINIGL ? 0 : -1;
+    return module_id == ZZM_MODULE_MINIGL;
 }
 static void transport_remove(uint32_t module_id) { (void)module_id; }
 static void transport_caps(uint32_t module_id, uint32_t caps)
@@ -155,6 +179,8 @@ const void *zzm_rt_get_service(uint32_t id, uint32_t version)
         return &host_window;
     case ZZM_SERVICE_TRANSPORT:
         return &transport;
+    case ZZM_SERVICE_RECLAIM:
+        return &reclaim;
     case ZZM_SERVICE_APP_GL_HOST:
         return &app_host;
     case ZZM_SERVICE_PALETTE:
@@ -233,6 +259,7 @@ int minigl_module_host_init(void)
     doorbells = 0;
     resets = 0;
     transport_fini = 0;
+    transport_owner = 0U;
     return zzm_module_init(&services);
 }
 

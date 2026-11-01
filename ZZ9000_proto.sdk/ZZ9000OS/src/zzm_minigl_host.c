@@ -4,7 +4,7 @@
 #include "zzm_runtime.h"
 #include "memorymap.h"
 #include "sdk_aperture_layout.h"
-
+#include "rix_drv.h"
 
 #include <string.h>
 
@@ -264,7 +264,6 @@ static const zzm_graphics_hw_t g_graphics_hw = {
 #endif
 };
 
-#if defined(ZZM_SERVICE_GRAPHICS_HW)
 static int graphics_v3_caps(zzm_graphics_hw_caps_t *out)
 {
     if (out == 0)
@@ -303,6 +302,7 @@ static int graphics_v3_csr_write(uint32_t offset, uint32_t value)
     (void)value;
     return 0;
 #endif
+}
 
 static int graphics_v3_fifo_read(uint32_t offset, uint32_t *value_out)
 {
@@ -395,9 +395,6 @@ static const zzm_graphics_hw_service_t graphics_hw_service = {
     graphics_v3_pl330_start, graphics_v3_pl330_abort,
     graphics_v3_pl330_release, graphics_v3_barrier
 };
-#endif
-
-#if defined(ZZM_SERVICE_TRANSPORT)
 static int transport_publish_descriptor(uint32_t module_id,
                                         const void *descriptor,
                                         uint32_t descriptor_bytes)
@@ -470,22 +467,13 @@ static const zzm_transport_service_t transport_service = {
     transport_install_doorbell, transport_remove_doorbell,
     transport_publish_capabilities
 };
-#endif
 const void *zzm_minigl_host_get_service(uint32_t id, uint32_t min_version)
 {
-#if defined(ZZM_SERVICE_GRAPHICS_HW)
     if (id == ZZM_SERVICE_GRAPHICS_HW &&
         min_version <= ZZM_SERVICE_GRAPHICS_HW_V3)
         return &graphics_hw_service;
-#endif
-#if defined(ZZM_SERVICE_TRANSPORT)
     if (id == ZZM_SERVICE_TRANSPORT && min_version <= ZZM_SERVICE_TRANSPORT_V3)
         return &transport_service;
-#endif
-#if !defined(ZZM_SERVICE_GRAPHICS_HW) && !defined(ZZM_SERVICE_TRANSPORT)
-    (void)id;
-    (void)min_version;
-#endif
     return 0;
 }
 
@@ -615,10 +603,19 @@ int zzm_minigl_reset_poll(void)
 
 void zzm_minigl_abort_reset(void)
 {
-    if (g_ops && g_ops->abort_reset)
-        g_ops->abort_reset(g_context);
-    g_reset_active = 0;
+    /*
+     * Reset recovery can run on core 0 after core 1 faulted. Module cleanup
+     * may wait for a fence owned by that dead worker, so abort every
+     * firmware-owned engine and withdraw callbacks without entering module
+     * code.
+     */
     graphics_pl330_abort(0);
+#if !defined(TASKQ_HOST_TEST)
+    Xil_Out32(ZZM_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
+    Xil_Out32(ZZM_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    __asm__ volatile("dsb sy" ::: "memory");
+#endif
+    zzm_minigl_on_core1_fault();
 }
 
 void zzm_minigl_on_core1_fault(void)

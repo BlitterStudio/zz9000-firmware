@@ -16,6 +16,10 @@
 #include "minigl_raster.h"
 #include "minigl_profile.h"
 
+#if defined(MINIGL_MODULE)
+#include "zzm_runtime.h"
+#include "minigl_pool.h"
+#endif
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)
 #include "xil_cache.h"
 #include "xtime_l.h"
@@ -207,6 +211,28 @@ static mw_ctx *mw_service_find_context(uint32_t handle)
     }
     return NULL;
 }
+#if defined(MINIGL_MODULE)
+static int mw_service_create_context_owner(uint32_t *owner)
+{
+    const zzm_reclaim_service_t *reclaim = zzm_rt_get_service(
+        ZZM_SERVICE_RECLAIM, ZZM_SERVICE_RECLAIM_V3);
+
+    return reclaim && reclaim->create_owner && owner &&
+           reclaim->create_owner(ZZM_MODULE_MINIGL,
+                                 ZZM_RUNTIME_OWNER_CLASS_MINIGL_CONTEXT,
+                                 0U, MINIGL_CARD_POOL_LIMIT_BYTES, owner);
+}
+
+static void mw_service_close_context_owner(uint32_t owner)
+{
+    const zzm_reclaim_service_t *reclaim = zzm_rt_get_service(
+        ZZM_SERVICE_RECLAIM, ZZM_SERVICE_RECLAIM_V3);
+
+    if (owner && reclaim && reclaim->close_owner)
+        (void)reclaim->close_owner(owner);
+}
+#endif
+
 
 int mw_service_bind_region(volatile void *region, uint32_t size)
 {
@@ -474,6 +500,7 @@ int mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
 {
     uint32_t slot;
     uint32_t new_handle;
+    uint32_t owner;
     mw_ctx *context;
 
     if (handle)
@@ -485,11 +512,18 @@ int mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
         return MW_STATUS_CAPACITY;
 
     new_handle = (g_generation << 16) | (slot + 1U);
-    context = mw_host_create_owned(width, height,
-                                   CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL,
-                                                   new_handle));
-    if (!context)
+    owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, new_handle);
+#if defined(MINIGL_MODULE)
+    if (!mw_service_create_context_owner(&owner))
         return MW_STATUS_FAILED;
+#endif
+    context = mw_host_create_owned(width, height, owner);
+    if (!context) {
+#if defined(MINIGL_MODULE)
+        mw_service_close_context_owner(owner);
+#endif
+        return MW_STATUS_FAILED;
+    }
     if (flags & 1U)
         context->state.force_cpu = 1;
     context->handle = new_handle;
@@ -504,14 +538,23 @@ int mw_service_close(uint32_t handle)
 {
     uint32_t slot = handle & 0xffffU;
     mw_ctx *context;
+#if defined(MINIGL_MODULE)
+    uint32_t owner;
+#endif
 
     if (slot < 1U || slot > MW_MAX_CONTEXTS)
         return MW_STATUS_UNAVAILABLE;
     context = g_contexts[slot - 1U];
     if (!context || context->handle != handle)
         return MW_STATUS_UNAVAILABLE;
+#if defined(MINIGL_MODULE)
+    owner = context->card_pool_owner;
+#endif
     mw_host_destroy(context);
     g_contexts[slot - 1U] = NULL;
+#if defined(MINIGL_MODULE)
+    mw_service_close_context_owner(owner);
+#endif
     if (g_active_handle == handle)
         g_active_handle = 0;
     return MW_STATUS_OK;
@@ -522,7 +565,14 @@ void mw_service_reset_local(void)
     uint32_t i;
     for (i = 0; i < MW_MAX_CONTEXTS; ++i) {
         if (g_contexts[i]) {
+#if defined(MINIGL_MODULE)
+            uint32_t owner = g_contexts[i]->card_pool_owner;
+#endif
+
             mw_host_destroy(g_contexts[i]);
+#if defined(MINIGL_MODULE)
+            mw_service_close_context_owner(owner);
+#endif
             g_contexts[i] = NULL;
         }
     }

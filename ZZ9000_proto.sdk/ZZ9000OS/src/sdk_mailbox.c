@@ -6700,6 +6700,12 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		*result_len = sizeof(generation);
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_MINIGL_MODULE_RELEASE:
+		*result_len = 0U;
+		if (!zzm_minigl_transport_release())
+			return SDK_STATUS_BAD_REQUEST;
+		zzm_loader_release(ZZM_MODULE_MINIGL);
+		return SDK_STATUS_OK;
 	case SDK_OP_IMAGE_SESSION_BEGIN: {
 		const struct image_begin_op_params *p =
 		    (const struct image_begin_op_params *)d->op_params;
@@ -8577,6 +8583,7 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 	case SDK_OP_APP_LOAD_END:
 	case SDK_OP_APP_START:
 	case SDK_OP_MINIGL_MODULE_ACQUIRE:
+	case SDK_OP_MINIGL_MODULE_RELEASE:
 		return 1;
 	default:
 		return 0;
@@ -8804,11 +8811,20 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_MINIGL_MODULE_RELEASE:
 		if (payload_len != 0U)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-		if (!zzm_minigl_transport_release())
-			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-		zzm_loader_release(ZZM_MODULE_MINIGL);
-		write_completion(comp, req, SDK_STATUS_OK, 0);
-		return SDK_STATUS_OK;
+		if (!sdk_aperture_runtime_is_zorro3() || !scheduler_core1_available())
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+		{
+			taskq_shared_t *sh = scheduler_shared();
+			int slot = taskq_enqueue(&sh->queue, SDK_OP_MINIGL_MODULE_RELEASE,
+			                         TASK_LONG, 0U, 0U, 0U, 0U,
+			                         get_be32(req->request_id),
+			                         get_be32(req->user_cookie), 0, 0U);
+			if (slot < 0)
+				return complete_status(req, comp, SDK_STATUS_BUSY);
+			g_task_generation[slot] = sdk_mailbox_generation;
+			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			return SDK_STATUS_QUEUED;
+		}
 	case SDK_OP_QUERY_APERTURE_LAYOUT:
 		return handle_query_aperture_layout(req, comp);
 	case SDK_OP_QUERY_SERVICE:

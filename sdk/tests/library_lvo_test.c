@@ -32,7 +32,7 @@ static void test_library_identity(void)
 {
   expect_str("name", ZZ9K_LIBRARY_NAME, "zz9k.library");
   expect_u32("version", ZZ9K_LIBRARY_VERSION, 2);
-  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 33);
+  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 34);
 }
 
 static void test_standard_lvos(void)

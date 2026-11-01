@@ -24,13 +24,18 @@ void zzapp_gl_reclaim(void) { }
 int main(void)
 {
     const zzm_minigl_registration_v1_t *registered;
-    zzm_minigl_wire_open_t request = { 320U, 200U, 0U };
+    zzm_minigl_wire_open_t request = { 640U, 480U, 0U };
     const void *gl = 0;
     uint32_t handle = 0;
 
     assert(minigl_module_host_init() == 0);
     registered = minigl_module_host_registration();
     assert(registered && registered->version == ZZM_MINIGL_REGISTRATION_V1);
+    assert(registered->ops->open_68k(registered->context, &request, &handle));
+    assert(handle == 0x10001U);
+    assert(registered->ops->transport_acquire(registered->context, &handle));
+    assert(handle == 7U);
+    handle = 0;
     assert(registered->ops->open_68k(registered->context, &request, &handle));
     assert(handle == 0x10001U);
     registered->ops->doorbell(registered->context);
