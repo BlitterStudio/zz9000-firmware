@@ -6,7 +6,10 @@ LDFLAGS ?= -Wl,--gc-sections
 ROOT := ../..
 FIRMWARE := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS
 SRC := $(FIRMWARE)/src
-LIB ?= $(ROOT)/amiberry-minigl-library-zz9k
+ifndef MINIGL_LIB_DIR
+$(error MINIGL_LIB_DIR must point to the matching amiberry-minigl-library checkout)
+endif
+LIB := $(MINIGL_LIB_DIR)
 BUILD := build
 TARGET := $(BUILD)/minigl_module_test
 PACKER := $(BUILD)/zzm_pack
