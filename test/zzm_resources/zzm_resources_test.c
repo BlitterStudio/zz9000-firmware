@@ -153,6 +153,43 @@ static void test_typed_owner_quota_and_reclaim(void)
     CHECK(card_pool.block_count == 0U);
 }
 
+/* MiniGL invalidates a fence in a context-owned command buffer while its
+ * allocation context names another owner of the same module (RasterIX,
+ * module or app owner).  That must reach the cache; another module must
+ * still be refused. */
+static void test_owned_ops_cover_the_whole_module(void)
+{
+    const zzm_services_t *services = zzm_runtime_services_v3();
+    const zzm_reclaim_service_t *reclaim;
+    const zzm_memory_service_t *memory;
+    const zzm_cache_service_t *cache;
+    uint32_t context;
+    uint32_t rix;
+    uint32_t other;
+    uint32_t address;
+
+    reset_resources();
+    reclaim = services->get_service(ZZM_SERVICE_RECLAIM, ZZM_SERVICE_RECLAIM_V3);
+    memory = services->get_service(ZZM_SERVICE_MEMORY, ZZM_SERVICE_MEMORY_V3);
+    cache = services->get_service(ZZM_SERVICE_CACHE, ZZM_SERVICE_CACHE_V3);
+    CHECK(reclaim->create_owner(4U, ZZM_RUNTIME_OWNER_CLASS_MINIGL_CONTEXT,
+                                0U, CARD_POOL_PAGE_BYTES, &context));
+    CHECK(reclaim->create_owner(4U, ZZM_RUNTIME_OWNER_CLASS_MINIGL_RIX,
+                                0U, CARD_POOL_PAGE_BYTES, &rix));
+    CHECK(reclaim->create_owner(5U, ZZM_RUNTIME_OWNER_CLASS_MINIGL_CONTEXT,
+                                0U, CARD_POOL_PAGE_BYTES, &other));
+    address = memory->alloc_ex(context, ZZM_RUNTIME_OWNER_CLASS_MINIGL_CONTEXT,
+                               CARD_POOL_PAGE_BYTES, 256U, 64U,
+                               ZZM_MEMORY_ATTR_NONE);
+    CHECK(address != 0U);
+    CHECK(cache->dcache_invalidate_owned(rix, address, 2U));
+    CHECK(cache->dcache_invalidate_owned(
+        (11U << 24) | ZZM_MODULE_OWNER(4U), address, 2U));
+    CHECK(cache_invalidate_calls == 2U);
+    CHECK(!cache->dcache_invalidate_owned(other, address, 2U));
+    CHECK(cache_invalidate_calls == 2U);
+}
+
 static void test_host_window_palette_and_app_guard(void)
 {
     const zzm_services_t *services = zzm_runtime_services_v3();
@@ -201,17 +238,19 @@ static void test_log_rate_limit(void)
 
     reset_resources();
     core = services->get_service(ZZM_SERVICE_CORE, ZZM_SERVICE_CORE_V3);
-    for (i = 0U; i < 10U; ++i)
+    for (i = 0U; i < 40U; ++i)
         core->log_limited(4U, 0U, "noisy");
-    CHECK(log_lines == 8U);
+    CHECK(log_lines == 32U);
     now_us = 1000000U;
     core->log_limited(4U, 0U, "next");
-    CHECK(log_lines == 10U);
+    /* the "suppressed 8 logs" summary, then the new line */
+    CHECK(log_lines == 34U);
 }
 
 int main(void)
 {
     test_typed_owner_quota_and_reclaim();
+    test_owned_ops_cover_the_whole_module();
     test_host_window_palette_and_app_guard();
     test_log_rate_limit();
     if (failures)

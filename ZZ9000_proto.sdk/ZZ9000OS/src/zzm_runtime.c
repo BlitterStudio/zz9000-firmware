@@ -30,6 +30,9 @@ extern int zzm_test_printf(const char *format, ...);
 #define ZZM_RUNTIME_MAX_OWNERS 32U
 #define ZZM_RUNTIME_MAX_WINDOWS 4U
 #define ZZM_RUNTIME_MAX_COUNTERS 16U
+/* Lines per module per second.  A RasterIX disable is one line plus a
+ * five-line dump; at 8 the reason itself was the line that got dropped. */
+#define ZZM_RUNTIME_LOG_BURST 32U
 
 typedef struct {
     uint32_t owner;
@@ -313,7 +316,7 @@ static void module_icache_invalidate(uint32_t address, uint32_t length)
     Xil_ICacheInvalidateRange(address, length);
 }
 
-static int module_range_owned(uint32_t owner, uint32_t address, uint32_t length)
+static int range_owned_exact(uint32_t owner, uint32_t address, uint32_t length)
 {
     uint32_t i;
 
@@ -327,6 +330,64 @@ static int module_range_owned(uint32_t owner, uint32_t address, uint32_t length)
         offset = address - runtime_windows[i].address;
         if (offset <= runtime_windows[i].bytes &&
             length <= runtime_windows[i].bytes - offset)
+            return 1;
+    }
+    return 0;
+}
+
+static uint32_t owner_module_id(uint32_t owner)
+{
+    uint32_t instance = owner & 0x00ffffffU;
+    uint32_t i;
+
+    if ((instance & ZZM_MODULE_OWNER_TAG) != 0U)
+        return instance & (ZZM_MODULE_OWNER_TAG - 1U);
+    for (i = 0U; i < ZZM_RUNTIME_MAX_OWNERS; ++i) {
+        if (runtime_owners[i].owner != 0U &&
+            (runtime_owners[i].owner & 0x00ffffffU) == instance)
+            return runtime_owners[i].module_id;
+    }
+    return 0U;
+}
+
+/*
+ * libzzm_rt derives the owner of a cache call from the module's current
+ * allocation context, which need not be the owner the buffer was allocated
+ * under (MiniGL waits on RasterIX fences in command buffers owned by a
+ * context while another context, the module or an app owner is selected).
+ * A failed check makes the call a silent no-op, and a skipped fence
+ * invalidate reads a stale value until RasterIX is declared hung.  The
+ * guard exists to keep a module off memory it does not own, so accept any
+ * range owned by the same module.
+ */
+static int module_range_owned(uint32_t owner, uint32_t address, uint32_t length)
+{
+    static const uint32_t base_classes[] = {
+        ZZM_MEMORY_CLASS_MEDIA,
+        ZZM_MEMORY_CLASS_MEDIA_INPUT,
+        ZZM_MEMORY_CLASS_IMAGE,
+        ZZM_MEMORY_CLASS_GENERAL,
+        ZZM_MEMORY_CLASS_MINIGL_MODULE,
+    };
+    uint32_t module_id;
+    uint32_t base;
+    uint32_t i;
+
+    if (range_owned_exact(owner, address, length))
+        return 1;
+    module_id = owner_module_id(owner);
+    if (module_id == 0U)
+        return 0;
+    for (i = 0U; i < ZZM_RUNTIME_MAX_OWNERS; ++i) {
+        if (runtime_owners[i].owner != 0U &&
+            runtime_owners[i].module_id == module_id &&
+            range_owned_exact(runtime_owners[i].owner, address, length))
+            return 1;
+    }
+    base = ZZM_MODULE_OWNER(module_id);
+    for (i = 0U; i < sizeof(base_classes) / sizeof(base_classes[0]); ++i) {
+        if (range_owned_exact(module_card_owner(base, base_classes[i]),
+                              address, length))
             return 1;
     }
     return 0;
@@ -420,7 +481,7 @@ static void module_log_limited(uint32_t module_id, uint32_t level,
         state->emitted = 0U;
         state->suppressed = 0U;
     }
-    if (state->emitted >= 8U) {
+    if (state->emitted >= ZZM_RUNTIME_LOG_BURST) {
         state->suppressed++;
         return;
     }
