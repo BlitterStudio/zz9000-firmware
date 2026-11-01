@@ -12,6 +12,7 @@
 #include "minigl_profile.h"
 #include "minigl_lighting.h"
 #include "minigl_platform.h"
+#include "minigl_pool.h"
 
 #include "card_pool.h"
 #include "sdk_palette.h"
@@ -118,9 +119,23 @@ static uint32_t mw_palette_get(uint32_t index)
 #endif
 
 static void mw_context_free(mw_ctx *c, void *memory, uint32_t *address);
+#if defined(MINIGL_MODULE)
+static void mw_context_select_allocation_owner(const mw_ctx *c)
+{
+    zzm_rt_set_context(c->card_pool_owner, ZZM_MEMORY_CLASS_MINIGL_CONTEXT,
+                       MINIGL_CARD_POOL_LIMIT_BYTES);
+}
+#else
+static void mw_context_select_allocation_owner(const mw_ctx *c)
+{
+    (void)c;
+}
+#endif
+
 
 static void *mw_context_alloc(mw_ctx *c, uint32_t bytes, uint32_t *address)
 {
+    mw_context_select_allocation_owner(c);
 #if MW_CONTEXT_CARD_POOL
     uint32_t card_address = card_pool_alloc(&card_pool, bytes, c->card_pool_owner);
     if (!card_address)
@@ -149,6 +164,7 @@ static void *mw_context_alloc(mw_ctx *c, uint32_t bytes, uint32_t *address)
 static void *mw_context_alloc_uninitialized(mw_ctx *c, uint32_t bytes,
                                             uint32_t *address)
 {
+    mw_context_select_allocation_owner(c);
 #if MW_CONTEXT_CARD_POOL
     uint32_t card_address = card_pool_alloc(&card_pool, bytes, c->card_pool_owner);
     if (!card_address)
@@ -173,6 +189,7 @@ static void *mw_context_alloc_uninitialized(mw_ctx *c, uint32_t bytes,
 
 static void mw_context_free(mw_ctx *c, void *memory, uint32_t *address)
 {
+    mw_context_select_allocation_owner(c);
 #if MW_CONTEXT_CARD_POOL
     (void)memory;
     if (*address)
@@ -911,6 +928,10 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     if (!width || !height || width > MW_MAX_DIMENSION || height > MW_MAX_DIMENSION)
         return NULL;
 
+#if defined(MINIGL_MODULE)
+    zzm_rt_set_context(owner, ZZM_MEMORY_CLASS_MINIGL_CONTEXT,
+                       MINIGL_CARD_POOL_LIMIT_BYTES);
+#endif
     c = (mw_ctx *)calloc(1, sizeof(mw_ctx));
     if (!c)
         return NULL;
@@ -979,6 +1000,7 @@ void mw_host_destroy(mw_ctx *c)
 
     if (!c)
         return;
+    mw_context_select_allocation_owner(c);
     if (!minigl_raster_quiesce() && c->rix_enabled)
         return;
     minigl_raster_set_fail_stop_target_handler(NULL, NULL);
@@ -1794,6 +1816,7 @@ uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
         *failed_opcode = 0U;
     if (!c || !packet || bytes < 16)
         return MW_STATUS_INVALID;
+    mw_context_select_allocation_owner(c);
 
     status = mw_validate_packet_report(packet, bytes, failed_opcode);
     if (status != MW_STATUS_OK)

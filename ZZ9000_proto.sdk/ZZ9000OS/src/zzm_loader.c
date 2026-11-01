@@ -21,6 +21,8 @@ extern int zzm_runtime_quota_available(uint32_t memory_class,
                                        uint32_t quota) __attribute__((weak));
 extern uint32_t zzm_runtime_release_module(uint32_t module_id) __attribute__((weak));
 extern const zzm_services_t *zzm_runtime_services_v3(void) __attribute__((weak));
+extern void zzm_minigl_unregister(void) __attribute__((weak));
+extern void zzm_minigl_on_core1_fault(void) __attribute__((weak));
 
 static zzm_status_t module_status[ZZM_MODULE_MAX];
 static zzm_header_t module_header[ZZM_MODULE_MAX];
@@ -466,6 +468,16 @@ static void poison_v3_slot(uint32_t index)
 static void load_v3_failed(uint32_t index, enum zzm_state state, uint32_t reason)
 {
     unregister_module(index);
+    /*
+     * This path runs on the core-1 loader owner. An init routine can have
+     * registered MiniGL callbacks before its final readiness check fails, so
+     * detach them before reclaiming or poisoning its image.
+     */
+    if (module_v3_header[index].fini_entry)
+        ((zzm_fini_fn)(uintptr_t)module_v3_header[index].fini_entry)();
+    if (module_status[index].id == ZZM_MODULE_MINIGL &&
+        zzm_minigl_unregister)
+        zzm_minigl_unregister();
     if (zzm_runtime_release_module)
         (void)zzm_runtime_release_module(module_status[index].id);
     poison_v3_slot(index);
@@ -537,6 +549,23 @@ static int load_v3_module(uint32_t index)
     printf("[ZZM] %s loaded v%lu\n", slot->name,
            (unsigned long)header->module_version);
     return 1;
+}
+static void unload_v3_on_owner(uint32_t index)
+{
+    const zzm_v3_header_t *header = &module_v3_header[index];
+
+    unregister_module(index);
+    if (header->fini_entry)
+        ((zzm_fini_fn)(uintptr_t)header->fini_entry)();
+    if (module_status[index].id == ZZM_MODULE_MINIGL &&
+        zzm_minigl_unregister)
+        zzm_minigl_unregister();
+    if (zzm_runtime_release_module)
+        (void)zzm_runtime_release_module(module_status[index].id);
+    poison_v3_slot(index);
+    status_from_v3_slot(index, ZZM_STATE_AVAILABLE, header, ZZM_REASON_NONE);
+    module_idle_since[index] = 0U;
+    release_dependencies(index);
 }
 static int load_module(uint32_t index, uint8_t visiting[ZZM_MODULE_COUNT])
 {
@@ -771,8 +800,16 @@ void zzm_loader_release(uint32_t module_id)
     if (index >= 0 && module_status[index].state == ZZM_STATE_LOADED &&
         module_status[index].ref_count != 0U) {
         module_status[index].ref_count--;
-        if (module_status[index].ref_count == 0U)
+        if (module_status[index].ref_count == 0U) {
             module_idle_since[index] = last_poll_ms;
+            /*
+             * Core-1-owned releases may tear down a v3 module immediately.
+             * Core 0 only marks it idle; it must never enter module code.
+             */
+            if (module_format[index] == ZZM_V3_FORMAT_VERSION &&
+                smp_cpu_id() == 1)
+                unload_v3_on_owner((uint32_t)index);
+        }
     }
     zzm_loader_session_begin_unlock();
 }
@@ -798,14 +835,13 @@ void zzm_loader_poll(uint64_t now_ms)
         if (now_ms - module_idle_since[i] < idle_ms)
             continue;
         if (module_format[i] == ZZM_V3_FORMAT_VERSION) {
-            unregister_module(i);
-            if (module_v3_header[i].fini_entry)
-                ((zzm_fini_fn)(uintptr_t)module_v3_header[i].fini_entry)();
-            if (zzm_runtime_release_module)
-                (void)zzm_runtime_release_module(module_status[i].id);
-            poison_v3_slot(i);
-            status_from_v3_slot(i, ZZM_STATE_AVAILABLE, &module_v3_header[i],
-                                ZZM_REASON_NONE);
+            /*
+             * Core 0 cannot run module fini or poison an image still
+             * reachable from the core-1 worker. The final core-1 release
+             * performs the drain/detach/fini/reclaim sequence.
+             */
+            module_idle_since[i] = now_ms;
+            continue;
         } else {
             unregister_and_reclaim(i, 1);
             status_from_slot(i, ZZM_STATE_AVAILABLE, &module_header[i],
@@ -829,9 +865,11 @@ void zzm_loader_mark_faulted(uint32_t module_id, const char *reason)
      * entry first, but never poison the slot on that stack; it remains
      * faulted until reboot. */
     unregister_module((uint32_t)index);
+    if (module_status[index].id == ZZM_MODULE_MINIGL &&
+        zzm_minigl_on_core1_fault)
+        zzm_minigl_on_core1_fault();
     if (zzm_runtime_release_module)
         (void)zzm_runtime_release_module(module_status[index].id);
-    module_status[index].ref_count = 0U;
     if (module_format[index] == ZZM_V3_FORMAT_VERSION)
         status_from_v3_slot((uint32_t)index, ZZM_STATE_FAULTED,
                             &module_v3_header[index], ZZM_REASON_FAULT);

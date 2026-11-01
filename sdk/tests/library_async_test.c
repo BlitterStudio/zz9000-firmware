@@ -27,6 +27,7 @@ struct EventWaitState {
   struct TestMailbox *mailbox;
   uint32_t request_id;
   uint32_t wait_calls;
+  uint32_t complete_after_calls;
   uint32_t fail_after_calls;
 };
 
@@ -90,11 +91,14 @@ static int prepare_completion_on_event(ZZ9KLibrary *library,
   struct EventWaitState *state;
 
   (void)library;
-  state = (struct EventWaitState *)user_data;
   state->wait_calls++;
   if (state->fail_after_calls &&
       state->wait_calls >= state->fail_after_calls) {
     return ZZ9K_STATUS_TIMEOUT;
+  }
+  if (state->complete_after_calls != 0U &&
+      state->wait_calls < state->complete_after_calls) {
+    return ZZ9K_STATUS_OK;
   }
 
   prepare_completion(state->mailbox, state->request_id, ZZ9K_OP_PING,
@@ -1054,6 +1058,35 @@ static int test_wait_async_times_out_without_consuming_request(void)
   return 0;
 }
 
+static int test_call_waits_for_late_completion(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct EventWaitState event_state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  request.entry.flags = ZZ9K_ENTRY_INLINE_PAYLOAD;
+  memset(&event_state, 0, sizeof(event_state));
+  event_state.mailbox = &mailbox;
+  event_state.request_id = 1U;
+  event_state.complete_after_calls = 3U;
+  if (ZZ9KSetEventWaiter(&library, prepare_completion_on_event,
+                         &event_state) != ZZ9K_STATUS_OK) return 2;
+
+  status = ZZ9KCall(&library, &request, &reply, 3U);
+  if (status != ZZ9K_STATUS_OK) return 3;
+  if (event_state.wait_calls != 3U) return 4;
+  if (reply.request_id != 1U || reply.status != ZZ9K_STATUS_OK) return 5;
+  ZZ9KClose(&library);
+  return 0;
+}
 static int test_wait_async_uses_event_waiter_between_polls(void)
 {
   struct TestMailbox mailbox;
@@ -1368,6 +1401,8 @@ int main(void)
 
   result = test_wait_async_times_out_without_consuming_request();
   if (result) return 70 + result;
+  result = test_call_waits_for_late_completion();
+  if (result) return 75 + result;
 
   result = test_wait_async_uses_event_waiter_between_polls();
   if (result) return 80 + result;

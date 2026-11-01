@@ -67,6 +67,10 @@ int ZZ9KQueryService(ZZ9KLibrary *library, uint32_t service_id,
 int ZZ9KPing(ZZ9KLibrary *library, const uint8_t *payload,
              uint32_t payload_len, uint8_t *reply_payload,
              uint32_t *reply_len);
+/*
+ * `timeout_ticks` is an elapsed wall-clock budget in Amiga DOS ticks
+ * (one tick is 1/50 second), not a count of tight polling iterations.
+ */
 int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
              ZZ9KMailboxEntry *reply, uint32_t timeout_ticks);
 int ZZ9KCallAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async,
@@ -77,6 +81,10 @@ int ZZ9KCallAsyncBatch(ZZ9KLibrary *library, ZZ9KAsyncRequest *asyncs,
                        ZZ9KAsyncCallback callback, void *user_data,
                        uint32_t *queued);
 int ZZ9KCancelAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async);
+/*
+ * Async wait calls also wait for one DOS tick after an empty poll when no
+ * transport event waiter is installed. `timeout_polls` bounds polls.
+ */
 int ZZ9KWaitAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async,
                   uint32_t timeout_polls, uint32_t *polls_run);
 int ZZ9KWaitAsyncBatch(ZZ9KLibrary *library, ZZ9KAsyncRequest *asyncs,

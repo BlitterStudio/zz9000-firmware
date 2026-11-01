@@ -8,6 +8,7 @@
 #include <string.h>
 
 #if ZZ9K_LIBRARY_AMIGA
+#include <proto/dos.h>
 #include <proto/exec.h>
 #endif
 
@@ -85,11 +86,20 @@ static int zz9k_batch_waitable(const ZZ9KAsyncRequest *asyncs,
 
 static int zz9k_wait_for_transport_event(ZZ9KLibrary *library)
 {
-  if (!library->event_waiter) {
-    return ZZ9K_STATUS_OK;
+  if (library->event_waiter) {
+    return library->event_waiter(library, library->event_user_data);
   }
 
-  return library->event_waiter(library, library->event_user_data);
+#if ZZ9K_LIBRARY_AMIGA
+  /*
+   * Synchronous callers have no resident IRQ waiter installed.  Yielding for
+   * a DOS tick makes their timeout a wall-clock budget instead of exhausting
+   * it in a few mailbox loads, while the next poll still dispatches replies
+   * for pending asynchronous requests.
+   */
+  Delay(1);
+#endif
+  return ZZ9K_STATUS_OK;
 }
 
 static int zz9k_dispatch_reply(ZZ9KLibrary *library,
@@ -242,25 +252,29 @@ int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
     return status;
   }
 
-  for (ticks = 0; ticks < timeout_ticks; ticks++) {
+  for (ticks = 0;;) {
     status = zz9k_poll(library->ctx, reply);
-    if (status == ZZ9K_STATUS_BUSY) {
-      continue;
-    }
-    if (status != ZZ9K_STATUS_OK) {
-      return status;
-    }
-    if (reply->request_id == request_id) {
-      return reply->status;
-    }
+    if (status != ZZ9K_STATUS_BUSY) {
+      if (status != ZZ9K_STATUS_OK) {
+        return status;
+      }
+      if (reply->request_id == request_id) {
+        return reply->status;
+      }
 
-    status = zz9k_dispatch_reply(library, reply);
+      status = zz9k_dispatch_reply(library, reply);
+      if (status != ZZ9K_STATUS_OK) {
+        return status;
+      }
+    }
+    if (ticks++ == timeout_ticks) {
+      return ZZ9K_STATUS_TIMEOUT;
+    }
+    status = zz9k_wait_for_transport_event(library);
     if (status != ZZ9K_STATUS_OK) {
       return status;
     }
   }
-
-  return ZZ9K_STATUS_TIMEOUT;
 }
 
 int ZZ9KCallAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async,
