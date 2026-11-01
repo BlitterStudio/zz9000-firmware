@@ -298,13 +298,19 @@ static int stop_requested(void)
            zzapp_svc_should_stop();
 }
 
+/* Core 1 (service tick, faults) and core 0 (restart recovery) can both stop
+ * the app; exactly one of them runs the teardown. */
+static int claim_fault(void)
+{
+    return __atomic_exchange_n(&g_faulted, 1, __ATOMIC_ACQ_REL) == 0;
+}
+
 static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
                        uint32_t lr, uint32_t far, uint32_t fsr, uint32_t cpsr)
 {
-    if (g_faulted)
+    if (!claim_fault())
         return;
     zzapp_private_timer_disable();
-    g_faulted = 1;
     g_coh->running = 0;
     g_coh->fault = fault;
     life32(ZZAPP_LIFE_FAULT_OFF, fault);
@@ -797,6 +803,8 @@ void zzapp_core0_poll(void)
         g_coh->running = 0;
         g_coh->fault = ZZAPP_FAULT_WATCHDOG_RESTART;
         life32(ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_WATCHDOG_RESTART);
+        (void)claim_fault();
+        g_fault_mark = now_ticks();
         publish_state(ZZAPP_ST_FAULTED);
         g_cold_restarts++;
 #ifndef ZZAPP_HOST_TEST
@@ -824,8 +832,14 @@ void zzapp_on_core1_restart(void)
     }
 }
 
+/* A running app stops itself within one private-timer tick and the worker
+ * acks after its teardown.  Bounded well under the 2 s API-stall limit. */
+#define ZZAPP_RESET_ACK_WAIT_US 1000000u
+
 void zzapp_on_amiga_reset(void)
 {
+    uint32_t running = g_coh->running;
+
     /* Core 1 owns deferred operations and their completion publication.
      * Publish stop first; worker_hook performs service teardown and acks. */
     coherent_barrier();
@@ -833,6 +847,26 @@ void zzapp_on_amiga_reset(void)
     g_coh->reset_request = 1;
     coherent_publish();
     wake_core1();
+#ifndef ZZAPP_HOST_TEST
+    /*
+     * The reset path continues with the core-1 quiesce, the L1 clean
+     * request and the Fast-RAM take-back.  A running app answers none of
+     * those, so without this wait every Amiga reset during an app
+     * cold-restarted a healthy core 1, which can wedge the Zorro bus.
+     * Only a core 1 that misses the ack still takes the restart.
+     */
+    if (running) {
+        uint64_t start = now_ticks();
+
+        while (!g_coh->reset_ack &&
+               ticks_to_us(now_ticks() - start) < ZZAPP_RESET_ACK_WAIT_US)
+            usleep(100u);
+        if (!g_coh->reset_ack)
+            printf("[app] reset: core 1 did not stop the app within 1 s\r\n");
+    }
+#else
+    (void)running;
+#endif
 }
 
 void zzapp_status_observed(void)

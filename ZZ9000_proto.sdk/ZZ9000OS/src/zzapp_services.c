@@ -1384,7 +1384,12 @@ static const struct audio_fabric_producer_ops app_audio_ops = {
 
 static void audio_detach(void)
 {
-	if (!audio_open)
+	int open = 1;
+
+	/* Core 0 (an app's close request) and core 1 (teardown) can both get
+	 * here; only the caller that clears audio_open releases the block. */
+	if (!__atomic_compare_exchange_n(&audio_open, &open, 0, 0,
+					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 		return;
 #ifndef ZZAPP_HOST_TEST
 	audio_fabric_producer_detach(audio_slot);
@@ -1394,7 +1399,6 @@ static void audio_detach(void)
 #ifdef ZZAPP_HOST_TEST
 	free(audio_block);
 #endif
-	audio_open = 0;
 	audio_block = NULL;
 	audio_samples = NULL;
 	audio_read_frame = NULL;
