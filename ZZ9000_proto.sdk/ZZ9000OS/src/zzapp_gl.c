@@ -17,6 +17,7 @@
 
 #include "memorymap.h"
 #include "minigl_present.h"
+#include "minigl_profile.h"
 #include "minigl_raster.h"
 #include "minigl_renderer.h"
 #include "mw_ctx.h"
@@ -460,6 +461,10 @@ int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out)
     fill_table();
     g_bound = 1;
     g_surface_id = surface_id;
+    /* One [MGLP] UART line per 5 s of GL work: where an ARM app's frame
+     * time goes (app vs MiniGL stages, hardware vs CPU draws, fallback
+     * reasons).  68k clients switch it on through trace_enabled. */
+    minigl_profile_set_enabled(1);
     if (out)
         *out = &g_table;
     return ZZ_OK;
@@ -472,6 +477,7 @@ void zzapp_gl_unbind(void)
     amiberry_inproc_close();
     g_surface_id = 0;
     g_bound = 0;
+    minigl_profile_set_enabled(0);
 }
 
 void zzapp_gl_reclaim(void)
@@ -576,12 +582,17 @@ void zzapp_gl_swap(void)
     if (!mw || !mw->color_buffers[mw->state.target.latest])
         goto done;
     src = mw->color_buffers[mw->state.target.latest];
-    if (!copy_bound(src, rgb565, minigl_raster_present_is_bottom_up(),
-                    w, h, pitch, format, card))
-        goto done;
-    minigl_platform_cache_clean(NULL, card, pitch * h);
-    minigl_platform_barrier(NULL);
-    (void)zzapp_svc_display_flip(g_surface_id);
+    /* pres= covers the CPU copy into the P96 bitmap and the wait for
+     * ZZRun's flip acknowledgement. */
+    minigl_profile_push(MGLP_PRESENT);
+    if (copy_bound(src, rgb565, minigl_raster_present_is_bottom_up(),
+                   w, h, pitch, format, card)) {
+        minigl_platform_cache_clean(NULL, card, pitch * h);
+        minigl_platform_barrier(NULL);
+        (void)zzapp_svc_display_flip(g_surface_id);
+    }
+    minigl_profile_pop();
+    minigl_profile_report();
 done:
     zzapp_api_leave();
 }
