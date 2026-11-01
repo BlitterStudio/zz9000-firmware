@@ -538,14 +538,18 @@ int mw_service_close(uint32_t handle)
 {
     uint32_t slot = handle & 0xffffU;
     mw_ctx *context;
+#if defined(MINIGL_MODULE)
     uint32_t owner;
+#endif
 
     if (slot < 1U || slot > MW_MAX_CONTEXTS)
         return MW_STATUS_UNAVAILABLE;
     context = g_contexts[slot - 1U];
     if (!context || context->handle != handle)
         return MW_STATUS_UNAVAILABLE;
+#if defined(MINIGL_MODULE)
     owner = context->card_pool_owner;
+#endif
     mw_host_destroy(context);
     g_contexts[slot - 1U] = NULL;
 #if defined(MINIGL_MODULE)
@@ -561,7 +565,9 @@ void mw_service_reset_local(void)
     uint32_t i;
     for (i = 0; i < MW_MAX_CONTEXTS; ++i) {
         if (g_contexts[i]) {
+#if defined(MINIGL_MODULE)
             uint32_t owner = g_contexts[i]->card_pool_owner;
+#endif
 
             mw_host_destroy(g_contexts[i]);
 #if defined(MINIGL_MODULE)

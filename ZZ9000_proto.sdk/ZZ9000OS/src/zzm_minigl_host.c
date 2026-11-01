@@ -4,7 +4,7 @@
 #include "zzm_runtime.h"
 #include "memorymap.h"
 #include "sdk_aperture_layout.h"
-
+#include "rix_drv.h"
 
 #include <string.h>
 
@@ -611,8 +611,8 @@ void zzm_minigl_abort_reset(void)
      */
     graphics_pl330_abort(0);
 #if !defined(TASKQ_HOST_TEST)
-    Xil_Out32(ZZM_RIX_CSR_BASE + 0U, 0U);
-    Xil_Out32(ZZM_RIX_FIFO_BASE + ZZM_RIX_FIFO_TDFD, 0U);
+    Xil_Out32(ZZM_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
+    Xil_Out32(ZZM_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     __asm__ volatile("dsb sy" ::: "memory");
 #endif
     zzm_minigl_on_core1_fault();

@@ -89,7 +89,7 @@ static int prepare_completion_on_event(ZZ9KLibrary *library,
                                        void *user_data)
 {
   struct EventWaitState *state;
-
+  state = (struct EventWaitState *)user_data;
   (void)library;
   state->wait_calls++;
   if (state->fail_after_calls &&

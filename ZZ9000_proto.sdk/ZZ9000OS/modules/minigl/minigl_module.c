@@ -96,12 +96,12 @@ static int minigl_create_transport_owner(minigl_module_context_t *module)
 
 static void minigl_release_transport(minigl_module_context_t *module)
 {
+    if (!module || module->transport_owner == 0U)
+        return;
     minigl_transport_fini();
-    if (module && module->transport_owner != 0U && module->reclaim &&
-        module->reclaim->close_owner)
+    if (module->reclaim && module->reclaim->close_owner)
         (void)module->reclaim->close_owner(module->transport_owner);
-    if (module)
-        module->transport_owner = 0U;
+    module->transport_owner = 0U;
 }
 
 static int minigl_transport_acquire(void *context, uint32_t *generation)
