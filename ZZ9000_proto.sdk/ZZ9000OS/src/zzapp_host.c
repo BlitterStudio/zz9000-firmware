@@ -334,7 +334,8 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
 
 static void maybe_expire_fault(uint64_t now)
 {
-    if (g_state == ZZAPP_ST_FAULTED &&
+    /* Core 1 may set the mark after the caller sampled now. */
+    if (g_state == ZZAPP_ST_FAULTED && now > g_fault_mark &&
         ticks_to_us(now - g_fault_mark) >= ZZAPP_WATCHDOG_US)
         publish_state(ZZAPP_ST_IDLE);
 }
@@ -739,11 +740,32 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
 #endif
 }
 
+/*
+ * Age of a timestamp that core 1 keeps rewriting.  A 64-bit store is not
+ * single-copy atomic on the Cortex-A9 (no LPAE), so re-read until two reads
+ * agree, and read the clock only afterwards: a stamp written between an
+ * earlier clock read and the stamp read lies "in the future", and the
+ * unsigned difference became a huge age that cold-restarted a healthy core 1.
+ */
+static uint64_t core1_stamp_age_us(const volatile uint64_t *stamp)
+{
+    uint64_t a;
+    uint64_t b;
+    uint64_t now;
+
+    do {
+        a = *stamp;
+        b = *stamp;
+    } while (a != b);
+    now = now_ticks();
+    return now > a ? ticks_to_us(now - a) : 0u;
+}
+
 void zzapp_core0_poll(void)
 {
+    uint64_t age = core1_stamp_age_us(&g_coh->progress);
+    uint64_t tick_age = core1_stamp_age_us(&g_coh->tick_seen);
     uint64_t now = now_ticks();
-    uint64_t age = ticks_to_us(now - g_coh->progress);
-    uint64_t tick_age = ticks_to_us(now - g_coh->tick_seen);
     uint32_t heartbeat = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
 
     maybe_expire_fault(now);

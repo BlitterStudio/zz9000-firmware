@@ -48,6 +48,20 @@ int main(void)
     zzapp_host_tick_at(ZZAPP_API_STUCK_US);
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
 
+    /*
+     * Core 0 can read its clock just before core 1 stores a newer progress
+     * and tick stamp.  That stamp is not an ancient one: a healthy app must
+     * not be cold-restarted (the unsigned age used to wrap to ~2^64).
+     */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(1000u);
+    zzapp_test_mark_running();
+    zzapp_host_tick_at(1000u);
+    zzapp_test_set_xtime(999u);
+    zzapp_core0_poll();
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    assert(zzapp_test_cold_restarts() == 0);
+
     zzapp_boot_init();
     assert(zzapp_loader_begin() == ZZ_OK);
     card = zzapp_test_arena_card();
