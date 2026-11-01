@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "zzapp.h"
+#include <stdlib.h>
 
 const zzapp_api *zzapp_api_ptr;
 static const zzapp_gl *bound_gl;
@@ -51,15 +52,27 @@ void zz_sleep_us(uint32_t us)
 
 void *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 {
-    if (ZZ_API_COVERS(zzapp_api_ptr, alloc) && zzapp_api_ptr->alloc)
-        return zzapp_api_ptr->alloc(bytes, align, flags);
-    return 0;
+    uintptr_t aligned;
+    void *raw;
+
+    (void)flags;
+    if (align < sizeof(void *) || (align & (align - 1u)) != 0u)
+        return 0;
+    if (bytes > UINT32_MAX - align - (uint32_t)sizeof(void *))
+        return 0;
+    raw = malloc((size_t)bytes + align - 1u + sizeof(void *));
+    if (!raw)
+        return 0;
+    aligned = ((uintptr_t)raw + sizeof(void *) + align - 1u) &
+              ~(uintptr_t)(align - 1u);
+    ((void **)aligned)[-1] = raw;
+    return (void *)aligned;
 }
 
 void zz_free(void *p)
 {
-    if (ZZ_API_COVERS(zzapp_api_ptr, free) && zzapp_api_ptr->free)
-        zzapp_api_ptr->free(p);
+    if (p)
+        free(((void **)p)[-1]);
 }
 
 void zz_heap_range(void **base, uint32_t *bytes)

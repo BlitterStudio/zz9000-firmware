@@ -45,11 +45,8 @@ SECTIONS
 {
 /* VBAR on both cores points here. Keep the vector branches in range of
  * the high firmware image rather than pinning the whole boot path low. */
-/* Firmware text is page-aligned so core 1 can mark it read-only before the
- * first hosted-app entry without covering writable firmware data. */
-. = ALIGN(0x1000);
-__firmware_text_start = .;
 .text : {
+   __firmware_text_start = .;
    . = ALIGN(32);
    KEEP (*(.vectors))
    KEEP (*(.boot))

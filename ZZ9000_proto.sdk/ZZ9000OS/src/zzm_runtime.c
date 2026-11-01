@@ -472,7 +472,10 @@ static int module_app_flip_bound(uint32_t generation)
 {
     if (generation != zzapp_current_generation())
         return -1;
-    return zzapp_display_flip_bound();
+    /* MiniGL swaps have the same presentation contract as SDK swaps: copy
+     * single-buffer surfaces, publish one generation, and wait for ZZRun's
+     * acknowledgement before rendering into the next back buffer. */
+    return zzapp_svc_display_flip(1U);
 }
 
 static int module_profile_register(uint32_t module_id, const char *name,

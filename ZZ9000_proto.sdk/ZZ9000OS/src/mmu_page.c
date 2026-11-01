@@ -45,7 +45,8 @@
 /* Page-table descriptor: table base [31:10], domain [8:5], type 0b01. */
 #define MMU_L1_TABLE_BASE_MASK 0xFFFFFC00U
 #define MMU_L1_DOMAIN_15       (15U << 5)
-
+/* Domain 14 is Client in DACR; AP bits therefore enforce firmware text RO. */
+#define MMU_L1_DOMAIN_TEXT     (14U << 5)
 #define PAGE_TABLE_BYTES (MMU_PAGES_PER_SECTION * sizeof(uint32_t))
 
 #ifdef MMU_PAGE_HOST_TEST
@@ -112,6 +113,12 @@ static uint32_t page_table_descriptor_for(const uint32_t *table)
 {
 	return ((uint32_t)(uintptr_t)table & MMU_L1_TABLE_BASE_MASK) |
 		MMU_L1_DOMAIN_15 | MMU_L1_TYPE_PAGE_TABLE;
+}
+
+static uint32_t text_page_table_descriptor_for(const uint32_t *table)
+{
+	return ((uint32_t)(uintptr_t)table & MMU_L1_TABLE_BASE_MASK) |
+		MMU_L1_DOMAIN_TEXT | MMU_L1_TYPE_PAGE_TABLE;
 }
 
 static uint32_t page_table_descriptor(void)
@@ -239,7 +246,7 @@ int mmu_page_set_readonly_executable(uintptr_t start, uintptr_t end)
 
 		/* The table is complete and clean before replacing the section.
 		 * Never expose an unmapped executable page while switching it. */
-		l1[section] = page_table_descriptor_for(table);
+		l1[section] = text_page_table_descriptor_for(table);
 		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&l1[section],
 		                     sizeof(l1[section]));
 		sync_translation();

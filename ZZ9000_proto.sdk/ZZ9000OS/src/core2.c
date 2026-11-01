@@ -453,6 +453,26 @@ __attribute__((naked, used)) static void core1_init_exception_state(void)
 		".ltorg\n\t");
 }
 
+/* An app unwind leaves an abort/undefined handler without returning through
+ * the BSP vector. Re-establish those banked stacks before normal execution
+ * resumes, so the next fault cannot consume the abandoned exception frame. */
+__attribute__((naked, used)) void core1_reset_exception_stacks(void)
+{
+	__asm__ volatile(
+		"mrs	r0, cpsr\n\t"
+		"orr	r1, r0, #0xc0\n\t"
+		"bic	r1, r1, #0x1f\n\t"
+		"orr	r2, r1, #0x17\n\t"
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_abort_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x1b\n\t"
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_undef_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"msr	cpsr_c, r0\n\t"
+		"bx	lr\n\t"
+		".ltorg\n\t");
+}
+
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
 // core1_loop is executed on core1 (vs core0), entered via core1_entry

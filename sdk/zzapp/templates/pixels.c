@@ -29,9 +29,15 @@ int zz_main(int argc, char **argv)
             uint16_t px = (uint16_t)(((x & 32u) ? 0xf800u : 0u) |
                                      ((y & 32u) ? 0x07e0u : 0u) |
                                      0x001fu);
-            row[x * 2u] = (uint8_t)px;
-            row[x * 2u + 1u] = (uint8_t)(px >> 8);
+            row[x * 2u] = (uint8_t)(px >> 8);
+            row[x * 2u + 1u] = (uint8_t)px;
         }
+    }
+    if (surface.front != surface.back) {
+        for (y = 0; y < surface.height; y++)
+            __builtin_memcpy((uint8_t *)surface.front + y * surface.pitch,
+                             (uint8_t *)surface.back + y * surface.pitch,
+                             surface.width * 2u);
     }
 
     for (;;) {

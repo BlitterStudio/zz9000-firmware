@@ -222,19 +222,12 @@ void scheduler_coherency_init_core1(void)
 {
   /* Core 1 is entered straight from the CPU1 reset vector (core1_loop),
    * bypassing boot.S, so it starts with MMU + caches + SMP OFF. Bring it up to
-   * match core 0 so cross-core LDREX/STREX and SCU coherency work:
-   *   1. point TTBR0 at the shared translation table (same table as core 0),
-   *   2. set the domain access control (all domains manager),
-   *   3. set ACTLR.SMP before enabling the D-cache,
-   *   4. enable MMU + D-cache after invalidating this core's L1s and TLB only
-   *      (core1_enable_mmu_local; the shared L2 stays untouched),
-   *   5. refresh the shareable attribute so this core's TLB reflects it.
-   * The region was already marked shareable by scheduler_coherency_init_core0()
-   * at boot, before this core started. */
+   * match core 0 and make domain 14 Client, matching the firmware-text L2
+   * descriptors installed by mmu_page_set_readonly_executable(). */
   u32 ttbr0 = (u32)(UINTPTR)&MMUTable | TASKQ_TTBR0_ATTR;
 
   mtcp(XREG_CP15_TTBR0, ttbr0);
-  mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0xFFFFFFFFU); /* all domains: manager */
+  mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0xDFFFFFFFU);
   dsb();
   isb();
 
@@ -295,7 +288,11 @@ void scheduler_core1_service_once(void)
     sh->core1_current_slot = -1;
     sh->tasks_on_core1++;
   }
+  sh->minigl_in_flight = 1;
+  dmb();
   zzm_minigl_service_tick(0);
+  sh->minigl_in_flight = 0;
+  dmb();
 }
 
 

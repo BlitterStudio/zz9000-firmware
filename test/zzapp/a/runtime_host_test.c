@@ -28,6 +28,13 @@ int main(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
 
     zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    zzapp_api_enter();
+    zzapp_host_tick_at(ZZAPP_API_STUCK_US);
+    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+
+    zzapp_boot_init();
     assert(zzapp_loader_begin() == ZZ_OK);
     card = zzapp_test_arena_card();
     assert(card != 0u);

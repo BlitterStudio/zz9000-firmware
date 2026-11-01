@@ -4,6 +4,7 @@
 
 #include "zzapp.h"
 #include "zzapp_runtime.h"
+int zzapp_loader_have_image(void);
 
 #define IMAGE_BYTES 0x200u
 #define PHOFF 52u
@@ -100,6 +101,12 @@ int main(void)
     card = zzapp_test_arena_card();
     assert(card != 0u);
     assert(get32(zzapp_test_arena_mem() + LOAD_OFF) == card + LOAD_OFF);
+    zzapp_loader_release();
+
+    zzapp_boot_init(); make_image(image);
+    put32(image + 24, 0u);
+    assert(load_end(image) == ZZ_OK);
+    assert(zzapp_loader_have_image());
     zzapp_loader_release();
 
     zzapp_boot_init(); make_image(image);
