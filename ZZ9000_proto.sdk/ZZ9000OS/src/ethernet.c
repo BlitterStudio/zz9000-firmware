@@ -34,6 +34,7 @@
 #include "interrupt.h"
 #include "memorymap.h"
 #include "mntzorro.h"
+#include "l2_maint.h"
 #include "sdk_smp_lock.h"
 #include "xpseudo_asm.h"
 

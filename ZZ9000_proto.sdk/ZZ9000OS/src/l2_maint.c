@@ -1,19 +1,11 @@
-#define L2_MAINT_NO_REDIRECT
 #include "l2_maint.h"
 #include "sdk_smp_lock.h"
-#ifdef Xil_DCacheFlushRange
-#undef Xil_DCacheFlushRange
-#undef Xil_DCacheInvalidateRange
-#undef Xil_DCacheFlush
-#undef Xil_L2CacheFlush
-#undef Xil_ICacheInvalidateRange
-#endif
-
 
 #ifdef L2_MAINT_HOST_TEST
 typedef intptr_t INTPTR;
 typedef uint32_t u32;
 #else
+#include <stdio.h>
 #include "xil_types.h"
 #include "xil_cache_l.h"
 #include "xil_io.h"
@@ -130,9 +122,13 @@ static void l2_maint_platform_l2_sync(void)
     dsb();
 }
 
+/* The BSP's own way flush: l2_maint.o is linked with --wrap like every other
+ * object, so the unwrapped symbol has to be named explicitly. */
+extern void __real_Xil_L2CacheFlush(void);
+
 static void l2_maint_platform_l2_flush(void)
 {
-    Xil_L2CacheFlush();
+    __real_Xil_L2CacheFlush();
 }
 
 static void l2_maint_platform_l1_icache_invalidate_range(INTPTR address, u32 length)
@@ -265,3 +261,43 @@ void l2_maint_reset_core1_lock(void)
 #endif
     }
 }
+
+#ifndef L2_MAINT_HOST_TEST
+void l2_maint_report(const char *tag)
+{
+    printf("[l2] %s: lock owner=%ld depth=%lu core0_waiting=%lu way_op=%04lx "
+           "debug=%lx ris=%03lx\r\n", tag,
+           (long)l2_maint_lock.owner, (unsigned long)l2_maint_lock.depth,
+           (unsigned long)l2_core0_waiting,
+           (unsigned long)(Xil_In32(XPS_L2CC_BASEADDR +
+                                    XPS_L2CC_CACHE_INV_CLN_WAY_OFFSET) & 0xffffU),
+           (unsigned long)Xil_In32(XPS_L2CC_BASEADDR + XPS_L2CC_DEBUG_CTRL_OFFSET),
+           (unsigned long)(Xil_In32(XPS_L2CC_BASEADDR + XPS_L2CC_ISR_OFFSET) & 0x1ffU));
+}
+
+/* Link-time targets of -Wl,--wrap=<symbol> (Makefile). */
+void __wrap_Xil_DCacheFlushRange(INTPTR address, u32 length)
+{
+    l2_maint_dcache_flush_range(address, length);
+}
+
+void __wrap_Xil_DCacheInvalidateRange(INTPTR address, u32 length)
+{
+    l2_maint_dcache_invalidate_range(address, length);
+}
+
+void __wrap_Xil_DCacheFlush(void)
+{
+    l2_maint_dcache_flush();
+}
+
+void __wrap_Xil_L2CacheFlush(void)
+{
+    l2_maint_l2_flush();
+}
+
+void __wrap_Xil_ICacheInvalidateRange(INTPTR address, u32 length)
+{
+    l2_maint_icache_invalidate_range(address, length);
+}
+#endif

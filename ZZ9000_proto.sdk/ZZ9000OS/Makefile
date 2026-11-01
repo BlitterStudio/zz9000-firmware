@@ -131,7 +131,6 @@ ZZ9000_BUILD_GIT ?= unknown
 ZZ9000_BUILD_DIRTY ?= unknown
 ZZ9000_BUILD_DATE ?= unknown
 CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2 $(EXTRA_CFLAGS)
-CFLAGS += -include $(SRC_DIR)/l2_maint.h
 CFLAGS += -DZZ9000_BUILD_GIT=\"$(ZZ9000_BUILD_GIT)\"
 CFLAGS += -DZZ9000_BUILD_DIRTY=\"$(ZZ9000_BUILD_DIRTY)\"
 CFLAGS += -DZZ9000_BUILD_DATE=\"$(ZZ9000_BUILD_DATE)\"
@@ -144,6 +143,11 @@ LDFLAGS += -specs=$(SRC_DIR)/Xilinx.spec
 LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -Wl,-Map,$(BUILD_DIR)/ZZ9000OS.map
 LDFLAGS += -L$(BSP_LIB)
+# Route every BSP cache entry point through the locked PL310 wrapper
+# (src/l2_maint.c), including calls made inside the BSP archive itself.
+LDFLAGS += -Wl,--wrap=Xil_DCacheFlushRange -Wl,--wrap=Xil_DCacheInvalidateRange
+LDFLAGS += -Wl,--wrap=Xil_DCacheFlush -Wl,--wrap=Xil_L2CacheFlush
+LDFLAGS += -Wl,--wrap=Xil_ICacheInvalidateRange
 
 # Libraries (order matters for --start-group)
 LIBS = $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group

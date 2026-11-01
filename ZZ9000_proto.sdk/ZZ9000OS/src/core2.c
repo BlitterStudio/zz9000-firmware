@@ -9,6 +9,7 @@
 #include "scheduler.h"
 #include "memorymap.h"
 #include "sdk_smp_lock.h"
+#include "l2_maint.h"
 #include "card_pool.h"
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
@@ -259,6 +260,9 @@ static void record_fault(uint32_t code, const char *name)
  * unconditional reset.
  */
 #define CORE1_PARK_SPINS 1000U   /* x 10 us */
+/* CPU1 CoreSight debug block (Zynq TRM memory map), program counter sampling
+ * register (Cortex-A9 TRM DBGPCSR, c33).  Reads need no debug unlock. */
+#define CORE1_DBGPCSR 0xF8892084U
 
 static void core1_park_for_reset(void)
 {
@@ -273,8 +277,20 @@ static void core1_park_for_reset(void)
 	__asm__ __volatile__("sev" ::: "memory");
 	for (spins = 0U; spins < CORE1_PARK_SPINS && !sh->core1_parked; spins++)
 		usleep(10);
-	if (!sh->core1_parked)
-		printf("[core2] core 1 did not park before its restart\n");
+	if (!sh->core1_parked) {
+		uint32_t pc[4];
+		unsigned i;
+
+		for (i = 0U; i < 4U; i++) {
+			pc[i] = Xil_In32(CORE1_DBGPCSR);
+			usleep(50);
+		}
+		printf("[core2] core 1 did not park before its restart "
+		       "(pc samples %08lx %08lx %08lx %08lx)\n",
+		       (unsigned long)pc[0], (unsigned long)pc[1],
+		       (unsigned long)pc[2], (unsigned long)pc[3]);
+		l2_maint_report("core 1 not parked");
+	}
 }
 
 /*
@@ -452,9 +468,11 @@ __attribute__((naked, used)) static void core1_init_exception_state(void)
 		".ltorg\n\t");
 }
 
-/* An app unwind leaves an abort/undefined handler without returning through
- * the BSP vector. Re-establish those banked stacks before normal execution
- * resumes, so the next fault cannot consume the abandoned exception frame. */
+/* An app unwind leaves an abort/undefined handler, or the private-timer IRQ
+ * handler, without returning through the BSP vector. Re-establish those
+ * banked stacks before normal execution resumes, so abandoned exception
+ * frames cannot accumulate until the 8 KiB stacks overflow. The caller is
+ * done with whichever of these modes it entered from. */
 __attribute__((naked, used)) void core1_reset_exception_stacks(void)
 {
 	__asm__ volatile(
@@ -467,6 +485,9 @@ __attribute__((naked, used)) void core1_reset_exception_stacks(void)
 		"orr	r2, r1, #0x1b\n\t"
 		"msr	cpsr_c, r2\n\t"
 		"ldr	sp, =(core1_undef_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x12\n\t"
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_irq_stack + "   CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
 		"msr	cpsr_c, r0\n\t"
 		"bx	lr\n\t"
 		".ltorg\n\t");

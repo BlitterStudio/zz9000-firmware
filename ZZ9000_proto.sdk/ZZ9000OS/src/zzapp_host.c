@@ -764,6 +764,10 @@ void zzapp_core0_poll(void)
         publish_state(ZZAPP_ST_FAULTED);
         g_cold_restarts++;
 #ifndef ZZAPP_HOST_TEST
+        printf("[app] watchdog restart: no progress for %lu ms, no tick for "
+               "%lu ms, in_api=%lu\r\n", (unsigned long)(age / 1000u),
+               (unsigned long)(tick_age / 1000u),
+               (unsigned long)g_coh->in_api);
         core1_cold_restart();
 #endif
         zzapp_services_on_app_end();
