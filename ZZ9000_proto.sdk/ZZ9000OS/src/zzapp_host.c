@@ -75,6 +75,8 @@ static uint32_t g_heap_end;
 static uint32_t g_heap_bump;
 static int g_faulted;
 static int g_cold_restarts;
+/* Set in service_tick (possibly IRQ context); reported from run_app. */
+static volatile uint32_t g_watchdog_reason;
 #ifndef ZZAPP_HOST_TEST
 /* Set while a task-context service tick runs (API epilogue on app_host_sp,
  * or a yield on the app stack).  The private-timer IRQ then neither nests
@@ -383,11 +385,15 @@ static void service_tick(uint64_t now, int permit_reentry)
         g_stop_mark = 0;
     }
     if (g_coh->running && g_coh->in_api == 0u &&
-        ticks_to_us(now - g_coh->progress) >= ZZAPP_WATCHDOG_US)
+        ticks_to_us(now - g_coh->progress) >= ZZAPP_APP_STALL_US) {
+        g_watchdog_reason = 1u;
         force_stop(ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
+    }
     if (g_coh->running && g_coh->in_api != 0u &&
-        ticks_to_us(now - g_coh->api_entered) >= ZZAPP_API_STUCK_US)
+        ticks_to_us(now - g_coh->api_entered) >= ZZAPP_API_STUCK_US) {
+        g_watchdog_reason = 2u;
         force_stop(ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
+    }
     maybe_expire_fault(now);
 }
 
@@ -736,6 +742,15 @@ static void run_app(uint32_t argc)
     g_unwind_pending = 0;
 #endif
     g_coh->running = 0;
+#ifndef ZZAPP_HOST_TEST
+    if (g_watchdog_reason == 1u)
+        printf("[app] stopped: no app API call for %lu s\r\n",
+               (unsigned long)(ZZAPP_APP_STALL_US / 1000000u));
+    else if (g_watchdog_reason == 2u)
+        printf("[app] stopped: one app API call ran for %lu s\r\n",
+               (unsigned long)(ZZAPP_API_STUCK_US / 1000000u));
+#endif
+    g_watchdog_reason = 0u;
     if (!g_faulted) {
         life32(ZZAPP_LIFE_EXIT_OFF, g_exit_code);
         zzapp_services_on_app_end();

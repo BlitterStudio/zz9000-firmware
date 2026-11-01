@@ -91,7 +91,7 @@ The handler still frees a card-pool or malloc lock only if this core owns it (`s
 
 ### Watchdog
 
-App progress is any yield or API epilogue, which stores `XTime_GetTime()` into the coherent shared word. The 5 ms timer IRQ checks it. If 2 seconds pass with no progress, including while an API is entered, the IRQ force-stops and unwinds through `run_app`; it never resumes the app.
+App progress is any yield or API epilogue, which stores `XTime_GetTime()` into the coherent shared word. The 5 ms timer IRQ checks it. If 30 seconds pass with no API call (`ZZAPP_APP_STALL_US`), or one API call runs for 10 seconds (`ZZAPP_API_STUCK_US`), the IRQ force-stops and unwinds through `run_app`; it never resumes the app, and the UART says which limit was hit. The limits are long because the user can always stop a running app (below) and real apps compute for seconds between calls: 2 s stopped ARM GLQuake during its level load. Declared waits (display flip, file, sleep) renew the API limit.
 
 If the app has executed `cpsid` (it can; v0 is privileged), the timer IRQ does not run and the progress word goes stale. Core 0's existing poll sees that. After 2 seconds stale, core 0 cold-restarts core 1 before reclaiming app state, so it cannot wait on a card-pool or module lock held by the old worker. That is the backstop, not the normal stop. The status report must say watchdog-plus-restart, so a hung Quake is not mistaken for a firmware crash that happened to lose 68k clients. After this restart, 68k MiniGL contexts are gone, as they are today after any core-1 restart (`mw_service_on_core1_fault`).
 
@@ -99,7 +99,7 @@ A stop request (Ctrl-C, close gadget, `APP_STOP`) sets the stop word. The app se
 
 ### Amiga reset and client loss
 
-`minigl_begin_amiga_reset` (`main.c` line 580) is the existing entry. `zzapp_on_amiga_reset` first publishes `reset_request` and wakes core 1. The worker cancels a pending START with a terminal completion, then tears down display, audio, and file/list state and publishes `reset_ack`; it is the only core that clears a running deferred operation. Core 0 never blocks in the reset entry and the scheduler cold-restart timeout remains the fallback before any reset reclaim.
+`minigl_begin_amiga_reset` (`main.c` line 580) is the existing entry. `zzapp_on_amiga_reset` first publishes `reset_request` and wakes core 1. The worker cancels a pending START with a terminal completion, then tears down display, audio, and file/list state and publishes `reset_ack`; it is the only core that clears a running deferred operation. When an app was running, core 0 waits up to 1 s for `reset_ack` before the rest of the reset path: the quiesce and L1-clean request that follow are not answered by a running app, and without the wait they cold-restarted a healthy core 1. Only a core 1 that misses the ack takes the scheduler cold-restart fallback.
 
 Client loss without a reset: ZZRun writes `heartbeat_ms` in the lifecycle block on every pass of its loop. Firmware timestamps **changes** to that value with its own clock and expires only the time since the last change; it never subtracts the Amiga clock from ARM uptime. Firmware progress does not refresh the launcher heartbeat. The launcher heartbeat does not refresh the app watchdog.
 
@@ -107,11 +107,12 @@ Client loss without a reset: ZZRun writes `heartbeat_ms` in the lifecycle block 
 
 ```c
 #define ZZAPP_TICK_US          5000u
-#define ZZAPP_WATCHDOG_US      2000000u
+#define ZZAPP_WATCHDOG_US      2000000u   /* core 1 silent: core 0 restarts it */
 #define ZZAPP_STOP_GRACE_US    500000u
 #define ZZAPP_LEASE_US         2000000u
 #define ZZAPP_GL_CALL_LOG_US   50000u
-#define ZZAPP_API_STUCK_US     2000000u
+#define ZZAPP_APP_STALL_US     30000000u
+#define ZZAPP_API_STUCK_US     10000000u
 #define ZZAPP_FILE_TIMEOUT_US  30000000u
 ```
 

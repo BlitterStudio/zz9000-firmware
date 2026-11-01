@@ -38,7 +38,11 @@ int main(void)
     zzapp_boot_init();
     zzapp_test_set_xtime(0);
     zzapp_test_mark_running();
-    zzapp_host_tick_at(ZZAPP_WATCHDOG_US);
+    /* Long app computation between API calls (GLQuake's level load) is
+     * not a hang; only ZZAPP_APP_STALL_US without any call stops it. */
+    zzapp_host_tick_at(ZZAPP_WATCHDOG_US + ZZAPP_TICK_US);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    zzapp_host_tick_at(ZZAPP_APP_STALL_US);
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
 
     zzapp_boot_init();

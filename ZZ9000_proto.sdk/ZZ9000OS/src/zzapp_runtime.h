@@ -15,11 +15,21 @@
 
 #include "zzapp_proto.h"
 #define ZZAPP_TICK_US          5000u
+/* Core 1 no longer answers at all (no app progress and no timer tick). */
 #define ZZAPP_WATCHDOG_US      2000000u
 #define ZZAPP_STOP_GRACE_US    500000u
 #define ZZAPP_LEASE_US         2000000u
 #define ZZAPP_GL_CALL_LOG_US   50000u
-#define ZZAPP_API_STUCK_US     2000000u
+/*
+ * Automatic stops of an app that is still taking timer ticks.  Ctrl-C and
+ * the close gadget stop such an app at any time, so these only catch apps
+ * that are left alone: they must clear legitimate long work (GLQuake's
+ * level load computes for seconds between API calls; the first GL call
+ * loads MINIGL.ZZM from SD).  2 s for both stopped ARM GLQuake while it
+ * started its first frame.
+ */
+#define ZZAPP_APP_STALL_US     30000000u
+#define ZZAPP_API_STUCK_US     10000000u
 #define ZZAPP_FILE_TIMEOUT_US  30000000u
 
 #define ZZAPP_ARENA_BYTES      (96u << 20)
