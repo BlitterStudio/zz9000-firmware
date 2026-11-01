@@ -11,6 +11,7 @@
 
 #define ZZM_MINIGL_MODULE_QUOTA (4U * 1024U * 1024U)
 #define ZZM_MINIGL_TRANSPORT_QUOTA (4U * 1024U * 1024U)
+#define ZZM_MINIGL_CONTEXT_QUOTA (384U * 1024U * 1024U)
 #define ZZM_MINIGL_CAP_RASTERIX 1U
 
 struct zzapp_gl;
@@ -29,10 +30,13 @@ typedef struct minigl_module_context {
     const zzm_graphics_hw_service_t *graphics;
     uint32_t owner;
     uint32_t transport_owner;
+    uint32_t app_owner;
     int initialized;
 } minigl_module_context_t;
 
 static minigl_module_context_t g_module;
+
+static void minigl_release_app(minigl_module_context_t *module);
 
 static int minigl_table_compatible(uint32_t version, uint32_t size,
                                    uint32_t required_version,
@@ -129,7 +133,10 @@ static int minigl_transport_release(void *context)
 
 static int minigl_begin_reset(void *context)
 {
-    minigl_release_transport(context);
+    minigl_module_context_t *module = context;
+
+    minigl_release_app(module);
+    minigl_release_transport(module);
     mw_service_reset();
     return ZZM_MINIGL_RESET_QUIESCENT;
 }
@@ -156,6 +163,7 @@ static void minigl_fini(void *context)
 {
     minigl_module_context_t *module = context;
 
+    minigl_release_app(module);
     minigl_release_transport(module);
     if (module && module->transport && module->transport->remove_doorbell)
         module->transport->remove_doorbell(ZZM_MODULE_MINIGL);
@@ -164,17 +172,41 @@ static void minigl_fini(void *context)
         module->initialized = 0;
 }
 
+static void minigl_release_app(minigl_module_context_t *module)
+{
+    if (!module || module->app_owner == 0U)
+        return;
+    zzapp_gl_reclaim();
+    if (module->reclaim && module->reclaim->close_owner)
+        (void)module->reclaim->close_owner(module->app_owner);
+    module->app_owner = 0U;
+    zzm_rt_set_context(module->owner, ZZM_MEMORY_CLASS_MINIGL_MODULE,
+                       ZZM_MINIGL_MODULE_QUOTA);
+}
+
 static int minigl_app_bind(void *context, uint32_t surface_id,
                            const void **out_gl)
 {
     const struct zzapp_gl *gl = 0;
+    minigl_module_context_t *module = context;
     int status;
 
-    (void)context;
+    if (!module || !module->reclaim || !module->reclaim->create_owner ||
+        module->app_owner != 0U ||
+        !module->reclaim->create_owner(
+            ZZM_MODULE_MINIGL, ZZM_RUNTIME_OWNER_CLASS_MINIGL_APP_CONTEXT,
+            0U, ZZM_MINIGL_CONTEXT_QUOTA, &module->app_owner))
+        return -1;
+    zzm_rt_set_context(module->app_owner, ZZM_MEMORY_CLASS_MINIGL_APP_CONTEXT,
+                       ZZM_MINIGL_CONTEXT_QUOTA);
     status = zzapp_gl_bind(surface_id, &gl);
+    if (status != 0) {
+        minigl_release_app(module);
+        return status;
+    }
     if (out_gl)
         *out_gl = gl;
-    return status;
+    return 0;
 }
 
 static int minigl_app_swap(void *context)
@@ -186,15 +218,13 @@ static int minigl_app_swap(void *context)
 
 static void minigl_app_unbind(void *context)
 {
-    (void)context;
-    zzapp_gl_unbind();
+    minigl_release_app(context);
 }
 
 static void minigl_app_reclaim(void *context, uint32_t generation)
 {
-    (void)context;
     (void)generation;
-    zzapp_gl_reclaim();
+    minigl_release_app(context);
 }
 
 static const zzm_minigl_ops_v1_t g_ops = {
