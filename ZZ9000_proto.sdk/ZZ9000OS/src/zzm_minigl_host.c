@@ -49,7 +49,10 @@
 #define ZZM_RIX_PL330_RD_DAR 2u
 #define ZZM_RIX_FIFO_TDFD 0x10U
 #define ZZM_RIX_DMA_MAX_WORDS 248U
-#define ZZM_MINIGL_DESCRIPTOR_WIRE_BYTES 80U
+/* sizeof(ZZ9KMiniGLTransportDescriptorWire), MW_TRANSPORT_DESCRIPTOR_WIRE_BYTES
+ * in mw_service.h.  This was 80, so every module publish was rejected and
+ * minigl.library found no descriptor. */
+#define ZZM_MINIGL_DESCRIPTOR_WIRE_BYTES 84U
 #define ZZM_RIX_IDENTITY 0x52495831U
 #define ZZM_RIX_CSR_ABI_V2 0x00020000U
 

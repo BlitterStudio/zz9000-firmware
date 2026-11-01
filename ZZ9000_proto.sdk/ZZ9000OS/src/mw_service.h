@@ -224,8 +224,8 @@ typedef struct ZZ9KMiniGLTransportDescriptor {
     uint32_t vram_limit_arm;
 } ZZ9KMiniGLTransportDescriptor;
 
-/* Big-endian wire image: 19 fields, 80 bytes total. */
-#define MW_TRANSPORT_DESCRIPTOR_WIRE_BYTES 80U
+/* Big-endian wire image: 18 fields plus 16 reserved bytes, 84 bytes. */
+#define MW_TRANSPORT_DESCRIPTOR_WIRE_BYTES 84U
 typedef struct ZZ9KMiniGLTransportDescriptorWire {
     uint8_t magic[4];
     uint8_t descriptor_version[2];
@@ -247,6 +247,9 @@ typedef struct ZZ9KMiniGLTransportDescriptorWire {
     uint8_t vram_limit_arm[4];
     uint8_t reserved[16];
 } ZZ9KMiniGLTransportDescriptorWire;
+_Static_assert(sizeof(ZZ9KMiniGLTransportDescriptorWire) ==
+               MW_TRANSPORT_DESCRIPTOR_WIRE_BYTES,
+               "MiniGL transport descriptor wire size");
 
 
 static inline void mw_put_be16(uint8_t *p, uint16_t v)
