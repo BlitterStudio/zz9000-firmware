@@ -286,3 +286,16 @@ reordering, seeds 1-4).
   no other module in `RasterIX`, `Float` or `3rdParty` has the pattern;
   the remaining hits (`sfifo.v`, `skidbuffer.v`) are `initial`-block
   initializers of registers whose clocked writes are nonblocking.
+
+## Coalescer simulation assertions
+
+- Files: `RasterIX/CoalesceAddrGen.v`, `RasterIX/CoalesceFiFo.v`
+- Patch: `patches/0010-coalescer-simulation-assertions.patch`
+- Hazard: the upstream AXI contract diagnostics call `$error` and `$finish`
+  from live clocked paths. Vivado 2018.3 rejects those system tasks during
+  out-of-context coalescer synthesis, leaving the parent `synth_1` run in
+  `Scripts Generated` state and preventing timing qualification.
+- Change: `synthesis translate_off/on` preserves the diagnostics in XSim while
+  excluding only the unsupported-request checks from synthesized hardware.
+  The accepted single-beat INCR transaction datapath and all valid-cycle
+  assignments are unchanged.

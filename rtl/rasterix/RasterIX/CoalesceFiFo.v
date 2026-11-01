@@ -161,12 +161,13 @@ module CoalesceFiFo #(
 
                 awcount <= s_mem_axi_awlen + 1;
 
+                // synthesis translate_off
                 if (s_mem_axi_awburst != 1)
                 begin
                     $error("Only incrementing burst is supported");
                     $finish;
                 end
-
+                // synthesis translate_on
                 fifo_read <= 1;
             end
 

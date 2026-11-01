@@ -209,7 +209,9 @@ module CoalesceAddrGen #(
                 end
             end
 
-            // Error Check
+            // synthesis translate_off
+            // Reject unsupported upstream requests in simulation without
+            // synthesizing system tasks into the production coalescer.
             if (s_mem_axi_axvalid && (s_mem_axi_axlen != 0))
             begin
                 $error("Only single beat transactions are supported for coalescing!");
@@ -220,6 +222,7 @@ module CoalesceAddrGen #(
                 $error("Only transactions with size matching DATA_WIDTH are supported for coalescing!");
                 $finish;
             end
+            // synthesis translate_on
         end
     end
 endmodule
