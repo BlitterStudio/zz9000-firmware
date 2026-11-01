@@ -206,9 +206,13 @@ int zzapp_loader_begin(void)
     g_mem = (uint8_t *)(uintptr_t)addr;
 #endif
     zzapp_loader_bound(g_card, g_mem, g_bytes, owner, gen);
+    zzapp_services_on_launch();
     {
         uint8_t *life = (uint8_t *)zzapp_services_window();
         if (life) {
+            memset(life + ZZAPP_INPUT_OFF, 0, ZZAPP_INPUT_HDR);
+            memset(life + ZZAPP_LOG_OFF, 0, ZZAPP_LOG_HDR);
+            memset(life + ZZAPP_FILE_OFF, 0, ZZAPP_FILE_BYTES);
             zzapp_put_be32(life + ZZAPP_LIFE_STOP_OFF, 0);
             zzapp_put_be32(life + ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_NONE);
             zzapp_put_be32(life + ZZAPP_LIFE_EXIT_OFF, 0);

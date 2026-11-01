@@ -13,6 +13,7 @@
 #include <string.h>
 #include "zzapp_proto.h"
 void zzapp_host_yield_wait(void);
+void __attribute__((weak)) zzapp_status_observed(void) {}
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
 #include "zzapp.h"
@@ -407,6 +408,18 @@ static void forget_window(void)
 
 static void audio_detach(void);
 
+void zzapp_services_on_launch(void)
+{
+	log_ring_count = 0U;
+	log_ring_window = 0U;
+#ifndef ZZAPP_HOST_TEST
+	log_uart_count = 0U;
+	log_uart_window = 0U;
+	reject_uart_count = 0U;
+	reject_uart_window = 0U;
+#endif
+}
+
 void zzapp_services_on_reset(void)
 {
 	audio_detach();
@@ -416,6 +429,7 @@ void zzapp_services_on_reset(void)
 	forget_window();
 	defer_state = DEFER_IDLE;
 	start_pending = 0U;
+	zzapp_services_on_launch();
 }
 
 static int fd_index(int fd)
@@ -1669,6 +1683,7 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		zzapp_put_be32(reply + ZZAPP_STATUS_FLIP_GEN,
 			       life_get(ZZAPP_LIFE_FLIP_GEN_OFF));
 		*reply_len = ZZAPP_STATUS_REPLY_BYTES;
+		zzapp_status_observed();
 		return SDK_STATUS_OK;
 	case ZZAPP_OP_DISPLAY_BIND:
 		rc = bind_surface(req, req_len);
@@ -1737,7 +1752,7 @@ void zzapp_services_test_reset(void)
 	yield_hook = NULL;
 	time_hook = NULL;
 	memset(slot_busy_test, 0, sizeof(slot_busy_test));
-	log_ring_count = 0U;
+	zzapp_services_on_launch();
 }
 
 void zzapp_services_test_set_window(void *base, uint32_t bytes)

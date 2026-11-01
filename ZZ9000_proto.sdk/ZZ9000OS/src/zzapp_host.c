@@ -61,19 +61,42 @@ static uint32_t g_state;
 static uint32_t g_entry;
 static uint32_t g_image_end;
 static uint32_t g_stack_bytes;
-static uint32_t g_note_flags;
 static uint64_t g_stop_mark;
 static uint64_t g_fault_mark;
 static uint32_t g_exit_code;
 static uint32_t g_heap_off;
 static uint32_t g_heap_end;
 static uint32_t g_heap_bump;
-static int g_exited;
 static int g_faulted;
 static int g_cold_restarts;
 
 static void zzapp_private_timer_enable(void);
 static void zzapp_private_timer_disable(void);
+
+static void coherent_barrier(void)
+{
+#if defined(__arm__) && !defined(ZZAPP_HOST_TEST)
+    __asm__ __volatile__("dmb sy" ::: "memory");
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+static void coherent_publish(void)
+{
+#if defined(__arm__) && !defined(ZZAPP_HOST_TEST)
+    __asm__ __volatile__("dsb sy" ::: "memory");
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+static void wake_core1(void)
+{
+#if defined(__arm__) && !defined(ZZAPP_HOST_TEST)
+    __asm__ __volatile__("sev" ::: "memory");
+#endif
+}
 
 #ifdef ZZAPP_HOST_TEST
 static void (*g_test_entry)(const void *api, int argc, char **argv);
@@ -186,6 +209,9 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
     g_card = card;
     g_mem = mem;
     g_owner = owner;
+    g_coh->running = 0;
+    g_coh->in_api = 0;
+    g_coh->fault = ZZAPP_FAULT_NONE;
     g_coh->arena_card = card;
     g_coh->arena_bytes = bytes;
     g_coh->owner = owner;
@@ -200,6 +226,9 @@ void zzapp_loader_unbound(void)
     g_card = 0;
     g_mem = NULL;
     g_owner = 0;
+    g_entry = 0;
+    g_image_end = 0;
+    g_stack_bytes = 0;
     g_coh->arena_card = 0;
     g_coh->arena_bytes = 0;
     g_coh->owner = 0;
@@ -216,8 +245,8 @@ void zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
     g_entry = entry;
     g_image_end = image_end;
     g_stack_bytes = stack_bytes;
-    g_note_flags = note_flags;
-    life32(ZZAPP_LIFE_FLAGS_OFF, note_flags & (ZZAPP_F_DISPLAY | ZZAPP_F_AUDIO | ZZAPP_F_GL));
+    life32(ZZAPP_LIFE_FLAGS_OFF,
+           note_flags & (ZZAPP_F_DISPLAY | ZZAPP_F_AUDIO | ZZAPP_F_GL));
 }
 
 uint32_t zzapp_current_generation(void) { return g_coh->generation; }
@@ -282,7 +311,9 @@ static void service_tick(uint64_t now, int permit_reentry)
         g_coh->service_seen = now;
         scheduler_core1_service_once();
     }
-    if (stop_requested()) {
+    if (g_coh->reset_request) {
+        force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
+    } else if (stop_requested()) {
         if (!g_stop_mark)
             g_stop_mark = now;
         if (ticks_to_us(now - g_stop_mark) >= ZZAPP_STOP_GRACE_US)
@@ -517,7 +548,8 @@ static void run_app(uint32_t argc)
     }
 #endif
     memset(g_mem + g_heap_end, 0xA5, ZZAPP_CANARY_BYTES);
-    g_exited = 0;
+    g_stop_mark = 0;
+    g_fault_mark = 0;
     g_faulted = 0;
     g_exit_code = 0;
     g_coh->running = 1;
@@ -550,6 +582,22 @@ void zzapp_worker_hook(void)
 {
     uint32_t argc = 0;
 
+    if (g_coh->reset_request) {
+        if (g_state == ZZAPP_ST_LOADING || g_state == ZZAPP_ST_STARTING)
+            (void)zzapp_loader_abort();
+        else if (g_coh->running)
+            force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
+        if (g_state == ZZAPP_ST_FAULTED) {
+            zzapp_loader_release();
+            publish_state(ZZAPP_ST_IDLE);
+        }
+        g_stop_mark = 0;
+        g_fault_mark = 0;
+        coherent_barrier();
+        g_coh->reset_request = 0;
+        coherent_publish();
+        return;
+    }
     zzapp_services_poll();
     if (g_state == ZZAPP_ST_LOADING && stop_requested()) {
         (void)zzapp_loader_abort();
@@ -619,12 +667,11 @@ void zzapp_on_core1_restart(void)
 
 void zzapp_on_amiga_reset(void)
 {
-    g_coh->reset_request = 1;
-    if (g_state == ZZAPP_ST_LOADING || g_state == ZZAPP_ST_STARTING)
-        (void)zzapp_loader_abort();
-    if (g_coh->running)
-        force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
     zzapp_services_on_reset();
+    coherent_barrier();
+    g_coh->reset_request = 1;
+    coherent_publish();
+    wake_core1();
 }
 
 void zzapp_status_observed(void)
@@ -654,7 +701,6 @@ void zzapp_boot_init(void)
 void zzapp_host_exit(int code)
 {
     g_exit_code = (uint32_t)code;
-    g_exited = 1;
 }
 
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)

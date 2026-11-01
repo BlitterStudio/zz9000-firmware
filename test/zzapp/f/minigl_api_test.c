@@ -225,6 +225,7 @@ int main(void)
     zzapp_test_mark_running();
     assert(api->gl_bind(100u) == &g_gl);
     zzapp_on_amiga_reset();
+    zzapp_worker_hook();
     assert(g_reclaims == 1);
     assert(g_68k_closes == 0);
     assert(g_releases == 1);

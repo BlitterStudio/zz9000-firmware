@@ -33,6 +33,7 @@ struct zzapp_audio;
 
 /* Amiga reset: forget the window (the host heap is already reset) and detach audio. */
 void zzapp_services_on_reset(void);
+void zzapp_services_on_launch(void);
 
 void zzapp_services_poll(void);
 void zzapp_services_core0_poll(void);

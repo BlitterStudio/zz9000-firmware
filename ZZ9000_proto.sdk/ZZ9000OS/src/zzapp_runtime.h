@@ -90,6 +90,7 @@ int zzapp_services_take_start(uint32_t *argc);
 uint8_t *zzapp_services_window(void);
 void zzapp_services_start_entered(int status);
 void zzapp_services_on_reset(void);
+void zzapp_services_on_launch(void);
 
 void zzapp_svc_log(const char *msg, uint32_t len);
 int zzapp_svc_should_stop(void);
