@@ -647,10 +647,15 @@ static void test_z2_unavailable(void)
     const struct MiniGLTransport *transport =
         amiberry_transport_zz9000_probe_report(&report);
     assert(transport == NULL);
-    assert(report.configdev_found == 1);
-    assert(report.is_zorro3 == 0);
-    assert(report.first_failure == ZZ9K_MINIGL_PROBE_MAILBOX_REGISTERS ||
-           report.first_failure == ZZ9K_MINIGL_PROBE_TRANSPORT_DESCRIPTOR);
+    if (report.configdev_found) {
+        assert(report.is_zorro3 == 0);
+        assert(report.first_failure == ZZ9K_MINIGL_PROBE_MAILBOX_REGISTERS ||
+               report.first_failure == ZZ9K_MINIGL_PROBE_TRANSPORT_DESCRIPTOR);
+    } else {
+        /* v29-base only probes the Zorro III product, which is likewise
+         * unavailable for this Zorro II card. */
+        assert(report.first_failure == ZZ9K_MINIGL_PROBE_CONFIGDEV);
+    }
     printf("PASS: test_z2_unavailable\n");
 }
 
