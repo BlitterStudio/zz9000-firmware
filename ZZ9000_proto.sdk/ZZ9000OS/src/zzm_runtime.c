@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "xil_cache.h"
+#include "l2_maint.h"
 #include "xtime_l.h"
 #include "card_pool.h"
 #include "memorymap.h"
@@ -457,6 +458,12 @@ static int module_host_window_alloc(uint32_t owner, uint32_t bytes,
     out->attributes = ZZM_MEMORY_ATTR_HOST_VISIBLE |
                       ZZM_MEMORY_ATTR_NONCACHEABLE;
     out->generation = runtime_windows[i].generation;
+#if !defined(MINIGL_HOST_TEST)
+    /* The module writes the window non-cacheable, but earlier 68k reads
+     * through the ACP may have left PL310 lines for this range; the 68k
+     * would keep reading those instead of the new control block. */
+    l2_maint_l2_invalidate_range((intptr_t)address, runtime_windows[i].bytes);
+#endif
     return 1;
 }
 

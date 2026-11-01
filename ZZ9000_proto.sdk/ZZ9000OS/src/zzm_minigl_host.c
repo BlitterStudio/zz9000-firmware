@@ -13,6 +13,7 @@
 #include "xil_cache.h"
 #include "xil_io.h"
 #include "xil_mmu.h"
+#include "l2_maint.h"
 #endif
 
 #define ZZM_RIX_CSR_BASE 0x83c60000U
@@ -441,6 +442,20 @@ static int transport_publish_descriptor(uint32_t module_id,
     for (i = 0U; i < descriptor_bytes; ++i)
         slot[i] = source[i];
     __asm__ volatile("dsb sy" ::: "memory");
+    /*
+     * These stores are non-cacheable, but the 68k reads through the ACP
+     * (ARCACHE=0xF), which allocates PL310 lines and keeps hitting them.
+     * Drop any line left from an earlier read (the previous session's
+     * retracted zeros), or minigl.library rejects the descriptor it reads
+     * right after ACQUIRE returns.
+     */
+    l2_maint_l2_invalidate_range((intptr_t)(uintptr_t)slot, 256U);
+    /* One line per ACQUIRE: what the library will validate. */
+    printf("[ZZM] MGTD published:");
+    for (i = 0U; i + 4U <= descriptor_bytes && i < 64U; i += 4U)
+        printf(" %02x%02x%02x%02x", source[i], source[i + 1U],
+               source[i + 2U], source[i + 3U]);
+    printf("\n");
     return 1;
 #else
     (void)module_id;
@@ -463,6 +478,7 @@ static void transport_retract_descriptor(uint32_t module_id)
     for (i = 0U; i < 256U; ++i)
         slot[i] = 0U;
     __asm__ volatile("dsb sy" ::: "memory");
+    l2_maint_l2_invalidate_range((intptr_t)(uintptr_t)slot, 256U);
 #else
     (void)module_id;
 #endif
