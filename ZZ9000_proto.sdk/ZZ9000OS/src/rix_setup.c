@@ -58,15 +58,6 @@ static void rix_store_vec(RixTriangle *triangle, unsigned int start, const float
     }
 }
 
-static void rix_interpolate3(float *out, const float *a, const float *b, const float *c,
-                             float w0, float w1, float w2, unsigned int count)
-{
-    unsigned int i;
-    for (i = 0U; i < count; ++i) {
-        out[i] = a[i] * w0 + b[i] * w1 + c[i] * w2;
-    }
-}
-
 int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
                        const RixVertex *v1, const RixVertex *v2,
                        const RixScissor *scissor)
@@ -76,7 +67,7 @@ int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
     int32_t wi[3], wx[3], wy[3];
     float normalized[3], normalized_x[3], normalized_y[3], area_inv;
     float c0[4], c1[4], c2[4], depth0[2], depth1[2], depth2[2];
-    float tex0[3], tex1[3], tex2[3], result[4];
+    float tex0[3], tex1[3], tex2[3];
     unsigned int i;
 
     if (triangle == NULL || v0 == NULL || v1 == NULL || v2 == NULL) {
@@ -157,23 +148,32 @@ int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
         c1[i] = rix_color_component(v1->rgba, i);
         c2[i] = rix_color_component(v2->rgba, i);
     }
-    rix_interpolate3(result, c0, c1, c2, normalized[0], normalized[1], normalized[2], 4U);
-    rix_store_vec(triangle, RIX_WORD_COLOR, result, 4U);
-    rix_interpolate3(result, c0, c1, c2, normalized_x[0], normalized_x[1], normalized_x[2], 4U);
-    rix_store_vec(triangle, RIX_WORD_COLOR_X, result, 4U);
-    rix_interpolate3(result, c0, c1, c2, normalized_y[0], normalized_y[1], normalized_y[2], 4U);
-    rix_store_vec(triangle, RIX_WORD_COLOR_Y, result, 4U);
-
     depth0[0] = v0->z; depth0[1] = v0->w;
     depth1[0] = v1->z; depth1[1] = v1->w;
     depth2[0] = v2->z; depth2[1] = v2->w;
-    rix_interpolate3(result, depth0, depth1, depth2, normalized[0], normalized[1], normalized[2], 2U);
-    rix_store_vec(triangle, RIX_WORD_DEPTH, result, 2U);
-    rix_interpolate3(result, depth0, depth1, depth2, normalized_x[0], normalized_x[1], normalized_x[2], 2U);
-    rix_store_vec(triangle, RIX_WORD_DEPTH_X, result, 2U);
-    rix_interpolate3(result, depth0, depth1, depth2, normalized_y[0], normalized_y[1], normalized_y[2], 2U);
-    rix_store_vec(triangle, RIX_WORD_DEPTH_Y, result, 2U);
 
+    /* Planes from the differences to vertex 0: the barycentric weights sum
+     * to one and their gradients to zero, so A*w0 + B*w1 + C*w2 collapses
+     * to A + (B-A)*w1 + (C-A)*w2 -- two multiplies per output word instead
+     * of three, across colour, depth and texture (the form Xanxi's
+     * librixgpu 1.5 `rix_desc_delta` uses). */
+#define RIX_PLANE(A, B, C, W0, WX, WY) do {                       \
+        float d1 = (B) - (A);                                     \
+        float d2 = (C) - (A);                                     \
+        float plane[3];                                           \
+        plane[0] = (A) + d1 * normalized[1] + d2 * normalized[2]; \
+        plane[1] = d1 * normalized_x[1] + d2 * normalized_x[2];   \
+        plane[2] = d1 * normalized_y[1] + d2 * normalized_y[2];   \
+        rix_store_vec(triangle, (W0), plane, 1U);                 \
+        rix_store_vec(triangle, (WX), plane + 1U, 1U);            \
+        rix_store_vec(triangle, (WY), plane + 2U, 1U);            \
+    } while (0)
+    for (i = 0U; i < 4U; ++i)
+        RIX_PLANE(c0[i], c1[i], c2[i],
+                  RIX_WORD_COLOR + i, RIX_WORD_COLOR_X + i, RIX_WORD_COLOR_Y + i);
+    for (i = 0U; i < 2U; ++i)
+        RIX_PLANE(depth0[i], depth1[i], depth2[i],
+                  RIX_WORD_DEPTH + i, RIX_WORD_DEPTH_X + i, RIX_WORD_DEPTH_Y + i);
     {
         float s0 = v0->s, s1 = v1->s, s2 = v2->s;
         float t0 = v0->t, t1 = v1->t, t2 = v2->t;
@@ -208,12 +208,10 @@ int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
             tex2[0] = s2 * w2; tex2[1] = t2 * w2; tex2[2] = v2->q * w2;
         }
     }
-    rix_interpolate3(result, tex0, tex1, tex2, normalized[0], normalized[1], normalized[2], 3U);
-    rix_store_vec(triangle, RIX_WORD_TEXTURE, result, 3U);
-    rix_interpolate3(result, tex0, tex1, tex2, normalized_x[0], normalized_x[1], normalized_x[2], 3U);
-    rix_store_vec(triangle, RIX_WORD_TEXTURE_X, result, 3U);
-    rix_interpolate3(result, tex0, tex1, tex2, normalized_y[0], normalized_y[1], normalized_y[2], 3U);
-    rix_store_vec(triangle, RIX_WORD_TEXTURE_Y, result, 3U);
+    for (i = 0U; i < 3U; ++i)
+        RIX_PLANE(tex0[i], tex1[i], tex2[i],
+                  RIX_WORD_TEXTURE + i, RIX_WORD_TEXTURE_X + i, RIX_WORD_TEXTURE_Y + i);
+#undef RIX_PLANE
     return 1;
 }
 
