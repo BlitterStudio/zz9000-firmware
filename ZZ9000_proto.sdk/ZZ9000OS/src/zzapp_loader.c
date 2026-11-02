@@ -493,7 +493,12 @@ static int parse_elf(struct load_image *img)
         return ZZ_EINVAL;
     if (memsz_sum + img->stack_bytes + ZZAPP_IMAGE_SLACK > ZZAPP_ARENA_BYTES)
         return ZZ_EINVAL;
-    img->image_end = (img->image_end + 7u) & ~7u;
+    /* The heap starts here, so VFP/NEdouble data in app allocations
+     * (GLQuake's hunk typed loads, newlib's double-heavy code) keeps its
+     * natural alignment whatever an image's .bss tail happens to be.  An
+     * 8-byte round let a rebuilt image with a larger .data shift the heap
+     * base and abort the app on a misaligned float load. */
+    img->image_end = (img->image_end + 31u) & ~31u;
     if (img->image_end + img->stack_bytes > g_bytes)
         return ZZ_EINVAL;
     for (i = 0; i < img->nseg; i++) {
