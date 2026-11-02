@@ -1088,6 +1088,44 @@ static int mw_upload_generated_mips(mw_ctx *c, const mw_texture *t)
     return 1;
 }
 
+/* Index of the colour buffer the rasterizer currently draws into; mirrors
+ * the choice mw_ctx_bind_buffers makes. */
+static uint32_t mw_active_color_index(const mw_ctx *c)
+{
+    return ((c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400) &&
+            c->state.target.buffer_count > 1U) ?
+               c->state.target.front : c->state.target.back;
+}
+
+/* colour_rgb565[] tracks each buffer's memory layout.  The active buffer's
+ * flag follows the live raster state; the others change only at a swap or
+ * a conversion. */
+static void mw_sync_active_format(mw_ctx *c)
+{
+    c->color_rgb565[mw_active_color_index(c)] =
+        minigl_raster_present_is_rgb565() ? 1U : 0U;
+}
+
+/* After minigl_raster_finish the active buffer holds RGBA.  Make sure the
+ * buffer a CPU reader wants matches, converting an untouched RasterIX
+ * buffer in place. */
+static int mw_buffer_cpu_visible(mw_ctx *c, uint32_t index)
+{
+    if (index >= 3U || !c->color_buffers[index])
+        return 0;
+    if (index == mw_active_color_index(c)) {
+        c->color_rgb565[index] = 0U;
+        return 1;
+    }
+    if (!c->color_rgb565[index])
+        return 1;
+    if (!minigl_raster_buffer_to_rgba(c->color_buffers[index],
+                                      (size_t)c->width * c->height))
+        return 0;
+    c->color_rgb565[index] = 0U;
+    return 1;
+}
+
 static int mw_execute_command_body(void *user, const mw_command *cmd)
 {
     mw_ctx *c = (mw_ctx *)user;
@@ -1527,6 +1565,10 @@ target_allocation_failed:
 
         uint32_t read_idx = (c->state.read_buffer == 0x404 || c->state.read_buffer == 0x400) ?
                             c->state.target.front : c->state.target.back;
+        if (!mw_buffer_cpu_visible(c, read_idx)) {
+            mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
         const uint32_t *src_buf = c->color_buffers[read_idx];
         if (!src_buf) {
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
@@ -1703,7 +1745,10 @@ target_allocation_failed:
         uint32_t old_latest = c->state.target.latest;
         uint32_t old_back = c->state.target.back;
 
-        if (!minigl_raster_finish()) {
+        uint32_t outgoing = c->state.target.back;
+        int gpu_format = minigl_raster_present_is_rgb565();
+
+        if (!minigl_raster_drain()) {
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }
@@ -1716,6 +1761,18 @@ target_allocation_failed:
             c->state.target.back = old_back;
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
+        }
+        /* The outgoing frame keeps its RasterIX format for span presents
+         * and read pixels (both convert on demand, tracked per buffer);
+         * the incoming back buffer is undefined after a swap, so it starts
+         * in the GPU's format instead of being converted twice for
+         * nothing.  Outside 565 mode nothing changes. */
+        if (gpu_format) {
+            c->color_rgb565[outgoing] = 1U;
+            c->color_rgb565[c->state.target.back] = 1U;
+            minigl_raster_target_discard();
+        } else {
+            c->color_rgb565[c->state.target.back] = 0U;
         }
         minigl_raster_frame_boundary();
         break;
@@ -1731,7 +1788,7 @@ target_allocation_failed:
         break;
 
     case MW_SYNC:
-        if (!minigl_raster_finish())
+        if (!minigl_raster_drain())
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
         break;
 
@@ -1759,6 +1816,7 @@ target_allocation_failed:
                      c->state.target.buffer_count > 1;
         dst_buffer = c->color_buffers[draw_front ? c->state.target.front :
                                       c->state.target.back];
+        c->color_rgb565[draw_front ? c->state.target.front : c->state.target.back] = 0U;
 
         for (r = 0; r < h; ++r) {
             const uint8_t *src_row = src_pixels + (size_t)r * w * 4;
@@ -1795,6 +1853,7 @@ static int mw_execute_command(void *user, const mw_command *cmd)
                   cmd->opcode == MW_TEXTURE_COPY ||
                   cmd->opcode == MW_COLOR_TABLE;
     int result;
+    mw_sync_active_format((mw_ctx *)user);
 
     if (texture) {
         minigl_profile_push(MGLP_TEX);
@@ -2155,9 +2214,14 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
     int source_rgb565;
     int source_bottom_up;
 
+    /* Host requests bypass the per-command format sync. */
+    mw_sync_active_format(c);
     if (!minigl_raster_prepare_present())
         return MW_STATUS_FAILED;
-    source_rgb565 = minigl_raster_present_is_rgb565();
+    /* The latest buffer may keep the GPU layout while the active one was
+     * already converted (or vice versa); follow the buffer, not the live
+     * raster target. */
+    source_rgb565 = c->color_rgb565[c->state.target.latest] != 0U;
     source_bottom_up = minigl_raster_present_is_bottom_up();
     src_buf = c->color_buffers[c->state.target.latest];
     if (!src_buf)
@@ -2281,6 +2345,7 @@ static uint32_t mw_capture(mw_ctx *c, const uint8_t *p, uint32_t bytes,
     if (status != MW_STATUS_OK)
         return status;
 
+    mw_sync_active_format(c);
     if (!minigl_raster_finish())
         return MW_STATUS_FAILED;
 
@@ -2291,6 +2356,7 @@ static uint32_t mw_capture(mw_ctx *c, const uint8_t *p, uint32_t bytes,
 
     /* Slow path: decode span into back buffer */
     memset(c->color_buffers[c->state.target.back], 0, (size_t)c->width * c->height * sizeof(uint32_t));
+    c->color_rgb565[c->state.target.back] = 0U;
 
     int32_t bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
     if (scaled) {
@@ -2413,6 +2479,7 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
             return MW_STATUS_OK;
         }
 
+        mw_sync_active_format(c);
         if (!minigl_raster_finish())
             return MW_STATUS_FAILED;
 
@@ -2428,6 +2495,8 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
         } else if (c->state.read_buffer == 0) {
             read_idx = -1;
         }
+        if (read_idx >= 0 && !mw_buffer_cpu_visible(c, (uint32_t)read_idx))
+            return MW_STATUS_FAILED;
         color_buffer = (read_idx >= 0 && read_idx < 3) ? c->color_buffers[read_idx] : NULL;
 
         /* GL glReadPixels produces bottom-row-first reply */
@@ -2504,7 +2573,10 @@ uint32_t mw_host_readback_latest_rows(mw_ctx *c, uint8_t *out,
     if (capacity < req_bytes)
         return MW_STATUS_CAPACITY;
 
+    mw_sync_active_format(c);
     if (!minigl_raster_finish())
+        return MW_STATUS_FAILED;
+    if (!mw_buffer_cpu_visible(c, c->state.target.latest))
         return MW_STATUS_FAILED;
     color_buffer = c->color_buffers[c->state.target.latest];
     for (y = 0; y < row_count; ++y) {

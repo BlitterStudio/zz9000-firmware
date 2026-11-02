@@ -512,6 +512,38 @@ int minigl_raster_present_is_bottom_up(void)
     return rix_target_is_rgb565();
 }
 
+/* Synchronise with the rasterizer without building the RGBA view: enough
+ * for a frame boundary or a guest "finish", whose only reader is the next
+ * GPU pass. */
+int minigl_raster_drain(void)
+{
+    if (!ready())
+        return 0;
+    return minigl_rix_backend_drain(&g_rix);
+}
+
+/* GL leaves a back buffer's contents undefined after a swap.  Marking the
+ * target as already in RasterIX's format skips converting the incoming
+ * buffer that no defined pixel survives in; the first full-frame draw or
+ * clear defines it. */
+void minigl_raster_target_discard(void)
+{
+    if (!ready())
+        return;
+    g_rix_surface = g_buffers.color;
+    g_rix_surface_rgb565 = 1;
+    g_rix_depth_z16 = 1;
+}
+
+/* Convert one colour buffer that is not the active raster target: the same
+ * drain + 565->RGBA pass minigl_raster_finish applies to g_buffers.color. */
+int minigl_raster_buffer_to_rgba(uint32_t *rgba, size_t pixels)
+{
+    if (!ready() || rgba == NULL)
+        return 0;
+    return minigl_rix_backend_make_cpu_visible(&g_rix, rgba, pixels);
+}
+
 int minigl_raster_finish(void)
 {
     if (!ready())
