@@ -25,6 +25,9 @@ void minigl_platform_cache_invalidate(void *context, uintptr_t address,
 void minigl_platform_barrier(void *context);
 int minigl_platform_dma_stream(void *context, uintptr_t source, uint32_t words,
                                uint32_t burst_words);
+int minigl_platform_dma_start_async(void *context, uintptr_t source,
+                                    uint32_t words, uint32_t burst_words);
+int minigl_platform_dma_retire(void *context);
 void minigl_platform_abort_graphics(void);
 uint64_t minigl_platform_time_us(void);
 void minigl_platform_log(const char *message);

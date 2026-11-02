@@ -514,12 +514,14 @@ static void test_rasterix_rgb565_present_orientation(void)
     c->state.target.latest = c->state.target.back;
     minigl_raster_clear(0x4000U, 0U, 0U);
     assert(minigl_raster_present_is_rgb565());
-    assert(minigl_raster_present_is_bottom_up());
+    /* The 565 layout presents unflipped like the RGBA view converted in
+     * place; the historical span-path flip double-flipped it. */
+    assert(!minigl_raster_present_is_bottom_up());
     surface = (uint16_t *)c->color_buffers[c->state.target.latest];
-    surface[0] = 0x001fU; /* RasterIX bottom row: blue, white. */
-    surface[1] = 0xffffU;
-    surface[2] = 0xf800U; /* RasterIX top row: red, green. */
-    surface[3] = 0x07e0U;
+    surface[0] = 0xf800U; /* top row: red, green. */
+    surface[1] = 0x07e0U;
+    surface[2] = 0x001fU; /* bottom row: blue, white. */
+    surface[3] = 0xffffU;
     assert_blit_pixels(c, expected);
     mw_host_destroy(c);
     minigl_raster_set_rix_platform(NULL);

@@ -1299,6 +1299,8 @@ void minigl_rix_backend_init(MiniGLRixBackend *backend,
     config.fifo_drain = platform->fifo_drain;
     config.clean_dcache = platform->cache_clean;
     config.dma_stream = platform->dma_stream;
+    config.dma_start_async = platform->dma_start_async;
+    config.dma_retire = platform->dma_retire;
     config.hardware_present = 1;
     if (rix_drv_init(&backend->driver, &config) != RIX_DRV_OK ||
         rix_drv_enable(&backend->driver) != RIX_DRV_OK) {

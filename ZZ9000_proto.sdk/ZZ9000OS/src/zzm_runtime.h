@@ -231,6 +231,9 @@ typedef struct zzm_graphics_hw_service {
     int (*pl330_claim)(uint32_t owner, uint32_t *channel_out);
     int (*pl330_start)(uint32_t channel, uint32_t source_address,
                        uint32_t bytes);
+    int (*pl330_start_async)(uint32_t channel, uint32_t source_address,
+                             uint32_t bytes);
+    int (*pl330_retire)(uint32_t channel);
     void (*pl330_abort)(uint32_t channel);
     void (*pl330_release)(uint32_t channel);
     void (*barrier)(void);

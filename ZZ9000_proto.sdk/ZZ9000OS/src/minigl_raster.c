@@ -509,7 +509,11 @@ void minigl_raster_frame_boundary(void)
 
 int minigl_raster_present_is_bottom_up(void)
 {
-    return rix_target_is_rgb565();
+    /* Historical trap: the RGB565 layout was assumed bottom-up.  It is the
+     * same memory the RGBA view converts in place, and that view has always
+     * presented unflipped and correct on hardware (app-runtime-25), so no
+     * presentation path flips.  Kept as an API for callers that report it. */
+    return 0;
 }
 
 /* Synchronise with the rasterizer without building the RGBA view: enough

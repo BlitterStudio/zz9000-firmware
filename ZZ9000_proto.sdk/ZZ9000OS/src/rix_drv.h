@@ -67,6 +67,14 @@ typedef void (*rix_drv_barrier_fn)(void *context);
 typedef int (*rix_drv_dma_stream_fn)(void *context, uintptr_t source,
                                      uint32_t words, uint32_t burst_words);
 
+/* Asynchronous DMA transport: start launches the transfer and returns once
+ * the channel is running; retire waits for it to finish and proves the
+ * byte count.  With only these, one transfer is in flight at a time and the
+ * caller defers the packet boundary (TLF) until retire. */
+typedef int (*rix_drv_dma_start_async_fn)(void *context, uintptr_t source,
+                                          uint32_t words, uint32_t burst_words);
+typedef int (*rix_drv_dma_retire_fn)(void *context);
+
 /* The caller must set hardware_present from its build-time capability gate.
  * When it is zero, rix_drv_init() does not access the CSR window. */
 struct rix_drv_config {
@@ -79,6 +87,8 @@ struct rix_drv_config {
     rix_drv_barrier_fn fifo_drain;
     rix_drv_cache_clean_fn clean_dcache;
     rix_drv_dma_stream_fn dma_stream;
+    rix_drv_dma_start_async_fn dma_start_async;
+    rix_drv_dma_retire_fn dma_retire;
     int hardware_present;
 };
 
@@ -92,6 +102,13 @@ struct rix_drv {
     rix_drv_barrier_fn fifo_drain;
     rix_drv_cache_clean_fn clean_dcache;
     rix_drv_dma_stream_fn dma_stream;
+    rix_drv_dma_start_async_fn dma_start_async;
+    rix_drv_dma_retire_fn dma_retire;
+    /* DMA transfer launched whose payload is in the FIFO but whose packet
+     * boundary (TLF) is not written yet: retired before the next packet's
+     * boundary so the parser still sees packets in order. */
+    uint32_t pending_bytes;
+    int pending_dma;
     uint32_t last_status;
     /* FIFO ISR after a rejected packet commit, else zero. */
     uint32_t last_error_status;

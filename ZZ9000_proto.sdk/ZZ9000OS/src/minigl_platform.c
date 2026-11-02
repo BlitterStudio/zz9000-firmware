@@ -151,6 +151,44 @@ void minigl_platform_barrier(void *context)
 #endif
 }
 
+int minigl_platform_dma_start_async(void *context, uintptr_t source,
+                                    uint32_t words, uint32_t burst_words)
+{
+    (void)context;
+#if defined(MINIGL_MODULE)
+    if (!g_graphics || !g_graphics_caps.pl330_available || !g_graphics->pl330_claim ||
+        !g_graphics->pl330_start_async || source == 0U || words == 0U ||
+        burst_words != 16U)
+        return 0;
+    if (!g_pl330_claimed) {
+        if (!g_graphics->pl330_claim(g_graphics_owner, &g_pl330_channel))
+            return 0;
+        g_pl330_claimed = 1;
+    }
+    minigl_platform_cache_clean(0, source, (size_t)words * sizeof(uint32_t));
+    minigl_platform_barrier(0);
+    return g_graphics->pl330_start_async(g_pl330_channel, (uint32_t)source,
+                                         words * sizeof(uint32_t));
+#else
+    (void)source;
+    (void)words;
+    (void)burst_words;
+    return 0;
+#endif
+}
+
+int minigl_platform_dma_retire(void *context)
+{
+    (void)context;
+#if defined(MINIGL_MODULE)
+    if (!g_graphics || !g_pl330_claimed || !g_graphics->pl330_retire)
+        return 0;
+    return g_graphics->pl330_retire(g_pl330_channel);
+#else
+    return 0;
+#endif
+}
+
 int minigl_platform_dma_stream(void *context, uintptr_t source, uint32_t words,
                                uint32_t burst_words)
 {

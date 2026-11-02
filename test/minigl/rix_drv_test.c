@@ -18,6 +18,11 @@ struct model {
     uintptr_t clean_address;
     size_t clean_bytes;
     uint32_t dma_words[8];
+    /* Interleaved transport events: h = header word, t = packet boundary,
+     * a = async launch, r = retire. */
+    char events[64];
+    unsigned event_count;
+    unsigned async_launches, retires;
 };
 
 static uint32_t csr_read(void *context, uint32_t offset)
@@ -51,6 +56,10 @@ static void fifo_write(void *context, uint32_t offset, uint32_t value)
         assert(model->packet_count < 8U);
         model->lengths[model->packet_count++] = value;
     }
+    if (offset == RIX_DRV_FIFO_TDFD && model->event_count < sizeof(model->events))
+        model->events[model->event_count++] = 'h';
+    else if (offset == RIX_DRV_FIFO_TLF && model->event_count < sizeof(model->events))
+        model->events[model->event_count++] = 't';
 }
 
 static void cache_clean(void *context, uintptr_t address, size_t bytes)
@@ -71,6 +80,31 @@ static int dma_stream(void *context, uintptr_t source, uint32_t words,
     assert(burst_words == 16U);
     assert(model->dma_count < 8U);
     model->dma_words[model->dma_count++] = words;
+    return 1;
+}
+
+static int dma_start_async(void *context, uintptr_t source, uint32_t words,
+                           uint32_t burst_words)
+{
+    struct model *model = context;
+
+    (void)source;
+    assert(burst_words == 16U);
+    assert(model->async_launches < 8U);
+    ++model->async_launches;
+    model->dma_words[model->dma_count++] = words;
+    if (model->event_count < sizeof(model->events))
+        model->events[model->event_count++] = 'a';
+    return 1;
+}
+
+static int dma_retire(void *context)
+{
+    struct model *model = context;
+
+    ++model->retires;
+    if (model->event_count < sizeof(model->events))
+        model->events[model->event_count++] = 'r';
     return 1;
 }
 
@@ -164,6 +198,36 @@ static void test_dma_chunking(void)
     assert(rix_drv_poll(&driver, 0U) == RIX_DRV_OK);
 }
 
+/* The deferred packet boundary: launch returns before the transfer
+ * finishes, so the boundary word of packet k must wait for its retire and
+ * must precede packet k+1's header -- the parser still sees whole packets
+ * strictly in order. */
+static void test_async_defers_boundary_until_retire(void)
+{
+    struct model model;
+    struct rix_drv driver;
+    struct rix_drv_config io;
+    uint32_t commands[300];
+    static const char expected[] = "hha" "rt" "hh" "a" "rt";
+
+    memset(&model, 0, sizeof(model));
+    memset(commands, 0, sizeof(commands));
+    identify(&model);
+    io = config(&model, 1);
+    io.dma_start_async = dma_start_async;
+    io.dma_retire = dma_retire;
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(rix_drv_submit(&driver, commands, (uintptr_t)commands, 300U, 0U) == RIX_DRV_OK);
+    assert(model.async_launches == 2U && model.retires == 2U);
+    assert(model.packet_count == 2U);
+    assert(model.lengths[0] == (248U + 2U) * 4U);
+    assert(model.lengths[1] == (52U + 2U) * 4U);
+    assert(model.event_count == sizeof(expected) - 1U);
+    assert(memcmp(model.events, expected, sizeof(expected) - 1U) == 0);
+    assert(rix_drv_poll(&driver, 0U) == RIX_DRV_OK);
+}
+
 /* A TLF that disagrees with the staged byte count is dropped by the FIFO
  * (ISR.TSE); the driver must report it on that packet, and enable must clear
  * a previous context's sticky errors without touching other ISR bits. */
@@ -214,6 +278,7 @@ int main(void)
     test_discovery_and_enable();
     test_cpu_packet_and_backpressure();
     test_dma_chunking();
+    test_async_defers_boundary_until_retire();
     test_rejected_commit();
     test_recovery_and_disable();
     return 0;

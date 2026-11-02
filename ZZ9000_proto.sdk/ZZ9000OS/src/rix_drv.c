@@ -89,6 +89,32 @@ static uint32_t rix_drv_command_words(uint32_t word)
     }
 }
 
+/* Ends the in-flight DMA packet: wait for the transfer, then establish its
+ * packet boundary.  TLF before the next packet's header keeps the parser's
+ * view of packet order intact. */
+static int rix_drv_flush_pending(struct rix_drv *driver)
+{
+    uint32_t isr;
+
+    if (!driver->pending_dma)
+        return RIX_DRV_OK;
+    if (driver->dma_retire == NULL ||
+        !driver->dma_retire(driver->context)) {
+        driver->pending_dma = 0;
+        return RIX_DRV_ERROR;
+    }
+    driver->pending_dma = 0;
+    if (driver->fifo_drain != NULL)
+        driver->fifo_drain(driver->context);
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, driver->pending_bytes);
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR);
+    if ((isr & RIX_DRV_FIFO_ISR_ERRORS) != 0U) {
+        driver->last_error_status = isr;
+        return RIX_DRV_ERROR;
+    }
+    return RIX_DRV_OK;
+}
+
 static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
                                uintptr_t command_address, uint32_t words,
                                uint32_t timeout)
@@ -99,19 +125,37 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
 
     if (words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS)
         return RIX_DRV_BAD_ARGUMENT;
+    /* The wait overlaps with the previous packet's DMA: the parser spends
+     * most of this interval consuming it, so the retire that follows is
+     * normally already complete.  Hardware log (kit 30): the synchronous
+     * wait-and-retire per packet cost the CPU ~124 us, 10-28 ms per frame
+     * across ~120-250 packets. */
     result = rix_drv_wait_vacancy(driver, words + 2U, timeout);
     if (result != RIX_DRV_OK)
         return result;
+    result = rix_drv_flush_pending(driver);
+    if (result != RIX_DRV_OK)
+        return result;
 
-    dma = driver->dma_stream != NULL && command_address != (uintptr_t)0U &&
-          words >= 16U;
+    dma = (driver->dma_start_async != NULL || driver->dma_stream != NULL) &&
+          command_address != (uintptr_t)0U && words >= 16U;
     minigl_profile_count(MGLP_N_DRV_PACKETS, 1U);
     driver->last_packet_bytes = (words + 2U) * sizeof(*commands);
+    driver->pending_bytes = driver->last_packet_bytes;
     driver->last_packet_dma = dma;
     ++driver->packets;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD,
                        RIX_DSE_STREAM | (words * sizeof(*commands)));
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, 0U);
+    if (dma && driver->dma_start_async != NULL) {
+        ++driver->dma_packets;
+        if (!driver->dma_start_async(driver->context, command_address, words, 16U)) {
+            driver->last_error_address = (uint32_t)command_address;
+            return RIX_DRV_ERROR;
+        }
+        driver->pending_dma = 1;
+        return RIX_DRV_OK;
+    }
     if (dma) {
         ++driver->dma_packets;
         if (!driver->dma_stream(driver->context, command_address, words, 16U)) {
@@ -156,6 +200,10 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
     driver->fifo_drain = config->fifo_drain;
     driver->clean_dcache = config->clean_dcache;
     driver->dma_stream = config->dma_stream;
+    driver->dma_start_async = config->dma_start_async;
+    driver->dma_retire = config->dma_retire;
+    driver->pending_bytes = 0U;
+    driver->pending_dma = 0;
     driver->last_status = 0U;
     driver->last_error_status = 0U;
     driver->last_error_address = 0U;
@@ -184,6 +232,7 @@ int rix_drv_enable(struct rix_drv *driver)
 
     if (!rix_drv_usable(driver))
         return RIX_DRV_UNAVAILABLE;
+    driver->pending_dma = 0;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     /* TDFR leaves ISR intact; clear a previous context's sticky errors so the
      * per-packet commit check only sees this context's packets. */
@@ -242,6 +291,8 @@ int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
                              (size_t)command_words * sizeof(*commands));
     result = rix_drv_submit_packets(driver, commands, command_address,
                                     command_words, timeout);
+    if (result == RIX_DRV_OK)
+        result = rix_drv_flush_pending(driver);
     minigl_profile_pop();
     if (result != RIX_DRV_OK)
         return result;
@@ -268,6 +319,7 @@ int rix_drv_recover(struct rix_drv *driver, uint32_t timeout, int soft_reset)
     if (soft_reset)
         rix_drv_write(driver, RIX_DRV_CSR_CONTROL,
                       RIX_DRV_CONTROL_ENABLE | RIX_DRV_CONTROL_SOFT_RESET);
+    driver->pending_dma = 0;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     return RIX_DRV_OK;
 }

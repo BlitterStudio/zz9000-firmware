@@ -64,6 +64,12 @@ typedef void (*MiniGLRixBarrierFn)(void *context);
 typedef int (*MiniGLRixDmaStreamFn)(void *context, uintptr_t source,
                                     uint32_t words, uint32_t burst_words);
 
+/* Asynchronous DMA pair; when present the backend defers each packet's
+ * boundary word until the transfer retires (see rix_drv.h). */
+typedef int (*MiniGLRixDmaStartAsyncFn)(void *context, uintptr_t source,
+                                        uint32_t words, uint32_t burst_words);
+typedef int (*MiniGLRixDmaRetireFn)(void *context);
+
 
 typedef int (*MiniGLRixTexturePoolGrowFn)(void *context, size_t minimum_bytes,
                                           uint8_t **memory,
@@ -79,6 +85,8 @@ typedef struct MiniGLRixPlatform {
     MiniGLRixFifoWordsFn fifo_write_words;
     MiniGLRixBarrierFn fifo_drain;
     MiniGLRixDmaStreamFn dma_stream;
+    MiniGLRixDmaStartAsyncFn dma_start_async;
+    MiniGLRixDmaRetireFn dma_retire;
     MiniGLRixCacheCleanFn cache_clean;
     MiniGLRixCacheInvalidateFn cache_invalidate;
     uint8_t *command_buffer[MINIGL_RIX_COMMAND_BUFFERS];

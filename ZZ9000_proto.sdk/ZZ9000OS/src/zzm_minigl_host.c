@@ -150,6 +150,7 @@ static void graphics_barrier(void *context)
 #if !defined(TASKQ_HOST_TEST)
 static uint8_t g_pl330_program[128] __attribute__((aligned(64)));
 static uint32_t g_dmac_base;
+static uint32_t g_pl330_expect;   /* SAR value that proves the launch finished */
 static uint32_t g_dmac_go_ns;
 
 /* An APB access to an unclocked or reset DMAC can stall the interconnect, so
@@ -206,8 +207,10 @@ static void graphics_pl330_abort(void *context)
     g_pl330_claimed = 0;
 }
 
-static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
-                                uint32_t burst_words)
+static int graphics_pl330_retire(void *context);
+
+static int graphics_pl330_start_async(void *context, uintptr_t source,
+                                      uint32_t words, uint32_t burst_words)
 {
     uint8_t *program = g_pl330_program;
     uint32_t blocks = words / 16U, tail = words % 16U, attempt;
@@ -279,20 +282,49 @@ static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
             break;
     if (attempt == 100000U)
         goto kill;
+    /* The debug instruction is accepted and the channel is running; the
+     * transfer is retired by the caller (graphics_pl330_retire) before the
+     * next launch, so the single program buffer is never rewritten while
+     * the channel still executes it. */
+    g_pl330_expect = (uint32_t)source + words * sizeof(uint32_t);
+    return 1;
+kill:
+    graphics_pl330_abort(0);
+    return 0;
+}
+
+/* Proves the launched transfer completed: channel stopped with every word
+ * issued (SAR at the end).  DMAWMB precedes DMAEND, so Stopped also means
+ * every store has its write response. */
+static int graphics_pl330_retire(void *context)
+{
+    uint32_t attempt;
+
+    (void)context;
+    if (!g_pl330_claimed || g_pl330_expect == 0U)
+        return 1;
     for (attempt = 0U; attempt < 1000000U; ++attempt) {
         uint32_t state = Xil_In32(g_dmac_base +
                                   ZZM_RIX_DMAC_CSR(ZZM_RIX_DMAC_CHANNEL)) & 15U;
-        if (state == ZZM_RIX_DMAC_STOPPED)
-            return Xil_In32(g_dmac_base +
-                            ZZM_RIX_DMAC_SAR(ZZM_RIX_DMAC_CHANNEL)) ==
-                   (uint32_t)source + words * sizeof(uint32_t);
+        if (state == ZZM_RIX_DMAC_STOPPED) {
+            uint32_t sar = Xil_In32(g_dmac_base +
+                                    ZZM_RIX_DMAC_SAR(ZZM_RIX_DMAC_CHANNEL));
+            return sar == g_pl330_expect;
+        }
         if (state == ZZM_RIX_DMAC_FAULTING_COMPLETING ||
             state == ZZM_RIX_DMAC_FAULTING)
             break;
     }
-kill:
     graphics_pl330_abort(0);
     return 0;
+}
+
+static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
+                                uint32_t burst_words)
+{
+    if (!graphics_pl330_start_async(context, source, words, burst_words))
+        return 0;
+    return graphics_pl330_retire(context);
 }
 #else
 static void graphics_pl330_abort(void *context)
@@ -300,6 +332,22 @@ static void graphics_pl330_abort(void *context)
     (void)context;
     g_pl330_claimed = 0;
 }
+static int graphics_pl330_start_async(void *context, uintptr_t source,
+                                      uint32_t words, uint32_t burst_words)
+{
+    (void)context;
+    (void)source;
+    (void)words;
+    (void)burst_words;
+    return 0;
+}
+
+static int graphics_pl330_retire(void *context)
+{
+    (void)context;
+    return 0;
+}
+
 static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
                                 uint32_t burst_words)
 {
@@ -435,7 +483,22 @@ static int graphics_v3_pl330_start(uint32_t channel, uint32_t source_address,
     return graphics_pl330_start(0, source_address, bytes / sizeof(uint32_t),
                                 16U);
 }
+static int graphics_v3_pl330_start_async(uint32_t channel,
+                                         uint32_t source_address,
+                                         uint32_t bytes)
+{
+    if (channel != ZZM_RIX_DMAC_CHANNEL || (bytes & 3U) != 0U)
+        return 0;
+    return graphics_pl330_start_async(0, source_address,
+                                      bytes / sizeof(uint32_t), 16U);
+}
 
+static int graphics_v3_pl330_retire(uint32_t channel)
+{
+    if (channel != ZZM_RIX_DMAC_CHANNEL)
+        return 0;
+    return graphics_pl330_retire(0);
+}
 static void graphics_v3_pl330_abort(uint32_t channel)
 {
     (void)channel;
@@ -460,7 +523,8 @@ static const zzm_graphics_hw_service_t graphics_hw_service = {
     graphics_v3_caps, graphics_v3_csr_read, graphics_v3_csr_write,
     graphics_v3_fifo_read, graphics_v3_fifo_write, graphics_v3_fifo_write_words,
     graphics_v3_pl330_claim,
-    graphics_v3_pl330_start, graphics_v3_pl330_abort,
+    graphics_v3_pl330_start, graphics_v3_pl330_start_async,
+    graphics_v3_pl330_retire, graphics_v3_pl330_abort,
     graphics_v3_pl330_release, graphics_v3_barrier
 };
 static int transport_publish_descriptor(uint32_t module_id,

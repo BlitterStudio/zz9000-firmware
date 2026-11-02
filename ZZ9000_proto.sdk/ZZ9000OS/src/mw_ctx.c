@@ -508,6 +508,8 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.fifo_drain = mw_rix_fifo_drain;
 #if MINIGL_RIX_DMA
     platform.dma_stream = mw_rix_dma_stream;
+    platform.dma_start_async = mw_rix_dma_start_async;
+    platform.dma_retire = mw_rix_dma_retire;
 #endif
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
@@ -581,6 +583,17 @@ static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
                              uint32_t burst_words)
 {
     return minigl_platform_dma_stream(context, source, words, burst_words);
+}
+
+static int mw_rix_dma_start_async(void *context, uintptr_t source, uint32_t words,
+                                  uint32_t burst_words)
+{
+    return minigl_platform_dma_start_async(context, source, words, burst_words);
+}
+
+static int mw_rix_dma_retire(void *context)
+{
+    return minigl_platform_dma_retire(context);
 }
 
 static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
@@ -673,6 +686,8 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.fifo_write_words = mw_rix_fifo_write_words;
     platform.fifo_drain = mw_rix_fifo_drain;
     platform.dma_stream = mw_rix_dma_stream;
+    platform.dma_start_async = mw_rix_dma_start_async;
+    platform.dma_retire = mw_rix_dma_retire;
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
     if (!minigl_rix_backend_probe_platform(&platform)) {
@@ -2222,7 +2237,11 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
      * already converted (or vice versa); follow the buffer, not the live
      * raster target. */
     source_rgb565 = c->color_rgb565[c->state.target.latest] != 0U;
-    source_bottom_up = minigl_raster_present_is_bottom_up();
+    /* The RGB565 layout shares its row order with the RGBA view converted
+     * in place (hardware-confirmed unflipped through app-runtime-25), so no
+     * row flip here either; the flip the 68k span path historically applied
+     * double-flipped RasterIX frames. */
+    source_bottom_up = 0;
     src_buf = c->color_buffers[c->state.target.latest];
     if (!src_buf)
         return MW_STATUS_FAILED;
