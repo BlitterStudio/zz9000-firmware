@@ -3931,22 +3931,31 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
         style = (flags >> (front ? MW_LOWERED_FRONT_SHIFT : MW_LOWERED_BACK_SHIFT)) & 3U;
     }
 
-    if (!g_rix_cpu_frame && style == 0U && rix_mode_supported(mode) &&
-        minigl_rix_backend_available(&g_rix) && rix_begin_draw()) {
-
-        g_rix_collecting = 1;
-        assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
-        if (g_rix_collecting > 0 &&
-            minigl_rix_backend_end_draw(&g_rix, (uintptr_t)g_buffers.color,
-                                        (uintptr_t)g_buffers.depth)) {
+    if (!g_rix_cpu_frame && style == 0U &&
+        minigl_rix_backend_available(&g_rix)) {
+        /* Same refusal reporting as rix_draw: GLQuake's immediate-mode
+         * draws arrive here, and "draw rejected" alone named no cause. */
+        if (!rix_mode_supported(mode)) {
+            g_rix.reject_stage = MINIGL_RIX_REJECT_MODE;
+            rix_note_reject(mode);
+        } else if (!rix_begin_draw()) {
+            rix_note_reject(mode);
+        } else {
+            g_rix_collecting = 1;
+            assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
+            if (g_rix_collecting > 0 &&
+                minigl_rix_backend_end_draw(&g_rix, (uintptr_t)g_buffers.color,
+                                            (uintptr_t)g_buffers.depth)) {
+                g_rix_collecting = 0;
+                ++g_frame_draws_hardware;
+                minigl_profile_count(MGLP_N_DRAW_HW, 1U);
+                mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
+                return;
+            }
+            rix_note_reject(mode);
+            minigl_rix_backend_abort_draw(&g_rix);
             g_rix_collecting = 0;
-            ++g_frame_draws_hardware;
-            minigl_profile_count(MGLP_N_DRAW_HW, 1U);
-            mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
-            return;
         }
-        minigl_rix_backend_abort_draw(&g_rix);
-        g_rix_collecting = 0;
     }
 
     /* Fallback to software rasterizer */
