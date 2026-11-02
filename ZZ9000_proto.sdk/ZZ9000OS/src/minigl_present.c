@@ -145,8 +145,8 @@ int minigl_present_copy_rgb565(const ZZ9KMiniGLPacketPresent *p,
             }
 #if defined(__ARM_NEON)
             while (index + 8U <= count) {
-                uint16x8_t pixels = vld1q_u16(src + index);
-                vst1q_u16(dst + index, vrev16q_u16(pixels));
+                uint8x16_t bytes = vld1q_u8((const uint8_t *)(const void *)(src + index));
+                vst1q_u8((uint8_t *)(void *)(dst + index), vrev16q_u8(bytes));
                 index += 8U;
             }
 #endif
