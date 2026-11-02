@@ -329,6 +329,7 @@ static int claim_fault(void)
 static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
                        uint32_t lr, uint32_t far, uint32_t fsr, uint32_t cpsr)
 {
+    (void)cpsr;
     if (!claim_fault())
         return;
     zzapp_private_timer_disable();
@@ -340,6 +341,8 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
     life32(ZZAPP_LIFE_LR_OFF, lr);
     life32(ZZAPP_LIFE_FAR_OFF, far);
     life32(ZZAPP_LIFE_FSR_OFF, fsr);
+#ifndef ZZAPP_HOST_TEST
+    (void)cpsr;
     {
         /* The caller chain, one line: pc/lr alone have twice pointed at a
          * frame whose inputs came from further up. */
@@ -361,6 +364,7 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
                (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5],
                (unsigned long)sp);
     }
+#endif
     publish_state(ZZAPP_ST_FAULTED);
     g_fault_mark = now_ticks();
     zzapp_services_on_app_end();

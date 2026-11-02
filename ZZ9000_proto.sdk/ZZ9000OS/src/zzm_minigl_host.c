@@ -478,6 +478,12 @@ static int graphics_v3_pl330_claim(uint32_t owner, uint32_t *channel_out)
      * module but resets none of this hardware, and the next session then
      * found the transport dead and fell back to CPU rendering until power
      * cycle.  Clear all of it before the new context's self-test. */
+#if !defined(TASKQ_HOST_TEST)
+    /* A crashed session can leave the channel faulted, the FIFO holding a
+     * sticky error and the parser mid-packet; a warm reset reloads the
+     * module but resets none of this hardware, and the next session then
+     * found the transport dead and fell back to CPU rendering until power
+     * cycle.  Clear all of it before the new context's self-test. */
     Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
               (ZZM_RIX_PL330_DMAKILL << 16U) |
               (ZZM_RIX_DMAC_CHANNEL << 8U) | 1U);
@@ -487,6 +493,7 @@ static int graphics_v3_pl330_claim(uint32_t owner, uint32_t *channel_out)
     Xil_Out32(ZZM_RIX_FIFO_BASE + ZZM_RIX_FIFO_TDFR, ZZM_RIX_FIFO_RESET_KEY);
     Xil_Out32(ZZM_RIX_FIFO_BASE + ZZM_RIX_FIFO_ISR, 0xffffffffU);
     graphics_barrier(0);
+#endif
     g_pl330_claimed = 1;
     *channel_out = ZZM_RIX_DMAC_CHANNEL;
     return 1;
