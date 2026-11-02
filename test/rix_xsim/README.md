@@ -5,7 +5,7 @@
 per scene with the exact `Rasterizer.v` edge rules, and gates replay through
 `compare_frames.py` full-image comparison via `run_scenes.sh` (builds the
 generator in gcc:13, replays every scene below over MMIO, `SHARED=1` and
-`DMA_BURST=1`, replays `ef-stress` with three randomized seeds, then replays
+`DMA_BURST=1`, replays `ef-stress` with four randomized seeds, then replays
 every scene through the real FIFO command path (see below), and fails on any
 mismatch).  `run_scenes.sh OUT LATENCY stream` runs only the stream-level
 matrix, `run_scenes.sh OUT LATENCY fifo` (or `run_fifo_path.sh [OUT]
@@ -20,6 +20,7 @@ matrix, `run_scenes.sh OUT LATENCY fifo` (or `run_fifo_path.sh [OUT]
 | `ef-s4` | 48-triangle radial stress scene | Enabled with deterministic 8x8 white texture. |
 | `ef-lm` | Two-pass lightmap: white textured base, then `ZERO,SRC_COLOR` with the uniform `0x8410` lightmap page | 8x8 white page, then the 8x8 lightmap page. |
 | `ef-stress` | Read-channel stress: 40 large overlapping triangles in shuffled depth order (`LESS`, depth writes), then six disjoint `ZERO,SRC_COLOR` lightmap triangles with the depth test still on | 256x256 RGB565 texture of uniform 64x64 blocks (zero/full channels, UVs 4 texels inside each block) so the texture cache keeps missing; then the 8x8 lightmap page. |
+| `ef-texenv` | TexEnv operand timing: one triangle with `MODULATE` (gradient texel x interpolated primary colour) under a second `INTERPOLATE` triangle using the constant env colour. | 64x64 RGB565 per-texel gradient page; reference frame is the committed RTL-derived baseline `refs/ef-texenv_ref.ppm.gz` (perspective texture-coordinate interpolation is not bit-exactly reproducible in C). |
 
 Each scene sets the 640×480 RGB565 color target and Z16 depth target, then
 performs a single full-target color/depth `MEMSET` and renders directly to
@@ -52,6 +53,53 @@ handshakes, then fails; the same dump accompanies a completion timeout.
 `TRACE_AXI=1` adds a 250000-cycle counter heartbeat and `TRACE_AXI=2` prints
 every accepted read address.  All of these are `run_xsim.bat` environment
 variables.
+
+## Coalescing cycle matrix (LATENCY=2, 2026-11-01)
+
+Cycles to completion with the framebuffer coalescer bypassed vs enabled. Each
+OFF/ON pair below was run from the merged tree; every compared frame was
+bit-exact (maximum channel delta 0 and coverage mismatches 0).
+
+### Stream-level transports
+
+| Scene | MMIO off | MMIO on | saving | SHARED off | SHARED on | saving | DMA off | DMA on | saving |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ef-s1` | 384,082 | 307,282 | 20.0% | 384,082 | 307,282 | 20.0% | 384,082 | 307,282 | 20.0% |
+| `ef-s2` | 412,053 | 330,230 | 19.9% | 412,057 | 330,230 | 19.9% | 412,053 | 330,230 | 19.9% |
+| `ef-s3` | 412,053 | 330,230 | 19.9% | 412,057 | 330,230 | 19.9% | 412,053 | 330,230 | 19.9% |
+| `ef-s4` | 465,121 | 380,558 | 18.2% | 465,121 | 380,558 | 18.2% | 465,121 | 380,558 | 18.2% |
+| `ef-probe` | 390,347 | 313,239 | 19.8% | 390,348 | 313,239 | 19.8% | 390,347 | 313,239 | 19.8% |
+| `ef-lm` | 446,882 | 356,177 | 20.3% | 445,495 | 355,801 | 20.1% | 446,882 | 356,177 | 20.3% |
+| `ef-stress` | 2,130,632 | 1,479,957 | 30.5% | 2,089,551 | 1,479,241 | 29.2% | 2,130,632 | 1,479,957 | 30.5% |
+| `ef-texenv` | 526,104 | 423,854 | 19.4% | 526,121 | 423,896 | 19.4% | 526,104 | 423,854 | 19.4% |
+
+`DMA_BURST=1` labels the same committed packet boundaries as a fixed-destination
+PL330 producer. The FIFO path below exercises the actual GP1 command ingress.
+
+### Real FIFO command path
+
+| Scene | FIFO MMIO off | on | saving | FIFO PL330 off | on | saving | FIFO burst16 off | on | saving |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ef-s1` | 386,570 | 309,798 | 19.9% | 386,090 | 309,318 | 19.9% | 386,014 | 309,242 | 19.9% |
+| `ef-s2` | 417,718 | 335,914 | 19.6% | 416,278 | 334,474 | 19.7% | 416,050 | 334,246 | 19.7% |
+| `ef-s3` | 417,718 | 335,914 | 19.6% | 416,278 | 334,474 | 19.7% | 416,050 | 334,246 | 19.7% |
+| `ef-s4` | 537,142 | 458,794 | 14.6% | 497,486 | 419,138 | 15.7% | 491,278 | 412,826 | 16.0% |
+| `ef-probe` | 402,426 | 325,314 | 19.2% | 399,066 | 321,954 | 19.3% | 398,538 | 321,426 | 19.3% |
+| `ef-lm` | 456,214 | 365,570 | 19.9% | 453,670 | 363,026 | 20.0% | 453,270 | 362,626 | 20.0% |
+| `ef-stress` | 2,150,930 | 1,500,262 | 30.3% | 2,145,162 | 1,494,430 | 30.3% | 2,144,210 | 1,493,542 | 30.3% |
+| `ef-texenv` | 535,582 | 433,310 | 19.1% | 533,014 | 430,742 | 19.2% | 532,610 | 430,338 | 19.2% |
+
+The FIFO-path run also verified that each `pl330-early` submission was rejected
+with `ISR.TSE` before any command word streamed.
+
+### Randomized shared DDR (`ef-stress`)
+
+| RAND_SEED | off | on | saving |
+| ---: | ---: | ---: | ---: |
+| 1 | 3,954,498 | 3,477,340 | 12.1% |
+| 2 | 3,951,871 | 3,474,542 | 12.1% |
+| 3 | 3,953,652 | 3,472,748 | 12.2% |
+| 4 | 3,948,588 | 3,474,373 | 12.0% |
 
 TMU0 MUST remain enabled for every scene that reaches the pixel pipeline.
 `TextureMappingUnit.v:275-339` always sends and joins the texture-read

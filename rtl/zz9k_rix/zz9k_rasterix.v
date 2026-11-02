@@ -243,9 +243,9 @@ module zz9k_rasterix #(
         .ID_WIDTH(6),
         .DATA_WIDTH(64),
         .STRB_WIDTH(8),
-        // StreamFramebuffer supplies bursts; bypass the single-beat-only
-        // coalescer rather than rejecting valid EF traffic during synthesis.
-        .ENABLE_MEMORY_COALESCING(0),
+        // Merge the framebuffer masters' single-beat transactions into
+        // INCR bursts (see rtl/rasterix/PATCHES.md).
+        .ENABLE_MEMORY_COALESCING(1),
         .RASTERIZER_FLOAT_PRECISION(24),
         .RASTERIZER_FIXPOINT_PRECISION(18),
         .RASTERIZER_ENABLE_FLOAT_INTERPOLATION(0)
