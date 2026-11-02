@@ -125,15 +125,16 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
 
     if (words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS)
         return RIX_DRV_BAD_ARGUMENT;
-    /* The wait overlaps with the previous packet's DMA: the parser spends
-     * most of this interval consuming it, so the retire that follows is
-     * normally already complete.  Hardware log (kit 30): the synchronous
-     * wait-and-retire per packet cost the CPU ~124 us, 10-28 ms per frame
-     * across ~120-250 packets. */
-    result = rix_drv_wait_vacancy(driver, words + 2U, timeout);
+    /* Close the previous packet before anything new is staged: TLF
+     * carries the byte count staged since the previous TLF, so a header
+     * word written first makes the boundary value wrong and the FIFO drops
+     * it (ISR.TSE, seen on kit 31) -- the parser then desynchronises and
+     * executes garbage.  The retire still overlaps with the caller's work
+     * since the launch: the emit stage between two submissions. */
+    result = rix_drv_flush_pending(driver);
     if (result != RIX_DRV_OK)
         return result;
-    result = rix_drv_flush_pending(driver);
+    result = rix_drv_wait_vacancy(driver, words + 2U, timeout);
     if (result != RIX_DRV_OK)
         return result;
 
