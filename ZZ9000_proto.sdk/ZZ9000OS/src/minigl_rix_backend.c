@@ -1255,6 +1255,18 @@ static int backend_select_transport(MiniGLRixBackend *backend)
 {
     static int logged = 0;
 
+    /* A previous session -- even one that exited cleanly -- can leave the
+     * engine wedged: the parser mid-command, the FIFO sticky-errored, the
+     * DMA channel faulted.  None of that resets with the module loaded
+     * once and reused across sessions, and the self-test below then
+     * failed and disabled the backend until reboot.  Recover the engine
+     * before testing it. */
+#if defined(MINIGL_MODULE) || (defined(__arm__) && !defined(MINIGL_HOST_TEST))
+    minigl_platform_abort_graphics();
+#else
+    (void)rix_drv_recover(&backend->driver, RIX_TIMEOUT, 1);
+    (void)rix_drv_enable(&backend->driver);
+#endif
     if (backend->driver.dma_stream == NULL) {
         if (!logged)
             RIX_LOG("[RasterIX] transport: MMIO\r\n");
