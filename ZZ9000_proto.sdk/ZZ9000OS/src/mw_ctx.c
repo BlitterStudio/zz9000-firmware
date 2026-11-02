@@ -1829,8 +1829,12 @@ uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
 
     status = mw_parse_packet_report(packet, bytes, mw_execute_command, c,
                                     failed_opcode);
-    if (!minigl_raster_finish())
-        mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+    /* The RGBA view of the colour surface is built on demand: every CPU
+     * reader (read pixels, capture, copy-to-texture, a rasterizer fallback)
+     * converts through minigl_raster_finish before it touches the buffer.
+     * Converting here instead cost two full-frame passes per packet on
+     * RasterIX-bound frames (MGLP tgt: 565->RGBA at packet end, then
+     * RGBA->565 again at the next frame's first draw). */
     return status;
 }
 
