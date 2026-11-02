@@ -6,7 +6,10 @@
 #include "minigl_platform.h"
 
 #include "memorymap.h"
-#include <stddef.h>
+#include <string.h>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 
 static uint32_t pixel_bytes(uint32_t format)
@@ -105,15 +108,60 @@ int minigl_present_copy_rgb565(const ZZ9KMiniGLPacketPresent *p,
                                uint32_t vram_length)
 {
     uint32_t y;
+    uint8_t *base;
+    uint32_t row_bytes;
 
     if (!color_buffer || !vram || !valid_rectangle(p, vram_length))
         return 0;
+    base = vram + p->dest_offset - MNT_FB_BASE +
+           p->window_y * p->dest_pitch +
+           p->window_x * pixel_bytes(p->dest_format);
+    row_bytes = p->window_w * pixel_bytes(p->dest_format);
+
+    /* The locked P96 back bitmap of a full-screen client is the common
+     * frame: same 16-bit format, row bytes equal to the pitch.  A panned
+     * ZZRun screen is exactly that, so the frame present is one memcpy or
+     * one byteswap pass instead of a per-pixel format switch.  The source
+     * rows are target_width apart, so only a window covering whole source
+     * rows from column zero may be copied as one block. */
+    if ((p->dest_format == ZZ9K_MGL_PIXFMT_RGB565_LE ||
+         p->dest_format == ZZ9K_MGL_PIXFMT_RGB565_BE) &&
+        row_bytes == p->dest_pitch) {
+        int block = p->source_x == 0U && p->window_w == p->target_width;
+        uint32_t rows = block ? 1U : p->window_h;
+        uint32_t row;
+
+        for (row = 0U; row < rows; ++row) {
+            const uint16_t *src = color_buffer +
+                                  (p->source_y + row) * p->target_width +
+                                  p->source_x;
+            uint16_t *dst = (uint16_t *)(void *)(base + row * p->dest_pitch);
+            uint32_t count = block ? p->window_w * p->window_h : p->window_w;
+            uint32_t index = 0U;
+
+            if (p->dest_format == ZZ9K_MGL_PIXFMT_RGB565_LE) {
+                memcpy(dst, src, (size_t)count * sizeof(*dst));
+                continue;
+            }
+#if defined(__ARM_NEON)
+            while (index + 8U <= count) {
+                uint16x8_t pixels = vld1q_u16(src + index);
+                vst1q_u16(dst + index, vrev16q_u16(pixels));
+                index += 8U;
+            }
+#endif
+            for (; index < count; ++index) {
+                uint16_t value = src[index];
+                dst[index] = (uint16_t)((value >> 8U) | (value << 8U));
+            }
+        }
+        return 1;
+    }
+
     for (y = 0U; y < p->window_h; ++y) {
         const uint16_t *src = color_buffer + (p->source_y + y) * p->target_width +
                               p->source_x;
-        uint8_t *dst = vram + p->dest_offset - MNT_FB_BASE +
-                       (p->window_y + y) * p->dest_pitch +
-                       p->window_x * pixel_bytes(p->dest_format);
+        uint8_t *dst = base + y * p->dest_pitch;
         uint32_t x;
 
         for (x = 0U; x < p->window_w; ++x) {
