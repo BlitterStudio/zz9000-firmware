@@ -493,14 +493,14 @@ static uint32_t dest_format(uint32_t format)
     return ZZ9K_MGL_PIXFMT_BGRA32;
 }
 
-static int copy_bound(const uint32_t *src, int rgb565, int bottom_up,
+static int copy_bound(const uint32_t *src, int rgb565,
                       uint32_t w, uint32_t h, uint32_t pitch, uint32_t format,
                       uint32_t card)
 {
     ZZ9KMiniGLPacketPresent pres;
     uint8_t *vram;
     uint32_t vram_len;
-    uint32_t y;
+
 
     if (!src || !card || !w || !h || !pitch)
         return 0;
@@ -528,25 +528,14 @@ static int copy_bound(const uint32_t *src, int rgb565, int bottom_up,
     /* present_copy addresses vram + dest_offset - MNT_FB_BASE. With
      * dest_offset == MNT_FB_BASE the write starts at vram, which is the
      * bound ARM address (or the host mock). */
-    if (!bottom_up) {
-        if (rgb565)
-            return minigl_present_copy_rgb565(&pres, (const uint16_t *)src, vram, vram_len);
-        return minigl_present_copy(&pres, src, vram, vram_len);
-    }
-    /* RasterIX RGB565 is bottom-up. present_copy has no flip flag. */
-    pres.window_h = 1;
-    for (y = 0; y < h; ++y) {
-        int ok;
-        pres.window_y = y;
-        pres.source_y = h - 1u - y;
-        if (rgb565)
-            ok = minigl_present_copy_rgb565(&pres, (const uint16_t *)src, vram, vram_len);
-        else
-            ok = minigl_present_copy(&pres, src, vram, vram_len);
-        if (!ok)
-            return 0;
-    }
-    return 1;
+    /* No row flip for the RGB565 layout: it is the same memory the RGBA
+     * view converts in place, and that view has always presented unflipped
+     * and correct on hardware (app-runtime-25: all-RasterIX frames,
+     * converted per packet). The earlier flip came from the 68k span
+     * convention and double-flipped. */
+    if (rgb565)
+        return minigl_present_copy_rgb565(&pres, (const uint16_t *)src, vram, vram_len);
+    return minigl_present_copy(&pres, src, vram, vram_len);
 }
 
 void zzapp_gl_swap(void)
@@ -585,7 +574,7 @@ void zzapp_gl_swap(void)
     /* pres= covers the CPU copy into the P96 bitmap and the wait for
      * ZZRun's flip acknowledgement. */
     minigl_profile_push(MGLP_PRESENT);
-    if (copy_bound(src, rgb565, minigl_raster_present_is_bottom_up(),
+    if (copy_bound(src, rgb565,
                    w, h, pitch, format, card)) {
         minigl_platform_cache_clean(NULL, card, pitch * h);
         minigl_platform_barrier(NULL);
