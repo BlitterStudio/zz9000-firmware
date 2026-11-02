@@ -57,6 +57,9 @@
 #define ZZM_RIX_PL330_RD_CCR 1u
 #define ZZM_RIX_PL330_RD_DAR 2u
 #define ZZM_RIX_FIFO_TDFD 0x10U
+#define ZZM_RIX_FIFO_TDFR 0x08U
+#define ZZM_RIX_FIFO_ISR 0x00U
+#define ZZM_RIX_FIFO_RESET_KEY 0xa5U
 #define ZZM_RIX_DMA_MAX_WORDS 248U
 /* sizeof(ZZ9KMiniGLTransportDescriptorWire), MW_TRANSPORT_DESCRIPTOR_WIRE_BYTES
  * in mw_service.h.  This was 80, so every module publish was rejected and
@@ -470,6 +473,20 @@ static int graphics_v3_pl330_claim(uint32_t owner, uint32_t *channel_out)
     if (!g_caps.has_pl330 || owner == 0U || channel_out == 0 ||
         g_pl330_claimed)
         return 0;
+    /* A crashed session can leave the channel faulted, the FIFO holding a
+     * sticky error and the parser mid-packet; a warm reset reloads the
+     * module but resets none of this hardware, and the next session then
+     * found the transport dead and fell back to CPU rendering until power
+     * cycle.  Clear all of it before the new context's self-test. */
+    Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
+              (ZZM_RIX_PL330_DMAKILL << 16U) |
+              (ZZM_RIX_DMAC_CHANNEL << 8U) | 1U);
+    Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST1, 0U);
+    Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGCMD, 0U);
+    g_pl330_expect = 0U;
+    Xil_Out32(ZZM_RIX_FIFO_BASE + ZZM_RIX_FIFO_TDFR, ZZM_RIX_FIFO_RESET_KEY);
+    Xil_Out32(ZZM_RIX_FIFO_BASE + ZZM_RIX_FIFO_ISR, 0xffffffffU);
+    graphics_barrier(0);
     g_pl330_claimed = 1;
     *channel_out = ZZM_RIX_DMAC_CHANNEL;
     return 1;

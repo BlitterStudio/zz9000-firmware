@@ -340,7 +340,27 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
     life32(ZZAPP_LIFE_LR_OFF, lr);
     life32(ZZAPP_LIFE_FAR_OFF, far);
     life32(ZZAPP_LIFE_FSR_OFF, fsr);
-    life32(ZZAPP_LIFE_CPSR_OFF, cpsr);
+    {
+        /* The caller chain, one line: pc/lr alone have twice pointed at a
+         * frame whose inputs came from further up. */
+        const uint32_t *stk = (const uint32_t *)(uintptr_t)sp;
+        uint32_t w[6];
+        uint32_t i;
+        int readable = 1;
+
+        for (i = 0U; i < 6U; ++i) {
+            w[i] = 0U;
+            if (readable && (uintptr_t)(stk + i) >= 0x0b000000U &&
+                (uintptr_t)(stk + i) < 0x11000000U)
+                w[i] = stk[i];
+            else
+                readable = 0;
+        }
+        printf("[app] fault stack: %08lx %08lx %08lx %08lx %08lx %08lx (sp=%08lx)\r\n",
+               (unsigned long)w[0], (unsigned long)w[1], (unsigned long)w[2],
+               (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5],
+               (unsigned long)sp);
+    }
     publish_state(ZZAPP_ST_FAULTED);
     g_fault_mark = now_ticks();
     zzapp_services_on_app_end();
