@@ -24,7 +24,16 @@
 #define ZZM_RIX_CSR_IDENTITY 0x00U
 #define ZZM_RIX_CSR_VERSION 0x04U
 
-#define ZZM_RIX_DMAC_BASE 0xf8004000U
+/* UG585: the PL330 has a secure (0xf8003000) and a non-secure (0xf8004000)
+ * APB view.  The DMAC ignores debug instructions from the view that does not
+ * match its manager's security state, so the base and the DMAGO ns bit come
+ * from DSR.DNS at boot (zzm_dmac_probe), never from a constant. */
+#define ZZM_RIX_DMAC_S_BASE 0xf8003000U
+#define ZZM_RIX_DMAC_NS_BASE 0xf8004000U
+#define ZZM_RIX_DMAC_DSR 0x000U
+#define ZZM_RIX_DMAC_DSR_DNS (1U << 9U)
+#define ZZM_SLCR_APER_CLK_CTRL 0xf800012cU
+#define ZZM_SLCR_DMAC_RST_CTRL 0xf800020cU
 #define ZZM_RIX_DMAC_CHANNEL 6U
 #define ZZM_RIX_DMAC_CSR(channel) (0x100U + (channel) * 8U)
 #define ZZM_RIX_DMAC_SAR(channel) (0x400U + (channel) * 0x20U)
@@ -140,6 +149,33 @@ static void graphics_barrier(void *context)
  * an owned command buffer through the service table. */
 #if !defined(TASKQ_HOST_TEST)
 static uint8_t g_pl330_program[128] __attribute__((aligned(64)));
+static uint32_t g_dmac_base;
+static uint32_t g_dmac_go_ns;
+
+/* An APB access to an unclocked or reset DMAC can stall the interconnect, so
+ * the SLCR (always readable) is checked before DSR.  The secure view's DSR is
+ * readable whatever the manager state; DNS selects the view and the DMAGO ns
+ * bit.  Using the non-secure view against a secure manager (the BSP default)
+ * made every PL330 self-test fail with err_status=0. */
+static int zzm_dmac_probe(void)
+{
+    uint32_t dsr;
+
+    if ((Xil_In32(ZZM_SLCR_APER_CLK_CTRL) & 1U) == 0U ||
+        (Xil_In32(ZZM_SLCR_DMAC_RST_CTRL) & 1U) != 0U)
+        return 0;
+    dsr = Xil_In32(ZZM_RIX_DMAC_S_BASE + ZZM_RIX_DMAC_DSR);
+    if ((dsr & ZZM_RIX_DMAC_DSR_DNS) != 0U) {
+        g_dmac_base = ZZM_RIX_DMAC_NS_BASE;
+        g_dmac_go_ns = 2U;
+    } else {
+        g_dmac_base = ZZM_RIX_DMAC_S_BASE;
+        g_dmac_go_ns = 0U;
+    }
+    printf("[ZZM] PL330 manager %s\r\n",
+           g_dmac_go_ns != 0U ? "non-secure" : "secure");
+    return 1;
+}
 
 static unsigned pl330_word(uint8_t *program, unsigned offset, uint32_t value)
 {
@@ -160,11 +196,11 @@ static void graphics_pl330_abort(void *context)
     (void)context;
     if (g_pl330_claimed && g_caps.has_pl330) {
         graphics_recovery_step(1U, "PL330 abort");
-        Xil_Out32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGINST0,
+        Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
                   (ZZM_RIX_PL330_DMAKILL << 16U) |
                   (ZZM_RIX_DMAC_CHANNEL << 8U) | 1U);
-        Xil_Out32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGINST1, 0U);
-        Xil_Out32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGCMD, 0U);
+        Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST1, 0U);
+        Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGCMD, 0U);
         graphics_barrier(0);
     }
     g_pl330_claimed = 0;
@@ -226,28 +262,28 @@ static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
     Xil_DCacheFlushRange((INTPTR)program, (u32)sizeof(g_pl330_program));
     graphics_barrier(0);
     for (attempt = 0U; attempt < 100000U; ++attempt)
-        if ((Xil_In32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
+        if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
             break;
     if (attempt == 100000U)
         return 0;
-    Xil_Out32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGINST0,
-              (ZZM_RIX_PL330_DMAGO << 16U) |
+    Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
+              ((ZZM_RIX_PL330_DMAGO | g_dmac_go_ns) << 16U) |
               (ZZM_RIX_DMAC_CHANNEL << 24U));
-    Xil_Out32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGINST1,
+    Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST1,
               (uint32_t)(uintptr_t)program);
     graphics_barrier(0);
-    Xil_Out32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGCMD, 0U);
+    Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGCMD, 0U);
     graphics_barrier(0);
     for (attempt = 0U; attempt < 100000U; ++attempt)
-        if ((Xil_In32(ZZM_RIX_DMAC_BASE + ZZM_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
+        if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
             break;
     if (attempt == 100000U)
         goto kill;
     for (attempt = 0U; attempt < 1000000U; ++attempt) {
-        uint32_t state = Xil_In32(ZZM_RIX_DMAC_BASE +
+        uint32_t state = Xil_In32(g_dmac_base +
                                   ZZM_RIX_DMAC_CSR(ZZM_RIX_DMAC_CHANNEL)) & 15U;
         if (state == ZZM_RIX_DMAC_STOPPED)
-            return Xil_In32(ZZM_RIX_DMAC_BASE +
+            return Xil_In32(g_dmac_base +
                             ZZM_RIX_DMAC_SAR(ZZM_RIX_DMAC_CHANNEL)) ==
                    (uint32_t)source + words * sizeof(uint32_t);
         if (state == ZZM_RIX_DMAC_FAULTING_COMPLETING ||
@@ -708,7 +744,7 @@ void zzm_minigl_boot_caps_init(uint32_t image_flavour)
     if (Xil_In32(ZZM_RIX_CSR_BASE + ZZM_RIX_CSR_IDENTITY) == ZZM_RIX_IDENTITY) {
         g_caps.rasterix_csr_abi = Xil_In32(ZZM_RIX_CSR_BASE + ZZM_RIX_CSR_VERSION);
         g_caps.has_rasterix_ef = (g_caps.rasterix_csr_abi >= ZZM_RIX_CSR_ABI_V2);
-        g_caps.has_pl330 = g_caps.has_rasterix_ef;
+        g_caps.has_pl330 = g_caps.has_rasterix_ef && zzm_dmac_probe();
     }
 #endif
 }
