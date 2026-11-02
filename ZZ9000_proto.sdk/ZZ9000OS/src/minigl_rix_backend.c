@@ -1579,29 +1579,39 @@ int minigl_rix_backend_begin_draw(MiniGLRixBackend *backend, uint16_t width,
     ZZ9KMiniGLPacketSetState mapped_state;
     uint32_t features;
 
+    if (backend == NULL)
+        return 0;
+    backend->reject_stage = MINIGL_RIX_REJECT_UNAVAILABLE;
     if (!minigl_rix_backend_available(backend) || width == 0U || height == 0U)
         return 0;
     mapped_state = backend->state;
     if ((mapped_state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U) {
+        backend->reject_stage = MINIGL_RIX_REJECT_MULTITEXTURE;
         if (!backend_multitexture_supported(backend))
             return 0;
         mapped_state.enabled_flags &= ~ZZ9K_MGL_STATE_TEXTURE_2D_1;
     }
+    backend->reject_stage = MINIGL_RIX_REJECT_STATE;
     if (!backend_maps_state(&mapped_state, &fragment, &environment, &features))
         return 0;
+    backend->reject_stage = MINIGL_RIX_REJECT_TARGET_FLUSH;
     if (backend->frame_active &&
         (backend->width != width || backend->height != height ||
          backend->color_address != color_address || backend->depth_address != depth_address) &&
         !backend_flush(backend, 0))
         return 0;
+    backend->reject_stage = MINIGL_RIX_REJECT_START_FRAME;
     if (!backend->frame_active &&
         !backend_start_frame(backend, width, height, color_address, depth_address))
         return 0;
+    backend->reject_stage = MINIGL_RIX_REJECT_OP_FLUSH;
     if (backend->op_count == MINIGL_RIX_MAX_OPS &&
         !backend_flush(backend, 1))
         return 0;
+    backend->reject_stage = MINIGL_RIX_REJECT_RECORD;
     if (!backend_record_draw(backend))
         return 0;
+    backend->reject_stage = MINIGL_RIX_REJECT_NONE;
     backend->collecting = 1U;
     return 1;
 }
@@ -1654,19 +1664,27 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     scissor.end_x = backend->width;
     scissor.end_y = backend->height;
     if ((backend->state.enabled_flags & ZZ9K_MGL_STATE_SCISSOR_TEST) != 0U) {
-        int32_t bottom = (int32_t)backend->height - backend->state.scissor_y -
-                         backend->state.scissor_h;
+        /* GL clips the scissor box to the framebuffer; a box that extends
+         * past it (e.g. the window size on a smaller target) is legal and
+         * must not push the draw to the CPU. */
+        int32_t x0 = backend->state.scissor_x;
+        int32_t y0 = (int32_t)backend->height - backend->state.scissor_y -
+                     (int32_t)backend->state.scissor_h;
+        int32_t x1 = x0 + (int32_t)backend->state.scissor_w;
+        int32_t y1 = y0 + (int32_t)backend->state.scissor_h;
 
-        if (backend->state.scissor_x < 0 || bottom < 0 ||
-            (uint32_t)backend->state.scissor_x + backend->state.scissor_w > backend->width ||
-            (uint32_t)bottom + backend->state.scissor_h > backend->height) {
-            return 0;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > (int32_t)backend->width) x1 = (int32_t)backend->width;
+        if (y1 > (int32_t)backend->height) y1 = (int32_t)backend->height;
+        if (x1 <= x0 || y1 <= y0) {
+            minigl_profile_count(MGLP_N_CULLED, 1U);
+            return 1;   /* nothing inside the scissor: draws nothing */
         }
-        scissor.start_x = (uint16_t)backend->state.scissor_x;
-        scissor.start_y = (uint16_t)bottom;
-        scissor.end_x = (uint16_t)((uint32_t)backend->state.scissor_x +
-                                   backend->state.scissor_w);
-        scissor.end_y = (uint16_t)((uint32_t)bottom + backend->state.scissor_h);
+        scissor.start_x = (uint16_t)x0;
+        scissor.start_y = (uint16_t)y0;
+        scissor.end_x = (uint16_t)x1;
+        scissor.end_y = (uint16_t)y1;
     }
     scissor.enabled = 1U;
     if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor)) {
@@ -1681,8 +1699,10 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     }
     if (passes == 2U &&
         !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
-                            &texture1_vertices[1], &texture1_vertices[2], &scissor))
+                            &texture1_vertices[1], &texture1_vertices[2], &scissor)) {
+        backend->reject_stage = MINIGL_RIX_REJECT_TEXTURE1;
         return 0;
+    }
     op = &backend->ops[backend->op_count - 1U];
     triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
     if (op->two_pass)
@@ -1692,6 +1712,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
         backend->command_words_estimate + triangle_words >
             MINIGL_RIX_COMMAND_WORD_BUDGET) {
+        backend->reject_stage = MINIGL_RIX_REJECT_BUDGET;
         if (backend->triangle_count == 0U && op->triangle_count == 0U)
             return 0;
         if (!backend_flush(backend, 1) || !backend_record_draw(backend))
@@ -1704,6 +1725,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         if (backend->command_words_estimate + triangle_words >
             MINIGL_RIX_COMMAND_WORD_BUDGET)
             return 0;
+        backend->reject_stage = MINIGL_RIX_REJECT_NONE;
     }
     triangle = &backend->triangles[backend->triangle_count];
     *triangle = prepared;
@@ -1719,9 +1741,12 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
 int minigl_rix_backend_end_draw(MiniGLRixBackend *backend, uint32_t color_address,
                                 uint32_t depth_address)
 {
-    if (backend == NULL || !backend->collecting ||
-        color_address != backend->color_address || depth_address != backend->depth_address)
+    if (backend == NULL || !backend->collecting)
         return 0;
+    if (color_address != backend->color_address || depth_address != backend->depth_address) {
+        backend->reject_stage = MINIGL_RIX_REJECT_END_TARGET;
+        return 0;
+    }
     backend->collecting = 0U;
     return 1;
 }
@@ -2002,6 +2027,32 @@ uint32_t minigl_rix_backend_eval_fallback(const MiniGLRixBackend *backend)
 void minigl_rix_backend_log_fallback(uint32_t reason)
 {
     RIX_LOG("[RasterIX] fallback: %s\r\n", minigl_rix_backend_fallback_name(reason));
+}
+
+void minigl_rix_backend_log_reject(const MiniGLRixBackend *backend, uint16_t mode)
+{
+    static const char *const names[MINIGL_RIX_REJECT_STAGES] = {
+        "unknown", "primitive", "unavailable", "multitexture", "state",
+        "target flush", "start frame", "op flush", "record", "scissor",
+        "texture unit 1", "command budget", "target changed", "prepare target"
+    };
+    const ZZ9KMiniGLPacketSetState *s;
+    uint32_t stage;
+
+    if (backend == NULL)
+        return;
+    s = &backend->state;
+    stage = backend->reject_stage < MINIGL_RIX_REJECT_STAGES ?
+        backend->reject_stage : 0U;
+    RIX_LOG("[RasterIX] draw rejected at %s: mode=%04x en=%08lx blend=%04x/%04x "
+            "eq=%04x depth=%04x/%u alpha=%04x env=%04x poly=%04x err=%u ops=%lu tri=%lu\r\n",
+            names[stage], (unsigned)mode, (unsigned long)s->enabled_flags,
+            (unsigned)s->blend_src, (unsigned)s->blend_dst,
+            (unsigned)s->blend_equation, (unsigned)s->depth_func,
+            (unsigned)s->depth_bits, (unsigned)s->alpha_func,
+            (unsigned)s->tex_env_mode[0], (unsigned)s->polygon_mode,
+            (unsigned)backend->error, (unsigned long)backend->op_count,
+            (unsigned long)backend->triangle_count);
 }
 
 void minigl_rix_backend_log_context_backend(const MiniGLRixBackend *backend)

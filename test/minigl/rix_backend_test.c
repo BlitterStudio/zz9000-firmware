@@ -1079,6 +1079,21 @@ int main(void)
     assert(model.packet_count >= 1U);
     assert(*(uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
                                  MINIGL_RIX_TEXTURE_PAGE_BYTES) == 1U);
+    /* A scissor box larger than the target is clipped, as GL does, not a
+     * reason to send the draw to the CPU rasterizer. */
+    state = state16();
+    state.enabled_flags |= ZZ9K_MGL_STATE_SCISSOR_TEST;
+    state.scissor_x = 0;
+    state.scissor_y = 0;
+    state.scissor_w = 640U;
+    state.scissor_h = 480U;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_drain(&backend));
+    state = state16();
+    minigl_rix_backend_set_state(&backend, &state);
     {
         uint32_t surface[64U * 64U];
         unsigned int invalidates = model.invalidates;

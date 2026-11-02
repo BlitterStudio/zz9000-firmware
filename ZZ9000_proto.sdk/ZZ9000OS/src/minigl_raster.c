@@ -191,6 +191,7 @@ static uint32_t g_last_frame_draws_hardware = 0U;
 static uint32_t g_last_frame_draws_software = 0U;
 static uint32_t g_last_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
 static uint32_t g_logged_fallback_mask = 0U;
+static uint32_t g_rix_logged_rejects;
 static int g_context_backend_logged = 0;
 
 /* These track ownership independently of backend fail-stop, which clears its
@@ -677,6 +678,7 @@ int minigl_raster_configure(uint32_t width, uint32_t height)
     g_last_frame_draws_software = 0U;
     g_last_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
     g_logged_fallback_mask = 0U;
+    g_rix_logged_rejects = 0U;
     g_context_backend_logged = 0;
     g_rix_cpu_fallbacks = 0U;
     g_rix_cpu_frame = 0;
@@ -698,6 +700,7 @@ void minigl_raster_reset(void)
     g_last_frame_draws_software = 0U;
     g_last_frame_fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
     g_logged_fallback_mask = 0U;
+    g_rix_logged_rejects = 0U;
     g_context_backend_logged = 0;
     g_rix_cpu_fallbacks = 0U;
     g_rix_cpu_frame = 0;
@@ -3193,16 +3196,39 @@ static int rix_begin_draw(void)
         return 0;
     if (rix_prepare_target())
         return 1;
+    g_rix.reject_stage = MINIGL_RIX_REJECT_PREPARE_TARGET;
     minigl_rix_backend_abort_draw(&g_rix);
     return 0;
 }
 
 
+/* One UART line per refusal stage per context (minigl_rix_backend_log_reject):
+ * "draw rejected" alone does not say which check failed. */
+
+static void rix_note_reject(uint16_t mode)
+{
+    uint32_t bit = 1U << g_rix.reject_stage;
+
+    if (!(g_rix_logged_rejects & bit)) {
+        g_rix_logged_rejects |= bit;
+        minigl_rix_backend_log_reject(&g_rix, mode);
+    }
+}
+
 static int rix_draw(uint16_t mode, uint16_t stride, uint32_t base,
                     const uint8_t *indices, uint32_t first, uint32_t count)
 {
-    if (g_rix_cpu_frame || !rix_mode_supported(mode) || !rix_begin_draw())
+    if (g_rix_cpu_frame)
         return 0;
+    if (!rix_mode_supported(mode)) {
+        g_rix.reject_stage = MINIGL_RIX_REJECT_MODE;
+        rix_note_reject(mode);
+        return 0;
+    }
+    if (!rix_begin_draw()) {
+        rix_note_reject(mode);
+        return 0;
+    }
     g_rix_collecting = 1;
     assemble(mode, stride, base, indices, first, count);
     if (g_rix_collecting > 0 &&
@@ -3212,6 +3238,7 @@ static int rix_draw(uint16_t mode, uint16_t stride, uint32_t base,
         mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
         return 1;
     }
+    rix_note_reject(mode);
     minigl_rix_backend_abort_draw(&g_rix);
     g_rix_collecting = 0;
     return 0;

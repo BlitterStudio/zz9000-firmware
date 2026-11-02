@@ -170,6 +170,8 @@ typedef struct MiniGLRixBackend {
     uint8_t needs_depth_read;
     uint8_t surface_rgb565;
     uint8_t error;
+    /* Why the last draw left the hardware path (MINIGL_RIX_REJECT_*). */
+    uint8_t reject_stage;
     uint32_t pending_fence[MINIGL_RIX_COMMAND_BUFFERS];
     uint32_t submitted_command_words[MINIGL_RIX_COMMAND_BUFFERS];
     uint8_t pending[MINIGL_RIX_COMMAND_BUFFERS];
@@ -251,5 +253,24 @@ uint32_t minigl_rix_backend_eval_fallback(const MiniGLRixBackend *backend);
 const char *minigl_rix_backend_fallback_name(uint32_t reason);
 void minigl_rix_backend_log_fallback(uint32_t reason);
 void minigl_rix_backend_log_context_backend(const MiniGLRixBackend *backend);
+
+/* Stage at which RasterIX refused a draw that eval_fallback accepts. */
+#define MINIGL_RIX_REJECT_NONE          0U
+#define MINIGL_RIX_REJECT_MODE          1U
+#define MINIGL_RIX_REJECT_UNAVAILABLE   2U
+#define MINIGL_RIX_REJECT_MULTITEXTURE  3U
+#define MINIGL_RIX_REJECT_STATE         4U
+#define MINIGL_RIX_REJECT_TARGET_FLUSH  5U
+#define MINIGL_RIX_REJECT_START_FRAME   6U
+#define MINIGL_RIX_REJECT_OP_FLUSH      7U
+#define MINIGL_RIX_REJECT_RECORD        8U
+#define MINIGL_RIX_REJECT_SCISSOR       9U
+#define MINIGL_RIX_REJECT_TEXTURE1     10U
+#define MINIGL_RIX_REJECT_BUDGET       11U
+#define MINIGL_RIX_REJECT_END_TARGET   12U
+#define MINIGL_RIX_REJECT_PREPARE_TARGET 13U
+#define MINIGL_RIX_REJECT_STAGES       14U
+/* One line per stage per context: the stage and the draw state. */
+void minigl_rix_backend_log_reject(const MiniGLRixBackend *backend, uint16_t mode);
 
 #endif /* MINIGL_RIX_BACKEND_H */
