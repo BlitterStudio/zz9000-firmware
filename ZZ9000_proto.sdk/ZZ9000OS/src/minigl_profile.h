@@ -53,6 +53,7 @@ typedef enum {
     MGLP_N_EVICTIONS,     /* textures evicted from the RasterIX pool */
     MGLP_N_OPS,           /* synchronous bridge ops */
     MGLP_N_ASYNC_PRESENTS,/* packet-owned direct P96 presentations */
+    MGLP_N_DRV_PACKETS,  /* FIFO packets pushed to RasterIX (MMIO or DMA) */
     MGLP_COUNTERS
 } MiniGLProfileCounter;
 

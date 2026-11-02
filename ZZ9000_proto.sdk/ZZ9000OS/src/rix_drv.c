@@ -105,6 +105,7 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
 
     dma = driver->dma_stream != NULL && command_address != (uintptr_t)0U &&
           words >= 16U;
+    minigl_profile_count(MGLP_N_DRV_PACKETS, 1U);
     driver->last_packet_bytes = (words + 2U) * sizeof(*commands);
     driver->last_packet_dma = dma;
     ++driver->packets;

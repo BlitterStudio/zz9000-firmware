@@ -196,7 +196,7 @@ void minigl_profile_report(void)
     window = mglp_tenth_ms(g_mglp.mark - g_mglp.window_start, 0U) / 1000U;
     written = snprintf(line, sizeof(line),
                        "[MGLP] %lu.%lus pk=%lu op=%lu ap=%lu kB=%lu cmd=%lu tri=%lu "
-                       "cull=%lu hw=%lu sw=%lu fb=%lu fw=%lu sub=%lu tx=%lu "
+                       "cull=%lu hw=%lu sw=%lu fb=%lu fw=%lu sub=%lu fp=%lu tx=%lu "
                        "up=%lu ub=%lu pin=%lu ev=%lu fbk=",
                        (unsigned long)(window / 10U), (unsigned long)(window % 10U),
                        (unsigned long)g_mglp.packets, (unsigned long)n[MGLP_N_OPS],
@@ -210,6 +210,7 @@ void minigl_profile_report(void)
                        (unsigned long)g_mglp.fallback_reason,
                        (unsigned long)n[MGLP_N_FIFO_WORDS],
                        (unsigned long)n[MGLP_N_FIFO_SUBMITS],
+                       (unsigned long)n[MGLP_N_DRV_PACKETS],
                        (unsigned long)n[MGLP_N_TEX_UPLOADS],
                        (unsigned long)n[MGLP_N_RIX_UPLOADS],
                        (unsigned long)(n[MGLP_N_RIX_UPLOAD_BYTES] / 1024U),
