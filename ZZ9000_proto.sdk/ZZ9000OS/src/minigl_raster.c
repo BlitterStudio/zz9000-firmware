@@ -660,7 +660,7 @@ int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers)
         return 0;
     }
     if (g_buffers.color != NULL && g_buffers.color != buffers->color &&
-        !minigl_raster_finish())
+        !minigl_raster_drain())
         return 0;
     g_buffers = *buffers;
     if (g_rix_surface != g_buffers.color) {

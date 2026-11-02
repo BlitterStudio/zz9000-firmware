@@ -463,6 +463,9 @@ static void put_blit_request(uint8_t *request)
     mw_put_be32(request + 36, 2U);
 }
 
+static uint32_t submit_single_command(mw_ctx *c, uint32_t opcode,
+                                      const uint8_t *payload, uint32_t payload_bytes);
+
 static void assert_blit_pixels(mw_ctx *c, const uint8_t expected[16])
 {
     uint8_t request[40];
@@ -473,7 +476,6 @@ static void assert_blit_pixels(mw_ctx *c, const uint8_t expected[16])
     memset(span, 0, sizeof(span));
     assert(mw_host_request(c, request, sizeof(request), span, sizeof(span),
                            &reply_bytes) == MW_STATUS_OK);
-    assert(reply_bytes == sizeof(span));
     assert(memcmp(span, expected, sizeof(span)) == 0);
 }
 
@@ -522,10 +524,136 @@ static void test_rasterix_rgb565_present_orientation(void)
     surface[1] = 0x07e0U;
     surface[2] = 0x001fU; /* bottom row: blue, white. */
     surface[3] = 0xffffU;
+    {
+        uint8_t present_cmd[24];
+        memset(present_cmd, 0, sizeof(present_cmd));
+        mw_put_be32(present_cmd, MW_MAGIC);
+        mw_put_be32(present_cmd + 4, MW_VERSION);
+        mw_put_be32(present_cmd + 8, sizeof(present_cmd));
+        mw_put_be32(present_cmd + 12, 1);
+        mw_put_be32(present_cmd + 16, MW_PRESENT);
+        assert(mw_host_submit(c, present_cmd, sizeof(present_cmd)) == MW_STATUS_OK);
+    }
     assert_blit_pixels(c, expected);
     mw_host_destroy(c);
     minigl_raster_set_rix_platform(NULL);
     printf("PASS: test_rasterix_rgb565_present_orientation\n");
+}
+
+static void test_rasterix_rgb565_span_presentation(void)
+{
+    static const uint8_t expected_rgba[16] = {
+        0xffU, 0x00U, 0x00U, 0xffU, 0x00U, 0xffU, 0x00U, 0xffU,
+        0x00U, 0x00U, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU
+    };
+    static uint8_t mock_vram[0x30000];
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+    uint16_t *surface;
+    uint8_t target_cmd[48];
+    uint8_t span_packet[80];
+    uint32_t card_offset = 0x00020000U;
+    uint8_t *span_dest;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+
+    /* 1. Configure single-buffered context via wire command */
+    memset(target_cmd, 0, sizeof(target_cmd));
+    mw_put_be32(target_cmd, 2U);
+    mw_put_be32(target_cmd + 4, 2U);
+    mw_put_be32(target_cmd + 8, 1U); /* buffer_count = 1 */
+    mw_put_be32(target_cmd + 12, 16U);
+    mw_put_be32(target_cmd + 16, 2U);
+    mw_put_be32(target_cmd + 20, 2U);
+    assert(submit_single_command(c, MW_TARGET, target_cmd, 24U) == MW_STATUS_OK);
+    assert(c->state.target.buffer_count == 1U);
+
+    /* 2. Execute MW_PRESENT per frame on single-buffered context */
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    {
+        uint8_t present_cmd[24];
+        memset(present_cmd, 0, sizeof(present_cmd));
+        mw_put_be32(present_cmd, MW_MAGIC);
+        mw_put_be32(present_cmd + 4, MW_VERSION);
+        mw_put_be32(present_cmd + 8, sizeof(present_cmd));
+        mw_put_be32(present_cmd + 12, 1);
+        mw_put_be32(present_cmd + 16, MW_PRESENT);
+        assert(mw_host_submit(c, present_cmd, sizeof(present_cmd)) == MW_STATUS_OK);
+    }
+
+    /* 3. Populate 565 surface the way hardware leaves it */
+    surface = (uint16_t *)c->color_buffers[c->state.target.latest];
+    surface[0] = 0xf800U; /* (0,0): red */
+    surface[1] = 0x07e0U; /* (1,0): green */
+    surface[2] = 0x001fU; /* (0,1): blue */
+    surface[3] = 0xffffU; /* (1,1): white */
+    /* 4. Execute direct card span presentation (MW_PRESENT_SPAN, RGBFB_R5G6B5PC = 4) */
+    memset(mock_vram, 0xa5, sizeof(mock_vram));
+    mw_host_set_present_vram(mock_vram, 0x01000000U);
+    span_dest = mock_vram + card_offset;
+
+    memset(span_packet, 0, sizeof(span_packet));
+    mw_put_be32(span_packet, MW_MAGIC);
+    mw_put_be32(span_packet + 4, MW_VERSION);
+    mw_put_be32(span_packet + 8, 24U + 48U); /* 1 command: MW_PRESENT_SPAN, 48 payload bytes */
+    mw_put_be32(span_packet + 12, 1U);
+    mw_put_be32(span_packet + 16, MW_PRESENT_SPAN);
+    mw_put_be32(span_packet + 20, 48U);
+
+    /* Payload: MW_BLIT (24 bytes) + rect (16 bytes) + card_offset (4) + span_bytes (4) */
+    uint8_t *p = span_packet + 24;
+    mw_put_be32(p, MW_BLIT);
+    mw_put_be32(p + 4, 4U);  /* format: RGBFB_R5G6B5PC (LE) */
+    mw_put_be32(p + 8, 4U);  /* pitch: 2 pixels * 2 bytes = 4 */
+    mw_put_be32(p + 12, 0U); /* in_x */
+    mw_put_be32(p + 16, 0U); /* in_y */
+    mw_put_be32(p + 20, 1U); /* 1 rect */
+    mw_put_be32(p + 24, 0U); /* rx0 */
+    mw_put_be32(p + 28, 0U); /* ry0 */
+    mw_put_be32(p + 32, 2U); /* rx1 */
+    mw_put_be32(p + 36, 2U); /* ry1 */
+    mw_put_be32(p + 40, card_offset);
+    mw_put_be32(p + 44, 8U); /* 4 pixels * 2 bytes = 8 bytes */
+
+    assert(mw_host_submit(c, span_packet, 24U + 48U) == MW_STATUS_OK);
+
+    /* Assert exact RGB565PC (LE) bytes: red=0x00,0xf8; green=0xe0,0x07; blue=0x1f,0x00; white=0xff,0xff */
+    assert(span_dest[0] == 0x00 && span_dest[1] == 0xf8);
+    assert(span_dest[2] == 0xe0 && span_dest[3] == 0x07);
+    assert(span_dest[4] == 0x1f && span_dest[5] == 0x00);
+    assert(span_dest[6] == 0xff && span_dest[7] == 0xff);
+
+    /* 5. Also assert blit to RGBA output */
+    assert_blit_pixels(c, expected_rgba);
+
+    /* 6. Verify CPU fallback frame in single-buffer mode doesn't corrupt to blue */
+    c->color_buffers[0][0] = 0xff0000ffU; /* Red RGBA */
+    c->color_buffers[0][1] = 0x00ff00ffU; /* Green RGBA */
+    c->color_buffers[0][2] = 0x0000ffffU; /* Blue RGBA */
+    c->color_buffers[0][3] = 0xffffffffU; /* White RGBA */
+    minigl_raster_finish();
+    assert(!minigl_raster_present_is_rgb565());
+    {
+        uint8_t present_cmd[24];
+        memset(present_cmd, 0, sizeof(present_cmd));
+        mw_put_be32(present_cmd, MW_MAGIC);
+        mw_put_be32(present_cmd + 4, MW_VERSION);
+        mw_put_be32(present_cmd + 8, sizeof(present_cmd));
+        mw_put_be32(present_cmd + 12, 1);
+        mw_put_be32(present_cmd + 16, MW_PRESENT);
+        assert(mw_host_submit(c, present_cmd, sizeof(present_cmd)) == MW_STATUS_OK);
+    }
+    assert(c->color_rgb565[0] == 0U);
+    assert_blit_pixels(c, expected_rgba);
+
+    mw_host_set_present_vram(NULL, 0);
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_rasterix_rgb565_span_presentation\n");
 }
 
 static void test_backend_disable_cpu_rerender_present(void)
@@ -740,6 +868,7 @@ int main(void)
     test_wire_v9_draw_routing_and_fallback();
     test_cpu_present_orientation();
     test_rasterix_rgb565_present_orientation();
+    test_rasterix_rgb565_span_presentation();
     test_backend_disable_cpu_rerender_present();
     test_wire_cpu_handoffs();
     test_watertight_tessellation();

@@ -1784,9 +1784,12 @@ target_allocation_failed:
          * nothing.  Outside 565 mode nothing changes. */
         if (gpu_format) {
             c->color_rgb565[outgoing] = 1U;
-            c->color_rgb565[c->state.target.back] = 1U;
-            minigl_raster_target_discard();
+            if (c->state.target.buffer_count > 1U) {
+                c->color_rgb565[c->state.target.back] = 1U;
+                minigl_raster_target_discard();
+            }
         } else {
+            c->color_rgb565[outgoing] = 0U;
             c->color_rgb565[c->state.target.back] = 0U;
         }
         minigl_raster_frame_boundary();
