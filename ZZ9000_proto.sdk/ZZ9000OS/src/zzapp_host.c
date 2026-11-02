@@ -35,7 +35,12 @@ struct zzapp_coherent {
     volatile uint32_t fault;
     volatile uint64_t progress;
     volatile uint64_t tick_seen;
-    volatile uint64_t service_seen;
+    /* Bumped by every API entry; the 5 ms tick turns changes into the
+     * progress and API-entry stamps, so a GL call reads no clock. */
+    volatile uint32_t api_calls;
+    /* A tick skipped scheduler work because an API call was running; the
+     * call's epilogue catches up. */
+    volatile uint32_t service_due;
     volatile uint64_t api_entered;
     volatile uint64_t heartbeat_seen;
     volatile uint32_t heartbeat_value;
@@ -362,17 +367,44 @@ static void maybe_expire_fault(uint64_t now)
         publish_state(ZZAPP_ST_IDLE);
 }
 
+/* Core 1 only: the API call count and time the previous tick observed. */
+static uint32_t g_seen_api_calls;
+static uint64_t g_last_tick;
+
+static void begin_tick_observation(void)
+{
+    g_coh->in_api = 0u;
+    g_coh->service_due = 0u;
+    g_seen_api_calls = g_coh->api_calls;
+    g_last_tick = now_ticks();
+}
+
 static void service_tick(uint64_t now, int permit_reentry)
 {
+    uint32_t calls = g_coh->api_calls;
+
     g_coh->tick_seen = now;
+    if (calls != g_seen_api_calls) {
+        /* The app made API calls since the previous tick.  One that is
+         * still running started no earlier than that tick.  Declared
+         * waits (permit_reentry) set their own entry stamp. */
+        g_seen_api_calls = calls;
+        g_coh->progress = now;
+        life_progress(now);
+        if (g_coh->in_api != 0u && !permit_reentry)
+            g_coh->api_entered = g_last_tick;
+    }
+    g_last_tick = now;
     zzapp_services_poll();
     /*
      * A tick must not acquire MiniGL or SDK work below an app API call.
      * File waits and sleep explicitly pass permit_reentry between polls.
      */
     if (g_coh->in_api == 0u || permit_reentry) {
-        g_coh->service_seen = now;
+        g_coh->service_due = 0u;
         scheduler_core1_service_once();
+    } else {
+        g_coh->service_due = 1u;
     }
     if (g_coh->reset_request) {
         force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
@@ -577,36 +609,32 @@ __attribute__((naked)) static void zzapp_api_tick_on_host_stack(void)
 }
 #endif
 
+/*
+ * Every GL call of an ARM app passes through here (GLQuake makes tens of
+ * thousands per frame), so neither side reads the clock or touches the
+ * uncached lifecycle block; service_tick derives the stamps.
+ */
 void zzapp_api_enter(void)
 {
-    if (g_coh->in_api++ == 0u)
-        g_coh->api_entered = now_ticks();
+    g_coh->api_calls++;
+    g_coh->in_api++;
 }
 
 void zzapp_api_leave(void)
 {
     if (g_coh->in_api)
         g_coh->in_api--;
-    if (!g_coh->in_api) {
-        uint64_t now = now_ticks();
-
-        zzapp_note_progress();
-        /*
-         * Skip epilogue service work until one timer period elapsed. The
-         * private timer provides the same 5 ms bound without taxing GL calls.
-         */
-        if (ticks_to_us(now - g_coh->service_seen) >= ZZAPP_TICK_US) {
+    if (!g_coh->in_api && g_coh->service_due) {
 #ifdef ZZAPP_HOST_TEST
-            service_tick(now, 0);
+        service_tick(now_ticks(), 0);
 #else
-            /* Never nest: an active tick may own app_host_sp. */
-            if (!g_host_tick_active) {
-                g_host_tick_active = 1;
-                zzapp_api_tick_on_host_stack();
-                g_host_tick_active = 0;
-            }
-#endif
+        /* Never nest: an active tick may own app_host_sp. */
+        if (!g_host_tick_active) {
+            g_host_tick_active = 1;
+            zzapp_api_tick_on_host_stack();
+            g_host_tick_active = 0;
         }
+#endif
     }
 }
 
@@ -718,6 +746,7 @@ static void run_app(uint32_t argc)
     g_coh->heartbeat_seen = now_ticks();
     g_coh->tick_seen = now_ticks();
     zzapp_note_progress();
+    begin_tick_observation();
     coherent_barrier();
     g_coh->running = 1;
     publish_state(ZZAPP_ST_RUNNING);
@@ -995,7 +1024,7 @@ void zzapp_host_heap(void **base, uint32_t *bytes)
 void zzapp_test_set_xtime(uint64_t ticks) { g_test_ticks = ticks; }
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv)) { g_test_entry = fn; }
 void zzapp_host_tick_at(uint64_t now) { g_test_ticks = now; service_tick(now, 0); }
-void zzapp_test_mark_running(void) { g_coh->running = 1; g_state = ZZAPP_ST_RUNNING; zzapp_note_progress(); }
+void zzapp_test_mark_running(void) { g_coh->running = 1; g_state = ZZAPP_ST_RUNNING; zzapp_note_progress(); begin_tick_observation(); }
 uint32_t zzapp_test_service_calls(void) { return g_test_service_calls; }
 uint32_t zzapp_test_in_api(void) { return g_coh->in_api; }
 
