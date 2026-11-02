@@ -1834,9 +1834,20 @@ uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
     return status;
 }
 
+/* The in-process transport (ARM apps) submits here; mw_service_poll wraps
+ * mw_host_submit_report itself for 68k clients.  Without this the profiler
+ * saw no packets on the ARM path and never printed its [MGLP] line. */
 uint32_t mw_host_submit(mw_ctx *c, const uint8_t *packet, uint32_t bytes)
 {
-    return mw_host_submit_report(c, packet, bytes, NULL);
+    uint32_t status;
+
+    minigl_profile_packet_begin();
+    status = mw_host_submit_report(c, packet, bytes, NULL);
+    minigl_profile_packet_end(bytes, packet && bytes >= 16U ?
+                              ((uint32_t)packet[12] << 24) |
+                              ((uint32_t)packet[13] << 16) |
+                              ((uint32_t)packet[14] << 8) | packet[15] : 0U);
+    return status;
 }
 
 static inline uint8_t mw_widen5(uint32_t v) {
