@@ -148,6 +148,7 @@ typedef struct MiniGLRixRecordedOp {
     uint16_t texture1_wrap_t;
     uint8_t two_pass;
     uint8_t type;
+    uint8_t inherits_state;   /* same state as the previous op: emit none */
 } MiniGLRixRecordedOp;
 
 

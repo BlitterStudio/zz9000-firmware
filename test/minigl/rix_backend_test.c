@@ -613,6 +613,61 @@ static void test_overflow_splits_with_reload(void)
     assert(minigl_rix_backend_drain(&backend));
     assert(model.packet_count >= 2U);
 }
+
+/* GLQuake draws its console and HUD one glBegin per character.  Each op
+ * carries the full state plus the texture's page list, so a long run of
+ * them exhausts the command budget through state words alone; the backend
+ * must submit and continue, not refuse the next draw (hardware log:
+ * "draw rejected at record ... ops=111 tri=222"). */
+static void test_many_small_textured_draws_flush_instead_of_refusing(void)
+{
+    MiniGLRixBackend backend;
+    static struct model model;
+    static uint32_t source[256U * 256U];
+    unsigned draw;
+
+    init_backend(&backend, &model, MINIGL_RIX_TEXTURE_PAGES);
+    assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, source, 256U,
+                                              256U, ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 1U, GL_LINEAR, GL_LINEAR,
+                                  0x2901U, 0x2901U);
+    for (draw = 0U; draw < 400U; ++draw)
+        assert(submit_texture(&backend, 1U));
+    assert(minigl_rix_backend_drain(&backend));
+    assert(model.packet_count >= 2U);
+}
+
+/* Consecutive ops with identical state emit it once; a state change emits
+ * again.  Counted by feature-enable writes: one per emitted state plus the
+ * fence's. */
+static void test_repeated_state_is_emitted_once(void)
+{
+    MiniGLRixBackend backend;
+    static struct model model;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
+    uint32_t *command;
+    size_t word;
+    unsigned draw, enables = 0U;
+
+    init_backend(&backend, &model, TEXTURE_SLOTS);
+    for (draw = 0U; draw < 3U; ++draw) {
+        if (draw == 2U)
+            state.enabled_flags |= ZZ9K_MGL_STATE_DEPTH_TEST;
+        minigl_rix_backend_set_state(&backend, &state);
+        assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+        assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+        assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    }
+    assert(minigl_rix_backend_drain(&backend));
+    command = (uint32_t *)model.command[0];
+    for (word = 0U; word < COMMAND_WORDS; ++word)
+        if (command[word] == (RIX_OP_RENDER_CONFIG | RIX_REG_FEATURE_ENABLE))
+            ++enables;
+    assert(enables == 3U);
+}
 static void test_depth_mapping_and_ordering(void)
 {
     static struct model model;
@@ -1128,6 +1183,8 @@ int main(void)
     test_recorded_frame_replay();
     test_clear_preserves_depth_feature();
     test_overflow_splits_with_reload();
+    test_many_small_textured_draws_flush_instead_of_refusing();
+    test_repeated_state_is_emitted_once();
     test_depth_mapping_and_ordering();
     test_fallback_reasons_and_logging();
     test_timeout_diagnostics();

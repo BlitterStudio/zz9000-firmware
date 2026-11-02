@@ -1432,7 +1432,7 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
                 !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET | clear_flags, pixels))
                 return 0;
         } else if (!op->two_pass) {
-            if (!backend_emit_state(backend, writer, op, 0U, 1) ||
+            if ((!op->inherits_state && !backend_emit_state(backend, writer, op, 0U, 1)) ||
                 !backend_emit_triangles(writer, backend, op, 0U))
                 return 0;
         } else {
@@ -1506,15 +1506,73 @@ static int backend_flush(MiniGLRixBackend *backend, int continue_frame)
     return ok;
 }
 
+/* An op whose state, texture and sampling equal the previous single-pass op
+ * in the same command buffer emits no state: RasterIX keeps its registers
+ * between triangles.  GLQuake sorts world surfaces by texture and draws
+ * text one character per glBegin, so most ops repeat the previous state
+ * (33 words plus one per texture page each). */
+static int backend_op_inherits_state(const MiniGLRixBackend *backend, int two_pass,
+                                     const MiniGLRixTexture *texture0)
+{
+    const MiniGLRixRecordedOp *previous;
+
+    if (two_pass || backend->op_count == 0U)
+        return 0;
+    previous = &backend->ops[backend->op_count - 1U];
+    if (previous->type != MINIGL_RIX_OP_DRAW || previous->two_pass ||
+        memcmp(&previous->state, &backend->state, sizeof(backend->state)) != 0)
+        return 0;
+    if (texture0 == NULL)
+        return previous->texture_slot == UINT16_MAX;
+    return previous->texture_slot == (uint16_t)(texture0 - backend->textures) &&
+           previous->texture_incarnation == texture0->incarnation &&
+           previous->min_filter == texture0->min_filter &&
+           previous->mag_filter == texture0->mag_filter &&
+           previous->wrap_s == texture0->wrap_s &&
+           previous->wrap_t == texture0->wrap_t;
+}
+
 static int backend_record_draw(MiniGLRixBackend *backend)
 {
     MiniGLRixRecordedOp *op;
     MiniGLRixTexture *texture0 = NULL;
     MiniGLRixTexture *texture1 = NULL;
     size_t state_words;
+    int two_pass = (backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U;
+    int inherits;
 
     if (backend->op_count == MINIGL_RIX_MAX_OPS)
         return 0;
+    if ((backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_0) != 0U) {
+        texture0 = backend_texture(backend, backend->bound_texture);
+        if (texture0 == NULL || !texture_filter_supported(texture0) ||
+            (mip_filter(texture0->min_filter) && texture0->levels != texture0->required_levels))
+            return 0;
+    }
+    if (two_pass) {
+        texture1 = backend_texture(backend, backend->bound_texture1);
+        if (texture1 == NULL || !texture_filter_supported(texture1) ||
+            (mip_filter(texture1->min_filter) && texture1->levels != texture1->required_levels))
+            return 0;
+    }
+    inherits = backend_op_inherits_state(backend, two_pass, texture0);
+    state_words = (two_pass || inherits) ? 0U : 33U +
+        (texture0 != NULL ? texture0->page_count : 0U);
+    /* Every op carries its full state and texture page list, so many small
+     * draws (GLQuake's console and HUD: one glBegin per character) fill the
+     * command budget through state alone.  Submit what is recorded and start
+     * a new buffer rather than refusing the draw: a refusal sent the rest of
+     * the frame to the CPU rasterizer.  The new buffer starts without a
+     * previous op, so this op carries its state again. */
+    if (backend->command_words_estimate + state_words > MINIGL_RIX_COMMAND_WORD_BUDGET) {
+        if (backend->op_count == 0U || !backend_flush(backend, 1))
+            return 0;
+        inherits = 0;
+        state_words = two_pass ? 0U : 33U +
+            (texture0 != NULL ? texture0->page_count : 0U);
+        if (backend->command_words_estimate + state_words > MINIGL_RIX_COMMAND_WORD_BUDGET)
+            return 0;
+    }
     op = &backend->ops[backend->op_count];
     memset(op, 0, sizeof(*op));
     op->type = MINIGL_RIX_OP_DRAW;
@@ -1522,23 +1580,8 @@ static int backend_record_draw(MiniGLRixBackend *backend)
     op->texture_slot = UINT16_MAX;
     op->texture1_slot = UINT16_MAX;
     op->first_triangle = backend->triangle_count;
-    op->two_pass = (op->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U;
-    if ((op->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_0) != 0U) {
-        texture0 = backend_texture(backend, backend->bound_texture);
-        if (texture0 == NULL || !texture_filter_supported(texture0) ||
-            (mip_filter(texture0->min_filter) && texture0->levels != texture0->required_levels))
-            return 0;
-    }
-    if (op->two_pass) {
-        texture1 = backend_texture(backend, backend->bound_texture1);
-        if (texture1 == NULL || !texture_filter_supported(texture1) ||
-            (mip_filter(texture1->min_filter) && texture1->levels != texture1->required_levels))
-            return 0;
-    }
-    state_words = op->two_pass ? 0U : 33U +
-        (texture0 != NULL ? texture0->page_count : 0U);
-    if (backend->command_words_estimate + state_words > MINIGL_RIX_COMMAND_WORD_BUDGET)
-        return 0;
+    op->two_pass = (uint8_t)two_pass;
+    op->inherits_state = (uint8_t)inherits;
     if (texture0 != NULL) {
         op->texture_slot = (uint16_t)(texture0 - backend->textures);
         op->texture_incarnation = texture0->incarnation;
@@ -1762,8 +1805,9 @@ static void backend_recalculate_command_words(MiniGLRixBackend *backend)
             backend->command_words_estimate += 37U;
         } else {
             if (!op->two_pass) {
-                backend->command_words_estimate +=
-                    backend_draw_state_words(backend, op, 0U);
+                if (!op->inherits_state)
+                    backend->command_words_estimate +=
+                        backend_draw_state_words(backend, op, 0U);
                 backend->command_words_estimate += op->triangle_count *
                     (RIX_TRIANGLE_WORDS + 1U);
             } else {
