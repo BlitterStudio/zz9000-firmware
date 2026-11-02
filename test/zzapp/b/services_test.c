@@ -203,6 +203,20 @@ static void test_audio_busy(void)
 	if (zzapp_svc_audio_close() != ZZ_OK)
 		fail("audio close");
 }
+static void test_fault_publish(void)
+{
+	zzapp_services_set_fault(1U, 0x00100000U, 0x00200000U, 0x00300000U,
+	                         0x00400000U, 0x00500000U, 0x00000010U);
+	if (life_get(ZZAPP_LIFE_FAULT_OFF) != 1U ||
+	    life_get(ZZAPP_LIFE_PC_OFF) != 0x00100000U ||
+	    life_get(ZZAPP_LIFE_SP_OFF) != 0x00200000U ||
+	    life_get(ZZAPP_LIFE_LR_OFF) != 0x00300000U ||
+	    life_get(ZZAPP_LIFE_FAR_OFF) != 0x00400000U ||
+	    life_get(ZZAPP_LIFE_FSR_OFF) != 0x00500000U ||
+	    life_get(ZZAPP_LIFE_CPSR_OFF) != 0x00000010U)
+		fail("fault publish");
+}
+
 
 int main(void)
 {
@@ -211,6 +225,7 @@ int main(void)
 	test_chunked_read();
 	test_drop_on_full();
 	test_audio_busy();
+	test_fault_publish();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;

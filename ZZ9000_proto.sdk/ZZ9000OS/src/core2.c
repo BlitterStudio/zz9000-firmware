@@ -644,6 +644,22 @@ void arm_exception_handler_id_data_abort(void *callback) {
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
 	if (!zzapp_fault_wants_restart(DataAbortAddr, DataAbortAddr + 8u)) {
+		const uint32_t *stk = (const uint32_t *)(uintptr_t)sp;
+		uint32_t w[6] = {0};
+		uint32_t i;
+		int readable = 1;
+		for (i = 0U; i < 6U; ++i) {
+			if (readable && (uintptr_t)(stk + i) >= 0x00100000U &&
+			    (uintptr_t)(stk + i) < 0x40000000U &&
+			    ((uintptr_t)(stk + i) & 3U) == 0U)
+				w[i] = stk[i];
+			else
+				readable = 0;
+		}
+		printf("[app] fault stack: %08lx %08lx %08lx %08lx %08lx %08lx (sp=%08lx)\r\n",
+		       (unsigned long)w[0], (unsigned long)w[1], (unsigned long)w[2],
+		       (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5],
+		       (unsigned long)sp);
 		sdk_smp_lock_reset_malloc_if_owned();
 		sdk_smp_lock_reset_if_owned(&card_pool.lock);
 		zzapp_take_app_fault(ZZAPP_FAULT_DATA, DataAbortAddr, sp, lr, far, fsr, cpsr);
