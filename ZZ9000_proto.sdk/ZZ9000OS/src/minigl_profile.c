@@ -25,6 +25,8 @@
 
 volatile int g_minigl_profile_on;
 uint32_t g_minigl_profile_counts[MGLP_COUNTERS];
+uint64_t g_minigl_profile_geom_cycles[MGLP_GEOM_SUB_STAGES];
+uint64_t g_minigl_profile_geom_total_cycles;
 
 static struct {
     uint64_t ticks[MGLP_STAGES];
@@ -73,6 +75,8 @@ static void mglp_window_reset(void)
 {
     memset(g_mglp.ticks, 0, sizeof(g_mglp.ticks));
     memset(g_minigl_profile_counts, 0, sizeof(g_minigl_profile_counts));
+    memset(g_minigl_profile_geom_cycles, 0, sizeof(g_minigl_profile_geom_cycles));
+    g_minigl_profile_geom_total_cycles = 0U;
     g_mglp.packet_max = 0U;
     g_mglp.packets = 0U;
     g_mglp.bytes = 0U;
@@ -108,6 +112,16 @@ void minigl_profile_set_enabled(int enabled)
         g_mglp.depth = 0U;
         g_mglp.overflow = 0U;
         g_mglp.last_log = 0U;
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+        {
+            uint32_t pmcr;
+            asm volatile("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
+            pmcr |= 0x01U;  /* E = 1: enable performance counters */
+            pmcr &= ~0x08U; /* D = 0: cycle counter counts every clock cycle */
+            asm volatile("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
+            asm volatile("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U)); /* enable PMCCNTR */
+        }
+#endif
         mglp_window_reset();
         g_minigl_profile_on = 1;
     } else if (!enabled && g_minigl_profile_on) {
@@ -119,6 +133,16 @@ void minigl_profile_packet_begin(void)
 {
     if (!g_minigl_profile_on)
         return;
+#if defined(__arm__) && !defined(MINIGL_HOST_TEST)
+    {
+        uint32_t pmcr;
+        asm volatile("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
+        pmcr |= 0x01U;
+        pmcr &= ~0x08U;
+        asm volatile("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
+        asm volatile("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U));
+    }
+#endif
     minigl_profile_push_on(MGLP_PARSE);
     g_mglp.packet_busy_start = mglp_packet_busy();
 }
@@ -235,9 +259,28 @@ void minigl_profile_report(void)
         used += (size_t)written;
     /* Stage columns are milliseconds per ring packet (one GLQuake frame);
      * an op-only window prints window totals instead. */
-    for (stage = MGLP_PARSE; stage < MGLP_STAGES; ++stage)
+    for (stage = MGLP_PARSE; stage < MGLP_STAGES; ++stage) {
         used = mglp_append_ms(line, used, sizeof(line), names[stage],
                               g_mglp.ticks[stage], g_mglp.packets);
+        if (stage == MGLP_GEOM) {
+            static const char *const sub_names[MGLP_GEOM_SUB_STAGES] = {
+                " g_conv=", " g_clip=", " g_setup=", " g_rec="
+            };
+            unsigned int sub;
+            for (sub = 0U; sub < MGLP_GEOM_SUB_STAGES; ++sub) {
+                uint64_t sub_ticks = 0U;
+                if (g_minigl_profile_geom_total_cycles > 0U && g_mglp.ticks[MGLP_GEOM] > 0U) {
+                    sub_ticks = (uint64_t)((double)g_mglp.ticks[MGLP_GEOM] *
+                                (double)g_minigl_profile_geom_cycles[sub] /
+                                (double)g_minigl_profile_geom_total_cycles + 0.5);
+                } else if (g_minigl_profile_geom_cycles[sub] > 0U) {
+                    sub_ticks = g_minigl_profile_geom_cycles[sub] / 666U;
+                }
+                used = mglp_append_ms(line, used, sizeof(line), sub_names[sub],
+                                      sub_ticks, g_mglp.packets);
+            }
+        }
+    }
     used = mglp_append_ms(line, used, sizeof(line), names[MGLP_IDLE],
                           g_mglp.ticks[MGLP_IDLE], g_mglp.packets);
     used = mglp_append_ms(line, used, sizeof(line), " | max=",

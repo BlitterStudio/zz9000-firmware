@@ -163,6 +163,7 @@ static float g_polygon_depth_scale;
 static int g_mvp_neon_ok;
 #endif
 static const mw_state *g_mw_state = NULL;
+static uint32_t g_clip_start_cycle;
 
 void minigl_raster_set_wire_v9_state(const struct mw_state *state)
 {
@@ -1865,8 +1866,10 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
     unsigned unit;
     TextureSlope slopes[MAX_TMU];
 
-    if (area == 0.0f)
+    if (area == 0.0f) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
         return;
+    }
     if (area < 0.0f) {
         Vertex swap = b;
         b = c;
@@ -1881,7 +1884,10 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
     if (y0 < 0) y0 = 0;
     if (x1 >= g_buffers.width) x1 = (int)g_buffers.width - 1;
     if (y1 >= g_buffers.height) y1 = (int)g_buffers.height - 1;
-    if (x0 > x1 || y0 > y1) return;
+    if (x0 > x1 || y0 > y1) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+        return;
+    }
     if (g_rix_collecting != 0) {
         if (g_rix_collecting > 0) {
             MiniGLRixVertex va = { a.sx, a.sy, a.sz, a.inv_w, a.color,
@@ -1890,11 +1896,13 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
                                    b.u0, b.v0, b.q0, b.u1, b.v1, b.q1 };
             MiniGLRixVertex vc = { c.sx, c.sy, c.sz, c.inv_w, c.color,
                                    c.u0, c.v0, c.q0, c.u1, c.v1, c.q1 };
+            minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
             if (!minigl_rix_backend_add_triangle(&g_rix, &va, &vb, &vc))
                 g_rix_collecting = -1;
         }
         return;
     }
+    minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
     /* Per-pixel mip gradients exist only for the CPU loop below; a
      * triangle queued for RasterIX above never reads them. */
     units = gradient_units();
@@ -2393,18 +2401,24 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
     Vertex verts[CLIP_MAX_VERTICES];
     unsigned i;
 
-    if (count < 3U)
+    if (count < 3U) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
         return;
+    }
     area = 0.0f;
     for (i = 2U; i < count; ++i)
         area += edge(&clipped[0], &clipped[i - 1U], clipped[i].sx, clipped[i].sy);
-    if (g_state.min_triangle_area > 0.0f && fabsf(area) < 2.0f * g_state.min_triangle_area)
+    if (g_state.min_triangle_area > 0.0f && fabsf(area) < 2.0f * g_state.min_triangle_area) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
         return;
+    }
     front = (g_state.front_face ? g_state.front_face : GL_CCW) == GL_CCW ? area < 0.0f : area > 0.0f;
     if (g_state.enabled_flags & ZZ9K_MGL_STATE_CULL_FACE) {
         face = g_state.cull_face_mode ? g_state.cull_face_mode : GL_BACK;
-        if (face == GL_FRONT_AND_BACK || (front && face == GL_FRONT) || (!front && face == GL_BACK))
+        if (face == GL_FRONT_AND_BACK || (front && face == GL_FRONT) || (!front && face == GL_BACK)) {
+            minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
             return;
+        }
     }
     for (i = 0U; i < count; ++i) {
         verts[i] = clipped[i];
@@ -2422,29 +2436,38 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
             line_screen(&verts[i], &verts[(i + 1U) % count], polygon_offset);
         break;
     default:
-        for (i = 2U; i < count; ++i)
+        for (i = 2U; i < count; ++i) {
+            if (i > 2U)
+                g_clip_start_cycle = minigl_profile_cycles();
             triangle_fill(&verts[0], &verts[i - 1U], &verts[i], polygon_offset);
+        }
         break;
     }
 }
 
 static void primitive_triangle(const Vertex *first, const Vertex *second, const Vertex *third)
 {
+    uint32_t c_clip_start = minigl_profile_cycles();
     Vertex input[3];
     Vertex clipped[CLIP_MAX_VERTICES];
     unsigned count;
     unsigned index;
 
+    g_clip_start_cycle = c_clip_start;
     input[0] = *first;
     input[1] = *second;
     input[2] = *third;
     input[0].flat_color = input[1].flat_color = input[2].flat_color = third->color;
     count = clip_polygon(input, 3U, clipped);
-    if (!count)
+    if (!count) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, c_clip_start);
         return;
+    }
     for (index = 0U; index < count; ++index)
-        if (!project(&clipped[index]))
+        if (!project(&clipped[index])) {
+            minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, c_clip_start);
             return;
+        }
     render_clipped_polygon(clipped, count, third->color);
 }
 
@@ -3597,6 +3620,7 @@ static void sphere_map_coords(const float eye[4], const float normal_eye[3], flo
 
 static void v9_vert_convert(const float *v, Vertex *out)
 {
+    uint32_t c_conv = minigl_profile_cycles();
     float clip[4];
     transform_mvp(g_mvp, v[0], v[1], v[2], v[3], clip);
     out->x = clip[0];
@@ -3712,6 +3736,7 @@ static void v9_vert_convert(const float *v, Vertex *out)
     out->q1 = tc1[3];
     if (g_state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1)
         texture_matrix(1U, &out->u1, &out->v1, tc1[2], &out->q1);
+    minigl_profile_geom_add_cycles(MGLP_GEOM_CONV, c_conv);
 }
 
 static int v9_mask_edge(const uint32_t *mask, size_t i)
@@ -3989,6 +4014,7 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
                                 uint32_t count, uint32_t flags,
                                 const uint32_t *edge_mask)
 {
+    uint32_t c_geom_start = minigl_profile_cycles();
     unsigned style = 0;
 
     if (!ready() || count == 0 || !object_vertices)
@@ -4027,6 +4053,7 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
                 ++g_frame_draws_hardware;
                 minigl_profile_count(MGLP_N_DRAW_HW, 1U);
                 mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
+                minigl_profile_geom_add_total_cycles(c_geom_start);
                 return;
             }
             rix_note_reject(mode);
@@ -4056,4 +4083,5 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
         assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
     }
     minigl_profile_pop();
+    minigl_profile_geom_add_total_cycles(c_geom_start);
 }

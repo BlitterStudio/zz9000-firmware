@@ -1809,6 +1809,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
                                     const MiniGLRixVertex *b,
                                     const MiniGLRixVertex *c)
 {
+    uint32_t c_setup = minigl_profile_cycles();
     RixVertex vertices[3];
     RixVertex texture1_vertices[3];
     RixScissor scissor;
@@ -1883,6 +1884,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     }
     scissor.enabled = 1U;
     if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor)) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
         /* Zero area at RasterIX's 1/32-pixel precision, or no pixel inside
          * the scissor: the engine would draw nothing. Failing here aborted
          * the whole draw and, through MINIGL_RIX_CPU_FALLBACKS_PER_FRAME,
@@ -1895,9 +1897,12 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     if (passes == 2U &&
         !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
                             &texture1_vertices[1], &texture1_vertices[2], &scissor)) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
         backend->reject_stage = MINIGL_RIX_REJECT_TEXTURE1;
         return 0;
     }
+    minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
+    uint32_t c_rec = minigl_profile_cycles();
     op = &backend->ops[backend->op_count - 1U];
     triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
     if (op->two_pass && !op->batched)
@@ -1908,18 +1913,24 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         backend->command_words_estimate + triangle_words >
             MINIGL_RIX_COMMAND_WORD_BUDGET) {
         backend->reject_stage = MINIGL_RIX_REJECT_BUDGET;
-        if (backend->triangle_count == 0U && op->triangle_count == 0U)
+        if (backend->triangle_count == 0U && op->triangle_count == 0U) {
+            minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
             return 0;
-        if (!backend_flush(backend, 1) || !backend_record_draw(backend))
+        }
+        if (!backend_flush(backend, 1) || !backend_record_draw(backend)) {
+            minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
             return 0;
+        }
         op = &backend->ops[backend->op_count - 1U];
         triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
         if (op->two_pass && !op->batched)
             triangle_words += backend_two_pass_state_words(backend, op, 0U, 0) +
                               backend_two_pass_state_words(backend, op, 1U, 1);
         if (backend->command_words_estimate + triangle_words >
-            MINIGL_RIX_COMMAND_WORD_BUDGET)
+            MINIGL_RIX_COMMAND_WORD_BUDGET) {
+            minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
             return 0;
+        }
         backend->reject_stage = MINIGL_RIX_REJECT_NONE;
     }
     triangle = &backend->triangles[backend->triangle_count];
@@ -1930,6 +1941,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     ++op->triangle_count;
     backend->command_words_estimate += triangle_words;
     minigl_profile_count(MGLP_N_TRIANGLES, 1U);
+    minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
     return 1;
 }
 

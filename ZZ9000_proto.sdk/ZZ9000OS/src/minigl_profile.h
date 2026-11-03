@@ -65,12 +65,45 @@ typedef enum {
     MGLP_COUNTERS
 } MiniGLProfileCounter;
 
+typedef enum {
+    MGLP_GEOM_CONV = 0,   /* vertex convert and transform (v9_vert_convert) */
+    MGLP_GEOM_CLIP,       /* polygon clip, project, and screen setup */
+    MGLP_GEOM_SETUP,      /* RasterIX triangle setup (rix_setup_triangle) */
+    MGLP_GEOM_REC,        /* descriptor record / buffer copy */
+    MGLP_GEOM_SUB_STAGES
+} MiniGLProfileGeomSubStage;
+
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST) && \
     !defined(MINIGL_SERVICE_HOST_TEST)
 #define MINIGL_PROFILE_ACTIVE 1
 
 extern volatile int g_minigl_profile_on;
 extern uint32_t g_minigl_profile_counts[MGLP_COUNTERS];
+extern uint64_t g_minigl_profile_geom_cycles[MGLP_GEOM_SUB_STAGES];
+extern uint64_t g_minigl_profile_geom_total_cycles;
+
+static inline uint32_t minigl_profile_cycles(void)
+{
+    uint32_t c;
+    asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(c));
+    return c;
+}
+
+static inline void minigl_profile_geom_add_cycles(MiniGLProfileGeomSubStage sub, uint32_t start_cycles)
+{
+    if (g_minigl_profile_on) {
+        uint32_t delta = minigl_profile_cycles() - start_cycles;
+        g_minigl_profile_geom_cycles[sub] += (uint64_t)delta;
+    }
+}
+
+static inline void minigl_profile_geom_add_total_cycles(uint32_t start_cycles)
+{
+    if (g_minigl_profile_on) {
+        uint32_t delta = minigl_profile_cycles() - start_cycles;
+        g_minigl_profile_geom_total_cycles += (uint64_t)delta;
+    }
+}
 
 void minigl_profile_push_on(MiniGLProfileStage stage);
 void minigl_profile_pop_on(void);
@@ -118,6 +151,16 @@ static inline void minigl_profile_count(MiniGLProfileCounter counter,
     (void)amount;
 }
 static inline int minigl_profile_enabled(void) { return 0; }
+static inline uint32_t minigl_profile_cycles(void) { return 0U; }
+static inline void minigl_profile_geom_add_cycles(MiniGLProfileGeomSubStage sub, uint32_t start_cycles)
+{
+    (void)sub;
+    (void)start_cycles;
+}
+static inline void minigl_profile_geom_add_total_cycles(uint32_t start_cycles)
+{
+    (void)start_cycles;
+}
 static inline void minigl_profile_set_enabled(int enabled) { (void)enabled; }
 static inline void minigl_profile_packet_begin(void) { }
 static inline void minigl_profile_packet_end(uint32_t bytes, uint32_t commands)
