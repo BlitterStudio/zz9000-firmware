@@ -21,7 +21,11 @@
 #include "zzm_runtime.h"
 #endif
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
 #include "xil_cache.h"
@@ -2249,63 +2253,460 @@ static uint32_t mw_parse_span(const uint8_t *p, uint32_t bytes,
     return MW_STATUS_OK;
 }
 
-/* One unscaled row in the formats GL screens use, without the per-pixel
- * format dispatch (68k GLQuake spent ~21 ms per frame in this present).  The
- * results equal mw_present_source_pixel + mw_encode_pixel bit for bit.
- * Returns 0 for any other format, which the per-pixel loop then handles. */
-static int mw_blit_row_fast(uint8_t *dst, const uint32_t *src_buf, int source_rgb565,
-                            size_t first, uint32_t count, uint32_t format)
+/* Present row converters: one unscaled row per call, one function per
+ * (source layout, screen format) pair, resolved once per blit instead of
+ * a per-pixel format dispatch (68k GLQuake spent ~21 ms per frame in that
+ * per-pixel encoder).  Every converter produces exactly the bytes
+ * mw_present_source_pixel + mw_encode_pixel -- or mw_clut_index for
+ * RGBFB_CLUT -- produce per pixel, byte for byte. */
+typedef void (*mw_blit_row_fn)(const mw_ctx *c, uint8_t *dst,
+                               const uint32_t *src_buf, size_t first,
+                               uint32_t count);
+
+/* Little-endian 16/32-bit stores without spelling a cast the optimizer
+ * would have to prove safe; both lower to a single str/strh. */
+static inline void mw_store_u16(uint8_t *dst, uint32_t w)
+{
+    uint16_t v = (uint16_t)w;
+    memcpy(dst, &v, sizeof(v));
+}
+
+static inline void mw_store_u32(uint8_t *dst, uint32_t w)
+{
+    memcpy(dst, &w, sizeof(w));
+}
+
+#if defined(__ARM_NEON)
+/* Widen eight packed 565 pixels to interleaved 8-bit lanes.  alpha_first
+ * picks A8R8G8B8 lane order over R8G8B8A8; the byte results equal the
+ * scalar mw_widen5/mw_widen6 widening exactly. */
+static uint8x8x4_t mw_565_to_lanes(uint16x8_t v, int alpha_first)
+{
+    uint16x8_t r5 = vshrq_n_u16(v, 11);
+    uint16x8_t g6 = vandq_u16(vshrq_n_u16(v, 5), vdupq_n_u16(63U));
+    uint16x8_t b5 = vandq_u16(v, vdupq_n_u16(31U));
+    uint16x8_t r8 = vorrq_u16(vshlq_n_u16(r5, 3), vshrq_n_u16(r5, 2));
+    uint16x8_t g8 = vorrq_u16(vshlq_n_u16(g6, 2), vshrq_n_u16(g6, 4));
+    uint16x8_t b8 = vorrq_u16(vshlq_n_u16(b5, 3), vshrq_n_u16(b5, 2));
+    uint8x8x4_t out;
+
+    if (alpha_first) {
+        out.val[0] = vdup_n_u8(0xffU);
+        out.val[1] = vmovn_u16(r8);
+        out.val[2] = vmovn_u16(g8);
+        out.val[3] = vmovn_u16(b8);
+    } else {
+        out.val[0] = vmovn_u16(r8);
+        out.val[1] = vmovn_u16(g8);
+        out.val[2] = vmovn_u16(b8);
+        out.val[3] = vdup_n_u8(0xffU);
+    }
+    return out;
+}
+
+/* Convert whole 8-pixel groups and return the first index left to the
+ * scalar tail.  swap_rb exchanges the red and blue byte lanes; with the
+ * alpha lane first that is lanes 1 and 3, otherwise 0 and 2. */
+static uint32_t mw_neon_565_to_32(const uint16_t *src, uint8_t *dst,
+                                  uint32_t count, int alpha_first, int swap_rb)
+{
+    uint32_t i = 0U;
+
+    while (i + 8U <= count) {
+        uint8x8x4_t out = mw_565_to_lanes(vld1q_u16(src + i), alpha_first);
+
+        if (swap_rb) {
+            uint8x8_t t = alpha_first ? out.val[1] : out.val[0];
+
+            if (alpha_first) {
+                out.val[1] = out.val[3];
+                out.val[3] = t;
+            } else {
+                out.val[0] = out.val[2];
+                out.val[2] = t;
+            }
+        }
+        vst4_u8(dst + i * 4U, out);
+        i += 8U;
+    }
+    return i;
+}
+
+static uint32_t mw_neon_565_to_24(const uint16_t *src, uint8_t *dst,
+                                  uint32_t count, int swap_rb)
+{
+    uint32_t i = 0U;
+
+    while (i + 8U <= count) {
+        uint8x8x4_t lanes = mw_565_to_lanes(vld1q_u16(src + i), 0);
+        uint8x8x3_t out;
+
+        out.val[0] = swap_rb ? lanes.val[2] : lanes.val[0];
+        out.val[1] = lanes.val[1];
+        out.val[2] = swap_rb ? lanes.val[0] : lanes.val[2];
+        vst3_u8(dst + i * 3U, out);
+        i += 8U;
+    }
+    return i;
+}
+
+static uint32_t mw_neon_swap16(const uint16_t *src, uint8_t *dst, uint32_t count)
+{
+    uint32_t i = 0U;
+
+    while (i + 8U <= count) {
+        uint8x16_t bytes = vld1q_u8((const uint8_t *)(const void *)(src + i));
+
+        vst1q_u8(dst + i * 2U, vrev16q_u8(bytes));
+        i += 8U;
+    }
+    return i;
+}
+#else
+static uint32_t mw_neon_565_to_32(const uint16_t *src, uint8_t *dst,
+                                  uint32_t count, int alpha_first, int swap_rb)
+{
+    (void)src; (void)dst; (void)count; (void)alpha_first; (void)swap_rb;
+    return 0U;
+}
+
+static uint32_t mw_neon_565_to_24(const uint16_t *src, uint8_t *dst,
+                                  uint32_t count, int swap_rb)
+{
+    (void)src; (void)dst; (void)count; (void)swap_rb;
+    return 0U;
+}
+
+static uint32_t mw_neon_swap16(const uint16_t *src, uint8_t *dst, uint32_t count)
+{
+    (void)src; (void)dst; (void)count;
+    return 0U;
+}
+#endif
+
+static void mw_row_565_to_rgb565pc(const mw_ctx *c, uint8_t *dst,
+                                   const uint32_t *src_buf, size_t first,
+                                   uint32_t count)
+{
+    (void)c;
+    memcpy(dst, (const uint16_t *)src_buf + first, (size_t)count * 2U);
+}
+
+static void mw_row_565_to_rgb565be(const mw_ctx *c, uint8_t *dst,
+                                   const uint32_t *src_buf, size_t first,
+                                   uint32_t count)
+{
+    const uint16_t *src = (const uint16_t *)src_buf + first;
+    uint32_t i = mw_neon_swap16(src, dst, count);
+
+    (void)c;
+    for (; i < count; ++i) {
+        uint16_t v = src[i];
+        dst[i * 2U] = (uint8_t)(v >> 8);
+        dst[i * 2U + 1U] = (uint8_t)v;
+    }
+}
+
+static void mw_row_565_to_rgb555pc(const mw_ctx *c, uint8_t *dst,
+                                   const uint32_t *src_buf, size_t first,
+                                   uint32_t count)
+{
+    const uint16_t *src = (const uint16_t *)src_buf + first;
+    uint32_t i;
+
+    (void)c;
+    for (i = 0U; i < count; ++i) {
+        uint32_t v = src[i];
+
+        mw_store_u16(dst + i * 2U, ((v >> 11) << 10) |
+                                    ((((v >> 5) & 63U) >> 1) << 5) | (v & 31U));
+    }
+}
+
+static void mw_row_565_to_rgb555be(const mw_ctx *c, uint8_t *dst,
+                                   const uint32_t *src_buf, size_t first,
+                                   uint32_t count)
+{
+    const uint16_t *src = (const uint16_t *)src_buf + first;
+    uint32_t i;
+
+    (void)c;
+    for (i = 0U; i < count; ++i) {
+        uint32_t v = src[i];
+        uint32_t w = ((v >> 11) << 10) |
+                     ((((v >> 5) & 63U) >> 1) << 5) | (v & 31U);
+
+        dst[i * 2U] = (uint8_t)(w >> 8);
+        dst[i * 2U + 1U] = (uint8_t)w;
+    }
+}
+
+static void mw_row_565_to_bgr565pc(const mw_ctx *c, uint8_t *dst,
+                                   const uint32_t *src_buf, size_t first,
+                                   uint32_t count)
+{
+    const uint16_t *src = (const uint16_t *)src_buf + first;
+    uint32_t i;
+
+    (void)c;
+    for (i = 0U; i < count; ++i) {
+        uint32_t v = src[i];
+
+        mw_store_u16(dst + i * 2U, ((v & 31U) << 11) |
+                                    (((v >> 5) & 63U) << 5) | (v >> 11));
+    }
+}
+
+static void mw_row_565_to_bgr555pc(const mw_ctx *c, uint8_t *dst,
+                                   const uint32_t *src_buf, size_t first,
+                                   uint32_t count)
+{
+    const uint16_t *src = (const uint16_t *)src_buf + first;
+    uint32_t i;
+
+    (void)c;
+    for (i = 0U; i < count; ++i) {
+        uint32_t v = src[i];
+
+        mw_store_u16(dst + i * 2U, ((v & 31U) << 10) |
+                                    ((((v >> 5) & 63U) >> 1) << 5) | (v >> 11));
+    }
+}
+
+#define MW_ROW_565_TO_32(FN, ALPHA_FIRST, SWAP_RB)                          \
+static void FN(const mw_ctx *c, uint8_t *dst, const uint32_t *src_buf,      \
+               size_t first, uint32_t count)                               \
+{                                                                           \
+    const uint16_t *src = (const uint16_t *)src_buf + first;                \
+    uint32_t i = mw_neon_565_to_32(src, dst, count, ALPHA_FIRST, SWAP_RB);  \
+                                                                            \
+    (void)c;                                                                \
+    for (; i < count; ++i) {                                                \
+        uint32_t v = src[i];                                                \
+        uint32_t r = mw_widen5(v >> 11);                                    \
+        uint32_t g = mw_widen6((v >> 5) & 63U);                             \
+        uint32_t b = mw_widen5(v & 31U);                                    \
+                                                                            \
+        if (ALPHA_FIRST)                                                    \
+            mw_store_u32(dst + i * 4U, SWAP_RB ?                            \
+                ((r << 24) | (g << 16) | (b << 8) | 0xffU) :                \
+                ((b << 24) | (g << 16) | (r << 8) | 0xffU));                \
+        else                                                                \
+            mw_store_u32(dst + i * 4U, SWAP_RB ?                            \
+                (0xff000000U | (r << 16) | (g << 8) | b) :                  \
+                (0xff000000U | (b << 16) | (g << 8) | r));                  \
+    }                                                                       \
+}
+
+MW_ROW_565_TO_32(mw_row_565_to_argb8888, 1, 0)   /* 6: RGBFB_A8R8G8B8 */
+MW_ROW_565_TO_32(mw_row_565_to_abgr8888, 1, 1)   /* 7: RGBFB_A8B8G8R8 */
+MW_ROW_565_TO_32(mw_row_565_to_rgba8888, 0, 0)   /* 8: RGBFB_R8G8B8A8 */
+MW_ROW_565_TO_32(mw_row_565_to_bgra8888, 0, 1)   /* 9: RGBFB_B8G8R8A8 */
+#undef MW_ROW_565_TO_32
+
+static void mw_row_565_to_rgb888(const mw_ctx *c, uint8_t *dst,
+                                 const uint32_t *src_buf, size_t first,
+                                 uint32_t count)
+{
+    const uint16_t *src = (const uint16_t *)src_buf + first;
+    uint32_t i = mw_neon_565_to_24(src, dst, count, 0);
+
+    (void)c;
+    for (; i < count; ++i) {
+        uint16_t v = src[i];
+
+        dst[i * 3U] = mw_widen5(v >> 11);
+        dst[i * 3U + 1U] = mw_widen6((v >> 5) & 63U);
+        dst[i * 3U + 2U] = mw_widen5(v & 31U);
+    }
+}
+
+static void mw_row_565_to_bgr888(const mw_ctx *c, uint8_t *dst,
+                                 const uint32_t *src_buf, size_t first,
+                                 uint32_t count)
+{
+    const uint16_t *src = (const uint16_t *)src_buf + first;
+    uint32_t i = mw_neon_565_to_24(src, dst, count, 1);
+
+    (void)c;
+    for (; i < count; ++i) {
+        uint16_t v = src[i];
+
+        dst[i * 3U] = mw_widen5(v & 31U);
+        dst[i * 3U + 1U] = mw_widen6((v >> 5) & 63U);
+        dst[i * 3U + 2U] = mw_widen5(v >> 11);
+    }
+}
+
+static void mw_row_565_to_clut8(const mw_ctx *c, uint8_t *dst,
+                                const uint32_t *src_buf, size_t first,
+                                uint32_t count)
+{
+    const uint16_t *src = (const uint16_t *)src_buf + first;
+    uint32_t i;
+
+    for (i = 0U; i < count; ++i) {
+        uint32_t v = src[i];
+        uint32_t r = mw_widen5(v >> 11);
+        uint32_t g = mw_widen6((v >> 5) & 63U);
+        uint32_t b = mw_widen5(v & 31U);
+
+        dst[i] = c->presented_clut[((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3)];
+    }
+}
+
+static void mw_row_rgba_to_rgb888(const mw_ctx *c, uint8_t *dst,
+                                  const uint32_t *src_buf, size_t first,
+                                  uint32_t count)
 {
     uint32_t i;
 
-    if (source_rgb565) {
-        const uint16_t *src = (const uint16_t *)src_buf + first;
-
-        switch (format) {
-        case 4: /* RGBFB_R5G6B5PC: the RasterIX layout itself */
-            memcpy(dst, src, (size_t)count * 2U);
-            return 1;
-        case 10: /* RGBFB_R5G6B5 (BE) */
-            for (i = 0U; i < count; ++i) {
-                dst[i * 2U] = (uint8_t)(src[i] >> 8);
-                dst[i * 2U + 1U] = (uint8_t)src[i];
-            }
-            return 1;
-        case 6: case 7: case 8: case 9:
-            for (i = 0U; i < count; ++i) {
-                uint16_t v = src[i];
-                uint8_t r = mw_widen5(v >> 11);
-                uint8_t g = mw_widen6((v >> 5) & 63U);
-                uint8_t b = mw_widen5(v & 31U);
-                uint8_t *d = dst + i * 4U;
-
-                if (format == 6) { d[0] = 0xff; d[1] = r; d[2] = g; d[3] = b; }
-                else if (format == 7) { d[0] = 0xff; d[1] = b; d[2] = g; d[3] = r; }
-                else if (format == 8) { d[0] = r; d[1] = g; d[2] = b; d[3] = 0xff; }
-                else { d[0] = b; d[1] = g; d[2] = r; d[3] = 0xff; }
-            }
-            return 1;
-        default:
-            return 0;
-        }
-    }
-    if (format < 6U || format > 9U)
-        return 0;
+    (void)c;
     for (i = 0U; i < count; ++i) {
         uint32_t pix = src_buf[first + i];
-        uint8_t r = (uint8_t)(pix >> 24), g = (uint8_t)(pix >> 16), b = (uint8_t)(pix >> 8);
-        uint8_t *d = dst + i * 4U;
 
-        if (format == 6) { d[0] = 0xff; d[1] = r; d[2] = g; d[3] = b; }
-        else if (format == 7) { d[0] = 0xff; d[1] = b; d[2] = g; d[3] = r; }
-        else if (format == 8) { d[0] = r; d[1] = g; d[2] = b; d[3] = 0xff; }
-        else { d[0] = b; d[1] = g; d[2] = r; d[3] = 0xff; }
+        dst[i * 3U] = (uint8_t)(pix >> 24);
+        dst[i * 3U + 1U] = (uint8_t)(pix >> 16);
+        dst[i * 3U + 2U] = (uint8_t)(pix >> 8);
     }
-    return 1;
+}
+
+static void mw_row_rgba_to_bgr888(const mw_ctx *c, uint8_t *dst,
+                                  const uint32_t *src_buf, size_t first,
+                                  uint32_t count)
+{
+    uint32_t i;
+
+    (void)c;
+    for (i = 0U; i < count; ++i) {
+        uint32_t pix = src_buf[first + i];
+
+        dst[i * 3U] = (uint8_t)(pix >> 8);
+        dst[i * 3U + 1U] = (uint8_t)(pix >> 16);
+        dst[i * 3U + 2U] = (uint8_t)(pix >> 24);
+    }
+}
+
+/* 16-bit big-endian targets from an RGBA source. */
+#define MW_ROW_RGBA_TO_16(FN, PACK, BIG_ENDIAN)                             \
+static void FN(const mw_ctx *c, uint8_t *dst, const uint32_t *src_buf,      \
+               size_t first, uint32_t count)                                \
+{                                                                           \
+    uint32_t i;                                                             \
+                                                                            \
+    (void)c;                                                                \
+    for (i = 0U; i < count; ++i) {                                          \
+        uint32_t pix = src_buf[first + i];                                  \
+        uint32_t r = pix >> 24;                                             \
+        uint32_t g = (pix >> 16) & 0xffU;                                             \
+        uint32_t b = (pix >> 8) & 0xffU;                                              \
+        uint32_t w = PACK;                                                  \
+                                                                            \
+        if (BIG_ENDIAN) {                                                   \
+            dst[i * 2U] = (uint8_t)(w >> 8);                                \
+            dst[i * 2U + 1U] = (uint8_t)w;                                  \
+        } else {                                                            \
+            mw_store_u16(dst + i * 2U, w);                                  \
+        }                                                                   \
+    }                                                                       \
+}
+
+MW_ROW_RGBA_TO_16(mw_row_rgba_to_rgb565pc, ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3), 0)
+MW_ROW_RGBA_TO_16(mw_row_rgba_to_rgb555pc, ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3), 0)
+MW_ROW_RGBA_TO_16(mw_row_rgba_to_bgr565pc, ((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3), 0)
+MW_ROW_RGBA_TO_16(mw_row_rgba_to_bgr555pc, ((b >> 3) << 10) | ((g >> 3) << 5) | (r >> 3), 0)
+MW_ROW_RGBA_TO_16(mw_row_rgba_to_rgb565be, ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3), 1)
+MW_ROW_RGBA_TO_16(mw_row_rgba_to_rgb555be, ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3), 1)
+#undef MW_ROW_RGBA_TO_16
+
+#define MW_ROW_RGBA_TO_32(FN, ALPHA_FIRST, SWAP_RB)                         \
+static void FN(const mw_ctx *c, uint8_t *dst, const uint32_t *src_buf,      \
+               size_t first, uint32_t count)                                \
+{                                                                           \
+    uint32_t i;                                                             \
+                                                                            \
+    (void)c;                                                                \
+    for (i = 0U; i < count; ++i) {                                          \
+        uint32_t pix = src_buf[first + i];                                  \
+        uint32_t r = pix >> 24;                                             \
+        uint32_t g = (pix >> 16) & 0xffU;                                             \
+        uint32_t b = (pix >> 8) & 0xffU;                                              \
+                                                                            \
+        if (ALPHA_FIRST)                                                    \
+            mw_store_u32(dst + i * 4U, SWAP_RB ?                            \
+                ((r << 24) | (g << 16) | (b << 8) | 0xffU) :                \
+                ((b << 24) | (g << 16) | (r << 8) | 0xffU));                \
+        else                                                                \
+            mw_store_u32(dst + i * 4U, SWAP_RB ?                            \
+                (0xff000000U | (r << 16) | (g << 8) | b) :                  \
+                (0xff000000U | (b << 16) | (g << 8) | r));                  \
+    }                                                                       \
+}
+
+MW_ROW_RGBA_TO_32(mw_row_rgba_to_argb8888, 1, 0)  /* 6: RGBFB_A8R8G8B8 */
+MW_ROW_RGBA_TO_32(mw_row_rgba_to_abgr8888, 1, 1)  /* 7: RGBFB_A8B8G8R8 */
+MW_ROW_RGBA_TO_32(mw_row_rgba_to_rgba8888, 0, 0)  /* 8: RGBFB_R8G8B8A8 */
+MW_ROW_RGBA_TO_32(mw_row_rgba_to_bgra8888, 0, 1)  /* 9: RGBFB_B8G8R8A8 */
+#undef MW_ROW_RGBA_TO_32
+
+static void mw_row_rgba_to_clut8(const mw_ctx *c, uint8_t *dst,
+                                 const uint32_t *src_buf, size_t first,
+                                 uint32_t count)
+{
+    uint32_t i;
+
+    for (i = 0U; i < count; ++i) {
+        uint32_t pix = src_buf[first + i];
+
+        dst[i] = c->presented_clut[(((pix >> 24) >> 3) << 10) |
+                                   ((((pix >> 16) & 0xffU) >> 3) << 5) |
+                                   (((pix >> 8) & 0xffU) >> 3)];
+    }
+}
+
+static mw_blit_row_fn mw_blit_row_for(int source_rgb565, uint32_t format)
+{
+    static const mw_blit_row_fn rows565[14] = {
+        NULL,
+        mw_row_565_to_clut8,
+        mw_row_565_to_rgb888,
+        mw_row_565_to_bgr888,
+        mw_row_565_to_rgb565pc,
+        mw_row_565_to_rgb555pc,
+        mw_row_565_to_argb8888,
+        mw_row_565_to_abgr8888,
+        mw_row_565_to_rgba8888,
+        mw_row_565_to_bgra8888,
+        mw_row_565_to_rgb565be,
+        mw_row_565_to_rgb555be,
+        mw_row_565_to_bgr565pc,
+        mw_row_565_to_bgr555pc
+    };
+    static const mw_blit_row_fn rows_rgba[14] = {
+        NULL,
+        mw_row_rgba_to_clut8,
+        mw_row_rgba_to_rgb888,
+        mw_row_rgba_to_bgr888,
+        mw_row_rgba_to_rgb565pc,
+        mw_row_rgba_to_rgb555pc,
+        mw_row_rgba_to_argb8888,
+        mw_row_rgba_to_abgr8888,
+        mw_row_rgba_to_rgba8888,
+        mw_row_rgba_to_bgra8888,
+        mw_row_rgba_to_rgb565be,
+        mw_row_rgba_to_rgb555be,
+        mw_row_rgba_to_bgr565pc,
+        mw_row_rgba_to_bgr555pc
+    };
+
+    if (format == 0U || format > 13U)
+        return NULL;
+    return (source_rgb565 ? rows565 : rows_rgba)[format];
 }
 
 static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
-                       uint8_t *span, uint32_t span_bytes)
+                       uint8_t *span, uint32_t span_bytes,
+                       size_t *written_offset, size_t *written_bytes)
 {
     mw_span_request r;
     uint32_t status = mw_parse_span(p, bytes, span, span_bytes, &r);
@@ -2344,6 +2745,8 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
         mw_letterbox_rect(c->width, c->height, frame_w, frame_h, &bx0, &by0, &bx1, &by1);
     }
 
+    size_t clean_offset = 0U, clean_bytes = 0U;
+
     if (r.count > 0) {
         uint32_t top = 0x7fffffffU, bottom = 0;
         uint32_t i;
@@ -2355,69 +2758,114 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
         int64_t first = (int64_t)top > (int64_t)r.frame_y ? (int64_t)top : (int64_t)r.frame_y;
         int64_t last = (int64_t)bottom < (int64_t)r.frame_y + frame_h ? (int64_t)bottom : (int64_t)r.frame_y + frame_h;
 
-        for (int64_t at = first; at < last; ++at) {
-            uint32_t row = (uint32_t)at;
-            int64_t fy = at - r.frame_y;
-            uint8_t *dst_row = span + (size_t)row * r.pitch;
+        if (last > first) {
+            mw_blit_row_fn row_fn = scaled ? NULL :
+                mw_blit_row_for(source_rgb565, r.format);
+            int64_t frame_right = (int64_t)frame_w + r.frame_x;
+            int64_t frame_left = r.frame_x < 0 ? 0 : r.frame_x;
 
-            for (i = 0; i < r.count; ++i) {
-                if (row < r.rects[i * 4 + 1] || row >= r.rects[i * 4 + 3])
-                    continue;
+            if (row_fn != NULL && r.count == 1) {
+                /* One clip rectangle: its column clip is the same for every
+                 * row, so hoist it out of the row loop and let the row
+                 * converter run without any per-pixel bounds work. */
+                int64_t lo = (int64_t)r.rects[0] > frame_left ? (int64_t)r.rects[0] : frame_left;
+                int64_t hi = (int64_t)r.rects[2] < frame_right ? (int64_t)r.rects[2] : frame_right;
 
-                int64_t lo = (int64_t)r.rects[i * 4] > (int64_t)(r.frame_x < 0 ? 0 : r.frame_x)
-                           ? (int64_t)r.rects[i * 4] : (int64_t)(r.frame_x < 0 ? 0 : r.frame_x);
-                int64_t hi = (int64_t)r.rects[i * 4 + 2] < (int64_t)frame_w + r.frame_x
-                           ? (int64_t)r.rects[i * 4 + 2] : (int64_t)frame_w + r.frame_x;
+                if (hi > lo) {
+                    size_t dst_x = (size_t)lo * r.bytes_per_pixel;
+                    size_t src_x = (size_t)(lo - r.frame_x);
+                    uint32_t count = (uint32_t)(hi - lo);
+                    int64_t at;
 
-                if (!scaled && hi > lo &&
-                    mw_blit_row_fast(dst_row + (size_t)lo * r.bytes_per_pixel,
-                                     src_buf, source_rgb565,
-                                     (size_t)fy * c->width + (size_t)(lo - r.frame_x),
-                                     (uint32_t)(hi - lo), r.format))
-                    continue;
-                for (int64_t col = lo; col < hi; ++col) {
-                    int64_t fx = col - r.frame_x;
-                    uint32_t pix;
+                    for (at = first; at < last; ++at)
+                        row_fn(c, span + (size_t)at * r.pitch + dst_x, src_buf,
+                               (size_t)(at - r.frame_y) * c->width + src_x, count);
+                }
+            } else if (row_fn != NULL) {
+                for (int64_t at = first; at < last; ++at) {
+                    uint32_t row = (uint32_t)at;
+                    int64_t fy = at - r.frame_y;
+                    uint8_t *dst_row = span + (size_t)row * r.pitch;
 
-                    if (scaled) {
-                        if (fx >= bx0 && fx < bx1 && fy >= by0 && fy < by1) {
-                            int64_t sx = (fx - bx0) * (int64_t)c->width / (bx1 - bx0);
-                            int64_t sy = (fy - by0) * (int64_t)c->height / (by1 - by0);
-                            if (sx >= 0 && sx < (int64_t)c->width && sy >= 0 && sy < (int64_t)c->height) {
-                                if (source_bottom_up)
-                                    sy = (int64_t)c->height - 1 - sy;
-                                pix = mw_present_source_pixel(src_buf, source_rgb565,
-                                                              (size_t)sy * c->width + sx);
+                    for (i = 0; i < r.count; ++i) {
+                        int64_t lo, hi;
+
+                        if (row < r.rects[i * 4 + 1] || row >= r.rects[i * 4 + 3])
+                            continue;
+                        lo = (int64_t)r.rects[i * 4] > frame_left ? (int64_t)r.rects[i * 4] : frame_left;
+                        hi = (int64_t)r.rects[i * 4 + 2] < frame_right ? (int64_t)r.rects[i * 4 + 2] : frame_right;
+                        if (hi <= lo)
+                            continue;
+                        row_fn(c, dst_row + (size_t)lo * r.bytes_per_pixel, src_buf,
+                               (size_t)fy * c->width + (size_t)(lo - r.frame_x),
+                               (uint32_t)(hi - lo));
+                    }
+                }
+            } else {
+                /* Scaled present: sample the source per destination pixel. */
+                for (int64_t at = first; at < last; ++at) {
+                    uint32_t row = (uint32_t)at;
+                    int64_t fy = at - r.frame_y;
+                    uint8_t *dst_row = span + (size_t)row * r.pitch;
+
+                    for (i = 0; i < r.count; ++i) {
+                        if (row < r.rects[i * 4 + 1] || row >= r.rects[i * 4 + 3])
+                            continue;
+
+                        int64_t lo = (int64_t)r.rects[i * 4] > frame_left ? (int64_t)r.rects[i * 4] : frame_left;
+                        int64_t hi = (int64_t)r.rects[i * 4 + 2] < frame_right ? (int64_t)r.rects[i * 4 + 2] : frame_right;
+
+                        for (int64_t col = lo; col < hi; ++col) {
+                            int64_t fx = col - r.frame_x;
+                            uint32_t pix;
+
+                            if (fx >= bx0 && fx < bx1 && fy >= by0 && fy < by1) {
+                                int64_t sx = (fx - bx0) * (int64_t)c->width / (bx1 - bx0);
+                                int64_t sy = (fy - by0) * (int64_t)c->height / (by1 - by0);
+                                if (sx >= 0 && sx < (int64_t)c->width && sy >= 0 && sy < (int64_t)c->height) {
+                                    if (source_bottom_up)
+                                        sy = (int64_t)c->height - 1 - sy;
+                                    pix = mw_present_source_pixel(src_buf, source_rgb565,
+                                                                  (size_t)sy * c->width + sx);
+                                } else {
+                                    pix = 0x000000ffU;
+                                }
                             } else {
                                 pix = 0x000000ffU;
                             }
-                        } else {
-                            pix = 0x000000ffU;
+
+                            uint8_t p_col[4];
+                            p_col[0] = (uint8_t)(pix >> 24);
+                            p_col[1] = (uint8_t)(pix >> 16);
+                            p_col[2] = (uint8_t)(pix >> 8);
+                            p_col[3] = (uint8_t)pix;
+
+                            uint8_t *dst = dst_row + (size_t)col * r.bytes_per_pixel;
+                            if (r.format == 1U)
+                                *dst = mw_clut_index(c, p_col);
+                            else
+                                mw_encode_pixel(r.format, p_col, dst);
                         }
-                    } else {
-                        int64_t sy = source_bottom_up ? (int64_t)c->height - 1 - fy : fy;
-                        pix = mw_present_source_pixel(src_buf, source_rgb565,
-                                                      (size_t)sy * c->width + fx);
                     }
-
-                    uint8_t p_col[4];
-                    p_col[0] = (uint8_t)(pix >> 24);
-                    p_col[1] = (uint8_t)(pix >> 16);
-                    p_col[2] = (uint8_t)(pix >> 8);
-                    p_col[3] = (uint8_t)pix;
-
-
-                    uint8_t *dst = dst_row + (size_t)col * r.bytes_per_pixel;
-                    if (r.format == 1U)
-                        *dst = mw_clut_index(c, p_col);
-                    else
-                        mw_encode_pixel(r.format, p_col, dst);
                 }
+            }
+            /* Only the rows the request touched were written; the caller
+             * cleans this range instead of the whole span. */
+            clean_offset = (size_t)first * r.pitch;
+            clean_bytes = span_bytes - clean_offset;
+            {
+                uint64_t rows_bytes = (uint64_t)(last - first) * r.pitch;
+
+                if (rows_bytes < (uint64_t)clean_bytes)
+                    clean_bytes = (size_t)rows_bytes;
             }
         }
     }
 
-
+    if (written_offset)
+        *written_offset = clean_offset;
+    if (written_bytes)
+        *written_bytes = clean_bytes;
     return MW_STATUS_OK;
 }
 uint32_t mw_host_present_span(mw_ctx *c, const uint8_t *payload, uint32_t bytes)
@@ -2441,10 +2889,16 @@ uint32_t mw_host_present_span(mw_ctx *c, const uint8_t *payload, uint32_t bytes)
         return MW_STATUS_UNAVAILABLE;
     span = g_present_vram_base ? g_present_vram_base + card_offset :
                                  (uint8_t *)(uintptr_t)arm;
-    status = mw_blit(c, payload, request_bytes, span, span_bytes);
-    if (status == MW_STATUS_OK) {
-        minigl_platform_cache_clean(NULL, (uintptr_t)span, span_bytes);
-        minigl_platform_barrier(NULL);
+    {
+        size_t written_offset = 0U, written_bytes = 0U;
+
+        status = mw_blit(c, payload, request_bytes, span, span_bytes,
+                         &written_offset, &written_bytes);
+        if (status == MW_STATUS_OK && written_bytes != 0U) {
+            minigl_platform_cache_clean(NULL, (uintptr_t)span + written_offset,
+                                        written_bytes);
+            minigl_platform_barrier(NULL);
+        }
     }
     return status;
 }
@@ -2548,7 +3002,8 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
     }
 
     if (id == MW_BLIT) {
-        uint32_t status = mw_blit(c, request, bytes, reply, reply_capacity);
+        uint32_t status = mw_blit(c, request, bytes, reply, reply_capacity,
+                                  NULL, NULL);
         if (status == MW_STATUS_OK && reply_bytes)
             *reply_bytes = reply_capacity;
         return status;
