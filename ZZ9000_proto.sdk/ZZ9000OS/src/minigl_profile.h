@@ -54,6 +54,14 @@ typedef enum {
     MGLP_N_OPS,           /* synchronous bridge ops */
     MGLP_N_ASYNC_PRESENTS,/* packet-owned direct P96 presentations */
     MGLP_N_DRV_PACKETS,  /* FIFO packets pushed to RasterIX (MMIO or DMA) */
+    /* RasterIX state sampled once per FIFO packet, before it is pushed: */
+    MGLP_N_HW_SAMPLES,    /* samples taken */
+    MGLP_N_HW_BUSY,       /* renderer busy */
+    MGLP_N_HW_STALL,      /* renderer pipeline stalled */
+    MGLP_N_HW_READS,      /* sum of outstanding AXI reads */
+    MGLP_N_HW_VACANCY,    /* sum of free FIFO words (TDFV) */
+    MGLP_N_RIX_STATES,    /* RasterIX state blocks emitted (per draw op/pass) */
+    MGLP_N_RIX_PAGE_WORDS,/* texture page-list words in those blocks */
     MGLP_COUNTERS
 } MiniGLProfileCounter;
 
@@ -86,6 +94,11 @@ static inline void minigl_profile_count(MiniGLProfileCounter counter,
         g_minigl_profile_counts[counter] += amount;
 }
 
+static inline int minigl_profile_enabled(void)
+{
+    return g_minigl_profile_on;
+}
+
 /* Service poll entry, stack depth 0 only: follow the host's switch. */
 void minigl_profile_set_enabled(int enabled);
 /* One ring packet: PARSE envelope, per-packet maximum, byte counters. */
@@ -104,6 +117,7 @@ static inline void minigl_profile_count(MiniGLProfileCounter counter,
     (void)counter;
     (void)amount;
 }
+static inline int minigl_profile_enabled(void) { return 0; }
 static inline void minigl_profile_set_enabled(int enabled) { (void)enabled; }
 static inline void minigl_profile_packet_begin(void) { }
 static inline void minigl_profile_packet_end(uint32_t bytes, uint32_t commands)

@@ -602,6 +602,17 @@ void minigl_rix_backend_bind_texture(MiniGLRixBackend *backend, uint16_t unit, u
         backend->bound_texture1 = id;
 }
 
+int minigl_rix_backend_mem_counters(const MiniGLRixBackend *backend, uint32_t *reads,
+                                    uint32_t *writes)
+{
+    if (backend == NULL || !backend->available || backend->platform.csr_read == NULL ||
+        reads == NULL || writes == NULL)
+        return 0;
+    *reads = backend->platform.csr_read(backend->platform.context, RIX_DRV_CSR_DBG_AR);
+    *writes = backend->platform.csr_read(backend->platform.context, RIX_DRV_CSR_DBG_AW);
+    return 1;
+}
+
 int minigl_rix_backend_texture_resident(const MiniGLRixBackend *backend, uint32_t id)
 {
     return backend != NULL &&
@@ -1158,6 +1169,8 @@ static int backend_emit_state(MiniGLRixBackend *backend, RixCmdWriter *writer,
         pages[0] = (uint32_t)backend->platform.white_texture_address;
         page_count = 1U;
     }
+    minigl_profile_count(MGLP_N_RIX_STATES, 1U);
+    minigl_profile_count(MGLP_N_RIX_PAGE_WORDS, (uint32_t)page_count);
     return pages[0] != 0U && rix_cmd_feature_enable(writer, features) &&
            rix_cmd_fragment_state(writer, &fragment) &&
            rix_cmd_texture_state(writer, 0U, &texture) &&

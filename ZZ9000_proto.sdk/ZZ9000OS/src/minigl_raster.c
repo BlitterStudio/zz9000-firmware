@@ -3444,6 +3444,11 @@ int minigl_raster_hardware_available(void)
     return minigl_rix_backend_available(&g_rix);
 }
 
+int minigl_raster_mem_counters(uint32_t *reads, uint32_t *writes)
+{
+    return minigl_rix_backend_mem_counters(&g_rix, reads, writes);
+}
+
 int minigl_raster_get_rix_diagnostics(MiniGLRasterRixDiagnostics *out)
 {
     if (!out)

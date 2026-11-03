@@ -125,6 +125,18 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
 
     if (words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS)
         return RIX_DRV_BAD_ARGUMENT;
+    /* Profiling only: where the renderer is when the next packet is ready.
+     * A full FIFO and a stalled pipeline mean RasterIX is the bottleneck;
+     * an empty FIFO means the ARM side is. */
+    if (minigl_profile_enabled()) {
+        uint32_t status = rix_drv_read(driver, RIX_DRV_CSR_STATUS);
+
+        minigl_profile_count(MGLP_N_HW_SAMPLES, 1U);
+        minigl_profile_count(MGLP_N_HW_BUSY, (status & RIX_DRV_STATUS_BUSY) != 0U);
+        minigl_profile_count(MGLP_N_HW_STALL, (status & RIX_DRV_STATUS_STALL) != 0U);
+        minigl_profile_count(MGLP_N_HW_READS, RIX_DRV_STATUS_READS(status));
+        minigl_profile_count(MGLP_N_HW_VACANCY, rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV));
+    }
     /* Close the previous packet before anything new is staged: TLF
      * carries the byte count staged since the previous TLF, so a header
      * word written first makes the boundary value wrong and the FIFO drops

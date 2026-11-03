@@ -18,6 +18,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "minigl_raster.h"
+
 #define MGLP_STACK_DEPTH 16U
 #define MGLP_WINDOW_TICKS (5ULL * 1000000ULL)
 
@@ -240,6 +242,46 @@ void minigl_profile_report(void)
                           g_mglp.ticks[MGLP_IDLE], g_mglp.packets);
     used = mglp_append_ms(line, used, sizeof(line), " | max=",
                           g_mglp.packet_max, 0U);
+    /* RasterIX side, per ring packet: AXI read/write bursts it issued, and
+     * how often it was busy or stalled, how many reads it had in flight and
+     * how much FIFO room was left whenever the next FIFO packet was ready. */
+    {
+        static uint32_t previous_reads;
+        static uint32_t previous_writes;
+        uint32_t frames = g_mglp.packets != 0U ? g_mglp.packets : 1U;
+        uint32_t samples = n[MGLP_N_HW_SAMPLES];
+        uint32_t reads, writes;
+
+        if (minigl_raster_mem_counters(&reads, &writes)) {
+            uint32_t delta_reads = reads >= previous_reads ? reads - previous_reads : reads;
+            uint32_t delta_writes = writes >= previous_writes ? writes - previous_writes : writes;
+
+            previous_reads = reads;
+            previous_writes = writes;
+            written = snprintf(line + used, sizeof(line) - used,
+                               " | hw st=%lu pgw=%lu ar=%lu aw=%lu",
+                               (unsigned long)(n[MGLP_N_RIX_STATES] / frames),
+                               (unsigned long)(n[MGLP_N_RIX_PAGE_WORDS] / frames),
+                               (unsigned long)(delta_reads / frames),
+                               (unsigned long)(delta_writes / frames));
+            if (written > 0 && (size_t)written < sizeof(line) - used)
+                used += (size_t)written;
+        }
+        if (samples != 0U) {
+            uint32_t reads_x10 = (uint32_t)((uint64_t)n[MGLP_N_HW_READS] * 10U / samples);
+
+            written = snprintf(line + used, sizeof(line) - used,
+                               " busy=%lu%% stall=%lu%% rd=%lu.%lu vac=%lu n=%lu",
+                               (unsigned long)(n[MGLP_N_HW_BUSY] * 100U / samples),
+                               (unsigned long)(n[MGLP_N_HW_STALL] * 100U / samples),
+                               (unsigned long)(reads_x10 / 10U),
+                               (unsigned long)(reads_x10 % 10U),
+                               (unsigned long)(n[MGLP_N_HW_VACANCY] / samples),
+                               (unsigned long)samples);
+            if (written > 0 && (size_t)written < sizeof(line) - used)
+                used += (size_t)written;
+        }
+    }
     /* One rate-limited line: core 0 and the worker share the UART. */
     minigl_platform_log(line);
     mglp_window_reset();

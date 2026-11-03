@@ -47,6 +47,9 @@
 #define RIX_DRV_CONTROL_SOFT_RESET (1U << 1)
 
 #define RIX_DRV_STATUS_IDLE        (1U << 1)
+#define RIX_DRV_STATUS_BUSY        (1U << 2)
+#define RIX_DRV_STATUS_STALL       (1U << 4)
+#define RIX_DRV_STATUS_READS(s)    (((s) >> 16) & 0xffU)
 
 enum rix_drv_result {
     RIX_DRV_OK = 0,

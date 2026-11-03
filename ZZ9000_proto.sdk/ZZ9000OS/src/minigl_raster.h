@@ -121,6 +121,7 @@ void minigl_raster_reset_frame_counters(void);
 int minigl_raster_hardware_available(void);
 /* Snapshot the RasterIX CSR state without changing command ownership. */
 int minigl_raster_get_rix_diagnostics(MiniGLRasterRixDiagnostics *out);
+int minigl_raster_mem_counters(uint32_t *reads, uint32_t *writes);
 int minigl_raster_upload_rgba8(uint32_t id, uint16_t level, uint16_t width, uint16_t height,
                                const uint32_t *rgba_pixels, int internal_rgb);
 int minigl_raster_subimage_rgba8(uint32_t id, uint16_t level, uint16_t xoffset, uint16_t yoffset,

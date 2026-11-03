@@ -231,6 +231,9 @@ void minigl_rix_backend_tex_params(MiniGLRixBackend *backend, uint32_t id,
 void minigl_rix_backend_delete_texture(MiniGLRixBackend *backend, uint32_t id);
 /* True only while all RasterIX page mappings for this texture are resident. */
 int minigl_rix_backend_texture_resident(const MiniGLRixBackend *backend, uint32_t id);
+/* RasterIX AXI read and write address counts (profiling; wrap at 2^32). */
+int minigl_rix_backend_mem_counters(const MiniGLRixBackend *backend, uint32_t *reads,
+                                    uint32_t *writes);
 int minigl_rix_backend_begin_draw(MiniGLRixBackend *backend, uint16_t width,
                                   uint16_t height, uint32_t color_address,
                                   uint32_t depth_address);
