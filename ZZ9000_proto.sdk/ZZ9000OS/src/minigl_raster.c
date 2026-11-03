@@ -1510,11 +1510,17 @@ static void texture_matrix(unsigned unit, float *u, float *v, float r, float *q)
 }
 
 #if defined(__ARM_NEON)
-static int neon_input_ok(float x, float y, float z, float w)
+static inline int float_neon_ok(float f)
 {
-    return isfinite(x) && isfinite(y) && isfinite(z) && isfinite(w) &&
-           fpclassify(x) != FP_SUBNORMAL && fpclassify(y) != FP_SUBNORMAL &&
-           fpclassify(z) != FP_SUBNORMAL && fpclassify(w) != FP_SUBNORMAL;
+    union { float f; uint32_t u; } un;
+    un.f = f;
+    uint32_t a = un.u & 0x7fffffffU;
+    return (a == 0U) || ((a - 0x00800000U) < 0x7f000000U);
+}
+
+static inline int neon_input_ok(float x, float y, float z, float w)
+{
+    return float_neon_ok(x) && float_neon_ok(y) && float_neon_ok(z) && float_neon_ok(w);
 }
 #endif
 
