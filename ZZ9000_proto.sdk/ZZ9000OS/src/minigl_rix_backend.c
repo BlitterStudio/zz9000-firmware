@@ -289,13 +289,51 @@ static int backend_multitexture_supported(const MiniGLRixBackend *backend)
             texture1->levels == texture1->required_levels);
 }
 
+/* RasterIX samples power-of-two textures up to 256 texels a side.  Round a
+ * dimension up, not down: a 24-row image stored as 32 rows keeps every
+ * source row, where rounding down to 16 dropped a third of them.  Only a
+ * dimension above 256 is reduced. */
 static uint16_t texture_dimension(uint16_t value)
 {
     uint16_t result = 1U;
 
-    while (result <= value / 2U && result < 256U)
+    while (result < value && result < 256U)
         result = (uint16_t)(result << 1U);
     return result;
+}
+
+/* One stored texel per output position: the nearest source texel when the
+ * axis grows or keeps its size, the average of the source span when it
+ * shrinks, so one-texel strokes fade instead of disappearing. */
+static void texture_resample(uint32_t *out, uint16_t out_width, uint16_t out_height,
+                             const uint32_t *rgba, uint16_t width, uint16_t height)
+{
+    uint32_t x, y;
+
+    for (y = 0U; y < out_height; ++y) {
+        uint32_t y0 = y * height / out_height;
+        uint32_t y1 = height > out_height ? (y + 1U) * height / out_height : y0 + 1U;
+
+        for (x = 0U; x < out_width; ++x) {
+            uint32_t x0 = x * width / out_width;
+            uint32_t x1 = width > out_width ? (x + 1U) * width / out_width : x0 + 1U;
+            uint32_t sum[4] = { 0U, 0U, 0U, 0U };
+            uint32_t count = (x1 - x0) * (y1 - y0);
+            uint32_t sx, sy, channel, texel = 0U;
+
+            if (count == 1U) {
+                out[y * out_width + x] = rgba[y0 * width + x0];
+                continue;
+            }
+            for (sy = y0; sy < y1; ++sy)
+                for (sx = x0; sx < x1; ++sx)
+                    for (channel = 0U; channel < 4U; ++channel)
+                        sum[channel] += (rgba[sy * width + sx] >> (channel * 8U)) & 0xffU;
+            for (channel = 0U; channel < 4U; ++channel)
+                texel |= ((sum[channel] + count / 2U) / count) << (channel * 8U);
+            out[y * out_width + x] = texel;
+        }
+    }
 }
 
 static uint8_t texture_log2(uint16_t value)
@@ -608,8 +646,6 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
     MiniGLRixTexture *texture;
     uint16_t out_width;
     uint16_t out_height;
-    uint32_t source_x;
-    uint32_t source_y;
     uint32_t offset;
     uint32_t bytes;
 
@@ -679,11 +715,7 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
         if (out_width == 0U) out_width = 1U;
         if (out_height == 0U) out_height = 1U;
     }
-    for (source_y = 0U; source_y < out_height; ++source_y)
-        for (source_x = 0U; source_x < out_width; ++source_x)
-            scaled[source_y * out_width + source_x] =
-                rgba[((uint32_t)source_y * height / out_height) * width +
-                     ((uint32_t)source_x * width / out_width)];
+    texture_resample(scaled, out_width, out_height, rgba, width, height);
     offset = rix_texture_mip_offset(texture->width_log2, texture->height_log2,
                                     (uint8_t)level);
     bytes = (uint32_t)out_width * out_height * 2U;
@@ -691,6 +723,32 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
         !backend_write_texture(backend, texture, offset, scaled, bytes / 2U))
         return 0;
     texture->levels |= (uint16_t)(1U << level);
+    /* Rounding a dimension up can make the stored chain longer than the
+     * app's: a chain the app ends at 1x1 repeats that texel down to the
+     * stored 1x1, or the texture never becomes mip-complete. */
+    if (width == 1U && height == 1U) {
+        uint16_t next;
+
+        for (next = (uint16_t)(level + 1U);
+             next < 16U && (texture->required_levels & (uint16_t)(1U << next)) != 0U;
+             ++next) {
+            uint32_t next_width = texture->width >> next;
+            uint32_t next_height = texture->height >> next;
+            uint32_t texels, index;
+
+            if (next_width == 0U) next_width = 1U;
+            if (next_height == 0U) next_height = 1U;
+            texels = next_width * next_height;
+            for (index = 0U; index < texels; ++index)
+                scaled[index] = rgba[0];
+            offset = rix_texture_mip_offset(texture->width_log2, texture->height_log2,
+                                            (uint8_t)next);
+            if (offset == UINT32_MAX ||
+                !backend_write_texture(backend, texture, offset, scaled, texels))
+                return 0;
+            texture->levels |= (uint16_t)(1U << next);
+        }
+    }
     minigl_profile_count(MGLP_N_RIX_UPLOADS, 1U);
     minigl_profile_count(MGLP_N_RIX_UPLOAD_BYTES, bytes);
     backend_touch_texture(backend, texture);

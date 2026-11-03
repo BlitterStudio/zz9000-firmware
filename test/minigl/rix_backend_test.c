@@ -392,11 +392,11 @@ static void test_downscale_and_residency_lifetime(void)
 {
     MiniGLRixBackend backend;
     static struct model model;
-    static uint32_t source[300U * 130U];
+    static uint32_t source[300U * 100U];
 
     init_backend(&backend, &model, 64U);
     source[0] = 0xff8040ffU;
-    assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, source, 300U, 130U,
+    assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, source, 300U, 100U,
                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
     assert(backend.textures[0].width == 256U && backend.textures[0].height == 128U);
     minigl_rix_backend_tex_params(&backend, 1U, GL_NEAREST, GL_NEAREST,
@@ -412,6 +412,94 @@ static void test_downscale_and_residency_lifetime(void)
     assert(minigl_rix_backend_drain(&backend));
     minigl_rix_backend_delete_texture(&backend, 1U);
     assert(!has_texture(&backend, 1U) && has_texture(&backend, 2U));
+}
+
+static const MiniGLRixTexture *find_texture(const MiniGLRixBackend *backend, uint32_t id)
+{
+    size_t index;
+
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
+        if (backend->textures[index].valid && backend->textures[index].id == id)
+            return &backend->textures[index];
+    return NULL;
+}
+
+static uint16_t stored_texel(const MiniGLRixBackend *backend, const MiniGLRixTexture *texture,
+                             uint32_t index)
+{
+    const uint8_t *texel = backend->platform.texture_memory +
+        (size_t)texture->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES + index * 2U;
+
+    return (uint16_t)(texel[0] | (texel[1] << 8U));
+}
+
+static uint16_t rgb565(uint32_t rgba)
+{
+    return (uint16_t)(((rgba >> 27U) << 11U) | (((rgba >> 18U) & 0x3fU) << 5U) |
+                      ((rgba >> 11U) & 0x1fU));
+}
+
+/* Images RasterIX cannot store at their own size must stay legible: an
+ * odd-sized one keeps every source row, and one shrunk past 256 texels keeps
+ * its one-texel strokes as grey instead of dropping them. */
+static void test_texture_resampling_keeps_detail(void)
+{
+    static const uint32_t rows[5] = {
+        0xff0000ffU, 0x00ff00ffU, 0x0000ffffU, 0xffff00ffU, 0x00ffffffU
+    };
+    MiniGLRixBackend backend;
+    static struct model model;
+    static uint32_t source[512U * 2U];
+    const MiniGLRixTexture *texture;
+    uint32_t r, x, y;
+
+    init_backend(&backend, &model, MINIGL_RIX_TEXTURE_PAGES);
+    for (y = 0U; y < 5U; ++y)
+        for (x = 0U; x < 3U; ++x)
+            source[y * 3U + x] = rows[y];
+    assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, source, 3U, 5U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    texture = find_texture(&backend, 1U);
+    assert(texture != NULL && texture->height >= 5U);
+    for (r = 0U; r < 5U; ++r) {
+        int found = 0;
+
+        for (y = 0U; y < texture->height; ++y)
+            found |= stored_texel(&backend, texture, y * texture->width) == rgb565(rows[r]);
+        assert(found);
+    }
+
+    for (x = 0U; x < 512U; ++x)
+        source[x] = source[512U + x] = (x & 1U) != 0U ? 0xffffffffU : 0x000000ffU;
+    assert(minigl_rix_backend_upload_texture(&backend, 2U, 0U, source, 512U, 2U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    texture = find_texture(&backend, 2U);
+    assert(texture != NULL && texture->width == 256U);
+    for (x = 0U; x < 256U; ++x)
+        assert(stored_texel(&backend, texture, x) == rgb565(0x808080ffU));
+}
+
+/* A mipmapped image whose size was rounded up becomes complete when the app
+ * finishes its own (shorter) chain at 1x1. */
+static void test_rounded_up_mip_chain_completes(void)
+{
+    MiniGLRixBackend backend;
+    static struct model model;
+    static uint32_t source[24U * 24U];
+    uint16_t size;
+    uint16_t level = 0U;
+
+    init_backend(&backend, &model, MINIGL_RIX_TEXTURE_PAGES);
+    for (size = 24U; ; size = (uint16_t)(size / 2U), ++level) {
+        assert(minigl_rix_backend_upload_texture(&backend, 3U, level, source, size, size,
+                                                  ZZ9K_MGL_TEX_INTERNAL_RGB));
+        if (size == 1U)
+            break;
+    }
+    minigl_rix_backend_tex_params(&backend, 3U, GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR,
+                                  0x2901U, 0x2901U);
+    minigl_rix_backend_bind_texture(&backend, 0U, 3U);
+    assert(submit_texture(&backend, 3U));
 }
 
 static void test_texture_pool_growth(void)
@@ -1199,6 +1287,8 @@ int main(void)
 
     test_mip_layout_and_filtering();
     test_downscale_and_residency_lifetime();
+    test_texture_resampling_keeps_detail();
+    test_rounded_up_mip_chain_completes();
     test_lru_eviction_and_subimage_reupload();
     test_subimage_writes_only_rectangle_and_copy_on_writes();
     test_abandon_retires_copy_only_after_engine_stop();
