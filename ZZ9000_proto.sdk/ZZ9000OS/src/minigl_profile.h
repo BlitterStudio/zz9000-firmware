@@ -85,7 +85,7 @@ extern uint64_t g_minigl_profile_geom_total_cycles;
 static inline uint32_t minigl_profile_cycles(void)
 {
     uint32_t c;
-    asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(c));
+    __asm__ __volatile__("mrc p15, 0, %0, c9, c13, 0" : "=r"(c));
     return c;
 }
 

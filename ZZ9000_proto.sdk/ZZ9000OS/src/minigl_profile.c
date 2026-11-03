@@ -115,11 +115,11 @@ void minigl_profile_set_enabled(int enabled)
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
         {
             uint32_t pmcr;
-            asm volatile("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
+            __asm__ __volatile__("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
             pmcr |= 0x01U;  /* E = 1: enable performance counters */
             pmcr &= ~0x08U; /* D = 0: cycle counter counts every clock cycle */
-            asm volatile("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
-            asm volatile("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U)); /* enable PMCCNTR */
+            __asm__ __volatile__("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
+            __asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U)); /* enable PMCCNTR */
         }
 #endif
         mglp_window_reset();
@@ -136,11 +136,11 @@ void minigl_profile_packet_begin(void)
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
     {
         uint32_t pmcr;
-        asm volatile("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
+        __asm__ __volatile__("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
         pmcr |= 0x01U;
         pmcr &= ~0x08U;
-        asm volatile("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
-        asm volatile("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U));
+        __asm__ __volatile__("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
+        __asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U));
     }
 #endif
     minigl_profile_push_on(MGLP_PARSE);
