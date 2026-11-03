@@ -59,22 +59,34 @@ module LodCalculator
     wire [31 : 0] diffT = s_texelT - s_texelTxy;
     wire [14 : 0] diffUnsignedS = diffS[31] ? ~diffS[0 +: 15] + 1 : diffS[0 +: 15];
     wire [14 : 0] diffUnsignedT = diffT[31] ? ~diffT[0 +: 15] + 1 : diffT[0 +: 15];
-    wire [ 7 : 0] diffU = diffUnsignedS[7 +: 8] >> (8 - s_textureSizeWidth);
-    wire [ 7 : 0] diffV = diffUnsignedT[7 +: 8] >> (8 - s_textureSizeHeight);
-    wire [ 7 : 0] diffMax = diffV | diffU;
+    // ZZ9000: the texel step is kept to half a texel, and the level is
+    // log2 of it rounded at 1.5 * 2^k, near OpenGL's sqrt(2) * 2^k.  Upstream
+    // took whole texels and picked level 1 for any step of one texel, so a
+    // texture drawn 1:1 (2D text, HUD) was sampled from its half-size level.
+    wire [ 8 : 0] diffU = diffUnsignedS[6 +: 9] >> (8 - s_textureSizeWidth);
+    wire [ 8 : 0] diffV = diffUnsignedT[6 +: 9] >> (8 - s_textureSizeHeight);
+    wire [ 8 : 0] diffMax = (diffU > diffV) ? diffU : diffV;
     always @(posedge aclk)
     if (ce) begin : Mux
         reg [ 3 : 0] lodReg;
-        casez (diffMax)
-            8'b00000000: lodReg = 0;
-            8'b00000001: lodReg = 1;
-            8'b0000001?: lodReg = 2;
-            8'b000001??: lodReg = 3;
-            8'b00001???: lodReg = 4;
-            8'b0001????: lodReg = 5;
-            8'b001?????: lodReg = 6;
-            8'b01??????: lodReg = 7;
-            8'b1???????: lodReg = 8;
+        casez (diffMax) // half texels
+            9'b00000000?: lodReg = 0;
+            9'b000000010: lodReg = 0;
+            9'b000000011: lodReg = 1;
+            9'b00000010?: lodReg = 1;
+            9'b00000011?: lodReg = 2;
+            9'b0000010??: lodReg = 2;
+            9'b0000011??: lodReg = 3;
+            9'b000010???: lodReg = 3;
+            9'b000011???: lodReg = 4;
+            9'b00010????: lodReg = 4;
+            9'b00011????: lodReg = 5;
+            9'b0010?????: lodReg = 5;
+            9'b0011?????: lodReg = 6;
+            9'b010??????: lodReg = 6;
+            9'b011??????: lodReg = 7;
+            9'b10???????: lodReg = 7;
+            9'b11???????: lodReg = 8;
         endcase
 
         if (confEnable)
