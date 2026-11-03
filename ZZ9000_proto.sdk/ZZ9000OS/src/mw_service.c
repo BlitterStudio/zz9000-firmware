@@ -618,6 +618,9 @@ size_t mw_service_packet_diagnostics(MWPacketDiagnostic *out, size_t capacity,
     return count;
 }
 
+/* Two lines, printed on core 1 inside the 50 ms reset budget (about 20 ms
+ * of UART): what the 68k was doing when the Amiga went down and how long
+ * ago it last spoke.  An Amiga-side crash leaves no other ARM trace. */
 void mw_service_report_amiga_reset(void)
 {
     mw_ctx *context = mw_service_find_context(g_active_handle);
@@ -628,47 +631,33 @@ void mw_service_report_amiga_reset(void)
     (void)context;
 #else
     MiniGLRasterRixDiagnostics rix;
-    uint32_t producer;
-    uint32_t consumer;
+    const MWPacketDiagnostic *last = NULL;
     uint32_t processed;
-    uint32_t count;
-    uint32_t index;
-    uint32_t now;
-    producer = mw_wire_ld32(&g_ctrl->producer_seq);
-    consumer = mw_wire_ld32(&g_ctrl->consumer_seq);
-    now = mw_diag_now_ms();
-    count = (uint32_t)mw_service_packet_diagnostics(NULL, 0U, &processed);
-    MW_DIAG("[MGL9] reset handle=%08lx size=%lux%lu backend=%s seq=%lu/%lu packets=%lu last=%lums\n",
-            (unsigned long)context->handle, (unsigned long)context->width,
-            (unsigned long)context->height, mw_backend_name(context),
-            (unsigned long)producer, (unsigned long)consumer,
+    uint32_t op_seq = mw_wire_ld32(&g_ctrl->op_seq);
+    uint32_t op_done = mw_wire_ld32(&g_ctrl->op_done_seq);
+    uint32_t now = mw_diag_now_ms();
+
+    if (mw_service_packet_diagnostics(NULL, 0U, &processed) != 0)
+        last = &g_packet_diagnostics[(g_packet_diagnostic_write - 1U) %
+                                     MW_PACKET_DIAG_RING_SIZE];
+    MW_DIAG("[MGL9] reset %lux%lu %s seq=%lu/%lu pk=%lu last=%lums op=%08lx st=%08lx ops=%lu/%lu pend=%lu lastop=%lu %lums\n",
+            (unsigned long)context->width, (unsigned long)context->height,
+            mw_backend_name(context),
+            (unsigned long)mw_wire_ld32(&g_ctrl->producer_seq),
+            (unsigned long)mw_wire_ld32(&g_ctrl->consumer_seq),
             (unsigned long)processed,
-            (unsigned long)(count ? now - g_packet_diagnostics[
-                (g_packet_diagnostic_write - 1U) % MW_PACKET_DIAG_RING_SIZE].timestamp_ms : 0U));
-    for (index = 0U; index < count; ++index) {
-        const MWPacketDiagnostic *entry = &g_packet_diagnostics[
-            (g_packet_diagnostic_write - count + index) % MW_PACKET_DIAG_RING_SIZE];
-        MW_DIAG("[MGL9] packet seq=%lu op=%08lx commands=%lu bytes=%lu status=%08lx t=%lums\n",
-                (unsigned long)entry->sequence, (unsigned long)entry->first_opcode,
-                (unsigned long)entry->command_count, (unsigned long)entry->bytes,
-                (unsigned long)entry->status, (unsigned long)entry->timestamp_ms);
-    }
-    if (minigl_raster_get_rix_diagnostics(&rix)) {
+            (unsigned long)(last ? now - last->timestamp_ms : 0U),
+            (unsigned long)(last ? last->first_opcode : 0U),
+            (unsigned long)(last ? last->status : 0U),
+            (unsigned long)op_seq, (unsigned long)op_done,
+            (unsigned long)(op_seq != op_done ? mw_wire_ld32(&g_ctrl->op_code) : 0U),
+            (unsigned long)g_last_op_code,
+            (unsigned long)(g_ops_processed ? now - g_last_op_ms : 0U));
+    if (minigl_raster_get_rix_diagnostics(&rix))
         MW_DIAG("[RasterIX] reset engine=%s status=%08lx fence=%lu/%lu\n",
                 (rix.status & RIX_DRV_STATUS_IDLE) ? "idle" : "busy",
                 (unsigned long)rix.status, (unsigned long)rix.completed_fence,
                 (unsigned long)rix.last_fence);
-    }
-    {
-        uint32_t op_seq = mw_wire_ld32(&g_ctrl->op_seq);
-        uint32_t op_done = mw_wire_ld32(&g_ctrl->op_done_seq);
-
-        MW_DIAG("[MGL9] reset ops seq=%lu/%lu pending=%lu processed=%lu last=%lu %lums ago\n",
-                (unsigned long)op_seq, (unsigned long)op_done,
-                (unsigned long)(op_seq != op_done ? mw_wire_ld32(&g_ctrl->op_code) : 0U),
-                (unsigned long)g_ops_processed, (unsigned long)g_last_op_code,
-                (unsigned long)(g_ops_processed ? now - g_last_op_ms : 0U));
-    }
 #endif
 }
 

@@ -135,6 +135,9 @@ static int minigl_begin_reset(void *context)
 {
     minigl_module_context_t *module = context;
 
+    /* What the 68k last asked for and how long ago, before the reset tears
+     * the context down: an Amiga-side crash leaves no other ARM trace. */
+    mw_service_report_amiga_reset();
     minigl_release_app(module);
     minigl_release_transport(module);
     mw_service_reset();
