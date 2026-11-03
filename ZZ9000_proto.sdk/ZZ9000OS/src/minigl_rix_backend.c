@@ -1847,6 +1847,13 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
                                   b->rgba, b->s, b->t, b->q};
         vertices[2] = (RixVertex){c->x - 0.5f, top - c->y, zc, c->reciprocal_w,
                                   c->rgba, c->s, c->t, c->q};
+    }
+    passes = (backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U ? 2U : 1U;
+    if (passes == 2U) {
+        float top = (float)backend->height - 0.5f;
+        float za = vertices[0].z;
+        float zb = vertices[1].z;
+        float zc = vertices[2].z;
         texture1_vertices[0] = (RixVertex){a->x - 0.5f, top - a->y, za,
                                            a->reciprocal_w, a->rgba, a->s1, a->t1, a->q1};
         texture1_vertices[1] = (RixVertex){b->x - 0.5f, top - b->y, zb,
@@ -1854,7 +1861,6 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         texture1_vertices[2] = (RixVertex){c->x - 0.5f, top - c->y, zc,
                                            c->reciprocal_w, c->rgba, c->s1, c->t1, c->q1};
     }
-    passes = (backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U ? 2U : 1U;
     scissor.start_x = 0U;
     scissor.start_y = 0U;
     scissor.end_x = backend->width;
