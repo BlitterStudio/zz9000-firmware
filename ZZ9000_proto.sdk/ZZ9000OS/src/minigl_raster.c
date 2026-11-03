@@ -173,6 +173,16 @@ static int g_mvp_neon_ok;
 #endif
 static const mw_state *g_mw_state = NULL;
 static uint32_t g_clip_start_cycle;
+
+/* Charges the clip stage once per primitive_triangle start.  Points and
+ * lines reach triangle_fill without one; 0 means nothing is pending. */
+static inline void clip_charge(void)
+{
+    if (g_clip_start_cycle) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+        g_clip_start_cycle = 0U;
+    }
+}
 static int g_need_eye;
 static int g_need_normal;
 
@@ -1930,7 +1940,7 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
     int y1;
 
     if (area == 0.0f) {
-        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+        clip_charge();
         return;
     }
     if (area < 0.0f) {
@@ -1947,7 +1957,7 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
     if (x1 >= g_buffers.width) x1 = (int)g_buffers.width - 1;
     if (y1 >= g_buffers.height) y1 = (int)g_buffers.height - 1;
     if (x0 > x1 || y0 > y1) {
-        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+        clip_charge();
         return;
     }
     if (g_rix_collecting != 0) {
@@ -1958,13 +1968,13 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
                                    v1->u0, v1->v0, v1->q0, v1->u1, v1->v1, v1->q1 };
             MiniGLRixVertex vc = { v2->sx, v2->sy, v2->sz, v2->inv_w, v2->color,
                                    v2->u0, v2->v0, v2->q0, v2->u1, v2->v1, v2->q1 };
-            minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+            clip_charge();
             if (!minigl_rix_backend_add_triangle(&g_rix, &va, &vb, &vc))
                 g_rix_collecting = -1;
         }
         return;
     }
-    minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+    clip_charge();
 
     Vertex a = *v0;
     Vertex b = *v1;
@@ -2473,21 +2483,21 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
     unsigned i;
 
     if (count < 3U) {
-        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+        clip_charge();
         return;
     }
     area = 0.0f;
     for (i = 2U; i < count; ++i)
         area += edge(&clipped[0], &clipped[i - 1U], clipped[i].sx, clipped[i].sy);
     if (g_state.min_triangle_area > 0.0f && fabsf(area) < 2.0f * g_state.min_triangle_area) {
-        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+        clip_charge();
         return;
     }
     front = (g_state.front_face ? g_state.front_face : GL_CCW) == GL_CCW ? area < 0.0f : area > 0.0f;
     if (g_state.enabled_flags & ZZ9K_MGL_STATE_CULL_FACE) {
         face = g_state.cull_face_mode ? g_state.cull_face_mode : GL_BACK;
         if (face == GL_FRONT_AND_BACK || (front && face == GL_FRONT) || (!front && face == GL_BACK)) {
-            minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+            clip_charge();
             return;
         }
     }
@@ -2542,14 +2552,13 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
 
 static void primitive_triangle(const Vertex *first, const Vertex *second, const Vertex *third)
 {
-    uint32_t c_clip_start = minigl_profile_cycles();
-    g_clip_start_cycle = c_clip_start;
+    g_clip_start_cycle = minigl_profile_cycles();
 
     unsigned c0 = vertex_outcode(first);
     unsigned c1 = vertex_outcode(second);
     unsigned c2 = vertex_outcode(third);
     if ((c0 & c1 & c2) != 0U) {
-        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, c_clip_start);
+        clip_charge();
         return;
     }
     if ((c0 | c1 | c2) == 0U) {
@@ -2558,7 +2567,7 @@ static void primitive_triangle(const Vertex *first, const Vertex *second, const 
         clipped[1] = *second;
         clipped[2] = *third;
         if (!project(&clipped[0]) || !project(&clipped[1]) || !project(&clipped[2])) {
-            minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, c_clip_start);
+            clip_charge();
             return;
         }
         render_clipped_polygon(clipped, 3U, third->color);
@@ -2576,12 +2585,12 @@ static void primitive_triangle(const Vertex *first, const Vertex *second, const 
     input[0].flat_color = input[1].flat_color = input[2].flat_color = third->color;
     count = clip_polygon(input, 3U, clipped);
     if (!count) {
-        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, c_clip_start);
+        clip_charge();
         return;
     }
     for (index = 0U; index < count; ++index)
         if (!project(&clipped[index])) {
-            minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, c_clip_start);
+            clip_charge();
             return;
         }
     render_clipped_polygon(clipped, count, third->color);
