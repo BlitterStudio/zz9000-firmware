@@ -62,13 +62,6 @@ static inline float rix_color_component(uint32_t rgba, unsigned int index)
     return s_rix_u8_to_float[(rgba >> (24U - index * 8U)) & 0xffU];
 }
 
-static void rix_store_vec(RixTriangle *triangle, unsigned int start, const float *value, unsigned int count)
-{
-    unsigned int i;
-    for (i = 0U; i < count; ++i) {
-        triangle->words[start + i] = rix_float_bits(value[i]);
-    }
-}
 
 int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
                        const RixVertex *v1, const RixVertex *v2,
@@ -124,7 +117,8 @@ int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
         end_y = clipped_end_y;
     }
 
-    memset(triangle, 0, sizeof(*triangle));
+    /* Every descriptor word except the reserved word 0 is written below. */
+    triangle->words[RIX_WORD_RESERVED] = 0U;
     triangle->words[RIX_WORD_BB_START] = ((uint32_t)(uint16_t)(start_y >> RIX_EDGE_SHIFT) << 16) |
                                          (uint16_t)(start_x >> RIX_EDGE_SHIFT);
     triangle->words[RIX_WORD_BB_END] = ((uint32_t)(uint16_t)(end_y >> RIX_EDGE_SHIFT) << 16) |
@@ -176,9 +170,9 @@ int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
         plane[0] = (A) + d1 * normalized[1] + d2 * normalized[2]; \
         plane[1] = d1 * normalized_x[1] + d2 * normalized_x[2];   \
         plane[2] = d1 * normalized_y[1] + d2 * normalized_y[2];   \
-        rix_store_vec(triangle, (W0), plane, 1U);                 \
-        rix_store_vec(triangle, (WX), plane + 1U, 1U);            \
-        rix_store_vec(triangle, (WY), plane + 2U, 1U);            \
+        triangle->words[(W0)] = rix_float_bits(plane[0]);           \
+        triangle->words[(WX)] = rix_float_bits(plane[1]);           \
+        triangle->words[(WY)] = rix_float_bits(plane[2]);           \
     } while (0)
     for (i = 0U; i < 4U; ++i)
         RIX_PLANE(c0[i], c1[i], c2[i],

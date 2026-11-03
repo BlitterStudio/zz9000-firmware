@@ -1819,6 +1819,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     MiniGLRixRecordedOp *op;
     size_t triangle_words;
     unsigned int passes;
+    int in_place;
     if (backend == NULL || !backend->collecting || a == NULL || b == NULL || c == NULL)
         return 0;
     /* RasterIX descriptors use the OpenGL bottom-up y axis; the raster
@@ -1889,7 +1890,26 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         scissor.end_y = (uint16_t)y1;
     }
     scissor.enabled = 1U;
-    if (!rix_setup_triangle(&prepared, &vertices[0], &vertices[1], &vertices[2], &scissor)) {
+    /* The triangle words are known before setup runs; when the current
+     * buffer certainly has room (the complement of the flush condition
+     * below), rix_setup_triangle writes the descriptor straight into the
+     * backend array instead of a stack copy that is then duplicated. */
+    op = &backend->ops[backend->op_count - 1U];
+    triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
+    if (op->two_pass && !op->batched)
+        triangle_words += backend_two_pass_state_words(backend, op, 0U,
+                                                       op->triangle_count != 0U) +
+                          backend_two_pass_state_words(backend, op, 1U, 1);
+    if (backend->triangle_count < MINIGL_RIX_MAX_TRIANGLES &&
+        backend->command_words_estimate + triangle_words <=
+            MINIGL_RIX_COMMAND_WORD_BUDGET) {
+        triangle = &backend->triangles[backend->triangle_count];
+        in_place = 1;
+    } else {
+        triangle = &prepared;
+        in_place = 0;
+    }
+    if (!rix_setup_triangle(triangle, &vertices[0], &vertices[1], &vertices[2], &scissor)) {
         minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
         /* Zero area at RasterIX's 1/32-pixel precision, or no pixel inside
          * the scissor: the engine would draw nothing. Failing here aborted
@@ -1900,49 +1920,50 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         minigl_profile_count(MGLP_N_CULLED, 1U);
         return 1;
     }
-    if (passes == 2U &&
-        !rix_setup_triangle(&prepared_texture1, &texture1_vertices[0],
-                            &texture1_vertices[1], &texture1_vertices[2], &scissor)) {
-        minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
-        backend->reject_stage = MINIGL_RIX_REJECT_TEXTURE1;
-        return 0;
+    if (passes == 2U) {
+        RixTriangle *texture1 = in_place ?
+            &backend->texture1_triangles[backend->triangle_count] :
+            &prepared_texture1;
+
+        if (!rix_setup_triangle(texture1, &texture1_vertices[0],
+                                &texture1_vertices[1], &texture1_vertices[2], &scissor)) {
+            minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
+            backend->reject_stage = MINIGL_RIX_REJECT_TEXTURE1;
+            return 0;
+        }
     }
     minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
     uint32_t c_rec = minigl_profile_cycles();
-    op = &backend->ops[backend->op_count - 1U];
-    triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
-    if (op->two_pass && !op->batched)
-        triangle_words += backend_two_pass_state_words(backend, op, 0U,
-                                                       op->triangle_count != 0U) +
-                          backend_two_pass_state_words(backend, op, 1U, 1);
-    if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
-        backend->command_words_estimate + triangle_words >
-            MINIGL_RIX_COMMAND_WORD_BUDGET) {
-        backend->reject_stage = MINIGL_RIX_REJECT_BUDGET;
-        if (backend->triangle_count == 0U && op->triangle_count == 0U) {
-            minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
-            return 0;
+    if (!in_place) {
+        if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
+            backend->command_words_estimate + triangle_words >
+                MINIGL_RIX_COMMAND_WORD_BUDGET) {
+            backend->reject_stage = MINIGL_RIX_REJECT_BUDGET;
+            if (backend->triangle_count == 0U && op->triangle_count == 0U) {
+                minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
+                return 0;
+            }
+            if (!backend_flush(backend, 1) || !backend_record_draw(backend)) {
+                minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
+                return 0;
+            }
+            op = &backend->ops[backend->op_count - 1U];
+            triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
+            if (op->two_pass && !op->batched)
+                triangle_words += backend_two_pass_state_words(backend, op, 0U, 0) +
+                                  backend_two_pass_state_words(backend, op, 1U, 1);
+            if (backend->command_words_estimate + triangle_words >
+                MINIGL_RIX_COMMAND_WORD_BUDGET) {
+                minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
+                return 0;
+            }
+            backend->reject_stage = MINIGL_RIX_REJECT_NONE;
         }
-        if (!backend_flush(backend, 1) || !backend_record_draw(backend)) {
-            minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
-            return 0;
-        }
-        op = &backend->ops[backend->op_count - 1U];
-        triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
-        if (op->two_pass && !op->batched)
-            triangle_words += backend_two_pass_state_words(backend, op, 0U, 0) +
-                              backend_two_pass_state_words(backend, op, 1U, 1);
-        if (backend->command_words_estimate + triangle_words >
-            MINIGL_RIX_COMMAND_WORD_BUDGET) {
-            minigl_profile_geom_add_cycles(MGLP_GEOM_REC, c_rec);
-            return 0;
-        }
-        backend->reject_stage = MINIGL_RIX_REJECT_NONE;
+        triangle = &backend->triangles[backend->triangle_count];
+        *triangle = prepared;
+        if (passes == 2U)
+            backend->texture1_triangles[backend->triangle_count] = prepared_texture1;
     }
-    triangle = &backend->triangles[backend->triangle_count];
-    *triangle = prepared;
-    if (passes == 2U)
-        backend->texture1_triangles[backend->triangle_count] = prepared_texture1;
     ++backend->triangle_count;
     ++op->triangle_count;
     backend->command_words_estimate += triangle_words;
