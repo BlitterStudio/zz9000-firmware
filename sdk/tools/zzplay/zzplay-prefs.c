@@ -6,6 +6,7 @@
 #include "zzplay-sys.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 static char zzplay_prefs_lower(char c)
 {

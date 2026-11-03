@@ -10,7 +10,7 @@
 #endif
 #include <string.h>
 #ifdef __amigaos__
-void *SysBase;
+__attribute__((weak)) void *SysBase;
 
 void *memset(void *dst, int value, size_t bytes)
 {
@@ -71,6 +71,21 @@ uint32_t __umodsi3(uint32_t dividend, uint32_t divisor)
   uint32_t remainder;
   (void)test_divmod_u32(dividend, divisor, &remainder);
   return remainder;
+}
+
+int32_t __mulsi3(int32_t a, int32_t b)
+{
+  uint32_t res = 0;
+  uint32_t ua = (uint32_t)a;
+  uint32_t ub = (uint32_t)b;
+  while (ub != 0) {
+    if (ub & 1U) {
+      res += ua;
+    }
+    ua <<= 1;
+    ub >>= 1;
+  }
+  return (int32_t)res;
 }
 #endif
 

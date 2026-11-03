@@ -4,7 +4,7 @@
 # vs software. It does NOT compile in the ZZ9000 provider — the drop-in library
 # already registers it and sets "?provider=zz9000" (see
 # docs/zz9k-amissl-provider.md), so the default context IS the offload path a
-# real browser uses. Run inside the sacredbanana/amiga-compiler:m68k-amigaos
+# real browser uses. Run inside the amigadev/crosstools:m68k-amigaos-gcc10
 # image, which ships the AmiSSL SDK.
 set -e
 cd /sdk

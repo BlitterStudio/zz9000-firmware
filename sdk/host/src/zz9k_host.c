@@ -47,7 +47,11 @@
  * resident library linked with -nostdlib (e.g. amissl.library carrying the
  * provider) has none, so the definition lives here. zz9k_find_board() opens
  * expansion.library itself and save/restores this base around the call. */
+#if defined(__GNUC__)
+__attribute__((weak)) struct ExpansionBase *ExpansionBase;
+#else
 struct ExpansionBase *ExpansionBase;
+#endif
 #endif
 
 #if ZZ9K_HOST_AMIGA
@@ -58,7 +62,11 @@ struct ExpansionBase *ExpansionBase;
  * supplies the symbol for any consumer that provides none.
  * zz9k_sync_wait_timeout_ms() opens dos.library itself and save/restores this
  * base around the call. */
+#if defined(__GNUC__)
+__attribute__((weak)) struct DosLibrary *DOSBase;
+#else
 struct DosLibrary *DOSBase;
+#endif
 #endif
 void zz9k_audio_ring_cache_flush(const volatile void *address, uint32_t length)
 {
@@ -1245,7 +1253,7 @@ int zz9k_sdk_use_int2(const ZZ9KContext *ctx)
 
 #if ZZ9K_HOST_AMIGA
 
-static uint32_t zz9k_sdk_isr(ZZ9KContext *ctx asm("a1"))
+static uint32_t zz9k_sdk_isr(ZZ9KContext *ctx __asm__("a1"))
 {
   uint16_t status = 0;
 
