@@ -156,6 +156,15 @@ static float g_matrix[4][16];
 static float g_mvp[16];
 static float g_stack[4][MATRIX_STACK_DEPTH][16];
 static uint8_t g_stack_depth[4];
+static uint8_t g_matrix_is_identity[4] = {1U, 1U, 1U, 1U};
+
+static inline int matrix_is_identity(const float *m)
+{
+    return m[0] == 1.0f && m[1] == 0.0f && m[2] == 0.0f && m[3] == 0.0f &&
+           m[4] == 0.0f && m[5] == 1.0f && m[6] == 0.0f && m[7] == 0.0f &&
+           m[8] == 0.0f && m[9] == 0.0f && m[10] == 1.0f && m[11] == 0.0f &&
+           m[12] == 0.0f && m[13] == 0.0f && m[14] == 0.0f && m[15] == 1.0f;
+}
 static uint8_t g_depth_bits;
 static float g_polygon_offset_units;
 static float g_polygon_depth_scale;
@@ -1487,6 +1496,8 @@ static int project(Vertex *vertex)
 
 static void texture_matrix(unsigned unit, float *u, float *v, float r, float *q)
 {
+    if (g_matrix_is_identity[2U + unit])
+        return;
     const float *matrix = g_matrix[2U + unit];
     float input_u = *u;
     float input_v = *v;
@@ -2837,8 +2848,10 @@ void minigl_raster_init(void)
     g_rix_depth_z16 = 0;
     g_rix_cpu_fallbacks = 0U;
     g_rix_cpu_frame = 0;
-    for (index = 0U; index < 4U; ++index)
+    for (index = 0U; index < 4U; ++index) {
         identity(g_matrix[index]);
+        g_matrix_is_identity[index] = 1U;
+    }
     update_mvp();
     memset(g_stack_depth, 0, sizeof(g_stack_depth));
     memset(&g_state, 0, sizeof(g_state));
@@ -3032,6 +3045,7 @@ void minigl_raster_load_matrix(uint16_t mode, const float *matrix)
         return;
     }
     memcpy(g_matrix[mode], matrix, sizeof(g_matrix[mode]));
+    g_matrix_is_identity[mode] = (uint8_t)matrix_is_identity(g_matrix[mode]);
     if (mode < 2U)
         update_mvp();
     if (mode == 0U)
@@ -3045,6 +3059,7 @@ void minigl_raster_multiply_matrix(uint16_t mode, const float *matrix)
         return;
     }
     matrix_mul(g_matrix[mode], g_matrix[mode], matrix);
+    g_matrix_is_identity[mode] = (uint8_t)matrix_is_identity(g_matrix[mode]);
     if (mode < 2U)
         update_mvp();
     if (mode == 0U)
@@ -3068,6 +3083,7 @@ int minigl_raster_pop_matrix(uint16_t mode)
         return 0;
     }
     memcpy(g_matrix[mode], g_stack[mode][--g_stack_depth[mode]], sizeof(g_matrix[mode]));
+    g_matrix_is_identity[mode] = (uint8_t)matrix_is_identity(g_matrix[mode]);
     if (mode < 2U)
         update_mvp();
     if (mode == 0U)
