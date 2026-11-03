@@ -150,7 +150,8 @@ static void mock_fifo_write(void *ctx, uint32_t offset, uint32_t value)
 {
     struct mock_platform *p = (struct mock_platform *)ctx;
 
-    p->fifo[offset / 4U] = value;
+    if (offset != RIX_DRV_FIFO_TDFD)
+        p->fifo[offset / 4U] = value;
     if (offset == RIX_DRV_FIFO_TDFR) {
         p->packet_words = 0U;
     } else if (offset == RIX_DRV_FIFO_TDFD) {

@@ -748,10 +748,16 @@ proc create_hier_cell_video { parentCell nameHier } {
     }
     # Xilinx AXI FIFO MM-S is the PS/PL330 command ingress.  It packetizes
     # TDFD writes only after TLF and drives RasterIX FrameStreamingCore ST0.
+    # TDFD is on the AXI4 data interface (S_AXI_FULL, 0x83c80000) so the
+    # PL330 payload lands as 16-beat INCR bursts; the registers stay on the
+    # AXI4-Lite S_AXI (0x83c70000).  PG080: AXI4 data accepts INCR bursts
+    # only, and the core decodes TDFD by comparing AWADDR with
+    # C_AXI4_BASEADDR, so every burst must start at the window base.
     set gpu_cmd_fifo [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_fifo_mm_s:4.2 gpu_cmd_fifo]
     set_property -dict [list \
       CONFIG.C_S_AXI_PROTOCOL {AXI4LITE} \
-      CONFIG.C_DATA_INTERFACE_TYPE {0} \
+      CONFIG.C_DATA_INTERFACE_TYPE {1} \
+      CONFIG.C_S_AXI4_DATA_WIDTH {32} \
       CONFIG.C_USE_TX_DATA {1} \
       CONFIG.C_USE_RX_DATA {0} \
       CONFIG.C_USE_TX_CTRL {0} \
@@ -1338,11 +1344,13 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.S00_HAS_REGSLICE {3} \
  ] $ps7_0_axi_periph
   if { $rasterix } {
-    # M07 is RasterIX CSR and M08 is the command FIFO MMIO aperture.
+    # M07 is RasterIX CSR, M08 the command FIFO registers (AXI4-Lite) and
+    # M09 the command FIFO TDFD data window (AXI4, bursts).
     set_property -dict [ list \
-      CONFIG.NUM_MI {9} \
+      CONFIG.NUM_MI {10} \
       CONFIG.M07_HAS_REGSLICE {3} \
       CONFIG.M08_HAS_REGSLICE {3} \
+      CONFIG.M09_HAS_REGSLICE {3} \
     ] $ps7_0_axi_periph
   }
 
@@ -1419,6 +1427,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   if { $rasterix } {
     connect_bd_intf_net -intf_net RasterIX_control [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins zz9k_rasterix_0/s_axi]
     connect_bd_intf_net -intf_net RasterIX_command_fifo [get_bd_intf_pins ps7_0_axi_periph/M08_AXI] [get_bd_intf_pins gpu_cmd_fifo/S_AXI]
+    connect_bd_intf_net -intf_net RasterIX_command_data [get_bd_intf_pins ps7_0_axi_periph/M09_AXI] [get_bd_intf_pins gpu_cmd_fifo/S_AXI_FULL]
   }
   connect_bd_intf_net -intf_net i2s_receiver_0_m_axis_aud [get_bd_intf_pins audio_formatter_1/s_axis_s2mm] [get_bd_intf_pins i2s_receiver_0/m_axis_aud]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
@@ -1533,8 +1542,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   if { $rasterix } {
     # The renderer, command FIFO and both peripheral targets are all FCLK0
     # (100 MHz); no command CDC or renderer-specific clock domain exists.
-    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins gpu_cmd_fifo/s_axi_aresetn] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN] [get_bd_pins ps7_0_axi_periph/M07_ARESETN] [get_bd_pins ps7_0_axi_periph/M08_ARESETN]
-    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins gpu_cmd_fifo/s_axi_aclk] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK] [get_bd_pins ps7_0_axi_periph/M07_ACLK] [get_bd_pins ps7_0_axi_periph/M08_ACLK]
+    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins gpu_cmd_fifo/s_axi_aresetn] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN] [get_bd_pins ps7_0_axi_periph/M07_ARESETN] [get_bd_pins ps7_0_axi_periph/M08_ARESETN] [get_bd_pins ps7_0_axi_periph/M09_ARESETN]
+    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins gpu_cmd_fifo/s_axi_aclk] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK] [get_bd_pins ps7_0_axi_periph/M07_ACLK] [get_bd_pins ps7_0_axi_periph/M08_ACLK] [get_bd_pins ps7_0_axi_periph/M09_ACLK]
     # Audio RX remains in the 25 MHz audio domain while sharing HP2.
     connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins axi_interconnect_3/S01_ARESETN]
     connect_bd_net -net S00_ACLK_1 [get_bd_pins axi_interconnect_3/S01_ACLK]
@@ -1553,6 +1562,7 @@ proc create_hier_cell_video { parentCell nameHier } {
     create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces zz9k_rasterix_0/m_axi] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_RasterIX_HP3_DDR_LOWOCM
     create_bd_addr_seg -range 0x00010000 -offset 0x83C60000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs zz9k_rasterix_0/s_axi/reg0] SEG_RasterIX_control_Reg
     create_bd_addr_seg -range 0x00010000 -offset 0x83C70000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs gpu_cmd_fifo/S_AXI/Mem0] SEG_RasterIX_command_fifo
+    create_bd_addr_seg -range 0x00010000 -offset 0x83C80000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs gpu_cmd_fifo/S_AXI_FULL/Mem1] SEG_RasterIX_command_data
   } else {
     create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_1/m_axi_s2mm] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_processing_system7_0_HP3_DDR_LOWOCM
   }

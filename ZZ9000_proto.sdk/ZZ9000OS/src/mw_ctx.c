@@ -311,8 +311,9 @@ static void mw_rix_fifo_drain(void *context)
 
 #if MINIGL_RIX_DMA
 /* Core1 owns this program.  Commands are cache-cleaned by rix_drv.  Each
- * 16-word source burst is stored as single-beat fixed-destination writes;
- * the backend's start-up self-test must pass before any packet uses it. */
+ * 16-word source burst is stored as one 16-beat INCR burst into the FIFO's
+ * AXI4 data window; the backend's start-up self-test must pass before any
+ * packet uses it. */
 static uint8_t mw_rix_dma_program[128] __attribute__((aligned(64)));
 
 static void mw_rix_dma_barrier(void)
@@ -329,9 +330,12 @@ static unsigned mw_rix_dma_word(uint8_t *program, unsigned offset, uint32_t valu
     return offset;
 }
 
+/* PL330 CCR (DDI0424 3.3.14): incrementing 4-byte source and destination
+ * beats, `words`-beat bursts on both sides. */
 static uint32_t mw_rix_dma_ccr(uint32_t words)
 {
-    return 1U | (2U << 1U) | ((words - 1U) << 4U) | (2U << 15U);
+    return 1U | (2U << 1U) | ((words - 1U) << 4U) |
+           (1U << 14U) | (2U << 15U) | ((words - 1U) << 18U);
 }
 
 static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
@@ -339,7 +343,7 @@ static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
 {
     uint8_t *program = mw_rix_dma_program;
     uint32_t blocks = words / 16U, tail = words % 16U, attempt;
-    unsigned offset = 0U, body, store, loop;
+    unsigned offset = 0U, body, loop;
 
     (void)context;
     if (source == 0U || words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS ||
@@ -347,28 +351,26 @@ static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
         return 0;
     program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_SAR;
     offset = mw_rix_dma_word(program, offset, (uint32_t)source);
-    program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_DAR;
-    offset = mw_rix_dma_word(program, offset, MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFD);
+    /* DAR increments through each burst, so it is reloaded before every
+     * DMAST: the FIFO decodes TDFD only at the data window base. */
     if (blocks != 0U) {
         program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_CCR;
         offset = mw_rix_dma_word(program, offset, mw_rix_dma_ccr(16U));
-        program[offset++] = MW_RIX_PL330_DMALP | 2U; program[offset++] = (uint8_t)(blocks - 1U);
+        program[offset++] = MW_RIX_PL330_DMALP; program[offset++] = (uint8_t)(blocks - 1U);
         body = offset; program[offset++] = MW_RIX_PL330_DMALD;
-        program[offset++] = MW_RIX_PL330_DMALP; program[offset++] = 15U;
-        store = offset; program[offset++] = MW_RIX_PL330_DMAST;
+        program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_DAR;
+        offset = mw_rix_dma_word(program, offset, MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFD);
+        program[offset++] = MW_RIX_PL330_DMAST;
         loop = offset; program[offset++] = MW_RIX_PL330_DMALPEND | 0x10U;
-        program[offset++] = (uint8_t)(loop - store);
-        loop = offset; program[offset++] = MW_RIX_PL330_DMALPEND | 0x14U;
         program[offset++] = (uint8_t)(loop - body);
     }
     if (tail != 0U) {
         program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_CCR;
         offset = mw_rix_dma_word(program, offset, mw_rix_dma_ccr(tail));
         program[offset++] = MW_RIX_PL330_DMALD;
-        program[offset++] = MW_RIX_PL330_DMALP; program[offset++] = (uint8_t)(tail - 1U);
-        store = offset; program[offset++] = MW_RIX_PL330_DMAST;
-        loop = offset; program[offset++] = MW_RIX_PL330_DMALPEND | 0x10U;
-        program[offset++] = (uint8_t)(loop - store);
+        program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_DAR;
+        offset = mw_rix_dma_word(program, offset, MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFD);
+        program[offset++] = MW_RIX_PL330_DMAST;
     }
     program[offset++] = MW_RIX_PL330_DMAWMB; program[offset++] = MW_RIX_PL330_DMAEND;
     if (offset > sizeof(mw_rix_dma_program))
@@ -502,7 +504,8 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.fifo_write = mw_rix_fifo_write;
     /* GP1's RasterIX section is strongly ordered in the BSP table.  The FIFO
      * accepts posted Device writes; map it Device-bufferable and pair every
-     * packet commit with a DSB in the driver. */
+     * packet commit with a DSB in the driver.  The 1 MiB section covers the
+     * register window and the TDFD data window above it. */
     Xil_SetTlbAttributes((INTPTR)MINIGL_RIX_FIFO_BASE, DEVICE_MEMORY);
     platform.fifo_write_words = mw_rix_fifo_write_words;
     platform.fifo_drain = mw_rix_fifo_drain;

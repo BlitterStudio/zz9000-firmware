@@ -178,27 +178,31 @@ module tb_zz9k_rasterix;
 
 `ifdef FIFO_PATH
     // The real command ingress of the EF image: GP1 (AXI3, FCLK1 25 MHz)
-    // -> ps7_0_axi_periph -> M07 RasterIX CSR / M08 axi_fifo_mm_s -> TX
-    // stream, generated from zz9000_project.tcl by fifo_path/fifo_path.tcl.
+    // -> ps7_0_axi_periph -> M07 RasterIX CSR / M08 axi_fifo_mm_s registers
+    // (AXI4-Lite) / M09 axi_fifo_mm_s TDFD data window (AXI4) -> TX stream,
+    // generated from zz9000_project.tcl by fifo_path/fifo_path.tcl.
     // The GP1 master replays <scene>.fifo, the packets rix_drv.c commits,
-    // as FIFO_TRANSPORT=mmio (single INCR stores, each waiting for its
-    // response like strongly-ordered CPU stores), pl330 (the firmware's
-    // PL330 program: single-beat FIXED stores to TDFD, posted, then the
-    // DMAWMB wait), burst16 (16-beat FIXED bursts to TDFD) or pl330-early
-    // (the pre-fix completion race: TLF written before the DMA payload).
+    // as FIFO_TRANSPORT=mmio (single INCR stores to the data window, each
+    // waiting for its response like strongly-ordered CPU stores), pl330 (the
+    // firmware's PL330 program: CPU header stores, then 16-beat INCR bursts
+    // of 4-byte beats, each from the window base, posted, then the DMAWMB
+    // wait) or pl330-early (the pre-fix completion race: TLF written before
+    // the DMA payload).
     localparam [31:0] GP_CSR = 32'h83c6_0000;
     localparam [31:0] GP_FIFO = 32'h83c7_0000;
+    localparam [31:0] GP_FIFO_DATA = 32'h83c8_0000;
     localparam [31:0] FIFO_ISR = 32'h00;
     localparam [31:0] FIFO_TDFR = 32'h08;
     localparam [31:0] FIFO_TDFV = 32'h0c;
-    localparam [31:0] FIFO_TDFD = 32'h10;
     localparam [31:0] FIFO_TLF = 32'h14;
     localparam [31:0] FIFO_ISR_TSE = 32'h0200_0000;
     localparam [31:0] FIFO_ISR_ERRORS = 32'h1200_0000;
-    localparam [1:0] BURST_FIXED = 2'b00;
     localparam [1:0] BURST_INCR = 2'b01;
     localparam integer FIFO_TRACE_WORDS = 65536;
     localparam integer FIFO_TRACE_PACKETS = 1024;
+    // A FIFO packet is at most RIX_DRV_FIFO_PACKET_WORDS (248) plus the two
+    // DSE header words.
+    localparam integer RIX_PACKET_BEATS = 250;
 
     reg gp_clk;
     reg gp_resetn;
@@ -284,7 +288,12 @@ module tb_zz9k_rasterix;
     end
 
     // Every accepted stream beat must be the next committed TDFD word, with
-    // TLAST exactly on each packet's final word.
+    // TLAST exactly on each packet's final word.  The first packet with a
+    // PL330 payload is printed as streamed (FIFO_PATH_PACKET).
+    reg [31:0] fifo_observed [0:RIX_PACKET_BEATS-1];
+    integer fifo_observed_count;
+    integer fifo_packet_shown;
+    integer k_show;
     always @(posedge clk) begin
         if (resetn && s_cmd_axis_tvalid && s_cmd_axis_tready) begin
             if (fifo_stream_beats >= fifo_total_words)
@@ -296,7 +305,21 @@ module tb_zz9k_rasterix;
             if (s_cmd_axis_tlast !== (fifo_stream_beats == fifo_packet_end))
                 $fatal(1, "FIFO_PATH stream word %0d has TLAST=%b", fifo_stream_beats,
                        s_cmd_axis_tlast);
+            if (fifo_observed_count < RIX_PACKET_BEATS)
+                fifo_observed[fifo_observed_count] = s_cmd_axis_tdata;
+            fifo_observed_count = fifo_observed_count + 1;
             if (fifo_stream_beats == fifo_packet_end) begin
+                if (!fifo_packet_shown && fifo_packet_dma_words[fifo_stream_packet] != 0) begin
+                    fifo_packet_shown = 1;
+                    $write("FIFO_PATH_PACKET packet=%0d words=%0d dma_first=%0d dma_words=%0d tlast_at=%0d:",
+                           fifo_stream_packet, fifo_observed_count,
+                           fifo_packet_dma_first[fifo_stream_packet],
+                           fifo_packet_dma_words[fifo_stream_packet], fifo_observed_count - 1);
+                    for (k_show = 0; k_show < fifo_observed_count; k_show = k_show + 1)
+                        $write(" %08x", fifo_observed[k_show]);
+                    $write("\n");
+                end
+                fifo_observed_count = 0;
                 fifo_stream_packet = fifo_stream_packet + 1;
                 if (fifo_stream_packet < fifo_packets)
                     fifo_packet_end = fifo_packet_end + fifo_packet_words[fifo_stream_packet];
@@ -304,6 +327,49 @@ module tb_zz9k_rasterix;
             fifo_stream_beats = fifo_stream_beats + 1;
         end
     end
+
+    // The FIFO's AXI4 data interface (S_AXI_FULL, behind GP1 M09) decodes
+    // TDFD by an exact AWADDR compare with C_AXI4_BASEADDR and supports INCR
+    // bursts only (PG080), so every write must start at the window base as
+    // an INCR burst of 4-byte beats.  A write elsewhere is never accepted, so
+    // it is checked when presented rather than when accepted.  The probes are
+    // the block design's Verilog M09 nets (the FIFO itself is VHDL).
+`define FIFO_PATH_M09(sig) fifo_path.rix_fifo_path_i.ps7_0_axi_periph_M09_AXI_``sig
+    integer fifo_axi4_bursts;
+    integer fifo_axi4_beats;
+    integer fifo_axi4_len [1:16];
+    always @(posedge clk) begin
+        if (resetn && `FIFO_PATH_M09(AWVALID)) begin
+            if (`FIFO_PATH_M09(AWADDR) !== GP_FIFO_DATA ||
+                `FIFO_PATH_M09(AWBURST) !== BURST_INCR ||
+                `FIFO_PATH_M09(AWSIZE) !== 3'd2 ||
+                `FIFO_PATH_M09(AWLEN) > 8'd15)
+                $fatal(1, "FIFO_PATH S_AXI_FULL write addr=%08x burst=%0d size=%0d len=%0d",
+                       `FIFO_PATH_M09(AWADDR), `FIFO_PATH_M09(AWBURST),
+                       `FIFO_PATH_M09(AWSIZE), `FIFO_PATH_M09(AWLEN));
+            if (`FIFO_PATH_M09(AWREADY)) begin
+                fifo_axi4_bursts = fifo_axi4_bursts + 1;
+                fifo_axi4_len[`FIFO_PATH_M09(AWLEN) + 1] =
+                    fifo_axi4_len[`FIFO_PATH_M09(AWLEN) + 1] + 1;
+            end
+        end
+        if (resetn && `FIFO_PATH_M09(WVALID) && `FIFO_PATH_M09(WREADY))
+            fifo_axi4_beats = fifo_axi4_beats + 1;
+    end
+    task fifo_axi4_report;
+        integer len;
+        begin
+            if (fifo_axi4_beats != fifo_total_words)
+                $fatal(1, "FIFO_PATH S_AXI_FULL took %0d beats for %0d committed words",
+                       fifo_axi4_beats, fifo_total_words);
+            $write("FIFO_PATH_AXI4 bursts=%0d beats=%0d by_length:", fifo_axi4_bursts, fifo_axi4_beats);
+            for (len = 1; len <= 16; len = len + 1)
+                if (fifo_axi4_len[len] != 0) $write(" %0dx%0d", len, fifo_axi4_len[len]);
+            $write("\n");
+            if (fifo_transport == "pl330" && fifo_axi4_len[16] == 0)
+                $fatal(1, "FIFO_PATH pl330 replay produced no 16-beat burst");
+        end
+    endtask
 
     task load_fifo_trace;
         input [8*512-1:0] name;
@@ -334,6 +400,11 @@ module tb_zz9k_rasterix;
             fifo_stream_beats = 0;
             fifo_stream_packet = 0;
             fifo_packet_end = fifo_packet_words[0] - 1;
+            fifo_observed_count = 0;
+            fifo_packet_shown = 0;
+            fifo_axi4_bursts = 0;
+            fifo_axi4_beats = 0;
+            for (k = 1; k <= 16; k = k + 1) fifo_axi4_len[k] = 0;
         end
     endtask
 
@@ -399,7 +470,9 @@ module tb_zz9k_rasterix;
             data = gp_rdata;
         end
     endtask
-    // The payload the firmware hands to its PL330 callback.
+    // The payload the firmware hands to its PL330 callback, as its program
+    // stores it: 16-beat INCR bursts of 4-byte beats (a shorter tail), DAR
+    // reloaded to the data window base before each, all posted.
     task fifo_dma;
         input integer first;
         input integer words;
@@ -407,8 +480,8 @@ module tb_zz9k_rasterix;
         begin
             n = 0;
             while (n < words) begin
-                beats = (fifo_transport == "burst16") ? ((words - n) < 16 ? (words - n) : 16) : 1;
-                gp_write(GP_FIFO | FIFO_TDFD, BURST_FIXED, beats, first + n, 0);
+                beats = (words - n) < 16 ? (words - n) : 16;
+                gp_write(GP_FIFO_DATA, BURST_INCR, beats, first + n, 0);
                 n = n + beats;
             end
             gp_wait_writes;
@@ -1061,7 +1134,7 @@ module tb_zz9k_rasterix;
                 if (fifo_transport == "pl330-early") begin
                     if (dma == 0) $fatal(1, "pl330-early needs a DMA packet");
                     for (n = 0; n < first; n = n + 1)
-                        gp_write(GP_FIFO | FIFO_TDFD, BURST_INCR, 1, base + n, 0);
+                        gp_write(GP_FIFO_DATA, BURST_INCR, 1, base + n, 0);
                     gp_wait_writes;
                     gp_store(GP_FIFO | FIFO_TLF, words * 4);
                     fifo_dma(base + first, dma);
@@ -1080,7 +1153,7 @@ module tb_zz9k_rasterix;
                         fifo_dma(base + n, dma);
                         n = n + dma;
                     end else begin
-                        gp_write(GP_FIFO | FIFO_TDFD, BURST_INCR, 1, base + n, 0);
+                        gp_write(GP_FIFO_DATA, BURST_INCR, 1, base + n, 0);
                         gp_wait_writes;
                         n = n + 1;
                     end
@@ -1267,8 +1340,8 @@ module tb_zz9k_rasterix;
         if (!$value$plusargs("FIFO=%s", fifo_file)) $fatal(1, "FIFO_PATH needs FIFO=<scene>.fifo");
         if (!$value$plusargs("FIFO_TRANSPORT=%s", fifo_transport)) fifo_transport = "mmio";
         if (fifo_transport != "mmio" && fifo_transport != "pl330" &&
-            fifo_transport != "burst16" && fifo_transport != "pl330-early")
-            $fatal(1, "FIFO_TRANSPORT must be mmio, pl330, burst16 or pl330-early");
+            fifo_transport != "pl330-early")
+            $fatal(1, "FIFO_TRANSPORT must be mmio, pl330 or pl330-early");
         load_fifo_trace(fifo_file);
 `else
         s_axi_awaddr = 0; s_axi_awprot = 0; s_axi_awvalid = 0; s_axi_wdata = 0; s_axi_wstrb = 0; s_axi_wvalid = 0; s_axi_bready = 1;
@@ -1409,6 +1482,7 @@ module tb_zz9k_rasterix;
                                    fifo_stream_beats, fifo_total_words);
                         $display("FIFO_PATH packets=%0d words=%0d streamed exactly",
                                  fifo_packets, fifo_total_words);
+                        fifo_axi4_report;
 `else
                                  $test$plusargs("DMA_BURST") ? "dma-fixed" : "mmio");
 `endif

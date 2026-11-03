@@ -26,8 +26,8 @@ Each scene sets the 640×480 RGB565 color target and Z16 depth target, then
 performs a single full-target color/depth `MEMSET` and renders directly to
 DDR.  No scene emits IF bands, offsets, `READ`, segment `MEMSET`, or `COMMIT`.
 The testbench submits each DSE packet through the FIFO TX stream model; the
-`DMA_BURST` plusarg uses the same committed packet boundaries as a fixed-
-destination PL330 producer.
+`DMA_BURST` plusarg uses the same committed packet boundaries as a PL330
+producer.
 
 The default DDR model accepts one render read or write transaction at a time.
 It deasserts read-address readiness every fifth cycle, write-address
@@ -73,8 +73,8 @@ bit-exact (maximum channel delta 0 and coverage mismatches 0).
 | `ef-stress` | 2,130,632 | 1,479,957 | 30.5% | 2,089,551 | 1,479,241 | 29.2% | 2,130,632 | 1,479,957 | 30.5% |
 | `ef-texenv` | 526,104 | 423,854 | 19.4% | 526,121 | 423,896 | 19.4% | 526,104 | 423,854 | 19.4% |
 
-`DMA_BURST=1` labels the same committed packet boundaries as a fixed-destination
-PL330 producer. The FIFO path below exercises the actual GP1 command ingress.
+`DMA_BURST=1` labels the same committed packet boundaries as a PL330
+producer. The FIFO path below exercises the actual GP1 command ingress.
 
 ### Real FIFO command path
 
@@ -89,8 +89,10 @@ PL330 producer. The FIFO path below exercises the actual GP1 command ingress.
 | `ef-stress` | 2,150,930 | 1,500,262 | 30.3% | 2,145,162 | 1,494,430 | 30.3% | 2,144,210 | 1,493,542 | 30.3% |
 | `ef-texenv` | 535,582 | 433,310 | 19.1% | 533,014 | 430,742 | 19.2% | 532,610 | 430,338 | 19.2% |
 
-The FIFO-path run also verified that each `pl330-early` submission was rejected
-with `ISR.TSE` before any command word streamed.
+These cycle counts predate the AXI4 TDFD data window; the FIFO PL330 and
+burst16 columns used the AXI4-Lite `TDFD` (single-beat and 16-beat FIXED
+stores).  The FIFO-path run also verified that each `pl330-early` submission
+was rejected with `ISR.TSE` before any command word streamed.
 
 ### Randomized shared DDR (`ef-stress`)
 
@@ -113,15 +115,18 @@ flat-primary-colour rendering.
 
 The stream-level harness feeds the RasterIX command stream directly.  With
 `FIFO_PATH` defined, the testbench instead drives the real EF command ingress
-from an AXI3 GP1 master: `ps7_0_axi_periph` (AXI3 to AXI4-Lite protocol
-converter, crossbar, and the clock converters to the 100 MHz RasterIX clock on
-M07/M08) and `gpu_cmd_fifo` (`axi_fifo_mm_s`), whose TX stream feeds the
-wrapper.  GP1 runs at 25 MHz.  `fifo_path/fifo_path.tcl` builds that block
-design from `zz9000_project.tcl --rasterix --rasterix-variant ef`, copying both
-cells from the real `zz9000_ps` design; it fails unless the copied
-interconnect matches the real one cell for cell and configuration for
-configuration.  CSR accesses go through M07 at the real `0x83c60000` window,
-FIFO accesses through M08 at `0x83c70000`.
+from an AXI3 GP1 master: `ps7_0_axi_periph` (crossbar with AXI4-Lite
+converters, and the clock converters to the 100 MHz RasterIX clock on
+M07/M08/M09) and `gpu_cmd_fifo` (`axi_fifo_mm_s` with the AXI4 data
+interface), whose TX stream feeds the wrapper.  GP1 runs at 25 MHz.
+`fifo_path/fifo_path.tcl` builds that block design from `zz9000_project.tcl
+--rasterix --rasterix-variant ef`, copying both cells from the real
+`zz9000_ps` design; it fails unless the copied interconnect matches the real
+one cell for cell and configuration for configuration, M08 feeds the FIFO's
+AXI4-Lite `S_AXI` and M09 its AXI4 `S_AXI_FULL` at `0x83c80000`.  CSR accesses
+go through M07 at the real `0x83c60000` window, FIFO register accesses
+through M08 at `0x83c70000`, and every `TDFD` word through M09 at
+`0x83c80000`.
 
 The generator also writes `<scene>.fifo`: the exact FIFO packets
 `rix_drv.c` commits for the scene (`P <words> <dma-first> <dma-words>` plus
@@ -129,14 +134,15 @@ the TDFD words), including which payload the firmware hands to its PL330
 callback.  The testbench waits for `TDFV`, stages each packet, commits it with
 `TLF`, and fails if `ISR` then reports `TSE` or `TPOE`; it also checks every
 accepted stream beat and its `TLAST` against the committed packets and that
-every committed word streamed.  `FIFO_TRANSPORT` selects how the payload
-reaches `TDFD`:
+every committed word streamed.  A monitor on the FIFO's `S_AXI_FULL` fails on
+any write that does not start at `0x83c80000` as an INCR burst of 4-byte
+beats, and reports the accepted bursts by length.  `FIFO_TRANSPORT` selects
+how the payload reaches `TDFD`:
 
 | Transport | GP1 traffic |
 | --- | --- |
-| `mmio` | One single-beat INCR store per word, each waiting for its response (strongly ordered CPU stores). |
-| `pl330` | The firmware's PL330 program: single-beat FIXED stores, posted back to back, then the DMAWMB wait before `TLF`. |
-| `burst16` | 16-beat FIXED bursts (shorter tail), posted, then the wait before `TLF`. |
+| `mmio` | One single-beat INCR store to `0x83c80000` per word, each waiting for its response (strongly ordered CPU stores). |
+| `pl330` | The firmware's PL330 program: header words as CPU stores, then the payload as 16-beat INCR bursts of 4-byte beats (shorter tail), each from `0x83c80000`, posted back to back, then the DMAWMB wait before `TLF`. |
 | `pl330-early` | The pre-fix completion race: `TLF` written after the header words, before the DMA payload.  The run passes only if `ISR.TSE` is set and nothing streamed, the failure mode observed on hardware. |
 
 `run_scenes.sh` (or `run_fifo_path.sh`) builds the design once with

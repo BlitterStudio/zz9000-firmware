@@ -8,8 +8,10 @@
 # S_AXI_GP1 those of processing_system7_0/M_AXI_GP1, M00..M07 those of the
 # slave each master interface feeds, M_AXIS_CMD the FIFO's TX stream, and
 # the clocks those of FCLK1 (GP1 and the interconnect) and FCLK0 (FIFO,
-# RasterIX).  The interconnect's internal topology after validation must
-# match the real one exactly, or the script fails.
+# RasterIX).  M08 (FIFO registers, AXI4-Lite) and M09 (FIFO TDFD data
+# window, AXI4) stay connected to gpu_cmd_fifo.  The interconnect's internal
+# topology after validation must match the real one exactly, or the script
+# fails.
 #
 # usage: vivado -mode batch -source fifo_path.tcl -tclargs <repo> <work-dir>
 # Output: <work-dir>/export/xsim (export_simulation compile lists) and
@@ -80,7 +82,7 @@ set rix_clock [config_of [get_bd_pins processing_system7_0/FCLK_CLK0]]
 # Real slave behind each master interface and its address window.
 set data_segments [get_bd_addr_segs -of_objects [get_bd_addr_spaces processing_system7_0/Data]]
 set masters {}
-for {set index 0} {$index < 9} {incr index} {
+for {set index 0} {$index < 10} {incr index} {
   set mi [format M%02d_AXI $index]
   set peer [find_bd_objs -relation connected_to -thru_hier [get_bd_intf_pins ps7_0_axi_periph/$mi]]
   if {[llength $peer] != 1} { fail "$mi connects to '$peer'" }
@@ -96,14 +98,25 @@ for {set index 0} {$index < 9} {incr index} {
   puts "FIFO_PATH_MI: $mi -> [get_property PATH $peer] [lindex $window 0]/[lindex $window 1]"
 }
 if {[lindex [lindex $masters 8] 1] ne "/gpu_cmd_fifo/S_AXI"} {
-  fail "M08_AXI does not feed gpu_cmd_fifo"
+  fail "M08_AXI does not feed gpu_cmd_fifo/S_AXI"
+}
+if {[lindex [lindex $masters 9] 1] ne "/gpu_cmd_fifo/S_AXI_FULL"} {
+  fail "M09_AXI does not feed gpu_cmd_fifo/S_AXI_FULL"
+}
+if {[lindex [lindex [lindex $masters 9] 3] 0] != 0x83C80000} {
+  fail "gpu_cmd_fifo/S_AXI_FULL is not at 0x83C80000"
+}
+if {[get_property CONFIG.C_DATA_INTERFACE_TYPE [get_bd_cells gpu_cmd_fifo]] != 1} {
+  fail "gpu_cmd_fifo does not use the AXI4 data interface"
 }
 set cells [get_bd_cells {ps7_0_axi_periph gpu_cmd_fifo}]
 
 create_bd_design rix_fifo_path
 copy_bd_objs -from_design zz9000_ps / $cells
-if {[get_bd_intf_nets -quiet -of_objects [get_bd_intf_pins gpu_cmd_fifo/S_AXI]] eq ""} {
-  connect_bd_intf_net [get_bd_intf_pins ps7_0_axi_periph/M08_AXI] [get_bd_intf_pins gpu_cmd_fifo/S_AXI]
+foreach {mi slave} {M08_AXI S_AXI M09_AXI S_AXI_FULL} {
+  if {[get_bd_intf_nets -quiet -of_objects [get_bd_intf_pins gpu_cmd_fifo/$slave]] eq ""} {
+    connect_bd_intf_net [get_bd_intf_pins ps7_0_axi_periph/$mi] [get_bd_intf_pins gpu_cmd_fifo/$slave]
+  }
 }
 
 set gp_aclk [create_bd_port -dir I -type clk gp_aclk]
@@ -138,17 +151,21 @@ for {set index 0} {$index < 7} {incr index} {
   connect_bd_net $gp_aresetn [get_bd_pins ps7_0_axi_periph/[format M%02d_ARESETN $index]]
 }
 connect_bd_net $rix_aclk [get_bd_pins ps7_0_axi_periph/M07_ACLK] \
-  [get_bd_pins ps7_0_axi_periph/M08_ACLK] [get_bd_pins gpu_cmd_fifo/s_axi_aclk]
+  [get_bd_pins ps7_0_axi_periph/M08_ACLK] [get_bd_pins ps7_0_axi_periph/M09_ACLK] \
+  [get_bd_pins gpu_cmd_fifo/s_axi_aclk]
 connect_bd_net $rix_aresetn [get_bd_pins ps7_0_axi_periph/M07_ARESETN] \
-  [get_bd_pins ps7_0_axi_periph/M08_ARESETN] [get_bd_pins gpu_cmd_fifo/s_axi_aresetn]
+  [get_bd_pins ps7_0_axi_periph/M08_ARESETN] [get_bd_pins ps7_0_axi_periph/M09_ARESETN] \
+  [get_bd_pins gpu_cmd_fifo/s_axi_aresetn]
 
 set space [get_bd_addr_spaces S_AXI_GP1]
-for {set index 0} {$index < 9} {incr index} {
+for {set index 0} {$index < 10} {incr index} {
   set window [lindex [lindex $masters $index] 3]
   if {$index < 8} {
     set target [get_bd_addr_segs [format M%02d_AXI $index]/Reg]
-  } else {
+  } elseif {$index == 8} {
     set target [get_bd_addr_segs gpu_cmd_fifo/S_AXI/Mem0]
+  } else {
+    set target [get_bd_addr_segs gpu_cmd_fifo/S_AXI_FULL/Mem1]
   }
   create_bd_addr_seg -offset [lindex $window 0] -range [lindex $window 1] $space $target [format SEG_M%02d $index]
 }

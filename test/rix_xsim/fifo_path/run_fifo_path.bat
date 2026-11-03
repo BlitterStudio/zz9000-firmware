@@ -10,7 +10,7 @@ rem       Generate the block design, export it, and compile and elaborate it
 rem       with the RasterIX EF wrapper and tb_zz9k_rasterix (FIFO_PATH).
 rem   run_fifo_path.bat run WORK OUT SCENE LATENCY TRANSPORT
 rem       Replay OUT\SCENE.hex as the packets in OUT\SCENE.fifo over TRANSPORT
-rem       (mmio, pl330, burst16 or pl330-early); writes OUT\SCENE_fifo-TRANSPORT.ppm
+rem       (mmio, pl330 or pl330-early); writes OUT\SCENE_fifo-TRANSPORT.ppm
 rem       (except pl330-early) and OUT\SCENE_fifo-TRANSPORT.xsim.log.
 rem
 rem WORK must be an absolute path without spaces.

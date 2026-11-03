@@ -44,22 +44,25 @@ static void fifo_write(void *context, uint32_t offset, uint32_t value)
 {
     struct model *model = context;
 
+    if (offset == RIX_DRV_FIFO_TDFD) {
+        assert(model->word_count < LOG_WORDS);
+        model->words[model->word_count++] = value;
+        if (model->event_count < sizeof(model->events))
+            model->events[model->event_count++] = 'h';
+        return;
+    }
+    assert(offset / 4U < FIFO_WORDS);
     if (offset == RIX_DRV_FIFO_ISR) {
         model->fifo[0] &= ~value;
         return;
     }
     model->fifo[offset / 4U] = value;
-    if (offset == RIX_DRV_FIFO_TDFD) {
-        assert(model->word_count < LOG_WORDS);
-        model->words[model->word_count++] = value;
-    } else if (offset == RIX_DRV_FIFO_TLF) {
+    if (offset == RIX_DRV_FIFO_TLF) {
         assert(model->packet_count < 8U);
         model->lengths[model->packet_count++] = value;
+        if (model->event_count < sizeof(model->events))
+            model->events[model->event_count++] = 't';
     }
-    if (offset == RIX_DRV_FIFO_TDFD && model->event_count < sizeof(model->events))
-        model->events[model->event_count++] = 'h';
-    else if (offset == RIX_DRV_FIFO_TLF && model->event_count < sizeof(model->events))
-        model->events[model->event_count++] = 't';
 }
 
 static void cache_clean(void *context, uintptr_t address, size_t bytes)

@@ -837,7 +837,8 @@ static void rix_raster_fifo_write(void *context, uint32_t offset, uint32_t value
 {
     struct rix_raster_model *model = context;
 
-    model->fifo[offset / 4U] = value;
+    if (offset != RIX_DRV_FIFO_TDFD)
+        model->fifo[offset / 4U] = value;
     if (offset == RIX_DRV_FIFO_TDFR) {
         model->fifo_packet_words = 0U;
     } else if (offset == RIX_DRV_FIFO_TDFD) {

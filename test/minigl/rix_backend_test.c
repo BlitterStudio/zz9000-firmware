@@ -135,7 +135,8 @@ static void fifo_write(void *context, uint32_t offset, uint32_t value)
 {
     struct model *model = context;
 
-    model->fifo[offset / sizeof(uint32_t)] = value;
+    if (offset != RIX_DRV_FIFO_TDFD)
+        model->fifo[offset / sizeof(uint32_t)] = value;
     if (offset == RIX_DRV_FIFO_TDFR) {
         assert(value == RIX_DRV_FIFO_RESET_KEY);
         model->fifo_words = 0U;

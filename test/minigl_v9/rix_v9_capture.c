@@ -192,7 +192,8 @@ static void fifo_write(void *context, uint32_t offset, uint32_t value)
 {
     struct capture_model *model = (struct capture_model *)context;
 
-    model->fifo[offset / 4U] = value;
+    if (offset != RIX_DRV_FIFO_TDFD)
+        model->fifo[offset / 4U] = value;
     if (offset == RIX_DRV_FIFO_TDFR) {
         model->packet_words = 0U;
     } else if (offset == RIX_DRV_FIFO_TDFD) {

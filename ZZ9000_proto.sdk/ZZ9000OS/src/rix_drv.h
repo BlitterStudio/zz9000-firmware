@@ -27,12 +27,18 @@
 #define RIX_DRV_CSR_DBG_LAST_AR  0x4cU
 #define RIX_DRV_CSR_DBG_LAST_ARID 0x50U
 
+/* FIFO offsets are relative to the AXI4-Lite register window (0x83c70000).
+ * TDFD is on the core's AXI4 data interface (PG080 C_DATA_INTERFACE_TYPE=1:
+ * TDFD at C_AXI4_BASEADDR + 0x0000), whose 64 KiB window the block design
+ * places directly above the register window.  The core decodes TDFD by an
+ * exact AWADDR == C_AXI4_BASEADDR compare, so every single write and every
+ * INCR burst MUST start at this offset; a burst then covers up to 4 KiB. */
 #define RIX_DRV_FIFO_ISR         0x00U
 #define RIX_DRV_FIFO_IER         0x04U
 #define RIX_DRV_FIFO_TDFR        0x08U
 #define RIX_DRV_FIFO_TDFV        0x0cU
-#define RIX_DRV_FIFO_TDFD        0x10U
 #define RIX_DRV_FIFO_TLF         0x14U
+#define RIX_DRV_FIFO_TDFD        0x10000U
 #define RIX_DRV_FIFO_RESET_KEY   0xa5U
 #define RIX_DRV_FIFO_PACKET_WORDS 248U
 

@@ -160,12 +160,13 @@ if [ "$MATRIX" != fifo ]; then
   echo "dma-fixed transport reproduces every mmio frame bit-exactly"
 fi
 
-# Real command ingress: GP1 (AXI3) -> ps7_0_axi_periph (AXI3 -> AXI4-Lite,
-# crossbar, clock converters) -> gpu_cmd_fifo (axi_fifo_mm_s) -> RasterIX EF,
-# generated from zz9000_project.tcl, replaying the packets rix_drv.c commits
-# over MMIO stores, the firmware's PL330 program (single-beat FIXED stores)
-# and 16-beat FIXED bursts.  Every frame must equal the fifo-mmio frame and,
-# in the full matrix, the stream-level mmio frame bit for bit.
+# Real command ingress: GP1 (AXI3) -> ps7_0_axi_periph (crossbar, AXI4-Lite
+# FIFO registers on M08, AXI4 TDFD data window on M09, clock converters) ->
+# gpu_cmd_fifo (axi_fifo_mm_s) -> RasterIX EF, generated from
+# zz9000_project.tcl, replaying the packets rix_drv.c commits over MMIO
+# stores and the firmware's PL330 program (16-beat INCR bursts).  Every
+# frame must equal the fifo-mmio frame and, in the full matrix, the
+# stream-level mmio frame bit for bit.
 if [ "$MATRIX" != stream ]; then
   FIFO_WORK=$OUT/fifo_path_work
   FIFO_WORK_WIN=$(cygpath -w "$FIFO_WORK" 2>/dev/null || printf '%s\n' "$FIFO_WORK" | tr '/' '\\')
@@ -177,7 +178,7 @@ if [ "$MATRIX" != stream ]; then
   }
   grep -E "^FIFO_PATH_TOPOLOGY" "$OUT/fifo_path_build.log"
   for scene in $SCENES; do
-    for transport in mmio pl330 burst16; do
+    for transport in mmio pl330; do
       run_fifo_scene "$scene" "$transport"
       compare_scene "$scene" "$OUT_WIN/${scene}_fifo-$transport.ppm" "fifo-$transport"
       cmp "$OUT/${scene}_fifo-mmio.ppm" "$OUT/${scene}_fifo-$transport.ppm"
@@ -187,7 +188,7 @@ if [ "$MATRIX" != stream ]; then
     fi
     run_fifo_scene "$scene" pl330-early
   done
-  echo "fifo path delivers every committed packet over mmio, pl330 and burst16 bit-exactly"
+  echo "fifo path delivers every committed packet over mmio and pl330 bit-exactly"
   echo "fifo path rejects the early-TLF race with ISR.TSE and streams nothing"
 fi
 echo "all scenes match their references"

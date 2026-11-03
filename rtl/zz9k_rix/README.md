@@ -35,21 +35,30 @@ nor an IRQ replaces a rendered-pixel fence.  Firmware MUST use the RasterIX
 pixel after cache maintenance.  The renderer's `fb_swapped` acknowledgement is
 held high; streams MUST NOT request `OP_FRAMEBUFFER SWAP`.
 
-## Command FIFO (`0x83c70000`)
+## Command FIFO (registers `0x83c70000`, data `0x83c80000`)
 
 The command ingress is Xilinx `axi_fifo_mm_s` TX-only, depth 512 words.  Its
 `AXI_STR_TXD` connects directly to RasterIX `s_cmd_axis` (FrameStreamingCore
 ST0).  It is the sole normal command route: `zz9k_cmd_fetcher` and all
 `CMD_ADDR`/`CMD_WORDS`/`CMD_START` protocol are absent.
 
-| Offset | Name | Usage |
+The FIFO uses the AXI4 data interface (`C_DATA_INTERFACE_TYPE=1`): its
+registers stay on the AXI4-Lite `S_AXI` at `0x83c70000` (GP1 `M08`), while
+`TDFD` moves to the AXI4 `S_AXI_FULL` window at `0x83c80000` (GP1 `M09`), which
+accepts INCR bursts.  The core decodes `TDFD` by comparing each write's
+`AWADDR` with the window base exactly, so every single store and every burst
+MUST start at `0x83c80000`; an INCR burst then covers its beats.
+
+| Address | Name | Usage |
 | --- | --- | --- |
-| `0x00` | `ISR` | W1C FIFO completion/error state; not wired to a PS IRQ |
-| `0x04` | `IER` | Leave zero; completion is polled |
-| `0x08` | `TDFR` | Write `0xa5` to reset/discard staged TX words |
-| `0x0c` | `TDFV` | Vacancy in 32-bit words; after reset hardware reserves four words, so normal maximum is 508 |
-| `0x10` | `TDFD` | 32-bit little-endian FIFO word write port |
-| `0x14` | `TLF` | Commit packet length in bytes; this starts stream delivery |
+| `0x83c70000` | `ISR` | W1C FIFO completion/error state; not wired to a PS IRQ |
+| `0x83c70004` | `IER` | Leave zero; completion is polled |
+| `0x83c70008` | `TDFR` | Write `0xa5` to reset/discard staged TX words |
+| `0x83c7000c` | `TDFV` | Vacancy in 32-bit words; after reset hardware reserves four words, so normal maximum is 508 |
+| `0x83c70014` | `TLF` | Commit packet length in bytes; this starts stream delivery |
+| `0x83c80000` | `TDFD` | 32-bit little-endian FIFO word write port (single stores or INCR bursts starting here) |
+
+`rix_drv.h` expresses `TDFD` as offset `0x10000` from the register window.
 
 A packet is one complete FrameStreamingCore ST0 sequence: write its two-word
 DSE header/address followed by parser payload words to `TDFD`, execute the
@@ -64,22 +73,22 @@ mismatches too, until `TDFR`.  Firmware reads `ISR` after each `TLF` and
 fails the packet on `TSE` or `TPOE` (bit 28).  `TDFR` leaves `ISR` intact, so
 enable clears stale error bits (W1C).
 
-PL330 transport uses a non-cacheable DDR source and fixed destination
-`0x83c70010` (`TDFD`), with no peripheral handshake.  Firmware MUST first run
-an integrity/count self-test.  It MAY use 16-beat, 32-bit fixed-destination
-bursts only if that test passes; otherwise it MUST use single-beat stores.
-It MUST wait for DMA completion and only then write `TLF`.  FIFO reset is
-separate from CSR soft reset.
+PL330 transport uses a non-cacheable DDR source and the `TDFD` data window,
+with no peripheral handshake.  Firmware MUST first run an integrity/count
+self-test.  It MUST wait for DMA completion and only then write `TLF`.  FIFO
+reset is separate from CSR soft reset.
 
 Firmware (`rix_drv.c`, `mw_ctx.c`) writes every word over MMIO by default.
-`./build_firmware.sh --rasterix MINIGL_RIX_DMA=1` builds the PL330 variant:
-it streams payloads of at least 16 words with PL330 channel 6 as 16-word
-source bursts stored as single-beat fixed-destination writes, waits for the
-debug interface to go idle (DMAGO executed), then for channel Stopped with
-`SAR` at the end of the source, and only then writes `TLF`.  At backend
-start-up it sends one DMA packet of parser NOPs plus a fence `MEMSET`; unless
-the commit is accepted, the fence pixel lands and the renderer drains, it
-soft-resets the renderer, resets the FIFO and uses MMIO.
+`./build_firmware.sh --rasterix MINIGL_RIX_DMA=1` builds the in-firmware PL330
+variant; the module host (`zzm_minigl_host.c`) uses the same program.  Both
+stream payloads of at least 16 words with PL330 channel 6: per 16 words one
+16-beat, 4-byte INCR source burst and one 16-beat INCR destination burst
+(shorter tail), with `DAR` reloaded to `0x83c80000` before each store.  They
+wait for the debug interface to go idle (DMAGO executed), then for channel
+Stopped with `SAR` at the end of the source, and only then write `TLF`.  At
+backend start-up it sends one DMA packet of parser NOPs plus a fence `MEMSET`;
+unless the commit is accepted, the fence pixel lands and the renderer drains,
+it soft-resets the renderer, resets the FIFO and uses MMIO.
 
 ## EF target rules
 

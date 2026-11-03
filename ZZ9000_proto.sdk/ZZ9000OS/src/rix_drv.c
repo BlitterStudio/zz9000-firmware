@@ -181,9 +181,10 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
         for (index = 0U; index < words; ++index)
             rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, commands[index]);
     }
-    /* The FIFO data aperture is Device bufferable on hardware.  Ensure all
-     * TDFD writes have reached the GP1 interconnect before TLF establishes
-     * the packet boundary required by PG080. */
+    /* The FIFO data aperture is Device bufferable on hardware, and TDFD (the
+     * AXI4 data window) and TLF (the register window) are separate GP1
+     * interconnect ports.  Ensure all TDFD writes have completed before TLF
+     * establishes the packet boundary required by PG080. */
     if (driver->fifo_drain != NULL)
         driver->fifo_drain(driver->context);
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, driver->last_packet_bytes);

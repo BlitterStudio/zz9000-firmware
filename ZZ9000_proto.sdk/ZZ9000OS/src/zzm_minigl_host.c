@@ -56,7 +56,9 @@
 #define ZZM_RIX_PL330_RD_SAR 0u
 #define ZZM_RIX_PL330_RD_CCR 1u
 #define ZZM_RIX_PL330_RD_DAR 2u
-#define ZZM_RIX_FIFO_TDFD 0x10U
+/* TDFD is the base of the FIFO's AXI4 data window (rix_drv.h): the core
+ * accepts a write or INCR burst only when its address is exactly this. */
+#define ZZM_RIX_FIFO_DATA (ZZM_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFD)
 #define ZZM_RIX_FIFO_TDFR 0x08U
 #define ZZM_RIX_FIFO_ISR 0x00U
 #define ZZM_RIX_FIFO_RESET_KEY 0xa5U
@@ -190,9 +192,13 @@ static unsigned pl330_word(uint8_t *program, unsigned offset, uint32_t value)
     return offset;
 }
 
+/* PL330 CCR (DDI0424 3.3.14): incrementing 4-byte source and destination
+ * beats, `words`-beat bursts on both sides, so each DMAST is one INCR burst
+ * into the AXI4 data window. */
 static uint32_t pl330_ccr(uint32_t words)
 {
-    return 1U | (2U << 1U) | ((words - 1U) << 4U) | (2U << 15U);
+    return 1U | (2U << 1U) | ((words - 1U) << 4U) |
+           (1U << 14U) | (2U << 15U) | ((words - 1U) << 18U);
 }
 
 static void graphics_pl330_abort(void *context)
@@ -217,7 +223,7 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
 {
     uint8_t *program = g_pl330_program;
     uint32_t blocks = words / 16U, tail = words % 16U, attempt;
-    unsigned offset = 0U, body, store, loop;
+    unsigned offset = 0U, body, loop;
 
     (void)context;
     if (!g_pl330_claimed || source == 0U || words == 0U ||
@@ -226,26 +232,23 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
     program[offset++] = ZZM_RIX_PL330_DMAMOV;
     program[offset++] = ZZM_RIX_PL330_RD_SAR;
     offset = pl330_word(program, offset, (uint32_t)source);
-    program[offset++] = ZZM_RIX_PL330_DMAMOV;
-    program[offset++] = ZZM_RIX_PL330_RD_DAR;
-    offset = pl330_word(program, offset, ZZM_RIX_FIFO_BASE + ZZM_RIX_FIFO_TDFD);
+    /* One DMALD/DMAST pair per burst.  DAR increments through each burst,
+     * so it is reloaded before every DMAST: the FIFO decodes TDFD only at
+     * the window base. */
     if (blocks != 0U) {
         program[offset++] = ZZM_RIX_PL330_DMAMOV;
         program[offset++] = ZZM_RIX_PL330_RD_CCR;
         offset = pl330_word(program, offset, pl330_ccr(16U));
-        program[offset++] = ZZM_RIX_PL330_DMALP | 2U;
+        program[offset++] = ZZM_RIX_PL330_DMALP;
         program[offset++] = (uint8_t)(blocks - 1U);
         body = offset;
         program[offset++] = ZZM_RIX_PL330_DMALD;
-        program[offset++] = ZZM_RIX_PL330_DMALP;
-        program[offset++] = 15U;
-        store = offset;
+        program[offset++] = ZZM_RIX_PL330_DMAMOV;
+        program[offset++] = ZZM_RIX_PL330_RD_DAR;
+        offset = pl330_word(program, offset, ZZM_RIX_FIFO_DATA);
         program[offset++] = ZZM_RIX_PL330_DMAST;
         loop = offset;
         program[offset++] = ZZM_RIX_PL330_DMALPEND | 0x10U;
-        program[offset++] = (uint8_t)(loop - store);
-        loop = offset;
-        program[offset++] = ZZM_RIX_PL330_DMALPEND | 0x14U;
         program[offset++] = (uint8_t)(loop - body);
     }
     if (tail != 0U) {
@@ -253,13 +256,10 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
         program[offset++] = ZZM_RIX_PL330_RD_CCR;
         offset = pl330_word(program, offset, pl330_ccr(tail));
         program[offset++] = ZZM_RIX_PL330_DMALD;
-        program[offset++] = ZZM_RIX_PL330_DMALP;
-        program[offset++] = (uint8_t)(tail - 1U);
-        store = offset;
+        program[offset++] = ZZM_RIX_PL330_DMAMOV;
+        program[offset++] = ZZM_RIX_PL330_RD_DAR;
+        offset = pl330_word(program, offset, ZZM_RIX_FIFO_DATA);
         program[offset++] = ZZM_RIX_PL330_DMAST;
-        loop = offset;
-        program[offset++] = ZZM_RIX_PL330_DMALPEND | 0x10U;
-        program[offset++] = (uint8_t)(loop - store);
     }
     program[offset++] = ZZM_RIX_PL330_DMAWMB;
     program[offset++] = ZZM_RIX_PL330_DMAEND;
@@ -459,7 +459,7 @@ static int graphics_v3_fifo_write_words(const uint32_t *words,
     if (!g_caps.has_rasterix_ef || words == 0 || word_count == 0)
         return 0;
     for (i = 0U; i < word_count; ++i)
-        graphics_fifo_write(0, ZZM_RIX_FIFO_TDFD, words[i]);
+        graphics_fifo_write(0, RIX_DRV_FIFO_TDFD, words[i]);
     return 1;
 #else
     (void)words;
