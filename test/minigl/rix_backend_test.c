@@ -259,6 +259,20 @@ static int dma_stream(void *context, uintptr_t source, uint32_t words,
     return 1;
 }
 
+/* The async launcher used for overlapped packets: same delivery, retired
+ * before the next packet. */
+static int dma_start_async(void *context, uintptr_t source, uint32_t words,
+                           uint32_t burst_words)
+{
+    return dma_stream(context, source, words, burst_words);
+}
+
+static int dma_retire(void *context)
+{
+    (void)context;
+    return 1;
+}
+
 static ZZ9KMiniGLPacketSetState state16(void)
 {
     ZZ9KMiniGLPacketSetState state;
@@ -811,7 +825,7 @@ static void test_timeout_diagnostics(void)
 }
 
 static void init_dma_backend(MiniGLRixBackend *backend, struct model *model,
-                             int fail)
+                             int fail, int async)
 {
     MiniGLRixPlatform io;
 
@@ -825,6 +839,10 @@ static void init_dma_backend(MiniGLRixBackend *backend, struct model *model,
     model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
     io = platform(model);
     io.dma_stream = dma_stream;
+    if (async) {
+        io.dma_start_async = dma_start_async;
+        io.dma_retire = dma_retire;
+    }
     minigl_rix_backend_init(backend, &io);
     assert(minigl_rix_backend_available(backend));
 }
@@ -838,13 +856,14 @@ static void test_dma_self_test_gates_transport(void)
     MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
     MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
     unsigned dma_packets;
+    int async;
 
     g_self_test_failures = 0U;
     g_diagnostic_snapshots = 0U;
     g_rix_test_log = count_log;
 
     /* A delivered DMA packet lands the self-test fence and keeps the PL330. */
-    init_dma_backend(&backend, &model, 0);
+    init_dma_backend(&backend, &model, 0, 0);
     assert(backend.driver.dma_stream != NULL);
     assert(model.dma_packets == 1U && model.packet_count == 1U);
     assert(*(uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
@@ -858,19 +877,23 @@ static void test_dma_self_test_gates_transport(void)
     assert(minigl_rix_backend_drain(&backend));
     assert(model.dma_packets > dma_packets);
 
-    /* A failed DMA packet falls back to MMIO after a reset, not to the CPU. */
-    init_dma_backend(&backend, &model, 1);
-    assert(backend.driver.dma_stream == NULL);
-    assert(model.dma_packets == 1U && model.packet_count == 0U);
-    assert(g_self_test_failures == 1U && g_diagnostic_snapshots == 1U);
-    assert(model.csr[RIX_DRV_CSR_CONTROL / 4U] == RIX_DRV_CONTROL_ENABLE);
-    assert(model.fifo_words == 0U && model.fifo_vacancy == FIFO_CAPACITY);
-    minigl_rix_backend_set_state(&backend, &state);
-    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
-    assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
-    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
-    assert(minigl_rix_backend_drain(&backend));
-    assert(model.dma_packets == 1U && model.packet_count >= 1U);
+    /* A failed DMA packet falls back to MMIO after a reset, not to the CPU,
+     * whichever DMA entry points the platform offered. */
+    for (async = 0; async < 2; ++async) {
+        g_self_test_failures = 0U;
+        g_diagnostic_snapshots = 0U;
+        init_dma_backend(&backend, &model, 1, async);
+        assert(model.dma_packets == 1U && model.packet_count == 0U);
+        assert(g_self_test_failures == 1U && g_diagnostic_snapshots == 1U);
+        assert(model.csr[RIX_DRV_CSR_CONTROL / 4U] == RIX_DRV_CONTROL_ENABLE);
+        assert(model.fifo_words == 0U && model.fifo_vacancy == FIFO_CAPACITY);
+        minigl_rix_backend_set_state(&backend, &state);
+        assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+        assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+        assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+        assert(minigl_rix_backend_drain(&backend));
+        assert(model.dma_packets == 1U && model.packet_count >= 1U);
+    }
     g_rix_test_log = NULL;
 }
 

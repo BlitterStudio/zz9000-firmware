@@ -1251,6 +1251,18 @@ static int backend_dma_self_test(MiniGLRixBackend *backend)
     return 1;
 }
 
+/* Both DMA entry points go together: with only the blocking one cleared, the
+ * async launcher kept feeding packets to the PL330 the self-test had just
+ * failed on, so the "MMIO" fallback disabled the backend on its first
+ * submit (kit 35, 68k: submit error -4 at the command buffer address). */
+static void backend_drop_dma(MiniGLRixBackend *backend)
+{
+    backend->driver.dma_stream = NULL;
+    backend->driver.dma_start_async = NULL;
+    backend->driver.dma_retire = NULL;
+    backend->driver.pending_dma = 0;
+}
+
 static int backend_select_transport(MiniGLRixBackend *backend)
 {
     static int logged = 0;
@@ -1260,14 +1272,17 @@ static int backend_select_transport(MiniGLRixBackend *backend)
      * DMA channel faulted.  None of that resets with the module loaded
      * once and reused across sessions, and the self-test below then
      * failed and disabled the backend until reboot.  Recover the engine
-     * before testing it. */
+     * before testing it.  The platform abort leaves the renderer disabled
+     * (CONTROL=0), so the driver re-enables it here: without that the
+     * self-test packet sat in the FIFO, its fence never landed, and every
+     * 68k session ran on the CPU rasterizer. */
 #if defined(MINIGL_MODULE) || (defined(__arm__) && !defined(MINIGL_HOST_TEST))
     minigl_platform_abort_graphics();
-#else
+#endif
     (void)rix_drv_recover(&backend->driver, RIX_TIMEOUT, 1);
     (void)rix_drv_enable(&backend->driver);
-#endif
-    if (backend->driver.dma_stream == NULL) {
+    if (backend->driver.dma_stream == NULL &&
+        backend->driver.dma_start_async == NULL) {
         if (!logged)
             RIX_LOG("[RasterIX] transport: MMIO\r\n");
         logged = 1;
@@ -1283,7 +1298,7 @@ static int backend_select_transport(MiniGLRixBackend *backend)
             (unsigned long)backend->driver.last_error_status);
     backend_log_diagnostics(backend, 0U);
     backend->submitted_command_words[0] = 0U;
-    backend->driver.dma_stream = NULL;
+    backend_drop_dma(backend);
     /* Discard the renderer and FIFO state of the failed packet, then clear
      * the FIFO's sticky errors before MMIO packets are committed. */
     return rix_drv_recover(&backend->driver, RIX_TIMEOUT, 1) == RIX_DRV_OK &&
@@ -2027,7 +2042,7 @@ void minigl_rix_backend_abandon(MiniGLRixBackend *backend)
     backend->collecting = 0U;
     backend->frame_active = 0U;
     backend->surface_rgb565 = 0U;
-    backend->driver.dma_stream = NULL;
+    backend_drop_dma(backend);
 }
 const char *minigl_rix_backend_fallback_name(uint32_t reason)
 {

@@ -224,6 +224,13 @@ void minigl_platform_abort_graphics(void)
         if (g_pl330_claimed && g_graphics->pl330_release)
             g_graphics->pl330_release(g_pl330_channel);
         g_pl330_claimed = 0;
+        /* Re-claim now: the claim hard-resets the channel and the FIFO.  Left
+         * to the first DMA start, that reset ran after rix_drv had staged
+         * the packet's two header words in TDFD and wiped them, so the
+         * self-test packet failed its TLF (ISR.TSE, kit 35 68k UART). */
+        if (g_graphics_caps.pl330_available && g_graphics->pl330_claim &&
+            g_graphics->pl330_claim(g_graphics_owner, &g_pl330_channel))
+            g_pl330_claimed = 1;
         g_graphics->csr_write(RIX_DRV_CSR_CONTROL, 0U);
         g_graphics->fifo_write(RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
         g_graphics->barrier();
