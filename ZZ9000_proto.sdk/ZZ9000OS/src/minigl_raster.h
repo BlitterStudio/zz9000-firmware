@@ -82,6 +82,7 @@ int minigl_raster_present_is_bottom_up(void);
 int minigl_raster_finish(void);
 int minigl_raster_drain(void);
 void minigl_raster_target_discard(void);
+void minigl_raster_target_retire(void);
 int minigl_raster_buffer_to_rgba(uint32_t *rgba, size_t pixels);
 /* Retires all queued engine work before its card-pool buffers are released. */
 int minigl_raster_quiesce(void);

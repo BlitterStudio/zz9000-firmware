@@ -539,6 +539,18 @@ void minigl_raster_target_discard(void)
     g_rix_depth_z16 = 1;
 }
 
+/* A swap leaves the drained frame in RasterIX's format; the caller tracks
+ * that per buffer (mw_ctx color_rgb565[]).  Forgetting the surface here
+ * keeps the rebind from converting a frame the presenter reads as 565.
+ * Every other rebind (context switch, draw buffer, resize) still converts
+ * through minigl_raster_finish, so no buffer leaves the rasterizer in a
+ * format nobody records. */
+void minigl_raster_target_retire(void)
+{
+    g_rix_surface = NULL;
+    g_rix_surface_rgb565 = 0;
+}
+
 /* Convert one colour buffer that is not the active raster target: the same
  * drain + 565->RGBA pass minigl_raster_finish applies to g_buffers.color. */
 int minigl_raster_buffer_to_rgba(uint32_t *rgba, size_t pixels)
@@ -660,7 +672,7 @@ int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers)
         return 0;
     }
     if (g_buffers.color != NULL && g_buffers.color != buffers->color &&
-        !minigl_raster_drain())
+        !minigl_raster_finish())
         return 0;
     g_buffers = *buffers;
     if (g_rix_surface != g_buffers.color) {

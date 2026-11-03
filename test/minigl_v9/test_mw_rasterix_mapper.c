@@ -476,6 +476,7 @@ static void assert_blit_pixels(mw_ctx *c, const uint8_t expected[16])
     memset(span, 0, sizeof(span));
     assert(mw_host_request(c, request, sizeof(request), span, sizeof(span),
                            &reply_bytes) == MW_STATUS_OK);
+    assert(reply_bytes == sizeof(span));
     assert(memcmp(span, expected, sizeof(span)) == 0);
 }
 
@@ -654,6 +655,45 @@ static void test_rasterix_rgb565_span_presentation(void)
     mw_host_destroy(c);
     minigl_raster_set_rix_platform(NULL);
     printf("PASS: test_rasterix_rgb565_span_presentation\n");
+}
+
+/* A second context binding its buffers must not strand the first one's
+ * RasterIX frame: the first context's next packet still reads its pixels. */
+static void test_second_context_keeps_first_frame(void)
+{
+    static const uint8_t expected[16] = {
+        0xffU, 0x00U, 0x00U, 0xffU, 0x00U, 0xffU, 0x00U, 0xffU,
+        0x00U, 0x00U, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU
+    };
+    static const uint8_t sync_payload[4] = { 0U, 0U, 0U, 0U };
+    MiniGLRixPlatform platform;
+    mw_ctx *first;
+    mw_ctx *second;
+    uint16_t *surface;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    first = mw_host_create(2U, 2U);
+    assert(first != NULL);
+    first->state.target.latest = first->state.target.back;
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    surface = (uint16_t *)first->color_buffers[first->state.target.latest];
+    surface[0] = 0xf800U;
+    surface[1] = 0x07e0U;
+    surface[2] = 0x001fU;
+    surface[3] = 0xffffU;
+
+    second = mw_host_create(2U, 2U);
+    assert(second != NULL);
+    assert(submit_single_command(second, MW_SYNC, sync_payload, 4U) == MW_STATUS_OK);
+    assert(submit_single_command(first, MW_SYNC, sync_payload, 4U) == MW_STATUS_OK);
+    assert_blit_pixels(first, expected);
+
+    mw_host_destroy(second);
+    mw_host_destroy(first);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_second_context_keeps_first_frame\n");
 }
 
 static void test_backend_disable_cpu_rerender_present(void)
@@ -869,6 +909,7 @@ int main(void)
     test_cpu_present_orientation();
     test_rasterix_rgb565_present_orientation();
     test_rasterix_rgb565_span_presentation();
+    test_second_context_keeps_first_frame();
     test_backend_disable_cpu_rerender_present();
     test_wire_cpu_handoffs();
     test_watertight_tessellation();

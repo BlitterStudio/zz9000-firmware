@@ -1762,6 +1762,7 @@ target_allocation_failed:
 
         uint32_t outgoing = c->state.target.back;
         int gpu_format = minigl_raster_present_is_rgb565();
+        int retire = gpu_format && c->state.target.buffer_count > 1U;
 
         if (!minigl_raster_drain()) {
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
@@ -1770,10 +1771,15 @@ target_allocation_failed:
         c->state.target.front = c->state.target.back;
         c->state.target.latest = c->state.target.front;
         c->state.target.back = (c->state.target.back + 1U) % c->state.target.buffer_count;
+        if (retire)
+            minigl_raster_target_retire();
         if (!mw_ctx_bind_buffers(c)) {
             c->state.target.front = old_front;
             c->state.target.latest = old_latest;
             c->state.target.back = old_back;
+            /* Still bound to the outgoing buffer: re-adopt its 565 frame. */
+            if (retire)
+                minigl_raster_target_discard();
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }
