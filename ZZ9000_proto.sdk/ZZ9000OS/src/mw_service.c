@@ -350,7 +350,7 @@ void mw_service_init(void)
         mw_wire_st32(&g_status->heartbeat, 0);
         mw_wire_st32(&g_status->capabilities,
                      MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS |
-                     MW_CAP_ASYNC_PRESENT);
+                     MW_CAP_ASYNC_PRESENT | MW_CAP_DRAW_PACKED_INDEXED);
     }
     g_doorbell_pending = 0;
     MW_DIAG("[MGL9] publish magic=%08lx wire=%u transport=%u slot_bytes=%lu slots=%lu caps=%08lx\n",

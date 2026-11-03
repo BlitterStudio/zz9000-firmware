@@ -88,6 +88,116 @@ static void test_draw_packed_decode(void)
 
     printf("PASS: test_draw_packed_decode\n");
 }
+static void test_draw_packed_indexed_decode(void)
+{
+    uint8_t payload[512];
+    float scratch[10 * MW_OBJECT_WORDS];
+    uint32_t mode, count;
+    uint32_t format;
+
+    memset(payload, 0, sizeof(payload));
+
+    /* Format: position 3D (3 words), RGBA8 color, 2D Tex0 (ST), no tex1, constant normal */
+    format = (1U << MW_PACK_POSITION) |
+             (1U << MW_PACK_COLOR)    |
+             (1U << MW_PACK_TEX0)     |
+             (0U << MW_PACK_TEX1)     |
+             (0U << MW_PACK_NORMAL);
+
+    uint32_t v_count = 4;
+    uint32_t idx_count = 6;
+
+    mw_put_be32(payload, 4);          /* GL_TRIANGLES */
+    mw_put_be32(payload + 4, v_count);
+    mw_put_be32(payload + 8, idx_count);
+    mw_put_be32(payload + 12, format);
+
+    /* Constants: tex1 (4 floats), normal (3 floats) */
+    uint8_t *q = payload + 16;
+    mw_put_bef(q, 0.0f); q += 4; /* tex1 S */
+    mw_put_bef(q, 0.0f); q += 4; /* tex1 T */
+    mw_put_bef(q, 0.0f); q += 4; /* tex1 P */
+    mw_put_bef(q, 1.0f); q += 4; /* tex1 Q */
+    mw_put_bef(q, 0.0f); q += 4; /* normal X */
+    mw_put_bef(q, 0.0f); q += 4; /* normal Y */
+    mw_put_bef(q, 1.0f); q += 4; /* normal Z */
+
+    /* 4 Unique Vertices:
+     * V0: (0, 0, 1), Red (0xff0000ff), (0.0, 0.0)
+     * V1: (1, 0, 1), Green (0x00ff00ff), (1.0, 0.0)
+     * V2: (1, 1, 1), Blue (0x0000ffff), (1.0, 1.0)
+     * V3: (0, 1, 1), Yellow (0xffff00ff), (0.0, 1.0)
+     */
+    mw_put_bef(q, 0.0f); q += 4; mw_put_bef(q, 0.0f); q += 4; mw_put_bef(q, 1.0f); q += 4;
+    mw_put_be32(q, 0xff0000ff); q += 4; mw_put_bef(q, 0.0f); q += 4; mw_put_bef(q, 0.0f); q += 4;
+
+    mw_put_bef(q, 1.0f); q += 4; mw_put_bef(q, 0.0f); q += 4; mw_put_bef(q, 1.0f); q += 4;
+    mw_put_be32(q, 0x00ff00ff); q += 4; mw_put_bef(q, 1.0f); q += 4; mw_put_bef(q, 0.0f); q += 4;
+
+    mw_put_bef(q, 1.0f); q += 4; mw_put_bef(q, 1.0f); q += 4; mw_put_bef(q, 1.0f); q += 4;
+    mw_put_be32(q, 0x0000ffff); q += 4; mw_put_bef(q, 1.0f); q += 4; mw_put_bef(q, 1.0f); q += 4;
+
+    mw_put_bef(q, 0.0f); q += 4; mw_put_bef(q, 1.0f); q += 4; mw_put_bef(q, 1.0f); q += 4;
+    mw_put_be32(q, 0xffff00ff); q += 4; mw_put_bef(q, 0.0f); q += 4; mw_put_bef(q, 1.0f); q += 4;
+
+    /* 6 Indices: Tri 0 = (0, 1, 2), Tri 1 = (0, 2, 3) */
+    uint8_t *idx_ptr = q;
+    mw_put_be16(idx_ptr + 0, 0);
+    mw_put_be16(idx_ptr + 2, 1);
+    mw_put_be16(idx_ptr + 4, 2);
+    mw_put_be16(idx_ptr + 6, 0);
+    mw_put_be16(idx_ptr + 8, 2);
+    mw_put_be16(idx_ptr + 10, 3);
+    q += 12; /* 6 * 2 = 12 bytes (multiple of 4, no extra pad) */
+
+    size_t bytes = q - payload;
+
+    /* 1. Successful decode */
+    memset(scratch, 0, sizeof(scratch));
+    assert(mw_decode_draw_packed_indexed(payload, bytes, scratch, &mode, &count));
+    assert(mode == 4);
+    assert(count == 6);
+
+    /* Verify expanded Tri 0: Vert 0 (X=0, Y=0, R=1, G=0, B=0) */
+    assert(fabsf(scratch[0] - 0.0f) < 1e-5f);
+    assert(fabsf(scratch[1] - 0.0f) < 1e-5f);
+    assert(fabsf(scratch[2] - 1.0f) < 1e-5f);
+    assert(fabsf(scratch[4] - 1.0f) < 1e-5f); /* R */
+    assert(fabsf(scratch[5] - 0.0f) < 1e-5f); /* G */
+
+    /* Vert 1 (X=1, Y=0, R=0, G=1, B=0) */
+    float *v1 = scratch + MW_OBJECT_WORDS;
+    assert(fabsf(v1[0] - 1.0f) < 1e-5f);
+    assert(fabsf(v1[1] - 0.0f) < 1e-5f);
+    assert(fabsf(v1[4] - 0.0f) < 1e-5f);
+    assert(fabsf(v1[5] - 1.0f) < 1e-5f);
+
+    /* Vert 5 in scratch = Tri 1 Vert 3 (X=0, Y=1, R=1, G=1, B=0) */
+    float *v5 = scratch + 5 * MW_OBJECT_WORDS;
+    assert(fabsf(v5[0] - 0.0f) < 1e-5f);
+    assert(fabsf(v5[1] - 1.0f) < 1e-5f);
+    assert(fabsf(v5[4] - 1.0f) < 1e-5f); /* Yellow R=1 */
+    assert(fabsf(v5[5] - 1.0f) < 1e-5f); /* Yellow G=1 */
+
+    /* 2. Out-of-range index rejected without touching memory */
+    mw_put_be16(idx_ptr + 10, 4); /* Index 4 >= v_count (4) */
+    memset(scratch, 0xAA, sizeof(scratch));
+    assert(!mw_decode_draw_packed_indexed(payload, bytes, scratch, &mode, &count));
+    for (size_t k = 0; k < sizeof(scratch); ++k) {
+        assert(((const uint8_t *)scratch)[k] == 0xAA);
+    }
+    mw_put_be16(idx_ptr + 10, 3); /* Restore valid index */
+
+    /* 3. Truncated payload rejected without touching memory */
+    memset(scratch, 0x55, sizeof(scratch));
+    assert(!mw_decode_draw_packed_indexed(payload, bytes - 4, scratch, &mode, &count));
+    for (size_t k = 0; k < sizeof(scratch); ++k) {
+        assert(((const uint8_t *)scratch)[k] == 0x55);
+    }
+
+    printf("PASS: test_draw_packed_indexed_decode\n");
+}
+
 
 static void test_draw_array_raw_decode(void)
 {
@@ -199,6 +309,7 @@ static void test_lowered_area_and_outline(void)
 int main(void)
 {
     test_draw_packed_decode();
+    test_draw_packed_indexed_decode();
     test_draw_array_raw_decode();
     test_lowered_area_and_outline();
     printf("All draw tests PASSED!\n");

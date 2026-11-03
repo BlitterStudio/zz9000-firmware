@@ -425,13 +425,40 @@ static int mw_valid_command(uint32_t opcode, const uint8_t *p, size_t bytes)
         return bytes == 24 && !(mw_be32(p) & ~3U) && mw_finite(p + 4, 5);
 
     case MW_DRAW_OBJECT:
-    case MW_DRAW_PACKED: {
+    case MW_DRAW_PACKED:
+    case MW_DRAW_PACKED_INDEXED: {
         uint32_t mode, count;
         uint64_t expected;
 
         if (bytes < 8)
             return 0;
         mode = mw_be32(p);
+
+        if (opcode == MW_DRAW_PACKED_INDEXED) {
+            uint32_t v_count, idx_count, constants, words;
+            const uint8_t *idx_ptr;
+            uint32_t i;
+
+            if (bytes < 16)
+                return 0;
+            v_count = mw_be32(p + 4);
+            idx_count = mw_be32(p + 8);
+            if (!mw_packed_layout(mw_be32(p + 12), &constants, &words))
+                return 0;
+            expected = 16 + 4 * ((uint64_t)constants + (uint64_t)v_count * words) +
+                       (((uint64_t)idx_count * 2 + 3) & ~3ULL);
+            if (bytes != expected || !v_count || v_count > MW_MAX_VERTICES ||
+                !idx_count || idx_count > MW_MAX_VERTICES || mode > 6 ||
+                (mode == 1 && (idx_count % 2 != 0)) || (mode == 4 && (idx_count % 3 != 0)))
+                return 0;
+            idx_ptr = p + 16 + 4 * (constants + v_count * words);
+            for (i = 0; i < idx_count; ++i) {
+                if (mw_be16(idx_ptr + i * 2) >= v_count)
+                    return 0;
+            }
+            return 1;
+        }
+
         count = mw_be32(p + 4);
 
         if (opcode == MW_DRAW_PACKED) {

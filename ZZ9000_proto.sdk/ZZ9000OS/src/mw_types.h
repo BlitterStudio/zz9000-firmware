@@ -39,6 +39,7 @@
 #define MW_TEXTURE_SUB_RAW          17UL
 #define MW_DRAW_ARRAY_RAW           18UL
 #define MW_COLOR_TABLE              20UL
+#define MW_DRAW_PACKED_INDEXED      21UL
 /* Capability-gated direct-card presentation. Its payload is an MW_BLIT
  * request followed by the board-relative destination offset and span bytes,
  * so old v9 implementations reject it and the library keeps BRIDGE_BLIT. */
@@ -143,6 +144,17 @@ static inline void mw_put_be32(uint8_t *p, uint32_t v)
     p[1] = (uint8_t)(v >> 16);
     p[2] = (uint8_t)(v >> 8);
     p[3] = (uint8_t)v;
+}
+
+static inline uint16_t mw_be16(const uint8_t *p)
+{
+    return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
+
+static inline void mw_put_be16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
 }
 
 static inline float mw_bef(const uint8_t *p)

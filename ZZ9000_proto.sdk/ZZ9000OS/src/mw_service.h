@@ -24,6 +24,7 @@ extern "C" {
 /* MW_PRESENT_SPAN is an additive v9 extension; it is never inferred from
  * the wire version because an older v9 peer must keep synchronous BLIT. */
 #define MW_CAP_ASYNC_PRESENT        (1U << 20)
+#define MW_CAP_DRAW_PACKED_INDEXED  (1U << 21)
 
 #define MW_DEFAULT_SLOT_CAPACITY_Z3 (256U * 1024U)
 #define MW_DEFAULT_SLOT_COUNT_Z3    2U
@@ -250,19 +251,6 @@ typedef struct ZZ9KMiniGLTransportDescriptorWire {
 _Static_assert(sizeof(ZZ9KMiniGLTransportDescriptorWire) ==
                MW_TRANSPORT_DESCRIPTOR_WIRE_BYTES,
                "MiniGL transport descriptor wire size");
-
-
-static inline void mw_put_be16(uint8_t *p, uint16_t v)
-{
-    p[0] = (uint8_t)(v >> 8);
-    p[1] = (uint8_t)v;
-}
-
-
-static inline uint16_t mw_get_be16(const uint8_t *p)
-{
-    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
-}
 
 /* Serialize/deserialize between the native snapshot and the wire image. */
 void mw_service_serialize_transport_descriptor(

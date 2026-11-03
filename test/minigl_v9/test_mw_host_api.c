@@ -416,6 +416,268 @@ static void test_palette_snapshot(void)
     assert(palette[3] == 0x00112233U);
     assert(palette[255] == 0x00aabbccU);
 }
+static void test_draw_packed_indexed_oracle(void)
+{
+    mw_ctx *c = mw_host_create(32, 32);
+    assert(c != NULL);
+
+    uint8_t packet[2048];
+    uint8_t out_packed[32 * 32 * 4];
+    uint8_t out_indexed[32 * 32 * 4];
+
+    float vpos[4][3] = {
+        {-0.7f, -0.7f, 0.0f},
+        { 0.7f, -0.7f, 0.0f},
+        { 0.7f,  0.7f, 0.0f},
+        {-0.7f,  0.7f, 0.0f}
+    };
+    uint32_t vcol[4] = { 0xff0000ff, 0x00ff00ff, 0x0000ffff, 0xffffffff };
+    float vtex[4][2] = {
+        {0.0f, 0.0f},
+        {1.0f, 0.0f},
+        {1.0f, 1.0f},
+        {0.0f, 1.0f}
+    };
+    uint16_t indices_tri[6] = { 0, 1, 2, 0, 2, 3 };
+    uint16_t indices_strip[4] = { 0, 1, 3, 2 };
+
+    /* --- Scenario 1: GL_TRIANGLES with RGBA8 Colour format --- */
+    uint32_t fmt_col = (1U << MW_PACK_POSITION) | (1U << MW_PACK_COLOR) |
+                       (0U << MW_PACK_TEX0) | (0U << MW_PACK_TEX1) | (0U << MW_PACK_NORMAL);
+    {
+        /* 1a. Expanded DRAW_PACKED */
+        memset(packet, 0, sizeof(packet));
+        mw_put_be32(packet, MW_MAGIC); mw_put_be32(packet + 4, MW_VERSION); mw_put_be32(packet + 12, 3);
+        uint8_t *q = packet + 16;
+        mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24); mw_put_be32(q + 8, 3);
+        mw_put_bef(q + 12, 0.0f); mw_put_bef(q + 16, 0.0f); mw_put_bef(q + 20, 0.0f);
+        mw_put_bef(q + 24, 1.0f); mw_put_bef(q + 28, 1.0f); q += 32;
+        uint32_t consts = 11, words = 4;
+        uint32_t pld = 12 + 4 * (consts + 6 * words);
+        mw_put_be32(q, MW_DRAW_PACKED); mw_put_be32(q + 4, pld);
+        mw_put_be32(q + 8, 4); mw_put_be32(q + 12, 6); mw_put_be32(q + 16, fmt_col);
+        uint8_t *cur = q + 20;
+        for (int k = 0; k < 8; ++k) { mw_put_bef(cur, 0.0f); cur += 4; }
+        mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 1.0f); cur += 4;
+        for (int k = 0; k < 6; ++k) {
+            int vi = indices_tri[k];
+            mw_put_bef(cur, vpos[vi][0]); cur += 4;
+            mw_put_bef(cur, vpos[vi][1]); cur += 4;
+            mw_put_bef(cur, vpos[vi][2]); cur += 4;
+            mw_put_be32(cur, vcol[vi]); cur += 4;
+        }
+        q += 8 + pld;
+        mw_put_be32(q, MW_PRESENT); mw_put_be32(q + 4, 0); q += 8;
+        uint32_t tot = q - packet; mw_put_be32(packet + 8, tot);
+        assert(mw_host_submit(c, packet, tot) == MW_STATUS_OK);
+        assert(mw_host_readback_rgba8(c, out_packed, sizeof(out_packed)) == MW_STATUS_OK);
+    }
+    {
+        /* 1b. DRAW_PACKED_INDEXED */
+        memset(packet, 0, sizeof(packet));
+        mw_put_be32(packet, MW_MAGIC); mw_put_be32(packet + 4, MW_VERSION); mw_put_be32(packet + 12, 3);
+        uint8_t *q = packet + 16;
+        mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24); mw_put_be32(q + 8, 3);
+        mw_put_bef(q + 12, 0.0f); mw_put_bef(q + 16, 0.0f); mw_put_bef(q + 20, 0.0f);
+        mw_put_bef(q + 24, 1.0f); mw_put_bef(q + 28, 1.0f); q += 32;
+        uint32_t consts = 11, words = 4, idx_bytes = 12;
+        uint32_t pld = 16 + 4 * (consts + 4 * words) + idx_bytes;
+        mw_put_be32(q, MW_DRAW_PACKED_INDEXED); mw_put_be32(q + 4, pld);
+        mw_put_be32(q + 8, 4); mw_put_be32(q + 12, 4); mw_put_be32(q + 16, 6); mw_put_be32(q + 20, fmt_col);
+        uint8_t *cur = q + 24;
+        for (int k = 0; k < 8; ++k) { mw_put_bef(cur, 0.0f); cur += 4; }
+        mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 1.0f); cur += 4;
+        for (int k = 0; k < 4; ++k) {
+            mw_put_bef(cur, vpos[k][0]); cur += 4;
+            mw_put_bef(cur, vpos[k][1]); cur += 4;
+            mw_put_bef(cur, vpos[k][2]); cur += 4;
+            mw_put_be32(cur, vcol[k]); cur += 4;
+        }
+        for (int k = 0; k < 6; ++k) {
+            mw_put_be16(cur, indices_tri[k]); cur += 2;
+        }
+        q += 8 + pld;
+        mw_put_be32(q, MW_PRESENT); mw_put_be32(q + 4, 0); q += 8;
+        uint32_t tot = q - packet; mw_put_be32(packet + 8, tot);
+        assert(mw_host_submit(c, packet, tot) == MW_STATUS_OK);
+        assert(mw_host_readback_rgba8(c, out_indexed, sizeof(out_indexed)) == MW_STATUS_OK);
+    }
+    assert(memcmp(out_packed, out_indexed, sizeof(out_packed)) == 0);
+
+    /* --- Scenario 2: GL_TRIANGLE_STRIP --- */
+    {
+        /* 2a. Expanded DRAW_PACKED */
+        memset(packet, 0, sizeof(packet));
+        mw_put_be32(packet, MW_MAGIC); mw_put_be32(packet + 4, MW_VERSION); mw_put_be32(packet + 12, 3);
+        uint8_t *q = packet + 16;
+        mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24); mw_put_be32(q + 8, 3);
+        mw_put_bef(q + 12, 0.0f); mw_put_bef(q + 16, 0.0f); mw_put_bef(q + 20, 0.0f);
+        mw_put_bef(q + 24, 1.0f); mw_put_bef(q + 28, 1.0f); q += 32;
+        uint32_t consts = 11, words = 4;
+        uint32_t pld = 12 + 4 * (consts + 4 * words);
+        mw_put_be32(q, MW_DRAW_PACKED); mw_put_be32(q + 4, pld);
+        mw_put_be32(q + 8, 5); /* GL_TRIANGLE_STRIP */
+        mw_put_be32(q + 12, 4); mw_put_be32(q + 16, fmt_col);
+        uint8_t *cur = q + 20;
+        for (int k = 0; k < 8; ++k) { mw_put_bef(cur, 0.0f); cur += 4; }
+        mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 1.0f); cur += 4;
+        for (int k = 0; k < 4; ++k) {
+            int vi = indices_strip[k];
+            mw_put_bef(cur, vpos[vi][0]); cur += 4;
+            mw_put_bef(cur, vpos[vi][1]); cur += 4;
+            mw_put_bef(cur, vpos[vi][2]); cur += 4;
+            mw_put_be32(cur, vcol[vi]); cur += 4;
+        }
+        q += 8 + pld;
+        mw_put_be32(q, MW_PRESENT); mw_put_be32(q + 4, 0); q += 8;
+        uint32_t tot = q - packet; mw_put_be32(packet + 8, tot);
+        assert(mw_host_submit(c, packet, tot) == MW_STATUS_OK);
+        assert(mw_host_readback_rgba8(c, out_packed, sizeof(out_packed)) == MW_STATUS_OK);
+    }
+    {
+        /* 2b. DRAW_PACKED_INDEXED */
+        memset(packet, 0, sizeof(packet));
+        mw_put_be32(packet, MW_MAGIC); mw_put_be32(packet + 4, MW_VERSION); mw_put_be32(packet + 12, 3);
+        uint8_t *q = packet + 16;
+        mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24); mw_put_be32(q + 8, 3);
+        mw_put_bef(q + 12, 0.0f); mw_put_bef(q + 16, 0.0f); mw_put_bef(q + 20, 0.0f);
+        mw_put_bef(q + 24, 1.0f); mw_put_bef(q + 28, 1.0f); q += 32;
+        uint32_t consts = 11, words = 4, idx_bytes = 8;
+        uint32_t pld = 16 + 4 * (consts + 4 * words) + idx_bytes;
+        mw_put_be32(q, MW_DRAW_PACKED_INDEXED); mw_put_be32(q + 4, pld);
+        mw_put_be32(q + 8, 5); /* GL_TRIANGLE_STRIP */
+        mw_put_be32(q + 12, 4); mw_put_be32(q + 16, 4); mw_put_be32(q + 20, fmt_col);
+        uint8_t *cur = q + 24;
+        for (int k = 0; k < 8; ++k) { mw_put_bef(cur, 0.0f); cur += 4; }
+        mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 1.0f); cur += 4;
+        for (int k = 0; k < 4; ++k) {
+            mw_put_bef(cur, vpos[k][0]); cur += 4;
+            mw_put_bef(cur, vpos[k][1]); cur += 4;
+            mw_put_bef(cur, vpos[k][2]); cur += 4;
+            mw_put_be32(cur, vcol[k]); cur += 4;
+        }
+        for (int k = 0; k < 4; ++k) {
+            mw_put_be16(cur, indices_strip[k]); cur += 2;
+        }
+        q += 8 + pld;
+        mw_put_be32(q, MW_PRESENT); mw_put_be32(q + 4, 0); q += 8;
+        uint32_t tot = q - packet; mw_put_be32(packet + 8, tot);
+        assert(mw_host_submit(c, packet, tot) == MW_STATUS_OK);
+        assert(mw_host_readback_rgba8(c, out_indexed, sizeof(out_indexed)) == MW_STATUS_OK);
+    }
+    assert(memcmp(out_packed, out_indexed, sizeof(out_packed)) == 0);
+
+    /* --- Scenario 3: Tex0 (ST) + Tex1 (multitexture ST0 + ST1) format --- */
+    uint32_t fmt_mtex = (1U << MW_PACK_POSITION) | (1U << MW_PACK_COLOR) |
+                        (1U << MW_PACK_TEX0) | (1U << MW_PACK_TEX1) | (0U << MW_PACK_NORMAL);
+    {
+        /* 3a. Expanded DRAW_PACKED */
+        memset(packet, 0, sizeof(packet));
+        mw_put_be32(packet, MW_MAGIC); mw_put_be32(packet + 4, MW_VERSION); mw_put_be32(packet + 12, 3);
+        uint8_t *q = packet + 16;
+        mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24); mw_put_be32(q + 8, 3);
+        mw_put_bef(q + 12, 0.0f); mw_put_bef(q + 16, 0.0f); mw_put_bef(q + 20, 0.0f);
+        mw_put_bef(q + 24, 1.0f); mw_put_bef(q + 28, 1.0f); q += 32;
+        uint32_t consts = 3; /* Normal only */
+        uint32_t words = 3 + 1 + 2 + 2; /* Pos(3) + Col(1) + Tex0(2) + Tex1(2) = 8 */
+        uint32_t pld = 12 + 4 * (consts + 6 * words);
+        mw_put_be32(q, MW_DRAW_PACKED); mw_put_be32(q + 4, pld);
+        mw_put_be32(q + 8, 4); mw_put_be32(q + 12, 6); mw_put_be32(q + 16, fmt_mtex);
+        uint8_t *cur = q + 20;
+        mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 1.0f); cur += 4;
+        for (int k = 0; k < 6; ++k) {
+            int vi = indices_tri[k];
+            mw_put_bef(cur, vpos[vi][0]); cur += 4;
+            mw_put_bef(cur, vpos[vi][1]); cur += 4;
+            mw_put_bef(cur, vpos[vi][2]); cur += 4;
+            mw_put_be32(cur, vcol[vi]); cur += 4;
+            mw_put_bef(cur, vtex[vi][0]); cur += 4;
+            mw_put_bef(cur, vtex[vi][1]); cur += 4;
+            mw_put_bef(cur, vtex[vi][1]); cur += 4; /* S1 */
+            mw_put_bef(cur, vtex[vi][0]); cur += 4; /* T1 */
+        }
+        q += 8 + pld;
+        mw_put_be32(q, MW_PRESENT); mw_put_be32(q + 4, 0); q += 8;
+        uint32_t tot = q - packet; mw_put_be32(packet + 8, tot);
+        assert(mw_host_submit(c, packet, tot) == MW_STATUS_OK);
+        assert(mw_host_readback_rgba8(c, out_packed, sizeof(out_packed)) == MW_STATUS_OK);
+    }
+    {
+        /* 3b. DRAW_PACKED_INDEXED */
+        memset(packet, 0, sizeof(packet));
+        mw_put_be32(packet, MW_MAGIC); mw_put_be32(packet + 4, MW_VERSION); mw_put_be32(packet + 12, 3);
+        uint8_t *q = packet + 16;
+        mw_put_be32(q, MW_CLEAR); mw_put_be32(q + 4, 24); mw_put_be32(q + 8, 3);
+        mw_put_bef(q + 12, 0.0f); mw_put_bef(q + 16, 0.0f); mw_put_bef(q + 20, 0.0f);
+        mw_put_bef(q + 24, 1.0f); mw_put_bef(q + 28, 1.0f); q += 32;
+        uint32_t consts = 3, words = 8, idx_bytes = 12;
+        uint32_t pld = 16 + 4 * (consts + 4 * words) + idx_bytes;
+        mw_put_be32(q, MW_DRAW_PACKED_INDEXED); mw_put_be32(q + 4, pld);
+        mw_put_be32(q + 8, 4); mw_put_be32(q + 12, 4); mw_put_be32(q + 16, 6); mw_put_be32(q + 20, fmt_mtex);
+        uint8_t *cur = q + 24;
+        mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 0.0f); cur += 4; mw_put_bef(cur, 1.0f); cur += 4;
+        for (int k = 0; k < 4; ++k) {
+            mw_put_bef(cur, vpos[k][0]); cur += 4;
+            mw_put_bef(cur, vpos[k][1]); cur += 4;
+            mw_put_bef(cur, vpos[k][2]); cur += 4;
+            mw_put_be32(cur, vcol[k]); cur += 4;
+            mw_put_bef(cur, vtex[k][0]); cur += 4;
+            mw_put_bef(cur, vtex[k][1]); cur += 4;
+            mw_put_bef(cur, vtex[k][1]); cur += 4;
+            mw_put_bef(cur, vtex[k][0]); cur += 4;
+        }
+        for (int k = 0; k < 6; ++k) {
+            mw_put_be16(cur, indices_tri[k]); cur += 2;
+        }
+        q += 8 + pld;
+        mw_put_be32(q, MW_PRESENT); mw_put_be32(q + 4, 0); q += 8;
+        uint32_t tot = q - packet; mw_put_be32(packet + 8, tot);
+        assert(mw_host_submit(c, packet, tot) == MW_STATUS_OK);
+        assert(mw_host_readback_rgba8(c, out_indexed, sizeof(out_indexed)) == MW_STATUS_OK);
+    }
+    assert(memcmp(out_packed, out_indexed, sizeof(out_packed)) == 0);
+
+    /* --- Scenario 4: Rejections leave framebuffer untouched --- */
+    /* Save baseline readback */
+    uint8_t baseline[32 * 32 * 4];
+    memcpy(baseline, out_indexed, sizeof(baseline));
+
+    /* 4a. Out-of-range index */
+    {
+        memset(packet, 0, sizeof(packet));
+        mw_put_be32(packet, MW_MAGIC); mw_put_be32(packet + 4, MW_VERSION); mw_put_be32(packet + 12, 1);
+        uint32_t consts = 11, words = 4, idx_bytes = 12;
+        uint32_t pld = 16 + 4 * (consts + 4 * words) + idx_bytes;
+        mw_put_be32(packet + 16, MW_DRAW_PACKED_INDEXED); mw_put_be32(packet + 20, pld);
+        mw_put_be32(packet + 24, 4); mw_put_be32(packet + 28, 4); mw_put_be32(packet + 32, 6); mw_put_be32(packet + 36, fmt_col);
+        uint8_t *cur = packet + 40;
+        for (int k = 0; k < 11; ++k) { mw_put_bef(cur, 0.0f); cur += 4; }
+        for (uint32_t k = 0; k < 4 * words; ++k) { mw_put_bef(cur, 0.0f); cur += 4; }
+        for (int k = 0; k < 5; ++k) { mw_put_be16(cur, 0); cur += 2; }
+        mw_put_be16(cur, 4); /* Out-of-range index 4 >= v_count 4 */
+        uint32_t tot = 24 + pld; mw_put_be32(packet + 8, tot);
+        assert(mw_host_submit(c, packet, tot) == MW_STATUS_INVALID);
+        assert(mw_host_readback_rgba8(c, out_indexed, sizeof(out_indexed)) == MW_STATUS_OK);
+        assert(memcmp(baseline, out_indexed, sizeof(baseline)) == 0);
+    }
+
+    /* 4b. Truncated payload */
+    {
+        memset(packet, 0, sizeof(packet));
+        mw_put_be32(packet, MW_MAGIC); mw_put_be32(packet + 4, MW_VERSION); mw_put_be32(packet + 12, 1);
+        uint32_t consts = 11, words = 4, idx_bytes = 12;
+        uint32_t pld = 16 + 4 * (consts + 4 * words) + idx_bytes;
+        mw_put_be32(packet + 16, MW_DRAW_PACKED_INDEXED); mw_put_be32(packet + 20, pld - 4);
+        uint32_t tot = 24 + pld - 4; mw_put_be32(packet + 8, tot);
+        assert(mw_host_submit(c, packet, tot) == MW_STATUS_INVALID);
+        assert(mw_host_readback_rgba8(c, out_indexed, sizeof(out_indexed)) == MW_STATUS_OK);
+        assert(memcmp(baseline, out_indexed, sizeof(baseline)) == 0);
+    }
+
+    mw_host_destroy(c);
+    printf("PASS: test_draw_packed_indexed_oracle\n");
+}
+
 
 int main(void)
 {
@@ -426,6 +688,7 @@ int main(void)
     test_draw_triangle_golden();
     test_requests();
     test_glquake_texture_soak();
+    test_draw_packed_indexed_oracle();
     test_palette_snapshot();
     printf("All host API tests PASSED!\n");
     return 0;

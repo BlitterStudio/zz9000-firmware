@@ -226,6 +226,70 @@ static void test_draw_validation_and_nan(void)
 
     printf("PASS: test_draw_validation_and_nan\n");
 }
+static void test_draw_packed_indexed_validation(void)
+{
+    uint8_t packet[512];
+    memset(packet, 0, sizeof(packet));
+
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 12, 1);
+
+    uint32_t format = (1U << MW_PACK_POSITION) | (1U << MW_PACK_COLOR) | (1U << MW_PACK_TEX0);
+    uint32_t v_count = 3;
+    uint32_t idx_count = 3;
+    uint32_t words = 6;
+    uint32_t constants = 7;
+    uint32_t idx_bytes = ((idx_count * 2 + 3) & ~3U);
+    uint32_t payload = 16 + 4 * (constants + v_count * words) + idx_bytes;
+    uint32_t total = 16 + 8 + payload;
+
+    mw_put_be32(packet + 8, total);
+    mw_put_be32(packet + 16, MW_DRAW_PACKED_INDEXED);
+    mw_put_be32(packet + 20, payload);
+    mw_put_be32(packet + 24, 4); /* GL_TRIANGLES */
+    mw_put_be32(packet + 28, v_count);
+    mw_put_be32(packet + 32, idx_count);
+    mw_put_be32(packet + 36, format);
+
+    uint8_t *idx_ptr = packet + 24 + 16 + 4 * (constants + v_count * words);
+    mw_put_be16(idx_ptr, 0);
+    mw_put_be16(idx_ptr + 2, 1);
+    mw_put_be16(idx_ptr + 4, 2);
+    mw_put_be16(idx_ptr + 6, 0);
+
+    assert(mw_validate_packet(packet, total) == MW_STATUS_OK);
+
+    /* Out-of-range index >= v_count */
+    mw_put_be16(idx_ptr + 4, 3);
+    assert(mw_validate_packet(packet, total) == MW_STATUS_INVALID);
+    mw_put_be16(idx_ptr + 4, 2);
+
+    /* Truncated payload */
+    mw_put_be32(packet + 20, payload - 4);
+    mw_put_be32(packet + 8, total - 4);
+    assert(mw_validate_packet(packet, total - 4) == MW_STATUS_INVALID);
+    mw_put_be32(packet + 20, payload);
+    mw_put_be32(packet + 8, total);
+
+    /* Invalid mode > 6 */
+    mw_put_be32(packet + 24, 7);
+    assert(mw_validate_packet(packet, total) == MW_STATUS_INVALID);
+    mw_put_be32(packet + 24, 4);
+
+    /* Non-multiple-of-3 index count for GL_TRIANGLES */
+    mw_put_be32(packet + 32, 4);
+    assert(mw_validate_packet(packet, total) == MW_STATUS_INVALID);
+    mw_put_be32(packet + 32, idx_count);
+
+    /* Zero v_count */
+    mw_put_be32(packet + 28, 0);
+    assert(mw_validate_packet(packet, total) == MW_STATUS_INVALID);
+    mw_put_be32(packet + 28, v_count);
+
+    printf("PASS: test_draw_packed_indexed_validation\n");
+}
+
 
 int main(void)
 {
@@ -233,6 +297,7 @@ int main(void)
     test_opcode_validation();
     test_state_key_validation();
     test_draw_validation_and_nan();
+    test_draw_packed_indexed_validation();
     printf("All packet validation tests PASSED!\n");
     return 0;
 }

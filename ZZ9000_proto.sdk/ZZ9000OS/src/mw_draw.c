@@ -30,44 +30,17 @@ int mw_decode_draw_object(const uint8_t *payload, size_t bytes,
     return 1;
 }
 
-int mw_decode_draw_packed(const uint8_t *payload, size_t bytes,
-                          float *out_verts, uint32_t *out_mode, uint32_t *out_count)
+static void mw_unpack_packed_vertices(const uint8_t *q, uint32_t count, uint32_t format,
+                                      const float *constant_color, const float *constant_tex0,
+                                      const float *constant_tex1, const float *constant_normal,
+                                      float *out_verts)
 {
-    uint32_t mode, count, format, position, color, tex0, tex1, vertex_normal;
-    const uint8_t *q;
-    float constant_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    float constant_tex0[4]  = {0.0f, 0.0f, 0.0f, 1.0f};
-    float constant_tex1[4]  = {0.0f, 0.0f, 0.0f, 1.0f};
-    float constant_normal[3]= {0.0f, 0.0f, 1.0f};
+    uint32_t position = ((format >> MW_PACK_POSITION) & 3U) + 2U;
+    uint32_t color = (format >> MW_PACK_COLOR) & 3U;
+    uint32_t tex0 = (format >> MW_PACK_TEX0) & 3U;
+    uint32_t tex1 = (format >> MW_PACK_TEX1) & 3U;
+    uint32_t vertex_normal = (format >> MW_PACK_NORMAL) & 1U;
     uint32_t i, c, u;
-
-    if (bytes < 12)
-        return 0;
-
-    mode = mw_be32(payload);
-    count = mw_be32(payload + 4);
-    format = mw_be32(payload + 8);
-
-    position = ((format >> MW_PACK_POSITION) & 3U) + 2U;
-    color = (format >> MW_PACK_COLOR) & 3U;
-    tex0 = (format >> MW_PACK_TEX0) & 3U;
-    tex1 = (format >> MW_PACK_TEX1) & 3U;
-    vertex_normal = (format >> MW_PACK_NORMAL) & 1U;
-
-    q = payload + 12;
-
-    if (!color) {
-        for (c = 0; c < 4; ++c) { constant_color[c] = mw_bef(q); q += 4; }
-    }
-    if (!tex0) {
-        for (c = 0; c < 4; ++c) { constant_tex0[c] = mw_bef(q); q += 4; }
-    }
-    if (!tex1) {
-        for (c = 0; c < 4; ++c) { constant_tex1[c] = mw_bef(q); q += 4; }
-    }
-    if (!vertex_normal) {
-        for (c = 0; c < 3; ++c) { constant_normal[c] = mw_bef(q); q += 4; }
-    }
 
     for (i = 0; i < count; ++i) {
         float *dst = out_verts + i * MW_OBJECT_WORDS;
@@ -122,9 +95,142 @@ int mw_decode_draw_packed(const uint8_t *payload, size_t bytes,
             dst[18] = constant_normal[2];
         }
     }
+}
+
+int mw_decode_draw_packed(const uint8_t *payload, size_t bytes,
+                          float *out_verts, uint32_t *out_mode, uint32_t *out_count)
+{
+    uint32_t mode, count, format, color, tex0, tex1, vertex_normal;
+    uint32_t constants, words;
+    uint64_t expected;
+    const uint8_t *q;
+    float constant_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float constant_tex0[4]  = {0.0f, 0.0f, 0.0f, 1.0f};
+    float constant_tex1[4]  = {0.0f, 0.0f, 0.0f, 1.0f};
+    float constant_normal[3]= {0.0f, 0.0f, 1.0f};
+    uint32_t c;
+
+    if (bytes < 12)
+        return 0;
+
+    mode = mw_be32(payload);
+    count = mw_be32(payload + 4);
+    format = mw_be32(payload + 8);
+
+    if (mode > 6 || !count || count > MW_MAX_VERTICES ||
+        (mode == 1 && (count % 2 != 0)) ||
+        (mode == 4 && (count % 3 != 0)))
+        return 0;
+
+    if (!mw_packed_layout(format, &constants, &words))
+        return 0;
+
+    expected = 12 + 4 * ((uint64_t)constants + (uint64_t)count * words);
+    if (bytes != expected)
+        return 0;
+
+    color = (format >> MW_PACK_COLOR) & 3U;
+    tex0 = (format >> MW_PACK_TEX0) & 3U;
+    tex1 = (format >> MW_PACK_TEX1) & 3U;
+    vertex_normal = (format >> MW_PACK_NORMAL) & 1U;
+
+    q = payload + 12;
+
+    if (!color) {
+        for (c = 0; c < 4; ++c) { constant_color[c] = mw_bef(q); q += 4; }
+    }
+    if (!tex0) {
+        for (c = 0; c < 4; ++c) { constant_tex0[c] = mw_bef(q); q += 4; }
+    }
+    if (!tex1) {
+        for (c = 0; c < 4; ++c) { constant_tex1[c] = mw_bef(q); q += 4; }
+    }
+    if (!vertex_normal) {
+        for (c = 0; c < 3; ++c) { constant_normal[c] = mw_bef(q); q += 4; }
+    }
+
+    mw_unpack_packed_vertices(q, count, format, constant_color, constant_tex0,
+                              constant_tex1, constant_normal, out_verts);
 
     *out_mode = mode;
     *out_count = count;
+    return 1;
+}
+
+int mw_decode_draw_packed_indexed(const uint8_t *payload, size_t bytes,
+                                  float *scratch, uint32_t *out_mode, uint32_t *out_count)
+{
+    uint32_t mode, v_count, idx_count, format;
+    uint32_t constants, words;
+    uint64_t expected;
+    const uint8_t *q, *idx_ptr;
+    float constant_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float constant_tex0[4]  = {0.0f, 0.0f, 0.0f, 1.0f};
+    float constant_tex1[4]  = {0.0f, 0.0f, 0.0f, 1.0f};
+    float constant_normal[3]= {0.0f, 0.0f, 1.0f};
+    uint32_t color, tex0, tex1, vertex_normal, c, i;
+    float *unique_verts;
+
+    if (bytes < 16)
+        return 0;
+
+    mode = mw_be32(payload);
+    v_count = mw_be32(payload + 4);
+    idx_count = mw_be32(payload + 8);
+    format = mw_be32(payload + 12);
+
+    if (mode > 6 || !v_count || v_count > MW_MAX_VERTICES ||
+        !idx_count || idx_count > MW_MAX_VERTICES ||
+        (mode == 1 && (idx_count % 2 != 0)) ||
+        (mode == 4 && (idx_count % 3 != 0)))
+        return 0;
+
+    if (!mw_packed_layout(format, &constants, &words))
+        return 0;
+
+    expected = 16 + 4 * ((uint64_t)constants + (uint64_t)v_count * words) +
+               (((uint64_t)idx_count * 2 + 3) & ~3ULL);
+    if (bytes != expected)
+        return 0;
+
+    idx_ptr = payload + 16 + 4 * (constants + v_count * words);
+    for (i = 0; i < idx_count; ++i) {
+        if (mw_be16(idx_ptr + i * 2) >= v_count)
+            return 0;
+    }
+
+    color = (format >> MW_PACK_COLOR) & 3U;
+    tex0 = (format >> MW_PACK_TEX0) & 3U;
+    tex1 = (format >> MW_PACK_TEX1) & 3U;
+    vertex_normal = (format >> MW_PACK_NORMAL) & 1U;
+
+    q = payload + 16;
+    if (!color) {
+        for (c = 0; c < 4; ++c) { constant_color[c] = mw_bef(q); q += 4; }
+    }
+    if (!tex0) {
+        for (c = 0; c < 4; ++c) { constant_tex0[c] = mw_bef(q); q += 4; }
+    }
+    if (!tex1) {
+        for (c = 0; c < 4; ++c) { constant_tex1[c] = mw_bef(q); q += 4; }
+    }
+    if (!vertex_normal) {
+        for (c = 0; c < 3; ++c) { constant_normal[c] = mw_bef(q); q += 4; }
+    }
+
+    unique_verts = scratch + idx_count * MW_OBJECT_WORDS;
+    mw_unpack_packed_vertices(q, v_count, format, constant_color, constant_tex0,
+                              constant_tex1, constant_normal, unique_verts);
+
+    for (i = 0; i < idx_count; ++i) {
+        uint16_t idx = mw_be16(idx_ptr + i * 2);
+        memcpy(scratch + i * MW_OBJECT_WORDS,
+               unique_verts + (uint32_t)idx * MW_OBJECT_WORDS,
+               MW_OBJECT_BYTES);
+    }
+
+    *out_mode = mode;
+    *out_count = idx_count;
     return 1;
 }
 

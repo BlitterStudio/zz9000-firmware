@@ -1702,6 +1702,7 @@ target_allocation_failed:
     }
 
     case MW_DRAW_PACKED:
+    case MW_DRAW_PACKED_INDEXED:
     case MW_DRAW_OBJECT:
     case MW_DRAW_LOWERED:
     case MW_DRAW_ARRAY_RAW: {
@@ -1722,6 +1723,25 @@ target_allocation_failed:
                 goto command_complete;
             }
             ok = mw_decode_draw_packed(p, cmd->bytes, c->vertex_scratch, &mode, &count);
+        } else if (cmd->opcode == MW_DRAW_PACKED_INDEXED) {
+            uint32_t v_count, idx_count, constants, words;
+            if (cmd->bytes < 16 ||
+                !mw_packed_layout(mw_be32(p + 12), &constants, &words)) {
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
+            v_count = mw_be32(p + 4);
+            idx_count = mw_be32(p + 8);
+            if (!v_count || v_count > MW_MAX_VERTICES ||
+                !idx_count || idx_count > MW_MAX_VERTICES) {
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                goto command_complete;
+            }
+            if (!mw_ensure_scratch(c, (v_count + idx_count) * MW_OBJECT_WORDS)) {
+                mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+                goto command_complete;
+            }
+            ok = mw_decode_draw_packed_indexed(p, cmd->bytes, c->vertex_scratch, &mode, &count);
         } else if (cmd->opcode == MW_DRAW_OBJECT) {
             count = mw_be32(p + 4);
             if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) {
