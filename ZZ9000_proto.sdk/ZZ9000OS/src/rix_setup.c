@@ -45,9 +45,21 @@ static float rix_bits_float(uint32_t bits)
     return value;
 }
 
-static float rix_color_component(uint32_t rgba, unsigned int index)
+#define RIX_C(x) ((float)(x) / 255.0f)
+#define RIX_C8(x) RIX_C(x), RIX_C(x+1), RIX_C(x+2), RIX_C(x+3), RIX_C(x+4), RIX_C(x+5), RIX_C(x+6), RIX_C(x+7)
+#define RIX_C64(x) RIX_C8(x), RIX_C8(x+8), RIX_C8(x+16), RIX_C8(x+24), RIX_C8(x+32), RIX_C8(x+40), RIX_C8(x+48), RIX_C8(x+56)
+
+static const float s_rix_u8_to_float[256] = {
+    RIX_C64(0), RIX_C64(64), RIX_C64(128), RIX_C64(192)
+};
+
+#undef RIX_C64
+#undef RIX_C8
+#undef RIX_C
+
+static inline float rix_color_component(uint32_t rgba, unsigned int index)
 {
-    return (float)((rgba >> (24U - index * 8U)) & 0xffU) / 255.0f;
+    return s_rix_u8_to_float[(rgba >> (24U - index * 8U)) & 0xffU];
 }
 
 static void rix_store_vec(RixTriangle *triangle, unsigned int start, const float *value, unsigned int count)
