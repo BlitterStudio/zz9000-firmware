@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+/* realpath(3) is POSIX, not C99: glibc hides the prototype under -std=c99
+ * unless a POSIX feature macro is visible before any include. */
+#define _XOPEN_SOURCE 700
 #define ZZ9K_ARCHIVE_NO_MAIN 1
 #include "../tools/zz9k-archive.c"
 
