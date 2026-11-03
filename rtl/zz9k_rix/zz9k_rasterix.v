@@ -78,6 +78,7 @@ module zz9k_rasterix #(
     reg write_addr_valid;
     reg write_data_valid;
     reg write_response_valid;
+    reg [31:0] read_value;
     reg [31:0] read_data;
     reg read_response_valid;
     reg enable_requested;
@@ -120,25 +121,28 @@ module zz9k_rasterix #(
     assign s_axi_rdata = read_data;
     assign s_axi_rresp = 2'b00;
 
+    // ARADDR is only valid with ARVALID.  The GP1 interconnect's per-port
+    // AXI4-Lite converter changes it once the handshake completes (IDENTITY
+    // reads returned VERSION), so the response is latched at the handshake.
     always @(*) begin
         case (s_axi_araddr[7:2])
-            6'h00: read_data = IDENTITY;
-            6'h01: read_data = VERSION;
-            6'h02: read_data = {29'd0, soft_reset, 1'b0, enable_requested};
-            6'h03: read_data = {8'd0, reads_outstanding[7:0], writes_outstanding[7:0],
+            6'h00: read_value = IDENTITY;
+            6'h01: read_value = VERSION;
+            6'h02: read_value = {29'd0, soft_reset, 1'b0, enable_requested};
+            6'h03: read_value = {8'd0, reads_outstanding[7:0], writes_outstanding[7:0],
                                  3'd0, renderer_stall, renderer_triangle_rendering,
                                  renderer_busy, idle, enable_requested};
-            6'h04: read_data = {28'd0, rix_response_last, rix_response_valid,
+            6'h04: read_value = {28'd0, rix_response_last, rix_response_valid,
                                  s_cmd_axis_tready, s_cmd_axis_tvalid};
-            6'h05: read_data = rix_response_data;
-            6'h0e: read_data = dbg_aw_count;
-            6'h0f: read_data = dbg_w_count;
-            6'h10: read_data = dbg_b_count;
-            6'h11: read_data = dbg_ar_count;
-            6'h12: read_data = dbg_r_count;
-            6'h13: read_data = dbg_last_araddr;
-            6'h14: read_data = {26'd0, dbg_last_arid};
-            default: read_data = 32'd0;
+            6'h05: read_value = rix_response_data;
+            6'h0e: read_value = dbg_aw_count;
+            6'h0f: read_value = dbg_w_count;
+            6'h10: read_value = dbg_b_count;
+            6'h11: read_value = dbg_ar_count;
+            6'h12: read_value = dbg_r_count;
+            6'h13: read_value = dbg_last_araddr;
+            6'h14: read_value = {26'd0, dbg_last_arid};
+            default: read_value = 32'd0;
         endcase
     end
 
@@ -151,6 +155,7 @@ module zz9k_rasterix #(
             write_data_valid <= 0;
             write_response_valid <= 0;
             read_response_valid <= 0;
+            read_data <= 0;
             enable_requested <= 0;
             soft_reset <= 0;
             writes_outstanding <= 0;
@@ -184,8 +189,10 @@ module zz9k_rasterix #(
             end
             if (write_response_valid && s_axi_bready)
                 write_response_valid <= 0;
-            if (s_axi_arvalid && s_axi_arready)
+            if (s_axi_arvalid && s_axi_arready) begin
                 read_response_valid <= 1;
+                read_data <= read_value;
+            end
             if (read_response_valid && s_axi_rready)
                 read_response_valid <= 0;
 
