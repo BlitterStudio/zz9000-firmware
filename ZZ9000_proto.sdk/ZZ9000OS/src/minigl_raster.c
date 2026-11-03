@@ -164,6 +164,44 @@ static int g_mvp_neon_ok;
 #endif
 static const mw_state *g_mw_state = NULL;
 static uint32_t g_clip_start_cycle;
+static int g_need_eye;
+static int g_need_normal;
+
+static inline int vert_needs_eye(void)
+{
+    if ((g_state.enabled_flags & ZZ9K_MGL_STATE_FOG) != 0U)
+        return 1;
+    if (g_mw_state) {
+        if (g_mw_state->lighting_enabled)
+            return 1;
+        if (g_mw_state->texgen[0].s_enabled && (g_mw_state->texgen[0].s_mode == 0x2400 || g_mw_state->texgen[0].s_mode == 0x2402))
+            return 1;
+        if (g_mw_state->texgen[0].t_enabled && (g_mw_state->texgen[0].t_mode == 0x2400 || g_mw_state->texgen[0].t_mode == 0x2402))
+            return 1;
+        if (g_mw_state->texgen[1].s_enabled && (g_mw_state->texgen[1].s_mode == 0x2400 || g_mw_state->texgen[1].s_mode == 0x2402))
+            return 1;
+        if (g_mw_state->texgen[1].t_enabled && (g_mw_state->texgen[1].t_mode == 0x2400 || g_mw_state->texgen[1].t_mode == 0x2402))
+            return 1;
+    }
+    return 0;
+}
+
+static inline int vert_needs_normal(void)
+{
+    if (g_mw_state) {
+        if (g_mw_state->lighting_enabled)
+            return 1;
+        if (g_mw_state->texgen[0].s_enabled && g_mw_state->texgen[0].s_mode == 0x2402)
+            return 1;
+        if (g_mw_state->texgen[0].t_enabled && g_mw_state->texgen[0].t_mode == 0x2402)
+            return 1;
+        if (g_mw_state->texgen[1].s_enabled && g_mw_state->texgen[1].s_mode == 0x2402)
+            return 1;
+        if (g_mw_state->texgen[1].t_enabled && g_mw_state->texgen[1].t_mode == 0x2402)
+            return 1;
+    }
+    return 0;
+}
 
 void minigl_raster_set_wire_v9_state(const struct mw_state *state)
 {
@@ -3628,25 +3666,30 @@ static void v9_vert_convert(const float *v, Vertex *out)
     out->z = clip[2];
     out->w = clip[3];
 
-    float eye[4];
-    const float *mv = g_matrix[0];
-    eye[0] = v[0] * mv[0] + v[1] * mv[4] + v[2] * mv[8] + v[3] * mv[12];
-    eye[1] = v[0] * mv[1] + v[1] * mv[5] + v[2] * mv[9] + v[3] * mv[13];
-    eye[2] = v[0] * mv[2] + v[1] * mv[6] + v[2] * mv[10] + v[3] * mv[14];
-    eye[3] = v[0] * mv[3] + v[1] * mv[7] + v[2] * mv[11] + v[3] * mv[15];
-
-    out->fog_coord = (eye[3] != 0.0f) ? fabsf(eye[2] / eye[3]) : 0.0f;
-
-    float normal_eye[3];
-    if (g_mw_state) {
-        const float *nm = g_mw_state->normal_matrix;
-        normal_eye[0] = nm[0] * v[16] + nm[3] * v[17] + nm[6] * v[18];
-        normal_eye[1] = nm[1] * v[16] + nm[4] * v[17] + nm[7] * v[18];
-        normal_eye[2] = nm[2] * v[16] + nm[5] * v[17] + nm[8] * v[18];
+    float eye[4] = {0};
+    if (g_need_eye) {
+        const float *mv = g_matrix[0];
+        eye[0] = v[0] * mv[0] + v[1] * mv[4] + v[2] * mv[8] + v[3] * mv[12];
+        eye[1] = v[0] * mv[1] + v[1] * mv[5] + v[2] * mv[9] + v[3] * mv[13];
+        eye[2] = v[0] * mv[2] + v[1] * mv[6] + v[2] * mv[10] + v[3] * mv[14];
+        eye[3] = v[0] * mv[3] + v[1] * mv[7] + v[2] * mv[11] + v[3] * mv[15];
+        out->fog_coord = (eye[3] != 0.0f) ? fabsf(eye[2] / eye[3]) : 0.0f;
     } else {
-        normal_eye[0] = v[16];
-        normal_eye[1] = v[17];
-        normal_eye[2] = v[18];
+        out->fog_coord = 0.0f;
+    }
+
+    float normal_eye[3] = {0};
+    if (g_need_normal) {
+        if (g_mw_state) {
+            const float *nm = g_mw_state->normal_matrix;
+            normal_eye[0] = nm[0] * v[16] + nm[3] * v[17] + nm[6] * v[18];
+            normal_eye[1] = nm[1] * v[16] + nm[4] * v[17] + nm[7] * v[18];
+            normal_eye[2] = nm[2] * v[16] + nm[5] * v[17] + nm[8] * v[18];
+        } else {
+            normal_eye[0] = v[16];
+            normal_eye[1] = v[17];
+            normal_eye[2] = v[18];
+        }
     }
 
     if (g_mw_state && g_mw_state->lighting_enabled) {
@@ -3753,6 +3796,8 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
 {
     uint32_t i;
     Vertex a, b, c, d;
+    g_need_eye = vert_needs_eye();
+    g_need_normal = vert_needs_normal();
 
     if (flags != 0 && count >= 3 && mode >= GL_TRIANGLES) {
         float area = mw_clipped_area(g_mvp, (float)g_state.viewport_w, (float)g_state.viewport_h,
