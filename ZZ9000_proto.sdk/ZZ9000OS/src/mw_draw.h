@@ -30,6 +30,12 @@ int mw_decode_draw_packed(const uint8_t *payload, size_t bytes,
 int mw_decode_draw_packed_indexed(const uint8_t *payload, size_t bytes,
                                   float *scratch, uint32_t *out_mode, uint32_t *out_count);
 
+/* Same decode for payloads mw_validate_packet_report has already accepted
+ * (the parse visitor path): skips the standalone index re-validation. */
+int mw_decode_draw_packed_indexed_validated(const uint8_t *payload, size_t bytes,
+                                            float *scratch, uint32_t *out_mode,
+                                            uint32_t *out_count);
+
 int mw_decode_draw_lowered(const uint8_t *payload, size_t bytes,
                            float *out_verts, uint32_t *out_mode, uint32_t *out_count,
                            uint32_t *out_flags, const uint8_t **out_edge_mask);

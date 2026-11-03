@@ -157,8 +157,11 @@ int mw_decode_draw_packed(const uint8_t *payload, size_t bytes,
     return 1;
 }
 
-int mw_decode_draw_packed_indexed(const uint8_t *payload, size_t bytes,
-                                  float *scratch, uint32_t *out_mode, uint32_t *out_count)
+static int mw_decode_draw_packed_indexed_impl(const uint8_t *payload,
+                                              size_t bytes, float *scratch,
+                                              uint32_t *out_mode,
+                                              uint32_t *out_count,
+                                              int prevalidate)
 {
     uint32_t mode, v_count, idx_count, format;
     uint32_t constants, words;
@@ -193,10 +196,17 @@ int mw_decode_draw_packed_indexed(const uint8_t *payload, size_t bytes,
     if (bytes != expected)
         return 0;
 
-    idx_ptr = payload + 16 + 4 * (constants + v_count * words);
-    for (i = 0; i < idx_count; ++i) {
-        if (mw_be16(idx_ptr + i * 2) >= v_count)
-            return 0;
+    /* The standalone decoder rejects a bad index before writing anything;
+     * the parse visitor runs after mw_validate_packet_report, which has
+     * already proven every index < v_count, so the validated entry point
+     * skips that extra pass over the index array and keeps the bound in
+     * the copy loop as a safety net. */
+    if (prevalidate) {
+        idx_ptr = payload + 16 + 4 * (constants + v_count * words);
+        for (i = 0; i < idx_count; ++i) {
+            if (mw_be16(idx_ptr + i * 2) >= v_count)
+                return 0;
+        }
     }
 
     color = (format >> MW_PACK_COLOR) & 3U;
@@ -222,8 +232,12 @@ int mw_decode_draw_packed_indexed(const uint8_t *payload, size_t bytes,
     mw_unpack_packed_vertices(q, v_count, format, constant_color, constant_tex0,
                               constant_tex1, constant_normal, unique_verts);
 
+    idx_ptr = payload + 16 + 4 * (constants + v_count * words);
     for (i = 0; i < idx_count; ++i) {
         uint16_t idx = mw_be16(idx_ptr + i * 2);
+
+        if (idx >= v_count)
+            return 0;
         memcpy(scratch + i * MW_OBJECT_WORDS,
                unique_verts + (uint32_t)idx * MW_OBJECT_WORDS,
                MW_OBJECT_BYTES);
@@ -232,6 +246,21 @@ int mw_decode_draw_packed_indexed(const uint8_t *payload, size_t bytes,
     *out_mode = mode;
     *out_count = idx_count;
     return 1;
+}
+
+int mw_decode_draw_packed_indexed(const uint8_t *payload, size_t bytes,
+                                  float *scratch, uint32_t *out_mode, uint32_t *out_count)
+{
+    return mw_decode_draw_packed_indexed_impl(payload, bytes, scratch,
+                                              out_mode, out_count, 1);
+}
+
+int mw_decode_draw_packed_indexed_validated(const uint8_t *payload, size_t bytes,
+                                            float *scratch, uint32_t *out_mode,
+                                            uint32_t *out_count)
+{
+    return mw_decode_draw_packed_indexed_impl(payload, bytes, scratch,
+                                              out_mode, out_count, 0);
 }
 
 int mw_decode_draw_lowered(const uint8_t *payload, size_t bytes,

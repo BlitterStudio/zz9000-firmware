@@ -140,6 +140,7 @@ typedef struct Vertex {
 
 static MiniGLRasterBuffers g_buffers;
 static ZZ9KMiniGLPacketSetState g_state;
+static uint8_t g_state_valid;
 static Texture g_textures[MAX_TEXTURES];
 static Texture g_default_texture;
 static TextureLevel *g_texture_allocations;
@@ -153,6 +154,7 @@ static uint16_t g_draw_attr_code;
 static uint32_t g_bound_texture[MAX_TMU];
 static Texture *g_bound_texture_info[MAX_TMU];
 static float g_matrix[4][16];
+static uint8_t g_matrix_valid[4];
 static float g_mvp[16];
 static float g_stack[4][MATRIX_STACK_DEPTH][16];
 static uint8_t g_stack_depth[4];
@@ -2933,10 +2935,12 @@ void minigl_raster_init(void)
     for (index = 0U; index < 4U; ++index) {
         identity(g_matrix[index]);
         g_matrix_is_identity[index] = 1U;
+        g_matrix_valid[index] = 0U;
     }
     update_mvp();
     memset(g_stack_depth, 0, sizeof(g_stack_depth));
     memset(&g_state, 0, sizeof(g_state));
+    g_state_valid = 0U;
     memset(g_textures, 0, sizeof(g_textures));
     texture_initialize(&g_default_texture, 0U);
     g_texture_allocations = NULL;
@@ -3097,8 +3101,18 @@ void minigl_raster_set_state(const ZZ9KMiniGLPacketSetState *state)
 {
     if (!state)
         return;
+    /* The per-draw sync re-sends the same state between draws; every
+     * value derived below is a deterministic function of *state, so an
+     * incoming copy identical to the raster-side one changes nothing.
+     * Comparing against the raster-side copy (not a cached input) keeps
+     * the skip correct across contexts, raster-side resets and any
+     * mutation of g_state elsewhere. */
+    if (g_state_valid && memcmp(&g_state, state, sizeof(g_state)) == 0)
+        return;
     memcpy(&g_state, state, sizeof(g_state));
+    g_state_valid = 1U;
     minigl_rix_backend_set_state(&g_rix, &g_state);
+
 
     if (state->depth_bits == 16U || state->depth_bits == 24U)
         g_depth_bits = (uint8_t)state->depth_bits;
@@ -3126,7 +3140,14 @@ void minigl_raster_load_matrix(uint16_t mode, const float *matrix)
         g_error |= RASTER_ERR_MATRIX;
         return;
     }
+    /* Same contract as set_state: an identical matrix changes neither the
+     * copy, the identity flag, g_mvp (any mutation of matrices 0/1 calls
+     * update_mvp, so g_mvp always holds their current product) nor the
+     * lighting modelview (guarded by its own comparison). */
+    if (g_matrix_valid[mode] && memcmp(g_matrix[mode], matrix, sizeof(g_matrix[mode])) == 0)
+        return;
     memcpy(g_matrix[mode], matrix, sizeof(g_matrix[mode]));
+    g_matrix_valid[mode] = 1U;
     g_matrix_is_identity[mode] = (uint8_t)matrix_is_identity(g_matrix[mode]);
     if (mode < 2U)
         update_mvp();

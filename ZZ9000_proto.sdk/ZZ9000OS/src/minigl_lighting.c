@@ -54,6 +54,18 @@ typedef char LightingStatePacketPrefix[(offsetof(LightingState, modelview) == 96
 
 static LightingState g_lighting;
 
+/* The per-draw state sync calls minigl_lighting_configure_wire_v9 with the
+ * same mw_state between draws.  cache_source/cache_input record what the
+ * lighting state was last built from; the pointer identity keeps distinct
+ * contexts apart even when their bytes match, and every other writer of
+ * g_lighting (reset, configure, another context's wire_v9 configure, which
+ * overwrites this entry) invalidates or replaces the entry.  A full-struct
+ * memcmp can only produce extra runs, never a missed one: configure reads
+ * a subset of the compared bytes. */
+static const mw_state *g_wire_cache_source;
+static mw_state g_wire_cache_input;
+static uint8_t g_wire_cache_valid;
+
 /* Light positions, directions and spot cones depend on state, not vertices. */
 typedef struct LightCache {
     float position[3];
@@ -192,6 +204,7 @@ void minigl_lighting_reset(void)
     };
 
     memset(&g_lighting, 0, sizeof(g_lighting));
+    g_wire_cache_valid = 0U;
     memcpy(g_lighting.modelview, identity, sizeof(identity));
     identity_normal_matrix();
     g_lighting.modelview_valid = 1U;
@@ -217,6 +230,7 @@ int minigl_lighting_configure(const ZZ9KMiniGLPacketLighting *packet)
         return 0;
 
     memcpy(&g_lighting.flags, &packet->flags, sizeof(*packet));
+    g_wire_cache_valid = 0U;
     cache_lights();
     return 1;
 }
@@ -572,6 +586,12 @@ static void lit_color_eval(const LightingState *s, const float eye[4], const flo
 void minigl_lighting_configure_wire_v9(const struct mw_state *s)
 {
     if (!s) return;
+    if (g_wire_cache_valid && s == g_wire_cache_source &&
+        memcmp(s, &g_wire_cache_input, sizeof(g_wire_cache_input)) == 0)
+        return;   /* g_lighting was last built from exactly these bytes */
+    g_wire_cache_source = s;
+    memcpy(&g_wire_cache_input, s, sizeof(g_wire_cache_input));
+    g_wire_cache_valid = 1U;
     uint32_t flags = 0;
     if (s->lighting_enabled) flags |= ZZ9K_MGL_LIGHTING_ENABLED;
     if (s->normalize_enabled) flags |= ZZ9K_MGL_LIGHTING_NORMALIZE;

@@ -1745,7 +1745,7 @@ target_allocation_failed:
                 mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
                 goto command_complete;
             }
-            ok = mw_decode_draw_packed_indexed(p, cmd->bytes, c->vertex_scratch, &mode, &count);
+            ok = mw_decode_draw_packed_indexed_validated(p, cmd->bytes, c->vertex_scratch, &mode, &count);
         } else if (cmd->opcode == MW_DRAW_OBJECT) {
             count = mw_be32(p + 4);
             if (!mw_ensure_scratch(c, count * MW_OBJECT_WORDS)) {
