@@ -25,7 +25,7 @@
 //  -------------------------
 //
 // Pipelined: yes
-// Depth: 1 cycles
+// Depth: 2 cycles
 module LodCalculator
 #(
     parameter USER_WIDTH = 1
@@ -63,9 +63,27 @@ module LodCalculator
     // log2 of it rounded at 1.5 * 2^k, near OpenGL's sqrt(2) * 2^k.  Upstream
     // took whole texels and picked level 1 for any step of one texel, so a
     // texture drawn 1:1 (2D text, HUD) was sampled from its half-size level.
+    // Two register stages (step, then level) keep the wider compare off the
+    // 100 MHz critical path; every output travels with its user data.
     wire [ 8 : 0] diffU = diffUnsignedS[6 +: 9] >> (8 - s_textureSizeWidth);
     wire [ 8 : 0] diffV = diffUnsignedT[6 +: 9] >> (8 - s_textureSizeHeight);
-    wire [ 8 : 0] diffMax = (diffU > diffV) ? diffU : diffV;
+
+    reg [ 8 : 0]                step0_diffU;
+    reg [ 8 : 0]                step0_diffV;
+    reg                         step0_enable;
+    reg                         step0_valid;
+    reg [USER_WIDTH - 1 : 0]    step0_user;
+
+    always @(posedge aclk)
+    if (ce) begin
+        step0_diffU <= diffU;
+        step0_diffV <= diffV;
+        step0_enable <= confEnable;
+        step0_valid <= s_valid;
+        step0_user <= s_user;
+    end
+
+    wire [ 8 : 0] diffMax = (step0_diffU > step0_diffV) ? step0_diffU : step0_diffV;
     always @(posedge aclk)
     if (ce) begin : Mux
         reg [ 3 : 0] lodReg;
@@ -89,7 +107,7 @@ module LodCalculator
             9'b11???????: lodReg = 8;
         endcase
 
-        if (confEnable)
+        if (step0_enable)
         begin
             m_lod <= lodReg;
         end
@@ -97,7 +115,7 @@ module LodCalculator
         begin
             m_lod <= 0;
         end
-        m_valid <= s_valid;
-        m_user <= s_user;
+        m_valid <= step0_valid;
+        m_user <= step0_user;
     end
 endmodule
