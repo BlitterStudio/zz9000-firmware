@@ -2778,21 +2778,27 @@ static void assemble(uint16_t mode, uint16_t stride, uint32_t base, const uint8_
         return;
     }
     if (mode == GL_TRIANGLE_STRIP) {
+        if (count < 3U) return;
+        if (!fetch_indexed(stride, base, indices, first, 0U, &a) ||
+            !fetch_indexed(stride, base, indices, first, 1U, &b)) return;
         for (index = 2U; index < count; ++index) {
-            if (fetch_indexed(stride, base, indices, first, index - 2U, &a) &&
-                fetch_indexed(stride, base, indices, first, index - 1U, &b) &&
-                fetch_indexed(stride, base, indices, first, index, &c)) {
-                if (index & 1U) primitive_triangle(&b, &a, &c);
-                else primitive_triangle(&a, &b, &c);
-            }
+            if (!fetch_indexed(stride, base, indices, first, index, &c)) return;
+            if (index & 1U) primitive_triangle(&b, &a, &c);
+            else primitive_triangle(&a, &b, &c);
+            a = b;
+            b = c;
         }
         return;
     }
     if (mode == GL_TRIANGLE_FAN) {
-        for (index = 2U; index < count; ++index)
-            if (fetch_indexed(stride, base, indices, first, 0U, &a) &&
-                fetch_indexed(stride, base, indices, first, index - 1U, &b) &&
-                fetch_indexed(stride, base, indices, first, index, &c)) primitive_triangle(&a, &b, &c);
+        if (count < 3U) return;
+        if (!fetch_indexed(stride, base, indices, first, 0U, &a) ||
+            !fetch_indexed(stride, base, indices, first, 1U, &b)) return;
+        for (index = 2U; index < count; ++index) {
+            if (!fetch_indexed(stride, base, indices, first, index, &c)) return;
+            primitive_triangle(&a, &b, &c);
+            b = c;
+        }
         return;
     }
     if (mode == GL_POLYGON) {
@@ -4009,24 +4015,29 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
     }
 
     if (mode == GL_TRIANGLE_STRIP) {
+        if (count < 3) return;
+        v9_vert_convert(object_vertices, &a);
+        v9_vert_convert(object_vertices + MW_OBJECT_WORDS, &b);
         for (i = 2; i < count; ++i) {
-            v9_vert_convert(object_vertices + (i - 2) * MW_OBJECT_WORDS, &a);
-            v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &b);
             v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &c);
             if (i & 1)
                 primitive_triangle(&b, &a, &c);
             else
                 primitive_triangle(&a, &b, &c);
+            a = b;
+            b = c;
         }
         return;
     }
 
     if (mode == GL_TRIANGLE_FAN) {
+        if (count < 3) return;
         v9_vert_convert(object_vertices, &a);
+        v9_vert_convert(object_vertices + MW_OBJECT_WORDS, &b);
         for (i = 2; i < count; ++i) {
-            v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &b);
             v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &c);
             primitive_triangle(&a, &b, &c);
+            b = c;
         }
         return;
     }
@@ -4046,13 +4057,16 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
     }
 
     if (mode == GL_QUAD_STRIP) {
+        if (count < 4) return;
+        v9_vert_convert(object_vertices, &a);
+        v9_vert_convert(object_vertices + MW_OBJECT_WORDS, &b);
         for (i = 3; i < count; i += 2) {
-            v9_vert_convert(object_vertices + (i - 3) * MW_OBJECT_WORDS, &a);
-            v9_vert_convert(object_vertices + (i - 2) * MW_OBJECT_WORDS, &b);
             v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &c);
             v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &d);
             primitive_triangle(&a, &b, &d);
             primitive_triangle(&a, &d, &c);
+            a = c;
+            b = d;
         }
         return;
     }
@@ -4061,11 +4075,13 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
         /* A lowered polygon is a fan from vertex 0, as the reference
          * lowers it; the whole-polygon clip path stays with the legacy
          * consumer ABI. */
+        if (count < 3) return;
         v9_vert_convert(object_vertices, &a);
+        v9_vert_convert(object_vertices + MW_OBJECT_WORDS, &b);
         for (i = 2; i < count; ++i) {
-            v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &b);
             v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &c);
             primitive_triangle(&a, &b, &c);
+            b = c;
         }
         return;
     }
