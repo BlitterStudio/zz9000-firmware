@@ -2352,6 +2352,30 @@ static void point_screen(const Vertex *vertex, float polygon_offset)
     int y_last = (int)ceilf(vertex->sy + (float)size * 0.5f - 0.5f) - 1;
     int x, y;
 
+    if (g_rix_collecting != 0) {
+        /* RasterIX has no point primitive: queue the covered pixel square
+         * as two triangles carrying the point's attributes.  RasterIX
+         * samples integer positions after the backend's height - y flip,
+         * and its row r is memory row height - 1 - r, so in these window
+         * coordinates pixel (x, y) is sampled at (x, y + 1).  Corners half
+         * a pixel around those samples cover x_first..x_last and
+         * y_first..y_last with no sample on an edge: the CPU coverage
+         * above, with no fill-rule tie. */
+        Vertex corner[4];
+        unsigned index;
+
+        for (index = 0U; index < 4U; ++index) {
+            corner[index] = *vertex;
+            corner[index].color = vertex->flat_color;
+        }
+        corner[0].sx = corner[3].sx = (float)x_first - 0.5f;
+        corner[1].sx = corner[2].sx = (float)x_last + 0.5f;
+        corner[0].sy = corner[1].sy = (float)y_first + 0.5f;
+        corner[2].sy = corner[3].sy = (float)y_last + 1.5f;
+        triangle_fill(&corner[0], &corner[1], &corner[2], polygon_offset);
+        triangle_fill(&corner[0], &corner[2], &corner[3], polygon_offset);
+        return;
+    }
     mark_dirty(x_first, y_first, x_last, y_last);
     for (y = y_first; y <= y_last; ++y)
         for (x = x_first; x <= x_last; ++x)
@@ -3207,9 +3231,12 @@ static int draw_arrays_valid(uint16_t attr_code, uint16_t stride, uint32_t first
            stride == MINIGL_RASTER_VERTEX_STRIDE &&
            last_byte <= g_buffers.vertices_bytes;
 }
+/* Points are queued as pixel squares (point_screen); lines still need the
+ * CPU rasterizer. */
 static int rix_mode_supported(uint16_t mode)
 {
-    return mode == GL_TRIANGLES || mode == GL_TRIANGLE_STRIP ||
+    return mode == GL_POINTS ||
+           mode == GL_TRIANGLES || mode == GL_TRIANGLE_STRIP ||
            mode == GL_TRIANGLE_FAN || mode == GL_QUADS ||
            mode == GL_QUAD_STRIP || mode == GL_POLYGON;
 }

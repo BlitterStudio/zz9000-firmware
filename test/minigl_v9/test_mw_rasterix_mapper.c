@@ -65,6 +65,41 @@ static uint16_t mock_fence_color(uint32_t rgba)
                       ((rgba >> 18U) << 5U) | (rgba >> 11U));
 }
 
+/* Pixel coverage of every triangle RasterIX would draw while capture is on,
+ * from the descriptor's edge equations (as test_watertight_tessellation).
+ * RasterIX rows count up from the bottom (the backend sends height - y), so
+ * row r lands in memory row height - 1 - r. */
+static int s_capture_coverage;
+static uint8_t s_coverage[HEIGHT][WIDTH];
+
+static void mock_cover_triangle(const uint32_t *words)
+{
+    int32_t bx = (int32_t)(words[RIX_WORD_BB_START] & 0xffffU);
+    int32_t by = (int32_t)(words[RIX_WORD_BB_START] >> 16);
+    int32_t ex = (int32_t)(words[RIX_WORD_BB_END] & 0xffffU);
+    int32_t ey = (int32_t)(words[RIX_WORD_BB_END] >> 16);
+    int32_t x, y;
+    unsigned e;
+
+    for (y = by; y < ey; ++y) {
+        for (x = bx; x < ex; ++x) {
+            int inside = 1;
+
+            for (e = 0U; e < 3U && inside; ++e) {
+                int32_t wx = (int32_t)words[RIX_WORD_W_X + e];
+                int32_t wy = (int32_t)words[RIX_WORD_W_Y + e];
+                int32_t val = (int32_t)words[RIX_WORD_W_INIT + e] +
+                              wx * (x - bx) + wy * (y - by);
+                int inc = (wx > 0) || (wx == 0 && wy > 0);
+
+                inside = !((uint32_t)val >> 31) && ((val != 0) || inc);
+            }
+            if (inside && x >= 0 && y >= 0 && x < (int32_t)WIDTH && y < (int32_t)HEIGHT)
+                ++s_coverage[HEIGHT - 1U - (uint32_t)y][x];
+        }
+    }
+}
+
 static void mock_render_packet(struct mock_platform *p)
 {
     unsigned index;
@@ -72,6 +107,17 @@ static void mock_render_packet(struct mock_platform *p)
     for (index = 2U; index < p->packet_words; ++index) {
         uint32_t command = p->packet[index];
 
+        if ((command & 0xf0000000U) == RIX_OP_TRIANGLE_STREAM) {
+            uint32_t words = (command & 0x3ffU) / 4U;
+
+            assert(index + words < p->packet_words);
+            if (s_capture_coverage) {
+                assert(words >= RIX_TRIANGLE_WORDS);
+                mock_cover_triangle(&p->packet[index + 1U]);
+            }
+            index += words;
+            continue;
+        }
         if ((command & 0xf0000000U) == RIX_OP_RENDER_CONFIG) {
             assert(index + 1U < p->packet_words);
             if (command == (RIX_OP_RENDER_CONFIG | RIX_REG_COLOR_BUFFER_ADDR))
@@ -657,6 +703,97 @@ static void test_rasterix_rgb565_span_presentation(void)
     printf("PASS: test_rasterix_rgb565_span_presentation\n");
 }
 
+static void submit_point_size(mw_ctx *c, float size)
+{
+    uint8_t payload[12];
+
+    mw_put_be32(payload, MW_POINT_SIZE);
+    mw_put_be32(payload + 4, 1U);
+    mw_put_bef(payload + 8, size);
+    assert(submit_single_command(c, MW_STATE, payload, sizeof(payload)) == MW_STATUS_OK);
+}
+
+/* Window coordinates (sx, sy) of each point; NDC for the identity MVP. */
+static void submit_points(mw_ctx *c, const float (*window)[2], uint32_t count)
+{
+    static uint8_t packet[16 + 8 + 8 + 8 * 76];
+    uint32_t payload = 8U + count * 76U;
+    uint8_t *q = packet + 32;
+    uint32_t i;
+
+    assert(count <= 8U);
+    memset(packet, 0, sizeof(packet));
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, 24U + payload);
+    mw_put_be32(packet + 12, 1U);
+    mw_put_be32(packet + 16, MW_DRAW_OBJECT);
+    mw_put_be32(packet + 20, payload);
+    mw_put_be32(packet + 24, 0U); /* GL_POINTS */
+    mw_put_be32(packet + 28, count);
+    for (i = 0U; i < count; ++i, q += 76) {
+        mw_put_bef(q, window[i][0] * 2.0f / (float)WIDTH - 1.0f);
+        mw_put_bef(q + 4, window[i][1] * 2.0f / (float)HEIGHT - 1.0f);
+        mw_put_bef(q + 8, 0.0f);
+        mw_put_bef(q + 12, 1.0f);
+        mw_put_bef(q + 16, 1.0f);
+        mw_put_bef(q + 20, 1.0f);
+        mw_put_bef(q + 24, 1.0f);
+        mw_put_bef(q + 28, 1.0f);
+    }
+    assert(mw_host_submit(c, packet, 24U + payload) == MW_STATUS_OK);
+}
+
+/* GL_POINTS (particles) stay on RasterIX instead of latching the frame to
+ * the CPU rasterizer, and cover exactly the pixels the CPU path covers. */
+static void test_points_render_on_rasterix(void)
+{
+    static const float window[][2] = {
+        { 10.5f, 10.5f }, { 30.0f, 20.0f }, { 47.25f, 33.75f }, { 0.2f, 0.2f }
+    };
+    static const float sizes[] = { 1.0f, 2.0f, 3.0f };
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+    unsigned s;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(WIDTH, HEIGHT);
+    assert(c != NULL);
+    for (s = 0U; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+        uint32_t hw_before, sw_before;
+        const uint32_t *cpu;
+        unsigned x, y;
+
+        submit_point_size(c, sizes[s]);
+        c->state.force_cpu = 0;
+        minigl_raster_reset_frame_counters();
+        hw_before = minigl_raster_draws_hardware();
+        sw_before = minigl_raster_draws_software();
+        memset(s_coverage, 0, sizeof(s_coverage));
+        s_capture_coverage = 1;
+        submit_points(c, window, 4U);
+        assert(minigl_raster_drain());
+        s_capture_coverage = 0;
+        assert(minigl_raster_draws_hardware() == hw_before + 1U);
+        assert(minigl_raster_draws_software() == sw_before);
+
+        c->state.force_cpu = 1;
+        assert(minigl_raster_finish());
+        memset(c->color_buffers[c->state.target.back], 0, WIDTH * HEIGHT * 4U);
+        submit_points(c, window, 4U);
+        cpu = c->color_buffers[c->state.target.back];
+        for (y = 0U; y < HEIGHT; ++y)
+            for (x = 0U; x < WIDTH; ++x)
+                assert(s_coverage[y][x] == (cpu[y * WIDTH + x] != 0U ? 1U : 0U));
+        /* The forced CPU draw latched this frame to the CPU. */
+        minigl_raster_frame_boundary();
+    }
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_points_render_on_rasterix\n");
+}
+
 /* A second context binding its buffers must not strand the first one's
  * RasterIX frame: the first context's next packet still reads its pixels. */
 static void test_second_context_keeps_first_frame(void)
@@ -910,6 +1047,7 @@ int main(void)
     test_rasterix_rgb565_present_orientation();
     test_rasterix_rgb565_span_presentation();
     test_second_context_keeps_first_frame();
+    test_points_render_on_rasterix();
     test_backend_disable_cpu_rerender_present();
     test_wire_cpu_handoffs();
     test_watertight_tessellation();
