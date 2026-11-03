@@ -1763,11 +1763,18 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     if (backend == NULL || !backend->collecting || a == NULL || b == NULL || c == NULL)
         return 0;
     /* RasterIX descriptors use the OpenGL bottom-up y axis; the raster
-     * service delivers top-down screen rows, so reflect y once here. */
+     * service delivers top-down screen rows, so reflect y once here.
+     * RasterIX samples pixel i at the integer position i, OpenGL and the
+     * CPU rasterizer at its centre i + 0.5: moving the vertices half a pixel
+     * back on both axes makes coverage and every interpolated attribute
+     * (colour, depth, texture coordinates) match.  Without it, a texture
+     * drawn 1:1 was sampled on texel edges, where nearest filtering picks
+     * either neighbour. */
     {
         float za = a->z;
         float zb = b->z;
         float zc = c->z;
+        float top = (float)backend->height - 0.5f;
         if (backend->state.depth_near != 0U || backend->state.depth_far != 0x00ffffffU) {
             float near_z = (float)backend->state.depth_near / 16777215.0f;
             float scale_z = ((float)backend->state.depth_far - (float)backend->state.depth_near) / 16777215.0f;
@@ -1775,17 +1782,17 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
             zb = near_z + zb * scale_z;
             zc = near_z + zc * scale_z;
         }
-        vertices[0] = (RixVertex){a->x, (float)backend->height - a->y, za, a->reciprocal_w,
+        vertices[0] = (RixVertex){a->x - 0.5f, top - a->y, za, a->reciprocal_w,
                                   a->rgba, a->s, a->t, a->q};
-        vertices[1] = (RixVertex){b->x, (float)backend->height - b->y, zb, b->reciprocal_w,
+        vertices[1] = (RixVertex){b->x - 0.5f, top - b->y, zb, b->reciprocal_w,
                                   b->rgba, b->s, b->t, b->q};
-        vertices[2] = (RixVertex){c->x, (float)backend->height - c->y, zc, c->reciprocal_w,
+        vertices[2] = (RixVertex){c->x - 0.5f, top - c->y, zc, c->reciprocal_w,
                                   c->rgba, c->s, c->t, c->q};
-        texture1_vertices[0] = (RixVertex){a->x, (float)backend->height - a->y, za,
+        texture1_vertices[0] = (RixVertex){a->x - 0.5f, top - a->y, za,
                                            a->reciprocal_w, a->rgba, a->s1, a->t1, a->q1};
-        texture1_vertices[1] = (RixVertex){b->x, (float)backend->height - b->y, zb,
+        texture1_vertices[1] = (RixVertex){b->x - 0.5f, top - b->y, zb,
                                            b->reciprocal_w, b->rgba, b->s1, b->t1, b->q1};
-        texture1_vertices[2] = (RixVertex){c->x, (float)backend->height - c->y, zc,
+        texture1_vertices[2] = (RixVertex){c->x - 0.5f, top - c->y, zc,
                                            c->reciprocal_w, c->rgba, c->s1, c->t1, c->q1};
     }
     passes = (backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U ? 2U : 1U;

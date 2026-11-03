@@ -713,8 +713,9 @@ static void submit_point_size(mw_ctx *c, float size)
     assert(submit_single_command(c, MW_STATE, payload, sizeof(payload)) == MW_STATUS_OK);
 }
 
-/* Window coordinates (sx, sy) of each point; NDC for the identity MVP. */
-static void submit_points(mw_ctx *c, const float (*window)[2], uint32_t count)
+/* Window coordinates (sx, sy) of each vertex; NDC for the identity MVP. */
+static void submit_vertices(mw_ctx *c, uint32_t mode, const float (*window)[2],
+                            uint32_t count)
 {
     static uint8_t packet[16 + 8 + 8 + 8 * 76];
     uint32_t payload = 8U + count * 76U;
@@ -729,7 +730,7 @@ static void submit_points(mw_ctx *c, const float (*window)[2], uint32_t count)
     mw_put_be32(packet + 12, 1U);
     mw_put_be32(packet + 16, MW_DRAW_OBJECT);
     mw_put_be32(packet + 20, payload);
-    mw_put_be32(packet + 24, 0U); /* GL_POINTS */
+    mw_put_be32(packet + 24, mode);
     mw_put_be32(packet + 28, count);
     for (i = 0U; i < count; ++i, q += 76) {
         mw_put_bef(q, window[i][0] * 2.0f / (float)WIDTH - 1.0f);
@@ -742,6 +743,40 @@ static void submit_points(mw_ctx *c, const float (*window)[2], uint32_t count)
         mw_put_bef(q + 28, 1.0f);
     }
     assert(mw_host_submit(c, packet, 24U + payload) == MW_STATUS_OK);
+}
+
+/* Draws the same vertices on RasterIX (coverage from the descriptors it is
+ * sent) and on the CPU rasterizer, and requires the same pixels. */
+static void assert_rasterix_matches_cpu(mw_ctx *c, uint32_t mode,
+                                        const float (*window)[2], uint32_t count)
+{
+    uint32_t hw_before, sw_before;
+    const uint32_t *cpu;
+    unsigned x, y;
+
+    c->state.force_cpu = 0;
+    minigl_raster_reset_frame_counters();
+    hw_before = minigl_raster_draws_hardware();
+    sw_before = minigl_raster_draws_software();
+    memset(s_coverage, 0, sizeof(s_coverage));
+    s_capture_coverage = 1;
+    submit_vertices(c, mode, window, count);
+    assert(minigl_raster_drain());
+    s_capture_coverage = 0;
+    assert(minigl_raster_draws_hardware() == hw_before + 1U);
+    assert(minigl_raster_draws_software() == sw_before);
+
+    c->state.force_cpu = 1;
+    assert(minigl_raster_finish());
+    memset(c->color_buffers[c->state.target.back], 0, WIDTH * HEIGHT * 4U);
+    submit_vertices(c, mode, window, count);
+    cpu = c->color_buffers[c->state.target.back];
+    for (y = 0U; y < HEIGHT; ++y)
+        for (x = 0U; x < WIDTH; ++x)
+            assert(s_coverage[y][x] == (cpu[y * WIDTH + x] != 0U ? 1U : 0U));
+    /* The forced CPU draw latched this frame to the CPU. */
+    minigl_raster_frame_boundary();
+    c->state.force_cpu = 0;
 }
 
 /* GL_POINTS (particles) stay on RasterIX instead of latching the frame to
@@ -761,37 +796,37 @@ static void test_points_render_on_rasterix(void)
     c = mw_host_create(WIDTH, HEIGHT);
     assert(c != NULL);
     for (s = 0U; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
-        uint32_t hw_before, sw_before;
-        const uint32_t *cpu;
-        unsigned x, y;
-
         submit_point_size(c, sizes[s]);
-        c->state.force_cpu = 0;
-        minigl_raster_reset_frame_counters();
-        hw_before = minigl_raster_draws_hardware();
-        sw_before = minigl_raster_draws_software();
-        memset(s_coverage, 0, sizeof(s_coverage));
-        s_capture_coverage = 1;
-        submit_points(c, window, 4U);
-        assert(minigl_raster_drain());
-        s_capture_coverage = 0;
-        assert(minigl_raster_draws_hardware() == hw_before + 1U);
-        assert(minigl_raster_draws_software() == sw_before);
-
-        c->state.force_cpu = 1;
-        assert(minigl_raster_finish());
-        memset(c->color_buffers[c->state.target.back], 0, WIDTH * HEIGHT * 4U);
-        submit_points(c, window, 4U);
-        cpu = c->color_buffers[c->state.target.back];
-        for (y = 0U; y < HEIGHT; ++y)
-            for (x = 0U; x < WIDTH; ++x)
-                assert(s_coverage[y][x] == (cpu[y * WIDTH + x] != 0U ? 1U : 0U));
-        /* The forced CPU draw latched this frame to the CPU. */
-        minigl_raster_frame_boundary();
+        assert_rasterix_matches_cpu(c, 0U /* GL_POINTS */, window, 4U);
     }
     mw_host_destroy(c);
     minigl_raster_set_rix_platform(NULL);
     printf("PASS: test_points_render_on_rasterix\n");
+}
+
+/* RasterIX samples where OpenGL does (pixel centres): triangles whose edges
+ * fall between pixel centres cover the CPU rasterizer's pixels, not ones
+ * half a pixel away. */
+static void test_triangles_sample_pixel_centres(void)
+{
+    static const float triangles[][3][2] = {
+        { { 3.3f, 4.7f }, { 20.6f, 5.2f }, { 9.4f, 19.8f } },
+        { { 30.25f, 2.75f }, { 41.75f, 2.75f }, { 41.75f, 14.25f } },
+        { { 50.5f, 30.1f }, { 60.9f, 44.6f }, { 45.2f, 41.3f } }
+    };
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+    unsigned t;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(WIDTH, HEIGHT);
+    assert(c != NULL);
+    for (t = 0U; t < sizeof(triangles) / sizeof(triangles[0]); ++t)
+        assert_rasterix_matches_cpu(c, 4U /* GL_TRIANGLES */, triangles[t], 3U);
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_triangles_sample_pixel_centres\n");
 }
 
 /* A second context binding its buffers must not strand the first one's
@@ -1048,6 +1083,7 @@ int main(void)
     test_rasterix_rgb565_span_presentation();
     test_second_context_keeps_first_frame();
     test_points_render_on_rasterix();
+    test_triangles_sample_pixel_centres();
     test_backend_disable_cpu_rerender_present();
     test_wire_cpu_handoffs();
     test_watertight_tessellation();
