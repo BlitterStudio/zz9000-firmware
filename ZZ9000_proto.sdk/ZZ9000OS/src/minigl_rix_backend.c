@@ -1505,6 +1505,33 @@ static size_t backend_two_pass_state_words(const MiniGLRixBackend *backend,
     return transition && backend_two_pass_texenv_same(op) ? words - 4U : words;
 }
 
+/* A two-pass draw whose first pass keeps the nearest fragment (depth test
+ * LESS or LEQUAL, depth writes on) can run every first-pass triangle and
+ * then every second-pass one: the EQUAL second pass meets the depth the
+ * first pass left, as when the passes alternate per triangle, except where
+ * triangles of the same draw overlap at exactly equal depth.  Each pass
+ * then sends its state and texture page list once per draw instead of once
+ * per triangle, and the texture cache, which every page list invalidates,
+ * survives a whole pass (Quake's lightmapped world). */
+static int backend_two_pass_batchable(const ZZ9KMiniGLPacketSetState *state)
+{
+    return (state->enabled_flags & ZZ9K_MGL_STATE_DEPTH_TEST) != 0U &&
+           (state->enabled_flags & ZZ9K_MGL_STATE_DEPTH_WRITE) != 0U &&
+           (state->depth_func == ZZ9K_MGL_WIRE_LESS ||
+            state->depth_func == ZZ9K_MGL_WIRE_LEQUAL);
+}
+
+static size_t backend_batched_state_words(const ZZ9KMiniGLPacketSetState *state,
+                                          const MiniGLRixTexture *texture0,
+                                          const MiniGLRixTexture *texture1)
+{
+    int texenv_same = state->tex_env_mode[0] == GL_REPLACE &&
+                      state->tex_env_color[0] == state->tex_env_color[1];
+
+    return 33U + (texture0 != NULL ? texture0->page_count : 1U) +
+           33U + texture1->page_count - (texenv_same ? 4U : 0U);
+}
+
 static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
 {
     size_t op_index;
@@ -1535,6 +1562,20 @@ static int backend_emit_frame(MiniGLRixBackend *backend, RixCmdWriter *writer)
             if ((!op->inherits_state && !backend_emit_state(backend, writer, op, 0U, 1)) ||
                 !backend_emit_triangles(writer, backend, op, 0U))
                 return 0;
+        } else if (op->batched) {
+            size_t triangle_index;
+
+            if (!backend_emit_state(backend, writer, op, 0U, 1))
+                return 0;
+            for (triangle_index = 0U; triangle_index < op->triangle_count; ++triangle_index)
+                if (!backend_emit_triangle(writer, backend, op, triangle_index, 0U))
+                    return 0;
+            if (!backend_emit_state(backend, writer, op, 1U,
+                                    !backend_two_pass_texenv_same(op)))
+                return 0;
+            for (triangle_index = 0U; triangle_index < op->triangle_count; ++triangle_index)
+                if (!backend_emit_triangle(writer, backend, op, triangle_index, 1U))
+                    return 0;
         } else {
             size_t triangle_index;
             int omit_texenv = backend_two_pass_texenv_same(op);
@@ -1639,6 +1680,7 @@ static int backend_record_draw(MiniGLRixBackend *backend)
     MiniGLRixTexture *texture1 = NULL;
     size_t state_words;
     int two_pass = (backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U;
+    int batched = two_pass && backend_two_pass_batchable(&backend->state);
     int inherits;
 
     if (backend->op_count == MINIGL_RIX_MAX_OPS)
@@ -1656,8 +1698,9 @@ static int backend_record_draw(MiniGLRixBackend *backend)
             return 0;
     }
     inherits = backend_op_inherits_state(backend, two_pass, texture0);
-    state_words = (two_pass || inherits) ? 0U : 33U +
-        (texture0 != NULL ? texture0->page_count : 0U);
+    state_words = inherits ? 0U :
+        batched ? backend_batched_state_words(&backend->state, texture0, texture1) :
+        two_pass ? 0U : 33U + (texture0 != NULL ? texture0->page_count : 0U);
     /* Every op carries its full state and texture page list, so many small
      * draws (GLQuake's console and HUD: one glBegin per character) fill the
      * command budget through state alone.  Submit what is recorded and start
@@ -1668,8 +1711,9 @@ static int backend_record_draw(MiniGLRixBackend *backend)
         if (backend->op_count == 0U || !backend_flush(backend, 1))
             return 0;
         inherits = 0;
-        state_words = two_pass ? 0U : 33U +
-            (texture0 != NULL ? texture0->page_count : 0U);
+        state_words =
+            batched ? backend_batched_state_words(&backend->state, texture0, texture1) :
+            two_pass ? 0U : 33U + (texture0 != NULL ? texture0->page_count : 0U);
         if (backend->command_words_estimate + state_words > MINIGL_RIX_COMMAND_WORD_BUDGET)
             return 0;
     }
@@ -1681,6 +1725,7 @@ static int backend_record_draw(MiniGLRixBackend *backend)
     op->texture1_slot = UINT16_MAX;
     op->first_triangle = backend->triangle_count;
     op->two_pass = (uint8_t)two_pass;
+    op->batched = (uint8_t)batched;
     op->inherits_state = (uint8_t)inherits;
     if (texture0 != NULL) {
         op->texture_slot = (uint16_t)(texture0 - backend->textures);
@@ -1855,7 +1900,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     }
     op = &backend->ops[backend->op_count - 1U];
     triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
-    if (op->two_pass)
+    if (op->two_pass && !op->batched)
         triangle_words += backend_two_pass_state_words(backend, op, 0U,
                                                        op->triangle_count != 0U) +
                           backend_two_pass_state_words(backend, op, 1U, 1);
@@ -1869,7 +1914,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
             return 0;
         op = &backend->ops[backend->op_count - 1U];
         triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
-        if (op->two_pass)
+        if (op->two_pass && !op->batched)
             triangle_words += backend_two_pass_state_words(backend, op, 0U, 0) +
                               backend_two_pass_state_words(backend, op, 1U, 1);
         if (backend->command_words_estimate + triangle_words >
@@ -1917,6 +1962,11 @@ static void backend_recalculate_command_words(MiniGLRixBackend *backend)
                         backend_draw_state_words(backend, op, 0U);
                 backend->command_words_estimate += op->triangle_count *
                     (RIX_TRIANGLE_WORDS + 1U);
+            } else if (op->batched) {
+                backend->command_words_estimate +=
+                    backend_draw_state_words(backend, op, 0U) +
+                    backend_two_pass_state_words(backend, op, 1U, 1) +
+                    op->triangle_count * 2U * (RIX_TRIANGLE_WORDS + 1U);
             } else {
                 size_t triangle_index;
 

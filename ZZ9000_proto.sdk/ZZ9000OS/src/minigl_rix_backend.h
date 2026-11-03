@@ -157,6 +157,7 @@ typedef struct MiniGLRixRecordedOp {
     uint8_t two_pass;
     uint8_t type;
     uint8_t inherits_state;   /* same state as the previous op: emit none */
+    uint8_t batched;          /* two-pass: every pass-0 triangle, then every pass 1 */
 } MiniGLRixRecordedOp;
 
 

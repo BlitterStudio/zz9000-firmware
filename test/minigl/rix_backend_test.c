@@ -1130,6 +1130,7 @@ static void test_two_texture_multipass_recording(void)
     uint32_t *command;
     size_t word;
     unsigned triangles = 0U;
+    unsigned streams = 0U;
 
     init_backend(&backend, &model, TEXTURE_SLOTS);
     assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, diffuse, 4U, 4U,
@@ -1168,10 +1169,22 @@ static void test_two_texture_multipass_recording(void)
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_drain(&backend));
     command = (uint32_t *)model.command[0];
-    for (word = 0U; word < COMMAND_WORDS; ++word)
+    for (word = 0U; word < COMMAND_WORDS;) {
+        uint32_t op = command[word] & 0xf0000000U;
+
         if (command[word] == (RIX_OP_TRIANGLE_STREAM | RIX_TRIANGLE_WORDS * 4U))
             ++triangles;
+        else if (op == RIX_OP_TEXTURE_STREAM)
+            ++streams;
+        word += op == RIX_OP_RENDER_CONFIG ? 2U :
+                op == RIX_OP_TRIANGLE_STREAM ? 1U + (command[word] & 0x3ffU) / 4U :
+                op == RIX_OP_FOG_LUT_STREAM ? 65U :
+                op == RIX_OP_TEXTURE_STREAM ? 1U + (command[word] & 0x7ffffU) : 1U;
+    }
     assert(triangles == 4U);
+    /* One state block and page list per pass for the whole draw, not per
+     * triangle: each page list also invalidates the RasterIX texture cache. */
+    assert(streams == 2U);
 
     state.enabled_flags |= ZZ9K_MGL_STATE_BLEND;
     minigl_rix_backend_set_state(&backend, &state);
