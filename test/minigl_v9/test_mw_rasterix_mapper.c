@@ -829,6 +829,62 @@ static void test_triangles_sample_pixel_centres(void)
     printf("PASS: test_triangles_sample_pixel_centres\n");
 }
 
+/* The row fast paths of the 68k present must give the bytes the per-pixel
+ * encoder gives, including the 5/6-bit widening, in every screen format
+ * they cover. */
+static void test_rasterix_rgb565_present_formats(void)
+{
+    static const struct {
+        uint32_t format;
+        uint32_t bpp;
+        uint8_t bytes[16];
+    } cases[] = {
+        { 4U, 2U, { 0x00, 0xf8, 0xe0, 0x07, 0x1f, 0x00, 0x10, 0x84 } },
+        { 10U, 2U, { 0xf8, 0x00, 0x07, 0xe0, 0x00, 0x1f, 0x84, 0x10 } },
+        { 6U, 4U, { 0xff, 0xff, 0x00, 0x00, 0xff, 0x00, 0xff, 0x00,
+                    0xff, 0x00, 0x00, 0xff, 0xff, 0x84, 0x82, 0x84 } },
+        { 7U, 4U, { 0xff, 0x00, 0x00, 0xff, 0xff, 0x00, 0xff, 0x00,
+                    0xff, 0xff, 0x00, 0x00, 0xff, 0x84, 0x82, 0x84 } },
+        { 8U, 4U, { 0xff, 0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff,
+                    0x00, 0x00, 0xff, 0xff, 0x84, 0x82, 0x84, 0xff } },
+        { 9U, 4U, { 0x00, 0x00, 0xff, 0xff, 0x00, 0xff, 0x00, 0xff,
+                    0xff, 0x00, 0x00, 0xff, 0x84, 0x82, 0x84, 0xff } }
+    };
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+    uint16_t *surface;
+    unsigned i;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+    c->state.target.latest = c->state.target.back;
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    surface = (uint16_t *)c->color_buffers[c->state.target.latest];
+    surface[0] = 0xf800U;
+    surface[1] = 0x07e0U;
+    surface[2] = 0x001fU;
+    surface[3] = 0x8410U;
+    for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        uint8_t request[40];
+        uint8_t span[16];
+        uint32_t reply_bytes = 0U;
+
+        put_blit_request(request);
+        mw_put_be32(request + 4, cases[i].format);
+        mw_put_be32(request + 8, 2U * cases[i].bpp);
+        memset(span, 0, sizeof(span));
+        assert(mw_host_request(c, request, sizeof(request), span, 4U * cases[i].bpp,
+                               &reply_bytes) == MW_STATUS_OK);
+        assert(memcmp(span, cases[i].bytes, 4U * cases[i].bpp) == 0);
+    }
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_rasterix_rgb565_present_formats\n");
+}
+
 /* A second context binding its buffers must not strand the first one's
  * RasterIX frame: the first context's next packet still reads its pixels. */
 static void test_second_context_keeps_first_frame(void)
@@ -1081,6 +1137,7 @@ int main(void)
     test_cpu_present_orientation();
     test_rasterix_rgb565_present_orientation();
     test_rasterix_rgb565_span_presentation();
+    test_rasterix_rgb565_present_formats();
     test_second_context_keeps_first_frame();
     test_points_render_on_rasterix();
     test_triangles_sample_pixel_centres();

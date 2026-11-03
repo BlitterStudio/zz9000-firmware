@@ -2226,6 +2226,61 @@ static uint32_t mw_parse_span(const uint8_t *p, uint32_t bytes,
     return MW_STATUS_OK;
 }
 
+/* One unscaled row in the formats GL screens use, without the per-pixel
+ * format dispatch (68k GLQuake spent ~21 ms per frame in this present).  The
+ * results equal mw_present_source_pixel + mw_encode_pixel bit for bit.
+ * Returns 0 for any other format, which the per-pixel loop then handles. */
+static int mw_blit_row_fast(uint8_t *dst, const uint32_t *src_buf, int source_rgb565,
+                            size_t first, uint32_t count, uint32_t format)
+{
+    uint32_t i;
+
+    if (source_rgb565) {
+        const uint16_t *src = (const uint16_t *)src_buf + first;
+
+        switch (format) {
+        case 4: /* RGBFB_R5G6B5PC: the RasterIX layout itself */
+            memcpy(dst, src, (size_t)count * 2U);
+            return 1;
+        case 10: /* RGBFB_R5G6B5 (BE) */
+            for (i = 0U; i < count; ++i) {
+                dst[i * 2U] = (uint8_t)(src[i] >> 8);
+                dst[i * 2U + 1U] = (uint8_t)src[i];
+            }
+            return 1;
+        case 6: case 7: case 8: case 9:
+            for (i = 0U; i < count; ++i) {
+                uint16_t v = src[i];
+                uint8_t r = mw_widen5(v >> 11);
+                uint8_t g = mw_widen6((v >> 5) & 63U);
+                uint8_t b = mw_widen5(v & 31U);
+                uint8_t *d = dst + i * 4U;
+
+                if (format == 6) { d[0] = 0xff; d[1] = r; d[2] = g; d[3] = b; }
+                else if (format == 7) { d[0] = 0xff; d[1] = b; d[2] = g; d[3] = r; }
+                else if (format == 8) { d[0] = r; d[1] = g; d[2] = b; d[3] = 0xff; }
+                else { d[0] = b; d[1] = g; d[2] = r; d[3] = 0xff; }
+            }
+            return 1;
+        default:
+            return 0;
+        }
+    }
+    if (format < 6U || format > 9U)
+        return 0;
+    for (i = 0U; i < count; ++i) {
+        uint32_t pix = src_buf[first + i];
+        uint8_t r = (uint8_t)(pix >> 24), g = (uint8_t)(pix >> 16), b = (uint8_t)(pix >> 8);
+        uint8_t *d = dst + i * 4U;
+
+        if (format == 6) { d[0] = 0xff; d[1] = r; d[2] = g; d[3] = b; }
+        else if (format == 7) { d[0] = 0xff; d[1] = b; d[2] = g; d[3] = r; }
+        else if (format == 8) { d[0] = r; d[1] = g; d[2] = b; d[3] = 0xff; }
+        else { d[0] = b; d[1] = g; d[2] = r; d[3] = 0xff; }
+    }
+    return 1;
+}
+
 static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                        uint8_t *span, uint32_t span_bytes)
 {
@@ -2291,6 +2346,12 @@ static uint32_t mw_blit(mw_ctx *c, const uint8_t *p, uint32_t bytes,
                 int64_t hi = (int64_t)r.rects[i * 4 + 2] < (int64_t)frame_w + r.frame_x
                            ? (int64_t)r.rects[i * 4 + 2] : (int64_t)frame_w + r.frame_x;
 
+                if (!scaled && hi > lo &&
+                    mw_blit_row_fast(dst_row + (size_t)lo * r.bytes_per_pixel,
+                                     src_buf, source_rgb565,
+                                     (size_t)fy * c->width + (size_t)(lo - r.frame_x),
+                                     (uint32_t)(hi - lo), r.format))
+                    continue;
                 for (int64_t col = lo; col < hi; ++col) {
                     int64_t fx = col - r.frame_x;
                     uint32_t pix;
