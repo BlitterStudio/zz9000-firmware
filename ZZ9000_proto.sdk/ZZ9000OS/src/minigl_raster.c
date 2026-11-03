@@ -1418,6 +1418,22 @@ static float plane(const Vertex *vertex, unsigned index)
     default: return vertex->w - vertex->z;
     }
 }
+static inline unsigned vertex_outcode(const Vertex *v)
+{
+    float w = v->w;
+    float x = v->x;
+    float y = v->y;
+    float z = v->z;
+    unsigned code = 0U;
+    if (x + w < 0.0f) code |= 1U << 0;
+    if (w - x < 0.0f) code |= 1U << 1;
+    if (y + w < 0.0f) code |= 1U << 2;
+    if (w - y < 0.0f) code |= 1U << 3;
+    if (z + w < 0.0f) code |= 1U << 4;
+    if (w - z < 0.0f) code |= 1U << 5;
+    return code;
+}
+
 
 static unsigned clip_polygon(const Vertex *in, unsigned count, Vertex *out)
 {
@@ -1434,9 +1450,7 @@ static unsigned clip_polygon(const Vertex *in, unsigned count, Vertex *out)
         unsigned any = 0U;
         unsigned all = 63U;
         for (index = 0U; index < count; ++index) {
-            unsigned code = 0U;
-            for (plane_index = 0U; plane_index < 6U; ++plane_index)
-                if (plane(&in[index], plane_index) < 0.0f) code |= 1U << plane_index;
+            unsigned code = vertex_outcode(&in[index]);
             any |= code;
             all &= code;
         }
@@ -1906,35 +1920,28 @@ static inline uint32_t blend_alpha_fast(uint32_t src, uint32_t dst, uint8_t a)
 
 static void triangle_fill(const Vertex *first, const Vertex *second, const Vertex *third, float polygon_offset)
 {
-    Vertex a = *first;
-    Vertex b = *second;
-    Vertex c = *third;
-    float area = edge(&a, &b, c.sx, c.sy);
+    const Vertex *v0 = first;
+    const Vertex *v1 = second;
+    const Vertex *v2 = third;
+    float area = edge(v0, v1, v2->sx, v2->sy);
     int x0;
     int x1;
     int y0;
     int y1;
-    int x;
-    int y;
-    int endpoint_depth = (a.sz == 0.0f || a.sz == 1.0f) && a.sz == b.sz && a.sz == c.sz;
-    unsigned units;
-    unsigned unit;
-    TextureSlope slopes[MAX_TMU];
 
     if (area == 0.0f) {
         minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
         return;
     }
     if (area < 0.0f) {
-        Vertex swap = b;
-        b = c;
-        c = swap;
+        v1 = third;
+        v2 = second;
         area = -area;
     }
-    x0 = (int)floorf(fminf(a.sx, fminf(b.sx, c.sx)));
-    x1 = (int)ceilf(fmaxf(a.sx, fmaxf(b.sx, c.sx)));
-    y0 = (int)floorf(fminf(a.sy, fminf(b.sy, c.sy)));
-    y1 = (int)ceilf(fmaxf(a.sy, fmaxf(b.sy, c.sy)));
+    x0 = (int)floorf(fminf(v0->sx, fminf(v1->sx, v2->sx)));
+    x1 = (int)ceilf(fmaxf(v0->sx, fmaxf(v1->sx, v2->sx)));
+    y0 = (int)floorf(fminf(v0->sy, fminf(v1->sy, v2->sy)));
+    y1 = (int)ceilf(fmaxf(v0->sy, fmaxf(v1->sy, v2->sy)));
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 >= g_buffers.width) x1 = (int)g_buffers.width - 1;
@@ -1945,12 +1952,12 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
     }
     if (g_rix_collecting != 0) {
         if (g_rix_collecting > 0) {
-            MiniGLRixVertex va = { a.sx, a.sy, a.sz, a.inv_w, a.color,
-                                   a.u0, a.v0, a.q0, a.u1, a.v1, a.q1 };
-            MiniGLRixVertex vb = { b.sx, b.sy, b.sz, b.inv_w, b.color,
-                                   b.u0, b.v0, b.q0, b.u1, b.v1, b.q1 };
-            MiniGLRixVertex vc = { c.sx, c.sy, c.sz, c.inv_w, c.color,
-                                   c.u0, c.v0, c.q0, c.u1, c.v1, c.q1 };
+            MiniGLRixVertex va = { v0->sx, v0->sy, v0->sz, v0->inv_w, v0->color,
+                                   v0->u0, v0->v0, v0->q0, v0->u1, v0->v1, v0->q1 };
+            MiniGLRixVertex vb = { v1->sx, v1->sy, v1->sz, v1->inv_w, v1->color,
+                                   v1->u0, v1->v0, v1->q0, v1->u1, v1->v1, v1->q1 };
+            MiniGLRixVertex vc = { v2->sx, v2->sy, v2->sz, v2->inv_w, v2->color,
+                                   v2->u0, v2->v0, v2->q0, v2->u1, v2->v1, v2->q1 };
             minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
             if (!minigl_rix_backend_add_triangle(&g_rix, &va, &vb, &vc))
                 g_rix_collecting = -1;
@@ -1958,6 +1965,16 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
         return;
     }
     minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, g_clip_start_cycle);
+
+    Vertex a = *v0;
+    Vertex b = *v1;
+    Vertex c = *v2;
+    int endpoint_depth = (a.sz == 0.0f || a.sz == 1.0f) && a.sz == b.sz && a.sz == c.sz;
+    unsigned units;
+    unsigned unit;
+    TextureSlope slopes[MAX_TMU];
+    int x;
+    int y;
     /* Per-pixel mip gradients exist only for the CPU loop below; a
      * triangle queued for RasterIX above never reads them. */
     units = gradient_units();
@@ -2453,7 +2470,6 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
     float polygon_offset;
     int front;
     uint16_t face;
-    Vertex verts[CLIP_MAX_VERTICES];
     unsigned i;
 
     if (count < 3U) {
@@ -2475,6 +2491,30 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
             return;
         }
     }
+    if (count == 3U) {
+        Vertex verts[3];
+        for (i = 0U; i < 3U; ++i) {
+            verts[i] = clipped[i];
+            verts[i].color = front ? verts[i].front_color : verts[i].back_color;
+            verts[i].flat_color = flat_color;
+        }
+        polygon_offset = polygon_offset_polygon(verts, 3U);
+        switch (g_state.polygon_mode ? g_state.polygon_mode : GL_FILL) {
+        case GL_POINT:
+            for (i = 0U; i < 3U; ++i)
+                point_screen(&verts[i], polygon_offset);
+            break;
+        case GL_LINE:
+            for (i = 0U; i < 3U; ++i)
+                line_screen(&verts[i], &verts[(i + 1U) % 3U], polygon_offset);
+            break;
+        default:
+            triangle_fill(&verts[0], &verts[1], &verts[2], polygon_offset);
+            break;
+        }
+        return;
+    }
+    Vertex verts[CLIP_MAX_VERTICES];
     for (i = 0U; i < count; ++i) {
         verts[i] = clipped[i];
         verts[i].color = front ? verts[i].front_color : verts[i].back_color;
@@ -2503,12 +2543,33 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
 static void primitive_triangle(const Vertex *first, const Vertex *second, const Vertex *third)
 {
     uint32_t c_clip_start = minigl_profile_cycles();
+    g_clip_start_cycle = c_clip_start;
+
+    unsigned c0 = vertex_outcode(first);
+    unsigned c1 = vertex_outcode(second);
+    unsigned c2 = vertex_outcode(third);
+    if ((c0 & c1 & c2) != 0U) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, c_clip_start);
+        return;
+    }
+    if ((c0 | c1 | c2) == 0U) {
+        Vertex clipped[3];
+        clipped[0] = *first;
+        clipped[1] = *second;
+        clipped[2] = *third;
+        if (!project(&clipped[0]) || !project(&clipped[1]) || !project(&clipped[2])) {
+            minigl_profile_geom_add_cycles(MGLP_GEOM_CLIP, c_clip_start);
+            return;
+        }
+        render_clipped_polygon(clipped, 3U, third->color);
+        return;
+    }
+
     Vertex input[3];
     Vertex clipped[CLIP_MAX_VERTICES];
     unsigned count;
     unsigned index;
 
-    g_clip_start_cycle = c_clip_start;
     input[0] = *first;
     input[1] = *second;
     input[2] = *third;
