@@ -640,9 +640,10 @@ void mw_service_report_amiga_reset(void)
     if (mw_service_packet_diagnostics(NULL, 0U, &processed) != 0)
         last = &g_packet_diagnostics[(g_packet_diagnostic_write - 1U) %
                                      MW_PACKET_DIAG_RING_SIZE];
-    MW_DIAG("[MGL9] reset %lux%lu %s seq=%lu/%lu pk=%lu last=%lums op=%08lx st=%08lx ops=%lu/%lu pend=%lu lastop=%lu %lums\n",
+    MW_DIAG("[MGL9] reset %lux%lu hw=%lu sw=%lu seq=%lu/%lu pk=%lu last=%lums op=%08lx st=%08lx ops=%lu/%lu pend=%lu lastop=%lu %lums\n",
             (unsigned long)context->width, (unsigned long)context->height,
-            mw_backend_name(context),
+            (unsigned long)minigl_raster_draws_hardware(),
+            (unsigned long)minigl_raster_draws_software(),
             (unsigned long)mw_wire_ld32(&g_ctrl->producer_seq),
             (unsigned long)mw_wire_ld32(&g_ctrl->consumer_seq),
             (unsigned long)processed,
