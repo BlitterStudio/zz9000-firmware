@@ -607,16 +607,16 @@ int minigl_raster_drain(void)
     return minigl_rix_backend_drain(&g_rix);
 }
 
-/* GL leaves a back buffer's contents undefined after a swap.  Marking the
- * target as already in RasterIX's format skips converting the incoming
- * buffer that no defined pixel survives in; the first full-frame draw or
- * clear defines it. */
-void minigl_raster_target_discard(void)
+/* GL leaves a back buffer's contents undefined after a swap, but its byte
+ * layout remains per target.  Keep that layout so a CPU fallback does not
+ * expand initial RGBA bytes as RGB565. */
+void minigl_raster_target_discard(int rgb565)
 {
     if (!ready())
         return;
+    minigl_rix_backend_discard_target(&g_rix, rgb565);
     g_rix_surface = g_buffers.color;
-    g_rix_surface_rgb565 = 1;
+    g_rix_surface_rgb565 = rgb565 != 0;
     g_rix_depth_z16 = 1;
 }
 

@@ -29,8 +29,8 @@ struct mw_ctx {
     uint32_t palette_width;
     uint32_t *color_buffers[3];
     /* Per colour buffer: contents are in RasterIX's RGB565 layout and a CPU
-     * reader must convert through minigl_raster_buffer_to_rgba first.  A
-     * swap leaves the incoming back buffer undefined, so it starts set. */
+     * reader must convert through minigl_raster_buffer_to_rgba first.  The
+     * layout belongs to the buffer and survives an undefined-content swap. */
     uint8_t  color_rgb565[3];
     uint8_t  *depth_buffer;
     uint8_t  *texture_pool;

@@ -1819,24 +1819,21 @@ target_allocation_failed:
             c->state.target.back = old_back;
             /* Still bound to the outgoing buffer: re-adopt its 565 frame. */
             if (retire)
-                minigl_raster_target_discard();
+                minigl_raster_target_discard(gpu_format);
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }
         /* The outgoing frame keeps its RasterIX format for span presents
-         * and read pixels (both convert on demand, tracked per buffer);
-         * the incoming back buffer is undefined after a swap, so it starts
-         * in the GPU's format instead of being converted twice for
-         * nothing.  Outside 565 mode nothing changes. */
+         * and read pixels.  The incoming target retains its own layout:
+         * a newly allocated third target is RGBA until RasterIX writes it,
+         * while a recycled GPU target is already RGB565. */
         if (gpu_format) {
             c->color_rgb565[outgoing] = 1U;
-            if (c->state.target.buffer_count > 1U) {
-                c->color_rgb565[c->state.target.back] = 1U;
-                minigl_raster_target_discard();
-            }
+            if (c->state.target.buffer_count > 1U)
+                minigl_raster_target_discard(
+                    c->color_rgb565[c->state.target.back] != 0U);
         } else {
             c->color_rgb565[outgoing] = 0U;
-            c->color_rgb565[c->state.target.back] = 0U;
         }
         minigl_raster_frame_boundary();
         break;

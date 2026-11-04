@@ -1093,6 +1093,38 @@ static void test_wire_cpu_handoffs(void)
     printf("PASS: test_wire_cpu_handoffs\n");
 }
 
+/* A queued GPU frame does not change the layout of the next, untouched
+ * colour target.  Its first CPU fallback must see the initial RGBA layout. */
+static void test_queued_present_preserves_incoming_format(void)
+{
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+    uint8_t target[24] = { 0 };
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+    mw_put_be32(target, 2U);
+    mw_put_be32(target + 4U, 2U);
+    mw_put_be32(target + 8U, 3U);
+    mw_put_be32(target + 12U, 24U);
+    mw_put_be32(target + 16U, 2U);
+    mw_put_be32(target + 20U, 2U);
+    assert(submit_single_command(c, MW_TARGET, target, sizeof(target)) == MW_STATUS_OK);
+
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(minigl_raster_present_is_rgb565());
+    assert(submit_single_command(c, MW_PRESENT, NULL, 0U) == MW_STATUS_OK);
+    assert(c->state.target.back == 2U);
+    assert(c->color_rgb565[2] == 0U);
+    assert(!minigl_raster_present_is_rgb565());
+
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_queued_present_preserves_incoming_format\n");
+}
+
 /* 4. Watertight tessellated grid test */
 static void test_watertight_tessellation(void)
 {
@@ -1191,6 +1223,7 @@ int main(void)
     test_triangles_sample_pixel_centres();
     test_backend_disable_cpu_rerender_present();
     test_wire_cpu_handoffs();
+    test_queued_present_preserves_incoming_format();
     test_watertight_tessellation();
     printf("ALL Wire-v9 RasterIX Mapper Tests PASSED!\n");
     return 0;

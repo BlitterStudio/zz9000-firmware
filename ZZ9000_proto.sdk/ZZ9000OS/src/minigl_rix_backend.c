@@ -2167,6 +2167,12 @@ int minigl_rix_backend_surface_is_rgb565(const MiniGLRixBackend *backend)
     return backend != NULL && backend->surface_rgb565;
 }
 
+void minigl_rix_backend_discard_target(MiniGLRixBackend *backend, int rgb565)
+{
+    if (backend != NULL)
+        backend->surface_rgb565 = rgb565 != 0;
+}
+
 
 int minigl_rix_backend_submit(MiniGLRixBackend *backend)
 {

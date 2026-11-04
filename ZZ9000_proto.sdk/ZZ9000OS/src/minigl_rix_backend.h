@@ -256,6 +256,8 @@ int minigl_rix_backend_prepare_target(MiniGLRixBackend *backend,
 int minigl_rix_backend_make_cpu_visible(MiniGLRixBackend *backend,
                                         uint32_t *rgba, size_t pixels);
 int minigl_rix_backend_surface_is_rgb565(const MiniGLRixBackend *backend);
+/* The next colour target can have a different layout from the retired one. */
+void minigl_rix_backend_discard_target(MiniGLRixBackend *backend, int rgb565);
 /* Completion is the ownership hand-off: no CPU access may occur before it. */
 int minigl_rix_backend_drain(MiniGLRixBackend *backend);
 /* Finish the current frame's command stream without waiting for its fence.
