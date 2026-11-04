@@ -2180,6 +2180,7 @@ int minigl_rix_backend_submit(MiniGLRixBackend *backend)
 int minigl_rix_backend_poll(MiniGLRixBackend *backend)
 {
     size_t index;
+    int any = 0;
 
     if (backend == NULL || !backend->available)
         return backend != NULL;
@@ -2196,6 +2197,19 @@ int minigl_rix_backend_poll(MiniGLRixBackend *backend)
                                                (uintptr_t)pixel, sizeof(*pixel));
         if (*pixel != (uint16_t)backend->pending_fence[index])
             return 0;
+        any = 1;
+    }
+    /* The fence pixel proves RasterIX reached the end of the commands, not
+     * that every earlier pixel write has left its write coalescer: on the
+     * A4000 the last things drawn (the view model, particles, explosion
+     * sprites) were missing from presented frames.  Like the blocking
+     * backend_wait_buffer_now, require the engine idle with no write
+     * outstanding; one status read, no wait. */
+    if (any && rix_drv_poll(&backend->driver, 0U) != RIX_DRV_OK)
+        return 0;
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        if (!backend->pending[index])
+            continue;
         backend->pending[index] = 0U;
         backend->pending_fence[index] = 0U;
         backend->submitted_command_words[index] = 0U;
