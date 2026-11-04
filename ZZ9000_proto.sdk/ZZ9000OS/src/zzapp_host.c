@@ -304,7 +304,7 @@ void zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
 
 uint32_t zzapp_current_generation(void) { return g_coh->generation; }
 uint32_t zzapp_runtime_state(void) { return g_state; }
-uint32_t zzapp_runtime_caps(void) { return ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO | ZZAPP_CAP_GL; }
+uint32_t zzapp_runtime_caps(void) { return ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO | ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8; }
 
 void zzapp_note_progress(void)
 {

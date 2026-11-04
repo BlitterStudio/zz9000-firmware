@@ -37,6 +37,7 @@
 #define ZZAPP_CAP_DISPLAY          (1u << 1)
 #define ZZAPP_CAP_AUDIO            (1u << 2)
 #define ZZAPP_CAP_GL               (1u << 3)
+#define ZZAPP_CAP_CLUT8            (1u << 4)
 
 /*
  * Mailbox payloads are big-endian in the 48-byte entry payload.
@@ -122,6 +123,8 @@
 #define ZZAPP_STAGING_BYTES    0x00010000u   /* 64 KiB, ends at 0x59B40 */
 
 /* Bytes from 0x59B40 to 0x60000 are reserved zero. */
+#define ZZAPP_PALETTE_OFF      ZZAPP_RESERVED_OFF
+#define ZZAPP_PALETTE_BYTES    1024u
 #define ZZAPP_RESERVED_OFF     0x00059B40u
 
 #define ZZAPP_LIFE_MAGIC       0x5A415050u   /* 'ZAPP' */
@@ -156,6 +159,9 @@
 #define ZZAPP_LIFE_PROGRESS_LO_OFF 0x68u
 #define ZZAPP_LIFE_PROGRESS_HI_OFF 0x6Cu
 #define ZZAPP_LIFE_LAYOUT_OFF      0x70u
+#define ZZAPP_LIFE_PALETTE_GEN_OFF   0x74u
+#define ZZAPP_LIFE_PALETTE_FIRST_OFF 0x78u
+#define ZZAPP_LIFE_PALETTE_COUNT_OFF 0x7Cu
 
 /* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
  * 5 stopping, 6 faulted. */
@@ -184,6 +190,7 @@
 #define ZZAPP_F_GL                 (1u << 2)
 #define ZZAPP_F_DISPLAY_UNBOUND    (1u << 8)
 #define ZZAPP_F_VSYNC              (1u << 9)
+#define ZZAPP_F_LAUNCHER_CLUT8     (1u << 10)
 
 #define ZZAPP_EV_KEY_DOWN          1u
 #define ZZAPP_EV_KEY_UP            2u
@@ -284,6 +291,9 @@ struct zzapp_life {
     uint32_t progress_lo;
     uint32_t progress_hi;
     uint32_t layout;
+    uint32_t palette_generation;
+    uint32_t palette_first;
+    uint32_t palette_count;
 };
 
 struct zzapp_input_hdr {
@@ -388,6 +398,9 @@ _Static_assert(offsetof(struct zzapp_life, card_back) == ZZAPP_LIFE_CARD_BACK_OF
 _Static_assert(offsetof(struct zzapp_life, progress_lo) == ZZAPP_LIFE_PROGRESS_LO_OFF, "plo");
 _Static_assert(offsetof(struct zzapp_life, progress_hi) == ZZAPP_LIFE_PROGRESS_HI_OFF, "phi");
 _Static_assert(offsetof(struct zzapp_life, layout) == ZZAPP_LIFE_LAYOUT_OFF, "layout");
+_Static_assert(offsetof(struct zzapp_life, palette_generation) == ZZAPP_LIFE_PALETTE_GEN_OFF, "pgen");
+_Static_assert(offsetof(struct zzapp_life, palette_first) == ZZAPP_LIFE_PALETTE_FIRST_OFF, "pfirst");
+_Static_assert(offsetof(struct zzapp_life, palette_count) == ZZAPP_LIFE_PALETTE_COUNT_OFF, "pcount");
 _Static_assert(sizeof(struct zzapp_life) <= ZZAPP_LIFE_BYTES, "life bytes");
 
 static inline void zzapp_put_be16(void *p, uint16_t value)

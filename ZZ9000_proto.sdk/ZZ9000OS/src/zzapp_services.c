@@ -56,12 +56,14 @@ typedef char zzapp_window_size_matches_memorymap[
 
 #define ZZ_FMT_RGB565   1u
 #define ZZ_FMT_BGRA8888 2u
+#define ZZ_FMT_CLUT8    3u
 #define ZZ_LAYOUT_RGB565_BE  1u
 #define ZZ_LAYOUT_RGB565_LE  2u
 #define ZZ_LAYOUT_BGR565_BE  3u
 #define ZZ_LAYOUT_BGR565_LE  4u
 #define ZZ_LAYOUT_BGRA8888   5u
 #define ZZ_LAYOUT_RGBA8888   6u
+#define ZZ_LAYOUT_CLUT8      7u
 #define ZZ_DISPLAY_VSYNC 1u
 
 typedef struct zzapp_surface {
@@ -1113,6 +1115,8 @@ static uint32_t format_bpp(uint32_t format)
 		return 2U;
 	if (format == ZZ_FMT_BGRA8888)
 		return 4U;
+	if (format == ZZ_FMT_CLUT8)
+		return 1U;
 	return 0U;
 }
 
@@ -1122,6 +1126,8 @@ static uint32_t default_layout(uint32_t format)
 		return ZZ_LAYOUT_RGB565_BE;
 	if (format == ZZ_FMT_BGRA8888)
 		return ZZ_LAYOUT_BGRA8888;
+	if (format == ZZ_FMT_CLUT8)
+		return ZZ_LAYOUT_CLUT8;
 	return 0U;
 }
 
@@ -1137,6 +1143,8 @@ static int layout_matches_format(uint32_t format, uint32_t layout)
 	if (format == ZZ_FMT_BGRA8888)
 		return layout == ZZ_LAYOUT_BGRA8888 ||
 		       layout == ZZ_LAYOUT_RGBA8888;
+	if (format == ZZ_FMT_CLUT8)
+		return layout == ZZ_LAYOUT_CLUT8;
 	return 0;
 }
 
@@ -1290,6 +1298,9 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 	bpp = format_bpp(format);
 	if (w == 0U || h == 0U || w > 4096U || h > 4096U || bpp == 0U)
 		return ZZ_EINVAL;
+	if (format == ZZ_FMT_CLUT8 &&
+	    (life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_LAUNCHER_CLUT8) == 0U)
+		return ZZ_ENOSYS;
 	if (display_bound)
 		return ZZ_EBUSY;
 	bits = life_get(ZZAPP_LIFE_FLAGS_OFF);
@@ -1326,6 +1337,28 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 	(void)bytes;
 #endif
 	barrier();
+}
+
+int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
+				  uint32_t count, const uint32_t *rgb)
+{
+	uint32_t i;
+	uint32_t gen;
+
+	if (!display_bound || surface_id != display_id ||
+	    life_get(ZZAPP_LIFE_FORMAT_OFF) != ZZ_FMT_CLUT8)
+		return ZZ_EINVAL;
+	if (!rgb || count == 0U || first >= 256U || count > 256U - first)
+		return ZZ_EINVAL;
+	for (i = 0U; i < count; i++)
+		win_put32(ZZAPP_PALETTE_OFF + (first + i) * sizeof(uint32_t),
+			  rgb[i] & 0x00ffffffU);
+	barrier();
+	life_put(ZZAPP_LIFE_PALETTE_FIRST_OFF, first);
+	life_put(ZZAPP_LIFE_PALETTE_COUNT_OFF, count);
+	gen = life_get(ZZAPP_LIFE_PALETTE_GEN_OFF) + 1U;
+	life_put(ZZAPP_LIFE_PALETTE_GEN_OFF, gen);
+	return ZZ_OK;
 }
 
 int zzapp_svc_display_flip_async(uint32_t surface_id)
@@ -1929,7 +1962,7 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 	case ZZAPP_OP_QUERY:
 		put_query(reply, reply_len,
 			  ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO |
-			  ZZAPP_CAP_GL);
+			  ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8);
 		return SDK_STATUS_OK;
 	case ZZAPP_OP_ALLOC_WINDOW: {
 		uint32_t arm = 0U;

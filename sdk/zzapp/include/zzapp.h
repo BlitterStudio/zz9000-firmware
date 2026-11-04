@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 #define ZZAPP_API_MAJOR 0u
-#define ZZAPP_API_MINOR 0u
+#define ZZAPP_API_MINOR 1u
 #define ZZAPP_API_VERSION ((ZZAPP_API_MAJOR << 16) | ZZAPP_API_MINOR)
 
 #define ZZ_OK         0
@@ -35,6 +35,7 @@ extern "C" {
 
 #define ZZ_FMT_RGB565   1u
 #define ZZ_FMT_BGRA8888 2u
+#define ZZ_FMT_CLUT8    3u
 
 /* Physical byte layout of a display surface.  format remains the requested
  * logical format for compatibility; inspect zzapp_surface.layout before
@@ -45,6 +46,7 @@ extern "C" {
 #define ZZ_LAYOUT_BGR565_LE  4u
 #define ZZ_LAYOUT_BGRA8888   5u
 #define ZZ_LAYOUT_RGBA8888   6u
+#define ZZ_LAYOUT_CLUT8      7u
 
 #define ZZ_EV_KEY_DOWN 1u
 #define ZZ_EV_KEY_UP   2u
@@ -289,6 +291,9 @@ typedef struct zzapp_api {
     int      (*display_refresh)(zzapp_surface *surface);
     /* Appended: bind with ZZ_GL_BIND_* flags; old firmware leaves it NULL. */
     const zzapp_gl *(*gl_bind_flags)(uint32_t surface_id, uint32_t flags);
+    /* Appended: update CLUT8 entries as 0x00RRGGBB words. */
+    int      (*display_set_palette)(uint32_t surface_id, uint32_t first,
+                                    uint32_t count, const uint32_t *rgb);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -344,6 +349,10 @@ int      zz_display_flip_idle(void);
 /* Refreshes front/back, pitch, and layout from the launcher after a completed
  * flip.  Returns ZZ_ENOSYS on firmware predating this optional API slot. */
 int      zz_display_refresh(zzapp_surface *surface);
+/* Updates CLUT8 entries as 0x00RRGGBB words.  Returns ZZ_ENOSYS when the
+ * launcher or firmware predates palette presentation support. */
+int      zz_display_set_palette(uint32_t surface_id, uint32_t first,
+                                uint32_t count, const uint32_t *rgb);
 int      zz_display_vsync(void);
 int      zz_display_close(uint32_t surface_id);
 

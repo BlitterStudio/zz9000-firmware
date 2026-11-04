@@ -197,6 +197,15 @@ int zz_display_refresh(zzapp_surface *surface)
     return ZZ_ENOSYS;
 }
 
+int zz_display_set_palette(uint32_t surface_id, uint32_t first,
+                           uint32_t count, const uint32_t *rgb)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, display_set_palette) &&
+        zzapp_api_ptr->display_set_palette)
+        return zzapp_api_ptr->display_set_palette(surface_id, first, count, rgb);
+    return ZZ_ENOSYS;
+}
+
 int zz_display_vsync(void)
 {
     if (ZZ_API_COVERS(zzapp_api_ptr, display_vsync) && zzapp_api_ptr->display_vsync)
