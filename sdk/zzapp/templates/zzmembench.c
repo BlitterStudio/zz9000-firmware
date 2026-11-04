@@ -20,7 +20,6 @@
 #define PL310_PREFETCH         0xf60u
 #define PL310_POWER            0xf80u
 #define DDRC_BASE              0xf8006000u
-#define ACTLR_L1_PREFETCH      (1u << 2)
 #define PL310_DOUBLE_LINEFILL  (1u << 30)
 #define PL310_INCR_LINEFILL    (1u << 23)
 #define PL310_PREFETCH_OFFSET  0x1fu
@@ -85,12 +84,6 @@ static uint32_t actlr_read(void)
 
     __asm__ __volatile__("mrc p15, 0, %0, c1, c0, 1" : "=r"(value));
     return value;
-}
-
-static void actlr_write(uint32_t value)
-{
-    __asm__ __volatile__("dsb sy\n\tmcr p15, 0, %0, c1, c0, 1\n\tisb"
-                         : : "r"(value) : "memory");
 }
 
 static uint32_t mmio_read(uint32_t address)
@@ -426,53 +419,68 @@ static void append_config(char **at, char *end)
     append_char(at, end, '\n');
 }
 
+/* PL310 Prefetch Control settings to compare.  Offsets must be 0-7, 15, 23
+ * or 31 (DDI 0246F 3.3.14).  The L1 prefetch bit made no difference on the
+ * card, so it stays as configured. */
 static void append_tune(char **at, char *end, uint8_t *memory)
 {
+    static const struct {
+        uint32_t offset;
+        uint32_t extra;
+    } settings[] = {
+        {0u, 0u},
+        {3u, 0u},
+        {7u, 0u},
+        {15u, 0u},
+        {7u, PL310_DOUBLE_LINEFILL},
+        {15u, PL310_DOUBLE_LINEFILL},
+        {15u, PL310_DOUBLE_LINEFILL | PL310_INCR_LINEFILL},
+    };
     uint32_t original_prefetch = mmio_read(PL310_BASE + PL310_PREFETCH);
-    uint32_t original_actlr = actlr_read();
-    uint32_t settings[3];
+    uint32_t base = original_prefetch & ~(PL310_PREFETCH_OFFSET |
+                                          PL310_DOUBLE_LINEFILL |
+                                          PL310_INCR_LINEFILL);
     uint32_t i;
-    uint32_t l1;
 
-    settings[0] = original_prefetch;
-    settings[1] = (original_prefetch & ~(PL310_PREFETCH_OFFSET |
-                                         PL310_DOUBLE_LINEFILL |
-                                         PL310_INCR_LINEFILL)) |
-                  7u | PL310_DOUBLE_LINEFILL;
-    settings[2] = (original_prefetch & ~(PL310_PREFETCH_OFFSET |
-                                         PL310_DOUBLE_LINEFILL |
-                                         PL310_INCR_LINEFILL)) |
-                  15u | PL310_DOUBLE_LINEFILL | PL310_INCR_LINEFILL;
-    append_text(at, end, "tune: pfetch current, p7+double, p15+double+incr; l1 on/off\n");
-    for (i = 0u; i < 3u; i++) {
-        if (i != 0u) {
-            mmio_write(PL310_BASE + PL310_PREFETCH, settings[i]);
-            if (mmio_read(PL310_BASE + PL310_PREFETCH) != settings[i]) {
-                append_text(at, end, "tune unavailable: prefetch write rejected\n");
-                break;
-            }
-        }
-        for (l1 = 0u; l1 < 2u; l1++) {
-            uint32_t next_actlr = l1 == 0u ?
-                original_actlr | ACTLR_L1_PREFETCH :
-                original_actlr & ~ACTLR_L1_PREFETCH;
+    append_text(at, end, "tune: PL310 prefetch control values\n");
+    for (i = 0u; i < sizeof(settings) / sizeof(settings[0]); i++) {
+        uint32_t value = base | settings[i].offset | settings[i].extra;
 
-            actlr_write(next_actlr);
-            append_text(at, end, "tune p ");
-            append_hex(at, end, mmio_read(PL310_BASE + PL310_PREFETCH));
-            append_text(at, end, " l1 ");
-            append_u32(at, end, l1 == 0u ? 1u : 0u);
-            append_char(at, end, ' ');
-            append_stream(at, end, "bss", memory);
+        mmio_write(PL310_BASE + PL310_PREFETCH, value);
+        if (mmio_read(PL310_BASE + PL310_PREFETCH) != value) {
+            append_text(at, end, "tune unavailable: prefetch write rejected\n");
+            break;
         }
+        append_text(at, end, "tune p ");
+        append_hex(at, end, value);
+        append_char(at, end, ' ');
+        append_stream(at, end, "bss", memory);
     }
-    actlr_write(original_actlr);
     mmio_write(PL310_BASE + PL310_PREFETCH, original_prefetch);
+    append_text(at, end, "tune restored p ");
+    append_hex(at, end, mmio_read(PL310_BASE + PL310_PREFETCH));
+    append_char(at, end, '\n');
+}
+
+/* zz_log truncates one call at 1024 bytes and the firmware passes at most
+ * 8 lines per second to the UART: send the report one line per call,
+ * 150 ms apart.  The firmware adds the line ending. */
+static void log_lines(const char *text)
+{
+    while (*text != '\0') {
+        const char *nl = text;
+
+        while (*nl != '\0' && *nl != '\n')
+            nl++;
+        zz_log(text, (uint32_t)(nl - text));
+        zz_sleep_us(150000u);
+        text = *nl == '\n' ? nl + 1 : nl;
+    }
 }
 
 int zz_main(int argc, char **argv)
 {
-    char report[2048];
+    char report[4096];
     char *at = report;
     char *const end = report + sizeof(report) - 1u;
     uint8_t *stack_raw;
@@ -537,7 +545,7 @@ int zz_main(int argc, char **argv)
     append_text(&at, end,
                 "firmware cached buffer unavailable: app ABI intentionally exposes none\n");
     *at = '\0';
-    zz_log(report, (uint32_t)(at - report));
+    log_lines(report);
     free(heap_raw);
     return 0;
 }
