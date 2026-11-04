@@ -54,7 +54,7 @@ MUST start at `0x83c80000`; an INCR burst then covers its beats.
 | `0x83c70000` | `ISR` | W1C FIFO completion/error state; not wired to a PS IRQ |
 | `0x83c70004` | `IER` | Leave zero; completion is polled |
 | `0x83c70008` | `TDFR` | Write `0xa5` to reset/discard staged TX words |
-| `0x83c7000c` | `TDFV` | Vacancy in 32-bit words; after reset hardware reserves four words, so normal maximum is 508 |
+| `0x83c7000c` | `TDFV` | Vacancy in 32-bit words; reset reserves four words, so maximum is 508 on legacy 512-word cores and 4092 on the 4096-word core |
 | `0x83c70014` | `TLF` | Commit packet length in bytes; this starts stream delivery |
 | `0x83c80000` | `TDFD` | 32-bit little-endian FIFO word write port (single stores or INCR bursts starting here) |
 
@@ -63,8 +63,9 @@ MUST start at `0x83c80000`; an INCR burst then covers its beats.
 A packet is one complete FrameStreamingCore ST0 sequence: write its two-word
 DSE header/address followed by parser payload words to `TDFD`, execute the
 required ARM barrier, then write the byte count to `TLF`.  Producers MUST wait
-until `TDFV` covers the entire packet, never overrun the FIFO, and limit normal
-packets to 248 words so two packets fit while one drains.
+until `TDFV` covers the entire packet and never overrun the FIFO.  Firmware
+samples reset `TDFV`: legacy 512-word cores retain 248-word payload packets,
+while the 4096-word core uses up to 4090 payload words plus the two-word header.
 
 `TLF` MUST equal the bytes written to `TDFD` since the last accepted `TLF`,
 header words included.  The FIFO drops any other value and sets `ISR.TSE`
