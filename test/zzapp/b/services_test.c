@@ -204,6 +204,44 @@ static void test_audio_busy(void)
 		fail("audio close");
 }
 
+static void test_display_refresh_rotation_and_layout(void)
+{
+	uint8_t payload[ZZAPP_BIND_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	zzapp_surface surface;
+	uint32_t front = 0x00200000U;
+	uint32_t back = 0x00210000U;
+	int rc;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_build_display_bind_request_layout(payload, 320U, 200U, 640U,
+						 ZZ_FMT_RGB565, front, back,
+						 ZZ_LAYOUT_RGB565_LE);
+	rc = zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				    reply, &reply_len, 1, 1U, 0U);
+	if (rc != SDK_STATUS_OK)
+		fail("display bind");
+	memset(&surface, 0, sizeof(surface));
+	surface.id = 1U;
+	if (zzapp_svc_display_refresh(&surface) != ZZ_OK ||
+	    surface.front != (void *)(uintptr_t)front ||
+	    surface.back != (void *)(uintptr_t)back ||
+	    surface.layout != ZZ_LAYOUT_RGB565_LE)
+		fail("display initial surface");
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_GEN_OFF, 1U);
+	if (zzapp_svc_display_refresh(&surface) != ZZ_EBUSY)
+		fail("display pending refresh");
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_ACK_OFF, 1U);
+	if (zzapp_svc_display_refresh(&surface) != ZZ_OK ||
+	    surface.front != (void *)(uintptr_t)back ||
+	    surface.back != (void *)(uintptr_t)front ||
+	    surface.layout != ZZ_LAYOUT_RGB565_LE)
+		fail("display refreshed rotation");
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -211,6 +249,7 @@ int main(void)
 	test_chunked_read();
 	test_drop_on_full();
 	test_audio_busy();
+	test_display_refresh_rotation_and_layout();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;

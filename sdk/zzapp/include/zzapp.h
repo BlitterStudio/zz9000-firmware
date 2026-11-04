@@ -34,7 +34,17 @@ extern "C" {
 #define ZZ_EBADF     -12
 
 #define ZZ_FMT_RGB565   1u
-#define ZZ_FMT_BGRA8888 2u   /* P96 32-bit; memory bytes B,G,R,A. Not ARGB. */
+#define ZZ_FMT_BGRA8888 2u
+
+/* Physical byte layout of a display surface.  format remains the requested
+ * logical format for compatibility; inspect zzapp_surface.layout before
+ * writing pixels. */
+#define ZZ_LAYOUT_RGB565_BE  1u
+#define ZZ_LAYOUT_RGB565_LE  2u
+#define ZZ_LAYOUT_BGR565_BE  3u
+#define ZZ_LAYOUT_BGR565_LE  4u
+#define ZZ_LAYOUT_BGRA8888   5u
+#define ZZ_LAYOUT_RGBA8888   6u
 
 #define ZZ_EV_KEY_DOWN 1u
 #define ZZ_EV_KEY_UP   2u
@@ -80,6 +90,7 @@ typedef struct zzapp_surface {
     void    *back;
     uint32_t card_front;
     uint32_t card_back;
+    uint32_t layout;      /* ZZ_LAYOUT_* byte order reported by the launcher */
 } zzapp_surface;
 
 /* Native-endian copy. The launcher ring is big-endian; the firmware converts. */
@@ -269,6 +280,8 @@ typedef struct zzapp_api {
     /* Optional non-blocking P96 present; unsupported firmware returns ENOSYS. */
     int      (*display_flip_async)(uint32_t surface_id);
     int      (*display_flip_idle)(void);
+    /* Refresh front/back after a completed flip; appended for ABI compatibility. */
+    int      (*display_refresh)(zzapp_surface *surface);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -321,6 +334,9 @@ int      zz_display_flip(uint32_t surface_id);
  * still pending, negative ZZ_E* code on error (ZZ_ENOSYS on older firmware). */
 int      zz_display_flip_async(uint32_t surface_id);
 int      zz_display_flip_idle(void);
+/* Refreshes front/back, pitch, and layout from the launcher after a completed
+ * flip.  Returns ZZ_ENOSYS on firmware predating this optional API slot. */
+int      zz_display_refresh(zzapp_surface *surface);
 int      zz_display_vsync(void);
 int      zz_display_close(uint32_t surface_id);
 

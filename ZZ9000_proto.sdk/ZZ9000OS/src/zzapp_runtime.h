@@ -123,6 +123,7 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 int zzapp_svc_display_flip(uint32_t surface_id);
 int zzapp_svc_display_flip_async(uint32_t surface_id);
 int zzapp_display_flip_idle(void);
+int zzapp_svc_display_refresh(struct zzapp_surface *out);
 int zzapp_svc_display_vsync(void);
 int zzapp_svc_input_poll(struct zzapp_event *out, uint32_t max, uint32_t *out_n);
 int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, struct zzapp_audio *out);

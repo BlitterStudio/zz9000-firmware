@@ -189,6 +189,14 @@ int zz_display_flip_idle(void)
     return ZZ_ENOSYS;
 }
 
+int zz_display_refresh(zzapp_surface *surface)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, display_refresh) &&
+        zzapp_api_ptr->display_refresh)
+        return zzapp_api_ptr->display_refresh(surface);
+    return ZZ_ENOSYS;
+}
+
 int zz_display_vsync(void)
 {
     if (ZZ_API_COVERS(zzapp_api_ptr, display_vsync) && zzapp_api_ptr->display_vsync)

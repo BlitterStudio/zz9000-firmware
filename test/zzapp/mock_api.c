@@ -25,7 +25,7 @@ static int mock_display_open(uint32_t w, uint32_t h, uint32_t fmt, uint32_t flag
     uint32_t pitch = w * (fmt == ZZ_FMT_BGRA8888 ? 4u : 2u);
     free(display_buffer); display_buffer = calloc(h, pitch);
     if (!display_buffer) return ZZ_ENOMEM;
-    memset(out, 0, sizeof *out); out->id = ++next_surface; out->width = w; out->height = h; out->pitch = pitch; out->format = fmt; out->front = display_buffer; out->back = display_buffer;
+    memset(out, 0, sizeof *out); out->id = ++next_surface; out->width = w; out->height = h; out->pitch = pitch; out->format = fmt; out->front = display_buffer; out->back = display_buffer; out->layout = fmt == ZZ_FMT_BGRA8888 ? ZZ_LAYOUT_BGRA8888 : ZZ_LAYOUT_RGB565_BE;
     zzapp_life_set(window_ptr, ZZAPP_LIFE_WIDTH, w); zzapp_life_set(window_ptr, ZZAPP_LIFE_HEIGHT, h); zzapp_life_set(window_ptr, ZZAPP_LIFE_PITCH, pitch); zzapp_life_set(window_ptr, ZZAPP_LIFE_FORMAT, fmt); zzapp_life_set(window_ptr, ZZAPP_LIFE_FLAGS, (flags & ZZ_DISPLAY_VSYNC) ? (1u << 9) : 0);
     return ZZ_OK;
 }

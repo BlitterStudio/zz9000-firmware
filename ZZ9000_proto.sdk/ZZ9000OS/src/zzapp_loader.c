@@ -235,6 +235,7 @@ int zzapp_loader_begin(void)
             zzapp_put_be32(life + ZZAPP_LIFE_FORMAT_OFF, 0);
             zzapp_put_be32(life + ZZAPP_LIFE_CARD_FRONT_OFF, 0);
             zzapp_put_be32(life + ZZAPP_LIFE_CARD_BACK_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_LAYOUT_OFF, 0);
         }
     }
     zzapp_loader_set_state(ZZAPP_ST_LOADING);

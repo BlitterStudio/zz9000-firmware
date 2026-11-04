@@ -56,6 +56,12 @@ typedef char zzapp_window_size_matches_memorymap[
 
 #define ZZ_FMT_RGB565   1u
 #define ZZ_FMT_BGRA8888 2u
+#define ZZ_LAYOUT_RGB565_BE  1u
+#define ZZ_LAYOUT_RGB565_LE  2u
+#define ZZ_LAYOUT_BGR565_BE  3u
+#define ZZ_LAYOUT_BGR565_LE  4u
+#define ZZ_LAYOUT_BGRA8888   5u
+#define ZZ_LAYOUT_RGBA8888   6u
 #define ZZ_DISPLAY_VSYNC 1u
 
 typedef struct zzapp_surface {
@@ -65,6 +71,7 @@ typedef struct zzapp_surface {
 	void *back;
 	uint32_t card_front;
 	uint32_t card_back;
+	uint32_t layout;
 } zzapp_surface;
 
 typedef struct zzapp_event {
@@ -1109,6 +1116,30 @@ static uint32_t format_bpp(uint32_t format)
 	return 0U;
 }
 
+static uint32_t default_layout(uint32_t format)
+{
+	if (format == ZZ_FMT_RGB565)
+		return ZZ_LAYOUT_RGB565_BE;
+	if (format == ZZ_FMT_BGRA8888)
+		return ZZ_LAYOUT_BGRA8888;
+	return 0U;
+}
+
+static int layout_matches_format(uint32_t format, uint32_t layout)
+{
+	if (layout == 0U)
+		layout = default_layout(format);
+	if (format == ZZ_FMT_RGB565)
+		return layout == ZZ_LAYOUT_RGB565_BE ||
+		       layout == ZZ_LAYOUT_RGB565_LE ||
+		       layout == ZZ_LAYOUT_BGR565_BE ||
+		       layout == ZZ_LAYOUT_BGR565_LE;
+	if (format == ZZ_FMT_BGRA8888)
+		return layout == ZZ_LAYOUT_BGRA8888 ||
+		       layout == ZZ_LAYOUT_RGBA8888;
+	return 0;
+}
+
 static void drop_owned_back(void)
 {
 	uint32_t back;
@@ -1179,6 +1210,32 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 	return ZZ_OK;
 }
 
+static int fill_surface(zzapp_surface *out)
+{
+	uint32_t w;
+	uint32_t h;
+	uint32_t pitch;
+	uint32_t format;
+	uint32_t front;
+	uint32_t back;
+
+	if (!out || !display_bound)
+		return ZZ_EINVAL;
+	if (zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != ZZ_OK)
+		return ZZ_EINVAL;
+	out->id = display_id;
+	out->width = w;
+	out->height = h;
+	out->pitch = pitch;
+	out->format = format;
+	out->card_front = front;
+	out->card_back = back;
+	out->front = (void *)(uintptr_t)front;
+	out->back = (void *)(uintptr_t)back;
+	out->layout = life_get(ZZAPP_LIFE_LAYOUT_OFF);
+	return ZZ_OK;
+}
+
 int zzapp_display_flip_bound(void)
 {
 	uint32_t gen;
@@ -1243,16 +1300,7 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 			break;
 		yield_wait_once();
 	}
-	out->id = display_id;
-	out->width = life_get(ZZAPP_LIFE_WIDTH_OFF);
-	out->height = life_get(ZZAPP_LIFE_HEIGHT_OFF);
-	out->pitch = life_get(ZZAPP_LIFE_PITCH_OFF);
-	out->format = life_get(ZZAPP_LIFE_FORMAT_OFF);
-	out->card_front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
-	out->card_back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
-	out->front = (void *)(uintptr_t)out->card_front;
-	out->back = (void *)(uintptr_t)out->card_back;
-	return ZZ_OK;
+	return fill_surface(out);
 }
 
 static void flush_presented(uint32_t addr, uint32_t bytes)
@@ -1320,6 +1368,15 @@ int zzapp_svc_display_flip(uint32_t surface_id)
 		return rc;
 	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
 	return wait_flip(gen);
+}
+
+int zzapp_svc_display_refresh(zzapp_surface *out)
+{
+	if (!out || out->id != display_id)
+		return ZZ_EINVAL;
+	if (!zzapp_display_flip_idle())
+		return ZZ_EBUSY;
+	return fill_surface(out);
 }
 
 int zzapp_svc_display_vsync(void)
@@ -1619,10 +1676,11 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	uint32_t front;
 	uint32_t back;
 	uint32_t bpp;
-	uint32_t bytes;
 	int rc;
+	uint32_t layout;
+	uint32_t bytes;
 
-	if (req_len < ZZAPP_BIND_REQ_BYTES)
+	if (req_len < ZZAPP_BIND_CARD_BACK + sizeof(uint32_t))
 		return ZZ_EINVAL;
 	width = zzapp_get_be32(req + ZZAPP_BIND_WIDTH);
 	height = zzapp_get_be32(req + ZZAPP_BIND_HEIGHT);
@@ -1630,7 +1688,11 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	format = zzapp_get_be32(req + ZZAPP_BIND_FORMAT);
 	front = zzapp_get_be32(req + ZZAPP_BIND_CARD_FRONT);
 	back = zzapp_get_be32(req + ZZAPP_BIND_CARD_BACK);
+	layout = req_len >= ZZAPP_BIND_REQ_BYTES ?
+		zzapp_get_be32(req + ZZAPP_BIND_LAYOUT) : default_layout(format);
 	bpp = format_bpp(format);
+	if (!layout_matches_format(format, layout))
+		return ZZ_EINVAL;
 	if (width == 0U || height == 0U || width > 4096U || height > 4096U ||
 	    bpp == 0U || pitch < width * bpp || height > (0xffffffffU / pitch))
 		return ZZ_EINVAL;
@@ -1654,6 +1716,7 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	life_put(ZZAPP_LIFE_FORMAT_OFF, format);
 	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, front);
 	life_put(ZZAPP_LIFE_CARD_BACK_OFF, back);
+	life_put(ZZAPP_LIFE_LAYOUT_OFF, layout);
 	life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF, 0U);
 	display_ack_seen = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 	display_bound = 1;

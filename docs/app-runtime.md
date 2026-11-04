@@ -394,7 +394,14 @@ Header: `sdk/zzapp/include/zzapp.h`, MIT. Apps include it and link `libzzapp`. T
 #define ZZ_EBADF     -12
 
 #define ZZ_FMT_RGB565   1u
-#define ZZ_FMT_BGRA8888 2u   /* P96 32-bit; memory bytes B,G,R,A. Not ARGB. */
+#define ZZ_FMT_BGRA8888 2u
+
+#define ZZ_LAYOUT_RGB565_BE  1u
+#define ZZ_LAYOUT_RGB565_LE  2u
+#define ZZ_LAYOUT_BGR565_BE  3u
+#define ZZ_LAYOUT_BGR565_LE  4u
+#define ZZ_LAYOUT_BGRA8888   5u
+#define ZZ_LAYOUT_RGBA8888   6u
 
 #define ZZ_EV_KEY_DOWN 1u
 #define ZZ_EV_KEY_UP   2u
@@ -422,6 +429,7 @@ typedef struct zzapp_surface {
     void    *back;
     uint32_t card_front;
     uint32_t card_back;
+    uint32_t layout;      /* ZZ_LAYOUT_* physical byte order */
 } zzapp_surface;
 
 typedef struct zzapp_event {
@@ -495,8 +503,19 @@ typedef struct zzapp_api {
     const zzapp_gl *(*gl_bind)(uint32_t surface_id);
     void     (*gl_swap)(void);
     void     (*gl_unbind)(void);
+
+    int      (*display_flip_async)(uint32_t surface_id);
+    int      (*display_flip_idle)(void);
+    int      (*display_refresh)(zzapp_surface *surface);
 } zzapp_api;
 ```
+
+`zz_display_refresh(&surface)` is an optional appended call. After
+`zz_display_flip_idle()` reports idle (or a synchronous `zz_display_flip`
+returns), it refreshes the surface's front/back mappings and layout. Apps
+must convert pixels according to `layout`; `format` remains the requested
+logical format for compatibility. The call returns `ZZ_ENOSYS` on an older
+runtime.
 
 `display_open` flags: bit0 vsync. Quake sets it. `gl_bind` returns NULL on failure. One GL context in v0. A second bind returns NULL until unbind.
 
@@ -651,7 +670,7 @@ Linker script: PHDRs for RX and RW, `.rela.dyn` kept and allocated so the loader
 
 68k launcher: container `sacredbanana/amiga-compiler:m68k-amigaos`, never a gcc10 image.
 
-Templates, each a few dozen lines, MIT: `hello` logs a line and exits; `pixels` opens 320×240 RGB565, initializes both display bitmaps in P96's big-endian R5G6B5 byte order, then flips until `ZZ_EV_STOP` or a key; `fault` logs then executes ARM `UDF`, so hardware must report the **undefined-instruction** fault (`fault_code == 3`). `pixels` draws the CPU mapping from `zz_display_open`. It does not go through GL. That is how the kit separates a bad present-copy from a bad launcher screen.
+Templates, each a few dozen lines, MIT: `hello` logs a line and exits; `pixels` opens 320×240 RGB565, uses the launcher's reported `ZZ_LAYOUT_*` byte order, refreshes its surface after each flip, then runs until `ZZ_EV_STOP` or a key; `fault` logs then executes ARM `UDF`, so hardware must report the **undefined-instruction** fault (`fault_code == 3`). `pixels` draws the CPU mapping from `zz_display_open`. It does not go through GL. That is how the kit separates a bad present-copy from a bad launcher screen.
 
 ## 8. Quake port
 
