@@ -1088,10 +1088,15 @@ void isr_video(void *dummy) {
 		// make it conditional (broke ethernet RX, June 2026).
 		Xil_L1DCacheFlush();
 		Xil_L2CacheFlush();
+		/*
+		 * Count only a completed card-vblank flush.  Split interrupts may
+		 * also enter this block, but must not make a mailbox frame eligible.
+		 */
+		if (vblank)
+			zzapp_services_display_mailbox_vblank_flushed();
 		/* Core-1 packed-YUV staging reaches DDR at this point. Only now may
 		 * the non-coherent overlay VDMA select the completed buffer. */
 		overlay_vblank_cache_flushed();
-		isr_flush_count = 0;
 
 		if (sprite_request_show) {
 			vs.sprite_showing = 1;

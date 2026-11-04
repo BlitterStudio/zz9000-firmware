@@ -341,6 +341,11 @@ static void test_display_mailbox(void)
 	    zzapp_svc_display_mailbox_replaced() != 1U)
 		fail("display mailbox replace");
 	if (!zzapp_services_display_mailbox_begin(front, &scanout) ||
+	    scanout != front)
+		fail("display mailbox waits for vblank flush");
+	zzapp_services_display_mailbox_end(1);
+	zzapp_services_display_mailbox_vblank_flushed();
+	if (!zzapp_services_display_mailbox_begin(front, &scanout) ||
 	    scanout != spare)
 		fail("display mailbox select latest");
 	zzapp_services_display_mailbox_end(1);
