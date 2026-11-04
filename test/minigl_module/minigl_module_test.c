@@ -257,6 +257,10 @@ int main(void)
         draw->TexImage2D(0x0de1U, 0, 0x1908, 4096, 4096, 0,
                          0x1908U, 0x1401U, pixels);
         assert(draw->GetError() == 0U);
+        draw->ClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        draw->Clear(0x4000U);
+        draw->Finish();
+        assert(ops->app_swap(context) == 0);
         free(pixels);
     }
     assert(ops->app_swap(context) == 0);

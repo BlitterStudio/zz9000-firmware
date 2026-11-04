@@ -6,6 +6,7 @@
  * This file does not include amiberry_backend.c, amiberry_glu_quad.c, or vendor/.
  */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #if defined(__has_include)
@@ -18,6 +19,7 @@
 #include "memorymap.h"
 #include "minigl_present.h"
 #include "minigl_profile.h"
+#include "minigl_platform.h"
 #include "minigl_raster.h"
 #include "minigl_renderer.h"
 #include "mw_ctx.h"
@@ -41,6 +43,9 @@
 #endif
 #ifndef ZZ_GL_BIND_DIRECT_PRESENT
 #define ZZ_GL_BIND_DIRECT_PRESENT 1u
+#endif
+#ifndef ZZ_GL_BIND_SYNC_PRESENT
+#define ZZ_GL_BIND_SYNC_PRESENT 2u
 #endif
 
 
@@ -333,6 +338,8 @@ static zzapp_gl g_table;
 static uint8_t g_present_queue[2];
 static uint8_t g_present_count;
 static uint8_t g_zero_copy;
+static uint8_t g_sync_present;
+static uint32_t g_present_frame;
 
 #define CTX 1u
 #define ENTER() zzapp_api_enter()
@@ -551,7 +558,7 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
 
     if (out)
         *out = 0;
-    if (!surface_id || (flags & ~ZZ_GL_BIND_DIRECT_PRESENT) != 0U)
+    if (!surface_id || (flags & ~(ZZ_GL_BIND_DIRECT_PRESENT | ZZ_GL_BIND_SYNC_PRESENT)) != 0U)
         return ZZ_EINVAL;
     if (g_bound)
         return ZZ_EBUSY;
@@ -582,6 +589,8 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
     g_bound = 1;
     g_surface_id = surface_id;
     g_present_count = 0U;
+    g_sync_present = (flags & ZZ_GL_BIND_SYNC_PRESENT) != 0U;
+    g_present_frame = 0U;
     /* One [MGLP] UART line per 5 s of GL work: where an ARM app's frame
      * time goes (app vs MiniGL stages, hardware vs CPU draws, fallback
      * reasons).  68k clients switch it on through trace_enabled. */
@@ -599,6 +608,7 @@ void zzapp_gl_unbind(void)
     g_surface_id = 0;
     g_present_count = 0U;
     g_zero_copy = 0U;
+    g_sync_present = 0U;
     g_bound = 0;
     minigl_profile_set_enabled(0);
 }
@@ -670,6 +680,31 @@ static int zzapp_gl_queue_flip(uint32_t surface_id)
 #endif
 }
 
+static void zzapp_gl_present_layout_mismatch(const mw_ctx *mw, uint32_t source,
+                                             uint8_t current)
+{
+#ifndef MINIGL_HOST_TEST
+    static uint64_t window_us;
+    static uint32_t count;
+    uint64_t now;
+
+    ++count;
+    now = minigl_platform_time_us();
+    if (now - window_us < 1000000ULL)
+        return;
+    window_us = now;
+    printf("[ZZM] [present] b=%lu sub=%lu flag=%u->%u reason=copy n=%lu\r\n",
+           (unsigned long)source, (unsigned long)mw->present_submit_frame[source],
+           (unsigned)mw->present_submit_rgb565[source], (unsigned)current,
+           (unsigned long)count);
+    count = 0U;
+#else
+    (void)mw;
+    (void)source;
+    (void)current;
+#endif
+}
+
 static int zzapp_gl_present_pending(mw_ctx *mw)
 {
     uint32_t w, h, pitch, format, front, back, card;
@@ -687,6 +722,8 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
         return 0;
     card = back ? back : front;
     rgb565 = mw->color_rgb565[source] != 0U;
+    if (mw->present_submit_rgb565[source] != (uint8_t)rgb565)
+        zzapp_gl_present_layout_mismatch(mw, source, (uint8_t)rgb565);
     minigl_profile_push(MGLP_SWAP_COPY);
     if (mw->color_direct[source]) {
         if ((uint32_t)(uintptr_t)mw->direct_color_buffers[source] != card) {
@@ -721,6 +758,7 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
         return 0;
     }
     minigl_profile_pop();
+    mw->present_queued[source] = 0U;
     --g_present_count;
     if (g_present_count != 0U)
         g_present_queue[0] = g_present_queue[1];
@@ -782,6 +820,9 @@ void zzapp_gl_swap(void)
     if (outgoing >= 3U || g_present_count == 2U)
         goto done;
     g_present_queue[g_present_count++] = (uint8_t)outgoing;
+    mw->present_queued[outgoing] = 1U;
+    mw->present_submit_rgb565[outgoing] = mw->color_rgb565[outgoing];
+    mw->present_submit_frame[outgoing] = ++g_present_frame;
     if (g_zero_copy) {
         int ok;
 
@@ -798,6 +839,23 @@ void zzapp_gl_swap(void)
         while (!zzapp_display_flip_idle()) {
         }
         minigl_profile_pop();
+    }
+    else if (g_sync_present) {
+        int ok;
+
+        minigl_profile_push(MGLP_SWAP_DRAIN);
+        ok = minigl_raster_drain();
+        minigl_profile_pop();
+        if (!ok)
+            goto done;
+        while (g_present_count != 0U) {
+            if (!zzapp_gl_present_pending(mw))
+                goto done;
+            minigl_profile_push(MGLP_SWAP_FLIP);
+            while (!zzapp_display_flip_idle()) {
+            }
+            minigl_profile_pop();
+        }
     }
     minigl_profile_report();
 done:

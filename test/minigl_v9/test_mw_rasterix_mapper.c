@@ -1194,6 +1194,41 @@ static void test_queued_present_preserves_incoming_format(void)
     printf("PASS: test_queued_present_preserves_incoming_format\n");
 }
 
+/* A CPU-only frame can rotate into an older RGB565 target.  Its layout must
+ * be adopted before the next command observes the active raster state. */
+static void test_cpu_frames_preserve_recycled_gpu_target_format(void)
+{
+    MiniGLRixPlatform platform;
+    mw_ctx *c;
+    uint8_t target[24] = { 0 };
+    uint8_t sync[4] = { 0 };
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+    mw_put_be32(target, 2U);
+    mw_put_be32(target + 4U, 2U);
+    mw_put_be32(target + 8U, 3U);
+    mw_put_be32(target + 12U, 24U);
+    mw_put_be32(target + 16U, 2U);
+    mw_put_be32(target + 20U, 2U);
+    assert(submit_single_command(c, MW_TARGET, target, sizeof(target)) == MW_STATUS_OK);
+
+    minigl_raster_clear(0x4000U, 0U, 0U);
+    assert(submit_single_command(c, MW_PRESENT, NULL, 0U) == MW_STATUS_OK);
+    assert(submit_single_command(c, MW_PRESENT, NULL, 0U) == MW_STATUS_OK);
+    assert(submit_single_command(c, MW_PRESENT, NULL, 0U) == MW_STATUS_OK);
+    assert(c->state.target.back == 1U);
+    assert(c->color_rgb565[1] == 1U);
+    assert(submit_single_command(c, MW_SYNC, sync, sizeof(sync)) == MW_STATUS_OK);
+    assert(c->color_rgb565[1] == 1U);
+
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_cpu_frames_preserve_recycled_gpu_target_format\n");
+}
+
 /* 4. Watertight tessellated grid test */
 static void test_watertight_tessellation(void)
 {
@@ -1330,6 +1365,7 @@ int main(void)
     test_backend_disable_cpu_rerender_present();
     test_wire_cpu_handoffs();
     test_queued_present_preserves_incoming_format();
+    test_cpu_frames_preserve_recycled_gpu_target_format();
     test_watertight_tessellation();
     test_direct_p96_target_rotation();
     printf("ALL Wire-v9 RasterIX Mapper Tests PASSED!\n");

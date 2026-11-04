@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
@@ -1209,10 +1210,43 @@ static uint32_t mw_active_color_index(const mw_ctx *c)
 /* colour_rgb565[] tracks each buffer's memory layout.  The active buffer's
  * flag follows the live raster state; the others change only at a swap or
  * a conversion. */
+static void mw_present_layout_note(const mw_ctx *c, uint32_t index,
+                                   uint8_t before, const char *reason)
+{
+#ifndef MINIGL_HOST_TEST
+    static uint64_t window_us;
+    static uint32_t count;
+    uint64_t now;
+
+    if (index >= 3U || !c->present_queued[index])
+        return;
+    ++count;
+    now = minigl_platform_time_us();
+    if (now - window_us < 1000000ULL)
+        return;
+    window_us = now;
+    printf("[ZZM] [present] b=%lu sub=%lu flag=%u->%u submitted=%u reason=%s n=%lu\r\n",
+           (unsigned long)index, (unsigned long)c->present_submit_frame[index],
+           (unsigned)before, (unsigned)c->color_rgb565[index],
+           (unsigned)c->present_submit_rgb565[index], reason,
+           (unsigned long)count);
+    count = 0U;
+#else
+    (void)c;
+    (void)index;
+    (void)before;
+    (void)reason;
+#endif
+}
+
 static void mw_sync_active_format(mw_ctx *c)
 {
-    c->color_rgb565[mw_active_color_index(c)] =
-        minigl_raster_present_is_rgb565() ? 1U : 0U;
+    uint32_t index = mw_active_color_index(c);
+    uint8_t before = c->color_rgb565[index];
+
+    c->color_rgb565[index] = minigl_raster_present_is_rgb565() ? 1U : 0U;
+    if (before != c->color_rgb565[index])
+        mw_present_layout_note(c, index, before, "sync");
 }
 
 /* After minigl_raster_finish the active buffer holds RGBA.  Make sure the
@@ -1220,18 +1254,24 @@ static void mw_sync_active_format(mw_ctx *c)
  * buffer in place. */
 static int mw_buffer_cpu_visible(mw_ctx *c, uint32_t index)
 {
+    uint8_t before;
+
     if (index >= 3U || !c->color_buffers[index])
         return 0;
+    before = c->color_rgb565[index];
     if (index == mw_active_color_index(c)) {
         c->color_rgb565[index] = 0U;
+        if (before != 0U)
+            mw_present_layout_note(c, index, before, "finish");
         return 1;
     }
-    if (!c->color_rgb565[index])
+    if (!before)
         return 1;
     if (!minigl_raster_buffer_to_rgba(c->color_buffers[index],
                                       (size_t)c->width * c->height))
         return 0;
     c->color_rgb565[index] = 0U;
+    mw_present_layout_note(c, index, before, "buffer_to_rgba");
     return 1;
 }
 
@@ -1902,17 +1942,13 @@ target_allocation_failed:
             goto command_complete;
         }
         /* The outgoing frame keeps its RasterIX format for span presents
-         * and read pixels.  The incoming target retains its own layout:
-         * a newly allocated third target is RGBA until RasterIX writes it,
-         * while a recycled GPU target is already RGB565. */
-        if (gpu_format) {
-            c->color_rgb565[outgoing] = 1U;
-            if (c->state.target.buffer_count > 1U)
-                minigl_raster_target_discard(
-                    c->color_rgb565[c->state.target.back] != 0U);
-        } else {
-            c->color_rgb565[outgoing] = 0U;
-        }
+         * and read pixels.  Always adopt the incoming target's own layout:
+         * a CPU frame can rotate into an older RGB565 target, whose bytes
+         * must not be relabelled as RGBA by the next command. */
+        c->color_rgb565[outgoing] = gpu_format ? 1U : 0U;
+        if (c->state.target.buffer_count > 1U)
+            minigl_raster_target_discard(
+                c->color_rgb565[c->state.target.back] != 0U);
         minigl_raster_frame_boundary();
         break;
     }

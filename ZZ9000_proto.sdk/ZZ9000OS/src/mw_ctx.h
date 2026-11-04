@@ -36,6 +36,10 @@ struct mw_ctx {
      * reader must convert through minigl_raster_buffer_to_rgba first.  The
      * layout belongs to the buffer and survives an undefined-content swap. */
     uint8_t  color_rgb565[3];
+    /* zzapp_gl marks targets retained for an asynchronous P96 copy. */
+    uint8_t  present_queued[3];
+    uint8_t  present_submit_rgb565[3];
+    uint32_t present_submit_frame[3];
     uint8_t  *depth_buffer;
     uint8_t  *texture_pool;
     uint32_t texture_pool_bytes;

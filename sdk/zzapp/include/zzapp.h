@@ -235,6 +235,8 @@ typedef struct zzapp_gl {
 #define ZZAPP_GL_VERSION_ARRAYS 1u
 /* zz_gl_bind_flags() requests optional rendering behavior. */
 #define ZZ_GL_BIND_DIRECT_PRESENT 1u
+/* Debug switch: drain and copy every frame before zz_gl_swap returns. */
+#define ZZ_GL_BIND_SYNC_PRESENT 2u
 
 
 typedef struct zzapp_api {
