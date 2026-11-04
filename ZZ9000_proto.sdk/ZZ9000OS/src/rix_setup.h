@@ -48,6 +48,9 @@ typedef struct RixTriangle {
 int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
                        const RixVertex *v1, const RixVertex *v2,
                        const RixScissor *scissor);
+/* Replaces just the texture planes in an already set-up descriptor. */
+int rix_setup_texture(RixTriangle *triangle, const RixVertex *v0,
+                      const RixVertex *v1, const RixVertex *v2);
 int rix_triangle_increment(RixTriangle *triangle, uint16_t line_start,
                            uint16_t line_end);
 int rix_triangle_in_band(const RixTriangle *triangle, uint16_t line_start,

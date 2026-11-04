@@ -62,6 +62,70 @@ static inline float rix_color_component(uint32_t rgba, unsigned int index)
     return s_rix_u8_to_float[(rgba >> (24U - index * 8U)) & 0xffU];
 }
 
+static inline void rix_texture_plane(RixTriangle *triangle, float a, float b,
+                                     float c, const float *normalized,
+                                     const float *normalized_x,
+                                     const float *normalized_y,
+                                     unsigned int word, unsigned int word_x,
+                                     unsigned int word_y)
+{
+    float d1 = b - a;
+    float d2 = c - a;
+
+    triangle->words[word] = rix_float_bits(a + d1 * normalized[1] +
+                                            d2 * normalized[2]);
+    triangle->words[word_x] = rix_float_bits(d1 * normalized_x[1] +
+                                              d2 * normalized_x[2]);
+    triangle->words[word_y] = rix_float_bits(d1 * normalized_y[1] +
+                                              d2 * normalized_y[2]);
+}
+
+static inline __attribute__((always_inline)) void
+rix_setup_texture_planes(RixTriangle *triangle, const RixVertex *v0,
+                         const RixVertex *v1, const RixVertex *v2,
+                         const float *normalized, const float *normalized_x,
+                         const float *normalized_y)
+{
+    float tex0[3], tex1[3], tex2[3];
+    float s0 = v0->s, s1 = v1->s, s2 = v2->s;
+    float t0 = v0->t, t1 = v1->t, t2 = v2->t;
+    float min_s = s0 < s1 ? (s0 < s2 ? s0 : s2) : (s1 < s2 ? s1 : s2);
+    float max_s = s0 > s1 ? (s0 > s2 ? s0 : s2) : (s1 > s2 ? s1 : s2);
+    float min_t = t0 < t1 ? (t0 < t2 ? t0 : t2) : (t1 < t2 ? t1 : t2);
+    float max_t = t0 > t1 ? (t0 > t2 ? t0 : t2) : (t1 > t2 ? t1 : t2);
+    float w_length = sqrtf(v0->w * v0->w + v1->w * v1->w + v2->w * v2->w);
+    float w_scale = 1.0f / (w_length > 1e-30f ? w_length : 1e-30f);
+    float w0, w1, w2;
+    unsigned int i;
+
+    if (min_s < -4.0f) {
+        float offset = (float)(int32_t)min_s;
+        s0 -= offset; s1 -= offset; s2 -= offset;
+    }
+    if (min_t < -4.0f) {
+        float offset = (float)(int32_t)min_t;
+        t0 -= offset; t1 -= offset; t2 -= offset;
+    }
+    if (max_s > 4.0f) {
+        float offset = (float)(int32_t)max_s;
+        s0 -= offset; s1 -= offset; s2 -= offset;
+    }
+    if (max_t > 4.0f) {
+        float offset = (float)(int32_t)max_t;
+        t0 -= offset; t1 -= offset; t2 -= offset;
+    }
+    w0 = v0->w * w_scale;
+    w1 = v1->w * w_scale;
+    w2 = v2->w * w_scale;
+    tex0[0] = s0 * w0; tex0[1] = t0 * w0; tex0[2] = v0->q * w0;
+    tex1[0] = s1 * w1; tex1[1] = t1 * w1; tex1[2] = v1->q * w1;
+    tex2[0] = s2 * w2; tex2[1] = t2 * w2; tex2[2] = v2->q * w2;
+    for (i = 0U; i < 3U; ++i)
+        rix_texture_plane(triangle, tex0[i], tex1[i], tex2[i], normalized,
+                          normalized_x, normalized_y, RIX_WORD_TEXTURE + i,
+                          RIX_WORD_TEXTURE_X + i, RIX_WORD_TEXTURE_Y + i);
+}
+
 
 int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
                        const RixVertex *v1, const RixVertex *v2,
@@ -72,7 +136,6 @@ int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
     int32_t wi[3], wx[3], wy[3];
     float normalized[3], normalized_x[3], normalized_y[3], area_inv;
     float c0[4], c1[4], c2[4], depth0[2], depth1[2], depth2[2];
-    float tex0[3], tex1[3], tex2[3];
     unsigned int i;
 
     if (triangle == NULL || v0 == NULL || v1 == NULL || v2 == NULL) {
@@ -180,44 +243,48 @@ int rix_setup_triangle(RixTriangle *triangle, const RixVertex *v0,
     for (i = 0U; i < 2U; ++i)
         RIX_PLANE(depth0[i], depth1[i], depth2[i],
                   RIX_WORD_DEPTH + i, RIX_WORD_DEPTH_X + i, RIX_WORD_DEPTH_Y + i);
-    {
-        float s0 = v0->s, s1 = v1->s, s2 = v2->s;
-        float t0 = v0->t, t1 = v1->t, t2 = v2->t;
-        float min_s = s0 < s1 ? (s0 < s2 ? s0 : s2) : (s1 < s2 ? s1 : s2);
-        float max_s = s0 > s1 ? (s0 > s2 ? s0 : s2) : (s1 > s2 ? s1 : s2);
-        float min_t = t0 < t1 ? (t0 < t2 ? t0 : t2) : (t1 < t2 ? t1 : t2);
-        float max_t = t0 > t1 ? (t0 > t2 ? t0 : t2) : (t1 > t2 ? t1 : t2);
-        float w_length = sqrtf(v0->w * v0->w + v1->w * v1->w + v2->w * v2->w);
-        float w_scale = 1.0f / (w_length > 1e-30f ? w_length : 1e-30f);
-        if (min_s < -4.0f) {
-            float offset = (float)(int32_t)min_s;
-            s0 -= offset; s1 -= offset; s2 -= offset;
-        }
-        if (min_t < -4.0f) {
-            float offset = (float)(int32_t)min_t;
-            t0 -= offset; t1 -= offset; t2 -= offset;
-        }
-        if (max_s > 4.0f) {
-            float offset = (float)(int32_t)max_s;
-            s0 -= offset; s1 -= offset; s2 -= offset;
-        }
-        if (max_t > 4.0f) {
-            float offset = (float)(int32_t)max_t;
-            t0 -= offset; t1 -= offset; t2 -= offset;
-        }
-        {
-            float w0 = v0->w * w_scale;
-            float w1 = v1->w * w_scale;
-            float w2 = v2->w * w_scale;
-            tex0[0] = s0 * w0; tex0[1] = t0 * w0; tex0[2] = v0->q * w0;
-            tex1[0] = s1 * w1; tex1[1] = t1 * w1; tex1[2] = v1->q * w1;
-            tex2[0] = s2 * w2; tex2[1] = t2 * w2; tex2[2] = v2->q * w2;
-        }
-    }
-    for (i = 0U; i < 3U; ++i)
-        RIX_PLANE(tex0[i], tex1[i], tex2[i],
-                  RIX_WORD_TEXTURE + i, RIX_WORD_TEXTURE_X + i, RIX_WORD_TEXTURE_Y + i);
+    rix_setup_texture_planes(triangle, v0, v1, v2, normalized, normalized_x,
+                             normalized_y);
 #undef RIX_PLANE
+    return 1;
+}
+
+int rix_setup_texture(RixTriangle *triangle, const RixVertex *v0,
+                      const RixVertex *v1, const RixVertex *v2)
+{
+    RixPoint p0, p1, p2, origin;
+    int32_t area, sign, wi1, wi2, wx1, wx2, wy1, wy2;
+    float normalized[3], normalized_x[3], normalized_y[3], area_inv;
+    uint32_t start;
+
+    if (triangle == NULL || v0 == NULL || v1 == NULL || v2 == NULL)
+        return 0;
+    p0.x = rix_fixed_coordinate(v0->x); p0.y = rix_fixed_coordinate(v0->y);
+    p1.x = rix_fixed_coordinate(v1->x); p1.y = rix_fixed_coordinate(v1->y);
+    p2.x = rix_fixed_coordinate(v2->x); p2.y = rix_fixed_coordinate(v2->y);
+    area = rix_edge(&p0, &p1, &p2);
+    sign = area <= 0 ? -1 : 1;
+    area *= sign;
+    if (area <= 0)
+        return 0;
+    start = triangle->words[RIX_WORD_BB_START];
+    origin.x = (int32_t)(uint16_t)start << RIX_EDGE_SHIFT;
+    origin.y = (int32_t)(uint16_t)(start >> 16U) << RIX_EDGE_SHIFT;
+    wi1 = rix_edge(&p2, &p0, &origin) * sign;
+    wi2 = rix_edge(&p0, &p1, &origin) * sign;
+    wx1 = (p0.y - p2.y) * RIX_EDGE_ONE * sign;
+    wx2 = (p1.y - p0.y) * RIX_EDGE_ONE * sign;
+    wy1 = (p2.x - p0.x) * RIX_EDGE_ONE * sign;
+    wy2 = (p0.x - p1.x) * RIX_EDGE_ONE * sign;
+    area_inv = 1.0f / (float)area;
+    normalized[1] = (float)wi1 * area_inv;
+    normalized[2] = (float)wi2 * area_inv;
+    normalized_x[1] = (float)wx1 * area_inv;
+    normalized_x[2] = (float)wx2 * area_inv;
+    normalized_y[1] = (float)wy1 * area_inv;
+    normalized_y[2] = (float)wy2 * area_inv;
+    rix_setup_texture_planes(triangle, v0, v1, v2, normalized, normalized_x,
+                             normalized_y);
     return 1;
 }
 

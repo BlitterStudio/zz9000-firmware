@@ -1822,6 +1822,8 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     int in_place;
     if (backend == NULL || !backend->collecting || a == NULL || b == NULL || c == NULL)
         return 0;
+    op = &backend->ops[backend->op_count - 1U];
+    passes = op->two_pass ? 2U : 1U;
     /* RasterIX descriptors use the OpenGL bottom-up y axis; the raster
      * service delivers top-down screen rows, so reflect y once here.
      * RasterIX samples pixel i at the integer position i, OpenGL and the
@@ -1849,18 +1851,19 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         vertices[2] = (RixVertex){c->x - 0.5f, top - c->y, zc, c->reciprocal_w,
                                   c->rgba, c->s, c->t, c->q};
     }
-    passes = (backend->state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U ? 2U : 1U;
     if (passes == 2U) {
-        float top = (float)backend->height - 0.5f;
-        float za = vertices[0].z;
-        float zb = vertices[1].z;
-        float zc = vertices[2].z;
-        texture1_vertices[0] = (RixVertex){a->x - 0.5f, top - a->y, za,
-                                           a->reciprocal_w, a->rgba, a->s1, a->t1, a->q1};
-        texture1_vertices[1] = (RixVertex){b->x - 0.5f, top - b->y, zb,
-                                           b->reciprocal_w, b->rgba, b->s1, b->t1, b->q1};
-        texture1_vertices[2] = (RixVertex){c->x - 0.5f, top - c->y, zc,
-                                           c->reciprocal_w, c->rgba, c->s1, c->t1, c->q1};
+        texture1_vertices[0] = vertices[0];
+        texture1_vertices[1] = vertices[1];
+        texture1_vertices[2] = vertices[2];
+        texture1_vertices[0].s = a->s1;
+        texture1_vertices[0].t = a->t1;
+        texture1_vertices[0].q = a->q1;
+        texture1_vertices[1].s = b->s1;
+        texture1_vertices[1].t = b->t1;
+        texture1_vertices[1].q = b->q1;
+        texture1_vertices[2].s = c->s1;
+        texture1_vertices[2].t = c->t1;
+        texture1_vertices[2].q = c->q1;
     }
     scissor.start_x = 0U;
     scissor.start_y = 0U;
@@ -1894,7 +1897,6 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
      * buffer certainly has room (the complement of the flush condition
      * below), rix_setup_triangle writes the descriptor straight into the
      * backend array instead of a stack copy that is then duplicated. */
-    op = &backend->ops[backend->op_count - 1U];
     triangle_words = passes * (RIX_TRIANGLE_WORDS + 1U);
     if (op->two_pass && !op->batched)
         triangle_words += backend_two_pass_state_words(backend, op, 0U,
@@ -1925,8 +1927,9 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
             &backend->texture1_triangles[backend->triangle_count] :
             &prepared_texture1;
 
-        if (!rix_setup_triangle(texture1, &texture1_vertices[0],
-                                &texture1_vertices[1], &texture1_vertices[2], &scissor)) {
+        *texture1 = *triangle;
+        if (!rix_setup_texture(texture1, &texture1_vertices[0],
+                               &texture1_vertices[1], &texture1_vertices[2])) {
             minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
             backend->reject_stage = MINIGL_RIX_REJECT_TEXTURE1;
             return 0;

@@ -394,6 +394,28 @@ static void test_texture_env_modes(void)
     printf("PASS: test_texture_env_modes\n");
 }
 
+/* The second texture pass shares coverage, colour and depth with the first.
+ * Its descriptor must therefore be the first descriptor with only the
+ * texture planes replaced, byte-for-byte as a complete setup would produce. */
+static void test_second_pass_descriptor_derivation(void)
+{
+    RixVertex a = { 10.25f, 12.5f, 0.2f, 0.75f, 0x4080c0ffU, 0.0f, 0.0f, 1.0f };
+    RixVertex b = { 50.75f, 15.25f, 0.4f, 1.25f, 0x804020ffU, 1.0f, 0.0f, 1.0f };
+    RixVertex c = { 17.5f, 40.75f, 0.6f, 0.5f, 0x206080ffU, 0.0f, 1.0f, 1.0f };
+    RixVertex texture_a = a, texture_b = b, texture_c = c;
+    RixTriangle first, expected, derived;
+
+    texture_a.s = -8.25f; texture_a.t = 0.25f; texture_a.q = 0.5f;
+    texture_b.s = -7.0f; texture_b.t = 2.5f; texture_b.q = 1.0f;
+    texture_c.s = -6.5f; texture_c.t = 3.0f; texture_c.q = 0.75f;
+    assert(rix_setup_triangle(&first, &a, &b, &c, NULL));
+    assert(rix_setup_triangle(&expected, &texture_a, &texture_b, &texture_c, NULL));
+    derived = first;
+    assert(rix_setup_texture(&derived, &texture_a, &texture_b, &texture_c));
+    assert(memcmp(&derived, &expected, sizeof(derived)) == 0);
+    printf("PASS: test_second_pass_descriptor_derivation\n");
+}
+
 /* 3. Integration: wire-v9 draws route to RasterIX and fallback cleanly */
 static void test_wire_v9_draw_routing_and_fallback(void)
 {
@@ -1213,6 +1235,7 @@ int main(void)
     test_platform_probe_guard();
     test_state_mapper_fallback_rules();
     test_texture_env_modes();
+    test_second_pass_descriptor_derivation();
     test_wire_v9_draw_routing_and_fallback();
     test_cpu_present_orientation();
     test_rasterix_rgb565_present_orientation();
