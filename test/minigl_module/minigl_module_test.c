@@ -17,9 +17,13 @@
 #include "zzm_runtime.h"
 #include "ff.h"
 #include "zzapp.h"
+#include "mw_ctx.h"
+
 
 extern int zzm_module_entry(const zzm_services_t *services);
 extern void zzm_module_exit(void);
+extern mw_ctx *amiberry_transport_inproc_ctx(void);
+
 
 static uint8_t module_file[ZZM_V3_HEADER_SIZE + 32U];
 static uint32_t module_offset;
@@ -223,6 +227,8 @@ int main(void)
     assert(ops->open_68k(context, &request, &handle));
     ops->close_68k(context, handle);
     assert(ops->app_bind(context, 1U, &gl) == 0 && gl != NULL);
+    /* Queued ARM presentation needs two retained frames plus one draw target. */
+    assert(amiberry_transport_inproc_ctx()->state.target.buffer_count == 3U);
     {
         const zzapp_gl *draw = (const zzapp_gl *)gl;
         uint32_t textures[3];

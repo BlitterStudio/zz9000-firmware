@@ -505,6 +505,24 @@ static void fill_table(void)
     g_table.UnlockArrays = w_UnlockArrays;
 }
 
+static int zzapp_gl_configure_targets(uint32_t width, uint32_t height)
+{
+    struct AmiberryContext *guest = amiberry_context(mini_CurrentContext);
+    UBYTE *payload;
+
+    if (guest == NULL || (payload = amiberry_command(guest, MW_TARGET, 24U)) == NULL)
+        return 0;
+    mw_put_be32(payload, width);
+    mw_put_be32(payload + 4U, height);
+    /* Two submitted frames plus the target receiving the next frame. */
+    mw_put_be32(payload + 8U, 3U);
+    mw_put_be32(payload + 12U, 24U);
+    mw_put_be32(payload + 16U, width);
+    mw_put_be32(payload + 20U, height);
+    return amiberry_flush(guest);
+}
+
+
 int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out)
 {
     uint32_t w, h, pitch, format, front, back;
@@ -522,6 +540,10 @@ int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out)
         return ZZ_EINVAL;
     if (!amiberry_inproc_open(w, h))
         return ZZ_ENOMEM;
+    if (!zzapp_gl_configure_targets(w, h)) {
+        amiberry_inproc_close();
+        return ZZ_ENOMEM;
+    }
     fill_table();
     g_bound = 1;
     g_surface_id = surface_id;
