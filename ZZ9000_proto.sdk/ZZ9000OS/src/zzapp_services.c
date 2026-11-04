@@ -32,6 +32,7 @@ __attribute__((weak)) int scheduler_core1_available(void) { return 1; }
 #include "audio_fabric.h"
 #include "audio_fabric_internal.h"
 #include "memorymap.h"
+#include "l2_maint.h"
 #include "scheduler.h"
 #include "sdk_aperture_layout.h"
 #include "sdk_smp_lock.h"
@@ -1337,12 +1338,16 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 {
 #ifndef ZZAPP_HOST_TEST
 	/*
-	 * Scanout is consumed only after core 0's mandatory vblank L2 way
-	 * flush.  Keep this L1-only to avoid a redundant, multi-megabyte L2
-	 * walk on the producer; non-scanout cache maintenance uses l2_maint_*.
+	 * Write the frame through L1 and L2 before the flip is queued.  Core
+	 * 0's vblank way flush is not enough on its own: scanout of the new
+	 * buffer can start before that flush has reached its lines, and a frame
+	 * smaller than L2 (an 8-bit 640x480 screen is 300 KiB) can sit there
+	 * whole: the likely cause of flicker in the top lines seen on 8-bit
+	 * screens.  l2_maint serialises with core 0 in 4 KiB chunks (PL310
+	 * background-operation rule).
 	 */
 	if (addr != 0U && bytes != 0U)
-		Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)addr, bytes);
+		l2_maint_dcache_flush_range((intptr_t)addr, bytes);
 #else
 	(void)addr;
 	(void)bytes;
