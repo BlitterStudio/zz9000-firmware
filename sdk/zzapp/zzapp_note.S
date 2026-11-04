@@ -15,9 +15,11 @@
 	.long	0x50505A41
 	.long	0
 	.long	0
-	.long	0
+#ifndef ZZAPP_NOTE_STACK_BYTES
+#define ZZAPP_NOTE_STACK_BYTES 0
+#endif
+	.long	ZZAPP_NOTE_STACK_BYTES
 #ifndef ZZAPP_NOTE_FLAGS
 #define ZZAPP_NOTE_FLAGS 0
 #endif
-	.long	ZZAPP_NOTE_FLAGS
 	.long	0

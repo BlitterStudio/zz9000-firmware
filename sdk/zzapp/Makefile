@@ -28,10 +28,10 @@ LIB_OBJS := $(BUILD)/zzapp.o $(BUILD)/gl_wrap.o $(BUILD)/syscalls.o
 
 .PHONY: all check-relocs clean
 
-all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf
+all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/zzmembench.elf
 
-check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf
-	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf
+check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf
+	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -66,6 +66,12 @@ $(BUILD)/fault.o: templates/fault.c | $(BUILD)
 $(BUILD)/sbrk_smoke.o: sbrk_smoke.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(BUILD)/note_zzmembench.o: zzapp_note.S | $(BUILD)
+	$(CC) $(ASMFLAGS) -DZZAPP_NOTE_FLAGS=1 -DZZAPP_NOTE_STACK_BYTES=12582912 -c -o $@ $<
+
+$(BUILD)/zzmembench.o: templates/zzmembench.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(BUILD)/libzzapp.a: $(LIB_OBJS)
 	$(AR) rcs $@ $^
 
@@ -82,6 +88,10 @@ $(BUILD)/fault.elf: $(BUILD)/crt0.o $(BUILD)/note_fault.o $(BUILD)/fault.o $(BUI
 	$(PYTHON) rela_dyn.py $@
 
 $(BUILD)/sbrk_smoke.elf: $(BUILD)/crt0.o $(BUILD)/note_smoke.o $(BUILD)/sbrk_smoke.o $(BUILD)/libzzapp.a
+	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
+	$(PYTHON) rela_dyn.py $@
+
+$(BUILD)/zzmembench.elf: $(BUILD)/crt0.o $(BUILD)/note_zzmembench.o $(BUILD)/zzmembench.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
 	$(PYTHON) rela_dyn.py $@
 
