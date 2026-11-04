@@ -1847,8 +1847,8 @@ int minigl_rix_backend_begin_draw(MiniGLRixBackend *backend, uint16_t width,
 
 /* The full-descriptor copy for a second texture pass is hot.  Keep it local
  * rather than calling the generic 156-byte memcpy, which ARM GCC leaves as a
- * call here.  Three words per iteration lets Cortex-A9 use paired loads and
- * stores without changing any descriptor word. */
+ * call here.  The fixed three-word loop keeps the copy inline without
+ * changing any descriptor word. */
 static void backend_copy_triangle(RixTriangle *dst, const RixTriangle *src)
 {
     size_t i;
@@ -1859,6 +1859,7 @@ static void backend_copy_triangle(RixTriangle *dst, const RixTriangle *src)
         dst->words[i + 2U] = src->words[i + 2U];
     }
 }
+
 int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
                                     const MiniGLRixVertex *a,
                                     const MiniGLRixVertex *b,
