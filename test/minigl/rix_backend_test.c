@@ -1269,6 +1269,11 @@ int main(void)
     state.scissor_h = 480U;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U, 0x03100000U));
+    assert(backend.ops[0].scissor.start_x == 0U);
+    assert(backend.ops[0].scissor.start_y == 0U);
+    assert(backend.ops[0].scissor.end_x == 64U);
+    assert(backend.ops[0].scissor.end_y == 64U);
+    assert(!backend.ops[0].scissor_empty);
     assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_drain(&backend));

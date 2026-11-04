@@ -1673,6 +1673,46 @@ static int backend_op_inherits_state(const MiniGLRixBackend *backend, int two_pa
            previous->wrap_t == texture0->wrap_t;
 }
 
+static void backend_record_triangle_constants(const MiniGLRixBackend *backend,
+                                              MiniGLRixRecordedOp *op)
+{
+    const ZZ9KMiniGLPacketSetState *state = &op->state;
+
+    op->scissor.start_x = 0U;
+    op->scissor.start_y = 0U;
+    op->scissor.end_x = backend->width;
+    op->scissor.end_y = backend->height;
+    op->scissor.enabled = 1U;
+    if ((state->enabled_flags & ZZ9K_MGL_STATE_SCISSOR_TEST) != 0U) {
+        int32_t x0 = state->scissor_x;
+        int32_t y0 = (int32_t)backend->height - state->scissor_y -
+                     (int32_t)state->scissor_h;
+        int32_t x1 = x0 + (int32_t)state->scissor_w;
+        int32_t y1 = y0 + (int32_t)state->scissor_h;
+
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > (int32_t)backend->width) x1 = (int32_t)backend->width;
+        if (y1 > (int32_t)backend->height) y1 = (int32_t)backend->height;
+        if (x1 <= x0 || y1 <= y0) {
+            op->scissor_empty = 1U;
+            return;
+        }
+        op->scissor.start_x = (uint16_t)x0;
+        op->scissor.start_y = (uint16_t)y0;
+        op->scissor.end_x = (uint16_t)x1;
+        op->scissor.end_y = (uint16_t)y1;
+    }
+    if (state->depth_near != 0U || state->depth_far != 0x00ffffffU) {
+        op->depth_remap = 1U;
+        op->depth_base = (float)state->depth_near / 16777215.0f;
+        op->depth_scale = ((float)state->depth_far - (float)state->depth_near) /
+                          16777215.0f;
+    } else {
+        op->depth_scale = 1.0f;
+    }
+}
+
 static int backend_record_draw(MiniGLRixBackend *backend)
 {
     MiniGLRixRecordedOp *op;
@@ -1727,6 +1767,7 @@ static int backend_record_draw(MiniGLRixBackend *backend)
     op->two_pass = (uint8_t)two_pass;
     op->batched = (uint8_t)batched;
     op->inherits_state = (uint8_t)inherits;
+    backend_record_triangle_constants(backend, op);
     if (texture0 != NULL) {
         op->texture_slot = (uint16_t)(texture0 - backend->textures);
         op->texture_incarnation = texture0->incarnation;
@@ -1804,15 +1845,28 @@ int minigl_rix_backend_begin_draw(MiniGLRixBackend *backend, uint16_t width,
     return 1;
 }
 
+/* The full-descriptor copy for a second texture pass is hot.  Keep it local
+ * rather than calling the generic 156-byte memcpy, which ARM GCC leaves as a
+ * call here.  Three words per iteration lets Cortex-A9 use paired loads and
+ * stores without changing any descriptor word. */
+static void backend_copy_triangle(RixTriangle *dst, const RixTriangle *src)
+{
+    size_t i;
+
+    for (i = 0U; i < RIX_TRIANGLE_WORDS; i += 3U) {
+        dst->words[i] = src->words[i];
+        dst->words[i + 1U] = src->words[i + 1U];
+        dst->words[i + 2U] = src->words[i + 2U];
+    }
+}
 int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
                                     const MiniGLRixVertex *a,
                                     const MiniGLRixVertex *b,
                                     const MiniGLRixVertex *c)
 {
-    uint32_t c_setup = minigl_profile_cycles();
+    uint32_t c_setup;
     RixVertex vertices[3];
     RixVertex texture1_vertices[3];
-    RixScissor scissor;
     RixTriangle prepared;
     RixTriangle prepared_texture1;
     RixTriangle *triangle;
@@ -1823,7 +1877,12 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
     if (backend == NULL || !backend->collecting || a == NULL || b == NULL || c == NULL)
         return 0;
     op = &backend->ops[backend->op_count - 1U];
+    if (op->scissor_empty) {
+        minigl_profile_count(MGLP_N_CULLED, 1U);
+        return 1;
+    }
     passes = op->two_pass ? 2U : 1U;
+    c_setup = minigl_profile_cycles();
     /* RasterIX descriptors use the OpenGL bottom-up y axis; the raster
      * service delivers top-down screen rows, so reflect y once here.
      * RasterIX samples pixel i at the integer position i, OpenGL and the
@@ -1837,12 +1896,10 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         float zb = b->z;
         float zc = c->z;
         float top = (float)backend->height - 0.5f;
-        if (backend->state.depth_near != 0U || backend->state.depth_far != 0x00ffffffU) {
-            float near_z = (float)backend->state.depth_near / 16777215.0f;
-            float scale_z = ((float)backend->state.depth_far - (float)backend->state.depth_near) / 16777215.0f;
-            za = near_z + za * scale_z;
-            zb = near_z + zb * scale_z;
-            zc = near_z + zc * scale_z;
+        if (op->depth_remap) {
+            za = op->depth_base + za * op->depth_scale;
+            zb = op->depth_base + zb * op->depth_scale;
+            zc = op->depth_base + zc * op->depth_scale;
         }
         vertices[0] = (RixVertex){a->x - 0.5f, top - a->y, za, a->reciprocal_w,
                                   a->rgba, a->s, a->t, a->q};
@@ -1865,34 +1922,6 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         texture1_vertices[2].t = c->t1;
         texture1_vertices[2].q = c->q1;
     }
-    scissor.start_x = 0U;
-    scissor.start_y = 0U;
-    scissor.end_x = backend->width;
-    scissor.end_y = backend->height;
-    if ((backend->state.enabled_flags & ZZ9K_MGL_STATE_SCISSOR_TEST) != 0U) {
-        /* GL clips the scissor box to the framebuffer; a box that extends
-         * past it (e.g. the window size on a smaller target) is legal and
-         * must not push the draw to the CPU. */
-        int32_t x0 = backend->state.scissor_x;
-        int32_t y0 = (int32_t)backend->height - backend->state.scissor_y -
-                     (int32_t)backend->state.scissor_h;
-        int32_t x1 = x0 + (int32_t)backend->state.scissor_w;
-        int32_t y1 = y0 + (int32_t)backend->state.scissor_h;
-
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > (int32_t)backend->width) x1 = (int32_t)backend->width;
-        if (y1 > (int32_t)backend->height) y1 = (int32_t)backend->height;
-        if (x1 <= x0 || y1 <= y0) {
-            minigl_profile_count(MGLP_N_CULLED, 1U);
-            return 1;   /* nothing inside the scissor: draws nothing */
-        }
-        scissor.start_x = (uint16_t)x0;
-        scissor.start_y = (uint16_t)y0;
-        scissor.end_x = (uint16_t)x1;
-        scissor.end_y = (uint16_t)y1;
-    }
-    scissor.enabled = 1U;
     /* The triangle words are known before setup runs; when the current
      * buffer certainly has room (the complement of the flush condition
      * below), rix_setup_triangle writes the descriptor straight into the
@@ -1911,7 +1940,8 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
         triangle = &prepared;
         in_place = 0;
     }
-    if (!rix_setup_triangle(triangle, &vertices[0], &vertices[1], &vertices[2], &scissor)) {
+    if (!rix_setup_triangle(triangle, &vertices[0], &vertices[1], &vertices[2],
+                            &op->scissor)) {
         minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
         /* Zero area at RasterIX's 1/32-pixel precision, or no pixel inside
          * the scissor: the engine would draw nothing. Failing here aborted
@@ -1927,7 +1957,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
             &backend->texture1_triangles[backend->triangle_count] :
             &prepared_texture1;
 
-        *texture1 = *triangle;
+        backend_copy_triangle(texture1, triangle);
         if (!rix_setup_texture(texture1, &texture1_vertices[0],
                                &texture1_vertices[1], &texture1_vertices[2])) {
             minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
@@ -1935,8 +1965,7 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
             return 0;
         }
     }
-    minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_setup);
-    uint32_t c_rec = minigl_profile_cycles();
+    uint32_t c_rec = minigl_profile_geom_split(MGLP_GEOM_SETUP, c_setup);
     if (!in_place) {
         if (backend->triangle_count == MINIGL_RIX_MAX_TRIANGLES ||
             backend->command_words_estimate + triangle_words >
@@ -1963,9 +1992,10 @@ int minigl_rix_backend_add_triangle(MiniGLRixBackend *backend,
             backend->reject_stage = MINIGL_RIX_REJECT_NONE;
         }
         triangle = &backend->triangles[backend->triangle_count];
-        *triangle = prepared;
+        backend_copy_triangle(triangle, &prepared);
         if (passes == 2U)
-            backend->texture1_triangles[backend->triangle_count] = prepared_texture1;
+            backend_copy_triangle(&backend->texture1_triangles[backend->triangle_count],
+                                  &prepared_texture1);
     }
     ++backend->triangle_count;
     ++op->triangle_count;

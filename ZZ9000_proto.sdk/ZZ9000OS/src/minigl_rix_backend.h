@@ -154,10 +154,15 @@ typedef struct MiniGLRixRecordedOp {
     uint16_t texture1_mag_filter;
     uint16_t texture1_wrap_s;
     uint16_t texture1_wrap_t;
+    RixScissor scissor;          /* translated once for every triangle in this draw */
+    float depth_base;
+    float depth_scale;
     uint8_t two_pass;
     uint8_t type;
     uint8_t inherits_state;   /* same state as the previous op: emit none */
     uint8_t batched;          /* two-pass: every pass-0 triangle, then every pass 1 */
+    uint8_t scissor_empty;
+    uint8_t depth_remap;
 } MiniGLRixRecordedOp;
 
 

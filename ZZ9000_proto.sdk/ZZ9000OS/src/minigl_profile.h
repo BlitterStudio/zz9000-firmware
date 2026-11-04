@@ -89,16 +89,31 @@ extern uint64_t g_minigl_profile_geom_total_cycles;
 static inline uint32_t minigl_profile_cycles(void)
 {
     uint32_t c;
+
+    if (!g_minigl_profile_on)
+        return 0U;
     __asm__ __volatile__("mrc p15, 0, %0, c9, c13, 0" : "=r"(c));
     return c;
 }
 
-static inline void minigl_profile_geom_add_cycles(MiniGLProfileGeomSubStage sub, uint32_t start_cycles)
+static inline uint32_t minigl_profile_geom_split(MiniGLProfileGeomSubStage sub,
+                                                  uint32_t start_cycles)
 {
-    if (g_minigl_profile_on) {
-        uint32_t delta = minigl_profile_cycles() - start_cycles;
-        g_minigl_profile_geom_cycles[sub] += (uint64_t)delta;
-    }
+    uint32_t now;
+
+    if (!g_minigl_profile_on)
+        return 0U;
+    __asm__ __volatile__("mrc p15, 0, %0, c9, c13, 0" : "=r"(now));
+    g_minigl_profile_geom_cycles[sub] += (uint64_t)(now - start_cycles);
+    return now;
+}
+
+static inline void minigl_profile_geom_add_cycles(MiniGLProfileGeomSubStage sub,
+                                                   uint32_t start_cycles)
+{
+    if (g_minigl_profile_on)
+        g_minigl_profile_geom_cycles[sub] +=
+            (uint64_t)(minigl_profile_cycles() - start_cycles);
 }
 
 static inline void minigl_profile_geom_add_total_cycles(uint32_t start_cycles)
@@ -156,6 +171,13 @@ static inline void minigl_profile_count(MiniGLProfileCounter counter,
 }
 static inline int minigl_profile_enabled(void) { return 0; }
 static inline uint32_t minigl_profile_cycles(void) { return 0U; }
+static inline uint32_t minigl_profile_geom_split(MiniGLProfileGeomSubStage sub,
+                                                  uint32_t start_cycles)
+{
+    (void)sub;
+    (void)start_cycles;
+    return 0U;
+}
 static inline void minigl_profile_geom_add_cycles(MiniGLProfileGeomSubStage sub, uint32_t start_cycles)
 {
     (void)sub;
