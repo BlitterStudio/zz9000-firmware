@@ -315,6 +315,10 @@ int      zz_file_list_close(int list);
 int      zz_display_open(uint32_t w, uint32_t h, uint32_t format,
                          uint32_t flags, zzapp_surface *out);
 int      zz_display_flip(uint32_t surface_id);
+/* Queue a flip of the back buffer and return without waiting: ZZ_OK, or a
+ * negative ZZ_E* code.  zz_display_flip_idle: 1 when the last queued flip
+ * has been shown (the back buffer may be written again), 0 while it is
+ * still pending, negative ZZ_E* code on error (ZZ_ENOSYS on older firmware). */
 int      zz_display_flip_async(uint32_t surface_id);
 int      zz_display_flip_idle(void);
 int      zz_display_vsync(void);
