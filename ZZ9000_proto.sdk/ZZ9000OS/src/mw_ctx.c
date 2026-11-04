@@ -523,9 +523,9 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.fifo_write_words = mw_rix_fifo_write_words;
     platform.fifo_drain = mw_rix_fifo_drain;
 #if MINIGL_RIX_DMA
+    /* Native PL330 submission is synchronous; leave the async callbacks
+     * unset so rix_drv uses the completed dma_stream path. */
     platform.dma_stream = mw_rix_dma_stream;
-    platform.dma_start_async = mw_rix_dma_start_async;
-    platform.dma_retire = mw_rix_dma_retire;
 #endif
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
