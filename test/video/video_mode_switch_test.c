@@ -75,6 +75,19 @@ int overlay_scanout_active(void) { return 0; }
 void overlay_scanout_released(void) {}
 void overlay_vblank_rearm(void) {}
 void overlay_vblank_cache_flushed(void) {}
+/* No app display is bound in these tests: the ISR keeps the P96 scanout. */
+int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
+					 uint32_t *scanout)
+{
+	(void)normal_scanout;
+	(void)scanout;
+	return 0;
+}
+void zzapp_services_display_mailbox_end(int latched) { (void)latched; }
+void zzapp_services_display_vblank(uint32_t scanout_address)
+{
+	(void)scanout_address;
+}
 void amiga_interrupt_set(uint32_t bit) { (void)bit; }
 
 void test_xil_out32(uintptr_t address, uint32_t value)
