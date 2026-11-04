@@ -76,6 +76,16 @@ int zzapp_svc_display_flip(uint32_t surface_id)
     return zzapp_display_flip_bound();
 }
 
+int zzapp_svc_display_flip_async(uint32_t surface_id)
+{
+    return zzapp_svc_display_flip(surface_id);
+}
+
+int zzapp_display_flip_idle(void)
+{
+    return 1;
+}
+
 int zzm_registry_register_ops(uint32_t module_id, const void *ops, uint32_t bytes)
 {
     return module_id == ZZM_MODULE_MINIGL && ops != NULL && bytes != 0U;

@@ -785,10 +785,13 @@ static int module_app_flip_bound(uint32_t generation)
 {
     if (generation != zzapp_current_generation())
         return -1;
-    /* MiniGL swaps have the same presentation contract as SDK swaps: copy
-     * single-buffer surfaces, publish one generation, and wait for ZZRun's
-     * acknowledgement before rendering into the next back buffer. */
-    return zzapp_svc_display_flip(1U);
+    return zzapp_svc_display_flip_async(1U);
+}
+
+static int module_app_flip_idle(uint32_t generation)
+{
+    return generation == zzapp_current_generation() &&
+           zzapp_display_flip_idle();
 }
 
 static int module_profile_register(uint32_t module_id, const char *name,
@@ -946,7 +949,7 @@ static const zzm_palette_service_t palette_service = {
 static const zzm_app_gl_host_service_t app_gl_host_service = {
     ZZM_SERVICE_APP_GL_HOST_V3, sizeof(app_gl_host_service), zzapp_api_enter,
     zzapp_api_leave, zzapp_display_bound, module_app_flip_bound,
-    zzapp_current_generation
+    module_app_flip_idle, zzapp_current_generation
 };
 static const zzm_profile_service_t profile_service = {
     ZZM_SERVICE_PROFILE_V3, sizeof(profile_service), module_profile_register,

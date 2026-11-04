@@ -177,6 +177,7 @@ typedef struct zzm_app_gl_host_service {
                          uint32_t *format, uint32_t *card_front,
                          uint32_t *card_back);
     int (*flip_bound)(uint32_t generation);
+    int (*flip_idle)(uint32_t generation);
     uint32_t (*generation)(void);
 } zzm_app_gl_host_service_t;
 

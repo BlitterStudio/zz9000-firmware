@@ -89,6 +89,11 @@ int zzapp_svc_display_flip(uint32_t surface_id)
     ++flip_calls;
     return 0;
 }
+int zzapp_svc_display_flip_async(uint32_t surface_id)
+{
+    return zzapp_svc_display_flip(surface_id);
+}
+int zzapp_display_flip_idle(void) { return 1; }
 int sdk_aperture_runtime_is_zorro3(void) { return 1; }
 
 int zzm_registry_register_ops(uint32_t module_id, const void *ops, uint32_t size)

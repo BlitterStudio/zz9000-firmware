@@ -2168,6 +2168,44 @@ int minigl_rix_backend_surface_is_rgb565(const MiniGLRixBackend *backend)
 }
 
 
+int minigl_rix_backend_submit(MiniGLRixBackend *backend)
+{
+    if (backend == NULL || !backend->available)
+        return backend != NULL;
+    if (backend->error || backend->collecting)
+        return 0;
+    return backend_flush(backend, 0);
+}
+
+int minigl_rix_backend_poll(MiniGLRixBackend *backend)
+{
+    size_t index;
+
+    if (backend == NULL || !backend->available)
+        return backend != NULL;
+    if (backend->error)
+        return 0;
+    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+        volatile uint16_t *pixel;
+
+        if (!backend->pending[index])
+            continue;
+        pixel = backend_fence_pixel(backend, (uint8_t)index);
+        if (backend->platform.cache_invalidate != NULL)
+            backend->platform.cache_invalidate(backend->platform.context,
+                                               (uintptr_t)pixel, sizeof(*pixel));
+        if (*pixel != (uint16_t)backend->pending_fence[index])
+            return 0;
+        backend->pending[index] = 0U;
+        backend->pending_fence[index] = 0U;
+        backend->submitted_command_words[index] = 0U;
+        backend_release_buffer(backend, (uint8_t)index);
+    }
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
+        backend->textures[index].last_used_fence = 0U;
+    return 1;
+}
+
 int minigl_rix_backend_drain(MiniGLRixBackend *backend)
 {
     size_t index;

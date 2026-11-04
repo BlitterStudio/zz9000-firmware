@@ -35,6 +35,9 @@ typedef enum {
     MGLP_TARGET,    /* RGB565/Z16 <-> RGBA8/Z24 target conversion */
     MGLP_TEX,       /* texture image/sub-image/copy upload */
     MGLP_PRESENT,   /* synchronous BLIT/CAPTURE op */
+    MGLP_SWAP_DRAIN,/* waiting for a queued RasterIX frame */
+    MGLP_SWAP_COPY, /* colour target copy/conversion into a P96 bitmap */
+    MGLP_SWAP_FLIP, /* waiting for a P96 flip slot (or publishing a flip) */
     MGLP_OP,        /* other synchronous ops (create, readback, request) */
     MGLP_STAGES
 } MiniGLProfileStage;

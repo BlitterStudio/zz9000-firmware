@@ -1791,7 +1791,10 @@ target_allocation_failed:
         int gpu_format = minigl_raster_present_is_rgb565();
         int retire = gpu_format && c->state.target.buffer_count > 1U;
 
-        if (!minigl_raster_drain()) {
+        /* Hand the command stream to RasterIX and immediately rotate to an
+         * independent colour target.  The presenter owns the fence before it
+         * reads `outgoing`; only command-buffer reuse may wait later. */
+        if (!minigl_raster_submit_present()) {
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }

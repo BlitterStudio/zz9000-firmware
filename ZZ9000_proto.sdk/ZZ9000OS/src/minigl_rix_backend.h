@@ -258,6 +258,10 @@ int minigl_rix_backend_make_cpu_visible(MiniGLRixBackend *backend,
 int minigl_rix_backend_surface_is_rgb565(const MiniGLRixBackend *backend);
 /* Completion is the ownership hand-off: no CPU access may occur before it. */
 int minigl_rix_backend_drain(MiniGLRixBackend *backend);
+/* Finish the current frame's command stream without waiting for its fence.
+ * `poll` returns true only after every submitted stream has reached its fence. */
+int minigl_rix_backend_submit(MiniGLRixBackend *backend);
+int minigl_rix_backend_poll(MiniGLRixBackend *backend);
 /* Releases pins and retired copy-on-write pages without waiting. The caller
  * must already have stopped PL330 and RasterIX; a live engine may still
  * sample those pages. */

@@ -135,6 +135,7 @@ static int list_open_slot[ZZAPP_FD_COUNT];
 static volatile int display_bound;
 static int display_back_owned;
 static uint32_t display_id;
+static uint32_t display_ack_seen;
 static volatile uint32_t defer_state;
 static uint16_t defer_opcode;
 static uint16_t defer_status;
@@ -513,6 +514,7 @@ static void forget_window(void)
 	display_bound = 0;
 	display_back_owned = 0;
 	display_id = 0U;
+	display_ack_seen = 0U;
 	memset(file_open_slot, 0, sizeof(file_open_slot));
 	memset(list_open_slot, 0, sizeof(list_open_slot));
 }
@@ -539,6 +541,7 @@ void zzapp_services_on_app_end(void)
 	display_bound = 0;
 	display_back_owned = 0;
 	display_id = 0U;
+	display_ack_seen = 0U;
 	memset(file_open_slot, 0, sizeof(file_open_slot));
 	memset(list_open_slot, 0, sizeof(list_open_slot));
 	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC));
@@ -1118,6 +1121,30 @@ static void drop_owned_back(void)
 		zzapp_loader_free_back(back);
 }
 
+static void display_reap_flip(void)
+{
+	uint32_t ack;
+
+	if (!display_bound)
+		return;
+	ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
+	if (ack == display_ack_seen)
+		return;
+	display_ack_seen = ack;
+	if (!display_back_owned && life_get(ZZAPP_LIFE_CARD_BACK_OFF) != 0U)
+		life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF,
+			 life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) ^ 1U);
+}
+
+int zzapp_display_flip_idle(void)
+{
+	if (!display_bound)
+		return 0;
+	display_reap_flip();
+	return life_get(ZZAPP_LIFE_FLIP_GEN_OFF) ==
+	       life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
+}
+
 int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 			uint32_t *format, uint32_t *card_front,
 			uint32_t *card_back)
@@ -1127,6 +1154,7 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 
 	if (!display_bound)
 		return ZZ_EINVAL;
+	display_reap_flip();
 	front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
 	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
 	if (!display_back_owned && back != 0U &&
@@ -1158,6 +1186,7 @@ int zzapp_display_flip_bound(void)
 
 	if (!display_bound)
 		return ZZ_EINVAL;
+	display_reap_flip();
 	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
 	ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 	if (gen != ack)
@@ -1178,11 +1207,7 @@ static int wait_flip(uint32_t gen)
 			return ZZ_EIO;
 		ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 		if (ack == gen) {
-			life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF,
-				 life_get(ZZAPP_LIFE_CARD_BACK_OFF) != 0U &&
-				 !display_back_owned
-					 ? (life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) ^ 1U)
-					 : 0U);
+			display_reap_flip();
 			return ZZ_OK;
 		}
 		yield_wait_once();
@@ -1247,9 +1272,8 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 	barrier();
 }
 
-int zzapp_svc_display_flip(uint32_t surface_id)
+int zzapp_svc_display_flip_async(uint32_t surface_id)
 {
-	uint32_t gen;
 	uint32_t pitch;
 	uint32_t height;
 	uint32_t bytes;
@@ -1259,35 +1283,42 @@ int zzapp_svc_display_flip(uint32_t surface_id)
 
 	if (!display_bound || surface_id != display_id)
 		return ZZ_EINVAL;
-	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
-	if (gen == life_get(ZZAPP_LIFE_FLIP_ACK_OFF)) {
-		pitch = life_get(ZZAPP_LIFE_PITCH_OFF);
-		height = life_get(ZZAPP_LIFE_HEIGHT_OFF);
-		if (pitch == 0U || height > (0xffffffffU / pitch))
+	if (!zzapp_display_flip_idle())
+		return ZZ_EBUSY;
+	pitch = life_get(ZZAPP_LIFE_PITCH_OFF);
+	height = life_get(ZZAPP_LIFE_HEIGHT_OFF);
+	if (pitch == 0U || height > (0xffffffffU / pitch))
+		return ZZ_EINVAL;
+	bytes = pitch * height;
+	front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
+	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
+	if (display_back_owned) {
+		if (front == 0U || back == 0U)
 			return ZZ_EINVAL;
-		bytes = pitch * height;
-		front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
-		back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
-		if (display_back_owned) {
-			if (front == 0U || back == 0U)
-				return ZZ_EINVAL;
-			memcpy((void *)(uintptr_t)front, (const void *)(uintptr_t)back,
-			       bytes);
-			flush_presented(front, bytes);
-		} else {
-			if (back != 0U && life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
-				uint32_t tmp = front;
+		memcpy((void *)(uintptr_t)front, (const void *)(uintptr_t)back, bytes);
+		flush_presented(front, bytes);
+	} else {
+		if (back != 0U && life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
+			uint32_t tmp = front;
 
-				front = back;
-				back = tmp;
-			}
-			flush_presented(back != 0U ? back : front, bytes);
+			front = back;
+			back = tmp;
 		}
-		rc = zzapp_display_flip_bound();
-		if (rc != ZZ_OK)
-			return rc;
-		gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
+		flush_presented(back != 0U ? back : front, bytes);
 	}
+	rc = zzapp_display_flip_bound();
+	return rc;
+}
+
+int zzapp_svc_display_flip(uint32_t surface_id)
+{
+	uint32_t gen;
+	int rc;
+
+	rc = zzapp_svc_display_flip_async(surface_id);
+	if (rc != ZZ_OK)
+		return rc;
+	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
 	return wait_flip(gen);
 }
 
@@ -1624,6 +1655,7 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, front);
 	life_put(ZZAPP_LIFE_CARD_BACK_OFF, back);
 	life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF, 0U);
+	display_ack_seen = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 	display_bound = 1;
 	display_id = 1U;
 	barrier();

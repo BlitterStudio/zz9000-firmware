@@ -541,6 +541,27 @@ static int rix_make_cpu_visible(void)
     return ok;
 }
 
+int minigl_raster_submit_present(void)
+{
+    if (!ready())
+        return 0;
+    if (!rix_target_is_rgb565())
+        return 1;
+    return minigl_rix_backend_submit(&g_rix);
+}
+
+int minigl_raster_present_ready(void)
+{
+    if (!ready())
+        return 0;
+    /*
+     * MW_PRESENT retires the current RasterIX target before zzapp_gl polls
+     * it, so g_rix_surface_rgb565 is no longer a pending-work indicator.
+     * The backend owns the fences until they are observed here.
+     */
+    return minigl_rix_backend_poll(&g_rix);
+}
+
 int minigl_raster_prepare_present(void)
 {
     if (!ready())

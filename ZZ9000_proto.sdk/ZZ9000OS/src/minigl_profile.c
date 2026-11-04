@@ -199,7 +199,7 @@ void minigl_profile_report(void)
 {
     static const char *const names[MGLP_STAGES] = {
         " idle=", " parse=", " geom=", " cpu=", " emit=", " fifo=", " stall=",
-        " fence=", " tgt=", " tex=", " pres=", " op="
+        " fence=", " tgt=", " tex=", " pres=", " sdr=", " scpy=", " sfli=", " op="
     };
     static char line[768];
     const uint32_t *n = g_minigl_profile_counts;
