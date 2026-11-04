@@ -156,13 +156,6 @@ static uint32_t display_queued;
 static volatile int display_mailbox_active;
 static uint32_t display_mailbox_shown;
 static uint32_t display_mailbox_pending;
-/* Flush count a pending frame waits on: the started count at its submit. */
-static uint32_t display_mailbox_pending_flush_count;
-/* Core 0's full L1+L2 flushes: incremented before one starts and after it
- * returns.  A frame is safe to scan once a flush that started after its
- * submit has completed. */
-static volatile uint32_t display_mailbox_started_flush_count;
-static volatile uint32_t display_mailbox_completed_flush_count;
 static uint32_t display_mailbox_lo;
 static uint32_t display_mailbox_hi;
 static int display_mailbox_latch_pending;
@@ -249,7 +242,6 @@ static void display_mailbox_disable(void)
 	display_mailbox_lock_acquire();
 	__atomic_store_n(&display_mailbox_active, 0, __ATOMIC_RELEASE);
 	display_mailbox_pending = 0U;
-	display_mailbox_pending_flush_count = 0U;
 	display_mailbox_latch_pending = 0;
 	display_mailbox_lock_release();
 }
@@ -1273,8 +1265,6 @@ int zzapp_display_flip_idle(void)
 int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 					 uint32_t *scanout)
 {
-	uint32_t completed_flush_count;
-
 	if (!scanout || !display_mailbox_enabled() ||
 	    normal_scanout < display_mailbox_lo ||
 	    normal_scanout >= display_mailbox_hi)
@@ -1285,14 +1275,9 @@ int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 		display_mailbox_lock_release();
 		return 0;
 	}
-	completed_flush_count = __atomic_load_n(
-		&display_mailbox_completed_flush_count, __ATOMIC_ACQUIRE);
-	display_mailbox_latch_pending =
-		display_mailbox_pending != 0U &&
-		(int32_t)(completed_flush_count -
-			  display_mailbox_pending_flush_count) > 0;
-	*scanout = display_mailbox_latch_pending ?
+	*scanout = display_mailbox_pending != 0U ?
 		display_mailbox_pending : display_mailbox_shown;
+	display_mailbox_latch_pending = display_mailbox_pending != 0U;
 	return 1;
 }
 
@@ -1303,30 +1288,11 @@ void zzapp_services_display_mailbox_end(int latched)
 
 		display_mailbox_shown = display_mailbox_pending;
 		display_mailbox_pending = 0U;
-		display_mailbox_pending_flush_count = 0U;
 		life_put(ZZAPP_LIFE_CARD_FRONT_OFF, display_mailbox_shown);
 		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, old_shown);
 	}
 	display_mailbox_latch_pending = 0;
 	display_mailbox_lock_release();
-}
-
-/*
- * Core 0 brackets every full L1+L2 flush with these.  A frame submitted
- * while a flush runs is tagged with that flush and waits for the next one:
- * the running flush may already have passed the lines the submit pushed
- * into L2.
- */
-void zzapp_services_display_flush_begin(void)
-{
-	__atomic_add_fetch(&display_mailbox_started_flush_count, 1U,
-			   __ATOMIC_ACQ_REL);
-}
-
-void zzapp_services_display_flush_done(void)
-{
-	__atomic_add_fetch(&display_mailbox_completed_flush_count, 1U,
-			   __ATOMIC_RELEASE);
 }
 
 uint32_t zzapp_svc_display_mailbox_replaced(void)
@@ -1502,32 +1468,16 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 {
 #ifndef ZZAPP_HOST_TEST
 	/*
-	 * Strict presentation can scan out immediately after its ack, so it
-	 * still must write the frame through both cache levels here.
+	 * Write the frame through L1 and L2 before the flip is queued.  Core
+	 * 0's vblank way flush is not enough on its own: scanout of the new
+	 * buffer can start before that flush has reached its lines, and a frame
+	 * smaller than L2 (an 8-bit 640x480 screen is 300 KiB) can sit there
+	 * whole: the likely cause of flicker in the top lines seen on 8-bit
+	 * screens.  l2_maint serialises with core 0 in 4 KiB chunks (PL310
+	 * background-operation rule).
 	 */
 	if (addr != 0U && bytes != 0U)
 		l2_maint_dcache_flush_range((intptr_t)addr, bytes);
-#else
-	(void)addr;
-	(void)bytes;
-#endif
-	barrier();
-}
-
-static void flush_mailbox_presented(uint32_t addr, uint32_t bytes)
-{
-#ifndef ZZAPP_HOST_TEST
-	/*
-	 * The following card-vblank way flush supplies L2 clean.  Core 1 only
-	 * needs to evict its private L1: set/way is cheaper than range cleaning
-	 * once the frame exceeds its 32 KiB D-cache.
-	 */
-	if (addr != 0U && bytes != 0U) {
-		if (bytes > 32U * 1024U)
-			Xil_L1DCacheFlush();
-		else
-			Xil_L1DCacheFlushRange((INTPTR)addr, bytes);
-	}
 #else
 	(void)addr;
 	(void)bytes;
@@ -1542,14 +1492,12 @@ static int display_mailbox_flip(uint32_t back, uint32_t bytes)
 
 	if (back == 0U)
 		return ZZ_EINVAL;
-	flush_mailbox_presented(back, bytes);
+	flush_presented(back, bytes);
 	display_mailbox_lock_acquire();
 	if (!display_mailbox_active) {
 		display_mailbox_lock_release();
 		return ZZ_EBUSY;
 	}
-	display_mailbox_pending_flush_count = __atomic_load_n(
-		&display_mailbox_started_flush_count, __ATOMIC_ACQUIRE);
 	if (display_mailbox_pending != 0U) {
 		/* The old pending buffer was never scanned.  It becomes drawing
 		 * immediately while the newer completed buffer replaces it. */
@@ -2048,7 +1996,6 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 		display_mailbox_lock_acquire();
 		display_mailbox_shown = front;
 		display_mailbox_pending = 0U;
-		display_mailbox_pending_flush_count = 0U;
 		display_mailbox_lo = mailbox_lo;
 		display_mailbox_hi = mailbox_hi;
 		display_mailbox_latch_pending = 0;
@@ -2360,10 +2307,6 @@ void zzapp_services_test_reset(void)
 	yield_hook = NULL;
 	time_hook = NULL;
 	memset(slot_busy_test, 0, sizeof(slot_busy_test));
-	__atomic_store_n(&display_mailbox_started_flush_count, 0U,
-			 __ATOMIC_RELEASE);
-	__atomic_store_n(&display_mailbox_completed_flush_count, 0U,
-			 __ATOMIC_RELEASE);
 	zzapp_services_on_launch();
 }
 

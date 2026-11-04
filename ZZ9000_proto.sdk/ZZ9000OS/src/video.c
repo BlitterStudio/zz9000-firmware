@@ -92,6 +92,7 @@ static uint32_t videocap_scanout_pan_offset(int ntsc, int full_width,
 		FRAMEBUFFER_ADDRESS;
 }
 
+static int isr_flush_count = 0;
 int vblank_count = 0;
 
 struct ZZ_VIDEO_STATE* video_get_state() {
@@ -1085,15 +1086,12 @@ void isr_video(void *dummy) {
 		// audio formatter DMAs bypass the caches entirely. this periodic
 		// full flush is what keeps those two worlds coherent — do not
 		// make it conditional (broke ethernet RX, June 2026).
-		/* Every full flush counts for mailbox eligibility, but only one
-		 * that starts after a frame's submit can vouch for its lines. */
-		zzapp_services_display_flush_begin();
 		Xil_L1DCacheFlush();
 		Xil_L2CacheFlush();
-		zzapp_services_display_flush_done();
 		/* Core-1 packed-YUV staging reaches DDR at this point. Only now may
 		 * the non-coherent overlay VDMA select the completed buffer. */
 		overlay_vblank_cache_flushed();
+		isr_flush_count = 0;
 
 		if (sprite_request_show) {
 			vs.sprite_showing = 1;
