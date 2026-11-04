@@ -775,18 +775,27 @@ static inline void mw_ctx_update_latest(mw_ctx *c)
     c->state.target.latest = front ? c->state.target.front : c->state.target.back;
 }
 
+static uint32_t mw_active_color_index(const mw_ctx *c);
+
 static int mw_ctx_bind_buffers(mw_ctx *c)
 {
     MiniGLRasterBuffers buffers;
+    uint32_t index;
     int draw_front;
+
     memset(&buffers, 0, sizeof(buffers));
     minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes,
                                    mw_ctx_grow_texture_pool, c);
-    draw_front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400) && (c->state.target.buffer_count > 1);
-    buffers.color = c->color_buffers[draw_front ? c->state.target.front : c->state.target.back];
-    buffers.color_bytes = c->width * c->height * sizeof(uint32_t);
+    draw_front = (c->state.draw_buffer == 0x404 || c->state.draw_buffer == 0x400) &&
+                 c->state.target.buffer_count > 1U;
+    index = draw_front ? c->state.target.front : c->state.target.back;
+    buffers.color = c->color_direct[index] ?
+        (uint32_t *)(void *)c->direct_color_buffers[index] : c->color_buffers[index];
+    buffers.color_bytes = c->width * c->height *
+        (c->color_direct[index] ? 2U : sizeof(*buffers.color));
+    buffers.color_rgb565_only = c->color_direct[index];
     buffers.depth = c->depth_buffer;
-    buffers.depth_bytes = c->width * c->height * 4;
+    buffers.depth_bytes = c->width * c->height * 4U;
     buffers.vertices = g_dummy_vertices;
     buffers.vertices_bytes = sizeof(g_dummy_vertices);
     buffers.texture_staging = g_dummy_staging;
@@ -796,6 +805,42 @@ static int mw_ctx_bind_buffers(mw_ctx *c)
     buffers.width = (uint16_t)c->width;
     buffers.height = (uint16_t)c->height;
     return minigl_raster_configure_buffers(&buffers);
+}
+
+static int mw_ctx_cpu_fallback_target(void *context,
+                                      const MiniGLRasterBuffers *source,
+                                      MiniGLRasterBuffers *replacement)
+{
+    mw_ctx *c = (mw_ctx *)context;
+    uint32_t index;
+    uint32_t pixel;
+    const uint16_t *rgb565;
+
+    if (!c || !source || !replacement)
+        return 0;
+    index = mw_active_color_index(c);
+    if (index >= 3U || !c->color_direct[index] ||
+        source->color != (uint32_t *)(void *)c->direct_color_buffers[index])
+        return 0;
+    rgb565 = c->direct_color_buffers[index];
+    for (pixel = c->width * c->height; pixel != 0U; --pixel) {
+        uint16_t value = rgb565[pixel - 1U];
+        uint32_t red = (uint32_t)((value >> 11U) & 0x1fU);
+        uint32_t green = (uint32_t)((value >> 5U) & 0x3fU);
+        uint32_t blue = (uint32_t)(value & 0x1fU);
+
+        c->color_buffers[index][pixel - 1U] =
+            (((red << 3U) | (red >> 2U)) << 24U) |
+            (((green << 2U) | (green >> 4U)) << 16U) |
+            (((blue << 3U) | (blue >> 2U)) << 8U) | 0xffU;
+    }
+    c->color_direct[index] = 0U;
+    c->color_rgb565[index] = 0U;
+    *replacement = *source;
+    replacement->color = c->color_buffers[index];
+    replacement->color_bytes = c->width * c->height * sizeof(*replacement->color);
+    replacement->color_rgb565_only = 0U;
+    return 1;
 }
 
 static int mw_ctx_replace_rix_target(void *context,
@@ -1012,6 +1057,7 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     c->handle = g_next_handle++;
     mw_ctx_configure_rix(c);
     minigl_raster_set_fail_stop_target_handler(mw_ctx_replace_rix_target, c);
+    minigl_raster_set_cpu_fallback_target_handler(mw_ctx_cpu_fallback_target, c);
     minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes,
                                    mw_ctx_grow_texture_pool, c);
     if (!mw_ctx_bind_buffers(c)) {
@@ -1023,6 +1069,39 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
 
     return c;
 }
+int mw_host_bind_direct_rgb565(mw_ctx *c, uint32_t front, uint32_t back,
+                               uint32_t bytes)
+{
+    uint32_t required;
+
+    if (!c || !front || !back || (front & (MW_RIX_TARGET_ALIGNMENT - 1U)) != 0U ||
+        (back & (MW_RIX_TARGET_ALIGNMENT - 1U)) != 0U ||
+        c->width > UINT32_MAX / c->height ||
+        c->width * c->height > UINT32_MAX / 2U)
+        return 0;
+    required = c->width * c->height * 2U;
+    if (bytes != required || !minigl_raster_finish())
+        return 0;
+    c->direct_color_buffers[0] = (uint16_t *)(uintptr_t)front;
+    c->direct_color_buffers[1] = (uint16_t *)(uintptr_t)back;
+    c->color_direct[0] = 1U;
+    c->color_direct[1] = 1U;
+    c->color_rgb565[0] = 1U;
+    c->color_rgb565[1] = 1U;
+    minigl_platform_cache_clean(NULL, (uintptr_t)front, bytes);
+    minigl_platform_cache_clean(NULL, (uintptr_t)back, bytes);
+    minigl_platform_barrier(NULL);
+    if (!mw_ctx_bind_buffers(c)) {
+        c->color_direct[0] = 0U;
+        c->color_direct[1] = 0U;
+        c->direct_color_buffers[0] = NULL;
+        c->direct_color_buffers[1] = NULL;
+        return 0;
+    }
+    minigl_raster_target_discard(1);
+    return 1;
+}
+
 
 void mw_host_destroy(mw_ctx *c)
 {
@@ -1034,6 +1113,7 @@ void mw_host_destroy(mw_ctx *c)
     if (!minigl_raster_quiesce() && c->rix_enabled)
         return;
     minigl_raster_set_fail_stop_target_handler(NULL, NULL);
+    minigl_raster_set_cpu_fallback_target_handler(NULL, NULL);
     if (c->rix_target_quarantined) {
 #if MW_CONTEXT_CARD_POOL
         /* The disabled engine may still write any allocation owned by this

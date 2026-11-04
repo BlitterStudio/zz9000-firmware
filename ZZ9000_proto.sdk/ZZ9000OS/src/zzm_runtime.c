@@ -949,7 +949,7 @@ static const zzm_palette_service_t palette_service = {
 static const zzm_app_gl_host_service_t app_gl_host_service = {
     ZZM_SERVICE_APP_GL_HOST_V3, sizeof(app_gl_host_service), zzapp_api_enter,
     zzapp_api_leave, zzapp_display_bound, module_app_flip_bound,
-    module_app_flip_idle, zzapp_current_generation
+    module_app_flip_idle, zzapp_current_generation, zzapp_display_layout
 };
 static const zzm_profile_service_t profile_service = {
     ZZM_SERVICE_PROFILE_V3, sizeof(profile_service), module_profile_register,

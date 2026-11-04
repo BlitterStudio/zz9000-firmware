@@ -28,6 +28,10 @@ struct mw_ctx {
     uint8_t  palette[256][4];
     uint32_t palette_width;
     uint32_t *color_buffers[3];
+    /* Optional RGB565 P96 targets selected per colour slot.  The matching
+     * color_buffers[] allocation remains available for CPU fallback. */
+    uint16_t *direct_color_buffers[3];
+    uint8_t color_direct[3];
     /* Per colour buffer: contents are in RasterIX's RGB565 layout and a CPU
      * reader must convert through minigl_raster_buffer_to_rgba first.  The
      * layout belongs to the buffer and survives an undefined-content swap. */

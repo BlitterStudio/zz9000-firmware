@@ -89,6 +89,7 @@ int zzapp_svc_audio_close(void);
 int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 			uint32_t *format, uint32_t *card_front,
 			uint32_t *card_back);
+int zzapp_display_layout(uint32_t *layout);
 int zzapp_display_flip_bound(void);
 
 /* Mailbox. QUEUED means core 1 will finish it; harvest from core 0. */

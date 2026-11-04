@@ -14,6 +14,7 @@
 typedef struct MiniGLRasterBuffers {
     uint32_t *color;
     uint32_t color_bytes;
+    uint8_t color_rgb565_only;
     uint8_t *depth;
     uint32_t depth_bytes;
     uint8_t *vertices;
@@ -27,6 +28,11 @@ typedef struct MiniGLRasterBuffers {
 } MiniGLRasterBuffers;
 typedef int (*MiniGLRasterFailStopTargetFn)(void *context,
                                             MiniGLRasterBuffers *replacement);
+/* Converts an RGB565-only display target to writable RGBA storage before a
+ * CPU fallback.  `source` remains owned by the caller. */
+typedef int (*MiniGLRasterCpuFallbackTargetFn)(void *context,
+                                               const MiniGLRasterBuffers *source,
+                                               MiniGLRasterBuffers *replacement);
 /* `live_bytes` reaches the highest live allocation offset, not the sum of
  * allocations, so a relocating grow callback preserves fragmented residency. */
 typedef int (*MiniGLRasterTexturePoolGrowFn)(void *context,
@@ -96,6 +102,8 @@ void minigl_raster_abandon(void);
  * may still be subject to an unbounded DMA write. */
 void minigl_raster_set_fail_stop_target_handler(MiniGLRasterFailStopTargetFn handler,
                                                 void *context);
+void minigl_raster_set_cpu_fallback_target_handler(
+    MiniGLRasterCpuFallbackTargetFn handler, void *context);
 void minigl_raster_clear(uint32_t mask, uint32_t color_rgba, uint32_t depth_value);
 void minigl_raster_set_state(const ZZ9KMiniGLPacketSetState *state);
 void minigl_raster_load_matrix(uint16_t mode, const float *m);

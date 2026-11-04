@@ -36,6 +36,9 @@
 #define ZZ_FMT_RGB565 1u
 #define ZZ_FMT_BGRA8888 2u
 #endif
+#ifndef ZZ_LAYOUT_RGB565_LE
+#define ZZ_LAYOUT_RGB565_LE 2u
+#endif
 
 #ifndef ZZAPP_GL_HAVE_HEADER
 /* Matches sdk/zzapp/include/zzapp.h (app/libzzapp 80c39ab). */
@@ -206,7 +209,7 @@ int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
 {
     if (!host || !host->api_enter || !host->api_leave ||
         !host->bound_display || !host->flip_bound || !host->flip_idle ||
-        !host->generation)
+        !host->generation || !host->display_layout)
         return ZZ_EINVAL;
     g_module_app_host = host;
     return ZZ_OK;
@@ -229,6 +232,11 @@ int zzm_module_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
     return g_module_app_host->bound_display(w, h, pitch, format, card_front,
                                              card_back);
 }
+int zzm_module_display_layout(uint32_t *layout)
+{
+    return g_module_app_host->display_layout(layout);
+}
+
 
 int zzm_module_display_flip_bound(void)
 {
@@ -256,6 +264,12 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
     (void)w; (void)h; (void)pitch; (void)format; (void)card_front; (void)card_back;
     return ZZ_ENOSYS;
 }
+__attribute__((weak)) int zzapp_display_layout(uint32_t *layout)
+{
+    (void)layout;
+    return ZZ_ENOSYS;
+}
+
 
 __attribute__((weak)) int zzapp_display_flip_bound(void)
 {
@@ -290,6 +304,7 @@ __attribute__((weak)) int zzapp_svc_display_flip_async(uint32_t surface_id)
 #define zzapp_api_enter zzm_module_api_enter
 #define zzapp_api_leave zzm_module_api_leave
 #define zzapp_display_bound zzm_module_display_bound
+#define zzapp_display_layout zzm_module_display_layout
 #define zzapp_display_flip_bound zzm_module_display_flip_bound
 #define zzapp_display_flip_idle zzm_module_display_flip_idle
 #define zzapp_svc_display_flip zzm_module_svc_display_flip
@@ -308,11 +323,12 @@ void zzapp_gl_test_set_p96(uint8_t *pixels, uint32_t bytes)
 static int g_bound;
 static uint32_t g_surface_id;
 static zzapp_gl g_table;
-/* A RasterIX frame owns a colour target until it has been copied into the
- * independent P96 back bitmap.  Three MiniGL targets permit two queued
- * frames and one target receiving the next frame. */
+/* The copy path queues two RasterIX frames.  Direct P96 rendering uses the
+ * same two physical buffers but waits for every flip acknowledgement before
+ * the next target can become writable. */
 static uint8_t g_present_queue[2];
 static uint8_t g_present_count;
+static uint8_t g_zero_copy;
 
 #define CTX 1u
 #define ENTER() zzapp_api_enter()
@@ -505,7 +521,8 @@ static void fill_table(void)
     g_table.UnlockArrays = w_UnlockArrays;
 }
 
-static int zzapp_gl_configure_targets(uint32_t width, uint32_t height)
+static int zzapp_gl_configure_targets(uint32_t width, uint32_t height,
+                                      uint32_t buffer_count)
 {
     struct AmiberryContext *guest = amiberry_context(mini_CurrentContext);
     UBYTE *payload;
@@ -514,8 +531,7 @@ static int zzapp_gl_configure_targets(uint32_t width, uint32_t height)
         return 0;
     mw_put_be32(payload, width);
     mw_put_be32(payload + 4U, height);
-    /* Two submitted frames plus the target receiving the next frame. */
-    mw_put_be32(payload + 8U, 3U);
+    mw_put_be32(payload + 8U, buffer_count);
     mw_put_be32(payload + 12U, 24U);
     mw_put_be32(payload + 16U, width);
     mw_put_be32(payload + 20U, height);
@@ -525,7 +541,9 @@ static int zzapp_gl_configure_targets(uint32_t width, uint32_t height)
 
 int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out)
 {
-    uint32_t w, h, pitch, format, front, back;
+    uint32_t w, h, pitch, format, front, back, layout = 0U;
+    mw_ctx *mw;
+
     if (out)
         *out = 0;
     if (!surface_id)
@@ -538,10 +556,20 @@ int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out)
         return ZZ_EINVAL;
     if (format != ZZ_FMT_RGB565 && format != ZZ_FMT_BGRA8888)
         return ZZ_EINVAL;
+    g_zero_copy = format == ZZ_FMT_RGB565 &&
+                  zzapp_display_layout(&layout) == ZZ_OK &&
+                  layout == ZZ_LAYOUT_RGB565_LE && pitch == w * 2U &&
+                  front != 0U && back != 0U &&
+                  (front & 2047U) == 0U && (back & 2047U) == 0U;
     if (!amiberry_inproc_open(w, h))
         return ZZ_ENOMEM;
-    if (!zzapp_gl_configure_targets(w, h)) {
+    mw = amiberry_transport_inproc_ctx();
+    if (g_zero_copy && (!mw || !mw_host_bind_direct_rgb565(mw, front, back,
+                                                            w * h * 2U)))
+        g_zero_copy = 0U;
+    if (!zzapp_gl_configure_targets(w, h, g_zero_copy ? 2U : 3U)) {
         amiberry_inproc_close();
+        g_zero_copy = 0U;
         return ZZ_ENOMEM;
     }
     fill_table();
@@ -564,6 +592,7 @@ void zzapp_gl_unbind(void)
     amiberry_inproc_close();
     g_surface_id = 0;
     g_present_count = 0U;
+    g_zero_copy = 0U;
     g_bound = 0;
     minigl_profile_set_enabled(0);
 }
@@ -653,19 +682,32 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     card = back ? back : front;
     rgb565 = mw->color_rgb565[source] != 0U;
     minigl_profile_push(MGLP_SWAP_COPY);
-    /*
-     * RasterIX owns the RGB565 half of this colour target.  Its fence was
-     * observed above, but the ARM still needs to discard cached target lines
-     * before the NEON row copy reads them.
-     */
-    minigl_platform_cache_invalidate(NULL, (uintptr_t)mw->color_buffers[source],
-                                     (size_t)w * h * (rgb565 ? 2U : 4U));
-    if (!copy_bound(mw->color_buffers[source], rgb565, w, h, pitch, format, card)) {
-        minigl_profile_pop();
-        return 0;
+    if (mw->color_direct[source]) {
+        if ((uint32_t)(uintptr_t)mw->direct_color_buffers[source] != card) {
+            minigl_profile_pop();
+            return 0;
+        }
+        /* RasterIX writes DDR directly.  Discard any old CPU view before
+         * ZZRun's flip service performs its scanout cache hand-off. */
+        minigl_platform_cache_invalidate(NULL,
+                                         (uintptr_t)mw->direct_color_buffers[source],
+                                         (size_t)w * h * 2U);
+        minigl_platform_barrier(NULL);
+    } else {
+        /*
+         * RasterIX owns the RGB565 half of this colour target.  Its fence was
+         * observed above, but the ARM still needs to discard cached target lines
+         * before the NEON row copy reads them.
+         */
+        minigl_platform_cache_invalidate(NULL, (uintptr_t)mw->color_buffers[source],
+                                         (size_t)w * h * (rgb565 ? 2U : 4U));
+        if (!copy_bound(mw->color_buffers[source], rgb565, w, h, pitch, format, card)) {
+            minigl_profile_pop();
+            return 0;
+        }
+        minigl_platform_cache_clean(NULL, card, pitch * h);
+        minigl_platform_barrier(NULL);
     }
-    minigl_platform_cache_clean(NULL, card, pitch * h);
-    minigl_platform_barrier(NULL);
     minigl_profile_pop();
     minigl_profile_push(MGLP_SWAP_FLIP);
     if (zzapp_gl_queue_flip(g_surface_id) != ZZ_OK) {
@@ -734,6 +776,23 @@ void zzapp_gl_swap(void)
     if (outgoing >= 3U || g_present_count == 2U)
         goto done;
     g_present_queue[g_present_count++] = (uint8_t)outgoing;
+    if (g_zero_copy) {
+        int ok;
+
+        /* With two P96 buffers, MW_PRESENT has rebound RasterIX to the
+         * currently displayed one.  Do not return to the app until the flip
+         * makes it hidden; this deliberately trades the old two-frame queue
+         * for ownership safety. */
+        minigl_profile_push(MGLP_SWAP_DRAIN);
+        ok = minigl_raster_prepare_present();
+        minigl_profile_pop();
+        if (!ok || !zzapp_gl_present_pending(mw))
+            goto done;
+        minigl_profile_push(MGLP_SWAP_FLIP);
+        while (!zzapp_display_flip_idle()) {
+        }
+        minigl_profile_pop();
+    }
     minigl_profile_report();
 done:
     zzapp_api_leave();

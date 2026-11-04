@@ -1209,6 +1209,14 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 		*card_back = back;
 	return ZZ_OK;
 }
+int zzapp_display_layout(uint32_t *layout)
+{
+	if (!layout || !display_bound)
+		return ZZ_EINVAL;
+	*layout = life_get(ZZAPP_LIFE_LAYOUT_OFF);
+	return ZZ_OK;
+}
+
 
 static int fill_surface(zzapp_surface *out)
 {

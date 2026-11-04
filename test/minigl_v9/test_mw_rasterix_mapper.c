@@ -1228,6 +1228,41 @@ static void test_watertight_tessellation(void)
     printf("PASS: test_watertight_tessellation (interior pixels hit exactly once, zero cracks, zero overlaps)\n");
 }
 
+/* Direct P96 binding has only two targets.  After every present, the next
+ * RasterIX target must be the buffer made hidden by the simulated flip, not
+ * the one that was displaying when MW_PRESENT rotated the context. */
+static void test_direct_p96_target_rotation(void)
+{
+    mw_ctx *c = mw_host_create(2U, 2U);
+    const uint8_t *present = NULL;
+    const uint32_t front = 0x00200000U;
+    const uint32_t back = 0x00202000U;
+    uint32_t displayed = front;
+    uint32_t hidden = back;
+
+    assert(c != NULL);
+    assert(mw_host_bind_direct_rgb565(c, front, back, 8U));
+    assert((uintptr_t)minigl_raster_color_buffer() == hidden);
+
+    assert(submit_single_command(c, MW_PRESENT, present, 0U) == MW_STATUS_OK);
+    displayed = hidden;
+    hidden = front;
+    assert((uintptr_t)minigl_raster_color_buffer() == hidden);
+    assert((uintptr_t)minigl_raster_color_buffer() != displayed);
+
+    assert(submit_single_command(c, MW_PRESENT, present, 0U) == MW_STATUS_OK);
+    displayed = hidden;
+    hidden = back;
+    assert((uintptr_t)minigl_raster_color_buffer() == hidden);
+    assert((uintptr_t)minigl_raster_color_buffer() != displayed);
+
+    c->color_direct[0] = 0U;
+    c->color_direct[1] = 0U;
+    minigl_raster_target_discard(0);
+    mw_host_destroy(c);
+    printf("PASS: test_direct_p96_target_rotation\n");
+}
+
 int main(void)
 {
     g_rix_test_log = test_log_wrapper;
@@ -1248,6 +1283,7 @@ int main(void)
     test_wire_cpu_handoffs();
     test_queued_present_preserves_incoming_format();
     test_watertight_tessellation();
+    test_direct_p96_target_rotation();
     printf("ALL Wire-v9 RasterIX Mapper Tests PASSED!\n");
     return 0;
 }

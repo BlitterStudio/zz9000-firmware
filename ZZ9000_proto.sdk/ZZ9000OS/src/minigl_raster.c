@@ -235,6 +235,8 @@ static int g_dirty_valid;
 static MiniGLRasterTraceHook g_trace_hook;
 static MiniGLRasterFailStopTargetFn g_rix_fail_stop_target_handler;
 static void *g_rix_fail_stop_target_context;
+static MiniGLRasterCpuFallbackTargetFn g_rix_cpu_fallback_target_handler;
+static void *g_rix_cpu_fallback_target_context;
 static MiniGLRixBackend g_rix;
 static MiniGLRixPlatform g_rix_platform;
 static int g_rix_platform_set;
@@ -522,6 +524,24 @@ static int rix_make_cpu_visible_now(void)
         g_rix_depth_z16 = 0;
         return 1;
     }
+    if (g_buffers.color_rgb565_only) {
+        if (g_rix_cpu_fallback_target_handler == NULL ||
+            !minigl_rix_backend_drain(&g_rix))
+            return 0;
+        if (g_rix.platform.cache_invalidate != NULL)
+            g_rix.platform.cache_invalidate(g_rix.platform.context,
+                                            (uintptr_t)g_buffers.color,
+                                            pixels() * 2U);
+        if (!g_rix_cpu_fallback_target_handler(g_rix_cpu_fallback_target_context,
+                                                &g_buffers, &replacement) ||
+            !rix_make_cpu_depth_visible())
+            return 0;
+        minigl_rix_backend_discard_target(&g_rix, 0);
+        g_buffers = replacement;
+        g_rix_surface = NULL;
+        g_rix_surface_rgb565 = 0;
+        return 1;
+    }
     if (!minigl_rix_backend_make_cpu_visible(&g_rix, g_buffers.color, pixels()) ||
         !rix_make_cpu_depth_visible())
         return 0;
@@ -684,6 +704,13 @@ void minigl_raster_set_fail_stop_target_handler(MiniGLRasterFailStopTargetFn han
     g_rix_fail_stop_target_handler = handler;
     g_rix_fail_stop_target_context = context;
 }
+void minigl_raster_set_cpu_fallback_target_handler(
+    MiniGLRasterCpuFallbackTargetFn handler, void *context)
+{
+    g_rix_cpu_fallback_target_handler = handler;
+    g_rix_cpu_fallback_target_context = context;
+}
+
 
 static int rix_cpu_visible(void)
 {
@@ -746,7 +773,10 @@ int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers)
         return 0;
     }
     count = (uint32_t)buffers->width * buffers->height;
-    if (count > buffers->color_bytes / sizeof(*buffers->color) ||
+    if ((buffers->color_rgb565_only ?
+         (count > buffers->color_bytes / 2U ||
+          g_rix_cpu_fallback_target_handler == NULL) :
+         count > buffers->color_bytes / sizeof(*buffers->color)) ||
         count > buffers->depth_bytes / 3U || !buffers->vertices_bytes ||
         !buffers->texture_staging_bytes || !buffers->texture_pool_bytes) {
         g_error |= RASTER_ERR_MEMORY;
