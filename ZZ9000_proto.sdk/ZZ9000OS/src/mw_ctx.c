@@ -60,6 +60,15 @@
 #define GL_TEXTURE_2D 0x0de1U
 #define MW_RIX_TARGET_ALIGNMENT 2048U
 
+/*
+ * Set to 1 in a debug module build to run the complete wire validator before
+ * trusted ARM-app packets.  Release in-process packets originate in the linked
+ * front end, while the 68k transport always takes mw_host_submit_report().
+ */
+#ifndef MW_TRUSTED_SUBMIT_VALIDATE
+#define MW_TRUSTED_SUBMIT_VALIDATE 0
+#endif
+
 
 static uint32_t g_next_handle = 1U;
 /* Board-relative P96 VRAM mapping for the packet-owned asynchronous present.
@@ -1920,18 +1929,23 @@ static int mw_execute_command(void *user, const mw_command *cmd)
     return result;
 }
 
-uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
-                               uint32_t *failed_opcode)
+static uint32_t mw_host_submit_impl(mw_ctx *c, const uint8_t *packet,
+                                    uint32_t bytes, uint32_t *failed_opcode,
+                                    int trusted)
 {
     uint32_t status;
 
     if (failed_opcode)
         *failed_opcode = 0U;
-    if (!c || !packet || bytes < 16)
+    if (!c || !packet || bytes < 16U)
         return MW_STATUS_INVALID;
     mw_context_select_allocation_owner(c);
 
-    status = mw_validate_packet_report(packet, bytes, failed_opcode);
+    if (trusted)
+        status = mw_parse_packet_trusted_report(packet, bytes, NULL, NULL,
+                                                failed_opcode);
+    else
+        status = mw_validate_packet_report(packet, bytes, failed_opcode);
     if (status != MW_STATUS_OK)
         return status;
 
@@ -1941,8 +1955,11 @@ uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
     }
     mw_ctx_sync_to_raster(c);
 
-    status = mw_parse_packet_report(packet, bytes, mw_execute_command, c,
-                                    failed_opcode);
+    status = trusted ?
+        mw_parse_packet_trusted_report(packet, bytes, mw_execute_command, c,
+                                       failed_opcode) :
+        mw_parse_packet_validated_report(packet, bytes, mw_execute_command, c,
+                                         failed_opcode);
     /* The RGBA view of the colour surface is built on demand: every CPU
      * reader (read pixels, capture, copy-to-texture, a rasterizer fallback)
      * converts through minigl_raster_finish before it touches the buffer.
@@ -1952,20 +1969,38 @@ uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
     return status;
 }
 
-/* The in-process transport (ARM apps) submits here; mw_service_poll wraps
- * mw_host_submit_report itself for 68k clients.  Without this the profiler
- * saw no packets on the ARM path and never printed its [MGLP] line. */
-uint32_t mw_host_submit(mw_ctx *c, const uint8_t *packet, uint32_t bytes)
+uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,
+                               uint32_t *failed_opcode)
+{
+    return mw_host_submit_impl(c, packet, bytes, failed_opcode, 0);
+}
+
+static uint32_t mw_host_submit_profiled(mw_ctx *c, const uint8_t *packet,
+                                        uint32_t bytes, int trusted)
 {
     uint32_t status;
 
     minigl_profile_packet_begin();
-    status = mw_host_submit_report(c, packet, bytes, NULL);
+    status = mw_host_submit_impl(c, packet, bytes, NULL, trusted);
     minigl_profile_packet_end(bytes, packet && bytes >= 16U ?
                               ((uint32_t)packet[12] << 24) |
                               ((uint32_t)packet[13] << 16) |
                               ((uint32_t)packet[14] << 8) | packet[15] : 0U);
     return status;
+}
+
+uint32_t mw_host_submit(mw_ctx *c, const uint8_t *packet, uint32_t bytes)
+{
+    return mw_host_submit_profiled(c, packet, bytes, 0);
+}
+
+uint32_t mw_host_submit_trusted(mw_ctx *c, const uint8_t *packet, uint32_t bytes)
+{
+#if MW_TRUSTED_SUBMIT_VALIDATE
+    return mw_host_submit_profiled(c, packet, bytes, 0);
+#else
+    return mw_host_submit_profiled(c, packet, bytes, 1);
+#endif
 }
 
 static inline uint8_t mw_widen5(uint32_t v) {

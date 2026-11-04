@@ -24,6 +24,12 @@ mw_ctx  *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner);
  * Status: 0 ok, 0xfffffffe INVALID, 0xfffffffd CAPACITY,
  *         0xfffffffc LOST, 0xfffffffb FAILED. */
 uint32_t mw_host_submit(mw_ctx *c, const uint8_t *packet, uint32_t bytes);
+/*
+ * Submits a packet emitted by the linked ARM MiniGL front end.  It retains
+ * header and command framing checks but skips the wire payload validation
+ * required for 68k-owned transport memory.
+ */
+uint32_t mw_host_submit_trusted(mw_ctx *c, const uint8_t *packet, uint32_t bytes);
 /* As mw_host_submit(), also returns the command that failed execution or
  * validation (zero only when framing fails before an opcode is available). */
 uint32_t mw_host_submit_report(mw_ctx *c, const uint8_t *packet, uint32_t bytes,

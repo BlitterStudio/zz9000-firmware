@@ -167,9 +167,10 @@ static void test_rejected_packet_changes_no_state(void)
 
 static void test_draw_triangle_golden(void)
 {
-    /* 32x32 target */
+    /* Submit this existing scenario through both transport trust levels. */
     mw_ctx *c = mw_host_create(32, 32);
-    assert(c != NULL);
+    mw_ctx *trusted = mw_host_create(32, 32);
+    assert(c != NULL && trusted != NULL);
 
     uint8_t packet[1024];
     memset(packet, 0, sizeof(packet));
@@ -230,7 +231,12 @@ static void test_draw_triangle_golden(void)
     assert(mw_host_submit(c, packet, total_bytes) == MW_STATUS_OK);
 
     uint8_t out[32 * 32 * 4];
+    uint8_t trusted_out[sizeof(out)];
     assert(mw_host_readback_rgba8(c, out, sizeof(out)) == MW_STATUS_OK);
+    assert(mw_host_submit_trusted(trusted, packet, total_bytes) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(trusted, trusted_out, sizeof(trusted_out)) ==
+           MW_STATUS_OK);
+    assert(memcmp(out, trusted_out, sizeof(out)) == 0);
 
     /* Center pixel (16, 16) is inside the triangle -> White (255, 255, 255) */
     uint32_t center_idx = (16 * 32 + 16) * 4;
@@ -239,6 +245,7 @@ static void test_draw_triangle_golden(void)
     /* Corner pixel (0, 0) is outside the triangle -> Black (0, 0, 0) */
     assert(out[0] == 0 && out[1] == 0 && out[2] == 0);
 
+    mw_host_destroy(trusted);
     mw_host_destroy(c);
     printf("PASS: test_draw_triangle_golden\n");
 }

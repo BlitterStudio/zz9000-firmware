@@ -34,8 +34,26 @@ uint32_t mw_validate_packet_report(const uint8_t *packet, uint32_t bytes,
                                    uint32_t *failed_opcode);
 
 /*
- * As mw_parse_packet(), also returns the opcode whose visitor rejected the
- * packet.  Validation failures report the malformed command opcode.
+ * Visits an already structurally validated packet.  Callers MUST first use
+ * mw_validate_packet_report(); this avoids repeating its full payload pass.
+ */
+uint32_t mw_parse_packet_validated_report(const uint8_t *packet, uint32_t bytes,
+                                          mw_command_visitor visitor, void *user,
+                                          uint32_t *failed_opcode);
+
+/*
+ * Visits a packet emitted by the in-process MiniGL front end.  It checks the
+ * packet and command framing but deliberately skips payload validation.
+ * This MUST NOT be used for host-controlled transport memory.
+ */
+uint32_t mw_parse_packet_trusted_report(const uint8_t *packet, uint32_t bytes,
+                                        mw_command_visitor visitor, void *user,
+                                        uint32_t *failed_opcode);
+
+/*
+ * Validates then visits a packet.  As mw_parse_packet(), also returns the
+ * opcode whose visitor rejected the packet.  Validation failures report the
+ * malformed command opcode.
  */
 uint32_t mw_parse_packet_report(const uint8_t *packet, uint32_t bytes,
                                 mw_command_visitor visitor, void *user,
