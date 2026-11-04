@@ -362,6 +362,8 @@ Default Quake request, issued by the port, not hardcoded in ZZRun: 640×480, `ZZ
 
 For a panned P96 triple buffer, a launcher that sets bit11 receives bit12 after bind. Firmware writes the P96 page's ARM address at `0x84`; ZZRun chooses that page by address, pans it, then writes the matching `flip_gen` at `0x88`. The firmware only advances `flip_ack` once its own vblank ISR has re-pointed VDMA to that address. It therefore never releases the prior front while scanout can still read it. Launchers and firmware without both bits retain the original launcher acknowledgement path.
 
+Mailbox is opt-in at display open and requires launcher bit14 plus firmware bit15. It has three roles: shown, pending, and drawing. A flip replaces the pending page, immediately returning the replaced page to drawing; core 0 selects and latches the newest pending address during its vblank ISR, then returns the former shown page as the next spare. The core-0 ISR holds the shared SMP lock across VDMA programming, so core 1 cannot hand a page to the app while that same page is being selected for scanout. ZZRun leaves `RyOffset` at its initial app page in mailbox mode: that P96 pan is only the guard proving the app screen remains front, while firmware overrides VDMA without changing `framebuffer_pan_offset` or `host_pan_offset`. If the current P96 pan lies outside the bound app bitmap, firmware leaves scanout untouched. An unavailable capability falls back to the strict vblank protocol.
+
 Flip: the app calls `zz_display_flip` or `zz_gl_swap`. Firmware drains the context, copies the RasterIX target into the back P96 bitmap (or the only bitmap), publishes `flip_gen`, and yields until `flip_ack == flip_gen` or stop. Screen-buffer launchers retain their safe-message acknowledgement; negotiated panning launchers use the card-vblank protocol above; older panning launchers retain `WaitTOF`. The firmware updates `flip_showing`. A late ack for a previous generation is ignored. The next present copies into the buffer whose previous flip has been acked. A CPU-drawn surface (`pixels`) writes `surface.back` itself; GL does not.
 
 On exit, fault, or reset, ZZRun closes the screen it opened and returns to the public screen it recorded at start. It does this even if the firmware has already reclaimed the app. Firmware must finish or abandon any present-copy into that bitmap before reclaim (`minigl_raster_quiesce` and the backend abandon used by `minigl_reset_abort_and_free` in `main.c`). RasterIX itself writes the context buffer, not the P96 bitmap.
@@ -521,7 +523,7 @@ must convert pixels according to `layout`; `format` remains the requested
 logical format for compatibility. The call returns `ZZ_ENOSYS` on an older
 runtime.
 
-`display_open` flags: bit0 vsync. Quake sets it. `gl_bind` returns NULL on failure. One GL context in v0. A second bind returns NULL until unbind.
+`display_open` flags: bit0 vsync; bit1 requests optional mailbox presentation and otherwise falls back to strict vsync. `zz_display_mailbox_replaced()` is an optional appended call returning the cumulative number of completed frames replaced before card vblank. `gl_bind` returns NULL on failure. One GL context in v0. A second bind returns NULL until unbind.
 
 `alloc`/`free` are the arena heap. `align` is a power of two, at least 8. `heap_range` reports the whole heap span. `ZZ_ALLOC_UNCACHED` is accepted and ignored while the arena is a normal cacheable mapping. When user mode maps an uncached grant, the flag starts meaning something. Apps that need uncached memory must pass it now.
 

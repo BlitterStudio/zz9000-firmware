@@ -66,6 +66,7 @@ typedef char zzapp_window_size_matches_memorymap[
 #define ZZ_LAYOUT_RGBA8888   6u
 #define ZZ_LAYOUT_CLUT8      7u
 #define ZZ_DISPLAY_VSYNC 1u
+#define ZZ_DISPLAY_MAILBOX (1u << 1)
 
 typedef struct zzapp_surface {
 	uint32_t id;
@@ -147,6 +148,22 @@ static int display_back_owned;
 static uint32_t display_id;
 static uint32_t display_ack_seen;
 static uint32_t display_queued;
+/*
+ * Mailbox ownership is protected across core 1 (app calls) and core 0
+ * (vblank).  Core 0 holds the lock while it programs VDMA, so a drawing
+ * buffer cannot be returned at the same time that it becomes scanout.
+ */
+static volatile int display_mailbox_active;
+static uint32_t display_mailbox_shown;
+static uint32_t display_mailbox_pending;
+static uint32_t display_mailbox_lo;
+static uint32_t display_mailbox_hi;
+static int display_mailbox_latch_pending;
+#ifndef ZZAPP_HOST_TEST
+static sdk_smp_lock_t display_mailbox_lock = SDK_SMP_LOCK_INIT;
+#else
+static volatile uint32_t display_mailbox_lock;
+#endif
 static volatile uint32_t defer_state;
 static uint16_t defer_opcode;
 static uint16_t defer_status;
@@ -194,6 +211,39 @@ static void barrier(void)
 #else
 	__asm__ __volatile__("" ::: "memory");
 #endif
+}
+
+static void display_mailbox_lock_acquire(void)
+{
+#ifndef ZZAPP_HOST_TEST
+	sdk_smp_lock_acquire(&display_mailbox_lock);
+#else
+	while (__atomic_test_and_set(&display_mailbox_lock, __ATOMIC_ACQUIRE))
+		;
+#endif
+}
+
+static void display_mailbox_lock_release(void)
+{
+#ifndef ZZAPP_HOST_TEST
+	sdk_smp_lock_release(&display_mailbox_lock);
+#else
+	__atomic_clear(&display_mailbox_lock, __ATOMIC_RELEASE);
+#endif
+}
+
+static int display_mailbox_enabled(void)
+{
+	return __atomic_load_n(&display_mailbox_active, __ATOMIC_ACQUIRE);
+}
+
+static void display_mailbox_disable(void)
+{
+	display_mailbox_lock_acquire();
+	__atomic_store_n(&display_mailbox_active, 0, __ATOMIC_RELEASE);
+	display_mailbox_pending = 0U;
+	display_mailbox_latch_pending = 0;
+	display_mailbox_lock_release();
 }
 
 static uint32_t defer_load(void)
@@ -527,6 +577,7 @@ static void forget_window(void)
 	display_id = 0U;
 	display_ack_seen = 0U;
 	display_queued = 0U;
+	display_mailbox_disable();
 	memset(file_open_slot, 0, sizeof(file_open_slot));
 	memset(list_open_slot, 0, sizeof(list_open_slot));
 }
@@ -555,14 +606,16 @@ void zzapp_services_on_app_end(void)
 	display_id = 0U;
 	display_ack_seen = 0U;
 	display_queued = 0U;
+	display_mailbox_disable();
 	memset(file_open_slot, 0, sizeof(file_open_slot));
 	memset(list_open_slot, 0, sizeof(list_open_slot));
 	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC |
-				   ZZAPP_F_SCANOUT_ACK));
+				   ZZAPP_F_SCANOUT_ACK | ZZAPP_F_MAILBOX));
 	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, 0U);
 	life_put(ZZAPP_LIFE_CARD_BACK_OFF, 0U);
 	life_put(ZZAPP_LIFE_FLIP_ADDRESS_OFF, 0U);
 	life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0U);
+	life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF, 0U);
 }
 
 void zzapp_services_on_reset(void)
@@ -1173,6 +1226,8 @@ static void display_reap_flip(void)
 
 	if (!display_bound)
 		return;
+	if (display_mailbox_enabled())
+		return;
 	ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 	if (ack == display_ack_seen)
 		return;
@@ -1194,9 +1249,57 @@ int zzapp_display_flip_idle(void)
 {
 	if (!display_bound)
 		return 0;
+	if (display_mailbox_enabled())
+		return 1;
 	display_reap_flip();
 	return life_get(ZZAPP_LIFE_FLIP_GEN_OFF) ==
 	       life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
+}
+
+/*
+ * Core 0 calls begin/end around init_vdma from the vblank ISR.  The lock is
+ * deliberately held across that programming step: either core 1 replaces the
+ * pending buffer before selection, or it waits until the selected address has
+ * become VDMA's next frame store.  There is no ownership interleaving.
+ */
+int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
+					 uint32_t *scanout)
+{
+	if (!scanout || !display_mailbox_enabled() ||
+	    normal_scanout < display_mailbox_lo ||
+	    normal_scanout >= display_mailbox_hi)
+		return 0;
+	display_mailbox_lock_acquire();
+	if (!display_mailbox_active || normal_scanout < display_mailbox_lo ||
+	    normal_scanout >= display_mailbox_hi) {
+		display_mailbox_lock_release();
+		return 0;
+	}
+	*scanout = display_mailbox_pending != 0U ?
+		display_mailbox_pending : display_mailbox_shown;
+	display_mailbox_latch_pending = display_mailbox_pending != 0U;
+	return 1;
+}
+
+void zzapp_services_display_mailbox_end(int latched)
+{
+	if (latched && display_mailbox_latch_pending) {
+		uint32_t old_shown = display_mailbox_shown;
+
+		display_mailbox_shown = display_mailbox_pending;
+		display_mailbox_pending = 0U;
+		life_put(ZZAPP_LIFE_CARD_FRONT_OFF, display_mailbox_shown);
+		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, old_shown);
+	}
+	display_mailbox_latch_pending = 0;
+	display_mailbox_lock_release();
+}
+
+uint32_t zzapp_svc_display_mailbox_replaced(void)
+{
+	if (!display_mailbox_enabled())
+		return 0U;
+	return life_get(ZZAPP_LIFE_MAILBOX_REPLACED_OFF);
 }
 
 void zzapp_services_display_vblank(uint32_t scanout_address)
@@ -1204,7 +1307,7 @@ void zzapp_services_display_vblank(uint32_t scanout_address)
 	uint32_t flags;
 	uint32_t gen;
 
-	if (!display_bound)
+	if (!display_bound || display_mailbox_enabled())
 		return;
 	flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
 	if ((flags & (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK)) !=
@@ -1341,8 +1444,11 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 		return ZZ_EBUSY;
 	bits = life_get(ZZAPP_LIFE_FLAGS_OFF);
 	bits |= ZZAPP_F_DISPLAY_UNBOUND;
+	bits &= ~(ZZAPP_F_VSYNC | ZZAPP_F_MAILBOX_REQUEST);
 	if ((flags & ZZ_DISPLAY_VSYNC) != 0U)
 		bits |= ZZAPP_F_VSYNC;
+	if ((flags & ZZ_DISPLAY_MAILBOX) != 0U)
+		bits |= ZZAPP_F_MAILBOX_REQUEST;
 	life_put(ZZAPP_LIFE_WIDTH_OFF, w);
 	life_put(ZZAPP_LIFE_HEIGHT_OFF, h);
 	life_put(ZZAPP_LIFE_FORMAT_OFF, format);
@@ -1377,6 +1483,45 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 	(void)bytes;
 #endif
 	barrier();
+}
+
+static int display_mailbox_flip(uint32_t back, uint32_t bytes)
+{
+	uint32_t spare;
+	uint32_t gen;
+
+	if (back == 0U)
+		return ZZ_EINVAL;
+	flush_presented(back, bytes);
+	display_mailbox_lock_acquire();
+	if (!display_mailbox_active) {
+		display_mailbox_lock_release();
+		return ZZ_EBUSY;
+	}
+	if (display_mailbox_pending != 0U) {
+		/* The old pending buffer was never scanned.  It becomes drawing
+		 * immediately while the newer completed buffer replaces it. */
+		life_put(ZZAPP_LIFE_CARD_BACK_OFF, display_mailbox_pending);
+		display_mailbox_pending = back;
+		life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF,
+			 life_get(ZZAPP_LIFE_MAILBOX_REPLACED_OFF) + 1U);
+	} else {
+		spare = life_get(ZZAPP_LIFE_CARD_SPARE_OFF);
+		if (spare == 0U) {
+			display_mailbox_lock_release();
+			return ZZ_EBUSY;
+		}
+		display_mailbox_pending = back;
+		life_put(ZZAPP_LIFE_CARD_BACK_OFF, spare);
+		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, 0U);
+	}
+	/* Keep generic flip clients idle without exposing a VBlank wait. */
+	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF) + 1U;
+	life_put(ZZAPP_LIFE_FLIP_GEN_OFF, gen);
+	life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+	display_ack_seen = gen;
+	display_mailbox_lock_release();
+	return ZZ_OK;
 }
 
 int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
@@ -1423,6 +1568,8 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
 	bytes = pitch * height;
 	front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
 	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
+	if (display_mailbox_enabled())
+		return display_mailbox_flip(back, bytes);
 	if (display_back_owned) {
 		if (front == 0U || back == 0U)
 			return ZZ_EINVAL;
@@ -1492,8 +1639,10 @@ int zzapp_svc_display_close(uint32_t surface_id)
 		return ZZ_EINVAL;
 	drop_owned_back();
 	display_bound = 0;
+	display_mailbox_disable();
 	display_id = 0U;
-	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC));
+	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC |
+				   ZZAPP_F_MAILBOX_REQUEST | ZZAPP_F_MAILBOX));
 	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, 0U);
 	life_put(ZZAPP_LIFE_CARD_BACK_OFF, 0U);
 	life_put(ZZAPP_LIFE_CARD_SPARE_OFF, 0U);
@@ -1779,6 +1928,9 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	int rc;
 	uint32_t layout;
 	uint32_t bytes;
+	uint32_t flags;
+	uint32_t mailbox_lo;
+	uint32_t mailbox_hi;
 
 	if (req_len < ZZAPP_BIND_CARD_BACK + sizeof(uint32_t))
 		return ZZ_EINVAL;
@@ -1825,15 +1977,39 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF, 0U);
 	life_put(ZZAPP_LIFE_FLIP_ADDRESS_OFF, 0U);
 	life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0U);
+	life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF, 0U);
 	display_ack_seen = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 	display_bound = 1;
 	display_id = 1U;
+	display_mailbox_disable();
+	flags = zzapp_services_flags();
+	if ((flags & (ZZAPP_F_MAILBOX_REQUEST | ZZAPP_F_LAUNCHER_MAILBOX)) ==
+	    (ZZAPP_F_MAILBOX_REQUEST | ZZAPP_F_LAUNCHER_MAILBOX) &&
+	    !display_back_owned && spare != 0U) {
+		mailbox_lo = front < back ? front : back;
+		if (spare < mailbox_lo)
+			mailbox_lo = spare;
+		mailbox_hi = front > back ? front : back;
+		if (spare > mailbox_hi)
+			mailbox_hi = spare;
+		mailbox_hi += bytes;
+		display_mailbox_lock_acquire();
+		display_mailbox_shown = front;
+		display_mailbox_pending = 0U;
+		display_mailbox_lo = mailbox_lo;
+		display_mailbox_hi = mailbox_hi;
+		display_mailbox_latch_pending = 0;
+		__atomic_store_n(&display_mailbox_active, 1, __ATOMIC_RELEASE);
+		display_mailbox_lock_release();
+		zzapp_services_or_flags(ZZAPP_F_MAILBOX);
+	} else {
+		zzapp_services_and_flags(~ZZAPP_F_MAILBOX);
+	}
 	barrier();
 	if (zzapp_services_flags() & ZZAPP_F_LAUNCHER_SCANOUT_ACK)
 		zzapp_services_or_flags(ZZAPP_F_SCANOUT_ACK);
 	else
 		zzapp_services_and_flags(~ZZAPP_F_SCANOUT_ACK);
-	zzapp_services_and_flags(~ZZAPP_F_DISPLAY_UNBOUND);
 	return ZZ_OK;
 }
 

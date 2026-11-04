@@ -167,6 +167,7 @@
 #define ZZAPP_LIFE_CARD_SPARE_OFF      0x80u
 #define ZZAPP_LIFE_FLIP_ADDRESS_OFF    0x84u
 #define ZZAPP_LIFE_FLIP_SUBMIT_OFF     0x88u
+#define ZZAPP_LIFE_MAILBOX_REPLACED_OFF 0x8Cu
 
 /* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
  * 5 stopping, 6 faulted. */
@@ -190,7 +191,8 @@
 
 /* Flags: bit0 display wanted, bit1 audio, bit2 GL,
  * bit8 display requested and not yet bound, bit9 vsync wanted.
- * Launcher/Firmware scanout-ack bits negotiate vblank-safe panning. */
+ * Launcher/Firmware scanout-ack bits negotiate strict vblank-safe panning;
+ * mailbox bits negotiate card-owned triple-buffer presentation. */
 #define ZZAPP_F_DISPLAY                 (1u << 0)
 #define ZZAPP_F_AUDIO                   (1u << 1)
 #define ZZAPP_F_GL                      (1u << 2)
@@ -199,6 +201,9 @@
 #define ZZAPP_F_LAUNCHER_CLUT8          (1u << 10)
 #define ZZAPP_F_LAUNCHER_SCANOUT_ACK    (1u << 11)
 #define ZZAPP_F_SCANOUT_ACK             (1u << 12)
+#define ZZAPP_F_MAILBOX_REQUEST         (1u << 13)
+#define ZZAPP_F_LAUNCHER_MAILBOX        (1u << 14)
+#define ZZAPP_F_MAILBOX                 (1u << 15)
 
 #define ZZAPP_EV_KEY_DOWN          1u
 #define ZZAPP_EV_KEY_UP            2u
@@ -305,6 +310,7 @@ struct zzapp_life {
     uint32_t card_spare;
     uint32_t flip_address;
     uint32_t flip_submit;
+    uint32_t mailbox_replaced;
 };
 
 struct zzapp_input_hdr {
@@ -415,6 +421,7 @@ _Static_assert(offsetof(struct zzapp_life, palette_count) == ZZAPP_LIFE_PALETTE_
 _Static_assert(offsetof(struct zzapp_life, card_spare) == ZZAPP_LIFE_CARD_SPARE_OFF, "spare");
 _Static_assert(offsetof(struct zzapp_life, flip_address) == ZZAPP_LIFE_FLIP_ADDRESS_OFF, "faddr");
 _Static_assert(offsetof(struct zzapp_life, flip_submit) == ZZAPP_LIFE_FLIP_SUBMIT_OFF, "fsubmit");
+_Static_assert(offsetof(struct zzapp_life, mailbox_replaced) == ZZAPP_LIFE_MAILBOX_REPLACED_OFF, "mreplace");
 _Static_assert(sizeof(struct zzapp_life) <= ZZAPP_LIFE_BYTES, "life bytes");
 
 static inline void zzapp_put_be16(void *p, uint16_t value)

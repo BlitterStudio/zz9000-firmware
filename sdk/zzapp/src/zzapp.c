@@ -197,6 +197,14 @@ int zz_display_refresh(zzapp_surface *surface)
     return ZZ_ENOSYS;
 }
 
+uint32_t zz_display_mailbox_replaced(void)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, display_mailbox_replaced) &&
+        zzapp_api_ptr->display_mailbox_replaced)
+        return zzapp_api_ptr->display_mailbox_replaced();
+    return 0U;
+}
+
 int zz_display_set_palette(uint32_t surface_id, uint32_t first,
                            uint32_t count, const uint32_t *rgb)
 {

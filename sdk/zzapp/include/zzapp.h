@@ -63,8 +63,9 @@ extern "C" {
 #define ZZ_SEEK_CUR 1
 #define ZZ_SEEK_END 2
 
-/* display_open flags. Bit 0 is vsync; Quake sets it. */
+/* display_open flags. Mailbox is optional and falls back to strict vsync. */
 #define ZZ_DISPLAY_VSYNC 1u
+#define ZZ_DISPLAY_MAILBOX (1u << 1)
 
 /*
  * ELF note, little-endian, name "ZZAPP" (section 3). n_namesz 6, n_descsz 24,
@@ -294,6 +295,8 @@ typedef struct zzapp_api {
     /* Appended: update CLUT8 entries as 0x00RRGGBB words. */
     int      (*display_set_palette)(uint32_t surface_id, uint32_t first,
                                     uint32_t count, const uint32_t *rgb);
+    /* Appended: cumulative frames replaced before card vblank in mailbox mode. */
+    uint32_t (*display_mailbox_replaced)(void);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -349,6 +352,9 @@ int      zz_display_flip_idle(void);
 /* Refreshes front/back, pitch, and layout from the launcher after a completed
  * flip.  Returns ZZ_ENOSYS on firmware predating this optional API slot. */
 int      zz_display_refresh(zzapp_surface *surface);
+/* Cumulative frames replaced before scanout in mailbox mode; zero when the
+ * optional mailbox API is unavailable or not active. */
+uint32_t zz_display_mailbox_replaced(void);
 /* Updates CLUT8 entries as 0x00RRGGBB words.  Returns ZZ_ENOSYS when the
  * launcher or firmware predates palette presentation support. */
 int      zz_display_set_palette(uint32_t surface_id, uint32_t first,

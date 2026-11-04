@@ -297,6 +297,72 @@ static void test_display_scanout_ack(void)
 		fail("display scanout-ack recycle");
 }
 
+static void test_display_mailbox(void)
+{
+	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	zzapp_surface surface;
+	uint32_t scanout;
+	uint32_t front = 0x00200000U;
+	uint32_t back = 0x00210000U;
+	uint32_t spare = 0x00220000U;
+	int rc;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_LAUNCHER_MAILBOX | ZZAPP_F_MAILBOX_REQUEST);
+	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
+						ZZ_FMT_RGB565, front, back,
+						ZZ_LAYOUT_RGB565_LE, spare);
+	rc = zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				    reply, &reply_len, 1, 1U, 0U);
+	if (rc != SDK_STATUS_OK ||
+	    (zzapp_services_flags() & ZZAPP_F_MAILBOX) == 0U)
+		fail("display mailbox bind");
+	memset(&surface, 0, sizeof(surface));
+	surface.id = 1U;
+	if (zzapp_svc_display_flip_async(surface.id) != ZZ_OK ||
+	    zzapp_svc_display_refresh(&surface) != ZZ_OK ||
+	    surface.back != (void *)(uintptr_t)spare)
+		fail("display mailbox first queue");
+	if (zzapp_svc_display_flip_async(surface.id) != ZZ_OK ||
+	    zzapp_svc_display_refresh(&surface) != ZZ_OK ||
+	    surface.back != (void *)(uintptr_t)back ||
+	    zzapp_svc_display_mailbox_replaced() != 1U)
+		fail("display mailbox replace");
+	if (!zzapp_services_display_mailbox_begin(front, &scanout) ||
+	    scanout != spare)
+		fail("display mailbox select latest");
+	zzapp_services_display_mailbox_end(1);
+	if (zzapp_svc_display_refresh(&surface) != ZZ_OK ||
+	    surface.front != (void *)(uintptr_t)spare ||
+	    surface.back != (void *)(uintptr_t)back ||
+	    zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_CARD_SPARE_OFF) != front)
+		fail("display mailbox latch reuse");
+	if (zzapp_svc_display_flip_async(surface.id) != ZZ_OK)
+		fail("display mailbox second queue");
+	if (zzapp_services_display_mailbox_begin(0x00300000U, &scanout))
+		fail("display mailbox hidden screen");
+	if (zzapp_svc_display_refresh(&surface) != ZZ_OK ||
+	    surface.back != (void *)(uintptr_t)front)
+		fail("display mailbox hidden ownership");
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_MAILBOX_REQUEST);
+	rc = zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				    reply, &reply_len, 1, 1U, 0U);
+	if (rc != SDK_STATUS_OK ||
+	    (zzapp_services_flags() & ZZAPP_F_MAILBOX) != 0U)
+		fail("display mailbox old launcher fallback");
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -306,6 +372,7 @@ int main(void)
 	test_audio_busy();
 	test_display_refresh_rotation_and_layout();
 	test_display_scanout_ack();
+	test_display_mailbox();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;
