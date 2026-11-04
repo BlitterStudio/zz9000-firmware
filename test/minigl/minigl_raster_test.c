@@ -917,6 +917,25 @@ static void assert_rix_ownership_transitions(void)
     assert(minigl_raster_finish());
     assert(depth[0] == 0x12U && depth[1] == 0x34U && depth[2] == 0U);
     assert(model.cache_cleans != 0U && model.cache_invalidates != 0U);
+    /* A presented target is retired before its fence completes.  Quiesce must
+     * still drain that fence rather than dropping the DMA channel on reset. */
+    minigl_raster_draw_arrays(GL_TRIANGLES, 0U, VSTRIDE, 0U, 3U, 0U);
+    assert(minigl_raster_submit_present());
+    minigl_raster_target_retire();
+    model.complete = 0;
+    memset(model.command[0] + MINIGL_RIX_COMMAND_BYTES -
+           MINIGL_RIX_TEXTURE_PAGE_BYTES, 0, sizeof(uint16_t));
+    memset(model.command[1] + MINIGL_RIX_COMMAND_BYTES -
+           MINIGL_RIX_TEXTURE_PAGE_BYTES, 0, sizeof(uint16_t));
+    assert(!minigl_raster_quiesce());
+    minigl_raster_abandon();
+    assert(minigl_raster_quiesce());
+    model.complete = 1;
+    minigl_raster_set_rix_platform(&platform);
+    minigl_raster_init();
+    minigl_raster_set_state(&s);
+
+
 
     s.scissor_x = W;
     s.scissor_w = 1U;

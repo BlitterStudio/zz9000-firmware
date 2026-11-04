@@ -695,6 +695,8 @@ int minigl_raster_quiesce(void)
         return 1;
     }
     result = minigl_raster_finish();
+    if (result)
+        result = minigl_rix_backend_drain(&g_rix);
     if (result) {
         minigl_rix_backend_reset(&g_rix);
         minigl_raster_set_rix_platform(NULL);
