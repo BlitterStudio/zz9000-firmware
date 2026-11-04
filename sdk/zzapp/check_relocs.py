@@ -93,6 +93,10 @@ def check(path):
             if owner != b"ZZAPP\x00":
                 die(path, "note owner is %r" % owner)
             desc_off = 12 + ((namesz + 3) & ~3)
+            # The loader rejects a descriptor that runs past the note.
+            if desc_off + descsz > len(note):
+                die(path, "ZZAPP note descriptor %d bytes, note has %d"
+                    % (descsz, len(note) - desc_off))
             magic = struct.unpack_from("<I", note, desc_off)[0]
             if magic != 0x50505A41:
                 die(path, "note magic 0x%x" % magic)

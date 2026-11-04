@@ -22,4 +22,5 @@
 #ifndef ZZAPP_NOTE_FLAGS
 #define ZZAPP_NOTE_FLAGS 0
 #endif
+	.long	ZZAPP_NOTE_FLAGS
 	.long	0
