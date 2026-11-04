@@ -55,6 +55,7 @@ typedef enum {
     MGLP_N_PIN_DRAINS,    /* uploads that drained RasterIX (texture in use) */
     MGLP_N_EVICTIONS,     /* textures evicted from the RasterIX pool */
     MGLP_N_OPS,           /* synchronous bridge ops */
+    MGLP_N_FRAMES,        /* MW_PRESENT swaps: the per-frame divisor */
     MGLP_N_ASYNC_PRESENTS,/* packet-owned direct P96 presentations */
     MGLP_N_DRV_PACKETS,  /* FIFO packets pushed to RasterIX (MMIO or DMA) */
     /* RasterIX state sampled once per FIFO packet, before it is pushed: */

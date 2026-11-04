@@ -197,6 +197,7 @@ static size_t mglp_append_ms(char *line, size_t used, size_t size,
 
 void minigl_profile_report(void)
 {
+    uint32_t divisor;
     static const char *const names[MGLP_STAGES] = {
         " idle=", " parse=", " geom=", " cpu=", " emit=", " fifo=", " stall=",
         " fence=", " tgt=", " tex=", " pres=", " sdr=", " scpy=", " sfli=", " op="
@@ -218,13 +219,19 @@ void minigl_profile_report(void)
         mglp_window_reset();
         return;
     }
+    /* Stage times and per-unit hardware figures are per frame: a 68k
+     * session sends about one ring packet per frame, an ARM app several
+     * in-process packets, so dividing by packets understated ARM frames. */
+    divisor = n[MGLP_N_FRAMES] != 0U ? n[MGLP_N_FRAMES] :
+              (g_mglp.packets != 0U ? g_mglp.packets : 1U);
     print_start = g_mglp.mark;
     window = mglp_tenth_ms(g_mglp.mark - g_mglp.window_start, 0U) / 1000U;
     written = snprintf(line, sizeof(line),
-                       "[MGLP] %lu.%lus pk=%lu op=%lu ap=%lu kB=%lu cmd=%lu tri=%lu "
+                       "[MGLP] %lu.%lus fr=%lu pk=%lu op=%lu ap=%lu kB=%lu cmd=%lu tri=%lu "
                        "cull=%lu hw=%lu sw=%lu fb=%lu fw=%lu sub=%lu fp=%lu tx=%lu "
                        "up=%lu ub=%lu pin=%lu ev=%lu fbk=",
                        (unsigned long)(window / 10U), (unsigned long)(window % 10U),
+                       (unsigned long)n[MGLP_N_FRAMES],
                        (unsigned long)g_mglp.packets, (unsigned long)n[MGLP_N_OPS],
                        (unsigned long)n[MGLP_N_ASYNC_PRESENTS],
                        (unsigned long)(g_mglp.bytes / 1024U),
@@ -261,7 +268,7 @@ void minigl_profile_report(void)
      * an op-only window prints window totals instead. */
     for (stage = MGLP_PARSE; stage < MGLP_STAGES; ++stage) {
         used = mglp_append_ms(line, used, sizeof(line), names[stage],
-                              g_mglp.ticks[stage], g_mglp.packets);
+                              g_mglp.ticks[stage], divisor);
         if (stage == MGLP_GEOM) {
             static const char *const sub_names[MGLP_GEOM_SUB_STAGES] = {
                 " g_conv=", " g_clip=", " g_setup=", " g_rec="
@@ -277,12 +284,12 @@ void minigl_profile_report(void)
                     sub_ticks = g_minigl_profile_geom_cycles[sub] / 666U;
                 }
                 used = mglp_append_ms(line, used, sizeof(line), sub_names[sub],
-                                      sub_ticks, g_mglp.packets);
+                                      sub_ticks, divisor);
             }
         }
     }
     used = mglp_append_ms(line, used, sizeof(line), names[MGLP_IDLE],
-                          g_mglp.ticks[MGLP_IDLE], g_mglp.packets);
+                          g_mglp.ticks[MGLP_IDLE], divisor);
     used = mglp_append_ms(line, used, sizeof(line), " | max=",
                           g_mglp.packet_max, 0U);
     /* RasterIX side, per ring packet: AXI read/write bursts it issued, and
@@ -291,7 +298,7 @@ void minigl_profile_report(void)
     {
         static uint32_t previous_reads;
         static uint32_t previous_writes;
-        uint32_t frames = g_mglp.packets != 0U ? g_mglp.packets : 1U;
+        uint32_t frames = divisor;
         uint32_t samples = n[MGLP_N_HW_SAMPLES];
         uint32_t reads, writes;
 

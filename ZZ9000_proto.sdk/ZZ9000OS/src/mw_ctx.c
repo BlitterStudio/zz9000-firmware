@@ -1798,6 +1798,7 @@ target_allocation_failed:
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }
+        minigl_profile_count(MGLP_N_FRAMES, 1U);
         c->state.target.front = c->state.target.back;
         c->state.target.latest = c->state.target.front;
         c->state.target.back = (c->state.target.back + 1U) % c->state.target.buffer_count;
