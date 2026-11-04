@@ -265,6 +265,10 @@ typedef struct zzapp_api {
     const zzapp_gl *(*gl_bind)(uint32_t surface_id);
     void     (*gl_swap)(void);
     void     (*gl_unbind)(void);
+
+    /* Optional non-blocking P96 present; unsupported firmware returns ENOSYS. */
+    int      (*display_flip_async)(uint32_t surface_id);
+    int      (*display_flip_idle)(void);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -311,6 +315,8 @@ int      zz_file_list_close(int list);
 int      zz_display_open(uint32_t w, uint32_t h, uint32_t format,
                          uint32_t flags, zzapp_surface *out);
 int      zz_display_flip(uint32_t surface_id);
+int      zz_display_flip_async(uint32_t surface_id);
+int      zz_display_flip_idle(void);
 int      zz_display_vsync(void);
 int      zz_display_close(uint32_t surface_id);
 

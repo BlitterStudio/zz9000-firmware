@@ -45,6 +45,8 @@ WEAK int zzapp_svc_file_list_next(int l, zzapp_dirent *o) { (void)l; (void)o; re
 WEAK int zzapp_svc_file_list_close(int l) { (void)l; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,zzapp_surface *o) { (void)w;(void)h;(void)f;(void)fl;(void)o; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_display_flip(uint32_t id) { (void)id; return ZZ_ENOSYS; }
+WEAK int zzapp_svc_display_flip_async(uint32_t id) { (void)id; return ZZ_ENOSYS; }
+WEAK int zzapp_display_flip_idle(void) { return 0; }
 WEAK int zzapp_svc_display_vsync(void) { return ZZ_ENOSYS; }
 WEAK int zzapp_svc_display_close(uint32_t id) { (void)id; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_input_poll(zzapp_event *o,uint32_t n,uint32_t *out) { (void)o;(void)n; if(out)*out=0; return ZZ_ENOSYS; }
@@ -190,6 +192,8 @@ WRAP1(api_file_close,int,zzapp_svc_file_close(a))
 WRAP1(api_list_open,const char *,zzapp_svc_file_list_open(a))
 WRAP1(api_list_close,int,zzapp_svc_file_list_close(a))
 WRAP1(api_display_flip,uint32_t,zzapp_svc_display_flip(a))
+WRAP1(api_display_flip_async,uint32_t,zzapp_svc_display_flip_async(a))
+WRAP0(api_display_flip_idle,zzapp_display_flip_idle())
 WRAP0(api_vsync,zzapp_svc_display_vsync())
 WRAP1(api_display_close,uint32_t,zzapp_svc_display_close(a))
 WRAP0(api_audio_close,zzapp_svc_audio_close())
@@ -212,6 +216,7 @@ static const zzapp_api g_api = {
     .alloc=api_alloc,.free=api_free,.heap_range=api_heap,.log=zzapp_svc_log,
     .file_open=api_file_open,.file_close=api_file_close,.file_read=api_file_read,.file_write=api_file_write,.file_seek=api_file_seek,.file_stat=api_file_stat,.file_list_open=api_list_open,.file_list_next=api_list_next,.file_list_close=api_list_close,
     .display_open=api_display_open,.display_flip=api_display_flip,.display_vsync=api_vsync,.display_close=api_display_close,.input_poll=api_input,.audio_open=api_audio_open,.audio_close=api_audio_close,
-    .gl_bind=api_gl_bind,.gl_swap=api_gl_swap,.gl_unbind=api_gl_unbind
+    .gl_bind=api_gl_bind,.gl_swap=api_gl_swap,.gl_unbind=api_gl_unbind,
+    .display_flip_async=api_display_flip_async,.display_flip_idle=api_display_flip_idle
 };
 const zzapp_api *zzapp_api_table(void) { return &g_api; }

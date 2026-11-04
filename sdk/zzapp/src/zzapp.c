@@ -173,6 +173,22 @@ int zz_display_flip(uint32_t surface_id)
     return ZZ_ENOSYS;
 }
 
+int zz_display_flip_async(uint32_t surface_id)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, display_flip_async) &&
+        zzapp_api_ptr->display_flip_async)
+        return zzapp_api_ptr->display_flip_async(surface_id);
+    return ZZ_ENOSYS;
+}
+
+int zz_display_flip_idle(void)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, display_flip_idle) &&
+        zzapp_api_ptr->display_flip_idle)
+        return zzapp_api_ptr->display_flip_idle();
+    return ZZ_ENOSYS;
+}
+
 int zz_display_vsync(void)
 {
     if (ZZ_API_COVERS(zzapp_api_ptr, display_vsync) && zzapp_api_ptr->display_vsync)
