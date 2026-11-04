@@ -145,6 +145,7 @@ static volatile int display_bound;
 static int display_back_owned;
 static uint32_t display_id;
 static uint32_t display_ack_seen;
+static uint32_t display_queued;
 static volatile uint32_t defer_state;
 static uint16_t defer_opcode;
 static uint16_t defer_status;
@@ -524,6 +525,7 @@ static void forget_window(void)
 	display_back_owned = 0;
 	display_id = 0U;
 	display_ack_seen = 0U;
+	display_queued = 0U;
 	memset(file_open_slot, 0, sizeof(file_open_slot));
 	memset(list_open_slot, 0, sizeof(list_open_slot));
 }
@@ -551,6 +553,7 @@ void zzapp_services_on_app_end(void)
 	display_back_owned = 0;
 	display_id = 0U;
 	display_ack_seen = 0U;
+	display_queued = 0U;
 	memset(file_open_slot, 0, sizeof(file_open_slot));
 	memset(list_open_slot, 0, sizeof(list_open_slot));
 	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC));
@@ -1170,9 +1173,17 @@ static void display_reap_flip(void)
 	if (ack == display_ack_seen)
 		return;
 	display_ack_seen = ack;
-	if (!display_back_owned && life_get(ZZAPP_LIFE_CARD_BACK_OFF) != 0U)
+	if (display_queued != 0U) {
+		uint32_t front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
+
+		life_put(ZZAPP_LIFE_CARD_FRONT_OFF, display_queued);
+		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, front);
+		display_queued = 0U;
+	} else if (!display_back_owned &&
+		   life_get(ZZAPP_LIFE_CARD_BACK_OFF) != 0U) {
 		life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF,
 			 life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) ^ 1U);
+	}
 }
 
 int zzapp_display_flip_idle(void)
@@ -1196,8 +1207,8 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 	display_reap_flip();
 	front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
 	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
-	if (!display_back_owned && back != 0U &&
-	    life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
+	if (!display_back_owned && life_get(ZZAPP_LIFE_CARD_SPARE_OFF) == 0U &&
+	    back != 0U && life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
 		uint32_t tmp = front;
 
 		front = back;
@@ -1386,6 +1397,12 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
 			return ZZ_EINVAL;
 		memcpy((void *)(uintptr_t)front, (const void *)(uintptr_t)back, bytes);
 		flush_presented(front, bytes);
+	} else if (life_get(ZZAPP_LIFE_CARD_SPARE_OFF) != 0U) {
+		uint32_t spare = life_get(ZZAPP_LIFE_CARD_SPARE_OFF);
+
+		flush_presented(back, bytes);
+		display_queued = back;
+		life_put(ZZAPP_LIFE_CARD_BACK_OFF, spare);
 	} else {
 		if (back != 0U && life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
 			uint32_t tmp = front;
@@ -1415,7 +1432,7 @@ int zzapp_svc_display_refresh(zzapp_surface *out)
 {
 	if (!out || out->id != display_id)
 		return ZZ_EINVAL;
-	if (!zzapp_display_flip_idle())
+	if (!zzapp_display_flip_idle() && display_queued == 0U)
 		return ZZ_EBUSY;
 	return fill_surface(out);
 }
@@ -1439,6 +1456,7 @@ int zzapp_svc_display_close(uint32_t surface_id)
 	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC));
 	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, 0U);
 	life_put(ZZAPP_LIFE_CARD_BACK_OFF, 0U);
+	life_put(ZZAPP_LIFE_CARD_SPARE_OFF, 0U);
 	return ZZ_OK;
 }
 
@@ -1716,6 +1734,7 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	uint32_t format;
 	uint32_t front;
 	uint32_t back;
+	uint32_t spare = 0U;
 	uint32_t bpp;
 	int rc;
 	uint32_t layout;
@@ -1731,6 +1750,8 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	back = zzapp_get_be32(req + ZZAPP_BIND_CARD_BACK);
 	layout = req_len >= ZZAPP_BIND_REQ_BYTES ?
 		zzapp_get_be32(req + ZZAPP_BIND_LAYOUT) : default_layout(format);
+	if (req_len >= ZZAPP_BIND_EXT_REQ_BYTES)
+		spare = zzapp_get_be32(req + ZZAPP_BIND_CARD_SPARE);
 	bpp = format_bpp(format);
 	if (!layout_matches_format(format, layout))
 		return ZZ_EINVAL;
@@ -1739,6 +1760,8 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 		return ZZ_EINVAL;
 	bytes = pitch * height;
 	if (!span_ok(front, bytes))
+		return ZZ_EINVAL;
+	if (spare != 0U && (!span_ok(spare, bytes) || spare == front || spare == back))
 		return ZZ_EINVAL;
 	drop_owned_back();
 	if (back == 0U) {
@@ -1758,6 +1781,7 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, front);
 	life_put(ZZAPP_LIFE_CARD_BACK_OFF, back);
 	life_put(ZZAPP_LIFE_LAYOUT_OFF, layout);
+	life_put(ZZAPP_LIFE_CARD_SPARE_OFF, spare);
 	life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF, 0U);
 	display_ack_seen = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 	display_bound = 1;

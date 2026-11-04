@@ -74,6 +74,8 @@
 #define ZZAPP_BIND_CARD_BACK       20u
 #define ZZAPP_BIND_LAYOUT          24u
 #define ZZAPP_BIND_REQ_BYTES       28u
+#define ZZAPP_BIND_CARD_SPARE      28u
+#define ZZAPP_BIND_EXT_REQ_BYTES   32u
 
 /* APP_STATUS snapshot. The full block stays in the rings window. */
 #define ZZAPP_STATUS_STATE         0u
@@ -162,6 +164,7 @@
 #define ZZAPP_LIFE_PALETTE_GEN_OFF   0x74u
 #define ZZAPP_LIFE_PALETTE_FIRST_OFF 0x78u
 #define ZZAPP_LIFE_PALETTE_COUNT_OFF 0x7Cu
+#define ZZAPP_LIFE_CARD_SPARE_OFF      0x80u
 
 /* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
  * 5 stopping, 6 faulted. */
@@ -294,6 +297,7 @@ struct zzapp_life {
     uint32_t palette_generation;
     uint32_t palette_first;
     uint32_t palette_count;
+    uint32_t card_spare;
 };
 
 struct zzapp_input_hdr {
@@ -401,6 +405,7 @@ _Static_assert(offsetof(struct zzapp_life, layout) == ZZAPP_LIFE_LAYOUT_OFF, "la
 _Static_assert(offsetof(struct zzapp_life, palette_generation) == ZZAPP_LIFE_PALETTE_GEN_OFF, "pgen");
 _Static_assert(offsetof(struct zzapp_life, palette_first) == ZZAPP_LIFE_PALETTE_FIRST_OFF, "pfirst");
 _Static_assert(offsetof(struct zzapp_life, palette_count) == ZZAPP_LIFE_PALETTE_COUNT_OFF, "pcount");
+_Static_assert(offsetof(struct zzapp_life, card_spare) == ZZAPP_LIFE_CARD_SPARE_OFF, "spare");
 _Static_assert(sizeof(struct zzapp_life) <= ZZAPP_LIFE_BYTES, "life bytes");
 
 static inline void zzapp_put_be16(void *p, uint16_t value)
@@ -497,6 +502,16 @@ static inline void zzapp_build_display_bind_request_layout(
     zzapp_put_be32(payload + ZZAPP_BIND_CARD_FRONT, card_front);
     zzapp_put_be32(payload + ZZAPP_BIND_CARD_BACK, card_back);
     zzapp_put_be32(payload + ZZAPP_BIND_LAYOUT, layout);
+}
+
+static inline void zzapp_build_display_bind_request_triple(
+    uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES], uint32_t width, uint32_t height,
+    uint32_t pitch, uint32_t format, uint32_t card_front, uint32_t card_back,
+    uint32_t layout, uint32_t card_spare)
+{
+    zzapp_build_display_bind_request_layout(payload, width, height, pitch, format,
+                                            card_front, card_back, layout);
+    zzapp_put_be32(payload + ZZAPP_BIND_CARD_SPARE, card_spare);
 }
 
 #endif /* ZZAPP_PROTO_H */
