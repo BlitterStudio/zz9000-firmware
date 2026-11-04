@@ -344,7 +344,8 @@ static void test_display_mailbox(void)
 	    scanout != front)
 		fail("display mailbox waits for vblank flush");
 	zzapp_services_display_mailbox_end(1);
-	zzapp_services_display_mailbox_vblank_flushed();
+	zzapp_services_display_flush_begin();
+	zzapp_services_display_flush_done();
 	if (!zzapp_services_display_mailbox_begin(front, &scanout) ||
 	    scanout != spare)
 		fail("display mailbox select latest");
@@ -375,6 +376,49 @@ static void test_display_mailbox(void)
 		fail("display mailbox old launcher fallback");
 }
 
+/* A frame queued while core 0's L2 flush is already running may have lines
+ * that flush passed over; only a flush that starts after the submit makes
+ * it safe to scan. */
+static void test_display_mailbox_flush_race(void)
+{
+	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	uint32_t scanout;
+	uint32_t front = 0x00200000U;
+	uint32_t back = 0x00210000U;
+	uint32_t spare = 0x00220000U;
+	int rc;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_LAUNCHER_MAILBOX | ZZAPP_F_MAILBOX_REQUEST |
+		       ZZAPP_F_DISPLAY_UNBOUND);
+	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
+						ZZ_FMT_RGB565, front, back,
+						ZZ_LAYOUT_RGB565_LE, spare);
+	rc = zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				    reply, &reply_len, 1, 1U, 0U);
+	if (rc != SDK_STATUS_OK)
+		fail("display mailbox race bind");
+	zzapp_services_display_flush_begin();
+	if (zzapp_svc_display_flip_async(1U) != ZZ_OK)
+		fail("display mailbox race queue");
+	zzapp_services_display_flush_done();
+	if (!zzapp_services_display_mailbox_begin(front, &scanout) ||
+	    scanout != front)
+		fail("display mailbox latched after a flush that began before it");
+	zzapp_services_display_mailbox_end(1);
+	zzapp_services_display_flush_begin();
+	zzapp_services_display_flush_done();
+	if (!zzapp_services_display_mailbox_begin(front, &scanout) ||
+	    scanout != back)
+		fail("display mailbox not latched after a full later flush");
+	zzapp_services_display_mailbox_end(1);
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -385,6 +429,7 @@ int main(void)
 	test_display_refresh_rotation_and_layout();
 	test_display_scanout_ack();
 	test_display_mailbox();
+	test_display_mailbox_flush_race();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;

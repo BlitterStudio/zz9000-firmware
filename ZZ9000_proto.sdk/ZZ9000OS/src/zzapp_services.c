@@ -156,8 +156,12 @@ static uint32_t display_queued;
 static volatile int display_mailbox_active;
 static uint32_t display_mailbox_shown;
 static uint32_t display_mailbox_pending;
+/* Flush count a pending frame waits on: the started count at its submit. */
 static uint32_t display_mailbox_pending_flush_count;
-/* Incremented by core 0 only after its vblank L2 way flush completes. */
+/* Core 0's full L1+L2 flushes: incremented before one starts and after it
+ * returns.  A frame is safe to scan once a flush that started after its
+ * submit has completed. */
+static volatile uint32_t display_mailbox_started_flush_count;
 static volatile uint32_t display_mailbox_completed_flush_count;
 static uint32_t display_mailbox_lo;
 static uint32_t display_mailbox_hi;
@@ -1285,7 +1289,8 @@ int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 		&display_mailbox_completed_flush_count, __ATOMIC_ACQUIRE);
 	display_mailbox_latch_pending =
 		display_mailbox_pending != 0U &&
-		completed_flush_count != display_mailbox_pending_flush_count;
+		(int32_t)(completed_flush_count -
+			  display_mailbox_pending_flush_count) > 0;
 	*scanout = display_mailbox_latch_pending ?
 		display_mailbox_pending : display_mailbox_shown;
 	return 1;
@@ -1307,10 +1312,18 @@ void zzapp_services_display_mailbox_end(int latched)
 }
 
 /*
- * The vblank ISR calls this only after its L1+L2 flush returns.  A frame
- * tagged with this value cannot be selected until a later such flush.
+ * Core 0 brackets every full L1+L2 flush with these.  A frame submitted
+ * while a flush runs is tagged with that flush and waits for the next one:
+ * the running flush may already have passed the lines the submit pushed
+ * into L2.
  */
-void zzapp_services_display_mailbox_vblank_flushed(void)
+void zzapp_services_display_flush_begin(void)
+{
+	__atomic_add_fetch(&display_mailbox_started_flush_count, 1U,
+			   __ATOMIC_ACQ_REL);
+}
+
+void zzapp_services_display_flush_done(void)
 {
 	__atomic_add_fetch(&display_mailbox_completed_flush_count, 1U,
 			   __ATOMIC_RELEASE);
@@ -1536,7 +1549,7 @@ static int display_mailbox_flip(uint32_t back, uint32_t bytes)
 		return ZZ_EBUSY;
 	}
 	display_mailbox_pending_flush_count = __atomic_load_n(
-		&display_mailbox_completed_flush_count, __ATOMIC_ACQUIRE);
+		&display_mailbox_started_flush_count, __ATOMIC_ACQUIRE);
 	if (display_mailbox_pending != 0U) {
 		/* The old pending buffer was never scanned.  It becomes drawing
 		 * immediately while the newer completed buffer replaces it. */
@@ -2347,6 +2360,8 @@ void zzapp_services_test_reset(void)
 	yield_hook = NULL;
 	time_hook = NULL;
 	memset(slot_busy_test, 0, sizeof(slot_busy_test));
+	__atomic_store_n(&display_mailbox_started_flush_count, 0U,
+			 __ATOMIC_RELEASE);
 	__atomic_store_n(&display_mailbox_completed_flush_count, 0U,
 			 __ATOMIC_RELEASE);
 	zzapp_services_on_launch();

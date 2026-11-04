@@ -99,8 +99,10 @@ int zzapp_display_flip_bound(void);
 int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 					 uint32_t *scanout);
 void zzapp_services_display_mailbox_end(int latched);
-/* Records a completed core-0 vblank L1+L2 flush for mailbox eligibility. */
-void zzapp_services_display_mailbox_vblank_flushed(void);
+/* Bracket every core-0 full L1+L2 flush; a mailbox frame becomes eligible
+ * once a flush that started after its submit has completed. */
+void zzapp_services_display_flush_begin(void);
+void zzapp_services_display_flush_done(void);
 /* Strict-presentation acknowledgement after core 0 re-points VDMA. */
 void zzapp_services_display_vblank(uint32_t scanout_address);
 
