@@ -13,7 +13,8 @@
 #define BENCH_MAX_BYTES  (8u << 20)
 #define BENCH_ROUNDS     8u
 #define BENCH_ALU_ADDS   20000000u
-#define BENCH_STACK_BYTES ((10u << 20) + 64u)
+/* The loader caps an app stack at 1 MiB (ZZAPP_STACK_DEFAULT): test half. */
+#define BENCH_STACK_BYTES ((512u << 10) + 64u)
 
 static uint8_t bench_bss[BENCH_MAX_BYTES + 64u];
 static volatile uint32_t bench_sink;
@@ -125,14 +126,16 @@ static uint32_t chase_measure(uint8_t *memory, uint32_t bytes)
     return elapsed / steps;
 }
 
-static struct chase_result chase_all(uint8_t *memory)
+/* Sizes larger than the region report 0 (not measured). */
+static struct chase_result chase_all(uint8_t *memory, uint32_t max_bytes)
 {
     static const uint32_t sizes[4] = {4096u, 65536u, 1u << 20, 8u << 20};
     struct chase_result result;
     uint32_t i;
 
     for (i = 0u; i < 4u; i++)
-        result.cycles_per_load[i] = chase_measure(memory, sizes[i]);
+        result.cycles_per_load[i] = sizes[i] <= max_bytes ?
+            chase_measure(memory, sizes[i]) : 0u;
     return result;
 }
 
@@ -206,11 +209,11 @@ static void append_chase(char **at, char *end, const struct chase_result *chase)
 }
 
 static void append_region(char **at, char *end, const char *name,
-                          uint8_t *memory)
+                          uint8_t *memory, uint32_t max_bytes)
 {
-    struct seq_result read = seq_measure(memory, BENCH_MAX_BYTES, 0);
-    struct seq_result write = seq_measure(memory, BENCH_MAX_BYTES, 1);
-    struct chase_result chase = chase_all(memory);
+    struct seq_result read = seq_measure(memory, max_bytes, 0);
+    struct seq_result write = seq_measure(memory, max_bytes, 1);
+    struct chase_result chase = chase_all(memory, max_bytes);
 
     append_text(at, end, name);
     append_text(at, end, "  ");
@@ -261,14 +264,20 @@ int zz_main(int argc, char **argv)
     append_u32(&at, end, cycles_per_add);
     append_text(&at, end, " c/add\n");
     append_text(&at, end, "region  R/W MiB/s  R/W cyc/KiB  chase cyc/load (4K/64K/1M/8M)\n");
-    append_region(&at, end, "bss  ", bench_bss);
-    append_region(&at, end, "stack", stack);
-    append_region(&at, end, "heap ", heap);
+    append_region(&at, end, "bss  ", bench_bss, BENCH_MAX_BYTES);
+    append_region(&at, end, "stack", stack, 512u << 10);
+    append_region(&at, end, "heap ", heap, BENCH_MAX_BYTES);
 
-    display_rc = zz_display_open(2048u, 1024u, ZZ_FMT_BGRA8888, 0u, &display);
+    /* The screen Quake uses: 640x480, 16-bit. */
+    display_rc = zz_display_open(640u, 480u, ZZ_FMT_RGB565, 0u, &display);
     if (display_rc == ZZ_OK && display.back != NULL &&
-        display.pitch >= 2048u * 4u && display.height >= 1024u) {
-        append_region(&at, end, "p96  ", (uint8_t *)display.back);
+        display.pitch >= 640u * 2u && display.height >= 480u) {
+        uint32_t span = display.pitch * display.height;
+        uint32_t bytes = 1u;
+
+        while (bytes * 2u <= span)
+            bytes *= 2u;
+        append_region(&at, end, "p96  ", (uint8_t *)display.back, bytes);
         (void)zz_display_close(display.id);
     } else {
         append_text(&at, end, "p96   unavailable rc ");

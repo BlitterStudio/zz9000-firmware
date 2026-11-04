@@ -67,7 +67,7 @@ $(BUILD)/sbrk_smoke.o: sbrk_smoke.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD)/note_zzmembench.o: zzapp_note.S | $(BUILD)
-	$(CC) $(ASMFLAGS) -DZZAPP_NOTE_FLAGS=1 -DZZAPP_NOTE_STACK_BYTES=12582912 -c -o $@ $<
+	$(CC) $(ASMFLAGS) -DZZAPP_NOTE_FLAGS=1 -c -o $@ $<
 
 $(BUILD)/zzmembench.o: templates/zzmembench.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
