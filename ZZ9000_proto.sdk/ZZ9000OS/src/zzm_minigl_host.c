@@ -78,6 +78,7 @@ static int g_doorbell_installed;
 static uint32_t g_module_capabilities;
 static int g_reset_active;
 static int g_pl330_claimed;
+static uint32_t g_pl330_owner;
 static zzm_minigl_boot_caps_t g_caps;
 
 #if !defined(TASKQ_HOST_TEST)
@@ -201,6 +202,31 @@ static uint32_t pl330_ccr(uint32_t words)
            (1U << 14U) | (2U << 15U) | ((words - 1U) << 18U);
 }
 
+/* One line per DMA failure (first eight per boot): which step failed and
+ * the channel's state, so a self-test failure on the A4000 names its cause
+ * instead of the backend's bare err_status=0. */
+static uint32_t g_pl330_reports;
+static void pl330_report(const char *step)
+{
+    const uint32_t ch = ZZM_RIX_DMAC_CHANNEL;
+
+    if (g_pl330_reports >= 8U)
+        return;
+    ++g_pl330_reports;
+    printf("[ZZM] PL330 %s: dsr=%08lx csr=%08lx cpc=%08lx sar=%08lx dar=%08lx "
+           "ftr=%08lx fsrc=%08lx dbg=%08lx expect=%08lx claimed=%d owner=%lu\r\n", step,
+           (unsigned long)Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DSR),
+           (unsigned long)Xil_In32(g_dmac_base + ZZM_RIX_DMAC_CSR(ch)),
+           (unsigned long)Xil_In32(g_dmac_base + ZZM_RIX_DMAC_CSR(ch) + 4U),
+           (unsigned long)Xil_In32(g_dmac_base + ZZM_RIX_DMAC_SAR(ch)),
+           (unsigned long)Xil_In32(g_dmac_base + ZZM_RIX_DMAC_SAR(ch) + 4U),
+           (unsigned long)Xil_In32(g_dmac_base + 0x040U + ch * 4U),
+           (unsigned long)Xil_In32(g_dmac_base + 0x034U),
+           (unsigned long)Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS),
+           (unsigned long)g_pl330_expect, g_pl330_claimed,
+           (unsigned long)g_pl330_owner);
+}
+
 static void graphics_pl330_abort(void *context)
 {
     (void)context;
@@ -227,8 +253,10 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
 
     (void)context;
     if (!g_pl330_claimed || source == 0U || words == 0U ||
-        words > ZZM_RIX_DMA_MAX_WORDS || burst_words != 16U)
+        words > ZZM_RIX_DMA_MAX_WORDS || burst_words != 16U) {
+        pl330_report(!g_pl330_claimed ? "start: not claimed" : "start: bad request");
         return 0;
+    }
     program[offset++] = ZZM_RIX_PL330_DMAMOV;
     program[offset++] = ZZM_RIX_PL330_RD_SAR;
     offset = pl330_word(program, offset, (uint32_t)source);
@@ -263,15 +291,19 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
     }
     program[offset++] = ZZM_RIX_PL330_DMAWMB;
     program[offset++] = ZZM_RIX_PL330_DMAEND;
-    if (offset > sizeof(g_pl330_program))
+    if (offset > sizeof(g_pl330_program)) {
+        pl330_report("start: program overflow");
         return 0;
+    }
     Xil_DCacheFlushRange((INTPTR)program, (u32)sizeof(g_pl330_program));
     graphics_barrier(0);
     for (attempt = 0U; attempt < 100000U; ++attempt)
         if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
             break;
-    if (attempt == 100000U)
+    if (attempt == 100000U) {
+        pl330_report("start: debug interface busy");
         return 0;
+    }
     Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
               ((ZZM_RIX_PL330_DMAGO | g_dmac_go_ns) << 16U) |
               (ZZM_RIX_DMAC_CHANNEL << 24U));
@@ -292,6 +324,7 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
     g_pl330_expect = (uint32_t)source + words * sizeof(uint32_t);
     return 1;
 kill:
+    pl330_report("start: DMAGO not accepted");
     graphics_pl330_abort(0);
     return 0;
 }
@@ -312,12 +345,15 @@ static int graphics_pl330_retire(void *context)
         if (state == ZZM_RIX_DMAC_STOPPED) {
             uint32_t sar = Xil_In32(g_dmac_base +
                                     ZZM_RIX_DMAC_SAR(ZZM_RIX_DMAC_CHANNEL));
+            if (sar != g_pl330_expect)
+                pl330_report("retire: stopped short");
             return sar == g_pl330_expect;
         }
         if (state == ZZM_RIX_DMAC_FAULTING_COMPLETING ||
             state == ZZM_RIX_DMAC_FAULTING)
             break;
     }
+    pl330_report("retire: fault or timeout");
     graphics_pl330_abort(0);
     return 0;
 }
@@ -330,6 +366,11 @@ static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
     return graphics_pl330_retire(context);
 }
 #else
+static void pl330_report(const char *step)
+{
+    (void)step;
+}
+
 static void graphics_pl330_abort(void *context)
 {
     (void)context;
@@ -470,9 +511,15 @@ static int graphics_v3_fifo_write_words(const uint32_t *words,
 
 static int graphics_v3_pl330_claim(uint32_t owner, uint32_t *channel_out)
 {
-    if (!g_caps.has_pl330 || owner == 0U || channel_out == 0 ||
-        g_pl330_claimed)
+    if (!g_caps.has_pl330 || owner == 0U || channel_out == 0)
         return 0;
+    /* One MiniGL module owns the channel at a time.  Its own re-claim (a
+     * reloaded module or a new session) is granted and resets the channel
+     * below; only a different owner is refused. */
+    if (g_pl330_claimed && g_pl330_owner != owner) {
+        pl330_report("claim refused: held by another owner");
+        return 0;
+    }
     /* A crashed session can leave the channel faulted, the FIFO holding a
      * sticky error and the parser mid-packet; a warm reset reloads the
      * module but resets none of this hardware, and the next session then
@@ -495,6 +542,7 @@ static int graphics_v3_pl330_claim(uint32_t owner, uint32_t *channel_out)
     graphics_barrier(0);
 #endif
     g_pl330_claimed = 1;
+    g_pl330_owner = owner;
     *channel_out = ZZM_RIX_DMAC_CHANNEL;
     return 1;
 }
@@ -679,6 +727,9 @@ int zzm_minigl_register(const zzm_minigl_ops_v1_t *ops, void *context,
     g_worker = worker_ops;
     g_context = context;
     g_reset_active = 0;
+    /* A newly registered module starts without a DMA claim, whatever the
+     * previous module left behind. */
+    graphics_pl330_abort(0);
     return 1;
 }
 
