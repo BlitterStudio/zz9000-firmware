@@ -456,3 +456,72 @@ int32_t gluBuild2DMipmaps(uint32_t target, int32_t internalFormat,
                                   format, type, data);
     return 0;
 }
+void glVertexPointer(int32_t size, uint32_t type, int32_t stride, const void *pointer)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, VertexPointer) && gl->VertexPointer)
+        gl->VertexPointer(size, type, stride, pointer);
+}
+
+void glTexCoordPointer(int32_t size, uint32_t type, int32_t stride, const void *pointer)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, TexCoordPointer) && gl->TexCoordPointer)
+        gl->TexCoordPointer(size, type, stride, pointer);
+}
+
+void glColorPointer(int32_t size, uint32_t type, int32_t stride, const void *pointer)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, ColorPointer) && gl->ColorPointer)
+        gl->ColorPointer(size, type, stride, pointer);
+}
+
+void glEnableClientState(uint32_t cap)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, EnableClientState) && gl->EnableClientState)
+        gl->EnableClientState(cap);
+}
+
+void glDisableClientState(uint32_t cap)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, DisableClientState) && gl->DisableClientState)
+        gl->DisableClientState(cap);
+}
+
+void glClientActiveTextureARB(uint32_t texture)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, ClientActiveTextureARB) && gl->ClientActiveTextureARB)
+        gl->ClientActiveTextureARB(texture);
+}
+
+void glDrawArrays(uint32_t mode, int32_t first, int32_t count)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, DrawArrays) && gl->DrawArrays)
+        gl->DrawArrays(mode, first, count);
+}
+
+void glDrawElements(uint32_t mode, int32_t count, uint32_t type, const void *indices)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, DrawElements) && gl->DrawElements)
+        gl->DrawElements(mode, count, type, indices);
+}
+
+void glLockArrays(uint32_t first, int32_t count)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, LockArrays) && gl->LockArrays)
+        gl->LockArrays(first, count);
+}
+
+void glUnlockArrays(void)
+{
+    const zzapp_gl *gl = zzapp_gl_bound();
+    if (ZZ_GL_COVERS(gl, UnlockArrays) && gl->UnlockArrays)
+        gl->UnlockArrays();
+}

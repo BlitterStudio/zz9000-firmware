@@ -528,7 +528,7 @@ Initial set, in this order, which is the v0 `size`:
 
 `libzzapp` exports those as `glBegin`, `glEnd`, and the rest, plus `gluPerspective` and `gluBuild2DMipmaps`, so Quake's calls do not change. The wrappers live in `libzzapp`, not in Quake. A wrapper whose field is past `gl->size` is a no-op or returns 0. Quake's `glquake.h` includes `<GL/gl.h>`. The port supplies a short `GL/gl.h` and `GL/glu.h` in the Quake tree (GPL, written for the port, token numbers only, no Khronos header text) that declares the same signatures.
 
-Not in the v0 table: quadric and GLUT entry points, `MGLCreateContext`, `MGLSwitchDisplay`, lock-arrays, VBOs, client arrays. The front end still has that code for the 68k library. The ARM table does not point at it. Quake's GL path is immediate mode plus `gluBuild2DMipmaps` and `gluPerspective`.
+v1 appends `VertexPointer`, `TexCoordPointer`, `ColorPointer`, `EnableClientState`, `DisableClientState`, `ClientActiveTextureARB`, `DrawArrays`, `DrawElements`, `LockArrays`, and `UnlockArrays`. The `size` field is the version gate: old tables remain valid, and callers must use `ZZ_GL_COVERS` before calling an appended slot. The ARM in-process transport advertises packed indexed draws, so `DrawElements` uses `MW_DRAW_PACKED_INDEXED`.
 
 `GetString(GL_RENDERER)` returns a static `"ZZ9000 RasterIX"`, or `"ZZ9000 CPU"` if the RasterIX probe failed. `GL_VENDOR` is `"ZZ9000"`. `GL_VERSION` is `"1.1"`. Do not return the Amiberry bridge string; that string is the 68k transport's.
 

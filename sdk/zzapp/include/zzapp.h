@@ -197,7 +197,31 @@ typedef struct zzapp_gl {
     int32_t  (*Build2DMipmaps)(uint32_t target, int32_t internalFormat,
                                int32_t width, int32_t height,
                                uint32_t format, uint32_t type, const void *data);
+    /*
+     * App GL ABI v1 additions.  These remain append-only: applications built
+     * against the original table test ZZ_GL_COVERS before using them.
+     */
+    void     (*VertexPointer)(int32_t size, uint32_t type, int32_t stride,
+                              const void *pointer);
+    void     (*TexCoordPointer)(int32_t size, uint32_t type, int32_t stride,
+                                const void *pointer);
+    void     (*ColorPointer)(int32_t size, uint32_t type, int32_t stride,
+                             const void *pointer);
+    void     (*EnableClientState)(uint32_t cap);
+    void     (*DisableClientState)(uint32_t cap);
+    void     (*ClientActiveTextureARB)(uint32_t texture);
+    void     (*DrawArrays)(uint32_t mode, int32_t first, int32_t count);
+    void     (*DrawElements)(uint32_t mode, int32_t count, uint32_t type,
+                             const void *indices);
+    void     (*LockArrays)(uint32_t first, int32_t count);
+    void     (*UnlockArrays)(void);
 } zzapp_gl;
+
+/*
+ * The table size is the compatibility version.  The v0 fields end at
+ * Build2DMipmaps; new callers must use ZZ_GL_COVERS for every v1 slot.
+ */
+#define ZZAPP_GL_VERSION_ARRAYS 1u
 
 typedef struct zzapp_api {
     uint32_t size;
@@ -378,6 +402,20 @@ void     gluPerspective(double fovy, double aspect, double zNear, double zFar);
 int32_t  gluBuild2DMipmaps(uint32_t target, int32_t internalFormat,
                            int32_t width, int32_t height,
                            uint32_t format, uint32_t type, const void *data);
+void     glVertexPointer(int32_t size, uint32_t type, int32_t stride,
+                         const void *pointer);
+void     glTexCoordPointer(int32_t size, uint32_t type, int32_t stride,
+                           const void *pointer);
+void     glColorPointer(int32_t size, uint32_t type, int32_t stride,
+                        const void *pointer);
+void     glEnableClientState(uint32_t cap);
+void     glDisableClientState(uint32_t cap);
+void     glClientActiveTextureARB(uint32_t texture);
+void     glDrawArrays(uint32_t mode, int32_t first, int32_t count);
+void     glDrawElements(uint32_t mode, int32_t count, uint32_t type,
+                        const void *indices);
+void     glLockArrays(uint32_t first, int32_t count);
+void     glUnlockArrays(void);
 
 #ifdef __cplusplus
 }

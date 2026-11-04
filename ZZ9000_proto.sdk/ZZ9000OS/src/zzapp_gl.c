@@ -103,6 +103,16 @@ typedef struct zzapp_gl {
     void (*PixelStorei)(uint32_t pname, int32_t param);
     void (*Perspective)(double fovy, double aspect, double zNear, double zFar);
     int32_t (*Build2DMipmaps)(uint32_t target, int32_t internalFormat, int32_t width, int32_t height, uint32_t format, uint32_t type, const void *data);
+    void (*VertexPointer)(int32_t size, uint32_t type, int32_t stride, const void *pointer);
+    void (*TexCoordPointer)(int32_t size, uint32_t type, int32_t stride, const void *pointer);
+    void (*ColorPointer)(int32_t size, uint32_t type, int32_t stride, const void *pointer);
+    void (*EnableClientState)(uint32_t cap);
+    void (*DisableClientState)(uint32_t cap);
+    void (*ClientActiveTextureARB)(uint32_t texture);
+    void (*DrawArrays)(uint32_t mode, int32_t first, int32_t count);
+    void (*DrawElements)(uint32_t mode, int32_t count, uint32_t type, const void *indices);
+    void (*LockArrays)(uint32_t first, int32_t count);
+    void (*UnlockArrays)(void);
 } zzapp_gl;
 #endif
 #include "minigl_platform.h"
@@ -177,6 +187,16 @@ extern void GLHint(GLcontext, GLenum, GLenum);
 extern void GLPixelStorei(GLcontext, GLenum, GLint);
 extern void GLUPerspective(GLfloat, GLfloat, GLfloat, GLfloat);
 extern GLint GLUBuild2DMipmaps(GLcontext, GLenum, GLint, GLsizei, GLsizei, GLenum, GLenum, const GLvoid *);
+extern void GLVertexPointer(GLcontext, GLint, GLenum, GLsizei, const GLvoid *);
+extern void GLTexCoordPointer(GLcontext, GLint, GLenum, GLsizei, const GLvoid *);
+extern void GLColorPointer(GLcontext, GLint, GLenum, GLsizei, const GLvoid *);
+extern void GLEnableClientState(GLcontext, GLenum);
+extern void GLDisableClientState(GLcontext, GLenum);
+extern void GLClientActiveTextureARB(GLcontext, GLenum);
+extern void GLDrawArrays(GLcontext, GLenum, GLint, GLsizei);
+extern void GLDrawElements(GLcontext, GLenum, GLsizei, GLenum, const GLvoid *);
+extern void GLLockArrays(GLcontext, GLuint, GLsizei);
+extern void GLUnlockArrays(GLcontext);
 #if defined(MINIGL_MODULE)
 #include "zzm_runtime.h"
 
@@ -395,6 +415,17 @@ static int32_t w_Build2DMipmaps(uint32_t target, int32_t internalFormat, int32_t
     LEAVE();
     return r;
 }
+static void w_VertexPointer(int32_t size, uint32_t type, int32_t stride, const void *pointer) { ENTER(); GLVertexPointer(CTX, size, type, stride, pointer); LEAVE(); }
+static void w_TexCoordPointer(int32_t size, uint32_t type, int32_t stride, const void *pointer) { ENTER(); GLTexCoordPointer(CTX, size, type, stride, pointer); LEAVE(); }
+static void w_ColorPointer(int32_t size, uint32_t type, int32_t stride, const void *pointer) { ENTER(); GLColorPointer(CTX, size, type, stride, pointer); LEAVE(); }
+static void w_EnableClientState(uint32_t cap) { ENTER(); GLEnableClientState(CTX, cap); LEAVE(); }
+static void w_DisableClientState(uint32_t cap) { ENTER(); GLDisableClientState(CTX, cap); LEAVE(); }
+static void w_ClientActiveTextureARB(uint32_t texture) { ENTER(); GLClientActiveTextureARB(CTX, texture); LEAVE(); }
+static void w_DrawArrays(uint32_t mode, int32_t first, int32_t count) { ENTER(); GLDrawArrays(CTX, mode, first, count); LEAVE(); }
+static void w_DrawElements(uint32_t mode, int32_t count, uint32_t type, const void *indices) { ENTER(); GLDrawElements(CTX, mode, count, type, indices); LEAVE(); }
+static void w_LockArrays(uint32_t first, int32_t count) { ENTER(); GLLockArrays(CTX, first, count); LEAVE(); }
+static void w_UnlockArrays(void) { ENTER(); GLUnlockArrays(CTX); LEAVE(); }
+
 
 static void fill_table(void)
 {
@@ -462,6 +493,16 @@ static void fill_table(void)
     g_table.PixelStorei = w_PixelStorei;
     g_table.Perspective = w_Perspective;
     g_table.Build2DMipmaps = w_Build2DMipmaps;
+    g_table.VertexPointer = w_VertexPointer;
+    g_table.TexCoordPointer = w_TexCoordPointer;
+    g_table.ColorPointer = w_ColorPointer;
+    g_table.EnableClientState = w_EnableClientState;
+    g_table.DisableClientState = w_DisableClientState;
+    g_table.ClientActiveTextureARB = w_ClientActiveTextureARB;
+    g_table.DrawArrays = w_DrawArrays;
+    g_table.DrawElements = w_DrawElements;
+    g_table.LockArrays = w_LockArrays;
+    g_table.UnlockArrays = w_UnlockArrays;
 }
 
 int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out)
