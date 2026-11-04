@@ -32,8 +32,10 @@ static void test_log_wrapper(const char *fmt, ...)
 struct mock_platform {
     uint32_t csr[16];
     uint32_t fifo[6];
-    uint32_t packet[RIX_DRV_FIFO_PACKET_WORDS + 2U];
+    uint32_t packet[RIX_DRV_FIFO_MAX_PACKET_WORDS + 2U];
     unsigned packet_words;
+    uint32_t committed[8][RIX_DRV_FIFO_MAX_PACKET_WORDS + 2U];
+    unsigned committed_words[8];
     uint32_t color_address;
     uint16_t clear_color;
     uint8_t cmd_buf[2][64 * 1024];
@@ -155,7 +157,7 @@ static void mock_fifo_write(void *ctx, uint32_t offset, uint32_t value)
     if (offset == RIX_DRV_FIFO_TDFR) {
         p->packet_words = 0U;
     } else if (offset == RIX_DRV_FIFO_TDFD) {
-        assert(p->packet_words < RIX_DRV_FIFO_PACKET_WORDS + 2U);
+        assert(p->packet_words < RIX_DRV_FIFO_MAX_PACKET_WORDS + 2U);
         p->packet[p->packet_words++] = value;
     } else if (offset == RIX_DRV_FIFO_TLF) {
         assert(value == p->packet_words * sizeof(p->packet[0]));
@@ -163,6 +165,10 @@ static void mock_fifo_write(void *ctx, uint32_t offset, uint32_t value)
         assert(p->packet[0] == (0x90000000U |
                                 ((p->packet_words - 2U) * sizeof(uint32_t))));
         assert(p->packet[1] == 0U);
+        assert(p->submissions < sizeof(p->committed_words) / sizeof(p->committed_words[0]));
+        p->committed_words[p->submissions] = p->packet_words;
+        memcpy(p->committed[p->submissions], p->packet,
+               p->packet_words * sizeof(p->packet[0]));
         mock_render_packet(p);
         ++p->submissions;
         p->packet_words = 0U;
@@ -184,7 +190,7 @@ static void setup_mock_platform(struct mock_platform *p, MiniGLRixPlatform *out)
     p->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
     p->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
     p->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
-    p->fifo[RIX_DRV_FIFO_TDFV / 4U] = RIX_DRV_FIFO_PACKET_WORDS + 2U;
+    p->fifo[RIX_DRV_FIFO_TDFV / 4U] = RIX_DRV_FIFO_LEGACY_VACANCY;
     out->context = p;
     out->csr_read = mock_csr_read;
     out->csr_write = mock_csr_write;
@@ -223,6 +229,47 @@ static void test_platform_probe_guard(void)
     assert(minigl_rix_backend_probe_platform(&platform));
     assert(s_mock.csr_reads == 2U);
     printf("PASS: test_platform_probe_guard\n");
+}
+
+static void test_fifo_depth_packet_boundaries(void)
+{
+    MiniGLRixPlatform platform;
+    MiniGLRixBackend backend;
+    static uint32_t commands[RIX_DRV_FIFO_MAX_PACKET_WORDS + 7U];
+    unsigned index;
+
+    for (index = 0U; index < sizeof(commands) / sizeof(commands[0]); ++index)
+        commands[index] = index;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_rix_backend_init(&backend, &platform);
+    assert(backend.available);
+    assert(backend.driver.packet_words == RIX_DRV_FIFO_PACKET_WORDS);
+    assert(rix_drv_submit(&backend.driver, commands, 0U, 300U, 0U) == RIX_DRV_OK);
+    assert(s_mock.submissions == 2U);
+    assert(s_mock.committed_words[0] == 250U);
+    assert(s_mock.committed_words[1] == 54U);
+    assert(memcmp(&s_mock.committed[0][2], commands, 248U * sizeof(*commands)) == 0);
+    assert(memcmp(&s_mock.committed[1][2], commands + 248U,
+                  52U * sizeof(*commands)) == 0);
+
+    setup_mock_platform(&s_mock, &platform);
+    s_mock.fifo[RIX_DRV_FIFO_TDFV / 4U] = 4092U;
+    minigl_rix_backend_init(&backend, &platform);
+    assert(backend.available);
+    assert(backend.driver.packet_words == RIX_DRV_FIFO_MAX_PACKET_WORDS);
+    assert(rix_drv_submit(&backend.driver, commands, 0U,
+                          (uint32_t)(sizeof(commands) / sizeof(commands[0])),
+                          0U) == RIX_DRV_OK);
+    assert(s_mock.submissions == 2U);
+    assert(s_mock.committed_words[0] == RIX_DRV_FIFO_MAX_PACKET_WORDS + 2U);
+    assert(s_mock.committed_words[1] == 9U);
+    assert(memcmp(&s_mock.committed[0][2], commands,
+                  RIX_DRV_FIFO_MAX_PACKET_WORDS * sizeof(*commands)) == 0);
+    assert(memcmp(&s_mock.committed[1][2],
+                  commands + RIX_DRV_FIFO_MAX_PACKET_WORDS,
+                  7U * sizeof(*commands)) == 0);
+    printf("PASS: test_fifo_depth_packet_boundaries\n");
 }
 
 /* 1. Direct state mapper test */
@@ -1268,6 +1315,7 @@ int main(void)
     g_rix_test_log = test_log_wrapper;
     printf("Starting Wire-v9 RasterIX Mapper Tests...\n");
     test_platform_probe_guard();
+    test_fifo_depth_packet_boundaries();
     test_state_mapper_fallback_rules();
     test_texture_env_modes();
     test_second_pass_descriptor_derivation();

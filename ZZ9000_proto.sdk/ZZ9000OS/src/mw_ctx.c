@@ -327,7 +327,7 @@ static void mw_rix_fifo_drain(void *context)
  * 16-word source burst is stored as one 16-beat INCR burst into the FIFO's
  * AXI4 data window; the backend's start-up self-test must pass before any
  * packet uses it. */
-static uint8_t mw_rix_dma_program[128] __attribute__((aligned(64)));
+static uint8_t mw_rix_dma_program[256] __attribute__((aligned(64)));
 
 static void mw_rix_dma_barrier(void)
 {
@@ -359,7 +359,7 @@ static int mw_rix_dma_stream(void *context, uintptr_t source, uint32_t words,
     unsigned offset = 0U, body, loop;
 
     (void)context;
-    if (source == 0U || words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS ||
+    if (source == 0U || words == 0U || words > RIX_DRV_FIFO_MAX_PACKET_WORDS ||
         burst_words != 16U)
         return 0;
     program[offset++] = MW_RIX_PL330_DMAMOV; program[offset++] = MW_RIX_PL330_RD_SAR;

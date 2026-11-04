@@ -7,7 +7,7 @@
 
 #define CSR_WORDS 32U
 #define FIFO_WORDS 8U
-#define LOG_WORDS 1024U
+#define LOG_WORDS (RIX_DRV_FIFO_MAX_PACKET_WORDS + 12U)
 
 struct model {
     uint32_t csr[CSR_WORDS];
@@ -201,6 +201,57 @@ static void test_dma_chunking(void)
     assert(rix_drv_poll(&driver, 0U) == RIX_DRV_OK);
 }
 
+static void test_fifo_depth_packet_boundaries(void)
+{
+    struct model model;
+    struct rix_drv driver;
+    struct rix_drv_config io;
+    uint32_t commands[RIX_DRV_FIFO_MAX_PACKET_WORDS + 7U];
+    uint32_t index;
+
+    for (index = 0U; index < sizeof(commands) / sizeof(commands[0]); ++index)
+        commands[index] = index;
+
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    io = config(&model, 1);
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(driver.packet_words == RIX_DRV_FIFO_PACKET_WORDS);
+    assert(rix_drv_submit(&driver, commands, 0U, 300U, 0U) == RIX_DRV_OK);
+    assert(model.packet_count == 2U);
+    assert(model.lengths[0] == (248U + 2U) * 4U);
+    assert(model.lengths[1] == (52U + 2U) * 4U);
+    assert(model.words[0] == (0x90000000U | 248U * 4U));
+    assert(model.words[250] == (0x90000000U | 52U * 4U));
+    assert(memcmp(&model.words[2], commands, 248U * sizeof(*commands)) == 0);
+    assert(memcmp(&model.words[252], commands + 248U,
+                  52U * sizeof(*commands)) == 0);
+
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    model.fifo[RIX_DRV_FIFO_TDFV / 4U] = 4092U;
+    io = config(&model, 1);
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(driver.packet_words == RIX_DRV_FIFO_MAX_PACKET_WORDS);
+    assert(rix_drv_submit(&driver, commands, 0U,
+                          (uint32_t)(sizeof(commands) / sizeof(commands[0])),
+                          0U) == RIX_DRV_OK);
+    assert(model.packet_count == 2U);
+    assert(model.lengths[0] == (RIX_DRV_FIFO_MAX_PACKET_WORDS + 2U) * 4U);
+    assert(model.lengths[1] == 9U * 4U);
+    assert(model.words[0] == (0x90000000U |
+                              RIX_DRV_FIFO_MAX_PACKET_WORDS * 4U));
+    assert(model.words[RIX_DRV_FIFO_MAX_PACKET_WORDS + 2U] ==
+           (0x90000000U | 7U * 4U));
+    assert(memcmp(&model.words[2], commands,
+                  RIX_DRV_FIFO_MAX_PACKET_WORDS * sizeof(*commands)) == 0);
+    assert(memcmp(&model.words[RIX_DRV_FIFO_MAX_PACKET_WORDS + 4U],
+                  commands + RIX_DRV_FIFO_MAX_PACKET_WORDS,
+                  7U * sizeof(*commands)) == 0);
+}
+
 /* The deferred packet boundary: launch returns before the transfer
  * finishes, so the boundary word of packet k must wait for its retire and
  * must precede packet k+1's header -- the parser still sees whole packets
@@ -283,6 +334,7 @@ int main(void)
     test_dma_chunking();
     test_async_defers_boundary_until_retire();
     test_rejected_commit();
+    test_fifo_depth_packet_boundaries();
     test_recovery_and_disable();
     return 0;
 }

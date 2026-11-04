@@ -62,7 +62,7 @@
 #define ZZM_RIX_FIFO_TDFR 0x08U
 #define ZZM_RIX_FIFO_ISR 0x00U
 #define ZZM_RIX_FIFO_RESET_KEY 0xa5U
-#define ZZM_RIX_DMA_MAX_WORDS 248U
+#define ZZM_RIX_DMA_MAX_WORDS RIX_DRV_FIFO_MAX_PACKET_WORDS
 /* sizeof(ZZ9KMiniGLTransportDescriptorWire), MW_TRANSPORT_DESCRIPTOR_WIRE_BYTES
  * in mw_service.h.  This was 80, so every module publish was rejected and
  * minigl.library found no descriptor. */
@@ -154,7 +154,7 @@ static void graphics_barrier(void *context)
 /* Firmware owns the PL330 program and channel.  Module code can only submit
  * an owned command buffer through the service table. */
 #if !defined(TASKQ_HOST_TEST)
-static uint8_t g_pl330_program[128] __attribute__((aligned(64)));
+static uint8_t g_pl330_program[256] __attribute__((aligned(64)));
 static uint32_t g_dmac_base;
 static uint32_t g_pl330_expect;   /* SAR value that proves the launch finished */
 static uint32_t g_dmac_go_ns;

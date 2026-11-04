@@ -40,7 +40,12 @@
 #define RIX_DRV_FIFO_TLF         0x14U
 #define RIX_DRV_FIFO_TDFD        0x10000U
 #define RIX_DRV_FIFO_RESET_KEY   0xa5U
+/* The 512-word FIFO's established packet size.  Keep it for old bitstreams,
+ * whose full vacancy is 508 words, while newer FIFOs advertise their size
+ * through TDFV after reset. */
 #define RIX_DRV_FIFO_PACKET_WORDS 248U
+#define RIX_DRV_FIFO_MAX_PACKET_WORDS 4090U
+#define RIX_DRV_FIFO_LEGACY_VACANCY 508U
 
 /* PG080 ISR bits.  A TLF value that differs from the bytes written to TDFD
  * since the last accepted TLF is dropped and sets TSE; the staged words then
@@ -129,6 +134,8 @@ struct rix_drv {
     uint32_t packets;
     uint32_t dma_packets;
     int last_packet_dma;
+    /* Payload words per packet, sampled from TDFV after the FIFO reset. */
+    uint32_t packet_words;
     int available;
     int enabled;
 };

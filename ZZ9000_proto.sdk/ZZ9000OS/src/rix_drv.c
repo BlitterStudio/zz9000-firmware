@@ -77,6 +77,23 @@ static int rix_drv_wait_vacancy(struct rix_drv *driver, uint32_t words,
     return result;
 }
 
+/* TDFV reports usable FIFO words after reset (PG080 reserves four).  The
+ * original 512-word core deliberately used 248-word packets; retain that
+ * wire behaviour, but use all of a deeper FIFO minus this packet's header. */
+static void rix_drv_set_packet_words(struct rix_drv *driver)
+{
+    uint32_t vacancy = rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV);
+
+    if (vacancy == RIX_DRV_FIFO_LEGACY_VACANCY)
+        driver->packet_words = RIX_DRV_FIFO_PACKET_WORDS;
+    else if (vacancy > 2U)
+        driver->packet_words = vacancy - 2U;
+    else
+        driver->packet_words = RIX_DRV_FIFO_PACKET_WORDS;
+    if (driver->packet_words > RIX_DRV_FIFO_MAX_PACKET_WORDS)
+        driver->packet_words = RIX_DRV_FIFO_MAX_PACKET_WORDS;
+}
+
 static uint32_t rix_drv_command_words(uint32_t word)
 {
     switch (word >> 28U) {
@@ -123,7 +140,7 @@ static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
     int result;
     int dma;
 
-    if (words == 0U || words > RIX_DRV_FIFO_PACKET_WORDS)
+    if (words == 0U || words > driver->packet_words)
         return RIX_DRV_BAD_ARGUMENT;
     /* Profiling only: where the renderer is when the next packet is ready.
      * A full FIFO and a stalled pipeline mean RasterIX is the bottleneck;
@@ -226,6 +243,7 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
     driver->packets = 0U;
     driver->dma_packets = 0U;
     driver->last_packet_dma = 0;
+    driver->packet_words = RIX_DRV_FIFO_PACKET_WORDS;
     driver->available = 0;
     driver->enabled = 0;
 
@@ -248,6 +266,7 @@ int rix_drv_enable(struct rix_drv *driver)
         return RIX_DRV_UNAVAILABLE;
     driver->pending_dma = 0;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    rix_drv_set_packet_words(driver);
     /* TDFR leaves ISR intact; clear a previous context's sticky errors so the
      * per-packet commit check only sees this context's packets. */
     isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR) & RIX_DRV_FIFO_ISR_ERRORS;
@@ -273,7 +292,7 @@ static int rix_drv_submit_packets(struct rix_drv *driver, const uint32_t *comman
 
             if (words == 0U || words > command_words - first - count)
                 return RIX_DRV_BAD_ARGUMENT;
-            if (words > RIX_DRV_FIFO_PACKET_WORDS - count)
+            if (words > driver->packet_words - count)
                 break;
             count += words;
         }
@@ -335,6 +354,7 @@ int rix_drv_recover(struct rix_drv *driver, uint32_t timeout, int soft_reset)
                       RIX_DRV_CONTROL_ENABLE | RIX_DRV_CONTROL_SOFT_RESET);
     driver->pending_dma = 0;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    rix_drv_set_packet_words(driver);
     return RIX_DRV_OK;
 }
 

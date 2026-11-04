@@ -761,9 +761,9 @@ proc create_hier_cell_video { parentCell nameHier } {
       CONFIG.C_USE_TX_DATA {1} \
       CONFIG.C_USE_RX_DATA {0} \
       CONFIG.C_USE_TX_CTRL {0} \
-      CONFIG.C_TX_FIFO_DEPTH {512} \
+      CONFIG.C_TX_FIFO_DEPTH {4096} \
       CONFIG.C_TX_FIFO_PE_THRESHOLD {5} \
-      CONFIG.C_TX_FIFO_PF_THRESHOLD {507} \
+      CONFIG.C_TX_FIFO_PF_THRESHOLD {4091} \
       CONFIG.C_USE_TX_CUT_THROUGH {0}] $gpu_cmd_fifo
   }
 
