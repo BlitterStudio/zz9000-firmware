@@ -229,6 +229,8 @@ int zzapp_loader_begin(void)
             zzapp_put_be32(life + ZZAPP_LIFE_FLIP_GEN_OFF, 0);
             zzapp_put_be32(life + ZZAPP_LIFE_FLIP_ACK_OFF, 0);
             zzapp_put_be32(life + ZZAPP_LIFE_FLIP_SHOWING_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_ADDRESS_OFF, 0);
+            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0);
             zzapp_put_be32(life + ZZAPP_LIFE_WIDTH_OFF, 0);
             zzapp_put_be32(life + ZZAPP_LIFE_HEIGHT_OFF, 0);
             zzapp_put_be32(life + ZZAPP_LIFE_PITCH_OFF, 0);

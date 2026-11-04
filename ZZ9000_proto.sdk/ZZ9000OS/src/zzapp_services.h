@@ -93,6 +93,8 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 			uint32_t *card_back);
 int zzapp_display_layout(uint32_t *layout);
 int zzapp_display_flip_bound(void);
+/* Core 0 calls this from its own vblank ISR after it has re-pointed VDMA. */
+void zzapp_services_display_vblank(uint32_t scanout_address);
 
 /* Mailbox. QUEUED means core 1 will finish it; harvest from core 0. */
 uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,

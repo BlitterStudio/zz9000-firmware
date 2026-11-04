@@ -298,12 +298,14 @@ Lifecycle block (`ZZAPP_LIFE_OFF`), each field a big-endian `u32` unless noted:
 | `0x64` | card_back | firmware if it allocated one, else launcher |
 | `0x68` | app progress xtime low | firmware, diagnostic |
 | `0x6C` | app progress xtime high | firmware, diagnostic |
+| `0x84` | requested scanout address | firmware |
+| `0x88` | submitted scanout generation | launcher |
 
 State enum: `0` idle, `1` loading, `2` starting, `3` running, `4` paused (unused), `5` stopping, `6` faulted.
 
 Fault codes: `0` none, `1` data abort, `2` prefetch abort, `3` undefined, `4` watchdog, `5` forced stop (grace or reset), `6` watchdog that fell through to cold restart.
 
-Flags: bit0 display wanted (ELF note, mirrored), bit1 audio, bit2 GL, bit8 display requested and not yet bound, bit9 vsync wanted.
+Flags: bit0 display wanted (ELF note, mirrored), bit1 audio, bit2 GL, bit8 display requested and not yet bound, bit9 vsync wanted, bit10 launcher CLUT8, bit11 launcher supports scanout-vblank acknowledgement, bit12 firmware accepted that protocol.
 
 Input event, 16 bytes, big-endian, array starts at `ZZAPP_INPUT_OFF + ZZAPP_INPUT_HDR`:
 
@@ -358,7 +360,9 @@ Display open is an app API call. Firmware sets `flags` bit 8 and writes the requ
 
 Default Quake request, issued by the port, not hardcoded in ZZRun: 640×480, `ZZ_FMT_RGB565`, two P96 bitmaps if the screen can allocate them, otherwise one. Pitch is the bitmap's byte stride, not `width * bytes_per_pixel` assumed. A P96 bitmap's ARM address is `(Planes[0] - MemoryBase) + 0x00200000`, the same `board_offset + ADDR_ADJ` the mailbox already uses. ZZRun passes that address and does not invent a second conversion. RasterIX renders into the context-owned card-pool target (`minigl_present.h`: that target is packed RGB565). Present always copies that target into the bound P96 bitmap (`minigl_present_copy_rgb565`, or `minigl_present_copy` for a 32-bit screen). v0 does not point RasterIX at the scanout address.
 
-Flip: the app calls `zz_display_flip` or `zz_gl_swap`. Firmware drains the context, copies the RasterIX target into the back P96 bitmap (or the only bitmap), publishes `flip_gen`, and yields until `flip_ack == flip_gen` or stop. ZZRun sees the new generation, points the screen at the completed bitmap when it has two, then `WaitTOF` if bit 9 is set, and writes `flip_ack`. The firmware updates `flip_showing`. A late ack for a previous generation is ignored. The next present copies into the buffer whose previous flip has been acked. A CPU-drawn surface (`pixels`) writes `surface.back` itself; GL does not.
+For a panned P96 triple buffer, a launcher that sets bit11 receives bit12 after bind. Firmware writes the P96 page's ARM address at `0x84`; ZZRun chooses that page by address, pans it, then writes the matching `flip_gen` at `0x88`. The firmware only advances `flip_ack` once its own vblank ISR has re-pointed VDMA to that address. It therefore never releases the prior front while scanout can still read it. Launchers and firmware without both bits retain the original launcher acknowledgement path.
+
+Flip: the app calls `zz_display_flip` or `zz_gl_swap`. Firmware drains the context, copies the RasterIX target into the back P96 bitmap (or the only bitmap), publishes `flip_gen`, and yields until `flip_ack == flip_gen` or stop. Screen-buffer launchers retain their safe-message acknowledgement; negotiated panning launchers use the card-vblank protocol above; older panning launchers retain `WaitTOF`. The firmware updates `flip_showing`. A late ack for a previous generation is ignored. The next present copies into the buffer whose previous flip has been acked. A CPU-drawn surface (`pixels`) writes `surface.back` itself; GL does not.
 
 On exit, fault, or reset, ZZRun closes the screen it opened and returns to the public screen it recorded at start. It does this even if the firmware has already reclaimed the app. Firmware must finish or abandon any present-copy into that bitmap before reclaim (`minigl_raster_quiesce` and the backend abandon used by `minigl_reset_abort_and_free` in `main.c`). RasterIX itself writes the context buffer, not the P96 bitmap.
 

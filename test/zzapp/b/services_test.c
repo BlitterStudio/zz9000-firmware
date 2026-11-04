@@ -231,7 +231,17 @@ static void test_display_refresh_rotation_and_layout(void)
 	    surface.back != (void *)(uintptr_t)back ||
 	    surface.layout != ZZ_LAYOUT_RGB565_LE)
 		fail("display initial surface");
+	/* An old launcher does not negotiate scanout acknowledgement, so its
+	 * established lifecycle ack remains authoritative. */
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_GEN_OFF, 1U);
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_ADDRESS_OFF,
+		       back);
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_SUBMIT_OFF,
+		       1U);
+	zzapp_services_display_vblank(back);
+	if (zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_FLIP_ACK_OFF) != 0U)
+		fail("display old launcher compatibility");
 	if (zzapp_svc_display_refresh(&surface) != ZZ_EBUSY)
 		fail("display pending refresh");
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_ACK_OFF, 1U);
@@ -242,6 +252,51 @@ static void test_display_refresh_rotation_and_layout(void)
 		fail("display refreshed rotation");
 }
 
+static void test_display_scanout_ack(void)
+{
+	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	zzapp_surface surface;
+	uint32_t front = 0x00200000U;
+	uint32_t back = 0x00210000U;
+	uint32_t spare = 0x00220000U;
+	int rc;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_LAUNCHER_SCANOUT_ACK);
+	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
+						ZZ_FMT_RGB565, front, back,
+						ZZ_LAYOUT_RGB565_LE, spare);
+	rc = zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				    reply, &reply_len, 1, 1U, 0U);
+	if (rc != SDK_STATUS_OK ||
+	    (zzapp_services_flags() & ZZAPP_F_SCANOUT_ACK) == 0U)
+		fail("display scanout-ack bind");
+	memset(&surface, 0, sizeof(surface));
+	surface.id = 1U;
+	if (zzapp_svc_display_flip_async(surface.id) != ZZ_OK ||
+	    zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_FLIP_ADDRESS_OFF) != back)
+		fail("display scanout-ack queue");
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_SUBMIT_OFF, 1U);
+	zzapp_services_display_vblank(front);
+	if (zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_FLIP_ACK_OFF) != 0U)
+		fail("display scanout-ack wrong address");
+	zzapp_services_display_vblank(back);
+	if (zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_FLIP_ACK_OFF) != 1U)
+		fail("display scanout-ack vblank");
+	if (zzapp_svc_display_refresh(&surface) != ZZ_OK ||
+	    surface.front != (void *)(uintptr_t)back ||
+	    surface.back != (void *)(uintptr_t)spare)
+		fail("display scanout-ack recycle");
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -250,6 +305,7 @@ int main(void)
 	test_drop_on_full();
 	test_audio_busy();
 	test_display_refresh_rotation_and_layout();
+	test_display_scanout_ack();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;

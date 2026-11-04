@@ -16,6 +16,7 @@
 #include "xil_io.h"
 #include "sdk_smp_lock.h"
 #include "surface_allocator.h"
+#include "zzapp_services.h"
 /* kept after the Xilinx headers: overlay.h pulls in gfx.h (see the
  * pack note on struct GFXData) */
 #include "overlay.h"
@@ -740,6 +741,7 @@ void isr_video(void *dummy) {
 	u32 live_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG2);
 	uint32_t videocap_live_rows = 0U;
 	uint32_t videocap_live_words = 0U;
+	uint32_t scanout_address;
 
 	if ((live_raw & MNTZORRO_REG2_LIVE_GEOMETRY_MASK) ==
 	    MNTZORRO_REG2_LIVE_GEOMETRY_MAGIC) {
@@ -802,11 +804,13 @@ void isr_video(void *dummy) {
 			if (vs.card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
 				video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
 			}
-			// P96 video overlay: present a composited shadow buffer
-			// instead of the framebuffer while the overlay is active
-			// (returns the regular pan address otherwise)
-			init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
-					overlay_present_bufpos(&vs));
+			/* The VDMA address is latched at the card's vblank.  Publish
+			 * an app flip acknowledgement only after this re-point,
+			 * never after the unrelated Amiga chipset vblank. */
+			scanout_address = overlay_present_bufpos(&vs);
+			if (init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
+				      scanout_address) == XST_SUCCESS)
+				zzapp_services_display_vblank(scanout_address);
 		}
 		vs.videocap_enabled_old = 0;
 		videocap_detection_reset();
