@@ -217,12 +217,17 @@ static void test_display_refresh_rotation_and_layout(void)
 	zzapp_services_test_reset();
 	memset(g_window, 0, sizeof(g_window));
 	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	/* zz_display_open raises the request; the bind must clear it or the
+	 * launcher and the app both treat the display as unbound. */
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_DISPLAY_UNBOUND);
 	zzapp_build_display_bind_request_layout(payload, 320U, 200U, 640U,
 						 ZZ_FMT_RGB565, front, back,
 						 ZZ_LAYOUT_RGB565_LE);
 	rc = zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
 				    reply, &reply_len, 1, 1U, 0U);
-	if (rc != SDK_STATUS_OK)
+	if (rc != SDK_STATUS_OK ||
+	    (zzapp_services_flags() & ZZAPP_F_DISPLAY_UNBOUND) != 0U)
 		fail("display bind");
 	memset(&surface, 0, sizeof(surface));
 	surface.id = 1U;
@@ -313,14 +318,16 @@ static void test_display_mailbox(void)
 	memset(g_window, 0, sizeof(g_window));
 	zzapp_services_test_set_window(g_window, sizeof(g_window));
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
-		       ZZAPP_F_LAUNCHER_MAILBOX | ZZAPP_F_MAILBOX_REQUEST);
+		       ZZAPP_F_LAUNCHER_MAILBOX | ZZAPP_F_MAILBOX_REQUEST |
+		       ZZAPP_F_DISPLAY_UNBOUND);
 	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
 						ZZ_FMT_RGB565, front, back,
 						ZZ_LAYOUT_RGB565_LE, spare);
 	rc = zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
 				    reply, &reply_len, 1, 1U, 0U);
 	if (rc != SDK_STATUS_OK ||
-	    (zzapp_services_flags() & ZZAPP_F_MAILBOX) == 0U)
+	    (zzapp_services_flags() & ZZAPP_F_MAILBOX) == 0U ||
+	    (zzapp_services_flags() & ZZAPP_F_DISPLAY_UNBOUND) != 0U)
 		fail("display mailbox bind");
 	memset(&surface, 0, sizeof(surface));
 	surface.id = 1U;

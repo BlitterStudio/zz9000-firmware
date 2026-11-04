@@ -2010,6 +2010,9 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 		zzapp_services_or_flags(ZZAPP_F_SCANOUT_ACK);
 	else
 		zzapp_services_and_flags(~ZZAPP_F_SCANOUT_ACK);
+	/* Last: the app and ZZRun wait for this bit to clear before using the
+	 * surface, so every field above must already be published. */
+	zzapp_services_and_flags(~ZZAPP_F_DISPLAY_UNBOUND);
 	return ZZ_OK;
 }
 
