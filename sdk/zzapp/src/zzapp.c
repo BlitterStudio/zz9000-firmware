@@ -232,16 +232,26 @@ int zz_audio_close(void)
     return ZZ_ENOSYS;
 }
 
-const zzapp_gl *zz_gl_bind(uint32_t surface_id)
+const zzapp_gl *zz_gl_bind_flags(uint32_t surface_id, uint32_t flags)
 {
     const zzapp_gl *gl;
 
     bound_gl = 0;
-    if (!ZZ_API_COVERS(zzapp_api_ptr, gl_bind) || !zzapp_api_ptr->gl_bind)
+    if (ZZ_API_COVERS(zzapp_api_ptr, gl_bind_flags) &&
+        zzapp_api_ptr->gl_bind_flags)
+        gl = zzapp_api_ptr->gl_bind_flags(surface_id, flags);
+    else if (flags == 0U && ZZ_API_COVERS(zzapp_api_ptr, gl_bind) &&
+             zzapp_api_ptr->gl_bind)
+        gl = zzapp_api_ptr->gl_bind(surface_id);
+    else
         return 0;
-    gl = zzapp_api_ptr->gl_bind(surface_id);
     bound_gl = gl;
     return gl;
+}
+
+const zzapp_gl *zz_gl_bind(uint32_t surface_id)
+{
+    return zz_gl_bind_flags(surface_id, 0U);
 }
 
 void zz_gl_swap(void)

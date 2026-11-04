@@ -233,6 +233,9 @@ typedef struct zzapp_gl {
  * Build2DMipmaps; new callers must use ZZ_GL_COVERS for every v1 slot.
  */
 #define ZZAPP_GL_VERSION_ARRAYS 1u
+/* zz_gl_bind_flags() requests optional rendering behavior. */
+#define ZZ_GL_BIND_DIRECT_PRESENT 1u
+
 
 typedef struct zzapp_api {
     uint32_t size;
@@ -282,6 +285,8 @@ typedef struct zzapp_api {
     int      (*display_flip_idle)(void);
     /* Refresh front/back after a completed flip; appended for ABI compatibility. */
     int      (*display_refresh)(zzapp_surface *surface);
+    /* Appended: bind with ZZ_GL_BIND_* flags; old firmware leaves it NULL. */
+    const zzapp_gl *(*gl_bind_flags)(uint32_t surface_id, uint32_t flags);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -346,6 +351,7 @@ int      zz_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out);
 int      zz_audio_close(void);
 
 const zzapp_gl *zz_gl_bind(uint32_t surface_id);
+const zzapp_gl *zz_gl_bind_flags(uint32_t surface_id, uint32_t flags);
 void     zz_gl_swap(void);
 void     zz_gl_unbind(void);
 

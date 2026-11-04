@@ -747,7 +747,7 @@ Shared text lives in this document. Nobody invents a second layout. Firmware fil
 Weak seams, so A links before B and C land:
 
 - `void zzapp_services_poll(void)` — B's tick body. A's copy is an empty weak symbol.
-- `int zzapp_gl_bind(uint32_t surface_id, const zzapp_gl **out)`, `void zzapp_gl_swap(void)`, `void zzapp_gl_unbind(void)` — C defines them. A's weak copies return `ZZ_ENOSYS` / NULL.
+- `int zzapp_gl_bind(uint32_t surface_id, uint32_t flags, const zzapp_gl **out)`, `void zzapp_gl_swap(void)`, `void zzapp_gl_unbind(void)` — C defines them. A's weak copies return `ZZ_ENOSYS` / NULL. `ZZ_GL_BIND_DIRECT_PRESENT` opts into direct RasterIX-to-P96 presentation only on a compatible RGB565-LE screen; unflagged binds retain queued copy presentation.
 
 A's `zzapp_api.c` calls those. It does not contain GL or file-protocol code.
 

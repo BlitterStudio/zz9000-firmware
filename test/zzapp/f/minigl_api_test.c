@@ -28,6 +28,7 @@ static uint32_t g_reclaim_generation;
 static uint32_t g_render_pixel;
 static uint32_t g_present_pixel;
 static int g_flips;
+static uint32_t g_bind_flags;
 
 int zzm_loader_acquire(uint32_t module_id)
 {
@@ -67,6 +68,13 @@ static int mock_app_bind(void *context, uint32_t surface_id, const void **out_gl
     *out_gl = &g_gl;
     return ZZ_OK;
 }
+static int mock_app_bind_flags(void *context, uint32_t surface_id,
+                               uint32_t flags, const void **out_gl)
+{
+    g_bind_flags = flags;
+    return mock_app_bind(context, surface_id, out_gl);
+}
+
 
 static int mock_app_swap(void *context)
 {
@@ -137,6 +145,7 @@ static void reset_module(void)
     g_ops.app_swap = mock_app_swap;
     g_ops.app_unbind = mock_app_unbind;
     g_ops.app_reclaim = mock_app_reclaim;
+    g_ops.app_bind_flags = mock_app_bind_flags;
     g_available = 0;
     g_acquires = 0;
     g_releases = 0;
@@ -164,6 +173,7 @@ static void reset_module(void)
     g_render_pixel = 0;
     g_present_pixel = 0;
     g_flips = 0;
+    g_bind_flags = 0;
 }
 
 int main(void)
@@ -203,6 +213,10 @@ int main(void)
     api->gl_unbind();
     assert(g_unbinds == 1);
     assert(g_releases == 2);
+    gl = api->gl_bind_flags(42u, ZZ_GL_BIND_DIRECT_PRESENT);
+    assert(gl == &g_gl);
+    assert(g_bind_flags == ZZ_GL_BIND_DIRECT_PRESENT);
+    api->gl_unbind();
 
     card = 0;
     assert(zzapp_loader_begin() == ZZ_OK);
@@ -217,7 +231,7 @@ int main(void)
     assert(g_reclaim_generation != 0u);
     assert(g_68k_closes == 0);
     assert(g_68k_open);
-    assert(g_releases == 3);
+    assert(g_releases == 4);
 
     zzapp_boot_init();
     reset_module();

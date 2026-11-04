@@ -39,6 +39,10 @@
 #ifndef ZZ_LAYOUT_RGB565_LE
 #define ZZ_LAYOUT_RGB565_LE 2u
 #endif
+#ifndef ZZ_GL_BIND_DIRECT_PRESENT
+#define ZZ_GL_BIND_DIRECT_PRESENT 1u
+#endif
+
 
 #ifndef ZZAPP_GL_HAVE_HEADER
 /* Matches sdk/zzapp/include/zzapp.h (app/libzzapp 80c39ab). */
@@ -539,14 +543,15 @@ static int zzapp_gl_configure_targets(uint32_t width, uint32_t height,
 }
 
 
-int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out)
+int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
+                  const struct zzapp_gl **out)
 {
     uint32_t w, h, pitch, format, front, back, layout = 0U;
     mw_ctx *mw;
 
     if (out)
         *out = 0;
-    if (!surface_id)
+    if (!surface_id || (flags & ~ZZ_GL_BIND_DIRECT_PRESENT) != 0U)
         return ZZ_EINVAL;
     if (g_bound)
         return ZZ_EBUSY;
@@ -556,7 +561,8 @@ int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out)
         return ZZ_EINVAL;
     if (format != ZZ_FMT_RGB565 && format != ZZ_FMT_BGRA8888)
         return ZZ_EINVAL;
-    g_zero_copy = format == ZZ_FMT_RGB565 &&
+    g_zero_copy = (flags & ZZ_GL_BIND_DIRECT_PRESENT) != 0U &&
+                  format == ZZ_FMT_RGB565 &&
                   zzapp_display_layout(&layout) == ZZ_OK &&
                   layout == ZZ_LAYOUT_RGB565_LE && pitch == w * 2U &&
                   front != 0U && back != 0U &&

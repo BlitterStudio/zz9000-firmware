@@ -131,6 +131,8 @@ int zzapp_svc_audio_close(void);
 
 /* ---- MiniGL module binding. ---- */
 int zzapp_minigl_bind(uint32_t surface_id, const struct zzapp_gl **out);
+int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
+                            const struct zzapp_gl **out);
 void zzapp_minigl_swap(void);
 void zzapp_minigl_unbind(void);
 void zzapp_minigl_reclaim(uint32_t generation);

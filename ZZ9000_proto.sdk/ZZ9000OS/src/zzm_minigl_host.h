@@ -60,6 +60,9 @@ typedef struct zzm_minigl_ops_v1 {
     int (*app_swap)(void *context);
     void (*app_unbind)(void *context);
     void (*app_reclaim)(void *context, uint32_t generation);
+    /* Appended so older MiniGL modules continue to provide unflagged binds. */
+    int (*app_bind_flags)(void *context, uint32_t surface_id, uint32_t flags,
+                          const void **out_gl);
 } zzm_minigl_ops_v1_t;
 /* The generic v3 register_ops() callback carries this envelope rather than a
  * bare function table, so the host can keep the module-owned context and

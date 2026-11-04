@@ -375,6 +375,10 @@ static void update_mvp(void)
 }
 static int mode_ok(uint16_t mode) { return mode < 4U; }
 static uint32_t pixels(void) { return (uint32_t)g_buffers.width * g_buffers.height; }
+static int target_is_rgb565_only(const MiniGLRasterBuffers *buffers)
+{
+    return buffers->color_bytes == (uint32_t)buffers->width * buffers->height * 2U;
+}
 static uint32_t depth_bytes_per_pixel(void) { return g_depth_bits == 16U ? 2U : 3U; }
 static uint32_t depth_max(void) { return g_depth_bits == 16U ? 0xffffU : 0xffffffU; }
 static int ready(void);
@@ -524,7 +528,7 @@ static int rix_make_cpu_visible_now(void)
         g_rix_depth_z16 = 0;
         return 1;
     }
-    if (g_buffers.color_rgb565_only) {
+    if (target_is_rgb565_only(&g_buffers)) {
         if (g_rix_cpu_fallback_target_handler == NULL ||
             !minigl_rix_backend_drain(&g_rix))
             return 0;
@@ -773,7 +777,7 @@ int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers)
         return 0;
     }
     count = (uint32_t)buffers->width * buffers->height;
-    if ((buffers->color_rgb565_only ?
+    if ((target_is_rgb565_only(buffers) ?
          (count > buffers->color_bytes / 2U ||
           g_rix_cpu_fallback_target_handler == NULL) :
          count > buffers->color_bytes / sizeof(*buffers->color)) ||

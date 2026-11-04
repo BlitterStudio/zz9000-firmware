@@ -78,7 +78,8 @@ static int minigl_registration_ready(const zzm_minigl_registration_v1_t *registr
            registration->ops && registration->worker_ops;
 }
 
-int zzapp_minigl_bind(uint32_t surface_id, const zzapp_gl **out)
+int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
+                            const zzapp_gl **out)
 {
     const zzm_minigl_registration_v1_t *registration;
     const zzm_minigl_ops_v1_t *ops;
@@ -109,7 +110,13 @@ int zzapp_minigl_bind(uint32_t surface_id, const zzapp_gl **out)
         context != registration->context)
         goto unavailable;
     ops = registration->ops;
-    status = ops->app_bind(context, surface_id, &module_gl);
+    if (flags != 0U &&
+        (ops->size < offsetof(zzm_minigl_ops_v1_t, app_bind_flags) +
+                         sizeof(ops->app_bind_flags) ||
+         !ops->app_bind_flags))
+        goto unavailable;
+    status = flags != 0U ? ops->app_bind_flags(context, surface_id, flags, &module_gl) :
+                            ops->app_bind(context, surface_id, &module_gl);
     if (status != ZZ_OK)
         goto failed;
     if (!module_gl)
@@ -127,6 +134,11 @@ failed:
 unavailable:
     zzm_loader_release(ZZM_MODULE_MINIGL);
     return ZZ_ENOSYS;
+}
+
+int zzapp_minigl_bind(uint32_t surface_id, const zzapp_gl **out)
+{
+    return zzapp_minigl_bind_flags(surface_id, 0U, out);
 }
 
 void zzapp_minigl_swap(void)
@@ -209,6 +221,7 @@ static int api_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,zzapp_s
 static int api_input(zzapp_event*out,uint32_t n,uint32_t*got){zzapp_api_enter();int r=zzapp_svc_input_poll(out,n,got);zzapp_api_leave();return r;}
 static int api_audio_open(uint32_t r,uint32_t c,zzapp_audio*out){zzapp_api_enter();int x=zzapp_svc_audio_open(r,c,out);zzapp_api_leave();return x;}
 static const zzapp_gl *api_gl_bind(uint32_t id){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
+static const zzapp_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind_flags(id,flags,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
 static void api_gl_swap(void){zzapp_api_enter();zzapp_minigl_swap();zzapp_api_leave();}
 static void api_gl_unbind(void){zzapp_api_enter();zzapp_minigl_unbind();zzapp_api_leave();}
 
@@ -220,6 +233,6 @@ static const zzapp_api g_api = {
     .display_open=api_display_open,.display_flip=api_display_flip,.display_vsync=api_vsync,.display_close=api_display_close,.input_poll=api_input,.audio_open=api_audio_open,.audio_close=api_audio_close,
     .gl_bind=api_gl_bind,.gl_swap=api_gl_swap,.gl_unbind=api_gl_unbind,
     .display_flip_async=api_display_flip_async,.display_flip_idle=api_display_flip_idle,
-    .display_refresh=api_display_refresh
+    .display_refresh=api_display_refresh,.gl_bind_flags=api_gl_bind_flags
 };
 const zzapp_api *zzapp_api_table(void) { return &g_api; }

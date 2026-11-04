@@ -793,7 +793,6 @@ static int mw_ctx_bind_buffers(mw_ctx *c)
         (uint32_t *)(void *)c->direct_color_buffers[index] : c->color_buffers[index];
     buffers.color_bytes = c->width * c->height *
         (c->color_direct[index] ? 2U : sizeof(*buffers.color));
-    buffers.color_rgb565_only = c->color_direct[index];
     buffers.depth = c->depth_buffer;
     buffers.depth_bytes = c->width * c->height * 4U;
     buffers.vertices = g_dummy_vertices;
@@ -839,7 +838,6 @@ static int mw_ctx_cpu_fallback_target(void *context,
     *replacement = *source;
     replacement->color = c->color_buffers[index];
     replacement->color_bytes = c->width * c->height * sizeof(*replacement->color);
-    replacement->color_rgb565_only = 0U;
     return 1;
 }
 

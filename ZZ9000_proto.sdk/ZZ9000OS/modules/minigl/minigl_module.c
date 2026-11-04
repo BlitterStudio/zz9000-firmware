@@ -17,7 +17,8 @@
 struct zzapp_gl;
 
 int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host);
-int zzapp_gl_bind(uint32_t surface_id, const struct zzapp_gl **out);
+int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
+                  const struct zzapp_gl **out);
 void zzapp_gl_swap(void);
 void zzapp_gl_unbind(void);
 void zzapp_gl_reclaim(void);
@@ -187,8 +188,8 @@ static void minigl_release_app(minigl_module_context_t *module)
                        ZZM_MINIGL_MODULE_QUOTA);
 }
 
-static int minigl_app_bind(void *context, uint32_t surface_id,
-                           const void **out_gl)
+static int minigl_app_bind_flags(void *context, uint32_t surface_id,
+                                 uint32_t flags, const void **out_gl)
 {
     const struct zzapp_gl *gl = 0;
     minigl_module_context_t *module = context;
@@ -202,7 +203,7 @@ static int minigl_app_bind(void *context, uint32_t surface_id,
         return -1;
     zzm_rt_set_context(module->app_owner, ZZM_MEMORY_CLASS_MINIGL_APP_CONTEXT,
                        ZZM_MINIGL_CONTEXT_QUOTA);
-    status = zzapp_gl_bind(surface_id, &gl);
+    status = zzapp_gl_bind(surface_id, flags, &gl);
     if (status != 0) {
         minigl_release_app(module);
         return status;
@@ -210,6 +211,12 @@ static int minigl_app_bind(void *context, uint32_t surface_id,
     if (out_gl)
         *out_gl = gl;
     return 0;
+}
+
+static int minigl_app_bind(void *context, uint32_t surface_id,
+                           const void **out_gl)
+{
+    return minigl_app_bind_flags(context, surface_id, 0U, out_gl);
 }
 
 static int minigl_app_swap(void *context)
@@ -237,7 +244,8 @@ static const zzm_minigl_ops_v1_t g_ops = {
     minigl_transport_acquire, minigl_transport_release,
     minigl_begin_reset, minigl_reset_poll, minigl_abort_reset,
     minigl_begin_unload, minigl_fini,
-    minigl_app_bind, minigl_app_swap, minigl_app_unbind, minigl_app_reclaim
+    minigl_app_bind, minigl_app_swap, minigl_app_unbind, minigl_app_reclaim,
+    minigl_app_bind_flags
 };
 
 static const zzm_minigl_worker_ops_t g_worker_ops = {

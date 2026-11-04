@@ -14,7 +14,6 @@
 typedef struct MiniGLRasterBuffers {
     uint32_t *color;
     uint32_t color_bytes;
-    uint8_t color_rgb565_only;
     uint8_t *depth;
     uint32_t depth_bytes;
     uint8_t *vertices;

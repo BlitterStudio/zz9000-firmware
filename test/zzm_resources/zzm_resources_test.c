@@ -83,6 +83,13 @@ int zzapp_display_bound(uint32_t *width, uint32_t *height, uint32_t *pitch,
     if (card_back) *card_back = 0x210000U;
     return 0;
 }
+int zzapp_display_layout(uint32_t *layout)
+{
+    if (layout)
+        *layout = 5U;
+    return 0;
+}
+
 int zzapp_svc_display_flip(uint32_t surface_id)
 {
     (void)surface_id;
