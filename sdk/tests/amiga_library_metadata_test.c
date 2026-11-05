@@ -320,7 +320,35 @@ int main(int argc, char **argv)
      "ZZ9KAudioStreamBeginEx(desc,result)(a0/a1)",
      "int ZZ9KAudioStreamBeginEx(const ZZ9KAudioStreamBeginExDesc *desc, "
      "ZZ9KAudioStreamResult *result);",
-     "jsr -348(a6)"}
+     "jsr -348(a6)"},
+    {"ZZ9KAppOpen", "ZZ9KAppOpen(handle,notify_port)(a0/a1)",
+     "int ZZ9KAppOpen(ZZ9KAppHandle **handle, struct MsgPort *notify_port);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppLoadFile", "ZZ9KAppLoadFile(handle,path)(a0/a1)",
+     "int ZZ9KAppLoadFile(ZZ9KAppHandle *handle, const char *path);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppLoadMemory", "ZZ9KAppLoadMemory(handle,data,length)(a0/a1/d0)",
+     "int ZZ9KAppLoadMemory(ZZ9KAppHandle *handle, const void *data, uint32_t length);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppStart", "ZZ9KAppStart(handle,argv,argc)(a0/a1/d0)",
+     "int ZZ9KAppStart(ZZ9KAppHandle *handle, const char *const *argv, uint32_t argc);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppStop", "ZZ9KAppStop(handle)(a0)",
+     "int ZZ9KAppStop(ZZ9KAppHandle *handle);", "#include <inline/zz9k.h>"},
+    {"ZZ9KAppStatus", "ZZ9KAppStatus(handle,status)(a0/a1)",
+     "int ZZ9KAppStatus(ZZ9KAppHandle *handle, ZZ9KAppStatusInfo *status);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppSendMessage", "ZZ9KAppSendMessage(handle,message)(a0/a1)",
+     "int ZZ9KAppSendMessage(ZZ9KAppHandle *handle, const ZZ9KAppMessage *message);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppGetMessage", "ZZ9KAppGetMessage(handle,message)(a0/a1)",
+     "int ZZ9KAppGetMessage(ZZ9KAppHandle *handle, ZZ9KAppMessage *message);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppMessageSignal", "ZZ9KAppMessageSignal(handle)(a0)",
+     "uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppClose", "ZZ9KAppClose(handle)(a0)",
+     "void ZZ9KAppClose(ZZ9KAppHandle *handle);", "#include <inline/zz9k.h>"}
   };
   char *fd;
   char *clib;

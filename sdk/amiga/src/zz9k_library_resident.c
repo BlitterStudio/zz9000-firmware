@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include "zz9k/app_client.h"
 #include "zz9k/library.h"
 #include "zz9k/library_vectors.h"
 #include <SDI_compiler.h>
@@ -31,6 +32,21 @@ struct DosLibrary *DOSBase;
 
 #define ZZ9K_LIB_IRQ_WAIT_MICROS 10UL
 
+struct ZZ9KAppHandle {
+  struct Task *owner_task;
+  struct MsgPort *notify_port;
+  ZZ9KAppEvent event;
+  volatile uint8_t *window;
+  ULONG signal_mask;
+  BYTE signal_bit;
+  ULONG heartbeat;
+  ULONG vblank_pending;
+  uint32_t generation;
+  UBYTE active;
+  UBYTE started;
+  UBYTE event_posted;
+};
+
 struct ZZ9KBase {
   struct Library library;
   BPTR segment;
@@ -57,6 +73,7 @@ struct ZZ9KBase {
   UBYTE dispatcher_running;
   UBYTE dispatcher_starting;
   UBYTE dispatcher_stop_requested;
+  struct ZZ9KAppHandle *app;
   int last_open_status;
 };
 
@@ -76,6 +93,8 @@ static ULONG zz9k_lib_irq_isr(REG(a1, struct ZZ9KBase *base));
 static int zz9k_lib_wait_for_irq_event(ZZ9KLibrary *library,
                                        void *user_data);
 static void zz9k_lib_dispatcher_proc(void);
+static void zz9k_lib_app_service_locked(struct ZZ9KBase *base);
+static void zz9k_lib_app_close_all_locked(struct ZZ9KBase *base);
 
 static int zz9k_lib_query_caps(REG(a6, struct ZZ9KBase *base),
                                REG(a0, ZZ9KCaps *caps));
@@ -295,6 +314,35 @@ static int zz9k_lib_audio_stream_set_gain(
     REG(a0, ZZ9KAudioStreamResult *result));
 static int zz9k_lib_query_palette(REG(a6, struct ZZ9KBase *base),
                                   REG(a0, const ZZ9KPaletteQueryDesc *desc));
+static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
+                             REG(a0, ZZ9KAppHandle **handle),
+                             REG(a1, struct MsgPort *notify_port));
+static int zz9k_lib_app_load_file(REG(a6, struct ZZ9KBase *base),
+                                  REG(a0, ZZ9KAppHandle *handle),
+                                  REG(a1, const char *path));
+static int zz9k_lib_app_load_memory(REG(a6, struct ZZ9KBase *base),
+                                    REG(a0, ZZ9KAppHandle *handle),
+                                    REG(a1, const void *data),
+                                    REG(d0, uint32_t length));
+static int zz9k_lib_app_start(REG(a6, struct ZZ9KBase *base),
+                              REG(a0, ZZ9KAppHandle *handle),
+                              REG(a1, const char *const *argv),
+                              REG(d0, uint32_t argc));
+static int zz9k_lib_app_stop(REG(a6, struct ZZ9KBase *base),
+                             REG(a0, ZZ9KAppHandle *handle));
+static int zz9k_lib_app_status(REG(a6, struct ZZ9KBase *base),
+                               REG(a0, ZZ9KAppHandle *handle),
+                               REG(a1, ZZ9KAppStatusInfo *status));
+static int zz9k_lib_app_send_message(REG(a6, struct ZZ9KBase *base),
+                                     REG(a0, ZZ9KAppHandle *handle),
+                                     REG(a1, const ZZ9KAppMessage *message));
+static int zz9k_lib_app_get_message(REG(a6, struct ZZ9KBase *base),
+                                    REG(a0, ZZ9KAppHandle *handle),
+                                    REG(a1, ZZ9KAppMessage *message));
+static ULONG zz9k_lib_app_message_signal(REG(a6, struct ZZ9KBase *base),
+                                         REG(a0, const ZZ9KAppHandle *handle));
+static void zz9k_lib_app_close(REG(a6, struct ZZ9KBase *base),
+                               REG(a0, ZZ9KAppHandle *handle));
 
 static const APTR zz9k_lib_vectors[] = {
   (APTR)zz9k_lib_open,
@@ -355,6 +403,16 @@ static const APTR zz9k_lib_vectors[] = {
   (APTR)zz9k_lib_image_animation_frame_retire,
   (APTR)zz9k_lib_image_animation_restart,
   (APTR)zz9k_lib_audio_stream_begin_ex,
+  (APTR)zz9k_lib_app_open,
+  (APTR)zz9k_lib_app_load_file,
+  (APTR)zz9k_lib_app_load_memory,
+  (APTR)zz9k_lib_app_start,
+  (APTR)zz9k_lib_app_stop,
+  (APTR)zz9k_lib_app_status,
+  (APTR)zz9k_lib_app_send_message,
+  (APTR)zz9k_lib_app_get_message,
+  (APTR)zz9k_lib_app_message_signal,
+  (APTR)zz9k_lib_app_close,
   (APTR)-1
 };
 
@@ -382,14 +440,20 @@ static ULONG zz9k_lib_irq_isr(REG(a1, struct ZZ9KBase *base))
   if (zz9k_interrupt_status(base->core.ctx, &status) != ZZ9K_STATUS_OK) {
     return 0;
   }
-  if ((status & ZZ9K_INTERRUPT_SDK) == 0) {
+  if ((status & (ZZ9K_INTERRUPT_SDK | ZZ9K_INTERRUPT_VBLANK)) == 0) {
     return 0;
   }
 
   base->irq_last_status = status;
   base->irq_hits++;
-  zz9k_completion_irq_ack(base->core.ctx);
-
+  if (status & ZZ9K_INTERRUPT_SDK) {
+    zz9k_completion_irq_ack(base->core.ctx);
+  }
+  /* The interrupt server neither calls DOS nor touches the mailbox.  The
+   * dispatcher publishes the lease and posts notifications in task context. */
+  if ((status & ZZ9K_INTERRUPT_VBLANK) && base->app && base->app->active) {
+    base->app->vblank_pending++;
+  }
   if (base->irq_task && base->irq_signal_mask) {
     Signal(base->irq_task, base->irq_signal_mask);
   }
@@ -723,6 +787,7 @@ static void zz9k_lib_dispatcher_proc(void)
         signals = SIGBREAKF_CTRL_C;
         break;
       }
+      zz9k_lib_app_service_locked(base);
       status = ZZ9KPoll(&base->core, 16, &completed);
       ReleaseSemaphore(&base->lock);
       if (status != ZZ9K_STATUS_OK || completed == 0) {
@@ -927,6 +992,7 @@ static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
   if (base->library.lib_OpenCnt == 0) {
     zz9k_lib_dispatcher_stop(base);
     ObtainSemaphore(&base->lock);
+    zz9k_lib_app_close_all_locked(base);
     zz9k_lib_irq_stop_locked(base);
     ZZ9KClose(&base->core);
     ReleaseSemaphore(&base->lock);
@@ -1831,3 +1897,5 @@ static int zz9k_lib_query_palette(REG(a6, struct ZZ9KBase *base),
   zz9k_lib_leave(base);
   return status;
 }
+
+#include "zz9k_library_app.inc"
