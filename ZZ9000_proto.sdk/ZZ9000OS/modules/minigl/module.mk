@@ -81,10 +81,12 @@ ZZM_MINIGL_FRONTEND_SRCS := \
 	amiberry_gl_buffer.c amiberry_glu.c \
 	amiberry_backend_inproc.c amiberry_transport_inproc.c
 
+ZZM_MINIGL_BUILD_ID ?= $(shell git -C $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../../..) rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 ZZM_MINIGL_CPU_FLAGS := -mcpu=cortex-a9 -marm -mfpu=neon -mfloat-abi=hard
 ZZM_MINIGL_COMMON_CFLAGS := -ffunction-sections -fdata-sections \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -fno-strict-aliasing
 ZZM_MINIGL_CFLAGS := $(ZZM_MINIGL_CPU_FLAGS) $(ZZM_MINIGL_COMMON_CFLAGS) \
-	-O2 -DMGL_PLATFORM_ZZARM -DMINIGL_MODULE
+	-O2 -DMGL_PLATFORM_ZZARM -DMINIGL_MODULE \
+	-DZZM_MINIGL_BUILD_ID=\"$(ZZM_MINIGL_BUILD_ID)\"
 ZZM_MINIGL_RASTER_CFLAGS := $(ZZM_MINIGL_CFLAGS) -O3
 ZZM_MINIGL_FRONTEND_CFLAGS := $(ZZM_MINIGL_CFLAGS)

@@ -756,8 +756,9 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
 {
     uint32_t w, h, pitch, format, front, back, card;
     uint32_t source;
+    uint32_t copy_us, flip_us;
+    uint64_t started;
     int rgb565;
-
     if (g_present_count == 0U || !minigl_raster_present_ready() ||
         !zzapp_display_flip_idle())
         return 0;
@@ -771,6 +772,7 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     rgb565 = mw->color_rgb565[source] != 0U;
     if (mw->present_submit_rgb565[source] != (uint8_t)rgb565)
         zzapp_gl_present_layout_mismatch(mw, source, (uint8_t)rgb565);
+    started = minigl_platform_time_us();
     minigl_profile_push(MGLP_SWAP_COPY);
     if (mw->color_direct[source]) {
         if ((uint32_t)(uintptr_t)mw->direct_color_buffers[source] != card) {
@@ -797,12 +799,18 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
         }
     }
     minigl_profile_pop();
+    copy_us = (uint32_t)(minigl_platform_time_us() - started);
+    started = minigl_platform_time_us();
     minigl_profile_push(MGLP_SWAP_FLIP);
     if (zzapp_gl_queue_flip(g_surface_id) != ZZ_OK) {
         minigl_profile_pop();
         return 0;
     }
     minigl_profile_pop();
+    flip_us = (uint32_t)(minigl_platform_time_us() - started);
+    mw_ctx_diag_add_present_wait(mw, source, copy_us, flip_us, 0U);
+    mw_ctx_diag_presented(mw, source, (const uint8_t *)(uintptr_t)card,
+                          pitch, format, w, h);
     mw->present_queued[source] = 0U;
     --g_present_count;
     if (g_present_count != 0U)
@@ -831,18 +839,27 @@ static int zzapp_gl_make_target_available(mw_ctx *mw)
             continue;
         if (!minigl_raster_present_ready()) {
             int ok;
+            uint64_t started = minigl_platform_time_us();
 
             minigl_profile_push(MGLP_SWAP_DRAIN);
             ok = minigl_raster_prepare_present();
             minigl_profile_pop();
+            mw_ctx_diag_add_wait(mw, 0U, 0U,
+                                 (uint32_t)(minigl_platform_time_us() - started), 0U);
             if (!ok)
                 return 0;
             continue;
         }
-        minigl_profile_push(MGLP_SWAP_FLIP);
-        if (!zzapp_gl_wait_flip_idle())
-            return 0;
-        minigl_profile_pop();
+        {
+            uint64_t started = minigl_platform_time_us();
+
+            minigl_profile_push(MGLP_SWAP_FLIP);
+            if (!zzapp_gl_wait_flip_idle())
+                return 0;
+            minigl_profile_pop();
+            mw_ctx_diag_add_wait(mw, 0U,
+                                 (uint32_t)(minigl_platform_time_us() - started), 0U, 0U);
+        }
     }
     return 1;
 }
@@ -852,7 +869,7 @@ void zzapp_gl_swap(void)
     mw_ctx *mw;
     struct AmiberryContext *guest;
     uint32_t outgoing;
-
+    uint64_t target_started;
     zzapp_api_enter();
     if (!g_bound)
         goto done;
@@ -862,8 +879,11 @@ void zzapp_gl_swap(void)
     /* A completed older target is copied while the app was constructing this
      * frame.  Do not wait when RasterIX or ZZRun has not reached it yet. */
     (void)zzapp_gl_present_pending(mw);
+    target_started = minigl_platform_time_us();
     if (!zzapp_gl_make_target_available(mw))
         goto done;
+    mw_ctx_diag_add_wait(mw, 0U, 0U, 0U,
+                         (uint32_t)(minigl_platform_time_us() - target_started));
     outgoing = mw->state.target.back;
     guest = amiberry_context(mini_CurrentContext);
     if (!guest)
@@ -884,27 +904,37 @@ void zzapp_gl_swap(void)
     mw->present_submit_frame[outgoing] = ++g_present_frame;
     if (g_zero_copy) {
         int ok;
+        uint64_t started;
 
         /* With two P96 buffers, MW_PRESENT has rebound RasterIX to the
          * currently displayed one.  Do not return to the app until the flip
          * makes it hidden; this deliberately trades the old two-frame queue
          * for ownership safety. */
+        started = minigl_platform_time_us();
         minigl_profile_push(MGLP_SWAP_DRAIN);
         ok = minigl_raster_prepare_present();
         minigl_profile_pop();
+        mw_ctx_diag_add_present_wait(mw, outgoing, 0U, 0U,
+                                     (uint32_t)(minigl_platform_time_us() - started));
         if (!ok || !zzapp_gl_present_pending(mw))
             goto done;
+        started = minigl_platform_time_us();
         minigl_profile_push(MGLP_SWAP_FLIP);
         if (!zzapp_gl_wait_flip_idle())
             goto done;
         minigl_profile_pop();
+        mw_ctx_diag_add_wait(mw, 0U,
+                             (uint32_t)(minigl_platform_time_us() - started), 0U, 0U);
     }
     else if (g_sync_present) {
         int ok;
+        uint64_t started = minigl_platform_time_us();
 
         minigl_profile_push(MGLP_SWAP_DRAIN);
         ok = minigl_raster_drain();
         minigl_profile_pop();
+        mw_ctx_diag_add_present_wait(mw, outgoing, 0U, 0U,
+                                     (uint32_t)(minigl_platform_time_us() - started));
         if (!ok)
             goto done;
         while (g_present_count != 0U) {

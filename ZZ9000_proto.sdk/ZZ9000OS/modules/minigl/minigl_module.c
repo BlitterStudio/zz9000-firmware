@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "minigl_transport.h"
 #include "minigl_platform.h"
@@ -13,6 +14,10 @@
 #define ZZM_MINIGL_TRANSPORT_QUOTA (4U * 1024U * 1024U)
 #define ZZM_MINIGL_CONTEXT_QUOTA (384U * 1024U * 1024U)
 #define ZZM_MINIGL_CAP_RASTERIX 1U
+#ifndef ZZM_MINIGL_BUILD_ID
+#define ZZM_MINIGL_BUILD_ID "unknown"
+#endif
+
 
 struct zzapp_gl;
 
@@ -328,6 +333,7 @@ int zzm_module_init(const zzm_services_t *services)
                                 sizeof(g_registration)))
         return -1;
     g_module.initialized = 1;
+    printf("[ZZM] MINIGL loaded v1 build %s\r\n", ZZM_MINIGL_BUILD_ID);
     return 0;
 }
 

@@ -28,6 +28,199 @@
 #include <arm_neon.h>
 #endif
 
+static uint8_t mw_diag_component(float value)
+{
+    if (value <= 0.0f)
+        return 0U;
+    if (value >= 1.0f)
+        return 255U;
+    return (uint8_t)(value * 255.0f + 0.5f);
+}
+
+static void mw_ctx_diag_draw(mw_ctx *c)
+{
+    mw_frame_diag *diag;
+    mw_texture *texture;
+    mw_diag_bucket key;
+    uint32_t index;
+
+    if (!minigl_profile_enabled())
+        return;
+    diag = &c->diag_frame;
+    if (diag->began_us == 0U)
+        diag->began_us = minigl_platform_time_us();
+    memset(&key, 0, sizeof(key));
+    key.blend_enabled = c->state.blend_enabled;
+    key.blend_src = c->state.blend_src_rgb;
+    key.blend_dst = c->state.blend_dst_rgb;
+    key.texture_enabled = c->state.stages[0].enabled;
+    key.alpha_test = c->state.alpha_test;
+    key.depth_test = c->state.depth_test;
+    key.color = ((uint32_t)mw_diag_component(c->vertex_scratch[4]) << 24U) |
+                ((uint32_t)mw_diag_component(c->vertex_scratch[5]) << 16U) |
+                ((uint32_t)mw_diag_component(c->vertex_scratch[6]) << 8U) |
+                mw_diag_component(c->vertex_scratch[7]);
+    if (key.texture_enabled) {
+        texture = mw_texmgr_find(&c->texmgr, c->state.stages[0].name);
+        key.texture = c->state.stages[0].name;
+        key.tex_env = (uint16_t)c->state.stages[0].environment;
+        if (texture && texture->pixels[0]) {
+            key.tex_width = (uint16_t)texture->widths[0];
+            key.tex_height = (uint16_t)texture->heights[0];
+            key.tex_internal_rgb = texture->internal_rgb[0];
+        }
+    }
+    ++diag->draws;
+    for (index = 0U; index < diag->bucket_count; ++index) {
+        mw_diag_bucket *bucket = &diag->buckets[index];
+
+        if (memcmp(bucket, &key, offsetof(mw_diag_bucket, count)) == 0) {
+            ++bucket->count;
+            return;
+        }
+    }
+    if (diag->bucket_count < MW_DIAG_BUCKETS) {
+        key.count = 1U;
+        diag->buckets[diag->bucket_count++] = key;
+    }
+}
+
+static void mw_ctx_diag_upload(mw_ctx *c, uint32_t bytes, uint32_t format)
+{
+    if (!minigl_profile_enabled())
+        return;
+    ++c->diag_frame.texture_uploads;
+    c->diag_frame.texture_upload_bytes += bytes;
+    c->diag_frame.texture_upload_format = format;
+}
+
+static void mw_ctx_diag_snapshot(mw_ctx *c, uint32_t target)
+{
+    mw_frame_diag *diag;
+
+    if (!minigl_profile_enabled() || target >= 3U)
+        return;
+    diag = &c->diag_frame;
+    diag->ended_us = minigl_platform_time_us();
+    diag->cpu_draws = minigl_raster_draws_software();
+    diag->framebuffer_readbacks = c->diag_framebuffer_readbacks;
+    c->present_diag[target] = *diag;
+    c->diag_frame_ready[target] = 1U;
+    memset(diag, 0, sizeof(*diag));
+    c->diag_framebuffer_readbacks = 0U;
+    c->diag_frame.began_us = minigl_platform_time_us();
+}
+
+void mw_ctx_diag_add_wait(mw_ctx *c, uint32_t copy_us, uint32_t flip_us,
+                          uint32_t drain_us, uint32_t target_us)
+{
+    if (!c || !minigl_profile_enabled())
+        return;
+    c->diag_frame.copy_wait_us += copy_us;
+    c->diag_frame.flip_wait_us += flip_us;
+    c->diag_frame.drain_wait_us += drain_us;
+    c->diag_frame.target_wait_us += target_us;
+}
+
+void mw_ctx_diag_add_present_wait(mw_ctx *c, uint32_t source, uint32_t copy_us,
+                                  uint32_t flip_us, uint32_t drain_us)
+{
+    mw_frame_diag *diag;
+
+    if (!c || source >= 3U || !minigl_profile_enabled())
+        return;
+    diag = c->diag_frame_ready[source] ? &c->present_diag[source] : &c->diag_frame;
+    diag->copy_wait_us += copy_us;
+    diag->flip_wait_us += flip_us;
+    diag->drain_wait_us += drain_us;
+}
+
+void mw_ctx_diag_presented(mw_ctx *c, uint32_t source, const uint8_t *pixels,
+                           uint32_t pitch, uint32_t format, uint32_t width,
+                           uint32_t height)
+{
+#if !defined(MINIGL_HOST_TEST)
+    const mw_frame_diag *diag;
+    uint64_t now;
+    uint64_t frame_us;
+    uint16_t centre = 0U, corner = 0U, plaque = 0U;
+    uint32_t index;
+    size_t used;
+    char line[768];
+
+    if (!c || source >= 3U || !c->diag_frame_ready[source] ||
+        !minigl_profile_enabled())
+        return;
+    diag = &c->present_diag[source];
+    now = minigl_platform_time_us();
+    frame_us = diag->ended_us >= diag->began_us ?
+               diag->ended_us - diag->began_us : 0U;
+    if (diag->draws != 0U && frame_us <= 100000U)
+        return;
+    if (now - c->diag_last_log_us < 1000000U)
+        return;
+    c->diag_last_log_us = now;
+    if (pixels && format == 1U && pitch >= width * 2U && width != 0U && height != 0U) {
+        uint32_t corner_x = 4U < width ? 4U : 0U;
+        const uint8_t *centre_pixel = pixels + (height / 2U) * pitch +
+                                      (width / 2U) * sizeof(uint16_t);
+        const uint8_t *plaque_pixel = pixels + (height / 4U) * pitch +
+                                      (width / 2U) * sizeof(uint16_t);
+
+        corner = (uint16_t)(((uint16_t)pixels[corner_x * 2U] << 8U) |
+                            pixels[corner_x * 2U + 1U]);
+        centre = (uint16_t)(((uint16_t)centre_pixel[0] << 8U) | centre_pixel[1]);
+        plaque = (uint16_t)(((uint16_t)plaque_pixel[0] << 8U) | plaque_pixel[1]);
+    }
+    used = (size_t)snprintf(line, sizeof(line),
+                            "[ZZM] [frame] us=%lu draw=%lu sw=%lu rb=%lu up=%lu/%lu/%08lx "
+                            "wait=sync:%lu copy:%lu flip:%lu drain:%lu target:%lu rgb565=%04x/%04x/%04x states=",
+                            (unsigned long)frame_us, (unsigned long)diag->draws,
+                            (unsigned long)diag->cpu_draws,
+                            (unsigned long)diag->framebuffer_readbacks,
+                            (unsigned long)diag->texture_uploads,
+                            (unsigned long)diag->texture_upload_bytes,
+                            (unsigned long)diag->texture_upload_format,
+                            (unsigned long)diag->sync_wait_us,
+                            (unsigned long)diag->copy_wait_us,
+                            (unsigned long)diag->flip_wait_us,
+                            (unsigned long)diag->drain_wait_us,
+                            (unsigned long)diag->target_wait_us,
+                            (unsigned)centre, (unsigned)corner, (unsigned)plaque);
+    if (used >= sizeof(line))
+        used = sizeof(line) - 1U;
+    for (index = 0U; index < diag->bucket_count && used < sizeof(line); ++index) {
+        const mw_diag_bucket *bucket = &diag->buckets[index];
+        int written = snprintf(line + used, sizeof(line) - used,
+                               "%sn%lu:b%u/%04x/%04x,t%u/%lu/%ux%u/rgb%u,e%04x,"
+                               "c%08lx,a%u,d%u",
+                               index == 0U ? "" : ";", (unsigned long)bucket->count,
+                               (unsigned)bucket->blend_enabled,
+                               (unsigned)bucket->blend_src, (unsigned)bucket->blend_dst,
+                               (unsigned)bucket->texture_enabled,
+                               (unsigned long)bucket->texture,
+                               (unsigned)bucket->tex_width, (unsigned)bucket->tex_height,
+                               (unsigned)bucket->tex_internal_rgb,
+                               (unsigned)bucket->tex_env, (unsigned long)bucket->color,
+                               (unsigned)bucket->alpha_test, (unsigned)bucket->depth_test);
+
+        if (written <= 0 || (size_t)written >= sizeof(line) - used)
+            break;
+        used += (size_t)written;
+    }
+    minigl_platform_log(line);
+    c->diag_frame_ready[source] = 0U;
+#else
+    (void)c;
+    (void)source;
+    (void)pixels;
+    (void)pitch;
+    (void)format;
+    (void)width;
+    (void)height;
+#endif
+}
+
 #if defined(__arm__) && !defined(MINIGL_HOST_TEST)
 #include "xil_cache.h"
 #include "xil_io.h"
@@ -1109,8 +1302,19 @@ void mw_host_destroy(mw_ctx *c)
     if (!c)
         return;
     mw_context_select_allocation_owner(c);
-    if (!minigl_raster_quiesce() && c->rix_enabled)
-        return;
+    if (!minigl_raster_quiesce() && c->rix_enabled) {
+        MiniGLRasterRixDiagnostics rix;
+
+        memset(&rix, 0, sizeof(rix));
+        (void)minigl_raster_get_rix_diagnostics(&rix);
+        minigl_platform_logf("[ZZM] [destroy] quiesce failed pending=%lu/%lu active=%u status=%08lx; aborting graphics\r\n",
+                             (unsigned long)rix.completed_fence,
+                             (unsigned long)rix.last_fence, (unsigned)rix.active,
+                             (unsigned long)rix.status);
+        mw_rix_abort_engines();
+        if (!minigl_raster_quiesce())
+            minigl_platform_log("[ZZM] [destroy] forced abort did not quiesce");
+    }
     minigl_raster_set_fail_stop_target_handler(NULL, NULL);
     minigl_raster_set_cpu_fallback_target_handler(NULL, NULL);
     if (c->rix_target_quarantined) {
@@ -1619,6 +1823,8 @@ target_allocation_failed:
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }
+        mw_ctx_diag_upload(c, width * height * sizeof(*t->pixels[level]),
+                           t->base_format[level]);
         break;
     }
 
@@ -1651,6 +1857,8 @@ target_allocation_failed:
                 mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
                 goto command_complete;
             }
+            mw_ctx_diag_upload(c, width * height * sizeof(*t->pixels[level]),
+                               t->base_format[level]);
         }
         break;
     }
@@ -1901,6 +2109,7 @@ target_allocation_failed:
             goto command_complete;
         }
 
+        mw_ctx_diag_draw(c);
         mw_ctx_sync_to_raster(c);
         minigl_profile_push(MGLP_GEOM);
         minigl_raster_draw_wire_v9((uint16_t)mode, c->vertex_scratch, count, flags, (const uint32_t *)edge_mask);
@@ -1949,6 +2158,7 @@ target_allocation_failed:
         if (c->state.target.buffer_count > 1U)
             minigl_raster_target_discard(
                 c->color_rgb565[c->state.target.back] != 0U);
+        mw_ctx_diag_snapshot(c, outgoing);
         minigl_raster_frame_boundary();
         break;
     }
@@ -1962,10 +2172,15 @@ target_allocation_failed:
         minigl_profile_pop();
         break;
 
-    case MW_SYNC:
+    case MW_SYNC: {
+        uint64_t started = minigl_platform_time_us();
+
         if (!minigl_raster_drain())
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+        c->diag_frame.sync_wait_us +=
+            (uint32_t)(minigl_platform_time_us() - started);
         break;
+    }
 
     case MW_UPLOAD: {
         uint32_t x = mw_be32(p);
@@ -3167,6 +3382,8 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
     }
 
     if (id == MW_READ_PIXELS) {
+        if (minigl_profile_enabled())
+            ++c->diag_framebuffer_readbacks;
         uint32_t format, w, h;
         int32_t x, y;
         uint64_t req_bytes;

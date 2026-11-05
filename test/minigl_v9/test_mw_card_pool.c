@@ -10,6 +10,8 @@
 #include "mw_host.h"
 #include "mw_types.h"
 #include "mw_texture.h"
+#include "mw_ctx.h"
+#include "minigl_raster.h"
 int smp_cpu_id(void) { return 0; }
 uint32_t smp_local_irq_save(void) { return 0U; }
 void smp_local_irq_restore(uint32_t flags) { (void)flags; }
@@ -133,6 +135,24 @@ static void test_texture_arena_growth_and_cap(void)
     assert(card_pool.block_count == 0U);
 }
 
+/* A failed quiesce used to return from mw_host_destroy, retaining every
+ * card-pool allocation until recovery later killed PL330.  Destruction must
+ * abandon the stopped engine and release this owner immediately. */
+static void test_destroy_forces_failed_quiesce(void)
+{
+    const uint32_t owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 9U);
+    mw_ctx *context;
+
+    host_card_pool_reset(128U << 20);
+    context = mw_host_create_owned(64U, 48U, owner);
+    assert(context != NULL);
+    context->rix_enabled = 1U;
+    minigl_raster_release_buffers();
+    mw_host_destroy(context);
+    assert(card_pool.block_count == 0U);
+    assert(card_pool.class_used[CARD_POOL_CLASS_MINIGL] == 0U);
+}
+
 int main(void)
 {
     enum { texture_count = 64U, update_count = 2048U };
@@ -142,6 +162,7 @@ int main(void)
     mw_ctx *context;
 
     test_texture_arena_growth_and_cap();
+    test_destroy_forces_failed_quiesce();
     host_card_pool_reset(128U << 20);
     assert(card_pool.block_count == 0U);
     context = mw_host_create_owned(640U, 480U, owner);
