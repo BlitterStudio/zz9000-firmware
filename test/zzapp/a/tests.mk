@@ -1,6 +1,7 @@
 A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o
 ZZAPP_TESTS += $(BUILD)/a/loader_smoke $(BUILD)/a/runtime_host_test \
-	$(BUILD)/a/loader_elf_test $(BUILD)/a/display_fallback_test
+	$(BUILD)/a/loader_elf_test $(BUILD)/a/display_fallback_test \
+	$(BUILD)/a/core_api_test $(BUILD)/a/map_unmap_test
 
 $(BUILD)/a/zzapp_loader.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
@@ -26,6 +27,14 @@ $(BUILD)/a/loader_elf_test: a/loader_elf_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 $(BUILD)/a/display_fallback_test: a/display_fallback_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o
+
+$(BUILD)/a/core_api_test: a/core_api_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
+
+$(BUILD)/a/map_unmap_test: a/map_unmap_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
 
 # Opt-in: `make test ZZAPP_PROBE_ELF=<app.elf>` feeds a real app ELF through the
 # loader in 64 KiB chunks. Not named *_test.c so auto-discovery skips it.

@@ -558,26 +558,45 @@ return `ZZ_ENOSYS` on older firmware.
 returns the board-relative Zorro III offset for precisely such an allocation;
 it rejects arena and interior pointers. The per-app limit is 16 MiB.
 `zz_mem_info` returns arena total/used/free/largest-free plus host-visible
-used/limit. Host-visible allocations are freed by `zz_free` and are
-unconditionally reclaimed on normal exit, fault, core-1 restart, and Amiga
-reset. This is coherent shareable non-cacheable memory; it is intended for
-an Amiga client, not for app-private working storage.
+used/limit. `zz_free` releases a host-visible allocation immediately, and all
+remaining host-visible allocations are reclaimed on normal exit, fault,
+core-1 restart, and Amiga reset. This is coherent shareable non-cacheable
+memory; it is intended for an Amiga client, not app-private working storage.
 
 `zz_map_file(path, &data, &bytes)` reads a complete launcher-proxied file into
-the app arena. It is read-only by contract and limited to 16 MiB and to the
-free arena at the time of the call. `zz_unmap_file` invalidates the handle
-logically; arena space remains bump-allocated until app teardown.
+a host-visible allocation. It is read-only by contract and limited to 16 MiB.
+`zz_unmap_file(data)` releases that allocation immediately; a later
+`zz_map_file` therefore returns quota to the same app. The pointer is invalid
+after unmap, app exit, fault, restart, or reset.
 
 Card services use a buffer-only synchronous API: no SDK mailbox handles or
 worker jobs leak into the app ABI. `zz_sha256` is the fixed-output crypto
 primitive. `zz_decompress` accepts `ZZ_COMPRESS_*` and reports exact
-input/output counts in `zzapp_service_result`. The call runs inline on the
+input/output counts in `zzapp_service_result`. Both run inline on the
 already-active core-1 app hook rather than queueing and waiting for a core-1
-job, so it cannot deadlock the worker. Decoder/session APIs (JPEG/PNG/WebP
-and MP3/FLAC/Vorbis) remain outside API 0.2 because their existing SDK
-interfaces are stateful mailbox sessions with core-affinity and deadline
-ownership; exposing them safely needs the same session-lifetime accounting as
-their SDK clients.
+job, so they cannot deadlock the worker.
+
+`zz_image_open`, `zz_image_decode`, and `zz_image_close` are core-1-affine
+JPEG, PNG, and WebP tile-buffer sessions. `zz_image_open` takes a caller-owned
+tile buffer and returns a session; each decode feed names that session and
+reports image geometry, input consumption, output bytes, and codec flags.
+The tile buffer and each feed buffer remain valid for the call. At most four
+app image sessions are open at once. `zz_image_close` ends one session; normal
+exit and reset close every tracked session, while a core-1 fault/restart
+poisons their core-1 decoder state after decode-reclaim has released it.
+
+`zz_audio_decode_open`, `zz_audio_decode`, and `zz_audio_decode_close` are
+core-1-inline sessions for `ZZ_AUDIO_MP3`, `ZZ_AUDIO_FLAC`, and
+`ZZ_AUDIO_VORBIS`. A decode call consumes the prefix it reports and writes
+interleaved S16LE PCM; the caller supplies capacity in sample frames and MUST
+provide room for stereo (`pcm_frames * 2` samples), including for streams that
+prove mono after their header. Result rate and channel count are zero until a
+codec has parsed them. MP3 decode needs room for one maximum 1152-frame
+MPEG-1 frame. FLAC and Vorbis may consume a header or partial unit without
+writing PCM, so callers retain unconsumed input and feed it again with later
+bytes. There are at most four app audio sessions; close and normal teardown
+release decoder state on core 1, while a core-1 restart uses decode-reclaim
+and drops the stale ledger entries without invoking core-1 destructors.
 
 `log` is rate-limited to 32 lines per second into the ring and 8 lines per second to the UART. Excess increments `log_drops` and is discarded. App code has no other path to the firmware console.
 

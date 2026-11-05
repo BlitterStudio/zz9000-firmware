@@ -22,6 +22,8 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
                           uint32_t lr, uint32_t far, uint32_t fsr,
                           uint32_t cpsr);
 int zzapp_loader_abort(void);
+void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
+int zzapp_host_mem_info(zzapp_mem_info *out);
 
 #define IMAGE_BYTES 0x200u
 #define PHOFF 52u
@@ -106,6 +108,13 @@ static void app_entry(const void *api, int argc, char **argv)
     (void)argv;
     app_runs++;
     if (reset_running) {
+        zzapp_mem_info mem;
+        void *host_visible;
+
+        host_visible = zzapp_host_alloc(4096u, 256u, ZZ_ALLOC_HOST_VISIBLE);
+        assert(host_visible != NULL);
+        assert(zzapp_host_mem_info(&mem) == ZZ_OK);
+        assert(mem.host_visible_used == 4096u);
         zzapp_on_amiga_reset();
         zzapp_host_yield();
     }
@@ -235,6 +244,12 @@ int main(void)
     reset_running = 1;
     load_hello();
     start_and_exit();
+    {
+        zzapp_mem_info mem;
+
+        assert(zzapp_host_mem_info(&mem) == ZZ_OK);
+        assert(mem.host_visible_used == 0u);
+    }
     reset_running = 0;
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     bind_window();

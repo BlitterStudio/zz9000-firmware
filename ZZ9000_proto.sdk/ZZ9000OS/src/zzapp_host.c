@@ -302,9 +302,13 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
     life32(ZZAPP_LIFE_EXIT_OFF, 0u);
 }
 
+extern void zzapp_api_reclaim_resources(void) __attribute__((weak));
+extern void zzapp_api_poison_resources(void) __attribute__((weak));
 void zzapp_loader_unbound(void)
 {
     host_visible_release_all();
+    if (zzapp_api_reclaim_resources)
+        zzapp_api_reclaim_resources();
     g_card = 0;
     g_mem = NULL;
     g_owner = 0;
@@ -971,6 +975,8 @@ void zzapp_core0_poll(void)
         if (g_owner)
             card_pool_release_owner(&card_pool, g_owner);
 #endif
+        if (zzapp_api_poison_resources)
+            zzapp_api_poison_resources();
         zzapp_loader_unbound();
     }
 }

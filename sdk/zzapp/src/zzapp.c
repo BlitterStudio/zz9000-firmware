@@ -164,6 +164,58 @@ int zz_decompress(uint32_t algorithm, uint32_t flags, const void *src,
                                          dst, dst_bytes, out);
     return ZZ_ENOSYS;
 }
+int zz_image_open(const zzapp_image_open *open, uint32_t *session,
+                  zzapp_image_result *out)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, image_open) && zzapp_api_ptr->image_open)
+        return zzapp_api_ptr->image_open(open, session, out);
+    return ZZ_ENOSYS;
+}
+
+int zz_image_decode(uint32_t session, const void *src, uint32_t src_bytes,
+                    uint32_t flags, zzapp_image_result *out)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, image_decode) &&
+        zzapp_api_ptr->image_decode)
+        return zzapp_api_ptr->image_decode(session, src, src_bytes, flags, out);
+    return ZZ_ENOSYS;
+}
+
+int zz_image_close(uint32_t session)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, image_close) &&
+        zzapp_api_ptr->image_close)
+        return zzapp_api_ptr->image_close(session);
+    return ZZ_ENOSYS;
+}
+
+int zz_audio_decode_open(uint32_t codec, uint32_t *session)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, audio_decode_open) &&
+        zzapp_api_ptr->audio_decode_open)
+        return zzapp_api_ptr->audio_decode_open(codec, session);
+    return ZZ_ENOSYS;
+}
+
+int zz_audio_decode(uint32_t session, const void *src, uint32_t src_bytes,
+                    int16_t *pcm, uint32_t pcm_frames,
+                    zzapp_audio_decode_result *out)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, audio_decode) &&
+        zzapp_api_ptr->audio_decode)
+        return zzapp_api_ptr->audio_decode(session, src, src_bytes, pcm,
+                                           pcm_frames, out);
+    return ZZ_ENOSYS;
+}
+
+int zz_audio_decode_close(uint32_t session)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, audio_decode_close) &&
+        zzapp_api_ptr->audio_decode_close)
+        return zzapp_api_ptr->audio_decode_close(session);
+    return ZZ_ENOSYS;
+}
+
 
 void zz_log(const char *msg, uint32_t len)
 {

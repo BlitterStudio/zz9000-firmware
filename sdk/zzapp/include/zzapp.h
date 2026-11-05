@@ -159,6 +159,40 @@ typedef struct zzapp_service_result {
     uint32_t flags;
 } zzapp_service_result;
 
+#define ZZ_IMAGE_JPEG 1u
+#define ZZ_IMAGE_PNG  2u
+#define ZZ_IMAGE_WEBP 4u
+
+/* Tile-buffer image decode. tile must hold stride * rows bytes. */
+typedef struct zzapp_image_open {
+    uint32_t codec;
+    uint32_t output_format;
+    void *tile;
+    uint32_t stride;
+    uint32_t rows;
+    uint32_t tile_bytes;
+    uint32_t flags;
+} zzapp_image_open;
+
+typedef struct zzapp_image_result {
+    uint32_t image_width;
+    uint32_t image_height;
+    uint32_t bytes_consumed;
+    uint32_t bytes_written;
+    uint32_t flags;
+} zzapp_image_result;
+
+#define ZZ_AUDIO_MP3    1u
+#define ZZ_AUDIO_FLAC   2u
+#define ZZ_AUDIO_VORBIS 3u
+
+typedef struct zzapp_audio_decode_result {
+    uint32_t bytes_consumed;
+    uint32_t frames_written;
+    uint32_t rate;
+    uint32_t channels;
+} zzapp_audio_decode_result;
+
 /*
  * Named GL 1.1 pointers, append-only, size first. Integer parameters are
  * int32_t / uint32_t. No Hyperion or Khronos header. A wrapper whose field
@@ -346,6 +380,18 @@ typedef struct zzapp_api {
                            const void *src, uint32_t src_bytes,
                            void *dst, uint32_t dst_bytes,
                            zzapp_service_result *out);
+    int      (*image_open)(const zzapp_image_open *open, uint32_t *session,
+                           zzapp_image_result *out);
+    int      (*image_decode)(uint32_t session, const void *src,
+                             uint32_t src_bytes, uint32_t flags,
+                             zzapp_image_result *out);
+    int      (*image_close)(uint32_t session);
+    int      (*audio_decode_open)(uint32_t codec, uint32_t *session);
+    int      (*audio_decode)(uint32_t session, const void *src,
+                             uint32_t src_bytes, int16_t *pcm,
+                             uint32_t pcm_frames,
+                             zzapp_audio_decode_result *out);
+    int      (*audio_decode_close)(uint32_t session);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -380,9 +426,9 @@ void    *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
 int      zz_host_address(const void *p, uint32_t *host_offset);
 int      zz_mem_info(zzapp_mem_info *out);
 
-/* Reads a complete proxied file into the app arena. The runtime accepts files
- * up to the currently free app-arena bytes (never more than 16 MiB). The
- * pointer stays valid until zz_unmap_file(), app exit, fault, or reset. */
+/* Reads a complete proxied file into host-visible memory. The runtime accepts
+ * files up to 16 MiB. The pointer stays valid until zz_unmap_file(), app exit,
+ * fault, restart, or reset. */
 int      zz_map_file(const char *path, const void **data, uint32_t *bytes);
 void     zz_unmap_file(const void *data);
 
@@ -394,6 +440,16 @@ int      zz_decompress(uint32_t algorithm, uint32_t flags,
                        const void *src, uint32_t src_bytes,
                        void *dst, uint32_t dst_bytes,
                        zzapp_service_result *out);
+int      zz_image_open(const zzapp_image_open *open, uint32_t *session,
+                       zzapp_image_result *out);
+int      zz_image_decode(uint32_t session, const void *src, uint32_t src_bytes,
+                         uint32_t flags, zzapp_image_result *out);
+int      zz_image_close(uint32_t session);
+int      zz_audio_decode_open(uint32_t codec, uint32_t *session);
+int      zz_audio_decode(uint32_t session, const void *src, uint32_t src_bytes,
+                         int16_t *pcm, uint32_t pcm_frames,
+                         zzapp_audio_decode_result *out);
+int      zz_audio_decode_close(uint32_t session);
 void     zz_free(void *p);
 void     zz_heap_range(void **base, uint32_t *bytes);
 
