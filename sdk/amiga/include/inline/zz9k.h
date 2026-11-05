@@ -10,6 +10,7 @@ extern struct Library *ZZ9KBase;
 #if defined(__GNUC__) && (defined(__amigaos__) || defined(__amiga__) || defined(__AMIGA__))
 #define ZZ9K_APP_INLINE_CLOBBERS_A0_A1 "cc", "memory", "d1"
 #define ZZ9K_APP_INLINE_CLOBBERS_A0 "cc", "memory", "d1", "a1"
+#define ZZ9K_APP_INLINE_CLOBBERS_A0_D0 "cc", "memory", "d0", "d1", "a1"
 
 #define ZZ9K_APP_INLINE_2A(name, offset, type0, arg0, type1, arg1) \
 static __inline int __##name(type0 arg0, type1 arg1) { \
@@ -52,7 +53,7 @@ static __inline uint32_t __ZZ9KAppMessageSignalInline(const ZZ9KAppHandle *handl
 #define ZZ9KAppMessageSignal(handle) __ZZ9KAppMessageSignalInline((handle))
 static __inline void __ZZ9KAppCloseInline(ZZ9KAppHandle *handle) {
   register struct Library *a6 __asm("a6") = ZZ9KBase; register ZZ9KAppHandle *a0 __asm("a0") = handle;
-  __asm volatile("jsr -408(a6)" : "+r"(a0) : "r"(a6) : ZZ9K_APP_INLINE_CLOBBERS_A0); }
+  __asm volatile("jsr -408(a6)" : "+r"(a0) : "r"(a6) : ZZ9K_APP_INLINE_CLOBBERS_A0_D0); }
 #define ZZ9KAppClose(handle) __ZZ9KAppCloseInline((handle))
 #endif
 #endif

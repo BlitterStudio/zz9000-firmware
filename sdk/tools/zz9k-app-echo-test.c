@@ -26,9 +26,11 @@ int main(int argc, char **argv)
   ZZ9KAppMessage sent;
   ZZ9KAppMessage received;
   uint32_t signal;
-  uint32_t count = 4U;
+  uint32_t count = 300U;
   uint32_t sent_count = 0U;
   uint32_t received_count = 0U;
+  uint32_t i;
+  ZZ9KAppStatusInfo final_status;
   int status;
 
   if (argc < 2 || argc > 3) {
@@ -38,7 +40,7 @@ int main(int argc, char **argv)
   if (argc == 3) {
     char *end = 0;
     unsigned long value = strtoul(argv[2], &end, 10);
-    if (!end || *end || value == 0UL || value > 64UL) {
+    if (!end || *end || value == 0UL || value > 65536UL) {
       usage(argv[0]);
       return 10;
     }
@@ -48,6 +50,11 @@ int main(int argc, char **argv)
                          ZZ9K_LIBRARY_VERSION);
   if (!ZZ9KBase) {
     puts("zz9k-app-echo-test: zz9k.library is not installed");
+    return 20;
+  }
+  if (ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT) {
+    puts("zz9k-app-echo-test: zz9k.library app client is too old");
+    CloseLibrary(ZZ9KBase);
     return 20;
   }
   port = CreateMsgPort();
@@ -69,9 +76,9 @@ int main(int argc, char **argv)
   while (sent_count < count) {
     ULONG signals;
 
-    memset(&sent, 0, sizeof(sent));
-    sent.bytes[0] = (uint8_t)sent_count;
-    sent.bytes[1] = 0xa5U;
+    for (i = 0U; i < sizeof(sent.bytes); i++) {
+      sent.bytes[i] = (uint8_t)(sent_count * 31U + i);
+    }
     status = ZZ9KAppSendMessage(app, &sent);
     if (status != ZZ9K_STATUS_OK) goto fail;
     sent_count++;
@@ -84,8 +91,8 @@ int main(int argc, char **argv)
       /* Notification payload is advisory; drain messages before Close. */
     }
     status = ZZ9KAppGetMessage(app, &received);
-    if (status != ZZ9K_STATUS_OK || received.bytes[0] != received_count ||
-        received.bytes[1] != 0xa5U) {
+    if (status != ZZ9K_STATUS_OK || memcmp(sent.bytes, received.bytes,
+                                            sizeof(sent.bytes)) != 0) {
       if (status == ZZ9K_STATUS_OK) status = ZZ9K_STATUS_INTERNAL_ERROR;
       goto fail;
     }
@@ -93,6 +100,18 @@ int main(int argc, char **argv)
   }
   status = ZZ9KAppStop(app);
   if (status != ZZ9K_STATUS_OK) goto fail;
+  for (;;) {
+    ULONG signals = Wait(signal | SIGBREAKF_CTRL_C);
+
+    if (signals & SIGBREAKF_CTRL_C) {
+      status = ZZ9K_STATUS_CANCELLED;
+      goto fail;
+    }
+    while (GetMsg(port)) {}
+    status = ZZ9KAppStatus(app, &final_status);
+    if (status != ZZ9K_STATUS_OK) goto fail;
+    if (final_status.state == ZZ9K_APP_STATE_IDLE) break;
+  }
   ZZ9KAppClose(app);
   DeleteMsgPort(port);
   CloseLibrary(ZZ9KBase);
@@ -101,11 +120,11 @@ int main(int argc, char **argv)
 
 fail:
   printf("zz9k-app-echo-test: FAIL (%d)\n", status);
-  if (app) ZZ9KAppClose(app);
   if (port) {
     while (GetMsg(port)) {}
-    DeleteMsgPort(port);
   }
+  if (app) ZZ9KAppClose(app);
+  if (port) DeleteMsgPort(port);
   CloseLibrary(ZZ9KBase);
   return 20;
 }

@@ -30,6 +30,21 @@
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
+#define ZZ9K_MMU_MAPP_CACHEINHIBIT 0x00000040UL
+#define ZZ9K_MMU_MAPP_COPYBACK 0x00002000UL
+#define ZZ9K_MMU_MAPP_IMPRECISE 0x00200000UL
+#define ZZ9K_MMU_MAPP_NONSERIALIZED 0x20000000UL
+#define ZZ9K_MMU_CACHE_MASK (ZZ9K_MMU_MAPP_CACHEINHIBIT | \
+                             ZZ9K_MMU_MAPP_COPYBACK | \
+                             ZZ9K_MMU_MAPP_IMPRECISE | \
+                             ZZ9K_MMU_MAPP_NONSERIALIZED)
+
+struct mmu_context;
+
+struct zz9k_mmu_page {
+  uint32_t address;
+  uint32_t properties;
+};
 #define ZZ9K_LIB_IRQ_WAIT_MICROS 10UL
 
 struct ZZ9KAppHandle {
@@ -42,9 +57,20 @@ struct ZZ9KAppHandle {
   ULONG heartbeat;
   ULONG vblank_pending;
   uint32_t generation;
+  struct Library *mmu_base;
+  struct mmu_context *mmu_context;
+  struct zz9k_mmu_page *mmu_pages;
+  uint32_t mmu_page_count;
+  uint32_t mmu_page_bytes;
   UBYTE active;
   UBYTE started;
   UBYTE event_posted;
+};
+
+struct ZZ9KOpener {
+  struct ZZ9KOpener *next;
+  struct Task *task;
+  uint32_t references;
 };
 
 struct ZZ9KBase {
@@ -53,6 +79,7 @@ struct ZZ9KBase {
   struct SignalSemaphore lock;
   ZZ9KLibrary core;
   struct Interrupt irq;
+  struct Interrupt vblank_irq;
   struct Task *irq_task;
   ULONG irq_signal_mask;
   ULONG irq_hits;
@@ -60,6 +87,7 @@ struct ZZ9KBase {
   int irq_int_bit;
   BYTE irq_signal_bit;
   UBYTE irq_installed;
+  UBYTE vblank_installed;
   UBYTE irq_enabled;
   struct Process *dispatcher_process;
   struct Task *dispatcher_task;
@@ -74,6 +102,7 @@ struct ZZ9KBase {
   UBYTE dispatcher_starting;
   UBYTE dispatcher_stop_requested;
   struct ZZ9KAppHandle *app;
+  struct ZZ9KOpener *openers;
   int last_open_status;
 };
 
@@ -90,11 +119,14 @@ static BPTR zz9k_lib_expunge(REG(a6, struct ZZ9KBase *base));
 static ULONG zz9k_lib_null(void);
 static struct ZZ9KBase *zz9k_lib_init(REG(a0, BPTR segment));
 static ULONG zz9k_lib_irq_isr(REG(a1, struct ZZ9KBase *base));
+static ULONG zz9k_lib_vblank_isr(REG(a1, struct ZZ9KBase *base));
 static int zz9k_lib_wait_for_irq_event(ZZ9KLibrary *library,
                                        void *user_data);
 static void zz9k_lib_dispatcher_proc(void);
 static void zz9k_lib_app_service_locked(struct ZZ9KBase *base);
 static void zz9k_lib_app_close_all_locked(struct ZZ9KBase *base);
+static void zz9k_lib_app_destroy_locked(struct ZZ9KBase *base,
+                                        ZZ9KAppHandle *handle);
 
 static int zz9k_lib_query_caps(REG(a6, struct ZZ9KBase *base),
                                REG(a0, ZZ9KCaps *caps));
@@ -433,32 +465,35 @@ static ULONG zz9k_lib_irq_isr(REG(a1, struct ZZ9KBase *base))
 {
   uint16_t status;
 
-  if (!base || !base->core.ctx) {
-    return 0;
-  }
-
-  if (zz9k_interrupt_status(base->core.ctx, &status) != ZZ9K_STATUS_OK) {
-    return 0;
-  }
-  if ((status & (ZZ9K_INTERRUPT_SDK | ZZ9K_INTERRUPT_VBLANK)) == 0) {
+  if (!base || !base->core.ctx ||
+      zz9k_interrupt_status(base->core.ctx, &status) != ZZ9K_STATUS_OK ||
+      (status & ZZ9K_INTERRUPT_SDK) == 0U) {
     return 0;
   }
 
   base->irq_last_status = status;
   base->irq_hits++;
-  if (status & ZZ9K_INTERRUPT_SDK) {
-    zz9k_completion_irq_ack(base->core.ctx);
+  zz9k_completion_irq_ack(base->core.ctx);
+  if (base->irq_task && base->irq_signal_mask) {
+    Signal(base->irq_task, base->irq_signal_mask);
   }
-  /* The interrupt server neither calls DOS nor touches the mailbox.  The
-   * dispatcher publishes the lease and posts notifications in task context. */
-  if ((status & ZZ9K_INTERRUPT_VBLANK) && base->app && base->app->active) {
+  return 1;
+}
+
+/* INTB_VERTB is a real Amiga vblank source.  The board VBlank source is
+ * optional and starts disabled, so it cannot carry an app lease. */
+static ULONG zz9k_lib_vblank_isr(REG(a1, struct ZZ9KBase *base))
+{
+  if (!base) {
+    return 0;
+  }
+  if (base->app && base->app->active) {
     base->app->vblank_pending++;
   }
   if (base->irq_task && base->irq_signal_mask) {
     Signal(base->irq_task, base->irq_signal_mask);
   }
-
-  return 1;
+  return 0;
 }
 
 static int zz9k_lib_irq_install_locked(struct ZZ9KBase *base)
@@ -466,10 +501,7 @@ static int zz9k_lib_irq_install_locked(struct ZZ9KBase *base)
   if (!base || !base->core.ctx) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
-  if (!zz9k_completion_irq_supported(base->core.ctx)) {
-    return ZZ9K_STATUS_UNSUPPORTED;
-  }
-  if (base->irq_installed) {
+  if (!zz9k_completion_irq_supported(base->core.ctx) || base->irq_installed) {
     return ZZ9K_STATUS_OK;
   }
 
@@ -488,9 +520,25 @@ static int zz9k_lib_irq_install_locked(struct ZZ9KBase *base)
   Forbid();
   AddIntServer(base->irq_int_bit, &base->irq);
   Permit();
-
   base->irq_installed = 1;
   return ZZ9K_STATUS_OK;
+}
+
+static void zz9k_lib_vblank_install_locked(struct ZZ9KBase *base)
+{
+  if (!base || base->vblank_installed) {
+    return;
+  }
+  memset(&base->vblank_irq, 0, sizeof(base->vblank_irq));
+  base->vblank_irq.is_Node.ln_Type = NT_INTERRUPT;
+  base->vblank_irq.is_Node.ln_Pri = 0;
+  base->vblank_irq.is_Node.ln_Name = (char *)"zz9k.library app VBlank";
+  base->vblank_irq.is_Data = base;
+  base->vblank_irq.is_Code = (void *)zz9k_lib_vblank_isr;
+  Forbid();
+  AddIntServer(INTB_VERTB, &base->vblank_irq);
+  Permit();
+  base->vblank_installed = 1;
 }
 
 static void zz9k_lib_irq_disable_locked(struct ZZ9KBase *base)
@@ -519,10 +567,22 @@ static void zz9k_lib_irq_remove_locked(struct ZZ9KBase *base)
   base->irq_signal_mask = 0;
 }
 
+static void zz9k_lib_vblank_remove_locked(struct ZZ9KBase *base)
+{
+  if (!base || !base->vblank_installed) {
+    return;
+  }
+  Forbid();
+  RemIntServer(INTB_VERTB, &base->vblank_irq);
+  Permit();
+  base->vblank_installed = 0;
+}
+
 static void zz9k_lib_irq_stop_locked(struct ZZ9KBase *base)
 {
   zz9k_lib_irq_disable_locked(base);
   zz9k_lib_irq_remove_locked(base);
+  zz9k_lib_vblank_remove_locked(base);
 }
 
 static int zz9k_lib_prepare_irq_wait_locked(struct ZZ9KBase *base)
@@ -742,12 +802,18 @@ static void zz9k_lib_dispatcher_proc(void)
   base->dispatcher_signal_mask = signal_mask;
   base->irq_task = (struct Task *)process;
   base->irq_signal_mask = signal_mask;
+  zz9k_lib_vblank_install_locked(base);
   status = zz9k_lib_irq_install_locked(base);
-  if (status == ZZ9K_STATUS_OK) {
+  if (status == ZZ9K_STATUS_OK &&
+      zz9k_completion_irq_supported(base->core.ctx)) {
     (void)zz9k_completion_irq_ack(base->core.ctx);
     status = zz9k_completion_irq_enable(base->core.ctx, 1);
+    if (status == ZZ9K_STATUS_OK) {
+      base->irq_enabled = 1;
+    }
   }
   if (status != ZZ9K_STATUS_OK) {
+    zz9k_lib_vblank_remove_locked(base);
     base->dispatcher_process = 0;
     base->dispatcher_task = 0;
     base->dispatcher_signal_bit = -1;
@@ -760,8 +826,6 @@ static void zz9k_lib_dispatcher_proc(void)
     FreeSignal(signal_bit);
     return;
   }
-
-  base->irq_enabled = 1;
   base->dispatcher_running = 1;
   base->dispatcher_starting = 0;
   zz9k_lib_signal_dispatcher_start_locked(base, ZZ9K_STATUS_OK);
@@ -802,6 +866,7 @@ static void zz9k_lib_dispatcher_proc(void)
   ObtainSemaphore(&base->lock);
   zz9k_lib_irq_disable_locked(base);
   zz9k_lib_irq_remove_locked(base);
+  zz9k_lib_vblank_remove_locked(base);
   base->dispatcher_process = 0;
   base->dispatcher_task = 0;
   base->dispatcher_signal_bit = -1;
@@ -844,7 +909,7 @@ static int zz9k_lib_dispatcher_ensure(struct ZZ9KBase *base)
     return ZZ9K_STATUS_OK;
   }
 
-  if (!base->core.ctx || !zz9k_completion_irq_supported(base->core.ctx)) {
+  if (!base->core.ctx) {
     ReleaseSemaphore(&base->lock);
     FreeSignal(signal_bit);
     return ZZ9K_STATUS_UNSUPPORTED;
@@ -969,12 +1034,51 @@ static void zz9k_lib_leave(struct ZZ9KBase *base)
   }
 }
 
+static struct ZZ9KOpener *zz9k_lib_find_opener_locked(
+    struct ZZ9KBase *base, struct Task *task, struct ZZ9KOpener **previous)
+{
+  struct ZZ9KOpener *opener;
+  struct ZZ9KOpener *prior = 0;
+
+  for (opener = base->openers; opener; opener = opener->next) {
+    if (opener->task == task) {
+      if (previous) *previous = prior;
+      return opener;
+    }
+    prior = opener;
+  }
+  if (previous) *previous = prior;
+  return 0;
+}
+
 static struct ZZ9KBase *zz9k_lib_open(REG(a6, struct ZZ9KBase *base))
 {
-  if (!base) {
-    return 0;
-  }
+  struct ZZ9KOpener *opener;
+  struct Task *task;
 
+  if (!base) return 0;
+  task = FindTask(0);
+  ObtainSemaphore(&base->lock);
+  opener = zz9k_lib_find_opener_locked(base, task, 0);
+  if (opener) opener->references++;
+  ReleaseSemaphore(&base->lock);
+  if (!opener) {
+    opener = (struct ZZ9KOpener *)AllocVec(sizeof(*opener),
+                                            MEMF_PUBLIC | MEMF_CLEAR);
+    if (!opener) return 0;
+    opener->task = task;
+    opener->references = 1U;
+    ObtainSemaphore(&base->lock);
+    if (zz9k_lib_find_opener_locked(base, task, 0)) {
+      zz9k_lib_find_opener_locked(base, task, 0)->references++;
+      ReleaseSemaphore(&base->lock);
+      FreeVec(opener);
+    } else {
+      opener->next = base->openers;
+      base->openers = opener;
+      ReleaseSemaphore(&base->lock);
+    }
+  }
   base->library.lib_OpenCnt++;
   base->library.lib_Flags &= (uint8_t)~LIBF_DELEXP;
   return base;
@@ -983,12 +1087,31 @@ static struct ZZ9KBase *zz9k_lib_open(REG(a6, struct ZZ9KBase *base))
 static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
 {
   BPTR segment;
+  struct ZZ9KOpener *opener;
+  struct ZZ9KOpener *previous;
+  struct Task *task;
+  int release_opener;
 
-  if (!base || base->library.lib_OpenCnt == 0) {
+  if (!base || base->library.lib_OpenCnt == 0) return 0;
+  task = FindTask(0);
+  ObtainSemaphore(&base->lock);
+  opener = zz9k_lib_find_opener_locked(base, task, &previous);
+  if (!opener) {
+    ReleaseSemaphore(&base->lock);
     return 0;
   }
-
+  opener->references--;
+  release_opener = opener->references == 0U;
+  if (release_opener) {
+    if (base->app && base->app->owner_task == task) {
+      zz9k_lib_app_destroy_locked(base, base->app);
+    }
+    if (previous) previous->next = opener->next;
+    else base->openers = opener->next;
+  }
   base->library.lib_OpenCnt--;
+  ReleaseSemaphore(&base->lock);
+  if (release_opener) FreeVec(opener);
   if (base->library.lib_OpenCnt == 0) {
     zz9k_lib_dispatcher_stop(base);
     ObtainSemaphore(&base->lock);
@@ -1001,7 +1124,6 @@ static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
       return segment;
     }
   }
-
   return 0;
 }
 

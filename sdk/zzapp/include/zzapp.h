@@ -198,6 +198,9 @@ typedef struct zzapp_audio_decode_result {
     uint32_t channels;
 } zzapp_audio_decode_result;
 
+#define ZZ_AUDIO_DECODE_EOF   (1U << 0)
+#define ZZ_AUDIO_DECODE_DRAIN (1U << 1)
+
 /*
  * Named GL 1.1 pointers, append-only, size first. Integer parameters are
  * int32_t / uint32_t. No Hyperion or Khronos header. A wrapper whose field
@@ -393,8 +396,8 @@ typedef struct zzapp_api {
     int      (*image_close)(uint32_t session);
     int      (*audio_decode_open)(uint32_t codec, uint32_t *session);
     int      (*audio_decode)(uint32_t session, const void *src,
-                             uint32_t src_bytes, int16_t *pcm,
-                             uint32_t pcm_frames,
+                             uint32_t src_bytes, uint32_t flags,
+                             int16_t *pcm, uint32_t pcm_frames,
                              zzapp_audio_decode_result *out);
     int      (*audio_decode_close)(uint32_t session);
     /* API 0.2 host: Shell/Workbench console and 32-byte client messages. */
@@ -457,7 +460,7 @@ int      zz_image_decode(uint32_t session, const void *src, uint32_t src_bytes,
 int      zz_image_close(uint32_t session);
 int      zz_audio_decode_open(uint32_t codec, uint32_t *session);
 int      zz_audio_decode(uint32_t session, const void *src, uint32_t src_bytes,
-                         int16_t *pcm, uint32_t pcm_frames,
+                         uint32_t flags, int16_t *pcm, uint32_t pcm_frames,
                          zzapp_audio_decode_result *out);
 int      zz_audio_decode_close(uint32_t session);
 void     zz_free(void *p);
