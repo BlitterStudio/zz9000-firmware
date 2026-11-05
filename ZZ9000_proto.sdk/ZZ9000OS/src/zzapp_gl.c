@@ -47,6 +47,10 @@
 #ifndef ZZ_GL_BIND_SYNC_PRESENT
 #define ZZ_GL_BIND_SYNC_PRESENT 2u
 #endif
+#ifndef ZZAPP_F_MAILBOX
+#define ZZAPP_F_MAILBOX (1u << 15)
+#endif
+
 
 
 #ifndef ZZAPP_GL_HAVE_HEADER
@@ -218,7 +222,8 @@ int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
 {
     if (!host || !host->api_enter || !host->api_leave ||
         !host->bound_display || !host->flip_bound || !host->flip_idle ||
-        !host->generation || !host->display_layout)
+        !host->generation || !host->display_layout || !host->display_flags ||
+        !host->stop_requested || !host->yield_wait)
         return ZZ_EINVAL;
     g_module_app_host = host;
     return ZZ_OK;
@@ -262,6 +267,26 @@ int zzm_module_svc_display_flip(uint32_t surface_id)
     (void)surface_id;
     return zzm_module_display_flip_bound();
 }
+
+uint32_t zzm_module_display_flags(void)
+{
+    return g_module_app_host->display_flags();
+}
+
+int zzm_module_stop_requested(void)
+{
+    return g_module_app_host->stop_requested();
+}
+
+void zzm_module_yield_wait(void)
+{
+    g_module_app_host->yield_wait();
+}
+
+uint32_t zzm_module_current_generation(void)
+{
+    return g_module_app_host->generation();
+}
 #else
 __attribute__((weak)) void zzapp_api_enter(void) {}
 __attribute__((weak)) void zzapp_api_leave(void) {}
@@ -301,6 +326,23 @@ __attribute__((weak)) int zzapp_svc_display_flip_async(uint32_t surface_id)
     (void)surface_id;
     return ZZ_ENOSYS;
 }
+
+__attribute__((weak)) uint32_t zzapp_services_flags(void)
+{
+    return 0U;
+}
+
+__attribute__((weak)) int zzapp_services_stop_requested(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) void zzapp_host_yield_wait(void) {}
+
+__attribute__((weak)) uint32_t zzapp_current_generation(void)
+{
+    return 0U;
+}
 #endif
 
 #if defined(MINIGL_MODULE)
@@ -317,6 +359,10 @@ __attribute__((weak)) int zzapp_svc_display_flip_async(uint32_t surface_id)
 #define zzapp_display_flip_bound zzm_module_display_flip_bound
 #define zzapp_display_flip_idle zzm_module_display_flip_idle
 #define zzapp_svc_display_flip zzm_module_svc_display_flip
+#define zzapp_services_flags zzm_module_display_flags
+#define zzapp_services_stop_requested zzm_module_stop_requested
+#define zzapp_host_yield_wait zzm_module_yield_wait
+#define zzapp_current_generation zzm_module_current_generation
 #endif
 
 #if defined(MINIGL_HOST_TEST)
@@ -569,6 +615,7 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
     if (format != ZZ_FMT_RGB565 && format != ZZ_FMT_BGRA8888)
         return ZZ_EINVAL;
     g_zero_copy = (flags & ZZ_GL_BIND_DIRECT_PRESENT) != 0U &&
+                  (zzapp_services_flags() & ZZAPP_F_MAILBOX) == 0U &&
                   format == ZZ_FMT_RGB565 &&
                   zzapp_display_layout(&layout) == ZZ_OK &&
                   layout == ZZ_LAYOUT_RGB565_LE && pitch == w * 2U &&
@@ -748,8 +795,6 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
             minigl_profile_pop();
             return 0;
         }
-        minigl_platform_cache_clean(NULL, card, pitch * h);
-        minigl_platform_barrier(NULL);
     }
     minigl_profile_pop();
     minigl_profile_push(MGLP_SWAP_FLIP);
@@ -764,6 +809,20 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
         g_present_queue[0] = g_present_queue[1];
     return 1;
 }
+
+static int zzapp_gl_wait_flip_idle(void)
+{
+    uint32_t generation = zzapp_current_generation();
+
+    while (!zzapp_display_flip_idle()) {
+        if (zzapp_services_stop_requested() ||
+            zzapp_current_generation() != generation)
+            return 0;
+        zzapp_host_yield_wait();
+    }
+    return 1;
+}
+
 
 static int zzapp_gl_make_target_available(mw_ctx *mw)
 {
@@ -781,8 +840,8 @@ static int zzapp_gl_make_target_available(mw_ctx *mw)
             continue;
         }
         minigl_profile_push(MGLP_SWAP_FLIP);
-        while (!zzapp_display_flip_idle()) {
-        }
+        if (!zzapp_gl_wait_flip_idle())
+            return 0;
         minigl_profile_pop();
     }
     return 1;
@@ -836,8 +895,8 @@ void zzapp_gl_swap(void)
         if (!ok || !zzapp_gl_present_pending(mw))
             goto done;
         minigl_profile_push(MGLP_SWAP_FLIP);
-        while (!zzapp_display_flip_idle()) {
-        }
+        if (!zzapp_gl_wait_flip_idle())
+            goto done;
         minigl_profile_pop();
     }
     else if (g_sync_present) {
@@ -852,8 +911,8 @@ void zzapp_gl_swap(void)
             if (!zzapp_gl_present_pending(mw))
                 goto done;
             minigl_profile_push(MGLP_SWAP_FLIP);
-            while (!zzapp_display_flip_idle()) {
-            }
+            if (!zzapp_gl_wait_flip_idle())
+                goto done;
             minigl_profile_pop();
         }
     }

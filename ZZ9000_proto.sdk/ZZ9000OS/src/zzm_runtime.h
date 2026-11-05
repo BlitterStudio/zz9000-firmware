@@ -180,6 +180,9 @@ typedef struct zzm_app_gl_host_service {
     int (*flip_idle)(uint32_t generation);
     uint32_t (*generation)(void);
     int (*display_layout)(uint32_t *layout);
+    uint32_t (*display_flags)(void);
+    int (*stop_requested)(void);
+    void (*yield_wait)(void);
 } zzm_app_gl_host_service_t;
 
 typedef struct zzm_profile_service {

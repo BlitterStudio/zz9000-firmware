@@ -28,6 +28,17 @@ extern mw_ctx *amiberry_transport_inproc_ctx(void);
 static uint8_t module_file[ZZM_V3_HEADER_SIZE + 32U];
 static uint32_t module_offset;
 static uint64_t now_us;
+static uint32_t display_width = 640U;
+static uint32_t display_height = 480U;
+static uint32_t display_pitch = 640U * 4U;
+static uint32_t display_format = 2U;
+static uint32_t display_front = 0x08000000U;
+static uint32_t display_back = 0x08000000U;
+static uint32_t display_layout = 5U;
+static uint32_t display_flags;
+static int flip_idle = 1;
+static int hold_flip;
+static unsigned wait_yields;
 
 
 int smp_cpu_id(void) { return 1; }
@@ -65,20 +76,25 @@ uint32_t zzapp_current_generation(void) { return 1U; }
 int zzapp_display_bound(uint32_t *width, uint32_t *height, uint32_t *pitch,
                         uint32_t *format, uint32_t *front, uint32_t *back)
 {
-    *width = 640U;
-    *height = 480U;
-    *pitch = 640U * 4U;
-    *format = 2U;
-    *front = 0x08000000U;
-    *back = 0x08000000U;
+    *width = display_width;
+    *height = display_height;
+    *pitch = display_pitch;
+    *format = display_format;
+    *front = display_front;
+    *back = display_back;
     return 0;
 }
 int zzapp_display_layout(uint32_t *layout)
 {
-    *layout = 5U;
+    *layout = display_layout;
     return 0;
 }
-int zzapp_display_flip_bound(void) { return 0; }
+int zzapp_display_flip_bound(void)
+{
+    if (hold_flip)
+        flip_idle = 0;
+    return 0;
+}
 int zzapp_svc_display_flip(uint32_t surface_id)
 {
     (void)surface_id;
@@ -92,7 +108,14 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
 
 int zzapp_display_flip_idle(void)
 {
-    return 1;
+    return flip_idle;
+}
+uint32_t zzapp_services_flags(void) { return display_flags; }
+int zzapp_services_stop_requested(void) { return 0; }
+void zzapp_host_yield_wait(void)
+{
+    ++wait_yields;
+    flip_idle = 1;
 }
 
 int zzm_registry_register_ops(uint32_t module_id, const void *ops, uint32_t bytes)
@@ -265,6 +288,29 @@ int main(void)
     }
     assert(ops->app_swap(context) == 0);
     assert(card_pool.class_used[CARD_POOL_CLASS_MINIGL_CONTEXT] >= (128U << 20));
+    ops->app_unbind(context);
+    display_width = 640U;
+    display_height = 480U;
+    display_pitch = 1280U;
+    display_format = 1U;
+    display_front = 0x08000000U;
+    display_back = 0x08100000U;
+    display_layout = 2U;
+    display_flags = 1U << 15;
+    assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_DIRECT_PRESENT, &gl) == 0);
+    assert(amiberry_transport_inproc_ctx()->state.target.buffer_count == 3U);
+    assert(ops->app_swap(context) == 0);
+    assert(ops->app_swap(context) == 0);
+    ops->app_unbind(context);
+
+    display_flags = 0U;
+    hold_flip = 1;
+    flip_idle = 1;
+    wait_yields = 0U;
+    assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_SYNC_PRESENT, &gl) == 0);
+    assert(ops->app_swap(context) == 0);
+    assert(wait_yields != 0U);
+    hold_flip = 0;
     ops->app_unbind(context);
     ops->app_reclaim(context, 1U);
     assert(zzm_minigl_begin_reset() == ZZM_MINIGL_RESET_QUIESCENT);

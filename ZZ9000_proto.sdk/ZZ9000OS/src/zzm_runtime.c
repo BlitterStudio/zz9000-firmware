@@ -27,6 +27,18 @@ extern int zzm_test_printf(const char *format, ...);
 #define ZZM_RUNTIME_LOG printf
 #endif
 
+__attribute__((weak)) uint32_t zzapp_services_flags(void)
+{
+    return 0U;
+}
+
+__attribute__((weak)) int zzapp_services_stop_requested(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) void zzapp_host_yield_wait(void) {}
+
 #define ZZM_RUNTIME_MAX_OWNERS 32U
 #define ZZM_RUNTIME_MAX_WINDOWS 4U
 #define ZZM_RUNTIME_MAX_COUNTERS 16U
@@ -949,7 +961,8 @@ static const zzm_palette_service_t palette_service = {
 static const zzm_app_gl_host_service_t app_gl_host_service = {
     ZZM_SERVICE_APP_GL_HOST_V3, sizeof(app_gl_host_service), zzapp_api_enter,
     zzapp_api_leave, zzapp_display_bound, module_app_flip_bound,
-    module_app_flip_idle, zzapp_current_generation, zzapp_display_layout
+    module_app_flip_idle, zzapp_current_generation, zzapp_display_layout,
+    zzapp_services_flags, zzapp_services_stop_requested, zzapp_host_yield_wait
 };
 static const zzm_profile_service_t profile_service = {
     ZZM_SERVICE_PROFILE_V3, sizeof(profile_service), module_profile_register,
