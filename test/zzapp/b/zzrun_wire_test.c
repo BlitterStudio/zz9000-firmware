@@ -32,6 +32,7 @@ void zzapp_loader_set_state(uint32_t state)
 int zzapp_loader_begin(void)
 {
     begun++;
+    zzapp_services_on_launch();
     return ZZ_OK;
 }
 
@@ -104,12 +105,40 @@ int main(void)
     zzapp_services_test_reset();
     memset(launcher_window, 0, sizeof(launcher_window));
     zzapp_services_test_set_window(launcher_window, sizeof(launcher_window));
+    zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF, 7u);
+    zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF + 4U, 3u);
+    zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF, 5u);
+    zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF + 4U, 1u);
+    zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF +
+                   ZZAPP_CONSOLE_EOF_OFF, 1u);
+    zzapp_put_be32(launcher_window + ZZAPP_MSG_H2A_OFF, 2u);
+    zzapp_put_be32(launcher_window + ZZAPP_MSG_A2H_OFF, 3u);
+    zzapp_put_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                   ZZAPP_AUDIO_HEAD_OFF, 12u);
+    zzapp_put_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                   ZZAPP_AUDIO_TAIL_OFF, 4u);
+    zzapp_put_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                   ZZAPP_AUDIO_ROUTE_OFF, ZZAPP_AUDIO_ROUTE_AHI);
 
     status = dispatch_deferred(ZZAPP_OP_LOAD_BEGIN, 0, 0U, 1U, reply,
                                &reply_len);
     assert(status == SDK_STATUS_OK);
     assert(begun == 1U);
     assert(zzapp_services_state() == ZZAPP_ST_LOADING);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF + 4U) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF + 4U) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF +
+                          ZZAPP_CONSOLE_EOF_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_MSG_H2A_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_MSG_A2H_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                          ZZAPP_AUDIO_HEAD_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                          ZZAPP_AUDIO_TAIL_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                          ZZAPP_AUDIO_ROUTE_OFF) == ZZAPP_AUDIO_ROUTE_CARD);
 
     memcpy(launcher_window + ZZAPP_STAGING_OFF, "hello", 5U);
     zzapp_put_be32(request + ZZAPP_CHUNK_FILE_OFF, 0U);
@@ -192,6 +221,39 @@ int main(void)
         assert(zzapp_svc_msg_poll(reply_message) == 1);
         assert(memcmp(message, reply_message, sizeof(message)) == 0);
         assert(zzapp_svc_msg_poll(reply_message) == 0);
+    }
+    {
+        zzapp_audio app_audio;
+        uint32_t frame;
+
+        zzapp_services_or_flags(ZZAPP_F_LAUNCHER_AUDIO_AHI);
+        assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == ZZ_OK);
+        for (frame = 0u; frame < 4u; frame++)
+            app_audio.samples[frame * 2u] = (int16_t)frame;
+        *app_audio.write_frame = 4u;
+        zzapp_services_poll();
+        assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                              ZZAPP_AUDIO_HEAD_OFF) == 16u);
+        zzapp_services_poll();
+        assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                              ZZAPP_AUDIO_HEAD_OFF) == 16u);
+        zzapp_put_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                       ZZAPP_AUDIO_TAIL_OFF, 16u);
+        zzapp_services_poll();
+        assert(*app_audio.read_frame == 4u);
+        assert(zzapp_svc_audio_close() == ZZ_OK);
+        assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                              ZZAPP_AUDIO_ROUTE_OFF) == ZZAPP_AUDIO_ROUTE_CARD);
+        assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                              ZZAPP_AUDIO_HEAD_OFF) == 0u);
+        assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                              ZZAPP_AUDIO_TAIL_OFF) == 0u);
+        assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == ZZ_OK);
+        assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                              ZZAPP_AUDIO_HEAD_OFF) == 0u);
+        assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                              ZZAPP_AUDIO_TAIL_OFF) == 0u);
+        assert(zzapp_svc_audio_close() == ZZ_OK);
     }
     return 0;
 }

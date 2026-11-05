@@ -367,13 +367,18 @@ Argv area: `u32` argc, then 16 offsets from the window base, then the strings, e
 ### API 0.2 host transport: console, audio, and messages
 
 The API 0.2 additions retain every v0 offset and use only the extension after
-`0x60000`. The console-output byte ring is `0x60000`/64 KiB and the
-console-input byte ring is `0x70000`/8 KiB. Both have big-endian monotonic
-`head` and `tail` words; the input header's word at `+8` is EOF. The app is
-the output producer and input consumer. ZZRun is the inverse. A full output
-ring is backpressure: the app waits in its API call and no bytes are discarded.
-Input is nonblocking at the launcher; when its input handle reaches EOF it sets
-the EOF word after publishing every preceding byte.
+`0x60000`. The console-output region is `0x60000`/64 KiB with a 32 KiB
+payload; the console-input region is `0x70000`/8 KiB with a 4 KiB payload.
+Both payload capacities are powers of two, so their big-endian monotonic `u32`
+head and tail counters preserve the physical position across counter wrap; the
+remaining region bytes are reserved. The input header's word at `+8` is EOF.
+The app is the output producer and input consumer. ZZRun is the inverse. A
+full output ring is backpressure: the app waits in its API call and no bytes
+are discarded. Input is nonblocking at the launcher; when its input handle
+reaches EOF it sets the EOF word after publishing every preceding byte. On an
+app terminal state ZZRun drains the complete console-output ring before it
+returns; firmware clears every console, message, and audio header only on the
+next successful `APP_LOAD_BEGIN`.
 
 Shell launches send console output to `Output()` and consume `Input()`.
 Workbench launches do not create a console merely because an app starts. When
@@ -388,15 +393,18 @@ well as its normal raw-key event. Ctrl-C retains its existing stop-word and
 `ZZ_EV_STOP` semantics. Console input continues to expose its input bytes and
 EOF through the console API.
 
-The app audio ring is at `0x72000`, 128 KiB including a 32-byte big-endian
-header (`head`, `tail`, source rate, channels, format, route, underruns,
-flags). Samples are interleaved S16LE. `AUDIO=AHI` on a ZZRun Workbench icon
-sets `ZZAPP_F_LAUNCHER_AUDIO_AHI` before start and selects route 1; absent that
-ToolType leaves route 0, the card fabric, as the default. The AHI route accepts
-only an exact AHI-granted stereo rate. It converts the shared S16LE samples to
-AHI's S16BE bounce buffer, but does not resample or downmix. It is paced from
-the consumer tail, reports underruns in the header/lifecycle field, and keeps
-only bounded ring latency.
+The app audio ring is at `0x72000`, a 128 KiB region with a 32-byte
+big-endian header (`head`, `tail`, source rate, channels, format, route,
+underruns, flags) and a 64 KiB power-of-two PCM payload. Samples are
+interleaved S16LE. `AUDIO=AHI` on a ZZRun Workbench icon sets
+`ZZAPP_F_LAUNCHER_AUDIO_AHI` after loading and before start, selecting route
+1; absent that ToolType leaves route 0, the card fabric, as the default. The
+AHI route requests the app's stereo rate from `ahi.device`. It converts the
+shared S16LE samples to AHI's S16BE double buffers, retires source bytes only
+after the corresponding asynchronous AHI write completes, reports underruns in
+the header/lifecycle field, and keeps only bounded ring latency. Closing audio
+zeros the ring header and sets route 0, which makes ZZRun stop playback and
+drop every pending AHI completion before it accepts a new stream.
 
 Two 4 KiB message regions follow at `0x92000` (host-to-app) and `0x93000`
 (app-to-host). They are single-producer/single-consumer rings with a 16-byte
