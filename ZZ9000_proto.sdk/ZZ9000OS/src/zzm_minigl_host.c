@@ -765,6 +765,11 @@ void zzm_minigl_unregister(void)
      * failed (err_status=0x00000000); using MMIO") until power cycle. */
     graphics_pl330_abort(0);
 }
+int zzm_minigl_poll_active(void)
+{
+    return g_poll_active;
+}
+
 
 const zzm_minigl_ops_v1_t *zzm_minigl_ops(void **context)
 {

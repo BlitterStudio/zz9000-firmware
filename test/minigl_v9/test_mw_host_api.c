@@ -686,6 +686,35 @@ static void test_draw_packed_indexed_oracle(void)
 }
 
 
+static void test_direct_rgb565_read_pixels(void)
+{
+    mw_ctx *c = mw_host_create(2U, 2U);
+    uint16_t direct[4] = { 0xf800U, 0x07e0U, 0x001fU, 0xffffU };
+    uint8_t request[24] = { 0 };
+    uint8_t reply[16] = { 0 };
+    uint32_t reply_bytes = 0U;
+    uint32_t index;
+
+    assert(c != NULL);
+    index = c->state.target.back;
+    c->color_direct[index] = 1U;
+    c->color_rgb565[index] = 1U;
+    c->direct_color_buffers[index] = direct;
+    mw_put_be32(request, MW_READ_PIXELS);
+    mw_put_be32(request + 4, 0x1908U);
+    mw_put_be32(request + 16, 2U);
+    mw_put_be32(request + 20, 2U);
+    assert(mw_host_request(c, request, sizeof(request), reply, sizeof(reply),
+                           &reply_bytes) == MW_STATUS_OK);
+    assert(reply_bytes == sizeof(reply));
+    assert(memcmp(reply, (const uint8_t[]){
+        0x00U, 0x00U, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU, 0xffU,
+        0xffU, 0x00U, 0x00U, 0xffU, 0x00U, 0xffU, 0x00U, 0xffU
+    }, sizeof(reply)) == 0);
+    mw_host_destroy(c);
+    printf("PASS: test_direct_rgb565_read_pixels\n");
+}
+
 int main(void)
 {
     test_create_destroy();
@@ -696,6 +725,7 @@ int main(void)
     test_requests();
     test_glquake_texture_soak();
     test_draw_packed_indexed_oracle();
+    test_direct_rgb565_read_pixels();
     test_palette_snapshot();
     printf("All host API tests PASSED!\n");
     return 0;

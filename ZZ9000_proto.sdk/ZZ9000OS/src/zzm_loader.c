@@ -22,6 +22,7 @@ extern int zzm_runtime_quota_available(uint32_t memory_class,
 extern uint32_t zzm_runtime_release_module(uint32_t module_id) __attribute__((weak));
 extern const zzm_services_t *zzm_runtime_services_v3(void) __attribute__((weak));
 extern void zzm_minigl_unregister(void) __attribute__((weak));
+extern int zzm_minigl_poll_active(void) __attribute__((weak));
 extern void zzm_minigl_on_core1_fault(void) __attribute__((weak));
 
 static zzm_status_t module_status[ZZM_MODULE_MAX];
@@ -553,6 +554,15 @@ static int load_v3_module(uint32_t index)
 static void unload_v3_on_owner(uint32_t index)
 {
     const zzm_v3_header_t *header = &module_v3_header[index];
+
+    /* A transport release can arrive from MiniGL's own worker poll.  That
+     * poll still executes in this image, so poisoning the slot here turns
+     * its return into an instruction fault and leaves stale registration
+     * pointers behind.  Keep the idle module loaded; its next acquire can
+     * safely reuse the registration. */
+    if (module_status[index].id == ZZM_MODULE_MINIGL &&
+        zzm_minigl_poll_active && zzm_minigl_poll_active())
+        return;
 
     unregister_module(index);
     if (header->fini_entry)

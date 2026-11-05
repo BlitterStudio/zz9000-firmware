@@ -301,7 +301,7 @@ static inline void mw_state_init(mw_state *s, uint32_t width, uint32_t height)
     s->perspective = 1;
 
     s->draw_buffer = 0x405; /* GL_BACK */
-    s->read_buffer = 0x404; /* GL_FRONT */
+    s->read_buffer = 0x405; /* GL_BACK */
 
     s->fog_mode = 0x800; /* GL_EXP */
     s->fog_density = 1.0f;

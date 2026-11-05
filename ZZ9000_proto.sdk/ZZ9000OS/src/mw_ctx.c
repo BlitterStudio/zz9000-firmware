@@ -1510,9 +1510,9 @@ static void mw_sync_active_format(mw_ctx *c)
         mw_present_layout_note(c, index, before, "sync");
 }
 
-/* After minigl_raster_finish the active buffer holds RGBA.  Make sure the
- * buffer a CPU reader wants matches, converting an untouched RasterIX
- * buffer in place. */
+/* Make a target readable through the CPU shadow. Direct P96 targets remain
+ * RGB565 in card memory, so unlike a private RasterIX buffer they cannot be
+ * reinterpreted as the RGBA shadow merely by clearing the format marker. */
 static int mw_buffer_cpu_visible(mw_ctx *c, uint32_t index)
 {
     uint8_t before;
@@ -1520,6 +1520,29 @@ static int mw_buffer_cpu_visible(mw_ctx *c, uint32_t index)
     if (index >= 3U || !c->color_buffers[index])
         return 0;
     before = c->color_rgb565[index];
+    if (c->color_direct[index]) {
+        const uint16_t *source = c->direct_color_buffers[index];
+        size_t pixel;
+
+        if (!source)
+            return 0;
+        minigl_platform_cache_invalidate(NULL, (uintptr_t)source,
+                                         (size_t)c->width * c->height * 2U);
+        for (pixel = 0U; pixel < (size_t)c->width * c->height; pixel++) {
+            uint16_t value = source[pixel];
+            uint32_t red = (value >> 11U) & 0x1fU;
+            uint32_t green = (value >> 5U) & 0x3fU;
+            uint32_t blue = value & 0x1fU;
+            c->color_buffers[index][pixel] =
+                (((red << 3U) | (red >> 2U)) << 24U) |
+                (((green << 2U) | (green >> 4U)) << 16U) |
+                (((blue << 3U) | (blue >> 2U)) << 8U) | 0xffU;
+        }
+        c->color_rgb565[index] = 0U;
+        if (before != 0U)
+            mw_present_layout_note(c, index, before, "direct_to_rgba");
+        return 1;
+    }
     if (index == mw_active_color_index(c)) {
         c->color_rgb565[index] = 0U;
         if (before != 0U)

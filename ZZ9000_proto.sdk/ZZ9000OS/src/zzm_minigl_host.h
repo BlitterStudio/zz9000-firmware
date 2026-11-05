@@ -118,10 +118,11 @@ int zzm_minigl_register(const zzm_minigl_ops_v1_t *ops, void *context,
 int zzm_minigl_register_ops(uint32_t module_id, const void *ops,
                             uint32_t ops_size);
 void zzm_minigl_unregister(void);
+/* A v3 image must not be reclaimed while its worker is executing from it. */
+int zzm_minigl_poll_active(void);
 const zzm_minigl_ops_v1_t *zzm_minigl_ops(void **context);
 int zzm_minigl_worker_registered(void);
 int zzm_minigl_has_work(void);
-void zzm_minigl_doorbell(void);
 int zzm_minigl_transport_acquire(uint32_t *generation);
 int zzm_minigl_transport_release(void);
 /* Called only from core 1's worker/service tick. */
