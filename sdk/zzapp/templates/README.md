@@ -19,5 +19,8 @@ runtime.
   and its `AUDIO=AHI` route use the same app binary.
 - `echo.c`: echoes each fixed 32-byte client message using `zz_msg_poll` and
   `zz_msg_send`; use it with the `zz9k.library` app-client smoke tool.
+- `console.c`: Shell console example. Prints its arguments to stdout and a
+  line to stderr, echoes each stdin line in upper case, reports Ctrl-D/E/F
+  break events, and exits at EOF (Ctrl-\ in a Shell window).
 
 Do not include `zzapp_proto.h` in an app. The public API is `zzapp.h`.
