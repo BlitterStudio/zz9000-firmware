@@ -17,6 +17,7 @@
 #include "zzm_loader.h"
 #include "zzapp_runtime.h"
 #include "zzapp_proto.h"
+#include "zzapp_services.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
 #define A9_CLKSTOP1_MASK	0x00000020
@@ -327,9 +328,10 @@ void core1_cold_restart(void)
 	 * restart paths: the fault path (record_fault -> scheduler_core0_poll)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
-	/* The card pool and PL310 locks have the same exposure. */
+	/* The card pool, PL310 and app mailbox locks have the same exposure. */
 	card_pool_reset_lock(&card_pool);
 	l2_maint_reset_core1_lock();
+	zzapp_services_reset_core1_lock();
 	sdk_smp_lock_reset_malloc();
 	/*
 	 * Same orphan-lock exposure as the malloc lock: the cold reset

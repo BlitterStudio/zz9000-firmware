@@ -156,8 +156,8 @@ static uint32_t display_queued;
 static volatile int display_mailbox_active;
 static uint32_t display_mailbox_shown;
 static uint32_t display_mailbox_pending;
-static uint32_t display_mailbox_lo;
-static uint32_t display_mailbox_hi;
+static uint32_t display_mailbox_buffers[3];
+static uint32_t display_mailbox_bytes;
 static int display_mailbox_latch_pending;
 #ifndef ZZAPP_HOST_TEST
 static sdk_smp_lock_t display_mailbox_lock = SDK_SMP_LOCK_INIT;
@@ -227,6 +227,28 @@ static void display_mailbox_lock_release(void)
 {
 #ifndef ZZAPP_HOST_TEST
 	sdk_smp_lock_release(&display_mailbox_lock);
+#else
+	__atomic_clear(&display_mailbox_lock, __ATOMIC_RELEASE);
+#endif
+}
+
+static int display_mailbox_owns(uint32_t address)
+{
+	uint32_t i;
+
+	for (i = 0U; i < 3U; i++) {
+		uint32_t base = display_mailbox_buffers[i];
+
+		if (address >= base && address - base < display_mailbox_bytes)
+			return 1;
+	}
+	return 0;
+}
+
+void zzapp_services_reset_core1_lock(void)
+{
+#ifndef ZZAPP_HOST_TEST
+	sdk_smp_lock_reset(&display_mailbox_lock);
 #else
 	__atomic_clear(&display_mailbox_lock, __ATOMIC_RELEASE);
 #endif
@@ -1266,12 +1288,10 @@ int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 					 uint32_t *scanout)
 {
 	if (!scanout || !display_mailbox_enabled() ||
-	    normal_scanout < display_mailbox_lo ||
-	    normal_scanout >= display_mailbox_hi)
+	    !display_mailbox_owns(normal_scanout))
 		return 0;
 	display_mailbox_lock_acquire();
-	if (!display_mailbox_active || normal_scanout < display_mailbox_lo ||
-	    normal_scanout >= display_mailbox_hi) {
+	if (!display_mailbox_active || !display_mailbox_owns(normal_scanout)) {
 		display_mailbox_lock_release();
 		return 0;
 	}
@@ -1929,8 +1949,6 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	uint32_t layout;
 	uint32_t bytes;
 	uint32_t flags;
-	uint32_t mailbox_lo;
-	uint32_t mailbox_hi;
 
 	if (req_len < ZZAPP_BIND_CARD_BACK + sizeof(uint32_t))
 		return ZZ_EINVAL;
@@ -1986,18 +2004,13 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	if ((flags & (ZZAPP_F_MAILBOX_REQUEST | ZZAPP_F_LAUNCHER_MAILBOX)) ==
 	    (ZZAPP_F_MAILBOX_REQUEST | ZZAPP_F_LAUNCHER_MAILBOX) &&
 	    !display_back_owned && spare != 0U) {
-		mailbox_lo = front < back ? front : back;
-		if (spare < mailbox_lo)
-			mailbox_lo = spare;
-		mailbox_hi = front > back ? front : back;
-		if (spare > mailbox_hi)
-			mailbox_hi = spare;
-		mailbox_hi += bytes;
 		display_mailbox_lock_acquire();
 		display_mailbox_shown = front;
 		display_mailbox_pending = 0U;
-		display_mailbox_lo = mailbox_lo;
-		display_mailbox_hi = mailbox_hi;
+		display_mailbox_buffers[0] = front;
+		display_mailbox_buffers[1] = back;
+		display_mailbox_buffers[2] = spare;
+		display_mailbox_bytes = bytes;
 		display_mailbox_latch_pending = 0;
 		__atomic_store_n(&display_mailbox_active, 1, __ATOMIC_RELEASE);
 		display_mailbox_lock_release();

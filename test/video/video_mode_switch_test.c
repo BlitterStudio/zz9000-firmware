@@ -32,6 +32,8 @@ static unsigned inject_native_irq, deferred_native_irqs;
 static uint32_t videocap_zstate;
 static uint32_t videocap_live_geometry_reg;
 static uint32_t zorro_ram_write_data;
+static int mailbox_begin_result, mailbox_end_calls, mailbox_end_latched;
+static uint32_t mailbox_scanout;
 
 static uint32_t videocap_live_geometry(uint16_t words, uint16_t rows)
 {
@@ -75,15 +77,19 @@ int overlay_scanout_active(void) { return 0; }
 void overlay_scanout_released(void) {}
 void overlay_vblank_rearm(void) {}
 void overlay_vblank_cache_flushed(void) {}
-/* No app display is bound in these tests: the ISR keeps the P96 scanout. */
 int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 					 uint32_t *scanout)
 {
 	(void)normal_scanout;
-	(void)scanout;
-	return 0;
+	if (mailbox_begin_result)
+		*scanout = mailbox_scanout;
+	return mailbox_begin_result;
 }
-void zzapp_services_display_mailbox_end(int latched) { (void)latched; }
+void zzapp_services_display_mailbox_end(int latched)
+{
+	++mailbox_end_calls;
+	mailbox_end_latched = latched;
+}
 void zzapp_services_display_vblank(uint32_t scanout_address)
 {
 	(void)scanout_address;
@@ -948,6 +954,22 @@ int main(void)
 	assert(vs.framebuffer_pan_width == 1280U);
 	assert(dma_buffer_address ==
 	       (UINTPTR)((uint32_t)(uintptr_t)vs.framebuffer + 0x00123400U));
+	/* Mailbox ownership crosses the vblank VDMA transaction: a successful
+	 * program latches the pending page, while a failed program returns it. */
+	video_mode_init(ZZVMODE_1280x720, 0, MNTVA_COLOR_32BIT);
+	videocap_zstate = 1U << 21;
+	mailbox_begin_result = 1;
+	mailbox_scanout = 0x00400000U;
+	mailbox_end_calls = 0;
+	dma_start_status = XST_SUCCESS;
+	isr_video(NULL);
+	assert(mailbox_end_calls == 1 && mailbox_end_latched == 1);
+	dma_start_status = XST_FAILURE;
+	isr_video(NULL);
+	assert(mailbox_end_calls == 2 && mailbox_end_latched == 0);
+	dma_start_status = XST_SUCCESS;
+	mailbox_begin_result = 0;
+
 	puts("video mode switch: PASS");
 	return 0;
 }

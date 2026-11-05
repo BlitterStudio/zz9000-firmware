@@ -302,6 +302,36 @@ static void test_display_scanout_ack(void)
 		fail("display scanout-ack recycle");
 }
 
+static void test_clut8_palette_publication(void)
+{
+	uint8_t payload[ZZAPP_BIND_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	uint32_t rgb[] = { 0x11223344U, 0x00a0b0c0U };
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_LAUNCHER_CLUT8);
+	zzapp_build_display_bind_request_layout(payload, 320U, 200U, 320U,
+						ZZ_FMT_CLUT8, 0x00200000U,
+						0x00210000U, ZZ_LAYOUT_CLUT8);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("CLUT8 display bind");
+	if (zzapp_svc_display_set_palette(1U, 4U, 2U, rgb) != ZZ_OK ||
+	    zzapp_get_be32(g_window + ZZAPP_PALETTE_OFF + 4U * 4U) != 0x223344U ||
+	    zzapp_get_be32(g_window + ZZAPP_PALETTE_OFF + 5U * 4U) != 0xa0b0c0U ||
+	    zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_PALETTE_FIRST_OFF) != 4U ||
+	    zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_PALETTE_COUNT_OFF) != 2U ||
+	    zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_PALETTE_GEN_OFF) != 1U)
+		fail("CLUT8 palette publish");
+}
+
 static void test_display_mailbox(void)
 {
 	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
@@ -310,8 +340,8 @@ static void test_display_mailbox(void)
 	zzapp_surface surface;
 	uint32_t scanout;
 	uint32_t front = 0x00200000U;
-	uint32_t back = 0x00210000U;
-	uint32_t spare = 0x00220000U;
+	uint32_t back = 0x00240000U;
+	uint32_t spare = 0x00280000U;
 	int rc;
 
 	zzapp_services_test_reset();
@@ -329,6 +359,8 @@ static void test_display_mailbox(void)
 	    (zzapp_services_flags() & ZZAPP_F_MAILBOX) == 0U ||
 	    (zzapp_services_flags() & ZZAPP_F_DISPLAY_UNBOUND) != 0U)
 		fail("display mailbox bind");
+	if (zzapp_services_display_mailbox_begin(0x00230000U, &scanout))
+		fail("display mailbox rejects buffer gap");
 	memset(&surface, 0, sizeof(surface));
 	surface.id = 1U;
 	if (zzapp_svc_display_flip_async(surface.id) != ZZ_OK ||
@@ -357,6 +389,12 @@ static void test_display_mailbox(void)
 	if (zzapp_svc_display_refresh(&surface) != ZZ_OK ||
 	    surface.back != (void *)(uintptr_t)front)
 		fail("display mailbox hidden ownership");
+	display_mailbox_lock_acquire();
+	zzapp_services_reset_core1_lock();
+	if (!zzapp_services_display_mailbox_begin(front, &scanout))
+		fail("display mailbox restart unlock");
+	else
+		zzapp_services_display_mailbox_end(0);
 
 	zzapp_services_test_reset();
 	memset(g_window, 0, sizeof(g_window));
@@ -379,6 +417,7 @@ int main(void)
 	test_audio_busy();
 	test_display_refresh_rotation_and_layout();
 	test_display_scanout_ack();
+	test_clut8_palette_publication();
 	test_display_mailbox();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);

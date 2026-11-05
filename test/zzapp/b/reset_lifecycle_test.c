@@ -208,11 +208,26 @@ int main(void)
     zzapp_put_be32(launcher_window + ZZAPP_INPUT_OFF + 4u, 3u);
     zzapp_put_be32(launcher_window + ZZAPP_LOG_OFF, 9u);
     zzapp_put_be32(launcher_window + ZZAPP_LOG_OFF + 4u, 2u);
+    zzapp_put_be32(launcher_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_PALETTE_GEN_OFF, 7u);
+    zzapp_put_be32(launcher_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_PALETTE_FIRST_OFF, 3u);
+    zzapp_put_be32(launcher_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_PALETTE_COUNT_OFF, 4u);
+    zzapp_put_be32(launcher_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_CARD_SPARE_OFF, 0x00280000u);
+    memset(launcher_window + ZZAPP_PALETTE_OFF, 0xa5, ZZAPP_PALETTE_BYTES);
     load_hello();
     assert(zzapp_get_be32(launcher_window + ZZAPP_INPUT_OFF) == 0u);
     assert(zzapp_get_be32(launcher_window + ZZAPP_INPUT_OFF + 4u) == 0u);
     assert(zzapp_get_be32(launcher_window + ZZAPP_LOG_OFF) == 0u);
     assert(zzapp_get_be32(launcher_window + ZZAPP_LOG_OFF + 4u) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_PALETTE_GEN_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_PALETTE_FIRST_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_PALETTE_COUNT_OFF) == 0u);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_CARD_SPARE_OFF) == 0u);
+    for (unsigned i = 0; i < ZZAPP_PALETTE_BYTES; i++)
+        assert(launcher_window[ZZAPP_PALETTE_OFF + i] == 0u);
     start_and_exit();
     assert(app_runs == 2u);
 

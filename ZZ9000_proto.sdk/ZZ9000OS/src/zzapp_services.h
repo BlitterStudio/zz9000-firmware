@@ -101,6 +101,9 @@ int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 void zzapp_services_display_mailbox_end(int latched);
 /* Strict-presentation acknowledgement after core 0 re-points VDMA. */
 void zzapp_services_display_vblank(uint32_t scanout_address);
+/* Core 0 calls this only while core 1 is halted in cold reset. */
+void zzapp_services_reset_core1_lock(void);
+
 
 /* Mailbox. QUEUED means core 1 will finish it; harvest from core 0. */
 uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
