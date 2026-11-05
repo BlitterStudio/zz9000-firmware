@@ -123,6 +123,7 @@ int zzm_minigl_poll_active(void);
 const zzm_minigl_ops_v1_t *zzm_minigl_ops(void **context);
 int zzm_minigl_worker_registered(void);
 int zzm_minigl_has_work(void);
+void zzm_minigl_doorbell(void);
 int zzm_minigl_transport_acquire(uint32_t *generation);
 int zzm_minigl_transport_release(void);
 /* Called only from core 1's worker/service tick. */
