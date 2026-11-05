@@ -466,6 +466,27 @@ static void poison_v3_slot(uint32_t index)
     Xil_ICacheInvalidateRange(header->slot_load_address, bytes);
 }
 
+static void report_v3_load_failure(const zzm_slot_t *slot, uint32_t reason,
+                                   FRESULT fatfs)
+{
+    const char *name = "unknown";
+
+    if (reason == ZZM_REASON_STORAGE_BUSY)
+        name = "storage-busy";
+    else if (reason == ZZM_REASON_QUOTA)
+        name = "quota";
+    else if (reason == ZZM_REASON_FILE_OPEN)
+        name = "file-open";
+    else if (reason == ZZM_REASON_FILE_READ)
+        name = "file-read";
+    else if (reason == ZZM_REASON_IMAGE_INVALID)
+        name = "image-invalid";
+    else if (reason == ZZM_REASON_INIT)
+        name = "init";
+    printf("[ZZM] %s load failed reason=%s(%lu) fatfs=%u\r\n",
+           slot->name, name, (unsigned long)reason, (unsigned)fatfs);
+}
+
 static void load_v3_failed(uint32_t index, enum zzm_state state, uint32_t reason,
                            int init_called)
 {
@@ -493,6 +514,7 @@ static int load_v3_module(uint32_t index)
     const zzm_slot_t *slot = &zzm_slots[index];
     zzm_v3_header_t *header = &module_v3_header[index];
     FIL file;
+    FRESULT fatfs;
     UINT read = 0;
     char path[32];
 
@@ -502,6 +524,7 @@ static int load_v3_module(uint32_t index)
         !module_header_valid[index])
         return 0;
     if (storage_idle && !storage_idle()) {
+        report_v3_load_failure(slot, ZZM_REASON_STORAGE_BUSY, FR_OK);
         status_from_v3_slot(index, ZZM_STATE_LOAD_FAILED, header,
                             ZZM_REASON_STORAGE_BUSY);
         return 0;
@@ -511,18 +534,24 @@ static int load_v3_module(uint32_t index)
     if (zzm_runtime_quota_available &&
         !zzm_runtime_quota_available(ZZM_MEMORY_CLASS_MINIGL_MODULE,
                                      header->resident_quota)) {
+        report_v3_load_failure(slot, ZZM_REASON_QUOTA, FR_OK);
         load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_QUOTA, 0);
         return 0;
     }
     snprintf(path, sizeof(path), "0:/ZZ9K/%s.ZZM", slot->name);
-    if (f_open(&file, path, FA_READ) != FR_OK) {
+    fatfs = f_open(&file, path, FA_READ);
+    if (fatfs != FR_OK) {
+        report_v3_load_failure(slot, ZZM_REASON_FILE_OPEN, fatfs);
         load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_OPEN, 0);
         return 0;
     }
-    if (f_lseek(&file, ZZM_V3_HEADER_SIZE) != FR_OK ||
-        f_read(&file, (void *)(uintptr_t)header->slot_load_address,
-               header->image_size, &read) != FR_OK || read != header->image_size) {
+    fatfs = f_lseek(&file, ZZM_V3_HEADER_SIZE);
+    if (fatfs == FR_OK)
+        fatfs = f_read(&file, (void *)(uintptr_t)header->slot_load_address,
+                       header->image_size, &read);
+    if (fatfs != FR_OK || read != header->image_size) {
         (void)f_close(&file);
+        report_v3_load_failure(slot, ZZM_REASON_FILE_READ, fatfs);
         load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_READ, 0);
         return 0;
     }
@@ -531,6 +560,7 @@ static int load_v3_module(uint32_t index)
                             (const uint8_t *)(uintptr_t)header->slot_load_address,
                             ZZM_V3_HEADER_SIZE + header->image_size,
                             &v3_capabilities, sdk_sha256) != ZZM_STATE_LOADED) {
+        report_v3_load_failure(slot, ZZM_REASON_IMAGE_INVALID, FR_OK);
         load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_IMAGE_INVALID, 0);
         return 0;
     }
@@ -540,6 +570,7 @@ static int load_v3_module(uint32_t index)
                          header->image_size + header->bss_size);
     Xil_ICacheInvalidateRange(header->slot_load_address, header->image_size);
     if (!zzm_runtime_services_v3) {
+        report_v3_load_failure(slot, ZZM_REASON_INIT, FR_OK);
         load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 0);
         return 0;
     }
@@ -547,6 +578,7 @@ static int load_v3_module(uint32_t index)
             zzm_runtime_services_v3()) != 0 ||
         (zzm_registry_module_services_ready &&
          !zzm_registry_module_services_ready(module_status[index].id))) {
+        report_v3_load_failure(slot, ZZM_REASON_INIT, FR_OK);
         load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 1);
         return 0;
     }

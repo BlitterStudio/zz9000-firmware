@@ -874,6 +874,11 @@ uint32_t zzm_runtime_release_module(uint32_t module_id)
         ZZM_MEMORY_CLASS_MEDIA_INPUT,
         ZZM_MEMORY_CLASS_IMAGE,
         ZZM_MEMORY_CLASS_GENERAL,
+        ZZM_MEMORY_CLASS_MINIGL_MODULE,
+        ZZM_MEMORY_CLASS_MINIGL_TRANSPORT,
+        ZZM_MEMORY_CLASS_MINIGL_CONTEXT,
+        ZZM_MEMORY_CLASS_MINIGL_APP_CONTEXT,
+        ZZM_MEMORY_CLASS_MINIGL_RIX,
     };
     uint32_t released = 0U;
     uint32_t owner = ZZM_MODULE_OWNER(module_id);

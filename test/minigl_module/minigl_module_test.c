@@ -237,7 +237,7 @@ int main(void)
     uint32_t generation2;
     uint32_t handle;
     const void *gl = NULL;
-
+    void *module_allocation;
     setup_host_memory();
     prepare_module_file();
     memset(&caps, 0, sizeof(caps));
@@ -340,10 +340,30 @@ int main(void)
     ops->app_unbind(context);
     ops->app_reclaim(context, 1U);
     assert(card_pool.block_count == 0U);
+    /*
+     * A 68k session has closed its transport and context. Leave one module
+     * allocation live so unload must reclaim the base module owner before an
+     * ARM app can reserve the complete resident quota again.
+     */
+    module_allocation = malloc(1U);
+    assert(module_allocation != NULL);
     zzm_loader_release(ZZM_MODULE_MINIGL);
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
     assert(status.state == ZZM_STATE_AVAILABLE);
     assert(!zzm_minigl_worker_registered());
+    assert(card_pool.class_used[CARD_POOL_CLASS_MINIGL_MODULE] == 0U);
+
+    /* The next owner is an ARM application: it must reload and bind cleanly. */
+    assert(zzm_loader_acquire(ZZM_MODULE_MINIGL));
+    ops = zzm_minigl_ops(&context);
+    assert(ops != NULL && context != NULL);
+    assert(ops->app_bind(context, 1U, &gl) == 0 && gl != NULL);
+    ops->app_unbind(context);
+    ops->app_reclaim(context, 1U);
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_AVAILABLE);
+    assert(card_pool.class_used[CARD_POOL_CLASS_MINIGL_MODULE] == 0U);
     /*
      * The released slot is poison. A following SD-open failure must report
      * LOAD_FAILED without entering its stale fini entry.
