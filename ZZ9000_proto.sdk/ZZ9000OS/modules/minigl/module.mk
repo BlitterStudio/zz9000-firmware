@@ -81,7 +81,12 @@ ZZM_MINIGL_FRONTEND_SRCS := \
 	amiberry_gl_buffer.c amiberry_glu.c \
 	amiberry_backend_inproc.c amiberry_transport_inproc.c
 
-ZZM_MINIGL_BUILD_ID ?= $(shell git -C $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../../..) rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+# The pinned external builder supplies FIRMWARE_COMMIT, which remains valid
+# when a Windows git-worktree is mounted in Linux (its .git pointer is not).
+# The native firmware build falls back to its checked-out source revision.
+ZZM_MINIGL_SOURCE_ROOT := $(abspath $(SRC_DIR)/../../..)
+ZZM_MINIGL_SOURCE_GIT := $(shell git -c safe.directory='*' -C $(ZZM_MINIGL_SOURCE_ROOT) rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+ZZM_MINIGL_BUILD_ID ?= $(if $(FIRMWARE_COMMIT),$(FIRMWARE_COMMIT),$(ZZM_MINIGL_SOURCE_GIT))
 ZZM_MINIGL_CPU_FLAGS := -mcpu=cortex-a9 -marm -mfpu=neon -mfloat-abi=hard
 ZZM_MINIGL_COMMON_CFLAGS := -ffunction-sections -fdata-sections \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -fno-strict-aliasing

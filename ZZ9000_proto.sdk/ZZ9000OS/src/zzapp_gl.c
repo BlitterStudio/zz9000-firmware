@@ -129,6 +129,7 @@ typedef struct zzapp_gl {
     void (*DrawElements)(uint32_t mode, int32_t count, uint32_t type, const void *indices);
     void (*LockArrays)(uint32_t first, int32_t count);
     void (*UnlockArrays)(void);
+    const char *build_id;
 } zzapp_gl;
 #endif
 #include "minigl_platform.h"
@@ -499,6 +500,10 @@ static void w_DrawElements(uint32_t mode, int32_t count, uint32_t type, const vo
 static void w_LockArrays(uint32_t first, int32_t count) { ENTER(); GLLockArrays(CTX, first, count); LEAVE(); }
 static void w_UnlockArrays(void) { ENTER(); GLUnlockArrays(CTX); LEAVE(); }
 
+#ifndef ZZM_MINIGL_BUILD_ID
+#define ZZM_MINIGL_BUILD_ID "unknown"
+#endif
+
 
 static void fill_table(void)
 {
@@ -576,6 +581,7 @@ static void fill_table(void)
     g_table.DrawElements = w_DrawElements;
     g_table.LockArrays = w_LockArrays;
     g_table.UnlockArrays = w_UnlockArrays;
+    g_table.build_id = ZZM_MINIGL_BUILD_ID;
 }
 
 static int zzapp_gl_configure_targets(uint32_t width, uint32_t height,

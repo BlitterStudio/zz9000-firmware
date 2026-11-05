@@ -81,6 +81,16 @@ static int verbosity_from_argv(int argc, char **argv)
     return verbosity;
 }
 
+static int surface_readback_from_argv(int argc, char **argv)
+{
+    int arg;
+
+    for (arg = 1; arg < argc; arg++)
+        if (strcmp(argv[arg], "--surface-readback") == 0)
+            return 1;
+    return 0;
+}
+
 #define GL_COLOR_BUFFER_BIT 0x00004000u
 #define GL_TEXTURE_2D 0x0de1u
 #define GL_TEXTURE_ENV 0x2300u
@@ -120,6 +130,37 @@ static const float vertices[4][3] = {
 static const float coords[4][2] = {
     { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f }
 };
+
+static mgl_probe_rgba read_surface_rgb565(const zzapp_surface *surface,
+                                          uint32_t x, uint32_t y)
+{
+    const uint8_t *pixel;
+    uint16_t raw;
+    uint16_t rgb;
+    mgl_probe_rgba value = { 0u, 0u, 0u, 255u };
+
+    if (!surface || !surface->front || x >= surface->width ||
+        y >= surface->height || surface->pitch < (x + 1u) * 2u)
+        return value;
+    pixel = (const uint8_t *)surface->front + y * surface->pitch + x * 2u;
+    if (surface->layout == ZZ_LAYOUT_RGB565_LE ||
+        surface->layout == ZZ_LAYOUT_BGR565_LE)
+        raw = (uint16_t)pixel[0] | (uint16_t)pixel[1] << 8;
+    else
+        raw = (uint16_t)pixel[0] << 8 | (uint16_t)pixel[1];
+    if (surface->layout == ZZ_LAYOUT_BGR565_BE ||
+        surface->layout == ZZ_LAYOUT_BGR565_LE) {
+        value.r = (uint8_t)((raw & 0x1fu) * 255u / 31u);
+        value.g = (uint8_t)(((raw >> 5) & 0x3fu) * 255u / 63u);
+        value.b = (uint8_t)(((raw >> 11) & 0x1fu) * 255u / 31u);
+        return value;
+    }
+    rgb = raw;
+    value.r = (uint8_t)(((rgb >> 11) & 0x1fu) * 255u / 31u);
+    value.g = (uint8_t)(((rgb >> 5) & 0x3fu) * 255u / 63u);
+    value.b = (uint8_t)((rgb & 0x1fu) * 255u / 31u);
+    return value;
+}
 static const uint16_t indexes[4] = { 0u, 1u, 2u, 3u };
 
 static uint32_t gl_env(enum mgl_probe_env mode)
@@ -188,6 +229,7 @@ static void draw_quad(enum mgl_probe_draw draw, mgl_probe_rgba colour)
 int zz_main(int argc, char **argv)
 {
     zzapp_surface surface;
+    const zzapp_gl *gl;
     uint32_t texture;
     unsigned int env, format, texel, colour, draw, alpha_test, blend;
     unsigned int cases = 0u, failures = 0u;
@@ -198,11 +240,17 @@ int zz_main(int argc, char **argv)
         (unsigned int)(sizeof(mgl_probe_colours) / sizeof(mgl_probe_colours[0])) *
         (unsigned int)(sizeof(mgl_probe_draws) / sizeof(mgl_probe_draws[0])) * 4u;
     int verbosity = verbosity_from_argv(argc, argv);
-    char line[96];
+    int surface_readback = surface_readback_from_argv(argc, argv);
+    char line[256];
 
     if (zz_display_open(WIDTH, HEIGHT, ZZ_FMT_RGB565, ZZ_DISPLAY_VSYNC, &surface) != ZZ_OK ||
-        !zz_gl_bind(surface.id))
+        !(gl = zz_gl_bind(surface.id)))
         return 2;
+    (void)snprintf(line, sizeof(line), "MGL identity firmware=%s module=%s\n",
+        ZZ_API_COVERS(zzapp_api_ptr, build_id) && zzapp_api_ptr->build_id ?
+            zzapp_api_ptr->build_id : "unavailable",
+        ZZ_GL_COVERS(gl, build_id) && gl->build_id ? gl->build_id : "unavailable");
+    log_line(line);
     glViewport(0, 0, WIDTH, HEIGHT);
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
@@ -262,6 +310,17 @@ int zz_main(int argc, char **argv)
     }
     glDeleteTextures(1, &texture);
     zz_gl_swap();
+    if (surface_readback) {
+        mgl_probe_rgba direct;
+
+        (void)zz_display_refresh(&surface);
+        direct = read_surface_rgb565(&surface, WIDTH / 2u, HEIGHT / 2u);
+        (void)snprintf(line, sizeof(line),
+            "MGL surface-readback x=%u y=%u rgba=%02x%02x%02x%02x layout=%lu\n",
+            WIDTH / 2u, HEIGHT / 2u, direct.r, direct.g, direct.b, direct.a,
+            (unsigned long)surface.layout);
+        log_line(line);
+    }
     (void)snprintf(line, sizeof(line), "MGL summary cases=%u failures=%u\n", cases, failures);
     log_line(line);
     zz_gl_unbind();

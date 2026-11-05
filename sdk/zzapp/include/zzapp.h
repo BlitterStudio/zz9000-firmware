@@ -229,6 +229,7 @@ typedef struct zzapp_gl {
                              const void *indices);
     void     (*LockArrays)(uint32_t first, int32_t count);
     void     (*UnlockArrays)(void);
+    const char *build_id; /* Module source revision; NULL on older firmware. */
 } zzapp_gl;
 
 /*
@@ -297,6 +298,8 @@ typedef struct zzapp_api {
                                     uint32_t count, const uint32_t *rgb);
     /* Appended: cumulative frames replaced before card vblank in mailbox mode. */
     uint32_t (*display_mailbox_replaced)(void);
+    /* Resident firmware source revision; NULL on older firmware. */
+    const char *build_id;
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */

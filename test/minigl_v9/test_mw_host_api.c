@@ -263,7 +263,7 @@ static void test_requests(void)
     mw_put_be32(req, MW_PLUGIN_VERSION);
     assert(mw_host_request(c, req, 4, reply, sizeof(reply), &reply_bytes) == MW_STATUS_OK);
     assert(reply_bytes > 0);
-    assert(strcmp((const char *)reply, "zz9000-minigl-v29-v9") == 0);
+    assert(strcmp((const char *)reply, "zz9000-minigl-v29-v9+unknown") == 0);
 
     /* 2. MW_BLIT and MW_CAPTURE with a truncated request are invalid:
      * a valid span request needs at least 24 bytes (id + 5 words + 1 rect). */

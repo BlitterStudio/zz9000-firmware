@@ -761,12 +761,13 @@ void zzm_minigl_unregister(void)
     g_reset_active = 0;
     g_doorbell_installed = 0;
     g_module_capabilities = 0U;
-    /* The module's claim on the PL330 channel ends with the module.  The
-     * claim was never released, so after Quake quit (MiniGL unloaded) the
-     * next load's claim was refused, its first DMA start failed and every
-     * later session ran the RasterIX FIFO from the CPU ("PL330 self-test
-     * failed (err_status=0x00000000); using MMIO") until power cycle. */
-    graphics_pl330_abort(0);
+    /*
+     * Module fini has already quiesced RasterIX before this clean unload.
+     * Release its channel ownership without issuing DMAKILL: that operation
+     * is fault recovery and its "[recovery] PL330 abort" log made an ordinary
+     * 68k context close look like a failed reset.
+     */
+    graphics_pl330_release(0);
 }
 int zzm_minigl_poll_active(void)
 {

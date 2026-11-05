@@ -239,6 +239,7 @@ static const zzapp_api g_api = {
     .display_flip_async=api_display_flip_async,.display_flip_idle=api_display_flip_idle,
     .display_refresh=api_display_refresh,.gl_bind_flags=api_gl_bind_flags,
     .display_set_palette=api_display_set_palette,
-    .display_mailbox_replaced=api_display_mailbox_replaced
+    .display_mailbox_replaced=api_display_mailbox_replaced,
+    .build_id=ZZ9000_BUILD_GIT
 };
 const zzapp_api *zzapp_api_table(void) { return &g_api; }

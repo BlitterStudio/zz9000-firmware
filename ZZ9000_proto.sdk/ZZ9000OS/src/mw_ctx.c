@@ -28,6 +28,10 @@
 #include <arm_neon.h>
 #endif
 
+#ifndef ZZM_MINIGL_BUILD_ID
+#define ZZM_MINIGL_BUILD_ID "unknown"
+#endif
+
 static uint8_t mw_diag_component(float value)
 {
     if (value <= 0.0f)
@@ -3430,7 +3434,7 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
     id = mw_be32(request);
 
     if (id == MW_PLUGIN_VERSION) {
-        static const char version[] = "zz9000-minigl-v29-v9";
+        static const char version[] = "zz9000-minigl-v29-v9+" ZZM_MINIGL_BUILD_ID;
         size_t len = strlen(version) + 1;
         if (len > MW_PLUGIN_VERSION_BYTES)
             len = MW_PLUGIN_VERSION_BYTES;

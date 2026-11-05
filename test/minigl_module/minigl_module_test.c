@@ -25,6 +25,7 @@ extern void zzm_module_exit(void);
 extern mw_ctx *amiberry_transport_inproc_ctx(void);
 
 
+static int reject_module_open;
 static uint8_t module_file[ZZM_V3_HEADER_SIZE + 32U];
 static uint32_t module_offset;
 static uint64_t now_us;
@@ -134,7 +135,7 @@ int zzm_registry_register_service(uint32_t module_id, uint32_t id,
 FRESULT f_open(FIL *file, const char *path, unsigned char mode)
 {
     (void)mode;
-    if (strstr(path, "/MINIGL.ZZM") == NULL)
+    if (strstr(path, "/MINIGL.ZZM") == NULL || reject_module_open)
         return FR_NO_FILE;
     file->size = sizeof(module_file);
     module_offset = 0U;
@@ -342,6 +343,15 @@ int main(void)
     zzm_loader_release(ZZM_MODULE_MINIGL);
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
     assert(status.state == ZZM_STATE_AVAILABLE);
+    assert(!zzm_minigl_worker_registered());
+    /*
+     * The released slot is poison. A following SD-open failure must report
+     * LOAD_FAILED without entering its stale fini entry.
+     */
+    reject_module_open = 1;
+    assert(!zzm_loader_acquire(ZZM_MODULE_MINIGL));
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_LOAD_FAILED);
     assert(!zzm_minigl_worker_registered());
     assert(card_pool.block_count == 0U);
     puts("MiniGL real module loader/runtime integration passed");

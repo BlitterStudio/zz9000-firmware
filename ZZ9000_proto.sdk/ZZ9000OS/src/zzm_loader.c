@@ -466,15 +466,17 @@ static void poison_v3_slot(uint32_t index)
     Xil_ICacheInvalidateRange(header->slot_load_address, bytes);
 }
 
-static void load_v3_failed(uint32_t index, enum zzm_state state, uint32_t reason)
+static void load_v3_failed(uint32_t index, enum zzm_state state, uint32_t reason,
+                           int init_called)
 {
     unregister_module(index);
     /*
-     * This path runs on the core-1 loader owner. An init routine can have
-     * registered MiniGL callbacks before its final readiness check fails, so
-     * detach them before reclaiming or poisoning its image.
+     * Before init_entry() runs, the slot may still contain the poison from a
+     * previous unload. Never follow the old fini_entry in that state: a
+     * failed SD reload would otherwise branch into the poison and fault core
+     * 1 while load_v3_failed is on the stack.
      */
-    if (module_v3_header[index].fini_entry)
+    if (init_called && module_v3_header[index].fini_entry)
         ((zzm_fini_fn)(uintptr_t)module_v3_header[index].fini_entry)();
     if (module_status[index].id == ZZM_MODULE_MINIGL &&
         zzm_minigl_unregister)
@@ -509,19 +511,19 @@ static int load_v3_module(uint32_t index)
     if (zzm_runtime_quota_available &&
         !zzm_runtime_quota_available(ZZM_MEMORY_CLASS_MINIGL_MODULE,
                                      header->resident_quota)) {
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_QUOTA);
+        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_QUOTA, 0);
         return 0;
     }
     snprintf(path, sizeof(path), "0:/ZZ9K/%s.ZZM", slot->name);
     if (f_open(&file, path, FA_READ) != FR_OK) {
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_OPEN);
+        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_OPEN, 0);
         return 0;
     }
     if (f_lseek(&file, ZZM_V3_HEADER_SIZE) != FR_OK ||
         f_read(&file, (void *)(uintptr_t)header->slot_load_address,
                header->image_size, &read) != FR_OK || read != header->image_size) {
         (void)f_close(&file);
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_READ);
+        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_READ, 0);
         return 0;
     }
     (void)f_close(&file);
@@ -529,7 +531,7 @@ static int load_v3_module(uint32_t index)
                             (const uint8_t *)(uintptr_t)header->slot_load_address,
                             ZZM_V3_HEADER_SIZE + header->image_size,
                             &v3_capabilities, sdk_sha256) != ZZM_STATE_LOADED) {
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_IMAGE_INVALID);
+        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_IMAGE_INVALID, 0);
         return 0;
     }
     memset((void *)(uintptr_t)(header->slot_load_address + header->image_size), 0,
@@ -537,12 +539,15 @@ static int load_v3_module(uint32_t index)
     Xil_DCacheFlushRange(header->slot_load_address,
                          header->image_size + header->bss_size);
     Xil_ICacheInvalidateRange(header->slot_load_address, header->image_size);
-    if (!zzm_runtime_services_v3 ||
-        ((int (*)(const void *))(uintptr_t)header->init_entry)(
+    if (!zzm_runtime_services_v3) {
+        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 0);
+        return 0;
+    }
+    if (((int (*)(const void *))(uintptr_t)header->init_entry)(
             zzm_runtime_services_v3()) != 0 ||
         (zzm_registry_module_services_ready &&
          !zzm_registry_module_services_ready(module_status[index].id))) {
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT);
+        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 1);
         return 0;
     }
     status_from_v3_slot(index, ZZM_STATE_LOADED, header, ZZM_REASON_NONE);
