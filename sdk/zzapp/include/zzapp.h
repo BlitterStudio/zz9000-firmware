@@ -54,6 +54,11 @@ extern "C" {
 #define ZZ_EV_JOY      4u
 #define ZZ_EV_STOP     5u
 #define ZZ_EV_RESIZE   6u
+#define ZZ_EV_BREAK    7u
+
+#define ZZ_BREAK_CTRL_D 4u
+#define ZZ_BREAK_CTRL_E 5u
+#define ZZ_BREAK_CTRL_F 6u
 
 #define ZZ_ALLOC_UNCACHED     1u
 /* Allocate from card DDR visible through the Zorro III host aperture. */
@@ -392,6 +397,11 @@ typedef struct zzapp_api {
                              uint32_t pcm_frames,
                              zzapp_audio_decode_result *out);
     int      (*audio_decode_close)(uint32_t session);
+    /* API 0.2 host: Shell/Workbench console and 32-byte client messages. */
+    int      (*console_write)(const void *buf, uint32_t len, uint32_t *out_n);
+    int      (*console_read)(void *buf, uint32_t len, uint32_t *out_n);
+    int      (*msg_send)(const void *msg);
+    int      (*msg_poll)(void *msg); /* 1 message, 0 empty, negative error */
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -491,6 +501,16 @@ int      zz_input_poll(zzapp_event *out, uint32_t max, uint32_t *out_n);
 
 int      zz_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out);
 int      zz_audio_close(void);
+
+/* Console reads wait politely for input. At EOF they return ZZ_OK with zero
+ * bytes. Console writes never silently drop bytes. */
+int      zz_console_write(const void *buf, uint32_t len, uint32_t *out_n);
+int      zz_console_read(void *buf, uint32_t len, uint32_t *out_n);
+
+/* Every message is exactly 32 opaque bytes. zz_msg_poll returns 1 when it
+ * copied one message, 0 when the ring is empty, or a negative ZZ_E* code. */
+int      zz_msg_send(const void *msg);
+int      zz_msg_poll(void *msg);
 
 const zzapp_gl *zz_gl_bind(uint32_t surface_id);
 const zzapp_gl *zz_gl_bind_flags(uint32_t surface_id, uint32_t flags);

@@ -124,6 +124,10 @@ WEAK uint16_t sdk_vorbis_decode(struct sdk_vorbis_state *state,
 WEAK void sdk_vorbis_release(struct sdk_vorbis_state *state) { (void)state; }
 WEAK void sdk_vorbis_forget(struct sdk_vorbis_state *state) { (void)state; }
 #endif
+WEAK int zzapp_svc_console_write(const void *p,uint32_t n,uint32_t *o) { (void)p;(void)n;if(o)*o=0;return ZZ_ENOSYS; }
+WEAK int zzapp_svc_console_read(void *p,uint32_t n,uint32_t *o) { (void)p;(void)n;if(o)*o=0;return ZZ_ENOSYS; }
+WEAK int zzapp_svc_msg_send(const void *p) { (void)p; return ZZ_ENOSYS; }
+WEAK int zzapp_svc_msg_poll(void *p) { (void)p; return ZZ_ENOSYS; }
 struct zzapp_minigl_binding {
     const zzm_minigl_ops_v1_t *ops;
     void *context;
@@ -695,6 +699,10 @@ static int api_list_next(int l,zzapp_dirent*out){zzapp_api_enter();int r=zzapp_s
 static int api_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,zzapp_surface*out){zzapp_api_enter();int r=zzapp_svc_display_open(w,h,f,fl,out);zzapp_api_leave();return r;}
 static int api_input(zzapp_event*out,uint32_t n,uint32_t*got){zzapp_api_enter();int r=zzapp_svc_input_poll(out,n,got);zzapp_api_leave();return r;}
 static int api_audio_open(uint32_t r,uint32_t c,zzapp_audio*out){zzapp_api_enter();int x=zzapp_svc_audio_open(r,c,out);zzapp_api_leave();return x;}
+static int api_console_write(const void *p,uint32_t n,uint32_t *out){zzapp_api_enter();int r=zzapp_svc_console_write(p,n,out);zzapp_api_leave();return r;}
+static int api_console_read(void *p,uint32_t n,uint32_t *out){zzapp_api_enter();int r=zzapp_svc_console_read(p,n,out);zzapp_api_leave();return r;}
+static int api_msg_send(const void *p){zzapp_api_enter();int r=zzapp_svc_msg_send(p);zzapp_api_leave();return r;}
+static int api_msg_poll(void *p){zzapp_api_enter();int r=zzapp_svc_msg_poll(p);zzapp_api_leave();return r;}
 static const zzapp_gl *api_gl_bind(uint32_t id){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
 static const zzapp_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind_flags(id,flags,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
 static void api_gl_swap(void){zzapp_api_enter();zzapp_minigl_swap();zzapp_api_leave();}
@@ -712,11 +720,15 @@ static const zzapp_api g_api = {
     .display_set_palette=api_display_set_palette,
     .display_mailbox_replaced=api_display_mailbox_replaced,
     .build_id=ZZ9000_BUILD_GIT,
+    /* API 0.2 core: shared memory, card services and file maps. */
     .host_address=api_host_address,.mem_info=api_mem_info,
     .map_file=api_map_file,.unmap_file=api_unmap_file,
     .sha256=api_sha256,.decompress=api_decompress,
     .image_open=api_image_open,.image_decode=api_image_decode,.image_close=api_image_close,
     .audio_decode_open=api_audio_open_decode,.audio_decode=api_audio_decode_app,
-    .audio_decode_close=api_audio_close_decode
+    .audio_decode_close=api_audio_close_decode,
+    /* API 0.2 host: console and fixed-size message rings. */
+    .console_write=api_console_write,.console_read=api_console_read,
+    .msg_send=api_msg_send,.msg_poll=api_msg_poll
 };
 const zzapp_api *zzapp_api_table(void) { return &g_api; }

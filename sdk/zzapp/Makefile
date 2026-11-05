@@ -28,10 +28,10 @@ LIB_OBJS := $(BUILD)/zzapp.o $(BUILD)/gl_wrap.o $(BUILD)/syscalls.o
 
 .PHONY: all check-relocs clean
 
-all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
+all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/tone.elf $(BUILD)/echo.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
 
-check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
-	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
+check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/tone.elf $(BUILD)/echo.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
+	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/tone.elf $(BUILD)/echo.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -59,6 +59,18 @@ $(BUILD)/pixels.o: templates/pixels.c | $(BUILD)
 
 $(BUILD)/note_fault.o: zzapp_note.S | $(BUILD)
 	$(CC) $(ASMFLAGS) -DZZAPP_NOTE_FLAGS=0 -c -o $@ $<
+
+$(BUILD)/note_tone.o: zzapp_note.S | $(BUILD)
+	$(CC) $(ASMFLAGS) -DZZAPP_NOTE_FLAGS=2 -c -o $@ $<
+
+$(BUILD)/tone.o: templates/tone.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD)/note_echo.o: zzapp_note.S | $(BUILD)
+	$(CC) $(ASMFLAGS) -DZZAPP_NOTE_FLAGS=0 -c -o $@ $<
+
+$(BUILD)/echo.o: templates/echo.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD)/fault.o: templates/fault.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -97,6 +109,12 @@ $(BUILD)/fault.elf: $(BUILD)/crt0.o $(BUILD)/note_fault.o $(BUILD)/fault.o $(BUI
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
 
 $(BUILD)/sbrk_smoke.elf: $(BUILD)/crt0.o $(BUILD)/note_smoke.o $(BUILD)/sbrk_smoke.o $(BUILD)/libzzapp.a
+	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
+
+$(BUILD)/tone.elf: $(BUILD)/crt0.o $(BUILD)/note_tone.o $(BUILD)/tone.o $(BUILD)/libzzapp.a
+	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
+
+$(BUILD)/echo.elf: $(BUILD)/crt0.o $(BUILD)/note_echo.o $(BUILD)/echo.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
 
 $(BUILD)/zzmembench.elf: $(BUILD)/crt0.o $(BUILD)/note_zzmembench.o $(BUILD)/zzmembench.o $(BUILD)/libzzapp.a

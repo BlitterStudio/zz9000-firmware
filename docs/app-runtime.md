@@ -10,7 +10,7 @@ One app at a time. It runs on core 1 in the same privilege mode as the firmware 
 
 v0 is not a sandbox. A trusted app can store through any writable mapping the firmware has. Isolation is a later slice. v0's fault path covers aborts and undefined instructions whose faulting PC is in the app, plus a watchdog. It does not cover a store that lands in firmware data.
 
-Out of scope for v0: more than one app, threads, sockets, stdin/stdout as a Shell conduit, ZZTop's Apps page, Zorro II, SD-card `ZZ9K/APPS/`, and pause/resume. The lifecycle enum still has a paused value so the wire format does not move when it is added.
+Out of scope for v0: more than one app, threads, sockets, ZZTop's Apps page, Zorro II, SD-card `ZZ9K/APPS/`, and pause/resume. The lifecycle enum still has a paused value so the wire format does not move when it is added.
 
 ### Licences
 
@@ -234,7 +234,7 @@ Payloads are big-endian in the 48-byte mailbox payload. Fields that do not fit l
 One non-cacheable block. Offsets are part of the contract. Big-endian integer fields. `_Static_assert` these offsets in `zzapp_proto.h`.
 
 ```c
-#define ZZAPP_WINDOW_BYTES     0x00060000u   /* 384 KiB allocation */
+#define ZZAPP_WINDOW_BYTES     0x00094000u   /* 592 KiB allocation */
 
 #define ZZAPP_LIFE_OFF         0x00000000u
 #define ZZAPP_LIFE_BYTES       0x00000100u
@@ -272,8 +272,7 @@ Lifecycle block (`ZZAPP_LIFE_OFF`), each field a big-endian `u32` unless noted:
 | Offset | Field | Writer |
 |---:|---|---|
 | `0x00` | magic `0x5A415050` (`'ZAPP'`) | firmware, at alloc |
-| `0x04` | layout version `1` | firmware |
-| `0x08` | state | firmware |
+| `0x04` | layout version `2` | firmware |
 | `0x0C` | generation | firmware |
 | `0x10` | heartbeat_ms | launcher |
 | `0x14` | stop (1 = request) | launcher |
@@ -307,11 +306,16 @@ Lifecycle block (`ZZAPP_LIFE_OFF`), each field a big-endian `u32` unless noted:
 | `0x84` | requested scanout address | firmware |
 | `0x88` | submitted scanout generation | launcher |
 | `0x8C` | mailbox_replaced | firmware |
+| `0x90` | audio route | firmware |
+| `0x94` | audio source rate | firmware |
+| `0x98` | audio channels | firmware |
+| `0x9C` | audio sample format | firmware |
+| `0xA0` | audio underruns | ZZRun for AHI route |
 State enum: `0` idle, `1` loading, `2` starting, `3` running, `4` paused (unused), `5` stopping, `6` faulted.
 
 Fault codes: `0` none, `1` data abort, `2` prefetch abort, `3` undefined, `4` watchdog, `5` forced stop (grace or reset), `6` watchdog that fell through to cold restart.
 
-Flags: bit0 display wanted (ELF note, mirrored), bit1 audio, bit2 GL, bit8 display requested and not yet bound, bit9 vsync wanted, bit10 launcher CLUT8 capability, bit11 launcher supports scanout-vblank acknowledgement, bit12 firmware accepted that protocol, bit13 app requests mailbox presentation, bit14 launcher supports mailbox presentation, bit15 firmware accepted mailbox presentation.
+Flags: bit0 display wanted (ELF note, mirrored), bit1 audio, bit2 GL, bit8 display requested and not yet bound, bit9 vsync wanted, bit10 launcher CLUT8 capability, bit11 launcher supports scanout-vblank acknowledgement, bit12 firmware accepted that protocol, bit13 app requests mailbox presentation, bit14 launcher supports mailbox presentation, bit15 firmware accepted mailbox presentation, bit16 console API has been used, and bit17 selects the launcher AHI route.
 
 Input event, 16 bytes, big-endian, array starts at `ZZAPP_INPUT_OFF + ZZAPP_INPUT_HDR`:
 
@@ -359,6 +363,47 @@ File ops: `1` open, `2` close, `3` read, `4` write, `5` seek, `6` stat, `7` list
 Paths sit at `path_off` as a NUL-terminated Amiga string, at most 255 bytes, inside `ZZAPP_PATH_OFF`. Relative paths are under the launcher root (Shell current directory, or the icon's directory, or ToolType `ROOT`). A path containing `:` is rejected unless ToolType `ABS=1`. A `..` that would leave the root is rejected. This stops a bad path. It is not a security boundary. Open flags: `1` read, `2` write, `4` create. FDs are small integers, 16 of them, starting at 3.
 
 Argv area: `u32` argc, then 16 offsets from the window base, then the strings, each at most 127 bytes plus NUL. The launcher fills this before `APP_START`. Firmware copies the strings into the arena before the jump so the app does not retain a pointer into the non-cacheable window.
+
+### API 0.2 host transport: console, audio, and messages
+
+The API 0.2 additions retain every v0 offset and use only the extension after
+`0x60000`. The console-output byte ring is `0x60000`/64 KiB and the
+console-input byte ring is `0x70000`/8 KiB. Both have big-endian monotonic
+`head` and `tail` words; the input header's word at `+8` is EOF. The app is
+the output producer and input consumer. ZZRun is the inverse. A full output
+ring is backpressure: the app waits in its API call and no bytes are discarded.
+Input is nonblocking at the launcher; when its input handle reaches EOF it sets
+the EOF word after publishing every preceding byte.
+
+Shell launches send console output to `Output()` and consume `Input()`.
+Workbench launches do not create a console merely because an app starts. When
+an app first uses its console API, firmware sets `ZZAPP_F_CONSOLE`; ZZRun then
+opens `CON:.../ZZRun/CLOSE/WAIT` and starts draining and filling the same rings.
+Failure to open that requested console stops the app rather than silently
+dropping output. `zz_log` remains a separate, lossy diagnostics ring.
+
+`ZZ_EV_BREAK` is event type 7. A Ctrl-D, Ctrl-E, or Ctrl-F key-down from the
+display window produces that event with `code` 4, 5, or 6 respectively, as
+well as its normal raw-key event. Ctrl-C retains its existing stop-word and
+`ZZ_EV_STOP` semantics. Console input continues to expose its input bytes and
+EOF through the console API.
+
+The app audio ring is at `0x72000`, 128 KiB including a 32-byte big-endian
+header (`head`, `tail`, source rate, channels, format, route, underruns,
+flags). Samples are interleaved S16LE. `AUDIO=AHI` on a ZZRun Workbench icon
+sets `ZZAPP_F_LAUNCHER_AUDIO_AHI` before start and selects route 1; absent that
+ToolType leaves route 0, the card fabric, as the default. The AHI route accepts
+only an exact AHI-granted stereo rate. It converts the shared S16LE samples to
+AHI's S16BE bounce buffer, but does not resample or downmix. It is paced from
+the consumer tail, reports underruns in the header/lifecycle field, and keeps
+only bounded ring latency.
+
+Two 4 KiB message regions follow at `0x92000` (host-to-app) and `0x93000`
+(app-to-host). They are single-producer/single-consumer rings with a 16-byte
+big-endian header and 64 opaque, fixed 32-byte records. They carry client
+messages independently of keyboard input; the app-to-host consumer signals the
+owning Amiga client. All fields and extension offsets are asserted by
+`zzapp_proto.h`.
 
 ### Screen, input, Ctrl-C, reset
 
@@ -421,6 +466,11 @@ Header: `sdk/zzapp/include/zzapp.h`, MIT. Apps include it and link `libzzapp`. T
 #define ZZ_EV_JOY      4u
 #define ZZ_EV_STOP     5u
 #define ZZ_EV_RESIZE   6u
+#define ZZ_EV_BREAK    7u
+
+#define ZZ_BREAK_CTRL_D 4u
+#define ZZ_BREAK_CTRL_E 5u
+#define ZZ_BREAK_CTRL_F 6u
 
 #define ZZ_ALLOC_UNCACHED     1u
 #define ZZ_ALLOC_HOST_VISIBLE 2u
@@ -534,6 +584,16 @@ The fields after `gl_unbind` are appended ABI slots. Before reading or calling
 any appended slot, an app MUST use `ZZ_API_COVERS(api, field)` and also check
 that the function pointer is non-NULL. A runtime predating an appended field
 does not provide storage for it.
+
+API 0.2 appends `console_write`, `console_read`, `msg_send`, and `msg_poll`
+after `build_id` (the core 0.2 block precedes them). `zz_console_write` copies
+all requested bytes to the non-lossy stdout/stderr ring or returns an error;
+it waits through backpressure without leaving the API/watchdog guard. Newlib
+`write(1, ...)` and `write(2, ...)` use it. `zz_console_read` waits for
+launcher input and returns `ZZ_OK` with zero bytes at EOF; newlib `read(0,...)`
+uses it. `zz_msg_send` accepts exactly one opaque 32-byte message and returns
+`ZZ_EBUSY` if the app-to-host ring is full. `zz_msg_poll` returns one when it
+copies a host message, zero when empty, or a negative `ZZ_E*` code.
 
 
 `zz_display_refresh(&surface)` is an optional appended call. After

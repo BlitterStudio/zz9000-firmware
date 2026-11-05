@@ -379,6 +379,36 @@ int zz_audio_close(void)
     return ZZ_ENOSYS;
 }
 
+int zz_console_write(const void *buf, uint32_t len, uint32_t *out_n)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, console_write) &&
+        zzapp_api_ptr->console_write)
+        return zzapp_api_ptr->console_write(buf, len, out_n);
+    return ZZ_ENOSYS;
+}
+
+int zz_console_read(void *buf, uint32_t len, uint32_t *out_n)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, console_read) &&
+        zzapp_api_ptr->console_read)
+        return zzapp_api_ptr->console_read(buf, len, out_n);
+    return ZZ_ENOSYS;
+}
+
+int zz_msg_send(const void *msg)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, msg_send) && zzapp_api_ptr->msg_send)
+        return zzapp_api_ptr->msg_send(msg);
+    return ZZ_ENOSYS;
+}
+
+int zz_msg_poll(void *msg)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, msg_poll) && zzapp_api_ptr->msg_poll)
+        return zzapp_api_ptr->msg_poll(msg);
+    return ZZ_ENOSYS;
+}
+
 const zzapp_gl *zz_gl_bind_flags(uint32_t surface_id, uint32_t flags)
 {
     const zzapp_gl *gl;

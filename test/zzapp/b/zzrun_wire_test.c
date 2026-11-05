@@ -13,6 +13,13 @@ static unsigned ended;
 
 static uint32_t wire_loader_state;
 
+static void drain_console_output(void)
+{
+    uint32_t head = zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF);
+
+    zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF + 4U, head);
+}
+
 uint32_t zzapp_runtime_state(void)
 {
     return wire_loader_state;
@@ -147,5 +154,44 @@ int main(void)
     assert(reply_len == ZZAPP_STATUS_REPLY_BYTES);
     assert(zzapp_get_be32(reply + ZZAPP_STATUS_STATE) == ZZAPP_ST_IDLE);
     assert(zzapp_get_be32(reply + ZZAPP_STATUS_EXIT) == 0U);
+    {
+        uint8_t input[3] = { 'o', 'k', '!' };
+        uint8_t output[3] = { 0 };
+        uint8_t message[ZZAPP_MSG_BYTES_PER];
+        uint8_t reply_message[ZZAPP_MSG_BYTES_PER];
+        uint32_t n = 0U;
+        uint32_t i;
+
+        zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF,
+                        ZZAPP_CONSOLE_OUT_CAP);
+        zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF + 4U, 0U);
+        zzapp_services_test_set_yield(drain_console_output);
+        assert(zzapp_svc_console_write("!", 1U, &n) == ZZ_OK);
+        assert(n == 1U);
+        assert(launcher_window[ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] == '!');
+
+        memcpy(launcher_window + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR,
+               input, sizeof(input));
+        zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF, sizeof(input));
+        zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF + 4U, 0U);
+        assert(zzapp_svc_console_read(output, sizeof(output), &n) == ZZ_OK);
+        assert(n == sizeof(output));
+        assert(memcmp(input, output, sizeof(input)) == 0);
+        zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF +
+                       ZZAPP_CONSOLE_EOF_OFF, 1U);
+        assert(zzapp_svc_console_read(output, sizeof(output), &n) == ZZ_OK);
+        assert(n == 0U);
+
+        for (i = 0U; i < sizeof(message); i++)
+            message[i] = (uint8_t)i;
+        assert(zzapp_svc_msg_send(message) == ZZ_OK);
+        assert(zzapp_get_be32(launcher_window + ZZAPP_MSG_A2H_OFF) == 1U);
+        memcpy(launcher_window + ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_HDR, message,
+               sizeof(message));
+        zzapp_put_be32(launcher_window + ZZAPP_MSG_H2A_OFF, 1U);
+        assert(zzapp_svc_msg_poll(reply_message) == 1);
+        assert(memcmp(message, reply_message, sizeof(message)) == 0);
+        assert(zzapp_svc_msg_poll(reply_message) == 0);
+    }
     return 0;
 }

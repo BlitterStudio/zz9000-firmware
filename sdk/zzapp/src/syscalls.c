@@ -2,9 +2,10 @@
  * newlib glue for the app heap. The heap is [image_end, stack_base), which
  * the runtime reports through heap_range. This is not the firmware _sbrk.
  *
- * Other stubs exist so -lc links. They do not reach the firmware console.
- * The contract is silent on them; ENOSYS / EIO is the boring failure.
- *
+ * File descriptors 0, 1, and 2 are the launcher console. They are separate
+ * from zz_log: writes use a lossless backpressured ring and reads return zero
+ * at the launcher-published EOF. Other descriptor stubs remain deliberately
+ * unsupported here.
  * SPDX-License-Identifier: MIT
  */
 #include "zzapp.h"
@@ -80,20 +81,51 @@ void _exit(int code)
 
 int _write(int fd, const void *buf, size_t count)
 {
-    (void)fd;
-    (void)buf;
-    (void)count;
-    errno = EIO;
-    return -1;
+    const uint8_t *bytes = (const uint8_t *)buf;
+    size_t done = 0;
+
+    if ((fd != 1 && fd != 2) || (count != 0 && !bytes)) {
+        errno = EIO;
+        return -1;
+    }
+    while (done < count) {
+        uint32_t wrote = 0;
+        uint32_t chunk = count - done > UINT32_MAX ? UINT32_MAX :
+                         (uint32_t)(count - done);
+        int rc = zz_console_write(bytes + done, chunk, &wrote);
+
+        if (rc != ZZ_OK || wrote > chunk) {
+            errno = EIO;
+            return done ? (int)done : -1;
+        }
+        done += wrote;
+        if (wrote != chunk) {
+            errno = EIO;
+            return (int)done;
+        }
+    }
+    return (int)done;
 }
 
 int _read(int fd, void *buf, size_t count)
 {
-    (void)fd;
-    (void)buf;
-    (void)count;
-    errno = EIO;
-    return -1;
+    uint32_t got = 0;
+    uint32_t chunk;
+    int rc;
+
+    if (fd != 0 || (count != 0 && !buf)) {
+        errno = EIO;
+        return -1;
+    }
+    if (count == 0)
+        return 0;
+    chunk = count > UINT32_MAX ? UINT32_MAX : (uint32_t)count;
+    rc = zz_console_read(buf, chunk, &got);
+    if (rc != ZZ_OK || got > chunk) {
+        errno = EIO;
+        return -1;
+    }
+    return (int)got;
 }
 
 int _close(int fd)
