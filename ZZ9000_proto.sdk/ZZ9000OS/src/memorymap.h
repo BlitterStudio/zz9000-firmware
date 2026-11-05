@@ -471,13 +471,13 @@
 #error "Z3 host window lies outside the Zorro III main board aperture"
 #endif
 /*
- * The app rings allocation is made on APP_ALLOC_WINDOW, never at boot.  Its
- * placement is nevertheless fixed to pages which main.c maps Normal
- * non-cacheable before core 1 starts.  Board offsets are ARM - ADDR_ADJ:
- * 0x07ea0000..0x07f00000, inside the 128 MiB Z3 main aperture.
+ * The app rings allocation is made on APP_ALLOC_WINDOW, never at boot. Its
+ * placement is fixed to pages which main.c maps Normal non-cacheable before
+ * core 1 starts. Board offsets are ARM - ADDR_ADJ:
+ * 0x07e6c000..0x07f00000, inside the 128 MiB Z3 main aperture.
  */
-#define ZZAPP_WINDOW_Z3_ADDRESS       0x08090000U
-#define ZZAPP_WINDOW_Z3_SIZE          0x00060000U
+#define ZZAPP_WINDOW_Z3_ADDRESS       0x0805C000U
+#define ZZAPP_WINDOW_Z3_SIZE          0x00094000U
 #define ZZAPP_WINDOW_Z3_END \
 	(ZZAPP_WINDOW_Z3_ADDRESS + ZZAPP_WINDOW_Z3_SIZE)
 

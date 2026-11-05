@@ -13,7 +13,7 @@
 #include "zzapp.h"
 
 #ifndef ZZAPP_WINDOW_BYTES
-#define ZZAPP_WINDOW_BYTES     0x00060000u
+#define ZZAPP_WINDOW_BYTES     0x00094000u
 
 #define ZZAPP_LIFE_OFF         0x00000000u
 #define ZZAPP_LIFE_BYTES       0x00000100u

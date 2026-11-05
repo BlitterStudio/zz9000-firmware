@@ -190,6 +190,8 @@ static int16_t *audio_samples;
 static uint64_t audio_staged;
 static void *audio_block;
 static volatile uint32_t audio_request;
+static int audio_ahi_route;
+static uint32_t audio_host_tail_seen;
 #ifndef ZZAPP_HOST_TEST
 static int audio_result;
 #endif
@@ -1177,6 +1179,149 @@ int zzapp_svc_input_poll(zzapp_event *out, uint32_t max, uint32_t *out_n)
 	return ZZ_OK;
 }
 
+static uint32_t console_available(uint32_t head, uint32_t tail, uint32_t cap)
+{
+	return head - tail <= cap ? head - tail : cap;
+}
+
+int zzapp_svc_console_write(const void *buf, uint32_t len, uint32_t *out_n)
+{
+	const uint8_t *src = (const uint8_t *)buf;
+	uint32_t done = 0U;
+
+	if (!out_n || (len != 0U && !src))
+		return ZZ_EINVAL;
+	*out_n = 0U;
+	if (!have_window())
+		return ZZ_EIO;
+	zzapp_services_or_flags(ZZAPP_F_CONSOLE);
+	while (done < len) {
+		uint32_t head = win_get32(ZZAPP_CONSOLE_OUT_OFF);
+		uint32_t tail = win_get32(ZZAPP_CONSOLE_OUT_OFF + 4U);
+		uint32_t used = console_available(head, tail, ZZAPP_CONSOLE_OUT_CAP);
+		uint32_t at;
+		uint32_t n;
+
+		if (head - tail > ZZAPP_CONSOLE_OUT_CAP)
+			return ZZ_EIO;
+		if (used == ZZAPP_CONSOLE_OUT_CAP) {
+			if (zzapp_services_stop_requested())
+				return ZZ_EIO;
+			yield_wait_once();
+			continue;
+		}
+		at = head % ZZAPP_CONSOLE_OUT_CAP;
+		n = ZZAPP_CONSOLE_OUT_CAP - at;
+		if (n > ZZAPP_CONSOLE_OUT_CAP - used)
+			n = ZZAPP_CONSOLE_OUT_CAP - used;
+		if (n > len - done)
+			n = len - done;
+		memcpy(window + ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at,
+		       src + done, n);
+		win_flush(ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at, n);
+		barrier();
+		win_put32(ZZAPP_CONSOLE_OUT_OFF, head + n);
+		done += n;
+	}
+	*out_n = done;
+	return ZZ_OK;
+}
+
+int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n)
+{
+	uint8_t *dst = (uint8_t *)buf;
+
+	if (!out_n || (len != 0U && !dst))
+		return ZZ_EINVAL;
+	*out_n = 0U;
+	if (!have_window())
+		return ZZ_EIO;
+	zzapp_services_or_flags(ZZAPP_F_CONSOLE);
+	while (len != 0U) {
+		uint32_t head = win_get32(ZZAPP_CONSOLE_IN_OFF);
+		uint32_t tail = win_get32(ZZAPP_CONSOLE_IN_OFF + 4U);
+		uint32_t available = console_available(head, tail, ZZAPP_CONSOLE_IN_CAP);
+		uint32_t at;
+		uint32_t n;
+
+		if (head - tail > ZZAPP_CONSOLE_IN_CAP)
+			return ZZ_EIO;
+		if (available == 0U) {
+			if (win_get32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF))
+				return ZZ_OK;
+			if (zzapp_services_stop_requested())
+				return ZZ_EIO;
+			yield_wait_once();
+			continue;
+		}
+		at = tail % ZZAPP_CONSOLE_IN_CAP;
+		n = ZZAPP_CONSOLE_IN_CAP - at;
+		if (n > available)
+			n = available;
+		if (n > len)
+			n = len;
+		win_inval(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, n);
+		memcpy(dst, window + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, n);
+		barrier();
+		win_put32(ZZAPP_CONSOLE_IN_OFF + 4U, tail + n);
+		*out_n = n;
+		return ZZ_OK;
+	}
+	return ZZ_OK;
+}
+
+int zzapp_svc_msg_send(const void *msg)
+{
+	uint32_t head;
+	uint32_t tail;
+	uint32_t slot;
+
+	if (!msg)
+		return ZZ_EINVAL;
+	if (!have_window())
+		return ZZ_EIO;
+	head = win_get32(ZZAPP_MSG_A2H_OFF);
+	tail = win_get32(ZZAPP_MSG_A2H_OFF + 4U);
+	if (head - tail > ZZAPP_MSG_CAP)
+		return ZZ_EIO;
+	if (head - tail == ZZAPP_MSG_CAP)
+		return ZZ_EBUSY;
+	slot = head & (ZZAPP_MSG_CAP - 1U);
+	memcpy(window + ZZAPP_MSG_A2H_OFF + ZZAPP_MSG_HDR +
+	       slot * ZZAPP_MSG_BYTES_PER, msg, ZZAPP_MSG_BYTES_PER);
+	win_flush(ZZAPP_MSG_A2H_OFF + ZZAPP_MSG_HDR +
+		  slot * ZZAPP_MSG_BYTES_PER, ZZAPP_MSG_BYTES_PER);
+	barrier();
+	win_put32(ZZAPP_MSG_A2H_OFF, head + 1U);
+	return ZZ_OK;
+}
+
+int zzapp_svc_msg_poll(void *msg)
+{
+	uint32_t head;
+	uint32_t tail;
+	uint32_t slot;
+
+	if (!msg)
+		return ZZ_EINVAL;
+	if (!have_window())
+		return ZZ_EIO;
+	head = win_get32(ZZAPP_MSG_H2A_OFF);
+	tail = win_get32(ZZAPP_MSG_H2A_OFF + 4U);
+	if (head - tail > ZZAPP_MSG_CAP)
+		return ZZ_EIO;
+	if (head == tail)
+		return 0;
+	slot = tail & (ZZAPP_MSG_CAP - 1U);
+	win_inval(ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_HDR +
+		  slot * ZZAPP_MSG_BYTES_PER, ZZAPP_MSG_BYTES_PER);
+	memcpy(msg, window + ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_HDR +
+	       slot * ZZAPP_MSG_BYTES_PER, ZZAPP_MSG_BYTES_PER);
+	barrier();
+	win_put32(ZZAPP_MSG_H2A_OFF + 4U, tail + 1U);
+	return 1;
+}
+
 static int span_ok(uint32_t addr, uint32_t bytes)
 {
 	uint64_t end;
@@ -1738,6 +1883,60 @@ static const struct audio_fabric_producer_ops app_audio_ops = {
 };
 #endif
 
+static void audio_pump_ahi_window(void)
+{
+	uint32_t host_head;
+	uint32_t host_tail;
+	uint32_t source_read;
+	uint32_t source_write;
+	uint32_t available;
+	uint32_t free_bytes;
+	uint32_t copied = 0U;
+
+	if (!audio_open || !audio_ahi_route || !have_window() ||
+	    !audio_samples || !audio_read_frame || !audio_write_frame)
+		return;
+	host_head = win_get32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF);
+	host_tail = win_get32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF);
+	if (host_head - host_tail > ZZAPP_AUDIO_CAP ||
+	    host_tail - audio_host_tail_seen > ZZAPP_AUDIO_CAP)
+		return;
+	if (host_tail != audio_host_tail_seen) {
+		*audio_read_frame += (host_tail - audio_host_tail_seen) / 4U;
+		audio_host_tail_seen = host_tail;
+	}
+	source_read = *audio_read_frame;
+	source_write = *audio_write_frame;
+	if (source_write - source_read > ZZAPP_AUDIO_FRAMES)
+		return;
+	available = (source_write - source_read) * 4U;
+	free_bytes = ZZAPP_AUDIO_CAP - (host_head - host_tail);
+	while (copied < available && copied < free_bytes) {
+		uint32_t src_at = (source_read * 4U + copied) %
+			(ZZAPP_AUDIO_FRAMES * 4U);
+		uint32_t dst_at = (host_head + copied) % ZZAPP_AUDIO_CAP;
+		uint32_t n = available - copied;
+		uint32_t src_left = ZZAPP_AUDIO_FRAMES * 4U - src_at;
+		uint32_t dst_left = ZZAPP_AUDIO_CAP - dst_at;
+
+		if (n > free_bytes - copied)
+			n = free_bytes - copied;
+		if (n > src_left)
+			n = src_left;
+		if (n > dst_left)
+			n = dst_left;
+		memcpy(window + ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + dst_at,
+		       (const uint8_t *)audio_samples + src_at, n);
+		win_flush(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + dst_at, n);
+		copied += n;
+	}
+	if (copied != 0U) {
+		barrier();
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF,
+			  host_head + copied);
+	}
+}
+
 static void audio_detach(void)
 {
 	int open = 1;
@@ -1748,7 +1947,8 @@ static void audio_detach(void)
 					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 		return;
 #ifndef ZZAPP_HOST_TEST
-	audio_fabric_producer_detach(audio_slot);
+	if (!audio_ahi_route)
+		audio_fabric_producer_detach(audio_slot);
 	if (audio_block)
 		surface_allocator_free((uint32_t)(uintptr_t)audio_block);
 #endif
@@ -1760,26 +1960,37 @@ static void audio_detach(void)
 	audio_read_frame = NULL;
 	audio_write_frame = NULL;
 	audio_staged = 0U;
+	audio_ahi_route = 0;
+	audio_host_tail_seen = 0U;
+	if (have_window()) {
+		life_put(ZZAPP_LIFE_AUDIO_ROUTE_OFF, ZZAPP_AUDIO_ROUTE_CARD);
+		life_put(ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF, 0U);
+	}
 }
 
 static int audio_attach(void)
 {
-	uint32_t slot;
+	uint32_t slot = 0U;
 	uint32_t bytes = 8U + ZZAPP_AUDIO_FRAMES * 4U;
 
+	audio_ahi_route = (life_get(ZZAPP_LIFE_FLAGS_OFF) &
+			   ZZAPP_F_LAUNCHER_AUDIO_AHI) != 0U;
 	if (audio_open)
 		return ZZ_EBUSY;
-	slot = AUDIO_FABRIC_SLOT_RESERVED;
-	if (slot_is_busy(slot))
-		slot = AUDIO_FABRIC_SLOT_MAILBOX;
-	if (slot_is_busy(slot))
-		return ZZ_EBUSY;
+	if (!audio_ahi_route) {
+		slot = AUDIO_FABRIC_SLOT_RESERVED;
+		if (slot_is_busy(slot))
+			slot = AUDIO_FABRIC_SLOT_MAILBOX;
+		if (slot_is_busy(slot))
+			return ZZ_EBUSY;
+	}
 #ifdef ZZAPP_HOST_TEST
 	audio_block = calloc(1, bytes);
 	if (!audio_block)
 		return ZZ_ENOMEM;
 #else
-	if (!audio_fabric_conversion_admissible(ZZAPP_AUDIO_RATE))
+	if (!audio_ahi_route &&
+	    !audio_fabric_conversion_admissible(ZZAPP_AUDIO_RATE))
 		return ZZ_EBUSY;
 	audio_block = (void *)(uintptr_t)surface_allocator_alloc_range(
 		bytes, 64U, SDK_MAILBOX_Z3_RESERVE_END,
@@ -1794,23 +2005,41 @@ static int audio_attach(void)
 	*audio_write_frame = 0U;
 	audio_staged = 0U;
 	audio_slot = slot;
+	audio_host_tail_seen = 0U;
+	if (audio_ahi_route) {
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF, 0U);
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF, 0U);
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_RATE_OFF, ZZAPP_AUDIO_RATE);
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_CHANNELS_OFF, 2U);
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_FORMAT_OFF,
+			  ZZAPP_AUDIO_FORMAT_S16LE);
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_ROUTE_OFF,
+			  ZZAPP_AUDIO_ROUTE_AHI);
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_UNDERRUNS_OFF, 0U);
+		life_put(ZZAPP_LIFE_AUDIO_ROUTE_OFF, ZZAPP_AUDIO_ROUTE_AHI);
+		life_put(ZZAPP_LIFE_AUDIO_RATE_OFF, ZZAPP_AUDIO_RATE);
+		life_put(ZZAPP_LIFE_AUDIO_CHANNELS_OFF, 2U);
+		life_put(ZZAPP_LIFE_AUDIO_FORMAT_OFF, ZZAPP_AUDIO_FORMAT_S16LE);
+	}
 	/* The ISR may snapshot as soon as go_live returns. */
 	audio_open = 1;
 	barrier();
 #ifndef ZZAPP_HOST_TEST
-	if (!audio_fabric_producer_attach(slot, &app_audio_ops)) {
-		audio_open = 0;
-		surface_allocator_free((uint32_t)(uintptr_t)audio_block);
-		audio_block = NULL;
-		audio_samples = NULL;
-		audio_read_frame = NULL;
-		audio_write_frame = NULL;
-		return ZZ_EBUSY;
+	if (!audio_ahi_route) {
+		if (!audio_fabric_producer_attach(slot, &app_audio_ops)) {
+			audio_open = 0;
+			surface_allocator_free((uint32_t)(uintptr_t)audio_block);
+			audio_block = NULL;
+			audio_samples = NULL;
+			audio_read_frame = NULL;
+			audio_write_frame = NULL;
+			return ZZ_EBUSY;
+		}
+		audio_fabric_producer_rate_set(slot, ZZAPP_AUDIO_RATE);
+		if (!audio_fabric_others_live(slot))
+			audio_fabric_producer_restart(slot);
+		audio_fabric_producer_go_live(slot);
 	}
-	audio_fabric_producer_rate_set(slot, ZZAPP_AUDIO_RATE);
-	if (!audio_fabric_others_live(slot))
-		audio_fabric_producer_restart(slot);
-	audio_fabric_producer_go_live(slot);
 #endif
 	return ZZ_OK;
 }
@@ -2136,6 +2365,7 @@ void zzapp_services_poll(void)
 	}
 	if (defer_claim(DEFER_POSTED, DEFER_RUNNING))
 		run_deferred();
+	audio_pump_ahi_window();
 }
 
 int zzapp_services_take_start(uint32_t *argc)

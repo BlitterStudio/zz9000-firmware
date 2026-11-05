@@ -87,6 +87,10 @@ int zzapp_svc_display_vsync(void);
 int zzapp_svc_input_poll(struct zzapp_event *out, uint32_t max, uint32_t *out_n);
 int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, struct zzapp_audio *out);
 int zzapp_svc_audio_close(void);
+int zzapp_svc_console_write(const void *buf, uint32_t len, uint32_t *out_n);
+int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n);
+int zzapp_svc_msg_send(const void *msg);
+int zzapp_svc_msg_poll(void *msg);
 
 /* Slice C. card_* are ARM physical. flip publishes flip_gen and does not wait. */
 int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,

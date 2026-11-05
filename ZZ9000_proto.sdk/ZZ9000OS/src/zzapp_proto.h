@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 #define ZZAPP_ABI_MAJOR            0u
-#define ZZAPP_ABI_MINOR            0u
+#define ZZAPP_ABI_MINOR            2u
 
 #define ZZAPP_OP_QUERY             0x0c00u
 #define ZZAPP_OP_ALLOC_WINDOW      0x0c01u
@@ -94,7 +94,7 @@
 
 #define ZZAPP_MAILBOX_PAYLOAD_BYTES 48u
 
-#define ZZAPP_WINDOW_BYTES     0x00060000u   /* 384 KiB allocation */
+#define ZZAPP_WINDOW_BYTES     0x00094000u   /* 592 KiB allocation */
 
 #define ZZAPP_LIFE_OFF         0x00000000u
 #define ZZAPP_LIFE_BYTES       0x00000100u
@@ -124,13 +124,52 @@
 #define ZZAPP_STAGING_OFF      0x00049B40u
 #define ZZAPP_STAGING_BYTES    0x00010000u   /* 64 KiB, ends at 0x59B40 */
 
-/* Bytes from 0x59B40 to 0x60000 are reserved zero. */
+/* The v0 tail through 0x60000 remains reserved for ABI stability. */
 #define ZZAPP_PALETTE_OFF      ZZAPP_RESERVED_OFF
 #define ZZAPP_PALETTE_BYTES    1024u
 #define ZZAPP_RESERVED_OFF     0x00059B40u
 
+/* API 0.2 host: byte rings have monotonic u32 head/tail counters.
+ * Console output is app-to-host; input is host-to-app and eof is written by
+ * the host when its input stream closes. Neither console ring drops data. */
+#define ZZAPP_CONSOLE_OUT_OFF  0x00060000u
+#define ZZAPP_CONSOLE_OUT_BYTES 0x00010000u
+#define ZZAPP_CONSOLE_IN_OFF   0x00070000u
+#define ZZAPP_CONSOLE_IN_BYTES 0x00002000u
+#define ZZAPP_CONSOLE_HDR      16u
+#define ZZAPP_CONSOLE_OUT_CAP  (ZZAPP_CONSOLE_OUT_BYTES - ZZAPP_CONSOLE_HDR)
+#define ZZAPP_CONSOLE_IN_CAP   (ZZAPP_CONSOLE_IN_BYTES - ZZAPP_CONSOLE_HDR)
+#define ZZAPP_CONSOLE_EOF_OFF  8u
+
+/* PCM is S16LE interleaved. The app is its only producer; route describes
+ * the launcher-selected card-fabric or AHI consumer. */
+#define ZZAPP_AUDIO_OFF        0x00072000u
+#define ZZAPP_AUDIO_BYTES      0x00020000u
+#define ZZAPP_AUDIO_HDR        32u
+#define ZZAPP_AUDIO_CAP        (ZZAPP_AUDIO_BYTES - ZZAPP_AUDIO_HDR)
+#define ZZAPP_AUDIO_HEAD_OFF   0u
+#define ZZAPP_AUDIO_TAIL_OFF   4u
+#define ZZAPP_AUDIO_RATE_OFF   8u
+#define ZZAPP_AUDIO_CHANNELS_OFF 12u
+#define ZZAPP_AUDIO_FORMAT_OFF 16u
+#define ZZAPP_AUDIO_ROUTE_OFF  20u
+#define ZZAPP_AUDIO_UNDERRUNS_OFF 24u
+#define ZZAPP_AUDIO_FLAGS_OFF  28u
+#define ZZAPP_AUDIO_FORMAT_S16LE 1u
+#define ZZAPP_AUDIO_ROUTE_CARD 0u
+#define ZZAPP_AUDIO_ROUTE_AHI  1u
+
+/* Fixed 32-byte application messages. Host-to-app and app-to-host each have
+ * one single-producer/single-consumer ring. Payload bytes are opaque. */
+#define ZZAPP_MSG_H2A_OFF      0x00092000u
+#define ZZAPP_MSG_A2H_OFF      0x00093000u
+#define ZZAPP_MSG_BYTES        0x00001000u
+#define ZZAPP_MSG_HDR          16u
+#define ZZAPP_MSG_BYTES_PER    32u
+#define ZZAPP_MSG_CAP          64u
+
 #define ZZAPP_LIFE_MAGIC       0x5A415050u   /* 'ZAPP' */
-#define ZZAPP_LIFE_VERSION     1u
+#define ZZAPP_LIFE_VERSION     2u
 
 #define ZZAPP_LIFE_MAGIC_OFF       0x00u
 #define ZZAPP_LIFE_VERSION_OFF     0x04u
@@ -168,6 +207,11 @@
 #define ZZAPP_LIFE_FLIP_ADDRESS_OFF    0x84u
 #define ZZAPP_LIFE_FLIP_SUBMIT_OFF     0x88u
 #define ZZAPP_LIFE_MAILBOX_REPLACED_OFF 0x8Cu
+#define ZZAPP_LIFE_AUDIO_ROUTE_OFF     0x90u
+#define ZZAPP_LIFE_AUDIO_RATE_OFF      0x94u
+#define ZZAPP_LIFE_AUDIO_CHANNELS_OFF  0x98u
+#define ZZAPP_LIFE_AUDIO_FORMAT_OFF    0x9Cu
+#define ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF 0xA0u
 
 /* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
  * 5 stopping, 6 faulted. */
@@ -192,7 +236,8 @@
 /* Flags: bit0 display wanted, bit1 audio, bit2 GL,
  * bit8 display requested and not yet bound, bit9 vsync wanted.
  * Launcher/Firmware scanout-ack bits negotiate strict vblank-safe panning;
- * mailbox bits negotiate card-owned triple-buffer presentation. */
+ * mailbox bits negotiate card-owned triple-buffer presentation. Bit16 marks
+ * an app that has used the console; bit17 selects AHI for the audio ring. */
 #define ZZAPP_F_DISPLAY                 (1u << 0)
 #define ZZAPP_F_AUDIO                   (1u << 1)
 #define ZZAPP_F_GL                      (1u << 2)
@@ -204,6 +249,8 @@
 #define ZZAPP_F_MAILBOX_REQUEST         (1u << 13)
 #define ZZAPP_F_LAUNCHER_MAILBOX        (1u << 14)
 #define ZZAPP_F_MAILBOX                 (1u << 15)
+#define ZZAPP_F_CONSOLE                 (1u << 16)
+#define ZZAPP_F_LAUNCHER_AUDIO_AHI      (1u << 17)
 
 #define ZZAPP_EV_KEY_DOWN          1u
 #define ZZAPP_EV_KEY_UP            2u
@@ -211,6 +258,11 @@
 #define ZZAPP_EV_JOY               4u
 #define ZZAPP_EV_STOP              5u
 #define ZZAPP_EV_RESIZE            6u
+#define ZZAPP_EV_BREAK             7u
+
+#define ZZAPP_BREAK_CTRL_D         4u
+#define ZZAPP_BREAK_CTRL_E         5u
+#define ZZAPP_BREAK_CTRL_F         6u
 
 #define ZZAPP_FILE_OP_OPEN         1u
 #define ZZAPP_FILE_OP_CLOSE        2u
@@ -272,6 +324,17 @@ struct zzapp_file_wire {   /* 64 bytes; do not add a field */
 };
 #define ZZAPP_FILE_WIRE_DEFINED 1
 
+struct zzapp_ring_hdr {
+    uint32_t head;
+    uint32_t tail;
+    uint32_t value0;
+    uint32_t value1;
+};
+
+struct zzapp_wire_msg {
+    uint8_t bytes[ZZAPP_MSG_BYTES_PER];
+};
+
 /* Native layout documents offsets. Wire stores are big-endian; use the
  * accessors. Do not read these fields as host integers on a little-endian CPU. */
 struct zzapp_life {
@@ -311,6 +374,11 @@ struct zzapp_life {
     uint32_t flip_address;
     uint32_t flip_submit;
     uint32_t mailbox_replaced;
+    uint32_t audio_route;
+    uint32_t audio_rate;
+    uint32_t audio_channels;
+    uint32_t audio_format;
+    uint32_t audio_underruns;
 };
 
 struct zzapp_input_hdr {
@@ -352,8 +420,25 @@ _Static_assert(ZZAPP_STAGING_OFF == 0x49B40u, "staging");
 _Static_assert(ZZAPP_STAGING_OFF + ZZAPP_STAGING_BYTES == 0x59B40u, "staging end");
 _Static_assert(ZZAPP_STAGING_OFF + ZZAPP_STAGING_BYTES == ZZAPP_RESERVED_OFF,
                "reserved");
-_Static_assert(ZZAPP_RESERVED_OFF < ZZAPP_WINDOW_BYTES, "window tail");
-_Static_assert(ZZAPP_WINDOW_BYTES == 0x60000u, "window");
+_Static_assert(ZZAPP_RESERVED_OFF + ZZAPP_PALETTE_BYTES == 0x59F40u,
+               "palette");
+_Static_assert(0x60000u <= ZZAPP_WINDOW_BYTES, "v0 window retained");
+_Static_assert(ZZAPP_CONSOLE_OUT_OFF == 0x60000u, "console out");
+_Static_assert(ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_OUT_BYTES ==
+               ZZAPP_CONSOLE_IN_OFF, "console out end");
+_Static_assert(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_IN_BYTES ==
+               ZZAPP_AUDIO_OFF, "console in end");
+_Static_assert(ZZAPP_CONSOLE_OUT_CAP > 0u && ZZAPP_CONSOLE_IN_CAP > 0u,
+               "console capacity");
+_Static_assert(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_BYTES == ZZAPP_MSG_H2A_OFF,
+               "audio end");
+_Static_assert(ZZAPP_AUDIO_CAP > 0u, "audio capacity");
+_Static_assert(ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_BYTES == ZZAPP_MSG_A2H_OFF,
+               "host message end");
+_Static_assert(ZZAPP_MSG_A2H_OFF + ZZAPP_MSG_BYTES == ZZAPP_WINDOW_BYTES,
+               "app message end");
+_Static_assert(ZZAPP_MSG_HDR + ZZAPP_MSG_CAP * ZZAPP_MSG_BYTES_PER <=
+               ZZAPP_MSG_BYTES, "message capacity");
 _Static_assert(ZZAPP_CHUNK_MAX == ZZAPP_STAGING_BYTES, "chunk fits staging");
 _Static_assert(ZZAPP_ARGV_STR_OFF < ZZAPP_ARGV_BYTES, "argv header");
 _Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_STR_MAX <= ZZAPP_ARGV_BYTES,
@@ -386,6 +471,8 @@ _Static_assert(offsetof(struct zzapp_file_wire, reserved) == 60, "file reserved"
 
 _Static_assert(sizeof(struct zzapp_input_hdr) == ZZAPP_INPUT_HDR, "input hdr");
 _Static_assert(sizeof(struct zzapp_log_hdr) == ZZAPP_LOG_HDR, "log hdr");
+_Static_assert(sizeof(struct zzapp_ring_hdr) == ZZAPP_CONSOLE_HDR, "ring hdr");
+_Static_assert(sizeof(struct zzapp_wire_msg) == ZZAPP_MSG_BYTES_PER, "message");
 _Static_assert(offsetof(struct zzapp_life, magic) == ZZAPP_LIFE_MAGIC_OFF, "magic");
 _Static_assert(offsetof(struct zzapp_life, version) == ZZAPP_LIFE_VERSION_OFF, "ver");
 _Static_assert(offsetof(struct zzapp_life, state) == ZZAPP_LIFE_STATE_OFF, "state");
@@ -422,6 +509,11 @@ _Static_assert(offsetof(struct zzapp_life, card_spare) == ZZAPP_LIFE_CARD_SPARE_
 _Static_assert(offsetof(struct zzapp_life, flip_address) == ZZAPP_LIFE_FLIP_ADDRESS_OFF, "faddr");
 _Static_assert(offsetof(struct zzapp_life, flip_submit) == ZZAPP_LIFE_FLIP_SUBMIT_OFF, "fsubmit");
 _Static_assert(offsetof(struct zzapp_life, mailbox_replaced) == ZZAPP_LIFE_MAILBOX_REPLACED_OFF, "mreplace");
+_Static_assert(offsetof(struct zzapp_life, audio_route) == ZZAPP_LIFE_AUDIO_ROUTE_OFF, "aroute");
+_Static_assert(offsetof(struct zzapp_life, audio_rate) == ZZAPP_LIFE_AUDIO_RATE_OFF, "arate");
+_Static_assert(offsetof(struct zzapp_life, audio_channels) == ZZAPP_LIFE_AUDIO_CHANNELS_OFF, "achannels");
+_Static_assert(offsetof(struct zzapp_life, audio_format) == ZZAPP_LIFE_AUDIO_FORMAT_OFF, "aformat");
+_Static_assert(offsetof(struct zzapp_life, audio_underruns) == ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF, "aunderruns");
 _Static_assert(sizeof(struct zzapp_life) <= ZZAPP_LIFE_BYTES, "life bytes");
 
 static inline void zzapp_put_be16(void *p, uint16_t value)
