@@ -13,6 +13,43 @@ static uint32_t ring_space(uint32_t head, uint32_t tail, uint32_t capacity)
     return capacity - (head - tail);
 }
 
+static int is_power_of_two(uint32_t value)
+{
+    return value != 0u && (value & (value - 1u)) == 0u;
+}
+
+static void ring_write(uint8_t *payload, uint32_t capacity, uint32_t head,
+                       const uint8_t *src, uint32_t bytes)
+{
+    while (bytes != 0u) {
+        uint32_t at = head % capacity;
+        uint32_t chunk = capacity - at;
+
+        if (chunk > bytes)
+            chunk = bytes;
+        memcpy(payload + at, src, chunk);
+        head += chunk;
+        src += chunk;
+        bytes -= chunk;
+    }
+}
+
+static void ring_drain(uint8_t *payload, uint32_t capacity, uint32_t *tail,
+                       uint8_t *dst, uint32_t bytes)
+{
+    while (bytes != 0u) {
+        uint32_t at = *tail % capacity;
+        uint32_t chunk = capacity - at;
+
+        if (chunk > bytes)
+            chunk = bytes;
+        memcpy(dst, payload + at, chunk);
+        *tail += chunk;
+        dst += chunk;
+        bytes -= chunk;
+    }
+}
+
 int main(void)
 {
     uint8_t *out = window + ZZAPP_CONSOLE_OUT_OFF;
@@ -36,6 +73,27 @@ int main(void)
     zzapp_put_be32(out + 4, 1u);
     assert(ring_space(zzapp_get_be32(out), zzapp_get_be32(out + 4),
                       ZZAPP_CONSOLE_OUT_CAP) == 1u);
+    {
+        uint8_t expected[32];
+        uint8_t drained[32];
+        uint32_t tail = 0xfffffff0u;
+
+        assert(is_power_of_two(ZZAPP_CONSOLE_OUT_CAP));
+        assert(is_power_of_two(ZZAPP_CONSOLE_IN_CAP));
+        assert(is_power_of_two(ZZAPP_AUDIO_CAP));
+        for (i = 0u; i < sizeof(expected); i++)
+            expected[i] = (uint8_t)(0x80u + i);
+        ring_write(out + ZZAPP_CONSOLE_HDR, ZZAPP_CONSOLE_OUT_CAP, tail,
+                   expected, sizeof(expected));
+        ring_drain(out + ZZAPP_CONSOLE_HDR, ZZAPP_CONSOLE_OUT_CAP, &tail,
+                   drained, 16u);
+        ring_drain(out + ZZAPP_CONSOLE_HDR, ZZAPP_CONSOLE_OUT_CAP, &tail,
+                   drained + 16u, 7u);
+        ring_drain(out + ZZAPP_CONSOLE_HDR, ZZAPP_CONSOLE_OUT_CAP, &tail,
+                   drained + 23u, 9u);
+        assert(tail == 0x10u);
+        assert(memcmp(expected, drained, sizeof(expected)) == 0);
+    }
 
     zzapp_put_be32(in, 3u);
     zzapp_put_be32(in + 4, 0u);

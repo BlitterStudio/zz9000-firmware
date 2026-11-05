@@ -132,13 +132,16 @@
 /* API 0.2 host: byte rings have monotonic u32 head/tail counters.
  * Console output is app-to-host; input is host-to-app and eof is written by
  * the host when its input stream closes. Neither console ring drops data. */
+/* These payload capacities are powers of two so wrapping u32 counters retain
+ * their physical position across UINT32_MAX.  The unused tail in each region
+ * remains reserved by this layout version. */
 #define ZZAPP_CONSOLE_OUT_OFF  0x00060000u
 #define ZZAPP_CONSOLE_OUT_BYTES 0x00010000u
 #define ZZAPP_CONSOLE_IN_OFF   0x00070000u
 #define ZZAPP_CONSOLE_IN_BYTES 0x00002000u
 #define ZZAPP_CONSOLE_HDR      16u
-#define ZZAPP_CONSOLE_OUT_CAP  (ZZAPP_CONSOLE_OUT_BYTES - ZZAPP_CONSOLE_HDR)
-#define ZZAPP_CONSOLE_IN_CAP   (ZZAPP_CONSOLE_IN_BYTES - ZZAPP_CONSOLE_HDR)
+#define ZZAPP_CONSOLE_OUT_CAP  0x00008000u
+#define ZZAPP_CONSOLE_IN_CAP   0x00001000u
 #define ZZAPP_CONSOLE_EOF_OFF  8u
 
 /* PCM is S16LE interleaved. The app is its only producer; route describes
@@ -146,7 +149,7 @@
 #define ZZAPP_AUDIO_OFF        0x00072000u
 #define ZZAPP_AUDIO_BYTES      0x00020000u
 #define ZZAPP_AUDIO_HDR        32u
-#define ZZAPP_AUDIO_CAP        (ZZAPP_AUDIO_BYTES - ZZAPP_AUDIO_HDR)
+#define ZZAPP_AUDIO_CAP        0x00010000u
 #define ZZAPP_AUDIO_HEAD_OFF   0u
 #define ZZAPP_AUDIO_TAIL_OFF   4u
 #define ZZAPP_AUDIO_RATE_OFF   8u
@@ -430,9 +433,15 @@ _Static_assert(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_IN_BYTES ==
                ZZAPP_AUDIO_OFF, "console in end");
 _Static_assert(ZZAPP_CONSOLE_OUT_CAP > 0u && ZZAPP_CONSOLE_IN_CAP > 0u,
                "console capacity");
+_Static_assert((ZZAPP_CONSOLE_OUT_CAP & (ZZAPP_CONSOLE_OUT_CAP - 1u)) == 0u,
+               "console output capacity wraps");
+_Static_assert((ZZAPP_CONSOLE_IN_CAP & (ZZAPP_CONSOLE_IN_CAP - 1u)) == 0u,
+               "console input capacity wraps");
 _Static_assert(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_BYTES == ZZAPP_MSG_H2A_OFF,
                "audio end");
 _Static_assert(ZZAPP_AUDIO_CAP > 0u, "audio capacity");
+_Static_assert((ZZAPP_AUDIO_CAP & (ZZAPP_AUDIO_CAP - 1u)) == 0u,
+               "audio capacity wraps");
 _Static_assert(ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_BYTES == ZZAPP_MSG_A2H_OFF,
                "host message end");
 _Static_assert(ZZAPP_MSG_A2H_OFF + ZZAPP_MSG_BYTES == ZZAPP_WINDOW_BYTES,

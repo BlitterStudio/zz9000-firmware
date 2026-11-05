@@ -133,7 +133,8 @@ enum {
 	DEFER_DONE = 4,
 	AUDIO_REQUEST_NONE = 0,
 	AUDIO_REQUEST_OPEN = 1,
-	AUDIO_REQUEST_CLOSE = 2
+	AUDIO_REQUEST_CLOSE = 2,
+	AUDIO_REQUEST_CLOSE_QUIESCED = 3
 };
 
 static uint8_t *window;
@@ -188,6 +189,7 @@ static volatile uint32_t *audio_read_frame;
 static volatile uint32_t *audio_write_frame;
 static int16_t *audio_samples;
 static uint64_t audio_staged;
+static uint32_t audio_ahi_staged_frame;
 static void *audio_block;
 static volatile uint32_t audio_request;
 static int audio_ahi_route;
@@ -613,6 +615,18 @@ void zzapp_services_on_launch(void)
 	log_ring_count = 0U;
 	log_ring_window = 0U;
 	load_diag_seen = 0U;
+	if (have_window()) {
+		memset(window + ZZAPP_CONSOLE_OUT_OFF, 0, ZZAPP_CONSOLE_HDR);
+		memset(window + ZZAPP_CONSOLE_IN_OFF, 0, ZZAPP_CONSOLE_HDR);
+		memset(window + ZZAPP_AUDIO_OFF, 0, ZZAPP_AUDIO_HDR);
+		memset(window + ZZAPP_MSG_H2A_OFF, 0, ZZAPP_MSG_HDR);
+		memset(window + ZZAPP_MSG_A2H_OFF, 0, ZZAPP_MSG_HDR);
+		win_flush(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
+		win_flush(ZZAPP_CONSOLE_IN_OFF, ZZAPP_CONSOLE_HDR);
+		win_flush(ZZAPP_AUDIO_OFF, ZZAPP_AUDIO_HDR);
+		win_flush(ZZAPP_MSG_H2A_OFF, ZZAPP_MSG_HDR);
+		win_flush(ZZAPP_MSG_A2H_OFF, ZZAPP_MSG_HDR);
+	}
 #ifndef ZZAPP_HOST_TEST
 	log_uart_count = 0U;
 	log_uart_window = 0U;
@@ -1888,7 +1902,9 @@ static void audio_pump_ahi_window(void)
 	uint32_t host_head;
 	uint32_t host_tail;
 	uint32_t source_read;
+	uint32_t source_staged;
 	uint32_t source_write;
+	uint32_t retired;
 	uint32_t available;
 	uint32_t free_bytes;
 	uint32_t copied = 0U;
@@ -1898,21 +1914,28 @@ static void audio_pump_ahi_window(void)
 		return;
 	host_head = win_get32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF);
 	host_tail = win_get32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF);
+	retired = host_tail - audio_host_tail_seen;
 	if (host_head - host_tail > ZZAPP_AUDIO_CAP ||
-	    host_tail - audio_host_tail_seen > ZZAPP_AUDIO_CAP)
+	    retired > ZZAPP_AUDIO_CAP || (retired & 3U) != 0U)
 		return;
-	if (host_tail != audio_host_tail_seen) {
-		*audio_read_frame += (host_tail - audio_host_tail_seen) / 4U;
-		audio_host_tail_seen = host_tail;
-	}
 	source_read = *audio_read_frame;
-	source_write = *audio_write_frame;
-	if (source_write - source_read > ZZAPP_AUDIO_FRAMES)
+	source_staged = audio_ahi_staged_frame;
+	if (source_staged - source_read > ZZAPP_AUDIO_FRAMES ||
+	    retired / 4U > source_staged - source_read)
 		return;
-	available = (source_write - source_read) * 4U;
+	if (retired != 0U) {
+		*audio_read_frame = source_read + retired / 4U;
+		audio_host_tail_seen = host_tail;
+		source_read = *audio_read_frame;
+	}
+	source_staged = audio_ahi_staged_frame;
+	source_write = *audio_write_frame;
+	if (source_write - source_staged > ZZAPP_AUDIO_FRAMES)
+		return;
+	available = (source_write - source_staged) * 4U;
 	free_bytes = ZZAPP_AUDIO_CAP - (host_head - host_tail);
 	while (copied < available && copied < free_bytes) {
-		uint32_t src_at = (source_read * 4U + copied) %
+		uint32_t src_at = (source_staged * 4U + copied) %
 			(ZZAPP_AUDIO_FRAMES * 4U);
 		uint32_t dst_at = (host_head + copied) % ZZAPP_AUDIO_CAP;
 		uint32_t n = available - copied;
@@ -1931,6 +1954,7 @@ static void audio_pump_ahi_window(void)
 		copied += n;
 	}
 	if (copied != 0U) {
+		audio_ahi_staged_frame += copied / 4U;
 		barrier();
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF,
 			  host_head + copied);
@@ -1940,14 +1964,18 @@ static void audio_pump_ahi_window(void)
 static void audio_detach(void)
 {
 	int open = 1;
+	int was_ahi_route;
 
-	/* Core 0 (an app's close request) and core 1 (teardown) can both get
-	 * here; only the caller that clears audio_open releases the block. */
+	/* Core 0 releases a close only after core 1 has quiesced the AHI pump. */
 	if (!__atomic_compare_exchange_n(&audio_open, &open, 0, 0,
 					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 		return;
+	was_ahi_route = audio_ahi_route;
+#ifdef ZZAPP_HOST_TEST
+	(void)was_ahi_route;
+#endif
 #ifndef ZZAPP_HOST_TEST
-	if (!audio_ahi_route)
+	if (!was_ahi_route)
 		audio_fabric_producer_detach(audio_slot);
 	if (audio_block)
 		surface_allocator_free((uint32_t)(uintptr_t)audio_block);
@@ -1960,10 +1988,16 @@ static void audio_detach(void)
 	audio_read_frame = NULL;
 	audio_write_frame = NULL;
 	audio_staged = 0U;
+	audio_ahi_staged_frame = 0U;
 	audio_ahi_route = 0;
 	audio_host_tail_seen = 0U;
 	if (have_window()) {
+		memset(window + ZZAPP_AUDIO_OFF, 0, ZZAPP_AUDIO_HDR);
+		win_flush(ZZAPP_AUDIO_OFF, ZZAPP_AUDIO_HDR);
 		life_put(ZZAPP_LIFE_AUDIO_ROUTE_OFF, ZZAPP_AUDIO_ROUTE_CARD);
+		life_put(ZZAPP_LIFE_AUDIO_RATE_OFF, 0U);
+		life_put(ZZAPP_LIFE_AUDIO_CHANNELS_OFF, 0U);
+		life_put(ZZAPP_LIFE_AUDIO_FORMAT_OFF, 0U);
 		life_put(ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF, 0U);
 	}
 }
@@ -2004,6 +2038,7 @@ static int audio_attach(void)
 	*audio_read_frame = 0U;
 	*audio_write_frame = 0U;
 	audio_staged = 0U;
+	audio_ahi_staged_frame = 0U;
 	audio_slot = slot;
 	audio_host_tail_seen = 0U;
 	if (audio_ahi_route) {
@@ -2105,7 +2140,7 @@ void zzapp_services_core0_poll(void)
 
 	if (request == AUDIO_REQUEST_OPEN)
 		audio_result = audio_attach();
-	else if (request == AUDIO_REQUEST_CLOSE) {
+	else if (request == AUDIO_REQUEST_CLOSE_QUIESCED) {
 		audio_detach();
 		audio_result = ZZ_OK;
 	} else {
@@ -2365,6 +2400,13 @@ void zzapp_services_poll(void)
 	}
 	if (defer_claim(DEFER_POSTED, DEFER_RUNNING))
 		run_deferred();
+	if (audio_request == AUDIO_REQUEST_CLOSE) {
+		/* The release store lets core 0 free the source only after no
+		 * core-1 AHI pump can still retain its pointers. */
+		barrier();
+		audio_request = AUDIO_REQUEST_CLOSE_QUIESCED;
+		return;
+	}
 	audio_pump_ahi_window();
 }
 
