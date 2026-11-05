@@ -15,6 +15,10 @@
 #include "zzm_minigl_host.h"
 #include "zzm_registry.h"
 
+
+#ifndef ZZ9000_BUILD_GIT
+#define ZZ9000_BUILD_GIT "unknown"
+#endif
 #define WEAK __attribute__((weak))
 
 #ifdef ZZAPP_HOST_TEST
