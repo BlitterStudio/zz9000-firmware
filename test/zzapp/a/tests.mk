@@ -26,3 +26,10 @@ $(BUILD)/a/loader_elf_test: a/loader_elf_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 $(BUILD)/a/display_fallback_test: a/display_fallback_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o
+
+ifneq ($(strip $(ZZAPP_PROBE_ELF)),)
+ZZAPP_TESTS += $(BUILD)/a/loader_file_test
+$(BUILD)/a/loader_file_test: a/loader_file_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PROBE_ELF=\"$(ZZAPP_PROBE_ELF)\" -o $@ $< $(A_RUNTIME_OBJS)
+endif

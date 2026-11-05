@@ -28,10 +28,10 @@ LIB_OBJS := $(BUILD)/zzapp.o $(BUILD)/gl_wrap.o $(BUILD)/syscalls.o
 
 .PHONY: all check-relocs clean
 
-all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/zzmembench.elf
+all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf
 
-check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf
-	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf
+check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf
+	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -72,6 +72,12 @@ $(BUILD)/note_zzmembench.o: zzapp_note.S | $(BUILD)
 $(BUILD)/zzmembench.o: templates/zzmembench.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(BUILD)/note_mgl-conformance.o: zzapp_note.S | $(BUILD)
+	$(CC) $(ASMFLAGS) -DZZAPP_NOTE_FLAGS=5 -c -o $@ $<
+
+$(BUILD)/mgl-conformance.o: templates/mgl_conformance.c templates/mgl_conformance_matrix.h | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(BUILD)/libzzapp.a: $(LIB_OBJS)
 	$(AR) rcs $@ $^
 
@@ -92,6 +98,10 @@ $(BUILD)/sbrk_smoke.elf: $(BUILD)/crt0.o $(BUILD)/note_smoke.o $(BUILD)/sbrk_smo
 	$(PYTHON) rela_dyn.py $@
 
 $(BUILD)/zzmembench.elf: $(BUILD)/crt0.o $(BUILD)/note_zzmembench.o $(BUILD)/zzmembench.o $(BUILD)/libzzapp.a
+	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
+	$(PYTHON) rela_dyn.py $@
+
+$(BUILD)/mgl-conformance.elf: $(BUILD)/crt0.o $(BUILD)/note_mgl-conformance.o $(BUILD)/mgl-conformance.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
 	$(PYTHON) rela_dyn.py $@
 
