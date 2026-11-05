@@ -2460,6 +2460,24 @@ void sdk_image_stream_poison_core1_sessions(void)
 }
 
 /*
+ * A core-1 fault poison already released the codec's owned storage and
+ * references. Drop only that failed slot without calling its normal close
+ * destructor; the caller supplies its own session ID so unrelated clients
+ * survive the app teardown.
+ */
+uint16_t sdk_image_stream_release_poisoned(uint32_t session)
+{
+	struct SDKImageStreamSession *slot = find_session(session);
+
+	if (!slot)
+		return SDK_STATUS_BAD_HANDLE;
+	if (!slot->failed)
+		return SDK_STATUS_BAD_REQUEST;
+	memset(slot, 0, sizeof(*slot));
+	return SDK_STATUS_OK;
+}
+
+/*
  * core-1 fault recovery only (core1_cold_restart, beside
  * sdk_smp_lock_reset_malloc): a cold reset can land inside the
  * decode-state budget critical section (the few-instruction

@@ -16,7 +16,10 @@ int main(void)
     zzapp_mem_info mem;
 
     zzapp_boot_init();
-    /* zzapp_enter_arm establishes the VFP ABI baseline before app code. */
+    /*
+     * This host harness cannot execute the ARM entry trampoline or read its
+     * hardware FPSCR; it only verifies the baseline constant it supplies.
+     */
     assert(ZZAPP_ENTRY_FPSCR == 0u);
 
     zzapp_test_set_xtime(0);
