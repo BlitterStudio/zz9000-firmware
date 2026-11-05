@@ -127,6 +127,9 @@ void zzm_minigl_doorbell(void);
 int zzm_minigl_transport_acquire(uint32_t *generation);
 int zzm_minigl_transport_release(void);
 /* Called only from core 1's worker/service tick. */
+#if defined(MINIGL_HOST_TEST)
+void zzm_minigl_test_set_poll_hook(void (*hook)(void));
+#endif
 void zzm_minigl_service_tick(int in_api);
 int zzm_minigl_begin_reset(void);
 int zzm_minigl_reset_poll(void);

@@ -80,6 +80,9 @@ static int g_reset_active;
 static int g_pl330_claimed;
 static uint32_t g_pl330_owner;
 static zzm_minigl_boot_caps_t g_caps;
+#if defined(MINIGL_HOST_TEST)
+static void (*g_test_poll_hook)(void);
+#endif
 
 #if !defined(TASKQ_HOST_TEST)
 static int graphics_p96_span(uintptr_t address, size_t bytes)
@@ -808,11 +811,22 @@ int zzm_minigl_transport_release(void)
     return g_ops->transport_release(g_context);
 }
 
+#if defined(MINIGL_HOST_TEST)
+void zzm_minigl_test_set_poll_hook(void (*hook)(void))
+{
+    g_test_poll_hook = hook;
+}
+#endif
+
 void zzm_minigl_service_tick(int in_api)
 {
     if (in_api || !g_worker || g_poll_active || !g_worker->has_work(g_context))
         return;
     g_poll_active = 1;
+#if defined(MINIGL_HOST_TEST)
+    if (g_test_poll_hook)
+        g_test_poll_hook();
+#endif
     (void)g_worker->poll(g_context, ZZM_MINIGL_POLL_BUDGET);
     g_poll_active = 0;
 }

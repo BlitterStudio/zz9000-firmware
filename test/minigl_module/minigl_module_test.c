@@ -218,6 +218,12 @@ static void setup_host_memory(void)
     host_card_pool_reset(CARD_POOL_LIMIT_MINIGL + (64U << 20));
     surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
 }
+static void release_transport_from_worker_poll(void)
+{
+    assert(zzm_minigl_transport_release());
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+}
+
 
 int main(void)
 {
@@ -318,7 +324,20 @@ int main(void)
     assert(card_pool.block_count == 0U);
     assert(zzm_minigl_transport_acquire(&generation2));
     assert(generation2 > generation1);
-    assert(zzm_minigl_transport_release());
+    zzm_minigl_doorbell();
+    assert(zzm_minigl_has_work());
+    zzm_minigl_test_set_poll_hook(release_transport_from_worker_poll);
+    zzm_minigl_service_tick(0);
+    zzm_minigl_test_set_poll_hook(NULL);
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_LOADED);
+    assert(zzm_minigl_worker_registered());
+    assert(zzm_loader_acquire(ZZM_MODULE_MINIGL));
+    ops = zzm_minigl_ops(&context);
+    assert(ops != NULL && context != NULL);
+    assert(ops->app_bind(context, 1U, &gl) == 0 && gl != NULL);
+    ops->app_unbind(context);
+    ops->app_reclaim(context, 1U);
     assert(card_pool.block_count == 0U);
     zzm_loader_release(ZZM_MODULE_MINIGL);
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
