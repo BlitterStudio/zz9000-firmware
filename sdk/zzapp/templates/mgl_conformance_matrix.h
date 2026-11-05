@@ -43,14 +43,14 @@ static const enum mgl_probe_env mgl_probe_envs[] = {
     MGL_PROBE_BLEND, MGL_PROBE_ADD
 };
 static const char *const mgl_probe_env_names[] = {
-    "replace", "modulate", "decal", "blend", "add"
+    "REPLACE", "MODULATE", "DECAL", "BLEND", "ADD"
 };
 static const enum mgl_probe_format mgl_probe_formats[] = {
     MGL_PROBE_RGBA, MGL_PROBE_RGB, MGL_PROBE_LUMINANCE,
     MGL_PROBE_ALPHA, MGL_PROBE_LUMINANCE_ALPHA
 };
 static const char *const mgl_probe_format_names[] = {
-    "rgba", "rgb", "luminance", "alpha", "luminance-alpha"
+    "RGBA", "RGB", "LUMINANCE", "ALPHA", "LUMINANCE_ALPHA"
 };
 static const enum mgl_probe_draw mgl_probe_draws[] = {
     MGL_PROBE_IMMEDIATE, MGL_PROBE_ARRAYS, MGL_PROBE_ELEMENTS

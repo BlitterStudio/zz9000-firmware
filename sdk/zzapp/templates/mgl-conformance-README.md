@@ -23,8 +23,10 @@ make -C D:/Github/amiberry-minigl-library \
 mgl-conformance
 ```
 
-Each `MGL case` line names the texture environment, internal texture format,
-texel, vertex-colour path, alpha-test/blend state, observed RGBA readback, and
-the GL-1.1 expected RGBA result.  RGB565 readback is accepted within 8 per
-component. `MGL summary` reports the case and failure counts; a nonzero exit
-status means at least one line failed.
+By default, each probe writes one `MGL` line for every texture-environment,
+format, and draw-path group, followed by `MGL summary`. `pass` and `fail` are
+the 112 cases in that group; `first-fail` records its first mismatched input
+and observed/expected RGBA result. The ARM app also writes `MGL start` first
+and spaces each UART line by 150 ms. Use `-v` to print every failing case, or
+`-vv` to print every case. RGB565 readback is accepted within 8 per component;
+a nonzero exit status means at least one case failed.
