@@ -108,6 +108,8 @@ int sdk_image_stream_has_core1_sessions(void);
  * references (their heap blocks were already freed by the decode-reclaim
  * pass) WITHOUT running destructors, and mark the sessions failed. */
 void sdk_image_stream_poison_core1_sessions(void);
+/* Release one failed, poisoned slot without invoking codec destructors. */
+uint16_t sdk_image_stream_release_poisoned(uint32_t session);
 /* Core-1 fault recovery only (core1_cold_restart, core 1 provably halted):
  * a cold reset can orphan either the decode-budget or session-create lock. */
 void sdk_image_stream_reset_locks(void);

@@ -116,6 +116,40 @@ int main(void)
     card = zzapp_test_arena_card();
     assert(get32(zzapp_test_arena_mem() + LOAD_OFF) == card + LOAD_OFF);
     zzapp_loader_release();
+    /* REL's implicit addend is read from its virtual target after PT_LOAD
+     * placement, not from the source-file offset. */
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + 24, LOAD_OFF + 0x20u);
+    put32(image + PHOFF + 8, LOAD_OFF + 0x20u);
+    put32(image + RELA_OFF, LOAD_OFF + 0x20u);
+    put32(image + RELA_OFF + 8, 0u);
+    put32(image + SHOFF + 4, 9u);          /* SHT_REL */
+    put32(image + SHOFF + 20, 8u);
+    put32(image + SHOFF + 36, 8u);
+    put32(image + LOAD_OFF, LOAD_OFF + 0x20u);
+    assert(load_end(image) == ZZ_OK);
+    card = zzapp_test_arena_card();
+    assert(get32(zzapp_test_arena_mem() + LOAD_OFF + 0x20u) ==
+           card + LOAD_OFF + 0x20u);
+    zzapp_loader_release();
+
+    zzapp_boot_init(); make_image(image);
+    put32(image + SHOFF + 4, 9u);          /* SHT_REL */
+    put32(image + SHOFF + 20, 8u);
+    put32(image + SHOFF + 36, 4u);         /* malformed entry size */
+    assert(load_end(image) == ZZ_EINVAL);
+
+    zzapp_boot_init(); make_image(image);
+    put32(image + SHOFF + 4, 9u);          /* SHT_REL */
+    put32(image + SHOFF + 20, 8u);
+    put32(image + SHOFF + 36, 8u);
+    put32(image + RELA_OFF + 4, 2u);       /* unsupported relocation type */
+    assert(load_end(image) == ZZ_EINVAL);
+
+    zzapp_boot_init(); make_image(image);
+    put32(image + RELA_OFF + 4, 0x100u | 23u); /* nonzero symbol index */
+    assert(load_end(image) == ZZ_EINVAL);
 
     zzapp_boot_init(); make_image(image);
     put32(image + 24, 0u);

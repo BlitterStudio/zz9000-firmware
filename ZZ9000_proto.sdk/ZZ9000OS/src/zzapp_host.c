@@ -92,6 +92,7 @@ struct zzapp_host_visible_block {
     uint32_t bytes;
 };
 static struct zzapp_host_visible_block g_host_visible[ZZAPP_HOST_VISIBLE_SLOTS];
+static volatile uint32_t g_host_visible_commit_active;
 static uint32_t g_host_visible_used;
 
 static void host_visible_release_all(void)
@@ -341,6 +342,7 @@ void zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
 uint32_t zzapp_current_generation(void) { return g_coh->generation; }
 uint32_t zzapp_runtime_state(void) { return g_state; }
 uint32_t zzapp_runtime_caps(void) { return ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO | ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8; }
+int zzapp_host_faulted(void) { return g_faulted; }
 
 void zzapp_note_progress(void)
 {
@@ -416,6 +418,8 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
     if (g_coh->reset_request)
         zzapp_services_on_reset();
 #endif
+    if (zzapp_api_poison_resources)
+        zzapp_api_poison_resources();
     zzapp_loader_unbound();
 }
 
@@ -466,9 +470,9 @@ static void service_tick(uint64_t now, int permit_reentry)
     } else {
         g_coh->service_due = 1u;
     }
-    if (g_coh->reset_request) {
+    if (!g_host_visible_commit_active && g_coh->reset_request) {
         force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
-    } else if (stop_requested()) {
+    } else if (!g_host_visible_commit_active && stop_requested()) {
         if (!g_stop_mark)
             g_stop_mark = now;
         if (ticks_to_us(now - g_stop_mark) >= ZZAPP_STOP_GRACE_US)
@@ -476,12 +480,14 @@ static void service_tick(uint64_t now, int permit_reentry)
     } else {
         g_stop_mark = 0;
     }
-    if (g_coh->running && g_coh->in_api == 0u &&
+    if (!g_host_visible_commit_active && g_coh->running &&
+        g_coh->in_api == 0u &&
         ticks_to_us(now - g_coh->progress) >= ZZAPP_APP_STALL_US) {
         g_watchdog_reason = 1u;
         force_stop(ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
     }
-    if (g_coh->running && g_coh->in_api != 0u &&
+    if (!g_host_visible_commit_active && g_coh->running &&
+        g_coh->in_api != 0u &&
         ticks_to_us(now - g_coh->api_entered) >= ZZAPP_API_STUCK_US) {
         g_watchdog_reason = 2u;
         force_stop(ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
@@ -1085,19 +1091,31 @@ void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 
         if (g_host_visible[i].ptr)
             continue;
+        /*
+         * surface_allocator_* restores interrupts before returning. Keep a
+         * forced-stop tick from unwinding the app until this real allocation
+         * has a ledger entry that teardown can release.
+         */
+        g_host_visible_commit_active = 1u;
 #ifndef ZZAPP_HOST_TEST
         card = surface_allocator_alloc_aligned(bytes, align);
         ptr = (void *)(uintptr_t)card;
 #else
         ptr = malloc(bytes);
         card = 0x033f0000u + g_host_visible_used;
+        extern void zzapp_test_host_visible_allocated(void) __attribute__((weak));
+        if (zzapp_test_host_visible_allocated)
+            zzapp_test_host_visible_allocated();
 #endif
-        if (!ptr)
+        if (!ptr) {
+            g_host_visible_commit_active = 0u;
             return NULL;
+        }
         g_host_visible[i].ptr = ptr;
         g_host_visible[i].card = card;
         g_host_visible[i].bytes = bytes;
         g_host_visible_used += bytes;
+        g_host_visible_commit_active = 0u;
         return ptr;
     }
     return NULL;
@@ -1110,6 +1128,7 @@ void zzapp_host_free(void *p)
     for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
         if (g_host_visible[i].ptr != p)
             continue;
+        g_host_visible_commit_active = 1u;
 #ifndef ZZAPP_HOST_TEST
         (void)surface_allocator_free(g_host_visible[i].card);
 #else
@@ -1117,6 +1136,7 @@ void zzapp_host_free(void *p)
 #endif
         g_host_visible_used -= g_host_visible[i].bytes;
         g_host_visible[i].ptr = NULL;
+        g_host_visible_commit_active = 0u;
         return;
     }
 }

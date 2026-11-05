@@ -14,8 +14,20 @@ static const uint8_t file_data[] = "mapped";
 static uint32_t image_begin_calls;
 static uint32_t image_feed_calls;
 static uint32_t image_close_calls;
+static uint32_t image_poisoned_close_calls;
+static uint32_t image_poison_calls;
 static uint32_t audio_release_calls;
+static uint32_t audio_forget_calls;
+static uint32_t decode_reclaim_calls;
+static int stop_during_host_alloc;
 
+int zzapp_svc_should_stop(void) { return stop_during_host_alloc; }
+
+void zzapp_test_host_visible_allocated(void)
+{
+    zzapp_host_tick_at(1u);
+    zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+}
 int zzapp_svc_file_stat(const char *path, zzapp_stat *out)
 {
     if (!path || strcmp(path, "RAM:fixture") != 0 || !out)
@@ -52,6 +64,7 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 {
     assert(begin->core1_affine == 1u);
     assert(begin->direct_arm_local == 1u);
+    assert(begin->output_format == SDK_SURFACE_FORMAT_BGRA8888);
     image_begin_calls++;
     memset(out, 0, sizeof(*out));
     out->session = 0x100u + image_begin_calls;
@@ -78,6 +91,18 @@ uint16_t sdk_image_stream_close(uint32_t session)
     return SDK_STATUS_OK;
 }
 
+void sdk_image_stream_poison_core1_sessions(void)
+{
+    image_poison_calls++;
+}
+
+uint16_t sdk_image_stream_release_poisoned(uint32_t session)
+{
+    assert(session != 0u && image_poison_calls);
+    image_poisoned_close_calls++;
+    return SDK_STATUS_OK;
+}
+
 void sdk_flac_init(struct sdk_flac_state *state, uint32_t format)
 {
     memset(state, 0, sizeof(*state));
@@ -87,7 +112,7 @@ void sdk_flac_init(struct sdk_flac_state *state, uint32_t format)
 uint16_t sdk_flac_decode(struct sdk_flac_state *state,
                          struct sdk_audio_codec_io *io)
 {
-    assert(io->input_length != 0u);
+    assert(io->input_length != 0u || (io->eof && io->drain));
     state->sample_rate = 44100u;
     state->channels = 2u;
     io->consumed = io->input_length;
@@ -103,7 +128,11 @@ void sdk_flac_release(struct sdk_flac_state *state)
     audio_release_calls++;
 }
 
-void sdk_flac_forget(struct sdk_flac_state *state) { (void)state; }
+void sdk_flac_forget(struct sdk_flac_state *state)
+{
+    (void)state;
+    audio_forget_calls++;
+}
 
 void sdk_vorbis_init(struct sdk_vorbis_state *state, uint32_t format)
 {
@@ -114,7 +143,7 @@ void sdk_vorbis_init(struct sdk_vorbis_state *state, uint32_t format)
 uint16_t sdk_vorbis_decode(struct sdk_vorbis_state *state,
                            struct sdk_audio_codec_io *io)
 {
-    assert(io->input_length != 0u);
+    assert(io->input_length != 0u || (io->eof && io->drain));
     state->sample_rate = 48000u;
     state->channels = 2u;
     io->consumed = io->input_length;
@@ -135,7 +164,16 @@ void sdk_vorbis_release(struct sdk_vorbis_state *state)
     audio_release_calls++;
 }
 
-void sdk_vorbis_forget(struct sdk_vorbis_state *state) { (void)state; }
+void sdk_vorbis_forget(struct sdk_vorbis_state *state)
+{
+    (void)state;
+    audio_forget_calls++;
+}
+unsigned sdk_compression_reclaim_core1_decode(void)
+{
+    decode_reclaim_calls++;
+    return 1u;
+}
 
 int main(void)
 {
@@ -192,7 +230,7 @@ int main(void)
     mp3[417] = 0xffu; mp3[418] = 0xfbu;
     mp3[419] = 0x90u; mp3[420] = 0x64u;
     assert(api->audio_decode_open(ZZ_AUDIO_MP3, &audio_session) == ZZ_OK);
-    assert(api->audio_decode(audio_session, mp3, sizeof(mp3), mp3_pcm,
+    assert(api->audio_decode(audio_session, mp3, sizeof(mp3), 0u, mp3_pcm,
                              1152u, &audio_result) == ZZ_OK);
     assert(audio_result.bytes_consumed == 417u);
     assert(audio_result.frames_written == 1152u);
@@ -200,17 +238,29 @@ int main(void)
     assert(api->audio_decode_close(audio_session) == ZZ_OK);
 
     assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &audio_session) == ZZ_OK);
-    assert(api->audio_decode(audio_session, source, sizeof(source), pcm, 2u,
-                             &audio_result) == ZZ_OK);
+    assert(api->audio_decode(audio_session, source, sizeof(source), 0u, pcm,
+                             2u, &audio_result) == ZZ_OK);
     assert(audio_result.bytes_consumed == sizeof(source));
     assert(audio_result.frames_written == 1u);
     assert(audio_result.rate == 44100u && audio_result.channels == 2u);
+    assert(api->audio_decode(audio_session, NULL, 0u,
+                             ZZ_AUDIO_DECODE_EOF | ZZ_AUDIO_DECODE_DRAIN,
+                             pcm, 2u, &audio_result) == ZZ_OK);
     assert(api->audio_decode_close(audio_session) == ZZ_OK);
     assert(api->audio_decode_open(ZZ_AUDIO_VORBIS, &audio_session) == ZZ_OK);
 
-    zzapp_loader_release();
-    assert(image_close_calls == 2u);
-    assert(audio_release_calls == 2u);
+    /* The host allocator must publish its ledger entry before a stop tick
+     * can unwind it; host-only seam because ARM entry/FPSCR cannot run here. */
+    stop_during_host_alloc = 1;
+    assert(api->alloc(64u, 8u, ZZ_ALLOC_HOST_VISIBLE) != NULL);
+    assert(api->mem_info(&mem) == ZZ_OK && mem.host_visible_used == 4160u);
+    zzapp_test_mark_running();
+    zzapp_host_tick_at(1u);
+    zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    assert(image_close_calls == 1u && image_poisoned_close_calls == 1u);
+    assert(audio_release_calls == 1u && audio_forget_calls == 1u);
+    assert(decode_reclaim_calls == 1u);
     assert(zzapp_host_mem_info(&mem) == ZZ_OK && mem.host_visible_used == 0u);
     return 0;
 }

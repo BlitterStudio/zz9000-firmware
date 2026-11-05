@@ -28,6 +28,7 @@
 extern int zzapp_host_address(const void *p, uint32_t *host_offset);
 extern int zzapp_host_mem_info(zzapp_mem_info *out);
 extern void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
+extern int zzapp_host_faulted(void);
 
 
 #ifndef ZZ9000_BUILD_GIT
@@ -99,6 +100,7 @@ WEAK uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
     (void)result;
     return SDK_STATUS_UNSUPPORTED;
 }
+WEAK unsigned sdk_compression_reclaim_core1_decode(void) { return 0; }
 WEAK uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *b,
                                      struct SDKImageStreamResult *r)
 { (void)b; (void)r; return SDK_STATUS_UNSUPPORTED; }
@@ -107,6 +109,8 @@ WEAK uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *f,
                                     struct SDKImageStreamResult *r)
 { (void)f; (void)s; (void)r; return SDK_STATUS_UNSUPPORTED; }
 WEAK uint16_t sdk_image_stream_close(uint32_t s)
+{ (void)s; return SDK_STATUS_UNSUPPORTED; }
+WEAK uint16_t sdk_image_stream_release_poisoned(uint32_t s)
 { (void)s; return SDK_STATUS_UNSUPPORTED; }
 WEAK void sdk_image_stream_poison_core1_sessions(void) {}
 WEAK void sdk_flac_init(struct sdk_flac_state *state, uint32_t format)
@@ -322,15 +326,31 @@ static int api_map_file(const char *path, const void **data, uint32_t *bytes)
     *bytes = 0;
     zzapp_api_enter();
     rc = zzapp_svc_file_stat(path, &st);
-    if (rc != ZZ_OK || st.size > (16u << 20) || st.size > UINT32_MAX)
+    if (zzapp_host_faulted()) {
+        rc = ZZ_EFAULT;
         goto out;
+    }
+    if (rc != ZZ_OK)
+        goto out;
+    if (st.size > (16u << 20) || st.size > UINT32_MAX) {
+        rc = ZZ_ENOSPC;
+        goto out;
+    }
     dst = (uint8_t *)zzapp_host_alloc((uint32_t)st.size, 8u,
                                       ZZ_ALLOC_HOST_VISIBLE);
     if (!dst) {
         rc = ZZ_ENOMEM;
         goto out;
     }
+    if (zzapp_host_faulted()) {
+        rc = ZZ_EFAULT;
+        goto free_dst;
+    }
     fd = zzapp_svc_file_open(path, ZZ_FILE_READ);
+    if (zzapp_host_faulted()) {
+        rc = ZZ_EFAULT;
+        goto free_dst;
+    }
     if (fd < 0) {
         rc = fd;
         goto free_dst;
@@ -343,6 +363,10 @@ static int api_map_file(const char *path, const void **data, uint32_t *bytes)
         if (want > 65536u)
             want = 65536u;
         rc = zzapp_svc_file_read(fd, dst + done, want, &got);
+        if (zzapp_host_faulted()) {
+            rc = ZZ_EFAULT;
+            break;
+        }
         if (rc != ZZ_OK || got == 0u) {
             if (rc == ZZ_OK)
                 rc = ZZ_EIO;
@@ -447,19 +471,23 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
     memset(&begin, 0, sizeof(begin));
     begin.codec = open->codec;
     begin.output_mode = SDK_IMAGE_OUTPUT_TILE_BUFFER;
-    begin.output_format = open->output_format;
+    begin.output_format = open->output_format == ZZ_FMT_BGRA8888 ?
+        SDK_SURFACE_FORMAT_BGRA8888 : SDK_SURFACE_FORMAT_UNKNOWN;
     begin.tile_stride = open->stride;
     begin.tile_rows = open->rows;
     begin.tile_address = (uintptr_t)open->tile;
     begin.tile_length = open->tile_bytes;
     begin.flags = open->flags;
+    if (begin.output_format == SDK_SURFACE_FORMAT_UNKNOWN)
+        return ZZ_EINVAL;
     begin.core1_affine = 1u;
     begin.direct_arm_local = 1u;
     zzapp_api_enter();
     rc = sdk_to_zz(sdk_image_stream_begin(&begin, &result));
+    if (rc == ZZ_OK)
+        g_image_sessions[i] = result.session;
     zzapp_api_leave();
     if (rc == ZZ_OK) {
-        g_image_sessions[i] = result.session;
         *session = result.session;
         image_result(&result, out);
     }
@@ -559,8 +587,8 @@ static int api_audio_open_decode(uint32_t codec, uint32_t *session)
 }
 
 static int api_audio_decode_app(uint32_t session, const void *src,
-                                uint32_t src_bytes, int16_t *pcm,
-                                uint32_t pcm_frames,
+                                uint32_t src_bytes, uint32_t flags,
+                                int16_t *pcm, uint32_t pcm_frames,
                                 zzapp_audio_decode_result *out)
 {
     struct zzapp_audio_session *slot;
@@ -571,7 +599,8 @@ static int api_audio_decode_app(uint32_t session, const void *src,
     uint32_t channels;
     int rc;
 
-    if (!src || !src_bytes || !pcm || !pcm_frames || !out)
+    if ((!src && src_bytes) || !pcm || !pcm_frames || !out ||
+        (flags & ~(ZZ_AUDIO_DECODE_EOF | ZZ_AUDIO_DECODE_DRAIN)) != 0u)
         return ZZ_EINVAL;
     slot = audio_session_find(session);
     if (!slot)
@@ -579,8 +608,10 @@ static int api_audio_decode_app(uint32_t session, const void *src,
     memset(out, 0, sizeof(*out));
     zzapp_api_enter();
     if (slot->codec == ZZ_AUDIO_MP3) {
-        if (pcm_frames < MINIMP3_MAX_SAMPLES_PER_FRAME / 2u ||
-            src_bytes > INT32_MAX) {
+        if (!src || !src_bytes || flags != 0u) {
+            rc = ZZ_EINVAL;
+        } else if (pcm_frames < MINIMP3_MAX_SAMPLES_PER_FRAME / 2u ||
+                   src_bytes > INT32_MAX) {
             rc = ZZ_ENOSPC;
         } else {
             memset(&info, 0, sizeof(info));
@@ -606,6 +637,8 @@ static int api_audio_decode_app(uint32_t session, const void *src,
         memset(&io, 0, sizeof(io));
         io.input = src;
         io.input_length = src_bytes;
+        io.eof = (flags & ZZ_AUDIO_DECODE_EOF) != 0u;
+        io.drain = (flags & ZZ_AUDIO_DECODE_DRAIN) != 0u;
         io.pcm = (uint8_t *)pcm;
         if (pcm_frames > UINT32_MAX / 4u) {
             rc = ZZ_ENOSPC;
@@ -666,7 +699,10 @@ void zzapp_api_poison_resources(void)
 
     sdk_image_stream_poison_core1_sessions();
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        g_image_sessions[i] = 0;
+        if (g_image_sessions[i]) {
+            (void)sdk_image_stream_release_poisoned(g_image_sessions[i]);
+            g_image_sessions[i] = 0;
+        }
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
         if (g_audio_sessions[i].id) {
             if (g_audio_sessions[i].codec == ZZ_AUDIO_FLAC)
@@ -675,6 +711,7 @@ void zzapp_api_poison_resources(void)
                 sdk_vorbis_forget(&g_audio_sessions[i].state.vorbis);
             memset(&g_audio_sessions[i], 0, sizeof(g_audio_sessions[i]));
         }
+    sdk_compression_reclaim_core1_decode();
 }
 #define WRAP0(name, call) static int name(void) { zzapp_api_enter(); int r=(call); zzapp_api_leave(); return r; }
 #define WRAP1(name, type, call) static int name(type a) { zzapp_api_enter(); int r=(call); zzapp_api_leave(); return r; }
