@@ -19,6 +19,7 @@ extern "C" {
 #endif
 
 
+#define MW_DIAG_UPLOADS 8U
 #define MW_DIAG_BUCKETS 6U
 
 typedef struct mw_diag_bucket {
@@ -37,6 +38,19 @@ typedef struct mw_diag_bucket {
     uint32_t count;
 } mw_diag_bucket;
 
+typedef struct mw_diag_upload {
+    uint32_t texture;
+    uint32_t internal_format;
+    uint32_t format;
+    uint32_t type;
+    uint32_t raw0;
+    uint32_t rgba0;
+    uint16_t width;
+    uint16_t height;
+    uint8_t level;
+    uint8_t subimage;
+} mw_diag_upload;
+
 typedef struct mw_frame_diag {
     uint64_t began_us;
     uint64_t ended_us;
@@ -44,6 +58,8 @@ typedef struct mw_frame_diag {
     uint32_t texture_uploads;
     uint32_t texture_upload_bytes;
     uint32_t texture_upload_format;
+    uint8_t upload_count;
+    mw_diag_upload uploads[MW_DIAG_UPLOADS];
     uint32_t cpu_draws;
     uint32_t framebuffer_readbacks;
     uint32_t sync_wait_us;

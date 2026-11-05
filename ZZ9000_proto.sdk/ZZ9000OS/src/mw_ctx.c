@@ -85,13 +85,44 @@ static void mw_ctx_diag_draw(mw_ctx *c)
     }
 }
 
-static void mw_ctx_diag_upload(mw_ctx *c, uint32_t bytes, uint32_t format)
+static void mw_ctx_diag_upload(mw_ctx *c, const uint8_t *payload, uint32_t bytes,
+                               const mw_texture *texture, uint32_t name,
+                               uint32_t level, uint32_t width, uint32_t height,
+                               int subimage)
 {
+    mw_frame_diag *diag;
+    mw_diag_upload *upload;
+    uint32_t source, data_offset;
+
     if (!minigl_profile_enabled())
         return;
-    ++c->diag_frame.texture_uploads;
-    c->diag_frame.texture_upload_bytes += bytes;
-    c->diag_frame.texture_upload_format = format;
+    diag = &c->diag_frame;
+    ++diag->texture_uploads;
+    diag->texture_upload_bytes += width * height * sizeof(*texture->pixels[level]);
+    diag->texture_upload_format = texture->base_format[level];
+    if (diag->upload_count >= MW_DIAG_UPLOADS)
+        return;
+    upload = &diag->uploads[diag->upload_count++];
+    memset(upload, 0, sizeof(*upload));
+    upload->texture = name;
+    upload->internal_format = mw_be32(payload + 8U);
+    upload->format = subimage ? mw_be32(payload + 24U) : mw_be32(payload + 20U);
+    upload->type = subimage ? mw_be32(payload + 28U) : mw_be32(payload + 24U);
+    upload->width = (uint16_t)width;
+    upload->height = (uint16_t)height;
+    upload->level = (uint8_t)level;
+    upload->subimage = subimage != 0;
+    upload->rgba0 = texture->pixels[level][0];
+    data_offset = subimage ? 60U : 56U;
+    source = mw_be32(payload + (subimage ? 56U : 52U));
+    if (source != 0U && bytes >= data_offset && source <= bytes - data_offset) {
+        const uint8_t *raw = payload + data_offset;
+        uint32_t raw_bytes = source < 4U ? source : 4U;
+        uint32_t index;
+
+        for (index = 0U; index < raw_bytes; ++index)
+            upload->raw0 |= (uint32_t)raw[index] << (24U - index * 8U);
+    }
 }
 
 static void mw_ctx_diag_snapshot(mw_ctx *c, uint32_t target)
@@ -146,7 +177,7 @@ void mw_ctx_diag_presented(mw_ctx *c, uint32_t source, const uint8_t *pixels,
     uint16_t centre = 0U, corner = 0U, plaque = 0U;
     uint32_t index;
     size_t used;
-    char line[768];
+    static char line[1536];
 
     if (!c || source >= 3U || !c->diag_frame_ready[source] ||
         !minigl_profile_enabled())
@@ -174,7 +205,7 @@ void mw_ctx_diag_presented(mw_ctx *c, uint32_t source, const uint8_t *pixels,
     }
     used = (size_t)snprintf(line, sizeof(line),
                             "[ZZM] [frame] us=%lu draw=%lu sw=%lu rb=%lu up=%lu/%lu/%08lx "
-                            "wait=sync:%lu copy:%lu flip:%lu drain:%lu target:%lu rgb565=%04x/%04x/%04x states=",
+                            "wait=sync:%lu copy:%lu flip:%lu drain:%lu target:%lu rgb565=%04x/%04x/%04x",
                             (unsigned long)frame_us, (unsigned long)diag->draws,
                             (unsigned long)diag->cpu_draws,
                             (unsigned long)diag->framebuffer_readbacks,
@@ -189,6 +220,31 @@ void mw_ctx_diag_presented(mw_ctx *c, uint32_t source, const uint8_t *pixels,
                             (unsigned)centre, (unsigned)corner, (unsigned)plaque);
     if (used >= sizeof(line))
         used = sizeof(line) - 1U;
+    for (index = 0U; index < diag->upload_count && used < sizeof(line); ++index) {
+        const mw_diag_upload *upload = &diag->uploads[index];
+        int written = snprintf(line + used, sizeof(line) - used,
+                               "%sup%lu:t%lu/l%u/%ux%u,i%08lx,f%08lx/%08lx,"
+                               "raw%08lx,rgba%08lx",
+                               index == 0U ? " uploads=" : ";",
+                               (unsigned long)upload->texture,
+                               (unsigned)upload->level, (unsigned)upload->width,
+                               (unsigned)upload->height,
+                               (unsigned long)upload->internal_format,
+                               (unsigned long)upload->format,
+                               (unsigned long)upload->type,
+                               (unsigned long)upload->raw0,
+                               (unsigned long)upload->rgba0);
+
+        if (written <= 0 || (size_t)written >= sizeof(line) - used)
+            break;
+        used += (size_t)written;
+    }
+    if (used < sizeof(line)) {
+        int written = snprintf(line + used, sizeof(line) - used, " states=");
+
+        if (written > 0 && (size_t)written < sizeof(line) - used)
+            used += (size_t)written;
+    }
     for (index = 0U; index < diag->bucket_count && used < sizeof(line); ++index) {
         const mw_diag_bucket *bucket = &diag->buckets[index];
         int written = snprintf(line + used, sizeof(line) - used,
@@ -1823,8 +1879,7 @@ target_allocation_failed:
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }
-        mw_ctx_diag_upload(c, width * height * sizeof(*t->pixels[level]),
-                           t->base_format[level]);
+        mw_ctx_diag_upload(c, p, (uint32_t)cmd->bytes, t, name, level, width, height, 0);
         break;
     }
 
@@ -1857,8 +1912,8 @@ target_allocation_failed:
                 mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
                 goto command_complete;
             }
-            mw_ctx_diag_upload(c, width * height * sizeof(*t->pixels[level]),
-                               t->base_format[level]);
+            mw_ctx_diag_upload(c, p, (uint32_t)cmd->bytes, t, name, level,
+                               width, height, 1);
         }
         break;
     }
