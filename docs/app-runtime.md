@@ -399,10 +399,10 @@ underruns, flags) and a 64 KiB power-of-two PCM payload. Samples are
 interleaved S16LE. `AUDIO=AHI` on a ZZRun Workbench icon sets
 `ZZAPP_F_LAUNCHER_AUDIO_AHI` after loading and before start, selecting route
 1; absent that ToolType leaves route 0, the card fabric, as the default. The
-AHI route accepts only an exact AHI-granted stereo rate. It converts the shared
-S16LE samples to AHI's S16BE double buffers, retires source bytes only after
-the corresponding asynchronous AHI write completes, reports underruns in the
-header/lifecycle field, and keeps only bounded ring latency. Closing audio
+AHI route requests the app's stereo rate from `ahi.device`. It converts the
+shared S16LE samples to AHI's S16BE double buffers, retires source bytes only
+after the corresponding asynchronous AHI write completes, reports underruns in
+the header/lifecycle field, and keeps only bounded ring latency. Closing audio
 zeros the ring header and sets route 0, which makes ZZRun stop playback and
 drop every pending AHI completion before it accepts a new stream.
 
