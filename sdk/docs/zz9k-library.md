@@ -87,6 +87,9 @@ uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);
 void ZZ9KAppClose(ZZ9KAppHandle *handle);
 ```
 
+`ZZ9KAppStart` passes `argv` to the app unchanged. Put the program name in
+`argv[0]`, as ZZRun does, so the app sees a standard C argument vector.
+
 `Open` checks for Zorro III, app-runtime ABI major 0, an idle runtime, and an
 Amiga `mmu.library` mapping that can keep the shared window cache-inhibited for
 the handle lifetime. It returns `ZZ9K_STATUS_BUSY` while another client owns

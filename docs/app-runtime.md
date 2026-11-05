@@ -450,7 +450,7 @@ Ctrl-C (`SIGBREAKF_CTRL_C`) and the window close gadget set the stop word and pu
 
 Amiga reset: ZZRun will not get to clean up. Firmware reclaim is what frees the arena. The next launch after reboot starts at IDLE.
 
-ToolTypes: `ROOT`, `ABS`, `MODE` (optional; the app request wins if MODE is absent). Shell form: `ZZRun <app.elf> [args]`. Args after the ELF path become argv. Quake timedemo: `ZZRun RAM:glquake.elf +timedemo demo1`, with `ROOT` pointing at the directory that contains `id1/`.
+ToolTypes: `ROOT`, `ABS`, `MODE` (optional; the app request wins if MODE is absent). Shell form: `ZZRun <app.elf> [args]`. The app gets the standard C argv: `argv[0]` is the ELF's file name and the arguments after the ELF path follow it (at most 16 entries in total). Quake timedemo: `ZZRun RAM:glquake.elf +timedemo demo1`, with `ROOT` pointing at the directory that contains `id1/`.
 
 Build ZZRun like `ZZCapture`: `tools/amiga-docker.sh`, image `sacredbanana/amiga-compiler:m68k-amigaos` (`zz9000-drivers/tools/amiga-docker.sh` line 23), `m68k-amigaos-gcc -m68030 -O2 -Wall -Wextra -noixemul -lamiga` (`ZZCapture/build.sh`). Never the gcc10 image.
 
