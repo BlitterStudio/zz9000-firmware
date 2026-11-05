@@ -223,8 +223,7 @@ void mw_ctx_diag_presented(mw_ctx *c, uint32_t source, const uint8_t *pixels,
     for (index = 0U; index < diag->upload_count && used < sizeof(line); ++index) {
         const mw_diag_upload *upload = &diag->uploads[index];
         int written = snprintf(line + used, sizeof(line) - used,
-                               "%sup%lu:t%lu/l%u/%ux%u,i%08lx,f%08lx/%08lx,"
-                               "raw%08lx,rgba%08lx",
+                               "%sup%lu/l%u/%ux%u,i%08lx,f%08lx/%08lx,raw%08lx,rgba%08lx",
                                index == 0U ? " uploads=" : ";",
                                (unsigned long)upload->texture,
                                (unsigned)upload->level, (unsigned)upload->width,
