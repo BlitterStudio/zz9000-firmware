@@ -49,6 +49,7 @@ typedef struct mw_diag_upload {
     uint16_t height;
     uint8_t level;
     uint8_t subimage;
+    uint8_t internal_rgb;
 } mw_diag_upload;
 
 typedef struct mw_frame_diag {

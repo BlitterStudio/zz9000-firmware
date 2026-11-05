@@ -105,13 +105,14 @@ static void mw_ctx_diag_upload(mw_ctx *c, const uint8_t *payload, uint32_t bytes
     upload = &diag->uploads[diag->upload_count++];
     memset(upload, 0, sizeof(*upload));
     upload->texture = name;
-    upload->internal_format = mw_be32(payload + 8U);
+    upload->internal_format = subimage ? 0U : mw_be32(payload + 8U);
     upload->format = subimage ? mw_be32(payload + 24U) : mw_be32(payload + 20U);
     upload->type = subimage ? mw_be32(payload + 28U) : mw_be32(payload + 24U);
     upload->width = (uint16_t)width;
     upload->height = (uint16_t)height;
     upload->level = (uint8_t)level;
     upload->subimage = subimage != 0;
+    upload->internal_rgb = texture->internal_rgb[level];
     upload->rgba0 = texture->pixels[level][0];
     data_offset = subimage ? 60U : 56U;
     source = mw_be32(payload + (subimage ? 56U : 52U));
@@ -223,12 +224,13 @@ void mw_ctx_diag_presented(mw_ctx *c, uint32_t source, const uint8_t *pixels,
     for (index = 0U; index < diag->upload_count && used < sizeof(line); ++index) {
         const mw_diag_upload *upload = &diag->uploads[index];
         int written = snprintf(line + used, sizeof(line) - used,
-                               "%sup%lu/l%u/%ux%u,i%08lx,f%08lx/%08lx,raw%08lx,rgba%08lx",
+                               "%sup%lu/l%u/%ux%u,i%08lx/rgb%u,f%08lx/%08lx,raw%08lx,rgba%08lx",
                                index == 0U ? " uploads=" : ";",
                                (unsigned long)upload->texture,
                                (unsigned)upload->level, (unsigned)upload->width,
                                (unsigned)upload->height,
                                (unsigned long)upload->internal_format,
+                               (unsigned)upload->internal_rgb,
                                (unsigned long)upload->format,
                                (unsigned long)upload->type,
                                (unsigned long)upload->raw0,
