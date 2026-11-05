@@ -27,9 +27,11 @@ $(BUILD)/a/display_fallback_test: a/display_fallback_test.c $(A_RUNTIME_OBJS) $(
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o
 
+# Opt-in: `make test ZZAPP_PROBE_ELF=<app.elf>` feeds a real app ELF through the
+# loader in 64 KiB chunks. Not named *_test.c so auto-discovery skips it.
 ifneq ($(strip $(ZZAPP_PROBE_ELF)),)
-ZZAPP_TESTS += $(BUILD)/a/loader_file_test
-$(BUILD)/a/loader_file_test: a/loader_file_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+ZZAPP_TESTS += $(BUILD)/a/loader_file_check
+$(BUILD)/a/loader_file_check: a/loader_file_check.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PROBE_ELF=\"$(ZZAPP_PROBE_ELF)\" -o $@ $< $(A_RUNTIME_OBJS)
 endif
