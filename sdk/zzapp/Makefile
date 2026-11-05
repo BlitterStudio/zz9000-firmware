@@ -28,10 +28,10 @@ LIB_OBJS := $(BUILD)/zzapp.o $(BUILD)/gl_wrap.o $(BUILD)/syscalls.o
 
 .PHONY: all check-relocs clean
 
-all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf
+all: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
 
-check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf
-	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf
+check-relocs: $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
+	$(PYTHON) check_relocs.py $(BUILD)/hello.elf $(BUILD)/pixels.elf $(BUILD)/fault.elf $(BUILD)/sbrk_smoke.elf $(BUILD)/zzmembench.elf $(BUILD)/mgl-conformance.elf $(BUILD)/filter.elf
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -78,32 +78,35 @@ $(BUILD)/note_mgl-conformance.o: zzapp_note.S | $(BUILD)
 $(BUILD)/mgl-conformance.o: templates/mgl_conformance.c templates/mgl_conformance_matrix.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(BUILD)/note_filter.o: zzapp_note.S | $(BUILD)
+	$(CC) $(ASMFLAGS) -c -o $@ $<
+
+$(BUILD)/filter.o: templates/filter.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(BUILD)/libzzapp.a: $(LIB_OBJS)
 	$(AR) rcs $@ $^
 
 $(BUILD)/hello.elf: $(BUILD)/crt0.o $(BUILD)/note_hello.o $(BUILD)/hello.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
-	$(PYTHON) rela_dyn.py $@
 
 $(BUILD)/pixels.elf: $(BUILD)/crt0.o $(BUILD)/note_pixels.o $(BUILD)/pixels.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
-	$(PYTHON) rela_dyn.py $@
 
 $(BUILD)/fault.elf: $(BUILD)/crt0.o $(BUILD)/note_fault.o $(BUILD)/fault.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
-	$(PYTHON) rela_dyn.py $@
 
 $(BUILD)/sbrk_smoke.elf: $(BUILD)/crt0.o $(BUILD)/note_smoke.o $(BUILD)/sbrk_smoke.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
-	$(PYTHON) rela_dyn.py $@
 
 $(BUILD)/zzmembench.elf: $(BUILD)/crt0.o $(BUILD)/note_zzmembench.o $(BUILD)/zzmembench.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
-	$(PYTHON) rela_dyn.py $@
 
 $(BUILD)/mgl-conformance.elf: $(BUILD)/crt0.o $(BUILD)/note_mgl-conformance.o $(BUILD)/mgl-conformance.o $(BUILD)/libzzapp.a
 	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
-	$(PYTHON) rela_dyn.py $@
+
+$(BUILD)/filter.elf: $(BUILD)/crt0.o $(BUILD)/note_filter.o $(BUILD)/filter.o $(BUILD)/libzzapp.a
+	$(CC) $(LDFLAGS) -o $@ -Wl,--start-group $^ -lc -lgcc -lm -Wl,--end-group
 
 clean:
 	rm -rf $(BUILD)

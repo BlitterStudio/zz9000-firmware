@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 #define ZZAPP_API_MAJOR 0u
-#define ZZAPP_API_MINOR 1u
+#define ZZAPP_API_MINOR 2u
 #define ZZAPP_API_VERSION ((ZZAPP_API_MAJOR << 16) | ZZAPP_API_MINOR)
 
 #define ZZ_OK         0
@@ -55,7 +55,21 @@ extern "C" {
 #define ZZ_EV_STOP     5u
 #define ZZ_EV_RESIZE   6u
 
-#define ZZ_ALLOC_UNCACHED 1u
+#define ZZ_ALLOC_UNCACHED     1u
+/* Allocate from card DDR visible through the Zorro III host aperture. */
+#define ZZ_ALLOC_HOST_VISIBLE 2u
+
+#define ZZ_COMPRESS_NONE        0u
+#define ZZ_COMPRESS_DEFLATE_RAW 1u
+#define ZZ_COMPRESS_ZLIB        2u
+#define ZZ_COMPRESS_GZIP        3u
+#define ZZ_COMPRESS_LZ4_BLOCK   4u
+#define ZZ_COMPRESS_LZMA_ALONE  5u
+#define ZZ_COMPRESS_LZMA2       6u
+#define ZZ_COMPRESS_LH1         7u
+#define ZZ_COMPRESS_LH5         8u
+#define ZZ_COMPRESS_LH6         9u
+#define ZZ_COMPRESS_LH7         10u
 #define ZZ_FILE_READ   1u
 #define ZZ_FILE_WRITE  2u
 #define ZZ_FILE_CREATE 4u
@@ -123,6 +137,27 @@ typedef struct zzapp_audio {
     uint32_t rate;                 /* granted */
     uint32_t channels;             /* 2 */
 } zzapp_audio;
+
+/* Allocation accounting for this app. All values are bytes. host_visible_* is
+ * a per-app limit inside the shared card host heap, not the app arena. */
+typedef struct zzapp_mem_info {
+    uint32_t arena_size;
+    uint32_t arena_used;
+    uint32_t arena_free;
+    uint32_t arena_largest_block;
+    uint32_t host_visible_used;
+    uint32_t host_visible_limit;
+} zzapp_mem_info;
+
+/* A small synchronous, buffer-only service ABI.  It deliberately exposes no
+ * SDK mailbox handles: callers retain ownership of every input/output buffer.
+ * zz_service_compress supports the SDK compression algorithm values; sha256
+ * is separate because its fixed output needs no versioned request structure. */
+typedef struct zzapp_service_result {
+    uint32_t bytes_consumed;
+    uint32_t bytes_written;
+    uint32_t flags;
+} zzapp_service_result;
 
 /*
  * Named GL 1.1 pointers, append-only, size first. Integer parameters are
@@ -300,6 +335,17 @@ typedef struct zzapp_api {
     uint32_t (*display_mailbox_replaced)(void);
     /* Resident firmware source revision; NULL on older firmware. */
     const char *build_id;
+
+    /* API 0.2 core: shared-memory, synchronous card services, file maps. */
+    int      (*host_address)(const void *p, uint32_t *host_offset);
+    int      (*mem_info)(zzapp_mem_info *out);
+    int      (*map_file)(const char *path, const void **data, uint32_t *bytes);
+    void     (*unmap_file)(const void *data);
+    int      (*sha256)(const void *data, uint32_t bytes, uint8_t digest[32]);
+    int      (*decompress)(uint32_t algorithm, uint32_t flags,
+                           const void *src, uint32_t src_bytes,
+                           void *dst, uint32_t dst_bytes,
+                           zzapp_service_result *out);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -328,6 +374,26 @@ uint64_t zz_time_us(void);
 void     zz_sleep_us(uint32_t us);
 
 void    *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
+
+/* Returns the board-relative address at which an Amiga Zorro III client can
+ * access a ZZ_ALLOC_HOST_VISIBLE allocation. */
+int      zz_host_address(const void *p, uint32_t *host_offset);
+int      zz_mem_info(zzapp_mem_info *out);
+
+/* Reads a complete proxied file into the app arena. The runtime accepts files
+ * up to the currently free app-arena bytes (never more than 16 MiB). The
+ * pointer stays valid until zz_unmap_file(), app exit, fault, or reset. */
+int      zz_map_file(const char *path, const void **data, uint32_t *bytes);
+void     zz_unmap_file(const void *data);
+
+/* Synchronous core-1 services. Buffers must be app allocations and remain
+ * valid for the call. Compression algorithm values are SDK_COMPRESSION_*.
+ * bytes_written/bytes_consumed report the exact completed operation. */
+int      zz_sha256(const void *data, uint32_t bytes, uint8_t digest[32]);
+int      zz_decompress(uint32_t algorithm, uint32_t flags,
+                       const void *src, uint32_t src_bytes,
+                       void *dst, uint32_t dst_bytes,
+                       zzapp_service_result *out);
 void     zz_free(void *p);
 void     zz_heap_range(void **base, uint32_t *bytes);
 

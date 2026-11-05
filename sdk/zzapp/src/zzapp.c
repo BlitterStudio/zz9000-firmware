@@ -9,6 +9,10 @@
 
 const zzapp_api *zzapp_api_ptr;
 static const zzapp_gl *bound_gl;
+/* Host-visible allocations are few and application-owned.  Track only these
+ * so zz_free can keep newlib allocations on libc's allocator. */
+#define ZZAPP_HOST_ALLOC_SLOTS 64u
+static void *host_allocs[ZZAPP_HOST_ALLOC_SLOTS];
 
 void zzapp_crt0_bind(const zzapp_api *api)
 {
@@ -54,8 +58,25 @@ void *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 {
     uintptr_t aligned;
     void *raw;
+    uint32_t i;
 
-    (void)flags;
+    if ((flags & ~(ZZ_ALLOC_UNCACHED | ZZ_ALLOC_HOST_VISIBLE)) != 0u)
+        return 0;
+    if ((flags & ZZ_ALLOC_HOST_VISIBLE) != 0u) {
+        if (!ZZ_API_COVERS(zzapp_api_ptr, alloc) || !zzapp_api_ptr->alloc)
+            return 0;
+        raw = zzapp_api_ptr->alloc(bytes, align, flags);
+        if (!raw)
+            return 0;
+        for (i = 0; i < ZZAPP_HOST_ALLOC_SLOTS; ++i) {
+            if (!host_allocs[i]) {
+                host_allocs[i] = raw;
+                return raw;
+            }
+        }
+        zzapp_api_ptr->free(raw);
+        return 0;
+    }
     if (align < sizeof(void *) || (align & (align - 1u)) != 0u)
         return 0;
     if (bytes > UINT32_MAX - align - (uint32_t)sizeof(void *))
@@ -71,8 +92,19 @@ void *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 
 void zz_free(void *p)
 {
-    if (p)
-        free(((void **)p)[-1]);
+    uint32_t i;
+
+    if (!p)
+        return;
+    for (i = 0; i < ZZAPP_HOST_ALLOC_SLOTS; ++i) {
+        if (host_allocs[i] == p) {
+            host_allocs[i] = 0;
+            if (ZZ_API_COVERS(zzapp_api_ptr, free) && zzapp_api_ptr->free)
+                zzapp_api_ptr->free(p);
+            return;
+        }
+    }
+    free(((void **)p)[-1]);
 }
 
 void zz_heap_range(void **base, uint32_t *bytes)
@@ -85,6 +117,52 @@ void zz_heap_range(void **base, uint32_t *bytes)
         if (bytes)
             *bytes = 0;
     }
+}
+
+int zz_host_address(const void *p, uint32_t *host_offset)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, host_address) &&
+        zzapp_api_ptr->host_address)
+        return zzapp_api_ptr->host_address(p, host_offset);
+    return ZZ_ENOSYS;
+}
+
+int zz_mem_info(zzapp_mem_info *out)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, mem_info) && zzapp_api_ptr->mem_info)
+        return zzapp_api_ptr->mem_info(out);
+    return ZZ_ENOSYS;
+}
+
+int zz_map_file(const char *path, const void **data, uint32_t *bytes)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, map_file) && zzapp_api_ptr->map_file)
+        return zzapp_api_ptr->map_file(path, data, bytes);
+    return ZZ_ENOSYS;
+}
+
+void zz_unmap_file(const void *data)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, unmap_file) && zzapp_api_ptr->unmap_file)
+        zzapp_api_ptr->unmap_file(data);
+}
+
+int zz_sha256(const void *data, uint32_t bytes, uint8_t digest[32])
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, sha256) && zzapp_api_ptr->sha256)
+        return zzapp_api_ptr->sha256(data, bytes, digest);
+    return ZZ_ENOSYS;
+}
+
+int zz_decompress(uint32_t algorithm, uint32_t flags, const void *src,
+                  uint32_t src_bytes, void *dst, uint32_t dst_bytes,
+                  zzapp_service_result *out)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, decompress) &&
+        zzapp_api_ptr->decompress)
+        return zzapp_api_ptr->decompress(algorithm, flags, src, src_bytes,
+                                         dst, dst_bytes, out);
+    return ZZ_ENOSYS;
 }
 
 void zz_log(const char *msg, uint32_t len)

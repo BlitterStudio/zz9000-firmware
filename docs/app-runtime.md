@@ -50,7 +50,7 @@ The tick is the body the worker already has, bounded: honour a pending reset or 
 
 `in_api` counts entries into firmware API functions. The timer tick runs MiniGL and SDK work only when `in_api == 0`, so it cannot re-enter RasterIX or the card-pool lock under an app GL call. Two firmware paths may call the tick while `in_api` is set, because they are not holding the GL lock: the file-wait loop and `zz_sleep_us`. They call it between polls. A GL call does not return until that call's RasterIX work is drained (`minigl_rix_backend_drain` / `minigl_raster_finish`, as the format requires). Between GL calls the engine is idle and a 68k packet may run.
 
-Before entering the app, the worker saves its SVC callee-saved registers, `sp`, `lr`, `d0`–`d31`, and `fpscr` in the `zzapp_enter_arm` frame. Normal `zz_exit`, forced stop, watchdog expiry, and app aborts restore that one frame and return to `run_app`'s completion path; they never branch into a fresh worker. The fault unwind resets the abort and undefined banked stacks and re-enables IRQs. A timer-triggered unwind explicitly writes the GIC EOI before discarding the IRQ frame. The API epilogue marks its host-stack tick active, so a private timer IRQ only acknowledges while that stack is in use.
+Before entering the app, the worker saves its SVC callee-saved registers, `sp`, `lr`, `d0`–`d31`, and `fpscr` in the `zzapp_enter_arm` frame, then writes FPSCR zero for the app: round-to-nearest with flush-to-zero and default-NaN clear. Normal `zz_exit`, forced stop, watchdog expiry, and app aborts restore the saved worker state and return to `run_app`'s completion path; they never branch into a fresh worker. The fault unwind resets the abort and undefined banked stacks and re-enables IRQs. A timer-triggered unwind explicitly writes the GIC EOI before discarding the IRQ frame. The API epilogue marks its host-stack tick active, so a private timer IRQ only acknowledges while that stack is in use.
 
 ### 68k MiniGL clients while an app runs
 
@@ -143,7 +143,7 @@ New owner class, next value after `CARD_POOL_CLASS_MINIGL` (7):
 
 Position-independent ARM ELF, little-endian, EABI, hard-float (`EF_ARM_ABI_FLOAT_HARD`). Link `-fPIE -pie -nostdlib` with the script in section 7. No `PT_INTERP`, no `DT_NEEDED`, no dynamic linker.
 
-Relocations: `SHT_RELA` only, type `R_ARM_RELATIVE` (23) only, symbol index 0. Apply `*(uint32_t *)(load_bias + r_offset) = r_addend + load_bias` for word-sized RELATIVE records. Reject `SHT_REL`, every other type, and any allocated section that would fall outside the arena. This is deliberately not the module loader: `docs/modules.md` rejects relocations because a `.ZZM` is fixed-address. An app is not a module.
+Relocations: allocated `SHT_REL` and `SHT_RELA` are accepted, type `R_ARM_RELATIVE` (23) only, symbol index 0 only. For RELA, apply `*(uint32_t *)(load_bias + r_offset) = r_addend + load_bias`; for REL, the addend is the word already at `load_bias + r_offset`. Reject every other relocation type and any allocated relocation section that would fall outside the arena. This lets stock GNU ld and clang/lld PIE links load without a post-link converter. This is deliberately not the module loader: `docs/modules.md` rejects relocations because a `.ZZM` is fixed-address. An app is not a module.
 
 Segments: `PT_LOAD` only, at most 4. Reject a segment that is both writable and executable. `p_vaddr` is an offset from the arena base, not a firmware address. The loader picks the physical base; the relocator fixes the image up to that base. v0 then runs identity-mapped, so the relocated VAs equal the card addresses. User mode later maps those same physical pages at those same VAs. That is why the image is PIE rather than linked at a constant: the pool cannot promise a fixed base, and a later mapping can keep the VAs the relocator already wrote.
 
@@ -388,7 +388,7 @@ Header: `sdk/zzapp/include/zzapp.h`, MIT. Apps include it and link `libzzapp`. T
 
 ```c
 #define ZZAPP_API_MAJOR 0u
-#define ZZAPP_API_MINOR 0u
+#define ZZAPP_API_MINOR 2u
 #define ZZAPP_API_VERSION ((ZZAPP_API_MAJOR << 16) | ZZAPP_API_MINOR)
 
 #define ZZ_OK         0
@@ -422,7 +422,8 @@ Header: `sdk/zzapp/include/zzapp.h`, MIT. Apps include it and link `libzzapp`. T
 #define ZZ_EV_STOP     5u
 #define ZZ_EV_RESIZE   6u
 
-#define ZZ_ALLOC_UNCACHED 1u
+#define ZZ_ALLOC_UNCACHED     1u
+#define ZZ_ALLOC_HOST_VISIBLE 2u
 #define ZZ_FILE_READ   1u
 #define ZZ_FILE_WRITE  2u
 #define ZZ_FILE_CREATE 4u
@@ -545,6 +546,38 @@ runtime.
 `display_open` flags: bit0 vsync; bit1 requests optional mailbox presentation and otherwise falls back to strict vsync. `zz_display_mailbox_replaced()` is an optional appended call returning the cumulative number of completed frames replaced before card vblank. `gl_bind` returns NULL on failure. One GL context in v0. A second bind returns NULL until unbind.
 
 `alloc`/`free` are the arena heap. `align` is a power of two, at least 8. `heap_range` reports the whole heap span. `ZZ_ALLOC_UNCACHED` is accepted and ignored while the arena is a normal cacheable mapping. When user mode maps an uncached grant, the flag starts meaning something. Apps that need uncached memory must pass it now.
+
+### API 0.2 core slots
+
+The 0.2 slots are appended after `build_id`. As with every appended field,
+apps MUST gate direct table access with `ZZ_API_COVERS`; `libzzapp` wrappers
+return `ZZ_ENOSYS` on older firmware.
+
+`ZZ_ALLOC_HOST_VISIBLE` allocates from the shared host-visible heap below
+`0x08200000`, not from the private app arena. `zz_host_address(ptr, &offset)`
+returns the board-relative Zorro III offset for precisely such an allocation;
+it rejects arena and interior pointers. The per-app limit is 16 MiB.
+`zz_mem_info` returns arena total/used/free/largest-free plus host-visible
+used/limit. Host-visible allocations are freed by `zz_free` and are
+unconditionally reclaimed on normal exit, fault, core-1 restart, and Amiga
+reset. This is coherent shareable non-cacheable memory; it is intended for
+an Amiga client, not for app-private working storage.
+
+`zz_map_file(path, &data, &bytes)` reads a complete launcher-proxied file into
+the app arena. It is read-only by contract and limited to 16 MiB and to the
+free arena at the time of the call. `zz_unmap_file` invalidates the handle
+logically; arena space remains bump-allocated until app teardown.
+
+Card services use a buffer-only synchronous API: no SDK mailbox handles or
+worker jobs leak into the app ABI. `zz_sha256` is the fixed-output crypto
+primitive. `zz_decompress` accepts `ZZ_COMPRESS_*` and reports exact
+input/output counts in `zzapp_service_result`. The call runs inline on the
+already-active core-1 app hook rather than queueing and waiting for a core-1
+job, so it cannot deadlock the worker. Decoder/session APIs (JPEG/PNG/WebP
+and MP3/FLAC/Vorbis) remain outside API 0.2 because their existing SDK
+interfaces are stateful mailbox sessions with core-affinity and deadline
+ownership; exposing them safely needs the same session-lifetime accounting as
+their SDK clients.
 
 `log` is rate-limited to 32 lines per second into the ring and 8 lines per second to the UART. Excess increments `log_drops` and is discarded. App code has no other path to the firmware console.
 

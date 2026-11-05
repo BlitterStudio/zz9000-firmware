@@ -14,6 +14,12 @@
 #include "zzm_loader.h"
 #include "zzm_minigl_host.h"
 #include "zzm_registry.h"
+#include "sdk_compression.h"
+#include "sdk_crypto.h"
+
+extern int zzapp_host_address(const void *p, uint32_t *host_offset);
+extern int zzapp_host_mem_info(zzapp_mem_info *out);
+extern void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
 
 
 #ifndef ZZ9000_BUILD_GIT
@@ -59,6 +65,33 @@ WEAK int zzapp_svc_display_close(uint32_t id) { (void)id; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_input_poll(zzapp_event *o,uint32_t n,uint32_t *out) { (void)o;(void)n; if(out)*out=0; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_audio_open(uint32_t r,uint32_t c,zzapp_audio *o) { (void)r;(void)c;(void)o; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_audio_close(void) { return ZZ_ENOSYS; }
+
+#ifdef ZZAPP_HOST_TEST
+WEAK void sdk_sha256(const uint8_t *data, uint32_t length,
+                     uint8_t digest[SDK_SHA256_DIGEST_SIZE])
+{
+    uint32_t i;
+
+    (void)data;
+    (void)length;
+    for (i = 0; i < SDK_SHA256_DIGEST_SIZE; ++i)
+        digest[i] = 0;
+}
+WEAK uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
+                                    const uint8_t *src, uint32_t src_length,
+                                    uint8_t *dst, uint32_t dst_capacity,
+                                    struct SDKDecompressResult *result)
+{
+    (void)algorithm;
+    (void)flags;
+    (void)src;
+    (void)src_length;
+    (void)dst;
+    (void)dst_capacity;
+    (void)result;
+    return SDK_STATUS_UNSUPPORTED;
+}
+#endif
 struct zzapp_minigl_binding {
     const zzm_minigl_ops_v1_t *ops;
     void *context;
@@ -205,6 +238,127 @@ static void *api_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 }
 static void api_free(void *p) { extern void zzapp_host_free(void *); zzapp_host_free(p); }
 static void api_heap(void **b, uint32_t *n) { extern void zzapp_host_heap(void **,uint32_t *); zzapp_host_heap(b,n); }
+
+static int sdk_to_zz(uint16_t status)
+{
+    switch (status) {
+    case SDK_STATUS_OK: return ZZ_OK;
+    case SDK_STATUS_NO_MEMORY: return ZZ_ENOMEM;
+    case SDK_STATUS_UNSUPPORTED: return ZZ_ENOSYS;
+    case SDK_STATUS_BAD_REQUEST: return ZZ_EINVAL;
+    case SDK_STATUS_NOT_FOUND: return ZZ_ENOENT;
+    case SDK_STATUS_BUSY: return ZZ_EBUSY;
+    default: return ZZ_EIO;
+    }
+}
+
+static int api_host_address(const void *p, uint32_t *host_offset)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_host_address(p, host_offset);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_mem_info(zzapp_mem_info *out)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_host_mem_info(out);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_map_file(const char *path, const void **data, uint32_t *bytes)
+{
+    zzapp_stat st;
+    uint8_t *dst;
+    uint32_t done = 0;
+    int fd;
+    int rc;
+
+    if (!path || !data || !bytes)
+        return ZZ_EINVAL;
+    *data = NULL;
+    *bytes = 0;
+    zzapp_api_enter();
+    rc = zzapp_svc_file_stat(path, &st);
+    if (rc != ZZ_OK || st.size > (16u << 20) || st.size > UINT32_MAX)
+        goto out;
+    dst = (uint8_t *)zzapp_host_alloc((uint32_t)st.size, 8u, 0u);
+    if (!dst) {
+        rc = ZZ_ENOMEM;
+        goto out;
+    }
+    fd = zzapp_svc_file_open(path, ZZ_FILE_READ);
+    if (fd < 0) {
+        rc = fd;
+        goto out;
+    }
+    rc = ZZ_OK;
+    while (done < (uint32_t)st.size) {
+        uint32_t got = 0;
+        uint32_t want = (uint32_t)st.size - done;
+
+        if (want > 65536u)
+            want = 65536u;
+        rc = zzapp_svc_file_read(fd, dst + done, want, &got);
+        if (rc != ZZ_OK || got == 0u) {
+            if (rc == ZZ_OK)
+                rc = ZZ_EIO;
+            break;
+        }
+        done += got;
+    }
+    (void)zzapp_svc_file_close(fd);
+    if (rc == ZZ_OK) {
+        *data = dst;
+        *bytes = done;
+    }
+out:
+    zzapp_api_leave();
+    return rc;
+}
+
+static void api_unmap_file(const void *data)
+{
+    /* Arena allocations are bump-only and reclaimed with the app. */
+    (void)data;
+}
+
+static int api_sha256(const void *data, uint32_t bytes, uint8_t digest[32])
+{
+    if (!data || !digest)
+        return ZZ_EINVAL;
+    zzapp_api_enter();
+    sdk_sha256(data, bytes, digest);
+    zzapp_api_leave();
+    return ZZ_OK;
+}
+
+static int api_decompress(uint32_t algorithm, uint32_t flags, const void *src,
+                          uint32_t src_bytes, void *dst, uint32_t dst_bytes,
+                          zzapp_service_result *out)
+{
+    struct SDKDecompressResult result;
+    int rc;
+
+    if (!src || !dst || !out)
+        return ZZ_EINVAL;
+    zzapp_api_enter();
+    rc = sdk_to_zz(sdk_decompress_buffer(algorithm, flags, src, src_bytes,
+                                         dst, dst_bytes, &result));
+    if (rc == ZZ_OK) {
+        out->bytes_consumed = result.bytes_consumed;
+        out->bytes_written = result.bytes_written;
+        out->flags = result.flags;
+    }
+    zzapp_api_leave();
+    return rc;
+}
 #define WRAP0(name, call) static int name(void) { zzapp_api_enter(); int r=(call); zzapp_api_leave(); return r; }
 #define WRAP1(name, type, call) static int name(type a) { zzapp_api_enter(); int r=(call); zzapp_api_leave(); return r; }
 WRAP1(api_file_close,int,zzapp_svc_file_close(a))
@@ -244,6 +398,9 @@ static const zzapp_api g_api = {
     .display_refresh=api_display_refresh,.gl_bind_flags=api_gl_bind_flags,
     .display_set_palette=api_display_set_palette,
     .display_mailbox_replaced=api_display_mailbox_replaced,
-    .build_id=ZZ9000_BUILD_GIT
+    .build_id=ZZ9000_BUILD_GIT,
+    .host_address=api_host_address,.mem_info=api_mem_info,
+    .map_file=api_map_file,.unmap_file=api_unmap_file,
+    .sha256=api_sha256,.decompress=api_decompress
 };
 const zzapp_api *zzapp_api_table(void) { return &g_api; }

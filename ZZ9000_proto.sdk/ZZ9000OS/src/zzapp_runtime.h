@@ -40,6 +40,8 @@
 #define ZZAPP_IMAGE_SLACK      (64u << 10)
 #define ZZAPP_LOG_RING_PER_SEC 32u
 #define ZZAPP_LOG_UART_PER_SEC 8u
+#define ZZAPP_ENTRY_FPSCR      0u
+
 
 /* Just below the image-session table in the coherent task-queue region.
  * Core 0 owns this block. It is not core-1 BSS: a cold restart does not

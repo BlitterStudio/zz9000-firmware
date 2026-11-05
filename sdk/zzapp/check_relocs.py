@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Fail unless a shipped app image matches the v0 loader contract.
 
-Only allocated SHT_RELA, only R_ARM_RELATIVE with symbol 0, no PT_INTERP,
-no DT_NEEDED, at most four PT_LOAD, no writable+executable PT_LOAD, and a
-ZZAPP note whose descriptor starts with magic 0x50505A41.
+Only allocated SHT_REL/SHT_RELA, only R_ARM_RELATIVE with symbol 0, no
+PT_INTERP, no DT_NEEDED, at most four PT_LOAD, no writable+executable PT_LOAD,
+and a ZZAPP note whose descriptor starts with magic 0x50505A41.
 """
 import struct
 import sys
@@ -12,7 +12,7 @@ EHDR = struct.Struct("<16sHHIIIIIHHHHHH")
 SHDR = struct.Struct("<IIIIIIIIII")
 PHDR = struct.Struct("<IIIIIIII")
 RELA = struct.Struct("<III")
-
+REL = struct.Struct("<II")
 SHT_RELA = 4
 SHT_REL = 9
 SHT_NOTE = 7
@@ -66,22 +66,27 @@ def check(path):
     if loads < 1:
         die(path, "no PT_LOAD")
 
-    saw_rela = False
+    saw_reloc = False
     saw_note = False
     for name, typ, shflags, addr, off, size, link, info, addralign, entsize in shdrs:
-        if typ == SHT_REL:
-            die(path, "SHT_REL section %s" % sname(name))
-        if typ == SHT_RELA and (shflags & SHF_ALLOC):
-            saw_rela = True
-            if sname(name) != ".rela.dyn":
-                die(path, "allocated SHT_RELA is named %s" % sname(name))
-            if size % 12:
-                die(path, ".rela.dyn size is not a multiple of 12")
-            for n in range(size // 12):
-                r_offset, r_info, r_addend = RELA.unpack_from(blob, off + n * 12)
+        if typ in (SHT_REL, SHT_RELA) and (shflags & SHF_ALLOC):
+            saw_reloc = True
+            section = sname(name)
+            if section not in (".rel.dyn", ".rela.dyn"):
+                die(path, "allocated relocation is named %s" % section)
+            stride = 8 if typ == SHT_REL else 12
+            if size % stride:
+                die(path, "%s size is not a multiple of %d" % (section, stride))
+            for n in range(size // stride):
+                if typ == SHT_REL:
+                    r_offset, r_info = REL.unpack_from(blob, off + n * stride)
+                else:
+                    r_offset, r_info, r_addend = RELA.unpack_from(
+                        blob, off + n * stride)
+                    del r_addend
                 if (r_info & 0xFF) != R_ARM_RELATIVE or (r_info >> 8) != 0:
                     die(path, "reloc %d is not R_ARM_RELATIVE/0" % n)
-                del r_offset, r_addend
+                del r_offset
         if typ == SHT_NOTE or sname(name) == ".note.zzapp":
             note = blob[off:off + size]
             if len(note) < 16:
@@ -106,13 +111,11 @@ def check(path):
                 tag, val = struct.unpack_from("<II", blob, off + n * 8)
                 if tag == DT_NEEDED:
                     die(path, "DT_NEEDED")
-                if tag == DT_REL:
-                    die(path, "DT_REL still present")
                 if tag == 0:
                     break
                 del val
-    if not saw_rela:
-        die(path, "no allocated .rela.dyn")
+    if not saw_reloc:
+        die(path, "no allocated .rel.dyn or .rela.dyn")
     if not saw_note:
         die(path, "no ZZAPP note")
     if entry != 0:

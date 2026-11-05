@@ -1,7 +1,7 @@
 /*
  * PIE app image. Vaddrs are offsets from 0; the loader adds the arena base.
- * No fixed firmware ORIGIN. Entry is zz_start. .rela.dyn stays allocated
- * after rela_dyn.py rewrites ld's SHT_REL .rel.dyn.
+ * GNU ld's allocated .rel.dyn is loaded directly; SHT_REL and SHT_RELA are
+ * both part of the public loader contract.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -32,8 +32,8 @@ SECTIONS {
 
 
 	/*
-	 * Arm GNU ld 13.2 emits SHT_REL into .rel.dyn. rela_dyn.py rewrites that
-	 * to an allocated SHT_RELA .rela.dyn. KEEP so --gc-sections cannot drop it.
+	 * Keep either GNU ld's .rel.dyn or a toolchain's .rela.dyn so
+	 * --gc-sections cannot drop the loader-visible relocation records.
 	 */
 	.rel.dyn : {
 		KEEP(*(.rel.dyn))

@@ -103,6 +103,20 @@ int main(void)
     assert(get32(zzapp_test_arena_mem() + LOAD_OFF) == card + LOAD_OFF);
     zzapp_loader_release();
 
+    /* Stock GNU ld emits SHT_REL: its addend is the target word, not a
+     * third relocation-field as in RELA. */
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + RELA_OFF + 8, 0u);
+    put32(image + SHOFF + 4, 9u);          /* SHT_REL */
+    put32(image + SHOFF + 20, 8u);
+    put32(image + SHOFF + 36, 8u);
+    put32(image + LOAD_OFF, LOAD_OFF);
+    assert(load_end(image) == ZZ_OK);
+    card = zzapp_test_arena_card();
+    assert(get32(zzapp_test_arena_mem() + LOAD_OFF) == card + LOAD_OFF);
+    zzapp_loader_release();
+
     zzapp_boot_init(); make_image(image);
     put32(image + 24, 0u);
     assert(load_end(image) == ZZ_OK);

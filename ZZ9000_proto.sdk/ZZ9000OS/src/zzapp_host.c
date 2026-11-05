@@ -21,6 +21,7 @@
 #include "xparameters.h"
 #include "xscutimer_hw.h"
 #include "card_pool.h"
+#include "surface_allocator.h"
 #include "core2.h"
 #include "interrupt.h"
 #include "sleep.h"
@@ -82,6 +83,33 @@ static int g_faulted;
 static int g_cold_restarts;
 /* Set in service_tick (possibly IRQ context); reported from run_app. */
 static volatile uint32_t g_watchdog_reason;
+
+#define ZZAPP_HOST_VISIBLE_LIMIT (16u << 20)
+#define ZZAPP_HOST_VISIBLE_SLOTS 64u
+struct zzapp_host_visible_block {
+    void *ptr;
+    uint32_t card;
+    uint32_t bytes;
+};
+static struct zzapp_host_visible_block g_host_visible[ZZAPP_HOST_VISIBLE_SLOTS];
+static uint32_t g_host_visible_used;
+
+static void host_visible_release_all(void)
+{
+    uint32_t i;
+
+    for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
+        if (!g_host_visible[i].ptr)
+            continue;
+#ifndef ZZAPP_HOST_TEST
+        (void)surface_allocator_free(g_host_visible[i].card);
+#else
+        free(g_host_visible[i].ptr);
+#endif
+        g_host_visible[i].ptr = NULL;
+    }
+    g_host_visible_used = 0;
+}
 #ifndef ZZAPP_HOST_TEST
 /* Set while a task-context service tick runs (API epilogue on app_host_sp,
  * or a yield on the app stack).  The private-timer IRQ then neither nests
@@ -141,6 +169,9 @@ __attribute__((naked)) void zzapp_enter_arm(uint32_t entry, const void *api,
         "push {r4}\n"
         "vpush {d0-d15}\n"
         "vpush {d16-d31}\n"
+        /* App ABI baseline: round-to-nearest, no FZ and no default-NaN. */
+        "mov r4, #0\n"
+        "vmsr fpscr, r4\n"
         "ldr r4, [sp, #296]\n"
         "ldr r12, =app_host_sp\n"
         "str sp, [r12]\n"
@@ -273,6 +304,7 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
 
 void zzapp_loader_unbound(void)
 {
+    host_visible_release_all();
     g_card = 0;
     g_mem = NULL;
     g_owner = 0;
@@ -1024,18 +1056,64 @@ void zzapp_host_exit(int code)
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 {
     uintptr_t p;
-    (void)flags;
-    if (!g_mem || align < 8u || (align & (align - 1u)) != 0u)
+    uint32_t i;
+
+    if ((flags & ~(ZZ_ALLOC_UNCACHED | ZZ_ALLOC_HOST_VISIBLE)) != 0u ||
+        !bytes || align < 8u || (align & (align - 1u)) != 0u)
         return NULL;
-    p = (uintptr_t)(g_mem + g_heap_bump);
-    p = (p + align - 1u) & ~(uintptr_t)(align - 1u);
-    if (p + bytes < p || p + bytes > (uintptr_t)(g_mem + g_heap_end))
+    if ((flags & ZZ_ALLOC_HOST_VISIBLE) == 0u) {
+        if (!g_mem)
+            return NULL;
+        p = (uintptr_t)(g_mem + g_heap_bump);
+        p = (p + align - 1u) & ~(uintptr_t)(align - 1u);
+        if (p + bytes < p || p + bytes > (uintptr_t)(g_mem + g_heap_end))
+            return NULL;
+        g_heap_bump = (uint32_t)(p + bytes - (uintptr_t)g_mem);
+        return (void *)p;
+    }
+    if (bytes > ZZAPP_HOST_VISIBLE_LIMIT - g_host_visible_used)
         return NULL;
-    g_heap_bump = (uint32_t)(p + bytes - (uintptr_t)g_mem);
-    return (void *)p;
+    for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
+        uint32_t card;
+        void *ptr;
+
+        if (g_host_visible[i].ptr)
+            continue;
+#ifndef ZZAPP_HOST_TEST
+        card = surface_allocator_alloc_aligned(bytes, align);
+        ptr = (void *)(uintptr_t)card;
+#else
+        ptr = malloc(bytes);
+        card = 0x033f0000u + g_host_visible_used;
+#endif
+        if (!ptr)
+            return NULL;
+        g_host_visible[i].ptr = ptr;
+        g_host_visible[i].card = card;
+        g_host_visible[i].bytes = bytes;
+        g_host_visible_used += bytes;
+        return ptr;
+    }
+    return NULL;
 }
 
-void zzapp_host_free(void *p) { (void)p; }
+void zzapp_host_free(void *p)
+{
+    uint32_t i;
+
+    for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
+        if (g_host_visible[i].ptr != p)
+            continue;
+#ifndef ZZAPP_HOST_TEST
+        (void)surface_allocator_free(g_host_visible[i].card);
+#else
+        free(p);
+#endif
+        g_host_visible_used -= g_host_visible[i].bytes;
+        g_host_visible[i].ptr = NULL;
+        return;
+    }
+}
 
 void zzapp_host_heap(void **base, uint32_t *bytes)
 {
@@ -1043,6 +1121,38 @@ void zzapp_host_heap(void **base, uint32_t *bytes)
         *base = g_mem ? g_mem + g_heap_off : NULL;
     if (bytes)
         *bytes = g_heap_end > g_heap_off ? g_heap_end - g_heap_off : 0;
+}
+
+int zzapp_host_address(const void *p, uint32_t *host_offset)
+{
+    uint32_t i;
+
+    if (!host_offset)
+        return ZZ_EINVAL;
+    for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
+        if (g_host_visible[i].ptr == p) {
+#ifndef ZZAPP_HOST_TEST
+            *host_offset = g_host_visible[i].card - ADDR_ADJ;
+#else
+            *host_offset = g_host_visible[i].card;
+#endif
+            return ZZ_OK;
+        }
+    }
+    return ZZ_EINVAL;
+}
+
+int zzapp_host_mem_info(zzapp_mem_info *out)
+{
+    if (!out)
+        return ZZ_EINVAL;
+    out->arena_size = g_mem ? ZZAPP_ARENA_BYTES : 0u;
+    out->arena_used = g_heap_bump > g_heap_off ? g_heap_bump - g_heap_off : 0u;
+    out->arena_free = g_heap_end > g_heap_bump ? g_heap_end - g_heap_bump : 0u;
+    out->arena_largest_block = out->arena_free;
+    out->host_visible_used = g_host_visible_used;
+    out->host_visible_limit = ZZAPP_HOST_VISIBLE_LIMIT;
+    return ZZ_OK;
 }
 #ifdef ZZAPP_HOST_TEST
 void zzapp_test_set_xtime(uint64_t ticks) { g_test_ticks = ticks; }

@@ -4,12 +4,21 @@
 #include "zzapp.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
+void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
+int zzapp_host_address(const void *p, uint32_t *host_offset);
+int zzapp_host_mem_info(zzapp_mem_info *out);
 
 int main(void)
 {
     uint32_t card;
+    uint32_t host_offset;
+    void *host_visible;
+    zzapp_mem_info mem;
 
     zzapp_boot_init();
+    /* zzapp_enter_arm establishes the VFP ABI baseline before app code. */
+    assert(ZZAPP_ENTRY_FPSCR == 0u);
+
     zzapp_test_set_xtime(0);
     zzapp_test_mark_running();
 
@@ -71,11 +80,19 @@ int main(void)
     card = zzapp_test_arena_card();
     assert(card != 0u);
     zzapp_test_mark_running();
+    host_visible = zzapp_host_alloc(4096u, 256u, ZZ_ALLOC_HOST_VISIBLE);
+    assert(host_visible != NULL);
+    assert(zzapp_host_address(host_visible, &host_offset) == ZZ_OK);
+    assert(host_offset != 0u);
+    assert(zzapp_host_mem_info(&mem) == ZZ_OK);
+    assert(mem.host_visible_used == 4096u);
+    assert(mem.host_visible_limit >= mem.host_visible_used);
     assert(zzapp_fault_is_app(card + 4u, 0u));
     assert(!zzapp_fault_wants_restart(card + 4u, 0u));
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, card + 4u, card + 8u,
                          card + 12u, 0x1234u, 0x5678u, 0x13u);
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(zzapp_test_cold_restarts() == 0);
+    assert(zzapp_host_address(host_visible, &host_offset) == ZZ_EINVAL);
     return 0;
 }

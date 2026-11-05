@@ -357,7 +357,7 @@ static int dynamic_clean(uint32_t off, uint32_t filesz)
 
         if (tag == DT_NULL)
             return ZZ_OK;
-        if (tag == DT_NEEDED || tag == DT_REL)
+        if (tag == DT_NEEDED)
             return ZZ_EINVAL;
     }
     return ZZ_OK;
@@ -381,21 +381,20 @@ static int relocs_ok(uint16_t shnum, uint16_t shentsize, uint32_t shoff)
         uint32_t n;
         uint32_t r;
 
-        if (type == SHT_REL)
-            return ZZ_EINVAL;
+        if (type != SHT_RELA && type != SHT_REL)
+            continue;
         if ((flags & SHF_ALLOC) && size) {
             if (!range_ok(addr, size, g_bytes))
                 return ZZ_EINVAL;
         }
-        if (type != SHT_RELA)
-            continue;
-        if (entsize != 12u || (size % 12u) != 0u)
+        if ((type == SHT_RELA && (entsize != 12u || (size % 12u) != 0u)) ||
+            (type == SHT_REL && (entsize != 8u || (size % 8u) != 0u)))
             return ZZ_EINVAL;
         if (!range_ok(off, size, g_file_end))
             return ZZ_EINVAL;
-        n = size / 12u;
+        n = size / (type == SHT_RELA ? 12u : 8u);
         for (r = 0; r < n; r++) {
-            const uint8_t *rel = g_mem + off + r * 12u;
+            const uint8_t *rel = g_mem + off + r * (type == SHT_RELA ? 12u : 8u);
             uint32_t roff = rd32(rel);
             uint32_t info = rd32(rel + 4u);
 
@@ -612,20 +611,30 @@ int zzapp_loader_end(void)
      * of the section bytes. Copy the reloc records first: place_segments
      * wipes the file image. */
     {
+        /* Normalise REL and RELA into 16-byte records: offset, type, kind,
+         * addend.  REL's addend is deliberately read only after PT_LOAD
+         * placement, from the relocated target word. */
         uint8_t *saved = NULL;
         uint32_t saved_n = 0;
         uint16_t i;
 
         for (i = 0; i < shnum; i++) {
             const uint8_t *sh = g_mem + shoff + (uint32_t)i * shentsize;
-            if (rd32(sh + 4u) == SHT_RELA)
-                saved_n += rd32(sh + 20u);
+            uint32_t type = rd32(sh + 4u);
+            uint32_t size = rd32(sh + 20u);
+            uint32_t entries;
+
+            if (type != SHT_RELA && type != SHT_REL)
+                continue;
+            entries = size / (type == SHT_RELA ? 12u : 8u);
+            if (entries > (UINT32_MAX - saved_n) / 16u) {
+                drop_arena();
+                zzapp_loader_set_state(ZZAPP_ST_IDLE);
+                return ZZ_ENOMEM;
+            }
+            saved_n += entries * 16u;
         }
-#ifdef ZZAPP_HOST_TEST
         saved = saved_n ? (uint8_t *)malloc(saved_n) : NULL;
-#else
-        saved = saved_n ? (uint8_t *)malloc(saved_n) : NULL;
-#endif
         if (saved_n && !saved) {
             drop_arena();
             zzapp_loader_set_state(ZZAPP_ST_IDLE);
@@ -633,15 +642,28 @@ int zzapp_loader_end(void)
         }
         if (saved_n) {
             uint32_t at = 0;
+
             for (i = 0; i < shnum; i++) {
                 const uint8_t *sh = g_mem + shoff + (uint32_t)i * shentsize;
-                uint32_t size;
+                uint32_t type = rd32(sh + 4u);
+                uint32_t size = rd32(sh + 20u);
+                uint32_t stride;
+                uint32_t r;
 
-                if (rd32(sh + 4u) != SHT_RELA)
+                if (type != SHT_RELA && type != SHT_REL)
                     continue;
-                size = rd32(sh + 20u);
-                memcpy(saved + at, g_mem + rd32(sh + 16u), size);
-                at += size;
+                stride = type == SHT_RELA ? 12u : 8u;
+                for (r = 0; r < size / stride; ++r) {
+                    const uint8_t *rel = g_mem + rd32(sh + 16u) + r * stride;
+
+                    memcpy(saved + at, rel, 8u);
+                    memcpy(saved + at + 8u, &type, 4u);
+                    if (type == SHT_RELA)
+                        memcpy(saved + at + 12u, rel + 8u, 4u);
+                    else
+                        memset(saved + at + 12u, 0, 4u);
+                    at += 16u;
+                }
             }
         }
         rc = place_segments(&img);
@@ -652,17 +674,16 @@ int zzapp_loader_end(void)
             return rc;
         }
         if (saved_n) {
-            uint32_t at = 0;
-            uint32_t r;
-            uint32_t n = saved_n / 12u;
+            uint32_t at;
 
-            for (r = 0; r < n; r++) {
+            for (at = 0; at < saved_n; at += 16u) {
                 uint32_t roff = rd32(saved + at);
-                uint32_t addend = rd32(saved + at + 8u);
+                uint32_t type = rd32(saved + at + 8u);
+                uint32_t addend = type == SHT_REL ? rd32(g_mem + roff) :
+                                                     rd32(saved + at + 12u);
                 uint32_t place = addend + g_card;
 
                 memcpy(g_mem + roff, &place, 4u);
-                at += 12u;
             }
             free(saved);
         }
