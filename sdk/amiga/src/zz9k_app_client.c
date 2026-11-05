@@ -14,35 +14,10 @@ static void zz9k_app_barrier(void)
 #endif
 }
 
-void zz9k_app_owner_init(ZZ9KAppOwner *owner)
+int zz9k_app_generation_matches(uint32_t owned_generation,
+                                uint32_t observed_generation)
 {
-  if (owner) {
-    owner->owner = 0;
-  }
-}
-
-int zz9k_app_owner_claim(ZZ9KAppOwner *owner, const void *claimant)
-{
-  if (!owner || !claimant) {
-    return ZZ9K_STATUS_BAD_REQUEST;
-  }
-  if (owner->owner && owner->owner != claimant) {
-    return ZZ9K_STATUS_BUSY;
-  }
-  owner->owner = claimant;
-  return ZZ9K_STATUS_OK;
-}
-
-int zz9k_app_owner_release(ZZ9KAppOwner *owner, const void *claimant)
-{
-  if (!owner || !claimant) {
-    return ZZ9K_STATUS_BAD_REQUEST;
-  }
-  if (owner->owner != claimant) {
-    return ZZ9K_STATUS_BAD_HANDLE;
-  }
-  owner->owner = 0;
-  return ZZ9K_STATUS_OK;
+  return owned_generation != 0U && owned_generation == observed_generation;
 }
 
 int zz9k_app_request_init(ZZ9KRequest *request, uint16_t opcode)
@@ -116,6 +91,41 @@ int zz9k_app_parse_status(const ZZ9KMailboxEntry *reply,
   return ZZ9K_STATUS_OK;
 }
 
+static int zz9k_app_ring_aligned(const volatile uint8_t *ring)
+{
+  return ((uintptr_t)ring & (sizeof(uint32_t) - 1U)) == 0U;
+}
+
+static uint32_t zz9k_app_ring_load_be(const volatile uint8_t *address)
+{
+#if defined(__m68k__)
+  return *(const volatile uint32_t *)(const void *)address;
+#else
+  return zz9k_get_be32((const void *)address);
+#endif
+}
+
+static void zz9k_app_ring_store_be(volatile uint8_t *address, uint32_t value)
+{
+#if defined(__m68k__)
+  *(volatile uint32_t *)(void *)address = value;
+#else
+  zz9k_put_be32((void *)address, value);
+#endif
+}
+
+int zz9k_app_ring_indices(const volatile uint8_t *ring, uint32_t *head,
+                          uint32_t *tail)
+{
+  if (!ring || !head || !tail || !zz9k_app_ring_aligned(ring)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  *head = zz9k_app_ring_load_be(ring);
+  zz9k_app_barrier();
+  *tail = zz9k_app_ring_load_be(ring + 4U);
+  return ZZ9K_STATUS_OK;
+}
+
 int zz9k_app_ring_push(volatile uint8_t *ring, const uint8_t message[32])
 {
   uint32_t head;
@@ -123,11 +133,12 @@ int zz9k_app_ring_push(volatile uint8_t *ring, const uint8_t message[32])
   uint32_t offset;
   uint32_t i;
 
-  if (!ring || !message) {
+  if (!ring || !message || !zz9k_app_ring_aligned(ring)) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
-  head = zz9k_get_be32((const void *)ring);
-  tail = zz9k_get_be32((const void *)(ring + 4U));
+  if (zz9k_app_ring_indices(ring, &head, &tail) != ZZ9K_STATUS_OK) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
   if (head - tail >= ZZ9K_APP_MESSAGE_CAPACITY) {
     return ZZ9K_STATUS_BUSY;
   }
@@ -137,7 +148,7 @@ int zz9k_app_ring_push(volatile uint8_t *ring, const uint8_t message[32])
     ring[offset + i] = message[i];
   }
   zz9k_app_barrier();
-  zz9k_put_be32((void *)ring, head + 1U);
+  zz9k_app_ring_store_be(ring, head + 1U);
   return ZZ9K_STATUS_OK;
 }
 
@@ -148,11 +159,12 @@ int zz9k_app_ring_pop(volatile uint8_t *ring, uint8_t message[32])
   uint32_t offset;
   uint32_t i;
 
-  if (!ring || !message) {
+  if (!ring || !message || !zz9k_app_ring_aligned(ring)) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
-  head = zz9k_get_be32((const void *)ring);
-  tail = zz9k_get_be32((const void *)(ring + 4U));
+  if (zz9k_app_ring_indices(ring, &head, &tail) != ZZ9K_STATUS_OK) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
   if (head == tail) {
     return ZZ9K_STATUS_BUSY;
   }
@@ -162,6 +174,6 @@ int zz9k_app_ring_pop(volatile uint8_t *ring, uint8_t message[32])
     message[i] = ring[offset + i];
   }
   zz9k_app_barrier();
-  zz9k_put_be32((void *)(ring + 4U), tail + 1U);
+  zz9k_app_ring_store_be(ring + 4U, tail + 1U);
   return ZZ9K_STATUS_OK;
 }

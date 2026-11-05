@@ -765,6 +765,7 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/fd/zz9k_lib.fd
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include/clib/zz9k_protos.h
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include/proto/zz9k.h
+          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include/inline/zz9k.h
 )
 
 add_executable(mpega_metadata_test
@@ -836,6 +837,15 @@ add_test(NAME app_client_logic_test COMMAND app_client_logic_test)
 
 target_link_libraries(app_client_logic_test PRIVATE zz9k_library_core)
 
+add_executable(app_echo_source_test
+  tests/app_echo_source_test.c
+)
+add_test(
+  NAME app_echo_source_test
+  COMMAND app_echo_source_test
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-app-echo-test.c
+)
+
 add_executable(library_resident_lock_test
   tests/library_resident_lock_test.c
 )
@@ -849,6 +859,7 @@ add_test(
   NAME library_resident_lock_test
   COMMAND library_resident_lock_test
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src/zz9k_library_resident.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src/zz9k_library_app.inc
 )
 
 add_executable(library_irq_source_test

@@ -90,16 +90,29 @@ static void test_message_rings(void)
   uint8_t ring[ZZ9K_APP_MESSAGE_RING_BYTES];
   uint8_t sent[ZZ9K_APP_MESSAGE_BYTES];
   uint8_t received[ZZ9K_APP_MESSAGE_BYTES];
+  uint32_t head;
+  uint32_t tail;
   uint32_t i;
+  uint32_t j;
 
   memset(ring, 0, sizeof(ring));
-  for (i = 0U; i < sizeof(sent); i++) sent[i] = (uint8_t)i;
-  expect_status("ring push", zz9k_app_ring_push(ring, sent), ZZ9K_STATUS_OK);
-  expect_status("ring pop", zz9k_app_ring_pop(ring, received), ZZ9K_STATUS_OK);
-  if (memcmp(sent, received, sizeof(sent)) != 0) {
-    puts("ring payload mismatch");
-    failures++;
+  for (i = 0U; i < 300U; i++) {
+    for (j = 0U; j < sizeof(sent); j++) sent[j] = (uint8_t)(i + j);
+    expect_status("ring push", zz9k_app_ring_push(ring, sent), ZZ9K_STATUS_OK);
+    expect_status("ring producer indices",
+                  zz9k_app_ring_indices(ring, &head, &tail), ZZ9K_STATUS_OK);
+    expect_u32("ring producer head", head, i + 1U);
+    expect_u32("ring producer tail", tail, i);
+    expect_status("ring pop", zz9k_app_ring_pop(ring, received), ZZ9K_STATUS_OK);
+    if (memcmp(sent, received, sizeof(sent)) != 0) {
+      puts("ring payload mismatch");
+      failures++;
+    }
   }
+  expect_status("ring consumer indices",
+                zz9k_app_ring_indices(ring, &head, &tail), ZZ9K_STATUS_OK);
+  expect_u32("ring consumer head", head, 300U);
+  expect_u32("ring consumer tail", tail, 300U);
   expect_status("ring empty", zz9k_app_ring_pop(ring, received),
                 ZZ9K_STATUS_BUSY);
   for (i = 0U; i < ZZ9K_APP_MESSAGE_CAPACITY; i++) {
@@ -110,25 +123,11 @@ static void test_message_rings(void)
                 ZZ9K_STATUS_BUSY);
 }
 
-static void test_owner_state(void)
+static void test_generation_fence(void)
 {
-  ZZ9KAppOwner owner;
-  uint32_t token_a = 1U;
-  uint32_t token_b = 2U;
-
-  zz9k_app_owner_init(&owner);
-  expect_status("claim a", zz9k_app_owner_claim(&owner, &token_a),
-                ZZ9K_STATUS_OK);
-  expect_status("claim a twice", zz9k_app_owner_claim(&owner, &token_a),
-                ZZ9K_STATUS_OK);
-  expect_status("claim b busy", zz9k_app_owner_claim(&owner, &token_b),
-                ZZ9K_STATUS_BUSY);
-  expect_status("release b", zz9k_app_owner_release(&owner, &token_b),
-                ZZ9K_STATUS_BAD_HANDLE);
-  expect_status("release a", zz9k_app_owner_release(&owner, &token_a),
-                ZZ9K_STATUS_OK);
-  expect_status("claim b", zz9k_app_owner_claim(&owner, &token_b),
-                ZZ9K_STATUS_OK);
+  expect_u32("zero generation", zz9k_app_generation_matches(0U, 0U), 0U);
+  expect_u32("matching generation", zz9k_app_generation_matches(9U, 9U), 1U);
+  expect_u32("replaced generation", zz9k_app_generation_matches(9U, 10U), 0U);
 }
 
 int main(void)
@@ -136,6 +135,6 @@ int main(void)
   test_request_builders();
   test_status_parser();
   test_message_rings();
-  test_owner_state();
+  test_generation_fence();
   return failures != 0;
 }

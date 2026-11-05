@@ -198,12 +198,12 @@ int zz_audio_decode_open(uint32_t codec, uint32_t *session)
 }
 
 int zz_audio_decode(uint32_t session, const void *src, uint32_t src_bytes,
-                    int16_t *pcm, uint32_t pcm_frames,
+                    uint32_t flags, int16_t *pcm, uint32_t pcm_frames,
                     zzapp_audio_decode_result *out)
 {
     if (ZZ_API_COVERS(zzapp_api_ptr, audio_decode) &&
         zzapp_api_ptr->audio_decode)
-        return zzapp_api_ptr->audio_decode(session, src, src_bytes, pcm,
+        return zzapp_api_ptr->audio_decode(session, src, src_bytes, flags, pcm,
                                            pcm_frames, out);
     return ZZ_ENOSYS;
 }

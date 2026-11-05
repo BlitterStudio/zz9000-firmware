@@ -87,26 +87,29 @@ uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);
 void ZZ9KAppClose(ZZ9KAppHandle *handle);
 ```
 
-`Open` checks for Zorro III, app-runtime ABI major 0, an idle runtime, and the
-existing completion-IRQ capability. It returns `ZZ9K_STATUS_BUSY` while another
-client owns core 1. `LoadFile` streams the ELF through the runtime staging
-window; `LoadMemory` accepts at most 16 MiB. `Start` copies no more than 16
-argv strings of 127 bytes each. `Status` returns the terminal fault/exit
-snapshot.
+`Open` checks for Zorro III, app-runtime ABI major 0, an idle runtime, and an
+Amiga `mmu.library` mapping that can keep the shared window cache-inhibited for
+the handle lifetime. It returns `ZZ9K_STATUS_BUSY` while another client owns
+core 1. `LoadFile` streams the ELF through the runtime staging window;
+`LoadMemory` accepts at most 16 MiB. `Start` copies no more than 16 argv
+strings of 127 bytes each. `Status` returns the terminal fault/exit snapshot.
 
 `ZZ9KAppMessage` is exactly 32 opaque bytes. Send returns `ZZ9K_STATUS_BUSY`
 when the host-to-app ring is full; get returns it when the app-to-host ring is
-empty. The library's VBlank interrupt server renews the runtime lease while the
-handle is open, independently of the caller's task. It signals
+empty. The library's real Amiga VBlank interrupt server renews the runtime
+lease while the handle is open, independently of the caller's task. It signals
 `ZZ9KAppMessageSignal(handle)` for an app message, exit, or fault. When a
-`notify_port` was supplied, it also posts one coalesced `ZZ9KAppEvent`; drain
-that port before `Close`.
+`notify_port` was supplied, it posts one coalesced `ZZ9KAppEvent`: dequeue
+that event before draining messages with `ZZ9KAppGetMessage`, and drain the
+port before `Close`.
 
-Always call `ZZ9KAppClose`: it issues stop and releases the owner. The resident
-library also stops an open handle when its final `CloseLibrary` occurs. AmigaOS
-does not provide a safe general callback for a client task that dies while
-retaining an open library handle, so a killed client without `Close` is reclaimed
-by the firmware lease after the library stops renewing it (or by Amiga reset).
+Always call `ZZ9KAppClose`: it stops only the generation loaded by that handle
+and releases the owner. Closing the owning task's final `zz9k.library`
+reference performs the same cleanup; another opener cannot release that
+task's signal. AmigaOS does not provide a safe general callback for a client
+task that dies while retaining an open library handle, so a killed client
+without `Close` is reclaimed by the firmware lease after the library stops
+renewing it (or by Amiga reset).
 
 `zz9k-app-echo-test <path-to-echo.elf> [count]` is the hardware smoke client.
 

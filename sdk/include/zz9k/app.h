@@ -86,21 +86,18 @@ typedef struct ZZ9KAppMessage {
   uint8_t bytes[ZZ9K_APP_MESSAGE_BYTES];
 } ZZ9KAppMessage;
 
-/* This state is deliberately separate from the resident library base so the
- * ownership rule can be tested without AmigaOS task structures. */
-typedef struct ZZ9KAppOwner {
-  const void *owner;
-} ZZ9KAppOwner;
-
-void zz9k_app_owner_init(ZZ9KAppOwner *owner);
-int zz9k_app_owner_claim(ZZ9KAppOwner *owner, const void *claimant);
-int zz9k_app_owner_release(ZZ9KAppOwner *owner, const void *claimant);
+/* The resident library owns a generation only after LOAD_BEGIN succeeds.
+ * Every live-window access fences itself against a replacement launcher. */
+int zz9k_app_generation_matches(uint32_t owned_generation,
+                                 uint32_t observed_generation);
 int zz9k_app_request_init(ZZ9KRequest *request, uint16_t opcode);
 int zz9k_app_request_chunk(ZZ9KRequest *request, uint32_t file_offset,
                            uint32_t length);
 int zz9k_app_request_start(ZZ9KRequest *request, uint32_t argc);
 int zz9k_app_parse_status(const ZZ9KMailboxEntry *reply,
                           ZZ9KAppStatusInfo *status);
+int zz9k_app_ring_indices(const volatile uint8_t *ring, uint32_t *head,
+                          uint32_t *tail);
 int zz9k_app_ring_push(volatile uint8_t *ring, const uint8_t message[32]);
 int zz9k_app_ring_pop(volatile uint8_t *ring, uint8_t message[32]);
 
