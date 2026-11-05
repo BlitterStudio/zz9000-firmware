@@ -264,7 +264,8 @@ One non-cacheable block. Offsets are part of the contract. Big-endian integer fi
 #define ZZAPP_STAGING_BYTES    0x00010000u   /* 64 KiB, ends at 0x59B40 */
 ```
 
-Bytes from `0x59B40` to `0x60000` are reserved zero.
+`ZZAPP_PALETTE_OFF` (`0x59B40`) holds 256 big-endian `0x00RRGGBB` CLUT8
+entries. The remaining bytes from `0x59F40` to `0x60000` are reserved zero.
 
 Lifecycle block (`ZZAPP_LIFE_OFF`), each field a big-endian `u32` unless noted:
 
@@ -298,14 +299,19 @@ Lifecycle block (`ZZAPP_LIFE_OFF`), each field a big-endian `u32` unless noted:
 | `0x64` | card_back | firmware if it allocated one, else launcher |
 | `0x68` | app progress xtime low | firmware, diagnostic |
 | `0x6C` | app progress xtime high | firmware, diagnostic |
+| `0x70` | layout (`ZZ_LAYOUT_*`) | firmware |
+| `0x74` | palette generation | firmware |
+| `0x78` | palette first entry | firmware |
+| `0x7C` | palette entry count | firmware |
+| `0x80` | card_spare | firmware / launcher |
 | `0x84` | requested scanout address | firmware |
 | `0x88` | submitted scanout generation | launcher |
-
+| `0x8C` | mailbox_replaced | firmware |
 State enum: `0` idle, `1` loading, `2` starting, `3` running, `4` paused (unused), `5` stopping, `6` faulted.
 
 Fault codes: `0` none, `1` data abort, `2` prefetch abort, `3` undefined, `4` watchdog, `5` forced stop (grace or reset), `6` watchdog that fell through to cold restart.
 
-Flags: bit0 display wanted (ELF note, mirrored), bit1 audio, bit2 GL, bit8 display requested and not yet bound, bit9 vsync wanted, bit10 launcher CLUT8, bit11 launcher supports scanout-vblank acknowledgement, bit12 firmware accepted that protocol.
+Flags: bit0 display wanted (ELF note, mirrored), bit1 audio, bit2 GL, bit8 display requested and not yet bound, bit9 vsync wanted, bit10 launcher CLUT8 capability, bit11 launcher supports scanout-vblank acknowledgement, bit12 firmware accepted that protocol, bit13 app requests mailbox presentation, bit14 launcher supports mailbox presentation, bit15 firmware accepted mailbox presentation.
 
 Input event, 16 bytes, big-endian, array starts at `ZZAPP_INPUT_OFF + ZZAPP_INPUT_HDR`:
 
@@ -513,8 +519,21 @@ typedef struct zzapp_api {
     int      (*display_flip_async)(uint32_t surface_id);
     int      (*display_flip_idle)(void);
     int      (*display_refresh)(zzapp_surface *surface);
+    const zzapp_gl *(*gl_bind_flags)(uint32_t surface_id, uint32_t flags);
+    int      (*display_set_palette)(uint32_t surface_id, uint32_t first,
+                                    uint32_t count, const uint32_t *rgb);
+    uint32_t (*display_mailbox_replaced)(void);
 } zzapp_api;
+
+#define ZZ_API_COVERS(api, field) \
+    ((api) != 0 && (uint32_t)(api)->size >= \
+        (uint32_t)(offsetof(zzapp_api, field) + sizeof((api)->field)))
 ```
+The fields after `gl_unbind` are appended ABI slots. Before reading or calling
+any appended slot, an app MUST use `ZZ_API_COVERS(api, field)` and also check
+that the function pointer is non-NULL. A runtime predating an appended field
+does not provide storage for it.
+
 
 `zz_display_refresh(&surface)` is an optional appended call. After
 `zz_display_flip_idle()` reports idle (or a synchronous `zz_display_flip`
