@@ -12,12 +12,14 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildScript = @'
 set -e
 mkdir -p build/m68k build/dtcode
-CFLAGS="-noixemul -Os -s -Iinclude -Ihost/include"
+CFLAGS="-noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
+STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
 
 m68k-amigaos-gcc $CFLAGS -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o
-m68k-amigaos-gcc $LIBCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
-m68k-amigaos-gcc $LIBCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
+m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
+m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_app_client.c -o build/m68k/zz9k_app_client.o
+m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-fb-common.c -o build/m68k/zz9k-fb-common.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-image-window.c -o build/m68k/zz9k-image-window.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-picture-viewer.c -o build/m68k/zz9k-picture-viewer.o
@@ -40,13 +42,14 @@ ZZPLAY_SOURCES="tools/zzplay/zzplay-ahi.c tools/zzplay/zzplay-ahiprefs.c tools/z
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-requester.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-rexx.c tools/zzplay/zzplay-rexx-commands.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-sys.c"
-m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
+m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Werror -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
-  build/m68k/zz9k_host.o -o build/zz9k.library
+  build/m68k/zz9k_app_client.o build/m68k/zz9k_host.o -o build/zz9k.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   amiga/mpega/mpega_resident.c -o build/mpega.library
 
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libtest.c -o build/zz9k-libtest
+m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libasync.c -o build/zz9k-libasync
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libbatch.c -o build/zz9k-libbatch
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libcancel.c -o build/zz9k-libcancel

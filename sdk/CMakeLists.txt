@@ -77,6 +77,7 @@ target_compile_definitions(zz9k_lha_unix PRIVATE HAVE_CONFIG_H=1)
 
 add_library(zz9k_library_core STATIC
   amiga/src/zz9k_library.c
+  amiga/src/zz9k_app_client.c
 )
 
 target_include_directories(zz9k_library_core
@@ -820,6 +821,20 @@ target_include_directories(library_lvo_test
 )
 
 add_test(NAME library_lvo_test COMMAND library_lvo_test)
+
+add_executable(app_client_logic_test
+  tests/app_client_logic_test.c
+)
+
+target_include_directories(app_client_logic_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+)
+
+add_test(NAME app_client_logic_test COMMAND app_client_logic_test)
+
+target_link_libraries(app_client_logic_test PRIVATE zz9k_library_core)
 
 add_executable(library_resident_lock_test
   tests/library_resident_lock_test.c

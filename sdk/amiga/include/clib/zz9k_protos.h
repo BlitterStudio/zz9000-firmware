@@ -10,6 +10,7 @@
 #define ZZ9K_LIBRARY_TYPES_ONLY
 #include "zz9k/library.h"
 #undef ZZ9K_LIBRARY_TYPES_ONLY
+#include "zz9k/app_client.h"
 #include <exec/ports.h>
 
 #ifdef __cplusplus
@@ -70,6 +71,16 @@ int ZZ9KCryptoAeadBatch(const ZZ9KCryptoAeadDesc *descs, ZZ9KCryptoResult *resul
 int ZZ9KImageSessionBegin(const ZZ9KImageSessionBeginDesc *desc, ZZ9KImageSessionResult *result);
 int ZZ9KImageSessionFeed(const ZZ9KImageSessionFeedDesc *desc, ZZ9KImageSessionResult *result);
 int ZZ9KImageSessionClose(uint32_t session, uint32_t flags);
+int ZZ9KAppOpen(ZZ9KAppHandle **handle, struct MsgPort *notify_port);
+int ZZ9KAppLoadFile(ZZ9KAppHandle *handle, const char *path);
+int ZZ9KAppLoadMemory(ZZ9KAppHandle *handle, const void *data, uint32_t length);
+int ZZ9KAppStart(ZZ9KAppHandle *handle, const char *const *argv, uint32_t argc);
+int ZZ9KAppStop(ZZ9KAppHandle *handle);
+int ZZ9KAppStatus(ZZ9KAppHandle *handle, ZZ9KAppStatusInfo *status);
+int ZZ9KAppSendMessage(ZZ9KAppHandle *handle, const ZZ9KAppMessage *message);
+int ZZ9KAppGetMessage(ZZ9KAppHandle *handle, ZZ9KAppMessage *message);
+uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);
+void ZZ9KAppClose(ZZ9KAppHandle *handle);
 
 #ifdef __cplusplus
 }

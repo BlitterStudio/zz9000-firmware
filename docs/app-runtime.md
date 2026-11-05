@@ -405,6 +405,25 @@ messages independently of keyboard input; the app-to-host consumer signals the
 owning Amiga client. All fields and extension offsets are asserted by
 `zzapp_proto.h`.
 
+### Amiga library client
+
+API 0.2 also publishes the protocol through `zz9k.library` revision 35 rather
+than requiring applications to reproduce ZZRun's mailbox sequence. Its
+`ZZ9KAppOpen`, `LoadFile`/`LoadMemory`, `Start`, `Stop`, `Status`,
+`SendMessage`, `GetMessage`, and `Close` vectors own the one runtime instance.
+The library reports `ZZ9K_STATUS_BUSY` to a second opener; the owner retains
+the loaded app until it closes its handle. The library's VBlank interrupt
+server renews the lifecycle heartbeat while the handle is open and its
+dispatcher signals the handle's app-message signal (and optional notification
+port) for an app message, completion, or fault. Interrupt context only records
+the VBlank work and signals the dispatcher; all mailbox calls and message-port
+posts happen in task context.
+
+The client must call `Close`, which publishes `APP_STOP`. The resident library
+also stops its remaining handle when the final `CloseLibrary` occurs. There is
+no safe AmigaOS callback for arbitrary task death while it retains an open
+library handle; in that case lease expiry, or Amiga reset, reclaims the app.
+
 ### Screen, input, Ctrl-C, reset
 
 Display open is an app API call. Firmware sets `flags` bit 8 and writes the requested width, height, and format into the lifecycle fields. ZZRun sees that on its poll, opens the P96 screen, binds with `APP_DISPLAY_BIND`, and clears bit 8 only after bind succeeds. If it cannot open the mode, it sets the stop word. The app's `zz_display_open` returns `ZZ_EIO`.

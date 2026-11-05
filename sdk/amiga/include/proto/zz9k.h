@@ -9,6 +9,7 @@
 
 #include "clib/zz9k_protos.h"
 #include "zz9k/library_vectors.h"
+#include "zz9k/app_client.h"
 #include <exec/libraries.h>
 
 #ifdef __cplusplus
@@ -984,6 +985,9 @@ static __inline int __ZZ9KAudioStreamBeginExInline(
 }
 #define ZZ9KAudioStreamBeginEx(desc, result) \
   __ZZ9KAudioStreamBeginExInline((desc), (result))
+
+#include <inline/zz9k.h>
+#include <pragmas/zz9k_pragmas.h>
 
 
 #endif
