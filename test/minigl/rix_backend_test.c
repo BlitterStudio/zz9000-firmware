@@ -526,7 +526,6 @@ static void test_lru_eviction_and_subimage_reupload(void)
     MiniGLRixBackend backend;
     static struct model model;
     static uint32_t source[16U * 16U];
-
     init_backend(&backend, &model, 2U);
     source[0] = 0xff0000ffU;
     assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, source, 16U, 16U,
@@ -585,6 +584,38 @@ static void test_subimage_writes_only_rectangle_and_copy_on_writes(void)
            0U);
     assert(model.textures[(size_t)updated->first_page * MINIGL_RIX_TEXTURE_PAGE_BYTES +
                           (3U * 16U + 2U) * 2U] == 0xe0U);
+    assert(minigl_rix_backend_drain(&backend));
+    assert(!backend.textures[0].valid);
+}
+
+static void test_reupload_copy_on_writes(void)
+{
+    MiniGLRixBackend backend;
+    static struct model model;
+    static uint32_t source[16U * 16U];
+    uint16_t old_page;
+    size_t slot;
+
+    memset(source, 0xff, sizeof(source));
+    init_backend(&backend, &model, 4U);
+    assert(minigl_rix_backend_upload_texture(&backend, 11U, 0U, source, 16U, 16U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 11U, GL_NEAREST, GL_NEAREST,
+                                  GL_REPEAT, GL_REPEAT);
+    assert(submit_texture(&backend, 11U));
+    assert(backend.textures[0].pin_count == 1U);
+    old_page = backend.textures[0].first_page;
+    source[0] = 0x00ff00ffU;
+    assert(minigl_rix_backend_upload_texture(&backend, 11U, 0U, source, 16U, 16U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    assert(backend.textures[0].deleted && backend.textures[0].pin_count == 1U);
+    for (slot = 0U; slot < MINIGL_RIX_MAX_TEXTURES; ++slot)
+        if (backend.textures[slot].valid && !backend.textures[slot].deleted &&
+            backend.textures[slot].id == 11U)
+            break;
+    assert(slot < MINIGL_RIX_MAX_TEXTURES);
+    assert(backend.textures[slot].first_page != old_page);
+    assert(stored_texel(&backend, &backend.textures[slot], 0U) == 0x07e0U);
     assert(minigl_rix_backend_drain(&backend));
     assert(!backend.textures[0].valid);
 }
@@ -1310,6 +1341,7 @@ int main(void)
     test_rounded_up_mip_chain_completes();
     test_lru_eviction_and_subimage_reupload();
     test_subimage_writes_only_rectangle_and_copy_on_writes();
+    test_reupload_copy_on_writes();
     test_abandon_retires_copy_only_after_engine_stop();
     test_texture_pool_growth();
     test_recorded_frame_replay();

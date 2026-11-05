@@ -648,6 +648,9 @@ void minigl_rix_backend_delete_texture(MiniGLRixBackend *backend, uint32_t id)
     }
 }
 
+static MiniGLRixTexture *backend_alloc_texture_without_drain(
+    MiniGLRixBackend *backend, uint32_t id, uint16_t page_count);
+
 int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
                                       uint16_t level, const uint32_t *rgba,
                                       uint16_t width, uint16_t height,
@@ -667,11 +670,6 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
         !backend_grow_texture_pool(backend, MINIGL_RIX_TEXTURE_PAGE_BYTES))
         return 0;
     texture = backend_texture(backend, id);
-    if (texture != NULL && texture->pin_count != 0U) {
-        minigl_profile_count(MGLP_N_PIN_DRAINS, 1U);
-        if (!minigl_rix_backend_drain(backend))
-            return 0;
-    }
     if (level == 0U) {
         uint8_t width_log2;
         uint8_t height_log2;
@@ -686,15 +684,31 @@ int minigl_rix_backend_upload_texture(MiniGLRixBackend *backend, uint32_t id,
             wrap_s = texture->wrap_s;
             wrap_t = texture->wrap_t;
         }
-
         out_width = texture_dimension(width);
         out_height = texture_dimension(height);
         width_log2 = texture_log2(out_width);
         height_log2 = texture_log2(out_height);
         page_count = texture_page_count(width_log2, height_log2);
-        if (texture != NULL)
-            backend_release_texture(backend, texture);
-        texture = backend_alloc_texture(backend, id, page_count);
+        if (texture != NULL && texture->pin_count != 0U) {
+            MiniGLRixTexture *previous = texture;
+
+            texture = backend_alloc_texture_without_drain(backend, id, page_count);
+            if (texture == NULL) {
+                minigl_profile_count(MGLP_N_PIN_DRAINS, 1U);
+                if (!minigl_rix_backend_drain(backend))
+                    return 0;
+                backend_release_texture(backend, previous);
+                texture = backend_alloc_texture(backend, id, page_count);
+            } else if (previous->pin_count != 0U) {
+                previous->deleted = 1U;
+            } else {
+                backend_release_texture(backend, previous);
+            }
+        } else {
+            if (texture != NULL)
+                backend_release_texture(backend, texture);
+            texture = backend_alloc_texture(backend, id, page_count);
+        }
         if (texture == NULL)
             return 0;
         texture->min_filter = min_filter;
@@ -792,6 +806,50 @@ static int backend_allocate_pages_without_drain(MiniGLRixBackend *backend,
         minigl_profile_count(MGLP_N_EVICTIONS, 1U);
         backend_release_texture(backend, victim);
     }
+}
+
+static MiniGLRixTexture *backend_alloc_texture_without_drain(
+    MiniGLRixBackend *backend, uint32_t id, uint16_t page_count)
+{
+    MiniGLRixTexture *texture = NULL;
+    uint32_t total_pages = (uint32_t)(backend->platform.texture_bytes /
+                                      MINIGL_RIX_TEXTURE_PAGE_BYTES);
+    uint32_t first_page;
+    size_t index;
+
+    if (page_count == 0U || page_count > total_pages)
+        return NULL;
+    for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)
+        if (!backend->textures[index].valid) {
+            texture = &backend->textures[index];
+            break;
+        }
+    if (texture == NULL)
+        return NULL;
+    memset(texture, 0, sizeof(*texture));
+    texture->id = id;
+    texture->valid = 1U;
+    ++backend->texture_incarnation_clock;
+    if (backend->texture_incarnation_clock == 0U)
+        ++backend->texture_incarnation_clock;
+    texture->incarnation = backend->texture_incarnation_clock;
+    texture->min_filter = GL_NEAREST_MIPMAP_LINEAR;
+    texture->mag_filter = GL_LINEAR;
+    texture->wrap_s = GL_REPEAT;
+    texture->wrap_t = GL_REPEAT;
+    for (first_page = 0U; first_page <= total_pages - page_count; ++first_page)
+        if (backend_range_available(backend, texture, (uint16_t)first_page,
+                                    page_count)) {
+            texture->first_page = (uint16_t)first_page;
+            texture->page_count = page_count;
+            break;
+        }
+    if (first_page > total_pages - page_count) {
+        memset(texture, 0, sizeof(*texture));
+        return NULL;
+    }
+    backend_touch_texture(backend, texture);
+    return texture;
 }
 
 static MiniGLRixTexture *backend_clone_texture(MiniGLRixBackend *backend,
