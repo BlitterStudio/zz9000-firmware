@@ -232,7 +232,7 @@ Payloads are big-endian in the 48-byte mailbox payload. Fields that do not fit l
 
 `APP_DISPLAY_BIND` payload: width, height, pitch (bytes), format, `card_front`, `card_back`. Addresses are ARM physical. `card_back == 0` means one P96 bitmap: the runtime allocates a back buffer as a second `CARD_POOL_CLASS_APP` block, counted against the 96 MiB cap, and copy-flips into `card_front`. Both addresses, when non-zero, must lie in card DDR the firmware may write: P96 VRAM `0x00200000`–`0x033F0000` or the host-visible heap. The firmware does not allocate inside P96 VRAM. P96 allocations are invisible to it (`memorymap.h` comment on `Z3_P96_VRAM_*`). ZZRun allocates screen bitmaps through P96 and passes the addresses.
 
-`APP_STOP` and the lifecycle stop word are the same request. Either is enough.
+`APP_STOP` and the lifecycle stop word are the same request. Either is enough. An `APP_STOP` payload of 4 bytes carries the generation the sender owns (big-endian, `ZZAPP_STOP_GENERATION`). The firmware checks it when it dispatches the op and returns `BAD_HANDLE` without touching the stop word if a newer load has replaced that generation. ZZRun and `zz9k.library` always send it. An empty payload stops whatever app is current.
 
 ### Rings window
 
@@ -405,9 +405,10 @@ EOF through the console API.
 The app audio ring is at `0x72000`, a 128 KiB region with a 32-byte
 big-endian header (`head`, `tail`, source rate, channels, format, route,
 underruns, stream epoch) and a 64 KiB power-of-two PCM payload. The epoch
-word, previously unused, increments on every successful audio open and is
-not cleared by the firmware counter when close or `APP_LOAD_BEGIN` zeros
-the header. Samples are
+increments on every successful audio open, is never 0 while a stream is
+open, and is written after the rest of the header. Close and
+`APP_LOAD_BEGIN` zero the header, epoch included; the firmware's own counter
+keeps counting. A launcher ignores the header while the epoch is 0. Samples are
 interleaved S16LE. `AUDIO=AHI` on a ZZRun Workbench icon sets
 `ZZAPP_F_LAUNCHER_AUDIO_AHI` after loading and before start, selecting route
 1; absent that ToolType leaves route 0, the card fabric, as the default. The
