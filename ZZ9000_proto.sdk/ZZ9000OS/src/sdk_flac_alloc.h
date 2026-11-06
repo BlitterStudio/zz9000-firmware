@@ -9,9 +9,9 @@
 #define SDK_FLAC_ALLOC_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
 void *sdk_flac_malloc(size_t size);
 void *sdk_flac_calloc(size_t count, size_t size);
 void *sdk_flac_realloc(void *ptr, size_t size);
