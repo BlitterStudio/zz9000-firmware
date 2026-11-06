@@ -181,9 +181,22 @@ position-independent little-endian hard-float ELF for Cortex-A9/NEON, no
 Flags in the note: bit 0 display, bit 1 audio, bit 2 GL. Request only what
 the app uses.
 
-The same `zzapp.h` is what a host build includes. The host-runner slice
-supplies `main`, points `zzapp_api_ptr` at its table, and calls `zz_main`.
-That table is not the card.
+## Running on a PC
+
+`sdk/zzapp/host` builds the same app natively, with SDL2 in place of the card:
+
+```cmake
+add_subdirectory(path/to/sdk/zzapp/host)
+zzapp_host_executable(myapp SOURCES main.c render.c)
+```
+
+`./myapp --root . --scale 2 -- args` runs it in a window; `--headless`,
+`--frames N`, `--input FILE` and `--msg-script FILE` make it scriptable for
+tests. The runner implements the whole API 0.2 table with host semantics.
+Decompress, image and audio decode and GL return `ZZ_ENOSYS` there. Timing,
+memory limits and the watchdog are not the card's, so check performance and
+limits on hardware. Options and the differences from the card are in
+`sdk/zzapp/host/README.md`.
 
 ## Running with ZZRun
 
