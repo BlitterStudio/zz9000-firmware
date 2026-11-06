@@ -34,19 +34,21 @@ static int pow2_align(uint32_t align)
 
 static void *arena_alloc(uint32_t bytes, uint32_t align)
 {
+    uintptr_t base;
     uintptr_t p;
-    uint32_t bump;
+    uintptr_t end;
 
     if (!arena)
         return 0;
+    base = (uintptr_t)arena;
     p = (uintptr_t)(arena + arena_used);
     p = (p + align - 1u) & ~(uintptr_t)(align - 1u);
-    if (p + bytes < p)
+    end = p + bytes;
+    /* Full-width extent first: narrowing (p + bytes) to uint32_t wraps a
+     * 64-bit end back below the bump and "succeeds" past the arena. */
+    if (end < p || end - base > (uintptr_t)HOST_ARENA_BYTES)
         return 0;
-    bump = (uint32_t)(p + bytes - (uintptr_t)arena);
-    if (bump > HOST_ARENA_BYTES)
-        return 0;
-    arena_used = bump;
+    arena_used = (uint32_t)(end - base);
     return (void *)p;
 }
 
