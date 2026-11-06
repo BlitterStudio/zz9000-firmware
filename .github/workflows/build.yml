@@ -540,3 +540,24 @@ jobs:
         run: python3 sdk/docs/check_zzapp_api.py --self-test
       - name: API 0.1 ELFs still load
         run: make -C test/zzapp/compat test
+
+  zzapp-host:
+    name: ZZApp SDL2 host runner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install SDL2
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            cmake python3 libsdl2-dev
+      - name: Configure
+        run: cmake -S sdk/zzapp/host -B build-zzapp-host -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build-zzapp-host --parallel
+      - name: Test
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: ctest --test-dir build-zzapp-host --output-on-failure
