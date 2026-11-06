@@ -27,6 +27,22 @@ static uint32_t zz9k_lib_app_mmu_page_size(ZZ9KAppHandle *handle)
   return d0;
 }
 
+static int zz9k_lib_app_mmu_set_properties(ZZ9KAppHandle *handle,
+                                            uint32_t flags, uint32_t mask,
+                                            uint32_t address, uint32_t bytes)
+{
+  register uint32_t d0 __asm("d0") = bytes;
+  register uint32_t d1 __asm("d1") = flags;
+  register uint32_t d2 __asm("d2") = mask;
+  register struct mmu_context *a0 __asm("a0") = handle->mmu_context;
+  register void *a1 __asm("a1") = (void *)(uintptr_t)address;
+  register void *a2 __asm("a2") = 0;
+  register struct Library *a6 __asm("a6") = handle->mmu_base;
+  __asm volatile("jsr -84(a6)" : "+r"(d0), "+r"(d1), "+r"(d2), "+r"(a0),
+                 "+r"(a1), "+r"(a2) : "r"(a6) : "cc", "memory");
+  return d0 != 0U;
+}
+
 static void zz9k_lib_app_cache_release(ZZ9KAppHandle *handle)
 {
   if (!handle) return;
