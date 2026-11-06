@@ -217,9 +217,15 @@ int card_pool_range_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
                     pool->blocks[i].addr > addr))
         --i;
     if (i < pool->block_count && pool->blocks[i].owner == owner &&
-        addr >= pool->blocks[i].addr &&
-        length <= pool->blocks[i].size - (addr - pool->blocks[i].addr))
-        owned = 1;
+        addr >= pool->blocks[i].addr) {
+        uint32_t offset = addr - pool->blocks[i].addr;
+
+        /* Subtract only after the address is inside the block. An address
+         * past the end used to wrap the unsigned difference and pass. */
+        if (offset < pool->blocks[i].size &&
+            length <= pool->blocks[i].size - offset)
+            owned = 1;
+    }
     sdk_smp_lock_release(&pool->lock);
     return owned;
 }

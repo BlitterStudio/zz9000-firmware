@@ -100,6 +100,20 @@ static void test_block_ownership(void)
     CHECK(!card_pool_block_owned(&pool, address, PAGE, MEDIA(1)));
 }
 
+static void test_range_owned_rejects_past_end(void)
+{
+    uint32_t address;
+
+    two_ranges(MB(1), MB(1));
+    address = card_pool_alloc(&pool, PAGE, MEDIA(1));
+    CHECK(address != 0);
+    CHECK(card_pool_range_owned(&pool, address, PAGE, MEDIA(1)));
+    CHECK(card_pool_range_owned(&pool, address + PAGE - 4U, 4U, MEDIA(1)));
+    CHECK(!card_pool_range_owned(&pool, address + PAGE, 4U, MEDIA(1)));
+    CHECK(!card_pool_range_owned(&pool, address + PAGE - 4U, 8U, MEDIA(1)));
+    CHECK(!card_pool_range_owned(&pool, address + PAGE + 0x1000U, 1U, MEDIA(1)));
+}
+
 static void test_too_large_leaves_table(void)
 {
     two_ranges(MB(1), MB(1));
@@ -448,6 +462,7 @@ int main(void)
 {
     test_fills_ranges_in_order();
     test_block_ownership();
+    test_range_owned_rejects_past_end();
     test_too_large_leaves_table();
     test_class_limit();
     test_wrong_owner_and_unknown_frees();
