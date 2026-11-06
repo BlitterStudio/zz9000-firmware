@@ -872,9 +872,26 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
         present_cache_invalidate((uintptr_t)mw->direct_color_buffers[source],
                                  (size_t)w * h * 2U);
         minigl_platform_barrier(NULL);
-    } else {
+    } else if (rgb565) {
+        /*
+         * RasterIX owns the RGB565 half of this colour target and wrote it
+         * over DDR. Its fence was observed above, but the ARM still needs
+         * to discard cached target lines before the NEON row copy reads
+         * them.
+         */
         present_cache_invalidate((uintptr_t)mw->color_buffers[source],
-                                 (size_t)w * h * (rgb565 ? 2U : 4U));
+                                 (size_t)w * h * 2U);
+        if (!copy_bound(mw->color_buffers[source], rgb565, w, h, pitch, format, card)) {
+            minigl_profile_pop();
+            return 0;
+        }
+    } else {
+        /*
+         * CPU-written RGBA target (software frame, or a RasterIX frame
+         * that finished back to RGBA through minigl_raster_finish). This
+         * core's cache holds the only up-to-date lines; invalidating
+         * before copy_bound reads them back would discard them.
+         */
         if (!copy_bound(mw->color_buffers[source], rgb565, w, h, pitch, format, card)) {
             minigl_profile_pop();
             return 0;

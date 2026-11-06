@@ -375,6 +375,50 @@ int main(void)
     display_format = 1U;
     display_layout = 2U;
 
+    /*
+     * Presentation must invalidate only targets the hardware wrote: a
+     * CPU-written RGBA frame crosses with no invalidate at all, a target
+     * flagged as the RasterIX RGB565 half is invalidated once.
+     */
+    display_width = 4U;
+    display_height = 2U;
+    display_front = 0x08000000U;
+    display_back = 0x08100000U;
+    display_flags = 0U;
+    display_format = 1U;
+    display_layout = 1U;
+    display_pitch = 8U;
+    assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0);
+    {
+        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        mw_ctx *mw;
+
+        draw->ClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        draw->Clear(0x4000U);
+        draw->Finish();
+        ops->app_swap(context);
+        mw = amiberry_transport_inproc_ctx();
+        assert(mw != NULL);
+        mw->color_rgb565[0] = 0U;
+        mw->color_rgb565[1] = 0U;
+        mw->color_rgb565[2] = 0U;
+        zzapp_gl_test_reset_invalidates();
+        ops->app_swap(context);
+        assert(zzapp_gl_test_invalidates() == 0U);
+        mw->color_rgb565[0] = 1U;
+        mw->color_rgb565[1] = 1U;
+        mw->color_rgb565[2] = 1U;
+        zzapp_gl_test_reset_invalidates();
+        ops->app_swap(context);
+        assert(zzapp_gl_test_invalidates() == 1U);
+    }
+    ops->app_unbind(context);
+    display_width = 640U;
+    display_height = 480U;
+    display_pitch = 1280U;
+    display_format = 1U;
+    display_layout = 2U;
+
     display_flags = 0U;
     hold_flip = 1;
     flip_idle = 1;
