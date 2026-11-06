@@ -5,6 +5,7 @@
 
 #include "sdk_audio_flac.h"
 #include "sdk_audio_vorbis.h"
+#include "sdk_compression.h"
 #include "sdk_image_stream.h"
 #include "zzapp.h"
 #include "zzapp_runtime.h"
@@ -196,6 +197,46 @@ unsigned sdk_compression_reclaim_app_decode(void)
     return 1u;
 }
 
+static uint32_t decompress_owner_seen;
+static uint32_t decompress_calls;
+static uint16_t fake_decompress(uint32_t algorithm, uint32_t flags,
+                                const uint8_t *src, uint32_t src_length,
+                                uint8_t *dst, uint32_t dst_capacity,
+                                struct SDKDecompressResult *result,
+                                uint32_t owner)
+{
+    (void)algorithm;
+    (void)flags;
+    (void)src;
+    (void)src_length;
+    (void)dst;
+    (void)dst_capacity;
+    memset(result, 0, sizeof(*result));
+    decompress_owner_seen = owner;
+    decompress_calls++;
+    /* Simulate the force-stop mid-call: scratch stays allocated. */
+    return SDK_STATUS_IO_ERROR;
+}
+
+uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
+                              const uint8_t *src, uint32_t src_length,
+                              uint8_t *dst, uint32_t dst_capacity,
+                              struct SDKDecompressResult *result)
+{
+    return fake_decompress(algorithm, flags, src, src_length, dst,
+                           dst_capacity, result, SDK_DECODE_POOL_OWNER);
+}
+
+uint16_t sdk_decompress_buffer_owned(uint32_t algorithm, uint32_t flags,
+                                     const uint8_t *src, uint32_t src_length,
+                                     uint8_t *dst, uint32_t dst_capacity,
+                                     struct SDKDecompressResult *result,
+                                     uint32_t scratch_owner)
+{
+    return fake_decompress(algorithm, flags, src, src_length, dst,
+                           dst_capacity, result, scratch_owner);
+}
+
 int main(void)
 {
     const zzapp_api *api;
@@ -269,6 +310,17 @@ int main(void)
                              pcm, 2u, &audio_result) == ZZ_OK);
     assert(api->audio_decode_close(audio_session) == ZZ_OK);
     assert(api->audio_decode_open(ZZ_AUDIO_VORBIS, &audio_session) == ZZ_OK);
+    /* App decompress scratch carries the app decode owner, so the
+     * force-stop poison below reclaims it instead of the shared pool. */
+    {
+        zzapp_service_result decompressed;
+
+        assert(api->decompress(ZZ_COMPRESS_ZLIB, 0u, source, sizeof(source),
+                               mp3_pcm, sizeof(mp3_pcm),
+                               &decompressed) == ZZ_EIO);
+        assert(decompress_calls == 1u);
+        assert(decompress_owner_seen == SDK_APP_DECODE_POOL_OWNER);
+    }
 
     /* The host allocator must publish its ledger entry before a stop tick
      * can unwind it; host-only seam because ARM entry/FPSCR cannot run here. */

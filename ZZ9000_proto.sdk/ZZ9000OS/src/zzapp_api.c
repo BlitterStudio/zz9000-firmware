@@ -100,6 +100,25 @@ WEAK uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
     (void)result;
     return SDK_STATUS_UNSUPPORTED;
 }
+WEAK uint16_t sdk_decompress_buffer_owned(uint32_t algorithm, uint32_t flags,
+                                          const uint8_t *src,
+                                          uint32_t src_length,
+                                          uint8_t *dst, uint32_t dst_capacity,
+                                          struct SDKDecompressResult *result,
+                                          uint32_t scratch_owner)
+{
+    (void)algorithm;
+    (void)flags;
+    (void)src;
+    (void)src_length;
+    (void)dst;
+    (void)dst_capacity;
+    (void)result;
+    (void)scratch_owner;
+    if (result)
+        memset(result, 0, sizeof(*result));
+    return SDK_STATUS_UNSUPPORTED;
+}
 WEAK unsigned sdk_compression_reclaim_core1_decode(void) { return 0; }
 WEAK unsigned sdk_compression_reclaim_app_decode(void) { return 0; }
 WEAK uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *b,
@@ -443,8 +462,13 @@ static int api_decompress(uint32_t algorithm, uint32_t flags, const void *src,
     /* Scratch under the app owner: a force-stop mid-call skips inflateEnd
      * / LZMA cleanup, and zzapp_api_poison_resources reclaims exactly this
      * owner instead of leaking into the shared decode pool. */
-    rc = sdk_to_zz(sdk_decompress_buffer(algorithm, flags, src, src_bytes,
-                                        dst, dst_bytes, &result));
+    /* Scratch under the app owner: a force-stop mid-call skips inflateEnd
+     * / LZMA cleanup, and zzapp_api_poison_resources reclaims exactly this
+     * owner instead of leaking into the shared decode pool. */
+    rc = sdk_to_zz(sdk_decompress_buffer_owned(algorithm, flags, src,
+                                               src_bytes, dst, dst_bytes,
+                                               &result,
+                                               SDK_APP_DECODE_POOL_OWNER));
     if (rc == ZZ_OK) {
         out->bytes_consumed = result.bytes_consumed;
         out->bytes_written = result.bytes_written;

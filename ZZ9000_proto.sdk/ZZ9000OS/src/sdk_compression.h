@@ -34,6 +34,14 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
                                const uint8_t *src, uint32_t src_length,
                                uint8_t *dst, uint32_t dst_capacity,
                                struct SDKDecompressResult *result);
+/* One-shot decompress whose codec scratch is allocated under scratch_owner,
+ * so an unwind out of the call (app force-stop) is reclaimed with that
+ * owner instead of the shared decode pool. */
+uint16_t sdk_decompress_buffer_owned(uint32_t algorithm, uint32_t flags,
+                                     const uint8_t *src, uint32_t src_length,
+                                     uint8_t *dst, uint32_t dst_capacity,
+                                     struct SDKDecompressResult *result,
+                                     uint32_t scratch_owner);
 uint16_t sdk_decompress_test_buffer(uint32_t algorithm, uint32_t flags,
                                     const uint8_t *src,
                                     uint32_t src_length,
