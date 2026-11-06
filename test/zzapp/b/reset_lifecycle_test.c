@@ -25,6 +25,8 @@ int zzapp_loader_abort(void);
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
 void *zzapp_sbrk(int increment);
 int zzapp_host_mem_info(zzapp_mem_info *out);
+uint8_t *zzapp_test_stack_canary(void);
+uint32_t zzapp_test_fault_code(void);
 /* syscalls.o is linked for zzapp_sbrk; it reads this table pointer. */
 const zzapp_api *zzapp_api_ptr;
 
@@ -39,6 +41,7 @@ static uint8_t launcher_window[ZZAPP_WINDOW_BYTES];
 static uint32_t request_id;
 static unsigned app_runs;
 static int reset_running;
+static int damage_canary;
 
 static void put16(uint8_t *p, uint16_t v)
 {
@@ -121,6 +124,16 @@ static void app_entry(const void *api, int argc, char **argv)
     assert(carved != NULL && brk != (void *)-1);
     assert((const char *)carved + 64 <= (const char *)brk ||
            (const char *)brk + 64 <= (const char *)carved);
+    if (damage_canary) {
+        uint8_t *canary = zzapp_test_stack_canary();
+
+        assert(canary != NULL);
+        canary[0] ^= 0xA5u;
+        zzapp_host_yield();
+        assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+        assert(zzapp_test_fault_code() == ZZAPP_FAULT_DATA);
+        return;
+    }
     if (reset_running) {
         zzapp_mem_info mem;
         void *host_visible;
@@ -271,6 +284,24 @@ int main(void)
     start_and_exit();
     assert(app_runs == 4u);
 
+    /* A damaged stack canary force-stops with the documented data fault. */
+    damage_canary = 1;
+    load_hello();
+    {
+        uint8_t request[ZZAPP_START_REQ_BYTES] = { 0 };
+
+        assert(dispatch(ZZAPP_OP_START, request, sizeof(request)) ==
+               SDK_STATUS_OK);
+    }
+    damage_canary = 0;
+    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    assert(status() == SDK_STATUS_OK);
+    assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
+    bind_window();
+    /* A clean launch clears the fault latch before the fault-ack scenario. */
+    load_hello();
+    start_and_exit();
+    assert(app_runs == 6u);
     /* A fault is reported once, then STATUS acknowledges it for a new launch. */
     zzapp_test_mark_running();
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
@@ -279,6 +310,6 @@ int main(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     load_hello();
     start_and_exit();
-    assert(app_runs == 5u);
+    assert(app_runs == 7u);
     return 0;
 }

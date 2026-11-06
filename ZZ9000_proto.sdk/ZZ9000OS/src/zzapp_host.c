@@ -443,12 +443,14 @@ static void begin_tick_observation(void)
     g_seen_api_calls = g_coh->api_calls;
     g_last_tick = now_ticks();
 }
+static void check_stack_canary(void);
 
 static void service_tick(uint64_t now, int permit_reentry)
 {
     uint32_t calls = g_coh->api_calls;
 
     g_coh->tick_seen = now;
+    check_stack_canary();
     if (calls != g_seen_api_calls) {
         /* The app made API calls since the previous tick.  One that is
          * still running started no earlier than that tick.  Declared
@@ -616,9 +618,27 @@ static void service_tick_in_task(uint64_t now, int permit_reentry)
 #define service_tick_in_task service_tick
 #endif
 
+/* The 64-byte canary below the app stack is set in run_app. Docs promise a
+ * force-stop with ZZAPP_FAULT_DATA when it is damaged; check it on every
+ * service pass. */
+static void check_stack_canary(void)
+{
+    uint32_t i;
+
+    if (!g_mem || g_heap_end == 0u || !g_coh->running)
+        return;
+    for (i = 0; i < ZZAPP_CANARY_BYTES; i++) {
+        if (g_mem[g_heap_end + i] != 0xA5u) {
+            force_stop(ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
+            return;
+        }
+    }
+}
+
 void zzapp_host_yield(void)
 {
     zzapp_note_progress();
+    check_stack_canary();
     service_tick_in_task(now_ticks(), 0);
 #ifndef ZZAPP_HOST_TEST
     zzapp_unwind_if_needed();
@@ -1220,4 +1240,9 @@ uint32_t zzapp_test_in_api(void) { return g_coh->in_api; }
 
 int zzapp_test_cold_restarts(void) { return g_cold_restarts; }
 uint32_t zzapp_test_exit_code(void) { return g_exit_code; }
+uint8_t *zzapp_test_stack_canary(void)
+{
+    return (g_mem && g_heap_end != 0u) ? g_mem + g_heap_end : 0;
+}
+uint32_t zzapp_test_fault_code(void) { return g_coh->fault; }
 #endif
