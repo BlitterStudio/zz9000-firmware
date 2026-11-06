@@ -692,8 +692,8 @@ static int alloc_fd(int *table)
 	return -1;
 }
 
-/* 1 is a live fd. 2 is retired by a timeout: kit 64 ZZRun may still complete
- * the abandoned op into that index, so it must not be allocated again. */
+/* 1 is a live fd. 2 is retired by a timeout: ZZRun may still complete the
+ * abandoned op into that index, so it must not be allocated again. */
 static int slot_live(const int *table, int fd)
 {
 	int ix = fd_index(fd);
@@ -770,7 +770,7 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 {
 	uint32_t generation = zzapp_services_generation();
 	uint64_t start = now_us();
-	/* Kit 64 ZZRun completes with request_seq + 2 (file_reply). */
+	/* ZZRun completes with request_seq + 2 (file_reply). */
 	uint32_t expect = file_seq + 2U;
 
 	for (;;) {
@@ -813,7 +813,7 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 			}
 		}
 		if (now_us() - start >= ZZAPP_FILE_TIMEOUT_US) {
-			/* An even sequence is a new request to kit 64 ZZRun, which
+			/* An even sequence is a new request to ZZRun, which
 			 * would execute this abandoned op. An odd sequence is
 			 * ignored. Advance past the abandoned completion
 			 * (request+2) so it cannot match the next wait. */

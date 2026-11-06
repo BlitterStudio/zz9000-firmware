@@ -432,7 +432,7 @@ static void file_yield(void)
 	if (!late_injected) {
 		if ((seq & 1U) == 0U && seq != 0U)
 			live_req = seq;
-		/* Stale kit 64 completion: request_seq + 2, not this request. */
+		/* Stale ZZRun completion: request_seq + 2, not this request. */
 		zzapp_put_be32(g_window + ZZAPP_FILE_OFF + 20U, 99U);
 		zzapp_put_be32(g_window + ZZAPP_FILE_OFF, abandoned_done);
 		late_injected = 1;
