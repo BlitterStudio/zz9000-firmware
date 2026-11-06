@@ -74,6 +74,22 @@ static void test_create_keeps_file_when_slots_full(void)
 
 static void test_close_reports_flush_failure(void)
 {
+#ifndef _WIN32
+    FILE *fp;
+
+    host_files_init(UNIT_ROOT, 0);
+    fp = fopen("/dev/full", "wb");
+    if (!fp)
+        return; /* environment without /dev/full; nothing to assert */
+    /* Buffered: the failure surfaces when fclose flushes. */
+    assert(fwrite("x", 1, 1, fp) == 1);
+    fds[0].used = 1;
+    fds[0].fp = fp;
+    assert(api_file_close(HOST_FD_BASE) == ZZ_ENOSPC);
+    assert(!fds[0].used); /* the descriptor is released despite the error */
+    assert(api_file_close(HOST_FD_BASE) == ZZ_EBADF);
+    host_files_shutdown();
+#endif
 }
 
 int main(void)

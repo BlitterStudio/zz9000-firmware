@@ -383,13 +383,16 @@ static int api_file_open(const char *path, uint32_t flags)
 static int api_file_close(int fd)
 {
     int ix = slot_of(fd);
+    int rc;
 
     if (ix < 0 || !fds[ix].used)
         return ZZ_EBADF;
-    fclose(fds[ix].fp);
+    /* fclose flushes; a failed final write (ENOSPC) must not read as
+     * success. The descriptor is released either way. */
+    rc = fclose(fds[ix].fp) == 0 ? ZZ_OK : io_err();
     fds[ix].fp = 0;
     fds[ix].used = 0;
-    return ZZ_OK;
+    return rc;
 }
 
 static int api_file_read(int fd, void *buf, uint32_t len, uint32_t *out_n)
