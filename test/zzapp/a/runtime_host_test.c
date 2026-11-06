@@ -64,6 +64,16 @@ int main(void)
     zzapp_host_tick_at(ZZAPP_API_STUCK_US);
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
 
+    /* should_stop and time_us are API calls. Polling only those must not
+     * trip the 30 s stall watchdog. */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    assert(zzapp_api_table()->should_stop() == 0);
+    assert(zzapp_api_table()->time_us() == 0u);
+    zzapp_host_tick_at(ZZAPP_APP_STALL_US);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+
     /*
      * Core 0 can read its clock just before core 1 stores a newer progress
      * and tick stamp.  That stamp is not an ancient one: a healthy app must

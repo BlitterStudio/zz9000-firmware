@@ -254,8 +254,16 @@ static void api_exit(int code)
     zzapp_host_exit(code);
 }
 static void api_yield(void) { zzapp_api_enter(); zzapp_host_yield(); zzapp_api_leave(); }
-static int api_stop(void) { return zzapp_svc_should_stop(); }
-static uint64_t api_time(void) { return zzapp_host_time_us(); }
+static int api_stop(void)
+{
+    zzapp_api_touch();
+    return zzapp_svc_should_stop();
+}
+static uint64_t api_time(void)
+{
+    zzapp_api_touch();
+    return zzapp_host_time_us();
+}
 static void api_sleep(uint32_t us)
 {
     uint64_t end;

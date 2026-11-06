@@ -50,8 +50,9 @@ other.
 Call the API at least every few seconds during a long compute. The runtime
 stops the app if 30 seconds pass with no API call, or if one call runs for
 10 seconds. `zz_yield` is enough. `zz_sleep_us`, file calls, console reads,
-and a flip wait already count, because they are inside an API call. A loop
-that only touches app memory does not.
+and a flip wait already count, because they are inside an API call.
+`zz_should_stop` and `zz_time_us` also count: a loop that only polls them
+is not a stall. A loop that only touches app memory does not.
 
 The 5 ms timer runs one service tick between app instructions. It does not
 preempt inside an API call. If the app executes `cpsid`, that timer does

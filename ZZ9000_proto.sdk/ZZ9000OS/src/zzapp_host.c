@@ -686,6 +686,14 @@ void zzapp_api_enter(void)
     g_coh->in_api++;
 }
 
+/* Hot non-blocking calls (should_stop, time_us). Count as an API call so a
+ * loop that only polls them is not a 30 s stall, without the in-API depth
+ * or the leave-path service tick. */
+void zzapp_api_touch(void)
+{
+    g_coh->api_calls++;
+}
+
 void zzapp_api_leave(void)
 {
     if (g_coh->in_api)
