@@ -472,3 +472,14 @@ jobs:
             tar -C /source --exclude=.context -cf - . | tar -C /work -xf -
             make -C /work/test/image test
           '
+
+  zzapp-docs-compat:
+    name: ZZApp API docs and 0.1 loader compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: API reference covers every public symbol
+        run: python3 sdk/docs/check_zzapp_api.py --self-test
+      - name: API 0.1 ELFs still load
+        run: make -C test/zzapp/compat test

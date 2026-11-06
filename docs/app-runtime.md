@@ -2,6 +2,11 @@
 
 Contract for the first app runtime on the ZZ9000. The first app is GLQuake, built from id Software's GPL sources, running as one trusted program on core 1 and started from AmigaOS. This document freezes the layouts and the slice boundaries. It is not the implementation.
 
+Third-party build and call notes are in
+[sdk/docs/zzapp-developer-guide.md](../sdk/docs/zzapp-developer-guide.md) and
+[sdk/docs/zzapp-api.md](../sdk/docs/zzapp-api.md). This file remains the
+firmware and launcher layout contract.
+
 Base: firmware `feature/rasterix-ef` at `89aa8586`. Headers in `ZZ9000_proto.sdk/ZZ9000OS/src/` are the address authority. `docs/memory-map.md` on this branch still describes a 16 MiB module arena ending at `0x0A000000` and a 128 MiB MiniGL pool cap. Both are stale. `memorymap.h` and `minigl_pool.h` are what the build checks.
 
 ## 1. What v0 is
