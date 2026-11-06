@@ -385,6 +385,7 @@ static zzapp_gl g_table;
 static uint8_t g_present_queue[2];
 static uint8_t g_present_count;
 static uint8_t g_zero_copy;
+static uint32_t g_bound_layout;
 static uint8_t g_sync_present;
 static uint32_t g_present_frame;
 
@@ -605,7 +606,7 @@ static int zzapp_gl_configure_targets(uint32_t width, uint32_t height,
 int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
                   const struct zzapp_gl **out)
 {
-    uint32_t w, h, pitch, format, front, back, layout = 0U;
+    uint32_t w, h, pitch, format, front, back;
     mw_ctx *mw;
 
     if (out)
@@ -620,11 +621,12 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         return ZZ_EINVAL;
     if (format != ZZ_FMT_RGB565 && format != ZZ_FMT_BGRA8888)
         return ZZ_EINVAL;
+    g_bound_layout = 0U;
+    (void)zzapp_display_layout(&g_bound_layout);
     g_zero_copy = (flags & ZZ_GL_BIND_DIRECT_PRESENT) != 0U &&
                   (zzapp_services_flags() & ZZAPP_F_MAILBOX) == 0U &&
                   format == ZZ_FMT_RGB565 &&
-                  zzapp_display_layout(&layout) == ZZ_OK &&
-                  layout == ZZ_LAYOUT_RGB565_LE && pitch == w * 2U &&
+                  g_bound_layout == ZZ_LAYOUT_RGB565_LE && pitch == w * 2U &&
                   front != 0U && back != 0U &&
                   (front & 2047U) == 0U && (back & 2047U) == 0U;
     if (!amiberry_inproc_open(w, h))
@@ -662,6 +664,7 @@ void zzapp_gl_unbind(void)
     g_present_count = 0U;
     g_zero_copy = 0U;
     g_sync_present = 0U;
+    g_bound_layout = 0U;
     g_bound = 0;
     minigl_profile_set_enabled(0);
 }
@@ -671,12 +674,56 @@ void zzapp_gl_reclaim(void)
     zzapp_gl_unbind();
 }
 
-static uint32_t dest_format(uint32_t format)
+static uint32_t dest_format(uint32_t format, uint32_t layout)
 {
-    /* P96 16-bit is high-byte-first, matching sdk_surface.c's RGB565 store. */
-    if (format == ZZ_FMT_RGB565)
+    if (format == ZZ_FMT_RGB565) {
+        /* P96 defaults to high-byte-first; the bound layout decides. */
+        if (layout == ZZ_LAYOUT_RGB565_LE)
+            return ZZ9K_MGL_PIXFMT_RGB565_LE;
         return ZZ9K_MGL_PIXFMT_RGB565_BE;
+    }
+    if (layout == ZZ_LAYOUT_RGBA8888)
+        return ZZ9K_MGL_PIXFMT_RGBA32;
     return ZZ9K_MGL_PIXFMT_BGRA32;
+}
+
+/* The MiniGL present helpers have no BGR565 pixel format; the R/B-swapped
+ * variants of the bound layout are written here directly. */
+static int copy_bgr565(const uint32_t *src_rgba, int rgb565_source,
+                       uint32_t w, uint32_t h, uint32_t pitch, uint8_t *vram,
+                       uint32_t vram_len, int little_end)
+{
+    uint32_t x;
+    uint32_t y;
+
+    if (!src_rgba || !vram || vram_len < pitch || pitch < w * 2U)
+        return 0;
+    for (y = 0; y < h; y++) {
+        uint8_t *row = vram + y * pitch;
+        const uint32_t *in = src_rgba + y * w;
+
+        for (x = 0; x < w; x++) {
+            uint16_t value;
+
+            if (rgb565_source) {
+                uint16_t rgb = ((const uint16_t *)in)[x];
+
+                value = (uint16_t)(((rgb & 0x001fu) << 11) |
+                                   (rgb & 0x07e0u) |
+                                   ((rgb & 0xf800u) >> 11));
+            } else {
+                uint32_t c = in[x];
+
+                value = (uint16_t)((((c >> 11) & 0x1fu) << 11) |
+                                   ((c >> 13) & 0x7e0u) |
+                                   (((c >> 24) & 0xf8u) >> 3));
+            }
+            row[x * 2U] = little_end ? (uint8_t)value : (uint8_t)(value >> 8);
+            row[x * 2U + 1U] = little_end ? (uint8_t)(value >> 8)
+                                          : (uint8_t)value;
+        }
+    }
+    return 1;
 }
 
 static int copy_bound(const uint32_t *src, int rgb565,
@@ -687,7 +734,6 @@ static int copy_bound(const uint32_t *src, int rgb565,
     uint8_t *vram;
     uint32_t vram_len;
 
-
     if (!src || !card || !w || !h || !pitch)
         return 0;
     memset(&pres, 0, sizeof(pres));
@@ -697,7 +743,7 @@ static int copy_bound(const uint32_t *src, int rgb565,
     pres.window_h = h;
     pres.dest_offset = MNT_FB_BASE;
     pres.dest_pitch = pitch;
-    pres.dest_format = dest_format(format);
+    pres.dest_format = dest_format(format, g_bound_layout);
 #if defined(MINIGL_HOST_TEST)
     if (g_test_p96) {
         vram = g_test_p96;
@@ -711,6 +757,12 @@ static int copy_bound(const uint32_t *src, int rgb565,
     if (!vram || vram_len < pitch)
         return 0;
 
+    if (format == ZZ_FMT_RGB565 &&
+        (g_bound_layout == ZZ_LAYOUT_BGR565_BE ||
+         g_bound_layout == ZZ_LAYOUT_BGR565_LE)) {
+        return copy_bgr565(src, rgb565, w, h, pitch, vram, vram_len,
+                           g_bound_layout == ZZ_LAYOUT_BGR565_LE);
+    }
     /* present_copy addresses vram + dest_offset - MNT_FB_BASE. With
      * dest_offset == MNT_FB_BASE the write starts at vram, which is the
      * bound ARM address (or the host mock). */
@@ -758,6 +810,36 @@ static void zzapp_gl_present_layout_mismatch(const mw_ctx *mw, uint32_t source,
 #endif
 }
 
+#if defined(MINIGL_HOST_TEST)
+static uint32_t g_test_present_invalidates;
+void zzapp_gl_test_reset_invalidates(void) { g_test_present_invalidates = 0U; }
+uint32_t zzapp_gl_test_invalidates(void) { return g_test_present_invalidates; }
+#endif
+
+static void present_cache_invalidate(uintptr_t address, size_t bytes)
+{
+#if defined(MINIGL_HOST_TEST)
+    g_test_present_invalidates++;
+#endif
+    minigl_platform_cache_invalidate(NULL, address, bytes);
+}
+
+#if defined(MINIGL_HOST_TEST)
+/* Direct seam for byte-exact layout checks: sets the bound layout like
+ * zzapp_gl_bind would and runs one copy. */
+int zzapp_gl_test_copy_bound(const uint32_t *src, int rgb565,
+                             uint32_t w, uint32_t h, uint32_t pitch,
+                             uint32_t format, uint32_t card, uint32_t layout)
+{
+    int ok;
+
+    g_bound_layout = layout;
+    ok = copy_bound(src, rgb565, w, h, pitch, format, card);
+    g_bound_layout = 0U;
+    return ok;
+}
+#endif
+
 static int zzapp_gl_present_pending(mw_ctx *mw)
 {
     uint32_t w, h, pitch, format, front, back, card;
@@ -787,18 +869,12 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
         }
         /* RasterIX writes DDR directly.  Discard any old CPU view before
          * ZZRun's flip service performs its scanout cache hand-off. */
-        minigl_platform_cache_invalidate(NULL,
-                                         (uintptr_t)mw->direct_color_buffers[source],
-                                         (size_t)w * h * 2U);
+        present_cache_invalidate((uintptr_t)mw->direct_color_buffers[source],
+                                 (size_t)w * h * 2U);
         minigl_platform_barrier(NULL);
     } else {
-        /*
-         * RasterIX owns the RGB565 half of this colour target.  Its fence was
-         * observed above, but the ARM still needs to discard cached target lines
-         * before the NEON row copy reads them.
-         */
-        minigl_platform_cache_invalidate(NULL, (uintptr_t)mw->color_buffers[source],
-                                         (size_t)w * h * (rgb565 ? 2U : 4U));
+        present_cache_invalidate((uintptr_t)mw->color_buffers[source],
+                                 (size_t)w * h * (rgb565 ? 2U : 4U));
         if (!copy_bound(mw->color_buffers[source], rgb565, w, h, pitch, format, card)) {
             minigl_profile_pop();
             return 0;

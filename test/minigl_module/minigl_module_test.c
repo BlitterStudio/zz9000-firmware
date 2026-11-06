@@ -23,6 +23,12 @@
 extern int zzm_module_entry(const zzm_services_t *services);
 extern void zzm_module_exit(void);
 extern mw_ctx *amiberry_transport_inproc_ctx(void);
+void zzapp_gl_test_set_p96(uint8_t *pixels, uint32_t bytes);
+void zzapp_gl_test_reset_invalidates(void);
+uint32_t zzapp_gl_test_invalidates(void);
+int zzapp_gl_test_copy_bound(const uint32_t *src, int rgb565,
+                             uint32_t w, uint32_t h, uint32_t pitch,
+                             uint32_t format, uint32_t card, uint32_t layout);
 
 
 static int reject_module_open;
@@ -309,6 +315,65 @@ int main(void)
     assert(ops->app_swap(context) == 0);
     assert(ops->app_swap(context) == 0);
     ops->app_unbind(context);
+
+    /*
+     * copy_bound must honour the bound layout byte for byte (it used to
+     * write RGB565 BE / BGRA whatever the display negotiated). The direct
+     * seam feeds a known pure-red source word for both frame sources.
+     */
+    {
+        static const struct {
+            uint32_t format;
+            uint32_t layout;
+            uint32_t pitch;
+            uint8_t bytes[4];
+        } layouts[] = {
+            { 1U, 1U, 4U * 2U, { 0xF8U, 0x00U } }, /* RGB565 BE */
+            { 1U, 2U, 4U * 2U, { 0x00U, 0xF8U } }, /* RGB565 LE */
+            { 1U, 3U, 4U * 2U, { 0x00U, 0x1FU } }, /* BGR565 BE */
+            { 1U, 4U, 4U * 2U, { 0x1FU, 0x00U } }, /* BGR565 LE */
+            { 2U, 5U, 4U * 4U, { 0x00U, 0x00U, 0xFFU, 0xFFU } }, /* BGRA */
+            { 2U, 6U, 4U * 4U, { 0xFFU, 0x00U, 0x00U, 0xFFU } }, /* RGBA */
+        };
+        uint32_t i;
+        uint8_t *frame = calloc(1U, 64U);
+        const uint32_t rgba_red = 0xFF0000FFU; /* r<<24 | g<<16 | b<<8 | a */
+        const uint16_t rgb565_red = 0xF800U;
+
+        /* The p96 mock keeps the copy destination out of the shared arena
+         * the earlier scenarios allocated from. */
+        assert(frame != NULL);
+        zzapp_gl_test_set_p96(frame, 64U);
+        for (i = 0; i < sizeof(layouts) / sizeof(layouts[0]); i++) {
+            memset(frame, 0, 64U);
+            assert(zzapp_gl_test_copy_bound(&rgba_red, 0, 4U, 2U,
+                                            layouts[i].pitch,
+                                            layouts[i].format,
+                                            0x08100000U,
+                                            layouts[i].layout) == 1);
+            assert(memcmp(frame, layouts[i].bytes,
+                          layouts[i].format == 1U ? 2U : 4U) == 0);
+        }
+        /* The RGB565 frame source (the RasterIX half) converts per layout
+         * too, including the R/B-swapped BGR565 variants. */
+        memset(frame, 0, 64U);
+        assert(zzapp_gl_test_copy_bound((const uint32_t *)&rgb565_red, 1,
+                                        4U, 2U, 8U, 1U, 0x08100000U, 1U) == 1);
+        assert(frame[0] == 0xF8U && frame[1] == 0x00U);
+        memset(frame, 0, 64U);
+        assert(zzapp_gl_test_copy_bound((const uint32_t *)&rgb565_red, 1,
+                                        4U, 2U, 8U, 1U, 0x08100000U, 3U) == 1);
+        assert(frame[0] == 0x00U && frame[1] == 0x1FU);
+        zzapp_gl_test_set_p96(NULL, 0U);
+        free(frame);
+    }
+
+    ops->app_unbind(context);
+    display_width = 640U;
+    display_height = 480U;
+    display_pitch = 1280U;
+    display_format = 1U;
+    display_layout = 2U;
 
     display_flags = 0U;
     hold_flip = 1;
