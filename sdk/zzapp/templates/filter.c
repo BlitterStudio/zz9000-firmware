@@ -5,6 +5,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "zzapp.h"
+#include "zzapp_note.h"
+
+ZZAPP_NOTE(0, 0)
 
 static int write_all(int fd, const uint8_t *data, uint32_t bytes)
 {

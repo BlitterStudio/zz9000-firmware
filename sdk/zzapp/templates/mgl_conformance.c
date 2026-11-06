@@ -3,7 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 #include "zzapp.h"
+#include "zzapp_note.h"
 #include "mgl_conformance_matrix.h"
+
+ZZAPP_NOTE(ZZAPP_NOTE_FLAG_DISPLAY | ZZAPP_NOTE_FLAG_GL, 0)
 
 #include <stdio.h>
 #include <string.h>

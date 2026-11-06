@@ -9,6 +9,9 @@
 #include <stdio.h>
 
 #include "zzapp.h"
+#include "zzapp_note.h"
+
+ZZAPP_NOTE(0, 0)
 
 static void report_breaks(void)
 {

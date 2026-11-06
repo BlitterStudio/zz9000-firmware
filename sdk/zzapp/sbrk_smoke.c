@@ -5,6 +5,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include <stdlib.h>
+#include "zzapp_note.h"
+
+ZZAPP_NOTE(0, 0)
 
 int zz_main(int argc, char **argv)
 {

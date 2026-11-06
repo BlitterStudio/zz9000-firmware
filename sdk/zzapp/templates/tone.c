@@ -5,6 +5,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "zzapp.h"
+#include "zzapp_note.h"
+
+ZZAPP_NOTE(ZZAPP_NOTE_FLAG_AUDIO, 0)
 
 #define TONE_RATE 22050u
 #define TONE_HZ 440u
