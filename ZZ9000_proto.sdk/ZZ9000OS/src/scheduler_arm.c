@@ -40,6 +40,7 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "xreg_cortexa9.h"
 #include "scheduler_core1_minigl_init.h"
 #include "zzapp_runtime.h"
+#include "zzm_runtime.h"
 #include <stdio.h>
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
@@ -584,6 +585,7 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
        * stays usable). */
       sdk_smp_lock_reset_malloc();
       sdk_image_stream_reset_locks();
+      zzm_runtime_reset_heap_lock();
       sdk_compression_reclaim_core1_decode();
       g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
       /* MiniGL is never parsed on core 0.  A module worker can only resume

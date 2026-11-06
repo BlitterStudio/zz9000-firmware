@@ -26,10 +26,19 @@ static uint32_t log_lines;
     } \
 } while (0)
 
+static int trap_held_lock;
+static int held_lock_taken;
 int smp_cpu_id(void) { return 0; }
 uint32_t smp_local_irq_save(void) { return 0U; }
 void smp_local_irq_restore(uint32_t state) { (void)state; }
-void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1U; }
+void smp_raw_spin_lock(volatile uint32_t *word)
+{
+    if (trap_held_lock && *word) {
+        held_lock_taken = 1;
+        return;
+    }
+    *word = 1U;
+}
 int smp_raw_spin_try_lock(volatile uint32_t *word)
 {
     if (*word)
@@ -322,6 +331,20 @@ static void test_log_rate_limit(void)
     CHECK(log_lines == 34U);
 }
 
+void zzm_runtime_test_orphan_heap_lock(void);
+
+static void test_orphaned_heap_lock_does_not_deadlock(void)
+{
+    reset_resources();
+    zzm_runtime_test_orphan_heap_lock();
+    zzm_runtime_reset_heap_lock();
+    trap_held_lock = 1;
+    held_lock_taken = 0;
+    (void)zzm_runtime_release_module(1U);
+    trap_held_lock = 0;
+    CHECK(!held_lock_taken);
+}
+
 int main(void)
 {
     test_typed_owner_quota_and_reclaim();
@@ -329,6 +352,7 @@ int main(void)
     test_owned_ops_cover_the_whole_module();
     test_host_window_palette_and_app_guard();
     test_log_rate_limit();
+    test_orphaned_heap_lock_does_not_deadlock();
     if (failures)
         return 1;
     puts("runtime resource tests passed");

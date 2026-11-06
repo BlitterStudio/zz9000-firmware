@@ -263,6 +263,8 @@ int zzm_runtime_register_ops(uint32_t module_id, const void *ops,
                              uint32_t ops_size);
 void zzm_runtime_module_fault(uint32_t module_id, const char *reason);
 uint32_t zzm_runtime_release_module(uint32_t module_id);
+/* Core 0 only, while core 1 is halted and cannot hold heap_lock. */
+void zzm_runtime_reset_heap_lock(void);
 int zzm_runtime_quota_available(uint32_t memory_class, uint32_t quota);
 
 /* libzzm_rt public module-side binding and context API. */

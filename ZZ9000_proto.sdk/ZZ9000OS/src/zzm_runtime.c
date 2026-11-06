@@ -220,6 +220,23 @@ static void heap_forget_owner(uint32_t card_owner)
     sdk_smp_lock_release(&heap_lock);
 }
 
+/* Core 0, after core 1 is halted. heap_forget_owner takes this lock; a
+ * restart that lands inside it would deadlock module cleanup. */
+void zzm_runtime_reset_heap_lock(void)
+{
+    sdk_smp_lock_reset(&heap_lock);
+}
+
+#ifdef MINIGL_HOST_TEST
+void zzm_runtime_test_orphan_heap_lock(void)
+{
+    heap_lock.raw = 1u;
+    heap_lock.owner = 1;
+    heap_lock.depth = 1u;
+    heap_lock.saved_irq = 0u;
+}
+#endif
+
 static uint32_t heap_take(zzm_heap_chunk_t *chunk, uint32_t need)
 {
     uint32_t *link = &chunk->free_head;

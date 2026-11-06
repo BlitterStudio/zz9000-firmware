@@ -15,6 +15,7 @@
 #include "sdk_image_stream.h"
 #include "zzm_minigl_host.h"
 #include "zzm_loader.h"
+#include "zzm_runtime.h"
 #include "zzapp_runtime.h"
 #include "zzapp_proto.h"
 #include "zzapp_services.h"
@@ -357,6 +358,8 @@ void core1_cold_restart(void)
 	dsb();
 	/* Core 1 is halted; the module host owns any active graphics abort. */
 	zzm_minigl_abort_reset();
+	/* heap_forget_owner takes heap_lock. Core 1 may have died holding it. */
+	zzm_runtime_reset_heap_lock();
 	/* Its module state died with core 1: reload it on the next acquire. */
 	zzm_loader_forget_core1_modules();
 
