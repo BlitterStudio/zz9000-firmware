@@ -178,6 +178,9 @@ static int api_msg_send(const void *msg)
         if (!ring_push(a2h, &a2h_head, a2h_tail, msg))
             return ZZ_EBUSY;
         record_sent(msg);
+        /* Nothing drains a2h; the message is already recorded. Release
+         * the slot now, or the 65th send wedges with ZZ_EBUSY forever. */
+        a2h_tail = a2h_head;
         if (script_stop && script_injected == script_count &&
             recorded >= script_count)
             host_request_stop();

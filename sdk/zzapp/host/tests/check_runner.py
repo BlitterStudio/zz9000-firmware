@@ -127,6 +127,24 @@ def check_echo(exe):
             raise SystemExit(f"echo messages {got}")
 
 
+def check_msgflood(exe):
+    with tempfile.TemporaryDirectory() as root:
+        script = os.path.join(root, "msg.txt")
+        out = os.path.join(root, "msg.out")
+        with open(script, "w", encoding="ascii") as fh:
+            fh.write('"ping"\nstop\n')
+        proc = run(
+            exe,
+            ["--headless", "--msg-script", script, "--msg-out", out],
+        )
+        expect_ok(proc)
+        with open(out, "r", encoding="ascii") as fh:
+            got = [line for line in fh if line.strip()]
+        if len(got) != 100:
+            show(proc)
+            raise SystemExit(f"msgflood recorded {len(got)} of 100 messages")
+
+
 def check_pixels(exe):
     want = checkerboard()
     with tempfile.TemporaryDirectory() as root:
@@ -225,6 +243,7 @@ CHECKS = {
     "tone": check_tone,
     "keys": check_keys,
     "contract": check_contract,
+    "msgflood": check_msgflood,
 }
 
 
