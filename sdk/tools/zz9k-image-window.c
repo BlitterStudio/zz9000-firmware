@@ -12,11 +12,7 @@
 #if ZZ9K_IMAGE_WINDOW_AMIGA
 #include <graphics/clip.h>
 #include <graphics/layers.h>
-#if defined(__GNUC__)
-__attribute__((weak)) struct IntuitionBase *IntuitionBase;
-#else
 struct IntuitionBase *IntuitionBase;
-#endif
 #endif
 
 static void zz9k_image_window_to_rect(const ZZ9KFbRect *source,
