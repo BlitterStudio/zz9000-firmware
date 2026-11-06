@@ -58,6 +58,16 @@ static void test_request_builders(void)
   expect_u32("start opcode", request.entry.opcode, ZZ9K_APP_OP_START);
   expect_u32("start argc", zz9k_get_be32(request.entry.payload.inline_data),
              2U);
+
+  expect_status("stop", zz9k_app_request_stop(&request, 9U), ZZ9K_STATUS_OK);
+  expect_u32("stop opcode", request.entry.opcode, ZZ9K_APP_OP_STOP);
+  expect_u32("stop bytes", request.entry.payload_len, ZZ9K_APP_STOP_REQ_BYTES);
+  expect_u32("stop generation",
+             zz9k_get_be32(request.entry.payload.inline_data +
+                           ZZ9K_APP_STOP_GENERATION),
+             9U);
+  expect_status("stop zero generation", zz9k_app_request_stop(&request, 0U),
+                ZZ9K_STATUS_BAD_REQUEST);
 }
 
 static void test_status_parser(void)

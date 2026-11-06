@@ -43,10 +43,7 @@ extern struct Library *UtilityBase;
 
 struct mmu_context;
 
-struct zz9k_mmu_page {
-  uint32_t address;
-  uint32_t properties;
-};
+
 #define ZZ9K_LIB_IRQ_WAIT_MICROS 10UL
 
 struct ZZ9KAppHandle {
@@ -61,9 +58,7 @@ struct ZZ9KAppHandle {
   uint32_t generation;
   struct Library *mmu_base;
   struct mmu_context *mmu_context;
-  struct zz9k_mmu_page *mmu_pages;
-  uint32_t mmu_page_count;
-  uint32_t mmu_page_bytes;
+
   UBYTE active;
   UBYTE started;
   UBYTE event_posted;

@@ -25,6 +25,7 @@ __attribute__((weak)) int scheduler_core1_available(void) { return 1; }
 #undef SDK_STATUS_BUSY
 #undef SDK_STATUS_UNSUPPORTED
 #undef SDK_STATUS_BAD_REQUEST
+#undef SDK_STATUS_BAD_HANDLE
 #undef SDK_STATUS_NO_MEMORY
 #undef SDK_STATUS_IO_ERROR
 #undef SDK_STATUS_NOT_FOUND
@@ -192,6 +193,7 @@ static uint64_t audio_staged;
 static uint32_t audio_ahi_staged_frame;
 static void *audio_block;
 static volatile uint32_t audio_request;
+static uint32_t audio_stream_epoch;
 static int audio_ahi_route;
 static uint32_t audio_host_tail_seen;
 #ifndef ZZAPP_HOST_TEST
@@ -2083,6 +2085,14 @@ static int audio_attach(void)
 		audio_fabric_producer_go_live(slot);
 	}
 #endif
+	if (have_window()) {
+		uint32_t epoch = audio_stream_epoch + 1U;
+
+		if (epoch == 0U)
+			epoch = 1U;
+		audio_stream_epoch = epoch;
+		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_EPOCH_OFF, epoch);
+	}
 	return ZZ_OK;
 }
 
@@ -2414,6 +2424,11 @@ void zzapp_services_poll(void)
 		audio_request = AUDIO_REQUEST_CLOSE_QUIESCED;
 		return;
 	}
+	/* Stay quiet until core 0 publishes completion. A second poll in
+	 * this window used to fall through and pump the source core 0 is
+	 * about to free. */
+	if (audio_request == AUDIO_REQUEST_CLOSE_QUIESCED)
+		return;
 	audio_pump_ahi_window();
 }
 
@@ -2519,6 +2534,15 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		return SDK_STATUS_OK;
 	}
 	case ZZAPP_OP_STOP:
+		if (req_len >= ZZAPP_STOP_REQ_BYTES) {
+			uint32_t expected;
+
+			if (!req)
+				return SDK_STATUS_BAD_REQUEST;
+			expected = zzapp_get_be32(req + ZZAPP_STOP_GENERATION);
+			if (expected != zzapp_services_generation())
+				return SDK_STATUS_BAD_HANDLE;
+		}
 		life_put(ZZAPP_LIFE_STOP_OFF, 1U);
 		return SDK_STATUS_OK;
 	case ZZAPP_OP_STATUS:
@@ -2628,5 +2652,15 @@ void zzapp_services_test_set_slot_busy(uint32_t slot, int busy)
 {
 	if (slot < 4U)
 		slot_busy_test[slot] = busy ? 1 : 0;
+}
+
+void zzapp_services_test_set_audio_request(uint32_t request)
+{
+	audio_request = request;
+}
+
+uint32_t zzapp_services_test_audio_request(void)
+{
+	return audio_request;
 }
 #endif

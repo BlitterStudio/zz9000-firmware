@@ -133,6 +133,11 @@ int main(int argc, char **argv)
     if (status != ZZ9K_STATUS_OK) goto fail;
     if (final_status.state == ZZ9K_APP_STATE_IDLE) break;
   }
+  if (final_status.fault_code != ZZ9K_APP_FAULT_NONE ||
+      final_status.exit_code != 0) {
+    status = ZZ9K_STATUS_INTERNAL_ERROR;
+    goto fail;
+  }
   trace("close");
   ZZ9KAppClose(app);
   DeleteMsgPort(port);

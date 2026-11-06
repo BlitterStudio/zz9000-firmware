@@ -318,6 +318,7 @@ static uint16_t run_unit(struct sdk_flac_state *st, const uint8_t *unit,
 	st->frames_written = 0U;
 	sdk_flac_alloc_set_quota(&st->alloc_used, &st->alloc_peak,
 	                         SDK_FLAC_ALLOC_LIMIT);
+	sdk_flac_alloc_set_owner(st->pool_owner);
 	ok = FLAC__stream_decoder_process_single(dec);
 	state = FLAC__stream_decoder_get_state(dec);
 	st->grant = 0;
@@ -340,6 +341,7 @@ static uint16_t create_decoder(struct sdk_flac_state *st)
 
 	sdk_flac_alloc_set_quota(&st->alloc_used, &st->alloc_peak,
 	                         SDK_FLAC_ALLOC_LIMIT);
+	sdk_flac_alloc_set_owner(st->pool_owner);
 	dec = FLAC__stream_decoder_new();
 	if (!dec)
 		return SDK_STATUS_NO_MEMORY;
@@ -661,6 +663,7 @@ void sdk_flac_release(struct sdk_flac_state *st)
 		return;
 	sdk_flac_alloc_set_quota(&st->alloc_used, &st->alloc_peak,
 	                         SDK_FLAC_ALLOC_LIMIT);
+	sdk_flac_alloc_set_owner(st->pool_owner);
 	FLAC__stream_decoder_delete((FLAC__StreamDecoder *)st->decoder);
 	st->decoder = 0;
 }

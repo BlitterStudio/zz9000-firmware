@@ -48,6 +48,7 @@ struct sdk_flac_state {
 	void *decoder;              /* FLAC__StreamDecoder *, NULL until first feed */
 	size_t alloc_used;
 	size_t alloc_peak;
+	uint32_t pool_owner;        /* 0: shared decode heap; else card-pool owner */
 	uint64_t total_samples;     /* STREAMINFO; 0 = unknown */
 	uint64_t samples_decoded;
 	uint32_t phase;

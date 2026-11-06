@@ -59,13 +59,23 @@ uint16_t sdk_decompress_stream_close(uint32_t session);
 /*
  * Reclaim card-pool-owned decode working sets after a core-1 cold reset.
  * The pool owner can be dropped without touching newlib metadata. Returns
- * nonzero when one or more blocks were reclaimed.
+ * nonzero when one or more blocks were reclaimed. A cold restart releases
+ * both the shared decode owner and the app-runtime owner. An ordinary app
+ * force-stop must call sdk_compression_reclaim_app_decode() instead.
  */
 unsigned sdk_compression_reclaim_core1_decode(void);
+unsigned sdk_compression_reclaim_app_decode(void);
+
+/* Shared core-1 decode heap. Distinct from the app-runtime owner so an app
+ * force-stop cannot free an SDK client's live FLAC/Vorbis working set.
+ * Class 2 is CARD_POOL_CLASS_MEDIA; sdk_compression.c asserts the match. */
+#define SDK_DECODE_POOL_OWNER (((uint32_t)2u << 24) | 0x00fffffeu)
+#define SDK_APP_DECODE_POOL_OWNER (((uint32_t)2u << 24) | 0x00fffffdU)
 
 /* Decode backend allocations use the reset-reclaimable MEDIA card-pool
  * owner. The historical name is retained for codec callback compatibility. */
 void *sdk_decode_heap_alloc(size_t size);
+void *sdk_decode_heap_alloc_owned(size_t size, uint32_t owner);
 void sdk_decode_heap_free(void *ptr);
 void *sdk_decode_heap_realloc(void *ptr, size_t size);
 void *sdk_decode_heap_calloc(size_t count, size_t size);

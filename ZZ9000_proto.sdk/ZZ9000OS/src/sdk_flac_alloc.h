@@ -20,6 +20,8 @@ void sdk_flac_free(void *ptr);
 /* Select the per-stream accounting words before every libFLAC call. used and
  * peak may be NULL (unaccounted); limit bounds *used. */
 void sdk_flac_alloc_set_quota(size_t *used, size_t *peak, size_t limit);
+/* 0 keeps the shared decode-heap owner. A nonzero owner is reclaimed alone. */
+void sdk_flac_alloc_set_owner(uint32_t owner);
 /* Nonzero when the current allocator context rejected an allocation. */
 int sdk_flac_alloc_failed(void);
 

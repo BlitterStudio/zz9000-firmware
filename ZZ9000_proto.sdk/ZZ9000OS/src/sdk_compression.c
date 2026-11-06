@@ -63,7 +63,12 @@ static uint32_t next_decompress_stream_id = 1U;
  * allocation header immediately before the returned pointer makes free safe
  * without consulting newlib metadata after a worker reset. */
 #define DECODE_POOL_MAGIC 0x44454350u
-#define DECODE_POOL_OWNER CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffeu)
+#define DECODE_POOL_OWNER SDK_DECODE_POOL_OWNER
+typedef char app_decode_owner_is_media[
+	(SDK_DECODE_POOL_OWNER ==
+	 CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffeu) &&
+	 SDK_APP_DECODE_POOL_OWNER ==
+	 CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffdU)) ? 1 : -1];
 
 struct decode_pool_header {
 	uint32_t magic;
@@ -72,23 +77,28 @@ struct decode_pool_header {
 	uint32_t owner;
 };
 
-void *sdk_decode_heap_alloc(size_t size)
+void *sdk_decode_heap_alloc_owned(size_t size, uint32_t owner)
 {
 	struct decode_pool_header *header;
 	uint32_t base;
 
-	if (size == 0U || size > UINT32_MAX - sizeof(*header))
+	if (size == 0U || size > UINT32_MAX - sizeof(*header) || owner == 0U)
 		return 0;
 	base = card_pool_alloc(&card_pool, (uint32_t)size + sizeof(*header),
-	                       DECODE_POOL_OWNER);
+	                       owner);
 	if (!base)
 		return 0;
 	header = (struct decode_pool_header *)(uintptr_t)base;
 	header->magic = DECODE_POOL_MAGIC;
 	header->base = base;
 	header->size = (uint32_t)size;
-	header->owner = DECODE_POOL_OWNER;
+	header->owner = owner;
 	return header + 1;
+}
+
+void *sdk_decode_heap_alloc(size_t size)
+{
+	return sdk_decode_heap_alloc_owned(size, DECODE_POOL_OWNER);
 }
 
 void sdk_decode_heap_free(void *ptr)
@@ -183,6 +193,12 @@ static void zlib_decode_free(voidpf opaque, voidpf address)
  * non-shared decode arena (tracked follow-up). This is a property of core-1
  * heap use under force-reset, not of the reclaim itself.
  */
+unsigned sdk_compression_reclaim_app_decode(void)
+{
+	return card_pool_release_owner(&card_pool,
+	                               SDK_APP_DECODE_POOL_OWNER) != 0U;
+}
+
 unsigned sdk_compression_reclaim_core1_decode(void)
 {
 	unsigned reclaimed;
@@ -190,9 +206,12 @@ unsigned sdk_compression_reclaim_core1_decode(void)
 	/*
 	 * Decode working sets are card-pool owned: reclaiming their owner never
 	 * dereferences allocator metadata written by the halted core. Keep the
-	 * legacy table pass for paths not yet backed by this owner.
+	 * legacy table pass for paths not yet backed by this owner. The app
+	 * owner is included here only because a cold restart has halted core 1;
+	 * an app force-stop must use sdk_compression_reclaim_app_decode().
 	 */
 	reclaimed = card_pool_release_owner(&card_pool, DECODE_POOL_OWNER) != 0U;
+	reclaimed += sdk_compression_reclaim_app_decode();
 	sdk_decode_invalidate_table();
 	reclaimed += sdk_decode_reclaim(free);
 	sdk_decode_flush_table();

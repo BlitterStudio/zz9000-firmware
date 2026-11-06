@@ -101,6 +101,7 @@ WEAK uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
     return SDK_STATUS_UNSUPPORTED;
 }
 WEAK unsigned sdk_compression_reclaim_core1_decode(void) { return 0; }
+WEAK unsigned sdk_compression_reclaim_app_decode(void) { return 0; }
 WEAK uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *b,
                                      struct SDKImageStreamResult *r)
 { (void)b; (void)r; return SDK_STATUS_UNSUPPORTED; }
@@ -113,6 +114,7 @@ WEAK uint16_t sdk_image_stream_close(uint32_t s)
 WEAK uint16_t sdk_image_stream_release_poisoned(uint32_t s)
 { (void)s; return SDK_STATUS_UNSUPPORTED; }
 WEAK void sdk_image_stream_poison_core1_sessions(void) {}
+WEAK void sdk_image_stream_poison_session(uint32_t s) { (void)s; }
 WEAK void sdk_flac_init(struct sdk_flac_state *state, uint32_t format)
 { (void)state; (void)format; }
 WEAK uint16_t sdk_flac_decode(struct sdk_flac_state *state,
@@ -483,9 +485,14 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
     begin.core1_affine = 1u;
     begin.direct_arm_local = 1u;
     zzapp_api_enter();
+    /* begin releases its lock, and that release restores interrupts,
+     * before it returns. Hold the same commit guard host-visible
+     * allocations use until the ledger records the new session. */
+    zzapp_host_commit_begin();
     rc = sdk_to_zz(sdk_image_stream_begin(&begin, &result));
     if (rc == ZZ_OK)
         g_image_sessions[i] = result.session;
+    zzapp_host_commit_end();
     zzapp_api_leave();
     if (rc == ZZ_OK) {
         *session = result.session;
@@ -578,10 +585,13 @@ static int api_audio_open_decode(uint32_t codec, uint32_t *session)
     slot->codec = codec;
     if (codec == ZZ_AUDIO_MP3)
         mp3dec_init(&slot->state.mp3);
-    else if (codec == ZZ_AUDIO_FLAC)
+    else if (codec == ZZ_AUDIO_FLAC) {
         sdk_flac_init(&slot->state.flac, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
-    else
+        slot->state.flac.pool_owner = SDK_APP_DECODE_POOL_OWNER;
+    } else {
         sdk_vorbis_init(&slot->state.vorbis, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+        slot->state.vorbis.heap.pool_owner = SDK_APP_DECODE_POOL_OWNER;
+    }
     *session = slot->id;
     return ZZ_OK;
 }
@@ -697,9 +707,9 @@ void zzapp_api_poison_resources(void)
 {
     uint32_t i;
 
-    sdk_image_stream_poison_core1_sessions();
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
         if (g_image_sessions[i]) {
+            sdk_image_stream_poison_session(g_image_sessions[i]);
             (void)sdk_image_stream_release_poisoned(g_image_sessions[i]);
             g_image_sessions[i] = 0;
         }
@@ -711,7 +721,7 @@ void zzapp_api_poison_resources(void)
                 sdk_vorbis_forget(&g_audio_sessions[i].state.vorbis);
             memset(&g_audio_sessions[i], 0, sizeof(g_audio_sessions[i]));
         }
-    sdk_compression_reclaim_core1_decode();
+    sdk_compression_reclaim_app_decode();
 }
 #define WRAP0(name, call) static int name(void) { zzapp_api_enter(); int r=(call); zzapp_api_leave(); return r; }
 #define WRAP1(name, type, call) static int name(type a) { zzapp_api_enter(); int r=(call); zzapp_api_leave(); return r; }
