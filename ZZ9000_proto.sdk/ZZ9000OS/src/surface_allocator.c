@@ -176,8 +176,10 @@ uint32_t surface_allocator_alloc_range(uint32_t size, uint32_t alignment,
         uint32_t baddr = sa_blocks[i].addr;
         uint32_t bend = baddr + sa_blocks[i].size;
 
-        if (baddr >= hi)
-            break;              /* this and later blocks are past the window */
+        if (baddr >= hi) {
+            insert_at = i;      /* gap is before this block, not after the table */
+            break;
+        }
         if (bend <= candidate)
             continue;           /* block ends at/below the candidate */
         if (baddr >= candidate && baddr - candidate >= rounded) {
