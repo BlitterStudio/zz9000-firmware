@@ -1261,13 +1261,20 @@ int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n)
 		if (head - tail > ZZAPP_CONSOLE_IN_CAP)
 			return ZZ_EIO;
 		if (available == 0U) {
-			if (win_get32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF))
+			if (win_get32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF)) {
+				win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 0U);
 				return ZZ_OK;
-			if (zzapp_services_stop_requested())
+			}
+			if (zzapp_services_stop_requested()) {
+				win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 0U);
 				return ZZ_EIO;
+			}
+			/* The launcher reads the keyboard only while this is set. */
+			win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 1U);
 			yield_wait_once();
 			continue;
 		}
+		win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 0U);
 		at = tail % ZZAPP_CONSOLE_IN_CAP;
 		n = ZZAPP_CONSOLE_IN_CAP - at;
 		if (n > available)

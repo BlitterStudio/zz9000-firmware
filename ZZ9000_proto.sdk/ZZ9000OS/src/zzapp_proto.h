@@ -143,6 +143,9 @@
 #define ZZAPP_CONSOLE_OUT_CAP  0x00008000u
 #define ZZAPP_CONSOLE_IN_CAP   0x00001000u
 #define ZZAPP_CONSOLE_EOF_OFF  8u
+/* Console-in only: 1 while the app is blocked reading an empty ring, so the
+ * launcher reads the keyboard only when the app asks for input. */
+#define ZZAPP_CONSOLE_WANT_OFF 12u
 
 /* PCM is S16LE interleaved. The app is its only producer; route describes
  * the launcher-selected card-fabric or AHI consumer. */

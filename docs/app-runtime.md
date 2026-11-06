@@ -371,7 +371,11 @@ The API 0.2 additions retain every v0 offset and use only the extension after
 payload; the console-input region is `0x70000`/8 KiB with a 4 KiB payload.
 Both payload capacities are powers of two, so their big-endian monotonic `u32`
 head and tail counters preserve the physical position across counter wrap; the
-remaining region bytes are reserved. The input header's word at `+8` is EOF.
+remaining region bytes are reserved. The input header's word at `+8` is EOF;
+the word at `+12` is 1 while the app is blocked reading an empty input ring.
+ZZRun reads an interactive console only while that word is set, with an
+asynchronous `ACTION_READ` in the console's normal line mode, so Return
+delivers a line and Ctrl-\ delivers EOF.
 The app is the output producer and input consumer. ZZRun is the inverse. A
 full output ring is backpressure: the app waits in its API call and no bytes
 are discarded. Input is nonblocking at the launcher; when its input handle

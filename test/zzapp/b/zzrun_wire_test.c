@@ -20,6 +20,21 @@ static void drain_console_output(void)
     zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF + 4U, head);
 }
 
+/* Launcher side of an interactive read: it only answers once the app has
+ * said it is waiting, as ZZRun does before it reads the keyboard. */
+static unsigned wanted_seen;
+static void answer_wanted_input(void)
+{
+    uint8_t *in = launcher_window + ZZAPP_CONSOLE_IN_OFF;
+    uint32_t head = zzapp_get_be32(in);
+
+    if (zzapp_get_be32(in + ZZAPP_CONSOLE_WANT_OFF) != 1U)
+        return;
+    wanted_seen++;
+    in[ZZAPP_CONSOLE_HDR + head % ZZAPP_CONSOLE_IN_CAP] = 'x';
+    zzapp_put_be32(in, head + 1U);
+}
+
 uint32_t zzapp_runtime_state(void)
 {
     return wire_loader_state;
@@ -210,6 +225,20 @@ int main(void)
                        ZZAPP_CONSOLE_EOF_OFF, 1U);
         assert(zzapp_svc_console_read(output, sizeof(output), &n) == ZZ_OK);
         assert(n == 0U);
+
+        /* A read on an empty ring tells the launcher it wants input, and
+         * withdraws the request once it has data. */
+        zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF +
+                       ZZAPP_CONSOLE_EOF_OFF, 0U);
+        zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF, 0U);
+        zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF + 4U, 0U);
+        zzapp_services_test_set_yield(answer_wanted_input);
+        assert(zzapp_svc_console_read(output, sizeof(output), &n) == ZZ_OK);
+        assert(n == 1U && output[0] == 'x');
+        assert(wanted_seen == 1U);
+        assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF +
+                              ZZAPP_CONSOLE_WANT_OFF) == 0U);
+        zzapp_services_test_set_yield(drain_console_output);
 
         for (i = 0U; i < sizeof(message); i++)
             message[i] = (uint8_t)i;
