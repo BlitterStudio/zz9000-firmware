@@ -2411,6 +2411,50 @@ int sdk_image_stream_has_core1_sessions(void)
  * pool it covered, so the budget it held is usable by the surviving
  * sessions at once.
  */
+static void poison_image_slot(struct SDKImageStreamSession *slot)
+{
+	if (slot->codec == SDK_IMAGE_CODEC_WEBP) {
+		const struct zzm_webp_ops *ops = webp_ops();
+
+		card_pool_release_owner(&card_pool,
+			CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, slot->session));
+		if (ops)
+			ops->poison(&slot->webp);
+		slot->decode_state_committed = 0U;
+		slot->failed = 1U;
+		if (slot->module_ref) {
+			zzm_loader_release(ZZM_MODULE_WEBP);
+			slot->module_ref = 0U;
+		}
+		return;
+	}
+	card_pool_release_owner(&card_pool,
+		CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, slot->session));
+	slot->jpeg_created = 0U;
+	slot->png_created = 0U;
+	slot->png_ptr = 0;
+	slot->png_info = 0;
+	slot->png_interlace_buffer = 0;
+	slot->png_interlace_buffer_length = 0U;
+	slot->png_tile_staging = 0U;
+	slot->png_tile_rows_emitted = 0U;
+	/*
+	 * The session's own card-pool owner covered this charge. Clear it
+	 * lock-free: a cold restart has already halted core 1, and an app
+	 * force-stop must not take a lock a reset may have orphaned.
+	 */
+	slot->decode_state_committed = 0U;
+	slot->failed = 1U;
+}
+
+void sdk_image_stream_poison_session(uint32_t session)
+{
+	struct SDKImageStreamSession *slot = find_session(session);
+
+	if (slot)
+		poison_image_slot(slot);
+}
+
 void sdk_image_stream_poison_core1_sessions(void)
 {
 	uint32_t i;
@@ -2420,42 +2464,7 @@ void sdk_image_stream_poison_core1_sessions(void)
 
 		if (!slot->in_use || !slot->core1_affine)
 			continue;
-		if (slot->codec == SDK_IMAGE_CODEC_WEBP) {
-			const struct zzm_webp_ops *ops = webp_ops();
-
-			card_pool_release_owner(&card_pool,
-				CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, slot->session));
-			if (ops)
-				ops->poison(&slot->webp);
-			slot->decode_state_committed = 0U;
-			slot->failed = 1U;
-			if (slot->module_ref) {
-				zzm_loader_release(ZZM_MODULE_WEBP);
-				slot->module_ref = 0U;
-			}
-			continue;
-		}
-		card_pool_release_owner(&card_pool,
-			CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, slot->session));
-		slot->jpeg_created = 0U;
-		slot->png_created = 0U;
-		slot->png_ptr = 0;
-		slot->png_info = 0;
-		slot->png_interlace_buffer = 0;
-		slot->png_interlace_buffer_length = 0U;
-		slot->png_tile_staging = 0U;
-		slot->png_tile_rows_emitted = 0U;
-		/*
-		 * The decode-reclaim pass freed the pool this charge
-		 * covered, so the charge is void. Clear it lock-free:
-		 * core 1 is provably halted here (the caller parks the
-		 * worker before the cold restart), and if a reset
-		 * orphaned the budget lock, taking it would wedge the
-		 * recovery -- the restart path resets the lock
-		 * unconditionally.
-		 */
-		slot->decode_state_committed = 0U;
-		slot->failed = 1U;
+		poison_image_slot(slot);
 	}
 }
 

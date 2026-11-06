@@ -23,6 +23,8 @@ extern "C" {
 #define ZZ9K_APP_OP_LOAD_END     0x0c04U
 #define ZZ9K_APP_OP_START        0x0c05U
 #define ZZ9K_APP_OP_STOP         0x0c06U
+#define ZZ9K_APP_STOP_GENERATION 0U
+#define ZZ9K_APP_STOP_REQ_BYTES  4U
 #define ZZ9K_APP_OP_STATUS       0x0c07U
 
 #define ZZ9K_APP_QUERY_REPLY_BYTES 16U
@@ -91,6 +93,7 @@ typedef struct ZZ9KAppMessage {
 int zz9k_app_generation_matches(uint32_t owned_generation,
                                  uint32_t observed_generation);
 int zz9k_app_request_init(ZZ9KRequest *request, uint16_t opcode);
+int zz9k_app_request_stop(ZZ9KRequest *request, uint32_t generation);
 int zz9k_app_request_chunk(ZZ9KRequest *request, uint32_t file_offset,
                            uint32_t length);
 int zz9k_app_request_start(ZZ9KRequest *request, uint32_t argc);

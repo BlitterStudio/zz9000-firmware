@@ -64,7 +64,10 @@
 
 #define ZZAPP_START_ARGC           0u
 #define ZZAPP_START_REQ_BYTES      4u
-
+/* Optional APP_STOP payload. Absent or shorter than 4 bytes keeps the
+ * original unconditional stop, for clients that predate the generation. */
+#define ZZAPP_STOP_GENERATION      0u
+#define ZZAPP_STOP_REQ_BYTES       4u
 
 #define ZZAPP_BIND_WIDTH           0u
 #define ZZAPP_BIND_HEIGHT          4u
@@ -160,7 +163,10 @@
 #define ZZAPP_AUDIO_FORMAT_OFF 16u
 #define ZZAPP_AUDIO_ROUTE_OFF  20u
 #define ZZAPP_AUDIO_UNDERRUNS_OFF 24u
-#define ZZAPP_AUDIO_FLAGS_OFF  28u
+/* Per-open stream epoch, never 0 while a stream is open. Written after the
+ * rest of the header, so a launcher that sees 0 waits for the next poll and
+ * one that sees a new value knows the stream was replaced. */
+#define ZZAPP_AUDIO_EPOCH_OFF  28u
 #define ZZAPP_AUDIO_FORMAT_S16LE 1u
 #define ZZAPP_AUDIO_ROUTE_CARD 0u
 #define ZZAPP_AUDIO_ROUTE_AHI  1u

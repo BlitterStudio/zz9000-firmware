@@ -42,6 +42,7 @@ int zzapp_svc_file_read(int fd, void *dst, uint32_t bytes, uint32_t *done)
     if (stop_during_read) {
         zzapp_host_tick_at(1u);
         zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+        return ZZ_EFAULT;
     }
     memcpy(dst, file_data, sizeof(file_data) - 1u);
     *done = sizeof(file_data) - 1u;

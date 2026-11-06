@@ -28,6 +28,7 @@ union sdk_flac_alloc_header {
 static size_t *active_used;
 static size_t *active_peak;
 static size_t active_limit;
+static uint32_t active_owner;
 static int active_failed;
 
 void sdk_flac_alloc_set_quota(size_t *used, size_t *peak, size_t limit)
@@ -36,6 +37,11 @@ void sdk_flac_alloc_set_quota(size_t *used, size_t *peak, size_t limit)
 	active_peak = peak;
 	active_limit = limit;
 	active_failed = 0;
+}
+
+void sdk_flac_alloc_set_owner(uint32_t owner)
+{
+	active_owner = owner;
 }
 
 int sdk_flac_alloc_failed(void)
@@ -54,10 +60,11 @@ void *sdk_flac_malloc(size_t size)
 	if (active_used && (total > active_limit ||
 	                    *active_used > active_limit - total))
 		goto fail;
-	if (smp_cpu_id() == 1 &&
+	if (active_owner == 0U && smp_cpu_id() == 1 &&
 	    sdk_decode_tracked_count() >= SDK_DECODE_MAX_TRACKED)
 		goto fail;
-	header = (union sdk_flac_alloc_header *)sdk_decode_heap_alloc(total);
+	header = (union sdk_flac_alloc_header *)sdk_decode_heap_alloc_owned(
+		total, active_owner != 0U ? active_owner : SDK_DECODE_POOL_OWNER);
 	if (!header)
 		goto fail;
 	header->h.size = total;

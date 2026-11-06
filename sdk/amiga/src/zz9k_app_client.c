@@ -29,6 +29,23 @@ int zz9k_app_request_init(ZZ9KRequest *request, uint16_t opcode)
   return ZZ9K_STATUS_OK;
 }
 
+int zz9k_app_request_stop(ZZ9KRequest *request, uint32_t generation)
+{
+  int result;
+
+  if (generation == 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  result = zz9k_app_request_init(request, ZZ9K_APP_OP_STOP);
+  if (result != ZZ9K_STATUS_OK) {
+    return result;
+  }
+  request->entry.payload_len = ZZ9K_APP_STOP_REQ_BYTES;
+  zz9k_put_be32(request->entry.payload.inline_data + ZZ9K_APP_STOP_GENERATION,
+                generation);
+  return ZZ9K_STATUS_OK;
+}
+
 int zz9k_app_request_chunk(ZZ9KRequest *request, uint32_t file_offset,
                            uint32_t length)
 {

@@ -86,6 +86,8 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
 
 void zzapp_api_enter(void);
 void zzapp_api_leave(void);
+void zzapp_host_commit_begin(void);
+void zzapp_host_commit_end(void);
 void zzapp_note_progress(void);
 uint32_t zzapp_current_generation(void);
 uint32_t zzapp_runtime_state(void);

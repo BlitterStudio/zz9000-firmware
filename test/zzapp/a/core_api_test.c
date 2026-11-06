@@ -19,9 +19,14 @@ static uint32_t image_poison_calls;
 static uint32_t audio_release_calls;
 static uint32_t audio_forget_calls;
 static uint32_t decode_reclaim_calls;
+static uint32_t image_poison_session_calls;
+static uint32_t app_decode_reclaim_calls;
 static int stop_during_host_alloc;
-
-int zzapp_svc_should_stop(void) { return stop_during_host_alloc; }
+static int stop_during_image_begin;
+int zzapp_svc_should_stop(void)
+{
+    return stop_during_host_alloc || stop_during_image_begin;
+}
 
 void zzapp_test_host_visible_allocated(void)
 {
@@ -66,6 +71,10 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
     assert(begin->direct_arm_local == 1u);
     assert(begin->output_format == SDK_SURFACE_FORMAT_BGRA8888);
     image_begin_calls++;
+    if (stop_during_image_begin) {
+        zzapp_host_tick_at(1u);
+        zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    }
     memset(out, 0, sizeof(*out));
     out->session = 0x100u + image_begin_calls;
     return SDK_STATUS_OK;
@@ -96,9 +105,15 @@ void sdk_image_stream_poison_core1_sessions(void)
     image_poison_calls++;
 }
 
+void sdk_image_stream_poison_session(uint32_t session)
+{
+    assert(session != 0u);
+    image_poison_session_calls++;
+}
+
 uint16_t sdk_image_stream_release_poisoned(uint32_t session)
 {
-    assert(session != 0u && image_poison_calls);
+    assert(session != 0u && image_poison_session_calls);
     image_poisoned_close_calls++;
     return SDK_STATUS_OK;
 }
@@ -172,6 +187,12 @@ void sdk_vorbis_forget(struct sdk_vorbis_state *state)
 unsigned sdk_compression_reclaim_core1_decode(void)
 {
     decode_reclaim_calls++;
+    return 1u;
+}
+
+unsigned sdk_compression_reclaim_app_decode(void)
+{
+    app_decode_reclaim_calls++;
     return 1u;
 }
 
@@ -259,8 +280,28 @@ int main(void)
     zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(image_close_calls == 1u && image_poisoned_close_calls == 1u);
+    assert(image_poison_calls == 0u && image_poison_session_calls == 1u);
     assert(audio_release_calls == 1u && audio_forget_calls == 1u);
-    assert(decode_reclaim_calls == 1u);
+    assert(decode_reclaim_calls == 0u && app_decode_reclaim_calls == 1u);
     assert(zzapp_host_mem_info(&mem) == ZZ_OK && mem.host_visible_used == 0u);
+
+    zzapp_loader_release();
+    zzapp_boot_init();
+    assert(zzapp_loader_begin() == ZZ_OK);
+    api = zzapp_api_table();
+    zzapp_test_mark_running();
+    stop_during_host_alloc = 0;
+    stop_during_image_begin = 1;
+    image_poison_session_calls = 0u;
+    image_poisoned_close_calls = 0u;
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_OK);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    stop_during_image_begin = 0;
+    stop_during_host_alloc = 1;
+    zzapp_host_tick_at(1u);
+    zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    assert(image_poison_session_calls == 1u);
+    assert(image_poison_calls == 0u);
     return 0;
 }

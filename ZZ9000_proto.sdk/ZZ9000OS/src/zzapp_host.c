@@ -1065,6 +1065,16 @@ void zzapp_host_exit(int code)
 #endif
 }
 
+void zzapp_host_commit_begin(void)
+{
+    g_host_visible_commit_active = 1u;
+}
+
+void zzapp_host_commit_end(void)
+{
+    g_host_visible_commit_active = 0u;
+}
+
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 {
     uintptr_t p;
@@ -1096,7 +1106,7 @@ void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
          * forced-stop tick from unwinding the app until this real allocation
          * has a ledger entry that teardown can release.
          */
-        g_host_visible_commit_active = 1u;
+        zzapp_host_commit_begin();
 #ifndef ZZAPP_HOST_TEST
         card = surface_allocator_alloc_aligned(bytes, align);
         ptr = (void *)(uintptr_t)card;

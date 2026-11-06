@@ -26,6 +26,7 @@ struct zzapp_audio;
 #define SDK_STATUS_BUSY            2u
 #define SDK_STATUS_UNSUPPORTED     3u
 #define SDK_STATUS_BAD_REQUEST     4u
+#define SDK_STATUS_BAD_HANDLE      5u
 #define SDK_STATUS_NO_MEMORY       6u
 #define SDK_STATUS_IO_ERROR        9u
 #define SDK_STATUS_NOT_FOUND       10u
@@ -136,6 +137,8 @@ void zzapp_services_test_set_window(void *window, uint32_t bytes);
 void zzapp_services_test_set_yield(void (*fn)(void));
 void zzapp_services_test_set_time(uint64_t (*fn)(void));
 void zzapp_services_test_set_slot_busy(uint32_t slot, int busy);
+void zzapp_services_test_set_audio_request(uint32_t request);
+uint32_t zzapp_services_test_audio_request(void);
 #endif
 
 #endif /* ZZAPP_SERVICES_H */

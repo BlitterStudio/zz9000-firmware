@@ -404,7 +404,10 @@ EOF through the console API.
 
 The app audio ring is at `0x72000`, a 128 KiB region with a 32-byte
 big-endian header (`head`, `tail`, source rate, channels, format, route,
-underruns, flags) and a 64 KiB power-of-two PCM payload. Samples are
+underruns, stream epoch) and a 64 KiB power-of-two PCM payload. The epoch
+word, previously unused, increments on every successful audio open and is
+not cleared by the firmware counter when close or `APP_LOAD_BEGIN` zeros
+the header. Samples are
 interleaved S16LE. `AUDIO=AHI` on a ZZRun Workbench icon sets
 `ZZAPP_F_LAUNCHER_AUDIO_AHI` after loading and before start, selecting route
 1; absent that ToolType leaves route 0, the card fabric, as the default. The
@@ -645,6 +648,7 @@ runtime.
 
 ### API 0.2 core slots
 
+The 0.2 layout is final as of feature/app-runtime and nothing earlier shipped.
 The 0.2 slots are appended after `build_id`. As with every appended field,
 apps MUST gate direct table access with `ZZ_API_COVERS`; `libzzapp` wrappers
 return `ZZ_ENOSYS` on older firmware.
