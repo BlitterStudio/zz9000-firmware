@@ -275,10 +275,10 @@ jobs:
           ZZAPP_NEWLIB_CACHE: ${{ github.workspace }}/.toolchain/zzapp-newlib-cache
         run: sh sdk/zzapp/build_pic_newlib.sh
 
-      - name: ZZApp PIE link and relocation check
+      - name: ZZApp PIE link and zzapp-check
         env:
           ZZAPP_PIC_SYSROOT: ${{ github.workspace }}/.toolchain/zzapp-pic-newlib
-        run: make -C sdk/zzapp check-relocs
+        run: make -C sdk/zzapp check
 
 
       # bootgen is Xilinx's boot image packager. Not packaged by any distro,
@@ -472,3 +472,60 @@ jobs:
             tar -C /source --exclude=.context -cf - . | tar -C /work -xf -
             make -C /work/test/image test
           '
+
+  zzapp-toolchain:
+    name: ZZApp SDK toolchain image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: ZZApp check unit test
+        run: python3 sdk/tests/zzapp_check_test.py
+      - name: Host ZZAPP_NOTE expands to nothing
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc binutils
+          cat > /tmp/zzapp-note-host.c <<'EOF'
+          #include "zzapp_note.h"
+          ZZAPP_NOTE(1, 0)
+          int host_ok(void) { return 0; }
+          EOF
+          gcc -Wall -Wextra -Werror -std=c11 -I sdk/zzapp/include -c -o /tmp/zzapp-note-host.o /tmp/zzapp-note-host.c
+          if readelf -S /tmp/zzapp-note-host.o | grep -q note.zzapp; then
+            echo "host ZZAPP_NOTE emitted a note" >&2
+            exit 1
+          fi
+      - name: Build SDK image
+        run: docker build -f sdk/zzapp/docker/Dockerfile -t zz9000-app-sdk:ci sdk/zzapp
+      - name: Make templates inside the image
+        run: docker run --rm zz9000-app-sdk:ci make check
+      - name: CMake hello template inside the image
+        run: |
+          docker run --rm zz9000-app-sdk:ci bash -c '
+            set -euo pipefail
+            cmake -S /opt/zzapp-sdk/cmake/example -B /tmp/hello \
+              -DCMAKE_TOOLCHAIN_FILE=/opt/zzapp-sdk/cmake/zzapp-toolchain.cmake
+            cmake --build /tmp/hello
+          '
+      - name: Log in to GHCR
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Push SDK image
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          IMAGE=ghcr.io/blitterstudio/zz9000-app-sdk
+          docker tag zz9000-app-sdk:ci "$IMAGE:sha-${GITHUB_SHA::12}"
+          docker push "$IMAGE:sha-${GITHUB_SHA::12}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            docker tag zz9000-app-sdk:ci "$IMAGE:${GITHUB_REF_NAME}"
+            docker push "$IMAGE:${GITHUB_REF_NAME}"
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            docker tag zz9000-app-sdk:ci "$IMAGE:manual"
+            docker push "$IMAGE:manual"
+          fi

@@ -5,6 +5,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "zzapp.h"
+#include "zzapp_note.h"
+
+ZZAPP_NOTE(ZZAPP_NOTE_FLAG_DISPLAY, 0)
 
 static void put_rgb565(uint8_t *dst, uint16_t pixel, uint32_t layout)
 {

@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "zzapp.h"
+#include "zzapp_note.h"
+
+ZZAPP_NOTE(0, 0)
 
 static const char hello_text[] = "hello zzapp\n";
 const char *zzapp_hello_msg = hello_text;
