@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <zz9k/text.h>
 
 struct Library *ZZ9KBase;
 
@@ -31,6 +32,7 @@ int main(int argc, char **argv)
   uint32_t received_count = 0U;
   uint32_t i;
   ZZ9KAppStatusInfo final_status;
+  const char *step = "open";
   int status;
 
   if (argc < 2 || argc > 3) {
@@ -64,8 +66,10 @@ int main(int argc, char **argv)
   }
   status = ZZ9KAppOpen(&app, port);
   if (status != ZZ9K_STATUS_OK) goto fail;
+  step = "load";
   status = ZZ9KAppLoadFile(app, argv[1]);
   if (status != ZZ9K_STATUS_OK) goto fail;
+  step = "start";
   status = ZZ9KAppStart(app, app_argv, 1U);
   if (status != ZZ9K_STATUS_OK) goto fail;
   signal = ZZ9KAppMessageSignal(app);
@@ -79,6 +83,7 @@ int main(int argc, char **argv)
     for (i = 0U; i < sizeof(sent.bytes); i++) {
       sent.bytes[i] = (uint8_t)(sent_count * 31U + i);
     }
+    step = "send";
     status = ZZ9KAppSendMessage(app, &sent);
     if (status != ZZ9K_STATUS_OK) goto fail;
     sent_count++;
@@ -90,6 +95,7 @@ int main(int argc, char **argv)
     while (GetMsg(port)) {
       /* Notification payload is advisory; drain messages before Close. */
     }
+    step = "receive";
     status = ZZ9KAppGetMessage(app, &received);
     if (status != ZZ9K_STATUS_OK || memcmp(sent.bytes, received.bytes,
                                             sizeof(sent.bytes)) != 0) {
@@ -98,6 +104,7 @@ int main(int argc, char **argv)
     }
     received_count++;
   }
+  step = "stop";
   status = ZZ9KAppStop(app);
   if (status != ZZ9K_STATUS_OK) goto fail;
   for (;;) {
@@ -119,7 +126,14 @@ int main(int argc, char **argv)
   return 0;
 
 fail:
-  printf("zz9k-app-echo-test: FAIL (%d)\n", status);
+  printf("zz9k-app-echo-test: FAIL at %s after %lu messages: %s (%d)\n", step,
+         (unsigned long)received_count, zz9k_status_text(status), status);
+  if (app && ZZ9KAppStatus(app, &final_status) == ZZ9K_STATUS_OK) {
+    printf("app state %lu fault %lu exit %ld generation %lu pc %08lx\n",
+           (unsigned long)final_status.state, (unsigned long)final_status.fault_code,
+           (long)final_status.exit_code, (unsigned long)final_status.generation,
+           (unsigned long)final_status.pc);
+  }
   if (port) {
     while (GetMsg(port)) {}
   }

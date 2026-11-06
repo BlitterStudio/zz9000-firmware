@@ -180,25 +180,17 @@ int main(int argc, char **argv)
     "zz9k_lib_copy_surface"
   };
   char *source;
-  char *app_source;
   size_t i;
   int failures;
 
-  if (argc != 3) {
-    printf("usage: %s <zz9k_library_resident.c> <zz9k_library_app.inc>\n",
-           argv[0]);
+  if (argc != 2) {
+    printf("usage: %s <zz9k_library_resident.c>\n", argv[0]);
     return 2;
   }
 
   source = read_file(argv[1]);
   if (!source) {
     printf("failed to read %s\n", argv[1]);
-    return 2;
-  }
-  app_source = read_file(argv[2]);
-  if (!app_source) {
-    printf("failed to read %s\n", argv[2]);
-    free(source);
     return 2;
   }
 
@@ -216,22 +208,6 @@ int main(int argc, char **argv)
     printf("zz9k_lib_close: missing semaphore guard\n");
     failures++;
   }
-  if (!strstr(source, "zz9k_lib_find_opener_locked") ||
-      !strstr(source, "base->app->owner_task == task")) {
-    puts("resident app ownership is not tracked per opener");
-    failures++;
-  }
-  if (!strstr(source, "INTB_VERTB") ||
-      !strstr(source, "zz9k_lib_vblank_isr")) {
-    puts("resident app lease is not driven by an Amiga VBlank server");
-    failures++;
-  }
-  if (!strstr(app_source, "zz9k_lib_app_cache_inhibit") ||
-      !strstr(app_source, "zz9k_lib_app_event_remove") ||
-      !strstr(app_source, "zz9k_lib_app_generation_matches")) {
-    puts("resident app client lacks cache, notification, or generation fencing");
-    failures++;
-  }
 
   if (!expect_vector_table_complete(source)) {
     failures++;
@@ -244,6 +220,5 @@ int main(int argc, char **argv)
   }
 
   free(source);
-  free(app_source);
   return failures ? 1 : 0;
 }

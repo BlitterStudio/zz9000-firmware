@@ -350,7 +350,7 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
     status = zz9k_lib_app_call_locked(base, &request, &reply);
   }
   if (status != ZZ9K_STATUS_OK || reply.payload_len < ZZ9K_APP_ALLOC_REPLY_BYTES ||
-      !zz9k_find_board(&board)) {
+      zz9k_find_board(&board) != ZZ9K_STATUS_OK) {
     zz9k_lib_leave(base);
     FreeSignal(signal_bit);
     FreeVec(handle);
