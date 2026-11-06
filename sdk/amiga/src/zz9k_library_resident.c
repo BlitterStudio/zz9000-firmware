@@ -29,6 +29,8 @@
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
+/* Defined by libnix next to the arithmetic helpers that use it. */
+extern struct Library *UtilityBase;
 
 #define ZZ9K_MMU_MAPP_CACHEINHIBIT 0x00000040UL
 #define ZZ9K_MMU_MAPP_COPYBACK 0x00002000UL
@@ -1144,6 +1146,10 @@ static BPTR zz9k_lib_expunge(REG(a6, struct ZZ9KBase *base))
     CloseLibrary((struct Library *)DOSBase);
     DOSBase = 0;
   }
+  if (UtilityBase) {
+    CloseLibrary(UtilityBase);
+    UtilityBase = 0;
+  }
   segment = base->segment;
   FreeMem((uint8_t *)base - base->library.lib_NegSize,
           base->library.lib_NegSize + base->library.lib_PosSize);
@@ -1165,10 +1171,21 @@ static struct ZZ9KBase *zz9k_lib_init(REG(a0, BPTR segment))
   if (!DOSBase) {
     return 0;
   }
+  /* GCC's 32-bit multiply and divide helpers (___udivsi3 and friends) jump
+   * through UtilityBase. -nostartfiles skips the startup code that opens it,
+   * so without this a plain division in the library jumps to 0xffffff63. */
+  UtilityBase = OpenLibrary((CONST_STRPTR)"utility.library", 37);
+  if (!UtilityBase) {
+    CloseLibrary((struct Library *)DOSBase);
+    DOSBase = 0;
+    return 0;
+  }
 
   base = (struct ZZ9KBase *)MakeLibrary(
       (CONST_APTR)zz9k_lib_vectors, 0, 0, sizeof(*base), 0);
   if (!base) {
+    CloseLibrary(UtilityBase);
+    UtilityBase = 0;
     CloseLibrary((struct Library *)DOSBase);
     DOSBase = 0;
     return 0;
