@@ -14,13 +14,28 @@
 static volatile uint32_t g_palette[SDK_PALETTE_ENTRIES];
 static volatile uint32_t g_palette_generation;
 
+/* Same discipline as zzapp_host.c's coherent_barrier: on the weakly
+ * ordered Cortex-A9 the final even generation can become visible before
+ * the palette data unless the writer orders it, and the reader must not
+ * sample data before confirming a stable even generation. */
+static void palette_barrier(void)
+{
+#if defined(__arm__)
+	__asm__ __volatile__("dmb sy" ::: "memory");
+#else
+	__asm__ __volatile__("" ::: "memory");
+#endif
+}
+
 static void sdk_palette_begin_update(void)
 {
 	++g_palette_generation;
+	palette_barrier();
 }
 
 static void sdk_palette_end_update(void)
 {
+	palette_barrier();
 	++g_palette_generation;
 	if (g_palette_generation == 0U)
 		g_palette_generation = 2U;
@@ -60,8 +75,10 @@ int sdk_palette_snapshot(uint32_t entries[SDK_PALETTE_ENTRIES],
 	before = g_palette_generation;
 	if (before & 1U)
 		return 0;
+	palette_barrier();
 	for (i = 0U; i < SDK_PALETTE_ENTRIES; ++i)
 		entries[i] = g_palette[i];
+	palette_barrier();
 	after = g_palette_generation;
 	if (before != after || (after & 1U))
 		return 0;
