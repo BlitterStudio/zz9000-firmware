@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 
+import threading
 
 def run(exe, args, *, input_bytes=None, env=None, cwd=None):
     merged = os.environ.copy()
@@ -145,6 +146,42 @@ def check_msgflood(exe):
             raise SystemExit(f"msgflood recorded {len(got)} of 100 messages")
 
 
+def check_conshort(exe):
+    merged = os.environ.copy()
+    merged["SDL_VIDEODRIVER"] = "dummy"
+    merged["SDL_AUDIODRIVER"] = "dummy"
+    proc = subprocess.Popen(
+        [exe, "--headless"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=merged,
+    )
+    try:
+        proc.stdin.write(b"hello\n")
+        proc.stdin.flush()  # the pipe stays open: a full-length read must not block
+        out = []
+        reader = threading.Thread(
+            target=lambda: out.append(proc.stdout.readline()), daemon=True
+        )
+        reader.start()
+        reader.join(10)
+        if not out or b"got 6: hello" not in out[0]:
+            raise SystemExit(f"console read blocked or wrong: {out!r}")
+        rc = proc.wait(timeout=10)
+        if rc != 0:
+            raise SystemExit(f"exit {rc}")
+    finally:
+        proc.stdin.close()
+        proc.kill()
+        proc.wait()
+
+
+def check_mailbox(exe):
+    proc = run(exe, ["--headless"])
+    expect_ok(proc)
+
+
 def check_pixels(exe):
     want = checkerboard()
     with tempfile.TemporaryDirectory() as root:
@@ -244,6 +281,7 @@ CHECKS = {
     "keys": check_keys,
     "contract": check_contract,
     "msgflood": check_msgflood,
+    "conshort": check_conshort,
 }
 
 

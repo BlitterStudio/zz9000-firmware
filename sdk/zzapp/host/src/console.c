@@ -10,8 +10,20 @@
  */
 #include "host_internal.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <io.h>
+typedef int ssize_t_pipe;
+#define pipe_read(fd, buf, n) _read((fd), (buf), (int)(n))
+typedef ssize_t_pipe read_len_t;
+#else
+#include <unistd.h>
+typedef ssize_t read_len_t;
+#define pipe_read(fd, buf, n) read((fd), (buf), (size_t)(n))
+#endif
 
 static int api_console_write(const void *buf, uint32_t len, uint32_t *out_n)
 {
@@ -41,7 +53,7 @@ static int api_console_write(const void *buf, uint32_t len, uint32_t *out_n)
 
 static int api_console_read(void *buf, uint32_t len, uint32_t *out_n)
 {
-    size_t n;
+    read_len_t n;
 
     if (!buf || !out_n)
         return ZZ_EINVAL;
@@ -51,16 +63,22 @@ static int api_console_read(void *buf, uint32_t len, uint32_t *out_n)
     }
     if (host_stop_requested())
         return ZZ_EIO;
-    n = fread(buf, 1, (size_t)len, stdin);
+    /*
+     * The card returns as soon as any input is available. fread would
+     * block until the full length or EOF; a raw read returns what the
+     * pipe holds now.
+     */
+    do {
+        n = pipe_read(0, buf, len);
+    } while (n < 0 && errno == EINTR);
     if (n == 0) {
         if (host_stop_requested())
             return ZZ_EIO;
-        if (feof(stdin)) {
-            *out_n = 0;
-            return ZZ_OK;
-        }
-        return ZZ_EIO;
+        *out_n = 0;
+        return ZZ_OK; /* EOF */
     }
+    if (n < 0)
+        return ZZ_EIO;
     *out_n = (uint32_t)n;
     return ZZ_OK;
 }

@@ -102,6 +102,7 @@ zzapp_host_executable(pixels SOURCES ${ZZAPP_TEMPLATE_DIR}/pixels.c)
 zzapp_host_executable(tone SOURCES ${ZZAPP_TEMPLATE_DIR}/tone.c)
 zzapp_host_executable(contract SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/contract.c)
 zzapp_host_executable(msgflood SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/msgflood.c)
+zzapp_host_executable(conshort SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/conshort.c)
 
 # Direct unit checks: they include the src file under test, so they do not
 # link the SDL2 runner library.
@@ -142,6 +143,7 @@ if(BUILD_TESTING)
   zzapp_host_test(pixels)
   zzapp_host_test(tone)
   zzapp_host_test(msgflood)
+  zzapp_host_test(conshort)
   add_test(NAME files_unit COMMAND files_unit)
   add_test(NAME memory_unit COMMAND memory_unit)
   add_test(
