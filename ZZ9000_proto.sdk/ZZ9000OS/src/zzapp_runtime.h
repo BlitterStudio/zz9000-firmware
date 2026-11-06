@@ -144,6 +144,8 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
 void zzapp_minigl_swap(void);
 void zzapp_minigl_unbind(void);
 void zzapp_minigl_reclaim(uint32_t generation);
+/* Core 0, while core 1 is halted: drops the binding without module code. */
+void zzapp_minigl_forget(void);
 
 #ifdef ZZAPP_HOST_TEST
 void zzapp_test_set_xtime(uint64_t ticks);

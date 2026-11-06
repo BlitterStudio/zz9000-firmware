@@ -361,6 +361,9 @@ void core1_cold_restart(void)
 	/* heap_forget_owner takes heap_lock. Core 1 may have died holding it. */
 	zzm_runtime_reset_heap_lock();
 	zzapp_services_reclaim_halted_audio();
+	/* The app's GL binding points into the module image; forget it before
+	 * zzm_loader_forget_core1_modules poisons that image. */
+	zzapp_minigl_forget();
 	/* Its module state died with core 1: reload it on the next acquire. */
 	zzm_loader_forget_core1_modules();
 

@@ -243,5 +243,20 @@ int main(void)
     assert(g_reclaims == 1);
     assert(g_68k_closes == 0);
     assert(g_releases == 1);
+
+    /* A watchdog cold restart poisons the module image before the app-side
+     * reclaim runs. zzapp_minigl_forget must drop the binding without
+     * calling into the (poisoned) ops, and the later reclaim must no-op. */
+    zzapp_boot_init();
+    reset_module();
+    g_available = 1;
+    zzapp_test_mark_running();
+    assert(api->gl_bind(101u) == &g_gl);
+    assert(g_reclaims == 0);
+    zzapp_minigl_forget();
+    zzapp_minigl_reclaim(zzapp_current_generation());
+    assert(g_reclaims == 0);
+    assert(g_unbinds == 0);
+    assert(g_releases == 1);
     return 0;
 }

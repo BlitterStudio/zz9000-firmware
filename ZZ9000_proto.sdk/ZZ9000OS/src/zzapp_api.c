@@ -248,6 +248,19 @@ void zzapp_minigl_reclaim(uint32_t generation)
     zzm_loader_release(ZZM_MODULE_MINIGL);
 }
 
+/* Core 0 only, while core 1 is halted and its module image is about to be
+ * poisoned. Drops the binding and the loader reference WITHOUT entering
+ * module code: after the poison, g_minigl.ops points into zeroed memory
+ * and the normal reclaim's app_reclaim call would crash recovery. */
+void zzapp_minigl_forget(void)
+{
+    if (!g_minigl.ops)
+        return;
+    g_minigl.ops = NULL;
+    g_minigl.context = NULL;
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+}
+
 static void api_exit(int code)
 {
     extern void zzapp_host_exit(int);
@@ -427,8 +440,11 @@ static int api_decompress(uint32_t algorithm, uint32_t flags, const void *src,
     if (!src || !dst || !out)
         return ZZ_EINVAL;
     zzapp_api_enter();
+    /* Scratch under the app owner: a force-stop mid-call skips inflateEnd
+     * / LZMA cleanup, and zzapp_api_poison_resources reclaims exactly this
+     * owner instead of leaking into the shared decode pool. */
     rc = sdk_to_zz(sdk_decompress_buffer(algorithm, flags, src, src_bytes,
-                                         dst, dst_bytes, &result));
+                                        dst, dst_bytes, &result));
     if (rc == ZZ_OK) {
         out->bytes_consumed = result.bytes_consumed;
         out->bytes_written = result.bytes_written;
