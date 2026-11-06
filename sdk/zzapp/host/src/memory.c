@@ -15,6 +15,7 @@
 #include <string.h>
 
 struct host_visible {
+    void *base;   /* malloc block; ptr is aligned into it */
     void *ptr;
     uint32_t bytes;
     uint32_t offset;
@@ -53,7 +54,8 @@ static void *visible_alloc(uint32_t bytes, uint32_t align)
 {
     uint32_t i;
     uint32_t offset;
-    void *ptr;
+    uintptr_t raw;
+    uintptr_t p;
 
     if (bytes > HOST_VISIBLE_LIMIT - visible_used)
         return 0;
@@ -66,16 +68,20 @@ static void *visible_alloc(uint32_t bytes, uint32_t align)
     }
     if (i == HOST_VISIBLE_SLOTS)
         return 0;
-    ptr = malloc(bytes);
-    if (!ptr)
+    /* malloc is not aligned past max_align_t; keep the base pointer so
+     * free releases the real block. */
+    raw = (uintptr_t)malloc((size_t)bytes + align);
+    if (!raw)
         return 0;
-    memset(ptr, 0, bytes);
-    visible[i].ptr = ptr;
+    p = (raw + align - 1u) & ~(uintptr_t)(align - 1u);
+    visible[i].base = (void *)raw;
+    visible[i].ptr = (void *)p;
     visible[i].bytes = bytes;
     visible[i].offset = offset;
+    memset(visible[i].ptr, 0, bytes);
     visible_used += bytes;
     visible_next = offset + bytes;
-    return ptr;
+    return visible[i].ptr;
 }
 
 static void *api_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
@@ -98,7 +104,8 @@ static void api_free(void *p)
     for (i = 0; i < HOST_VISIBLE_SLOTS; i++) {
         if (visible[i].ptr == p) {
             visible_used -= visible[i].bytes;
-            free(p);
+            free(visible[i].base);
+            visible[i].base = 0;
             visible[i].ptr = 0;
             visible[i].bytes = 0;
             visible[i].offset = 0;
@@ -160,7 +167,8 @@ void host_memory_shutdown(void)
     uint32_t i;
 
     for (i = 0; i < HOST_VISIBLE_SLOTS; i++) {
-        free(visible[i].ptr);
+        free(visible[i].base);
+        visible[i].base = 0;
         visible[i].ptr = 0;
     }
     free(arena);

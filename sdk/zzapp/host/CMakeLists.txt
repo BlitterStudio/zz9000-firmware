@@ -110,8 +110,14 @@ target_include_directories(files_unit PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+add_executable(memory_unit tests/memory_unit.c)
+target_include_directories(memory_unit PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(files_unit PRIVATE -Wall -Wextra)
+  target_compile_options(memory_unit PRIVATE -Wall -Wextra)
 endif()
 
 include(CTest)
@@ -137,6 +143,7 @@ if(BUILD_TESTING)
   zzapp_host_test(tone)
   zzapp_host_test(msgflood)
   add_test(NAME files_unit COMMAND files_unit)
+  add_test(NAME memory_unit COMMAND memory_unit)
   add_test(
     NAME keys
     COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} keys $<TARGET_FILE:hello>
