@@ -2091,6 +2091,8 @@ static int audio_attach(void)
 		if (epoch == 0U)
 			epoch = 1U;
 		audio_stream_epoch = epoch;
+		/* Last: the launcher ignores the header until this is nonzero. */
+		barrier();
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_EPOCH_OFF, epoch);
 	}
 	return ZZ_OK;

@@ -277,6 +277,9 @@ int main(void)
                               ZZAPP_AUDIO_HEAD_OFF) == 0u);
         assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                               ZZAPP_AUDIO_TAIL_OFF) == 0u);
+        /* ZZRun treats 0 as "header not published yet". */
+        assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
+                              ZZAPP_AUDIO_EPOCH_OFF) == 0u);
         assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == ZZ_OK);
         {
             uint32_t epoch = zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +

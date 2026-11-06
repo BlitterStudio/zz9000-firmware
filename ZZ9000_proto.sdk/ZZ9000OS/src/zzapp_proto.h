@@ -163,10 +163,10 @@
 #define ZZAPP_AUDIO_FORMAT_OFF 16u
 #define ZZAPP_AUDIO_ROUTE_OFF  20u
 #define ZZAPP_AUDIO_UNDERRUNS_OFF 24u
-/* Previously unused flags word. Firmware publishes a per-open stream epoch
- * here so a launcher that misses a close still sees the replacement. */
+/* Per-open stream epoch, never 0 while a stream is open. Written after the
+ * rest of the header, so a launcher that sees 0 waits for the next poll and
+ * one that sees a new value knows the stream was replaced. */
 #define ZZAPP_AUDIO_EPOCH_OFF  28u
-#define ZZAPP_AUDIO_FLAGS_OFF  ZZAPP_AUDIO_EPOCH_OFF
 #define ZZAPP_AUDIO_FORMAT_S16LE 1u
 #define ZZAPP_AUDIO_ROUTE_CARD 0u
 #define ZZAPP_AUDIO_ROUTE_AHI  1u
