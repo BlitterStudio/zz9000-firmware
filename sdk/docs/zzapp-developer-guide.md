@@ -129,26 +129,54 @@ Ctrl-D, Ctrl-E, and Ctrl-F on the display window are raw keys and also
 
 ## Building
 
-The supported third-party interfaces, owned by the toolchain slice, are:
+The SDK image `ghcr.io/blitterstudio/zz9000-app-sdk` has Arm GNU Toolchain
+13.2.rel1, a PIC newlib 4.3.0.20230120 sysroot (stock newlib is not PIC and
+cannot satisfy the loader) and the SDK at `/opt/zzapp-sdk`, with
+`ZZAPP_SDK` and `ZZAPP_PIC_SYSROOT` set. Build it yourself with
+`docker build -f sdk/zzapp/docker/Dockerfile -t zz9000-app-sdk sdk/zzapp`.
+Outside the image, set `ZZAPP_SDK` to `sdk/zzapp` and `ZZAPP_PIC_SYSROOT` to
+the output of `sdk/zzapp/build_pic_newlib.sh`.
 
-- Docker image `zz9000/app-sdk`: Arm GNU Toolchain 13.2.rel1, a PIC newlib
-  4.3.0.20230120 sysroot, and this SDK. Stock newlib is not PIC and cannot
-  satisfy the loader.
-- `sdk/zzapp/mk/zzapp.mk`, a Makefile include.
-- `sdk/zzapp/cmake/zzapp-toolchain.cmake` and `zzapp_add_executable`.
-- `ZZAPP_NOTE(flags, stack_bytes)` in `sdk/zzapp/include/zzapp_note.h`. It
-  emits the `ZZAPP` note (magic `0x50505A41`, ABI 0.0, the stack request,
-  and the display/audio/GL flags). A host build compiles the macro to
-  nothing.
+One source file declares the note:
 
-Exact command lines: see `sdk/zzapp/mk` and `sdk/zzapp/cmake`.
+```c
+#include "zzapp.h"
+#include "zzapp_note.h"
 
-The image must be a position-independent ARM ELF, little-endian, hard-float,
-Cortex-A9, NEON. Link `-fPIE -pie` with the SDK linker script. No
-`PT_INTERP` and no `DT_NEEDED`. Allocated relocations must be
-`R_ARM_RELATIVE` only. Current stock GNU ld `SHT_REL` output loads
-directly. The in-tree check is `make -C sdk/zzapp check-relocs` with
-`ZZAPP_PIC_SYSROOT` set to the PIC sysroot.
+ZZAPP_NOTE(ZZAPP_NOTE_FLAG_DISPLAY, 0) /* flags, stack bytes (0 = 1 MiB); no ';' */
+```
+
+With make:
+
+```make
+ZZAPP_SDK ?= /opt/zzapp-sdk
+APP := myapp
+SRCS := main.c render.c
+include $(ZZAPP_SDK)/mk/zzapp.mk
+```
+
+`make` builds `build/myapp.elf`, `make check` also runs `zzapp-check`, and
+`make clean` removes the build. `CFLAGS` and `LDLIBS` set before the include
+are added to the SDK's flags.
+
+With CMake:
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+project(myapp C ASM)
+include("${ZZAPP_SDK}/cmake/zzapp.cmake")
+zzapp_add_executable(myapp SOURCES main.c render.c)
+```
+
+Configure with
+`-DCMAKE_TOOLCHAIN_FILE=$ZZAPP_SDK/cmake/zzapp-toolchain.cmake`; the build
+runs `zzapp-check` after linking.
+
+`sdk/zzapp/tools/zzapp-check app.elf` checks a finished image: a
+position-independent little-endian hard-float ELF for Cortex-A9/NEON, no
+`PT_INTERP` and no `DT_NEEDED`, allocated relocations `R_ARM_RELATIVE` only
+(stock GNU ld `SHT_REL` output loads directly), and a valid `ZZAPP` note
+(magic `0x50505A41`, ABI 0, known flags, a stack of 0 or 64 KiB to 1 MiB).
 
 Flags in the note: bit 0 display, bit 1 audio, bit 2 GL. Request only what
 the app uses.
