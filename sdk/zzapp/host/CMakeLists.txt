@@ -146,6 +146,14 @@ if(BUILD_TESTING)
   zzapp_host_test(msgflood)
   zzapp_host_test(conshort)
   zzapp_host_test(mailbox)
+  add_test(
+    NAME constop
+    COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} constop $<TARGET_FILE:conshort>
+  )
+  set_tests_properties(constop PROPERTIES
+    TIMEOUT 60
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
+  )
   add_test(NAME files_unit COMMAND files_unit)
   add_test(NAME memory_unit COMMAND memory_unit)
   add_test(

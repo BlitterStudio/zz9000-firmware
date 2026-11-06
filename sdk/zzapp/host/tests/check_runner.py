@@ -182,6 +182,37 @@ def check_mailbox(exe):
     expect_ok(proc)
 
 
+def check_constop(exe):
+    if os.name != "posix":
+        return
+    import signal
+    import time
+
+    merged = os.environ.copy()
+    merged["SDL_VIDEODRIVER"] = "dummy"
+    merged["SDL_AUDIODRIVER"] = "dummy"
+    proc = subprocess.Popen(
+        [exe, "--headless"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=merged,
+    )
+    try:
+        time.sleep(0.5)  # let the app block in zz_console_read on the empty pipe
+        proc.send_signal(signal.SIGTERM)
+        try:
+            rc = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise SystemExit("console read not interrupted by SIGTERM")
+        if rc != 1:
+            raise SystemExit(f"expected the stop result 1, got {rc}")
+    finally:
+        proc.stdin.close()
+        proc.kill()
+        proc.wait()
+
+
 def check_pixels(exe):
     want = checkerboard()
     with tempfile.TemporaryDirectory() as root:
@@ -283,6 +314,7 @@ CHECKS = {
     "msgflood": check_msgflood,
     "conshort": check_conshort,
     "mailbox": check_mailbox,
+    "constop": check_constop,
 }
 
 
