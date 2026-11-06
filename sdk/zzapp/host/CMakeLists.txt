@@ -102,6 +102,17 @@ zzapp_host_executable(pixels SOURCES ${ZZAPP_TEMPLATE_DIR}/pixels.c)
 zzapp_host_executable(tone SOURCES ${ZZAPP_TEMPLATE_DIR}/tone.c)
 zzapp_host_executable(contract SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/contract.c)
 
+# Direct unit checks: they include the src file under test, so they do not
+# link the SDL2 runner library.
+add_executable(files_unit tests/files_unit.c)
+target_include_directories(files_unit PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(files_unit PRIVATE -Wall -Wextra)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -123,6 +134,7 @@ if(BUILD_TESTING)
   zzapp_host_test(echo)
   zzapp_host_test(pixels)
   zzapp_host_test(tone)
+  add_test(NAME files_unit COMMAND files_unit)
   add_test(
     NAME keys
     COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} keys $<TARGET_FILE:hello>

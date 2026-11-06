@@ -347,9 +347,8 @@ static int api_file_open(const char *path, uint32_t flags)
     const char *mode;
     FILE *fp;
     int creating;
-    int id;
+    int slot;
     int rc;
-    int i;
 
     if ((flags & ~(ZZ_FILE_READ | ZZ_FILE_WRITE | ZZ_FILE_CREATE)) != 0u)
         return ZZ_EINVAL;
@@ -365,19 +364,20 @@ static int api_file_open(const char *path, uint32_t flags)
         mode = "r+b";
     else
         mode = "rb";
+    /* Reserve the slot before the creating open: "wb+" truncates, and a
+     * truncation followed by ZZ_ENOMEM would destroy the caller's file. */
+    for (slot = 0; slot < HOST_FD_COUNT; slot++) {
+        if (!fds[slot].used)
+            break;
+    }
+    if (slot == HOST_FD_COUNT)
+        return ZZ_ENOMEM;
     fp = fopen(full, mode);
     if (!fp)
         return io_err();
-    for (i = 0; i < HOST_FD_COUNT; i++) {
-        if (!fds[i].used) {
-            fds[i].used = 1;
-            fds[i].fp = fp;
-            id = HOST_FD_BASE + i;
-            return id;
-        }
-    }
-    fclose(fp);
-    return ZZ_ENOMEM;
+    fds[slot].used = 1;
+    fds[slot].fp = fp;
+    return HOST_FD_BASE + slot;
 }
 
 static int api_file_close(int fd)
