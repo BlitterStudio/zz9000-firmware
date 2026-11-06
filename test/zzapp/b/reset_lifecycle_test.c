@@ -23,7 +23,10 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
                           uint32_t cpsr);
 int zzapp_loader_abort(void);
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
+void *zzapp_sbrk(int increment);
 int zzapp_host_mem_info(zzapp_mem_info *out);
+/* syscalls.o is linked for zzapp_sbrk; it reads this table pointer. */
+const zzapp_api *zzapp_api_ptr;
 
 #define IMAGE_BYTES 0x200u
 #define PHOFF 52u
@@ -103,10 +106,21 @@ static void make_image(uint8_t image[IMAGE_BYTES])
 
 static void app_entry(const void *api, int argc, char **argv)
 {
-    (void)api;
+    const zzapp_api *table = (const zzapp_api *)api;
+    void *carved;
+    void *brk;
+
     (void)argc;
     (void)argv;
     app_runs++;
+    /* The table's arena blocks carve down from the heap top; newlib's
+     * _sbrk grows up from heap_range's base. They must never overlap. */
+    zzapp_api_ptr = table;
+    carved = table->alloc(64u, 8u, 0u);
+    brk = zzapp_sbrk(64);
+    assert(carved != NULL && brk != (void *)-1);
+    assert((const char *)carved + 64 <= (const char *)brk ||
+           (const char *)brk + 64 <= (const char *)carved);
     if (reset_running) {
         zzapp_mem_info mem;
         void *host_visible;

@@ -18,6 +18,6 @@ $(BUILD)/b/deferred_mailbox_test: b/deferred_mailbox_test.c $(B_DEFERRED_OBJS) $
 	@mkdir -p $(dir $@)
 	$(CC) $(B_SDK_CPPFLAGS) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -pthread -o $@ $< $(B_DEFERRED_OBJS) $(A_RUNTIME_OBJS)
 
-$(BUILD)/b/reset_lifecycle_test: b/reset_lifecycle_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+$(BUILD)/b/reset_lifecycle_test: b/reset_lifecycle_test.c $(A_RUNTIME_OBJS) $(BUILD)/syscalls.o | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -o $@ $< $(A_RUNTIME_OBJS)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/syscalls.o
