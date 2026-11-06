@@ -269,15 +269,7 @@ static uint64_t api_time_us(void)
 
 static void api_sleep_us(uint32_t us)
 {
-    uint64_t deadline = host_time_us() + us;
-
-    while (!host_stop_requested() && host_time_us() < deadline) {
-        uint64_t left = deadline - host_time_us();
-        if (left > 2000ull)
-            SDL_Delay((Uint32)(left / 1000ull));
-        else
-            host_pump();
-    }
+    host_sleep_until(host_time_us() + us);
 }
 
 static void api_log(const char *msg, uint32_t len)

@@ -57,6 +57,7 @@ add_library(zzapp-host STATIC
   src/console.c
   src/messages.c
   src/services.c
+  src/sleep.c
 )
 set_target_properties(zzapp-host PROPERTIES OUTPUT_NAME zzapp-host)
 target_include_directories(zzapp-host
@@ -117,9 +118,16 @@ target_include_directories(memory_unit PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+add_executable(sleep_unit tests/sleep_unit.c)
+target_include_directories(sleep_unit PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(sleep_unit PRIVATE ${ZZAPP_SDL2})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(files_unit PRIVATE -Wall -Wextra)
   target_compile_options(memory_unit PRIVATE -Wall -Wextra)
+  target_compile_options(sleep_unit PRIVATE -Wall -Wextra)
 endif()
 
 include(CTest)
@@ -156,6 +164,7 @@ if(BUILD_TESTING)
   )
   add_test(NAME files_unit COMMAND files_unit)
   add_test(NAME memory_unit COMMAND memory_unit)
+  add_test(NAME sleep_unit COMMAND sleep_unit)
   add_test(
     NAME keys
     COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} keys $<TARGET_FILE:hello>
