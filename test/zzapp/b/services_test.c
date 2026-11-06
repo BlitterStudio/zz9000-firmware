@@ -408,6 +408,107 @@ static void test_display_mailbox(void)
 		fail("display mailbox old launcher fallback");
 }
 
+static uint64_t file_now;
+static int file_phase;
+static int late_injected;
+static uint32_t abandoned_done;
+static uint32_t live_req;
+
+static uint64_t file_time(void)
+{
+	return file_now;
+}
+
+static void file_yield(void)
+{
+	uint32_t seq = zzapp_get_be32(g_window + ZZAPP_FILE_OFF);
+
+	if (file_phase == 0) {
+		if ((seq & 1U) == 0U && seq != 0U)
+			abandoned_done = seq + 2U;
+		file_now += ZZAPP_FILE_TIMEOUT_US;
+		return;
+	}
+	if (!late_injected) {
+		if ((seq & 1U) == 0U && seq != 0U)
+			live_req = seq;
+		/* Stale kit 64 completion: request_seq + 2, not this request. */
+		zzapp_put_be32(g_window + ZZAPP_FILE_OFF + 20U, 99U);
+		zzapp_put_be32(g_window + ZZAPP_FILE_OFF, abandoned_done);
+		late_injected = 1;
+		return;
+	}
+	if (live_req != 0U) {
+		zzapp_put_be32(g_window + ZZAPP_FILE_OFF, live_req + 1U);
+		zzapp_put_be32(g_window + ZZAPP_FILE_OFF + 20U, 0U);
+		zzapp_put_be32(g_window + ZZAPP_FILE_OFF, live_req + 2U);
+		live_req = 0U;
+		return;
+	}
+	file_now += ZZAPP_FILE_TIMEOUT_US;
+}
+
+static void test_late_file_reply(void)
+{
+	int fd;
+	uint32_t seq;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_set_generation(1U);
+	file_now = 0U;
+	file_phase = 0;
+	late_injected = 0;
+	abandoned_done = 0U;
+	live_req = 0U;
+	zzapp_services_test_set_time(file_time);
+	zzapp_services_test_set_yield(file_yield);
+	fd = zzapp_svc_file_open("pak0.pak", ZZ_FILE_READ);
+	if (fd != ZZ_ETIMEDOUT)
+		fail("first open timeout");
+	seq = zzapp_get_be32(g_window + ZZAPP_FILE_OFF);
+	if ((seq & 1U) == 0U)
+		fail("timeout looked like a new launcher request");
+	file_phase = 1;
+	file_now = 0U;
+	fd = zzapp_svc_file_open("pak1.pak", ZZ_FILE_READ);
+	if (fd != ZZAPP_FD_BASE + 1)
+		fail("late reply applied or timed-out fd reused");
+}
+
+static void test_audio_teardown_handoff(void)
+{
+	zzapp_audio audio;
+	int rc;
+
+	zzapp_services_test_reset();
+	rc = zzapp_svc_audio_open(22050U, 2U, &audio);
+	if (rc != ZZ_OK)
+		fail("audio open before end");
+	zzapp_services_on_app_end();
+	if (zzapp_services_test_audio_detach_count() != 0U)
+		fail("app end reclaimed audio");
+	if (zzapp_services_test_audio_request() != AUDIO_REQUEST_CLOSE)
+		fail("app end did not hand off close");
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_EBUSY)
+		fail("open reused audio before handoff");
+	zzapp_services_poll();
+	if (zzapp_services_test_audio_request() != AUDIO_REQUEST_CLOSE_QUIESCED)
+		fail("core 1 did not quiesce audio close");
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_EBUSY)
+		fail("open during audio quiesce");
+	zzapp_services_core0_poll();
+	if (zzapp_services_test_audio_detach_count() != 1U)
+		fail("core 0 did not reclaim audio");
+	if (zzapp_services_test_audio_request() != AUDIO_REQUEST_NONE)
+		fail("audio handoff still pending");
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_OK)
+		fail("open after audio reclaim");
+	if (zzapp_svc_audio_close() != ZZ_OK)
+		fail("close after reclaim");
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -415,6 +516,8 @@ int main(void)
 	test_chunked_read();
 	test_drop_on_full();
 	test_audio_busy();
+	test_late_file_reply();
+	test_audio_teardown_handoff();
 	test_display_refresh_rotation_and_layout();
 	test_display_scanout_ack();
 	test_clut8_palette_publication();

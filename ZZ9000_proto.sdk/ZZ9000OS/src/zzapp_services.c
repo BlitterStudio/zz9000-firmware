@@ -193,11 +193,13 @@ static uint64_t audio_staged;
 static uint32_t audio_ahi_staged_frame;
 static void *audio_block;
 static volatile uint32_t audio_request;
+static int audio_result;
+static int audio_teardown;
 static uint32_t audio_stream_epoch;
 static int audio_ahi_route;
 static uint32_t audio_host_tail_seen;
-#ifndef ZZAPP_HOST_TEST
-static int audio_result;
+#ifdef ZZAPP_HOST_TEST
+static uint32_t audio_detach_count;
 #endif
 static int slot_busy_test[4];
 
@@ -611,6 +613,7 @@ static void forget_window(void)
 }
 
 static void audio_detach(void);
+static void audio_post_teardown(void);
 
 void zzapp_services_on_launch(void)
 {
@@ -637,8 +640,7 @@ void zzapp_services_on_launch(void)
 
 void zzapp_services_on_app_end(void)
 {
-	audio_detach();
-	audio_request = AUDIO_REQUEST_NONE;
+	audio_post_teardown();
 	if (display_back_owned)
 		zzapp_loader_free_back(life_get(ZZAPP_LIFE_CARD_BACK_OFF));
 	display_bound = 0;
@@ -688,6 +690,23 @@ static int alloc_fd(int *table)
 		}
 	}
 	return -1;
+}
+
+/* 1 is a live fd. 2 is retired by a timeout: kit 64 ZZRun may still complete
+ * the abandoned op into that index, so it must not be allocated again. */
+static int slot_live(const int *table, int fd)
+{
+	int ix = fd_index(fd);
+
+	return ix >= 0 && table[ix] == 1;
+}
+
+static void release_slot(int *table, int fd, int timed_out)
+{
+	int ix = fd_index(fd);
+
+	if (ix >= 0)
+		table[ix] = timed_out ? 2 : 0;
 }
 
 static uint16_t zz_to_sdk(int zz)
@@ -751,6 +770,8 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 {
 	uint32_t generation = zzapp_services_generation();
 	uint64_t start = now_us();
+	/* Kit 64 ZZRun completes with request_seq + 2 (file_reply). */
+	uint32_t expect = file_seq + 2U;
 
 	for (;;) {
 		uint32_t s1;
@@ -767,7 +788,7 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 		win_inval(ZZAPP_FILE_OFF, ZZAPP_FILE_BYTES);
 		barrier();
 		s1 = win_get32(ZZAPP_FILE_OFF + 0U);
-		if ((s1 & 1U) == 0U && s1 != file_seq) {
+		if (s1 == expect) {
 			n = win_get32(ZZAPP_FILE_OFF + 32U);
 			pos = ((uint64_t)win_get32(ZZAPP_FILE_OFF + 48U) << 32) |
 			      win_get32(ZZAPP_FILE_OFF + 52U);
@@ -792,11 +813,14 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 			}
 		}
 		if (now_us() - start >= ZZAPP_FILE_TIMEOUT_US) {
-			/* Retire this request on the wire before another one reuses
-			 * file_seq; a late reply can no longer satisfy the next wait. */
-			file_seq += 2U;
-			win_put32(ZZAPP_FILE_OFF + 0U, file_seq);
+			/* An even sequence is a new request to kit 64 ZZRun, which
+			 * would execute this abandoned op. An odd sequence is
+			 * ignored. Advance past the abandoned completion
+			 * (request+2) so it cannot match the next wait. */
+			win_put32(ZZAPP_FILE_OFF + 0U, file_seq + 1U);
 			barrier();
+			win_put32(ZZAPP_FILE_OFF + 4U, 0U);
+			file_seq = expect;
 			return ZZ_ETIMEDOUT;
 		}
 		/* File completion polling holds no GL lock, so it is an intentional
@@ -846,7 +870,7 @@ int zzapp_svc_file_open(const char *path, uint32_t flags)
 	}
 	rc = wait_file(NULL, NULL, &mode, NULL, &err);
 	if (rc != ZZ_OK || err != 0) {
-		file_open_slot[fd_index(fd)] = 0;
+		release_slot(file_open_slot, fd, rc == ZZ_ETIMEDOUT);
 		return rc != ZZ_OK ? rc : err;
 	}
 	(void)mode;
@@ -855,17 +879,16 @@ int zzapp_svc_file_open(const char *path, uint32_t flags)
 
 int zzapp_svc_file_close(int fd)
 {
-	int ix = fd_index(fd);
 	int32_t err = 0;
 	int rc;
 
-	if (ix < 0 || !file_open_slot[ix])
+	if (!slot_live(file_open_slot, fd))
 		return ZZ_EBADF;
 	rc = publish_file(ZZAPP_FILE_OP_CLOSE, fd, 0, 0, 0U, 0U, 0U, 0U);
 	if (rc != ZZ_OK)
 		return rc;
 	rc = wait_file(NULL, NULL, NULL, NULL, &err);
-	file_open_slot[ix] = 0;
+	release_slot(file_open_slot, fd, rc == ZZ_ETIMEDOUT);
 	if (rc != ZZ_OK)
 		return rc;
 	return err;
@@ -875,12 +898,11 @@ int zzapp_svc_file_read(int fd, void *buf, uint32_t len, uint32_t *out_n)
 {
 	uint8_t *dst = (uint8_t *)buf;
 	uint32_t got = 0U;
-	int ix = fd_index(fd);
 
 	if (!out_n)
 		return ZZ_EINVAL;
 	*out_n = 0U;
-	if (ix < 0 || !file_open_slot[ix] || !dst)
+	if (!slot_live(file_open_slot, fd) || !dst)
 		return ZZ_EBADF;
 	while (got < len) {
 		uint32_t chunk = len - got;
@@ -916,12 +938,11 @@ int zzapp_svc_file_write(int fd, const void *buf, uint32_t len, uint32_t *out_n)
 {
 	const uint8_t *src = (const uint8_t *)buf;
 	uint32_t got = 0U;
-	int ix = fd_index(fd);
 
 	if (!out_n)
 		return ZZ_EINVAL;
 	*out_n = 0U;
-	if (ix < 0 || !file_open_slot[ix] || (!src && len != 0U))
+	if (!slot_live(file_open_slot, fd) || (!src && len != 0U))
 		return ZZ_EBADF;
 	while (got < len) {
 		uint32_t chunk = len - got;
@@ -955,10 +976,9 @@ int zzapp_svc_file_seek(int fd, int64_t off, int whence, int64_t *out_pos)
 {
 	uint64_t pos = 0U;
 	int32_t err = 0;
-	int ix = fd_index(fd);
 	int rc;
 
-	if (ix < 0 || !file_open_slot[ix])
+	if (!slot_live(file_open_slot, fd))
 		return ZZ_EBADF;
 	if (whence != ZZAPP_SEEK_SET && whence != ZZAPP_SEEK_CUR &&
 	    whence != ZZAPP_SEEK_END)
@@ -1025,7 +1045,7 @@ int zzapp_svc_file_list_open(const char *path)
 	}
 	rc = wait_file(NULL, NULL, NULL, NULL, &err);
 	if (rc != ZZ_OK || err != 0) {
-		list_open_slot[fd_index(list)] = 0;
+		release_slot(list_open_slot, list, rc == ZZ_ETIMEDOUT);
 		return rc != ZZ_OK ? rc : err;
 	}
 	return list;
@@ -1036,10 +1056,9 @@ int zzapp_svc_file_list_next(int list, zzapp_dirent *out)
 	uint32_t n = 0U;
 	uint32_t mode = 0U;
 	int32_t err = 0;
-	int ix = fd_index(list);
 	int rc;
 
-	if (ix < 0 || !list_open_slot[ix] || !out)
+	if (!slot_live(list_open_slot, list) || !out)
 		return ZZ_EBADF;
 	rc = publish_file(ZZAPP_FILE_OP_LIST_NEXT, list, 0, 0, 0U, 0U, 0U, 0U);
 	if (rc != ZZ_OK)
@@ -1062,17 +1081,16 @@ int zzapp_svc_file_list_next(int list, zzapp_dirent *out)
 
 int zzapp_svc_file_list_close(int list)
 {
-	int ix = fd_index(list);
 	int32_t err = 0;
 	int rc;
 
-	if (ix < 0 || !list_open_slot[ix])
+	if (!slot_live(list_open_slot, list))
 		return ZZ_EBADF;
 	rc = publish_file(ZZAPP_FILE_OP_LIST_CLOSE, list, 0, 0, 0U, 0U, 0U, 0U);
 	if (rc != ZZ_OK)
 		return rc;
 	rc = wait_file(NULL, NULL, NULL, NULL, &err);
-	list_open_slot[ix] = 0;
+	release_slot(list_open_slot, list, rc == ZZ_ETIMEDOUT);
 	return rc != ZZ_OK ? rc : err;
 }
 
@@ -1979,6 +1997,9 @@ static void audio_detach(void)
 	if (!__atomic_compare_exchange_n(&audio_open, &open, 0, 0,
 					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 		return;
+#ifdef ZZAPP_HOST_TEST
+	audio_detach_count++;
+#endif
 	was_ahi_route = audio_ahi_route;
 #ifdef ZZAPP_HOST_TEST
 	(void)was_ahi_route;
@@ -2152,22 +2173,68 @@ int zzapp_svc_audio_close(void)
 	return ZZ_OK;
 }
 
-void zzapp_services_core0_poll(void)
+static void audio_post_teardown(void)
 {
-#ifndef ZZAPP_HOST_TEST
-	uint32_t request = audio_request;
-
-	if (request == AUDIO_REQUEST_OPEN)
-		audio_result = audio_attach();
-	else if (request == AUDIO_REQUEST_CLOSE_QUIESCED) {
-		audio_detach();
-		audio_result = ZZ_OK;
-	} else {
+	/* Force-stop and fault frames cannot wait for core 0. Post the same
+	 * close handoff explicit close uses, and leave the slot busy until
+	 * core 0 (or a halted-core reclaim) finishes the detach. */
+	if (audio_request == AUDIO_REQUEST_CLOSE ||
+	    audio_request == AUDIO_REQUEST_CLOSE_QUIESCED) {
+		audio_teardown = 1;
 		return;
 	}
+	if (!audio_open && !audio_block &&
+	    audio_request != AUDIO_REQUEST_OPEN)
+		return;
+	audio_teardown = 1;
+	audio_result = ZZ_EIO;
+	barrier();
+	if (audio_request != AUDIO_REQUEST_OPEN)
+		audio_request = AUDIO_REQUEST_CLOSE;
+}
+
+void zzapp_services_reclaim_halted_audio(void)
+{
+	if (audio_request == AUDIO_REQUEST_OPEN) {
+		audio_result = ZZ_EIO;
+		audio_teardown = 0;
+		barrier();
+		audio_request = AUDIO_REQUEST_NONE;
+		return;
+	}
+	if (!audio_open && !audio_block &&
+	    audio_request != AUDIO_REQUEST_CLOSE &&
+	    audio_request != AUDIO_REQUEST_CLOSE_QUIESCED)
+		return;
+	audio_detach();
+	audio_teardown = 0;
+	audio_result = ZZ_OK;
 	barrier();
 	audio_request = AUDIO_REQUEST_NONE;
-#endif
+}
+
+void zzapp_services_core0_poll(void)
+{
+	uint32_t request = audio_request;
+
+	if (request == AUDIO_REQUEST_OPEN) {
+		if (audio_teardown)
+			audio_result = ZZ_EIO;
+		else
+			audio_result = audio_attach();
+		barrier();
+		audio_request = AUDIO_REQUEST_NONE;
+		if (audio_teardown && (audio_open || audio_block))
+			audio_request = AUDIO_REQUEST_CLOSE;
+		return;
+	}
+	if (request != AUDIO_REQUEST_CLOSE_QUIESCED)
+		return;
+	audio_detach();
+	audio_teardown = 0;
+	audio_result = ZZ_OK;
+	barrier();
+	audio_request = AUDIO_REQUEST_NONE;
 }
 
 static void init_window(uint8_t *base, uint32_t bytes, int uncached)
@@ -2618,6 +2685,9 @@ void zzapp_mailbox_harvest_ack(void)
 void zzapp_services_test_reset(void)
 {
 	audio_detach();
+	audio_request = AUDIO_REQUEST_NONE;
+	audio_teardown = 0;
+	audio_detach_count = 0;
 	forget_window();
 	defer_store(DEFER_IDLE);
 	start_pending = 0U;
@@ -2664,5 +2734,10 @@ void zzapp_services_test_set_audio_request(uint32_t request)
 uint32_t zzapp_services_test_audio_request(void)
 {
 	return audio_request;
+}
+
+uint32_t zzapp_services_test_audio_detach_count(void)
+{
+	return audio_detach_count;
 }
 #endif

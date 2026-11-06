@@ -127,8 +127,9 @@ wrapper result on firmware older than the slot.
 ## ZZ_ETIMEDOUT
 
 `-8`. A file or directory call waited 30 seconds (`ZZAPP_FILE_TIMEOUT_US`)
-without a launcher reply. The runtime retires that request before returning,
-so a late reply cannot satisfy the next call.
+without the launcher completion `request_seq + 2`. The runtime retires that
+request before returning, so a late reply cannot satisfy the next call, and
+the file or directory id is not reused for the rest of the app.
 
 ## ZZ_EFAULT
 

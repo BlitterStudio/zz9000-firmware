@@ -41,6 +41,8 @@ void zzapp_services_on_launch(void);
 
 void zzapp_services_poll(void);
 void zzapp_services_core0_poll(void);
+/* Core 0, while core 1 is halted and cannot be inside the AHI pump. */
+void zzapp_services_reclaim_halted_audio(void);
 void zzapp_services_set_window_mapping_available(int available);
 
 uint8_t *zzapp_services_window(void);
@@ -139,6 +141,7 @@ void zzapp_services_test_set_time(uint64_t (*fn)(void));
 void zzapp_services_test_set_slot_busy(uint32_t slot, int busy);
 void zzapp_services_test_set_audio_request(uint32_t request);
 uint32_t zzapp_services_test_audio_request(void);
+uint32_t zzapp_services_test_audio_detach_count(void);
 #endif
 
 #endif /* ZZAPP_SERVICES_H */
