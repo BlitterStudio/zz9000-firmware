@@ -14,6 +14,14 @@
 
 struct Library *ZZ9KBase;
 
+/* Each step is printed before the call, so a crash names the call that
+ * did not return. */
+static void trace(const char *step)
+{
+  printf("zz9k-app-echo-test: %s\n", step);
+  fflush(stdout);
+}
+
 static void usage(const char *name)
 {
   printf("usage: %s <echo.elf> [message-count]\n", name);
@@ -64,14 +72,18 @@ int main(int argc, char **argv)
     CloseLibrary(ZZ9KBase);
     return 20;
   }
+  trace("open");
   status = ZZ9KAppOpen(&app, port);
   if (status != ZZ9K_STATUS_OK) goto fail;
   step = "load";
+  trace(step);
   status = ZZ9KAppLoadFile(app, argv[1]);
   if (status != ZZ9K_STATUS_OK) goto fail;
   step = "start";
+  trace(step);
   status = ZZ9KAppStart(app, app_argv, 1U);
   if (status != ZZ9K_STATUS_OK) goto fail;
+  trace("signal");
   signal = ZZ9KAppMessageSignal(app);
   if (!signal) {
     status = ZZ9K_STATUS_INTERNAL_ERROR;
@@ -84,6 +96,7 @@ int main(int argc, char **argv)
       sent.bytes[i] = (uint8_t)(sent_count * 31U + i);
     }
     step = "send";
+    if (sent_count < 2U || sent_count % 100U == 0U) trace(step);
     status = ZZ9KAppSendMessage(app, &sent);
     if (status != ZZ9K_STATUS_OK) goto fail;
     sent_count++;
@@ -105,6 +118,7 @@ int main(int argc, char **argv)
     received_count++;
   }
   step = "stop";
+  trace(step);
   status = ZZ9KAppStop(app);
   if (status != ZZ9K_STATUS_OK) goto fail;
   for (;;) {
@@ -119,8 +133,10 @@ int main(int argc, char **argv)
     if (status != ZZ9K_STATUS_OK) goto fail;
     if (final_status.state == ZZ9K_APP_STATE_IDLE) break;
   }
+  trace("close");
   ZZ9KAppClose(app);
   DeleteMsgPort(port);
+  trace("close library");
   CloseLibrary(ZZ9KBase);
   printf("zz9k-app-echo-test: PASS (%lu messages)\n", (unsigned long)count);
   return 0;
@@ -137,8 +153,10 @@ fail:
   if (port) {
     while (GetMsg(port)) {}
   }
+  trace("close");
   if (app) ZZ9KAppClose(app);
   if (port) DeleteMsgPort(port);
+  trace("close library");
   CloseLibrary(ZZ9KBase);
   return 20;
 }
