@@ -282,6 +282,7 @@ CHECKS = {
     "contract": check_contract,
     "msgflood": check_msgflood,
     "conshort": check_conshort,
+    "mailbox": check_mailbox,
 }
 
 

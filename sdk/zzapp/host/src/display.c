@@ -349,9 +349,15 @@ static int api_display_flip(uint32_t surface_id)
         complete_pending();
     present_buffer(disp.drawing);
     disp.showing = disp.drawing;
-    disp.drawing ^= 1;
+    /*
+     * Pick the next drawing buffer from the live rotation (showing /
+     * pending / free), like the firmware mailbox rules. The old
+     * `drawing ^= 1` assumed two buffers and produced index 3 after a
+     * mailbox async flip left drawing at 2.
+     */
+    disp.drawing = spare_buffer();
     if (disp.drawing == disp.showing)
-        disp.drawing = spare_buffer();
+        disp.drawing = (disp.showing + 1) % disp.nbuf;
     count_flip();
     return ZZ_OK;
 }
