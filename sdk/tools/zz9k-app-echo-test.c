@@ -6,6 +6,7 @@
 #include <exec/ports.h>
 #include <exec/types.h>
 #include <proto/exec.h>
+#include <dos/dos.h>
 #include <proto/zz9k.h>
 #include <stdio.h>
 #include <stdlib.h>
