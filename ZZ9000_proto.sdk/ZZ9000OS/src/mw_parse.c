@@ -279,7 +279,18 @@ static int mw_raw_array(const uint8_t *p, size_t bytes)
                         index_bytes != (uint64_t)count * index_scalar)))
         return 0;
 
-    return offset + (((size_t)index_bytes + 3) & ~(size_t)3) == bytes;
+    if (offset + (((size_t)index_bytes + 3) & ~(size_t)3) != bytes)
+        return 0;
+
+    for (i = 0; i < count && index_type; ++i) {
+        uint32_t index = index_type == 0x1401 ? p[offset + i] :
+                         index_type == 0x1403 ? mw_be16(p + offset + i * 2U) :
+                                                mw_be32(p + offset + i * 4U);
+
+        if (index >= count)
+            return 0;
+    }
+    return 1;
 }
 
 static int mw_rgba(const uint8_t *p, size_t bytes, size_t header, size_t dim_offset)

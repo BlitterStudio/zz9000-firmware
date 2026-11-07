@@ -290,6 +290,38 @@ static void test_draw_packed_indexed_validation(void)
     printf("PASS: test_draw_packed_indexed_validation\n");
 }
 
+static void test_raw_array_index_validation(void)
+{
+    uint8_t packet[88];
+    uint8_t *payload = packet + 24;
+
+    memset(packet, 0, sizeof(packet));
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, sizeof(packet));
+    mw_put_be32(packet + 12, 1);
+    mw_put_be32(packet + 16, MW_DRAW_ARRAY_RAW);
+    mw_put_be32(packet + 20, 64);
+    mw_put_be32(payload, 0);          /* GL_POINTS */
+    mw_put_be32(payload + 4, 1);      /* one source vertex */
+    mw_put_be32(payload + 16, 1);     /* one stream */
+    mw_put_be32(payload + 20, 0x1405);/* GL_UNSIGNED_INT indices */
+    mw_put_be32(payload + 24, 4);
+    mw_put_be32(payload + 32, 0);     /* position */
+    mw_put_be32(payload + 36, 2);
+    mw_put_be32(payload + 40, 0x1406);/* GL_FLOAT */
+    mw_put_be32(payload + 44, 8);
+    mw_put_be32(payload + 48, 8);
+    mw_put_bef(payload + 52, 0.0f);
+    mw_put_bef(payload + 56, 0.0f);
+    mw_put_be32(payload + 60, 2);
+
+    assert(mw_validate_packet(packet, sizeof(packet)) == MW_STATUS_INVALID);
+    mw_put_be32(payload + 60, 0);
+    assert(mw_validate_packet(packet, sizeof(packet)) == MW_STATUS_OK);
+    printf("PASS: test_raw_array_index_validation\n");
+}
+
 
 int main(void)
 {
@@ -298,6 +330,7 @@ int main(void)
     test_state_key_validation();
     test_draw_validation_and_nan();
     test_draw_packed_indexed_validation();
+    test_raw_array_index_validation();
     printf("All packet validation tests PASSED!\n");
     return 0;
 }
