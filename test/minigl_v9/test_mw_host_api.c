@@ -456,6 +456,53 @@ static void test_wire_texture_bounds_and_indices(void)
     mw_host_destroy(c);
     printf("PASS: test_wire_texture_bounds_and_indices\n");
 }
+static void test_copy_texture_discards_index_storage(void)
+{
+    mw_ctx *c = mw_host_create(4U, 4U);
+    uint8_t packet[128] = { 0 };
+    uint8_t *p;
+    uint32_t bytes;
+    mw_texture *t;
+
+    assert(c != NULL);
+    bytes = texture_packet(packet, MW_TEXTURE_IMAGE_RAW, 60U);
+    p = packet + 24U;
+    mw_put_be32(p, 93U);
+    mw_put_be32(p + 8U, 4U);
+    mw_put_be32(p + 12U, 1U);
+    mw_put_be32(p + 16U, 1U);
+    mw_put_be32(p + 20U, 0x1900U);
+    mw_put_be32(p + 24U, 0x1401U);
+    mw_put_be32(p + 28U, 1U);
+    mw_put_be32(p + 52U, 1U);
+    p[56] = 0U;
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+
+    bytes = texture_packet(packet, MW_TEXTURE_COPY, 40U);
+    p = packet + 24U;
+    mw_put_be32(p, 93U);
+    mw_put_be32(p + 8U, 4U);
+    mw_put_be32(p + 28U, 4U);
+    mw_put_be32(p + 32U, 4U);
+    mw_put_be32(p + 36U, 1U);
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    t = mw_texmgr_find(&c->texmgr, 93U);
+
+    bytes = texture_packet(packet, MW_COLOR_TABLE, 32U);
+    p = packet + 24U;
+    mw_put_be32(p, 0x80d0U);
+    mw_put_be32(p + 12U, 1U);
+    mw_put_be32(p + 16U, 0x1907U);
+    mw_put_be32(p + 20U, 0x1401U);
+    mw_put_be32(p + 24U, 3U);
+    p[28] = 0xffU;
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    assert(t != NULL && !t->indexed && t->indices[0] == NULL &&
+           t->pixels[0][15] == 0x000000ffU);
+    mw_host_destroy(c);
+    printf("PASS: test_copy_texture_discards_index_storage\n");
+}
+
 
 static void test_draw_buffer_none_preserves_color(void)
 {
@@ -955,6 +1002,7 @@ int main(void)
     test_draw_triangle_golden();
     test_requests();
     test_wire_texture_bounds_and_indices();
+    test_copy_texture_discards_index_storage();
     test_draw_buffer_none_preserves_color();
     test_glquake_texture_soak();
     test_draw_packed_indexed_oracle();

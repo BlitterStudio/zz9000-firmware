@@ -485,6 +485,21 @@ void mw_texmgr_delete(mw_texture_manager *tm, uint32_t id)
     memset(t, 0, sizeof(*t));
     tm->count--;
 }
+void mw_texmgr_discard_indices(mw_texture_manager *tm, mw_texture *t)
+{
+    uint32_t level;
+
+    if (!t)
+        return;
+    for (level = 0U; level < MW_MAX_MIP_LEVELS; ++level) {
+        if (t->indices[level]) {
+            mw_texmgr_free(tm, t->indices[level], &t->index_addresses[level]);
+            t->indices[level] = NULL;
+        }
+    }
+    t->indexed = 0U;
+}
+
 
 int mw_texmgr_allocate_level(mw_texture_manager *tm, mw_texture *t,
                              uint32_t level, uint32_t width, uint32_t height)
@@ -506,6 +521,10 @@ int mw_texmgr_allocate_level(mw_texture_manager *tm, mw_texture *t,
         return 0;
     if (t->pixels[level])
         mw_texmgr_free(tm, t->pixels[level], &t->pixel_addresses[level]);
+    if (t->indices[level]) {
+        mw_texmgr_free(tm, t->indices[level], &t->index_addresses[level]);
+        t->indices[level] = NULL;
+    }
     t->pixels[level] = pixels;
     t->pixel_addresses[level] = address;
     t->widths[level] = width;
@@ -602,7 +621,6 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
     const uint8_t *src;
     mw_texture *t;
     uint32_t *dst;
-    uint32_t level_resize;
     uint32_t y, x;
 
     if (bytes < 56)
@@ -628,14 +646,6 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
     t = mw_texmgr_get_or_create(tm, name);
     if (!t)
         return 0;
-    level_resize = !t->pixels[level] || t->widths[level] != width ||
-                   t->heights[level] != height;
-
-
-    if (level_resize && t->indices[level]) {
-        mw_texmgr_free(tm, t->indices[level], &t->index_addresses[level]);
-        t->indices[level] = NULL;
-    }
     if (!mw_texmgr_allocate_level(tm, t, level, width, height))
         return 0;
     t->base_format[level] = format;
@@ -677,11 +687,7 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
             }
         }
     } else {
-        t->indexed = 0;
-        if (t->indices[level]) {
-            mw_texmgr_free(tm, t->indices[level], &t->index_addresses[level]);
-            t->indices[level] = NULL;
-        }
+        mw_texmgr_discard_indices(tm, t);
         if (source == 0U) {
             memset(dst, 0, (size_t)width * height * sizeof(*dst));
             if (level == 0 && t->generate_mipmap)
@@ -775,6 +781,7 @@ int mw_texmgr_sub_raw(mw_texture_manager *tm, const uint8_t *payload, size_t byt
             }
         }
     } else {
+        mw_texmgr_discard_indices(tm, t);
         pixel = (type == 0x8363 || type == 0x8033 || format == MW_RAW_ARGB_4444) ? 2U :
                 mw_tex_raw_components(format) * mw_tex_raw_scalar_bytes(type);
         source_width = row_length ? row_length : width;

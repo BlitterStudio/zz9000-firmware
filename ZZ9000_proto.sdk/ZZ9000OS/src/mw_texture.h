@@ -66,6 +66,8 @@ void mw_texmgr_destroy(mw_texture_manager *tm);
 mw_texture *mw_texmgr_get_or_create(mw_texture_manager *tm, uint32_t id);
 mw_texture *mw_texmgr_find(mw_texture_manager *tm, uint32_t id);
 void mw_texmgr_delete(mw_texture_manager *tm, uint32_t id);
+void mw_texmgr_discard_indices(mw_texture_manager *tm, mw_texture *t);
+
 
 int mw_texmgr_allocate_level(mw_texture_manager *tm, mw_texture *t,
                              uint32_t level, uint32_t width, uint32_t height);

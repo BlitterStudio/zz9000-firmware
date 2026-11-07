@@ -2064,6 +2064,7 @@ target_allocation_failed:
         }
 
         if (define) {
+            mw_texmgr_discard_indices(&c->texmgr, t);
             if (!mw_texmgr_allocate_level(&c->texmgr, t, level, w, h)) {
                 mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
                 goto command_complete;
