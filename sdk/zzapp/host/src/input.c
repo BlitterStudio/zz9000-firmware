@@ -97,6 +97,9 @@ static const struct raw_map raw_table[] = {
     {SDL_SCANCODE_L, 0x28u, 0},
     {SDL_SCANCODE_SEMICOLON, 0x29u, 0},
     {SDL_SCANCODE_APOSTROPHE, 0x2au, 0},
+    {SDL_SCANCODE_KP_4, 0x2du, 1},
+    {SDL_SCANCODE_KP_5, 0x2eu, 1},
+    {SDL_SCANCODE_KP_6, 0x2fu, 1},
     {SDL_SCANCODE_NONUSBACKSLASH, 0x30u, 0},
     {SDL_SCANCODE_Z, 0x31u, 0},
     {SDL_SCANCODE_X, 0x32u, 0},
@@ -486,6 +489,15 @@ int host_input_selftest(void)
         return 4;
     if (!raw_from_scan(SDL_SCANCODE_UP, &raw, &keypad) || raw != 0x4cu)
         return 5;
+    if (!raw_from_scan(SDL_SCANCODE_KP_4, &raw, &keypad) || raw != 0x2du ||
+        !keypad)
+        return 6;
+    if (!raw_from_scan(SDL_SCANCODE_KP_5, &raw, &keypad) || raw != 0x2eu ||
+        !keypad)
+        return 7;
+    if (!raw_from_scan(SDL_SCANCODE_KP_6, &raw, &keypad) || raw != 0x2fu ||
+        !keypad)
+        return 8;
     memset(&ev, 0, sizeof ev);
     ev.type = SDL_KEYDOWN;
     ev.key.type = SDL_KEYDOWN;
