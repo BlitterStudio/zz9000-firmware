@@ -90,9 +90,9 @@ variant_output() {
 }
 
 variant_capture_c28() {
-    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28
+    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set
     row=$(variant_matrix_row "$1") || return 1
-    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 <<< "$row"
+    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set <<< "$row"
     printf '%s\n' "$capture_c28"
 }
 
@@ -113,9 +113,9 @@ write_define() {
 }
 
 variant_block() {
-    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28
+    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set
     row=$(variant_matrix_row "$1") || return 1
-    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 <<< "$row"
+    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set <<< "$row"
 
     cat <<'EOF'
 // ZORRO2/3 switch

@@ -167,6 +167,8 @@ jobs:
         run: make -C test/sd_activity_led test
       - name: SD boot metadata suite
         run: make -C test/sd_boot test
+      - name: Release variant builder selection
+        run: bash test/release/variant_builder_test.sh
       - name: Scheduler host tests
         run: make -C test/scheduler test
       - name: ZZ9000.CFG parser suite
