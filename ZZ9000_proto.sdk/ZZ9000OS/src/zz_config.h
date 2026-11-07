@@ -195,6 +195,7 @@ struct zz_config {
 
 	/* Audio control-plane keys, parsed here and folded into the scene
 	 * module at boot. Absent/out-of-range keys keep built-in defaults.
+	 * audio_limiter is the limiter threshold in hundredths of full scale;
 	 * audio_ceiling_paula/audio_ceiling_ax are per-card measured clean
 	 * ceilings (1..4095). EQ pairs pack hi*128+lo, scene out packs
 	 * prefactor*128+volume, and baseline packs paula<<8|ax.
@@ -206,11 +207,15 @@ struct zz_config {
 #define ZZ_CFG_AUDIO_NAME_CHUNKS 8
 
 	uint8_t audio_active_present;
+#define ZZ_CFG_AUDIO_LIMITER_MIN 1
+#define ZZ_CFG_AUDIO_LIMITER_MAX 100
 #define ZZ_CFG_AUDIO_CEILING_MIN 1
 #define ZZ_CFG_AUDIO_CEILING_MAX 4095
 	uint16_t audio_active;          /* 0..7 */
 	uint8_t audio_baseline_present;
 	uint16_t audio_baseline;        /* paula<<8 | ax, legs 0..255 */
+	uint8_t audio_limiter_present;
+	uint8_t audio_limiter;          /* limiter threshold, 1..100 hundredths FS */
 	uint8_t audio_ceiling_paula_present;
 	uint16_t audio_ceiling_paula;   /* measured clean ceiling, 1..4095 */
 	uint8_t audio_ceiling_ax_present;

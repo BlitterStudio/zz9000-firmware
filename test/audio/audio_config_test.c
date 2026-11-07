@@ -22,6 +22,7 @@
 #include "ff.h"
 #include "audio_scene.h"
 #include "ax.h"
+#include "limiter_parameter.h"
 #include "limiter_stub.h"
 #include "zz_config.h"
 
@@ -190,7 +191,7 @@ static unsigned count_substring(const char *text, const char *needle)
 	return count;
 }
 
-/* One complete audio block: every one of the 132 audio keys (68
+/* One complete audio block: every one of the 133 audio keys (69
  * parameter keys plus the 64 name-chunk keys), each with a value
  * distinct from the built-in defaults. */
 static void parse_full_audio_block(void)
@@ -201,6 +202,7 @@ static void parse_full_audio_block(void)
 	off += snprintf(text + off, sizeof(text) - off,
 		"audio_active = 5\n"
 		"audio_baseline = %u\n"
+		"audio_limiter = 95\n"
 		"audio_ceiling_paula = 48\n"
 		"audio_ceiling_ax = 80\n", 170u * 256u + 130u);
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++) {
@@ -263,6 +265,12 @@ static void test_parse_all_audio_keys(void)
 		c->audio_ceiling_paula_present &&
 		c->audio_ceiling_ax == 80 && c->audio_ceiling_ax_present,
 		"audio calibration parsed", NULL);
+	check(c->audio_limiter == 95 && c->audio_limiter_present,
+		"audio limiter parsed", fmt("v=%u", c->audio_limiter));
+	check(LIMITER_THRESHOLD_Q23_FROM_HUNDREDTHS(47U) ==
+			LIMITER_BOOT_THRESHOLD_Q23 &&
+		LIMITER_THRESHOLD_Q23_FROM_HUNDREDTHS(95U) == 7969178U,
+		"audio limiter Q23 conversion", NULL);
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
 		check(c->audio_scene_mask[i] == 0xffffu,
 			fmt("scene %d key mask complete", i),
@@ -321,6 +329,8 @@ static void test_absent_and_corrupt_degrade(void)
 	audio_scene_load_config();
 	check(audio_scene_active_index() == 3, "absent keys keep defaults",
 		fmt("active=%u", audio_scene_active_index()));
+	check(!zz_config_get()->audio_limiter_present,
+		"absent limiter keeps boot threshold", NULL);
 	check(audio_scene_apply_after_dsp_init() == 0,
 		"uncalibrated boot applies its baseline before playback", NULL);
 	audio_scene_control_state(&state);
@@ -344,6 +354,8 @@ static void test_absent_and_corrupt_degrade(void)
 		"audio_active = 8\n"
 		"audio_active = xyz\n"
 		"audio_baseline = 70000\n"
+		"audio_limiter = 0\n"
+		"audio_limiter = 101\n"
 		"audio_ceiling_paula = 0\n"
 		"audio_ceiling_ax = 4096\n"
 		"audio_scene2_lpf = 0\n"
@@ -370,6 +382,8 @@ static void test_absent_and_corrupt_degrade(void)
 			AUDIO_SCENE_DEFAULT_CEILING_PAULA &&
 		audio_scene_ceiling_ax() == AUDIO_SCENE_DEFAULT_CEILING_AX,
 		"corrupt calibration pair keeps defaults", NULL);
+	check(!zz_config_get()->audio_limiter_present,
+		"out-of-range limiter keeps boot threshold", NULL);
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
 		check_scene(i, &defaults[i], fmt("degraded scene %d", i));
 	check(zz_config_get()->audio_scene_mask[2] == 0 &&
@@ -446,6 +460,8 @@ static void test_save_roundtrip(void)
 	check(strstr(saved, "audio_ceiling_paula = 512") != NULL &&
 		strstr(saved, "audio_ceiling_ax = 1024") != NULL,
 		"save includes calibration keys", NULL);
+	check(strstr(saved, "audio_limiter = ") == NULL,
+		"save omits an absent limiter key", NULL);
 	/* The saved text must reparse into the same state. */
 	zz_config_reset();
 	check(zz_config_parse(saved, (unsigned)len) == 145,
@@ -504,6 +520,7 @@ static void test_save_splices_live_config(void)
 		"\r\n"
 		"  VIDEOCAP_SAMPLE = even   # keep this spelling\r\n"
 		"audio_active = 1\r\n"
+		"Audio_Limiter = 95\r\n"
 		"Audio_Scene0_LPF = 12000\r\n"
 		"audio_activex = 1\r\n"
 		"# audio_active = 1\r\n"
@@ -522,7 +539,7 @@ static void test_save_splices_live_config(void)
 
 	mock_fs_reset();
 	mock_fs_set_file("0:/ZZ9000.CFG", live);
-	parse_str("videocap_sample = odd\nscanline_mode = 1\n");
+	parse_str("audio_limiter = 95\nvideocap_sample = odd\nscanline_mode = 1\n");
 	audio_scene_init();
 	scene_of(&queued, 12345, 50, 50, 50, 50);
 	scene_of(&later, 8000, 50, 50, 50, 50);
@@ -554,6 +571,10 @@ static void test_save_splices_live_config(void)
 		count_substring(saved, "\naudio_active = ") == 1 &&
 		count_substring(saved, "\naudio_scene0_lpf = ") == 1,
 		"audio keys are replaced once", NULL);
+	check(saved != NULL &&
+		count_substring(saved, "\naudio_limiter = ") == 1 &&
+		strstr(saved, "audio_limiter = 95\n") != NULL,
+		"save preserves configured limiter key", NULL);
 	check(saved != NULL &&
 		strstr(saved, "audio_scene0_lpf = 12345\n") != NULL &&
 		strstr(saved, "audio_scene0_lpf = 8000\n") == NULL,

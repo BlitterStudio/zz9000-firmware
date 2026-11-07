@@ -69,6 +69,8 @@ audio_ceiling_paula = <value>
 audio_ceiling_ax = <value>
 ```
 
+It also preserves `audio_limiter` when present. The value is hundredths of
+full scale; 47 is the default and 95 suits the new ZZ9000 Audio card.
 Firmware loads the pair only when both keys are present. It stores the
 baseline separately as `audio_baseline`. When that key is absent, firmware
 uses the parity calculation in the default-configuration table.

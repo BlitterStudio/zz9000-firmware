@@ -1101,7 +1101,8 @@ AX-equivalent enforced boundary as 3/4 of AX. State get returns both
 ceilings in the former reserved words at offsets 24 and 28; save status
 remains the append-only tail word at offset 44. The pair applies live
 through the ordinary staged commit and persists as
-`audio_ceiling_paula` / `audio_ceiling_ax` on scene Save.
+`audio_ceiling_paula` / `audio_ceiling_ax` on scene Save. Scene Save also
+preserves a present `audio_limiter` configuration key.
 
 Scene **names** are user labels carried beside the master-chain
 parameters. They flow through two paths and no opcode of their own:
