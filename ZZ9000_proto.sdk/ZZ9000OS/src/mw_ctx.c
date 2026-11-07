@@ -1172,6 +1172,31 @@ allocation_failed:
     return 0;
 }
 
+static void mw_clip_raster_rect(const mw_ctx *c, int32_t x, int32_t y,
+                                uint32_t width, uint32_t height,
+                                int16_t *clipped_x, int16_t *clipped_y,
+                                uint16_t *clipped_width, uint16_t *clipped_height)
+{
+    int64_t x0 = x;
+    int64_t y0 = y;
+    int64_t x1 = x0 + width;
+    int64_t y1 = y0 + height;
+
+    if (x0 < 0) x0 = 0;
+    else if (x0 > (int64_t)c->width) x0 = c->width;
+    if (y0 < 0) y0 = 0;
+    else if (y0 > (int64_t)c->height) y0 = c->height;
+    if (x1 < 0) x1 = 0;
+    else if (x1 > (int64_t)c->width) x1 = c->width;
+    if (y1 < 0) y1 = 0;
+    else if (y1 > (int64_t)c->height) y1 = c->height;
+
+    *clipped_x = (int16_t)x0;
+    *clipped_y = (int16_t)y0;
+    *clipped_width = (uint16_t)(x1 > x0 ? x1 - x0 : 0);
+    *clipped_height = (uint16_t)(y1 > y0 ? y1 - y0 : 0);
+}
+
 static void mw_ctx_sync_to_raster(mw_ctx *c)
 {
     ZZ9KMiniGLPacketSetState rstate;
@@ -1194,14 +1219,14 @@ static void mw_ctx_sync_to_raster(mw_ctx *c)
     if (s->stages[1].enabled) flags |= ZZ9K_MGL_STATE_TEXTURE_2D_1;
     if (s->fog_enabled) flags |= ZZ9K_MGL_STATE_FOG;
     rstate.enabled_flags = flags;
-    rstate.viewport_x = (int16_t)s->viewport_x;
-    rstate.viewport_y = (int16_t)s->viewport_y;
-    rstate.viewport_w = (uint16_t)s->viewport_w;
-    rstate.viewport_h = (uint16_t)s->viewport_h;
-    rstate.scissor_x = (int16_t)s->scissor_x;
-    rstate.scissor_y = (int16_t)s->scissor_y;
-    rstate.scissor_w = (uint16_t)s->scissor_w;
-    rstate.scissor_h = (uint16_t)s->scissor_h;
+    mw_clip_raster_rect(c, s->viewport_x, s->viewport_y,
+                        s->viewport_w, s->viewport_h,
+                        &rstate.viewport_x, &rstate.viewport_y,
+                        &rstate.viewport_w, &rstate.viewport_h);
+    mw_clip_raster_rect(c, s->scissor_x, s->scissor_y,
+                        s->scissor_w, s->scissor_h,
+                        &rstate.scissor_x, &rstate.scissor_y,
+                        &rstate.scissor_w, &rstate.scissor_h);
     rstate.depth_func = (uint16_t)s->depth_func;
     rstate.depth_near = (uint32_t)(s->depth_range_near * 16777215.0f);
     rstate.depth_far = (uint32_t)(s->depth_range_far * 16777215.0f);
@@ -2073,13 +2098,13 @@ target_allocation_failed:
             t->internal_rgb[level] = (internal_format == 3 || internal_format == 0x1907);
             uint32_t r, col;
             for (r = 0; r < h; ++r) {
-                int32_t src_y = (int32_t)c->height - 1 - (y + (int32_t)r);
+                int64_t src_y = (int64_t)c->height - 1 - ((int64_t)y + r);
                 for (col = 0; col < w; ++col) {
-                    int32_t src_x = x + (int32_t)col;
+                    int64_t src_x = (int64_t)x + col;
                     uint32_t px = 0;
-                    if (src_x >= 0 && src_x < (int32_t)c->width &&
-                        src_y >= 0 && src_y < (int32_t)c->height)
-                        px = src_buf[(uint32_t)src_y * c->width + (uint32_t)src_x];
+                    if (src_x >= 0 && src_x < (int64_t)c->width &&
+                        src_y >= 0 && src_y < (int64_t)c->height)
+                        px = src_buf[(size_t)src_y * c->width + (size_t)src_x];
                     if (t->internal_rgb[level])
                         px |= 0xffU;
                     t->pixels[level][r * w + col] = px;
@@ -2094,13 +2119,13 @@ target_allocation_failed:
                 goto command_complete;
             }
             for (r = 0; r < h; ++r) {
-                int32_t src_y = (int32_t)c->height - 1 - (y + (int32_t)r);
+                int64_t src_y = (int64_t)c->height - 1 - ((int64_t)y + r);
                 for (col = 0; col < w; ++col) {
-                    int32_t src_x = x + (int32_t)col;
+                    int64_t src_x = (int64_t)x + col;
                     uint32_t px = 0;
-                    if (src_x >= 0 && src_x < (int32_t)c->width &&
-                        src_y >= 0 && src_y < (int32_t)c->height)
-                        px = src_buf[(uint32_t)src_y * c->width + (uint32_t)src_x];
+                    if (src_x >= 0 && src_x < (int64_t)c->width &&
+                        src_y >= 0 && src_y < (int64_t)c->height)
+                        px = src_buf[(size_t)src_y * c->width + (size_t)src_x];
                     if (t->internal_rgb[level])
                         px |= 0xffU;
                     t->pixels[level][(yoffset + r) * t->widths[level] +
@@ -3577,18 +3602,19 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
 
         /* GL glReadPixels produces bottom-row-first reply */
         for (row = 0; row < h; ++row) {
-            int32_t gl_row = y + (int32_t)row;
-            int32_t rast_row = (int32_t)c->height - 1 - gl_row;
+            int64_t gl_row = (int64_t)y + row;
+            int64_t rast_row = (int64_t)c->height - 1 - gl_row;
             uint8_t *dst_row = reply + (size_t)row * w * 4;
             uint32_t col;
 
             for (col = 0; col < w; ++col) {
-                int32_t gl_col = x + (int32_t)col;
-                if (rast_row >= 0 && rast_row < (int32_t)c->height &&
-                    gl_col >= 0 && gl_col < (int32_t)c->width) {
+                int64_t gl_col = (int64_t)x + col;
+                if (rast_row >= 0 && rast_row < (int64_t)c->height &&
+                    gl_col >= 0 && gl_col < (int64_t)c->width) {
                     if (format == 0x1908) { /* GL_RGBA */
                         if (color_buffer) {
-                            uint32_t pix = color_buffer[(size_t)rast_row * c->width + gl_col];
+                            uint32_t pix = color_buffer[(size_t)rast_row * c->width +
+                                                        (size_t)gl_col];
                             dst_row[col * 4]     = (uint8_t)(pix >> 24);
                             dst_row[col * 4 + 1] = (uint8_t)(pix >> 16);
                             dst_row[col * 4 + 2] = (uint8_t)(pix >> 8);
@@ -3600,11 +3626,13 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
                         uint32_t dval = 0;
                         float df;
                         if (minigl_raster_depth_bits() == 16U) {
-                            const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 2;
+                            const uint8_t *dp = c->depth_buffer +
+                                ((size_t)rast_row * c->width + (size_t)gl_col) * 2;
                             dval = ((uint32_t)dp[0] << 8) | dp[1];
                             df = (float)dval / 65535.0f;
                         } else {
-                            const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 3;
+                            const uint8_t *dp = c->depth_buffer +
+                                ((size_t)rast_row * c->width + (size_t)gl_col) * 3;
                             dval = ((uint32_t)dp[0] << 16) | ((uint32_t)dp[1] << 8) | dp[2];
                             df = (float)dval / 16777215.0f;
                         }

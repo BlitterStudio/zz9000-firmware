@@ -327,6 +327,51 @@ static void test_capture_round_trips_all_rgb_formats(void)
 }
 
 
+static void test_scissor_clips_before_raster_narrowing(void)
+{
+    mw_ctx *c = mw_host_create(4U, 4U);
+    uint8_t packet[128] = { 0 };
+    uint8_t *q = packet + 16U;
+    uint32_t pixel;
+    uint8_t output[64];
+
+    assert(c != NULL);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4U, MW_VERSION);
+    mw_put_be32(packet + 12U, 4U);
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4U, 24U);
+    mw_put_be32(q + 8U, MW_SCISSOR_BOX);
+    mw_put_be32(q + 12U, 4U);
+    mw_put_be32(q + 24U, 65536U);
+    mw_put_be32(q + 28U, 65536U);
+    q += 32U;
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4U, 12U);
+    mw_put_be32(q + 8U, MW_SCISSOR);
+    mw_put_be32(q + 12U, 1U);
+    mw_put_be32(q + 16U, 1U);
+    q += 20U;
+    mw_put_be32(q, MW_CLEAR);
+    mw_put_be32(q + 4U, 24U);
+    mw_put_be32(q + 8U, 3U);
+    mw_put_bef(q + 12U, 1.0f);
+    mw_put_bef(q + 24U, 1.0f);
+    mw_put_bef(q + 28U, 1.0f);
+    q += 32U;
+    mw_put_be32(q, MW_PRESENT);
+    mw_put_be32(q + 4U, 0U);
+    q += 8U;
+    mw_put_be32(packet + 8U, (uint32_t)(q - packet));
+    assert(mw_host_submit(c, packet, (uint32_t)(q - packet)) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(c, output, sizeof(output)) == MW_STATUS_OK);
+    for (pixel = 0U; pixel < 16U; ++pixel)
+        assert(output[pixel * 4U] == 0xffU && output[pixel * 4U + 1U] == 0U &&
+               output[pixel * 4U + 2U] == 0U && output[pixel * 4U + 3U] == 0xffU);
+    mw_host_destroy(c);
+    printf("PASS: test_scissor_clips_before_raster_narrowing\n");
+}
+
 static uint32_t texture_packet(uint8_t *packet, uint32_t opcode, uint32_t payload_bytes)
 {
     memset(packet, 0, 24U + payload_bytes);
@@ -1039,6 +1084,7 @@ int main(void)
     test_draw_triangle_golden();
     test_requests();
     test_capture_round_trips_all_rgb_formats();
+    test_scissor_clips_before_raster_narrowing();
     test_wire_texture_bounds_and_indices();
     test_copy_texture_discards_index_storage();
     test_draw_buffer_none_preserves_color();
