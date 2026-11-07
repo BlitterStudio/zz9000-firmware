@@ -1636,13 +1636,24 @@ int audio_scene_reapply_after_dsp_reload(void)
 {
 	if (!audio_scene_quiescent())
 		return -1;
-	/* Unlike an Amiga reset, the owners, their trims and any staged
-	 * edits are still live: keep them, and replay the applied scene
-	 * in full onto the reloaded DSP. */
-	last_applied_valid = 0;
-	meter_reset_all();
-	commit_begin(active_scene_index, 0);
-	commit_flush();
+	/* Unlike an Amiga reset, the owners, their trims, any staged edits
+	 * and the bound playback sessions are still live: keep them and
+	 * their meters (the meters scan TX periods, not DSP state), and
+	 * replay the applied scene in full onto the reloaded DSP. */
+	{
+		/* The replay re-resolves an unchanged scene: it is not a new
+		 * gain reduction, so keep the telemetry as the client saw it. */
+		uint32_t count = gain_reduction_count;
+		struct audio_scene_gain_event last = last_gain_reduction;
+		int have_last = have_last_gain_reduction;
+
+		last_applied_valid = 0;
+		commit_begin(active_scene_index, 0);
+		commit_flush();
+		gain_reduction_count = count;
+		last_gain_reduction = last;
+		have_last_gain_reduction = have_last;
+	}
 	return commit.failed ? -1 : 0;
 }
 

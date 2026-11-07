@@ -795,7 +795,7 @@ uint8_t* audio_get_inited_tx_buffer() {
 /* Applies the operator-kept power-on limiter engagement after the
  * parameter-table load; defined beside the verify helper below. */
 int audio_adau_limiter_apply_boot_threshold(void);
-int audio_adau_init(int program_dsp) {
+static int audio_adau_load(int program_dsp) {
 	XIicPs_Config* i2c_config;
 	i2c_config = XIicPs_LookupConfig(IIC2_DEVICE_ID);
 	int status = XIicPs_CfgInitialize(&Iic2, i2c_config, i2c_config->BaseAddress);
@@ -954,8 +954,18 @@ int audio_adau_init(int program_dsp) {
 
 	printf("[adau] capture build %04x: TDM8 slots 0/1 active\n",
 			ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID);
+	return 1;
+}
+
+int audio_adau_init(int program_dsp) {
+	if (!audio_adau_load(program_dsp))
+		return 0;
 	audio_init_i2s();
 	return 1;
+}
+
+int audio_adau_reload(void) {
+	return audio_adau_load(1);
 }
 
 XTime debug_time_start = 0;

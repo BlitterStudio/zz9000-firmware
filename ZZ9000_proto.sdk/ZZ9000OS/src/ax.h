@@ -69,6 +69,10 @@ enum {
 };
 
 int audio_adau_init(int program_dsp);
+/* Reprogram the ADAU1701 after an external reset, without restarting the
+ * FPGA audio formatters: their TX DMA position is live fabric state.
+ * Returns 1 on success, 0 on failure. */
+int audio_adau_reload(void);
 /* Number of I2C writes issued to the ADAU1701 since boot. */
 uint32_t audio_adau_write_count(void);
 /* Nonzero only when the ADAU1701 core control register is running. */

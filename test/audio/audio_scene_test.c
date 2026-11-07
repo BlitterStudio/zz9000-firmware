@@ -569,6 +569,13 @@ static void test_scene_alone_clamps(void)
 	check(audio_scene_get(2) != NULL &&
 		audio_scene_get(2)->volume == 100,
 		"stored scene definition unchanged by the clamp", NULL);
+	/* #195: a runtime DSP reload replays this clamping scene; the
+	 * replay is not a new reduction the client should see. */
+	check(audio_scene_reapply_after_dsp_reload() == 0 &&
+		audio_scene_gain_reduction_events() == 1,
+		"runtime reload replays the clamp without a new event",
+		fmt("events=%lu",
+			(unsigned long)audio_scene_gain_reduction_events()));
 }
 
 /*

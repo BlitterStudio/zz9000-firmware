@@ -694,6 +694,28 @@ static void test_reset_with_dsp_reinit(void)
 	}
 }
 
+/* ---- #195: a runtime DSP reload keeps the live meter instance ---- */
+
+static void test_runtime_reload_keeps_meters(void)
+{
+	audio_scene_init();
+	audio_scene_meter_output_identity(SDK_AUDIO_METER_IDENTITY_MEDIA);
+	out_fill(0x4000, 0x4000);
+	audio_scene_meter_output_period(out_period, TEST_FRAMES);
+	audio_scene_meter_output_underrun();
+	check(audio_scene_reapply_after_dsp_reload() == 0,
+		"runtime reload reapply succeeds", NULL);
+	check(audio_scene_meter_read(SDK_AUDIO_METER_DIRECTION_OUTPUT,
+	                             0, &snap) == 0 &&
+	      snap.identity == SDK_AUDIO_METER_IDENTITY_MEDIA &&
+	      snap.underrun_count == 1 && snap.peak_hold_ch1 != 0,
+		"runtime reload keeps identity and counters",
+		fmt("identity=%lu underruns=%lu peak=%08lx",
+		    (unsigned long)snap.identity,
+		    (unsigned long)snap.underrun_count,
+		    (unsigned long)snap.peak_hold_ch1));
+}
+
 int main(void)
 {
 	test_peak_hold_consume_reset();
@@ -705,6 +727,7 @@ int main(void)
 	test_snapshot_no_tear();
 	test_frame_packing();
 	test_reset_with_dsp_reinit();
+	test_runtime_reload_keeps_meters();
 
 	if (failures == 0) {
 		printf("audio_meter_test: all tests passed\n");

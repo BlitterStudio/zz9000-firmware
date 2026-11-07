@@ -639,43 +639,62 @@ static void minigl_begin_amiga_reset(void)
 		minigl_reset_abort_and_free();
 }
 
-/* Pulse the ADAU1701 RESET and reload its program. */
-static void audio_dsp_reset_and_init(void)
+/* Pulse the ADAU1701 RESET. */
+static void audio_dsp_pulse_reset(void)
 {
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
 	// Hold RESET low long enough for the Audio card RC filter.
 	usleep(1000);
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
-
-	adau_enabled = audio_adau_init(1);
-	audio_set_codec_present(adau_enabled);
 }
+
+/* Set while a runtime DSP reload has not completed. The watch retries it,
+ * backing off from 1 s to 32 s so a dead chip costs little core-0 time;
+ * an Amiga reset reloads the DSP itself and clears it. */
+static int adau_recovery_pending;
+static uint32_t adau_watch_interval_s = 1U;
 
 /* Once a second, check that the ADAU1701 still runs its program. A glitch
  * on its RESET line (e.g. hot-plugging an audio jack) leaves it at
  * power-on defaults with every output silent; reload it then instead of
  * waiting for an Amiga reset. Runs only while no scene commit, save or
- * bench session is in flight, so the reapply starts from a settled state. */
+ * bench session is in flight, so the reapply starts from a settled state.
+ * The reload reprograms the DSP only: the FPGA formatters and every
+ * client-visible audio state keep running. */
 static void audio_dsp_watch(void)
 {
 	static XTime last_check;
 	XTime now;
 
-	if (!adau_enabled || !audio_scene_quiescent())
+	if ((!adau_enabled && !adau_recovery_pending) ||
+			!audio_scene_quiescent())
 		return;
 	XTime_GetTime(&now);
-	if (now - last_check < COUNTS_PER_SECOND)
+	if (now - last_check <
+			(XTime)adau_watch_interval_s * COUNTS_PER_SECOND)
 		return;
 	last_check = now;
-	if (audio_adau_core_running())
-		return;
+	if (!adau_recovery_pending) {
+		if (audio_adau_core_running())
+			return;
+		printf("[audio] DSP lost its program: reloading\n");
+		adau_recovery_pending = 1;
+	}
 
-	printf("[audio] DSP lost its program: reloading\n");
-	audio_dsp_reset_and_init();
-	if (adau_enabled && audio_scene_reapply_after_dsp_reload() != 0)
-		printf("[scene] reapply after DSP reload failed; "
-		       "DSP holds defaults\n");
+	audio_dsp_pulse_reset();
+	adau_enabled = audio_adau_reload();
+	audio_set_codec_present(adau_enabled);
+	if (adau_enabled && audio_scene_reapply_after_dsp_reload() == 0) {
+		adau_recovery_pending = 0;
+		adau_watch_interval_s = 1U;
+		printf("[audio] DSP reloaded\n");
+		return;
+	}
+	if (adau_watch_interval_s < 32U)
+		adau_watch_interval_s *= 2U;
+	printf("[audio] DSP reload failed; retrying in %lu s\n",
+	       (unsigned long)adau_watch_interval_s);
 }
 
 void handle_amiga_reset(enum amiga_reset_mode mode) {
@@ -822,7 +841,9 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	}*/
 
 	if (!keep_dsp) {
-		audio_dsp_reset_and_init();
+		audio_dsp_pulse_reset();
+		adau_enabled = audio_adau_init(1);
+		audio_set_codec_present(adau_enabled);
 
 		/* The DSP now holds power-on defaults; the control plane
 		 * re-applies the active scene (R10) before the request loop
@@ -836,6 +857,9 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 			audio_scene_apply_after_dsp_init();
 		}
 	}
+	/* This pass reloaded the DSP or verified it running. */
+	adau_recovery_pending = 0;
+	adau_watch_interval_s = 1U;
 	adau_writes_after_reset_pass = audio_adau_write_count();
 
 	// clear interrupt holding amiga
