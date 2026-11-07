@@ -8,6 +8,7 @@
 #define ZZ9K_EVENT_WAIT_H
 
 #include <devices/timer.h>
+#include <dos/dos.h>
 #include <proto/exec.h>
 #include <string.h>
 #include "zz9k/library.h"

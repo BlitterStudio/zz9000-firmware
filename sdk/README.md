@@ -45,9 +45,12 @@ cd sdk
 ./scripts/package-m68k-amigaos.sh
 ```
 
-Both build scripts use the `sacredbanana/amiga-compiler:m68k-amigaos` Docker
-image by default. Supply `-Image` to the PowerShell build script or set `IMAGE`
-when running the shell build script to use another image.
+Both build scripts use the `amigadev/crosstools:m68k-amigaos-gcc10` Docker
+image (GCC 16.2.1b, AmigaDev 16.2-rc23-20; the tag name is historical),
+pinned by digest because the tag follows release candidates. Supply `-Image`
+to the PowerShell build script or set `IMAGE` when running the shell build
+script to try another image. The drivers repository builds with the same
+image.
 
 Run the build step separately when you need only the generated binaries:
 

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 param(
-  [string]$Image = "sacredbanana/amiga-compiler:m68k-amigaos"
+  # Same pinned GCC 16 image as build-m68k-amigaos.sh.
+  [string]$Image = "amigadev/crosstools:m68k-amigaos-gcc10@sha256:47b5556f434ea10e6837c0db3011357f9a08cbc96cdb9c86cd84412cd0456fe1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,7 +13,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildScript = @'
 set -e
 mkdir -p build/m68k build/dtcode
-CFLAGS="-noixemul -Os -s -Werror -Iinclude -Ihost/include"
+CFLAGS="-fcommon -noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
 STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
 
@@ -88,7 +89,13 @@ m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zzplay/zzplay-mp3-transpor
 # swapstack.o grows the stack at startup to the __stack zzplay.c asks for:
 # GadTools, ASL and AHI calls run on the calling task stack, and a Shell
 # launch otherwise gets only its (often 4 KiB) default.
-m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES "$(m68k-amigaos-gcc -noixemul -print-file-name=swapstack.o)" -o build/zzplay
+SWAPSTACK="$(m68k-amigaos-gcc -noixemul -print-file-name=swapstack.o)"
+if [ ! -f "$SWAPSTACK" ]; then
+  LIBNIX="$(m68k-amigaos-gcc -noixemul -print-file-name=libnix20.a)"
+  m68k-amigaos-ar p "$LIBNIX" swapstack.o > build/m68k/swapstack.o
+  SWAPSTACK="build/m68k/swapstack.o"
+fi
+m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES "$SWAPSTACK" -o build/zzplay
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-mpega-smoke.c -o build/zz9k-mpega-smoke
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-jpeg.c -o build/zz9k-jpeg
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-png.c -o build/zz9k-png

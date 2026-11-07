@@ -54,11 +54,28 @@ static inline int zz9k_shared_copy_to(ZZ9KSharedBuffer *buffer,
       zz9k_shared_ptr_aligned(src8, 3U)) {
     volatile uint32_t *dst32 = (volatile uint32_t *)dst8;
     const uint32_t *src32 = (const uint32_t *)src8;
-
+#if defined(__GNUC__) && (defined(__m68k__) || defined(__mc68000__))
+    uint32_t count = length >> 2;
+    if (count != 0U) {
+      uint32_t dbf_cnt = count - 1U;
+      __asm__ volatile(
+          "1:\n\t"
+          "move.l (%[src])+,(%[dst])+\n\t"
+          "dbf %[cnt],1b\n\t"
+          "clr.w %[cnt]\n\t"
+          "subq.l #1,%[cnt]\n\t"
+          "bcc.s 1b"
+          : [dst] "+a"(dst32), [src] "+a"(src32), [cnt] "+d"(dbf_cnt)
+          :
+          : "cc", "memory");
+      length &= 3U;
+    }
+#else
     while (length >= 4U) {
       *dst32++ = *src32++;
       length -= 4U;
     }
+#endif
     dst8 = (volatile uint8_t *)dst32;
     src8 = (const uint8_t *)src32;
   }
@@ -66,18 +83,52 @@ static inline int zz9k_shared_copy_to(ZZ9KSharedBuffer *buffer,
       zz9k_shared_ptr_aligned(src8, 1U)) {
     volatile uint16_t *dst16 = (volatile uint16_t *)dst8;
     const uint16_t *src16 = (const uint16_t *)src8;
-
+#if defined(__GNUC__) && (defined(__m68k__) || defined(__mc68000__))
+    uint32_t count = length >> 1;
+    if (count != 0U) {
+      uint32_t dbf_cnt = count - 1U;
+      __asm__ volatile(
+          "1:\n\t"
+          "move.w (%[src])+,(%[dst])+\n\t"
+          "dbf %[cnt],1b\n\t"
+          "clr.w %[cnt]\n\t"
+          "subq.l #1,%[cnt]\n\t"
+          "bcc.s 1b"
+          : [dst] "+a"(dst16), [src] "+a"(src16), [cnt] "+d"(dbf_cnt)
+          :
+          : "cc", "memory");
+      length &= 1U;
+    }
+#else
     while (length >= 2U) {
       *dst16++ = *src16++;
       length -= 2U;
     }
+#endif
     dst8 = (volatile uint8_t *)dst16;
     src8 = (const uint8_t *)src16;
   }
+#if defined(__GNUC__) && (defined(__m68k__) || defined(__mc68000__))
+  if (length != 0U) {
+    uint32_t dbf_cnt = length - 1U;
+    __asm__ volatile(
+        "1:\n\t"
+        "move.b (%[src])+,(%[dst])+\n\t"
+        "dbf %[cnt],1b\n\t"
+        "clr.w %[cnt]\n\t"
+        "subq.l #1,%[cnt]\n\t"
+        "bcc.s 1b"
+        : [dst] "+a"(dst8), [src] "+a"(src8), [cnt] "+d"(dbf_cnt)
+        :
+        : "cc", "memory");
+    length = 0U;
+  }
+#else
   while (length != 0U) {
     *dst8++ = *src8++;
     length--;
   }
+#endif
   return 1;
 }
 
@@ -100,11 +151,28 @@ static inline int zz9k_shared_copy_from(void *dst,
       zz9k_shared_ptr_aligned(src8, 3U)) {
     uint32_t *dst32 = (uint32_t *)dst8;
     volatile const uint32_t *src32 = (volatile const uint32_t *)src8;
-
+#if defined(__GNUC__) && (defined(__m68k__) || defined(__mc68000__))
+    uint32_t count = length >> 2;
+    if (count != 0U) {
+      uint32_t dbf_cnt = count - 1U;
+      __asm__ volatile(
+          "1:\n\t"
+          "move.l (%[src])+,(%[dst])+\n\t"
+          "dbf %[cnt],1b\n\t"
+          "clr.w %[cnt]\n\t"
+          "subq.l #1,%[cnt]\n\t"
+          "bcc.s 1b"
+          : [dst] "+a"(dst32), [src] "+a"(src32), [cnt] "+d"(dbf_cnt)
+          :
+          : "cc", "memory");
+      length &= 3U;
+    }
+#else
     while (length >= 4U) {
       *dst32++ = *src32++;
       length -= 4U;
     }
+#endif
     dst8 = (uint8_t *)dst32;
     src8 = (volatile const uint8_t *)src32;
   }
@@ -112,18 +180,52 @@ static inline int zz9k_shared_copy_from(void *dst,
       zz9k_shared_ptr_aligned(src8, 1U)) {
     uint16_t *dst16 = (uint16_t *)dst8;
     volatile const uint16_t *src16 = (volatile const uint16_t *)src8;
-
+#if defined(__GNUC__) && (defined(__m68k__) || defined(__mc68000__))
+    uint32_t count = length >> 1;
+    if (count != 0U) {
+      uint32_t dbf_cnt = count - 1U;
+      __asm__ volatile(
+          "1:\n\t"
+          "move.w (%[src])+,(%[dst])+\n\t"
+          "dbf %[cnt],1b\n\t"
+          "clr.w %[cnt]\n\t"
+          "subq.l #1,%[cnt]\n\t"
+          "bcc.s 1b"
+          : [dst] "+a"(dst16), [src] "+a"(src16), [cnt] "+d"(dbf_cnt)
+          :
+          : "cc", "memory");
+      length &= 1U;
+    }
+#else
     while (length >= 2U) {
       *dst16++ = *src16++;
       length -= 2U;
     }
+#endif
     dst8 = (uint8_t *)dst16;
     src8 = (volatile const uint8_t *)src16;
   }
+#if defined(__GNUC__) && (defined(__m68k__) || defined(__mc68000__))
+  if (length != 0U) {
+    uint32_t dbf_cnt = length - 1U;
+    __asm__ volatile(
+        "1:\n\t"
+        "move.b (%[src])+,(%[dst])+\n\t"
+        "dbf %[cnt],1b\n\t"
+        "clr.w %[cnt]\n\t"
+        "subq.l #1,%[cnt]\n\t"
+        "bcc.s 1b"
+        : [dst] "+a"(dst8), [src] "+a"(src8), [cnt] "+d"(dbf_cnt)
+        :
+        : "cc", "memory");
+    length = 0U;
+  }
+#else
   while (length != 0U) {
     *dst8++ = *src8++;
     length--;
   }
+#endif
   return 1;
 }
 

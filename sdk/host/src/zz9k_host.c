@@ -1245,7 +1245,7 @@ int zz9k_sdk_use_int2(const ZZ9KContext *ctx)
 
 #if ZZ9K_HOST_AMIGA
 
-static uint32_t zz9k_sdk_isr(ZZ9KContext *ctx asm("a1"))
+static uint32_t zz9k_sdk_isr(ZZ9KContext *ctx __asm__("a1"))
 {
   uint16_t status = 0;
 

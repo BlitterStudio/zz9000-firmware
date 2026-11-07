@@ -50,7 +50,7 @@ static void print_status(const char *prefix, int status)
 }
 
 #if ZZ9K_IRQTEST_AMIGA
-static uint32_t zz9k_irqtest_isr(ZZ9KIRQTestState *state asm("a1"))
+static uint32_t zz9k_irqtest_isr(ZZ9KIRQTestState *state __asm__("a1"))
 {
   uint16_t irq_status = 0;
 
