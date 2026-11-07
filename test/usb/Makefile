@@ -6,7 +6,8 @@ BUILD_DIR := build
 TARGETS := $(BUILD_DIR)/usb_proxy_protocol_test $(BUILD_DIR)/usb_proxy_recovery_test \
 	$(BUILD_DIR)/ehci_lifecycle_test $(BUILD_DIR)/usb_proxy_diag_test \
 	$(BUILD_DIR)/ehci_periodic_test $(BUILD_DIR)/usb_event_irq_test \
-	$(BUILD_DIR)/ehci_iso_test $(BUILD_DIR)/usb_proxy_iso_test
+	$(BUILD_DIR)/ehci_iso_test $(BUILD_DIR)/usb_proxy_iso_test \
+	$(BUILD_DIR)/usb_port_reset_sm_test
 
 CPPFLAGS += -Istubs -I$(SRC_DIR)
 
@@ -21,6 +22,12 @@ test: $(TARGETS)
 	$(BUILD_DIR)/usb_event_irq_test
 	$(BUILD_DIR)/ehci_iso_test
 	$(BUILD_DIR)/usb_proxy_iso_test
+	$(BUILD_DIR)/usb_port_reset_sm_test
+
+$(BUILD_DIR)/usb_port_reset_sm_test: usb_port_reset_sm_test.c \
+		$(SRC_DIR)/usb_port_reset_sm.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ usb_port_reset_sm_test.c
 
 $(BUILD_DIR)/usb_proxy_protocol_test: usb_proxy_protocol_test.c $(SRC_DIR)/usb_proxy.h stubs/xil_types.h
 	@mkdir -p $(BUILD_DIR)

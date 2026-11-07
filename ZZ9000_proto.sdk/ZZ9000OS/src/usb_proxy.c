@@ -25,6 +25,7 @@
 #include <xtime_l.h>
 #include "xil_cache.h"
 #include "usb_proxy.h"
+#include "usb_port_reset_sm.h"
 #include "usb/usb.h"
 #include "usb_proxy_diag.h"
 #include "usb_proxy_iso.h"
@@ -55,7 +56,16 @@ static uint32_t controller_epoch = 1;
 static uint32_t last_request_id = 0;
 static uint32_t diag_detail;
 
+static struct zzusb_root_reset root_reset;
+static uint32_t root_reset_reg;
+static int root_reset_fsls;
+
 static void periodic_stop_all(void);
+static void reset_port_abort(void);
+static uint16_t diag_complete_command(
+    volatile struct ZZUSBCommand *cmd,
+    volatile struct ZZUSBProtocolExtension *ext, int is_v2,
+    uint16_t result);
 
 uint32_t usb_proxy_get_controller_epoch(void)
 {
@@ -64,6 +74,7 @@ uint32_t usb_proxy_get_controller_epoch(void)
 
 void usb_proxy_advance_controller_epoch(void)
 {
+    reset_port_abort();
     periodic_stop_all();
     usb_proxy_iso_stop_all(EHCI_ISO_PACKET_OFFLINE);
     controller_epoch++;
@@ -94,31 +105,12 @@ int usb_proxy_can_stage_payload(void)
 }
 
 
-static int wait_port_reset_clear(uint32_t *portsc, uint32_t timeout_us,
-                                 uint32_t *observed)
+static uint64_t reset_now_us(void)
 {
-    XTime start;
     XTime now;
-    uint64_t budget = ((uint64_t)timeout_us * COUNTS_PER_SECOND +
-                       999999ULL) / 1000000ULL;
 
-    XTime_GetTime(&start);
-    for (;;) {
-        uint32_t reg = ehci_readl(portsc);
-
-        if (!(reg & EHCI_PS_PR)) {
-            if (observed)
-                *observed = reg;
-            return 0;
-        }
-        XTime_GetTime(&now);
-        if ((uint64_t)(now - start) >= budget) {
-            if (observed)
-                *observed = reg;
-            return -1;
-        }
-        udelay(5);
-    }
+    XTime_GetTime(&now);
+    return ((uint64_t)now * 1000000U) / COUNTS_PER_SECOND;
 }
 
 static int zz_speed_to_usb(int zz)
@@ -897,9 +889,48 @@ static uint16_t handle_cancel_ep(volatile struct ZZUSBCommand *cmd)
     return ZZUSB_STATUS_NAK;
 }
 
+static void reset_port_assert(struct ehci_ctrl *ctrl, uint32_t reg_pre)
+{
+    uint32_t *portsc = (uint32_t *)&ctrl->hcor->or_portsc[0];
+
+    if ((reg_pre & PORTSC_LS_MASK) == PORTSC_LS_K)
+        root_reset_fsls = 1;
+    ehci_zynq_set_phy_mode(root_reset_fsls);
+    udelay(100);
+
+    root_reset_reg = reg_pre & ~EHCI_PS_CLEAR;
+    root_reset_reg |= EHCI_PS_PR;
+    root_reset_reg &= ~EHCI_PS_PE;
+    if (root_reset_fsls)
+        root_reset_reg |= PORTSC_PFSC;
+    else
+        root_reset_reg &= ~PORTSC_PFSC;
+    ehci_writel(portsc, root_reset_reg);
+}
+
+static void reset_port_abort(void)
+{
+    struct ehci_ctrl *ctrl;
+
+    if (!zzusb_root_reset_active(&root_reset))
+        return;
+    ctrl = get_ehci_ctrl();
+    if (ctrl && (root_reset_reg & EHCI_PS_PR)) {
+        root_reset_reg &= ~EHCI_PS_PR;
+        ehci_writel(&ctrl->hcor->or_portsc[0], root_reset_reg);
+    }
+    if (ctrl)
+        ehci_zynq_set_phy_speed(USB_SPEED_HIGH);
+    zzusb_root_reset_abort(&root_reset);
+}
+
 static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
 {
     struct ehci_ctrl *ctrl = get_ehci_ctrl();
+    uint32_t *portsc;
+    uint32_t reg_pre;
+    enum zzusb_root_reset_action action;
+
     if (!ctrl)
         return ZZUSB_STATUS_ERROR;
     periodic_stop_all();
@@ -913,155 +944,114 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
     memset(toggle_bits, 0, sizeof(toggle_bits));
     root_port_connected = 0;
 
-    uint32_t *portsc = (uint32_t *)&ctrl->hcor->or_portsc[0];
-    uint32_t reg_pre, reg;
-    int ret;
-    int reset_flags;
-    int use_fsls_reset;
-
+    portsc = (uint32_t *)&ctrl->hcor->or_portsc[0];
     reg_pre = ehci_readl(portsc);
-    reset_flags = be16(&cmd->flags);
-    use_fsls_reset = (reset_flags & ZZUSB_FLAG_RESET_FSLS) ? 1 : 0;
-
-    /*
-     * If the port already has PR=1 latched from a prior wedged attempt,
-     * drop it cleanly before re-asserting. We write the same value that
-     * is currently in the register with PR cleared (and W1C bits
-     * zeroed so we don't inadvertently ACK status changes).
-     */
-    if (reg_pre & EHCI_PS_PR) {
-        if (use_fsls_reset)
-            ehci_zynq_set_phy_mode(1);
-        reg = reg_pre & ~EHCI_PS_CLEAR;
-        if (use_fsls_reset)
-            reg |= PORTSC_PFSC;
+    root_reset_fsls = (be16(&cmd->flags) & ZZUSB_FLAG_RESET_FSLS) ? 1 : 0;
+    action = zzusb_root_reset_start(&root_reset, reset_now_us(), reg_pre);
+    if (action == ZZUSB_ROOT_RESET_DROP_STALE) {
+        root_reset_reg = reg_pre & ~EHCI_PS_CLEAR;
+        if (root_reset_fsls)
+            root_reset_reg |= PORTSC_PFSC;
         else
-            reg &= ~PORTSC_PFSC;
-        reg &= ~EHCI_PS_PR;
-        ehci_writel(portsc, reg);
-        if (wait_port_reset_clear(portsc, 4000U, &reg_pre) < 0) {
-            diag_detail = reg_pre;
-            return ZZUSB_STATUS_HOSTERROR;
+            root_reset_reg &= ~PORTSC_PFSC;
+        root_reset_reg &= ~EHCI_PS_PR;
+        ehci_writel(portsc, root_reset_reg);
+    } else {
+        reset_port_assert(ctrl, reg_pre);
+    }
+    return ZZUSB_STATUS_PENDING;
+}
+
+int usb_proxy_reset_port_pending(void)
+{
+    return zzusb_root_reset_active(&root_reset);
+}
+
+uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
+                                   volatile struct ZZUSBProtocolExtension *ext,
+                                   int is_v2)
+{
+    struct ehci_ctrl *ctrl = get_ehci_ctrl();
+    uint32_t *portsc;
+    uint32_t reg;
+    enum zzusb_root_reset_state state;
+    enum zzusb_root_reset_action action;
+    uint16_t result = ZZUSB_STATUS_PENDING;
+
+    if (!ctrl || !zzusb_root_reset_active(&root_reset))
+        return ZZUSB_STATUS_ERROR;
+    portsc = (uint32_t *)&ctrl->hcor->or_portsc[0];
+    state = root_reset.state;
+    reg = ehci_readl(portsc);
+    action = zzusb_root_reset_step(&root_reset, reset_now_us(), reg);
+    switch (action) {
+    case ZZUSB_ROOT_RESET_NONE:
+        return ZZUSB_STATUS_PENDING;
+    case ZZUSB_ROOT_RESET_ASSERT:
+        reset_port_assert(ctrl, reg);
+        return ZZUSB_STATUS_PENDING;
+    case ZZUSB_ROOT_RESET_DEASSERT:
+        /*
+         * Use the value written to assert PR, not a PORTSC reread: sticky
+         * ChipIdea bits may have changed while the PHY classified the link.
+         */
+        root_reset_reg &= ~EHCI_PS_PR;
+        ehci_writel(portsc, root_reset_reg);
+        return ZZUSB_STATUS_PENDING;
+    case ZZUSB_ROOT_RESET_PORT_READY:
+        if (!(reg & EHCI_PS_CS)) {
+            root_port_speed_zz = ZZUSB_SPEED_FULL;
+            ehci_zynq_set_phy_speed(USB_SPEED_HIGH);
+            diag_detail = reg;
+            zzusb_root_reset_abort(&root_reset);
+            result = ZZUSB_STATUS_ERROR;
+            break;
         }
+        if (!(reg & EHCI_PS_PE)) {
+            diag_detail = reg;
+            zzusb_root_reset_abort(&root_reset);
+            result = ZZUSB_STATUS_ERROR;
+            break;
+        }
+        root_port_speed_zz = portsc_to_zz_speed(reg);
+        ehci_zynq_set_phy_speed(zz_speed_to_usb(root_port_speed_zz));
+        udelay(100);
+        root_reset.observed_portsc = ehci_readl(portsc);
+        diag_detail = root_reset.observed_portsc;
+        put_be16(&cmd->speed, root_port_speed_zz);
+        return ZZUSB_STATUS_PENDING;
+    case ZZUSB_ROOT_RESET_COMPLETE:
+        memset(toggle_bits, 0, sizeof(toggle_bits));
+        root_port_connected = 1;
+        put_be16(&cmd->speed, root_port_speed_zz);
+        result = ZZUSB_STATUS_OK;
+        break;
+    case ZZUSB_ROOT_RESET_TIMEOUT:
+        diag_detail = root_reset.observed_portsc;
+        if (state == ZZUSB_ROOT_RESET_WAIT_STALE_CLEAR) {
+            result = ZZUSB_STATUS_HOSTERROR;
+        } else {
+            root_port_speed_zz =
+                portsc_to_zz_speed(root_reset.observed_portsc);
+            put_be16(&cmd->speed, root_port_speed_zz);
+            result = root_port_speed_zz == ZZUSB_SPEED_LOW ?
+                     ZZUSB_STATUS_OFFLINE : ZZUSB_STATUS_ERROR;
+        }
+        break;
+    default:
+        break;
     }
 
-    /*
-     * Detect pre-reset line state. On a USB 2.0 root port, LS devices
-     * show line status = K (D- pull-up); FS/HS devices show J.
-     *
-     * Line status bits 11:10; K = 01.
-     *
-     * The Amiga-side root hub code only sets ZZUSB_FLAG_RESET_FSLS for a
-     * confirmed low-speed root attach. Full-speed and high-speed devices
-     * both present J before reset, so a full-speed pre-reset hint must not
-     * force PFSC or high-speed chirp will be suppressed for USB2/USB3
-     * devices. Keep this hint explicit: ZZUSB_SPEED_LOW is encoded as 0,
-     * so a zero/unknown speed value alone must not force FS/LS mode.
-     */
-    if ((reg_pre & PORTSC_LS_MASK) == PORTSC_LS_K)
-        use_fsls_reset = 1;
-
-    /*
-     * Dynamic ULPI transceiver-select switch. HS mode is the default
-     * resting state for the PHY (see ehci-zynq.c init), so HS devices
-     * negotiate 480 Mbit/s natively. For FS/LS devices, HS chirp
-     * negotiation can wedge the HC, so we drop the PHY to FS4LS mode
-     * BEFORE asserting port reset. The call gives the PHY a few
-     * microseconds to settle before we kick the reset.
-     */
-    ehci_zynq_set_phy_mode(use_fsls_reset);
-    udelay(100);
-
-    /*
-     * Assert reset: set PR=1, clear PE, and preserve other bits.
-     * W1C bits (CSC/PEC/OCC) must be written as 0 so we don't
-     * accidentally acknowledge changes we haven't processed yet.
-     * For FS/LS devices also set PFSC to disable HS chirp on the HC
-     * side (defensive; PHY is already in FS4LS).
-     */
-    reg = reg_pre;
-    reg &= ~EHCI_PS_CLEAR;
-    reg |= EHCI_PS_PR;
-    reg &= ~EHCI_PS_PE;
-    if (use_fsls_reset)
-        reg |= PORTSC_PFSC;
-    else
-        reg &= ~PORTSC_PFSC;
-    ehci_writel(portsc, reg);
-
-    /* USB 2.0 spec: hold reset for 50ms on root ports. */
-    mdelay(50);
-
-
-    /*
-     * De-assert reset. Crucially, use the VALUE WE WROTE (with W1C
-     * cleared) rather than re-reading PORTSC: a re-read may pick up
-     * ChipIdea / Zynq-specific sticky bits (PSPD changing as the
-     * PHY redetects LS, line-status transitioning through J/K/SE0)
-     * whose write-back semantics differ from HS reset and were
-     * wedging the low-speed reset path. This matches the in-tree
-     * U-Boot EHCI root-hub RESET handler.
-     */
-    reg &= ~EHCI_PS_PR;
-    ehci_writel(portsc, reg);
-
-    /*
-     * EHCI spec 2.3.9: the host controller must clear PR and
-     * stabilize the port within 2 ms. Give it a bit of headroom
-     * but don't sit here forever — on failure we want to return
-     * status to Poseidon promptly so the Zorro bus keeps flowing.
-     */
-    ret = wait_port_reset_clear(portsc, 4000U, &reg);
-    if (ret < 0) {
-        int stuck_speed;
-
-        reg = ehci_readl(portsc);
-        stuck_speed = portsc_to_zz_speed(reg);
-        root_port_speed_zz = stuck_speed;
-        put_be16(&cmd->speed, stuck_speed);
-        diag_detail = reg;
-        if (stuck_speed == ZZUSB_SPEED_LOW)
-            return ZZUSB_STATUS_OFFLINE;
-        return ZZUSB_STATUS_ERROR;
+    if (result == ZZUSB_STATUS_OK)
+        usb_proxy_iso_after_controller_reset();
+    usb_proxy_advance_controller_epoch();
+    if (is_v2) {
+        put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);
+        put_be16(&ext->header_size, ZZUSB_V2_HEADER_SIZE);
+        put_be32(&ext->controller_epoch, controller_epoch);
+        put_be32(&ext->capabilities, ZZUSB_CAP_BASE);
     }
-
-    reg = ehci_readl(portsc);
-
-    if (!(reg & EHCI_PS_CS)) {
-        root_port_speed_zz = ZZUSB_SPEED_FULL;
-        ehci_zynq_set_phy_speed(USB_SPEED_HIGH);
-        diag_detail = reg;
-        return ZZUSB_STATUS_ERROR;
-    }
-
-    if (!(reg & EHCI_PS_PE)) {
-        diag_detail = reg;
-        return ZZUSB_STATUS_ERROR;
-    }
-
-    int zz_speed = portsc_to_zz_speed(reg);
-    int usb_speed = zz_speed_to_usb(zz_speed);
-    root_port_speed_zz = zz_speed;
-
-    /*
-     * FS4LS is useful while asserting reset because it avoids the
-     * ChipIdea PR latch problem on FS/LS attach. Once the controller has
-     * classified the device, switch the ULPI function-control register to
-     * the actual wire speed before the first address-0 transaction.
-     */
-    ehci_zynq_set_phy_speed(usb_speed);
-    udelay(100);
-    reg = ehci_readl(portsc);
-
-    /* USB 2.0 TRSTRCY recovery. 10 ms is the spec floor. */
-    mdelay(10);
-
-    memset(toggle_bits, 0, sizeof(toggle_bits));
-    root_port_connected = 1;
-
-    diag_detail = reg;
-    put_be16(&cmd->speed, zz_speed);
-    return ZZUSB_STATUS_OK;
+    return diag_complete_command(cmd, ext, is_v2, result);
 }
 
 static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
@@ -1620,6 +1610,7 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
     put_be32(&cmd->actual_length, 0);
     diag_begin_command(cmd, ext, is_v2);
     if (command != ZZUSB_CMD_QUERY_CAPS &&
+        command != ZZUSB_CMD_RESET_PORT &&
         ehci_controller_needs_recovery()) {
         zzusb_diag_count(ZZUSB_DIAG_COUNT_RECOVERY);
         zzusb_diag_record(ZZUSB_DIAG_EVENT_RECOVERY, ZZUSB_STATUS_PENDING,
@@ -1687,9 +1678,11 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
             break;
         case ZZUSB_CMD_RESET_PORT:
             result = handle_reset_port(cmd);
-            if (result == ZZUSB_STATUS_OK)
-                usb_proxy_iso_after_controller_reset();
-            usb_proxy_advance_controller_epoch();
+            if (result != ZZUSB_STATUS_PENDING) {
+                if (result == ZZUSB_STATUS_OK)
+                    usb_proxy_iso_after_controller_reset();
+                usb_proxy_advance_controller_epoch();
+            }
             break;
         case ZZUSB_CMD_CHECK_PORT:
             result = handle_check_port(cmd);
@@ -1736,6 +1729,9 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
             break;
         }
     }
+    if (result == ZZUSB_STATUS_PENDING)
+        return result;
+
 
     if (is_v2) {
         put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);

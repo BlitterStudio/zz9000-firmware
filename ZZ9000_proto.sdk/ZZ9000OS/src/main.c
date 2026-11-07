@@ -177,6 +177,10 @@ static struct ZZUSBProtocolExtension usb_proxy_maint_ext_snapshot
 	__attribute__((aligned(16)));
 static uint8_t usb_proxy_maint_data_snapshot[ZZUSB_MAINT_DATA_MAX]
 	__attribute__((aligned(64)));
+static int usb_proxy_reset_active;
+static int usb_proxy_reset_is_v2;
+static uint32_t usb_proxy_reset_request_id;
+static uint32_t usb_proxy_reset_request_epoch;
 
 static int usb_proxy_request_matches(
     volatile struct ZZUSBCommand *shared_cmd,
@@ -196,6 +200,46 @@ static int usb_proxy_request_matches(
          be32(&shared_ext->controller_epoch) != request_epoch))
         return 0;
     return 1;
+}
+
+static void usb_proxy_poll_reset_command(void)
+{
+	volatile struct ZZUSBCommand *proxy_cmd =
+		(volatile struct ZZUSBCommand *)USB_BLOCK_STORAGE_ADDRESS;
+	volatile struct ZZUSBProtocolExtension *proxy_ext =
+		(volatile struct ZZUSBProtocolExtension *)
+			(USB_BLOCK_STORAGE_ADDRESS + ZZUSB_CMD_SIZE);
+	uint16_t result;
+	int request_matches;
+
+	result = usb_proxy_poll_reset_port(&usb_proxy_cmd_snapshot,
+		&usb_proxy_ext_snapshot, usb_proxy_reset_is_v2);
+	if (result == ZZUSB_STATUS_PENDING)
+		return;
+
+	Xil_DCacheInvalidateRange((u32)proxy_cmd, ZZUSB_V2_HEADER_SIZE);
+	__asm__ __volatile__("dsb" ::: "memory");
+	request_matches = usb_proxy_request_matches(proxy_cmd, proxy_ext,
+		&usb_proxy_cmd_snapshot, usb_proxy_reset_request_id,
+		usb_proxy_reset_request_epoch, usb_proxy_reset_is_v2);
+	if (request_matches) {
+		put_be16(&usb_proxy_cmd_snapshot.status, result);
+		memcpy((void *)proxy_cmd, &usb_proxy_cmd_snapshot,
+		       sizeof(usb_proxy_cmd_snapshot));
+		if (usb_proxy_reset_is_v2)
+			memcpy((void *)proxy_ext, &usb_proxy_ext_snapshot,
+			       sizeof(usb_proxy_ext_snapshot));
+		Xil_DCacheFlushRange((u32)proxy_cmd, ZZUSB_V2_HEADER_SIZE);
+		__asm__ __volatile__("dsb" ::: "memory");
+	} else {
+		usb_proxy_note_late_completion(&usb_proxy_cmd_snapshot,
+			&usb_proxy_ext_snapshot, usb_proxy_reset_is_v2);
+		usb_proxy_advance_controller_epoch();
+	}
+	if (usb_proxy_reset_is_v2)
+		usb_proxy_publish_diagnostics(
+			(volatile void *)USB_BLOCK_STORAGE_ADDRESS, 0U);
+	usb_proxy_reset_active = 0;
 }
 
 void usb_proxy_poll_maintenance(void)
@@ -2547,9 +2591,15 @@ int main() {
 		} else {
 			// there are no read/write requests, we can do other housekeeping
 
-			if (!usb_proxy_pending)
+			if (usb_proxy_reset_active) {
+				if (usb_proxy_reset_port_pending())
+					usb_proxy_poll_reset_command();
+				else
+					usb_proxy_reset_active = 0;
+			}
+			if (!usb_proxy_pending && !usb_proxy_reset_active)
 				usb_proxy_poll_maintenance();
-			if (usb_proxy_pending) {
+			if (usb_proxy_pending && !usb_proxy_reset_active) {
 				volatile struct ZZUSBCommand *proxy_cmd =
 					(volatile struct ZZUSBCommand *)USB_BLOCK_STORAGE_ADDRESS;
 				volatile struct ZZUSBProtocolExtension *proxy_ext =
@@ -2635,6 +2685,13 @@ int main() {
 						       actual_length);
 						Xil_DCacheFlushRange((u32)proxy_data,
 						                     actual_length);
+					}
+					if (command == ZZUSB_CMD_RESET_PORT &&
+					    result == ZZUSB_STATUS_PENDING) {
+						usb_proxy_reset_active = 1;
+						usb_proxy_reset_is_v2 = is_v2;
+						usb_proxy_reset_request_id = request_id;
+						usb_proxy_reset_request_epoch = request_epoch;
 					}
 					put_be16(&usb_proxy_cmd_snapshot.status, result);
 					memcpy((void *)proxy_cmd, &usb_proxy_cmd_snapshot,
