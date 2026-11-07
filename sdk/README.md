@@ -54,8 +54,11 @@ the same image.
 `scripts/m68k-toolchain-pin.sh current` prints the pinned image and
 `scripts/m68k-toolchain-pin.sh set <image>@sha256:<digest>` moves every pin.
 The daily `m68k toolchain update` workflow does that when the tag moves:
-it builds, packages and starts the SDK tools with the new image and offers
-the change on the `build/m68k-toolchain` branch.
+it pushes the change to the `build/m68k-toolchain` branch and opens or
+updates a pull request, on which CI builds, packages and starts the SDK
+tools with the new image. It acts as the ZZ9000 toolchain GitHub App
+(organization variable `M68K_TOOLCHAIN_APP_ID`, secret
+`M68K_TOOLCHAIN_APP_PRIVATE_KEY`), so that pull request gets normal CI.
 
 Run the build step separately when you need only the generated binaries:
 
