@@ -84,6 +84,14 @@ jobs:
         run: sh sdk/scripts/build-m68k-amigaos.sh
       - name: Package AmigaOS 3 SDK
         run: sh sdk/scripts/package-m68k-amigaos.sh --skip-build
+      # Start every packaged CLI program once under vamos (in the same
+      # pinned compiler image) and fail on a CPU fault: catches startup
+      # breakage such as a library base libnix never opens.
+      - name: Start packaged tools under vamos
+        run: |
+          docker run --rm -v "$PWD/sdk":/sdk -w /sdk \
+            amigadev/crosstools:m68k-amigaos-gcc10@sha256:47b5556f434ea10e6837c0db3011357f9a08cbc96cdb9c86cd84412cd0456fe1 \
+            python3 scripts/smoke-m68k-vamos.py build/package/amigaos3 --vamos vamos
       - name: Upload AmigaOS 3 package
         uses: actions/upload-artifact@v7
         with:

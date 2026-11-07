@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 param(
-  [string]$Image = "amigadev/crosstools:m68k-amigaos-gcc10"
+  # Same pinned GCC 16 image as build-m68k-amigaos.sh.
+  [string]$Image = "amigadev/crosstools:m68k-amigaos-gcc10@sha256:47b5556f434ea10e6837c0db3011357f9a08cbc96cdb9c86cd84412cd0456fe1"
 )
 
 $ErrorActionPreference = "Stop"

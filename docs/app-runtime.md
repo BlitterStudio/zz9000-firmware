@@ -465,7 +465,7 @@ Amiga reset: ZZRun will not get to clean up. Firmware reclaim is what frees the 
 
 ToolTypes: `ROOT`, `ABS`, `MODE` (optional; the app request wins if MODE is absent). Shell form: `ZZRun <app.elf> [args]`. The app gets the standard C argv: `argv[0]` is the ELF's file name and the arguments after the ELF path follow it (at most 16 entries in total). Quake timedemo: `ZZRun RAM:glquake.elf +timedemo demo1`, with `ROOT` pointing at the directory that contains `id1/`.
 
-Build ZZRun like `ZZCapture`: `tools/amiga-docker.sh` (`zz9000-drivers/tools/amiga-docker.sh`), `m68k-amigaos-gcc -m68030 -O2 -Wall -Wextra -noixemul -lamiga` (`ZZCapture/build.sh`). The drivers repo owns its image choice; the SDK payloads switched to `amigadev/crosstools:m68k-amigaos-gcc10` (GCC 16.2.1b, `sdk/scripts/build-m68k-amigaos.sh`).
+Build ZZRun like `ZZCapture`: `tools/amiga-docker.sh` (`zz9000-drivers/tools/amiga-docker.sh`), `m68k-amigaos-gcc -m68030 -O2 -Wall -Wextra -noixemul -lamiga` (`ZZCapture/build.sh`). The drivers and the SDK payloads (`sdk/scripts/build-m68k-amigaos.sh`) build with the same `amigadev/crosstools:m68k-amigaos-gcc10` image (GCC 16.2.1b), pinned by digest.
 
 ## 5. App API table v0
 
@@ -846,7 +846,7 @@ crt0 (`sdk/zzapp/crt0.S`): save `r0` as the API pointer, set up no vectors, call
 
 Linker script: PHDRs for RX and RW, `.rela.dyn` kept and allocated so the loader can see `R_ARM_RELATIVE`, note `ZZAPP`, entry `zz_start`. No fixed `ORIGIN`. Vaddrs are offsets from 0; the loader adds the arena base.
 
-68k launcher: see the drivers repo (`tools/amiga-docker.sh`); the SDK payloads switched to `amigadev/crosstools:m68k-amigaos-gcc10`.
+68k launcher: see the drivers repo (`tools/amiga-docker.sh`); drivers and SDK payloads both build with `amigadev/crosstools:m68k-amigaos-gcc10` (GCC 16.2.1b).
 
 Templates, each a few dozen lines, MIT: `hello` logs a line and exits; `pixels` opens 320×240 RGB565, uses the launcher's reported `ZZ_LAYOUT_*` byte order, refreshes its surface after each flip, then runs until `ZZ_EV_STOP` or a key; `fault` logs then executes ARM `UDF`, so hardware must report the **undefined-instruction** fault (`fault_code == 3`). `pixels` draws the CPU mapping from `zz_display_open`. It does not go through GL. That is how the kit separates a bad present-copy from a bad launcher screen.
 
