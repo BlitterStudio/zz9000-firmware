@@ -5,7 +5,7 @@ set -e
 
 # GCC 16.2.1b (AmigaDev 16.2-rc23-20). The tag follows release candidates,
 # so the digest pins the compiler that was qualified on the card.
-IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos-gcc10@sha256:47b5556f434ea10e6837c0db3011357f9a08cbc96cdb9c86cd84412cd0456fe1}"
+IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos-gcc10_amd64@sha256:01d8a99e4e23200f6f519cc600b0e03b078724fc69afed05c10876e706438faa}"
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 # Run as root inside the container: the toolchain NDK headers under
