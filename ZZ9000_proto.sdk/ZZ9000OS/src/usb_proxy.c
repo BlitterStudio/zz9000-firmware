@@ -1610,7 +1610,6 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
     put_be32(&cmd->actual_length, 0);
     diag_begin_command(cmd, ext, is_v2);
     if (command != ZZUSB_CMD_QUERY_CAPS &&
-        command != ZZUSB_CMD_RESET_PORT &&
         ehci_controller_needs_recovery()) {
         zzusb_diag_count(ZZUSB_DIAG_COUNT_RECOVERY);
         zzusb_diag_record(ZZUSB_DIAG_EVENT_RECOVERY, ZZUSB_STATUS_PENDING,
