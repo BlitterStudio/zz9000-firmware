@@ -371,6 +371,10 @@ int usb_proxy_reset_port_pending(void);
 uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
                                    volatile struct ZZUSBProtocolExtension *ext,
                                    int is_v2);
+int usb_proxy_set_address_recovery_pending(void);
+uint16_t usb_proxy_poll_set_address_recovery(
+    volatile struct ZZUSBCommand *cmd,
+    volatile struct ZZUSBProtocolExtension *ext, int is_v2);
 uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
                                   volatile struct ZZUSBProtocolExtension *ext,
                                   uint8_t *data_buf, int is_v2);
