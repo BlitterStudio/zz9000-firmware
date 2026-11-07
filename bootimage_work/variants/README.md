@@ -10,7 +10,7 @@ address, HDF selection, and Zorro III Fast RAM.
 
 | Variant | Bitstream | Hardware |
 |---|---|---|
-| `zorro3` | `bootimage_work/zz9000_ps_wrapper.bit` | Zorro III, A3000/A4000, E7M capture |
+| `zorro3` | `bootimage_work/zz9000_ps_wrapper.bit` | Zorro III, A3000/A4000, E7M capture, RasterIX |
 | `zorro3-aga` | `bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga.bit` | A4000/A4000T AGA video-slot capture, Zorro III Fast RAM, RasterIX |
 | `zorro2` | `bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit` | Zorro II 4 MB, A2000 |
 | `zorro2-2mb` | `bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit` | Zorro II 2 MB, A2000 |
