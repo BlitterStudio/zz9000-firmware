@@ -655,20 +655,22 @@ int mw_texmgr_image_raw(mw_texture_manager *tm, const uint8_t *payload, size_t b
             return 1;
         }
         source_width = row_length ? row_length : width;
-        row = ((source_width + alignment - 1) / alignment) * alignment;
-        src = payload + 56 + (size_t)skip_rows * row + (size_t)skip_pixels;
+        pixel = mw_tex_raw_scalar_bytes(type);
+        row = ((source_width * pixel + alignment - 1) / alignment) * alignment;
+        src = payload + 56 + (size_t)skip_rows * row + (size_t)skip_pixels * pixel;
         for (y = 0; y < height; ++y) {
             const uint8_t *src_row = src + (size_t)y * row;
             uint32_t *dst_row = dst + (size_t)y * width;
             uint8_t *idx_row = t->indices[level] + (size_t)y * width;
             for (x = 0; x < width; ++x) {
-                uint8_t idx = src_row[x];
+                uint32_t index = mw_tex_raw_word(src_row + (size_t)x * pixel, pixel, swap);
+                uint8_t idx = (uint8_t)index;
                 idx_row[x] = idx;
-                if (palette && idx < palette_width) {
-                    dst_row[x] = ((uint32_t)palette[idx][0] << 24) |
-                                 ((uint32_t)palette[idx][1] << 16) |
-                                 ((uint32_t)palette[idx][2] << 8)  |
-                                 (uint32_t)palette[idx][3];
+                if (palette && index < palette_width) {
+                    dst_row[x] = ((uint32_t)palette[index][0] << 24) |
+                                 ((uint32_t)palette[index][1] << 16) |
+                                 ((uint32_t)palette[index][2] << 8)  |
+                                 (uint32_t)palette[index][3];
                 } else {
                     dst_row[x] = 0x000000ffU;
                 }
@@ -742,7 +744,8 @@ int mw_texmgr_sub_raw(mw_texture_manager *tm, const uint8_t *payload, size_t byt
     if (!t || !t->pixels[level])
         return 0;
 
-    if (xoffset + width > t->widths[level] || yoffset + height > t->heights[level])
+    if (xoffset > t->widths[level] || width > t->widths[level] - xoffset ||
+        yoffset > t->heights[level] || height > t->heights[level] - yoffset)
         return 0;
 
     dst = t->pixels[level];
@@ -750,20 +753,22 @@ int mw_texmgr_sub_raw(mw_texture_manager *tm, const uint8_t *payload, size_t byt
         if (!mw_texmgr_allocate_indices(tm, t, level))
             return 0;
         source_width = row_length ? row_length : width;
-        row = ((source_width + alignment - 1) / alignment) * alignment;
-        src = payload + 60 + (size_t)skip_rows * row + (size_t)skip_pixels;
+        pixel = mw_tex_raw_scalar_bytes(type);
+        row = ((source_width * pixel + alignment - 1) / alignment) * alignment;
+        src = payload + 60 + (size_t)skip_rows * row + (size_t)skip_pixels * pixel;
         for (y = 0; y < height; ++y) {
             const uint8_t *src_row = src + (size_t)y * row;
             uint32_t *dst_row = dst + (size_t)(yoffset + y) * t->widths[level] + xoffset;
             uint8_t *idx_row = t->indices[level] + (size_t)(yoffset + y) * t->widths[level] + xoffset;
             for (x = 0; x < width; ++x) {
-                uint8_t idx = src_row[x];
+                uint32_t index = mw_tex_raw_word(src_row + (size_t)x * pixel, pixel, swap);
+                uint8_t idx = (uint8_t)index;
                 idx_row[x] = idx;
-                if (palette && idx < palette_width) {
-                    dst_row[x] = ((uint32_t)palette[idx][0] << 24) |
-                                 ((uint32_t)palette[idx][1] << 16) |
-                                 ((uint32_t)palette[idx][2] << 8)  |
-                                 (uint32_t)palette[idx][3];
+                if (palette && index < palette_width) {
+                    dst_row[x] = ((uint32_t)palette[index][0] << 24) |
+                                 ((uint32_t)palette[index][1] << 16) |
+                                 ((uint32_t)palette[index][2] << 8)  |
+                                 (uint32_t)palette[index][3];
                 } else {
                     dst_row[x] = 0x000000ffU;
                 }

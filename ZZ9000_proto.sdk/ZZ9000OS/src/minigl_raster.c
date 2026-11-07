@@ -3383,8 +3383,8 @@ void minigl_raster_tex_subimage(uint32_t id, uint16_t level, uint16_t xoffset, u
     uint16_t storage_format = format & ZZ9K_MGL_TEX_STORAGE_MASK;
 
     if (!ready() || !image || !image->size || !width || !height ||
-        (uint32_t)xoffset + width > image->width ||
-        (uint32_t)yoffset + height > image->height) {
+        xoffset > image->width || width > image->width - xoffset ||
+        yoffset > image->height || height > image->height - yoffset) {
         g_error |= RASTER_ERR_TEXTURE;
         return;
     }
@@ -3845,7 +3845,8 @@ int minigl_raster_subimage_rgba8(uint32_t id, uint16_t level, uint16_t xoffset, 
         g_error |= RASTER_ERR_TEXTURE;
         return 0;
     }
-    if (xoffset + width > image->width || yoffset + height > image->height) {
+    if (xoffset > image->width || width > image->width - xoffset ||
+        yoffset > image->height || height > image->height - yoffset) {
         g_error |= RASTER_ERR_TEXTURE;
         return 0;
     }

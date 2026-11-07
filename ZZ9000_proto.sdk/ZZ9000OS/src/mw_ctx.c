@@ -1205,7 +1205,8 @@ static void mw_ctx_sync_to_raster(mw_ctx *c)
     rstate.alpha_ref = (uint16_t)(s->alpha_ref * 255.0f);
     rstate.cull_face_mode = (uint16_t)s->cull_face;
     rstate.front_face = (uint16_t)s->front_face;
-    rstate.color_mask = (s->color_mask[0] ? 1U : 0U) |
+    rstate.color_mask = s->draw_buffer == 0U ? 0U :
+                        (s->color_mask[0] ? 1U : 0U) |
                         (s->color_mask[1] ? 2U : 0U) |
                         (s->color_mask[2] ? 4U : 0U) |
                         (s->color_mask[3] ? 8U : 0U);
@@ -2048,8 +2049,9 @@ target_allocation_failed:
             }
         } else {
             uint32_t r, col;
-            if (!t->pixels[level] || xoffset + w > t->widths[level] ||
-                yoffset + h > t->heights[level]) {
+            if (!t->pixels[level] || xoffset > t->widths[level] ||
+                w > t->widths[level] - xoffset ||
+                yoffset > t->heights[level] || h > t->heights[level] - yoffset) {
                 mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
                 goto command_complete;
             }

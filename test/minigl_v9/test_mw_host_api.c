@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include "mw_parse.h"
 #include "mw_ctx.h"
 #include "mw_host.h"
 #include "mw_types.h"
@@ -355,6 +356,181 @@ static uint32_t lightmap_subimage(uint8_t *packet, uint32_t name, uint8_t value)
     mw_put_be32(packet + 80, 16U * 16U * 4U);
     memset(pixels, value, 16U * 16U * 4U);
     return bytes;
+}
+
+static void test_wire_texture_bounds_and_indices(void)
+{
+    mw_ctx *c = mw_host_create(4U, 4U);
+    uint8_t packet[160] = { 0 };
+    uint8_t *p;
+    uint8_t *src;
+    uint32_t bytes;
+    mw_texture *t;
+
+    assert(c != NULL);
+    assert(mw_host_submit(c, packet, define_texture(packet, 90U)) == MW_STATUS_OK);
+
+    bytes = texture_packet(packet, MW_TEXTURE_COPY, 40U);
+    p = packet + 24U;
+    mw_put_be32(p, 90U);
+    mw_put_be32(p + 8U, 4U);
+    mw_put_be32(p + 12U, UINT32_MAX);
+    mw_put_be32(p + 28U, 2U);
+    mw_put_be32(p + 32U, 1U);
+    assert(mw_validate_packet(packet, bytes) == MW_STATUS_OK);
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    assert(c->error == 0x0502U);
+    c->error = 0U;
+
+    bytes = texture_packet(packet, MW_TEXTURE_SUB_RAW, 68U);
+    p = packet + 24U;
+    mw_put_be32(p, 90U);
+    mw_put_be32(p + 8U, UINT32_MAX);
+    mw_put_be32(p + 16U, 2U);
+    mw_put_be32(p + 20U, 1U);
+    mw_put_be32(p + 24U, 0x1908U);
+    mw_put_be32(p + 28U, 0x1401U);
+    mw_put_be32(p + 32U, 4U);
+    mw_put_be32(p + 56U, 8U);
+    assert(mw_validate_packet(packet, bytes) == MW_STATUS_OK);
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    assert(c->error == 0x0502U);
+    c->error = 0U;
+
+    c->palette[1][0] = 0xffU; c->palette[1][3] = 0xffU;
+    c->palette[2][1] = 0xffU; c->palette[2][3] = 0xffU;
+    c->palette_width = 3U;
+    bytes = texture_packet(packet, MW_TEXTURE_IMAGE_RAW, 60U);
+    p = packet + 24U;
+    mw_put_be32(p, 91U);
+    mw_put_be32(p + 8U, 4U);
+    mw_put_be32(p + 12U, 2U);
+    mw_put_be32(p + 16U, 1U);
+    mw_put_be32(p + 20U, 0x1900U);
+    mw_put_be32(p + 24U, 0x1403U);
+    mw_put_be32(p + 28U, 2U);
+    mw_put_be32(p + 52U, 4U);
+    p[56] = 0U; p[57] = 1U; p[58] = 0U; p[59] = 2U;
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    t = mw_texmgr_find(&c->texmgr, 91U);
+    assert(t != NULL && t->pixels[0][0] == 0xff0000ffU &&
+           t->pixels[0][1] == 0x00ff00ffU);
+
+    bytes = texture_packet(packet, MW_TEXTURE_IMAGE_RAW, 64U);
+    p = packet + 24U;
+    mw_put_be32(p, 92U);
+    mw_put_be32(p + 8U, 4U);
+    mw_put_be32(p + 12U, 2U);
+    mw_put_be32(p + 16U, 2U);
+    mw_put_be32(p + 20U, 0x1900U);
+    mw_put_be32(p + 24U, 0x1403U);
+    mw_put_be32(p + 28U, 2U);
+    mw_put_be32(p + 52U, 8U);
+    p[56] = 0U; p[57] = 1U; p[58] = 0U; p[59] = 2U;
+    p[60] = 0U; p[61] = 2U; p[62] = 0U; p[63] = 1U;
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+
+    bytes = texture_packet(packet, MW_TEXTURE_SUB_RAW, 84U);
+    p = packet + 24U;
+    mw_put_be32(p, 92U);
+    mw_put_be32(p + 16U, 2U);
+    mw_put_be32(p + 20U, 2U);
+    mw_put_be32(p + 24U, 0x1900U);
+    mw_put_be32(p + 28U, 0x1403U);
+    mw_put_be32(p + 32U, 2U);
+    mw_put_be32(p + 36U, 4U);
+    mw_put_be32(p + 40U, 1U);
+    mw_put_be32(p + 44U, 1U);
+    mw_put_be32(p + 48U, 1U);
+    mw_put_be32(p + 56U, 22U);
+    src = p + 60U;
+    src[10] = 1U; src[11] = 0U; src[12] = 2U; src[13] = 0U;
+    src[18] = 2U; src[19] = 0U; src[20] = 1U; src[21] = 0U;
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    t = mw_texmgr_find(&c->texmgr, 92U);
+    assert(t != NULL && t->pixels[0][0] == 0xff0000ffU &&
+           t->pixels[0][1] == 0x00ff00ffU &&
+           t->pixels[0][2] == 0x00ff00ffU &&
+           t->pixels[0][3] == 0xff0000ffU);
+
+    mw_host_destroy(c);
+    printf("PASS: test_wire_texture_bounds_and_indices\n");
+}
+
+static void test_draw_buffer_none_preserves_color(void)
+{
+    mw_ctx *c = mw_host_create(8U, 8U);
+    uint8_t packet[320] = { 0 };
+    uint8_t *p;
+    uint8_t *vertex;
+    uint32_t bytes;
+    uint32_t i;
+
+    assert(c != NULL);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4U, MW_VERSION);
+    mw_put_be32(packet + 12U, 2U);
+    p = packet + 16U;
+    mw_put_be32(p, MW_STATE);
+    mw_put_be32(p + 4U, 12U);
+    mw_put_be32(p + 8U, MW_DRAW_BUFFER);
+    mw_put_be32(p + 12U, 1U);
+    mw_put_be32(p + 16U, 0U);
+    p += 20U;
+    mw_put_be32(p, MW_CLEAR);
+    mw_put_be32(p + 4U, 24U);
+    mw_put_be32(p + 8U, 3U);
+    mw_put_bef(p + 12U, 1.0f);
+    mw_put_bef(p + 24U, 0.0f);
+    mw_put_bef(p + 28U, 1.0f);
+    mw_put_bef(p + 32U, 1.0f);
+    p += 32U;
+    bytes = (uint32_t)(p - packet);
+    mw_put_be32(packet + 8U, bytes);
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    for (i = 0U; i < 64U; ++i)
+        assert(c->color_buffers[c->state.target.back][i] == 0x000000ffU);
+    assert(c->depth_buffer[(4U * 8U + 4U) * 3U] == 0xffU);
+
+    memset(packet, 0, sizeof(packet));
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4U, MW_VERSION);
+    mw_put_be32(packet + 12U, 2U);
+    p = packet + 16U;
+    mw_put_be32(p, MW_STATE);
+    mw_put_be32(p + 4U, 12U);
+    mw_put_be32(p + 8U, MW_DEPTH_TEST);
+    mw_put_be32(p + 12U, 1U);
+    mw_put_be32(p + 16U, 1U);
+    p += 20U;
+    mw_put_be32(p, MW_DRAW_OBJECT);
+    mw_put_be32(p + 4U, 8U + 3U * MW_OBJECT_BYTES);
+    mw_put_be32(p + 8U, 4U);
+    mw_put_be32(p + 12U, 3U);
+    vertex = p + 16U;
+    mw_put_bef(vertex, -1.0f); mw_put_bef(vertex + 4U, -1.0f);
+    mw_put_bef(vertex + 8U, 0.0f); mw_put_bef(vertex + 12U, 1.0f);
+    mw_put_bef(vertex + 16U, 1.0f); mw_put_bef(vertex + 20U, 1.0f);
+    mw_put_bef(vertex + 24U, 1.0f); mw_put_bef(vertex + 28U, 1.0f);
+    vertex += MW_OBJECT_BYTES;
+    mw_put_bef(vertex, 1.0f); mw_put_bef(vertex + 4U, -1.0f);
+    mw_put_bef(vertex + 8U, 0.0f); mw_put_bef(vertex + 12U, 1.0f);
+    mw_put_bef(vertex + 16U, 1.0f); mw_put_bef(vertex + 20U, 1.0f);
+    mw_put_bef(vertex + 24U, 1.0f); mw_put_bef(vertex + 28U, 1.0f);
+    vertex += MW_OBJECT_BYTES;
+    mw_put_bef(vertex, 0.0f); mw_put_bef(vertex + 4U, 1.0f);
+    mw_put_bef(vertex + 8U, 0.0f); mw_put_bef(vertex + 12U, 1.0f);
+    mw_put_bef(vertex + 16U, 1.0f); mw_put_bef(vertex + 20U, 1.0f);
+    mw_put_bef(vertex + 24U, 1.0f); mw_put_bef(vertex + 28U, 1.0f);
+    bytes = 44U + 8U + 3U * MW_OBJECT_BYTES;
+    mw_put_be32(packet + 8U, bytes);
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    for (i = 0U; i < 64U; ++i)
+        assert(c->color_buffers[c->state.target.back][i] == 0x000000ffU);
+    assert(c->depth_buffer[(4U * 8U + 4U) * 3U] != 0xffU);
+
+    mw_host_destroy(c);
+    printf("PASS: test_draw_buffer_none_preserves_color\n");
 }
 
 static void test_glquake_texture_soak(void)
@@ -723,6 +899,8 @@ int main(void)
     test_rejected_packet_changes_no_state();
     test_draw_triangle_golden();
     test_requests();
+    test_wire_texture_bounds_and_indices();
+    test_draw_buffer_none_preserves_color();
     test_glquake_texture_soak();
     test_draw_packed_indexed_oracle();
     test_direct_rgb565_read_pixels();
