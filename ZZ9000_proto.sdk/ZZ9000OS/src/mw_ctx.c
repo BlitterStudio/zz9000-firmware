@@ -387,6 +387,8 @@ static uint32_t mw_palette_get(uint32_t index)
 #endif
 
 static void mw_context_free(mw_ctx *c, void *memory, uint32_t *address);
+static mw_ctx *g_raster_texture_context;
+static int mw_ctx_restore_textures(mw_ctx *c);
 #if defined(MINIGL_MODULE)
 static void mw_context_select_allocation_owner(const mw_ctx *c)
 {
@@ -1058,7 +1060,14 @@ static int mw_ctx_bind_buffers(mw_ctx *c)
     buffers.texture_pool_bytes = c->texture_pool_bytes;
     buffers.width = (uint16_t)c->width;
     buffers.height = (uint16_t)c->height;
-    return minigl_raster_configure_buffers(&buffers);
+    if (!minigl_raster_configure_buffers(&buffers))
+        return 0;
+    if (g_raster_texture_context == c)
+        return 1;
+    if (!mw_ctx_restore_textures(c))
+        return 0;
+    g_raster_texture_context = c;
+    return 1;
 }
 
 static int mw_ctx_cpu_fallback_target(void *context,
@@ -1319,6 +1328,7 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
         return NULL;
     }
     minigl_raster_init();
+    g_raster_texture_context = NULL;
     mw_ctx_sync_to_raster(c);
 
     return c;
@@ -1363,6 +1373,8 @@ void mw_host_destroy(mw_ctx *c)
 
     if (!c)
         return;
+    if (g_raster_texture_context == c)
+        g_raster_texture_context = NULL;
     mw_context_select_allocation_owner(c);
     if (!minigl_raster_quiesce() && c->rix_enabled) {
         MiniGLRasterRixDiagnostics rix;
@@ -1460,6 +1472,31 @@ static int mw_upload_generated_mips(mw_ctx *c, const mw_texture *t)
                                         (uint16_t)t->heights[lvl],
                                         t->pixels[lvl], t->internal_rgb[lvl]))
             return 0;
+    }
+    return 1;
+}
+
+static int mw_ctx_restore_textures(mw_ctx *c)
+{
+    uint32_t index;
+
+    minigl_raster_reset_textures();
+    for (index = 0U; index < c->texmgr.capacity; ++index) {
+        const mw_texture *t = &c->texmgr.textures[index];
+        uint32_t level;
+
+        if (!t->valid)
+            continue;
+        for (level = 0U; level < MW_MAX_MIP_LEVELS; ++level) {
+            if (t->pixels[level] &&
+                !minigl_raster_upload_rgba8(t->id, (uint16_t)level,
+                                            (uint16_t)t->widths[level],
+                                            (uint16_t)t->heights[level],
+                                            t->pixels[level], t->internal_rgb[level]))
+                return 0;
+        }
+        minigl_raster_tex_params(t->id, t->min_filter, t->mag_filter,
+                                 t->wrap_s, t->wrap_t);
     }
     return 1;
 }

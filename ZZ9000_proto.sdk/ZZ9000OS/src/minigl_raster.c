@@ -3030,6 +3030,23 @@ void minigl_raster_init(void)
     minigl_lighting_modelview(g_matrix[0]);
 }
 
+void minigl_raster_reset_textures(void)
+{
+    unsigned index;
+
+    for (index = 0U; index < MAX_TEXTURES; ++index)
+        if (g_textures[index].valid)
+            minigl_rix_backend_delete_texture(&g_rix, g_textures[index].id);
+    memset(g_textures, 0, sizeof(g_textures));
+    texture_initialize(&g_default_texture, 0U);
+    g_texture_allocations = NULL;
+    g_texture_used = 0U;
+    memset(g_texture_lookup, 0, sizeof(g_texture_lookup));
+    memset(g_bound_texture, 0, sizeof(g_bound_texture));
+    for (index = 0U; index < MAX_TMU; ++index)
+        g_bound_texture_info[index] = &g_default_texture;
+}
+
 void minigl_raster_clear(uint32_t mask, uint32_t color, uint32_t depth)
 {
     int x0 = 0;

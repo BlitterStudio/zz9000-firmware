@@ -99,6 +99,8 @@ int minigl_raster_quiesce(void);
 /* Engines have been stopped from outside. The next quiesce must not wait
  * for a fence that will never arrive. */
 void minigl_raster_abandon(void);
+/* Discards the active context's CPU and RasterIX texture tables. */
+void minigl_raster_reset_textures(void);
 /* Replaces a target after a RasterIX fail-stop without reusing memory that
  * may still be subject to an unbounded DMA write. */
 void minigl_raster_set_fail_stop_target_handler(MiniGLRasterFailStopTargetFn handler,

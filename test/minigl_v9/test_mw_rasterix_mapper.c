@@ -1399,6 +1399,51 @@ static void test_rasterix_z16_depth_readback(void)
     printf("PASS: test_rasterix_z16_depth_readback\n");
 }
 
+
+extern int minigl_raster_test_level_size(uint32_t id, uint16_t level,
+                                         uint16_t *width, uint16_t *height);
+
+static void test_context_texture_restore(void)
+{
+    MiniGLRixPlatform platform;
+    mw_ctx *first;
+    mw_ctx *second;
+    mw_texture *texture;
+    uint8_t sync[4] = { 0 };
+    uint16_t width;
+    uint16_t height;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    first = mw_host_create(2U, 2U);
+    assert(first != NULL);
+    texture = mw_texmgr_get_or_create(&first->texmgr, 7U);
+    assert(texture != NULL);
+    assert(mw_texmgr_allocate_level(&first->texmgr, texture, 0U, 1U, 1U));
+    texture->pixels[0][0] = 0xff0000ffU;
+    assert(submit_single_command(first, MW_SYNC, sync, sizeof(sync)) == MW_STATUS_OK);
+    assert(minigl_raster_test_level_size(7U, 0U, &width, &height));
+
+    second = mw_host_create(2U, 2U);
+    assert(second != NULL);
+    texture = mw_texmgr_get_or_create(&second->texmgr, 7U);
+    assert(texture != NULL);
+    assert(mw_texmgr_allocate_level(&second->texmgr, texture, 0U, 1U, 1U));
+    texture->pixels[0][0] = 0x0000ffffU;
+    assert(submit_single_command(second, MW_SYNC, sync, sizeof(sync)) == MW_STATUS_OK);
+    assert(minigl_raster_test_level_size(7U, 0U, &width, &height));
+
+    mw_texmgr_delete(&first->texmgr, 7U);
+    assert(submit_single_command(first, MW_SYNC, sync, sizeof(sync)) == MW_STATUS_OK);
+    assert(!minigl_raster_test_level_size(7U, 0U, &width, &height));
+    assert(submit_single_command(second, MW_SYNC, sync, sizeof(sync)) == MW_STATUS_OK);
+    assert(minigl_raster_test_level_size(7U, 0U, &width, &height));
+
+    mw_host_destroy(second);
+    mw_host_destroy(first);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_context_texture_restore\n");
+}
 int main(void)
 {
     g_rix_test_log = test_log_wrapper;
@@ -1423,6 +1468,7 @@ int main(void)
     test_watertight_tessellation();
     test_direct_p96_target_rotation();
     test_rasterix_z16_depth_readback();
+    test_context_texture_restore();
     printf("ALL Wire-v9 RasterIX Mapper Tests PASSED!\n");
     return 0;
 }
