@@ -1075,6 +1075,50 @@ static void test_read_pixels_activates_its_context(void)
     printf("PASS: test_read_pixels_activates_its_context\n");
 }
 
+static void test_draw_triangle_nan_color_and_coords(void)
+{
+    mw_ctx *c = mw_host_create(8U, 8U);
+    uint8_t packet[512] = { 0 };
+    uint8_t *p;
+    uint8_t *vertex;
+    float nan_val = 0.0f / 0.0f;
+    float inf_val = 1.0f / 0.0f;
+    uint32_t bytes;
+
+    assert(c != NULL);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4U, MW_VERSION);
+    mw_put_be32(packet + 12U, 1U);
+    p = packet + 16U;
+    mw_put_be32(p, MW_DRAW_OBJECT);
+    mw_put_be32(p + 4U, 8U + 3U * MW_OBJECT_BYTES);
+    mw_put_be32(p + 8U, 4U); /* GL_TRIANGLES */
+    mw_put_be32(p + 12U, 3U);
+    vertex = p + 16U;
+    /* Vertex 0: NaN color */
+    mw_put_bef(vertex, -1.0f); mw_put_bef(vertex + 4U, -1.0f);
+    mw_put_bef(vertex + 8U, 0.0f); mw_put_bef(vertex + 12U, 1.0f);
+    mw_put_bef(vertex + 16U, nan_val); mw_put_bef(vertex + 20U, nan_val);
+    mw_put_bef(vertex + 24U, nan_val); mw_put_bef(vertex + 28U, 1.0f);
+    vertex += MW_OBJECT_BYTES;
+    /* Vertex 1: Inf position */
+    mw_put_bef(vertex, inf_val); mw_put_bef(vertex + 4U, -inf_val);
+    mw_put_bef(vertex + 8U, 0.0f); mw_put_bef(vertex + 12U, 1.0f);
+    mw_put_bef(vertex + 16U, 1.0f); mw_put_bef(vertex + 20U, 1.0f);
+    mw_put_bef(vertex + 24U, 1.0f); mw_put_bef(vertex + 28U, 1.0f);
+    vertex += MW_OBJECT_BYTES;
+    /* Vertex 2: Normal */
+    mw_put_bef(vertex, 0.0f); mw_put_bef(vertex + 4U, 1.0f);
+    mw_put_bef(vertex + 8U, 0.0f); mw_put_bef(vertex + 12U, 1.0f);
+    mw_put_bef(vertex + 16U, 1.0f); mw_put_bef(vertex + 20U, 1.0f);
+    mw_put_bef(vertex + 24U, 1.0f); mw_put_bef(vertex + 28U, 1.0f);
+    bytes = 16U + 8U + 8U + 3U * MW_OBJECT_BYTES;
+    mw_put_be32(packet + 8U, bytes);
+
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    mw_host_destroy(c);
+    printf("PASS: test_draw_triangle_nan_color_and_coords\n");
+}
 int main(void)
 {
     test_create_destroy();
@@ -1093,6 +1137,7 @@ int main(void)
     test_direct_rgb565_read_pixels();
     test_read_pixels_activates_its_context();
     test_palette_snapshot();
+    test_draw_triangle_nan_color_and_coords();
     printf("All host API tests PASSED!\n");
     return 0;
 }

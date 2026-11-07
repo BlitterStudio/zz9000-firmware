@@ -329,7 +329,11 @@ static uint8_t satadd(uint8_t a, uint8_t b)
 
 static float clamp01(float value)
 {
-    return value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value;
+    if (isnan(value) || value <= 0.0f)
+        return 0.0f;
+    if (value >= 1.0f)
+        return 1.0f;
+    return value;
 }
 
 static void identity(float *matrix)
@@ -1447,6 +1451,7 @@ static void fragment(int x, int y, float z, float u0, float v0, float u1, float 
 
 static uint32_t color_lerp(uint32_t a, uint32_t b, float amount)
 {
+    amount = clamp01(amount);
     return rgba((uint8_t)(channel(a, 24U) + (channel(b, 24U) - channel(a, 24U)) * amount),
                 (uint8_t)(channel(a, 16U) + (channel(b, 16U) - channel(a, 16U)) * amount),
                 (uint8_t)(channel(a, 8U) + (channel(b, 8U) - channel(a, 8U)) * amount),
@@ -1457,6 +1462,7 @@ static Vertex lerp_vertex(const Vertex *a, const Vertex *b, float amount)
 {
     Vertex out;
 
+    amount = clamp01(amount);
     out.x = a->x + (b->x - a->x) * amount;
     out.y = a->y + (b->y - a->y) * amount;
     out.z = a->z + (b->z - a->z) * amount;
@@ -1567,7 +1573,8 @@ static int project(Vertex *vertex)
     float inverse_w;
     float gl_y;
 
-    if (vertex->w == 0.0f)
+    if (vertex->w == 0.0f || !isfinite(vertex->w) ||
+        !isfinite(vertex->x) || !isfinite(vertex->y) || !isfinite(vertex->z))
         return 0;
     inverse_w = 1.0f / vertex->w;
     vertex->inv_w = inverse_w;
@@ -1575,7 +1582,7 @@ static int project(Vertex *vertex)
     gl_y = (vertex->y * inverse_w + 1.0f) * 0.5f * g_state.viewport_h + g_state.viewport_y;
     vertex->sy = (float)g_buffers.height - gl_y;
     vertex->sz = vertex->z * inverse_w * 0.5f + 0.5f;
-    return 1;
+    return isfinite(vertex->sx) && isfinite(vertex->sy) && isfinite(vertex->sz);
 }
 
 static void texture_matrix(unsigned unit, float *u, float *v, float r, float *q)
@@ -1999,7 +2006,7 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
     int y0;
     int y1;
 
-    if (area == 0.0f) {
+    if (!isfinite(area) || area == 0.0f) {
         clip_charge();
         return;
     }
