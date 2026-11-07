@@ -1,6 +1,6 @@
 # ZZ9000 variant matrix - 7 release bitstreams
 # canonical zorro3 (top-level) + 6 release variant bitstreams
-a43be92be0b5f404296e10b64ed3e37095896b3347027a247fa9a00a5acb057f  zz9000_ps_wrapper.bit
+a903420974ecdf9b73c98b8650be19bcf08b4797cb704c81222855d11b1902bd  zz9000_ps_wrapper.bit
 41206b04d2f27af0d90605561010ed77c8364b6509f2e383964924511903d0cf  variants/zz9000_ps_wrapper-a500-2mb.bit
 381f16c12fb1a061bbe26b2d42617e318b88f3d735f2de7ddf4c843a83c0eeaf  variants/zz9000_ps_wrapper-a500.bit
 86d6a0848f4448981bf4a76733e859e5d762da6de7eec7b93db189ec12537bfe  variants/zz9000_ps_wrapper-a500plus.bit

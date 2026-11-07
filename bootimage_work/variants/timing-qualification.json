@@ -3,17 +3,17 @@
     "variants":  {
                      "zorro3":  {
                                     "bitstream":  "bootimage_work/zz9000_ps_wrapper.bit",
-                                    "sha256":  "a43be92be0b5f404296e10b64ed3e37095896b3347027a247fa9a00a5acb057f",
-                                    "source_revision":  "6a07953ff6d5efa0b1552d45b23fd860ce79a460",
-                                    "build_id":  "6a07953f",
+                                    "sha256":  "a903420974ecdf9b73c98b8650be19bcf08b4797cb704c81222855d11b1902bd",
+                                    "source_revision":  "6a286773f03c3c0788d6ea147f8a1d4231ac2052",
+                                    "build_id":  "6a286773",
                                     "placement_directive":  "Default",
                                     "pixel_slack_ns":  {
-                                                           "setup":  0.135,
-                                                           "hold":  0.011
+                                                           "setup":  0.403,
+                                                           "hold":  0.006
                                                        },
                                     "overall_slack_ns":  {
-                                                             "setup":  0.135,
-                                                             "hold":  0.011
+                                                             "setup":  0.235,
+                                                             "hold":  0.006
                                                          },
                                     "i2s_slack_ns":  {
                                                          "setup":  1.099
