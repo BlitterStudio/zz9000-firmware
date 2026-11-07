@@ -19,12 +19,14 @@ cd "$SCRIPT_DIR"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: ./build_bitstream.sh [--no-autoboot] [--capture-c28] [--output PATH]
+Usage: ./build_bitstream.sh [--no-autoboot] [--capture-c28] [--rasterix] [--output PATH]
 
 Options:
   --no-autoboot  Synthesize a diagnostic bitstream that does not advertise
                  the Zorro autoboot ROM.
   --capture-c28  Use the A4000 video-slot C28 clock, not the E7M clock.
+  --rasterix     Include the RasterIX renderer; requires --output so the
+                 selected matrix release path is explicit.
   --output PATH  Write the generated bitstream to PATH.
 EOF
 }
@@ -32,6 +34,7 @@ EOF
 PROJECT_ARGS=(--origin_dir .)
 NO_AUTOBOOT=0
 CAPTURE_C28=0
+RASTERIX=0
 OUTPUT=
 
 while [ "$#" -gt 0 ]; do
@@ -44,6 +47,11 @@ while [ "$#" -gt 0 ]; do
         --capture-c28)
             CAPTURE_C28=1
             PROJECT_ARGS+=(--capture-c28)
+            shift
+            ;;
+        --rasterix)
+            RASTERIX=1
+            PROJECT_ARGS+=(--rasterix)
             shift
             ;;
         --output)
@@ -66,6 +74,10 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "$RASTERIX" -eq 1 ] && [ -z "$OUTPUT" ]; then
+    echo "ERROR: a RasterIX build requires --output from the release matrix." >&2
+    exit 1
+fi
 if [ -z "$OUTPUT" ]; then
     if [ "$CAPTURE_C28" -eq 1 ]; then
         OUTPUT=bootimage_work/capture-c28/zz9000_ps_wrapper.bit
@@ -75,7 +87,7 @@ if [ -z "$OUTPUT" ]; then
 fi
 if [ "$CAPTURE_C28" -eq 1 ] &&
    [ "$(realpath -m "$OUTPUT")" = "$(realpath -m bootimage_work/zz9000_ps_wrapper.bit)" ]; then
-    echo "ERROR: a C28 bitstream cannot replace the default E7M bitstream." >&2
+    echo "ERROR: a C28 bitstream cannot replace the zorro3 image." >&2
     exit 1
 fi
 

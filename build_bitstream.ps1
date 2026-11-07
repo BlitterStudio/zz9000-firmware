@@ -23,7 +23,8 @@ Build the opt-in A4000 C28 capture candidate. Its default output is
 bootimage_work/capture-c28/zz9000_ps_wrapper.bit, separate from packaged builds.
 
 .PARAMETER RasterIX
-Build the opt-in RasterIX renderer fit trial.
+Build the RasterIX renderer for a release variant. Use -OutputBitstream to
+select the matrix row's release path explicitly.
 
 .PARAMETER RasterIXTMUCount
 RasterIX texture-mapping units (1 or 2; default 1; EF requires 1).
@@ -36,7 +37,8 @@ Deprecated compatibility option; ignored by EF.
 
  .PARAMETER OutputBitstream
  Optional output bitstream path, relative to the repository or absolute.
- C28 and RasterIX candidates cannot overwrite bootimage_work/zz9000_ps_wrapper.bit.
+ RasterIX builds require this explicit path so a diagnostic invocation cannot
+ silently overwrite a release image.
 #>
 
 [CmdletBinding()]
@@ -167,16 +169,17 @@ if ($OutputBitstream) {
     } else {
         $output = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputBitstream))
     }
-} elseif ($RasterIX) {
-    $output = Join-Path $repoRoot 'bootimage_work\variants\zz9000_ps_wrapper-zorro3-aga-rix.bit'
 } elseif ($CaptureC28) {
     $output = Join-Path $repoRoot 'bootimage_work\capture-c28\zz9000_ps_wrapper.bit'
 } else {
     $output = $packagedOutput
 }
-if (($CaptureC28 -or $RasterIX) -and [string]::Equals($output, $packagedOutput,
+if ($RasterIX -and -not $OutputBitstream) {
+    throw 'A RasterIX build requires -OutputBitstream selected from the release matrix.'
+}
+if ($CaptureC28 -and [string]::Equals($output, $packagedOutput,
         [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw 'A C28 or RasterIX candidate must use a separate output path from the packaged default.'
+    throw 'A C28 build must use a separate output path from the zorro3 image.'
 }
 
 if ($RasterIXVariant -eq 'ef' -and $RasterIXTMUCount -ne 1) {

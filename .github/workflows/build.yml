@@ -378,17 +378,62 @@ jobs:
       - name: Check exception-vector placement
         run: bash util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
 
-      - name: Package release assets (standard)
+      - name: Package standard release assets
         run: |
           set -euo pipefail
           BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
-          ARGS=(--tag "$BUILD_LABEL" --output release_assets)
+          ARGS=(--tag "$BUILD_LABEL" --output release_assets --elf-set standard)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             ARGS+=(--require-all --minigl-kit minigl-kit)
           fi
           ./build_release_assets.sh "${ARGS[@]}"
 
-      - name: Enforce 4 MiB high-image and BOOT.bin budgets
+      - name: Enforce standard firmware and BOOT.bin budgets
+        run: |
+          set -euo pipefail
+          source bootimage_work/variants/variant-matrix.sh
+          read -r STANDARD_ROW < <(variant_matrix_release_rows standard)
+          IFS='|' read -r STANDARD_VARIANT _ <<< "$STANDARD_ROW"
+          BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
+          ARCHIVE_ROOT="zz9000-firmware-${BUILD_LABEL}-${STANDARD_VARIANT}"
+          TEMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+          python3 - "release_assets/${ARCHIVE_ROOT}.zip" "${ARCHIVE_ROOT}/BOOT.bin" "$TEMP_DIR/BOOT.bin" <<'PY'
+            import pathlib
+            import sys
+            import zipfile
+
+            with zipfile.ZipFile(sys.argv[1]) as archive:
+                pathlib.Path(sys.argv[3]).write_bytes(archive.read(sys.argv[2]))
+          PY
+          python3 util/check_firmware_size.py \
+            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
+            "$TEMP_DIR/BOOT.bin"
+
+      - name: Build RasterIX firmware
+        run: ./build_firmware.sh --rasterix
+
+      - name: Reject resident MiniGL RasterIX firmware link
+        run: |
+          sh util/check_no_resident_minigl.sh \
+            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
+            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.map \
+            ZZ9000_proto.sdk/ZZ9000OS/Makefile
+
+      - name: Check RasterIX exception-vector placement
+        run: bash util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+
+      - name: Package RasterIX release assets
+        run: |
+          set -euo pipefail
+          BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
+          ARGS=(--tag "$BUILD_LABEL" --output release_assets --elf-set rasterix)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ARGS+=(--require-all --minigl-kit minigl-kit)
+          fi
+          ./build_release_assets.sh "${ARGS[@]}"
+
+      - name: Enforce RasterIX firmware and BOOT.bin budgets
         run: |
           python3 util/check_firmware_size.py \
             ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \

@@ -7,11 +7,8 @@
 #   zz9000-firmware-<tag>-<variant>/ZZ9000.CFG
 #   zz9000-firmware-<tag>-<variant>/ZZ9K/*.ZZM
 # CI can only package variants that already have a committed bitstream.
-# All seven committed release bitstreams contain the current hardware ABI,
-# including the native overlay and ZZ9000AX capture paths, so every archive
-# uses the same current firmware ELF. The separately built legacy-bitstream
-# ELF remains available for manual compatibility packages that retain an older
-# bitstream.
+# Five release bitstreams use the standard firmware ELF. The two RasterIX
+# images use the RasterIX-enabled ELF selected by their matrix column.
 
 set -euo pipefail
 
@@ -24,6 +21,7 @@ QUALIFICATION_RECORD=${ZZ9000_QUALIFICATION_RECORD:-bootimage_work/variants/timi
 usage() {
     cat >&2 <<'EOF'
 Usage: ./build_release_assets.sh [--tag TAG] [--output DIR] [--require-all]
+                                 [--elf-set standard|rasterix]
                                  [--firmware-flavor SUFFIX]
                                  [--minigl-kit DIRECTORY]
 
@@ -35,17 +33,14 @@ Options:
   --require-all           Fail unless every release bitstream has a matching
                           passing timing qualification record
   --check-qualification   Validate all qualification records and exit
+  --elf-set SET           Package rows requiring SET (default: standard).
+                          Supported sets are standard and rasterix. The
+                          RasterIX set requires ./build_firmware.sh --rasterix.
   --firmware-flavor SUFFIX
                           Append SUFFIX to each archive name, e.g. "diag"
                           produces zz9000-firmware-<tag>-<variant>-diag.zip.
-                          Use this when packaging an alternate ZZ9000OS.elf
-                          flavor (the script does not rebuild firmware —
-                          the caller is expected to do that). The "rasterix"
-                          flavor emits only the qualified zorro3-aga-rix
-                          image; canonical packages never include it. Skips
-                          the canonical bootimage_work/BOOT.bin overwrite so
-                          the standard-flavor BOOT.bin remains the local
-                          default.
+                          This changes archive names only; it does not select
+                          a firmware ELF or matrix rows.
                           CI should not use this for PAL/native-video
                           defaults; use ZZ9000.CFG instead.
   --minigl-kit DIRECTORY  Verified module-release directory containing
@@ -57,6 +52,7 @@ TAG=local
 OUT_DIR=release
 REQUIRE_ALL=0
 CHECK_QUALIFICATION=0
+ELF_SET=standard
 FIRMWARE_FLAVOR=
 MINIGL_KIT_DIR=
 
@@ -88,6 +84,15 @@ while [ "$#" -gt 0 ]; do
             CHECK_QUALIFICATION=1
             shift
             ;;
+        --elf-set)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --elf-set needs a value." >&2
+                usage
+                exit 1
+            fi
+            ELF_SET=$2
+            shift 2
+            ;;
         --firmware-flavor)
             if [ "$#" -lt 2 ]; then
                 echo "ERROR: --firmware-flavor needs a value." >&2
@@ -117,6 +122,15 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+case "$ELF_SET" in
+    standard|rasterix) ;;
+    *)
+        echo "ERROR: unknown firmware ELF set: $ELF_SET" >&2
+        usage
+        exit 1
+        ;;
+esac
 
 validate_qualifications() {
     local args=("$QUALIFICATION_RECORD") variant bitstream label
@@ -186,10 +200,16 @@ if [ "$CHECK_QUALIFICATION" -eq 1 ]; then
 fi
 
 FIRMWARE_ELF=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
-if [ "$FIRMWARE_FLAVOR" = rasterix ] &&
-   { [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/.minigl-rasterix ] ||
-     [ "$(cat ZZ9000_proto.sdk/ZZ9000OS/build/.minigl-rasterix)" != 1 ]; }; then
-    echo "ERROR: RasterIX package requires ./build_firmware.sh --rasterix." >&2
+if [ "$ELF_SET" = rasterix ]; then
+    EXPECTED_RASTERIX_STAMP=1
+    EXPECTED_BUILD_COMMAND='./build_firmware.sh --rasterix'
+else
+    EXPECTED_RASTERIX_STAMP=0
+    EXPECTED_BUILD_COMMAND='./build_firmware.sh'
+fi
+if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/.minigl-rasterix ] ||
+   [ "$(cat ZZ9000_proto.sdk/ZZ9000OS/build/.minigl-rasterix)" != "$EXPECTED_RASTERIX_STAMP" ]; then
+    echo "ERROR: $ELF_SET package requires $EXPECTED_BUILD_COMMAND." >&2
     exit 1
 fi
 
@@ -232,7 +252,7 @@ fi
 variant_defs=()
 while IFS= read -r def; do
     variant_defs+=("$def")
-done < <(variant_matrix_release_rows "$FIRMWARE_FLAVOR")
+done < <(variant_matrix_release_rows "$ELF_SET")
 
 mkdir -p "$OUT_DIR"
 # Each pass deletes only the exact archive names it's about to (re)write,
@@ -293,8 +313,8 @@ for def in "${variant_defs[@]}"; do
     )
     created+=("$zip_path")
 
-    # Only the standard-flavor zorro3 build refreshes the canonical
-    # local BOOT.bin — alternate flavors are release artifacts only.
+    # Only the unsuffixed zorro3 package refreshes the canonical local
+    # BOOT.bin. The selected matrix row determines which ELF set produces it.
     if [ "$variant" = zorro3 ] && [ -z "$FIRMWARE_FLAVOR" ]; then
         cp "$boot_bin" bootimage_work/BOOT.bin
     fi
