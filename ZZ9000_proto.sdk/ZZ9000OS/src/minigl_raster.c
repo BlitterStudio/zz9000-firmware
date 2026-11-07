@@ -20,6 +20,10 @@
 #define MATRIX_STACK_DEPTH 32U
 #define RASTER_MAX_WIDTH 1024U
 #define RASTER_MAX_HEIGHT 768U
+#define RAST_SUBPIX_SHIFT 8
+#define RAST_SUBPIX_ONE   (1 << RAST_SUBPIX_SHIFT)
+#define RAST_SUBPIX_HALF  (RAST_SUBPIX_ONE / 2)
+#define RASTER_SCREEN_COORD_LIMIT ((INT_MAX / 2 - RAST_SUBPIX_ONE) / RAST_SUBPIX_ONE)
 #define CLIP_MAX_VERTICES 32U
 
 #define GL_POINTS 0x0000U
@@ -1583,10 +1587,10 @@ static int project(Vertex *vertex)
     vertex->sy = (float)g_buffers.height - gl_y;
     vertex->sz = vertex->z * inverse_w * 0.5f + 0.5f;
     return isfinite(vertex->sx) && isfinite(vertex->sy) && isfinite(vertex->sz) &&
-           vertex->sx >= -(float)(INT_MAX - RASTER_MAX_WIDTH) &&
-           vertex->sx <= (float)(INT_MAX - RASTER_MAX_WIDTH) &&
-           vertex->sy >= -(float)(INT_MAX - RASTER_MAX_HEIGHT) &&
-           vertex->sy <= (float)(INT_MAX - RASTER_MAX_HEIGHT);
+           vertex->sx >= -(float)RASTER_SCREEN_COORD_LIMIT &&
+           vertex->sx <= (float)RASTER_SCREEN_COORD_LIMIT &&
+           vertex->sy >= -(float)RASTER_SCREEN_COORD_LIMIT &&
+           vertex->sy <= (float)RASTER_SCREEN_COORD_LIMIT;
 }
 
 static void texture_matrix(unsigned unit, float *u, float *v, float r, float *q)
@@ -1764,10 +1768,6 @@ static float edge(const Vertex *a, const Vertex *b, float x, float y)
 {
     return (b->sx - a->sx) * (y - a->sy) - (b->sy - a->sy) * (x - a->sx);
 }
-
-#define RAST_SUBPIX_SHIFT 8
-#define RAST_SUBPIX_ONE   (1 << RAST_SUBPIX_SHIFT)
-#define RAST_SUBPIX_HALF  (RAST_SUBPIX_ONE / 2)
 
 typedef struct RastPoint {
     int32_t x;
