@@ -26,11 +26,28 @@
 #include <xscugic.h>
 #include "usb/ehci.h"
 #include "usb/usb.h"
+#include "usb_proxy_diag.h"
 #include "ethernet.h"
 
 struct zynq_ehci_priv _zynq_ehci;
 static int usb_host_initialized = 0;
 static int usb_host_scan_mode = -1;
+
+static void zz_usb_record_boot_vbus_cycle(
+		const struct ehci_zynq_vbus_cycle *cycle)
+{
+	zzusb_diag_record(ZZUSB_DIAG_EVENT_BOOT_PORTSC, cycle->cycled,
+			  0, 0, 0, 0, 0, 0, 0, cycle->before_portsc, 0);
+	if (!cycle->cycled)
+		return;
+
+	zzusb_diag_record(ZZUSB_DIAG_EVENT_BOOT_VBUS_OFF,
+			  (uint16_t)cycle->off_error, 0, 0, 0, 0, 0, 0, 0,
+			  cycle->off_portsc, 0);
+	zzusb_diag_record(ZZUSB_DIAG_EVENT_BOOT_VBUS_ON,
+			  (uint16_t)cycle->on_error, 0, 0, 0, 0, 0, 0, 0,
+			  cycle->on_portsc, 0);
+}
 
 /*
  * https://www.cypress.com/file/134171/download
@@ -43,6 +60,8 @@ standard requests and must support these requests on all USB devices."
  */
 
 static int zz_usb_host_init_mode(int scan_bus) {
+	int ret;
+
 	if (usb_host_initialized && usb_host_scan_mode == scan_bus)
 		return 0;
 
@@ -50,9 +69,19 @@ static int zz_usb_host_init_mode(int scan_bus) {
 	ehci_zynq_probe(&_zynq_ehci);
 	printf("[USB] probed!\n");
 	if (scan_bus)
-		usb_init();
+		ret = usb_init();
 	else
-		usb_init_proxy_only();
+		ret = usb_init_proxy_only();
+	if (ret)
+		return ret;
+
+	if (!scan_bus && !usb_host_initialized) {
+		struct ehci_zynq_vbus_cycle cycle;
+
+		ehci_zynq_cycle_vbus_if_disconnected(&_zynq_ehci.ehcictrl,
+						     &cycle);
+		zz_usb_record_boot_vbus_cycle(&cycle);
+	}
 	printf("[USB] initialized%s!\n", scan_bus ? "" : " (proxy-only)");
 	usb_host_initialized = 1;
 	usb_host_scan_mode = scan_bus;

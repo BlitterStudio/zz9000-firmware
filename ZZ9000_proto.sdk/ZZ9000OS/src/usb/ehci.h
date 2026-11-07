@@ -273,6 +273,22 @@ struct zynq_ehci_priv {
 };
 int ehci_zynq_probe(struct zynq_ehci_priv *priv);
 
+struct ehci_zynq_vbus_cycle {
+	uint32_t before_portsc;
+	uint32_t off_portsc;
+	uint32_t on_portsc;
+	int off_error;
+	int on_error;
+	int cycled;
+};
+
+/*
+ * Reattach an initially disconnected root-port device after the controller
+ * runs. Used only by the boot-time proxy-only initialization path.
+ */
+int ehci_zynq_cycle_vbus_if_disconnected(
+		struct ehci_ctrl *ctrl, struct ehci_zynq_vbus_cycle *cycle);
+
 /*
  * Runtime ULPI XCVR-select switch for the Zynq PS USB ChipIdea
  * EHCI. Called from the reset handler to use FS4LS while resetting
