@@ -110,6 +110,33 @@ int main(void)
         CHECK(zzusb_ticks_to_us(TIMER_HZ - 1U, TIMER_HZ) == 999999U);
     }
 
+    /* SET_ADDRESS recovery is measured from the completed transfer. */
+    {
+        struct zzusb_set_address_recovery recovery;
+        uint64_t recovery_ticks =
+            ((uint64_t)ZZUSB_SET_ADDRESS_RECOVERY_US * TIMER_HZ + 999999U) /
+            1000000U;
+
+        zzusb_set_address_recovery_init(&recovery);
+        zzusb_set_address_recovery_arm(&recovery, 1000U);
+        CHECK(zzusb_set_address_recovery_active(&recovery));
+        CHECK(!zzusb_set_address_recovery_elapsed(
+            &recovery, 1000U + recovery_ticks - 1U, TIMER_HZ));
+        CHECK(zzusb_set_address_recovery_elapsed(
+            &recovery, 1000U + recovery_ticks, TIMER_HZ));
+
+        /* Tick subtraction, rather than absolute ticks, survives wrap. */
+        zzusb_set_address_recovery_arm(
+            &recovery, UINT64_MAX - recovery_ticks + 1U);
+        CHECK(zzusb_set_address_recovery_elapsed(
+            &recovery, 0U, TIMER_HZ));
+
+        zzusb_set_address_recovery_abort(&recovery);
+        CHECK(!zzusb_set_address_recovery_active(&recovery));
+        CHECK(!zzusb_set_address_recovery_elapsed(
+            &recovery, 1000U + recovery_ticks, TIMER_HZ));
+    }
+
     zzusb_root_reset_init(&reset);
     CHECK(zzusb_root_reset_start(&reset, 0U, 0U) ==
           ZZUSB_ROOT_RESET_ASSERT);

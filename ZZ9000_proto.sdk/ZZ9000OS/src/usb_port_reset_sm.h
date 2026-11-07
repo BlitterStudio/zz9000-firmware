@@ -46,6 +46,51 @@ static inline uint64_t zzusb_ticks_to_us(uint64_t ticks, uint64_t hz)
     return (ticks / hz) * 1000000U + ((ticks % hz) * 1000000U) / hz;
 }
 
+/* USB spec requires 2ms recovery time after SET_ADDRESS before the next
+ * transaction to the device's new address. Use 10ms for margin. */
+#define ZZUSB_SET_ADDRESS_RECOVERY_US 10000U
+
+struct zzusb_set_address_recovery {
+    uint64_t started_ticks;
+    int active;
+};
+
+static inline void zzusb_set_address_recovery_init(
+    struct zzusb_set_address_recovery *recovery)
+{
+    recovery->started_ticks = 0;
+    recovery->active = 0;
+}
+
+static inline void zzusb_set_address_recovery_arm(
+    struct zzusb_set_address_recovery *recovery, uint64_t now_ticks)
+{
+    recovery->started_ticks = now_ticks;
+    recovery->active = 1;
+}
+
+static inline int zzusb_set_address_recovery_active(
+    const struct zzusb_set_address_recovery *recovery)
+{
+    return recovery->active;
+}
+
+static inline int zzusb_set_address_recovery_elapsed(
+    const struct zzusb_set_address_recovery *recovery, uint64_t now_ticks,
+    uint64_t ticks_per_second)
+{
+    return recovery->active &&
+        zzusb_ticks_to_us(now_ticks - recovery->started_ticks,
+                          ticks_per_second) >=
+            ZZUSB_SET_ADDRESS_RECOVERY_US;
+}
+
+static inline void zzusb_set_address_recovery_abort(
+    struct zzusb_set_address_recovery *recovery)
+{
+    zzusb_set_address_recovery_init(recovery);
+}
+
 struct zzusb_root_reset {
     enum zzusb_root_reset_state state;
     uint64_t started_us;

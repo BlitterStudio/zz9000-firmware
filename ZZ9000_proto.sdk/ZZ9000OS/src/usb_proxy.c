@@ -59,6 +59,8 @@ static uint32_t diag_detail;
 static struct zzusb_root_reset root_reset;
 static uint32_t root_reset_reg;
 static int root_reset_fsls;
+static struct zzusb_set_address_recovery set_address_recovery;
+
 
 static void periodic_stop_all(void);
 static void reset_port_abort(void);
@@ -75,6 +77,7 @@ uint32_t usb_proxy_get_controller_epoch(void)
 void usb_proxy_advance_controller_epoch(void)
 {
     reset_port_abort();
+    zzusb_set_address_recovery_abort(&set_address_recovery);
     periodic_stop_all();
     usb_proxy_iso_stop_all(EHCI_ISO_PACKET_OFFLINE);
     controller_epoch++;
@@ -111,6 +114,14 @@ static uint64_t reset_now_us(void)
 
     XTime_GetTime(&now);
     return zzusb_ticks_to_us((uint64_t)now, COUNTS_PER_SECOND);
+}
+
+static uint64_t proxy_now_ticks(void)
+{
+    XTime now;
+
+    XTime_GetTime(&now);
+    return (uint64_t)now;
 }
 
 static int zz_speed_to_usb(int zz)
@@ -969,6 +980,31 @@ int usb_proxy_reset_port_pending(void)
     return zzusb_root_reset_active(&root_reset);
 }
 
+int usb_proxy_set_address_recovery_pending(void)
+{
+    return zzusb_set_address_recovery_active(&set_address_recovery);
+}
+
+uint16_t usb_proxy_poll_set_address_recovery(
+    volatile struct ZZUSBCommand *cmd,
+    volatile struct ZZUSBProtocolExtension *ext, int is_v2)
+{
+    if (!zzusb_set_address_recovery_active(&set_address_recovery))
+        return ZZUSB_STATUS_ERROR;
+    if (!zzusb_set_address_recovery_elapsed(
+            &set_address_recovery, proxy_now_ticks(), COUNTS_PER_SECOND))
+        return ZZUSB_STATUS_PENDING;
+
+    zzusb_set_address_recovery_abort(&set_address_recovery);
+    if (is_v2) {
+        put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);
+        put_be16(&ext->header_size, ZZUSB_V2_HEADER_SIZE);
+        put_be32(&ext->controller_epoch, controller_epoch);
+        put_be32(&ext->capabilities, ZZUSB_CAP_BASE);
+    }
+    return diag_complete_command(cmd, ext, is_v2, ZZUSB_STATUS_OK);
+}
+
 uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
                                    volatile struct ZZUSBProtocolExtension *ext,
                                    int is_v2)
@@ -1206,10 +1242,9 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
                     toggle_bits[dev_addr][1] = 0;
                 }
             }
-            /* USB spec requires 2ms recovery time after SET_ADDRESS
-             * before the next transaction to the device's new address.
-             * Use 10ms for margin. */
-            usleep(10000);
+            zzusb_set_address_recovery_arm(&set_address_recovery,
+                                           proxy_now_ticks());
+            return ZZUSB_STATUS_PENDING;
         }
 
         /*
