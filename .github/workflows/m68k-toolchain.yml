@@ -1,11 +1,11 @@
 # Follow the GCC 16 m68k compiler image. The tag below moves with every GCC 16
 # release candidate; the SDK builds pin it by digest
 # (sdk/scripts/m68k-toolchain-pin.sh). When the tag points at a new image,
-# this job moves every pin, builds and packages the AmigaOS 3 SDK with it,
-# starts each packaged tool under vamos, and offers the result on the
-# build/m68k-toolchain branch as a pull request (or as an issue when Actions
-# may not open pull requests). Merging it is the decision; card runs of the
-# current compiler happen before releases.
+# this job moves every pin on the build/m68k-toolchain branch and opens or
+# updates a pull request for it; the Build firmware workflow then builds,
+# packages and smoke-tests the SDK with the new image on that pull request.
+# Merging it is the decision; card runs of the current compiler happen before
+# releases.
 name: m68k toolchain update
 
 on:
@@ -19,9 +19,7 @@ on:
         default: ''
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
 
 concurrency:
   group: m68k-toolchain-update
@@ -33,14 +31,29 @@ env:
   # try another tag first (input `image`).
   TOOLCHAIN_IMAGE: ${{ inputs.image || 'amigadev/crosstools:m68k-amigaos-gcc10' }}
   BRANCH: build/m68k-toolchain
-  GH_TOKEN: ${{ github.token }}
 
 jobs:
   update:
     name: Follow the m68k compiler image
     runs-on: ubuntu-latest
     steps:
+      # The bump is pushed and proposed as the ZZ9000 toolchain GitHub App,
+      # not with the workflow token: GitHub starts no workflows for workflow-
+      # token pushes and holds CI on pull requests opened by github-actions
+      # for manual approval. With the App token the branch and the pull
+      # request get their normal CI.
+      - name: App token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          # app-id: actionlint does not know v3's client-id input yet.
+          app-id: ${{ vars.M68K_TOOLCHAIN_APP_ID }}
+          private-key: ${{ secrets.M68K_TOOLCHAIN_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
       - uses: actions/checkout@v6
+        with:
+          token: ${{ steps.token.outputs.token }}
       - name: Compare the pin with the tag
         id: pin
         run: |
@@ -63,45 +76,27 @@ jobs:
             echo "old_version=$old_version"
             echo "new_version=$new_version"
           } >> "$GITHUB_OUTPUT"
-      - name: Move the pins
-        if: steps.pin.outputs.changed == 'true'
-        run: sdk/scripts/m68k-toolchain-pin.sh set "${{ steps.pin.outputs.new }}"
-      - name: Build, package and start the SDK tools with the new image
-        id: check
-        if: steps.pin.outputs.changed == 'true'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          sh sdk/scripts/build-m68k-amigaos.sh
-          sh sdk/scripts/package-m68k-amigaos.sh --skip-build
-          docker run --rm -v "$PWD/sdk":/sdk -w /sdk "${{ steps.pin.outputs.new }}" \
-            python3 scripts/smoke-m68k-vamos.py build/package/amigaos3 --vamos vamos
-      - name: Offer the update
+      - name: Push the bump and open or update its pull request
         if: steps.pin.outputs.changed == 'true'
         env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          APP_SLUG: ${{ steps.token.outputs.app-slug }}
           OLD: ${{ steps.pin.outputs.old }}
           NEW: ${{ steps.pin.outputs.new }}
           OLD_VERSION: ${{ steps.pin.outputs.old_version }}
           NEW_VERSION: ${{ steps.pin.outputs.new_version }}
-          CHECK: ${{ steps.check.outcome }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          if [ "$CHECK" = success ]; then
-            result="SDK build, package and vamos startup smoke passed with the new image."
-            title="m68k toolchain: $NEW_VERSION"
-          else
-            result="**The SDK build, package or vamos smoke FAILED with the new image** (see the run log)."
-            title="m68k toolchain: $NEW_VERSION (fails)"
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sdk/scripts/m68k-toolchain-pin.sh set "$NEW"
+          bot_id=$(gh api "users/${APP_SLUG}[bot]" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "$bot_id+${APP_SLUG}[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
           git add -u
           git commit -q -m "build: m68k toolchain $NEW_VERSION" \
-            -m "Pin $NEW (was $OLD_VERSION, $OLD)." \
-            -m "$result"
+            -m "Pin $NEW (was $OLD_VERSION, $OLD)."
           git push -f origin "$BRANCH"
+          title="m68k toolchain: $NEW_VERSION"
           body=$(printf '%s\n' \
             "The \`$TOOLCHAIN_IMAGE\` tag points at a new image." \
             "" \
@@ -110,20 +105,11 @@ jobs:
             "| pinned | $OLD_VERSION | \`$OLD\` |" \
             "| new | $NEW_VERSION | \`$NEW\` |" \
             "" \
-            "$result Run: $RUN_URL" \
-            "" \
             "Merging moves the SDK builds to this compiler. The drivers repo follows its own pin, and its SDK payloads follow \`sdk/SDK_REF\`. A card run of the current compiler is due before the next release.")
           pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$pr" ]; then
             gh pr edit "$pr" --title "$title" --body "$body"
-          elif ! gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
-              --title "$title" --body "$body"; then
-            issue=$(gh issue list --state open --search "in:title \"m68k toolchain:\"" --json number --jq '.[0].number // empty')
-            note="Actions may not open pull requests in this organisation; open one from \`$BRANCH\`."
-            if [ -n "$issue" ]; then
-              gh issue edit "$issue" --title "$title" --body "$body"$'\n\n'"$note"
-            else
-              gh issue create --title "$title" --body "$body"$'\n\n'"$note"
-            fi
+          else
+            gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
+              --title "$title" --body "$body"
           fi
-          [ "$CHECK" = success ]
