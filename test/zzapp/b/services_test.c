@@ -509,6 +509,24 @@ static void test_audio_teardown_handoff(void)
 		fail("close after reclaim");
 }
 
+static void test_audio_write_cursor_wrap(void)
+{
+	/* The app's write cursor is 32-bit and wraps after ~54 h at 22050 Hz.
+	 * Produced must stay >= staged across the wrap, or the fabric producer
+	 * stalls. */
+	uint64_t staged = 0xFFFFFFFCull * 4u; /* staged up to frame 2^32 - 4 */
+
+	if (audio_produced_frames(0xFFFFFFFEu, staged) != 0xFFFFFFFEull)
+		fail("cursor before the wrap");
+	if (audio_produced_frames(0x00000003u, staged) != 0x100000003ull)
+		fail("cursor across the wrap");
+	staged = 0x100000001ull * 4u; /* staging itself crossed the wrap */
+	if (audio_produced_frames(0x00000005u, staged) != 0x100000005ull)
+		fail("cursor after staging crossed the wrap");
+	if (audio_produced_frames(0x00000001u, staged) != 0x100000001ull)
+		fail("cursor equal to staged");
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -518,6 +536,7 @@ int main(void)
 	test_audio_busy();
 	test_late_file_reply();
 	test_audio_teardown_handoff();
+	test_audio_write_cursor_wrap();
 	test_display_refresh_rotation_and_layout();
 	test_display_scanout_ack();
 	test_clut8_palette_publication();

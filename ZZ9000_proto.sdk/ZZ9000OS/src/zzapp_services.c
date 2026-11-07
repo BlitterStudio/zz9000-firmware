@@ -1870,19 +1870,38 @@ static int slot_is_busy(uint32_t slot)
 	return 0;
 }
 
+/*
+ * The app's public write cursor is a 32-bit frame index: it wraps after
+ * ~54 h at 22050 Hz, while audio_staged is a monotonic 64-bit byte count.
+ * Widening the raw counter makes produced < staged at the wrap and the
+ * producer stalls. The app is never more than one ring ahead of what was
+ * staged, so extend the cursor from the staged frame count by the modular
+ * difference. No state: the fabric's snapshot and stage paths can both call
+ * this. (The AHI pump already compares modular uint32 differences.)
+ */
+__attribute__((unused))
+static uint64_t audio_produced_frames(uint32_t write_frame, uint64_t staged_bytes)
+{
+	uint64_t staged_frames = staged_bytes / 4U;
+
+	return staged_frames + (uint32_t)(write_frame - (uint32_t)staged_frames);
+}
+
 #ifndef ZZAPP_HOST_TEST
 static int app_audio_snapshot(struct audio_fabric_source *source)
 {
 	uint32_t wr;
+	uint64_t staged;
 
 	if (!audio_open || !audio_samples || !audio_write_frame)
 		return 0;
 	wr = *audio_write_frame;
+	staged = audio_staged;
 	memset(source, 0, sizeof(*source));
 	source->ring = (uint8_t *)audio_samples;
 	source->capacity = ZZAPP_AUDIO_FRAMES * 4U;
-	source->produced_bytes = (uint64_t)wr * 4U;
-	source->staged_bytes = audio_staged;
+	source->produced_bytes = audio_produced_frames(wr, staged) * 4U;
+	source->staged_bytes = staged;
 	source->sample_rate = ZZAPP_AUDIO_RATE;
 	source->channels = 2U;
 	source->sample_format = 1U; /* SDK_AUDIO_SAMPLE_FORMAT_S16LE */
@@ -1895,7 +1914,7 @@ static int app_audio_stage(uint32_t bytes)
 
 	if (!audio_open || !audio_write_frame)
 		return 0;
-	produced = (uint64_t)(*audio_write_frame) * 4U;
+	produced = audio_produced_frames(*audio_write_frame, audio_staged) * 4U;
 	if (produced < audio_staged || produced - audio_staged < bytes)
 		return 0;
 	audio_staged += bytes;
