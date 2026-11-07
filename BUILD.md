@@ -355,10 +355,23 @@ which fails when the tag (ignoring any `-rc1` style suffix) and the
 `REVISION_*` values differ.
 
 Push an annotated `v*` tag after the firmware and every release bitstream have
-been committed. GitHub Actions builds the standard firmware image, packages
-every required variant with the sample `ZZ9000.CFG`, then creates a GitHub
-Release from the ZIP files. A tag containing `-`, such as `v2.3.0-rc1`,
+been committed. GitHub Actions builds the standard and RasterIX firmware images,
+packages every required variant with the sample `ZZ9000.CFG`, then creates a
+GitHub Release from the ZIP files. A tag containing `-`, such as `v2.3.0-rc1`,
 becomes a pre-release.
+
+The zips also carry the MiniGL module kit (`ZZ9K/MINIGL.ZZM`, its
+`MINIGL.KIT.json` and source tarball) from the amiberry-minigl-library release
+named in `util/minigl-kit.pin`, which holds `<tag> <MINIGL.ZZM sha256>` or
+`none`. The tag build downloads that release with the `MINIGL_RELEASE_TOKEN`
+secret and fails if the module's SHA-256 differs from the pin; with `none` the
+release ships without the module. Point the pin at a new library release before
+tagging:
+
+```bash
+sh util/minigl-kit-pin.sh set v30.0   # or: set none
+sh util/minigl-kit-pin.sh current
+```
 
 ```bash
 sh util/check_release_version.sh v2.3.0

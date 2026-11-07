@@ -169,6 +169,8 @@ jobs:
         run: make -C test/sd_boot test
       - name: Release variant builder selection
         run: bash test/release/variant_builder_test.sh
+      - name: MiniGL kit pin
+        run: bash test/release/minigl_kit_pin_test.sh
       - name: Scheduler host tests
         run: make -C test/scheduler test
       - name: ZZ9000.CFG parser suite
@@ -363,19 +365,13 @@ jobs:
             ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.map \
             ZZ9000_proto.sdk/ZZ9000OS/Makefile
 
-      - name: Download matching MiniGL release kit
+      # util/minigl-kit.pin names the amiberry-minigl-library release whose
+      # module kit the release zips carry, or "none".
+      - name: Download pinned MiniGL release kit
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.MINIGL_RELEASE_TOKEN }}
-        run: |
-          set -euo pipefail
-          mkdir minigl-kit
-          gh release download "$GITHUB_REF_NAME" \
-            --repo BlitterStudio/amiberry-minigl-library \
-            --dir minigl-kit \
-            --pattern 'MINIGL.ZZM' \
-            --pattern 'MINIGL.KIT.json' \
-            --pattern 'MINIGL-source-*.tar.gz'
+        run: sh util/minigl-kit-pin.sh fetch minigl-kit
 
       - name: Check exception-vector placement
         run: bash util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
@@ -386,7 +382,10 @@ jobs:
           BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
           ARGS=(--tag "$BUILD_LABEL" --output release_assets --elf-set standard)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            ARGS+=(--require-all --minigl-kit minigl-kit)
+            ARGS+=(--require-all)
+            if [[ -d minigl-kit ]]; then
+              ARGS+=(--minigl-kit minigl-kit)
+            fi
           fi
           ./build_release_assets.sh "${ARGS[@]}"
 
@@ -425,7 +424,10 @@ jobs:
           BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
           ARGS=(--tag "$BUILD_LABEL" --output release_assets --elf-set rasterix)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            ARGS+=(--require-all --minigl-kit minigl-kit)
+            ARGS+=(--require-all)
+            if [[ -d minigl-kit ]]; then
+              ARGS+=(--minigl-kit minigl-kit)
+            fi
           fi
           ./build_release_assets.sh "${ARGS[@]}"
 

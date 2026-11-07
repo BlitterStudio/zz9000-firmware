@@ -1,0 +1,4 @@
+# MiniGL module kit shipped in firmware release zips.
+# One line: "none", or "<amiberry-minigl-library release tag> <MINIGL.ZZM sha256>".
+# Change it with util/minigl-kit-pin.sh set <tag>|none.
+none
