@@ -30,10 +30,10 @@
 
 #define IIC2_DEVICE_ID	XPAR_XIICPS_1_DEVICE_ID
 #define IIC2_SCLK_RATE	100000
-/* Bulk program/parameter RAM download only: the ADAU1701 control port is
- * rated for 400 kHz fast mode. Every burst is read back; any mismatch drops
- * the bus to IIC2_SCLK_RATE and reloads word by word. */
-#define IIC2_BULK_SCLK_RATE	400000
+/* Bulk program/parameter RAM download only. A 400 kHz request selects
+ * 388.5 kHz from the 111.11 MHz input (1.287 us SCL low, below 1.3 us).
+ * 360000 selects 360.75 kHz with 1.386 us SCL low. */
+#define IIC2_BULK_SCLK_RATE	360000
 /* Words per burst. Reads stay below the PS I2C 255-byte transfer size. */
 #define ADAU_PROGRAM_BURST_WORDS	40
 #define ADAU_PARAMETER_BURST_WORDS	50
@@ -228,6 +228,17 @@ int adau_read16(u8 i2c_addr, u16 addr, u8* buffer) {
 	return status1;
 }
 
+/* adau_read16() reports only the address phase; the zeroed buffer keeps a
+ * failed data phase from matching the running value. */
+int audio_adau_core_running(void)
+{
+	u8 rbuf[2] = { 0U, 0U };
+
+	return adau_read16(0x34, 2076, rbuf) == 0 &&
+		rbuf[0] == (u8)(ZZ_AUDIO_CODEC_CORE_RUNNING >> 8) &&
+		rbuf[1] == (u8)ZZ_AUDIO_CODEC_CORE_RUNNING;
+}
+
 int adau_read24(u8 i2c_addr, u16 addr, u8* buffer) {
 	XIicPs* iic = &Iic2;
 	int status1;
@@ -412,6 +423,23 @@ static int adau_read_burst(u8 i2c_addr, u16 addr, u8 *data, u32 len)
 	return adau_wait_idle(iic);
 }
 
+static int audio_adau_restore_iic_clock(void)
+{
+	int status = XIicPs_SetSClk(&Iic2, IIC2_SCLK_RATE);
+
+	if (status == 0)
+		return 0;
+	printf("[adau] restoring I2C clock failed: %d; resetting controller\n",
+	       status);
+	XIicPs_Reset(&Iic2);
+	XIicPs_WriteReg(Iic2.Config.BaseAddress, XIICPS_TRANS_SIZE_OFFSET, 0U);
+	status = XIicPs_SetSClk(&Iic2, IIC2_SCLK_RATE);
+	if (status != 0)
+		printf("[adau] restoring I2C clock after reset failed: %d\n",
+		       status);
+	return status;
+}
+
 /* Write and read back one RAM image in bursts at the bulk clock. Parameter
  * words carry the same high-nibble mask as audio_adau_write_parameter().
  * Returns 0 only if every burst read back identically; the bus is back at
@@ -444,7 +472,8 @@ static int audio_adau_burst_load(u16 base, const uint8_t *image, uint32_t len,
 		     memcmp(wire, readback, chunk) == 0;
 		offset += chunk;
 	}
-	(void)XIicPs_SetSClk(&Iic2, IIC2_SCLK_RATE);
+	if (audio_adau_restore_iic_clock() != 0)
+		ok = 0;
 	if (!ok)
 		printf("[adau] burst load at 0x%03x failed near word %lu; "
 		       "reloading word by word\n", base,
