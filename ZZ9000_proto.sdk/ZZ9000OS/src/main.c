@@ -699,9 +699,16 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * after power-on, before any host driver runs): a Zorro reset does not
 	 * touch the audio path in the RTL. Keep it instead of reloading the
 	 * program and scene a second time. */
-	const int keep_dsp = !boot_pass && adau_enabled &&
-	                     audio_adau_write_count() ==
-	                     adau_writes_after_reset_pass;
+	int keep_dsp = !boot_pass && adau_enabled &&
+	               audio_adau_write_count() ==
+	               adau_writes_after_reset_pass;
+	const char *audio_dsp_reset_message = "";
+
+	if (keep_dsp && !audio_adau_core_running()) {
+		keep_dsp = 0;
+		audio_dsp_reset_message =
+			" (audio DSP lost its program: reloading)";
+	}
 
 	if (boot_pass) {
 		printf("    _______________   ___   ___   ___  \n");
@@ -714,7 +721,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 		       mode == AMIGA_RESET_INIT_MEDIA ? "media" : "no media");
 	} else {
 		printf("[reset] Amiga reset%s\r\n",
-		       keep_dsp ? " (audio DSP unchanged: kept)" : "");
+		       keep_dsp ? " (audio DSP unchanged: kept)" :
+		       audio_dsp_reset_message);
 	}
 
 	video_reset();
@@ -777,6 +785,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	if (!keep_dsp) {
 		// reset ADAU
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
+		// Hold RESET low long enough for the Audio card RC filter.
+		usleep(1000);
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
 
