@@ -289,6 +289,43 @@ static void test_requests(void)
     mw_host_destroy(c);
     printf("PASS: test_requests\n");
 }
+static void test_capture_round_trips_all_rgb_formats(void)
+{
+    mw_ctx *c = mw_host_create(1U, 1U);
+    uint8_t request[40];
+    uint8_t span[4];
+    uint32_t format;
+
+    assert(c != NULL);
+    sdk_palette_reset();
+    sdk_palette_set(1U, 0x00ff0000U);
+    for (format = 1U; format <= 13U; ++format) {
+        uint32_t bytes_per_pixel = format == 1U ? 1U :
+                                   format <= 3U ? 3U :
+                                   format <= 9U ? 4U : 2U;
+        uint32_t reply_bytes = 0U;
+
+        c->state.target.latest = c->state.target.back;
+        c->color_buffers[c->state.target.back][0] = 0xff0000ffU;
+        memset(request, 0, sizeof(request));
+        mw_put_be32(request, MW_BLIT);
+        mw_put_be32(request + 4U, format);
+        mw_put_be32(request + 8U, bytes_per_pixel);
+        mw_put_be32(request + 20U, 1U);
+        mw_put_be32(request + 32U, 1U);
+        mw_put_be32(request + 36U, 1U);
+        assert(mw_host_request(c, request, sizeof(request), span,
+                               bytes_per_pixel, &reply_bytes) == MW_STATUS_OK);
+
+        mw_put_be32(request, MW_CAPTURE);
+        assert(mw_host_request(c, request, sizeof(request), span,
+                               bytes_per_pixel, &reply_bytes) == MW_STATUS_OK);
+        assert(c->color_buffers[c->state.target.back][0] == 0xff0000ffU);
+    }
+    mw_host_destroy(c);
+    printf("PASS: test_capture_round_trips_all_rgb_formats\n");
+}
+
 
 static uint32_t texture_packet(uint8_t *packet, uint32_t opcode, uint32_t payload_bytes)
 {
@@ -1001,6 +1038,7 @@ int main(void)
     test_rejected_packet_changes_no_state();
     test_draw_triangle_golden();
     test_requests();
+    test_capture_round_trips_all_rgb_formats();
     test_wire_texture_bounds_and_indices();
     test_copy_texture_discards_index_storage();
     test_draw_buffer_none_preserves_color();

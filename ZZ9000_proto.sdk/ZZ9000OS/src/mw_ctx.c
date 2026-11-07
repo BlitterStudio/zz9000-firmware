@@ -2671,15 +2671,15 @@ static inline void mw_decode_pixel(uint32_t format, const uint8_t *d, uint8_t *o
         break;
     }
     case 12: { /* RGBFB_B5G6R5PC */
-        o[0] = mw_widen5(d[1] >> 3);
+        o[0] = mw_widen5(d[0] & 31);
         o[1] = mw_widen6(((d[1] & 7) << 3) | (d[0] >> 5));
-        o[2] = mw_widen5(d[0] & 31);
+        o[2] = mw_widen5(d[1] >> 3);
         break;
     }
     case 13: { /* RGBFB_B5G5R5PC */
-        o[0] = mw_widen5((d[1] >> 2) & 31);
+        o[0] = mw_widen5(d[0] & 31);
         o[1] = mw_widen5(((d[1] & 3) << 3) | (d[0] >> 5));
-        o[2] = mw_widen5(d[0] & 31);
+        o[2] = mw_widen5((d[1] >> 2) & 31);
         break;
     }
     default:
