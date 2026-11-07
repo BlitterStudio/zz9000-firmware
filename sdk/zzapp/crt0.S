@@ -1,6 +1,8 @@
 /*
  * App entry. r0 is the API table, r1 argc, r2 argv, sp the arena top.
- * No vectors, no BSS clear, no MMU. Return from zz_main is zz_exit.
+ * No vectors, no BSS clear, no MMU. Return from zz_main routes through
+ * libc exit() so newlib flushes buffered stdio (stdout is fully buffered
+ * because _isatty reports 0); exit's _exit stub is zz_exit.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -21,5 +23,6 @@ zz_start:
 	mov	r0, r4
 	mov	r1, r5
 	bl	zz_main
-	b	zz_exit
+	bl	exit
+	b	zz_exit		/* unreachable: exit() does not return */
 	.size zz_start, . - zz_start
