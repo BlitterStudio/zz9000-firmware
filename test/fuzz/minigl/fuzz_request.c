@@ -33,7 +33,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     const uint8_t *req_data = data + 3 + submit_len;
 
     if (submit_len >= 16) {
-        (void)mw_host_submit(c, submit_data, (uint32_t)submit_len);
+        (void)fuzz_submit_fixed(c, submit_data, submit_len);
     }
 
     if (req_len >= 4) {

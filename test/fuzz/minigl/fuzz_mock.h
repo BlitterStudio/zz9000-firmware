@@ -172,6 +172,28 @@ static inline void disable_rasterix_mock(void)
     minigl_raster_set_rix_platform(NULL);
 }
 
+/* Most random packets die at the frame header (magic, version, total
+ * length). Fix those three words so mutations reach the command decoders;
+ * the command count and everything after it stay fuzzed. */
+static inline uint32_t fuzz_submit_fixed(mw_ctx *c, const uint8_t *data, size_t len)
+{
+    uint8_t *packet;
+    uint32_t status;
+
+    if (len < 16 || len > (1u << 20))
+        return mw_host_submit(c, data, (uint32_t)len);
+    packet = (uint8_t *)malloc(len);
+    if (!packet)
+        return MW_STATUS_INVALID;
+    memcpy(packet, data, len);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, (uint32_t)len);
+    status = mw_host_submit(c, packet, (uint32_t)len);
+    free(packet);
+    return status;
+}
+
 static inline uint32_t fuzz_size_reply_capacity(const uint8_t *req, size_t req_bytes)
 {
     if (!req || req_bytes < 4)

@@ -58,7 +58,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             }
         } else {
             if (chunk_len >= 16) {
-                (void)mw_host_submit(target_ctx, p, (uint32_t)chunk_len);
+                (void)fuzz_submit_fixed(target_ctx, p, chunk_len);
             }
         }
 

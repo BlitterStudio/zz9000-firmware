@@ -35,7 +35,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 pkt_len = header_len;
             }
         }
-        (void)mw_host_submit(c, p, (uint32_t)pkt_len);
+        (void)fuzz_submit_fixed(c, p, pkt_len);
         p += pkt_len;
         rem -= pkt_len;
     }
