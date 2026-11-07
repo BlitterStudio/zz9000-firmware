@@ -367,6 +367,10 @@ uint32_t usb_proxy_periodic_schedule_bits(void);
 void usb_proxy_refresh_event_irq(void);
 void usb_proxy_iso_pump(void);
 void usb_proxy_poll_maintenance(void);
+int usb_proxy_reset_port_pending(void);
+uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
+                                   volatile struct ZZUSBProtocolExtension *ext,
+                                   int is_v2);
 uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
                                   volatile struct ZZUSBProtocolExtension *ext,
                                   uint8_t *data_buf, int is_v2);
