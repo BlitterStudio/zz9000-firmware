@@ -3534,6 +3534,22 @@ int minigl_raster_test_level_size(uint32_t id, uint16_t level,
     *height = image->height;
     return 1;
 }
+
+int minigl_raster_test_level_pixel(uint32_t id, uint16_t level,
+                                   uint16_t x, uint16_t y, uint32_t *pixel)
+{
+    Texture *texture_info = id ? texture(id) : NULL;
+    const TextureLevel *image;
+
+    if (!texture_info || !pixel || level >= ZZ9K_MINIGL_MAX_MIP_LEVELS)
+        return 0;
+    image = &texture_info->levels[level];
+    if (!image->size || x >= image->width || y >= image->height)
+        return 0;
+    *pixel = ((const uint32_t *)(const void *)(g_buffers.texture_pool + image->offset))
+                 [(size_t)y * image->width + x];
+    return 1;
+}
 #endif
 
 static int draw_arrays_valid(uint16_t attr_code, uint16_t stride, uint32_t first,

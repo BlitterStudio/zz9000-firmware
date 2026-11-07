@@ -14,6 +14,10 @@
 #include "mw_types.h"
 #include "sdk_palette.h"
 
+extern int minigl_raster_test_level_pixel(uint32_t id, uint16_t level,
+                                          uint16_t x, uint16_t y,
+                                          uint32_t *pixel);
+
 
 static void test_create_destroy(void)
 {
@@ -458,6 +462,63 @@ static uint32_t texture_param(uint8_t *packet, uint32_t name,
     mw_put_be32(packet + 28, pname);
     mw_put_be32(packet + 32, value);
     return bytes;
+}
+
+static void test_color_table_regenerates_indexed_mips(void)
+{
+    mw_ctx *c = mw_host_create(2U, 2U);
+    uint8_t packet[128] = { 0 };
+    uint8_t *p;
+    uint32_t bytes;
+    uint32_t pixel;
+    mw_texture *t;
+
+    assert(c != NULL);
+    bytes = texture_packet(packet, MW_COLOR_TABLE, 32U);
+    p = packet + 24U;
+    mw_put_be32(p, 0x80d0U);
+    mw_put_be32(p + 12U, 1U);
+    mw_put_be32(p + 16U, 0x1908U);
+    mw_put_be32(p + 20U, 0x1401U);
+    mw_put_be32(p + 24U, 4U);
+    p[28] = 0xffU;
+    p[31] = 0xffU;
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+
+    assert(mw_host_submit(c, packet, texture_generate_mips(packet, 94U)) ==
+           MW_STATUS_OK);
+    bytes = texture_packet(packet, MW_TEXTURE_IMAGE_RAW, 60U);
+    p = packet + 24U;
+    mw_put_be32(p, 94U);
+    mw_put_be32(p + 8U, 4U);
+    mw_put_be32(p + 12U, 2U);
+    mw_put_be32(p + 16U, 2U);
+    mw_put_be32(p + 20U, 0x1900U);
+    mw_put_be32(p + 24U, 0x1401U);
+    mw_put_be32(p + 28U, 1U);
+    mw_put_be32(p + 52U, 4U);
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+
+    bytes = texture_packet(packet, MW_COLOR_TABLE, 32U);
+    p = packet + 24U;
+    mw_put_be32(p, 0x80d0U);
+    mw_put_be32(p + 12U, 1U);
+    mw_put_be32(p + 16U, 0x1908U);
+    mw_put_be32(p + 20U, 0x1401U);
+    mw_put_be32(p + 24U, 4U);
+    p[29] = 0xffU;
+    p[31] = 0xffU;
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+
+    t = mw_texmgr_find(&c->texmgr, 94U);
+    assert(t != NULL && t->pixels[0][0] == 0x00ff00ffU &&
+           t->pixels[1][0] == 0x00ff00ffU);
+    assert(minigl_raster_test_level_pixel(94U, 0U, 0U, 0U, &pixel) &&
+           pixel == 0x00ff00ffU);
+    assert(minigl_raster_test_level_pixel(94U, 1U, 0U, 0U, &pixel) &&
+           pixel == 0x00ff00ffU);
+    mw_host_destroy(c);
+    printf("PASS: test_color_table_regenerates_indexed_mips\n");
 }
 
 static uint32_t lightmap_subimage(uint8_t *packet, uint32_t name, uint8_t value)
@@ -1170,6 +1231,7 @@ int main(void)
     test_capture_round_trips_all_rgb_formats();
     test_scissor_clips_before_raster_narrowing();
     test_wire_texture_bounds_and_indices();
+    test_color_table_regenerates_indexed_mips();
     test_copy_texture_discards_index_storage();
     test_draw_buffer_none_preserves_color();
     test_glquake_texture_soak();

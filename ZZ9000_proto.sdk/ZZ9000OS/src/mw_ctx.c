@@ -2200,6 +2200,12 @@ target_allocation_failed:
                     }
                 }
             }
+            if (t->generate_mipmap &&
+                (!mw_texmgr_generate_mips(&c->texmgr, t) ||
+                 !mw_upload_generated_mips(c, t))) {
+                mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+                goto command_complete;
+            }
         }
         break;
     }
