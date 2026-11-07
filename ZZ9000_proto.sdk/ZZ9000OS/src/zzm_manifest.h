@@ -8,6 +8,11 @@
 #define ZZM_ARENA_SIZE    0x02000000U
 #define ZZM_ARENA_END     (ZZM_ARENA_ADDRESS + ZZM_ARENA_SIZE)
 
+/* MiniGL starts with the mandated 4 MiB fixed image-and-BSS gate.  A future
+ * measured 8 MiB cutover must replace this complete fixed manifest layout. */
+#define ZZM_MINIGL_SLOT_ADDRESS 0x09800000U
+#define ZZM_MINIGL_SLOT_SIZE    0x00400000U
+
 typedef struct zzm_slot {
     uint32_t id;
     const char *name;

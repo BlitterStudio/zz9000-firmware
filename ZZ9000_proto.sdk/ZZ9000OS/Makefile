@@ -90,8 +90,8 @@ LIBOPUS_DIR ?= $(BUILD_DIR)/deps/opus/$(LIBOPUS_VERSION)
 LIBOPUS_LIB ?= $(LIBOPUS_DIR)/arm/libopusdec.a
 LIBOPUS_INCLUDE_DIR ?= $(LIBOPUS_DIR)/arm/include
 
-# Include paths
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
+INCLUDES += -I../../sdk/zzapp/include
 INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
 INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
@@ -115,9 +115,25 @@ COMMON_FLAGS += -DCONFIG_EHCI_IS_TDI
 # Errors (status=0x20) on HS bulk OUT.
 COMMON_FLAGS += -DCONFIG_USB_EHCI_TXFIFO_THRESH=4
 
+# RasterIX is physically absent from ordinary bitstreams.  Keep every CSR
+# access out of their firmware by making the platform registration opt-in.
+# RasterIX command payloads use PL330 after its start-up self-test; short
+# packets retain the cheaper MMIO path.
+MINIGL_RASTERIX ?= 0
+MINIGL_RIX_DMA ?= 1
+ifeq ($(MINIGL_RASTERIX),1)
+EXTRA_CFLAGS += -DMINIGL_RASTERIX=1 -DMINIGL_RIX_DMA=$(MINIGL_RIX_DMA)
+endif
+
 # -O2 flags (default for all files)
 EXTRA_CFLAGS ?=
+ZZ9000_BUILD_GIT ?= unknown
+ZZ9000_BUILD_DIRTY ?= unknown
+ZZ9000_BUILD_DATE ?= unknown
 CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2 $(EXTRA_CFLAGS)
+CFLAGS += -DZZ9000_BUILD_GIT=\"$(ZZ9000_BUILD_GIT)\"
+CFLAGS += -DZZ9000_BUILD_DIRTY=\"$(ZZ9000_BUILD_DIRTY)\"
+CFLAGS += -DZZ9000_BUILD_DATE=\"$(ZZ9000_BUILD_DATE)\"
 
 # Linker flags
 LDFLAGS = $(CPU_FLAGS)
@@ -127,6 +143,11 @@ LDFLAGS += -specs=$(SRC_DIR)/Xilinx.spec
 LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -Wl,-Map,$(BUILD_DIR)/ZZ9000OS.map
 LDFLAGS += -L$(BSP_LIB)
+# Route every BSP cache entry point through the locked PL310 wrapper
+# (src/l2_maint.c), including calls made inside the BSP archive itself.
+LDFLAGS += -Wl,--wrap=Xil_DCacheFlushRange -Wl,--wrap=Xil_DCacheInvalidateRange
+LDFLAGS += -Wl,--wrap=Xil_DCacheFlush -Wl,--wrap=Xil_L2CacheFlush
+LDFLAGS += -Wl,--wrap=Xil_ICacheInvalidateRange
 
 # Libraries (order matters for --start-group)
 LIBS = $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
@@ -157,9 +178,11 @@ C_SRCS = \
 	$(SRC_DIR)/core2.c \
 	$(SRC_DIR)/scheduler.c \
 	$(SRC_DIR)/scheduler_arm.c \
+	$(SRC_DIR)/zzm_minigl_host.c \
 	$(SRC_DIR)/scheduler_stress.c \
 	$(SRC_DIR)/sdk_smp_lock.c \
 	$(SRC_DIR)/sdk_smp_lock_arm.c \
+	$(SRC_DIR)/l2_maint.c \
 	$(SRC_DIR)/sdk_decode_reclaim.c \
 	$(SRC_DIR)/sdk_decode_reclaim_arm.c \
 	$(SRC_DIR)/dma_acc.c \
@@ -167,6 +190,9 @@ C_SRCS = \
 	$(SRC_DIR)/surface_allocator.c \
 	$(SRC_DIR)/card_pool.c \
 	$(SRC_DIR)/sdk_palette.c \
+	$(SRC_DIR)/zzapp_loader.c \
+	$(SRC_DIR)/zzapp_host.c \
+	$(SRC_DIR)/zzapp_api.c \
 	$(SRC_DIR)/overlay.c \
 	$(SRC_DIR)/usb.c \
 	$(SRC_DIR)/mp3/decode_mp3.c \
@@ -259,6 +285,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_aperture_layout.c \
 	$(SRC_DIR)/mmu_page.c \
 	$(SRC_DIR)/sdk_mailbox.c \
+	$(SRC_DIR)/zzapp_services.c \
 	$(SRC_DIR)/sdk_console_encode.c \
 	$(SRC_DIR)/rfb/rfb_encode.c \
 	$(SRC_DIR)/rfb/rfb_words.c \
@@ -287,6 +314,29 @@ FALLBACK_OBJS = $(COMMON_OBJS) $(OVERLAY_HW_FALLBACK_OBJ)
 TARGET = $(BUILD_DIR)/ZZ9000OS.elf
 FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 ZZM_PACKER = $(BUILD_DIR)/zzm_pack
+
+# The two bitstream flavors compile common source with different preprocessor
+# inputs.  Stable stamps force every source object to rebuild whenever the
+# requested flavor or RasterIX transport changes, while preserving incremental
+# builds of one configuration.
+BUILD_CONFIG_STAMP = $(BUILD_DIR)/.minigl-rasterix
+BUILD_TRANSPORT_STAMP = $(BUILD_DIR)/.minigl-rix-dma
+
+$(BUILD_CONFIG_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@if test ! -f "$@" || test "$$(cat "$@")" != "$(MINIGL_RASTERIX)"; then \
+		printf '%s\n' "$(MINIGL_RASTERIX)" > "$@"; \
+	fi
+
+$(BUILD_TRANSPORT_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@if test ! -f "$@" || test "$$(cat "$@")" != "$(MINIGL_RIX_DMA)"; then \
+		printf '%s\n' "$(MINIGL_RIX_DMA)" > "$@"; \
+	fi
+
+$(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS)) \
+$(BSP_SDPS_OBJ) $(BSP_SDPSOPT_OBJ) $(BSP_DISKIO_OBJ) \
+$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP) $(BUILD_TRANSPORT_STAMP)
 
 .DEFAULT_GOAL := all
 
@@ -459,6 +509,7 @@ $(BUILD_DIR)/sdk_video_webm.o: $(SRC_DIR)/sdk_video_webm.c $(LIBVPX_LIB) $(LIBOP
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -O3 -MMD -MP -o $@ $<
 
+
 # Vendored LZH decode core (LHa for UNIX) + firmware I/O shim: every TU here
 # includes lha.h, which does `#include <config.h>` (angle-bracket). Two flags
 # are mandatory and absent from the default rule:
@@ -473,6 +524,7 @@ $(BUILD_DIR)/sdk_video_webm.o: $(SRC_DIR)/sdk_video_webm.c $(LIBVPX_LIB) $(LIBOP
 $(BUILD_DIR)/lzh/%.o: $(SRC_DIR)/lzh/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H $(CFLAGS) -MMD -MP -o $@ $<
+
 
 # Default rule for all other files (-O2).
 # -MMD emits a .d file next to the .o listing every header the source

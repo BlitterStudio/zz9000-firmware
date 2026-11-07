@@ -63,7 +63,19 @@ static uint32_t next_decompress_stream_id = 1U;
  * allocation header immediately before the returned pointer makes free safe
  * without consulting newlib metadata after a worker reset. */
 #define DECODE_POOL_MAGIC 0x44454350u
-#define DECODE_POOL_OWNER CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffeu)
+#define DECODE_POOL_OWNER SDK_DECODE_POOL_OWNER
+typedef char app_decode_owner_is_media[
+	(SDK_DECODE_POOL_OWNER ==
+	 CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffeu) &&
+	 SDK_APP_DECODE_POOL_OWNER ==
+	 CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffdU)) ? 1 : -1];
+
+/* Scratch for the codec allocators below. Every public entry sets it
+ * first, so an unwind out of a call (app force-stop) can only leave the
+ * value the next entry overwrites anyway. App one-shot decompress runs
+ * under SDK_APP_DECODE_POOL_OWNER so zzapp_api_poison_resources reclaims
+ * a mid-call unwind; streaming sessions stay on the shared owner. */
+static uint32_t decompress_scratch_owner = DECODE_POOL_OWNER;
 
 struct decode_pool_header {
 	uint32_t magic;
@@ -71,24 +83,28 @@ struct decode_pool_header {
 	uint32_t size;
 	uint32_t owner;
 };
-
-void *sdk_decode_heap_alloc(size_t size)
+void *sdk_decode_heap_alloc_owned(size_t size, uint32_t owner)
 {
 	struct decode_pool_header *header;
 	uint32_t base;
 
-	if (size == 0U || size > UINT32_MAX - sizeof(*header))
+	if (size == 0U || size > UINT32_MAX - sizeof(*header) || owner == 0U)
 		return 0;
 	base = card_pool_alloc(&card_pool, (uint32_t)size + sizeof(*header),
-	                       DECODE_POOL_OWNER);
+	                       owner);
 	if (!base)
 		return 0;
 	header = (struct decode_pool_header *)(uintptr_t)base;
 	header->magic = DECODE_POOL_MAGIC;
 	header->base = base;
 	header->size = (uint32_t)size;
-	header->owner = DECODE_POOL_OWNER;
+	header->owner = owner;
 	return header + 1;
+}
+
+void *sdk_decode_heap_alloc(size_t size)
+{
+	return sdk_decode_heap_alloc_owned(size, DECODE_POOL_OWNER);
 }
 
 void sdk_decode_heap_free(void *ptr)
@@ -144,7 +160,7 @@ void *sdk_decode_heap_calloc(size_t count, size_t size)
 static void *lzma_alloc(ISzAllocPtr alloc, size_t size)
 {
 	(void)alloc;
-	return sdk_decode_heap_alloc(size);
+	return sdk_decode_heap_alloc_owned(size, decompress_scratch_owner);
 }
 
 static void lzma_free(ISzAllocPtr alloc, void *address)
@@ -159,7 +175,8 @@ static const ISzAlloc lzma_allocator = { lzma_alloc, lzma_free };
 static voidpf zlib_decode_alloc(voidpf opaque, uInt items, uInt size)
 {
 	(void)opaque;
-	return (voidpf)sdk_decode_heap_alloc((size_t)items * (size_t)size);
+	return (voidpf)sdk_decode_heap_alloc_owned((size_t)items * (size_t)size,
+						   decompress_scratch_owner);
 }
 
 static void zlib_decode_free(voidpf opaque, voidpf address)
@@ -183,6 +200,12 @@ static void zlib_decode_free(voidpf opaque, voidpf address)
  * non-shared decode arena (tracked follow-up). This is a property of core-1
  * heap use under force-reset, not of the reclaim itself.
  */
+unsigned sdk_compression_reclaim_app_decode(void)
+{
+	return card_pool_release_owner(&card_pool,
+	                               SDK_APP_DECODE_POOL_OWNER) != 0U;
+}
+
 unsigned sdk_compression_reclaim_core1_decode(void)
 {
 	unsigned reclaimed;
@@ -190,9 +213,12 @@ unsigned sdk_compression_reclaim_core1_decode(void)
 	/*
 	 * Decode working sets are card-pool owned: reclaiming their owner never
 	 * dereferences allocator metadata written by the halted core. Keep the
-	 * legacy table pass for paths not yet backed by this owner.
+	 * legacy table pass for paths not yet backed by this owner. The app
+	 * owner is included here only because a cold restart has halted core 1;
+	 * an app force-stop must use sdk_compression_reclaim_app_decode().
 	 */
 	reclaimed = card_pool_release_owner(&card_pool, DECODE_POOL_OWNER) != 0U;
+	reclaimed += sdk_compression_reclaim_app_decode();
 	sdk_decode_invalidate_table();
 	reclaimed += sdk_decode_reclaim(free);
 	sdk_decode_flush_table();
@@ -690,6 +716,7 @@ uint16_t sdk_decompress_stream_begin(
 	int feed_mode;
 	uint16_t status;
 
+	decompress_scratch_owner = DECODE_POOL_OWNER;
 	allowed_flags = SDK_DECOMPRESS_FLAG_EXPECT_END |
 	                SDK_DECOMPRESS_FLAG_FEED_INPUT;
 	feed_mode = (flags & SDK_DECOMPRESS_FLAG_FEED_INPUT) != 0U;
@@ -1117,6 +1144,7 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
 	int window_bits;
 	int rc;
 
+	decompress_scratch_owner = DECODE_POOL_OWNER;
 	if (!result)
 		return SDK_STATUS_BAD_REQUEST;
 
@@ -1192,6 +1220,17 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
 	if (rc == Z_BUF_ERROR)
 		return SDK_STATUS_BAD_REQUEST;
 	return SDK_STATUS_BAD_REQUEST;
+}
+
+uint16_t sdk_decompress_buffer_owned(uint32_t algorithm, uint32_t flags,
+                                     const uint8_t *src, uint32_t src_length,
+                                     uint8_t *dst, uint32_t dst_capacity,
+                                     struct SDKDecompressResult *result,
+                                     uint32_t scratch_owner)
+{
+	decompress_scratch_owner = scratch_owner;
+	return sdk_decompress_buffer(algorithm, flags, src, src_length, dst,
+	                             dst_capacity, result);
 }
 
 uint16_t sdk_decompress_test_buffer(uint32_t algorithm, uint32_t flags,

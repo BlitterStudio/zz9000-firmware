@@ -68,6 +68,9 @@ proc print_help {} {
   puts "$script_file -tclargs \[--project_name <name>\]"
   puts "$script_file -tclargs \[--no-autoboot\]"
   puts "$script_file -tclargs \[--capture-c28\]"
+  puts "$script_file -tclargs \[--rasterix\]"
+  puts "$script_file -tclargs \[--rasterix-tmu-count <1>\]"
+  puts "$script_file -tclargs \[--rasterix-variant <ef>\]"
   puts "$script_file -tclargs \[--help\]\n"
   puts "Usage:"
   puts "Name                   Description"
@@ -77,10 +80,14 @@ proc print_help {} {
   puts "                       that was set with the \"-paths_relative_to\" switch"
   puts "                       when this script was generated.\n"
   puts "\[--project_name <name>\] Create project with the specified name. Default"
-  puts "                       name is the name of the project from where this"
-  puts "                       script was generated.\n"
+  puts "                       name is the name of the project from where this script"
+  puts "                       was generated.\n"
   puts "\[--no-autoboot\]        Build without advertising the Zorro autoboot ROM.\n"
   puts "\[--capture-c28\]        Opt-in A4000 C28 native capture clock candidate.\n"
+  puts "\[--rasterix\]           Include the opt-in external-framebuffer RasterIX EF renderer.\n"
+  puts "\[--rasterix-tmu-count\] Select the RasterIX TMU count (only 1 is supported).\n"
+  puts "\[--rasterix-variant\] Select RasterIX EF (only ef is supported).\n"
+  puts "\[--rasterix-framebuffer-size-lg\] Deprecated compatibility option; ignored by EF.\n"
   puts "\[--help\]               Print help information for this script"
   puts "-------------------------------------------------------------------------\n"
   exit 0
@@ -88,16 +95,24 @@ proc print_help {} {
 
 set no_autoboot 0
 set capture_c28 0
+set rasterix 0
+set rasterix_tmu_count 1
+set rasterix_framebuffer_size_in_pixel_lg 14
+set rasterix_variant ef
 
 if { $::argc > 0 } {
   for {set i 0} {$i < $::argc} {incr i} {
     set option [string trim [lindex $::argv $i]]
     switch -regexp -- $option {
-      "--origin_dir"   { incr i; set origin_dir [lindex $::argv $i] }
-      "--project_name" { incr i; set _xil_proj_name_ [lindex $::argv $i] }
-      "--no-autoboot"  { set no_autoboot 1 }
-      "--capture-c28"  { set capture_c28 1 }
-      "--help"         { print_help }
+      {^--origin_dir$}   { incr i; set origin_dir [lindex $::argv $i] }
+      {^--project_name$} { incr i; set _xil_proj_name_ [lindex $::argv $i] }
+      {^--no-autoboot$}  { set no_autoboot 1 }
+      {^--capture-c28$}  { set capture_c28 1 }
+      {^--rasterix$}     { set rasterix 1 }
+      {^--rasterix-tmu-count$} { incr i; set rasterix_tmu_count [lindex $::argv $i] }
+      {^--rasterix-variant$} { incr i; set rasterix_variant [string tolower [lindex $::argv $i]] }
+      {^--rasterix-framebuffer-size-lg$} { incr i; set rasterix_framebuffer_size_in_pixel_lg [lindex $::argv $i] }
+      {^--help$}         { print_help }
       default {
         if { [regexp {^-} $option] } {
           puts "ERROR: Unknown option '$option' specified, please type '$script_file -tclargs --help' for usage info.\n"
@@ -106,6 +121,16 @@ if { $::argc > 0 } {
       }
     }
   }
+}
+
+if {$rasterix_tmu_count != 1} {
+  error "RasterIX EF supports exactly one TMU"
+}
+if {$rasterix_variant ne "ef"} {
+  error "RasterIX EF is the only supported RasterIX variant"
+}
+if {$rasterix_framebuffer_size_in_pixel_lg ni {14 15}} {
+  error "RasterIX framebuffer band log2 must be 14 or 15"
 }
 
 # Set the directory path for the original project from where this script was exported
@@ -158,9 +183,13 @@ if {[string equal [get_filesets -quiet sources_1] ""]} {
 
 # Set IP repository paths
 set obj [get_filesets sources_1]
-set_property "ip_repo_paths" [list \
+set ip_repo_paths [list \
   [file normalize "$origin_dir/ip_repo/MNTZorro_1.0"] \
-  [file normalize "$origin_dir/ip_repo/audio_formatter_v1_0"]] $obj
+  [file normalize "$origin_dir/ip_repo/audio_formatter_v1_0"]]
+if { $rasterix } {
+  lappend ip_repo_paths [file normalize "$origin_dir/ip_repo/zz9k_rasterix_1.0"]
+}
+set_property "ip_repo_paths" $ip_repo_paths $obj
 
 # Rebuild user ip_repo's index before adding any source files
 update_ip_catalog -rebuild
@@ -197,6 +226,17 @@ if { $no_autoboot } {
   lappend verilog_defines VARIANT_DISABLE_AUTOBOOT
   set_property verilog_define $verilog_defines $obj
   puts "INFO: VARIANT_DISABLE_AUTOBOOT set; Zorro autoboot ROM will not be advertised."
+}
+if { $rasterix } {
+  lappend verilog_defines \
+    RASTERIX \
+    "RASTERIX_TMU_COUNT=$rasterix_tmu_count" \
+    "RASTERIX_FRAMEBUFFER_SIZE_IN_PIXEL_LG=$rasterix_framebuffer_size_in_pixel_lg"
+  if {$rasterix_variant eq "ef"} {
+    lappend verilog_defines RASTERIX_VARIANT_EF
+  }
+  set_property verilog_define $verilog_defines $obj
+  puts "INFO: RasterIX enabled: variant=$rasterix_variant TMUs=$rasterix_tmu_count framebuffer_band_log2=$rasterix_framebuffer_size_in_pixel_lg"
 }
 # Import local files from the original project
 set files [list \
@@ -344,10 +384,10 @@ if { [get_files audio_clock.v] == "" } {
 
 # Proc to create BD zz9000_ps
 proc cr_bd_zz9000_ps { parentCell } {
+  global rasterix
 # The design that will be created by this Tcl proc contains the following
 # module references:
-# MNTZorro_v0_1_S00_AXI, audio_clock, video_formatter
-
+# MNTZorro_v0_1_S00_AXI, audio_clock, video_formatter, zz9k_rasterix (opt-in)
 
 
   # CHANGE DESIGN NAME HERE
@@ -377,6 +417,10 @@ proc cr_bd_zz9000_ps { parentCell } {
   xilinx.com:ip:axi_vdma:6.3\
   xilinx.com:ip:axis_data_fifo:2.0\
   "
+   if { $rasterix } {
+     append list_check_ips "  zz9k.org:user:zz9k_rasterix:1.0\n"
+     append list_check_ips "  xilinx.com:ip:axi_fifo_mm_s:4.2\n"
+   }
 
    set list_ips_missing ""
    common::send_msg_id "BD_TCL-006" "INFO" "Checking if the following IPs exist in the project's IP catalog: $list_check_ips ."
@@ -405,6 +449,7 @@ proc cr_bd_zz9000_ps { parentCell } {
   audio_clock\
   video_formatter\
   "
+
 
    set list_mods_missing ""
    common::send_msg_id "BD_TCL-006" "INFO" "Checking if the following modules exist in the project's sources: $list_check_mods ."
@@ -695,6 +740,33 @@ proc create_hier_cell_video { parentCell nameHier } {
      catch {common::send_msg_id "BD_TCL-106" "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
    }
+  if { $rasterix } {
+    set block_cell_name zz9k_rasterix_0
+    if { [catch {set zz9k_rasterix_0 [create_bd_cell -type ip -vlnv zz9k.org:user:zz9k_rasterix:1.0 $block_cell_name] } errmsg] } {
+      catch {common::send_msg_id "BD_TCL-105" "ERROR" "Unable to add RasterIX IP <$block_cell_name>: $errmsg"}
+      return 1
+    }
+    # Xilinx AXI FIFO MM-S is the PS/PL330 command ingress.  It packetizes
+    # TDFD writes only after TLF and drives RasterIX FrameStreamingCore ST0.
+    # TDFD is on the AXI4 data interface (S_AXI_FULL, 0x83c80000) so the
+    # PL330 payload lands as 16-beat INCR bursts; the registers stay on the
+    # AXI4-Lite S_AXI (0x83c70000).  PG080: AXI4 data accepts INCR bursts
+    # only, and the core decodes TDFD by comparing AWADDR with
+    # C_AXI4_BASEADDR, so every burst must start at the window base.
+    set gpu_cmd_fifo [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_fifo_mm_s:4.2 gpu_cmd_fifo]
+    set_property -dict [list \
+      CONFIG.C_S_AXI_PROTOCOL {AXI4LITE} \
+      CONFIG.C_DATA_INTERFACE_TYPE {1} \
+      CONFIG.C_S_AXI4_DATA_WIDTH {32} \
+      CONFIG.C_USE_TX_DATA {1} \
+      CONFIG.C_USE_RX_DATA {0} \
+      CONFIG.C_USE_TX_CTRL {0} \
+      CONFIG.C_TX_FIFO_DEPTH {4096} \
+      CONFIG.C_TX_FIFO_PE_THRESHOLD {5} \
+      CONFIG.C_TX_FIFO_PF_THRESHOLD {4091} \
+      CONFIG.C_USE_TX_CUT_THROUGH {0}] $gpu_cmd_fifo
+  }
+
 
   # Create instance: audio_formatter_0, and set properties
   set audio_formatter_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:audio_formatter:1.0 audio_formatter_0 ]
@@ -743,6 +815,8 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.NUM_MI {1} \
    CONFIG.S00_HAS_REGSLICE {3} \
  ] $axi_interconnect_2
+  # HP1 remains capture/MNTZorro exactly as in default images.  In the EF
+  # image the rasterizer gets HP3 alone; the audio formatters share HP2.
 
   # Create instance: axi_interconnect_3, and set properties
   set axi_interconnect_3 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_interconnect_3 ]
@@ -752,6 +826,11 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.NUM_SI {1} \
    CONFIG.S00_HAS_REGSLICE {0} \
  ] $axi_interconnect_3
+  if { $rasterix } {
+    set_property -dict [list \
+      CONFIG.NUM_SI {2} \
+      CONFIG.S01_HAS_REGSLICE {0}] $axi_interconnect_3
+  }
 
   # Create instance: axi_interconnect_4, and set properties
   set axi_interconnect_4 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_interconnect_4 ]
@@ -1245,6 +1324,13 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.PCW_WDT_PERIPHERAL_FREQMHZ {133.333333} \
    CONFIG.PCW_WDT_WDT_IO {<Select>} \
  ] $processing_system7_0
+  if { $rasterix } {
+    # RasterIX EF is the sole 64-bit master on HP3.  The EF firmware flavor
+    # clears AFI3's 32BIT_EN; HP1 remains unchanged for capture/MNTZorro.
+    set_property -dict [ list \
+      CONFIG.PCW_S_AXI_HP3_DATA_WIDTH {64} \
+    ] $processing_system7_0
+  }
 
   # Create instance: ps7_0_axi_periph, and set properties
   set ps7_0_axi_periph [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 ps7_0_axi_periph ]
@@ -1257,6 +1343,16 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.S00_HAS_DATA_FIFO {0} \
    CONFIG.S00_HAS_REGSLICE {3} \
  ] $ps7_0_axi_periph
+  if { $rasterix } {
+    # M07 is RasterIX CSR, M08 the command FIFO registers (AXI4-Lite) and
+    # M09 the command FIFO TDFD data window (AXI4, bursts).
+    set_property -dict [ list \
+      CONFIG.NUM_MI {10} \
+      CONFIG.M07_HAS_REGSLICE {3} \
+      CONFIG.M08_HAS_REGSLICE {3} \
+      CONFIG.M09_HAS_REGSLICE {3} \
+    ] $ps7_0_axi_periph
+  }
 
   # Create instance: rst_ps7_0_25M, and set properties
   set rst_ps7_0_25M [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_25M ]
@@ -1312,8 +1408,14 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net S00_AXI_3 [get_bd_intf_pins axi_interconnect_1/S00_AXI] [get_bd_intf_pins video/M_AXI_MM2S1]
   connect_bd_intf_net -intf_net S01_AXI_3 [get_bd_intf_pins axi_interconnect_1/S01_AXI] [get_bd_intf_pins video/M_AXI_MM2S2]
   connect_bd_intf_net -intf_net S00_AXI_4 [get_bd_intf_pins MNTZorro_v0_1_S00_AXI_0/m01_axi] [get_bd_intf_pins axi_interconnect_2/S00_AXI]
-  connect_bd_intf_net -intf_net S00_AXI_5 [get_bd_intf_pins audio_formatter_1/m_axi_s2mm] [get_bd_intf_pins axi_interconnect_4/S00_AXI]
   connect_bd_intf_net -intf_net audio_formatter_0_m_axi_mm2s [get_bd_intf_pins audio_formatter_0/m_axi_mm2s] [get_bd_intf_pins axi_interconnect_3/S00_AXI]
+  if { $rasterix } {
+    connect_bd_intf_net -intf_net audio_formatter_1_m_axi_s2mm [get_bd_intf_pins audio_formatter_1/m_axi_s2mm] [get_bd_intf_pins axi_interconnect_3/S01_AXI]
+    connect_bd_intf_net -intf_net RasterIX_memory [get_bd_intf_pins zz9k_rasterix_0/m_axi] [get_bd_intf_pins axi_interconnect_4/S00_AXI]
+    connect_bd_intf_net -intf_net RasterIX_command_stream [get_bd_intf_pins gpu_cmd_fifo/AXI_STR_TXD] [get_bd_intf_pins zz9k_rasterix_0/s_cmd_axis]
+  } else {
+    connect_bd_intf_net -intf_net S00_AXI_5 [get_bd_intf_pins audio_formatter_1/m_axi_s2mm] [get_bd_intf_pins axi_interconnect_4/S00_AXI]
+  }
   connect_bd_intf_net -intf_net audio_formatter_0_m_axis_mm2s [get_bd_intf_pins audio_formatter_0/m_axis_mm2s] [get_bd_intf_pins i2s_transmitter_0/s_axis_aud]
   connect_bd_intf_net -intf_net axi_dwidth_converter_0_M_AXI [get_bd_intf_pins axi_dwidth_converter_0/M_AXI] [get_bd_intf_pins axi_register_slice_1/S_AXI]
   connect_bd_intf_net -intf_net axi_interconnect_0_M00_AXI [get_bd_intf_pins MNTZorro_v0_1_S00_AXI_0/S_AXI] [get_bd_intf_pins axi_interconnect_0/M00_AXI]
@@ -1322,6 +1424,11 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net axi_interconnect_3_M00_AXI [get_bd_intf_pins axi_interconnect_3/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP2]
   connect_bd_intf_net -intf_net axi_interconnect_4_M00_AXI [get_bd_intf_pins axi_interconnect_4/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP3]
   connect_bd_intf_net -intf_net axi_register_slice_1_M_AXI [get_bd_intf_pins axi_register_slice_1/M_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_ACP]
+  if { $rasterix } {
+    connect_bd_intf_net -intf_net RasterIX_control [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins zz9k_rasterix_0/s_axi]
+    connect_bd_intf_net -intf_net RasterIX_command_fifo [get_bd_intf_pins ps7_0_axi_periph/M08_AXI] [get_bd_intf_pins gpu_cmd_fifo/S_AXI]
+    connect_bd_intf_net -intf_net RasterIX_command_data [get_bd_intf_pins ps7_0_axi_periph/M09_AXI] [get_bd_intf_pins gpu_cmd_fifo/S_AXI_FULL]
+  }
   connect_bd_intf_net -intf_net i2s_receiver_0_m_axis_aud [get_bd_intf_pins audio_formatter_1/s_axis_s2mm] [get_bd_intf_pins i2s_receiver_0/m_axis_aud]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
@@ -1426,6 +1533,22 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net xlslice_0_Dout [get_bd_ports VGA_R] [get_bd_pins xlslice_0/Dout]
   connect_bd_net -net xlslice_1_Dout [get_bd_ports VGA_G] [get_bd_pins xlslice_1/Dout]
   connect_bd_net -net xlslice_2_Dout [get_bd_ports VGA_B] [get_bd_pins xlslice_2/Dout]
+  if { $rasterix } {
+    # HP3 changes from audio RX to the 100 MHz RasterIX domain only in the
+    # opt-in EF image.  Default images retain the original FCLK1 audio net.
+    disconnect_bd_net [get_bd_nets S00_ACLK_1] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK]
+    disconnect_bd_net [get_bd_nets rst_ps7_0_25M_peripheral_aresetn] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN]
+  }
+  if { $rasterix } {
+    # The renderer, command FIFO and both peripheral targets are all FCLK0
+    # (100 MHz); no command CDC or renderer-specific clock domain exists.
+    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins gpu_cmd_fifo/s_axi_aresetn] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN] [get_bd_pins ps7_0_axi_periph/M07_ARESETN] [get_bd_pins ps7_0_axi_periph/M08_ARESETN] [get_bd_pins ps7_0_axi_periph/M09_ARESETN]
+    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins gpu_cmd_fifo/s_axi_aclk] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK] [get_bd_pins ps7_0_axi_periph/M07_ACLK] [get_bd_pins ps7_0_axi_periph/M08_ACLK] [get_bd_pins ps7_0_axi_periph/M09_ACLK]
+    # Audio RX remains in the 25 MHz audio domain while sharing HP2.
+    connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins axi_interconnect_3/S01_ARESETN]
+    connect_bd_net -net S00_ACLK_1 [get_bd_pins axi_interconnect_3/S01_ACLK]
+  }
+
 
   # Create address segments
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces MNTZorro_v0_1_S00_AXI_0/m00_axi] [get_bd_addr_segs processing_system7_0/S_AXI_ACP/ACP_DDR_LOWOCM] SEG_processing_system7_0_ACP_DDR_LOWOCM
@@ -1434,7 +1557,15 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_addr_seg -range 0x40000000 -offset 0x80000000 [get_bd_addr_spaces MNTZorro_v0_1_S00_AXI_0/m00_axi] [get_bd_addr_segs processing_system7_0/S_AXI_ACP/ACP_M_AXI_GP1] SEG_processing_system7_0_ACP_M_AXI_GP1
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces MNTZorro_v0_1_S00_AXI_0/m01_axi] [get_bd_addr_segs processing_system7_0/S_AXI_HP1/HP1_DDR_LOWOCM] SEG_processing_system7_0_HP1_DDR_LOWOCM
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_0/m_axi_mm2s] [get_bd_addr_segs processing_system7_0/S_AXI_HP2/HP2_DDR_LOWOCM] SEG_processing_system7_0_HP2_DDR_LOWOCM
-  create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_1/m_axi_s2mm] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_processing_system7_0_HP3_DDR_LOWOCM
+  if { $rasterix } {
+    create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_1/m_axi_s2mm] [get_bd_addr_segs processing_system7_0/S_AXI_HP2/HP2_DDR_LOWOCM] SEG_audio_formatter_1_HP2_DDR_LOWOCM
+    create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces zz9k_rasterix_0/m_axi] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_RasterIX_HP3_DDR_LOWOCM
+    create_bd_addr_seg -range 0x00010000 -offset 0x83C60000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs zz9k_rasterix_0/s_axi/reg0] SEG_RasterIX_control_Reg
+    create_bd_addr_seg -range 0x00010000 -offset 0x83C70000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs gpu_cmd_fifo/S_AXI/Mem0] SEG_RasterIX_command_fifo
+    create_bd_addr_seg -range 0x00010000 -offset 0x83C80000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs gpu_cmd_fifo/S_AXI_FULL/Mem1] SEG_RasterIX_command_data
+  } else {
+    create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_1/m_axi_s2mm] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_processing_system7_0_HP3_DDR_LOWOCM
+  }
   create_bd_addr_seg -range 0x00010000 -offset 0x43C00000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs MNTZorro_v0_1_S00_AXI_0/S_AXI/reg0] SEG_MNTZorro_v0_1_S00_AXI_0_reg0
   create_bd_addr_seg -range 0x00010000 -offset 0x83C20000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs audio_formatter_0/s_axi_lite/reg0] SEG_audio_formatter_0_reg0
   create_bd_addr_seg -range 0x00010000 -offset 0x83C50000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs audio_formatter_1/s_axi_lite/reg0] SEG_audio_formatter_1_reg0

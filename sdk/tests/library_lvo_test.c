@@ -32,7 +32,7 @@ static void test_library_identity(void)
 {
   expect_str("name", ZZ9K_LIBRARY_NAME, "zz9k.library");
   expect_u32("version", ZZ9K_LIBRARY_VERSION, 2);
-  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 33);
+  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 35);
 }
 
 static void test_standard_lvos(void)
@@ -100,7 +100,17 @@ static void test_public_lvos(void)
   expect_u32("image_animation_frame_retire", ZZ9K_LVO_IMAGE_ANIMATION_FRAME_RETIRE, -336);
   expect_u32("image_animation_restart", ZZ9K_LVO_IMAGE_ANIMATION_RESTART, -342);
   expect_u32("audio_stream_begin_ex", ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX, -348);
-  expect_u32("function_count", ZZ9K_LVO_FUNCTION_COUNT, 54);
+  expect_u32("app_open", ZZ9K_LVO_APP_OPEN, -354);
+  expect_u32("app_load_file", ZZ9K_LVO_APP_LOAD_FILE, -360);
+  expect_u32("app_load_memory", ZZ9K_LVO_APP_LOAD_MEMORY, -366);
+  expect_u32("app_start", ZZ9K_LVO_APP_START, -372);
+  expect_u32("app_stop", ZZ9K_LVO_APP_STOP, -378);
+  expect_u32("app_status", ZZ9K_LVO_APP_STATUS, -384);
+  expect_u32("app_send_message", ZZ9K_LVO_APP_SEND_MESSAGE, -390);
+  expect_u32("app_get_message", ZZ9K_LVO_APP_GET_MESSAGE, -396);
+  expect_u32("app_message_signal", ZZ9K_LVO_APP_MESSAGE_SIGNAL, -402);
+  expect_u32("app_close", ZZ9K_LVO_APP_CLOSE, -408);
+  expect_u32("function_count", ZZ9K_LVO_FUNCTION_COUNT, 64);
 }
 
 int main(void)

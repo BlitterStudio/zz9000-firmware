@@ -320,28 +320,73 @@ int main(int argc, char **argv)
      "ZZ9KAudioStreamBeginEx(desc,result)(a0/a1)",
      "int ZZ9KAudioStreamBeginEx(const ZZ9KAudioStreamBeginExDesc *desc, "
      "ZZ9KAudioStreamResult *result);",
-     "jsr -348(a6)"}
+     "jsr -348(a6)"},
+    {"ZZ9KAppOpen", "ZZ9KAppOpen(handle,notify_port)(a0/a1)",
+     "int ZZ9KAppOpen(ZZ9KAppHandle **handle, struct MsgPort *notify_port);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppLoadFile", "ZZ9KAppLoadFile(handle,path)(a0/a1)",
+     "int ZZ9KAppLoadFile(ZZ9KAppHandle *handle, const char *path);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppLoadMemory", "ZZ9KAppLoadMemory(handle,data,length)(a0/a1/d0)",
+     "int ZZ9KAppLoadMemory(ZZ9KAppHandle *handle, const void *data, uint32_t length);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppStart", "ZZ9KAppStart(handle,argv,argc)(a0/a1/d0)",
+     "int ZZ9KAppStart(ZZ9KAppHandle *handle, const char *const *argv, uint32_t argc);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppStop", "ZZ9KAppStop(handle)(a0)",
+     "int ZZ9KAppStop(ZZ9KAppHandle *handle);", "#include <inline/zz9k.h>"},
+    {"ZZ9KAppStatus", "ZZ9KAppStatus(handle,status)(a0/a1)",
+     "int ZZ9KAppStatus(ZZ9KAppHandle *handle, ZZ9KAppStatusInfo *status);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppSendMessage", "ZZ9KAppSendMessage(handle,message)(a0/a1)",
+     "int ZZ9KAppSendMessage(ZZ9KAppHandle *handle, const ZZ9KAppMessage *message);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppGetMessage", "ZZ9KAppGetMessage(handle,message)(a0/a1)",
+     "int ZZ9KAppGetMessage(ZZ9KAppHandle *handle, ZZ9KAppMessage *message);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppMessageSignal", "ZZ9KAppMessageSignal(handle)(a0)",
+     "uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);",
+     "#include <inline/zz9k.h>"},
+    {"ZZ9KAppClose", "ZZ9KAppClose(handle)(a0)",
+     "void ZZ9KAppClose(ZZ9KAppHandle *handle);", "#include <inline/zz9k.h>"}
   };
   char *fd;
   char *clib;
   char *proto;
+  char *inline_header;
   size_t i;
   int ok;
+  static const char *const app_inline_contract[] = {
+    "ZZ9K_APP_INLINE_2A(ZZ9KAppOpenInline, -354",
+    "ZZ9K_APP_INLINE_2A(ZZ9KAppLoadFileInline, -360",
+    "jsr -366(a6)", "jsr -372(a6)",
+    "ZZ9K_APP_INLINE_1A(ZZ9KAppStopInline, -378",
+    "ZZ9K_APP_INLINE_2A(ZZ9KAppStatusInline, -384",
+    "ZZ9K_APP_INLINE_2A(ZZ9KAppSendMessageInline, -390",
+    "ZZ9K_APP_INLINE_2A(ZZ9KAppGetMessageInline, -396",
+    "jsr -402(a6)", "jsr -408(a6)",
+    "#define ZZ9K_APP_INLINE_CLOBBERS_A0_A1 \"cc\", \"memory\", \"d1\"",
+    "#define ZZ9K_APP_INLINE_CLOBBERS_A0 \"cc\", \"memory\", \"d1\", \"a1\"",
+    "#define ZZ9K_APP_INLINE_CLOBBERS_A0_D0 \"cc\", \"memory\", \"d0\", \"d1\", \"a1\"",
+    "jsr -408(a6)\" : \"+r\"(a0) : \"r\"(a6) : ZZ9K_APP_INLINE_CLOBBERS_A0_D0"
+  };
 
-  if (argc != 4) {
+  if (argc != 5) {
     printf("usage: %s <zz9k_lib.fd> <clib/zz9k_protos.h> "
-           "<proto/zz9k.h>\n", argv[0]);
+           "<proto/zz9k.h> <inline/zz9k.h>\n", argv[0]);
     return 2;
   }
 
   fd = read_file(argv[1]);
   clib = read_file(argv[2]);
   proto = read_file(argv[3]);
-  if (!fd || !clib || !proto) {
+  inline_header = read_file(argv[4]);
+  if (!fd || !clib || !proto || !inline_header) {
     printf("failed to read metadata inputs\n");
     free(fd);
     free(clib);
     free(proto);
+    free(inline_header);
     return 2;
   }
 
@@ -362,9 +407,14 @@ int main(int argc, char **argv)
     ok &= expect_contains("clib", clib, expected[i].proto_decl);
     ok &= expect_contains("proto", proto, expected[i].lvo_token);
   }
+  for (i = 0; i < sizeof(app_inline_contract) / sizeof(app_inline_contract[0]); i++) {
+    ok &= expect_contains("inline", inline_header, app_inline_contract[i]);
+  }
+
 
   free(fd);
   free(clib);
   free(proto);
+  free(inline_header);
   return ok ? 0 : 1;
 }

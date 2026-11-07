@@ -83,12 +83,13 @@ static int test_service_text(void)
 
 static int test_known_service_iteration(void)
 {
-  if (zz9k_known_service_count() != 12U) return 1;
+  if (zz9k_known_service_count() != 13U) return 1;
   if (zz9k_known_service_id(0) != ZZ9K_SERVICE_CORE) return 2;
   if (zz9k_known_service_id(4) != ZZ9K_SERVICE_IMAGE) return 3;
   if (zz9k_known_service_id(10) != ZZ9K_SERVICE_MODULE) return 4;
   if (zz9k_known_service_id(11) != ZZ9K_SERVICE_VIDEO) return 5;
-  if (zz9k_known_service_id(12) != 0xffffffffUL) return 6;
+  if (zz9k_known_service_id(12) != ZZ9K_SERVICE_APP) return 6;
+  if (zz9k_known_service_id(13) != 0xffffffffUL) return 7;
   return 0;
 }
 

@@ -16,6 +16,7 @@
 #include "xil_io.h"
 #include "sdk_smp_lock.h"
 #include "surface_allocator.h"
+#include "zzapp_services.h"
 /* kept after the Xilinx headers: overlay.h pulls in gfx.h (see the
  * pack note on struct GFXData) */
 #include "overlay.h"
@@ -159,23 +160,32 @@ static void videocap_detection_reset() {
 	video_videocap_detection_reset(&vs.videocap_detection);
 }
 
-// Zynq S_AXI_HP0 carries the video scanout DMA and was widened to 64 bit
-// together with the 64-bit RTG scanout path. FSBLs built before that change
-// still program the port's AFI into 32-bit mode (AFI_RDCHAN_CTRL and
-// AFI_WRCHAN_CTRL bit 0 "32BIT_EN", UG585 B.5), which corrupts one half of
-// every 64-bit VDMA beat: every other pixel word is garbage in all modes.
-// Force both channels back to the 64-bit reset default before any VDMA
-// traffic runs, so a stale FSBL cannot break scanout.
+// S_AXI_HP0 carries video scanout DMA and is 64-bit in every block design.
+// The shipped FSBL (ps7_init_gpl.c) sets AFI_RDCHAN_CTRL and AFI_WRCHAN_CTRL
+// bit 0 ("32BIT_EN", UG585 B.5) on AFI1, AFI2 and AFI3, and leaves AFI0
+// alone; some older FSBL images also set it on AFI0, which corrupts one half
+// of every 64-bit VDMA beat, so clear it before any VDMA traffic runs.
+// HP1 (MNTZorro m01 and capture) and HP2 (audio) are 32-bit in every block
+// design and keep the FSBL setting.  HP3 is 32-bit in default images and the
+// 64-bit RasterIX EF memory port in RasterIX images, where a 32-bit AFI3
+// drops half of every RasterIX beat; only the RasterIX firmware flavor, which
+// ships with those images, widens AFI3.
 #define AFI0_RDCHAN_CTRL 0xF8008000
 #define AFI0_WRCHAN_CTRL 0xF8008014
+#define AFI3_RDCHAN_CTRL 0xF800B000
+#define AFI3_WRCHAN_CTRL 0xF800B014
 
-static void video_hp0_bus_width_init() {
+static void video_hp_bus_width_init(void) {
 	Xil_Out32(AFI0_RDCHAN_CTRL, Xil_In32(AFI0_RDCHAN_CTRL) & ~1u);
 	Xil_Out32(AFI0_WRCHAN_CTRL, Xil_In32(AFI0_WRCHAN_CTRL) & ~1u);
+#if defined(MINIGL_RASTERIX) && MINIGL_RASTERIX
+	Xil_Out32(AFI3_RDCHAN_CTRL, Xil_In32(AFI3_RDCHAN_CTRL) & ~1u);
+	Xil_Out32(AFI3_WRCHAN_CTRL, Xil_In32(AFI3_WRCHAN_CTRL) & ~1u);
+#endif
 }
 
 struct ZZ_VIDEO_STATE* video_init() {
-	video_hp0_bus_width_init();
+	video_hp_bus_width_init();
 
 	vs.framebuffer = (u32*) FRAMEBUFFER_ADDRESS;
 
@@ -731,6 +741,8 @@ void isr_video(void *dummy) {
 	u32 live_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG2);
 	uint32_t videocap_live_rows = 0U;
 	uint32_t videocap_live_words = 0U;
+	uint32_t scanout_address;
+	int mailbox_scanout;
 
 	if ((live_raw & MNTZORRO_REG2_LIVE_GEOMETRY_MASK) ==
 	    MNTZORRO_REG2_LIVE_GEOMETRY_MAGIC) {
@@ -793,11 +805,22 @@ void isr_video(void *dummy) {
 			if (vs.card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
 				video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
 			}
-			// P96 video overlay: present a composited shadow buffer
-			// instead of the framebuffer while the overlay is active
-			// (returns the regular pan address otherwise)
-			init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
-					overlay_present_bufpos(&vs));
+			/* Mailbox selection is made here, on core 0 at card vblank.
+			 * It never edits the host pan state: P96's page remains the
+			 * visibility guard while VDMA follows the mailbox buffer. */
+			scanout_address = overlay_present_bufpos(&vs);
+			mailbox_scanout =
+				zzapp_services_display_mailbox_begin(scanout_address,
+								     &scanout_address);
+			if (init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
+				      scanout_address) == XST_SUCCESS) {
+				if (mailbox_scanout)
+					zzapp_services_display_mailbox_end(1);
+				else
+					zzapp_services_display_vblank(scanout_address);
+			} else if (mailbox_scanout) {
+				zzapp_services_display_mailbox_end(0);
+			}
 		}
 		vs.videocap_enabled_old = 0;
 		videocap_detection_reset();

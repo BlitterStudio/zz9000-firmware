@@ -1,0 +1,6 @@
+[
+  { "manifest": "standard.json", "compatible": true },
+  { "manifest": "rasterix-ef.json", "compatible": true },
+  { "manifest": "requires-ef-on-standard.json", "compatible": false },
+  { "manifest": "csr-mismatch.json", "compatible": false }
+]

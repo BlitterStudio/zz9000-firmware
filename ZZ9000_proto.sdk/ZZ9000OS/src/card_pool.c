@@ -33,10 +33,24 @@ void card_pool_init(card_pool_t *pool)
     pool->class_limit[CARD_POOL_CLASS_MEDIA] = CARD_POOL_LIMIT_MEDIA;
     pool->class_limit[CARD_POOL_CLASS_MEDIA_INPUT] =
         CARD_POOL_LIMIT_MEDIA_INPUT;
-    pool->class_limit[CARD_POOL_CLASS_CONSOLE] = CARD_POOL_LIMIT_CONSOLE;
     pool->class_limit[CARD_POOL_CLASS_SDK_SURFACE] =
         CARD_POOL_LIMIT_SDK_SURFACE;
+    pool->class_limit[CARD_POOL_CLASS_CONSOLE] = CARD_POOL_LIMIT_CONSOLE;
+    pool->class_limit[CARD_POOL_CLASS_MINIGL] = CARD_POOL_LIMIT_MINIGL;
     pool->class_limit[CARD_POOL_CLASS_IMAGE] = CARD_POOL_LIMIT_IMAGE;
+    pool->class_limit[CARD_POOL_CLASS_APP] = CARD_POOL_LIMIT_APP;
+    pool->class_limit[CARD_POOL_CLASS_APP_DISPLAY] =
+        CARD_POOL_LIMIT_APP_DISPLAY;
+    pool->class_limit[CARD_POOL_CLASS_MINIGL_MODULE] =
+        CARD_POOL_LIMIT_MINIGL_MODULE;
+    pool->class_limit[CARD_POOL_CLASS_MINIGL_TRANSPORT] =
+        CARD_POOL_LIMIT_MINIGL_TRANSPORT;
+    pool->class_limit[CARD_POOL_CLASS_MINIGL_CONTEXT] =
+        CARD_POOL_LIMIT_MINIGL_CONTEXT;
+    pool->class_limit[CARD_POOL_CLASS_MINIGL_APP_CONTEXT] =
+        CARD_POOL_LIMIT_MINIGL_APP_CONTEXT;
+    pool->class_limit[CARD_POOL_CLASS_MINIGL_RIX] =
+        CARD_POOL_LIMIT_MINIGL_RIX;
 }
 
 void card_pool_setup_card(card_pool_t *pool)
@@ -152,7 +166,8 @@ uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner)
             const card_pool_range_t *range = &pool->ranges[r];
             uint32_t insert_at;
             if (!range->open ||
-                (range->revocable && cls == CARD_POOL_CLASS_FIRMWARE))
+                (range->revocable &&
+                 (cls == CARD_POOL_CLASS_FIRMWARE || cls == CARD_POOL_CLASS_APP)))
                 continue;
             addr = find_gap(pool, range, rounded, &insert_at);
             if (addr) {
@@ -184,6 +199,33 @@ int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
         pool->blocks[i].owner == owner &&
         length <= pool->blocks[i].size)
         owned = 1;
+    sdk_smp_lock_release(&pool->lock);
+    return owned;
+}
+
+int card_pool_range_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
+                          uint32_t owner)
+{
+    uint32_t i;
+    int owned = 0;
+
+    if (!pool || !addr || !length || !owner)
+        return 0;
+    sdk_smp_lock_acquire(&pool->lock);
+    i = lower_bound(pool, addr);
+    if (i != 0U && (i == pool->block_count ||
+                    pool->blocks[i].addr > addr))
+        --i;
+    if (i < pool->block_count && pool->blocks[i].owner == owner &&
+        addr >= pool->blocks[i].addr) {
+        uint32_t offset = addr - pool->blocks[i].addr;
+
+        /* Subtract only after the address is inside the block. An address
+         * past the end used to wrap the unsigned difference and pass. */
+        if (offset < pool->blocks[i].size &&
+            length <= pool->blocks[i].size - offset)
+            owned = 1;
+    }
     sdk_smp_lock_release(&pool->lock);
     return owned;
 }

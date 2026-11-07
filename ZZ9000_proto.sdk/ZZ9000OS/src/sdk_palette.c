@@ -8,19 +8,82 @@
 
 #include "sdk_palette.h"
 
-/* Written only by the RTG palette upload path and read only by the mailbox
- * handler, both 32-bit aligned word accesses, so no lock is needed: a racing
- * query sees either the old or the new entry, never a torn one. */
-static uint32_t g_palette[SDK_PALETTE_ENTRIES];
+/* RTG palette uploads run on core 0 while the mailbox presenter runs on core
+ * 1. The generation is a sequence lock: odd while a writer owns the shadow,
+ * even only after its palette words are fully published. */
+static volatile uint32_t g_palette[SDK_PALETTE_ENTRIES];
+static volatile uint32_t g_palette_generation;
+
+/* Same discipline as zzapp_host.c's coherent_barrier: on the weakly
+ * ordered Cortex-A9 the final even generation can become visible before
+ * the palette data unless the writer orders it, and the reader must not
+ * sample data before confirming a stable even generation. */
+static void palette_barrier(void)
+{
+#if defined(__arm__)
+	__asm__ __volatile__("dmb sy" ::: "memory");
+#else
+	__asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+static void sdk_palette_begin_update(void)
+{
+	++g_palette_generation;
+	palette_barrier();
+}
+
+static void sdk_palette_end_update(void)
+{
+	palette_barrier();
+	++g_palette_generation;
+	if (g_palette_generation == 0U)
+		g_palette_generation = 2U;
+}
 
 void sdk_palette_set(uint32_t idx, uint32_t xrgb)
 {
-	g_palette[idx & (SDK_PALETTE_ENTRIES - 1U)] = xrgb & 0x00FFFFFFU;
+	uint32_t slot = idx & (SDK_PALETTE_ENTRIES - 1U);
+	uint32_t value = xrgb & 0x00FFFFFFU;
+
+	if (g_palette[slot] != value) {
+		sdk_palette_begin_update();
+		g_palette[slot] = value;
+		sdk_palette_end_update();
+	}
 }
 
 uint32_t sdk_palette_get(uint32_t idx)
 {
 	return g_palette[idx & (SDK_PALETTE_ENTRIES - 1U)];
+}
+
+uint32_t sdk_palette_generation(void)
+{
+	return g_palette_generation;
+}
+
+int sdk_palette_snapshot(uint32_t entries[SDK_PALETTE_ENTRIES],
+                         uint32_t *generation)
+{
+	uint32_t before;
+	uint32_t after;
+	uint32_t i;
+
+	if (!entries || !generation)
+		return 0;
+	before = g_palette_generation;
+	if (before & 1U)
+		return 0;
+	palette_barrier();
+	for (i = 0U; i < SDK_PALETTE_ENTRIES; ++i)
+		entries[i] = g_palette[i];
+	palette_barrier();
+	after = g_palette_generation;
+	if (before != after || (after & 1U))
+		return 0;
+	*generation = after;
+	return 1;
 }
 
 uint32_t sdk_palette_pack_be(void *dst, uint32_t start, uint32_t count)
@@ -51,6 +114,8 @@ void sdk_palette_reset(void)
 {
 	uint32_t i;
 
+	sdk_palette_begin_update();
 	for (i = 0U; i < SDK_PALETTE_ENTRIES; i++)
 		g_palette[i] = 0U;
+	sdk_palette_end_update();
 }

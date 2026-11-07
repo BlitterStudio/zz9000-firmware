@@ -18,9 +18,13 @@ Research GmbH. SDK issues and fork-specific discussion belong here.
 | `amiga/` | `zz9k.library`, `mpega.library`, DataTypes, AmiSSL provider code, Amiga headers, and icons |
 | `tools/` | AmigaOS command-line tools and ZZPlay sources |
 | `examples/` | AmigaOS library, JPEG streaming, typed decode, and crypto examples |
-| `docs/` | SDK and component reference material |
+| `docs/` | SDK reference, including the ARM app guide and API reference |
 | `scripts/` | m68k build, package, descriptor-generation, and icon-generation scripts |
 | `tests/` | Host-side tests and test fixtures |
+
+ARM apps on core 1 use [the developer guide](docs/zzapp-developer-guide.md)
+and [the API reference](docs/zzapp-api.md). Those two files are MIT. The rest
+of this tree stays GPL-3.0-or-later unless a file says otherwise.
 
 ## Build an AmigaOS 3 package
 

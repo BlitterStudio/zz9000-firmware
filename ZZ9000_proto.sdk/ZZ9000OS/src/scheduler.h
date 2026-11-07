@@ -145,6 +145,13 @@ typedef struct {                /* coherent control block at the queue region */
    * this for it. */
   volatile uint32_t core1_clean_request;
   volatile uint32_t core1_clean_done;
+  /* MiniGL dual-core coordination */
+  volatile uint32_t minigl_doorbell;        /* core 0 sets 1 on doorbell; core 1 clears 0 */
+  volatile uint32_t minigl_reset_request;   /* core 0 sets 1 on Amiga reset; core 1 clears 0 */
+  volatile uint32_t minigl_reset_ack;       /* core 1 sets 1 after reset executed */
+  volatile uint32_t minigl_in_flight;       /* core 1 sets 1 while executing MiniGL packet */
+  volatile uint32_t minigl_packets_on_core1;/* observability counter */
+  volatile uint32_t minigl_packets_on_core0;/* observability counter (fallback) */
 } taskq_shared_t;
 
 typedef struct {
@@ -172,6 +179,31 @@ int  taskq_has_active(taskq_t *q);         /* any slot still QUEUED or CLAIMED *
 /* ---- dispatch policy (portable) ---- */
 taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len);
 int  taskq_should_drain(int zorro_pending, int display_pending, int core1_enabled);
+typedef enum {
+  SCHED_WORKER_ACTION_RESET,      /* reset requested: execute minigl reset */
+  SCHED_WORKER_ACTION_TASK,       /* queued task available: claim and run task */
+  SCHED_WORKER_ACTION_MINIGL,     /* MiniGL packet available: execute packet slice */
+  SCHED_WORKER_ACTION_POLL_IDLE,  /* no task, MiniGL bound, idle: poll heartbeat + pause */
+  SCHED_WORKER_ACTION_WFE         /* no task, MiniGL not bound: sleep on WFE */
+} sched_worker_action_t;
+
+sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
+                                          int minigl_work_available, int minigl_bound);
+
+/* Core 0's Amiga-reset decision for MiniGL. Core 0 must not free command
+ * or present buffers while core 1 may still be streaming them. The caller
+ * posts the request and polls this; it does not spin. */
+typedef enum {
+  SCHED_MINIGL_RESET_IDLE = 0,  /* nothing posted */
+  SCHED_MINIGL_RESET_WAIT,      /* core 1 will free after its current packet */
+  SCHED_MINIGL_RESET_ACKED,     /* core 1 already freed; do not free again */
+  SCHED_MINIGL_RESET_LOCAL,     /* no core 1; caller frees now */
+  SCHED_MINIGL_RESET_ABORT      /* deadline or dead worker: stop engines, then free */
+} sched_minigl_reset_phase_t;
+
+sched_minigl_reset_phase_t sched_minigl_reset_phase(int core1_up, int posted,
+                                                    int acked, int elapsed_ms,
+                                                    int budget_ms);
 
 /* ---- fault watchdog (portable) ---- */
 void taskq_watchdog_init(taskq_watchdog_t *w, uint32_t threshold);
@@ -188,6 +220,10 @@ int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired);
 #ifdef TASKQ_HOST_TEST
 extern int taskq_test_force_cas_fail;  /* >0: force the next N CAS calls to fail */
 #endif
+#if defined(MINIGL_HOST_TEST)
+/* Exercises the exact core-1 MiniGL initialization shared with the worker. */
+void scheduler_core1_host_test_init(taskq_shared_t *sh);
+#endif
 
 #ifndef TASKQ_HOST_TEST
 /* ARM-only glue (scheduler_arm.c). Not visible to the host test build. */
@@ -196,11 +232,17 @@ void scheduler_coherency_init_core1(void); /* core 1: full MMU/cache/SMP bring-u
 taskq_shared_t *scheduler_shared(void);    /* the coherent control block */
 void scheduler_boot_init(void);            /* core 0: init queue + watchdog at boot */
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
+void scheduler_core1_wake(void);           /* core 0: publish async app work, then wake worker */
 void scheduler_confirm_core1_boot(void);   /* core 0: bounded wait for worker liveness at boot */
 void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
 void scheduler_core1_park_if_requested(void); /* core 1: clean L1 + park for a cold restart */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
 void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tasks + reset queue before a mailbox teardown */
+/* Post the MiniGL reset and wake core 1. It runs after the current packet,
+ * including an in-flight PL330 stream or present blit. */
+void scheduler_request_minigl_reset(void);
+/* Drop the request and cold-restart core 1 so it cannot also free. */
+void scheduler_cancel_minigl_reset(void);
 /* core 0, after the quiesce: have the idle core 1 free its tracked decode
  * blocks itself. 0 on success; nonzero means the caller must cold-restart. */
 int  scheduler_core1_reclaim(void);

@@ -90,7 +90,9 @@ static zzm_rt_usage_t *usage_for(uint32_t owner, uint32_t memory_class,
 int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
                 uint32_t memory_class, uint32_t quota)
 {
-    if (!services || services->abi_version != ZZM_MODULE_ABI_VERSION ||
+    if (!services ||
+        (services->abi_version != ZZM_MODULE_ABI_VERSION &&
+         services->abi_version != ZZM_V3_ABI_MAJOR) ||
         services->size < sizeof(*services) || !services->get_service)
         return 0;
     runtime = services;
@@ -125,9 +127,19 @@ void zzm_rt_get_context(zzm_allocation_context_t *out)
         *out = context;
 }
 
+const void *zzm_rt_get_service(uint32_t id, uint32_t min_version)
+{
+    return runtime && runtime->get_service ?
+        runtime->get_service(id, min_version) : 0;
+}
+
 void zzm_rt_log(const char *message)
 {
-    if (core && core->log)
+    if (core && core->size >= offsetof(zzm_core_service_t, log_limited) +
+                                   sizeof(core->log_limited) &&
+        core->log_limited)
+        core->log_limited(bound_module_id, 0U, message);
+    else if (core && core->log)
         core->log(message);
 }
 
@@ -147,6 +159,70 @@ void zzm_rt_dcache_clean(uint32_t address, uint32_t length)
         cache->dcache_clean(address, length);
 }
 
+static uint32_t zzm_rt_card_owner(void)
+{
+    uint32_t owner_class;
+
+    switch (context.memory_class) {
+    case ZZM_MEMORY_CLASS_MINIGL_MODULE:
+        owner_class = 9U;
+        break;
+    case ZZM_MEMORY_CLASS_MINIGL_TRANSPORT:
+        owner_class = 10U;
+        break;
+    case ZZM_MEMORY_CLASS_MINIGL_CONTEXT:
+        owner_class = 11U;
+        break;
+    case ZZM_MEMORY_CLASS_MINIGL_APP_CONTEXT:
+        owner_class = 12U;
+        break;
+    case ZZM_MEMORY_CLASS_MINIGL_RIX:
+        owner_class = 13U;
+        break;
+    default:
+        return context.owner;
+    }
+    return (owner_class << 24U) | (context.owner & 0x00ffffffU);
+}
+
+void zzm_rt_dcache_invalidate(uint32_t address, uint32_t length)
+{
+    if (cache && cache->size >=
+            offsetof(zzm_cache_service_t, dcache_invalidate_owned) +
+            sizeof(cache->dcache_invalidate_owned) &&
+        cache->dcache_invalidate_owned)
+        (void)cache->dcache_invalidate_owned(zzm_rt_card_owner(), address,
+                                             length);
+}
+int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address, uint32_t length)
+{
+    if (cache && cache->size >=
+            offsetof(zzm_cache_service_t, dcache_clean_owned) +
+            sizeof(cache->dcache_clean_owned) &&
+        cache->dcache_clean_owned)
+        return cache->dcache_clean_owned(owner, address, length);
+    return 0;
+}
+
+void zzm_rt_barrier(void)
+{
+    const zzm_graphics_hw_service_t *graphics =
+        (const zzm_graphics_hw_service_t *)zzm_rt_get_service(
+            ZZM_SERVICE_GRAPHICS_HW, ZZM_SERVICE_GRAPHICS_HW_V3);
+
+    if (graphics && graphics->size >=
+            offsetof(zzm_graphics_hw_service_t, barrier) +
+            sizeof(graphics->barrier) && graphics->barrier)
+        graphics->barrier();
+}
+
+uint64_t zzm_rt_time_us(void)
+{
+    if (core && core->size >= offsetof(zzm_core_service_t, time_us) +
+                               sizeof(core->time_us) && core->time_us)
+        return core->time_us();
+    return 0U;
+}
 void *memalign(size_t alignment, size_t bytes)
 {
     struct zzm_rt_allocation *header;

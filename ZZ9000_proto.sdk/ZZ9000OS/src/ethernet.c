@@ -22,7 +22,6 @@
 #include <xil_printf.h>
 #include <xil_cache.h>
 #include <xil_mmu.h>
-#include <xl2cc.h>
 #include <xparameters_ps.h>
 #include "xpseudo_asm.h"
 #include "sleep.h"
@@ -35,6 +34,7 @@
 #include "interrupt.h"
 #include "memorymap.h"
 #include "mntzorro.h"
+#include "l2_maint.h"
 #include "sdk_smp_lock.h"
 #include "xpseudo_asm.h"
 
@@ -187,28 +187,14 @@ static uint8_t *ethernet_backlog_payload_ptr(u16 slot)
  */
 static void ethernet_backlog_slot_publish_from(u16 slot, u32 from, u32 bytes)
 {
-	/* Invalidate by physical address, a line at a time, one sync at the
-	 * end.  Not Xil_L2CacheInvalidateRange(): that masks interrupts, turns
-	 * the whole L2's line fills and write-back off for the duration and
-	 * syncs after every line -- for a frame's 48 lines, inside the GEM's
-	 * interrupt, with a gigabit sender 12 us apart. */
+	/*
+	 * Slots are 2 KiB aligned, so no cache line is shared.  This is L2-only:
+	 * the host and GEM own the DMA data, while l2_maint serializes these PA
+	 * writes with core 0's vblank way flush.
+	 */
 	u32 addr = (u32)ethernet_backlog_slot_ptr(slot) + from;
-	u32 end  = addr + bytes;
-	volatile u32 *inv  = (volatile u32 *)(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_INVLD_PA_OFFSET);
-	volatile u32 *sync = (volatile u32 *)(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_SYNC_OFFSET);
 
-	addr &= ~31U;
-	while (addr < end) {
-		*inv = addr;
-		/* bit 0 stays set while the line operation runs; a write that
-		 * lands before it clears is lost (PL310 TRM), and a line the loop
-		 * skipped is a frame the 68k reads stale. */
-		while ((*inv & 1U) != 0U)
-			;
-		addr += 32U;
-	}
-	*sync = 0U;
-	dsb();
+	l2_maint_l2_invalidate_range((INTPTR)addr, bytes);
 }
 
 static void ethernet_clear_backlog_slot(u16 slot)

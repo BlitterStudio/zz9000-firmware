@@ -70,6 +70,13 @@ void *sdk_decode_heap_alloc(size_t size)
   return ptr;
 }
 
+/* The pool owner only matters to the card allocator's reclaim. */
+void *sdk_decode_heap_alloc_owned(size_t size, uint32_t owner)
+{
+  (void)owner;
+  return sdk_decode_heap_alloc(size);
+}
+
 void sdk_decode_heap_free(void *ptr)
 {
   unsigned i;

@@ -735,15 +735,10 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 				p->key_native, p->key_enabled);
 	}
 
-	/* L1-ONLY flush, deliberately: Xil_DCacheFlushRange would issue
-	 * megabytes of line operations against the shared PL310 L2
-	 * controller every frame, concurrently with the vblank ISR's full
-	 * L2 way-flush on core 0 - the BSP cache routines are not
-	 * multi-core safe against each other and the contention can stall
-	 * the ISR (and with it Zorro DTACK). CP15 L1 ops are per-core and
-	 * touch no shared hardware; the ISR's existing per-vblank full L2
-	 * flush (video.c, "do not make conditional") carries the lines the
-	 * rest of the way to DDR before the VDMA scans them. */
+	/* L1-only deliberately: this scanout destination is covered by the
+	 * mandatory vblank L2 way flush before VDMA selects it.  Avoiding a
+	 * second multi-megabyte L2 walk keeps the producer off the vblank
+	 * deadline; all other L2 maintenance uses l2_maint_*. */
 	Xil_L1DCacheFlushRange((INTPTR)p->dst_addr,
 			(INTPTR)p->dst_pitch * p->scr_h);
 

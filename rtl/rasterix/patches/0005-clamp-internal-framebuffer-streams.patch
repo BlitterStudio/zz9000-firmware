@@ -1,0 +1,42 @@
+diff --git a/RasterIX/InternalFramebufferCommandHandler.v b/RasterIX/InternalFramebufferCommandHandler.v
+--- a/RasterIX/InternalFramebufferCommandHandler.v
++++ b/RasterIX/InternalFramebufferCommandHandler.v
+@@ -123,11 +123,17 @@ module InternalFramebufferCommandHandler
+     localparam COMMAND_MEMSET = 2;
+     localparam COMMAND_READ = 3;
+     
+-    // State variables
++    // The internal address has no representation for the last beat.  Keep
++    // the stream count one bit wider so a complete band is explicit instead
++    // of being represented as zero after truncation.
++    localparam [MEM_ADDR_WIDTH : 0] MAX_MEM_BEATS = 1 << MEM_ADDR_WIDTH;
++    wire [FB_SIZE_IN_PIXEL_LG - PIXEL_PER_BEAT_LOG2 - 1 : 0] cmdSizeInBeats = cmdSize >> PIXEL_PER_BEAT_LOG2;
++    wire [MEM_ADDR_WIDTH : 0] cmdSizeInBeatsClamped =
++        (cmdSizeInBeats > MAX_MEM_BEATS) ? MAX_MEM_BEATS : cmdSizeInBeats[MEM_ADDR_WIDTH : 0];
+     reg  [MEM_ADDR_WIDTH - 1 : 0]   cmdMemAddr;
+-    wire [MEM_ADDR_WIDTH - 1 : 0]   cmdMemAddrNext = cmdMemAddr + 1;
++    wire [MEM_ADDR_WIDTH : 0]       cmdMemAddrNext = { 1'b0, cmdMemAddr } + 1;
+     reg  [5 : 0]                    cmdState;
+-    reg  [MEM_ADDR_WIDTH - 1 : 0]   cmdFbSizeInBeats;
++    reg  [MEM_ADDR_WIDTH : 0]       cmdFbSizeInBeats;
+     
+     // Scissor variables
+     reg  [X_BIT_WIDTH - 1 : 0]      scissorX;
+@@ -204,7 +210,7 @@ module InternalFramebufferCommandHandler
+                 scissorX <= 0;
+                 writeEnablePort <= 0;
+ 
+-                cmdFbSizeInBeats <= cmdSize[PIXEL_PER_BEAT_LOG2 +: MEM_ADDR_WIDTH];
++                cmdFbSizeInBeats <= cmdSizeInBeatsClamped;
+ 
+                 if (apply && !m_avalid)
+                 begin
+@@ -225,7 +231,7 @@ module InternalFramebufferCommandHandler
+                         cmdState <= COMMAND_MEMSET;
+                     end
+ 
+-                    m_abeats <= { 12'b0, cmdSize } >> PIXEL_PER_BEAT_LOG2;
++                    m_abeats <= cmdSizeInBeatsClamped;
+                     m_aaddr <= cmdAddr;
+ 
+                     if (cmdCommit)

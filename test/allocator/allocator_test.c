@@ -341,6 +341,24 @@ static void test_z3_host_window_reservation(void)
     CHECK(SDK_HOST_WINDOW_Z3_END <= HOST_VISIBLE_HEAP_END);
 }
 
+/* A reserved block at the window end must not push the new block past it.
+ * Otherwise a second alloc in the same window returns the same address. */
+static void test_range_inserts_before_higher_block(void)
+{
+    uint32_t a;
+    uint32_t b;
+
+    surface_allocator_init(0x5000u, 0x5000u);
+    CHECK(surface_allocator_reserve(0x9000u, 0x100u) == 0);
+    a = surface_allocator_alloc_range(0x100u, 256u, 0x5000u, 0x9000u);
+    b = surface_allocator_alloc_range(0x100u, 256u, 0x5000u, 0x9000u);
+    CHECK(a == 0x5000u);
+    CHECK(b == 0x5100u);
+    CHECK(a != b);
+    CHECK(surface_allocator_owns(a, 0x100u));
+    CHECK(surface_allocator_owns(b, 0x100u));
+}
+
 /* ---------------------------------------------------------------------- */
 
 int main(void) {
@@ -357,6 +375,7 @@ int main(void) {
     test_churn();
     test_p96_sdk_interleaving();
     test_z3_host_window_reservation();
+    test_range_inserts_before_higher_block();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -61,10 +61,12 @@ if [[ "$SEC_LINE" != *"AX"* && ( "$SEC_LINE" != *"A"* || "$SEC_LINE" != *"X"* ) 
     exit 1
 fi
 
-# 3. Check readelf program headers: _vector_table must be inside a PT_LOAD segment with execute permission
+# 3. Check readelf program headers: _vector_table must be inside a PT_LOAD segment with execute permission.
+# readelf pads the flags to three columns ("RWE", "R E", "RW ", "R  "); once
+# .text/.rodata outgrow a page boundary ld gives them their own "R E" segment.
 LOAD_COVERED=0
 while read -r pline; do
-    if [[ "$pline" =~ LOAD[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+([RWE]+) ]]; then
+    if [[ "$pline" =~ LOAD[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]+(0x[0-9a-fA-F]+)[[:space:]]([RWE ]{3})[[:space:]] ]]; then
         seg_vaddr=$((${BASH_REMATCH[2]}))
         seg_memsiz=$((${BASH_REMATCH[5]}))
         seg_flags="${BASH_REMATCH[6]}"

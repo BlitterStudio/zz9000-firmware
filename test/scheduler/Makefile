@@ -10,11 +10,21 @@ CPPFLAGS += -DTASKQ_HOST_TEST -I$(SRC_DIR)
 SOURCES := scheduler_test.c $(SRC_DIR)/scheduler.c
 DEPS := $(SRC_DIR)/scheduler.h
 
+HOST_TARGET := $(BUILD_DIR)/minigl_host_test
+HOST_CPPFLAGS := -DTASKQ_HOST_TEST -I$(SRC_DIR)
+HOST_SOURCES := minigl_host_test.c $(SRC_DIR)/zzm_minigl_host.c
+HOST_DEPS := $(SRC_DIR)/zzm_minigl_host.h
+
 SMP_LOCK_TARGET := $(BUILD_DIR)/smp_lock_test
 SMP_LOCK_CPPFLAGS := -DSMP_LOCK_HOST_TEST -I$(SRC_DIR)
 SMP_LOCK_SOURCES := smp_lock_test.c $(SRC_DIR)/sdk_smp_lock.c
 SMP_LOCK_DEPS := $(SRC_DIR)/sdk_smp_lock.h
 SMP_LOCK_LDLIBS := -lpthread
+
+L2_MAINT_TARGET := $(BUILD_DIR)/l2_maint_test
+L2_MAINT_CPPFLAGS := -DL2_MAINT_HOST_TEST -DSMP_LOCK_HOST_TEST -I$(SRC_DIR)
+L2_MAINT_SOURCES := l2_maint_test.c $(SRC_DIR)/l2_maint.c $(SRC_DIR)/sdk_smp_lock.c
+L2_MAINT_DEPS := $(SRC_DIR)/l2_maint.h $(SRC_DIR)/sdk_smp_lock.h
 
 OFFLOAD_PARAMS_TARGET := $(BUILD_DIR)/offload_params_test
 OFFLOAD_PARAMS_CPPFLAGS := -DTASKQ_HOST_TEST -I$(SRC_DIR)
@@ -36,14 +46,23 @@ LZH_DECODE_CONTRACT_CPPFLAGS := -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H -I$(SRC_DIR)
 LZH_DECODE_CONTRACT_SOURCES := lzh_decode_contract_test.c $(SRC_DIR)/lzh/sdk_decompress_lzh.c
 LZH_DECODE_CONTRACT_DEPS := $(SRC_DIR)/lzh/zz9k_lzh.h
 
-.PHONY: test clean smp_lock offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract
+.PHONY: test clean host smp_lock l2_maint offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract
 
-test: $(TARGET)
+test: $(TARGET) $(HOST_TARGET) $(L2_MAINT_TARGET)
 	$(TARGET)
+	$(HOST_TARGET)
+	$(L2_MAINT_TARGET)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SOURCES)
+
+host: $(HOST_TARGET)
+	$(HOST_TARGET)
+
+$(HOST_TARGET): $(HOST_SOURCES) $(HOST_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(HOST_CPPFLAGS) $(CFLAGS) -o $@ $(HOST_SOURCES)
 
 smp_lock: $(SMP_LOCK_TARGET)
 	$(SMP_LOCK_TARGET)
@@ -51,6 +70,13 @@ smp_lock: $(SMP_LOCK_TARGET)
 $(SMP_LOCK_TARGET): $(SMP_LOCK_SOURCES) $(SMP_LOCK_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(SMP_LOCK_CPPFLAGS) $(CFLAGS) -o $@ $(SMP_LOCK_SOURCES) $(SMP_LOCK_LDLIBS)
+
+l2_maint: $(L2_MAINT_TARGET)
+	$(L2_MAINT_TARGET)
+
+$(L2_MAINT_TARGET): $(L2_MAINT_SOURCES) $(L2_MAINT_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(L2_MAINT_CPPFLAGS) $(CFLAGS) -o $@ $(L2_MAINT_SOURCES)
 
 offload_params: $(OFFLOAD_PARAMS_TARGET)
 	$(OFFLOAD_PARAMS_TARGET)

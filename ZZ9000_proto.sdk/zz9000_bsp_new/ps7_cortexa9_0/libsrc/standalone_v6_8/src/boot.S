@@ -330,7 +330,7 @@ shareable_loop:
 	orr	r0, r0, #0x5B			/* Outer-cacheable, WB */
 	mcr	15, 0, r0, c2, c0, 0		/* TTB0 */
 
-	mvn	r0,#0				/* Load MMU domains -- all ones=manager */
+	ldr	r0, =0xDFFFFFFF		/* domain 14 Client; all others manager */
 	mcr	p15,0,r0,c3,c0,0
 
 	/* Enable mmu, icahce and dcache */

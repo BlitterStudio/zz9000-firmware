@@ -1118,6 +1118,70 @@ static inline int zz9k_reply_decompress_batch_result(
   return ZZ9K_STATUS_OK;
 }
 
+static inline int zz9k_reply_app_query(const ZZ9KMailboxEntry *reply,
+                                       uint32_t *abi_major, uint32_t *abi_minor,
+                                       uint32_t *state, uint32_t *caps)
+{
+  int status;
+
+  if (!abi_major || !abi_minor || !state || !caps)
+    return ZZ9K_STATUS_BAD_REQUEST;
+  *abi_major = 0U;
+  *abi_minor = 0U;
+  *state = 0U;
+  *caps = 0U;
+  status = zz9k_reply_require(reply, ZZ9K_OP_APP_QUERY, 16U);
+  if (status != ZZ9K_STATUS_OK)
+    return status;
+  *abi_major = zz9k_get_be32(&reply->payload.inline_data[0]);
+  *abi_minor = zz9k_get_be32(&reply->payload.inline_data[4]);
+  *state = zz9k_get_be32(&reply->payload.inline_data[8]);
+  *caps = zz9k_get_be32(&reply->payload.inline_data[12]);
+  return ZZ9K_STATUS_OK;
+}
+
+static inline int zz9k_reply_app_window(const ZZ9KMailboxEntry *reply,
+                                        uint32_t *arm_address, uint32_t *size,
+                                        uint32_t *host_offset)
+{
+  int status;
+
+  if (!arm_address || !size || !host_offset)
+    return ZZ9K_STATUS_BAD_REQUEST;
+  *arm_address = 0U;
+  *size = 0U;
+  *host_offset = 0U;
+  status = zz9k_reply_require(reply, ZZ9K_OP_APP_ALLOC_WINDOW, 12U);
+  if (status != ZZ9K_STATUS_OK)
+    return status;
+  *arm_address = zz9k_get_be32(&reply->payload.inline_data[0]);
+  *size = zz9k_get_be32(&reply->payload.inline_data[4]);
+  *host_offset = zz9k_get_be32(&reply->payload.inline_data[8]);
+  return ZZ9K_STATUS_OK;
+}
+
+static inline int zz9k_reply_app_status(const ZZ9KMailboxEntry *reply,
+                                        uint32_t *state, uint32_t *generation,
+                                        uint32_t *fault, int32_t *exit_code)
+{
+  int status;
+
+  if (!state || !generation || !fault || !exit_code)
+    return ZZ9K_STATUS_BAD_REQUEST;
+  *state = 0U;
+  *generation = 0U;
+  *fault = 0U;
+  *exit_code = 0;
+  status = zz9k_reply_require(reply, ZZ9K_OP_APP_STATUS, 16U);
+  if (status != ZZ9K_STATUS_OK)
+    return status;
+  *state = zz9k_get_be32(&reply->payload.inline_data[0]);
+  *generation = zz9k_get_be32(&reply->payload.inline_data[4]);
+  *fault = zz9k_get_be32(&reply->payload.inline_data[8]);
+  *exit_code = (int32_t)zz9k_get_be32(&reply->payload.inline_data[12]);
+  return ZZ9K_STATUS_OK;
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -57,6 +57,7 @@ void Xil_AssertNonVoid() {}
 #include "bootrom.h"
 #include "core2.h"
 #include "scheduler.h"
+#include "zzapp_runtime.h"
 #include "adc.h"
 #include "ax.h"
 #include "audio_capture.h"
@@ -72,8 +73,12 @@ void Xil_AssertNonVoid() {}
 #include "sdk_mailbox.h"
 #include "sdk_aperture_layout.h"
 #include "surface_allocator.h"
+#include "mmu_page.h"
+#include "zzapp_services.h"
 #include "card_pool.h"
 #include "overlay.h"
+#include "zzm_minigl_host.h"
+#include "mw_service.h"
 #include "newlib_heap.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
@@ -374,6 +379,26 @@ static int zzm_storage_idle(void)
 {
 	return !fw_update_busy();
 }
+
+static void zzm_configure_v3_capabilities(void)
+{
+	const zzm_minigl_boot_caps_t *graphics = zzm_minigl_boot_caps();
+	zzm_v3_capabilities_t caps;
+
+	memset(&caps, 0, sizeof(caps));
+	caps.image_flags = ZZM_IMAGE_NEEDS_CORE1 |
+		ZZM_IMAGE_NEEDS_HOST_VISIBLE | ZZM_IMAGE_NEEDS_VFP_NEON;
+	caps.wire_version = MW_SERVICE_WIRE_VER;
+	caps.transport_descriptor_major = MW_TRANSPORT_DESCRIPTOR_VERSION;
+	caps.host_window_layout_major = ZZM_HOST_WINDOW_LAYOUT_MAJOR;
+	if (graphics && graphics->has_rasterix_ef) {
+		caps.image_flags |= ZZM_IMAGE_NEEDS_RASTERIX_EF |
+			ZZM_IMAGE_NEEDS_PL330;
+		caps.rasterix_csr_abi_major = graphics->rasterix_csr_abi >> 16;
+		caps.rasterix_csr_abi_minor = graphics->rasterix_csr_abi & 0xffffU;
+	}
+	zzm_loader_set_v3_capabilities(&caps);
+}
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
 
@@ -444,6 +469,22 @@ static int reserve_host_control_ranges(void)
 	&& surface_allocator_reserve((address), (size)) == 0
 	return 1 Z3_HOST_CONTROL_RANGES(RESERVE_HOST_CONTROL_RANGE);
 #undef RESERVE_HOST_CONTROL_RANGE
+}
+
+/* The app window is allocated on demand, but every possible page must be
+ * non-cacheable before core 1 and interrupts can observe the mapping. */
+static int map_zzapp_window_pages(void)
+{
+	uint32_t address;
+
+	if (!sdk_aperture_runtime_is_zorro3())
+		return 0;
+	for (address = ZZAPP_WINDOW_Z3_ADDRESS;
+	     address < ZZAPP_WINDOW_Z3_END; address += 0x1000U) {
+		if (!mmu_page_set_noncacheable((uintptr_t)address))
+			return 0;
+	}
+	return 1;
 }
 
 static void apply_aperture_framebuffer_limit(void)
@@ -530,6 +571,72 @@ static int fastram_can_advertise(void)
 	return zz_config_fastram_advertise() &&
 	       (mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7) &
 	        MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000) != 0U;
+}
+
+/* Same bound as scheduler_quiesce_for_reset, checked across loop iterations
+ * so core 0 keeps servicing the bus while a present or PL330 stream finishes. */
+#define MINIGL_RESET_BUDGET_MS 50
+
+static int mgl_reset_posted;
+static XTime mgl_reset_mark;
+
+static int mgl_reset_elapsed_ms(void)
+{
+	XTime now;
+	uint64_t ms;
+
+	XTime_GetTime(&now);
+	ms = (uint64_t)(now - mgl_reset_mark) / (COUNTS_PER_SECOND / 1000U);
+	return ms > 1000000ULL ? 1000000 : (int)ms;
+}
+
+static void minigl_reset_abort_and_free(void)
+{
+	scheduler_cancel_minigl_reset();
+	zzm_minigl_abort_reset();
+	mgl_reset_posted = 0;
+}
+
+static void minigl_reset_poll(void)
+{
+	taskq_shared_t *sh;
+	sched_minigl_reset_phase_t phase;
+
+	if (!mgl_reset_posted)
+		return;
+	sh = scheduler_shared();
+	phase = sched_minigl_reset_phase(scheduler_core1_available(), 1,
+	                                 sh->minigl_reset_ack != 0,
+	                                 mgl_reset_elapsed_ms(),
+	                                 MINIGL_RESET_BUDGET_MS);
+	if (phase == SCHED_MINIGL_RESET_ACKED)
+		mgl_reset_posted = 0;
+	else if (phase == SCHED_MINIGL_RESET_ABORT)
+		minigl_reset_abort_and_free();
+}
+
+static void minigl_begin_amiga_reset(void)
+{
+	sched_minigl_reset_phase_t phase;
+	int acked = 0;
+	zzapp_on_amiga_reset();
+
+	if (scheduler_core1_available() && zzm_minigl_worker_registered()) {
+		scheduler_request_minigl_reset();
+		mgl_reset_posted = 1;
+		XTime_GetTime(&mgl_reset_mark);
+		acked = scheduler_shared()->minigl_reset_ack != 0;
+	}
+	handle_amiga_reset(AMIGA_RESET_FAST);
+	phase = sched_minigl_reset_phase(scheduler_core1_available(),
+	                                 mgl_reset_posted, acked, 0,
+	                                 MINIGL_RESET_BUDGET_MS);
+	if (phase == SCHED_MINIGL_RESET_LOCAL)
+		zzm_minigl_abort_reset();
+	else if (phase == SCHED_MINIGL_RESET_ACKED)
+		mgl_reset_posted = 0;
+	else if (phase == SCHED_MINIGL_RESET_ABORT)
+		minigl_reset_abort_and_free();
 }
 
 void handle_amiga_reset(enum amiga_reset_mode mode) {
@@ -694,6 +801,9 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	amiga_interrupt_clear(0xffffffff);
 
 	sdk_mailbox_init();
+
+	/* MiniGL transport is module-owned and is bound only by its successful
+	 * on-demand acquire on core 1.  Reset never manufactures a descriptor. */
 	sdk_diag_last_reg_write_addr = 0;
 	sdk_diag_last_reg_write_raw_addr = 0;
 	sdk_diag_last_reg_write_data = 0;
@@ -764,9 +874,11 @@ int main() {
 	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
 			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
-	/* The section split is break-before-make: do it while core 1 is still
-	 * held and no interrupt can touch the framebuffer/PIP section. */
+	/* Both host-written command regions must be mapped before core 1 and
+	 * interrupts run. Z2 keeps its existing mailbox page; Z3 maps the
+	 * app-window placement separately. */
 	sdk_mailbox_map_z2_page();
+	zzapp_services_set_window_mapping_available(map_zzapp_window_pages());
 
 	boot_rom_init();
 
@@ -777,6 +889,12 @@ int main() {
 		// driver can still override it later via REG_ZZ_ETH_MAC_*
 		memcpy(ethernet_get_mac_address_ptr(), zz_config_get()->mac, 6);
 	}
+
+#if defined(MINIGL_RASTERIX) && MINIGL_RASTERIX
+	zzm_minigl_boot_caps_init(ZZM_MINIGL_IMAGE_RASTERIX_EF);
+#else
+	zzm_minigl_boot_caps_init(ZZM_MINIGL_IMAGE_STANDARD);
+#endif
 
 	video_state = video_init();
 
@@ -910,6 +1028,7 @@ int main() {
 #else
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
 	zzm_loader_set_storage_idle(zzm_storage_idle);
+	zzm_configure_v3_capabilities();
 	/* The initial media reset mounted SD. The scan validates headers only;
 	 * payload reads and initialization run on core 1 at first use. */
 	if (sd_storage_available_flag) {
@@ -918,6 +1037,8 @@ int main() {
 		printf("[ZZM] skipped: SD volume not mounted\n");
 	}
 #endif
+	printf("[boot] build git=" ZZ9000_BUILD_GIT " dirty="
+	       ZZ9000_BUILD_DIRTY " date=" ZZ9000_BUILD_DATE "\r\n");
 
 	// Mark the task-queue region shareable-cacheable in the shared MMU table
 	// before core 1 starts, so the SCU keeps it coherent once core 1 brings up
@@ -1081,6 +1202,7 @@ int main() {
 		 * job that owns the SD card. */
 		if (!fw_update_busy())
 			audio_scene_poll();
+		/* MiniGL packet polling is core-1-only. */
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		u32 aperture_flags = sdk_aperture_runtime_flags();
 		/* Acknowledge late: firmware normally boots before the RTG driver.
@@ -2502,9 +2624,11 @@ int main() {
 					sdk_mailbox_ack_irq();
 				if (events & SDK_MAILBOX_EVENT_IRQ_ENABLE)
 					sdk_mailbox_irq_enable();
-				if (events & SDK_MAILBOX_EVENT_DOORBELL)
-					sdk_mailbox_doorbell();
 				sdk_mailbox_task();
+				if (events & SDK_MAILBOX_EVENT_DOORBELL) {
+					sdk_mailbox_doorbell();
+					zzm_minigl_doorbell();
+				}
 				sdk_diag_task_count++;
 			}
 
@@ -2517,7 +2641,10 @@ int main() {
 			}
 			if (zstate & MNTZORRO_STATUS_SDK_DOORBELL) {
 				sdk_mailbox_doorbell();
+				zzm_minigl_doorbell();
 				mntzorro_pulse_control(MNTZORRO_CTRL_SDK_DOORBELL_CLEAR);
+				/* Core 0 records the doorbell and wakes core 1; it never
+				 * parses wire packets, including after a core-1 fault. */
 				sdk_mailbox_task();
 				sdk_diag_task_count++;
 			}
@@ -2539,9 +2666,10 @@ int main() {
 				}
 			}
 
+			minigl_reset_poll();
 			if ((zstate & 0xff) == 0) {
 				if (!amiga_reset_seen) {
-					handle_amiga_reset(AMIGA_RESET_FAST);
+					minigl_begin_amiga_reset();
 					amiga_reset_seen = 1;
 					videocap_backing_arm_pending = 1;
 				}

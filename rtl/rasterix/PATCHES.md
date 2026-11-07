@@ -1,0 +1,301 @@
+# Local RasterIX patches
+
+The files below intentionally differ from those blobs; every other file in `RasterIX`, `Float`, and `3rdParty` remains byte-identical and is checked by `test/rasterix/run.sh`.
+
+## FloatToInt zero-shift rounding
+
+- File: `Float/rtl/float/FloatToInt.v`
+- Upstream blob: `f9cb6366`
+- Local blob: `523b3b5f`
+- Patch: `patches/0001-floattoint-zero-shift-rounding.patch`
+- Evidence: real MiniGL gears capture had known fractional primary colours, but the `attr_color` signal was unknown. `shiftSize == 0` selected `number[-1]`; the xsim run then propagated X through pixel output. The patched run produced known primary colour values.
+- Synthesis safety: this is a combinational condition within the existing clocked assignment and preserves all `shiftSize > 0` behavior. A no-shift conversion has no discarded rounding bit, so zero is the defined rounding input.
+
+## TexEnv only accepts valid input
+
+- File: `RasterIX/TexEnv.v`
+- Upstream blob: `20ee2a24`
+- Local blob: `46f98da3`
+- Patch: `patches/0002-texenv-gate-select-on-valid.patch`
+- Evidence: after the FloatToInt correction, sparse texture-cache response bubbles overwrote TexEnv operand registers with unknown values, even though `m_valid` was delayed from `s_valid`. Real gears capture then failed before framebuffer completion.
+- Pipeline semantics: `ce` is `m_ready`, `s_ready` is also `m_ready`, and `m_valid` is `s_valid` delayed four enabled cycles. The SelectColor registers are the stage-0 payload for that valid token. A non-valid transfer has no output token and no payload that may legitimately replace them; gating only prevents payload mutation on bubbles and leaves every valid-cycle datapath unchanged.
+- Synthesis safety: this adds `s_valid` to the existing clock enable; it does not change latency, ready propagation, or any valid-cycle expression.
+
+## Texture-reader reset initialization
+
+- File: `RasterIX/TextureReaderContext.v`
+- Upstream blob: `3b40bd0e`
+- Local blob: `0a0442a8`
+- Patch: `patches/0003-texture-reader-reset-all-lanes.patch`
+- Evidence: nearest filtering populates texel 00 only while the registered sample has four lanes. Before a linear request, uninitialized neighbour lanes propagated X through the real MiniGL capture path.
+- Synthesis safety: adds reset values only; normal request, cache, and sampling behavior is unchanged.
+
+## Disabled depth/stencil ports are idle
+
+- File: `RasterIX/RasterIXCoreIF.v`
+- Patch: `patches/0004-idle-disabled-depth-stencil-ports.patch`
+- Evidence: the real gears capture stalled with crossbar port 2 selected and
+  its adapter streaming forever at 8,192 beats. With
+  `ENABLE_STENCIL_BUFFER=0`, the upstream else branch assigned undeclared
+  `m_stencil_*` names, leaving the actual `m_stencilbuffer_*` port-2 signals
+  undriven. The disabled depth branch had the equivalent error.
+- Synthesis safety: every external disabled-buffer port is now tied to its
+  defined idle value; enabled-buffer generate branches are unchanged.
+
+## Internal framebuffer stream length is clamped
+
+- File: `RasterIX/InternalFramebufferCommandHandler.v`
+- Patch: `patches/0005-clamp-internal-framebuffer-streams.patch`
+- Evidence: with 16,384 pixels of internal color memory and two pixels per
+  stream beat, a 307,200-pixel COMMIT advertised 153,600 beats to the
+  `AxisToAxiAdapter` but the truncated handler limit stopped at 6,144 beats.
+  The adapter then held the command open indefinitely. The same mismatch
+  occurs whenever the requested length does not fit the internal address
+  width.
+- Stream semantics: the command size is converted once to beats, clamped to
+  the 8,192-beat internal memory capacity, and used both for the external
+  address transfer (COMMIT and READ) and the internal COMMIT/MEMSET terminal
+  condition. The one-bit-wider terminal count explicitly represents a full
+  band, rather than overloading zero after address wrap.
+- Synthesis safety: this changes only command-length bookkeeping and terminal
+  comparison widths; the framebuffer datapath, RAM addressing, and valid/ready
+  timing are unchanged.
+
+## Command-parser reset initialization
+
+- File: `RasterIX/CommandParser.v`
+- Patch: `patches/0006-command-parser-reset-initialization.patch`
+- Evidence: `colorBufferApply`, `depthBufferApply`, `stencilBufferApply`, and
+  related command registers were uninitialized on reset. In simulation, their
+  undetermined `1'bx` state propagated through `colorBufferApplied` and
+  `framebufferFinished`, stalling the parser in `WAIT_FOR_IDLE` with
+  `s_cmd_axis_tready = 0` and deadlocking the initial DMA stream.
+- Synthesis safety: adds defined reset values (0) to output registers; command
+  decoding and execution cycles are unchanged.
+
+## EF framebuffer addresses are zero-extended
+
+- File: `RasterIX/RasterIXCoreEF.v`
+- Patch: `patches/0007-ef-zero-extend-framebuffer-addresses.patch`
+- Evidence: `m_color_araddr`/`m_color_waddr` (and depth/stencil equivalents)
+  are `FRAMEBUFFER_SIZE_IN_PIXEL_LG` bits wide while the `StreamFramebuffer`
+  fragment ports are `ADDR_WIDTH` bits. Passing the narrow vector undriven the
+  upper bits, which simulated as `Z`; `FramebufferMMU`'s
+  `(addr << PIXEL_WIDTH_LG) + confAddr` then produced `X` addresses, so every
+  rasterized fragment write was dropped and the EF triangle scenes rendered an
+  all-clear framebuffer. Zero-extending the pixel index first makes the same
+  scenes pass pixel checks.
+- Synthesis safety: only the constant-zero upper address bits change; the
+  pixel index and byte address arithmetic are unchanged.
+
+## StreamConcatFifo holds drained output data
+
+- File: `RasterIX/StreamConcatFifo.v`
+- Upstream blob: `7805a39c`
+- Local blob: `f0023cf6`
+- Patch: `patches/0008-streamconcatfifo-hold-drained-output.patch`
+- Evidence: the wire-v9 MiniGL blended_quad capture (two triangles with
+  blending over a shared diagonal) committed unknown bytes to the framebuffer
+  and aborted with "framebuffer contains unknown byte". Tracing the first X
+  showed the joined stream's registered-read sfifo outputs go undefined once a
+  fifo drains (unwritten BRAM slots); the per-fragment pipeline latches its
+  input lines every ready cycle, so an idle gap inside the blended triangle
+  stream contaminated the color blender's factor registers and produced X
+  fragment colors on the first beats after the gap. The patched run renders
+  the full 640x480 frame with zero coverage mismatches and zero pixels beyond
+  one LSB (bit-exact against the CPU reference), and gears, textured_lightmap
+  and the synthetic probe/s1-s4 scenes are unchanged.
+- Stream semantics: AXIS requires stable data only during transfers. While a
+  transfer is accepted the beat is steered combinationally from the fifo
+  outputs as before; between transfers the last accepted beat is held on the
+  lines instead of exposing the drained fifo's undefined BRAM read. Valid
+  generation, the pop condition, and every per-stream fifo are unchanged.
+- Synthesis safety: adds one hold register with reset and an output mux; no
+  timing, latency, or handshake change on any accepted transfer.
+
+## ColorBlender select stage is nonblocking
+
+- File: `RasterIX/ColorBlender.v`
+- Upstream blob: `4d72c911`
+- Local blob: `1d78b4c2`
+- Patch: `patches/0009-colorblender-nonblocking-select-stage.patch`
+- Evidence: the `ef-stress` xsim scene (overlapping depth-tested block-
+  textured triangles, then a `ZERO,SRC_COLOR` lightmap pass) rendered 1,756
+  pixels with the destination colour of the pixel to their right, all along
+  colour edges and never at `x % 4 == 3`.  The fragment/destination join was
+  correct (`StreamConcatFifo` output pairs index 216477 with its own
+  `0xffff` read), but the blended result for that fragment used the next
+  fragment's destination.  The `Select` stage writes the module-level
+  `v00..v33` with blocking assignments while `ColorMixer` samples them on the
+  same edge, so in simulation the select and first multiply stages collapse
+  into one and back-to-back fragments read their successor's operands; the
+  last fragment of each 4-pixel read burst is followed by a gap and is
+  correct.  The same race made drained-FIFO X reach the blender before
+  patch 0008.
+- Synthesis safety: `v00..v33` are only written in this block and only read
+  by `ColorMixer`, so they were already inferred as the stage's registers;
+  nonblocking assignment makes simulation match that 3-cycle netlist and does
+  not change any synthesized logic.  With the patch `ef-stress` and `ef-lm`
+  are bit-exact.
+
+## XACP G4C EF comparison and adopted read-credit fix
+
+On 2026-10-29 the EF-sensitive files were blob-compared with Xanxi-Amiga's
+published `XACP-ZZ9000` `2646a23` tree.  The local/XACP SHA-256 pairs are:
+
+| File | Local | XACP |
+| --- | --- | --- |
+| `RasterIX_EF.v` | `fcbce77fdd3b93b8c2369fd1c9bf6917ce582b4683a6d200e16942c423573e5f` | `91336062f48183e099bacd2121884cf6ffffc952d159fa7cbf24ff6d1e7354de` |
+| `RasterIXCoreEF.v` | `8e0efe4ba93ceb4c6c47fc5f2f957705c49fcf01aa366faffca34401fd232c7f` | `10023fbce176daad34860ee74bbff61bad3a7ec194dee2dc0aaf1ffbc769d8d0` |
+| `FrameStreamingCore.v` | `6a2bf1948292b728f2bd0d7b8c7a0d5ffc759a8bbd5f261182c1e26c2bea0941` | `ce8fcfd492f36760540a35cc9e8cc936319ec37d779a90e6dc032198d05a3a51` |
+| `CommandParser.v` | `6aa12d1d8104a08e4b0ac9d81616a0d9640b1448b47812fe442127cde1337220` | `2882f15f99d764d9b1392839bca98aecb489facfda70fccf14e97f2056866429` |
+| `InternalFramebufferCommandHandler.v` | `bcf8757757b89d3f115c926818389172b00b89d26b55c5ecc0480e461239652f` | `853cee9950255486feb95cdf51c00e9ce9d58cd12b6cfb212a431840b2dd4419` |
+| `AxisToAxiAdapter.v` | `03c93b8345ca5cc5c893943cd5c8ee0bb38e2e529ac7dc5da091866e4b435adc` | `686f4b2ab13ded10d7e61a571e46989c419ff61f6451966e46017dea03c2dc30` |
+
+XACP is an older RasterIX snapshot and lacks this tree's external-texture
+cache family, so its divergent EF files were not copied wholesale.  The
+verified independent change is `RasterIX/XACPCommandReadCredit.v`
+(`b80c25957169593eed5cb3270dad52cd1af2582ff7db53d4a69b00827dcb10be`
+in XACP): it is GPL-3.0-or-later and is inserted after the 64-bit
+FrameStreamingCore `commonAxiAdapter` and before crossbar port 0.  Its
+64-beat reserved-response queue keeps list-read backpressure from holding the
+fragment-memory read channel.  This preserves the newer external texture
+cache and all local fixes above while taking the specific silicon-proven fix.
+
+## Every read master reserves its responses
+
+- Files: `RasterIX/RasterIX_EF.v`, `RasterIX/XACPCommandReadCredit.v`
+  (generalized from the command port to any read master; GPL-3.0-or-later
+  header and XACP/BigMig attribution kept, modification notice added).
+- Hazard: `mainXBar` has one master, PS7 `S_AXI_HP3`, whose read data
+  returns in order through the AFI read FIFO and is routed per beat to the
+  issuing port by RID.  A port that withholds RREADY stalls the crossbar's
+  master R channel and every response queued behind it.  Before this change
+  only the command port reserved space.  Colour and depth readers accept a
+  beat only as fragments drain into `StreamConcatFifo`, and the TMU only
+  while its 32-entry R FIFO has room.  The concat semaphore keeps that
+  acyclic today, but nothing at the AXI boundary guaranteed it.
+- Change: a `readReservation` generate installs `XACPCommandReadCredit` in
+  front of every crossbar read port (command 64 beats, colour/depth/stencil
+  16, TMU0/TMU1 32).  An AR is issued only once its whole burst fits, and R
+  is accepted unconditionally, so `m_axi_rready` never depends on a client.
+  Depths cover `M_ISSUE` (8) single-beat framebuffer reads and 8 four-beat
+  texture lines; idle stencil/TMU1 ports have constant-zero AR and trim away.
+- Write side: `FramebufferPacker` raises AWVALID and WVALID together from a
+  registered line with BREADY tied high and the coalescer is bypassed, so no
+  framebuffer AW waits for data.  Only the DSE memory-write operation (not
+  used by the EF FIFO contract) issues AW ahead of W.  Its W data comes from
+  the committed FIFO packet or port 0's reserved read buffer, never from a
+  response a client could refuse.
+- The earlier xsim "ef-s3 SHARED deadlock" (STATUS `0x401d`) was a testbench
+  artefact, not this hazard.  EF has no command-read master, so the
+  testbench's `m_cmd_axi_arvalid` floated, `m_axi_arready` was X except on
+  cycles divisible by 7, and the shared queue count never decremented.  The
+  model then replayed a stale zero-length entry as RID 0 (port 0, which
+  always accepts) forever: two ARs, 249,859 R beats, the TMU's second line
+  never returned.  STATUS also packed the outstanding counters at bits
+  13:6/21:14 instead of the documented 15:8/23:16 (that read as 64 writes
+  outstanding) and dropped an increment when an address and a completion
+  coincided.  Both are fixed in `rtl/zz9k_rix/zz9k_rasterix.v`.  With the
+  testbench fixed, the unreserved RTL also passes every scene, so the
+  reservation is a guarantee, not a fix for an observed hang.
+- Cost (xsim, `LATENCY=2`, cycles to completion, unreserved -> reserved;
+  every frame bit-exact against its analytic reference, DMA frames
+  byte-identical to MMIO):
+
+| Scene | MMIO | `SHARED=1` | `SHARED=1 RAND_SEED=1..4` |
+| --- | --- | --- | --- |
+| `ef-s1` | 384,082 -> 384,082 | 384,082 -> 384,082 | |
+| `ef-s2` | 412,053 -> 412,053 | 412,053 -> 412,057 | |
+| `ef-s3` | 412,053 -> 412,053 | 412,053 -> 412,057 | |
+| `ef-s4` | 465,121 -> 465,121 | 465,121 -> 465,121 | |
+| `ef-probe` | 390,346 -> 390,347 | 390,347 -> 390,348 | |
+| `ef-lm` | 446,881 -> 446,882 | 445,494 -> 445,495 | |
+| `ef-stress` | 2,130,582 -> 2,130,632 | 2,089,514 -> 2,089,551 | 3,954,218 / 3,951,971 / 3,954,161 / 3,948,128 -> 3,954,498 / 3,951,871 / 3,953,652 / 3,948,588 |
+
+## EF memory coalescing enabled
+
+The EF wrapper instantiates RasterIX with `ENABLE_MEMORY_COALESCING(1)`
+(`rtl/zz9k_rix/zz9k_rasterix.v`).  `FramebufferAdapter` issues only
+single-beat AR/AW transactions, and `CoalesceAddrGen` merges runs of
+consecutive ones into INCR bursts of up to `NR_OF_COALESCED_BEATS_*` beats
+(colour 4, depth 4, stencil 2 at `DATA_WIDTH=64`), which `CoalesceFiFo`
+replays on the write channel beat-exact (wlast on the final beat of each
+merged burst).
+
+The corruption that kept coalescing disabled was not in the coalescer.
+Instrumented counters prove the merge pipeline lossless (ef-s1 clear:
+76,800 single writes in, 19,200 four-beat AW + 76,800 W beats + 19,200
+wlast out).  The xsim memory model computed each W beat's address as
+`write_addr + (1 << m_axi_awsize)` while a burst was in flight; AWSIZE is
+only defined during the AW handshake, and between handshakes the
+crossbar's bypassed M-side register slice follows the write arbiter, so
+a stray size 0 advanced the model's address by one byte per beat.  The
+testbench now latches the beat stride on the AW handshake (like the read
+model always latched `render_read_size`), and every scene is bit-exact
+with coalescing on.
+
+`CoalesceAddrGen` additionally carries the group's first AXI ID onto the
+merged burst and closes the group when the ID changes, so a merged burst
+never answers with a foreign ID (the EF framebuffer masters drive ID 0, so
+this is inert here but keeps the module correct for other integrations).
+The read path keeps `s_mem_axi_rlast = 1`: every merged read beat completes
+one of the client's single-beat AR transactions, so each beat is its own
+last beat; `FramebufferSerializer` consumes one beat per vector fetch.
+
+Reservation interaction: the per-port `XACPCommandReadCredit` buffers
+reserve `ARLEN+1` beats per accepted AR and issue an AR only when the whole
+merged burst fits, so merged 4-beat colour/depth (2-beat stencil) bursts
+need 4 of the 16 reserved beats and can never wedge the shared HP3 read
+channel; the reservation accepts R unconditionally while the serializer
+drains its buffer one beat per vector fetch.
+
+Cycles to completion, LATENCY=2, coalescing off -> on (2026-10-29): see
+the matrix in `test/rix_xsim/README.md`; every frame is bit-exact against
+its reference in MMIO, DMA_BURST and SHARED (including randomized
+reordering, seeds 1-4).
+
+## TexEnv select stage is nonblocking
+
+- File: `RasterIX/TexEnv.v`
+- Hazard: the same class as the ColorBlender select stage (patch 0009).
+  `v00..v33` are the select stage's operand registers, written with
+  blocking assignments inside `always @(posedge aclk) if (ce && s_valid)`,
+  while the `ColorMixerSigned` instance samples them as its colorA..D
+  inputs on the same edge.  In simulation the select stage and the mixer's
+  first multiply stage collapse into one, so back-to-back fragments can be
+  blended with their successor's operands; synthesis builds the registers
+  and samples the previous cycle's values.
+- Evidence: the new `ef-texenv` scene (64x64 per-texel gradient texture,
+  MODULATE with per-vertex interpolated primary colour, then INTERPOLATE
+  with the constant env colour) renders 13,114 differing bytes (454 pixels
+  beyond one LSB, channel deltas up to full scale) between the blocking
+  and nonblocking versions of the stage.  Earlier scenes could not expose
+  it: they use REPLACE with uniform textures, so every fragment presents
+  identical operands.  The committed reference frame
+  (`test/rix_xsim/refs/ef-texenv_ref.ppm.gz`) is the post-fix frame, i.e.
+  the synthesized semantics.
+- Change: the 120 `v00..v33` assignments take `<=`; the block-local
+  operand temporaries keep blocking assignment.  No synthesized logic
+  changes: `v00..v33` were already the stage's registers.
+- Audit: the rest of `rtl/rasterix` was scanned for module-level
+  registers blocking-written inside clocked blocks and read by another
+  clocked block, a submodule port, or an assign.  `TextureSampler.v`'s
+  `step1_texelU*` blocking writes are read only later inside the same
+  block (same-edge semantics identical in simulation and synthesis), and
+  no other module in `RasterIX`, `Float` or `3rdParty` has the pattern;
+  the remaining hits (`sfifo.v`, `skidbuffer.v`) are `initial`-block
+  initializers of registers whose clocked writes are nonblocking.
+
+## Coalescer simulation assertions
+
+- Files: `RasterIX/CoalesceAddrGen.v`, `RasterIX/CoalesceFiFo.v`
+- Patch: `patches/0010-coalescer-simulation-assertions.patch`
+- Hazard: the upstream AXI contract diagnostics call `$error` and `$finish`
+  from live clocked paths. Vivado 2018.3 rejects those system tasks during
+  out-of-context coalescer synthesis, leaving the parent `synth_1` run in
+  `Scripts Generated` state and preventing timing qualification.
+- Change: `synthesis translate_off/on` preserves the diagnostics in XSim while
+  excluding only the unsupported-request checks from synthesized hardware.
+  The accepted single-beat INCR transaction datapath and all valid-cycle
+  assignments are unchanged.

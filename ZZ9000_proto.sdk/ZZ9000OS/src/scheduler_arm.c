@@ -3,12 +3,23 @@
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * This file carries the Cortex-A9 / Xilinx-BSP integration that cannot be
- * host-tested: SCU/SMP coherency bring-up, the coherent shared control block,
- * the core-1 worker, and the core-0 poll. The portable state machine it drives
- * lives in scheduler.c (host-tested). Compiled out of the host test build.
+ *
+ * This file carries the Cortex-A9 / Xilinx-BSP integration: SCU/SMP
+ * coherency bring-up, the coherent shared control block, the core-1 worker,
+ * and the core-0 poll. The portable state machine it drives lives in
+ * scheduler.c (host-tested); a focused host seam covers worker initialization.
  */
-#ifndef TASKQ_HOST_TEST
+#if defined(TASKQ_HOST_TEST) && defined(MINIGL_HOST_TEST)
+
+#include "scheduler.h"
+#include "scheduler_core1_minigl_init.h"
+
+void scheduler_core1_host_test_init(taskq_shared_t *sh)
+{
+  scheduler_core1_minigl_init(sh);
+}
+
+#elif !defined(TASKQ_HOST_TEST)
 
 #include "scheduler.h"
 #include "memorymap.h"
@@ -19,6 +30,7 @@
 #include "sdk_media_session.h"
 #include "sdk_smp_lock.h"
 #include "card_pool.h"
+#include "zzm_minigl_host.h"
 #include "core2.h"
 #include "sleep.h"
 #include "xil_types.h"
@@ -26,6 +38,10 @@
 #include "xil_cache.h"
 #include "xpseudo_asm.h"
 #include "xreg_cortexa9.h"
+#include "scheduler_core1_minigl_init.h"
+#include "zzapp_runtime.h"
+#include "zzapp_services.h"
+#include "zzm_runtime.h"
 #include <stdio.h>
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
@@ -102,7 +118,14 @@ void scheduler_boot_init(void)
   sh->core1_reclaim_done = 0;
   sh->core1_clean_request = 0;
   sh->core1_clean_done = 0;
+  sh->minigl_doorbell = 0;
+  sh->minigl_reset_request = 0;
+  sh->minigl_reset_ack = 0;
+  sh->minigl_in_flight = 0;
+  sh->minigl_packets_on_core1 = 0;
+  sh->minigl_packets_on_core0 = 0;
   taskq_watchdog_init(&g_sched_watchdog, 3u);
+  zzapp_boot_init();
   g_core1_started = 0;
 }
 
@@ -110,6 +133,13 @@ int scheduler_core1_available(void)
 {
   return (g_core1_started != 0 &&
           taskq_watchdog_core1_enabled(&g_sched_watchdog)) ? 1 : 0;
+}
+
+void scheduler_core1_wake(void)
+{
+  /* The producer's release-store publishes its payload before this event. */
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
 }
 
 /* Bounded wait for core 1's worker to come up, ~100 ms total. */
@@ -194,19 +224,12 @@ void scheduler_coherency_init_core1(void)
 {
   /* Core 1 is entered straight from the CPU1 reset vector (core1_loop),
    * bypassing boot.S, so it starts with MMU + caches + SMP OFF. Bring it up to
-   * match core 0 so cross-core LDREX/STREX and SCU coherency work:
-   *   1. point TTBR0 at the shared translation table (same table as core 0),
-   *   2. set the domain access control (all domains manager),
-   *   3. set ACTLR.SMP before enabling the D-cache,
-   *   4. enable MMU + D-cache after invalidating this core's L1s and TLB only
-   *      (core1_enable_mmu_local; the shared L2 stays untouched),
-   *   5. refresh the shareable attribute so this core's TLB reflects it.
-   * The region was already marked shareable by scheduler_coherency_init_core0()
-   * at boot, before this core started. */
+   * match core 0 and make domain 14 Client, matching the firmware-text L2
+   * descriptors installed by mmu_page_set_readonly_executable(). */
   u32 ttbr0 = (u32)(UINTPTR)&MMUTable | TASKQ_TTBR0_ATTR;
 
   mtcp(XREG_CP15_TTBR0, ttbr0);
-  mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0xFFFFFFFFU); /* all domains: manager */
+  mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0xDFFFFFFFU);
   dsb();
   isb();
 
@@ -254,6 +277,26 @@ static uint16_t scheduler_run_slot(taskq_desc_t *d)
   taskq_complete(&sh->queue, slot, status, payload, (uint16_t)len);
   return status;
 }
+/* Bounded service body used between app calls. It never sleeps: while an
+ * app is live the next timer tick or cooperative yield returns here. */
+void scheduler_core1_service_once(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  int slot = taskq_claim_any(&sh->queue);
+
+  if (slot >= 0) {
+    sh->core1_current_slot = slot;
+    (void)scheduler_run_slot(&sh->queue.descs[slot]);
+    sh->core1_current_slot = -1;
+    sh->tasks_on_core1++;
+  }
+  sh->minigl_in_flight = 1;
+  dmb();
+  zzm_minigl_service_tick(0);
+  sh->minigl_in_flight = 0;
+  dmb();
+}
+
 
 /*
  * Core-1 dedicated worker. Entered from core1_loop (core2.c) after coherency
@@ -269,27 +312,92 @@ void scheduler_core1_worker(void)
 {
   taskq_shared_t *sh = scheduler_shared();
 
-  sh->core1_alive = 1;
-  dmb();  /* make the alive flag observable to core 0 before we sleep on WFE */
+
+  scheduler_core1_minigl_init(sh);
 
   for (;;) {
-    int slot;
+    int reset_req;
+    int task_slot;
+    int task_avail;
+    int mgl_avail;
+    int mgl_bound;
+    sched_worker_action_t action;
 
     /* Checked before every claim: once core 0 asks, no further task runs. */
     scheduler_core1_reclaim_if_requested(sh);
     scheduler_core1_clean_if_requested(sh);
     scheduler_core1_park_if_requested();
-    slot = taskq_claim_any(&sh->queue);
-    if (slot < 0) {
-      __asm__ __volatile__("wfe" ::: "memory");
-      continue;
+    zzapp_worker_hook();
+
+    reset_req = (sh->minigl_reset_request != 0);
+    task_slot = reset_req ? -1 : taskq_claim_any(&sh->queue);
+    task_avail = (task_slot >= 0);
+    mgl_avail = zzm_minigl_has_work();
+    mgl_bound = zzm_minigl_worker_registered();
+    action = sched_worker_decide(reset_req, task_avail, mgl_avail, mgl_bound);
+
+    switch (action) {
+    case SCHED_WORKER_ACTION_RESET:
+      /* The module owns context draining.  It is polled only on core 1 and
+       * acknowledges after it has stopped its worker-facing resources. */
+      if (zzm_minigl_begin_reset() != ZZM_MINIGL_RESET_BUSY &&
+          zzm_minigl_reset_poll() == ZZM_MINIGL_RESET_QUIESCENT) {
+        sh->minigl_reset_request = 0;
+        sh->minigl_reset_ack = 1;
+        dmb();
+      }
+      break;
+
+    case SCHED_WORKER_ACTION_TASK:
+      sh->core1_current_slot = task_slot;
+      (void)scheduler_run_slot(&sh->queue.descs[task_slot]);
+      sh->core1_current_slot = -1;
+      sh->tasks_on_core1++;
+      break;
+
+    case SCHED_WORKER_ACTION_MINIGL:
+    case SCHED_WORKER_ACTION_POLL_IDLE:
+      sh->minigl_in_flight = 1;
+      dmb();
+      zzm_minigl_service_tick(0);
+      sh->minigl_in_flight = 0;
+      dmb();
+      break;
+
+    case SCHED_WORKER_ACTION_WFE:
+    default:
+      if (!taskq_has_active(&sh->queue) &&
+          !sh->minigl_reset_request &&
+          !sh->minigl_doorbell &&
+          !zzm_minigl_worker_registered())
+        __asm__ __volatile__("wfe" ::: "memory");
+      break;
     }
-    sh->core1_current_slot = slot;
-    (void)scheduler_run_slot(&sh->queue.descs[slot]);
-    sh->core1_current_slot = -1;
-    sh->tasks_on_core1++;   /* proof: this core executed a crypto task */
   }
 }
+
+void scheduler_request_minigl_reset(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  sh->minigl_reset_ack = 0;
+  dmb();
+  sh->minigl_reset_request = 1;
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
+}
+
+void scheduler_cancel_minigl_reset(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  /* The restarted worker must not also run the reset. */
+  sh->minigl_reset_request = 0;
+  dsb();
+  if (scheduler_core1_available())
+    core1_cold_restart();
+}
+
 
 /*
  * Core 1 side of the reset-time reclaim. Core 0 asks only after the quiesce,
@@ -443,6 +551,7 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     }
     taskq_release(&sh->queue, slot);
   }
+  zzapp_core0_poll();
 
   if (sh->core1_restart_request) {
     sh->core1_restart_request = 0;
@@ -452,6 +561,7 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
      * pool, its lock is still held; free it before the poison handlers
      * below release their sessions' pool memory. */
     card_pool_reset_lock(&card_pool);
+    zzapp_on_core1_restart();
     /* Core-1-affine image sessions lost their codec heap objects with the
      * fault; both branches below reclaim the decode blocks core 1 left
      * allocated (the cold restart inside core1_cold_restart, the
@@ -476,8 +586,12 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
        * stays usable). */
       sdk_smp_lock_reset_malloc();
       sdk_image_stream_reset_locks();
+      zzm_runtime_reset_heap_lock();
+      zzapp_services_reclaim_halted_audio();
       sdk_compression_reclaim_core1_decode();
       g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
+      /* MiniGL is never parsed on core 0.  A module worker can only resume
+       * after core 1 returns; its transport remains unavailable meanwhile. */
     }
   }
 
@@ -558,7 +672,7 @@ void scheduler_quiesce_for_reset(void)
     return;   /* no core-1 worker -> no in-flight writes to drain */
 
   for (spins = 0; spins < SCHED_QUIESCE_SPINS; spins++) {
-    if (!taskq_has_active(&sh->queue))
+    if (!taskq_has_active(&sh->queue) && !sh->minigl_in_flight)
       break;
     usleep(SCHED_QUIESCE_US);
   }
@@ -568,7 +682,7 @@ void scheduler_quiesce_for_reset(void)
    * taskq_init leaves zero QUEUED slots, and the worker only ever claims QUEUED,
    * so it cannot pick up a stale task and write into buffers the mailbox is
    * about to reuse. */
-  timed_out = taskq_has_active(&sh->queue);
+  timed_out = taskq_has_active(&sh->queue) || sh->minigl_in_flight;
   taskq_init(&sh->queue);
   sh->core1_current_slot = -1;
 

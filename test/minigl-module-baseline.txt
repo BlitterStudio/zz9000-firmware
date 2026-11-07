@@ -1,0 +1,86 @@
+MiniGL module migration baseline
+===============================
+
+Base: origin/feature/app-runtime e727df6f
+Recorded from an isolated debian:bookworm-slim ARM-toolchain build and an
+isolated ubuntu:24.04 host-test build.  The firmware source and private
+library checkout were mounted read-only and copied before either build.
+
+Host regression baseline
+------------------------
+
+Commands:
+  make -C test/minigl clean test
+  make -C test/minigl_v9 clean test
+  make -C test/minigl_v9 asan
+
+All three commands exit 0.  CPU raster, polygon, present, lighting, and the
+11 RasterIX oracle cases pass (maximum colour difference <= 1; depth exact).
+The v9 suite passes its parser/state/draw/texture/host API/card-pool/E2E,
+transport guard, RasterIX mapper, and 32-bit guest-client coverage.  The
+client summary is `amiberry_v29 DONE 100 0`; `amiberry_ops DONE 96 3` is the
+existing host-mock allowance for context-from-bitmap, context-screen-modes,
+and texture-packed-565, reported as 0 unexpected failures.
+
+The ASAN/UBSAN command exits 0.  Its pre-existing diagnostics are unaligned
+control/status accesses in mw_service.c and its test, unaligned uint32_t
+accesses in rix_drv.c, the CSR mock bounds diagnostic in
+ test_mw_rasterix_mapper.c, and a signed shift in guest_mock.  These are
+recorded here so migration verification compares test outcomes rather than
+silencing diagnostics.
+
+The host suites define MINIGL_HOST_TEST, which deliberately compiles the
+on-card five-second profiler out; therefore they have no valid profile
+counter snapshot.  The module regression target must inject the v3 profile
+service and compare its exported counter snapshot, rather than treating a
+host-zero counter array as an equivalence measurement.
+
+ARM object-size baseline
+------------------------
+
+Command (ARM GNU toolchain 13.2.1):
+  make MINIGL_LIB_DIR=../../../amiberry-minigl-library-zz9k <26 MiniGL object targets>
+  arm-none-eabi-size -A <the same objects>
+
+Object totals include ELF metadata and are retained as a reproducible,
+per-translation-unit baseline:
+
+  firmware backend
+  minigl_raster.o             981793
+  minigl_lighting.o             7647
+  minigl_present.o              3578
+  minigl_profile.o              4050
+  minigl_rix_backend.o        282115
+  mw_parse.o                    8033
+  mw_texture.o                  7266
+  mw_draw.o                     5494
+  mw_ctx.o                     51952
+  mw_service.o                  8627
+  minigl_transport.o             660
+  rix_cmd.o                     3166
+  rix_texture.o                  626
+  rix_setup.o                   2806
+  rix_drv.o                     2258
+  zzapp_gl.o                    5604
+
+  private-library front end
+  amiberry_gl_state.o          30041
+  amiberry_gl_draw.o           25034
+  amiberry_gl_texture.o        19338
+  amiberry_gl_light.o           4914
+  amiberry_gl_light_get.o       1698
+  amiberry_gl_list.o            2126
+  amiberry_gl_buffer.o          3022
+  amiberry_glu.o                1368
+  amiberry_backend_inproc.o     4118
+  amiberry_transport_inproc.o    885
+
+Resident final-ELF baseline
+---------------------------
+
+The unmodified resident link intentionally fails its current 4 MiB high-image
+gate, before it can emit an ELF: `ps7_ddr_hi` overflows by 83104 bytes.  This
+is the known base failure that the module cutover removes.  Consequently no
+truthful final-ELF section table exists at this revision.  The linked-module
+measurement supersedes it and is required to report `arm-none-eabi-size -A`
+for MINIGL.elf plus the packed MINIGL.ZZM bytes against the 4 MiB slot.

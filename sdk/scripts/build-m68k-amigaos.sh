@@ -17,12 +17,14 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$REPO_ROOT:/work" -w /work \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" "$IMAGE" sh -c '
 set -e
 mkdir -p build/m68k build/dtcode
-CFLAGS="-noixemul -Os -s -Iinclude -Ihost/include"
+CFLAGS="-noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
+STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
 
 m68k-amigaos-gcc $CFLAGS -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o
-m68k-amigaos-gcc $LIBCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
-m68k-amigaos-gcc $LIBCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
+m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
+m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_app_client.c -o build/m68k/zz9k_app_client.o
+m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-fb-common.c -o build/m68k/zz9k-fb-common.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-image-window.c -o build/m68k/zz9k-image-window.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-picture-viewer.c -o build/m68k/zz9k-picture-viewer.o
@@ -47,7 +49,7 @@ ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-rexx.c tools/zzplay/zzplay-r
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-sys.c"
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
-  build/m68k/zz9k_host.o -o build/zz9k.library
+  build/m68k/zz9k_app_client.o build/m68k/zz9k_host.o -o build/zz9k.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   amiga/mpega/mpega_resident.c -o build/mpega.library
 
@@ -66,6 +68,7 @@ m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libeventcancel.c -o build/zz9k-libeventca
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libdecode.c -o build/zz9k-libdecode
 m68k-amigaos-gcc $LIBCFLAGS -Itools build/m68k/zz9k-fb-common.o \
   tools/zz9k-libsmoke.c -o build/zz9k-libsmoke
+m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
 m68k-amigaos-gcc $LIBCFLAGS examples/amiga-library/zz9k-library-demo.c \
   -o build/zz9k-library-demo
 m68k-amigaos-gcc $LIBCFLAGS examples/amiga-jpeg-stream/zz9k-jpeg-stream-demo.c \

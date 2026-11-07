@@ -25,6 +25,7 @@ usage() {
     cat >&2 <<'EOF'
 Usage: ./build_release_assets.sh [--tag TAG] [--output DIR] [--require-all]
                                  [--firmware-flavor SUFFIX]
+                                 [--minigl-kit DIRECTORY]
 
 Options:
   --tag TAG               Release/build label used in archive names
@@ -39,11 +40,16 @@ Options:
                           produces zz9000-firmware-<tag>-<variant>-diag.zip.
                           Use this when packaging an alternate ZZ9000OS.elf
                           flavor (the script does not rebuild firmware —
-                          the caller is expected to do that). Skips the
-                          canonical bootimage_work/BOOT.bin overwrite so the
-                          standard-flavor BOOT.bin remains the local default.
+                          the caller is expected to do that). The "rasterix"
+                          flavor emits only the qualified zorro3-aga-rix
+                          image; canonical packages never include it. Skips
+                          the canonical bootimage_work/BOOT.bin overwrite so
+                          the standard-flavor BOOT.bin remains the local
+                          default.
                           CI should not use this for PAL/native-video
                           defaults; use ZZ9000.CFG instead.
+  --minigl-kit DIRECTORY  Verified module-release directory containing
+                          MINIGL.ZZM, MINIGL.KIT.json, and its source tarball.
 EOF
 }
 
@@ -52,6 +58,7 @@ OUT_DIR=release
 REQUIRE_ALL=0
 CHECK_QUALIFICATION=0
 FIRMWARE_FLAVOR=
+MINIGL_KIT_DIR=
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -88,6 +95,15 @@ while [ "$#" -gt 0 ]; do
                 exit 1
             fi
             FIRMWARE_FLAVOR=$2
+            shift 2
+            ;;
+        --minigl-kit)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --minigl-kit needs a directory." >&2
+                usage
+                exit 1
+            fi
+            MINIGL_KIT_DIR=$2
             shift 2
             ;;
         -h|--help)
@@ -169,17 +185,25 @@ if [ "$CHECK_QUALIFICATION" -eq 1 ]; then
     exit 0
 fi
 
+FIRMWARE_ELF=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+if [ "$FIRMWARE_FLAVOR" = rasterix ] &&
+   { [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/.minigl-rasterix ] ||
+     [ "$(cat ZZ9000_proto.sdk/ZZ9000OS/build/.minigl-rasterix)" != 1 ]; }; then
+    echo "ERROR: RasterIX package requires ./build_firmware.sh --rasterix." >&2
+    exit 1
+fi
+
 if ! command -v zip >/dev/null 2>&1; then
     echo "ERROR: zip not found on PATH." >&2
     exit 1
 fi
 
-if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
+if [ ! -f "$FIRMWARE_ELF" ]; then
     echo "ERROR: missing ZZ9000OS.elf; run ./build_firmware.sh first." >&2
     exit 1
 fi
 
-bash ./util/check_elf_vectors.sh ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+bash ./util/check_elf_vectors.sh "$FIRMWARE_ELF"
 
 MODULE_DIR=ZZ9000_proto.sdk/ZZ9000OS/build/modules
 make -C ZZ9000_proto.sdk/ZZ9000OS modules
@@ -201,8 +225,14 @@ done
 # firmware artifact directly rather than unpacking a release ZIP.
 mkdir -p "$OUT_DIR/ZZ9K"
 cp "$MODULE_DIR"/*.ZZM "$OUT_DIR/ZZ9K/"
+if [ -n "$MINIGL_KIT_DIR" ]; then
+    sh ./util/stage_minigl_kit.sh "$MINIGL_KIT_DIR" "$OUT_DIR" --require-source
+fi
 
-variant_defs=("${VARIANT_MATRIX[@]}")
+variant_defs=()
+while IFS= read -r def; do
+    variant_defs+=("$def")
+done < <(variant_matrix_release_rows "$FIRMWARE_FLAVOR")
 
 mkdir -p "$OUT_DIR"
 # Each pass deletes only the exact archive names it's about to (re)write,
@@ -244,12 +274,16 @@ for def in "${variant_defs[@]}"; do
 
     echo "[release] building $variant${flavor_label}: $label"
     mkdir -p "$archive_root"
-    ./build_bootimage.sh --bitstream "$bitstream" --firmware ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
+    ./build_bootimage.sh --bitstream "$bitstream" --firmware "$FIRMWARE_ELF" \
         --output "$boot_bin"
     # Ship the (all-commented) sample config next to BOOT.bin so users
     # discover it; copying it to the SD card as-is changes nothing.
     cp ZZ9000.CFG "$archive_root/ZZ9000.CFG"
     mkdir -p "$archive_root/ZZ9K"
+    if [ -n "$MINIGL_KIT_DIR" ]; then
+        cp "$OUT_DIR/ZZ9K/MINIGL.ZZM" "$archive_root/ZZ9K/MINIGL.ZZM"
+        cp "$OUT_DIR/ZZ9K/MINIGL.KIT.json" "$archive_root/ZZ9K/MINIGL.KIT.json"
+    fi
     cp "$MODULE_DIR"/*.ZZM "$archive_root/ZZ9K/"
 
     rm -f "$zip_path"

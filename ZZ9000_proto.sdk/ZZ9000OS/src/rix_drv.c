@@ -1,0 +1,373 @@
+/*
+ * RasterIX EF FIFO transport driver for ZZ9000.
+ *
+ * The bounded DSE packet and texture ordering rules follow XACP librixgpu
+ * (0BSD).  This implementation is part of ZZ9000 firmware.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+#include "rix_drv.h"
+#include "minigl_profile.h"
+
+#define RIX_DSE_STREAM 0x90000000U
+
+static uint32_t rix_drv_read(const struct rix_drv *driver, uint32_t offset)
+{
+    return driver->read(driver->context, offset);
+}
+
+static void rix_drv_write(const struct rix_drv *driver, uint32_t offset,
+                          uint32_t value)
+{
+    driver->write(driver->context, offset, value);
+}
+
+static uint32_t rix_drv_fifo_read(const struct rix_drv *driver, uint32_t offset)
+{
+    return driver->fifo_read(driver->context, offset);
+}
+
+static void rix_drv_fifo_write(const struct rix_drv *driver, uint32_t offset,
+                               uint32_t value)
+{
+    driver->fifo_write(driver->context, offset, value);
+}
+
+static int rix_drv_usable(const struct rix_drv *driver)
+{
+    return driver != NULL && driver->available && driver->read != NULL &&
+           driver->write != NULL && driver->fifo_read != NULL &&
+           driver->fifo_write != NULL;
+}
+
+static int rix_drv_wait_idle(struct rix_drv *driver, uint32_t timeout)
+{
+    uint32_t attempt = 0U;
+
+    for (;;) {
+        driver->last_status = rix_drv_read(driver, RIX_DRV_CSR_STATUS);
+        if ((driver->last_status & RIX_DRV_STATUS_IDLE) != 0U)
+            return RIX_DRV_OK;
+        if (attempt++ >= timeout)
+            return RIX_DRV_TIMEOUT;
+    }
+}
+
+static int rix_drv_wait_vacancy(struct rix_drv *driver, uint32_t words,
+                                uint32_t timeout)
+{
+    uint32_t attempt = 0U;
+    int result;
+
+    if (rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV) >= words)
+        return RIX_DRV_OK;
+    /* Back-pressure: RasterIX consumes slower than the ARM pushes. Same
+     * read/attempt sequence as a plain poll loop. */
+    minigl_profile_push(MGLP_STALL);
+    for (;;) {
+        if (attempt++ >= timeout) {
+            result = RIX_DRV_TIMEOUT;
+            break;
+        }
+        if (rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV) >= words) {
+            result = RIX_DRV_OK;
+            break;
+        }
+    }
+    minigl_profile_pop();
+    return result;
+}
+
+/* TDFV reports usable FIFO words after reset (PG080 reserves four).  The
+ * original 512-word core deliberately used 248-word packets; retain that
+ * wire behaviour, but use all of a deeper FIFO minus this packet's header. */
+static void rix_drv_set_packet_words(struct rix_drv *driver)
+{
+    uint32_t vacancy = rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV);
+
+    if (vacancy == RIX_DRV_FIFO_LEGACY_VACANCY)
+        driver->packet_words = RIX_DRV_FIFO_PACKET_WORDS;
+    else if (vacancy > 2U)
+        driver->packet_words = vacancy - 2U;
+    else
+        driver->packet_words = RIX_DRV_FIFO_PACKET_WORDS;
+    if (driver->packet_words > RIX_DRV_FIFO_MAX_PACKET_WORDS)
+        driver->packet_words = RIX_DRV_FIFO_MAX_PACKET_WORDS;
+}
+
+static uint32_t rix_drv_command_words(uint32_t word)
+{
+    switch (word >> 28U) {
+    case 1U: return 2U; /* OP_RENDER_CONFIG */
+    case 2U: return 1U; /* OP_FRAMEBUFFER */
+    case 3U: return 1U + ((word & 0x3ffU) / 4U); /* OP_TRIANGLE_STREAM */
+    case 4U: return 65U; /* OP_FOG_LUT_STREAM */
+    case 5U: return 1U + (word & 0x7ffffU); /* OP_TEXTURE_STREAM */
+    default: return 1U; /* OP_NOP */
+    }
+}
+
+/* Ends the in-flight DMA packet: wait for the transfer, then establish its
+ * packet boundary.  TLF before the next packet's header keeps the parser's
+ * view of packet order intact. */
+static int rix_drv_flush_pending(struct rix_drv *driver)
+{
+    uint32_t isr;
+
+    if (!driver->pending_dma)
+        return RIX_DRV_OK;
+    if (driver->dma_retire == NULL ||
+        !driver->dma_retire(driver->context)) {
+        driver->pending_dma = 0;
+        return RIX_DRV_ERROR;
+    }
+    driver->pending_dma = 0;
+    if (driver->fifo_drain != NULL)
+        driver->fifo_drain(driver->context);
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, driver->pending_bytes);
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR);
+    if ((isr & RIX_DRV_FIFO_ISR_ERRORS) != 0U) {
+        driver->last_error_status = isr;
+        return RIX_DRV_ERROR;
+    }
+    return RIX_DRV_OK;
+}
+
+static int rix_drv_send_packet(struct rix_drv *driver, const uint32_t *commands,
+                               uintptr_t command_address, uint32_t words,
+                               uint32_t timeout)
+{
+    uint32_t index, isr;
+    int result;
+    int dma;
+
+    if (words == 0U || words > driver->packet_words)
+        return RIX_DRV_BAD_ARGUMENT;
+    /* Profiling only: where the renderer is when the next packet is ready.
+     * A full FIFO and a stalled pipeline mean RasterIX is the bottleneck;
+     * an empty FIFO means the ARM side is. */
+    if (minigl_profile_enabled()) {
+        uint32_t status = rix_drv_read(driver, RIX_DRV_CSR_STATUS);
+
+        minigl_profile_count(MGLP_N_HW_SAMPLES, 1U);
+        minigl_profile_count(MGLP_N_HW_BUSY, (status & RIX_DRV_STATUS_BUSY) != 0U);
+        minigl_profile_count(MGLP_N_HW_STALL, (status & RIX_DRV_STATUS_STALL) != 0U);
+        minigl_profile_count(MGLP_N_HW_READS, RIX_DRV_STATUS_READS(status));
+        minigl_profile_count(MGLP_N_HW_VACANCY, rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV));
+    }
+    /* Close the previous packet before anything new is staged: TLF
+     * carries the byte count staged since the previous TLF, so a header
+     * word written first makes the boundary value wrong and the FIFO drops
+     * it (ISR.TSE, seen on kit 31) -- the parser then desynchronises and
+     * executes garbage.  The retire still overlaps with the caller's work
+     * since the launch: the emit stage between two submissions. */
+    result = rix_drv_flush_pending(driver);
+    if (result != RIX_DRV_OK)
+        return result;
+    result = rix_drv_wait_vacancy(driver, words + 2U, timeout);
+    if (result != RIX_DRV_OK)
+        return result;
+
+    dma = (driver->dma_start_async != NULL || driver->dma_stream != NULL) &&
+          command_address != (uintptr_t)0U && words >= 16U;
+    minigl_profile_count(MGLP_N_DRV_PACKETS, 1U);
+    driver->last_packet_bytes = (words + 2U) * sizeof(*commands);
+    driver->pending_bytes = driver->last_packet_bytes;
+    driver->last_packet_dma = dma;
+    ++driver->packets;
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD,
+                       RIX_DSE_STREAM | (words * sizeof(*commands)));
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, 0U);
+    if (dma && driver->dma_start_async != NULL) {
+        ++driver->dma_packets;
+        if (!driver->dma_start_async(driver->context, command_address, words, 16U)) {
+            driver->last_error_address = (uint32_t)command_address;
+            return RIX_DRV_ERROR;
+        }
+        driver->pending_dma = 1;
+        return RIX_DRV_OK;
+    }
+    if (dma) {
+        ++driver->dma_packets;
+        if (!driver->dma_stream(driver->context, command_address, words, 16U)) {
+            driver->last_error_address = (uint32_t)command_address;
+            return RIX_DRV_ERROR;
+        }
+    } else if (driver->fifo_write_words != NULL) {
+        driver->fifo_write_words(driver->context, commands, words);
+    } else {
+        for (index = 0U; index < words; ++index)
+            rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, commands[index]);
+    }
+    /* The FIFO data aperture is Device bufferable on hardware, and TDFD (the
+     * AXI4 data window) and TLF (the register window) are separate GP1
+     * interconnect ports.  Ensure all TDFD writes have completed before TLF
+     * establishes the packet boundary required by PG080. */
+    if (driver->fifo_drain != NULL)
+        driver->fifo_drain(driver->context);
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, driver->last_packet_bytes);
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR);
+    if ((isr & RIX_DRV_FIFO_ISR_ERRORS) != 0U) {
+        driver->last_error_status = isr;
+        driver->last_error_address = (uint32_t)(command_address != (uintptr_t)0U ?
+                                                command_address :
+                                                (uintptr_t)commands);
+        return RIX_DRV_ERROR;
+    }
+    return RIX_DRV_OK;
+}
+
+int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
+{
+    uint32_t identity;
+
+    if (driver == NULL || config == NULL)
+        return RIX_DRV_BAD_ARGUMENT;
+    driver->context = config->context;
+    driver->read = config->read;
+    driver->write = config->write;
+    driver->fifo_read = config->fifo_read;
+    driver->fifo_write = config->fifo_write;
+    driver->fifo_write_words = config->fifo_write_words;
+    driver->fifo_drain = config->fifo_drain;
+    driver->clean_dcache = config->clean_dcache;
+    driver->dma_stream = config->dma_stream;
+    driver->dma_start_async = config->dma_start_async;
+    driver->dma_retire = config->dma_retire;
+    driver->pending_bytes = 0U;
+    driver->pending_dma = 0;
+    driver->last_status = 0U;
+    driver->last_error_status = 0U;
+    driver->last_error_address = 0U;
+    driver->submitted_target = 0U;
+    driver->last_packet_bytes = 0U;
+    driver->packets = 0U;
+    driver->dma_packets = 0U;
+    driver->last_packet_dma = 0;
+    driver->packet_words = RIX_DRV_FIFO_PACKET_WORDS;
+    driver->available = 0;
+    driver->enabled = 0;
+
+    if (!config->hardware_present || config->read == NULL || config->write == NULL ||
+        config->fifo_read == NULL || config->fifo_write == NULL)
+        return RIX_DRV_UNAVAILABLE;
+    identity = rix_drv_read(driver, RIX_DRV_CSR_IDENTITY);
+    if (identity != RIX_DRV_IDENTITY_VALUE ||
+        rix_drv_read(driver, RIX_DRV_CSR_VERSION) != RIX_DRV_VERSION_VALUE)
+        return RIX_DRV_UNAVAILABLE;
+    driver->available = 1;
+    return RIX_DRV_OK;
+}
+
+int rix_drv_enable(struct rix_drv *driver)
+{
+    uint32_t isr;
+
+    if (!rix_drv_usable(driver))
+        return RIX_DRV_UNAVAILABLE;
+    driver->pending_dma = 0;
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    rix_drv_set_packet_words(driver);
+    /* TDFR leaves ISR intact; clear a previous context's sticky errors so the
+     * per-packet commit check only sees this context's packets. */
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR) & RIX_DRV_FIFO_ISR_ERRORS;
+    if (isr != 0U)
+        rix_drv_fifo_write(driver, RIX_DRV_FIFO_ISR, isr);
+    rix_drv_write(driver, RIX_DRV_CSR_CONTROL, RIX_DRV_CONTROL_ENABLE);
+    driver->enabled = 1;
+    return RIX_DRV_OK;
+}
+
+static int rix_drv_submit_packets(struct rix_drv *driver, const uint32_t *commands,
+                                  uintptr_t command_address, uint32_t command_words,
+                                  uint32_t timeout)
+{
+    uint32_t first, count;
+    int result;
+
+    first = 0U;
+    while (first < command_words) {
+        count = 0U;
+        while (first + count < command_words) {
+            uint32_t words = rix_drv_command_words(commands[first + count]);
+
+            if (words == 0U || words > command_words - first - count)
+                return RIX_DRV_BAD_ARGUMENT;
+            if (words > driver->packet_words - count)
+                break;
+            count += words;
+        }
+        result = rix_drv_send_packet(driver, commands + first,
+                                     command_address == (uintptr_t)0U ? 0U :
+                                     command_address + first * sizeof(*commands),
+                                     count, timeout);
+        if (result != RIX_DRV_OK)
+            return result;
+        first += count;
+    }
+    return RIX_DRV_OK;
+}
+
+int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
+                   uintptr_t command_address, uint32_t command_words,
+                   uint32_t timeout)
+{
+    int result;
+
+    if (!rix_drv_usable(driver) || !driver->enabled || commands == NULL ||
+        command_words == 0U)
+        return RIX_DRV_BAD_ARGUMENT;
+    minigl_profile_push(MGLP_FIFO);
+    minigl_profile_count(MGLP_N_FIFO_WORDS, command_words);
+    minigl_profile_count(MGLP_N_FIFO_SUBMITS, 1U);
+    if (driver->clean_dcache != NULL && command_address != (uintptr_t)0U)
+        driver->clean_dcache(driver->context, command_address,
+                             (size_t)command_words * sizeof(*commands));
+    result = rix_drv_submit_packets(driver, commands, command_address,
+                                    command_words, timeout);
+    if (result == RIX_DRV_OK)
+        result = rix_drv_flush_pending(driver);
+    minigl_profile_pop();
+    if (result != RIX_DRV_OK)
+        return result;
+    ++driver->submitted_target;
+    return RIX_DRV_OK;
+}
+
+int rix_drv_poll(struct rix_drv *driver, uint32_t timeout)
+{
+    if (!rix_drv_usable(driver))
+        return RIX_DRV_UNAVAILABLE;
+    return rix_drv_wait_idle(driver, timeout);
+}
+
+int rix_drv_recover(struct rix_drv *driver, uint32_t timeout, int soft_reset)
+{
+    int result;
+
+    if (!rix_drv_usable(driver))
+        return RIX_DRV_UNAVAILABLE;
+    result = rix_drv_wait_idle(driver, timeout);
+    if (result != RIX_DRV_OK)
+        return result;
+    if (soft_reset)
+        rix_drv_write(driver, RIX_DRV_CSR_CONTROL,
+                      RIX_DRV_CONTROL_ENABLE | RIX_DRV_CONTROL_SOFT_RESET);
+    driver->pending_dma = 0;
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    rix_drv_set_packet_words(driver);
+    return RIX_DRV_OK;
+}
+
+int rix_drv_disable(struct rix_drv *driver, uint32_t timeout)
+{
+    int result;
+
+    if (!rix_drv_usable(driver))
+        return RIX_DRV_UNAVAILABLE;
+    result = rix_drv_wait_idle(driver, timeout);
+    if (result != RIX_DRV_OK)
+        return result;
+    rix_drv_write(driver, RIX_DRV_CSR_CONTROL, 0U);
+    driver->enabled = 0;
+    return RIX_DRV_OK;
+}

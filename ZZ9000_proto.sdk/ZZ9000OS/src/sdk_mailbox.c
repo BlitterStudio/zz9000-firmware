@@ -41,6 +41,8 @@
 #include "sdk_aperture_layout.h"
 #include "sdk_smp_lock.h"
 #include "memorymap.h"
+#include "zzapp_proto.h"
+#include "zzapp_services.h"
 #include "card_pool.h"
 #include "surface_allocator.h"
 #include "mmu_page.h"
@@ -57,6 +59,7 @@
 #include "sdk_audio_flac.h"
 #include "sdk_audio_vorbis.h"
 #include "zzm_loader.h"
+#include "zzm_minigl_host.h"
 
 /* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
  * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
@@ -6683,6 +6686,26 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		(void)zzm_loader_load_on_owner(module_id);
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_MINIGL_MODULE_ACQUIRE: {
+		uint32_t generation = 0U;
+
+		*result_len = 0U;
+		if (!zzm_loader_acquire(ZZM_MODULE_MINIGL))
+			return SDK_STATUS_MODULE_MISSING;
+		if (!zzm_minigl_transport_acquire(&generation)) {
+			zzm_loader_release(ZZM_MODULE_MINIGL);
+			return SDK_STATUS_MODULE_MISMATCH;
+		}
+		put_be32(result_payload, generation);
+		*result_len = sizeof(generation);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_MINIGL_MODULE_RELEASE:
+		*result_len = 0U;
+		if (!zzm_minigl_transport_release())
+			return SDK_STATUS_BAD_REQUEST;
+		zzm_loader_release(ZZM_MODULE_MINIGL);
+		return SDK_STATUS_OK;
 	case SDK_OP_IMAGE_SESSION_BEGIN: {
 		const struct image_begin_op_params *p =
 		    (const struct image_begin_op_params *)d->op_params;
@@ -8555,6 +8578,12 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 	case SDK_OP_IMAGE_ANIMATION_FRAME_PRESENT:
 	case SDK_OP_IMAGE_ANIMATION_FRAME_RETIRE:
 	case SDK_OP_IMAGE_ANIMATION_RESTART:
+	case SDK_OP_APP_LOAD_BEGIN:
+	case SDK_OP_APP_LOAD_CHUNK:
+	case SDK_OP_APP_LOAD_END:
+	case SDK_OP_APP_START:
+	case SDK_OP_MINIGL_MODULE_ACQUIRE:
+	case SDK_OP_MINIGL_MODULE_RELEASE:
 		return 1;
 	default:
 		return 0;
@@ -8656,6 +8685,40 @@ static uint16_t handle_console_encode(volatile struct SDKMailboxEntry *req,
 	return SDK_STATUS_OK;
 }
 
+static uint16_t handle_app_op(volatile struct SDKMailboxEntry *req,
+			      volatile struct SDKMailboxEntry *comp,
+			      uint16_t payload_len, uint16_t opcode)
+{
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	uint16_t status;
+
+	status = zzapp_mailbox_dispatch(opcode, (const uint8_t *)req->payload,
+					payload_len, reply, &reply_len,
+					sdk_aperture_runtime_is_zorro3(),
+					get_be32(req->request_id),
+					get_be32(req->user_cookie));
+	if (status == SDK_STATUS_QUEUED)
+		return SDK_STATUS_QUEUED;
+	write_completion(comp, req, status, reply_len);
+	if (reply_len != 0U) {
+		memset((void *)comp->payload, 0, sizeof(comp->payload));
+		memcpy((void *)comp->payload, reply, reply_len);
+	}
+	return status;
+}
+
+typedef char zzapp_opcode_drift[
+	(SDK_OP_APP_QUERY == ZZAPP_OP_QUERY &&
+	 SDK_OP_APP_ALLOC_WINDOW == ZZAPP_OP_ALLOC_WINDOW &&
+	 SDK_OP_APP_LOAD_BEGIN == ZZAPP_OP_LOAD_BEGIN &&
+	 SDK_OP_APP_LOAD_CHUNK == ZZAPP_OP_LOAD_CHUNK &&
+	 SDK_OP_APP_LOAD_END == ZZAPP_OP_LOAD_END &&
+	 SDK_OP_APP_START == ZZAPP_OP_START &&
+	 SDK_OP_APP_STOP == ZZAPP_OP_STOP &&
+	 SDK_OP_APP_STATUS == ZZAPP_OP_STATUS &&
+	 SDK_OP_APP_DISPLAY_BIND == ZZAPP_OP_DISPLAY_BIND) ? 1 : -1];
+
 static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
                                volatile struct SDKMailboxEntry *comp,
                                uint32_t pending_requests)
@@ -8728,6 +8791,40 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		memcpy((void *)reply->name, status.name, sizeof(reply->name));
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_MINIGL_MODULE_ACQUIRE:
+		if (payload_len != 0U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		if (!sdk_aperture_runtime_is_zorro3() || !scheduler_core1_available())
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+		{
+			taskq_shared_t *sh = scheduler_shared();
+			int slot = taskq_enqueue(&sh->queue, SDK_OP_MINIGL_MODULE_ACQUIRE,
+			                         TASK_LONG, 0U, 0U, 0U, 0U,
+			                         get_be32(req->request_id),
+			                         get_be32(req->user_cookie), 0, 0U);
+			if (slot < 0)
+				return complete_status(req, comp, SDK_STATUS_BUSY);
+			g_task_generation[slot] = sdk_mailbox_generation;
+			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			return SDK_STATUS_QUEUED;
+		}
+	case SDK_OP_MINIGL_MODULE_RELEASE:
+		if (payload_len != 0U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		if (!sdk_aperture_runtime_is_zorro3() || !scheduler_core1_available())
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+		{
+			taskq_shared_t *sh = scheduler_shared();
+			int slot = taskq_enqueue(&sh->queue, SDK_OP_MINIGL_MODULE_RELEASE,
+			                         TASK_LONG, 0U, 0U, 0U, 0U,
+			                         get_be32(req->request_id),
+			                         get_be32(req->user_cookie), 0, 0U);
+			if (slot < 0)
+				return complete_status(req, comp, SDK_STATUS_BUSY);
+			g_task_generation[slot] = sdk_mailbox_generation;
+			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			return SDK_STATUS_QUEUED;
+		}
 	case SDK_OP_QUERY_APERTURE_LAYOUT:
 		return handle_query_aperture_layout(req, comp);
 	case SDK_OP_QUERY_SERVICE:
@@ -8870,6 +8967,16 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_diag_sched(req, comp);
 	case SDK_OP_DIAG_MEMORY:
 		return handle_diag_memory(req, comp);
+	case SDK_OP_APP_QUERY:
+	case SDK_OP_APP_ALLOC_WINDOW:
+	case SDK_OP_APP_LOAD_BEGIN:
+	case SDK_OP_APP_LOAD_CHUNK:
+	case SDK_OP_APP_LOAD_END:
+	case SDK_OP_APP_START:
+	case SDK_OP_APP_STOP:
+	case SDK_OP_APP_STATUS:
+	case SDK_OP_APP_DISPLAY_BIND:
+		return handle_app_op(req, comp, payload_len, opcode);
 	default:
 		write_completion(comp, req, SDK_STATUS_UNSUPPORTED, 0);
 		return SDK_STATUS_UNSUPPORTED;
@@ -9107,6 +9214,23 @@ void sdk_mailbox_irq_disable(void)
 	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
 }
 
+static void harvest_app_ops(void)
+{
+	uint32_t request_id;
+	uint32_t cookie;
+	uint16_t opcode;
+	uint16_t status;
+	uint16_t len = 0U;
+	uint8_t payload[48];
+
+	if (!zzapp_mailbox_harvest(&request_id, &cookie, &opcode, &status,
+				   payload, &len))
+		return;
+	if (sdk_mailbox_post_deferred(request_id, cookie, opcode, status,
+				      payload, len))
+		zzapp_mailbox_harvest_ack();
+}
+
 void sdk_mailbox_task(void)
 {
 	volatile struct SDKMailboxDescriptor *desc = descriptor();
@@ -9118,11 +9242,13 @@ void sdk_mailbox_task(void)
 	uint32_t comp_tail;
 	uint32_t next_comp_tail;
 	int completed_any = 0;
+	zzapp_services_core0_poll();
 
 	if (mailbox_base == 0U) {
 		sdk_mailbox_pending = 0;
 		return;
 	}
+	harvest_app_ops();
 	if (!sdk_mailbox_active && !sdk_mailbox_pending)
 		return;
 

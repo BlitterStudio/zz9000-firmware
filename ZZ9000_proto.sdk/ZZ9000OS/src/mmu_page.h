@@ -26,7 +26,9 @@
  * address, a section with any other mapping, or a second cached section.
  */
 int mmu_page_set_noncacheable(uintptr_t page_addr);
-
+/* Change whole 4 KiB pages of firmware code to privileged read-only,
+ * executable mappings. start/end must be page aligned. */
+int mmu_page_set_readonly_executable(uintptr_t start, uintptr_t end);
 #ifdef MMU_PAGE_HOST_TEST
 /* Host tests supply the L1 table and read back the page table. */
 extern uint32_t mmu_page_test_l1[4096];

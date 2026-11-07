@@ -1,0 +1,320 @@
+/*
+ * Unit tests for Wire Protocol v9 texture manager and image decoding
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "mw_types.h"
+#include "mw_texture.h"
+
+static void test_texture_image_raw_rgba8(void)
+{
+    mw_texture_manager tm;
+    uint8_t payload[128];
+    mw_texture *t;
+
+    mw_texmgr_init(&tm);
+    memset(payload, 0, sizeof(payload));
+
+    /* 2x2 RGBA8 texture upload */
+    mw_put_be32(payload, 1);      /* name = 1 */
+    mw_put_be32(payload + 4, 0);  /* level = 0 */
+    mw_put_be32(payload + 8, 4);  /* internal = 4 (RGBA) */
+    mw_put_be32(payload + 12, 2); /* width = 2 */
+    mw_put_be32(payload + 16, 2); /* height = 2 */
+    mw_put_be32(payload + 20, 0x1908); /* GL_RGBA */
+    mw_put_be32(payload + 24, 0x1401); /* GL_UNSIGNED_BYTE */
+    mw_put_be32(payload + 28, 4); /* alignment = 4 */
+    mw_put_be32(payload + 32, 0); /* row_length = 0 */
+    mw_put_be32(payload + 36, 0); /* skip_rows = 0 */
+    mw_put_be32(payload + 40, 0); /* skip_pixels = 0 */
+    mw_put_be32(payload + 44, 0); /* swap = 0 */
+    mw_put_be32(payload + 48, 0); /* lsb = 0 */
+    mw_put_be32(payload + 52, 16);/* source = 16 bytes (2x2x4) */
+
+    /* 4 pixels: red, green, blue, white */
+    uint8_t *pix = payload + 56;
+    pix[0] = 255; pix[1] = 0; pix[2] = 0; pix[3] = 255;     /* (0,0) Red */
+    pix[4] = 0; pix[5] = 255; pix[6] = 0; pix[7] = 255;     /* (1,0) Green */
+    pix[8] = 0; pix[9] = 0; pix[10] = 255; pix[11] = 255;   /* (0,1) Blue */
+    pix[12] = 255; pix[13] = 255; pix[14] = 255; pix[15] = 255; /* (1,1) White */
+
+    assert(mw_texmgr_image_raw(&tm, payload, 56 + 16, NULL, 0));
+
+    t = mw_texmgr_find(&tm, 1);
+    assert(t != NULL);
+    assert(t->widths[0] == 2 && t->heights[0] == 2);
+    assert(t->pixels[0] != NULL);
+
+    /* Verify decoded 32-bit RGBA words */
+    assert(t->pixels[0][0] == 0xff0000ff); /* Red */
+    assert(t->pixels[0][1] == 0x00ff00ff); /* Green */
+    assert(t->pixels[0][2] == 0x0000ffff); /* Blue */
+    assert(t->pixels[0][3] == 0xffffffff); /* White */
+
+    mw_texmgr_destroy(&tm);
+    printf("PASS: test_texture_image_raw_rgba8\n");
+}
+
+static void test_texture_image_raw_rgb565(void)
+{
+    mw_texture_manager tm;
+    uint8_t payload[128];
+    mw_texture *t;
+
+    mw_texmgr_init(&tm);
+    memset(payload, 0, sizeof(payload));
+
+    /* 1x1 RGB565 texture upload: pure red (0xf800) */
+    mw_put_be32(payload, 2);      /* name = 2 */
+    mw_put_be32(payload + 4, 0);  /* level = 0 */
+    mw_put_be32(payload + 8, 3);  /* internal = 3 (RGB) */
+    mw_put_be32(payload + 12, 1); /* width = 1 */
+    mw_put_be32(payload + 16, 1); /* height = 1 */
+    mw_put_be32(payload + 20, 0x1907); /* GL_RGB */
+    mw_put_be32(payload + 24, 0x8363); /* GL_UNSIGNED_SHORT_5_6_5 */
+    mw_put_be32(payload + 28, 2); /* alignment = 2 */
+    mw_put_be32(payload + 52, 2); /* source = 2 bytes */
+
+    /* 0xf800 is full red (5 bits red = 31, green = 0, blue = 0) */
+    payload[56] = 0xf8;
+    payload[57] = 0x00;
+
+    assert(mw_texmgr_image_raw(&tm, payload, 56 + 4, NULL, 0));
+
+    t = mw_texmgr_find(&tm, 2);
+    assert(t != NULL);
+    assert(t->widths[0] == 1 && t->heights[0] == 1);
+    assert(t->pixels[0] != NULL);
+
+    /* Decoded RGB565 red should be (255, 0, 0, 255) */
+    assert(t->pixels[0][0] == 0xff0000ff);
+
+    mw_texmgr_destroy(&tm);
+    printf("PASS: test_texture_image_raw_rgb565\n");
+}
+
+static void test_texture_generate_mipmap(void)
+{
+    mw_texture_manager tm;
+    uint8_t payload[128];
+    uint8_t *pix;
+    mw_texture *t;
+    unsigned x, y;
+
+    mw_texmgr_init(&tm);
+    memset(payload, 0, sizeof(payload));
+
+    /* Regenerate a non-uniform 4x4 base level so every derived level's
+     * content, not just its dimensions, is checked. */
+    mw_texmgr_param(&tm, 3, 0x8191 /* GL_GENERATE_MIPMAP */, 1, 0.0f);
+    mw_put_be32(payload, 3);
+    mw_put_be32(payload + 4, 0);
+    mw_put_be32(payload + 8, 4);
+    mw_put_be32(payload + 12, 4);
+    mw_put_be32(payload + 16, 4);
+    mw_put_be32(payload + 20, 0x1908);
+    mw_put_be32(payload + 24, 0x1401);
+    mw_put_be32(payload + 28, 4);
+    mw_put_be32(payload + 52, 64);
+    pix = payload + 56;
+    for (y = 0; y < 4; ++y) {
+        for (x = 0; x < 4; ++x) {
+            uint32_t rgba = y < 2 ? (x < 2 ? 0xff0000ffU : 0x00ff00ffU)
+                                  : (x < 2 ? 0x0000ffffU : 0xffffffffU);
+            mw_put_be32(pix + (y * 4 + x) * 4, rgba);
+        }
+    }
+    assert(mw_texmgr_image_raw(&tm, payload, 56 + 64, NULL, 0));
+
+    t = mw_texmgr_find(&tm, 3);
+    assert(t != NULL);
+    assert(t->widths[1] == 2 && t->heights[1] == 2);
+    assert(t->pixels[1][0] == 0xff0000ffU);
+    assert(t->pixels[1][1] == 0x00ff00ffU);
+    assert(t->pixels[1][2] == 0x0000ffffU);
+    assert(t->pixels[1][3] == 0xffffffffU);
+    assert(t->widths[2] == 1 && t->heights[2] == 1);
+    assert(t->pixels[2][0] == 0x808080ffU);
+
+    /* Replacing level zero must rebuild the chain and discard deeper,
+     * now-invalid generated levels. */
+    memset(payload + 56, 0xff, 16);
+    for (x = 0; x < 4; ++x)
+        mw_put_be32(payload + 56 + x * 4, 0xffff00ffU);
+    mw_put_be32(payload + 12, 2);
+    mw_put_be32(payload + 16, 2);
+    mw_put_be32(payload + 52, 16);
+    assert(mw_texmgr_image_raw(&tm, payload, 56 + 16, NULL, 0));
+    assert(t->widths[0] == 2 && t->heights[0] == 2);
+    assert(t->widths[1] == 1 && t->heights[1] == 1);
+    assert(t->pixels[1][0] == 0xffff00ffU);
+    assert(t->widths[2] == 0 && t->heights[2] == 0 && t->pixels[2] == NULL);
+
+    mw_texmgr_destroy(&tm);
+    printf("PASS: test_texture_generate_mipmap\n");
+}
+
+static void test_texture_sub_raw(void)
+{
+    mw_texture_manager tm;
+    uint8_t payload[128];
+    mw_texture *t;
+
+    mw_texmgr_init(&tm);
+    memset(payload, 0, sizeof(payload));
+
+    /* 1. Storage-only allocation (source = 0) of 4x4 texture */
+    mw_put_be32(payload, 4);
+    mw_put_be32(payload + 4, 0);
+    mw_put_be32(payload + 8, 4);
+    mw_put_be32(payload + 12, 4);
+    mw_put_be32(payload + 16, 4);
+    mw_put_be32(payload + 20, 0x1908);
+    mw_put_be32(payload + 24, 0x1401);
+    mw_put_be32(payload + 28, 4);
+    mw_put_be32(payload + 52, 0); /* source_bytes = 0 */
+
+    assert(mw_texmgr_image_raw(&tm, payload, 56, NULL, 0));
+    t = mw_texmgr_find(&tm, 4);
+    assert(t != NULL && t->widths[0] == 4 && t->heights[0] == 4);
+
+    /* 2. Banded upload: sub-image 2x2 at (1, 1) */
+    memset(payload, 0, sizeof(payload));
+    mw_put_be32(payload, 4);      /* name = 4 */
+    mw_put_be32(payload + 4, 0);  /* level = 0 */
+    mw_put_be32(payload + 8, 1);  /* xoffset = 1 */
+    mw_put_be32(payload + 12, 1); /* yoffset = 1 */
+    mw_put_be32(payload + 16, 2); /* width = 2 */
+    mw_put_be32(payload + 20, 2); /* height = 2 */
+    mw_put_be32(payload + 24, 0x1908);
+    mw_put_be32(payload + 28, 0x1401);
+    mw_put_be32(payload + 32, 4);
+    mw_put_be32(payload + 56, 16);/* source = 16 */
+
+    uint8_t *pix = payload + 60;
+    for (int k = 0; k < 16; ++k) pix[k] = 255; /* White (255, 255, 255, 255) */
+
+    assert(mw_texmgr_sub_raw(&tm, payload, 60 + 16, NULL, 0));
+
+    /* Check that pixel (0,0) is still 0 (from storage-only alloc) */
+    assert(t->pixels[0][0] == 0);
+    /* Check that pixel (1,1) is now White */
+    assert(t->pixels[0][1 * 4 + 1] == 0xffffffff);
+
+    mw_texmgr_destroy(&tm);
+    printf("PASS: test_texture_sub_raw\n");
+}
+static void test_texture_indexed_palette(void)
+{
+    mw_texture_manager tm;
+    uint8_t payload[128];
+    uint8_t palette[256][4];
+    mw_texture *t;
+
+    mw_texmgr_init(&tm);
+    memset(payload, 0, sizeof(payload));
+    memset(palette, 0, sizeof(palette));
+
+    /* Palette: index 0 = Red, index 1 = Green, index 2 = Blue */
+    palette[0][0] = 255; palette[0][1] = 0;   palette[0][2] = 0;   palette[0][3] = 255;
+    palette[1][0] = 0;   palette[1][1] = 255; palette[1][2] = 0;   palette[1][3] = 255;
+    palette[2][0] = 0;   palette[2][1] = 0;   palette[2][2] = 255; palette[2][3] = 255;
+
+    /* 2x2 indexed texture: indices 0, 1, 2, 0 */
+    mw_put_be32(payload, 5);      /* name = 5 */
+    mw_put_be32(payload + 4, 0);  /* level = 0 */
+    mw_put_be32(payload + 8, 4);  /* internal = RGBA */
+    mw_put_be32(payload + 12, 2); /* width = 2 */
+    mw_put_be32(payload + 16, 2); /* height = 2 */
+    mw_put_be32(payload + 20, 0x1900); /* GL_COLOR_INDEX */
+    mw_put_be32(payload + 24, 0x1401); /* GL_UNSIGNED_BYTE */
+    mw_put_be32(payload + 28, 1); /* alignment = 1 */
+    mw_put_be32(payload + 52, 4); /* source = 4 bytes */
+
+    uint8_t *idx = payload + 56;
+    idx[0] = 0; idx[1] = 1; idx[2] = 2; idx[3] = 0;
+
+    assert(mw_texmgr_image_raw(&tm, payload, 56 + 4, palette, 3));
+
+    t = mw_texmgr_find(&tm, 5);
+    assert(t != NULL && t->indexed);
+    assert(t->pixels[0][0] == 0xff0000ff); /* Red */
+    assert(t->pixels[0][1] == 0x00ff00ff); /* Green */
+    assert(t->pixels[0][2] == 0x0000ffff); /* Blue */
+    assert(t->pixels[0][3] == 0xff0000ff); /* Red */
+
+    mw_texmgr_destroy(&tm);
+    printf("PASS: test_texture_indexed_palette\n");
+}
+
+static void test_indexed_subupdate_after_mipmap_regeneration(void)
+{
+    mw_texture_manager tm;
+    uint8_t image[128] = {0};
+    uint8_t subimage[128] = {0};
+    uint8_t palette[256][4] = {{0}};
+    mw_texture *t;
+    uint32_t i;
+
+    palette[1][0] = 0xffU; palette[1][3] = 0xffU;
+    palette[2][1] = 0xffU; palette[2][3] = 0xffU;
+    mw_texmgr_init(&tm);
+
+    mw_put_be32(image, 6U);
+    mw_put_be32(image + 4, 0U);
+    mw_put_be32(image + 8, 4U);
+    mw_put_be32(image + 12, 4U);
+    mw_put_be32(image + 16, 4U);
+    mw_put_be32(image + 20, 0x1900U);
+    mw_put_be32(image + 24, 0x1401U);
+    mw_put_be32(image + 28, 1U);
+    mw_put_be32(image + 52, 16U);
+    for (i = 0U; i < 16U; ++i)
+        image[56U + i] = 1U;
+    assert(mw_texmgr_image_raw(&tm, image, 72U, palette, 3U));
+
+    mw_put_be32(image + 4, 1U);
+    mw_put_be32(image + 12, 2U);
+    mw_put_be32(image + 16, 2U);
+    mw_put_be32(image + 52, 4U);
+    memset(image + 56, 1, 4U);
+    assert(mw_texmgr_image_raw(&tm, image, 60U, palette, 3U));
+    assert(mw_texmgr_param(&tm, 6U, 0x8191U, 1U, 0.0f));
+    t = mw_texmgr_find(&tm, 6U);
+    assert(t != NULL && t->indices[1] == NULL);
+
+    mw_put_be32(subimage, 6U);
+    mw_put_be32(subimage + 4, 1U);
+    mw_put_be32(subimage + 16, 1U);
+    mw_put_be32(subimage + 20, 1U);
+    mw_put_be32(subimage + 24, 0x1900U);
+    mw_put_be32(subimage + 28, 0x1401U);
+    mw_put_be32(subimage + 32, 1U);
+    mw_put_be32(subimage + 56, 1U);
+    subimage[60] = 2U;
+    assert(mw_texmgr_sub_raw(&tm, subimage, 61U, palette, 3U));
+    assert(t->indices[1] != NULL);
+    assert(t->indices[1][0] == 2U);
+    assert(t->pixels[1][0] == 0x00ff00ffU);
+
+    mw_texmgr_destroy(&tm);
+    printf("PASS: test_indexed_subupdate_after_mipmap_regeneration\n");
+}
+
+
+int main(void)
+{
+    test_texture_image_raw_rgba8();
+    test_texture_image_raw_rgb565();
+    test_texture_generate_mipmap();
+    test_texture_sub_raw();
+    test_texture_indexed_palette();
+    test_indexed_subupdate_after_mipmap_regeneration();
+    printf("All texture tests PASSED!\n");
+    return 0;
+}

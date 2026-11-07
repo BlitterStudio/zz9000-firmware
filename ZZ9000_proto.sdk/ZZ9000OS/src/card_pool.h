@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include "sdk_smp_lock.h"
+#include "minigl_pool.h"
 
 #define CARD_POOL_PAGE_BYTES 0x00010000u
 #define CARD_POOL_MAX_RANGES 2u
@@ -41,6 +42,21 @@ enum card_pool_class {
     CARD_POOL_CLASS_SDK_SURFACE = 5,
     /* RFB console shadow, snapshot, scratch, and deflate workspace. */
     CARD_POOL_CLASS_CONSOLE = 6,
+    /* MiniGL wire-v9 render contexts: colour/depth/texture working sets.
+     * Released per context destroy, by owner on fault recovery, and on
+     * every Amiga reset. */
+    CARD_POOL_CLASS_MINIGL = 7,
+    /* Trusted PIE app arena. */
+    CARD_POOL_CLASS_APP = 8,
+    /* Module-ABI v3 MiniGL resources are distinct so reclaim cannot free a
+     * transport lease while closing a render context. */
+    CARD_POOL_CLASS_MINIGL_MODULE = 9,
+    CARD_POOL_CLASS_MINIGL_TRANSPORT = 10,
+    CARD_POOL_CLASS_MINIGL_CONTEXT = 11,
+    CARD_POOL_CLASS_MINIGL_APP_CONTEXT = 12,
+    CARD_POOL_CLASS_MINIGL_RIX = 13,
+    /* Firmware-owned back buffers for a trusted app's single-buffer bind. */
+    CARD_POOL_CLASS_APP_DISPLAY = 14,
     CARD_POOL_CLASS_COUNT
 };
 
@@ -48,11 +64,21 @@ enum card_pool_class {
 #define CARD_POOL_LIMIT_MEDIA       (128u << 20)
 #define CARD_POOL_LIMIT_MEDIA_INPUT (64u << 20)
 #define CARD_POOL_LIMIT_CONSOLE     (32u << 20)
+/* Shared MiniGL budget. Context resources grow on demand, so the ceiling
+ * protects the card pool without reserving it for idle contexts. */
+#define CARD_POOL_LIMIT_MINIGL      MINIGL_CARD_POOL_LIMIT_BYTES
 /* ARM-only client surfaces are card-resident and reset-reclaimable. */
 #define CARD_POOL_LIMIT_SDK_SURFACE (128u << 20)
 /* Matches the image decode budget all image sessions share
  * (SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES). */
 #define CARD_POOL_LIMIT_IMAGE       (72u << 20)
+#define CARD_POOL_LIMIT_APP         (96u << 20)
+#define CARD_POOL_LIMIT_APP_DISPLAY (32u << 20)
+#define CARD_POOL_LIMIT_MINIGL_MODULE    (4u << 20)
+#define CARD_POOL_LIMIT_MINIGL_TRANSPORT (4u << 20)
+#define CARD_POOL_LIMIT_MINIGL_CONTEXT   MINIGL_CARD_POOL_LIMIT_BYTES
+#define CARD_POOL_LIMIT_MINIGL_APP_CONTEXT MINIGL_CARD_POOL_LIMIT_BYTES
+#define CARD_POOL_LIMIT_MINIGL_RIX       MINIGL_CARD_POOL_LIMIT_BYTES
 
 #define CARD_POOL_OWNER(cls, instance) \
     (((uint32_t)(cls) << 24) | ((uint32_t)(instance) & 0x00FFFFFFu))
@@ -114,6 +140,9 @@ uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner);
 /* Whether `owner` owns the live block starting at `addr` and that block
  * covers `length`. */
 int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
+                          uint32_t owner);
+/* Whether `owner` owns a live block containing `[addr, addr + length)`. */
+int card_pool_range_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
                           uint32_t owner);
 /* Frees the block starting at `addr` when `owner` owns it and returns 1.
  * Otherwise nothing changes, the free is counted in ignored_frees, and it

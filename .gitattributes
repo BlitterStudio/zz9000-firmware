@@ -48,3 +48,6 @@ ZZ9000.CFG     text eol=lf
 # Vendored Vivado-generated PS init code: byte-exact LF, never EOL-converted
 ZZ9000_proto.sdk/ZZ9000FSBL/src/ps7_init_gpl.c -text
 ZZ9000_proto.sdk/ZZ9000FSBL/src/ps7_init_gpl.h -text
+
+# RasterIX is vendored as byte-identical upstream source.
+rtl/rasterix/** -text

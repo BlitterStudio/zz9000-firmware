@@ -1,0 +1,4 @@
+#ifndef SDK_MAILBOX_H
+#define SDK_MAILBOX_H
+#define SDK_MAILBOX_Z3_ADDRESS 0x08100000U
+#endif

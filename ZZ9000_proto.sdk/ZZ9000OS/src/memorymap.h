@@ -470,6 +470,70 @@
 #if (SDK_HOST_WINDOW_Z3_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE
 #error "Z3 host window lies outside the Zorro III main board aperture"
 #endif
+/*
+ * The app rings allocation is made on APP_ALLOC_WINDOW, never at boot. Its
+ * placement is fixed to pages which main.c maps Normal non-cacheable before
+ * core 1 starts. Board offsets are ARM - ADDR_ADJ:
+ * 0x07e6c000..0x07f00000, inside the 128 MiB Z3 main aperture.
+ */
+#define ZZAPP_WINDOW_Z3_ADDRESS       0x0805C000U
+#define ZZAPP_WINDOW_Z3_SIZE          0x00094000U
+#define ZZAPP_WINDOW_Z3_END \
+	(ZZAPP_WINDOW_Z3_ADDRESS + ZZAPP_WINDOW_Z3_SIZE)
+
+#if ZZAPP_WINDOW_Z3_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS || \
+    ZZAPP_WINDOW_Z3_END > HOST_VISIBLE_HEAP_END
+#error "app window must fit the host-visible heap"
+#endif
+#if ZZAPP_WINDOW_Z3_END != SDK_HOST_WINDOW_Z3_ADDRESS
+#error "app window must end before the fixed Z3 host window"
+#endif
+#if (ZZAPP_WINDOW_Z3_ADDRESS - ADDR_ADJ) >= Z3_MAIN_BOARD_WINDOW_SIZE || \
+    (ZZAPP_WINDOW_Z3_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE
+#error "app window must fit the Z3 main board aperture"
+#endif
+#if (ZZAPP_WINDOW_Z3_ADDRESS & 0xfffU) != 0U || \
+    (ZZAPP_WINDOW_Z3_SIZE & 0xfffU) != 0U
+#error "app window must use whole MMU pages"
+#endif
+#if ZZAPP_WINDOW_Z3_END > FIRMWARE_HIGH_DDR_ADDRESS
+#error "app window must remain below firmware and card-pool DDR"
+#endif
+
+// MiniGL wire-v9 transport window (2.9.0 layout). One dynamic allocation
+// from the host-visible heap -- there is deliberately NO fixed low-DDR
+// MiniGL carve-out. minigl_transport.c requests the window between the
+// bounds below and publishes its address through the versioned transport
+// descriptor inside the SDK mailbox reservation (SDK_MAILBOX_MINIGL_DESC_
+// OFFSET); the Amiga library reads the descriptor and never assumes an
+// address. The bounds keep the window inside the 1 MiB MMU section the
+// SDK mailbox already maps Normal non-cacheable (both CPUs poll the
+// control block, so a cacheable placement would need per-poll cache
+// maintenance); the allocator still owns every page in the gap.
+#define MW_TRANSPORT_WINDOW_ALIGNMENT  0x00001000U
+#define MW_TRANSPORT_PLACEMENT_LO \
+	(SDK_MAILBOX_Z3_ADDRESS + SDK_MAILBOX_Z3_RESERVE_SIZE)
+#define MW_TRANSPORT_PLACEMENT_HI SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS
+
+#if (MW_TRANSPORT_PLACEMENT_HI - MW_TRANSPORT_PLACEMENT_LO) < 0x00091000U
+#error "MiniGL transport gap inside the mailbox MMU section is too small"
+#endif
+#if (MW_TRANSPORT_PLACEMENT_LO & (MW_TRANSPORT_WINDOW_ALIGNMENT - 1U)) != 0U
+#error "MiniGL transport placement must start page aligned"
+#endif
+
+// Offset of the versioned MiniGL transport descriptor inside the Z3 SDK
+// mailbox reservation. The mailbox descriptor plus both 64-entry rings end
+// at 0x2080; the descriptor sits beyond them and survives mailbox re-inits
+// (which memset only the ring area).
+#define SDK_MAILBOX_MINIGL_DESC_OFFSET 0x00008000U
+
+#if SDK_MAILBOX_MINIGL_DESC_OFFSET <= 0x00002080U
+#error "MiniGL transport descriptor overlaps the SDK mailbox rings"
+#endif
+#if (SDK_MAILBOX_MINIGL_DESC_OFFSET + 256U) > SDK_MAILBOX_Z3_RESERVE_SIZE
+#error "MiniGL transport descriptor exceeds the SDK mailbox reservation"
+#endif
 
 /* Immutable Z3 control ranges are reserved after every allocator reset. */
 #define Z3_HOST_CONTROL_RANGES(X) \

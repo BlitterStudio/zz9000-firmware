@@ -1,0 +1,40 @@
+diff --git a/rtl/rasterix/RasterIX/CoalesceAddrGen.v b/rtl/rasterix/RasterIX/CoalesceAddrGen.v
+index 46dd183a..00000000 100644
+--- a/rtl/rasterix/RasterIX/CoalesceAddrGen.v
++++ b/rtl/rasterix/RasterIX/CoalesceAddrGen.v
+@@ -209,6 +209,9 @@ module CoalesceAddrGen #(
+             end
+ 
+             // Error Check
++            // synthesis translate_off
++            // Reject unsupported upstream requests in simulation without
++            // synthesizing system tasks into the production coalescer.
+             if (s_mem_axi_axvalid && (s_mem_axi_axlen != 0))
+             begin
+                 $error("Only single beat transactions are supported for coalescing!");
+@@ -219,6 +222,7 @@ module CoalesceAddrGen #(
+                 $error("Only transactions with size matching DATA_WIDTH are supported for coalescing!");
+                 $finish;
+             end
++            // synthesis translate_on
+         end
+     end
+ endmodule
+diff --git a/rtl/rasterix/RasterIX/CoalesceFiFo.v b/rtl/rasterix/RasterIX/CoalesceFiFo.v
+index 15bd2ef7..00000000 100644
+--- a/rtl/rasterix/RasterIX/CoalesceFiFo.v
++++ b/rtl/rasterix/RasterIX/CoalesceFiFo.v
+@@ -161,11 +161,13 @@ module CoalesceFiFo #(
+ 
+                 awcount <= s_mem_axi_awlen + 1;
+ 
++                // synthesis translate_off
+                 if (s_mem_axi_awburst != 1)
+                 begin
+                     $error("Only incrementing burst is supported");
+                     $finish;
+                 end
++                // synthesis translate_on
+ 
+                 fifo_read <= 1;
+             end

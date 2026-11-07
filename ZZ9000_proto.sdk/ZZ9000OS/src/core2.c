@@ -9,10 +9,16 @@
 #include "scheduler.h"
 #include "memorymap.h"
 #include "sdk_smp_lock.h"
+#include "l2_maint.h"
 #include "card_pool.h"
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
+#include "zzm_minigl_host.h"
 #include "zzm_loader.h"
+#include "zzm_runtime.h"
+#include "zzapp_runtime.h"
+#include "zzapp_proto.h"
+#include "zzapp_services.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
 #define A9_CLKSTOP1_MASK	0x00000020
@@ -209,6 +215,12 @@ static void record_fault(uint32_t code, const char *name)
 	printf("%s: arm_exception_handler()!\n", name);
 	print_fault_detail(code);
 
+	if (sh->minigl_in_flight) {
+		/* Never call module code on the faulting stack. */
+		zzm_minigl_on_core1_fault();
+		sh->minigl_in_flight = 0;
+	}
+
 	if (slot >= 0) {
 		/*
 		 * Core 1 faulted while running a dual-core scheduler task. Don't hang
@@ -251,6 +263,9 @@ static void record_fault(uint32_t code, const char *name)
  * unconditional reset.
  */
 #define CORE1_PARK_SPINS 1000U   /* x 10 us */
+/* CPU1 CoreSight debug block (Zynq TRM memory map), program counter sampling
+ * register (Cortex-A9 TRM DBGPCSR, c33).  Reads need no debug unlock. */
+#define CORE1_DBGPCSR 0xF8892084U
 
 static void core1_park_for_reset(void)
 {
@@ -265,8 +280,20 @@ static void core1_park_for_reset(void)
 	__asm__ __volatile__("sev" ::: "memory");
 	for (spins = 0U; spins < CORE1_PARK_SPINS && !sh->core1_parked; spins++)
 		usleep(10);
-	if (!sh->core1_parked)
-		printf("[core2] core 1 did not park before its restart\n");
+	if (!sh->core1_parked) {
+		uint32_t pc[4];
+		unsigned i;
+
+		for (i = 0U; i < 4U; i++) {
+			pc[i] = Xil_In32(CORE1_DBGPCSR);
+			usleep(50);
+		}
+		printf("[core2] core 1 did not park before its restart "
+		       "(pc samples %08lx %08lx %08lx %08lx)\n",
+		       (unsigned long)pc[0], (unsigned long)pc[1],
+		       (unsigned long)pc[2], (unsigned long)pc[3]);
+		l2_maint_report("core 1 not parked");
+	}
 }
 
 /*
@@ -302,11 +329,11 @@ void core1_cold_restart(void)
 	 * restart paths: the fault path (record_fault -> scheduler_core0_poll)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
-	/* The card pool lock has the same exposure. Reset it first so the
-	 * dsb/sev in the malloc reset below publishes both. */
+	/* The card pool, PL310 and app mailbox locks have the same exposure. */
 	card_pool_reset_lock(&card_pool);
+	l2_maint_reset_core1_lock();
+	zzapp_services_reset_core1_lock();
 	sdk_smp_lock_reset_malloc();
-
 	/*
 	 * Same orphan-lock exposure as the malloc lock: the cold reset
 	 * can land inside the image-stream decode-state budget
@@ -329,6 +356,16 @@ void core1_cold_restart(void)
 	sh->core1_park_request = 0U;
 	sh->core1_parked = 0U;
 	dsb();
+	/* Core 1 is halted; the module host owns any active graphics abort. */
+	zzm_minigl_abort_reset();
+	/* heap_forget_owner takes heap_lock. Core 1 may have died holding it. */
+	zzm_runtime_reset_heap_lock();
+	zzapp_services_reclaim_halted_audio();
+	/* The app's GL binding points into the module image; forget it before
+	 * zzm_loader_forget_core1_modules poisons that image. */
+	zzapp_minigl_forget();
+	/* Its module state died with core 1: reload it on the next acquire. */
+	zzm_loader_forget_core1_modules();
 
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
@@ -443,6 +480,31 @@ __attribute__((naked, used)) static void core1_init_exception_state(void)
 		".ltorg\n\t");
 }
 
+/* An app unwind leaves an abort/undefined handler, or the private-timer IRQ
+ * handler, without returning through the BSP vector. Re-establish those
+ * banked stacks before normal execution resumes, so abandoned exception
+ * frames cannot accumulate until the 8 KiB stacks overflow. The caller is
+ * done with whichever of these modes it entered from. */
+__attribute__((naked, used)) void core1_reset_exception_stacks(void)
+{
+	__asm__ volatile(
+		"mrs	r0, cpsr\n\t"
+		"orr	r1, r0, #0xc0\n\t"
+		"bic	r1, r1, #0x1f\n\t"
+		"orr	r2, r1, #0x17\n\t"
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_abort_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x1b\n\t"
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_undef_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x12\n\t"
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_irq_stack + "   CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"msr	cpsr_c, r0\n\t"
+		"bx	lr\n\t"
+		".ltorg\n\t");
+}
+
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
 // core1_loop is executed on core1 (vs core0), entered via core1_entry
@@ -500,6 +562,9 @@ void core1_loop() {
 	// reaches record_fault() (which fails the task and requests a cold restart)
 	// instead of vectoring through stale state or dying on a garbage SP.
 	core1_init_exception_state();
+	/* PPI 29 is configured locally on core 1. It remains disabled until an
+	 * app runs; core 0 never enables or handles this private timer. */
+	zzapp_private_timer_init_core1();
 	C1_TRACE("[c1] R2b exc-state-ok\r\n");
 
 #ifdef SCHED_STRESS_TEST
@@ -581,17 +646,52 @@ void arm_exception_handler_id_reset(void *callback) {
 }
 
 void arm_exception_handler_id_data_abort(void *callback) {
+	uint32_t far, fsr, lr = 0, sp = 0, cpsr = 0;
+	(void)callback;
+	__asm__ __volatile__("mrc p15, 0, %0, c6, c0, 0" : "=r"(far));
+	__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 0" : "=r"(fsr));
+	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
+	(void)read_interrupted_lr_sp(&lr, &sp);
+	if (!zzapp_fault_wants_restart(DataAbortAddr, DataAbortAddr + 8u)) {
+		sdk_smp_lock_reset_malloc_if_owned();
+		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		zzapp_take_app_fault(ZZAPP_FAULT_DATA, DataAbortAddr, sp, lr, far, fsr, cpsr);
+		return;
+	}
 	record_fault(CORE_FAULT_DATA_ABORT, "id_data_abort");
 }
 
 void arm_exception_handler_id_prefetch_abort(void *callback) {
+	uint32_t far, fsr, lr = 0, sp = 0, cpsr = 0;
+	(void)callback;
+	__asm__ __volatile__("mrc p15, 0, %0, c6, c0, 2" : "=r"(far));
+	__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 1" : "=r"(fsr));
+	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
+	(void)read_interrupted_lr_sp(&lr, &sp);
+	if (!zzapp_fault_wants_restart(PrefetchAbortAddr, PrefetchAbortAddr + 4u)) {
+		sdk_smp_lock_reset_malloc_if_owned();
+		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		zzapp_take_app_fault(ZZAPP_FAULT_PREFETCH, PrefetchAbortAddr, sp, lr, far, fsr, cpsr);
+		return;
+	}
 	record_fault(CORE_FAULT_PREFETCH_ABORT, "id_prefetch_abort");
 }
 
 void arm_exception_handler(void *callback) {
+	(void)callback;
 	record_fault(CORE_FAULT_GENERIC, "generic");
 }
 
 void arm_exception_handler_illinst(void *callback) {
+	uint32_t lr = 0, sp = 0, cpsr = 0;
+	(void)callback;
+	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
+	(void)read_interrupted_lr_sp(&lr, &sp);
+	if (!zzapp_fault_wants_restart(UndefinedExceptionAddr, UndefinedExceptionAddr + 4u)) {
+		sdk_smp_lock_reset_malloc_if_owned();
+		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		zzapp_take_app_fault(ZZAPP_FAULT_UNDEF, UndefinedExceptionAddr, sp, lr, 0, 0, cpsr);
+		return;
+	}
 	record_fault(CORE_FAULT_UNDEF, "illinst");
 }

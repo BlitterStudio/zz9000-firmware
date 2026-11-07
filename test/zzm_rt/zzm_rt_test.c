@@ -133,13 +133,14 @@ static uint64_t mock_time_us(void)
 
 static const zzm_core_service_t core_service = {
     ZZM_SERVICE_CORE_V1, sizeof(core_service), mock_log, mock_fault, mock_time_us,
-    mock_module_fault
+    mock_module_fault, 0
 };
 static const zzm_memory_service_t memory_service = {
-    ZZM_SERVICE_MEMORY_V1, sizeof(memory_service), mock_alloc, mock_free, mock_realloc
+    ZZM_SERVICE_MEMORY_V1, sizeof(memory_service), mock_alloc, mock_free, mock_realloc,
+    0, 0, 0
 };
 static const zzm_cache_service_t cache_service = {
-    ZZM_SERVICE_CACHE_V1, sizeof(cache_service), 0, 0
+    ZZM_SERVICE_CACHE_V1, sizeof(cache_service), 0, 0, 0, 0, 0
 };
 
 static const void *mock_get_service(uint32_t id, uint32_t min_version)
@@ -156,6 +157,9 @@ static const void *mock_get_service(uint32_t id, uint32_t min_version)
 
 static const zzm_services_t services = {
     ZZM_MODULE_ABI_VERSION, sizeof(services), mock_get_service, 0, 0
+};
+static const zzm_services_t services_v3 = {
+    ZZM_V3_ABI_MAJOR, sizeof(services_v3), mock_get_service, 0, 0
 };
 
 /* This models a newlib helper: the allocation must use the reentrant bridge. */
@@ -180,6 +184,13 @@ static void reset_runtime(uint32_t quota)
     last_log = 0;
     last_fault = 0;
     CHECK(zzm_rt_bind(&services, 0x55U, ZZM_MEMORY_CLASS_MEDIA, quota) == 1);
+}
+
+static void test_v3_binding(void)
+{
+    pool_used = 0U;
+    CHECK(zzm_rt_bind(&services_v3, 0x55U, ZZM_MEMORY_CLASS_MEDIA, 0U) == 1);
+    CHECK(malloc(1U) != 0);
 }
 
 static void test_allocator_entry_points(void)
@@ -336,6 +347,7 @@ static void test_faults_cpp_and_guards(void)
 
 int main(void)
 {
+    test_v3_binding();
     test_allocator_entry_points();
     test_calloc_and_realloc_failures();
     test_alignment_and_quota();

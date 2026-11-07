@@ -1,0 +1,9 @@
+*.o
+*.a
+test_mw_validate
+test_mw_state
+test_mw_draw
+test_mw_texture
+test_mw_host_api
+test_mw_e2e
+test_mw_rasterix_mapper

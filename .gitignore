@@ -38,6 +38,8 @@ release/
 !test/release/**
 test/rtg/build/
 
+.docker-tmp/
+timing_reports/
 # OS files
 .DS_Store
 

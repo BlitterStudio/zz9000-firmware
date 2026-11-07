@@ -85,7 +85,7 @@ fetch() {
             curl --fail --location --silent --show-error --connect-timeout 30 \
                 --retry 5 --retry-delay 10 --retry-all-errors "$url" -o "$dest"
         elif command -v wget >/dev/null 2>&1; then
-            wget -q "$url" -O "$dest"
+            wget -q --tries=4 "$url" -O "$dest"
         else
             echo "ERROR: install curl or wget to download $url." >&2
             exit 1

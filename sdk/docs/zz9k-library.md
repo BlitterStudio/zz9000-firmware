@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 33 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 35 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -68,6 +68,53 @@ printf("service: %s\n", zz9k_service_text(ZZ9K_SERVICE_IMAGE));
 SDK v2 is paired with the new SDK-service firmware. The pre-service firmware is
 not a supported runtime for SDK v2 tools or `zz9k.library`, because the mailbox
 service registry did not exist before this release pair.
+
+## ARM app client
+
+Revision 35 adds an Amiga-side client for the API 0.2 ARM app runtime. Include
+`proto/zz9k.h` and require `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT`. The API is:
+
+```c
+int ZZ9KAppOpen(ZZ9KAppHandle **handle, struct MsgPort *notify_port);
+int ZZ9KAppLoadFile(ZZ9KAppHandle *handle, const char *path);
+int ZZ9KAppLoadMemory(ZZ9KAppHandle *handle, const void *data, uint32_t length);
+int ZZ9KAppStart(ZZ9KAppHandle *handle, const char *const *argv, uint32_t argc);
+int ZZ9KAppStop(ZZ9KAppHandle *handle);
+int ZZ9KAppStatus(ZZ9KAppHandle *handle, ZZ9KAppStatusInfo *status);
+int ZZ9KAppSendMessage(ZZ9KAppHandle *handle, const ZZ9KAppMessage *message);
+int ZZ9KAppGetMessage(ZZ9KAppHandle *handle, ZZ9KAppMessage *message);
+uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);
+void ZZ9KAppClose(ZZ9KAppHandle *handle);
+```
+
+`ZZ9KAppStart` passes `argv` to the app unchanged. Put the program name in
+`argv[0]`, as ZZRun does, so the app sees a standard C argument vector.
+
+`Open` checks for Zorro III, app-runtime ABI major 0, an idle runtime, and an
+Amiga `mmu.library` mapping that can keep the shared window cache-inhibited for
+the handle lifetime. It returns `ZZ9K_STATUS_BUSY` while another client owns
+core 1. `LoadFile` streams the ELF through the runtime staging window;
+`LoadMemory` accepts at most 16 MiB. `Start` copies no more than 16 argv
+strings of 127 bytes each. `Status` returns the terminal fault/exit snapshot.
+
+`ZZ9KAppMessage` is exactly 32 opaque bytes. Send returns `ZZ9K_STATUS_BUSY`
+when the host-to-app ring is full; get returns it when the app-to-host ring is
+empty. The library's real Amiga VBlank interrupt server renews the runtime
+lease while the handle is open, independently of the caller's task. It signals
+`ZZ9KAppMessageSignal(handle)` for an app message, exit, or fault. When a
+`notify_port` was supplied, it posts one coalesced `ZZ9KAppEvent`: dequeue
+that event before draining messages with `ZZ9KAppGetMessage`, and drain the
+port before `Close`.
+
+Always call `ZZ9KAppClose`: it stops only the generation loaded by that handle
+and releases the owner. Closing the owning task's final `zz9k.library`
+reference performs the same cleanup; another opener cannot release that
+task's signal. AmigaOS does not provide a safe general callback for a client
+task that dies while retaining an open library handle, so a killed client
+without `Close` is reclaimed by the firmware lease after the library stops
+renewing it (or by Amiga reset).
+
+`zz9k-app-echo-test <path-to-echo.elf> [count]` is the hardware smoke client.
 
 Use `zz9k_known_service_count()` / `zz9k_known_service_id()` to enumerate the
 SDK-known built-in service IDs when checking the firmware service registry.
@@ -1766,6 +1813,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 31 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN` | `ZZ9KAudioStreamSetGain()`; gain 0 is silence, 128 preserves scene level, and flags are zero |
 | 32 | `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION` | `ZZ9KImageAnimationFrameNext()`, Present, Retire, and Restart |
 | 33 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX` | `ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX` (`-348`); older firmware returns `ZZ9K_STATUS_UNSUPPORTED`, with no implicit MP3-only fallback |
+| 35 | `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT` | `ZZ9KAppOpen`, load/start/stop/status, 32-byte message rings, VBlank lease, and close |
 
 ### Async submission and wait helpers
 
