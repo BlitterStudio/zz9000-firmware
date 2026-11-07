@@ -352,6 +352,61 @@ int main(void)
 	assert(vs.vmode_hsize != 0U && vs.vmode_vdma_rows != 0U &&
 	       vs.vmode_hdiv != 0U);
 	assert(dma_configs == 1 && dma_starts == 1);
+
+	/* Reset leaves the VDMA scanning its current capture backing until the
+	 * rearmed capture path reaches stable timing. Clear that old scanout,
+	 * but never clear a reserved backing while RTG owns scanout. */
+	UINTPTR capture_scanout = dma_buffer_address;
+	uint32_t capture_scanout_word;
+	assert(vs.framebuffer_pan_offset ==
+		vs.videocap_backing_address -
+		VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA - FRAMEBUFFER_ADDRESS);
+	assert(capture_scanout == (UINTPTR)((uint32_t)(uintptr_t)capture_framebuffer +
+		vs.framebuffer_pan_offset));
+	capture_scanout_word = vs.framebuffer_pan_offset /
+		sizeof(capture_framebuffer[0]);
+	capture_framebuffer[capture_scanout_word] = 0xa5a5a5a5U;
+	formatter_ops[MNTVF_OP_DPMS] = 0x5aU;
+	video_reset();
+	assert(capture_framebuffer[capture_scanout_word] == 0U);
+	assert(dma_buffer_address == capture_scanout);
+	assert(formatter_ops[MNTVF_OP_DPMS] == 0x5aU);
+	assert(video_videocap_backing_reserve());
+	capture_scanout_word = (vs.videocap_backing_address -
+		VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA - FRAMEBUFFER_ADDRESS) /
+		sizeof(capture_framebuffer[0]);
+	capture_framebuffer[capture_scanout_word] = 0xa5a5a5a5U;
+	vs.videocap_enabled_old = 0;
+	video_reset();
+	assert(capture_framebuffer[capture_scanout_word] == 0xa5a5a5a5U);
+
+	/* A PAL/NTSC transition keeps scanning the old PAL origin while
+	 * detection settles. Blank it on the first changed candidate, then
+	 * leave a stable capture frame untouched. */
+	vs.framebuffer = capture_framebuffer;
+	assert(video_videocap_backing_reserve());
+	assert(video_videocap_backing_arm());
+	videocap_zstate = (1U << 21) | (1U << 23);
+	geometry_native_vblank();
+	capture_scanout = dma_buffer_address;
+	assert(capture_scanout == (UINTPTR)((uint32_t)(uintptr_t)capture_framebuffer +
+		vs.framebuffer_pan_offset));
+	capture_scanout_word = vs.framebuffer_pan_offset /
+		sizeof(capture_framebuffer[0]);
+	capture_framebuffer[capture_scanout_word] = 0xa5a5a5a5U;
+	clear_measurements();
+	videocap_zstate |= 1U << 22;
+	isr_video(NULL);
+	assert(dma_starts == 0);
+	assert(dma_buffer_address == capture_scanout);
+	assert(capture_framebuffer[capture_scanout_word] == 0U);
+	isr_video(NULL);
+	capture_framebuffer[capture_scanout_word] = 0xa5a5a5a5U;
+	clear_measurements();
+	isr_video(NULL);
+	assert(dma_starts == 0);
+	assert(capture_framebuffer[capture_scanout_word] == 0xa5a5a5a5U);
+
 	clear_measurements();
 	videocap_zstate = 0;
 
