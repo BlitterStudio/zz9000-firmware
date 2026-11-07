@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 #include "mw_types.h"
 #include "mw_parse.h"
 
@@ -356,6 +357,23 @@ static void test_raw_array_components_validation(void)
     printf("PASS: test_raw_array_components_validation\n");
 }
 
+static void test_raw_texture_empty_payload(void)
+{
+    uint8_t *packet = calloc(1U, 24U);
+
+    assert(packet != NULL);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4U, MW_VERSION);
+    mw_put_be32(packet + 8U, 24U);
+    mw_put_be32(packet + 12U, 1U);
+    mw_put_be32(packet + 16U, MW_TEXTURE_IMAGE_RAW);
+    assert(mw_validate_packet(packet, 24U) == MW_STATUS_INVALID);
+    mw_put_be32(packet + 16U, MW_TEXTURE_SUB_RAW);
+    assert(mw_validate_packet(packet, 24U) == MW_STATUS_INVALID);
+    free(packet);
+    printf("PASS: test_raw_texture_empty_payload\n");
+}
+
 
 int main(void)
 {
@@ -366,6 +384,7 @@ int main(void)
     test_draw_packed_indexed_validation();
     test_raw_array_index_validation();
     test_raw_array_components_validation();
+    test_raw_texture_empty_payload();
     printf("All packet validation tests PASSED!\n");
     return 0;
 }

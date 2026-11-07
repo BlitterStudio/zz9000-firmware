@@ -515,10 +515,11 @@ static int mw_valid_command(uint32_t opcode, const uint8_t *p, size_t bytes)
         return mw_valid_state(p, bytes);
 
     case MW_TEXTURE_IMAGE_RAW:
-        return mw_be32(p + 4) <= 12 && mw_internal_format(mw_be32(p + 8)) && mw_raw(p, bytes, 0);
+        return bytes >= 56 && mw_be32(p + 4) <= 12 &&
+               mw_internal_format(mw_be32(p + 8)) && mw_raw(p, bytes, 0);
 
     case MW_TEXTURE_SUB_RAW:
-        return mw_be32(p + 4) <= 12 && mw_raw(p, bytes, 1);
+        return bytes >= 60 && mw_be32(p + 4) <= 12 && mw_raw(p, bytes, 1);
 
     case MW_COLOR_TABLE:
         return mw_color_table(p, bytes);
