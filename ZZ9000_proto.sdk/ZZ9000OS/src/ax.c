@@ -197,7 +197,6 @@ int adau_write32(u8 i2c_addr, u16 addr, u8* data) {
 int adau_read16(u8 i2c_addr, u16 addr, u8* buffer) {
 	XIicPs* iic = &Iic2;
 	int status1;
-	int status2;
 	u8 abuffer[2];
 	abuffer[0] = addr>>8;
 	abuffer[1] = addr&0xff;
@@ -215,7 +214,7 @@ int adau_read16(u8 i2c_addr, u16 addr, u8* buffer) {
 	}
 	status1 = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
 	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
-	status2 = XIicPs_MasterRecvPolled(iic, buffer, 2, i2c_addr);
+	XIicPs_MasterRecvPolled(iic, buffer, 2, i2c_addr);
 	timeout = 0;
 	while (XIicPs_BusIsBusy(iic)) {
 		usleep(1);
@@ -226,9 +225,11 @@ int adau_read16(u8 i2c_addr, u16 addr, u8* buffer) {
 		}
 	}
 
-	return status1 != 0 ? status1 : status2;
+	return status1;
 }
 
+/* adau_read16() reports only the address phase; the zeroed buffer keeps a
+ * failed data phase from matching the running value. */
 int audio_adau_core_running(void)
 {
 	u8 rbuf[2] = { 0U, 0U };
