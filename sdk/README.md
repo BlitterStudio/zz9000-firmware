@@ -46,11 +46,16 @@ cd sdk
 ```
 
 Both build scripts use the `amigadev/crosstools:m68k-amigaos-gcc10` Docker
-image (GCC 16.2.1b, AmigaDev 16.2-rc23-20; the tag name is historical),
-pinned by digest because the tag follows release candidates. Supply `-Image`
-to the PowerShell build script or set `IMAGE` when running the shell build
-script to try another image. The drivers repository builds with the same
-image.
+image (GCC 16), pinned by digest because the tag follows release candidates.
+Supply `-Image` to the PowerShell build script or set `IMAGE` when running the
+shell build script to try another image. The drivers repository builds with
+the same image.
+
+`scripts/m68k-toolchain-pin.sh current` prints the pinned image and
+`scripts/m68k-toolchain-pin.sh set <image>@sha256:<digest>` moves every pin.
+The daily `m68k toolchain update` workflow does that when the tag moves:
+it builds, packages and starts the SDK tools with the new image and offers
+the change on the `build/m68k-toolchain` branch.
 
 Run the build step separately when you need only the generated binaries:
 
