@@ -81,6 +81,45 @@ static void test_clear_and_readback(void)
     printf("PASS: test_clear_and_readback\n");
 }
 
+static void test_single_buffer_front_clear_readback(void)
+{
+    mw_ctx *c = mw_host_create(2U, 2U);
+    uint8_t packet[128] = { 0 };
+    uint8_t output[16];
+
+    assert(c != NULL);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4U, MW_VERSION);
+    mw_put_be32(packet + 12U, 3U);
+    mw_put_be32(packet + 16U, MW_TARGET);
+    mw_put_be32(packet + 20U, 24U);
+    mw_put_be32(packet + 24U, 2U);
+    mw_put_be32(packet + 28U, 2U);
+    mw_put_be32(packet + 32U, 1U);
+    mw_put_be32(packet + 36U, 24U);
+    mw_put_be32(packet + 40U, 2U);
+    mw_put_be32(packet + 44U, 2U);
+    mw_put_be32(packet + 48U, MW_STATE);
+    mw_put_be32(packet + 52U, 12U);
+    mw_put_be32(packet + 56U, MW_DRAW_BUFFER);
+    mw_put_be32(packet + 60U, 1U);
+    mw_put_be32(packet + 64U, 0x404U);
+    mw_put_be32(packet + 68U, MW_CLEAR);
+    mw_put_be32(packet + 72U, 24U);
+    mw_put_be32(packet + 76U, 3U);
+    mw_put_bef(packet + 80U, 1.0f);
+    mw_put_bef(packet + 92U, 1.0f);
+    mw_put_bef(packet + 96U, 1.0f);
+    mw_put_be32(packet + 8U, 100U);
+
+    assert(mw_host_submit(c, packet, 100U) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(c, output, sizeof(output)) == MW_STATUS_OK);
+    assert(output[0] == 0xffU && output[1] == 0U &&
+           output[2] == 0U && output[3] == 0xffU);
+    mw_host_destroy(c);
+    printf("PASS: test_single_buffer_front_clear_readback\n");
+}
+
 static void test_latest_readback_rows(void)
 {
     mw_ctx *c = mw_host_create(2U, 3U);
@@ -1123,6 +1162,7 @@ int main(void)
 {
     test_create_destroy();
     test_clear_and_readback();
+    test_single_buffer_front_clear_readback();
     test_latest_readback_rows();
     test_rejected_packet_changes_no_state();
     test_draw_triangle_golden();

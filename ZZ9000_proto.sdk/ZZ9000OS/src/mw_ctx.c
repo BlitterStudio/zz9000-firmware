@@ -1726,6 +1726,12 @@ static int mw_execute_command_body(void *user, const mw_command *cmd)
         c->state.target.depth_bits = depth_bits;
         c->state.target.present_width = pres_w;
         c->state.target.present_height = pres_h;
+        /* A one-buffer target has one storage slot: make all front, back,
+         * and latest references name it before later draw/read commands. */
+        if (buf_count == 1U) {
+            c->state.target.front = c->state.target.back;
+            c->state.target.latest = c->state.target.back;
+        }
         break;
 
 target_rebind_failed:
