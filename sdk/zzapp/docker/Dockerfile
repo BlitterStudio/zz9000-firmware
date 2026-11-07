@@ -1,4 +1,4 @@
-# ZZ9000 app SDK: Arm GNU Toolchain 13.2.rel1, PIC newlib, and sdk/zzapp.
+# ZZ9000 app SDK: Arm GNU Toolchain 15.3.rel2, PIC newlib, and sdk/zzapp.
 # Build from the sdk/zzapp directory:
 #   docker build -f docker/Dockerfile -t zz9000-app-sdk .
 #
@@ -6,9 +6,9 @@
 
 FROM debian:bookworm-slim AS toolchain
 
-ARG ARM_TOOLCHAIN_VERSION=13.2.rel1
-ARG ARM_TOOLCHAIN_SHA256=6cd1bbc1d9ae57312bcd169ae283153a9572bd6a8e4eeae2fedfbc33b115fdbb
-ARG ARM_TOOLCHAIN_URL=https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/arm-gnu-toolchain-13.2.rel1-x86_64-arm-none-eabi.tar.xz
+ARG ARM_TOOLCHAIN_VERSION=15.3.rel2
+ARG ARM_TOOLCHAIN_SHA256=463df9665c246fa13bab2102115bbf83440661b6eb70b44f3dfd4712ca30037a
+ARG ARM_TOOLCHAIN_URL=https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/15.3.rel2/arm-gnu-toolchain-15.3.rel2-x86_64-arm-none-eabi.tar.xz
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build the PIE-safe app libc/libm sysroot from newlib 4.3.0.20230120, the
-# release used by Arm GNU Toolchain 13.2.rel1. Stock archives are non-PIC.
+# Build the PIE-safe app libc/libm sysroot from newlib 4.6.0.20260123, the
+# release used by Arm GNU Toolchain 15.3.rel2. Stock archives are non-PIC.
 # Suggested Docker cache volumes:
 #   -v zzapp-pic-newlib:/opt/zzapp-pic-newlib
 #   -v zzapp-newlib-cache:/opt/zzapp-newlib-cache
@@ -9,8 +9,8 @@
 set -e
 set -u
 
-NEWLIB_VERSION=4.3.0.20230120
-NEWLIB_SHA256=83a62a99af59e38eb9b0c58ed092ee24d700fff43a22c03e433955113ef35150
+NEWLIB_VERSION=4.6.0.20260123
+NEWLIB_SHA256=6ff27e3bf022666f43f7802255be680eeff722ac181b1725d21e2e8318604ee3
 NEWLIB_URL=https://sourceware.org/pub/newlib/newlib-${NEWLIB_VERSION}.tar.gz
 TARGET=arm-none-eabi
 PREFIX=${ZZAPP_PIC_SYSROOT:?set ZZAPP_PIC_SYSROOT to the PIC app sysroot}

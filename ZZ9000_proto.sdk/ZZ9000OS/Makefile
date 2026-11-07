@@ -8,13 +8,14 @@
 # Requires: ARM GNU Toolchain with newlib (NOT picolibc)
 #
 # macOS:  brew install --cask gcc-arm-embedded
-# Linux:  Download the official toolchain from:
-#         https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
+# Linux:  Download the official toolchain (15.3.rel2, as CI uses) from:
+#         https://gitlab.arm.com/tooling/gnu-toolchains-for-arm/-/releases
 #         (The Debian gcc-arm-none-eabi package uses picolibc, which is
 #         incompatible with the Xilinx BSP that depends on newlib internals
 #         like _impure_ptr and stdout.)
 #
-# Tested with: arm-none-eabi-gcc 12.2, 14.2, 15.2 (Arm GNU Toolchain)
+# Tested with: arm-none-eabi-gcc 12.2, 14.2, 15.2 (Arm GNU Toolchain).
+# Release builds use Arm GNU Toolchain 15.3.rel2 (CI and the Docker wrappers).
 
 CC = arm-none-eabi-gcc
 OBJCOPY = arm-none-eabi-objcopy

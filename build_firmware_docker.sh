@@ -70,14 +70,18 @@ apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
   wget xz-utils make cmake perl ca-certificates python3 g++ libssl-dev flex bison git p7zip-full unzip
 
-ARM_TOOLCHAIN_VERSION=13.2.rel1
+ARM_TOOLCHAIN_VERSION=15.3.rel2
+ARM_TOOLCHAIN_SHA256=463df9665c246fa13bab2102115bbf83440661b6eb70b44f3dfd4712ca30037a
 TC_BASE="arm-gnu-toolchain-${ARM_TOOLCHAIN_VERSION}-x86_64-arm-none-eabi"
 TC_DIR=/opt/arm-gnu-toolchain
-if [ ! -x "$TC_DIR/bin/arm-none-eabi-gcc" ]; then
+# The manifest names the installed release, so a volume holding an older
+# toolchain is replaced instead of reused.
+if [ ! -f "$TC_DIR/${ARM_TOOLCHAIN_VERSION}-x86_64-arm-none-eabi-manifest.txt" ]; then
   rm -rf "$TC_DIR"/*
   wget -q \
-    "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_TOOLCHAIN_VERSION}/binrel/${TC_BASE}.tar.xz" \
+    "https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/${ARM_TOOLCHAIN_VERSION}/${TC_BASE}.tar.xz" \
     -O /tmp/toolchain.tar.xz
+  echo "${ARM_TOOLCHAIN_SHA256}  /tmp/toolchain.tar.xz" | sha256sum -c -
   tar xf /tmp/toolchain.tar.xz --strip-components=1 -C "$TC_DIR"
   rm /tmp/toolchain.tar.xz
 fi

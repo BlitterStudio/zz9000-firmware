@@ -131,7 +131,7 @@ Ctrl-D, Ctrl-E, and Ctrl-F on the display window are raw keys and also
 ## Building
 
 The SDK image `ghcr.io/blitterstudio/zz9000-app-sdk` has Arm GNU Toolchain
-13.2.rel1, a PIC newlib 4.3.0.20230120 sysroot (stock newlib is not PIC and
+15.3.rel2, a PIC newlib 4.6.0.20260123 sysroot (stock newlib is not PIC and
 cannot satisfy the loader) and the SDK at `/opt/zzapp-sdk`, with
 `ZZAPP_SDK` and `ZZAPP_PIC_SYSROOT` set. Build it yourself with
 `docker build -f sdk/zzapp/docker/Dockerfile -t zz9000-app-sdk sdk/zzapp`.
