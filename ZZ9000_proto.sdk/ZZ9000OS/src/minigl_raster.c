@@ -1582,7 +1582,11 @@ static int project(Vertex *vertex)
     gl_y = (vertex->y * inverse_w + 1.0f) * 0.5f * g_state.viewport_h + g_state.viewport_y;
     vertex->sy = (float)g_buffers.height - gl_y;
     vertex->sz = vertex->z * inverse_w * 0.5f + 0.5f;
-    return isfinite(vertex->sx) && isfinite(vertex->sy) && isfinite(vertex->sz);
+    return isfinite(vertex->sx) && isfinite(vertex->sy) && isfinite(vertex->sz) &&
+           vertex->sx >= -(float)(INT_MAX - RASTER_MAX_WIDTH) &&
+           vertex->sx <= (float)(INT_MAX - RASTER_MAX_WIDTH) &&
+           vertex->sy >= -(float)(INT_MAX - RASTER_MAX_HEIGHT) &&
+           vertex->sy <= (float)(INT_MAX - RASTER_MAX_HEIGHT);
 }
 
 static void texture_matrix(unsigned unit, float *u, float *v, float r, float *q)

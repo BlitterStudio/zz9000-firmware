@@ -1219,6 +1219,35 @@ static void test_draw_triangle_nan_color_and_coords(void)
     mw_host_destroy(c);
     printf("PASS: test_draw_triangle_nan_color_and_coords\n");
 }
+
+static void test_clipped_line_rejects_unrepresentable_screen_coords(void)
+{
+    static const uint32_t words[] = {
+        0x414d3344U, 0x00000009U, 0x00000104U, 0x00000001U, 0x0000000dU,
+        0x000000ecU, 0x00000003U, 0x00000003U, 0xbf800000U, 0xbf800000U,
+        0x00000000U, 0x2e800000U, 0x3f800000U, 0x00000000U, 0x00000000U,
+        0x00000000U, 0x00000000U, 0x3f800000U, 0x00000000U, 0x3f800000U,
+        0x3f800000U, 0x00000000U, 0x00000000U, 0x000000ffU, 0xff4f4000U,
+        0x00ce1300U, 0x00000000U, 0x00000000U, 0xab00000aU, 0x003f8000U,
+        0x00000000U, 0x00000000U, 0x00000000U, 0x00000000U, 0x00ffffffU,
+        0xffffffffU, 0x0a800000U, 0xbf800000U, 0x00000000U, 0x3f800000U,
+        0x003f8000U, 0x3f802500U, 0x3f800000U, 0x3f800000U, 0x000000bfU,
+        0x80009c00U, 0x000a003fU, 0x8000003fU, 0x80001010U, 0x414d3344U,
+        0x00000000U, 0x00000000U, 0x04000100U, 0x00000e00U, 0x00000002U,
+        0x00000000U, 0x3f800033U, 0x44000000U, 0x09100001U, 0x0c000000U,
+        0x3f800000U, 0x00010800U, 0x00000000U, 0x00000000U, 0x00000000U
+    };
+    mw_ctx *c = mw_host_create(18U, 18U);
+    uint8_t packet[sizeof(words)];
+    size_t index;
+
+    assert(c != NULL);
+    for (index = 0U; index < sizeof(words) / sizeof(words[0]); ++index)
+        mw_put_be32(packet + index * 4U, words[index]);
+    assert(mw_host_submit(c, packet, sizeof(packet)) == MW_STATUS_OK);
+    mw_host_destroy(c);
+    printf("PASS: test_clipped_line_rejects_unrepresentable_screen_coords\n");
+}
 int main(void)
 {
     test_create_destroy();
@@ -1240,6 +1269,7 @@ int main(void)
     test_read_pixels_activates_its_context();
     test_palette_snapshot();
     test_draw_triangle_nan_color_and_coords();
+    test_clipped_line_rejects_unrepresentable_screen_coords();
     printf("All host API tests PASSED!\n");
     return 0;
 }
