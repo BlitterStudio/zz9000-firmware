@@ -1279,7 +1279,8 @@ static int backend_submit(MiniGLRixBackend *backend, RixCmdWriter *writer,
     int result;
 
     if (backend->error || writer->failed || writer->length == 0U ||
-        buffer == NULL || backend->platform.command_address[index] == 0U)
+        buffer == NULL || ((uintptr_t)buffer & (sizeof(uint32_t) - 1U)) != 0U ||
+        backend->platform.command_address[index] == 0U)
         return 0;
     command_words = (uint32_t)(writer->length / sizeof(uint32_t));
     backend->submitted_command_words[index] = command_words;
@@ -1352,6 +1353,8 @@ static int backend_dma_self_test(MiniGLRixBackend *backend)
     volatile uint16_t *pixel = backend_fence_pixel(backend, 0U);
     uint8_t *buffer = backend->platform.command_buffer[0];
     uint32_t packets = backend->driver.dma_packets;
+    if (buffer == NULL || ((uintptr_t)buffer & (sizeof(uint32_t) - 1U)) != 0U)
+        return 0;
     uint32_t index;
 
     if (buffer == NULL || backend->platform.command_address[0] == 0U ||

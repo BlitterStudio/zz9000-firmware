@@ -30,14 +30,14 @@ static void test_log_wrapper(const char *fmt, ...)
 
 /* Mock platform for capture & hardware path routing */
 struct mock_platform {
-    uint32_t csr[16];
+    uint32_t csr[32];
     uint32_t fifo[6];
     uint32_t packet[RIX_DRV_FIFO_MAX_PACKET_WORDS + 2U];
     unsigned packet_words;
     uint32_t committed[8][RIX_DRV_FIFO_MAX_PACKET_WORDS + 2U];
     unsigned committed_words[8];
     uint32_t color_address;
-    uint16_t clear_color;
+    uint32_t clear_color;
     uint8_t cmd_buf[2][64 * 1024];
     uint8_t white_tex[MINIGL_RIX_WHITE_TEXTURE_BYTES];
     uint8_t tex_pool[MINIGL_RIX_TEXTURE_POOL_BYTES];
@@ -52,13 +52,16 @@ static uint32_t mock_csr_read(void *ctx, uint32_t offset)
 {
     struct mock_platform *p = (struct mock_platform *)ctx;
     ++p->csr_reads;
-    return p->csr[offset / 4U];
+    if (offset / 4U < sizeof(p->csr) / sizeof(p->csr[0]))
+        return p->csr[offset / 4U];
+    return 0U;
 }
 
 static void mock_csr_write(void *ctx, uint32_t offset, uint32_t value)
 {
     struct mock_platform *p = (struct mock_platform *)ctx;
-    p->csr[offset / 4U] = value;
+    if (offset / 4U < sizeof(p->csr) / sizeof(p->csr[0]))
+        p->csr[offset / 4U] = value;
 }
 
 static uint16_t mock_fence_color(uint32_t rgba)
