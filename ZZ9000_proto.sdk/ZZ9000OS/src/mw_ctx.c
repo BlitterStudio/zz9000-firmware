@@ -1900,11 +1900,21 @@ target_allocation_failed:
         }
 
         t = mw_texmgr_find(&c->texmgr, name);
+        /* With GL_GENERATE_MIPMAP a level 0 image replaces the whole chain:
+         * drop the rasterizer's deeper levels, then push the regenerated
+         * ones, as the subimage handler does. Other uploads leave the
+         * remaining levels alone, as GL specifies. */
+        if (t && level == 0 && t->generate_mipmap)
+            minigl_raster_drop_mip_levels(name, 0U);
         if (!t || !t->pixels[level] ||
             !minigl_raster_upload_rgba8(name, (uint16_t)level,
                                         (uint16_t)width, (uint16_t)height,
                                         t->pixels[level], t->internal_rgb[level])) {
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            goto command_complete;
+        }
+        if (level == 0 && t->generate_mipmap && !mw_upload_generated_mips(c, t)) {
+            mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
             goto command_complete;
         }
         mw_ctx_diag_upload(c, p, (uint32_t)cmd->bytes, t, name, level, width, height, 0);

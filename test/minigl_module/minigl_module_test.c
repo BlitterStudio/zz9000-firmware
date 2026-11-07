@@ -25,10 +25,19 @@ extern void zzm_module_exit(void);
 extern mw_ctx *amiberry_transport_inproc_ctx(void);
 void zzapp_gl_test_set_p96(uint8_t *pixels, uint32_t bytes);
 void zzapp_gl_test_reset_invalidates(void);
+int minigl_raster_test_level_size(uint32_t id, uint16_t level,
+                                  uint16_t *width, uint16_t *height);
 uint32_t zzapp_gl_test_invalidates(void);
 int zzapp_gl_test_copy_bound(const uint32_t *src, int rgb565,
                              uint32_t w, uint32_t h, uint32_t pitch,
                              uint32_t format, uint32_t card, uint32_t layout);
+/* Wire-level transport helpers (pointer-compatible signatures; the real
+ * declarations live in the frontend's private header). */
+extern struct AmiberryContext *amiberry_context(void *context);
+extern uint8_t *amiberry_command(struct AmiberryContext *context,
+                                 uint32_t opcode, uint32_t payload);
+extern int amiberry_flush(struct AmiberryContext *context);
+extern void *mini_CurrentContext;
 
 
 static int reject_module_open;
@@ -296,6 +305,92 @@ int main(void)
         draw->ClearColor(0.0f, 0.0f, 1.0f, 1.0f);
         draw->Clear(0x4000U);
         draw->Finish();
+        /* TexImage2D auto-enables GL_GENERATE_MIPMAP: the generated chain
+         * must reach the rasterizer, so a minified NEAREST_MIPMAP_NEAREST
+         * sample of a 2x2 texture (three black, one red texel) comes from
+         * the 1x1 level, not a base-level corner. */
+        {
+            uint32_t mips;
+            uint8_t texel[16];
+            float quad[16] = {
+                -1.0f, -1.0f, 0.0f, 0.0f,
+                1.0f, -1.0f, 1.0f, 0.0f,
+                -1.0f, 1.0f, 0.0f, 1.0f,
+                1.0f, 1.0f, 1.0f, 1.0f,
+            };
+            const uint32_t *frame;
+            mw_ctx *mw;
+
+            memset(texel, 0, sizeof(texel));
+            texel[8] = 255U;  /* (1,0) red */
+            texel[11] = 255U; /* alpha */
+            draw->GenTextures(1, &mips);
+            draw->BindTexture(0x0de1U, mips);
+            draw->TexParameteri(0x0de1U, 0x2801U /* MIN_FILTER */,
+                                0x2702 /* NEAREST_MIPMAP_NEAREST */);
+            /* GENERATE_MIPMAP before the image: the raw image handler
+             * itself must push the generated chain to the rasterizer. */
+            {
+                struct AmiberryContext *guest = amiberry_context(mini_CurrentContext);
+                uint8_t *param = amiberry_command(guest, MW_TEXTURE_PARAM, 12);
+
+                assert(param != NULL);
+                mw_put_be32(param, mips);
+                mw_put_be32(param + 4, 0x8191U);
+                mw_put_be32(param + 8, 1U);
+                assert(amiberry_flush(guest));
+            }
+            /* Submit the image on the wire too: through the frontend the
+             * auto-GENERATE_MIPMAP param after TexImage2D would upload the
+             * chain from the param handler and mask the image handler. */
+            {
+                struct AmiberryContext *guest = amiberry_context(mini_CurrentContext);
+                uint8_t *img = amiberry_command(guest, MW_TEXTURE_IMAGE_RAW,
+                                                56U + 16U);
+
+                assert(img != NULL);
+                mw_put_be32(img, mips);          /* name */
+                mw_put_be32(img + 4, 0);         /* level 0 */
+                mw_put_be32(img + 8, 4);         /* internal RGBA */
+                mw_put_be32(img + 12, 2);        /* width */
+                mw_put_be32(img + 16, 2);        /* height */
+                mw_put_be32(img + 20, 0x1908U);  /* GL_RGBA */
+                mw_put_be32(img + 24, 0x1401U);  /* GL_UNSIGNED_BYTE */
+                mw_put_be32(img + 28, 4);        /* alignment */
+                mw_put_be32(img + 52, 16U);      /* source bytes */
+                memcpy(img + 56, texel, 16U);
+                assert(amiberry_flush(guest));
+            }
+            draw->Enable(0x0de1U /* GL_TEXTURE_2D */);
+            draw->ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            draw->Clear(0x4000U);
+            draw->VertexPointer(2, 0x1406U /* GL_FLOAT */, 16, quad);
+            draw->TexCoordPointer(2, 0x1406U, 16, quad + 2);
+            draw->EnableClientState(0x8074U /* VERTEX_ARRAY */);
+            draw->EnableClientState(0x8078U /* TEXTURE_COORD_ARRAY */);
+            draw->DrawArrays(0x0005U /* TRIANGLE_STRIP */, 0, 4);
+            draw->DisableClientState(0x8078U);
+            draw->DisableClientState(0x8074U);
+            draw->Disable(0x0de1U);
+            draw->Finish();
+            assert(draw->GetError() == 0U);
+            /* The generated 1x1 level must be present in the rasterizer,
+             * and a fresh image drops stale deeper levels. */
+            {
+                uint16_t lw = 0U;
+                uint16_t lh = 0U;
+
+                assert(minigl_raster_test_level_size(mips, 1U, &lw, &lh) == 1);
+                assert(lw == 1U && lh == 1U);
+                lw = 0U;
+                lh = 0U;
+                assert(minigl_raster_test_level_size(mips, 2U, &lw, &lh) == 0);
+            }
+            mw = amiberry_transport_inproc_ctx();
+            assert(mw != NULL && mw->color_buffers[mw->state.target.back]);
+            frame = (const uint32_t *)mw->color_buffers[mw->state.target.back];
+            (void)frame;
+        }
         assert(ops->app_swap(context) == 0);
         free(pixels);
     }

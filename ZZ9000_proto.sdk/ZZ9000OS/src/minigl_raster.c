@@ -3467,6 +3467,49 @@ void minigl_raster_delete_texture(uint32_t id)
         }
 }
 
+void minigl_raster_drop_mip_levels(uint32_t id, uint16_t keep)
+{
+    Texture *texture_info = id ? texture(id) : NULL;
+    unsigned index;
+    int dropped = 0;
+
+    if (!texture_info)
+        return;
+    for (index = (unsigned)keep + 1U; index < ZZ9K_MINIGL_MAX_MIP_LEVELS; ++index) {
+        TextureLevel *image = &texture_info->levels[index];
+
+        if (!image->size)
+            continue;
+        texture_unlink(image);
+        g_texture_used -= image->size;
+        memset(image, 0, sizeof(*image));
+        dropped = 1;
+    }
+    if (!dropped)
+        return;
+    texture_complete(texture_info);
+    /* The RasterIX copy still holds the dropped levels. Forget it; the next
+     * bind uploads the remaining levels from this store. */
+    minigl_rix_backend_delete_texture(&g_rix, id);
+}
+
+#ifdef MINIGL_HOST_TEST
+int minigl_raster_test_level_size(uint32_t id, uint16_t level,
+                                  uint16_t *width, uint16_t *height)
+{
+    Texture *texture_info = id ? texture(id) : NULL;
+    const TextureLevel *image;
+
+    if (!texture_info || level >= ZZ9K_MINIGL_MAX_MIP_LEVELS)
+        return 0;
+    image = &texture_info->levels[level];
+    if (!image->size)
+        return 0;
+    *width = image->width;
+    *height = image->height;
+    return 1;
+}
+#endif
 
 static int draw_arrays_valid(uint16_t attr_code, uint16_t stride, uint32_t first,
                              uint32_t count, uint32_t base)

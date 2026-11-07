@@ -119,6 +119,7 @@ void minigl_raster_tex_subimage(uint32_t texture_id, uint16_t level, uint16_t xo
                                 uint16_t staging_slot, uint32_t size_bytes);
 void minigl_raster_delete_texture(uint32_t texture_id);
 /* Free the mip levels above `keep` while the texture stays bound. */
+void minigl_raster_drop_mip_levels(uint32_t texture_id, uint16_t keep);
 void minigl_raster_draw_arrays(uint16_t mode, uint16_t attr_code, uint16_t vertex_stride,
                                uint32_t first, uint32_t count, uint32_t vertex_base_offset);
 void minigl_raster_draw_elements(uint16_t mode, uint16_t attr_code, uint16_t vertex_stride,
