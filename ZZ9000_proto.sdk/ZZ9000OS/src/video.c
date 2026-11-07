@@ -61,6 +61,8 @@ void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
 static int video_mode_init_internal(int mode, int scalemode, int colormode,
 		int skip_vdma, int output_profile, int transactional);
+static void videocap_area_clear(void);
+
 static int videocap_geometry_valid(uint16_t width, uint16_t height)
 {
 	return (!width || video_videocap_width_valid(width)) &&
@@ -250,6 +252,11 @@ struct ZZ_VIDEO_STATE* video_init() {
 }
 
 void video_reset() {
+	/* The VDMA keeps the prior capture scanout through an Amiga reset.
+	 * Blank it before discarding the backing address and reallocating it. */
+	if (vs.videocap_enabled_old)
+		videocap_area_clear();
+
 	vs.videocap_enabled_old = 0;
 	vs.videocap_backing_address = 0;
 	vs.videocap_backing_programmed = 0;
@@ -620,7 +627,7 @@ static void init_videocap_video_mode(int ntsc, int full_width,
 		ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 }
 
-void videocap_area_clear() {
+static void videocap_area_clear(void) {
 	if (vs.videocap_backing_address != 0U) {
 		uint32_t offset = vs.videocap_backing_address -
 			VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA -
@@ -845,8 +852,9 @@ void isr_video(void *dummy) {
 		}
 		if (vblank) {
 				int videocap_reset = 0;
+				int videocap_entered = !vs.videocap_enabled_old;
 
-				if (!vs.videocap_enabled_old) {
+				if (videocap_entered) {
 					videocap_area_clear();
 					videocap_detection_reset();
 					vs.videocap_enabled_old = videocap_enabled;
@@ -862,6 +870,13 @@ void isr_video(void *dummy) {
 								videocap_shres, vs.videocap_video_mode,
 								videocap_output_profile,
 								videocap_source_class);
+				/* A changed standard still scans the old capture origin
+				 * until the detector accepts the new timing. Clear it
+				 * once when the first new candidate arrives. */
+				if (!videocap_detection_stable && !videocap_entered &&
+						vs.videocap_detection.stable_count == 1 &&
+						videocap_ntsc != vs.videocap_ntsc_old)
+					videocap_area_clear();
 
 				if (videocap_detection_stable &&
 						(videocap_ntsc != vs.videocap_ntsc_old ||
