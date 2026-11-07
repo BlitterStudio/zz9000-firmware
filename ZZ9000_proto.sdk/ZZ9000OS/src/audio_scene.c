@@ -1624,6 +1624,28 @@ int audio_scene_apply_after_dsp_init(void)
 	return commit.failed ? -1 : 0;
 }
 
+int audio_scene_quiescent(void)
+{
+	return module_initialized && !limiter_bench.active &&
+		!commit_in_progress && !pending_valid &&
+		save.phase == SAVE_IDLE && !baseline_staged &&
+		!calibration_staged;
+}
+
+int audio_scene_reapply_after_dsp_reload(void)
+{
+	if (!audio_scene_quiescent())
+		return -1;
+	/* Unlike an Amiga reset, the owners, their trims and any staged
+	 * edits are still live: keep them, and replay the applied scene
+	 * in full onto the reloaded DSP. */
+	last_applied_valid = 0;
+	meter_reset_all();
+	commit_begin(active_scene_index, 0);
+	commit_flush();
+	return commit.failed ? -1 : 0;
+}
+
 static int scene_def_valid(const struct audio_scene_def *def)
 {
 	int i;

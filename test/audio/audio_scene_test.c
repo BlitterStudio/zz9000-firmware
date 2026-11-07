@@ -968,6 +968,71 @@ static void test_trim_lifecycle(void)
 }
 
 /*
+ * #195: the ADAU1701 is reset at runtime (no Amiga reset) and the
+ * firmware reloads it. Owners are still live, so unlike the warm-reset
+ * apply the reapply keeps their trims and replays the whole scene onto
+ * the fresh DSP. It refuses while a commit is in flight.
+ */
+static void test_runtime_dsp_reload_keeps_trims(void)
+{
+	struct audio_scene_trim_result result;
+	int kind = 0, a = 0, b = 0;
+	int i, ok, base;
+
+	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"reload: weight-1 calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(128, 128) == 0,
+		"reload: baseline accepted", NULL);
+	pump_scene();
+	audio_scene_select(0);
+	pump_scene();
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_SDK, -20, -20,
+			&result) == 0 && result.mixer_paula == 108,
+		"reload: owner trim applied", NULL);
+	pump_scene();
+
+	audio_scene_select(1);
+	clear_writes();
+	check(!audio_scene_quiescent() &&
+		audio_scene_reapply_after_dsp_reload() == -1 &&
+		write_count == 0,
+		"reload refused while a commit is in flight",
+		fmt("writes=%d", write_count));
+	pump_scene();
+	audio_scene_select(0);
+	pump_scene();
+
+	/* audio_adau_init(1) leaves the power-on mixer. Simulated here. */
+	clear_writes();
+	audio_adau_set_lpf_params(23900);
+	audio_adau_set_mixer_vol(AUDIO_SCENE_DEFAULT_BASELINE_PAULA,
+		AUDIO_SCENE_DEFAULT_BASELINE_AX);
+	check(audio_scene_quiescent() &&
+		audio_scene_reapply_after_dsp_reload() == 0,
+		"reapply after runtime DSP reload succeeds", NULL);
+	base = 2;
+	ok = write_count == base + 15 &&
+		log_at(base, &kind, &a, &b) && kind == WRITE_VOLPAN && a == 0;
+	ok = ok && log_at(base + 1, &kind, &a, &b) && kind == WRITE_LPF;
+	for (i = 0; ok && i < AUDIO_SCENE_EQ_BANDS; i++)
+		ok = log_at(base + 2 + i, &kind, &a, &b) && kind == WRITE_EQ &&
+			a == i;
+	ok = ok && log_at(base + 12, &kind, &a, &b) && kind == WRITE_PREF;
+	ok = ok && log_at(base + 13, &kind, &a, &b) &&
+		kind == WRITE_MIXER && a == 108 && b == 108;
+	ok = ok && log_at(base + 14, &kind, &a, &b) && kind == WRITE_VOLPAN;
+	check(ok, "reload replays the full scene with the owner trim kept",
+		fmt("writes=%d", write_count));
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_SDK);
+	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 128,
+		"owner trim still releasable after reload",
+		fmt("v1=%d v2=%d", a, b));
+}
+
+/*
  * Review 3855833169: trim submit/release are transactional. A failed
  * mixer restage cannot leave software describing legs the DSP never
  * accepted -- the previous trim, participation and the authoritative
@@ -1829,6 +1894,7 @@ int main(void)
 	test_silent_chain_leg_clamp();
 	test_boot_apply_order();
 	test_trim_lifecycle();
+	test_runtime_dsp_reload_keeps_trims();
 	test_trim_write_failure_is_transactional();
 	test_commit_failure_keeps_staging();
 	test_apply_failure_restores_volume();

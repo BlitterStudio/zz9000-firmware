@@ -639,6 +639,45 @@ static void minigl_begin_amiga_reset(void)
 		minigl_reset_abort_and_free();
 }
 
+/* Pulse the ADAU1701 RESET and reload its program. */
+static void audio_dsp_reset_and_init(void)
+{
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
+	// Hold RESET low long enough for the Audio card RC filter.
+	usleep(1000);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
+
+	adau_enabled = audio_adau_init(1);
+	audio_set_codec_present(adau_enabled);
+}
+
+/* Once a second, check that the ADAU1701 still runs its program. A glitch
+ * on its RESET line (e.g. hot-plugging an audio jack) leaves it at
+ * power-on defaults with every output silent; reload it then instead of
+ * waiting for an Amiga reset. Runs only while no scene commit, save or
+ * bench session is in flight, so the reapply starts from a settled state. */
+static void audio_dsp_watch(void)
+{
+	static XTime last_check;
+	XTime now;
+
+	if (!adau_enabled || !audio_scene_quiescent())
+		return;
+	XTime_GetTime(&now);
+	if (now - last_check < COUNTS_PER_SECOND)
+		return;
+	last_check = now;
+	if (audio_adau_core_running())
+		return;
+
+	printf("[audio] DSP lost its program: reloading\n");
+	audio_dsp_reset_and_init();
+	if (adau_enabled && audio_scene_reapply_after_dsp_reload() != 0)
+		printf("[scene] reapply after DSP reload failed; "
+		       "DSP holds defaults\n");
+}
+
 void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* amiga_boot_reset_pass is consumed by the Fast-RAM step below. */
 	const int boot_pass = amiga_boot_reset_pass;
@@ -783,15 +822,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	}*/
 
 	if (!keep_dsp) {
-		// reset ADAU
-		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
-		// Hold RESET low long enough for the Audio card RC filter.
-		usleep(1000);
-		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
-		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
-
-		adau_enabled = audio_adau_init(1);
-		audio_set_codec_present(adau_enabled);
+		audio_dsp_reset_and_init();
 
 		/* The DSP now holds power-on defaults; the control plane
 		 * re-applies the active scene (R10) before the request loop
@@ -1210,8 +1241,10 @@ int main() {
 		 * never blocks the mailbox dispatch below. */
 		/* Its scene saves write ZZ9000.CFG, so it waits out a FWUP
 		 * job that owns the SD card. */
-		if (!fw_update_busy())
+		if (!fw_update_busy()) {
 			audio_scene_poll();
+			audio_dsp_watch();
+		}
 		/* MiniGL packet polling is core-1-only. */
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		u32 aperture_flags = sdk_aperture_runtime_flags();

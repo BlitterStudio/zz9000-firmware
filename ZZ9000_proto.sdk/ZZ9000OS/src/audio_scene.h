@@ -95,6 +95,16 @@ void audio_scene_init(void);
  * verified DSP write failed or the module is not initialized. */
 int audio_scene_apply_after_dsp_init(void);
 
+/* Nonzero when no commit, queued commit, save, staged baseline or
+ * calibration, or limiter bench session is in flight. */
+int audio_scene_quiescent(void);
+
+/* After a runtime DSP reload (the ADAU1701 was reset externally),
+ * replay the applied scene in full while keeping owner trims and staged
+ * edits. Only valid while audio_scene_quiescent(); returns -1 otherwise
+ * or when a verified DSP write fails. */
+int audio_scene_reapply_after_dsp_reload(void);
+
 /*
  * Compatibility status from the synchronous-commit era (KTD7
  * serialization): entry points re-entered mid-commit used to fail
