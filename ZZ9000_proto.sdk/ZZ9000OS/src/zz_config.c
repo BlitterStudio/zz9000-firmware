@@ -476,6 +476,15 @@ static int apply_key(const char *key, const char *value) {
 		cfg.audio_baseline_present = 1;
 		return 0;
 	}
+	if (token_eq(key, "audio_limiter")) {
+		long v = parse_uint(value);
+		if (v < ZZ_CFG_AUDIO_LIMITER_MIN ||
+				v > ZZ_CFG_AUDIO_LIMITER_MAX)
+			return -1;
+		cfg.audio_limiter = (uint8_t)v;
+		cfg.audio_limiter_present = 1;
+		return 0;
+	}
 	if (token_eq(key, "audio_ceiling_paula")) {
 		long v = parse_uint(value);
 		if (v < ZZ_CFG_AUDIO_CEILING_MIN ||
@@ -660,6 +669,7 @@ static int audio_key_name(const char *key, unsigned len) {
 
 	if (token_span_eq(key, len, "audio_active") ||
 			token_span_eq(key, len, "audio_baseline") ||
+			token_span_eq(key, len, "audio_limiter") ||
 			token_span_eq(key, len, "audio_ceiling_paula") ||
 			token_span_eq(key, len, "audio_ceiling_ax"))
 		return 1;

@@ -2016,6 +2016,7 @@ static int appendf(char *buf, unsigned size, int off, const char *fmt, ...)
  * returns the new length, or -1 when it does not fit. */
 static int audio_scene_emit_keys(char *buf, unsigned size, int off)
 {
+	const struct zz_config *c = zz_config_get();
 	int i, k;
 
 	off = appendf(buf, size, off, "audio_active = %u\n",
@@ -2024,6 +2025,11 @@ static int audio_scene_emit_keys(char *buf, unsigned size, int off)
 	off = appendf(buf, size, off, "audio_baseline = %u\n",
 		((unsigned)baseline_paula << 8) | (unsigned)baseline_ax);
 	if (off < 0) return -1;
+	if (c->audio_limiter_present) {
+		off = appendf(buf, size, off, "audio_limiter = %u\n",
+			(unsigned)c->audio_limiter);
+		if (off < 0) return -1;
+	}
 	off = appendf(buf, size, off, "audio_ceiling_paula = %u\n",
 		(unsigned)ceiling_paula);
 	if (off < 0) return -1;

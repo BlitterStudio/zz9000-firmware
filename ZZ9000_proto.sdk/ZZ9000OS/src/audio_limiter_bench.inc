@@ -118,10 +118,10 @@ uint16_t audio_scene_limiter_bench_command(uint32_t command,
             if (trims[i].paula || trims[i].ax) return SDK_STATUS_BUSY;
         /* Snapshot the live DSP threshold before any mutation: RESTORE
          * must return the operator's engagement, not a hardcoded bypass
-         * (the boot image now arms 0.47 FS). One bounded I2C read,
-         * serialized with poll-side I2C by the service loop. Zero is
-         * rejected: no writer legitimately sets it, and restoring it
-         * would clamp playback to silence. */
+         * (the boot image arms the configured limiter threshold). One
+         * bounded I2C read, serialized with poll-side I2C by the service
+         * loop. Zero is rejected: no writer legitimately sets it, and
+         * restoring it would clamp playback to silence. */
         if (audio_adau_limiter_threshold_get(
                 &limiter_bench.original_threshold) != 0 ||
                 limiter_bench.original_threshold == 0U)

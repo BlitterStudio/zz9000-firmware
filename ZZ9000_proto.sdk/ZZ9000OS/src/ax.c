@@ -6,6 +6,7 @@
 #include "adau.h"
 #include "adau_PARAM.h"
 #include "limiter_parameter.h"
+#include "zz_config.h"
 #include "xiicps.h"
 #include "xi2stx.h"
 #include "xi2srx.h"
@@ -1907,17 +1908,20 @@ int audio_adau_limiter_verify(uint16_t address, uint32_t expected)
 		audio_adau_readback_matches(bytes, actual, sizeof(bytes)) ? 0 : -1;
 }
 
-/* Power-on limiter engagement (user decision 2026-09-09): 0.47 FS
- * instead of the exported 7.0 bypass, so the operator-kept boost
- * baseline stays protected without a bench session. Runs while the
- * DSP core is still held after the parameter-table load, where a
- * direct write plus readback is the correct (non-safeload) path;
- * runtime changes keep using safeload. audio_adau_init(1) runs at
- * cold boot and every warm reset, so the engagement survives both. */
+/* Power-on limiter engagement defaults to 0.47 FS so the operator-kept
+ * boost baseline stays protected without a bench session. A valid
+ * audio_limiter config key overrides it. Runs while the DSP core is still
+ * held after the parameter-table load, where a direct write plus readback
+ * is the correct (non-safeload) path; runtime changes keep using safeload.
+ * audio_adau_init(1) runs at cold boot and every warm reset, so the
+ * engagement survives both. */
 int audio_adau_limiter_apply_boot_threshold(void)
 {
 	uint8_t bytes[ADAU_PARAMETER_WORD_BYTES];
-	uint32_t t = LIMITER_BOOT_THRESHOLD_Q23;
+	const struct zz_config *cfg = zz_config_get();
+	uint32_t t = cfg->audio_limiter_present ?
+		LIMITER_THRESHOLD_Q23_FROM_HUNDREDTHS(cfg->audio_limiter) :
+		LIMITER_BOOT_THRESHOLD_Q23;
 
 	bytes[0] = (uint8_t)(t >> 24) & 0x0fU;
 	bytes[1] = (uint8_t)(t >> 16);
@@ -1931,8 +1935,12 @@ int audio_adau_limiter_apply_boot_threshold(void)
 		printf("[adau] limiter boot threshold verify failed\n");
 		return -1;
 	}
-	printf("[adau] limiter boot threshold set: 0.47 FS (q23 %lu)\n",
-		(unsigned long)t);
+	if (cfg->audio_limiter_present)
+		printf("[adau] limiter boot threshold set: %u/100 FS (q23 %lu)\n",
+			(unsigned)cfg->audio_limiter, (unsigned long)t);
+	else
+		printf("[adau] limiter boot threshold set: 0.47 FS (q23 %lu)\n",
+			(unsigned long)t);
 	return 0;
 }
 

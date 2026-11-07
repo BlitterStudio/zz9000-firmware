@@ -179,13 +179,14 @@ together in this release.
 
 ## ZZ9000AX audio
 
-The audio control plane stores eight scenes, an active scene, a baseline, and
-per-card clean ceilings. Values are decimal.
+The audio control plane stores eight scenes, an active scene, a baseline,
+per-card clean ceilings, and a boot limiter threshold. Values are decimal.
 
 | Key or family | Accepted values | Effect |
 |---|---|---|
 | `audio_active` | `0`–`7` | Scene selected at boot and after each Amiga warm reset. |
 | `audio_baseline` | Unsigned 16-bit decimal | Paula/AX balance packed as `paula*256+ax`, with each leg `0`–`255`; 127 is 0 dB. |
+| `audio_limiter` | `1`–`100` | Limiter threshold in hundredths of full scale. Absent or invalid uses 47 (0.47 FS); 95 suits the new ZZ9000 Audio card. |
 | `audio_ceiling_paula` | `1`–`4095` | Measured clean Paula-only ceiling. |
 | `audio_ceiling_ax` | `1`–`4095` | Measured clean AX-only ceiling. |
 | `audio_scene<N>_lpf` | `N` = `0`–`7`; `1`–`23900` | Low-pass cutoff in Hz. `23900` is the DSP default. |
