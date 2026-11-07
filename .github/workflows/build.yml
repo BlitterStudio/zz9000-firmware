@@ -400,14 +400,8 @@ jobs:
           ARCHIVE_ROOT="zz9000-firmware-${BUILD_LABEL}-${STANDARD_VARIANT}"
           TEMP_DIR="$(mktemp -d)"
           trap 'rm -rf "$TEMP_DIR"' EXIT
-          python3 - "release_assets/${ARCHIVE_ROOT}.zip" "${ARCHIVE_ROOT}/BOOT.bin" "$TEMP_DIR/BOOT.bin" <<'PY'
-            import pathlib
-            import sys
-            import zipfile
-
-            with zipfile.ZipFile(sys.argv[1]) as archive:
-                pathlib.Path(sys.argv[3]).write_bytes(archive.read(sys.argv[2]))
-          PY
+          python3 -c 'import pathlib, sys, zipfile; pathlib.Path(sys.argv[3]).write_bytes(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' \
+            "release_assets/${ARCHIVE_ROOT}.zip" "${ARCHIVE_ROOT}/BOOT.bin" "$TEMP_DIR/BOOT.bin"
           python3 util/check_firmware_size.py \
             ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
             "$TEMP_DIR/BOOT.bin"
