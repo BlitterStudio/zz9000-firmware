@@ -246,7 +246,7 @@ static int mw_raw_array(const uint8_t *p, size_t bytes)
         allowed = (slot == 0) ? 0x1c : (slot == 1) ? 0x18 :
                   (slot == 4 || slot == 5) ? 0x1e : (slot == 6) ? 0x08 : 0;
 
-        if (!allowed || (seen & (1U << slot)) || !(allowed & (1U << components)) ||
+        if (!allowed || (seen & (1U << slot)) || components > 4 || !(allowed & (1U << components)) ||
             !mw_array_scalar(type, &scalar) || element != components * scalar ||
             (slot == 6 && !(type == 0x1400 || type == 0x1402 || type == 0x1404 ||
                              type == 0x1406 || type == 0x140a)))
