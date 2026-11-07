@@ -30,6 +30,24 @@ else
     BITSTREAM_BUILDER_CMD=(./build_bitstream.sh)
 fi
 
+if [ -n "${RASTERIX_BITSTREAM_BUILDER:-}" ]; then
+    # shellcheck disable=SC2206  # deliberate word split of $RASTERIX_BITSTREAM_BUILDER
+    RASTERIX_BUILDER_CMD=(${RASTERIX_BITSTREAM_BUILDER})
+elif [ -n "${BITSTREAM_BUILDER:-}" ]; then
+    RASTERIX_BUILDER_CMD=()
+else
+    RASTERIX_BUILDER_CMD=(./build_bitstream.sh --rasterix --output)
+fi
+
+if [ -n "${RASTERIX_C28_BITSTREAM_BUILDER:-}" ]; then
+    # shellcheck disable=SC2206  # deliberate word split of $RASTERIX_C28_BITSTREAM_BUILDER
+    RASTERIX_C28_BUILDER_CMD=(${RASTERIX_C28_BITSTREAM_BUILDER})
+elif [ -n "${BITSTREAM_BUILDER:-}" ]; then
+    RASTERIX_C28_BUILDER_CMD=()
+else
+    RASTERIX_C28_BUILDER_CMD=(./build_bitstream.sh --rasterix --capture-c28 --output)
+fi
+
 MNTZORRO=mntzorro.v
 CANONICAL_BIT=bootimage_work/zz9000_ps_wrapper.bit
 VARIANT_DIR=bootimage_work/variants
@@ -43,7 +61,7 @@ Builds all release variants when no variant is specified.
 
 Variants:
   zorro3          Zorro III / A3000 / A4000
-  zorro3-aga      A4000/A4000T AGA video-slot capture, Zorro III Fast RAM
+  zorro3-aga      A4000/A4000T AGA video-slot capture, Zorro III Fast RAM, RasterIX
   zorro2          Zorro II 4MB / A2000
   zorro2-2mb      Zorro II 2MB / A2000
   a500            A500 4MB / ZZ9500CX Denise adapter
@@ -72,10 +90,17 @@ variant_output() {
 }
 
 variant_capture_c28() {
-    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28
+    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set
     row=$(variant_matrix_row "$1") || return 1
-    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 <<< "$row"
+    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set <<< "$row"
     printf '%s\n' "$capture_c28"
+}
+
+variant_rasterix() {
+    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set
+    row=$(variant_matrix_row "$1") || return 1
+    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set <<< "$row"
+    [ "$elf_set" = rasterix ]
 }
 
 write_define() {
@@ -88,9 +113,9 @@ write_define() {
 }
 
 variant_block() {
-    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28
+    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set
     row=$(variant_matrix_row "$1") || return 1
-    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 <<< "$row"
+    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 elf_set <<< "$row"
 
     cat <<'EOF'
 // ZORRO2/3 switch
@@ -178,7 +203,21 @@ else
     C28_BUILDER_CMD=(./build_bitstream.sh --capture-c28 --output)
 fi
 for variant in "${selected[@]}"; do
-    if [ "$(variant_capture_c28 "$variant")" = 1 ] && [ "${#C28_BUILDER_CMD[@]}" -eq 0 ]; then
+    if variant_rasterix "$variant"; then
+        if [ "$(variant_capture_c28 "$variant")" = 1 ] &&
+           [ "${#RASTERIX_C28_BUILDER_CMD[@]}" -eq 0 ]; then
+            echo "ERROR: set RASTERIX_C28_BITSTREAM_BUILDER to a RasterIX C28 builder ending in its output-path option." >&2
+            exit 1
+        fi
+        if [ "$(variant_capture_c28 "$variant")" != 1 ] &&
+           [ "${#RASTERIX_BUILDER_CMD[@]}" -eq 0 ]; then
+            echo "ERROR: set RASTERIX_BITSTREAM_BUILDER to a RasterIX builder ending in its output-path option." >&2
+            exit 1
+        fi
+    fi
+    if [ "$(variant_capture_c28 "$variant")" = 1 ] &&
+       ! variant_rasterix "$variant" &&
+       [ "${#C28_BUILDER_CMD[@]}" -eq 0 ]; then
         echo "ERROR: set C28_BITSTREAM_BUILDER to a C28 builder ending in its output-path option." >&2
         exit 1
     fi
@@ -232,7 +271,14 @@ for variant in "${selected[@]}"; do
     variant_block "$variant" > "$block_tmp"
     replace_define_block "$block_tmp"
 
-    if [ "$(variant_capture_c28 "$variant")" = 1 ]; then
+    if variant_rasterix "$variant"; then
+        mkdir -p "$(dirname "$output")"
+        if [ "$(variant_capture_c28 "$variant")" = 1 ]; then
+            "${RASTERIX_C28_BUILDER_CMD[@]}" "$output"
+        else
+            "${RASTERIX_BUILDER_CMD[@]}" "$output"
+        fi
+    elif [ "$(variant_capture_c28 "$variant")" = 1 ]; then
         mkdir -p "$(dirname "$output")"
         "${C28_BUILDER_CMD[@]}" "$output"
     else

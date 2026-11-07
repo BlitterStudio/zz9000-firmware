@@ -1,10 +1,10 @@
 # RasterIX EF hardware contract
 
-`--rasterix` builds the external-framebuffer RasterIX EF image only.  The
+Zorro III release images include the external-framebuffer RasterIX EF renderer.
+Other release images do not instantiate RasterIX or alter its ports. The
 renderer is a 100 MHz FCLK0, one-TMU RGB565/Z16 core with a 64-bit AXI memory
-master dedicated to PS HP3.  HP0 remains scanout, HP1 remains MNTZorro plus
-capture, and audio TX/RX share an interconnect on HP2.  Default images do not
-instantiate any RasterIX or alter those ports.
+master dedicated to PS HP3. HP0 remains scanout, HP1 remains MNTZorro plus
+capture, and audio TX/RX share an interconnect on HP2.
 
 ## Discovery and CSR (`0x83c60000`)
 

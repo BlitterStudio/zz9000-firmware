@@ -16,7 +16,7 @@ The firmware build fetches and builds its pinned codec dependencies when they
 are absent.
 
 ```bash
-./build_firmware.sh
+./build_firmware.sh --rasterix
 ./build_bootimage.sh
 ```
 
@@ -24,9 +24,9 @@ The commands create these files:
 
 | File | Purpose |
 |---|---|
-| `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf` | Firmware for the default bitstream |
+| `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf` | Firmware for the selected build |
 | `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf` | Firmware for legacy bitstreams |
-| `bootimage_work/BOOT.bin` | Image to copy to the ZZ9000 SD card |
+| `bootimage_work/BOOT.bin` | Current unsuffixed `zorro3` release image to copy to the ZZ9000 SD card |
 | `bootimage_work/bootrom.bin` | Generated 8 KiB autoboot ROM data partition |
 
 `build_firmware.sh` runs the dependency builders for libjpeg-turbo, libpng
@@ -39,12 +39,12 @@ To remove the firmware build tree before rebuilding, run:
 
 ```bash
 ./build_firmware.sh clean
-./build_firmware.sh
+./build_firmware.sh --rasterix
 ./build_bootimage.sh
 ```
 
 `build_bootimage.sh` packages `bootimage_work/FSBL_exec.elf`,
-`bootimage_work/zz9000_ps_wrapper.bit`, and the default firmware ELF. Override
+`bootimage_work/zz9000_ps_wrapper.bit`, and the selected firmware ELF. Override
 an input or output only when preparing a separate image:
 
 ```bash
@@ -164,6 +164,9 @@ passes every gate, including the pixel, overall, and I2S timing floors.
 .\build_timing_sweep.ps1 -Variant zorro3-aga
 ```
 
+The matrix marks both Zorro III variants as RasterIX, so this command builds
+the RasterIX design without an extra switch.
+
 The driver writes the selected bitstream, final timing reports, per-attempt
 logs and reports, `SHA256SUMS`, and `sweep-summary.json` below
 `build/timing/<variant>/`; it also refreshes
@@ -202,15 +205,17 @@ The supported variant names are `zorro3`, `zorro3-aga`, `zorro2`,
 writes `bootimage_work/zz9000_ps_wrapper.bit`; the other outputs are under
 `bootimage_work/variants/`.
 The canonical matrix is `bootimage_work/variants/variant-matrix.sh`; both build
-drivers and release packaging consume it.
+drivers and release packaging consume it. Its two Zorro III rows build the
+RasterIX design at their normal release paths.
 
-From Git Bash on Windows, use the PowerShell builder. A selected C28 variant
-requires a C28 builder that ends with its output-path option:
+From Git Bash on Windows, use the PowerShell builder. RasterIX builders must
+end with their output-path option; use the C28 form for the AGA matrix row:
 
 ```bash
 BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1" \
-C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -CaptureC28 -OutputBitstream" \
-  ./build_variant_bitstreams.sh zorro3-aga
+RASTERIX_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -RasterIX -OutputBitstream" \
+RASTERIX_C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -RasterIX -CaptureC28 -OutputBitstream" \
+  ./build_variant_bitstreams.sh
 ```
 
 ## Package release assets
@@ -223,14 +228,18 @@ Install every file in `ZZ9K/` before `BOOT.bin`; do not overwrite
 `ZZ9000.CFG`.
 
 ```bash
-./build_release_assets.sh --tag v2.2.0 --require-all
+./build_firmware.sh
+./build_release_assets.sh --tag v2.2.0 --require-all --elf-set standard
+./build_firmware.sh --rasterix
+./build_release_assets.sh --tag v2.2.0 --require-all --elf-set rasterix
 ```
 
-Use `--output DIR` to choose another output directory. Use
-`--firmware-flavor SUFFIX` only when packaging an alternate firmware ELF; the
-standard Zorro III image remains `bootimage_work/BOOT.bin`. `--require-all`
-also verifies that every release-matrix bitstream has the exact SHA-256 of a
-passing entry in `bootimage_work/variants/timing-qualification.json`.
+The two packaging passes produce the seven unsuffixed release archives. The
+matrix selects the required firmware ELF set; `--firmware-flavor SUFFIX` only
+adds a diagnostic archive-name suffix. Only the unsuffixed `zorro3` package
+updates `bootimage_work/BOOT.bin`. `--require-all` verifies every
+release-matrix bitstream against its passing SHA-256 entry in
+`bootimage_work/variants/timing-qualification.json`.
 
 ## Rebuild the FSBL
 

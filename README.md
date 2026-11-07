@@ -32,8 +32,8 @@ commented [`ZZ9000.CFG`](ZZ9000.CFG) sample.
 
 | Variant | Target |
 |---|---|
-| `zorro3` | Zorro III A3000/A4000 systems using E7M capture |
-| `zorro3-aga` | A4000/A4000T AGA systems using video-slot capture |
+| `zorro3` | Zorro III A3000/A4000 systems using E7M capture and RasterIX |
+| `zorro3-aga` | A4000/A4000T AGA systems using video-slot capture and RasterIX |
 | `zorro2` | A2000 or other Zorro II system with a 4 MB window |
 | `zorro2-2mb` | A2000 or other Zorro II system with a 2 MB window |
 | `a500` | A500 with a ZZ9500CX Denise adapter and a 4 MB window |
@@ -45,8 +45,8 @@ commented [`ZZ9000.CFG`](ZZ9000.CFG) sample.
 2. To change boot settings, copy and edit `ZZ9000.CFG` in the same directory.
 3. Power-cycle the Amiga.
 
-The release packages use one `ZZ9000OS` ARM image with the bitstream selected
-for the board variant.
+The release matrix selects the matching `ZZ9000OS` ARM image and bitstream for
+each board variant. Both Zorro III variants use the RasterIX-enabled image.
 
 ## Configure the card
 
