@@ -9,8 +9,9 @@ Run every command in this guide from the repository root.
 
 ## Build a BOOT image
 
-Install the official Arm GNU Toolchain with newlib so that
-`arm-none-eabi-gcc` and `arm-none-eabi-objcopy` are on `PATH`. Install a host
+Install the official Arm GNU Toolchain with newlib (15.3.rel2, the version CI
+uses; [Arm's GitLab releases](https://gitlab.arm.com/tooling/gnu-toolchains-for-arm/-/releases))
+so that `arm-none-eabi-gcc` and `arm-none-eabi-objcopy` are on `PATH`. Install a host
 C compiler as `cc`, plus `cmake`, `make`, `wget`, and `7z`, `7za`, or `7zr`.
 The firmware build fetches and builds its pinned codec dependencies when they
 are absent.

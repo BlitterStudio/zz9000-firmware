@@ -228,7 +228,7 @@ jobs:
     name: Build & package firmware
     runs-on: ubuntu-latest
     env:
-      ARM_TOOLCHAIN_VERSION: 13.2.rel1
+      ARM_TOOLCHAIN_VERSION: 15.3.rel2
       ARM_TOOLCHAIN_DIR: ${{ github.workspace }}/.toolchain/arm-gnu-toolchain
       BOOTGEN_REF: master
 
@@ -267,14 +267,16 @@ jobs:
         run: |
           set -euo pipefail
           case "${{ runner.arch }}" in
-            X64)   TC_HOST=x86_64  ;;
-            ARM64) TC_HOST=aarch64 ;;
+            X64)   TC_HOST=x86_64;  TC_SHA256=463df9665c246fa13bab2102115bbf83440661b6eb70b44f3dfd4712ca30037a ;;
+            ARM64) TC_HOST=aarch64; TC_SHA256=a0dc18893171d39dec82fd8d57eeab3da836fd3df4b61978db3eccbf4a6bb948 ;;
             *)     echo "Unsupported runner arch: ${{ runner.arch }}"; exit 1 ;;
           esac
           TC_BASE="arm-gnu-toolchain-${ARM_TOOLCHAIN_VERSION}-${TC_HOST}-arm-none-eabi"
-          URL="https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_TOOLCHAIN_VERSION}/binrel/${TC_BASE}.tar.xz"
+          # From 15.3 on, Arm publishes the toolchain on its GitLab package registry.
+          URL="https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/${ARM_TOOLCHAIN_VERSION}/${TC_BASE}.tar.xz"
           mkdir -p "${ARM_TOOLCHAIN_DIR}"
           wget -q "$URL" -O toolchain.tar.xz
+          echo "${TC_SHA256}  toolchain.tar.xz" | sha256sum -c -
           tar xf toolchain.tar.xz --strip-components=1 -C "${ARM_TOOLCHAIN_DIR}"
           rm toolchain.tar.xz
 
@@ -285,7 +287,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/.toolchain/zzapp-pic-newlib
-          key: zzapp-pic-newlib-4.3.0.20230120-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sdk/zzapp/build_pic_newlib.sh') }}
+          key: zzapp-pic-newlib-4.6.0.20260123-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sdk/zzapp/build_pic_newlib.sh') }}
 
       - name: Build ZZApp PIC newlib
         if: steps.zzapp-pic-newlib-cache.outputs.cache-hit != 'true'

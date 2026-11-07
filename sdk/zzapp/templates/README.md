@@ -41,7 +41,7 @@ way and runs `zzapp-check` after the link. `cmake/example` builds `hello`.
 
 ## Docker
 
-`docker/Dockerfile` is Debian slim plus Arm GNU Toolchain 13.2.rel1 (pinned
+`docker/Dockerfile` is Debian slim plus Arm GNU Toolchain 15.3.rel2 (pinned
 URL and sha256), PIC newlib, Python, make, and CMake. The image sets
 `ZZAPP_SDK`, `ZZAPP_PIC_SYSROOT`, and `PATH`.
 
@@ -53,7 +53,7 @@ docker run --rm -v "$PWD":/src -w /src zz9000-app-sdk make check
 `ghcr.io/blitterstudio/zz9000-app-sdk` is pushed only on tag pushes and
 manual workflow dispatch.
 
-Without Docker, install Arm GNU Toolchain 13.2.rel1, run
+Without Docker, install Arm GNU Toolchain 15.3.rel2, run
 `build_pic_newlib.sh`, and export the two variables above. The Make and CMake
 entry points are the same.
 

@@ -1,6 +1,6 @@
 # Cross file for a ZZ9000 app. Pass it as CMAKE_TOOLCHAIN_FILE.
 # ZZAPP_SDK and ZZAPP_PIC_SYSROOT come from -D or the environment.
-# The compiler is arm-none-eabi-gcc (Arm GNU Toolchain 13.2.rel1).
+# The compiler is arm-none-eabi-gcc (Arm GNU Toolchain 15.3.rel2).
 #
 # SPDX-License-Identifier: MIT
 
