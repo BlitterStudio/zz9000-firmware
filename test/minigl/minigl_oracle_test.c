@@ -630,16 +630,24 @@ static void run_scenario(const char *name, int is_ref)
         s.alpha_func = GL_GREATER;
         s.alpha_ref = 32768U;
         if (is_ref) {
+            /* Clear with depth writes enabled (the depth write mask gates
+             * the depth clear); the scenario state itself never writes. */
+            ZZ9KMiniGLPacketSetState clear_state = s;
+            clear_state.enabled_flags |= ZZ9K_MGL_STATE_DEPTH_WRITE;
+            ref_minigl_raster_set_state(&clear_state);
+            ref_minigl_raster_clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, CLEAR_RGBA, DEPTH_FAR);
             ref_minigl_raster_set_state(&s);
             ref_minigl_raster_bind_texture(0, GL_TEXTURE_2D, TEX_HUD);
-            ref_minigl_raster_clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, CLEAR_RGBA, DEPTH_FAR);
             unsigned i;
             for (i = 0; i < 8U; ++i)
                 ref_minigl_raster_draw_arrays(GL_TRIANGLE_FAN, 0, VSTRIDE, g_hud_first + i * 4U, 4, 0);
         } else {
+            ZZ9KMiniGLPacketSetState clear_state = s;
+            clear_state.enabled_flags |= ZZ9K_MGL_STATE_DEPTH_WRITE;
+            minigl_raster_set_state(&clear_state);
+            minigl_raster_clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, CLEAR_RGBA, DEPTH_FAR);
             minigl_raster_set_state(&s);
             minigl_raster_bind_texture(0, GL_TEXTURE_2D, TEX_HUD);
-            minigl_raster_clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, CLEAR_RGBA, DEPTH_FAR);
             unsigned i;
             for (i = 0; i < 8U; ++i)
                 minigl_raster_draw_arrays(GL_TRIANGLE_FAN, 0, VSTRIDE, g_hud_first + i * 4U, 4, 0);
@@ -650,14 +658,20 @@ static void run_scenario(const char *name, int is_ref)
         s.blend_dst = GL_ONE; s.blend_src_alpha = GL_ONE; s.blend_dst_alpha = GL_ONE;
         s.shade_model = GL_SMOOTH;
         if (is_ref) {
-            ref_minigl_raster_set_state(&s);
+            ZZ9KMiniGLPacketSetState clear_state = s;
+            clear_state.enabled_flags |= ZZ9K_MGL_STATE_DEPTH_WRITE;
+            ref_minigl_raster_set_state(&clear_state);
             ref_minigl_raster_clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, CLEAR_RGBA, DEPTH_FAR);
+            ref_minigl_raster_set_state(&s);
             unsigned i;
             for (i = 0; i < 6U; ++i)
                 ref_minigl_raster_draw_arrays(GL_TRIANGLE_FAN, 0, VSTRIDE, g_add_first + i * 9U, 9, 0);
         } else {
-            minigl_raster_set_state(&s);
+            ZZ9KMiniGLPacketSetState clear_state = s;
+            clear_state.enabled_flags |= ZZ9K_MGL_STATE_DEPTH_WRITE;
+            minigl_raster_set_state(&clear_state);
             minigl_raster_clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, CLEAR_RGBA, DEPTH_FAR);
+            minigl_raster_set_state(&s);
             unsigned i;
             for (i = 0; i < 6U; ++i)
                 minigl_raster_draw_arrays(GL_TRIANGLE_FAN, 0, VSTRIDE, g_add_first + i * 9U, 9, 0);

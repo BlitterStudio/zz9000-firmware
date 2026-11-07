@@ -3038,21 +3038,33 @@ void minigl_raster_clear(uint32_t mask, uint32_t color, uint32_t depth)
     int32_t y;
     int32_t x;
     uint32_t scaled_depth;
+    uint32_t clear_mask;
 
     if (!ready())
+        return;
+    /*
+     * Apply the write masks before either clear path: glDepthMask(GL_FALSE)
+     * must keep the depth buffer intact (there is no stencil buffer, so a
+     * stencil-only clear is a no-op). The colour path already derives from
+     * the per-channel colour mask below.
+     */
+    clear_mask = mask;
+    if ((g_state.enabled_flags & ZZ9K_MGL_STATE_DEPTH_WRITE) == 0U)
+        clear_mask &= ~(GL_DEPTH_BUFFER_BIT | 2U);
+    if ((clear_mask & (GL_COLOR_BUFFER_BIT | 1U | GL_DEPTH_BUFFER_BIT | 2U)) == 0U)
         return;
     if (!g_context_backend_logged) {
         g_context_backend_logged = 1;
         minigl_rix_backend_log_context_backend(&g_rix);
     }
     if (minigl_rix_backend_available(&g_rix) &&
-        (rix_clear_replaces_targets(mask) || rix_prepare_target()) &&
+        (rix_clear_replaces_targets(clear_mask) || rix_prepare_target()) &&
         minigl_rix_backend_clear(&g_rix, g_buffers.width, g_buffers.height,
                                  (uintptr_t)g_buffers.color, (uintptr_t)g_buffers.depth,
-                                 mask, color, depth)) {
+                                 clear_mask, color, depth)) {
         if (!rix_target_is_rgb565())
             rix_adopt_cleared_targets();
-        if (((mask & GL_COLOR_BUFFER_BIT) != 0U) || ((mask & 1U) != 0U))
+        if (((clear_mask & GL_COLOR_BUFFER_BIT) != 0U) || ((clear_mask & 1U) != 0U))
             mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
         return;
     }
@@ -3077,8 +3089,8 @@ void minigl_raster_clear(uint32_t mask, uint32_t color, uint32_t depth)
     }
     {
         uint32_t cmask = g_state.color_mask & 0xfU;
-        int write_color = (((mask & GL_COLOR_BUFFER_BIT) != 0U) || ((mask & 1U) != 0U)) && cmask != 0U;
-        int write_depth = (((mask & GL_DEPTH_BUFFER_BIT) != 0U) || ((mask & 2U) != 0U));
+        int write_color = (((clear_mask & GL_COLOR_BUFFER_BIT) != 0U) || ((clear_mask & 1U) != 0U)) && cmask != 0U;
+        int write_depth = (((clear_mask & GL_DEPTH_BUFFER_BIT) != 0U) || ((clear_mask & 2U) != 0U));
         if (!write_color && !write_depth)
             return;
         if (write_color)
@@ -3454,6 +3466,7 @@ void minigl_raster_delete_texture(uint32_t id)
             g_bound_texture_info[index] = &g_default_texture;
         }
 }
+
 
 static int draw_arrays_valid(uint16_t attr_code, uint16_t stride, uint32_t first,
                              uint32_t count, uint32_t base)

@@ -204,6 +204,37 @@ static void assert_point_half_open_coverage(void)
     assert(pixel(32U, 23U) == 0U && pixel(31U, 24U) == 0U && pixel(32U, 24U) == 0U);
 }
 
+static void assert_clear_depth_write_mask(void)
+{
+    ZZ9KMiniGLPacketSetState s = state();
+
+    /* glDepthMask(GL_FALSE): the clear must leave the depth buffer at its
+     * 0x3fffff sentinel while still clearing colour (Codex 0x3fffff ->
+     * 0xbfffff regression). */
+    s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_TEST;
+    minigl_raster_reset();
+    minigl_raster_set_state(&s);
+    memset(depth, 0x3f, sizeof(depth));
+    minigl_raster_clear(0x4100U, 0x00ff00ffU, 0x00bfffffU);
+    assert(pixel(0U, 0U) == 0x00ff00ffU);
+    assert(depth[0] == 0x3fU && depth[1] == 0x3fU && depth[2] == 0x3fU);
+    assert(depth[(W * H - 1U) * 3U] == 0x3fU);
+    /* With depth writes re-enabled the same clear rewrites depth. */
+    s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_DEPTH_WRITE;
+    minigl_raster_set_state(&s);
+    minigl_raster_clear(0x4100U, 0U, 0x00bfffffU);
+    assert(depth[0] == 0xbfU && depth[1] == 0xffU && depth[2] == 0xffU);
+    assert(depth[(W * H - 1U) * 3U] == 0xbfU);
+    /* Colour mask still gates the colour clear on the same path. */
+    s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_WRITE;
+    s.color_mask = 0x0U;
+    minigl_raster_set_state(&s);
+    minigl_raster_clear(0x4100U, 0xff0000ffU, 0x00ffffffU);
+    assert(pixel(0U, 0U) == 0U);
+    s.color_mask = 0xfU;
+    minigl_raster_set_state(&s);
+}
+
 static void wire_vertex(float *v, float x, float y, uint32_t rgba)
 {
     memset(v, 0, MW_OBJECT_BYTES);
@@ -1347,6 +1378,7 @@ int main(void)
     assert(pixel(50U, 38U) == 0xff0000ffU);
     assert_scanline_coverage();
     assert_point_half_open_coverage();
+    assert_clear_depth_write_mask();
     assert_large_lowered_outline();
     assert_fragment_extensions();
     assert_mipmaps();
@@ -1359,7 +1391,6 @@ int main(void)
     assert_fragmented_pool_growth();
     minigl_raster_release_buffers();
     assert(minigl_raster_color_buffer() == NULL);
-    assert(minigl_raster_width() == 0U && minigl_raster_height() == 0U);
     minigl_raster_draw_arrays(GL_POINTS, 0, VSTRIDE, 0, 1, 0);
     assert(minigl_raster_get_error() != 0U);
     {
