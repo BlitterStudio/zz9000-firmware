@@ -226,3 +226,10 @@ after the 64-entry ring has wrapped. Each event sequence identifies its entry.
 Readers copy the page only when the generation is even and unchanged before and
 after the copy. Firmware writes an odd generation, flushes the page body, then
 writes and flushes the final even generation.
+
+Boot-time proxy initialization records event types `13` through `15` without
+changing the page layout: type `13` contains the initial root `PORTSC` in
+`detail` and has status `1` when firmware ran a VBUS cycle (`0` when it
+skipped it because `CCS` was already set). Types `14` and `15` contain
+`PORTSC` after VBUS off and on respectively; their status is the signed ULPI
+write result represented as a 16-bit value, so `0` means success.
