@@ -50,19 +50,6 @@ void *zzapp_sbrk(int increment)
         errno = ENOMEM;
         return (void *)-1;
     }
-    /*
-     * Direct table allocations carve down from the top of the span, so the
-     * end shrinks during the run. Re-read it every call; newlib must never
-     * hand out bytes the table allocator already gave away.
-     */
-    if (ZZ_API_COVERS(zzapp_api_ptr, heap_range) && zzapp_api_ptr->heap_range) {
-        void *base = 0;
-        uint32_t bytes = 0;
-
-        zzapp_api_ptr->heap_range(&base, &bytes);
-        if (base == (void *)heap_base)
-            heap_end = heap_base + bytes;
-    }
     previous = heap_brk;
     if (increment >= 0) {
         step = (uint32_t)increment;

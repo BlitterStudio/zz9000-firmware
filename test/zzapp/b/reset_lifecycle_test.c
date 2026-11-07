@@ -110,20 +110,24 @@ static void make_image(uint8_t image[IMAGE_BYTES])
 static void app_entry(const void *api, int argc, char **argv)
 {
     const zzapp_api *table = (const zzapp_api *)api;
-    void *carved;
     void *brk;
+    void *heap_base = NULL;
+    uint32_t heap_bytes = 0u;
 
     (void)argc;
     (void)argv;
     app_runs++;
-    /* The table's arena blocks carve down from the heap top; newlib's
-     * _sbrk grows up from heap_range's base. They must never overlap. */
+    /* The arena heap is newlib's alone: the table allocates host-visible
+     * memory only, so it can never hand out bytes malloc already owns. */
     zzapp_api_ptr = table;
-    carved = table->alloc(64u, 8u, 0u);
-    brk = zzapp_sbrk(64);
-    assert(carved != NULL && brk != (void *)-1);
-    assert((const char *)carved + 64 <= (const char *)brk ||
-           (const char *)brk + 64 <= (const char *)carved);
+    assert(table->alloc(64u, 8u, 0u) == NULL);
+    table->heap_range(&heap_base, &heap_bytes);
+    /* zzapp_sbrk keeps its span in app BSS, which a real launch starts
+     * fresh; in this harness it survives relaunches, so check it once. */
+    if (app_runs == 1) {
+        brk = zzapp_sbrk(64);
+        assert(brk == heap_base && heap_bytes >= 64u);
+    }
     if (damage_canary) {
         uint8_t *canary = zzapp_test_stack_canary();
 

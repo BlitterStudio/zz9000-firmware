@@ -1,9 +1,10 @@
 /*
  * Host stand-in for the card arena and the host-visible heap.
  *
- * Ordinary zz_alloc (no HOST_VISIBLE) is served by libzzapp's malloc, not by
- * this file. The table slot still implements a bump arena so a direct table
- * call has a span, and heap_range reports that span. HOST_VISIBLE allocations
+ * Ordinary zz_alloc (no HOST_VISIBLE) is served by malloc, not by this file.
+ * As on the card, the table slot allocates host-visible memory only;
+ * heap_range reports a reserved span for apps that size their own heaps.
+ * HOST_VISIBLE allocations
  * are ordinary process memory under a 16 MiB quota. host_address returns a
  * synthetic board offset, not a Zorro address, and rejects interior pointers.
  *
@@ -22,7 +23,6 @@ struct host_visible {
 };
 
 static uint8_t *arena;
-static uint32_t arena_used;
 static struct host_visible visible[HOST_VISIBLE_SLOTS];
 static uint32_t visible_used;
 static uint32_t visible_next = 0x033f0000u;
@@ -30,26 +30,6 @@ static uint32_t visible_next = 0x033f0000u;
 static int pow2_align(uint32_t align)
 {
     return align >= 8u && (align & (align - 1u)) == 0u;
-}
-
-static void *arena_alloc(uint32_t bytes, uint32_t align)
-{
-    uintptr_t base;
-    uintptr_t p;
-    uintptr_t end;
-
-    if (!arena)
-        return 0;
-    base = (uintptr_t)arena;
-    p = (uintptr_t)(arena + arena_used);
-    p = (p + align - 1u) & ~(uintptr_t)(align - 1u);
-    end = p + bytes;
-    /* Full-width extent first: narrowing (p + bytes) to uint32_t wraps a
-     * 64-bit end back below the bump and "succeeds" past the arena. */
-    if (end < p || end - base > (uintptr_t)HOST_ARENA_BYTES)
-        return 0;
-    arena_used = (uint32_t)(end - base);
-    return (void *)p;
 }
 
 static void *visible_alloc(uint32_t bytes, uint32_t align)
@@ -92,9 +72,9 @@ static void *api_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
         return 0;
     if ((flags & ~(ZZ_ALLOC_UNCACHED | ZZ_ALLOC_HOST_VISIBLE)) != 0u)
         return 0;
-    if (flags & ZZ_ALLOC_HOST_VISIBLE)
-        return visible_alloc(bytes, align);
-    return arena_alloc(bytes, align);
+    if ((flags & ZZ_ALLOC_HOST_VISIBLE) == 0u)
+        return 0;
+    return visible_alloc(bytes, align);
 }
 
 static void api_free(void *p)
@@ -145,8 +125,8 @@ static int api_mem_info(zzapp_mem_info *out)
         return ZZ_EINVAL;
     memset(out, 0, sizeof *out);
     out->arena_size = HOST_ARENA_BYTES;
-    out->arena_used = arena_used;
-    out->arena_free = HOST_ARENA_BYTES - arena_used;
+    out->arena_used = 0u;
+    out->arena_free = HOST_ARENA_BYTES;
     out->arena_largest_block = out->arena_free;
     out->host_visible_used = visible_used;
     out->host_visible_limit = HOST_VISIBLE_LIMIT;
@@ -156,7 +136,6 @@ static int api_mem_info(zzapp_mem_info *out)
 void host_memory_init(void)
 {
     arena = (uint8_t *)malloc(HOST_ARENA_BYTES);
-    arena_used = 0;
     visible_used = 0;
     visible_next = 0x033f0000u;
     memset(visible, 0, sizeof visible);
@@ -175,7 +154,6 @@ void host_memory_shutdown(void)
     }
     free(arena);
     arena = 0;
-    arena_used = 0;
     visible_used = 0;
 }
 

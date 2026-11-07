@@ -266,7 +266,9 @@ normal raw-key event. `code` is `ZZ_BREAK_CTRL_D`, `ZZ_BREAK_CTRL_E`, or
 `1`. Accepted. Ignored while the arena is a normal cacheable mapping. Pass
 it now if the app needs the uncached meaning once user mode exists.
 `zz_alloc` without `ZZ_ALLOC_HOST_VISIBLE` does not call the table; it uses
-newlib `malloc`.
+newlib `malloc`. The table `alloc` itself returns NULL without
+`ZZ_ALLOC_HOST_VISIBLE`: the arena heap belongs to newlib, and a second
+allocator there would hand out bytes `malloc` already owns.
 
 ## ZZ_ALLOC_HOST_VISIBLE
 
@@ -710,6 +712,8 @@ alignment. `align` must be a power of two and at least `sizeof(void *)`.
 Failure is NULL. With `ZZ_ALLOC_HOST_VISIBLE`, the table `alloc` is used.
 Firmware also requires `align >= 8` and a power of two, and rejects unknown
 flag bits. Host-visible failure is NULL (`ZZ_ENOMEM` conditions above).
+Calling the table `alloc` directly without `ZZ_ALLOC_HOST_VISIBLE` returns
+NULL.
 Does not block. Gate for the host-visible path: `ZZ_API_COVERS(api, alloc)`.
 Core 1. Minimum minor: 0 for arena malloc; 2 to honour
 `ZZ_ALLOC_HOST_VISIBLE`.

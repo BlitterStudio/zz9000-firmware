@@ -79,7 +79,6 @@ static uint32_t g_exit_code;
 static uint32_t g_heap_off;
 static uint32_t g_heap_end;
 static uint32_t g_heap_bump;
-static uint32_t g_heap_top;
 static int g_faulted;
 static int g_cold_restarts;
 /* Set in service_tick (possibly IRQ context); reported from run_app. */
@@ -812,7 +811,6 @@ static void run_app(uint32_t argc)
     if (!g_image_loaded || !g_mem) { start_failed(ZZ_EINVAL); return; }
     g_heap_off = (g_image_end + 7u) & ~7u;
     g_heap_end = ZZAPP_ARENA_BYTES - g_stack_bytes;
-    g_heap_top = g_heap_end;
     g_heap_bump = g_heap_off;
     if (g_heap_end <= g_heap_off) { start_failed(ZZ_ENOMEM); return; }
     rc = copy_argv(argc, &argv);
@@ -1112,26 +1110,14 @@ void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
     if ((flags & ~(ZZ_ALLOC_UNCACHED | ZZ_ALLOC_HOST_VISIBLE)) != 0u ||
         !bytes || align < 8u || (align & (align - 1u)) != 0u)
         return NULL;
-    if ((flags & ZZ_ALLOC_HOST_VISIBLE) == 0u) {
-        uintptr_t low;
-        uintptr_t p;
-
-        if (!g_mem || g_heap_end == 0u)
-            return NULL;
-        /*
-         * Carve down from the top of the heap. Newlib's _sbrk grows up
-         * from g_heap_off inside the span heap_range reports, which ends
-         * at g_heap_top; a bottom-up bump here handed out the same bytes
-         * _sbrk returns.
-         */
-        p = (uintptr_t)g_mem + g_heap_top - bytes;
-        p &= ~(uintptr_t)(align - 1u);
-        low = (uintptr_t)g_mem + g_heap_bump;
-        if (p < low || p + bytes > (uintptr_t)g_mem + g_heap_top)
-            return NULL;
-        g_heap_top = (uint32_t)(p - (uintptr_t)g_mem);
-        return (void *)p;
-    }
+    /*
+     * The arena heap belongs to the app's newlib (_sbrk over heap_range),
+     * which the runtime cannot see into. A second allocator here would hand
+     * out bytes malloc already owns, so the table allocates host-visible
+     * memory only; zz_alloc serves arena requests from malloc.
+     */
+    if ((flags & ZZ_ALLOC_HOST_VISIBLE) == 0u)
+        return NULL;
     if (bytes > ZZAPP_HOST_VISIBLE_LIMIT - g_host_visible_used)
         return NULL;
     for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
@@ -1195,7 +1181,7 @@ void zzapp_host_heap(void **base, uint32_t *bytes)
     if (base)
         *base = g_mem ? g_mem + g_heap_off : NULL;
     if (bytes)
-        *bytes = g_heap_top > g_heap_off ? g_heap_top - g_heap_off : 0;
+        *bytes = g_heap_end > g_heap_off ? g_heap_end - g_heap_off : 0;
 }
 
 int zzapp_host_address(const void *p, uint32_t *host_offset)
@@ -1222,9 +1208,8 @@ int zzapp_host_mem_info(zzapp_mem_info *out)
     if (!out)
         return ZZ_EINVAL;
     out->arena_size = g_mem ? ZZAPP_ARENA_BYTES : 0u;
-    out->arena_used = g_mem ?
-        (g_heap_end - g_heap_off) - (g_heap_top - g_heap_bump) : 0u;
-    out->arena_free = g_mem ? g_heap_top - g_heap_bump : 0u;
+    out->arena_used = g_heap_bump > g_heap_off ? g_heap_bump - g_heap_off : 0u;
+    out->arena_free = g_heap_end > g_heap_bump ? g_heap_end - g_heap_bump : 0u;
     out->arena_largest_block = out->arena_free;
     out->host_visible_used = g_host_visible_used;
     out->host_visible_limit = ZZAPP_HOST_VISIBLE_LIMIT;

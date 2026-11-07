@@ -1,5 +1,5 @@
 /*
- * Unit check for host-visible allocation alignment in the host runner.
+ * Unit checks for the host runner's table allocator.
  * Includes memory.c directly so the slot table is observable.
  *
  * SPDX-License-Identifier: MIT
@@ -27,35 +27,26 @@ static void test_visible_alignment(void)
     host_memory_shutdown();
 }
 
-static void test_arena_extent_checked_full_width(void)
+static void test_table_alloc_is_host_visible_only(void)
 {
     zzapp_api api;
     zzapp_mem_info mi;
-    void *a;
-    void *huge;
-    void *b;
 
     memset(&api, 0, sizeof api);
     host_memory_init();
     host_memory_bind(&api);
-    a = api.alloc(8u, 8u, 0u);
-    assert(a != NULL);
-    /* The 64-bit end narrowed to uint32_t used to wrap back below the
-     * bump: this "succeeded" and rewound arena_used to overlap. */
-    huge = api.alloc(0xFFFFFFFFu, 8u, 0u);
-    assert(huge == NULL);
-    b = api.alloc(8u, 8u, 0u);
-    assert(b != NULL);
-    assert(b != a);
-    assert((char *)b >= (char *)a + 8);
+    /* The arena is the app's malloc heap; as on the card the table must
+     * not hand out a second set of arena blocks. */
+    assert(api.alloc(8u, 8u, 0u) == NULL);
+    assert(api.alloc(8u, 8u, ZZ_ALLOC_UNCACHED) == NULL);
     assert(api.mem_info(&mi) == ZZ_OK);
-    assert(mi.arena_used == 16u);
+    assert(mi.arena_used == 0u);
     host_memory_shutdown();
 }
 
 int main(void)
 {
     test_visible_alignment();
-    test_arena_extent_checked_full_width();
+    test_table_alloc_is_host_visible_only();
     return 0;
 }
