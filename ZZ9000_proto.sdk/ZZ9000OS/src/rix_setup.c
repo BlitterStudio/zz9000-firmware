@@ -98,20 +98,20 @@ rix_setup_texture_planes(RixTriangle *triangle, const RixVertex *v0,
     float w0, w1, w2;
     unsigned int i;
 
-    if (min_s < -4.0f) {
-        float offset = (float)(int32_t)min_s;
+    if (isfinite(min_s) && min_s < -4.0f) {
+        float offset = floorf(min_s);
         s0 -= offset; s1 -= offset; s2 -= offset;
     }
-    if (min_t < -4.0f) {
-        float offset = (float)(int32_t)min_t;
+    if (isfinite(min_t) && min_t < -4.0f) {
+        float offset = floorf(min_t);
         t0 -= offset; t1 -= offset; t2 -= offset;
     }
-    if (max_s > 4.0f) {
-        float offset = (float)(int32_t)max_s;
+    if (isfinite(max_s) && max_s > 4.0f) {
+        float offset = floorf(max_s);
         s0 -= offset; s1 -= offset; s2 -= offset;
     }
-    if (max_t > 4.0f) {
-        float offset = (float)(int32_t)max_t;
+    if (isfinite(max_t) && max_t > 4.0f) {
+        float offset = floorf(max_t);
         t0 -= offset; t1 -= offset; t2 -= offset;
     }
     w0 = v0->w * w_scale;

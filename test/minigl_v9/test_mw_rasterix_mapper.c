@@ -1447,6 +1447,48 @@ static void test_context_texture_restore(void)
     minigl_raster_set_rix_platform(NULL);
     printf("PASS: test_context_texture_restore\n");
 }
+
+static void test_rasterix_large_texture_coords(void)
+{
+    MiniGLRixPlatform platform;
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+
+    mw_ctx *c = mw_host_create(4U, 4U);
+    assert(c != NULL);
+
+    uint8_t packet[512] = { 0 };
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4U, MW_VERSION);
+    mw_put_be32(packet + 12U, 1U);
+    uint8_t *p = packet + 16U;
+    mw_put_be32(p, MW_DRAW_OBJECT);
+    mw_put_be32(p + 4U, 8U + 3U * MW_OBJECT_BYTES);
+    mw_put_be32(p + 8U, 4U); /* GL_TRIANGLES */
+    mw_put_be32(p + 12U, 3U);
+    uint8_t *v = p + 16U;
+    for (int i = 0; i < 3; ++i) {
+        mw_put_bef(v, i == 0 ? -1.0f : i == 1 ? 1.0f : 0.0f);
+        mw_put_bef(v + 4, i == 2 ? 1.0f : -1.0f);
+        mw_put_bef(v + 8, 0.0f);
+        mw_put_bef(v + 12, 1.0f);
+        mw_put_bef(v + 16, 1.0f);
+        mw_put_bef(v + 20, 1.0f);
+        mw_put_bef(v + 24, 1.0f);
+        mw_put_bef(v + 28, 1.0f);
+        /* Huge texture coordinates */
+        mw_put_bef(v + 44, i == 0 ? -1e32f : 1e32f); /* s0 */
+        mw_put_bef(v + 48, i == 1 ? -1e32f : 1e32f); /* t0 */
+        v += MW_OBJECT_BYTES;
+    }
+    uint32_t bytes = 16U + 8U + 8U + 3U * MW_OBJECT_BYTES;
+    mw_put_be32(packet + 8U, bytes);
+
+    assert(mw_host_submit(c, packet, bytes) == MW_STATUS_OK);
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_rasterix_large_texture_coords\n");
+}
 int main(void)
 {
     g_rix_test_log = test_log_wrapper;
@@ -1472,6 +1514,7 @@ int main(void)
     test_direct_p96_target_rotation();
     test_rasterix_z16_depth_readback();
     test_context_texture_restore();
+    test_rasterix_large_texture_coords();
     printf("ALL Wire-v9 RasterIX Mapper Tests PASSED!\n");
     return 0;
 }
