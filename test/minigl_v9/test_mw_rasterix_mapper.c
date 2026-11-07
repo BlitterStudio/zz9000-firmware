@@ -1345,6 +1345,60 @@ static void test_direct_p96_target_rotation(void)
     printf("PASS: test_direct_p96_target_rotation\n");
 }
 
+/* A 32-bit requested depth target uses RasterIX's Z16 CPU backing.  The mock
+ * does not execute the depth-clear packet, so seed the CPU-visible Z16
+ * memory after draining the RasterIX clear. */
+static void test_rasterix_z16_depth_readback(void)
+{
+    MiniGLRixPlatform platform;
+    ZZ9KMiniGLPacketSetState state;
+    mw_ctx *c;
+    uint8_t request[24] = { 0 };
+    uint8_t reply[16] = { 0 };
+    uint32_t reply_bytes = 0U;
+    uint32_t index;
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    c = mw_host_create(2U, 2U);
+    assert(c != NULL);
+    memset(&state, 0, sizeof(state));
+    state.depth_bits = 32U;
+    state.enabled_flags = ZZ9K_MGL_STATE_DEPTH_WRITE;
+    state.color_mask = 0xfU;
+    state.blend_equation = 0x8006U;
+    state.depth_func = 0x0201U;
+    state.alpha_func = 0x0207U;
+    state.blend_src = 0x0302U;
+    state.blend_dst = 0x0303U;
+    c->state.target.depth_bits = 32U;
+    minigl_raster_set_state(&state);
+    assert(minigl_raster_depth_bits() == 16U);
+    minigl_raster_clear(0x4100U, 0U, 0x800000U);
+    assert(minigl_raster_present_is_rgb565());
+    assert(minigl_raster_finish());
+    for (index = 0U; index < 4U; ++index) {
+        c->depth_buffer[index * 2U] = 0x80U;
+        c->depth_buffer[index * 2U + 1U] = 0U;
+    }
+
+    mw_put_be32(request, MW_READ_PIXELS);
+    mw_put_be32(request + 4U, 0x1902U);
+    mw_put_be32(request + 16U, 2U);
+    mw_put_be32(request + 20U, 2U);
+    assert(mw_host_request(c, request, sizeof(request), reply, sizeof(reply),
+                           &reply_bytes) == MW_STATUS_OK);
+    assert(minigl_raster_depth_bits() == 16U);
+    assert(reply_bytes == sizeof(reply));
+    for (index = 0U; index < 4U; ++index) {
+        float depth = mw_bef(reply + index * 4U);
+        assert(depth > 0.499f && depth < 0.501f);
+    }
+    mw_host_destroy(c);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_rasterix_z16_depth_readback\n");
+}
+
 int main(void)
 {
     g_rix_test_log = test_log_wrapper;
@@ -1368,6 +1422,7 @@ int main(void)
     test_cpu_frames_preserve_recycled_gpu_target_format();
     test_watertight_tessellation();
     test_direct_p96_target_rotation();
+    test_rasterix_z16_depth_readback();
     printf("ALL Wire-v9 RasterIX Mapper Tests PASSED!\n");
     return 0;
 }

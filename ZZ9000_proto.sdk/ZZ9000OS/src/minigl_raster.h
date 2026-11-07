@@ -61,6 +61,8 @@ void minigl_raster_release_buffers(void);
 const uint32_t *minigl_raster_color_buffer(void);
 uint16_t minigl_raster_width(void);
 uint16_t minigl_raster_height(void);
+/* Actual CPU depth storage precision after RasterIX fallback selection. */
+uint8_t minigl_raster_depth_bits(void);
 uint32_t minigl_raster_get_error(void);
 int minigl_raster_take_dirty_region(MiniGLRasterDirtyRegion *region);
 int minigl_raster_configure(uint32_t width, uint32_t height);

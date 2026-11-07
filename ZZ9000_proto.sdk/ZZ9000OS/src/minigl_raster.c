@@ -819,6 +819,7 @@ void minigl_raster_release_buffers(void)
 const uint32_t *minigl_raster_color_buffer(void) { return g_buffers.color; }
 uint16_t minigl_raster_width(void) { return g_buffers.width; }
 uint16_t minigl_raster_height(void) { return g_buffers.height; }
+uint8_t minigl_raster_depth_bits(void) { return g_depth_bits; }
 uint32_t minigl_raster_get_error(void)
 {
     uint32_t error = g_error;

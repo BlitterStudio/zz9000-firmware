@@ -3552,20 +3552,11 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
                     } else { /* GL_DEPTH_COMPONENT */
                         uint32_t dval = 0;
                         float df;
-                        if (c->state.target.depth_bits == 16) {
+                        if (minigl_raster_depth_bits() == 16U) {
                             const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 2;
                             dval = ((uint32_t)dp[0] << 8) | dp[1];
                             df = (float)dval / 65535.0f;
-                        } else if (c->state.target.depth_bits == 24) {
-                            const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 3;
-                            dval = ((uint32_t)dp[0] << 16) | ((uint32_t)dp[1] << 8) | dp[2];
-                            df = (float)dval / 16777215.0f;
                         } else {
-                            /* The software rasterizer stores every depth
-                             * format wider than 16 bits as a packed 24-bit
-                             * value. GL's requested 32-bit depth buffer is
-                             * therefore read back from that 24-bit backing
-                             * store and normalized as such. */
                             const uint8_t *dp = c->depth_buffer + ((size_t)rast_row * c->width + gl_col) * 3;
                             dval = ((uint32_t)dp[0] << 16) | ((uint32_t)dp[1] << 8) | dp[2];
                             df = (float)dval / 16777215.0f;
