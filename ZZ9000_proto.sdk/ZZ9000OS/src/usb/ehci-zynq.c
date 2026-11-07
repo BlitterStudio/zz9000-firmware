@@ -14,6 +14,7 @@
 #include "ehci-ci.h"
 #include "ulpi.h"
 #include "ehci.h"
+#include "ehci-vbus-cycle.h"
 #include <stdio.h>
 #include <xusbps_hw.h>
 #include <sleep.h>
@@ -22,6 +23,9 @@
 
 // see zynq TRM
 #define USB_BASE_ADDR 0xE0002000
+
+#define EHCI_ZYNQ_VBUS_OFF_US 100000U
+#define EHCI_ZYNQ_VBUS_ON_US   20000U
 
 int ehci_hcd_init(int index, enum usb_init_type init,
 		struct ehci_hccr **hccr, struct ehci_hcor **hcor)
@@ -158,6 +162,58 @@ usleep(10000);
 	// FIXME removing this made it work! probably because there is another ehci_reset in there?
 	//return ehci_register(&priv->ehcictrl, hccr, hcor, NULL, 0, USB_INIT_HOST);
 	return 0;
+}
+
+/*
+ * A hub attached at cold boot can connect while the ChipIdea controller is
+ * stopped, leaving PORTSC.CCS clear permanently.  Recreate its VBUS attach
+ * only after ehci_common_init() has started the controller.
+ */
+int ehci_zynq_cycle_vbus_if_disconnected(
+		struct ehci_ctrl *ctrl, struct ehci_zynq_vbus_cycle *cycle)
+{
+	struct usb_ehci *ehci = (struct usb_ehci *)USB_BASE_ADDR;
+	struct ulpi_viewport ulpi_vp;
+	struct ulpi_regs *ulpi = (struct ulpi_regs *)0;
+
+	ulpi_vp.viewport_addr = (u32)&ehci->ulpi_viewpoint;
+	ulpi_vp.port_num = 0;
+
+	cycle->before_portsc = ehci_readl(&ctrl->hcor->or_portsc[0]);
+	cycle->off_portsc = 0;
+	cycle->on_portsc = 0;
+	cycle->off_error = 0;
+	cycle->on_error = 0;
+	cycle->cycled = 0;
+	if (!zzusb_vbus_cycle_needed(cycle->before_portsc)) {
+		printf("[USB] boot VBUS: PORTSC=%08lx, cycle skipped\n",
+		       (unsigned long)cycle->before_portsc);
+		return 0;
+	}
+
+	cycle->cycled = 1;
+	cycle->off_error = ulpi_write(&ulpi_vp, &ulpi->otg_ctrl_clear,
+				      ULPI_OTG_DRVVBUS | ULPI_OTG_DRVVBUS_EXT);
+	if (cycle->off_error)
+		printf("[USB] boot VBUS off ULPI error: %d\n",
+		       cycle->off_error);
+	/* Let an attached hub recognize VBUS removal before restoring it. */
+	usleep(EHCI_ZYNQ_VBUS_OFF_US);
+	cycle->off_portsc = ehci_readl(&ctrl->hcor->or_portsc[0]);
+
+	cycle->on_error = ulpi_write(&ulpi_vp, &ulpi->otg_ctrl_set,
+				     ULPI_OTG_DRVVBUS | ULPI_OTG_DRVVBUS_EXT);
+	if (cycle->on_error)
+		printf("[USB] boot VBUS on ULPI error: %d\n", cycle->on_error);
+	usleep(EHCI_ZYNQ_VBUS_ON_US);
+	cycle->on_portsc = ehci_readl(&ctrl->hcor->or_portsc[0]);
+
+	printf("[USB] boot VBUS: before=%08lx off=%08lx on=%08lx "
+	       "errors=%d/%d\n", (unsigned long)cycle->before_portsc,
+	       (unsigned long)cycle->off_portsc,
+	       (unsigned long)cycle->on_portsc, cycle->off_error,
+	       cycle->on_error);
+	return cycle->off_error ? cycle->off_error : cycle->on_error;
 }
 
 /*
