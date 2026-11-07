@@ -110,7 +110,7 @@ static uint64_t reset_now_us(void)
     XTime now;
 
     XTime_GetTime(&now);
-    return ((uint64_t)now * 1000000U) / COUNTS_PER_SECOND;
+    return zzusb_ticks_to_us((uint64_t)now, COUNTS_PER_SECOND);
 }
 
 static int zz_speed_to_usb(int zz)
@@ -959,6 +959,8 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
     } else {
         reset_port_assert(ctrl, reg_pre);
     }
+    /* The PR-clear budget or the 50 ms hold runs from the PORTSC write. */
+    zzusb_root_reset_arm(&root_reset, reset_now_us());
     return ZZUSB_STATUS_PENDING;
 }
 
@@ -989,6 +991,7 @@ uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
         return ZZUSB_STATUS_PENDING;
     case ZZUSB_ROOT_RESET_ASSERT:
         reset_port_assert(ctrl, reg);
+        zzusb_root_reset_arm(&root_reset, reset_now_us());
         return ZZUSB_STATUS_PENDING;
     case ZZUSB_ROOT_RESET_DEASSERT:
         /*
@@ -997,6 +1000,7 @@ uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
          */
         root_reset_reg &= ~EHCI_PS_PR;
         ehci_writel(portsc, root_reset_reg);
+        zzusb_root_reset_arm(&root_reset, reset_now_us());
         return ZZUSB_STATUS_PENDING;
     case ZZUSB_ROOT_RESET_PORT_READY:
         if (!(reg & EHCI_PS_CS)) {
@@ -1019,6 +1023,9 @@ uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
         root_reset.observed_portsc = ehci_readl(portsc);
         diag_detail = root_reset.observed_portsc;
         put_be16(&cmd->speed, root_port_speed_zz);
+        /* TRSTRCY runs from the PHY speed switch, as it did after the
+         * blocking path's udelay(100). */
+        zzusb_root_reset_arm(&root_reset, reset_now_us());
         return ZZUSB_STATUS_PENDING;
     case ZZUSB_ROOT_RESET_COMPLETE:
         memset(toggle_bits, 0, sizeof(toggle_bits));
