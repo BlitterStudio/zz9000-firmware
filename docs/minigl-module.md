@@ -424,10 +424,12 @@ Host test ownership after the split is:
 ## Release and kit packaging
 
 A firmware release contains no MiniGL implementation and is usable without the
-module. The drivers installer and SD-card kit ship the matching
-`ZZ9K/MINIGL.ZZM` beside the normal module packages. The 68k `minigl.library`
-continues to ship in its own drivers/library package under its per-file licences;
-it is not embedded in the firmware image.
+module. The firmware release zips ship `ZZ9K/MINIGL.ZZM`, its kit manifest and
+source tarball from the amiberry-minigl-library release pinned in
+`util/minigl-kit.pin` (see BUILD.md, "Publish a release"); the drivers
+installer and SD-card kit ship the same matching module. The 68k
+`minigl.library` is distributed separately under its per-file licences; it is
+not embedded in the firmware image.
 
 Each kit has a small signed-or-hashed compatibility manifest containing:
 

@@ -18,6 +18,7 @@
 *.md           text eol=lf
 *.cmake        text eol=lf
 CMakeLists.txt text eol=lf
+*.pin          text eol=lf
 Dockerfile     text eol=lf
 *.ld           text eol=lf
 *.bif          text eol=lf
