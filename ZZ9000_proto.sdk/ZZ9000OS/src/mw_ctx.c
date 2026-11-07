@@ -3498,6 +3498,15 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
         return MW_STATUS_OK;
     }
 
+    /* Every request below reads this context's targets through the single
+     * global rasterizer. With several live contexts that may currently hold
+     * another context's buffers and format, so activate this one first, as
+     * mw_host_submit does. */
+    mw_context_select_allocation_owner(c);
+    if (!mw_ctx_bind_buffers(c))
+        return MW_STATUS_FAILED;
+    mw_ctx_sync_to_raster(c);
+
     if (id == MW_BLIT) {
         uint32_t status = mw_blit(c, request, bytes, reply, reply_capacity,
                                   NULL, NULL);

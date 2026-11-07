@@ -891,6 +891,61 @@ static void test_direct_rgb565_read_pixels(void)
     printf("PASS: test_direct_rgb565_read_pixels\n");
 }
 
+static void clear_depth_half(mw_ctx *c)
+{
+    uint8_t packet[64];
+    uint8_t *q = packet + 16;
+    uint32_t total;
+
+    memset(packet, 0, sizeof(packet));
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 12, 1);
+    mw_put_be32(q, MW_CLEAR);
+    mw_put_be32(q + 4, 24);
+    mw_put_be32(q + 8, 2); /* depth only */
+    mw_put_bef(q + 28, 0.5f);
+    q += 32;
+    total = (uint32_t)(q - packet);
+    mw_put_be32(packet + 8, total);
+    assert(mw_host_submit(c, packet, total) == MW_STATUS_OK);
+}
+
+static void test_read_pixels_activates_its_context(void)
+{
+    mw_ctx *first = mw_host_create(2U, 2U);
+    mw_ctx *second;
+    uint8_t request[24] = { 0 };
+    uint8_t reply[16] = { 0 };
+    uint32_t reply_bytes = 0U;
+    uint32_t index;
+
+    assert(first != NULL);
+    first->state.target.depth_bits = 24U;
+    clear_depth_half(first);
+    second = mw_host_create(2U, 2U);
+    assert(second != NULL);
+    second->state.target.depth_bits = 16U;
+    clear_depth_half(second);
+
+    /* The rasterizer now holds the second context's buffers and depth
+     * format; a read of the first must not decode those. */
+    mw_put_be32(request, MW_READ_PIXELS);
+    mw_put_be32(request + 4, 0x1902U);
+    mw_put_be32(request + 16, 2U);
+    mw_put_be32(request + 20, 2U);
+    assert(mw_host_request(first, request, sizeof(request), reply, sizeof(reply),
+                           &reply_bytes) == MW_STATUS_OK);
+    assert(reply_bytes == sizeof(reply));
+    for (index = 0U; index < 4U; ++index) {
+        float depth = mw_bef(reply + index * 4U);
+        assert(depth > 0.499f && depth < 0.501f);
+    }
+    mw_host_destroy(second);
+    mw_host_destroy(first);
+    printf("PASS: test_read_pixels_activates_its_context\n");
+}
+
 int main(void)
 {
     test_create_destroy();
@@ -904,6 +959,7 @@ int main(void)
     test_glquake_texture_soak();
     test_draw_packed_indexed_oracle();
     test_direct_rgb565_read_pixels();
+    test_read_pixels_activates_its_context();
     test_palette_snapshot();
     printf("All host API tests PASSED!\n");
     return 0;
