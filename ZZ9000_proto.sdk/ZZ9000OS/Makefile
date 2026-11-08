@@ -132,20 +132,31 @@ ZZ9000_BUILD_GIT ?= unknown
 ZZ9000_BUILD_DIRTY ?= unknown
 ZZ9000_BUILD_DATE ?= unknown
 
+# Instruction set and optimisation per object, measured on the card (kit
+# flags-ab-1, 2026-11-08). Default: ARM at -O2 (-O3 where a rule says so),
+# for everything on a pixel, sample, DMA or interrupt path. Keep files with
+# ARM-state or naked inline assembly (core2.c, zzapp_host.c) ARM.
+#
 # Control-path objects (configuration, loaders, firmware update, app and
-# module bookkeeping, diagnostics, boot) build as Thumb-2 at -Os: about
-# 50 KB smaller, and none of them runs per pixel, sample, packet or
-# interrupt. Everything else stays ARM at -O2/-O3. Keep files with
-# ARM-state or naked inline assembly (core2.c, zzapp_host.c) and anything
-# on a data, DMA or interrupt path out of this list.
+# module bookkeeping, diagnostics, boot): Thumb-2 at -Os.
 SIZE_OBJS = adc.o bootrom.o fw_update.o gamma.o newlib_compat.o platform.o \
 	sd_activity_led.o sd_boot.o sd_boot_deadline.o sdk_aperture_layout.o \
 	sdk_decode_reclaim.o sdk_media_session.o sdk_video_mpeg2_glue.o \
 	sdk_video_webm_module.o usb.o usb/ulpi-viewport.o usb/usb_hub.o \
 	usb_proxy_diag.o watchdog.o zz_config.o zzapp_api.o zzapp_loader.o \
 	zzapp_services.o zzm_loader.o zzm_manifest.o zzm_registry.o
+# Throughput objects (USB host and mass storage, SD, Ethernet, TLS crypto,
+# LZH, the Amiga mailbox handler, surface/card allocators): Thumb-2 at -O2.
+# No loss against ARM on the card; network downloads were faster.
+THUMB_OBJS = usb/ehci-hcd.o usb/usb.o usb/usb_storage.o usb/ehci-zynq.o \
+	bsp/xsdps.o bsp/xsdps_options.o bsp/diskio.o sd_storage.o ethernet.o \
+	ethernet_mcast.o sdk_crypto.o sdk_mailbox.o card_pool.o \
+	surface_allocator.o sdk_surface.o sdk_media_profile.o zzm_minigl_host.o \
+	zzm_runtime.o
 SIZE_CFLAGS :=
 $(addprefix $(BUILD_DIR)/,$(SIZE_OBJS)): SIZE_CFLAGS := -mthumb -Os
+$(addprefix $(BUILD_DIR)/,$(THUMB_OBJS)): SIZE_CFLAGS := -mthumb
+$(BUILD_DIR)/bearssl/%.o $(BUILD_DIR)/lzh/%.o: SIZE_CFLAGS := -mthumb
 
 CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2 $(SIZE_CFLAGS) $(EXTRA_CFLAGS)
 CFLAGS += -DZZ9000_BUILD_GIT=\"$(ZZ9000_BUILD_GIT)\"
