@@ -371,6 +371,23 @@ int main(void)
 	assert(capture_framebuffer[capture_scanout_word] == 0U);
 	assert(dma_buffer_address == capture_scanout);
 	assert(formatter_ops[MNTVF_OP_DPMS] == 0x5aU);
+	/* While the Zorro FSM holds reset it reports capture enabled, but the
+	 * backing is not armed yet. Those vblanks must leave the VDMA on the
+	 * cleared capture origin instead of falling back to the RTG scanout
+	 * at the framebuffer base, and so must the first vblank after the
+	 * backing is armed again, before detection is stable. */
+	clear_measurements();
+	videocap_zstate = (1U << 21) | (1U << 23);
+	isr_video(NULL);
+	isr_video(NULL);
+	assert(dma_configs == 0 && dma_starts == 0);
+	assert(dma_buffer_address == capture_scanout);
+	assert(video_videocap_backing_reserve());
+	assert(video_videocap_backing_arm());
+	isr_video(NULL);
+	assert(dma_configs == 0 && dma_starts == 0);
+	assert(dma_buffer_address == capture_scanout);
+	videocap_zstate = 0;
 	assert(video_videocap_backing_reserve());
 	capture_scanout_word = (vs.videocap_backing_address -
 		VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA - FRAMEBUFFER_ADDRESS) /

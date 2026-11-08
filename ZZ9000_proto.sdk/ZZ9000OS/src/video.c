@@ -788,7 +788,12 @@ void isr_video(void *dummy) {
 			 vs.vmode_hdiv == 0U))
 		return;
 
-	if (!videocap_active) {
+	/* While the Zorro FSM holds reset it reports capture enabled, but
+	 * video_reset() has disarmed the backing until reset releases. Leave
+	 * the VDMA on the origin it already scans (cleared by video_reset()
+	 * if capture owned it): the RTG path would point it at the
+	 * framebuffer base with the capture geometry and show raw VRAM. */
+	if (!videocap_enabled) {
 		/* Capture overwrote framebuffer_pan_* with its own origin and
 		 * stride; give the RTG screen back the pan its driver set. */
 		if (vs.videocap_enabled_old) {
@@ -831,7 +836,7 @@ void isr_video(void *dummy) {
 		}
 		vs.videocap_enabled_old = 0;
 		videocap_detection_reset();
-	} else {
+	} else if (videocap_active) {
 		// videocap owns the scanout decisions from here on; if an
 		// overlay shadow was still being presented, hand the scanout
 		// back to the framebuffer once so the deferred shadow frees
