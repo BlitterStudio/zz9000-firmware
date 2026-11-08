@@ -173,9 +173,12 @@ buttons (`|<`, **Play**, **Pause**, **Stop**, `>|`), the volume slider, the
 repeat cycle gadget, the **Shuffle** check box, and the playlist. A message
 line reports errors and notices. The window remembers its position.
 
-The playing time follows frames the card has actually output, divided by
-the card's 48 kHz rate, not the file's bitrate. A VBR file and a file with
-a large ID3 tag therefore keep time with the audio.
+When the sound plays through the card (MHI with `mhizz9000.library`, or the
+card's own output), the playing time follows frames the card has actually
+output, divided by its 48 kHz rate, not the file's bitrate. A VBR file and a
+file with a large ID3 tag therefore keep time with the audio. Over AHI the
+time follows the frames the AHI unit has played, so it also runs on Paula
+and other non-card units. Another MHI driver keeps a bitrate estimate.
 
 Drag the position slider to seek in MP3 files. The slider is unavailable for
 MPEG video, WebM, FLAC, Ogg Vorbis, and WebP animations.

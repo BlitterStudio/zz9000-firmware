@@ -34,6 +34,15 @@ int zzplay_mp3_input_room_low(uint32_t bytes_fed,
                               uint32_t capacity,
                               uint32_t next_feed_bytes);
 
+/* Whether `unsent_bytes` of decoded PCM, less than one AHI period, must go
+ * to AHI before a forced Read under backpressure. It must only when the
+ * ring, after that Read returns everything AHI took, cannot hold one more
+ * `unit_bytes` decoder unit; otherwise the decoder can still progress and
+ * the remainder waits to fill a whole period. */
+int zzplay_mp3_partial_flush_due(uint32_t unsent_bytes,
+                                 uint32_t capacity,
+                                 uint32_t unit_bytes);
+
 /* CBR duration estimate for the audio payload only (file size minus ID3v2
  * header and ID3v1 trailer): bytes * 8 / kbps yields milliseconds
  * directly. Returns 0 when the bitrate is unknown, and saturates rather

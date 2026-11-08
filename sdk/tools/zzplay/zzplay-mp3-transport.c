@@ -127,6 +127,16 @@ int zzplay_mp3_input_room_low(uint32_t bytes_fed,
   return buffered > capacity - next_feed_bytes;
 }
 
+int zzplay_mp3_partial_flush_due(uint32_t unsent_bytes,
+                                 uint32_t capacity,
+                                 uint32_t unit_bytes)
+{
+  if (unsent_bytes == 0U) {
+    return 0;
+  }
+  return unsent_bytes >= capacity || capacity - unsent_bytes < unit_bytes;
+}
+
 uint32_t zzplay_mp3_duration_ms(uint64_t audio_bytes,
                                 uint32_t bitrate_kbps)
 {

@@ -42,7 +42,7 @@ ZZPlayMHIStatus zzplay_mhi_acquire(ZZPlayMHISink *sink,
     driver = ZZPLAY_MHI_DEFAULT_DRIVER;
   }
   strcpy(sink->driver, driver);
-  sink->eof_marker = (uint8_t)zzplay_ascii_equal_fold(
+  sink->card_driver = (uint8_t)zzplay_ascii_equal_fold(
       driver, ZZPLAY_MHI_DEFAULT_DRIVER);
   strcpy(path, ZZPLAY_MHI_LIBRARY_PREFIX);
   strcat(path, driver);
@@ -204,7 +204,7 @@ ZZPlayMHIStatus zzplay_mhi_play_file(
       }
     }
     if (eof && queued == 0U && !eof_announced) {
-      if (sink->eof_marker) {
+      if (sink->card_driver) {
         /* mhizz9000 extends the public queue call with a self-detecting
          * zero-length EOF marker. Firmware needs the corresponding stream
          * EOF flag to decode the last short input and drain a sub-period

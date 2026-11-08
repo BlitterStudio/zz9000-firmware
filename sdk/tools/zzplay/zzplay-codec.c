@@ -7,7 +7,6 @@
 #include "zz9k/host.h"
 #include "zz9k/shared.h"
 #include "zzplay-ahi.h"
-#include "zzplay-audio-clock.h"
 #include "zzplay-core.h"
 #include "zzplay-launch.h"
 #include "zzplay-mp3-transport.h"
@@ -82,21 +81,14 @@ static int zzplay_codec_service_controls(ZZPlayCodecDecode *decode)
 
 static void zzplay_codec_report_progress(ZZPlayCodecDecode *decode)
 {
-  uint32_t elapsed_ms = 0U;
   uint64_t frames;
 
-  /* The card's DMA clock is the same transmitter AHI feeds. Prefer it
-   * so a resampled source is timed at 48 kHz, not at the file rate. */
-  if (zzplay_output_clock_elapsed(decode->ctx, &decode->clock_origin,
-                                  &decode->clock_armed,
-                                  (uint32_t)decode->position_base_ms,
-                                  &elapsed_ms)) {
-    zzplay_controller_set_position(decode->engine->ctl, elapsed_ms, 1);
-    return;
-  }
   /* Count what AHI has played, not what was queued to it: the queue holds
    * a few hundred milliseconds, which would put the position ahead of the
-   * sound. Without a sink (muted) output is consumed as it is produced. */
+   * sound. AHI is fed at the file rate, so its frames time the item on any
+   * unit, Paula included; the card's output clock only moves when the unit
+   * plays through the card. Without a sink (muted) output is consumed as
+   * it is produced. */
   frames = decode->ahi ? zzplay_ahi_played_frames(decode->ahi)
                        : decode->output_frames;
   if (decode->engine->sample_rate != 0U) {
@@ -552,12 +544,19 @@ static ZZPlayCodecPassResult zzplay_codec_decode_once(ZZPlayCodecDecode *decode)
           !zzplay_codec_pump_pcm(decode, flags != 0U)) {
         return zzplay_codec_pass_failure(decode);
       }
-      /* Under backpressure hand AHI whatever whole frames are waiting, even
-       * less than a period, before the forced Read: a decoder that needs
-       * room for a whole block must never wait on a partial period. */
+      /* Under backpressure the forced Read below returns everything AHI has
+       * taken. The sub-period remainder goes to AHI early only when the
+       * ring could not then hold the decoder's largest unit (a shrunk
+       * ring); otherwise it waits for the next decode to complete a period.
+       * A short buffer would take one of the two AHI slots and shrink the
+       * audio that covers the next file read and decode. */
       if ((decode->result.flags &
            ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) != 0U &&
-          (!zzplay_codec_pump_pcm(decode, 1) || !zzplay_codec_ack(decode, 1))) {
+          ((zzplay_mp3_partial_flush_due(
+                decode->result.bytes_produced - decode->produced_seen,
+                decode->pcm.length, decode->engine->min_pcm_bytes) &&
+            !zzplay_codec_pump_pcm(decode, 1)) ||
+           !zzplay_codec_ack(decode, 1))) {
         return zzplay_codec_pass_failure(decode);
       }
     } while ((decode->result.flags &
