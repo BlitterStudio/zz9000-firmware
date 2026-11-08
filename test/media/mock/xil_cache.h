@@ -17,11 +17,4 @@ static inline void Xil_DCacheFlushRange(INTPTR address, unsigned long length)
 	(void)length;
 }
 
-static inline void Xil_L1DCacheFlushRange(INTPTR address,
-                                          unsigned long length)
-{
-	(void)address;
-	(void)length;
-}
-
 #endif /* XIL_CACHE_H */

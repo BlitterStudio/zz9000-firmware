@@ -17,6 +17,10 @@
 #include "generic-phy.h"
 #include "io.h"
 
+/* Data cache maintenance over [start, stop), defined in ehci-hcd.c. */
+void flush_dcache_range(unsigned long start, unsigned long stop);
+void invalidate_dcache_range(unsigned long start, unsigned long stop);
+
 /* Section 2.2.3 - N_PORTS */
 #define MAX_HC_PORTS		15
 

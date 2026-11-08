@@ -175,7 +175,7 @@ encode_p(unsigned short p)
 static void
 send_block( /* void */ )
 {
-    unsigned char   flags;
+    unsigned char   flags = 0;
     unsigned short  i, k, root, pos, size;
 
     root = make_tree(NC, c_freq, c_len, c_code);

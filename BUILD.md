@@ -16,6 +16,10 @@ C compiler as `cc`, plus `cmake`, `make`, `wget`, and `7z`, `7za`, or `7zr`.
 The firmware build fetches and builds its pinned codec dependencies when they
 are absent.
 
+Firmware and module sources build with `-Werror`, and the build has no
+warnings with 15.3.rel2. Another compiler version may report new ones; fix
+them, or build anyway with `WERROR= ./build_firmware.sh`.
+
 ```bash
 ./build_firmware.sh --rasterix
 ./build_bootimage.sh

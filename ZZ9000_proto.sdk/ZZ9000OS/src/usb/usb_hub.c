@@ -568,7 +568,6 @@ static int usb_hub_configure(struct usb_device *dev)
 	short hubCharacteristics;
 	struct usb_hub_descriptor *descriptor;
 	struct usb_hub_device *hub;
-	struct usb_hub_status *hubsts;
 	int ret;
 
 	hub = usb_get_hub_device(dev);
@@ -721,18 +720,6 @@ static int usb_hub_configure(struct usb_device *dev)
 		      dev->status);
 		return ret;
 	}
-
-	hubsts = (struct usb_hub_status *)buffer;
-
-	/*printf("get_hub_status returned status %X, change %X\n",
-	      le16_to_cpu(hubsts->wHubStatus),
-	      le16_to_cpu(hubsts->wHubChange));*/
-	/*printf("local power source is %s\n",
-	      (le16_to_cpu(hubsts->wHubStatus) & HUB_STATUS_LOCAL_POWER) ? \
-	      "lost (inactive)" : "good");*/
-	/*printf("%sover-current condition exists\n",
-	      (le16_to_cpu(hubsts->wHubStatus) & HUB_STATUS_OVERCURRENT) ? \
-	      "" : "no ");*/
 
 	usb_hub_power_on(hub);
 

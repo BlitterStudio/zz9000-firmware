@@ -108,7 +108,8 @@ if [ "$TARGET" = arm ]; then
     unset CC AR AS
     # -mcpu=cortex-a9 conflicts with the target's -march=armv7-a under
     # -Werror. Tune instead, and rewrite the target's softfp ABI below.
-    EXTRA="-mtune=cortex-a9 -marm -mfpu=neon $CFLAGS_COMMON -DSDK_VORBIS_REPLACE_ALLOCATORS -include $OS_DIR/src/sdk_vorbis_alloc.h"
+    # vpx_ports/vpx_timer.h's no-timer stubs ignore their argument.
+    EXTRA="-mtune=cortex-a9 -marm -mfpu=neon $CFLAGS_COMMON -Wno-unused-parameter -DSDK_VORBIS_REPLACE_ALLOCATORS -include $OS_DIR/src/sdk_vorbis_alloc.h"
     bash "$SRC/configure" \
         --target=armv7-linux-gcc \
         --prefix="$OUT" \

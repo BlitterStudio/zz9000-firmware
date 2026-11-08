@@ -14,6 +14,7 @@
 #include "zzm_format.h"
 #include "zzm_loader.h"
 #include "zzm_minigl_host.h"
+#include "zzm_registry.h"
 #ifdef ZZAPP_HOST_TEST
 #define MINIMP3_IMPLEMENTATION 1
 #endif

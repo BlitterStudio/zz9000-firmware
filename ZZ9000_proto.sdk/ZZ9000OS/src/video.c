@@ -296,7 +296,7 @@ static struct {
 	uint8_t valid;
 } video_geom_diag;
 
-uint16_t video_rtg_diag_value(uint16_t key, uint8_t *present)
+uint16_t video_rtg_diag_value(uint16_t key, uint16_t *present)
 {
 	if (present)
 		*present = 0;

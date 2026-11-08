@@ -70,6 +70,7 @@ ZZM_MINIGL_BACKEND_SRCS := \
 ZZM_MINIGL_LINK_SRCS = $(ZZM_MINIGL_ENTRY_SRC) $(ZZM_MINIGL_BACKEND_SRCS) \
 	$(ZZM_MINIGL_FRONTEND_SRCS)
 ZZM_MINIGL_LINK_FLAGS := -nostdlib -Wl,-build-id=none -Wl,--gc-sections \
+	-Wl,--no-warn-rwx-segments -Wl,-z,noexecstack \
 	-Wl,-T,$(ZZM_MINIGL_LINKER) \
 	-Wl,--defsym,ZZM_SLOT=$(ZZM_MINIGL_SLOT_ADDRESS) \
 	-Wl,--defsym,ZZM_SLOT_SIZE=$(ZZM_MINIGL_SLOT_SIZE)

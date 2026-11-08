@@ -907,7 +907,7 @@ static void reset_port_assert(struct ehci_ctrl *ctrl, uint32_t reg_pre)
     if ((reg_pre & PORTSC_LS_MASK) == PORTSC_LS_K)
         root_reset_fsls = 1;
     ehci_zynq_set_phy_mode(root_reset_fsls);
-    udelay(100);
+    usleep(100);
 
     root_reset_reg = reg_pre & ~EHCI_PS_CLEAR;
     root_reset_reg |= EHCI_PS_PR;
@@ -1055,7 +1055,7 @@ uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
         }
         root_port_speed_zz = portsc_to_zz_speed(reg);
         ehci_zynq_set_phy_speed(zz_speed_to_usb(root_port_speed_zz));
-        udelay(100);
+        usleep(100);
         root_reset.observed_portsc = ehci_readl(portsc);
         diag_detail = root_reset.observed_portsc;
         put_be16(&cmd->speed, root_port_speed_zz);

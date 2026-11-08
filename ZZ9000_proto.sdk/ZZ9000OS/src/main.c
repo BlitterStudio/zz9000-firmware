@@ -489,6 +489,8 @@ enum amiga_reset_mode {
 	AMIGA_RESET_INIT_MEDIA = 1,
 };
 
+void handle_amiga_reset(enum amiga_reset_mode mode);
+
 static void reset_storage_request_state() {
 	usb_status = 0;
 	usb_read_write_num_blocks = 1;
@@ -1000,13 +1002,13 @@ int main() {
 		 * only UART output this path produces before the service
 		 * bring-up. */
 		printf("[boot] fastram: %s rtl-2fe00000=%s advertised=%s "
-		       "cfg=%ums diag=%u\n",
+		       "cfg=%lums diag=%u\n",
 			zz_fastram_outcome_name((enum zz_fastram_outcome)
 				zz_config_get()->fastram_outcome),
 			(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7) &
 			 MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000) ? "yes" : "no",
 			fastram_can_advertise() ? "yes" : "no",
-			load_ms, zz_config_diag_count());
+			(unsigned long)load_ms, zz_config_diag_count());
 	}
 
 	sd_activity_led_init();

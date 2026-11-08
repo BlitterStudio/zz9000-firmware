@@ -278,7 +278,7 @@ int usb_control_msg(struct usb_device *dev, unsigned int pipe,
 	setup_packet->index = cpu_to_le16(index);
 	setup_packet->length = cpu_to_le16(size);
 	// FIXME debug option
-	//printf("[usb] usb_control_msg: request: 0x%X, requesttype: 0x%X, " \
+	//printf("[usb] usb_control_msg: request: 0x%X, requesttype: 0x%X, "
 	//     "value 0x%X index 0x%X length 0x%X\n",
 	//      request, requesttype, value, index, size);
 	dev->status = USB_ST_NOT_PROC; /*not yet processed */

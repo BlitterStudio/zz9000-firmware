@@ -36,6 +36,7 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "xil_types.h"
 #include "xil_mmu.h"
 #include "xil_cache.h"
+#include "xil_cache_l.h"
 #include "xpseudo_asm.h"
 #include "xreg_cortexa9.h"
 #include "scheduler_core1_minigl_init.h"

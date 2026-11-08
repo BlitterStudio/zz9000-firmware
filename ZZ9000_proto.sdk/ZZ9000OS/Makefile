@@ -101,12 +101,13 @@ INCLUDES += -I$(LIBFLAC_INCLUDE_DIR) -I$(LIBVORBIS_INCLUDE_DIR)
 INCLUDES += -I$(LIBVPX_INCLUDE_DIR) -I$(LIBOPUS_INCLUDE_DIR)
 INCLUDES += -I$(LZMA_SDK_SRC)/C
 
-# Common flags (shared by all optimization levels)
-COMMON_FLAGS = $(INCLUDES) -Wall -c
+# Common flags (shared by all optimization levels). Warnings are errors;
+# WERROR= turns that off, e.g. for a compiler other than the CI one.
+WERROR ?= -Werror
+COMMON_FLAGS = $(INCLUDES) -Wall $(WERROR) -c
 COMMON_FLAGS += -ffunction-sections -fdata-sections
 COMMON_FLAGS += -fno-unwind-tables -fno-asynchronous-unwind-tables
 COMMON_FLAGS += -fno-strict-aliasing
-COMMON_FLAGS += -Wno-incompatible-pointer-types -Wno-return-mismatch -Wno-implicit-function-declaration
 COMMON_FLAGS += -DCONFIG_EHCI_IS_TDI
 # TXFIFO threshold tuning: raises the EHCI TX FIFO fill threshold
 # from 2 to 4 DWORDs before a transaction is launched. Compensates
@@ -168,6 +169,9 @@ CFLAGS += -DZZ9000_BUILD_DATE=\"$(ZZ9000_BUILD_DATE)\"
 LDFLAGS = $(CPU_FLAGS)
 LDFLAGS += -Wl,-build-id=none
 LDFLAGS += -Wl,--gc-sections
+# The image is one bare-metal load segment; access permissions come from the
+# MMU translation table at run time, not from the ELF program headers.
+LDFLAGS += -Wl,--no-warn-rwx-segments
 LDFLAGS += -specs=$(SRC_DIR)/Xilinx.spec
 LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -Wl,-Map,$(BUILD_DIR)/ZZ9000OS.map
