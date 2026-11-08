@@ -133,8 +133,9 @@ ZZ9000_BUILD_DIRTY ?= unknown
 ZZ9000_BUILD_DATE ?= unknown
 
 # Instruction set and optimisation per object, measured on the card (kit
-# flags-ab-1, 2026-11-08). Default: ARM at -O2 (-O3 where a rule says so),
-# for everything on a pixel, sample, DMA or interrupt path. Keep files with
+# flags-ab-1, 2026-11-08). Default: ARM at -O2, for everything on a pixel,
+# sample, DMA or interrupt path. gfx.c was -O3 until that kit showed no RTG
+# or GLQuake difference at -O2 (31 KB smaller). Keep files with
 # ARM-state or naked inline assembly (core2.c, zzapp_host.c) ARM.
 #
 # Control-path objects (configuration, loaders, firmware update, app and
@@ -512,13 +513,6 @@ $(BUILD_DIR)/usb/ulpi.o: $(SRC_DIR)/usb/ulpi.c
 $(BUILD_DIR)/sdk_compression.o: $(SRC_DIR)/sdk_compression.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(SRC_DIR)/lzh -MMD -MP -o $@ $<
-
-# Video hot path: MPEG decode and per-pixel composition benefit materially
-# from the more aggressive loop/inlining passes; keep the rest at -O2.
-$(BUILD_DIR)/gfx.o: $(SRC_DIR)/gfx.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
-
 
 # U7 FLAC backend: includes libFLAC headers that exist only after the pinned
 # dependency build, so the object depends on the archive (DVD codec pattern).
