@@ -1869,23 +1869,6 @@ static void encode_video_session_result(
 	put_be32(payload->flags, result->flags);
 }
 
-static uint16_t complete_video_session_result(
-	volatile struct SDKMailboxEntry *req,
-	volatile struct SDKMailboxEntry *comp,
-	uint16_t status,
-	const struct SDKVideoStreamResult *result)
-{
-	volatile struct SDKVideoSessionResultPayload *payload;
-
-	if (status != SDK_STATUS_OK)
-		return complete_status(req, comp, status);
-	write_completion(comp, req, SDK_STATUS_OK, sizeof(*payload));
-	memset((void *)comp->payload, 0, sizeof(comp->payload));
-	payload = (volatile struct SDKVideoSessionResultPayload *)comp->payload;
-	encode_video_session_result(payload, result);
-	return SDK_STATUS_OK;
-}
-
 static void put_be64_parts(volatile uint8_t hi[4],
 	                       volatile uint8_t lo[4], uint64_t value)
 {

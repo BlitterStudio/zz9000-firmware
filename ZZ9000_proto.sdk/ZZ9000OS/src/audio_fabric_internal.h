@@ -159,13 +159,6 @@ void fabric_lease_isr_tick(void);
  * still consume. No-op at zero. */
 void fabric_lease_catchup(uint32_t periods);
 
-/* Request the queued-contribution rebuild (core TU): after this slot
- * detaches, the next compositor ISR rebuilds every TX period strictly
- * ahead of the DMA position from the remaining live producers, so only
- * the current 20-ms period may still carry the detached lease's audio.
- * Main-loop and ISR callers; plain store, ISR-consumed. */
-void audio_fabric_request_rebuild(uint32_t slot);
-
 /* The compositor ISR is the single writer of a lease's consumed/credited
  * cursors; a reader in the mailbox thread can still tear a 64-bit load
  * across its two words if an audio IRQ lands between them, so read

@@ -3,8 +3,11 @@ ZZM_RT_DIR := modules/libzzm_rt
 ZZM_RT_BUILD := $(BUILD_DIR)/modules/libzzm_rt
 ZZM_RT_LIB := $(ZZM_RT_BUILD)/libzzm_rt.a
 ZZM_CONFORMANCE := ../../util/check_zzm_conformance.sh
+# Modules run from a fixed slot under the firmware's MMU table: neither
+# segment permissions nor a GNU stack note exist for them at run time.
+ZZM_BARE_METAL_LDFLAGS := -Wl,--no-warn-rwx-segments -Wl,-z,noexecstack
 define zzm_module_link
-$(CC) $(CPU_FLAGS) -nostdlib -Wl,-build-id=none -Wl,--gc-sections \
+$(CC) $(CPU_FLAGS) -nostdlib -Wl,-build-id=none -Wl,--gc-sections $(ZZM_BARE_METAL_LDFLAGS) \
 	-Wl,-T,$(3) -Wl,--defsym,ZZM_SLOT=$(4) -Wl,--defsym,ZZM_SLOT_SIZE=$(5) \
 	-Wl,--undefined=malloc -Wl,--undefined=free -Wl,--undefined=calloc \
 	-Wl,--undefined=realloc -Wl,--undefined=memalign \

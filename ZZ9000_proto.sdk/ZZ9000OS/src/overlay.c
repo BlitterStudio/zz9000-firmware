@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "xil_cache.h"
+#include "xil_cache_l.h"
 #include "overlay.h"
 #include "overlay_color.h"
 #include "overlay_hw.h"

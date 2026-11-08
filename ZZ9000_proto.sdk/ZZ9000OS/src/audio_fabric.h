@@ -126,6 +126,12 @@ void audio_fabric_producer_detach(uint32_t slot);
 /* Drop one producer's queued-period tags without touching the shared TX
  * ring (pause with a live peer); pair with audio_fabric_request_rebuild. */
 void audio_fabric_producer_clear(uint32_t slot);
+/* Request the queued-contribution rebuild: after this slot detaches, the
+ * next compositor ISR rebuilds every TX period strictly ahead of the DMA
+ * position from the remaining live producers, so only the current 20-ms
+ * period may still carry the detached lease's audio. Main-loop and ISR
+ * callers; plain store, ISR-consumed. */
+void audio_fabric_request_rebuild(uint32_t slot);
 void audio_fabric_producer_freeze(uint32_t slot);
 /* Fill the initial DMA reserve and publish an isolated frozen slot as live
  * under one local-IRQ critical section. Returns nonzero when real PCM staged. */

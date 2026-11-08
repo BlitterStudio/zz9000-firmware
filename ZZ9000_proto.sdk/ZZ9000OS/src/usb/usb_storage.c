@@ -127,10 +127,8 @@ int usb_stor_info(void)
 	int i;
 
 	if (usb_max_devs > 0) {
-		for (i = 0; i < usb_max_devs; i++) {
+		for (i = 0; i < usb_max_devs; i++)
 			printf("  Device %d: ", i);
-			dev_print(&usb_dev_desc[i]);
-		}
 		return 0;
 	}
 	if (!count) {
@@ -201,8 +199,6 @@ static int usb_stor_probe_device(struct usb_device *udev)
 
 		if (usb_stor_get_info(udev, &usb_stor[start],
 				      &usb_dev_desc[usb_max_devs]) == 1) {
-			//printf("partype: %d\n", blkdev->part_type);
-			init_part(blkdev); // FIXME mntmn was part_init
 			//printf("partype: %d\n", blkdev->part_type);
 			usb_max_devs++;
 			//printf("%s: Found device %p\n", __func__, udev);

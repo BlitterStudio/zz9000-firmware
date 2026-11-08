@@ -101,6 +101,7 @@ static int range_ok(uint32_t off, uint32_t len, uint32_t limit)
 #include "card_pool.h"
 #include "memorymap.h"
 #include "xil_cache.h"
+#include "xil_cache_l.h"
 
 static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
 {

@@ -100,12 +100,12 @@ if [ "$TARGET" = arm ]; then
     : "${ARM_NONE_EABI_RANLIB:=arm-none-eabi-ranlib}"
     CC_TOOL="$ARM_NONE_EABI_CC"; AR_TOOL="$ARM_NONE_EABI_AR"; RANLIB_TOOL="$ARM_NONE_EABI_RANLIB"
     # newlib's int32_t is long, and libFLAC passes int * where it expects
-    # FLAC__int32 *: same width, different type. GCC 14 made that an error;
-    # keep it a warning for this dependency.
+    # FLAC__int32 *: same width, different type, so the warning carries no
+    # information for this dependency.
     CFLAGS_TARGET="-mcpu=cortex-a9 -marm -mfpu=neon -mfloat-abi=hard \
 -O2 -ffunction-sections -fdata-sections -fno-unwind-tables \
 -fno-asynchronous-unwind-tables -fno-strict-aliasing \
--Wno-error=incompatible-pointer-types"
+-Wno-incompatible-pointer-types"
 else
     : "${CC_FOR_BUILD:=cc}"
     : "${AR_FOR_BUILD:=ar}"

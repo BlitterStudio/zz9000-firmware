@@ -32,7 +32,8 @@ void handle_acc_op(uint16_t zdata)
             SWAP32(data->offset[0]);
             SWAP32(data->offset[1]);
 
-            printf ("%s: %d - %d\n", data->clut2, data->offset[0], data->offset[1]);
+            printf ("%s: %lu - %lu\n", data->clut2, (unsigned long)data->offset[0],
+                    (unsigned long)data->offset[1]);
             break;
         }
         case ACC_OP_BUFFER_CLEAR: {

@@ -327,7 +327,8 @@ void *realloc(void *pointer, size_t bytes)
 int posix_memalign(void **out, size_t alignment, size_t bytes)
 {
     void *result;
-    if (!out || !is_power_of_two(alignment) || alignment < sizeof(void *))
+    /* newlib declares out nonnull, so a NULL check here is compiled away. */
+    if (!is_power_of_two(alignment) || alignment < sizeof(void *))
         return EINVAL;
     result = memalign(alignment, bytes);
     if (!result)

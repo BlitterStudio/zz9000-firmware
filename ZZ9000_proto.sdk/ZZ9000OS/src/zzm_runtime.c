@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <string.h>
 #include "xil_cache.h"
+#ifndef MINIGL_HOST_TEST
+#include "xil_cache_l.h"
+#endif
 #include "l2_maint.h"
 #include "xtime_l.h"
 #include "card_pool.h"

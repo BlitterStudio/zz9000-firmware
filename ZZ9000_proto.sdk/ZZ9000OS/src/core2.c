@@ -583,6 +583,14 @@ void core1_loop() {
 }
 #pragma GCC pop_options
 
+/* Store a word at a low physical address. GCC's bounds checks treat a
+ * small constant pointer as an offset from NULL, so hide the constant. */
+static void store_low_word(uintptr_t address, uint32_t value)
+{
+	__asm__("" : "+r"(address));
+	*(volatile uint32_t *)address = value;
+}
+
 void arm_app_init() {
 	arm_run_env.api_version = 1;
 	arm_run_env.fn_putchar = _putchar;
@@ -610,13 +618,10 @@ void arm_app_init() {
 	*core1_addr = (uint32_t) core1_entry;
 	// Place some machine code in strategic positions that will catch core1 if it crashes
 	// FIXME: clean this up and turn into a debug handler / monitor
-	volatile uint32_t* core1_addr2 = (volatile uint32_t*) 0x140; // catch 1
-	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
-	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
-
-	core1_addr2 = (volatile uint32_t*) 0x100; // catch 2
-	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
-	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
+	store_low_word(0x140, 0xe3e0000f); // catch 1: mvn r0, #15 -- loads 0xfffffff0
+	store_low_word(0x144, 0xe590f000); //          ldr pc, [r0] -- jumps to the address in that address
+	store_low_word(0x100, 0xe3e0000f); // catch 2: mvn r0, #15
+	store_low_word(0x104, 0xe590f000); //          ldr pc, [r0]
 
 	// The reset-vector word and catch stubs live in memory CPU1 reads with its
 	// caches off; flush core 0's D-cache so they are visible before we wake it.

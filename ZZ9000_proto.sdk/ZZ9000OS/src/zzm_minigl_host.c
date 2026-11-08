@@ -11,6 +11,7 @@
 #if !defined(TASKQ_HOST_TEST)
 #include <stdio.h>
 #include "xil_cache.h"
+#include "xil_cache_l.h"
 #include "xil_io.h"
 #include "xil_mmu.h"
 #include "l2_maint.h"
