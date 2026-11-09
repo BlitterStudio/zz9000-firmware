@@ -339,6 +339,25 @@ void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t slot,
 	kernel->threads[slot].svc_ticks += elapsed_ms;
 }
 
+static void wake_api_waiters(zzapp_kernel_t *kernel)
+{
+	uint32_t slot;
+
+	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
+		if (!kernel->api_waiting[slot])
+			continue;
+		kernel->api_waiting[slot] = 0U;
+		(void)zzapp_kernel_wake(kernel, slot, ZZAPP_WAKE_READY);
+	}
+}
+
+static void release_api_lock(zzapp_kernel_t *kernel)
+{
+	kernel->api_lock_owner = -1;
+	kernel->api_lock_depth = 0U;
+	wake_api_waiters(kernel);
+}
+
 int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot)
 {
 	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
@@ -347,8 +366,11 @@ int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot)
 		kernel->api_lock_depth++;
 		return 0;
 	}
-	if (kernel->api_lock_owner >= 0)
+	if (kernel->api_lock_owner >= 0) {
+		kernel->api_waiting[slot] = 1U;
 		return -1;
+	}
+	kernel->api_waiting[slot] = 0U;
 	kernel->api_lock_owner = (int)slot;
 	kernel->api_lock_depth = 1U;
 	return 0;
@@ -360,7 +382,7 @@ int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot)
 	    kernel->api_lock_owner != (int)slot)
 		return -1;
 	if (--kernel->api_lock_depth == 0U)
-		kernel->api_lock_owner = -1;
+		release_api_lock(kernel);
 	return 0;
 }
 
@@ -368,10 +390,8 @@ int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot)
 {
 	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
 		return -1;
-	if (kernel->api_lock_owner == (int)slot) {
-		kernel->api_lock_owner = -1;
-		kernel->api_lock_depth = 0U;
-	}
+	if (kernel->api_lock_owner == (int)slot)
+		release_api_lock(kernel);
 	return zzapp_kernel_block(kernel, slot);
 }
 
@@ -519,10 +539,9 @@ void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot)
 	kernel->threads[slot].quantum_left = 0U;
 	if (kernel->active == slot)
 		kernel->active = NO_ACTIVE;
-	if (kernel->api_lock_owner == (int)slot) {
-		kernel->api_lock_owner = -1;
-		kernel->api_lock_depth = 0U;
-	}
+	if (kernel->api_lock_owner == (int)slot)
+		release_api_lock(kernel);
+	kernel->api_waiting[slot] = 0U;
 }
 
 void zzapp_kernel_stack_paint(uint8_t *stack, uint32_t bytes)

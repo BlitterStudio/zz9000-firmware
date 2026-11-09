@@ -51,6 +51,17 @@ zzapp_core1_vectors:
 	mov sp, r0
 .endm
 
+.macro select_irq_frame, adjust
+	mov r4, sp
+	mov r1, r0
+	mov r0, sp
+	mov r2, #\adjust
+	bl zzapp_kernel_arch_dispatch
+	cmp r0, #0
+	moveq r0, r4
+	mov sp, r0
+.endm
+
 .macro restore_frame, adjust
 	ldmia sp, {sp, lr}^
 	/* No banked-register access directly after a user-bank LDM. */
@@ -72,7 +83,7 @@ core1_vector_reset:
 core1_vector_irq:
 	save_frame
 	bl zzapp_kernel_irq_dispatch
-	select_frame 0, 4
+	select_irq_frame 4
 	restore_frame 4
 
 core1_vector_undef:

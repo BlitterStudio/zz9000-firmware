@@ -61,6 +61,8 @@ static uint32_t l2_pool[ZZAPP_AS_L2_TABLE_COUNT][L2_ENTRIES] ZZAPP_AS_TABLES
 static uint8_t l2_owner[ZZAPP_AS_L2_TABLE_COUNT];
 static uint8_t slot_live[ZZAPP_AS_SLOT_COUNT];
 static uint32_t asid_generation[ZZAPP_AS_SLOT_COUNT];
+static uint8_t alias_used[ZZAPP_AS_SLOT_COUNT][ZZAPP_AS_ALIAS_PAGE_COUNT];
+static uint16_t alias_length[ZZAPP_AS_SLOT_COUNT][ZZAPP_AS_ALIAS_PAGE_COUNT];
 static int template_ready;
 static sdk_smp_lock_t as_lock = SDK_SMP_LOCK_INIT;
 
@@ -292,6 +294,33 @@ static int app_range_ok(const zzapp_as_t *as, uint32_t address,
 	return 1;
 }
 
+static int alias_range_ok(const zzapp_as_t *as, uint32_t address,
+			  uint32_t bytes)
+{
+	if (!as || !as->active || bytes == 0U ||
+	    (address & (4096U - 1U)) != 0U ||
+	    (bytes & (4096U - 1U)) != 0U ||
+	    address < ZZAPP_AS_ALIAS_BASE ||
+	    bytes > ZZAPP_AS_ALIAS_END - address)
+		return 0;
+	return 1;
+}
+
+static int alias_first_free(uint32_t slot, uint32_t pages)
+{
+	uint32_t first;
+	uint32_t page;
+
+	for (first = 0U; first <= ZZAPP_AS_ALIAS_PAGE_COUNT - pages; first++) {
+		for (page = 0U; page < pages; page++)
+			if (alias_used[slot][first + page])
+				break;
+		if (page == pages)
+			return (int)first;
+	}
+	return -1;
+}
+
 void zzapp_as_init(const uint32_t *bsp_l1)
 {
 	uint32_t section;
@@ -300,6 +329,8 @@ void zzapp_as_init(const uint32_t *bsp_l1)
 	memset(app_l1, 0, sizeof(app_l1));
 	memset(slot_live, 0, sizeof(slot_live));
 	memset(asid_generation, 0, sizeof(asid_generation));
+	memset(alias_used, 0, sizeof(alias_used));
+	memset(alias_length, 0, sizeof(alias_length));
 	memset(l2_owner, 0xff, sizeof(l2_owner));
 	if (!bsp_l1)
 		return;
@@ -338,6 +369,8 @@ int zzapp_as_create(zzapp_as_t *as, uint32_t slot, uint32_t generation)
 	as->asid = (uint16_t)(slot + 1U);
 	as->slot = (uint8_t)slot;
 	as->active = 1U;
+	memset(alias_used[slot], 0, sizeof(alias_used[slot]));
+	memset(alias_length[slot], 0, sizeof(alias_length[slot]));
 	slot_live[slot] = 1U;
 	as_clean(as->l1, sizeof(app_l1[slot]));
 	sdk_smp_lock_release(&as_lock);
@@ -352,6 +385,8 @@ void zzapp_as_destroy(zzapp_as_t *as)
 	invalidate_asid(as->asid);
 	sdk_smp_lock_acquire(&as_lock);
 	l2_release_owner(as->slot + 1U);
+	memset(alias_used[as->slot], 0, sizeof(alias_used[as->slot]));
+	memset(alias_length[as->slot], 0, sizeof(alias_length[as->slot]));
 	memset(as->l1, 0, sizeof(app_l1[0]));
 	asid_generation[as->slot] = 0U;
 	slot_live[as->slot] = 0U;
@@ -402,134 +437,131 @@ int zzapp_as_unmap_frames(zzapp_as_t *as, uint32_t virtual_base,
 	return 0;
 }
 
-int zzapp_as_map_window(zzapp_as_t *as, uint32_t physical_base)
+int zzapp_as_alias_map_flags(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
+			     uint32_t flags, uint32_t *va)
 {
-	uint32_t section;
-	uint32_t descriptor;
+	uint32_t offset;
+	uint32_t virtual_base;
+	uint32_t pages;
+	int first;
 
-	if (!as || !as->active || (physical_base & ~SECTION_MASK) != 0U ||
-	    physical_base >= 0x40000000U)
+	if (!as || !as->active || !va || (phys & (4096U - 1U)) != 0U ||
+	    bytes == 0U || (bytes & (4096U - 1U)) != 0U ||
+	    (uint64_t)phys + bytes > (uint64_t)UINT32_MAX + 1U ||
+	    (flags != ZZAPP_AS_ALIAS_RO && flags != ZZAPP_AS_ALIAS_RW &&
+	     flags != ZZAPP_AS_ALIAS_RX))
 		return -1;
-	section = physical_base >> SECTION_SHIFT;
+	for (offset = 0U; offset < bytes; offset += 4096U)
+		if ((template_page((phys + offset) >> SECTION_SHIFT,
+				   ((phys + offset) >> PAGE_SHIFT) & 0xffU) &
+		     L2_TYPE) != L2_TYPE)
+			return -1;
+	pages = bytes >> PAGE_SHIFT;
 	sdk_smp_lock_acquire(&as_lock);
-	descriptor = template_l1[section];
-	if ((descriptor & L1_TYPE_MASK) != L1_SECTION) {
-		sdk_smp_lock_release(&as_lock);
-		return -1;
-	}
-	as->l1[section] = (descriptor & ~L1_AP_MASK) | (3U << 10) | L1_NG;
-	as_clean(&as->l1[section], sizeof(as->l1[section]));
-	as_sync();
-	sdk_smp_lock_release(&as_lock);
-	return 0;
-}
-
-int zzapp_as_grant_user(zzapp_as_t *as, uint32_t address, uint32_t bytes)
-{
-	uint32_t end;
-	uint32_t page_address;
-
-	if (!as || !as->active || bytes == 0U || (address & 0xfffU) != 0U ||
-	    (bytes & 0xfffU) != 0U || address >= 0x40000000U ||
-	    bytes > 0x40000000U - address)
-		return -1;
-	end = address + bytes;
-	sdk_smp_lock_acquire(&as_lock);
-	if (!grant_l2_available(as, address, end)) {
+	first = alias_first_free(as->slot, pages);
+	if (first < 0) {
 		sdk_smp_lock_release(&as_lock);
 		return ZZAPP_AS_ENOMEM;
 	}
-	for (page_address = address; page_address < end; page_address += 4096U) {
-		uint32_t section = page_address >> SECTION_SHIFT;
-		uint32_t page = (page_address >> PAGE_SHIFT) & 0xffU;
+	virtual_base = ZZAPP_AS_ALIAS_BASE + (uint32_t)first * 4096U;
+	if (!grant_l2_available(as, virtual_base, virtual_base + bytes)) {
+		sdk_smp_lock_release(&as_lock);
+		return ZZAPP_AS_ENOMEM;
+	}
+	for (offset = 0U; offset < bytes; offset += 4096U) {
+		uint32_t address = virtual_base + offset;
+		uint32_t section = address >> SECTION_SHIFT;
+		uint32_t page = (address >> PAGE_SHIFT) & 0xffU;
+		uint32_t source = template_page((phys + offset) >> SECTION_SHIFT,
+					      ((phys + offset) >> PAGE_SHIFT) & 0xffU);
 		int index = ensure_l2(as, section);
 
 		if (index < 0) {
 			sdk_smp_lock_release(&as_lock);
 			return index;
 		}
-		l2_pool[index][page] = (l2_pool[index][page] & ~L2_AP_MASK) |
-			L2_AP_USER_RW | L2_NG | L2_XN;
+		l2_pool[index][page] = (phys + offset) |
+			(source & ~(PAGE_MASK | L2_AP_MASK | L2_NG | L2_XN)) |
+			(flags == ZZAPP_AS_ALIAS_RW ? L2_AP_USER_RW : L2_AP_USER_RO) |
+			L2_NG | (flags == ZZAPP_AS_ALIAS_RX ? 0U : L2_XN);
 		as_clean(&l2_pool[index][page], sizeof(l2_pool[index][page]));
+		alias_used[as->slot][(uint32_t)first + (offset >> PAGE_SHIFT)] = 1U;
 	}
+	alias_length[as->slot][first] = (uint16_t)pages;
 	as_clean(as->l1, sizeof(app_l1[0]));
 	as_sync();
 	sdk_smp_lock_release(&as_lock);
+	*va = virtual_base;
 	return 0;
 }
 
-int zzapp_as_grant_user_ro(zzapp_as_t *as, uint32_t address, uint32_t bytes,
-                           int executable)
+int zzapp_as_alias_map(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
+		       int writable, uint32_t *va)
 {
-	uint32_t end;
-	uint32_t page_address;
+	return zzapp_as_alias_map_flags(as, phys, bytes,
+		writable ? ZZAPP_AS_ALIAS_RW : ZZAPP_AS_ALIAS_RO, va);
+}
 
-	if (!as || !as->active || bytes == 0U || (address & 0xfffU) != 0U ||
-	    (bytes & 0xfffU) != 0U || address >= 0x40000000U ||
-	    bytes > 0x40000000U - address)
+int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va, uint32_t bytes)
+{
+	uint32_t offset;
+	uint32_t first;
+	uint32_t pages;
+
+	if (!alias_range_ok(as, va, bytes))
 		return -1;
-	end = address + bytes;
+	first = (va - ZZAPP_AS_ALIAS_BASE) >> PAGE_SHIFT;
+	pages = bytes >> PAGE_SHIFT;
 	sdk_smp_lock_acquire(&as_lock);
-	if (!grant_l2_available(as, address, end)) {
+	if (alias_length[as->slot][first] != pages) {
 		sdk_smp_lock_release(&as_lock);
-		return ZZAPP_AS_ENOMEM;
+		return -1;
 	}
-	for (page_address = address; page_address < end; page_address += 4096U) {
-		uint32_t section = page_address >> SECTION_SHIFT;
-		uint32_t page = (page_address >> PAGE_SHIFT) & 0xffU;
-		int index = ensure_l2(as, section);
-		uint32_t descriptor;
+	for (offset = 0U; offset < bytes; offset += 4096U) {
+		uint32_t address = va + offset;
+		uint32_t section = address >> SECTION_SHIFT;
+		uint32_t page = (address >> PAGE_SHIFT) & 0xffU;
+		int index = l2_index_for_descriptor(as->l1[section]);
 
-		if (index < 0) {
-			sdk_smp_lock_release(&as_lock);
-			return index;
-		}
-		descriptor = l2_pool[index][page];
-		if ((descriptor & L1_TYPE_MASK) != L2_TYPE) {
+		if (index < 0 || !alias_used[as->slot][first +
+						 (offset >> PAGE_SHIFT)]) {
 			sdk_smp_lock_release(&as_lock);
 			return -1;
 		}
-		descriptor = (descriptor & ~(L2_AP_MASK | L2_XN)) |
-			L2_AP_USER_RO | L2_NG;
-		if (!executable)
-			descriptor |= L2_XN;
-		l2_pool[index][page] = descriptor;
-		as_clean(&l2_pool[index][page], sizeof(l2_pool[index][page]));
-	}
-	as_clean(as->l1, sizeof(app_l1[0]));
-	as_sync();
-	sdk_smp_lock_release(&as_lock);
-	return 0;
-}
-
-int zzapp_as_ungrant_user(zzapp_as_t *as, uint32_t address, uint32_t bytes)
-{
-	uint32_t end;
-	uint32_t page_address;
-
-	if (!as || !as->active || bytes == 0U || (address & 0xfffU) != 0U ||
-	    (bytes & 0xfffU) != 0U || address >= 0x40000000U ||
-	    bytes > 0x40000000U - address)
-		return -1;
-	end = address + bytes;
-	sdk_smp_lock_acquire(&as_lock);
-	for (page_address = address; page_address < end; page_address += 4096U) {
-		uint32_t section = page_address >> SECTION_SHIFT;
-		uint32_t page = (page_address >> PAGE_SHIFT) & 0xffU;
-		int index = ensure_l2(as, section);
-
-		if (index < 0) {
-			sdk_smp_lock_release(&as_lock);
-			return index;
-		}
 		l2_pool[index][page] = template_page(section, page);
 		as_clean(&l2_pool[index][page], sizeof(l2_pool[index][page]));
+		alias_used[as->slot][first + (offset >> PAGE_SHIFT)] = 0U;
 	}
+	alias_length[as->slot][first] = 0U;
 	as_clean(as->l1, sizeof(app_l1[0]));
 	as_sync();
+	invalidate_asid(as->asid);
 	sdk_smp_lock_release(&as_lock);
 	return 0;
 }
+
+uint32_t zzapp_as_alias_phys(const zzapp_as_t *as, uint32_t va)
+{
+	uint32_t page;
+	uint32_t descriptor;
+	int index;
+
+	if (!as || !as->active || va < ZZAPP_AS_ALIAS_BASE ||
+	    va >= ZZAPP_AS_ALIAS_END)
+		return 0U;
+	page = (va - ZZAPP_AS_ALIAS_BASE) >> PAGE_SHIFT;
+	if (!alias_used[as->slot][page])
+		return 0U;
+	descriptor = as->l1[va >> SECTION_SHIFT];
+	index = l2_index_for_descriptor(descriptor);
+	if (index < 0)
+		return 0U;
+	descriptor = l2_pool[index][(va >> PAGE_SHIFT) & 0xffU];
+	if ((descriptor & L2_TYPE) != L2_TYPE)
+		return 0U;
+	return (descriptor & PAGE_MASK) | (va & (4096U - 1U));
+}
+
 
 int zzapp_as_map_image(zzapp_as_t *as, uint32_t virtual_base,
 			uint32_t physical_base, uint32_t bytes, uint32_t permissions)
@@ -604,9 +636,7 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 		if (index < 0 || l2_owner[index] == 0U) {
 			replace_live_descriptor(&app_l1[slot][section],
 						template_l1[section]);
-			continue;
-		}
-		{
+		} else {
 			uint32_t page;
 
 			/* A section-wide change (Xil_SetTlbAttributes) carries
@@ -617,6 +647,35 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 					section_page_descriptor(section, page,
 								descriptor));
 			as_clean(l2_pool[index], sizeof(l2_pool[index]));
+		}
+		{
+			uint32_t table;
+
+			/* Alias VAs are unrelated to the mapped physical section,
+			 * so find every owned L2 entry that names this section. */
+			for (table = 0U; table < ZZAPP_AS_L2_TABLE_COUNT; table++) {
+				uint32_t page;
+
+				if (l2_owner[table] != slot + 1U)
+					continue;
+				for (page = 0U; page < L2_ENTRIES; page++) {
+					uint32_t mapped = l2_pool[table][page];
+					uint32_t physical = mapped & PAGE_MASK;
+					uint32_t source;
+
+					if ((mapped & L2_TYPE) != L2_TYPE ||
+					    physical >> SECTION_SHIFT != section)
+						continue;
+					source = pages ?
+						pages[(physical >> PAGE_SHIFT) & 0xffU] :
+						section_page_descriptor(section,
+							(physical >> PAGE_SHIFT) & 0xffU,
+							descriptor);
+					replace_memory_attributes(&l2_pool[table][page],
+								  source);
+				}
+				as_clean(l2_pool[table], sizeof(l2_pool[table]));
+			}
 		}
 	}
 	as_clean(template_l1, sizeof(template_l1));

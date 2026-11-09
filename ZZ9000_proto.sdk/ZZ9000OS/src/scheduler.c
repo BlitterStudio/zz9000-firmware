@@ -159,7 +159,7 @@ uint32_t taskq_doorbell_drain(volatile uint32_t *pending,
   if (!pending || !drain || !more || batch == 0U)
     return 0;
   drained = drain(context, batch);
-  if (drained == batch || more(context))
+  if (more(context))
     return drained;
   taskq_store_release(pending, 0U);
   taskq_acquire_barrier();

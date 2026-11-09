@@ -280,6 +280,39 @@ static void test_waiter_isolation_timeout_and_stop(void)
 	CHECK(zzapp_kernel_wait_status(&kernel, 1) == ZZAPP_KERNEL_WAIT_CANCELLED);
 }
 
+static void test_stop_wakes_api_lock_waiter(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) != 0);
+	CHECK(zzapp_kernel_block(&kernel, 1) == 0);
+	zzapp_kernel_stop_app(&kernel, 0);
+	CHECK(kernel.threads[1].state == ZZAPP_THREAD_RUNNABLE);
+	CHECK(kernel.threads[1].wake_reason == ZZAPP_WAKE_READY);
+}
+
+static void test_kernel_stack_covers_decoder_call_chain(void)
+{
+	/* MP3's decode scratch alone is 13,216 bytes; leave room for the
+	 * exception frame and its callers without sharing a stack between apps. */
+	CHECK(ZZAPP_KERNEL_STACK_BYTES >= 32768U);
+}
+
+static void test_non_timer_interrupt_does_not_advance_time(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+
+	zzapp_kernel_init(&kernel);
+	(void)zzapp_kernel_switch_frame(&kernel, &frame,
+		ZZAPP_KERNEL_DISPATCH_INTERRUPT, 4U);
+	CHECK(kernel.now == 0U);
+}
+
 static void test_system_ticks_wake_sleepers(void)
 {
 	zzapp_kernel_t kernel;
@@ -317,6 +350,9 @@ int main(void)
     test_accounting_and_throttle();
     test_blocking_api_lock_and_slot_resources();
     test_waiter_isolation_timeout_and_stop();
+    test_stop_wakes_api_lock_waiter();
+    test_kernel_stack_covers_decoder_call_chain();
+    test_non_timer_interrupt_does_not_advance_time();
     test_system_ticks_wake_sleepers();
     printf("kernel_sched_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;

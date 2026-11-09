@@ -12,11 +12,24 @@
 #define ZZAPP_AS_SLOT_COUNT 4U
 #define ZZAPP_AS_WINDOW_BASE 0xc0000000U
 #define ZZAPP_AS_WINDOW_END  0xe0000000U
+/*
+ * Host-visible buffers live below the 1 MiB stack guard and the largest
+ * permitted 1 MiB app stack at the top of the private window. The loader
+ * must leave this range unmapped for private image, heap, and stack pages.
+ */
+#define ZZAPP_AS_ALIAS_BASE 0xdc000000U
+#define ZZAPP_AS_ALIAS_END  0xdfe00000U
+#define ZZAPP_AS_ALIAS_PAGE_COUNT \
+	((ZZAPP_AS_ALIAS_END - ZZAPP_AS_ALIAS_BASE) / 4096U)
 #define ZZAPP_AS_ENOMEM       (-3)
 
 #define ZZAPP_AS_IMAGE_RX 1U
 #define ZZAPP_AS_IMAGE_RO 2U
 #define ZZAPP_AS_IMAGE_RW 3U
+
+#define ZZAPP_AS_ALIAS_RO 1U
+#define ZZAPP_AS_ALIAS_RW 2U
+#define ZZAPP_AS_ALIAS_RX 3U
 
 typedef struct {
 	uint32_t *l1;
@@ -37,14 +50,17 @@ int zzapp_as_map_frames(zzapp_as_t *as, uint32_t virtual_base,
 /* Remove 1 MiB private mappings. */
 int zzapp_as_unmap_frames(zzapp_as_t *as, uint32_t virtual_base,
                           uint32_t frame_count);
-/* Map the launcher window as one identity-mapped user section. */
-int zzapp_as_map_window(zzapp_as_t *as, uint32_t physical_base);
-/* Add or remove identity-mapped user RW pages for an owned low-DDR grant. */
-int zzapp_as_grant_user(zzapp_as_t *as, uint32_t address, uint32_t bytes);
-int zzapp_as_ungrant_user(zzapp_as_t *as, uint32_t address, uint32_t bytes);
-/* Add identity-mapped user read-only pages. Execution is controlled separately. */
-int zzapp_as_grant_user_ro(zzapp_as_t *as, uint32_t address, uint32_t bytes,
-                           int executable);
+/* Map [phys, phys + bytes) into this app's private alias range. phys and
+ * bytes must be page aligned. RO and RW mappings are XN; RX is executable. */
+int zzapp_as_alias_map_flags(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
+			     uint32_t flags, uint32_t *va);
+/* Convenience wrapper for an XN RO or RW alias. */
+int zzapp_as_alias_map(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
+		       int writable, uint32_t *va);
+/* Unmap exactly the alias returned by zzapp_as_alias_map. */
+int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va, uint32_t bytes);
+/* Return the physical address for an alias address, or zero when unmapped. */
+uint32_t zzapp_as_alias_phys(const zzapp_as_t *as, uint32_t va);
 /* Map page-aligned image memory with the requested user permissions. */
 int zzapp_as_map_image(zzapp_as_t *as, uint32_t virtual_base,
 			uint32_t physical_base, uint32_t bytes, uint32_t permissions);

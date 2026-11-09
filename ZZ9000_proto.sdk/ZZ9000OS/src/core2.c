@@ -3,6 +3,7 @@
 #include "xil_cache.h"
 #include "xil_exception.h"
 #include "xil_io.h"
+#include "xparameters.h"
 #include "xil_misc_psreset_api.h"
 #include "core2.h"
 #include "sleep.h"
@@ -101,11 +102,23 @@ extern u32 PrefetchAbortAddr;
 
 extern void zzapp_core1_vectors(void);
 
-/* Core 1 uses a private VBAR. Its vector entry owns the complete VFP save;
- * the GIC dispatcher then invokes the normal per-interrupt callbacks. */
-void zzapp_kernel_irq_dispatch(void)
+/* Core 1 owns its GIC CPU interface. Read the acknowledged interrupt ID here
+ * so the exception return path advances scheduler time only for its timer. */
+uint32_t zzapp_kernel_irq_dispatch(void)
 {
-	XScuGic_InterruptHandler(interrupt_get_intc());
+	XScuGic *intc = interrupt_get_intc();
+	uint32_t full_id = XScuGic_CPUReadReg(intc, XSCUGIC_INT_ACK_OFFSET);
+	uint32_t interrupt_id = full_id & XSCUGIC_ACK_INTID_MASK;
+
+	if (interrupt_id < XSCUGIC_MAX_NUM_INTR_INPUTS) {
+		XScuGic_VectorTableEntry *entry =
+			&intc->Config->HandlerTable[interrupt_id];
+
+		entry->Handler(entry->CallBackRef);
+	}
+	XScuGic_CPUWriteReg(intc, XSCUGIC_EOI_OFFSET, full_id);
+	return interrupt_id == XPAR_PS7_SCUTIMER_0_INTR ?
+		ZZAPP_KERNEL_DISPATCH_TICK : ZZAPP_KERNEL_DISPATCH_INTERRUPT;
 }
 extern u32 UndefinedExceptionAddr;
 

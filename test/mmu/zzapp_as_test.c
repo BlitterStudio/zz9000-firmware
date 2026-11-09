@@ -96,46 +96,6 @@ static void test_frame_sections_only_fill_window(void)
 	CHECK((l1[0xc00U] & 3U) != 0U);
 	zzapp_as_destroy(&as);
 }
-static void test_window_is_one_user_section(void)
-{
-	zzapp_as_t as;
-	const uint32_t *l1;
-
-	CHECK(zzapp_as_create(&as, 0U, 4U) == 0);
-	CHECK(zzapp_as_map_window(&as, 0x03400000U) == 0);
-	l1 = zzapp_as_l1(&as);
-	CHECK((l1[0x034U] & SECTION_AP_MASK) == (3U << 10));
-	CHECK((l1[0x034U] & SECTION_NG) != 0U);
-	CHECK((l1[0x034U] & 3U) == 2U);
-	CHECK(zzapp_as_l2_for(&as, 0x03400000U) == NULL);
-	zzapp_as_destroy(&as);
-}
-
-
-static void test_grant_and_ungrant_preserve_neighbours(void)
-{
-	zzapp_as_t as;
-	const uint32_t *l1;
-	const uint32_t *l2;
-
-	CHECK(zzapp_as_create(&as, 1U, 1U) == 0);
-	CHECK(zzapp_as_grant_user(&as, 0x03405000U, 5U * 4096U) == 0);
-	l1 = zzapp_as_l1(&as);
-	CHECK((l1[0x034U] & 3U) == 1U);
-	l2 = zzapp_as_l2_for(&as, 0x03400000U);
-	CHECK(l2 != NULL);
-	CHECK((l2[4] & PAGE_AP_MASK) != PAGE_USER_RW);
-	CHECK((l2[5] & PAGE_AP_MASK) == PAGE_USER_RW);
-	CHECK((l2[9] & PAGE_AP_MASK) == PAGE_USER_RW);
-	CHECK((l2[10] & PAGE_AP_MASK) != PAGE_USER_RW);
-	CHECK(zzapp_as_ungrant_user(&as, 0x03406000U, 2U * 4096U) == 0);
-	CHECK((l2[5] & PAGE_AP_MASK) == PAGE_USER_RW);
-	CHECK((l2[6] & PAGE_AP_MASK) != PAGE_USER_RW);
-	CHECK((l2[7] & PAGE_AP_MASK) != PAGE_USER_RW);
-	CHECK((l2[8] & PAGE_AP_MASK) == PAGE_USER_RW);
-	CHECK((l2[9] & PAGE_AP_MASK) == PAGE_USER_RW);
-	zzapp_as_destroy(&as);
-}
 
 static void test_image_permissions_and_window_bounds(void)
 {
@@ -181,62 +141,99 @@ static void test_noncacheable_change_propagates(void)
 }
 
 /* Xil_SetTlbAttributes rewrites whole BSP sections at run time (audio,
- * Ethernet, MiniGL, the Z3 mailbox). An app holding a grant in that section
- * must see the new memory type on every page while keeping its access. */
-static void test_section_attribute_change_reaches_app_pages(void)
+ * Ethernet, MiniGL, the Z3 mailbox). An alias of that physical range must
+ * retain its user access while taking the changed memory attributes. */
+static void test_section_attribute_change_reaches_alias_pages(void)
 {
 	zzapp_as_t as;
 	const uint32_t *l2;
 	const uint32_t noncache = 0x03400000U | 0x11de2U;
 	const uint32_t mem_type = (7U << 6) | (1U << 3) | (1U << 2);
+	uint32_t va;
 
 	CHECK(zzapp_as_create(&as, 1U, 7U) == 0);
-	CHECK(zzapp_as_grant_user(&as, 0x03405000U, 5U * 4096U) == 0);
+	CHECK(zzapp_as_alias_map(&as, 0x03405000U, 5U * 4096U, 1, &va) == 0);
 	zzapp_as_mmu_page_changed(0x034U, noncache, NULL);
 	CHECK((zzapp_as_template()[0x034U] & ~(SECTION_AP_MASK | SECTION_NG)) ==
 	      (noncache & ~(SECTION_AP_MASK | SECTION_NG)));
-	l2 = zzapp_as_l2_for(&as, 0x03400000U);
+	l2 = zzapp_as_l2_for(&as, va);
 	CHECK(l2 != NULL);
-	CHECK((l2[5] & mem_type) == (1U << 6));
-	CHECK((l2[5] & PAGE_AP_MASK) == PAGE_USER_RW);
-	CHECK((l2[4] & mem_type) == (1U << 6));
-	CHECK((l2[4] & PAGE_AP_MASK) != PAGE_USER_RW);
+	CHECK((l2[(va >> 12) & 0xffU] & mem_type) == (1U << 6));
+	CHECK((l2[(va >> 12) & 0xffU] & PAGE_AP_MASK) == PAGE_USER_RW);
+	CHECK((l2[((va >> 12) + 4U) & 0xffU] & mem_type) == (1U << 6));
+	CHECK((l2[((va >> 12) + 4U) & 0xffU] & PAGE_AP_MASK) == PAGE_USER_RW);
 	zzapp_as_destroy(&as);
 }
 
-static void test_readonly_user_grant(void)
+
+static void test_alias_maps_only_in_private_region(void)
 {
 	zzapp_as_t as;
-	const uint32_t *l2;
+	const uint32_t *identity_l2;
+	const uint32_t *alias_l2;
+	uint32_t rw_va;
+	uint32_t ro_va;
+	uint32_t rx_va;
 
-	CHECK(zzapp_as_create(&as, 1U, 2U) == 0);
-	CHECK(zzapp_as_grant_user_ro(&as, 0x00300000U, 4096U, 1) == 0);
-	l2 = zzapp_as_l2_for(&as, 0x00300000U);
-	CHECK((l2[0] & PAGE_AP_MASK) == PAGE_USER_RO);
-	CHECK((l2[0] & PAGE_XN) == 0U);
-	CHECK(zzapp_as_grant_user_ro(&as, 0x00301000U, 4096U, 0) == 0);
-	CHECK((l2[1] & PAGE_AP_MASK) == PAGE_USER_RO);
-	CHECK((l2[1] & PAGE_XN) != 0U);
+	CHECK(zzapp_as_create(&as, 0U, 5U) == 0);
+	CHECK(zzapp_as_alias_map(&as, 0x03405000U, 5U * 4096U, 1,
+	                         &rw_va) == 0);
+	CHECK(rw_va >= ZZAPP_AS_ALIAS_BASE && rw_va < ZZAPP_AS_ALIAS_END);
+	identity_l2 = zzapp_as_l2_for(&as, 0x03400000U);
+	CHECK(identity_l2 == NULL);
+	alias_l2 = zzapp_as_l2_for(&as, rw_va);
+	CHECK(alias_l2 != NULL);
+	CHECK((alias_l2[(rw_va >> 12) & 0xffU] & 0xfffff000U) ==
+	      0x03405000U);
+	CHECK((alias_l2[(rw_va >> 12) & 0xffU] & PAGE_AP_MASK) == PAGE_USER_RW);
+	CHECK((alias_l2[(rw_va >> 12) & 0xffU] & PAGE_XN) != 0U);
+	CHECK((alias_l2[(rw_va >> 12) & 0xffU] & PAGE_NG) != 0U);
+	CHECK(zzapp_as_alias_phys(&as, rw_va + 0x234U) == 0x03405234U);
+	CHECK(zzapp_as_alias_map(&as, 0x03410000U, 4096U, 0, &ro_va) == 0);
+	alias_l2 = zzapp_as_l2_for(&as, ro_va);
+	CHECK((alias_l2[(ro_va >> 12) & 0xffU] & PAGE_AP_MASK) == PAGE_USER_RO);
+	CHECK(zzapp_as_alias_map_flags(&as, 0x03411000U, 4096U,
+				       ZZAPP_AS_ALIAS_RX, &rx_va) == 0);
+	alias_l2 = zzapp_as_l2_for(&as, rx_va);
+	CHECK((alias_l2[(rx_va >> 12) & 0xffU] & PAGE_AP_MASK) == PAGE_USER_RO);
+	CHECK((alias_l2[(rx_va >> 12) & 0xffU] & PAGE_XN) == 0U);
+	CHECK(zzapp_as_alias_unmap(&as, rw_va, 4U * 4096U) != 0);
+	CHECK(zzapp_as_alias_phys(&as, rw_va) == 0x03405000U);
+	CHECK(zzapp_as_alias_unmap(&as, rw_va, 5U * 4096U) == 0);
+	CHECK(zzapp_as_alias_phys(&as, rw_va) == 0U);
+	CHECK(zzapp_as_alias_unmap(&as, ro_va, 4096U) == 0);
+	CHECK(zzapp_as_alias_unmap(&as, rx_va, 4096U) == 0);
+	CHECK(zzapp_as_alias_map(&as, 0x03410001U, 4096U, 1, &rw_va) != 0);
+	CHECK(zzapp_as_alias_map(&as, 0x03410000U, 4095U, 1, &rw_va) != 0);
 	zzapp_as_destroy(&as);
+	CHECK(zzapp_as_alias_phys(&as, ZZAPP_AS_ALIAS_BASE) == 0U);
 }
 
-static void test_l2_exhaustion_is_atomic(void)
+static void test_alias_l2_exhaustion_is_atomic(void)
 {
-	zzapp_as_t as;
+	zzapp_as_t first;
+	zzapp_as_t second;
+	zzapp_as_t third;
+	zzapp_as_t fourth;
 	uint32_t before[4096];
-	uint32_t section;
-	int rc = 0;
+	uint32_t va;
+	uint32_t bytes = ZZAPP_AS_ALIAS_END - ZZAPP_AS_ALIAS_BASE;
 
-	CHECK(zzapp_as_create(&as, 0U, 3U) == 0);
-	for (section = 0U; section < 0x400U; section++) {
-		memcpy(before, zzapp_as_l1(&as), sizeof(before));
-		rc = zzapp_as_grant_user(&as, section << 20, 4096U);
-		if (rc != 0)
-			break;
-	}
-	CHECK(rc == ZZAPP_AS_ENOMEM);
-	CHECK(memcmp(before, zzapp_as_l1(&as), sizeof(before)) == 0);
-	zzapp_as_destroy(&as);
+	CHECK(zzapp_as_create(&first, 0U, 3U) == 0);
+	CHECK(zzapp_as_create(&second, 1U, 3U) == 0);
+	CHECK(zzapp_as_create(&third, 2U, 3U) == 0);
+	CHECK(zzapp_as_create(&fourth, 3U, 3U) == 0);
+	CHECK(zzapp_as_alias_map(&first, 0U, bytes, 1, &va) == 0);
+	CHECK(zzapp_as_alias_map(&second, 0U, bytes, 1, &va) == 0);
+	CHECK(zzapp_as_alias_map(&third, 0U, 3U << 20, 1, &va) == 0);
+	memcpy(before, zzapp_as_l1(&fourth), sizeof(before));
+	CHECK(zzapp_as_alias_map(&fourth, 0U, 4096U, 1, &va) ==
+	      ZZAPP_AS_ENOMEM);
+	CHECK(memcmp(before, zzapp_as_l1(&fourth), sizeof(before)) == 0);
+	zzapp_as_destroy(&first);
+	zzapp_as_destroy(&second);
+	zzapp_as_destroy(&third);
+	zzapp_as_destroy(&fourth);
 }
 
 int main(void)
@@ -244,13 +241,11 @@ int main(void)
 	setup();
 	test_template_is_privileged_global();
 	test_frame_sections_only_fill_window();
-	test_window_is_one_user_section();
-	test_grant_and_ungrant_preserve_neighbours();
 	test_image_permissions_and_window_bounds();
 	test_noncacheable_change_propagates();
-	test_section_attribute_change_reaches_app_pages();
-	test_readonly_user_grant();
-	test_l2_exhaustion_is_atomic();
+	test_section_attribute_change_reaches_alias_pages();
+	test_alias_maps_only_in_private_region();
+	test_alias_l2_exhaustion_is_atomic();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

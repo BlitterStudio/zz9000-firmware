@@ -478,6 +478,18 @@ static void test_doorbell_coalesces_and_drains(void)
   expect_u32("doorbell_cleared", pending, 0U);
 }
 
+static void test_doorbell_clears_after_exact_final_batch(void)
+{
+  volatile uint32_t pending = 1;
+  doorbell_test_t test = { 8U, 0U, 0U, 0 };
+
+  expect_u32("doorbell_exact_drained",
+             taskq_doorbell_drain(&pending, doorbell_drain, doorbell_more,
+                                  &test, 8U), 8U);
+  expect_u32("doorbell_exact_empty", test.queued, 0U);
+  expect_u32("doorbell_exact_clear", pending, 0U);
+}
+
 static void test_doorbell_rechecks_before_clear(void)
 {
   volatile uint32_t pending = 1;
@@ -522,6 +534,7 @@ int main(void)
   test_minigl_reset_handshake_flow();
   test_minigl_reset_phase_keeps_inflight_buffers();
   test_doorbell_coalesces_and_drains();
+  test_doorbell_clears_after_exact_final_batch();
   test_doorbell_rechecks_before_clear();
 
   if (failures) {

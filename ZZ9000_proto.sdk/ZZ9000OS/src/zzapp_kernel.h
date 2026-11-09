@@ -12,7 +12,8 @@
 #define ZZAPP_KERNEL_QUANTUM_MS 5U
 #define ZZAPP_KERNEL_SERVICE_WINDOW_MS 100U
 #define ZZAPP_KERNEL_SERVICE_LIMIT_MS 95U
-#define ZZAPP_KERNEL_STACK_BYTES 8192U
+/* Covers the 13,216-byte MP3 decode scratch, exception frame, and callers. */
+#define ZZAPP_KERNEL_STACK_BYTES (32U << 10)
 #define ZZAPP_KERNEL_PAGE_BYTES 4096U
 #define ZZAPP_KERNEL_SESSION_LIMIT 4U
 #define ZZAPP_KERNEL_APP_CPSR 0x10U
@@ -22,7 +23,8 @@
 typedef enum {
 	ZZAPP_KERNEL_DISPATCH_TICK = 0,
 	ZZAPP_KERNEL_DISPATCH_DOORBELL,
-	ZZAPP_KERNEL_DISPATCH_VOLUNTARY
+	ZZAPP_KERNEL_DISPATCH_VOLUNTARY,
+	ZZAPP_KERNEL_DISPATCH_INTERRUPT
 } zzapp_kernel_dispatch_t;
 
 /*
@@ -115,6 +117,7 @@ typedef struct {
 	uint32_t wake_log_count;
 	int api_lock_owner;
 	uint32_t api_lock_depth;
+	uint8_t api_waiting[ZZAPP_KERNEL_APP_SLOTS];
 	int gl_owner;
 	uint32_t gl_generation;
 	uint32_t direct_audio_count;
