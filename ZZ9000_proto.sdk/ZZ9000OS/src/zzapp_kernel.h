@@ -152,6 +152,7 @@ int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
 			      uint32_t generation, uint32_t base, uint32_t bytes);
+void zzapp_kernel_surface_unbind(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t slot,
 			    int direct_card_route);
 void zzapp_kernel_audio_close(zzapp_kernel_t *kernel, uint32_t slot);

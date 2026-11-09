@@ -34,6 +34,10 @@
 #include <stdlib.h>
 #endif
 
+#ifdef ZZAPP_HOST_TEST
+static uint8_t g_test_wait_registered[ZZAPP_AS_SLOT_COUNT];
+#endif
+
 uint32_t __attribute__((weak)) zzapp_services_current_slot(void)
 {
     return 0U;
@@ -47,6 +51,16 @@ void __attribute__((weak)) zzapp_services_select_slot(uint32_t slot)
 uint32_t __attribute__((weak)) zzapp_services_memory_limit(void)
 {
     return 0U;
+}
+
+int __attribute__((weak)) zzapp_services_wait_registered(uint32_t slot)
+{
+#ifdef ZZAPP_HOST_TEST
+    return slot < ZZAPP_AS_SLOT_COUNT && g_test_wait_registered[slot];
+#else
+    (void)slot;
+    return 0;
+#endif
 }
 
 struct zzapp_coherent {
@@ -636,7 +650,7 @@ static void service_tick(uint64_t now, int permit_reentry)
         host->watchdog_reason = 1u;
         force_stop(ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
     }
-    if (!g_host_visible_commit_active[slot] && coh->running &&
+    if (!permit_reentry && !g_host_visible_commit_active[slot] && coh->running &&
         coh->in_api != 0u &&
         ticks_to_us(now - coh->api_entered) >= ZZAPP_API_STUCK_US) {
         host->watchdog_reason = 2u;
@@ -761,22 +775,46 @@ void zzapp_host_yield(void)
 
 void zzapp_host_yield_wait(void)
 {
-    uint64_t now = now_ticks();
     uint32_t slot = current_slot();
     struct zzapp_coherent *coh = coherent(slot);
-    int blocked = zzapp_kernel_current_thread() >= 0 && coh->in_api != 0u;
 
-    if (coh->in_api != 0u)
-        coh->api_entered = now;
-    if (blocked)
-        (void)zzapp_kernel_api_block(&g_kernel, slot);
-    zzapp_note_progress();
-    service_tick_in_task(now, 1);
-    if (blocked) {
-        (void)zzapp_kernel_wake(&g_kernel, slot, ZZAPP_WAKE_READY);
-        (void)zzapp_kernel_api_lock(&g_kernel, slot);
+    if (zzapp_kernel_current_thread() < 0) {
+        zzapp_note_progress();
+        check_stack_canary();
+        service_tick_in_task(now_ticks(), 1);
+        return;
     }
+    if (coh->in_api == 0u) {
+        zzapp_host_yield();
+        return;
+    }
+    (void)zzapp_kernel_api_block(&g_kernel, slot);
+    if (!zzapp_services_wait_registered(slot))
+        (void)zzapp_kernel_sleep(&g_kernel, slot, g_kernel.now + 1U);
+    zzapp_note_progress();
+#ifndef ZZAPP_HOST_TEST
+    /*
+     * The core-1 SVC vector recognises a privileged SVC as a voluntary
+     * scheduler handoff.  It resumes here only after the waiter is woken.
+     */
+    __asm__ __volatile__("svc 0" ::: "memory");
+#endif
+    (void)zzapp_kernel_api_lock(&g_kernel, slot);
 }
+void zzapp_host_sleep(uint32_t us)
+{
+    uint32_t slot = current_slot();
+
+    if (zzapp_kernel_current_thread() < 0)
+        return;
+    (void)zzapp_kernel_sleep(&g_kernel, slot,
+        g_kernel.now + (uint64_t)((us + 999u) / 1000u));
+#ifndef ZZAPP_HOST_TEST
+    __asm__ __volatile__("svc 0" ::: "memory");
+#endif
+    (void)zzapp_kernel_api_lock(&g_kernel, slot);
+}
+
 
 uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
 
@@ -1284,6 +1322,7 @@ void zzapp_boot_init(void)
     g_cold_restarts = 0;
 #ifdef ZZAPP_HOST_TEST
     g_test_service_calls = 0;
+    memset(g_test_wait_registered, 0, sizeof(g_test_wait_registered));
 #endif
 }
 
@@ -1459,4 +1498,9 @@ uint8_t *zzapp_test_stack_canary(void)
     return (host->mem && host->heap_end != 0u) ? host->mem + host->heap_end : 0;
 }
 uint32_t zzapp_test_fault_code(void) { return coherent(current_slot())->fault; }
+void zzapp_test_set_wait_registered(uint32_t slot, int registered)
+{
+    if (slot < ZZAPP_AS_SLOT_COUNT)
+        g_test_wait_registered[slot] = registered ? 1u : 0u;
+}
 #endif

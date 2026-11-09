@@ -138,44 +138,77 @@ enum {
 	AUDIO_REQUEST_CLOSE_QUIESCED = 3
 };
 
+enum zzapp_wait_kind {
+	ZZAPP_WAIT_NONE,
+	ZZAPP_WAIT_FILE,
+	ZZAPP_WAIT_CONSOLE_WRITE,
+	ZZAPP_WAIT_CONSOLE_READ,
+	ZZAPP_WAIT_DISPLAY_OPEN,
+	ZZAPP_WAIT_FLIP,
+	ZZAPP_WAIT_AUDIO
+};
+
 struct zzapp_service_slot {
 	uint8_t *window;
 	uint32_t window_bytes;
 	uint32_t generation;
 	uint32_t state;
 	uint32_t memory_limit;
+	int window_uncached;
+};
+
+struct zzapp_service_runtime {
+	uint32_t file_seq;
+	int file_open[ZZAPP_FD_COUNT];
+	int list_open[ZZAPP_FD_COUNT];
+	volatile int display_bound;
+	int display_back_owned;
+	uint32_t display_id;
+	uint32_t display_ack_seen;
+	uint32_t display_queued;
+	volatile int display_mailbox_active;
+	uint32_t display_mailbox_shown;
+	uint32_t display_mailbox_pending;
+	uint32_t display_mailbox_buffers[3];
+	uint32_t display_mailbox_bytes;
+	int display_mailbox_latch_pending;
+#ifndef ZZAPP_HOST_TEST
+	sdk_smp_lock_t display_mailbox_lock;
+#else
+	volatile uint32_t display_mailbox_lock;
+#endif
+	uint32_t log_ring_count;
+	uint64_t log_ring_window;
+#ifndef ZZAPP_HOST_TEST
+	uint32_t log_uart_count;
+	uint64_t log_uart_window;
+#endif
+	volatile int audio_open;
+	uint32_t audio_slot;
+	volatile uint32_t *audio_read_frame;
+	volatile uint32_t *audio_write_frame;
+	int16_t *audio_samples;
+	uint64_t audio_staged;
+	uint32_t audio_ahi_staged_frame;
+	void *audio_block;
+	volatile uint32_t audio_request;
+	int audio_result;
+	int audio_teardown;
+	uint32_t audio_stream_epoch;
+	int audio_ahi_route;
+	uint32_t audio_host_tail_seen;
+	enum zzapp_wait_kind wait_kind;
+	uint32_t wait_value;
+	uint64_t wait_deadline;
+#ifdef ZZAPP_HOST_TEST
+	uint32_t audio_detach_count;
+#endif
 };
 
 static struct zzapp_service_slot slots[ZZAPP_SLOT_COUNT];
-static uint32_t active_slot;
-static uint8_t *window;
-static uint32_t window_bytes;
-static int window_uncached;
+static struct zzapp_service_runtime runtime[ZZAPP_SLOT_COUNT];
+static uint32_t selected_slot[2];
 static int window_mapping_available;
-static uint32_t file_seq;
-static int file_open_slot[ZZAPP_FD_COUNT];
-static int list_open_slot[ZZAPP_FD_COUNT];
-static volatile int display_bound;
-static int display_back_owned;
-static uint32_t display_id;
-static uint32_t display_ack_seen;
-static uint32_t display_queued;
-/*
- * Mailbox ownership is protected across core 1 (app calls) and core 0
- * (vblank).  Core 0 holds the lock while it programs VDMA, so a drawing
- * buffer cannot be returned at the same time that it becomes scanout.
- */
-static volatile int display_mailbox_active;
-static uint32_t display_mailbox_shown;
-static uint32_t display_mailbox_pending;
-static uint32_t display_mailbox_buffers[3];
-static uint32_t display_mailbox_bytes;
-static int display_mailbox_latch_pending;
-#ifndef ZZAPP_HOST_TEST
-static sdk_smp_lock_t display_mailbox_lock = SDK_SMP_LOCK_INIT;
-#else
-static volatile uint32_t display_mailbox_lock;
-#endif
 static volatile uint32_t defer_state;
 static uint16_t defer_opcode;
 static uint16_t defer_status;
@@ -188,40 +221,64 @@ static uint8_t defer_req[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 static uint8_t defer_reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 static volatile uint32_t start_pending;
 static uint32_t start_argc;
-static uint32_t log_ring_count;
-static uint64_t log_ring_window;
-#ifndef ZZAPP_HOST_TEST
-static uint32_t log_uart_count;
-static uint64_t log_uart_window;
-#endif
 static uint32_t load_diag_seen;
-static volatile int audio_open;
-static uint32_t audio_slot;
-static volatile uint32_t *audio_read_frame;
-static volatile uint32_t *audio_write_frame;
-static int16_t *audio_samples;
-static uint64_t audio_staged;
-static uint32_t audio_ahi_staged_frame;
-static void *audio_block;
-static volatile uint32_t audio_request;
-static int audio_result;
-static int audio_teardown;
-static uint32_t audio_stream_epoch;
-static int audio_ahi_route;
-static uint32_t audio_host_tail_seen;
-#ifdef ZZAPP_HOST_TEST
-static uint32_t audio_detach_count;
-#endif
 static int slot_busy_test[4];
 
 static void (*yield_hook)(void);
 static uint64_t (*time_hook)(void);
 
+static unsigned service_context(void);
+
 static uint32_t service_slot(void)
 {
 	int slot = zzapp_kernel_current_thread();
 
-	return slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT ? (uint32_t)slot : 0U;
+	if (service_context() == 1U && slot >= 0 &&
+	    slot < (int)ZZAPP_AS_SLOT_COUNT)
+		return (uint32_t)slot;
+	return selected_slot[service_context()];
+}
+
+static struct zzapp_service_runtime *runtime_for_slot(uint32_t slot)
+{
+	return slot < ZZAPP_SLOT_COUNT ? &runtime[slot] : NULL;
+}
+
+static struct zzapp_service_runtime *current_runtime(void)
+{
+	return runtime_for_slot(service_slot());
+}
+static int wait_status(void)
+{
+	int status = zzapp_kernel_wait_status(zzapp_runtime_kernel(), service_slot());
+
+	if (status == ZZAPP_KERNEL_WAIT_TIMEOUT)
+		return ZZ_ETIMEDOUT;
+	if (status == ZZAPP_KERNEL_WAIT_CANCELLED)
+		return ZZ_EIO;
+	return ZZ_OK;
+}
+
+static void wait_begin(enum zzapp_wait_kind kind, uint32_t value,
+		       uint64_t deadline)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+
+	state->wait_kind = kind;
+	state->wait_value = value;
+	state->wait_deadline = deadline;
+}
+
+static void wait_end(void)
+{
+	current_runtime()->wait_kind = ZZAPP_WAIT_NONE;
+}
+
+int zzapp_services_wait_registered(uint32_t slot)
+{
+	struct zzapp_service_runtime *state = runtime_for_slot(slot);
+
+	return state && state->wait_kind != ZZAPP_WAIT_NONE;
 }
 
 
@@ -268,6 +325,48 @@ __attribute__((weak)) void zzapp_kernel_audio_close(zzapp_kernel_t *kernel,
 		kernel->direct_audio_count--;
 	kernel->resources[slot].direct_audio = 0U;
 }
+__attribute__((weak)) int zzapp_kernel_wait_status(
+	const zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
+		return ZZAPP_KERNEL_WAIT_CANCELLED;
+	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_TIMEOUT)
+		return ZZAPP_KERNEL_WAIT_TIMEOUT;
+	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_CANCELLED)
+		return ZZAPP_KERNEL_WAIT_CANCELLED;
+	return 0;
+}
+
+__attribute__((weak)) int zzapp_kernel_wake(zzapp_kernel_t *kernel,
+					      uint32_t slot,
+					      zzapp_wake_reason_t reason)
+{
+	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
+		return -1;
+	kernel->threads[slot].state = ZZAPP_THREAD_RUNNABLE;
+	kernel->threads[slot].wake_reason = reason;
+	return 0;
+}
+
+__attribute__((weak)) int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel,
+						      uint32_t slot,
+						      uint32_t generation,
+						      uint32_t base,
+						      uint32_t bytes)
+{
+	(void)kernel;
+	(void)slot;
+	(void)generation;
+	return base != 0U && bytes != 0U ? 0 : -1;
+}
+__attribute__((weak)) void zzapp_kernel_surface_unbind(
+	zzapp_kernel_t *kernel, uint32_t slot)
+{
+	(void)kernel;
+	(void)slot;
+}
+
+
 #endif
 #ifdef ZZAPP_HOST_TEST
 static int defer_test_core = 1;
@@ -287,9 +386,9 @@ static void barrier(void)
 static void display_mailbox_lock_acquire(void)
 {
 #ifndef ZZAPP_HOST_TEST
-	sdk_smp_lock_acquire(&display_mailbox_lock);
+	sdk_smp_lock_acquire(&current_runtime()->display_mailbox_lock);
 #else
-	while (__atomic_test_and_set(&display_mailbox_lock, __ATOMIC_ACQUIRE))
+	while (__atomic_test_and_set(&current_runtime()->display_mailbox_lock, __ATOMIC_ACQUIRE))
 		;
 #endif
 }
@@ -297,9 +396,9 @@ static void display_mailbox_lock_acquire(void)
 static void display_mailbox_lock_release(void)
 {
 #ifndef ZZAPP_HOST_TEST
-	sdk_smp_lock_release(&display_mailbox_lock);
+	sdk_smp_lock_release(&current_runtime()->display_mailbox_lock);
 #else
-	__atomic_clear(&display_mailbox_lock, __ATOMIC_RELEASE);
+	__atomic_clear(&current_runtime()->display_mailbox_lock, __ATOMIC_RELEASE);
 #endif
 }
 
@@ -308,9 +407,9 @@ static int display_mailbox_owns(uint32_t address)
 	uint32_t i;
 
 	for (i = 0U; i < 3U; i++) {
-		uint32_t base = display_mailbox_buffers[i];
+		uint32_t base = current_runtime()->display_mailbox_buffers[i];
 
-		if (address >= base && address - base < display_mailbox_bytes)
+		if (address >= base && address - base < current_runtime()->display_mailbox_bytes)
 			return 1;
 	}
 	return 0;
@@ -319,23 +418,23 @@ static int display_mailbox_owns(uint32_t address)
 void zzapp_services_reset_core1_lock(void)
 {
 #ifndef ZZAPP_HOST_TEST
-	sdk_smp_lock_reset(&display_mailbox_lock);
+	sdk_smp_lock_reset(&current_runtime()->display_mailbox_lock);
 #else
-	__atomic_clear(&display_mailbox_lock, __ATOMIC_RELEASE);
+	__atomic_clear(&current_runtime()->display_mailbox_lock, __ATOMIC_RELEASE);
 #endif
 }
 
 static int display_mailbox_enabled(void)
 {
-	return __atomic_load_n(&display_mailbox_active, __ATOMIC_ACQUIRE);
+	return __atomic_load_n(&current_runtime()->display_mailbox_active, __ATOMIC_ACQUIRE);
 }
 
 static void display_mailbox_disable(void)
 {
 	display_mailbox_lock_acquire();
-	__atomic_store_n(&display_mailbox_active, 0, __ATOMIC_RELEASE);
-	display_mailbox_pending = 0U;
-	display_mailbox_latch_pending = 0;
+	__atomic_store_n(&current_runtime()->display_mailbox_active, 0, __ATOMIC_RELEASE);
+	current_runtime()->display_mailbox_pending = 0U;
+	current_runtime()->display_mailbox_latch_pending = 0;
 	display_mailbox_lock_release();
 }
 
@@ -363,22 +462,36 @@ static int defer_on_core1(void)
 	return smp_cpu_id() == 1;
 #endif
 }
+static unsigned service_context(void)
+{
+#ifdef ZZAPP_HOST_TEST
+	return defer_test_core == 0 ? 0U : 1U;
+#else
+	return smp_cpu_id() == 0 ? 0U : 1U;
+#endif
+}
+
 
 static void select_slot(uint32_t slot)
 {
 	if (slot >= ZZAPP_SLOT_COUNT)
 		slot = 0U;
-	active_slot = slot;
-	window = slots[slot].window;
-	window_bytes = slots[slot].window_bytes;
+	selected_slot[service_context()] = slot;
 }
 
-static void select_current_thread_slot(void)
+static uint8_t *current_window(void)
 {
-	int slot = zzapp_kernel_current_thread();
+	return slots[service_slot()].window;
+}
 
-	if (slot >= 0 && slot < (int)ZZAPP_SLOT_COUNT)
-		select_slot((uint32_t)slot);
+static uint32_t current_window_bytes(void)
+{
+	return slots[service_slot()].window_bytes;
+}
+
+static int __attribute__((unused)) current_window_uncached(void)
+{
+	return slots[service_slot()].window_uncached;
 }
 
 static int select_request_slot(const uint8_t *req, uint16_t req_len,
@@ -403,14 +516,15 @@ static int select_request_slot(const uint8_t *req, uint16_t req_len,
 
 static int have_window(void)
 {
-	return window != NULL && window_bytes >= ZZAPP_WINDOW_BYTES;
+	return current_window() != NULL &&
+	       current_window_bytes() >= ZZAPP_WINDOW_BYTES;
 }
 
 static void win_flush(uint32_t off, uint32_t len)
 {
 #ifndef ZZAPP_HOST_TEST
-	if (!window_uncached && have_window() && len != 0U)
-		Xil_DCacheFlushRange((INTPTR)(window + off), len);
+	if (!current_window_uncached() && have_window() && len != 0U)
+		Xil_DCacheFlushRange((INTPTR)(current_window() + off), len);
 #else
 	(void)off;
 	(void)len;
@@ -420,8 +534,8 @@ static void win_flush(uint32_t off, uint32_t len)
 static void win_inval(uint32_t off, uint32_t len)
 {
 #ifndef ZZAPP_HOST_TEST
-	if (!window_uncached && have_window() && len != 0U)
-		Xil_DCacheInvalidateRange((INTPTR)(window + off), len);
+	if (!current_window_uncached() && have_window() && len != 0U)
+		Xil_DCacheInvalidateRange((INTPTR)(current_window() + off), len);
 #else
 	(void)off;
 	(void)len;
@@ -430,13 +544,14 @@ static void win_inval(uint32_t off, uint32_t len)
 
 static void win_put32(uint32_t off, uint32_t value)
 {
-	zzapp_put_be32(window + off, value);
+	zzapp_put_be32(current_window() + off, value);
 	win_flush(off, 4U);
 }
 
 static uint32_t win_get32(uint32_t off)
 {
-	volatile const uint32_t *word = (volatile const uint32_t *)(window + off);
+	volatile const uint32_t *word =
+		(volatile const uint32_t *)(current_window() + off);
 	uint32_t value;
 
 	win_inval(off, 4U);
@@ -447,7 +562,6 @@ static uint32_t win_get32(uint32_t off)
 
 static void life_put(uint32_t off, uint32_t value)
 {
-	select_current_thread_slot();
 	if (!have_window())
 		return;
 	win_put32(ZZAPP_LIFE_OFF + off, value);
@@ -455,7 +569,6 @@ static void life_put(uint32_t off, uint32_t value)
 
 static uint32_t life_get(uint32_t off)
 {
-	select_current_thread_slot();
 	if (!have_window())
 		return 0U;
 	return win_get32(ZZAPP_LIFE_OFF + off);
@@ -464,7 +577,8 @@ static uint32_t life_get(uint32_t off)
 #ifndef ZZAPP_HOST_TEST
 static int raw_life_get(uint32_t off, uint32_t *value)
 {
-	if (!window || window_bytes < ZZAPP_LIFE_OFF + off + 4U)
+	if (!current_window() ||
+	    current_window_bytes() < ZZAPP_LIFE_OFF + off + 4U)
 		return 0;
 	*value = win_get32(ZZAPP_LIFE_OFF + off);
 	return 1;
@@ -499,16 +613,20 @@ static void report_load_snapshot(const char *event, uint16_t opcode,
 	if (raw_life) {
 		printf("[app] %s op 0x%04x%s%s%s: have_window=%d window=%p bytes=%lu uncached=%d life_state=0x%08lx life_stop=0x%08lx loader_state=0x%08lx reset_request=0x%08lx core=%d\r\n",
 		       event, (unsigned)opcode, reason ? " (" : "",
-		       reason ? reason : "", reason ? ")" : "", have_window(), (void *)window,
-		       (unsigned long)window_bytes, window_uncached,
+		       reason ? reason : "", reason ? ")" : "", have_window(),
+		       (void *)current_window(),
+		       (unsigned long)current_window_bytes(),
+		       current_window_uncached(),
 		       (unsigned long)life_state, (unsigned long)life_stop,
 		       (unsigned long)zzapp_loader_state(),
 		       (unsigned long)zzapp_loader_reset_requested(), smp_cpu_id());
 	} else {
 		printf("[app] %s op 0x%04x%s%s%s: have_window=%d window=%p bytes=%lu uncached=%d life_state=n/a life_stop=n/a loader_state=0x%08lx reset_request=0x%08lx core=%d\r\n",
 		       event, (unsigned)opcode, reason ? " (" : "",
-		       reason ? reason : "", reason ? ")" : "", have_window(), (void *)window,
-		       (unsigned long)window_bytes, window_uncached,
+		       reason ? reason : "", reason ? ")" : "", have_window(),
+		       (void *)current_window(),
+		       (unsigned long)current_window_bytes(),
+		       current_window_uncached(),
 		       (unsigned long)zzapp_loader_state(),
 		       (unsigned long)zzapp_loader_reset_requested(), smp_cpu_id());
 	}
@@ -558,6 +676,8 @@ static void report_rejected_app_op(uint16_t opcode, const char *reason)
 static uint32_t service_loader_state;
 static zzapp_kernel_t service_test_kernel;
 static zzapp_proc_t service_test_proc[ZZAPP_AS_SLOT_COUNT];
+static int service_test_current_thread = -1;
+static unsigned service_test_wake_count;
 
 __attribute__((weak)) zzapp_kernel_t *zzapp_runtime_kernel(void)
 {
@@ -571,7 +691,7 @@ __attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
 
 __attribute__((weak)) int zzapp_kernel_current_thread(void)
 {
-	return -1;
+	return service_test_current_thread;
 }
 
 __attribute__((weak)) int zzapp_kernel_audio_open(zzapp_kernel_t *kernel,
@@ -598,6 +718,49 @@ __attribute__((weak)) void zzapp_kernel_audio_close(zzapp_kernel_t *kernel,
 		kernel->direct_audio_count--;
 	kernel->resources[slot].direct_audio = 0U;
 }
+__attribute__((weak)) int zzapp_kernel_wait_status(
+	const zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
+		return ZZAPP_KERNEL_WAIT_CANCELLED;
+	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_TIMEOUT)
+		return ZZAPP_KERNEL_WAIT_TIMEOUT;
+	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_CANCELLED)
+		return ZZAPP_KERNEL_WAIT_CANCELLED;
+	return 0;
+}
+
+__attribute__((weak)) int zzapp_kernel_wake(zzapp_kernel_t *kernel,
+					      uint32_t slot,
+					      zzapp_wake_reason_t reason)
+{
+	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
+		return -1;
+	service_test_wake_count++;
+	kernel->threads[slot].state = ZZAPP_THREAD_RUNNABLE;
+	kernel->threads[slot].wake_reason = reason;
+	return 0;
+}
+
+__attribute__((weak)) int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel,
+						      uint32_t slot,
+						      uint32_t generation,
+						      uint32_t base,
+						      uint32_t bytes)
+{
+	(void)kernel;
+	(void)slot;
+	(void)generation;
+	return base != 0U && bytes != 0U ? 0 : -1;
+}
+__attribute__((weak)) void zzapp_kernel_surface_unbind(
+	zzapp_kernel_t *kernel, uint32_t slot)
+{
+	(void)kernel;
+	(void)slot;
+}
+
+
 
 __attribute__((weak)) uint32_t zzapp_runtime_state(void)
 {
@@ -668,7 +831,7 @@ __attribute__((weak)) uint64_t zzapp_host_time_us(void)
 
 uint8_t *zzapp_services_window(void)
 {
-	return have_window() ? window : NULL;
+	return have_window() ? current_window() : NULL;
 }
 
 void zzapp_services_set_window_mapping_available(int available)
@@ -679,12 +842,12 @@ void zzapp_services_set_window_mapping_available(int available)
 uint32_t zzapp_services_generation(void)
 {
 	return have_window() ? life_get(ZZAPP_LIFE_GENERATION_OFF) :
-	       slots[active_slot].generation;
+	       slots[service_slot()].generation;
 }
 
 uint32_t zzapp_services_current_slot(void)
 {
-	return active_slot;
+	return service_slot();
 }
 
 void zzapp_services_select_slot(uint32_t slot)
@@ -694,9 +857,11 @@ void zzapp_services_select_slot(uint32_t slot)
 
 uint32_t zzapp_services_state(void)
 {
-	if (active_slot == 0U && slots[0].state != ZZAPP_ST_CLAIMED)
+	uint32_t slot = service_slot();
+
+	if (slot == 0U && slots[0].state != ZZAPP_ST_CLAIMED)
 		return zzapp_runtime_state();
-	return slots[active_slot].state;
+	return slots[slot].state;
 }
 
 int zzapp_services_stop_requested(void)
@@ -706,20 +871,20 @@ int zzapp_services_stop_requested(void)
 
 void zzapp_services_set_state(uint32_t state)
 {
-	slots[active_slot].state = state;
+	slots[service_slot()].state = state;
 	zzapp_loader_set_state(state);
 	life_put(ZZAPP_LIFE_STATE_OFF, state);
 }
 
 void zzapp_services_set_generation(uint32_t generation)
 {
-	slots[active_slot].generation = generation;
+	slots[service_slot()].generation = generation;
 	life_put(ZZAPP_LIFE_GENERATION_OFF, generation);
 }
 
 uint32_t zzapp_services_memory_limit(void)
 {
-	return slots[active_slot].memory_limit;
+	return slots[service_slot()].memory_limit;
 }
 
 void zzapp_services_set_fault(uint32_t code, uint32_t pc, uint32_t sp,
@@ -763,18 +928,13 @@ uint32_t zzapp_services_flags(void)
 
 static void forget_window(void)
 {
-	window = NULL;
-	window_bytes = 0U;
-	window_uncached = 0;
-	file_seq = 0U;
-	display_bound = 0;
-	display_back_owned = 0;
-	display_id = 0U;
-	display_ack_seen = 0U;
-	display_queued = 0U;
-	display_mailbox_disable();
-	memset(file_open_slot, 0, sizeof(file_open_slot));
-	memset(list_open_slot, 0, sizeof(list_open_slot));
+	uint32_t slot = service_slot();
+	struct zzapp_service_runtime *state = current_runtime();
+
+	slots[slot].window = NULL;
+	slots[slot].window_bytes = 0U;
+	slots[slot].window_uncached = 0;
+	memset(state, 0, sizeof(*state));
 }
 
 static void audio_detach(void);
@@ -782,15 +942,17 @@ static void audio_post_teardown(void);
 
 void zzapp_services_on_launch(void)
 {
-	log_ring_count = 0U;
-	log_ring_window = 0U;
+	struct zzapp_service_runtime *state = current_runtime();
+
+	state->log_ring_count = 0U;
+	state->log_ring_window = 0U;
 	load_diag_seen = 0U;
 	if (have_window()) {
-		memset(window + ZZAPP_CONSOLE_OUT_OFF, 0, ZZAPP_CONSOLE_HDR);
-		memset(window + ZZAPP_CONSOLE_IN_OFF, 0, ZZAPP_CONSOLE_HDR);
-		memset(window + ZZAPP_AUDIO_OFF, 0, ZZAPP_AUDIO_HDR);
-		memset(window + ZZAPP_MSG_H2A_OFF, 0, ZZAPP_MSG_HDR);
-		memset(window + ZZAPP_MSG_A2H_OFF, 0, ZZAPP_MSG_HDR);
+		memset(current_window() + ZZAPP_CONSOLE_OUT_OFF, 0, ZZAPP_CONSOLE_HDR);
+		memset(current_window() + ZZAPP_CONSOLE_IN_OFF, 0, ZZAPP_CONSOLE_HDR);
+		memset(current_window() + ZZAPP_AUDIO_OFF, 0, ZZAPP_AUDIO_HDR);
+		memset(current_window() + ZZAPP_MSG_H2A_OFF, 0, ZZAPP_MSG_HDR);
+		memset(current_window() + ZZAPP_MSG_A2H_OFF, 0, ZZAPP_MSG_HDR);
 		win_flush(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
 		win_flush(ZZAPP_CONSOLE_IN_OFF, ZZAPP_CONSOLE_HDR);
 		win_flush(ZZAPP_AUDIO_OFF, ZZAPP_AUDIO_HDR);
@@ -798,24 +960,27 @@ void zzapp_services_on_launch(void)
 		win_flush(ZZAPP_MSG_A2H_OFF, ZZAPP_MSG_HDR);
 	}
 #ifndef ZZAPP_HOST_TEST
-	log_uart_count = 0U;
-	log_uart_window = 0U;
+	state->log_uart_count = 0U;
+	state->log_uart_window = 0U;
 #endif
 }
 
 void zzapp_services_on_app_end(void)
 {
+	struct zzapp_service_runtime *state = current_runtime();
+
 	audio_post_teardown();
-	if (display_back_owned)
+	zzapp_kernel_surface_unbind(zzapp_runtime_kernel(), service_slot());
+	if (state->display_back_owned)
 		zzapp_loader_free_back(life_get(ZZAPP_LIFE_CARD_BACK_OFF));
-	display_bound = 0;
-	display_back_owned = 0;
-	display_id = 0U;
-	display_ack_seen = 0U;
-	display_queued = 0U;
+	state->display_bound = 0;
+	state->display_back_owned = 0;
+	state->display_id = 0U;
+	state->display_ack_seen = 0U;
+	state->display_queued = 0U;
 	display_mailbox_disable();
-	memset(file_open_slot, 0, sizeof(file_open_slot));
-	memset(list_open_slot, 0, sizeof(list_open_slot));
+	memset(state->file_open, 0, sizeof(state->file_open));
+	memset(state->list_open, 0, sizeof(state->list_open));
 	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC |
 				   ZZAPP_F_SCANOUT_ACK | ZZAPP_F_MAILBOX));
 	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, 0U);
@@ -823,7 +988,7 @@ void zzapp_services_on_app_end(void)
 	life_put(ZZAPP_LIFE_FLIP_ADDRESS_OFF, 0U);
 	life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0U);
 	life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF, 0U);
-	slots[active_slot].state = ZZAPP_ST_IDLE;
+	slots[service_slot()].state = ZZAPP_ST_IDLE;
 }
 
 void zzapp_services_on_reset(void)
@@ -901,13 +1066,14 @@ static int publish_file(uint32_t op, int fd, int32_t flags, int32_t whence,
 			uint32_t path_off, uint32_t length, uint64_t offset,
 			uint32_t mode)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	uint32_t odd;
 	uint32_t even;
 
 	if (!have_window())
 		return ZZ_EIO;
-	odd = file_seq + 1U;
-	even = file_seq + 2U;
+	odd = state->file_seq + 1U;
+	even = state->file_seq + 2U;
 	win_put32(ZZAPP_FILE_OFF + 0U, odd);
 	barrier();
 	win_put32(ZZAPP_FILE_OFF + 4U, op);
@@ -919,25 +1085,27 @@ static int publish_file(uint32_t op, int fd, int32_t flags, int32_t whence,
 	win_put32(ZZAPP_FILE_OFF + 28U, length);
 	win_put32(ZZAPP_FILE_OFF + 32U, 0U);
 	win_put32(ZZAPP_FILE_OFF + 36U, mode);
-	zzapp_put_be64(window + ZZAPP_FILE_OFF + 40U, offset);
+	zzapp_put_be64(current_window() + ZZAPP_FILE_OFF + 40U, offset);
 	win_flush(ZZAPP_FILE_OFF + 40U, 8U);
-	zzapp_put_be64(window + ZZAPP_FILE_OFF + 48U, 0U);
+	zzapp_put_be64(current_window() + ZZAPP_FILE_OFF + 48U, 0U);
 	win_flush(ZZAPP_FILE_OFF + 48U, 8U);
 	win_put32(ZZAPP_FILE_OFF + 56U, 0U);
 	win_put32(ZZAPP_FILE_OFF + 60U, 0U);
 	barrier();
 	win_put32(ZZAPP_FILE_OFF + 0U, even);
-	file_seq = even;
+	state->file_seq = even;
 	return ZZ_OK;
 }
 
 static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 		     uint32_t *mtime, int32_t *err)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	uint32_t generation = zzapp_services_generation();
 	uint64_t start = now_us();
-	/* ZZRun completes with request_seq + 2 (file_reply). */
-	uint32_t expect = file_seq + 2U;
+	uint32_t expect = state->file_seq + 2U;
+	wait_begin(ZZAPP_WAIT_FILE, expect, start + ZZAPP_FILE_TIMEOUT_US);
+
 
 	for (;;) {
 		uint32_t s1;
@@ -974,26 +1142,27 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 					*mtime = reply_mtime;
 				if (err)
 					*err = reply_err;
-				file_seq = s1;
+				state->file_seq = s1;
+				wait_end();
 				return ZZ_OK;
 			}
 		}
 		if (now_us() - start >= ZZAPP_FILE_TIMEOUT_US) {
-			/* An even sequence is a new request to ZZRun, which
-			 * would execute this abandoned op. An odd sequence is
-			 * ignored. Advance past the abandoned completion
-			 * (request+2) so it cannot match the next wait. */
-			win_put32(ZZAPP_FILE_OFF + 0U, file_seq + 1U);
+			win_put32(ZZAPP_FILE_OFF + 0U, state->file_seq + 1U);
 			barrier();
 			win_put32(ZZAPP_FILE_OFF + 4U, 0U);
-			file_seq = expect;
+			state->file_seq = expect;
+			wait_end();
 			return ZZ_ETIMEDOUT;
 		}
-		/* File completion polling holds no GL lock, so it is an intentional
-		 * service-tick exception while its enclosing API remains active. */
 		yield_wait_once();
-	}
+		if (wait_status() != ZZ_OK) {
+			wait_end();
+			return wait_status();
+		}
 }
+}
+
 
 static int put_path(const char *path, uint32_t *path_off)
 {
@@ -1004,7 +1173,7 @@ static int put_path(const char *path, uint32_t *path_off)
 	n = strlen(path);
 	if (n == 0U || n > ZZAPP_PATH_MAX)
 		return ZZ_EINVAL;
-	memcpy(window + ZZAPP_PATH_OFF, path, n + 1U);
+	memcpy(current_window() + ZZAPP_PATH_OFF, path, n + 1U);
 	win_flush(ZZAPP_PATH_OFF, (uint32_t)(n + 1U));
 	*path_off = ZZAPP_PATH_OFF;
 	return ZZ_OK;
@@ -1012,6 +1181,7 @@ static int put_path(const char *path, uint32_t *path_off)
 
 int zzapp_svc_file_open(const char *path, uint32_t flags)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	uint32_t path_off = 0U;
 	uint32_t mode = 0U;
 	int32_t err = 0;
@@ -1025,18 +1195,18 @@ int zzapp_svc_file_open(const char *path, uint32_t flags)
 	rc = put_path(path, &path_off);
 	if (rc != ZZ_OK)
 		return rc;
-	fd = alloc_fd(file_open_slot);
+	fd = alloc_fd(state->file_open);
 	if (fd < 0)
 		return ZZ_ENOMEM;
 	rc = publish_file(ZZAPP_FILE_OP_OPEN, fd, (int32_t)flags, 0, path_off,
 			  0U, 0U, 0U);
 	if (rc != ZZ_OK) {
-		file_open_slot[fd_index(fd)] = 0;
+		state->file_open[fd_index(fd)] = 0;
 		return rc;
 	}
 	rc = wait_file(NULL, NULL, &mode, NULL, &err);
 	if (rc != ZZ_OK || err != 0) {
-		release_slot(file_open_slot, fd, rc == ZZ_ETIMEDOUT);
+		release_slot(state->file_open, fd, rc == ZZ_ETIMEDOUT);
 		return rc != ZZ_OK ? rc : err;
 	}
 	(void)mode;
@@ -1045,16 +1215,17 @@ int zzapp_svc_file_open(const char *path, uint32_t flags)
 
 int zzapp_svc_file_close(int fd)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	int32_t err = 0;
 	int rc;
 
-	if (!slot_live(file_open_slot, fd))
+	if (!slot_live(state->file_open, fd))
 		return ZZ_EBADF;
 	rc = publish_file(ZZAPP_FILE_OP_CLOSE, fd, 0, 0, 0U, 0U, 0U, 0U);
 	if (rc != ZZ_OK)
 		return rc;
 	rc = wait_file(NULL, NULL, NULL, NULL, &err);
-	release_slot(file_open_slot, fd, rc == ZZ_ETIMEDOUT);
+	release_slot(state->file_open, fd, rc == ZZ_ETIMEDOUT);
 	if (rc != ZZ_OK)
 		return rc;
 	return err;
@@ -1062,13 +1233,14 @@ int zzapp_svc_file_close(int fd)
 
 int zzapp_svc_file_read(int fd, void *buf, uint32_t len, uint32_t *out_n)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	uint8_t *dst = (uint8_t *)buf;
 	uint32_t got = 0U;
 
 	if (!out_n)
 		return ZZ_EINVAL;
 	*out_n = 0U;
-	if (!slot_live(file_open_slot, fd) || !dst)
+	if (!slot_live(state->file_open, fd) || !dst)
 		return ZZ_EBADF;
 	while (got < len) {
 		uint32_t chunk = len - got;
@@ -1090,7 +1262,7 @@ int zzapp_svc_file_read(int fd, void *buf, uint32_t len, uint32_t *out_n)
 			n = chunk;
 		if (n != 0U) {
 			win_inval(ZZAPP_DATA_OFF, n);
-			memcpy(dst + got, window + ZZAPP_DATA_OFF, n);
+			memcpy(dst + got, current_window() + ZZAPP_DATA_OFF, n);
 		}
 		got += n;
 		*out_n = got;
@@ -1102,13 +1274,14 @@ int zzapp_svc_file_read(int fd, void *buf, uint32_t len, uint32_t *out_n)
 
 int zzapp_svc_file_write(int fd, const void *buf, uint32_t len, uint32_t *out_n)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	const uint8_t *src = (const uint8_t *)buf;
 	uint32_t got = 0U;
 
 	if (!out_n)
 		return ZZ_EINVAL;
 	*out_n = 0U;
-	if (!slot_live(file_open_slot, fd) || (!src && len != 0U))
+	if (!slot_live(state->file_open, fd) || (!src && len != 0U))
 		return ZZ_EBADF;
 	while (got < len) {
 		uint32_t chunk = len - got;
@@ -1118,7 +1291,7 @@ int zzapp_svc_file_write(int fd, const void *buf, uint32_t len, uint32_t *out_n)
 
 		if (chunk > ZZAPP_DATA_BYTES)
 			chunk = ZZAPP_DATA_BYTES;
-		memcpy(window + ZZAPP_DATA_OFF, src + got, chunk);
+		memcpy(current_window() + ZZAPP_DATA_OFF, src + got, chunk);
 		win_flush(ZZAPP_DATA_OFF, chunk);
 		rc = publish_file(ZZAPP_FILE_OP_WRITE, fd, 0, 0, 0U, chunk, 0U, 0U);
 		if (rc != ZZ_OK)
@@ -1140,11 +1313,12 @@ int zzapp_svc_file_write(int fd, const void *buf, uint32_t len, uint32_t *out_n)
 
 int zzapp_svc_file_seek(int fd, int64_t off, int whence, int64_t *out_pos)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	uint64_t pos = 0U;
 	int32_t err = 0;
 	int rc;
 
-	if (!slot_live(file_open_slot, fd))
+	if (!slot_live(state->file_open, fd))
 		return ZZ_EBADF;
 	if (whence != ZZAPP_SEEK_SET && whence != ZZAPP_SEEK_CUR &&
 	    whence != ZZAPP_SEEK_END)
@@ -1193,6 +1367,7 @@ int zzapp_svc_file_stat(const char *path, zzapp_stat *out)
 
 int zzapp_svc_file_list_open(const char *path)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	uint32_t path_off = 0U;
 	int32_t err = 0;
 	int list;
@@ -1201,17 +1376,17 @@ int zzapp_svc_file_list_open(const char *path)
 	rc = put_path(path, &path_off);
 	if (rc != ZZ_OK)
 		return rc;
-	list = alloc_fd(list_open_slot);
+	list = alloc_fd(state->list_open);
 	if (list < 0)
 		return ZZ_ENOMEM;
 	rc = publish_file(ZZAPP_FILE_OP_LIST_OPEN, list, 0, 0, path_off, 0U, 0U, 0U);
 	if (rc != ZZ_OK) {
-		list_open_slot[fd_index(list)] = 0;
+		state->list_open[fd_index(list)] = 0;
 		return rc;
 	}
 	rc = wait_file(NULL, NULL, NULL, NULL, &err);
 	if (rc != ZZ_OK || err != 0) {
-		release_slot(list_open_slot, list, rc == ZZ_ETIMEDOUT);
+		release_slot(state->list_open, list, rc == ZZ_ETIMEDOUT);
 		return rc != ZZ_OK ? rc : err;
 	}
 	return list;
@@ -1219,12 +1394,13 @@ int zzapp_svc_file_list_open(const char *path)
 
 int zzapp_svc_file_list_next(int list, zzapp_dirent *out)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	uint32_t n = 0U;
 	uint32_t mode = 0U;
 	int32_t err = 0;
 	int rc;
 
-	if (!slot_live(list_open_slot, list) || !out)
+	if (!slot_live(state->list_open, list) || !out)
 		return ZZ_EBADF;
 	rc = publish_file(ZZAPP_FILE_OP_LIST_NEXT, list, 0, 0, 0U, 0U, 0U, 0U);
 	if (rc != ZZ_OK)
@@ -1239,7 +1415,7 @@ int zzapp_svc_file_list_next(int list, zzapp_dirent *out)
 	if (n > 255U)
 		n = 255U;
 	win_inval(ZZAPP_DATA_OFF, n + 1U);
-	memcpy(out->name, window + ZZAPP_DATA_OFF, n);
+	memcpy(out->name, current_window() + ZZAPP_DATA_OFF, n);
 	out->name[n] = '\0';
 	out->mode = mode;
 	return ZZ_OK;
@@ -1247,16 +1423,17 @@ int zzapp_svc_file_list_next(int list, zzapp_dirent *out)
 
 int zzapp_svc_file_list_close(int list)
 {
+	struct zzapp_service_runtime *state = current_runtime();
 	int32_t err = 0;
 	int rc;
 
-	if (!slot_live(list_open_slot, list))
+	if (!slot_live(state->list_open, list))
 		return ZZ_EBADF;
 	rc = publish_file(ZZAPP_FILE_OP_LIST_CLOSE, list, 0, 0, 0U, 0U, 0U, 0U);
 	if (rc != ZZ_OK)
 		return rc;
 	rc = wait_file(NULL, NULL, NULL, NULL, &err);
-	release_slot(list_open_slot, list, rc == ZZ_ETIMEDOUT);
+	release_slot(state->list_open, list, rc == ZZ_ETIMEDOUT);
 	return rc != ZZ_OK ? rc : err;
 }
 
@@ -1286,11 +1463,11 @@ void zzapp_svc_log(const char *msg, uint32_t len)
 	if (len > 1024U)
 		len = 1024U;
 	t = now_us();
-	if (t - log_ring_window >= 1000000ull) {
-		log_ring_window = t;
-		log_ring_count = 0U;
+	if (t - current_runtime()->log_ring_window >= 1000000ull) {
+		current_runtime()->log_ring_window = t;
+		current_runtime()->log_ring_count = 0U;
 	}
-	if (log_ring_count >= ZZAPP_LOG_RING_HZ) {
+	if (current_runtime()->log_ring_count >= ZZAPP_LOG_RING_HZ) {
 		log_drop();
 		return;
 	}
@@ -1312,20 +1489,20 @@ void zzapp_svc_log(const char *msg, uint32_t len)
 			b = hdr[i];
 		else if (i < 2U + len)
 			b = (uint8_t)msg[i - 2U];
-		window[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR + at] = b;
+		current_window()[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR + at] = b;
 	}
 	win_flush(ZZAPP_LOG_OFF + ZZAPP_LOG_HDR, usable);
 	barrier();
 	win_put32(ZZAPP_LOG_OFF + 0U, head + rec);
-	log_ring_count++;
+	current_runtime()->log_ring_count++;
 #ifndef ZZAPP_HOST_TEST
-	if (t - log_uart_window >= 1000000ull) {
-		log_uart_window = t;
-		log_uart_count = 0U;
+	if (t - current_runtime()->log_uart_window >= 1000000ull) {
+		current_runtime()->log_uart_window = t;
+		current_runtime()->log_uart_count = 0U;
 	}
-	if (log_uart_count < ZZAPP_LOG_UART_HZ) {
+	if (current_runtime()->log_uart_count < ZZAPP_LOG_UART_HZ) {
 		printf("[app] %.*s\r\n", (int)len, msg);
-		log_uart_count++;
+		current_runtime()->log_uart_count++;
 	}
 #endif
 }
@@ -1361,13 +1538,13 @@ int zzapp_svc_input_poll(zzapp_event *out, uint32_t max, uint32_t *out_n)
 
 		win_inval(off, ZZAPP_EVENT_BYTES);
 		barrier();
-		ev->type = zzapp_get_be16(window + off + 0U);
-		ev->code = zzapp_get_be16(window + off + 2U);
-		ev->dx = zzapp_get_be16s(window + off + 4U);
-		ev->dy = zzapp_get_be16s(window + off + 6U);
-		ev->buttons = zzapp_get_be16(window + off + 8U);
-		ev->reserved = zzapp_get_be16(window + off + 10U);
-		ev->time_ms = zzapp_get_be32(window + off + 12U);
+		ev->type = zzapp_get_be16(current_window() + off + 0U);
+		ev->code = zzapp_get_be16(current_window() + off + 2U);
+		ev->dx = zzapp_get_be16s(current_window() + off + 4U);
+		ev->dy = zzapp_get_be16s(current_window() + off + 6U);
+		ev->buttons = zzapp_get_be16(current_window() + off + 8U);
+		ev->reserved = zzapp_get_be16(current_window() + off + 10U);
+		ev->time_ms = zzapp_get_be32(current_window() + off + 12U);
 		tail++;
 		n++;
 	}
@@ -1407,7 +1584,12 @@ int zzapp_svc_console_write(const void *buf, uint32_t len, uint32_t *out_n)
 		if (used == ZZAPP_CONSOLE_OUT_CAP) {
 			if (zzapp_services_stop_requested())
 				return ZZ_EIO;
+			wait_begin(ZZAPP_WAIT_CONSOLE_WRITE, tail, 0U);
 			yield_wait_once();
+			if (wait_status() != ZZ_OK) {
+				wait_end();
+				return wait_status();
+			}
 			continue;
 		}
 		at = head % ZZAPP_CONSOLE_OUT_CAP;
@@ -1416,13 +1598,14 @@ int zzapp_svc_console_write(const void *buf, uint32_t len, uint32_t *out_n)
 			n = ZZAPP_CONSOLE_OUT_CAP - used;
 		if (n > len - done)
 			n = len - done;
-		memcpy(window + ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at,
+		memcpy(current_window() + ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at,
 		       src + done, n);
 		win_flush(ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at, n);
 		barrier();
 		win_put32(ZZAPP_CONSOLE_OUT_OFF, head + n);
 		done += n;
 	}
+	wait_end();
 	*out_n = done;
 	return ZZ_OK;
 }
@@ -1457,7 +1640,13 @@ int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n)
 			}
 			/* The launcher reads the keyboard only while this is set. */
 			win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 1U);
+			wait_begin(ZZAPP_WAIT_CONSOLE_READ, head, 0U);
 			yield_wait_once();
+			if (wait_status() != ZZ_OK) {
+				wait_end();
+				win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 0U);
+				return wait_status();
+			}
 			continue;
 		}
 		win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 0U);
@@ -1468,9 +1657,10 @@ int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n)
 		if (n > len)
 			n = len;
 		win_inval(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, n);
-		memcpy(dst, window + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, n);
+		memcpy(dst, current_window() + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, n);
 		barrier();
 		win_put32(ZZAPP_CONSOLE_IN_OFF + 4U, tail + n);
+		wait_end();
 		*out_n = n;
 		return ZZ_OK;
 	}
@@ -1494,7 +1684,7 @@ int zzapp_svc_msg_send(const void *msg)
 	if (head - tail == ZZAPP_MSG_CAP)
 		return ZZ_EBUSY;
 	slot = head & (ZZAPP_MSG_CAP - 1U);
-	memcpy(window + ZZAPP_MSG_A2H_OFF + ZZAPP_MSG_HDR +
+	memcpy(current_window() + ZZAPP_MSG_A2H_OFF + ZZAPP_MSG_HDR +
 	       slot * ZZAPP_MSG_BYTES_PER, msg, ZZAPP_MSG_BYTES_PER);
 	win_flush(ZZAPP_MSG_A2H_OFF + ZZAPP_MSG_HDR +
 		  slot * ZZAPP_MSG_BYTES_PER, ZZAPP_MSG_BYTES_PER);
@@ -1522,7 +1712,7 @@ int zzapp_svc_msg_poll(void *msg)
 	slot = tail & (ZZAPP_MSG_CAP - 1U);
 	win_inval(ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_HDR +
 		  slot * ZZAPP_MSG_BYTES_PER, ZZAPP_MSG_BYTES_PER);
-	memcpy(msg, window + ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_HDR +
+	memcpy(msg, current_window() + ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_HDR +
 	       slot * ZZAPP_MSG_BYTES_PER, ZZAPP_MSG_BYTES_PER);
 	barrier();
 	win_put32(ZZAPP_MSG_H2A_OFF + 4U, tail + 1U);
@@ -1586,10 +1776,10 @@ static void drop_owned_back(void)
 {
 	uint32_t back;
 
-	if (!display_back_owned)
+	if (!current_runtime()->display_back_owned)
 		return;
 	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
-	display_back_owned = 0;
+	current_runtime()->display_back_owned = 0;
 	if (back != 0U)
 		zzapp_loader_free_back(back);
 }
@@ -1598,21 +1788,21 @@ static void display_reap_flip(void)
 {
 	uint32_t ack;
 
-	if (!display_bound)
+	if (!current_runtime()->display_bound)
 		return;
 	if (display_mailbox_enabled())
 		return;
 	ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
-	if (ack == display_ack_seen)
+	if (ack == current_runtime()->display_ack_seen)
 		return;
-	display_ack_seen = ack;
-	if (display_queued != 0U) {
+	current_runtime()->display_ack_seen = ack;
+	if (current_runtime()->display_queued != 0U) {
 		uint32_t front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
 
-		life_put(ZZAPP_LIFE_CARD_FRONT_OFF, display_queued);
+		life_put(ZZAPP_LIFE_CARD_FRONT_OFF, current_runtime()->display_queued);
 		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, front);
-		display_queued = 0U;
-	} else if (!display_back_owned &&
+		current_runtime()->display_queued = 0U;
+	} else if (!current_runtime()->display_back_owned &&
 		   life_get(ZZAPP_LIFE_CARD_BACK_OFF) != 0U) {
 		life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF,
 			 life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) ^ 1U);
@@ -1621,7 +1811,7 @@ static void display_reap_flip(void)
 
 int zzapp_display_flip_idle(void)
 {
-	if (!display_bound)
+	if (!current_runtime()->display_bound)
 		return 0;
 	if (display_mailbox_enabled())
 		return 1;
@@ -1643,27 +1833,27 @@ int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 	    !display_mailbox_owns(normal_scanout))
 		return 0;
 	display_mailbox_lock_acquire();
-	if (!display_mailbox_active || !display_mailbox_owns(normal_scanout)) {
+	if (!current_runtime()->display_mailbox_active || !display_mailbox_owns(normal_scanout)) {
 		display_mailbox_lock_release();
 		return 0;
 	}
-	*scanout = display_mailbox_pending != 0U ?
-		display_mailbox_pending : display_mailbox_shown;
-	display_mailbox_latch_pending = display_mailbox_pending != 0U;
+	*scanout = current_runtime()->display_mailbox_pending != 0U ?
+		current_runtime()->display_mailbox_pending : current_runtime()->display_mailbox_shown;
+	current_runtime()->display_mailbox_latch_pending = current_runtime()->display_mailbox_pending != 0U;
 	return 1;
 }
 
 void zzapp_services_display_mailbox_end(int latched)
 {
-	if (latched && display_mailbox_latch_pending) {
-		uint32_t old_shown = display_mailbox_shown;
+	if (latched && current_runtime()->display_mailbox_latch_pending) {
+		uint32_t old_shown = current_runtime()->display_mailbox_shown;
 
-		display_mailbox_shown = display_mailbox_pending;
-		display_mailbox_pending = 0U;
-		life_put(ZZAPP_LIFE_CARD_FRONT_OFF, display_mailbox_shown);
+		current_runtime()->display_mailbox_shown = current_runtime()->display_mailbox_pending;
+		current_runtime()->display_mailbox_pending = 0U;
+		life_put(ZZAPP_LIFE_CARD_FRONT_OFF, current_runtime()->display_mailbox_shown);
 		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, old_shown);
 	}
-	display_mailbox_latch_pending = 0;
+	current_runtime()->display_mailbox_latch_pending = 0;
 	display_mailbox_lock_release();
 }
 
@@ -1676,23 +1866,28 @@ uint32_t zzapp_svc_display_mailbox_replaced(void)
 
 void zzapp_services_display_vblank(uint32_t scanout_address)
 {
-	uint32_t flags;
-	uint32_t gen;
+	uint32_t slot;
+	uint32_t selected = selected_slot[service_context()];
 
-	if (!display_bound || display_mailbox_enabled())
-		return;
-	flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
-	if ((flags & (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK)) !=
-	    (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK))
-		return;
-	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
-	if (gen == life_get(ZZAPP_LIFE_FLIP_ACK_OFF) ||
-	    gen != life_get(ZZAPP_LIFE_FLIP_SUBMIT_OFF) ||
-	    scanout_address != life_get(ZZAPP_LIFE_FLIP_ADDRESS_OFF))
-		return;
-	/* VDMA was re-pointed during this ZZ9000 vblank, so only now may
-	 * core 1 recycle the prior front buffer. */
-	life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		uint32_t flags;
+		uint32_t gen;
+
+		select_slot(slot);
+		if (!current_runtime()->display_bound || display_mailbox_enabled())
+			continue;
+		flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
+		if ((flags & (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK)) !=
+		    (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK))
+			continue;
+		gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
+		if (gen == life_get(ZZAPP_LIFE_FLIP_ACK_OFF) ||
+		    gen != life_get(ZZAPP_LIFE_FLIP_SUBMIT_OFF) ||
+		    scanout_address != life_get(ZZAPP_LIFE_FLIP_ADDRESS_OFF))
+			continue;
+		life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+	}
+	select_slot(selected);
 }
 
 int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
@@ -1702,12 +1897,12 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 	uint32_t front;
 	uint32_t back;
 
-	if (!display_bound)
+	if (!current_runtime()->display_bound)
 		return ZZ_EINVAL;
 	display_reap_flip();
 	front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
 	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
-	if (!display_back_owned && life_get(ZZAPP_LIFE_CARD_SPARE_OFF) == 0U &&
+	if (!current_runtime()->display_back_owned && life_get(ZZAPP_LIFE_CARD_SPARE_OFF) == 0U &&
 	    back != 0U && life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
 		uint32_t tmp = front;
 
@@ -1730,7 +1925,7 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 }
 int zzapp_display_layout(uint32_t *layout)
 {
-	if (!layout || !display_bound)
+	if (!layout || !current_runtime()->display_bound)
 		return ZZ_EINVAL;
 	*layout = life_get(ZZAPP_LIFE_LAYOUT_OFF);
 	return ZZ_OK;
@@ -1746,11 +1941,11 @@ static int fill_surface(zzapp_surface *out)
 	uint32_t front;
 	uint32_t back;
 
-	if (!out || !display_bound)
+	if (!out || !current_runtime()->display_bound)
 		return ZZ_EINVAL;
 	if (zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != ZZ_OK)
 		return ZZ_EINVAL;
-	out->id = display_id;
+	out->id = current_runtime()->display_id;
 	out->width = w;
 	out->height = h;
 	out->pitch = pitch;
@@ -1768,7 +1963,7 @@ int zzapp_display_flip_bound(void)
 	uint32_t gen;
 	uint32_t ack;
 
-	if (!display_bound)
+	if (!current_runtime()->display_bound)
 		return ZZ_EINVAL;
 	display_reap_flip();
 	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
@@ -1792,11 +1987,18 @@ static int wait_flip(uint32_t gen)
 		ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 		if (ack == gen) {
 			display_reap_flip();
+			wait_end();
 			return ZZ_OK;
 		}
+		wait_begin(ZZAPP_WAIT_FLIP, gen, 0U);
 		yield_wait_once();
-	}
+		if (wait_status() != ZZ_OK) {
+			wait_end();
+			return wait_status();
+		}
 }
+}
+
 
 int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 			   uint32_t flags, zzapp_surface *out)
@@ -1812,7 +2014,7 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 	if (format == ZZ_FMT_CLUT8 &&
 	    (life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_LAUNCHER_CLUT8) == 0U)
 		return ZZ_ENOSYS;
-	if (display_bound)
+	if (current_runtime()->display_bound)
 		return ZZ_EBUSY;
 	bits = life_get(ZZAPP_LIFE_FLAGS_OFF);
 	bits |= ZZAPP_F_DISPLAY_UNBOUND;
@@ -1829,10 +2031,16 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 		if (zzapp_services_stop_requested())
 			return ZZ_EIO;
 		if ((life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_DISPLAY_UNBOUND) == 0U &&
-		    display_bound)
+		    current_runtime()->display_bound)
 			break;
+		wait_begin(ZZAPP_WAIT_DISPLAY_OPEN, 0U, 0U);
 		yield_wait_once();
+		if (wait_status() != ZZ_OK) {
+			wait_end();
+			return wait_status();
+		}
 	}
+	wait_end();
 	return fill_surface(out);
 }
 
@@ -1866,15 +2074,15 @@ static int display_mailbox_flip(uint32_t back, uint32_t bytes)
 		return ZZ_EINVAL;
 	flush_presented(back, bytes);
 	display_mailbox_lock_acquire();
-	if (!display_mailbox_active) {
+	if (!current_runtime()->display_mailbox_active) {
 		display_mailbox_lock_release();
 		return ZZ_EBUSY;
 	}
-	if (display_mailbox_pending != 0U) {
+	if (current_runtime()->display_mailbox_pending != 0U) {
 		/* The old pending buffer was never scanned.  It becomes drawing
 		 * immediately while the newer completed buffer replaces it. */
-		life_put(ZZAPP_LIFE_CARD_BACK_OFF, display_mailbox_pending);
-		display_mailbox_pending = back;
+		life_put(ZZAPP_LIFE_CARD_BACK_OFF, current_runtime()->display_mailbox_pending);
+		current_runtime()->display_mailbox_pending = back;
 		life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF,
 			 life_get(ZZAPP_LIFE_MAILBOX_REPLACED_OFF) + 1U);
 	} else {
@@ -1883,7 +2091,7 @@ static int display_mailbox_flip(uint32_t back, uint32_t bytes)
 			display_mailbox_lock_release();
 			return ZZ_EBUSY;
 		}
-		display_mailbox_pending = back;
+		current_runtime()->display_mailbox_pending = back;
 		life_put(ZZAPP_LIFE_CARD_BACK_OFF, spare);
 		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, 0U);
 	}
@@ -1891,7 +2099,7 @@ static int display_mailbox_flip(uint32_t back, uint32_t bytes)
 	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF) + 1U;
 	life_put(ZZAPP_LIFE_FLIP_GEN_OFF, gen);
 	life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
-	display_ack_seen = gen;
+	current_runtime()->display_ack_seen = gen;
 	display_mailbox_lock_release();
 	return ZZ_OK;
 }
@@ -1902,7 +2110,7 @@ int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
 	uint32_t i;
 	uint32_t gen;
 
-	if (!display_bound || surface_id != display_id ||
+	if (!current_runtime()->display_bound || surface_id != current_runtime()->display_id ||
 	    life_get(ZZAPP_LIFE_FORMAT_OFF) != ZZ_FMT_CLUT8)
 		return ZZ_EINVAL;
 	if (!rgb || count == 0U || first >= 256U || count > 256U - first)
@@ -1929,7 +2137,7 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
 	uint32_t flags;
 	int rc;
 
-	if (!display_bound || surface_id != display_id)
+	if (!current_runtime()->display_bound || surface_id != current_runtime()->display_id)
 		return ZZ_EINVAL;
 	if (!zzapp_display_flip_idle())
 		return ZZ_EBUSY;
@@ -1942,7 +2150,7 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
 	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
 	if (display_mailbox_enabled())
 		return display_mailbox_flip(back, bytes);
-	if (display_back_owned) {
+	if (current_runtime()->display_back_owned) {
 		if (front == 0U || back == 0U)
 			return ZZ_EINVAL;
 		memcpy((void *)(uintptr_t)front, (const void *)(uintptr_t)back, bytes);
@@ -1953,7 +2161,7 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
 
 		flush_presented(back, bytes);
 		present = back;
-		display_queued = back;
+		current_runtime()->display_queued = back;
 		life_put(ZZAPP_LIFE_CARD_BACK_OFF, spare);
 	} else {
 		if (back != 0U && life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
@@ -1989,16 +2197,16 @@ int zzapp_svc_display_flip(uint32_t surface_id)
 
 int zzapp_svc_display_refresh(zzapp_surface *out)
 {
-	if (!out || out->id != display_id)
+	if (!out || out->id != current_runtime()->display_id)
 		return ZZ_EINVAL;
-	if (!zzapp_display_flip_idle() && display_queued == 0U)
+	if (!zzapp_display_flip_idle() && current_runtime()->display_queued == 0U)
 		return ZZ_EBUSY;
 	return fill_surface(out);
 }
 
 int zzapp_svc_display_vsync(void)
 {
-	if (!display_bound)
+	if (!current_runtime()->display_bound)
 		return ZZ_EINVAL;
 	zzapp_services_or_flags(ZZAPP_F_VSYNC);
 	yield_once();
@@ -2007,12 +2215,12 @@ int zzapp_svc_display_vsync(void)
 
 int zzapp_svc_display_close(uint32_t surface_id)
 {
-	if (!display_bound || surface_id != display_id)
+	if (!current_runtime()->display_bound || surface_id != current_runtime()->display_id)
 		return ZZ_EINVAL;
 	drop_owned_back();
-	display_bound = 0;
+	current_runtime()->display_bound = 0;
 	display_mailbox_disable();
-	display_id = 0U;
+	current_runtime()->display_id = 0U;
 	zzapp_services_and_flags(~(ZZAPP_F_DISPLAY_UNBOUND | ZZAPP_F_VSYNC |
 				   ZZAPP_F_MAILBOX_REQUEST | ZZAPP_F_MAILBOX));
 	life_put(ZZAPP_LIFE_CARD_FRONT_OFF, 0U);
@@ -2059,12 +2267,12 @@ static int app_audio_snapshot(struct audio_fabric_source *source)
 	uint32_t wr;
 	uint64_t staged;
 
-	if (!audio_open || !audio_samples || !audio_write_frame)
+	if (!current_runtime()->audio_open || !current_runtime()->audio_samples || !current_runtime()->audio_write_frame)
 		return 0;
-	wr = *audio_write_frame;
-	staged = audio_staged;
+	wr = *current_runtime()->audio_write_frame;
+	staged = current_runtime()->audio_staged;
 	memset(source, 0, sizeof(*source));
-	source->ring = (uint8_t *)audio_samples;
+	source->ring = (uint8_t *)current_runtime()->audio_samples;
 	source->capacity = ZZAPP_AUDIO_FRAMES * 4U;
 	source->produced_bytes = audio_produced_frames(wr, staged) * 4U;
 	source->staged_bytes = staged;
@@ -2078,20 +2286,20 @@ static int app_audio_stage(uint32_t bytes)
 {
 	uint64_t produced;
 
-	if (!audio_open || !audio_write_frame)
+	if (!current_runtime()->audio_open || !current_runtime()->audio_write_frame)
 		return 0;
-	produced = audio_produced_frames(*audio_write_frame, audio_staged) * 4U;
-	if (produced < audio_staged || produced - audio_staged < bytes)
+	produced = audio_produced_frames(*current_runtime()->audio_write_frame, current_runtime()->audio_staged) * 4U;
+	if (produced < current_runtime()->audio_staged || produced - current_runtime()->audio_staged < bytes)
 		return 0;
-	audio_staged += bytes;
+	current_runtime()->audio_staged += bytes;
 	return 1;
 }
 
 static void app_audio_retire(uint32_t bytes)
 {
-	if (!audio_open || !audio_read_frame || (bytes & 3U) != 0U)
+	if (!current_runtime()->audio_open || !current_runtime()->audio_read_frame || (bytes & 3U) != 0U)
 		return;
-	*audio_read_frame += bytes / 4U;
+	*current_runtime()->audio_read_frame += bytes / 4U;
 }
 
 static void app_audio_nop(void)
@@ -2121,27 +2329,27 @@ static void audio_pump_ahi_window(void)
 	uint32_t free_bytes;
 	uint32_t copied = 0U;
 
-	if (!audio_open || !audio_ahi_route || !have_window() ||
-	    !audio_samples || !audio_read_frame || !audio_write_frame)
+	if (!current_runtime()->audio_open || !current_runtime()->audio_ahi_route || !have_window() ||
+	    !current_runtime()->audio_samples || !current_runtime()->audio_read_frame || !current_runtime()->audio_write_frame)
 		return;
 	host_head = win_get32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF);
 	host_tail = win_get32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF);
-	retired = host_tail - audio_host_tail_seen;
+	retired = host_tail - current_runtime()->audio_host_tail_seen;
 	if (host_head - host_tail > ZZAPP_AUDIO_CAP ||
 	    retired > ZZAPP_AUDIO_CAP || (retired & 3U) != 0U)
 		return;
-	source_read = *audio_read_frame;
-	source_staged = audio_ahi_staged_frame;
+	source_read = *current_runtime()->audio_read_frame;
+	source_staged = current_runtime()->audio_ahi_staged_frame;
 	if (source_staged - source_read > ZZAPP_AUDIO_FRAMES ||
 	    retired / 4U > source_staged - source_read)
 		return;
 	if (retired != 0U) {
-		*audio_read_frame = source_read + retired / 4U;
-		audio_host_tail_seen = host_tail;
-		source_read = *audio_read_frame;
+		*current_runtime()->audio_read_frame = source_read + retired / 4U;
+		current_runtime()->audio_host_tail_seen = host_tail;
+		source_read = *current_runtime()->audio_read_frame;
 	}
-	source_staged = audio_ahi_staged_frame;
-	source_write = *audio_write_frame;
+	source_staged = current_runtime()->audio_ahi_staged_frame;
+	source_write = *current_runtime()->audio_write_frame;
 	if (source_write - source_staged > ZZAPP_AUDIO_FRAMES)
 		return;
 	available = (source_write - source_staged) * 4U;
@@ -2160,13 +2368,13 @@ static void audio_pump_ahi_window(void)
 			n = src_left;
 		if (n > dst_left)
 			n = dst_left;
-		memcpy(window + ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + dst_at,
-		       (const uint8_t *)audio_samples + src_at, n);
+		memcpy(current_window() + ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + dst_at,
+		       (const uint8_t *)current_runtime()->audio_samples + src_at, n);
 		win_flush(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + dst_at, n);
 		copied += n;
 	}
 	if (copied != 0U) {
-		audio_ahi_staged_frame += copied / 4U;
+		current_runtime()->audio_ahi_staged_frame += copied / 4U;
 		barrier();
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF,
 			  host_head + copied);
@@ -2179,37 +2387,37 @@ static void audio_detach(void)
 	int was_ahi_route;
 
 	/* Core 0 releases a close only after core 1 has quiesced the AHI pump. */
-	if (!__atomic_compare_exchange_n(&audio_open, &open, 0, 0,
+	if (!__atomic_compare_exchange_n(&current_runtime()->audio_open, &open, 0, 0,
 					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 		return;
 #ifdef ZZAPP_HOST_TEST
-	audio_detach_count++;
+	current_runtime()->audio_detach_count++;
 #endif
-	was_ahi_route = audio_ahi_route;
+	was_ahi_route = current_runtime()->audio_ahi_route;
 #ifdef ZZAPP_HOST_TEST
 	(void)was_ahi_route;
 #endif
 #ifndef ZZAPP_HOST_TEST
 	if (!was_ahi_route)
-		audio_fabric_producer_detach(audio_slot);
-	if (audio_block)
-		surface_allocator_free((uint32_t)(uintptr_t)audio_block);
+		audio_fabric_producer_detach(current_runtime()->audio_slot);
+	if (current_runtime()->audio_block)
+		surface_allocator_free((uint32_t)(uintptr_t)current_runtime()->audio_block);
 #endif
 #ifdef ZZAPP_HOST_TEST
-	free(audio_block);
+	free(current_runtime()->audio_block);
 #endif
-	audio_block = NULL;
-	audio_samples = NULL;
-	audio_read_frame = NULL;
-	audio_write_frame = NULL;
-	audio_staged = 0U;
-	audio_ahi_staged_frame = 0U;
-	audio_ahi_route = 0;
-	audio_host_tail_seen = 0U;
+	current_runtime()->audio_block = NULL;
+	current_runtime()->audio_samples = NULL;
+	current_runtime()->audio_read_frame = NULL;
+	current_runtime()->audio_write_frame = NULL;
+	current_runtime()->audio_staged = 0U;
+	current_runtime()->audio_ahi_staged_frame = 0U;
+	current_runtime()->audio_ahi_route = 0;
+	current_runtime()->audio_host_tail_seen = 0U;
 	zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_slot());
 	zzapp_proc_slot(service_slot())->audio_direct = 0U;
 	if (have_window()) {
-		memset(window + ZZAPP_AUDIO_OFF, 0, ZZAPP_AUDIO_HDR);
+		memset(current_window() + ZZAPP_AUDIO_OFF, 0, ZZAPP_AUDIO_HDR);
 		win_flush(ZZAPP_AUDIO_OFF, ZZAPP_AUDIO_HDR);
 		life_put(ZZAPP_LIFE_AUDIO_ROUTE_OFF, ZZAPP_AUDIO_ROUTE_CARD);
 		life_put(ZZAPP_LIFE_AUDIO_RATE_OFF, 0U);
@@ -2224,11 +2432,11 @@ static int audio_attach(void)
 	uint32_t slot = 0U;
 	uint32_t bytes = 8U + ZZAPP_AUDIO_FRAMES * 4U;
 
-	audio_ahi_route = (life_get(ZZAPP_LIFE_FLAGS_OFF) &
+	current_runtime()->audio_ahi_route = (life_get(ZZAPP_LIFE_FLAGS_OFF) &
 			   ZZAPP_F_LAUNCHER_AUDIO_AHI) != 0U;
-	if (audio_open)
+	if (current_runtime()->audio_open)
 		return ZZ_EBUSY;
-	if (!audio_ahi_route) {
+	if (!current_runtime()->audio_ahi_route) {
 		slot = AUDIO_FABRIC_SLOT_RESERVED;
 		if (slot_is_busy(slot))
 			slot = AUDIO_FABRIC_SLOT_MAILBOX;
@@ -2236,29 +2444,29 @@ static int audio_attach(void)
 			return ZZ_EBUSY;
 	}
 #ifdef ZZAPP_HOST_TEST
-	audio_block = calloc(1, bytes);
-	if (!audio_block)
+	current_runtime()->audio_block = calloc(1, bytes);
+	if (!current_runtime()->audio_block)
 		return ZZ_ENOMEM;
 #else
-	if (!audio_ahi_route &&
+	if (!current_runtime()->audio_ahi_route &&
 	    !audio_fabric_conversion_admissible(ZZAPP_AUDIO_RATE))
 		return ZZ_EBUSY;
-	audio_block = (void *)(uintptr_t)surface_allocator_alloc_range(
+	current_runtime()->audio_block = (void *)(uintptr_t)surface_allocator_alloc_range(
 		bytes, 64U, SDK_MAILBOX_Z3_RESERVE_END,
 		SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS);
-	if (!audio_block)
+	if (!current_runtime()->audio_block)
 		return ZZ_ENOMEM;
 #endif
-	audio_read_frame = (volatile uint32_t *)audio_block;
-	audio_write_frame = audio_read_frame + 1;
-	audio_samples = (int16_t *)(audio_read_frame + 2);
-	*audio_read_frame = 0U;
-	*audio_write_frame = 0U;
-	audio_staged = 0U;
-	audio_ahi_staged_frame = 0U;
-	audio_slot = slot;
-	audio_host_tail_seen = 0U;
-	if (audio_ahi_route) {
+	current_runtime()->audio_read_frame = (volatile uint32_t *)current_runtime()->audio_block;
+	current_runtime()->audio_write_frame = current_runtime()->audio_read_frame + 1;
+	current_runtime()->audio_samples = (int16_t *)(current_runtime()->audio_read_frame + 2);
+	*current_runtime()->audio_read_frame = 0U;
+	*current_runtime()->audio_write_frame = 0U;
+	current_runtime()->audio_staged = 0U;
+	current_runtime()->audio_ahi_staged_frame = 0U;
+	current_runtime()->audio_slot = slot;
+	current_runtime()->audio_host_tail_seen = 0U;
+	if (current_runtime()->audio_ahi_route) {
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF, 0U);
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF, 0U);
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_RATE_OFF, ZZAPP_AUDIO_RATE);
@@ -2274,17 +2482,17 @@ static int audio_attach(void)
 		life_put(ZZAPP_LIFE_AUDIO_FORMAT_OFF, ZZAPP_AUDIO_FORMAT_S16LE);
 	}
 	/* The ISR may snapshot as soon as go_live returns. */
-	audio_open = 1;
+	current_runtime()->audio_open = 1;
 	barrier();
 #ifndef ZZAPP_HOST_TEST
-	if (!audio_ahi_route) {
+	if (!current_runtime()->audio_ahi_route) {
 		if (!audio_fabric_producer_attach(slot, &app_audio_ops)) {
-			audio_open = 0;
-			surface_allocator_free((uint32_t)(uintptr_t)audio_block);
-			audio_block = NULL;
-			audio_samples = NULL;
-			audio_read_frame = NULL;
-			audio_write_frame = NULL;
+			current_runtime()->audio_open = 0;
+			surface_allocator_free((uint32_t)(uintptr_t)current_runtime()->audio_block);
+			current_runtime()->audio_block = NULL;
+			current_runtime()->audio_samples = NULL;
+			current_runtime()->audio_read_frame = NULL;
+			current_runtime()->audio_write_frame = NULL;
 			return ZZ_EBUSY;
 		}
 		audio_fabric_producer_rate_set(slot, ZZAPP_AUDIO_RATE);
@@ -2294,11 +2502,11 @@ static int audio_attach(void)
 	}
 #endif
 	if (have_window()) {
-		uint32_t epoch = audio_stream_epoch + 1U;
+		uint32_t epoch = current_runtime()->audio_stream_epoch + 1U;
 
 		if (epoch == 0U)
 			epoch = 1U;
-		audio_stream_epoch = epoch;
+		current_runtime()->audio_stream_epoch = epoch;
 		/* Last: the launcher ignores the header until this is nonzero. */
 		barrier();
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_EPOCH_OFF, epoch);
@@ -2308,10 +2516,10 @@ static int audio_attach(void)
 
 static void audio_fill(zzapp_audio *out)
 {
-	out->samples = audio_samples;
+	out->samples = current_runtime()->audio_samples;
 	out->frames = ZZAPP_AUDIO_FRAMES;
-	out->read_frame = audio_read_frame;
-	out->write_frame = audio_write_frame;
+	out->read_frame = current_runtime()->audio_read_frame;
+	out->write_frame = current_runtime()->audio_write_frame;
 	out->rate = ZZAPP_AUDIO_RATE;
 	out->channels = 2U;
 }
@@ -2325,7 +2533,7 @@ int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out)
 		return ZZ_EINVAL;
 	if (channels != 2U || rate != ZZAPP_AUDIO_RATE)
 		return ZZ_EINVAL;
-	if (audio_open || audio_request != AUDIO_REQUEST_NONE)
+	if (current_runtime()->audio_open || current_runtime()->audio_request != AUDIO_REQUEST_NONE)
 		return ZZ_EBUSY;
 	direct_card_route = (life_get(ZZAPP_LIFE_FLAGS_OFF) &
 			     ZZAPP_F_LAUNCHER_AUDIO_AHI) == 0U;
@@ -2335,12 +2543,19 @@ int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out)
 #ifdef ZZAPP_HOST_TEST
 	rc = audio_attach();
 #else
-	audio_result = ZZ_EBUSY;
+	current_runtime()->audio_result = ZZ_EBUSY;
 	barrier();
-	audio_request = AUDIO_REQUEST_OPEN;
-	while (audio_request != AUDIO_REQUEST_NONE)
-		yield_once();
-	rc = audio_result;
+	current_runtime()->audio_request = AUDIO_REQUEST_OPEN;
+	wait_begin(ZZAPP_WAIT_AUDIO, 0U, 0U);
+	while (current_runtime()->audio_request != AUDIO_REQUEST_NONE) {
+		yield_wait_once();
+		if (wait_status() != ZZ_OK) {
+			wait_end();
+			return wait_status();
+		}
+	}
+	wait_end();
+	rc = current_runtime()->audio_result;
 #endif
 	if (rc != ZZ_OK) {
 		zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_slot());
@@ -2353,18 +2568,25 @@ int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out)
 
 int zzapp_svc_audio_close(void)
 {
-	if (!audio_open || audio_request != AUDIO_REQUEST_NONE)
+	if (!current_runtime()->audio_open || current_runtime()->audio_request != AUDIO_REQUEST_NONE)
 		return ZZ_EINVAL;
 #ifdef ZZAPP_HOST_TEST
 	audio_detach();
 #else
-	audio_result = ZZ_EIO;
+	current_runtime()->audio_result = ZZ_EIO;
 	barrier();
-	audio_request = AUDIO_REQUEST_CLOSE;
-	while (audio_request != AUDIO_REQUEST_NONE)
-		yield_once();
-	if (audio_result != ZZ_OK)
-		return audio_result;
+	current_runtime()->audio_request = AUDIO_REQUEST_CLOSE;
+	wait_begin(ZZAPP_WAIT_AUDIO, 0U, 0U);
+	while (current_runtime()->audio_request != AUDIO_REQUEST_NONE) {
+		yield_wait_once();
+		if (wait_status() != ZZ_OK) {
+			wait_end();
+			return wait_status();
+		}
+	}
+	wait_end();
+	if (current_runtime()->audio_result != ZZ_OK)
+		return current_runtime()->audio_result;
 #endif
 	return ZZ_OK;
 }
@@ -2374,73 +2596,139 @@ static void audio_post_teardown(void)
 	/* Force-stop and fault frames cannot wait for core 0. Post the same
 	 * close handoff explicit close uses, and leave the slot busy until
 	 * core 0 (or a halted-core reclaim) finishes the detach. */
-	if (audio_request == AUDIO_REQUEST_CLOSE ||
-	    audio_request == AUDIO_REQUEST_CLOSE_QUIESCED) {
-		audio_teardown = 1;
+	if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE ||
+	    current_runtime()->audio_request == AUDIO_REQUEST_CLOSE_QUIESCED) {
+		current_runtime()->audio_teardown = 1;
 		return;
 	}
-	if (!audio_open && !audio_block &&
-	    audio_request != AUDIO_REQUEST_OPEN)
+	if (!current_runtime()->audio_open && !current_runtime()->audio_block &&
+	    current_runtime()->audio_request != AUDIO_REQUEST_OPEN)
 		return;
-	audio_teardown = 1;
-	audio_result = ZZ_EIO;
+	current_runtime()->audio_teardown = 1;
+	current_runtime()->audio_result = ZZ_EIO;
 	barrier();
-	if (audio_request != AUDIO_REQUEST_OPEN)
-		audio_request = AUDIO_REQUEST_CLOSE;
+	if (current_runtime()->audio_request != AUDIO_REQUEST_OPEN)
+		current_runtime()->audio_request = AUDIO_REQUEST_CLOSE;
 }
 
 void zzapp_services_reclaim_halted_audio(void)
 {
-	if (audio_request == AUDIO_REQUEST_OPEN) {
-		audio_result = ZZ_EIO;
-		audio_teardown = 0;
+	if (current_runtime()->audio_request == AUDIO_REQUEST_OPEN) {
+		current_runtime()->audio_result = ZZ_EIO;
+		current_runtime()->audio_teardown = 0;
 		barrier();
-		audio_request = AUDIO_REQUEST_NONE;
+		current_runtime()->audio_request = AUDIO_REQUEST_NONE;
 		return;
 	}
-	if (!audio_open && !audio_block &&
-	    audio_request != AUDIO_REQUEST_CLOSE &&
-	    audio_request != AUDIO_REQUEST_CLOSE_QUIESCED)
+	if (!current_runtime()->audio_open && !current_runtime()->audio_block &&
+	    current_runtime()->audio_request != AUDIO_REQUEST_CLOSE &&
+	    current_runtime()->audio_request != AUDIO_REQUEST_CLOSE_QUIESCED)
 		return;
 	audio_detach();
-	audio_teardown = 0;
-	audio_result = ZZ_OK;
+	current_runtime()->audio_teardown = 0;
+	current_runtime()->audio_result = ZZ_OK;
 	barrier();
-	audio_request = AUDIO_REQUEST_NONE;
+	current_runtime()->audio_request = AUDIO_REQUEST_NONE;
 }
 
-void zzapp_services_core0_poll(void)
+static void wake_ready_waits(void)
 {
-	uint32_t request = audio_request;
+	uint32_t slot;
+	uint32_t selected = selected_slot[service_context()];
+
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		struct zzapp_service_runtime *state = runtime_for_slot(slot);
+		int ready = 0;
+
+		select_slot(slot);
+		if (state->wait_kind == ZZAPP_WAIT_NONE)
+			continue;
+		if (state->wait_deadline != 0U && now_us() >= state->wait_deadline) {
+			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), slot,
+						 ZZAPP_WAKE_TIMEOUT);
+			continue;
+		}
+		switch (state->wait_kind) {
+		case ZZAPP_WAIT_FILE:
+			ready = win_get32(ZZAPP_FILE_OFF) == state->wait_value;
+			break;
+		case ZZAPP_WAIT_CONSOLE_WRITE:
+			ready = win_get32(ZZAPP_CONSOLE_OUT_OFF + 4U) !=
+				state->wait_value;
+			break;
+		case ZZAPP_WAIT_CONSOLE_READ:
+			ready = win_get32(ZZAPP_CONSOLE_IN_OFF) != state->wait_value ||
+				win_get32(ZZAPP_CONSOLE_IN_OFF +
+					  ZZAPP_CONSOLE_EOF_OFF) != 0U;
+			break;
+		case ZZAPP_WAIT_DISPLAY_OPEN:
+			ready = state->display_bound ||
+				(win_get32(ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF) &
+				 ZZAPP_F_DISPLAY_UNBOUND) == 0U;
+			break;
+		case ZZAPP_WAIT_FLIP:
+			ready = win_get32(ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_ACK_OFF) ==
+				state->wait_value;
+			break;
+		case ZZAPP_WAIT_AUDIO:
+			ready = state->audio_request == AUDIO_REQUEST_NONE;
+			break;
+		default:
+			break;
+		}
+		if (ready)
+			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), slot,
+						 ZZAPP_WAKE_READY);
+	}
+	select_slot(selected);
+}
+
+static void audio_core0_poll_slot(void)
+{
+	uint32_t request = current_runtime()->audio_request;
 
 	if (request == AUDIO_REQUEST_OPEN) {
-		if (audio_teardown)
-			audio_result = ZZ_EIO;
+		if (current_runtime()->audio_teardown)
+			current_runtime()->audio_result = ZZ_EIO;
 		else
-			audio_result = audio_attach();
+			current_runtime()->audio_result = audio_attach();
 		barrier();
-		audio_request = AUDIO_REQUEST_NONE;
-		if (audio_teardown && (audio_open || audio_block))
-			audio_request = AUDIO_REQUEST_CLOSE;
+		current_runtime()->audio_request = AUDIO_REQUEST_NONE;
+		if (current_runtime()->audio_teardown &&
+		    (current_runtime()->audio_open || current_runtime()->audio_block))
+			current_runtime()->audio_request = AUDIO_REQUEST_CLOSE;
 		return;
 	}
 	if (request != AUDIO_REQUEST_CLOSE_QUIESCED)
 		return;
 	audio_detach();
-	audio_teardown = 0;
-	audio_result = ZZ_OK;
+	current_runtime()->audio_teardown = 0;
+	current_runtime()->audio_result = ZZ_OK;
 	barrier();
-	audio_request = AUDIO_REQUEST_NONE;
+	current_runtime()->audio_request = AUDIO_REQUEST_NONE;
+}
+
+void zzapp_services_core0_poll(void)
+{
+	uint32_t slot;
+	uint32_t selected = selected_slot[service_context()];
+
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		select_slot(slot);
+		audio_core0_poll_slot();
+	}
+	select_slot(selected);
 }
 
 static void init_window(uint8_t *base, uint32_t bytes, int uncached)
 {
-	slots[active_slot].window = base;
-	slots[active_slot].window_bytes = bytes;
-	select_slot(active_slot);
-	window_uncached = uncached;
-	file_seq = 0U;
-	memset(window, 0, ZZAPP_WINDOW_BYTES);
+	uint32_t slot = service_slot();
+
+	slots[slot].window = base;
+	slots[slot].window_bytes = bytes;
+	slots[slot].window_uncached = uncached;
+	current_runtime()->file_seq = 0U;
+	memset(current_window(), 0, ZZAPP_WINDOW_BYTES);
 	win_flush(0U, ZZAPP_WINDOW_BYTES);
 	life_put(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
 	life_put(ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
@@ -2453,14 +2741,14 @@ static int alloc_window(uint32_t slot, uint32_t *arm_addr, uint32_t *host_off)
 #ifdef ZZAPP_HOST_TEST
 	if (!have_window())
 		return ZZ_ENOMEM;
-	*arm_addr = (uint32_t)(uintptr_t)window;
+	*arm_addr = (uint32_t)(uintptr_t)current_window();
 	*host_off = *arm_addr;
 	return ZZ_OK;
 #else
 	uint32_t addr;
 
 	if (have_window()) {
-		*arm_addr = (uint32_t)(uintptr_t)window;
+		*arm_addr = (uint32_t)(uintptr_t)current_window();
 		*host_off = *arm_addr - ADDR_ADJ;
 		return ZZ_OK;
 	}
@@ -2523,12 +2811,29 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 		rc = zzapp_loader_alloc_back(bytes, &back);
 		if (rc != ZZ_OK)
 			return rc == ZZ_ENOSYS ? ZZ_ENOMEM : rc;
-		display_back_owned = 1;
+		current_runtime()->display_back_owned = 1;
 	} else if (!span_ok(back, bytes)) {
 		return ZZ_EINVAL;
 	} else {
-		display_back_owned = 0;
+		current_runtime()->display_back_owned = 0;
 	}
+	{
+		uint32_t lease_base = front < back ? front : back;
+		uint64_t lease_end = (uint64_t)(front > back ? front : back) + bytes;
+		uint32_t lease_bytes;
+
+		if (lease_end > UINT32_MAX)
+			return ZZ_EINVAL;
+		lease_base &= ~(ZZAPP_KERNEL_PAGE_BYTES - 1U);
+		lease_bytes = ((uint32_t)lease_end - lease_base +
+			       ZZAPP_KERNEL_PAGE_BYTES - 1U) &
+			~(ZZAPP_KERNEL_PAGE_BYTES - 1U);
+		if (zzapp_kernel_surface_bind(zzapp_runtime_kernel(), service_slot(),
+					      zzapp_services_generation(), lease_base,
+					      lease_bytes) != 0)
+			return ZZ_EBUSY;
+	}
+
 	life_put(ZZAPP_LIFE_WIDTH_OFF, width);
 	life_put(ZZAPP_LIFE_HEIGHT_OFF, height);
 	life_put(ZZAPP_LIFE_PITCH_OFF, pitch);
@@ -2541,23 +2846,23 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	life_put(ZZAPP_LIFE_FLIP_ADDRESS_OFF, 0U);
 	life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0U);
 	life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF, 0U);
-	display_ack_seen = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
-	display_bound = 1;
-	display_id = 1U;
+	current_runtime()->display_ack_seen = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
+	current_runtime()->display_bound = 1;
+	current_runtime()->display_id = 1U;
 	display_mailbox_disable();
 	flags = zzapp_services_flags();
 	if ((flags & (ZZAPP_F_MAILBOX_REQUEST | ZZAPP_F_LAUNCHER_MAILBOX)) ==
 	    (ZZAPP_F_MAILBOX_REQUEST | ZZAPP_F_LAUNCHER_MAILBOX) &&
-	    !display_back_owned && spare != 0U) {
+	    !current_runtime()->display_back_owned && spare != 0U) {
 		display_mailbox_lock_acquire();
-		display_mailbox_shown = front;
-		display_mailbox_pending = 0U;
-		display_mailbox_buffers[0] = front;
-		display_mailbox_buffers[1] = back;
-		display_mailbox_buffers[2] = spare;
-		display_mailbox_bytes = bytes;
-		display_mailbox_latch_pending = 0;
-		__atomic_store_n(&display_mailbox_active, 1, __ATOMIC_RELEASE);
+		current_runtime()->display_mailbox_shown = front;
+		current_runtime()->display_mailbox_pending = 0U;
+		current_runtime()->display_mailbox_buffers[0] = front;
+		current_runtime()->display_mailbox_buffers[1] = back;
+		current_runtime()->display_mailbox_buffers[2] = spare;
+		current_runtime()->display_mailbox_bytes = bytes;
+		current_runtime()->display_mailbox_latch_pending = 0;
+		__atomic_store_n(&current_runtime()->display_mailbox_active, 1, __ATOMIC_RELEASE);
 		display_mailbox_lock_release();
 		zzapp_services_or_flags(ZZAPP_F_MAILBOX);
 	} else {
@@ -2625,7 +2930,7 @@ static void run_deferred(void)
 			break;
 		}
 		win_inval(ZZAPP_STAGING_OFF, n);
-		rc = zzapp_loader_chunk(off, window + ZZAPP_STAGING_OFF, n);
+		rc = zzapp_loader_chunk(off, current_window() + ZZAPP_STAGING_OFF, n);
 		if (rc == ZZ_EINVAL)
 			reject_reason = "loader rejected chunk offset or range";
 		break;
@@ -2683,17 +2988,18 @@ void zzapp_services_poll(void)
 	}
 	if (defer_claim(DEFER_POSTED, DEFER_RUNNING))
 		run_deferred();
-	if (audio_request == AUDIO_REQUEST_CLOSE) {
+	wake_ready_waits();
+	if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE) {
 		/* The release store lets core 0 free the source only after no
 		 * core-1 AHI pump can still retain its pointers. */
 		barrier();
-		audio_request = AUDIO_REQUEST_CLOSE_QUIESCED;
+		current_runtime()->audio_request = AUDIO_REQUEST_CLOSE_QUIESCED;
 		return;
 	}
 	/* Stay quiet until core 0 publishes completion. A second poll in
 	 * this window used to fall through and pump the source core 0 is
 	 * about to free. */
-	if (audio_request == AUDIO_REQUEST_CLOSE_QUIESCED)
+	if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE_QUIESCED)
 		return;
 	audio_pump_ahi_window();
 }
@@ -2743,7 +3049,7 @@ static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 		memcpy(defer_req, req, req_len);
 	defer_opcode = opcode;
 	defer_req_len = req_len;
-	defer_slot = active_slot;
+	defer_slot = service_slot();
 	defer_request_id = request_id;
 	defer_cookie = user_cookie;
 	defer_reply_len = 0U;
@@ -2958,7 +3264,7 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 
 			if (mib > UINT32_MAX / (1024U * 1024U))
 				return SDK_STATUS_BAD_REQUEST;
-			slots[active_slot].memory_limit = mib * 1024U * 1024U;
+			slots[service_slot()].memory_limit = mib * 1024U * 1024U;
 		}
 		/* fall through */
 	case ZZAPP_OP_LOAD_CHUNK:
@@ -3007,18 +3313,25 @@ void zzapp_mailbox_harvest_ack(void)
 #ifdef ZZAPP_HOST_TEST
 void zzapp_services_test_reset(void)
 {
-	audio_detach();
-	audio_request = AUDIO_REQUEST_NONE;
-	audio_teardown = 0;
-	audio_detach_count = 0;
+	uint32_t slot;
+
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		select_slot(slot);
+		audio_detach();
+	}
+	memset(runtime, 0, sizeof(runtime));
 	memset(slots, 0, sizeof(slots));
-	active_slot = 0U;
-	forget_window();
+	selected_slot[0] = 0U;
+	selected_slot[1] = 0U;
 	defer_store(DEFER_IDLE);
 	start_pending = 0U;
 	defer_test_core = 1;
 	yield_hook = NULL;
 	time_hook = NULL;
+#ifdef ZZAPP_SERVICES_STANDALONE_TEST
+	service_test_current_thread = -1;
+	service_test_wake_count = 0U;
+#endif
 	memset(slot_busy_test, 0, sizeof(slot_busy_test));
 	zzapp_services_on_launch();
 }
@@ -3060,16 +3373,16 @@ void zzapp_services_test_set_slot_busy(uint32_t slot, int busy)
 
 void zzapp_services_test_set_audio_request(uint32_t request)
 {
-	audio_request = request;
+	current_runtime()->audio_request = request;
 }
 
 uint32_t zzapp_services_test_audio_request(void)
 {
-	return audio_request;
+	return current_runtime()->audio_request;
 }
 
 uint32_t zzapp_services_test_audio_detach_count(void)
 {
-	return audio_detach_count;
+	return current_runtime()->audio_detach_count;
 }
 #endif

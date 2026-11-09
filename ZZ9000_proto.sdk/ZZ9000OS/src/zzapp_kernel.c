@@ -414,6 +414,15 @@ int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
 	resource->surface_generation = generation;
 	return 0;
 }
+void zzapp_kernel_surface_unbind(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	kernel->resources[slot].surface_base = 0U;
+	kernel->resources[slot].surface_bytes = 0U;
+	kernel->resources[slot].surface_generation = 0U;
+}
+
 
 int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t slot,
 			    int direct_card_route)
@@ -506,6 +515,7 @@ void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot)
 	zzapp_kernel_gl_unbind(kernel, slot,
 			      kernel->resources[slot].gl_generation);
 	memset(&kernel->resources[slot], 0, sizeof(kernel->resources[slot]));
+	kernel->threads[slot].wake_reason = ZZAPP_WAKE_CANCELLED;
 	kernel->threads[slot].state = ZZAPP_THREAD_STOPPED;
 	kernel->threads[slot].quantum_left = 0U;
 	if (kernel->active == slot)

@@ -50,6 +50,7 @@ uint32_t zzapp_services_generation(void);
 uint32_t zzapp_services_state(void);
 uint32_t zzapp_services_current_slot(void);
 int zzapp_services_stop_requested(void);
+int zzapp_services_wait_registered(uint32_t slot);
 void zzapp_services_set_state(uint32_t state);
 void zzapp_services_set_generation(uint32_t generation);
 uint32_t zzapp_services_memory_limit(void);

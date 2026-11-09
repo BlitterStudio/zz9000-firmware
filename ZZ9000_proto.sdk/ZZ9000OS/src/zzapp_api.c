@@ -320,17 +320,8 @@ static uint64_t api_time(void)
 }
 static void api_sleep(uint32_t us)
 {
-    uint64_t end;
-
     zzapp_api_enter();
-    end = zzapp_host_time_us() + us;
-    do {
-        /* Sleep has no MiniGL lock; it may service one queued client packet. */
-        zzapp_host_yield_wait();
-#ifdef ZZAPP_HOST_TEST
-        break;
-#endif
-    } while (!api_stop() && zzapp_host_time_us() < end);
+    zzapp_host_sleep(us);
     zzapp_api_leave();
 }
 /* Firmware allocation is bounded by the app heap. The app's _sbrk uses this

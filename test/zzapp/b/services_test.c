@@ -527,6 +527,126 @@ static void test_audio_write_cursor_wrap(void)
 		fail("cursor equal to staged");
 }
 
+static uint8_t g_slot_windows[2][ZZAPP_WINDOW_BYTES];
+
+static void slot_launcher(void)
+{
+	uint8_t *slot_window = slots[service_slot()].window;
+	uint32_t seq;
+
+	if (!slot_window)
+		return;
+	seq = zzapp_get_be32(slot_window + ZZAPP_FILE_OFF);
+	if ((seq & 1U) != 0U || seq == 0U)
+		return;
+	zzapp_put_be32(slot_window + ZZAPP_FILE_OFF, seq + 1U);
+	zzapp_put_be32(slot_window + ZZAPP_FILE_OFF + 20U, 0U);
+	zzapp_put_be32(slot_window + ZZAPP_FILE_OFF, seq + 2U);
+}
+
+static void test_per_slot_file_and_audio_state(void)
+{
+	zzapp_audio first;
+	zzapp_audio second;
+	int first_fd;
+	int second_fd;
+	uint32_t written;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_test_set_yield(slot_launcher);
+	zzapp_services_select_slot(0U);
+	first_fd = zzapp_svc_file_open("slot0", ZZ_FILE_READ);
+	zzapp_services_select_slot(1U);
+	second_fd = zzapp_svc_file_open("slot1", ZZ_FILE_READ);
+	if (first_fd != ZZAPP_FD_BASE || second_fd != ZZAPP_FD_BASE)
+		fail("per-slot file handles");
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_console_write("a", 1U, &written) != ZZ_OK ||
+	    written != 1U ||
+	    g_slot_windows[0][ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] != 'a' ||
+	    zzapp_get_be32(g_slot_windows[1] + ZZAPP_CONSOLE_OUT_OFF) != 0U)
+		fail("slot zero console data");
+	zzapp_services_select_slot(1U);
+	if (zzapp_svc_console_write("b", 1U, &written) != ZZ_OK ||
+	    written != 1U ||
+	    g_slot_windows[1][ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] != 'b' ||
+	    g_slot_windows[0][ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] != 'a')
+		fail("slot one console data");
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_audio_open(22050U, 2U, &first) != ZZ_OK)
+		fail("first slot audio open");
+	zzapp_services_select_slot(1U);
+	if (zzapp_svc_audio_open(22050U, 2U, &second) != ZZ_OK ||
+	    first.samples == second.samples)
+		fail("per-slot audio state");
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_audio_close() != ZZ_OK)
+		fail("first slot audio close");
+	zzapp_services_select_slot(1U);
+	if (zzapp_svc_audio_close() != ZZ_OK)
+		fail("second slot audio close");
+}
+
+static void test_app_window_ignores_mailbox_selection(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(2U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_test_set_core(0);
+	zzapp_services_select_slot(1U);
+	zzapp_services_set_generation(1U);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 1U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 1U);
+	reply_len = 0U;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_STATUS, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("slot one mailbox selection");
+	zzapp_services_test_set_core(1);
+	service_test_current_thread = 2;
+	if (zzapp_services_window() != g_slot_windows[1])
+		fail("app window ignores mailbox selection");
+	service_test_current_thread = -1;
+}
+
+static void test_core1_wakes_ready_waiter(void)
+{
+	zzapp_kernel_t *kernel;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(2U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	runtime[2].wait_kind = ZZAPP_WAIT_CONSOLE_READ;
+	runtime[2].wait_value = 0U;
+	zzapp_put_be32(g_slot_windows[1] + ZZAPP_CONSOLE_IN_OFF, 1U);
+	kernel = zzapp_runtime_kernel();
+	kernel->threads[2].state = ZZAPP_THREAD_BLOCKED;
+	zzapp_services_test_set_core(0);
+	zzapp_services_core0_poll();
+	if (kernel->threads[2].state != ZZAPP_THREAD_BLOCKED)
+		fail("core zero woke waiter");
+	if (service_test_wake_count != 0U)
+		fail("core zero called wake");
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (kernel->threads[2].state != ZZAPP_THREAD_RUNNABLE)
+		fail("core one did not wake waiter");
+	if (service_test_wake_count != 1U)
+		fail("core one wake count");
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -541,6 +661,9 @@ int main(void)
 	test_display_scanout_ack();
 	test_clut8_palette_publication();
 	test_display_mailbox();
+	test_per_slot_file_and_audio_state();
+	test_app_window_ignores_mailbox_selection();
+	test_core1_wakes_ready_waiter();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;

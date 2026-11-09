@@ -256,6 +256,30 @@ static void test_blocking_api_lock_and_slot_resources(void)
 	CHECK(kernel.resources[1].audio_sessions == 0u);
 }
 
+static void test_waiter_isolation_timeout_and_stop(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 1);
+	make_runnable(&kernel, 2);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_api_block(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 5) == ZZAPP_KERNEL_APP2);
+	CHECK(zzapp_kernel_wake(&kernel, 1, ZZAPP_WAKE_READY) == 0);
+	CHECK(kernel.wake_log_count == 1u);
+	CHECK(kernel.wake_log[0] == 1u);
+	CHECK(kernel.threads[2].state == ZZAPP_THREAD_RUNNABLE);
+
+	CHECK(zzapp_kernel_sleep(&kernel, 1, kernel.now + 10u) == 0);
+	zzapp_kernel_advance(&kernel, 10u);
+	CHECK(zzapp_kernel_wait_status(&kernel, 1) == ZZAPP_KERNEL_WAIT_TIMEOUT);
+
+	CHECK(zzapp_kernel_block(&kernel, 1) == 0);
+	zzapp_kernel_stop_app(&kernel, 1);
+	CHECK(zzapp_kernel_wait_status(&kernel, 1) == ZZAPP_KERNEL_WAIT_CANCELLED);
+}
+
 int main(void)
 {
     test_first_context_and_dispatch();
@@ -268,6 +292,7 @@ int main(void)
     test_wait_completion_timeout_and_cancel();
     test_accounting_and_throttle();
     test_blocking_api_lock_and_slot_resources();
+    test_waiter_isolation_timeout_and_stop();
     printf("kernel_sched_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;
 }

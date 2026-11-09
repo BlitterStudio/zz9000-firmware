@@ -98,9 +98,9 @@ int zzapp_loader_chunk(uint32_t file_off, const void *src, uint32_t len);
 int zzapp_loader_end(void);
 int zzapp_loader_abort(void);
 int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr_out);
-void zzapp_loader_free_back(uint32_t addr);
 void zzapp_host_yield(void);
 void zzapp_host_yield_wait(void);
+void zzapp_host_sleep(uint32_t us);
 uint64_t zzapp_host_time_us(void);
 void zzapp_loader_release(void);
 uint32_t zzapp_loader_state(void);
@@ -162,6 +162,7 @@ uint8_t *zzapp_services_window(void);
 uint32_t zzapp_services_current_slot(void);
 void zzapp_services_select_slot(uint32_t slot);
 uint32_t zzapp_services_memory_limit(void);
+int zzapp_services_wait_registered(uint32_t slot);
 void zzapp_services_start_entered(int status);
 void zzapp_services_on_reset(void);
 void zzapp_services_on_app_end(void);
@@ -214,6 +215,7 @@ uint32_t zzapp_test_arena_card(void);
 uint8_t *zzapp_test_arena_mem(void);
 int zzapp_test_cold_restarts(void);
 uint32_t zzapp_test_exit_code(void);
+void zzapp_test_set_wait_registered(uint32_t slot, int registered);
 #endif
 
 #endif /* ZZAPP_RUNTIME_H */

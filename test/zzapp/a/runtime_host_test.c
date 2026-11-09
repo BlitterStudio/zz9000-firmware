@@ -49,6 +49,31 @@ int main(void)
 
     zzapp_boot_init();
     zzapp_test_set_xtime(0);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_host_yield_wait();
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_SLEEPING);
+    assert(zzapp_runtime_kernel()->threads[0].sleep_deadline == 1U);
+
+    zzapp_boot_init();
+    zzapp_test_set_wait_registered(0U, 1);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_host_yield_wait();
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_BLOCKED);
+    zzapp_kernel_set_current_thread(-1);
+
+    {
+        uint32_t service_calls = zzapp_test_service_calls();
+
+        zzapp_host_yield_wait();
+        assert(zzapp_test_service_calls() == service_calls + 1U);
+    }
+
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
     zzapp_test_mark_running();
     /* Long app computation between API calls (GLQuake's level load) is
      * not a hang; only ZZAPP_APP_STALL_US without any call stops it. */
