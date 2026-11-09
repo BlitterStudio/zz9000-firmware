@@ -1,10 +1,13 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#define _GNU_SOURCE
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "zzapp.h"
-#include "zzapp_as.h"
+#include "zzapp_runtime.h"
 #include "zzapp_svc.h"
 #include "xil_cache.h"
 
@@ -50,6 +53,144 @@ static void setup(zzapp_as_t *as)
     CHECK(zzapp_as_map_image(as, WINDOW + 0x1000U, 0x01001000U, 4096U,
                              ZZAPP_AS_IMAGE_RO) == 0);
     CHECK(zzapp_as_grant_user(as, 0x02000000U, 4096U) == 0);
+}
+static zzapp_proc_t proc;
+static zzapp_api api;
+static zzapp_gl gl;
+static uint8_t *user_page;
+static unsigned vertex_pointer_calls;
+static unsigned draw_arrays_calls;
+static unsigned draw_elements_calls;
+static unsigned texture_upload_calls;
+static unsigned read_pixels_calls;
+
+int zzapp_kernel_current_thread(void) { return 0; }
+zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
+{
+    return slot == 0U ? &proc : NULL;
+}
+const zzapp_api *zzapp_api_table(void) { return &api; }
+
+static const zzapp_gl *mock_gl_bind(uint32_t surface_id)
+{
+    return surface_id ? &gl : NULL;
+}
+static void mock_vertex_pointer(int32_t size, uint32_t type, int32_t stride,
+                                const void *pointer)
+{
+    (void)size;
+    (void)type;
+    (void)stride;
+    (void)pointer;
+    ++vertex_pointer_calls;
+}
+static void mock_enable_client_state(uint32_t state) { (void)state; }
+static void mock_draw_arrays(uint32_t mode, int32_t first, int32_t count)
+{
+    (void)mode;
+    (void)first;
+    (void)count;
+    ++draw_arrays_calls;
+}
+static void mock_draw_elements(uint32_t mode, int32_t count, uint32_t type,
+                               const void *indices)
+{
+    (void)mode;
+    (void)count;
+    (void)type;
+    (void)indices;
+    ++draw_elements_calls;
+}
+static void mock_texture_upload(uint32_t target, int32_t level,
+                                int32_t internal_format, int32_t width,
+                                int32_t height, int32_t border,
+                                uint32_t format, uint32_t type,
+                                const void *pixels)
+{
+    (void)target;
+    (void)level;
+    (void)internal_format;
+    (void)width;
+    (void)height;
+    (void)border;
+    (void)format;
+    (void)type;
+    (void)pixels;
+    ++texture_upload_calls;
+}
+static void mock_read_pixels(int32_t x, int32_t y, int32_t width,
+                             int32_t height, uint32_t format, uint32_t type,
+                             void *pixels)
+{
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)format;
+    (void)type;
+    (void)pixels;
+    ++read_pixels_calls;
+}
+static uint32_t mock_get_error(void) { return 0U; }
+
+static uint32_t gl_slot(size_t field)
+{
+    return (uint32_t)((field - offsetof(zzapp_gl, Begin)) / sizeof(void *));
+}
+static uint32_t api_slot(size_t field)
+{
+    return (uint32_t)((field - offsetof(zzapp_api, exit)) / sizeof(void *));
+}
+static void dispatch(uint32_t number, zzapp_arm_frame_t *frame,
+                     const uint32_t args[9])
+{
+    uint32_t i;
+
+    memset(frame, 0, sizeof(*frame));
+    *(uint32_t *)(void *)user_page = 0xef000000U | number;
+    frame->exception_lr = 0x02000004U;
+    for (i = 0U; i < 4U; ++i)
+        frame->r[i] = args[i];
+    frame->user_sp = 0x02000800U;
+    for (; i < 9U; ++i)
+        *(uint32_t *)(void *)(user_page + 0x800U + (i - 4U) * 4U) = args[i];
+    zzapp_svc_dispatch(frame);
+}
+static void setup_dispatch(void)
+{
+    void *mapped;
+
+    memset(&proc, 0, sizeof(proc));
+    setup(&proc.as);
+    mapped = mmap((void *)(uintptr_t)0x02000000U, 4096U,
+                  PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS |
+                  MAP_FIXED, -1, 0);
+    CHECK(mapped != MAP_FAILED);
+    user_page = mapped == MAP_FAILED ? NULL : mapped;
+    memset(&api, 0, sizeof(api));
+    memset(&gl, 0, sizeof(gl));
+    api.size = sizeof(api);
+    api.gl_bind = mock_gl_bind;
+    gl.size = sizeof(gl);
+    gl.VertexPointer = mock_vertex_pointer;
+    gl.EnableClientState = mock_enable_client_state;
+    gl.DrawArrays = mock_draw_arrays;
+    gl.DrawElements = mock_draw_elements;
+    gl.TexImage2D = mock_texture_upload;
+    gl.ReadPixels = mock_read_pixels;
+    gl.GetError = mock_get_error;
+    vertex_pointer_calls = 0U;
+    draw_arrays_calls = 0U;
+    draw_elements_calls = 0U;
+    texture_upload_calls = 0U;
+    read_pixels_calls = 0U;
+}
+static void teardown_dispatch(void)
+{
+    if (user_page)
+        munmap(user_page, 4096U);
+    user_page = NULL;
+    zzapp_as_destroy(&proc.as);
 }
 
 static void test_table_copy_uses_only_veneers(void)
@@ -172,12 +313,66 @@ static void test_pointer_checks(void)
     zzapp_as_destroy(&as);
 }
 
+static void test_gl_deferred_pointer_checks(void)
+{
+    zzapp_arm_frame_t frame;
+    uint32_t args[9] = { 0U };
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(frame.r[0] != 0U);
+    CHECK(zzapp_as_grant_user(&proc.as, 0x02001000U, 4096U) == ZZ_OK);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+             &frame, (uint32_t[9]){ 3U, 0x1406U, 0U, 0x02000100U });
+    CHECK(vertex_pointer_calls == 1U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+             &frame, (uint32_t[9]){ 0x8074U });
+    CHECK(zzapp_as_ungrant_user(&proc.as, 0x02001000U, 4096U) == ZZ_OK);
+    args[0] = 4U;
+    args[1] = 0U;
+    args[2] = 1024U;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawArrays)),
+             &frame, args);
+    CHECK(draw_arrays_calls == 0U);
+    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0501U);
+    CHECK(zzapp_as_grant_user(&proc.as, 0x02001000U, 12288U) == ZZ_OK);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawArrays)),
+             &frame, args);
+    CHECK(draw_arrays_calls == 1U);
+    CHECK(zzapp_as_ungrant_user(&proc.as, 0x02001000U, 12288U) == ZZ_OK);
+    *(uint16_t *)(void *)(user_page + 0x700U) = 1024U;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+             &frame, (uint32_t[9]){ 4U, 1U, 0x1403U, 0x02000700U });
+    CHECK(draw_elements_calls == 0U);
+    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, TexImage2D)),
+             &frame, (uint32_t[9]){ 0x0de1U, 0U, 4U, 32U, 32U, 0U,
+                                    0x1908U, 0x1401U, 0x02001000U });
+    CHECK(texture_upload_calls == 0U);
+    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ReadPixels)),
+             &frame, (uint32_t[9]){ 0U, 0U, 1U, 1U, 0x1908U, 0x1401U,
+                                    WINDOW + 0x1000U });
+    CHECK(read_pixels_calls == 0U);
+    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    teardown_dispatch();
+}
+
 int main(void)
 {
     test_table_copy_uses_only_veneers();
     test_gl_table_copy_uses_only_veneers();
     test_pointer_checks();
     test_descriptors_cover_callable_slots();
+    test_gl_deferred_pointer_checks();
     test_descriptor_shapes();
     printf("svc_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;
