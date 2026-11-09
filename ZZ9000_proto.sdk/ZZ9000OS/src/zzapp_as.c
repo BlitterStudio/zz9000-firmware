@@ -87,6 +87,17 @@ static void as_sync(void)
 #endif
 }
 
+static void invalidate_asid(uint32_t asid)
+{
+#ifndef MMU_PAGE_HOST_TEST
+	__asm__ __volatile__("dsb sy\n\t"
+		"mcr p15, 0, %0, c8, c3, 2\n\t"
+		"dsb sy\n\tisb" : : "r" (asid) : "memory");
+#else
+	(void)asid;
+#endif
+}
+
 static void replace_live_descriptor(uint32_t *entry, uint32_t descriptor)
 {
 	if (*entry == descriptor)
@@ -337,9 +348,12 @@ void zzapp_as_destroy(zzapp_as_t *as)
 {
 	if (!as || !as->active)
 		return;
+	zzapp_as_switch_kernel();
+	invalidate_asid(as->asid);
 	sdk_smp_lock_acquire(&as_lock);
 	l2_release_owner(as->slot + 1U);
 	memset(as->l1, 0, sizeof(app_l1[0]));
+	asid_generation[as->slot] = 0U;
 	slot_live[as->slot] = 0U;
 	as->l1 = NULL;
 	as->active = 0U;
@@ -621,9 +635,7 @@ void zzapp_as_switch(zzapp_as_t *as)
 		uint32_t ttbr0 = (uint32_t)(uintptr_t)as->l1 | TTBR0_ATTR;
 
 		if (asid_generation[as->slot] != as->generation) {
-			__asm__ __volatile__("dsb sy\n\t"
-				"mcr p15, 0, %0, c8, c3, 2\n\t"
-				"dsb sy\n\tisb" : : "r" (asid) : "memory");
+			invalidate_asid(asid);
 			asid_generation[as->slot] = as->generation;
 		}
 		__asm__ __volatile__("dsb sy\n\t"

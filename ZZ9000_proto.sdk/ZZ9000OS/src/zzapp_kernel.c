@@ -208,11 +208,11 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 
 	if (!kernel)
 		return ZZAPP_KERNEL_IDLE;
+	zzapp_kernel_advance(kernel, elapsed_ms);
 	if (kernel->now - kernel->window_start >= ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
 		kernel->window_start = kernel->now;
 		kernel->service_in_window = 0;
 	}
-	wake_due(kernel);
 	runnable = app_runnable(kernel);
 	if (kernel->service_due &&
 	    (!runnable || kernel->service_in_window + elapsed_ms <=
@@ -220,7 +220,6 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 		kernel->service_due = 0;
 		kernel->service_ticks += elapsed_ms;
 		kernel->service_in_window += elapsed_ms;
-		kernel->now += elapsed_ms;
 		return ZZAPP_KERNEL_SYSTEM;
 	}
 	if (kernel->service_due && runnable)
@@ -234,12 +233,10 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 			charged = thread->quantum_left;
 		thread->user_ticks += charged;
 		thread->quantum_left -= charged;
-		kernel->now += charged;
 		if (thread->quantum_left == 0U)
 			kernel->active = NO_ACTIVE;
 		return pick;
 	}
-	kernel->now += elapsed_ms;
 	return ZZAPP_KERNEL_IDLE;
 }
 int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
@@ -314,7 +311,9 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 	} else {
 		context_save(&kernel->system_context, frame, return_adjust);
 		kernel->system_context_valid = 1U;
-		pick = zzapp_kernel_schedule(kernel, 0U);
+		pick = zzapp_kernel_schedule(kernel,
+			source == ZZAPP_KERNEL_DISPATCH_TICK ?
+			ZZAPP_KERNEL_QUANTUM_MS : 0U);
 	}
 	if ((pick == ZZAPP_KERNEL_SYSTEM || pick == ZZAPP_KERNEL_IDLE) &&
 	    kernel->system_context_valid) {

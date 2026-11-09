@@ -370,12 +370,20 @@
 #define SDK_AUDIO_STREAMS_MAX_BYTES \
     (SDK_TASKQ_REGION_SIZE - SDK_AUDIO_STREAMS_OFFSET)
 
-// Core 1 uses a full-descending stack. Its top is encodable by the naked
-// reset stub's single ARM `mov sp, #immediate`.
+// Core 1 uses separate full-descending SVC and SYS stacks. Its reservation
+// top is encodable by the naked reset stub's single ARM `mov sp, #immediate`.
 #define SDK_CORE1_STACK_BASE         SDK_TASKQ_REGION_END
 #define SDK_CORE1_STACK_SIZE         0x00100000
 #define SDK_CORE1_STACK_TOP \
     (SDK_CORE1_STACK_BASE + SDK_CORE1_STACK_SIZE)
+#define SDK_CORE1_SVC_STACK_BASE     SDK_CORE1_STACK_BASE
+#define SDK_CORE1_SVC_STACK_SIZE     0x00002000
+#define SDK_CORE1_SVC_STACK_TOP \
+    (SDK_CORE1_SVC_STACK_BASE + SDK_CORE1_SVC_STACK_SIZE)
+#define SDK_CORE1_SYSTEM_STACK_BASE  SDK_CORE1_SVC_STACK_TOP
+#define SDK_CORE1_SYSTEM_STACK_SIZE \
+    (SDK_CORE1_STACK_SIZE - SDK_CORE1_SVC_STACK_SIZE)
+#define SDK_CORE1_SYSTEM_STACK_TOP   SDK_CORE1_STACK_TOP
 
 // Measured service-path peak is below 1 MiB after decoder, console, and
 // media working sets moved to the card pool. Keep the 8 MiB minimum
@@ -439,6 +447,16 @@
 #if SDK_CORE1_STACK_TOP != 0x08800000
 #error "core-1 stack top must remain a single-instruction ARM immediate"
 #endif
+#if SDK_CORE1_SVC_STACK_TOP != SDK_CORE1_SYSTEM_STACK_BASE || \
+    SDK_CORE1_SYSTEM_STACK_TOP != SDK_CORE1_STACK_TOP || \
+    SDK_CORE1_SVC_STACK_SIZE == 0 || SDK_CORE1_SYSTEM_STACK_SIZE == 0
+#error "core-1 SVC and SYS stacks must tile the stack reservation"
+#endif
+#if (SDK_CORE1_SVC_STACK_BASE | SDK_CORE1_SVC_STACK_TOP | \
+     SDK_CORE1_SYSTEM_STACK_BASE | SDK_CORE1_SYSTEM_STACK_TOP) & 7
+#error "core-1 SVC and SYS stack bounds must be 8-byte aligned"
+#endif
+
 
 // SDK v2 bootstrap mailbox (descriptor plus both rings; firmware publishes
 // the chosen ARM address through REG_ZZ_SDK_MAILBOX_HI/LO and the Amiga

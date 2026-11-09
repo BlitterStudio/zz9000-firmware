@@ -214,14 +214,25 @@ static void test_repeat_and_second_page(void)
 				mmu_page_test_page_table()[0xdeU]);
 }
 
-static void test_second_cached_section_refused(void)
+static void test_app_window_sections_are_all_mappable(void)
 {
-	static const uint32_t nc[] = { 0xdeU, 0xdfU };
+	uint32_t section;
 
-	set_section(0x009U, BSP_DDR_WB);
-	CHECK(!mmu_page_set_noncacheable(0x009df000U));
-	CHECK(mmu_page_test_l1[0x009U] == (0x00900000U | BSP_DDR_WB));
-	check_split_section(0x005U, nc, 2U);
+	for (section = 0x07eU; section <= 0x080U; section++)
+		set_section(section, BSP_DDR_WB);
+	set_section(0x07dU, BSP_DDR_WB);
+	set_section(0x081U, BSP_DDR_WB);
+
+	for (section = 0x07eU; section <= 0x080U; section++) {
+		uint32_t address;
+
+		for (address = section << 20; address < (section + 1U) << 20;
+		     address += 0x1000U)
+			CHECK(mmu_page_set_noncacheable(address));
+		CHECK((mmu_page_test_l1[section] & 3U) == 1U);
+	}
+	CHECK(mmu_page_test_l1[0x07dU] == (0x07d00000U | BSP_DDR_WB));
+	CHECK(mmu_page_test_l1[0x081U] == (0x08100000U | BSP_DDR_WB));
 }
 
 int main(void)
@@ -230,7 +241,7 @@ int main(void)
 	test_uncached_sections_are_accepted_as_is();
 	test_split_one_page();
 	test_repeat_and_second_page();
-	test_second_cached_section_refused();
+	test_app_window_sections_are_all_mappable();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

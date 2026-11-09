@@ -48,21 +48,28 @@
 /* Domain 14 is Client in DACR; AP bits therefore enforce firmware text RO. */
 #define MMU_L1_DOMAIN_TEXT     (14U << 5)
 #define PAGE_TABLE_BYTES (MMU_PAGES_PER_SECTION * sizeof(uint32_t))
+/* Three adjacent sections hold the Z3 app windows; a fourth preserves the
+ * existing Z2 mailbox page split. */
+#define MMU_NONCACHE_PAGE_TABLE_COUNT 4U
 
 #ifdef MMU_PAGE_HOST_TEST
-/* Host tests place the table where bit 18 of its address is set: in a
+/* Host tests place the tables where bit 18 of their addresses is set: in a
  * page-table descriptor that bit is table base, never a supersection flag. */
-static uint32_t page_table_arena[0x80000U / sizeof(uint32_t)]
-	__attribute__((aligned(0x40000)));
-#define page_table \
-	(page_table_arena + \
-	 ((((uintptr_t)page_table_arena & 0x40000U) != 0U) ? \
+static uint32_t page_table_arena[MMU_NONCACHE_PAGE_TABLE_COUNT]
+	[0x80000U / sizeof(uint32_t)] __attribute__((aligned(0x40000)));
+#define page_table(index) \
+	(page_table_arena[(index)] + \
+	 ((((uintptr_t)page_table_arena[(index)] & 0x40000U) != 0U) ? \
 	  0U : 0x40000U / sizeof(uint32_t)))
 #else
-static uint32_t page_table[MMU_PAGES_PER_SECTION]
-	__attribute__((aligned(1024)));
+static uint32_t page_tables[MMU_NONCACHE_PAGE_TABLE_COUNT]
+	[MMU_PAGES_PER_SECTION] __attribute__((aligned(1024)));
+#define page_table(index) page_tables[(index)]
 #endif
-static uint32_t page_table_section = MMU_SECTION_COUNT;
+static uint32_t page_table_section[MMU_NONCACHE_PAGE_TABLE_COUNT] = {
+	MMU_SECTION_COUNT, MMU_SECTION_COUNT, MMU_SECTION_COUNT,
+	MMU_SECTION_COUNT
+};
 
 /* Firmware text uses a separate L2 table from the host-window page split.
  * The sections therefore coexist in the one translation table core 0 and
@@ -84,7 +91,7 @@ uint32_t mmu_page_test_l1[MMU_SECTION_COUNT];
 
 const uint32_t *mmu_page_test_page_table(void)
 {
-	return page_table;
+	return page_table(0U);
 }
 
 static uint32_t *l1_table(void)
@@ -127,18 +134,36 @@ static uint32_t text_page_table_descriptor_for(const uint32_t *table)
 		MMU_L1_DOMAIN_TEXT | MMU_L1_TYPE_PAGE_TABLE;
 }
 
-static uint32_t page_table_descriptor(void)
+static int page_table_index(uint32_t section, uint32_t descriptor)
 {
-	return page_table_descriptor_for(page_table);
+	uint32_t table;
+
+	for (table = 0U; table < MMU_NONCACHE_PAGE_TABLE_COUNT; table++)
+		if (page_table_section[table] == section &&
+		    descriptor == page_table_descriptor_for(page_table(table)))
+			return (int)table;
+	return -1;
+}
+
+static int free_page_table_index(void)
+{
+	uint32_t table;
+
+	for (table = 0U; table < MMU_NONCACHE_PAGE_TABLE_COUNT; table++)
+		if (page_table_section[table] == MMU_SECTION_COUNT)
+			return (int)table;
+	return -1;
 }
 
 int mmu_page_set_noncacheable(uintptr_t page_addr)
 {
 	uint32_t *l1 = l1_table();
+	uint32_t *table;
 	uint32_t section;
 	uint32_t index;
 	uint32_t entry;
 	uint32_t noncache_page;
+	int table_index;
 	int install = 0;
 
 	if ((page_addr & (MMU_PAGE_SIZE - 1U)) != 0U ||
@@ -151,10 +176,11 @@ int mmu_page_set_noncacheable(uintptr_t page_addr)
 	entry = l1[section];
 
 	if ((entry & MMU_L1_TYPE_MASK) == MMU_L1_TYPE_PAGE_TABLE) {
-		if (section != page_table_section ||
-		    entry != page_table_descriptor())
+		table_index = page_table_index(section, entry);
+		if (table_index < 0)
 			return 0;
-		if (page_table[index] == noncache_page)
+		table = page_table((uint32_t)table_index);
+		if (table[index] == noncache_page)
 			return 1;
 	} else {
 		uint32_t attr = entry & MMU_L1_ATTR_MASK;
@@ -166,11 +192,14 @@ int mmu_page_set_noncacheable(uintptr_t page_addr)
 			return 0;
 		if (attr == MMU_SECTION_NONCACHE || attr == MMU_SECTION_STRONG)
 			return 1;
-		if (attr != MMU_SECTION_DDR_WB ||
-		    page_table_section != MMU_SECTION_COUNT)
+		if (attr != MMU_SECTION_DDR_WB)
 			return 0;
+		table_index = free_page_table_index();
+		if (table_index < 0)
+			return 0;
+		table = page_table((uint32_t)table_index);
 		for (i = 0U; i < MMU_PAGES_PER_SECTION; i++)
-			page_table[i] = (section << MMU_SECTION_SHIFT) |
+			table[i] = (section << MMU_SECTION_SHIFT) |
 				(i << MMU_PAGE_SHIFT) | MMU_PAGE_DDR_WB;
 		install = 1;
 	}
@@ -182,30 +211,29 @@ int mmu_page_set_noncacheable(uintptr_t page_addr)
 		/* Break before make: changing a section to pages changes the
 		 * mapping size, so no TLB may hold the section entry once a
 		 * page entry for the same range can be walked. */
-		page_table[index] = noncache_page;
-		Xil_DCacheFlushRange((INTPTR)(uintptr_t)page_table,
-		                     PAGE_TABLE_BYTES);
+		table[index] = noncache_page;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)table, PAGE_TABLE_BYTES);
 		l1[section] = 0U;
 		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&l1[section],
 		                     sizeof(l1[section]));
 		sync_translation();
-		l1[section] = page_table_descriptor();
+		l1[section] = page_table_descriptor_for(table);
 		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&l1[section],
 		                     sizeof(l1[section]));
-		page_table_section = section;
+		page_table_section[table_index] = section;
 	} else {
 		/* Break before make on the page entry: it changes memory type. */
-		page_table[index] = 0U;
-		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&page_table[index],
-		                     sizeof(page_table[index]));
+		table[index] = 0U;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&table[index],
+		                     sizeof(table[index]));
 		sync_translation();
-		page_table[index] = noncache_page;
-		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&page_table[index],
-		                     sizeof(page_table[index]));
+		table[index] = noncache_page;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&table[index],
+		                     sizeof(table[index]));
 	}
 	sync_translation();
 	if (page_change_hook)
-		page_change_hook(section, l1[section], page_table);
+		page_change_hook(section, l1[section], table);
 	/* Drop any clean line a speculative fill brought in under the old
 	 * cacheable entry before the TLB invalidate took effect. */
 	Xil_DCacheFlushRange((INTPTR)page_addr, MMU_PAGE_SIZE);

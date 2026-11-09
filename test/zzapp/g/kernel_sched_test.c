@@ -280,6 +280,30 @@ static void test_waiter_isolation_timeout_and_stop(void)
 	CHECK(zzapp_kernel_wait_status(&kernel, 1) == ZZAPP_KERNEL_WAIT_CANCELLED);
 }
 
+static void test_system_ticks_wake_sleepers(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t system_frame = { 0 };
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	CHECK(zzapp_kernel_sleep(&kernel, 0, 10u) == 0);
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &system_frame,
+					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+	CHECK(next == &kernel.system_context.frame);
+	CHECK(kernel.now == 5u);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_SLEEPING);
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+	CHECK(kernel.now == 10u);
+	CHECK(next == &kernel.threads[0].context.frame);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
+}
+
 int main(void)
 {
     test_first_context_and_dispatch();
@@ -293,6 +317,7 @@ int main(void)
     test_accounting_and_throttle();
     test_blocking_api_lock_and_slot_resources();
     test_waiter_isolation_timeout_and_stop();
+    test_system_ticks_wake_sleepers();
     printf("kernel_sched_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;
 }

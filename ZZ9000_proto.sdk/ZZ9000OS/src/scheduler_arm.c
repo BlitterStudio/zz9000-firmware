@@ -137,8 +137,8 @@ void scheduler_boot_init(void)
   sh->minigl_in_flight = 0;
   sh->minigl_packets_on_core1 = 0;
   sh->service_pending = 0;
-  zzapp_kernel_stack_paint((uint8_t *)(uintptr_t)SDK_CORE1_STACK_BASE,
-                           SDK_CORE1_STACK_SIZE);
+  zzapp_kernel_stack_paint((uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
+                           SDK_CORE1_SYSTEM_STACK_SIZE);
   {
     uint32_t slot;
     for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
@@ -197,8 +197,8 @@ uint32_t scheduler_core1_stack_high_water(uint32_t slot)
 {
   if (slot >= ZZAPP_KERNEL_APP_SLOTS)
     return zzapp_kernel_stack_used(
-        (const uint8_t *)(uintptr_t)SDK_CORE1_STACK_BASE,
-        SDK_CORE1_STACK_SIZE);
+        (const uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
+        SDK_CORE1_SYSTEM_STACK_SIZE);
   return zzapp_kernel_stack_used(scheduler_app_stacks[slot],
                                  sizeof(scheduler_app_stacks[slot]));
 }
