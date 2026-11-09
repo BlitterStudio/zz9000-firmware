@@ -160,6 +160,7 @@ struct zzapp_minigl_binding {
 };
 
 static struct zzapp_minigl_binding g_minigl;
+static uint32_t api_slot(void);
 
 static int minigl_app_ops_ready(const zzm_minigl_ops_v1_t *ops)
 {
@@ -185,6 +186,8 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
     const zzm_minigl_registration_v1_t *registration;
     const zzm_minigl_ops_v1_t *ops;
     const void *module_gl = NULL;
+    uint32_t owner = api_slot();
+    uint32_t generation = zzapp_current_generation();
     int status;
     void *context = NULL;
 
@@ -192,15 +195,20 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
         *out = NULL;
     if (!surface_id)
         return ZZ_EINVAL;
-    if (g_minigl.ops)
+    if (g_minigl.ops ||
+        zzapp_kernel_gl_bind(zzapp_runtime_kernel(), owner, generation) != 0)
         return ZZ_EBUSY;
 #ifdef ZZAPP_HOST_TEST
     if (!zzm_loader_acquire || !zzm_loader_release || !zzm_registry_ops ||
-        !zzm_minigl_ops)
+        !zzm_minigl_ops) {
+        zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
         return ZZ_ENOSYS;
+    }
 #endif
-    if (!zzm_loader_acquire(ZZM_MODULE_MINIGL))
+    if (!zzm_loader_acquire(ZZM_MODULE_MINIGL)) {
+        zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
         return ZZ_ENOSYS;
+    }
     registration = (const zzm_minigl_registration_v1_t *)zzm_registry_ops(
         ZZM_MODULE_MINIGL,
         offsetof(zzm_minigl_registration_v1_t, worker_ops) +
@@ -229,10 +237,12 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
     return ZZ_OK;
 
 failed:
+    zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
     zzm_loader_release(ZZM_MODULE_MINIGL);
     return status;
 
 unavailable:
+    zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
     zzm_loader_release(ZZM_MODULE_MINIGL);
     return ZZ_ENOSYS;
 }
@@ -250,21 +260,28 @@ void zzapp_minigl_swap(void)
 
 void zzapp_minigl_unbind(void)
 {
+    uint32_t owner = api_slot();
+    uint32_t generation = zzapp_current_generation();
+
     if (!g_minigl.ops)
         return;
     g_minigl.ops->app_unbind(g_minigl.context);
     g_minigl.ops = NULL;
     g_minigl.context = NULL;
+    zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
     zzm_loader_release(ZZM_MODULE_MINIGL);
 }
 
 void zzapp_minigl_reclaim(uint32_t generation)
 {
+    uint32_t owner = api_slot();
+
     if (!g_minigl.ops)
         return;
     g_minigl.ops->app_reclaim(g_minigl.context, generation);
     g_minigl.ops = NULL;
     g_minigl.context = NULL;
+    zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
     zzm_loader_release(ZZM_MODULE_MINIGL);
 }
 
@@ -274,10 +291,14 @@ void zzapp_minigl_reclaim(uint32_t generation)
  * and the normal reclaim's app_reclaim call would crash recovery. */
 void zzapp_minigl_forget(void)
 {
+    uint32_t owner = api_slot();
+    uint32_t generation = zzapp_current_generation();
+
     if (!g_minigl.ops)
         return;
     g_minigl.ops = NULL;
     g_minigl.context = NULL;
+    zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
     zzm_loader_release(ZZM_MODULE_MINIGL);
 }
 
@@ -513,7 +534,15 @@ static int api_decompress(uint32_t algorithm, uint32_t flags, const void *src,
 }
 
 #define ZZAPP_DECODE_SESSIONS 4u
-static uint32_t g_image_sessions[ZZAPP_DECODE_SESSIONS];
+
+static uint32_t api_slot(void)
+{
+    int slot = zzapp_kernel_current_thread();
+
+    return slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT ? (uint32_t)slot : 0u;
+}
+
+static uint32_t g_image_sessions[ZZAPP_AS_SLOT_COUNT][ZZAPP_DECODE_SESSIONS];
 
 struct zzapp_audio_session {
     uint32_t id;
@@ -525,8 +554,9 @@ struct zzapp_audio_session {
     } state;
 };
 
-static struct zzapp_audio_session g_audio_sessions[ZZAPP_DECODE_SESSIONS];
-static uint32_t g_next_audio_session = 1u;
+static struct zzapp_audio_session
+    g_audio_sessions[ZZAPP_AS_SLOT_COUNT][ZZAPP_DECODE_SESSIONS];
+static uint32_t g_next_audio_session[ZZAPP_AS_SLOT_COUNT];
 
 static void image_result(const struct SDKImageStreamResult *result,
                          zzapp_image_result *out)
@@ -543,14 +573,17 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
 {
     struct SDKImageStreamBegin begin;
     struct SDKImageStreamResult result;
+    uint32_t owner = api_slot();
     uint32_t i;
     int rc;
 
     if (!open || !session || !out || !open->tile || !open->stride ||
         !open->rows || !open->tile_bytes)
         return ZZ_EINVAL;
-    for (i = 0; i < ZZAPP_DECODE_SESSIONS && g_image_sessions[i]; ++i) {}
-    if (i == ZZAPP_DECODE_SESSIONS)
+    for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
+                g_image_sessions[owner][i]; ++i) {}
+    if (i == ZZAPP_DECODE_SESSIONS ||
+        zzapp_kernel_session_open(zzapp_runtime_kernel(), owner, 0) != 0)
         return ZZ_ENOMEM;
     memset(&begin, 0, sizeof(begin));
     begin.codec = open->codec;
@@ -572,8 +605,11 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
      * allocations use until the ledger records the new session. */
     zzapp_host_commit_begin();
     rc = sdk_to_zz(sdk_image_stream_begin(&begin, &result));
-    if (rc == ZZ_OK)
-        g_image_sessions[i] = result.session;
+    if (rc == ZZ_OK) {
+        g_image_sessions[owner][i] = result.session;
+        zzapp_proc_slot(owner)->image_sessions++;
+    } else
+        zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 0);
     zzapp_host_commit_end();
     zzapp_api_leave();
     if (rc == ZZ_OK) {
@@ -588,13 +624,14 @@ static int api_image_decode(uint32_t session, const void *src, uint32_t bytes,
 {
     struct SDKImageStreamFeed feed;
     struct SDKImageStreamResult result;
+    uint32_t owner = api_slot();
     uint32_t i;
     int rc;
 
     if (!src || !out)
         return ZZ_EINVAL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
-                g_image_sessions[i] != session; ++i) {}
+                g_image_sessions[owner][i] != session; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS)
         return ZZ_EINVAL;
     memset(&feed, 0, sizeof(feed));
@@ -611,28 +648,34 @@ static int api_image_decode(uint32_t session, const void *src, uint32_t bytes,
 
 static int api_image_close(uint32_t session)
 {
+    uint32_t owner = api_slot();
     uint32_t i;
     int rc;
 
     for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
-                g_image_sessions[i] != session; ++i) {}
+                g_image_sessions[owner][i] != session; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS)
         return ZZ_EINVAL;
     zzapp_api_enter();
     rc = sdk_to_zz(sdk_image_stream_close(session));
     zzapp_api_leave();
-    if (rc == ZZ_OK)
-        g_image_sessions[i] = 0;
+    if (rc == ZZ_OK) {
+        g_image_sessions[owner][i] = 0;
+        zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 0);
+        if (zzapp_proc_slot(owner)->image_sessions)
+            zzapp_proc_slot(owner)->image_sessions--;
+    }
     return rc;
 }
 
 static struct zzapp_audio_session *audio_session_find(uint32_t session)
 {
+    struct zzapp_audio_session *sessions = g_audio_sessions[api_slot()];
     uint32_t i;
 
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (g_audio_sessions[i].id == session)
-            return &g_audio_sessions[i];
+        if (sessions[i].id == session)
+            return &sessions[i];
     return NULL;
 }
 
@@ -648,22 +691,24 @@ static void audio_session_release(struct zzapp_audio_session *session)
 static int api_audio_open_decode(uint32_t codec, uint32_t *session)
 {
     struct zzapp_audio_session *slot = NULL;
+    uint32_t owner = api_slot();
     uint32_t i;
 
     if (!session || (codec != ZZ_AUDIO_MP3 && codec != ZZ_AUDIO_FLAC &&
                      codec != ZZ_AUDIO_VORBIS))
         return ZZ_EINVAL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (g_audio_sessions[i].id == 0u) {
-            slot = &g_audio_sessions[i];
+        if (g_audio_sessions[owner][i].id == 0u) {
+            slot = &g_audio_sessions[owner][i];
             break;
         }
-    if (!slot)
+    if (!slot ||
+        zzapp_kernel_session_open(zzapp_runtime_kernel(), owner, 1) != 0)
         return ZZ_ENOMEM;
     memset(slot, 0, sizeof(*slot));
-    slot->id = 0x80000000u | g_next_audio_session++;
-    if (g_next_audio_session == 0u)
-        g_next_audio_session = 1u;
+    slot->id = 0x80000000u | ++g_next_audio_session[owner];
+    if (g_next_audio_session[owner] == 0u)
+        g_next_audio_session[owner] = 1u;
     slot->codec = codec;
     if (codec == ZZ_AUDIO_MP3)
         mp3dec_init(&slot->state.mp3);
@@ -674,6 +719,7 @@ static int api_audio_open_decode(uint32_t codec, uint32_t *session)
         sdk_vorbis_init(&slot->state.vorbis, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
         slot->state.vorbis.heap.pool_owner = SDK_APP_DECODE_POOL_OWNER;
     }
+    zzapp_proc_slot(owner)->audio_sessions++;
     *session = slot->id;
     return ZZ_OK;
 }
@@ -761,6 +807,7 @@ static int api_audio_decode_app(uint32_t session, const void *src,
 
 static int api_audio_close_decode(uint32_t session)
 {
+    uint32_t owner = api_slot();
     struct zzapp_audio_session *slot = audio_session_find(session);
 
     if (!slot)
@@ -768,40 +815,47 @@ static int api_audio_close_decode(uint32_t session)
     zzapp_api_enter();
     audio_session_release(slot);
     zzapp_api_leave();
+    zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 1);
+    if (zzapp_proc_slot(owner)->audio_sessions)
+        zzapp_proc_slot(owner)->audio_sessions--;
     return ZZ_OK;
 }
 
 void zzapp_api_reclaim_resources(void)
 {
+    struct zzapp_audio_session *audio_sessions = g_audio_sessions[api_slot()];
+    uint32_t *image_sessions = g_image_sessions[api_slot()];
     uint32_t i;
 
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (g_image_sessions[i]) {
-            (void)sdk_image_stream_close(g_image_sessions[i]);
-            g_image_sessions[i] = 0;
+        if (image_sessions[i]) {
+            (void)sdk_image_stream_close(image_sessions[i]);
+            image_sessions[i] = 0;
         }
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (g_audio_sessions[i].id)
-            audio_session_release(&g_audio_sessions[i]);
+        if (audio_sessions[i].id)
+            audio_session_release(&audio_sessions[i]);
 }
 
 void zzapp_api_poison_resources(void)
 {
+    struct zzapp_audio_session *audio_sessions = g_audio_sessions[api_slot()];
+    uint32_t *image_sessions = g_image_sessions[api_slot()];
     uint32_t i;
 
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (g_image_sessions[i]) {
-            sdk_image_stream_poison_session(g_image_sessions[i]);
-            (void)sdk_image_stream_release_poisoned(g_image_sessions[i]);
-            g_image_sessions[i] = 0;
+        if (image_sessions[i]) {
+            sdk_image_stream_poison_session(image_sessions[i]);
+            (void)sdk_image_stream_release_poisoned(image_sessions[i]);
+            image_sessions[i] = 0;
         }
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (g_audio_sessions[i].id) {
-            if (g_audio_sessions[i].codec == ZZ_AUDIO_FLAC)
-                sdk_flac_forget(&g_audio_sessions[i].state.flac);
-            else if (g_audio_sessions[i].codec == ZZ_AUDIO_VORBIS)
-                sdk_vorbis_forget(&g_audio_sessions[i].state.vorbis);
-            memset(&g_audio_sessions[i], 0, sizeof(g_audio_sessions[i]));
+        if (audio_sessions[i].id) {
+            if (audio_sessions[i].codec == ZZ_AUDIO_FLAC)
+                sdk_flac_forget(&audio_sessions[i].state.flac);
+            else if (audio_sessions[i].codec == ZZ_AUDIO_VORBIS)
+                sdk_vorbis_forget(&audio_sessions[i].state.vorbis);
+            memset(&audio_sessions[i], 0, sizeof(audio_sessions[i]));
         }
     sdk_compression_reclaim_app_decode();
 }

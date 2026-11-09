@@ -1,4 +1,5 @@
-A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o
+A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
+	$(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o
 ZZAPP_TESTS += $(BUILD)/a/loader_smoke $(BUILD)/a/runtime_host_test \
 	$(BUILD)/a/loader_elf_test $(BUILD)/a/display_fallback_test \
 	$(BUILD)/a/core_api_test $(BUILD)/a/map_unmap_test
@@ -10,6 +11,9 @@ $(BUILD)/a/zzapp_host.o: $(FW)/zzapp_host.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
 $(BUILD)/a/zzapp_api.o: $(FW)/zzapp_api.c $(FW)/zzapp_runtime.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
+$(BUILD)/a/zzapp_kernel.o: $(FW)/zzapp_kernel.c $(FW)/zzapp_kernel.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
 $(BUILD)/a/zzapp_services.o: $(FW)/zzapp_services.c $(FW)/zzapp_services.h | $(BUILD)

@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "zzapp_as.h"
+#include "zzapp_kernel.h"
 #include "zzapp_mem.h"
 #include "zzapp_proto.h"
 #define ZZAPP_TICK_US          5000u
@@ -64,6 +65,18 @@ typedef struct zzapp_proc {
     uint32_t stack_frame_count;
     uint32_t stack_bytes;
     uint32_t note_minor;
+    uint32_t host_visible_used;
+    uint32_t display_lease_base;
+    uint32_t display_lease_bytes;
+    uint32_t display_lease_generation;
+    uint32_t audio_direct;
+    uint32_t image_sessions;
+    uint32_t audio_sessions;
+    void *launcher_window;
+    void *coherent;
+    uint64_t watchdog_stamp;
+    uint64_t lease_stamp;
+    uint64_t stop_stamp;
 } zzapp_proc_t;
 
 
@@ -139,6 +152,7 @@ int zzapp_proc_heap_info(uint32_t *committed, uint32_t *limit,
 void zzapp_loader_memory_init(void);
 int zzapp_loader_heap_grow(uint32_t bytes);
 int zzapp_loader_heap_shrink(uint32_t bytes);
+zzapp_kernel_t *zzapp_runtime_kernel(void);
 uint32_t zzapp_loader_pool_free(void);
 
 /* ---- B defines these. Weak no-ops here. ---- */

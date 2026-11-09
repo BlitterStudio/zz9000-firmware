@@ -206,6 +206,58 @@ static int slot_busy_test[4];
 static void (*yield_hook)(void);
 static uint64_t (*time_hook)(void);
 
+static uint32_t service_slot(void)
+{
+	int slot = zzapp_kernel_current_thread();
+
+	return slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT ? (uint32_t)slot : 0U;
+}
+
+
+#ifndef ZZAPP_SERVICES_STANDALONE_TEST
+static zzapp_kernel_t service_fallback_kernel;
+static zzapp_proc_t service_fallback_proc[ZZAPP_AS_SLOT_COUNT];
+
+__attribute__((weak)) int zzapp_kernel_current_thread(void)
+{
+	return -1;
+}
+
+__attribute__((weak)) zzapp_kernel_t *zzapp_runtime_kernel(void)
+{
+	return &service_fallback_kernel;
+}
+
+__attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
+{
+	return slot < ZZAPP_AS_SLOT_COUNT ? &service_fallback_proc[slot] : NULL;
+}
+
+__attribute__((weak)) int zzapp_kernel_audio_open(zzapp_kernel_t *kernel,
+						    uint32_t slot, int direct)
+{
+	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT ||
+	    (direct && kernel->direct_audio_count >= 2U))
+		return -1;
+	if (kernel->resources[slot].direct_audio)
+		return -1;
+	kernel->resources[slot].direct_audio = direct ? 1U : 2U;
+	if (direct)
+		kernel->direct_audio_count++;
+	return 0;
+}
+
+__attribute__((weak)) void zzapp_kernel_audio_close(zzapp_kernel_t *kernel,
+						      uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
+		return;
+	if (kernel->resources[slot].direct_audio == 1U &&
+	    kernel->direct_audio_count != 0U)
+		kernel->direct_audio_count--;
+	kernel->resources[slot].direct_audio = 0U;
+}
+#endif
 #ifdef ZZAPP_HOST_TEST
 static int defer_test_core = 1;
 #else
@@ -454,6 +506,48 @@ static void report_rejected_app_op(uint16_t opcode, const char *reason)
 #ifdef ZZAPP_SERVICES_STANDALONE_TEST
 
 static uint32_t service_loader_state;
+static zzapp_kernel_t service_test_kernel;
+static zzapp_proc_t service_test_proc[ZZAPP_AS_SLOT_COUNT];
+
+__attribute__((weak)) zzapp_kernel_t *zzapp_runtime_kernel(void)
+{
+	return &service_test_kernel;
+}
+
+__attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
+{
+	return slot < ZZAPP_AS_SLOT_COUNT ? &service_test_proc[slot] : NULL;
+}
+
+__attribute__((weak)) int zzapp_kernel_current_thread(void)
+{
+	return -1;
+}
+
+__attribute__((weak)) int zzapp_kernel_audio_open(zzapp_kernel_t *kernel,
+						    uint32_t slot, int direct)
+{
+	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT ||
+	    (direct && kernel->direct_audio_count >= 2U))
+		return -1;
+	if (kernel->resources[slot].direct_audio)
+		return -1;
+	kernel->resources[slot].direct_audio = direct ? 1U : 2U;
+	if (direct)
+		kernel->direct_audio_count++;
+	return 0;
+}
+
+__attribute__((weak)) void zzapp_kernel_audio_close(zzapp_kernel_t *kernel,
+						      uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
+		return;
+	if (kernel->resources[slot].direct_audio == 1U &&
+	    kernel->direct_audio_count != 0U)
+		kernel->direct_audio_count--;
+	kernel->resources[slot].direct_audio = 0U;
+}
 
 __attribute__((weak)) uint32_t zzapp_runtime_state(void)
 {
@@ -2040,6 +2134,8 @@ static void audio_detach(void)
 	audio_ahi_staged_frame = 0U;
 	audio_ahi_route = 0;
 	audio_host_tail_seen = 0U;
+	zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_slot());
+	zzapp_proc_slot(service_slot())->audio_direct = 0U;
 	if (have_window()) {
 		memset(window + ZZAPP_AUDIO_OFF, 0, ZZAPP_AUDIO_HDR);
 		win_flush(ZZAPP_AUDIO_OFF, ZZAPP_AUDIO_HDR);
@@ -2150,6 +2246,7 @@ static void audio_fill(zzapp_audio *out)
 
 int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out)
 {
+	int direct_card_route;
 	int rc;
 
 	if (!out)
@@ -2157,6 +2254,11 @@ int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out)
 	if (channels != 2U || rate != ZZAPP_AUDIO_RATE)
 		return ZZ_EINVAL;
 	if (audio_open || audio_request != AUDIO_REQUEST_NONE)
+		return ZZ_EBUSY;
+	direct_card_route = (life_get(ZZAPP_LIFE_FLAGS_OFF) &
+			     ZZAPP_F_LAUNCHER_AUDIO_AHI) == 0U;
+	if (zzapp_kernel_audio_open(zzapp_runtime_kernel(), service_slot(),
+				    direct_card_route) != 0)
 		return ZZ_EBUSY;
 #ifdef ZZAPP_HOST_TEST
 	rc = audio_attach();
@@ -2168,8 +2270,11 @@ int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out)
 		yield_once();
 	rc = audio_result;
 #endif
-	if (rc != ZZ_OK)
+	if (rc != ZZ_OK) {
+		zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_slot());
 		return rc;
+	}
+	zzapp_proc_slot(service_slot())->audio_direct = direct_card_route ? 1U : 0U;
 	audio_fill(out);
 	return ZZ_OK;
 }

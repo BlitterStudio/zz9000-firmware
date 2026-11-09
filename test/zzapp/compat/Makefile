@@ -10,7 +10,8 @@ CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror -DZZAPP_HOST_TEST \
 	-I$(SDK)/include -I.. -I$(FW)
 
 BUILD := build
-OBJS := $(BUILD)/zzapp_loader.o $(BUILD)/zzapp_host.o $(BUILD)/zzapp_api.o
+OBJS := $(BUILD)/zzapp_loader.o $(BUILD)/zzapp_host.o $(BUILD)/zzapp_api.o \
+	$(BUILD)/zzapp_kernel.o
 ELFS := v0.1/hello.elf v0.1/pixels.elf v0.1/fault.elf
 
 .PHONY: test clean
@@ -35,6 +36,8 @@ $(BUILD)/zzapp_host.o: $(FW)/zzapp_host.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD)/zzapp_api.o: $(FW)/zzapp_api.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+$(BUILD)/zzapp_kernel.o: $(FW)/zzapp_kernel.c | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:

@@ -13,6 +13,8 @@
 #define ZZAPP_KERNEL_SERVICE_WINDOW_MS 100U
 #define ZZAPP_KERNEL_SERVICE_LIMIT_MS 95U
 #define ZZAPP_KERNEL_STACK_BYTES 8192U
+#define ZZAPP_KERNEL_PAGE_BYTES 4096U
+#define ZZAPP_KERNEL_SESSION_LIMIT 4U
 
 typedef enum {
 	ZZAPP_THREAD_STOPPED = 0,
@@ -49,6 +51,16 @@ typedef struct {
 } zzapp_thread_t;
 
 typedef struct {
+	uint32_t surface_base;
+	uint32_t surface_bytes;
+	uint32_t surface_generation;
+	uint32_t gl_generation;
+	uint32_t direct_audio;
+	uint32_t image_sessions;
+	uint32_t audio_sessions;
+} zzapp_kernel_resources_t;
+
+typedef struct {
 	zzapp_thread_t threads[ZZAPP_KERNEL_APP_SLOTS];
 	uint64_t now;
 	uint64_t service_ticks;
@@ -61,6 +73,12 @@ typedef struct {
 	uint32_t wake_serial;
 	uint8_t wake_log[ZZAPP_KERNEL_APP_SLOTS];
 	uint32_t wake_log_count;
+	int api_lock_owner;
+	uint32_t api_lock_depth;
+	int gl_owner;
+	uint32_t gl_generation;
+	uint32_t direct_audio_count;
+	zzapp_kernel_resources_t resources[ZZAPP_KERNEL_APP_SLOTS];
 } zzapp_kernel_t;
 
 void zzapp_kernel_init(zzapp_kernel_t *kernel);
@@ -73,6 +91,24 @@ int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t slot,
 void zzapp_kernel_advance(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 void zzapp_kernel_service_due(zzapp_kernel_t *kernel);
 int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
+
+int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
+			      uint32_t generation, uint32_t base, uint32_t bytes);
+int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t slot,
+			    int direct_card_route);
+void zzapp_kernel_audio_close(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_gl_bind(zzapp_kernel_t *kernel, uint32_t slot,
+			 uint32_t generation);
+void zzapp_kernel_gl_unbind(zzapp_kernel_t *kernel, uint32_t slot,
+			    uint32_t generation);
+int zzapp_kernel_session_open(zzapp_kernel_t *kernel, uint32_t slot,
+			      int audio_session);
+void zzapp_kernel_session_close(zzapp_kernel_t *kernel, uint32_t slot,
+			       int audio_session);
+void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot);
 
 /* The exception path identifies an app by its scheduled thread, not by the
  * faulting PC. */

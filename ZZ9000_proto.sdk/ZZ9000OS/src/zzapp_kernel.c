@@ -49,8 +49,12 @@ static void wake_due(zzapp_kernel_t *kernel)
 
 void zzapp_kernel_init(zzapp_kernel_t *kernel)
 {
+	if (!kernel)
+		return;
 	memset(kernel, 0, sizeof(*kernel));
 	kernel->active = NO_ACTIVE;
+	kernel->api_lock_owner = -1;
+	kernel->gl_owner = -1;
 }
 
 int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t slot)
@@ -203,6 +207,182 @@ void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t slot,
 	    kernel->threads[slot].state == ZZAPP_THREAD_BLOCKED)
 		return;
 	kernel->threads[slot].svc_ticks += elapsed_ms;
+}
+
+int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	if (kernel->api_lock_owner == (int)slot) {
+		kernel->api_lock_depth++;
+		return 0;
+	}
+	if (kernel->api_lock_owner >= 0)
+		return -1;
+	kernel->api_lock_owner = (int)slot;
+	kernel->api_lock_depth = 1U;
+	return 0;
+}
+
+int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS ||
+	    kernel->api_lock_owner != (int)slot)
+		return -1;
+	if (--kernel->api_lock_depth == 0U)
+		kernel->api_lock_owner = -1;
+	return 0;
+}
+
+int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	if (kernel->api_lock_owner == (int)slot) {
+		kernel->api_lock_owner = -1;
+		kernel->api_lock_depth = 0U;
+	}
+	return zzapp_kernel_block(kernel, slot);
+}
+
+static int surface_overlaps(uint32_t base_a, uint32_t bytes_a,
+			    uint32_t base_b, uint32_t bytes_b)
+{
+	uint32_t end_a = base_a + bytes_a;
+	uint32_t end_b = base_b + bytes_b;
+
+	return end_a > base_b && end_b > base_a;
+}
+
+int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
+			      uint32_t generation, uint32_t base, uint32_t bytes)
+{
+	zzapp_kernel_resources_t *resource;
+	uint32_t i;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS || !base || !bytes ||
+	    (base & (ZZAPP_KERNEL_PAGE_BYTES - 1U)) != 0U ||
+	    (bytes & (ZZAPP_KERNEL_PAGE_BYTES - 1U)) != 0U ||
+	    base + bytes < base)
+		return -1;
+	resource = &kernel->resources[slot];
+	if (resource->surface_bytes != 0U)
+		return resource->surface_base == base &&
+		       resource->surface_bytes == bytes &&
+		       resource->surface_generation == generation ? 0 : -1;
+	for (i = 0; i < ZZAPP_KERNEL_APP_SLOTS; i++) {
+		const zzapp_kernel_resources_t *other = &kernel->resources[i];
+
+		if (i != slot && other->surface_bytes != 0U &&
+		    surface_overlaps(base, bytes, other->surface_base,
+				     other->surface_bytes))
+			return -1;
+	}
+	resource->surface_base = base;
+	resource->surface_bytes = bytes;
+	resource->surface_generation = generation;
+	return 0;
+}
+
+int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t slot,
+			    int direct_card_route)
+{
+	zzapp_kernel_resources_t *resource;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	resource = &kernel->resources[slot];
+	if (resource->direct_audio)
+		return -1;
+	if (direct_card_route && kernel->direct_audio_count >= 2U)
+		return -1;
+	resource->direct_audio = direct_card_route ? 1U : 2U;
+	if (direct_card_route)
+		kernel->direct_audio_count++;
+	return 0;
+}
+
+void zzapp_kernel_audio_close(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	zzapp_kernel_resources_t *resource;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	resource = &kernel->resources[slot];
+	if (resource->direct_audio == 1U && kernel->direct_audio_count != 0U)
+		kernel->direct_audio_count--;
+	resource->direct_audio = 0U;
+}
+
+int zzapp_kernel_gl_bind(zzapp_kernel_t *kernel, uint32_t slot,
+			 uint32_t generation)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	if (kernel->gl_owner >= 0)
+		return kernel->gl_owner == (int)slot &&
+		       kernel->gl_generation == generation ? 0 : -1;
+	kernel->gl_owner = (int)slot;
+	kernel->gl_generation = generation;
+	kernel->resources[slot].gl_generation = generation;
+	return 0;
+}
+
+void zzapp_kernel_gl_unbind(zzapp_kernel_t *kernel, uint32_t slot,
+			    uint32_t generation)
+{
+	if (kernel && kernel->gl_owner == (int)slot &&
+	    kernel->gl_generation == generation) {
+		kernel->gl_owner = -1;
+		kernel->gl_generation = 0U;
+		kernel->resources[slot].gl_generation = 0U;
+	}
+}
+
+int zzapp_kernel_session_open(zzapp_kernel_t *kernel, uint32_t slot,
+			      int audio_session)
+{
+	uint32_t *sessions;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	sessions = audio_session ? &kernel->resources[slot].audio_sessions :
+				   &kernel->resources[slot].image_sessions;
+	if (*sessions >= ZZAPP_KERNEL_SESSION_LIMIT)
+		return -1;
+	(*sessions)++;
+	return 0;
+}
+
+void zzapp_kernel_session_close(zzapp_kernel_t *kernel, uint32_t slot,
+			       int audio_session)
+{
+	uint32_t *sessions;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	sessions = audio_session ? &kernel->resources[slot].audio_sessions :
+				   &kernel->resources[slot].image_sessions;
+	if (*sessions != 0U)
+		(*sessions)--;
+}
+
+void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	zzapp_kernel_audio_close(kernel, slot);
+	zzapp_kernel_gl_unbind(kernel, slot,
+			      kernel->resources[slot].gl_generation);
+	memset(&kernel->resources[slot], 0, sizeof(kernel->resources[slot]));
+	kernel->threads[slot].state = ZZAPP_THREAD_STOPPED;
+	kernel->threads[slot].quantum_left = 0U;
+	if (kernel->active == slot)
+		kernel->active = NO_ACTIVE;
+	if (kernel->api_lock_owner == (int)slot) {
+		kernel->api_lock_owner = -1;
+		kernel->api_lock_depth = 0U;
+	}
 }
 
 void zzapp_kernel_stack_paint(uint8_t *stack, uint32_t bytes)
