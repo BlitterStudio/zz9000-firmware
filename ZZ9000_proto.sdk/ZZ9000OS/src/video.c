@@ -162,6 +162,20 @@ static void videocap_detection_reset() {
 	video_videocap_detection_reset(&vs.videocap_detection);
 }
 
+/* Region the VDMA read channel was last started on. During an Amiga reset
+ * isr_video() leaves the VDMA alone, so this is what the monitor shows. */
+static uint32_t vdma_scanout_address;
+static uint32_t vdma_scanout_bytes;
+
+static void vdma_scanout_clear(void)
+{
+	if (vdma_scanout_bytes != 0U)
+		memset((uint8_t *)vs.framebuffer +
+		       (vdma_scanout_address -
+			(uint32_t)(uintptr_t)vs.framebuffer),
+		       0, vdma_scanout_bytes);
+}
+
 // S_AXI_HP0 carries video scanout DMA and is 64-bit in every block design.
 // The shipped FSBL (ps7_init_gpl.c) sets AFI_RDCHAN_CTRL and AFI_WRCHAN_CTRL
 // bit 0 ("32BIT_EN", UG585 B.5) on AFI1, AFI2 and AFI3, and leaves AFI0
@@ -252,10 +266,14 @@ struct ZZ_VIDEO_STATE* video_init() {
 }
 
 void video_reset() {
-	/* The VDMA keeps the prior capture scanout through an Amiga reset.
-	 * Blank it before discarding the backing address and reallocating it. */
+	/* The VDMA keeps its last scanout through an Amiga reset. Blank it
+	 * before discarding the backing address and reallocating it: the whole
+	 * capture area if capture owned the output, else the RTG (or mailbox)
+	 * frame it was scanning. Host-visible memory is dropped on reset. */
 	if (vs.videocap_enabled_old)
 		videocap_area_clear();
+	else
+		vdma_scanout_clear();
 
 	vs.videocap_enabled_old = 0;
 	vs.videocap_backing_address = 0;
@@ -393,6 +411,9 @@ int init_vdma(int hsize, int source_rows, int hdiv, u32 bufpos) {
 		printf("VDMA Failed to start DMA engine (read channel), status: 0x%X\r\n", status);
 		return status;
 	}
+	vdma_scanout_address = bufpos;
+	vdma_scanout_bytes = source_rows > 0 ?
+		(u32)(source_rows - 1) * stride + line_bytes : 0U;
 	return XST_SUCCESS;
 }
 
