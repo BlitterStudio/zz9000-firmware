@@ -61,6 +61,33 @@ static uint32_t root_reset_reg;
 static int root_reset_fsls;
 static struct zzusb_set_address_recovery set_address_recovery;
 
+/*
+ * One control, bulk or CLEAR_STALL transfer is in flight at a time (the
+ * async schedule holds one QH). The command returns PENDING and finishes
+ * on a later main-loop pass, so the core-0 loop keeps answering Zorro
+ * register reads while a device NAKs; the device, setup packet and
+ * completion context therefore outlive the handler.
+ */
+enum proxy_xfer_kind {
+    PROXY_XFER_CONTROL,
+    PROXY_XFER_BULK,
+    PROXY_XFER_CLEAR_STALL
+};
+
+static struct proxy_xfer {
+    int active;
+    enum proxy_xfer_kind kind;
+    struct usb_device dev;
+    struct usb_device split_hub;
+    struct devrequest setup __attribute__((aligned(32)));
+    int dev_addr;
+    int is_in;
+    int data_len;
+    uint8_t *data_buf;
+    unsigned long target_pipe;
+    uint32_t diag_detail;
+} proxy_xfer;
+
 
 static void periodic_stop_all(void);
 static void reset_port_abort(void);
@@ -78,6 +105,11 @@ void usb_proxy_advance_controller_epoch(void)
 {
     reset_port_abort();
     zzusb_set_address_recovery_abort(&set_address_recovery);
+    /* The request that owns the transfer is stale after the fence. */
+    if (proxy_xfer.active) {
+        ehci_submit_async_cancel();
+        proxy_xfer.active = 0;
+    }
     periodic_stop_all();
     usb_proxy_iso_stop_all(EHCI_ISO_PACKET_OFFLINE);
     controller_epoch++;
@@ -164,7 +196,7 @@ static unsigned long read_timeout_ms(volatile struct ZZUSBCommand *cmd)
     /*
      * The Amiga side is blocked while a proxy command is in flight.
      * Respect explicit request timeouts, but cap them so a dead device
-     * cannot hold the Zorro bus for several seconds in firmware.
+     * cannot hold the single primary mailbox for several seconds.
      */
     if (timeout_ms > ZZUSB_PROXY_MAX_TIMEOUT_MS)
         timeout_ms = ZZUSB_PROXY_MAX_TIMEOUT_MS;
@@ -1097,12 +1129,145 @@ uint16_t usb_proxy_poll_reset_port(volatile struct ZZUSBCommand *cmd,
     return diag_complete_command(cmd, ext, is_v2, result);
 }
 
+static uint16_t control_xfer_complete(volatile struct ZZUSBCommand *cmd,
+                                      int result)
+{
+    struct usb_device *dev = &proxy_xfer.dev;
+    const struct devrequest *setup = &proxy_xfer.setup;
+    int dev_addr = proxy_xfer.dev_addr;
+
+    save_toggle(dev_addr, dev);
+
+    if (result >= 0 && dev->status == 0) {
+        if (proxy_xfer.is_in && proxy_xfer.data_len > 0 && dev->act_len > 0) {
+            Xil_DCacheInvalidateRange((u32)dma_buf, ALIGN(dev->act_len, 32));
+            memcpy(proxy_xfer.data_buf, dma_buf, dev->act_len);
+        }
+        put_be32(&cmd->actual_length, dev->act_len);
+
+        if (setup->requesttype == 0x00 && setup->request == 0x05) {
+            int new_addr = setup->value;
+            diag_detail = (uint32_t)new_addr;
+            if (new_addr > 0 && new_addr < 128) {
+                toggle_bits[new_addr][0] = 0;
+                toggle_bits[new_addr][1] = 0;
+                if (new_addr != dev_addr) {
+                    toggle_bits[dev_addr][0] = 0;
+                    toggle_bits[dev_addr][1] = 0;
+                }
+            }
+            zzusb_set_address_recovery_arm(&set_address_recovery,
+                                           proxy_now_ticks());
+            return ZZUSB_STATUS_PENDING;
+        }
+
+        /*
+         * CLEAR_FEATURE(ENDPOINT_HALT): bmRequestType=0x02 (standard,
+         * endpoint recipient, host-to-device), bRequest=0x01,
+         * wValue=0x0000 (ENDPOINT_HALT), wIndex encodes endpoint
+         * number in bits 0-3 and direction (IN=1) in bit 7.
+         *
+         * The device resets its toggle to DATA0 on a successful
+         * clear-halt. If we don't mirror that in our per-address
+         * toggle cache, the next bulk/interrupt transfer on the
+         * endpoint will use the stale toggle value — which looks
+         * like a DATA0/DATA1 mismatch and fails. Mass-storage
+         * STALL recovery stops working after the first halt.
+         */
+        if (setup->requesttype == 0x02 && setup->request == 0x01 &&
+            setup->value == 0x0000 &&
+            dev_addr >= 0 && dev_addr < 128) {
+            int clr_ep  = setup->index & 0x0f;
+            int clr_dir = (setup->index & 0x80) ? 1 : 0;
+            toggle_bits[dev_addr][clr_dir] &= ~(1U << clr_ep);
+        }
+        return ZZUSB_STATUS_OK;
+    }
+
+    diag_detail = (uint32_t)dev->status;
+    put_be32(&cmd->actual_length, 0);
+    return usb_status_to_zz(dev->status, proxy_xfer.is_in);
+}
+
+static uint16_t bulk_xfer_complete(volatile struct ZZUSBCommand *cmd,
+                                   int result)
+{
+    struct usb_device *dev = &proxy_xfer.dev;
+
+    save_toggle(proxy_xfer.dev_addr, dev);
+
+    if (result >= 0 && dev->status == 0) {
+        if (proxy_xfer.is_in && proxy_xfer.data_len > 0 && dev->act_len > 0)
+            Xil_DCacheInvalidateRange((u32)proxy_xfer.data_buf,
+                                      ALIGN(dev->act_len, 32));
+        put_be32(&cmd->actual_length, dev->act_len);
+        return ZZUSB_STATUS_OK;
+    }
+
+    diag_detail = (uint32_t)dev->status;
+    put_be32(&cmd->actual_length, 0);
+    return usb_status_to_zz(dev->status, proxy_xfer.is_in);
+}
+
+static uint16_t clear_stall_complete(int result)
+{
+    struct usb_device *dev = &proxy_xfer.dev;
+    unsigned long target = proxy_xfer.target_pipe;
+    int cleared = result >= 0 && dev->status == 0;
+
+    /* The device resets the endpoint's toggle to DATA0 on a clear; persist
+     * that so the next bulk/int transfer starts with DATA0. */
+    if (cleared)
+        usb_settoggle(dev, usb_pipeendpoint(target), usb_pipeout(target), 0);
+    save_toggle(proxy_xfer.dev_addr, dev);
+    return cleared ? ZZUSB_STATUS_OK : ZZUSB_STATUS_ERROR;
+}
+
+static uint16_t proxy_xfer_complete(volatile struct ZZUSBCommand *cmd,
+                                    int result)
+{
+    switch (proxy_xfer.kind) {
+    case PROXY_XFER_CONTROL:
+        return control_xfer_complete(cmd, result);
+    case PROXY_XFER_BULK:
+        return bulk_xfer_complete(cmd, result);
+    case PROXY_XFER_CLEAR_STALL:
+    default:
+        return clear_stall_complete(result);
+    }
+}
+
+/* Starts proxy_xfer on the async schedule; a start failure completes the
+ * command at once. */
+static uint16_t proxy_xfer_start(volatile struct ZZUSBCommand *cmd,
+                                 unsigned long pipe, void *buf, int length,
+                                 unsigned long timeout_ms, int idle_bulk_poll)
+{
+    int result = ehci_submit_async_begin(
+        &proxy_xfer.dev, pipe, buf, length,
+        proxy_xfer.kind == PROXY_XFER_BULK ? NULL : &proxy_xfer.setup,
+        timeout_ms, idle_bulk_poll);
+
+    if (result < 0)
+        return proxy_xfer_complete(cmd, result);
+    proxy_xfer.active = 1;
+    proxy_xfer.diag_detail = diag_detail;
+    return ZZUSB_STATUS_PENDING;
+}
+
+int usb_proxy_async_xfer_pending(void)
+{
+    return proxy_xfer.active;
+}
+
 static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
                                 uint8_t *data_buf)
 {
     struct ehci_ctrl *ctrl = get_ehci_ctrl();
     if (!ctrl)
         return ZZUSB_STATUS_ERROR;
+    if (proxy_xfer.active)
+        return ZZUSB_STATUS_HOSTERROR;
 
     int dev_addr = be32(&cmd->dev_addr);
     int endpoint = be16(&cmd->endpoint);
@@ -1116,9 +1281,9 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
     int data_len = (int)data_len_u32;
     int split_hub_addr = 0;
     int split_hub_port = 0;
-    struct usb_device split_hub;
     struct usb_device *split_hub_ptr =
-        read_split(cmd, &split_hub_addr, &split_hub_port) ? &split_hub : NULL;
+        read_split(cmd, &split_hub_addr, &split_hub_port) ?
+        &proxy_xfer.split_hub : NULL;
     int direct_root_addr0 = 0;
 
     /* No per-control-xfer trace in the hot path: the UART is
@@ -1169,8 +1334,8 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
          * The Zynq/ChipIdea EHCI root port does not retire direct
          * low-speed EP0 transactions here, even with the QH and ULPI
          * speed set correctly. Fail fast so the Amiga-side driver can
-         * hide the unsupported direct-LS device without blocking Zorro
-         * long enough to crash the OS. LS behind a high-speed hub still
+         * hide the unsupported direct-LS device instead of waiting out
+         * every enumeration attempt. LS behind a high-speed hub still
          * uses the split path above.
          */
         diag_detail = portsc_now;
@@ -1178,24 +1343,24 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
         return ZZUSB_STATUS_OFFLINE;
     }
 
-    struct usb_device dev;
-    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint,
+    struct usb_device *dev = &proxy_xfer.dev;
+    prep_dev(dev, dev_addr, speed_usb, maxpkt, endpoint,
              split_hub_ptr, split_hub_addr, split_hub_port);
 
     unsigned long pipe;
     if (cmd->setup_bRequestType & 0x80)
-        pipe = usb_rcvctrlpipe(&dev, endpoint);
+        pipe = usb_rcvctrlpipe(dev, endpoint);
     else
-        pipe = usb_sndctrlpipe(&dev, endpoint);
+        pipe = usb_sndctrlpipe(dev, endpoint);
 
-    struct devrequest setup __attribute__((aligned(32)));
-    setup.requesttype = cmd->setup_bRequestType;
-    setup.request = cmd->setup_bRequest;
-    setup.value = le16(&cmd->setup_wValue);
-    setup.index = le16(&cmd->setup_wIndex);
-    setup.length = le16(&cmd->setup_wLength);
+    struct devrequest *setup = &proxy_xfer.setup;
+    setup->requesttype = cmd->setup_bRequestType;
+    setup->request = cmd->setup_bRequest;
+    setup->value = le16(&cmd->setup_wValue);
+    setup->index = le16(&cmd->setup_wIndex);
+    setup->length = le16(&cmd->setup_wLength);
 
-    Xil_DCacheFlushRange((u32)&setup, ALIGN(sizeof(setup), 32));
+    Xil_DCacheFlushRange((u32)setup, ALIGN(sizeof(*setup), 32));
 
     int is_in = (cmd->setup_bRequestType & 0x80) != 0;
     void *buf = NULL;
@@ -1213,66 +1378,18 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
     unsigned long timeout_ms = read_timeout_ms(cmd);
     if (direct_root_addr0 &&
         speed_usb == USB_SPEED_LOW &&
-        setup.requesttype == 0x80 &&
-        setup.request == 0x06 &&
-        setup.value == 0x0100) {
+        setup->requesttype == 0x80 &&
+        setup->request == 0x06 &&
+        setup->value == 0x0100) {
         timeout_ms = 25;
     }
 
-    int result = ehci_submit_async_timeout(&dev, pipe, buf, data_len, &setup,
-                                           timeout_ms, 0);
-
-    save_toggle(dev_addr, &dev);
-
-    if (result >= 0 && dev.status == 0) {
-        if (is_in && data_len > 0 && dev.act_len > 0) {
-            Xil_DCacheInvalidateRange((u32)dma_buf, ALIGN(dev.act_len, 32));
-            memcpy(data_buf, dma_buf, dev.act_len);
-        }
-        put_be32(&cmd->actual_length, dev.act_len);
-
-        if (setup.requesttype == 0x00 && setup.request == 0x05) {
-            int new_addr = setup.value;
-            diag_detail = (uint32_t)new_addr;
-            if (new_addr > 0 && new_addr < 128) {
-                toggle_bits[new_addr][0] = 0;
-                toggle_bits[new_addr][1] = 0;
-                if (new_addr != dev_addr) {
-                    toggle_bits[dev_addr][0] = 0;
-                    toggle_bits[dev_addr][1] = 0;
-                }
-            }
-            zzusb_set_address_recovery_arm(&set_address_recovery,
-                                           proxy_now_ticks());
-            return ZZUSB_STATUS_PENDING;
-        }
-
-        /*
-         * CLEAR_FEATURE(ENDPOINT_HALT): bmRequestType=0x02 (standard,
-         * endpoint recipient, host-to-device), bRequest=0x01,
-         * wValue=0x0000 (ENDPOINT_HALT), wIndex encodes endpoint
-         * number in bits 0-3 and direction (IN=1) in bit 7.
-         *
-         * The device resets its toggle to DATA0 on a successful
-         * clear-halt. If we don't mirror that in our per-address
-         * toggle cache, the next bulk/interrupt transfer on the
-         * endpoint will use the stale toggle value — which looks
-         * like a DATA0/DATA1 mismatch and fails. Mass-storage
-         * STALL recovery stops working after the first halt.
-         */
-        if (setup.requesttype == 0x02 && setup.request == 0x01 &&
-            setup.value == 0x0000 &&
-            dev_addr >= 0 && dev_addr < 128) {
-            int clr_ep  = setup.index & 0x0f;
-            int clr_dir = (setup.index & 0x80) ? 1 : 0;
-            toggle_bits[dev_addr][clr_dir] &= ~(1U << clr_ep);
-        }
-        return ZZUSB_STATUS_OK;
-    } else {
-        diag_detail = (uint32_t)dev.status;
-        put_be32(&cmd->actual_length, 0);
-        return usb_status_to_zz(dev.status, is_in);
-    }
+    proxy_xfer.kind = PROXY_XFER_CONTROL;
+    proxy_xfer.dev_addr = dev_addr;
+    proxy_xfer.is_in = is_in;
+    proxy_xfer.data_len = data_len;
+    proxy_xfer.data_buf = data_buf;
+    return proxy_xfer_start(cmd, pipe, buf, data_len, timeout_ms, 0);
 }
 
 static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
@@ -1281,6 +1398,8 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
     struct ehci_ctrl *ctrl = get_ehci_ctrl();
     if (!ctrl)
         return ZZUSB_STATUS_ERROR;
+    if (proxy_xfer.active)
+        return ZZUSB_STATUS_HOSTERROR;
 
     int dev_addr = be32(&cmd->dev_addr);
     int endpoint = be16(&cmd->endpoint);
@@ -1298,21 +1417,21 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
 
     int split_hub_addr = 0;
     int split_hub_port = 0;
-    struct usb_device split_hub;
-    struct usb_device dev;
+    struct usb_device *dev = &proxy_xfer.dev;
     struct usb_device *split_hub_ptr =
-        read_split(cmd, &split_hub_addr, &split_hub_port) ? &split_hub : NULL;
+        read_split(cmd, &split_hub_addr, &split_hub_port) ?
+        &proxy_xfer.split_hub : NULL;
     drop_direct_root_split(ctrl, "bulk", speed_usb,
                            &split_hub_ptr,
                            &split_hub_addr, &split_hub_port);
-    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint,
+    prep_dev(dev, dev_addr, speed_usb, maxpkt, endpoint,
              split_hub_ptr, split_hub_addr, split_hub_port);
 
     unsigned long pipe;
     if (is_in)
-        pipe = usb_rcvbulkpipe(&dev, endpoint);
+        pipe = usb_rcvbulkpipe(dev, endpoint);
     else
-        pipe = usb_sndbulkpipe(&dev, endpoint);
+        pipe = usb_sndbulkpipe(dev, endpoint);
 
     /* DMA directly from/to the shared mailbox (USB_BLOCK_STORAGE_ADDRESS
      * + ZZUSB_DATA_OFFSET). The mailbox is 64-byte aligned in DDR and
@@ -1330,24 +1449,14 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
         }
     }
 
-    int result = ehci_submit_async_timeout(
-        &dev, pipe, data_len > 0 ? xfer_buf : NULL, data_len, NULL,
-        read_timeout_ms(cmd),
-        (be16(&cmd->flags) & ZZUSB_FLAG_BULK_IN_POLL) != 0);
-
-    save_toggle(dev_addr, &dev);
-
-    if (result >= 0 && dev.status == 0) {
-        if (is_in && data_len > 0 && dev.act_len > 0) {
-            Xil_DCacheInvalidateRange((u32)xfer_buf, ALIGN(dev.act_len, 32));
-        }
-        put_be32(&cmd->actual_length, dev.act_len);
-        return ZZUSB_STATUS_OK;
-    } else {
-        diag_detail = (uint32_t)dev.status;
-        put_be32(&cmd->actual_length, 0);
-        return usb_status_to_zz(dev.status, is_in);
-    }
+    proxy_xfer.kind = PROXY_XFER_BULK;
+    proxy_xfer.dev_addr = dev_addr;
+    proxy_xfer.is_in = is_in != 0;
+    proxy_xfer.data_len = data_len;
+    proxy_xfer.data_buf = xfer_buf;
+    return proxy_xfer_start(cmd, pipe, data_len > 0 ? xfer_buf : NULL,
+                            data_len, read_timeout_ms(cmd),
+                            (be16(&cmd->flags) & ZZUSB_FLAG_BULK_IN_POLL) != 0);
 }
 
 static uint16_t handle_int_xfer(volatile struct ZZUSBCommand *cmd,
@@ -1437,6 +1546,8 @@ static uint16_t handle_clear_stall(volatile struct ZZUSBCommand *cmd)
     struct ehci_ctrl *ctrl = get_ehci_ctrl();
     if (!ctrl)
         return ZZUSB_STATUS_ERROR;
+    if (proxy_xfer.active)
+        return ZZUSB_STATUS_HOSTERROR;
 
     int dev_addr = be32(&cmd->dev_addr);
     int endpoint = be16(&cmd->endpoint);
@@ -1445,30 +1556,41 @@ static uint16_t handle_clear_stall(volatile struct ZZUSBCommand *cmd)
 
     int split_hub_addr = 0;
     int split_hub_port = 0;
-    struct usb_device split_hub;
-    struct usb_device dev;
+    struct usb_device *dev = &proxy_xfer.dev;
     struct usb_device *split_hub_ptr =
-        read_split(cmd, &split_hub_addr, &split_hub_port) ? &split_hub : NULL;
+        read_split(cmd, &split_hub_addr, &split_hub_port) ?
+        &proxy_xfer.split_hub : NULL;
     drop_direct_root_split(ctrl, "clear-stall", speed_usb,
                            &split_hub_ptr,
                            &split_hub_addr, &split_hub_port);
-    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint,
+    prep_dev(dev, dev_addr, speed_usb, maxpkt, endpoint,
              split_hub_ptr, split_hub_addr, split_hub_port);
 
     /* Direction convention matches the rest of the driver: bit 7 of
      * `direction` selects IN (0x80) vs OUT (0x00). */
-    unsigned long pipe;
+    unsigned long target;
     if (be16(&cmd->direction) & 0x80)
-        pipe = usb_rcvbulkpipe(&dev, endpoint);
+        target = usb_rcvbulkpipe(dev, endpoint);
     else
-        pipe = usb_sndbulkpipe(&dev, endpoint);
+        target = usb_sndbulkpipe(dev, endpoint);
 
-    int result = usb_clear_halt(&dev, pipe);
-    /* usb_clear_halt resets dev->toggle[] for the endpoint on
-     * success; persist that back to our per-address cache so the
-     * next bulk/int transfer sees DATA0. */
-    save_toggle(dev_addr, &dev);
-    return (result == 0) ? ZZUSB_STATUS_OK : ZZUSB_STATUS_ERROR;
+    /* CLEAR_FEATURE(ENDPOINT_HALT), as usb_clear_halt() sends it. */
+    struct devrequest *setup = &proxy_xfer.setup;
+    setup->requesttype = USB_RECIP_ENDPOINT;
+    setup->request = USB_REQ_CLEAR_FEATURE;
+    setup->value = cpu_to_le16(0);
+    setup->index = cpu_to_le16(usb_pipeendpoint(target) |
+                               (usb_pipein(target) << 7));
+    setup->length = cpu_to_le16(0);
+    Xil_DCacheFlushRange((u32)setup, ALIGN(sizeof(*setup), 32));
+
+    proxy_xfer.kind = PROXY_XFER_CLEAR_STALL;
+    proxy_xfer.dev_addr = dev_addr;
+    proxy_xfer.is_in = 0;
+    proxy_xfer.data_len = 0;
+    proxy_xfer.data_buf = NULL;
+    proxy_xfer.target_pipe = target;
+    return proxy_xfer_start(cmd, usb_sndctrlpipe(dev, 0), NULL, 0, 0, 0);
 }
 
 static uint16_t handle_enumerate(volatile struct ZZUSBCommand *cmd,
@@ -1641,6 +1763,19 @@ void usb_proxy_note_late_completion(
                       be32(&cmd->actual_length), diag_timestamp());
 }
 
+static uint16_t complete_command(volatile struct ZZUSBCommand *cmd,
+                                 volatile struct ZZUSBProtocolExtension *ext,
+                                 int is_v2, uint16_t result)
+{
+    if (is_v2) {
+        put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);
+        put_be16(&ext->header_size, ZZUSB_V2_HEADER_SIZE);
+        put_be32(&ext->controller_epoch, controller_epoch);
+        put_be32(&ext->capabilities, ZZUSB_CAP_BASE);
+    }
+    return diag_complete_command(cmd, ext, is_v2, result);
+}
+
 uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
                                   volatile struct ZZUSBProtocolExtension *ext,
                                   uint8_t *data_buf, int is_v2)
@@ -1772,13 +1907,25 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
     }
     if (result == ZZUSB_STATUS_PENDING)
         return result;
+    return complete_command(cmd, ext, is_v2, result);
+}
 
+uint16_t usb_proxy_poll_async_xfer(volatile struct ZZUSBCommand *cmd,
+                                   volatile struct ZZUSBProtocolExtension *ext,
+                                   int is_v2)
+{
+    uint16_t status;
+    int result;
 
-    if (is_v2) {
-        put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);
-        put_be16(&ext->header_size, ZZUSB_V2_HEADER_SIZE);
-        put_be32(&ext->controller_epoch, controller_epoch);
-        put_be32(&ext->capabilities, ZZUSB_CAP_BASE);
-    }
-    return diag_complete_command(cmd, ext, is_v2, result);
+    if (!proxy_xfer.active)
+        return ZZUSB_STATUS_ERROR;
+    if (!ehci_submit_async_poll(&result))
+        return ZZUSB_STATUS_PENDING;
+    proxy_xfer.active = 0;
+    diag_detail = proxy_xfer.diag_detail;
+    status = proxy_xfer_complete(cmd, result);
+    /* A successful SET_ADDRESS continues as its recovery delay. */
+    if (status == ZZUSB_STATUS_PENDING)
+        return status;
+    return complete_command(cmd, ext, is_v2, status);
 }

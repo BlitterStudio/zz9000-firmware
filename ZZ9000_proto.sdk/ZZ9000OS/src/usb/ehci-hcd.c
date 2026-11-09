@@ -417,28 +417,68 @@ static int ehci_unlink_async_qh(struct ehci_ctrl *ctrl)
 	return 0;
 }
 
+/*
+ * The async schedule carries one QH, so one control or bulk transfer is in
+ * flight at a time. The USB proxy starts a transfer and polls it from the
+ * main loop, which keeps answering Zorro register reads while a device
+ * NAKs; ehci_submit_async() drives the same steps in a loop.
+ */
+struct ehci_async_xfer {
+	int active;
+	int aborted;
+	struct ehci_ctrl *ctrl;
+	struct usb_device *dev;
+	unsigned long pipe;
+	void *buffer;
+	int length;
+	struct ehci_async_allocation *allocation;
+	int qtd_count;
+	volatile struct qTD *vtd;
+	unsigned long ts;
+	unsigned long timeout;
+	int idle_bulk_poll;
+};
+
+static struct ehci_async_xfer async_xfer;
+
+static int ehci_async_fail(struct ehci_ctrl *ctrl,
+			   struct ehci_async_allocation *allocation,
+			   int async_linked, int descriptors_reclaimable)
+{
+	if (async_linked && !descriptors_reclaimable &&
+	    ehci_unlink_async_qh(ctrl) == 0)
+		descriptors_reclaimable = 1;
+	if (async_linked && ehci_stop_async_schedule(ctrl) == 0)
+		descriptors_reclaimable = 1;
+	if (!async_linked || descriptors_reclaimable)
+		ehci_release_async(allocation);
+	else
+		ehci_quarantine_async(allocation);
+	return -1;
+}
+
 static int
-ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
-		   void *buffer, int length, struct devrequest *req,
-		   unsigned long timeout_ms, int idle_bulk_poll)
+ehci_async_start(struct usb_device *dev, unsigned long pipe,
+		 void *buffer, int length, struct devrequest *req,
+		 unsigned long timeout_ms, int idle_bulk_poll)
 {
 	struct ehci_async_allocation *allocation;
 	struct QH *qh;
 	struct qTD *qtd;
 	int qtd_count = 0;
 	int qtd_counter = 0;
-	volatile struct qTD *vtd;
-	unsigned long ts;
 	uint32_t *tdp;
 	uint32_t endpt, maxpacket, token, usbsts;
 	uint32_t c, toggle;
 	uint32_t cmd;
 	int async_linked = 0;
-	int descriptors_reclaimable = 0;
-	unsigned long timeout;
 	int ret = 0;
-	int idle_bulk_in_timeout = 0;
 	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
+	if (async_xfer.active) {
+		dev->status = USB_ST_CRC_ERR;
+		dev->act_len = 0;
+		return -EBUSY;
+	}
 	if (ehci_recovery_required) {
 		dev->status = USB_ST_CRC_ERR;
 		dev->act_len = 0;
@@ -710,28 +750,76 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		goto fail;
 	}
 
-	/* Wait for TDs to be processed. */
-	ts = get_timer(0);  // FIXME
-	vtd = &qtd[qtd_counter - 1];
-	timeout = timeout_ms ? timeout_ms : USB_TIMEOUT_MS(pipe);
-	do {
-		usb_proxy_iso_pump();
-		usb_proxy_periodic_pump();
-		usb_proxy_poll_maintenance();
-		/* Invalidate dcache */
-		invalidate_dcache_range((unsigned long)&ctrl->qh_list,
-			ALIGN_END_ADDR(struct QH, &ctrl->qh_list, 1));
-		invalidate_dcache_range((unsigned long)qh,
-			ALIGN_END_ADDR(struct QH, qh, 1));
-		invalidate_dcache_range((unsigned long)qtd,
-			ALIGN_END_ADDR(struct qTD, qtd, qtd_count));
+	async_xfer.active = 1;
+	async_xfer.aborted = 0;
+	async_xfer.ctrl = ctrl;
+	async_xfer.dev = dev;
+	async_xfer.pipe = pipe;
+	async_xfer.buffer = buffer;
+	async_xfer.length = length;
+	async_xfer.allocation = allocation;
+	async_xfer.qtd_count = qtd_count;
+	async_xfer.vtd = &qtd[qtd_counter - 1];
+	async_xfer.ts = get_timer(0);
+	async_xfer.timeout = timeout_ms ? timeout_ms : USB_TIMEOUT_MS(pipe);
+	async_xfer.idle_bulk_poll =
+		idle_bulk_poll && req == NULL && usb_pipein(pipe);
+	return 0;
 
-		token = hc32_to_cpu(vtd->qt_token);
-		if (!(QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE))
-			break;
-		//WATCHDOG_RESET(); // FIXME
-	} while (get_timer(ts) < timeout);
-	if (idle_bulk_poll && req == NULL && usb_pipein(pipe) &&
+fail:
+	return ehci_async_fail(ctrl, allocation, async_linked, 0);
+}
+
+static uint32_t ehci_async_token(void)
+{
+	struct ehci_ctrl *ctrl = async_xfer.ctrl;
+	struct ehci_async_allocation *allocation = async_xfer.allocation;
+
+	invalidate_dcache_range((unsigned long)&ctrl->qh_list,
+		ALIGN_END_ADDR(struct QH, &ctrl->qh_list, 1));
+	invalidate_dcache_range((unsigned long)allocation->qh,
+		ALIGN_END_ADDR(struct QH, allocation->qh, 1));
+	invalidate_dcache_range((unsigned long)allocation->qtd,
+		ALIGN_END_ADDR(struct qTD, allocation->qtd,
+			       async_xfer.qtd_count));
+	return hc32_to_cpu(async_xfer.vtd->qt_token);
+}
+
+/* Nonzero once the last qTD retired, the deadline passed or recovery
+ * aborted the transfer. */
+static int ehci_async_done(void)
+{
+	if (async_xfer.aborted)
+		return 1;
+	if (!(QT_TOKEN_GET_STATUS(ehci_async_token()) &
+	      QT_TOKEN_STATUS_ACTIVE))
+		return 1;
+	return get_timer(async_xfer.ts) >= async_xfer.timeout;
+}
+
+static int ehci_async_finish(void)
+{
+	struct ehci_ctrl *ctrl = async_xfer.ctrl;
+	struct usb_device *dev = async_xfer.dev;
+	struct ehci_async_allocation *allocation = async_xfer.allocation;
+	unsigned long pipe = async_xfer.pipe;
+	void *buffer = async_xfer.buffer;
+	int length = async_xfer.length;
+	struct QH *qh;
+	uint32_t token, toggle;
+	int descriptors_reclaimable = 0;
+	int idle_bulk_in_timeout = 0;
+	int ret;
+
+	async_xfer.active = 0;
+	/* ehci_controller_recover() already quarantined the descriptors and
+	 * set dev->status. */
+	if (async_xfer.aborted)
+		return -1;
+
+	qh = allocation->qh;
+	token = ehci_async_token();
+	if (async_xfer.idle_bulk_poll &&
 	    ehci_qtd_idle_active((uint8_t)QT_TOKEN_GET_STATUS(token)))
 		idle_bulk_in_timeout = 1;
 
@@ -761,7 +849,8 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	if (!ehci_dma_reclaimable(ret == 0, descriptors_reclaimable, 0)) {
 		dev->status = USB_ST_CRC_ERR;
 		dev->act_len = 0;
-		goto fail;
+		return ehci_async_fail(ctrl, allocation, 1,
+				       descriptors_reclaimable);
 	}
 
 	token = hc32_to_cpu(qh->qh_overlay.qt_token);
@@ -854,32 +943,47 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 
 	ehci_release_async(allocation);
 	return (dev->status != USB_ST_NOT_PROC) ? 0 : -1;
-
-fail:
-	if (async_linked && !descriptors_reclaimable &&
-	    ehci_unlink_async_qh(ctrl) == 0)
-		descriptors_reclaimable = 1;
-	if (async_linked && ehci_stop_async_schedule(ctrl) == 0)
-		descriptors_reclaimable = 1;
-	if (!async_linked || descriptors_reclaimable)
-		ehci_release_async(allocation);
-	else
-		ehci_quarantine_async(allocation);
-	return -1;
 }
 
 int ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 		   int length, struct devrequest *req)
 {
-	return ehci_submit_async_internal(dev, pipe, buffer, length, req, 0, 0);
+	int ret = ehci_async_start(dev, pipe, buffer, length, req, 0, 0);
+
+	if (ret < 0)
+		return ret;
+	do {
+		usb_proxy_iso_pump();
+		usb_proxy_periodic_pump();
+		usb_proxy_poll_maintenance();
+	} while (!ehci_async_done());
+	return ehci_async_finish();
 }
 
-int ehci_submit_async_timeout(struct usb_device *dev, unsigned long pipe,
+int ehci_submit_async_begin(struct usb_device *dev, unsigned long pipe,
 		   void *buffer, int length, struct devrequest *req,
 		   unsigned long timeout_ms, int idle_bulk_poll)
 {
-	return ehci_submit_async_internal(dev, pipe, buffer, length, req,
-					  timeout_ms, idle_bulk_poll);
+	return ehci_async_start(dev, pipe, buffer, length, req, timeout_ms,
+				idle_bulk_poll);
+}
+
+int ehci_submit_async_poll(int *result)
+{
+	if (!async_xfer.active) {
+		*result = -1;
+		return 1;
+	}
+	if (!ehci_async_done())
+		return 0;
+	*result = ehci_async_finish();
+	return 1;
+}
+
+void ehci_submit_async_cancel(void)
+{
+	if (async_xfer.active)
+		(void)ehci_async_finish();
 }
 
 static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
@@ -2003,6 +2107,16 @@ int ehci_controller_recover(void)
 		return 0;
 	if (!ctrl->hccr || !ctrl->hcor)
 		return -ENODEV;
+
+	/* The controller reset below is the reclaim fence for an in-flight
+	 * async transfer too; its poll reports the failure. */
+	if (async_xfer.active && !async_xfer.aborted) {
+		ehci_quarantine_async(async_xfer.allocation);
+		async_xfer.allocation = NULL;
+		async_xfer.aborted = 1;
+		async_xfer.dev->status = USB_ST_CRC_ERR;
+		async_xfer.dev->act_len = 0;
+	}
 
 	result = ehci_reset(ctrl);
 	if (result < 0)
