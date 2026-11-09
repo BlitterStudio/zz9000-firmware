@@ -5,6 +5,51 @@
 #include "zzapp.h"
 #include "zzapp_runtime.h"
 int zzapp_loader_have_image(void);
+static uint32_t selected_slot;
+
+uint32_t zzapp_services_current_slot(void)
+{
+    return selected_slot;
+}
+static uint8_t service_window[ZZAPP_WINDOW_BYTES];
+static int start_pending;
+static int dynamic_started;
+
+uint8_t *zzapp_services_window(void)
+{
+    return service_window;
+}
+
+int zzapp_services_take_start(uint32_t *argc)
+{
+    if (!start_pending)
+        return 0;
+    start_pending = 0;
+    *argc = 0U;
+    return 1;
+}
+
+void zzapp_host_heap(void **base, uint32_t *bytes);
+
+static void dynamic_entry(const void *api_ptr, int argc, char **argv)
+{
+    const zzapp_api *api = api_ptr;
+    void *base;
+    void *old_break;
+    uint32_t bytes;
+
+    assert(argc == 0);
+    assert(argv != NULL);
+    zzapp_host_heap(&base, &bytes);
+    assert(base != NULL);
+    assert(bytes >= (1u << 20));
+    assert(api->heap_grow(1u << 20, &old_break) == ZZ_OK);
+    assert(old_break != NULL);
+    assert(api->heap_shrink(1u << 20, NULL) == ZZ_OK);
+    dynamic_started = 1;
+}
+
+
 
 #define IMAGE_BYTES 0x200u
 #define PHOFF 52u
@@ -103,6 +148,12 @@ int main(void)
     assert(card == 0xc0000000u);
     assert(get32(zzapp_test_arena_mem() + LOAD_OFF) == card + LOAD_OFF);
     assert(zzapp_proc_slot(0)->memory.committed == ZZAPP_ARENA_BYTES);
+    selected_slot = 1U;
+    make_image(image);
+    assert(load_end(image) == ZZ_OK);
+    assert(zzapp_proc_slot(1)->owner != zzapp_proc_slot(0)->owner);
+    zzapp_loader_release();
+    selected_slot = 0U;
     zzapp_loader_release();
 
     /* Stock GNU ld emits SHT_REL: its addend is the target word, not a
@@ -176,6 +227,7 @@ int main(void)
     assert(load_end(image) == ZZ_OK);
     assert(zzapp_proc_slot(0)->memory.committed == (2u << 20));
     zzapp_proc_slot(0)->heap_base = 0x00100000u;
+    zzapp_proc_slot(0)->heap_start = 0x00100000u;
     zzapp_proc_slot(0)->heap_break = 0x00100000u;
     zzapp_proc_slot(0)->heap_limit = 0x01000000u;
     api = zzapp_api_table();
@@ -186,6 +238,7 @@ int main(void)
     assert(api->heap_shrink(2u << 20, NULL) == ZZ_OK);
     assert(zzapp_proc_slot(0)->heap_break == 0x00200000u);
     zzapp_proc_slot(0)->heap_base = 0u;
+    zzapp_proc_slot(0)->heap_start = 0u;
     zzapp_proc_slot(0)->heap_break = 0u;
     zzapp_proc_slot(0)->heap_limit = 32u << 20;
     zzapp_proc_slot(0)->memory.committed = 0u;
@@ -195,6 +248,15 @@ int main(void)
     assert(api->heap_grow(1u << 20, NULL) == ZZ_ENOMEM);
     assert(zzapp_proc_slot(0)->heap_break == (16u << 20));
     zzapp_loader_release();
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + NOTE_OFF + 28u, 3u);
+    assert(load_end(image) == ZZ_OK);
+    zzapp_test_set_entry(dynamic_entry);
+    start_pending = 1;
+    dynamic_started = 0;
+    zzapp_worker_hook();
+    assert(dynamic_started);
 
     zzapp_boot_init(); make_image(image);
     put32(image + NOTE_OFF + 28u, 3u);

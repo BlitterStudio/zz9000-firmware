@@ -7,6 +7,30 @@
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
 int zzapp_host_address(const void *p, uint32_t *host_offset);
 int zzapp_host_mem_info(zzapp_mem_info *out);
+static uint32_t selected_slot;
+static int api_wait_hook_called;
+
+uint32_t zzapp_services_current_slot(void)
+{
+    return selected_slot;
+}
+
+void zzapp_services_select_slot(uint32_t slot)
+{
+    selected_slot = slot;
+}
+
+void zzapp_test_api_wait_hook(void)
+{
+    assert(zzapp_runtime_kernel()->api_lock_owner == 0);
+    selected_slot = 0U;
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_leave();
+    selected_slot = 1U;
+    zzapp_kernel_set_current_thread(1);
+    api_wait_hook_called++;
+}
+
 
 int main(void)
 {
@@ -32,6 +56,53 @@ int main(void)
     zzapp_api_leave();
     assert(zzapp_test_in_api() == 0u);
     assert(zzapp_test_service_calls() == 1u);
+    /* A core-0 operation must retain its selected slot while an app runs on
+     * core 1. */
+    zzapp_boot_init();
+    selected_slot = 1U;
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_kernel_set_current_thread(-1);
+    assert(zzapp_test_in_api() == 1U);
+    selected_slot = 0U;
+    assert(zzapp_test_in_api() == 0U);
+    selected_slot = 1U;
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_leave();
+    zzapp_kernel_set_current_thread(-1);
+    selected_slot = 0U;
+
+    /* A contending API call parks until the owner releases the lock, before
+     * its handler can execute. */
+    zzapp_boot_init();
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 1U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    selected_slot = 1U;
+    zzapp_kernel_set_current_thread(1);
+    zzapp_api_enter();
+    assert(api_wait_hook_called == 1);
+    assert(zzapp_runtime_kernel()->api_lock_owner == 1);
+    zzapp_api_leave();
+    zzapp_kernel_set_current_thread(-1);
+    selected_slot = 0U;
+
+    /* A blocked app can keep an old per-slot tick while the core continues
+     * servicing another context. That must not trigger a cold restart. */
+    zzapp_boot_init();
+    selected_slot = 1U;
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    zzapp_test_set_xtime(ZZAPP_WATCHDOG_US + ZZAPP_TICK_US);
+    selected_slot = 0U;
+    zzapp_host_tick_at(ZZAPP_WATCHDOG_US + ZZAPP_TICK_US);
+    zzapp_core0_poll();
+    selected_slot = 1U;
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    selected_slot = 0U;
+
 
     /*
      * A display flip can wait for ZZRun's SafeMessage longer than the

@@ -55,6 +55,7 @@ typedef struct zzapp_proc {
     uint32_t image_frames[ZZAPP_IMAGE_MAX_BYTES / ZZAPP_MEM_FRAME_BYTES];
     uint32_t image_frame_count;
     uint32_t heap_base;
+    uint32_t heap_start;
     uint32_t heap_break;
     uint32_t heap_limit;
     uint32_t heap_frames[ZZAPP_MEM_MAX_FRAMES];
@@ -97,6 +98,7 @@ int zzapp_loader_begin(void);
 int zzapp_loader_chunk(uint32_t file_off, const void *src, uint32_t len);
 int zzapp_loader_end(void);
 int zzapp_loader_abort(void);
+int zzapp_loader_set_generation(uint32_t generation);
 int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr_out);
 void zzapp_host_yield(void);
 void zzapp_host_yield_wait(void);
@@ -129,6 +131,7 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
 void zzapp_api_enter(void);
 void zzapp_api_leave(void);
 void zzapp_api_touch(void);
+void zzapp_host_revoke_visible(void);
 void zzapp_host_commit_begin(void);
 void zzapp_host_commit_end(void);
 void zzapp_note_progress(void);
