@@ -23,7 +23,7 @@ above it.
 | `0x00100000`–`0x00200000` | 1 MiB | Low exception vectors and MMU table only. |
 | `0x00200000`–`0x033F0000` | 49.9375 MiB | P96 VRAM, managed by rtg.library. The RTG driver's MemorySize ends here. |
 | `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages, the MiniGL wire-v9 transport window (one dynamic allocation, see below) and the AHI/MHI scratch. |
-| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. |
+| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. The high image also reserves a 208 KiB app translation-table slab: four 16 KiB app L1 tables, one 16 KiB template, and 128 1 KiB L2 tables. |
 | `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
 | `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. |
@@ -31,6 +31,25 @@ above it.
 | `0x0A000000`–`0x2FE00000` | 606 MiB | Permanent prefix of the card pool. |
 | `0x2FE00000`–`0x3FE00000` | 256 MiB | Fast-RAM landing window when advertised; otherwise contiguous revocable card-pool tail. |
 | `0x3FE00000`–`0x40000000` | 2 MiB | RTL-pinned audio, Ethernet, boot ROM, and USB/SD belt. |
+
+### App kernel mappings
+
+App-private frames have physical addresses in the permanent card-pool prefix;
+they do not have a fixed DDR range. The app-frame allocator obtains 1 MiB
+frames from 8 MiB-aligned pool extents and returns an empty extent to the pool.
+`CARD_POOL_CLASS_APP_FRAMES` has no class cap: aggregate commit admission,
+the system reserve, and the 512 MiB private-window bound limit it instead.
+
+Each app maps its private image, heap, and stack at
+`0xC0000000`–`0xDFFFFFFF`. This 512 MiB virtual range is non-global and
+private to the slot's ASID; it is not an identity mapping. The low identity
+map is privileged-only except for user grants to that app's host-visible
+blocks, display surfaces, and launcher window.
+
+The four 592 KiB launcher windows are at the start of four consecutive 1 MiB
+sections in one 4 MiB section-aligned host-visible allocation. Firmware marks
+the whole four-section region non-cacheable at boot. Each slot maps only its
+own window as a user section.
 
 ### Zorro III SDK host window
 

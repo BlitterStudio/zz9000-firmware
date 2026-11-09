@@ -5,12 +5,15 @@ SPDX-License-Identifier: MIT
 
 # ZZApp developer guide
 
-One trusted ARM program runs on core 1. AmigaOS starts it. The card loads
-the ELF, passes a function table, and reclaims every resource when the app
-stops or faults. This is not a sandbox. The app runs in SVC, the same mode
-as the firmware, with no per-app page tables. A wild store into firmware
-data does not abort. Isolation is later work. App source does not change
-for that later work if it keeps calling through the table.
+Up to four trusted ARM programs run on core 1. AmigaOS starts them. The card
+loads each ELF, passes a function table, and reclaims every resource when its
+app stops or faults. Apps run in ARM user mode with separate address spaces.
+The table contains user-mode SVC veneers; keep calling the `zz_*` wrappers
+and never call or cache a firmware address.
+
+This protects the card from ordinary app bugs. It is not a sandbox: the user
+chooses what code to run, and the app still receives the services and
+host-visible resources it requests.
 
 The public header is `sdk/zzapp/include/zzapp.h`. The call reference is
 [zzapp-api.md](zzapp-api.md). Firmware and launcher layouts live in
@@ -18,32 +21,27 @@ The public header is `sdk/zzapp/include/zzapp.h`. The call reference is
 
 ## Lifecycle
 
-Core 1 runs one app. A second load gets `ZZ_EBUSY`. States are idle,
-loading, starting, running, stopping, and faulted. Paused exists in the
-wire enum and is unused.
+Each launch owns one of four slots, its launcher window, and a generation.
+States progress from free to claimed, loading, starting, runnable or blocked,
+then through stopping and reclaiming back to free. A launch fails without
+changing another slot when every slot is occupied or admission fails.
 
-ZZRun, or a `zz9k.library` client, streams the ELF. Firmware checks the
-note, applies `R_ARM_RELATIVE` relocations, zeroes BSS, and enters at
-`e_entry` with `r0` = the API table, `r1` = argc, `r2` = argv, and `sp` at
-the top of the arena stack. crt0 calls `zz_main`. Return is `zz_exit` of
-that status.
+ZZRun, or a `zz9k.library` client, streams the ELF. Firmware checks the note,
+applies `R_ARM_RELATIVE` relocations, zeroes BSS, and enters at `e_entry` with
+`r0` = the API table, `r1` = argc, `r2` = argv, and `sp` at the top of the
+private stack. crt0 calls `zz_main`. Return is `zz_exit` of that status.
 
 Stop is Ctrl-C, `ZZ9KAppStop`, or the library handle closing. The app sees
-`zz_should_stop` and `ZZ_EV_STOP`. Grace is 500 ms, then the runtime
-force-stops. A normal stop does not cold-restart core 1. ZZRun returns the
-app exit code. It returns 20 on fault, an unavailable runtime, a display
-failure, or a launcher error, and 10 on bad launcher arguments.
+`zz_should_stop` and `ZZ_EV_STOP`. Grace is 500 ms, then the runtime stops
+that app. A user-mode data abort, prefetch abort, or undefined instruction
+stops and reclaims only its slot; firmware code faults retain the existing
+core-1 cold-restart recovery. Amiga reset and client lease loss also reclaim
+the owning slot.
 
-A fault whose PC is in the app arena is an app fault. Firmware captures
-`pc`, `sp`, `lr`, fault address, status, and `cpsr`, reclaims the app, and
-leaves other firmware services running. A fault inside an API call or the
-GL front end takes the existing core-1 cold restart. After that restart,
-68k MiniGL contexts are gone, as they are after any core-1 restart.
-
-Amiga reset reclaims the app. If the client vanishes without a reset, the
-2 second lease expires and the app is stopped. The launcher heartbeat and
-the app watchdog are different clocks. Refreshing one does not refresh the
-other.
+Teardown is ordered and idempotent: new calls are blocked; waits and work
+holding app pointers are cancelled; display, audio, GL, and decoder resources
+are released; mappings, frames, and host-visible blocks are released; then
+the terminal reason is published and the slot becomes free.
 
 ## Watchdog
 
@@ -54,38 +52,62 @@ and a flip wait already count, because they are inside an API call.
 `zz_should_stop` and `zz_time_us` also count: a loop that only polls them
 is not a stall. A loop that only touches app memory does not.
 
-The 5 ms timer runs one service tick between app instructions. It does not
-preempt inside an API call. If the app executes `cpsid`, that timer does
-not run. Core 0 then cold-restarts core 1 after 2 seconds of silence. That
-is the backstop, not a normal stop, and it drops 68k MiniGL clients.
+The private timer preempts runnable app code every 5 ms. It does not make a
+long-running API handler safe to interrupt; a call that runs for 10 seconds
+still stops the app. Core 0 cold-restarts core 1 after 2 seconds of silence
+as a backstop for a masked interrupt.
 
-## Memory and the arena
+## Memory model
 
-The arena is one 96 MiB card-pool block from the permanent prefix, not from
-Fast RAM and not from a module slot. The ELF, BSS, heap, and stack live
-there. The note may request less stack, down to 64 KiB, not more than
-1 MiB. Zero means 1 MiB. A 64-byte canary sits at the low end of the stack.
-A damaged canary force-stops the app. There is no unmapped guard page.
+Every app has a private virtual window at `0xC0000000`–`0xDFFFFFFF`. Its ELF,
+BSS, heap, and stack are mapped there from 1 MiB card-pool frames. The heap
+grows upward; the stack is at the top of the window. There is an unmapped gap
+between them. Firmware memory, other apps' private frames, device mappings,
+and ungranted host memory are not user mappings.
 
-The heap is `[image_end, stack_base)`. newlib `malloc` uses that range.
-`zz_alloc` without `ZZ_ALLOC_HOST_VISIBLE` is that malloc, with the
-alignment you pass. `zz_heap_range` reports the span. Do not call the
-firmware `_sbrk`.
+API 0.1 and 0.2 images retain the old contract: their image, heap, and stack
+commit 96 MiB at load. API 0.3 images use the dynamic-heap note. They commit
+the image, stack, and optional minimum heap at load, then newlib grows or
+shrinks the heap in 1 MiB steps. A failed growth makes `malloc` return NULL;
+it does not fault and it never moves existing allocations. The API table's
+`heap_info` slot reports the current commit, cap, and remaining pool capacity.
 
-`ZZ_ALLOC_HOST_VISIBLE` comes from the shared heap below `0x08200000`, up
-to 16 MiB per app, at most 64 blocks. It is shareable and non-cacheable.
-An Amiga client reads it coherently. It is for sharing, not for the app's
-working set. `zz_host_address` returns the board-relative offset of that
-base pointer only. `zz_mem_info` reports arena and host-visible accounting.
-`zz_free` returns a host-visible block immediately. Exit, fault, restart,
-and reset release the rest.
+The runtime keeps a system reserve. When free app memory crosses the low-water
+mark, it appends one low-memory record to every live slot's launcher log ring;
+another record is written only after free memory rises above the high-water
+mark and falls again. A launcher may cap its own app.
+`ZZ_ALLOC_HOST_VISIBLE` remains a separately accounted shared card allocation,
+up to 16 MiB per app, for Amiga-visible buffers rather than private working
+memory.
 
-`ZZ_ALLOC_UNCACHED` is accepted and ignored while the arena is cacheable.
-Pass it if you need the uncached meaning once user mode exists.
+## Isolation
+
+User code may access its private window, its granted host-visible allocations,
+its owned display surfaces, and its own launcher window. Other access takes an
+app fault and ends only that app. API and GL veneers also validate every
+pointer argument. A bad pointer passed to any call returns `ZZ_EFAULT`; do not
+use it as a probing mechanism.
+
+Isolation prevents accidental cross-app and firmware corruption. It does not
+turn an app into an untrusted sandbox or grant it a security boundary against
+the user who launched it.
+
+## Scheduling and shared resources
+
+Core 1 runs the system thread before app threads. Service work—SDK tasks,
+MiniGL, launcher processing, and audio feeding—has priority, then runnable
+apps share the remaining time round-robin in 5 ms quanta. Block in file I/O,
+console input, event waits, sleep, vsync, and audio-space waits; a blocked app
+uses no CPU. Do not poll or spin for readiness. Use the blocking call,
+`zz_sleep_us`, or `zz_yield`.
+
+Two direct card-audio streams may be open across all apps. Only one app may
+bind GL at a time. Each app may bind one display; a second display for that
+same app fails. Release a resource promptly so another slot can use it.
 
 FPSCR is zero at entry: round-to-nearest, flush-to-zero clear, default-NaN
-clear. The hard-float ABI is required. A VFP-only build is fine. The
-runtime saves `d0`–`d31` and FPSCR across ticks.
+clear. The hard-float ABI is required. A VFP-only build is fine. The runtime
+saves `d0`–`d31` and FPSCR across switches.
 
 ## Files
 
@@ -184,25 +206,17 @@ the app uses.
 
 ## Running on a PC
 
-`sdk/zzapp/host` builds the same app natively, with SDL2 in place of the card:
-
-```cmake
-add_subdirectory(path/to/sdk/zzapp/host)
-zzapp_host_executable(myapp SOURCES main.c render.c)
-```
-
-`./myapp --root . --scale 2 -- args` runs it in a window; `--headless`,
-`--frames N`, `--input FILE` and `--msg-script FILE` make it scriptable for
-tests. The runner implements the whole API 0.2 table with host semantics.
-Decompress, image and audio decode and GL return `ZZ_ENOSYS` there. Timing,
-memory limits and the watchdog are not the card's, so check performance and
-limits on hardware. Options and the differences from the card are in
-`sdk/zzapp/host/README.md`.
+The runner implements the API 0.3 table with host semantics, including plain
+host-memory dynamic heap growth. Decompress, image and audio decode and GL
+return `ZZ_ENOSYS` there. Timing, memory limits and the watchdog are not the
+card's, so check performance and limits on hardware. Options and the
+differences from the card are in `sdk/zzapp/host/README.md`.
 
 ## Running with ZZRun
 
-ZZRun is a Shell command and a Workbench tool. One app at a time. Zorro III
-only. It needs `zz9k.library` and, for a display, Picasso96.
+ZZRun is a Shell command and a Workbench tool. On firmware with slot support,
+each instance claims its own slot; an unchanged API 0.2 launcher still uses
+slot 0. Zorro III only. It needs `zz9k.library` and, for a display, Picasso96.
 
 Shell:
 
@@ -244,11 +258,10 @@ opened, ZZRun sets the stop word and `zz_display_open` returns `ZZ_EIO`.
 `ZZ9KAppSendMessage`, `ZZ9KAppGetMessage`, `ZZ9KAppMessageSignal`, and
 `ZZ9KAppClose`.
 
-Open returns `ZZ9K_STATUS_BUSY` to a second opener. The owner keeps the app
-until `ZZ9KAppClose`. Close publishes stop. The library's VBlank server
-renews the lease while the handle is open. A task that dies holding the
-handle is reclaimed by lease expiry or Amiga reset. There is no callback
-for that death.
+New firmware gives a handle its claimed slot and generation; operations affect
+only that pair. An unchanged library uses the legacy slot-0 request shape.
+The library's VBlank server renews each open handle's lease. A task that dies
+holding a handle is reclaimed by lease expiry or Amiga reset.
 
 `ZZ9KAppStart` passes `argv` unchanged. Put the program name in `argv[0]`
 if the app expects the ZZRun convention. Messages are 32 opaque bytes.
@@ -266,12 +279,9 @@ On fault, ZZRun prints `pc`, `sp`, `lr`, fault address, status, `cpsr`,
 exit code, and generation, then returns 20. `ZZ9KAppStatus` returns the
 same fields in `ZZ9KAppStatusInfo`.
 
-Resolve `pc` and `lr` against the app ELF, not the firmware ELF. The
-addresses are the relocated VAs, which equal the card addresses in this
-runtime. Subtract the arena base if your `addr2line` expects the ELF's
-unrelocated VMA. The loader treats `p_vaddr` as an offset from the arena
-base, so an ELF linked at VMA 0 matches `addr2line` once you subtract the
-runtime load address from the captured `pc`.
+Resolve `pc` and `lr` against the app ELF, not the firmware ELF. They are
+private virtual addresses in the `0xC0000000` window. Subtract that window
+base if `addr2line` expects the ELF's unrelocated VMA.
 
 ```text
 arm-none-eabi-addr2line -e app.elf -f -C <pc minus load address>
@@ -291,12 +301,11 @@ The APU runs at 666666687 Hz. Compile `-mcpu=cortex-a9 -marm -mfpu=neon
 for bulk pixel and sample work. Do not ship a soft-float object. It will
 not link against `libzzapp`.
 
-Core 1 is one thread. Firmware audio, MiniGL, and SDK jobs run in the 5 ms
-tick and at the end of each API call, and they preempt the app only at
-those points. A GL call does not return until that call's RasterIX work
-has drained. Between GL calls the engine is idle and one 68k packet may
-run. Do not stay inside one GL call for long. A call over 50 ms is logged.
-A call over 10 seconds stops the app.
+Four apps share core 1 with the system thread. Service work is scheduled
+first; runnable apps then rotate on 5 ms quanta. A GL call does not return
+until that call's RasterIX work has drained. Between GL calls the engine is
+idle and one 68k packet may run. Do not stay inside one GL call for long. A
+call over 50 ms is logged. A call over 10 seconds stops the app.
 
 The arena is cacheable. Host-visible memory and the audio ring are not.
 Do not use host-visible memory as a framebuffer scratch pad. Draw in the
@@ -364,10 +373,11 @@ table.
 ## Versioning
 
 The table is append-only. A new call is a new field at the end and a minor
-bump. `ZZAPP_API_MINOR` is 2. Minor 0 published the table through
+bump. `ZZAPP_API_MINOR` is 3. Minor 0 published the table through
 `gl_unbind`. Minor 1 appended the async flip, refresh, palette, mailbox
 counter, and `gl_bind_flags` slots. Minor 2 appended host-visible memory,
-file maps, card services, the console, and messages.
+file maps, card services, the console, and messages. Minor 3 appends dynamic
+heap growth, shrink, and accounting.
 
 Gate every appended slot with `ZZ_API_COVERS` and a non-NULL function
 pointer. `libzzapp` already does this and returns `ZZ_ENOSYS` when the
@@ -375,9 +385,8 @@ slot is missing. A direct call that skips the test reads off the end of an
 older table.
 
 A breaking change needs a new major. The loader rejects a note major other
-than 0. The runtime is expected to keep the previous table for one release
-after a major bump. That has not happened. Do not renumber or reorder
-fields. Do not change the meaning of a `ZZ_*` value.
+than 0. Do not renumber or reorder fields. Do not change the meaning of a
+`ZZ_*` value.
 
 The note ABI is 0.0. That number is the loader note, not `ZZAPP_API_MINOR`.
 

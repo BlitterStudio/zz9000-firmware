@@ -3,13 +3,15 @@ SPDX-FileCopyrightText: 2026 Dimitris Panokostas <midwan@gmail.com>
 SPDX-License-Identifier: MIT
 -->
 
-# ZZApp API reference (0.2)
+# ZZApp API reference (0.3)
 
 Public contract of `sdk/zzapp/include/zzapp.h`. The firmware entry is the
-`zzapp_api` table passed in `r0` at start. Call the `zz_*` wrappers. Do not
-cache a firmware address found any other way.
+`zzapp_api` table passed in `r0` at start. Call the `zz_*` wrappers. The table
+points at user-mode SVC veneers, not firmware functions: an app must not call
+or retain a firmware address. Code that calls through the table needs no
+change.
 
-`ZZAPP_API_MAJOR` is 0 and `ZZAPP_API_MINOR` is 2.
+`ZZAPP_API_MAJOR` is 0 and `ZZAPP_API_MINOR` is 3.
 `ZZAPP_API_VERSION` is `(major << 16) | minor`. The loader rejects a note
 whose major is not 0. A higher note minor is accepted only when the runtime
 minor is at least that value.
@@ -18,11 +20,12 @@ The table begins with `size`, then `version`, `flags`, and `reserved0`.
 Additions are appended. `size` is the compatibility check. `version` names
 the runtime that built the table; it is not a substitute for `size`.
 
-Every call runs on core 1, in the app's SVC context. Core 0 does not execute
-the call. A wait yields on core 1 until the launcher completes the matching
-mailbox operation, or until stop or timeout. Image decode, audio decode,
-SHA-256, and decompress run inline on core 1. They are not queued as core-1
-jobs, so they cannot deadlock the worker that is already running the app.
+Every API handler runs on core 1 after the app's user-mode veneer traps into
+SVC. Core 0 does not execute the call. A wait yields on core 1 until the
+launcher completes the matching mailbox operation, or until stop or timeout.
+Image decode, audio decode, SHA-256, and decompress run inline on core 1.
+They are not queued as core-1 jobs, so they cannot deadlock the worker that
+is already running the app.
 
 The watchdog stops the app if 30 seconds pass with no API call
 (`ZZAPP_APP_STALL_US`), or if one call runs for 10 seconds
@@ -42,8 +45,8 @@ Minor 0 published the table through `gl_unbind`. Minor 1 appends
 `display_flip_async` through `build_id`, plus `ZZ_DISPLAY_MAILBOX` and
 `ZZ_GL_BIND_*`. Minor 2 appends `host_address` through `msg_poll`, plus
 break events, host-visible allocation, compression, and image/audio decode.
-API 0.1 at `4b4e3198` is that minor-1 table. Size-gating still applies to
-every appended slot.
+Minor 3 appends the dynamic heap slots. API 0.1 at `4b4e3198` is the
+minor-1 table. Size-gating still applies to every appended slot.
 
 ## ZZ_API_COVERS
 
@@ -133,8 +136,12 @@ the file or directory id is not reused for the rest of the app.
 
 ## ZZ_EFAULT
 
-`-9`. The app faulted during `zz_map_file`. Other calls do not return this;
-a fault unwinds the app instead.
+`-9`. The runtime rejected a bad pointer passed to an API or GL call. A
+pointer must name the calling app's mapped memory with the access the call
+needs; mappings owned by another app, firmware memory, device memory, an
+overflowing range, and an invalid user stack pointer all fail this check.
+The call returns `ZZ_EFAULT`; it does not turn the bad pointer into a kernel
+abort.
 
 ## ZZ_ENOSPC
 
@@ -440,6 +447,34 @@ flags slot: 1, and the slot is appended, so gate with `ZZ_API_COVERS`.
 
 `2`. Debug. Drain and copy every frame before `zz_gl_swap` returns.
 
+## Memory contract
+
+Apps with an API 0.1 or 0.2 note keep the old contract: load commits one
+96 MiB region for their image, heap, and stack. The load returns `ZZ_ENOMEM`
+when that full commit cannot be admitted.
+
+An API 0.3 dynamic-heap app commits its image, stack, and any requested
+minimum heap at load. Its heap grows and shrinks in whole MiB frames. Growth
+is first-come, first-served from the free card pool after the system reserve
+and any launcher cap; failed growth makes `malloc` return NULL. The heap's
+virtual range is fixed, so a successful grow never moves existing pointers.
+
+## ZZAPP_NOTE_FLAG_DYNAMIC_HEAP
+
+`8`. Set in a dynamic-heap image note. `ZZAPP_NOTE` sets it while retaining
+note minor 0, so that image can still run with the fixed legacy heap on API
+0.2 firmware. `ZZAPP_NOTE_MIN_HEAP` sets the flag and requires API 0.3.
+
+## ZZAPP_NOTE_MIN_HEAP
+
+```c
+ZZAPP_NOTE_MIN_HEAP(flags, stack_bytes, min_heap_mib)
+```
+
+Emits an API 0.3 note and commits `min_heap_mib` of heap at load, in addition
+to the image and stack. Use zero when no initial heap commit is required.
+The loader rejects a request it cannot admit.
+
 ## Types
 
 ## zzapp_note
@@ -458,10 +493,11 @@ struct zzapp_note {
 ELF note, little-endian, name `ZZAPP`, `n_type` 1, descriptor 24 bytes.
 `ZZAPP_NOTE_MAGIC` is `0x50505A41`. `ZZAPP_NOTE_TYPE` is 1.
 `ZZAPP_NOTE_FLAG_DISPLAY` is 1, `ZZAPP_NOTE_FLAG_AUDIO` is 2,
-`ZZAPP_NOTE_FLAG_GL` is 4. Stack request 0 means 1 MiB. The minimum is
-64 KiB. More than 1 MiB is rejected. The note may not request an arena
-above 96 MiB. Third-party builds emit this with `ZZAPP_NOTE(flags,
-stack_bytes)` in `zzapp_note.h`. A host build compiles that macro to nothing.
+`ZZAPP_NOTE_FLAG_GL` is 4, and `ZZAPP_NOTE_FLAG_DYNAMIC_HEAP` is 8. Stack
+request 0 means 1 MiB. The minimum is 64 KiB. More than 1 MiB is rejected.
+Third-party builds use `ZZAPP_NOTE(flags, stack_bytes)` for compatibility or
+`ZZAPP_NOTE_MIN_HEAP(flags, stack_bytes, min_heap_mib)` for dynamic memory.
+A host build compiles those macros to nothing.
 
 ## zzapp_surface
 
@@ -551,6 +587,22 @@ typedef struct zzapp_mem_info {
 
 All fields are bytes. `host_visible_limit` is 16 MiB, a per-app cap inside
 the shared host heap, not a slice of the 96 MiB arena.
+
+## zzapp_heap_info
+
+```c
+typedef struct zzapp_heap_info {
+    uint32_t committed;
+    uint32_t limit;
+    uint32_t pool_free;
+} zzapp_heap_info;
+```
+
+All fields are bytes. `committed` is this app's private-memory commit,
+including image, heap, and stack. `limit` is its effective private-memory
+limit after any launcher cap. `pool_free` is memory still available for new
+app commits after the system reserve. The values are a snapshot; a different
+app may grow before a later request.
 
 ## zzapp_service_result
 
@@ -740,6 +792,43 @@ void zz_heap_range(void **base, uint32_t *bytes);
 Reports the newlib heap span `[image_end, stack_base)`. Either out-pointer
 may be NULL. Gate: `ZZ_API_COVERS(api, heap_range)`. Missing slot: writes
 NULL and 0. Does not block. Core 1. Minimum minor: 0.
+
+## zz_heap_grow
+
+```c
+int zz_heap_grow(uint32_t bytes, void **old_break);
+```
+
+Requests `bytes` more private heap, in whole MiB units. On success,
+`*old_break` is the start of the new contiguous range. Dynamic API 0.3 apps
+use this through newlib `_sbrk`; normal application code normally calls
+`malloc` instead. `ZZ_ENOMEM` means the pool, launcher cap, or private-window
+limit cannot satisfy the request. `ZZ_EINVAL` covers zero, non-MiB, or invalid
+arguments. Gate direct use with `ZZ_API_COVERS(api, heap_grow)`. Minimum
+minor: 3.
+
+## zz_heap_shrink
+
+```c
+int zz_heap_shrink(uint32_t bytes, void **new_break);
+```
+
+Releases whole MiB units from the top of a dynamic heap. On success,
+`*new_break` is the new break. It cannot release image, stack, or the
+minimum heap already needed below the break. The SDK uses it only when
+newlib can safely give back the top of the heap. Gate direct use with
+`ZZ_API_COVERS(api, heap_shrink)`. Minimum minor: 3.
+
+## heap_info
+
+```c
+int (*heap_info)(zzapp_heap_info *out);
+```
+
+The API-table slot writes the private-memory accounting snapshot. NULL `out`
+is `ZZ_EINVAL`. Read the slot only after `ZZ_API_COVERS(api, heap_info)` and
+check that it is non-NULL; a missing slot has the usual `ZZ_ENOSYS` meaning.
+Minimum minor: 3.
 
 ## zz_host_address
 
