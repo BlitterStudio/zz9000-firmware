@@ -32,7 +32,8 @@ typedef enum {
     ZZAPP_SVC_LENGTH_COUNT,
     ZZAPP_SVC_LENGTH_STRING,
     ZZAPP_SVC_LENGTH_GL_PIXELS,
-    ZZAPP_SVC_LENGTH_GL_INDICES
+    ZZAPP_SVC_LENGTH_GL_INDICES,
+    ZZAPP_SVC_LENGTH_GL_GET
 } zzapp_svc_length_t;
 
 typedef struct {
@@ -42,6 +43,7 @@ typedef struct {
     uint8_t length_argument;
     uint16_t element_bytes;
     uint8_t copy;
+    uint8_t optional;
     uint8_t format_argument;
     uint8_t type_argument;
 } zzapp_svc_pointer_t;
@@ -52,6 +54,7 @@ typedef struct {
     /* Consecutive saved VFP words starting at s0; a double takes two. */
     uint8_t vfp_words;
     uint8_t result;
+    uint8_t copy_out_on_positive;
     zzapp_svc_pointer_t pointers[3];
 } zzapp_svc_descriptor_t;
 
@@ -63,12 +66,16 @@ uint32_t zzapp_svc_api_count(void);
 uint32_t zzapp_svc_gl_count(void);
 uintptr_t zzapp_svc_api_veneer(uint32_t slot);
 uintptr_t zzapp_svc_gl_veneer(uint32_t slot);
+int zzapp_svc_set_veneer_alias(uint32_t slot, uintptr_t address);
+int zzapp_svc_set_table_aliases(uint32_t slot, uintptr_t api_address,
+                                uintptr_t gl_address);
 int zzapp_svc_is_veneer(uintptr_t address);
 int zzapp_svc_copy_api(zzapp_api *destination, const zzapp_api *source);
 const zzapp_api *zzapp_svc_api_for_slot(uint32_t slot,
                                         const zzapp_api *source);
 zzapp_gl *zzapp_svc_gl_for_slot(uint32_t slot);
 int zzapp_svc_copy_gl(zzapp_gl *destination, const zzapp_gl *source);
+void zzapp_svc_gl_release(uint32_t slot, uint32_t generation);
 
 /* A zero-length range is valid; all nonempty ranges must be fully mapped for
  * the requested user access. */

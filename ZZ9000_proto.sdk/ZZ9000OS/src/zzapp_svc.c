@@ -68,6 +68,15 @@ struct user_gl_table {
 static struct user_api_table user_api[ZZAPP_AS_SLOT_COUNT];
 static struct user_gl_table user_gl[ZZAPP_AS_SLOT_COUNT];
 static const zzapp_gl *direct_gl[ZZAPP_AS_SLOT_COUNT];
+static uintptr_t veneer_alias[ZZAPP_AS_SLOT_COUNT];
+static uintptr_t api_alias[ZZAPP_AS_SLOT_COUNT];
+static uintptr_t gl_alias[ZZAPP_AS_SLOT_COUNT];
+typedef struct {
+    uint32_t alignment;
+    uint32_t row_length;
+    uint32_t skip_rows;
+    uint32_t skip_pixels;
+} gl_pixel_store_t;
 typedef struct {
     uint32_t pointer;
     int32_t size;
@@ -79,26 +88,32 @@ typedef struct {
     gl_client_array_t vertex;
     gl_client_array_t color;
     gl_client_array_t texcoord[GL_TEXTURE_UNITS];
+    gl_pixel_store_t pack;
+    gl_pixel_store_t unpack;
+    uint32_t generation;
     uint32_t active_texture;
     uint32_t error;
 } gl_client_state_t;
 static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 
 
-#define P(a, d, l, n, e, c) { a, d, l, n, e, c, 0U, 0U }
+#define P(a, d, l, n, e, c) { a, d, l, n, e, c, 0U, 0U, 0U }
 #define N P(0U, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_FIXED, 0U, 0U, 0U)
-#define D(a, r, p0, p1, p2) { a, 0U, r, { p0, p1, p2 } }
-#define DF(a, v, r, p0, p1, p2) { a, v, r, { p0, p1, p2 } }
+#define D(a, r, p0, p1, p2) { a, 0U, r, 0U, { p0, p1, p2 } }
+#define DP(a, r, p0, p1, p2) { a, 0U, r, 1U, { p0, p1, p2 } }
+#define DF(a, v, r, p0, p1, p2) { a, v, r, 0U, { p0, p1, p2 } }
 #define IN_FIXED(a, n, c) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c)
 #define OUT_FIXED(a, n, c) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c)
+#define OUT_OPTIONAL(a, n, c) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c, 1U, 0U, 0U }
 #define IO_FIXED(a, n, c) P(a, ZZAPP_SVC_POINTER_INOUT, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c)
 #define IN_ARG(a, n) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_ARGUMENT, n, 1U, 0U)
 #define OUT_ARG(a, n) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_ARGUMENT, n, 1U, 0U)
 #define IN_COUNT(a, n, e) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
 #define OUT_COUNT(a, n, e) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
 #define IN_STRING(a) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, 1U, 1U)
-#define IN_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, f, t }
-#define OUT_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, f, t }
+#define IN_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
+#define OUT_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
+#define OUT_GL_GET(a) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_GET, 0U, 4U, 0U)
 #define IN_INDICES(a, n) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_INDICES, n, 1U, 0U)
 
 /* The descriptors are the ABI audit: argument words include 64-bit values and
@@ -111,13 +126,13 @@ static const zzapp_svc_descriptor_t api_descriptors[API_COUNT] = {
     [API_SLOT(sleep_us)] = D(1, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [API_SLOT(alloc)] = D(3, ZZAPP_SVC_RETURN_POINTER, N, N, N),
     [API_SLOT(free)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 1U, 0U), N, N),
-    [API_SLOT(heap_range)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_FIXED(0, 4U, 1U), OUT_FIXED(1, 4U, 1U), N),
+    [API_SLOT(heap_range)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_OPTIONAL(0, 4U, 1U), OUT_OPTIONAL(1, 4U, 1U), N),
     [API_SLOT(log)] = D(2, ZZAPP_SVC_RETURN_VOID, IN_ARG(0, 1), N, N),
     [API_SLOT(file_open)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING(0), N, N),
     [API_SLOT(file_close)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
     [API_SLOT(file_read)] = D(4, ZZAPP_SVC_RETURN_INT, OUT_ARG(1, 2), OUT_FIXED(3, 4U, 1U), N),
     [API_SLOT(file_write)] = D(4, ZZAPP_SVC_RETURN_INT, IN_ARG(1, 2), OUT_FIXED(3, 4U, 1U), N),
-    [API_SLOT(file_seek)] = D(6, ZZAPP_SVC_RETURN_INT, OUT_FIXED(5, 8U, 1U), N, N),
+    [API_SLOT(file_seek)] = D(6, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(5, 8U, 1U), N, N),
     [API_SLOT(file_stat)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING(0), OUT_FIXED(1, sizeof(zzapp_stat), 1U), N),
     [API_SLOT(file_list_open)] = D(1, ZZAPP_SVC_RETURN_INT, IN_STRING(0), N, N),
     [API_SLOT(file_list_next)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, sizeof(zzapp_dirent), 1U), N, N),
@@ -153,7 +168,7 @@ static const zzapp_svc_descriptor_t api_descriptors[API_COUNT] = {
     [API_SLOT(console_write)] = D(3, ZZAPP_SVC_RETURN_INT, IN_ARG(0, 1), OUT_FIXED(2, 4U, 1U), N),
     [API_SLOT(console_read)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_ARG(0, 1), OUT_FIXED(2, 4U, 1U), N),
     [API_SLOT(msg_send)] = D(1, ZZAPP_SVC_RETURN_INT, IN_FIXED(0, 32U, 1U), N, N),
-    [API_SLOT(msg_poll)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, 32U, 1U), N, N),
+    [API_SLOT(msg_poll)] = DP(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, 32U, 1U), N, N),
     [API_SLOT(heap_grow)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, 4U, 1U), N, N),
     [API_SLOT(heap_shrink)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, 4U, 1U), N, N),
     [API_SLOT(heap_info)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, sizeof(zzapp_heap_info), 1U), N, N)
@@ -205,8 +220,8 @@ static const zzapp_svc_descriptor_t gl_descriptors[GL_COUNT] = {
     G1(ReadBuffer, ZZAPP_SVC_RETURN_VOID),
     [GL_SLOT(ReadPixels)] = D(7, ZZAPP_SVC_RETURN_VOID, OUT_PIXELS(6, 2, 4, 5), N, N),
     G1(GetString, ZZAPP_SVC_RETURN_POINTER),
-    [GL_SLOT(GetIntegerv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_FIXED(1, 4U, 0U), N, N),
-    [GL_SLOT(GetFloatv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_FIXED(1, 4U, 0U), N, N),
+    [GL_SLOT(GetIntegerv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_GL_GET(1), N, N),
+    [GL_SLOT(GetFloatv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_GL_GET(1), N, N),
     G0(GetError, ZZAPP_SVC_RETURN_INT), G2(Hint, ZZAPP_SVC_RETURN_VOID),
     G2(PixelStorei, ZZAPP_SVC_RETURN_VOID), DF(0, 8, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [GL_SLOT(Build2DMipmaps)] = D(7, ZZAPP_SVC_RETURN_INT, IN_PIXELS(6, 2, 4, 5), N, N),
@@ -230,6 +245,23 @@ uintptr_t zzapp_svc_api_veneer(uint32_t slot)
 { return slot < API_COUNT ? (uintptr_t)VENEER_PAGE + slot * VENEER_BYTES : 0U; }
 uintptr_t zzapp_svc_gl_veneer(uint32_t slot)
 { return slot < GL_COUNT ? (uintptr_t)VENEER_PAGE + (ZZAPP_SVC_GL_FIRST + slot) * VENEER_BYTES : 0U; }
+int zzapp_svc_set_veneer_alias(uint32_t slot, uintptr_t address)
+{
+    if (slot >= ZZAPP_AS_SLOT_COUNT || !address ||
+        address & (VENEER_PAGE_BYTES - 1U))
+        return ZZ_EINVAL;
+    veneer_alias[slot] = address;
+    return ZZ_OK;
+}
+int zzapp_svc_set_table_aliases(uint32_t slot, uintptr_t api_address,
+                                uintptr_t gl_address)
+{
+    if (slot >= ZZAPP_AS_SLOT_COUNT || !api_address || !gl_address)
+        return ZZ_EINVAL;
+    api_alias[slot] = api_address;
+    gl_alias[slot] = gl_address;
+    return ZZ_OK;
+}
 int zzapp_svc_is_veneer(uintptr_t address)
 {
     uintptr_t first = (uintptr_t)VENEER_PAGE;
@@ -271,9 +303,13 @@ const zzapp_api *zzapp_svc_api_for_slot(uint32_t slot, const zzapp_api *source)
     memcpy(&table->table, source, source->size);
     entries = (uintptr_t *)(void *)((uint8_t *)&table->table + API_FIRST);
     for (i = 0U; i < API_COUNT; ++i)
-        if (i != API_SLOT(build_id)) entries[i] = zzapp_svc_api_veneer(i);
+        if (i != API_SLOT(build_id))
+            entries[i] = (veneer_alias[slot] ? veneer_alias[slot] :
+                          (uintptr_t)VENEER_PAGE) + i * VENEER_BYTES;
     copy_build_id(table->build_id, source->build_id);
-    table->table.build_id = table->build_id;
+    table->table.build_id = (const char *)(uintptr_t)(api_alias[slot] ?
+        api_alias[slot] + offsetof(struct user_api_table, build_id) :
+        (uintptr_t)table->build_id);
     return &table->table;
 }
 zzapp_gl *zzapp_svc_gl_for_slot(uint32_t slot)
@@ -289,6 +325,23 @@ int zzapp_svc_copy_gl(zzapp_gl *destination, const zzapp_gl *source)
     for (i = 0U; i < GL_COUNT; ++i)
         if (i != GL_SLOT(build_id)) entries[i] = zzapp_svc_gl_veneer(i);
     destination->build_id = NULL;
+    return ZZ_OK;
+}
+static int zzapp_svc_copy_gl_for_slot(uint32_t slot, zzapp_gl *destination,
+                                      const zzapp_gl *source)
+{
+    uintptr_t *entries;
+    uint32_t i;
+
+    if (zzapp_svc_copy_gl(destination, source) != ZZ_OK)
+        return ZZ_EINVAL;
+    if (!veneer_alias[slot])
+        return ZZ_OK;
+    entries = (uintptr_t *)(void *)((uint8_t *)destination + GL_FIRST);
+    for (i = 0U; i < GL_COUNT; ++i)
+        if (i != GL_SLOT(build_id))
+            entries[i] = veneer_alias[slot] +
+                         (ZZAPP_SVC_GL_FIRST + i) * VENEER_BYTES;
     return ZZ_OK;
 }
 
@@ -330,6 +383,21 @@ static uint32_t gl_type_bytes(uint32_t type)
     default: return 0U;
     }
 }
+static void gl_client_reset(uint32_t slot)
+{
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        return;
+    memset(&gl_client[slot], 0, sizeof(gl_client[slot]));
+    gl_client[slot].pack.alignment = 4U;
+    gl_client[slot].unpack.alignment = 4U;
+}
+void zzapp_svc_gl_release(uint32_t slot, uint32_t generation)
+{
+    if (slot < ZZAPP_AS_SLOT_COUNT && gl_client[slot].generation == generation) {
+        direct_gl[slot] = NULL;
+        gl_client_reset(slot);
+    }
+}
 static gl_client_array_t *gl_client_array(gl_client_state_t *state,
                                           uint32_t number)
 {
@@ -363,6 +431,29 @@ static void gl_record_client_call(uint32_t slot, uint32_t number,
     if (number == GL_SLOT(ClientActiveTextureARB)) {
         if (args[0] >= GL_TEXTURE0 && args[0] < GL_TEXTURE0 + GL_TEXTURE_UNITS)
             state->active_texture = args[0] - GL_TEXTURE0;
+        return;
+    }
+    if (number == GL_SLOT(PixelStorei)) {
+        gl_pixel_store_t *store;
+        int32_t value = (int32_t)args[1];
+
+        if (args[0] >= 0x0d00U && args[0] <= 0x0d05U)
+            store = &state->pack;
+        else if (args[0] >= 0x0cf0U && args[0] <= 0x0cf5U)
+            store = &state->unpack;
+        else
+            return;
+        if (value < 0)
+            return;
+        if ((args[0] & 7U) == 5U) {
+            if (value == 1 || value == 2 || value == 4 || value == 8)
+                store->alignment = (uint32_t)value;
+        } else if ((args[0] & 7U) == 2U)
+            store->row_length = (uint32_t)value;
+        else if ((args[0] & 7U) == 3U)
+            store->skip_rows = (uint32_t)value;
+        else if ((args[0] & 7U) == 4U)
+            store->skip_pixels = (uint32_t)value;
         return;
     }
     if (number == GL_SLOT(EnableClientState) ||
@@ -470,20 +561,25 @@ static int frame_arguments(const zzapp_as_t *as, const zzapp_arm_frame_t *frame,
         if (stack_word(as, frame->user_sp, i - 4U, &args[i]) != ZZ_OK) return ZZ_EFAULT;
     return ZZ_OK;
 }
-static int gl_pixel_bytes(const uint32_t args[9],
+static int gl_pixel_bytes(uint32_t slot, const uint32_t args[9],
                           const zzapp_svc_pointer_t *pointer,
                           uint32_t *bytes)
 {
+    const gl_pixel_store_t *store;
     uint32_t components;
     uint32_t element;
     uint32_t first = pointer->length_argument;
     uint32_t format = args[pointer->format_argument];
     uint32_t type = args[pointer->type_argument];
-    uint64_t pixels;
+    uint64_t pixel_bytes;
+    uint64_t source_width;
+    uint64_t row_bytes;
     uint64_t length;
     int32_t width = (int32_t)args[first];
     int32_t height = (int32_t)args[first + 1U];
 
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        return ZZ_EFAULT;
     if (width <= 0 || height <= 0) {
         *bytes = 0U;
         return ZZ_OK;
@@ -503,8 +599,17 @@ static int gl_pixel_bytes(const uint32_t args[9],
     case 0x8034U: case 0x8035U: case 0x8367U: components = 1U; element = 4U; break;
     default: return ZZ_EFAULT;
     }
-    pixels = (uint64_t)(uint32_t)width * (uint32_t)height;
-    length = pixels * components * element;
+    store = pointer->direction == ZZAPP_SVC_POINTER_IN ?
+        &gl_client[slot].unpack : &gl_client[slot].pack;
+    pixel_bytes = (uint64_t)components * element;
+    source_width = store->row_length ? store->row_length : (uint32_t)width;
+    row_bytes = source_width * pixel_bytes;
+    row_bytes = (row_bytes + store->alignment - 1U) &
+                ~(uint64_t)(store->alignment - 1U);
+    length = (uint64_t)store->skip_rows * row_bytes +
+             (uint64_t)store->skip_pixels * pixel_bytes +
+             ((uint64_t)(uint32_t)height - 1U) * row_bytes +
+             (uint64_t)(uint32_t)width * pixel_bytes;
     if (length > UINT32_MAX) return ZZ_EFAULT;
     *bytes = (uint32_t)length;
     return ZZ_OK;
@@ -531,8 +636,25 @@ static int gl_indices_bytes(const uint32_t args[9], uint32_t first,
     *bytes = (uint32_t)length;
     return ZZ_OK;
 }
-static int pointer_bytes(const zzapp_svc_pointer_t *pointer, const uint32_t args[9],
-                         uint32_t *bytes)
+static int gl_get_bytes(const uint32_t args[9], uint32_t *bytes)
+{
+    uint32_t values;
+
+    switch (args[0]) {
+    case 0x0b02U: values = 3U; break;
+    case 0x0b00U: case 0x0b03U: case 0x0b04U: case 0x0b06U:
+    case 0x0b07U: case 0x0ba2U: case 0x0c10U: case 0x0c22U:
+    case 0x8005U: values = 4U; break;
+    case 0x0b40U: case 0x0b70U: case 0x0d3aU:
+    case 0x846dU: case 0x846eU: case 0x846fU: values = 2U; break;
+    case 0x0ba6U: case 0x0ba7U: case 0x0ba8U: values = 16U; break;
+    default: values = 1U; break;
+    }
+    *bytes = values * sizeof(uint32_t);
+    return ZZ_OK;
+}
+static int pointer_bytes(uint32_t slot, const zzapp_svc_pointer_t *pointer,
+                         const uint32_t args[9], uint32_t *bytes)
 {
     uint64_t length;
 
@@ -541,9 +663,11 @@ static int pointer_bytes(const zzapp_svc_pointer_t *pointer, const uint32_t args
     else if (pointer->length == ZZAPP_SVC_LENGTH_COUNT)
         length = (uint64_t)args[pointer->length_argument] * pointer->element_bytes;
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_PIXELS)
-        return gl_pixel_bytes(args, pointer, bytes);
+        return gl_pixel_bytes(slot, args, pointer, bytes);
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_INDICES)
         return gl_indices_bytes(args, pointer->length_argument, bytes);
+    else if (pointer->length == ZZAPP_SVC_LENGTH_GL_GET)
+        return gl_get_bytes(args, bytes);
     else return ZZ_OK;
     if (length > UINT32_MAX) return ZZ_EFAULT;
     *bytes = (uint32_t)length;
@@ -576,7 +700,8 @@ static int entry_at(const void *table, uint32_t size, uint32_t first, uint32_t s
     return *entry ? ZZ_OK : ZZ_ENOSYS;
 }
 
-static int prepare_pointers(const zzapp_as_t *as, const zzapp_svc_descriptor_t *descriptor,
+static int prepare_pointers(uint32_t slot, const zzapp_as_t *as,
+                            const zzapp_svc_descriptor_t *descriptor,
                             uint32_t args[9], uint8_t copies[3][COPY_BYTES],
                             char strings[3][STRING_BYTES], uint32_t originals[3])
 {
@@ -587,13 +712,15 @@ static int prepare_pointers(const zzapp_as_t *as, const zzapp_svc_descriptor_t *
         int write;
         if (!pointer->element_bytes) continue;
         originals[i] = args[pointer->argument];
+        if (pointer->optional && !originals[i])
+            continue;
         write = pointer->direction != ZZAPP_SVC_POINTER_IN;
         if (pointer->length == ZZAPP_SVC_LENGTH_STRING) {
             if (copy_string(as, args[pointer->argument], strings[i]) != ZZ_OK) return ZZ_EFAULT;
             args[pointer->argument] = (uint32_t)(uintptr_t)strings[i];
             continue;
         }
-        if (pointer_bytes(pointer, args, &bytes) != ZZ_OK ||
+        if (pointer_bytes(slot, pointer, args, &bytes) != ZZ_OK ||
             (!args[pointer->argument] && bytes) ||
             zzapp_svc_check_user(as, args[pointer->argument], bytes, write) != ZZ_OK) return ZZ_EFAULT;
         if (pointer->copy) {
@@ -606,21 +733,23 @@ static int prepare_pointers(const zzapp_as_t *as, const zzapp_svc_descriptor_t *
     }
     return ZZ_OK;
 }
-static void finish_pointers(const zzapp_svc_descriptor_t *descriptor,
+static void finish_pointers(uint32_t slot, const zzapp_svc_descriptor_t *descriptor,
                             const uint32_t args[9],
                             uint8_t copies[3][COPY_BYTES],
                             const uint32_t originals[3], uint32_t result)
 {
     uint32_t i;
 
-    if (descriptor->result == ZZAPP_SVC_RETURN_INT && result != (uint32_t)ZZ_OK)
+    if (descriptor->result == ZZAPP_SVC_RETURN_INT && result != (uint32_t)ZZ_OK &&
+        (!descriptor->copy_out_on_positive || (int32_t)result <= 0))
         return;
     for (i = 0U; i < 3U; ++i) {
         const zzapp_svc_pointer_t *pointer = &descriptor->pointers[i];
         uint32_t bytes = 0U;
         if (!pointer->element_bytes || !pointer->copy ||
+            (pointer->optional && !originals[i]) ||
             pointer->direction == ZZAPP_SVC_POINTER_IN ||
-            pointer_bytes(pointer, args, &bytes) != ZZ_OK) continue;
+            pointer_bytes(slot, pointer, args, &bytes) != ZZ_OK) continue;
         memcpy((void *)(uintptr_t)originals[i], copies[i], bytes);
     }
 }
@@ -674,24 +803,31 @@ static int call_gl_float(const zzapp_gl *gl, uint32_t slot, const zzapp_arm_fram
     return 1;
 }
 
-static int dispatch_bind(const zzapp_api *api, uint32_t slot, const uint32_t args[9], int flags, uint32_t *result)
+static int dispatch_bind(const zzapp_api *api, uint32_t slot,
+                         const uint32_t args[9], int flags, uint32_t *result)
 {
     const zzapp_gl *gl = flags ? api->gl_bind_flags(args[0], args[1]) :
                                  api->gl_bind(args[0]);
-    if (!gl || slot >= ZZAPP_AS_SLOT_COUNT ||
-        zzapp_svc_copy_gl(&user_gl[slot].table, gl) != ZZ_OK) {
+    zzapp_proc_t *proc = zzapp_proc_slot(slot);
+
+    if (!gl || !proc || slot >= ZZAPP_AS_SLOT_COUNT ||
+        zzapp_svc_copy_gl_for_slot(slot, &user_gl[slot].table, gl) != ZZ_OK) {
         if (slot < ZZAPP_AS_SLOT_COUNT) {
             direct_gl[slot] = NULL;
-            memset(&gl_client[slot], 0, sizeof(gl_client[slot]));
+            gl_client_reset(slot);
         }
         *result = 0U;
         return ZZ_OK;
     }
-    memset(&gl_client[slot], 0, sizeof(gl_client[slot]));
+    gl_client_reset(slot);
+    gl_client[slot].generation = proc->generation;
     direct_gl[slot] = gl;
     copy_build_id(user_gl[slot].build_id, gl->build_id);
-    user_gl[slot].table.build_id = user_gl[slot].build_id;
-    *result = (uint32_t)(uintptr_t)&user_gl[slot].table;
+    user_gl[slot].table.build_id = (const char *)(uintptr_t)(gl_alias[slot] ?
+        gl_alias[slot] + offsetof(struct user_gl_table, build_id) :
+        (uintptr_t)user_gl[slot].build_id);
+    *result = (uint32_t)(gl_alias[slot] ? gl_alias[slot] :
+                         (uintptr_t)&user_gl[slot].table);
     return ZZ_OK;
 }
 static int dispatch_api(const zzapp_api *api, uint32_t slot, const zzapp_arm_frame_t *frame,
@@ -712,18 +848,19 @@ static int dispatch_api(const zzapp_api *api, uint32_t slot, const zzapp_arm_fra
     if (entry_at(api, api->size, API_FIRST, number, &entry) != ZZ_OK)
         return ZZ_ENOSYS;
     *result = call_words(entry, args);
-    if (number == API_SLOT(gl_unbind) && slot < ZZAPP_AS_SLOT_COUNT) {
-        direct_gl[slot] = NULL;
-        memset(&gl_client[slot], 0, sizeof(gl_client[slot]));
-    }
+    if (number == API_SLOT(gl_unbind) && slot < ZZAPP_AS_SLOT_COUNT)
+        zzapp_svc_gl_release(slot, gl_client[slot].generation);
     return ZZ_OK;
 }
 static int dispatch_gl(uint32_t slot, const zzapp_arm_frame_t *frame,
                        uint32_t number, const uint32_t args[9], uint32_t *result)
 {
+    zzapp_proc_t *proc = zzapp_proc_slot(slot);
     const zzapp_gl *gl = slot < ZZAPP_AS_SLOT_COUNT ? direct_gl[slot] : NULL;
     uintptr_t entry;
-    if (!gl) return ZZ_ENOSYS;
+
+    if (!gl || !proc || gl_client[slot].generation != proc->generation)
+        return ZZ_ENOSYS;
     if (number == GL_SLOT(GetError) && gl_client[slot].error) {
         *result = gl_client[slot].error;
         gl_client[slot].error = 0U;
@@ -733,11 +870,13 @@ static int dispatch_gl(uint32_t slot, const zzapp_arm_frame_t *frame,
         const uint8_t *string = gl->GetString(args[0]);
         if (!string) { *result = 0U; return ZZ_OK; }
         copy_build_id(user_gl[slot].build_id, (const char *)string);
-        *result = (uint32_t)(uintptr_t)user_gl[slot].build_id;
+        *result = (uint32_t)(gl_alias[slot] ?
+            gl_alias[slot] + offsetof(struct user_gl_table, build_id) :
+            (uintptr_t)user_gl[slot].build_id);
         return ZZ_OK;
     }
     if (number == GL_SLOT(DrawArrays) || number == GL_SLOT(DrawElements)) {
-        if (!gl_validate_draw(&zzapp_proc_slot(slot)->as, slot, number, args)) {
+        if (!gl_validate_draw(&proc->as, slot, number, args)) {
             if (!gl_client[slot].error)
                 gl_client[slot].error = GL_INVALID_VALUE;
             return ZZ_EFAULT;
@@ -774,7 +913,7 @@ void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
     descriptor = gl ? zzapp_svc_gl_descriptor(number) : zzapp_svc_api_descriptor(number);
     if (!descriptor) { frame->r[0] = (uint32_t)ZZ_ENOSYS; return; }
     if (frame_arguments(&proc->as, frame, descriptor->arguments, args) != ZZ_OK ||
-        prepare_pointers(&proc->as, descriptor, args, copies, strings, originals) != ZZ_OK) { frame->r[0] = (uint32_t)ZZ_EFAULT; return; }
+        prepare_pointers(slot, &proc->as, descriptor, args, copies, strings, originals) != ZZ_OK) { frame->r[0] = (uint32_t)ZZ_EFAULT; return; }
     if (!gl && number == API_SLOT(heap_shrink) &&
         heap_shrink_out_overlaps(proc, args, originals)) {
         frame->r[0] = (uint32_t)ZZ_EFAULT;
@@ -795,6 +934,6 @@ void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
         frame->r[0] = (uint32_t)(status == ZZ_EFAULT ? ZZ_EFAULT : ZZ_ENOSYS);
         return;
     }
-    finish_pointers(descriptor, args, copies, originals, result);
+    finish_pointers(slot, descriptor, args, copies, originals, result);
     if (descriptor->result != ZZAPP_SVC_RETURN_VOID) frame->r[0] = result;
 }

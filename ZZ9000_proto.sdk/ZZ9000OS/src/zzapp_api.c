@@ -76,6 +76,8 @@ WEAK int zzapp_svc_display_close(uint32_t id) { (void)id; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_input_poll(zzapp_event *o,uint32_t n,uint32_t *out) { (void)o;(void)n; if(out)*out=0; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_audio_open(uint32_t r,uint32_t c,zzapp_audio *o) { (void)r;(void)c;(void)o; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_audio_close(void) { return ZZ_ENOSYS; }
+WEAK void zzapp_svc_gl_release(uint32_t slot, uint32_t generation)
+{ (void)slot; (void)generation; }
 
 #ifdef ZZAPP_HOST_TEST
 WEAK void sdk_sha256(const uint8_t *data, uint32_t length,
@@ -286,6 +288,7 @@ static void minigl_drop(void)
     g_minigl.context = NULL;
     g_minigl.owner = 0U;
     g_minigl.generation = 0U;
+    zzapp_svc_gl_release(owner, generation);
     zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
     zzm_loader_release(ZZM_MODULE_MINIGL);
 }
@@ -543,8 +546,12 @@ static int api_decompress(uint32_t algorithm, uint32_t flags, const void *src,
 static uint32_t api_slot(void)
 {
     int slot = zzapp_kernel_current_thread();
+    uint32_t selected;
 
-    return slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT ? (uint32_t)slot : 0u;
+    if (slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT)
+        return (uint32_t)slot;
+    selected = zzapp_services_current_slot();
+    return selected < ZZAPP_AS_SLOT_COUNT ? selected : 0U;
 }
 
 static uint32_t app_decode_owner(void)

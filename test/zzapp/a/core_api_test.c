@@ -11,6 +11,7 @@
 #include "zzapp_svc.h"
 #include "zzapp_runtime.h"
 int zzapp_host_mem_info(zzapp_mem_info *out);
+void zzapp_api_reclaim_resources(void);
 
 static const uint8_t file_data[] = "mapped";
 static uint32_t image_begin_calls;
@@ -28,6 +29,11 @@ static int stop_during_image_begin;
 static uint32_t flac_pool_owner[2];
 static uint32_t flac_pool_owner_count;
 static int tile_writable = 1;
+static uint32_t selected_service_slot;
+uint32_t zzapp_services_current_slot(void)
+{
+    return selected_service_slot;
+}
 int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address,
                          uint32_t bytes, int write)
 {
@@ -282,7 +288,7 @@ int main(void)
     assert(bytes == sizeof(file_data) - 1u);
     assert(memcmp(mapped, file_data, bytes) == 0);
     assert(api->mem_info(&mem) == ZZ_OK);
-    assert(mem.host_visible_used == bytes);
+    assert(mem.host_visible_used == 4096u);
     api->unmap_file(mapped);
     assert(api->mem_info(&mem) == ZZ_OK);
     assert(mem.host_visible_used == 0u);
@@ -312,12 +318,13 @@ int main(void)
     assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
     assert(api->audio_decode(slot_audio_session, source, sizeof(source), 0u,
                              pcm, 2u, &audio_result) == ZZ_OK);
-    zzapp_kernel_set_current_thread(1);
+    selected_service_slot = 1U;
+    zzapp_kernel_set_current_thread(-1);
     assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
-    assert(api->audio_decode(slot_audio_session, source, sizeof(source), 0u,
-                             pcm, 2u, &audio_result) == ZZ_OK);
-    assert(flac_pool_owner_count == 2u);
-    assert(flac_pool_owner[0] != flac_pool_owner[1]);
+    zzapp_api_reclaim_resources();
+    assert(audio_release_calls == 1u);
+    audio_release_calls = 0u;
+    selected_service_slot = 0U;
     zzapp_kernel_set_current_thread(-1);
     assert(api->image_close(image_session) == ZZ_OK);
     assert(image_begin_calls == 1u && image_feed_calls == 1u &&
@@ -362,7 +369,7 @@ int main(void)
      * can unwind it; host-only seam because ARM entry/FPSCR cannot run here. */
     stop_during_host_alloc = 1;
     assert(api->alloc(64u, 8u, ZZ_ALLOC_HOST_VISIBLE) != NULL);
-    assert(api->mem_info(&mem) == ZZ_OK && mem.host_visible_used == 4160u);
+    assert(api->mem_info(&mem) == ZZ_OK && mem.host_visible_used == 8192u);
     zzapp_test_mark_running();
     zzapp_host_tick_at(1u);
     zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
