@@ -95,12 +95,13 @@ void ZZ9KAppClose(ZZ9KAppHandle *handle);
 handle lifetime. When the extended `QUERY` reply advertises
 `ZZ9K_APP_CAP_SLOTS`, the library can open up to `ZZ9K_APP_SLOT_COUNT` (four)
 handles. Each one claims its own window and generation, so a stale generation
-or terminal state affects only that handle. With firmware that lacks that cap,
-the library retains API 0.2 behaviour: one handle claims legacy slot 0 and a
+or terminal state affects only that handle. A claimed slot that does not begin
+loading expires after two seconds. With firmware that lacks that cap, the
+library retains API 0.2 behaviour: one handle claims legacy slot 0 and a
 second `Open` returns `ZZ9K_STATUS_BUSY`. `LoadFile` streams the ELF through
 the handle's runtime staging window; `LoadMemory` accepts at most 16 MiB.
-`Start` copies no more than 16 argv strings of 127 bytes each. `Status` returns
-the terminal fault/exit snapshot for its handle.
+`Start` copies no more than 16 argv strings of 127 bytes each. `Status`
+returns the fault/exit snapshot for its handle.
 
 `ZZ9KAppMessage` is exactly 32 opaque bytes. Send returns `ZZ9K_STATUS_BUSY`
 when the host-to-app ring is full; get returns it when the app-to-host ring is

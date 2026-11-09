@@ -47,10 +47,12 @@ map is privileged-only except for user grants to that app's host-visible
 blocks, display surfaces, and launcher window.
 
 The four 592 KiB launcher windows use fixed ranges in the host-visible heap:
-slot 0 at `0x0805C000` (the legacy range, ending at the Z3 host window) and
-slots 1-3 in the three equal ranges directly below it, down to `0x07EA0000`.
-Firmware marks all four ranges non-cacheable at boot and allocates a slot's
-window from its range when a launcher claims the slot.
+slot 0 `0x0805C000`–`0x080F0000`, slot 1
+`0x07FC8000`–`0x0805C000`, slot 2
+`0x07F34000`–`0x07FC8000`, and slot 3
+`0x07EA0000`–`0x07F34000`. Slot 0 is the legacy range and ends at the fixed
+Z3 host window. Firmware maps all four ranges non-cacheable before core 1
+runs and allocates a slot's window from its range when a launcher claims it.
 Legacy app-service requests continue to use slot 0's window and do not expose
 the other three windows.
 
@@ -147,9 +149,11 @@ the Amiga protocol requires a stable address. A true fixed range must have
 derived exclusive bounds, overlap assertions in `memorymap.h`, matching RTL
 definitions where applicable, and an entry in this document.
 
-The card-pool class table: `FIRMWARE` 64 MiB, `MEDIA` 128 MiB,
-`MEDIA_INPUT` 64 MiB, `IMAGE` 72 MiB, `SDK_SURFACE` 128 MiB,
-`CONSOLE` 32 MiB, `MINIGL` 128 MiB (colour/depth/texture working sets of
-live wire-v9 render contexts; released per context destroy, by owner on
-fault recovery, and on every Amiga reset).
+The card-pool has 16 classes including `NONE`. Capped classes are `FIRMWARE`
+64 MiB, `MEDIA` 128 MiB, `IMAGE` 72 MiB, `MEDIA_INPUT` 64 MiB,
+`SDK_SURFACE` 128 MiB, `CONSOLE` 32 MiB, `MINIGL` 384 MiB, `APP` 96 MiB,
+`MINIGL_MODULE` and `MINIGL_TRANSPORT` 4 MiB each, `MINIGL_CONTEXT`,
+`MINIGL_APP_CONTEXT`, and `MINIGL_RIX` 384 MiB each, and `APP_DISPLAY`
+32 MiB. `APP_FRAMES` has no class cap; commit admission, the system reserve,
+and the private-window bound limit it.
 

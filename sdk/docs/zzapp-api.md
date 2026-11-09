@@ -21,17 +21,27 @@ Additions are appended. `size` is the compatibility check. `version` names
 the runtime that built the table; it is not a substitute for `size`.
 
 Every API handler runs on core 1 after the app's user-mode veneer traps into
-SVC. Core 0 does not execute the call. A wait yields on core 1 until the
-launcher completes the matching mailbox operation, or until stop or timeout.
+SVC. The vector moves that call's frame to the caller's kernel stack, enters
+SYS mode with IRQs enabled, and then invokes the handler. Core 0 does not
+execute the call.
+
+File and directory operations, console read and output backpressure, display
+open and flip, non-host audio open and close, and `zz_sleep_us` park their
+slot. `zz_gl_swap` parks through its flip. A launcher completion wakes the
+slot READY. File and directory waits time out after 30 seconds with
+`ZZ_ETIMEDOUT`; stop marks a parked waiter CANCELLED and waiting service calls
+return `ZZ_EIO`. `zz_input_poll` and `zz_display_vsync` do not park.
+
 Image decode, audio decode, SHA-256, and decompress run inline on core 1.
 They are not queued as core-1 jobs, so they cannot deadlock the worker that
 is already running the app.
 
-The watchdog stops the app if 30 seconds pass with no API call
-(`ZZAPP_APP_STALL_US`), or if one call runs for 10 seconds
+The stall watchdog stops only the slot that has made no API call for 30
+seconds (`ZZAPP_APP_STALL_US`), or whose call runs for 10 seconds
 (`ZZAPP_API_STUCK_US`). A long compute loop must call the API at least every
 few seconds. `zz_yield` is enough. Declared waits renew the stall timer
-because they are inside an API call.
+because they are inside an API call. A distinct two-second core-1 watchdog
+cold-restarts core 1 when it has neither progress nor timer ticks.
 
 `libzzapp` reads a slot only when `ZZ_API_COVERS` is true and the function
 pointer is non-NULL. A covered NULL pointer is `ZZ_ENOSYS` for the integer
@@ -88,8 +98,8 @@ read with this code and zero bytes is EOF.
 ## ZZ_EIO
 
 `-1`. The launcher failed the operation, the window is gone, a transfer
-ended early, a flip or console ring is corrupt, or stop arrived during a
-wait. `zz_display_open` returns this when ZZRun cannot open the requested
+ended early, a flip or console ring is corrupt, or stop cancelled a parked
+call. `zz_display_open` returns this when ZZRun cannot open the requested
 mode and sets the stop word.
 
 ## ZZ_EINVAL
@@ -676,6 +686,12 @@ be the same ABI.
 `UnlockArrays` are that version. `build_id` is the module source revision,
 or NULL on older firmware.
 
+Every enabled client array is rechecked when `DrawArrays` or `DrawElements`
+reads it. `DrawArrays` checks each requested element; `DrawElements` checks
+the index buffer and every referenced element. An invalid range prevents the
+MiniGL draw, returns `ZZ_EFAULT` through the veneer, and makes the next
+`glGetError` return `GL_INVALID_VALUE`.
+
 `libzzapp` also declares classic `gl*` and `glu*` entry points. They forward
 to the bound table. Do not define them in the app. There is no stdcall.
 `gluPerspective` is four doubles, not the 68k `GLfloat` signature.
@@ -747,11 +763,9 @@ The global timer counts at half that rate. Does not block. Gate:
 void zz_sleep_us(uint32_t us);
 ```
 
-Yields in tick steps until `zz_time_us` passes the deadline, or stop is
-requested. Tick is 5 ms. It is not a busy wait. The sleep holds no GL lock,
-so a tick may service one queued 68k MiniGL packet. Gate:
-`ZZ_API_COVERS(api, sleep_us)`. Missing slot: return immediately. Core 1.
-Blocks. Minimum minor: 0.
+Parks until its deadline, rounded to 5 ms ticks. It is not a busy wait and
+holds no GL lock. Gate: `ZZ_API_COVERS(api, sleep_us)`. Missing slot: return
+immediately. Core 1. Minimum minor: 0.
 
 ## zz_alloc
 
@@ -1002,7 +1016,7 @@ int zz_file_open(const char *path, uint32_t flags);
 
 Returns a file id, or a negative code. See `ZZ_FILE_*` and the path rules.
 Empty path or unknown flags: `ZZ_EINVAL`. No free slot: `ZZ_ENOMEM`. No
-window: `ZZ_EIO`. Blocks until the launcher replies, stop (`ZZ_EIO`), or
+window: `ZZ_EIO`. Parks until the launcher replies, stop (`ZZ_EIO`), or
 30 seconds (`ZZ_ETIMEDOUT`). Gate: `ZZ_API_COVERS(api, file_open)`. Missing
 slot: `ZZ_ENOSYS`. Core 1. Minimum minor: 0. Limit: 16 files, path 255 bytes.
 
@@ -1115,14 +1129,14 @@ Minimum minor: 0. `ZZ_DISPLAY_MAILBOX` is a request, not a guarantee.
 int zz_display_flip(uint32_t surface_id);
 ```
 
-Presents the back buffer and waits until `flip_ack` matches the new
-generation, or stop (`ZZ_EIO`). A flip already pending is `ZZ_EBUSY`. A bad
-id is `ZZ_EINVAL`. Mailbox mode returns the replaced page to drawing and
-does not wait for vblank inside this call when mailbox is active; the
-vsync path waits. Core 1. Gate: `ZZ_API_COVERS(api, display_flip)`. Missing
-slot: `ZZ_ENOSYS`. Minimum minor: 0. Flush presented pixels before calling;
-firmware also cleans the presented range through L1 and L2 before queueing
-a mailbox flip.
+Presents the back buffer and parks until `flip_ack` matches the new
+generation, or until stop cancels it (`ZZ_EIO`). A flip already pending is
+`ZZ_EBUSY`. A bad id is `ZZ_EINVAL`. Mailbox mode returns the replaced page
+to drawing and does not wait for vblank inside this call when mailbox is
+active; the vsync path parks. Core 1. Gate:
+`ZZ_API_COVERS(api, display_flip)`. Missing slot: `ZZ_ENOSYS`. Minimum
+minor: 0. Flush presented pixels before calling; firmware also cleans the
+presented range through L1 and L2 before queueing a mailbox flip.
 
 ## zz_display_flip_async
 
@@ -1189,7 +1203,7 @@ the palette window.
 int zz_display_vsync(void);
 ```
 
-Records a vsync request and yields once. Does not wait for the next raster
+Records a vsync request and yields once. It does not park for the next raster
 line. No bound display is `ZZ_EINVAL`. Gate:
 `ZZ_API_COVERS(api, display_vsync)`. Missing slot: `ZZ_ENOSYS`. Core 1.
 Minimum minor: 0.
@@ -1230,9 +1244,10 @@ Anything else is `ZZ_EINVAL`. A second open, or both fabric slots live, is
 in non-cacheable memory. Default route is the card fabric (slot 2 if free,
 else slot 1). `AUDIO=AHI` selects the launcher AHI route before start; ZZRun
 accepts it only when AHI grants that exact stereo rate and converts S16LE
-to S16BE without resampling. Does not block past attach. Gate:
-`ZZ_API_COVERS(api, audio_open)`. Missing slot: `ZZ_ENOSYS`. Core 1.
-Minimum minor: 0. 11025 is not granted on this path.
+to S16BE without resampling. Parks while core 0 attaches the stream; stop
+cancels that wait with `ZZ_EIO`. Gate: `ZZ_API_COVERS(api, audio_open)`.
+Missing slot: `ZZ_ENOSYS`. Core 1. Minimum minor: 0. 11025 is not granted on
+this path.
 
 ## zz_audio_close
 
@@ -1241,9 +1256,10 @@ int zz_audio_close(void);
 ```
 
 Detaches the stream, zeros the ring header, and sets route 0 so ZZRun drops
-pending AHI completions before a new stream. Not open is `ZZ_EINVAL`. Does
-not block past detach. Gate: `ZZ_API_COVERS(api, audio_close)`. Missing
-slot: `ZZ_ENOSYS`. Core 1. Minimum minor: 0.
+pending AHI completions before a new stream. Not open is `ZZ_EINVAL`. Parks
+while core 0 detaches it; stop cancels that wait with `ZZ_EIO`. Gate:
+`ZZ_API_COVERS(api, audio_close)`. Missing slot: `ZZ_ENOSYS`. Core 1.
+Minimum minor: 0.
 
 ## zz_console_write
 
@@ -1252,14 +1268,15 @@ int zz_console_write(const void *buf, uint32_t len, uint32_t *out_n);
 ```
 
 Copies every requested byte to the console-output ring, or returns an error.
-A full ring is backpressure: the call waits and yields. No byte is dropped.
-Stop during that wait is `ZZ_EIO`. A corrupt head/tail is `ZZ_EIO`. NULL
-`out_n`, or NULL `buf` with non-zero `len`, is `ZZ_EINVAL`. The payload
-capacity is 32 KiB (`ZZAPP_CONSOLE_OUT_CAP`). The first console call sets
-the console flag so a Workbench launch opens `CON:0/0/640/160/ZZRun/CLOSE/WAIT`.
-If that open fails, ZZRun stops the app. newlib `write` of fd 1 and fd 2
-uses this call. Gate: `ZZ_API_COVERS(api, console_write)`. Missing slot:
-`ZZ_ENOSYS`. Core 1. Blocks on backpressure. Minimum minor: 2.
+A full ring parks the slot until the launcher advances the tail. No byte is
+dropped. Stop cancels that wait with `ZZ_EIO`. A corrupt head/tail is
+`ZZ_EIO`. NULL `out_n`, or NULL `buf` with non-zero `len`, is `ZZ_EINVAL`.
+The payload capacity is 32 KiB (`ZZAPP_CONSOLE_OUT_CAP`). The first console
+call sets the console flag so a Workbench launch opens
+`CON:0/0/640/160/ZZRun/CLOSE/WAIT`. If that open fails, ZZRun stops the app.
+newlib `write` of fd 1 and fd 2 uses this call. Gate:
+`ZZ_API_COVERS(api, console_write)`. Missing slot: `ZZ_ENOSYS`. Core 1.
+Minimum minor: 2.
 
 ## zz_console_read
 
@@ -1267,17 +1284,17 @@ uses this call. Gate: `ZZ_API_COVERS(api, console_write)`. Missing slot:
 int zz_console_read(void *buf, uint32_t len, uint32_t *out_n);
 ```
 
-Waits until the launcher has bytes, then copies one contiguous span, at most
+Parks until the launcher has bytes, then copies one contiguous span, at most
 `len` and at most the 4 KiB input capacity. `ZZ_OK` with `*out_n` 0 is EOF.
-`len` 0 returns `ZZ_OK` without waiting. Stop while waiting is `ZZ_EIO`.
-While the call waits on an empty ring it sets the stdin-wanted word. ZZRun
-reads an interactive console only while that word is set, with an
+`len` 0 returns `ZZ_OK` without waiting. Stop cancels the wait with
+`ZZ_EIO`. While the call waits on an empty ring it sets the stdin-wanted
+word. ZZRun reads an interactive console only while that word is set, with an
 asynchronous `ACTION_READ` in normal line mode. On OS 3.2, Ctrl-\ does not
 end keyboard input, including for `Type *`. Use a redirected handle
 (`ZZRun app.elf <file`) or Ctrl-C. A redirected input publishes EOF after
 the last byte. newlib `read` of fd 0 uses this call and returns 0 at EOF.
 Gate: `ZZ_API_COVERS(api, console_read)`. Missing slot: `ZZ_ENOSYS`. Core 1.
-Blocks until data, EOF, or stop. Minimum minor: 2.
+Minimum minor: 2.
 
 ## zz_msg_send
 

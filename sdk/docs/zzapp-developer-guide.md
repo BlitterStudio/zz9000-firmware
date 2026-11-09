@@ -24,7 +24,9 @@ The public header is `sdk/zzapp/include/zzapp.h`. The call reference is
 Each launch owns one of four slots, its launcher window, and a generation.
 States progress from free to claimed, loading, starting, runnable or blocked,
 then through stopping and reclaiming back to free. A launch fails without
-changing another slot when every slot is occupied or admission fails.
+changing another slot when every slot is occupied or admission fails. A
+`CLAIMED` slot that never begins loading expires after two seconds and records
+lease loss.
 
 ZZRun, or a `zz9k.library` client, streams the ELF. Firmware checks the note,
 applies `R_ARM_RELATIVE` relocations, zeroes BSS, and enters at `e_entry` with
@@ -34,19 +36,22 @@ private stack. crt0 calls `zz_main`. Return is `zz_exit` of that status.
 Stop is Ctrl-C, `ZZ9KAppStop`, or the library handle closing. The app sees
 `zz_should_stop` and `ZZ_EV_STOP`. Grace is 500 ms, then the runtime stops
 that app. A user-mode data abort, prefetch abort, or undefined instruction
-stops and reclaims only its slot; firmware code faults retain the existing
-core-1 cold-restart recovery. Amiga reset and client lease loss also reclaim
-the owning slot.
+stops and reclaims only its slot. Firmware code faults retain the core-1
+cold-restart recovery and end every non-idle slot. Amiga reset also ends every
+slot; an exit racing that reset records the reset reason. Loss of a running
+slot's heartbeat for two seconds stops that slot.
 
 Teardown is ordered and idempotent: new calls are blocked; waits and work
 holding app pointers are cancelled; display, audio, GL, and decoder resources
 are released; mappings, frames, and host-visible blocks are released; then
-the terminal reason is published and the slot becomes free.
+the terminal reason is published and the slot becomes free. `APP_LIST`
+retains one of normal exit, forced stop, user fault, stall, stuck call, lease
+loss, Amiga reset, or core restart after teardown.
 
 ## Watchdog
 
 Call the API at least every few seconds during a long compute. The runtime
-stops the app if 30 seconds pass with no API call, or if one call runs for
+stops that slot if 30 seconds pass with no API call, or if one call runs for
 10 seconds. `zz_yield` is enough. `zz_sleep_us`, file calls, console reads,
 and a flip wait already count, because they are inside an API call.
 `zz_should_stop` and `zz_time_us` also count: a loop that only polls them
@@ -54,8 +59,9 @@ is not a stall. A loop that only touches app memory does not.
 
 The private timer preempts runnable app code every 5 ms. It does not make a
 long-running API handler safe to interrupt; a call that runs for 10 seconds
-still stops the app. Core 0 cold-restarts core 1 after 2 seconds of silence
-as a backstop for a masked interrupt.
+still stops its app. Core 0 cold-restarts core 1 only after two seconds with
+neither progress nor timer ticks, and records core restart for every non-idle
+slot.
 
 ## Memory model
 
@@ -96,10 +102,14 @@ the user who launched it.
 
 Core 1 runs the system thread before app threads. Service work—SDK tasks,
 MiniGL, launcher processing, and audio feeding—has priority, then runnable
-apps share the remaining time round-robin in 5 ms quanta. Block in file I/O,
-console input, event waits, sleep, vsync, and audio-space waits; a blocked app
-uses no CPU. Do not poll or spin for readiness. Use the blocking call,
-`zz_sleep_us`, or `zz_yield`.
+apps share the remaining time round-robin in 5 ms quanta. File and directory
+operations, console read and output backpressure, display open and flip,
+non-host audio open and close, and sleep park the calling slot. Completion
+wakes it; file and directory calls time out after 30 seconds with
+`ZZ_ETIMEDOUT`; stop marks a parked waiter CANCELLED and waiting service calls
+return `ZZ_EIO`. `zz_input_poll` and `zz_display_vsync` do not park. Do not
+poll or spin for readiness. Use the blocking call, `zz_sleep_us`, or
+`zz_yield`.
 
 Two direct card-audio streams may be open across all apps. Only one app may
 bind GL at a time. Each app may bind one display; a second display for that
@@ -120,8 +130,9 @@ or ToolType `ROOT`. A relative path that would leave that root is rejected.
 A path containing `:` is rejected unless `ABS=1`. That check stops a bad
 path. It is not a security boundary.
 
-Sixteen files and sixteen directory lists, ids 3..18. Each transfer waits
-up to 30 seconds. A short read with `ZZ_OK` is EOF. `zz_map_file` reads a
+Sixteen files and sixteen directory lists, ids 3..18. Each transfer parks
+for up to 30 seconds. Stop returns `ZZ_EIO`; expiry returns
+`ZZ_ETIMEDOUT`. A short read with `ZZ_OK` is EOF. `zz_map_file` reads a
 whole file into host-visible memory, 16 MiB maximum, and holds it until
 `zz_unmap_file`. newlib `open` is not connected. Use `zz_file_*` or
 `zz_map_file`.
@@ -129,16 +140,17 @@ whole file into host-visible memory, 16 MiB maximum, and holds it until
 ## Console
 
 `printf`, `puts`, and `write` of fd 1 or 2 go to the console-output ring
-through `zz_console_write`. The ring holds 32 KiB. A full ring waits. No
-byte is dropped. `zz_log` is a different, lossy diagnostic ring: 32 records
-per second to ZZRun, 8 lines per second to the UART, 1024 bytes per record.
-Use `zz_log` for card traces. Use stdout for the user.
+through `zz_console_write`. The ring holds 32 KiB. A full ring parks until
+the launcher drains it. No byte is dropped. Stop cancels that wait with
+`ZZ_EIO`. `zz_log` is a different, lossy diagnostic ring: 32 records per
+second to ZZRun, 8 lines per second to the UART, 1024 bytes per record. Use
+`zz_log` for card traces. Use stdout for the user.
 
-`read` of fd 0 and `zz_console_read` wait for launcher input. At EOF they
-return success with zero bytes. The input ring holds 4 KiB. Shell launches
-use `Output()` and `Input()`. Workbench launches open a console only after
-the app first touches console I/O, as `CON:0/0/640/160/ZZRun/CLOSE/WAIT`.
-If that open fails, ZZRun stops the app.
+`read` of fd 0 and `zz_console_read` park for launcher input. At EOF they
+return success with zero bytes. Stop cancels the wait with `ZZ_EIO`. The input
+ring holds 4 KiB. Shell launches use `Output()` and `Input()`. Workbench
+launches open a console only after the app first touches console I/O, as
+`CON:0/0/640/160/ZZRun/CLOSE/WAIT`. If that open fails, ZZRun stops the app.
 
 On OS 3.2, Ctrl-\ does not end keyboard input. It does not end `Type *`
 either, on the standard handler or on CCON. Stop a keyboard-fed app with

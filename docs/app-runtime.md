@@ -26,9 +26,15 @@ nested call into app code.
 The core-1 private timer gives apps a 5 ms quantum. The scheduler first runs
 due system work—SDK tasks, MiniGL service, launcher work, and audio feeding—
 then selects runnable app threads round-robin. In an overload window, service
-work is limited so runnable apps retain a 5% floor. File I/O, console input,
-event waits, sleep, vsync, and audio-space waits block the caller rather than
-spinning; completion, timeout, and cancellation wake it with a result.
+work is limited so runnable apps retain a 5% floor.
+
+File and directory operations, console read and backpressure, display open and
+flip, non-host audio open and close, and sleep park the caller at the SVC
+handoff. `zz_gl_swap` parks through its flip. Completion wakes the slot READY;
+file and directory waits wake TIMEOUT after 30 seconds and return
+`ZZ_ETIMEDOUT`. Stop marks a parked waiter CANCELLED; waiting service calls
+return `ZZ_EIO`. `zz_input_poll` and `zz_display_vsync` do not park; the
+latter only yields once.
 
 Core 0 does not wait for core 1. It publishes work and raises doorbell SGI 15
 only when `service_pending` changes from zero to one. Core 1 drains a bounded
@@ -47,10 +53,19 @@ its launcher window, host-visible blocks, and owned display surfaces. The
 rest of DDR, firmware, devices, and other apps remain privileged-only.
 
 The app-facing API and GL tables retain their layout and `size` semantics, but
-their entries point to user-RX `svc; bx lr` veneers. Every SVC handler checks
-user pointers against the caller's mappings and permissions before touching
-them. Invalid, overflowed, read-only-for-output, device, and other-slot
-pointers return `ZZ_EFAULT`. Firmware code never becomes a user-call target.
+their entries point to user-RX `svc; bx lr` veneers. On a user veneer call,
+the vector copies the exception frame to that slot's kernel stack, switches to
+SYS mode, and enables IRQs before invoking the handler. Every SVC handler
+checks user pointers against the caller's mappings and permissions before
+touching them. Invalid, overflowed, read-only-for-output, device, and
+other-slot pointers return `ZZ_EFAULT`. Firmware code never becomes a
+user-call target.
+
+GL client-array state is per slot. `DrawArrays` validates every enabled vertex,
+colour, and client texture-coordinate element in its requested range.
+`DrawElements` also validates its index buffer and every indexed element before
+MiniGL is called. An unmapped or changed range returns `ZZ_EFAULT` and records
+`GL_INVALID_VALUE` for `glGetError`.
 
 ### Frames, commit, and teardown
 
@@ -66,9 +81,13 @@ All terminal paths call the same generation-guarded teardown: stop new calls,
 wake and cancel waits, quiesce work and DMA holding app pointers, hand off or
 unbind display, detach audio, release GL and decoder sessions, unmap grants,
 return frames and host-visible blocks, release the slot, and publish one
-terminal reason. A user-mode abort ends its own app. A privileged kernel or
-firmware fault uses the existing core-1 cold restart and ends all live slots
-with the restart reason.
+terminal reason. `LIST` retains that reason after the slot returns to idle.
+The reasons are none, normal exit, forced stop, user fault, stall watchdog,
+stuck API call, lease loss, Amiga reset, and core-1 restart. Per-slot
+30-second stall and 10-second stuck-call watchdogs stop only their slot. A
+separate core-0 backstop cold-restarts core 1 after two seconds without both
+progress and timer ticks; that ends every non-idle slot with the restart
+reason.
 
 ## Slot protocol
 
@@ -83,11 +102,11 @@ unused bytes are zero. A selector with an out-of-range slot or a generation
 that no longer owns the slot fails with the stale ownership error and changes
 nothing.
 
-`QUERY` has the unchanged 16-byte legacy reply. Its extended reply appends
-slot count, free slots, free commit, and total commit at bytes 16, 20, 24, and
-28. Extended `ALLOC_WINDOW` atomically claims the lowest free slot and returns
-the old 12-byte window reply followed by slot and generation at bytes 12 and
-16. A claimed slot not loaded before its lease expires is released.
+Extended `ALLOC_WINDOW` atomically claims the lowest free slot and returns the
+old 12-byte window reply followed by slot and generation at bytes 12 and 16.
+A `CLAIMED` slot that does not start loading expires after two seconds, returns
+to idle, and records the lease-loss reason. Once running, the launcher must
+renew the slot heartbeat within the same two-second lease.
 
 Extended `LOAD_BEGIN` carries the launcher memory limit in MiB at byte 0;
 zero means no limit beyond the pool. `LOAD_CHUNK`, `LOAD_END`, `START`,
@@ -96,9 +115,13 @@ Extended `STOP` is conditional on that selector. `DISPLAY_BIND` always carries
 the spare-buffer field at byte 28; zero means none.
 
 `LIST` (`0x0c09`) is extended-only. The selector names the slot and ignores
-its generation. Its 48-byte reply reports state, generation, committed bytes,
-limit, app CPU milliseconds, system-service milliseconds, block and terminal
-reasons, overload flag, and a NUL-padded 20-byte basename.
+its generation. Its 48-byte reply has state, generation, committed bytes,
+limit, app CPU milliseconds, and kernel service milliseconds at bytes 0
+through 23. Byte 24 is the block reason and is currently zero; byte 25 is the
+terminal reason. Bytes 26-27 hold the overload flag, and bytes 28-47 are
+currently zeroed. Terminal reasons are `NONE` (0), `EXIT` (1), `FORCED` (2),
+`USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
+`AMIGA_RESET` (7), and `CORE_RESTART` (8).
 
 ### Legacy slot 0
 
@@ -112,11 +135,12 @@ run one app without learning about the other slots. A client without
 ### Launcher windows
 
 Each slot gets a `ZZAPP_WINDOW_BYTES` (592 KiB) launcher window with the
-unchanged layout. Slot 0 keeps the legacy range `0x0805C000`-`0x080EFFFF`,
-which ends at the fixed Z3 host window; slots 1-3 use the three
-`ZZAPP_WINDOW_Z3_SIZE` ranges directly below it. Each window is allocated from
-its fixed range on claim, and every page of the four ranges is mapped
-non-cacheable at boot, before core 1 runs.
+unchanged layout. The fixed ranges are slot 0
+`0x0805C000`–`0x080F0000`, slot 1 `0x07FC8000`–`0x0805C000`, slot 2
+`0x07F34000`–`0x07FC8000`, and slot 3
+`0x07EA0000`–`0x07F34000`. Slot 0 is the legacy range and ends at the fixed
+Z3 host window. Each range is mapped non-cacheable before core 1 runs; its
+window is allocated when the launcher claims that slot.
 
 ## Translation attribute changes
 
