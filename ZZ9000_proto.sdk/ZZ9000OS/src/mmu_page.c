@@ -72,6 +72,12 @@ static uint32_t page_table_section = MMU_SECTION_COUNT;
 #define MMU_RO_TEXT_SECTIONS 4U
 static uint32_t ro_page_table[MMU_RO_TEXT_SECTIONS][MMU_PAGES_PER_SECTION]
 	__attribute__((aligned(1024)));
+static mmu_page_change_hook_t page_change_hook;
+
+void mmu_page_set_change_hook(mmu_page_change_hook_t hook)
+{
+	page_change_hook = hook;
+}
 
 #ifdef MMU_PAGE_HOST_TEST
 uint32_t mmu_page_test_l1[MMU_SECTION_COUNT];
@@ -198,6 +204,8 @@ int mmu_page_set_noncacheable(uintptr_t page_addr)
 		                     sizeof(page_table[index]));
 	}
 	sync_translation();
+	if (page_change_hook)
+		page_change_hook(section, l1[section], page_table);
 	/* Drop any clean line a speculative fill brought in under the old
 	 * cacheable entry before the TLB invalidate took effect. */
 	Xil_DCacheFlushRange((INTPTR)page_addr, MMU_PAGE_SIZE);
@@ -250,6 +258,8 @@ int mmu_page_set_readonly_executable(uintptr_t start, uintptr_t end)
 		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&l1[section],
 		                     sizeof(l1[section]));
 		sync_translation();
+		if (page_change_hook)
+			page_change_hook(section, l1[section], table);
 	}
 	return 1;
 }

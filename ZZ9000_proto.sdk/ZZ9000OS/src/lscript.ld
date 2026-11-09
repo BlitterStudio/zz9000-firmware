@@ -521,6 +521,18 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    . = ALIGN(16);
    __bss_end = .;
 } > ps7_ddr_hi
+/* Four app L1 tables, their private template, and the bounded L2 pool stay
+ * in high DDR so they cannot consume the fixed low MMU-table budget. */
+.zzapp_as_tables (NOLOAD) : {
+   . = ALIGN(0x4000);
+   __zzapp_as_tables_start = .;
+   KEEP(*(.zzapp_as_tables))
+   . = ALIGN(16);
+   __zzapp_as_tables_end = .;
+} > ps7_ddr_hi
+ASSERT((__zzapp_as_tables_end - __zzapp_as_tables_start) <= 0x34000,
+       "app translation-table slab exceeds its 208 KiB budget")
+
 
 /* The MMU table has a fixed low address used during early startup. Put it
  * after every high-image section so changing regions cannot advance the

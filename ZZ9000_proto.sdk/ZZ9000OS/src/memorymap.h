@@ -327,6 +327,17 @@
 // The 4 MiB high-image region ends 1,511,824 bytes above the measured
 // 0x0848f670 image/BSS high-water (qualification build 141c121).
 #define FIRMWARE_IMAGE_END          0x08600000
+// Core-1 app address spaces keep four 16 KiB app L1 tables, one private
+// 16 KiB template, and 128 1 KiB L2 tables in the high firmware image.
+#define ZZAPP_AS_L1_TABLE_COUNT      4U
+#define ZZAPP_AS_L2_TABLE_COUNT      128U
+#define ZZAPP_AS_TABLE_SLAB_BYTES \
+    ((ZZAPP_AS_L1_TABLE_COUNT + 1U) * 0x4000U + \
+     ZZAPP_AS_L2_TABLE_COUNT * 0x0400U)
+#if ZZAPP_AS_TABLE_SLAB_BYTES != 0x00034000U
+#error "app translation-table slab budget must remain 208 KiB"
+#endif
+
 #define SDK_TASKQ_REGION_ADDRESS    FIRMWARE_IMAGE_END
 #define SDK_TASKQ_REGION_SIZE       0x00100000
 #define SDK_TASKQ_REGION_END \

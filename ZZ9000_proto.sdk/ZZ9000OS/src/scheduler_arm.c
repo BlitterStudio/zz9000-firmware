@@ -225,12 +225,13 @@ void scheduler_coherency_init_core1(void)
 {
   /* Core 1 is entered straight from the CPU1 reset vector (core1_loop),
    * bypassing boot.S, so it starts with MMU + caches + SMP OFF. Bring it up to
-   * match core 0 and make domain 14 Client, matching the firmware-text L2
-   * descriptors installed by mmu_page_set_readonly_executable(). */
+   * match core 0. Unlike core 0, every domain is Client: app-table AP bits
+   * must protect both DDR (domain 15) and the domain-0 device, FPGA and OCM
+   * mappings, and domain 14 keeps the firmware-text L2 pages read-only. */
   u32 ttbr0 = (u32)(UINTPTR)&MMUTable | TASKQ_TTBR0_ATTR;
 
   mtcp(XREG_CP15_TTBR0, ttbr0);
-  mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0xDFFFFFFFU);
+  mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0x55555555U);
   dsb();
   isb();
 
