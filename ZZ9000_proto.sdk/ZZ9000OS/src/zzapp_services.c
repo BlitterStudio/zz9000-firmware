@@ -156,6 +156,7 @@ struct zzapp_service_slot {
 	uint32_t memory_limit;
 	uint32_t terminal_reason;
 	uint64_t claim_started;
+	uint8_t name[ZZAPP_LIST_NAME_BYTES];
 	int window_uncached;
 };
 
@@ -166,6 +167,18 @@ struct zzapp_service_runtime {
 	volatile int display_bound;
 	int display_back_owned;
 	uint32_t display_id;
+	uint32_t display_width;
+	uint32_t display_height;
+	uint32_t display_pitch;
+	uint32_t display_format;
+	uint32_t display_layout;
+	uint32_t display_bytes;
+	uint32_t display_front;
+	uint32_t display_back;
+	uint32_t display_spare;
+	uint32_t display_present;
+	uint32_t display_alias_phys[3];
+	uint32_t display_alias[3];
 	uint32_t display_ack_seen;
 	uint32_t display_queued;
 	volatile int display_mailbox_active;
@@ -197,6 +210,7 @@ struct zzapp_service_runtime {
 	void *audio_block;
 	uint32_t audio_grant_base;
 	uint32_t audio_grant_bytes;
+	uint32_t audio_alias;
 	volatile uint32_t audio_request;
 	int audio_result;
 	int audio_teardown;
@@ -211,22 +225,26 @@ struct zzapp_service_runtime {
 #endif
 };
 
+struct zzapp_deferred {
+	volatile uint32_t state;
+	uint16_t opcode;
+	uint16_t status;
+	uint16_t req_len;
+	uint16_t reply_len;
+	uint32_t request_id;
+	uint32_t cookie;
+	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	volatile uint32_t start_pending;
+	uint32_t start_argc;
+};
+
 static struct zzapp_service_slot slots[ZZAPP_SLOT_COUNT];
 static struct zzapp_service_runtime runtime[ZZAPP_SLOT_COUNT];
+static struct zzapp_deferred deferred[ZZAPP_SLOT_COUNT];
 static uint32_t selected_slot[2];
+static uint32_t deferred_harvest_slot = ZZAPP_SLOT_COUNT;
 static int window_mapping_available;
-static volatile uint32_t defer_state;
-static uint16_t defer_opcode;
-static uint16_t defer_status;
-static uint16_t defer_req_len;
-static uint16_t defer_reply_len;
-static uint32_t defer_request_id;
-static uint32_t defer_cookie;
-static uint32_t defer_slot;
-static uint8_t defer_req[ZZAPP_MAILBOX_PAYLOAD_BYTES];
-static uint8_t defer_reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
-static volatile uint32_t start_pending;
-static uint32_t start_argc;
 static uint32_t load_diag_seen;
 static int slot_busy_test[4];
 static int display_mailbox_slot = -1;
@@ -373,20 +391,25 @@ __attribute__((weak)) void zzapp_kernel_surface_unbind(
 	(void)slot;
 }
 #ifdef ZZAPP_HOST_TEST
-__attribute__((weak)) int zzapp_as_grant_user(zzapp_as_t *as,
-					       uint32_t address, uint32_t bytes)
+
+__attribute__((weak)) int zzapp_as_alias_map(zzapp_as_t *as, uint32_t phys,
+					      uint32_t bytes, int writable,
+					      uint32_t *va)
 {
 	(void)as;
-	(void)address;
 	(void)bytes;
+	(void)writable;
+	if (!va)
+		return -1;
+	*va = phys;
 	return 0;
 }
 
-__attribute__((weak)) int zzapp_as_ungrant_user(zzapp_as_t *as,
-						 uint32_t address, uint32_t bytes)
+__attribute__((weak)) int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va,
+						uint32_t bytes)
 {
 	(void)as;
-	(void)address;
+	(void)va;
 	(void)bytes;
 	return 0;
 }
@@ -484,20 +507,31 @@ static void display_mailbox_disable(void)
 	display_mailbox_lock_release();
 }
 
+static struct zzapp_deferred *defer_for_slot(uint32_t slot)
+{
+	return slot < ZZAPP_SLOT_COUNT ? &deferred[slot] : NULL;
+}
+
+static struct zzapp_deferred *current_deferred(void)
+{
+	return defer_for_slot(service_slot());
+}
+
 static uint32_t defer_load(void)
 {
-	return __atomic_load_n(&defer_state, __ATOMIC_ACQUIRE);
+	return __atomic_load_n(&current_deferred()->state, __ATOMIC_ACQUIRE);
 }
 
 static void defer_store(uint32_t state)
 {
-	__atomic_store_n(&defer_state, state, __ATOMIC_RELEASE);
+	__atomic_store_n(&current_deferred()->state, state, __ATOMIC_RELEASE);
 }
 
 static int defer_claim(uint32_t expected, uint32_t desired)
 {
-	return __atomic_compare_exchange_n(&defer_state, &expected, desired, 0,
-					   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	return __atomic_compare_exchange_n(&current_deferred()->state, &expected,
+					   desired, 0, __ATOMIC_ACQ_REL,
+					   __ATOMIC_ACQUIRE);
 }
 
 static int defer_on_core1(void)
@@ -745,21 +779,25 @@ static uint32_t service_loader_generation;
 static uint32_t service_test_grant_count;
 static uint32_t service_test_ungrant_count;
 
-__attribute__((weak)) int zzapp_as_grant_user(zzapp_as_t *as,
-					       uint32_t address, uint32_t bytes)
+__attribute__((weak)) int zzapp_as_alias_map(zzapp_as_t *as, uint32_t phys,
+					      uint32_t bytes, int writable,
+					      uint32_t *va)
 {
 	(void)as;
-	(void)address;
 	(void)bytes;
+	(void)writable;
+	if (!va)
+		return -1;
+	*va = phys;
 	service_test_grant_count++;
 	return 0;
 }
 
-__attribute__((weak)) int zzapp_as_ungrant_user(zzapp_as_t *as,
-						 uint32_t address, uint32_t bytes)
+__attribute__((weak)) int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va,
+						uint32_t bytes)
 {
 	(void)as;
-	(void)address;
+	(void)va;
 	(void)bytes;
 	service_test_ungrant_count++;
 	return 0;
@@ -1049,10 +1087,12 @@ void zzapp_services_expire_claims(uint64_t now)
 }
 
 static int grant_user_buffer(uint32_t address, uint32_t bytes,
-			     uint32_t *grant_base, uint32_t *grant_bytes)
+			     uint32_t *grant_base, uint32_t *grant_bytes,
+			     uint32_t *user_address)
 {
 	zzapp_proc_t *proc = zzapp_proc_slot(service_slot());
 	uint32_t base;
+	uint32_t alias;
 	uint64_t end;
 
 	if (!proc || bytes == 0U)
@@ -1060,10 +1100,12 @@ static int grant_user_buffer(uint32_t address, uint32_t bytes,
 	base = address & ~0xfffU;
 	end = ((uint64_t)address + bytes + 0xfffU) & ~0xfffULL;
 	if (end > (uint64_t)UINT32_MAX + 1U || end <= base ||
-	    zzapp_as_grant_user(&proc->as, base, (uint32_t)(end - base)) != 0)
+	    zzapp_as_alias_map(&proc->as, base, (uint32_t)(end - base), 1,
+				 &alias) != 0)
 		return ZZ_ENOMEM;
-	*grant_base = base;
+	*grant_base = alias;
 	*grant_bytes = (uint32_t)(end - base);
+	*user_address = alias + address - base;
 	return ZZ_OK;
 }
 
@@ -1075,11 +1117,13 @@ static void revoke_surface_grants(void)
 
 	for (i = 0U; i < 3U; i++) {
 		if (proc && state->display_grant_bytes[i] != 0U)
-			(void)zzapp_as_ungrant_user(&proc->as,
-						     state->display_grant_base[i],
-						     state->display_grant_bytes[i]);
+			(void)zzapp_as_alias_unmap(&proc->as,
+						    state->display_grant_base[i],
+						    state->display_grant_bytes[i]);
 		state->display_grant_base[i] = 0U;
 		state->display_grant_bytes[i] = 0U;
+		state->display_alias_phys[i] = 0U;
+		state->display_alias[i] = 0U;
 	}
 }
 
@@ -1095,10 +1139,12 @@ static int grant_surface_buffers(uint32_t front, uint32_t back,
 			continue;
 		if (grant_user_buffer(buffers[i], bytes,
 				      &state->display_grant_base[i],
-				      &state->display_grant_bytes[i]) != ZZ_OK) {
+				      &state->display_grant_bytes[i],
+				      &state->display_alias[i]) != ZZ_OK) {
 			revoke_surface_grants();
 			return ZZ_ENOMEM;
 		}
+		state->display_alias_phys[i] = buffers[i];
 	}
 	return ZZ_OK;
 }
@@ -1135,6 +1181,7 @@ static void forget_window(void)
 	state->audio_block = saved.audio_block;
 	state->audio_grant_base = saved.audio_grant_base;
 	state->audio_grant_bytes = saved.audio_grant_bytes;
+	state->audio_alias = saved.audio_alias;
 	state->audio_request = saved.audio_request;
 	state->audio_result = saved.audio_result;
 	state->audio_teardown = saved.audio_teardown;
@@ -1209,7 +1256,7 @@ void zzapp_services_on_reset(void)
 #endif
 	forget_window();
 	defer_store(DEFER_IDLE);
-	start_pending = 0U;
+	current_deferred()->start_pending = 0U;
 	zzapp_services_on_launch();
 }
 
@@ -1988,7 +2035,7 @@ static void drop_owned_back(void)
 
 	if (!current_runtime()->display_back_owned)
 		return;
-	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
+	back = current_runtime()->display_back;
 	current_runtime()->display_back_owned = 0;
 	if (back != 0U)
 		zzapp_loader_free_back(back);
@@ -2007,15 +2054,25 @@ static void display_reap_flip(void)
 		return;
 	current_runtime()->display_ack_seen = ack;
 	if (current_runtime()->display_queued != 0U) {
-		uint32_t front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
+		uint32_t front = current_runtime()->display_front;
 
-		life_put(ZZAPP_LIFE_CARD_FRONT_OFF, current_runtime()->display_queued);
-		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, front);
+		current_runtime()->display_front = current_runtime()->display_queued;
+		current_runtime()->display_spare = front;
+		life_put(ZZAPP_LIFE_CARD_FRONT_OFF,
+			 current_runtime()->display_front);
+		life_put(ZZAPP_LIFE_CARD_SPARE_OFF,
+			 current_runtime()->display_spare);
 		current_runtime()->display_queued = 0U;
 	} else if (!current_runtime()->display_back_owned &&
-		   life_get(ZZAPP_LIFE_CARD_BACK_OFF) != 0U) {
-		life_put(ZZAPP_LIFE_FLIP_SHOWING_OFF,
-			 life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) ^ 1U);
+		   current_runtime()->display_back != 0U) {
+		uint32_t front = current_runtime()->display_front;
+
+		current_runtime()->display_front = current_runtime()->display_back;
+		current_runtime()->display_back = front;
+		life_put(ZZAPP_LIFE_CARD_FRONT_OFF,
+			 current_runtime()->display_front);
+		life_put(ZZAPP_LIFE_CARD_BACK_OFF,
+			 current_runtime()->display_back);
 	}
 }
 
@@ -2081,9 +2138,12 @@ void zzapp_services_display_mailbox_end(int latched)
 
 		state->display_mailbox_shown = state->display_mailbox_pending;
 		state->display_mailbox_pending = 0U;
+		state->display_front = state->display_mailbox_shown;
+		state->display_spare = old_shown;
 		life_put_slot(slot, ZZAPP_LIFE_CARD_FRONT_OFF,
-			      state->display_mailbox_shown);
-		life_put_slot(slot, ZZAPP_LIFE_CARD_SPARE_OFF, old_shown);
+			      state->display_front);
+		life_put_slot(slot, ZZAPP_LIFE_CARD_SPARE_OFF,
+			      state->display_spare);
 	}
 	state->display_mailbox_latch_pending = 0;
 	display_mailbox_slot = -1;
@@ -2127,43 +2187,45 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 			uint32_t *format, uint32_t *card_front,
 			uint32_t *card_back)
 {
-	uint32_t front;
-	uint32_t back;
+	struct zzapp_service_runtime *state = current_runtime();
 
-	if (!current_runtime()->display_bound)
+	if (!state->display_bound)
 		return ZZ_EINVAL;
 	display_reap_flip();
-	front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
-	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
-	if (!current_runtime()->display_back_owned && life_get(ZZAPP_LIFE_CARD_SPARE_OFF) == 0U &&
-	    back != 0U && life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
-		uint32_t tmp = front;
-
-		front = back;
-		back = tmp;
-	}
 	if (w)
-		*w = life_get(ZZAPP_LIFE_WIDTH_OFF);
+		*w = state->display_width;
 	if (h)
-		*h = life_get(ZZAPP_LIFE_HEIGHT_OFF);
+		*h = state->display_height;
 	if (pitch)
-		*pitch = life_get(ZZAPP_LIFE_PITCH_OFF);
+		*pitch = state->display_pitch;
 	if (format)
-		*format = life_get(ZZAPP_LIFE_FORMAT_OFF);
+		*format = state->display_format;
 	if (card_front)
-		*card_front = front;
+		*card_front = state->display_front;
 	if (card_back)
-		*card_back = back;
+		*card_back = state->display_back;
 	return ZZ_OK;
 }
+
 int zzapp_display_layout(uint32_t *layout)
 {
 	if (!layout || !current_runtime()->display_bound)
 		return ZZ_EINVAL;
-	*layout = life_get(ZZAPP_LIFE_LAYOUT_OFF);
+	*layout = current_runtime()->display_layout;
 	return ZZ_OK;
 }
 
+static uint32_t display_alias(uint32_t physical)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+	uint32_t i;
+
+	for (i = 0U; i < 3U; i++) {
+		if (state->display_alias_phys[i] == physical)
+			return state->display_alias[i];
+	}
+	return 0U;
+}
 
 static int fill_surface(zzapp_surface *out)
 {
@@ -2183,12 +2245,12 @@ static int fill_surface(zzapp_surface *out)
 	out->height = h;
 	out->pitch = pitch;
 	out->format = format;
-	out->card_front = front;
-	out->card_back = back;
-	out->front = (void *)(uintptr_t)front;
-	out->back = (void *)(uintptr_t)back;
-	out->layout = life_get(ZZAPP_LIFE_LAYOUT_OFF);
-	return ZZ_OK;
+	out->card_front = display_alias(front);
+	out->card_back = display_alias(back);
+	out->front = (void *)(uintptr_t)out->card_front;
+	out->back = (void *)(uintptr_t)out->card_back;
+	out->layout = current_runtime()->display_layout;
+	return out->card_front != 0U && out->card_back != 0U ? ZZ_OK : ZZ_EINVAL;
 }
 
 int zzapp_display_flip_bound(void)
@@ -2312,19 +2374,22 @@ static int display_mailbox_flip(uint32_t back, uint32_t bytes)
 		return ZZ_EBUSY;
 	}
 	if (current_runtime()->display_mailbox_pending != 0U) {
-		/* The old pending buffer was never scanned.  It becomes drawing
-		 * immediately while the newer completed buffer replaces it. */
-		life_put(ZZAPP_LIFE_CARD_BACK_OFF, current_runtime()->display_mailbox_pending);
+		current_runtime()->display_back =
+			current_runtime()->display_mailbox_pending;
+		life_put(ZZAPP_LIFE_CARD_BACK_OFF,
+			 current_runtime()->display_back);
 		current_runtime()->display_mailbox_pending = back;
 		life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF,
 			 life_get(ZZAPP_LIFE_MAILBOX_REPLACED_OFF) + 1U);
 	} else {
-		spare = life_get(ZZAPP_LIFE_CARD_SPARE_OFF);
+		spare = current_runtime()->display_spare;
 		if (spare == 0U) {
 			display_mailbox_lock_release();
 			return ZZ_EBUSY;
 		}
 		current_runtime()->display_mailbox_pending = back;
+		current_runtime()->display_back = spare;
+		current_runtime()->display_spare = 0U;
 		life_put(ZZAPP_LIFE_CARD_BACK_OFF, spare);
 		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, 0U);
 	}
@@ -2361,51 +2426,41 @@ int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
 
 int zzapp_svc_display_flip_async(uint32_t surface_id)
 {
-	uint32_t pitch;
-	uint32_t height;
-	uint32_t bytes;
+	struct zzapp_service_runtime *state = current_runtime();
 	uint32_t front;
 	uint32_t back;
 	uint32_t present;
 	uint32_t flags;
 	int rc;
 
-	if (!current_runtime()->display_bound || surface_id != current_runtime()->display_id)
+	if (!state->display_bound || surface_id != state->display_id)
 		return ZZ_EINVAL;
 	if (!zzapp_display_flip_idle())
 		return ZZ_EBUSY;
-	pitch = life_get(ZZAPP_LIFE_PITCH_OFF);
-	height = life_get(ZZAPP_LIFE_HEIGHT_OFF);
-	if (pitch == 0U || height > (0xffffffffU / pitch))
-		return ZZ_EINVAL;
-	bytes = pitch * height;
-	front = life_get(ZZAPP_LIFE_CARD_FRONT_OFF);
-	back = life_get(ZZAPP_LIFE_CARD_BACK_OFF);
+	front = state->display_front;
+	back = state->display_back;
 	if (display_mailbox_enabled())
-		return display_mailbox_flip(back, bytes);
-	if (current_runtime()->display_back_owned) {
+		return display_mailbox_flip(back, state->display_bytes);
+	if (state->display_back_owned) {
 		if (front == 0U || back == 0U)
 			return ZZ_EINVAL;
-		memcpy((void *)(uintptr_t)front, (const void *)(uintptr_t)back, bytes);
-		flush_presented(front, bytes);
+		memcpy((void *)(uintptr_t)front, (const void *)(uintptr_t)back,
+		       state->display_bytes);
+		flush_presented(front, state->display_bytes);
 		present = front;
-	} else if (life_get(ZZAPP_LIFE_CARD_SPARE_OFF) != 0U) {
-		uint32_t spare = life_get(ZZAPP_LIFE_CARD_SPARE_OFF);
-
-		flush_presented(back, bytes);
+	} else if (state->display_spare != 0U) {
+		flush_presented(back, state->display_bytes);
 		present = back;
-		current_runtime()->display_queued = back;
-		life_put(ZZAPP_LIFE_CARD_BACK_OFF, spare);
+		state->display_queued = back;
+		state->display_back = state->display_spare;
+		state->display_spare = 0U;
+		life_put(ZZAPP_LIFE_CARD_BACK_OFF, state->display_back);
+		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, 0U);
 	} else {
-		if (back != 0U && life_get(ZZAPP_LIFE_FLIP_SHOWING_OFF) != 0U) {
-			uint32_t tmp = front;
-
-			front = back;
-			back = tmp;
-		}
 		present = back != 0U ? back : front;
-		flush_presented(present, bytes);
+		flush_presented(present, state->display_bytes);
 	}
+	state->display_present = present;
 	flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
 	if ((flags & (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK)) ==
 	    (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK)) {
@@ -2689,10 +2744,11 @@ static void revoke_audio_grant(void)
 	zzapp_proc_t *proc = zzapp_proc_slot(service_slot());
 
 	if (proc && state->audio_grant_bytes != 0U)
-		(void)zzapp_as_ungrant_user(&proc->as, state->audio_grant_base,
-					     state->audio_grant_bytes);
+		(void)zzapp_as_alias_unmap(&proc->as, state->audio_grant_base,
+					    state->audio_grant_bytes);
 	state->audio_grant_base = 0U;
 	state->audio_grant_bytes = 0U;
+	state->audio_alias = 0U;
 }
 
 
@@ -2747,7 +2803,7 @@ static int audio_attach(void)
 {
 	uint32_t slot = 0U;
 	uint32_t bytes = 8U + ZZAPP_AUDIO_FRAMES * 4U;
-
+	uint32_t alloc_bytes = (bytes + 4095U) & ~4095U;
 	current_runtime()->audio_ahi_route = (life_get(ZZAPP_LIFE_FLAGS_OFF) &
 			   ZZAPP_F_LAUNCHER_AUDIO_AHI) != 0U;
 	if (current_runtime()->audio_open)
@@ -2760,22 +2816,24 @@ static int audio_attach(void)
 			return ZZ_EBUSY;
 	}
 #ifdef ZZAPP_HOST_TEST
-	current_runtime()->audio_block = calloc(1, bytes);
+	current_runtime()->audio_block = aligned_alloc(4096U, alloc_bytes);
 	if (!current_runtime()->audio_block)
 		return ZZ_ENOMEM;
+	memset(current_runtime()->audio_block, 0, alloc_bytes);
 #else
 	if (!current_runtime()->audio_ahi_route &&
 	    !audio_fabric_conversion_admissible(ZZAPP_AUDIO_RATE))
 		return ZZ_EBUSY;
 	current_runtime()->audio_block = (void *)(uintptr_t)surface_allocator_alloc_range(
-		bytes, 64U, SDK_MAILBOX_Z3_RESERVE_END,
+		alloc_bytes, 4096U, SDK_MAILBOX_Z3_RESERVE_END,
 		SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS);
 	if (!current_runtime()->audio_block)
 		return ZZ_ENOMEM;
 #endif
 	if (grant_user_buffer((uint32_t)(uintptr_t)current_runtime()->audio_block,
 			      bytes, &current_runtime()->audio_grant_base,
-			      &current_runtime()->audio_grant_bytes) != ZZ_OK) {
+			      &current_runtime()->audio_grant_bytes,
+			      &current_runtime()->audio_alias) != ZZ_OK) {
 #ifdef ZZAPP_HOST_TEST
 		free(current_runtime()->audio_block);
 #else
@@ -2844,10 +2902,12 @@ static int audio_attach(void)
 
 static void audio_fill(zzapp_audio *out)
 {
-	out->samples = current_runtime()->audio_samples;
+	uintptr_t alias = current_runtime()->audio_alias;
+
+	out->samples = (int16_t *)(alias + 8U);
 	out->frames = ZZAPP_AUDIO_FRAMES;
-	out->read_frame = current_runtime()->audio_read_frame;
-	out->write_frame = current_runtime()->audio_write_frame;
+	out->read_frame = (volatile uint32_t *)alias;
+	out->write_frame = (volatile uint32_t *)(alias + 4U);
 	out->rate = ZZAPP_AUDIO_RATE;
 	out->channels = 2U;
 }
@@ -3150,10 +3210,20 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 		return ZZ_ENOMEM;
 	}
 	{
-		uint32_t lease_base = front < back ? front : back;
-		uint64_t lease_end = (uint64_t)(front > back ? front : back) + bytes;
+		uint32_t buffers[3] = { front, back, spare };
+		uint32_t lease_base = front;
+		uint64_t lease_end = (uint64_t)front + bytes;
 		uint32_t lease_bytes;
+		uint32_t i;
 
+		for (i = 1U; i < 3U; i++) {
+			if (buffers[i] == 0U)
+				continue;
+			if (buffers[i] < lease_base)
+				lease_base = buffers[i];
+			if ((uint64_t)buffers[i] + bytes > lease_end)
+				lease_end = (uint64_t)buffers[i] + bytes;
+		}
 		if (lease_end > UINT32_MAX) {
 			revoke_surface_grants();
 			release_unbound_back(back);
@@ -3184,6 +3254,16 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	life_put(ZZAPP_LIFE_FLIP_ADDRESS_OFF, 0U);
 	life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0U);
 	life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF, 0U);
+	current_runtime()->display_width = width;
+	current_runtime()->display_height = height;
+	current_runtime()->display_pitch = pitch;
+	current_runtime()->display_format = format;
+	current_runtime()->display_layout = layout;
+	current_runtime()->display_bytes = bytes;
+	current_runtime()->display_front = front;
+	current_runtime()->display_back = back;
+	current_runtime()->display_spare = spare;
+	current_runtime()->display_present = 0U;
 	current_runtime()->display_ack_seen = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 	current_runtime()->display_bound = 1;
 	current_runtime()->display_id = 1U;
@@ -3217,34 +3297,82 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	return ZZ_OK;
 }
 
+static void capture_start_name(uint32_t argc)
+{
+	uint8_t *name = slots[service_slot()].name;
+	uint32_t off;
+	uint32_t end;
+	uint32_t start;
+	uint32_t i;
+	uint32_t length;
+
+	memset(name, 0, ZZAPP_LIST_NAME_BYTES);
+	if (argc == 0U || !have_window())
+		return;
+	off = win_get32(ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF);
+	if (off < ZZAPP_ARGV_STR_OFF || off >= ZZAPP_ARGV_BYTES)
+		return;
+	start = ZZAPP_ARGV_OFF + off;
+	length = ZZAPP_ARGV_BYTES - off;
+	if (length > ZZAPP_ARGV_STR_MAX)
+		length = ZZAPP_ARGV_STR_MAX;
+	end = 0U;
+	for (i = 0U; i < length && current_window()[start + i] != '\0'; i++) {
+		if (current_window()[start + i] == '/' ||
+		    current_window()[start + i] == ':')
+			end = i + 1U;
+	}
+	for (i = end; i + 1U < ZZAPP_LIST_NAME_BYTES + end && i < length; i++)
+		name[i - end] = current_window()[start + i];
+}
+
+static void audio_core1_poll_all(void)
+{
+	uint32_t slot;
+	uint32_t selected = selected_slot[service_context()];
+
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		select_slot(slot);
+		if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE) {
+			barrier();
+			current_runtime()->audio_request =
+				AUDIO_REQUEST_CLOSE_QUIESCED;
+			continue;
+		}
+		if (current_runtime()->audio_request != AUDIO_REQUEST_CLOSE_QUIESCED)
+			audio_pump_ahi_window();
+	}
+	select_slot(selected);
+}
+
 static void run_deferred(void)
 {
+	struct zzapp_deferred *defer = current_deferred();
 	int rc = ZZ_EINVAL;
 	const char *reject_reason = NULL;
-	const uint8_t *req = defer_req;
-	uint16_t len = defer_req_len;
-	select_slot(defer_slot);
+	const uint8_t *req = defer->req;
+	uint16_t len = defer->req_len;
 
-	defer_reply_len = 0U;
-	switch (defer_opcode) {
+	defer->reply_len = 0U;
+	switch (defer->opcode) {
 	case ZZAPP_OP_LOAD_BEGIN:
 		if (zzapp_services_state() != ZZAPP_ST_IDLE &&
 		    zzapp_services_state() != ZZAPP_ST_CLAIMED) {
 			rc = ZZ_EBUSY;
 			break;
 		}
-		if (slots[defer_slot].generation == 0U) {
-			slots[defer_slot].generation = 1U;
+		if (slots[service_slot()].generation == 0U) {
+			slots[service_slot()].generation = 1U;
 			life_put(ZZAPP_LIFE_GENERATION_OFF, 1U);
 		}
-		rc = zzapp_loader_set_generation(slots[defer_slot].generation);
+		rc = zzapp_loader_set_generation(slots[service_slot()].generation);
 		if (rc != ZZ_OK)
 			break;
 		rc = zzapp_loader_begin();
 		if (rc == ZZ_OK)
 			zzapp_services_set_state(ZZAPP_ST_LOADING);
 		if (rc == ZZ_OK)
-			report_load_snapshot("load begin", defer_opcode, NULL);
+			report_load_snapshot("load begin", defer->opcode, NULL);
 		break;
 	case ZZAPP_OP_LOAD_CHUNK: {
 		uint32_t off;
@@ -3297,31 +3425,35 @@ static void run_deferred(void)
 			rc = ZZ_EINVAL;
 			break;
 		}
-		start_argc = len >= ZZAPP_START_REQ_BYTES
+		defer->start_argc = len >= ZZAPP_START_REQ_BYTES
 			? zzapp_get_be32(req + ZZAPP_START_ARGC) : 0U;
-		if (start_argc > ZZAPP_ARGV_MAX) {
+		if (defer->start_argc > ZZAPP_ARGV_MAX) {
 			reject_reason = "start argc exceeds argv capacity";
 			rc = ZZ_EINVAL;
 			break;
 		}
-		start_pending = 1U;
+		capture_start_name(defer->start_argc);
+		defer->start_pending = 1U;
 		return;
 	default:
 		rc = ZZ_ENOSYS;
 		break;
 	}
 	if (zz_to_sdk(rc) == SDK_STATUS_BAD_REQUEST && reject_reason) {
-		if (defer_opcode == ZZAPP_OP_LOAD_CHUNK)
-			report_load_snapshot("reject", defer_opcode, reject_reason);
+		if (defer->opcode == ZZAPP_OP_LOAD_CHUNK)
+			report_load_snapshot("reject", defer->opcode, reject_reason);
 		else
-			report_rejected_app_op(defer_opcode, reject_reason);
+			report_rejected_app_op(defer->opcode, reject_reason);
 	}
-	defer_status = zz_to_sdk(rc);
+	defer->status = zz_to_sdk(rc);
 	defer_store(DEFER_DONE);
 }
 
 void zzapp_services_poll(void)
 {
+	uint32_t slot;
+	uint32_t selected = selected_slot[service_context()];
+
 	if (!defer_on_core1()) {
 #ifndef ZZAPP_HOST_TEST
 		if (!defer_wrong_core_logged) {
@@ -3331,54 +3463,56 @@ void zzapp_services_poll(void)
 #endif
 		return;
 	}
-	if (zzapp_kernel_current_thread() < 0 &&
-	    defer_claim(DEFER_POSTED, DEFER_RUNNING))
-		run_deferred();
-	wake_ready_waits();
-	if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE) {
-		/* The release store lets core 0 free the source only after no
-		 * core-1 AHI pump can still retain its pointers. */
-		barrier();
-		current_runtime()->audio_request = AUDIO_REQUEST_CLOSE_QUIESCED;
-		return;
+	if (zzapp_kernel_current_thread() < 0) {
+		for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+			select_slot(slot);
+			if (defer_claim(DEFER_POSTED, DEFER_RUNNING)) {
+				run_deferred();
+				break;
+			}
+		}
+		if (slot == ZZAPP_SLOT_COUNT)
+			select_slot(selected);
 	}
-	/* Stay quiet until core 0 publishes completion. A second poll in
-	 * this window used to fall through and pump the source core 0 is
-	 * about to free. */
-	if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE_QUIESCED)
-		return;
-	audio_pump_ahi_window();
+	wake_ready_waits();
+	audio_core1_poll_all();
 }
 
 int zzapp_services_take_start(uint32_t *argc)
 {
-	if (!start_pending)
+	struct zzapp_deferred *defer = current_deferred();
+
+	if (!defer->start_pending)
 		return 0;
-	start_pending = 0U;
+	defer->start_pending = 0U;
 	if (argc)
-		*argc = start_argc;
+		*argc = defer->start_argc;
 	return 1;
 }
 
 void zzapp_services_start_entered(int status)
 {
+	struct zzapp_deferred *defer = current_deferred();
+
 	if (status == ZZ_OK)
 		zzapp_services_set_state(ZZAPP_ST_RUNNING);
 	else {
 		zzapp_services_set_state(ZZAPP_ST_FAULTED);
 		zzapp_services_set_exit(status);
 	}
-	defer_status = zz_to_sdk(status);
-	defer_reply_len = 0U;
+	defer->status = zz_to_sdk(status);
+	defer->reply_len = 0U;
 	defer_store(DEFER_DONE);
 }
 
 void zzapp_services_cancel_start(int status)
 {
-	start_pending = 0U;
-	if (defer_load() == DEFER_RUNNING && defer_opcode == ZZAPP_OP_START) {
-		defer_status = zz_to_sdk(status);
-		defer_reply_len = 0U;
+	struct zzapp_deferred *defer = current_deferred();
+
+	defer->start_pending = 0U;
+	if (defer_load() == DEFER_RUNNING && defer->opcode == ZZAPP_OP_START) {
+		defer->status = zz_to_sdk(status);
+		defer->reply_len = 0U;
 		defer_store(DEFER_DONE);
 	}
 }
@@ -3386,19 +3520,20 @@ void zzapp_services_cancel_start(int status)
 static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 			  uint32_t request_id, uint32_t user_cookie)
 {
+	struct zzapp_deferred *defer = current_deferred();
+
 	if (!defer_claim(DEFER_IDLE, DEFER_FILLING))
 		return 0;
-	if (req_len > sizeof(defer_req))
-		req_len = sizeof(defer_req);
-	memset(defer_req, 0, sizeof(defer_req));
+	if (req_len > sizeof(defer->req))
+		req_len = sizeof(defer->req);
+	memset(defer->req, 0, sizeof(defer->req));
 	if (req_len != 0U && req)
-		memcpy(defer_req, req, req_len);
-	defer_opcode = opcode;
-	defer_req_len = req_len;
-	defer_slot = service_slot();
-	defer_request_id = request_id;
-	defer_cookie = user_cookie;
-	defer_reply_len = 0U;
+		memcpy(defer->req, req, req_len);
+	defer->opcode = opcode;
+	defer->req_len = req_len;
+	defer->request_id = request_id;
+	defer->cookie = user_cookie;
+	defer->reply_len = 0U;
 	defer_store(DEFER_POSTED);
 #ifndef ZZAPP_HOST_TEST
 	scheduler_core1_wake();
@@ -3464,6 +3599,7 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
 	slots[slot].generation = generation;
 	slots[slot].memory_limit = 0U;
 	slots[slot].terminal_reason = ZZAPP_END_NONE;
+	memset(slots[slot].name, 0, sizeof(slots[slot].name));
 	slots[slot].claim_started = now_us();
 	slots[slot].state = ZZAPP_ST_CLAIMED;
 	life_put(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
@@ -3497,6 +3633,8 @@ static void put_list(uint8_t *reply, uint16_t *reply_len, uint32_t slot)
 	zzapp_put_be32(reply + ZZAPP_LIST_SERVICE_MS,
 		       service > UINT32_MAX ? UINT32_MAX : (uint32_t)service);
 	reply[ZZAPP_LIST_REASONS + 1U] = (uint8_t)slots[slot].terminal_reason;
+	memcpy(reply + ZZAPP_LIST_NAME, slots[slot].name,
+	       sizeof(slots[slot].name));
 	if (kernel && kernel->overload_count != 0U)
 		zzapp_put_be16(reply + ZZAPP_LIST_REASONS + 2U,
 			       ZZAPP_LIST_FLAG_OVERLOAD);
@@ -3583,6 +3721,16 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 			if (expected != zzapp_services_generation())
 				return SDK_STATUS_BAD_HANDLE;
 		}
+		if (zzapp_services_state() == ZZAPP_ST_CLAIMED) {
+			memset(current_runtime(), 0, sizeof(*current_runtime()));
+			slots[service_slot()].memory_limit = 0U;
+			slots[service_slot()].terminal_reason = ZZAPP_END_FORCED;
+			slots[service_slot()].state = ZZAPP_ST_IDLE;
+			life_put(ZZAPP_LIFE_STOP_OFF, 0U);
+			life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
+			life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_FORCED);
+			return SDK_STATUS_OK;
+		}
 		life_put(ZZAPP_LIFE_STOP_OFF, 1U);
 		return SDK_STATUS_OK;
 	case ZZAPP_OP_STATUS:
@@ -3638,26 +3786,45 @@ int zzapp_mailbox_harvest(uint32_t *request_id, uint32_t *user_cookie,
 			  uint16_t *opcode, uint16_t *status,
 			  uint8_t *payload, uint16_t *payload_len)
 {
-	if (defer_load() != DEFER_DONE)
-		return 0;
+	struct zzapp_deferred *defer;
+	uint32_t slot;
+
+	if (deferred_harvest_slot == ZZAPP_SLOT_COUNT) {
+		for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+			if (__atomic_load_n(&deferred[slot].state, __ATOMIC_ACQUIRE) ==
+			    DEFER_DONE)
+				break;
+		}
+		if (slot == ZZAPP_SLOT_COUNT)
+			return 0;
+		deferred_harvest_slot = slot;
+	}
+	defer = &deferred[deferred_harvest_slot];
 	if (request_id)
-		*request_id = defer_request_id;
+		*request_id = defer->request_id;
 	if (user_cookie)
-		*user_cookie = defer_cookie;
+		*user_cookie = defer->cookie;
 	if (opcode)
-		*opcode = defer_opcode;
+		*opcode = defer->opcode;
 	if (status)
-		*status = defer_status;
+		*status = defer->status;
 	if (payload_len)
-		*payload_len = defer_reply_len;
-	if (payload && defer_reply_len != 0U)
-		memcpy(payload, defer_reply, defer_reply_len);
+		*payload_len = defer->reply_len;
+	if (payload && defer->reply_len != 0U)
+		memcpy(payload, defer->reply, defer->reply_len);
 	return 1;
 }
 
 void zzapp_mailbox_harvest_ack(void)
 {
-	(void)defer_claim(DEFER_DONE, DEFER_IDLE);
+	uint32_t expected = DEFER_DONE;
+
+	if (deferred_harvest_slot == ZZAPP_SLOT_COUNT)
+		return;
+	(void)__atomic_compare_exchange_n(
+		&deferred[deferred_harvest_slot].state, &expected, DEFER_IDLE, 0,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	deferred_harvest_slot = ZZAPP_SLOT_COUNT;
 }
 
 #ifdef ZZAPP_HOST_TEST
@@ -3671,10 +3838,10 @@ void zzapp_services_test_reset(void)
 	}
 	memset(runtime, 0, sizeof(runtime));
 	memset(slots, 0, sizeof(slots));
+	memset(deferred, 0, sizeof(deferred));
 	selected_slot[0] = 0U;
 	selected_slot[1] = 0U;
-	defer_store(DEFER_IDLE);
-	start_pending = 0U;
+	deferred_harvest_slot = ZZAPP_SLOT_COUNT;
 	display_mailbox_slot = -1;
 	defer_test_core = 1;
 	yield_hook = NULL;

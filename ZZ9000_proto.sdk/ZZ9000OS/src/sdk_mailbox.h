@@ -396,6 +396,7 @@ struct SDKModuleStatusPayload {
 #define SDK_OP_APP_STOP                0x0c06U
 #define SDK_OP_APP_STATUS              0x0c07U
 #define SDK_OP_APP_DISPLAY_BIND        0x0c08U
+#define SDK_OP_APP_LIST                0x0c09U
 
 struct SDKMediaSessionBeginPayload {
 	uint8_t video_codec[4];
