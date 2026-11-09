@@ -20,12 +20,54 @@ int zz9k_app_generation_matches(uint32_t owned_generation,
   return owned_generation != 0U && owned_generation == observed_generation;
 }
 
+int zz9k_app_slot_claim(ZZ9KAppSlotRegistry *registry, uint32_t slot,
+                        void *handle)
+{
+  if (!registry || !handle || slot >= ZZ9K_APP_SLOT_COUNT) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  if (registry->handles[slot]) {
+    return ZZ9K_STATUS_BUSY;
+  }
+  registry->handles[slot] = handle;
+  return ZZ9K_STATUS_OK;
+}
+
+void *zz9k_app_slot_get(const ZZ9KAppSlotRegistry *registry, uint32_t slot)
+{
+  return registry && slot < ZZ9K_APP_SLOT_COUNT ? registry->handles[slot] : 0;
+}
+
+int zz9k_app_slot_release(ZZ9KAppSlotRegistry *registry, uint32_t slot,
+                          const void *handle)
+{
+  if (!registry || !handle || slot >= ZZ9K_APP_SLOT_COUNT ||
+      registry->handles[slot] != handle) {
+    return ZZ9K_STATUS_BAD_HANDLE;
+  }
+  registry->handles[slot] = 0;
+  return ZZ9K_STATUS_OK;
+}
+
 int zz9k_app_request_init(ZZ9KRequest *request, uint16_t opcode)
 {
   if (!request || opcode < ZZ9K_APP_OP_QUERY || opcode > ZZ9K_APP_OP_STATUS) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
   zz9k_request_init(request, opcode);
+  return ZZ9K_STATUS_OK;
+}
+
+int zz9k_app_request_select(ZZ9KRequest *request, uint32_t slot,
+                            uint32_t generation)
+{
+  if (!request || slot >= ZZ9K_APP_SLOT_COUNT) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  request->entry.payload_len = ZZ9K_APP_MAILBOX_PAYLOAD_BYTES;
+  zz9k_put_be32(request->entry.payload.inline_data + ZZ9K_APP_SEL_SLOT, slot);
+  zz9k_put_be32(request->entry.payload.inline_data + ZZ9K_APP_SEL_GENERATION,
+                generation);
   return ZZ9K_STATUS_OK;
 }
 

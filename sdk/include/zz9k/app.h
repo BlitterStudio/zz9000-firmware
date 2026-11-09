@@ -14,7 +14,7 @@ extern "C" {
 #endif
 
 #define ZZ9K_APP_ABI_MAJOR 0U
-#define ZZ9K_APP_ABI_MINOR 2U
+#define ZZ9K_APP_ABI_MINOR 3U
 
 #define ZZ9K_APP_OP_QUERY        0x0c00U
 #define ZZ9K_APP_OP_ALLOC_WINDOW 0x0c01U
@@ -29,6 +29,17 @@ extern "C" {
 
 #define ZZ9K_APP_QUERY_REPLY_BYTES 16U
 #define ZZ9K_APP_ALLOC_REPLY_BYTES 12U
+#define ZZ9K_APP_QUERY_SLOTS 16U
+#define ZZ9K_APP_QUERY_FREE_SLOTS 20U
+#define ZZ9K_APP_QUERY_COMMIT_FREE 24U
+#define ZZ9K_APP_QUERY_COMMIT_TOTAL 28U
+#define ZZ9K_APP_QUERY_EXT_REPLY_BYTES 32U
+#define ZZ9K_APP_ALLOC_SLOT 12U
+#define ZZ9K_APP_ALLOC_GENERATION 16U
+#define ZZ9K_APP_ALLOC_EXT_REPLY_BYTES 20U
+#define ZZ9K_APP_MAILBOX_PAYLOAD_BYTES 48U
+#define ZZ9K_APP_SEL_SLOT 40U
+#define ZZ9K_APP_SEL_GENERATION 44U
 #define ZZ9K_APP_STATUS_REPLY_BYTES 48U
 #define ZZ9K_APP_CHUNK_MAX 65536U
 #define ZZ9K_APP_IMAGE_MAX_BYTES 0x01000000U
@@ -58,6 +69,8 @@ extern "C" {
 #define ZZ9K_APP_MESSAGE_CAPACITY 64U
 
 #define ZZ9K_APP_CAP_Z3 (1U << 0)
+#define ZZ9K_APP_CAP_SLOTS (1U << 5)
+#define ZZ9K_APP_SLOT_COUNT 4U
 
 #define ZZ9K_APP_STATE_IDLE 0U
 #define ZZ9K_APP_STATE_LOADING 1U
@@ -88,12 +101,24 @@ typedef struct ZZ9KAppMessage {
   uint8_t bytes[ZZ9K_APP_MESSAGE_BYTES];
 } ZZ9KAppMessage;
 
+typedef struct ZZ9KAppSlotRegistry {
+  void *handles[ZZ9K_APP_SLOT_COUNT];
+} ZZ9KAppSlotRegistry;
+
 /* The resident library owns a generation only after LOAD_BEGIN succeeds.
  * Every live-window access fences itself against a replacement launcher. */
 int zz9k_app_generation_matches(uint32_t owned_generation,
                                  uint32_t observed_generation);
+int zz9k_app_slot_claim(ZZ9KAppSlotRegistry *registry, uint32_t slot,
+                        void *handle);
+void *zz9k_app_slot_get(const ZZ9KAppSlotRegistry *registry, uint32_t slot);
+int zz9k_app_slot_release(ZZ9KAppSlotRegistry *registry, uint32_t slot,
+                          const void *handle);
 int zz9k_app_request_init(ZZ9KRequest *request, uint16_t opcode);
 int zz9k_app_request_stop(ZZ9KRequest *request, uint32_t generation);
+/* Changes a legacy request into the 48-byte slot-addressed form. */
+int zz9k_app_request_select(ZZ9KRequest *request, uint32_t slot,
+                            uint32_t generation);
 int zz9k_app_request_chunk(ZZ9KRequest *request, uint32_t file_offset,
                            uint32_t length);
 int zz9k_app_request_start(ZZ9KRequest *request, uint32_t argc);

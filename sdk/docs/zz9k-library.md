@@ -71,7 +71,7 @@ service registry did not exist before this release pair.
 
 ## ARM app client
 
-Revision 35 adds an Amiga-side client for the API 0.2 ARM app runtime. Include
+Revision 35 adds an Amiga-side client for the ARM app runtime. Include
 `proto/zz9k.h` and require `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT`. The API is:
 
 ```c
@@ -90,17 +90,22 @@ void ZZ9KAppClose(ZZ9KAppHandle *handle);
 `ZZ9KAppStart` passes `argv` to the app unchanged. Put the program name in
 `argv[0]`, as ZZRun does, so the app sees a standard C argument vector.
 
-`Open` checks for Zorro III, app-runtime ABI major 0, an idle runtime, and an
-Amiga `mmu.library` mapping that can keep the shared window cache-inhibited for
-the handle lifetime. It returns `ZZ9K_STATUS_BUSY` while another client owns
-core 1. `LoadFile` streams the ELF through the runtime staging window;
-`LoadMemory` accepts at most 16 MiB. `Start` copies no more than 16 argv
-strings of 127 bytes each. `Status` returns the terminal fault/exit snapshot.
+`Open` checks for Zorro III, app-runtime ABI major 0, and an Amiga
+`mmu.library` mapping that can keep the shared window cache-inhibited for the
+handle lifetime. When the extended `QUERY` reply advertises
+`ZZ9K_APP_CAP_SLOTS`, the library can open up to `ZZ9K_APP_SLOT_COUNT` (four)
+handles. Each one claims its own window and generation, so a stale generation
+or terminal state affects only that handle. With firmware that lacks that cap,
+the library retains API 0.2 behaviour: one handle claims legacy slot 0 and a
+second `Open` returns `ZZ9K_STATUS_BUSY`. `LoadFile` streams the ELF through
+the handle's runtime staging window; `LoadMemory` accepts at most 16 MiB.
+`Start` copies no more than 16 argv strings of 127 bytes each. `Status` returns
+the terminal fault/exit snapshot for its handle.
 
 `ZZ9KAppMessage` is exactly 32 opaque bytes. Send returns `ZZ9K_STATUS_BUSY`
 when the host-to-app ring is full; get returns it when the app-to-host ring is
-empty. The library's real Amiga VBlank interrupt server renews the runtime
-lease while the handle is open, independently of the caller's task. It signals
+empty. The library's real Amiga VBlank interrupt server renews every active
+handle's runtime lease independently of the caller's task. It signals
 `ZZ9KAppMessageSignal(handle)` for an app message, exit, or fault. When a
 `notify_port` was supplied, it posts one coalesced `ZZ9KAppEvent`: dequeue
 that event before draining messages with `ZZ9KAppGetMessage`, and drain the

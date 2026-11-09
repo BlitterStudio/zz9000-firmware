@@ -56,12 +56,14 @@ struct ZZ9KAppHandle {
   ULONG heartbeat;
   ULONG vblank_pending;
   uint32_t generation;
+  uint32_t slot;
   struct Library *mmu_base;
   struct mmu_context *mmu_context;
 
   UBYTE active;
   UBYTE started;
   UBYTE event_posted;
+  UBYTE slot_addressed;
 };
 
 struct ZZ9KOpener {
@@ -98,7 +100,7 @@ struct ZZ9KBase {
   UBYTE dispatcher_running;
   UBYTE dispatcher_starting;
   UBYTE dispatcher_stop_requested;
-  struct ZZ9KAppHandle *app;
+  ZZ9KAppSlotRegistry apps;
   struct ZZ9KOpener *openers;
   int last_open_status;
 };
@@ -484,8 +486,15 @@ static ULONG zz9k_lib_vblank_isr(REG(a1, struct ZZ9KBase *base))
   if (!base) {
     return 0;
   }
-  if (base->app && base->app->active) {
-    base->app->vblank_pending++;
+  {
+    uint32_t slot;
+    for (slot = 0U; slot < ZZ9K_APP_SLOT_COUNT; slot++) {
+      ZZ9KAppHandle *handle =
+          (ZZ9KAppHandle *)zz9k_app_slot_get(&base->apps, slot);
+      if (handle && handle->active) {
+        handle->vblank_pending++;
+      }
+    }
   }
   if (base->irq_task && base->irq_signal_mask) {
     Signal(base->irq_task, base->irq_signal_mask);
@@ -1100,8 +1109,13 @@ static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
   opener->references--;
   release_opener = opener->references == 0U;
   if (release_opener) {
-    if (base->app && base->app->owner_task == task) {
-      zz9k_lib_app_destroy_locked(base, base->app);
+    uint32_t slot;
+    for (slot = 0U; slot < ZZ9K_APP_SLOT_COUNT; slot++) {
+      ZZ9KAppHandle *handle =
+          (ZZ9KAppHandle *)zz9k_app_slot_get(&base->apps, slot);
+      if (handle && handle->owner_task == task) {
+        zz9k_lib_app_destroy_locked(base, handle);
+      }
     }
     if (previous) previous->next = opener->next;
     else base->openers = opener->next;

@@ -157,7 +157,9 @@ static void zz9k_lib_app_event_remove(ZZ9KAppHandle *handle)
 static int zz9k_lib_app_valid_locked(struct ZZ9KBase *base,
                                      const ZZ9KAppHandle *handle)
 {
-  if (!base || !handle || base->app != handle || !handle->active) {
+  if (!base || !handle || handle->slot >= ZZ9K_APP_SLOT_COUNT ||
+      zz9k_app_slot_get(&base->apps, handle->slot) != handle ||
+      !handle->active) {
     return ZZ9K_STATUS_BAD_HANDLE;
   }
   if (handle->owner_task != FindTask(0)) {
@@ -170,6 +172,28 @@ static int zz9k_lib_app_call_locked(struct ZZ9KBase *base, ZZ9KRequest *request,
                                     ZZ9KMailboxEntry *reply)
 {
   return ZZ9KCall(&base->core, request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+}
+
+static int zz9k_lib_app_select_request(const ZZ9KAppHandle *handle,
+                                       ZZ9KRequest *request)
+{
+  if (!handle->slot_addressed) {
+    return ZZ9K_STATUS_OK;
+  }
+  return zz9k_app_request_select(request, handle->slot, handle->generation);
+}
+
+static int zz9k_lib_app_stop_request(const ZZ9KAppHandle *handle,
+                                     ZZ9KRequest *request)
+{
+  int status;
+
+  if (!handle->slot_addressed) {
+    return zz9k_app_request_stop(request, handle->generation);
+  }
+  status = zz9k_app_request_init(request, ZZ9K_APP_OP_STOP);
+  return status == ZZ9K_STATUS_OK
+      ? zz9k_lib_app_select_request(handle, request) : status;
 }
 
 static void zz9k_lib_app_fill_life_status(ZZ9KAppHandle *handle,
@@ -193,15 +217,13 @@ static void zz9k_lib_app_fill_life_status(ZZ9KAppHandle *handle,
   status->flip_generation = zz9k_get_be32((const void *)(life + 68U));
 }
 
-static void zz9k_lib_app_service_locked(struct ZZ9KBase *base)
+static void zz9k_lib_app_service_handle_locked(ZZ9KAppHandle *handle)
 {
-  ZZ9KAppHandle *handle;
   ZZ9KAppStatusInfo status;
   uint32_t head;
   uint32_t tail;
   uint32_t event_type;
 
-  handle = base ? base->app : 0;
   if (!handle || !handle->active || handle->vblank_pending == 0U) {
     return;
   }
@@ -245,6 +267,17 @@ static void zz9k_lib_app_service_locked(struct ZZ9KBase *base)
   PutMsg(handle->notify_port, &handle->event.message);
 }
 
+static void zz9k_lib_app_service_locked(struct ZZ9KBase *base)
+{
+  uint32_t slot;
+
+  if (!base) return;
+  for (slot = 0U; slot < ZZ9K_APP_SLOT_COUNT; slot++) {
+    zz9k_lib_app_service_handle_locked(
+        (ZZ9KAppHandle *)zz9k_app_slot_get(&base->apps, slot));
+  }
+}
+
 static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
                              REG(a0, ZZ9KAppHandle **out),
                              REG(a1, struct MsgPort *notify_port))
@@ -257,7 +290,9 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
   uint32_t abi_major;
   uint32_t host_offset;
   uint32_t bytes;
+  uint32_t slot = 0U;
   BYTE signal_bit;
+  UBYTE slot_addressed;
   int status;
 
   if (!base || !out) {
@@ -284,13 +319,10 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
     FreeVec(handle);
     return status;
   }
-  if (base->app) {
-    zz9k_lib_leave(base);
-    FreeSignal(signal_bit);
-    FreeVec(handle);
-    return ZZ9K_STATUS_BUSY;
-  }
   status = zz9k_app_request_init(&request, ZZ9K_APP_OP_QUERY);
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_app_request_select(&request, 0U, 0U);
+  }
   if (status == ZZ9K_STATUS_OK) {
     status = zz9k_lib_app_call_locked(base, &request, &reply);
   }
@@ -302,23 +334,45 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
   }
   abi_major = zz9k_get_be32(reply.payload.inline_data);
   caps = zz9k_get_be32(reply.payload.inline_data + 12U);
+  slot_addressed = (caps & ZZ9K_APP_CAP_SLOTS) != 0U;
   if (abi_major != ZZ9K_APP_ABI_MAJOR || !(caps & ZZ9K_APP_CAP_Z3) ||
-      zz9k_get_be32(reply.payload.inline_data + 8U) != ZZ9K_APP_STATE_IDLE) {
+      (slot_addressed && reply.payload_len < ZZ9K_APP_QUERY_EXT_REPLY_BYTES) ||
+      (!slot_addressed &&
+       (zz9k_app_slot_get(&base->apps, 0U) ||
+        zz9k_get_be32(reply.payload.inline_data + 8U) !=
+            ZZ9K_APP_STATE_IDLE))) {
     zz9k_lib_leave(base);
     FreeSignal(signal_bit);
     FreeVec(handle);
     return (caps & ZZ9K_APP_CAP_Z3) ? ZZ9K_STATUS_BUSY : ZZ9K_STATUS_UNSUPPORTED;
   }
   status = zz9k_app_request_init(&request, ZZ9K_APP_OP_ALLOC_WINDOW);
+  if (status == ZZ9K_STATUS_OK && slot_addressed) {
+    status = zz9k_app_request_select(&request, 0U, 0U);
+  }
   if (status == ZZ9K_STATUS_OK) {
     status = zz9k_lib_app_call_locked(base, &request, &reply);
   }
-  if (status != ZZ9K_STATUS_OK || reply.payload_len < ZZ9K_APP_ALLOC_REPLY_BYTES ||
+  if (status != ZZ9K_STATUS_OK ||
+      reply.payload_len < (slot_addressed ? ZZ9K_APP_ALLOC_EXT_REPLY_BYTES :
+                                             ZZ9K_APP_ALLOC_REPLY_BYTES) ||
       zz9k_find_board(&board) != ZZ9K_STATUS_OK) {
     zz9k_lib_leave(base);
     FreeSignal(signal_bit);
     FreeVec(handle);
     return status == ZZ9K_STATUS_OK ? ZZ9K_STATUS_IO_ERROR : status;
+  }
+  if (slot_addressed) {
+    slot = zz9k_get_be32(reply.payload.inline_data + ZZ9K_APP_ALLOC_SLOT);
+    handle->generation =
+        zz9k_get_be32(reply.payload.inline_data + ZZ9K_APP_ALLOC_GENERATION);
+    if (slot >= ZZ9K_APP_SLOT_COUNT || handle->generation == 0U ||
+        zz9k_app_slot_get(&base->apps, slot)) {
+      zz9k_lib_leave(base);
+      FreeSignal(signal_bit);
+      FreeVec(handle);
+      return ZZ9K_STATUS_INTERNAL_ERROR;
+    }
   }
   bytes = zz9k_get_be32(reply.payload.inline_data + 4U);
   host_offset = zz9k_get_be32(reply.payload.inline_data + 8U);
@@ -329,6 +383,8 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
     FreeVec(handle);
     return ZZ9K_STATUS_UNSUPPORTED;
   }
+  handle->slot = slot;
+  handle->slot_addressed = slot_addressed;
   handle->window = (volatile uint8_t *)(uintptr_t)(board.board_addr + host_offset);
   status = zz9k_lib_app_cache_inhibit(handle);
   if (status != ZZ9K_STATUS_OK) {
@@ -338,7 +394,16 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
     return status;
   }
   if (zz9k_lib_app_life_get(handle->window, 0U) != ZZ9K_APP_LIFE_MAGIC ||
-      zz9k_lib_app_life_get(handle->window, 4U) != ZZ9K_APP_LIFE_VERSION) {
+      zz9k_lib_app_life_get(handle->window, 4U) != ZZ9K_APP_LIFE_VERSION ||
+      (slot_addressed && !zz9k_lib_app_generation_matches(handle))) {
+    zz9k_lib_app_cache_release(handle);
+    zz9k_lib_leave(base);
+    FreeSignal(signal_bit);
+    FreeVec(handle);
+    return ZZ9K_STATUS_INTERNAL_ERROR;
+  }
+  status = zz9k_app_slot_claim(&base->apps, slot, handle);
+  if (status != ZZ9K_STATUS_OK) {
     zz9k_lib_app_cache_release(handle);
     zz9k_lib_leave(base);
     FreeSignal(signal_bit);
@@ -346,12 +411,11 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
     return ZZ9K_STATUS_INTERNAL_ERROR;
   }
   handle->active = 1U;
-  base->app = handle;
   zz9k_lib_leave(base);
   status = zz9k_lib_dispatcher_ensure(base);
   if (status != ZZ9K_STATUS_OK) {
     (void)zz9k_lib_enter(base);
-    if (base->app == handle) base->app = 0;
+    (void)zz9k_app_slot_release(&base->apps, slot, handle);
     zz9k_lib_leave(base);
     zz9k_lib_app_cache_release(handle);
     FreeSignal(signal_bit);
@@ -370,21 +434,34 @@ static int zz9k_lib_app_load_begin_locked(struct ZZ9KBase *base,
   int status;
 
   status = zz9k_app_request_init(&request, ZZ9K_APP_OP_LOAD_BEGIN);
-  if (status != ZZ9K_STATUS_OK) return status;
-  status = zz9k_lib_app_call_locked(base, &request, &reply);
   if (status == ZZ9K_STATUS_OK) {
-    handle->generation = zz9k_lib_app_life_get(handle->window,
-                                                ZZ9K_APP_LIFE_GENERATION_OFFSET);
+    status = zz9k_lib_app_select_request(handle, &request);
+  }
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_lib_app_call_locked(base, &request, &reply);
+  }
+  if (status == ZZ9K_STATUS_OK) {
+    uint32_t generation = zz9k_lib_app_life_get(
+        handle->window, ZZ9K_APP_LIFE_GENERATION_OFFSET);
+    if (handle->slot_addressed &&
+        !zz9k_app_generation_matches(handle->generation, generation)) {
+      return ZZ9K_STATUS_BAD_HANDLE;
+    }
+    if (!handle->slot_addressed) handle->generation = generation;
     handle->started = 0U;
   }
   return status;
 }
 
-static int zz9k_lib_app_load_end_locked(struct ZZ9KBase *base)
+static int zz9k_lib_app_load_end_locked(struct ZZ9KBase *base,
+                                        ZZ9KAppHandle *handle)
 {
   ZZ9KRequest request;
   ZZ9KMailboxEntry reply;
   int status = zz9k_app_request_init(&request, ZZ9K_APP_OP_LOAD_END);
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_lib_app_select_request(handle, &request);
+  }
   return status == ZZ9K_STATUS_OK ? zz9k_lib_app_call_locked(base, &request, &reply)
                                   : status;
 }
@@ -414,10 +491,15 @@ static int zz9k_lib_app_load_memory(REG(a6, struct ZZ9KBase *base),
            chunk);
     zz9k_lib_app_cache(handle->window, ZZ9K_APP_STAGING_OFFSET, chunk);
     status = zz9k_app_request_chunk(&request, offset, chunk);
-    if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_call_locked(base, &request, &reply);
+    if (status == ZZ9K_STATUS_OK) {
+      status = zz9k_lib_app_select_request(handle, &request);
+    }
+    if (status == ZZ9K_STATUS_OK) {
+      status = zz9k_lib_app_call_locked(base, &request, &reply);
+    }
     offset += chunk;
   }
-  if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_load_end_locked(base);
+  if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_load_end_locked(base, handle);
   zz9k_lib_leave(base);
   return status;
 }
@@ -460,10 +542,15 @@ static int zz9k_lib_app_load_file(REG(a6, struct ZZ9KBase *base),
     }
     zz9k_lib_app_cache(handle->window, ZZ9K_APP_STAGING_OFFSET, chunk);
     status = zz9k_app_request_chunk(&request, offset, chunk);
-    if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_call_locked(base, &request, &reply);
+    if (status == ZZ9K_STATUS_OK) {
+      status = zz9k_lib_app_select_request(handle, &request);
+    }
+    if (status == ZZ9K_STATUS_OK) {
+      status = zz9k_lib_app_call_locked(base, &request, &reply);
+    }
     offset += chunk;
   }
-  if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_load_end_locked(base);
+  if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_load_end_locked(base, handle);
   zz9k_lib_leave(base);
   Close(file);
   return status;
@@ -511,7 +598,12 @@ static int zz9k_lib_app_start(REG(a6, struct ZZ9KBase *base),
     zz9k_lib_app_cache(handle->window, ZZ9K_APP_ARGV_OFFSET, ZZ9K_APP_ARGV_BYTES);
   }
   if (status == ZZ9K_STATUS_OK) status = zz9k_app_request_start(&request, argc);
-  if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_call_locked(base, &request, &reply);
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_lib_app_select_request(handle, &request);
+  }
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_lib_app_call_locked(base, &request, &reply);
+  }
   if (status == ZZ9K_STATUS_OK) handle->started = 1U;
   zz9k_lib_leave(base);
   return status;
@@ -528,8 +620,12 @@ static int zz9k_lib_app_stop(REG(a6, struct ZZ9KBase *base),
   if (status == ZZ9K_STATUS_OK && !zz9k_lib_app_generation_matches(handle)) {
     status = ZZ9K_STATUS_BAD_HANDLE;
   }
-  if (status == ZZ9K_STATUS_OK) status = zz9k_app_request_stop(&request, handle->generation);
-  if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_call_locked(base, &request, &reply);
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_lib_app_stop_request(handle, &request);
+  }
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_lib_app_call_locked(base, &request, &reply);
+  }
   zz9k_lib_leave(base);
   return status;
 }
@@ -548,8 +644,15 @@ static int zz9k_lib_app_status(REG(a6, struct ZZ9KBase *base),
   if (status == ZZ9K_STATUS_OK && !zz9k_lib_app_generation_matches(handle)) {
     status = ZZ9K_STATUS_BAD_HANDLE;
   }
-  if (status == ZZ9K_STATUS_OK) status = zz9k_app_request_init(&request, ZZ9K_APP_OP_STATUS);
-  if (status == ZZ9K_STATUS_OK) status = zz9k_lib_app_call_locked(base, &request, &reply);
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_app_request_init(&request, ZZ9K_APP_OP_STATUS);
+  }
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_lib_app_select_request(handle, &request);
+  }
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_lib_app_call_locked(base, &request, &reply);
+  }
   if (status == ZZ9K_STATUS_OK) status = zz9k_app_parse_status(&reply, status_out);
   if (status == ZZ9K_STATUS_OK &&
       !zz9k_app_generation_matches(handle->generation, status_out->generation)) {
@@ -633,11 +736,13 @@ static void zz9k_lib_app_destroy_locked(struct ZZ9KBase *base,
   if (!handle) return;
   if (base && base->core.ctx && handle->active &&
       zz9k_lib_app_generation_matches(handle) &&
-      zz9k_app_request_stop(&request, handle->generation) == ZZ9K_STATUS_OK) {
+      zz9k_lib_app_stop_request(handle, &request) == ZZ9K_STATUS_OK) {
     (void)zz9k_lib_app_call_locked(base, &request, &reply);
   }
   zz9k_lib_app_event_remove(handle);
-  if (base && base->app == handle) base->app = 0;
+  if (base && handle->slot < ZZ9K_APP_SLOT_COUNT) {
+    (void)zz9k_app_slot_release(&base->apps, handle->slot, handle);
+  }
   handle->active = 0U;
   zz9k_lib_app_cache_release(handle);
   if (handle->owner_task == FindTask(0)) {
@@ -658,5 +763,14 @@ static void zz9k_lib_app_close(REG(a6, struct ZZ9KBase *base),
 
 static void zz9k_lib_app_close_all_locked(struct ZZ9KBase *base)
 {
-  if (base && base->app) zz9k_lib_app_destroy_locked(base, base->app);
+  uint32_t slot;
+
+  if (!base) return;
+  for (slot = 0U; slot < ZZ9K_APP_SLOT_COUNT; slot++) {
+    ZZ9KAppHandle *handle =
+        (ZZ9KAppHandle *)zz9k_app_slot_get(&base->apps, slot);
+    if (handle) {
+      zz9k_lib_app_destroy_locked(base, handle);
+    }
+  }
 }
