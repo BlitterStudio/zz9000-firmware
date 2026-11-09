@@ -424,6 +424,71 @@ static void test_minigl_reset_phase_keeps_inflight_buffers(void)
              SCHED_MINIGL_RESET_IDLE);
 }
 
+typedef struct {
+  uint32_t queued;
+  uint32_t sends;
+  uint32_t rechecks;
+  int inject_after_drain;
+} doorbell_test_t;
+
+static void doorbell_send(void *context)
+{
+  ((doorbell_test_t *)context)->sends++;
+}
+
+static uint32_t doorbell_drain(void *context, uint32_t batch)
+{
+  doorbell_test_t *test = context;
+  uint32_t drained = test->queued < batch ? test->queued : batch;
+
+  test->queued -= drained;
+  return drained;
+}
+
+static int doorbell_more(void *context)
+{
+  doorbell_test_t *test = context;
+
+  if (test->inject_after_drain && test->rechecks++ == 0U)
+    test->queued++;
+  return test->queued != 0U;
+}
+
+static uint32_t doorbell_drain_all(volatile uint32_t *pending,
+                                   doorbell_test_t *test)
+{
+  uint32_t total = 0;
+
+  while (*pending)
+    total += taskq_doorbell_drain(pending, doorbell_drain, doorbell_more,
+                                  test, 16U);
+  return total;
+}
+
+static void test_doorbell_coalesces_and_drains(void)
+{
+  volatile uint32_t pending = 0;
+  doorbell_test_t test = { 1000U, 0U, 0U, 0 };
+
+  expect_int("doorbell_first", taskq_doorbell_request(&pending, doorbell_send, &test), 1);
+  expect_int("doorbell_repeat", taskq_doorbell_request(&pending, doorbell_send, &test), 0);
+  expect_u32("doorbell_one_sgi", test.sends, 1U);
+  expect_u32("doorbell_all_drained", doorbell_drain_all(&pending, &test),
+             1000U);
+  expect_u32("doorbell_cleared", pending, 0U);
+}
+
+static void test_doorbell_rechecks_before_clear(void)
+{
+  volatile uint32_t pending = 1;
+  doorbell_test_t test = { 2U, 0U, 0U, 1 };
+
+  expect_u32("doorbell_race_drained", doorbell_drain_all(&pending, &test),
+             3U);
+  expect_u32("doorbell_race_empty", test.queued, 0U);
+  expect_u32("doorbell_race_clear", pending, 0U);
+}
+
 int main(void)
 {
   test_stress_fill_is_deterministic();
@@ -456,6 +521,8 @@ int main(void)
   test_sched_worker_decide_priorities();
   test_minigl_reset_handshake_flow();
   test_minigl_reset_phase_keeps_inflight_buffers();
+  test_doorbell_coalesces_and_drains();
+  test_doorbell_rechecks_before_clear();
 
   if (failures) {
     printf("scheduler_test: %d failure(s)\n", failures);

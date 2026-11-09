@@ -74,12 +74,15 @@ void Xil_AssertNonVoid() {}
 #include "sdk_aperture_layout.h"
 #include "surface_allocator.h"
 #include "mmu_page.h"
+#include "zzapp_as.h"
 #include "zzapp_services.h"
 #include "card_pool.h"
 #include "overlay.h"
 #include "zzm_minigl_host.h"
 #include "mw_service.h"
 #include "newlib_heap.h"
+
+extern uint32_t MMUTable;
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
  * P96 off-screen bitmap hooks on this revision (older firmware would
@@ -1227,6 +1230,10 @@ int main() {
 #endif
 	printf("[boot] build git=" ZZ9000_BUILD_GIT " dirty="
 	       ZZ9000_BUILD_DIRTY " date=" ZZ9000_BUILD_DATE "\r\n");
+
+	/* Build the core-1-only privileged template after every boot-time page
+	 * split. Subsequent splits propagate through its mmu_page hook. */
+	zzapp_as_init(&MMUTable);
 
 	// Mark the task-queue region shareable-cacheable in the shared MMU table
 	// before core 1 starts, so the SCU keeps it coherent once core 1 brings up

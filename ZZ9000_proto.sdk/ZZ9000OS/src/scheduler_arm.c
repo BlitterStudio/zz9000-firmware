@@ -32,6 +32,7 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "card_pool.h"
 #include "zzm_minigl_host.h"
 #include "core2.h"
+#include "interrupt.h"
 #include "sleep.h"
 #include "xil_types.h"
 #include "xil_mmu.h"
@@ -40,10 +41,21 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "xpseudo_asm.h"
 #include "xreg_cortexa9.h"
 #include "scheduler_core1_minigl_init.h"
+#include "zzapp_as.h"
+#include "zzapp_kernel.h"
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
 #include "zzm_runtime.h"
 #include <stdio.h>
+
+#define SCHED_CORE1_DOORBELL_SGI 15U
+#define SCHED_CORE1_DOORBELL_CPU 2U
+#define SCHED_CORE1_DOORBELL_BATCH 8U
+
+/* The system thread keeps the established 1 MiB core-1 stack. */
+static uint8_t scheduler_app_stacks[ZZAPP_KERNEL_APP_SLOTS]
+                                   [ZZAPP_KERNEL_STACK_BYTES]
+  __attribute__((aligned(8)));
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
 static void scheduler_core1_clean_if_requested(taskq_shared_t *sh);
@@ -124,6 +136,15 @@ void scheduler_boot_init(void)
   sh->minigl_reset_ack = 0;
   sh->minigl_in_flight = 0;
   sh->minigl_packets_on_core1 = 0;
+  sh->service_pending = 0;
+  zzapp_kernel_stack_paint((uint8_t *)(uintptr_t)SDK_CORE1_STACK_BASE,
+                           SDK_CORE1_STACK_SIZE);
+  {
+    uint32_t slot;
+    for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
+      zzapp_kernel_stack_paint(scheduler_app_stacks[slot],
+                               sizeof(scheduler_app_stacks[slot]));
+  }
   sh->minigl_packets_on_core0 = 0;
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   zzapp_boot_init();
@@ -136,11 +157,59 @@ int scheduler_core1_available(void)
           taskq_watchdog_core1_enabled(&g_sched_watchdog)) ? 1 : 0;
 }
 
+static void scheduler_send_doorbell(void *unused)
+{
+  (void)unused;
+  dsb();
+  (void)XScuGic_SoftwareIntr(interrupt_get_intc(),
+                              SCHED_CORE1_DOORBELL_SGI,
+                              SCHED_CORE1_DOORBELL_CPU);
+  __asm__ __volatile__("sev" ::: "memory");
+}
+
 void scheduler_core1_wake(void)
 {
-  /* The producer's release-store publishes its payload before this event. */
-  dsb();
-  __asm__ __volatile__("sev" ::: "memory");
+  taskq_shared_t *sh = scheduler_shared();
+
+  (void)taskq_doorbell_request(&sh->service_pending,
+                               scheduler_send_doorbell, NULL);
+}
+
+/* With an app running, queued work would otherwise wait for the app's next
+ * 5 ms tick; pull that tick forward. The worker loop drains the queue
+ * itself when no app runs (the SGI also ends its WFE). */
+static void scheduler_core1_doorbell_irq(void *unused)
+{
+  (void)unused;
+  if (zzapp_kernel_current_thread() >= 0)
+    zzapp_private_timer_kick();
+}
+
+void scheduler_core1_enable_doorbell(void)
+{
+  XScuGic *intc = interrupt_get_intc();
+
+  (void)XScuGic_Connect(intc, SCHED_CORE1_DOORBELL_SGI,
+                         (Xil_InterruptHandler)scheduler_core1_doorbell_irq,
+                         NULL);
+  XScuGic_Enable(intc, SCHED_CORE1_DOORBELL_SGI);
+}
+
+uint32_t scheduler_core1_stack_high_water(uint32_t slot)
+{
+  if (slot >= ZZAPP_KERNEL_APP_SLOTS)
+    return zzapp_kernel_stack_used(
+        (const uint8_t *)(uintptr_t)SDK_CORE1_STACK_BASE,
+        SDK_CORE1_STACK_SIZE);
+  return zzapp_kernel_stack_used(scheduler_app_stacks[slot],
+                                 sizeof(scheduler_app_stacks[slot]));
+}
+
+void *scheduler_core1_app_stack_top(uint32_t slot)
+{
+  if (slot >= ZZAPP_KERNEL_APP_SLOTS)
+    return NULL;
+  return scheduler_app_stacks[slot] + sizeof(scheduler_app_stacks[slot]);
 }
 
 /* Bounded wait for core 1's worker to come up, ~100 ms total. */
@@ -228,9 +297,16 @@ void scheduler_coherency_init_core1(void)
    * match core 0. Unlike core 0, every domain is Client: app-table AP bits
    * must protect both DDR (domain 15) and the domain-0 device, FPGA and OCM
    * mappings, and domain 14 keeps the firmware-text L2 pages read-only. */
-  u32 ttbr0 = (u32)(UINTPTR)&MMUTable | TASKQ_TTBR0_ATTR;
+  u32 ttbr0 = (u32)(UINTPTR)zzapp_as_template() | TASKQ_TTBR0_ATTR;
+  uint32_t contextidr = 0U;
+
+  __asm__ __volatile__("mcr p15, 0, %0, c13, c0, 1\n\tisb"
+                       : : "r" (contextidr) : "memory");
 
   mtcp(XREG_CP15_TTBR0, ttbr0);
+  dsb();
+  mtcp(XREG_CP15_INVAL_UTLB_UNLOCKED, 0U);
+  mtcp(XREG_CP15_INVAL_BRANCH_ARRAY, 0U);
   mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0x55555555U);
   dsb();
   isb();
@@ -299,6 +375,35 @@ void scheduler_core1_service_once(void)
   dmb();
 }
 
+static uint32_t scheduler_doorbell_drain(void *context, uint32_t batch)
+{
+  taskq_shared_t *sh = context;
+  uint32_t done = 0;
+
+  while (done < batch && taskq_has_active(&sh->queue)) {
+    scheduler_core1_service_once();
+    done++;
+  }
+  return done;
+}
+
+static int scheduler_doorbell_more(void *context)
+{
+  return taskq_has_active(&((taskq_shared_t *)context)->queue);
+}
+
+void scheduler_core1_service_from_app(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  /* One queued task per app tick, as before; the step also runs the MiniGL
+   * tick. Without queued work only the MiniGL tick runs. */
+  if (sh->service_pending &&
+      taskq_doorbell_drain(&sh->service_pending, scheduler_doorbell_drain,
+                           scheduler_doorbell_more, sh, 1U) != 0U)
+    return;
+  scheduler_core1_service_once();
+}
 
 /*
  * Core-1 dedicated worker. Entered from core1_loop (core2.c) after coherency
@@ -327,8 +432,14 @@ void scheduler_core1_worker(void)
 
     /* Checked before every claim: once core 0 asks, no further task runs. */
     scheduler_core1_reclaim_if_requested(sh);
+    zzapp_kernel_set_current_thread(-1);
     scheduler_core1_clean_if_requested(sh);
     scheduler_core1_park_if_requested();
+    if (sh->service_pending)
+      (void)taskq_doorbell_drain(&sh->service_pending,
+                                  scheduler_doorbell_drain,
+                                  scheduler_doorbell_more, sh,
+                                  SCHED_CORE1_DOORBELL_BATCH);
     zzapp_worker_hook();
 
     reset_req = (sh->minigl_reset_request != 0);

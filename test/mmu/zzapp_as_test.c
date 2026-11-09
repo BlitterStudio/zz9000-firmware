@@ -164,6 +164,30 @@ static void test_noncacheable_change_propagates(void)
 	zzapp_as_destroy(&second);
 }
 
+/* Xil_SetTlbAttributes rewrites whole BSP sections at run time (audio,
+ * Ethernet, MiniGL, the Z3 mailbox). An app holding a grant in that section
+ * must see the new memory type on every page while keeping its access. */
+static void test_section_attribute_change_reaches_app_pages(void)
+{
+	zzapp_as_t as;
+	const uint32_t *l2;
+	const uint32_t noncache = 0x03400000U | 0x11de2U;
+	const uint32_t mem_type = (7U << 6) | (1U << 3) | (1U << 2);
+
+	CHECK(zzapp_as_create(&as, 1U, 7U) == 0);
+	CHECK(zzapp_as_grant_user(&as, 0x03405000U, 5U * 4096U) == 0);
+	zzapp_as_mmu_page_changed(0x034U, noncache, NULL);
+	CHECK((zzapp_as_template()[0x034U] & ~(SECTION_AP_MASK | SECTION_NG)) ==
+	      (noncache & ~(SECTION_AP_MASK | SECTION_NG)));
+	l2 = zzapp_as_l2_for(&as, 0x03400000U);
+	CHECK(l2 != NULL);
+	CHECK((l2[5] & mem_type) == (1U << 6));
+	CHECK((l2[5] & PAGE_AP_MASK) == PAGE_USER_RW);
+	CHECK((l2[4] & mem_type) == (1U << 6));
+	CHECK((l2[4] & PAGE_AP_MASK) != PAGE_USER_RW);
+	zzapp_as_destroy(&as);
+}
+
 static void test_l2_exhaustion_is_atomic(void)
 {
 	zzapp_as_t as;
@@ -192,6 +216,7 @@ int main(void)
 	test_grant_and_ungrant_preserve_neighbours();
 	test_image_permissions_and_window_bounds();
 	test_noncacheable_change_propagates();
+	test_section_attribute_change_reaches_app_pages();
 	test_l2_exhaustion_is_atomic();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

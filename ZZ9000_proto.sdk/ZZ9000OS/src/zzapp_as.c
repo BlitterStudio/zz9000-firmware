@@ -60,6 +60,7 @@ static uint32_t l2_pool[ZZAPP_AS_L2_TABLE_COUNT][L2_ENTRIES] ZZAPP_AS_TABLES
 static uint8_t l2_owner[ZZAPP_AS_L2_TABLE_COUNT];
 static uint8_t slot_live[ZZAPP_AS_SLOT_COUNT];
 static uint32_t asid_generation[ZZAPP_AS_SLOT_COUNT];
+static int template_ready;
 
 static void as_clean(const void *address, uint32_t bytes)
 {
@@ -306,6 +307,7 @@ void zzapp_as_init(const uint32_t *bsp_l1)
 	}
 	as_clean(template_l1, sizeof(template_l1));
 	mmu_page_set_change_hook(zzapp_as_mmu_page_changed);
+	template_ready = 1;
 }
 
 int zzapp_as_create(zzapp_as_t *as, uint32_t slot, uint32_t generation)
@@ -479,7 +481,8 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 		if (template_l2(section, pages) != 0)
 			return;
 	} else {
-		template_l1[section] = priv_global_section(descriptor);
+		replace_live_descriptor(&template_l1[section],
+					priv_global_section(descriptor));
 	}
 	for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; slot++) {
 		uint32_t app_descriptor;
@@ -494,10 +497,16 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 						template_l1[section]);
 			continue;
 		}
-		if (pages) {
+		{
 			uint32_t page;
+
+			/* A section-wide change (Xil_SetTlbAttributes) carries
+			 * no page table; every page takes the section's type. */
 			for (page = 0U; page < L2_ENTRIES; page++)
-				replace_memory_attributes(&l2_pool[index][page], pages[page]);
+				replace_memory_attributes(&l2_pool[index][page],
+					pages ? pages[page] :
+					section_page_descriptor(section, page,
+								descriptor));
 			as_clean(l2_pool[index], sizeof(l2_pool[index]));
 		}
 	}
@@ -553,3 +562,21 @@ const uint32_t *zzapp_as_l2_for(const zzapp_as_t *as, uint32_t address)
 	index = l2_index_for_descriptor(descriptor);
 	return index < 0 ? NULL : l2_pool[index];
 }
+
+#ifndef MMU_PAGE_HOST_TEST
+/* Every Xil_SetTlbAttributes call, including those inside the BSP archive,
+ * lands here (-Wl,--wrap in the Makefile). It rewrites a BSP section that
+ * core 1, running on the template, would otherwise keep with its old memory
+ * type. */
+extern u32 MMUTable;
+void __real_Xil_SetTlbAttributes(UINTPTR addr, u32 attrib);
+
+void __wrap_Xil_SetTlbAttributes(UINTPTR addr, u32 attrib)
+{
+	uint32_t section = (uint32_t)addr >> SECTION_SHIFT;
+
+	__real_Xil_SetTlbAttributes(addr, attrib);
+	if (template_ready)
+		zzapp_as_mmu_page_changed(section, (&MMUTable)[section], NULL);
+}
+#endif

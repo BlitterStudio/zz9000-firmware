@@ -152,6 +152,8 @@ typedef struct {                /* coherent control block at the queue region */
   volatile uint32_t minigl_in_flight;       /* core 1 sets 1 while executing MiniGL packet */
   volatile uint32_t minigl_packets_on_core1;/* observability counter */
   volatile uint32_t minigl_packets_on_core0;/* observability counter (fallback) */
+  /* Core 0 raises the doorbell SGI only when this changes from zero to one. */
+  volatile uint32_t service_pending;
 } taskq_shared_t;
 
 typedef struct {
@@ -159,6 +161,10 @@ typedef struct {
   uint32_t fault_threshold;
   int      core1_enabled;
 } taskq_watchdog_t;
+
+typedef void (*taskq_doorbell_send_fn)(void *context);
+typedef uint32_t (*taskq_doorbell_drain_fn)(void *context, uint32_t batch);
+typedef int (*taskq_doorbell_more_fn)(void *context);
 
 /* ---- queue lifecycle (portable) ---- */
 void taskq_init(taskq_t *q);
@@ -174,6 +180,16 @@ void taskq_complete(taskq_t *q, int slot, uint16_t status,
 void taskq_fail(taskq_t *q, int slot, uint16_t status);
 int  taskq_harvest(taskq_t *q);
 void taskq_release(taskq_t *q, int slot);
+
+/* Coalesced producer-to-core-1 notification. The producer sends only when it
+ * changes pending from zero to one; the consumer clears only after rechecking
+ * its work source. */
+int taskq_doorbell_request(volatile uint32_t *pending,
+			   taskq_doorbell_send_fn send, void *context);
+uint32_t taskq_doorbell_drain(volatile uint32_t *pending,
+			      taskq_doorbell_drain_fn drain,
+			      taskq_doorbell_more_fn more, void *context,
+			      uint32_t batch);
 int  taskq_has_active(taskq_t *q);         /* any slot still QUEUED or CLAIMED */
 
 /* ---- dispatch policy (portable) ---- */
@@ -230,6 +246,9 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh);
 void scheduler_coherency_init_core0(void); /* core 0: mark region shareable */
 void scheduler_coherency_init_core1(void); /* core 1: full MMU/cache/SMP bring-up */
 taskq_shared_t *scheduler_shared(void);    /* the coherent control block */
+void scheduler_core1_enable_doorbell(void); /* core 1: install SGI 15 */
+uint32_t scheduler_core1_stack_high_water(uint32_t slot);
+void *scheduler_core1_app_stack_top(uint32_t slot);
 void scheduler_boot_init(void);            /* core 0: init queue + watchdog at boot */
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
 void scheduler_core1_wake(void);           /* core 0: publish async app work, then wake worker */

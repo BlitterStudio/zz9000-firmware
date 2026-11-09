@@ -18,6 +18,7 @@
 #include "zzm_runtime.h"
 #include "zzapp_runtime.h"
 #include "zzapp_proto.h"
+#include "interrupt.h"
 #include "zzapp_services.h"
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -97,6 +98,15 @@ struct core_fault_slot core1_fault __attribute__((aligned(32))) = { CORE_FAULT_N
 /* Saved by the BSP vectors (asm_vectors.S) before the handler runs. */
 extern u32 DataAbortAddr;
 extern u32 PrefetchAbortAddr;
+
+extern void zzapp_core1_vectors(void);
+
+/* Core 1 uses a private VBAR. Its vector entry owns the complete VFP save;
+ * the GIC dispatcher then invokes the normal per-interrupt callbacks. */
+void zzapp_kernel_irq_dispatch(void)
+{
+	XScuGic_InterruptHandler(interrupt_get_intc());
+}
 extern u32 UndefinedExceptionAddr;
 
 /* The interrupted code's lr and sp: switch to its mode (SPSR) to read the
@@ -448,7 +458,7 @@ static uint8_t core1_abort_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), 
 static uint8_t core1_undef_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), used));
 
 /*
- * Program VBAR = _vector_table, then point each exception mode's banked SP at
+ * Program core 1's private VBAR, then point each exception mode's banked SP at
  * its own stack and return to the entry mode. Naked with PC-relative literals
  * (`ldr ..., =sym`) so no value is carried across a mode switch -- FIQ banks
  * r8-r12, which would corrupt register operands. I+F are masked while switching;
@@ -458,7 +468,7 @@ static uint8_t core1_undef_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), 
 __attribute__((naked, used)) static void core1_init_exception_state(void)
 {
 	__asm__ volatile(
-		"ldr	r0, =_vector_table\n\t"            /* VBAR = BSP vector table */
+		"ldr	r0, =zzapp_core1_vectors\n\t"
 		"mcr	p15, 0, r0, c12, c0, 0\n\t"
 		"mrs	r0, cpsr\n\t"
 		"bic	r1, r0, #0x1f\n\t"
@@ -565,6 +575,7 @@ void core1_loop() {
 	/* PPI 29 is configured locally on core 1. It remains disabled until an
 	 * app runs; core 0 never enables or handles this private timer. */
 	zzapp_private_timer_init_core1();
+	scheduler_core1_enable_doorbell();
 	C1_TRACE("[c1] R2b exc-state-ok\r\n");
 
 #ifdef SCHED_STRESS_TEST

@@ -1,0 +1,223 @@
+/*
+ * Core-1 app scheduler policy.
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+#include <string.h>
+
+#include "zzapp_kernel.h"
+
+
+static volatile int current_thread = -1;
+#define NO_ACTIVE (ZZAPP_KERNEL_APP_SLOTS + 1U)
+
+static int app_runnable(const zzapp_kernel_t *kernel)
+{
+	uint32_t slot;
+
+	for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
+		if (kernel->threads[slot].state == ZZAPP_THREAD_RUNNABLE)
+			return 1;
+	return 0;
+}
+
+static void wake_due(zzapp_kernel_t *kernel)
+{
+	for (;;) {
+		uint32_t slot;
+		uint32_t found = ZZAPP_KERNEL_APP_SLOTS;
+		uint64_t deadline = UINT64_MAX;
+
+		for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
+			const zzapp_thread_t *thread = &kernel->threads[slot];
+			if (thread->state == ZZAPP_THREAD_SLEEPING &&
+			    thread->sleep_deadline <= kernel->now &&
+			    (thread->sleep_deadline < deadline ||
+			     (thread->sleep_deadline == deadline &&
+			      (found == ZZAPP_KERNEL_APP_SLOTS ||
+			       thread->wake_sequence <
+			       kernel->threads[found].wake_sequence)))) {
+				found = slot;
+				deadline = thread->sleep_deadline;
+			}
+		}
+		if (found == ZZAPP_KERNEL_APP_SLOTS)
+			return;
+		(void)zzapp_kernel_wake(kernel, found, ZZAPP_WAKE_TIMEOUT);
+	}
+}
+
+void zzapp_kernel_init(zzapp_kernel_t *kernel)
+{
+	memset(kernel, 0, sizeof(*kernel));
+	kernel->active = NO_ACTIVE;
+}
+
+int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	kernel->threads[slot].state = ZZAPP_THREAD_RUNNABLE;
+	kernel->threads[slot].wake_reason = ZZAPP_WAKE_READY;
+	kernel->threads[slot].quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
+	return 0;
+}
+
+void zzapp_kernel_set_current_thread(int slot)
+{
+	current_thread = slot;
+}
+
+int zzapp_kernel_current_thread(void)
+{
+	return current_thread;
+}
+
+int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	kernel->threads[slot].state = ZZAPP_THREAD_BLOCKED;
+	kernel->threads[slot].quantum_left = 0;
+	if (kernel->active == slot)
+		kernel->active = NO_ACTIVE;
+	return 0;
+}
+
+int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
+		zzapp_wake_reason_t reason)
+{
+	zzapp_thread_t *thread;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	thread = &kernel->threads[slot];
+	if (thread->state != ZZAPP_THREAD_BLOCKED &&
+	    thread->state != ZZAPP_THREAD_SLEEPING)
+		return -1;
+	thread->state = ZZAPP_THREAD_RUNNABLE;
+	thread->wake_reason = reason;
+	thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
+	thread->wake_sequence = ++kernel->wake_serial;
+	if (kernel->wake_log_count < ZZAPP_KERNEL_APP_SLOTS)
+		kernel->wake_log[kernel->wake_log_count++] = (uint8_t)slot;
+	return 0;
+}
+
+int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t slot,
+		uint64_t deadline)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	kernel->threads[slot].state = ZZAPP_THREAD_SLEEPING;
+	kernel->threads[slot].sleep_deadline = deadline;
+	kernel->threads[slot].wake_sequence = ++kernel->wake_serial;
+	kernel->threads[slot].quantum_left = 0;
+	if (kernel->active == slot)
+		kernel->active = NO_ACTIVE;
+	return 0;
+}
+
+void zzapp_kernel_advance(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
+{
+	if (!kernel)
+		return;
+	kernel->now += elapsed_ms;
+	wake_due(kernel);
+}
+
+void zzapp_kernel_service_due(zzapp_kernel_t *kernel)
+{
+	if (kernel)
+		kernel->service_due = 1;
+}
+
+static int choose_app(zzapp_kernel_t *kernel)
+{
+	uint32_t offset;
+
+	if (kernel->active < ZZAPP_KERNEL_APP_SLOTS &&
+	    kernel->threads[kernel->active].state == ZZAPP_THREAD_RUNNABLE &&
+	    kernel->threads[kernel->active].quantum_left != 0U)
+		return (int)kernel->active;
+	for (offset = 0; offset < ZZAPP_KERNEL_APP_SLOTS; offset++) {
+		uint32_t slot = (kernel->rr_next + offset) % ZZAPP_KERNEL_APP_SLOTS;
+		if (kernel->threads[slot].state == ZZAPP_THREAD_RUNNABLE) {
+			kernel->active = slot;
+			kernel->rr_next = (slot + 1U) % ZZAPP_KERNEL_APP_SLOTS;
+			if (kernel->threads[slot].quantum_left == 0U)
+				kernel->threads[slot].quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
+			return (int)slot;
+		}
+	}
+	kernel->active = NO_ACTIVE;
+	return ZZAPP_KERNEL_IDLE;
+}
+
+int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
+{
+	int pick;
+	int runnable;
+
+	if (!kernel)
+		return ZZAPP_KERNEL_IDLE;
+	if (kernel->now - kernel->window_start >= ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
+		kernel->window_start = kernel->now;
+		kernel->service_in_window = 0;
+	}
+	wake_due(kernel);
+	runnable = app_runnable(kernel);
+	if (kernel->service_due &&
+	    (!runnable || kernel->service_in_window + elapsed_ms <=
+	     ZZAPP_KERNEL_SERVICE_LIMIT_MS)) {
+		kernel->service_due = 0;
+		kernel->service_ticks += elapsed_ms;
+		kernel->service_in_window += elapsed_ms;
+		kernel->now += elapsed_ms;
+		return ZZAPP_KERNEL_SYSTEM;
+	}
+	if (kernel->service_due && runnable)
+		kernel->overload_count++;
+	pick = choose_app(kernel);
+	if (pick >= 0) {
+		zzapp_thread_t *thread = &kernel->threads[pick];
+		uint32_t charged = elapsed_ms;
+
+		if (charged > thread->quantum_left)
+			charged = thread->quantum_left;
+		thread->user_ticks += charged;
+		thread->quantum_left -= charged;
+		kernel->now += charged;
+		if (thread->quantum_left == 0U)
+			kernel->active = NO_ACTIVE;
+		return pick;
+	}
+	kernel->now += elapsed_ms;
+	return ZZAPP_KERNEL_IDLE;
+}
+
+void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t slot,
+		uint32_t elapsed_ms)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS ||
+	    kernel->threads[slot].state == ZZAPP_THREAD_BLOCKED)
+		return;
+	kernel->threads[slot].svc_ticks += elapsed_ms;
+}
+
+void zzapp_kernel_stack_paint(uint8_t *stack, uint32_t bytes)
+{
+	if (stack)
+		memset(stack, 0xa5, bytes);
+}
+
+uint32_t zzapp_kernel_stack_used(const uint8_t *stack, uint32_t bytes)
+{
+	uint32_t index = 0;
+
+	if (!stack)
+		return 0;
+	while (index < bytes && stack[index] == 0xa5)
+		index++;
+	return bytes - index;
+}

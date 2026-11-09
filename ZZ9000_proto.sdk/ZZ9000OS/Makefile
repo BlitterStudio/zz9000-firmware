@@ -181,6 +181,9 @@ LDFLAGS += -L$(BSP_LIB)
 LDFLAGS += -Wl,--wrap=Xil_DCacheFlushRange -Wl,--wrap=Xil_DCacheInvalidateRange
 LDFLAGS += -Wl,--wrap=Xil_DCacheFlush -Wl,--wrap=Xil_L2CacheFlush
 LDFLAGS += -Wl,--wrap=Xil_ICacheInvalidateRange
+# Section attribute changes also reach the core-1 template and app tables
+# (src/zzapp_as.c).
+LDFLAGS += -Wl,--wrap=Xil_SetTlbAttributes
 
 # Libraries (order matters for --start-group)
 LIBS = $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
@@ -224,6 +227,7 @@ C_SRCS = \
 	$(SRC_DIR)/card_pool.c \
 	$(SRC_DIR)/zzapp_mem.c \
 	$(SRC_DIR)/zzapp_as.c \
+	$(SRC_DIR)/zzapp_kernel.c \
 	$(SRC_DIR)/sdk_palette.c \
 	$(SRC_DIR)/zzapp_loader.c \
 	$(SRC_DIR)/zzapp_host.c \
@@ -329,8 +333,11 @@ C_SRCS = \
 	$(SRC_DIR)/newlib_heap.c \
 	$(SRC_DIR)/sd_boot_deadline.c
 
+ASM_SRCS = $(SRC_DIR)/zzapp_kernel_asm.S
+
 # Object files shared by both bitstream-capability firmware images.
 COMMON_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
+COMMON_OBJS += $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRCS))
 COMMON_OBJS += $(LZMA_SDK_BUILD)/LzmaDec.o
 COMMON_OBJS += $(LZMA_SDK_BUILD)/Lzma2Dec.o
 BOOTROM_TOOL = $(BUILD_DIR)/make_bootrom_image
@@ -553,6 +560,10 @@ $(BUILD_DIR)/lzh/%.o: $(SRC_DIR)/lzh/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H $(CFLAGS) -MMD -MP -o $@ $<
 
+
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(INCLUDES) $(WERROR) -c -o $@ $<
 
 # Default rule for all other files (-O2).
 # -MMD emits a .d file next to the .o listing every header the source

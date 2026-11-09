@@ -1240,7 +1240,7 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
 		return 0;
 
 	g_task_generation[slot] = sdk_mailbox_generation;
-	__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+	scheduler_core1_wake();
 	return 1;
 }
 
@@ -4426,8 +4426,7 @@ void sdk_mailbox_audio_playback_pump(void)
 				if (slot >= 0) {
 					g_task_generation[slot] =
 					    sdk_mailbox_generation;
-					__asm__ __volatile__("dsb ish\n\tsev"
-					                     ::: "memory");
+					scheduler_core1_wake();
 					g_audio_playback.refill_pending = 1U;
 					g_audio_playback.refill_session =
 					    g_audio_playback.session;
@@ -7369,7 +7368,7 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 			g_task_generation[slot] = sdk_mailbox_generation;
 			/* taskq_enqueue release-stored the QUEUED state; make it globally
 			 * visible and wake the worker if it is idling on WFE. */
-			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			scheduler_core1_wake();
 			return SDK_STATUS_QUEUED;
 		}
 		/* queue full -> fall through to synchronous inline compute */
@@ -7417,7 +7416,7 @@ static uint16_t service_try_defer(uint16_t opcode,
 			g_task_generation[slot] = sdk_mailbox_generation;
 			/* taskq_enqueue release-stored the QUEUED state; make it globally
 			 * visible and wake the worker if it is idling on WFE. */
-			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			scheduler_core1_wake();
 			return SDK_STATUS_QUEUED;
 		}
 		/* queue full -> caller computes inline */
@@ -7460,7 +7459,7 @@ static uint16_t image_session_begin_try_defer(
 		return SDK_STATUS_BUSY;
 	}
 	g_task_generation[slot] = sdk_mailbox_generation;
-	__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+	scheduler_core1_wake();
 	return SDK_STATUS_QUEUED;
 }
 
@@ -7525,7 +7524,7 @@ static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
 			g_task_generation[slot] = sdk_mailbox_generation;
 			/* taskq_enqueue release-stored the QUEUED state; make it globally
 			 * visible and wake the worker if it is idling on WFE. */
-			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			scheduler_core1_wake();
 			return SDK_STATUS_QUEUED;
 		}
 		/* queue full -> fall through to synchronous inline compute */
@@ -8071,7 +8070,7 @@ static uint16_t handle_decompress_batch(volatile struct SDKMailboxEntry *req,
 	g_task_generation[slot] = sdk_mailbox_generation;
 	/* taskq_enqueue release-stored the QUEUED state; make it globally
 	 * visible and wake the worker if it is idling on WFE. */
-	__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+	scheduler_core1_wake();
 	return SDK_STATUS_QUEUED;
 }
 
@@ -8788,7 +8787,7 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 			if (slot < 0)
 				return complete_status(req, comp, SDK_STATUS_BUSY);
 			g_task_generation[slot] = sdk_mailbox_generation;
-			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			scheduler_core1_wake();
 			return SDK_STATUS_QUEUED;
 		}
 	case SDK_OP_MINIGL_MODULE_RELEASE:
@@ -8805,7 +8804,7 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 			if (slot < 0)
 				return complete_status(req, comp, SDK_STATUS_BUSY);
 			g_task_generation[slot] = sdk_mailbox_generation;
-			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			scheduler_core1_wake();
 			return SDK_STATUS_QUEUED;
 		}
 	case SDK_OP_QUERY_APERTURE_LAYOUT:

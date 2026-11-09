@@ -77,7 +77,12 @@ void zzapp_core0_poll(void);
 void zzapp_on_core1_restart(void);
 void zzapp_on_amiga_reset(void);
 void zzapp_private_timer_init_core1(void);
+/* Fire the running app's service tick now (doorbell SGI on core 1). */
+void zzapp_private_timer_kick(void);
 void scheduler_core1_service_once(void);
+/* One bounded service step from an app's tick; clears the doorbell when
+ * the queue drains. */
+void scheduler_core1_service_from_app(void);
 
 int zzapp_fault_is_app(uint32_t pc, uint32_t abort_lr);
 void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,

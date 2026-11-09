@@ -138,6 +138,40 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
   return -1;
 }
 
+int taskq_doorbell_request(volatile uint32_t *pending,
+                           taskq_doorbell_send_fn send, void *context)
+{
+  if (!pending || !taskq_cas_u32(pending, 0U, 1U))
+    return 0;
+  taskq_store_release(pending, 1U);
+  if (send)
+    send(context);
+  return 1;
+}
+
+uint32_t taskq_doorbell_drain(volatile uint32_t *pending,
+                              taskq_doorbell_drain_fn drain,
+                              taskq_doorbell_more_fn more, void *context,
+                              uint32_t batch)
+{
+  uint32_t drained;
+
+  if (!pending || !drain || !more || batch == 0U)
+    return 0;
+  drained = drain(context, batch);
+  if (drained == batch || more(context))
+    return drained;
+  taskq_store_release(pending, 0U);
+  taskq_acquire_barrier();
+  if (!more(context))
+    return drained;
+  /* Work arrived between the empty check and clear. It is already either
+   * accompanied by the producer's SGI or remains visible to the next worker
+   * pass; retain the pending state in both cases. */
+  (void)taskq_cas_u32(pending, 0U, 1U);
+  return drained;
+}
+
 /* ---- atomic claim (consumer): CAS QUEUED -> CLAIMED ---- */
 int taskq_claim_any(taskq_t *q)
 {
