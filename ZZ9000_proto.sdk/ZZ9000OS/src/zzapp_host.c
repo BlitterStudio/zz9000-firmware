@@ -1127,9 +1127,14 @@ static void run_app(uint32_t argc)
     coh->running = 0;
     host->watchdog_reason = 0u;
     if (!host->faulted) {
-        life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
-        zzapp_services_set_terminal(ZZAPP_END_EXIT);
-        zzapp_services_on_app_end();
+        if (coh->reset_request) {
+            zzapp_services_set_terminal(ZZAPP_END_AMIGA_RESET);
+            zzapp_services_on_reset();
+        } else {
+            life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
+            zzapp_services_set_terminal(ZZAPP_END_EXIT);
+            zzapp_services_on_app_end();
+        }
         zzapp_minigl_reclaim(coh->generation);
         publish_state(ZZAPP_ST_IDLE);
         zzapp_loader_release();
@@ -1385,9 +1390,14 @@ void zzapp_host_exit(int code)
     if (zzapp_kernel_current_thread() >= 0) {
         zzapp_kernel_stop_app(&g_kernel, slot);
         coh->running = 0;
-        life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
-        zzapp_services_set_terminal(ZZAPP_END_EXIT);
-        zzapp_services_on_app_end();
+        if (coh->reset_request) {
+            zzapp_services_set_terminal(ZZAPP_END_AMIGA_RESET);
+            zzapp_services_on_reset();
+        } else {
+            life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
+            zzapp_services_set_terminal(ZZAPP_END_EXIT);
+            zzapp_services_on_app_end();
+        }
         zzapp_minigl_reclaim(coh->generation);
         publish_state(ZZAPP_ST_IDLE);
         zzapp_loader_release();
