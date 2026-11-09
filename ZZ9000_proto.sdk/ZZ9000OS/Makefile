@@ -222,6 +222,7 @@ C_SRCS = \
 	$(SRC_DIR)/dma_rtg.c \
 	$(SRC_DIR)/surface_allocator.c \
 	$(SRC_DIR)/card_pool.c \
+	$(SRC_DIR)/zzapp_mem.c \
 	$(SRC_DIR)/sdk_palette.c \
 	$(SRC_DIR)/zzapp_loader.c \
 	$(SRC_DIR)/zzapp_host.c \

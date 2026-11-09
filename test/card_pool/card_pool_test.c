@@ -85,6 +85,21 @@ static void test_fills_ranges_in_order(void)
     CHECK(d == C_BASE + 2 * PAGE);
 }
 
+static void test_aligned_allocation_skips_unaligned_range(void)
+{
+    uint32_t addr;
+
+    card_pool_init(&pool);
+    CHECK(card_pool_add_range(&pool, A_BASE + PAGE,
+                              A_BASE + PAGE + MB(1), 0) == 0);
+    CHECK(card_pool_add_range(&pool, C_BASE, C_BASE + MB(2), 0) == 1);
+    card_pool_open_range(&pool, 0);
+    card_pool_open_range(&pool, 1);
+    addr = card_pool_alloc_aligned(&pool, MB(1), MB(1), MEDIA(1));
+    CHECK(addr == C_BASE);
+    CHECK((addr & (MB(1) - 1u)) == 0u);
+}
+
 static void test_block_ownership(void)
 {
     uint32_t address;
@@ -461,6 +476,7 @@ static void test_random(void)
 int main(void)
 {
     test_fills_ranges_in_order();
+    test_aligned_allocation_skips_unaligned_range();
     test_block_ownership();
     test_range_owned_rejects_past_end();
     test_too_large_leaves_table();

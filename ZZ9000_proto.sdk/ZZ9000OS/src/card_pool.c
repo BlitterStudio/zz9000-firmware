@@ -41,6 +41,8 @@ void card_pool_init(card_pool_t *pool)
     pool->class_limit[CARD_POOL_CLASS_APP] = CARD_POOL_LIMIT_APP;
     pool->class_limit[CARD_POOL_CLASS_APP_DISPLAY] =
         CARD_POOL_LIMIT_APP_DISPLAY;
+    pool->class_limit[CARD_POOL_CLASS_APP_FRAMES] =
+        CARD_POOL_LIMIT_APP_FRAMES;
     pool->class_limit[CARD_POOL_CLASS_MINIGL_MODULE] =
         CARD_POOL_LIMIT_MINIGL_MODULE;
     pool->class_limit[CARD_POOL_CLASS_MINIGL_TRANSPORT] =
@@ -131,48 +133,76 @@ uint32_t card_pool_revoke_range(card_pool_t *pool, uint32_t range)
     return dropped;
 }
 
-/* First gap of `size` bytes in an open range, or 0. *insert_at receives
- * the table index the new block takes. */
+/* First aligned gap of `size` bytes in an open range, or 0. *insert_at
+ * receives the table index the new block takes. */
 static uint32_t find_gap(const card_pool_t *pool, const card_pool_range_t *r,
-                         uint32_t size, uint32_t *insert_at)
+                         uint32_t size, uint32_t alignment,
+                         uint32_t *insert_at)
 {
     uint32_t i = lower_bound(pool, r->base);
     uint32_t candidate = r->base;
+    uint32_t mask = alignment - 1u;
+
     for (; i < pool->block_count && pool->blocks[i].addr < r->end; i++) {
-        if (pool->blocks[i].addr - candidate >= size)
-            break;
+        uint32_t aligned = (candidate + mask) & ~mask;
+
+        if (aligned >= candidate && aligned <= pool->blocks[i].addr &&
+            pool->blocks[i].addr - aligned >= size) {
+            *insert_at = i;
+            return aligned;
+        }
         candidate = pool->blocks[i].addr + pool->blocks[i].size;
     }
-    if (r->end - candidate < size)
-        return 0;
-    *insert_at = i;
-    return candidate;
+    {
+        uint32_t aligned = (candidate + mask) & ~mask;
+
+        if (aligned >= candidate && aligned <= r->end &&
+            r->end - aligned >= size) {
+            *insert_at = i;
+            return aligned;
+        }
+    }
+    return 0;
 }
 
-uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner)
+static int range_allows(const card_pool_range_t *range, uint32_t cls)
+{
+    return range->open &&
+           !(range->revocable &&
+             (cls == CARD_POOL_CLASS_FIRMWARE || cls == CARD_POOL_CLASS_APP ||
+              cls == CARD_POOL_CLASS_APP_FRAMES));
+}
+
+uint32_t card_pool_alloc_aligned(card_pool_t *pool, uint32_t size,
+                                 uint32_t alignment, uint32_t owner)
 {
     uint32_t cls = CARD_POOL_OWNER_CLASS(owner);
+    uint32_t rounded;
+    uint32_t addr = 0;
+
     if (!size || size > UINT32_MAX - (CARD_POOL_PAGE_BYTES - 1u) ||
+        alignment < CARD_POOL_PAGE_BYTES ||
+        (alignment & (alignment - 1u)) ||
+        (alignment & (CARD_POOL_PAGE_BYTES - 1u)) ||
         cls == CARD_POOL_CLASS_NONE || cls >= CARD_POOL_CLASS_COUNT)
         return 0;
-    uint32_t rounded = (size + CARD_POOL_PAGE_BYTES - 1u) &
-                       ~(CARD_POOL_PAGE_BYTES - 1u);
+    rounded = (size + CARD_POOL_PAGE_BYTES - 1u) &
+              ~(CARD_POOL_PAGE_BYTES - 1u);
 
-    uint32_t addr = 0;
     sdk_smp_lock_acquire(&pool->lock);
     if (pool->block_count < CARD_POOL_MAX_BLOCKS &&
         rounded <= pool->class_limit[cls] - pool->class_used[cls]) {
         for (uint32_t r = 0; r < pool->range_count && !addr; r++) {
             const card_pool_range_t *range = &pool->ranges[r];
             uint32_t insert_at;
-            if (!range->open ||
-                (range->revocable &&
-                 (cls == CARD_POOL_CLASS_FIRMWARE || cls == CARD_POOL_CLASS_APP)))
+
+            if (!range_allows(range, cls))
                 continue;
-            addr = find_gap(pool, range, rounded, &insert_at);
+            addr = find_gap(pool, range, rounded, alignment, &insert_at);
             if (addr) {
                 memmove(&pool->blocks[insert_at + 1], &pool->blocks[insert_at],
-                        (pool->block_count - insert_at) * sizeof(pool->blocks[0]));
+                        (pool->block_count - insert_at) *
+                        sizeof(pool->blocks[0]));
                 pool->blocks[insert_at].addr = addr;
                 pool->blocks[insert_at].size = rounded;
                 pool->blocks[insert_at].owner = owner;
@@ -183,6 +213,11 @@ uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner)
     }
     sdk_smp_lock_release(&pool->lock);
     return addr;
+}
+
+uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner)
+{
+    return card_pool_alloc_aligned(pool, size, CARD_POOL_PAGE_BYTES, owner);
 }
 
 int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
@@ -311,6 +346,28 @@ uint32_t card_pool_range_free_bytes(card_pool_t *pool, uint32_t range)
     if (range < pool->range_count && pool->ranges[range].open) {
         const card_pool_range_t *r = &pool->ranges[range];
         free_bytes = r->end - r->base;
+        for (uint32_t i = lower_bound(pool, r->base);
+             i < pool->block_count && pool->blocks[i].addr < r->end; i++)
+            free_bytes -= pool->blocks[i].size;
+    }
+    sdk_smp_lock_release(&pool->lock);
+    return free_bytes;
+}
+
+uint32_t card_pool_available_bytes(card_pool_t *pool, uint32_t owner)
+{
+    uint32_t cls = CARD_POOL_OWNER_CLASS(owner);
+    uint32_t free_bytes = 0;
+
+    if (cls == CARD_POOL_CLASS_NONE || cls >= CARD_POOL_CLASS_COUNT)
+        return 0;
+    sdk_smp_lock_acquire(&pool->lock);
+    for (uint32_t range = 0; range < pool->range_count; range++) {
+        const card_pool_range_t *r = &pool->ranges[range];
+
+        if (!range_allows(r, cls))
+            continue;
+        free_bytes += r->end - r->base;
         for (uint32_t i = lower_bound(pool, r->base);
              i < pool->block_count && pool->blocks[i].addr < r->end; i++)
             free_bytes -= pool->blocks[i].size;

@@ -57,6 +57,9 @@ enum card_pool_class {
     CARD_POOL_CLASS_MINIGL_RIX = 13,
     /* Firmware-owned back buffers for a trusted app's single-buffer bind. */
     CARD_POOL_CLASS_APP_DISPLAY = 14,
+    /* 1 MiB-aligned extents the app frame allocator carves into frames.
+     * Commit admission in zzapp_mem bounds them, not a class limit. */
+    CARD_POOL_CLASS_APP_FRAMES = 15,
     CARD_POOL_CLASS_COUNT
 };
 
@@ -74,6 +77,7 @@ enum card_pool_class {
 #define CARD_POOL_LIMIT_IMAGE       (72u << 20)
 #define CARD_POOL_LIMIT_APP         (96u << 20)
 #define CARD_POOL_LIMIT_APP_DISPLAY (32u << 20)
+#define CARD_POOL_LIMIT_APP_FRAMES  UINT32_MAX
 #define CARD_POOL_LIMIT_MINIGL_MODULE    (4u << 20)
 #define CARD_POOL_LIMIT_MINIGL_TRANSPORT (4u << 20)
 #define CARD_POOL_LIMIT_MINIGL_CONTEXT   MINIGL_CARD_POOL_LIMIT_BYTES
@@ -137,6 +141,10 @@ uint32_t card_pool_revoke_range(card_pool_t *pool, uint32_t range);
  * address, or 0 for a zero size, an invalid owner class, a class over its
  * limit, no gap large enough, or a full block table. */
 uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner);
+/* Like card_pool_alloc(), but starts the block at an `alignment` boundary.
+ * The alignment must be a power of two and at least one pool page. */
+uint32_t card_pool_alloc_aligned(card_pool_t *pool, uint32_t size,
+                                 uint32_t alignment, uint32_t owner);
 /* Whether `owner` owns the live block starting at `addr` and that block
  * covers `length`. */
 int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
@@ -168,6 +176,9 @@ void card_pool_finish_amiga_reset(card_pool_t *pool, int is_zorro3,
 
 /* Free bytes in one interval; 0 while it is closed. */
 uint32_t card_pool_range_free_bytes(card_pool_t *pool, uint32_t range);
+/* Free bytes available to `owner`, excluding closed and incompatible
+ * revocable ranges. */
+uint32_t card_pool_available_bytes(card_pool_t *pool, uint32_t owner);
 
 /* Force the pool lock free. Only for core-1 fault recovery, while core 1
  * is halted and cannot be inside the pool. */
