@@ -62,6 +62,9 @@ void zzapp_services_note_progress(uint32_t lo, uint32_t hi);
 void zzapp_services_or_flags(uint32_t flags);
 void zzapp_services_and_flags(uint32_t mask);
 uint32_t zzapp_services_flags(void);
+/* Terminal status survives slot reclamation for APP_LIST. */
+void zzapp_services_set_terminal(uint32_t reason);
+void zzapp_services_expire_claims(uint64_t now_us);
 
 /* After poll: nonzero means APP_START is waiting for the worker to enter.
  * Copy argv from the window, then start_entered before the branch. */

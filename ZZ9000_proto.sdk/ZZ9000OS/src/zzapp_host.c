@@ -53,6 +53,21 @@ uint32_t __attribute__((weak)) zzapp_services_memory_limit(void)
     return 0U;
 }
 
+uint32_t __attribute__((weak)) zzapp_services_state(void)
+{
+    return ZZAPP_ST_IDLE;
+}
+
+void __attribute__((weak)) zzapp_services_set_terminal(uint32_t reason)
+{
+    (void)reason;
+}
+
+void __attribute__((weak)) zzapp_services_expire_claims(uint64_t now)
+{
+    (void)now;
+}
+
 int __attribute__((weak)) zzapp_services_wait_registered(uint32_t slot)
 {
 #ifdef ZZAPP_HOST_TEST
@@ -117,6 +132,7 @@ struct zzapp_host_slot {
     uint32_t seen_api_calls;
     uint64_t last_tick;
     volatile uint32_t watchdog_reason;
+    uint32_t terminal_reason;
 };
 
 static struct zzapp_host_slot g_host[ZZAPP_AS_SLOT_COUNT];
@@ -524,6 +540,22 @@ static int claim_fault(uint32_t slot)
 {
     return __atomic_exchange_n(&host_slot(slot)->faulted, 1, __ATOMIC_ACQ_REL) == 0;
 }
+static uint32_t terminal_reason(const struct zzapp_host_slot *host,
+                                uint32_t fault)
+{
+    if (host->terminal_reason)
+        return host->terminal_reason;
+    if (fault == ZZAPP_FAULT_DATA || fault == ZZAPP_FAULT_PREFETCH ||
+        fault == ZZAPP_FAULT_UNDEF)
+        return ZZAPP_END_USER_FAULT;
+    if (fault == ZZAPP_FAULT_WATCHDOG)
+        return host->watchdog_reason == 2u ? ZZAPP_END_STUCK_CALL :
+                                              ZZAPP_END_STALL;
+    if (fault == ZZAPP_FAULT_WATCHDOG_RESTART)
+        return ZZAPP_END_CORE_RESTART;
+    return ZZAPP_END_FORCED;
+}
+
 
 static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
                        uint32_t lr, uint32_t far, uint32_t fsr, uint32_t cpsr)
@@ -543,10 +575,9 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
     life32(ZZAPP_LIFE_LR_OFF, lr);
     life32(ZZAPP_LIFE_FAR_OFF, far);
     life32(ZZAPP_LIFE_FSR_OFF, fsr);
-    if (zzapp_kernel_current_thread() >= 0) {
-        zzapp_kernel_stop_app(&g_kernel, slot);
+    zzapp_kernel_stop_app(&g_kernel, slot);
+    if (zzapp_kernel_current_thread() >= 0)
         zzapp_kernel_service_due(&g_kernel);
-    }
 #ifndef ZZAPP_HOST_TEST
     {
         const uint32_t *stk = (const uint32_t *)(uintptr_t)sp;
@@ -570,19 +601,16 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
 #endif
     publish_state(ZZAPP_ST_FAULTED);
     host->fault_mark = now_ticks();
+    zzapp_services_set_terminal(terminal_reason(host, fault));
     zzapp_services_on_app_end();
     zzapp_minigl_reclaim(coh->generation);
-#ifndef ZZAPP_HOST_TEST
-    if (host->owner)
-        card_pool_release_owner(&card_pool, host->owner);
-#endif
 #ifdef ZZAPP_HOST_TEST
     if (coh->reset_request)
         zzapp_services_on_reset();
 #endif
     if (zzapp_api_poison_resources)
         zzapp_api_poison_resources();
-    zzapp_loader_unbound();
+    zzapp_loader_release();
 }
 
 static void maybe_expire_fault(uint64_t now)
@@ -1100,6 +1128,7 @@ static void run_app(uint32_t argc)
     host->watchdog_reason = 0u;
     if (!host->faulted) {
         life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
+        zzapp_services_set_terminal(ZZAPP_END_EXIT);
         zzapp_services_on_app_end();
         zzapp_minigl_reclaim(coh->generation);
         publish_state(ZZAPP_ST_IDLE);
@@ -1204,6 +1233,8 @@ static uint64_t core1_stamp_age_us(const volatile uint64_t *stamp)
 void zzapp_core0_poll(void)
 {
     uint32_t slot;
+    uint32_t selected = zzapp_services_current_slot();
+    zzapp_services_expire_claims(ticks_to_us(now_ticks()));
 
     for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
         struct zzapp_host_slot *host = host_slot(slot);
@@ -1226,8 +1257,10 @@ void zzapp_core0_poll(void)
             coh->heartbeat_seen = now;
         }
         if (running && host->state == ZZAPP_ST_RUNNING &&
-            core1_stamp_age_us(&coh->heartbeat_seen) >= ZZAPP_LEASE_US)
+            core1_stamp_age_us(&coh->heartbeat_seen) >= ZZAPP_LEASE_US) {
+            host->terminal_reason = ZZAPP_END_LEASE;
             life32(ZZAPP_LIFE_STOP_OFF, 1u);
+        }
         if (running && age >= ZZAPP_WATCHDOG_US &&
             tick_age >= ZZAPP_WATCHDOG_US) {
             coh->running = 0;
@@ -1236,6 +1269,7 @@ void zzapp_core0_poll(void)
             (void)claim_fault(slot);
             host->fault_mark = now_ticks();
             publish_state(ZZAPP_ST_FAULTED);
+            zzapp_services_set_terminal(ZZAPP_END_CORE_RESTART);
 #ifndef ZZAPP_HOST_TEST
             printf("[app] watchdog restart: no progress for %lu ms, no tick for "
                    "%lu ms, in_api=%lu\r\n", (unsigned long)(age / 1000u),
@@ -1245,27 +1279,30 @@ void zzapp_core0_poll(void)
 #endif
             zzapp_services_on_app_end();
             zzapp_minigl_reclaim(coh->generation);
-#ifndef ZZAPP_HOST_TEST
-            if (host->owner)
-                card_pool_release_owner(&card_pool, host->owner);
-#endif
             if (zzapp_api_poison_resources)
                 zzapp_api_poison_resources();
-            zzapp_loader_unbound();
+            zzapp_loader_release();
         }
     }
+    zzapp_services_select_slot(selected);
 }
 
 void zzapp_on_core1_restart(void)
 {
     uint32_t slot;
+    uint32_t selected = zzapp_services_current_slot();
 
     for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
-        if (!coherent(slot)->running)
-            continue;
         zzapp_services_select_slot(slot);
-        force_stop(ZZAPP_FAULT_WATCHDOG_RESTART, 0, 0, 0, 0, 0, 0);
+        if (coherent(slot)->running) {
+            host_slot(slot)->terminal_reason = ZZAPP_END_CORE_RESTART;
+            force_stop(ZZAPP_FAULT_WATCHDOG_RESTART, 0, 0, 0, 0, 0, 0);
+        } else if (zzapp_services_state() != ZZAPP_ST_IDLE) {
+            zzapp_services_set_terminal(ZZAPP_END_CORE_RESTART);
+            zzapp_services_on_reset();
+        }
     }
+    zzapp_services_select_slot(selected);
     g_cold_restarts++;
 }
 
@@ -1276,11 +1313,13 @@ void zzapp_on_core1_restart(void)
 void zzapp_on_amiga_reset(void)
 {
     uint32_t slot;
+    uint32_t selected = zzapp_services_current_slot();
 
     coherent_barrier();
     for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
         coherent(slot)->reset_ack = 0;
         coherent(slot)->reset_request = 1;
+        host_slot(slot)->terminal_reason = ZZAPP_END_AMIGA_RESET;
     }
     coherent_publish();
     wake_core1();
@@ -1299,6 +1338,14 @@ void zzapp_on_amiga_reset(void)
                    (unsigned long)slot);
     }
 #endif
+    for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
+        zzapp_services_select_slot(slot);
+        if (zzapp_services_state() != ZZAPP_ST_CLAIMED)
+            continue;
+        zzapp_services_set_terminal(ZZAPP_END_AMIGA_RESET);
+        zzapp_services_on_reset();
+    }
+    zzapp_services_select_slot(selected);
 }
 
 void zzapp_status_observed(void)
@@ -1339,6 +1386,7 @@ void zzapp_host_exit(int code)
         zzapp_kernel_stop_app(&g_kernel, slot);
         coh->running = 0;
         life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
+        zzapp_services_set_terminal(ZZAPP_END_EXIT);
         zzapp_services_on_app_end();
         zzapp_minigl_reclaim(coh->generation);
         publish_state(ZZAPP_ST_IDLE);

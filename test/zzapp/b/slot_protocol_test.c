@@ -78,5 +78,28 @@ int main(void)
     assert(dispatch(ZZAPP_OP_STATUS, NULL, 0U, reply, &reply_len) ==
            SDK_STATUS_OK);
     assert(zzapp_get_be32(reply + ZZAPP_STATUS_GENERATION) == generation[0]);
+    /* A claim whose launcher never starts a load expires independently. */
+    zzapp_services_test_reset();
+    for (i = 0; i < ZZAPP_SLOT_COUNT; i++)
+        zzapp_services_test_set_window_slot(i, windows[i], sizeof(windows[i]));
+    extended_request(request, 0U, 0U);
+    assert(dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request), reply,
+                    &reply_len) == SDK_STATUS_OK);
+    generation[0] = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+    zzapp_services_expire_claims(1999999U);
+    extended_request(request, 0U, 0U);
+    assert(dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply, &reply_len) ==
+           SDK_STATUS_OK);
+    assert(zzapp_get_be32(reply + ZZAPP_LIST_STATE) == ZZAPP_ST_CLAIMED);
+    assert(reply[ZZAPP_LIST_REASONS + 1U] == ZZAPP_END_NONE);
+    zzapp_services_expire_claims(2000000U);
+    assert(dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply, &reply_len) ==
+           SDK_STATUS_OK);
+    assert(zzapp_get_be32(reply + ZZAPP_LIST_STATE) == ZZAPP_ST_IDLE);
+    assert(reply[ZZAPP_LIST_REASONS + 1U] == ZZAPP_END_LEASE);
+    extended_request(request, 0U, 0U);
+    assert(dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request), reply,
+                    &reply_len) == SDK_STATUS_OK);
+    assert(zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION) == generation[0] + 1U);
     return 0;
 }

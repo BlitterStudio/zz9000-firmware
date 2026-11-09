@@ -191,7 +191,7 @@ static int map_loaded_image(const struct load_image *img)
     proc->image_frame_count = image_frames;
     proc->heap_frame_count = heap_frames;
     proc->stack_frame_count = stack_frames;
-    if (zzapp_as_create(&proc->as, 0U, proc->generation))
+    if (zzapp_as_create(&proc->as, loader_slot(), proc->generation))
         goto failed;
     proc->heap_base = image_frames * ZZAPP_MEM_FRAME_BYTES;
     if (img->note_minor < 3u) {

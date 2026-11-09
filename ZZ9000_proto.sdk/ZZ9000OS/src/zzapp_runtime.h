@@ -161,6 +161,7 @@ int zzapp_services_take_start(uint32_t *argc);
 uint8_t *zzapp_services_window(void);
 uint32_t zzapp_services_current_slot(void);
 void zzapp_services_select_slot(uint32_t slot);
+uint32_t zzapp_services_state(void);
 uint32_t zzapp_services_memory_limit(void);
 int zzapp_services_wait_registered(uint32_t slot);
 void zzapp_services_start_entered(int status);
@@ -168,6 +169,8 @@ void zzapp_services_on_reset(void);
 void zzapp_services_on_app_end(void);
 void zzapp_services_cancel_start(int status);
 void zzapp_services_on_launch(void);
+void zzapp_services_set_terminal(uint32_t reason);
+void zzapp_services_expire_claims(uint64_t now_us);
 
 void zzapp_svc_log(const char *msg, uint32_t len);
 int zzapp_svc_should_stop(void);

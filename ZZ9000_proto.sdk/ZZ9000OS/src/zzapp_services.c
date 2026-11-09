@@ -154,6 +154,8 @@ struct zzapp_service_slot {
 	uint32_t generation;
 	uint32_t state;
 	uint32_t memory_limit;
+	uint32_t terminal_reason;
+	uint64_t claim_started;
 	int window_uncached;
 };
 
@@ -924,6 +926,35 @@ void zzapp_services_and_flags(uint32_t mask)
 uint32_t zzapp_services_flags(void)
 {
 	return life_get(ZZAPP_LIFE_FLAGS_OFF);
+}
+
+void zzapp_services_set_terminal(uint32_t reason)
+{
+	slots[service_slot()].terminal_reason = reason;
+	life_put(ZZAPP_LIFE_TERMINAL_OFF, reason);
+}
+
+void zzapp_services_expire_claims(uint64_t now)
+{
+	uint32_t saved = selected_slot[service_context()];
+	uint32_t slot;
+
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		struct zzapp_service_slot *entry = &slots[slot];
+
+		if (entry->state != ZZAPP_ST_CLAIMED ||
+		    now - entry->claim_started < ZZAPP_LEASE_US)
+			continue;
+		select_slot(slot);
+		memset(current_runtime(), 0, sizeof(*current_runtime()));
+		entry->memory_limit = 0U;
+		entry->state = ZZAPP_ST_IDLE;
+		entry->terminal_reason = ZZAPP_END_LEASE;
+		life_put(ZZAPP_LIFE_STOP_OFF, 0U);
+		life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
+		life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_LEASE);
+	}
+	select_slot(saved);
 }
 
 static void forget_window(void)
@@ -3117,10 +3148,13 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
 		generation = 1U;
 	slots[slot].generation = generation;
 	slots[slot].memory_limit = 0U;
+	slots[slot].terminal_reason = ZZAPP_END_NONE;
+	slots[slot].claim_started = now_us();
 	slots[slot].state = ZZAPP_ST_CLAIMED;
 	life_put(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
 	life_put(ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
 	life_put(ZZAPP_LIFE_GENERATION_OFF, generation);
+	life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_NONE);
 	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_CLAIMED);
 	return ZZ_OK;
 }
@@ -3147,6 +3181,7 @@ static void put_list(uint8_t *reply, uint16_t *reply_len, uint32_t slot)
 		       cpu > UINT32_MAX ? UINT32_MAX : (uint32_t)cpu);
 	zzapp_put_be32(reply + ZZAPP_LIST_SERVICE_MS,
 		       service > UINT32_MAX ? UINT32_MAX : (uint32_t)service);
+	reply[ZZAPP_LIST_REASONS + 1U] = (uint8_t)slots[slot].terminal_reason;
 	if (kernel && kernel->overload_count != 0U)
 		zzapp_put_be16(reply + ZZAPP_LIST_REASONS + 2U,
 			       ZZAPP_LIST_FLAG_OVERLOAD);

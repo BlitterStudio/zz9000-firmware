@@ -181,6 +181,20 @@ static uint16_t status(void)
                                   &reply_bytes, 1, 0, 0);
 }
 
+static uint8_t terminal_reason(void)
+{
+    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+    uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    uint16_t reply_bytes = 0;
+
+    zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+    assert(zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request),
+                                  reply, &reply_bytes, 1, 0, 0) ==
+           SDK_STATUS_OK);
+    assert(reply_bytes == ZZAPP_LIST_REPLY_BYTES);
+    return reply[ZZAPP_LIST_REASONS + 1U];
+}
+
 static void bind_window(void)
 {
     memset(launcher_window, 0, sizeof(launcher_window));
@@ -299,6 +313,7 @@ int main(void)
     }
     damage_canary = 0;
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    assert(terminal_reason() == ZZAPP_END_USER_FAULT);
     assert(status() == SDK_STATUS_OK);
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     bind_window();
@@ -310,10 +325,57 @@ int main(void)
     zzapp_test_mark_running();
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    assert(terminal_reason() == ZZAPP_END_USER_FAULT);
     assert(status() == SDK_STATUS_OK);
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     load_hello();
     start_and_exit();
     assert(app_runs == 7u);
+
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    bind_window();
+    zzapp_test_set_xtime(0U);
+    zzapp_test_mark_running();
+    zzapp_host_tick_at(30000000U);
+    assert(terminal_reason() == ZZAPP_END_STALL);
+
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    bind_window();
+    zzapp_test_set_xtime(0U);
+    zzapp_test_mark_running();
+    zzapp_api_enter();
+    zzapp_host_tick_at(1U);
+    zzapp_host_tick_at(10000001U);
+    assert(terminal_reason() == ZZAPP_END_STUCK_CALL);
+
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    bind_window();
+    zzapp_test_set_xtime(0U);
+    zzapp_test_mark_running();
+    zzapp_test_set_xtime(1999999U);
+    zzapp_host_tick_at(1999999U);
+    zzapp_test_set_xtime(2000000U);
+    zzapp_core0_poll();
+    zzapp_host_tick_at(2000000U);
+    zzapp_host_tick_at(2500000U);
+    assert(terminal_reason() == ZZAPP_END_LEASE);
+
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    bind_window();
+    zzapp_test_mark_running();
+    zzapp_on_amiga_reset();
+    zzapp_worker_hook();
+    assert(terminal_reason() == ZZAPP_END_AMIGA_RESET);
+
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    bind_window();
+    zzapp_test_mark_running();
+    zzapp_on_core1_restart();
+    assert(terminal_reason() == ZZAPP_END_CORE_RESTART);
     return 0;
 }

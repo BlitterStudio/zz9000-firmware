@@ -289,6 +289,7 @@
 #define ZZAPP_LIFE_AUDIO_CHANNELS_OFF  0x98u
 #define ZZAPP_LIFE_AUDIO_FORMAT_OFF    0x9Cu
 #define ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF 0xA0u
+#define ZZAPP_LIFE_TERMINAL_OFF     0xA4u
 
 /* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
  * 5 stopping, 6 faulted. */
