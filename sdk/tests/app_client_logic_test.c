@@ -129,6 +129,7 @@ static void test_slot_selectors(void)
 static void test_slot_registry(void)
 {
   ZZ9KAppSlotRegistry registry;
+  void *previous;
   uint32_t first;
   uint32_t second;
   uint32_t third;
@@ -156,6 +157,12 @@ static void test_slot_registry(void)
                 zz9k_app_slot_claim(&registry, 0U, &first), ZZ9K_STATUS_OK);
   expect_status("legacy second open",
                 zz9k_app_slot_claim(&registry, 0U, &second), ZZ9K_STATUS_BUSY);
+  expect_status("replace stale first",
+                zz9k_app_slot_replace(&registry, 0U, &second, &previous),
+                ZZ9K_STATUS_OK);
+  expect_u32("replace returns stale handle", previous == &first, 1U);
+  expect_u32("replacement becomes active",
+             zz9k_app_slot_get(&registry, 0U) == &second, 1U);
 }
 
 static void test_status_parser(void)

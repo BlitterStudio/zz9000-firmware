@@ -33,6 +33,19 @@ int zz9k_app_slot_claim(ZZ9KAppSlotRegistry *registry, uint32_t slot,
   return ZZ9K_STATUS_OK;
 }
 
+int zz9k_app_slot_replace(ZZ9KAppSlotRegistry *registry, uint32_t slot,
+                          void *handle, void **previous)
+{
+  if (!registry || !handle || slot >= ZZ9K_APP_SLOT_COUNT) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  if (previous) {
+    *previous = registry->handles[slot];
+  }
+  registry->handles[slot] = handle;
+  return ZZ9K_STATUS_OK;
+}
+
 void *zz9k_app_slot_get(const ZZ9KAppSlotRegistry *registry, uint32_t slot)
 {
   return registry && slot < ZZ9K_APP_SLOT_COUNT ? registry->handles[slot] : 0;

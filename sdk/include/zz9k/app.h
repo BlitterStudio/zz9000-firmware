@@ -114,6 +114,10 @@ int zz9k_app_slot_claim(ZZ9KAppSlotRegistry *registry, uint32_t slot,
 void *zz9k_app_slot_get(const ZZ9KAppSlotRegistry *registry, uint32_t slot);
 int zz9k_app_slot_release(ZZ9KAppSlotRegistry *registry, uint32_t slot,
                           const void *handle);
+/* Replaces a stale owner after firmware assigns the slot to a new generation.
+ * The former owner is returned so its handle can remain closeable. */
+int zz9k_app_slot_replace(ZZ9KAppSlotRegistry *registry, uint32_t slot,
+                          void *handle, void **previous);
 int zz9k_app_request_init(ZZ9KRequest *request, uint16_t opcode);
 int zz9k_app_request_stop(ZZ9KRequest *request, uint32_t generation);
 /* Changes a legacy request into the 48-byte slot-addressed form. */

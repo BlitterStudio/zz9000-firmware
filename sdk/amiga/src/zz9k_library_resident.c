@@ -47,6 +47,7 @@ struct mmu_context;
 #define ZZ9K_LIB_IRQ_WAIT_MICROS 10UL
 
 struct ZZ9KAppHandle {
+  struct ZZ9KAppHandle *next;
   struct Task *owner_task;
   struct MsgPort *notify_port;
   ZZ9KAppEvent event;
@@ -54,13 +55,14 @@ struct ZZ9KAppHandle {
   ULONG signal_mask;
   BYTE signal_bit;
   ULONG heartbeat;
-  ULONG vblank_pending;
+  volatile ULONG vblank_pending;
   uint32_t generation;
   uint32_t slot;
   struct Library *mmu_base;
   struct mmu_context *mmu_context;
 
-  UBYTE active;
+  volatile UBYTE active;
+  volatile UBYTE claimed;
   UBYTE started;
   UBYTE event_posted;
   UBYTE slot_addressed;
@@ -76,6 +78,7 @@ struct ZZ9KBase {
   struct Library library;
   BPTR segment;
   struct SignalSemaphore lock;
+  struct SignalSemaphore app_lock;
   ZZ9KLibrary core;
   struct Interrupt irq;
   struct Interrupt vblank_irq;
@@ -101,6 +104,7 @@ struct ZZ9KBase {
   UBYTE dispatcher_starting;
   UBYTE dispatcher_stop_requested;
   ZZ9KAppSlotRegistry apps;
+  ZZ9KAppHandle *app_handles;
   struct ZZ9KOpener *openers;
   int last_open_status;
 };
@@ -126,6 +130,8 @@ static void zz9k_lib_app_service_locked(struct ZZ9KBase *base);
 static void zz9k_lib_app_close_all_locked(struct ZZ9KBase *base);
 static void zz9k_lib_app_destroy_locked(struct ZZ9KBase *base,
                                         ZZ9KAppHandle *handle);
+static void zz9k_lib_app_destroy_owner_locked(struct ZZ9KBase *base,
+                                               struct Task *owner);
 
 static int zz9k_lib_query_caps(REG(a6, struct ZZ9KBase *base),
                                REG(a0, ZZ9KCaps *caps));
@@ -491,7 +497,7 @@ static ULONG zz9k_lib_vblank_isr(REG(a1, struct ZZ9KBase *base))
     for (slot = 0U; slot < ZZ9K_APP_SLOT_COUNT; slot++) {
       ZZ9KAppHandle *handle =
           (ZZ9KAppHandle *)zz9k_app_slot_get(&base->apps, slot);
-      if (handle && handle->active) {
+      if (handle && handle->active && handle->claimed) {
         handle->vblank_pending++;
       }
     }
@@ -851,13 +857,15 @@ static void zz9k_lib_dispatcher_proc(void)
       uint32_t completed;
 
       completed = 0;
+      ObtainSemaphore(&base->app_lock);
+      zz9k_lib_app_service_locked(base);
+      ReleaseSemaphore(&base->app_lock);
       ObtainSemaphore(&base->lock);
       if (base->dispatcher_stop_requested) {
         ReleaseSemaphore(&base->lock);
         signals = SIGBREAKF_CTRL_C;
         break;
       }
-      zz9k_lib_app_service_locked(base);
       status = ZZ9KPoll(&base->core, 16, &completed);
       ReleaseSemaphore(&base->lock);
       if (status != ZZ9K_STATUS_OK || completed == 0) {
@@ -1109,14 +1117,7 @@ static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
   opener->references--;
   release_opener = opener->references == 0U;
   if (release_opener) {
-    uint32_t slot;
-    for (slot = 0U; slot < ZZ9K_APP_SLOT_COUNT; slot++) {
-      ZZ9KAppHandle *handle =
-          (ZZ9KAppHandle *)zz9k_app_slot_get(&base->apps, slot);
-      if (handle && handle->owner_task == task) {
-        zz9k_lib_app_destroy_locked(base, handle);
-      }
-    }
+    zz9k_lib_app_destroy_owner_locked(base, task);
     if (previous) previous->next = opener->next;
     else base->openers = opener->next;
   }
@@ -1211,6 +1212,7 @@ static struct ZZ9KBase *zz9k_lib_init(REG(a0, BPTR segment))
   base->irq_signal_bit = -1;
   base->dispatcher_signal_bit = -1;
   InitSemaphore(&base->lock);
+  InitSemaphore(&base->app_lock);
   ZZ9KInit(&base->core);
 
   AddLibrary((struct Library *)base);

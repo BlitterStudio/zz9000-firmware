@@ -95,9 +95,11 @@ void ZZ9KAppClose(ZZ9KAppHandle *handle);
 handle lifetime. When the extended `QUERY` reply advertises
 `ZZ9K_APP_CAP_SLOTS`, the library can open up to `ZZ9K_APP_SLOT_COUNT` (four)
 handles. Each one claims its own window and generation, so a stale generation
-or terminal state affects only that handle. A claimed slot that does not begin
-loading expires after two seconds. With firmware that lacks that cap, the
-library retains API 0.2 behaviour: one handle claims legacy slot 0 and a
+or terminal state affects only that handle; a new claim detaches a stale
+handle while leaving it safe to close. A claimed slot that does not begin
+loading expires after two seconds. If `Open` cannot finish setup after a
+successful claim, it cancels that claim. With firmware that lacks that cap,
+the library retains API 0.2 behaviour: one handle claims legacy slot 0 and a
 second `Open` returns `ZZ9K_STATUS_BUSY`. `LoadFile` streams the ELF through
 the handle's runtime staging window; `LoadMemory` accepts at most 16 MiB.
 `Start` copies no more than 16 argv strings of 127 bytes each. `Status`
@@ -106,11 +108,11 @@ returns the fault/exit snapshot for its handle.
 `ZZ9KAppMessage` is exactly 32 opaque bytes. Send returns `ZZ9K_STATUS_BUSY`
 when the host-to-app ring is full; get returns it when the app-to-host ring is
 empty. The library's real Amiga VBlank interrupt server renews every active
-handle's runtime lease independently of the caller's task. It signals
-`ZZ9KAppMessageSignal(handle)` for an app message, exit, or fault. When a
-`notify_port` was supplied, it posts one coalesced `ZZ9KAppEvent`: dequeue
-that event before draining messages with `ZZ9KAppGetMessage`, and drain the
-port before `Close`.
+handle's runtime lease independently of the caller's task and a concurrent
+load. It signals `ZZ9KAppMessageSignal(handle)` for an app message, exit, or
+fault. When a `notify_port` was supplied, it posts one coalesced
+`ZZ9KAppEvent`: dequeue that event before draining messages with
+`ZZ9KAppGetMessage`, and drain the port before `Close`.
 
 Always call `ZZ9KAppClose`: it stops only the generation loaded by that handle
 and releases the owner. Closing the owning task's final `zz9k.library`

@@ -142,6 +142,67 @@ static int expect_public_call_locked(const char *source, const char *name)
 
   return ok;
 }
+static char *read_app_source(const char *resident_path)
+{
+  const char *slash = strrchr(resident_path, '/');
+  size_t directory_bytes;
+  char *app_path;
+  char *source;
+
+  if (!slash) {
+    return 0;
+  }
+  directory_bytes = (size_t)(slash - resident_path + 1);
+  app_path = (char *)malloc(directory_bytes + sizeof("zz9k_library_app.inc"));
+  if (!app_path) {
+    return 0;
+  }
+  memcpy(app_path, resident_path, directory_bytes);
+  memcpy(app_path + directory_bytes, "zz9k_library_app.inc",
+         sizeof("zz9k_library_app.inc"));
+  source = read_file(app_path);
+  free(app_path);
+  return source;
+}
+
+static int expect_app_lease_independent(const char *resident)
+{
+  const char *dispatcher;
+  const char *service;
+  const char *lock;
+  const char *release;
+
+  dispatcher = find_definition(resident, "zz9k_lib_dispatcher_proc");
+  service = dispatcher ? strstr(dispatcher, "zz9k_lib_app_service_locked(base);") : 0;
+  lock = service ? strstr(dispatcher, "ObtainSemaphore(&base->app_lock)") : 0;
+  release = lock ? strstr(lock, "ReleaseSemaphore(&base->app_lock)") : 0;
+  if (!service || !lock || !release || lock > service || release < service) {
+    puts("app lease service waits on the transport lock");
+    return 0;
+  }
+  return 1;
+}
+
+static int expect_app_claim_lifetime_split(const char *app)
+{
+  static const char *required[] = {
+    "zz9k_app_slot_replace(",
+    "zz9k_lib_app_detach_stale_claim_locked",
+    "zz9k_lib_app_cancel_claim_locked",
+    "app_handles"
+  };
+  size_t i;
+  int ok = 1;
+
+  for (i = 0U; i < sizeof(required) / sizeof(required[0]); i++) {
+    if (!strstr(app, required[i])) {
+      printf("app client missing %s\n", required[i]);
+      ok = 0;
+    }
+  }
+  return ok;
+}
+
 
 int main(int argc, char **argv)
 {
@@ -179,6 +240,7 @@ int main(int argc, char **argv)
     "zz9k_lib_fill_surface",
     "zz9k_lib_copy_surface"
   };
+  char *app_source;
   char *source;
   size_t i;
   int failures;
@@ -189,8 +251,11 @@ int main(int argc, char **argv)
   }
 
   source = read_file(argv[1]);
-  if (!source) {
-    printf("failed to read %s\n", argv[1]);
+  app_source = read_app_source(argv[1]);
+  if (!source || !app_source) {
+    printf("failed to read app library source next to %s\n", argv[1]);
+    free(source);
+    free(app_source);
     return 2;
   }
 
@@ -208,6 +273,13 @@ int main(int argc, char **argv)
     printf("zz9k_lib_close: missing semaphore guard\n");
     failures++;
   }
+  if (!expect_app_lease_independent(source)) {
+    failures++;
+  }
+  if (!expect_app_claim_lifetime_split(app_source)) {
+    failures++;
+  }
+
 
   if (!expect_vector_table_complete(source)) {
     failures++;
@@ -219,6 +291,7 @@ int main(int argc, char **argv)
     }
   }
 
+  free(app_source);
   free(source);
   return failures ? 1 : 0;
 }
