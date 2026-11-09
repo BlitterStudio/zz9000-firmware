@@ -407,6 +407,36 @@ static void test_display_mailbox(void)
 	    (zzapp_services_flags() & ZZAPP_F_MAILBOX) != 0U)
 		fail("display mailbox old launcher fallback");
 }
+static void test_display_mailbox_uses_scanout_owner(void)
+{
+	uint8_t windows[2][ZZAPP_WINDOW_BYTES];
+	uint32_t scanout;
+
+	zzapp_services_test_reset();
+	memset(windows, 0, sizeof(windows));
+	zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
+	zzapp_services_test_set_window_slot(1U, windows[1], sizeof(windows[1]));
+	runtime[1].display_mailbox_active = 1;
+	runtime[1].display_mailbox_shown = 0x00200000U;
+	runtime[1].display_mailbox_pending = 0x00210000U;
+	runtime[1].display_mailbox_buffers[0] = 0x00200000U;
+	runtime[1].display_mailbox_buffers[1] = 0x00210000U;
+	runtime[1].display_mailbox_buffers[2] = 0x00220000U;
+	runtime[1].display_mailbox_bytes = 0x10000U;
+	zzapp_services_test_set_core(0);
+	zzapp_services_select_slot(0U);
+	if (!zzapp_services_display_mailbox_begin(0x00200000U, &scanout) ||
+	    scanout != 0x00210000U)
+		fail("display mailbox scanout owner");
+	zzapp_services_display_mailbox_end(1);
+	if (runtime[1].display_mailbox_shown != 0x00210000U ||
+	    runtime[1].display_mailbox_pending != 0U ||
+	    zzapp_get_be32(windows[1] + ZZAPP_LIFE_CARD_FRONT_OFF) !=
+		0x00210000U)
+		fail("display mailbox owner completion");
+	zzapp_services_test_set_core(1);
+}
+
 
 static uint64_t file_now;
 static int file_phase;
@@ -508,6 +538,25 @@ static void test_audio_teardown_handoff(void)
 	if (zzapp_svc_audio_close() != ZZ_OK)
 		fail("close after reclaim");
 }
+static void test_reset_preserves_audio_teardown(void)
+{
+	zzapp_audio audio;
+
+	zzapp_services_test_reset();
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_OK)
+		fail("audio open before reset");
+	zzapp_services_on_reset();
+	if (zzapp_services_test_audio_request() != AUDIO_REQUEST_CLOSE)
+		fail("reset discarded audio close request");
+	zzapp_services_poll();
+	if (zzapp_services_test_audio_request() != AUDIO_REQUEST_CLOSE_QUIESCED)
+		fail("reset did not quiesce audio close");
+	zzapp_services_core0_poll();
+	if (zzapp_services_test_audio_detach_count() != 1U ||
+	    zzapp_services_test_audio_request() != AUDIO_REQUEST_NONE)
+		fail("reset did not complete audio detach");
+}
+
 
 static void test_audio_write_cursor_wrap(void)
 {
@@ -646,6 +695,101 @@ static void test_core1_wakes_ready_waiter(void)
 	if (service_test_wake_count != 1U)
 		fail("core one wake count");
 }
+static void test_deferred_waits_for_system_thread(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_test_set_core(0);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 1U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 0U);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_QUEUED)
+		fail("deferred request queued");
+	zzapp_services_test_set_core(1);
+	service_test_current_thread = 0;
+	zzapp_services_poll();
+	if (defer_load() != DEFER_POSTED)
+		fail("app thread ran deferred request");
+	service_test_current_thread = -1;
+	zzapp_services_poll();
+	if (defer_load() != DEFER_DONE)
+		fail("system thread did not run deferred request");
+}
+static void test_load_uses_claim_generation(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("first window claim");
+	zzapp_services_expire_claims(ZZAPP_LEASE_US);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_OK)
+		fail("second window claim");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 3U, 0U) != SDK_STATUS_QUEUED)
+		fail("load begin queued");
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (service_loader_generation != generation)
+		fail("load generation differs from claim");
+}
+static void test_returned_buffers_are_user_granted(void)
+{
+	uint8_t payload[ZZAPP_BIND_REQ_BYTES];
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	zzapp_audio audio;
+	uint32_t grants;
+	uint32_t revokes;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_build_display_bind_request_layout(payload, 320U, 200U, 640U,
+						ZZ_FMT_RGB565, 0x00200000U,
+						0x00210000U, ZZ_LAYOUT_RGB565_LE);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("surface bind for grant");
+	if (service_test_grant_count != 2U)
+		fail("surface buffers were not granted");
+	grants = service_test_grant_count;
+	if (zzapp_svc_display_close(1U) != ZZ_OK)
+		fail("surface close for revoke");
+	if (service_test_ungrant_count != 2U)
+		fail("surface buffers were not revoked");
+	revokes = service_test_ungrant_count;
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_OK)
+		fail("audio open for grant");
+	if (service_test_grant_count != grants + 1U)
+		fail("audio buffer was not granted");
+	if (zzapp_svc_audio_close() != ZZ_OK)
+		fail("audio close for revoke");
+	if (service_test_ungrant_count != revokes + 1U)
+		fail("audio buffer was not revoked");
+}
+
+
+
 
 int main(void)
 {
@@ -656,14 +800,19 @@ int main(void)
 	test_audio_busy();
 	test_late_file_reply();
 	test_audio_teardown_handoff();
+	test_reset_preserves_audio_teardown();
 	test_audio_write_cursor_wrap();
 	test_display_refresh_rotation_and_layout();
 	test_display_scanout_ack();
 	test_clut8_palette_publication();
 	test_display_mailbox();
+	test_display_mailbox_uses_scanout_owner();
 	test_per_slot_file_and_audio_state();
 	test_app_window_ignores_mailbox_selection();
 	test_core1_wakes_ready_waiter();
+	test_deferred_waits_for_system_thread();
+	test_load_uses_claim_generation();
+	test_returned_buffers_are_user_granted();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;
