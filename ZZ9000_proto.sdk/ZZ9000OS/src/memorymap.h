@@ -482,15 +482,24 @@
 #error "Z3 host window lies outside the Zorro III main board aperture"
 #endif
 /*
- * The app rings allocation is made on APP_ALLOC_WINDOW, never at boot. Its
- * placement is fixed to pages which main.c maps Normal non-cacheable before
- * core 1 starts. Board offsets are ARM - ADDR_ADJ:
- * 0x07e6c000..0x07f00000, inside the 128 MiB Z3 main aperture.
+ * App windows are allocated on APP_ALLOC_WINDOW, never at boot, each in a
+ * fixed range that main.c maps Normal non-cacheable before core 1 starts.
+ * Slot 0 keeps the legacy range, which ends at the fixed Z3 host window;
+ * slots 1-3 sit directly below it. Board offsets are ARM - ADDR_ADJ.
  */
 #define ZZAPP_WINDOW_Z3_ADDRESS       0x0805C000U
 #define ZZAPP_WINDOW_Z3_SIZE          0x00094000U
+#define ZZAPP_WINDOW_Z3_SLOTS         4U
+#define ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot) \
+	(ZZAPP_WINDOW_Z3_ADDRESS - (slot) * ZZAPP_WINDOW_Z3_SIZE)
+#define ZZAPP_WINDOW_Z3_LOWEST \
+	ZZAPP_WINDOW_Z3_SLOT_ADDRESS(ZZAPP_WINDOW_Z3_SLOTS - 1U)
 #define ZZAPP_WINDOW_Z3_END \
 	(ZZAPP_WINDOW_Z3_ADDRESS + ZZAPP_WINDOW_Z3_SIZE)
+
+#if ZZAPP_WINDOW_Z3_LOWEST < HOST_VISIBLE_HEAP_ADDRESS
+#error "every app window must fit the host-visible heap"
+#endif
 
 #if ZZAPP_WINDOW_Z3_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS || \
     ZZAPP_WINDOW_Z3_END > HOST_VISIBLE_HEAP_END

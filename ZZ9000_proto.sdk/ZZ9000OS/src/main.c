@@ -597,15 +597,16 @@ static int reserve_host_control_ranges(void)
 #undef RESERVE_HOST_CONTROL_RANGE
 }
 
-/* The app window is allocated on demand, but every possible page must be
- * non-cacheable before core 1 and interrupts can observe the mapping. */
+/* App windows are allocated on demand, but every page any slot can use must
+ * be non-cacheable before core 1 and interrupts can observe the mapping.
+ * The slot ranges are contiguous below the legacy slot 0 range. */
 static int map_zzapp_window_pages(void)
 {
 	uint32_t address;
 
 	if (!sdk_aperture_runtime_is_zorro3())
 		return 0;
-	for (address = ZZAPP_WINDOW_Z3_ADDRESS;
+	for (address = ZZAPP_WINDOW_Z3_LOWEST;
 	     address < ZZAPP_WINDOW_Z3_END; address += 0x1000U) {
 		if (!mmu_page_set_noncacheable((uintptr_t)address))
 			return 0;

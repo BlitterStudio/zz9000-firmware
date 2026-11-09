@@ -34,6 +34,21 @@
 #include <stdlib.h>
 #endif
 
+uint32_t __attribute__((weak)) zzapp_services_current_slot(void)
+{
+    return 0U;
+}
+
+void __attribute__((weak)) zzapp_services_select_slot(uint32_t slot)
+{
+    (void)slot;
+}
+
+uint32_t __attribute__((weak)) zzapp_services_memory_limit(void)
+{
+    return 0U;
+}
+
 struct zzapp_coherent {
     volatile uint32_t running;
     volatile uint32_t in_api;
@@ -56,40 +71,59 @@ struct zzapp_coherent {
     volatile uint32_t reset_request;
     volatile uint32_t reset_ack;
 };
-#ifdef ZZAPP_HOST_TEST
-static uint32_t g_test_service_calls;
-void scheduler_core1_service_from_app(void) { g_test_service_calls++; }
-#endif
 
 #ifndef ZZAPP_HOST_TEST
 static struct zzapp_coherent *const g_coh =
     (struct zzapp_coherent *)(SDK_TASKQ_REGION_ADDRESS + ZZAPP_COHERENT_OFFSET);
 #else
-static struct zzapp_coherent g_coh_store;
-static struct zzapp_coherent *const g_coh = &g_coh_store;
+static struct zzapp_coherent g_coh_store[ZZAPP_AS_SLOT_COUNT];
+static struct zzapp_coherent *const g_coh = g_coh_store;
 static uint64_t g_test_ticks;
 #endif
 
-static uint8_t *g_mem;
-static uint32_t g_card;
-static uint32_t g_owner;
-static uint32_t g_state;
-static uint32_t g_entry;
-static int g_image_loaded;
-static uint32_t g_image_end;
-static uint32_t g_stack_bytes;
-static uint64_t g_stop_mark;
-static uint64_t g_fault_mark;
-static uint32_t g_exit_code;
-static uint32_t g_heap_off;
-static uint32_t g_heap_end;
-static uint32_t g_heap_bump;
-static int g_faulted;
-static int g_cold_restarts;
-/* Set in service_tick (possibly IRQ context); reported from run_app. */
-static volatile uint32_t g_watchdog_reason;
+_Static_assert(sizeof(struct zzapp_coherent) * ZZAPP_AS_SLOT_COUNT <= 0x1000u,
+               "coherent slots exceed reserved region");
+
+struct zzapp_host_slot {
+    uint8_t *mem;
+    uint32_t card;
+    uint32_t owner;
+    uint32_t state;
+    uint32_t entry;
+    int image_loaded;
+    uint32_t image_end;
+    uint32_t stack_bytes;
+    uint64_t stop_mark;
+    uint64_t fault_mark;
+    uint32_t exit_code;
+    uint32_t heap_off;
+    uint32_t heap_end;
+    uint32_t heap_bump;
+    int faulted;
+    uint32_t seen_api_calls;
+    uint64_t last_tick;
+    volatile uint32_t watchdog_reason;
+};
+
+static struct zzapp_host_slot g_host[ZZAPP_AS_SLOT_COUNT];
 static zzapp_proc_t g_proc[ZZAPP_AS_SLOT_COUNT];
 static zzapp_kernel_t g_kernel;
+static int g_cold_restarts;
+/* Set in service_tick (possibly IRQ context); reported from run_app. */
+#ifdef ZZAPP_HOST_TEST
+static uint32_t g_test_service_calls;
+void scheduler_core1_service_from_app(void) { g_test_service_calls++; }
+#endif
+
+static struct zzapp_coherent *coherent(uint32_t slot)
+{
+    return &g_coh[slot < ZZAPP_AS_SLOT_COUNT ? slot : 0U];
+}
+
+static struct zzapp_host_slot *host_slot(uint32_t slot)
+{
+    return &g_host[slot < ZZAPP_AS_SLOT_COUNT ? slot : 0U];
+}
 
 #ifndef ZZAPP_HOST_TEST
 static uint8_t *proc_alias(uint32_t offset, uint32_t bytes);
@@ -155,14 +189,18 @@ void zzapp_kernel_switch_kernel_address_space(void)
 static uint32_t current_slot(void)
 {
     int slot = zzapp_kernel_current_thread();
+    uint32_t selected;
 
-    return slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT ?
-           (uint32_t)slot : 0u;
+    if (slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT)
+        return (uint32_t)slot;
+    selected = zzapp_services_current_slot();
+    return selected < ZZAPP_AS_SLOT_COUNT ? selected : 0U;
 }
 
 int zzapp_proc_heap_grow(uint32_t bytes, void **old_break)
 {
-    zzapp_proc_t *proc = &g_proc[0];
+    uint32_t slot = current_slot();
+    zzapp_proc_t *proc = &g_proc[slot];
 
     if (!bytes || bytes % ZZAPP_MEM_FRAME_BYTES ||
         proc->note_minor < 3u ||
@@ -171,7 +209,7 @@ int zzapp_proc_heap_grow(uint32_t bytes, void **old_break)
         return ZZ_ENOMEM;
     if (old_break)
 #ifdef ZZAPP_HOST_TEST
-        *old_break = g_mem + proc->heap_break;
+        *old_break = host_slot(slot)->mem + proc->heap_break;
 #else
         *old_break = (void *)(uintptr_t)(ZZAPP_AS_WINDOW_BASE + proc->heap_break);
 #endif
@@ -188,7 +226,8 @@ int zzapp_proc_heap_grow(uint32_t bytes, void **old_break)
 
 int zzapp_proc_heap_shrink(uint32_t bytes, void **new_break)
 {
-    zzapp_proc_t *proc = &g_proc[0];
+    uint32_t slot = current_slot();
+    zzapp_proc_t *proc = &g_proc[slot];
 
     if (!bytes || bytes % ZZAPP_MEM_FRAME_BYTES || proc->note_minor < 3u ||
         bytes > proc->heap_break - proc->heap_base)
@@ -203,7 +242,7 @@ int zzapp_proc_heap_shrink(uint32_t bytes, void **new_break)
 #endif
     if (new_break)
 #ifdef ZZAPP_HOST_TEST
-        *new_break = g_mem + proc->heap_break;
+        *new_break = host_slot(slot)->mem + proc->heap_break;
 #else
         *new_break = (void *)(uintptr_t)(ZZAPP_AS_WINDOW_BASE + proc->heap_break);
 #endif
@@ -213,7 +252,7 @@ int zzapp_proc_heap_shrink(uint32_t bytes, void **new_break)
 int zzapp_proc_heap_info(uint32_t *committed, uint32_t *limit,
                          uint32_t *pool_free)
 {
-    zzapp_proc_t *proc = &g_proc[0];
+    zzapp_proc_t *proc = &g_proc[current_slot()];
 
     if (!committed || !limit || !pool_free)
         return ZZ_EINVAL;
@@ -234,25 +273,27 @@ struct zzapp_host_visible_block {
     uint32_t card;
     uint32_t bytes;
 };
-static struct zzapp_host_visible_block g_host_visible[ZZAPP_HOST_VISIBLE_SLOTS];
-static volatile uint32_t g_host_visible_commit_active;
-static uint32_t g_host_visible_used;
+static struct zzapp_host_visible_block
+    g_host_visible[ZZAPP_AS_SLOT_COUNT][ZZAPP_HOST_VISIBLE_SLOTS];
+static volatile uint32_t g_host_visible_commit_active[ZZAPP_AS_SLOT_COUNT];
+static uint32_t g_host_visible_used[ZZAPP_AS_SLOT_COUNT];
 
 static void host_visible_release_all(void)
 {
+    struct zzapp_host_visible_block *blocks = g_host_visible[current_slot()];
     uint32_t i;
 
     for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
-        if (!g_host_visible[i].ptr)
+        if (!blocks[i].ptr)
             continue;
 #ifndef ZZAPP_HOST_TEST
-        (void)surface_allocator_free(g_host_visible[i].card);
+        (void)surface_allocator_free(blocks[i].card);
 #else
-        free(g_host_visible[i].ptr);
+        free(blocks[i].ptr);
 #endif
-        g_host_visible[i].ptr = NULL;
+        blocks[i].ptr = NULL;
     }
-    g_host_visible_used = 0;
+    g_host_visible_used[current_slot()] = 0;
 }
 
 static void zzapp_private_timer_enable(void);
@@ -333,10 +374,13 @@ static void life_progress(uint64_t ticks)
     life32(ZZAPP_LIFE_PROGRESS_HI_OFF, (uint32_t)(ticks >> 32));
 }
 
-/* g_state is the runtime authority; this is its sole lifecycle-state mirror. */
+/* The selected service window is the lifecycle authority outside an app
+ * context; an app context always resolves to its scheduler slot. */
 static void publish_state(uint32_t state)
 {
-    g_state = state;
+    uint32_t slot = current_slot();
+
+    host_slot(slot)->state = state;
     coherent_publish();
     life32(ZZAPP_LIFE_STATE_OFF, state);
 }
@@ -344,23 +388,25 @@ static void publish_state(uint32_t state)
 void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
                         uint32_t owner, uint32_t generation)
 {
-    g_card = card;
-    g_mem = mem;
-    g_owner = owner;
-    g_proc[0].owner = owner;
-    g_proc[0].generation = generation;
-    g_coh->running = 0;
-    g_coh->in_api = 0;
-    g_coh->fault = ZZAPP_FAULT_NONE;
-    g_coh->arena_card = card;
-    g_coh->arena_bytes = bytes;
-    g_coh->owner = owner;
-    g_coh->generation = generation;
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+    struct zzapp_coherent *coh = coherent(slot);
+
+    host->card = card;
+    host->mem = mem;
+    host->owner = owner;
+    g_proc[slot].owner = owner;
+    g_proc[slot].generation = generation;
+    coh->running = 0;
+    coh->in_api = 0;
+    coh->fault = ZZAPP_FAULT_NONE;
+    coh->arena_card = card;
+    coh->arena_bytes = bytes;
+    coh->owner = owner;
+    coh->generation = generation;
     life32(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
     life32(ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
     life32(ZZAPP_LIFE_GENERATION_OFF, generation);
-    /* The window outlives sessions; a fault without registers (watchdog
-     * restart) must not report the previous app's pc/far/fsr. */
     life32(ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_NONE);
     life32(ZZAPP_LIFE_PC_OFF, 0u);
     life32(ZZAPP_LIFE_SP_OFF, 0u);
@@ -376,48 +422,57 @@ extern void zzapp_api_poison_resources(void) __attribute__((weak));
 void zzapp_loader_unbound(void)
 {
     uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+    struct zzapp_coherent *coh = coherent(slot);
+    uint32_t state = host->state;
+    uint64_t fault_mark = host->fault_mark;
+    int faulted = host->faulted;
 
     host_visible_release_all();
     if (zzapp_api_reclaim_resources)
         zzapp_api_reclaim_resources();
     zzapp_kernel_stop_app(&g_kernel, slot);
-    g_card = 0;
-    g_mem = NULL;
-    g_owner = 0;
-    g_entry = 0;
-    g_image_loaded = 0;
-    g_image_end = 0;
-    g_stack_bytes = 0;
+    memset(host, 0, sizeof(*host));
+    host->state = state;
+    host->fault_mark = fault_mark;
+    host->faulted = faulted;
     memset(&g_proc[slot], 0, sizeof(g_proc[slot]));
-    g_coh->arena_card = 0;
-    g_coh->arena_bytes = 0;
-    g_coh->owner = 0;
+    coh->arena_card = 0;
+    coh->arena_bytes = 0;
+    coh->owner = 0;
 }
 
-uint32_t zzapp_loader_generation(void) { return g_coh->generation; }
-uint32_t zzapp_loader_state(void) { return g_state; }
+uint32_t zzapp_loader_generation(void) { return coherent(current_slot())->generation; }
+uint32_t zzapp_loader_state(void) { return host_slot(current_slot())->state; }
 void zzapp_loader_set_state(uint32_t state) { publish_state(state); }
-uint32_t zzapp_loader_reset_requested(void) { return g_coh->reset_request; }
-int zzapp_loader_have_image(void) { return g_image_loaded; }
+uint32_t zzapp_loader_reset_requested(void) { return coherent(current_slot())->reset_request; }
+int zzapp_loader_have_image(void) { return host_slot(current_slot())->image_loaded; }
 
 int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
                            uint32_t stack_bytes, uint32_t note_flags,
                            uint32_t note_minor, uint32_t min_heap_bytes)
 {
-    zzapp_proc_t *proc = &g_proc[0];
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+    zzapp_proc_t *proc = &g_proc[slot];
     uint32_t image_bytes = (image_end + ZZAPP_MEM_FRAME_BYTES - 1u) &
                            ~(ZZAPP_MEM_FRAME_BYTES - 1u);
     uint32_t stack_commit = (stack_bytes + ZZAPP_MEM_FRAME_BYTES - 1u) &
                             ~(ZZAPP_MEM_FRAME_BYTES - 1u);
     uint32_t commit = note_minor < 3u ? ZZAPP_ARENA_BYTES :
                       image_bytes + stack_commit + min_heap_bytes;
+    uint32_t limit = note_minor < 3u ? ZZAPP_ARENA_BYTES :
+                     ZZAPP_MEM_PRIVATE_WINDOW_BYTES;
+    uint32_t requested_limit = zzapp_services_memory_limit();
 
-    if (commit > ZZAPP_MEM_PRIVATE_WINDOW_BYTES)
+    if (requested_limit && requested_limit < limit)
+        limit = requested_limit;
+    if (commit > limit)
         return ZZ_ENOMEM;
-    g_entry = entry;
-    g_image_loaded = 1;
-    g_image_end = image_end;
-    g_stack_bytes = stack_bytes;
+    host->entry = entry;
+    host->image_loaded = 1;
+    host->image_end = image_end;
+    host->stack_bytes = stack_bytes;
     proc->image_entry = entry;
     proc->image_end = image_end;
     proc->image_frame_count = image_bytes / ZZAPP_MEM_FRAME_BYTES;
@@ -425,47 +480,49 @@ int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
     proc->stack_bytes = stack_bytes;
     proc->note_minor = note_minor;
     proc->memory.committed = commit;
-    proc->memory.limit = note_minor < 3u ? ZZAPP_ARENA_BYTES :
-                         ZZAPP_MEM_PRIVATE_WINDOW_BYTES;
+    proc->memory.limit = limit;
     life32(ZZAPP_LIFE_FLAGS_OFF,
            note_flags & (ZZAPP_F_DISPLAY | ZZAPP_F_AUDIO | ZZAPP_F_GL));
     return ZZ_OK;
 }
 
-uint32_t zzapp_current_generation(void) { return g_coh->generation; }
-uint32_t zzapp_runtime_state(void) { return g_state; }
+uint32_t zzapp_current_generation(void) { return coherent(current_slot())->generation; }
+uint32_t zzapp_runtime_state(void) { return host_slot(current_slot())->state; }
 uint32_t zzapp_runtime_caps(void) { return ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO | ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8; }
-int zzapp_host_faulted(void) { return g_faulted; }
+int zzapp_host_faulted(void) { return host_slot(current_slot())->faulted; }
 
 void zzapp_note_progress(void)
 {
     uint64_t now = now_ticks();
-    g_coh->progress = now;
+    coherent(current_slot())->progress = now;
     life_progress(now);
 }
 
 static int stop_requested(void)
 {
-    return g_coh->reset_request || life_get32(ZZAPP_LIFE_STOP_OFF) != 0u ||
-           zzapp_svc_should_stop();
+    return coherent(current_slot())->reset_request ||
+           life_get32(ZZAPP_LIFE_STOP_OFF) != 0u || zzapp_svc_should_stop();
 }
 
 /* Core 1 (service tick, faults) and core 0 (restart recovery) can both stop
  * the app; exactly one of them runs the teardown. */
-static int claim_fault(void)
+static int claim_fault(uint32_t slot)
 {
-    return __atomic_exchange_n(&g_faulted, 1, __ATOMIC_ACQ_REL) == 0;
+    return __atomic_exchange_n(&host_slot(slot)->faulted, 1, __ATOMIC_ACQ_REL) == 0;
 }
 
 static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
                        uint32_t lr, uint32_t far, uint32_t fsr, uint32_t cpsr)
 {
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+    struct zzapp_coherent *coh = coherent(slot);
+
     (void)cpsr;
-    if (!claim_fault())
+    if (!claim_fault(slot))
         return;
-    zzapp_private_timer_disable();
-    g_coh->running = 0;
-    g_coh->fault = fault;
+    coh->running = 0;
+    coh->fault = fault;
     life32(ZZAPP_LIFE_FAULT_OFF, fault);
     life32(ZZAPP_LIFE_PC_OFF, pc);
     life32(ZZAPP_LIFE_SP_OFF, sp);
@@ -473,16 +530,11 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
     life32(ZZAPP_LIFE_FAR_OFF, far);
     life32(ZZAPP_LIFE_FSR_OFF, fsr);
     if (zzapp_kernel_current_thread() >= 0) {
-        uint32_t slot = current_slot();
-
         zzapp_kernel_stop_app(&g_kernel, slot);
         zzapp_kernel_service_due(&g_kernel);
     }
 #ifndef ZZAPP_HOST_TEST
-    (void)cpsr;
     {
-        /* The caller chain, one line: pc/lr alone have twice pointed at a
-         * frame whose inputs came from further up. */
         const uint32_t *stk = (const uint32_t *)(uintptr_t)sp;
         uint32_t w[6];
         uint32_t i;
@@ -503,17 +555,15 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
     }
 #endif
     publish_state(ZZAPP_ST_FAULTED);
-    g_fault_mark = now_ticks();
+    host->fault_mark = now_ticks();
     zzapp_services_on_app_end();
-    zzapp_minigl_reclaim(g_coh->generation);
+    zzapp_minigl_reclaim(coh->generation);
 #ifndef ZZAPP_HOST_TEST
-    if (g_owner)
-        card_pool_release_owner(&card_pool, g_owner);
+    if (host->owner)
+        card_pool_release_owner(&card_pool, host->owner);
 #endif
 #ifdef ZZAPP_HOST_TEST
-    /* The host harness cannot discard the C app frame. Mirror the worker's
-     * post-unwind reset hand-off so a reset START has no stale completion. */
-    if (g_coh->reset_request)
+    if (coh->reset_request)
         zzapp_services_on_reset();
 #endif
     if (zzapp_api_poison_resources)
@@ -523,77 +573,73 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
 
 static void maybe_expire_fault(uint64_t now)
 {
-    /* Core 1 may set the mark after the caller sampled now. */
-    if (g_state == ZZAPP_ST_FAULTED && now > g_fault_mark &&
-        ticks_to_us(now - g_fault_mark) >= ZZAPP_WATCHDOG_US)
+    struct zzapp_host_slot *host = host_slot(current_slot());
+
+    if (host->state == ZZAPP_ST_FAULTED && now > host->fault_mark &&
+        ticks_to_us(now - host->fault_mark) >= ZZAPP_WATCHDOG_US)
         publish_state(ZZAPP_ST_IDLE);
 }
 
-/* Core 1 only: the API call count and time the previous tick observed. */
-static uint32_t g_seen_api_calls;
-static uint64_t g_last_tick;
-
 static void begin_tick_observation(void)
 {
-    g_coh->in_api = 0u;
-    g_coh->service_due = 0u;
-    g_seen_api_calls = g_coh->api_calls;
-    g_last_tick = now_ticks();
+    uint32_t slot = current_slot();
+    struct zzapp_coherent *coh = coherent(slot);
+
+    coh->in_api = 0u;
+    coh->service_due = 0u;
+    host_slot(slot)->seen_api_calls = coh->api_calls;
+    host_slot(slot)->last_tick = now_ticks();
 }
 static void check_stack_canary(void);
 
 static void service_tick(uint64_t now, int permit_reentry)
 {
-    uint32_t calls = g_coh->api_calls;
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+    struct zzapp_coherent *coh = coherent(slot);
+    uint32_t calls = coh->api_calls;
 
-    g_coh->tick_seen = now;
+    coh->tick_seen = now;
     check_stack_canary();
-    if (calls != g_seen_api_calls) {
-        /* The app made API calls since the previous tick.  One that is
-         * still running started no earlier than that tick.  Declared
-         * waits (permit_reentry) set their own entry stamp. */
-        g_seen_api_calls = calls;
-        g_coh->progress = now;
+    if (calls != host->seen_api_calls) {
+        host->seen_api_calls = calls;
+        coh->progress = now;
         life_progress(now);
-        if (g_coh->in_api != 0u && !permit_reentry)
-            g_coh->api_entered = g_last_tick;
+        if (coh->in_api != 0u && !permit_reentry)
+            coh->api_entered = host->last_tick;
     }
-    g_last_tick = now;
-    /*
-     * Privileged work never enters an API body. A declared wait is the only
-     * yield point that permits it before the matching API leave.
-     */
-    if (g_coh->in_api == 0u || permit_reentry) {
+    host->last_tick = now;
+    if (coh->in_api == 0u || permit_reentry) {
         zzapp_services_poll();
-        g_coh->service_due = 0u;
+        coh->service_due = 0u;
 #ifdef ZZAPP_HOST_TEST
         scheduler_core1_service_from_app();
 #else
         zzapp_kernel_service_due(&g_kernel);
 #endif
     } else {
-        g_coh->service_due = 1u;
+        coh->service_due = 1u;
     }
-    if (!g_host_visible_commit_active && g_coh->reset_request) {
+    if (!g_host_visible_commit_active[slot] && coh->reset_request) {
         force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
-    } else if (!g_host_visible_commit_active && stop_requested()) {
-        if (!g_stop_mark)
-            g_stop_mark = now;
-        if (ticks_to_us(now - g_stop_mark) >= ZZAPP_STOP_GRACE_US)
+    } else if (!g_host_visible_commit_active[slot] && stop_requested()) {
+        if (!host->stop_mark)
+            host->stop_mark = now;
+        if (ticks_to_us(now - host->stop_mark) >= ZZAPP_STOP_GRACE_US)
             force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
     } else {
-        g_stop_mark = 0;
+        host->stop_mark = 0;
     }
-    if (!g_host_visible_commit_active && g_coh->running &&
-        g_coh->in_api == 0u &&
-        ticks_to_us(now - g_coh->progress) >= ZZAPP_APP_STALL_US) {
-        g_watchdog_reason = 1u;
+    if (!g_host_visible_commit_active[slot] && coh->running &&
+        coh->in_api == 0u &&
+        ticks_to_us(now - coh->progress) >= ZZAPP_APP_STALL_US) {
+        host->watchdog_reason = 1u;
         force_stop(ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
     }
-    if (!g_host_visible_commit_active && g_coh->running &&
-        g_coh->in_api != 0u &&
-        ticks_to_us(now - g_coh->api_entered) >= ZZAPP_API_STUCK_US) {
-        g_watchdog_reason = 2u;
+    if (!g_host_visible_commit_active[slot] && coh->running &&
+        coh->in_api != 0u &&
+        ticks_to_us(now - coh->api_entered) >= ZZAPP_API_STUCK_US) {
+        host->watchdog_reason = 2u;
         force_stop(ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
     }
     maybe_expire_fault(now);
@@ -606,7 +652,7 @@ static void zzapp_private_timer_irq(void *unused)
     (void)unused;
     Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_ISR_OFFSET,
               XSCUTIMER_ISR_EVENT_FLAG_MASK);
-    if (g_coh->running)
+    if (coherent(current_slot())->running)
         service_tick(now_ticks(), 0);
 }
 
@@ -679,20 +725,21 @@ void zzapp_private_timer_kick(void) {}
  * service pass. */
 static void check_stack_canary(void)
 {
+    struct zzapp_host_slot *host = host_slot(current_slot());
     uint32_t i;
 
-    if (!g_mem || g_heap_end == 0u || !g_coh->running)
+    if (!host->mem || host->heap_end == 0u || !coherent(current_slot())->running)
         return;
 #ifdef ZZAPP_HOST_TEST
     for (i = 0; i < ZZAPP_CANARY_BYTES; i++) {
-        if (g_mem[g_heap_end + i] != 0xA5u) {
+        if (host->mem[host->heap_end + i] != 0xA5u) {
             force_stop(ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
             return;
         }
     }
 #else
     {
-        uint8_t *canary = proc_alias(g_heap_end, ZZAPP_CANARY_BYTES);
+        uint8_t *canary = proc_alias(host->heap_end, ZZAPP_CANARY_BYTES);
 
         if (!canary)
             return;
@@ -716,10 +763,11 @@ void zzapp_host_yield_wait(void)
 {
     uint64_t now = now_ticks();
     uint32_t slot = current_slot();
-    int blocked = zzapp_kernel_current_thread() >= 0 && g_coh->in_api != 0u;
+    struct zzapp_coherent *coh = coherent(slot);
+    int blocked = zzapp_kernel_current_thread() >= 0 && coh->in_api != 0u;
 
-    if (g_coh->in_api != 0u)
-        g_coh->api_entered = now;
+    if (coh->in_api != 0u)
+        coh->api_entered = now;
     if (blocked)
         (void)zzapp_kernel_api_block(&g_kernel, slot);
     zzapp_note_progress();
@@ -740,11 +788,12 @@ uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
 void zzapp_api_enter(void)
 {
     uint32_t slot = current_slot();
+    struct zzapp_coherent *coh = coherent(slot);
 
     if (zzapp_kernel_current_thread() >= 0)
         (void)zzapp_kernel_api_lock(&g_kernel, slot);
-    g_coh->api_calls++;
-    g_coh->in_api++;
+    coh->api_calls++;
+    coh->in_api++;
 }
 
 /* Hot non-blocking calls (should_stop, time_us). Count as an API call so a
@@ -752,25 +801,26 @@ void zzapp_api_enter(void)
  * or the leave-path service tick. */
 void zzapp_api_touch(void)
 {
-    g_coh->api_calls++;
+    coherent(current_slot())->api_calls++;
 }
 
 void zzapp_api_leave(void)
 {
     uint32_t slot = current_slot();
+    struct zzapp_coherent *coh = coherent(slot);
 
-    if (g_coh->in_api)
-        g_coh->in_api--;
+    if (coh->in_api)
+        coh->in_api--;
     if (zzapp_kernel_current_thread() >= 0)
         (void)zzapp_kernel_api_unlock(&g_kernel, slot);
-    if (!g_coh->in_api && g_coh->service_due)
+    if (!coh->in_api && coh->service_due)
         service_tick(now_ticks(), 0);
 }
 
 #ifndef ZZAPP_HOST_TEST
 static uint8_t *proc_alias(uint32_t offset, uint32_t bytes)
 {
-    zzapp_proc_t *proc = &g_proc[0];
+    zzapp_proc_t *proc = &g_proc[current_slot()];
     uint32_t frame = offset >> 20;
     uint32_t in_frame = offset & (ZZAPP_MEM_FRAME_BYTES - 1u);
     uint32_t physical;
@@ -792,6 +842,7 @@ static uint8_t *proc_alias(uint32_t offset, uint32_t bytes)
 
 static int copy_argv(uint32_t argc, char ***argv_out)
 {
+    struct zzapp_host_slot *host = host_slot(current_slot());
     uint8_t *window = (uint8_t *)zzapp_services_window();
     uint32_t i;
     uint32_t total = (argc + 1u) * sizeof(uint32_t);
@@ -814,29 +865,29 @@ static int copy_argv(uint32_t argc, char ***argv_out)
         total += n + 1u;
     }
     total = (total + 7u) & ~7u;
-    if (g_heap_bump + total > g_heap_end)
+    if (host->heap_bump + total > host->heap_end)
         return ZZ_ENOMEM;
-    argv_offset = g_heap_bump;
+    argv_offset = host->heap_bump;
     argv = proc_alias(argv_offset, (argc + 1u) * sizeof(uint32_t));
     if (!argv)
         return ZZ_ENOMEM;
-    g_heap_bump += (argc + 1u) * sizeof(uint32_t);
+    host->heap_bump += (argc + 1u) * sizeof(uint32_t);
     for (i = 0; i < argc; i++) {
         uint32_t off = zzapp_get_be32(window + ZZAPP_ARGV_OFF +
                                       ZZAPP_ARGV_OFFS_OFF + 4u * i);
         uint32_t n = 0;
-        uint32_t value = ZZAPP_AS_WINDOW_BASE + g_heap_bump;
+        uint32_t value = ZZAPP_AS_WINDOW_BASE + host->heap_bump;
         uint8_t *dst;
 
         while (window[off + n])
             n++;
-        dst = proc_alias(g_heap_bump, n + 1u);
+        dst = proc_alias(host->heap_bump, n + 1u);
         if (!dst)
             return ZZ_ENOMEM;
         memcpy(dst, window + off, n);
         dst[n] = '\0';
         memcpy(argv + i * sizeof(value), &value, sizeof(value));
-        g_heap_bump += n + 1u;
+        host->heap_bump += n + 1u;
     }
     memset(argv + argc * sizeof(uint32_t), 0, sizeof(uint32_t));
     *argv_out = (char **)(uintptr_t)(ZZAPP_AS_WINDOW_BASE + argv_offset);
@@ -845,12 +896,13 @@ static int copy_argv(uint32_t argc, char ***argv_out)
 #else
 static int copy_argv(uint32_t argc, char ***argv_out)
 {
+    struct zzapp_host_slot *host = host_slot(current_slot());
     uint8_t *window = (uint8_t *)zzapp_services_window();
     char **argv;
     uint32_t i;
     uint32_t total = (argc + 1u) * (uint32_t)sizeof(*argv);
 
-    if (argc > ZZAPP_ARGV_MAX || !g_mem)
+    if (argc > ZZAPP_ARGV_MAX || !host->mem)
         return ZZ_EINVAL;
     if (argc && !window)
         return ZZ_EIO;
@@ -866,18 +918,18 @@ static int copy_argv(uint32_t argc, char ***argv_out)
         total += n + 1u;
     }
     total = (total + 7u) & ~7u;
-    if (g_heap_bump + total > g_heap_end)
+    if (host->heap_bump + total > host->heap_end)
         return ZZ_ENOMEM;
-    argv = (char **)(g_mem + g_heap_bump);
-    g_heap_bump += (argc + 1u) * (uint32_t)sizeof(*argv);
+    argv = (char **)(host->mem + host->heap_bump);
+    host->heap_bump += (argc + 1u) * (uint32_t)sizeof(*argv);
     for (i = 0; i < argc; i++) {
         uint32_t off = zzapp_get_be32(window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF + 4u * i);
-        char *dst = (char *)(g_mem + g_heap_bump);
+        char *dst = (char *)(host->mem + host->heap_bump);
         uint32_t n = 0;
         while (window[off + n]) { dst[n] = (char)window[off + n]; n++; }
         dst[n++] = '\0';
         argv[i] = dst;
-        g_heap_bump += n;
+        host->heap_bump += n;
     }
     argv[argc] = NULL;
     *argv_out = argv;
@@ -917,39 +969,41 @@ static void start_failed(int status)
 
 static void run_app(uint32_t argc)
 {
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+    struct zzapp_coherent *coh = coherent(slot);
     char **argv = NULL;
     const zzapp_api *app_api;
     int rc;
+    zzapp_proc_t *proc = &g_proc[slot];
 
-    if (!g_image_loaded || !g_mem) { start_failed(ZZ_EINVAL); return; }
-    g_heap_off = (g_image_end + 7u) & ~7u;
+    if (!host->image_loaded || !host->mem) { start_failed(ZZ_EINVAL); return; }
+    host->heap_off = (host->image_end + 7u) & ~7u;
 #ifdef ZZAPP_HOST_TEST
-    g_heap_end = ZZAPP_ARENA_BYTES - g_stack_bytes;
+    host->heap_end = ZZAPP_ARENA_BYTES - host->stack_bytes;
 #else
-    g_heap_end = g_proc[0].heap_limit;
+    host->heap_end = proc->heap_limit;
 #endif
-    g_heap_bump = g_heap_off;
-    if (g_heap_end <= g_heap_off) { start_failed(ZZ_ENOMEM); return; }
+    host->heap_bump = host->heap_off;
+    if (host->heap_end <= host->heap_off) { start_failed(ZZ_ENOMEM); return; }
     rc = copy_argv(argc, &argv);
     if (rc != ZZ_OK) { start_failed(rc); return; }
-    /* argv is app-owned memory. Newlib's _sbrk begins immediately after it. */
-    g_heap_off = g_heap_bump;
-    g_proc[0].heap_base = g_heap_off;
-    g_proc[0].heap_break = g_heap_off;
-    g_proc[0].heap_limit = g_heap_end;
+    proc->heap_base = host->heap_bump;
+    proc->heap_break = host->heap_bump;
+    proc->heap_limit = host->heap_end;
 #ifndef ZZAPP_HOST_TEST
     if (!protect_firmware_text()) {
         start_failed(ZZ_EIO);
         return;
     }
-    app_api = zzapp_svc_api_for_slot(0U, zzapp_api_table());
+    app_api = zzapp_svc_api_for_slot(slot, zzapp_api_table());
     if (!app_api ||
-        zzapp_as_grant_user_ro(&g_proc[0].as,
-            (uint32_t)zzapp_svc_api_veneer(0U) & ~0xfffU, 4096U, 1) ||
-        zzapp_as_grant_user_ro(&g_proc[0].as,
+        zzapp_as_grant_user_ro(&proc->as,
+            (uint32_t)zzapp_svc_api_veneer(slot) & ~0xfffU, 4096U, 1) ||
+        zzapp_as_grant_user_ro(&proc->as,
             (uint32_t)(uintptr_t)app_api & ~0xfffU, 4096U, 0) ||
-        zzapp_as_grant_user_ro(&g_proc[0].as,
-            (uint32_t)(uintptr_t)zzapp_svc_gl_for_slot(0U) & ~0xfffU,
+        zzapp_as_grant_user_ro(&proc->as,
+            (uint32_t)(uintptr_t)zzapp_svc_gl_for_slot(slot) & ~0xfffU,
             4096U, 0)) {
         start_failed(ZZ_EIO);
         return;
@@ -957,111 +1011,102 @@ static void run_app(uint32_t argc)
 #endif
 #ifdef ZZAPP_HOST_TEST
     app_api = zzapp_api_table();
-#endif
-#ifdef ZZAPP_HOST_TEST
-    memset(g_mem + g_heap_end, 0xA5, ZZAPP_CANARY_BYTES);
+    memset(host->mem + host->heap_end, 0xA5, ZZAPP_CANARY_BYTES);
 #else
     {
-        uint8_t *canary = proc_alias(g_heap_end, ZZAPP_CANARY_BYTES);
+        uint8_t *canary = proc_alias(host->heap_end, ZZAPP_CANARY_BYTES);
 
         if (!canary) { start_failed(ZZ_ENOMEM); return; }
         memset(canary, 0xA5, ZZAPP_CANARY_BYTES);
     }
 #endif
-    g_stop_mark = 0;
-    g_fault_mark = 0;
-    g_faulted = 0;
-    g_exit_code = 0;
-    /* Core 0's watchdog and lease checks trust these stamps whenever it sees
-     * running == 1, so they must be fresh before running is published. The
-     * first app after boot otherwise met stamps from power-on (0) and was
-     * cold-restarted while starting. */
-    g_coh->heartbeat_value = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
-    g_coh->heartbeat_seen = now_ticks();
-    g_coh->tick_seen = now_ticks();
+    host->stop_mark = 0;
+    host->fault_mark = 0;
+    host->faulted = 0;
+    host->exit_code = 0;
+    coh->heartbeat_value = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
+    coh->heartbeat_seen = now_ticks();
+    coh->tick_seen = now_ticks();
     zzapp_note_progress();
     begin_tick_observation();
     coherent_barrier();
-    if (zzapp_kernel_prepare_app(&g_kernel, 0,
+    if (zzapp_kernel_prepare_app(&g_kernel, slot,
 #ifdef ZZAPP_HOST_TEST
-                                 g_card + g_entry,
+                                 host->card + host->entry,
 #else
-                                 ZZAPP_AS_WINDOW_BASE + g_entry,
+                                 ZZAPP_AS_WINDOW_BASE + host->entry,
 #endif
                                  (uint32_t)(uintptr_t)app_api, argc,
                                  (uint32_t)(uintptr_t)argv,
 #ifdef ZZAPP_HOST_TEST
-                                 g_card + g_proc[0].stack_top
+                                 host->card + proc->stack_top
 #else
-                                 ZZAPP_AS_WINDOW_BASE + g_proc[0].stack_top
+                                 ZZAPP_AS_WINDOW_BASE + proc->stack_top
 #endif
                                  ) != 0) {
         start_failed(ZZ_EINVAL);
         return;
     }
-    g_coh->running = 1;
+    coh->running = 1;
     publish_state(ZZAPP_ST_RUNNING);
     zzapp_services_start_entered(ZZ_OK);
-    (void)zzapp_kernel_start_app(&g_kernel, 0);
+    (void)zzapp_kernel_start_app(&g_kernel, slot);
 #ifdef ZZAPP_HOST_TEST
-    zzapp_kernel_set_current_thread(0);
+    zzapp_kernel_set_current_thread((int)slot);
     zzapp_private_timer_enable();
     if (g_test_entry)
         g_test_entry(zzapp_api_table(), (int)argc, argv);
     zzapp_private_timer_disable();
     zzapp_kernel_set_current_thread(-1);
-    g_coh->running = 0;
-    g_watchdog_reason = 0u;
-    if (!g_faulted) {
-        life32(ZZAPP_LIFE_EXIT_OFF, g_exit_code);
+    coh->running = 0;
+    host->watchdog_reason = 0u;
+    if (!host->faulted) {
+        life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
         zzapp_services_on_app_end();
-        zzapp_minigl_reclaim(g_coh->generation);
+        zzapp_minigl_reclaim(coh->generation);
         publish_state(ZZAPP_ST_IDLE);
         zzapp_loader_release();
     }
 #else
-    /*
-     * The worker remains the system thread. Its next SVC saves that context
-     * and returns through the synthetic app frame above; run_app never nests
-     * the app below the worker stack.
-     */
     zzapp_kernel_set_current_thread(-1);
     zzapp_private_timer_enable();
-    return;
 #endif
 }
 
 void zzapp_worker_hook(void)
 {
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+    struct zzapp_coherent *coh = coherent(slot);
     uint32_t argc = 0;
 
-    if (g_coh->reset_request) {
-        if (g_state == ZZAPP_ST_LOADING || g_state == ZZAPP_ST_STARTING) {
+    if (coh->reset_request) {
+        if (host->state == ZZAPP_ST_LOADING || host->state == ZZAPP_ST_STARTING) {
             zzapp_services_cancel_start(ZZ_EIO);
             (void)zzapp_loader_abort();
-        } else if (g_coh->running) {
+        } else if (coh->running) {
             force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
         }
-        if (g_state == ZZAPP_ST_FAULTED) {
+        if (host->state == ZZAPP_ST_FAULTED) {
             zzapp_loader_release();
             publish_state(ZZAPP_ST_IDLE);
         }
         zzapp_services_on_reset();
-        g_stop_mark = 0;
-        g_fault_mark = 0;
+        host->stop_mark = 0;
+        host->fault_mark = 0;
         coherent_barrier();
-        g_coh->reset_ack = 1;
-        g_coh->reset_request = 0;
+        coh->reset_ack = 1;
+        coh->reset_request = 0;
         coherent_publish();
         return;
     }
     zzapp_services_poll();
-    if (g_state == ZZAPP_ST_LOADING && stop_requested()) {
+    if (host->state == ZZAPP_ST_LOADING && stop_requested()) {
         zzapp_services_cancel_start(ZZ_EIO);
         (void)zzapp_loader_abort();
         return;
     }
-    if (g_state == ZZAPP_ST_LOADING && zzapp_services_take_start(&argc)) {
+    if (host->state == ZZAPP_ST_LOADING && zzapp_services_take_start(&argc)) {
         publish_state(ZZAPP_ST_STARTING);
         run_app(argc);
     }
@@ -1069,14 +1114,19 @@ void zzapp_worker_hook(void)
 
 int zzapp_fault_is_app(uint32_t pc, uint32_t abort_lr)
 {
+    uint32_t slot = current_slot();
+
 #ifdef ZZAPP_HOST_TEST
-    uint32_t end = g_card + ZZAPP_ARENA_BYTES;
-    return g_coh->running && g_card && end > g_card &&
-           ((pc >= g_card && pc < end) || (abort_lr >= g_card && abort_lr < end));
+    struct zzapp_host_slot *host = host_slot(slot);
+    uint32_t end = host->card + ZZAPP_ARENA_BYTES;
+
+    return coherent(slot)->running && host->card && end > host->card &&
+           ((pc >= host->card && pc < end) ||
+            (abort_lr >= host->card && abort_lr < end));
 #else
     (void)pc;
     (void)abort_lr;
-    return g_coh->running && zzapp_kernel_current_thread() >= 0;
+    return coherent(slot)->running && zzapp_kernel_current_thread() >= 0;
 #endif
 }
 
@@ -1115,63 +1165,70 @@ static uint64_t core1_stamp_age_us(const volatile uint64_t *stamp)
 
 void zzapp_core0_poll(void)
 {
-    /* Pairs with run_app's barrier: stamps are fresh once running reads 1. */
-    uint32_t running = g_coh->running;
-    uint64_t age;
-    uint64_t tick_age;
-    uint64_t now;
-    uint32_t heartbeat;
+    uint32_t slot;
 
-    coherent_barrier();
-    age = core1_stamp_age_us(&g_coh->progress);
-    tick_age = core1_stamp_age_us(&g_coh->tick_seen);
-    now = now_ticks();
-    heartbeat = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
+    for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
+        struct zzapp_host_slot *host = host_slot(slot);
+        struct zzapp_coherent *coh = coherent(slot);
+        uint32_t running = coh->running;
+        uint64_t age;
+        uint64_t tick_age;
+        uint64_t now;
+        uint32_t heartbeat;
 
-    maybe_expire_fault(now);
-    if (heartbeat != g_coh->heartbeat_value) {
-        g_coh->heartbeat_value = heartbeat;
-        g_coh->heartbeat_seen = now;
-    }
-    /* Heartbeat is an Amiga clock value; only its change is meaningful here. */
-    if (running && g_state == ZZAPP_ST_RUNNING &&
-        core1_stamp_age_us(&g_coh->heartbeat_seen) >= ZZAPP_LEASE_US)
-        life32(ZZAPP_LIFE_STOP_OFF, 1u);
-    if (running && age >= ZZAPP_WATCHDOG_US &&
-        tick_age >= ZZAPP_WATCHDOG_US) {
-        /* Do not reclaim app state until the stopped worker cannot own a lock. */
-        g_coh->running = 0;
-        g_coh->fault = ZZAPP_FAULT_WATCHDOG_RESTART;
-        life32(ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_WATCHDOG_RESTART);
-        (void)claim_fault();
-        g_fault_mark = now_ticks();
-        publish_state(ZZAPP_ST_FAULTED);
-        g_cold_restarts++;
+        zzapp_services_select_slot(slot);
+        coherent_barrier();
+        age = core1_stamp_age_us(&coh->progress);
+        tick_age = core1_stamp_age_us(&coh->tick_seen);
+        now = now_ticks();
+        heartbeat = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
+        maybe_expire_fault(now);
+        if (heartbeat != coh->heartbeat_value) {
+            coh->heartbeat_value = heartbeat;
+            coh->heartbeat_seen = now;
+        }
+        if (running && host->state == ZZAPP_ST_RUNNING &&
+            core1_stamp_age_us(&coh->heartbeat_seen) >= ZZAPP_LEASE_US)
+            life32(ZZAPP_LIFE_STOP_OFF, 1u);
+        if (running && age >= ZZAPP_WATCHDOG_US &&
+            tick_age >= ZZAPP_WATCHDOG_US) {
+            coh->running = 0;
+            coh->fault = ZZAPP_FAULT_WATCHDOG_RESTART;
+            life32(ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_WATCHDOG_RESTART);
+            (void)claim_fault(slot);
+            host->fault_mark = now_ticks();
+            publish_state(ZZAPP_ST_FAULTED);
 #ifndef ZZAPP_HOST_TEST
-        printf("[app] watchdog restart: no progress for %lu ms, no tick for "
-               "%lu ms, in_api=%lu\r\n", (unsigned long)(age / 1000u),
-               (unsigned long)(tick_age / 1000u),
-               (unsigned long)g_coh->in_api);
-        core1_cold_restart();
+            printf("[app] watchdog restart: no progress for %lu ms, no tick for "
+                   "%lu ms, in_api=%lu\r\n", (unsigned long)(age / 1000u),
+                   (unsigned long)(tick_age / 1000u),
+                   (unsigned long)coh->in_api);
+            core1_cold_restart();
 #endif
-        zzapp_services_on_app_end();
-        zzapp_minigl_reclaim(g_coh->generation);
+            zzapp_services_on_app_end();
+            zzapp_minigl_reclaim(coh->generation);
 #ifndef ZZAPP_HOST_TEST
-        if (g_owner)
-            card_pool_release_owner(&card_pool, g_owner);
+            if (host->owner)
+                card_pool_release_owner(&card_pool, host->owner);
 #endif
-        if (zzapp_api_poison_resources)
-            zzapp_api_poison_resources();
-        zzapp_loader_unbound();
+            if (zzapp_api_poison_resources)
+                zzapp_api_poison_resources();
+            zzapp_loader_unbound();
+        }
     }
 }
 
 void zzapp_on_core1_restart(void)
 {
-    if (g_coh->running) {
+    uint32_t slot;
+
+    for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
+        if (!coherent(slot)->running)
+            continue;
+        zzapp_services_select_slot(slot);
         force_stop(ZZAPP_FAULT_WATCHDOG_RESTART, 0, 0, 0, 0, 0, 0);
-        g_cold_restarts++;
     }
+    g_cold_restarts++;
 }
 
 /* A running app stops itself within one private-timer tick and the worker
@@ -1180,40 +1237,35 @@ void zzapp_on_core1_restart(void)
 
 void zzapp_on_amiga_reset(void)
 {
-    uint32_t running = g_coh->running;
+    uint32_t slot;
 
-    /* Core 1 owns deferred operations and their completion publication.
-     * Publish stop first; worker_hook performs service teardown and acks. */
     coherent_barrier();
-    g_coh->reset_ack = 0;
-    g_coh->reset_request = 1;
+    for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
+        coherent(slot)->reset_ack = 0;
+        coherent(slot)->reset_request = 1;
+    }
     coherent_publish();
     wake_core1();
 #ifndef ZZAPP_HOST_TEST
-    /*
-     * The reset path continues with the core-1 quiesce, the L1 clean
-     * request and the Fast-RAM take-back.  A running app answers none of
-     * those, so without this wait every Amiga reset during an app
-     * cold-restarted a healthy core 1, which can wedge the Zorro bus.
-     * Only a core 1 that misses the ack still takes the restart.
-     */
-    if (running) {
-        uint64_t start = now_ticks();
+    for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
+        uint64_t start;
 
-        while (!g_coh->reset_ack &&
+        if (!coherent(slot)->running)
+            continue;
+        start = now_ticks();
+        while (!coherent(slot)->reset_ack &&
                ticks_to_us(now_ticks() - start) < ZZAPP_RESET_ACK_WAIT_US)
             usleep(100u);
-        if (!g_coh->reset_ack)
-            printf("[app] reset: core 1 did not stop the app within 1 s\r\n");
+        if (!coherent(slot)->reset_ack)
+            printf("[app] reset: core 1 did not stop slot %lu within 1 s\r\n",
+                   (unsigned long)slot);
     }
-#else
-    (void)running;
 #endif
 }
 
 void zzapp_status_observed(void)
 {
-    if (g_state == ZZAPP_ST_FAULTED)
+    if (host_slot(current_slot())->state == ZZAPP_ST_FAULTED)
         publish_state(ZZAPP_ST_IDLE);
 }
 
@@ -1224,14 +1276,11 @@ int zzapp_flip_ack_is_current(uint32_t gen)
 
 void zzapp_boot_init(void)
 {
-    memset((void *)g_coh, 0, sizeof(*g_coh));
+    memset((void *)g_coh, 0, sizeof(*g_coh) * ZZAPP_AS_SLOT_COUNT);
+    memset(g_host, 0, sizeof(g_host));
     memset(g_proc, 0, sizeof(g_proc));
     zzapp_kernel_init(&g_kernel);
     zzapp_loader_memory_init();
-    g_state = ZZAPP_ST_IDLE;
-    g_faulted = 0;
-    g_stop_mark = 0;
-    g_fault_mark = 0;
     g_cold_restarts = 0;
 #ifdef ZZAPP_HOST_TEST
     g_test_service_calls = 0;
@@ -1240,14 +1289,19 @@ void zzapp_boot_init(void)
 
 void zzapp_host_exit(int code)
 {
-    g_exit_code = (uint32_t)code;
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+
+    host->exit_code = (uint32_t)code;
 #ifndef ZZAPP_HOST_TEST
+    struct zzapp_coherent *coh = coherent(slot);
+
     if (zzapp_kernel_current_thread() >= 0) {
-        zzapp_kernel_stop_app(&g_kernel, current_slot());
-        g_coh->running = 0;
-        life32(ZZAPP_LIFE_EXIT_OFF, g_exit_code);
+        zzapp_kernel_stop_app(&g_kernel, slot);
+        coh->running = 0;
+        life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
         zzapp_services_on_app_end();
-        zzapp_minigl_reclaim(g_coh->generation);
+        zzapp_minigl_reclaim(coh->generation);
         publish_state(ZZAPP_ST_IDLE);
         zzapp_loader_release();
         zzapp_kernel_service_due(&g_kernel);
@@ -1260,62 +1314,52 @@ void zzapp_host_exit(int code)
 
 void zzapp_host_commit_begin(void)
 {
-    g_host_visible_commit_active = 1u;
+    g_host_visible_commit_active[current_slot()] = 1u;
 }
 
 void zzapp_host_commit_end(void)
 {
-    g_host_visible_commit_active = 0u;
+    g_host_visible_commit_active[current_slot()] = 0u;
 }
 
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 {
+    uint32_t slot = current_slot();
+    struct zzapp_host_visible_block *blocks = g_host_visible[slot];
     uint32_t i;
 
     if ((flags & ~(ZZ_ALLOC_UNCACHED | ZZ_ALLOC_HOST_VISIBLE)) != 0u ||
         !bytes || align < 8u || (align & (align - 1u)) != 0u)
         return NULL;
-    /*
-     * The arena heap belongs to the app's newlib (_sbrk over heap_range),
-     * which the runtime cannot see into. A second allocator here would hand
-     * out bytes malloc already owns, so the table allocates host-visible
-     * memory only; zz_alloc serves arena requests from malloc.
-     */
-    if ((flags & ZZ_ALLOC_HOST_VISIBLE) == 0u)
-        return NULL;
-    if (bytes > ZZAPP_HOST_VISIBLE_LIMIT - g_host_visible_used)
+    if ((flags & ZZ_ALLOC_HOST_VISIBLE) == 0u ||
+        bytes > ZZAPP_HOST_VISIBLE_LIMIT - g_host_visible_used[slot])
         return NULL;
     for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
         uint32_t card;
         void *ptr;
 
-        if (g_host_visible[i].ptr)
+        if (blocks[i].ptr)
             continue;
-        /*
-         * surface_allocator_* restores interrupts before returning. Keep a
-         * forced-stop tick from unwinding the app until this real allocation
-         * has a ledger entry that teardown can release.
-         */
         zzapp_host_commit_begin();
 #ifndef ZZAPP_HOST_TEST
         card = surface_allocator_alloc_aligned(bytes, align);
         ptr = (void *)(uintptr_t)card;
 #else
         ptr = malloc(bytes);
-        card = 0x033f0000u + g_host_visible_used;
+        card = 0x033f0000u + g_host_visible_used[slot];
         extern void zzapp_test_host_visible_allocated(void) __attribute__((weak));
         if (zzapp_test_host_visible_allocated)
             zzapp_test_host_visible_allocated();
 #endif
         if (!ptr) {
-            g_host_visible_commit_active = 0u;
+            g_host_visible_commit_active[slot] = 0u;
             return NULL;
         }
-        g_host_visible[i].ptr = ptr;
-        g_host_visible[i].card = card;
-        g_host_visible[i].bytes = bytes;
-        g_host_visible_used += bytes;
-        g_host_visible_commit_active = 0u;
+        blocks[i].ptr = ptr;
+        blocks[i].card = card;
+        blocks[i].bytes = bytes;
+        g_host_visible_used[slot] += bytes;
+        g_host_visible_commit_active[slot] = 0u;
         return ptr;
     }
     return NULL;
@@ -1323,44 +1367,50 @@ void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 
 void zzapp_host_free(void *p)
 {
+    uint32_t slot = current_slot();
+    struct zzapp_host_visible_block *blocks = g_host_visible[slot];
     uint32_t i;
 
     for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
-        if (g_host_visible[i].ptr != p)
+        if (blocks[i].ptr != p)
             continue;
-        g_host_visible_commit_active = 1u;
+        g_host_visible_commit_active[slot] = 1u;
 #ifndef ZZAPP_HOST_TEST
-        (void)surface_allocator_free(g_host_visible[i].card);
+        (void)surface_allocator_free(blocks[i].card);
 #else
         free(p);
 #endif
-        g_host_visible_used -= g_host_visible[i].bytes;
-        g_host_visible[i].ptr = NULL;
-        g_host_visible_commit_active = 0u;
+        g_host_visible_used[slot] -= blocks[i].bytes;
+        blocks[i].ptr = NULL;
+        g_host_visible_commit_active[slot] = 0u;
         return;
     }
 }
 
 void zzapp_host_heap(void **base, uint32_t *bytes)
 {
+    struct zzapp_host_slot *host = host_slot(current_slot());
+
     if (base)
-        *base = g_mem ? g_mem + g_heap_off : NULL;
+        *base = host->mem ? host->mem + host->heap_off : NULL;
     if (bytes)
-        *bytes = g_heap_end > g_heap_off ? g_heap_end - g_heap_off : 0;
+        *bytes = host->heap_end > host->heap_off ?
+                 host->heap_end - host->heap_off : 0;
 }
 
 int zzapp_host_address(const void *p, uint32_t *host_offset)
 {
+    struct zzapp_host_visible_block *blocks = g_host_visible[current_slot()];
     uint32_t i;
 
     if (!host_offset)
         return ZZ_EINVAL;
     for (i = 0; i < ZZAPP_HOST_VISIBLE_SLOTS; ++i) {
-        if (g_host_visible[i].ptr == p) {
+        if (blocks[i].ptr == p) {
 #ifndef ZZAPP_HOST_TEST
-            *host_offset = g_host_visible[i].card - ADDR_ADJ;
+            *host_offset = blocks[i].card - ADDR_ADJ;
 #else
-            *host_offset = g_host_visible[i].card;
+            *host_offset = blocks[i].card;
 #endif
             return ZZ_OK;
         }
@@ -1370,13 +1420,18 @@ int zzapp_host_address(const void *p, uint32_t *host_offset)
 
 int zzapp_host_mem_info(zzapp_mem_info *out)
 {
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+
     if (!out)
         return ZZ_EINVAL;
-    out->arena_size = g_mem ? ZZAPP_ARENA_BYTES : 0u;
-    out->arena_used = g_heap_bump > g_heap_off ? g_heap_bump - g_heap_off : 0u;
-    out->arena_free = g_heap_end > g_heap_bump ? g_heap_end - g_heap_bump : 0u;
+    out->arena_size = host->mem ? ZZAPP_ARENA_BYTES : 0u;
+    out->arena_used = host->heap_bump > host->heap_off ?
+                      host->heap_bump - host->heap_off : 0u;
+    out->arena_free = host->heap_end > host->heap_bump ?
+                      host->heap_end - host->heap_bump : 0u;
     out->arena_largest_block = out->arena_free;
-    out->host_visible_used = g_host_visible_used;
+    out->host_visible_used = g_host_visible_used[slot];
     out->host_visible_limit = ZZAPP_HOST_VISIBLE_LIMIT;
     return ZZ_OK;
 }
@@ -1384,15 +1439,24 @@ int zzapp_host_mem_info(zzapp_mem_info *out)
 void zzapp_test_set_xtime(uint64_t ticks) { g_test_ticks = ticks; }
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv)) { g_test_entry = fn; }
 void zzapp_host_tick_at(uint64_t now) { g_test_ticks = now; service_tick(now, 0); }
-void zzapp_test_mark_running(void) { g_coh->running = 1; g_state = ZZAPP_ST_RUNNING; zzapp_note_progress(); begin_tick_observation(); }
-uint32_t zzapp_test_service_calls(void) { return g_test_service_calls; }
-uint32_t zzapp_test_in_api(void) { return g_coh->in_api; }
+void zzapp_test_mark_running(void)
+{
+    uint32_t slot = current_slot();
 
+    coherent(slot)->running = 1;
+    host_slot(slot)->state = ZZAPP_ST_RUNNING;
+    zzapp_note_progress();
+    begin_tick_observation();
+}
+uint32_t zzapp_test_service_calls(void) { return g_test_service_calls; }
+uint32_t zzapp_test_in_api(void) { return coherent(current_slot())->in_api; }
 int zzapp_test_cold_restarts(void) { return g_cold_restarts; }
-uint32_t zzapp_test_exit_code(void) { return g_exit_code; }
+uint32_t zzapp_test_exit_code(void) { return host_slot(current_slot())->exit_code; }
 uint8_t *zzapp_test_stack_canary(void)
 {
-    return (g_mem && g_heap_end != 0u) ? g_mem + g_heap_end : 0;
+    struct zzapp_host_slot *host = host_slot(current_slot());
+
+    return (host->mem && host->heap_end != 0u) ? host->mem + host->heap_end : 0;
 }
-uint32_t zzapp_test_fault_code(void) { return g_coh->fault; }
+uint32_t zzapp_test_fault_code(void) { return coherent(current_slot())->fault; }
 #endif

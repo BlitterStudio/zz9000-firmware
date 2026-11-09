@@ -46,10 +46,14 @@ private to the slot's ASID; it is not an identity mapping. The low identity
 map is privileged-only except for user grants to that app's host-visible
 blocks, display surfaces, and launcher window.
 
-The four 592 KiB launcher windows are at the start of four consecutive 1 MiB
-sections in one 4 MiB section-aligned host-visible allocation. Firmware marks
-the whole four-section region non-cacheable at boot. Each slot maps only its
-own window as a user section.
+The four 592 KiB launcher windows use fixed ranges in the host-visible heap:
+slot 0 at `0x0805C000` (the legacy range, ending at the Z3 host window) and
+slots 1-3 in the three equal ranges directly below it, down to `0x07EA0000`.
+Firmware marks all four ranges non-cacheable at boot and allocates a slot's
+window from its range when a launcher claims the slot.
+Legacy app-service requests continue to use slot 0's window and do not expose
+the other three windows.
+
 
 ### Zorro III SDK host window
 

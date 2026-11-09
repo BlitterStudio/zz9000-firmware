@@ -29,7 +29,7 @@
 #define ZZAPP_OP_FIRST             ZZAPP_OP_QUERY
 /* Per-slot snapshot for status listings (extended requests only). */
 #define ZZAPP_OP_LIST              0x0c09u
-#define ZZAPP_OP_LAST              ZZAPP_OP_DISPLAY_BIND
+#define ZZAPP_OP_LAST              ZZAPP_OP_LIST
 /* 0x0c00..0x0c1f is reserved. v0 uses FIRST..LAST. */
 #define ZZAPP_OP_RANGE_LO          0x0c00u
 #define ZZAPP_OP_RANGE_HI          0x0c1fu
@@ -43,6 +43,9 @@
 /* ZZAPP_SLOT_COUNT apps at once; the extended request forms below work. */
 #define ZZAPP_CAP_SLOTS            (1u << 5)
 #define ZZAPP_SLOT_COUNT           4u
+
+/* Extended-request ownership mismatch. Matches SDK_STATUS_BAD_HANDLE. */
+#define ZZAPP_ERR_STALE            5u
 
 /*
  * Mailbox payloads are big-endian in the 48-byte entry payload.

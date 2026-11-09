@@ -69,18 +69,43 @@ int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
                            uint32_t note_minor, uint32_t min_heap_bytes);
 int zzapp_loader_have_image(void);
 
-static uint32_t g_card;
-static uint8_t *g_mem;
-static uint32_t g_bytes;
-static uint32_t g_owner;
-static uint32_t g_file_end;
-static uint32_t g_back;
-static uint32_t g_back_owner;
-static int g_ready;
-
+struct loader_slot {
+    uint32_t card;
+    uint8_t *mem;
+    uint32_t bytes;
+    uint32_t owner;
+    uint32_t file_end;
+    uint32_t back;
+    uint32_t back_owner;
+    int ready;
 #ifdef ZZAPP_HOST_TEST
-static uint8_t *g_host_mem;
-static uint8_t *g_host_back;
+    uint8_t *host_mem;
+    uint8_t *host_back;
+#endif
+};
+
+uint32_t zzapp_services_current_slot(void) __attribute__((weak));
+
+static struct loader_slot g_loader[ZZAPP_AS_SLOT_COUNT];
+
+static uint32_t loader_slot(void)
+{
+    uint32_t slot = zzapp_services_current_slot ? zzapp_services_current_slot() : 0U;
+
+    return slot < ZZAPP_AS_SLOT_COUNT ? slot : 0U;
+}
+
+#define g_card       (g_loader[loader_slot()].card)
+#define g_mem        (g_loader[loader_slot()].mem)
+#define g_bytes      (g_loader[loader_slot()].bytes)
+#define g_owner      (g_loader[loader_slot()].owner)
+#define g_file_end   (g_loader[loader_slot()].file_end)
+#define g_back       (g_loader[loader_slot()].back)
+#define g_back_owner (g_loader[loader_slot()].back_owner)
+#define g_ready      (g_loader[loader_slot()].ready)
+#ifdef ZZAPP_HOST_TEST
+#define g_host_mem   (g_loader[loader_slot()].host_mem)
+#define g_host_back  (g_loader[loader_slot()].host_back)
 #define HOST_CARD 0xc0000000u
 #endif
 
@@ -136,7 +161,7 @@ static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
 
 static int map_loaded_image(const struct load_image *img)
 {
-    zzapp_proc_t *proc = zzapp_proc_slot(0);
+    zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
     uint32_t image_frames;
     uint32_t stack_frames;
     uint32_t heap_frames;
@@ -256,7 +281,7 @@ failed:
 
 int zzapp_loader_heap_grow(uint32_t bytes)
 {
-    zzapp_proc_t *proc = zzapp_proc_slot(0);
+    zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
     uint32_t frames = bytes / ZZAPP_MEM_FRAME_BYTES;
     uint32_t first;
 
@@ -280,7 +305,7 @@ int zzapp_loader_heap_grow(uint32_t bytes)
 
 int zzapp_loader_heap_shrink(uint32_t bytes)
 {
-    zzapp_proc_t *proc = zzapp_proc_slot(0);
+    zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
     uint32_t frames = bytes / ZZAPP_MEM_FRAME_BYTES;
     uint32_t first;
     uint32_t i;
@@ -328,7 +353,7 @@ void zzapp_loader_memory_init(void) {}
 static void drop_arena(void)
 {
 #ifndef ZZAPP_HOST_TEST
-    zzapp_proc_t *proc = zzapp_proc_slot(0);
+    zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
 
     if (proc) {
         zzapp_as_destroy(&proc->as);

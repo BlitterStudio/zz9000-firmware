@@ -111,12 +111,12 @@ run one app without learning about the other slots. A client without
 
 ### Launcher windows
 
-Each slot gets a `ZZAPP_WINDOW_BYTES` (592 KiB) launcher window at the start
-of its own 1 MiB section. The four windows occupy one section-aligned 4 MiB
-host-visible region, mapped non-cacheable by whole section at boot. A window
-is an identity-mapped user section only in its owner's address space. This
-preserves the existing window layout while giving each app one TLB entry and
-preventing another slot from reading it.
+Each slot gets a `ZZAPP_WINDOW_BYTES` (592 KiB) launcher window with the
+unchanged layout. Slot 0 keeps the legacy range `0x0805C000`-`0x080EFFFF`,
+which ends at the fixed Z3 host window; slots 1-3 use the three
+`ZZAPP_WINDOW_Z3_SIZE` ranges directly below it. Each window is allocated from
+its fixed range on claim, and every page of the four ranges is mapped
+non-cacheable at boot, before core 1 runs.
 
 ## Translation attribute changes
 

@@ -48,9 +48,11 @@ void zzapp_services_set_window_mapping_available(int available);
 uint8_t *zzapp_services_window(void);
 uint32_t zzapp_services_generation(void);
 uint32_t zzapp_services_state(void);
+uint32_t zzapp_services_current_slot(void);
 int zzapp_services_stop_requested(void);
 void zzapp_services_set_state(uint32_t state);
 void zzapp_services_set_generation(uint32_t generation);
+uint32_t zzapp_services_memory_limit(void);
 void zzapp_services_set_fault(uint32_t code, uint32_t pc, uint32_t sp,
 			      uint32_t lr, uint32_t far, uint32_t fsr,
 			      uint32_t cpsr);
@@ -136,6 +138,8 @@ uint64_t zzapp_host_time_us(void);
 void zzapp_services_test_reset(void);
 void zzapp_services_test_set_core(int core);
 void zzapp_services_test_set_window(void *window, uint32_t bytes);
+void zzapp_services_test_set_window_slot(uint32_t slot, void *window,
+					 uint32_t bytes);
 void zzapp_services_test_set_yield(void (*fn)(void));
 void zzapp_services_test_set_time(uint64_t (*fn)(void));
 void zzapp_services_test_set_slot_busy(uint32_t slot, int busy);
