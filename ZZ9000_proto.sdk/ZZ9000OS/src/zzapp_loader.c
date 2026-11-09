@@ -172,7 +172,8 @@ static int map_loaded_image(const struct load_image *img)
     uint32_t total_frames;
     uint32_t i;
 
-    if (!g_app_memory_ready || !proc)
+    if (!g_app_memory_ready || !proc ||
+        img->image_end > ZZAPP_AS_ALIAS_BASE - ZZAPP_AS_WINDOW_BASE)
         return ZZ_ENOMEM;
     image_frames = (img->image_end + ZZAPP_MEM_FRAME_BYTES - 1u) >> 20;
     stack_frames = (img->stack_bytes + ZZAPP_MEM_FRAME_BYTES - 1u) >> 20;
@@ -180,7 +181,8 @@ static int map_loaded_image(const struct load_image *img)
                    ZZAPP_ARENA_BYTES / ZZAPP_MEM_FRAME_BYTES :
                    image_frames + stack_frames +
                    img->min_heap_bytes / ZZAPP_MEM_FRAME_BYTES;
-    if (total_frames > ZZAPP_MEM_MAX_FRAMES)
+    if (image_frames > ZZAPP_MEM_MAX_FRAMES ||
+        total_frames > ZZAPP_MEM_MAX_FRAMES)
         return ZZ_ENOMEM;
     heap_frames = total_frames - image_frames - stack_frames;
     zzapp_mem_proc_init(&proc->memory, img->note_minor < 3u ?
@@ -197,14 +199,6 @@ static int map_loaded_image(const struct load_image *img)
     proc->stack_frame_count = stack_frames;
     if (zzapp_as_create(&proc->as, loader_slot(), proc->generation))
         goto failed;
-    {
-        uint8_t *window = zzapp_services_window();
-
-        if (!window || zzapp_as_map_window(&proc->as,
-                                            (uint32_t)(uintptr_t)window))
-            goto failed;
-        proc->launcher_window = window;
-    }
     proc->heap_base = image_frames * ZZAPP_MEM_FRAME_BYTES;
     if (img->note_minor < 3u) {
         proc->stack_base = ZZAPP_ARENA_BYTES - stack_frames *
@@ -215,8 +209,12 @@ static int map_loaded_image(const struct load_image *img)
                            ZZAPP_MEM_FRAME_BYTES;
         if (proc->stack_base < ZZAPP_MEM_FRAME_BYTES)
             goto failed;
-        proc->heap_limit = proc->stack_base - ZZAPP_MEM_FRAME_BYTES;
+        proc->heap_limit = ZZAPP_AS_ALIAS_BASE - ZZAPP_AS_WINDOW_BASE;
     }
+    if (proc->heap_base > proc->heap_limit ||
+        heap_frames > (proc->heap_limit - proc->heap_base) /
+                      ZZAPP_MEM_FRAME_BYTES)
+        goto failed;
     proc->stack_top = proc->stack_base + stack_frames * ZZAPP_MEM_FRAME_BYTES;
     proc->heap_start = proc->heap_base;
     proc->heap_break = proc->heap_base;

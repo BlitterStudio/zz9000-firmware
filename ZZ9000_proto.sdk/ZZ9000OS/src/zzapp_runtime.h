@@ -52,7 +52,7 @@ typedef struct zzapp_proc {
     uint32_t generation;
     uint32_t image_entry;
     uint32_t image_end;
-    uint32_t image_frames[ZZAPP_IMAGE_MAX_BYTES / ZZAPP_MEM_FRAME_BYTES];
+    uint32_t image_frames[ZZAPP_MEM_MAX_FRAMES];
     uint32_t image_frame_count;
     uint32_t heap_base;
     uint32_t heap_start;
@@ -73,7 +73,6 @@ typedef struct zzapp_proc {
     uint32_t audio_direct;
     uint32_t image_sessions;
     uint32_t audio_sessions;
-    void *launcher_window;
     void *coherent;
     uint64_t watchdog_stamp;
     uint64_t lease_stamp;

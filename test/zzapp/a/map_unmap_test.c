@@ -68,7 +68,9 @@ int main(void)
     assert(api->map_file("RAM:fixture", &mapped, &bytes) == ZZ_OK);
     assert(bytes == sizeof(file_data) - 1u);
     assert(api->mem_info(&mem) == ZZ_OK);
-    assert(mem.host_visible_used == bytes);
+    /* App-visible host memory is backed by whole pages, so no page is
+     * shared between owners; usage counts that backing. */
+    assert(mem.host_visible_used == ((bytes + 4095u) & ~4095u));
     api->unmap_file(mapped);
     assert(api->mem_info(&mem) == ZZ_OK);
     assert(mem.host_visible_used == 0u);

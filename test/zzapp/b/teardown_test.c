@@ -396,10 +396,8 @@ static void run_case(enum teardown_path value)
 
     assert(live_slot1_commit == MB(3));
     if (value == TEARDOWN_AMIGA_RESET) {
-        for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-            select_test_slot(slot);
-            zzapp_worker_hook();
-        }
+        select_test_slot(1U);
+        zzapp_worker_hook();
     }
     assert_slot1_reclaimed(expected_reason(value));
     if (value == TEARDOWN_AMIGA_RESET || value == TEARDOWN_CORE_RESTART) {

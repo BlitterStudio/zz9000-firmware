@@ -130,10 +130,13 @@ int main(void)
     zzapp_boot_init();
     zzapp_test_set_wait_registered(0U, 1);
     assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_test_mark_running();
     zzapp_kernel_set_current_thread(0);
     zzapp_api_enter();
     zzapp_host_yield_wait();
     assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_BLOCKED);
+    zzapp_host_tick_at(ZZAPP_API_STUCK_US);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
     zzapp_kernel_set_current_thread(-1);
 
     {

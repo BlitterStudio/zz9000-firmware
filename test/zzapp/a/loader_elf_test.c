@@ -14,6 +14,8 @@ uint32_t zzapp_services_current_slot(void)
 static uint8_t service_window[ZZAPP_WINDOW_BYTES];
 static int start_pending;
 static int dynamic_started;
+static uint32_t start_argc;
+static int argv_started;
 
 uint8_t *zzapp_services_window(void)
 {
@@ -25,11 +27,26 @@ int zzapp_services_take_start(uint32_t *argc)
     if (!start_pending)
         return 0;
     start_pending = 0;
-    *argc = 0U;
+    *argc = start_argc;
     return 1;
 }
 
 void zzapp_host_heap(void **base, uint32_t *bytes);
+
+static void argv_entry(const void *api_ptr, int argc, char **argv)
+{
+    void *base;
+    uint32_t bytes;
+
+    (void)api_ptr;
+    assert(argc == 1);
+    assert(strcmp(argv[0], "argv-test") == 0);
+    zzapp_host_heap(&base, &bytes);
+    assert(base > (void *)argv[0]);
+    assert(bytes != 0u);
+    argv_started = 1;
+}
+
 
 static void dynamic_entry(const void *api_ptr, int argc, char **argv)
 {
@@ -42,7 +59,7 @@ static void dynamic_entry(const void *api_ptr, int argc, char **argv)
     assert(argv != NULL);
     zzapp_host_heap(&base, &bytes);
     assert(base != NULL);
-    assert(bytes >= (1u << 20));
+    assert(bytes == 0u);
     assert(api->heap_grow(1u << 20, &old_break) == ZZ_OK);
     assert(old_break != NULL);
     assert(api->heap_shrink(1u << 20, NULL) == ZZ_OK);
@@ -142,6 +159,8 @@ int main(void)
     const zzapp_api *api;
     zzapp_heap_info mem;
     zzapp_boot_init();
+    assert(sizeof(zzapp_proc_slot(0)->image_frames) /
+           sizeof(zzapp_proc_slot(0)->image_frames[0]) == ZZAPP_MEM_MAX_FRAMES);
     make_image(image);
     assert(load_end(image) == ZZ_OK);
     card = zzapp_test_arena_card();
@@ -250,7 +269,20 @@ int main(void)
     zzapp_loader_release();
     zzapp_boot_init();
     make_image(image);
+    assert(load_end(image) == ZZ_OK);
+    zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
+                   ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
+    memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF, "argv-test", 10u);
+    start_argc = 1u;
+    argv_started = 0;
+    zzapp_test_set_entry(argv_entry);
+    start_pending = 1;
+    zzapp_worker_hook();
+    assert(argv_started);
+
+    make_image(image);
     put32(image + NOTE_OFF + 28u, 3u);
+    start_argc = 0u;
     assert(load_end(image) == ZZ_OK);
     zzapp_test_set_entry(dynamic_entry);
     start_pending = 1;
