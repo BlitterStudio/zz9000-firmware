@@ -20,6 +20,89 @@ static void make_runnable(zzapp_kernel_t *kernel, unsigned slot)
 	CHECK(zzapp_kernel_start_app(kernel, slot) == 0);
 }
 
+static void test_first_context_and_dispatch(void)
+{
+	zzapp_kernel_t kernel;
+	unsigned slot;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x12345678u,
+				       0x23456789u, 3u, 0x34567890u,
+				       0x45678000u) == 0);
+	CHECK(kernel.threads[0].context.r[15] == 0x12345678u);
+	CHECK(kernel.threads[0].context.r[0] == 0x23456789u);
+	CHECK(kernel.threads[0].context.r[1] == 3u);
+	CHECK(kernel.threads[0].context.r[2] == 0x34567890u);
+	CHECK(kernel.threads[0].context.r[13] == 0x45678000u);
+	CHECK(kernel.threads[0].context.cpsr == ZZAPP_KERNEL_APP_CPSR);
+	CHECK(kernel.threads[0].context.fpscr == 0u);
+	for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
+		make_runnable(&kernel, slot);
+	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_TICK, 5u) ==
+	      ZZAPP_KERNEL_APP0);
+	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_TICK, 5u) ==
+	      ZZAPP_KERNEL_APP1);
+	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_TICK, 5u) ==
+	      ZZAPP_KERNEL_APP2);
+	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_TICK, 5u) ==
+	      ZZAPP_KERNEL_APP3);
+	zzapp_kernel_service_due(&kernel);
+	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_DOORBELL, 0u) ==
+	      ZZAPP_KERNEL_SYSTEM);
+	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u) ==
+	      ZZAPP_KERNEL_APP0);
+}
+
+static void test_frame_switch(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame;
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 1, 0x2000u, 2u, 0u, 0u,
+				       0x9000u) == 0);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	frame = kernel.threads[0].context.frame;
+	frame.exception_lr = 0x1004u;
+	zzapp_kernel_set_current_thread(0);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+	CHECK(next == &kernel.threads[0].context.frame);
+	CHECK(kernel.threads[0].context.r[15] == 0x1000u);
+	CHECK(kernel.threads[0].context.r[13] == 0x8000u);
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+	CHECK(next == &kernel.threads[1].context.frame);
+	CHECK(zzapp_kernel_current_thread() == 1);
+}
+
+static void test_system_frame_runs_service_before_apps(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t system_frame = { 0 };
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	system_frame.exception_lr = 0x5000u;
+	system_frame.spsr = ZZAPP_KERNEL_APP_CPSR;
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &system_frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(next == &kernel.threads[0].context.frame);
+	zzapp_kernel_service_due(&kernel);
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_DOORBELL, 0u);
+	CHECK(next == &kernel.system_context.frame);
+	CHECK(zzapp_kernel_current_thread() == -1);
+}
+
 static void test_round_robin_quantum(void)
 {
 	zzapp_kernel_t kernel;
@@ -76,6 +159,25 @@ static void test_sleep_deadline_order(void)
 	CHECK(kernel.wake_log[0] == 1u);
 	CHECK(kernel.wake_log[1] == 0u);
 	CHECK(zzapp_kernel_schedule(&kernel, 5) != ZZAPP_KERNEL_IDLE);
+}
+
+static void test_wait_completion_timeout_and_cancel(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	CHECK(zzapp_kernel_block(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_wake(&kernel, 0, ZZAPP_WAKE_READY) == 0);
+	CHECK(zzapp_kernel_wait_status(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_block(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_wake(&kernel, 0, ZZAPP_WAKE_TIMEOUT) == 0);
+	CHECK(zzapp_kernel_wait_status(&kernel, 0) ==
+	      ZZAPP_KERNEL_WAIT_TIMEOUT);
+	CHECK(zzapp_kernel_block(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_wake(&kernel, 0, ZZAPP_WAKE_CANCELLED) == 0);
+	CHECK(zzapp_kernel_wait_status(&kernel, 0) ==
+	      ZZAPP_KERNEL_WAIT_CANCELLED);
 }
 
 static void test_accounting_and_throttle(void)
@@ -156,10 +258,14 @@ static void test_blocking_api_lock_and_slot_resources(void)
 
 int main(void)
 {
+    test_first_context_and_dispatch();
+    test_frame_switch();
+    test_system_frame_runs_service_before_apps();
     test_round_robin_quantum();
     test_service_precedes_app_and_preserves_remainder();
     test_block_wake_and_idle();
     test_sleep_deadline_order();
+    test_wait_completion_timeout_and_cancel();
     test_accounting_and_throttle();
     test_blocking_api_lock_and_slot_resources();
     printf("kernel_sched_test: %u checks, %d failures\n", checks, failures);

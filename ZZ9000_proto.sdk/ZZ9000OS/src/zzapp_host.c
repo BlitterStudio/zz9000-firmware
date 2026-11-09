@@ -104,6 +104,40 @@ zzapp_kernel_t *zzapp_runtime_kernel(void)
     return &g_kernel;
 }
 
+/* The vectors restore from the returned frame and leave the exception-mode
+ * SP just above it. Copy the chosen context onto the exception stack in
+ * place, so that SP stays inside the exception stack and the next exception
+ * cannot push into another thread's saved context. */
+zzapp_arm_frame_t *zzapp_kernel_arch_dispatch(zzapp_arm_frame_t *frame,
+                                               uint32_t source,
+                                               uint32_t return_adjust)
+{
+    zzapp_arm_frame_t *next = zzapp_kernel_switch_frame(&g_kernel, frame,
+        (zzapp_kernel_dispatch_t)source, return_adjust);
+
+    if (next && next != frame)
+        memcpy(frame, next, sizeof(*frame));
+    return frame;
+}
+
+void zzapp_kernel_switch_address_space(uint32_t slot)
+{
+#ifndef ZZAPP_HOST_TEST
+    if (slot < ZZAPP_AS_SLOT_COUNT)
+        zzapp_as_switch(&g_proc[slot].as);
+#else
+    (void)slot;
+#endif
+}
+
+void zzapp_kernel_switch_kernel_address_space(void)
+{
+#ifndef ZZAPP_HOST_TEST
+    zzapp_as_switch_kernel();
+#endif
+}
+
+
 static uint32_t current_slot(void)
 {
     int slot = zzapp_kernel_current_thread();
@@ -206,14 +240,6 @@ static void host_visible_release_all(void)
     }
     g_host_visible_used = 0;
 }
-#ifndef ZZAPP_HOST_TEST
-/* Set while a task-context service tick runs (API epilogue on app_host_sp,
- * or a yield on the app stack).  The private-timer IRQ then neither nests
- * service_tick nor switches to app_host_sp.  Global: the IRQ entry reads it
- * from assembly. */
-volatile int g_host_tick_active;
-static volatile int g_unwind_pending;
-#endif
 
 static void zzapp_private_timer_enable(void);
 static void zzapp_private_timer_disable(void);
@@ -246,83 +272,10 @@ static void wake_core1(void)
 #ifdef ZZAPP_HOST_TEST
 static void (*g_test_entry)(const void *api, int argc, char **argv);
 #else
-/* Every app's service ticks run on its dedicated kernel stack, never on the
- * app arena or IRQ stack. app_return_sp retains the worker frame. */
-volatile uint32_t app_host_sp;
-static volatile uint32_t app_return_sp;
 static int g_private_timer_ready;
 static int g_firmware_text_readonly;
 extern char __firmware_text_start[];
 extern char __firmware_text_end[];
-
-__attribute__((naked)) void zzapp_enter_arm(uint32_t entry, const void *api,
-                                            uint32_t argc, char **argv,
-                                            uint32_t sp)
-{
-    (void)entry; (void)api; (void)argc; (void)argv; (void)sp;
-    __asm__ volatile (
-        "push {r4-r11, lr}\n"
-        "vmrs r4, fpscr\n"
-        "push {r4}\n"
-        "vpush {d0-d15}\n"
-        "vpush {d16-d31}\n"
-        /* App ABI baseline: round-to-nearest, no FZ and no default-NaN. */
-        "mov r4, #0\n"
-        "vmsr fpscr, r4\n"
-        "ldr r4, [sp, #296]\n"
-        "ldr r12, =app_return_sp\n"
-        "str sp, [r12]\n"
-        "mov r12, r0\n"
-        "mov r0, r1\n"
-        "mov r1, r2\n"
-        "mov r2, r3\n"
-        /* Change 0x1f to 0x10 when the SVC veneer path owns app calls. */
-        "cps #0x1f\n"
-        "mov sp, r4\n"
-        "blx r12\n"
-        "cps #0x13\n"
-        "ldr r12, =app_return_sp\n"
-        "ldr sp, [r12]\n"
-        "vpop {d16-d31}\n"
-        "vpop {d0-d15}\n"
-        "pop {r4}\n"
-        "vmsr fpscr, r4\n"
-        "pop {r4-r11, lr}\n"
-        "bx lr\n");
-}
-
-/* Return to run_app through the saved zzapp_enter_arm frame.  This is used
- * for normal exit, watchdog/stop unwinds, and app exceptions; no app frame
- * survives any of those paths. */
-extern void core1_reset_exception_stacks(void);
-__attribute__((naked, noreturn)) static void zzapp_unwind_to_host(void)
-{
-    __asm__ volatile (
-        "cpsid if\n"
-        "bl core1_reset_exception_stacks\n"
-        "cps #0x13\n"
-        "ldr r12, =app_return_sp\n"
-        "ldr sp, [r12]\n"
-        "vpop {d16-d31}\n"
-        "vpop {d0-d15}\n"
-        "pop {r4}\n"
-        "vmsr fpscr, r4\n"
-        "pop {r4-r11, lr}\n"
-        "cpsie i\n"
-        "bx lr\n");
-}
-
-static void zzapp_unwind_if_needed(void)
-{
-    if (g_unwind_pending)
-        zzapp_unwind_to_host();
-}
-
-__attribute__((naked, noreturn)) static void zzapp_resume_worker_from_fault(void)
-{
-    __asm__ volatile (
-        "b zzapp_unwind_to_host\n");
-}
 #endif
 
 static uint64_t now_ticks(void)
@@ -505,6 +458,12 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
     life32(ZZAPP_LIFE_LR_OFF, lr);
     life32(ZZAPP_LIFE_FAR_OFF, far);
     life32(ZZAPP_LIFE_FSR_OFF, fsr);
+    if (zzapp_kernel_current_thread() >= 0) {
+        uint32_t slot = current_slot();
+
+        zzapp_kernel_stop_app(&g_kernel, slot);
+        zzapp_kernel_service_due(&g_kernel);
+    }
 #ifndef ZZAPP_HOST_TEST
     (void)cpsr;
     {
@@ -536,7 +495,6 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
 #ifndef ZZAPP_HOST_TEST
     if (g_owner)
         card_pool_release_owner(&card_pool, g_owner);
-    g_unwind_pending = 1;
 #endif
 #ifdef ZZAPP_HOST_TEST
     /* The host harness cannot discard the C app frame. Mirror the worker's
@@ -587,14 +545,18 @@ static void service_tick(uint64_t now, int permit_reentry)
             g_coh->api_entered = g_last_tick;
     }
     g_last_tick = now;
-    zzapp_services_poll();
     /*
-     * A tick must not acquire MiniGL or SDK work below an app API call.
-     * File waits and sleep explicitly pass permit_reentry between polls.
+     * Privileged work never enters an API body. A declared wait is the only
+     * yield point that permits it before the matching API leave.
      */
     if (g_coh->in_api == 0u || permit_reentry) {
+        zzapp_services_poll();
         g_coh->service_due = 0u;
+#ifdef ZZAPP_HOST_TEST
         scheduler_core1_service_from_app();
+#else
+        zzapp_kernel_service_due(&g_kernel);
+#endif
     } else {
         g_coh->service_due = 1u;
     }
@@ -623,57 +585,15 @@ static void service_tick(uint64_t now, int permit_reentry)
     maybe_expire_fault(now);
 }
 
+
 #ifndef ZZAPP_HOST_TEST
-static void zzapp_private_timer_eoi(void)
-{
-    XScuGic_CPUWriteReg(interrupt_get_intc(), XSCUGIC_EOI_OFFSET,
-                        XPAR_PS7_SCUTIMER_0_INTR);
-    __asm__ __volatile__("dsb sy" ::: "memory");
-}
-
-static __attribute__((noinline, used)) void zzapp_private_timer_service(void)
-{
-    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_ISR_OFFSET,
-              XSCUTIMER_ISR_EVENT_FLAG_MASK);
-    if (g_coh->running) {
-        if (!g_host_tick_active) {
-            zzapp_kernel_set_current_thread(-1);
-            service_tick(now_ticks(), 0);
-            zzapp_kernel_set_current_thread(0);
-        } else
-            /* A task-context tick is still running (possibly a long SDK
-             * task); core 1 is alive and taking interrupts. */
-            g_coh->tick_seen = now_ticks();
-    }
-    if (g_unwind_pending) {
-        /* We discard the IRQ frame below, so acknowledge the GIC before
-         * restoring run_app's saved worker context. */
-        zzapp_private_timer_eoi();
-        zzapp_unwind_if_needed();
-    }
-}
-
-/* Core 1's private vector owns the sole VFP frame for this interrupt. While a
- * task-context tick is active, app_host_sp is already in use by
- * zzapp_api_tick_body; switching to it would overwrite that live frame
- * (its saved return address came back as 0x42a00028 on hardware), so stay
- * on the IRQ stack: the service routine then does no deep work. */
-__attribute__((naked)) static void zzapp_private_timer_irq(void *unused)
+static void zzapp_private_timer_irq(void *unused)
 {
     (void)unused;
-    __asm__ volatile (
-        "push {r4, lr}\n"
-        "mov r4, sp\n"
-        "ldr r12, =g_host_tick_active\n"
-        "ldr r12, [r12]\n"
-        "cmp r12, #0\n"
-        "bne 1f\n"
-        "ldr r12, =app_host_sp\n"
-        "ldr sp, [r12]\n"
-        "1:\n"
-        "bl zzapp_private_timer_service\n"
-        "mov sp, r4\n"
-        "pop {r4, pc}\n");
+    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_ISR_OFFSET,
+              XSCUTIMER_ISR_EVENT_FLAG_MASK);
+    if (g_coh->running)
+        service_tick(now_ticks(), 0);
 }
 
 static void zzapp_private_timer_disable(void)
@@ -738,22 +658,7 @@ static void zzapp_private_timer_disable(void) {}
 void zzapp_private_timer_kick(void) {}
 #endif
 
-#ifndef ZZAPP_HOST_TEST
-/* A service tick from task context.  The flag keeps the private-timer IRQ
- * from running a nested service_tick on top of this one. */
-static void service_tick_in_task(uint64_t now, int permit_reentry)
-{
-    int outer = g_host_tick_active;
-
-    g_host_tick_active = 1;
-    __asm__ __volatile__("" ::: "memory");
-    service_tick(now, permit_reentry);
-    __asm__ __volatile__("" ::: "memory");
-    g_host_tick_active = outer;
-}
-#else
 #define service_tick_in_task service_tick
-#endif
 
 /* The 64-byte canary below the app stack is set in run_app. Docs promise a
  * force-stop with ZZAPP_FAULT_DATA when it is damaged; check it on every
@@ -791,9 +696,6 @@ void zzapp_host_yield(void)
     zzapp_note_progress();
     check_stack_canary();
     service_tick_in_task(now_ticks(), 0);
-#ifndef ZZAPP_HOST_TEST
-    zzapp_unwind_if_needed();
-#endif
 }
 
 void zzapp_host_yield_wait(void)
@@ -802,12 +704,6 @@ void zzapp_host_yield_wait(void)
     uint32_t slot = current_slot();
     int blocked = zzapp_kernel_current_thread() >= 0 && g_coh->in_api != 0u;
 
-    /*
-     * This is a declared blocking service wait (display/file/timeout), not
-     * an API that wedged in host code.  Renew the API-stall deadline before
-     * servicing the wait so a delayed launcher acknowledgement cannot turn
-     * into a false watchdog fault.
-     */
     if (g_coh->in_api != 0u)
         g_coh->api_entered = now;
     if (blocked)
@@ -818,42 +714,9 @@ void zzapp_host_yield_wait(void)
         (void)zzapp_kernel_wake(&g_kernel, slot, ZZAPP_WAKE_READY);
         (void)zzapp_kernel_api_lock(&g_kernel, slot);
     }
-#ifndef ZZAPP_HOST_TEST
-    zzapp_unwind_if_needed();
-#endif
 }
 
 uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
-
-#ifndef ZZAPP_HOST_TEST
-static __attribute__((noinline, used)) void zzapp_api_tick_body(void)
-{
-    service_tick(now_ticks(), 0);
-    /* g_host_tick_active stays set: this frame on app_host_sp is live until
-     * the wrapper has switched back, and an IRQ must not reuse that stack. */
-    zzapp_unwind_if_needed();
-}
-
-__attribute__((naked)) static void zzapp_api_tick_on_host_stack(void)
-{
-    __asm__ volatile (
-        "push {r4, lr}\n"
-        "vmrs r4, fpscr\n"
-        "push {r4}\n"
-        "vpush {d0-d15}\n"
-        "vpush {d16-d31}\n"
-        "mov r4, sp\n"
-        "ldr r12, =app_host_sp\n"
-        "ldr sp, [r12]\n"
-        "bl zzapp_api_tick_body\n"
-        "mov sp, r4\n"
-        "vpop {d16-d31}\n"
-        "vpop {d0-d15}\n"
-        "pop {r4}\n"
-        "vmsr fpscr, r4\n"
-        "pop {r4, pc}\n");
-}
-#endif
 
 /*
  * Every GL call of an ARM app passes through here (GLQuake makes tens of
@@ -886,18 +749,8 @@ void zzapp_api_leave(void)
         g_coh->in_api--;
     if (zzapp_kernel_current_thread() >= 0)
         (void)zzapp_kernel_api_unlock(&g_kernel, slot);
-    if (!g_coh->in_api && g_coh->service_due) {
-#ifdef ZZAPP_HOST_TEST
+    if (!g_coh->in_api && g_coh->service_due)
         service_tick(now_ticks(), 0);
-#else
-        /* Never nest: an active tick may own app_host_sp. */
-        if (!g_host_tick_active) {
-            g_host_tick_active = 1;
-            zzapp_api_tick_on_host_stack();
-            g_host_tick_active = 0;
-        }
-#endif
-    }
 }
 
 #ifndef ZZAPP_HOST_TEST
@@ -1089,10 +942,6 @@ static void run_app(uint32_t argc)
     g_fault_mark = 0;
     g_faulted = 0;
     g_exit_code = 0;
-#ifndef ZZAPP_HOST_TEST
-    g_unwind_pending = 0;
-    g_host_tick_active = 0;
-#endif
     /* Core 0's watchdog and lease checks trust these stamps whenever it sees
      * running == 1, so they must be fresh before running is published. The
      * first app after boot otherwise met stamps from power-on (0) and was
@@ -1103,47 +952,25 @@ static void run_app(uint32_t argc)
     zzapp_note_progress();
     begin_tick_observation();
     coherent_barrier();
+    if (zzapp_kernel_prepare_app(&g_kernel, 0, g_card + g_entry,
+                                 (uint32_t)(uintptr_t)zzapp_api_table(), argc,
+                                 (uint32_t)(uintptr_t)argv,
+                                 g_card + g_proc[0].stack_top) != 0) {
+        start_failed(ZZ_EINVAL);
+        return;
+    }
     g_coh->running = 1;
     publish_state(ZZAPP_ST_RUNNING);
     zzapp_services_start_entered(ZZ_OK);
     (void)zzapp_kernel_start_app(&g_kernel, 0);
-    zzapp_kernel_set_current_thread(0);
-#ifndef ZZAPP_HOST_TEST
-    app_host_sp = (uint32_t)(uintptr_t)scheduler_core1_app_stack_top(0);
-    zzapp_as_switch(&g_proc[0].as);
-#endif
-    zzapp_private_timer_enable();
 #ifdef ZZAPP_HOST_TEST
+    zzapp_kernel_set_current_thread(0);
+    zzapp_private_timer_enable();
     if (g_test_entry)
         g_test_entry(zzapp_api_table(), (int)argc, argv);
-#else
-    /* The ARM entry trampoline is intentionally separate from the loader.
-     * It establishes r0-r2 and the arena stack, then returns only via exit. */
-    extern void zzapp_enter_arm(uint32_t entry, const void *api, uint32_t argc,
-                                char **argv, uint32_t sp);
-    zzapp_enter_arm(g_card + g_entry, zzapp_api_table(), argc, argv,
-                    g_card + g_proc[0].stack_top);
-#endif
     zzapp_private_timer_disable();
     zzapp_kernel_set_current_thread(-1);
-#ifndef ZZAPP_HOST_TEST
-    zzapp_as_switch_kernel();
-#endif
-#ifndef ZZAPP_HOST_TEST
-    /* The unwind (exit, force-stop or fault) has landed here.  A pending
-     * flag left set would make any later host yield unwind onto this
-     * worker frame again after it has been reused. */
-    g_unwind_pending = 0;
-#endif
     g_coh->running = 0;
-#ifndef ZZAPP_HOST_TEST
-    if (g_watchdog_reason == 1u)
-        printf("[app] stopped: no app API call for %lu s\r\n",
-               (unsigned long)(ZZAPP_APP_STALL_US / 1000000u));
-    else if (g_watchdog_reason == 2u)
-        printf("[app] stopped: one app API call ran for %lu s\r\n",
-               (unsigned long)(ZZAPP_API_STUCK_US / 1000000u));
-#endif
     g_watchdog_reason = 0u;
     if (!g_faulted) {
         life32(ZZAPP_LIFE_EXIT_OFF, g_exit_code);
@@ -1152,6 +979,16 @@ static void run_app(uint32_t argc)
         publish_state(ZZAPP_ST_IDLE);
         zzapp_loader_release();
     }
+#else
+    /*
+     * The worker remains the system thread. Its next SVC saves that context
+     * and returns through the synthetic app frame above; run_app never nests
+     * the app below the worker stack.
+     */
+    zzapp_kernel_set_current_thread(-1);
+    zzapp_private_timer_enable();
+    return;
+#endif
 }
 
 void zzapp_worker_hook(void)
@@ -1213,9 +1050,6 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
                           uint32_t cpsr)
 {
     force_stop(fault, pc, sp, lr, far, fsr, cpsr);
-#ifndef ZZAPP_HOST_TEST
-    zzapp_resume_worker_from_fault();
-#endif
 }
 
 /*
@@ -1368,8 +1202,19 @@ void zzapp_host_exit(int code)
 {
     g_exit_code = (uint32_t)code;
 #ifndef ZZAPP_HOST_TEST
-    g_unwind_pending = 1;
-    zzapp_unwind_to_host();
+    if (zzapp_kernel_current_thread() >= 0) {
+        zzapp_kernel_stop_app(&g_kernel, current_slot());
+        g_coh->running = 0;
+        life32(ZZAPP_LIFE_EXIT_OFF, g_exit_code);
+        zzapp_services_on_app_end();
+        zzapp_minigl_reclaim(g_coh->generation);
+        publish_state(ZZAPP_ST_IDLE);
+        zzapp_loader_release();
+        zzapp_kernel_service_due(&g_kernel);
+        __asm__ __volatile__("svc #0" ::: "memory");
+        for (;;)
+            __asm__ __volatile__("wfe" ::: "memory");
+    }
 #endif
 }
 

@@ -15,6 +15,41 @@
 #define ZZAPP_KERNEL_STACK_BYTES 8192U
 #define ZZAPP_KERNEL_PAGE_BYTES 4096U
 #define ZZAPP_KERNEL_SESSION_LIMIT 4U
+#define ZZAPP_KERNEL_APP_CPSR 0x1fU
+#define ZZAPP_KERNEL_WAIT_CANCELLED (-1)
+#define ZZAPP_KERNEL_WAIT_TIMEOUT (-8)
+
+typedef enum {
+	ZZAPP_KERNEL_DISPATCH_TICK = 0,
+	ZZAPP_KERNEL_DISPATCH_DOORBELL,
+	ZZAPP_KERNEL_DISPATCH_VOLUNTARY
+} zzapp_kernel_dispatch_t;
+
+/*
+ * Exact stack layout made by zzapp_kernel_asm.S, in ascending addresses:
+ * interrupted SYS sp/lr, SPSR, d16-d31, d0-d15, FPSCR, r0-r12, exception LR.
+ * The vector returns through exception_lr, subtracting its exception-specific
+ * return adjustment.
+ */
+typedef struct {
+	uint32_t user_sp;
+	uint32_t user_lr;
+	uint32_t spsr;
+	uint32_t vfp[64];
+	uint32_t fpscr;
+	uint32_t r[13];
+	uint32_t exception_lr;
+} zzapp_arm_frame_t;
+
+/* Scheduler-visible context. r15 is the interrupted or first-entry PC. */
+typedef struct {
+	uint32_t r[16];
+	uint32_t cpsr;
+	uint32_t fpscr;
+	uint64_t d[32];
+	zzapp_arm_frame_t frame;
+} zzapp_thread_context_t;
+
 
 typedef enum {
 	ZZAPP_THREAD_STOPPED = 0,
@@ -48,6 +83,7 @@ typedef struct {
 	uint64_t sleep_deadline;
 	uint32_t wake_sequence;
 	uint32_t stack_high_water;
+	zzapp_thread_context_t context;
 } zzapp_thread_t;
 
 typedef struct {
@@ -62,6 +98,8 @@ typedef struct {
 
 typedef struct {
 	zzapp_thread_t threads[ZZAPP_KERNEL_APP_SLOTS];
+	zzapp_thread_context_t system_context;
+	uint32_t system_context_valid;
 	uint64_t now;
 	uint64_t service_ticks;
 	uint32_t overload_count;
@@ -83,6 +121,17 @@ typedef struct {
 
 void zzapp_kernel_init(zzapp_kernel_t *kernel);
 int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
+			      uint32_t entry, uint32_t api, uint32_t argc,
+			      uint32_t argv, uint32_t stack_top);
+int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
+			 zzapp_kernel_dispatch_t source, uint32_t elapsed_ms);
+int zzapp_kernel_wait_status(const zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_apps_runnable(const zzapp_kernel_t *kernel);
+zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
+					      zzapp_arm_frame_t *frame,
+					      zzapp_kernel_dispatch_t source,
+					      uint32_t return_adjust);
 int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
 		zzapp_wake_reason_t reason);

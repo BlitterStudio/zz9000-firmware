@@ -9,6 +9,19 @@
 
 
 static volatile int current_thread = -1;
+void __attribute__((weak)) scheduler_core1_service_from_app(void)
+{
+}
+
+void __attribute__((weak)) zzapp_kernel_switch_address_space(uint32_t slot)
+{
+	(void)slot;
+}
+void __attribute__((weak)) zzapp_kernel_switch_kernel_address_space(void)
+{
+}
+
+
 #define NO_ACTIVE (ZZAPP_KERNEL_APP_SLOTS + 1U)
 
 static int app_runnable(const zzapp_kernel_t *kernel)
@@ -20,6 +33,11 @@ static int app_runnable(const zzapp_kernel_t *kernel)
 			return 1;
 	return 0;
 }
+int zzapp_kernel_apps_runnable(const zzapp_kernel_t *kernel)
+{
+	return kernel && app_runnable(kernel);
+}
+
 
 static void wake_due(zzapp_kernel_t *kernel)
 {
@@ -66,6 +84,31 @@ int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t slot)
 	kernel->threads[slot].quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
 	return 0;
 }
+int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
+			      uint32_t entry, uint32_t api, uint32_t argc,
+			      uint32_t argv, uint32_t stack_top)
+{
+	zzapp_thread_context_t *context;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS || !entry || !stack_top)
+		return -1;
+	context = &kernel->threads[slot].context;
+	memset(context, 0, sizeof(*context));
+	context->r[0] = api;
+	context->r[1] = argc;
+	context->r[2] = argv;
+	context->r[13] = stack_top;
+	context->r[15] = entry;
+	context->cpsr = ZZAPP_KERNEL_APP_CPSR;
+	context->frame.user_sp = stack_top;
+	context->frame.spsr = ZZAPP_KERNEL_APP_CPSR;
+	context->frame.r[0] = api;
+	context->frame.r[1] = argc;
+	context->frame.r[2] = argv;
+	context->frame.exception_lr = entry;
+	return 0;
+}
+
 
 void zzapp_kernel_set_current_thread(int slot)
 {
@@ -199,6 +242,94 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	kernel->now += elapsed_ms;
 	return ZZAPP_KERNEL_IDLE;
 }
+int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
+			 zzapp_kernel_dispatch_t source, uint32_t elapsed_ms)
+{
+	if (!kernel)
+		return ZZAPP_KERNEL_IDLE;
+	if (source == ZZAPP_KERNEL_DISPATCH_DOORBELL)
+		zzapp_kernel_service_due(kernel);
+	else if (source == ZZAPP_KERNEL_DISPATCH_VOLUNTARY &&
+		 kernel->active < ZZAPP_KERNEL_APP_SLOTS) {
+		kernel->threads[kernel->active].quantum_left = 0U;
+		kernel->active = NO_ACTIVE;
+	}
+	return zzapp_kernel_schedule(kernel, elapsed_ms);
+}
+
+int zzapp_kernel_wait_status(const zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return ZZAPP_KERNEL_WAIT_CANCELLED;
+	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_TIMEOUT)
+		return ZZAPP_KERNEL_WAIT_TIMEOUT;
+	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_CANCELLED)
+		return ZZAPP_KERNEL_WAIT_CANCELLED;
+	return 0;
+}
+static void context_save(zzapp_thread_context_t *context,
+			 const zzapp_arm_frame_t *frame, uint32_t adjust)
+{
+	memcpy(&context->frame, frame, sizeof(*frame));
+	memcpy(context->d, frame->vfp, sizeof(frame->vfp));
+	memcpy(context->r, frame->r, sizeof(frame->r));
+	context->r[13] = frame->user_sp;
+	context->r[14] = frame->user_lr;
+	context->r[15] = frame->exception_lr - adjust;
+	context->cpsr = frame->spsr;
+	context->fpscr = frame->fpscr;
+}
+
+static zzapp_arm_frame_t *context_restore(zzapp_thread_context_t *context,
+					   uint32_t adjust)
+{
+	zzapp_arm_frame_t *frame = &context->frame;
+
+	frame->user_sp = context->r[13];
+	frame->user_lr = context->r[14];
+	frame->spsr = context->cpsr;
+	memcpy(frame->vfp, context->d, sizeof(frame->vfp));
+	frame->fpscr = context->fpscr;
+	memcpy(frame->r, context->r, sizeof(frame->r));
+	frame->exception_lr = context->r[15] + adjust;
+	return frame;
+}
+
+zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
+					      zzapp_arm_frame_t *frame,
+					      zzapp_kernel_dispatch_t source,
+					      uint32_t return_adjust)
+{
+	int slot;
+	int pick;
+
+	if (!kernel || !frame)
+		return frame;
+	slot = zzapp_kernel_current_thread();
+	if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS) {
+		context_save(&kernel->threads[slot].context, frame, return_adjust);
+		pick = zzapp_kernel_dispatch(kernel, source,
+					     source == ZZAPP_KERNEL_DISPATCH_TICK ?
+					     ZZAPP_KERNEL_QUANTUM_MS : 0U);
+	} else {
+		context_save(&kernel->system_context, frame, return_adjust);
+		kernel->system_context_valid = 1U;
+		pick = zzapp_kernel_schedule(kernel, 0U);
+	}
+	if ((pick == ZZAPP_KERNEL_SYSTEM || pick == ZZAPP_KERNEL_IDLE) &&
+	    kernel->system_context_valid) {
+		zzapp_kernel_set_current_thread(-1);
+		zzapp_kernel_switch_kernel_address_space();
+		return context_restore(&kernel->system_context, return_adjust);
+	}
+	if (pick < 0)
+		return frame;
+	zzapp_kernel_set_current_thread(pick);
+	zzapp_kernel_switch_address_space((uint32_t)pick);
+	return context_restore(&kernel->threads[pick].context, return_adjust);
+}
+
+
 
 void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t slot,
 		uint32_t elapsed_ms)

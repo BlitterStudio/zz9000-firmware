@@ -175,14 +175,12 @@ void scheduler_core1_wake(void)
                                scheduler_send_doorbell, NULL);
 }
 
-/* With an app running, queued work would otherwise wait for the app's next
- * 5 ms tick; pull that tick forward. The worker loop drains the queue
- * itself when no app runs (the SGI also ends its WFE). */
+/* The SGI is a doorbell, not a work body. Mark service due and let the
+ * exception return path select the system thread before another app runs. */
 static void scheduler_core1_doorbell_irq(void *unused)
 {
   (void)unused;
-  if (zzapp_kernel_current_thread() >= 0)
-    zzapp_private_timer_kick();
+  zzapp_kernel_service_due(zzapp_runtime_kernel());
 }
 
 void scheduler_core1_enable_doorbell(void)
@@ -441,6 +439,8 @@ void scheduler_core1_worker(void)
                                   scheduler_doorbell_more, sh,
                                   SCHED_CORE1_DOORBELL_BATCH);
     zzapp_worker_hook();
+    if (zzapp_kernel_apps_runnable(zzapp_runtime_kernel()))
+      __asm__ __volatile__("svc #0" ::: "memory");
 
     reset_req = (sh->minigl_reset_request != 0);
     task_slot = reset_req ? -1 : taskq_claim_any(&sh->queue);

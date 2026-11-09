@@ -514,6 +514,16 @@ __attribute__((naked, used)) void core1_reset_exception_stacks(void)
 		"bx	lr\n\t"
 		".ltorg\n\t");
 }
+/* The worker is a privileged system thread in SYS mode. Its exception frame
+ * can therefore use the same SYS banked SP/LR layout as app frames. */
+__attribute__((naked, noreturn, used)) static void core1_enter_system_thread(void)
+{
+	__asm__ volatile(
+		"cps	#0x1f\n\t"
+		"mov	sp, #" CORE1_STR(SDK_CORE1_STACK_TOP) "\n\t"
+		"b	scheduler_core1_worker\n\t");
+}
+
 
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
@@ -590,7 +600,7 @@ void core1_loop() {
 	// an uncached environment) has been removed; the v2 ARM-hosted app platform
 	// launches apps through the scheduler instead.
 	C1_TRACE("[c1] R3 worker-start\r\n");
-	scheduler_core1_worker();  // dual-core task worker; never returns
+	core1_enter_system_thread();
 }
 #pragma GCC pop_options
 

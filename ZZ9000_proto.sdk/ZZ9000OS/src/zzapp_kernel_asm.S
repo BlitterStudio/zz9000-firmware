@@ -21,19 +21,47 @@ zzapp_core1_vectors:
 	b core1_vector_irq
 	b core1_vector_fiq
 
+/*
+ * One complete switch frame, lowest address first:
+ * SYS r13/r14, SPSR, d16-d31, d0-d15, FPSCR, r0-r12, exception LR.
+ * zzapp_kernel_switch_frame() records that layout in the selected thread
+ * before it returns the next frame; restore_frame changes exception SP to it.
+ */
 .macro save_frame
 	stmdb sp!, {r0-r12, lr}
-	vpush {d0-d15}
-	vpush {d16-d31}
 	vmrs r0, fpscr
 	push {r0}
+	vpush {d0-d15}
+	vpush {d16-d31}
+	mrs r0, spsr
+	push {r0}
+	/* Writeback with the user-bank form is UNPREDICTABLE: adjust SP first. */
+	sub sp, sp, #8
+	stmia sp, {sp, lr}^
+.endm
+
+.macro select_frame, source, adjust
+	mov r4, sp
+	mov r0, sp
+	mov r1, #\source
+	mov r2, #\adjust
+	bl zzapp_kernel_arch_dispatch
+	cmp r0, #0
+	moveq r0, r4
+	mov sp, r0
 .endm
 
 .macro restore_frame, adjust
+	ldmia sp, {sp, lr}^
+	/* No banked-register access directly after a user-bank LDM. */
+	nop
+	add sp, sp, #8
 	pop {r0}
-	vmsr fpscr, r0
+	msr spsr_cxsf, r0
 	vpop {d16-d31}
 	vpop {d0-d15}
+	pop {r0}
+	vmsr fpscr, r0
 	ldmia sp!, {r0-r12, lr}
 	subs pc, lr, #\adjust
 .endm
@@ -44,6 +72,7 @@ core1_vector_reset:
 core1_vector_irq:
 	save_frame
 	bl zzapp_kernel_irq_dispatch
+	select_frame 0, 4
 	restore_frame 4
 
 core1_vector_undef:
@@ -52,11 +81,12 @@ core1_vector_undef:
 	sub r1, lr, #4
 	str r1, [r0]
 	bl arm_exception_handler_illinst
+	select_frame 1, 0
 	restore_frame 0
 
 core1_vector_svc:
 	save_frame
-	bl SWInterrupt
+	select_frame 2, 0
 	restore_frame 0
 
 core1_vector_pabort:
@@ -65,6 +95,7 @@ core1_vector_pabort:
 	sub r1, lr, #4
 	str r1, [r0]
 	bl arm_exception_handler_id_prefetch_abort
+	select_frame 1, 4
 	restore_frame 4
 
 core1_vector_dabort:
@@ -74,6 +105,7 @@ core1_vector_dabort:
 	sub r1, lr, #8
 	str r1, [r0]
 	bl arm_exception_handler_id_data_abort
+	select_frame 1, 8
 	restore_frame 8
 
 core1_vector_reserved:
