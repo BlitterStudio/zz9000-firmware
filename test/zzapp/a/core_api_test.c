@@ -8,6 +8,7 @@
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
 #include "zzapp.h"
+#include "zzapp_svc.h"
 #include "zzapp_runtime.h"
 int zzapp_host_mem_info(zzapp_mem_info *out);
 
@@ -24,6 +25,17 @@ static uint32_t image_poison_session_calls;
 static uint32_t app_decode_reclaim_calls;
 static int stop_during_host_alloc;
 static int stop_during_image_begin;
+static uint32_t flac_pool_owner[2];
+static uint32_t flac_pool_owner_count;
+static int tile_writable = 1;
+int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address,
+                         uint32_t bytes, int write)
+{
+    (void)as;
+    (void)address;
+    (void)bytes;
+    return write && tile_writable ? ZZ_OK : ZZ_EFAULT;
+}
 int zzapp_svc_should_stop(void)
 {
     return stop_during_host_alloc || stop_during_image_begin;
@@ -129,6 +141,8 @@ uint16_t sdk_flac_decode(struct sdk_flac_state *state,
                          struct sdk_audio_codec_io *io)
 {
     assert(io->input_length != 0u || (io->eof && io->drain));
+    if (flac_pool_owner_count < 2u)
+        flac_pool_owner[flac_pool_owner_count++] = state->pool_owner;
     state->sample_rate = 44100u;
     state->channels = 2u;
     io->consumed = io->input_length;
@@ -191,10 +205,15 @@ unsigned sdk_compression_reclaim_core1_decode(void)
     return 1u;
 }
 
-unsigned sdk_compression_reclaim_app_decode(void)
+unsigned sdk_compression_reclaim_app_decode(uint32_t owner)
 {
+    (void)owner;
     app_decode_reclaim_calls++;
     return 1u;
+}
+uint32_t sdk_compression_app_decode_owner(uint32_t slot, uint32_t generation)
+{
+    return 0x02000000u | (generation << 2) | slot;
 }
 
 static uint32_t decompress_owner_seen;
@@ -248,6 +267,7 @@ int main(void)
     uint32_t bytes;
     uint32_t image_session;
     uint32_t audio_session;
+    uint32_t slot_audio_session;
     uint8_t source[8] = { 0 };
     uint8_t mp3[834] = { 0 };
     int16_t pcm[8];
@@ -281,8 +301,24 @@ int main(void)
     image.rows = 2u;
     image.tile_bytes = sizeof(source);
     assert(api->image_open(&image, &image_session, &image_result) == ZZ_OK);
+    tile_writable = 0;
+    assert(api->image_decode(image_session, source, sizeof(source), 0u,
+                             &image_result) == ZZ_EFAULT);
+    assert(image_feed_calls == 0u);
+    tile_writable = 1;
     assert(api->image_decode(image_session, source, sizeof(source), 0u,
                              &image_result) == ZZ_OK);
+    zzapp_kernel_set_current_thread(0);
+    assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
+    assert(api->audio_decode(slot_audio_session, source, sizeof(source), 0u,
+                             pcm, 2u, &audio_result) == ZZ_OK);
+    zzapp_kernel_set_current_thread(1);
+    assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
+    assert(api->audio_decode(slot_audio_session, source, sizeof(source), 0u,
+                             pcm, 2u, &audio_result) == ZZ_OK);
+    assert(flac_pool_owner_count == 2u);
+    assert(flac_pool_owner[0] != flac_pool_owner[1]);
+    zzapp_kernel_set_current_thread(-1);
     assert(api->image_close(image_session) == ZZ_OK);
     assert(image_begin_calls == 1u && image_feed_calls == 1u &&
            image_close_calls == 1u);
@@ -319,7 +355,7 @@ int main(void)
                                mp3_pcm, sizeof(mp3_pcm),
                                &decompressed) == ZZ_EIO);
         assert(decompress_calls == 1u);
-        assert(decompress_owner_seen == SDK_APP_DECODE_POOL_OWNER);
+        assert(decompress_owner_seen == flac_pool_owner[0]);
     }
 
     /* The host allocator must publish its ledger entry before a stop tick
@@ -333,7 +369,7 @@ int main(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(image_close_calls == 1u && image_poisoned_close_calls == 1u);
     assert(image_poison_calls == 0u && image_poison_session_calls == 1u);
-    assert(audio_release_calls == 1u && audio_forget_calls == 1u);
+    assert(audio_release_calls == 1u && audio_forget_calls == 2u);
     assert(decode_reclaim_calls == 0u && app_decode_reclaim_calls == 1u);
     assert(zzapp_host_mem_info(&mem) == ZZ_OK && mem.host_visible_used == 0u);
 

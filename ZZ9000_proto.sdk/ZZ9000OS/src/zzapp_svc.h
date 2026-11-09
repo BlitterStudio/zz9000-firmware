@@ -42,6 +42,8 @@ typedef struct {
     uint8_t length_argument;
     uint16_t element_bytes;
     uint8_t copy;
+    uint8_t format_argument;
+    uint8_t type_argument;
 } zzapp_svc_pointer_t;
 
 typedef struct {

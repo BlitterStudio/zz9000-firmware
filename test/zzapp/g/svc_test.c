@@ -58,11 +58,16 @@ static zzapp_proc_t proc;
 static zzapp_api api;
 static zzapp_gl gl;
 static uint8_t *user_page;
+static uint8_t *heap_page;
 static unsigned vertex_pointer_calls;
 static unsigned draw_arrays_calls;
 static unsigned draw_elements_calls;
 static unsigned texture_upload_calls;
+static unsigned texture_sub_upload_calls;
 static unsigned read_pixels_calls;
+static unsigned build_mipmaps_calls;
+static unsigned file_list_next_calls;
+static unsigned heap_shrink_calls;
 
 int zzapp_kernel_current_thread(void) { return 0; }
 zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
@@ -118,6 +123,23 @@ static void mock_texture_upload(uint32_t target, int32_t level,
     (void)pixels;
     ++texture_upload_calls;
 }
+static void mock_texture_sub_upload(uint32_t target, int32_t level,
+                                    int32_t xoffset, int32_t yoffset,
+                                    int32_t width, int32_t height,
+                                    uint32_t format, uint32_t type,
+                                    const void *pixels)
+{
+    (void)target;
+    (void)level;
+    (void)xoffset;
+    (void)yoffset;
+    (void)width;
+    (void)height;
+    (void)format;
+    (void)type;
+    (void)pixels;
+    ++texture_sub_upload_calls;
+}
 static void mock_read_pixels(int32_t x, int32_t y, int32_t width,
                              int32_t height, uint32_t format, uint32_t type,
                              void *pixels)
@@ -130,6 +152,38 @@ static void mock_read_pixels(int32_t x, int32_t y, int32_t width,
     (void)type;
     (void)pixels;
     ++read_pixels_calls;
+}
+static int32_t mock_build_mipmaps(uint32_t target, int32_t internal_format,
+                                  int32_t width, int32_t height,
+                                  uint32_t format, uint32_t type,
+                                  const void *pixels)
+{
+    (void)target;
+    (void)internal_format;
+    (void)width;
+    (void)height;
+    (void)format;
+    (void)type;
+    (void)pixels;
+    ++build_mipmaps_calls;
+    return 0;
+}
+static int mock_file_list_next(int list, zzapp_dirent *entry)
+{
+    (void)list;
+    ++file_list_next_calls;
+    if (file_list_next_calls == 1U) {
+        memset(entry, 0x31, sizeof(*entry));
+        return ZZ_OK;
+    }
+    return ZZ_EINVAL;
+}
+static int mock_heap_shrink(uint32_t bytes, void **new_break)
+{
+    (void)bytes;
+    (void)new_break;
+    ++heap_shrink_calls;
+    return ZZ_OK;
 }
 static uint32_t mock_get_error(void) { return 0U; }
 
@@ -167,6 +221,11 @@ static void setup_dispatch(void)
                   MAP_FIXED, -1, 0);
     CHECK(mapped != MAP_FAILED);
     user_page = mapped == MAP_FAILED ? NULL : mapped;
+    mapped = mmap((void *)(uintptr_t)WINDOW, 4096U,
+                  PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS |
+                  MAP_FIXED, -1, 0);
+    CHECK(mapped != MAP_FAILED);
+    heap_page = mapped == MAP_FAILED ? NULL : mapped;
     memset(&api, 0, sizeof(api));
     memset(&gl, 0, sizeof(gl));
     api.size = sizeof(api);
@@ -178,15 +237,25 @@ static void setup_dispatch(void)
     gl.DrawElements = mock_draw_elements;
     gl.TexImage2D = mock_texture_upload;
     gl.ReadPixels = mock_read_pixels;
+    gl.TexSubImage2D = mock_texture_sub_upload;
+    gl.Build2DMipmaps = mock_build_mipmaps;
+    api.file_list_next = mock_file_list_next;
+    api.heap_shrink = mock_heap_shrink;
     gl.GetError = mock_get_error;
     vertex_pointer_calls = 0U;
     draw_arrays_calls = 0U;
-    draw_elements_calls = 0U;
     texture_upload_calls = 0U;
+    texture_sub_upload_calls = 0U;
     read_pixels_calls = 0U;
+    build_mipmaps_calls = 0U;
+    file_list_next_calls = 0U;
+    heap_shrink_calls = 0U;
 }
 static void teardown_dispatch(void)
 {
+    if (heap_page)
+        munmap(heap_page, 4096U);
+    heap_page = NULL;
     if (user_page)
         munmap(user_page, 4096U);
     user_page = NULL;
@@ -365,6 +434,40 @@ static void test_gl_deferred_pointer_checks(void)
     CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
     teardown_dispatch();
 }
+static void test_copy_out_and_pixel_argument_positions(void)
+{
+    zzapp_arm_frame_t frame;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(frame.r[0] != 0U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, TexSubImage2D)),
+             &frame, (uint32_t[9]){ 0x0de1U, 0U, 0U, 0U, 1U, 1U,
+                                    0x1908U, 0x1401U, 0x02000100U });
+    CHECK(texture_sub_upload_calls == 1U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ReadPixels)),
+             &frame, (uint32_t[9]){ 0U, 0U, 1U, 1U, 0x1908U, 0x1401U,
+                                    0x02000200U });
+    CHECK(read_pixels_calls == 1U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Build2DMipmaps)),
+             &frame, (uint32_t[9]){ 0x0de1U, 4U, 1U, 1U, 0x1908U, 0x1401U,
+                                    0x02000240U });
+    CHECK(build_mipmaps_calls == 1U);
+
+
+    proc.heap_base = 0U;
+    proc.heap_break = 1U << 20;
+    proc.heap_frame_count = 1U;
+    dispatch(api_slot(offsetof(zzapp_api, heap_shrink)), &frame,
+             (uint32_t[9]){ 1U << 20, WINDOW + 0x100U });
+    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    CHECK(heap_shrink_calls == 0U);
+    teardown_dispatch();
+}
 
 int main(void)
 {
@@ -373,6 +476,7 @@ int main(void)
     test_pointer_checks();
     test_descriptors_cover_callable_slots();
     test_gl_deferred_pointer_checks();
+    test_copy_out_and_pixel_argument_positions();
     test_descriptor_shapes();
     printf("svc_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;

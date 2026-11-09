@@ -85,7 +85,7 @@ typedef struct {
 static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 
 
-#define P(a, d, l, n, e, c) { a, d, l, n, e, c }
+#define P(a, d, l, n, e, c) { a, d, l, n, e, c, 0U, 0U }
 #define N P(0U, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_FIXED, 0U, 0U, 0U)
 #define D(a, r, p0, p1, p2) { a, 0U, r, { p0, p1, p2 } }
 #define DF(a, v, r, p0, p1, p2) { a, v, r, { p0, p1, p2 } }
@@ -97,8 +97,8 @@ static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 #define IN_COUNT(a, n, e) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
 #define OUT_COUNT(a, n, e) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
 #define IN_STRING(a) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, 1U, 1U)
-#define IN_PIXELS(a, n) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U)
-#define OUT_PIXELS(a, n) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U)
+#define IN_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, f, t }
+#define OUT_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, f, t }
 #define IN_INDICES(a, n) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_INDICES, n, 1U, 0U)
 
 /* The descriptors are the ABI audit: argument words include 64-bit values and
@@ -194,8 +194,8 @@ static const zzapp_svc_descriptor_t gl_descriptors[GL_COUNT] = {
     DF(0, 4, ZZAPP_SVC_RETURN_VOID, N, N, N), DF(0, 3, ZZAPP_SVC_RETURN_VOID, N, N, N),
     DF(0, 3, ZZAPP_SVC_RETURN_VOID, N, N, N), DF(0, 12, ZZAPP_SVC_RETURN_VOID, N, N, N),
     DF(0, 12, ZZAPP_SVC_RETURN_VOID, N, N, N),
-    [GL_SLOT(TexImage2D)] = D(9, ZZAPP_SVC_RETURN_VOID, IN_PIXELS(8, 3), N, N),
-    [GL_SLOT(TexSubImage2D)] = D(9, ZZAPP_SVC_RETURN_VOID, IN_PIXELS(8, 4), N, N),
+    [GL_SLOT(TexImage2D)] = D(9, ZZAPP_SVC_RETURN_VOID, IN_PIXELS(8, 3, 6, 7), N, N),
+    [GL_SLOT(TexSubImage2D)] = D(9, ZZAPP_SVC_RETURN_VOID, IN_PIXELS(8, 4, 6, 7), N, N),
     G3(TexParameteri, ZZAPP_SVC_RETURN_VOID), DF(2, 1, ZZAPP_SVC_RETURN_VOID, N, N, N),
     G3(TexEnvi, ZZAPP_SVC_RETURN_VOID), DF(2, 1, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [GL_SLOT(GenTextures)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_COUNT(1, 0, 4U), N, N),
@@ -203,13 +203,13 @@ static const zzapp_svc_descriptor_t gl_descriptors[GL_COUNT] = {
     G2(BindTexture, ZZAPP_SVC_RETURN_VOID), G0(Finish, ZZAPP_SVC_RETURN_VOID),
     G0(Flush, ZZAPP_SVC_RETURN_VOID), G1(DrawBuffer, ZZAPP_SVC_RETURN_VOID),
     G1(ReadBuffer, ZZAPP_SVC_RETURN_VOID),
-    [GL_SLOT(ReadPixels)] = D(7, ZZAPP_SVC_RETURN_VOID, OUT_PIXELS(6, 2), N, N),
+    [GL_SLOT(ReadPixels)] = D(7, ZZAPP_SVC_RETURN_VOID, OUT_PIXELS(6, 2, 4, 5), N, N),
     G1(GetString, ZZAPP_SVC_RETURN_POINTER),
     [GL_SLOT(GetIntegerv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_FIXED(1, 4U, 0U), N, N),
     [GL_SLOT(GetFloatv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_FIXED(1, 4U, 0U), N, N),
     G0(GetError, ZZAPP_SVC_RETURN_INT), G2(Hint, ZZAPP_SVC_RETURN_VOID),
     G2(PixelStorei, ZZAPP_SVC_RETURN_VOID), DF(0, 8, ZZAPP_SVC_RETURN_VOID, N, N, N),
-    [GL_SLOT(Build2DMipmaps)] = D(7, ZZAPP_SVC_RETURN_INT, IN_PIXELS(6, 2), N, N),
+    [GL_SLOT(Build2DMipmaps)] = D(7, ZZAPP_SVC_RETURN_INT, IN_PIXELS(6, 2, 4, 5), N, N),
     [GL_SLOT(VertexPointer)] = D(4, ZZAPP_SVC_RETURN_VOID, IN_FIXED(3, 1U, 0U), N, N),
     [GL_SLOT(TexCoordPointer)] = D(4, ZZAPP_SVC_RETURN_VOID, IN_FIXED(3, 1U, 0U), N, N),
     [GL_SLOT(ColorPointer)] = D(4, ZZAPP_SVC_RETURN_VOID, IN_FIXED(3, 1U, 0U), N, N),
@@ -470,13 +470,15 @@ static int frame_arguments(const zzapp_as_t *as, const zzapp_arm_frame_t *frame,
         if (stack_word(as, frame->user_sp, i - 4U, &args[i]) != ZZ_OK) return ZZ_EFAULT;
     return ZZ_OK;
 }
-static int gl_pixel_bytes(const uint32_t args[9], uint32_t first,
+static int gl_pixel_bytes(const uint32_t args[9],
+                          const zzapp_svc_pointer_t *pointer,
                           uint32_t *bytes)
 {
     uint32_t components;
     uint32_t element;
-    uint32_t format = args[first + 3U];
-    uint32_t type = args[first + 4U];
+    uint32_t first = pointer->length_argument;
+    uint32_t format = args[pointer->format_argument];
+    uint32_t type = args[pointer->type_argument];
     uint64_t pixels;
     uint64_t length;
     int32_t width = (int32_t)args[first];
@@ -539,7 +541,7 @@ static int pointer_bytes(const zzapp_svc_pointer_t *pointer, const uint32_t args
     else if (pointer->length == ZZAPP_SVC_LENGTH_COUNT)
         length = (uint64_t)args[pointer->length_argument] * pointer->element_bytes;
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_PIXELS)
-        return gl_pixel_bytes(args, pointer->length_argument, bytes);
+        return gl_pixel_bytes(args, pointer, bytes);
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_INDICES)
         return gl_indices_bytes(args, pointer->length_argument, bytes);
     else return ZZ_OK;
@@ -596,6 +598,7 @@ static int prepare_pointers(const zzapp_as_t *as, const zzapp_svc_descriptor_t *
             zzapp_svc_check_user(as, args[pointer->argument], bytes, write) != ZZ_OK) return ZZ_EFAULT;
         if (pointer->copy) {
             if (bytes > COPY_BYTES) return ZZ_EFAULT;
+            memset(copies[i], 0, bytes);
             if (pointer->direction != ZZAPP_SVC_POINTER_OUT)
                 memcpy(copies[i], (const void *)(uintptr_t)args[pointer->argument], bytes);
             args[pointer->argument] = (uint32_t)(uintptr_t)copies[i];
@@ -603,17 +606,40 @@ static int prepare_pointers(const zzapp_as_t *as, const zzapp_svc_descriptor_t *
     }
     return ZZ_OK;
 }
-static void finish_pointers(const zzapp_svc_descriptor_t *descriptor, const uint32_t args[9],
-                            uint8_t copies[3][COPY_BYTES], const uint32_t originals[3])
+static void finish_pointers(const zzapp_svc_descriptor_t *descriptor,
+                            const uint32_t args[9],
+                            uint8_t copies[3][COPY_BYTES],
+                            const uint32_t originals[3], uint32_t result)
 {
     uint32_t i;
+
+    if (descriptor->result == ZZAPP_SVC_RETURN_INT && result != (uint32_t)ZZ_OK)
+        return;
     for (i = 0U; i < 3U; ++i) {
         const zzapp_svc_pointer_t *pointer = &descriptor->pointers[i];
         uint32_t bytes = 0U;
-        if (!pointer->element_bytes || !pointer->copy || pointer->direction == ZZAPP_SVC_POINTER_IN ||
+        if (!pointer->element_bytes || !pointer->copy ||
+            pointer->direction == ZZAPP_SVC_POINTER_IN ||
             pointer_bytes(pointer, args, &bytes) != ZZ_OK) continue;
         memcpy((void *)(uintptr_t)originals[i], copies[i], bytes);
     }
+}
+
+static int heap_shrink_out_overlaps(const zzapp_proc_t *proc,
+                                    const uint32_t args[9],
+                                    const uint32_t originals[3])
+{
+    uint64_t start;
+    uint64_t end;
+    uint64_t out;
+
+    if (!proc || args[0] == 0U || proc->heap_break < proc->heap_base ||
+        args[0] > proc->heap_break - proc->heap_base)
+        return 0;
+    start = (uint64_t)ZZAPP_AS_WINDOW_BASE + proc->heap_break - args[0];
+    end = start + args[0];
+    out = originals[0];
+    return out < end && out + sizeof(void *) > start;
 }
 
 static uint32_t float_word(const zzapp_arm_frame_t *frame, uint32_t index)
@@ -749,6 +775,11 @@ void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
     if (!descriptor) { frame->r[0] = (uint32_t)ZZ_ENOSYS; return; }
     if (frame_arguments(&proc->as, frame, descriptor->arguments, args) != ZZ_OK ||
         prepare_pointers(&proc->as, descriptor, args, copies, strings, originals) != ZZ_OK) { frame->r[0] = (uint32_t)ZZ_EFAULT; return; }
+    if (!gl && number == API_SLOT(heap_shrink) &&
+        heap_shrink_out_overlaps(proc, args, originals)) {
+        frame->r[0] = (uint32_t)ZZ_EFAULT;
+        return;
+    }
     if (!gl && number == API_SLOT(image_open)) {
         const zzapp_image_open *open = (const zzapp_image_open *)(const void *)copies[0];
 
@@ -764,6 +795,6 @@ void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
         frame->r[0] = (uint32_t)(status == ZZ_EFAULT ? ZZ_EFAULT : ZZ_ENOSYS);
         return;
     }
-    finish_pointers(descriptor, args, copies, originals);
+    finish_pointers(descriptor, args, copies, originals, result);
     if (descriptor->result != ZZAPP_SVC_RETURN_VOID) frame->r[0] = result;
 }

@@ -199,6 +199,8 @@ int main(void)
     assert(g_releases == 1);
     g_ops.version = ZZM_MINIGL_OPS_V1;
 
+
+    zzapp_kernel_set_current_thread(0);
     g_available = 1;
     gl = api->gl_bind(41u);
     assert(gl == &g_gl);
@@ -210,6 +212,11 @@ int main(void)
     assert(g_swaps == 1);
     assert(g_flips == 1);
     assert(g_present_pixel == 0xa55a0042u);
+    zzapp_kernel_set_current_thread(1);
+    api->gl_unbind();
+    assert(g_unbinds == 0);
+    assert(g_releases == 1);
+    zzapp_kernel_set_current_thread(0);
     api->gl_unbind();
     assert(g_unbinds == 1);
     assert(g_releases == 2);
