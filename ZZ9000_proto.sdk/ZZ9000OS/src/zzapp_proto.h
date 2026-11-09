@@ -27,6 +27,8 @@
 #define ZZAPP_OP_STATUS            0x0c07u
 #define ZZAPP_OP_DISPLAY_BIND      0x0c08u
 #define ZZAPP_OP_FIRST             ZZAPP_OP_QUERY
+/* Per-slot snapshot for status listings (extended requests only). */
+#define ZZAPP_OP_LIST              0x0c09u
 #define ZZAPP_OP_LAST              ZZAPP_OP_DISPLAY_BIND
 /* 0x0c00..0x0c1f is reserved. v0 uses FIRST..LAST. */
 #define ZZAPP_OP_RANGE_LO          0x0c00u
@@ -38,6 +40,9 @@
 #define ZZAPP_CAP_AUDIO            (1u << 2)
 #define ZZAPP_CAP_GL               (1u << 3)
 #define ZZAPP_CAP_CLUT8            (1u << 4)
+/* ZZAPP_SLOT_COUNT apps at once; the extended request forms below work. */
+#define ZZAPP_CAP_SLOTS            (1u << 5)
+#define ZZAPP_SLOT_COUNT           4u
 
 /*
  * Mailbox payloads are big-endian in the 48-byte entry payload.
@@ -96,6 +101,63 @@
 #define ZZAPP_STATUS_REPLY_BYTES   48u
 
 #define ZZAPP_MAILBOX_PAYLOAD_BYTES 48u
+
+/*
+ * Extended requests. A payload of exactly ZZAPP_MAILBOX_PAYLOAD_BYTES
+ * carries the slot and its generation in the last 8 bytes; legacy fields
+ * keep their offsets and unused bytes are zero. Any other payload length
+ * is a legacy request and addresses slot 0 only.
+ */
+#define ZZAPP_SEL_SLOT             40u
+#define ZZAPP_SEL_GENERATION       44u
+
+/* Extended QUERY reply: the legacy 16 bytes, then slot and commit counts. */
+#define ZZAPP_QUERY_SLOTS          16u
+#define ZZAPP_QUERY_FREE_SLOTS     20u
+#define ZZAPP_QUERY_COMMIT_FREE    24u
+#define ZZAPP_QUERY_COMMIT_TOTAL   28u
+#define ZZAPP_QUERY_EXT_REPLY_BYTES 32u
+
+/* Extended ALLOC_WINDOW reply: the legacy 12 bytes, then the claim. */
+#define ZZAPP_ALLOC_SLOT           12u
+#define ZZAPP_ALLOC_GENERATION     16u
+#define ZZAPP_ALLOC_EXT_REPLY_BYTES 20u
+
+/* Extended LOAD_BEGIN: launcher memory cap in MiB, 0 for none. */
+#define ZZAPP_LOAD_MEM_LIMIT_MIB   0u
+
+/* LIST reply for the selector's slot. */
+#define ZZAPP_LIST_STATE           0u
+#define ZZAPP_LIST_GENERATION      4u
+#define ZZAPP_LIST_COMMITTED       8u
+#define ZZAPP_LIST_LIMIT           12u
+#define ZZAPP_LIST_CPU_MS          16u
+#define ZZAPP_LIST_SERVICE_MS      20u
+#define ZZAPP_LIST_REASONS         24u   /* block, terminal, flags (u16) */
+#define ZZAPP_LIST_NAME            28u
+#define ZZAPP_LIST_NAME_BYTES      20u
+#define ZZAPP_LIST_REPLY_BYTES     48u
+#define ZZAPP_LIST_FLAG_OVERLOAD   1u
+
+/* LIST terminal reasons. */
+#define ZZAPP_END_NONE             0u
+#define ZZAPP_END_EXIT             1u
+#define ZZAPP_END_FORCED           2u
+#define ZZAPP_END_USER_FAULT       3u
+#define ZZAPP_END_STALL            4u
+#define ZZAPP_END_STUCK_CALL       5u
+#define ZZAPP_END_LEASE            6u
+#define ZZAPP_END_AMIGA_RESET      7u
+#define ZZAPP_END_CORE_RESTART     8u
+
+/* LIST block reasons. */
+#define ZZAPP_BLOCK_NONE           0u
+#define ZZAPP_BLOCK_FILE           1u
+#define ZZAPP_BLOCK_CONSOLE        2u
+#define ZZAPP_BLOCK_EVENT          3u
+#define ZZAPP_BLOCK_SLEEP          4u
+#define ZZAPP_BLOCK_VSYNC          5u
+#define ZZAPP_BLOCK_AUDIO          6u
 
 #define ZZAPP_WINDOW_BYTES     0x00094000u   /* 592 KiB allocation */
 
@@ -234,6 +296,8 @@
 #define ZZAPP_ST_PAUSED            4u
 #define ZZAPP_ST_STOPPING          5u
 #define ZZAPP_ST_FAULTED           6u
+/* A launcher claimed the slot and has not loaded an image yet. */
+#define ZZAPP_ST_CLAIMED           7u
 
 /* Fault: 0 none, 1 data abort, 2 prefetch, 3 undefined, 4 watchdog,
  * 5 forced stop (grace or reset), 6 watchdog that fell through to cold restart. */
@@ -412,6 +476,13 @@ _Static_assert(ZZAPP_START_REQ_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "start");
 _Static_assert(ZZAPP_BIND_REQ_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "bind");
 _Static_assert(ZZAPP_STATUS_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "status");
 _Static_assert(ZZAPP_STATUS_REPLY_BYTES == 48, "status fills the payload");
+_Static_assert(ZZAPP_SEL_GENERATION + 4u == ZZAPP_MAILBOX_PAYLOAD_BYTES,
+               "selector ends the payload");
+_Static_assert(ZZAPP_BIND_EXT_REQ_BYTES <= ZZAPP_SEL_SLOT, "bind below selector");
+_Static_assert(ZZAPP_QUERY_EXT_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "query ext");
+_Static_assert(ZZAPP_ALLOC_EXT_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "alloc ext");
+_Static_assert(ZZAPP_LIST_NAME + ZZAPP_LIST_NAME_BYTES == ZZAPP_LIST_REPLY_BYTES,
+               "list name ends the reply");
 
 _Static_assert(ZZAPP_LIFE_OFF == 0u, "life");
 _Static_assert(ZZAPP_LIFE_OFF + ZZAPP_LIFE_BYTES == ZZAPP_INPUT_OFF, "life end");
