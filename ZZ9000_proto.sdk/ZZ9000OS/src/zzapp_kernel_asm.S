@@ -84,8 +84,52 @@ core1_vector_undef:
 	select_frame 1, 0
 	restore_frame 0
 
+/* Bytes in one save_frame: SYS SP/LR, SPSR, 32 D registers, FPSCR,
+ * r0-r12 and LR.  zzapp_kernel.h asserts the C struct has this size. */
+.equ FRAME_BYTES, 328
+
 core1_vector_svc:
 	save_frame
+	/* Only a veneer call from user mode is an API call.  A trap from a
+	 * privileged mode is a voluntary switch by kernel code. */
+	ldr r0, [sp, #8]
+	and r0, r0, #0x1f
+	cmp r0, #0x10
+	bne 1f
+	mov r4, sp
+	bl zzapp_kernel_current_thread
+	bl scheduler_core1_app_stack_top
+	cmp r0, #0
+	beq 1f
+	/* Move the frame to the top of the caller's kernel stack and release
+	 * the shared SVC stack: a call that blocks or is preempted must not
+	 * leave its frame where the next thread's SVC entry would land. */
+	sub r5, r0, #FRAME_BYTES
+	mov r0, r5
+	mov r1, r4
+	mov r2, #FRAME_BYTES
+	bl memcpy
+	add sp, r4, #FRAME_BYTES
+	cps #0x1f
+	mov sp, r5
+	cpsie i
+	mov r0, r5
+	bl zzapp_svc_dispatch
+	cpsid i
+	cps #0x13
+	sub sp, sp, #FRAME_BYTES
+	mov r4, sp
+	mov r0, r4
+	mov r1, r5
+	mov r2, #FRAME_BYTES
+	bl memcpy
+	/* An ordinary call returns to its caller; switch only if the call
+	 * left the thread blocked, sleeping or stopped. */
+	mov r0, r4
+	bl zzapp_kernel_svc_return
+	mov sp, r0
+	restore_frame 0
+1:
 	select_frame 2, 0
 	restore_frame 0
 
@@ -115,3 +159,22 @@ core1_vector_fiq:
 	save_frame
 	bl FIQInterrupt
 	restore_frame 4
+
+.section .zzapp_svc_veneers, "ax", %progbits
+.align 12
+.global zzapp_svc_veneer_page
+.type zzapp_svc_veneer_page, %function
+zzapp_svc_veneer_page:
+.set svc_number, 0
+.rept 128
+	svc #svc_number
+	bx lr
+.set svc_number, svc_number + 1
+.endr
+.set svc_number, 128
+.rept 128
+	svc #svc_number
+	bx lr
+.set svc_number, svc_number + 1
+.endr
+.space 2048

@@ -229,6 +229,7 @@ C_SRCS = \
 	$(SRC_DIR)/zzapp_as.c \
 	$(SRC_DIR)/zzapp_kernel.c \
 	$(SRC_DIR)/sdk_palette.c \
+	$(SRC_DIR)/zzapp_svc.c \
 	$(SRC_DIR)/zzapp_loader.c \
 	$(SRC_DIR)/zzapp_host.c \
 	$(SRC_DIR)/zzapp_api.c \

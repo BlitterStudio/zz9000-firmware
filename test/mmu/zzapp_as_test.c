@@ -204,6 +204,22 @@ static void test_section_attribute_change_reaches_app_pages(void)
 	zzapp_as_destroy(&as);
 }
 
+static void test_readonly_user_grant(void)
+{
+	zzapp_as_t as;
+	const uint32_t *l2;
+
+	CHECK(zzapp_as_create(&as, 1U, 2U) == 0);
+	CHECK(zzapp_as_grant_user_ro(&as, 0x00300000U, 4096U, 1) == 0);
+	l2 = zzapp_as_l2_for(&as, 0x00300000U);
+	CHECK((l2[0] & PAGE_AP_MASK) == PAGE_USER_RO);
+	CHECK((l2[0] & PAGE_XN) == 0U);
+	CHECK(zzapp_as_grant_user_ro(&as, 0x00301000U, 4096U, 0) == 0);
+	CHECK((l2[1] & PAGE_AP_MASK) == PAGE_USER_RO);
+	CHECK((l2[1] & PAGE_XN) != 0U);
+	zzapp_as_destroy(&as);
+}
+
 static void test_l2_exhaustion_is_atomic(void)
 {
 	zzapp_as_t as;
@@ -233,6 +249,7 @@ int main(void)
 	test_image_permissions_and_window_bounds();
 	test_noncacheable_change_propagates();
 	test_section_attribute_change_reaches_app_pages();
+	test_readonly_user_grant();
 	test_l2_exhaustion_is_atomic();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

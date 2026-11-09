@@ -15,7 +15,7 @@
 #define ZZAPP_KERNEL_STACK_BYTES 8192U
 #define ZZAPP_KERNEL_PAGE_BYTES 4096U
 #define ZZAPP_KERNEL_SESSION_LIMIT 4U
-#define ZZAPP_KERNEL_APP_CPSR 0x1fU
+#define ZZAPP_KERNEL_APP_CPSR 0x10U
 #define ZZAPP_KERNEL_WAIT_CANCELLED (-1)
 #define ZZAPP_KERNEL_WAIT_TIMEOUT (-8)
 
@@ -40,6 +40,8 @@ typedef struct {
 	uint32_t r[13];
 	uint32_t exception_lr;
 } zzapp_arm_frame_t;
+/* FRAME_BYTES in zzapp_kernel_asm.S copies this struct. */
+_Static_assert(sizeof(zzapp_arm_frame_t) == 328, "exception frame size");
 
 /* Scheduler-visible context. r15 is the interrupted or first-entry PC. */
 typedef struct {
@@ -132,6 +134,10 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 					      zzapp_arm_frame_t *frame,
 					      zzapp_kernel_dispatch_t source,
 					      uint32_t return_adjust);
+/* Runtime glue in zzapp_host.c, called by the SVC vector after an API
+ * call: returns `frame` while the caller stays runnable, otherwise the
+ * scheduler's choice copied into it. */
+zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame);
 int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
 		zzapp_wake_reason_t reason);

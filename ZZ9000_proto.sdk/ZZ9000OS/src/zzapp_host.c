@@ -10,6 +10,7 @@
 #include "zzapp.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
+#include "zzapp_svc.h"
 #ifndef ZZAPP_HOST_TEST
 #include <stdio.h>
 #include "memorymap.h"
@@ -118,6 +119,19 @@ zzapp_arm_frame_t *zzapp_kernel_arch_dispatch(zzapp_arm_frame_t *frame,
     if (next && next != frame)
         memcpy(frame, next, sizeof(*frame));
     return frame;
+}
+
+/* After an API call: a thread that is still runnable returns straight to
+ * its caller without giving up its quantum. A call that blocked, slept or
+ * stopped the thread hands the core to the scheduler. */
+zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame)
+{
+    int slot = zzapp_kernel_current_thread();
+
+    if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS &&
+        g_kernel.threads[slot].state == ZZAPP_THREAD_RUNNABLE)
+        return frame;
+    return zzapp_kernel_arch_dispatch(frame, ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0U);
 }
 
 void zzapp_kernel_switch_address_space(uint32_t slot)
@@ -904,6 +918,7 @@ static void start_failed(int status)
 static void run_app(uint32_t argc)
 {
     char **argv = NULL;
+    const zzapp_api *app_api;
     int rc;
 
     if (!g_image_loaded || !g_mem) { start_failed(ZZ_EINVAL); return; }
@@ -927,6 +942,21 @@ static void run_app(uint32_t argc)
         start_failed(ZZ_EIO);
         return;
     }
+    app_api = zzapp_svc_api_for_slot(0U, zzapp_api_table());
+    if (!app_api ||
+        zzapp_as_grant_user_ro(&g_proc[0].as,
+            (uint32_t)zzapp_svc_api_veneer(0U) & ~0xfffU, 4096U, 1) ||
+        zzapp_as_grant_user_ro(&g_proc[0].as,
+            (uint32_t)(uintptr_t)app_api & ~0xfffU, 4096U, 0) ||
+        zzapp_as_grant_user_ro(&g_proc[0].as,
+            (uint32_t)(uintptr_t)zzapp_svc_gl_for_slot(0U) & ~0xfffU,
+            4096U, 0)) {
+        start_failed(ZZ_EIO);
+        return;
+    }
+#endif
+#ifdef ZZAPP_HOST_TEST
+    app_api = zzapp_api_table();
 #endif
 #ifdef ZZAPP_HOST_TEST
     memset(g_mem + g_heap_end, 0xA5, ZZAPP_CANARY_BYTES);
@@ -952,10 +982,20 @@ static void run_app(uint32_t argc)
     zzapp_note_progress();
     begin_tick_observation();
     coherent_barrier();
-    if (zzapp_kernel_prepare_app(&g_kernel, 0, g_card + g_entry,
-                                 (uint32_t)(uintptr_t)zzapp_api_table(), argc,
+    if (zzapp_kernel_prepare_app(&g_kernel, 0,
+#ifdef ZZAPP_HOST_TEST
+                                 g_card + g_entry,
+#else
+                                 ZZAPP_AS_WINDOW_BASE + g_entry,
+#endif
+                                 (uint32_t)(uintptr_t)app_api, argc,
                                  (uint32_t)(uintptr_t)argv,
-                                 g_card + g_proc[0].stack_top) != 0) {
+#ifdef ZZAPP_HOST_TEST
+                                 g_card + g_proc[0].stack_top
+#else
+                                 ZZAPP_AS_WINDOW_BASE + g_proc[0].stack_top
+#endif
+                                 ) != 0) {
         start_failed(ZZ_EINVAL);
         return;
     }

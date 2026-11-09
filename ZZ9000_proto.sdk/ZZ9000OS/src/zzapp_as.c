@@ -444,6 +444,50 @@ int zzapp_as_grant_user(zzapp_as_t *as, uint32_t address, uint32_t bytes)
 	return 0;
 }
 
+int zzapp_as_grant_user_ro(zzapp_as_t *as, uint32_t address, uint32_t bytes,
+                           int executable)
+{
+	uint32_t end;
+	uint32_t page_address;
+
+	if (!as || !as->active || bytes == 0U || (address & 0xfffU) != 0U ||
+	    (bytes & 0xfffU) != 0U || address >= 0x40000000U ||
+	    bytes > 0x40000000U - address)
+		return -1;
+	end = address + bytes;
+	sdk_smp_lock_acquire(&as_lock);
+	if (!grant_l2_available(as, address, end)) {
+		sdk_smp_lock_release(&as_lock);
+		return ZZAPP_AS_ENOMEM;
+	}
+	for (page_address = address; page_address < end; page_address += 4096U) {
+		uint32_t section = page_address >> SECTION_SHIFT;
+		uint32_t page = (page_address >> PAGE_SHIFT) & 0xffU;
+		int index = ensure_l2(as, section);
+		uint32_t descriptor;
+
+		if (index < 0) {
+			sdk_smp_lock_release(&as_lock);
+			return index;
+		}
+		descriptor = l2_pool[index][page];
+		if ((descriptor & L1_TYPE_MASK) != L2_TYPE) {
+			sdk_smp_lock_release(&as_lock);
+			return -1;
+		}
+		descriptor = (descriptor & ~(L2_AP_MASK | L2_XN)) |
+			L2_AP_USER_RO | L2_NG;
+		if (!executable)
+			descriptor |= L2_XN;
+		l2_pool[index][page] = descriptor;
+		as_clean(&l2_pool[index][page], sizeof(l2_pool[index][page]));
+	}
+	as_clean(as->l1, sizeof(app_l1[0]));
+	as_sync();
+	sdk_smp_lock_release(&as_lock);
+	return 0;
+}
+
 int zzapp_as_ungrant_user(zzapp_as_t *as, uint32_t address, uint32_t bytes)
 {
 	uint32_t end;

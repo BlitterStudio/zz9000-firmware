@@ -42,6 +42,9 @@ int zzapp_as_map_window(zzapp_as_t *as, uint32_t physical_base);
 /* Add or remove identity-mapped user RW pages for an owned low-DDR grant. */
 int zzapp_as_grant_user(zzapp_as_t *as, uint32_t address, uint32_t bytes);
 int zzapp_as_ungrant_user(zzapp_as_t *as, uint32_t address, uint32_t bytes);
+/* Add identity-mapped user read-only pages. Execution is controlled separately. */
+int zzapp_as_grant_user_ro(zzapp_as_t *as, uint32_t address, uint32_t bytes,
+                           int executable);
 /* Map page-aligned image memory with the requested user permissions. */
 int zzapp_as_map_image(zzapp_as_t *as, uint32_t virtual_base,
 			uint32_t physical_base, uint32_t bytes, uint32_t permissions);
