@@ -10,9 +10,10 @@ ZZAPP_AS_TARGET := $(BUILD_DIR)/zzapp_as_test
 CPPFLAGS += -DMMU_PAGE_HOST_TEST -I$(MOCK_DIR) -I$(SRC_DIR)
 MMU_PAGE_SOURCES := mmu_page_test.c $(SRC_DIR)/mmu_page.c
 MMU_PAGE_DEPS := $(MOCK_DIR)/xil_cache.h $(SRC_DIR)/mmu_page.h
-ZZAPP_AS_SOURCES := zzapp_as_test.c $(SRC_DIR)/zzapp_as.c $(SRC_DIR)/mmu_page.c
+ZZAPP_AS_SOURCES := zzapp_as_test.c $(SRC_DIR)/zzapp_as.c $(SRC_DIR)/mmu_page.c \
+	$(SRC_DIR)/sdk_smp_lock.c
 ZZAPP_AS_DEPS := $(MOCK_DIR)/xil_cache.h $(SRC_DIR)/zzapp_as.h \
-	$(SRC_DIR)/memorymap.h $(SRC_DIR)/mmu_page.h
+	$(SRC_DIR)/memorymap.h $(SRC_DIR)/mmu_page.h $(SRC_DIR)/sdk_smp_lock.h
 
 .PHONY: test clean
 

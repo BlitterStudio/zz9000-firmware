@@ -127,7 +127,7 @@ def unit_tests():
     expect_fail(elf(include_note=False), "no ZZAPP note")
     expect_fail(elf(magic=0x11111111), "note magic")
     expect_fail(elf(abi_major=1), "note abi major 1 is not 0")
-    expect_fail(elf(flags=0x8), "note flags 0x8 has unknown bits")
+    expect_fail(elf(flags=0x10), "note flags 0x10 has unknown bits")
     expect_fail(elf(stack=4), "note stack 4 is not 0")
     expect_fail(elf(stack=(1 << 20) + 8), "note stack")
     code, out, err = run_check(b"not an elf")

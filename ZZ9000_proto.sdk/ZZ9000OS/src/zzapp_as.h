@@ -34,6 +34,9 @@ void zzapp_as_destroy(zzapp_as_t *as);
 /* Map 1 MiB app frames at a private virtual address. */
 int zzapp_as_map_frames(zzapp_as_t *as, uint32_t virtual_base,
 			const uint32_t *frames, uint32_t frame_count);
+/* Remove 1 MiB private mappings. */
+int zzapp_as_unmap_frames(zzapp_as_t *as, uint32_t virtual_base,
+                          uint32_t frame_count);
 /* Map the launcher window as one identity-mapped user section. */
 int zzapp_as_map_window(zzapp_as_t *as, uint32_t physical_base);
 /* Add or remove identity-mapped user RW pages for an owned low-DDR grant. */
@@ -44,6 +47,8 @@ int zzapp_as_map_image(zzapp_as_t *as, uint32_t virtual_base,
 			uint32_t physical_base, uint32_t bytes, uint32_t permissions);
 /* Install this address space on core 1. */
 void zzapp_as_switch(zzapp_as_t *as);
+/* Restore core 1's privileged kernel template. */
+void zzapp_as_switch_kernel(void);
 
 const uint32_t *zzapp_as_template(void);
 const uint32_t *zzapp_as_l1(const zzapp_as_t *as);

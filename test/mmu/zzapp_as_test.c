@@ -19,6 +19,18 @@
 #define PAGE_USER_RW (3U << 4)
 #define PAGE_USER_RO (2U << 4)
 struct xil_cache_mock_state g_xil_cache_mock;
+int smp_cpu_id(void) { return 0; }
+uint32_t smp_local_irq_save(void) { return 0u; }
+void smp_local_irq_restore(uint32_t state) { (void)state; }
+void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1u; }
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+    if (*word)
+        return 0;
+    *word = 1u;
+    return 1;
+}
+void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0u; }
 
 
 static uint32_t bsp[4096];
@@ -78,6 +90,10 @@ static void test_frame_sections_only_fill_window(void)
 	CHECK((l1[0xc02U] & 0xfff00000U) == frames[2]);
 	CHECK((l1[0xc00U] & SECTION_NG) != 0U);
 	CHECK((l1[0xc03U] & 3U) == 0U);
+	CHECK(zzapp_as_unmap_frames(&as, ZZAPP_AS_WINDOW_BASE + 0x00100000U,
+	                            1U) == 0);
+	CHECK((l1[0xc01U] & 3U) == 0U);
+	CHECK((l1[0xc00U] & 3U) != 0U);
 	zzapp_as_destroy(&as);
 }
 static void test_window_is_one_user_section(void)

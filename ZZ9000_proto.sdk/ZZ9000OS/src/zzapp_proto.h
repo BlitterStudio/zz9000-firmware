@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 #define ZZAPP_ABI_MAJOR            0u
-#define ZZAPP_ABI_MINOR            2u
+#define ZZAPP_ABI_MINOR            3u
 
 #define ZZAPP_OP_QUERY             0x0c00u
 #define ZZAPP_OP_ALLOC_WINDOW      0x0c01u

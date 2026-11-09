@@ -94,13 +94,15 @@ int main(void)
 {
     uint8_t image[IMAGE_BYTES];
     uint32_t card;
-
+    const zzapp_api *api;
+    zzapp_heap_info mem;
     zzapp_boot_init();
     make_image(image);
     assert(load_end(image) == ZZ_OK);
     card = zzapp_test_arena_card();
-    assert(card != 0u);
+    assert(card == 0xc0000000u);
     assert(get32(zzapp_test_arena_mem() + LOAD_OFF) == card + LOAD_OFF);
+    assert(zzapp_proc_slot(0)->memory.committed == ZZAPP_ARENA_BYTES);
     zzapp_loader_release();
 
     /* Stock GNU ld emits SHT_REL: its addend is the target word, not a
@@ -170,7 +172,34 @@ int main(void)
     assert(load_end(image) == ZZ_EINVAL);
 
     zzapp_boot_init(); make_image(image);
-    put32(image + PHOFF + 16, (16u << 20) + 1u);
-    assert(load_end(image) == ZZ_EINVAL);
+    put32(image + NOTE_OFF + 28u, 3u);
+    assert(load_end(image) == ZZ_OK);
+    assert(zzapp_proc_slot(0)->memory.committed == (2u << 20));
+    zzapp_proc_slot(0)->heap_base = 0x00100000u;
+    zzapp_proc_slot(0)->heap_break = 0x00100000u;
+    zzapp_proc_slot(0)->heap_limit = 0x01000000u;
+    api = zzapp_api_table();
+    assert(api->heap_grow(3u << 20, NULL) == ZZ_OK);
+    assert(zzapp_proc_slot(0)->heap_break == 0x00400000u);
+    assert(api->heap_info(&mem) == ZZ_OK);
+    assert(mem.committed == (5u << 20));
+    assert(api->heap_shrink(2u << 20, NULL) == ZZ_OK);
+    assert(zzapp_proc_slot(0)->heap_break == 0x00200000u);
+    zzapp_proc_slot(0)->heap_base = 0u;
+    zzapp_proc_slot(0)->heap_break = 0u;
+    zzapp_proc_slot(0)->heap_limit = 32u << 20;
+    zzapp_proc_slot(0)->memory.committed = 0u;
+    zzapp_proc_slot(0)->memory.limit = 16u << 20;
+    for (card = 0; card < 16u; card++)
+        assert(api->heap_grow(1u << 20, NULL) == ZZ_OK);
+    assert(api->heap_grow(1u << 20, NULL) == ZZ_ENOMEM);
+    assert(zzapp_proc_slot(0)->heap_break == (16u << 20));
+    zzapp_loader_release();
+
+    zzapp_boot_init(); make_image(image);
+    put32(image + NOTE_OFF + 28u, 3u);
+    put32(image + NOTE_OFF + 40u, 600u);
+    assert(load_end(image) == ZZ_ENOMEM);
+    assert(zzapp_loader_state() == ZZAPP_ST_IDLE);
     return 0;
 }

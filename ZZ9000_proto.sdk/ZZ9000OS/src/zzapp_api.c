@@ -322,6 +322,39 @@ static void *api_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 static void api_free(void *p) { extern void zzapp_host_free(void *); zzapp_host_free(p); }
 static void api_heap(void **b, uint32_t *n) { extern void zzapp_host_heap(void **,uint32_t *); zzapp_host_heap(b,n); }
 
+static int api_heap_grow(uint32_t bytes, void **old_break)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_proc_heap_grow(bytes, old_break);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_heap_shrink(uint32_t bytes, void **new_break)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_proc_heap_shrink(bytes, new_break);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_heap_info(zzapp_heap_info *out)
+{
+    int rc;
+
+    if (!out)
+        return ZZ_EINVAL;
+    zzapp_api_enter();
+    rc = zzapp_proc_heap_info(&out->committed, &out->limit, &out->pool_free);
+    zzapp_api_leave();
+    return rc;
+}
+
+
 static int sdk_to_zz(uint16_t status)
 {
     switch (status) {
@@ -825,6 +858,9 @@ static const zzapp_api g_api = {
     .audio_decode_close=api_audio_close_decode,
     /* API 0.2 host: console and fixed-size message rings. */
     .console_write=api_console_write,.console_read=api_console_read,
-    .msg_send=api_msg_send,.msg_poll=api_msg_poll
+    .msg_send=api_msg_send,.msg_poll=api_msg_poll,
+    /* API 0.3: the private heap grows and shrinks in frames. */
+    .heap_grow=api_heap_grow,.heap_shrink=api_heap_shrink,
+    .heap_info=api_heap_info
 };
 const zzapp_api *zzapp_api_table(void) { return &g_api; }

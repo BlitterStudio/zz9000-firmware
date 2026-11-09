@@ -50,6 +50,8 @@ struct load_image {
     uint32_t entry;
     uint32_t stack_bytes;
     uint32_t note_flags;
+    uint32_t note_minor;
+    uint32_t min_heap_bytes;
     uint32_t image_end;
     uint32_t nseg;
     struct load_seg seg[ZZAPP_MAX_LOAD];
@@ -62,8 +64,9 @@ void zzapp_loader_unbound(void);
 uint32_t zzapp_loader_generation(void);
 uint32_t zzapp_loader_state(void);
 void zzapp_loader_set_state(uint32_t state);
-void zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
-                            uint32_t stack_bytes, uint32_t note_flags);
+int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
+                           uint32_t stack_bytes, uint32_t note_flags,
+                           uint32_t note_minor, uint32_t min_heap_bytes);
 int zzapp_loader_have_image(void);
 
 static uint32_t g_card;
@@ -78,7 +81,7 @@ static int g_ready;
 #ifdef ZZAPP_HOST_TEST
 static uint8_t *g_host_mem;
 static uint8_t *g_host_back;
-#define HOST_CARD 0x20000000u
+#define HOST_CARD 0xc0000000u
 #endif
 
 static uint32_t rd32(const uint8_t *p)
@@ -103,6 +106,16 @@ static int range_ok(uint32_t off, uint32_t len, uint32_t limit)
 #include "xil_cache.h"
 #include "xil_cache_l.h"
 
+static zzapp_mem_t g_app_memory;
+static int g_app_memory_ready;
+
+void zzapp_loader_memory_init(void)
+{
+    if (!g_app_memory_ready &&
+        zzapp_mem_init(&g_app_memory, &card_pool) == 0)
+        g_app_memory_ready = 1;
+}
+
 static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
 {
     uint32_t addr;
@@ -120,25 +133,174 @@ static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
     return addr;
 }
 
-static void cache_image(const struct load_image *img)
+
+static int map_loaded_image(const struct load_image *img)
 {
+    zzapp_proc_t *proc = zzapp_proc_slot(0);
+    uint32_t image_frames;
+    uint32_t stack_frames;
+    uint32_t heap_frames;
+    uint32_t total_frames;
     uint32_t i;
 
-    /*
-     * The app executes on core 1.  Cleaning its private L1 exposes the
-     * completed image to its I-side through the shared L2 without racing
-     * core 0's vblank-owned PL310 flush.  Only loaded segments need
-     * cleaning; g_bytes is the 96 MiB reservation, not image length.
-     */
-    Xil_L1DCacheFlushRange((INTPTR)g_card, img->image_end);
+    if (!g_app_memory_ready || !proc)
+        return ZZ_ENOMEM;
+    image_frames = (img->image_end + ZZAPP_MEM_FRAME_BYTES - 1u) >> 20;
+    stack_frames = (img->stack_bytes + ZZAPP_MEM_FRAME_BYTES - 1u) >> 20;
+    total_frames = img->note_minor < 3u ?
+                   ZZAPP_ARENA_BYTES / ZZAPP_MEM_FRAME_BYTES :
+                   image_frames + stack_frames +
+                   img->min_heap_bytes / ZZAPP_MEM_FRAME_BYTES;
+    if (total_frames > ZZAPP_MEM_MAX_FRAMES)
+        return ZZ_ENOMEM;
+    heap_frames = total_frames - image_frames - stack_frames;
+    zzapp_mem_proc_init(&proc->memory, img->note_minor < 3u ?
+                        ZZAPP_ARENA_BYTES : ZZAPP_MEM_PRIVATE_WINDOW_BYTES);
+    if (zzapp_mem_alloc(&g_app_memory, &proc->memory, image_frames,
+                        proc->image_frames) ||
+        (heap_frames && zzapp_mem_alloc(&g_app_memory, &proc->memory,
+                                        heap_frames, proc->heap_frames)) ||
+        zzapp_mem_alloc(&g_app_memory, &proc->memory, stack_frames,
+                        proc->stack_frames))
+        goto failed;
+    proc->image_frame_count = image_frames;
+    proc->heap_frame_count = heap_frames;
+    proc->stack_frame_count = stack_frames;
+    if (zzapp_as_create(&proc->as, 0U, proc->generation))
+        goto failed;
+    proc->heap_base = image_frames * ZZAPP_MEM_FRAME_BYTES;
+    if (img->note_minor < 3u) {
+        proc->stack_base = ZZAPP_ARENA_BYTES - stack_frames *
+                           ZZAPP_MEM_FRAME_BYTES;
+        proc->heap_limit = proc->stack_base;
+    } else {
+        proc->stack_base = ZZAPP_MEM_PRIVATE_WINDOW_BYTES - stack_frames *
+                           ZZAPP_MEM_FRAME_BYTES;
+        if (proc->stack_base < ZZAPP_MEM_FRAME_BYTES)
+            goto failed;
+        proc->heap_limit = proc->stack_base - ZZAPP_MEM_FRAME_BYTES;
+    }
+    proc->stack_top = proc->stack_base + stack_frames * ZZAPP_MEM_FRAME_BYTES;
+    proc->heap_break = proc->heap_base;
+    if ((heap_frames &&
+         zzapp_as_map_frames(&proc->as, ZZAPP_AS_WINDOW_BASE + proc->heap_base,
+                             proc->heap_frames, heap_frames)) ||
+        zzapp_as_map_frames(&proc->as, ZZAPP_AS_WINDOW_BASE + proc->stack_base,
+                            proc->stack_frames, stack_frames))
+        goto failed;
     for (i = 0; i < img->nseg; i++) {
-        if (img->seg[i].flags & PF_X) {
-            Xil_ICacheInvalidateRange((INTPTR)(g_card + img->seg[i].vaddr),
-                                      img->seg[i].memsz);
+        uint32_t copied = 0;
+        uint32_t map_start = img->seg[i].vaddr & ~0xfffU;
+        uint32_t map_end = (img->seg[i].vaddr + img->seg[i].memsz + 0xfffU) &
+                           ~0xfffU;
+        uint32_t permissions = (img->seg[i].flags & PF_X) ? ZZAPP_AS_IMAGE_RX :
+                               (img->seg[i].flags & PF_W) ? ZZAPP_AS_IMAGE_RW :
+                               ZZAPP_AS_IMAGE_RO;
+
+        while (copied < img->seg[i].memsz) {
+            uint32_t va = img->seg[i].vaddr + copied;
+            uint32_t in_frame = va & (ZZAPP_MEM_FRAME_BYTES - 1u);
+            uint32_t count = img->seg[i].memsz - copied;
+
+            if (count > ZZAPP_MEM_FRAME_BYTES - in_frame)
+                count = ZZAPP_MEM_FRAME_BYTES - in_frame;
+            memcpy((void *)(uintptr_t)(proc->image_frames[va >> 20] + in_frame),
+                   g_mem + va, count);
+            copied += count;
+        }
+        while (map_start < map_end) {
+            uint32_t in_frame = map_start & (ZZAPP_MEM_FRAME_BYTES - 1u);
+            uint32_t count = map_end - map_start;
+
+            if (count > ZZAPP_MEM_FRAME_BYTES - in_frame)
+                count = ZZAPP_MEM_FRAME_BYTES - in_frame;
+            if (zzapp_as_map_image(&proc->as, ZZAPP_AS_WINDOW_BASE + map_start,
+                                   proc->image_frames[map_start >> 20] + in_frame,
+                                   count, permissions))
+                goto failed;
+            Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)
+                                   (proc->image_frames[map_start >> 20] + in_frame),
+                                   count);
+            if (img->seg[i].flags & PF_X)
+                Xil_ICacheInvalidateRange((INTPTR)(uintptr_t)
+                                          (proc->image_frames[map_start >> 20] +
+                                           in_frame), count);
+            map_start += count;
         }
     }
-    __asm__ __volatile__("dsb" ::: "memory");
-    __asm__ __volatile__("isb" ::: "memory");
+    {
+        uint32_t map_start = (img->image_end + 0xfffU) & ~0xfffU;
+        uint32_t map_end = image_frames * ZZAPP_MEM_FRAME_BYTES;
+
+        while (map_start < map_end) {
+            uint32_t in_frame = map_start & (ZZAPP_MEM_FRAME_BYTES - 1u);
+            uint32_t count = map_end - map_start;
+
+            if (count > ZZAPP_MEM_FRAME_BYTES - in_frame)
+                count = ZZAPP_MEM_FRAME_BYTES - in_frame;
+            if (zzapp_as_map_image(&proc->as, ZZAPP_AS_WINDOW_BASE + map_start,
+                                   proc->image_frames[map_start >> 20] + in_frame,
+                                   count, ZZAPP_AS_IMAGE_RW))
+                goto failed;
+            map_start += count;
+        }
+    }
+    __asm__ __volatile__("dsb\n\tmcr p15, 0, r0, c7, c5, 6\n\tdsb\n\tisb" ::: "memory");
+    return ZZ_OK;
+
+failed:
+    zzapp_as_destroy(&proc->as);
+    (void)zzapp_mem_release_proc(&g_app_memory, &proc->memory);
+    return ZZ_ENOMEM;
+}
+
+int zzapp_loader_heap_grow(uint32_t bytes)
+{
+    zzapp_proc_t *proc = zzapp_proc_slot(0);
+    uint32_t frames = bytes / ZZAPP_MEM_FRAME_BYTES;
+    uint32_t first;
+
+    if (!proc || !frames || frames > ZZAPP_MEM_MAX_FRAMES - proc->heap_frame_count)
+        return ZZ_ENOMEM;
+    first = proc->heap_frame_count;
+    if (zzapp_mem_alloc(&g_app_memory, &proc->memory, frames,
+                        proc->heap_frames + first))
+        return ZZ_ENOMEM;
+    if (zzapp_as_map_frames(&proc->as, ZZAPP_AS_WINDOW_BASE + proc->heap_base +
+                            first * ZZAPP_MEM_FRAME_BYTES,
+                            proc->heap_frames + first, frames)) {
+        while (frames--)
+            (void)zzapp_mem_release(&g_app_memory, &proc->memory,
+                                    proc->heap_frames[first + frames]);
+        return ZZ_ENOMEM;
+    }
+    proc->heap_frame_count += bytes / ZZAPP_MEM_FRAME_BYTES;
+    return ZZ_OK;
+}
+
+int zzapp_loader_heap_shrink(uint32_t bytes)
+{
+    zzapp_proc_t *proc = zzapp_proc_slot(0);
+    uint32_t frames = bytes / ZZAPP_MEM_FRAME_BYTES;
+    uint32_t first;
+    uint32_t i;
+
+    if (!proc || !frames || frames > proc->heap_frame_count)
+        return ZZ_EINVAL;
+    first = proc->heap_frame_count - frames;
+    if (zzapp_as_unmap_frames(&proc->as, ZZAPP_AS_WINDOW_BASE + proc->heap_base +
+                              first * ZZAPP_MEM_FRAME_BYTES, frames))
+        return ZZ_EINVAL;
+    for (i = 0; i < frames; i++)
+        (void)zzapp_mem_release(&g_app_memory, &proc->memory,
+                                proc->heap_frames[first + i]);
+    proc->heap_frame_count = first;
+    return ZZ_OK;
+}
+
+uint32_t zzapp_loader_pool_free(void)
+{
+    return g_app_memory_ready ? zzapp_mem_free_bytes(&g_app_memory) : 0u;
 }
 #else
 static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
@@ -160,11 +322,18 @@ static void cache_image(const struct load_image *img)
 }
 #define CARD_POOL_CLASS_APP 8
 #define CARD_POOL_CLASS_APP_DISPLAY 14
+void zzapp_loader_memory_init(void) {}
 #endif
 
 static void drop_arena(void)
 {
 #ifndef ZZAPP_HOST_TEST
+    zzapp_proc_t *proc = zzapp_proc_slot(0);
+
+    if (proc) {
+        zzapp_as_destroy(&proc->as);
+        (void)zzapp_mem_release_proc(&g_app_memory, &proc->memory);
+    }
     if (g_card)
         card_pool_release_owner(&card_pool, g_owner);
     if (g_back)
@@ -198,22 +367,32 @@ int zzapp_loader_begin(void)
     if (gen == 0u || (gen & 0x00FFFFFFu) == 0u)
         gen = 1u;
     owner = ((uint32_t)CARD_POOL_CLASS_APP << 24) | (gen & 0x00FFFFFFu);
+#ifdef ZZAPP_HOST_TEST
     addr = pool_alloc(ZZAPP_ARENA_BYTES, owner);
+#else
+    if (!g_app_memory_ready)
+        return ZZ_ENOMEM;
+    addr = pool_alloc(ZZAPP_FILE_MAX, owner);
+#endif
     if (!addr) {
         zzapp_loader_set_state(ZZAPP_ST_IDLE);
         return ZZ_ENOMEM;
     }
     g_owner = owner;
-    g_card = addr;
-    g_bytes = ZZAPP_ARENA_BYTES;
     g_file_end = 0;
     g_ready = 0;
 #ifdef ZZAPP_HOST_TEST
+    g_card = addr;
+    g_bytes = ZZAPP_ARENA_BYTES;
     g_mem = g_host_mem;
-#else
-    g_mem = (uint8_t *)(uintptr_t)addr;
-#endif
     zzapp_loader_bound(g_card, g_mem, g_bytes, owner, gen);
+#else
+    g_card = ZZAPP_AS_WINDOW_BASE;
+    g_bytes = ZZAPP_FILE_MAX;
+    g_mem = (uint8_t *)(uintptr_t)addr;
+    zzapp_loader_bound(g_card, g_mem, ZZAPP_MEM_PRIVATE_WINDOW_BYTES,
+                       owner, gen);
+#endif
     zzapp_services_on_launch();
     {
         uint8_t *life = (uint8_t *)zzapp_services_window();
@@ -300,6 +479,18 @@ static int note_ok(const uint8_t *note, uint32_t nlen, struct load_image *img)
                 return ZZ_EINVAL;
             img->stack_bytes = body.stack_bytes;
             img->note_flags = body.flags;
+            img->note_minor = body.abi_minor;
+            /* ZZAPP_NOTE in the 0.3 SDK marks a dynamic heap with a flag
+             * and keeps minor 0, so the app still loads (with the fixed
+             * heap) on 0.2 firmware. Treat it as the 0.3 contract here. */
+            if (body.flags & ZZAPP_NOTE_FLAG_DYNAMIC_HEAP)
+                img->note_minor = 3u;
+            if (body.abi_minor >= 3u) {
+                if (body.reserved >
+                    ZZAPP_MEM_PRIVATE_WINDOW_BYTES / ZZAPP_MEM_FRAME_BYTES)
+                    return ZZ_ENOMEM;
+                img->min_heap_bytes = body.reserved << 20;
+            }
             return ZZ_OK;
         }
         if (desc + desc_pad < desc)
@@ -325,8 +516,14 @@ static int find_note(struct load_image *img, const uint8_t *eh, uint16_t phnum,
             continue;
         if (!range_ok(off, filesz, g_file_end))
             return ZZ_EINVAL;
-        if (note_ok(g_mem + off, filesz, img) == ZZ_OK)
-            return ZZ_OK;
+        {
+            int rc = note_ok(g_mem + off, filesz, img);
+
+            if (rc == ZZ_OK)
+                return ZZ_OK;
+            if (rc != ZZ_EINVAL)
+                return rc;
+        }
     }
     if (!shoff || !shnum)
         return ZZ_EINVAL;
@@ -341,8 +538,14 @@ static int find_note(struct load_image *img, const uint8_t *eh, uint16_t phnum,
             continue;
         if (!range_ok(off, size, g_file_end))
             return ZZ_EINVAL;
-        if (note_ok(g_mem + off, size, img) == ZZ_OK)
-            return ZZ_OK;
+        {
+            int rc = note_ok(g_mem + off, size, img);
+
+            if (rc == ZZ_OK)
+                return ZZ_OK;
+            if (rc != ZZ_EINVAL)
+                return rc;
+        }
     }
     return ZZ_EINVAL;
 }
@@ -500,7 +703,8 @@ static int parse_elf(struct load_image *img)
     }
     if (img->nseg == 0u || filesz_sum > ZZAPP_FILE_MAX)
         return ZZ_EINVAL;
-    if (memsz_sum + img->stack_bytes + ZZAPP_IMAGE_SLACK > ZZAPP_ARENA_BYTES)
+    if (memsz_sum + img->stack_bytes + ZZAPP_IMAGE_SLACK >
+        ZZAPP_MEM_PRIVATE_WINDOW_BYTES)
         return ZZ_EINVAL;
     /* The heap starts here, so VFP/NEdouble data in app allocations
      * (GLQuake's hunk typed loads, newlib's double-heavy code) keeps its
@@ -508,14 +712,14 @@ static int parse_elf(struct load_image *img)
      * 8-byte round let a rebuilt image with a larger .data shift the heap
      * base and abort the app on a misaligned float load. */
     img->image_end = (img->image_end + 31u) & ~31u;
-    if (img->image_end + img->stack_bytes > g_bytes)
+    if (img->image_end + img->stack_bytes > ZZAPP_MEM_PRIVATE_WINDOW_BYTES)
         return ZZ_EINVAL;
     for (i = 0; i < img->nseg; i++) {
         uint32_t a = img->seg[i].vaddr;
         uint32_t ae = a + img->seg[i].memsz;
         uint16_t j;
 
-        if (ae > g_bytes - img->stack_bytes)
+        if (ae > ZZAPP_MEM_PRIVATE_WINDOW_BYTES - img->stack_bytes)
             return ZZ_EINVAL;
         for (j = (uint16_t)(i + 1u); j < img->nseg; j++) {
             uint32_t b = img->seg[j].vaddr;
@@ -526,7 +730,7 @@ static int parse_elf(struct load_image *img)
         }
     }
     img->entry = rd32(eh + 24u);
-    if (img->entry >= g_bytes - img->stack_bytes)
+    if (img->entry >= ZZAPP_MEM_PRIVATE_WINDOW_BYTES - img->stack_bytes)
         return ZZ_EINVAL;
     return relocs_ok(shnum, shentsize, shoff);
 }
@@ -690,9 +894,23 @@ int zzapp_loader_end(void)
         }
     }
 
+#ifdef ZZAPP_HOST_TEST
     cache_image(&img);
-    zzapp_loader_set_image(img.entry, img.image_end, img.stack_bytes,
-                           img.note_flags);
+#else
+    rc = map_loaded_image(&img);
+    if (rc != ZZ_OK) {
+        drop_arena();
+        zzapp_loader_set_state(ZZAPP_ST_IDLE);
+        return rc;
+    }
+#endif
+    rc = zzapp_loader_set_image(img.entry, img.image_end, img.stack_bytes,
+                                img.note_flags, img.note_minor, img.min_heap_bytes);
+    if (rc != ZZ_OK) {
+        drop_arena();
+        zzapp_loader_set_state(ZZAPP_ST_IDLE);
+        return rc;
+    }
     g_ready = 1;
     /* STARTING is published only by APP_START. */
     return ZZ_OK;

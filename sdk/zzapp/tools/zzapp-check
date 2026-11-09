@@ -24,7 +24,8 @@ PF_X = 1
 R_ARM_RELATIVE = 23
 DT_NEEDED = 1
 NOTE_MAGIC = 0x50505A41
-NOTE_FLAG_KNOWN = 0x7  # display | audio | gl
+NOTE_FLAG_KNOWN = 0xf  # display | audio | gl | dynamic heap
+NOTE_FLAG_DYNAMIC_HEAP = 0x8
 STACK_MIN = 64 << 10
 STACK_MAX = 1 << 20
 
@@ -169,8 +170,10 @@ def check(path):
 
 
 def note_bytes(flags, stack):
+    """The bytes ZZAPP_NOTE() emits: abi 0/0 with the dynamic-heap flag."""
     name = b"ZZAPP\x00\x00\x00"
-    desc = struct.pack("<IIIIII", NOTE_MAGIC, 0, 0, stack, flags, 0)
+    desc = struct.pack("<IIIIII", NOTE_MAGIC, 0, 0, stack,
+                       flags | NOTE_FLAG_DYNAMIC_HEAP, 0)
     return struct.pack("<III", 6, 24, 1) + name + desc
 
 

@@ -13,6 +13,8 @@
 
 #include <stdint.h>
 
+#include "zzapp_as.h"
+#include "zzapp_mem.h"
 #include "zzapp_proto.h"
 #define ZZAPP_TICK_US          5000u
 /* Core 1 no longer answers at all (no app progress and no timer tick). */
@@ -41,6 +43,28 @@
 #define ZZAPP_LOG_RING_PER_SEC 32u
 #define ZZAPP_LOG_UART_PER_SEC 8u
 #define ZZAPP_ENTRY_FPSCR      0u
+
+typedef struct zzapp_proc {
+    zzapp_mem_proc_t memory;
+    zzapp_as_t as;
+    uint32_t owner;
+    uint32_t generation;
+    uint32_t image_entry;
+    uint32_t image_end;
+    uint32_t image_frames[ZZAPP_IMAGE_MAX_BYTES / ZZAPP_MEM_FRAME_BYTES];
+    uint32_t image_frame_count;
+    uint32_t heap_base;
+    uint32_t heap_break;
+    uint32_t heap_limit;
+    uint32_t heap_frames[ZZAPP_MEM_MAX_FRAMES];
+    uint32_t heap_frame_count;
+    uint32_t stack_base;
+    uint32_t stack_top;
+    uint32_t stack_frames[1];
+    uint32_t stack_frame_count;
+    uint32_t stack_bytes;
+    uint32_t note_minor;
+} zzapp_proc_t;
 
 
 /* Just below the image-session table in the coherent task-queue region.
@@ -106,6 +130,16 @@ int zzapp_flip_ack_is_current(uint32_t gen);
 int zzapp_fault_wants_restart(uint32_t pc, uint32_t abort_lr);
 
 const struct zzapp_api *zzapp_api_table(void);
+
+zzapp_proc_t *zzapp_proc_slot(uint32_t slot);
+int zzapp_proc_heap_grow(uint32_t bytes, void **old_break);
+int zzapp_proc_heap_shrink(uint32_t bytes, void **new_break);
+int zzapp_proc_heap_info(uint32_t *committed, uint32_t *limit,
+                         uint32_t *pool_free);
+void zzapp_loader_memory_init(void);
+int zzapp_loader_heap_grow(uint32_t bytes);
+int zzapp_loader_heap_shrink(uint32_t bytes);
+uint32_t zzapp_loader_pool_free(void);
 
 /* ---- B defines these. Weak no-ops here. ---- */
 void zzapp_services_poll(void);
