@@ -22,9 +22,10 @@ typedef struct ZZPlayMHIBridge {
   ZZPlayCodecEngine *engine;
   ZZ9KContext *ctx;
   ZZPlayMHISink *sink;
-  /* offset/base_ms are the seek restart point. The displayed time comes
-   * from the card output clock, anchored at clock_origin when the pass
-   * starts, so a tag or a VBR header cannot move it. */
+  /* offset/base_ms are the seek restart point. With mhizz9000 the
+   * displayed time comes from the card output clock, anchored at
+   * clock_origin when the pass starts, so a tag or a VBR header cannot
+   * move it. Other drivers play elsewhere and keep the byte estimate. */
   uint64_t offset;
   uint32_t base_ms;
   uint64_t clock_origin;
@@ -133,7 +134,9 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
   }
   (void)zzplay_mhi_set_volume(&sink, run->ctl->volume);
   zzplay_info("zzplay: selected audio backend MHI (card-local Layer III)\n");
-  if (zz9k_open(&bridge.ctx) != ZZ9K_STATUS_OK) {
+  /* Only mhizz9000 plays through the card's transmitter; any other MHI
+   * driver would leave that clock standing still. */
+  if (!sink.card_driver || zz9k_open(&bridge.ctx) != ZZ9K_STATUS_OK) {
     bridge.ctx = NULL;
   }
   for (;;) {

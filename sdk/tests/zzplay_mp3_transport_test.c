@@ -1,6 +1,7 @@
 /* Behavioural tests for the host-testable MP3 transport calculations the
- * desktop player added: the CBR duration estimate over the audio payload
- * and the proportional, clamped seek offset.
+ * desktop player added: the CBR duration estimate over the audio payload,
+ * the proportional, clamped seek offset and the backpressure partial-period
+ * flush rule.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
@@ -85,10 +86,33 @@ static void test_seek_offset(void)
             zzplay_mp3_seek_offset(0U, 3U, 10000U, 9999U), 2U);
 }
 
+static void test_partial_flush(void)
+{
+  /* 256 KiB ring, MP3 unit (1152 stereo S16 samples), 200 ms period at
+   * 48 kHz stereo: the remainder after the whole periods leaves the
+   * decoder plenty of room, so it waits for the next decode. */
+  check_u32("flush full ring", zzplay_mp3_partial_flush_due(
+                                   26112U, 262144U, 4608U), 0U);
+  check_u32("flush nothing", zzplay_mp3_partial_flush_due(0U, 8192U,
+                                                          65536U), 0U);
+  /* A shrunk ring that cannot hold one more decoder unit beside the
+   * remainder must hand it over, or the decoder never progresses. */
+  check_u32("flush shrunk ring", zzplay_mp3_partial_flush_due(
+                                     36864U, 73728U, 71680U), 1U);
+  /* Exactly one unit of room is enough. */
+  check_u32("flush exact room", zzplay_mp3_partial_flush_due(
+                                    4096U, 8704U, 4608U), 0U);
+  check_u32("flush one short", zzplay_mp3_partial_flush_due(
+                                   4097U, 8704U, 4608U), 1U);
+  check_u32("flush full", zzplay_mp3_partial_flush_due(8704U, 8704U, 0U),
+            1U);
+}
+
 int main(void)
 {
   test_duration();
   test_seek_offset();
+  test_partial_flush();
   if (failures != 0) {
     printf("zzplay_mp3_transport_test: %d failure(s)\n", failures);
     return 1;

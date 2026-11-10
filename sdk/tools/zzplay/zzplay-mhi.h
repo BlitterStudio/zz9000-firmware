@@ -33,9 +33,10 @@ typedef struct ZZPlayMHISink {
   uint8_t paused;
   /* The driver advertised MHIQ_VOLUME_CONTROL. */
   uint8_t volume_supported;
-  /* The driver is mhizz9000.library, whose zero-length EOF marker is a
-   * private extension other MHI drivers must not be fed. */
-  uint8_t eof_marker;
+  /* The driver is mhizz9000.library: it plays through the card's output
+   * clock and takes a private zero-length EOF marker other MHI drivers
+   * must not be fed. */
+  uint8_t card_driver;
 } ZZPlayMHISink;
 
 typedef int (*ZZPlayMHIStopRequested)(void *user);
