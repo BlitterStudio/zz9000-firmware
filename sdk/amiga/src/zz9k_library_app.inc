@@ -135,11 +135,13 @@ static int zz9k_lib_app_event_queued(const ZZ9KAppHandle *handle)
   return queued;
 }
 
-static void zz9k_lib_app_event_remove(ZZ9KAppHandle *handle)
+static void zz9k_lib_app_event_remove(struct ZZ9KBase *base,
+                                       ZZ9KAppHandle *handle)
 {
   struct Node *node;
 
-  if (!handle || !handle->event_posted || !handle->notify_port) return;
+  if (!base || !handle || !handle->event_posted || !handle->notify_port) return;
+  ObtainSemaphore(&base->app_lock);
   /* Forbid does not block interrupts. A device completion can append to
    * this port while Remove updates the links. */
   Disable();
@@ -152,6 +154,7 @@ static void zz9k_lib_app_event_remove(ZZ9KAppHandle *handle)
     }
   }
   Enable();
+  ReleaseSemaphore(&base->app_lock);
 }
 
 static void zz9k_lib_app_handle_link_locked(struct ZZ9KBase *base,
@@ -482,7 +485,7 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
   }
   if (zz9k_lib_app_life_get(handle->window, 0U) != ZZ9K_APP_LIFE_MAGIC ||
       zz9k_lib_app_life_get(handle->window, 4U) != ZZ9K_APP_LIFE_VERSION ||
-      !zz9k_lib_app_generation_matches(handle)) {
+      (slot_addressed && !zz9k_lib_app_generation_matches(handle))) {
     status = ZZ9K_STATUS_INTERNAL_ERROR;
     goto claim_failed;
   }
@@ -795,6 +798,7 @@ static int zz9k_lib_app_get_message(REG(a6, struct ZZ9KBase *base),
     status = ZZ9K_STATUS_BAD_HANDLE;
   }
   if (status == ZZ9K_STATUS_OK) {
+    ObtainSemaphore(&base->app_lock);
     zz9k_lib_app_cache(handle->window, ZZ9K_APP_MESSAGE_A2H_OFFSET,
                         ZZ9K_APP_MESSAGE_RING_BYTES);
     status = zz9k_app_ring_pop(handle->window + ZZ9K_APP_MESSAGE_A2H_OFFSET,
@@ -804,6 +808,7 @@ static int zz9k_lib_app_get_message(REG(a6, struct ZZ9KBase *base),
     if (handle->event_posted && !zz9k_lib_app_event_queued(handle)) {
       handle->event_posted = 0U;
     }
+    ReleaseSemaphore(&base->app_lock);
   }
   zz9k_lib_leave(base);
   return status;
@@ -838,7 +843,7 @@ static void zz9k_lib_app_destroy_locked(struct ZZ9KBase *base,
     (void)zz9k_lib_app_call_locked(base, &request, &reply);
   }
   zz9k_lib_app_unpublish_locked(base, handle);
-  zz9k_lib_app_event_remove(handle);
+  zz9k_lib_app_event_remove(base, handle);
   zz9k_lib_app_cache_release(handle);
   if (handle->owner_task == FindTask(0)) {
     if (handle->signal_bit >= 0) FreeSignal(handle->signal_bit);

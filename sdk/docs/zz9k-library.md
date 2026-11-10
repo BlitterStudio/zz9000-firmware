@@ -100,7 +100,9 @@ handle while leaving it safe to close. A claimed slot that does not begin
 loading expires after two seconds. If `Open` cannot finish setup after a
 successful claim, it cancels that claim. With firmware that lacks that cap,
 the library retains API 0.2 behaviour: one handle claims legacy slot 0 and a
-second `Open` returns `ZZ9K_STATUS_BUSY`. `LoadFile` streams the ELF through
+second `Open` returns `ZZ9K_STATUS_BUSY`. Legacy firmware assigns that
+handle's generation at `LOAD_BEGIN`, so `Open` also succeeds while the
+unloaded window reports generation zero. `LoadFile` streams the ELF through
 the handle's runtime staging window; `LoadMemory` accepts at most 16 MiB.
 `Start` copies no more than 16 argv strings of 127 bytes each. `Status`
 returns the fault/exit snapshot for its handle.

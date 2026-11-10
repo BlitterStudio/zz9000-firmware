@@ -169,15 +169,59 @@ static int expect_app_lease_independent(const char *resident)
 {
   const char *dispatcher;
   const char *service;
-  const char *lock;
-  const char *release;
+  const char *app_lock;
+  const char *app_release;
+  const char *transport_lock;
+  const char *transport_release;
+  const char *blocking_transport_lock;
 
   dispatcher = find_definition(resident, "zz9k_lib_dispatcher_proc");
   service = dispatcher ? strstr(dispatcher, "zz9k_lib_app_service_locked(base);") : 0;
-  lock = service ? strstr(dispatcher, "ObtainSemaphore(&base->app_lock)") : 0;
-  release = lock ? strstr(lock, "ReleaseSemaphore(&base->app_lock)") : 0;
-  if (!service || !lock || !release || lock > service || release < service) {
-    puts("app lease service waits on the transport lock");
+  app_lock = service ? strstr(dispatcher, "ObtainSemaphore(&base->app_lock)") : 0;
+  app_release = app_lock ? strstr(app_lock, "ReleaseSemaphore(&base->app_lock)") : 0;
+  blocking_transport_lock = app_release ? strstr(app_release,
+      "ObtainSemaphore(&base->lock)") : 0;
+  transport_lock = app_release ? strstr(app_release,
+                                        "AttemptSemaphore(&base->lock)") : 0;
+  transport_release = transport_lock ? strstr(transport_lock,
+      "ReleaseSemaphore(&base->lock)") : 0;
+  if (!service || !app_lock || !app_release || !transport_lock ||
+      !transport_release || (blocking_transport_lock &&
+                             blocking_transport_lock < transport_lock) ||
+      app_lock > service || app_release < service ||
+      transport_lock < app_release || transport_release < transport_lock) {
+    puts("app lease service can wait on the transport lock");
+    return 0;
+  }
+  return 1;
+}
+
+static int expect_app_notification_synchronized(const char *app)
+{
+  const char *get_message;
+  const char *app_lock;
+  const char *event_ack;
+  const char *app_release;
+
+  get_message = find_definition(app, "zz9k_lib_app_get_message");
+  app_lock = get_message ? strstr(get_message,
+                                  "ObtainSemaphore(&base->app_lock)") : 0;
+  event_ack = app_lock ? strstr(app_lock, "handle->event_posted = 0U") : 0;
+  app_release = event_ack ? strstr(event_ack,
+      "ReleaseSemaphore(&base->app_lock)") : 0;
+  if (!app_lock || !event_ack || !app_release || app_lock > event_ack ||
+      event_ack > app_release) {
+    puts("app notification acknowledgement is not synchronized");
+    return 0;
+  }
+  return 1;
+}
+
+static int expect_legacy_claim_before_generation(const char *app)
+{
+  if (!function_contains(app, "zz9k_lib_app_open",
+                         "slot_addressed && !zz9k_lib_app_generation_matches(handle)")) {
+    puts("legacy open requires a generation before load begins");
     return 0;
   }
   return 1;
@@ -274,6 +318,12 @@ int main(int argc, char **argv)
     failures++;
   }
   if (!expect_app_lease_independent(source)) {
+    failures++;
+  }
+  if (!expect_app_notification_synchronized(app_source)) {
+    failures++;
+  }
+  if (!expect_legacy_claim_before_generation(app_source)) {
     failures++;
   }
   if (!expect_app_claim_lifetime_split(app_source)) {

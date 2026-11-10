@@ -860,7 +860,9 @@ static void zz9k_lib_dispatcher_proc(void)
       ObtainSemaphore(&base->app_lock);
       zz9k_lib_app_service_locked(base);
       ReleaseSemaphore(&base->app_lock);
-      ObtainSemaphore(&base->lock);
+      if (!AttemptSemaphore(&base->lock)) {
+        break;
+      }
       if (base->dispatcher_stop_requested) {
         ReleaseSemaphore(&base->lock);
         signals = SIGBREAKF_CTRL_C;
