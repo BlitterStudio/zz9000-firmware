@@ -22,4 +22,4 @@ SVC_TEST_DEPS := $(FW)/zzapp_svc.h $(FW)/zzapp_gl_contract.h $(FW)/zzapp_as.h \
 
 $(BUILD)/g/svc_test: $(SVC_TEST_SOURCES) $(SVC_TEST_DEPS) | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_SVC_COUNTERS_TEST -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)

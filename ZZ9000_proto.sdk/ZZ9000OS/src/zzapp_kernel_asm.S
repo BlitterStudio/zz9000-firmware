@@ -101,16 +101,12 @@ core1_vector_undef:
 .equ SVC_FRAME_BYTES, 136
 
 core1_vector_svc:
-	/* User calls take the compact path.  Save the caller-clobbered state
-	 * temporarily on the exception stack before using it to form the frame
-	 * on the currently scheduled app's kernel stack. */
+	/* Keep only caller-clobbered state on the SVC stack while a compact
+	 * frame is built directly on the current app's kernel stack. */
 	stmdb sp!, {r0-r3, r12, lr}
 	mrs r0, spsr
 	push {r0}
-	sub sp, sp, #12
-	add r1, sp, #4
-	stmia r1, {sp, lr}^
-	ldr r0, [sp, #12]
+	ldr r0, [sp]
 	and r0, r0, #0x1f
 	cmp r0, #0x10
 	bne 3f
@@ -126,55 +122,71 @@ core1_vector_svc:
 	ldr r3, =zzapp_svc_entry_stamp
 	str r2, [r3, r1, lsl #2]
 	sub r0, r0, #SVC_FRAME_BYTES
-	str r0, [sp]
-	add r1, sp, #4
-	ldmia r1, {r2, r3}
-	stmia r0, {r2, r3}
-	/* SPSR into the frame: the fast exit returns to the app with it. */
-	ldr r1, [sp, #12]
+	/* Store the user-bank stack and link directly in the compact frame. */
+	stmia r0, {sp, lr}^
+	ldr r1, [sp]
 	str r1, [r0, #8]
 	add r1, r0, #12
-	ldr r2, [sp, #32]
-	/* API_SLOT(time_us) has no VFP arguments or result. It is the
-	 * empty-call timing path, so avoid spilling s0-s15 there. */
+	ldr r2, [sp, #20]
+	/* API_SLOT(should_stop) and API_SLOT(time_us) have no VFP arguments
+	 * or results, so avoid spilling s0-s15 on the empty-call paths. */
+	cmp r2, #2
+	beq 4f
 	cmp r2, #3
 	beq 4f
 	vstmia r1, {d0-d7}
 4:
 	add r1, r0, #76
-	ldr r2, [sp, #16]
+	ldr r2, [sp, #4]
 	str r2, [r1]
-	ldr r2, [sp, #20]
+	ldr r2, [sp, #8]
 	str r2, [r1, #4]
-	ldr r2, [sp, #24]
+	ldr r2, [sp, #12]
 	str r2, [r1, #8]
-	ldr r2, [sp, #28]
+	ldr r2, [sp, #16]
 	str r2, [r1, #12]
-	ldr r2, [sp, #32]
+	ldr r2, [sp, #20]
 	str r2, [r1, #48]
-	ldr r2, [sp, #36]
+	ldr r2, [sp, #24]
 	str r2, [r0, #128]
 	/* Release the shared SVC stack before the body can be preempted or
 	 * block: another thread's SVC entry must never find this thread's
 	 * scratch words on it.  Everything needed later is in the frame. */
-	add sp, sp, #40
+	add sp, sp, #28
 	cps #0x1f
 	mov sp, r0
 	cpsie i
 	bl zzapp_svc_dispatch
 	cpsid i
 	bl zzapp_kernel_svc_can_return
-	/* Stamp as late as possible on the fast path. Preserve the return
-	 * decision while the C helper accumulates the plain per-slot stores. */
-	push {r0, r1}	/* r1 keeps the stack 8-byte aligned for the call */
-	mrc p15, 0, r0, c9, c13, 0
-	ldr r1, =zzapp_svc_eret_stamp
+	/* Fold the final PMU stage into its counter.  This preserves the return
+	 * decision in r0 and avoids a C helper and an aligned call frame. */
 	ldr r2, =zzapp_svc_counter_slot
 	ldr r2, [r2]
-	str r0, [r1, r2, lsl #2]
-	bl zzapp_svc_counters_eret
-	pop {r0, r1}
-	/* SYS SP is the frame again (both calls are balanced). */
+	add r3, r2, r2, lsl #1
+	add r3, r3, r2, lsl #3
+	ldr r12, =zzapp_svc_counters
+	add r12, r12, r3, lsl #3
+	ldrb r3, [r12, #76]
+	cmp r3, #0
+	beq 5f
+	mrc p15, 0, r1, c9, c13, 0
+	ldr r3, [r12, #72]
+	sub r1, r1, r3
+	ldr r3, [r12, #60]
+	add r3, r3, #1
+	str r3, [r12, #60]
+	ldr r3, [r12, #48]
+	adds r3, r3, r1
+	str r3, [r12, #48]
+	ldr r3, [r12, #52]
+	adc r3, r3, #0
+	str r3, [r12, #52]
+	ldr r3, [r12, #56]
+	cmp r1, r3
+	strhi r1, [r12, #56]
+5:
+	/* SYS SP is the frame again. */
 	mov r2, sp
 	cps #0x13
 	cmp r0, #0
@@ -224,9 +236,9 @@ core1_vector_svc:
 	/* A privileged SVC remains the scheduler's voluntary switch.  Kernel
 	 * code issues it without declaring clobbers, so restore r0-r3 (used
 	 * above) before saving its frame, and release the scratch words. */
-	add r1, sp, #16
+	add r1, sp, #4
 	ldmia r1, {r0-r3}
-	add sp, sp, #40
+	add sp, sp, #28
 	save_frame
 	select_frame 2, 0
 	restore_frame 0

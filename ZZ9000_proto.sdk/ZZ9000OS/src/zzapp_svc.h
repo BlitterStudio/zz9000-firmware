@@ -48,6 +48,11 @@ typedef struct {
     uint8_t type_argument;
 } zzapp_svc_pointer_t;
 
+enum {
+    /* No pointers or shared firmware state: dispatch without the API lock. */
+    ZZAPP_SVC_FAST_NO_LOCK = 1U
+};
+
 typedef struct {
     /* AAPCS core words, including stack words after r0-r3. */
     uint8_t arguments;
@@ -55,6 +60,7 @@ typedef struct {
     uint8_t vfp_words;
     uint8_t result;
     uint8_t copy_out_on_positive;
+    uint8_t flags;
     zzapp_svc_pointer_t pointers[3];
 } zzapp_svc_descriptor_t;
 
@@ -109,10 +115,8 @@ void zzapp_svc_counters_reset(uint32_t slot);
 void zzapp_svc_counters_report(uint32_t slot);
 /* Veneer number of each slot's latest SVC, for diagnostics. */
 extern volatile uint32_t zzapp_svc_last_number[];
-/* Assembly-side PMCCNTR stamps for the entry and return stages. */
+/* Assembly-side PMCCNTR stamp for the entry stage. */
 extern volatile uint32_t zzapp_svc_entry_stamp[];
-extern volatile uint32_t zzapp_svc_eret_stamp[];
 extern volatile uint32_t zzapp_svc_counter_slot;
-void zzapp_svc_counters_eret(void);
 
 #endif

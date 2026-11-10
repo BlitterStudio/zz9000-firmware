@@ -77,8 +77,20 @@ static unsigned heap_range_calls;
 static unsigned file_list_next_calls;
 static unsigned heap_shrink_calls;
 static int svc_test_current_thread;
+static unsigned should_stop_calls;
 static unsigned time_us_calls;
 static uint32_t vertex2f_words[2];
+static uint32_t svc_counter_now;
+
+uint32_t zzapp_svc_test_pmccntr(void)
+{
+    svc_counter_now += 10U;
+    return svc_counter_now;
+}
+
+void zzapp_svc_counters_test_eret(uint32_t slot, uint32_t stamp);
+void zzapp_svc_counters_test_snapshot(uint32_t slot, uint32_t *total_calls,
+                                      uint32_t samples[4], uint32_t averages[4]);
 
 int zzapp_kernel_current_thread(void) { return svc_test_current_thread; }
 zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
@@ -250,6 +262,12 @@ static void mock_heap_range(void **base, uint32_t *bytes)
         *bytes = 0U;
 }
 
+static int mock_should_stop(void)
+{
+    ++should_stop_calls;
+    return 1;
+}
+
 static uint64_t mock_time_us(void)
 {
     ++time_us_calls;
@@ -302,6 +320,7 @@ static void setup_dispatch(void)
     api.gl_bind = mock_gl_bind;
     gl.size = sizeof(gl);
     api.file_seek = mock_file_seek;
+    api.should_stop = mock_should_stop;
     api.time_us = mock_time_us;
     api.heap_range = mock_heap_range;
     api.msg_poll = mock_msg_poll;
@@ -335,6 +354,7 @@ static void setup_dispatch(void)
     msg_poll_calls = 0U;
     file_seek_calls = 0U;
     heap_range_calls = 0U;
+    should_stop_calls = 0U;
     time_us_calls = 0U;
     vertex2f_words[0] = 0U;
     vertex2f_words[1] = 0U;
@@ -448,6 +468,18 @@ static void test_descriptor_shapes(void)
                                             sizeof(void *)));
     CHECK(gl->arguments == 0U);
     CHECK(gl->vfp_words == 2U);
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, should_stop) -
+                                               offsetof(zzapp_api, exit)) /
+                                              sizeof(void *)));
+    CHECK(api->flags == ZZAPP_SVC_FAST_NO_LOCK);
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, time_us) -
+                                               offsetof(zzapp_api, exit)) /
+                                              sizeof(void *)));
+    CHECK(api->flags == ZZAPP_SVC_FAST_NO_LOCK);
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, mem_info) -
+                                               offsetof(zzapp_api, exit)) /
+                                              sizeof(void *)));
+    CHECK(api->flags == 0U);
 }
 
 static void test_pointer_checks(void)
@@ -705,6 +737,62 @@ static void test_svc_number_comes_from_r12(void)
     CHECK(time_us_calls == 2U);
     teardown_dispatch();
 }
+static void test_fast_no_lock_calls(void)
+{
+    zzapp_svc_frame_t frame;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    svc_test_current_thread = 1;
+    dispatch(api_slot(offsetof(zzapp_api, should_stop)), &frame,
+             (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 1U);
+    CHECK(should_stop_calls == 1U);
+    CHECK(zzapp_svc_last_number[1] ==
+          api_slot(offsetof(zzapp_api, should_stop)));
+    svc_test_current_thread = 0;
+    teardown_dispatch();
+}
+static void test_sampled_counter_averages(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t total_calls = 0U;
+    uint32_t samples[4] = { 0U };
+    uint32_t averages[4] = { 0U };
+    uint32_t call;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    zzapp_svc_counters_reset(0U);
+    svc_counter_now = 0U;
+    for (call = 1U; call <= 128U; ++call) {
+        zzapp_svc_entry_stamp[0] = svc_counter_now;
+        dispatch(api_slot(offsetof(zzapp_api, should_stop)), &frame,
+                 (uint32_t[9]){ 0U });
+        if (call == 64U) {
+            svc_counter_now += 10U;
+            zzapp_svc_counters_test_eret(0U, svc_counter_now);
+        }
+    }
+    zzapp_svc_counters_test_snapshot(0U, &total_calls, samples, averages);
+    CHECK(total_calls == 128U);
+    CHECK(samples[0] == 2U);
+    CHECK(samples[1] == 2U);
+    CHECK(samples[2] == 2U);
+    CHECK(samples[3] == 1U);
+    CHECK(averages[0] == 10U);
+    CHECK(averages[1] == 10U);
+    CHECK(averages[2] == 10U);
+    CHECK(averages[3] == 10U);
+    teardown_dispatch();
+}
+
 
 static void test_svc_float_frame_arguments(void)
 {
@@ -762,9 +850,11 @@ int main(void)
     test_copy_out_and_pixel_argument_positions();
     test_descriptor_shapes();
     test_extended_pointer_checks();
+    test_sampled_counter_averages();
     test_svc_uses_core_aware_slot_resolver();
     test_gl_getters_copy_full_outputs();
     test_svc_number_comes_from_r12();
+    test_fast_no_lock_calls();
     test_svc_float_frame_arguments();
     test_rejected_pixel_store_does_not_change_validation();
     test_slot_aliases();

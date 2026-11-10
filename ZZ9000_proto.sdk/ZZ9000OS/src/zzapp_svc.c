@@ -42,7 +42,7 @@
 #define GL_TEXTURE0 0x84c0U
 #define GL_TEXTURE_UNITS 8U
 
-#ifndef ZZAPP_HOST_TEST
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_SVC_COUNTERS_TEST)
 #include <stdio.h>
 #endif
 
@@ -92,45 +92,75 @@ typedef struct {
     uint32_t handler_done_stamp;
     uint8_t handler_started;
     uint8_t reported;
+    uint32_t total_calls;
 } zzapp_svc_counters_t;
+_Static_assert(sizeof(zzapp_svc_cost_t) == 16U, "svc cost layout");
+_Static_assert(offsetof(zzapp_svc_counters_t, handler_to_eret) == 48U,
+               "svc h2e offset");
+_Static_assert(offsetof(zzapp_svc_counters_t, handler_done_stamp) == 72U,
+               "svc h2e stamp");
+_Static_assert(offsetof(zzapp_svc_counters_t, handler_started) == 76U,
+               "svc h2e started");
+_Static_assert(offsetof(zzapp_svc_counters_t, total_calls) == 80U,
+               "svc total calls");
+_Static_assert(sizeof(zzapp_svc_counters_t) == 88U, "svc counters layout");
 
-#ifndef ZZAPP_HOST_TEST
+
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_SVC_COUNTERS_TEST)
 volatile uint32_t zzapp_svc_entry_stamp[ZZAPP_AS_SLOT_COUNT];
-volatile uint32_t zzapp_svc_eret_stamp[ZZAPP_AS_SLOT_COUNT];
-static zzapp_svc_counters_t svc_counters[ZZAPP_AS_SLOT_COUNT];
+/* The vector folds the final stage into this layout without a C call. */
+zzapp_svc_counters_t zzapp_svc_counters[ZZAPP_AS_SLOT_COUNT];
 
 static inline uint32_t pmccntr(void)
 {
+#ifdef ZZAPP_SVC_COUNTERS_TEST
+    extern uint32_t zzapp_svc_test_pmccntr(void);
+
+    return zzapp_svc_test_pmccntr();
+#else
     uint32_t cycles;
 
     __asm__ __volatile__("mrc p15, 0, %0, c9, c13, 0" : "=r"(cycles));
     return cycles;
+#endif
 }
 
-static inline void counter_add(zzapp_svc_cost_t *cost, uint32_t cycles)
+static inline void counter_record(zzapp_svc_cost_t *cost, uint32_t cycles)
 {
-    cost->calls++;
     cost->sum += cycles;
     if (cycles > cost->max)
         cost->max = cycles;
 }
 
+static inline void counter_add(zzapp_svc_cost_t *cost, uint32_t cycles)
+{
+    cost->calls++;
+    counter_record(cost, cycles);
+}
+
 static inline void counters_dispatch(uint32_t slot)
 {
-    zzapp_svc_counters_t *counters = &svc_counters[slot];
-    uint32_t stamp = pmccntr();
+    zzapp_svc_counters_t *counters = &zzapp_svc_counters[slot];
+    uint32_t stamp;
 
+    counters->total_calls++;
+    counters->handler_started = 0U;
+    if ((counters->total_calls & 63U) != 0U)
+        return;
+    stamp = pmccntr();
     counter_add(&counters->entry_to_dispatch,
                 stamp - zzapp_svc_entry_stamp[slot]);
     counters->dispatch_stamp = stamp;
-    counters->handler_started = 0U;
 }
 
 static inline void counters_handler_start(uint32_t slot)
 {
-    zzapp_svc_counters_t *counters = &svc_counters[slot];
-    uint32_t stamp = pmccntr();
+    zzapp_svc_counters_t *counters = &zzapp_svc_counters[slot];
+    uint32_t stamp;
 
+    if ((counters->total_calls & 63U) != 0U)
+        return;
+    stamp = pmccntr();
     counter_add(&counters->dispatch_to_handler,
                 stamp - counters->dispatch_stamp);
     counters->handler_stamp = stamp;
@@ -139,37 +169,27 @@ static inline void counters_handler_start(uint32_t slot)
 
 static inline void counters_handler_end(uint32_t slot)
 {
-    zzapp_svc_counters_t *counters = &svc_counters[slot];
-    uint32_t stamp = pmccntr();
+    zzapp_svc_counters_t *counters = &zzapp_svc_counters[slot];
+    uint32_t stamp;
 
+    if ((counters->total_calls & 63U) != 0U)
+        return;
+    stamp = pmccntr();
     counter_add(&counters->handler, stamp - counters->handler_stamp);
     counters->handler_done_stamp = stamp;
-}
-
-void zzapp_svc_counters_eret(void)
-{
-    uint32_t slot = zzapp_svc_counter_slot;
-    zzapp_svc_counters_t *counters;
-
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return;
-    counters = &svc_counters[slot];
-    if (counters->handler_started)
-        counter_add(&counters->handler_to_eret,
-                    zzapp_svc_eret_stamp[slot] -
-                    counters->handler_done_stamp);
 }
 
 void zzapp_svc_counters_reset(uint32_t slot)
 {
     if (slot >= ZZAPP_AS_SLOT_COUNT)
         return;
-    memset(&svc_counters[slot], 0, sizeof(svc_counters[slot]));
+    memset(&zzapp_svc_counters[slot], 0, sizeof(zzapp_svc_counters[slot]));
 }
 
-static uint32_t counter_average(const zzapp_svc_cost_t *cost)
+
+static uint32_t counter_average(const zzapp_svc_cost_t *cost, uint32_t samples)
 {
-    return cost->calls ? (uint32_t)(cost->sum / cost->calls) : 0U;
+    return samples ? (uint32_t)(cost->sum / samples) : 0U;
 }
 
 void zzapp_svc_counters_report(uint32_t slot)
@@ -178,27 +198,66 @@ void zzapp_svc_counters_report(uint32_t slot)
 
     if (slot >= ZZAPP_AS_SLOT_COUNT)
         return;
-    counters = &svc_counters[slot];
-    if (counters->reported || !counters->entry_to_dispatch.calls)
+    counters = &zzapp_svc_counters[slot];
+    if (counters->reported || !counters->total_calls)
         return;
     counters->reported = 1U;
-    printf("[app] svc slot=%lu calls=%lu e2d=%lu/%lu d2h=%lu/%lu h=%lu/%lu h2e=%lu/%lu\r\n",
+    printf("[app] svc slot=%lu calls=%lu samples=%lu/%lu/%lu/%lu e2d=%lu/%lu d2h=%lu/%lu h=%lu/%lu h2e=%lu/%lu\r\n",
            (unsigned long)slot,
+           (unsigned long)counters->total_calls,
            (unsigned long)counters->entry_to_dispatch.calls,
-           (unsigned long)counter_average(&counters->entry_to_dispatch),
+           (unsigned long)counters->dispatch_to_handler.calls,
+           (unsigned long)counters->handler.calls,
+           (unsigned long)counters->handler_to_eret.calls,
+           (unsigned long)counter_average(&counters->entry_to_dispatch,
+                                          counters->entry_to_dispatch.calls),
            (unsigned long)counters->entry_to_dispatch.max,
-           (unsigned long)counter_average(&counters->dispatch_to_handler),
+           (unsigned long)counter_average(&counters->dispatch_to_handler,
+                                          counters->dispatch_to_handler.calls),
            (unsigned long)counters->dispatch_to_handler.max,
-           (unsigned long)counter_average(&counters->handler),
+           (unsigned long)counter_average(&counters->handler,
+                                          counters->handler.calls),
            (unsigned long)counters->handler.max,
-           (unsigned long)counter_average(&counters->handler_to_eret),
+           (unsigned long)counter_average(&counters->handler_to_eret,
+                                          counters->handler_to_eret.calls),
            (unsigned long)counters->handler_to_eret.max);
 }
+#ifdef ZZAPP_SVC_COUNTERS_TEST
+void zzapp_svc_counters_test_eret(uint32_t slot, uint32_t stamp)
+{
+    zzapp_svc_counters_t *counters;
+
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        return;
+    counters = &zzapp_svc_counters[slot];
+    if (counters->handler_started)
+        counter_add(&counters->handler_to_eret,
+                    stamp - counters->handler_done_stamp);
+}
+
+void zzapp_svc_counters_test_snapshot(uint32_t slot, uint32_t *total_calls,
+                                      uint32_t samples[4], uint32_t averages[4])
+{
+    zzapp_svc_counters_t *counters;
+    zzapp_svc_cost_t *costs;
+    uint32_t i;
+
+    if (slot >= ZZAPP_AS_SLOT_COUNT || !total_calls || !samples || !averages)
+        return;
+    counters = &zzapp_svc_counters[slot];
+    costs = &counters->entry_to_dispatch;
+    *total_calls = counters->total_calls;
+    for (i = 0U; i < 4U; ++i) {
+        samples[i] = costs[i].calls;
+        averages[i] = counter_average(&costs[i], costs[i].calls);
+    }
+}
+#endif
+
 #else
 static inline void counters_dispatch(uint32_t slot) { (void)slot; }
 static inline void counters_handler_start(uint32_t slot) { (void)slot; }
 static inline void counters_handler_end(uint32_t slot) { (void)slot; }
-void zzapp_svc_counters_eret(void) {}
 void zzapp_svc_counters_reset(uint32_t slot) { (void)slot; }
 void zzapp_svc_counters_report(uint32_t slot) { (void)slot; }
 #endif
@@ -232,9 +291,11 @@ static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 
 #define P(a, d, l, n, e, c) { a, d, l, n, e, c, 0U, 0U, 0U }
 #define N P(0U, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_FIXED, 0U, 0U, 0U)
-#define D(a, r, p0, p1, p2) { a, 0U, r, 0U, { p0, p1, p2 } }
-#define DP(a, r, p0, p1, p2) { a, 0U, r, 1U, { p0, p1, p2 } }
-#define DF(a, v, r, p0, p1, p2) { a, v, r, 0U, { p0, p1, p2 } }
+#define D(a, r, p0, p1, p2) { a, 0U, r, 0U, 0U, { p0, p1, p2 } }
+#define DP(a, r, p0, p1, p2) { a, 0U, r, 1U, 0U, { p0, p1, p2 } }
+#define DF(a, v, r, p0, p1, p2) { a, v, r, 0U, 0U, { p0, p1, p2 } }
+#define DL(a, r, p0, p1, p2) { a, 0U, r, 0U, ZZAPP_SVC_FAST_NO_LOCK, \
+                                { p0, p1, p2 } }
 #define IN_FIXED(a, n, c) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c)
 #define OUT_FIXED(a, n, c) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c)
 #define OUT_OPTIONAL(a, n, c) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c, 1U, 0U, 0U }
@@ -254,8 +315,8 @@ static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 static const zzapp_svc_descriptor_t api_descriptors[API_COUNT] = {
     [API_SLOT(exit)] = D(1, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [API_SLOT(yield)] = D(0, ZZAPP_SVC_RETURN_VOID, N, N, N),
-    [API_SLOT(should_stop)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(time_us)] = D(0, ZZAPP_SVC_RETURN_U64, N, N, N),
+    [API_SLOT(should_stop)] = DL(0, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(time_us)] = DL(0, ZZAPP_SVC_RETURN_U64, N, N, N),
     [API_SLOT(sleep_us)] = D(1, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [API_SLOT(alloc)] = D(3, ZZAPP_SVC_RETURN_POINTER, N, N, N),
     [API_SLOT(free)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 1U, 0U), N, N),
@@ -1084,36 +1145,74 @@ static void zzapp_svc_dispatch_slow(const zzapp_api *api, zzapp_proc_t *proc,
         frame->r[0] = result;
 }
 
+static int dispatch_fast_no_lock(const zzapp_api *api, uint32_t number,
+                                 zzapp_svc_frame_t *frame)
+{
+    if (number == API_SLOT(should_stop)) {
+        if (!api->should_stop)
+            return ZZ_ENOSYS;
+        frame->r[0] = (uint32_t)api->should_stop();
+        return ZZ_OK;
+    }
+    if (number == API_SLOT(time_us)) {
+        uint64_t value;
+
+        if (!api->time_us)
+            return ZZ_ENOSYS;
+        value = api->time_us();
+        frame->r[0] = (uint32_t)value;
+        frame->r[1] = (uint32_t)(value >> 32);
+        return ZZ_OK;
+    }
+    return ZZ_ENOSYS;
+}
+
 void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
 {
     const zzapp_api *api;
     zzapp_proc_t *proc;
+    const zzapp_svc_descriptor_t *descriptor;
     uint32_t number;
     uint32_t slot;
+    int status;
+    int thread;
 
     if (!frame)
         return;
+    number = frame->r[12];
+    if (number < API_COUNT) {
+        descriptor = &api_descriptors[number];
+        if (descriptor->flags & ZZAPP_SVC_FAST_NO_LOCK) {
+            thread = zzapp_kernel_current_thread();
+            slot = thread >= 0 && thread < (int)ZZAPP_AS_SLOT_COUNT ?
+                   (uint32_t)thread : zzapp_services_current_slot();
+            if (slot >= ZZAPP_AS_SLOT_COUNT)
+                slot = 0U;
+            counters_dispatch(slot);
+            api = zzapp_api_table();
+            if (!api) {
+                frame->r[0] = (uint32_t)ZZ_EFAULT;
+                return;
+            }
+            zzapp_svc_last_number[slot] = number;
+            counters_handler_start(slot);
+            status = dispatch_fast_no_lock(api, number, frame);
+            counters_handler_end(slot);
+            if (status != ZZ_OK)
+                frame->r[0] = (uint32_t)ZZ_ENOSYS;
+            return;
+        }
+    }
     slot = zzapp_services_current_slot();
     if (slot >= ZZAPP_AS_SLOT_COUNT)
         slot = 0U;
     counters_dispatch(slot);
-    proc = zzapp_proc_slot(slot);
     api = zzapp_api_table();
+    proc = zzapp_proc_slot(slot);
     if (!proc || !api) {
         frame->r[0] = (uint32_t)ZZ_EFAULT;
         return;
     }
-    number = frame->r[12];
     zzapp_svc_last_number[slot] = number;
-    if (number == API_SLOT(time_us)) {
-        uint64_t value;
-
-        counters_handler_start(slot);
-        value = api->time_us();
-        counters_handler_end(slot);
-        frame->r[0] = (uint32_t)value;
-        frame->r[1] = (uint32_t)(value >> 32);
-        return;
-    }
     zzapp_svc_dispatch_slow(api, proc, slot, number, frame);
 }

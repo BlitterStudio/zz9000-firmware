@@ -17,6 +17,7 @@ ZZAPP_NOTE(0, 0)
 #define SVCBENCH_SAMPLES (SVCBENCH_CALLS / SVCBENCH_CALLS_PER_SAMPLE)
 #define CPU_CYCLES_PER_US 667u
 
+static uint32_t should_stop_samples[SVCBENCH_SAMPLES];
 static uint32_t time_us_samples[SVCBENCH_SAMPLES];
 static uint32_t mem_info_samples[SVCBENCH_SAMPLES];
 
@@ -42,6 +43,20 @@ static void report(const char *call, uint32_t samples[SVCBENCH_SAMPLES])
     printf("svcbench: %s median %lu p99 %lu cycles\n", call,
            (unsigned long)samples[SVCBENCH_SAMPLES / 2u],
            (unsigned long)samples[p99_index]);
+}
+
+static void benchmark_should_stop(void)
+{
+    uint32_t sample;
+
+    for (sample = 0u; sample < SVCBENCH_SAMPLES; sample++) {
+        uint64_t begin = zz_time_us();
+        uint32_t call;
+
+        for (call = 0u; call < SVCBENCH_CALLS_PER_SAMPLE; call++)
+            (void)zz_should_stop();
+        should_stop_samples[sample] = timer_cycles(zz_time_us() - begin);
+    }
 }
 
 static void benchmark_time_us(void)
@@ -86,6 +101,8 @@ int zz_main(int argc, char **argv)
     (void)argv;
     printf("svcbench: zz_time_us batches; 667 MHz timer-derived cycle estimates "
            "(PMU unavailable in user mode)\n");
+    benchmark_should_stop();
+    report("should_stop", should_stop_samples);
     benchmark_time_us();
     report("time_us", time_us_samples);
     rc = benchmark_mem_info();
