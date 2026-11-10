@@ -371,13 +371,49 @@ int main(void)
 	assert(capture_framebuffer[capture_scanout_word] == 0U);
 	assert(dma_buffer_address == capture_scanout);
 	assert(formatter_ops[MNTVF_OP_DPMS] == 0x5aU);
+	/* While the Zorro FSM holds reset it reports capture enabled, but the
+	 * backing is not armed yet. Those vblanks must leave the VDMA on the
+	 * cleared capture origin instead of falling back to the RTG scanout
+	 * at the framebuffer base, and so must the first vblank after the
+	 * backing is armed again, before detection is stable. */
+	clear_measurements();
+	videocap_zstate = (1U << 21) | (1U << 23);
+	isr_video(NULL);
+	isr_video(NULL);
+	assert(dma_configs == 0 && dma_starts == 0);
+	assert(dma_buffer_address == capture_scanout);
+	assert(video_videocap_backing_reserve());
+	assert(video_videocap_backing_arm());
+	isr_video(NULL);
+	assert(dma_configs == 0 && dma_starts == 0);
+	assert(dma_buffer_address == capture_scanout);
+	videocap_zstate = 0;
+	/* A reset taken while RTG owns the output blanks the frame the VDMA
+	 * keeps scanning, exactly that frame, and never the reserved capture
+	 * backing. */
 	assert(video_videocap_backing_reserve());
 	capture_scanout_word = (vs.videocap_backing_address -
 		VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA - FRAMEBUFFER_ADDRESS) /
 		sizeof(capture_framebuffer[0]);
 	capture_framebuffer[capture_scanout_word] = 0xa5a5a5a5U;
-	vs.videocap_enabled_old = 0;
-	video_reset();
+	{
+		const uint32_t rtg_offset = 0x00800000U;
+		const uint32_t rtg_first = rtg_offset / sizeof(capture_framebuffer[0]);
+		const uint32_t rtg_end = rtg_first + 1280U * 720U;
+
+		vs.framebuffer_pan_width = 0;
+		assert(init_vdma(1280, 720, 1,
+			(uint32_t)(uintptr_t)capture_framebuffer + rtg_offset) ==
+			XST_SUCCESS);
+		capture_framebuffer[rtg_first] = 0xa5a5a5a5U;
+		capture_framebuffer[rtg_end - 1U] = 0xa5a5a5a5U;
+		capture_framebuffer[rtg_end] = 0xa5a5a5a5U;
+		vs.videocap_enabled_old = 0;
+		video_reset();
+		assert(capture_framebuffer[rtg_first] == 0U);
+		assert(capture_framebuffer[rtg_end - 1U] == 0U);
+		assert(capture_framebuffer[rtg_end] == 0xa5a5a5a5U);
+	}
 	assert(capture_framebuffer[capture_scanout_word] == 0xa5a5a5a5U);
 
 	/* A PAL/NTSC transition keeps scanning the old PAL origin while
