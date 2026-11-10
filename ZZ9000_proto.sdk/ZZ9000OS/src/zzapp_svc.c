@@ -893,6 +893,10 @@ static int dispatch_gl(uint32_t slot, const zzapp_arm_frame_t *frame,
     return ZZ_OK;
 }
 
+/* Veneer number of each slot's latest SVC (GL calls are 128 and up), for
+ * the stop report on the UART. */
+volatile uint32_t zzapp_svc_last_number[ZZAPP_AS_SLOT_COUNT];
+
 void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
 {
     const zzapp_api *api;
@@ -914,6 +918,7 @@ void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
     instruction = *(const uint32_t *)(uintptr_t)(frame->exception_lr - 4U);
     if ((instruction & 0xff000000U) != 0xef000000U) { frame->r[0] = (uint32_t)ZZ_EINVAL; return; }
     number = instruction & 0x00ffffffU;
+    zzapp_svc_last_number[slot] = number;
     gl = number >= ZZAPP_SVC_GL_FIRST;
     number -= gl ? ZZAPP_SVC_GL_FIRST : 0U;
     descriptor = gl ? zzapp_svc_gl_descriptor(number) : zzapp_svc_api_descriptor(number);

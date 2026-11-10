@@ -84,5 +84,7 @@ int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address,
 
 /* Called by the SVC vector after it has saved the user exception frame. */
 void zzapp_svc_dispatch(zzapp_arm_frame_t *frame);
+/* Veneer number of each slot's latest SVC, for diagnostics. */
+extern volatile uint32_t zzapp_svc_last_number[];
 
 #endif

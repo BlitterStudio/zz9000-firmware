@@ -637,6 +637,21 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
                (unsigned long)w[0], (unsigned long)w[1], (unsigned long)w[2],
                (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5],
                (unsigned long)sp);
+        /* Which call or wait the app was in when it was stopped: the
+         * watchdog paths pass no registers, so this is the only trace. */
+        printf("[app] stop slot=%lu fault=%lu reason=%lu pc=%08lx lr=%08lx "
+               "far=%08lx fsr=%08lx thread=%lu wake=%lu in_api=%lu "
+               "svc=%lu parked=%lu wait=%d\r\n",
+               (unsigned long)slot, (unsigned long)fault,
+               (unsigned long)terminal_reason(host, fault),
+               (unsigned long)pc, (unsigned long)lr, (unsigned long)far,
+               (unsigned long)fsr,
+               (unsigned long)g_kernel.threads[slot].state,
+               (unsigned long)g_kernel.threads[slot].wake_reason,
+               (unsigned long)coh->in_api,
+               (unsigned long)zzapp_svc_last_number[slot],
+               (unsigned long)g_api_parked[slot],
+               zzapp_services_wait_registered(slot));
     }
 #endif
     publish_state(ZZAPP_ST_FAULTED);
