@@ -180,7 +180,8 @@ static uint8_t usb_proxy_maint_data_snapshot[ZZUSB_MAINT_DATA_MAX]
 enum usb_proxy_deferred_command {
 	USB_PROXY_DEFERRED_NONE,
 	USB_PROXY_DEFERRED_RESET_PORT,
-	USB_PROXY_DEFERRED_SET_ADDRESS
+	USB_PROXY_DEFERRED_SET_ADDRESS,
+	USB_PROXY_DEFERRED_ASYNC_XFER
 };
 
 static enum usb_proxy_deferred_command usb_proxy_deferred_command;
@@ -207,6 +208,34 @@ static int usb_proxy_request_matches(
          be32(&shared_ext->controller_epoch) != request_epoch))
         return 0;
     return 1;
+}
+
+/* A reply length beyond the aperture becomes OVERRUN with no payload. */
+static uint16_t usb_proxy_bound_reply(uint16_t result, int is_v2)
+{
+	if (be32(&usb_proxy_cmd_snapshot.actual_length) >
+	    (is_v2 ? ZZUSB_V2_DATA_MAX : ZZUSB_MAX_XFER)) {
+		put_be32(&usb_proxy_cmd_snapshot.actual_length, 0);
+		return ZZUSB_STATUS_OVERRUN;
+	}
+	return result;
+}
+
+/* Copies a completed IN payload from the snapshot to the shared aperture. */
+static void usb_proxy_publish_reply_payload(uint16_t result)
+{
+	uint8_t *proxy_data =
+		(uint8_t *)USB_BLOCK_STORAGE_ADDRESS + ZZUSB_DATA_OFFSET;
+	uint32_t actual_length = be32(&usb_proxy_cmd_snapshot.actual_length);
+	uint16_t command = be16(&usb_proxy_cmd_snapshot.cmd);
+
+	if (result == ZZUSB_STATUS_OK && actual_length != 0 &&
+	    (be16(&usb_proxy_cmd_snapshot.direction) == 0x80 ||
+	     command == ZZUSB_CMD_ENUMERATE ||
+	     command == ZZUSB_CMD_ISO_REAP)) {
+		memcpy(proxy_data, usb_proxy_data_snapshot, actual_length);
+		Xil_DCacheFlushRange((u32)proxy_data, actual_length);
+	}
 }
 
 static void usb_proxy_poll_deferred_command(void)
@@ -242,6 +271,22 @@ static void usb_proxy_poll_deferred_command(void)
 		result = usb_proxy_poll_set_address_recovery(&usb_proxy_cmd_snapshot,
 			&usb_proxy_ext_snapshot, usb_proxy_deferred_is_v2);
 		break;
+	case USB_PROXY_DEFERRED_ASYNC_XFER:
+		if (!usb_proxy_async_xfer_pending()) {
+			usb_proxy_deferred_command = USB_PROXY_DEFERRED_NONE;
+			return;
+		}
+		result = usb_proxy_poll_async_xfer(&usb_proxy_cmd_snapshot,
+			&usb_proxy_ext_snapshot, usb_proxy_deferred_is_v2);
+		if (result == ZZUSB_STATUS_PENDING) {
+			/* A successful SET_ADDRESS continues as its recovery. */
+			if (usb_proxy_set_address_recovery_pending())
+				usb_proxy_deferred_command =
+					USB_PROXY_DEFERRED_SET_ADDRESS;
+			return;
+		}
+		result = usb_proxy_bound_reply(result, usb_proxy_deferred_is_v2);
+		break;
 	default:
 		return;
 	}
@@ -254,6 +299,7 @@ static void usb_proxy_poll_deferred_command(void)
 		&usb_proxy_cmd_snapshot, usb_proxy_deferred_request_id,
 		usb_proxy_deferred_request_epoch, usb_proxy_deferred_is_v2);
 	if (request_matches) {
+		usb_proxy_publish_reply_payload(result);
 		put_be16(&usb_proxy_cmd_snapshot.status, result);
 		memcpy((void *)proxy_cmd, &usb_proxy_cmd_snapshot,
 		       sizeof(usb_proxy_cmd_snapshot));
@@ -2626,8 +2672,12 @@ int main() {
 
 			if (usb_proxy_deferred_command != USB_PROXY_DEFERRED_NONE)
 				usb_proxy_poll_deferred_command();
-			if (!usb_proxy_pending &&
-			    usb_proxy_deferred_command == USB_PROXY_DEFERRED_NONE)
+			/* Sideband ISO/QUERY_CAPS commands also run while a control or
+			 * bulk transfer is in flight, as realtime audio needs them. */
+			if ((!usb_proxy_pending &&
+			     usb_proxy_deferred_command == USB_PROXY_DEFERRED_NONE) ||
+			    usb_proxy_deferred_command ==
+				USB_PROXY_DEFERRED_ASYNC_XFER)
 				usb_proxy_poll_maintenance();
 			if (usb_proxy_pending &&
 			    usb_proxy_deferred_command == USB_PROXY_DEFERRED_NONE) {
@@ -2640,7 +2690,6 @@ int main() {
 					(uint8_t *)USB_BLOCK_STORAGE_ADDRESS + ZZUSB_DATA_OFFSET;
 				u32 proxy_buf_size = ZZUSB_APERTURE_SIZE;
 				uint32_t data_length;
-				uint32_t actual_length;
 				uint32_t request_id;
 				uint32_t request_epoch;
 				uint16_t command;
@@ -2688,13 +2737,7 @@ int main() {
 						&usb_proxy_cmd_snapshot, &usb_proxy_ext_snapshot,
 						usb_proxy_data_snapshot, is_v2);
 				}
-				actual_length = be32(&usb_proxy_cmd_snapshot.actual_length);
-				if (actual_length > (is_v2 ? ZZUSB_V2_DATA_MAX :
-				                     ZZUSB_MAX_XFER)) {
-					actual_length = 0;
-					put_be32(&usb_proxy_cmd_snapshot.actual_length, 0);
-					result = ZZUSB_STATUS_OVERRUN;
-				}
+				result = usb_proxy_bound_reply(result, is_v2);
 
 				Xil_DCacheInvalidateRange((u32)proxy_cmd,
 				                         ZZUSB_V2_HEADER_SIZE);
@@ -2708,23 +2751,14 @@ int main() {
 					    result == ZZUSB_STATUS_OK)
 						usb_proxy_publish_diagnostics(
 							(volatile void *)USB_BLOCK_STORAGE_ADDRESS, 0U);
-					if (result == ZZUSB_STATUS_OK && actual_length != 0 &&
-					    (direction == 0x80 ||
-					     command == ZZUSB_CMD_ENUMERATE ||
-					     command == ZZUSB_CMD_ISO_REAP)) {
-						memcpy(proxy_data, usb_proxy_data_snapshot,
-						       actual_length);
-						Xil_DCacheFlushRange((u32)proxy_data,
-						                     actual_length);
-					}
+					usb_proxy_publish_reply_payload(result);
 					if (result == ZZUSB_STATUS_PENDING) {
-						if (command == ZZUSB_CMD_RESET_PORT)
+						if (usb_proxy_async_xfer_pending())
+							usb_proxy_deferred_command =
+								USB_PROXY_DEFERRED_ASYNC_XFER;
+						else if (command == ZZUSB_CMD_RESET_PORT)
 							usb_proxy_deferred_command =
 								USB_PROXY_DEFERRED_RESET_PORT;
-						else if (command == ZZUSB_CMD_CONTROL_XFER &&
-							 usb_proxy_set_address_recovery_pending())
-							usb_proxy_deferred_command =
-								USB_PROXY_DEFERRED_SET_ADDRESS;
 						usb_proxy_deferred_is_v2 = is_v2;
 						usb_proxy_deferred_request_id = request_id;
 						usb_proxy_deferred_request_epoch = request_epoch;

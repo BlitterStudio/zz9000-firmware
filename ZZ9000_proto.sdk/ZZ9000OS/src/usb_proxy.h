@@ -375,6 +375,12 @@ int usb_proxy_set_address_recovery_pending(void);
 uint16_t usb_proxy_poll_set_address_recovery(
     volatile struct ZZUSBCommand *cmd,
     volatile struct ZZUSBProtocolExtension *ext, int is_v2);
+/* CONTROL, BULK and CLEAR_STALL return PENDING while their transfer runs;
+ * the main loop polls it until the command completes. */
+int usb_proxy_async_xfer_pending(void);
+uint16_t usb_proxy_poll_async_xfer(volatile struct ZZUSBCommand *cmd,
+                                   volatile struct ZZUSBProtocolExtension *ext,
+                                   int is_v2);
 uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
                                   volatile struct ZZUSBProtocolExtension *ext,
                                   uint8_t *data_buf, int is_v2);

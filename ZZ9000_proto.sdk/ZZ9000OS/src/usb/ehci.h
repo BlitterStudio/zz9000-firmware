@@ -343,9 +343,14 @@ int ehci_shutdown_phy(struct udevice *dev, struct phy *phy);
 
 int ehci_submit_async(struct usb_device *dev, unsigned long pipe,
 		      void *buffer, int length, struct devrequest *req);
-int ehci_submit_async_timeout(struct usb_device *dev, unsigned long pipe,
+/* Start a control or bulk transfer and return; ehci_submit_async_poll()
+ * returns 1 with the ehci_submit_async() result once it has finished. */
+int ehci_submit_async_begin(struct usb_device *dev, unsigned long pipe,
 		      void *buffer, int length, struct devrequest *req,
 		      unsigned long timeout_ms, int idle_bulk_poll);
+int ehci_submit_async_poll(int *result);
+/* Retire an in-flight transfer now; it finishes as timed out. */
+void ehci_submit_async_cancel(void);
 int ehci_controller_needs_recovery(void);
 int ehci_async_schedule_active(struct ehci_ctrl *ctrl);
 int ehci_controller_recover(void);
