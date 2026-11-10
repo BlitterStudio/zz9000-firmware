@@ -39,6 +39,7 @@
 void Xil_AssertNonVoid() {}
 
 #include "memorymap.h"
+#include "cpu_tls.h"
 #include "mntzorro.h"
 #include "video.h"
 #include "gamma.h"
@@ -1018,6 +1019,10 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 int main() {
 	init_platform();
+	/* The BSP leaves TPIDRURO at 0, which would put thread-local
+	 * variables at physical address 0x8. */
+	if (cpu_tls_init(0u) != 0)
+		printf("[boot] TLS image larger than its block\r\n");
 	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_DATA_ABORT_INT,
 		(Xil_ExceptionHandler)arm_exception_handler_id_data_abort, NULL);
 	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_PREFETCH_ABORT_INT,

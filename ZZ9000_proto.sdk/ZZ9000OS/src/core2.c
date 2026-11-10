@@ -18,6 +18,7 @@
 #include "zzm_loader.h"
 #include "zzm_runtime.h"
 #include "zzapp_runtime.h"
+#include "cpu_tls.h"
 #include "zzapp_proto.h"
 #include "interrupt.h"
 #include "zzapp_services.h"
@@ -578,6 +579,12 @@ void core1_loop() {
 	/* enable L2 Prefetch hint */
 	asm("mcr	p15,0,r0,c1,c0,1");
 	/* write Auxiliary Control Register */
+
+	/* Core 1 skips the BSP boot code, so TPIDRURO still holds its unknown
+	 * reset value. Point it at core 1's own TLS block before any C code
+	 * that uses thread-local variables (libjpeg-turbo) can run. */
+	if (cpu_tls_init(1u) != 0)
+		C1_TRACE("[c1] TLS image larger than its block\r\n");
 
 	// SP was established by the core1_entry reset stub (SDK_CORE1_STACK_TOP),
 	// before any C ran -- do NOT reset it here.
