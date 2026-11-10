@@ -600,6 +600,8 @@ int zzapp_as_map_image(zzapp_as_t *as, uint32_t virtual_base,
 		attrs = (DDR_PAGE & ~L2_AP_MASK) | L2_AP_USER_RO | L2_NG | L2_XN;
 	else if (permissions == ZZAPP_AS_IMAGE_RW)
 		attrs = (DDR_PAGE & ~L2_AP_MASK) | L2_AP_USER_RW | L2_NG | L2_XN;
+	else if (permissions == ZZAPP_AS_IMAGE_RWX)
+		attrs = (DDR_PAGE & ~L2_AP_MASK) | L2_AP_USER_RW | L2_NG;
 	else
 		return -1;
 	sdk_smp_lock_acquire(&as_lock);

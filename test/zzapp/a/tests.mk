@@ -3,7 +3,7 @@ A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
 ZZAPP_TESTS += $(BUILD)/a/loader_smoke $(BUILD)/a/runtime_host_test \
 	$(BUILD)/a/loader_elf_test $(BUILD)/a/display_fallback_test \
 	$(BUILD)/a/core_api_test $(BUILD)/a/map_unmap_test \
-	$(BUILD)/a/svc_return_test
+	$(BUILD)/a/svc_return_test $(BUILD)/a/page_flags_test
 
 $(BUILD)/a/zzapp_loader.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
@@ -42,6 +42,10 @@ $(BUILD)/a/map_unmap_test: a/map_unmap_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
 
 $(BUILD)/a/svc_return_test: a/svc_return_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
+
+$(BUILD)/a/page_flags_test: a/page_flags_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
 

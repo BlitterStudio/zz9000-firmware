@@ -26,6 +26,8 @@
 #define ZZAPP_AS_IMAGE_RX 1U
 #define ZZAPP_AS_IMAGE_RO 2U
 #define ZZAPP_AS_IMAGE_RW 3U
+/* A page shared by a code segment and a data segment. */
+#define ZZAPP_AS_IMAGE_RWX 4U
 
 #define ZZAPP_AS_ALIAS_RO 1U
 #define ZZAPP_AS_ALIAS_RW 2U

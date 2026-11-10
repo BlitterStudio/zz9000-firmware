@@ -24,6 +24,7 @@
 #define PT_DYNAMIC             2u
 #define PF_X                   1u
 #define PF_W                   2u
+#define PF_R                   4u
 #define SHT_RELA               4u
 #define SHT_NOTE               7u
 #define SHT_REL                9u
@@ -129,6 +130,27 @@ static int range_ok(uint32_t off, uint32_t len, uint32_t limit)
     return len <= limit && off <= limit - len;
 }
 
+/* PF_* flags for the image page that starts at `page`: the union of every
+ * PT_LOAD whose memory touches it. The SDK linker script packs .data right
+ * after .text, so one page often holds code and data. Mapping each segment
+ * with only its own flags let the later segment win, which made shared
+ * code pages non-executable or shared data pages read-only. */
+uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
+                                 uint32_t page)
+{
+    uint32_t flags = 0;
+    uint32_t i;
+
+    for (i = 0; i < nseg; i++) {
+        uint32_t start = segs[i][0];
+        uint32_t end = start + segs[i][1];
+
+        if (segs[i][1] && start < page + 0x1000u && end > page)
+            flags |= segs[i][2];
+    }
+    return flags;
+}
+
 #ifndef ZZAPP_HOST_TEST
 #include "card_pool.h"
 #include "memorymap.h"
@@ -226,12 +248,6 @@ static int map_loaded_image(const struct load_image *img)
         goto failed;
     for (i = 0; i < img->nseg; i++) {
         uint32_t copied = 0;
-        uint32_t map_start = img->seg[i].vaddr & ~0xfffU;
-        uint32_t map_end = (img->seg[i].vaddr + img->seg[i].memsz + 0xfffU) &
-                           ~0xfffU;
-        uint32_t permissions = (img->seg[i].flags & PF_X) ? ZZAPP_AS_IMAGE_RX :
-                               (img->seg[i].flags & PF_W) ? ZZAPP_AS_IMAGE_RW :
-                               ZZAPP_AS_IMAGE_RO;
 
         while (copied < img->seg[i].filesz) {
             uint32_t va = img->seg[i].vaddr + copied;
@@ -255,24 +271,51 @@ static int map_loaded_image(const struct load_image *img)
                    0, count);
             copied += count;
         }
-        while (map_start < map_end) {
-            uint32_t in_frame = map_start & (ZZAPP_MEM_FRAME_BYTES - 1u);
-            uint32_t count = map_end - map_start;
+    }
+    {
+        uint32_t segs[ZZAPP_MAX_LOAD][3];
+        uint32_t image_pages_end = (img->image_end + 0xfffU) & ~0xfffU;
+        uint32_t run_start = 0;
+        uint32_t run_flags = 0;
+        uint32_t page;
 
-            if (count > ZZAPP_MEM_FRAME_BYTES - in_frame)
-                count = ZZAPP_MEM_FRAME_BYTES - in_frame;
-            if (zzapp_as_map_image(&proc->as, ZZAPP_AS_WINDOW_BASE + map_start,
-                                   proc->image_frames[map_start >> 20] + in_frame,
-                                   count, permissions))
-                goto failed;
-            Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)
-                                   (proc->image_frames[map_start >> 20] + in_frame),
-                                   count);
-            if (img->seg[i].flags & PF_X)
-                Xil_ICacheInvalidateRange((INTPTR)(uintptr_t)
-                                          (proc->image_frames[map_start >> 20] +
-                                           in_frame), count);
-            map_start += count;
+        for (i = 0; i < img->nseg; i++) {
+            segs[i][0] = img->seg[i].vaddr;
+            segs[i][1] = img->seg[i].memsz;
+            segs[i][2] = (img->seg[i].flags & (PF_X | PF_W)) | PF_R;
+        }
+        /* Map runs of pages with equal merged flags, split at frames
+         * because frames are not physically contiguous. Pages no segment
+         * touches stay unmapped. */
+        for (page = 0; page <= image_pages_end; page += 0x1000U) {
+            uint32_t flags = page < image_pages_end ?
+                             zzapp_loader_page_flags(segs, img->nseg, page) : 0u;
+            uint32_t physical;
+            uint32_t bytes;
+            uint32_t permissions;
+
+            if (page < image_pages_end && flags == run_flags &&
+                page != run_start &&
+                (page & (ZZAPP_MEM_FRAME_BYTES - 1u)) != 0u)
+                continue;
+            if (run_flags) {
+                physical = proc->image_frames[run_start >> 20] +
+                           (run_start & (ZZAPP_MEM_FRAME_BYTES - 1u));
+                bytes = page - run_start;
+                permissions = (run_flags & PF_X) ?
+                              ((run_flags & PF_W) ? ZZAPP_AS_IMAGE_RWX :
+                                                    ZZAPP_AS_IMAGE_RX) :
+                              (run_flags & PF_W) ? ZZAPP_AS_IMAGE_RW :
+                                                   ZZAPP_AS_IMAGE_RO;
+                if (zzapp_as_map_image(&proc->as, ZZAPP_AS_WINDOW_BASE + run_start,
+                                       physical, bytes, permissions))
+                    goto failed;
+                Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)physical, bytes);
+                if (run_flags & PF_X)
+                    Xil_ICacheInvalidateRange((INTPTR)(uintptr_t)physical, bytes);
+            }
+            run_start = page;
+            run_flags = flags;
         }
     }
     {

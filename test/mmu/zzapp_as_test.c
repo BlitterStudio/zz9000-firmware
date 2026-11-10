@@ -117,6 +117,11 @@ static void test_image_permissions_and_window_bounds(void)
 	CHECK((l2[2] & PAGE_AP_MASK) == PAGE_USER_RW);
 	CHECK((l2[2] & PAGE_XN) != 0U);
 	CHECK((l2[0] & PAGE_NG) != 0U);
+	/* A page shared by code and data: user-writable and executable. */
+	CHECK(zzapp_as_map_image(&as, ZZAPP_AS_WINDOW_BASE + 12288U,
+	                         0x10003000U, 4096U, ZZAPP_AS_IMAGE_RWX) == 0);
+	CHECK((l2[3] & PAGE_AP_MASK) == PAGE_USER_RW);
+	CHECK((l2[3] & PAGE_XN) == 0U);
 	CHECK(zzapp_as_map_image(&as, 0xdffff000U, 0x10003000U,
 	                         8192U, ZZAPP_AS_IMAGE_RW) != 0);
 	zzapp_as_destroy(&as);
