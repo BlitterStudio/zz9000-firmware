@@ -22,6 +22,13 @@ void __attribute__((weak)) smp_local_irq_restore(uint32_t state)
 
 
 static volatile int current_thread = -1;
+volatile uintptr_t zzapp_kernel_svc_stack_top;
+void *scheduler_core1_app_stack_top(uint32_t slot) __attribute__((weak));
+void *scheduler_core1_app_stack_top(uint32_t slot)
+{
+	(void)slot;
+	return NULL;
+}
 void __attribute__((weak)) scheduler_core1_service_from_app(void)
 {
 }
@@ -126,6 +133,8 @@ int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
 void zzapp_kernel_set_current_thread(int slot)
 {
 	current_thread = slot;
+	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS)
+		zzapp_kernel_svc_stack_top = 0U;
 }
 
 int zzapp_kernel_current_thread(void)
@@ -376,6 +385,8 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 	if (pick < 0)
 		return frame;
 	zzapp_kernel_set_current_thread(pick);
+	zzapp_kernel_svc_stack_top =
+		(uintptr_t)scheduler_core1_app_stack_top((uint32_t)pick);
 	zzapp_kernel_switch_address_space((uint32_t)pick);
 	return context_restore(&kernel->threads[pick].context, return_adjust);
 }

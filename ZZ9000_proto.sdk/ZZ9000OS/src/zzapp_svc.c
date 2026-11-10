@@ -17,7 +17,7 @@
 #define L1_AP_MASK (3U << 10)
 #define L2_AP_MASK (3U << 4)
 #define PAGE_BYTES 4096U
-#define VENEER_BYTES 8U
+#define VENEER_BYTES 12U
 #define VENEER_PAGE_BYTES 4096U
 #define STRING_BYTES 512U
 #define COPY_BYTES sizeof(zzapp_dirent)
@@ -567,7 +567,7 @@ static int stack_word(const zzapp_as_t *as, uint32_t stack, uint32_t index, uint
     *value = *(const uint32_t *)(uintptr_t)address;
     return ZZ_OK;
 }
-static int frame_arguments(const zzapp_as_t *as, const zzapp_arm_frame_t *frame,
+static int frame_arguments(const zzapp_as_t *as, const zzapp_svc_frame_t *frame,
                            uint32_t words, uint32_t args[9])
 {
     uint32_t i;
@@ -775,13 +775,13 @@ static int heap_shrink_out_overlaps(const zzapp_proc_t *proc,
     return out < end && out + sizeof(void *) > start;
 }
 
-static uint32_t float_word(const zzapp_arm_frame_t *frame, uint32_t index)
-{ return frame->vfp[32U + index]; }
-static float float_argument(const zzapp_arm_frame_t *frame, uint32_t index)
+static uint32_t float_word(const zzapp_svc_frame_t *frame, uint32_t index)
+{ return frame->vfp[index]; }
+static float float_argument(const zzapp_svc_frame_t *frame, uint32_t index)
 { float value; uint32_t word = float_word(frame, index); memcpy(&value, &word, sizeof(value)); return value; }
-static double double_argument(const zzapp_arm_frame_t *frame, uint32_t index)
+static double double_argument(const zzapp_svc_frame_t *frame, uint32_t index)
 { double value; uint32_t words[2] = { float_word(frame, index * 2U), float_word(frame, index * 2U + 1U) }; memcpy(&value, words, sizeof(value)); return value; }
-static int call_gl_float(const zzapp_gl *gl, uint32_t slot, const zzapp_arm_frame_t *frame,
+static int call_gl_float(const zzapp_gl *gl, uint32_t slot, const zzapp_svc_frame_t *frame,
                          const uint32_t args[9], uint32_t *result)
 {
     float a = float_argument(frame, 0U), b = float_argument(frame, 1U);
@@ -834,7 +834,7 @@ static int dispatch_bind(const zzapp_api *api, uint32_t slot,
                          (uintptr_t)&user_gl[slot].table);
     return ZZ_OK;
 }
-static int dispatch_api(const zzapp_api *api, uint32_t slot, const zzapp_arm_frame_t *frame,
+static int dispatch_api(const zzapp_api *api, uint32_t slot, zzapp_svc_frame_t *frame,
                         const zzapp_svc_descriptor_t *descriptor, uint32_t number,
                         uint32_t args[9], uint32_t *result)
 {
@@ -846,7 +846,7 @@ static int dispatch_api(const zzapp_api *api, uint32_t slot, const zzapp_arm_fra
         uint64_t value = api->time_us();
 
         *result = (uint32_t)value;
-        ((zzapp_arm_frame_t *)frame)->r[1] = (uint32_t)(value >> 32);
+        frame->r[1] = (uint32_t)(value >> 32);
         return ZZ_OK;
     }
     if (entry_at(api, api->size, API_FIRST, number, &entry) != ZZ_OK)
@@ -856,7 +856,7 @@ static int dispatch_api(const zzapp_api *api, uint32_t slot, const zzapp_arm_fra
         zzapp_svc_gl_release(slot, gl_client[slot].generation);
     return ZZ_OK;
 }
-static int dispatch_gl(uint32_t slot, const zzapp_arm_frame_t *frame,
+static int dispatch_gl(uint32_t slot, const zzapp_svc_frame_t *frame,
                        uint32_t number, const uint32_t args[9], uint32_t *result)
 {
     zzapp_proc_t *proc = zzapp_proc_slot(slot);
@@ -897,12 +897,12 @@ static int dispatch_gl(uint32_t slot, const zzapp_arm_frame_t *frame,
  * the stop report on the UART. */
 volatile uint32_t zzapp_svc_last_number[ZZAPP_AS_SLOT_COUNT];
 
-void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
+void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
 {
     const zzapp_api *api;
     const zzapp_svc_descriptor_t *descriptor;
     zzapp_proc_t *proc;
-    uint32_t instruction, number, slot, result = 0U, args[9] = { 0U };
+    uint32_t number, slot, result = 0U, args[9] = { 0U };
     uint8_t copies[3][COPY_BYTES];
     char strings[3][STRING_BYTES];
     uint32_t originals[3] = { 0U };
@@ -914,10 +914,8 @@ void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
         slot = 0U;
     proc = zzapp_proc_slot(slot);
     api = zzapp_api_table();
-    if (!proc || !api || zzapp_svc_check_user(&proc->as, frame->exception_lr - 4U, 4U, 0) != ZZ_OK) { frame->r[0] = (uint32_t)ZZ_EFAULT; return; }
-    instruction = *(const uint32_t *)(uintptr_t)(frame->exception_lr - 4U);
-    if ((instruction & 0xff000000U) != 0xef000000U) { frame->r[0] = (uint32_t)ZZ_EINVAL; return; }
-    number = instruction & 0x00ffffffU;
+    if (!proc || !api) { frame->r[0] = (uint32_t)ZZ_EFAULT; return; }
+    number = frame->r[12];
     zzapp_svc_last_number[slot] = number;
     gl = number >= ZZAPP_SVC_GL_FIRST;
     number -= gl ? ZZAPP_SVC_GL_FIRST : 0U;

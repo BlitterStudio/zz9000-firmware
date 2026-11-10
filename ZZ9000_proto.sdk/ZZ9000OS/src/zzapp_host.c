@@ -219,6 +219,15 @@ zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame)
     return zzapp_kernel_arch_dispatch(frame, ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0U);
 }
 
+int zzapp_kernel_svc_can_return(void)
+{
+    int slot = zzapp_kernel_current_thread();
+
+    return slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS &&
+           g_kernel.threads[slot].state == ZZAPP_THREAD_RUNNABLE &&
+           !g_kernel.service_due;
+}
+
 void zzapp_kernel_switch_address_space(uint32_t slot)
 {
 #ifndef ZZAPP_HOST_TEST

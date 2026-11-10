@@ -98,49 +98,112 @@ core1_vector_undef:
 /* Bytes in one save_frame: SYS SP/LR, SPSR, 32 D registers, FPSCR,
  * r0-r12 and LR.  zzapp_kernel.h asserts the C struct has this size. */
 .equ FRAME_BYTES, 328
+.equ SVC_FRAME_BYTES, 136
 
 core1_vector_svc:
-	save_frame
-	/* Only a veneer call from user mode is an API call.  A trap from a
-	 * privileged mode is a voluntary switch by kernel code. */
-	ldr r0, [sp, #8]
+	/* User calls take the compact path.  Save the caller-clobbered state
+	 * temporarily on the exception stack before using it to form the frame
+	 * on the currently scheduled app's kernel stack. */
+	stmdb sp!, {r0-r3, r12, lr}
+	mrs r0, spsr
+	push {r0}
+	sub sp, sp, #12
+	add r1, sp, #4
+	stmia r1, {sp, lr}^
+	ldr r0, [sp, #12]
 	and r0, r0, #0x1f
 	cmp r0, #0x10
-	bne 1f
-	mov r4, sp
-	bl zzapp_kernel_current_thread
-	bl scheduler_core1_app_stack_top
+	bne 3f
+	ldr r0, =zzapp_kernel_svc_stack_top
+	ldr r0, [r0]
 	cmp r0, #0
-	beq 1f
-	/* Move the frame to the top of the caller's kernel stack and release
-	 * the shared SVC stack: a call that blocks or is preempted must not
-	 * leave its frame where the next thread's SVC entry would land. */
-	sub r5, r0, #FRAME_BYTES
-	mov r0, r5
-	mov r1, r4
-	mov r2, #FRAME_BYTES
-	bl memcpy
-	add sp, r4, #FRAME_BYTES
+	beq 3f
+	sub r0, r0, #SVC_FRAME_BYTES
+	str r0, [sp]
+	add r1, sp, #4
+	ldmia r1, {r2, r3}
+	stmia r0, {r2, r3}
+	ldr r1, [sp, #12]
+	str r1, [r0, #8]
+	add r1, r0, #12
+	vstmia r1, {d0-d7}
+	add r1, r0, #76
+	ldr r2, [sp, #16]
+	str r2, [r1]
+	ldr r2, [sp, #20]
+	str r2, [r1, #4]
+	ldr r2, [sp, #24]
+	str r2, [r1, #8]
+	ldr r2, [sp, #28]
+	str r2, [r1, #12]
+	ldr r2, [sp, #32]
+	str r2, [r1, #48]
+	ldr r2, [sp, #36]
+	str r2, [r0, #128]
+	/* Release the shared SVC stack before the body can be preempted or
+	 * block: another thread's SVC entry must never find this thread's
+	 * scratch words on it.  Everything needed later is in the frame. */
+	add sp, sp, #40
 	cps #0x1f
-	mov sp, r5
+	mov sp, r0
 	cpsie i
-	mov r0, r5
 	bl zzapp_svc_dispatch
 	cpsid i
+	bl zzapp_kernel_svc_can_return
+	/* SYS SP is the frame again (both calls are balanced). */
+	mov r2, sp
 	cps #0x13
-	sub sp, sp, #FRAME_BYTES
-	mov r4, sp
-	mov r0, r4
-	mov r1, r5
-	mov r2, #FRAME_BYTES
-	bl memcpy
-	/* An ordinary call returns to its caller; switch only if the call
-	 * left the thread blocked, sleeping or stopped. */
-	mov r0, r4
-	bl zzapp_kernel_svc_return
-	mov sp, r0
-	restore_frame 0
+	cmp r0, #0
+	beq 1f
+	/* The bl calls above ran in SYS mode and used the user bank's SP and
+	 * LR; give the app back its own before returning. */
+	ldmia r2, {sp, lr}^
+	nop
+	ldr r0, [r2, #76]
+	ldr r1, [r2, #80]
+	ldr r3, [r2, #8]
+	ldr lr, [r2, #128]
+	msr spsr_cxsf, r3
+	subs pc, lr, #0
 1:
+	/* Blocking, stopping and service handover are uncommon.  Materialize the
+	 * complete scheduler frame only here, then use the established switch
+	 * path.  r12 is caller-clobbered for the app, so it carries the compact
+	 * frame across save_frame. */
+	mov r12, r2
+	save_frame
+	add r5, r12, #12
+	vldmia r5, {d0-d7}
+	add r5, sp, #140
+	vstmia r5, {d0-d7}
+	ldr r5, [r12]
+	str r5, [sp]
+	ldr r5, [r12, #4]
+	str r5, [sp, #4]
+	ldr r5, [r12, #8]
+	str r5, [sp, #8]
+	ldr r5, [r12, #76]
+	str r5, [sp, #272]
+	ldr r5, [r12, #80]
+	str r5, [sp, #276]
+	ldr r5, [r12, #84]
+	str r5, [sp, #280]
+	ldr r5, [r12, #88]
+	str r5, [sp, #284]
+	ldr r5, [r12, #124]
+	str r5, [sp, #320]
+	ldr r5, [r12, #128]
+	str r5, [sp, #324]
+	select_frame 2, 0
+	restore_frame 0
+3:
+	/* A privileged SVC remains the scheduler's voluntary switch.  Kernel
+	 * code issues it without declaring clobbers, so restore r0-r3 (used
+	 * above) before saving its frame, and release the scratch words. */
+	add r1, sp, #16
+	ldmia r1, {r0-r3}
+	add sp, sp, #40
+	save_frame
 	select_frame 2, 0
 	restore_frame 0
 
@@ -178,14 +241,16 @@ core1_vector_fiq:
 zzapp_svc_veneer_page:
 .set svc_number, 0
 .rept 128
-	svc #svc_number
+	mov r12, #svc_number
+	svc #0
 	bx lr
 .set svc_number, svc_number + 1
 .endr
 .set svc_number, 128
 .rept 128
-	svc #svc_number
+	movw r12, #svc_number
+	svc #0
 	bx lr
 .set svc_number, svc_number + 1
 .endr
-.space 2048
+.space 1024

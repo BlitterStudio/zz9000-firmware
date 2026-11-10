@@ -178,7 +178,11 @@ void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot);
 /* The exception path identifies an app by its scheduled thread, not by the
  * faulting PC. */
 void zzapp_kernel_set_current_thread(int slot);
+/* Published by the scheduler before an app returns to user mode; the SVC
+ * vector reads it directly instead of calling back into C on entry. */
+extern volatile uintptr_t zzapp_kernel_svc_stack_top;
 int zzapp_kernel_current_thread(void);
+int zzapp_kernel_svc_can_return(void);
 void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t slot,
 		uint32_t elapsed_ms);
 void zzapp_kernel_stack_paint(uint8_t *stack, uint32_t bytes);

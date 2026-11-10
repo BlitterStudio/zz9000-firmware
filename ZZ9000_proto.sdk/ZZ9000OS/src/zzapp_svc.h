@@ -82,8 +82,28 @@ void zzapp_svc_gl_release(uint32_t slot, uint32_t generation);
 int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address,
                          uint32_t bytes, int write);
 
-/* Called by the SVC vector after it has saved the user exception frame. */
-void zzapp_svc_dispatch(zzapp_arm_frame_t *frame);
+/*
+ * Compact user-call state built by the SVC vector on the current app's
+ * kernel stack.  VFP holds s0-s15, the only VFP argument registers an app
+ * call can present to the dispatcher.
+ */
+typedef struct {
+    uint32_t user_sp;
+    uint32_t user_lr;
+    uint32_t spsr;
+    uint32_t vfp[16];
+    uint32_t r[13];
+    uint32_t exception_lr;
+} zzapp_svc_frame_t;
+/* zzapp_kernel_asm.S builds this frame by offset (SVC_FRAME_BYTES = 136). */
+_Static_assert(__builtin_offsetof(zzapp_svc_frame_t, vfp) == 12, "svc vfp");
+_Static_assert(__builtin_offsetof(zzapp_svc_frame_t, r) == 76, "svc r0");
+_Static_assert(__builtin_offsetof(zzapp_svc_frame_t, exception_lr) == 128,
+               "svc return address");
+_Static_assert(sizeof(zzapp_svc_frame_t) <= 136, "svc frame size");
+
+/* Called by the SVC vector after it has saved the user-call state. */
+void zzapp_svc_dispatch(zzapp_svc_frame_t *frame);
 /* Veneer number of each slot's latest SVC, for diagnostics. */
 extern volatile uint32_t zzapp_svc_last_number[];
 

@@ -77,6 +77,8 @@ static unsigned heap_range_calls;
 static unsigned file_list_next_calls;
 static unsigned heap_shrink_calls;
 static int svc_test_current_thread;
+static unsigned time_us_calls;
+static uint32_t vertex2f_words[2];
 
 int zzapp_kernel_current_thread(void) { return svc_test_current_thread; }
 zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
@@ -90,6 +92,12 @@ static const zzapp_gl *mock_gl_bind(uint32_t surface_id)
 {
     return surface_id ? &gl : NULL;
 }
+static void mock_vertex2f(float x, float y)
+{
+    memcpy(&vertex2f_words[0], &x, sizeof(x));
+    memcpy(&vertex2f_words[1], &y, sizeof(y));
+}
+
 static void mock_vertex_pointer(int32_t size, uint32_t type, int32_t stride,
                                 const void *pointer)
 {
@@ -242,6 +250,12 @@ static void mock_heap_range(void **base, uint32_t *bytes)
         *bytes = 0U;
 }
 
+static uint64_t mock_time_us(void)
+{
+    ++time_us_calls;
+    return UINT64_C(0x1122334455667788);
+}
+
 static uint32_t gl_slot(size_t field)
 {
     return (uint32_t)((field - offsetof(zzapp_gl, Begin)) / sizeof(void *));
@@ -250,14 +264,15 @@ static uint32_t api_slot(size_t field)
 {
     return (uint32_t)((field - offsetof(zzapp_api, exit)) / sizeof(void *));
 }
-static void dispatch(uint32_t number, zzapp_arm_frame_t *frame,
+static void dispatch(uint32_t number, zzapp_svc_frame_t *frame,
                      const uint32_t args[9])
 {
     uint32_t i;
 
     memset(frame, 0, sizeof(*frame));
-    *(uint32_t *)(void *)user_page = 0xef000000U | number;
+    *(uint32_t *)(void *)user_page = 0xef000000U;
     frame->exception_lr = user_va + 4U;
+    frame->r[12] = number;
     for (i = 0U; i < 4U; ++i)
         frame->r[i] = args[i];
     frame->user_sp = user_va + 0x800U;
@@ -287,12 +302,14 @@ static void setup_dispatch(void)
     api.gl_bind = mock_gl_bind;
     gl.size = sizeof(gl);
     api.file_seek = mock_file_seek;
+    api.time_us = mock_time_us;
     api.heap_range = mock_heap_range;
     api.msg_poll = mock_msg_poll;
     gl.Begin = mock_begin;
     gl.End = mock_end;
     gl.GetIntegerv = mock_get_integerv;
     gl.GetFloatv = (void (*)(uint32_t, float *))mock_get_integerv;
+    gl.Vertex2f = mock_vertex2f;
     gl.VertexPointer = mock_vertex_pointer;
     gl.EnableClientState = mock_enable_client_state;
     gl.DrawArrays = mock_draw_arrays;
@@ -318,6 +335,9 @@ static void setup_dispatch(void)
     msg_poll_calls = 0U;
     file_seek_calls = 0U;
     heap_range_calls = 0U;
+    time_us_calls = 0U;
+    vertex2f_words[0] = 0U;
+    vertex2f_words[1] = 0U;
 }
 static void teardown_dispatch(void)
 {
@@ -452,7 +472,7 @@ static void test_pointer_checks(void)
 
 static void test_gl_deferred_pointer_checks(void)
 {
-    zzapp_arm_frame_t frame;
+    zzapp_svc_frame_t frame;
     uint32_t args[9] = { 0U };
     uint32_t extra_va;
 
@@ -507,7 +527,7 @@ static void test_gl_deferred_pointer_checks(void)
 }
 static void test_copy_out_and_pixel_argument_positions(void)
 {
-    zzapp_arm_frame_t frame;
+    zzapp_svc_frame_t frame;
 
     setup_dispatch();
     if (!user_page) {
@@ -541,7 +561,7 @@ static void test_copy_out_and_pixel_argument_positions(void)
 }
 static void test_extended_pointer_checks(void)
 {
-    zzapp_arm_frame_t frame;
+    zzapp_svc_frame_t frame;
     uint8_t *message;
 
     setup_dispatch();
@@ -590,7 +610,7 @@ static void test_extended_pointer_checks(void)
 }
 static void test_svc_uses_core_aware_slot_resolver(void)
 {
-    zzapp_arm_frame_t frame;
+    zzapp_svc_frame_t frame;
 
     setup_dispatch();
     if (!user_page) {
@@ -606,7 +626,7 @@ static void test_svc_uses_core_aware_slot_resolver(void)
 }
 static void test_gl_getters_copy_full_outputs(void)
 {
-    zzapp_arm_frame_t frame;
+    zzapp_svc_frame_t frame;
     static const uint32_t vector_pnames[] = {
         0x0b66U, 0x0c23U, 0x0b53U
     };
@@ -632,7 +652,7 @@ static void test_gl_getters_copy_full_outputs(void)
 }
 static void test_rejected_pixel_store_does_not_change_validation(void)
 {
-    zzapp_arm_frame_t frame;
+    zzapp_svc_frame_t frame;
 
     setup_dispatch();
     if (!user_page) {
@@ -657,10 +677,62 @@ static void test_rejected_pixel_store_does_not_change_validation(void)
     CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
     teardown_dispatch();
 }
+static void test_svc_number_comes_from_r12(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t time = api_slot(offsetof(zzapp_api, time_us));
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    *(uint32_t *)(void *)user_page = 0xef000000U | time;
+    dispatch(UINT32_MAX, &frame,
+             (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == (uint32_t)ZZ_ENOSYS);
+    CHECK(time_us_calls == 0U);
+    dispatch(time, &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == UINT32_C(0x55667788));
+    CHECK(frame.r[1] == UINT32_C(0x11223344));
+    CHECK(time_us_calls == 1U);
+    memset(&frame, 0, sizeof(frame));
+    frame.r[12] = time;
+    frame.user_sp = 0x02000000U;
+    zzapp_svc_dispatch(&frame);
+    CHECK(frame.r[0] == UINT32_C(0x55667788));
+    CHECK(frame.r[1] == UINT32_C(0x11223344));
+    CHECK(time_us_calls == 2U);
+    teardown_dispatch();
+}
+
+static void test_svc_float_frame_arguments(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t number = ZZAPP_SVC_GL_FIRST +
+        gl_slot(offsetof(zzapp_gl, Vertex2f));
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame,
+             (uint32_t[9]){ 1U });
+    memset(&frame, 0, sizeof(frame));
+    frame.r[12] = number;
+    frame.vfp[0] = UINT32_C(0x3fa00000);
+    frame.vfp[1] = UINT32_C(0xc0200000);
+    zzapp_svc_dispatch(&frame);
+    CHECK(vertex2f_words[0] == UINT32_C(0x3fa00000));
+    CHECK(vertex2f_words[1] == UINT32_C(0xc0200000));
+    teardown_dispatch();
+}
+
 static void test_slot_aliases(void)
 {
     const zzapp_api *table;
-    zzapp_arm_frame_t frame;
+    zzapp_svc_frame_t frame;
 
     setup_dispatch();
     if (!user_page) {
@@ -692,6 +764,8 @@ int main(void)
     test_extended_pointer_checks();
     test_svc_uses_core_aware_slot_resolver();
     test_gl_getters_copy_full_outputs();
+    test_svc_number_comes_from_r12();
+    test_svc_float_frame_arguments();
     test_rejected_pixel_store_does_not_change_validation();
     test_slot_aliases();
     printf("svc_test: %u checks, %d failures\n", checks, failures);
