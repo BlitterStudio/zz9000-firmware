@@ -23,6 +23,8 @@ void __attribute__((weak)) smp_local_irq_restore(uint32_t state)
 
 static volatile int current_thread = -1;
 volatile uintptr_t zzapp_kernel_svc_stack_top;
+/* The SVC vector reads this directly to index its per-app PMU stamps. */
+volatile uint32_t zzapp_svc_counter_slot;
 void *scheduler_core1_app_stack_top(uint32_t slot) __attribute__((weak));
 void *scheduler_core1_app_stack_top(uint32_t slot)
 {
@@ -133,6 +135,8 @@ int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
 void zzapp_kernel_set_current_thread(int slot)
 {
 	current_thread = slot;
+	zzapp_svc_counter_slot =
+		slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS ? (uint32_t)slot : 0U;
 	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS)
 		zzapp_kernel_svc_stack_top = 0U;
 }

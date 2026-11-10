@@ -554,6 +554,20 @@ __attribute__((naked, noreturn, used)) static void core1_enter_system_thread(voi
 		".ltorg\n\t");
 }
 
+/* PMCCNTR is sampled only by privileged core-1 SVC code. Do not change
+ * PMUSERENR: user mode must continue to time a complete SVC round trip. */
+static void core1_enable_pmu_cycles(void)
+{
+	uint32_t pmcr;
+
+	__asm__ __volatile__("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
+	pmcr |= 0x01U;
+	pmcr &= ~0x08U;
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U));
+}
+
+
 
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
@@ -612,6 +626,7 @@ void core1_loop() {
 	// task-queue region shareable at boot, before this core started).
 	scheduler_coherency_init_core1();
 	C1_TRACE("[c1] R2 coherency-ok (mmu on)\r\n");  /* survived MMU/cache/SMP bring-up */
+	core1_enable_pmu_cycles();
 
 	// Program VBAR + banked exception stacks before running any task, so a
 	// data/prefetch/undefined fault vectors to the registered handlers and

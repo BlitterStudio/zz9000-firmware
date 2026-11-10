@@ -88,13 +88,6 @@ struct zzapp_coherent {
     volatile uint64_t progress;
     volatile uint64_t tick_seen;
     volatile uint64_t core_heartbeat;
-    /* Bumped by every API entry; the 5 ms tick turns changes into the
-     * progress and API-entry stamps, so a GL call reads no clock. */
-    volatile uint32_t api_calls;
-    /* A tick skipped scheduler work because an API call was running; the
-     * call's epilogue catches up. */
-    volatile uint32_t service_due;
-    volatile uint64_t api_entered;
     volatile uint64_t heartbeat_seen;
     volatile uint32_t heartbeat_value;
     volatile uint32_t arena_card;
@@ -133,7 +126,13 @@ struct zzapp_host_slot {
     uint32_t heap_bump;
     uint32_t stack_canary;
     int faulted;
+    /* Core 1 only: keep the hot SVC watchdog state out of the uncached
+     * lifecycle block. The timer IRQ samples it every 5 ms. */
+    volatile uint32_t api_calls;
+    volatile uint32_t in_api;
+    volatile uint32_t service_due;
     uint32_t seen_api_calls;
+    uint64_t api_entered;
     uint64_t last_tick;
     volatile uint32_t watchdog_reason;
     uint32_t terminal_reason;
@@ -681,6 +680,9 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
     life32(ZZAPP_LIFE_PC_OFF, pc);
     life32(ZZAPP_LIFE_SP_OFF, sp);
     snapshot_stop_diagnostics(slot);
+#ifndef ZZAPP_HOST_TEST
+    zzapp_svc_counters_report(slot);
+#endif
     life32(ZZAPP_LIFE_LR_OFF, lr);
     life32(ZZAPP_LIFE_FAR_OFF, far);
     life32(ZZAPP_LIFE_FSR_OFF, fsr);
@@ -766,12 +768,14 @@ static void begin_tick_observation(void)
 {
     uint32_t slot = current_slot();
     struct zzapp_coherent *coh = coherent(slot);
+    struct zzapp_host_slot *host = host_slot(slot);
 
+    host->in_api = 0u;
+    host->service_due = 0u;
+    host->seen_api_calls = host->api_calls;
+    host->last_tick = now_ticks();
     coh->in_api = 0u;
-    coh->service_due = 0u;
-    host_slot(slot)->seen_api_calls = coh->api_calls;
-    host_slot(slot)->last_tick = now_ticks();
-    coherent(0)->core_heartbeat = host_slot(slot)->last_tick;
+    coherent(0)->core_heartbeat = host->last_tick;
 }
 
 /* The private timer may interrupt an app API or system service pass. It only
@@ -797,15 +801,16 @@ static void service_tick_irq(uint64_t now)
     host = host_slot(slot);
     coh = coherent(slot);
     coh->tick_seen = now;
-    calls = coh->api_calls;
+    calls = host->api_calls;
+    coh->in_api = host->in_api;
     if (calls != host->seen_api_calls) {
         host->seen_api_calls = calls;
         coh->progress = now;
-        if (coh->in_api != 0u)
-            coh->api_entered = host->last_tick;
+        if (host->in_api != 0u)
+            host->api_entered = host->last_tick;
     }
     host->last_tick = now;
-    coh->service_due = 1u;
+    host->service_due = 1u;
     if (g_host_visible_commit_active[slot] || !coh->running)
         return;
     if (coh->reset_request || life_get32(ZZAPP_LIFE_STOP_OFF) != 0u) {
@@ -816,12 +821,12 @@ static void service_tick_irq(uint64_t now)
             request_stop(slot, ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
         return;
     }
-    if (coh->in_api == 0u &&
+    if (host->in_api == 0u &&
         ticks_to_us(now - coh->progress) >= ZZAPP_APP_STALL_US) {
         host->watchdog_reason = 1u;
         request_stop(slot, ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
-    } else if (coh->in_api != 0u && !g_api_parked[slot] &&
-               ticks_to_us(now - coh->api_entered) >= ZZAPP_API_STUCK_US) {
+    } else if (host->in_api != 0u && !g_api_parked[slot] &&
+               ticks_to_us(now - host->api_entered) >= ZZAPP_API_STUCK_US) {
         host->watchdog_reason = 2u;
         request_stop(slot, ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
     }
@@ -1007,10 +1012,10 @@ static void api_lock_until_acquired(uint32_t slot)
 
 static void resume_parked_api(uint32_t slot)
 {
-    struct zzapp_coherent *coh = coherent(slot);
+    struct zzapp_host_slot *host = host_slot(slot);
 
-    coh->api_entered = now_ticks();
-    host_slot(slot)->seen_api_calls = coh->api_calls;
+    host->api_entered = now_ticks();
+    host->seen_api_calls = host->api_calls;
     g_api_parked[slot] = 0u;
 }
 
@@ -1018,22 +1023,22 @@ static void resume_parked_api(uint32_t slot)
 void zzapp_host_yield(void)
 {
     zzapp_note_progress();
-    coherent(current_slot())->service_due = 1u;
+    host_slot(current_slot())->service_due = 1u;
     zzapp_kernel_service_due(&g_kernel);
 }
 
 void zzapp_host_yield_wait(void)
 {
     uint32_t slot = current_slot();
-    struct zzapp_coherent *coh = coherent(slot);
+    struct zzapp_host_slot *host = host_slot(slot);
 
     if (zzapp_kernel_current_thread() < 0) {
         zzapp_note_progress();
-        coh->service_due = 1u;
+        host->service_due = 1u;
         zzapp_kernel_service_due(&g_kernel);
         return;
     }
-    if (coh->in_api == 0u) {
+    if (host->in_api == 0u) {
         zzapp_host_yield();
         return;
     }
@@ -1079,19 +1084,19 @@ uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
 
 /*
  * Every GL call of an ARM app passes through here (GLQuake makes tens of
- * thousands per frame), so neither side reads the clock or touches the
- * uncached lifecycle block; service_tick derives the stamps.
+ * thousands per frame). The SVC watchdog state is private to core 1 and
+ * cached; service_tick_irq publishes only the diagnostic in_api value.
  */
 void zzapp_api_enter(void)
 {
     uint32_t slot = current_slot();
-    struct zzapp_coherent *coh = coherent(slot);
+    struct zzapp_host_slot *host = host_slot(slot);
 
     g_api_parked[slot] = 0u;
     if (zzapp_kernel_current_thread() >= 0)
         api_lock_until_acquired(slot);
-    coh->api_calls++;
-    coh->in_api++;
+    host->api_calls++;
+    host->in_api++;
 }
 
 /* Hot non-blocking calls (should_stop, time_us). Count as an API call so a
@@ -1099,21 +1104,21 @@ void zzapp_api_enter(void)
  * or the leave-path service tick. */
 void zzapp_api_touch(void)
 {
-    coherent(current_slot())->api_calls++;
+    host_slot(current_slot())->api_calls++;
 }
 
 void zzapp_api_leave(void)
 {
     uint32_t slot = current_slot();
-    struct zzapp_coherent *coh = coherent(slot);
+    struct zzapp_host_slot *host = host_slot(slot);
 
-    if (coh->in_api)
-        coh->in_api--;
+    if (host->in_api)
+        host->in_api--;
     if (zzapp_kernel_current_thread() >= 0) {
         (void)zzapp_kernel_api_unlock(&g_kernel, slot);
     }
-    if (!coh->in_api && coh->service_due) {
-        coh->service_due = 0u;
+    if (!host->in_api && host->service_due) {
+        host->service_due = 0u;
         zzapp_kernel_service_due(&g_kernel);
     }
 }
@@ -1361,6 +1366,9 @@ static void run_app(uint32_t argc)
     host->faulted = 0;
     host->stop_diagnostics_valid = 0u;
     host->exit_code = 0;
+#ifndef ZZAPP_HOST_TEST
+    zzapp_svc_counters_reset(slot);
+#endif
     coh->heartbeat_value = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
     coh->heartbeat_seen = now_ticks();
     coh->tick_seen = now_ticks();
@@ -1691,6 +1699,9 @@ void zzapp_host_exit(int code)
 
     host->exit_code = (uint32_t)code;
 #ifndef ZZAPP_HOST_TEST
+    zzapp_svc_counters_report(slot);
+#endif
+#ifndef ZZAPP_HOST_TEST
     struct zzapp_coherent *coh = coherent(slot);
 
     if (zzapp_kernel_current_thread() >= 0) {
@@ -1874,7 +1885,7 @@ void zzapp_test_mark_running(void)
     begin_tick_observation();
 }
 uint32_t zzapp_test_service_calls(void) { return g_test_service_calls; }
-uint32_t zzapp_test_in_api(void) { return coherent(current_slot())->in_api; }
+uint32_t zzapp_test_in_api(void) { return host_slot(current_slot())->in_api; }
 int zzapp_test_cold_restarts(void) { return g_cold_restarts; }
 uint32_t zzapp_test_exit_code(void) { return host_slot(current_slot())->exit_code; }
 uint8_t *zzapp_test_stack_canary(void)

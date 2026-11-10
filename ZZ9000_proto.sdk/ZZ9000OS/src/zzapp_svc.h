@@ -104,7 +104,15 @@ _Static_assert(sizeof(zzapp_svc_frame_t) <= 136, "svc frame size");
 
 /* Called by the SVC vector after it has saved the user-call state. */
 void zzapp_svc_dispatch(zzapp_svc_frame_t *frame);
+/* Reset and print the core-1 PMU breakdown for one app lifecycle. */
+void zzapp_svc_counters_reset(uint32_t slot);
+void zzapp_svc_counters_report(uint32_t slot);
 /* Veneer number of each slot's latest SVC, for diagnostics. */
 extern volatile uint32_t zzapp_svc_last_number[];
+/* Assembly-side PMCCNTR stamps for the entry and return stages. */
+extern volatile uint32_t zzapp_svc_entry_stamp[];
+extern volatile uint32_t zzapp_svc_eret_stamp[];
+extern volatile uint32_t zzapp_svc_counter_slot;
+void zzapp_svc_counters_eret(void);
 
 #endif

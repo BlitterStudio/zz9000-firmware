@@ -118,15 +118,25 @@ core1_vector_svc:
 	ldr r0, [r0]
 	cmp r0, #0
 	beq 3f
+	/* PMCCNTR stamp after the mode and stack checks, before the compact
+	 * frame work. The scheduler publishes this slot before user return. */
+	mrc p15, 0, r2, c9, c13, 0
+	ldr r1, =zzapp_svc_counter_slot
+	ldr r1, [r1]
+	ldr r3, =zzapp_svc_entry_stamp
+	str r2, [r3, r1, lsl #2]
 	sub r0, r0, #SVC_FRAME_BYTES
 	str r0, [sp]
 	add r1, sp, #4
 	ldmia r1, {r2, r3}
 	stmia r0, {r2, r3}
-	ldr r1, [sp, #12]
-	str r1, [r0, #8]
-	add r1, r0, #12
+	ldr r2, [sp, #32]
+	/* API_SLOT(time_us) has no VFP arguments or result. It is the
+	 * empty-call timing path, so avoid spilling s0-s15 there. */
+	cmp r2, #3
+	beq 4f
 	vstmia r1, {d0-d7}
+4:
 	add r1, r0, #76
 	ldr r2, [sp, #16]
 	str r2, [r1]
@@ -150,6 +160,16 @@ core1_vector_svc:
 	bl zzapp_svc_dispatch
 	cpsid i
 	bl zzapp_kernel_svc_can_return
+	/* Stamp as late as possible on the fast path. Preserve the return
+	 * decision while the C helper accumulates the plain per-slot stores. */
+	push {r0}
+	mrc p15, 0, r0, c9, c13, 0
+	ldr r1, =zzapp_svc_eret_stamp
+	ldr r2, =zzapp_svc_counter_slot
+	ldr r2, [r2]
+	str r0, [r1, r2, lsl #2]
+	bl zzapp_svc_counters_eret
+	pop {r0}
 	/* SYS SP is the frame again (both calls are balanced). */
 	mov r2, sp
 	cps #0x13
