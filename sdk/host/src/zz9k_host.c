@@ -18,9 +18,35 @@
 #define ZZ9K_HOST_AMIGA 0
 #endif
 
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+#include <proto/zz9k.h>
+#endif
+
+#if !ZZ9K_HOST_AMIGA
+typedef struct ZZ9KLibraryTransportForTest {
+  int (*open)(void *user, ZZ9KBoard *board);
+  void (*close)(void *user);
+  int (*call)(void *user, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
+              uint32_t timeout_ticks);
+  int (*submit)(void *user, ZZ9KRequest *request, uint32_t *request_id);
+  int (*poll)(void *user, ZZ9KMailboxEntry *reply);
+  void *user;
+} ZZ9KLibraryTransportForTest;
+
+static const ZZ9KLibraryTransportForTest *zz9k_library_transport_for_test;
+
+void zz9k_set_library_transport_for_test(
+    const ZZ9KLibraryTransportForTest *transport)
+{
+  zz9k_library_transport_for_test = transport;
+}
+#endif
+
 #if ZZ9K_HOST_AMIGA
-/* CACRF_ClearD lives in execbase.h, not types.h; the amissl
- * adtools build compiles this TU without it. */
+struct Library *ZZ9KBase;
+#endif
+
+#if ZZ9K_HOST_AMIGA
 #include <exec/types.h>
 #include <exec/execbase.h>
 #include <exec/memory.h>
@@ -87,36 +113,6 @@ void zz9k_audio_ring_cache_invalidate(const volatile void *address,
 #endif
 }
 
-#if !ZZ9K_HOST_AMIGA
-static void (*zz9k_mailbox_cache_hook_for_test)(const volatile void *address,
-                                                 uint32_t length);
-
-void zz9k_set_mailbox_cache_hook_for_test(
-    void (*hook)(const volatile void *address, uint32_t length))
-{
-  zz9k_mailbox_cache_hook_for_test = hook;
-}
-#endif
-
-/* The mailbox lives in board RAM. A Zorro III mapping may be cacheable on
- * 68040/060 systems, so volatile loads alone can keep seeing the tail that
- * preceded a firmware completion. Clear before reading firmware-owned
- * fields, and after writing host-owned fields, to make the DMA-visible
- * contents coherent. */
-static void zz9k_mailbox_cache_invalidate(const volatile void *address,
-                                          uint32_t length)
-{
-#if ZZ9K_HOST_AMIGA
-  if (address && length != 0U) {
-    CacheClearE((APTR)(uintptr_t)address, (ULONG)length, CACRF_ClearD);
-    __asm__ volatile("" ::: "memory");
-  }
-#else
-  if (zz9k_mailbox_cache_hook_for_test) {
-    zz9k_mailbox_cache_hook_for_test(address, length);
-  }
-#endif
-}
 
 
 #define ZZ9K_SYNC_COOKIE_MASK 0x5aa55aa5UL
@@ -127,6 +123,12 @@ typedef struct ZZ9KMailboxSemaphore {
   struct SignalSemaphore semaphore;
   char name[sizeof(ZZ9K_MAILBOX_SEMAPHORE_NAME)];
 } ZZ9KMailboxSemaphore;
+#endif
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+typedef struct ZZ9KStaticLibraryPending {
+  ZZ9KAsyncRequest async;
+  struct ZZ9KStaticLibraryPending *next;
+} ZZ9KStaticLibraryPending;
 #endif
 
 struct ZZ9KContext {
@@ -149,6 +151,15 @@ struct ZZ9KContext {
   unsigned char irq_armed;
   unsigned char late_irq_expected; /* cancelled op still in flight */
   unsigned char aperture_layout_valid;
+  unsigned char library_transport;
+#if ZZ9K_HOST_AMIGA
+  struct Library *library_base;
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+  ZZ9KStaticLibraryPending *library_pending;
+#endif
+#else
+  const ZZ9KLibraryTransportForTest *library_transport_for_test;
+#endif
 #if ZZ9K_HOST_AMIGA
   struct Interrupt irq;
   struct Task *irq_task;
@@ -1020,6 +1031,33 @@ int zz9k_open(ZZ9KContext **ctx)
 
   *ctx = 0;
 
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+  {
+    struct Library *library_base;
+    ZZ9KContext *new_ctx;
+
+    library_base = OpenLibrary((CONST_STRPTR)"zz9k.library", 0);
+    if (library_base) {
+      status = zz9k_find_board(&board);
+      if (status == ZZ9K_STATUS_OK) {
+        new_ctx = (ZZ9KContext *)zz9k_alloc_host(sizeof(*new_ctx));
+        if (new_ctx) {
+          memset(new_ctx, 0, sizeof(*new_ctx));
+          new_ctx->board = board;
+          new_ctx->library_transport = 1U;
+          new_ctx->library_base = library_base;
+          ZZ9KBase = library_base;
+          *ctx = new_ctx;
+          return ZZ9K_STATUS_OK;
+        }
+        status = ZZ9K_STATUS_NO_MEMORY;
+      }
+      CloseLibrary(library_base);
+      return status;
+    }
+  }
+#endif
+
 #if ZZ9K_HOST_AMIGA
   status = zz9k_find_board(&board);
   if (status != ZZ9K_STATUS_OK) {
@@ -1052,6 +1090,28 @@ int zz9k_open(ZZ9KContext **ctx)
   }
   return status;
 #else
+  if (zz9k_library_transport_for_test) {
+    ZZ9KContext *new_ctx;
+    ZZ9KBoard board;
+    int status;
+
+    memset(&board, 0, sizeof(board));
+    status = zz9k_library_transport_for_test->open(
+        zz9k_library_transport_for_test->user, &board);
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    new_ctx = (ZZ9KContext *)zz9k_alloc_host(sizeof(*new_ctx));
+    if (!new_ctx) {
+      return ZZ9K_STATUS_NO_MEMORY;
+    }
+    memset(new_ctx, 0, sizeof(*new_ctx));
+    new_ctx->board = board;
+    new_ctx->library_transport = 1U;
+    new_ctx->library_transport_for_test = zz9k_library_transport_for_test;
+    *ctx = new_ctx;
+    return ZZ9K_STATUS_OK;
+  }
   return ZZ9K_STATUS_UNSUPPORTED;
 #endif
 }
@@ -1168,6 +1228,29 @@ void zz9k_close(ZZ9KContext *ctx)
   zz9k_disarm_completion_irq(ctx);
 #if ZZ9K_HOST_AMIGA
   zz9k_timer_close(ctx);
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+  while (ctx->library_pending) {
+    ZZ9KStaticLibraryPending *pending = ctx->library_pending;
+
+    ctx->library_pending = pending->next;
+    if (pending->async.queued) {
+      (void)ZZ9KCancelAsync(&pending->async);
+    }
+    zz9k_free_host(pending);
+  }
+#endif
+  if (ctx->library_transport && ctx->library_base) {
+    if (ZZ9KBase == ctx->library_base) {
+      ZZ9KBase = 0;
+    }
+    CloseLibrary(ctx->library_base);
+  }
+#else
+  if (ctx->library_transport && ctx->library_transport_for_test &&
+      ctx->library_transport_for_test->close) {
+    ctx->library_transport_for_test->close(
+        ctx->library_transport_for_test->user);
+  }
 #endif
   zz9k_free_host(ctx);
 }
@@ -3465,7 +3548,6 @@ static int zz9k_enqueue_request_locked(ZZ9KContext *ctx, ZZ9KRequest *request,
     return ZZ9K_STATUS_BAD_REQUEST;
   }
 
-  zz9k_mailbox_cache_invalidate(ctx->mailbox, sizeof(*ctx->mailbox));
 
   head = zz9k_get_be32(ctx->mailbox->request_head);
   tail = zz9k_get_be32(ctx->mailbox->request_tail);
@@ -3485,10 +3567,7 @@ static int zz9k_enqueue_request_locked(ZZ9KContext *ctx, ZZ9KRequest *request,
   entry.status = ZZ9K_STATUS_QUEUED;
 
   zz9k_entry_to_wire(&ctx->request_ring[tail], &entry);
-  zz9k_mailbox_cache_invalidate(&ctx->request_ring[tail],
-                                sizeof(ctx->request_ring[tail]));
   zz9k_put_wire_be32(ctx->mailbox->request_tail, next_tail);
-  zz9k_mailbox_cache_invalidate(ctx->mailbox, sizeof(*ctx->mailbox));
   if (ctx->doorbell) {
     *ctx->doorbell = 1;
   }
@@ -3496,6 +3575,34 @@ static int zz9k_enqueue_request_locked(ZZ9KContext *ctx, ZZ9KRequest *request,
   *request_id = entry.request_id;
   return ZZ9K_STATUS_QUEUED;
 }
+
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+static void zz9k_library_pending_complete(ZZ9KAsyncRequest *async,
+                                          void *user_data)
+{
+  (void)async;
+  (void)user_data;
+}
+
+static int zz9k_library_take_completed(ZZ9KContext *ctx,
+                                       ZZ9KMailboxEntry *reply)
+{
+  ZZ9KStaticLibraryPending **link = &ctx->library_pending;
+
+  while (*link) {
+    ZZ9KStaticLibraryPending *pending = *link;
+
+    if (pending->async.completed) {
+      *reply = pending->async.reply;
+      *link = pending->next;
+      zz9k_free_host(pending);
+      return ZZ9K_STATUS_OK;
+    }
+    link = &pending->next;
+  }
+  return ZZ9K_STATUS_BUSY;
+}
+#endif
 
 int zz9k_submit(ZZ9KContext *ctx, ZZ9KRequest *request, uint32_t *request_id)
 {
@@ -3505,6 +3612,33 @@ int zz9k_submit(ZZ9KContext *ctx, ZZ9KRequest *request, uint32_t *request_id)
   if (!ctx || !request || !request_id) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
+  if (ctx->library_transport) {
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+    ZZ9KStaticLibraryPending *pending =
+        (ZZ9KStaticLibraryPending *)zz9k_alloc_host(sizeof(*pending));
+
+    if (!pending) {
+      return ZZ9K_STATUS_NO_MEMORY;
+    }
+    memset(pending, 0, sizeof(*pending));
+    status = ZZ9KCallAsync(&pending->async, request,
+                            zz9k_library_pending_complete, ctx);
+    if (status != ZZ9K_STATUS_QUEUED) {
+      zz9k_free_host(pending);
+      return status;
+    }
+    pending->next = ctx->library_pending;
+    ctx->library_pending = pending;
+    *request_id = pending->async.request_id;
+    return status;
+#elif ZZ9K_HOST_AMIGA
+    return ZZ9K_STATUS_UNSUPPORTED;
+#else
+    return ctx->library_transport_for_test->submit(
+        ctx->library_transport_for_test->user, request, request_id);
+#endif
+  }
+
   lock_status = zz9k_mailbox_lock(ctx);
   if (lock_status != ZZ9K_STATUS_OK) {
     return lock_status;
@@ -3571,7 +3705,6 @@ static int zz9k_consume_next_completion_locked(ZZ9KContext *ctx,
     return ZZ9K_STATUS_UNSUPPORTED;
   }
 
-  zz9k_mailbox_cache_invalidate(ctx->mailbox, sizeof(*ctx->mailbox));
 
   head = zz9k_get_be32(ctx->mailbox->completion_head);
   tail = zz9k_get_be32(ctx->mailbox->completion_tail);
@@ -3583,13 +3716,10 @@ static int zz9k_consume_next_completion_locked(ZZ9KContext *ctx,
     return ZZ9K_STATUS_BUSY;
   }
 
-  zz9k_mailbox_cache_invalidate(&ctx->completion_ring[head],
-                                sizeof(ctx->completion_ring[head]));
 
   zz9k_entry_from_wire(reply, &ctx->completion_ring[head]);
   next_head = zz9k_next_ring_index(head, ctx->completion_ring_entries);
   zz9k_put_wire_be32(ctx->mailbox->completion_head, next_head);
-  zz9k_mailbox_cache_invalidate(ctx->mailbox, sizeof(*ctx->mailbox));
   if (ctx->irq_ack) {
     *ctx->irq_ack = 1;
   }
@@ -3605,6 +3735,27 @@ int zz9k_poll(ZZ9KContext *ctx, ZZ9KMailboxEntry *reply)
   if (!ctx || !reply) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
+  if (ctx->library_transport) {
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+    uint32_t completed = 0U;
+
+    status = zz9k_library_take_completed(ctx, reply);
+    if (status == ZZ9K_STATUS_OK) {
+      return status;
+    }
+    status = ZZ9KPoll(1U, &completed);
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    return zz9k_library_take_completed(ctx, reply);
+#elif ZZ9K_HOST_AMIGA
+    return ZZ9K_STATUS_UNSUPPORTED;
+#else
+    return ctx->library_transport_for_test->poll(
+        ctx->library_transport_for_test->user, reply);
+#endif
+  }
+
   lock_status = zz9k_mailbox_lock(ctx);
   if (lock_status != ZZ9K_STATUS_OK) {
     return lock_status;
@@ -4040,6 +4191,17 @@ int zz9k_call(ZZ9KContext *ctx, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
   if (!ctx || !request || !reply) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
+  if (ctx->library_transport) {
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+    return ZZ9KCall(request, reply, timeout_ticks);
+#elif ZZ9K_HOST_AMIGA
+    return ZZ9K_STATUS_UNSUPPORTED;
+#else
+    return ctx->library_transport_for_test->call(
+        ctx->library_transport_for_test->user, request, reply, timeout_ticks);
+#endif
+  }
+
 
   lock_status = zz9k_mailbox_lock(ctx);
   if (lock_status != ZZ9K_STATUS_OK) {

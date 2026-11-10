@@ -901,6 +901,19 @@ add_executable(library_async_test
 target_link_libraries(library_async_test PRIVATE zz9k_library_core)
 add_test(NAME library_async_test COMMAND library_async_test)
 
+add_executable(host_library_transport_test
+  tests/host_library_transport_test.c
+)
+
+target_include_directories(host_library_transport_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+)
+
+target_link_libraries(host_library_transport_test PRIVATE zz9k_host)
+add_test(NAME host_library_transport_test COMMAND host_library_transport_test)
+
 add_executable(library_lvo_test
   tests/library_lvo_test.c
 )
