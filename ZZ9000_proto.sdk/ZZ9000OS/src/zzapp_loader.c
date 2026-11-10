@@ -134,9 +134,13 @@ static int range_ok(uint32_t off, uint32_t len, uint32_t limit)
  * PT_LOAD whose memory touches it. The SDK linker script packs .data right
  * after .text, so one page often holds code and data. Mapping each segment
  * with only its own flags let the later segment win, which made shared
- * code pages non-executable or shared data pages read-only. */
+ * code pages non-executable or shared data pages read-only.
+ *
+ * The heap (and argv) starts right after `image_end`, so the rest of the
+ * page holding image_end is also writable. swquake's last PT_LOAD is a
+ * read-only .rela.dyn, and its first malloc wrote into that page. */
 uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
-                                 uint32_t page)
+                                 uint32_t image_end, uint32_t page)
 {
     uint32_t flags = 0;
     uint32_t i;
@@ -148,6 +152,8 @@ uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
         if (segs[i][1] && start < page + 0x1000u && end > page)
             flags |= segs[i][2];
     }
+    if (image_end > page && image_end < page + 0x1000u)
+        flags |= PF_R | PF_W;
     return flags;
 }
 
@@ -289,7 +295,8 @@ static int map_loaded_image(const struct load_image *img)
          * touches stay unmapped. */
         for (page = 0; page <= image_pages_end; page += 0x1000U) {
             uint32_t flags = page < image_pages_end ?
-                             zzapp_loader_page_flags(segs, img->nseg, page) : 0u;
+                             zzapp_loader_page_flags(segs, img->nseg,
+                                                     img->image_end, page) : 0u;
             uint32_t physical;
             uint32_t bytes;
             uint32_t permissions;
