@@ -4036,13 +4036,12 @@ int zz9k_call(ZZ9KContext *ctx, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
   }
 #endif
 
-  zz9k_idle_between_polls_backoff(0);
   if (!use_wall_clock && timeout_ticks == 0U) {
     status = ZZ9K_STATUS_TIMEOUT;
     goto done;
   }
 
-  for (ticks = 0;; ticks++) {
+  for (ticks = 0;;) {
     status = zz9k_consume_next_completion_locked(ctx, reply);
     if (status == ZZ9K_STATUS_OK) {
       if (reply->request_id == request_id &&
@@ -4052,7 +4051,9 @@ int zz9k_call(ZZ9KContext *ctx, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
         goto done;
       }
       /* Stale/non-matching completion: discard and keep waiting for ours. */
-    } else if (status != ZZ9K_STATUS_BUSY) {
+      continue;
+    }
+    if (status != ZZ9K_STATUS_BUSY) {
       goto done;
     }
 
@@ -4067,6 +4068,7 @@ int zz9k_call(ZZ9KContext *ctx, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
       goto done;
     }
     zz9k_idle_between_polls_backoff(ticks + 1U);
+    ticks++;
   }
 
 done:

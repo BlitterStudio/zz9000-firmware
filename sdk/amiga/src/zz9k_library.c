@@ -254,10 +254,7 @@ int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
 
   for (ticks = 0;;) {
     status = zz9k_poll(library->ctx, reply);
-    if (status != ZZ9K_STATUS_BUSY) {
-      if (status != ZZ9K_STATUS_OK) {
-        return status;
-      }
+    if (status == ZZ9K_STATUS_OK) {
       if (reply->request_id == request_id) {
         return reply->status;
       }
@@ -266,6 +263,10 @@ int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
       if (status != ZZ9K_STATUS_OK) {
         return status;
       }
+      continue;
+    }
+    if (status != ZZ9K_STATUS_BUSY) {
+      return status;
     }
     if (ticks++ == timeout_ticks) {
       return ZZ9K_STATUS_TIMEOUT;

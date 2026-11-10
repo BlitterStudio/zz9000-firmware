@@ -17,6 +17,18 @@ struct TestMailbox {
   ZZ9KMailboxWireEntry completion_ring[4];
 };
 
+#define DRAIN_TEST_RING_ENTRIES 512U
+#define DRAIN_TEST_INITIAL_FOREIGN 300U
+#define DRAIN_TEST_LATE_FOREIGN 3U
+#define DRAIN_TEST_FOREIGN_TOTAL \
+  (DRAIN_TEST_INITIAL_FOREIGN + DRAIN_TEST_LATE_FOREIGN)
+
+struct DrainTestMailbox {
+  ZZ9KMailboxDescriptor descriptor;
+  ZZ9KMailboxWireEntry request_ring[DRAIN_TEST_RING_ENTRIES];
+  ZZ9KMailboxWireEntry completion_ring[DRAIN_TEST_RING_ENTRIES];
+};
+
 struct CallbackState {
   int called;
   int status;
@@ -29,6 +41,14 @@ struct EventWaitState {
   uint32_t wait_calls;
   uint32_t complete_after_calls;
   uint32_t fail_after_calls;
+};
+
+struct DrainEventState {
+  struct DrainTestMailbox *mailbox;
+  const ZZ9KAsyncRequest *asyncs;
+  uint32_t request_id;
+  uint32_t wait_calls;
+  int waited_with_completion_queued;
 };
 
 static void init_mailbox(struct TestMailbox *mailbox)
@@ -47,6 +67,40 @@ static void init_mailbox(struct TestMailbox *mailbox)
   zz9k_put_be32(mailbox->descriptor.completion_ring_entries, 4);
   zz9k_put_be32(mailbox->descriptor.capability_bits,
                 ZZ9K_CAP_MAILBOX | ZZ9K_CAP_IRQ_COMPLETION);
+}
+
+static void init_drain_mailbox(struct DrainTestMailbox *mailbox)
+{
+  memset(mailbox, 0, sizeof(*mailbox));
+  zz9k_put_be32(mailbox->descriptor.magic, ZZ9K_ABI_MAGIC);
+  zz9k_put_be16(mailbox->descriptor.abi_major, ZZ9K_ABI_VERSION_MAJOR);
+  zz9k_put_be16(mailbox->descriptor.abi_minor, ZZ9K_ABI_VERSION_MINOR);
+  zz9k_put_be32(mailbox->descriptor.descriptor_size,
+                (uint32_t)sizeof(mailbox->descriptor));
+  zz9k_put_be32(mailbox->descriptor.request_ring_offset,
+                (uint32_t)offsetof(struct DrainTestMailbox, request_ring));
+  zz9k_put_be32(mailbox->descriptor.request_ring_entries,
+                DRAIN_TEST_RING_ENTRIES);
+  zz9k_put_be32(mailbox->descriptor.completion_ring_offset,
+                (uint32_t)offsetof(struct DrainTestMailbox, completion_ring));
+  zz9k_put_be32(mailbox->descriptor.completion_ring_entries,
+                DRAIN_TEST_RING_ENTRIES);
+  zz9k_put_be32(mailbox->descriptor.capability_bits,
+                ZZ9K_CAP_MAILBOX | ZZ9K_CAP_IRQ_COMPLETION);
+}
+
+static void prepare_drain_completion_at(struct DrainTestMailbox *mailbox,
+                                        uint32_t index, uint32_t request_id)
+{
+  index %= DRAIN_TEST_RING_ENTRIES;
+  zz9k_put_be32(mailbox->completion_ring[index].request_id, request_id);
+  zz9k_put_be16(mailbox->completion_ring[index].opcode, ZZ9K_OP_PING);
+  zz9k_put_be16(mailbox->completion_ring[index].status, ZZ9K_STATUS_OK);
+  zz9k_put_be16(mailbox->completion_ring[index].payload_len, 0);
+  zz9k_put_be32(mailbox->completion_ring[index].user_cookie,
+                request_id ^ TEST_SYNC_COOKIE_MASK);
+  zz9k_put_be32(mailbox->descriptor.completion_tail,
+                (index + 1U) % DRAIN_TEST_RING_ENTRIES);
 }
 
 static void prepare_completion(struct TestMailbox *mailbox, uint32_t request_id,
@@ -107,6 +161,35 @@ static int prepare_completion_on_event(ZZ9KLibrary *library,
   return ZZ9K_STATUS_OK;
 }
 
+static int prepare_drain_completions_on_event(ZZ9KLibrary *library,
+                                              void *user_data)
+{
+  struct DrainEventState *state = (struct DrainEventState *)user_data;
+  uint32_t head;
+  uint32_t tail;
+  uint32_t i;
+
+  (void)library;
+  head = zz9k_get_be32(state->mailbox->descriptor.completion_head);
+  tail = zz9k_get_be32(state->mailbox->descriptor.completion_tail);
+  state->wait_calls++;
+  if (head != tail) {
+    state->waited_with_completion_queued = 1;
+  }
+  if (state->wait_calls != 1U) {
+    return ZZ9K_STATUS_OK;
+  }
+
+  for (i = 0; i < DRAIN_TEST_LATE_FOREIGN; i++) {
+    prepare_drain_completion_at(
+        state->mailbox, tail + i,
+        state->asyncs[DRAIN_TEST_INITIAL_FOREIGN + i].request_id);
+  }
+  prepare_drain_completion_at(state->mailbox, tail + DRAIN_TEST_LATE_FOREIGN,
+                              state->request_id);
+  return ZZ9K_STATUS_OK;
+}
+
 static uint32_t count_pending(const ZZ9KLibrary *library)
 {
   const ZZ9KAsyncRequest *async;
@@ -123,6 +206,26 @@ static uint32_t count_pending(const ZZ9KLibrary *library)
 }
 
 static int attach_library(ZZ9KLibrary *library, struct TestMailbox *mailbox)
+{
+  ZZ9KContext *ctx;
+  ZZ9KBoard board;
+
+  memset(&board, 0, sizeof(board));
+  if (zz9k_attach_mailbox(&ctx, &board, &mailbox->descriptor, 0, 0) !=
+      ZZ9K_STATUS_OK) {
+    return 1;
+  }
+
+  if (ZZ9KAttachContext(library, ctx, 1) != ZZ9K_STATUS_OK) {
+    zz9k_close(ctx);
+    return 2;
+  }
+
+  return 0;
+}
+
+static int attach_drain_library(ZZ9KLibrary *library,
+                                struct DrainTestMailbox *mailbox)
 {
   ZZ9KContext *ctx;
   ZZ9KBoard board;
@@ -1087,6 +1190,77 @@ static int test_call_waits_for_late_completion(void)
   ZZ9KClose(&library);
   return 0;
 }
+
+static int test_call_drains_foreign_completions_before_waiting(void)
+{
+  struct DrainTestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KAsyncRequest asyncs[DRAIN_TEST_FOREIGN_TOTAL];
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct CallbackState callback_state;
+  struct DrainEventState event_state;
+  uint32_t i;
+  int status;
+
+  init_drain_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_drain_library(&library, &mailbox) != 0) return 1;
+
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  memset(asyncs, 0, sizeof(asyncs));
+  memset(&callback_state, 0, sizeof(callback_state));
+  for (i = 0; i < DRAIN_TEST_FOREIGN_TOTAL; i++) {
+    status = ZZ9KCallAsync(&library, &asyncs[i], &request, async_callback,
+                           &callback_state);
+    if (status != ZZ9K_STATUS_QUEUED) {
+      ZZ9KClose(&library);
+      return 2;
+    }
+  }
+  for (i = 0; i < DRAIN_TEST_INITIAL_FOREIGN; i++) {
+    prepare_drain_completion_at(&mailbox, i, asyncs[i].request_id);
+  }
+
+  memset(&event_state, 0, sizeof(event_state));
+  event_state.mailbox = &mailbox;
+  event_state.asyncs = asyncs;
+  event_state.request_id = 0x7f000001UL;
+  if (ZZ9KSetEventWaiter(&library, prepare_drain_completions_on_event,
+                         &event_state) != ZZ9K_STATUS_OK) {
+    ZZ9KClose(&library);
+    return 3;
+  }
+
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  request.entry.request_id = event_state.request_id;
+  status = ZZ9KCall(&library, &request, &reply, 250U);
+  if (status != ZZ9K_STATUS_OK || reply.request_id != event_state.request_id) {
+    ZZ9KClose(&library);
+    return 4;
+  }
+  if (event_state.wait_calls != 1U ||
+      event_state.waited_with_completion_queued) {
+    ZZ9KClose(&library);
+    return 5;
+  }
+  if (callback_state.called != (int)DRAIN_TEST_FOREIGN_TOTAL) {
+    ZZ9KClose(&library);
+    return 6;
+  }
+  for (i = 0; i < DRAIN_TEST_FOREIGN_TOTAL; i++) {
+    if (!asyncs[i].completed || asyncs[i].queued ||
+        asyncs[i].status != ZZ9K_STATUS_OK) {
+      ZZ9KClose(&library);
+      return 7;
+    }
+  }
+
+  ZZ9KClose(&library);
+  return 0;
+}
 static int test_wait_async_uses_event_waiter_between_polls(void)
 {
   struct TestMailbox mailbox;
@@ -1403,6 +1577,9 @@ int main(void)
   if (result) return 70 + result;
   result = test_call_waits_for_late_completion();
   if (result) return 75 + result;
+
+  result = test_call_drains_foreign_completions_before_waiting();
+  if (result) return 77 + result;
 
   result = test_wait_async_uses_event_waiter_between_polls();
   if (result) return 80 + result;
