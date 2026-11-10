@@ -87,6 +87,37 @@ void zz9k_audio_ring_cache_invalidate(const volatile void *address,
 #endif
 }
 
+#if !ZZ9K_HOST_AMIGA
+static void (*zz9k_mailbox_cache_hook_for_test)(const volatile void *address,
+                                                 uint32_t length);
+
+void zz9k_set_mailbox_cache_hook_for_test(
+    void (*hook)(const volatile void *address, uint32_t length))
+{
+  zz9k_mailbox_cache_hook_for_test = hook;
+}
+#endif
+
+/* The mailbox lives in board RAM. A Zorro III mapping may be cacheable on
+ * 68040/060 systems, so volatile loads alone can keep seeing the tail that
+ * preceded a firmware completion. Clear before reading firmware-owned
+ * fields, and after writing host-owned fields, to make the DMA-visible
+ * contents coherent. */
+static void zz9k_mailbox_cache_invalidate(const volatile void *address,
+                                          uint32_t length)
+{
+#if ZZ9K_HOST_AMIGA
+  if (address && length != 0U) {
+    CacheClearE((APTR)(uintptr_t)address, (ULONG)length, CACRF_ClearD);
+    __asm__ volatile("" ::: "memory");
+  }
+#else
+  if (zz9k_mailbox_cache_hook_for_test) {
+    zz9k_mailbox_cache_hook_for_test(address, length);
+  }
+#endif
+}
+
 
 #define ZZ9K_SYNC_COOKIE_MASK 0x5aa55aa5UL
 #define ZZ9K_MAILBOX_SEMAPHORE_NAME "zz9000.sdk.mailbox"
@@ -3434,6 +3465,8 @@ static int zz9k_enqueue_request_locked(ZZ9KContext *ctx, ZZ9KRequest *request,
     return ZZ9K_STATUS_BAD_REQUEST;
   }
 
+  zz9k_mailbox_cache_invalidate(ctx->mailbox, sizeof(*ctx->mailbox));
+
   head = zz9k_get_be32(ctx->mailbox->request_head);
   tail = zz9k_get_be32(ctx->mailbox->request_tail);
   if (head >= ctx->request_ring_entries || tail >= ctx->request_ring_entries) {
@@ -3452,7 +3485,10 @@ static int zz9k_enqueue_request_locked(ZZ9KContext *ctx, ZZ9KRequest *request,
   entry.status = ZZ9K_STATUS_QUEUED;
 
   zz9k_entry_to_wire(&ctx->request_ring[tail], &entry);
+  zz9k_mailbox_cache_invalidate(&ctx->request_ring[tail],
+                                sizeof(ctx->request_ring[tail]));
   zz9k_put_wire_be32(ctx->mailbox->request_tail, next_tail);
+  zz9k_mailbox_cache_invalidate(ctx->mailbox, sizeof(*ctx->mailbox));
   if (ctx->doorbell) {
     *ctx->doorbell = 1;
   }
@@ -3535,6 +3571,8 @@ static int zz9k_consume_next_completion_locked(ZZ9KContext *ctx,
     return ZZ9K_STATUS_UNSUPPORTED;
   }
 
+  zz9k_mailbox_cache_invalidate(ctx->mailbox, sizeof(*ctx->mailbox));
+
   head = zz9k_get_be32(ctx->mailbox->completion_head);
   tail = zz9k_get_be32(ctx->mailbox->completion_tail);
   if (head >= ctx->completion_ring_entries ||
@@ -3545,9 +3583,13 @@ static int zz9k_consume_next_completion_locked(ZZ9KContext *ctx,
     return ZZ9K_STATUS_BUSY;
   }
 
+  zz9k_mailbox_cache_invalidate(&ctx->completion_ring[head],
+                                sizeof(ctx->completion_ring[head]));
+
   zz9k_entry_from_wire(reply, &ctx->completion_ring[head]);
   next_head = zz9k_next_ring_index(head, ctx->completion_ring_entries);
   zz9k_put_wire_be32(ctx->mailbox->completion_head, next_head);
+  zz9k_mailbox_cache_invalidate(ctx->mailbox, sizeof(*ctx->mailbox));
   if (ctx->irq_ack) {
     *ctx->irq_ack = 1;
   }

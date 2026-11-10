@@ -25,10 +25,14 @@ struct TestMailbox {
 void zz9k_set_idle_hook_for_test(void (*hook)(void));
 void zz9k_set_now_hook_for_test(uint32_t (*hook)(void));
 void zz9k_set_offload_timeout_ms(ZZ9KContext *ctx, uint32_t timeout_ms);
+void zz9k_set_mailbox_cache_hook_for_test(
+    void (*hook)(const volatile void *address, uint32_t length));
 
 static struct TestMailbox *idle_test_mailbox;
 static uint32_t idle_test_now_ms;
 static uint32_t idle_test_calls;
+static struct TestMailbox *cache_test_mailbox;
+static int cache_test_completion_posted;
 
 static void clear_test_env_u32(void)
 {
@@ -85,6 +89,28 @@ static void prepare_completion(struct TestMailbox *mailbox, uint32_t request_id,
                                uint16_t payload_len)
 {
   prepare_completion_at(mailbox, 0, request_id, opcode, status, payload_len);
+}
+
+static void complete_ping_on_mailbox_cache_sync(const volatile void *address,
+                                                uint32_t length)
+{
+  uint32_t request_id;
+
+  if (!cache_test_mailbox ||
+      address != (const volatile void *)&cache_test_mailbox->descriptor ||
+      length != sizeof(cache_test_mailbox->descriptor) ||
+      cache_test_completion_posted ||
+      zz9k_get_be32(cache_test_mailbox->descriptor.request_tail) == 0U ||
+      zz9k_get_be32(cache_test_mailbox->descriptor.completion_tail) != 0U) {
+    return;
+  }
+
+  request_id = zz9k_get_be32(cache_test_mailbox->request_ring[0].request_id);
+  prepare_completion(cache_test_mailbox, request_id, ZZ9K_OP_PING,
+                     ZZ9K_STATUS_OK, 0U);
+  zz9k_put_be32(cache_test_mailbox->completion_ring[0].user_cookie,
+                zz9k_get_be32(cache_test_mailbox->request_ring[0].user_cookie));
+  cache_test_completion_posted = 1;
 }
 
 static void complete_query_caps_from_idle_hook(void)
@@ -2854,6 +2880,48 @@ static int test_audio_stream_gain_roundtrip_result(void)
   zz9k_close(ctx);
   return 0;
 }
+static int test_sync_call_observes_completion_after_cache_sync(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KContext *ctx;
+  ZZ9KBoard board;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  init_mailbox(&mailbox);
+  memset(&board, 0, sizeof(board));
+  memset(&request, 0, sizeof(request));
+  memset(&reply, 0, sizeof(reply));
+  request.entry.opcode = ZZ9K_OP_PING;
+  cache_test_mailbox = &mailbox;
+  cache_test_completion_posted = 0;
+  zz9k_set_mailbox_cache_hook_for_test(complete_ping_on_mailbox_cache_sync);
+
+  if (zz9k_attach_mailbox(&ctx, &board, &mailbox.descriptor, 0, 0) !=
+      ZZ9K_STATUS_OK) {
+    zz9k_set_mailbox_cache_hook_for_test(0);
+    cache_test_mailbox = 0;
+    return 1;
+  }
+
+  status = zz9k_call(ctx, &request, &reply, 1U);
+  zz9k_set_mailbox_cache_hook_for_test(0);
+  cache_test_mailbox = 0;
+  if (status != ZZ9K_STATUS_OK) {
+    zz9k_close(ctx);
+    return 2;
+  }
+  if (!cache_test_completion_posted || reply.request_id != 1U ||
+      reply.opcode != ZZ9K_OP_PING) {
+    zz9k_close(ctx);
+    return 3;
+  }
+
+  zz9k_close(ctx);
+  return 0;
+}
+
 static int test_sync_call_yields_bus_before_polling_completion(void)
 {
   struct TestMailbox mailbox;
@@ -3261,6 +3329,9 @@ int main(void)
   if (result) return 370 + result;
   result = test_audio_stream_gain_roundtrip_result();
   if (result) return 375 + result;
+
+  result = test_sync_call_observes_completion_after_cache_sync();
+  if (result) return 376 + result;
 
   result = test_sync_call_yields_bus_before_polling_completion();
   if (result) return 345 + result;
