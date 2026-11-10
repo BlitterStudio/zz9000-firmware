@@ -313,6 +313,55 @@ static void test_stop_wakes_api_lock_waiter(void)
 	CHECK(kernel.threads[1].wake_reason == ZZAPP_WAKE_READY);
 }
 
+static void test_system_kernel_lock_handoffs(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(kernel.api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) != 0);
+	CHECK(zzapp_kernel_api_block(&kernel, 0) == 0);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_BLOCKED);
+	CHECK(zzapp_kernel_schedule(&kernel, 0) == ZZAPP_KERNEL_SYSTEM);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_api_unlock(&kernel, 0) == 0);
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	zzapp_kernel_service_due(&kernel);
+	CHECK(zzapp_kernel_schedule(&kernel, 0) == ZZAPP_KERNEL_APP0);
+	CHECK(kernel.service_due != 0U);
+	CHECK(zzapp_kernel_api_unlock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0) == ZZAPP_KERNEL_SYSTEM);
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_system_lock(&kernel) != 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0) == ZZAPP_KERNEL_APP0);
+	CHECK(zzapp_kernel_api_unlock(&kernel, 0) == 0);
+}
+
+static void test_fault_releases_kernel_lock(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) != 0);
+	CHECK(zzapp_kernel_api_block(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_api_fault_release(&kernel, 0) == 0);
+	CHECK(kernel.api_lock_owner == -1);
+	CHECK(kernel.threads[1].state == ZZAPP_THREAD_RUNNABLE);
+}
+
 static void test_kernel_stack_covers_decoder_call_chain(void)
 {
 	/* MP3's decode scratch alone is 13,216 bytes; leave room for the
@@ -369,6 +418,8 @@ int main(void)
     test_blocking_api_lock_and_slot_resources();
     test_waiter_isolation_timeout_and_stop();
     test_stop_wakes_api_lock_waiter();
+    test_system_kernel_lock_handoffs();
+    test_fault_releases_kernel_lock();
     test_kernel_stack_covers_decoder_call_chain();
     test_non_timer_interrupt_does_not_advance_time();
     test_system_ticks_wake_sleepers();

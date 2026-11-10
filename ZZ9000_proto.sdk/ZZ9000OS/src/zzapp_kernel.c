@@ -227,6 +227,19 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 		kernel->service_in_window = 0;
 	}
 	runnable = app_runnable(kernel);
+	if (kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER) {
+		uint32_t slot;
+
+		for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
+			if (kernel->api_waiting[slot])
+				return ZZAPP_KERNEL_SYSTEM;
+	} else if (kernel->api_lock_owner >= 0 &&
+		   kernel->api_lock_owner < (int)ZZAPP_KERNEL_APP_SLOTS &&
+		   kernel->threads[kernel->api_lock_owner].state ==
+		   ZZAPP_THREAD_RUNNABLE) {
+		pick = kernel->api_lock_owner;
+		goto charge_app;
+	}
 	if (kernel->service_due &&
 	    (!runnable || kernel->service_in_window + elapsed_ms <=
 	     ZZAPP_KERNEL_SERVICE_LIMIT_MS)) {
@@ -239,15 +252,20 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 		kernel->overload_count++;
 	pick = choose_app(kernel);
 	if (pick >= 0) {
-		zzapp_thread_t *thread = &kernel->threads[pick];
-		uint32_t charged = elapsed_ms;
+		zzapp_thread_t *thread;
 
-		if (charged > thread->quantum_left)
-			charged = thread->quantum_left;
-		thread->user_ticks += charged;
-		thread->quantum_left -= charged;
-		if (thread->quantum_left == 0U)
-			kernel->active = NO_ACTIVE;
+charge_app:
+		thread = &kernel->threads[pick];
+		{
+			uint32_t charged = elapsed_ms;
+
+			if (charged > thread->quantum_left)
+				charged = thread->quantum_left;
+			thread->user_ticks += charged;
+			thread->quantum_left -= charged;
+			if (thread->quantum_left == 0U)
+				kernel->active = NO_ACTIVE;
+		}
 		return pick;
 	}
 	return ZZAPP_KERNEL_IDLE;
@@ -371,6 +389,54 @@ static void release_api_lock(zzapp_kernel_t *kernel)
 	wake_api_waiters(kernel);
 }
 
+int zzapp_kernel_system_lock(zzapp_kernel_t *kernel)
+{
+	if (!kernel)
+		return -1;
+	if (kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER) {
+		kernel->api_lock_depth++;
+		return 0;
+	}
+	if (kernel->api_lock_owner >= 0)
+		return -1;
+	kernel->api_lock_owner = ZZAPP_KERNEL_SYSTEM_OWNER;
+	kernel->api_lock_depth = 1U;
+	return 0;
+}
+
+int zzapp_kernel_system_unlock(zzapp_kernel_t *kernel)
+{
+	uint32_t irq_state;
+
+	if (!kernel)
+		return -1;
+	irq_state = smp_local_irq_save();
+	if (kernel->api_lock_owner != ZZAPP_KERNEL_SYSTEM_OWNER) {
+		smp_local_irq_restore(irq_state);
+		return -1;
+	}
+	if (--kernel->api_lock_depth == 0U)
+		release_api_lock(kernel);
+	smp_local_irq_restore(irq_state);
+	return 0;
+}
+
+int zzapp_kernel_api_fault_release(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	uint32_t irq_state;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	irq_state = smp_local_irq_save();
+	if (kernel->api_lock_owner != (int)slot) {
+		smp_local_irq_restore(irq_state);
+		return -1;
+	}
+	release_api_lock(kernel);
+	smp_local_irq_restore(irq_state);
+	return 0;
+}
+
 int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot)
 {
 	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
@@ -379,7 +445,8 @@ int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot)
 		kernel->api_lock_depth++;
 		return 0;
 	}
-	if (kernel->api_lock_owner >= 0) {
+	if (kernel->api_lock_owner >= 0 ||
+	    kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER) {
 		kernel->api_waiting[slot] = 1U;
 		return -1;
 	}

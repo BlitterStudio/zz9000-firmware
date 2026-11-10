@@ -19,6 +19,7 @@
 #define ZZAPP_KERNEL_APP_CPSR 0x10U
 #define ZZAPP_KERNEL_WAIT_CANCELLED (-1)
 #define ZZAPP_KERNEL_WAIT_TIMEOUT (-8)
+#define ZZAPP_KERNEL_SYSTEM_OWNER (-2)
 
 typedef enum {
 	ZZAPP_KERNEL_DISPATCH_TICK = 0,
@@ -153,6 +154,9 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_system_lock(zzapp_kernel_t *kernel);
+int zzapp_kernel_system_unlock(zzapp_kernel_t *kernel);
+int zzapp_kernel_api_fault_release(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
 			      uint32_t generation, uint32_t base, uint32_t bytes);
 void zzapp_kernel_surface_unbind(zzapp_kernel_t *kernel, uint32_t slot);

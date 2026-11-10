@@ -372,7 +372,9 @@ int main(void)
     assert(api->mem_info(&mem) == ZZ_OK && mem.host_visible_used == 8192u);
     zzapp_test_mark_running();
     zzapp_host_tick_at(1u);
+    zzapp_worker_hook();
     zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(image_close_calls == 1u && image_poisoned_close_calls == 1u);
     assert(image_poison_calls == 0u && image_poison_session_calls == 1u);
@@ -394,7 +396,9 @@ int main(void)
     stop_during_image_begin = 0;
     stop_during_host_alloc = 1;
     zzapp_host_tick_at(1u);
+    zzapp_worker_hook();
     zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(image_poison_session_calls == 1u);
     assert(image_poison_calls == 0u);

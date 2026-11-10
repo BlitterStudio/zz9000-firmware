@@ -10,6 +10,22 @@ int zzapp_host_mem_info(zzapp_mem_info *out);
 static uint32_t selected_slot;
 static int api_wait_hook_called;
 
+static uint32_t service_poll_depth;
+static uint32_t service_poll_max_depth;
+static int tick_during_service_poll;
+
+void zzapp_services_poll(void)
+{
+    service_poll_depth++;
+    if (service_poll_depth > service_poll_max_depth)
+        service_poll_max_depth = service_poll_depth;
+    if (tick_during_service_poll) {
+        tick_during_service_poll = 0;
+        zzapp_host_tick_at(ZZAPP_TICK_US);
+    }
+    service_poll_depth--;
+}
+
 uint32_t zzapp_services_current_slot(void)
 {
     return selected_slot;
@@ -55,18 +71,28 @@ int main(void)
     assert(zzapp_test_in_api() == 1u);
     zzapp_api_leave();
     assert(zzapp_test_in_api() == 0u);
+    assert(zzapp_test_service_calls() == 0u);
+    zzapp_worker_hook();
     assert(zzapp_test_service_calls() == 1u);
-    /* A core-0 operation must retain its selected slot while an app runs on
-     * core 1. */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    tick_during_service_poll = 1;
+    service_poll_max_depth = 0u;
+    zzapp_worker_hook();
+    assert(service_poll_max_depth == 1u);
+
+    /* An app context resolves to its scheduler slot while the system thread
+     * keeps the independently selected service slot. */
     zzapp_boot_init();
     selected_slot = 1U;
     assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
     zzapp_kernel_set_current_thread(0);
     zzapp_api_enter();
     zzapp_kernel_set_current_thread(-1);
-    assert(zzapp_test_in_api() == 1U);
-    selected_slot = 0U;
     assert(zzapp_test_in_api() == 0U);
+    selected_slot = 0U;
+    assert(zzapp_test_in_api() == 1U);
     selected_slot = 1U;
     zzapp_kernel_set_current_thread(0);
     zzapp_api_leave();
@@ -156,6 +182,8 @@ int main(void)
         uint32_t service_calls = zzapp_test_service_calls();
 
         zzapp_host_yield_wait();
+        assert(zzapp_test_service_calls() == service_calls);
+        zzapp_worker_hook();
         assert(zzapp_test_service_calls() == service_calls + 1U);
     }
 
@@ -164,16 +192,27 @@ int main(void)
     zzapp_test_mark_running();
     /* Long app computation between API calls (GLQuake's level load) is
      * not a hang; only ZZAPP_APP_STALL_US without any call stops it. */
-    zzapp_host_tick_at(ZZAPP_WATCHDOG_US + ZZAPP_TICK_US);
-    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
-    zzapp_host_tick_at(ZZAPP_APP_STALL_US);
-    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    {
+        uint32_t service_calls = zzapp_test_service_calls();
+
+        zzapp_host_tick_at(ZZAPP_WATCHDOG_US + ZZAPP_TICK_US);
+        assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+        assert(zzapp_test_service_calls() == service_calls);
+        zzapp_host_tick_at(ZZAPP_APP_STALL_US);
+        assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+        assert(zzapp_test_service_calls() == service_calls);
+        zzapp_worker_hook();
+        assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    }
 
     zzapp_boot_init();
     zzapp_test_set_xtime(0);
     zzapp_test_mark_running();
     zzapp_api_enter();
     zzapp_host_tick_at(ZZAPP_API_STUCK_US);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+    zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
 
     /* should_stop and time_us are API calls. Polling only those must not
@@ -216,6 +255,8 @@ int main(void)
     assert(!zzapp_fault_wants_restart(card + 4u, 0u));
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, card + 4u, card + 8u,
                          card + 12u, 0x1234u, 0x5678u, 0x13u);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(zzapp_test_cold_restarts() == 0);
     assert(zzapp_host_address(host_visible, &host_offset) == ZZ_EINVAL);

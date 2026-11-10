@@ -234,6 +234,7 @@ int main(void)
     assert(g_ops.open_68k(&g_context, NULL, &card) == ZZ_OK);
     assert(g_68k_open);
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, card + 4u, 0u, 0u, 0u, 0u, 0u);
+    zzapp_worker_hook();
     assert(g_reclaims == 1);
     assert(g_reclaim_generation != 0u);
     assert(g_68k_closes == 0);

@@ -134,8 +134,6 @@ static void app_entry(const void *api, int argc, char **argv)
         assert(canary != NULL);
         canary[0] ^= 0xA5u;
         zzapp_host_yield();
-        assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
-        assert(zzapp_test_fault_code() == ZZAPP_FAULT_DATA);
         return;
     }
     if (reset_running) {
@@ -324,6 +322,7 @@ int main(void)
     /* A fault is reported once, then STATUS acknowledges it for a new launch. */
     zzapp_test_mark_running();
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
+    zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(terminal_reason() == ZZAPP_END_USER_FAULT);
     assert(status() == SDK_STATUS_OK);
@@ -338,6 +337,7 @@ int main(void)
     zzapp_test_set_xtime(0U);
     zzapp_test_mark_running();
     zzapp_host_tick_at(30000000U);
+    zzapp_worker_hook();
     assert(terminal_reason() == ZZAPP_END_STALL);
 
     zzapp_boot_init();
@@ -348,6 +348,7 @@ int main(void)
     zzapp_api_enter();
     zzapp_host_tick_at(1U);
     zzapp_host_tick_at(10000001U);
+    zzapp_worker_hook();
     assert(terminal_reason() == ZZAPP_END_STUCK_CALL);
 
     zzapp_boot_init();
@@ -361,6 +362,7 @@ int main(void)
     zzapp_core0_poll();
     zzapp_host_tick_at(2000000U);
     zzapp_host_tick_at(2500000U);
+    zzapp_worker_hook();
     assert(terminal_reason() == ZZAPP_END_LEASE);
 
     zzapp_boot_init();

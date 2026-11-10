@@ -50,7 +50,6 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 
 #define SCHED_CORE1_DOORBELL_SGI 15U
 #define SCHED_CORE1_DOORBELL_CPU 2U
-#define SCHED_CORE1_DOORBELL_BATCH 8U
 
 /* The system thread keeps the established 1 MiB core-1 stack. */
 static uint8_t scheduler_app_stacks[ZZAPP_KERNEL_APP_SLOTS]
@@ -403,6 +402,19 @@ void scheduler_core1_service_from_app(void)
   scheduler_core1_service_once();
 }
 
+static int scheduler_core1_kernel_lock_or_yield(void)
+{
+  zzapp_kernel_t *kernel = zzapp_runtime_kernel();
+
+  if (zzapp_kernel_system_lock(kernel) == 0)
+    return 1;
+  /* An app owns firmware state. Let its API epilogue run; retry only after
+   * the voluntary context switch instead of spinning on this core. */
+  zzapp_kernel_service_due(kernel);
+  __asm__ __volatile__("svc #0" ::: "memory");
+  return 0;
+}
+
 /*
  * Core-1 dedicated worker. Entered from core1_loop (core2.c) after coherency
  * bring-up; never returns. Publishes core1_alive in the coherent shared block
@@ -417,8 +429,12 @@ void scheduler_core1_worker(void)
 {
   taskq_shared_t *sh = scheduler_shared();
 
-
+  for (;;) {
+    if (scheduler_core1_kernel_lock_or_yield())
+      break;
+  }
   scheduler_core1_minigl_init(sh);
+  (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
 
   for (;;) {
     int reset_req;
@@ -426,21 +442,35 @@ void scheduler_core1_worker(void)
     int task_avail;
     int mgl_avail;
     int mgl_bound;
+    int apps_runnable;
+    int should_wfe = 0;
+    uint32_t drained = 0U;
     sched_worker_action_t action;
+
+    if (!scheduler_core1_kernel_lock_or_yield())
+      continue;
+    zzapp_kernel_set_current_thread(-1);
+    if (sh->core1_park_request) {
+      (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+      scheduler_core1_park_if_requested();
+      continue;
+    }
 
     /* Checked before every claim: once core 0 asks, no further task runs. */
     scheduler_core1_reclaim_if_requested(sh);
-    zzapp_kernel_set_current_thread(-1);
     scheduler_core1_clean_if_requested(sh);
-    scheduler_core1_park_if_requested();
     if (sh->service_pending)
-      (void)taskq_doorbell_drain(&sh->service_pending,
-                                  scheduler_doorbell_drain,
-                                  scheduler_doorbell_more, sh,
-                                  SCHED_CORE1_DOORBELL_BATCH);
+      drained = taskq_doorbell_drain(&sh->service_pending,
+                                     scheduler_doorbell_drain,
+                                     scheduler_doorbell_more, sh, 1U);
     zzapp_worker_hook();
-    if (zzapp_kernel_apps_runnable(zzapp_runtime_kernel()))
-      __asm__ __volatile__("svc #0" ::: "memory");
+    apps_runnable = zzapp_kernel_apps_runnable(zzapp_runtime_kernel());
+    if (drained != 0U) {
+      (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+      if (apps_runnable)
+        __asm__ __volatile__("svc #0" ::: "memory");
+      continue;
+    }
 
     reset_req = (sh->minigl_reset_request != 0);
     task_slot = reset_req ? -1 : taskq_claim_any(&sh->queue);
@@ -451,7 +481,7 @@ void scheduler_core1_worker(void)
 
     switch (action) {
     case SCHED_WORKER_ACTION_RESET:
-      /* The module owns context draining.  It is polled only on core 1 and
+      /* The module owns context draining. It is polled only on core 1 and
        * acknowledges after it has stopped its worker-facing resources. */
       if (zzm_minigl_begin_reset() != ZZM_MINIGL_RESET_BUSY &&
           zzm_minigl_reset_poll() == ZZM_MINIGL_RESET_QUIESCENT) {
@@ -479,13 +509,18 @@ void scheduler_core1_worker(void)
 
     case SCHED_WORKER_ACTION_WFE:
     default:
-      if (!taskq_has_active(&sh->queue) &&
-          !sh->minigl_reset_request &&
-          !sh->minigl_doorbell &&
-          !zzm_minigl_worker_registered())
-        __asm__ __volatile__("wfe" ::: "memory");
+      should_wfe = !taskq_has_active(&sh->queue) &&
+                   !sh->minigl_reset_request &&
+                   !sh->minigl_doorbell &&
+                   !zzm_minigl_worker_registered();
       break;
     }
+
+    (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+    if (should_wfe)
+      __asm__ __volatile__("wfe" ::: "memory");
+    else if (apps_runnable)
+      __asm__ __volatile__("svc #0" ::: "memory");
   }
 }
 

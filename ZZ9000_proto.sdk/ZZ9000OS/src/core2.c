@@ -211,6 +211,17 @@ static void print_fault_detail(uint32_t code)
 	}
 }
 
+static void recover_app_fault_locks(void)
+{
+	/*
+	 * An app fault can only orphan locks held by its own core-1 API call.
+	 * The kernel lock excludes every other core-1 thread from firmware while
+	 * that call runs, and the owner-checked resets leave a core-0 owner alone.
+	 */
+	sdk_smp_lock_reset_malloc_if_owned();
+	sdk_smp_lock_reset_if_owned(&card_pool.lock);
+}
+
 static void record_fault(uint32_t code, const char *name)
 {
 	/*
@@ -703,8 +714,7 @@ void arm_exception_handler_id_data_abort(void *callback) {
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
 	if (!zzapp_fault_wants_restart(DataAbortAddr, DataAbortAddr + 8u)) {
-		sdk_smp_lock_reset_malloc_if_owned();
-		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_DATA, DataAbortAddr, sp, lr, far, fsr, cpsr);
 		return;
 	}
@@ -719,8 +729,7 @@ void arm_exception_handler_id_prefetch_abort(void *callback) {
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
 	if (!zzapp_fault_wants_restart(PrefetchAbortAddr, PrefetchAbortAddr + 4u)) {
-		sdk_smp_lock_reset_malloc_if_owned();
-		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_PREFETCH, PrefetchAbortAddr, sp, lr, far, fsr, cpsr);
 		return;
 	}
@@ -738,8 +747,7 @@ void arm_exception_handler_illinst(void *callback) {
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
 	if (!zzapp_fault_wants_restart(UndefinedExceptionAddr, UndefinedExceptionAddr + 4u)) {
-		sdk_smp_lock_reset_malloc_if_owned();
-		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_UNDEF, UndefinedExceptionAddr, sp, lr, 0, 0, cpsr);
 		return;
 	}
