@@ -403,6 +403,54 @@ static void test_system_ticks_wake_sleepers(void)
 	CHECK(next == &kernel.threads[0].context.frame);
 	CHECK(kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
 }
+static void test_restart_releases_kernel_lock_waiters(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) != 0);
+	CHECK(zzapp_kernel_api_block(&kernel, 0) == 0);
+	zzapp_kernel_reset_lock(&kernel);
+	CHECK(kernel.api_lock_owner == -1);
+	CHECK(kernel.api_lock_depth == 0U);
+	CHECK(kernel.api_waiting[0] == 0U);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
+	CHECK(kernel.threads[0].wake_reason == ZZAPP_WAKE_READY);
+
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) != 0);
+	CHECK(zzapp_kernel_api_block(&kernel, 1) == 0);
+	zzapp_kernel_reset_lock(&kernel);
+	CHECK(kernel.api_lock_owner == -1);
+	CHECK(kernel.api_lock_depth == 0U);
+	CHECK(kernel.api_waiting[1] == 0U);
+	CHECK(kernel.threads[1].state == ZZAPP_THREAD_RUNNABLE);
+	CHECK(kernel.threads[1].wake_reason == ZZAPP_WAKE_READY);
+}
+
+static void test_system_lock_inheritance_is_throttled(void)
+{
+	zzapp_kernel_t kernel;
+	unsigned i;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) != 0);
+	CHECK(zzapp_kernel_api_block(&kernel, 0) == 0);
+	for (i = 0U; i < 19U; ++i)
+		CHECK(zzapp_kernel_schedule(&kernel, 5U) == ZZAPP_KERNEL_SYSTEM);
+	CHECK(kernel.service_ticks == 95U);
+	CHECK(kernel.service_in_window == 95U);
+	CHECK(zzapp_kernel_schedule(&kernel, 5U) == ZZAPP_KERNEL_APP1);
+	CHECK(kernel.threads[1].user_ticks == 5U);
+	CHECK(kernel.overload_count == 1U);
+}
+
 
 int main(void)
 {
@@ -423,6 +471,8 @@ int main(void)
     test_kernel_stack_covers_decoder_call_chain();
     test_non_timer_interrupt_does_not_advance_time();
     test_system_ticks_wake_sleepers();
+    test_restart_releases_kernel_lock_waiters();
+    test_system_lock_inheritance_is_throttled();
     printf("kernel_sched_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;
 }

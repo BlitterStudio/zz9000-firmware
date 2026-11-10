@@ -7,12 +7,27 @@
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
 int zzapp_host_address(const void *p, uint32_t *host_offset);
 int zzapp_host_mem_info(zzapp_mem_info *out);
+void zzapp_kernel_switch_address_space(uint32_t slot);
 static uint32_t selected_slot;
 static int api_wait_hook_called;
 
 static uint32_t service_poll_depth;
 static uint32_t service_poll_max_depth;
 static int tick_during_service_poll;
+static int stop_requested;
+static unsigned service_core = 1U;
+
+static void set_service_core(unsigned core)
+{
+    service_core = core;
+}
+
+
+int zzapp_svc_should_stop(void)
+{
+    return stop_requested;
+}
+
 
 void zzapp_services_poll(void)
 {
@@ -28,6 +43,10 @@ void zzapp_services_poll(void)
 
 uint32_t zzapp_services_current_slot(void)
 {
+    int slot = zzapp_kernel_current_thread();
+
+    if (service_core == 1U && slot >= 0 && slot < 4)
+        return (uint32_t)slot;
     return selected_slot;
 }
 
@@ -98,6 +117,38 @@ int main(void)
     zzapp_api_leave();
     zzapp_kernel_set_current_thread(-1);
     selected_slot = 0U;
+    /* An app address-space switch cannot replace the system thread's service
+     * selection, and core 0 ignores core 1's current app thread. */
+    zzapp_boot_init();
+    selected_slot = 1U;
+    zzapp_kernel_switch_address_space(0U);
+    assert(selected_slot == 1U);
+    zzapp_kernel_set_current_thread(-1);
+    zzapp_test_mark_running();
+    zzapp_kernel_set_current_thread(0);
+    set_service_core(0U);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    set_service_core(1U);
+    zzapp_kernel_set_current_thread(-1);
+    selected_slot = 0U;
+
+    /* A forced stop cannot tear down an in-flight commit. The timer and
+     * worker leave the app runnable until its publication completes. */
+    zzapp_boot_init();
+    selected_slot = 0U;
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    zzapp_host_commit_begin();
+    zzapp_on_amiga_reset();
+    zzapp_host_tick_at(ZZAPP_STOP_GRACE_US);
+    zzapp_worker_hook();
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    zzapp_host_commit_end();
+    zzapp_worker_hook();
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+    zzapp_kernel_set_current_thread(-1);
+
 
     /* A contending API call parks until the owner releases the lock, before
      * its handler can execute. */

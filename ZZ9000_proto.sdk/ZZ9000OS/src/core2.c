@@ -369,6 +369,7 @@ void core1_cold_restart(void)
 	l2_maint_reset_core1_lock();
 	zzapp_services_reset_core1_lock();
 	sdk_smp_lock_reset_malloc();
+	zzapp_kernel_reset_lock(zzapp_runtime_kernel());
 	/*
 	 * Same orphan-lock exposure as the malloc lock: the cold reset
 	 * can land inside the image-stream decode-state budget

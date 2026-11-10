@@ -222,7 +222,7 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	if (!kernel)
 		return ZZAPP_KERNEL_IDLE;
 	zzapp_kernel_advance(kernel, elapsed_ms);
-	if (kernel->now - kernel->window_start >= ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
+	if (kernel->now - kernel->window_start > ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
 		kernel->window_start = kernel->now;
 		kernel->service_in_window = 0;
 	}
@@ -230,9 +230,18 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	if (kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER) {
 		uint32_t slot;
 
-		for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
-			if (kernel->api_waiting[slot])
+		for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
+			if (!kernel->api_waiting[slot])
+				continue;
+			if (!runnable || kernel->service_in_window + elapsed_ms <=
+			    ZZAPP_KERNEL_SERVICE_LIMIT_MS) {
+				kernel->service_ticks += elapsed_ms;
+				kernel->service_in_window += elapsed_ms;
 				return ZZAPP_KERNEL_SYSTEM;
+			}
+			kernel->overload_count++;
+			break;
+		}
 	} else if (kernel->api_lock_owner >= 0 &&
 		   kernel->api_lock_owner < (int)ZZAPP_KERNEL_APP_SLOTS &&
 		   kernel->threads[kernel->api_lock_owner].state ==
@@ -387,6 +396,13 @@ static void release_api_lock(zzapp_kernel_t *kernel)
 	kernel->api_lock_owner = -1;
 	kernel->api_lock_depth = 0U;
 	wake_api_waiters(kernel);
+}
+
+void zzapp_kernel_reset_lock(zzapp_kernel_t *kernel)
+{
+	if (!kernel)
+		return;
+	release_api_lock(kernel);
 }
 
 int zzapp_kernel_system_lock(zzapp_kernel_t *kernel)

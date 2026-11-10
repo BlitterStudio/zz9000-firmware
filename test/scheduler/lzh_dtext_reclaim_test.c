@@ -17,6 +17,26 @@
 FILE *infile;
 FILE *outfile;
 
+
+void *sdk_decode_heap_alloc(size_t size)
+{
+	return malloc(size);
+}
+
+void sdk_decode_heap_free(void *ptr)
+{
+	free(ptr);
+}
+
+void *sdk_decode_heap_realloc(void *ptr, size_t size)
+{
+	return realloc(ptr, size);
+}
+
+void *sdk_decode_heap_calloc(size_t count, size_t size)
+{
+	return calloc(count, size);
+}
 extern unsigned char *dtext;
 
 static unsigned flush_count;

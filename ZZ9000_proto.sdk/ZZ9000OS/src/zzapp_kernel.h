@@ -157,6 +157,8 @@ int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_system_lock(zzapp_kernel_t *kernel);
 int zzapp_kernel_system_unlock(zzapp_kernel_t *kernel);
 int zzapp_kernel_api_fault_release(zzapp_kernel_t *kernel, uint32_t slot);
+/* Core 0 calls this only while core 1 is held in reset. */
+void zzapp_kernel_reset_lock(zzapp_kernel_t *kernel);
 int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
 			      uint32_t generation, uint32_t base, uint32_t bytes);
 void zzapp_kernel_surface_unbind(zzapp_kernel_t *kernel, uint32_t slot);

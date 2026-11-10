@@ -464,10 +464,9 @@ void scheduler_core1_worker(void)
                                      scheduler_doorbell_drain,
                                      scheduler_doorbell_more, sh, 1U);
     zzapp_worker_hook();
-    apps_runnable = zzapp_kernel_apps_runnable(zzapp_runtime_kernel());
     if (drained != 0U) {
       (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
-      if (apps_runnable)
+      if (zzapp_kernel_apps_runnable(zzapp_runtime_kernel()))
         __asm__ __volatile__("svc #0" ::: "memory");
       continue;
     }
@@ -534,6 +533,7 @@ void scheduler_core1_worker(void)
     /* A runnable app gets the core back at once. Idling in WFE while an
      * app could run left it waiting for the next 5 ms tick after every
      * service pass, which made swquake take minutes to load (kit 66). */
+    apps_runnable = zzapp_kernel_apps_runnable(zzapp_runtime_kernel());
     if (apps_runnable)
       __asm__ __volatile__("svc #0" ::: "memory");
     else if (should_wfe)
