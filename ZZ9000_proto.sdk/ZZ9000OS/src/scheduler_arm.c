@@ -515,12 +515,29 @@ void scheduler_core1_worker(void)
                    !zzm_minigl_worker_registered();
       break;
     }
+    /* An app parked on host data (a file reply, console input, a flip) is
+     * woken by this loop's next service pass. The launcher's reply raises
+     * no interrupt, so idling in WFE would add up to one 5 ms tick to every
+     * request; keep polling while any wait is registered. */
+    if (should_wfe) {
+      uint32_t slot;
+
+      for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
+        if (zzapp_services_wait_registered(slot)) {
+          should_wfe = 0;
+          break;
+        }
+      }
+    }
 
     (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
-    if (should_wfe)
-      __asm__ __volatile__("wfe" ::: "memory");
-    else if (apps_runnable)
+    /* A runnable app gets the core back at once. Idling in WFE while an
+     * app could run left it waiting for the next 5 ms tick after every
+     * service pass, which made swquake take minutes to load (kit 66). */
+    if (apps_runnable)
       __asm__ __volatile__("svc #0" ::: "memory");
+    else if (should_wfe)
+      __asm__ __volatile__("wfe" ::: "memory");
   }
 }
 
