@@ -652,6 +652,9 @@ static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
                (unsigned long)zzapp_svc_last_number[slot],
                (unsigned long)g_api_parked[slot],
                zzapp_services_wait_registered(slot));
+        /* Kit 66 lost the second half of this line: stdout is buffered and
+         * nothing else printed after the app stopped. */
+        fflush(stdout);
     }
 #endif
     publish_state(ZZAPP_ST_FAULTED);
