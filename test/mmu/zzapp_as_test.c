@@ -209,6 +209,37 @@ static void test_alias_maps_only_in_private_region(void)
 	CHECK(zzapp_as_alias_phys(&as, ZZAPP_AS_ALIAS_BASE) == 0U);
 }
 
+static void test_alias_rejects_larger_than_private_region(void)
+{
+	zzapp_as_t as;
+	uint32_t va;
+
+	CHECK(zzapp_as_create(&as, 0U, 8U) == 0);
+	CHECK(zzapp_as_alias_map(&as, 0x03400000U,
+		ZZAPP_AS_ALIAS_END - ZZAPP_AS_ALIAS_BASE + 4096U, 1, &va) ==
+	      ZZAPP_AS_ENOMEM);
+	zzapp_as_destroy(&as);
+}
+
+static void test_alias_honours_virtual_alignment(void)
+{
+	zzapp_as_t as;
+	uint32_t first;
+	uint32_t aligned;
+
+	CHECK(zzapp_as_create(&as, 0U, 9U) == 0);
+	CHECK(zzapp_as_alias_map(&as, 0x03400000U, 4096U, 1, &first) == 0);
+	CHECK(zzapp_as_alias_map_aligned(&as, 0x03401000U, 4096U, 1,
+		65536U, &aligned) == 0);
+	CHECK((aligned & (65536U - 1U)) == 0U);
+	CHECK(zzapp_as_alias_map_aligned(&as, 0x03402000U, 4096U, 1,
+		8192U, &aligned) == 0);
+	CHECK((aligned & (8192U - 1U)) == 0U);
+	CHECK(zzapp_as_alias_map_aligned(&as, 0x03403000U, 4096U, 1,
+		2048U, &aligned) != 0);
+	zzapp_as_destroy(&as);
+}
+
 static void test_alias_l2_exhaustion_is_atomic(void)
 {
 	zzapp_as_t first;
@@ -246,6 +277,8 @@ int main(void)
 	test_section_attribute_change_reaches_alias_pages();
 	test_alias_maps_only_in_private_region();
 	test_alias_l2_exhaustion_is_atomic();
+	test_alias_rejects_larger_than_private_region();
+	test_alias_honours_virtual_alignment();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

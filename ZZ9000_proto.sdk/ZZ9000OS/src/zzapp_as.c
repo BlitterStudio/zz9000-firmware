@@ -300,18 +300,22 @@ static int alias_range_ok(const zzapp_as_t *as, uint32_t address,
 	if (!as || !as->active || bytes == 0U ||
 	    (address & (4096U - 1U)) != 0U ||
 	    (bytes & (4096U - 1U)) != 0U ||
-	    address < ZZAPP_AS_ALIAS_BASE ||
+	    address < ZZAPP_AS_ALIAS_BASE || address >= ZZAPP_AS_ALIAS_END ||
 	    bytes > ZZAPP_AS_ALIAS_END - address)
 		return 0;
 	return 1;
 }
 
-static int alias_first_free(uint32_t slot, uint32_t pages)
+static int alias_first_free(uint32_t slot, uint32_t pages, uint32_t alignment)
 {
 	uint32_t first;
 	uint32_t page;
 
+	if (pages == 0U || pages > ZZAPP_AS_ALIAS_PAGE_COUNT)
+		return -1;
 	for (first = 0U; first <= ZZAPP_AS_ALIAS_PAGE_COUNT - pages; first++) {
+		if (((ZZAPP_AS_ALIAS_BASE + first * 4096U) & (alignment - 1U)) != 0U)
+			continue;
 		for (page = 0U; page < pages; page++)
 			if (alias_used[slot][first + page])
 				break;
@@ -437,16 +441,21 @@ int zzapp_as_unmap_frames(zzapp_as_t *as, uint32_t virtual_base,
 	return 0;
 }
 
-int zzapp_as_alias_map_flags(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
-			     uint32_t flags, uint32_t *va)
+int zzapp_as_alias_map_flags_aligned(zzapp_as_t *as, uint32_t phys,
+				     uint32_t bytes, uint32_t flags,
+				     uint32_t alignment, uint32_t *va)
 {
 	uint32_t offset;
 	uint32_t virtual_base;
 	uint32_t pages;
 	int first;
 
+	if (bytes > ZZAPP_AS_ALIAS_END - ZZAPP_AS_ALIAS_BASE)
+		return ZZAPP_AS_ENOMEM;
 	if (!as || !as->active || !va || (phys & (4096U - 1U)) != 0U ||
 	    bytes == 0U || (bytes & (4096U - 1U)) != 0U ||
+	    alignment < 4096U || (alignment & (alignment - 1U)) != 0U ||
+	    (alignment & (4096U - 1U)) != 0U ||
 	    (uint64_t)phys + bytes > (uint64_t)UINT32_MAX + 1U ||
 	    (flags != ZZAPP_AS_ALIAS_RO && flags != ZZAPP_AS_ALIAS_RW &&
 	     flags != ZZAPP_AS_ALIAS_RX))
@@ -458,7 +467,7 @@ int zzapp_as_alias_map_flags(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
 			return -1;
 	pages = bytes >> PAGE_SHIFT;
 	sdk_smp_lock_acquire(&as_lock);
-	first = alias_first_free(as->slot, pages);
+	first = alias_first_free(as->slot, pages, alignment);
 	if (first < 0) {
 		sdk_smp_lock_release(&as_lock);
 		return ZZAPP_AS_ENOMEM;
@@ -495,11 +504,24 @@ int zzapp_as_alias_map_flags(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
 	return 0;
 }
 
+int zzapp_as_alias_map_aligned(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
+			       int writable, uint32_t alignment, uint32_t *va)
+{
+	return zzapp_as_alias_map_flags_aligned(as, phys, bytes,
+		writable ? ZZAPP_AS_ALIAS_RW : ZZAPP_AS_ALIAS_RO, alignment, va);
+}
+
+int zzapp_as_alias_map_flags(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
+			     uint32_t flags, uint32_t *va)
+{
+	return zzapp_as_alias_map_flags_aligned(as, phys, bytes, flags, 4096U,
+						va);
+}
+
 int zzapp_as_alias_map(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
 		       int writable, uint32_t *va)
 {
-	return zzapp_as_alias_map_flags(as, phys, bytes,
-		writable ? ZZAPP_AS_ALIAS_RW : ZZAPP_AS_ALIAS_RO, va);
+	return zzapp_as_alias_map_aligned(as, phys, bytes, writable, 4096U, va);
 }
 
 int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va, uint32_t bytes)

@@ -55,11 +55,12 @@ static void dynamic_entry(const void *api_ptr, int argc, char **argv)
     void *old_break;
     uint32_t bytes;
 
-    assert(argc == 0);
+    assert(argc == 1);
     assert(argv != NULL);
+    assert(strcmp(argv[0], "dynamic-argv") == 0);
     zzapp_host_heap(&base, &bytes);
-    assert(base != NULL);
-    assert(bytes == 0u);
+    assert(base > (void *)argv[0]);
+    assert(bytes != 0u);
     assert(api->heap_grow(1u << 20, &old_break) == ZZ_OK);
     assert(old_break != NULL);
     assert(api->heap_shrink(1u << 20, NULL) == ZZ_OK);
@@ -281,8 +282,14 @@ int main(void)
     assert(argv_started);
 
     make_image(image);
+    put32(image + PHOFF + 20u, (1u << 20) - LOAD_OFF);
     put32(image + NOTE_OFF + 28u, 3u);
-    start_argc = 0u;
+    put32(image + NOTE_OFF + 40u, 1u);
+    zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
+                   ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
+    memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
+           "dynamic-argv", 13u);
+    start_argc = 1u;
     assert(load_end(image) == ZZ_OK);
     zzapp_test_set_entry(dynamic_entry);
     start_pending = 1;

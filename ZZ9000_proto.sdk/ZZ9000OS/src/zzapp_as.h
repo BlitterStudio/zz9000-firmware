@@ -51,13 +51,20 @@ int zzapp_as_map_frames(zzapp_as_t *as, uint32_t virtual_base,
 int zzapp_as_unmap_frames(zzapp_as_t *as, uint32_t virtual_base,
                           uint32_t frame_count);
 /* Map [phys, phys + bytes) into this app's private alias range. phys and
- * bytes must be page aligned. RO and RW mappings are XN; RX is executable. */
+ * bytes must be page aligned. alignment must be a power-of-two page
+ * alignment. RO and RW mappings are XN; RX is executable. */
+int zzapp_as_alias_map_flags_aligned(zzapp_as_t *as, uint32_t phys,
+				     uint32_t bytes, uint32_t flags,
+				     uint32_t alignment, uint32_t *va);
+/* Map an XN RO or RW alias with the requested virtual alignment. */
+int zzapp_as_alias_map_aligned(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
+			       int writable, uint32_t alignment, uint32_t *va);
+/* Convenience wrapper for a page-aligned RO, RW, or RX alias. */
 int zzapp_as_alias_map_flags(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
 			     uint32_t flags, uint32_t *va);
-/* Convenience wrapper for an XN RO or RW alias. */
+/* Convenience wrapper for a page-aligned XN RO or RW alias. */
 int zzapp_as_alias_map(zzapp_as_t *as, uint32_t phys, uint32_t bytes,
 		       int writable, uint32_t *va);
-/* Unmap exactly the alias returned by zzapp_as_alias_map. */
 int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va, uint32_t bytes);
 /* Return the physical address for an alias address, or zero when unmapped. */
 uint32_t zzapp_as_alias_phys(const zzapp_as_t *as, uint32_t va);

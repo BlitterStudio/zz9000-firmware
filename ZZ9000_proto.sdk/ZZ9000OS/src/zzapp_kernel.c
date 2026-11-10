@@ -5,7 +5,20 @@
  */
 #include <string.h>
 
+#include "sdk_smp_lock.h"
 #include "zzapp_kernel.h"
+
+#ifdef ZZAPP_HOST_TEST
+uint32_t __attribute__((weak)) smp_local_irq_save(void)
+{
+	return 0U;
+}
+
+void __attribute__((weak)) smp_local_irq_restore(uint32_t state)
+{
+	(void)state;
+}
+#endif
 
 
 static volatile int current_thread = -1;
@@ -378,21 +391,34 @@ int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot)
 
 int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS ||
-	    kernel->api_lock_owner != (int)slot)
+	uint32_t irq_state;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
 		return -1;
+	irq_state = smp_local_irq_save();
+	if (kernel->api_lock_owner != (int)slot) {
+		smp_local_irq_restore(irq_state);
+		return -1;
+	}
 	if (--kernel->api_lock_depth == 0U)
 		release_api_lock(kernel);
+	smp_local_irq_restore(irq_state);
 	return 0;
 }
 
 int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot)
 {
+	uint32_t irq_state;
+	int rc;
+
 	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
 		return -1;
+	irq_state = smp_local_irq_save();
 	if (kernel->api_lock_owner == (int)slot)
 		release_api_lock(kernel);
-	return zzapp_kernel_block(kernel, slot);
+	rc = zzapp_kernel_block(kernel, slot);
+	smp_local_irq_restore(irq_state);
+	return rc;
 }
 
 static int surface_overlaps(uint32_t base_a, uint32_t bytes_a,

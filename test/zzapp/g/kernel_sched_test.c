@@ -4,6 +4,21 @@
 
 #include "zzapp_kernel.h"
 
+static unsigned irq_save_calls;
+static unsigned irq_restore_calls;
+
+uint32_t smp_local_irq_save(void)
+{
+	irq_save_calls++;
+	return 0U;
+}
+
+void smp_local_irq_restore(uint32_t state)
+{
+	(void)state;
+	irq_restore_calls++;
+}
+
 static int failures;
 static unsigned checks;
 
@@ -223,8 +238,11 @@ static void test_blocking_api_lock_and_slot_resources(void)
 	for (i = 0; i < 20; i++)
 		(void)zzapp_kernel_schedule(&kernel, 5);
 	CHECK(kernel.threads[0].user_ticks == 0u);
-	CHECK(zzapp_kernel_wake(&kernel, 0, ZZAPP_WAKE_READY) == 0);
+	irq_save_calls = 0U;
+	irq_restore_calls = 0U;
 	CHECK(zzapp_kernel_api_unlock(&kernel, 1) == 0);
+	CHECK(irq_save_calls == 1U);
+	CHECK(irq_restore_calls == 1U);
 	CHECK(kernel.threads[0].wake_reason == ZZAPP_WAKE_READY);
 
 	CHECK(zzapp_kernel_surface_bind(&kernel, 0, 11u, 0x200000u,

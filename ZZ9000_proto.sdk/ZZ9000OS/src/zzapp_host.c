@@ -40,7 +40,9 @@ static uint8_t g_test_wait_registered[ZZAPP_AS_SLOT_COUNT];
 
 uint32_t __attribute__((weak)) zzapp_services_current_slot(void)
 {
-    return 0U;
+    int slot = zzapp_kernel_current_thread();
+
+    return slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT ? (uint32_t)slot : 0U;
 }
 
 void __attribute__((weak)) zzapp_services_select_slot(uint32_t slot)
@@ -141,19 +143,7 @@ static struct zzapp_host_slot g_host[ZZAPP_AS_SLOT_COUNT];
 static zzapp_proc_t g_proc[ZZAPP_AS_SLOT_COUNT];
 static zzapp_kernel_t g_kernel;
 static int g_cold_restarts;
-static uint8_t g_api_waiting[ZZAPP_AS_SLOT_COUNT];
 static uint8_t g_api_parked[ZZAPP_AS_SLOT_COUNT];
-
-static void wake_api_waiters(void)
-{
-    uint32_t slot;
-
-    if (g_kernel.api_lock_owner >= 0)
-        return;
-    for (slot = 0; slot < ZZAPP_AS_SLOT_COUNT; ++slot)
-        if (g_api_waiting[slot])
-            (void)zzapp_kernel_wake(&g_kernel, slot, ZZAPP_WAKE_READY);
-}
 
 /* Set in service_tick (possibly IRQ context); reported from run_app. */
 #ifdef ZZAPP_HOST_TEST
@@ -322,12 +312,14 @@ static volatile uint32_t g_host_visible_commit_active[ZZAPP_AS_SLOT_COUNT];
 static uint32_t g_host_visible_used[ZZAPP_AS_SLOT_COUNT];
 #ifndef ZZAPP_HOST_TEST
 static int host_visible_alias_map(uint32_t slot, uint32_t card,
-                                  uint32_t bytes, uint32_t *alias)
+                                  uint32_t bytes, uint32_t align,
+                                  uint32_t *alias)
 {
     if (!alias || (card & 0xfffU) || !bytes || (bytes & 0xfffU) ||
         card + bytes < card || card + bytes > 0x40000000U)
         return -1;
-    return zzapp_as_alias_map(&g_proc[slot].as, card, bytes, 1, alias);
+    return zzapp_as_alias_map_aligned(&g_proc[slot].as, card, bytes, 1,
+                                      align, alias);
 }
 
 static int host_visible_alias_unmap(uint32_t slot, uint32_t alias,
@@ -872,13 +864,11 @@ static void api_lock_until_acquired(uint32_t slot)
 #endif
 
         if (zzapp_kernel_api_lock(&g_kernel, slot) == 0) {
-            g_api_waiting[slot] = 0u;
 #ifndef ZZAPP_HOST_TEST
             api_lock_irq_restore(cpsr);
 #endif
             return;
         }
-        g_api_waiting[slot] = 1u;
         (void)zzapp_kernel_block(&g_kernel, slot);
 #ifndef ZZAPP_HOST_TEST
         api_lock_irq_restore(cpsr);
@@ -891,6 +881,15 @@ static void api_lock_until_acquired(uint32_t slot)
         zzapp_test_api_wait_hook();
 #endif
     }
+}
+
+static void resume_parked_api(uint32_t slot)
+{
+    struct zzapp_coherent *coh = coherent(slot);
+
+    coh->api_entered = now_ticks();
+    host_slot(slot)->seen_api_calls = coh->api_calls;
+    g_api_parked[slot] = 0u;
 }
 
 
@@ -918,7 +917,6 @@ void zzapp_host_yield_wait(void)
     }
     g_api_parked[slot] = zzapp_services_wait_registered(slot) ? 1u : 0u;
     (void)zzapp_kernel_api_block(&g_kernel, slot);
-    wake_api_waiters();
     if (!g_api_parked[slot])
         (void)zzapp_kernel_sleep(&g_kernel, slot, g_kernel.now + 1U);
     zzapp_note_progress();
@@ -929,10 +927,12 @@ void zzapp_host_yield_wait(void)
      */
     __asm__ __volatile__("svc 0" ::: "memory");
     api_lock_until_acquired(slot);
-    g_api_parked[slot] = 0u;
+    resume_parked_api(slot);
 #else
-    if (!g_api_parked[slot])
+    if (!g_api_parked[slot]) {
         api_lock_until_acquired(slot);
+        resume_parked_api(slot);
+    }
 #endif
 }
 void zzapp_host_sleep(uint32_t us)
@@ -943,13 +943,12 @@ void zzapp_host_sleep(uint32_t us)
         return;
     g_api_parked[slot] = 1u;
     (void)zzapp_kernel_api_block(&g_kernel, slot);
-    wake_api_waiters();
     (void)zzapp_kernel_sleep(&g_kernel, slot,
         g_kernel.now + (uint64_t)((us + 999u) / 1000u));
 #ifndef ZZAPP_HOST_TEST
     __asm__ __volatile__("svc 0" ::: "memory");
     api_lock_until_acquired(slot);
-    g_api_parked[slot] = 0u;
+    resume_parked_api(slot);
 #endif
 }
 
@@ -990,7 +989,6 @@ void zzapp_api_leave(void)
         coh->in_api--;
     if (zzapp_kernel_current_thread() >= 0) {
         (void)zzapp_kernel_api_unlock(&g_kernel, slot);
-        wake_api_waiters();
     }
     if (!coh->in_api && coh->service_due)
         service_tick(now_ticks(), 0);
@@ -1186,10 +1184,7 @@ static void run_app(uint32_t argc)
     rc = copy_argv(argc, &argv);
     if (rc != ZZ_OK) { start_failed(rc); return; }
     host->heap_bump = (host->heap_bump + 7u) & ~7u;
-    if (proc->note_minor < 3u)
-        proc->heap_start = host->heap_bump;
-    else
-        proc->heap_start = proc->heap_base;
+    proc->heap_start = host->heap_bump;
     proc->heap_break = proc->heap_base +
                        proc->heap_frame_count * ZZAPP_MEM_FRAME_BYTES;
     proc->heap_limit = host->heap_end;
@@ -1535,7 +1530,6 @@ void zzapp_boot_init(void)
     memset((void *)g_coh, 0, sizeof(*g_coh) * ZZAPP_AS_SLOT_COUNT);
     memset(g_host, 0, sizeof(g_host));
     memset(g_proc, 0, sizeof(g_proc));
-    memset(g_api_waiting, 0, sizeof(g_api_waiting));
     memset(g_api_parked, 0, sizeof(g_api_parked));
     zzapp_kernel_init(&g_kernel);
     zzapp_loader_memory_init();
@@ -1613,7 +1607,8 @@ void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
         zzapp_host_commit_begin();
 #ifndef ZZAPP_HOST_TEST
         card = surface_allocator_alloc_aligned(bytes, align);
-        if (!card || host_visible_alias_map(slot, card, bytes, &alias) != 0) {
+        if (!card || host_visible_alias_map(slot, card, bytes, align,
+                                            &alias) != 0) {
             if (card)
                 (void)surface_allocator_free(card);
             g_host_visible_commit_active[slot] = 0u;
