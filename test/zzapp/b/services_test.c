@@ -850,6 +850,43 @@ static void test_stop_releases_claimed_slot(void)
 	    zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION) != generation[0] + 1U)
 		fail("claimed slot was not released");
 }
+static void test_stop_cancels_queued_claim_load(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim slot before queued load");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED)
+		fail("queue claimed load");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_STOP, request, sizeof(request), reply,
+				   &reply_len, 1, 3U, 0U) != SDK_STATUS_OK)
+		fail("stop queued claimed load");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 4U, 0U) != SDK_STATUS_OK)
+		fail("reclaim stopped slot");
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (service_loader_generation != 0U)
+		fail("stale claimed load reached loader");
+	if (slots[0].state != ZZAPP_ST_CLAIMED)
+		fail("stale claimed load changed replacement state");
+}
 
 static void test_list_name_uses_start_argv(void)
 {
@@ -865,7 +902,7 @@ static void test_list_name_uses_start_argv(void)
 	zzapp_services_set_state(ZZAPP_ST_LOADING);
 	zzapp_put_be32(g_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_ARGC_OFF, 1U);
 	zzapp_put_be32(g_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
-		       ZZAPP_ARGV_STR_OFF);
+		       ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
 	memcpy(g_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
 	       "PROGDIR:bin/demo", sizeof("PROGDIR:bin/demo"));
 	memset(request, 0, sizeof(request));
@@ -964,6 +1001,7 @@ int main(void)
 	test_returned_buffers_are_user_granted();
 	test_deferred_slots_queue_independently();
 	test_stop_releases_claimed_slot();
+	test_stop_cancels_queued_claim_load();
 	test_list_name_uses_start_argv();
 	test_display_state_ignores_window_tampering();
 	test_audio_teardown_quiesces_every_slot();

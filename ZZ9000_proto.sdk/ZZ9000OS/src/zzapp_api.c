@@ -545,13 +545,7 @@ static int api_decompress(uint32_t algorithm, uint32_t flags, const void *src,
 
 static uint32_t api_slot(void)
 {
-    int slot = zzapp_kernel_current_thread();
-    uint32_t selected;
-
-    if (slot >= 0 && slot < (int)ZZAPP_AS_SLOT_COUNT)
-        return (uint32_t)slot;
-    selected = zzapp_services_current_slot();
-    return selected < ZZAPP_AS_SLOT_COUNT ? selected : 0U;
+    return zzapp_services_current_slot();
 }
 
 static uint32_t app_decode_owner(void)

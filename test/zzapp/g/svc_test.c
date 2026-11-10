@@ -68,19 +68,23 @@ static unsigned texture_sub_upload_calls;
 static unsigned read_pixels_calls;
 static unsigned build_mipmaps_calls;
 static unsigned getter_calls;
+static uintptr_t getter_pointer;
 static unsigned gl_begin_calls;
+static unsigned gl_end_calls;
 static unsigned msg_poll_calls;
 static unsigned file_seek_calls;
 static unsigned heap_range_calls;
 static unsigned file_list_next_calls;
 static unsigned heap_shrink_calls;
+static int svc_test_current_thread;
 
-int zzapp_kernel_current_thread(void) { return 0; }
+int zzapp_kernel_current_thread(void) { return svc_test_current_thread; }
 zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
 {
     return slot == 0U ? &proc : NULL;
 }
 const zzapp_api *zzapp_api_table(void) { return &api; }
+uint32_t zzapp_services_current_slot(void) { return 0U; }
 
 static const zzapp_gl *mock_gl_bind(uint32_t surface_id)
 {
@@ -202,14 +206,16 @@ static void mock_begin(uint32_t mode)
     (void)mode;
     ++gl_begin_calls;
 }
+static void mock_end(void)
+{
+    ++gl_end_calls;
+}
 static void mock_get_integerv(uint32_t pname, int32_t *params)
 {
     (void)pname;
     ++getter_calls;
-    params[0] = 1;
-    params[1] = 2;
-    params[2] = 3;
-    params[3] = 4;
+    getter_pointer = (uintptr_t)params;
+    (void)params;
 }
 static int mock_msg_poll(void *message)
 {
@@ -284,7 +290,9 @@ static void setup_dispatch(void)
     api.heap_range = mock_heap_range;
     api.msg_poll = mock_msg_poll;
     gl.Begin = mock_begin;
+    gl.End = mock_end;
     gl.GetIntegerv = mock_get_integerv;
+    gl.GetFloatv = (void (*)(uint32_t, float *))mock_get_integerv;
     gl.VertexPointer = mock_vertex_pointer;
     gl.EnableClientState = mock_enable_client_state;
     gl.DrawArrays = mock_draw_arrays;
@@ -304,7 +312,9 @@ static void setup_dispatch(void)
     read_pixels_calls = 0U;
     build_mipmaps_calls = 0U;
     getter_calls = 0U;
+    getter_pointer = 0U;
     gl_begin_calls = 0U;
+    gl_end_calls = 0U;
     msg_poll_calls = 0U;
     file_seek_calls = 0U;
     heap_range_calls = 0U;
@@ -578,6 +588,75 @@ static void test_extended_pointer_checks(void)
     CHECK(frame.r[0] == (uint32_t)ZZ_ENOSYS);
     teardown_dispatch();
 }
+static void test_svc_uses_core_aware_slot_resolver(void)
+{
+    zzapp_arm_frame_t frame;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    svc_test_current_thread = 1;
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame,
+             (uint32_t[9]){ 1U });
+    CHECK(frame.r[0] != (uint32_t)ZZ_EFAULT);
+    svc_test_current_thread = 0;
+    teardown_dispatch();
+}
+static void test_gl_getters_copy_full_outputs(void)
+{
+    zzapp_arm_frame_t frame;
+    static const uint32_t vector_pnames[] = {
+        0x0b66U, 0x0c23U, 0x0b53U
+    };
+    uint32_t i;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    for (i = 0U; i < sizeof(vector_pnames) / sizeof(vector_pnames[0]); ++i) {
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetIntegerv)),
+                 &frame, (uint32_t[9]){ vector_pnames[i], user_va + 0xffcU });
+        CHECK(getter_calls == 0U);
+        CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    }
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetIntegerv)),
+             &frame, (uint32_t[9]){ vector_pnames[0], user_va + 0x500U });
+    CHECK(getter_calls == 1U);
+    CHECK(getter_pointer != (uintptr_t)(user_va + 0x500U));
+    teardown_dispatch();
+}
+static void test_rejected_pixel_store_does_not_change_validation(void)
+{
+    zzapp_arm_frame_t frame;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, PixelStorei)),
+             &frame, (uint32_t[9]){ 0x0d04U, 1024U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin)),
+             &frame, (uint32_t[9]){ 4U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, PixelStorei)),
+             &frame, (uint32_t[9]){ 0x0d04U, 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, End)),
+             &frame, (uint32_t[9]){ 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ReadPixels)),
+             &frame, (uint32_t[9]){ 0U, 0U, 1U, 1U, 0x1908U, 0x1401U,
+                                    user_va + 0xffcU });
+    CHECK(gl_begin_calls == 1U);
+    CHECK(gl_end_calls == 1U);
+    CHECK(read_pixels_calls == 0U);
+    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    teardown_dispatch();
+}
 static void test_slot_aliases(void)
 {
     const zzapp_api *table;
@@ -611,6 +690,9 @@ int main(void)
     test_copy_out_and_pixel_argument_positions();
     test_descriptor_shapes();
     test_extended_pointer_checks();
+    test_svc_uses_core_aware_slot_resolver();
+    test_gl_getters_copy_full_outputs();
+    test_rejected_pixel_store_does_not_change_validation();
     test_slot_aliases();
     printf("svc_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;

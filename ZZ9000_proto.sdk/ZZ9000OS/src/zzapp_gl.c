@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "zzapp_gl_contract.h"
 
 #if defined(__has_include)
 #  if __has_include("zzapp.h")

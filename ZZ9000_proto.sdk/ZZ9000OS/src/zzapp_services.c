@@ -233,6 +233,7 @@ struct zzapp_deferred {
 	uint16_t reply_len;
 	uint32_t request_id;
 	uint32_t cookie;
+	uint32_t generation;
 	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	volatile uint32_t start_pending;
@@ -532,6 +533,22 @@ static int defer_claim(uint32_t expected, uint32_t desired)
 	return __atomic_compare_exchange_n(&current_deferred()->state, &expected,
 					   desired, 0, __ATOMIC_ACQ_REL,
 					   __ATOMIC_ACQUIRE);
+}
+static int cancel_current_deferred(void)
+{
+	struct zzapp_deferred *defer = current_deferred();
+	uint32_t state = defer_load();
+
+	while (state != DEFER_IDLE && state != DEFER_RUNNING) {
+		if (__atomic_compare_exchange_n(&defer->state, &state, DEFER_IDLE,
+						0, __ATOMIC_ACQ_REL,
+						__ATOMIC_ACQUIRE)) {
+			if (deferred_harvest_slot == service_slot())
+				deferred_harvest_slot = ZZAPP_SLOT_COUNT;
+			return 1;
+		}
+	}
+	return state == DEFER_IDLE;
 }
 
 static int defer_on_core1(void)
@@ -3310,10 +3327,11 @@ static void capture_start_name(uint32_t argc)
 	if (argc == 0U || !have_window())
 		return;
 	off = win_get32(ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF);
-	if (off < ZZAPP_ARGV_STR_OFF || off >= ZZAPP_ARGV_BYTES)
+	if (off < ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF ||
+	    off >= ZZAPP_ARGV_OFF + ZZAPP_ARGV_BYTES)
 		return;
-	start = ZZAPP_ARGV_OFF + off;
-	length = ZZAPP_ARGV_BYTES - off;
+	start = off;
+	length = ZZAPP_ARGV_OFF + ZZAPP_ARGV_BYTES - off;
 	if (length > ZZAPP_ARGV_STR_MAX)
 		length = ZZAPP_ARGV_STR_MAX;
 	end = 0U;
@@ -3354,6 +3372,11 @@ static void run_deferred(void)
 	uint16_t len = defer->req_len;
 
 	defer->reply_len = 0U;
+	if (defer->generation != slots[service_slot()].generation) {
+		defer->status = SDK_STATUS_BAD_HANDLE;
+		defer_store(DEFER_DONE);
+		return;
+	}
 	switch (defer->opcode) {
 	case ZZAPP_OP_LOAD_BEGIN:
 		if (zzapp_services_state() != ZZAPP_ST_IDLE &&
@@ -3533,6 +3556,7 @@ static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 	defer->req_len = req_len;
 	defer->request_id = request_id;
 	defer->cookie = user_cookie;
+	defer->generation = slots[service_slot()].generation;
 	defer->reply_len = 0U;
 	defer_store(DEFER_POSTED);
 #ifndef ZZAPP_HOST_TEST
@@ -3722,6 +3746,8 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 				return SDK_STATUS_BAD_HANDLE;
 		}
 		if (zzapp_services_state() == ZZAPP_ST_CLAIMED) {
+			if (!cancel_current_deferred())
+				return SDK_STATUS_BUSY;
 			memset(current_runtime(), 0, sizeof(*current_runtime()));
 			slots[service_slot()].memory_limit = 0U;
 			slots[service_slot()].terminal_reason = ZZAPP_END_FORCED;

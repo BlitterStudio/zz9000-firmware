@@ -7,9 +7,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "zzapp_gl_contract.h"
 #include "zzapp_runtime.h"
+#include "zzapp_services.h"
 #include "zzapp_svc.h"
-
 #define L1_TYPE_MASK 3U
 #define L1_SECTION 2U
 #define L1_TABLE 1U
@@ -93,6 +94,7 @@ typedef struct {
     uint32_t generation;
     uint32_t active_texture;
     uint32_t error;
+    uint8_t in_begin;
 } gl_client_state_t;
 static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 
@@ -113,7 +115,7 @@ static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 #define IN_STRING(a) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, 1U, 1U)
 #define IN_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
 #define OUT_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
-#define OUT_GL_GET(a) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_GET, 0U, 4U, 0U)
+#define OUT_GL_GET(a) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_GET, 0U, 4U, 1U)
 #define IN_INDICES(a, n) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_INDICES, n, 1U, 0U)
 
 /* The descriptors are the ABI audit: argument words include 64-bit values and
@@ -407,6 +409,10 @@ static gl_client_array_t *gl_client_array(gl_client_state_t *state,
         return &state->texcoord[state->active_texture];
     return NULL;
 }
+static int gl_begin_mode(uint32_t mode)
+{
+    return mode <= 9U;
+}
 static void gl_record_client_call(uint32_t slot, uint32_t number,
                                   const uint32_t args[9])
 {
@@ -415,6 +421,16 @@ static void gl_record_client_call(uint32_t slot, uint32_t number,
 
     if (slot >= ZZAPP_AS_SLOT_COUNT) return;
     state = &gl_client[slot];
+    if (number == GL_SLOT(Begin)) {
+        if (!state->in_begin && gl_begin_mode(args[0]))
+            state->in_begin = 1U;
+        return;
+    }
+    if (number == GL_SLOT(End)) {
+        if (state->in_begin)
+            state->in_begin = 0U;
+        return;
+    }
     array = gl_client_array(state, number);
     if (array) {
         int32_t size = (int32_t)args[0];
@@ -437,13 +453,13 @@ static void gl_record_client_call(uint32_t slot, uint32_t number,
         gl_pixel_store_t *store;
         int32_t value = (int32_t)args[1];
 
+        if (state->in_begin || value < 0)
+            return;
         if (args[0] >= 0x0d00U && args[0] <= 0x0d05U)
             store = &state->pack;
         else if (args[0] >= 0x0cf0U && args[0] <= 0x0cf5U)
             store = &state->unpack;
         else
-            return;
-        if (value < 0)
             return;
         if ((args[0] & 7U) == 5U) {
             if (value == 1 || value == 2 || value == 4 || value == 8)
@@ -638,19 +654,7 @@ static int gl_indices_bytes(const uint32_t args[9], uint32_t first,
 }
 static int gl_get_bytes(const uint32_t args[9], uint32_t *bytes)
 {
-    uint32_t values;
-
-    switch (args[0]) {
-    case 0x0b02U: values = 3U; break;
-    case 0x0b00U: case 0x0b03U: case 0x0b04U: case 0x0b06U:
-    case 0x0b07U: case 0x0ba2U: case 0x0c10U: case 0x0c22U:
-    case 0x8005U: values = 4U; break;
-    case 0x0b40U: case 0x0b70U: case 0x0d3aU:
-    case 0x846dU: case 0x846eU: case 0x846fU: values = 2U; break;
-    case 0x0ba6U: case 0x0ba7U: case 0x0ba8U: values = 16U; break;
-    default: values = 1U; break;
-    }
-    *bytes = values * sizeof(uint32_t);
+    *bytes = zzapp_gl_get_values(args[0]) * sizeof(uint32_t);
     return ZZ_OK;
 }
 static int pointer_bytes(uint32_t slot, const zzapp_svc_pointer_t *pointer,
@@ -901,7 +905,9 @@ void zzapp_svc_dispatch(zzapp_arm_frame_t *frame)
     int gl;
     int status;
     if (!frame) return;
-    slot = zzapp_kernel_current_thread() >= 0 ? (uint32_t)zzapp_kernel_current_thread() : 0U;
+    slot = zzapp_services_current_slot();
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        slot = 0U;
     proc = zzapp_proc_slot(slot);
     api = zzapp_api_table();
     if (!proc || !api || zzapp_svc_check_user(&proc->as, frame->exception_lr - 4U, 4U, 0) != ZZ_OK) { frame->r[0] = (uint32_t)ZZ_EFAULT; return; }
