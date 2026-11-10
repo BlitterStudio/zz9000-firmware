@@ -130,6 +130,10 @@ core1_vector_svc:
 	add r1, sp, #4
 	ldmia r1, {r2, r3}
 	stmia r0, {r2, r3}
+	/* SPSR into the frame: the fast exit returns to the app with it. */
+	ldr r1, [sp, #12]
+	str r1, [r0, #8]
+	add r1, r0, #12
 	ldr r2, [sp, #32]
 	/* API_SLOT(time_us) has no VFP arguments or result. It is the
 	 * empty-call timing path, so avoid spilling s0-s15 there. */
@@ -162,14 +166,14 @@ core1_vector_svc:
 	bl zzapp_kernel_svc_can_return
 	/* Stamp as late as possible on the fast path. Preserve the return
 	 * decision while the C helper accumulates the plain per-slot stores. */
-	push {r0}
+	push {r0, r1}	/* r1 keeps the stack 8-byte aligned for the call */
 	mrc p15, 0, r0, c9, c13, 0
 	ldr r1, =zzapp_svc_eret_stamp
 	ldr r2, =zzapp_svc_counter_slot
 	ldr r2, [r2]
 	str r0, [r1, r2, lsl #2]
 	bl zzapp_svc_counters_eret
-	pop {r0}
+	pop {r0, r1}
 	/* SYS SP is the frame again (both calls are balanced). */
 	mov r2, sp
 	cps #0x13
