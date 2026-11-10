@@ -970,6 +970,7 @@ void zzapp_gl_swap(void)
     struct AmiberryContext *guest;
     uint32_t outgoing;
     uint64_t target_started;
+
     zzapp_api_enter();
     if (!g_bound)
         goto done;

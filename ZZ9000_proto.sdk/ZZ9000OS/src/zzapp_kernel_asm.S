@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#ifndef ZZAPP_PERF_COUNTERS
+#define ZZAPP_PERF_COUNTERS 1
+#endif
+
 .syntax unified
 .arm
 .section .zzapp_vectors, "ax", %progbits
@@ -114,6 +118,7 @@ core1_vector_svc:
 	ldr r0, [r0]
 	cmp r0, #0
 	beq 3f
+#if ZZAPP_PERF_COUNTERS
 	/* PMCCNTR stamp after the mode and stack checks, before the compact
 	 * frame work. The scheduler publishes this slot before user return. */
 	mrc p15, 0, r2, c9, c13, 0
@@ -121,6 +126,7 @@ core1_vector_svc:
 	ldr r1, [r1]
 	ldr r3, =zzapp_svc_entry_stamp
 	str r2, [r3, r1, lsl #2]
+#endif
 	sub r0, r0, #SVC_FRAME_BYTES
 	/* Store the user-bank stack and link directly in the compact frame. */
 	stmia r0, {sp, lr}^
@@ -159,14 +165,20 @@ core1_vector_svc:
 	bl zzapp_svc_dispatch
 	cpsid i
 	bl zzapp_kernel_svc_can_return
+#if ZZAPP_PERF_COUNTERS
 	/* Fold the final PMU stage into its counter.  This preserves the return
 	 * decision in r0 and avoids a C helper and an aligned call frame. */
 	ldr r2, =zzapp_svc_counter_slot
 	ldr r2, [r2]
+	ldr r3, =zzapp_svc_counter_class
+	ldrb r1, [r3, r2]
 	add r3, r2, r2, lsl #1
 	add r3, r3, r2, lsl #3
+	lsl r3, r3, #4
 	ldr r12, =zzapp_svc_counters
-	add r12, r12, r3, lsl #3
+	add r12, r12, r3
+	cmp r1, #0
+	addne r12, r12, #88
 	ldrb r3, [r12, #76]
 	cmp r3, #0
 	beq 5f
@@ -186,6 +198,7 @@ core1_vector_svc:
 	cmp r1, r3
 	strhi r1, [r12, #56]
 5:
+#endif
 	/* SYS SP is the frame again. */
 	mov r2, sp
 	cps #0x13

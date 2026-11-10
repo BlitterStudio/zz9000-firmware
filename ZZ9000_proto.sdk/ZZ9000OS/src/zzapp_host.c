@@ -680,7 +680,7 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
     life32(ZZAPP_LIFE_PC_OFF, pc);
     life32(ZZAPP_LIFE_SP_OFF, sp);
     snapshot_stop_diagnostics(slot);
-#ifndef ZZAPP_HOST_TEST
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
 #endif
     life32(ZZAPP_LIFE_LR_OFF, lr);
@@ -983,8 +983,10 @@ static void api_lock_irq_restore(uint32_t cpsr)
 }
 #endif
 
-static void api_lock_until_acquired(uint32_t slot)
+static int api_lock_until_acquired(uint32_t slot)
 {
+    int contended = 0;
+
     while (1) {
 #ifndef ZZAPP_HOST_TEST
         uint32_t cpsr = api_lock_irq_save();
@@ -994,8 +996,9 @@ static void api_lock_until_acquired(uint32_t slot)
 #ifndef ZZAPP_HOST_TEST
             api_lock_irq_restore(cpsr);
 #endif
-            return;
+            return contended;
         }
+        contended = 1;
         (void)zzapp_kernel_block(&g_kernel, slot);
 #ifndef ZZAPP_HOST_TEST
         api_lock_irq_restore(cpsr);
@@ -1093,8 +1096,19 @@ void zzapp_api_enter(void)
     struct zzapp_host_slot *host = host_slot(slot);
 
     g_api_parked[slot] = 0u;
-    if (zzapp_kernel_current_thread() >= 0)
-        api_lock_until_acquired(slot);
+    if (zzapp_kernel_current_thread() >= 0) {
+        int contended;
+
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+        zzapp_svc_gl_telemetry_lock_begin(slot);
+#endif
+        contended = api_lock_until_acquired(slot);
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+        zzapp_svc_gl_telemetry_lock_end(slot, contended);
+#else
+        (void)contended;
+#endif
+    }
     host->api_calls++;
     host->in_api++;
 }
@@ -1366,7 +1380,7 @@ static void run_app(uint32_t argc)
     host->faulted = 0;
     host->stop_diagnostics_valid = 0u;
     host->exit_code = 0;
-#ifndef ZZAPP_HOST_TEST
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_reset(slot);
 #endif
     coh->heartbeat_value = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
@@ -1698,7 +1712,7 @@ void zzapp_host_exit(int code)
     struct zzapp_host_slot *host = host_slot(slot);
 
     host->exit_code = (uint32_t)code;
-#ifndef ZZAPP_HOST_TEST
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
 #endif
 #ifndef ZZAPP_HOST_TEST

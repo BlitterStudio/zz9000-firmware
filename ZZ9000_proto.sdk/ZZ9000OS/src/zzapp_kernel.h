@@ -8,6 +8,10 @@
 
 #include <stdint.h>
 
+#ifndef ZZAPP_PERF_COUNTERS
+#define ZZAPP_PERF_COUNTERS 1
+#endif
+
 #define ZZAPP_KERNEL_APP_SLOTS 4U
 #define ZZAPP_KERNEL_QUANTUM_MS 5U
 #define ZZAPP_KERNEL_SERVICE_WINDOW_MS 100U

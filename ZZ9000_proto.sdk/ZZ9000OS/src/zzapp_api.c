@@ -26,6 +26,23 @@
 #include "sdk_compression.h"
 #include "sdk_crypto.h"
 #include "sdk_image_stream.h"
+#if defined(ZZAPP_HOST_TEST) && ZZAPP_PERF_COUNTERS
+void __attribute__((weak)) zzapp_svc_gl_telemetry_reset(uint32_t slot)
+{ (void)slot; }
+int __attribute__((weak)) zzapp_svc_gl_telemetry_swap(
+    uint32_t slot, uint64_t now_us, zzapp_gl_telemetry_snapshot_t *snapshot)
+{
+    (void)slot;
+    (void)now_us;
+    if (snapshot)
+        memset(snapshot, 0, sizeof(*snapshot));
+    return 0;
+}
+void __attribute__((weak)) zzapp_svc_gl_telemetry_report(
+    uint32_t slot, const zzapp_gl_telemetry_snapshot_t *snapshot)
+{ (void)slot; (void)snapshot; }
+#endif
+
 
 extern int zzapp_host_address(const void *p, uint32_t *host_offset);
 extern int zzapp_host_mem_info(zzapp_mem_info *out);
@@ -247,6 +264,9 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
     g_minigl.context = context;
     g_minigl.owner = owner;
     g_minigl.generation = generation;
+#if ZZAPP_PERF_COUNTERS
+    zzapp_svc_gl_telemetry_reset(owner);
+#endif
     if (out)
         *out = (const zzapp_gl *)module_gl;
     return ZZ_OK;
@@ -288,6 +308,9 @@ static void minigl_drop(void)
     g_minigl.context = NULL;
     g_minigl.owner = 0U;
     g_minigl.generation = 0U;
+#if ZZAPP_PERF_COUNTERS
+    zzapp_svc_gl_telemetry_reset(owner);
+#endif
     zzapp_svc_gl_release(owner, generation);
     zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
     zzm_loader_release(ZZM_MODULE_MINIGL);
@@ -914,7 +937,28 @@ static int api_msg_send(const void *p){zzapp_api_enter();int r=zzapp_svc_msg_sen
 static int api_msg_poll(void *p){zzapp_api_enter();int r=zzapp_svc_msg_poll(p);zzapp_api_leave();return r;}
 static const zzapp_gl *api_gl_bind(uint32_t id){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
 static const zzapp_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind_flags(id,flags,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
-static void api_gl_swap(void){zzapp_api_enter();zzapp_minigl_swap();zzapp_api_leave();}
+#if ZZAPP_PERF_COUNTERS
+static void api_gl_swap(void)
+{
+    zzapp_gl_telemetry_snapshot_t snapshot;
+    uint32_t slot = api_slot();
+    int report;
+
+    zzapp_api_enter();
+    report = zzapp_svc_gl_telemetry_swap(slot, zzapp_host_time_us(), &snapshot);
+    zzapp_minigl_swap();
+    zzapp_api_leave();
+    if (report)
+        zzapp_svc_gl_telemetry_report(slot, &snapshot);
+}
+#else
+static void api_gl_swap(void)
+{
+    zzapp_api_enter();
+    zzapp_minigl_swap();
+    zzapp_api_leave();
+}
+#endif
 static void api_gl_unbind(void){zzapp_api_enter();zzapp_minigl_unbind();zzapp_api_leave();}
 
 static const zzapp_api g_api = {

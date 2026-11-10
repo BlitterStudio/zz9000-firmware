@@ -13,6 +13,7 @@
 #include "zzapp_kernel.h"
 
 
+
 typedef enum {
     ZZAPP_SVC_RETURN_VOID,
     ZZAPP_SVC_RETURN_INT,
@@ -108,15 +109,65 @@ _Static_assert(__builtin_offsetof(zzapp_svc_frame_t, exception_lr) == 128,
                "svc return address");
 _Static_assert(sizeof(zzapp_svc_frame_t) <= 136, "svc frame size");
 
-/* Called by the SVC vector after it has saved the user-call state. */
-void zzapp_svc_dispatch(zzapp_svc_frame_t *frame);
+#define ZZAPP_GL_TELEMETRY_TOP 8U
+typedef struct {
+    uint32_t frames;
+    uint32_t gl_calls;
+    uint32_t gl_calls_per_frame;
+    uint32_t max_gl_calls;
+    uint32_t lock_acquisitions;
+    uint32_t lock_contention;
+    uint32_t descriptor_failures;
+    uint32_t pointer_failures;
+    uint32_t array_element_checks;
+    uint32_t average_boundary_cycles;
+    uint32_t average_descriptor_cycles;
+    uint32_t average_lock_cycles;
+    uint32_t average_frontend_cycles;
+    uint32_t boundary_share_percent;
+    uint32_t descriptor_share_percent;
+    uint32_t lock_share_percent;
+    uint32_t top_slots[ZZAPP_GL_TELEMETRY_TOP];
+    uint32_t top_counts[ZZAPP_GL_TELEMETRY_TOP];
+} zzapp_gl_telemetry_snapshot_t;
+
+#if ZZAPP_PERF_COUNTERS
+void zzapp_svc_gl_telemetry_reset(uint32_t slot);
+int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
+                                 zzapp_gl_telemetry_snapshot_t *snapshot);
+void zzapp_svc_gl_telemetry_report(uint32_t slot,
+                                    const zzapp_gl_telemetry_snapshot_t *snapshot);
+void zzapp_svc_gl_telemetry_lock_begin(uint32_t slot);
+void zzapp_svc_gl_telemetry_lock_end(uint32_t slot, int contended);
+
 /* Reset and print the core-1 PMU breakdown for one app lifecycle. */
 void zzapp_svc_counters_reset(uint32_t slot);
 void zzapp_svc_counters_report(uint32_t slot);
-/* Veneer number of each slot's latest SVC, for diagnostics. */
-extern volatile uint32_t zzapp_svc_last_number[];
 /* Assembly-side PMCCNTR stamp for the entry stage. */
 extern volatile uint32_t zzapp_svc_entry_stamp[];
 extern volatile uint32_t zzapp_svc_counter_slot;
+#else
+static inline void zzapp_svc_gl_telemetry_reset(uint32_t slot)
+{ (void)slot; }
+static inline int zzapp_svc_gl_telemetry_swap(
+    uint32_t slot, uint64_t now_us, zzapp_gl_telemetry_snapshot_t *snapshot)
+{ (void)slot; (void)now_us; (void)snapshot; return 0; }
+static inline void zzapp_svc_gl_telemetry_report(
+    uint32_t slot, const zzapp_gl_telemetry_snapshot_t *snapshot)
+{ (void)slot; (void)snapshot; }
+static inline void zzapp_svc_gl_telemetry_lock_begin(uint32_t slot)
+{ (void)slot; }
+static inline void zzapp_svc_gl_telemetry_lock_end(uint32_t slot, int contended)
+{ (void)slot; (void)contended; }
+static inline void zzapp_svc_counters_reset(uint32_t slot)
+{ (void)slot; }
+static inline void zzapp_svc_counters_report(uint32_t slot)
+{ (void)slot; }
+#endif
+
+/* Called by the SVC vector after it has saved the user-call state. */
+void zzapp_svc_dispatch(zzapp_svc_frame_t *frame);
+/* Veneer number of each slot's latest SVC, for diagnostics. */
+extern volatile uint32_t zzapp_svc_last_number[];
 
 #endif

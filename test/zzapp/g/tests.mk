@@ -20,6 +20,12 @@ SVC_TEST_SOURCES := g/svc_test.c $(FW)/zzapp_svc.c $(FW)/zzapp_as.c \
 SVC_TEST_DEPS := $(FW)/zzapp_svc.h $(FW)/zzapp_gl_contract.h $(FW)/zzapp_as.h \
 	$(FW)/mmu_page.h $(FW)/sdk_smp_lock.h
 
+ZZAPP_TESTS += $(BUILD)/g/svc_no_counters_test
+
 $(BUILD)/g/svc_test: $(SVC_TEST_SOURCES) $(SVC_TEST_DEPS) | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_SVC_COUNTERS_TEST -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PERF_COUNTERS=1 -DZZAPP_SVC_COUNTERS_TEST -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)
+
+$(BUILD)/g/svc_no_counters_test: $(SVC_TEST_SOURCES) $(SVC_TEST_DEPS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PERF_COUNTERS=0 -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)

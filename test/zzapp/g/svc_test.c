@@ -80,6 +80,7 @@ static int svc_test_current_thread;
 static unsigned should_stop_calls;
 static unsigned time_us_calls;
 static uint32_t vertex2f_words[2];
+#if ZZAPP_PERF_COUNTERS
 static uint32_t svc_counter_now;
 
 uint32_t zzapp_svc_test_pmccntr(void)
@@ -91,6 +92,7 @@ uint32_t zzapp_svc_test_pmccntr(void)
 void zzapp_svc_counters_test_eret(uint32_t slot, uint32_t stamp);
 void zzapp_svc_counters_test_snapshot(uint32_t slot, uint32_t *total_calls,
                                       uint32_t samples[4], uint32_t averages[4]);
+#endif
 
 int zzapp_kernel_current_thread(void) { return svc_test_current_thread; }
 zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
@@ -505,6 +507,10 @@ static void test_pointer_checks(void)
 static void test_gl_deferred_pointer_checks(void)
 {
     zzapp_svc_frame_t frame;
+#if ZZAPP_PERF_COUNTERS
+    zzapp_gl_telemetry_snapshot_t snapshot;
+#endif
+
     uint32_t args[9] = { 0U };
     uint32_t extra_va;
 
@@ -515,6 +521,10 @@ static void test_gl_deferred_pointer_checks(void)
     }
     dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
     CHECK(frame.r[0] != 0U);
+#if ZZAPP_PERF_COUNTERS
+    CHECK(zzapp_svc_gl_telemetry_swap(0U, 0U, NULL) == 0);
+#endif
+
     CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 4096U, 1,
                              &extra_va) == ZZ_OK);
     dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
@@ -555,6 +565,15 @@ static void test_gl_deferred_pointer_checks(void)
                                     WINDOW + 0x1000U });
     CHECK(read_pixels_calls == 0U);
     CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + zzapp_svc_gl_count(), &frame,
+             (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == (uint32_t)ZZ_ENOSYS);
+#if ZZAPP_PERF_COUNTERS
+    CHECK(zzapp_svc_gl_telemetry_swap(0U, 999999U, &snapshot) == 0);
+    CHECK(snapshot.descriptor_failures == 1U);
+    CHECK(snapshot.pointer_failures >= 4U);
+    CHECK(snapshot.array_element_checks >= 2U);
+#endif
     teardown_dispatch();
 }
 static void test_copy_out_and_pixel_argument_positions(void)
@@ -756,6 +775,7 @@ static void test_fast_no_lock_calls(void)
     svc_test_current_thread = 0;
     teardown_dispatch();
 }
+#if ZZAPP_PERF_COUNTERS
 static void test_sampled_counter_averages(void)
 {
     zzapp_svc_frame_t frame;
@@ -792,6 +812,7 @@ static void test_sampled_counter_averages(void)
     CHECK(averages[3] == 10U);
     teardown_dispatch();
 }
+#endif
 
 
 static void test_svc_float_frame_arguments(void)
@@ -840,6 +861,65 @@ static void test_slot_aliases(void)
     teardown_dispatch();
 }
 
+#if ZZAPP_PERF_COUNTERS
+static void test_gl_telemetry_snapshot_and_rate_limit(void)
+{
+    zzapp_svc_frame_t frame;
+    zzapp_gl_telemetry_snapshot_t snapshot;
+    uint32_t begin = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin));
+    uint32_t end = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, End));
+    uint32_t vertex = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Vertex2f));
+    uint32_t i;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    zzapp_svc_gl_telemetry_reset(0U);
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    for (i = 0U; i < 63U; ++i)
+        dispatch(begin, &frame, (uint32_t[9]){ 4U });
+    CHECK(zzapp_svc_gl_telemetry_swap(0U, 0U, &snapshot) == 0);
+    CHECK(snapshot.frames == 0U);
+    CHECK(snapshot.gl_calls == 0U);
+
+    for (i = 0U; i < 5U; ++i)
+        dispatch(begin, &frame, (uint32_t[9]){ 4U });
+    for (i = 0U; i < 3U; ++i)
+        dispatch(end, &frame, (uint32_t[9]){ 0U });
+    for (i = 0U; i < 3U; ++i)
+        dispatch(vertex, &frame, (uint32_t[9]){ 0U });
+    CHECK(zzapp_svc_gl_telemetry_swap(0U, 999999U, &snapshot) == 0);
+    CHECK(snapshot.frames == 1U);
+    CHECK(snapshot.gl_calls == 11U);
+    CHECK(snapshot.gl_calls_per_frame == 11U);
+    CHECK(snapshot.max_gl_calls == 11U);
+    CHECK(snapshot.average_descriptor_cycles != 0U);
+    CHECK(snapshot.average_frontend_cycles != 0U);
+    CHECK(snapshot.top_slots[0] == gl_slot(offsetof(zzapp_gl, Begin)));
+    CHECK(snapshot.top_counts[0] == 5U);
+    CHECK(snapshot.top_slots[1] == gl_slot(offsetof(zzapp_gl, End)));
+    CHECK(snapshot.top_counts[1] == 3U);
+    CHECK(snapshot.top_slots[2] == gl_slot(offsetof(zzapp_gl, Vertex2f)));
+    CHECK(snapshot.top_counts[2] == 3U);
+    CHECK(snapshot.top_counts[3] == 0U);
+    CHECK(snapshot.top_slots[3] != UINT32_MAX);
+
+
+    dispatch(begin, &frame, (uint32_t[9]){ 4U });
+    CHECK(zzapp_svc_gl_telemetry_swap(0U, 1000000U, &snapshot) == 1);
+    CHECK(snapshot.frames == 2U);
+    CHECK(snapshot.gl_calls == 12U);
+    CHECK(snapshot.gl_calls_per_frame == 6U);
+    CHECK(snapshot.max_gl_calls == 11U);
+    CHECK(zzapp_svc_gl_telemetry_swap(0U, 1000001U, &snapshot) == 0);
+    CHECK(snapshot.frames == 1U);
+    CHECK(snapshot.gl_calls == 0U);
+    teardown_dispatch();
+}
+#endif
+
 int main(void)
 {
     test_table_copy_uses_only_veneers();
@@ -850,13 +930,18 @@ int main(void)
     test_copy_out_and_pixel_argument_positions();
     test_descriptor_shapes();
     test_extended_pointer_checks();
+#if ZZAPP_PERF_COUNTERS
     test_sampled_counter_averages();
+#endif
     test_svc_uses_core_aware_slot_resolver();
     test_gl_getters_copy_full_outputs();
     test_svc_number_comes_from_r12();
     test_fast_no_lock_calls();
     test_svc_float_frame_arguments();
     test_rejected_pixel_store_does_not_change_validation();
+#if ZZAPP_PERF_COUNTERS
+    test_gl_telemetry_snapshot_and_rate_limit();
+#endif
     test_slot_aliases();
     printf("svc_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;

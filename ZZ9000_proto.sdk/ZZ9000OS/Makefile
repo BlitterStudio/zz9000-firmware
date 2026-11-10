@@ -127,8 +127,15 @@ ifeq ($(MINIGL_RASTERIX),1)
 EXTRA_CFLAGS += -DMINIGL_RASTERIX=1 -DMINIGL_RIX_DMA=$(MINIGL_RIX_DMA)
 endif
 
+# Set to 0 to remove app SVC and GL performance instrumentation.
+ZZAPP_PERF_COUNTERS ?= 1
+ifneq ($(filter 0 1,$(ZZAPP_PERF_COUNTERS)),$(ZZAPP_PERF_COUNTERS))
+$(error ZZAPP_PERF_COUNTERS must be 0 or 1)
+endif
+
 # -O2 flags (default for all files)
 EXTRA_CFLAGS ?=
+override EXTRA_CFLAGS += -DZZAPP_PERF_COUNTERS=$(ZZAPP_PERF_COUNTERS)
 ZZ9000_BUILD_GIT ?= unknown
 ZZ9000_BUILD_DIRTY ?= unknown
 ZZ9000_BUILD_DATE ?= unknown
@@ -359,12 +366,13 @@ TARGET = $(BUILD_DIR)/ZZ9000OS.elf
 FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 
-# The two bitstream flavors compile common source with different preprocessor
-# inputs.  Stable stamps force every source object to rebuild whenever the
-# requested flavor or RasterIX transport changes, while preserving incremental
-# builds of one configuration.
+# The bitstream flavors and performance counter mode compile common source
+# with different preprocessor inputs. Stable stamps force every source object
+# to rebuild whenever a requested configuration changes, while preserving
+# incremental builds of one configuration.
 BUILD_CONFIG_STAMP = $(BUILD_DIR)/.minigl-rasterix
 BUILD_TRANSPORT_STAMP = $(BUILD_DIR)/.minigl-rix-dma
+BUILD_PERF_COUNTERS_STAMP = $(BUILD_DIR)/.zzapp-perf-counters
 
 $(BUILD_CONFIG_STAMP): FORCE
 	@mkdir -p $(dir $@)
@@ -378,9 +386,16 @@ $(BUILD_TRANSPORT_STAMP): FORCE
 		printf '%s\n' "$(MINIGL_RIX_DMA)" > "$@"; \
 	fi
 
+$(BUILD_PERF_COUNTERS_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@if test ! -f "$@" || test "$$(cat "$@")" != "$(ZZAPP_PERF_COUNTERS)"; then \
+		printf '%s\n' "$(ZZAPP_PERF_COUNTERS)" > "$@"; \
+	fi
+
 $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS)) \
+$(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRCS)) \
 $(BSP_SDPS_OBJ) $(BSP_SDPSOPT_OBJ) $(BSP_DISKIO_OBJ) \
-$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP) $(BUILD_TRANSPORT_STAMP)
+$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP) $(BUILD_TRANSPORT_STAMP) $(BUILD_PERF_COUNTERS_STAMP)
 
 .DEFAULT_GOAL := all
 
@@ -565,7 +580,7 @@ $(BUILD_DIR)/lzh/%.o: $(SRC_DIR)/lzh/%.c
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.S
 	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(INCLUDES) $(WERROR) -c -o $@ $<
+	$(CC) $(CPU_FLAGS) $(INCLUDES) $(WERROR) $(EXTRA_CFLAGS) -c -o $@ $<
 
 # Default rule for all other files (-O2).
 # -MMD emits a .d file next to the .o listing every header the source
