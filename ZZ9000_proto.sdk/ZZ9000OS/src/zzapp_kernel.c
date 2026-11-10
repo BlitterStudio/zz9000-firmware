@@ -214,6 +214,22 @@ static int choose_app(zzapp_kernel_t *kernel)
 	return ZZAPP_KERNEL_IDLE;
 }
 
+/* Charge `slot` for a slice of up to `elapsed_ms`; an exhausted quantum
+ * lets the next pick rotate to another runnable app. */
+static void charge_slice(zzapp_kernel_t *kernel, uint32_t slot,
+			 uint32_t elapsed_ms)
+{
+	zzapp_thread_t *thread = &kernel->threads[slot];
+	uint32_t charged = elapsed_ms;
+
+	if (charged > thread->quantum_left)
+		charged = thread->quantum_left;
+	thread->user_ticks += charged;
+	thread->quantum_left -= charged;
+	if (thread->quantum_left == 0U)
+		kernel->active = NO_ACTIVE;
+}
+
 int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 {
 	int pick;
@@ -261,20 +277,8 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 		kernel->overload_count++;
 	pick = choose_app(kernel);
 	if (pick >= 0) {
-		zzapp_thread_t *thread;
-
 charge_app:
-		thread = &kernel->threads[pick];
-		{
-			uint32_t charged = elapsed_ms;
-
-			if (charged > thread->quantum_left)
-				charged = thread->quantum_left;
-			thread->user_ticks += charged;
-			thread->quantum_left -= charged;
-			if (thread->quantum_left == 0U)
-				kernel->active = NO_ACTIVE;
-		}
+		charge_slice(kernel, (uint32_t)pick, elapsed_ms);
 		return pick;
 	}
 	return ZZAPP_KERNEL_IDLE;
@@ -354,6 +358,14 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 		pick = zzapp_kernel_schedule(kernel,
 			source == ZZAPP_KERNEL_DISPATCH_TICK ?
 			ZZAPP_KERNEL_QUANTUM_MS : 0U);
+		/* Ticks are charged to the app the scheduler picks for the next
+		 * slice. Every tick also makes service due, so the tick usually
+		 * goes to this thread, and the app it hands the core to after its
+		 * pass would run uncharged: the same app kept its quantum forever
+		 * and a second CPU-bound app got about 5% of the core (kit 66,
+		 * two spin apps). Charge that slice too. */
+		if (pick >= 0 && source != ZZAPP_KERNEL_DISPATCH_TICK)
+			charge_slice(kernel, (uint32_t)pick, ZZAPP_KERNEL_QUANTUM_MS);
 	}
 	if ((pick == ZZAPP_KERNEL_SYSTEM || pick == ZZAPP_KERNEL_IDLE) &&
 	    kernel->system_context_valid) {

@@ -132,6 +132,51 @@ static void test_round_robin_quantum(void)
 	CHECK(kernel.threads[0].user_ticks == 1000u);
 }
 
+/* Kit 66: every tick also makes service due, so it hands the core to the
+ * system thread, which yields back to an app after its pass. With two
+ * CPU-bound spin apps one of them got ~95% of the core. Both must get the
+ * same share when every tick goes through the system thread. */
+static void test_ticks_through_system_thread_share_fairly(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+	unsigned runs[2] = { 0u, 0u };
+	unsigned i;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 1, 0x2000u, 2u, 0u, 0u,
+				       0x9000u) == 0);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	frame.spsr = ZZAPP_KERNEL_APP_CPSR;
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	for (i = 0; i < 200; i++) {
+		int app = zzapp_kernel_current_thread();
+
+		CHECK(app == 0 || app == 1);
+		if (app != 0 && app != 1)
+			return;
+		runs[app]++;
+		/* The timer tick marks service due and lands in the app. The
+		 * scheduler hands it to the system thread unless the 95% cap
+		 * is spent; the system thread then finishes its pass and
+		 * yields. */
+		zzapp_kernel_service_due(&kernel);
+		next = zzapp_kernel_switch_frame(&kernel, next,
+						 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+		if (zzapp_kernel_current_thread() == -1)
+			next = zzapp_kernel_switch_frame(&kernel, next,
+					ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	}
+	CHECK(runs[0] + runs[1] == 200u);
+	CHECK(runs[0] >= 95u && runs[1] >= 95u);
+}
+
 static void test_service_precedes_app_and_preserves_remainder(void)
 {
 	zzapp_kernel_t kernel;
@@ -458,6 +503,7 @@ int main(void)
     test_frame_switch();
     test_system_frame_runs_service_before_apps();
     test_round_robin_quantum();
+    test_ticks_through_system_thread_share_fairly();
     test_service_precedes_app_and_preserves_remainder();
     test_block_wake_and_idle();
     test_sleep_deadline_order();
