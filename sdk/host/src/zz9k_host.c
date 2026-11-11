@@ -839,9 +839,9 @@ static void zz9k_put_wire_be32(volatile uint8_t *p, uint32_t value)
 static void zz9k_copy_payload_to_wire(volatile uint8_t *dst,
                                       const uint8_t *src, uint32_t length)
 {
-  uint32_t i;
 
 #if ZZ9K_HOST_AMIGA
+  uint32_t i;
   for (i = 0; i + 1U < length; i += 2U) {
     *(volatile uint16_t *)(dst + i) =
         (uint16_t)(((uint16_t)src[i] << 8) | src[i + 1U]);

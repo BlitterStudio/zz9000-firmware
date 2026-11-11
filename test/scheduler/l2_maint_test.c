@@ -33,6 +33,11 @@ static struct line l2[LINES];
 
 static int test_cpu;
 static uint32_t irq_masked;
+static unsigned l2_clean_inv_calls;
+static unsigned l2_inv_calls;
+static unsigned l2_syncs;
+static INTPTR l2_inv_addresses[LINES];
+static INTPTR l2_clean_inv_addresses[LINES];
 static unsigned l2_ops_unlocked;
 static unsigned lock_holds;
 static unsigned max_bytes_per_hold;
@@ -160,19 +165,10 @@ void l2_maint_platform_l1_inv_line(INTPTR address)
     l1[i].valid = 0;
     l1[i].dirty = 0;
 }
-void l2_maint_platform_l2_flush_range(INTPTR address, u32 length)
-{
-    u32 a = (u32)address & ~(LINE - 1U);
-    u32 end = (u32)address + length;
-
-    for (; a < end; a += LINE) {
-        l2_op_locked();
-        l2_clean_inv(index_of((INTPTR)a));
-    }
-}
 void l2_maint_platform_l2_clean_inv_line(INTPTR address)
 {
     l2_op_locked();
+    l2_clean_inv_addresses[l2_clean_inv_calls++] = address;
     l2_clean_inv(index_of(address));
 }
 void l2_maint_platform_l2_inv_line(INTPTR address)
@@ -180,13 +176,23 @@ void l2_maint_platform_l2_inv_line(INTPTR address)
     unsigned i = index_of(address);
 
     l2_op_locked();
+    l2_inv_addresses[l2_inv_calls++] = address;
     l2[i].valid = 0;
     l2[i].dirty = 0;
+}
+void l2_maint_platform_l2_flush_range(INTPTR address, u32 length)
+{
+    u32 a = (u32)address & ~(LINE - 1U);
+    u32 end = (u32)address + length;
+
+    for (; a < end; a += LINE)
+        l2_maint_platform_l2_clean_inv_line((INTPTR)a);
 }
 void l2_maint_platform_l2_sync(void)
 {
     if (irq_masked == 0U)
         l2_ops_unlocked++;
+    l2_syncs++;
 }
 void l2_maint_platform_l2_flush(void)
 {
@@ -224,9 +230,30 @@ static void reset_model(void)
     memset(ddr, 0, sizeof(ddr));
     memset(l1, 0, sizeof(l1));
     memset(l2, 0, sizeof(l2));
+    l2_clean_inv_calls = 0U;
+    l2_inv_calls = 0U;
+    l2_syncs = 0U;
     l2_ops_unlocked = 0U;
     lock_holds = 0U;
     max_bytes_per_hold = 0U;
+}
+
+/* Each 4 KiB serialized PL310 batch covers every line, then syncs once. */
+static void test_invalidate_batches_sync(void)
+{
+    const u32 buf = 0x1000U;
+    const u32 len = L2_MAINT_CHUNK_BYTES * 2U + LINE;
+    unsigned i;
+
+    reset_model();
+    l2_maint_dcache_invalidate_range((INTPTR)buf, len);
+    assert(l2_clean_inv_calls == 0U);
+    assert(l2_inv_calls == len / LINE);
+    for (i = 0U; i < l2_inv_calls; i++)
+        assert(l2_inv_addresses[i] == (INTPTR)(buf + i * LINE));
+    assert(l2_syncs == 3U);
+    assert(max_bytes_per_hold <= L2_MAINT_CHUNK_BYTES);
+    assert(irq_masked == 0U);
 }
 
 /* A DMA receive buffer that starts and ends mid-line, with CPU-owned dirty
@@ -253,11 +280,14 @@ static void test_invalidate_keeps_neighbours(void)
         ddr[a - BASE] = (uint8_t)(a * 7U);
 
     l2_maint_dcache_invalidate_range((INTPTR)buf, len);
-
     assert(cpu_load(before) == 0xA5U);
     assert(cpu_load(after) == 0x5AU);
     for (a = (buf + LINE - 1U) & ~(LINE - 1U); a < (after & ~(LINE - 1U)); a++)
         assert(cpu_load(a) == (uint8_t)(a * 7U));
+    assert(l2_clean_inv_calls == 2U);
+    assert(l2_clean_inv_addresses[0] == (INTPTR)0x2000U);
+    assert(l2_clean_inv_addresses[1] == (INTPTR)0x3FC0U);
+    assert(l2_syncs == 4U);
     assert(l2_ops_unlocked == 0U);
     assert(max_bytes_per_hold <= L2_MAINT_CHUNK_BYTES);
     assert(irq_masked == 0U);
@@ -273,6 +303,10 @@ static void test_invalidate_within_one_line(void)
     l2_maint_dcache_invalidate_range((INTPTR)0x5004U, 4U);
     assert(cpu_load(0x5000U) == 0x11U);
     assert(cpu_load(0x501FU) == 0x33U);
+    assert(l2_clean_inv_calls == 1U);
+    assert(l2_clean_inv_addresses[0] == (INTPTR)0x5000U);
+    assert(l2_inv_calls == 0U);
+    assert(l2_syncs == 1U);
     assert(l2_ops_unlocked == 0U);
 }
 
@@ -284,6 +318,11 @@ static void test_l2_invalidate_keeps_neighbours(void)
     l1_clean_inv(index_of(0x6000));
     l2_maint_l2_invalidate_range((INTPTR)0x6010U, 0x30U);
     assert(cpu_load(0x6008U) == 0x77U);
+    assert(l2_clean_inv_calls == 1U);
+    assert(l2_clean_inv_addresses[0] == (INTPTR)0x6000U);
+    assert(l2_inv_calls == 1U);
+    assert(l2_inv_addresses[0] == (INTPTR)0x6020U);
+    assert(l2_syncs == 2U);
     assert(l2_ops_unlocked == 0U);
 }
 
@@ -300,6 +339,9 @@ static void test_flush_reaches_ddr(void)
     l2_maint_dcache_flush_range((INTPTR)buf, len);
     for (a = buf; a < buf + len; a++)
         assert(ddr[a - BASE] == (uint8_t)(a * 3U));
+    assert(l2_clean_inv_calls == (len + (buf & (LINE - 1U)) + LINE - 1U) / LINE);
+    assert(l2_inv_calls == 0U);
+    assert(l2_syncs == 3U);
     assert(l2_ops_unlocked == 0U);
     assert(lock_holds >= (len + L2_MAINT_CHUNK_BYTES - 1U) / L2_MAINT_CHUNK_BYTES);
     assert(irq_masked == 0U);
@@ -340,6 +382,7 @@ static void test_loader_code_visible(void)
 int main(void)
 {
     test_cpu = 1;
+    test_invalidate_batches_sync();
     test_invalidate_keeps_neighbours();
     test_invalidate_within_one_line();
     test_l2_invalidate_keeps_neighbours();

@@ -609,6 +609,7 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
 {
     uint32_t w, h, pitch, format, front, back;
     mw_ctx *mw;
+    const char *present_mode;
 
     if (out)
         *out = 0;
@@ -624,23 +625,39 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         return ZZ_EINVAL;
     g_bound_layout = 0U;
     (void)zzapp_display_layout(&g_bound_layout);
-    g_zero_copy = (flags & ZZ_GL_BIND_DIRECT_PRESENT) != 0U &&
-                  (zzapp_services_flags() & ZZAPP_F_MAILBOX) == 0U &&
-                  format == ZZ_FMT_RGB565 &&
-                  g_bound_layout == ZZ_LAYOUT_RGB565_LE && pitch == w * 2U &&
-                  front != 0U && back != 0U &&
-                  (front & 2047U) == 0U && (back & 2047U) == 0U;
+    g_zero_copy = 0U;
+    if ((flags & ZZ_GL_BIND_DIRECT_PRESENT) == 0U)
+        present_mode = "copy (direct not requested)";
+    else if ((zzapp_services_flags() & ZZAPP_F_MAILBOX) != 0U)
+        present_mode = "copy (mailbox display)";
+    else if (format != ZZ_FMT_RGB565)
+        present_mode = "copy (not RGB565)";
+    else if (g_bound_layout != ZZ_LAYOUT_RGB565_LE)
+        present_mode = "copy (RGB565 layout)";
+    else if (pitch != w * 2U)
+        present_mode = "copy (padded pitch)";
+    else if (front == 0U || back == 0U)
+        present_mode = "copy (missing buffers)";
+    else if ((front & 2047U) != 0U || (back & 2047U) != 0U)
+        present_mode = "copy (unaligned buffers)";
+    else {
+        g_zero_copy = 1U;
+        present_mode = "direct";
+    }
     if (!amiberry_inproc_open(w, h))
         return ZZ_ENOMEM;
     mw = amiberry_transport_inproc_ctx();
     if (g_zero_copy && (!mw || !mw_host_bind_direct_rgb565(mw, front, back,
-                                                            w * h * 2U)))
+                                                            w * h * 2U))) {
         g_zero_copy = 0U;
+        present_mode = "copy (direct buffer bind)";
+    }
     if (!zzapp_gl_configure_targets(w, h, g_zero_copy ? 2U : 3U)) {
         amiberry_inproc_close();
         g_zero_copy = 0U;
         return ZZ_ENOMEM;
     }
+    printf("[app] present: %s\r\n", present_mode);
     fill_table();
     g_bound = 1;
     g_surface_id = surface_id;
