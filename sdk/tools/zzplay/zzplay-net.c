@@ -359,6 +359,13 @@ static int tls_connect(ZZPlayNet *net, const char *host)
     return 0;
   }
   SSL_CTX_set_min_proto_version(net->ctx, TLS1_2_VERSION);
+  /* Many stream servers close the connection without a TLS close_notify.
+   * AmiSSL 5 reports that as an error; treat it as the end of the data,
+   * as over plain HTTP, and let the HTTP framing decide whether the body
+   * was complete. */
+#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
+  SSL_CTX_set_options(net->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+#endif
   SSL_CTX_set_verify(net->ctx, SSL_VERIFY_PEER, NULL);
   if (SSL_CTX_set_default_verify_paths(net->ctx) != 1) {
     ssl_err(net, "Cannot load the AmiSSL certificates");
