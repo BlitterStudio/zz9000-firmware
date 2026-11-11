@@ -90,6 +90,25 @@ int zzplay_probe_mp3_frame(const uint8_t *data,
   return info->frame_bytes >= 4U;
 }
 
+/* True when the Layer III frame at `data` carries a Xing or Info header
+ * after its side information instead of audio. */
+static int zzplay_mp3_is_info_frame(const uint8_t *data, size_t length,
+                                    const ZZPlayMP3Info *frame)
+{
+  size_t side;
+
+  if (frame->mpeg_version == 1U) {
+    side = frame->channels == 1U ? 17U : 32U;
+  } else {
+    side = frame->channels == 1U ? 9U : 17U;
+  }
+  if (length < 4U + side + 4U) {
+    return 0;
+  }
+  data += 4U + side;
+  return memcmp(data, "Xing", 4U) == 0 || memcmp(data, "Info", 4U) == 0;
+}
+
 int zzplay_probe_mp3(const uint8_t *data,
                      size_t length,
                      ZZPlayMP3Info *info)
@@ -114,6 +133,8 @@ int zzplay_probe_mp3(const uint8_t *data,
   }
   for (; offset + 4U <= length; offset++) {
     ZZPlayMP3Info candidate;
+    ZZPlayMP3Info next;
+    int have_next = 0;
 
     if (!zzplay_probe_mp3_frame(data + offset, length - offset,
                                 &candidate)) {
@@ -122,12 +143,19 @@ int zzplay_probe_mp3(const uint8_t *data,
     /* If another complete frame header is in the probe, require it to be
      * Layer III too. This rejects most sync-like byte sequences in junk. */
     if (candidate.frame_bytes <= length - offset - 4U) {
-      ZZPlayMP3Info next;
       if (!zzplay_probe_mp3_frame(data + offset + candidate.frame_bytes,
                                   length - offset - candidate.frame_bytes,
                                   &next)) {
         continue;
       }
+      have_next = 1;
+    }
+    /* A Xing or Info frame (VBR encoders, and streams converted on the
+     * fly) is coded at whatever bitrate fits the header, often 32 kbps;
+     * the first audio frame says what the stream carries. */
+    if (have_next && zzplay_mp3_is_info_frame(data + offset, length - offset,
+                                              &candidate)) {
+      candidate.bitrate_kbps = next.bitrate_kbps;
     }
     *info = candidate;
     return 1;
