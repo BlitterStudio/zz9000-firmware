@@ -28,6 +28,7 @@
 #define API_COUNT ((uint32_t)((sizeof(zzapp_api) - API_FIRST) / sizeof(void *)))
 #define GL_COUNT ((uint32_t)((sizeof(zzapp_gl) - GL_FIRST) / sizeof(void *)))
 #define GL_INVALID_VALUE 0x0501U
+#define GL_INVALID_OPERATION 0x0502U
 #define GL_BYTE 0x1400U
 #define GL_UNSIGNED_BYTE 0x1401U
 #define GL_SHORT 0x1402U
@@ -37,6 +38,7 @@
 #define GL_FLOAT 0x1406U
 #define GL_DOUBLE 0x140aU
 #define GL_VERTEX_ARRAY 0x8074U
+#define MGL_ARRAY_TRANSFORMATIONS 0x701dU
 #define GL_COLOR_ARRAY 0x8076U
 #define GL_TEXTURE_COORD_ARRAY 0x8078U
 #define GL_TEXTURE0 0x84c0U
@@ -278,7 +280,8 @@ typedef struct {
     uint32_t lock_contention;
     uint32_t descriptor_failures;
     uint32_t pointer_failures;
-    uint32_t array_element_checks;
+    uint32_t array_span_checks;
+    uint32_t array_span_fallbacks;
     zzapp_svc_cost_t descriptor;
     zzapp_svc_cost_t lock;
     zzapp_svc_cost_t frontend;
@@ -299,7 +302,8 @@ typedef struct {
     uint32_t lock_contention;
     uint32_t descriptor_failures;
     uint32_t pointer_failures;
-    uint32_t array_element_checks;
+    uint32_t array_span_checks;
+    uint32_t array_span_fallbacks;
     zzapp_svc_cost_t boundary;
     zzapp_svc_cost_t descriptor;
     zzapp_svc_cost_t lock;
@@ -357,9 +361,13 @@ static void gl_telemetry_pointer_failure(uint32_t slot)
     gl_telemetry[slot].frame.pointer_failures++;
 }
 
-static void gl_telemetry_array_element(uint32_t slot)
+static void gl_telemetry_array_span(uint32_t slot)
 {
-    gl_telemetry[slot].frame.array_element_checks++;
+    gl_telemetry[slot].frame.array_span_checks++;
+}
+static void gl_telemetry_array_fallback(uint32_t slot)
+{
+    gl_telemetry[slot].frame.array_span_fallbacks++;
 }
 
 static inline void gl_telemetry_frontend_begin(uint32_t slot)
@@ -476,7 +484,8 @@ static void gl_telemetry_snapshot(const zzapp_gl_report_telemetry_t *report,
     snapshot->lock_contention = report->lock_contention;
     snapshot->descriptor_failures = report->descriptor_failures;
     snapshot->pointer_failures = report->pointer_failures;
-    snapshot->array_element_checks = report->array_element_checks;
+    snapshot->array_span_checks = report->array_span_checks;
+    snapshot->array_span_fallbacks = report->array_span_fallbacks;
     snapshot->average_boundary_cycles = gl_cost_average(&report->boundary);
     snapshot->average_descriptor_cycles = gl_cost_average(&report->descriptor);
     snapshot->average_lock_cycles = counter_average(&report->lock,
@@ -551,7 +560,8 @@ int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
     report->lock_contention += frame->lock_contention;
     report->descriptor_failures += frame->descriptor_failures;
     report->pointer_failures += frame->pointer_failures;
-    report->array_element_checks += frame->array_element_checks;
+    report->array_span_checks += frame->array_span_checks;
+    report->array_span_fallbacks += frame->array_span_fallbacks;
     for (i = 0U; i < GL_COUNT; ++i)
         report->opcodes[i] += frame->opcodes[i];
     report->boundary.sum += boundary->entry_to_dispatch.sum +
@@ -583,7 +593,7 @@ void zzapp_svc_gl_telemetry_report(uint32_t slot,
         return;
     printf("[app] gl slot=%lu frames=%lu calls=%lu/%lu top=%lu:%lu,%lu:%lu,"
            "%lu:%lu,%lu:%lu,%lu:%lu,%lu:%lu,%lu:%lu,%lu:%lu lock=%lu/%lu "
-           "fail=%lu/%lu elem=%lu avg=%lu/%lu/%lu/%lu share=%lu/%lu/%lu%%\r\n",
+           "fail=%lu/%lu span=%lu/%lu avg=%lu/%lu/%lu/%lu share=%lu/%lu/%lu%%\r\n",
            (unsigned long)slot, (unsigned long)snapshot->frames,
            (unsigned long)snapshot->gl_calls_per_frame,
            (unsigned long)snapshot->max_gl_calls,
@@ -599,7 +609,8 @@ void zzapp_svc_gl_telemetry_report(uint32_t slot,
            (unsigned long)snapshot->lock_contention,
            (unsigned long)snapshot->descriptor_failures,
            (unsigned long)snapshot->pointer_failures,
-           (unsigned long)snapshot->array_element_checks,
+           (unsigned long)snapshot->array_span_checks,
+           (unsigned long)snapshot->array_span_fallbacks,
            (unsigned long)snapshot->average_boundary_cycles,
            (unsigned long)snapshot->average_descriptor_cycles,
            (unsigned long)snapshot->average_lock_cycles,
@@ -621,7 +632,9 @@ static inline void gl_telemetry_descriptor_failure(uint32_t slot)
 { (void)slot; }
 static inline void gl_telemetry_pointer_failure(uint32_t slot)
 { (void)slot; }
-static inline void gl_telemetry_array_element(uint32_t slot)
+static inline void gl_telemetry_array_span(uint32_t slot)
+{ (void)slot; }
+static inline void gl_telemetry_array_fallback(uint32_t slot)
 { (void)slot; }
 static inline void gl_telemetry_frontend_begin(uint32_t slot)
 { (void)slot; }
@@ -652,6 +665,7 @@ typedef struct {
     uint32_t active_texture;
     uint32_t error;
     uint8_t in_begin;
+    uint8_t lock_held;
 } gl_client_state_t;
 static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 
@@ -968,10 +982,6 @@ static gl_client_array_t *gl_client_array(gl_client_state_t *state,
         return &state->texcoord[state->active_texture];
     return NULL;
 }
-static int gl_begin_mode(uint32_t mode)
-{
-    return mode <= 9U;
-}
 static void gl_record_client_call(uint32_t slot, uint32_t number,
                                   const uint32_t args[9])
 {
@@ -981,7 +991,7 @@ static void gl_record_client_call(uint32_t slot, uint32_t number,
     if (slot >= ZZAPP_AS_SLOT_COUNT) return;
     state = &gl_client[slot];
     if (number == GL_SLOT(Begin)) {
-        if (!state->in_begin && gl_begin_mode(args[0]))
+        if (!state->in_begin)
             state->in_begin = 1U;
         return;
     }
@@ -995,6 +1005,8 @@ static void gl_record_client_call(uint32_t slot, uint32_t number,
         int32_t size = (int32_t)args[0];
         int32_t stride = (int32_t)args[2];
 
+        if (state->in_begin)
+            return;
         if (size > 0 && size <= 4 && stride >= 0 && gl_type_bytes(args[1])) {
             array->size = size;
             array->type = args[1];
@@ -1004,6 +1016,8 @@ static void gl_record_client_call(uint32_t slot, uint32_t number,
         return;
     }
     if (number == GL_SLOT(ClientActiveTextureARB)) {
+        if (state->in_begin)
+            return;
         if (args[0] >= GL_TEXTURE0 && args[0] < GL_TEXTURE0 + GL_TEXTURE_UNITS)
             state->active_texture = args[0] - GL_TEXTURE0;
         return;
@@ -1035,13 +1049,15 @@ static void gl_record_client_call(uint32_t slot, uint32_t number,
         number == GL_SLOT(DisableClientState)) {
         uint8_t enabled = number == GL_SLOT(EnableClientState);
 
+        if (state->in_begin)
+            return;
         if (args[0] == GL_VERTEX_ARRAY) state->vertex.enabled = enabled;
         else if (args[0] == GL_COLOR_ARRAY) state->color.enabled = enabled;
         else if (args[0] == GL_TEXTURE_COORD_ARRAY)
             state->texcoord[state->active_texture].enabled = enabled;
     }
 }
-static int gl_validate_array_element(uint32_t slot, const zzapp_as_t *as,
+static int gl_validate_array_element(const zzapp_as_t *as,
                                      const gl_client_array_t *array,
                                      uint32_t index)
 {
@@ -1051,7 +1067,6 @@ static int gl_validate_array_element(uint32_t slot, const zzapp_as_t *as,
     int32_t stride;
 
     if (!array->enabled) return 1;
-    gl_telemetry_array_element(slot);
     type_bytes = gl_type_bytes(array->type);
     stride = array->stride;
     if (array->size <= 0 || array->size > 4 || !type_bytes || stride < 0)
@@ -1063,26 +1078,91 @@ static int gl_validate_array_element(uint32_t slot, const zzapp_as_t *as,
     return address <= UINT32_MAX &&
            zzapp_svc_check_user(as, (uint32_t)address, element_bytes, 0) == ZZ_OK;
 }
-static int gl_validate_array_index(uint32_t slot, const zzapp_as_t *as,
+static int gl_validate_array_index(const zzapp_as_t *as,
                                    const gl_client_state_t *state,
                                    uint32_t index)
 {
     uint32_t texture;
 
-    if (!gl_validate_array_element(slot, as, &state->vertex, index) ||
-        !gl_validate_array_element(slot, as, &state->color, index))
+    if (!gl_validate_array_element(as, &state->vertex, index) ||
+        !gl_validate_array_element(as, &state->color, index))
         return 0;
     for (texture = 0U; texture < GL_TEXTURE_UNITS; ++texture)
-        if (!gl_validate_array_element(slot, as, &state->texcoord[texture], index))
+        if (!gl_validate_array_element(as, &state->texcoord[texture], index))
             return 0;
     return 1;
+}
+static int gl_validate_array_span(uint32_t slot, const zzapp_as_t *as,
+                                  const gl_client_array_t *array,
+                                  uint32_t min, uint32_t max,
+                                  uint32_t element_count)
+{
+    uint32_t type_bytes;
+    uint32_t element_bytes;
+    uint32_t step;
+    uint64_t lo;
+    uint64_t hi;
+    uint64_t pages;
+
+    if (!array->enabled) return 1;
+    type_bytes = gl_type_bytes(array->type);
+    if (array->size <= 0 || array->size > 4 || !type_bytes ||
+        array->stride < 0)
+        return 1;
+    element_bytes = (uint32_t)array->size * type_bytes;
+    if (!array->pointer) return 0;
+    step = array->stride ? (uint32_t)array->stride : element_bytes;
+    lo = (uint64_t)array->pointer + (uint64_t)min * step;
+    hi = (uint64_t)array->pointer + (uint64_t)max * step + element_bytes;
+    if (lo > UINT32_MAX || hi > UINT32_MAX + 1ULL)
+        return 0;
+    pages = ((hi - 1U) >> 12) - (lo >> 12) + 1U;
+    if (pages > element_count || hi - lo > UINT32_MAX)
+        return 0;
+    gl_telemetry_array_span(slot);
+    return zzapp_svc_check_user(as, (uint32_t)lo, (uint32_t)(hi - lo), 0) ==
+           ZZ_OK;
+}
+static int gl_validate_spans(uint32_t slot, const zzapp_as_t *as,
+                             gl_client_state_t *state, uint32_t min,
+                             uint32_t max, uint32_t element_count)
+{
+    uint32_t texture;
+
+    if (!gl_validate_array_span(slot, as, &state->vertex, min, max,
+                                element_count))
+        return 0;
+    if (!gl_validate_array_span(slot, as, &state->color, min, max,
+                                element_count))
+        return 0;
+    for (texture = 0U; texture < GL_TEXTURE_UNITS; ++texture)
+        if (!gl_validate_array_span(slot, as, &state->texcoord[texture],
+                                    min, max, element_count))
+            return 0;
+    return 1;
+}
+static uint32_t gl_index_at(const uint8_t *indices, uint32_t index,
+                            uint32_t index_bytes)
+{
+    uint32_t value = 0U;
+
+    if (index_bytes == 1U)
+        return indices[index];
+    memcpy(&value, indices + index * index_bytes, index_bytes);
+    return value;
 }
 static int gl_validate_draw(const zzapp_as_t *as, uint32_t slot,
                             uint32_t number, const uint32_t args[9])
 {
-    const gl_client_state_t *state;
+    gl_client_state_t *state;
     int32_t count;
+    uint32_t min;
+    uint32_t max;
+    int span_status;
+
     uint32_t i;
+    uint32_t index_bytes = 0U;
+    const uint8_t *indices = NULL;
 
     if (slot >= ZZAPP_AS_SLOT_COUNT) return 0;
     state = &gl_client[slot];
@@ -1094,27 +1174,42 @@ static int gl_validate_draw(const zzapp_as_t *as, uint32_t slot,
         if (first < 0) return 1;
         if ((uint64_t)(uint32_t)first + (uint32_t)count > UINT32_MAX + 1ULL)
             return 0;
-        for (i = 0U; i < (uint32_t)count; ++i)
-            if (!gl_validate_array_index(slot, as, state, (uint32_t)first + i))
-                return 0;
-        return 1;
-    }
-    {
-        uint32_t index_bytes = gl_type_bytes(args[2]);
-        const uint8_t *indices = (const uint8_t *)(uintptr_t)args[3];
-
-        if (!index_bytes || !indices) return 1;
-        for (i = 0U; i < (uint32_t)count; ++i) {
-            uint32_t index = 0U;
-
-            if (index_bytes == 1U) index = indices[i];
-            else if (index_bytes == 2U)
-                memcpy(&index, indices + i * index_bytes, index_bytes);
-            else
-                memcpy(&index, indices + i * index_bytes, index_bytes);
-            if (!gl_validate_array_index(slot, as, state, index))
-                return 0;
+        min = (uint32_t)first;
+        max = min + (uint32_t)count - 1U;
+    } else {
+        switch (args[2]) {
+        case GL_UNSIGNED_BYTE: index_bytes = 1U; break;
+        case GL_UNSIGNED_SHORT: index_bytes = 2U; break;
+        case GL_UNSIGNED_INT: index_bytes = 4U; break;
+        default: return 1;
         }
+        indices = (const uint8_t *)(uintptr_t)args[3];
+        if (!indices) return 1;
+        min = gl_index_at(indices, 0U, index_bytes);
+        max = min;
+        for (i = 1U; i < (uint32_t)count; ++i) {
+            uint32_t index = gl_index_at(indices, i, index_bytes);
+
+            if (index < min) min = index;
+            if (index > max) max = index;
+        }
+    }
+    span_status = gl_validate_spans(slot, as, state, min, max,
+                                    (uint32_t)count);
+    if (span_status == 1)
+        return 1;
+    if (span_status < 0)
+        return 0;
+    gl_telemetry_array_fallback(slot);
+    if (number == GL_SLOT(DrawArrays)) {
+        for (i = 0U; i < (uint32_t)count; ++i)
+            if (!gl_validate_array_index(as, state, min + i))
+                return 0;
+    } else {
+        for (i = 0U; i < (uint32_t)count; ++i)
+            if (!gl_validate_array_index(as, state,
+                                         gl_index_at(indices, i, index_bytes)))
+                return 0;
     }
     return 1;
 }
@@ -1431,6 +1526,40 @@ static int dispatch_gl(uint32_t slot, const zzapp_svc_frame_t *frame,
     if (number == GL_SLOT(GetError) && gl_client[slot].error) {
         *result = gl_client[slot].error;
         gl_client[slot].error = 0U;
+        goto done;
+    }
+    if (number == GL_SLOT(LockArrays) || number == GL_SLOT(UnlockArrays)) {
+        gl_client_state_t *state = &gl_client[slot];
+        int has_is_enabled = gl->size >=
+            offsetof(zzapp_gl, IsEnabled) + sizeof(gl->IsEnabled) &&
+            gl->IsEnabled;
+
+        if (state->in_begin) {
+            if (!state->error)
+                state->error = GL_INVALID_OPERATION;
+        } else if (number == GL_SLOT(LockArrays)) {
+            if ((int32_t)args[1] < 0 || args[0] > INT32_MAX) {
+                if (!state->error)
+                    state->error = GL_INVALID_VALUE;
+            } else if (has_is_enabled &&
+                       (!gl->IsEnabled(GL_VERTEX_ARRAY) ||
+                        !gl->IsEnabled(MGL_ARRAY_TRANSFORMATIONS))) {
+                if (!state->error)
+                    state->error = GL_INVALID_OPERATION;
+            } else {
+                /*
+                 * The lock is intentionally ignored; do not emulate
+                 * MiniGL's allocation-dependent GL_OUT_OF_MEMORY result.
+                 */
+                state->lock_held = 1U;
+            }
+        } else if (!state->lock_held) {
+            if (!state->error)
+                state->error = GL_INVALID_OPERATION;
+        } else {
+            state->lock_held = 0U;
+        }
+        *result = 0U;
         goto done;
     }
     if (number == GL_SLOT(GetString)) {

@@ -80,6 +80,11 @@ static int svc_test_current_thread;
 static unsigned should_stop_calls;
 static unsigned time_us_calls;
 static uint32_t vertex2f_words[2];
+static unsigned lock_arrays_calls;
+static unsigned unlock_arrays_calls;
+static uint8_t mock_vertex_array_enabled;
+static uint8_t mock_array_transformations_enabled;
+static uint32_t mock_gl_error;
 #if ZZAPP_PERF_COUNTERS
 static uint32_t svc_counter_now;
 
@@ -122,6 +127,25 @@ static void mock_vertex_pointer(int32_t size, uint32_t type, int32_t stride,
     ++vertex_pointer_calls;
 }
 static void mock_enable_client_state(uint32_t state) { (void)state; }
+static void mock_disable_client_state(uint32_t state) { (void)state; }
+static uint8_t mock_is_enabled(uint32_t cap)
+{
+    if (cap == 0x8074U)
+        return mock_vertex_array_enabled;
+    if (cap == 0x701dU)
+        return mock_array_transformations_enabled;
+    return 0U;
+}
+static void mock_lock_arrays(uint32_t first, int32_t count)
+{
+    (void)first;
+    (void)count;
+    ++lock_arrays_calls;
+}
+static void mock_unlock_arrays(void)
+{
+    ++unlock_arrays_calls;
+}
 static void mock_pixel_store(uint32_t pname, int32_t value)
 {
     (void)pname;
@@ -143,6 +167,63 @@ static void mock_draw_elements(uint32_t mode, int32_t count, uint32_t type,
     (void)indices;
     ++draw_elements_calls;
 }
+static void mock_client_active_texture(uint32_t texture)
+{
+    (void)texture;
+}
+static void mock_gl_unbind(void) {}
+typedef struct {
+    uint32_t pointer;
+    int32_t size;
+    uint32_t type;
+    int32_t stride;
+    uint8_t enabled;
+} reference_array_t;
+
+static uint32_t reference_type_bytes(uint32_t type)
+{
+    switch (type) {
+    case 0x1400U: case 0x1401U: return 1U;
+    case 0x1402U: case 0x1403U: return 2U;
+    case 0x1404U: case 0x1405U: case 0x1406U: return 4U;
+    default: return 0U;
+    }
+}
+static int reference_array_accepts(const zzapp_as_t *as,
+                                   const reference_array_t *array,
+                                   uint32_t index)
+{
+    uint32_t type_bytes;
+    uint32_t element_bytes;
+    uint64_t address;
+    uint32_t step;
+
+    if (!array->enabled) return 1;
+    type_bytes = reference_type_bytes(array->type);
+    if (array->size <= 0 || array->size > 4 || !type_bytes ||
+        array->stride < 0)
+        return 1;
+    element_bytes = (uint32_t)array->size * type_bytes;
+    if (!array->pointer) return 0;
+    step = array->stride ? (uint32_t)array->stride : element_bytes;
+    address = (uint64_t)array->pointer + (uint64_t)index * step;
+    return address <= UINT32_MAX &&
+           zzapp_svc_check_user(as, (uint32_t)address, element_bytes, 0) == ZZ_OK;
+}
+static int reference_draw_accepts(const zzapp_as_t *as,
+                                  const reference_array_t arrays[3],
+                                  const uint32_t *indices, uint32_t count)
+{
+    uint32_t i;
+    uint32_t array;
+
+    for (i = 0U; i < count; ++i)
+        for (array = 0U; array < 3U; ++array)
+            if (!reference_array_accepts(as, &arrays[array], indices[i]))
+                return 0;
+    return 1;
+}
+
 static void mock_texture_upload(uint32_t target, int32_t level,
                                 int32_t internal_format, int32_t width,
                                 int32_t height, int32_t border,
@@ -222,10 +303,17 @@ static int mock_heap_shrink(uint32_t bytes, void **new_break)
     ++heap_shrink_calls;
     return ZZ_OK;
 }
-static uint32_t mock_get_error(void) { return 0U; }
+static uint32_t mock_get_error(void)
+{
+    uint32_t error = mock_gl_error;
+
+    mock_gl_error = 0U;
+    return error;
+}
 static void mock_begin(uint32_t mode)
 {
-    (void)mode;
+    if (mode > 9U)
+        mock_gl_error = 0x0500U;
     ++gl_begin_calls;
 }
 static void mock_end(void)
@@ -333,7 +421,18 @@ static void setup_dispatch(void)
     gl.Vertex2f = mock_vertex2f;
     gl.VertexPointer = mock_vertex_pointer;
     gl.EnableClientState = mock_enable_client_state;
+    gl.IsEnabled = mock_is_enabled;
+    gl.DisableClientState = mock_disable_client_state;
     gl.DrawArrays = mock_draw_arrays;
+    gl.ColorPointer = mock_vertex_pointer;
+    gl.TexCoordPointer = mock_vertex_pointer;
+    gl.ClientActiveTextureARB = mock_client_active_texture;
+    gl.LockArrays = mock_lock_arrays;
+    gl.UnlockArrays = mock_unlock_arrays;
+    api.gl_unbind = mock_gl_unbind;
+    draw_elements_calls = 0U;
+
+
     gl.DrawElements = mock_draw_elements;
     gl.TexImage2D = mock_texture_upload;
     gl.PixelStorei = mock_pixel_store;
@@ -360,6 +459,11 @@ static void setup_dispatch(void)
     time_us_calls = 0U;
     vertex2f_words[0] = 0U;
     vertex2f_words[1] = 0U;
+    lock_arrays_calls = 0U;
+    unlock_arrays_calls = 0U;
+    mock_vertex_array_enabled = 0U;
+    mock_array_transformations_enabled = 1U;
+    mock_gl_error = 0U;
 }
 static void teardown_dispatch(void)
 {
@@ -434,6 +538,7 @@ static void test_descriptors_cover_callable_slots(void)
         if (i != gl_build)
             CHECK(zzapp_svc_gl_descriptor(i) != NULL);
 }
+
 
 static void test_descriptor_shapes(void)
 {
@@ -572,10 +677,275 @@ static void test_gl_deferred_pointer_checks(void)
     CHECK(zzapp_svc_gl_telemetry_swap(0U, 999999U, &snapshot) == 0);
     CHECK(snapshot.descriptor_failures == 1U);
     CHECK(snapshot.pointer_failures >= 4U);
-    CHECK(snapshot.array_element_checks >= 2U);
+    CHECK(snapshot.array_span_checks >= 2U);
 #endif
     teardown_dispatch();
 }
+static void test_gl_span_validation(void)
+{
+    zzapp_svc_frame_t frame;
+#if ZZAPP_PERF_COUNTERS
+    zzapp_gl_telemetry_snapshot_t snapshot;
+#endif
+    uint32_t extra_va;
+    void *index_pages;
+    uint32_t i;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 0x20000U, 1,
+                             &extra_va) == ZZ_OK);
+    index_pages = mmap((void *)(uintptr_t)(user_va + 0x2000U), 0x3000U,
+                       PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS |
+                       MAP_FIXED, -1, 0);
+    CHECK(index_pages != MAP_FAILED);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+             &frame, (uint32_t[9]){ 3U, 0x1406U, 12U, extra_va });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ColorPointer)),
+             &frame, (uint32_t[9]){ 4U, 0x1406U, 16U, extra_va + 0x8000U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, TexCoordPointer)),
+             &frame, (uint32_t[9]){ 2U, 0x1406U, 8U, extra_va + 0x10000U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+             &frame, (uint32_t[9]){ 0x8074U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+             &frame, (uint32_t[9]){ 0x8076U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+             &frame, (uint32_t[9]){ 0x8078U });
+    for (i = 0U; i < 6144U; ++i)
+        ((uint16_t *)(void *)(user_page + 0x700U))[i] = (uint16_t)(i & 1023U);
+#if ZZAPP_PERF_COUNTERS
+    zzapp_svc_gl_telemetry_reset(0U);
+    CHECK(zzapp_svc_gl_telemetry_swap(0U, 0U, NULL) == 0);
+#endif
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+             &frame, (uint32_t[9]){ 4U, 6144U, 0x1403U, user_va + 0x700U });
+    CHECK(draw_elements_calls == 1U);
+#if ZZAPP_PERF_COUNTERS
+    CHECK(zzapp_svc_gl_telemetry_swap(0U, 1U, &snapshot) == 0);
+    CHECK(snapshot.array_span_checks == 3U);
+    CHECK(snapshot.array_span_fallbacks == 0U);
+#endif
+    if (index_pages != MAP_FAILED)
+        munmap(index_pages, 0x3000U);
+    CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 0x20000U) == ZZ_OK);
+    teardown_dispatch();
+}
+static void test_gl_span_fallback_reference(void)
+{
+    zzapp_svc_frame_t frame;
+    reference_array_t arrays[3];
+    uint32_t gap_va;
+    uint32_t target_va;
+    uint32_t values[4] = { 0U, 1U, 2U, 3U };
+    uint32_t seed = 0x4d595df4U;
+    uint32_t iteration;
+    unsigned before;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 4096U, 1, &gap_va) == ZZ_OK);
+    CHECK(zzapp_as_alias_map(&proc.as, 0x02002000U, 4096U, 1, &target_va) == ZZ_OK);
+    CHECK(zzapp_as_alias_unmap(&proc.as, gap_va, 4096U) == ZZ_OK);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+             &frame, (uint32_t[9]){ 3U, 0x1406U, 8192U, user_va });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+             &frame, (uint32_t[9]){ 0x8074U });
+    ((uint16_t *)(void *)(user_page + 0x700U))[0] = 0U;
+    ((uint16_t *)(void *)(user_page + 0x700U))[1] = 1U;
+    before = draw_elements_calls;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+             &frame, (uint32_t[9]){ 4U, 2U, 0x1403U, user_va + 0x700U });
+    CHECK(draw_elements_calls == before + 1U);
+    ((uint8_t *)(void *)(user_page + 0x700U))[0] = 0U;
+    ((uint8_t *)(void *)(user_page + 0x700U))[1] = 1U;
+    before = draw_elements_calls;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+             &frame, (uint32_t[9]){ 4U, 2U, 0x1401U, user_va + 0x700U });
+    CHECK(draw_elements_calls == before + 1U);
+    for (iteration = 0U; iteration < 32U; ++iteration) {
+        uint32_t array;
+        int expected;
+
+        seed = seed * 1664525U + 1013904223U;
+        for (array = 0U; array < 3U; ++array) {
+            static const uint32_t types[] = { 0x1401U, 0x1403U, 0x1406U };
+            static const uint32_t strides[] = { 0U, 4U, 16U, 8192U };
+
+            seed = seed * 1664525U + 1013904223U;
+            arrays[array].pointer = (seed & 1U) ? user_va + (seed & 63U) :
+                                                   target_va + (seed & 63U);
+            arrays[array].size = (int32_t)(1U + ((seed >> 1) & 3U));
+            arrays[array].type = types[(seed >> 3) % 3U];
+            arrays[array].stride = (int32_t)strides[(seed >> 5) % 4U];
+            arrays[array].enabled = (uint8_t)((seed >> 7) & 1U);
+        }
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+                 &frame, (uint32_t[9]){ (uint32_t)arrays[0].size, arrays[0].type,
+                                         (uint32_t)arrays[0].stride, arrays[0].pointer });
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ColorPointer)),
+                 &frame, (uint32_t[9]){ (uint32_t)arrays[1].size, arrays[1].type,
+                                         (uint32_t)arrays[1].stride, arrays[1].pointer });
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, TexCoordPointer)),
+                 &frame, (uint32_t[9]){ (uint32_t)arrays[2].size, arrays[2].type,
+                                         (uint32_t)arrays[2].stride, arrays[2].pointer });
+        CHECK(frame.r[0] != (uint32_t)ZZ_ENOSYS);
+
+        for (array = 0U; array < 3U; ++array) {
+            uint32_t state = array == 0U ? 0x8074U :
+                             array == 1U ? 0x8076U : 0x8078U;
+            uint32_t number = arrays[array].enabled ?
+                gl_slot(offsetof(zzapp_gl, EnableClientState)) :
+                gl_slot(offsetof(zzapp_gl, DisableClientState));
+
+            dispatch(ZZAPP_SVC_GL_FIRST + number, &frame, (uint32_t[9]){ state });
+            CHECK(frame.r[0] != (uint32_t)ZZ_ENOSYS);
+        }
+        if (iteration == 0U)
+            values[0] = UINT32_MAX;
+        else
+            values[0] = iteration & 3U;
+        ((uint32_t *)(void *)(user_page + 0x600U))[0] = values[0];
+        ((uint32_t *)(void *)(user_page + 0x600U))[1] = values[1];
+        ((uint32_t *)(void *)(user_page + 0x600U))[2] = values[2];
+        ((uint32_t *)(void *)(user_page + 0x600U))[3] = values[3];
+        expected = reference_draw_accepts(&proc.as, arrays, values, 4U);
+        before = draw_elements_calls;
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+                 &frame, (uint32_t[9]){ 4U, 4U, 0x1405U, user_va + 0x600U });
+        CHECK((draw_elements_calls != before) == expected);
+    }
+    CHECK(zzapp_as_alias_unmap(&proc.as, target_va, 4096U) == ZZ_OK);
+    teardown_dispatch();
+}
+
+static void test_gl_lock_calls_stay_kernel_side(void)
+{
+    zzapp_svc_frame_t frame;
+    const zzapp_gl *table;
+    unsigned before;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    table = zzapp_svc_gl_for_slot(0U);
+    CHECK(table != NULL);
+    CHECK(zzapp_svc_is_veneer((uintptr_t)table->LockArrays));
+    CHECK(zzapp_svc_is_veneer((uintptr_t)table->UnlockArrays));
+
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+             &frame, (uint32_t[9]){ 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0502U);
+
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+             &frame, (uint32_t[9]){ 3U, 0x1406U, 12U, user_va + 0x100U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+             &frame, (uint32_t[9]){ 0x8074U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+             &frame, (uint32_t[9]){ 0U, 1U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0502U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+             &frame, (uint32_t[9]){ 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0502U);
+
+    mock_vertex_array_enabled = 1U;
+    mock_array_transformations_enabled = 0U;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+             &frame, (uint32_t[9]){ 0U, 1U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0502U);
+
+    mock_array_transformations_enabled = 1U;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+             &frame, (uint32_t[9]){ 0U, 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+             &frame, (uint32_t[9]){ 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0U);
+
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+             &frame, (uint32_t[9]){ UINT32_MAX, 1U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0501U);
+
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+             &frame, (uint32_t[9]){ 0U, INT32_MAX });
+    CHECK(lock_arrays_calls == 0U);
+    ((uint16_t *)(void *)(user_page + 0x700U))[0] = 0U;
+    before = draw_elements_calls;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+             &frame, (uint32_t[9]){ 4U, 1U, 0x1403U, user_va + 0x700U });
+    CHECK(draw_elements_calls == before + 1U);
+    ((uint16_t *)(void *)(user_page + 0x700U))[0] = 1024U;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+             &frame, (uint32_t[9]){ 4U, 1U, 0x1403U, user_va + 0x700U });
+    CHECK(draw_elements_calls == before + 1U);
+    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0501U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+             &frame, (uint32_t[9]){ 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0U);
+
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin)),
+             &frame, (uint32_t[9]){ UINT32_MAX });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0500U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+             &frame, (uint32_t[9]){ 0U, 1U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, End)),
+             &frame, (uint32_t[9]){ 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0502U);
+
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin)),
+             &frame, (uint32_t[9]){ UINT32_MAX });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0500U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+             &frame, (uint32_t[9]){ 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, End)),
+             &frame, (uint32_t[9]){ 0U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0502U);
+
+    CHECK(lock_arrays_calls == 0U);
+    CHECK(unlock_arrays_calls == 0U);
+    teardown_dispatch();
+}
+
+
+
+
 static void test_copy_out_and_pixel_argument_positions(void)
 {
     zzapp_svc_frame_t frame;
@@ -991,6 +1361,9 @@ int main(void)
     test_table_copy_uses_only_veneers();
     test_gl_table_copy_uses_only_veneers();
     test_pointer_checks();
+    test_gl_span_validation();
+    test_gl_span_fallback_reference();
+    test_gl_lock_calls_stay_kernel_side();
     test_descriptors_cover_callable_slots();
     test_gl_deferred_pointer_checks();
     test_copy_out_and_pixel_argument_positions();

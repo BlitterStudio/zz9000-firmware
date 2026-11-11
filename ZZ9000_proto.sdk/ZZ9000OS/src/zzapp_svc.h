@@ -131,7 +131,9 @@ typedef struct {
     uint32_t lock_contention;
     uint32_t descriptor_failures;
     uint32_t pointer_failures;
-    uint32_t array_element_checks;
+    /* Draw validation counts: spans attempted and sparse-span fallbacks. */
+    uint32_t array_span_checks;
+    uint32_t array_span_fallbacks;
     uint32_t average_boundary_cycles;
     uint32_t average_descriptor_cycles;
     uint32_t average_lock_cycles;
