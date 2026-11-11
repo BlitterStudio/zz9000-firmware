@@ -362,6 +362,23 @@ static int test_new_options_and_wants_player(void)
   return 0;
 }
 
+static int test_cli_url_and_pattern_mixing(void)
+{
+  ZZPlayOptions options;
+  char *argv[] = { "zzplay", "--quiet", "Work:Music/#?.mp3",
+                   "http://h/s.mp3", "DH0:Music/Drawer" };
+
+  if (zzplay_options_parse_cli(5, argv, &options) != ZZPLAY_OPTIONS_OK) {
+    return 1;
+  }
+  if (!options.quiet) return 2;
+  if (options.path_count != 3U) return 3;
+  if (strcmp(options.paths[0], "Work:Music/#?.mp3") != 0) return 4;
+  if (strcmp(options.paths[1], "http://h/s.mp3") != 0) return 5;
+  if (strcmp(options.paths[2], "DH0:Music/Drawer") != 0) return 6;
+  return 0;
+}
+
 int main(void)
 {
   int rc;
@@ -386,6 +403,8 @@ int main(void)
   if (rc != 0) { printf("multi-path %d\n", rc); return 200 + rc; }
   rc = test_new_options_and_wants_player();
   if (rc != 0) { printf("new-options %d\n", rc); return 220 + rc; }
+  rc = test_cli_url_and_pattern_mixing();
+  if (rc != 0) { printf("url-pattern-mixing %d\n", rc); return 240 + rc; }
   printf("zzplay_options_test: all checks passed\n");
   return 0;
 }

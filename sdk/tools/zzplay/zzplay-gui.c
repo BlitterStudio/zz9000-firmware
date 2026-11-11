@@ -26,6 +26,7 @@
 #include "zzplay-devices.h"
 #include "zzplay-files.h"
 #include "zzplay-requester.h"
+#include "zzplay-http.h"
 
 /* Program-wide library base ownership per plan. */
 struct GfxBase *GfxBase;
@@ -82,6 +83,7 @@ enum {
 enum {
   MID_PROJECT = 1,
   MID_OPEN,
+  MID_OPEN_URL,
   MID_ADD_FILES,
   MID_ADD_DRAWER,
   MID_LOAD_PLAYLIST,
@@ -115,6 +117,13 @@ enum {
   SGID_SAVE,
   SGID_USE,
   SGID_CANCEL
+};
+
+/* Gadget IDs for Open URL window */
+enum {
+  UGID_STRING = 201,
+  UGID_OPEN,
+  UGID_CANCEL
 };
 
 /* --- Player Window State --- */
@@ -242,6 +251,13 @@ static struct Window *settings_win;
 static APTR settings_vi;
 static struct Gadget *settings_gadgets;
 static ZZPlayPrefs settings_copy;
+
+/* --- Open URL Window State --- */
+static struct Window *url_win;
+static APTR url_vi;
+static struct Gadget *url_gadgets;
+static struct Gadget *url_string_gad;
+static char url_input_buf[ZZPLAY_PLAYLIST_PATH_MAX];
 
 static char ahi_unit_labels[ZZPLAY_PREFS_AHI_UNITS][ZZPLAY_DEVICES_NAME_MAX];
 static const char *ahi_cycle_ptrs[ZZPLAY_PREFS_AHI_UNITS + 1];
@@ -1255,9 +1271,9 @@ static void start_requester(ZZPlayModal op)
 
 static void request_quit(ZZPlayController *ctl)
 {
-  if (zzplay_requester_active()) {
+  if (zzplay_requester_active() || url_win) {
     zzplay_controller_set_message(ctl,
-                                  "Close the file requester before quitting");
+                                  "Close the open window before quitting");
     return;
   }
   zzplay_controller_request(ctl, ZZPLAY_REQUEST_QUIT);
@@ -1289,6 +1305,189 @@ static struct Gadget *gui_gadget(ULONG kind, struct Gadget *prev,
   ng->ng_GadgetID = id;
   ng->ng_Flags = flags;
   return CreateGadgetA(kind, prev, ng, (struct TagItem *)tags);
+}
+
+static void close_url_window(int cancel)
+{
+  ZZPlayController *ctl = gui_context ? gui_context->controller : 0;
+
+  (void)cancel;
+  if (url_win) {
+    if (url_win->UserPort) {
+      struct IntuiMessage *msg;
+      while ((msg = GT_GetIMsg(url_win->UserPort)) != 0) {
+        GT_ReplyIMsg(msg);
+      }
+    }
+    CloseWindow(url_win);
+    url_win = 0;
+  }
+  if (url_gadgets) {
+    FreeGadgets(url_gadgets);
+    url_gadgets = 0;
+  }
+  if (url_vi) {
+    FreeVisualInfo(url_vi);
+    url_vi = 0;
+  }
+  url_string_gad = 0;
+  if (ctl && ctl->modal == ZZPLAY_MODAL_OPEN_FILES) {
+    zzplay_controller_end_modal(ctl);
+  }
+}
+
+/* The gadget's own StringInfo buffer: GT_GetGadgetAttrs() is V39, and
+ * ZZPlay opens gadtools.library 37. */
+static void get_string_gadget_text(struct Gadget *gad, char *buf,
+                                   size_t max_len)
+{
+  struct StringInfo *si;
+
+  if (!gad || !buf || max_len == 0U) {
+    return;
+  }
+  buf[0] = '\0';
+  si = (struct StringInfo *)gad->SpecialInfo;
+  if (si && si->Buffer) {
+    strncpy(buf, (const char *)si->Buffer, max_len - 1U);
+    buf[max_len - 1U] = '\0';
+  }
+}
+
+static void open_url_window(void)
+{
+  ZZPlayController *ctl;
+  struct RastPort *srp;
+  struct NewGadget ng;
+  struct Gadget *gad;
+  struct TagItem str_tags[4];
+  int btn_h;
+  int s_width;
+  int btn_w;
+  int cur_y;
+  int label_w;
+  int str_w;
+  int left;
+  int top;
+  int max_w;
+
+  if (url_win) {
+    WindowToFront(url_win);
+    ActivateWindow(url_win);
+    return;
+  }
+
+  ctl = gui_context ? gui_context->controller : 0;
+  if (!ctl || !player_screen || !gui_context->playlist) {
+    return;
+  }
+
+  if (ctl->modal != ZZPLAY_MODAL_NONE || zzplay_requester_active()) {
+    zzplay_controller_set_message(ctl, "Another operation is active");
+    return;
+  }
+
+  if (!zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_OPEN_FILES)) {
+    return;
+  }
+
+  url_vi = GetVisualInfo(player_screen, TAG_DONE);
+  if (!url_vi) {
+    close_url_window(1);
+    return;
+  }
+
+  srp = &player_screen->RastPort;
+  btn_h = font_height + 6;
+  s_width = 380;
+  max_w = player_screen->Width - player_screen->WBorLeft - player_screen->WBorRight;
+  if (s_width > max_w) {
+    s_width = max_w;
+  }
+
+  label_w = gui_text_width(srp, "URL:") + 12;
+  str_w = s_width - 2 * ZZPLAY_GUI_MARGIN - label_w;
+  if (str_w < 100) {
+    str_w = 100;
+  }
+  btn_w = (s_width - 2 * ZZPLAY_GUI_MARGIN - ZZPLAY_GUI_SPACING) / 2;
+  cur_y = ZZPLAY_GUI_MARGIN;
+
+  url_input_buf[0] = '\0';
+
+  str_tags[0].ti_Tag = GTST_String;
+  str_tags[0].ti_Data = (ULONG)url_input_buf;
+  str_tags[1].ti_Tag = GTST_MaxChars;
+  str_tags[1].ti_Data = (ULONG)(sizeof(url_input_buf) - 1U);
+  str_tags[2].ti_Tag = GA_RelVerify;
+  str_tags[2].ti_Data = TRUE;
+  str_tags[3].ti_Tag = TAG_DONE;
+  str_tags[3].ti_Data = 0;
+
+  url_gadgets = 0;
+  gad = CreateContext(&url_gadgets);
+  if (!gad) {
+    close_url_window(1);
+    return;
+  }
+
+  memset(&ng, 0, sizeof(ng));
+  ng.ng_VisualInfo = url_vi;
+  ng.ng_TextAttr = gui_text_attr;
+
+  url_string_gad = gad = gui_gadget(
+      STRING_KIND, gad, &ng, ZZPLAY_GUI_MARGIN + label_w, cur_y,
+      str_w, btn_h, "URL:",
+      UGID_STRING, PLACETEXT_LEFT,
+      str_tags);
+  cur_y += btn_h + ZZPLAY_GUI_SPACING;
+
+  gad = gui_gadget(BUTTON_KIND, gad, &ng, ZZPLAY_GUI_MARGIN, cur_y,
+                   btn_w, btn_h, "Open", UGID_OPEN, PLACETEXT_IN,
+                   GUI_TAGS(TAG_DONE));
+  gad = gui_gadget(BUTTON_KIND, gad, &ng,
+                   s_width - ZZPLAY_GUI_MARGIN - btn_w, cur_y,
+                   btn_w, btn_h, "Cancel", UGID_CANCEL, PLACETEXT_IN,
+                   GUI_TAGS(TAG_DONE));
+  cur_y += btn_h + ZZPLAY_GUI_MARGIN;
+
+  if (!gad) {
+    close_url_window(1);
+    zzplay_controller_set_message(ctl, "Not enough memory for URL window");
+    return;
+  }
+
+  left = player_win ? (player_win->LeftEdge + 40) : 40;
+  top = player_win ? (player_win->TopEdge + 40) : 40;
+
+  url_win = OpenWindowTags(
+      0,
+      WA_Title, (ULONG)"Open URL",
+      WA_Left, (ULONG)left,
+      WA_Top, (ULONG)top,
+      WA_InnerWidth, (ULONG)s_width,
+      WA_InnerHeight, (ULONG)cur_y,
+      WA_AutoAdjust, TRUE,
+      WA_PubScreen, (ULONG)player_screen,
+      WA_Gadgets, (ULONG)url_gadgets,
+      WA_DragBar, TRUE,
+      WA_CloseGadget, TRUE,
+      WA_DepthGadget, TRUE,
+      WA_Activate, TRUE,
+      WA_SmartRefresh, TRUE,
+      WA_NewLookMenus, TRUE,
+      WA_IDCMP,
+      IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+      BUTTONIDCMP | STRINGIDCMP,
+      TAG_DONE);
+
+  if (!url_win) {
+    close_url_window(1);
+    return;
+  }
+
+  GT_RefreshWindow(url_win, 0);
+  ActivateGadget(url_string_gad, url_win, 0);
 }
 
 /* --- Public API --- */
@@ -1324,6 +1523,7 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
   static struct NewMenu new_menu[] = {
     { NM_TITLE, (CONST_STRPTR)"Project",       0, 0, 0, (APTR)MID_PROJECT },
     { NM_ITEM,  (CONST_STRPTR)"Open...",       (CONST_STRPTR)"O", 0, 0, (APTR)MID_OPEN },
+    { NM_ITEM,  (CONST_STRPTR)"Open URL...",   (CONST_STRPTR)"U", 0, 0, (APTR)MID_OPEN_URL },
     { NM_ITEM,  (CONST_STRPTR)"Add files...",  (CONST_STRPTR)"A", 0, 0, (APTR)MID_ADD_FILES },
     { NM_ITEM,  (CONST_STRPTR)"Add drawer...", 0, 0, 0, (APTR)MID_ADD_DRAWER },
     { NM_ITEM,  (CONST_STRPTR)"Load playlist...", (CONST_STRPTR)"L", 0, 0, (APTR)MID_LOAD_PLAYLIST },
@@ -1617,6 +1817,7 @@ void zzplay_gui_close(void)
   /* An ASL requester cannot be closed from another task. Wait for its child
    * before tearing down the screen or letting this task exit. */
   zzplay_requester_close();
+  close_url_window(1);
   close_settings_window();
 
   if (app_window) {
@@ -1715,6 +1916,9 @@ uint32_t zzplay_gui_signal_mask(void)
   if (settings_win && settings_win->UserPort) {
     mask |= (1UL << settings_win->UserPort->mp_SigBit);
   }
+  if (url_win && url_win->UserPort) {
+    mask |= (1UL << url_win->UserPort->mp_SigBit);
+  }
   if (app_port) {
     mask |= (1UL << app_port->mp_SigBit);
   }
@@ -1781,6 +1985,7 @@ void zzplay_gui_poll(void)
    * input events). */
   if (!gui_port_pending(player_win->UserPort) &&
       !(settings_win && gui_port_pending(settings_win->UserPort)) &&
+      !(url_win && gui_port_pending(url_win->UserPort)) &&
       !gui_port_pending(app_port) && ctl->dirty == 0U && !refresh_pending &&
       !settings_refresh_pending &&
       zzplay_controller_modal_ready(ctl) != ZZPLAY_MODAL_ADD_DROPPED) {
@@ -1892,6 +2097,56 @@ void zzplay_gui_poll(void)
     settings_refresh_pending = 0;
     GT_BeginRefresh(settings_win);
     GT_EndRefresh(settings_win, TRUE);
+  }
+
+  /* 2b. URL window IDCMP */
+  if (url_win && url_win->UserPort) {
+    while (url_win &&
+           (imsg = GT_GetIMsg(url_win->UserPort)) != 0) {
+      ULONG m_class = imsg->Class;
+      struct Gadget *gad = (struct Gadget *)imsg->IAddress;
+      GT_ReplyIMsg(imsg);
+
+      switch (m_class) {
+        case IDCMP_CLOSEWINDOW:
+          close_url_window(1);
+          break;
+
+        case IDCMP_REFRESHWINDOW:
+          GT_BeginRefresh(url_win);
+          GT_EndRefresh(url_win, TRUE);
+          break;
+
+        case IDCMP_GADGETUP:
+          if (gad) {
+            UWORD gid = gad->GadgetID;
+            if (gid == UGID_CANCEL) {
+              close_url_window(1);
+            } else if (gid == UGID_OPEN || gid == UGID_STRING) {
+              get_string_gadget_text(url_string_gad, url_input_buf,
+                                     sizeof(url_input_buf));
+              if (zzplay_http_is_url(url_input_buf)) {
+                int32_t idx;
+                close_url_window(0);
+                idx = zzplay_playlist_add(pl, url_input_buf);
+                if (idx >= 0) {
+                  ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+                  zzplay_controller_jump(ctl, idx);
+                } else {
+                  zzplay_controller_set_message(ctl, "Failed to add URL to playlist");
+                }
+              } else {
+                close_url_window(1);
+                zzplay_controller_set_message(ctl, "Not an HTTP or HTTPS URL");
+              }
+            }
+          }
+          break;
+
+        default:
+          break;
+      }
+    }
   }
 
   /* 3. Player window IDCMP */
@@ -2079,6 +2334,9 @@ void zzplay_gui_poll(void)
               switch (mid) {
                 case MID_OPEN:
                   start_requester(ZZPLAY_MODAL_OPEN_FILES);
+                  break;
+                case MID_OPEN_URL:
+                  open_url_window();
                   break;
                 case MID_ADD_FILES:
                   start_requester(ZZPLAY_MODAL_ADD_FILES);

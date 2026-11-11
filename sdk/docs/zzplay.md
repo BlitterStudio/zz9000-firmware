@@ -5,10 +5,10 @@ the card and presents video through the Picasso96 overlay. On an accelerated
 Zorro III system, decoded video stays on the card rather than crossing the
 Zorro bus.
 
-Start it as a desktop player from Workbench, or pass files from a shell for a
-one-shot playlist. A shell launch with files exits after playback; a shell
-launch without files opens the player. Workbench launches open the player
-unless `FULLSCREEN` or `PLAYER=NO` selects one-shot playback. Scripts can
+Start it as a desktop player from Workbench, or pass files or network URLs from
+a shell for a one-shot playlist. A shell launch with media exits after playback;
+a shell launch without arguments opens the player. Workbench launches open the
+player unless `FULLSCREEN` or `PLAYER=NO` selects one-shot playback. Scripts can
 control a running ZZPlay through its [ARexx port](#arexx).
 
 ## Supported input
@@ -16,7 +16,8 @@ control a running ZZPlay through its [ARexx port](#arexx).
 ZZPlay identifies media from its contents. Extensions only control drawer scans
 and the file requester, so a correctly formed file can play under another name.
 A WebM file must declare the `webm` DocType, and a Matroska file the
-`matroska` DocType.
+`matroska` DocType. Audio also plays from `http://` addresses; see
+[Network playback](#network-playback).
 
 | Input | Extensions offered in scans and requesters | Supported content |
 | --- | --- | --- |
@@ -28,6 +29,7 @@ A WebM file must declare the `webm` DocType, and a Matroska file the
 | Ogg Vorbis | `.ogg`, `.oga` | A mono or stereo Vorbis stream at 8–192 kHz. Ogg Opus, Ogg-FLAC, and other Ogg codecs are rejected. |
 | Animated WebP | `.webp` | Animated WebP, 16–1920 pixels wide and 16–1080 pixels high. Still WebP images are rejected. |
 | Playlist | `.m3u`, `.m3u8` | Files listed by the playlist. |
+| Network address | None | `http://` addresses of MP3, FLAC and Ogg Vorbis audio, and Shoutcast or Icecast stations. See [Network playback](#network-playback). |
 
 WebM and MPEG video have separate realtime thresholds. VP8 is realtime through
 1280x720, and VP9 through 854x480. Larger WebM files within the maximum can
@@ -147,6 +149,44 @@ level. When the output cannot change its level, the slider is disabled and the
 output line shows `(fixed volume)`. A new volume applies when you release the
 slider.
 
+## Network playback
+
+ZZPlay plays MP3, FLAC and Ogg Vorbis from `http://` addresses, including
+Shoutcast and Icecast radio stations. It needs a running TCP/IP stack that
+provides `bsdsocket.library` version 4, such as Roadshow, AmiTCP or MiamiDX.
+`https://` addresses are not supported yet.
+
+### Adding an address
+
+- Choose **Open URL...** (Amiga-U) in the **Project** menu, type the address
+  and press Return or click **Open**. ZZPlay adds it to the playlist and plays
+  it. **Cancel** changes nothing; text that is not an `http://` or `https://`
+  address is refused with a message.
+- Give the address as a Shell argument, alone or mixed with files and drawers:
+  `ZZPlay http://radio.example:8000/stream`
+- List it in an M3U playlist. Addresses are kept as written when ZZPlay loads
+  or saves the playlist.
+- Use the ARexx `OPEN` or `ADD` command with the address.
+
+An address that ends in `.pls`, `.m3u` or `.m3u8` is a station's playlist. It
+stays one playlist entry, and ZZPlay downloads it when the entry starts and
+plays the first stream in it that answers.
+
+### What plays and how
+
+A network item uses the same audio settings as a file: MP3 through MHI,
+ZZ9000AX or AHI, FLAC and Ogg Vorbis decoded on the card.
+
+| Situation | What ZZPlay does |
+| --- | --- |
+| Shoutcast or Icecast station | Shows the station name in the playlist and the current track in the title line, updated when the station announces a new one. |
+| A station drops the connection | Reconnects after 1, 2 and 4 seconds. Three failures in a row without any audio end the item, and the playlist moves on. |
+| Seeking | Works when the server reports the length and accepts byte ranges, as file servers normally do. Live stations and other sources are not seekable. |
+| Video address (MPEG, WebM, WebP) | Refused with "video plays only from files". |
+| AAC, HE-AAC or Opus station | Not playable. |
+| Icecast Ogg Vorbis station | Stops at the first track change, because each new track starts a new Ogg stream. |
+| Host-name lookup | Can hold the player for a moment, longer when the name server does not answer. Stop takes effect once the lookup returns. |
+
 ## Preload to card memory
 
 **Preload whole file** in the player's settings window (stored as `PRELOAD`
@@ -212,6 +252,7 @@ tries it again.
 | Menu | Item | Shortcut | Action |
 | --- | --- | --- | --- |
 | Project | Open... | Amiga-O | Replace the playlist with the chosen files and play the first one. |
+| Project | Open URL... | Amiga-U | Add a network address to the playlist and play it. |
 | Project | Add files... | Amiga-A | Append files. |
 | Project | Add drawer... | | Append the media files of a drawer and its sub-drawers. |
 | Project | Load playlist... | Amiga-L | Append the entries of an M3U playlist. |

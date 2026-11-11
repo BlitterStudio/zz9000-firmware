@@ -2,6 +2,7 @@
 
 #include "zzplay-files.h"
 #include "zzplay-sys.h"
+#include "zzplay-http.h"
 
 #include <dos/dos.h>
 #include <dos/dosasl.h>
@@ -256,6 +257,10 @@ uint32_t zzplay_files_add(ZZPlayPlaylist *list, const char *path)
   if (!list || !path || path[0] == '\0' ||
       list->count >= ZZPLAY_PLAYLIST_MAX_ENTRIES) {
     return 0U;
+  }
+
+  if (zzplay_http_is_url(path)) {
+    return (zzplay_playlist_add(list, path) >= 0) ? 1U : 0U;
   }
 
   if (is_wildcard_pattern(path, list)) {

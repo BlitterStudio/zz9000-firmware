@@ -3,6 +3,7 @@
 
 #include "zzplay-playlist.h"
 #include "zzplay-sys.h"
+#include "zzplay-http.h"
 
 #include <string.h>
 
@@ -617,7 +618,10 @@ const char *zzplay_playlist_display_name(const ZZPlayPlaylist *list,
   if (list->entries[index].title[0] != '\0') {
     return list->entries[index].title;
   }
-  return zzplay_playlist_basename(list->entries[index].path);
+  {
+    const char *base = zzplay_playlist_basename(list->entries[index].path);
+    return (base && base[0] != '\0') ? base : list->entries[index].path;
+  }
 }
 
 int zzplay_playlist_join(char *out, size_t capacity, const char *drawer,
@@ -631,7 +635,7 @@ int zzplay_playlist_join(char *out, size_t capacity, const char *drawer,
   if (!out || capacity == 0U || !name) {
     return 0;
   }
-  if (strchr(name, ':') != NULL) {
+  if (zzplay_http_is_url(name) || strchr(name, ':') != NULL) {
     nlen = strlen(name);
     if (nlen >= capacity) {
       return 0;
@@ -966,7 +970,7 @@ int zzplay_playlist_is_playlist_path(const char *path)
 {
   const char *dot;
 
-  if (!path) {
+  if (!path || zzplay_http_is_url(path)) {
     return 0;
   }
   dot = strrchr(path, '.');

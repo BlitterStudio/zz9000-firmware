@@ -294,6 +294,11 @@ static int test_join_and_drawer(void)
     return 11;
   if (strcmp(zzplay_playlist_basename("Work:song.mp3"), "song.mp3") != 0)
     return 12;
+  /* zzplay_playlist_join with URLs */
+  if (!zzplay_playlist_join(buf, sizeof(buf), "Work:Music", "http://h/s.mp3") ||
+      strcmp(buf, "http://h/s.mp3") != 0) return 13;
+  if (!zzplay_playlist_join(buf, sizeof(buf), "Work:Music", "https://h/stream") ||
+      strcmp(buf, "https://h/stream") != 0) return 14;
 
   return 0;
 }
@@ -391,6 +396,55 @@ static int test_m3u_extinf_saturates(void)
   return 0;
 }
 
+static int test_m3u_with_urls(void)
+{
+  static const char m3u_mixed[] =
+      "#EXTM3U\n"
+      "#EXTINF:120,Relative Song\n"
+      "relative/song.mp3\n"
+      "#EXTINF:-1,Radio Stream\n"
+      "http://h/s.mp3\n"
+      "#EXTINF:240,Absolute Song\n"
+      "DH0:Music/absolute.mp3\n";
+
+  ZZPlayPlaylist list;
+  char out_buf[1024];
+  size_t needed;
+
+  zzplay_playlist_init(&list);
+  if (zzplay_playlist_parse_m3u(&list, m3u_mixed, sizeof(m3u_mixed) - 1U,
+                               "Work:Music") != 3U) {
+    return 1;
+  }
+  if (list.count != 3U) return 2;
+
+  /* Entry 0: relative path was joined with drawer */
+  if (strcmp(list.entries[0].path, "Work:Music/relative/song.mp3") != 0) return 3;
+  if (strcmp(list.entries[0].title, "Relative Song") != 0) return 4;
+
+  /* Entry 1: URL was NOT joined, kept exactly unchanged */
+  if (strcmp(list.entries[1].path, "http://h/s.mp3") != 0) return 5;
+  if (strcmp(list.entries[1].title, "Radio Stream") != 0) return 6;
+
+  /* Entry 2: Absolute AmigaDOS path was NOT joined */
+  if (strcmp(list.entries[2].path, "DH0:Music/absolute.mp3") != 0) return 7;
+
+  /* Saving/formatting writes the URL unchanged */
+  needed = zzplay_playlist_format_m3u(&list, out_buf, sizeof(out_buf));
+  if (needed == 0U) return 8;
+  if (strstr(out_buf, "http://h/s.mp3\n") == NULL) return 9;
+  if (strstr(out_buf, "#EXTINF:-1,Radio Stream\n") == NULL) return 10;
+  if (strstr(out_buf, "Work:Music/relative/song.mp3\n") == NULL) return 11;
+
+  /* Playlist path check: URLs are never local playlist paths */
+  if (zzplay_playlist_is_playlist_path("http://h/s.m3u")) return 12;
+  if (zzplay_playlist_is_playlist_path("https://h/s.m3u8")) return 13;
+  if (zzplay_playlist_is_playlist_path("http://h/s.pls")) return 14;
+
+  zzplay_playlist_free(&list);
+  return 0;
+}
+
 int main(void)
 {
   int rc;
@@ -429,6 +483,11 @@ int main(void)
   if (rc) {
     fprintf(stderr, "test_m3u_extinf_saturates failed: %d\n", rc);
     return 6;
+  }
+  rc = test_m3u_with_urls();
+  if (rc) {
+    fprintf(stderr, "test_m3u_with_urls failed: %d\n", rc);
+    return 8;
   }
 
   printf("zzplay_playlist_test: all tests passed\n");
