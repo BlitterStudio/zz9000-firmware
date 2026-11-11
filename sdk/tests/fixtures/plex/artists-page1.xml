@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="2" totalSize="3" offset="0" librarySectionID="3" title1="Music" title2="All Artists" viewGroup="artist">
+<Directory ratingKey="101" key="/library/metadata/101/children" type="artist" title="Alpha Band" summary="A very long biography text that goes on and on, the kind of summary Plex returns for well known artists, repeated to be long. A very long biography text that goes on and on." index="1" />
+<Directory ratingKey="102" key="/library/metadata/102/children" type="artist" title="Caf&#233; &amp; Co" index="1" />
+</MediaContainer>

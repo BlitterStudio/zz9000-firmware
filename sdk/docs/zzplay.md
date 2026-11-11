@@ -244,6 +244,33 @@ listed as unsupported and cannot be played.
 Favourites are stored in `ENVARC:ZZPlay/radio.prefs`, one line per station:
 `fav_<n>=<id>|<name>|<codec>|<bitrate>|<country>`.
 
+### Plex
+
+`plex.zzprov` plays the music libraries of a Plex Media Server. Choose Plex
+Media Server in the Browse window, click **Settings** and enter:
+
+- **Server URL**: the server's address with its port, for example
+  `http://192.168.1.10:32400`.
+- **Token**: your Plex token. In Plex Web, open a track's menu, choose
+  **Get Info**, then **View XML**; the address of the page that opens ends in
+  `X-Plex-Token=` followed by the token.
+- **Bitrate**: the MP3 bitrate in kbit/s for tracks the server has to convert
+  (192 when empty).
+
+The token is stored in `ENVARC:ZZPlay/plex.prefs` as plain text and is sent
+only to the server you entered. With a plain `http://` address, the server's
+**Secure connections** setting (Settings, Network) must be **Preferred**, not
+**Required**.
+
+The top level shows an Audio playlists folder and your music libraries; a
+server with one music library shows its artists there directly. An artist
+opens to albums and an album or playlist to tracks, each shown with artist,
+album and length. Search finds artists, albums and tracks.
+
+MP3, FLAC and Ogg Vorbis tracks play straight from the server and can be
+seeked. The server converts other formats (AAC, ALAC, WAV and so on) to MP3
+while they play; such tracks cannot be seeked.
+
 ## Preload to card memory
 
 **Preload whole file** in the player's settings window (stored as `PRELOAD`

@@ -137,11 +137,14 @@ m68k-amigaos-gcc $CFLAGS tools/zz9k-step.c -o build/zz9k-step
 
 # ZZPlay service modules: LoadSeg hunk files whose first code is the entry stub.
 # No C library or startup code; the module calls through the host table.
-m68k-amigaos-gcc -noixemul -nostartfiles -nostdlib -Os -s -fomit-frame-pointer \
-  -Wall -Wextra -Werror -Wstack-usage=2048 \
-  -Iinclude -Itools/zzplay \
-  tools/zzplay/providers/zzprov_entry.S \
-  tools/zzplay/providers/radio.c -lgcc -o build/providers/radio.zzprov
+for m in radio plex; do
+  m68k-amigaos-gcc -noixemul -nostartfiles -nostdlib -ffreestanding \
+    -fno-tree-loop-distribute-patterns -Os -s -fomit-frame-pointer \
+    -Wall -Wextra -Werror -Wstack-usage=2048 \
+    -Iinclude -Itools/zzplay \
+    tools/zzplay/providers/zzprov_entry.S \
+    tools/zzplay/providers/$m.c -lgcc -o build/providers/$m.zzprov
+done
 
 # Hand the root-owned build outputs back to the invoking host user so the
 # host-side packaging step (and any later cleanup) can write under build/.

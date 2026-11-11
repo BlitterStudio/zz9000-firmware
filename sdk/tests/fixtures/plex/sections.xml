@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="3" allowSync="0" title1="Plex Library">
+<Directory allowSync="1" art="/:/resources/movie-fanart.jpg" key="1" type="movie" title="Movies" agent="tv.plex.agents.movie" />
+<Directory allowSync="1" art="/:/resources/artist-fanart.jpg" key="3" type="artist" title="Music" agent="tv.plex.agents.music" />
+<Directory allowSync="1" key="5" type="artist" title="Audiobooks &amp; Talk" agent="tv.plex.agents.music" />
+</MediaContainer>

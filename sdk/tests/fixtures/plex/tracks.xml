@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="3" key="201" grandparentTitle="Alpha Band" parentTitle="First Light" title1="Alpha Band" title2="First Light" viewGroup="track">
+<Track ratingKey="301" key="/library/metadata/301" parentRatingKey="201" grandparentRatingKey="101" type="track" title="Opening" grandparentTitle="Alpha Band" parentTitle="First Light" index="1" duration="201000">
+<Media id="401" duration="201000" bitrate="320" audioChannels="2" audioCodec="mp3" container="mp3">
+<Part id="501" key="/library/parts/501/1653313046/file.mp3" duration="201000" file="/music/a.mp3" size="8040000" container="mp3" />
+</Media>
+</Track>
+<Track ratingKey="302" key="/library/metadata/302" parentRatingKey="201" grandparentRatingKey="101" type="track" title="Lossless" grandparentTitle="Alpha Band" parentTitle="First Light" index="2" duration="245500">
+<Media id="402" duration="245500" bitrate="900" audioChannels="2" audioCodec="flac" container="flac">
+<Part id="502" key="/library/parts/502/1653313047/file.flac" duration="245500" file="/music/b.flac" size="27000000" container="flac" />
+</Media>
+</Track>
+<Track ratingKey="303" key="/library/metadata/303" parentRatingKey="201" grandparentRatingKey="101" type="track" title="Apple Format" grandparentTitle="Alpha Band" parentTitle="First Light" index="3" duration="180000">
+<Media id="403" duration="180000" bitrate="256" audioChannels="2" audioCodec="aac" container="mp4">
+<Part id="503" key="/library/parts/503/1653313048/file.m4a" duration="180000" file="/music/c.m4a" size="5760000" container="mp4" />
+</Media>
+</Track>
+</MediaContainer>

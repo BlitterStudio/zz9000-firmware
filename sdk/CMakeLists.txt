@@ -562,6 +562,13 @@ add_executable(zzplay_providers_test
 )
 target_link_libraries(zzplay_providers_test PRIVATE zzplay_core)
 add_test(NAME zzplay_providers_test COMMAND zzplay_providers_test)
+add_executable(zzplay_provider_plex_test
+  tests/zzplay_provider_plex_test.c
+  tools/zzplay/providers/plex.c
+)
+target_link_libraries(zzplay_provider_plex_test PRIVATE zzplay_core)
+add_test(NAME zzplay_provider_plex_test COMMAND zzplay_provider_plex_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(zzplay_host_test
   tests/zzplay_host_test.c
