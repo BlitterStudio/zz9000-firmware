@@ -16,7 +16,7 @@ control a running ZZPlay through its [ARexx port](#arexx).
 ZZPlay identifies media from its contents. Extensions only control drawer scans
 and the file requester, so a correctly formed file can play under another name.
 A WebM file must declare the `webm` DocType, and a Matroska file the
-`matroska` DocType. Audio also plays from `http://` addresses; see
+`matroska` DocType. Audio also plays from `http://` and `https://` addresses; see
 [Network playback](#network-playback).
 
 | Input | Extensions offered in scans and requesters | Supported content |
@@ -29,7 +29,7 @@ A WebM file must declare the `webm` DocType, and a Matroska file the
 | Ogg Vorbis | `.ogg`, `.oga` | A mono or stereo Vorbis stream at 8–192 kHz. Ogg Opus, Ogg-FLAC, and other Ogg codecs are rejected. |
 | Animated WebP | `.webp` | Animated WebP, 16–1920 pixels wide and 16–1080 pixels high. Still WebP images are rejected. |
 | Playlist | `.m3u`, `.m3u8` | Files listed by the playlist. |
-| Network address | None | `http://` addresses of MP3, FLAC and Ogg Vorbis audio, and Shoutcast or Icecast stations. See [Network playback](#network-playback). |
+| Network address | None | `http://` and `https://` addresses of MP3, FLAC and Ogg Vorbis audio, and Shoutcast or Icecast stations. See [Network playback](#network-playback). |
 
 WebM and MPEG video have separate realtime thresholds. VP8 is realtime through
 1280x720, and VP9 through 854x480. Larger WebM files within the maximum can
@@ -151,10 +151,14 @@ slider.
 
 ## Network playback
 
-ZZPlay plays MP3, FLAC and Ogg Vorbis from `http://` addresses, including
-Shoutcast and Icecast radio stations. It needs a running TCP/IP stack that
-provides `bsdsocket.library` version 4, such as Roadshow, AmiTCP or MiamiDX.
-`https://` addresses are not supported yet.
+ZZPlay plays MP3, FLAC and Ogg Vorbis from `http://` and `https://`
+addresses, including Shoutcast and Icecast radio stations. It needs a running
+TCP/IP stack that provides `bsdsocket.library` version 4, such as Roadshow,
+AmiTCP or MiamiDX. `https://` also needs AmiSSL 5: ZZPlay accepts TLS 1.2 or
+later and checks the server's certificate and name against AmiSSL's
+certificate store. Without AmiSSL, `https://` items fail with a message and
+`http://` keeps working. ZZPlay never follows a redirect from `https://` to
+`http://`.
 
 ### Adding an address
 
