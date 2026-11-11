@@ -52,4 +52,10 @@ int zzplay_tags_read(ZZPlayFile *file, ZZPlayTags *tags);
 /* "Artist - Title", "Title", or "" when neither is known. */
 void zzplay_tags_display(const ZZPlayTags *tags, char *out, size_t capacity);
 
+/* Rewrite network text (station and track titles, service listings, which
+ * are normally UTF-8) as Latin-1 in place: characters Latin-1 lacks become
+ * '?', typographic quotes, dashes and the ellipsis their ASCII forms. Bytes
+ * that do not form UTF-8 are kept, so Latin-1 text passes unchanged. */
+void zzplay_tags_text_to_latin1(char *text);
+
 #endif /* ZZPLAY_TAGS_H */

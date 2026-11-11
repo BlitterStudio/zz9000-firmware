@@ -417,3 +417,56 @@ void zzplay_tags_display(const ZZPlayTags *tags, char *out, size_t capacity)
     out[0] = '\0';
   }
 }
+
+static int continuation(uint8_t c)
+{
+  return (c & 0xc0U) == 0x80U;
+}
+
+void zzplay_tags_text_to_latin1(char *text)
+{
+  uint8_t *in = (uint8_t *)text;
+  uint8_t *out = (uint8_t *)text;
+
+  if (!text) {
+    return;
+  }
+  while (*in != 0U) {
+    uint8_t c = *in;
+
+    if (c >= 0xc2U && c <= 0xdfU && continuation(in[1])) {
+      uint32_t cp = ((uint32_t)(c & 0x1fU) << 6) | (in[1] & 0x3fU);
+
+      *out++ = cp <= 0xffU ? (uint8_t)cp : (uint8_t)'?';
+      in += 2;
+    } else if (c >= 0xe0U && c <= 0xefU && continuation(in[1]) &&
+               continuation(in[2])) {
+      uint32_t cp = ((uint32_t)(c & 0x0fU) << 12) |
+                    ((uint32_t)(in[1] & 0x3fU) << 6) | (in[2] & 0x3fU);
+
+      in += 3;
+      if (cp == 0x2018U || cp == 0x2019U) {
+        *out++ = '\'';
+      } else if (cp == 0x201cU || cp == 0x201dU) {
+        *out++ = '"';
+      } else if (cp == 0x2013U || cp == 0x2014U) {
+        *out++ = '-';
+      } else if (cp == 0x2026U) {
+        /* Three bytes in, three out: the text never grows. */
+        *out++ = '.';
+        *out++ = '.';
+        *out++ = '.';
+      } else if (cp != 0xfeffU) {
+        *out++ = '?';
+      }
+    } else if (c >= 0xf0U && c <= 0xf4U && continuation(in[1]) &&
+               continuation(in[2]) && continuation(in[3])) {
+      *out++ = '?';
+      in += 4;
+    } else {
+      *out++ = c;
+      in++;
+    }
+  }
+  *out = 0U;
+}

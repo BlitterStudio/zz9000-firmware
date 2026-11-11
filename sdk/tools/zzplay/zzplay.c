@@ -3328,6 +3328,7 @@ static void zzplay_app_network_title(void *user, const char *text)
   ZZPlayApp *app = (ZZPlayApp *)user;
 
   (void)snprintf(app->stream_title, sizeof(app->stream_title), "%s", text);
+  zzplay_tags_text_to_latin1(app->stream_title);
   zzplay_controller_set_title(&app->ctl, app->stream_title);
 }
 
@@ -3396,6 +3397,7 @@ static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
 
     strcpy(app->item_path, resolved.url);
     if (resolved.title[0] != '\0') {
+      zzplay_tags_text_to_latin1(resolved.title);
       if ((uint32_t)app->playlist.current < app->playlist.count) {
         zzplay_playlist_set_title(&app->playlist, (uint32_t)app->playlist.current,
                                   resolved.title);
@@ -5084,6 +5086,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     source_seekable = zzplay_file_seekable(file);
     (void)snprintf(station, sizeof(station), "%s",
                    zzplay_file_station(file));
+    zzplay_tags_text_to_latin1(station);
     zzplay_file_close(file);
   }
   {

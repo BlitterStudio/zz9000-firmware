@@ -288,6 +288,26 @@ static int test_truncated_input(void)
   return 0;
 }
 
+static int test_text_to_latin1(void)
+{
+  /* "98°" from Plex, "Café" from radio-browser, a Japanese title, quotes,
+   * a dash, an ellipsis and an emoji. */
+  char text[96] = "98\xc2\xb0 Caf\xc3\xa9 \xe6\x97\xa5 \xe2\x80\x9cHi\xe2\x80\x9d"
+                  " \xe2\x80\x93 It\xe2\x80\x99s\xe2\x80\xa6 \xf0\x9f\x8e\xb5";
+  char latin1[32] = "Caf\xe9 \xb0";
+  char broken[16] = "a\xc3";
+
+  zzplay_tags_text_to_latin1(text);
+  if (strcmp(text, "98\xb0 Caf\xe9 ? \"Hi\" - It's... ?") != 0) return 1;
+  /* Text that is already Latin-1 is not UTF-8 and stays as it is. */
+  zzplay_tags_text_to_latin1(latin1);
+  if (strcmp(latin1, "Caf\xe9 \xb0") != 0) return 2;
+  /* A sequence cut off by the end of the text is kept, not overrun. */
+  zzplay_tags_text_to_latin1(broken);
+  if (strcmp(broken, "a\xc3") != 0) return 3;
+  return 0;
+}
+
 int main(void)
 {
   int rc;
@@ -321,6 +341,11 @@ int main(void)
   if (rc) {
     fprintf(stderr, "test_truncated_input failed: %d\n", rc);
     return 6;
+  }
+  rc = test_text_to_latin1();
+  if (rc) {
+    fprintf(stderr, "test_text_to_latin1 failed: %d\n", rc);
+    return 7;
   }
 
   printf("zzplay_tags_test: all tests passed\n");

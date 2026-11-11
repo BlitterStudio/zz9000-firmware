@@ -8,6 +8,7 @@
 
 #include "zzplay-host.h"
 #include "zzplay-sys.h"
+#include "zzplay-tags.h"
 
 #if defined(__amigaos__) || defined(AMIGA)
 
@@ -70,9 +71,11 @@ static int worker_sink_item(void *user, const ZZPlayProviderItem *item)
   }
   if (item->title) {
     (void)snprintf(dst->title, sizeof(dst->title), "%s", item->title);
+    zzplay_tags_text_to_latin1(dst->title);
   }
   if (item->subtitle) {
     (void)snprintf(dst->subtitle, sizeof(dst->subtitle), "%s", item->subtitle);
+    zzplay_tags_text_to_latin1(dst->subtitle);
   }
   dst->duration_ms = item->duration_ms;
   dst->kind = item->kind;
