@@ -1,9 +1,10 @@
-/* HTTP client over bsdsocket.library for ZZPlay's network sources.
+/* HTTP and HTTPS client over bsdsocket.library and AmiSSL for ZZPlay's
+ * network sources.
  *
  * Connection handling follows the ZZTop updater's HTTPS client
  * (zz9000-drivers ZZTop/Core/https.c), reworked so several processes can
  * each hold connections: all state lives in the connection, including the
- * bsdsocket.library base.
+ * bsdsocket.library and AmiSSL bases.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
@@ -11,13 +12,79 @@
 
 #include "zzplay-sys.h"
 
+#include <dos/dosextens.h>
+#include <exec/libraries.h>
 #include <exec/types.h>
 #include <proto/exec.h>
 
-/* The inline bsdsocket stubs read the library base through this name, so
- * every function below that calls bsdsocket.library has a `net` in scope
- * and uses that connection's own base. */
-#define BSDSOCKET_BASE_NAME (net->socket_base)
+/* A bsdsocket.library base belongs to the process that opened it, socket
+ * descriptors belong to that base, and AmiSSL must be given the base that
+ * created the sockets it reads. Each process that uses the network
+ * therefore gets one context holding its bsdsocket and AmiSSL bases,
+ * shared by its connections and counted by them. The inline library stubs
+ * look the bases up for the calling process. */
+typedef struct NetTask {
+  struct Task *task;           /* owner, or NULL for a free slot */
+  ULONG users;                 /* open connections */
+  struct Library *socket;
+  struct Library *master;      /* AmiSSL, from the first https:// hop */
+  struct Library *amissl;
+  struct Library *amissl_ext;
+  int amissl_errno;
+} NetTask;
+
+#define NET_TASKS 8
+static NetTask net_tasks[NET_TASKS];
+
+/* Only the owner writes a claimed slot; others only compare `task`. */
+static NetTask *net_task(void)
+{
+  struct Task *me = FindTask(NULL);
+  int i;
+
+  for (i = 0; i < NET_TASKS; i++) {
+    if (net_tasks[i].task == me) {
+      return &net_tasks[i];
+    }
+  }
+  return NULL;
+}
+
+static struct Library *net_socket_base(void)
+{
+  return net_task()->socket;
+}
+
+static struct Library *net_amissl_master_base(void)
+{
+  return net_task()->master;
+}
+
+static struct Library *net_amissl_base(void)
+{
+  return net_task()->amissl;
+}
+
+static struct Library *net_amissl_ext_base(void)
+{
+  return net_task()->amissl_ext;
+}
+
+/* AmiSSL's call macros come first: its OpenSSL headers then skip the
+ * plain prototypes. */
+#define AMISSLMASTER_BASE_NAME (net_amissl_master_base())
+#define AMISSL_BASE_NAME (net_amissl_base())
+#define AMISSLEXT_BASE_NAME (net_amissl_ext_base())
+#include <proto/amissl.h>
+#include <proto/amisslmaster.h>
+#include <libraries/amisslmaster.h>
+#include <libraries/amissl.h>
+#include <amissl/amissl.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/x509.h>
+
+#define BSDSOCKET_BASE_NAME (net_socket_base())
 #include <proto/socket.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -37,7 +104,9 @@
 #define NET_USER_AGENT "ZZPlay (AmigaOS; ZZ9000)"
 
 struct ZZPlayNet {
-  struct Library *socket_base;
+  NetTask *task;
+  SSL_CTX *ctx;
+  SSL *ssl;
   LONG fd;
   ZZPlayNetKeepRunning keep_running;
   void *user;
@@ -119,12 +188,195 @@ static int wait_socket(ZZPlayNet *net, int for_write)
   return 0;
 }
 
+static void ssl_err(ZZPlayNet *net, const char *what)
+{
+  unsigned long e = ERR_get_error();
+  long verify = net->ssl != NULL ? SSL_get_verify_result(net->ssl)
+                                 : X509_V_OK;
+
+  if (verify != X509_V_OK) {
+    (void)snprintf(net->err, sizeof(net->err), "%s: certificate %s", what,
+                   X509_verify_cert_error_string(verify));
+  } else if (e != 0UL && ERR_reason_error_string(e) != NULL) {
+    (void)snprintf(net->err, sizeof(net->err), "%s: %s", what,
+                   ERR_reason_error_string(e));
+  } else {
+    set_err(net, what);
+  }
+}
+
+/* Drive a non-blocking TLS call that returned `rc`. Returns 1 to retry
+ * after waiting, 0 on a real failure or cancel. */
+static int ssl_retry(ZZPlayNet *net, int rc, const char *what)
+{
+  int e = SSL_get_error(net->ssl, rc);
+
+  if (e == SSL_ERROR_WANT_READ) {
+    return wait_socket(net, 0);
+  }
+  if (e == SSL_ERROR_WANT_WRITE) {
+    return wait_socket(net, 1);
+  }
+  if (!net->cancelled) {
+    ssl_err(net, what);
+  }
+  return 0;
+}
+
 static void close_socket(ZZPlayNet *net)
 {
+  if (net->ssl != NULL) {
+    SSL_free(net->ssl);
+    net->ssl = NULL;
+  }
+  if (net->ctx != NULL) {
+    SSL_CTX_free(net->ctx);
+    net->ctx = NULL;
+  }
   if (net->fd >= 0) {
     CloseSocket(net->fd);
     net->fd = -1;
   }
+}
+
+/* Claim this process's context and make sure bsdsocket.library is open.
+ * Returns NULL with the reason in `net` when it cannot. */
+static NetTask *net_task_acquire(ZZPlayNet *net)
+{
+  struct Task *me = FindTask(NULL);
+  NetTask *t;
+  int i;
+
+  Forbid();
+  t = net_task();
+  for (i = 0; t == NULL && i < NET_TASKS; i++) {
+    if (net_tasks[i].task == NULL) {
+      t = &net_tasks[i];
+      t->task = me;
+    }
+  }
+  if (t != NULL) {
+    t->users++;
+  }
+  Permit();
+  if (t == NULL) {
+    set_err(net, "Too many processes are using the network");
+    return NULL;
+  }
+  net->task = t;
+  if (t->socket == NULL) {
+    t->socket = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);
+    if (t->socket == NULL) {
+      set_err(net, "No TCP/IP stack is running");
+      return NULL;
+    }
+  }
+  return t;
+}
+
+/* The last connection of a process closes its libraries: AmiSSL before
+ * the socket base it was given. */
+static void net_task_release(NetTask *t)
+{
+  if (t == NULL || --t->users != 0U) {
+    return;
+  }
+  if (t->amissl != NULL) {
+    CloseAmiSSL();
+    t->amissl = NULL;
+    t->amissl_ext = NULL;
+  }
+  if (t->master != NULL) {
+    CloseLibrary(t->master);
+    t->master = NULL;
+  }
+  if (t->socket != NULL) {
+    CloseLibrary(t->socket);
+    t->socket = NULL;
+  }
+  Forbid();
+  t->task = NULL;
+  Permit();
+}
+
+/* Open AmiSSL for this process. AmiSSL opens usergroup.library and falls
+ * back to AmiTCP:Libs, so AmigaDOS volume requesters are off meanwhile: a
+ * stack without that assign would otherwise stop the player on "insert
+ * volume AmiTCP". */
+static int tls_open(ZZPlayNet *net)
+{
+  NetTask *t = net->task;
+  struct Process *me = (struct Process *)FindTask(NULL);
+  APTR window = me->pr_WindowPtr;
+  struct TagItem tags[6];
+  int ok = 0;
+
+  if (t->amissl != NULL) {
+    return 1;
+  }
+  me->pr_WindowPtr = (APTR)-1;
+  if (t->master == NULL) {
+    t->master = OpenLibrary((CONST_STRPTR)"amisslmaster.library",
+                            AMISSLMASTER_MIN_VERSION);
+  }
+  if (t->master == NULL) {
+    set_err(net, "https:// needs AmiSSL 5, which is not installed");
+  } else {
+    tags[0].ti_Tag = AmiSSL_UsesOpenSSLStructs;
+    tags[0].ti_Data = FALSE;
+    tags[1].ti_Tag = AmiSSL_GetAmiSSLBase;
+    tags[1].ti_Data = (ULONG)&t->amissl;
+    tags[2].ti_Tag = AmiSSL_GetAmiSSLExtBase;
+    tags[2].ti_Data = (ULONG)&t->amissl_ext;
+    tags[3].ti_Tag = AmiSSL_SocketBase;
+    tags[3].ti_Data = (ULONG)t->socket;
+    tags[4].ti_Tag = AmiSSL_ErrNoPtr;
+    tags[4].ti_Data = (ULONG)&t->amissl_errno;
+    tags[5].ti_Tag = TAG_DONE;
+    tags[5].ti_Data = 0;
+    /* OpenSSL 3 API: any AmiSSL 5 release provides these calls. */
+    if (OpenAmiSSLTagList(AMISSL_V3xx, tags) != 0) {
+      t->amissl = NULL;
+      t->amissl_ext = NULL;
+      set_err(net, "AmiSSL could not be opened");
+    } else {
+      ok = 1;
+    }
+  }
+  me->pr_WindowPtr = window;
+  return ok;
+}
+
+/* TLS 1.2 or later over the connected socket, with the certificate and
+ * host name verified against AmiSSL's certificate store. */
+static int tls_connect(ZZPlayNet *net, const char *host)
+{
+  int rc;
+
+  net->ctx = SSL_CTX_new(TLS_client_method());
+  if (net->ctx == NULL) {
+    ssl_err(net, "TLS setup failed");
+    return 0;
+  }
+  SSL_CTX_set_min_proto_version(net->ctx, TLS1_2_VERSION);
+  SSL_CTX_set_verify(net->ctx, SSL_VERIFY_PEER, NULL);
+  if (SSL_CTX_set_default_verify_paths(net->ctx) != 1) {
+    ssl_err(net, "Cannot load the AmiSSL certificates");
+    return 0;
+  }
+  net->ssl = SSL_new(net->ctx);
+  if (net->ssl == NULL || SSL_set_fd(net->ssl, (int)net->fd) != 1 ||
+      SSL_set_tlsext_host_name(net->ssl, host) != 1 ||
+      SSL_set1_host(net->ssl, host) != 1) {
+    ssl_err(net, "TLS setup failed");
+    return 0;
+  }
+  while ((rc = SSL_connect(net->ssl)) != 1) {
+    if (!ssl_retry(net, rc, "Secure connection failed")) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 static int connect_to(ZZPlayNet *net, const ZZPlayUrl *url)
@@ -194,6 +446,17 @@ static int send_all(ZZPlayNet *net, const char *data, size_t len)
     if (!keep_running(net)) {
       return 0;
     }
+    if (net->ssl != NULL) {
+      int rc = SSL_write(net->ssl, data, (int)len);
+
+      if (rc > 0) {
+        data += rc;
+        len -= (size_t)rc;
+      } else if (!ssl_retry(net, rc, "Sending the request failed")) {
+        return 0;
+      }
+      continue;
+    }
     n = send(net->fd, (APTR)data, (LONG)len, 0);
     if (n > 0) {
       data += n;
@@ -220,6 +483,27 @@ static long recv_some(ZZPlayNet *net, uint8_t *buf, size_t size)
 
     if (!keep_running(net)) {
       return -1;
+    }
+    if (net->ssl != NULL) {
+      int rc = SSL_read(net->ssl, buf, (int)size);
+      int e;
+
+      if (rc > 0) {
+        return (long)rc;
+      }
+      e = SSL_get_error(net->ssl, rc);
+      if (e == SSL_ERROR_ZERO_RETURN) {
+        return 0;
+      }
+      /* A server that closes without close_notify after a delimited body:
+       * the framing decides whether that was the end. */
+      if (e == SSL_ERROR_SYSCALL && ERR_peek_error() == 0UL) {
+        return 0;
+      }
+      if (!ssl_retry(net, rc, "Receiving data failed")) {
+        return -1;
+      }
+      continue;
     }
     n = recv(net->fd, (APTR)buf, (LONG)size, 0);
     if (n >= 0) {
@@ -290,7 +574,6 @@ static int is_redirect(int status)
 ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
                           char *err, size_t err_size, int *cancelled)
 {
-  static const char no_stack[] = "No TCP/IP stack is running";
   ZZPlayNet *net;
   int redirects;
 
@@ -312,14 +595,12 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
   net->fd = -1;
   if (req == NULL || req->url == NULL ||
       !zzplay_http_parse_url(req->url, &net->origin)) {
-    set_err(net, "Not a valid http:// address");
+    set_err(net, "Not a valid http:// or https:// address");
     goto fail;
   }
   net->keep_running = req->keep_running;
   net->user = req->user;
-  net->socket_base = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);
-  if (net->socket_base == NULL) {
-    set_err(net, no_stack);
+  if (net_task_acquire(net) == NULL) {
     goto fail;
   }
 
@@ -329,8 +610,7 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
     size_t len;
     int same_origin = zzplay_http_same_origin(&net->origin, &net->at);
 
-    if (net->at.tls) {
-      set_err(net, "Secure (https://) addresses are not supported yet");
+    if (net->at.tls && !tls_open(net)) {
       goto fail;
     }
     /* The head buffer holds the request until the response replaces it. */
@@ -342,8 +622,9 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
       set_err(net, "The address is too long");
       goto fail;
     }
-    if (!connect_to(net, &net->at) || !send_all(net, net->head, len) ||
-        !read_head(net, head)) {
+    if (!connect_to(net, &net->at) ||
+        (net->at.tls && !tls_connect(net, net->at.host)) ||
+        !send_all(net, net->head, len) || !read_head(net, head)) {
       goto fail;
     }
     if (is_redirect(head->status) && head->location[0] != '\0') {
@@ -535,8 +816,6 @@ void zzplay_net_close(ZZPlayNet *net)
     return;
   }
   close_socket(net);
-  if (net->socket_base != NULL) {
-    CloseLibrary(net->socket_base);
-  }
+  net_task_release(net->task);
   zzplay_free(net);
 }

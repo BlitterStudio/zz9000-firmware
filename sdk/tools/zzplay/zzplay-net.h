@@ -1,12 +1,15 @@
-/* HTTP client over bsdsocket.library for ZZPlay's network sources.
+/* HTTP and HTTPS client over bsdsocket.library and AmiSSL for ZZPlay's
+ * network sources.
  *
- * One connection carries one GET and its response. Each connection opens
- * its own bsdsocket.library base, because a base belongs to the process
- * that opened it: a connection must be used only by the process that
- * created it. Sockets are non-blocking and every wait polls the caller's
- * keep-running hook at least every 100 ms, so Stop and Quit take effect
- * promptly. Host-name lookups are the exception: bsdsocket has only a
- * blocking resolver.
+ * One connection carries one GET and its response. The bsdsocket.library
+ * and AmiSSL bases belong to the process that opened them, so each process
+ * shares one set among its connections, and a connection must be used only
+ * by the process that created it. AmiSSL opens on the first https:// hop
+ * only; TLS 1.2 or later is required and the server certificate and host
+ * name are verified against AmiSSL's certificate store. Sockets are
+ * non-blocking and every wait polls the caller's keep-running hook at
+ * least every 100 ms, so Stop and Quit take effect promptly. Host-name
+ * lookups are the exception: bsdsocket has only a blocking resolver.
  *
  * AmigaOS only. SPDX-License-Identifier: GPL-3.0-or-later */
 
