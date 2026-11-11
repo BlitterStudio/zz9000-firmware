@@ -282,9 +282,14 @@ typedef struct ZZPlayApp {
   int32_t jump_index;      /* pending JUMP target */
   uint32_t start_seek_ms;  /* restart position for the next START */
   BPTR trace;
-  /* Private copy of the playing entry's path: playlist edits must not
-   * free the path an engine is reading from. */
-  char item_path[ZZPLAY_PLAYLIST_PATH_MAX];
+  /* Private copy of the playing playlist entry: playlist edits must not
+   * free the path an engine is reading from. Messages name this. */
+  char entry_path[ZZPLAY_PLAYLIST_PATH_MAX];
+  /* What is opened: the entry, or the address a service module turned a
+   * <scheme>:// entry into (which may carry the service's credentials). */
+  char item_path[ZZPLAY_HTTP_URL_MAX];
+  /* The service module's title for the item, or "". */
+  char item_title[ZZPLAY_PROVIDER_TEXT_MAX];
   /* The latest StreamTitle of the playing network stream, or "". */
   char stream_title[ZZPLAY_NOW_TEXT_MAX];
   /* Why a stream playlist gave nothing to play, for the message line. */
@@ -3396,7 +3401,8 @@ static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
                                   resolved.title);
         app->ctl.dirty |= ZZPLAY_DIRTY_PLAYLIST;
       }
-      zzplay_controller_set_title(&app->ctl, resolved.title);
+      (void)snprintf(app->item_title, sizeof(app->item_title), "%s",
+                     resolved.title);
     }
   } else {
     char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
@@ -5047,9 +5053,11 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     return app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_EXIT;
   }
   /* Private copy: the playlist may be edited while this item plays. */
-  strncpy(app->item_path, app->playlist.entries[index].path,
-          sizeof(app->item_path) - 1U);
-  app->item_path[sizeof(app->item_path) - 1U] = '\0';
+  strncpy(app->entry_path, app->playlist.entries[index].path,
+          sizeof(app->entry_path) - 1U);
+  app->entry_path[sizeof(app->entry_path) - 1U] = '\0';
+  strcpy(app->item_path, app->entry_path);
+  app->item_title[0] = '\0';
   (void)zzplay_playlist_set_current(&app->playlist, index);
   zzplay_controller_item_begin(&app->ctl);
   app->stream_title[0] = '\0';
@@ -5099,10 +5107,12 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
         app->ctl.dirty |= ZZPLAY_DIRTY_PLAYLIST;
       }
       zzplay_controller_set_title(&app->ctl, display);
+    } else if (app->item_title[0] != '\0') {
+      zzplay_controller_set_title(&app->ctl, app->item_title);
     } else {
       zzplay_controller_set_title(
           &app->ctl,
-          zzplay_playlist_basename(app->item_path));
+          zzplay_playlist_basename(app->entry_path));
     }
     /* A stream that already announced its track shows that instead. */
     if (app->stream_title[0] != '\0') {
@@ -5127,20 +5137,20 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
 
     if (why[0] != '\0') {
       zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s: %s",
-                            app->item_path, why);
+                            app->entry_path, why);
     } else {
       zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
-                            app->item_path);
+                            app->entry_path);
     }
   } else if (!engine && probe.network_video) {
     zzplay_launch_reportf(&app->ctl, &app->options,
                           "cannot play %s: video plays only from files",
-                          app->item_path);
+                          app->entry_path);
   } else if (!engine) {
     zzplay_launch_reportf(
         &app->ctl, &app->options,
          "cannot play %s: not a supported MPEG Program Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
-        app->item_path);
+        app->entry_path);
   } else {
     /* A one-shot run shows only the video window; an audio-only item
      * opens the player window lazily, as the status window's
