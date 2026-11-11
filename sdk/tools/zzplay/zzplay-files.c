@@ -3,6 +3,7 @@
 #include "zzplay-files.h"
 #include "zzplay-sys.h"
 #include "zzplay-http.h"
+#include "zzplay-providers.h"
 
 #include <dos/dos.h>
 #include <dos/dosasl.h>
@@ -259,7 +260,7 @@ uint32_t zzplay_files_add(ZZPlayPlaylist *list, const char *path)
     return 0U;
   }
 
-  if (zzplay_http_is_url(path)) {
+  if (zzplay_http_is_url(path) || zzplay_providers_uri_scheme(path, NULL)) {
     return (zzplay_playlist_add(list, path) >= 0) ? 1U : 0U;
   }
 

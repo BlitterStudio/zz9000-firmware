@@ -105,24 +105,42 @@ int zzplay_providers_add(ZZPlayProviders *set, const char *file,
   return 1;
 }
 
+uint32_t zzplay_providers_uri_scheme(const char *uri,
+                                     char scheme[ZZPLAY_PROVIDER_SCHEME_MAX])
+{
+  size_t n = 0U;
+
+  if (uri == NULL) {
+    return 0U;
+  }
+  while (uri[n] >= 'a' && uri[n] <= 'z') {
+    if (n + 1U >= ZZPLAY_PROVIDER_SCHEME_MAX) {
+      return 0U;
+    }
+    n++;
+  }
+  if (n == 0U || strncmp(uri + n, "://", 3U) != 0 ||
+      (n == 4U && strncmp(uri, "http", 4U) == 0) ||
+      (n == 5U && strncmp(uri, "https", 5U) == 0)) {
+    return 0U;
+  }
+  if (scheme != NULL) {
+    memcpy(scheme, uri, n);
+    scheme[n] = '\0';
+  }
+  return (uint32_t)n;
+}
+
 const ZZPlayProviderSlot *zzplay_providers_for_uri(const ZZPlayProviders *set,
                                                    const char *uri,
                                                    const char **id)
 {
   char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
-  size_t n = 0U;
+  uint32_t n = zzplay_providers_uri_scheme(uri, scheme);
 
-  if (uri == NULL) {
+  if (n == 0U) {
     return NULL;
   }
-  while (uri[n] >= 'a' && uri[n] <= 'z' && n + 1U < sizeof(scheme)) {
-    scheme[n] = uri[n];
-    n++;
-  }
-  if (n == 0U || strncmp(uri + n, "://", 3U) != 0) {
-    return NULL;
-  }
-  scheme[n] = '\0';
   if (id != NULL) {
     *id = uri + n + 3U;
   }

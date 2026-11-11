@@ -3344,9 +3344,8 @@ static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
   providers = zzplay_providers_shared();
 
 #if defined(__amigaos__) || defined(AMIGA)
-  if (providers->count == 0U && strstr(app->item_path, "://") != NULL &&
-      strncmp(app->item_path, "http://", 7) != 0 &&
-      strncmp(app->item_path, "https://", 8) != 0) {
+  if (providers->count == 0U &&
+      zzplay_providers_uri_scheme(app->item_path, NULL) != 0U) {
     char why[ZZPLAY_PROVIDER_ERROR_MAX];
     why[0] = '\0';
     (void)zzplay_providers_load(providers, why, sizeof(why));
@@ -3399,20 +3398,15 @@ static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
       }
       zzplay_controller_set_title(&app->ctl, resolved.title);
     }
-  } else if (strstr(app->item_path, "://") != NULL &&
-             strncmp(app->item_path, "http://", 7) != 0 &&
-             strncmp(app->item_path, "https://", 8) != 0) {
+  } else {
     char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
-    size_t n = 0U;
-    while (app->item_path[n] >= 'a' && app->item_path[n] <= 'z' &&
-           n + 1U < sizeof(scheme)) {
-      scheme[n] = app->item_path[n];
-      n++;
+
+    if (zzplay_providers_uri_scheme(app->item_path, scheme) != 0U) {
+      (void)snprintf(app->open_why, sizeof(app->open_why),
+                     "no installed service module handles %s:// addresses",
+                     scheme);
+      return 0;
     }
-    scheme[n] = '\0';
-    (void)snprintf(app->open_why, sizeof(app->open_why),
-                   "no installed service module handles %s:// addresses", scheme);
-    return 0;
   }
 
   file = zzplay_file_open(app->item_path, 0);

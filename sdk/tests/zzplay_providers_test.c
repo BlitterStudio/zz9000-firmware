@@ -133,6 +133,28 @@ static int test_registry(void)
   return 0;
 }
 
+static int test_uri_scheme(void)
+{
+  char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
+
+  if (zzplay_providers_uri_scheme("radio://d284-e0", scheme) != 5U ||
+      strcmp(scheme, "radio") != 0)
+    return 1;
+  /* Not service addresses: web addresses, AmigaDOS paths, upper case,
+   * no "//", and a scheme longer than any module may declare. */
+  if (zzplay_providers_uri_scheme("http://h/a.mp3", scheme) != 0U) return 2;
+  if (zzplay_providers_uri_scheme("https://h/a.mp3", scheme) != 0U) return 3;
+  if (zzplay_providers_uri_scheme("Work:Music/a.mp3", scheme) != 0U) return 4;
+  if (zzplay_providers_uri_scheme("RADIO://x", scheme) != 0U) return 5;
+  if (zzplay_providers_uri_scheme("radio:x", scheme) != 0U) return 6;
+  if (zzplay_providers_uri_scheme("abcdefghijklmnop://x", scheme) != 0U)
+    return 7;
+  if (zzplay_providers_uri_scheme("abcdefghijklmno://x", NULL) != 15U)
+    return 8;
+  if (zzplay_providers_uri_scheme("httpx://x", NULL) != 5U) return 9;
+  return 0;
+}
+
 int main(void)
 {
   int rc;
@@ -141,6 +163,8 @@ int main(void)
   if (rc != 0) { printf("check %d\n", rc); return 10 + rc; }
   rc = test_registry();
   if (rc != 0) { printf("registry %d\n", rc); return 30 + rc; }
+  rc = test_uri_scheme();
+  if (rc != 0) { printf("uri scheme %d\n", rc); return 50 + rc; }
   printf("zzplay_providers_test: all checks passed\n");
   return 0;
 }

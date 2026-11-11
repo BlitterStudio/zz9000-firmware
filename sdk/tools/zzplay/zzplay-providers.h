@@ -52,6 +52,13 @@ int zzplay_providers_add(ZZPlayProviders *set, const char *file,
 const ZZPlayProviderSlot *zzplay_providers_find(const ZZPlayProviders *set,
                                                 const char *scheme);
 
+/* The scheme of a service address "<scheme>://<id>" (lower-case letters,
+ * not http or https): copies it to `scheme` when that is not NULL and
+ * returns its length, or returns 0 for anything else. Such an address is
+ * never an AmigaDOS path. */
+uint32_t zzplay_providers_uri_scheme(const char *uri,
+                                     char scheme[ZZPLAY_PROVIDER_SCHEME_MAX]);
+
 /* The scheme of a "<scheme>://<id>" playlist entry when a module serves
  * it, copied to `scheme`, with the id after "://" in `*id`. Returns the
  * module's slot, or NULL for any other path. */
