@@ -1526,7 +1526,7 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
     { NM_TITLE, (CONST_STRPTR)"Project",       0, 0, 0, (APTR)MID_PROJECT },
     { NM_ITEM,  (CONST_STRPTR)"Open...",       (CONST_STRPTR)"O", 0, 0, (APTR)MID_OPEN },
     { NM_ITEM,  (CONST_STRPTR)"Open URL...",   (CONST_STRPTR)"U", 0, 0, (APTR)MID_OPEN_URL },
-    { NM_ITEM,  (CONST_STRPTR)"Browse...",     0, 0, 0, (APTR)MID_BROWSE },
+    { NM_ITEM,  (CONST_STRPTR)"Browse...",     (CONST_STRPTR)"R", 0, 0, (APTR)MID_BROWSE },
     { NM_ITEM,  (CONST_STRPTR)"Add files...",  (CONST_STRPTR)"A", 0, 0, (APTR)MID_ADD_FILES },
     { NM_ITEM,  (CONST_STRPTR)"Add drawer...", 0, 0, 0, (APTR)MID_ADD_DRAWER },
     { NM_ITEM,  (CONST_STRPTR)"Load playlist...", (CONST_STRPTR)"L", 0, 0, (APTR)MID_LOAD_PLAYLIST },

@@ -191,59 +191,58 @@ ZZ9000AX or AHI, FLAC and Ogg Vorbis decoded on the card.
 | Icecast Ogg Vorbis station | Stops at the first track change, because each new track starts a new Ogg stream. |
 | Host-name lookup | Can hold the player for a moment, longer when the name server does not answer. Stop takes effect once the lookup returns. |
 
-### Internet radio
-
-The internet radio service browses and searches the radio-browser.info directory
-over plain HTTP without requiring AmiSSL. Service modules live in ZZPlay's
-`Providers/` drawer (for example, `PROGDIR:Providers/radio.zzprov`). ZZPlay
-detects and loads modules on demand when you open the Browse window or resolve
-a service item.
-
-The service provides four top-level folders:
-
-- **Favourites:** Lists stations marked as favourites. Click the **Favourite**
-  button in the Browse window to add or remove the selected station. Favourites
-  are saved in `ENVARC:ZZPlay/radio.prefs` (`fav_<index>=<uuid>|<name>|<codec>|<bitrate>|<country>`).
-- **Top voted:** Lists the most popular stations ordered by votes.
-- **By tag:** Browses genres and tags (such as pop, rock, jazz). Opening a tag
-  folder lists its stations.
-- **By country:** Browses stations grouped by country.
-
-Search finds stations by name across the directory, hiding broken streams and
-ordering results by votes.
-
-Stations broadcasting in MP3 or Ogg Vorbis are fully playable and resolve to
-their live stream address. Stations that broadcast in unsupported formats, such
-as AAC, AAC+ or Opus, are displayed with an unsupported notice in their
-subtitle and cannot be played.
-
 ### Browse window
 
-Choose **Browse...** in the **Project** menu to open the service browser.
-ZZPlay loads installed service modules from `PROGDIR:Providers/` on demand
-when the window opens.
+Service modules let ZZPlay list and search music services. Each module is a
+file in the `Providers` drawer next to ZZPlay (`PROGDIR:Providers/`), for
+example `radio.zzprov`. ZZPlay loads the modules the first time the Browse
+window opens or a playlist entry needs one, and uses no memory for them
+before that.
 
-The cycle gadget selects the service. The search gadget queries the active
-service when you press Return.
+Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
 
-The list view shows folders, tracks and stations:
-- Double-click a folder to enter it and browse its contents.
-- **Back** returns to the previous folder, restoring the list and selection.
-- Double-click a track or station to add it to the playlist and start playback
-  immediately.
-- **Play** begins playback of the selected track or station.
-- **Add** appends the selected item to the playlist without interrupting playback.
-- **Favourite** adds or removes the selected track or station from the service's favourites, when supported.
-- Folders and unsupported items cannot be played or added.
-- **Stop** cancels an in-flight search or directory request.
-- **Settings** opens a form to configure the active service (such as credentials,
-  server address, or bitrate). **Save** writes the values to `ENVARC:ZZPlay/`
-  and reloads the service; **Cancel** discards changes.
+- The cycle gadget at the top chooses the service. Type in the search field
+  and press Return to search it.
+- Double-click a folder to open it. **Back** returns to the previous list
+  with the same entry selected. A long list ends in a "--- More items ---"
+  row; click it to load the next part.
+- Double-click a track or station to add it to the playlist and play it.
+  **Play** does the same for the selected entry, **Add** only adds it.
+  Folders, and entries the service marks as unplayable, cannot be played or
+  added.
+- **Favourite** adds the selected entry to the service's favourites, or
+  removes it when it is already one. The button is disabled for services
+  without favourites.
+- **Stop** cancels a list or search that is still loading. Network work runs
+  in its own process, so the player keeps playing meanwhile.
+- **Settings** shows the service's settings, such as a server address or a
+  token. **Save** stores them in `ENVARC:ZZPlay/<service>.prefs` and reconnects
+  the service; **Cancel** keeps the old values.
 
-Items added from a service appear in the playlist as `<scheme>://<id>` entries
-(such as `radio://...` or `plex://...`) with the item title. When saved to an
-M3U playlist, these entries reload and play directly as long as the service
-module remains installed in `Providers/`.
+An entry added from a service is stored in the playlist as `<service>://<id>`,
+for example `radio://9610c519-0601-11e8-ae97-52543be04c81`, with the entry's
+title. ZZPlay asks the module for the current address each time the entry
+starts, so such entries can be saved in M3U playlists, added with the Shell
+or ARexx, and keep playing as long as the module is installed. Without the
+module the entry fails with "no installed service module handles ...".
+
+### Internet radio
+
+`radio.zzprov` uses the radio-browser.info station directory over plain
+`http://`, so it needs no AmiSSL. Its top level has four folders:
+
+- **Favourites**: the stations you added with **Favourite** (up to 64).
+- **Top voted**: the directory's most popular stations.
+- **By tag**: genres and other tags, each opening a list of stations.
+- **By country**: countries, each opening a list of stations.
+
+Search looks for station names and leaves out stations the directory marks
+as broken. Each station shows its codec, bitrate and country. Stations in
+MP3 or Ogg Vorbis play; stations in other formats (AAC, HE-AAC, Opus) are
+listed as unsupported and cannot be played.
+
+Favourites are stored in `ENVARC:ZZPlay/radio.prefs`, one line per station:
+`fav_<n>=<id>|<name>|<codec>|<bitrate>|<country>`.
 
 ## Preload to card memory
 
@@ -311,7 +310,7 @@ tries it again.
 | --- | --- | --- | --- |
 | Project | Open... | Amiga-O | Replace the playlist with the chosen files and play the first one. |
 | Project | Open URL... | Amiga-U | Add a network address to the playlist and play it. |
-| Project | Browse... | | Open the service browser window. |
+| Project | Browse... | Amiga-R | Open the Browse window for service modules. |
 | Project | Add files... | Amiga-A | Append files. |
 | Project | Add drawer... | | Append the media files of a drawer and its sub-drawers. |
 | Project | Load playlist... | Amiga-L | Append the entries of an M3U playlist. |
