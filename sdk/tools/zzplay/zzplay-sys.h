@@ -40,6 +40,8 @@ void zzplay_file_clear_error(ZZPlayFile *file);
 int zzplay_file_seekable(ZZPlayFile *file);
 /* 1 for a network source. */
 int zzplay_file_is_network(ZZPlayFile *file);
+/* The station name a live network stream announced, or "". */
+const char *zzplay_file_station(ZZPlayFile *file);
 
 /* Why the last zzplay_file_open() of a network path failed, for the
  * message line ("" after a file failure). The application opens network
@@ -47,8 +49,13 @@ int zzplay_file_is_network(ZZPlayFile *file);
 const char *zzplay_file_open_error(void);
 
 /* Network waits call `poll` at least every 100 ms so the player stays
- * live; returning 0 cancels the transfer. NULL removes it. */
-void zzplay_file_set_network_poll(int (*poll)(void *user), void *user);
+ * live; returning 0 cancels the transfer. `title` receives each new
+ * StreamTitle a live stream announces while it is read. Either may be
+ * NULL. */
+void zzplay_file_set_network_hooks(int (*poll)(void *user),
+                                   void (*title)(void *user,
+                                                 const char *text),
+                                   void *user);
 
 /* Read a complete file no larger than max_len. A successful read returns an
  * owned buffer (including for an empty file) which must be released with

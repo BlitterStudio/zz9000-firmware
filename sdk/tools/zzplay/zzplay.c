@@ -38,6 +38,7 @@
 #include "zzplay-rexx.h"
 #include "zzplay-stats.h"
 #include "zzplay-stream.h"
+#include "zzplay-streamlist.h"
 #include "zzplay-decode-policy.h"
 #include "zzplay-sync.h"
 #include "zzplay-tags.h"
@@ -281,6 +282,10 @@ typedef struct ZZPlayApp {
   /* Private copy of the playing entry's path: playlist edits must not
    * free the path an engine is reading from. */
   char item_path[ZZPLAY_PLAYLIST_PATH_MAX];
+  /* The latest StreamTitle of the playing network stream, or "". */
+  char stream_title[ZZPLAY_NOW_TEXT_MAX];
+  /* Why a stream playlist gave nothing to play, for the message line. */
+  char open_why[96];
   /* The fullscreen screen between two videos: the item that used it has
    * ended and the next one has not taken it yet. It holds its own
    * Picasso96API reference, since every engine closes P96Base. */
@@ -3309,6 +3314,52 @@ static int zzplay_app_network_poll(void *user)
          app->ctl.request == ZZPLAY_REQUEST_SEEK;
 }
 
+/* A live stream announced a new track: show it while it plays. */
+static void zzplay_app_network_title(void *user, const char *text)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+
+  (void)snprintf(app->stream_title, sizeof(app->stream_title), "%s", text);
+  zzplay_controller_set_title(&app->ctl, app->stream_title);
+}
+
+/* Open the current item. A .pls or .m3u URL lists a station's stream
+ * addresses: fetch it and open the first address that answers, which
+ * becomes the item's path; the playlist entry keeps the list's URL. */
+static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
+{
+  static ZZPlayStreamList streams;
+  static char text[ZZPLAY_STREAMLIST_TEXT_MAX];
+  ZZPlayFile *file;
+  size_t len;
+  uint32_t i;
+
+  app->open_why[0] = '\0';
+  file = zzplay_file_open(app->item_path, 0);
+  if (!file || !zzplay_streamlist_is_playlist(app->item_path)) {
+    return file;
+  }
+  len = zzplay_file_read(file, text, sizeof(text) - 1U);
+  text[len] = '\0';
+  zzplay_file_close(file);
+  if (zzplay_streamlist_parse(text, len, app->item_path, &streams) == 0U) {
+    (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
+                   "the playlist names no stream");
+    return 0;
+  }
+  for (i = 0U; i < streams.count; i++) {
+    if (strlen(streams.url[i]) >= sizeof(app->item_path)) {
+      continue;
+    }
+    file = zzplay_file_open(streams.url[i], 0);
+    if (file) {
+      strcpy(app->item_path, streams.url[i]);
+      return file;
+    }
+  }
+  return 0;
+}
+
 static void zzplay_app_open_gui(ZZPlayApp *app)
 {
   ZZPlayGuiContext context;
@@ -4916,6 +4967,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   uint32_t seek_ms;
   int probed = 0;
   int source_seekable = 1;
+  char station[ZZPLAY_HTTP_NAME_MAX];
 
   if (index < 0 || (uint32_t)index >= app->playlist.count) {
     return app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_EXIT;
@@ -4926,13 +4978,15 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   app->item_path[sizeof(app->item_path) - 1U] = '\0';
   (void)zzplay_playlist_set_current(&app->playlist, index);
   zzplay_controller_item_begin(&app->ctl);
+  app->stream_title[0] = '\0';
+  station[0] = '\0';
 
   /* Title first, so the window shows the item even when it fails: an
    * ID3 "Artist - Title" for MP3, else the file name. Probing shares
    * the same open file. */
   memset(&tags, 0, sizeof(tags));
   memset(&probe, 0, sizeof(probe));
-  file = zzplay_file_open(app->item_path, 0);
+  file = zzplay_app_open_item(app);
   if (file) {
     long length = 0L;
 
@@ -4946,6 +5000,8 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     }
     probed = zzplay_probe_media_file(file, &probe);
     source_seekable = zzplay_file_seekable(file);
+    (void)snprintf(station, sizeof(station), "%s",
+                   zzplay_file_station(file));
     zzplay_file_close(file);
   }
   {
@@ -4954,6 +5010,9 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     display[0] = '\0';
     if (probe.kind == ZZPLAY_MEDIA_KIND_MP3) {
       zzplay_tags_display(&tags, display, sizeof(display));
+    }
+    if (display[0] == '\0' && station[0] != '\0') {
+      (void)snprintf(display, sizeof(display), "%s", station);
     }
     if (display[0] != '\0') {
       /* The row was drawn from the file name; redraw it only when the
@@ -4971,6 +5030,10 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
           &app->ctl,
           zzplay_playlist_basename(app->item_path));
     }
+    /* A stream that already announced its track shows that instead. */
+    if (app->stream_title[0] != '\0') {
+      zzplay_controller_set_title(&app->ctl, app->stream_title);
+    }
   }
 
   if (probed) {
@@ -4985,7 +5048,8 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     zzplay_app_close_screen();
   }
   if (!file) {
-    const char *why = zzplay_file_open_error();
+    const char *why = app->open_why[0] != '\0' ? app->open_why
+                                                : zzplay_file_open_error();
 
     if (why[0] != '\0') {
       zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s: %s",
@@ -5287,7 +5351,8 @@ int main(int argc, char **argv)
     zzplay_controller_init(&app.ctl, app.prefs.volume, repeat,
                            app.prefs.shuffle);
     zzplay_controller_set_fullscreen(&app.ctl, app.prefs.fullscreen);
-    zzplay_file_set_network_poll(zzplay_app_network_poll, &app);
+    zzplay_file_set_network_hooks(zzplay_app_network_poll,
+                                  zzplay_app_network_title, &app);
   }
   app.started_prefs = app.prefs;
   app.started_prefs.volume = app.ctl.volume;

@@ -9,7 +9,9 @@
  * a probe can rewind to the start even on a live stream.
  *
  * Shoutcast/Icecast metadata is removed before any reader sees the bytes;
- * the latest StreamTitle is kept for display.
+ * the latest StreamTitle is kept for display. A live stream that drops is
+ * reconnected, up to three times in a row with growing pauses, and the
+ * reader sees the new connection's audio continue at the same position.
  *
  * The transport is passed in, so the host tests drive this with a
  * scripted server. SPDX-License-Identifier: GPL-3.0-or-later */
@@ -36,6 +38,9 @@ typedef struct ZZPlayHttpStreamOps {
   /* The reason for the last -1 from read(). */
   const char *(*error)(void *ctx, void *stream);
   void (*close)(void *ctx, void *stream);
+  /* Wait `ms` before a reconnect attempt; return 0 to give up (the user
+   * stopped the item). */
+  int (*pause)(void *ctx, uint32_t ms);
   void *ctx;
 } ZZPlayHttpStreamOps;
 

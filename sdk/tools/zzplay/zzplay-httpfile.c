@@ -30,6 +30,7 @@ struct ZZPlayHttpFile {
   int error;
   int eof;
   int stream_ended;   /* the open stream reached the end of its body */
+  uint32_t drops;     /* live reconnects since the last audio arrived */
   char err[HTTPFILE_ERROR_MAX];
   char station[ZZPLAY_HTTP_NAME_MAX];
 
@@ -175,8 +176,47 @@ static long fill_window(ZZPlayHttpFile *f)
       memcpy(f->head + f->head_len, f->win, keep);
       f->head_len += keep;
     }
+    f->drops = 0;
     return (long)got;
   }
+}
+
+/* A live stream dropped: open it again and let its audio continue at the
+ * current position. Three drops or failed opens in a row without any
+ * audio in between end the stream, and so does a pause that reports the
+ * user stopped the item. */
+static int reconnect_live(ZZPlayHttpFile *f)
+{
+  static const uint32_t pause_ms[3] = { 1000U, 2000U, 4000U };
+  char reason[HTTPFILE_ERROR_MAX];
+
+  (void)snprintf(reason, sizeof(reason), "%s",
+                 f->error ? f->err : "The stream ended");
+  close_stream(f);
+  while (f->drops < 3U) {
+    ZZPlayHttpHead head;
+
+    if (f->ops.pause != NULL &&
+        !f->ops.pause(f->ops.ctx, pause_ms[f->drops])) {
+      set_error(f, "Cancelled");
+      return 0;
+    }
+    f->drops++;
+    f->stream = f->ops.open(f->ops.ctx, f->url, 0, 0U, &head, reason,
+                            sizeof(reason));
+    if (f->stream != NULL) {
+      f->error = 0;
+      f->err[0] = '\0';
+      f->stream_ended = 0;
+      f->icy_active = head.icy_metaint != 0U;
+      if (f->icy_active) {
+        zzplay_icy_init(&f->icy, head.icy_metaint);
+      }
+      return 1;
+    }
+  }
+  set_error(f, reason);
+  return 0;
 }
 
 ZZPlayHttpFile *zzplay_httpfile_open(const ZZPlayHttpStreamOps *ops,
@@ -280,6 +320,12 @@ size_t zzplay_httpfile_read(ZZPlayHttpFile *file, void *buf, size_t len)
       }
     }
     n = fill_window(file);
+    if (n <= 0 && file->live) {
+      if (reconnect_live(file)) {
+        continue;
+      }
+      break;
+    }
     if (n < 0) {
       break;
     }

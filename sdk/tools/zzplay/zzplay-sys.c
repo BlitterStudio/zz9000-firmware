@@ -24,13 +24,18 @@ struct ZZPlayFile {
 };
 
 static int (*network_poll)(void *user);
-static void *network_poll_user;
+static void (*network_title)(void *user, const char *text);
+static void *network_user;
 static char open_error[ZZPLAY_NET_ERROR_MAX];
 
-void zzplay_file_set_network_poll(int (*poll)(void *user), void *user)
+void zzplay_file_set_network_hooks(int (*poll)(void *user),
+                                   void (*title)(void *user,
+                                                 const char *text),
+                                   void *user)
 {
   network_poll = poll;
-  network_poll_user = user;
+  network_title = title;
+  network_user = user;
 }
 
 const char *zzplay_file_open_error(void)
@@ -41,7 +46,7 @@ const char *zzplay_file_open_error(void)
 static int network_keep_running(void *user)
 {
   (void)user;
-  return network_poll == 0 || network_poll(network_poll_user);
+  return network_poll == 0 || network_poll(network_user);
 }
 
 static void *network_open(void *ctx, const char *url, int has_range,
@@ -78,8 +83,24 @@ static void network_close(void *ctx, void *stream)
   zzplay_net_close((ZZPlayNet *)stream);
 }
 
+/* Wait before a live reconnect in 100 ms steps, staying cancellable. */
+static int network_pause(void *ctx, uint32_t ms)
+{
+  (void)ctx;
+  while (ms != 0U) {
+    uint32_t step = ms < 100U ? ms : 100U;
+
+    if (!network_keep_running(0)) {
+      return 0;
+    }
+    Delay((LONG)((step + 19U) / 20U)); /* 50 ticks per second */
+    ms -= step;
+  }
+  return network_keep_running(0);
+}
+
 static const ZZPlayHttpStreamOps network_ops = {
-  network_open, network_read, network_error, network_close, 0
+  network_open, network_read, network_error, network_close, network_pause, 0
 };
 
 void *zzplay_alloc(size_t size)
@@ -160,12 +181,18 @@ size_t zzplay_file_read(ZZPlayFile *file, void *buf, size_t len)
     return 0U;
   }
   if (file->http) {
+    char title[ZZPLAY_HTTP_TITLE_MAX];
+
     total = zzplay_httpfile_read(file->http, buf, len);
     if (zzplay_httpfile_error(file->http)) {
       file->error = 1;
     }
     if (zzplay_httpfile_eof(file->http)) {
       file->eof = 1;
+    }
+    if (network_title != 0 &&
+        zzplay_httpfile_take_title(file->http, title, sizeof(title))) {
+      network_title(network_user, title);
     }
     return total;
   }
@@ -287,6 +314,11 @@ int zzplay_file_seekable(ZZPlayFile *file)
 int zzplay_file_is_network(ZZPlayFile *file)
 {
   return file && file->http;
+}
+
+const char *zzplay_file_station(ZZPlayFile *file)
+{
+  return file && file->http ? zzplay_httpfile_station(file->http) : "";
 }
 
 
@@ -420,14 +452,24 @@ int zzplay_file_is_network(ZZPlayFile *file)
   return 0;
 }
 
+const char *zzplay_file_station(ZZPlayFile *file)
+{
+  (void)file;
+  return "";
+}
+
 const char *zzplay_file_open_error(void)
 {
   return "";
 }
 
-void zzplay_file_set_network_poll(int (*poll)(void *user), void *user)
+void zzplay_file_set_network_hooks(int (*poll)(void *user),
+                                   void (*title)(void *user,
+                                                 const char *text),
+                                   void *user)
 {
   (void)poll;
+  (void)title;
   (void)user;
 }
 

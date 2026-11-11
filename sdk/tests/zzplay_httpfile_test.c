@@ -24,6 +24,9 @@ typedef struct Server {
   uint32_t read_size;    /* bytes per read() */
   int not_found;         /* answers 404 */
   uint32_t fail_after;   /* fail a read once this many bytes were sent */
+  int stop;              /* the user stopped the item: pauses give up */
+  int pauses;
+  uint32_t paused_ms;
   /* What the client asked for. */
   int opens;
   int last_has_range;
@@ -141,6 +144,15 @@ static void fake_close(void *ctx, void *stream)
   free(stream);
 }
 
+static int fake_pause(void *ctx, uint32_t ms)
+{
+  Server *s = (Server *)ctx;
+
+  s->pauses++;
+  s->paused_ms += ms;
+  return !s->stop;
+}
+
 static ZZPlayHttpFile *open_server(Server *s)
 {
   ZZPlayHttpStreamOps ops;
@@ -150,6 +162,7 @@ static ZZPlayHttpFile *open_server(Server *s)
   ops.read = fake_read;
   ops.error = fake_error;
   ops.close = fake_close;
+  ops.pause = fake_pause;
   ops.ctx = s;
   return zzplay_httpfile_open(&ops, "http://h/x", err, sizeof(err));
 }
@@ -324,6 +337,68 @@ static int test_live_stream(void)
   return 0;
 }
 
+static int test_live_reconnect(void)
+{
+  Server s;
+  ZZPlayHttpFile *f;
+  static uint8_t got[8000];
+
+  /* Each connection drops after 3000 bytes; the reader still gets all
+   * the audio it asks for, over two reconnects. */
+  server_defaults(&s);
+  s.size = RESOURCE_BYTES;
+  s.icy_interval = 1000U;
+  s.icy_title = "A";
+  s.fail_after = 3000U;
+  f = open_server(&s);
+  if (f == NULL) return 1;
+  if (zzplay_httpfile_read(f, got, sizeof(got)) != sizeof(got)) return 2;
+  if (zzplay_httpfile_error(f)) return 3;
+  if (s.opens != 3 || s.pauses != 2) return 4;
+  if (s.last_has_range) return 5;
+  zzplay_httpfile_close(f);
+
+  /* Three failed reopens in a row end the stream with the last reason. */
+  server_defaults(&s);
+  s.size = RESOURCE_BYTES;
+  s.icy_interval = 1000U;
+  s.icy_title = "A";
+  s.fail_after = 3000U;
+  f = open_server(&s);
+  if (f == NULL) return 6;
+  s.not_found = 1;
+  if (zzplay_httpfile_read(f, got, sizeof(got)) >= sizeof(got)) return 7;
+  if (!zzplay_httpfile_error(f)) return 8;
+  if (strcmp(zzplay_httpfile_error_text(f), "The server answered HTTP 404") !=
+      0)
+    return 9;
+  if (s.opens != 4 || s.pauses != 3 || s.paused_ms != 7000U) return 10;
+  zzplay_httpfile_close(f);
+
+  /* Stopping the item during the pause gives up at once. */
+  server_defaults(&s);
+  s.size = RESOURCE_BYTES;
+  s.icy_interval = 1000U;
+  s.icy_title = "A";
+  s.fail_after = 3000U;
+  f = open_server(&s);
+  if (f == NULL) return 11;
+  s.stop = 1;
+  if (zzplay_httpfile_read(f, got, sizeof(got)) >= sizeof(got)) return 12;
+  if (s.opens != 1 || s.pauses != 1) return 13;
+  zzplay_httpfile_close(f);
+
+  /* A finite download that drops is an error, not a reconnect. */
+  server_defaults(&s);
+  s.fail_after = 3000U;
+  f = open_server(&s);
+  if (f == NULL) return 14;
+  if (zzplay_httpfile_read(f, got, 5000U) != 3000U || s.pauses != 0)
+    return 15;
+  zzplay_httpfile_close(f);
+  return 0;
+}
+
 static int test_failure(void)
 {
   Server s;
@@ -352,6 +427,7 @@ static int test_failure(void)
     ops.read = fake_read;
     ops.error = fake_error;
     ops.close = fake_close;
+    ops.pause = fake_pause;
     ops.ctx = &s;
     if (zzplay_httpfile_open(&ops, "http://h/missing", err, sizeof(err)) !=
         NULL)
@@ -379,6 +455,8 @@ int main(void)
   if (rc != 0) { printf("range_refused %d\n", rc); return 70 + rc; }
   rc = test_live_stream();
   if (rc != 0) { printf("live_stream %d\n", rc); return 90 + rc; }
+  rc = test_live_reconnect();
+  if (rc != 0) { printf("live_reconnect %d\n", rc); return 130 + rc; }
   rc = test_failure();
   if (rc != 0) { printf("failure %d\n", rc); return 110 + rc; }
   printf("zzplay_httpfile_test: all checks passed\n");
