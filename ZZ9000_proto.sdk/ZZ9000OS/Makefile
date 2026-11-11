@@ -127,6 +127,12 @@ ifeq ($(MINIGL_RASTERIX),1)
 EXTRA_CFLAGS += -DMINIGL_RASTERIX=1 -DMINIGL_RIX_DMA=$(MINIGL_RIX_DMA)
 endif
 
+# Set to 1 only for the SVC round-trip measurement firmware.
+ZZAPP_SVC_PROBES ?= 0
+ifneq ($(filter 0 1,$(ZZAPP_SVC_PROBES)),$(ZZAPP_SVC_PROBES))
+$(error ZZAPP_SVC_PROBES must be 0 or 1)
+endif
+
 # Set to 0 to remove app SVC and GL performance instrumentation.
 ZZAPP_PERF_COUNTERS ?= 1
 ifneq ($(filter 0 1,$(ZZAPP_PERF_COUNTERS)),$(ZZAPP_PERF_COUNTERS))
@@ -135,7 +141,8 @@ endif
 
 # -O2 flags (default for all files)
 EXTRA_CFLAGS ?=
-override EXTRA_CFLAGS += -DZZAPP_PERF_COUNTERS=$(ZZAPP_PERF_COUNTERS)
+override EXTRA_CFLAGS += -DZZAPP_PERF_COUNTERS=$(ZZAPP_PERF_COUNTERS) \
+	-DZZAPP_SVC_PROBES=$(ZZAPP_SVC_PROBES)
 ZZ9000_BUILD_GIT ?= unknown
 ZZ9000_BUILD_DIRTY ?= unknown
 ZZ9000_BUILD_DATE ?= unknown
@@ -373,6 +380,7 @@ ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 BUILD_CONFIG_STAMP = $(BUILD_DIR)/.minigl-rasterix
 BUILD_TRANSPORT_STAMP = $(BUILD_DIR)/.minigl-rix-dma
 BUILD_PERF_COUNTERS_STAMP = $(BUILD_DIR)/.zzapp-perf-counters
+BUILD_SVC_PROBES_STAMP = $(BUILD_DIR)/.zzapp-svc-probes
 
 $(BUILD_CONFIG_STAMP): FORCE
 	@mkdir -p $(dir $@)
@@ -392,10 +400,16 @@ $(BUILD_PERF_COUNTERS_STAMP): FORCE
 		printf '%s\n' "$(ZZAPP_PERF_COUNTERS)" > "$@"; \
 	fi
 
+$(BUILD_SVC_PROBES_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@if test ! -f "$@" || test "$$(cat "$@")" != "$(ZZAPP_SVC_PROBES)"; then \
+		printf '%s\n' "$(ZZAPP_SVC_PROBES)" > "$@"; \
+	fi
+
 $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS)) \
 $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRCS)) \
 $(BSP_SDPS_OBJ) $(BSP_SDPSOPT_OBJ) $(BSP_DISKIO_OBJ) \
-$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP) $(BUILD_TRANSPORT_STAMP) $(BUILD_PERF_COUNTERS_STAMP)
+$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP) $(BUILD_TRANSPORT_STAMP) $(BUILD_PERF_COUNTERS_STAMP) $(BUILD_SVC_PROBES_STAMP)
 
 .DEFAULT_GOAL := all
 

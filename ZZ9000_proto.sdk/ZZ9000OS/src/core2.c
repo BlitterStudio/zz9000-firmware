@@ -554,8 +554,8 @@ __attribute__((naked, noreturn, used)) static void core1_enter_system_thread(voi
 		".ltorg\n\t");
 }
 
-/* PMCCNTR is sampled only by privileged core-1 SVC code. Do not change
- * PMUSERENR: user mode must continue to time a complete SVC round trip. */
+/* PMCCNTR is sampled only by privileged core-1 SVC code, except in the
+ * explicitly instrumented probe firmware. */
 static void core1_enable_pmu_cycles(void)
 {
 	uint32_t pmcr;
@@ -565,6 +565,9 @@ static void core1_enable_pmu_cycles(void)
 	pmcr &= ~0x08U;
 	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
 	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U));
+#if ZZAPP_SVC_PROBES
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c14, 0" : : "r"(1U));
+#endif
 }
 
 

@@ -775,6 +775,72 @@ static void test_fast_no_lock_calls(void)
     svc_test_current_thread = 0;
     teardown_dispatch();
 }
+#if ZZAPP_SVC_PROBES
+#define SVC_PROBE_P2 0x102U
+#define SVC_PROBE_P3 0x103U
+#define SVC_PROBE_P4 0x104U
+static void test_svc_probes_do_not_run_real_handlers(void)
+{
+    zzapp_svc_frame_t frame;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(SVC_PROBE_P3, &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0U);
+    CHECK(should_stop_calls == 0U);
+    dispatch(SVC_PROBE_P4, &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0U);
+    CHECK(should_stop_calls == 0U);
+    teardown_dispatch();
+}
+#endif
+#if ZZAPP_SVC_PROBES && ZZAPP_PERF_COUNTERS
+static void test_svc_probe_shallow_exits_clear_counter_tail(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t total_calls = 0U;
+    uint32_t samples[4] = { 0U };
+    uint32_t averages[4] = { 0U };
+    uint32_t call;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    zzapp_svc_counters_reset(0U);
+    svc_counter_now = 0U;
+    for (call = 1U; call <= 64U; ++call) {
+        zzapp_svc_entry_stamp[0] = svc_counter_now;
+        dispatch(api_slot(offsetof(zzapp_api, should_stop)), &frame,
+                 (uint32_t[9]){ 0U });
+    }
+    dispatch(SVC_PROBE_P2, &frame, (uint32_t[9]){ 99U });
+    CHECK(frame.r[0] == 0U);
+    zzapp_svc_counters_test_eret(0U, svc_counter_now);
+    zzapp_svc_counters_test_snapshot(0U, &total_calls, samples, averages);
+    CHECK(total_calls == 64U);
+    CHECK(samples[3] == 0U);
+
+    zzapp_svc_counters_reset(0U);
+    svc_counter_now = 0U;
+    for (call = 1U; call <= 64U; ++call) {
+        zzapp_svc_entry_stamp[0] = svc_counter_now;
+        dispatch(api_slot(offsetof(zzapp_api, should_stop)), &frame,
+                 (uint32_t[9]){ 0U });
+    }
+    dispatch(SVC_PROBE_P3, &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0U);
+    zzapp_svc_counters_test_eret(0U, svc_counter_now);
+    zzapp_svc_counters_test_snapshot(0U, &total_calls, samples, averages);
+    CHECK(total_calls == 64U);
+    CHECK(samples[3] == 0U);
+    teardown_dispatch();
+}
+#endif
 #if ZZAPP_PERF_COUNTERS
 static void test_sampled_counter_averages(void)
 {
@@ -937,6 +1003,12 @@ int main(void)
     test_gl_getters_copy_full_outputs();
     test_svc_number_comes_from_r12();
     test_fast_no_lock_calls();
+#if ZZAPP_SVC_PROBES
+    test_svc_probes_do_not_run_real_handlers();
+#endif
+#if ZZAPP_SVC_PROBES && ZZAPP_PERF_COUNTERS
+    test_svc_probe_shallow_exits_clear_counter_tail();
+#endif
     test_svc_float_frame_arguments();
     test_rejected_pixel_store_does_not_change_validation();
 #if ZZAPP_PERF_COUNTERS

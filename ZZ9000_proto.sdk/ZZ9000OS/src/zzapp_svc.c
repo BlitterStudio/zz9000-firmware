@@ -1569,6 +1569,21 @@ static int dispatch_fast_no_lock(const zzapp_api *api, uint32_t number,
     return ZZ_ENOSYS;
 }
 
+#if ZZAPP_SVC_PROBES && ZZAPP_PERF_COUNTERS
+static void probe_invalidate_counter_tail(void)
+{
+    int thread = zzapp_kernel_current_thread();
+    uint32_t slot = thread >= 0 && thread < (int)ZZAPP_AS_SLOT_COUNT ?
+                    (uint32_t)thread : zzapp_services_current_slot();
+
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        slot = 0U;
+    zzapp_svc_counters[slot][zzapp_svc_counter_class[slot]].handler_started =
+        0U;
+}
+#endif
+
+#if !ZZAPP_SVC_PROBES
 void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
 {
     const zzapp_api *api;
@@ -1618,3 +1633,71 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
     zzapp_svc_last_number[slot] = number;
     zzapp_svc_dispatch_slow(api, proc, slot, number, frame);
 }
+#else
+void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
+{
+    const zzapp_api *api;
+    const zzapp_svc_descriptor_t *descriptor;
+    uint32_t number;
+    uint32_t slot;
+    int status;
+    int thread;
+    int fast = 0;
+
+    if (!frame)
+        return;
+    number = frame->r[12];
+    if (number == ZZAPP_SVC_PROBE_P2 || number == ZZAPP_SVC_PROBE_P3) {
+#if ZZAPP_PERF_COUNTERS
+        probe_invalidate_counter_tail();
+#endif
+        frame->r[0] = 0U;
+        return;
+    }
+    if (number == ZZAPP_SVC_PROBE_P4)
+        fast = 1;
+    if (number < API_COUNT) {
+        descriptor = &api_descriptors[number];
+        if (descriptor->flags & ZZAPP_SVC_FAST_NO_LOCK)
+            fast = 1;
+    }
+    if (!fast) {
+        zzapp_proc_t *proc;
+
+        slot = zzapp_services_current_slot();
+        if (slot >= ZZAPP_AS_SLOT_COUNT)
+            slot = 0U;
+        counters_dispatch(slot, number >= ZZAPP_SVC_GL_FIRST);
+        api = zzapp_api_table();
+        proc = zzapp_proc_slot(slot);
+        if (!proc || !api) {
+            frame->r[0] = (uint32_t)ZZ_EFAULT;
+            return;
+        }
+        zzapp_svc_last_number[slot] = number;
+        zzapp_svc_dispatch_slow(api, proc, slot, number, frame);
+        return;
+    }
+    thread = zzapp_kernel_current_thread();
+    slot = thread >= 0 && thread < (int)ZZAPP_AS_SLOT_COUNT ?
+           (uint32_t)thread : zzapp_services_current_slot();
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        slot = 0U;
+    counters_dispatch(slot, 0);
+    api = zzapp_api_table();
+    if (!api) {
+        frame->r[0] = (uint32_t)ZZ_EFAULT;
+        return;
+    }
+    zzapp_svc_last_number[slot] = number;
+    counters_handler_start(slot);
+    if (number == ZZAPP_SVC_PROBE_P4) {
+        frame->r[0] = 0U;
+        status = ZZ_OK;
+    } else
+        status = dispatch_fast_no_lock(api, number, frame);
+    counters_handler_end(slot);
+    if (status != ZZ_OK)
+        frame->r[0] = (uint32_t)ZZ_ENOSYS;
+}
+#endif

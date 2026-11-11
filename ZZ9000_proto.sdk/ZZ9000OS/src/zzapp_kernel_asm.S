@@ -8,6 +8,10 @@
 #define ZZAPP_PERF_COUNTERS 1
 #endif
 
+#ifndef ZZAPP_SVC_PROBES
+#define ZZAPP_SVC_PROBES 0
+#endif
+
 .syntax unified
 .arm
 .section .zzapp_vectors, "ax", %progbits
@@ -108,6 +112,18 @@ core1_vector_svc:
 	/* Keep only caller-clobbered state on the SVC stack while a compact
 	 * frame is built directly on the current app's kernel stack. */
 	stmdb sp!, {r0-r3, r12, lr}
+#if ZZAPP_SVC_PROBES
+	/* P0 only for SVCs from user mode: privileged callers (sleep and
+	 * scheduler hand-offs) leave r12 undefined. r0 is saved above and
+	 * reloaded below; the flags are recomputed. */
+	cmp r12, #0x100
+	bne 9f
+	mrs r0, spsr
+	and r0, r0, #0x1f
+	cmp r0, #0x10
+	beq .Lsvc_probe_p0_return
+9:
+#endif
 	mrs r0, spsr
 	push {r0}
 	ldr r0, [sp]
@@ -118,6 +134,11 @@ core1_vector_svc:
 	ldr r0, [r0]
 	cmp r0, #0
 	beq 3f
+#if ZZAPP_SVC_PROBES
+	movw r1, #0x101
+	cmp r12, r1
+	beq .Lsvc_probe_early_return
+#endif
 #if ZZAPP_PERF_COUNTERS
 	/* PMCCNTR stamp after the mode and stack checks, before the compact
 	 * frame work. The scheduler publishes this slot before user return. */
@@ -162,7 +183,35 @@ core1_vector_svc:
 	cps #0x1f
 	mov sp, r0
 	cpsie i
+#if ZZAPP_SVC_PROBES
+	ldr r2, [sp, #124]
+	movw r1, #0x102
+	cmp r2, r1
+	bne 6f
+	mov r1, #0
+	str r1, [sp, #76]
+#if ZZAPP_PERF_COUNTERS
+	ldr r2, =zzapp_svc_counter_slot
+	ldr r2, [r2]
+	ldr r3, =zzapp_svc_counter_class
+	ldrb r1, [r3, r2]
+	add r3, r2, r2, lsl #1
+	add r3, r3, r2, lsl #3
+	lsl r3, r3, #4
+	ldr r12, =zzapp_svc_counters
+	add r12, r12, r3
+	cmp r1, #0
+	addne r12, r12, #88
+	mov r1, #0
+	strb r1, [r12, #76]
+#endif
+	b .Lsvc_probe_return
+6:
+#endif
 	bl zzapp_svc_dispatch
+#if ZZAPP_SVC_PROBES
+.Lsvc_probe_return:
+#endif
 	cpsid i
 	bl zzapp_kernel_svc_can_return
 #if ZZAPP_PERF_COUNTERS
@@ -255,6 +304,24 @@ core1_vector_svc:
 	save_frame
 	select_frame 2, 0
 	restore_frame 0
+#if ZZAPP_SVC_PROBES
+.Lsvc_probe_p0_return:
+	/* P0 has only the six scratch words; SPSR is untouched in its bank. */
+	ldmia sp!, {r0-r3, r12, lr}
+	mov r0, #0
+	subs pc, lr, #0
+
+.Lsvc_probe_early_return:
+	/* The scratch frame holds the original user r1-r3/r12/lr and SPSR.
+	 * r0 is the documented zero probe result, so it is intentionally not
+	 * restored.  P0/P1 have no compact frame to hand to the scheduler. */
+	ldr r0, [sp]
+	msr spsr_cxsf, r0
+	add sp, sp, #4
+	ldmia sp!, {r0-r3, r12, lr}
+	mov r0, #0
+	subs pc, lr, #0
+#endif
 
 core1_vector_pabort:
 	save_frame

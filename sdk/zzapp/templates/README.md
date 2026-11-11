@@ -76,6 +76,8 @@ or a stack other than 0 or 64 KiB–1 MiB aligned to 8.
 - `svcbench.c`: times table calls in `zz_time_us` batches and reports
   667 MHz timer-derived cycle estimates because PMU access is unavailable in
   user mode.
+- `svcprobe.c`: with firmware built using `ZZAPP_SVC_PROBES=1`, times
+  individual SVC path boundaries with PMCCNTR.
 - `zzmembench.c`: allocator benchmark.
 - `filter.c`: file-in/file-out Shell template. It maps an input through the
   ZZRun file proxy, computes SHA-256 with the card service, and writes the

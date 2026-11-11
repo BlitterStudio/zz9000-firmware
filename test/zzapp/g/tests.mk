@@ -29,3 +29,15 @@ $(BUILD)/g/svc_test: $(SVC_TEST_SOURCES) $(SVC_TEST_DEPS) | $(BUILD)
 $(BUILD)/g/svc_no_counters_test: $(SVC_TEST_SOURCES) $(SVC_TEST_DEPS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PERF_COUNTERS=0 -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)
+
+ZZAPP_TESTS += $(BUILD)/g/svc_probes_test
+
+$(BUILD)/g/svc_probes_test: $(SVC_TEST_SOURCES) $(SVC_TEST_DEPS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PERF_COUNTERS=0 -DZZAPP_SVC_PROBES=1 -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)
+
+ZZAPP_TESTS += $(BUILD)/g/svc_probes_counters_test
+
+$(BUILD)/g/svc_probes_counters_test: $(SVC_TEST_SOURCES) $(SVC_TEST_DEPS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PERF_COUNTERS=1 -DZZAPP_SVC_COUNTERS_TEST -DZZAPP_SVC_PROBES=1 -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)
