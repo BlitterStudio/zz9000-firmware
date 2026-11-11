@@ -3297,6 +3297,18 @@ static void zzplay_app_pump(void *user)
   zzplay_app_after_input(app);
 }
 
+/* Network waits run inside an item: keep the window live, and let any
+ * request that ends the item cancel the transfer. A seek restarts the item
+ * at its own pace, so it leaves the transfer alone. */
+static int zzplay_app_network_poll(void *user)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+
+  zzplay_app_pump(app);
+  return app->ctl.request == ZZPLAY_REQUEST_NONE ||
+         app->ctl.request == ZZPLAY_REQUEST_SEEK;
+}
+
 static void zzplay_app_open_gui(ZZPlayApp *app)
 {
   ZZPlayGuiContext context;
@@ -4903,6 +4915,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   int32_t jump_index;
   uint32_t seek_ms;
   int probed = 0;
+  int source_seekable = 1;
 
   if (index < 0 || (uint32_t)index >= app->playlist.count) {
     return app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_EXIT;
@@ -4932,6 +4945,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
       file_size = (uint64_t)length;
     }
     probed = zzplay_probe_media_file(file, &probe);
+    source_seekable = zzplay_file_seekable(file);
     zzplay_file_close(file);
   }
   {
@@ -4971,7 +4985,18 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     zzplay_app_close_screen();
   }
   if (!file) {
-    zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
+    const char *why = zzplay_file_open_error();
+
+    if (why[0] != '\0') {
+      zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s: %s",
+                            app->item_path, why);
+    } else {
+      zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
+                            app->item_path);
+    }
+  } else if (!engine && probe.network_video) {
+    zzplay_launch_reportf(&app->ctl, &app->options,
+                          "cannot play %s: video plays only from files",
                           app->item_path);
   } else if (!engine) {
     zzplay_launch_reportf(
@@ -4996,6 +5021,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     run.trailer_bytes = tags.trailer_bytes;
     run.file_size = file_size;
     run.seek_ms = app->start_seek_ms;
+    run.source_seekable = source_seekable;
     run.pump = zzplay_app_pump;
     run.pump_user = app;
     app->start_seek_ms = 0U;
@@ -5261,6 +5287,7 @@ int main(int argc, char **argv)
     zzplay_controller_init(&app.ctl, app.prefs.volume, repeat,
                            app.prefs.shuffle);
     zzplay_controller_set_fullscreen(&app.ctl, app.prefs.fullscreen);
+    zzplay_file_set_network_poll(zzplay_app_network_poll, &app);
   }
   app.started_prefs = app.prefs;
   app.started_prefs.volume = app.ctl.volume;

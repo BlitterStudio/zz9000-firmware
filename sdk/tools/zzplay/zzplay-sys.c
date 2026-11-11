@@ -3,6 +3,8 @@
 
 #include "zzplay-sys.h"
 
+#include <string.h>
+
 #if defined(__amigaos__) || defined(AMIGA)
 
 #include <dos/dos.h>
@@ -10,11 +12,74 @@
 #include <proto/dos.h>
 #include <proto/exec.h>
 
+#include "zzplay-http.h"
+#include "zzplay-httpfile.h"
+#include "zzplay-net.h"
 
 struct ZZPlayFile {
   BPTR handle;
+  ZZPlayHttpFile *http; /* set for a network source instead of handle */
   int error;
   int eof;
+};
+
+static int (*network_poll)(void *user);
+static void *network_poll_user;
+static char open_error[ZZPLAY_NET_ERROR_MAX];
+
+void zzplay_file_set_network_poll(int (*poll)(void *user), void *user)
+{
+  network_poll = poll;
+  network_poll_user = user;
+}
+
+const char *zzplay_file_open_error(void)
+{
+  return open_error;
+}
+
+static int network_keep_running(void *user)
+{
+  (void)user;
+  return network_poll == 0 || network_poll(network_poll_user);
+}
+
+static void *network_open(void *ctx, const char *url, int has_range,
+                          uint32_t from, ZZPlayHttpHead *head, char *err,
+                          size_t err_size)
+{
+  ZZPlayNetRequest req;
+
+  (void)ctx;
+  memset(&req, 0, sizeof(req));
+  req.url = url;
+  req.has_range = has_range;
+  req.range_from = from;
+  req.icy = 1;
+  req.keep_running = network_keep_running;
+  return zzplay_net_get(&req, head, err, err_size, 0);
+}
+
+static long network_read(void *ctx, void *stream, uint8_t *buf, size_t size)
+{
+  (void)ctx;
+  return zzplay_net_read((ZZPlayNet *)stream, buf, size);
+}
+
+static const char *network_error(void *ctx, void *stream)
+{
+  (void)ctx;
+  return zzplay_net_error((const ZZPlayNet *)stream);
+}
+
+static void network_close(void *ctx, void *stream)
+{
+  (void)ctx;
+  zzplay_net_close((ZZPlayNet *)stream);
+}
+
+static const ZZPlayHttpStreamOps network_ops = {
+  network_open, network_read, network_error, network_close, 0
 };
 
 void *zzplay_alloc(size_t size)
@@ -46,6 +111,18 @@ ZZPlayFile *zzplay_file_open(const char *path, int writable)
   if (!file) {
     return 0;
   }
+  open_error[0] = '\0';
+  if (zzplay_http_is_url(path)) {
+    if (!writable) {
+      file->http = zzplay_httpfile_open(&network_ops, path, open_error,
+                                        sizeof(open_error));
+    }
+    if (!file->http) {
+      zzplay_free(file);
+      return 0;
+    }
+    return file;
+  }
   handle = Open((CONST_STRPTR)path, writable ? MODE_NEWFILE : MODE_OLDFILE);
   if (!handle) {
     zzplay_free(file);
@@ -62,7 +139,12 @@ int zzplay_file_close(ZZPlayFile *file)
   if (!file) {
     return 0;
   }
-  ok = Close(file->handle) != 0;
+  if (file->http) {
+    zzplay_httpfile_close(file->http);
+    ok = 1;
+  } else {
+    ok = Close(file->handle) != 0;
+  }
   zzplay_free(file);
   return ok;
 }
@@ -76,6 +158,16 @@ size_t zzplay_file_read(ZZPlayFile *file, void *buf, size_t len)
       file->error = 1;
     }
     return 0U;
+  }
+  if (file->http) {
+    total = zzplay_httpfile_read(file->http, buf, len);
+    if (zzplay_httpfile_error(file->http)) {
+      file->error = 1;
+    }
+    if (zzplay_httpfile_eof(file->http)) {
+      file->eof = 1;
+    }
+    return total;
   }
   while (total < len) {
     LONG got = Read(file->handle, (UBYTE *)buf + total,
@@ -104,6 +196,10 @@ size_t zzplay_file_write(ZZPlayFile *file, const void *buf, size_t len)
     }
     return 0U;
   }
+  if (file->http) {
+    file->error = 1;
+    return 0U;
+  }
   while (total < len) {
     LONG written = Write(file->handle, (APTR)((const UBYTE *)buf + total),
                          (LONG)(len - total));
@@ -128,6 +224,13 @@ int zzplay_file_seek(ZZPlayFile *file, long offset, ZZPlayFileOrigin origin)
   if (!file) {
     return 0;
   }
+  if (file->http) {
+    if (!zzplay_httpfile_seek(file->http, offset, origin)) {
+      return 0;
+    }
+    file->eof = 0;
+    return 1;
+  }
   mode = origin == ZZPLAY_FILE_BEGIN ? OFFSET_BEGINNING
        : origin == ZZPLAY_FILE_CURRENT ? OFFSET_CURRENT
                                        : OFFSET_END;
@@ -144,6 +247,9 @@ long zzplay_file_tell(ZZPlayFile *file)
 {
   LONG pos;
 
+  if (file && file->http) {
+    return zzplay_httpfile_tell(file->http);
+  }
   if (!file || (pos = Seek(file->handle, 0L, OFFSET_CURRENT)) < 0L) {
     if (file) {
       file->error = 1;
@@ -167,7 +273,20 @@ void zzplay_file_clear_error(ZZPlayFile *file)
 {
   if (file) {
     file->error = 0;
+    if (file->http) {
+      zzplay_httpfile_clear_error(file->http);
+    }
   }
+}
+
+int zzplay_file_seekable(ZZPlayFile *file)
+{
+  return file && (!file->http || zzplay_httpfile_seekable(file->http));
+}
+
+int zzplay_file_is_network(ZZPlayFile *file)
+{
+  return file && file->http;
 }
 
 
@@ -288,6 +407,28 @@ void zzplay_file_clear_error(ZZPlayFile *file)
   if (file) {
     clearerr(file);
   }
+}
+
+int zzplay_file_seekable(ZZPlayFile *file)
+{
+  return file != 0;
+}
+
+int zzplay_file_is_network(ZZPlayFile *file)
+{
+  (void)file;
+  return 0;
+}
+
+const char *zzplay_file_open_error(void)
+{
+  return "";
+}
+
+void zzplay_file_set_network_poll(int (*poll)(void *user), void *user)
+{
+  (void)poll;
+  (void)user;
 }
 
 

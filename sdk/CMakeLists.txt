@@ -497,6 +497,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-geometry.c
   tools/zzplay/zzplay-media.c
   tools/zzplay/zzplay-http.c
+  tools/zzplay/zzplay-httpfile.c
   tools/zzplay/zzplay-mp3-transport.c
   tools/zzplay/zzplay-options.c
   tools/zzplay/zzplay-path.c
@@ -532,6 +533,12 @@ add_executable(zzplay_http_test
 )
 target_link_libraries(zzplay_http_test PRIVATE zzplay_core)
 add_test(NAME zzplay_http_test COMMAND zzplay_http_test)
+
+add_executable(zzplay_httpfile_test
+  tests/zzplay_httpfile_test.c
+)
+target_link_libraries(zzplay_httpfile_test PRIVATE zzplay_core)
+add_test(NAME zzplay_httpfile_test COMMAND zzplay_httpfile_test)
 
 add_executable(zzplay_webm_test
   tests/zzplay_webm_test.c

@@ -712,11 +712,13 @@ int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info)
   uint8_t id3[10];
   long audio_offset = 0L;
   size_t got;
+  int network;
 
   if (!file || !info) {
     return 0;
   }
   memset(info, 0, sizeof(*info));
+  network = zzplay_file_is_network(file);
 
   if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
     zzplay_file_clear_error(file);
@@ -724,14 +726,21 @@ int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info)
   }
   got = zzplay_file_read(file, buffer, sizeof(buffer));
   if (got >= 4U && buffer[0] == 0x1AU && buffer[1] == 0x45U &&
-      buffer[2] == 0xDFU && buffer[3] == 0xA3U &&
-      zzplay_probe_webm_file(file, &info->webm)) {
-    info->kind = ZZPLAY_MEDIA_KIND_WEBM;
-    goto done;
+      buffer[2] == 0xDFU && buffer[3] == 0xA3U) {
+    if (network) {
+      info->network_video = 1;
+      goto done;
+    }
+    if (zzplay_probe_webm_file(file, &info->webm)) {
+      info->kind = ZZPLAY_MEDIA_KIND_WEBM;
+      goto done;
+    }
   }
   if (got >= ZZ9K_WEBP_HEADER_MIN_BYTES &&
       zzplay_probe_webp(buffer, got, &info->webp)) {
-    if (info->webp.is_animated) {
+    if (network) {
+      info->network_video = 1;
+    } else if (info->webp.is_animated) {
       info->kind = ZZPLAY_MEDIA_KIND_WEBP;
     } else {
       info->kind = ZZPLAY_MEDIA_KIND_UNSUPPORTED;
@@ -772,9 +781,17 @@ int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info)
     return 0;
   }
 
-  if (zzplay_probe_file(file, &info->video) &&
-      info->video.is_program_stream &&
-      info->video.has_video_pes) {
+  if (network) {
+    /* The Program Stream scan reads 256 KiB and then rewinds, which a
+     * stream cannot do; a pack start code is enough to refuse it. */
+    if (got >= 4U && buffer[0] == 0U && buffer[1] == 0U &&
+        buffer[2] == 1U && buffer[3] == 0xBAU) {
+      info->network_video = 1;
+      goto done;
+    }
+  } else if (zzplay_probe_file(file, &info->video) &&
+             info->video.is_program_stream &&
+             info->video.has_video_pes) {
     info->kind = ZZPLAY_MEDIA_KIND_MPEG_PS;
     return 1;
   }
@@ -801,7 +818,11 @@ done:
   zzplay_file_clear_error(file);
   if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
     zzplay_file_clear_error(file);
-    return 0;
+    /* A stream that cannot go back past its cached start is reopened by
+     * the engine anyway; only a seekable source must rewind. */
+    if (zzplay_file_seekable(file)) {
+      return 0;
+    }
   }
   return info->kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED;
 }

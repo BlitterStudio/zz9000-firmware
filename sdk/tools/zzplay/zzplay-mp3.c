@@ -125,7 +125,7 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
     return ZZPLAY_ENGINE_FAILED;
   }
   zzplay_controller_set_capabilities(
-      run->ctl, 1, sink.volume_supported != 0, 0);
+      run->ctl, run->source_seekable, sink.volume_supported != 0, 0);
   {
     char output[ZZPLAY_NOW_OUTPUT_MAX];
 
@@ -234,7 +234,7 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
       engine.audio_end - engine.audio_start,
       engine.info->bitrate_kbps);
   zzplay_controller_set_duration(run->ctl, engine.total_ms);
-  zzplay_controller_set_capabilities(run->ctl, 1, 0, 0);
+  zzplay_controller_set_capabilities(run->ctl, run->source_seekable, 0, 0);
   {
     char format[ZZPLAY_NOW_TEXT_MAX];
 
@@ -286,12 +286,12 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
     zzplay_info("zzplay: selected audio backend NONE "
            "(accelerated Layer III decode benchmark)\n");
     engine.muted = 1;
-    zzplay_controller_set_capabilities(run->ctl, 1, 0, 0);
+    zzplay_controller_set_capabilities(run->ctl, run->source_seekable, 0, 0);
     zzplay_codec_set_output(&engine, "none");
   } else {
     zzplay_info("zzplay: selected audio backend AHI "
            "(accelerated Layer III decode, S16BE)\n");
-    zzplay_controller_set_capabilities(run->ctl, 1, 1, 0);
+    zzplay_controller_set_capabilities(run->ctl, run->source_seekable, 1, 0);
     sprintf(engine.output_base, "AHI unit %lu",
             (unsigned long)run->prefs->ahi_unit);
     zzplay_codec_refresh_output(&engine);

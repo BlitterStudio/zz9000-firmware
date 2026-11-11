@@ -23,7 +23,8 @@ typedef enum ZZPlayFileOrigin {
   ZZPLAY_FILE_END
 } ZZPlayFileOrigin;
 
-/* Open an AmigaDOS file for reading or replace it for writing. */
+/* Open an AmigaDOS file for reading or replace it for writing. On AmigaOS
+ * an http:// or https:// path opens the network resource for reading. */
 ZZPlayFile *zzplay_file_open(const char *path, int writable);
 int zzplay_file_close(ZZPlayFile *file);
 size_t zzplay_file_read(ZZPlayFile *file, void *buf, size_t len);
@@ -34,6 +35,20 @@ int zzplay_file_error(ZZPlayFile *file);
 int zzplay_file_eof(ZZPlayFile *file);
 void zzplay_file_clear_error(ZZPlayFile *file);
 
+/* 1 when any position can be reached: always for files; for a network
+ * source only when the server names the length and accepts byte ranges. */
+int zzplay_file_seekable(ZZPlayFile *file);
+/* 1 for a network source. */
+int zzplay_file_is_network(ZZPlayFile *file);
+
+/* Why the last zzplay_file_open() of a network path failed, for the
+ * message line ("" after a file failure). The application opens network
+ * paths from one process only, so one copy suffices. */
+const char *zzplay_file_open_error(void);
+
+/* Network waits call `poll` at least every 100 ms so the player stays
+ * live; returning 0 cancels the transfer. NULL removes it. */
+void zzplay_file_set_network_poll(int (*poll)(void *user), void *user);
 
 /* Read a complete file no larger than max_len. A successful read returns an
  * owned buffer (including for an empty file) which must be released with

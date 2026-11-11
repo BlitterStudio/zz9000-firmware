@@ -40,6 +40,9 @@ typedef struct ZZPlayEngineRun {
   uint32_t trailer_bytes;
   uint64_t file_size;
   uint32_t seek_ms;
+  /* The source can be reopened at any offset (always true for files; a
+   * network source needs byte ranges and a known length). */
+  int source_seekable;
   /* Called regularly from every wait loop so the GUI stays live while
    * the engine blocks; may be NULL when there is nothing to pump. */
   void (*pump)(void *user);
