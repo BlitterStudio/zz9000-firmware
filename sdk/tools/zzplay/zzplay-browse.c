@@ -284,6 +284,13 @@ static void close_settings_window(void)
   }
 }
 
+/* Width of `text` in the screen font, which every gadget here uses. */
+static int browse_text_w(const char *text)
+{
+  return (int)TextLength(&gui_screen->RastPort, (CONST_STRPTR)text,
+                         (ULONG)strlen(text));
+}
+
 static void __attribute__((noinline)) open_settings_window(void)
 {
   const ZZPlayBrowseServiceEntry *svc;
@@ -325,10 +332,20 @@ static void __attribute__((noinline)) open_settings_window(void)
   struct TextFont *font = gui_screen->RastPort.Font;
   font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
   btn_h = font_h + 6;
-  win_w = 380;
-  label_w = 120;
+  label_w = 0;
+  for (i = 0U; i < count; i++) {
+    int w = browse_text_w(p->fields[i].label);
+    if (w > label_w) {
+      label_w = w;
+    }
+  }
+  label_w += 12;
+  btn_w = browse_text_w("Cancel") + 24;
+  win_w = label_w + 260 + 2 * BROWSE_MARGIN;
+  if (win_w < 2 * btn_w + BROWSE_SPACING + 2 * BROWSE_MARGIN) {
+    win_w = 2 * btn_w + BROWSE_SPACING + 2 * BROWSE_MARGIN;
+  }
   val_w = win_w - 2 * BROWSE_MARGIN - label_w;
-  btn_w = (win_w - 2 * BROWSE_MARGIN - BROWSE_SPACING) / 2;
 
   settings_glist = NULL;
   gad = CreateContext(&settings_glist);
@@ -572,12 +589,47 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
   }
   btn_h = font_h + 6;
-  win_w = 460;
+  /* Six buttons as wide as the widest label; the cycle gadget as wide as
+   * the longest service name plus its glyph. */
+  btn_w = 0;
+  {
+    static const char *const labels[] = {
+      "Back", "Play", "Add", "Favourite", "Stop", "Settings"
+    };
+    for (i = 0U; i < sizeof(labels) / sizeof(labels[0]); i++) {
+      int w = browse_text_w(labels[i]);
+      if (w > btn_w) {
+        btn_w = w;
+      }
+    }
+  }
+  btn_w += 16;
+  cycle_w = browse_text_w("(No services)");
+  for (i = 0U; i < loaded_count; i++) {
+    int w = browse_text_w(service_labels[i]);
+    if (w > cycle_w) {
+      cycle_w = w;
+    }
+  }
+  cycle_w += 32;
+  search_label_w = browse_text_w("Search:") + 8;
+  win_w = 6 * btn_w + 5 * BROWSE_SPACING + 2 * BROWSE_MARGIN;
+  if (win_w < cycle_w + BROWSE_SPACING + search_label_w + 160 +
+                  2 * BROWSE_MARGIN) {
+    win_w = cycle_w + BROWSE_SPACING + search_label_w + 160 +
+            2 * BROWSE_MARGIN;
+  }
+  if (win_w < 460) {
+    win_w = 460;
+  }
   if (win_w > gui_screen->Width - gui_screen->WBorLeft - gui_screen->WBorRight) {
     win_w = gui_screen->Width - gui_screen->WBorLeft - gui_screen->WBorRight;
   }
-  win_h = font_h * 8 + btn_h * 3 + BROWSE_MARGIN * 2 + BROWSE_SPACING * 5 + 30;
   content_w = win_w - 2 * BROWSE_MARGIN;
+  btn_w = (content_w - 5 * BROWSE_SPACING) / 6;
+  /* Service row, list, button row, status line. */
+  win_h = BROWSE_MARGIN + btn_h + BROWSE_SPACING + (font_h * 8 + 8) +
+          BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h + BROWSE_MARGIN;
 
   init_exec_list(&browse_exec_list);
 
@@ -614,8 +666,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
 
   cur_y = BROWSE_MARGIN;
 
-  /* Service cycle + Search string */
-  cycle_w = 160;
+  /* Service cycle + Search string (cycle_w measured above) */
   tags[0].ti_Tag = GTCY_Labels;
   tags[0].ti_Data = (ULONG)service_labels;
   tags[1].ti_Tag = TAG_DONE;
@@ -625,7 +676,6 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
       BROWSE_MARGIN, cur_y, cycle_w, btn_h,
       NULL, BGID_SERVICE, 0, tags);
 
-  search_label_w = 48;
   search_w = content_w - cycle_w - BROWSE_SPACING - search_label_w;
   search_buf[0] = '\0';
   tags[0].ti_Tag = GTST_String;
@@ -658,7 +708,6 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   cur_y += font_h * 8 + 8 + BROWSE_SPACING;
 
   /* Buttons: Back, Play, Add, Favourite, Stop, Settings */
-  btn_w = (content_w - 5 * BROWSE_SPACING) / 6;
 
   back_gad = gad = create_gadget(
       browse_win, BUTTON_KIND, gad, &ng,
@@ -689,6 +738,8 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
       browse_win, BUTTON_KIND, gad, &ng,
       BROWSE_MARGIN + 5 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
       "Settings", BGID_SETTINGS, PLACETEXT_IN, NULL);
+
+  cur_y += btn_h + BROWSE_SPACING;
 
   /* Status text */
   status_buf[0] = '\0';
