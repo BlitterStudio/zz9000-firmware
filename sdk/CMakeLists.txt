@@ -513,6 +513,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-tags.c
   tools/zzplay/zzplay-video.c
   tools/zzplay/zzplay-webm.c
+  tools/zzplay/zzplay-xml.c
 )
 
 target_include_directories(zzplay_core
@@ -546,6 +547,12 @@ add_executable(zzplay_streamlist_test
 )
 target_link_libraries(zzplay_streamlist_test PRIVATE zzplay_core)
 add_test(NAME zzplay_streamlist_test COMMAND zzplay_streamlist_test)
+
+add_executable(zzplay_xml_test
+  tests/zzplay_xml_test.c
+)
+target_link_libraries(zzplay_xml_test PRIVATE zzplay_core)
+add_test(NAME zzplay_xml_test COMMAND zzplay_xml_test)
 
 add_executable(zzplay_webm_test
   tests/zzplay_webm_test.c
