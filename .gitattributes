@@ -16,6 +16,7 @@
 *.c            text eol=lf
 *.h            text eol=lf
 *.md           text eol=lf
+*.patch        text eol=lf
 *.cmake        text eol=lf
 CMakeLists.txt text eol=lf
 *.pin          text eol=lf
