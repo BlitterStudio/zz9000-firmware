@@ -168,4 +168,8 @@ typedef struct ZZPlayProvider {
 /* The first code of a module's hunk file. */
 typedef const ZZPlayProvider *(*ZZPlayProviderEntry)(void);
 
+/* Each module defines this; providers/zzprov_entry.S, the first code of
+ * the hunk file, calls it. */
+const ZZPlayProvider *zzplay_provider_entry(void);
+
 #endif /* ZZPLAY_PROVIDER_H */

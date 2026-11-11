@@ -1044,8 +1044,3 @@ const ZZPlayProvider *zzplay_provider_entry(void)
 {
   return &radio_provider;
 }
-
-const ZZPlayProvider *zzplay_provider_radio(void)
-{
-  return &radio_provider;
-}

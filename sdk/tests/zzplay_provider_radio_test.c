@@ -12,8 +12,6 @@
 #include "../tools/zzplay/zzplay-host.h"
 #include "../tools/zzplay/zzplay-xml.h"
 
-extern const ZZPlayProvider *zzplay_provider_radio(void);
-
 #define MAX_PREFS 128
 
 typedef struct PrefEntry {
@@ -303,7 +301,7 @@ static void sink_total_cb(void *user, uint32_t total)
 
 static void test_radio_descriptor(void)
 {
-  const ZZPlayProvider *p = zzplay_provider_radio();
+  const ZZPlayProvider *p = zzplay_provider_entry();
   assert(p != NULL);
   assert(p->id == ZZPLAY_PROVIDER_ID);
   assert(p->abi == ZZPLAY_PROVIDER_ABI);
@@ -320,7 +318,7 @@ static void test_radio_descriptor(void)
 
 static void test_radio_search(ZZPlayHost *host)
 {
-  const ZZPlayProvider *p = zzplay_provider_radio();
+  const ZZPlayProvider *p = zzplay_provider_entry();
   void *ctx;
   TestSinkData sink_data;
   ZZPlayItemSink sink;
@@ -372,7 +370,7 @@ static void test_radio_search(ZZPlayHost *host)
 
 static void test_radio_search_empty(ZZPlayHost *host)
 {
-  const ZZPlayProvider *p = zzplay_provider_radio();
+  const ZZPlayProvider *p = zzplay_provider_entry();
   void *ctx;
   TestSinkData sink_data;
   ZZPlayItemSink sink;
@@ -396,7 +394,7 @@ static void test_radio_search_empty(ZZPlayHost *host)
 
 static void test_radio_resolve(ZZPlayHost *host)
 {
-  const ZZPlayProvider *p = zzplay_provider_radio();
+  const ZZPlayProvider *p = zzplay_provider_entry();
   void *ctx;
   ZZPlayResolved resolved;
   char err[128];
@@ -435,7 +433,7 @@ static void test_radio_resolve(ZZPlayHost *host)
 
 static void test_radio_favourites(ZZPlayHost *host)
 {
-  const ZZPlayProvider *p = zzplay_provider_radio();
+  const ZZPlayProvider *p = zzplay_provider_entry();
   void *ctx;
   TestSinkData sink_data;
   ZZPlayItemSink sink;
@@ -587,7 +585,7 @@ static void test_radio_favourites(ZZPlayHost *host)
 
 static void test_radio_folders(ZZPlayHost *host)
 {
-  const ZZPlayProvider *p = zzplay_provider_radio();
+  const ZZPlayProvider *p = zzplay_provider_entry();
   void *ctx;
   TestSinkData sink_data;
   ZZPlayItemSink sink;
