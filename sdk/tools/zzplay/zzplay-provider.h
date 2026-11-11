@@ -87,30 +87,35 @@ typedef struct ZZPlayHostXmlHandler {
   void *user;
 } ZZPlayHostXmlHandler;
 
-/* Services ZZPlay offers a module. Every call runs in the process that
- * called the module. */
-typedef struct ZZPlayHost {
+/* Services ZZPlay offers a module. Every call takes the host table it
+ * came from (ZZPlay binds a table to one module and one process) and runs
+ * in the process that called the module. */
+typedef struct ZZPlayHost ZZPlayHost;
+struct ZZPlayHost {
   uint32_t abi;               /* ZZPLAY_PROVIDER_ABI */
   uint32_t size;              /* sizeof(ZZPlayHost) of the running ZZPlay */
 
-  void *(*alloc)(uint32_t size);       /* cleared memory, or NULL */
-  void (*free)(void *ptr);
+  void *(*alloc)(const ZZPlayHost *host, uint32_t size); /* cleared, or NULL */
+  void (*free)(const ZZPlayHost *host, void *ptr);
 
   /* GET `url`, sending `headers` (CRLF-terminated lines, or NULL) only to
    * that URL's origin. Body bytes go to data(), which returns nonzero to
    * stop early. Returns 1 when the body was delivered or data() stopped;
    * 0 with a reason in `err` otherwise. `*status` is the final HTTP
-   * status, 0 when none arrived. Stop and Quit cancel the transfer. */
-  int (*http_get)(const char *url, const char *headers,
+   * status, 0 when none arrived. The user's Stop cancels the transfer. */
+  int (*http_get)(const ZZPlayHost *host, const char *url,
+                  const char *headers,
                   int (*data)(void *user, const uint8_t *bytes,
                               uint32_t len),
                   void *user, int *status, char *err, uint32_t err_size);
 
   /* A streaming XML scanner over the body bytes. */
-  void *(*xml_open)(const ZZPlayHostXmlHandler *handler);
+  void *(*xml_open)(const ZZPlayHost *host,
+                    const ZZPlayHostXmlHandler *handler);
   /* Returns 1 once a handler asked to stop. */
-  int (*xml_feed)(void *xml, const char *data, uint32_t len);
-  void (*xml_close)(void *xml);
+  int (*xml_feed)(const ZZPlayHost *host, void *xml, const char *data,
+                  uint32_t len);
+  void (*xml_close)(const ZZPlayHost *host, void *xml);
   const char *(*xml_attr)(const ZZPlayHostXmlAttr *attrs, uint32_t count,
                           const char *name);
 
@@ -122,9 +127,11 @@ typedef struct ZZPlayHost {
 
   /* This module's settings: get returns 0 and "" for a missing key; set
    * stores for this session and saves to ENVARC:. */
-  int (*pref_get)(const char *key, char *out, uint32_t size);
-  int (*pref_set)(const char *key, const char *value);
-} ZZPlayHost;
+  int (*pref_get)(const ZZPlayHost *host, const char *key, char *out,
+                  uint32_t size);
+  int (*pref_set)(const ZZPlayHost *host, const char *key,
+                  const char *value);
+};
 
 typedef struct ZZPlayProvider {
   uint32_t id;                /* ZZPLAY_PROVIDER_ID */
