@@ -12,7 +12,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 $BuildScript = @'
 set -e
-mkdir -p build/m68k build/dtcode
+mkdir -p build/m68k build/dtcode build/providers
 CFLAGS="-fcommon -noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
 STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
@@ -44,6 +44,8 @@ ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-requester.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-rexx.c tools/zzplay/zzplay-rexx-commands.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-sys.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-http.c tools/zzplay/zzplay-httpfile.c tools/zzplay/zzplay-net.c tools/zzplay/zzplay-streamlist.c"
+ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-xml.c tools/zzplay/zzplay-providers.c tools/zzplay/zzplay-host.c"
+ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-browse.c tools/zzplay/zzplay-browse-model.c tools/zzplay/zzplay-browse-worker.c"
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Werror -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
   build/m68k/zz9k_app_client.o build/m68k/zz9k_host.o -o build/zz9k.library
@@ -126,6 +128,14 @@ m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-commo
   tools/zz9k-surfaceops.c -o build/zz9k-surfaceops
 m68k-amigaos-gcc $CFLAGS tools/zz9k-probe.c -o build/zz9k-probe
 m68k-amigaos-gcc $CFLAGS tools/zz9k-step.c -o build/zz9k-step
+
+# ZZPlay service modules: LoadSeg hunk files whose first code is the entry stub.
+# No C library or startup code; the module calls through the host table.
+m68k-amigaos-gcc -noixemul -nostartfiles -nostdlib -Os -s -fomit-frame-pointer \
+  -Wall -Wextra -Werror -Wstack-usage=2048 \
+  -Iinclude -Itools/zzplay \
+  tools/zzplay/providers/zzprov_entry.S \
+  tools/zzplay/providers/radio.c -lgcc -o build/providers/radio.zzprov
 '@
 
 New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "build") | Out-Null

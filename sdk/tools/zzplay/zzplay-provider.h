@@ -43,6 +43,7 @@ typedef struct ZZPlayProviderItem {
   uint32_t duration_ms;      /* 0 when unknown */
   uint32_t kind;             /* ZZPLAY_ITEM_* */
   uint32_t playable;         /* 0 for an item shown but not playable */
+  uint32_t favourite;        /* 1 when it is in the service's favourites */
 } ZZPlayProviderItem;
 
 /* Receives list and search results. ZZPlay copies every string before
@@ -157,6 +158,11 @@ typedef struct ZZPlayProvider {
    * reason (an unsupported codec, say). */
   int (*resolve)(void *ctx, const char *item, ZZPlayResolved *out,
                  char *err, uint32_t err_size);
+  /* Add (`add` 1) or remove (`add` 0) a playable item, as the module
+   * listed it, from the service's favourites. NULL when the service keeps
+   * none. Returns 1, or 0 with the reason. */
+  int (*favourite)(void *ctx, const ZZPlayProviderItem *item, int add,
+                   char *err, uint32_t err_size);
 } ZZPlayProvider;
 
 /* The first code of a module's hunk file. */

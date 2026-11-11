@@ -1,0 +1,177 @@
+/* Host-testable state for ZZPlay's service browser.
+ * SPDX-License-Identifier: GPL-3.0-or-later */
+
+#ifndef ZZPLAY_BROWSE_MODEL_H
+#define ZZPLAY_BROWSE_MODEL_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "zzplay-provider.h"
+#include "zzplay-providers.h"
+
+#define ZZPLAY_BROWSE_PAGE_SIZE 100U
+#define ZZPLAY_BROWSE_STACK_MAX 16U
+#define ZZPLAY_BROWSE_SERVICES_MAX ZZPLAY_PROVIDERS_MAX
+
+typedef struct ZZPlayBrowseItem {
+  char id[ZZPLAY_PROVIDER_TEXT_MAX];
+  char title[ZZPLAY_PROVIDER_TEXT_MAX];
+  char subtitle[ZZPLAY_PROVIDER_TEXT_MAX];
+  uint32_t duration_ms;
+  uint32_t kind;             /* ZZPLAY_ITEM_* */
+  uint32_t playable;
+  uint32_t favourite;        /* 1 when in favourites */
+} ZZPlayBrowseItem;
+
+typedef enum ZZPlayBrowseAction {
+  ZZPLAY_BROWSE_ACTION_NONE = 0,
+  ZZPLAY_BROWSE_ACTION_ENTER_FOLDER,
+  ZZPLAY_BROWSE_ACTION_PLAY,
+  ZZPLAY_BROWSE_ACTION_PAGE_MORE
+} ZZPlayBrowseAction;
+
+typedef enum ZZPlayBrowseReqKind {
+  ZZPLAY_BROWSE_REQ_NONE = 0,
+  ZZPLAY_BROWSE_REQ_OPEN,
+  ZZPLAY_BROWSE_REQ_LIST,
+  ZZPLAY_BROWSE_REQ_SEARCH,
+  ZZPLAY_BROWSE_REQ_RESOLVE,
+  ZZPLAY_BROWSE_REQ_FAVOURITE,
+  ZZPLAY_BROWSE_REQ_CLOSE
+} ZZPlayBrowseReqKind;
+
+typedef struct ZZPlayBrowseRequest {
+  ZZPlayBrowseReqKind kind;
+  uint32_t generation;
+  char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
+  char node_id[ZZPLAY_PROVIDER_TEXT_MAX];
+  char query[ZZPLAY_PROVIDER_TEXT_MAX];
+  char item_id[ZZPLAY_PROVIDER_TEXT_MAX];
+  uint32_t start;
+  uint32_t count;
+  int fav_add;               /* 1 to add, 0 to remove */
+  ZZPlayBrowseItem item;
+} ZZPlayBrowseRequest;
+
+typedef struct ZZPlayBrowseReply {
+  ZZPlayBrowseReqKind kind;
+  uint32_t generation;
+  int success;
+  char error[ZZPLAY_PROVIDER_ERROR_MAX];
+  const ZZPlayBrowseItem *items;
+  uint32_t item_count;
+  uint32_t start;
+  uint32_t total;
+  int has_total;
+  int fav_add;
+  ZZPlayResolved resolved;
+} ZZPlayBrowseReply;
+
+typedef struct ZZPlayBrowseFrame {
+  char node_id[ZZPLAY_PROVIDER_TEXT_MAX];
+  char title[ZZPLAY_PROVIDER_TEXT_MAX];
+  int is_search;
+  char search_query[ZZPLAY_PROVIDER_TEXT_MAX];
+  int32_t selection;
+  uint32_t scroll;
+  ZZPlayBrowseItem *items;
+  uint32_t item_count;
+  uint32_t item_capacity;
+  uint32_t total;
+  int has_total;
+  int has_more;
+} ZZPlayBrowseFrame;
+
+typedef struct ZZPlayBrowseServiceEntry {
+  char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
+  char name[ZZPLAY_PROVIDER_TEXT_MAX];
+  const ZZPlayProvider *provider;
+} ZZPlayBrowseServiceEntry;
+
+typedef struct ZZPlayBrowseModel {
+  /* Installed services */
+  ZZPlayBrowseServiceEntry services[ZZPLAY_BROWSE_SERVICES_MAX];
+  uint32_t service_count;
+  int32_t current_service;
+
+  /* Current view */
+  char current_node[ZZPLAY_PROVIDER_TEXT_MAX];
+  char current_title[ZZPLAY_PROVIDER_TEXT_MAX];
+  int is_search;
+  char search_query[ZZPLAY_PROVIDER_TEXT_MAX];
+
+  /* Items */
+  ZZPlayBrowseItem *items;
+  uint32_t item_count;
+  uint32_t item_capacity;
+  uint32_t total;
+  int has_total;
+  int has_more;
+
+  /* Selection and scroll */
+  int32_t selection;
+  uint32_t scroll;
+
+  int32_t saved_selection;   /* for restoring selection across reload */
+  /* Navigation stack */
+  ZZPlayBrowseFrame stack[ZZPLAY_BROWSE_STACK_MAX];
+  uint32_t stack_depth;
+
+  /* Generation and pending request */
+  uint32_t generation;
+  int busy;
+  ZZPlayBrowseRequest pending_request;
+  char status_message[ZZPLAY_PROVIDER_ERROR_MAX];
+} ZZPlayBrowseModel;
+
+void zzplay_browse_model_init(ZZPlayBrowseModel *model);
+void zzplay_browse_model_free(ZZPlayBrowseModel *model);
+
+/* Service management */
+int zzplay_browse_model_add_service(ZZPlayBrowseModel *model,
+                                    const char *scheme,
+                                    const char *name,
+                                    const ZZPlayProvider *provider);
+int zzplay_browse_model_select_service(ZZPlayBrowseModel *model, uint32_t index,
+                                       ZZPlayBrowseRequest *out_req);
+const ZZPlayBrowseServiceEntry *zzplay_browse_model_current_service(
+    const ZZPlayBrowseModel *model);
+
+/* Navigation and paging */
+int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
+                                     ZZPlayBrowseRequest *out_req);
+int zzplay_browse_model_back(ZZPlayBrowseModel *model,
+                             ZZPlayBrowseRequest *out_req);
+int zzplay_browse_model_can_back(const ZZPlayBrowseModel *model);
+
+int zzplay_browse_model_search(ZZPlayBrowseModel *model, const char *query,
+                               ZZPlayBrowseRequest *out_req);
+int zzplay_browse_model_request_more(ZZPlayBrowseModel *model,
+                                     ZZPlayBrowseRequest *out_req);
+
+/* Actions and selection */
+void zzplay_browse_model_set_selection(ZZPlayBrowseModel *model, int32_t index);
+void zzplay_browse_model_set_scroll(ZZPlayBrowseModel *model, uint32_t scroll);
+int zzplay_browse_model_can_play(const ZZPlayBrowseModel *model);
+int zzplay_browse_model_can_add(const ZZPlayBrowseModel *model);
+int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider);
+int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model);
+int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,
+                                  ZZPlayBrowseRequest *out_req);
+ZZPlayBrowseAction zzplay_browse_model_activate(ZZPlayBrowseModel *model,
+                                                int32_t index,
+                                                ZZPlayBrowseRequest *out_req);
+int zzplay_browse_model_format_uri(const ZZPlayBrowseModel *model,
+                                   int32_t index,
+                                   char *uri, size_t uri_size,
+                                   char *title, size_t title_size);
+
+/* Stop and generation */
+void zzplay_browse_model_stop(ZZPlayBrowseModel *model);
+
+/* Applying worker replies. Returns 1 if accepted, 0 if dropped. */
+int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
+                                    const ZZPlayBrowseReply *reply);
+
+#endif /* ZZPLAY_BROWSE_MODEL_H */

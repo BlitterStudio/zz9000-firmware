@@ -69,6 +69,7 @@ mkdir -p \
   "$PACKAGE_ROOT/Developer/FD" \
   "$PACKAGE_ROOT/Docs" \
   "$PACKAGE_ROOT/Examples" \
+  "$PACKAGE_ROOT/C/Providers" \
   "$PACKAGE_ROOT/Archives"
 
 copy_one() {
@@ -138,6 +139,7 @@ copy_one "build/zz9k-m68kbench" "C/zz9k-m68kbench"
 copy_one "build/zz9k-mp3" "C/zz9k-mp3"
 copy_one "build/zzplay" "C/ZZPlay"
 copy_one "amiga/icons/zzplay.info" "C/ZZPlay.info"
+copy_one "build/providers/radio.zzprov" "C/Providers/radio.zzprov"
 copy_one "amiga/icons/zzplay-project.info" "Docs/ZZPlay-project.info"
 copy_one "build/zz9k-mpega-smoke" "C/zz9k-mpega-smoke"
 copy_one "build/zz9k-jpeg" "C/zz9k-jpeg"

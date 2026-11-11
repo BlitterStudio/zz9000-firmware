@@ -27,6 +27,7 @@
 #include "zzplay-files.h"
 #include "zzplay-requester.h"
 #include "zzplay-http.h"
+#include "zzplay-browse.h"
 
 /* Program-wide library base ownership per plan. */
 struct GfxBase *GfxBase;
@@ -84,6 +85,7 @@ enum {
   MID_PROJECT = 1,
   MID_OPEN,
   MID_OPEN_URL,
+  MID_BROWSE,
   MID_ADD_FILES,
   MID_ADD_DRAWER,
   MID_LOAD_PLAYLIST,
@@ -1524,6 +1526,7 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
     { NM_TITLE, (CONST_STRPTR)"Project",       0, 0, 0, (APTR)MID_PROJECT },
     { NM_ITEM,  (CONST_STRPTR)"Open...",       (CONST_STRPTR)"O", 0, 0, (APTR)MID_OPEN },
     { NM_ITEM,  (CONST_STRPTR)"Open URL...",   (CONST_STRPTR)"U", 0, 0, (APTR)MID_OPEN_URL },
+    { NM_ITEM,  (CONST_STRPTR)"Browse...",     0, 0, 0, (APTR)MID_BROWSE },
     { NM_ITEM,  (CONST_STRPTR)"Add files...",  (CONST_STRPTR)"A", 0, 0, (APTR)MID_ADD_FILES },
     { NM_ITEM,  (CONST_STRPTR)"Add drawer...", 0, 0, 0, (APTR)MID_ADD_DRAWER },
     { NM_ITEM,  (CONST_STRPTR)"Load playlist...", (CONST_STRPTR)"L", 0, 0, (APTR)MID_LOAD_PLAYLIST },
@@ -1835,6 +1838,7 @@ void zzplay_gui_close(void)
 
   free_exec_list_nodes(&playlist_exec_list);
   drop_queue_free();
+  zzplay_browse_close();
 
   if (player_win && player_menus) {
     ClearMenuStrip(player_win);
@@ -1923,6 +1927,7 @@ uint32_t zzplay_gui_signal_mask(void)
     mask |= (1UL << app_port->mp_SigBit);
   }
   mask |= zzplay_requester_signal_mask();
+  mask |= zzplay_browse_signal_mask();
   return mask;
 }
 
@@ -1977,6 +1982,9 @@ void zzplay_gui_poll(void)
   if (zzplay_requester_take(&requester_result)) {
     apply_requester_result(ctl, pl, prefs, &requester_result);
     zzplay_requester_result_release(&requester_result);
+  }
+  if (zzplay_browse_is_open()) {
+    zzplay_browse_poll();
   }
   /* Cheap when idle: this runs on every pass of the playback loops. It
    * must look at the message queues themselves, not the signal bits - the
@@ -2337,6 +2345,9 @@ void zzplay_gui_poll(void)
                   break;
                 case MID_OPEN_URL:
                   open_url_window();
+                  break;
+                case MID_BROWSE:
+                  zzplay_browse_open(player_screen, ctl, pl);
                   break;
                 case MID_ADD_FILES:
                   start_requester(ZZPLAY_MODAL_ADD_FILES);

@@ -44,6 +44,9 @@
 #include "zzplay-tags.h"
 #include "zzplay-video.h"
 #include "zzplay-webm.h"
+#include "zzplay-provider.h"
+#include "zzplay-providers.h"
+#include "zzplay-host.h"
 
 
 #include <devices/timer.h>
@@ -3330,11 +3333,88 @@ static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
 {
   static ZZPlayStreamList streams;
   static char text[ZZPLAY_STREAMLIST_TEXT_MAX];
+  const ZZPlayProviderSlot *slot;
+  const char *item_id = NULL;
+  ZZPlayProviders *providers;
   ZZPlayFile *file;
   size_t len;
   uint32_t i;
 
   app->open_why[0] = '\0';
+  providers = zzplay_providers_shared();
+
+#if defined(__amigaos__) || defined(AMIGA)
+  if (providers->count == 0U && strstr(app->item_path, "://") != NULL &&
+      strncmp(app->item_path, "http://", 7) != 0 &&
+      strncmp(app->item_path, "https://", 8) != 0) {
+    char why[ZZPLAY_PROVIDER_ERROR_MAX];
+    why[0] = '\0';
+    (void)zzplay_providers_load(providers, why, sizeof(why));
+  }
+#endif
+
+  slot = zzplay_providers_for_uri(providers, app->item_path, &item_id);
+  if (slot != NULL && slot->provider != NULL) {
+    const ZZPlayProvider *p = slot->provider;
+    ZZPlayHostBinding binding;
+    char err[ZZPLAY_PROVIDER_ERROR_MAX];
+    ZZPlayResolved resolved;
+    void *ctx;
+    int res_ok;
+
+    err[0] = '\0';
+    zzplay_host_bind(&binding, p->scheme, zzplay_app_network_poll, app);
+    ctx = p->open ? p->open(&binding.table, err, sizeof(err)) : NULL;
+    if (!ctx) {
+      (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
+                     err[0] != '\0' ? err : "cannot open service");
+      return 0;
+    }
+
+    memset(&resolved, 0, sizeof(resolved));
+    err[0] = '\0';
+    res_ok = p->resolve ? p->resolve(ctx, item_id, &resolved, err, sizeof(err)) : 0;
+    if (p->close) {
+      p->close(ctx);
+    }
+
+    if (!res_ok) {
+      (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
+                     err[0] != '\0' ? err : "cannot resolve item");
+      return 0;
+    }
+
+    if (strlen(resolved.url) >= sizeof(app->item_path)) {
+      (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
+                     "resolved address is too long");
+      return 0;
+    }
+
+    strcpy(app->item_path, resolved.url);
+    if (resolved.title[0] != '\0') {
+      if ((uint32_t)app->playlist.current < app->playlist.count) {
+        zzplay_playlist_set_title(&app->playlist, (uint32_t)app->playlist.current,
+                                  resolved.title);
+        app->ctl.dirty |= ZZPLAY_DIRTY_PLAYLIST;
+      }
+      zzplay_controller_set_title(&app->ctl, resolved.title);
+    }
+  } else if (strstr(app->item_path, "://") != NULL &&
+             strncmp(app->item_path, "http://", 7) != 0 &&
+             strncmp(app->item_path, "https://", 8) != 0) {
+    char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
+    size_t n = 0U;
+    while (app->item_path[n] >= 'a' && app->item_path[n] <= 'z' &&
+           n + 1U < sizeof(scheme)) {
+      scheme[n] = app->item_path[n];
+      n++;
+    }
+    scheme[n] = '\0';
+    (void)snprintf(app->open_why, sizeof(app->open_why),
+                   "no installed service module handles %s:// addresses", scheme);
+    return 0;
+  }
+
   file = zzplay_file_open(app->item_path, 0);
   if (!file || !zzplay_streamlist_is_playlist(app->item_path)) {
     return file;
@@ -5455,6 +5535,7 @@ int main(int argc, char **argv)
   /* Closing the window records its final position in prefs, so it must
    * happen before the session is saved. */
   zzplay_gui_close();
+  zzplay_providers_unload_shared();
   if (app.player_mode) {
     app.prefs.volume = app.ctl.volume;
     app.prefs.repeat = app.ctl.repeat;

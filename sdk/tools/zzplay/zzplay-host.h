@@ -44,4 +44,11 @@ int zzplay_host_pref_set(const char *scheme, const char *key,
  * when it does not fit in `size` with its terminator. */
 uint32_t zzplay_host_url_escape(const char *in, char *out, uint32_t size);
 
+/* Pure text helpers for KEY=VALUE preferences parsing and updating.
+ * Keys contain letters, digits, and '_'. Values may contain '=' and spaces. */
+int zzplay_host_pref_text_get(const char *text, const char *key, char *out,
+                              uint32_t size);
+int zzplay_host_pref_text_set(const char *in_text, const char *key,
+                              const char *value, char *out, uint32_t out_size);
+
 #endif /* ZZPLAY_HOST_H */

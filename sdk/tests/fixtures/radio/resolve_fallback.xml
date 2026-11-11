@@ -1,0 +1,3 @@
+<result>
+  <station stationuuid="44444444-4444-4444-4444-444444444444" name="Fallback Radio" url="http://stream.example.org/fallback.mp3" url_resolved="" codec="MP3" bitrate="128" country="UK"></station>
+</result>

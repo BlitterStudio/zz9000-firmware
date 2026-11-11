@@ -1,0 +1,5 @@
+<result>
+  <station changeuuid="4af32abe-0c71-4ccf-94a8-62387cad17b2" stationuuid="11111111-1111-1111-1111-111111111111" name="Blasmusikradio" url="http://stream.laut.fm/blasmusik" url_resolved="http://resolved.laut.fm/blasmusik" codec="MP3" bitrate="128" country="Germany"></station>
+  <station changeuuid="74e2f753-ec87-402c-ad46-f4c78aec58c2" stationuuid="22222222-2222-2222-2222-222222222222" name="Radio Vorbis" url="http://stream.example.org/ogg" url_resolved="http://stream.example.org/ogg" codec="OGG" bitrate="160" country="Sweden"></station>
+  <station changeuuid="b1f5bbbc-3cb6-4637-a080-3a4a697d8251" stationuuid="33333333-3333-3333-3333-333333333333" name="Radio Capital" url="http://stream.capital.it/aac" url_resolved="http://stream.capital.it/aac" codec="AAC+" bitrate="122" country="Italy"></station>
+</result>

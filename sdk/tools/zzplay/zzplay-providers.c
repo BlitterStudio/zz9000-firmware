@@ -249,3 +249,19 @@ void zzplay_providers_unload(ZZPlayProviders *set)
 }
 
 #endif
+
+static ZZPlayProviders shared_providers;
+
+ZZPlayProviders *zzplay_providers_shared(void)
+{
+  return &shared_providers;
+}
+
+void zzplay_providers_unload_shared(void)
+{
+#if defined(__amigaos__) || defined(AMIGA)
+  zzplay_providers_unload(&shared_providers);
+#else
+  shared_providers.count = 0U;
+#endif
+}

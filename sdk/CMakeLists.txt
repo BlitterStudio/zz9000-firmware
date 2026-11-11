@@ -490,6 +490,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-audio.c
   tools/zzplay/zzplay-audio-clock.c
   tools/zzplay/zzplay-ax.c
+  tools/zzplay/zzplay-browse-model.c
   tools/zzplay/zzplay-controller.c
   tools/zzplay/zzplay-core.c
   tools/zzplay/zzplay-formats.c
@@ -498,6 +499,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-media.c
   tools/zzplay/zzplay-http.c
   tools/zzplay/zzplay-httpfile.c
+  tools/zzplay/zzplay-host.c
   tools/zzplay/zzplay-mp3-transport.c
   tools/zzplay/zzplay-options.c
   tools/zzplay/zzplay-path.c
@@ -560,6 +562,26 @@ add_executable(zzplay_providers_test
 )
 target_link_libraries(zzplay_providers_test PRIVATE zzplay_core)
 add_test(NAME zzplay_providers_test COMMAND zzplay_providers_test)
+
+add_executable(zzplay_host_test
+  tests/zzplay_host_test.c
+)
+target_link_libraries(zzplay_host_test PRIVATE zzplay_core)
+add_test(NAME zzplay_host_test COMMAND zzplay_host_test)
+
+add_executable(zzplay_provider_radio_test
+  tests/zzplay_provider_radio_test.c
+  tools/zzplay/providers/radio.c
+)
+target_link_libraries(zzplay_provider_radio_test PRIVATE zzplay_core)
+add_test(NAME zzplay_provider_radio_test COMMAND zzplay_provider_radio_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(zzplay_browse_test
+  tests/zzplay_browse_test.c
+)
+target_link_libraries(zzplay_browse_test PRIVATE zzplay_core)
+add_test(NAME zzplay_browse_test COMMAND zzplay_browse_test)
 
 add_executable(zzplay_webm_test
   tests/zzplay_webm_test.c

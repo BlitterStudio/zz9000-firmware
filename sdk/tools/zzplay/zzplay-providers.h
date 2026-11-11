@@ -68,4 +68,8 @@ uint32_t zzplay_providers_load(ZZPlayProviders *set, char *why,
 void zzplay_providers_unload(ZZPlayProviders *set);
 #endif
 
+/* Shared module set for the application, loaded on first need. */
+ZZPlayProviders *zzplay_providers_shared(void);
+void zzplay_providers_unload_shared(void);
+
 #endif /* ZZPLAY_PROVIDERS_H */
