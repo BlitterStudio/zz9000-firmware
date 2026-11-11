@@ -506,6 +506,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-sys.c
   tools/zzplay/zzplay-prefs.c
   tools/zzplay/zzplay-probe.c
+  tools/zzplay/zzplay-providers.c
   tools/zzplay/zzplay-stats.c
   tools/zzplay/zzplay-stream.c
   tools/zzplay/zzplay-streamlist.c
@@ -553,6 +554,12 @@ add_executable(zzplay_xml_test
 )
 target_link_libraries(zzplay_xml_test PRIVATE zzplay_core)
 add_test(NAME zzplay_xml_test COMMAND zzplay_xml_test)
+
+add_executable(zzplay_providers_test
+  tests/zzplay_providers_test.c
+)
+target_link_libraries(zzplay_providers_test PRIVATE zzplay_core)
+add_test(NAME zzplay_providers_test COMMAND zzplay_providers_test)
 
 add_executable(zzplay_webm_test
   tests/zzplay_webm_test.c

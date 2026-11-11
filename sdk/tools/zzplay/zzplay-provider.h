@@ -1,0 +1,158 @@
+/* The interface between ZZPlay and its service modules (Plex, internet
+ * radio, ...).
+ *
+ * A module is an AmigaOS hunk file in ZZPlay's Providers drawer whose
+ * first code is an entry function returning its ZZPlayProvider. ZZPlay
+ * checks the descriptor before calling anything, then hands the module a
+ * ZZPlayHost: the only services a module uses. A module never opens a
+ * library, socket or file itself, so it needs no startup code and no
+ * library bases.
+ *
+ * This is a public interface that outlives any one ZZPlay release:
+ * structures only grow at the end, each carries its size, and a new
+ * capability bumps ZZPLAY_PROVIDER_ABI only when an existing field
+ * changes meaning.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later */
+
+#ifndef ZZPLAY_PROVIDER_H
+#define ZZPLAY_PROVIDER_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define ZZPLAY_PROVIDER_ID 0x5A5A5056UL /* "ZZPV" */
+#define ZZPLAY_PROVIDER_ABI 1UL
+
+#define ZZPLAY_PROVIDER_URL_MAX 1168U
+#define ZZPLAY_PROVIDER_TEXT_MAX 96U
+#define ZZPLAY_PROVIDER_ERROR_MAX 128U
+
+/* What a browse row is. */
+#define ZZPLAY_ITEM_FOLDER 0U  /* opens another list */
+#define ZZPLAY_ITEM_TRACK 1U   /* a finite item */
+#define ZZPLAY_ITEM_STATION 2U /* a live stream */
+
+typedef struct ZZPlayProviderItem {
+  /* Module-defined, at most ZZPLAY_PROVIDER_TEXT_MAX - 1 bytes. A folder's
+   * id is passed back to list(); a playable item's id is stored in the
+   * playlist as "<scheme>://<id>" and passed back to resolve(). */
+  const char *id;
+  const char *title;
+  const char *subtitle;      /* artist and album, codec and bitrate, or "" */
+  uint32_t duration_ms;      /* 0 when unknown */
+  uint32_t kind;             /* ZZPLAY_ITEM_* */
+  uint32_t playable;         /* 0 for an item shown but not playable */
+} ZZPlayProviderItem;
+
+/* Receives list and search results. ZZPlay copies every string before
+ * item() returns. Return nonzero from item() to stop the listing. */
+typedef struct ZZPlayItemSink {
+  int (*item)(void *user, const ZZPlayProviderItem *item);
+  /* The number of items the whole list holds, when the service says. */
+  void (*total)(void *user, uint32_t total);
+  void *user;
+} ZZPlayItemSink;
+
+/* A playable item turned into something ZZPlay can open. */
+typedef struct ZZPlayResolved {
+  char url[ZZPLAY_PROVIDER_URL_MAX];   /* http:// or https:// */
+  char title[ZZPLAY_PROVIDER_TEXT_MAX];
+  uint32_t duration_ms;
+} ZZPlayResolved;
+
+/* A setting the module needs from the user, shown in the Browse window's
+ * settings form and stored in ENVARC:ZZPlay/<scheme>.prefs. */
+#define ZZPLAY_FIELD_TEXT 0U
+#define ZZPLAY_FIELD_SECRET 1U /* shown as dots */
+#define ZZPLAY_FIELD_NUMBER 2U
+
+typedef struct ZZPlayProviderField {
+  const char *key;      /* prefs key: letters, digits and '_' */
+  const char *label;
+  uint32_t kind;        /* ZZPLAY_FIELD_* */
+  uint32_t max_len;     /* longest value, excluding the terminator */
+} ZZPlayProviderField;
+
+/* XML element callback; see zzplay-xml.h for the scanner's behaviour. */
+typedef struct ZZPlayHostXmlAttr {
+  const char *name;
+  const char *value;
+} ZZPlayHostXmlAttr;
+
+typedef struct ZZPlayHostXmlHandler {
+  int (*start)(void *user, const char *name, const ZZPlayHostXmlAttr *attrs,
+               uint32_t count, int truncated);
+  int (*end)(void *user, const char *name);
+  void *user;
+} ZZPlayHostXmlHandler;
+
+/* Services ZZPlay offers a module. Every call runs in the process that
+ * called the module. */
+typedef struct ZZPlayHost {
+  uint32_t abi;               /* ZZPLAY_PROVIDER_ABI */
+  uint32_t size;              /* sizeof(ZZPlayHost) of the running ZZPlay */
+
+  void *(*alloc)(uint32_t size);       /* cleared memory, or NULL */
+  void (*free)(void *ptr);
+
+  /* GET `url`, sending `headers` (CRLF-terminated lines, or NULL) only to
+   * that URL's origin. Body bytes go to data(), which returns nonzero to
+   * stop early. Returns 1 when the body was delivered or data() stopped;
+   * 0 with a reason in `err` otherwise. `*status` is the final HTTP
+   * status, 0 when none arrived. Stop and Quit cancel the transfer. */
+  int (*http_get)(const char *url, const char *headers,
+                  int (*data)(void *user, const uint8_t *bytes,
+                              uint32_t len),
+                  void *user, int *status, char *err, uint32_t err_size);
+
+  /* A streaming XML scanner over the body bytes. */
+  void *(*xml_open)(const ZZPlayHostXmlHandler *handler);
+  /* Returns 1 once a handler asked to stop. */
+  int (*xml_feed)(void *xml, const char *data, uint32_t len);
+  void (*xml_close)(void *xml);
+  const char *(*xml_attr)(const ZZPlayHostXmlAttr *attrs, uint32_t count,
+                          const char *name);
+
+  /* Percent-encode `in` for a URL query; returns the length written, or
+   * 0 when it does not fit. */
+  uint32_t (*url_escape)(const char *in, char *out, uint32_t size);
+  /* snprintf. */
+  int (*format)(char *out, uint32_t size, const char *fmt, ...);
+
+  /* This module's settings: get returns 0 and "" for a missing key; set
+   * stores for this session and saves to ENVARC:. */
+  int (*pref_get)(const char *key, char *out, uint32_t size);
+  int (*pref_set)(const char *key, const char *value);
+} ZZPlayHost;
+
+typedef struct ZZPlayProvider {
+  uint32_t id;                /* ZZPLAY_PROVIDER_ID */
+  uint32_t abi;               /* ZZPLAY_PROVIDER_ABI the module was built for */
+  uint32_t size;              /* sizeof(ZZPlayProvider) the module was built with */
+  const char *scheme;         /* URI scheme and prefs name: "radio", "plex" */
+  const char *name;           /* shown in the service list */
+  const ZZPlayProviderField *fields;
+  uint32_t field_count;
+
+  /* Start a session with the current settings. Returns the module's
+   * context, or NULL with the reason in `err`. */
+  void *(*open)(const ZZPlayHost *host, char *err, uint32_t err_size);
+  void (*close)(void *ctx);
+  /* List folder `node` ("" for the service's top level): at most `count`
+   * items starting at `start`. Returns 1, or 0 with the reason. */
+  int (*list)(void *ctx, const char *node, uint32_t start, uint32_t count,
+              const ZZPlayItemSink *sink, char *err, uint32_t err_size);
+  /* Search the service. Returns 1, or 0 with the reason. */
+  int (*search)(void *ctx, const char *query, const ZZPlayItemSink *sink,
+                char *err, uint32_t err_size);
+  /* Turn a playable item's id into an address. Returns 1, or 0 with the
+   * reason (an unsupported codec, say). */
+  int (*resolve)(void *ctx, const char *item, ZZPlayResolved *out,
+                 char *err, uint32_t err_size);
+} ZZPlayProvider;
+
+/* The first code of a module's hunk file. */
+typedef const ZZPlayProvider *(*ZZPlayProviderEntry)(void);
+
+#endif /* ZZPLAY_PROVIDER_H */
