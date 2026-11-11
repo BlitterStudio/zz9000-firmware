@@ -7,10 +7,141 @@
 #include "zz9k/library.h"
 #include <string.h>
 
+#define ZZ9K_LIBRARY_BUSY_POLL_MICROS 250UL
+
 #if ZZ9K_LIBRARY_AMIGA
-#include <proto/dos.h>
+#include <devices/timer.h>
+#include <exec/memory.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
+#include <proto/timer.h>
+
+struct Device *TimerBase;
+
+static int zz9k_busy_poll_timer_open(ZZ9KLibrary *library)
+{
+  struct timerequest *request;
+
+  if (library->busy_poll_timer_request) {
+    return 1;
+  }
+  request = (struct timerequest *)AllocVec(sizeof(*request),
+                                           MEMF_PUBLIC | MEMF_CLEAR);
+  if (!request) {
+    return 0;
+  }
+  if (OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ,
+                 (struct IORequest *)request, 0) != 0) {
+    FreeVec(request);
+    return 0;
+  }
+  library->busy_poll_timer_request = request;
+  library->busy_poll_timer_base = (struct Device *)request->tr_node.io_Device;
+  TimerBase = library->busy_poll_timer_base;
+  return 1;
+}
+
+static void zz9k_busy_poll_timer_close(ZZ9KLibrary *library)
+{
+  if (!library->busy_poll_timer_request) {
+    return;
+  }
+  if (TimerBase == library->busy_poll_timer_base) {
+    TimerBase = 0;
+  }
+  CloseDevice((struct IORequest *)library->busy_poll_timer_request);
+  FreeVec(library->busy_poll_timer_request);
+  library->busy_poll_timer_request = 0;
+  library->busy_poll_timer_base = 0;
+}
+#else
+#include <time.h>
 #endif
+
+#if !ZZ9K_LIBRARY_AMIGA
+static uint32_t (*zz9k_busy_poll_clock_for_test)(void);
+static int zz9k_busy_poll_available_for_test = 1;
+
+void zz9k_set_busy_poll_clock_for_test(uint32_t (*clock_fn)(void))
+{
+  zz9k_busy_poll_clock_for_test = clock_fn;
+}
+
+void zz9k_set_busy_poll_available_for_test(int available)
+{
+  zz9k_busy_poll_available_for_test = available;
+}
+#endif
+
+/*
+ * A firmware mailbox reply normally arrives in about 6 us.  Poll for 250 us
+ * before yielding: this avoids a full 20 ms DOS tick for normal calls while
+ * keeping the shared Zorro bus busy for less than 1/80 of that tick.  The
+ * pause makes consecutive reads of the completion index less aggressive.
+ */
+static uint32_t zz9k_busy_poll_now(ZZ9KLibrary *library)
+{
+#if ZZ9K_LIBRARY_AMIGA
+  struct EClockVal clock;
+
+  TimerBase = library->busy_poll_timer_base;
+  (void)ReadEClock(&clock);
+  return clock.ev_lo;
+#else
+  (void)library;
+  if (zz9k_busy_poll_clock_for_test) {
+    return zz9k_busy_poll_clock_for_test();
+  }
+  return (uint32_t)((clock() * 1000000UL) / CLOCKS_PER_SEC);
+#endif
+}
+
+static int zz9k_busy_poll_expired(ZZ9KLibrary *library, uint32_t start)
+{
+#if ZZ9K_LIBRARY_AMIGA
+  struct EClockVal clock;
+  uint32_t frequency;
+  uint32_t ticks;
+
+  TimerBase = library->busy_poll_timer_base;
+  frequency = ReadEClock(&clock);
+  ticks = (frequency * ZZ9K_LIBRARY_BUSY_POLL_MICROS + 999999UL) /
+          1000000UL;
+  if (ticks == 0U) {
+    ticks = 1U;
+  }
+  return (uint32_t)(clock.ev_lo - start) >= ticks;
+#else
+  return (uint32_t)(zz9k_busy_poll_now(library) - start) >=
+         ZZ9K_LIBRARY_BUSY_POLL_MICROS;
+#endif
+}
+
+static void zz9k_busy_poll_pause(void)
+{
+#if ZZ9K_LIBRARY_AMIGA
+  volatile uint32_t spin;
+
+  for (spin = 0; spin < 64U; spin++) {
+  }
+#endif
+}
+
+static int zz9k_busy_poll_begin(ZZ9KLibrary *library, uint32_t *start)
+{
+#if ZZ9K_LIBRARY_AMIGA
+  if (!zz9k_busy_poll_timer_open(library)) {
+    return 0;
+  }
+#else
+  if (!zz9k_busy_poll_available_for_test) {
+    return 0;
+  }
+#endif
+  *start = zz9k_busy_poll_now(library);
+  return 1;
+}
+
 
 static int zz9k_library_has_context(const ZZ9KLibrary *library)
 {
@@ -133,6 +264,12 @@ static int zz9k_dispatch_reply(ZZ9KLibrary *library,
   return ZZ9K_STATUS_OK;
 }
 
+static int zz9k_dispatch_completion(void *user_data,
+                                    const ZZ9KMailboxEntry *reply)
+{
+  return zz9k_dispatch_reply((ZZ9KLibrary *)user_data, reply);
+}
+
 void ZZ9KInit(ZZ9KLibrary *library)
 {
   if (library) {
@@ -159,6 +296,7 @@ int ZZ9KOpen(ZZ9KLibrary *library)
   library->ctx = ctx;
   library->owns_context = 1;
   library->pending_head = 0;
+  zz9k_set_completion_dispatcher(ctx, zz9k_dispatch_completion, library);
   return ZZ9K_STATUS_OK;
 }
 
@@ -169,9 +307,16 @@ void ZZ9KClose(ZZ9KLibrary *library)
   }
 
   zz9k_cancel_pending(library);
-  if (library->ctx && library->owns_context) {
-    zz9k_close(library->ctx);
+  if (library->ctx) {
+    zz9k_set_completion_dispatcher(library->ctx, 0, 0);
+    if (library->owns_context) {
+      zz9k_close(library->ctx);
+    }
   }
+
+#if ZZ9K_LIBRARY_AMIGA
+  zz9k_busy_poll_timer_close(library);
+#endif
 
   library->ctx = 0;
   library->owns_context = 0;
@@ -190,6 +335,7 @@ int ZZ9KAttachContext(ZZ9KLibrary *library, ZZ9KContext *ctx,
   library->ctx = ctx;
   library->owns_context = take_ownership ? 1 : 0;
   library->pending_head = 0;
+  zz9k_set_completion_dispatcher(ctx, zz9k_dispatch_completion, library);
   return ZZ9K_STATUS_OK;
 }
 
@@ -241,6 +387,9 @@ int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
 {
   uint32_t request_id;
   uint32_t ticks;
+  uint32_t busy_start;
+  int busy_polling;
+  int busy_expired;
   int status;
 
   if (!zz9k_library_has_context(library) || !request || !reply) {
@@ -251,6 +400,9 @@ int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
   if (status != ZZ9K_STATUS_QUEUED) {
     return status;
   }
+
+  busy_polling = 0;
+  busy_expired = 0;
 
   for (ticks = 0;;) {
     status = zz9k_poll(library->ctx, reply);
@@ -268,13 +420,28 @@ int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
     if (status != ZZ9K_STATUS_BUSY) {
       return status;
     }
-    if (ticks++ == timeout_ticks) {
+    if (ticks == timeout_ticks) {
       return ZZ9K_STATUS_TIMEOUT;
     }
-    status = zz9k_wait_for_transport_event(library);
-    if (status != ZZ9K_STATUS_OK) {
-      return status;
+    if (!busy_polling) {
+      if (!busy_expired && zz9k_busy_poll_begin(library, &busy_start)) {
+        busy_polling = 1;
+      } else {
+        busy_expired = 0;
+        ticks++;
+        status = zz9k_wait_for_transport_event(library);
+        if (status != ZZ9K_STATUS_OK) {
+          return status;
+        }
+      }
+    } else if (zz9k_busy_poll_expired(library, busy_start)) {
+      /* A reply can land between the last poll and the expiry check:
+       * poll once more before sleeping. */
+      busy_polling = 0;
+      busy_expired = 1;
+      continue;
     }
+    zz9k_busy_poll_pause();
   }
 }
 
@@ -385,6 +552,7 @@ int ZZ9KWaitAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async,
 {
   uint32_t polls;
   uint32_t completed;
+  uint32_t busy_start;
   int status;
 
   if (polls_run) {
@@ -419,6 +587,38 @@ int ZZ9KWaitAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async,
       return ZZ9K_STATUS_BAD_REQUEST;
     }
     if (completed == 0 && polls < timeout_polls) {
+      if (zz9k_busy_poll_begin(library, &busy_start)) {
+        while (!zz9k_busy_poll_expired(library, busy_start)) {
+          zz9k_busy_poll_pause();
+          completed = 0;
+          status = ZZ9KPoll(library, 1, &completed);
+          if (status != ZZ9K_STATUS_OK) {
+            return status;
+          }
+          if (async->completed) {
+            return async->status;
+          }
+          if (!async->queued) {
+            return ZZ9K_STATUS_BAD_REQUEST;
+          }
+        }
+      }
+      for (;;) {
+        completed = 0;
+        status = ZZ9KPoll(library, 1, &completed);
+        if (status != ZZ9K_STATUS_OK) {
+          return status;
+        }
+        if (async->completed) {
+          return async->status;
+        }
+        if (!async->queued) {
+          return ZZ9K_STATUS_BAD_REQUEST;
+        }
+        if (completed == 0U) {
+          break;
+        }
+      }
       status = zz9k_wait_for_transport_event(library);
       if (status != ZZ9K_STATUS_OK) {
         return status;
@@ -436,6 +636,7 @@ int ZZ9KWaitAsyncBatch(ZZ9KLibrary *library, ZZ9KAsyncRequest *asyncs,
   uint32_t done;
   uint32_t polls;
   uint32_t poll_completed;
+  uint32_t busy_start;
   int status;
 
   if (completed) {
@@ -482,6 +683,46 @@ int ZZ9KWaitAsyncBatch(ZZ9KLibrary *library, ZZ9KAsyncRequest *asyncs,
       return ZZ9K_STATUS_BAD_REQUEST;
     }
     if (poll_completed == 0 && polls < timeout_polls) {
+      if (zz9k_busy_poll_begin(library, &busy_start)) {
+        while (!zz9k_busy_poll_expired(library, busy_start)) {
+          zz9k_busy_poll_pause();
+          poll_completed = 0;
+          status = ZZ9KPoll(library, 1, &poll_completed);
+          if (status != ZZ9K_STATUS_OK) {
+            return status;
+          }
+          done = zz9k_count_batch_completed(asyncs, count);
+          if (completed) {
+            *completed = done;
+          }
+          if (done == count) {
+            return ZZ9K_STATUS_OK;
+          }
+          if (!zz9k_batch_waitable(asyncs, count)) {
+            return ZZ9K_STATUS_BAD_REQUEST;
+          }
+        }
+      }
+      for (;;) {
+        poll_completed = 0;
+        status = ZZ9KPoll(library, 1, &poll_completed);
+        if (status != ZZ9K_STATUS_OK) {
+          return status;
+        }
+        done = zz9k_count_batch_completed(asyncs, count);
+        if (completed) {
+          *completed = done;
+        }
+        if (done == count) {
+          return ZZ9K_STATUS_OK;
+        }
+        if (!zz9k_batch_waitable(asyncs, count)) {
+          return ZZ9K_STATUS_BAD_REQUEST;
+        }
+        if (poll_completed == 0U) {
+          break;
+        }
+      }
       status = zz9k_wait_for_transport_event(library);
       if (status != ZZ9K_STATUS_OK) {
         return status;

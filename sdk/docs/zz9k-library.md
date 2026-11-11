@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 35 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 36 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -352,6 +352,13 @@ Use high-level wrappers such as `ZZ9KQueryCaps()`, `ZZ9KPing()`,
 `ZZ9KCryptoStream()`, `ZZ9KCryptoStreamBatch()`, `ZZ9KCryptoAead()`, and
 `ZZ9KCryptoAeadBatch()` for normal calls. The resident library serializes
 access to the shared mailbox context.
+
+For an empty completion ring, synchronous calls poll its producer index for up
+to 250 microseconds before yielding through the existing event wait or DOS
+tick. Firmware normally answers in about 6 microseconds, so this avoids a
+tick-scale latency for short calls while keeping the held mailbox semaphore and
+the existing timeout tick budget unchanged. Long-running operations retain the
+same wait and timeout behavior.
 
 ```c
 ZZ9KCaps caps;
@@ -1832,6 +1839,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 32 | `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION` | `ZZ9KImageAnimationFrameNext()`, Present, Retire, and Restart |
 | 33 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX` | `ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX` (`-348`); older firmware returns `ZZ9K_STATUS_UNSUPPORTED`, with no implicit MP3-only fallback |
 | 35 | `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT` | `ZZ9KAppOpen`, load/start/stop/status, 32-byte message rings, VBlank lease, and close |
+| 36 | None | Synchronous completion waits poll for up to 250 microseconds before their existing event or DOS-tick wait. |
 
 ### Async submission and wait helpers
 

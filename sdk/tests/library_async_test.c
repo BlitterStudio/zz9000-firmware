@@ -51,6 +51,86 @@ struct DrainEventState {
   int waited_with_completion_queued;
 };
 
+
+struct BusyPollState {
+  struct TestMailbox *mailbox;
+  uint32_t now;
+  uint32_t clock_calls;
+  uint32_t wait_calls;
+  int complete_during_poll;
+  uint32_t complete_on_clock_call;
+};
+
+static void prepare_completion_at(struct TestMailbox *mailbox,
+                                  uint32_t index, uint32_t request_id,
+                                  uint16_t opcode, uint16_t status,
+                                  uint16_t payload_len);
+struct DeadlineDrainState {
+  struct TestMailbox *mailbox;
+  ZZ9KAsyncRequest *asyncs;
+  uint32_t count;
+  uint32_t now;
+  uint32_t clock_calls;
+  uint32_t wait_calls;
+};
+
+static struct DeadlineDrainState *deadline_drain_state;
+
+static uint32_t deadline_drain_clock(void)
+{
+  struct DeadlineDrainState *state = deadline_drain_state;
+  uint32_t i;
+
+  state->clock_calls++;
+  if (state->clock_calls == 4U) {
+    for (i = 0; i < state->count; i++) {
+      prepare_completion_at(state->mailbox, i, state->asyncs[i].request_id,
+                            ZZ9K_OP_PING, ZZ9K_STATUS_OK, 0U);
+    }
+  }
+  state->now += 100U;
+  return state->now - 100U;
+}
+
+static int count_deadline_wait(ZZ9KLibrary *library, void *user_data)
+{
+  struct DeadlineDrainState *state = (struct DeadlineDrainState *)user_data;
+
+  (void)library;
+  state->wait_calls++;
+  return ZZ9K_STATUS_OK;
+}
+
+void zz9k_set_busy_poll_clock_for_test(uint32_t (*clock_fn)(void));
+void zz9k_set_busy_poll_available_for_test(int available);
+
+static void prepare_completion(struct TestMailbox *mailbox,
+                               uint32_t request_id, uint16_t opcode,
+                               uint16_t status, uint16_t payload_len);
+static struct BusyPollState *busy_poll_state;
+
+static uint32_t busy_poll_clock(void)
+{
+  struct BusyPollState *state = busy_poll_state;
+
+  state->clock_calls++;
+  if ((state->complete_during_poll && state->clock_calls == 2U) ||
+      (state->complete_on_clock_call != 0U &&
+       state->clock_calls == state->complete_on_clock_call)) {
+    prepare_completion(state->mailbox, 1U, ZZ9K_OP_PING, ZZ9K_STATUS_OK, 0U);
+  }
+  state->now += 100U;
+  return state->now - 100U;
+}
+
+static int count_event_wait(ZZ9KLibrary *library, void *user_data)
+{
+  struct BusyPollState *state = (struct BusyPollState *)user_data;
+
+  (void)library;
+  state->wait_calls++;
+  return ZZ9K_STATUS_OK;
+}
 static void init_mailbox(struct TestMailbox *mailbox)
 {
   memset(mailbox, 0, sizeof(*mailbox));
@@ -773,6 +853,9 @@ static int test_crypto_hash_batch_uses_library_context(void)
   ZZ9KLibrary library;
   ZZ9KCryptoHashDesc descs[2];
   ZZ9KCryptoResult results[2];
+  ZZ9KAsyncRequest async;
+  ZZ9KRequest async_request;
+  struct CallbackState callback_state;
 
   init_mailbox(&mailbox);
   memset(descs, 0, sizeof(descs));
@@ -787,41 +870,55 @@ static int test_crypto_hash_batch_uses_library_context(void)
   descs[1].src_offset = 0x4000UL;
   descs[1].dst_offset = 32U;
 
-  prepare_completion_at(&mailbox, 0, 2, ZZ9K_OP_CRYPTO_HASH,
+
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&async_request, 0, sizeof(async_request));
+  async_request.entry.opcode = ZZ9K_OP_PING;
+  memset(&async, 0, sizeof(async));
+  memset(&callback_state, 0, sizeof(callback_state));
+  if (ZZ9KCallAsync(&library, &async, &async_request, async_callback,
+                    &callback_state) != ZZ9K_STATUS_QUEUED) {
+    return 2;
+  }
+  prepare_completion_at(&mailbox, 0U, async.request_id, ZZ9K_OP_PING,
+                        ZZ9K_STATUS_OK, 0U);
+  prepare_completion_at(&mailbox, 1U, 3U, ZZ9K_OP_CRYPTO_HASH,
                         ZZ9K_STATUS_OK, sizeof(ZZ9KCryptoResultPayload));
-  zz9k_put_be32(mailbox.completion_ring[0].user_cookie, 1U);
-  zz9k_put_be32(&mailbox.completion_ring[0].payload[0], 32U);
-  zz9k_put_be32(&mailbox.completion_ring[0].payload[4],
-                ZZ9K_CRYPTO_HASH_SHA256);
-  zz9k_put_be32(&mailbox.completion_ring[0].payload[8],
-                ZZ9K_CRYPTO_HASH_FLAG_HMAC);
-  prepare_completion_at(&mailbox, 1, 1, ZZ9K_OP_CRYPTO_HASH,
-                        ZZ9K_STATUS_OK, sizeof(ZZ9KCryptoResultPayload));
-  zz9k_put_be32(mailbox.completion_ring[1].user_cookie, 0U);
+  zz9k_put_be32(mailbox.completion_ring[1].user_cookie, 1U);
   zz9k_put_be32(&mailbox.completion_ring[1].payload[0], 32U);
   zz9k_put_be32(&mailbox.completion_ring[1].payload[4],
                 ZZ9K_CRYPTO_HASH_SHA256);
   zz9k_put_be32(&mailbox.completion_ring[1].payload[8],
                 ZZ9K_CRYPTO_HASH_FLAG_HMAC);
-
-  ZZ9KInit(&library);
-  if (attach_library(&library, &mailbox) != 0) return 1;
+  prepare_completion_at(&mailbox, 2U, 2U, ZZ9K_OP_CRYPTO_HASH,
+                        ZZ9K_STATUS_OK, sizeof(ZZ9KCryptoResultPayload));
+  zz9k_put_be32(mailbox.completion_ring[2].user_cookie, 0U);
+  zz9k_put_be32(&mailbox.completion_ring[2].payload[0], 32U);
+  zz9k_put_be32(&mailbox.completion_ring[2].payload[4],
+                ZZ9K_CRYPTO_HASH_SHA256);
+  zz9k_put_be32(&mailbox.completion_ring[2].payload[8],
+                ZZ9K_CRYPTO_HASH_FLAG_HMAC);
 
   memset(results, 0, sizeof(results));
   if (ZZ9KCryptoHashBatch(&library, descs, results, 2U, 2U,
                           ZZ9K_DEFAULT_TIMEOUT_TICKS) != ZZ9K_STATUS_OK) {
     return 2;
   }
-  if (zz9k_get_be16(mailbox.request_ring[0].opcode) !=
+  if (zz9k_get_be16(mailbox.request_ring[1].opcode) !=
       ZZ9K_OP_CRYPTO_HASH) {
     return 3;
   }
-  if (zz9k_get_be32(mailbox.request_ring[1].user_cookie) != 1U) {
+  if (zz9k_get_be32(mailbox.request_ring[2].user_cookie) != 1U) {
     return 4;
   }
   if (results[0].bytes_written != 32U ||
       results[1].bytes_written != 32U) {
     return 5;
+  }
+  if (!async.completed || async.status != ZZ9K_STATUS_OK ||
+      callback_state.called != 1) {
+    return 6;
   }
 
   ZZ9KClose(&library);
@@ -1127,6 +1224,37 @@ static int test_cancel_async_completes_locally_and_ignores_late_reply(void)
   ZZ9KClose(&library);
   return 0;
 }
+static int test_completion_before_cancel_is_reclaimable(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KAsyncRequest async;
+  ZZ9KRequest request;
+  uint32_t completed;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  memset(&async, 0, sizeof(async));
+  status = ZZ9KCallAsync(&library, &async, &request, 0, 0);
+  if (status != ZZ9K_STATUS_QUEUED) return 2;
+  prepare_completion(&mailbox, async.request_id, ZZ9K_OP_PING,
+                     ZZ9K_STATUS_OK, 0);
+  completed = 0;
+  status = ZZ9KPoll(&library, 1U, &completed);
+  if (status != ZZ9K_STATUS_OK || completed != 1U || !async.completed ||
+      async.queued) {
+    return 3;
+  }
+  status = ZZ9KCancelAsync(&library, &async);
+  if (status != ZZ9K_STATUS_BAD_REQUEST || !async.completed) return 4;
+  ZZ9KClose(&library);
+  return 0;
+}
+
 
 static int test_wait_async_times_out_without_consuming_request(void)
 {
@@ -1157,6 +1285,291 @@ static int test_wait_async_times_out_without_consuming_request(void)
   if (!async.queued || async.completed) return 5;
   if (count_pending(&library) != 1U) return 6;
 
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_sync_call_busy_polls_before_waiting(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct BusyPollState state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  state.complete_during_poll = 1;
+  busy_poll_state = &state;
+  zz9k_set_busy_poll_clock_for_test(busy_poll_clock);
+  if (ZZ9KSetEventWaiter(&library, count_event_wait, &state) !=
+      ZZ9K_STATUS_OK) {
+    return 2;
+  }
+
+  status = ZZ9KCall(&library, &request, &reply, 2U);
+  if (status != ZZ9K_STATUS_OK || reply.request_id != 1U ||
+      state.wait_calls != 0U || state.clock_calls < 2U) {
+    return 3;
+  }
+
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  busy_poll_state = &state;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  status = ZZ9KCall(&library, &request, &reply, 2U);
+  zz9k_set_busy_poll_clock_for_test(0);
+  busy_poll_state = 0;
+  if (status != ZZ9K_STATUS_TIMEOUT || state.wait_calls != 2U) {
+    return 4;
+  }
+
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_async_waits_busy_poll_before_slow_wait(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KAsyncRequest async;
+  ZZ9KRequest request;
+  struct BusyPollState state;
+  uint32_t polls;
+  uint32_t completed;
+  uint32_t queued;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  memset(&async, 0, sizeof(async));
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  state.complete_during_poll = 1;
+  busy_poll_state = &state;
+  zz9k_set_busy_poll_clock_for_test(busy_poll_clock);
+  if (ZZ9KSetEventWaiter(&library, count_event_wait, &state) !=
+      ZZ9K_STATUS_OK) {
+    return 2;
+  }
+
+  status = ZZ9KCallAsync(&library, &async, &request, 0, 0);
+  if (status != ZZ9K_STATUS_QUEUED) return 3;
+  status = ZZ9KWaitAsync(&library, &async, 2U, &polls);
+  if (status != ZZ9K_STATUS_OK || polls != 1U || state.wait_calls != 0U) {
+    return 4;
+  }
+
+  ZZ9KClose(&library);
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 5;
+  memset(&async, 0, sizeof(async));
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  state.complete_during_poll = 1;
+  busy_poll_state = &state;
+  if (ZZ9KSetEventWaiter(&library, count_event_wait, &state) !=
+      ZZ9K_STATUS_OK) {
+    return 6;
+  }
+  status = ZZ9KCallAsyncBatch(&library, &async, &request, 1U, 0, 0,
+                              &queued);
+  if (status != ZZ9K_STATUS_QUEUED || queued != 1U) return 7;
+  status = ZZ9KWaitAsyncBatch(&library, &async, 1U, 2U, &completed, &polls);
+  zz9k_set_busy_poll_clock_for_test(0);
+  busy_poll_state = 0;
+  if (status != ZZ9K_STATUS_OK || completed != 1U || polls != 1U ||
+      state.wait_calls != 0U) {
+    return 8;
+  }
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_async_wait_drains_deadline_completions(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KAsyncRequest asyncs[3];
+  ZZ9KRequest request;
+  ZZ9KRequest batch_requests[3];
+  struct DeadlineDrainState state;
+  uint32_t completed;
+  uint32_t polls;
+  uint32_t queued;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  memset(asyncs, 0, sizeof(asyncs));
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  state.asyncs = asyncs;
+  state.count = 1U;
+  deadline_drain_state = &state;
+  zz9k_set_busy_poll_clock_for_test(deadline_drain_clock);
+  if (ZZ9KSetEventWaiter(&library, count_deadline_wait, &state) !=
+      ZZ9K_STATUS_OK) {
+    return 2;
+  }
+  if (ZZ9KCallAsync(&library, &asyncs[0], &request, 0, 0) !=
+      ZZ9K_STATUS_QUEUED) {
+    return 3;
+  }
+  status = ZZ9KWaitAsync(&library, &asyncs[0], 2U, &polls);
+  if (status != ZZ9K_STATUS_OK || polls != 1U || state.wait_calls != 0U ||
+      !asyncs[0].completed) {
+    return 4;
+  }
+
+  ZZ9KClose(&library);
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 5;
+  memset(asyncs, 0, sizeof(asyncs));
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  state.asyncs = asyncs;
+  state.count = 3U;
+  deadline_drain_state = &state;
+  if (ZZ9KSetEventWaiter(&library, count_deadline_wait, &state) !=
+      ZZ9K_STATUS_OK) {
+    return 6;
+  }
+  batch_requests[0] = request;
+  batch_requests[1] = request;
+  batch_requests[2] = request;
+  status = ZZ9KCallAsyncBatch(&library, asyncs, batch_requests, 3U, 0, 0,
+                              &queued);
+  if (status != ZZ9K_STATUS_QUEUED || queued != 3U) return 7;
+  status = ZZ9KWaitAsyncBatch(&library, asyncs, 3U, 2U, &completed, &polls);
+  zz9k_set_busy_poll_clock_for_test(0);
+  deadline_drain_state = 0;
+  if (status != ZZ9K_STATUS_OK || completed != 3U || polls != 1U ||
+      state.wait_calls != 0U) {
+    return 8;
+  }
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_sync_call_rechecks_ring_at_busy_poll_expiry(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct BusyPollState state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  /* Clock call 1 starts the busy poll at 0; call 4 reads 300 us, past the
+   * 250 us budget, and the reply lands during that same read. */
+  state.complete_on_clock_call = 4U;
+  busy_poll_state = &state;
+  zz9k_set_busy_poll_clock_for_test(busy_poll_clock);
+  if (ZZ9KSetEventWaiter(&library, count_event_wait, &state) !=
+      ZZ9K_STATUS_OK) {
+    return 2;
+  }
+  status = ZZ9KCall(&library, &request, &reply, 2U);
+  zz9k_set_busy_poll_clock_for_test(0);
+  busy_poll_state = 0;
+  if (status != ZZ9K_STATUS_OK || state.wait_calls != 0U ||
+      state.clock_calls != 4U) {
+    return 3;
+  }
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_busy_poll_wrap_and_zero_timeout(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct BusyPollState state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  state.now = UINT32_MAX - 100U;
+  busy_poll_state = &state;
+  zz9k_set_busy_poll_clock_for_test(busy_poll_clock);
+  if (ZZ9KSetEventWaiter(&library, count_event_wait, &state) !=
+      ZZ9K_STATUS_OK) {
+    return 2;
+  }
+  status = ZZ9KCall(&library, &request, &reply, 1U);
+  if (status != ZZ9K_STATUS_TIMEOUT || state.wait_calls != 1U ||
+      (uint32_t)(state.now - (UINT32_MAX - 100U)) < 250U) {
+    return 3;
+  }
+
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  busy_poll_state = &state;
+  status = ZZ9KCall(&library, &request, &reply, 0U);
+  zz9k_set_busy_poll_clock_for_test(0);
+  busy_poll_state = 0;
+  if (status != ZZ9K_STATUS_TIMEOUT || state.wait_calls != 0U ||
+      state.clock_calls != 0U) {
+    return 4;
+  }
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_busy_poll_timer_failure_uses_slow_wait(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct BusyPollState state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_PING;
+  memset(&state, 0, sizeof(state));
+  state.mailbox = &mailbox;
+  if (ZZ9KSetEventWaiter(&library, count_event_wait, &state) !=
+      ZZ9K_STATUS_OK) {
+    return 2;
+  }
+  zz9k_set_busy_poll_available_for_test(0);
+  status = ZZ9KCall(&library, &request, &reply, 1U);
+  zz9k_set_busy_poll_available_for_test(1);
+  if (status != ZZ9K_STATUS_TIMEOUT || state.wait_calls != 1U) return 3;
   ZZ9KClose(&library);
   return 0;
 }
@@ -1256,6 +1669,48 @@ static int test_call_drains_foreign_completions_before_waiting(void)
       ZZ9KClose(&library);
       return 7;
     }
+  }
+
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_raw_call_routes_foreign_async_completion(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KAsyncRequest async;
+  ZZ9KRequest async_request;
+  ZZ9KRequest raw_request;
+  ZZ9KMailboxEntry reply;
+  struct CallbackState callback_state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&async_request, 0, sizeof(async_request));
+  async_request.entry.opcode = ZZ9K_OP_PING;
+  memset(&async, 0, sizeof(async));
+  memset(&callback_state, 0, sizeof(callback_state));
+  if (ZZ9KCallAsync(&library, &async, &async_request, async_callback,
+                    &callback_state) != ZZ9K_STATUS_QUEUED) {
+    return 2;
+  }
+  prepare_completion_at(&mailbox, 0U, async.request_id, ZZ9K_OP_PING,
+                        ZZ9K_STATUS_OK, 0U);
+  memset(&raw_request, 0, sizeof(raw_request));
+  raw_request.entry.opcode = ZZ9K_OP_PING;
+  raw_request.entry.request_id = async.request_id + 1U;
+  prepare_completion_at(&mailbox, 1U, raw_request.entry.request_id,
+                        ZZ9K_OP_PING, ZZ9K_STATUS_OK, 0U);
+
+  status = zz9k_call(library.ctx, &raw_request, &reply, 2U);
+  if (status != ZZ9K_STATUS_OK ||
+      reply.request_id != raw_request.entry.request_id || !async.completed ||
+      async.status != ZZ9K_STATUS_OK || callback_state.called != 1 ||
+      zz9k_get_be32(mailbox.descriptor.completion_head) != 2U) {
+    return 3;
   }
 
   ZZ9KClose(&library);
@@ -1572,14 +2027,28 @@ int main(void)
 
   result = test_cancel_async_completes_locally_and_ignores_late_reply();
   if (result) return 50 + result;
+  result = test_completion_before_cancel_is_reclaimable();
+  if (result) return 55 + result;
 
   result = test_wait_async_times_out_without_consuming_request();
   if (result) return 70 + result;
-  result = test_call_waits_for_late_completion();
+  result = test_sync_call_busy_polls_before_waiting();
   if (result) return 75 + result;
+  result = test_async_waits_busy_poll_before_slow_wait();
+  if (result) return 76 + result;
+  result = test_async_wait_drains_deadline_completions();
+  if (result) return 77 + result;
+  result = test_busy_poll_wrap_and_zero_timeout();
+  if (result) return 78 + result;
+  result = test_busy_poll_timer_failure_uses_slow_wait();
+  if (result) return 79 + result;
+  result = test_call_waits_for_late_completion();
+  if (result) return 80 + result;
 
   result = test_call_drains_foreign_completions_before_waiting();
   if (result) return 77 + result;
+  result = test_raw_call_routes_foreign_async_completion();
+  if (result) return 78 + result;
 
   result = test_wait_async_uses_event_waiter_between_polls();
   if (result) return 80 + result;
@@ -1592,6 +2061,9 @@ int main(void)
 
   result = test_wait_async_batch_completes_all_requests();
   if (result) return 110 + result;
+
+  result = test_sync_call_rechecks_ring_at_busy_poll_expiry();
+  if (result) return 120 + result;
 
   result = test_wait_async_batch_times_out_with_partial_completion();
   if (result) return 130 + result;

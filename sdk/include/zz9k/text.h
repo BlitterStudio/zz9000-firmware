@@ -42,6 +42,8 @@ static inline const char *zz9k_status_text(int status)
     return "module not installed";
   case ZZ9K_STATUS_MODULE_MISMATCH:
     return "module version mismatch";
+  case ZZ9K_STATUS_LIBRARY_TOO_OLD:
+    return "library-too-old";
   case ZZ9K_STATUS_INTERNAL_ERROR:
     return "internal-error";
   default:

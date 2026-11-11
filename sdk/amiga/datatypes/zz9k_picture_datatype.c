@@ -127,7 +127,6 @@ struct IntuitionBase *IntuitionBase;
 struct Library *UtilityBase;
 static ZZ9KCaps zz9k_picture_cached_caps;
 static ZZ9KServiceInfo zz9k_picture_cached_image_service;
-static ZZ9KContext *zz9k_picture_cached_ctx;
 static struct SignalSemaphore zz9k_picture_decode_semaphore;
 static uint8_t zz9k_picture_cached_caps_ready;
 static uint8_t zz9k_picture_cached_image_service_ready;
@@ -3747,41 +3746,18 @@ static uint32_t zz9k_picture_image_codec(ZZ9KPictureCodec codec)
   }
 }
 
-static int zz9k_picture_open_cached_context(ZZ9KContext **ctx)
+static int zz9k_picture_open_decode_context(ZZ9KContext **ctx)
 {
-  ZZ9KContext *opened;
-  int status;
-
   if (!ctx) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
 
   *ctx = 0;
-  if (zz9k_picture_cached_ctx) {
-    *ctx = zz9k_picture_cached_ctx;
-    return ZZ9K_STATUS_OK;
-  }
-
-  opened = 0;
-  status = zz9k_open(&opened);
-  if (status != ZZ9K_STATUS_OK) {
-    return status;
-  }
-  if (!opened) {
-    return ZZ9K_STATUS_INTERNAL_ERROR;
-  }
-
-  zz9k_picture_cached_ctx = opened;
-  *ctx = opened;
-  return ZZ9K_STATUS_OK;
+  return zz9k_open(ctx);
 }
 
-static void zz9k_picture_close_cached_context(void)
+static void zz9k_picture_clear_cached_capabilities(void)
 {
-  if (zz9k_picture_cached_ctx) {
-    zz9k_close(zz9k_picture_cached_ctx);
-    zz9k_picture_cached_ctx = 0;
-  }
   memset(&zz9k_picture_cached_caps, 0, sizeof(zz9k_picture_cached_caps));
   memset(&zz9k_picture_cached_image_service, 0,
          sizeof(zz9k_picture_cached_image_service));
@@ -6496,7 +6472,7 @@ static int zz9k_picture_decode_png_to_datatype_pixels(
   }
   decode_lock_held = 1;
 
-  if (zz9k_picture_open_cached_context(&ctx) != ZZ9K_STATUS_OK) {
+  if (zz9k_picture_open_decode_context(&ctx) != ZZ9K_STATUS_OK) {
     failure = "decode: zz9k_open failed";
     goto cleanup;
   }
@@ -6534,6 +6510,10 @@ static int zz9k_picture_decode_png_to_datatype_pixels(
   }
 
 cleanup:
+  if (ctx) {
+    zz9k_close(ctx);
+    ctx = 0;
+  }
   if (decode_lock_held) {
     zz9k_picture_decode_lock_release();
   }
@@ -6806,7 +6786,7 @@ static int zz9k_picture_decode_to_datatype_pixels(
   }
   decode_lock_held = 1;
 
-  if (zz9k_picture_open_cached_context(&ctx) != ZZ9K_STATUS_OK) {
+  if (zz9k_picture_open_decode_context(&ctx) != ZZ9K_STATUS_OK) {
     failure = "decode: zz9k_open failed";
     goto cleanup;
   }
@@ -7144,6 +7124,10 @@ cleanup:
   }
   if (decode_lock_held) {
     zz9k_picture_decode_lock_release();
+  }
+  if (ctx) {
+    zz9k_close(ctx);
+    ctx = 0;
   }
   if (scratch_allocated) {
     FreeMem(scratch_pixels, (ULONG)scratch_bytes);
@@ -8359,7 +8343,7 @@ static BPTR zz9k_picture_datatype_expunge(
     FreeClass(base->class_library.cl_Class);
     base->class_library.cl_Class = 0;
   }
-  zz9k_picture_close_cached_context();
+  zz9k_picture_clear_cached_capabilities();
   zz9k_picture_decode_semaphore_ready = 0U;
   zz9k_picture_datatype_close_system_bases();
 

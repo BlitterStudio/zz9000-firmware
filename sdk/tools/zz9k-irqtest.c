@@ -160,6 +160,12 @@ int main(void)
     return 1;
   }
 
+  if (zz9k_uses_library_transport(ctx)) {
+    puts("zz9k-irqtest: unavailable while using zz9k.library transport");
+    zz9k_close(ctx);
+    return 0;
+  }
+
   printf("zz9k-irqtest: querying capabilities\n");
   fflush(stdout);
   status = zz9k_query_caps(ctx, &caps);

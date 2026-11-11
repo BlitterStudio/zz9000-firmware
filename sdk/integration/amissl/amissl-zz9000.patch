@@ -12,7 +12,7 @@ index 39f0cbe97..2366eb43c 100644
  
  MASTEROBJS = $(BUILD_D)/amisslmaster_libinit.o \
               $(BUILD_D)/amisslmaster_library.o \
-@@ -476,6 +477,39 @@ $(BUILD_D)/%.o: $(SRC_D)/%.c
+@@ -476,6 +477,40 @@ $(BUILD_D)/%.o: $(SRC_D)/%.c
  	@echo "  CC $<"
  	@$(CC) $(CFLAGS) -c $< -o $@
  
@@ -22,6 +22,7 @@ index 39f0cbe97..2366eb43c 100644
 +ZZ9000_CFLAGS = -DZZ9K_PROVIDER_OFFLOAD \
 +                -I$(ZZ9000_SDK)/include \
 +                -I$(ZZ9000_SDK)/host/include \
++                -I$(ZZ9000_SDK)/amiga/include \
 +                -I$(ZZ9000_SDK)/tools \
 +                -I$(ZZ9000_SDK)/amiga/provider
 +ZZ9000_OBJS = $(BUILD_D)/zz9k_provider.o \

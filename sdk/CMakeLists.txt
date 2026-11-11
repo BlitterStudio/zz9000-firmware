@@ -14,6 +14,7 @@ target_include_directories(zz9k_host
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include
 )
 
 add_library(zz9k_fb_common STATIC

@@ -18,6 +18,8 @@ extern "C" {
 
 typedef struct ZZ9KContext ZZ9KContext;
 
+typedef int (*ZZ9KCompletionDispatcher)(void *user_data,
+                                        const ZZ9KMailboxEntry *reply);
 typedef struct ZZ9KBoard {
   uint32_t board_addr;
   uint32_t board_size;
@@ -438,6 +440,7 @@ int zz9k_read_diag_timing(ZZ9KContext *ctx, ZZ9KDiagTimingInfo *timing);
 int zz9k_read_diag_sched(ZZ9KContext *ctx, ZZ9KDiagSchedInfo *sched);
 int zz9k_read_diag_memory(ZZ9KContext *ctx, ZZ9KDiagMemoryInfo *memory);
 int zz9k_completion_irq_supported(ZZ9KContext *ctx);
+int zz9k_uses_library_transport(const ZZ9KContext *ctx);
 int zz9k_completion_irq_enable(ZZ9KContext *ctx, int enable);
 
 /*
@@ -484,6 +487,15 @@ void zz9k_expect_late_completion_irq(ZZ9KContext *ctx);
 
 int zz9k_completion_irq_ack(ZZ9KContext *ctx);
 int zz9k_interrupt_status(ZZ9KContext *ctx, uint16_t *status);
+/*
+ * Registers the owner that consumes asynchronous replies encountered by a
+ * synchronous ring consumer. The caller must serialize dispatch with the
+ * owner's pending-request state.
+ */
+void zz9k_set_completion_dispatcher(ZZ9KContext *ctx,
+                                    ZZ9KCompletionDispatcher dispatcher,
+                                    void *user_data);
+
 int zz9k_submit(ZZ9KContext *ctx, ZZ9KRequest *request,
                 uint32_t *request_id);
 int zz9k_submit_batch(ZZ9KContext *ctx, ZZ9KRequest *requests,

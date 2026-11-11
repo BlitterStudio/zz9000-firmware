@@ -15,6 +15,9 @@
 #include <exec/ports.h>
 #endif
 
+struct Device;
+struct timerequest;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,6 +52,10 @@ struct ZZ9KLibrary {
   ZZ9KAsyncRequest *pending_head;
   ZZ9KEventWaiter event_waiter;
   void *event_user_data;
+#if ZZ9K_LIBRARY_AMIGA
+  struct timerequest *busy_poll_timer_request;
+  struct Device *busy_poll_timer_base;
+#endif
 };
 
 #ifndef ZZ9K_LIBRARY_TYPES_ONLY
