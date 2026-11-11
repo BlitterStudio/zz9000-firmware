@@ -42,13 +42,11 @@ int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address,
     (void)bytes;
     return write && tile_writable ? ZZ_OK : ZZ_EFAULT;
 }
-int zzapp_svc_should_stop(void)
-{
-    return stop_during_host_alloc || stop_during_image_begin;
-}
 
 void zzapp_test_host_visible_allocated(void)
 {
+    if (stop_during_host_alloc)
+        zzapp_host_latch_stop(0U);
     zzapp_host_tick_at(1u);
     zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
 }
@@ -91,6 +89,7 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
     assert(begin->output_format == SDK_SURFACE_FORMAT_BGRA8888);
     image_begin_calls++;
     if (stop_during_image_begin) {
+        zzapp_host_latch_stop(0U);
         zzapp_host_tick_at(1u);
         zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
     }

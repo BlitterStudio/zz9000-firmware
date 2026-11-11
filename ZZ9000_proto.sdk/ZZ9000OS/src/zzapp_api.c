@@ -355,7 +355,7 @@ static void api_yield(void) { zzapp_api_enter(); zzapp_host_yield(); zzapp_api_l
 static int api_stop(void)
 {
     zzapp_api_touch();
-    return zzapp_svc_should_stop();
+    return zzapp_host_stop_requested();
 }
 static uint64_t api_time(void)
 {

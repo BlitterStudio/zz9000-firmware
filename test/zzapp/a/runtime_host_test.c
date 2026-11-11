@@ -14,7 +14,6 @@ static int api_wait_hook_called;
 static uint32_t service_poll_depth;
 static uint32_t service_poll_max_depth;
 static int tick_during_service_poll;
-static int stop_requested;
 static unsigned service_core = 1U;
 
 static void set_service_core(unsigned core)
@@ -23,10 +22,6 @@ static void set_service_core(unsigned core)
 }
 
 
-int zzapp_svc_should_stop(void)
-{
-    return stop_requested;
-}
 
 
 void zzapp_services_poll(void)
@@ -67,6 +62,72 @@ void zzapp_test_api_wait_hook(void)
 }
 
 
+#define TIMER_TICKS_PER_SECOND 333333343ULL
+#define HUNDRED_YEARS_SECONDS 3155760000ULL
+
+static uint64_t divided_ticks_to_us(uint64_t ticks)
+{
+    return (ticks / TIMER_TICKS_PER_SECOND) * 1000000ULL +
+           ((ticks % TIMER_TICKS_PER_SECOND) * 1000000ULL) /
+           TIMER_TICKS_PER_SECOND;
+}
+
+static void assert_ticks_to_us(uint64_t ticks)
+{
+    assert(zzapp_ticks_to_us(ticks) == divided_ticks_to_us(ticks));
+}
+
+static uint64_t next_random(uint64_t *state)
+{
+    uint64_t value = *state;
+
+    value ^= value << 7;
+    value ^= value >> 9;
+    value ^= value << 8;
+    *state = value;
+    return value;
+}
+
+static void test_ticks_to_us(void)
+{
+    const uint64_t limit = TIMER_TICKS_PER_SECOND * HUNDRED_YEARS_SECONDS;
+    uint64_t random = 0xd1b54a32d192ed03ULL;
+    uint64_t microsecond;
+    uint32_t i;
+
+    assert_ticks_to_us(0U);
+    assert_ticks_to_us(1U);
+    assert_ticks_to_us(limit - 1U);
+    assert_ticks_to_us(limit);
+    assert_ticks_to_us(UINT64_MAX);
+    /* Every result boundary in the first second, on both sides. */
+    for (microsecond = 0U; microsecond <= 1000000U; ++microsecond) {
+        uint64_t boundary =
+            (microsecond * TIMER_TICKS_PER_SECOND + 999999ULL) / 1000000ULL;
+        uint64_t delta;
+
+        for (delta = 0U; delta < 3U; ++delta) {
+            if (boundary >= delta)
+                assert_ticks_to_us(boundary - delta);
+            if (boundary <= limit - delta)
+                assert_ticks_to_us(boundary + delta);
+        }
+    }
+    for (i = 0U; i < 64U; ++i) {
+        uint64_t boundary = 1ULL << i;
+        uint64_t delta;
+
+        for (delta = 0U; delta < 3U; ++delta) {
+            if (boundary >= delta)
+                assert_ticks_to_us(boundary - delta);
+            if (boundary <= limit - delta)
+                assert_ticks_to_us(boundary + delta);
+        }
+    }
+    for (i = 0U; i < 100000U; ++i)
+        assert_ticks_to_us(next_random(&random) % (limit + 1U));
+}
+
 int main(void)
 {
     uint32_t card;
@@ -80,6 +141,7 @@ int main(void)
      * hardware FPSCR; it only verifies the baseline constant it supplies.
      */
     assert(ZZAPP_ENTRY_FPSCR == 0u);
+    test_ticks_to_us();
 
     zzapp_test_set_xtime(0);
     zzapp_test_mark_running();
@@ -275,6 +337,40 @@ int main(void)
     assert(zzapp_api_table()->time_us() == 0u);
     zzapp_host_tick_at(ZZAPP_APP_STALL_US);
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+
+    /* A fault stop is immediately visible to the app's polling API. */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    assert(zzapp_api_table()->should_stop() == 0);
+    zzapp_take_app_fault(ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
+    assert(zzapp_api_table()->should_stop() == 1);
+
+    /* Reset requests latch a stop until reset cleanup completes. */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    zzapp_on_amiga_reset();
+    assert(zzapp_api_table()->should_stop() == 1);
+    zzapp_worker_hook();
+    zzapp_test_mark_running();
+    assert(zzapp_api_table()->should_stop() == 0);
+
+    /* The timer watchdog follows the same latch path as a synchronous fault. */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    zzapp_host_tick_at(ZZAPP_APP_STALL_US);
+    assert(zzapp_api_table()->should_stop() == 1);
+
+    /* Core 0 latches a lease expiry without the app reading its window. */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    zzapp_test_mark_running();
+    zzapp_host_tick_at(ZZAPP_LEASE_US - 1U);
+    zzapp_test_set_xtime(ZZAPP_LEASE_US + 1U);
+    zzapp_core0_poll();
+    assert(zzapp_api_table()->should_stop() == 1);
 
     /*
      * Core 0 can read its clock just before core 1 stores a newer progress

@@ -27,6 +27,7 @@ void *zzapp_sbrk(int increment);
 int zzapp_host_mem_info(zzapp_mem_info *out);
 uint8_t *zzapp_test_stack_canary(void);
 uint32_t zzapp_test_fault_code(void);
+void zzapp_test_set_service_hook(void (*fn)(void));
 /* syscalls.o is linked for zzapp_sbrk; it reads this table pointer. */
 const zzapp_api *zzapp_api_ptr;
 
@@ -42,6 +43,10 @@ static uint32_t request_id;
 static unsigned app_runs;
 static int reset_running;
 static int damage_canary;
+static int direct_stop_running;
+static unsigned direct_stop_seen;
+static const zzapp_api *app_api;
+static int start_stop_written;
 
 static void put16(uint8_t *p, uint16_t v)
 {
@@ -107,6 +112,15 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     put32(sh + 36, 12);
 }
 
+static void write_start_stop_word(void)
+{
+    assert(start_stop_written == 0);
+    start_stop_written = 1;
+    zzapp_put_be32(launcher_window + ZZAPP_LIFE_OFF +
+                   ZZAPP_LIFE_STOP_OFF, 1U);
+    zzapp_test_set_service_hook(NULL);
+}
+
 static void app_entry(const void *api, int argc, char **argv)
 {
     const zzapp_api *table = (const zzapp_api *)api;
@@ -120,6 +134,7 @@ static void app_entry(const void *api, int argc, char **argv)
     /* The arena heap is newlib's alone: the table allocates host-visible
      * memory only, so it can never hand out bytes malloc already owns. */
     zzapp_api_ptr = table;
+    app_api = table;
     assert(table->alloc(64u, 8u, 0u) == NULL);
     table->heap_range(&heap_base, &heap_bytes);
     /* zzapp_sbrk keeps its span in app BSS, which a real launch starts
@@ -127,6 +142,16 @@ static void app_entry(const void *api, int argc, char **argv)
     if (app_runs == 1) {
         brk = zzapp_sbrk(64);
         assert(brk == heap_base && heap_bytes >= 64u);
+    }
+    if (direct_stop_running) {
+        zzapp_put_be32(launcher_window + ZZAPP_LIFE_OFF +
+                       ZZAPP_LIFE_STOP_OFF, 1U);
+        zzapp_host_tick_at(ZZAPP_TICK_US);
+        direct_stop_seen = (unsigned)table->should_stop();
+        assert(direct_stop_seen == 1U);
+        zzapp_host_tick_at(ZZAPP_TICK_US + ZZAPP_STOP_GRACE_US);
+        zzapp_worker_hook();
+        return;
     }
     if (damage_canary) {
         uint8_t *canary = zzapp_test_stack_canary();
@@ -244,6 +269,70 @@ int main(void)
     start_and_exit();
     assert(app_runs == 1u);
 
+    /* A launcher-only lifecycle write is observed on the next timer tick,
+     * then force-stopped after the normal grace without APP_STOP. */
+    direct_stop_running = 1;
+    load_hello();
+    {
+        uint8_t request[ZZAPP_START_REQ_BYTES] = { 0 };
+
+        assert(dispatch(ZZAPP_OP_START, request, sizeof(request)) ==
+               SDK_STATUS_OK);
+    }
+    direct_stop_running = 0;
+    assert(direct_stop_seen == 1U);
+    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+
+    /* APP_STOP before launch is latched by its firmware handler; real START
+     * processing cancels the pending launch.  The next launch clears it. */
+    {
+        uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+        uint16_t reply_bytes = 0U;
+        uint16_t reply_status;
+        uint8_t request[ZZAPP_START_REQ_BYTES] = { 0 };
+        unsigned before;
+
+        zzapp_boot_init();
+        zzapp_services_test_reset();
+        bind_window();
+        load_hello();
+        reply_status = zzapp_mailbox_dispatch(ZZAPP_OP_STOP, NULL, 0U, reply,
+                                               &reply_bytes, 1, ++request_id, 0);
+        assert(reply_status == SDK_STATUS_OK);
+        assert(app_api != NULL);
+        assert(app_api->should_stop() == 1);
+        before = app_runs;
+        (void)dispatch(ZZAPP_OP_START, request, sizeof(request));
+        assert(app_runs == before);
+        assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
+        load_hello();
+        start_and_exit();
+        assert(app_runs == before + 1U);
+    }
+    /* A lifecycle word written after the worker's watch but before the
+     * pending START is consumed is caught by START's own sampler. */
+    {
+        uint8_t request[ZZAPP_START_REQ_BYTES] = { 0 };
+        unsigned before;
+
+        zzapp_boot_init();
+        zzapp_services_test_reset();
+        bind_window();
+        load_hello();
+        before = app_runs;
+        start_stop_written = 0;
+        zzapp_test_set_service_hook(write_start_stop_word);
+        assert(dispatch(ZZAPP_OP_START, request, sizeof(request)) ==
+               SDK_STATUS_IO_ERROR);
+        assert(start_stop_written == 1);
+        assert(app_runs == before);
+        assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
+    }
+    zzapp_loader_release();
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    bind_window();
+
     /* A reset during a partial upload abandons it exactly once. */
     begin_load();
     zzapp_on_amiga_reset();
@@ -281,7 +370,7 @@ int main(void)
     for (unsigned i = 0; i < ZZAPP_PALETTE_BYTES; i++)
         assert(launcher_window[ZZAPP_PALETTE_OFF + i] == 0u);
     start_and_exit();
-    assert(app_runs == 2u);
+    assert(app_runs == 4u);
 
     /* A running app sees reset as an immediate forced stop, then can relaunch. */
     reset_running = 1;
@@ -298,7 +387,7 @@ int main(void)
     bind_window();
     load_hello();
     start_and_exit();
-    assert(app_runs == 4u);
+    assert(app_runs == 6u);
 
     /* A damaged stack canary force-stops with the documented data fault. */
     damage_canary = 1;
@@ -318,7 +407,7 @@ int main(void)
     /* A clean launch clears the fault latch before the fault-ack scenario. */
     load_hello();
     start_and_exit();
-    assert(app_runs == 6u);
+    assert(app_runs == 8u);
     /* A fault is reported once, then STATUS acknowledges it for a new launch. */
     zzapp_test_mark_running();
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
@@ -329,7 +418,7 @@ int main(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     load_hello();
     start_and_exit();
-    assert(app_runs == 7u);
+    assert(app_runs == 9u);
 
     zzapp_boot_init();
     zzapp_services_test_reset();

@@ -103,6 +103,7 @@ void zzapp_host_yield(void);
 void zzapp_host_yield_wait(void);
 void zzapp_host_sleep(uint32_t us);
 uint64_t zzapp_host_time_us(void);
+uint64_t zzapp_ticks_to_us(uint64_t ticks);
 void zzapp_loader_release(void);
 uint32_t zzapp_loader_state(void);
 void zzapp_loader_set_state(uint32_t state);
@@ -135,6 +136,9 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
 void zzapp_api_enter(void);
 void zzapp_api_leave(void);
 void zzapp_api_touch(void);
+int zzapp_host_stop_requested(void);
+void zzapp_host_latch_stop(uint32_t slot);
+void zzapp_host_clear_stop_requested(uint32_t slot);
 void zzapp_host_revoke_visible(void);
 void zzapp_host_commit_begin(void);
 void zzapp_host_commit_end(void);

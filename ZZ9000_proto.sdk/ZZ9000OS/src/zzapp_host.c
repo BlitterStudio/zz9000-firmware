@@ -136,6 +136,7 @@ struct zzapp_host_slot {
     uint64_t last_tick;
     volatile uint32_t watchdog_reason;
     uint32_t terminal_reason;
+    volatile uint32_t stop_requested;
     volatile uint32_t stop_pending;
     uint32_t pending_fault;
     uint32_t pending_pc;
@@ -159,10 +160,17 @@ static zzapp_kernel_t g_kernel;
 static int g_cold_restarts;
 static uint8_t g_api_parked[ZZAPP_AS_SLOT_COUNT];
 
-/* Host tests count service work only when the system thread runs it. */
+/* Host tests may inject work at the system-thread handoff point. */
 #ifdef ZZAPP_HOST_TEST
 static uint32_t g_test_service_calls;
-void scheduler_core1_service_from_app(void) { g_test_service_calls++; }
+static void (*g_test_service_hook)(void);
+void scheduler_core1_service_from_app(void)
+{
+    g_test_service_calls++;
+    if (g_test_service_hook)
+        g_test_service_hook();
+}
+void zzapp_test_set_service_hook(void (*fn)(void)) { g_test_service_hook = fn; }
 #endif
 
 static struct zzapp_coherent *coherent(uint32_t slot)
@@ -424,14 +432,74 @@ static uint64_t now_ticks(void)
 #endif
 }
 
+struct zzapp_u96 {
+    uint32_t high;
+    uint64_t low;
+};
+
+/* floor(2^64 * 1000000 / COUNTS_PER_SECOND), for the global timer's
+ * COUNTS_PER_SECOND = CPU clock / 2.  The assertion makes a clock change
+ * require a new reciprocal rather than silently skewing app time. */
+#define ZZAPP_TICKS_PER_US_RECIPROCAL 55340230616261966ULL
+#define ZZAPP_GLOBAL_TIMER_HZ 333333343U
+
+static uint64_t mul_hi_u64(uint64_t a, uint64_t b)
+{
+    uint64_t a0 = (uint32_t)a;
+    uint64_t a1 = a >> 32;
+    uint64_t b0 = (uint32_t)b;
+    uint64_t b1 = b >> 32;
+    uint64_t p00 = a0 * b0;
+    uint64_t p01 = a0 * b1;
+    uint64_t p10 = a1 * b0;
+    uint64_t p11 = a1 * b1;
+    uint64_t middle = (p00 >> 32) + (uint32_t)p01 + (uint32_t)p10;
+
+    return p11 + (p01 >> 32) + (p10 >> 32) + (middle >> 32);
+}
+
+static struct zzapp_u96 mul_u64_u32(uint64_t value, uint32_t multiplier)
+{
+    uint64_t low_product = (uint32_t)value * (uint64_t)multiplier;
+    uint64_t high_product = (value >> 32) * (uint64_t)multiplier +
+                            (low_product >> 32);
+    struct zzapp_u96 product;
+
+    product.high = (uint32_t)(high_product >> 32);
+    product.low = (high_product << 32) | (uint32_t)low_product;
+    return product;
+}
+
+static int u96_le(struct zzapp_u96 a, struct zzapp_u96 b)
+{
+    return a.high < b.high || (a.high == b.high && a.low <= b.low);
+}
+
+uint64_t zzapp_ticks_to_us(uint64_t ticks)
+{
+    uint64_t us = mul_hi_u64(ticks, ZZAPP_TICKS_PER_US_RECIPROCAL);
+    struct zzapp_u96 exact = mul_u64_u32(ticks, 1000000U);
+    struct zzapp_u96 next = mul_u64_u32(us + 1U, ZZAPP_GLOBAL_TIMER_HZ);
+
+    /*
+     * The truncated reciprocal is low by less than ticks / 2^64, hence by
+     * less than one for every uint64_t tick count.  `us` is therefore the
+     * exact quotient or one below it; this 96-bit comparison corrects only
+     * that latter case without a division.
+     */
+    if (u96_le(next, exact))
+        ++us;
+    return us;
+}
+
 static uint64_t ticks_to_us(uint64_t ticks)
 {
 #ifdef ZZAPP_HOST_TEST
     return ticks;
 #else
-    return (ticks / (uint64_t)COUNTS_PER_SECOND) * 1000000ULL +
-           ((ticks % (uint64_t)COUNTS_PER_SECOND) * 1000000ULL) /
-           (uint64_t)COUNTS_PER_SECOND;
+    _Static_assert(COUNTS_PER_SECOND == ZZAPP_GLOBAL_TIMER_HZ,
+                   "update ZZAPP_TICKS_PER_US_RECIPROCAL");
+    return zzapp_ticks_to_us(ticks);
 #endif
 }
 
@@ -475,6 +543,7 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
     host->card = card;
     host->mem = mem;
     host->owner = owner;
+    host->stop_requested = 0u;
     g_proc[slot].owner = owner;
     g_proc[slot].generation = generation;
     coh->running = 0;
@@ -589,10 +658,26 @@ void zzapp_note_progress(void)
     life_progress(now);
 }
 
+void zzapp_host_latch_stop(uint32_t slot)
+{
+    if (slot < ZZAPP_AS_SLOT_COUNT)
+        host_slot(slot)->stop_requested = 1u;
+}
+
+void zzapp_host_clear_stop_requested(uint32_t slot)
+{
+    if (slot < ZZAPP_AS_SLOT_COUNT)
+        host_slot(slot)->stop_requested = 0u;
+}
+
+int zzapp_host_stop_requested(void)
+{
+    return host_slot(current_slot())->stop_requested != 0u;
+}
+
 static int stop_requested(void)
 {
-    return coherent(current_slot())->reset_request ||
-           life_get32(ZZAPP_LIFE_STOP_OFF) != 0u || zzapp_svc_should_stop();
+    return zzapp_host_stop_requested();
 }
 
 /* Core 1 (service tick, faults) and core 0 (restart recovery) can both stop
@@ -646,6 +731,7 @@ static void request_stop(uint32_t slot, uint32_t fault, uint32_t pc,
     struct zzapp_host_slot *host = host_slot(slot);
     struct zzapp_coherent *coh = coherent(slot);
     uint32_t expected = 0u;
+    zzapp_host_latch_stop(slot);
 
     if (!__atomic_compare_exchange_n(&host->stop_pending, &expected, 2u, 0,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -810,10 +896,14 @@ static void service_tick_irq(uint64_t now)
             host->api_entered = host->last_tick;
     }
     host->last_tick = now;
+    /* ZZRun can set this host-visible word before its best-effort APP_STOP
+     * reaches firmware.  Sample it at the scheduler tick, never per SVC. */
+    if (life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
+        zzapp_host_latch_stop(slot);
     host->service_due = 1u;
     if (g_host_visible_commit_active[slot] || !coh->running)
         return;
-    if (coh->reset_request || life_get32(ZZAPP_LIFE_STOP_OFF) != 0u) {
+    if (coh->reset_request || host->stop_requested != 0u) {
         if (!host->stop_mark)
             host->stop_mark = now;
         if (coh->reset_request ||
@@ -842,9 +932,15 @@ static void service_watch_slot(uint64_t now)
     struct zzapp_coherent *coh = coherent(slot);
 
     check_stack_canary();
+    /* The worker runs once per service tick and visits every slot.  ZZRun can
+     * write this host-visible word even when its best-effort APP_STOP is
+     * dropped, so sample every valid slot here rather than only the app that
+     * received the timer interrupt. */
+    if (life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
+        zzapp_host_latch_stop(slot);
     if (g_host_visible_commit_active[slot])
         return;
-    if (coh->running && (coh->reset_request || stop_requested())) {
+    if (coh->running && stop_requested()) {
         if (!host->stop_mark)
             host->stop_mark = now;
         if (coh->reset_request ||
@@ -1457,6 +1553,7 @@ static void service_reset(uint32_t slot)
         publish_state(ZZAPP_ST_IDLE);
     }
     zzapp_services_on_reset();
+    zzapp_host_clear_stop_requested(slot);
     host->stop_mark = 0;
     host->fault_mark = 0;
     coherent_barrier();
@@ -1500,6 +1597,9 @@ void zzapp_worker_hook(void)
 #endif
     selected = current_slot();
     host = host_slot(selected);
+    if (host->state == ZZAPP_ST_LOADING &&
+        life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
+        zzapp_host_latch_stop(selected);
     if (host->state == ZZAPP_ST_LOADING && stop_requested()) {
         zzapp_services_cancel_start(ZZ_EIO);
         (void)zzapp_loader_abort();
@@ -1591,6 +1691,7 @@ void zzapp_core0_poll(void)
         if (running && host->state == ZZAPP_ST_RUNNING &&
             core1_stamp_age_us(&coh->heartbeat_seen) >= ZZAPP_LEASE_US) {
             host->terminal_reason = ZZAPP_END_LEASE;
+            zzapp_host_latch_stop(slot);
             life32(ZZAPP_LIFE_STOP_OFF, 1u);
         }
         if (running && age >= ZZAPP_WATCHDOG_US &&
@@ -1652,6 +1753,7 @@ void zzapp_on_amiga_reset(void)
         coherent(slot)->reset_ack = 0;
         coherent(slot)->reset_request = 1;
         host_slot(slot)->terminal_reason = ZZAPP_END_AMIGA_RESET;
+        zzapp_host_latch_stop(slot);
     }
     coherent_publish();
     wake_core1();
@@ -1701,6 +1803,7 @@ void zzapp_boot_init(void)
     zzapp_loader_memory_init();
     g_cold_restarts = 0;
 #ifdef ZZAPP_HOST_TEST
+    g_test_service_hook = NULL;
     g_test_service_calls = 0;
     memset(g_test_wait_registered, 0, sizeof(g_test_wait_registered));
 #endif

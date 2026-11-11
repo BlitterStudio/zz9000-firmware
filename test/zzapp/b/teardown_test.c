@@ -32,6 +32,7 @@ enum teardown_path {
     TEARDOWN_LEASE,
     TEARDOWN_AMIGA_RESET,
     TEARDOWN_CORE_RESTART,
+    TEARDOWN_DIRECT_STOP_PARKED,
 };
 
 static uint8_t windows[ZZAPP_SLOT_COUNT][ZZAPP_WINDOW_BYTES];
@@ -278,6 +279,20 @@ static void app_entry(const void *api, int argc, char **argv)
         zzapp_kernel_set_current_thread(-1);
         zzapp_on_core1_restart();
         break;
+    case TEARDOWN_DIRECT_STOP_PARKED:
+        /* The system thread is active while slot 1 waits.  ZZRun writes
+         * slot 1's lifecycle word directly, without APP_STOP. */
+        assert(zzapp_kernel_block(zzapp_runtime_kernel(), 1U) == 0);
+        zzapp_kernel_set_current_thread(-1);
+        select_test_slot(2U);
+        zzapp_put_be32(windows[1] + ZZAPP_LIFE_OFF + ZZAPP_LIFE_STOP_OFF, 1U);
+        zzapp_host_tick_at(ZZAPP_TICK_US);
+        zzapp_worker_hook();
+        assert(zzapp_runtime_kernel()->threads[1].state == ZZAPP_THREAD_BLOCKED);
+        zzapp_host_tick_at(ZZAPP_TICK_US + ZZAPP_STOP_GRACE_US);
+        zzapp_worker_hook();
+        assert(zzapp_runtime_kernel()->threads[1].state == ZZAPP_THREAD_STOPPED);
+        break;
     }
 }
 
@@ -341,6 +356,7 @@ static uint8_t expected_reason(enum teardown_path value)
         ZZAPP_END_LEASE,
         ZZAPP_END_AMIGA_RESET,
         ZZAPP_END_CORE_RESTART,
+        ZZAPP_END_FORCED,
     };
 
     return reasons[value];
@@ -420,7 +436,7 @@ int main(void)
 {
     enum teardown_path value;
 
-    for (value = TEARDOWN_EXIT; value <= TEARDOWN_CORE_RESTART; value++)
+    for (value = TEARDOWN_EXIT; value <= TEARDOWN_DIRECT_STOP_PARKED; value++)
         run_case(value);
     return 0;
 }

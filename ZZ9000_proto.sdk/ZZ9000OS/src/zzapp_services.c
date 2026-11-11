@@ -15,6 +15,10 @@
 #include "zzapp_runtime.h"
 void zzapp_host_yield_wait(void);
 void __attribute__((weak)) zzapp_status_observed(void) {}
+void __attribute__((weak)) zzapp_host_latch_stop(uint32_t slot)
+{
+	(void)slot;
+}
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
 #include "zzapp.h"
@@ -3757,6 +3761,7 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 			life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_FORCED);
 			return SDK_STATUS_OK;
 		}
+		zzapp_host_latch_stop(service_slot());
 		life_put(ZZAPP_LIFE_STOP_OFF, 1U);
 		return SDK_STATUS_OK;
 	case ZZAPP_OP_STATUS:
