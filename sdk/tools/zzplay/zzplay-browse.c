@@ -983,6 +983,8 @@ void zzplay_browse_poll(void)
                    DoubleClick(last_click_s, last_click_m, imsg_s, imsg_m)) {
           /* Double-click */
           ZZPlayBrowseAction act = zzplay_browse_model_activate(&browse_model, clicked, &poll_req);
+          /* A third click starts a new pair, as in the playlist. */
+          last_clicked_idx = -1;
 
           if (act == ZZPLAY_BROWSE_ACTION_ENTER_FOLDER) {
             browse_send(&poll_req, p);
