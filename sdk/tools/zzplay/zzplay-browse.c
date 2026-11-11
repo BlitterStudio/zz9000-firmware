@@ -87,6 +87,12 @@ static int last_fav_add = 0;
 static char poll_title[ZZPLAY_PLAYLIST_TITLE_MAX];
 static ULONG last_click_s = 0UL;
 static ULONG last_click_m = 0UL;
+/* The request waiting for the running one to be cancelled. */
+static ZZPlayBrowseRequest pending_req;
+static const ZZPlayProvider *pending_provider = NULL;
+static int have_pending = 0;
+/* Shown again once the list reloaded after a favourite changed. */
+static const char *reload_note = NULL;
 
 static void copy_string(char *dst, size_t dst_size, const char *src)
 {
@@ -169,6 +175,26 @@ static void update_status_text(const char *msg)
   GT_SetGadgetAttrs(status_gad, browse_win, NULL,
                     GTTX_Text, (ULONG)status_buf,
                     TAG_DONE);
+}
+
+/* The worker runs one request at a time. A new request (the user opened
+ * a folder, searched, went back) supersedes a running one: cancel that and
+ * send the new one once its reply, now stale, has come back. */
+static void browse_send(const ZZPlayBrowseRequest *req,
+                        const ZZPlayProvider *provider)
+{
+  if (!req || !provider) {
+    return;
+  }
+  if (!zzplay_browse_worker_active()) {
+    have_pending = 0;
+    (void)zzplay_browse_worker_send(req, provider);
+    return;
+  }
+  pending_req = *req;
+  pending_provider = provider;
+  have_pending = 1;
+  zzplay_browse_worker_cancel();
 }
 
 static void update_buttons(void)
@@ -497,7 +523,7 @@ static void __attribute__((noinline)) poll_settings(void)
         /* Reopen service */
         if (browse_model.current_service >= 0) {
           zzplay_browse_model_select_service(&browse_model, (uint32_t)browse_model.current_service, &req);
-          zzplay_browse_worker_send(&req, p);
+          browse_send(&req, p);
           rebuild_list_nodes();
           update_status_text("Reloading service...");
           update_buttons();
@@ -767,7 +793,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   if (browse_model.service_count > 0U && browse_model.current_service < 0) {
     ZZPlayBrowseRequest req;
     zzplay_browse_model_select_service(&browse_model, 0U, &req);
-    zzplay_browse_worker_send(&req, browse_model.services[0].provider);
+    browse_send(&req, browse_model.services[0].provider);
     update_status_text("Loading service...");
   }
 
@@ -847,25 +873,30 @@ void zzplay_browse_poll(void)
         browse_model.busy = 0;
         update_buttons();
       } else {
-        update_status_text(poll_worker_reply.fav_add ? "Added to favourites"
-                                                     : "Removed from favourites");
-        browse_model.saved_selection = browse_model.selection;
-        browse_model.generation++;
-        browse_model.busy = 1;
-        if (browse_model.is_search) {
-          poll_req.kind = ZZPLAY_BROWSE_REQ_SEARCH;
-          poll_req.generation = browse_model.generation;
-          copy_string(poll_req.scheme, sizeof(poll_req.scheme), svc ? svc->scheme : "");
-          copy_string(poll_req.query, sizeof(poll_req.query), browse_model.search_query);
-        } else {
-          poll_req.kind = ZZPLAY_BROWSE_REQ_LIST;
-          poll_req.generation = browse_model.generation;
-          copy_string(poll_req.scheme, sizeof(poll_req.scheme), svc ? svc->scheme : "");
-          copy_string(poll_req.node_id, sizeof(poll_req.node_id), browse_model.current_node);
-          poll_req.start = 0U;
-          poll_req.count = ZZPLAY_BROWSE_PAGE_SIZE;
+        reload_note = poll_worker_reply.fav_add ? "Added to favourites"
+                                                : "Removed from favourites";
+        update_status_text(reload_note);
+        /* Reload the list (the Favourites folder changes), unless the user
+         * has already asked for something else. */
+        if (!have_pending) {
+          browse_model.saved_selection = browse_model.selection;
+          browse_model.generation++;
+          browse_model.busy = 1;
+          if (browse_model.is_search) {
+            poll_req.kind = ZZPLAY_BROWSE_REQ_SEARCH;
+            poll_req.generation = browse_model.generation;
+            copy_string(poll_req.scheme, sizeof(poll_req.scheme), svc ? svc->scheme : "");
+            copy_string(poll_req.query, sizeof(poll_req.query), browse_model.search_query);
+          } else {
+            poll_req.kind = ZZPLAY_BROWSE_REQ_LIST;
+            poll_req.generation = browse_model.generation;
+            copy_string(poll_req.scheme, sizeof(poll_req.scheme), svc ? svc->scheme : "");
+            copy_string(poll_req.node_id, sizeof(poll_req.node_id), browse_model.current_node);
+            poll_req.start = 0U;
+            poll_req.count = ZZPLAY_BROWSE_PAGE_SIZE;
+          }
+          browse_send(&poll_req, p);
         }
-        zzplay_browse_worker_send(&poll_req, p);
         update_buttons();
       }
       zzplay_browse_worker_release_reply(&poll_worker_reply);
@@ -875,9 +906,16 @@ void zzplay_browse_poll(void)
 
       if (ok) {
         rebuild_list_nodes();
-        update_status_text(browse_model.status_message[0] ? browse_model.status_message : "");
+        update_status_text(browse_model.status_message[0]
+                               ? browse_model.status_message
+                               : (reload_note ? reload_note : ""));
+        reload_note = NULL;
         update_buttons();
       }
+    }
+    if (have_pending && !zzplay_browse_worker_active()) {
+      have_pending = 0;
+      (void)zzplay_browse_worker_send(&pending_req, pending_provider);
     }
   }
 
@@ -913,7 +951,7 @@ void zzplay_browse_poll(void)
           zzplay_browse_model_select_service(&browse_model, (uint32_t)code, &poll_req);
           svc = zzplay_browse_model_current_service(&browse_model);
           p = svc ? svc->provider : NULL;
-          zzplay_browse_worker_send(&poll_req, p);
+          browse_send(&poll_req, p);
           rebuild_list_nodes();
           update_status_text("Loading service...");
           update_buttons();
@@ -925,7 +963,7 @@ void zzplay_browse_poll(void)
         }
         if (query && query[0] != '\0') {
           if (zzplay_browse_model_search(&browse_model, query, &poll_req)) {
-            zzplay_browse_worker_send(&poll_req, p);
+            browse_send(&poll_req, p);
             rebuild_list_nodes();
             update_status_text("Searching...");
             update_buttons();
@@ -937,7 +975,7 @@ void zzplay_browse_poll(void)
         if (clicked == (int32_t)browse_model.item_count && browse_model.has_more) {
           /* Clicked More row */
           if (zzplay_browse_model_request_more(&browse_model, &poll_req)) {
-            zzplay_browse_worker_send(&poll_req, p);
+            browse_send(&poll_req, p);
             update_status_text("Loading more items...");
             update_buttons();
           }
@@ -947,7 +985,7 @@ void zzplay_browse_poll(void)
           ZZPlayBrowseAction act = zzplay_browse_model_activate(&browse_model, clicked, &poll_req);
 
           if (act == ZZPLAY_BROWSE_ACTION_ENTER_FOLDER) {
-            zzplay_browse_worker_send(&poll_req, p);
+            browse_send(&poll_req, p);
             rebuild_list_nodes();
             update_status_text("Opening folder...");
             update_buttons();
@@ -1004,13 +1042,14 @@ void zzplay_browse_poll(void)
         if (zzplay_browse_model_can_favourite(&browse_model)) {
           if (zzplay_browse_model_favourite(&browse_model, &poll_req)) {
             last_fav_add = poll_req.fav_add;
-            zzplay_browse_worker_send(&poll_req, p);
+            browse_send(&poll_req, p);
             update_status_text(last_fav_add ? "Adding to favourites..."
                                             : "Removing from favourites...");
             update_buttons();
           }
         }
       } else if (gid == BGID_STOP) {
+        have_pending = 0;
         zzplay_browse_worker_cancel();
         zzplay_browse_model_stop(&browse_model);
         update_status_text("Stopped");
