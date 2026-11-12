@@ -1439,6 +1439,48 @@ uint32_t zzplay_browse_model_service_rows(const ZZPlayBrowseModel *model)
   return model ? model->item_count - model_lead(model) : 0U;
 }
 
+size_t zzplay_browse_model_format_count(const ZZPlayBrowseModel *model,
+                                        char *buf, size_t size)
+{
+  uint32_t count;
+  int n;
+
+  if (buf && size > 0U) {
+    buf[0] = '\0';
+  }
+  if (!model || !buf || size == 0U) {
+    return 0U;
+  }
+  count = model->item_count;
+  if (count == 0U) {
+    return 0U;
+  }
+  /* Count what is shown. When total is known and larger than the loaded
+   * rows, show "X of Y items" (counting any folder row shown at the top). */
+  if (model->has_total) {
+    uint32_t lead = model_lead(model);
+    uint32_t srows = count >= lead ? count - lead : 0U;
+
+    if (model->total > srows) {
+      uint32_t total = model->total + lead;
+      n = snprintf(buf, size, "%lu of %lu items", (unsigned long)count,
+                   (unsigned long)total);
+      if (n < 0 || (size_t)n >= size) {
+        buf[size - 1U] = '\0';
+        return size - 1U;
+      }
+      return (size_t)n;
+    }
+  }
+  n = snprintf(buf, size, "%lu %s", (unsigned long)count,
+               count == 1U ? "item" : "items");
+  if (n < 0 || (size_t)n >= size) {
+    buf[size - 1U] = '\0';
+    return size - 1U;
+  }
+  return (size_t)n;
+}
+
 int zzplay_browse_model_in_recent(const ZZPlayBrowseModel *model)
 {
   return (model && model->current_service >= 0 && !model->is_search &&

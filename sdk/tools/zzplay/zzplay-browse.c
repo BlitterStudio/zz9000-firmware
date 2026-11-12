@@ -490,6 +490,7 @@ static void update_status_text(const char *msg)
                     GTTX_Text, (ULONG)status_buf,
                     TAG_DONE);
 }
+
 /* True while the gathering request is still the one being waited for. */
 static int gather_live(void)
 {
@@ -497,6 +498,15 @@ static int gather_live(void)
                                          browse_model.gather_generation);
 }
 
+/* Set the status line to the view's count ("1 item", "6 items") or empty
+ * when the view has no rows. */
+static void browse_update_count_status(void)
+{
+  char buf[ZZPLAY_PROVIDER_ERROR_MAX];
+
+  (void)zzplay_browse_model_format_count(&browse_model, buf, sizeof(buf));
+  update_status_text(buf);
+}
 
 /* While a request runs, name what it waits for; once rows arrive, count
  * them. Returns 1 when stage text was drawn. */
@@ -517,17 +527,15 @@ static int update_stage_status(void)
   if (!browse_model.busy) {
     return 0;
   }
-  if (zzplay_browse_model_service_rows(&browse_model) > 0U) {
+  if (browse_model.item_count > 0U) {
     if (browse_model.has_total) {
       (void)snprintf(status_buf, sizeof(status_buf),
                      "Loading %lu of %lu items...",
-                     (unsigned long)zzplay_browse_model_service_rows(
-                         &browse_model),
+                     (unsigned long)browse_model.item_count,
                      (unsigned long)browse_model.total);
     } else {
       (void)snprintf(status_buf, sizeof(status_buf), "Loading %lu items...",
-                     (unsigned long)zzplay_browse_model_service_rows(
-                         &browse_model));
+                     (unsigned long)browse_model.item_count);
     }
     update_status_text(status_buf);
     return 1;
@@ -2053,7 +2061,7 @@ static void browse_after_navigation(const char *loading)
 {
   if (poll_req.kind == ZZPLAY_BROWSE_REQ_NONE) {
     rebuild_list_nodes();
-    update_status_text("");
+    browse_update_count_status();
   } else {
     int sent = browse_send(&poll_req, browse_provider());
 
@@ -2094,7 +2102,7 @@ static void browse_do_back(void)
 {
   if (zzplay_browse_model_back(&browse_model, &poll_req)) {
     rebuild_list_nodes();
-    update_status_text("");
+    browse_update_count_status();
     update_buttons();
   }
 }
@@ -2107,7 +2115,7 @@ static void browse_do_reload(void)
   if (poll_req.kind == ZZPLAY_BROWSE_REQ_NONE) {
     /* Recently played shows its list as it is now. */
     rebuild_list_nodes();
-    update_status_text("");
+    browse_update_count_status();
   } else if (browse_send(&poll_req, browse_provider())) {
     update_status_text("Reloading...");
   }
@@ -2334,9 +2342,6 @@ void zzplay_browse_poll(void)
       zzplay_browse_worker_release_reply(&poll_worker_reply);
 
       if (ok) {
-        /* The count leaves out the Recently played row. */
-        uint32_t rows = zzplay_browse_model_service_rows(&browse_model);
-
         rebuild_list_nodes();
         if (partial) {
           (void)update_stage_status();
@@ -2345,19 +2350,8 @@ void zzplay_browse_poll(void)
         } else if (reload_note) {
           update_status_text(reload_note);
           reload_note = NULL;
-        } else if (rows > 0U) {
-          if (browse_model.has_total && browse_model.total > rows) {
-            (void)snprintf(status_buf, sizeof(status_buf),
-                           "%lu of %lu items", (unsigned long)rows,
-                           (unsigned long)browse_model.total);
-          } else {
-            (void)snprintf(status_buf, sizeof(status_buf), "%lu %s",
-                           (unsigned long)rows,
-                           rows == 1U ? "item" : "items");
-          }
-          update_status_text(status_buf);
         } else {
-          update_status_text("");
+          browse_update_count_status();
         }
         if (!partial) {
           reload_note = NULL;

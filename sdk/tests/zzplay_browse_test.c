@@ -2352,6 +2352,76 @@ static int test_recent_save_failure(void)
   return 0;
 }
 
+
+/* View row count text: counts what is shown ("1 item", "6 items", or
+ * "X of Y items"). */
+static int test_format_count(void)
+{
+  static const char saved[] = "folder\talb:1\tAlbum\tArtist\t1\n";
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem items[6];
+  char status[64];
+  uint32_t i;
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_format_count(&model, status, sizeof(status)) == 0U);
+  assert(status[0] == '\0');
+
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+
+  /* 1 item: singular */
+  set_item(&items[0], "1", "One", "", ZZPLAY_ITEM_TRACK, 1U);
+  apply_list(&model, req.generation, 0U, items, 1U, 0U, 0);
+  assert(zzplay_browse_model_format_count(&model, status, sizeof(status)) > 0U);
+  assert(strcmp(status, "1 item") == 0);
+
+  /* 2 items: plural */
+  set_item(&items[1], "2", "Two", "", ZZPLAY_ITEM_TRACK, 1U);
+  apply_list(&model, req.generation, 0U, items, 2U, 0U, 0);
+  assert(zzplay_browse_model_format_count(&model, status, sizeof(status)) > 0U);
+  assert(strcmp(status, "2 items") == 0);
+
+  /* Total larger than loaded rows: "X of Y items" */
+  apply_list(&model, req.generation, 0U, items, 2U, 10U, 0);
+  assert(zzplay_browse_model_format_count(&model, status, sizeof(status)) > 0U);
+  assert(strcmp(status, "2 of 10 items") == 0);
+  /* Top level with 5 service rows and Recently played folder shown: */
+  zzplay_browse_model_free(&model);
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  zzplay_browse_model_load_recent(&model, saved, strlen(saved));
+  for (i = 0U; i < 5U; i++) {
+    char id[16];
+    snprintf(id, sizeof(id), "lib:%lu", (unsigned long)i);
+    set_item(&items[i], id, "Library", "", ZZPLAY_ITEM_FOLDER, 0U);
+  }
+  apply_list(&model, req.generation, 0U, items, 5U, 5U, 0);
+  assert(model.item_count == 6U);
+  assert(strcmp(model.items[0].id, ZZPLAY_BROWSE_RECENT_ID) == 0);
+  assert(zzplay_browse_model_format_count(&model, status, sizeof(status)) > 0U);
+  assert(strcmp(status, "6 items") == 0);
+
+  /* (b) Opening Recently played (1 album row) shows "1 item". */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(zzplay_browse_model_in_recent(&model));
+  assert(model.item_count == 1U);
+  assert(zzplay_browse_model_format_count(&model, status, sizeof(status)) > 0U);
+  assert(strcmp(status, "1 item") == 0);
+
+  /* (a) Backspace back to top level shows "6 items" again. */
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(model.item_count == 6U);
+  assert(zzplay_browse_model_format_count(&model, status, sizeof(status)) > 0U);
+  assert(strcmp(status, "6 items") == 0);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
 int main(void)
 {
   assert(test_enter_folder_and_back() == 0);
@@ -2381,6 +2451,7 @@ int main(void)
   assert(test_gather_liveness() == 0);
   assert(test_reopen_service() == 0);
   assert(test_recent_save_failure() == 0);
+  assert(test_format_count() == 0);
   printf("zzplay_browse_test: all tests passed\n");
   return 0;
 }

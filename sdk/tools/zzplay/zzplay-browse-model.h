@@ -298,6 +298,12 @@ int32_t zzplay_browse_model_jump_to_letter(ZZPlayBrowseModel *model,
 /* Rows the service sent for the view: the Recently played row is not
  * counted. */
 uint32_t zzplay_browse_model_service_rows(const ZZPlayBrowseModel *model);
+/* Format the view's row count ("1 item", "6 items", or "X of Y items"
+ * when total is known and larger than the rows shown); writes "" and
+ * returns 0 when no rows are shown. Counts what is shown (including the
+ * "Recently played" folder row at the top level). */
+size_t zzplay_browse_model_format_count(const ZZPlayBrowseModel *model,
+                                        char *buf, size_t size);
 /* True while the Recently played folder is shown. */
 int zzplay_browse_model_in_recent(const ZZPlayBrowseModel *model);
 /* The folder being shown as a row, for Play all and Play all next:
