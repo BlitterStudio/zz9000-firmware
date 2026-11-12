@@ -381,11 +381,12 @@ int zzplay_tags_read(ZZPlayFile *file, ZZPlayTags *tags)
     }
   }
 
-  /* An ID3v1 trailer costs a network source a second connection to the
-   * far end of the file. Skip it when the ID3v2 tag already gave a
-   * title; a local file still reads it. */
-  if (file_len >= 128 &&
-      !(zzplay_file_is_network(file) && tags->title[0] != '\0')) {
+  /* An ID3v1 trailer costs a network source another connection to the far
+   * end of the file, and that request also gives up the open one, so the
+   * engine then needs a third. Network sources skip it: their title comes
+   * from ID3v2, the stream or the service. The decoder resynchronises over
+   * an unread trailer at the very end. A local file still reads it. */
+  if (file_len >= 128 && !zzplay_file_is_network(file)) {
     uint8_t v1_buf[128];
     if (zzplay_file_seek(file, file_len - 128L, ZZPLAY_FILE_BEGIN)) {
       if (zzplay_file_read(file, v1_buf, 128U) == 128U) {

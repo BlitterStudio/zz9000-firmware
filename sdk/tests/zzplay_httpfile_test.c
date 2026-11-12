@@ -439,8 +439,8 @@ static int test_failure(void)
 
 /* The open path for one network track: the byte accesses zzplay.c makes
  * between choosing the entry and the engine's first reads - the tag
- * reader's length seek and ID3v2 read (its title is known, so the ID3v1
- * trailer at the far end is skipped), the file-size seek, the probe's
+ * reader's length seek and ID3v2 read (network sources never fetch the
+ * ID3v1 trailer at the far end), the file-size seek, the probe's
  * reads, then the close and the engine's reopen. Open, tags and probe
  * share the first connection, and so does the engine start; only a real
  * seek pays for a new ranged request. */
