@@ -9227,22 +9227,6 @@ void sdk_mailbox_task(void)
 	uint32_t next_comp_tail;
 	int completed_any = 0;
 	zzapp_services_core0_poll();
-	/* Diagnostic for kit 66: report when a doorbell-flagged request waited a
-	 * long time for core 0 to run this task. */
-	{
-		static XTime last_entry;
-		static uint32_t gap_reports;
-		XTime now;
-
-		XTime_GetTime(&now);
-		if (last_entry != 0U && gap_reports < 20u && sdk_mailbox_pending &&
-		    timing_delta_us(last_entry, now) > 200000u) {
-			gap_reports++;
-			printf("[sdk] mailbox task not run for %lu us\r\n",
-			       (unsigned long)timing_delta_us(last_entry, now));
-		}
-		last_entry = now;
-	}
 
 	if (mailbox_base == 0U) {
 		sdk_mailbox_pending = 0;
@@ -9292,17 +9276,6 @@ void sdk_mailbox_task(void)
 
 		next_comp_tail = next_index(comp_tail);
 		if (next_comp_tail == comp_head) {
-			/* Diagnostic for kit 66: ZZRun's request timed out while
-			 * ZZPlay streamed through MHI. Report when a full completion
-			 * ring holds requests back. */
-			static uint32_t ring_full_reports;
-
-			if (ring_full_reports < 20u) {
-				ring_full_reports++;
-				printf("[sdk] completion ring full: req %lu..%lu comp %lu..%lu\r\n",
-				       (unsigned long)req_head, (unsigned long)req_tail,
-				       (unsigned long)comp_head, (unsigned long)comp_tail);
-			}
 			sdk_status = SDK_STATUS_BUSY;
 			break;
 		}
@@ -9324,14 +9297,6 @@ void sdk_mailbox_task(void)
 		record_request_timing(opcode,
 		                      timing_delta_us(timing_start,
 		                                      timing_end));
-		/* Diagnostic for kit 66 (see above): app ops and slow requests. */
-		if ((opcode & 0xff00u) == 0x0c00u ||
-		    timing_delta_us(timing_start, timing_end) > 50000u)
-			printf("[sdk] op 0x%04lx status %u in %lu us, %lu queued\r\n",
-			       (unsigned long)opcode, (unsigned)sdk_status,
-			       (unsigned long)timing_delta_us(timing_start, timing_end),
-			       (unsigned long)pending_requests);
-
 		if (sdk_status == SDK_STATUS_QUEUED) {
 			/*
 			 * Deferred to the core-1 task scheduler. Consume the request but
