@@ -183,6 +183,8 @@ static int s_mock_fail = 0;
 static const char *s_mock_body = NULL;
 static size_t s_mock_body_len = 0U;
 static uint32_t s_split_rng = 1U;
+/* 1: the next request sends half an element, then drops; becomes 2. */
+static int s_mock_cut_first = 0;
 
 static void mock_body(const char *body, size_t len)
 {
@@ -236,6 +238,22 @@ static int fake_http_get(const ZZPlayHost *host, const char *url,
     }
     return 0;
   }
+  if (s_mock_cut_first == 1) {
+    static const char partial[] = "<result><station name=\"";
+
+    s_mock_cut_first = 2;
+    if (data) {
+      (void)data(user, (const uint8_t *)partial,
+                 (uint32_t)(sizeof(partial) - 1U));
+    }
+    if (status) {
+      *status = 0;
+    }
+    if (err && err_size > 0U) {
+      snprintf(err, err_size, "The connection was lost");
+    }
+    return 0;
+  }
   if (s_mock_body != NULL) {
     size_t pos = 0U;
 
@@ -256,8 +274,10 @@ static int fake_http_get(const ZZPlayHost *host, const char *url,
     return 1;
   }
 
-  /* Assert contracted API base */
-  assert(strncmp(url, "http://de1.api.radio-browser.info/xml/", 38) == 0);
+  /* Assert contracted API base (the second mirror after a cut reply) */
+  assert(strncmp(url, s_mock_cut_first == 2
+                          ? "http://de2.api.radio-browser.info/xml/"
+                          : "http://de1.api.radio-browser.info/xml/", 38) == 0);
 
   if (strstr(url, "/stations/search?name=empty")) {
     fix_file = "empty.xml";
@@ -486,6 +506,29 @@ static void test_radio_resolve(ZZPlayHost *host)
   assert(strstr(err, "Unsupported codec") != NULL);
   assert(strstr(err, "AAC+") != NULL);
 
+  p->close(ctx);
+}
+
+/* The first server drops the connection inside an element; the next one
+ * answers in full. The second reply must parse on its own. */
+static void test_radio_resolve_after_cut_reply(ZZPlayHost *host)
+{
+  const ZZPlayProvider *p = zzplay_provider_entry();
+  void *ctx;
+  ZZPlayResolved resolved;
+  char err[128];
+  int ok;
+
+  ctx = p->open(host, err, sizeof(err));
+  assert(ctx != NULL);
+  s_mock_cut_first = 1;
+  ok = p->resolve(ctx, "11111111-1111-1111-1111-111111111111", &resolved, err,
+                  sizeof(err));
+  assert(s_mock_cut_first == 2);
+  s_mock_cut_first = 0;
+  assert(ok);
+  assert(strncmp(s_last_requested_url, "http://de2.api.radio-browser.info/", 34) == 0);
+  assert(strcmp(resolved.url, "http://resolved.laut.fm/blasmusik") == 0);
   p->close(ctx);
 }
 
@@ -1247,6 +1290,7 @@ int main(void)
   test_radio_search(&fake_host);
   test_radio_search_empty(&fake_host);
   test_radio_resolve(&fake_host);
+  test_radio_resolve_after_cut_reply(&fake_host);
   test_radio_favourites(&fake_host);
   test_radio_folders(&fake_host);
   test_my_stations(&fake_host);

@@ -1322,6 +1322,8 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
   int status = 0;
   int ok;
   int whole;
+  uint32_t attempt;
+  char first_error[ZZPLAY_PROVIDER_ERROR_MAX];
 
   if (!rc || !rc->host || !item || !out) {
     return 0;
@@ -1346,50 +1348,53 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
   }
 
   memset(out, 0, sizeof(*out));
-  memset(&col, 0, sizeof(col));
-  col.host = host;
-  col.target_uuid = item;
-
-  memset(&handler, 0, sizeof(handler));
-  handler.start = resolve_xml_start;
-  handler.user = &col;
-
-  xml = host->xml_open(host, &handler);
-  if (!xml) {
-    if (err && err_size > 0U) {
-      host->format(err, err_size, "Failed to initialize XML parser");
-    }
-    return 0;
-  }
-
-  feed.host = host;
-  feed.xml = xml;
-  feed.stopped = 0;
-
   host->url_escape(item, escaped, sizeof(escaped));
   host->format(url, sizeof(url), "%s/stations/byuuid/%s", radio_api_base(rc), escaped);
 
-  radio_set_server_url(url, rc->server);
-  ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
-                      err_size);
-  if (!ok || status >= 500) {
-    uint32_t attempt;
-    char first_error[ZZPLAY_PROVIDER_ERROR_MAX];
-    radio_copy_text(first_error, sizeof(first_error), err ? err : "", 0);
-    for (attempt = 1U; attempt < 3U && (!ok || status >= 500); attempt++) {
+  /* Up to three servers. Each attempt parses its reply from scratch: a
+   * reply cut off part way must not leave a half element behind for the
+   * next server's document. */
+  first_error[0] = '\0';
+  ok = 0;
+  whole = 0;
+  for (attempt = 0U; attempt < 3U; attempt++) {
+    if (attempt > 0U) {
       rc->server++;
       if (rc->server >= 3U) rc->server = 0U;
-      radio_set_server_url(url, rc->server);
-      status = 0;
       if (err && err_size > 0U) err[0] = '\0';
-      ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status,
-                          err, err_size);
     }
-    if ((!ok || status >= 500) && first_error[0] && err && err_size > 0U)
-      host->format(err, err_size, "%s", first_error);
+    memset(&col, 0, sizeof(col));
+    col.host = host;
+    col.target_uuid = item;
+
+    memset(&handler, 0, sizeof(handler));
+    handler.start = resolve_xml_start;
+    handler.user = &col;
+
+    xml = host->xml_open(host, &handler);
+    if (!xml) {
+      if (err && err_size > 0U) {
+        host->format(err, err_size, "Failed to initialize XML parser");
+      }
+      return 0;
+    }
+    feed.host = host;
+    feed.xml = xml;
+    feed.stopped = 0;
+
+    radio_set_server_url(url, rc->server);
+    status = 0;
+    ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
+                        err_size);
+    whole = radio_xml_complete(host, xml);
+    host->xml_close(host, xml);
+    if (ok && status < 500) break;
+    if (attempt == 0U) {
+      radio_copy_text(first_error, sizeof(first_error), err ? err : "", 0);
+    }
   }
-  whole = radio_xml_complete(host, xml);
-  host->xml_close(host, xml);
+  if ((!ok || status >= 500) && first_error[0] && err && err_size > 0U)
+    host->format(err, err_size, "%s", first_error);
 
   if (!radio_reply_ok(host, ok, status, col.saw_root && whole, err,
                       err_size)) {
