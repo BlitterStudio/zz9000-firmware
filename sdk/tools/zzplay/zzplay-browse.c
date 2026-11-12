@@ -2645,6 +2645,11 @@ static int browse_select_service_scheme(const char *scheme, int request)
   if (!model_inited || !scheme || !scheme[0]) return 0;
   for (i = 0U; i < browse_model.service_count; i++) {
     if (strcmp(browse_model.services[i].scheme, scheme) == 0) {
+      /* The settings window (and a station form, and sign-in) act on
+       * the current service: another service's window goes. */
+      if (settings_win && strcmp(settings_scheme, scheme) != 0) {
+        close_settings_window();
+      }
       /* The request goes out through poll_req (browse_after_navigation
        * sends that one); without a request the local copy is dropped. */
       if (!zzplay_browse_model_select_service(
