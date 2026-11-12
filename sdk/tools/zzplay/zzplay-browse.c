@@ -2622,6 +2622,11 @@ static int browse_select_service_scheme(const char *scheme, int request)
       }
       if (request && browse_win) {
         browse_after_navigation("Loading service...");
+      } else {
+        /* Nothing was sent, so nothing will clear the busy state (and
+         * the busy pointer) the switch set. Browse loads the service's
+         * list itself when it opens. */
+        browse_model.busy = 0;
       }
       return 1;
     }
@@ -2644,14 +2649,22 @@ int zzplay_browse_settings_open(struct Screen *screen, ZZPlayController *ctl,
                                 ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs,
                                 const char *scheme)
 {
+  const ZZPlayBrowseServiceEntry *svc;
+
   if (settings_win && scheme && strcmp(settings_scheme, scheme) == 0) {
     WindowToFront(settings_win);
     ActivateWindow(settings_win);
     return 1;
   }
   if (settings_win) close_settings_window();
-  if (!browse_prepare_services(screen, ctl, playlist, prefs) ||
-      !browse_select_service_scheme(scheme, 0)) {
+  if (!browse_prepare_services(screen, ctl, playlist, prefs)) {
+    return 0;
+  }
+  /* An open Browse switches to the service and loads it, as the Services
+   * menu does; one already on it keeps its place. */
+  svc = zzplay_browse_model_current_service(&browse_model);
+  if ((!svc || !scheme || strcmp(svc->scheme, scheme) != 0) &&
+      !browse_select_service_scheme(scheme, browse_win != NULL)) {
     return 0;
   }
   browse_text_attr = gui_screen->Font;
