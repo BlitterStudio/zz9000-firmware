@@ -619,10 +619,13 @@ static void update_menu_checks(void)
   } else {
     OffMenu(player_win, FULLMENUNUM(1, 6, NOSUB));
   }
+  /* Clear and Save need entries. */
   if (gui_context->playlist->count != 0U) {
     OnMenu(player_win, FULLMENUNUM(1, 7, NOSUB));
+    OnMenu(player_win, FULLMENUNUM(1, 4, NOSUB));
   } else {
     OffMenu(player_win, FULLMENUNUM(1, 7, NOSUB));
+    OffMenu(player_win, FULLMENUNUM(1, 4, NOSUB));
   }
 }
 
@@ -2649,6 +2652,9 @@ void zzplay_gui_poll(void)
 
     if (d & ZZPLAY_DIRTY_PLAYLIST) {
       rebuild_playlist_nodes();
+      /* Remove entry, Clear and Save follow the playlist, whoever changed
+       * it (a requester, Load, a drop, ARexx). */
+      update_menu_checks();
     } else if (d & ZZPLAY_DIRTY_CURRENT) {
       update_current_playlist_node();
     }
