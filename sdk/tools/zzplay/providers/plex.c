@@ -1389,6 +1389,21 @@ static int plex_same_server(const char *a, const char *b)
   return alen != 0U && alen == blen && plex_strncmp(a, b, alen) == 0;
 }
 
+/* Copy the section part of a node id, [start, sep), into a
+ * PLEX_SECTION_KEY_MAX buffer. Node ids can come from ARexx, so a part
+ * that cannot be a section key is refused rather than cut. */
+static int plex_section_from_node(char *dst, const char *start,
+                                  const char *sep)
+{
+  size_t len = (size_t)(sep - start);
+
+  if (len == 0U || len >= PLEX_SECTION_KEY_MAX) {
+    return 0;
+  }
+  plex_strlcpy(dst, start, len + 1U);
+  return 1;
+}
+
 static void *plex_open(const ZZPlayHost *host, char *err, uint32_t err_size)
 {
   PlexContext *ctx;
@@ -1859,8 +1874,10 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
     if (!plex_load_sections(ctx, err, err_size)) {
       return 0;
     }
-    plex_strlcpy(sec_buf, node + 4,
-                 (size_t)(sep - (node + 4)) + 1U);
+    if (!plex_section_from_node(sec_buf, node + 4, sep)) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
     sec = plex_find_section(ctx, sec_buf);
     if (!sec) {
       ctx->host->format(err, err_size, "Unknown browse node");
@@ -1927,7 +1944,10 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
       ctx->host->format(err, err_size, "Unknown browse node");
       return 0;
     }
-    plex_strlcpy(sec_buf, node + 4, (size_t)(sep - (node + 4)) + 1U);
+    if (!plex_section_from_node(sec_buf, node + 4, sep)) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
     type_char = sep[1];
     key = sep + 3;
     if ((type_char != '8' && type_char != '9') || sep[2] != ':' ||
@@ -1963,7 +1983,10 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
       ctx->host->format(err, err_size, "Unknown browse node");
       return 0;
     }
-    plex_strlcpy(sec_buf, node + 4, (size_t)(sep - (node + 4)) + 1U);
+    if (!plex_section_from_node(sec_buf, node + 4, sep)) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
     gid = sep + 1;
     if (!plex_is_safe_token(gid)) {
       ctx->host->format(err, err_size, "Unknown browse node");
