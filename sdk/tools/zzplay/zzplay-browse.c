@@ -1152,6 +1152,10 @@ static void close_settings_window(void)
   }
   settings_note[0] = '\0';
   settings_scheme[0] = '\0';
+  /* A row form lasts as long as its window: Cancel and the close gadget
+   * end it too, so the next Settings window is the service's own. */
+  row_form_mode = 0;
+  row_form_item[0] = '\0';
   release_service_state();
 }
 
@@ -3303,6 +3307,8 @@ void zzplay_browse_poll(void)
       } else {
         row_form = poll_worker_reply.form;
         row_form.title = poll_worker_reply.form_title;
+        /* A form replaces whatever the settings window showed. */
+        close_settings_window();
         copy_string(row_form_item, sizeof(row_form_item), form_get_item);
         row_form_mode = 1;
         for (i = 0U; i < row_form.field_count && i < BROWSE_FIELDS_MAX; i++) {
