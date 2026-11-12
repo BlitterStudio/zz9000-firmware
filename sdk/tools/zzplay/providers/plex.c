@@ -1549,6 +1549,232 @@ static int plex_list_search_group(PlexContext *ctx, const char *type_and_query,
   return 1;
 }
 
+static int plex_link_start(void *ctx_in, ZZPlayProviderLinkStart *out,
+                           char *err, uint32_t err_size)
+{
+  PlexContext *ctx = (PlexContext *)ctx_in;
+  char headers[256];
+  PlexPinXmlState pst;
+  ZZPlayHostXmlHandler h;
+  PlexXmlFeedState feed;
+  void *xml;
+  int status = 0;
+  int ok;
+  int whole;
+
+  if (!ctx || !out) return 0;
+  plex_memset(out, 0, sizeof(*out));
+  if (!plex_host_has_signin(ctx->host)) {
+    ctx->host->format(err, err_size,
+                      "ZZPlay update required for plex.tv sign-in");
+    return 0;
+  }
+  ctx->host->format(headers, sizeof(headers),
+                    "X-Plex-Product: %s\r\n"
+                    "X-Plex-Version: %s\r\n"
+                    "X-Plex-Platform: %s\r\n"
+                    "X-Plex-Client-Identifier: %s\r\n"
+                    "Accept: application/xml\r\n",
+                    PLEX_PRODUCT, PLEX_VERSION, PLEX_PLATFORM, ctx->client_id);
+  plex_memset(&pst, 0, sizeof(pst));
+  pst.host = ctx->host;
+  plex_memset(&h, 0, sizeof(h));
+  h.start = plex_pin_xml_start;
+  h.user = &pst;
+  xml = ctx->host->xml_open(ctx->host, &h);
+  if (!xml) {
+    ctx->host->format(err, err_size, "Out of memory");
+    return 0;
+  }
+  feed.host = ctx->host;
+  feed.xml = xml;
+  ok = ctx->host->http_post(
+      ctx->host, "https://plex.tv/api/v2/pins?strong=false", headers,
+      NULL, 0U, plex_xml_data_cb, &feed, &status, err, err_size);
+  whole = plex_xml_done(ctx->host, xml);
+  if (ok && status == 201 && !whole) {
+    ctx->host->format(err, err_size, "%s", PLEX_UNREADABLE);
+    return 0;
+  }
+  if (!ok || status != 201 || pst.id[0] == '\0' || pst.code[0] == '\0') {
+    if (err && err_size > 0U && err[0] == '\0') {
+      if (status != 0) {
+        ctx->host->format(err, err_size, "plex.tv answered HTTP %d", status);
+      } else {
+        ctx->host->format(err, err_size, "plex.tv did not answer");
+      }
+    }
+    return 0;
+  }
+  plex_strlcpy(out->url, "plex.tv/link", sizeof(out->url));
+  plex_strlcpy(out->code, pst.code, sizeof(out->code));
+  plex_strlcpy(out->link_id, pst.id, sizeof(out->link_id));
+  return 1;
+}
+
+static int plex_link_poll(void *ctx_in, const char *link_id,
+                          ZZPlayProviderLinkResult *out,
+                          char *err, uint32_t err_size)
+{
+  PlexContext *ctx = (PlexContext *)ctx_in;
+  char poll_url[256];
+  char poll_headers[256];
+  char account_token[128];
+  uint32_t poll_count;
+  int got_token = 0;
+
+  if (!ctx || !out || !plex_is_key(link_id)) {
+    if (ctx) ctx->host->format(err, err_size, "Invalid sign-in request");
+    return 0;
+  }
+  plex_memset(out, 0, sizeof(*out));
+  if (!plex_host_has_signin(ctx->host)) {
+    ctx->host->format(err, err_size,
+                      "ZZPlay update required for plex.tv sign-in");
+    return 0;
+  }
+  account_token[0] = '\0';
+  ctx->host->format(poll_url, sizeof(poll_url),
+                    "https://plex.tv/api/v2/pins/%s", link_id);
+  ctx->host->format(poll_headers, sizeof(poll_headers),
+                    "X-Plex-Product: %s\r\n"
+                    "X-Plex-Version: %s\r\n"
+                    "X-Plex-Platform: %s\r\n"
+                    "X-Plex-Client-Identifier: %s\r\n"
+                    "Accept: application/xml\r\n",
+                    PLEX_PRODUCT, PLEX_VERSION, PLEX_PLATFORM, ctx->client_id);
+
+  for (poll_count = 0U; poll_count < 90U; poll_count++) {
+    PlexPinXmlState pst;
+    ZZPlayHostXmlHandler h;
+    PlexXmlFeedState feed;
+    void *xml;
+    int status = 0;
+    int ok;
+    int whole;
+
+    plex_memset(&pst, 0, sizeof(pst));
+    pst.host = ctx->host;
+    plex_memset(&h, 0, sizeof(h));
+    h.start = plex_pin_xml_start;
+    h.user = &pst;
+    xml = ctx->host->xml_open(ctx->host, &h);
+    if (!xml) {
+      ctx->host->format(err, err_size, "Out of memory");
+      return 0;
+    }
+    feed.host = ctx->host;
+    feed.xml = xml;
+    ok = ctx->host->http_get(ctx->host, poll_url, poll_headers,
+                             plex_xml_data_cb, &feed, &status, err, err_size);
+    whole = plex_xml_done(ctx->host, xml);
+    if (ok && status == 200 && !whole) {
+      ctx->host->format(err, err_size, "%s", PLEX_UNREADABLE);
+      return 0;
+    }
+    if (ok && status == 200) {
+      if (pst.auth_token[0] != '\0') {
+        plex_strlcpy(account_token, pst.auth_token, sizeof(account_token));
+        got_token = 1;
+        break;
+      }
+      if (pst.expires_in[0] != '\0' &&
+          plex_parse_uint(pst.expires_in) == 0U) {
+        ctx->host->format(err, err_size,
+                          "The PIN has expired. Start sign-in again.");
+        return 0;
+      }
+    } else if (status == 404) {
+      ctx->host->format(err, err_size,
+                        "The PIN has expired. Start sign-in again.");
+      return 0;
+    } else if (status == 401) {
+      ctx->host->format(err, err_size, "%s", PLEX_SIGNIN_REJECTED);
+      return 0;
+    } else if (!ok && status == 0) {
+      if (err && err_size > 0U && err[0] == '\0') {
+        ctx->host->format(err, err_size, "plex.tv did not answer");
+      }
+      return 0;
+    }
+    if (!ctx->host->sleep(ctx->host, 2000U)) {
+      ctx->host->format(err, err_size, "Cancelled");
+      return 0;
+    }
+  }
+  if (!got_token) {
+    ctx->host->format(err, err_size,
+                      "Sign-in timed out. Start sign-in again.");
+    return 0;
+  }
+  if (!plex_fetch_resources(ctx, account_token, err, err_size)) {
+    return 0;
+  }
+  if (ctx->discovered_server_count == 0U) {
+    ctx->host->format(err, err_size,
+                      "No Plex Media Server found on this account");
+    return 0;
+  }
+  if (ctx->discovered_server_count == 1U) {
+    if (!plex_select_server(ctx, &ctx->discovered_servers[0],
+                            err, err_size)) {
+      return 0;
+    }
+    out->state = ZZPLAY_LINK_DONE;
+    plex_strlcpy(out->signed_in_name, ctx->discovered_servers[0].name,
+                 sizeof(out->signed_in_name));
+    return 1;
+  }
+  out->state = ZZPLAY_LINK_CHOOSE;
+  out->choice_count = ctx->discovered_server_count;
+  if (out->choice_count > ZZPLAY_LINK_CHOICES_MAX) {
+    out->choice_count = ZZPLAY_LINK_CHOICES_MAX;
+  }
+  for (poll_count = 0U; poll_count < out->choice_count; poll_count++) {
+    ctx->host->format(out->choices[poll_count].id,
+                      sizeof(out->choices[poll_count].id), "%lu",
+                      (unsigned long)poll_count);
+    ctx->host->format(out->choices[poll_count].label,
+                      sizeof(out->choices[poll_count].label), "%s (%s)",
+                      ctx->discovered_servers[poll_count].name,
+                      ctx->discovered_servers[poll_count].owned
+                          ? "owned" : "shared");
+  }
+  return 1;
+}
+
+static int plex_link_choose(void *ctx_in, const char *choice_id,
+                            ZZPlayProviderLinkResult *out,
+                            char *err, uint32_t err_size)
+{
+  PlexContext *ctx = (PlexContext *)ctx_in;
+  uint32_t idx;
+  const char *p;
+
+  if (!ctx || !out || !choice_id || choice_id[0] == '\0') return 0;
+  for (p = choice_id; *p != '\0'; p++) {
+    if (*p < '0' || *p > '9') {
+      ctx->host->format(err, err_size, "Invalid server selection");
+      return 0;
+    }
+  }
+  idx = plex_parse_uint(choice_id);
+  if (idx >= ctx->discovered_server_count ||
+      idx >= ZZPLAY_LINK_CHOICES_MAX) {
+    ctx->host->format(err, err_size, "Invalid server selection");
+    return 0;
+  }
+  plex_memset(out, 0, sizeof(*out));
+  if (!plex_select_server(ctx, &ctx->discovered_servers[idx],
+                          err, err_size)) {
+    return 0;
+  }
+  out->state = ZZPLAY_LINK_DONE;
+  plex_strlcpy(out->signed_in_name, ctx->discovered_servers[idx].name,
+               sizeof(out->signed_in_name));
+  return 1;
+}
+
 static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t count,
                      const ZZPlayItemSink *sink, char *err, uint32_t err_size)
 {
@@ -1558,16 +1784,16 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
   if (node == NULL || node[0] == '\0') {
     if (ctx->token[0] == '\0') {
       if (sink->total) {
-        sink->total(sink->user, 1);
+        sink->total(sink->user, 1U);
       }
-      if (start == 0) {
+      if (start == 0U) {
         ZZPlayProviderItem it;
         plex_memset(&it, 0, sizeof(it));
-        it.id = "signin";
-        it.title = "Sign in with plex.tv";
+        it.id = ZZPLAY_PROVIDER_SETTINGS_ID;
+        it.title = "Not signed in. Open Settings to sign in.";
         it.subtitle = "";
-        it.kind = ZZPLAY_ITEM_FOLDER;
-        it.playable = 0;
+        it.kind = ZZPLAY_ITEM_TRACK;
+        it.playable = 0U;
         sink->item(sink->user, &it);
       }
       return 1;
@@ -1575,255 +1801,6 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
     return plex_list_library_top(ctx, start, count, sink, err, err_size);
   }
 
-  if (plex_strcmp(node, "signin") == 0) {
-    char headers[256];
-    char post_url[256];
-    char code_title[64];
-    char continue_id[64];
-    PlexPinXmlState pst;
-    ZZPlayHostXmlHandler h;
-    PlexXmlFeedState feed;
-    void *xml;
-    int status = 0;
-    int ok;
-    int whole;
-
-    if (!plex_host_has_signin(ctx->host)) {
-      ctx->host->format(err, err_size, "ZZPlay update required for plex.tv sign-in");
-      return 0;
-    }
-
-    ctx->host->format(post_url, sizeof(post_url), "https://plex.tv/api/v2/pins?strong=false");
-    ctx->host->format(headers, sizeof(headers),
-                      "X-Plex-Product: %s\r\n"
-                      "X-Plex-Version: %s\r\n"
-                      "X-Plex-Platform: %s\r\n"
-                      "X-Plex-Client-Identifier: %s\r\n"
-                      "Accept: application/xml\r\n",
-                      PLEX_PRODUCT, PLEX_VERSION, PLEX_PLATFORM, ctx->client_id);
-
-    plex_memset(&pst, 0, sizeof(pst));
-    pst.host = ctx->host;
-    plex_memset(&h, 0, sizeof(h));
-    h.start = plex_pin_xml_start;
-    h.user = &pst;
-
-    xml = ctx->host->xml_open(ctx->host, &h);
-    if (!xml) {
-      ctx->host->format(err, err_size, "Out of memory");
-      return 0;
-    }
-    feed.host = ctx->host;
-    feed.xml = xml;
-
-    ok = ctx->host->http_post(ctx->host, post_url, headers, NULL, 0U,
-                              plex_xml_data_cb, &feed, &status, err, err_size);
-    whole = plex_xml_done(ctx->host, xml);
-
-    if (ok && status == 201 && !whole) {
-      ctx->host->format(err, err_size, "%s", PLEX_UNREADABLE);
-      return 0;
-    }
-    if (!ok || status != 201 || pst.id[0] == '\0' || pst.code[0] == '\0') {
-      if (err && err_size > 0U && err[0] == '\0') {
-        ctx->host->format(err, err_size, "Failed to request PIN from plex.tv");
-      }
-      return 0;
-    }
-
-    if (sink->total) {
-      sink->total(sink->user, 3);
-    }
-
-    ctx->host->format(code_title, sizeof(code_title), "and enter the code %s", pst.code);
-    ctx->host->format(continue_id, sizeof(continue_id), "signin:continue:%s", pst.id);
-
-    if (start <= 0 && (count == 0 || start + count > 0)) {
-      ZZPlayProviderItem it;
-      plex_memset(&it, 0, sizeof(it));
-      it.id = "info:link";
-      it.title = "On any device, open plex.tv/link";
-      it.subtitle = "";
-      it.kind = ZZPLAY_ITEM_TRACK;
-      it.playable = 0;
-      if (sink->item(sink->user, &it) != 0) return 1;
-    }
-    if (start <= 1 && (count == 0 || start + count > 1)) {
-      ZZPlayProviderItem it;
-      plex_memset(&it, 0, sizeof(it));
-      it.id = "info:code";
-      it.title = code_title;
-      it.subtitle = "";
-      it.kind = ZZPLAY_ITEM_TRACK;
-      it.playable = 0;
-      if (sink->item(sink->user, &it) != 0) return 1;
-    }
-    if (start <= 2 && (count == 0 || start + count > 2)) {
-      ZZPlayProviderItem it;
-      plex_memset(&it, 0, sizeof(it));
-      it.id = continue_id;
-      it.title = "Continue after entering the code";
-      it.subtitle = "";
-      it.kind = ZZPLAY_ITEM_FOLDER;
-      it.playable = 0;
-      if (sink->item(sink->user, &it) != 0) return 1;
-    }
-    return 1;
-  }
-
-  if (plex_strncmp(node, "signin:continue:", 16) == 0) {
-    const char *pin_id = node + 16;
-    char poll_url[256];
-    char poll_headers[256];
-    char account_token[128];
-    uint32_t poll_count;
-    int got_token = 0;
-
-    if (!plex_host_has_signin(ctx->host)) {
-      ctx->host->format(err, err_size, "ZZPlay update required for plex.tv sign-in");
-      return 0;
-    }
-    if (!plex_is_key(pin_id)) {
-      ctx->host->format(err, err_size, "Unknown browse node");
-      return 0;
-    }
-
-    account_token[0] = '\0';
-    ctx->host->format(poll_url, sizeof(poll_url), "https://plex.tv/api/v2/pins/%s", pin_id);
-    ctx->host->format(poll_headers, sizeof(poll_headers),
-                      "X-Plex-Product: %s\r\n"
-                      "X-Plex-Version: %s\r\n"
-                      "X-Plex-Platform: %s\r\n"
-                      "X-Plex-Client-Identifier: %s\r\n"
-                      "Accept: application/xml\r\n",
-                      PLEX_PRODUCT, PLEX_VERSION, PLEX_PLATFORM, ctx->client_id);
-
-    for (poll_count = 0U; poll_count < 90U; poll_count++) {
-      PlexPinXmlState pst;
-      ZZPlayHostXmlHandler h;
-      PlexXmlFeedState feed;
-      void *xml;
-      int status = 0;
-      int ok;
-      int whole;
-
-      plex_memset(&pst, 0, sizeof(pst));
-      pst.host = ctx->host;
-      plex_memset(&h, 0, sizeof(h));
-      h.start = plex_pin_xml_start;
-      h.user = &pst;
-
-      xml = ctx->host->xml_open(ctx->host, &h);
-      if (!xml) {
-        ctx->host->format(err, err_size, "Out of memory");
-        return 0;
-      }
-      feed.host = ctx->host;
-      feed.xml = xml;
-
-      ok = ctx->host->http_get(ctx->host, poll_url, poll_headers,
-                               plex_xml_data_cb, &feed, &status, err, err_size);
-      whole = plex_xml_done(ctx->host, xml);
-
-      if (ok && status == 200 && !whole) {
-        ctx->host->format(err, err_size, "%s", PLEX_UNREADABLE);
-        return 0;
-      }
-      if (ok && status == 200) {
-        if (pst.auth_token[0] != '\0') {
-          plex_strlcpy(account_token, pst.auth_token, sizeof(account_token));
-          got_token = 1;
-          break;
-        }
-        if (pst.expires_in[0] != '\0' && plex_parse_uint(pst.expires_in) == 0U) {
-          ctx->host->format(err, err_size, "The PIN has expired. Start sign-in again.");
-          return 0;
-        }
-      } else if (status == 404) {
-        ctx->host->format(err, err_size, "The PIN has expired. Start sign-in again.");
-        return 0;
-      } else if (status == 401) {
-        ctx->host->format(err, err_size, "%s", PLEX_SIGNIN_REJECTED);
-        return 0;
-      } else if (!ok && status == 0) {
-        /* No answer at all (or the user stopped): polling on would only
-         * wait out the time limit. */
-        if (err && err_size > 0U && err[0] == '\0') {
-          ctx->host->format(err, err_size, "plex.tv did not answer");
-        }
-        return 0;
-      }
-
-      /* Wait 2 seconds */
-      if (!ctx->host->sleep(ctx->host, 2000U)) {
-        if (err && err_size > 0U) {
-          ctx->host->format(err, err_size, "Cancelled");
-        }
-        return 0;
-      }
-    }
-
-    if (!got_token) {
-      ctx->host->format(err, err_size, "Sign-in timed out. Start sign-in again.");
-      return 0;
-    }
-
-    /* Fetch resources */
-    if (!plex_fetch_resources(ctx, account_token, err, err_size)) {
-      return 0;
-    }
-
-    if (ctx->discovered_server_count == 0) {
-      ctx->host->format(err, err_size, "No Plex Media Server found on this account");
-      return 0;
-    }
-
-    if (ctx->discovered_server_count == 1) {
-      if (!plex_select_server(ctx, &ctx->discovered_servers[0], err, err_size)) {
-        return 0;
-      }
-      return plex_list_library_top(ctx, start, count, sink, err, err_size);
-    } else {
-      /* Several servers: list as folders */
-      uint32_t emitted = 0;
-      uint32_t i;
-
-      if (sink->total) {
-        sink->total(sink->user, ctx->discovered_server_count);
-      }
-      for (i = 0U; i < ctx->discovered_server_count; i++) {
-        if (count > 0 && emitted >= count) break;
-        if (i >= start) {
-          char srv_id[32];
-          ZZPlayProviderItem it;
-          ctx->host->format(srv_id, sizeof(srv_id), "signin:server:%lu", (unsigned long)i);
-          plex_memset(&it, 0, sizeof(it));
-          it.id = srv_id;
-          it.title = ctx->discovered_servers[i].name;
-          it.subtitle = ctx->discovered_servers[i].owned ? "owned" : "shared";
-          it.kind = ZZPLAY_ITEM_FOLDER;
-          it.playable = 0;
-          if (sink->item(sink->user, &it) != 0) {
-            return 1;
-          }
-          emitted++;
-        }
-      }
-      return 1;
-    }
-  }
-
-  if (plex_strncmp(node, "signin:server:", 14) == 0) {
-    uint32_t idx = plex_parse_uint(node + 14);
-    if (idx >= ctx->discovered_server_count) {
-      ctx->host->format(err, err_size, "Invalid server selection");
-      return 0;
-    }
-    if (!plex_select_server(ctx, &ctx->discovered_servers[idx], err, err_size)) {
-      return 0;
-    }
-    return plex_list_library_top(ctx, start, count, sink, err, err_size);
-  }
 
   if (plex_strcmp(node, "playlists") == 0) {
     int stopped = 0;
@@ -2309,7 +2286,12 @@ static const ZZPlayProvider plex_provider = {
   .close = plex_close,
   .list = plex_list,
   .search = plex_search,
-  .resolve = plex_resolve
+  .resolve = plex_resolve,
+  .link_name = "Plex",
+  .link_host = "plex.tv",
+  .link_start = plex_link_start,
+  .link_poll = plex_link_poll,
+  .link_choose = plex_link_choose
 };
 
 const ZZPlayProvider *zzplay_provider_entry(void)

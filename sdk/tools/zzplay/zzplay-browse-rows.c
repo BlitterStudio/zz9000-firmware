@@ -107,19 +107,32 @@ void zzplay_browse_layout_columns(int avail_w, int marker_w, int len_w,
   }
 }
 
-void zzplay_browse_widen_title(ZZPlayBrowseColumns *cols, int avail_w,
-                               int gap, int has_subtitle, int has_length)
+void zzplay_browse_fit_row(ZZPlayBrowseColumns *cols, int avail_w, int gap,
+                           int has_subtitle, int has_length)
 {
   int end;
+  int rest;
+  int title_w;
 
-  if (!cols || has_subtitle) {
+  if (!cols || (has_subtitle && has_length)) {
     return;
   }
   end = has_length ? cols->len_x - gap : avail_w - 2;
-  if (end - cols->title_x > cols->title_w) {
-    cols->title_w = end - cols->title_x;
-    cols->sub_x = cols->title_x + cols->title_w;
-    cols->sub_w = 0;
+  rest = end - cols->title_x;
+  if (!has_subtitle) {
+    if (rest > cols->title_w) {
+      cols->title_w = rest;
+      cols->sub_x = cols->title_x + rest;
+      cols->sub_w = 0;
+    }
+    return;
+  }
+  /* A subtitle but no length: split the longer width the same way. */
+  title_w = (rest * ZZPLAY_BROWSE_TITLE_SHARE) / 100;
+  if (title_w > cols->title_w && rest - title_w - gap > cols->sub_w) {
+    cols->title_w = title_w;
+    cols->sub_x = cols->title_x + title_w + gap;
+    cols->sub_w = rest - title_w - gap;
   }
 }
 

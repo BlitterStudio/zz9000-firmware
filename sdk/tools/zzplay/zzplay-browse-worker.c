@@ -215,6 +215,18 @@ static int worker_provider_has_favourite(const ZZPlayProvider *p)
   return p->favourite != NULL;
 }
 
+static int worker_provider_has_link(const ZZPlayProvider *p)
+{
+  if (!p ||
+      p->size < offsetof(ZZPlayProvider, link_choose) +
+                    sizeof(p->link_choose)) {
+    return 0;
+  }
+  return p->link_start != NULL && p->link_poll != NULL &&
+         p->link_choose != NULL;
+}
+
+
 /* The provider list call, shaped for ZZPlayGather. */
 typedef struct WorkerGatherLister {
   const ZZPlayProvider *provider;
@@ -456,6 +468,45 @@ static void worker_process(void)
             (void)snprintf(rep->error, sizeof(rep->error),
                            req->fav_add ? "cannot add favourite"
                                         : "cannot remove favourite");
+          }
+        }
+      } else if (req->kind == ZZPLAY_BROWSE_REQ_LINK_START) {
+        if (!worker_provider_has_link(p)) {
+          (void)snprintf(rep->error, sizeof(rep->error),
+                         "service does not support sign-in");
+        } else {
+          rep->success = p->link_start(ctx, &rep->link_start,
+                                       rep->error, sizeof(rep->error));
+          if (!rep->success && rep->error[0] == '\0') {
+            (void)snprintf(rep->error, sizeof(rep->error),
+                           "cannot start sign-in");
+          }
+        }
+      } else if (req->kind == ZZPLAY_BROWSE_REQ_LINK_POLL) {
+        if (!worker_provider_has_link(p)) {
+          (void)snprintf(rep->error, sizeof(rep->error),
+                         "service does not support sign-in");
+        } else {
+          rep->success = p->link_poll(ctx, req->link_id,
+                                      &rep->link_result,
+                                      rep->error, sizeof(rep->error));
+          if (!rep->success && rep->error[0] == '\0') {
+            (void)snprintf(rep->error, sizeof(rep->error),
+                           worker_cancel_flag ? "Cancelled"
+                                              : "sign-in failed");
+          }
+        }
+      } else if (req->kind == ZZPLAY_BROWSE_REQ_LINK_CHOOSE) {
+        if (!worker_provider_has_link(p)) {
+          (void)snprintf(rep->error, sizeof(rep->error),
+                         "service does not support sign-in");
+        } else {
+          rep->success = p->link_choose(ctx, req->choice_id,
+                                        &rep->link_result,
+                                        rep->error, sizeof(rep->error));
+          if (!rep->success && rep->error[0] == '\0') {
+            (void)snprintf(rep->error, sizeof(rep->error),
+                           "cannot select server");
           }
         }
       } else if (req->kind == ZZPLAY_BROWSE_REQ_GATHER) {

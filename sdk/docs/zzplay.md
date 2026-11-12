@@ -245,7 +245,9 @@ menu** and **Browse keys** at the end of this section.
   playlist as it was. The playlist holds at most 4,096 entries; the status
   line says when tracks did not fit.
 - **Favourite** adds the selected entry to the service's favourites, or
-  removes it. Services without favourites have it disabled.
+  removes it. Favourites show a star before their title (`* ` on systems
+  before AmigaOS 3.0). Services without favourites have the button
+  disabled.
 - **Settings** shows the service's settings, such as a server address or a
   token. **Save** stores them in `ENVARC:ZZPlay/<service>.prefs` and
   reconnects the service. If they cannot be saved, for example on a full
@@ -343,24 +345,26 @@ Favourites are stored in `ENVARC:ZZPlay/radio.prefs`, one line per station:
 
 `plex.zzprov` plays the music libraries of a Plex Media Server.
 
-To sign in from the Browse window:
+To sign in:
 
-1. Open Plex Media Server in the Browse window.
-2. Open **Sign in with plex.tv**.
-3. On another device (such as a phone or PC), open `plex.tv/link` in a browser
-   and enter the code shown in ZZPlay.
-4. Open **Continue after entering the code**.
+1. Choose Plex Media Server in the Browse window and click **Settings**.
+   When signed out, the only Browse row also opens Settings.
+2. Click **Sign in with plex.tv**.
+3. On a phone or computer, open `plex.tv/link` and enter the code shown
+   in the Plex sign-in window. ZZPlay waits in the background; music keeps
+   playing, and **Cancel** stops the wait.
+4. If the account has several servers, choose one and click
+   **Use this server**.
 
-ZZPlay then asks plex.tv for your servers. If your account has more than
-one, open the one you want. ZZPlay remembers the server's `https` and plain
-`http` addresses, and the **Connection** setting below picks which one it
-uses. The music library opens right away, and later sessions start there.
+ZZPlay saves the selected server and token immediately, then refreshes the
+Server URL and Token fields. **Cancel** in Settings does not undo this
+sign-in. ZZPlay remembers the server's `https` and plain `http` addresses;
+the **Connection** setting below picks which one it uses.
 
-To sign in again, clear **Token** in Settings. If the server stops
+To sign in again, click **Sign in with plex.tv** again. If the server stops
 accepting the token, for example after it was revoked, opening Plex says so.
 
-To set up the connection by hand, choose Plex Media Server in the Browse
-window, click **Settings** and set:
+To set up the connection by hand, open Plex Settings and set:
 
 - **Server URL**: the server's address with its port, for example
   `http://192.168.1.10:32400`.

@@ -16,7 +16,9 @@ ZZPlayProviderCheck zzplay_provider_check(const ZZPlayProvider *provider)
   if (provider->abi != ZZPLAY_PROVIDER_ABI) {
     return ZZPLAY_PROVIDER_OTHER_ABI;
   }
-  if (provider->size < sizeof(ZZPlayProvider)) {
+  /* Device-link fields are an optional ABI tail. Modules built against
+   * the original descriptor end immediately before link_name. */
+  if (provider->size < offsetof(ZZPlayProvider, link_name)) {
     return ZZPLAY_PROVIDER_TOO_SMALL;
   }
   if (provider->name == NULL || provider->name[0] == '\0' ||

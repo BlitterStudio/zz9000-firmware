@@ -524,121 +524,94 @@ static void collector_init(ItemCollector *col, uint32_t stop_after)
 
 /* --- Tests --- */
 
-static void test_no_token_shows_signin_folder(const ZZPlayProvider *p)
+static void test_no_token_shows_settings_row(const ZZPlayProvider *p)
 {
   char err[128];
   ItemCollector col;
   void *ctx;
   int ok;
 
-  /* No SERVER, no TOKEN */
   mock_prefs_clear();
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
   collector_init(&col, 0);
   ok = p->list(ctx, "", 0, 10, &col.sink, err, sizeof(err));
   assert(ok == 1);
-  assert(col.count == 1);
-  assert(col.total == 1);
-  assert(strcmp(col.items[0].id, "signin") == 0);
-  assert(strcmp(col.items[0].title, "Sign in with plex.tv") == 0);
-  assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
-  assert(col.items[0].playable == 0);
+  assert(col.count == 1 && col.total == 1);
+  assert(strcmp(col.items[0].id, ZZPLAY_PROVIDER_SETTINGS_ID) == 0);
+  assert(strcmp(col.items[0].title,
+                "Not signed in. Open Settings to sign in.") == 0);
+  assert(col.items[0].kind == ZZPLAY_ITEM_TRACK);
+  assert(col.items[0].playable == 0U);
   p->close(ctx);
 
-  /* SERVER set, TOKEN empty: still lists sign-in folder */
   mock_prefs_clear();
   mock_pref_set("SERVER", TEST_SERVER);
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
   collector_init(&col, 0);
-  ok = p->list(ctx, "", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 1);
+  assert(p->list(ctx, "", 0, 10, &col.sink, err, sizeof(err)) == 1);
   assert(col.count == 1);
-  assert(strcmp(col.items[0].id, "signin") == 0);
+  assert(strcmp(col.items[0].id, ZZPLAY_PROVIDER_SETTINGS_ID) == 0);
   p->close(ctx);
 
-  /* TOKEN set, SERVER empty: top-level fails asking for server */
   mock_prefs_clear();
   mock_pref_set("TOKEN", TEST_TOKEN);
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
   collector_init(&col, 0);
-  ok = p->list(ctx, "", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 0);
+  assert(p->list(ctx, "", 0, 10, &col.sink, err, sizeof(err)) == 0);
   assert(strcmp(err, "Set the server in Settings") == 0);
   p->close(ctx);
 }
 
-static void test_pin_request(const ZZPlayProvider *p)
+static void test_link_start(const ZZPlayProvider *p)
 {
   char err[128];
-  ItemCollector col;
+  ZZPlayProviderLinkStart start;
   void *ctx;
-  int ok;
 
   mock_prefs_clear();
   g_mock_post_status = 201;
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 1);
-  assert(col.count == 3);
-  assert(col.total == 3);
-
-  assert(strcmp(col.items[0].id, "info:link") == 0);
-  assert(strcmp(col.items[0].title, "On any device, open plex.tv/link") == 0);
-  assert(col.items[0].playable == 0);
-
-  assert(strcmp(col.items[1].id, "info:code") == 0);
-  assert(strcmp(col.items[1].title, "and enter the code NTLQ") == 0);
-  assert(col.items[1].playable == 0);
-
-  assert(strcmp(col.items[2].id, "signin:continue:736458353") == 0);
-  assert(strcmp(col.items[2].title, "Continue after entering the code") == 0);
-  assert(col.items[2].kind == ZZPLAY_ITEM_FOLDER);
-  assert(col.items[2].playable == 0);
-
+  memset(&start, 0, sizeof(start));
+  assert(p->link_start(ctx, &start, err, sizeof(err)) == 1);
+  assert(strcmp(start.url, "plex.tv/link") == 0);
+  assert(strcmp(start.code, "NTLQ") == 0);
+  assert(strcmp(start.link_id, "736458353") == 0);
   p->close(ctx);
 }
 
-static void test_pin_poll_waiting_then_token(const ZZPlayProvider *p)
+static void test_link_poll_waiting_then_token(const ZZPlayProvider *p)
 {
   char err[128];
-  ItemCollector col;
+  ZZPlayProviderLinkResult result;
   void *ctx;
-  int ok;
 
   mock_prefs_clear();
   g_mock_poll_calls = 0;
-  g_mock_poll_authenticated_after = 2; /* Poll 1 waiting, Poll 2 authenticated */
+  g_mock_poll_authenticated_after = 2;
   g_mock_sleep_calls = 0;
   g_mock_sleep_cancelled = 0;
   g_mock_https_identity_fails = 0;
   g_mock_two_servers = 0;
-
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 1);
+  memset(&result, 0, sizeof(result));
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 1);
+  assert(result.state == ZZPLAY_LINK_DONE);
+  assert(strcmp(result.signed_in_name, "Koula") == 0);
   assert(g_mock_poll_calls == 2);
   assert(g_mock_sleep_calls == 1);
-
   p->close(ctx);
 }
 
-static void test_pin_poll_cancel_stores_nothing(const ZZPlayProvider *p)
+static void test_link_poll_cancel_stores_nothing(const ZZPlayProvider *p)
 {
   char err[128];
-  err[0] = '\0';
-  ItemCollector col;
+  ZZPlayProviderLinkResult result;
   void *ctx;
-  int ok;
   char srv[128];
   char tok[128];
 
@@ -646,32 +619,66 @@ static void test_pin_poll_cancel_stores_nothing(const ZZPlayProvider *p)
   g_mock_poll_calls = 0;
   g_mock_poll_authenticated_after = 10;
   g_mock_sleep_calls = 0;
-  g_mock_sleep_cancelled = 1; /* sleep returns 0 to cancel */
-
+  g_mock_sleep_cancelled = 1;
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 0);
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 0);
   assert(strcmp(err, "Cancelled") == 0);
-
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 0);
   assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 0);
-
   p->close(ctx);
 }
 
-static void test_resources_signin_stores_both_addresses(const ZZPlayProvider *p)
+static void test_link_poll_errors(const ZZPlayProvider *p)
 {
   char err[128];
-  ItemCollector col;
+  ZZPlayProviderLinkResult result;
   void *ctx;
-  int ok;
+
+  mock_prefs_clear();
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  g_mock_status = 404;
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 0);
+  assert(strcmp(err, "The PIN has expired. Start sign-in again.") == 0);
+
+  g_mock_status = 200;
+  g_mock_poll_calls = 0;
+  g_mock_poll_authenticated_after = 100;
+  g_mock_sleep_calls = 0;
+  g_mock_sleep_cancelled = 0;
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 0);
+  assert(strcmp(err, "Sign-in timed out. Start sign-in again.") == 0);
+  assert(g_mock_sleep_calls == 90);
+
+  g_mock_unreachable = 2;
+  g_mock_sleep_calls = 0;
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 0);
+  assert(strcmp(err, "plex.tv did not answer") == 0);
+  assert(g_mock_sleep_calls == 0);
+  g_mock_unreachable = 0;
+
+  g_mock_poll_calls = 0;
+  g_mock_poll_authenticated_after = 1;
+  g_mock_body_path = "/api/v2/resources";
+  g_mock_body = "<?xml version=\"1.0\"?><MediaContainer/>";
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 0);
+  assert(strcmp(err, "No Plex Media Server found on this account") == 0);
+  g_mock_body = NULL;
+  g_mock_body_path = NULL;
+  p->close(ctx);
+}
+
+
+static void test_link_poll_stores_both_addresses(const ZZPlayProvider *p)
+{
+  char err[128];
+  ZZPlayProviderLinkResult result;
+  void *ctx;
   char srv[256];
   char tok[128];
 
-  /* Sign-in with default/empty CONNECTION: probes https, stores both addresses */
   mock_prefs_clear();
   g_mock_poll_calls = 0;
   g_mock_poll_authenticated_after = 1;
@@ -680,66 +687,44 @@ static void test_resources_signin_stores_both_addresses(const ZZPlayProvider *p)
   g_mock_https_identity_fails = 0;
   g_mock_http_identity_fails = 0;
   g_mock_two_servers = 0;
-
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 1);
-
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 1);
+  assert(result.state == ZZPLAY_LINK_DONE);
+  assert(strcmp(result.signed_in_name, "Koula") == 0);
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 1);
-  assert(strcmp(srv, "https://192-168-1-18.abcdef0123456789.plex.direct:32400") == 0);
+  assert(strcmp(srv,
+                "https://192-168-1-18.abcdef0123456789.plex.direct:32400") == 0);
   assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 1);
-  assert(strcmp(srv, "https://192-168-1-18.abcdef0123456789.plex.direct:32400") == 0);
   assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 1);
   assert(strcmp(srv, "http://192.168.1.18:32400") == 0);
   assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 1);
   assert(strcmp(tok, "server-token-456") == 0);
-
-  /* One server lands directly in library top level */
-  assert(col.count > 0);
-  assert(strcmp(col.items[0].id, "playlists") == 0);
   p->close(ctx);
 }
 
-static void test_resources_signin_connection_plain(const ZZPlayProvider *p)
+static void test_link_poll_connection_plain(const ZZPlayProvider *p)
 {
   char err[128];
-  ItemCollector col;
+  ZZPlayProviderLinkResult result;
   void *ctx;
-  int ok;
   char srv[256];
-  char tok[128];
 
-  /* Sign-in with CONNECTION=plain: probes http, stores both addresses, SERVER is plain */
   mock_prefs_clear();
   mock_pref_set("CONNECTION", "plain");
   g_mock_poll_calls = 0;
   g_mock_poll_authenticated_after = 1;
   g_mock_sleep_calls = 0;
   g_mock_sleep_cancelled = 0;
-  g_mock_https_identity_fails = 1; /* https would fail, but plain probe is used */
+  g_mock_https_identity_fails = 1;
   g_mock_http_identity_fails = 0;
   g_mock_two_servers = 0;
-
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 1);
-
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 1);
+  assert(result.state == ZZPLAY_LINK_DONE);
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 1);
   assert(strcmp(srv, "http://192.168.1.18:32400") == 0);
-  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 1);
-  assert(strcmp(srv, "https://192-168-1-18.abcdef0123456789.plex.direct:32400") == 0);
-  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 1);
-  assert(strcmp(srv, "http://192.168.1.18:32400") == 0);
-  assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 1);
-  assert(strcmp(tok, "server-token-456") == 0);
-  assert(col.count > 0);
-  assert(strcmp(col.items[0].id, "playlists") == 0);
   p->close(ctx);
 }
 
@@ -889,158 +874,108 @@ static void test_plain_plexdirect_fallback(const ZZPlayProvider *p)
 static void test_failed_probe_stores_nothing_and_names_connection(const ZZPlayProvider *p)
 {
   char err[128];
-  ItemCollector col;
+  ZZPlayProviderLinkResult result;
   void *ctx;
-  int ok;
   char srv[256];
   char tok[128];
 
-  /* Case A: HTTPS identity check fails on secure connection */
   mock_prefs_clear();
   g_mock_poll_calls = 0;
   g_mock_poll_authenticated_after = 1;
-  g_mock_sleep_calls = 0;
   g_mock_sleep_cancelled = 0;
   g_mock_https_identity_fails = 1;
   g_mock_http_identity_fails = 0;
   g_mock_two_servers = 0;
-
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 0);
-  assert(strstr(err, "Connection") != NULL);
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 0);
   assert(strcmp(err, "The server did not answer over https; set Connection to plain or check the server") == 0);
-
-  /* Nothing stored in prefs */
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 0);
-  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 0);
-  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 0);
   assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 0);
   p->close(ctx);
 
-  /* Case B: HTTP identity check fails when CONNECTION=plain */
   mock_prefs_clear();
   mock_pref_set("CONNECTION", "plain");
   g_mock_poll_calls = 0;
-  g_mock_poll_authenticated_after = 1;
-  g_mock_sleep_calls = 0;
-  g_mock_sleep_cancelled = 0;
   g_mock_https_identity_fails = 0;
   g_mock_http_identity_fails = 1;
-  g_mock_two_servers = 0;
-
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 0);
-  assert(strstr(err, "Connection") != NULL);
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 0);
   assert(strcmp(err, "The server did not answer over http; set Connection to secure or check the server") == 0);
-
-  /* Only CONNECTION was in prefs; no server or token stored */
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 0);
-  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 0);
-  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 0);
   assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 0);
   p->close(ctx);
 }
 
-static void test_resources_two_servers(const ZZPlayProvider *p)
+static void test_link_two_servers(const ZZPlayProvider *p)
 {
   char err[128];
-  ItemCollector col;
+  ZZPlayProviderLinkResult result;
   void *ctx;
-  int ok;
   char srv[256];
   char tok[128];
 
   mock_prefs_clear();
   g_mock_poll_calls = 0;
   g_mock_poll_authenticated_after = 1;
-  g_mock_sleep_calls = 0;
   g_mock_sleep_cancelled = 0;
   g_mock_https_identity_fails = 0;
-  g_mock_two_servers = 1; /* returns resources-multi.xml with 2 servers */
-
+  g_mock_http_identity_fails = 0;
+  g_mock_two_servers = 1;
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
-
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 1);
-  assert(col.count == 2);
-  assert(col.total == 2);
-
-  assert(strcmp(col.items[0].id, "signin:server:0") == 0);
-  assert(strcmp(col.items[0].title, "Server One") == 0);
-  assert(strcmp(col.items[0].subtitle, "owned") == 0);
-  assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
-
-  assert(strcmp(col.items[1].id, "signin:server:1") == 0);
-  assert(strcmp(col.items[1].title, "Server Two") == 0);
-  assert(strcmp(col.items[1].subtitle, "shared") == 0);
-  assert(col.items[1].kind == ZZPLAY_ITEM_FOLDER);
-
-  /* Neither server stored yet */
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 1);
+  assert(result.state == ZZPLAY_LINK_CHOOSE);
+  assert(result.choice_count == 2U);
+  assert(strcmp(result.choices[0].id, "0") == 0);
+  assert(strcmp(result.choices[0].label, "Server One (owned)") == 0);
+  assert(strcmp(result.choices[1].id, "1") == 0);
+  assert(strcmp(result.choices[1].label, "Server Two (shared)") == 0);
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 0);
 
-  /* Select Server Two */
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:server:1", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 1);
-
+  assert(p->link_choose(ctx, "1", &result, err, sizeof(err)) == 1);
+  assert(result.state == ZZPLAY_LINK_DONE);
+  assert(strcmp(result.signed_in_name, "Server Two") == 0);
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 1);
-  assert(strcmp(srv, "https://192-168-1-20.1234567890abcdef.plex.direct:32400") == 0);
-  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 1);
   assert(strcmp(srv, "https://192-168-1-20.1234567890abcdef.plex.direct:32400") == 0);
   assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 1);
   assert(strcmp(srv, "http://192.168.1.20:32400") == 0);
   assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 1);
   assert(strcmp(tok, "server-two-token") == 0);
-
-  /* Lands in library top level */
-  assert(col.count > 0);
-  assert(strcmp(col.items[0].id, "playlists") == 0);
-
   p->close(ctx);
 }
 
-static void test_older_host_fails_signin_gracefully(const ZZPlayProvider *p)
+static void test_older_host_fails_link_gracefully(const ZZPlayProvider *p)
 {
   char err[128];
   ItemCollector col;
+  ZZPlayProviderLinkStart start;
   void *ctx;
-  int ok;
   ZZPlayHost old_host;
 
   old_host = g_test_host;
   old_host.size = (uint32_t)offsetof(ZZPlayHost, http_post);
   old_host.http_post = NULL;
   old_host.sleep = NULL;
-
-  /* Without token, signin folder fails gracefully */
   mock_prefs_clear();
   ctx = p->open(&old_host, err, sizeof(err));
   assert(ctx != NULL);
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 0);
+  assert(p->link_start(ctx, &start, err, sizeof(err)) == 0);
   assert(strstr(err, "ZZPlay update required") != NULL);
+  collector_init(&col, 0);
+  assert(p->list(ctx, "", 0, 10, &col.sink, err, sizeof(err)) == 1);
+  assert(col.count == 1);
+  assert(strcmp(col.items[0].id, ZZPLAY_PROVIDER_SETTINGS_ID) == 0);
   p->close(ctx);
 
-  /* With manual settings, older host still works as today */
   mock_prefs_clear();
   mock_pref_set("SERVER", TEST_SERVER);
   mock_pref_set("TOKEN", TEST_TOKEN);
   ctx = p->open(&old_host, err, sizeof(err));
   assert(ctx != NULL);
   collector_init(&col, 0);
-  ok = p->list(ctx, "", 0, 10, &col.sink, err, sizeof(err));
-  assert(ok == 1);
+  assert(p->list(ctx, "", 0, 10, &col.sink, err, sizeof(err)) == 1);
   assert(col.count > 0);
   p->close(ctx);
 }
@@ -1688,6 +1623,8 @@ static void test_error_401(const ZZPlayProvider *p)
   char err[128];
   ItemCollector col;
   ZZPlayResolved res;
+  ZZPlayProviderLinkStart start;
+  ZZPlayProviderLinkResult link;
   void *ctx;
   size_t i;
   int ok;
@@ -1702,34 +1639,24 @@ static void test_error_401(const ZZPlayProvider *p)
     assert(strcmp(err, TOKEN_REJECTED) == 0);
   }
   collector_init(&col, 0);
-  ok = p->search(ctx, "paris", &col.sink, err, sizeof(err));
-  assert(ok == 0);
+  assert(p->search(ctx, "paris", &col.sink, err, sizeof(err)) == 0);
   assert(strcmp(err, TOKEN_REJECTED) == 0);
-  ok = p->resolve(ctx, "302", &res, err, sizeof(err));
-  assert(ok == 0);
+  assert(p->resolve(ctx, "302", &res, err, sizeof(err)) == 0);
   assert(strcmp(err, TOKEN_REJECTED) == 0);
   p->close(ctx);
 
-  /* plex.tv refusing the sign-in poll ends it at once instead of polling
-   * until the time limit. */
   mock_prefs_clear();
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
   g_mock_sleep_calls = 0;
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 50, &col.sink, err,
-               sizeof(err));
-  assert(ok == 0);
+  assert(p->link_poll(ctx, "736458353", &link, err, sizeof(err)) == 0);
   assert(strcmp(err, "plex.tv rejected the sign-in. Start sign-in again.") == 0);
   assert(g_mock_sleep_calls == 0);
-  assert(g_pref_count == 1U); /* only CLIENTID was stored */
-
-  /* A PIN request plex.tv refuses. */
+  assert(g_pref_count == 1U);
   g_mock_status = 200;
   g_mock_post_status = 401;
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin", 0, 50, &col.sink, err, sizeof(err));
-  assert(ok == 0 && err[0] != '\0');
+  assert(p->link_start(ctx, &start, err, sizeof(err)) == 0);
+  assert(err[0] != '\0');
   g_mock_post_status = 201;
   p->close(ctx);
   g_mock_status = 200;
@@ -1742,6 +1669,7 @@ static void test_unreachable_server(const ZZPlayProvider *p)
   char err[128];
   ItemCollector col;
   ZZPlayResolved res;
+  ZZPlayProviderLinkResult link;
   void *ctx;
   int ok;
 
@@ -1752,19 +1680,14 @@ static void test_unreachable_server(const ZZPlayProvider *p)
   assert(ok == 0 && strcmp(err, "Cannot connect to 192.168.1.10") == 0);
   ok = p->resolve(ctx, "302", &res, err, sizeof(err));
   assert(ok == 0 && strcmp(err, "Cannot connect to 192.168.1.10") == 0);
-
   g_mock_unreachable = 2;
   collector_init(&col, 0);
   ok = p->list(ctx, "alb:201", 0, 50, &col.sink, err, sizeof(err));
   assert(ok == 0 && strcmp(err, "The Plex server did not answer") == 0);
-
-  /* plex.tv unreachable during the sign-in poll: no waiting it out. */
   g_mock_unreachable = 1;
   g_mock_sleep_calls = 0;
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 50, &col.sink, err,
-               sizeof(err));
-  assert(ok == 0 && strcmp(err, "Cannot connect to 192.168.1.10") == 0);
+  assert(p->link_poll(ctx, "736458353", &link, err, sizeof(err)) == 0);
+  assert(strcmp(err, "Cannot connect to 192.168.1.10") == 0);
   assert(g_mock_sleep_calls == 0);
   g_mock_unreachable = 0;
   p->close(ctx);
@@ -1828,12 +1751,12 @@ static void test_empty_library(const ZZPlayProvider *p)
 
 /* A sign-in whose settings cannot be saved says so and does not leave
  * the session signed in. */
-static void test_signin_save_failure(const ZZPlayProvider *p)
+static void test_link_save_failure(const ZZPlayProvider *p)
 {
   char err[128];
   ItemCollector col;
+  ZZPlayProviderLinkResult link;
   void *ctx;
-  int ok;
 
   mock_prefs_clear();
   g_mock_status = 200;
@@ -1843,16 +1766,13 @@ static void test_signin_save_failure(const ZZPlayProvider *p)
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
   g_mock_pref_fail = 1;
-  collector_init(&col, 0);
-  ok = p->list(ctx, "signin:continue:736458353", 0, 50, &col.sink, err,
-               sizeof(err));
+  assert(p->link_poll(ctx, "736458353", &link, err, sizeof(err)) == 0);
   g_mock_pref_fail = 0;
-  assert(ok == 0);
   assert(strcmp(err, "Could not save the settings") == 0);
-  /* Still signed out: the top level offers sign-in. */
   collector_init(&col, 0);
-  ok = p->list(ctx, "", 0, 50, &col.sink, err, sizeof(err));
-  assert(ok == 1 && col.count == 1 && strcmp(col.items[0].id, "signin") == 0);
+  assert(p->list(ctx, "", 0, 50, &col.sink, err, sizeof(err)) == 1);
+  assert(col.count == 1);
+  assert(strcmp(col.items[0].id, ZZPLAY_PROVIDER_SETTINGS_ID) == 0);
   p->close(ctx);
 }
 
@@ -2139,10 +2059,9 @@ static void test_reply_fuzz(const ZZPlayProvider *p)
     { "letter-a-artists.xml", "/firstCharacter/", "ltr:3:8:A" },
     { "genres.xml", "/genre?", "lib:3:gen" },
     { "metadata-302.xml", "/library/metadata/302", NULL },
-    { "resources.xml", "/api/v2/resources", "signin:continue:736458353" }
   };
-  static char seeds[9][8192];
-  static size_t seed_len[9];
+  static char seeds[8][8192];
+  static size_t seed_len[8];
   static char buf[24576];
   ZZPlayItemSink sink;
   ZZPlayResolved res;
@@ -2152,7 +2071,7 @@ static void test_reply_fuzz(const ZZPlayProvider *p)
   uint32_t r;
   size_t i;
 
-  for (i = 0U; i < 9U; i++) {
+  for (i = 0U; i < 8U; i++) {
     seed_len[i] = read_fixture(cases[i].fixture, seeds[i], sizeof(seeds[i]));
   }
   sink.item = fuzz_sink_item;
@@ -2160,7 +2079,7 @@ static void test_reply_fuzz(const ZZPlayProvider *p)
   sink.user = &seen;
   g_mock_poll_authenticated_after = 1;
   for (r = 0U; r < 3000U; r++) {
-    size_t which = fz() % 9U;
+    size_t which = fz() % 8U;
     int ok;
 
     /* A fresh session each time: sign-in replaces the server and token. */
@@ -2226,19 +2145,23 @@ int main(void)
   assert(p->fields[3].choice_values == NULL && p->fields[3].choice_labels == NULL);
   assert(strcmp(p->fields[2].key, "TOKEN") == 0);
   assert(strcmp(p->fields[3].key, "BITRATE") == 0);
+  assert(p->link_start != NULL);
+  assert(p->link_poll != NULL);
+  assert(p->link_choose != NULL);
 
-  test_no_token_shows_signin_folder(p);
-  test_pin_request(p);
-  test_pin_poll_waiting_then_token(p);
-  test_pin_poll_cancel_stores_nothing(p);
-  test_resources_signin_stores_both_addresses(p);
-  test_resources_signin_connection_plain(p);
+  test_no_token_shows_settings_row(p);
+  test_link_start(p);
+  test_link_poll_waiting_then_token(p);
+  test_link_poll_cancel_stores_nothing(p);
+  test_link_poll_errors(p);
+  test_link_poll_stores_both_addresses(p);
+  test_link_poll_connection_plain(p);
   test_connection_selection_and_switching(p);
   test_manual_server_alone(p);
   test_plain_plexdirect_fallback(p);
   test_failed_probe_stores_nothing_and_names_connection(p);
-  test_resources_two_servers(p);
-  test_older_host_fails_signin_gracefully(p);
+  test_link_two_servers(p);
+  test_older_host_fails_link_gracefully(p);
   test_sections_listing(p);
   test_single_library_top(p);
   test_letter_folders(p);
@@ -2257,7 +2180,7 @@ int main(void)
   test_empty_library(p);
   test_odd_text(p);
   test_reply_fuzz(p);
-  test_signin_save_failure(p);
+  test_link_save_failure(p);
   test_headers_on_every_request();
 
   printf("All zzplay_provider_plex_test checks passed (%u HTTP requests verified).\n",

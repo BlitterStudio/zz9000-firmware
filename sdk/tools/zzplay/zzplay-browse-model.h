@@ -43,7 +43,8 @@ typedef enum ZZPlayBrowseAction {
   ZZPLAY_BROWSE_ACTION_NONE = 0,
   ZZPLAY_BROWSE_ACTION_ENTER_FOLDER,
   ZZPLAY_BROWSE_ACTION_PLAY,
-  ZZPLAY_BROWSE_ACTION_PAGE_MORE
+  ZZPLAY_BROWSE_ACTION_PAGE_MORE,
+  ZZPLAY_BROWSE_ACTION_OPEN_SETTINGS
 } ZZPlayBrowseAction;
 
 /* What Play or Add does with the current selection. */
@@ -61,7 +62,10 @@ typedef enum ZZPlayBrowseReqKind {
   ZZPLAY_BROWSE_REQ_RESOLVE,
   ZZPLAY_BROWSE_REQ_FAVOURITE,
   ZZPLAY_BROWSE_REQ_GATHER,
-  ZZPLAY_BROWSE_REQ_CLOSE
+  ZZPLAY_BROWSE_REQ_CLOSE,
+  ZZPLAY_BROWSE_REQ_LINK_START,
+  ZZPLAY_BROWSE_REQ_LINK_POLL,
+  ZZPLAY_BROWSE_REQ_LINK_CHOOSE
 } ZZPlayBrowseReqKind;
 
 typedef struct ZZPlayBrowseRequest {
@@ -77,6 +81,8 @@ typedef struct ZZPlayBrowseRequest {
   int reopen;                /* close and reopen the module first: its
                                 settings changed */
   ZZPlayBrowseItem item;
+  char link_id[ZZPLAY_PROVIDER_TEXT_MAX];
+  char choice_id[ZZPLAY_PROVIDER_TEXT_MAX];
 } ZZPlayBrowseRequest;
 
 typedef struct ZZPlayBrowseReply {
@@ -97,6 +103,8 @@ typedef struct ZZPlayBrowseReply {
    * exhausted. */
   int truncated;
   ZZPlayResolved resolved;
+  ZZPlayProviderLinkStart link_start;
+  ZZPlayProviderLinkResult link_result;
 } ZZPlayBrowseReply;
 
 typedef struct ZZPlayBrowseFrame {
@@ -260,6 +268,7 @@ int zzplay_browse_model_gather_live(const ZZPlayBrowseModel *model,
 /* The live gather's final reply has been handled. */
 void zzplay_browse_model_gather_done(ZZPlayBrowseModel *model);
 int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider);
+int zzplay_browse_model_provider_has_link(const ZZPlayProvider *provider);
 int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,
                                   ZZPlayBrowseRequest *out_req);

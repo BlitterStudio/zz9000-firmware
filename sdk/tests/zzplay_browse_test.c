@@ -429,6 +429,37 @@ static int test_activation_folder_enters_station_plays(void)
   return 0;
 }
 
+static int test_settings_row_opens_settings(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem item;
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  memset(&item, 0, sizeof(item));
+  snprintf(item.id, sizeof(item.id), "%s", ZZPLAY_PROVIDER_SETTINGS_ID);
+  snprintf(item.title, sizeof(item.title),
+           "Not signed in. Open Settings to sign in.");
+  item.kind = ZZPLAY_ITEM_TRACK;
+  item.playable = 0U;
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = &item;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply));
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_OPEN_SETTINGS);
+  assert(model.selection == 0);
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+
 static int test_gather_request_for_collection(void)
 {
   ZZPlayBrowseModel model;
@@ -2431,6 +2462,7 @@ int main(void)
   assert(test_play_add_unavailable_for_folders_and_unplayable() == 0);
   assert(test_gather_request_for_collection() == 0);
   assert(test_activation_folder_enters_station_plays() == 0);
+  assert(test_settings_row_opens_settings() == 0);
   assert(test_favourite_action() == 0);
   assert(test_play_all_add_all_on_shown_folder() == 0);
   assert(test_back_after_play_all_shows_letter_rows() == 0);

@@ -80,28 +80,37 @@ static int test_layout_columns(void)
   if (cols.sub_x + cols.sub_w > cols.len_x) return 10;
   if (cols.len_x + cols.len_w > 28) return 11;
 
-  /* A row with no subtitle (an instruction such as "On any device, open
-   * plex.tv/link") keeps the whole width up to the length cell, or to the
-   * right padding when it has no length either. */
+  /* Rows use the cells they do not need: an instruction (no subtitle)
+   * keeps the whole width up to the length cell, or to the right padding
+   * without a length; a station (subtitle, no length) splits the width
+   * up to the right padding, so its details are not cut early. */
   {
     ZZPlayBrowseColumns split;
 
     zzplay_browse_layout_columns(400, 12, 50, 6, &split);
     cols = split;
-    zzplay_browse_widen_title(&cols, 400, 6, 1, 1);
+    zzplay_browse_fit_row(&cols, 400, 6, 1, 1);
     if (cols.title_w != split.title_w || cols.sub_w != split.sub_w) return 12;
     cols = split;
-    zzplay_browse_widen_title(&cols, 400, 6, 0, 1);
+    zzplay_browse_fit_row(&cols, 400, 6, 0, 1);
     if (cols.title_x + cols.title_w != cols.len_x - 6) return 13;
     if (cols.sub_w != 0) return 14;
     cols = split;
-    zzplay_browse_widen_title(&cols, 400, 6, 0, 0);
+    zzplay_browse_fit_row(&cols, 400, 6, 0, 0);
     if (cols.title_x + cols.title_w != 398) return 15;
+    cols = split;
+    zzplay_browse_fit_row(&cols, 400, 6, 1, 0);
+    if (cols.sub_x + cols.sub_w != 398) return 16;
+    if (cols.title_w <= split.title_w || cols.sub_w <= split.sub_w) return 17;
+    if (cols.title_x + cols.title_w + 6 != cols.sub_x) return 18;
     /* Never narrower than the plain split, even in a tiny row. */
     zzplay_browse_layout_columns(30, 12, 50, 6, &split);
     cols = split;
-    zzplay_browse_widen_title(&cols, 30, 6, 0, 1);
-    if (cols.title_w < split.title_w || cols.title_w < 0) return 16;
+    zzplay_browse_fit_row(&cols, 30, 6, 0, 1);
+    if (cols.title_w < split.title_w || cols.title_w < 0) return 19;
+    cols = split;
+    zzplay_browse_fit_row(&cols, 30, 6, 1, 0);
+    if (cols.title_w < split.title_w || cols.sub_w < split.sub_w) return 20;
   }
 
   return 0;

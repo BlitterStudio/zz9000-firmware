@@ -28,6 +28,36 @@
 #define ZZPLAY_PROVIDER_TEXT_MAX 96U
 #define ZZPLAY_PROVIDER_ERROR_MAX 128U
 
+/* A non-playable row with this id asks ZZPlay to open the service's
+ * Settings window instead of trying to browse or play it. */
+#define ZZPLAY_PROVIDER_SETTINGS_ID "\037settings"
+
+/* Device-link sign-in results. link_poll may block while it polls because
+ * ZZPlay always calls it in the Browse worker process. */
+#define ZZPLAY_LINK_DONE 1U
+#define ZZPLAY_LINK_CHOOSE 2U
+#define ZZPLAY_LINK_CHOICES_MAX 8U
+
+typedef struct ZZPlayProviderLinkStart {
+  char url[ZZPLAY_PROVIDER_TEXT_MAX];
+  char code[ZZPLAY_PROVIDER_TEXT_MAX];
+  char link_id[ZZPLAY_PROVIDER_TEXT_MAX];
+} ZZPlayProviderLinkStart;
+
+typedef struct ZZPlayProviderLinkChoice {
+  char id[ZZPLAY_PROVIDER_TEXT_MAX];
+  char label[ZZPLAY_PROVIDER_TEXT_MAX];
+} ZZPlayProviderLinkChoice;
+
+typedef struct ZZPlayProviderLinkResult {
+  uint32_t state; /* ZZPLAY_LINK_* */
+  uint32_t choice_count;
+  ZZPlayProviderLinkChoice choices[ZZPLAY_LINK_CHOICES_MAX];
+  /* Set on DONE to the human-readable account/server selected. */
+  char signed_in_name[ZZPLAY_PROVIDER_TEXT_MAX];
+} ZZPlayProviderLinkResult;
+
+
 /* What a browse row is. */
 #define ZZPLAY_ITEM_FOLDER 0U  /* opens another list */
 #define ZZPLAY_ITEM_TRACK 1U   /* a finite item */
@@ -192,7 +222,25 @@ typedef struct ZZPlayProvider {
    * none. Returns 1, or 0 with the reason. */
   int (*favourite)(void *ctx, const ZZPlayProviderItem *item, int add,
                    char *err, uint32_t err_size);
+  /* Optional device-link sign-in. These fields were appended after the
+   * original ABI; callers must check size before reading them. link_name
+   * is the short account name used in the window title ("Plex");
+   * link_host is the site shown in prompts ("plex.tv"). link_start obtains
+   * the URL, code and opaque id. link_poll waits for approval and either
+   * saves the only choice (DONE) or returns choices (CHOOSE). link_choose
+   * saves one returned choice. */
+  const char *link_name;
+  const char *link_host;
+  int (*link_start)(void *ctx, ZZPlayProviderLinkStart *out,
+                    char *err, uint32_t err_size);
+  int (*link_poll)(void *ctx, const char *link_id,
+                   ZZPlayProviderLinkResult *out,
+                   char *err, uint32_t err_size);
+  int (*link_choose)(void *ctx, const char *choice_id,
+                     ZZPlayProviderLinkResult *out,
+                     char *err, uint32_t err_size);
 } ZZPlayProvider;
+
 
 /* The first code of a module's hunk file. */
 typedef const ZZPlayProvider *(*ZZPlayProviderEntry)(void);

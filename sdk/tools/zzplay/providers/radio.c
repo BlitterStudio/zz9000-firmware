@@ -1241,7 +1241,12 @@ static const ZZPlayProvider radio_provider = {
   radio_list,
   radio_search,
   radio_resolve,
-  radio_favourite
+  radio_favourite,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL
 };
 
 const ZZPlayProvider *zzplay_provider_entry(void)

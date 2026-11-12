@@ -83,7 +83,11 @@ enum BrowseGadgetID {
   BGID_STATUS,
   SGID_SAVE,
   SGID_CANCEL,
-  SGID_FIELD_BASE
+  SGID_LINK,
+  SGID_STATUS,
+  SGID_FIELD_BASE = 100,
+  LGID_ACTION = 200,
+  LGID_CHOICE
 };
 
 static struct Window *browse_win = NULL;
@@ -92,6 +96,9 @@ static APTR browse_vi = NULL;
 static APTR settings_vi = NULL;
 static struct Gadget *browse_glist = NULL;
 static struct Gadget *settings_glist = NULL;
+static struct Window *link_win = NULL;
+static APTR link_vi = NULL;
+static struct Gadget *link_glist = NULL;
 
 static struct Gadget *service_gad = NULL;
 static struct Gadget *search_gad = NULL;
@@ -108,6 +115,10 @@ static struct Gadget *stop_gad = NULL;
 static struct Gadget *settings_btn_gad = NULL;
 static struct Gadget *status_gad = NULL;
 static struct Gadget *field_gads[BROWSE_FIELDS_MAX];
+static struct Gadget *settings_link_gad = NULL;
+static struct Gadget *settings_note_gad = NULL;
+static struct Gadget *link_choice_gad = NULL;
+static struct Gadget *link_action_gad = NULL;
 static struct TextAttr *browse_text_attr = NULL;
 static struct List browse_exec_list;
 static ZZPlayBrowseModel browse_model;
@@ -128,6 +139,30 @@ static char secret_orig[BROWSE_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
  * Zero means the field is shown as a text field instead. */
 static int field_choice_n[BROWSE_FIELDS_MAX];
 static int field_choice_sel[BROWSE_FIELDS_MAX];
+static char settings_note[ZZPLAY_PROVIDER_ERROR_MAX];
+static char settings_link_label[ZZPLAY_PROVIDER_TEXT_MAX];
+static char link_line1[ZZPLAY_PROVIDER_ERROR_MAX];
+static char link_line2[ZZPLAY_PROVIDER_ERROR_MAX];
+static char link_code[ZZPLAY_PROVIDER_TEXT_MAX];
+static char link_status[ZZPLAY_PROVIDER_ERROR_MAX];
+static char link_title[ZZPLAY_PROVIDER_TEXT_MAX];
+static char link_choice_storage[ZZPLAY_LINK_CHOICES_MAX]
+                               [ZZPLAY_PROVIDER_TEXT_MAX];
+static const char *link_choice_labels[ZZPLAY_LINK_CHOICES_MAX + 1U];
+static ZZPlayProviderLinkStart link_start_data;
+static ZZPlayProviderLinkResult link_result;
+static ZZPlayBrowseReqKind link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
+static uint32_t link_generation = 0U;
+static int link_choice_sel = 0;
+static const ZZPlayProvider *link_provider = NULL;
+enum LinkWindowState {
+  LINK_WINDOW_CLOSED = 0,
+  LINK_WINDOW_STARTING,
+  LINK_WINDOW_WAITING,
+  LINK_WINDOW_CHOOSE,
+  LINK_WINDOW_ERROR
+};
+static int link_window_state = LINK_WINDOW_CLOSED;
 
 static int32_t last_clicked_idx = -1;
 static ZZPlayBrowseReply poll_worker_reply;
@@ -221,6 +256,7 @@ struct browse_row_node {
   int32_t index;    /* row in browse_model.items, -1 = the More row */
   uint32_t kind;
   uint32_t playable;
+  uint32_t favourite; /* draws a star before the title */
   char duration[12]; /* "88:88:88" or "" when unknown */
   char title[ZZPLAY_PROVIDER_TEXT_MAX];
   char subtitle[ZZPLAY_PROVIDER_TEXT_MAX];
@@ -306,6 +342,19 @@ static void browse_draw_marker(struct RastPort *rp, int x, int top,
   }
 }
 
+/* A seven by seven filled star in front of a favourite's title. */
+static void browse_draw_star(struct RastPort *rp, int x, int top)
+{
+  RectFill(rp, (WORD)(x + 3), (WORD)top, (WORD)(x + 3), (WORD)(top + 1));
+  RectFill(rp, (WORD)x, (WORD)(top + 2), (WORD)(x + 6), (WORD)(top + 2));
+  RectFill(rp, (WORD)(x + 1), (WORD)(top + 3), (WORD)(x + 5), (WORD)(top + 3));
+  RectFill(rp, (WORD)(x + 2), (WORD)(top + 4), (WORD)(x + 4), (WORD)(top + 4));
+  RectFill(rp, (WORD)(x + 1), (WORD)(top + 5), (WORD)(x + 2), (WORD)(top + 5));
+  RectFill(rp, (WORD)(x + 4), (WORD)(top + 5), (WORD)(x + 5), (WORD)(top + 5));
+  RectFill(rp, (WORD)x, (WORD)(top + 6), (WORD)(x + 1), (WORD)(top + 6));
+  RectFill(rp, (WORD)(x + 5), (WORD)(top + 6), (WORD)(x + 6), (WORD)(top + 6));
+}
+
 /* Renders one row: marker, title, subtitle, then the length right
  * aligned when known. GadTools calls this hook wherever it renders the
  * list, which includes Intuition's input task during a scroll drag, so
@@ -369,11 +418,18 @@ static LONG browse_row_render(REG(a0, struct Hook *hook),
     return (LONG)LVCB_OK;
   }
 
-  zzplay_browse_widen_title(&cols, w, BROWSE_COLUMN_GAP,
-                            row->subtitle[0] != '\0',
-                            row->duration[0] != '\0');
+  zzplay_browse_fit_row(&cols, w, BROWSE_COLUMN_GAP,
+                        row->subtitle[0] != '\0',
+                        row->duration[0] != '\0');
   browse_draw_marker(rp, (int)msg->lvdm_Bounds.MinX + cols.marker_x,
                      y + ((h - 7) >> 1), row->kind, row->playable);
+  if (row->favourite && cols.title_w > 7 + BROWSE_COLUMN_GAP) {
+    /* The star takes the start of the title cell. */
+    browse_draw_star(rp, (int)msg->lvdm_Bounds.MinX + cols.title_x,
+                     y + ((h - 7) >> 1));
+    cols.title_x += 7 + BROWSE_COLUMN_GAP;
+    cols.title_w -= 7 + BROWSE_COLUMN_GAP;
+  }
   browse_draw_text(rp, row->title, (int)msg->lvdm_Bounds.MinX + cols.title_x,
                    text_y, cols.title_w);
   browse_draw_text(rp, row->subtitle,
@@ -422,6 +478,7 @@ static void update_busy_pointer(void)
 
   set_window_busy(browse_win, busy);
   set_window_busy(settings_win, busy);
+  set_window_busy(link_win, busy);
 }
 
 static void copy_string(char *dst, size_t dst_size, const char *src)
@@ -587,6 +644,9 @@ static void browse_send_failed(const char *why)
   update_busy_pointer();
 }
 
+static int is_link_request(ZZPlayBrowseReqKind kind);
+static void link_show_error(const char *message);
+
 /* The worker runs one request at a time. A new request (the user opened
  * a folder, searched, went back) supersedes a running one: cancel that and
  * send the new one once its reply, now stale, has come back. Returns 0,
@@ -612,6 +672,11 @@ static int browse_send(const ZZPlayBrowseRequest *req,
     }
     update_busy_pointer();
     return 1;
+  }
+  if (have_pending && is_link_request(pending_req.kind) &&
+      !is_link_request(req->kind)) {
+    link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
+    link_show_error("Sign-in was cancelled");
   }
   pending_req = *req;
   pending_provider = provider;
@@ -751,6 +816,7 @@ static void rebuild_list_nodes(void)
     row->index = (int32_t)i;
     row->kind = it->kind;
     row->playable = it->playable;
+    row->favourite = it->favourite;
     zzplay_browse_format_duration(it->duration_ms, row->duration,
                                   sizeof(row->duration));
     if (browse_columns_ok) {
@@ -765,8 +831,10 @@ static void rebuild_list_nodes(void)
       if (it->kind == ZZPLAY_ITEM_FOLDER) {
         n = snprintf(row->title, sizeof(row->title), "[+] %s", it->title);
       } else if (it->subtitle[0] != '\0') {
-        n = snprintf(row->title, sizeof(row->title), "%s - %s", it->title,
-                     it->subtitle);
+        n = snprintf(row->title, sizeof(row->title), "%s%s - %s",
+                     it->favourite ? "* " : "", it->title, it->subtitle);
+      } else if (it->favourite) {
+        n = snprintf(row->title, sizeof(row->title), "* %s", it->title);
       } else {
         n = 0;
         copy_string(row->title, sizeof(row->title), it->title);
@@ -916,8 +984,11 @@ static void browse_show_selection(void)
   update_buttons();
 }
 
+static void close_link_window(int cancel);
+
 static void close_settings_window(void)
 {
+  close_link_window(1);
   if (settings_win) {
     if (settings_win->UserPort) {
       struct IntuiMessage *msg;
@@ -932,10 +1003,13 @@ static void close_settings_window(void)
     FreeGadgets(settings_glist);
     settings_glist = NULL;
   }
+  settings_link_gad = NULL;
+  settings_note_gad = NULL;
   if (settings_vi) {
     FreeVisualInfo(settings_vi);
     settings_vi = NULL;
   }
+  settings_note[0] = '\0';
 }
 
 /* Width of `text` in the screen font, which every gadget here uses. */
@@ -944,6 +1018,235 @@ static int browse_text_w(const char *text)
   return (int)TextLength(&gui_screen->RastPort, (CONST_STRPTR)text,
                          (ULONG)strlen(text));
 }
+
+static int is_link_request(ZZPlayBrowseReqKind kind)
+{
+  return kind == ZZPLAY_BROWSE_REQ_LINK_START ||
+         kind == ZZPLAY_BROWSE_REQ_LINK_POLL ||
+         kind == ZZPLAY_BROWSE_REQ_LINK_CHOOSE;
+}
+
+static void destroy_link_window(void)
+{
+  if (link_win) {
+    if (link_win->UserPort) {
+      struct IntuiMessage *msg;
+      while ((msg = GT_GetIMsg(link_win->UserPort)) != NULL) {
+        GT_ReplyIMsg(msg);
+      }
+    }
+    CloseWindow(link_win);
+    link_win = NULL;
+  }
+  if (link_glist) {
+    FreeGadgets(link_glist);
+    link_glist = NULL;
+  }
+  if (link_vi) {
+    FreeVisualInfo(link_vi);
+    link_vi = NULL;
+  }
+  link_choice_gad = NULL;
+  link_action_gad = NULL;
+}
+
+static void close_link_window(int cancel)
+{
+  destroy_link_window();
+  if (cancel) {
+    if (have_pending && is_link_request(pending_req.kind)) {
+      have_pending = 0;
+    }
+    if (link_request_kind != ZZPLAY_BROWSE_REQ_NONE &&
+        zzplay_browse_worker_active()) {
+      zzplay_browse_worker_cancel();
+    }
+    link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
+    link_window_state = LINK_WINDOW_CLOSED;
+    link_provider = NULL;
+  }
+}
+
+static int link_text_width(void)
+{
+  int width = browse_text_w("On a phone or computer, open service.example/link");
+  int w;
+  uint32_t i;
+
+  w = browse_text_w(link_line1);
+  if (w > width) width = w;
+  w = browse_text_w(link_line2);
+  if (w > width) width = w;
+  w = browse_text_w(link_code);
+  if (w > width) width = w;
+  w = browse_text_w(link_status);
+  if (w > width) width = w;
+  for (i = 0U; i < link_result.choice_count; i++) {
+    w = browse_text_w(link_choice_labels[i]) + 32;
+    if (w > width) width = w;
+  }
+  return width;
+}
+
+static void __attribute__((noinline)) open_link_window(void)
+{
+  struct NewGadget ng;
+  struct Gadget *gad;
+  struct TextFont *font;
+  struct TagItem text_tags[4];
+  struct TagItem cycle_tags[3];
+  int font_h;
+  int row_h;
+  int win_w;
+  int win_h;
+  int y;
+  int button_w;
+  const char *action;
+
+  destroy_link_window();
+  if (!gui_screen || link_window_state == LINK_WINDOW_CLOSED) return;
+  link_vi = GetVisualInfo(gui_screen, TAG_DONE);
+  if (!link_vi) return;
+  font = gui_screen->RastPort.Font;
+  font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
+  row_h = font_h + 6;
+  win_w = link_text_width() + 2 * BROWSE_MARGIN;
+  action = link_window_state == LINK_WINDOW_CHOOSE
+               ? "Use this server"
+               : (link_window_state == LINK_WINDOW_ERROR ? "Close" : "Cancel");
+  button_w = browse_text_w(action) + 24;
+  if (win_w < button_w + 2 * BROWSE_MARGIN) {
+    win_w = button_w + 2 * BROWSE_MARGIN;
+  }
+  win_h = 5 * row_h + 5 * BROWSE_SPACING + 2 * BROWSE_MARGIN;
+  if (link_window_state == LINK_WINDOW_CHOOSE) {
+    win_h += row_h + BROWSE_SPACING;
+  }
+
+  link_glist = NULL;
+  gad = CreateContext(&link_glist);
+  if (!gad) {
+    close_link_window(1);
+    return;
+  }
+  memset(&ng, 0, sizeof(ng));
+  ng.ng_VisualInfo = link_vi;
+  ng.ng_TextAttr = browse_text_attr;
+  link_win = OpenWindowTags(
+      NULL,
+      WA_Title, (ULONG)link_title,
+      WA_Left, settings_win ? settings_win->LeftEdge + 24 : 80,
+      WA_Top, settings_win ? settings_win->TopEdge + 24 : 70,
+      WA_InnerWidth, (ULONG)win_w,
+      WA_InnerHeight, (ULONG)win_h,
+      WA_DragBar, TRUE,
+      WA_DepthGadget, TRUE,
+      WA_CloseGadget, TRUE,
+      WA_Activate, TRUE,
+      WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_GADGETUP | IDCMP_REFRESHWINDOW,
+      WA_CustomScreen, (ULONG)gui_screen,
+      TAG_DONE);
+  if (!link_win) {
+    close_link_window(1);
+    return;
+  }
+
+  text_tags[0].ti_Tag = GTTX_CopyText;
+  text_tags[0].ti_Data = TRUE;
+  text_tags[1].ti_Tag = GTTX_Clipped;
+  text_tags[1].ti_Data = TRUE;
+  text_tags[2].ti_Tag = GTTX_Justification;
+  text_tags[2].ti_Data = GTJ_CENTER;
+  text_tags[3].ti_Tag = TAG_DONE;
+  y = BROWSE_MARGIN;
+#define LINK_TEXT_ROW(text_value) \
+  do { \
+    text_tags[0].ti_Tag = GTTX_Text; \
+    text_tags[0].ti_Data = (ULONG)(text_value); \
+    text_tags[1].ti_Tag = GTTX_CopyText; \
+    text_tags[1].ti_Data = TRUE; \
+    text_tags[2].ti_Tag = GTTX_Justification; \
+    text_tags[2].ti_Data = GTJ_CENTER; \
+    text_tags[3].ti_Tag = TAG_DONE; \
+    gad = create_gadget(link_win, TEXT_KIND, gad, &ng, BROWSE_MARGIN, y, \
+                        win_w - 2 * BROWSE_MARGIN, row_h, NULL, 0, 0, \
+                        text_tags); \
+    y += row_h + BROWSE_SPACING; \
+  } while (0)
+  LINK_TEXT_ROW(link_line1);
+  LINK_TEXT_ROW(link_line2);
+  LINK_TEXT_ROW(link_code);
+  LINK_TEXT_ROW(link_status);
+#undef LINK_TEXT_ROW
+
+  if (link_window_state == LINK_WINDOW_CHOOSE) {
+    cycle_tags[0].ti_Tag = GTCY_Labels;
+    cycle_tags[0].ti_Data = (ULONG)link_choice_labels;
+    cycle_tags[1].ti_Tag = GTCY_Active;
+    cycle_tags[1].ti_Data = (ULONG)link_choice_sel;
+    cycle_tags[2].ti_Tag = TAG_DONE;
+    link_choice_gad = gad = create_gadget(
+        link_win, CYCLE_KIND, gad, &ng, BROWSE_MARGIN, y,
+        win_w - 2 * BROWSE_MARGIN, row_h, NULL, LGID_CHOICE,
+        PLACETEXT_IN, cycle_tags);
+    y += row_h + BROWSE_SPACING;
+  }
+  link_action_gad = gad = create_gadget(
+      link_win, BUTTON_KIND, gad, &ng, (win_w - button_w) / 2, y,
+      button_w, row_h, action, LGID_ACTION, PLACETEXT_IN, NULL);
+  if (!gad) {
+    close_link_window(1);
+    return;
+  }
+  AddGList(link_win, link_glist, (UWORD)-1, (UWORD)-1, NULL);
+  RefreshGList(link_glist, link_win, NULL, (UWORD)-1);
+  GT_RefreshWindow(link_win, NULL);
+  update_busy_pointer();
+}
+
+static void link_show_error(const char *message)
+{
+  link_window_state = LINK_WINDOW_ERROR;
+  link_line1[0] = '\0';
+  link_line2[0] = '\0';
+  link_code[0] = '\0';
+  copy_string(link_status, sizeof(link_status),
+              message && message[0] ? message : "Sign-in failed");
+  open_link_window();
+}
+
+static void start_link_signin(const ZZPlayProvider *p)
+{
+  ZZPlayBrowseRequest req;
+
+  if (!p || !zzplay_browse_model_provider_has_link(p)) return;
+  link_provider = p;
+  memset(&link_start_data, 0, sizeof(link_start_data));
+  memset(&link_result, 0, sizeof(link_result));
+  link_generation++;
+  link_window_state = LINK_WINDOW_STARTING;
+  (void)snprintf(link_title, sizeof(link_title), "%s sign-in",
+                 p->link_name ? p->link_name : "Service");
+  (void)snprintf(link_line1, sizeof(link_line1),
+                 "Asking %s for a code...",
+                 p->link_host ? p->link_host : "the service");
+  link_line2[0] = '\0';
+  link_code[0] = '\0';
+  link_status[0] = '\0';
+  open_link_window();
+  if (!link_win) return;
+
+  memset(&req, 0, sizeof(req));
+  req.kind = ZZPLAY_BROWSE_REQ_LINK_START;
+  req.generation = link_generation;
+  copy_string(req.scheme, sizeof(req.scheme), p->scheme);
+  link_request_kind = req.kind;
+  if (!browse_send(&req, p)) {
+    link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
+    link_show_error(BROWSE_WORKER_FAILED);
+  }
+}
+
 
 static void __attribute__((noinline)) open_settings_window(void)
 {
@@ -961,6 +1264,7 @@ static void __attribute__((noinline)) open_settings_window(void)
   int btn_w;
   uint32_t i;
   uint32_t count;
+  int has_link;
 
   if (settings_win) {
     WindowToFront(settings_win);
@@ -970,7 +1274,8 @@ static void __attribute__((noinline)) open_settings_window(void)
 
   svc = zzplay_browse_model_current_service(&browse_model);
   p = svc ? svc->provider : NULL;
-  if (!p || p->field_count == 0U) {
+  has_link = zzplay_browse_model_provider_has_link(p);
+  if (!p || (p->field_count == 0U && !has_link)) {
     update_status_text("Service has no settings");
     return;
   }
@@ -1011,6 +1316,14 @@ static void __attribute__((noinline)) open_settings_window(void)
       }
     }
   }
+  if (has_link) {
+    int w;
+    (void)snprintf(settings_link_label, sizeof(settings_link_label),
+                   "Sign in with %s",
+                   p->link_host ? p->link_host : "service");
+    w = browse_text_w(settings_link_label);
+    if (w + 24 > val_min_w) val_min_w = w + 24;
+  }
   label_w += 12;
   btn_w = browse_text_w("Cancel") + 24;
   win_w = label_w + val_min_w + 2 * BROWSE_MARGIN;
@@ -1034,6 +1347,9 @@ static void __attribute__((noinline)) open_settings_window(void)
   cur_y = BROWSE_MARGIN;
   for (i = 0U; i < count; i++) {
     cur_y += btn_h + BROWSE_SPACING;
+  }
+  if (has_link) {
+    cur_y += 2 * (btn_h + BROWSE_SPACING);
   }
   cur_y += btn_h + BROWSE_MARGIN;
 
@@ -1128,6 +1444,26 @@ static void __attribute__((noinline)) open_settings_window(void)
 
     cur_y += btn_h + BROWSE_SPACING;
   }
+  if (has_link) {
+    struct TagItem note_tags[4];
+    settings_link_gad = gad = create_gadget(
+        settings_win, BUTTON_KIND, gad, &ng, BROWSE_MARGIN, cur_y,
+        win_w - 2 * BROWSE_MARGIN, btn_h, settings_link_label,
+        SGID_LINK, PLACETEXT_IN, NULL);
+    cur_y += btn_h + BROWSE_SPACING;
+    note_tags[0].ti_Tag = GTTX_Text;
+    note_tags[0].ti_Data = (ULONG)settings_note;
+    note_tags[1].ti_Tag = GTTX_CopyText;
+    note_tags[1].ti_Data = TRUE;
+    note_tags[2].ti_Tag = GTTX_Clipped;
+    note_tags[2].ti_Data = TRUE;
+    note_tags[3].ti_Tag = TAG_DONE;
+    settings_note_gad = gad = create_gadget(
+        settings_win, TEXT_KIND, gad, &ng, BROWSE_MARGIN, cur_y,
+        win_w - 2 * BROWSE_MARGIN, btn_h, NULL, SGID_STATUS, 0,
+        note_tags);
+    cur_y += btn_h + BROWSE_SPACING;
+  }
 
   gad = create_gadget(settings_win, BUTTON_KIND, gad, &ng,
                       BROWSE_MARGIN, cur_y, btn_w, btn_h,
@@ -1146,6 +1482,203 @@ static void __attribute__((noinline)) open_settings_window(void)
   RefreshGList(settings_glist, settings_win, NULL, (UWORD)-1);
   GT_RefreshWindow(settings_win, NULL);
 }
+
+static void settings_refresh_fields(const ZZPlayProvider *p)
+{
+  uint32_t count;
+  uint32_t i;
+
+  if (!settings_win || !p) return;
+  count = p->field_count > BROWSE_FIELDS_MAX
+              ? BROWSE_FIELDS_MAX : p->field_count;
+  for (i = 0U; i < count; i++) {
+    const ZZPlayProviderField *f = &p->fields[i];
+    field_bufs[i][0] = '\0';
+    zzplay_host_pref_get(p->scheme, f->key, field_bufs[i],
+                         sizeof(field_bufs[i]));
+    if (field_choice_n[i] > 0) {
+      int sel = 0;
+      int c;
+      for (c = 0; c < field_choice_n[i]; c++) {
+        if (strcmp(field_bufs[i], f->choice_values[c]) == 0) sel = c;
+      }
+      field_choice_sel[i] = sel;
+      if (field_gads[i]) {
+        GT_SetGadgetAttrs(field_gads[i], settings_win, NULL,
+                          GTCY_Active, (ULONG)sel, TAG_DONE);
+      }
+    } else {
+      if (f->kind == ZZPLAY_FIELD_SECRET && field_bufs[i][0] != '\0') {
+        copy_string(secret_orig[i], sizeof(secret_orig[i]), field_bufs[i]);
+        copy_string(field_bufs[i], sizeof(field_bufs[i]), "********");
+      }
+      if (field_gads[i]) {
+        GT_SetGadgetAttrs(field_gads[i], settings_win, NULL,
+                          GTST_String, (ULONG)field_bufs[i], TAG_DONE);
+      }
+    }
+  }
+  if (settings_note_gad) {
+    GT_SetGadgetAttrs(settings_note_gad, settings_win, NULL,
+                      GTTX_Text, (ULONG)settings_note, TAG_DONE);
+  }
+}
+
+static void link_finish_success(const char *server_name)
+{
+  const ZZPlayProvider *p = link_provider;
+  const ZZPlayBrowseServiceEntry *svc;
+  ZZPlayBrowseRequest req;
+
+  destroy_link_window();
+  link_window_state = LINK_WINDOW_CLOSED;
+  link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
+  (void)snprintf(settings_note, sizeof(settings_note), "Signed in to %s",
+                 server_name && server_name[0] ? server_name : "server");
+  svc = zzplay_browse_model_current_service(&browse_model);
+  if (settings_win && svc && svc->provider == p) {
+    settings_refresh_fields(p);
+  }
+  if (svc && svc->provider == p &&
+      zzplay_browse_model_reopen_service(&browse_model, &req)) {
+    browse_load_recent();
+    (void)browse_send(&req, p);
+    rebuild_list_nodes();
+    update_status_text(settings_note);
+    update_buttons();
+  }
+  link_provider = NULL;
+}
+
+static void link_send_poll(void)
+{
+  ZZPlayBrowseRequest req;
+
+  if (!link_provider) return;
+  memset(&req, 0, sizeof(req));
+  req.kind = ZZPLAY_BROWSE_REQ_LINK_POLL;
+  req.generation = link_generation;
+  copy_string(req.scheme, sizeof(req.scheme), link_provider->scheme);
+  copy_string(req.link_id, sizeof(req.link_id), link_start_data.link_id);
+  link_request_kind = req.kind;
+  if (!browse_send(&req, link_provider)) {
+    link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
+    link_show_error(BROWSE_WORKER_FAILED);
+  }
+}
+
+static int handle_link_reply(const ZZPlayBrowseReply *reply)
+{
+  uint32_t i;
+
+  if (!reply || !is_link_request(reply->kind)) return 0;
+  if (reply->generation != link_generation ||
+      link_window_state == LINK_WINDOW_CLOSED) {
+    return 1;
+  }
+  link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
+  if (!reply->success) {
+    link_show_error(reply->error);
+    return 1;
+  }
+  if (reply->kind == ZZPLAY_BROWSE_REQ_LINK_START) {
+    link_start_data = reply->link_start;
+    link_window_state = LINK_WINDOW_WAITING;
+    (void)snprintf(link_line1, sizeof(link_line1),
+                   "On a phone or computer, open %s",
+                   link_start_data.url);
+    copy_string(link_line2, sizeof(link_line2), "and enter this code:");
+    copy_string(link_code, sizeof(link_code), link_start_data.code);
+    copy_string(link_status, sizeof(link_status),
+                "Waiting for you to approve ZZPlay...");
+    open_link_window();
+    if (!link_win) return 1;
+    link_send_poll();
+    return 1;
+  }
+
+  link_result = reply->link_result;
+  if (link_result.state == ZZPLAY_LINK_DONE) {
+    link_finish_success(link_result.signed_in_name);
+    return 1;
+  }
+  if (reply->kind == ZZPLAY_BROWSE_REQ_LINK_POLL &&
+      link_result.state == ZZPLAY_LINK_CHOOSE &&
+      link_result.choice_count > 0U) {
+    if (link_result.choice_count > ZZPLAY_LINK_CHOICES_MAX) {
+      link_result.choice_count = ZZPLAY_LINK_CHOICES_MAX;
+    }
+    for (i = 0U; i < link_result.choice_count; i++) {
+      copy_string(link_choice_storage[i], sizeof(link_choice_storage[i]),
+                  link_result.choices[i].label);
+      link_choice_labels[i] = link_choice_storage[i];
+    }
+    link_choice_labels[link_result.choice_count] = NULL;
+    link_choice_sel = 0;
+    link_window_state = LINK_WINDOW_CHOOSE;
+    (void)snprintf(link_line1, sizeof(link_line1), "Choose a %s server:",
+                   link_provider && link_provider->link_name
+                       ? link_provider->link_name : "service");
+    link_line2[0] = '\0';
+    link_code[0] = '\0';
+    copy_string(link_status, sizeof(link_status),
+                "Select the server ZZPlay should use.");
+    open_link_window();
+    return 1;
+  }
+  link_show_error("Sign-in returned an unknown result");
+  return 1;
+}
+
+static void poll_link_window(void)
+{
+  struct IntuiMessage *imsg;
+
+  if (!link_win || !link_win->UserPort) return;
+  while ((imsg = GT_GetIMsg(link_win->UserPort)) != NULL) {
+    ULONG class = imsg->Class;
+    UWORD code = imsg->Code;
+    struct Gadget *gad = (struct Gadget *)imsg->IAddress;
+    GT_ReplyIMsg(imsg);
+
+    if (class == IDCMP_CLOSEWINDOW) {
+      close_link_window(1);
+      return;
+    }
+    if (class == IDCMP_REFRESHWINDOW) {
+      GT_BeginRefresh(link_win);
+      GT_EndRefresh(link_win, TRUE);
+      continue;
+    }
+    if (class == IDCMP_GADGETUP && gad) {
+      if (gad->GadgetID == LGID_CHOICE &&
+          (uint32_t)code < link_result.choice_count) {
+        link_choice_sel = (int)code;
+      } else if (gad->GadgetID == LGID_ACTION) {
+        if (link_window_state != LINK_WINDOW_CHOOSE) {
+          close_link_window(1);
+          return;
+        }
+        if (link_provider &&
+            (uint32_t)link_choice_sel < link_result.choice_count) {
+          ZZPlayBrowseRequest req;
+          memset(&req, 0, sizeof(req));
+          req.kind = ZZPLAY_BROWSE_REQ_LINK_CHOOSE;
+          req.generation = link_generation;
+          copy_string(req.scheme, sizeof(req.scheme), link_provider->scheme);
+          copy_string(req.choice_id, sizeof(req.choice_id),
+                      link_result.choices[link_choice_sel].id);
+          link_request_kind = req.kind;
+          if (!browse_send(&req, link_provider)) {
+            link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
+            link_show_error(BROWSE_WORKER_FAILED);
+          }
+        }
+      }
+    }
+  }
+}
+
 
 static void __attribute__((noinline)) poll_settings(void)
 {
@@ -1188,6 +1721,10 @@ static void __attribute__((noinline)) poll_settings(void)
       if (gad->GadgetID == SGID_CANCEL) {
         close_settings_window();
         return;
+      }
+      if (gad->GadgetID == SGID_LINK && p) {
+        start_link_signin(p);
+        continue;
       }
       if (gad->GadgetID == SGID_SAVE && p) {
         uint32_t count = p->field_count > BROWSE_FIELDS_MAX ? BROWSE_FIELDS_MAX : p->field_count;
@@ -1333,8 +1870,12 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
    * typed across a rebuild. */
   tags[0].ti_Tag = GTCY_Labels;
   tags[0].ti_Data = (ULONG)service_labels;
-  tags[1].ti_Tag = TAG_DONE;
-  tags[1].ti_Data = 0;
+  tags[1].ti_Tag = GTCY_Active;
+  tags[1].ti_Data = (ULONG)(browse_model.current_service >= 0
+                                ? browse_model.current_service
+                                : 0);
+  tags[2].ti_Tag = TAG_DONE;
+  tags[2].ti_Data = 0;
 
   service_gad = gad = create_gadget(
       browse_win, CYCLE_KIND, gad, &ng,
@@ -1891,9 +2432,9 @@ void zzplay_browse_close(void)
   }
 
   if (remember) {
-    (void)zzplay_prefs_save_session(browse_prefs, ZZPLAY_PREFS_ENV_PATH);
     (void)zzplay_prefs_save_session(browse_prefs,
                                     ZZPLAY_PREFS_ENVARC_PATH);
+    (void)zzplay_prefs_save_session(browse_prefs, ZZPLAY_PREFS_ENV_PATH);
   }
 }
 
@@ -1911,6 +2452,9 @@ uint32_t zzplay_browse_signal_mask(void)
   }
   if (settings_win && settings_win->UserPort) {
     mask |= (1UL << (ULONG)settings_win->UserPort->mp_SigBit);
+  }
+  if (link_win && link_win->UserPort) {
+    mask |= (1UL << (ULONG)link_win->UserPort->mp_SigBit);
   }
   mask |= zzplay_browse_worker_signal_mask();
   return mask;
@@ -2143,6 +2687,8 @@ static void browse_activate_row(int32_t index)
   } else if (act == ZZPLAY_BROWSE_ACTION_PLAY) {
     browse_use_selection(BROWSE_TO_PLAY);
     update_buttons();
+  } else if (act == ZZPLAY_BROWSE_ACTION_OPEN_SETTINGS) {
+    open_settings_window();
   }
 }
 
@@ -2322,6 +2868,7 @@ void zzplay_browse_poll(void)
   const ZZPlayProvider *p;
 
   poll_settings();
+  poll_link_window();
   svc = zzplay_browse_model_current_service(&browse_model);
   p = svc ? svc->provider : NULL;
 
@@ -2338,7 +2885,9 @@ void zzplay_browse_poll(void)
 
   /* 1. Worker replies (rows arrive in groups; drain what queued) */
   while (zzplay_browse_worker_take_reply(&poll_worker_reply)) {
-    if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_GATHER) {
+    if (handle_link_reply(&poll_worker_reply)) {
+      zzplay_browse_worker_release_reply(&poll_worker_reply);
+    } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_GATHER) {
       /* Rows of a superseded or stopped gather are discarded: it must
        * not change the playlist or Recently played any more. */
       if (zzplay_browse_model_gather_live(&browse_model,
@@ -2502,7 +3051,9 @@ void zzplay_browse_poll(void)
           browse_load_more();
         } else if ((clicked >= 0 &&
                     (uint32_t)clicked < browse_model.item_count &&
-                    browse_model.items[clicked].kind == ZZPLAY_ITEM_FOLDER) ||
+                    (browse_model.items[clicked].kind == ZZPLAY_ITEM_FOLDER ||
+                     strcmp(browse_model.items[clicked].id,
+                            ZZPLAY_PROVIDER_SETTINGS_ID) == 0)) ||
                    (clicked == last_clicked_idx &&
                     DoubleClick(last_click_s, last_click_m, imsg_s, imsg_m))) {
           /* A folder opens on one click, like a drawer in the ASL file

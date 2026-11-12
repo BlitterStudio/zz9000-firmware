@@ -83,12 +83,13 @@ void zzplay_browse_format_duration(uint32_t duration_ms, char *buf,
 void zzplay_browse_layout_columns(int avail_w, int marker_w, int len_w,
                                   int gap, ZZPlayBrowseColumns *out);
 
-/* Give a row's title the cells it does not use: without a subtitle the
- * title runs up to the length cell, and without a length too it runs to
- * the row's right padding. Rows such as instructions and folder names
- * then show in full instead of in the title's share. */
-void zzplay_browse_widen_title(ZZPlayBrowseColumns *cols, int avail_w,
-                               int gap, int has_subtitle, int has_length);
+/* Fit a row's cells to what it shows. Without a length, the title and
+ * subtitle share the width up to the row's right padding (stations have
+ * no length); without a subtitle, the title takes all of that width.
+ * Rows such as instructions then show in full instead of in the title's
+ * share. A cell never ends up narrower than the plain split gave it. */
+void zzplay_browse_fit_row(ZZPlayBrowseColumns *cols, int avail_w, int gap,
+                           int has_subtitle, int has_length);
 
 /* Clamp a remembered window to the screen it is opened on: size into
  * [min_w, screen_w] and [min_h, screen_h], then position it so the whole

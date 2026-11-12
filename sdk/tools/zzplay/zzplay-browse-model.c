@@ -1138,6 +1138,18 @@ int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider)
   return provider->favourite != NULL;
 }
 
+int zzplay_browse_model_provider_has_link(const ZZPlayProvider *provider)
+{
+  if (!provider ||
+      provider->size < offsetof(ZZPlayProvider, link_choose) +
+                           sizeof(provider->link_choose)) {
+    return 0;
+  }
+  return provider->link_start != NULL && provider->link_poll != NULL &&
+         provider->link_choose != NULL;
+}
+
+
 int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model)
 {
   const ZZPlayBrowseServiceEntry *svc;
@@ -1195,6 +1207,11 @@ ZZPlayBrowseAction zzplay_browse_model_activate(ZZPlayBrowseModel *model,
     return ZZPLAY_BROWSE_ACTION_NONE;
   }
   item = &model->items[index];
+  if (item->playable == 0U &&
+      strcmp(item->id, ZZPLAY_PROVIDER_SETTINGS_ID) == 0) {
+    model->selection = index;
+    return ZZPLAY_BROWSE_ACTION_OPEN_SETTINGS;
+  }
   if (item->kind == ZZPLAY_ITEM_FOLDER) {
     if (zzplay_browse_model_enter_folder(model, index, out_req)) {
       return ZZPLAY_BROWSE_ACTION_ENTER_FOLDER;
