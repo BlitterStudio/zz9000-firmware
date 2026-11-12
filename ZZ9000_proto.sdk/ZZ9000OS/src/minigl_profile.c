@@ -305,7 +305,7 @@ void minigl_profile_report(void)
         " idle=", " parse=", " geom=", " cpu=", " emit=", " fifo=", " stall=",
         " fence=", " tgt=", " tex=", " pres=", " sdr=", " scpy=", " sfli=", " op="
     };
-    static char line[768];
+    static char line[1024];
     const uint32_t *n = g_minigl_profile_counts;
     uint64_t print_start;
     uint32_t window;
@@ -399,6 +399,7 @@ void minigl_profile_report(void)
         written = snprintf(line + used, sizeof(line) - used,
                            " | feed svc=%lu deadline=%lu park=%lu swap=%lu empty=%lu full=%lu"
                            " retry=%lu tse=%lu tpoe=%lu dma=%lu qhi=%lu dwake=%lu"
+                           " steps=%lu step-rd=%lu step-inv=%lu"
                            " wait-ring=%lu/%lums wait-drain=%lu/%lums"
                            " wait-target=%lu/%lums wait-tex=%lu/%lums",
                            (unsigned long)g_mglp.feed_chunks[RIX_DRV_FEED_SOURCE_SVC],
@@ -413,6 +414,9 @@ void minigl_profile_report(void)
                            (unsigned long)g_mglp.feed_dma_complete,
                            (unsigned long)g_mglp.queued_high_water,
                            (unsigned long)g_mglp.feed_deadline_wakeups,
+                           (unsigned long)(n[MGLP_N_FEED_STEPS] / divisor),
+                           (unsigned long)(n[MGLP_N_FEED_DEVICE_READS] / divisor),
+                           (unsigned long)(n[MGLP_N_FEED_INVALIDATES] / divisor),
                            (unsigned long)g_mglp.feed_waits[MGLP_FEED_WAIT_RING],
                            (unsigned long)(g_mglp.feed_wait_us[MGLP_FEED_WAIT_RING] /
                                            1000U / divisor),

@@ -39,7 +39,8 @@ rix_core_test: rix_core_test.c $(MINIGL_MODULE_BACKEND)/rix_cmd.c $(MINIGL_MODUL
 rix_drv_test: rix_drv_test.c $(MINIGL_MODULE_BACKEND)/rix_drv.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@
 
-rix_backend_test: rix_backend_test.c $(RIX_BACKEND)
+rix_backend_test: rix_backend_test.c $(RIX_BACKEND) $(FIRMWARE)/minigl_fence_guard.c \
+	$(FIRMWARE)/card_pool.c $(FIRMWARE)/sdk_smp_lock.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -lm -o $@
 
 minigl_profile_test: minigl_profile_test.c $(MINIGL_MODULE_BACKEND)/minigl_profile.c

@@ -119,11 +119,26 @@ static void test_feed_deadline_and_park_telemetry(void)
     assert(strstr(report, "wait-tex=1/3ms") != NULL);
 }
 
+/* Per-frame cost of feed steps: device reads and cache invalidates. */
+static void test_feed_step_cost_per_frame(void)
+{
+    reset_profile(RIX_DRV_VERSION_BUSY_CYCLES, 0U);
+    minigl_profile_count(MGLP_N_FRAMES, 2U);
+    minigl_profile_count(MGLP_N_FEED_STEPS, 13200U);
+    minigl_profile_count(MGLP_N_FEED_DEVICE_READS, 64U);
+    minigl_profile_count(MGLP_N_FEED_INVALIDATES, 4U);
+    emit_packet();
+    now_us = 5000000U;
+    minigl_profile_report();
+    assert(strstr(report, "steps=6600 step-rd=32 step-inv=2") != NULL);
+}
+
 int main(void)
 {
     test_busy_csr_abi_gating();
     test_busy_percentage_and_counter_wrap();
     test_feed_full_empty_and_retry_counters();
     test_feed_deadline_and_park_telemetry();
+    test_feed_step_cost_per_frame();
     return 0;
 }

@@ -397,6 +397,15 @@ void core1_cold_restart(void)
 	/* heap_forget_owner takes heap_lock. Core 1 may have died holding it. */
 	zzm_runtime_reset_heap_lock();
 	zzapp_services_reclaim_halted_audio();
+	/* Core 0 has no fence proof after halting core 1. RasterIX can continue
+	 * reading DDR lists, so retain every MiniGL owner before discarding the
+	 * module image. */
+	zzm_runtime_quarantine_module(ZZM_MODULE_MINIGL);
+	/* The module lifetime is quarantined before abandoning a torn fence
+	 * publication from the halted producer. */
+	sh->minigl_rix_fence_epoch = 0U;
+	sh->minigl_rix_fence_sequence = 0U;
+	sh->minigl_rix_fence_address = 0U;
 	/* The app's GL binding points into the module image; forget it before
 	 * zzm_loader_forget_core1_modules poisons that image. */
 	zzapp_minigl_forget();

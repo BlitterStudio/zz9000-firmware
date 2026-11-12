@@ -1135,6 +1135,31 @@ static uint32_t submit_single_command(mw_ctx *c, uint32_t opcode,
     return mw_host_submit(c, packet, packet_bytes);
 }
 
+static void test_closing_nonowning_context_retires_its_target(void)
+{
+    MiniGLRixPlatform platform;
+    mw_ctx *wire;
+    mw_ctx *app;
+    const uint32_t *target;
+    uint8_t clear[24] = { 0 };
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    wire = mw_host_create(2U, 2U);
+    assert(wire != NULL);
+    app = mw_host_create(2U, 2U);
+    assert(app != NULL);
+    assert(submit_single_command(wire, MW_CLEAR, clear, sizeof(clear)) ==
+           MW_STATUS_OK);
+    target = minigl_raster_color_buffer();
+    assert(target == wire->color_buffers[wire->state.target.back]);
+    mw_host_destroy(wire);
+    assert(minigl_raster_color_buffer() != target);
+    mw_host_destroy(app);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_closing_nonowning_context_retires_its_target\n");
+}
+
 static void test_wire_cpu_handoffs(void)
 {
     MiniGLRixPlatform platform;
@@ -1537,6 +1562,7 @@ int main(void)
     test_rasterix_rgb565_present_formats();
     test_second_context_keeps_first_frame();
     test_points_render_on_rasterix();
+    test_closing_nonowning_context_retires_its_target();
     test_triangles_sample_pixel_centres();
     test_backend_disable_cpu_rerender_present();
     test_wire_cpu_handoffs();

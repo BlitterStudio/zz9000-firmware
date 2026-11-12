@@ -347,11 +347,60 @@ sched_worker_action_t sched_worker_decide(int reset_requested, int task_availabl
   return SCHED_WORKER_ACTION_WFE;
 }
 
+int sched_worker_may_wfe(sched_worker_action_t action, int minigl_progress,
+                         int task_active, int reset_requested, int doorbell,
+                         int minigl_registered)
+{
+  if (task_active || reset_requested || doorbell)
+    return 0;
+  if (action == SCHED_WORKER_ACTION_WFE)
+    return !minigl_registered;
+  /* An idle bound worker keeps polling the 68k ring, which raises no event. */
+  return action == SCHED_WORKER_ACTION_MINIGL && !minigl_progress;
+}
+
+int scheduler_minigl_submission_admit(taskq_shared_t *shared)
+{
+  if (shared->minigl_submission_admission != 0U)
+    return 1;
+  taskq_acquire_barrier();
+  /* The reset request precedes closed admission. Do not acknowledge until the
+   * worker's reset step has cleared it, even after a stale action selection. */
+  if (shared->minigl_reset_request != 0U)
+    return 0;
+  taskq_store_release(&shared->minigl_submission_ack,
+                      shared->minigl_submission_generation);
+  return 0;
+}
+sched_worker_action_t scheduler_minigl_submission_action(
+    taskq_shared_t *shared, sched_worker_action_t action)
+{
+  /* A reset step can still abort a feed and publish its accepted envelope.
+   * Let it complete before acknowledging closed submission admission. */
+  if (action == SCHED_WORKER_ACTION_RESET)
+    return action;
+  if (!scheduler_minigl_submission_admit(shared) &&
+      (action == SCHED_WORKER_ACTION_MINIGL ||
+       action == SCHED_WORKER_ACTION_POLL_IDLE))
+    return SCHED_WORKER_ACTION_WFE;
+  return action;
+}
+
+int scheduler_minigl_quiesce_done(taskq_shared_t *shared)
+{
+  return shared->minigl_submission_ack == shared->minigl_submission_generation &&
+         !taskq_has_active(&shared->queue) && !shared->minigl_in_flight;
+}
+
+
 sched_minigl_reset_phase_t sched_minigl_reset_phase(int core1_up, int posted,
-                                                    int acked, int elapsed_ms,
+                                                    uint32_t ack, int elapsed_ms,
                                                     int budget_ms)
 {
-  if (acked)
+  /* Core 1 could not stop the engines: stop them here, with it halted. */
+  if (ack == SCHED_MINIGL_RESET_ACK_FAILED)
+    return SCHED_MINIGL_RESET_ABORT;
+  if (ack != 0U)
     return SCHED_MINIGL_RESET_ACKED;
   if (!core1_up)
     return posted ? SCHED_MINIGL_RESET_ABORT : SCHED_MINIGL_RESET_LOCAL;

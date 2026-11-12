@@ -148,10 +148,20 @@ typedef struct {                /* coherent control block at the queue region */
   /* MiniGL dual-core coordination */
   volatile uint32_t minigl_doorbell;        /* core 0 sets 1 on doorbell; core 1 clears 0 */
   volatile uint32_t minigl_reset_request;   /* core 0 sets 1 on Amiga reset; core 1 clears 0 */
-  volatile uint32_t minigl_reset_ack;       /* core 1 sets 1 after reset executed */
+  volatile uint32_t minigl_reset_ack;       /* core 1 sets SCHED_MINIGL_RESET_ACK_* */
   volatile uint32_t minigl_in_flight;       /* core 1 sets 1 while executing MiniGL packet */
+  /* Core 0 closes admission before reset reclamation. Core 1 acknowledges
+   * only after its final submission check, so a selected-but-not-yet-running
+   * packet cannot appear after the fence snapshot. */
+  volatile uint32_t minigl_submission_admission;
+  volatile uint32_t minigl_submission_generation;
+  volatile uint32_t minigl_submission_ack;
   volatile uint32_t minigl_packets_on_core1;/* observability counter */
   volatile uint32_t minigl_packets_on_core0;/* observability counter (fallback) */
+  /* Seqlock protects the address/sequence pair sampled by core 0. */
+  volatile uint32_t minigl_rix_fence_epoch;
+  volatile uint32_t minigl_rix_fence_sequence;
+  volatile uint32_t minigl_rix_fence_address;
   /* Core 0 raises the doorbell SGI only when this changes from zero to one. */
   volatile uint32_t service_pending;
 } taskq_shared_t;
@@ -205,6 +215,19 @@ typedef enum {
 
 sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
                                           int minigl_work_available, int minigl_bound);
+/* Whether the worker may WFE after running `action`.  A MiniGL step that
+ * made no progress (a full FIFO or a DMA in flight, and no app parked in a
+ * GL call) is not retried at once; the next tick or SEV resumes it.  The
+ * caller still prefers a runnable app and keeps polling for registered
+ * app waits. */
+int sched_worker_may_wfe(sched_worker_action_t action, int minigl_progress,
+                         int task_active, int reset_requested, int doorbell,
+                         int minigl_registered);
+
+/* minigl_reset_ack values.  FAILED: core 1 could not stop the module's
+ * engines; core 0 then stops them and drops the module with core 1 halted. */
+#define SCHED_MINIGL_RESET_ACK_DONE 1U
+#define SCHED_MINIGL_RESET_ACK_FAILED 2U
 
 /* Core 0's Amiga-reset decision for MiniGL. Core 0 must not free command
  * or present buffers while core 1 may still be streaming them. The caller
@@ -217,9 +240,21 @@ typedef enum {
   SCHED_MINIGL_RESET_ABORT      /* deadline or dead worker: stop engines, then free */
 } sched_minigl_reset_phase_t;
 
+/* `ack` is the raw minigl_reset_ack value. */
 sched_minigl_reset_phase_t sched_minigl_reset_phase(int core1_up, int posted,
-                                                    int acked, int elapsed_ms,
+                                                    uint32_t ack, int elapsed_ms,
                                                     int budget_ms);
+/* Core-0 reset quiesce holds its admission barrier for this long. */
+#define SCHED_QUIESCE_SPINS 15000U
+#define SCHED_QUIESCE_US 10U
+
+/* Applies the worker's final MiniGL admission gate to a selected action. */
+sched_worker_action_t scheduler_minigl_submission_action(
+    taskq_shared_t *shared, sched_worker_action_t action);
+/* True only after the worker has acknowledged closed admission and stopped
+ * every MiniGL submission and queued task. */
+int scheduler_minigl_quiesce_done(taskq_shared_t *shared);
+
 
 /* ---- fault watchdog (portable) ---- */
 void taskq_watchdog_init(taskq_watchdog_t *w, uint32_t threshold);
@@ -230,6 +265,9 @@ int  taskq_watchdog_core1_enabled(const taskq_watchdog_t *w);
 /* ---- coherency stress model (portable; Phase 0 harness uses these) ---- */
 uint32_t taskq_stress_fill(uint32_t seed, uint32_t index);
 int      taskq_stress_check(uint32_t seed, uint32_t index, uint32_t value);
+/* Returns zero after acknowledging that this worker will make no further
+ * MiniGL submissions for the current admission generation. */
+int scheduler_minigl_submission_admit(taskq_shared_t *shared);
 
 /* ---- atomic primitive seam ---- */
 int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired);
@@ -257,6 +295,7 @@ void scheduler_core1_worker(void);         /* core 1: dedicated task worker; nev
 void scheduler_core1_park_if_requested(void); /* core 1: clean L1 + park for a cold restart */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
 void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tasks + reset queue before a mailbox teardown */
+void scheduler_resume_minigl_submissions(void);
 /* Post the MiniGL reset and wake core 1. It runs after the current packet,
  * including an in-flight PL330 stream or present blit. */
 void scheduler_request_minigl_reset(void);

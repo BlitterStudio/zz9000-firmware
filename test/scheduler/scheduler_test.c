@@ -370,6 +370,63 @@ static void test_sched_worker_decide_priorities(void)
   expect_int("decide_wfe_unbound", sched_worker_decide(0, 0, 0, 0), SCHED_WORKER_ACTION_WFE);
 }
 
+static void test_reset_admission_blocks_selected_submission(void)
+{
+  taskq_shared_t shared = { 0 };
+
+  shared.minigl_submission_admission = 1U;
+  expect_int("admission_initial",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_MINIGL),
+             SCHED_WORKER_ACTION_MINIGL);
+  /* The worker selected a packet. Core 0 closes admission before the worker
+   * marks it in-flight, so the production action gate must suppress it. */
+  shared.minigl_submission_admission = 0U;
+  shared.minigl_submission_generation = 7U;
+  expect_int("admission_blocks_selected_submission",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_MINIGL),
+             SCHED_WORKER_ACTION_WFE);
+  expect_u32("admission_acknowledges_generation",
+             shared.minigl_submission_ack, 7U);
+}
+
+static void test_reset_admission_acks_after_reset_step(void)
+{
+  taskq_shared_t shared = { 0 };
+
+  shared.minigl_submission_admission = 0U;
+  shared.minigl_submission_generation = 9U;
+  /* The worker selected MiniGL just before it observed the reset request.
+   * A reset step can abort a feed after accepting its RasterIX envelope, so
+   * this stale selection must not acknowledge the quiesce guard. */
+  shared.minigl_reset_request = 1U;
+  expect_int("reset_admission_blocks_stale_submission",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_MINIGL),
+             SCHED_WORKER_ACTION_WFE);
+  expect_u32("reset_admission_waits_for_reset_step",
+             shared.minigl_submission_ack, 0U);
+  expect_int("reset_admission_keeps_guard_closed",
+             scheduler_minigl_quiesce_done(&shared), 0);
+
+  expect_int("reset_admission_runs_reset",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_RESET),
+             SCHED_WORKER_ACTION_RESET);
+  /* zzm_minigl_reset_step completed and cleared the request. The next
+   * selection acknowledges closed admission and cannot submit MiniGL work. */
+  shared.minigl_reset_request = 0U;
+  expect_int("reset_admission_blocks_post_reset_submission",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_MINIGL),
+             SCHED_WORKER_ACTION_WFE);
+  expect_u32("reset_admission_acknowledges_after_reset",
+             shared.minigl_submission_ack, 9U);
+  expect_int("reset_admission_allows_guard_after_reset",
+             scheduler_minigl_quiesce_done(&shared), 1);
+}
+
 static void test_minigl_reset_handshake_flow(void)
 {
   taskq_shared_t sh;
@@ -410,8 +467,13 @@ static void test_minigl_reset_phase_keeps_inflight_buffers(void)
   expect_int("phase_wait_late", sched_minigl_reset_phase(1, 1, 0, 49, 50),
              SCHED_MINIGL_RESET_WAIT);
   /* Ack means core 1 already freed. A second free would be a double release. */
-  expect_int("phase_acked", sched_minigl_reset_phase(1, 1, 1, 10, 50),
+  expect_int("phase_acked", sched_minigl_reset_phase(1, 1, SCHED_MINIGL_RESET_ACK_DONE, 10, 50),
              SCHED_MINIGL_RESET_ACKED);
+  /* Core 1 could not stop the engines and said so: core 0 aborts at once,
+   * before the deadline, rather than treating the module as freed. */
+  expect_int("phase_failed_ack_aborts",
+             sched_minigl_reset_phase(1, 1, SCHED_MINIGL_RESET_ACK_FAILED, 0, 50),
+             SCHED_MINIGL_RESET_ABORT);
   /* Deadline or a dead worker: stop the engines, then the caller may free. */
   expect_int("phase_abort_deadline", sched_minigl_reset_phase(1, 1, 0, 50, 50),
              SCHED_MINIGL_RESET_ABORT);
@@ -422,6 +484,56 @@ static void test_minigl_reset_phase_keeps_inflight_buffers(void)
              SCHED_MINIGL_RESET_LOCAL);
   expect_int("phase_idle", sched_minigl_reset_phase(1, 0, 0, 0, 50),
              SCHED_MINIGL_RESET_IDLE);
+}
+static void test_minigl_reset_quiesce_allows_120ms_drain(void)
+{
+  taskq_shared_t shared = { 0 };
+  uint32_t spins;
+  int cold_restarted = 0;
+  int quarantined = 0;
+
+  shared.minigl_submission_generation = 1U;
+  shared.minigl_in_flight = 1U;
+  for (spins = 0U; spins < SCHED_QUIESCE_SPINS; ++spins) {
+    if (spins == 12000U) {
+      shared.minigl_submission_ack = shared.minigl_submission_generation;
+      shared.minigl_in_flight = 0U;
+    }
+    if (scheduler_minigl_quiesce_done(&shared))
+      break;
+  }
+  if (!scheduler_minigl_quiesce_done(&shared)) {
+    cold_restarted = 1;
+    quarantined = 1;
+  }
+  expect_int("120ms_minigl_drain_completes", scheduler_minigl_quiesce_done(&shared), 1);
+  expect_int("120ms_minigl_drain_no_cold_restart", cold_restarted, 0);
+  expect_int("120ms_minigl_drain_no_quarantine", quarantined, 0);
+}
+
+
+static void test_worker_idles_only_on_a_stalled_minigl_step(void)
+{
+  /* A feed step blocked on a full FIFO or a DMA in flight is not retried
+   * at once. */
+  expect_int("wfe_stalled_feed",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 0, 0, 0, 0, 1), 1);
+  expect_int("no_wfe_after_progress",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 1, 0, 0, 0, 1), 0);
+  /* Other work pending wins over the stall. */
+  expect_int("no_wfe_task_queued",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 0, 1, 0, 0, 1), 0);
+  expect_int("no_wfe_reset_requested",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 0, 0, 1, 0, 1), 0);
+  expect_int("no_wfe_doorbell",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 0, 0, 0, 1, 1), 0);
+  /* A bound worker with nothing to do keeps polling the 68k ring. */
+  expect_int("no_wfe_bound_idle",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_POLL_IDLE, 0, 0, 0, 0, 1), 0);
+  expect_int("wfe_unbound_idle",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_WFE, 0, 0, 0, 0, 0), 1);
+  expect_int("no_wfe_after_reset_step",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_RESET, 0, 0, 0, 0, 1), 0);
 }
 
 typedef struct {
@@ -531,8 +643,12 @@ int main(void)
   test_watchdog_trips_at_threshold();
   test_watchdog_success_resets_counter();
   test_sched_worker_decide_priorities();
+  test_reset_admission_blocks_selected_submission();
+  test_reset_admission_acks_after_reset_step();
   test_minigl_reset_handshake_flow();
   test_minigl_reset_phase_keeps_inflight_buffers();
+  test_minigl_reset_quiesce_allows_120ms_drain();
+  test_worker_idles_only_on_a_stalled_minigl_step();
   test_doorbell_coalesces_and_drains();
   test_doorbell_clears_after_exact_final_batch();
   test_doorbell_rechecks_before_clear();

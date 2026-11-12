@@ -31,14 +31,21 @@ struct model {
     int dma_done;
 };
 
+static void log_abort(struct model *model, char event);
+
 static uint32_t csr_read(void *context, uint32_t offset)
 {
     return ((struct model *)context)->csr[offset / 4U];
 }
 
+/* Abort log: C = command admission stopped, S = renderer soft reset. */
 static void csr_write(void *context, uint32_t offset, uint32_t value)
 {
-    ((struct model *)context)->csr[offset / 4U] = value;
+    struct model *model = context;
+
+    model->csr[offset / 4U] = value;
+    if (offset == RIX_DRV_CSR_CONTROL && model->record_abort)
+        log_abort(model, (value & RIX_DRV_CONTROL_SOFT_RESET) != 0U ? 'S' : 'C');
 }
 
 static uint32_t fifo_read(void *context, uint32_t offset)
@@ -211,6 +218,13 @@ static struct rix_drv_config config(struct model *model, int present)
     value.fifo_write = fifo_write;
     value.clean_dcache = cache_clean;
     value.hardware_present = present;
+    return value;
+}
+static struct rix_drv_config memfetch_config(struct model *model)
+{
+    struct rix_drv_config value = config(model, 1);
+
+    value.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
     return value;
 }
 
@@ -776,6 +790,158 @@ static void test_feed_matches_synchronous_stream(void)
     assert(model_command_stream(&feed_model, feed_commands) == sizeof(commands) / sizeof(commands[0]));
     assert(memcmp(feed_commands, sync_commands, sizeof(commands)) == 0);
 }
+/* Envelopes are fixed 16 KiB pieces of the list: a triangle may straddle
+ * the cut, which the parser joins (proved in xsim, ef-stress_memfetch-split). */
+static void test_memfetch_envelopes_cut_at_fixed_size(void)
+{
+    static uint32_t commands[4128] __attribute__((aligned(64)));
+    struct model model;
+    struct rix_drv driver;
+    struct rix_drv_config io;
+    struct rix_drv_feed feed;
+    uint32_t index;
+
+    memset(commands, 0, sizeof(commands));
+    commands[4080] = 0x3000009cU; /* A 40-word triangle across the cut. */
+    for (index = 4081U; index < 4120U; ++index)
+        commands[index] = index;
+
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    io = memfetch_config(&model);
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(rix_drv_submit(&driver, commands, 0x01000000U,
+                          (uint32_t)(sizeof(commands) / sizeof(commands[0])),
+                          0U) == RIX_DRV_OK);
+    assert(model.clean_count == 1U && model.clean_bytes == sizeof(commands));
+    assert(model.packet_count == 2U);
+    assert(model.lengths[0] == 8U && model.lengths[1] == 8U);
+    assert(model.word_count == 4U);
+    assert(model.words[0] == (0xb0000000U | 4096U * sizeof(uint32_t)));
+    assert(model.words[1] == 0x01000000U);
+    assert(model.words[2] == (0xb0000000U | 32U * sizeof(uint32_t)));
+    assert(model.words[3] == 0x01004000U);
+
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    io = memfetch_config(&model);
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(rix_drv_feed_begin(&feed, commands, 0x01000000U,
+                              (uint32_t)(sizeof(commands) / sizeof(commands[0])),
+                              RIX_DRV_FEED_SOURCE_SVC) == RIX_DRV_OK);
+    assert(rix_drv_try_feed(&driver, &feed) == RIX_DRV_FEED_PROGRESS);
+    assert(feed.command_offset == 4096U && model.packet_count == 1U);
+    assert(rix_drv_try_feed(&driver, &feed) == RIX_DRV_FEED_DONE);
+    assert(feed.command_offset == 4128U && model.packet_count == 2U);
+    assert(model.lengths[0] == 8U && model.lengths[1] == 8U);
+    assert(model.words[0] == (0xb0000000U | 4096U * sizeof(uint32_t)));
+    assert(model.words[1] == 0x01000000U);
+    assert(model.words[2] == (0xb0000000U | 32U * sizeof(uint32_t)));
+    assert(model.words[3] == 0x01004000U);
+}
+
+static void test_memfetch_rejects_unaligned_lists(void)
+{
+    static uint32_t commands[16] __attribute__((aligned(64)));
+    struct model model;
+    struct rix_drv driver;
+    struct rix_drv_config io;
+
+    memset(commands, 0, sizeof(commands));
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    io = memfetch_config(&model);
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(rix_drv_submit(&driver, commands, 0x01000004U, 16U, 0U) ==
+           RIX_DRV_BAD_ARGUMENT);
+    assert(rix_drv_submit(&driver, commands, 0x01000000U, 15U, 0U) ==
+           RIX_DRV_BAD_ARGUMENT);
+    assert(model.word_count == 0U && model.packet_count == 0U);
+}
+
+/* An accepted envelope cannot be recalled, and the next one may complete a
+ * command it began.  Aborting mid-list pushes the rest of the list and
+ * touches neither CONTROL nor the FIFO reset: the caller waits for the
+ * list's fence before reusing memory. */
+static void test_memfetch_abort_finishes_the_list(void)
+{
+    static uint32_t commands[3U * RIX_DRV_MEMFETCH_CHUNK_WORDS]
+        __attribute__((aligned(64)));
+    struct model model;
+    struct rix_drv driver;
+    struct rix_drv_config io;
+    struct rix_drv_feed feed;
+
+    memset(commands, 0, sizeof(commands));
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    io = memfetch_config(&model);
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(rix_drv_feed_begin(&feed, commands, 0x01000000U,
+                              (uint32_t)(sizeof(commands) / sizeof(commands[0])),
+                              RIX_DRV_FEED_SOURCE_SVC) == RIX_DRV_OK);
+    assert(rix_drv_try_feed(&driver, &feed) == RIX_DRV_FEED_PROGRESS);
+    model.record_abort = 1;
+    assert(rix_drv_feed_abort(&driver, &feed) == RIX_DRV_FEED_BLOCKED);
+    assert(rix_drv_feed_abort(&driver, &feed) == RIX_DRV_FEED_DONE);
+    assert(model.packet_count == 3U && !feed.active);
+    assert(model.words[4] == (0xb0000000U | RIX_DRV_MEMFETCH_CHUNK_BYTES));
+    assert(model.words[5] == 0x01000000U + 2U * RIX_DRV_MEMFETCH_CHUNK_BYTES);
+    assert(model.abort_log_count == 0U);
+    assert(rix_drv_feed_abort(&driver, &feed) == RIX_DRV_FEED_DONE);
+    assert(model.packet_count == 3U && model.abort_log_count == 0U);
+}
+
+static unsigned g_tdfv_reads;
+
+static uint32_t counting_fifo_read(void *context, uint32_t offset)
+{
+    if (offset == RIX_DRV_FIFO_TDFV)
+        ++g_tdfv_reads;
+    return fifo_read(context, offset);
+}
+
+/* Envelopes always fit: the vacancy read once covers many envelopes. */
+static void test_memfetch_tracks_fifo_vacancy_in_software(void)
+{
+    static uint32_t commands[4U * RIX_DRV_MEMFETCH_CHUNK_WORDS]
+        __attribute__((aligned(64)));
+    struct model model;
+    struct rix_drv driver;
+    struct rix_drv_config io;
+    struct rix_drv_feed feed;
+    int result;
+
+    memset(commands, 0, sizeof(commands));
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    io = memfetch_config(&model);
+    io.fifo_read = counting_fifo_read;
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(rix_drv_feed_begin(&feed, commands, 0x01000000U,
+                              (uint32_t)(sizeof(commands) / sizeof(commands[0])),
+                              RIX_DRV_FEED_SOURCE_SVC) == RIX_DRV_OK);
+    g_tdfv_reads = 0U;
+    do
+        result = rix_drv_try_feed(&driver, &feed);
+    while (result == RIX_DRV_FEED_PROGRESS);
+    assert(result == RIX_DRV_FEED_DONE && model.packet_count == 4U);
+    assert(g_tdfv_reads <= 1U);
+
+    /* An estimate that says full is re-read, never trusted. */
+    model.fifo[RIX_DRV_FIFO_TDFV / 4U] = 1U;
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(rix_drv_feed_begin(&feed, commands, 0x01000000U, 64U,
+                              RIX_DRV_FEED_SOURCE_SVC) == RIX_DRV_OK);
+    assert(rix_drv_try_feed(&driver, &feed) == RIX_DRV_FEED_BLOCKED);
+    model.fifo[RIX_DRV_FIFO_TDFV / 4U] = 508U;
+    assert(rix_drv_try_feed(&driver, &feed) == RIX_DRV_FEED_DONE);
+}
 
 static void test_version_compatibility(void)
 {
@@ -808,6 +974,7 @@ static void test_busy_counter_wrap(void)
     assert(minigl_profile_counter_delta(0x100U, 0x80U) == 0x80U);
 }
 
+
 int main(void)
 {
     test_discovery_and_enable();
@@ -823,6 +990,10 @@ int main(void)
     test_feed_partial_vacancy_and_oversized_command();
     test_feed_delayed_dma_and_reset();
     test_feed_matches_synchronous_stream();
+    test_memfetch_envelopes_cut_at_fixed_size();
+    test_memfetch_rejects_unaligned_lists();
+    test_memfetch_abort_finishes_the_list();
+    test_memfetch_tracks_fifo_vacancy_in_software();
     test_feed_pending_launch_does_not_restage_header();
     test_feed_rejects_unclaimed_dma_before_staging();
     test_feed_rejects_nonblocking_launch_failure();

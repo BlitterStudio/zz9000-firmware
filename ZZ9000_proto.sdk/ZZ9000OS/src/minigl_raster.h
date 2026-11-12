@@ -80,9 +80,14 @@ void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform);
 /* ARM in-process contexts opt into the kernel-owned asynchronous command ring. */
 void minigl_raster_set_async_feed(int enabled);
 int minigl_raster_async_feed_enabled(void);
+/* Command buffers waiting to be fed (feed steps can make progress). */
 int minigl_raster_feed_pending(void);
+/* Submitted RasterIX work not yet retired, including rendering buffers. */
+int minigl_raster_work_outstanding(void);
 int minigl_raster_try_feed(uint32_t source);
 int minigl_raster_abort_feed(void);
+int minigl_raster_engine_idle(void);
+void minigl_raster_quarantine_outstanding(void);
 /* Submit the current frame without waiting for RasterIX, then poll its fences. */
 int minigl_raster_submit_present(void);
 int minigl_raster_present_ready(void);

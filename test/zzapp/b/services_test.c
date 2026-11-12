@@ -302,6 +302,75 @@ static void test_display_scanout_ack(void)
 		fail("display scanout-ack recycle");
 }
 
+static uint64_t g_flip_us;
+static unsigned g_flip_yields;
+static unsigned g_flip_unregistered_yields;
+
+static uint64_t flip_time(void)
+{
+	return g_flip_us;
+}
+
+/* Model a parked app: it resumes only after the service pass wakes its
+ * registered wait, first at the 50 ms diagnostic deadline and then at ack. */
+static void flip_yield(void)
+{
+	if (!zzapp_services_wait_registered(service_slot()))
+		g_flip_unregistered_yields++;
+	g_flip_yields++;
+	if (current_runtime()->wait_deadline != 0U) {
+		g_flip_us = current_runtime()->wait_deadline;
+	} else {
+		g_flip_us = 80000U;
+		zzapp_put_be32(g_window + ZZAPP_LIFE_OFF +
+			       ZZAPP_LIFE_FLIP_ACK_OFF, 1U);
+	}
+	zzapp_services_poll();
+}
+
+static void test_display_wait_flip_idle(void)
+{
+	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_LAUNCHER_SCANOUT_ACK);
+	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
+						ZZ_FMT_RGB565, 0x00200000U,
+						0x00210000U, ZZ_LAYOUT_RGB565_LE,
+						0x00220000U);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("flip wait display bind");
+	g_flip_us = 0U;
+	g_flip_yields = 0U;
+	g_flip_unregistered_yields = 0U;
+	flip_wait_reports = 0U;
+	zzapp_services_test_set_time(flip_time);
+	zzapp_services_test_set_yield(flip_yield);
+	/* Nothing queued: idle at once, no wait. */
+	if (zzapp_display_wait_flip_idle() != ZZ_OK || g_flip_yields != 0U)
+		fail("flip wait while idle");
+	if (zzapp_svc_display_flip_async(1U) != ZZ_OK)
+		fail("flip wait queue");
+	/* The first pass wakes at the 50 ms diagnostic deadline. The second
+	 * remains parked until VBlank acknowledges the queued flip at 80 ms. */
+	if (zzapp_display_wait_flip_idle() != ZZ_OK)
+		fail("flip wait result");
+	if (g_flip_yields != 2U || g_flip_unregistered_yields != 0U)
+		fail("flip wait registers with the service pass");
+	if (zzapp_services_wait_registered(service_slot()))
+		fail("flip wait ended");
+	if (flip_wait_reports != 1U)
+		fail("slow flip reported once");
+	zzapp_services_test_set_time(NULL);
+	zzapp_services_test_set_yield(NULL);
+}
+
 static void test_clut8_palette_publication(void)
 {
 	uint8_t payload[ZZAPP_BIND_REQ_BYTES];
@@ -990,6 +1059,7 @@ int main(void)
 	test_audio_write_cursor_wrap();
 	test_display_refresh_rotation_and_layout();
 	test_display_scanout_ack();
+	test_display_wait_flip_idle();
 	test_clut8_palette_publication();
 	test_display_mailbox();
 	test_display_mailbox_uses_scanout_owner();

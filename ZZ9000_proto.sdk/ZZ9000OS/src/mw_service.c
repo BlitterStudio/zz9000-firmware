@@ -211,6 +211,13 @@ static mw_ctx *mw_service_find_context(uint32_t handle)
     }
     return NULL;
 }
+#if defined(MINIGL_HOST_TEST)
+mw_ctx *mw_service_test_context(uint32_t handle)
+{
+    return mw_service_find_context(handle);
+}
+#endif
+
 #if defined(MINIGL_MODULE)
 static int mw_service_create_context_owner(uint32_t *owner)
 {
@@ -671,9 +678,13 @@ int mw_service_poll(void)
     if (!g_ctrl)
         return 0;
 
-    if (minigl_raster_feed_pending()) {
-        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER);
-        return 1;
+    /* 68k packets wait until the ARM ring has retired: they may switch the
+     * shared backend to another context.  Waiting work is a demand, so this
+     * step polls fences. */
+    if (minigl_raster_work_outstanding()) {
+        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_PARKED);
+        if (minigl_raster_work_outstanding())
+            return 1;
     }
 
     g_doorbell_pending = 0;

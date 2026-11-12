@@ -2290,29 +2290,78 @@ int zzapp_display_flip_bound(void)
 	return ZZ_OK;
 }
 
+/* A flip normally completes within a few VBlanks; one line per wait that
+ * outlasts this says which half of the handshake is late. */
+#define FLIP_WAIT_REPORT_US 50000U
+
+#ifdef ZZAPP_HOST_TEST
+static uint32_t flip_wait_reports;
+#endif
+
+/* gen != submit: ZZRun has not shown the frame yet.  submit == gen but no
+ * ack: the VBlank has not seen the flip address on scanout. */
+static void report_slow_flip(uint32_t gen, uint64_t waited_us)
+{
+#ifndef ZZAPP_HOST_TEST
+	printf("[app] flip wait %lu ms: gen=%lu ack=%lu submit=%lu addr=%08lx flags=%08lx queued=%08lx\r\n",
+	       (unsigned long)(waited_us / 1000U), (unsigned long)gen,
+	       (unsigned long)life_get(ZZAPP_LIFE_FLIP_ACK_OFF),
+	       (unsigned long)life_get(ZZAPP_LIFE_FLIP_SUBMIT_OFF),
+	       (unsigned long)life_get(ZZAPP_LIFE_FLIP_ADDRESS_OFF),
+	       (unsigned long)life_get(ZZAPP_LIFE_FLAGS_OFF),
+	       (unsigned long)current_runtime()->display_queued);
+#else
+	(void)gen;
+	(void)waited_us;
+	flip_wait_reports++;
+#endif
+}
+
 static int wait_flip(uint32_t gen)
 {
-	uint32_t generation = zzapp_services_generation();
+    uint32_t generation = zzapp_services_generation();
+    uint64_t started = now_us();
+    int reported = 0;
 
-	for (;;) {
-		uint32_t ack;
+    for (;;) {
+        uint32_t ack;
+        int status;
 
-		if (zzapp_services_stop_requested() ||
-		    zzapp_services_generation() != generation)
-			return ZZ_EIO;
-		ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
-		if (ack == gen) {
-			display_reap_flip();
-			wait_end();
-			return ZZ_OK;
-		}
-		wait_begin(ZZAPP_WAIT_FLIP, gen, 0U);
-		yield_wait_once();
-		if (wait_status() != ZZ_OK) {
-			wait_end();
-			return wait_status();
-		}
+        if (zzapp_services_stop_requested() ||
+            zzapp_services_generation() != generation)
+            return ZZ_EIO;
+        ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
+        if (ack == gen) {
+            display_reap_flip();
+            wait_end();
+            return ZZ_OK;
+        }
+        /* The first registration wakes this parked app at 50 ms solely for
+         * diagnostics. Subsequent waiting remains event-driven until ack. */
+        wait_begin(ZZAPP_WAIT_FLIP, gen,
+                   reported ? 0U : started + FLIP_WAIT_REPORT_US);
+        yield_wait_once();
+        status = wait_status();
+        if (status == ZZ_ETIMEDOUT && !reported) {
+            reported = 1;
+            wait_end();
+            report_slow_flip(gen, now_us() - started);
+            continue;
+        }
+        if (status != ZZ_OK) {
+            wait_end();
+            return status;
+        }
+    }
 }
+
+int zzapp_display_wait_flip_idle(void)
+{
+	if (!current_runtime()->display_bound)
+		return ZZ_EINVAL;
+	if (display_mailbox_enabled())
+		return ZZ_OK;
+	return wait_flip(life_get(ZZAPP_LIFE_FLIP_GEN_OFF));
 }
 
 

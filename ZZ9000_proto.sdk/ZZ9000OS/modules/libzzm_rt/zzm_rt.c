@@ -34,6 +34,7 @@ static const zzm_services_t *runtime;
 static const zzm_core_service_t *core;
 static const zzm_memory_service_t *memory;
 static const zzm_cache_service_t *cache;
+static const zzm_reclaim_service_t *reclaim;
 static zzm_allocation_context_t context;
 
 #define ZZM_RT_MAX_CONTEXTS 16U
@@ -102,6 +103,8 @@ int zzm_rt_bind(const zzm_services_t *services, uint32_t module_id,
                                                                    ZZM_SERVICE_MEMORY_V1);
     cache = (const zzm_cache_service_t *)services->get_service(ZZM_SERVICE_CACHE,
                                                                  ZZM_SERVICE_CACHE_V1);
+    reclaim = (const zzm_reclaim_service_t *)services->get_service(
+        ZZM_SERVICE_RECLAIM, ZZM_SERVICE_RECLAIM_V1);
     if (!core || !memory || !core->log || !core->fault || !memory->alloc ||
         !memory->free || !memory->realloc)
         return 0;
@@ -125,6 +128,15 @@ void zzm_rt_get_context(zzm_allocation_context_t *out)
 {
     if (out)
         *out = context;
+}
+
+void zzm_rt_quarantine_owner(uint32_t owner)
+{
+    if (reclaim && reclaim->size >= offsetof(zzm_reclaim_service_t,
+                                             quarantine_owner) +
+                                        sizeof(reclaim->quarantine_owner) &&
+        reclaim->quarantine_owner)
+        reclaim->quarantine_owner(owner);
 }
 
 const void *zzm_rt_get_service(uint32_t id, uint32_t min_version)

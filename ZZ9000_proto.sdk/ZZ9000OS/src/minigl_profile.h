@@ -66,6 +66,9 @@ typedef enum {
     MGLP_N_HW_VACANCY,    /* sum of free FIFO words (TDFV) */
     MGLP_N_RIX_STATES,    /* RasterIX state blocks emitted (per draw op/pass) */
     MGLP_N_RIX_PAGE_WORDS,/* texture page-list words in those blocks */
+    MGLP_N_FEED_STEPS,    /* asynchronous feed steps taken */
+    MGLP_N_FEED_DEVICE_READS, /* RasterIX/FIFO/DMA reads made by feed steps */
+    MGLP_N_FEED_INVALIDATES,  /* fence cache invalidates made by feed steps */
     MGLP_COUNTERS
 } MiniGLProfileCounter;
 

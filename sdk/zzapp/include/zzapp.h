@@ -329,6 +329,8 @@ typedef struct zzapp_gl {
 #define ZZ_GL_BIND_SYNC_PRESENT 2u
 /* Debug switch: keep RasterIX command feed synchronous for A/B comparison. */
 #define ZZ_GL_BIND_SYNC_RIX_FEED 4u
+/* Debug switch: keep the asynchronous ring but push command words inline. */
+#define ZZ_GL_BIND_INLINE_RIX_FEED 8u
 
 
 typedef struct zzapp_api {

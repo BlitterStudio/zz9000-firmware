@@ -100,6 +100,7 @@ typedef struct {
     uint32_t addr;
     uint32_t size;
     uint32_t owner;
+    uint8_t flags;
 } card_pool_block_t;
 
 typedef struct {
@@ -114,6 +115,8 @@ typedef struct {
     /* Frees naming an unknown address or another owner. */
     uint32_t ignored_frees;
 } card_pool_t;
+
+#define CARD_POOL_BLOCK_QUARANTINED 0x01u
 
 /* One contiguous card pool: a permanent prefix plus a revocable Fast-RAM
  * tail. The tail stays closed while Fast RAM is advertised. */
@@ -133,8 +136,8 @@ void card_pool_init(card_pool_t *pool);
 int card_pool_add_range(card_pool_t *pool, uint32_t base, uint32_t end,
                         int revocable);
 void card_pool_open_range(card_pool_t *pool, uint32_t range);
-/* Drop every block in the range and close it. Their owners' later frees
- * are ignored. Returns the bytes dropped. */
+/* Drop every non-quarantined block in the range and close it. Their owners'
+ * later frees are ignored. Returns the bytes dropped. */
 uint32_t card_pool_revoke_range(card_pool_t *pool, uint32_t range);
 
 /* `size` bytes rounded up to whole pages, page aligned. Returns the card
@@ -152,25 +155,39 @@ int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
 /* Whether `owner` owns a live block containing `[addr, addr + length)`. */
 int card_pool_range_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
                           uint32_t owner);
-/* Frees the block starting at `addr` when `owner` owns it and returns 1.
- * Otherwise nothing changes, the free is counted in ignored_frees, and it
- * returns 0. A zero address is a no-op returning 0. */
+/* Frees the block starting at `addr` when `owner` owns it and the block is
+ * not quarantined, and returns 1. Otherwise nothing changes, the free is
+ * counted in ignored_frees, and it returns 0. A zero address is a no-op
+ * returning 0. */
 int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner);
-/* Free every block of one owner. Returns the bytes freed. */
+/* Free every non-quarantined block of one owner. Returns the bytes freed. */
 uint32_t card_pool_release_owner(card_pool_t *pool, uint32_t owner);
+/* Permanently retain every live block of `owner`. Legacy MiniGL (class 7)
+ * and module MiniGL context (class 11) owners with the same instance name
+ * the same context. */
+void card_pool_quarantine_owner(card_pool_t *pool, uint32_t owner);
+/* Permanently retain every live MiniGL block. Used only while core 1 is
+ * halted after a cold restart. */
+void card_pool_quarantine_minigl(card_pool_t *pool);
+/* Whether the revocable Fast-RAM window contains quarantined memory and
+ * therefore cannot be handed to the Amiga. */
+int card_pool_can_lend_to_amiga(const card_pool_t *pool);
 
 /* Whether a revocable range is lent out. Reads no lock: only core 0 opens
  * and closes ranges, so its own answer cannot change underneath it. */
 int card_pool_has_lent(const card_pool_t *pool);
-/* Amiga reset, before the fast-RAM gate can reopen: revoke every lent
- * range. The caller must first stop core 1 (which also frees a pool lock a
- * faulted core 1 still holds) and afterwards write back the ARM cache
- * lines for that memory. Takes no lock when nothing is lent. */
+/* Amiga reset, before the fast-RAM gate can reopen: revoke every lent range's
+ * non-quarantined blocks. Quarantined blocks remain reserved; callers must
+ * keep the gate closed while card_pool_can_lend_to_amiga() is false. The
+ * caller must first stop core 1 (which also frees a pool lock a faulted core
+ * 1 still holds) and afterwards write back the ARM cache lines for that
+ * memory. Takes no lock when nothing is lent. */
 void card_pool_take_back_lent(card_pool_t *pool);
-/* Amiga reset, after the module resets: release every owner except the
- * FIRMWARE class, then lend the revocable tail when the Amiga cannot use it
- * -- a Zorro II board has no fast-RAM window, and Zorro III lends the tail
- * while Fast RAM is withheld. */
+/* Amiga reset, after core 0 has observed RasterIX completion or quarantined
+ * its MiniGL blocks: release every non-quarantined owner except FIRMWARE,
+ * then lend the revocable tail when the Amiga cannot use it -- a Zorro II
+ * board has no Fast-RAM window, and Zorro III lends it while Fast RAM is
+ * withheld. */
 void card_pool_finish_amiga_reset(card_pool_t *pool, int is_zorro3,
                                   int fastram_advertised);
 

@@ -78,6 +78,7 @@ void Xil_AssertNonVoid() {}
 #include "zzapp_as.h"
 #include "zzapp_services.h"
 #include "card_pool.h"
+#include "minigl_fence_guard.h"
 #include "overlay.h"
 #include "zzm_minigl_host.h"
 #include "mw_service.h"
@@ -701,12 +702,91 @@ static int fastram_can_advertise(void)
 	        MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000) != 0U;
 }
 
-/* Same bound as scheduler_quiesce_for_reset, checked across loop iterations
- * so core 0 keeps servicing the bus while a present or PL330 stream finishes. */
-#define MINIGL_RESET_BUDGET_MS 50
+/* MiniGL's module reset has its own deadline. Pool safety polls the published
+ * RasterIX fence directly, so reclamation does not depend on that reply. */
+#define MINIGL_RESET_BUDGET_MS 150
+#define MINIGL_FENCE_WAIT_MS 100
 
 static int mgl_reset_posted;
 static XTime mgl_reset_mark;
+
+static int fastram_can_lend_to_amiga(void)
+{
+	return fastram_can_advertise() && card_pool_can_lend_to_amiga(&card_pool);
+}
+
+
+static void take_back_lent_card_pool(void)
+{
+	scheduler_quiesce_for_reset();
+	if (scheduler_core1_clean_dcache() != 0)
+		core1_cold_restart();
+	card_pool_take_back_lent(&card_pool);
+	Xil_DCacheFlush();
+}
+
+static void finish_amiga_reset_pool(void)
+{
+	card_pool_finish_amiga_reset(&card_pool,
+		sdk_aperture_runtime_is_zorro3(), fastram_can_lend_to_amiga());
+	print_memory_line();
+}
+
+static int minigl_fence_snapshot(void *context, uint32_t *address,
+	uint32_t *sequence)
+{
+	(void)context;
+	return zzm_minigl_fence_snapshot(address, sequence);
+}
+
+static uint16_t minigl_fence_read(void *context, uint32_t address)
+{
+	(void)context;
+	Xil_DCacheInvalidateRange((INTPTR)address, sizeof(uint16_t));
+	return *(volatile uint16_t *)(uintptr_t)address;
+}
+
+static int minigl_fence_engine_idle(void *context)
+{
+	(void)context;
+	return zzm_minigl_rasterix_idle();
+}
+
+static uint32_t minigl_fence_clock_ms(void *context)
+{
+	XTime now;
+
+	(void)context;
+	XTime_GetTime(&now);
+	return (uint32_t)((uint64_t)now / (COUNTS_PER_SECOND / 1000U));
+}
+
+static void minigl_fence_sleep(void *context, uint32_t milliseconds)
+{
+	(void)context;
+	usleep(milliseconds * 1000U);
+}
+
+static void minigl_fence_forget(void *context)
+{
+	(void)context;
+	zzm_minigl_forget_fence();
+}
+
+static void protect_minigl_card_pool(void)
+{
+	static const minigl_fence_guard_hooks_t hooks = {
+		.snapshot = minigl_fence_snapshot,
+		.read_fence = minigl_fence_read,
+		.engine_idle = minigl_fence_engine_idle,
+		.clock_ms = minigl_fence_clock_ms,
+		.sleep_ms = minigl_fence_sleep,
+		.forget = minigl_fence_forget,
+	};
+
+	minigl_fence_guard_pool(&card_pool, zzm_minigl_rasterix_active(), &hooks,
+		MINIGL_FENCE_WAIT_MS);
+}
 
 static int mgl_reset_elapsed_ms(void)
 {
@@ -718,10 +798,15 @@ static int mgl_reset_elapsed_ms(void)
 	return ms > 1000000ULL ? 1000000 : (int)ms;
 }
 
-static void minigl_reset_abort_and_free(void)
+static void minigl_reset_abort(void)
 {
+	/* A running core 1 is cold-restarted, and the restart aborts the module
+	 * while that core is halted. Aborting again here would race the
+	 * restarted worker, so only a core 1 that is not running leaves it to
+	 * this core. */
+	if (!scheduler_core1_available())
+		zzm_minigl_abort_reset();
 	scheduler_cancel_minigl_reset();
-	zzm_minigl_abort_reset();
 	mgl_reset_posted = 0;
 }
 
@@ -734,37 +819,38 @@ static void minigl_reset_poll(void)
 		return;
 	sh = scheduler_shared();
 	phase = sched_minigl_reset_phase(scheduler_core1_available(), 1,
-	                                 sh->minigl_reset_ack != 0,
+	                                 sh->minigl_reset_ack,
 	                                 mgl_reset_elapsed_ms(),
 	                                 MINIGL_RESET_BUDGET_MS);
-	if (phase == SCHED_MINIGL_RESET_ACKED)
+	if (phase == SCHED_MINIGL_RESET_ACKED) {
 		mgl_reset_posted = 0;
-	else if (phase == SCHED_MINIGL_RESET_ABORT)
-		minigl_reset_abort_and_free();
+	} else if (phase == SCHED_MINIGL_RESET_ABORT) {
+		minigl_reset_abort();
+	}
 }
 
 static void minigl_begin_amiga_reset(void)
 {
 	sched_minigl_reset_phase_t phase;
-	int acked = 0;
+	uint32_t ack = 0U;
 	zzapp_on_amiga_reset();
 
 	if (scheduler_core1_available() && zzm_minigl_worker_registered()) {
 		scheduler_request_minigl_reset();
 		mgl_reset_posted = 1;
 		XTime_GetTime(&mgl_reset_mark);
-		acked = scheduler_shared()->minigl_reset_ack != 0;
+		ack = scheduler_shared()->minigl_reset_ack;
 	}
 	handle_amiga_reset(AMIGA_RESET_FAST);
 	phase = sched_minigl_reset_phase(scheduler_core1_available(),
-	                                 mgl_reset_posted, acked, 0,
+	                                 mgl_reset_posted, ack, 0,
 	                                 MINIGL_RESET_BUDGET_MS);
 	if (phase == SCHED_MINIGL_RESET_LOCAL)
-		zzm_minigl_abort_reset();
-	else if (phase == SCHED_MINIGL_RESET_ACKED)
+		minigl_reset_abort();
+	else if (phase == SCHED_MINIGL_RESET_ACKED) {
 		mgl_reset_posted = 0;
-	else if (phase == SCHED_MINIGL_RESET_ABORT)
-		minigl_reset_abort_and_free();
+	} else if (phase == SCHED_MINIGL_RESET_ABORT)
+		minigl_reset_abort();
 }
 
 /* Pulse the ADAU1701 RESET. */
@@ -849,6 +935,11 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * warm reboot therefore applies a saved fast_ram change, and a
 	 * failed or too-slow re-read boots without Fast RAM. */
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6, 0);
+	/* Stop new module submissions before sampling its last committed fence.
+	 * The direct poll below then covers a RasterIX fetch that outlives the
+	 * worker, including the cold-restart safety path in the quiesce. */
+	scheduler_quiesce_for_reset();
+	protect_minigl_card_pool();
 	/* Card pool range B is the fast-RAM window, lent to the ARM while fast
 	 * RAM is not advertised. Take it back before the gate can reopen.
 	 * Core 1 goes first: the quiesce stops any task still writing a block
@@ -859,13 +950,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * invalidates L1 and L2, so no dirty line for the window can reach
 	 * DDR once the Amiga owns it. Skipped when the window was not lent,
 	 * which keeps a fast-RAM board's reset as quick as before. */
-	if (card_pool_has_lent(&card_pool)) {
-		scheduler_quiesce_for_reset();
-		if (scheduler_core1_clean_dcache() != 0)
-			core1_cold_restart();
-		card_pool_take_back_lent(&card_pool);
-		Xil_DCacheFlush();
-	}
+	if (card_pool_has_lent(&card_pool))
+		take_back_lent_card_pool();
 	/* Cold boot reaches this handler right after main() decided the
 	 * gate: as media init normally, and as a FAST reset in the
 	 * ZZ9000_SKIP_INITIAL_MEDIA_INIT build where no volume is ever
@@ -877,7 +963,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 		zz_config_fastram_reload_warm(ZZ_CONFIG_FASTRAM_DEADLINE_MS);
 	amiga_boot_reset_pass = 0;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
-		fastram_can_advertise() ? 1 : 0);
+		fastram_can_lend_to_amiga() ? 1 : 0);
 
 	/* The boot pass initialises card services; it is not an Amiga reset.
 	 * A real reset finds the audio DSP exactly as the previous pass left
@@ -1006,11 +1092,11 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	sdk_diag_task_count = 0;
 	sdk_mailbox_register_events = 0;
 
-	/* Every session went down above: give back what they held, and lend
-	 * the fast-RAM window again when the Amiga cannot use it. */
-	card_pool_finish_amiga_reset(&card_pool,
-		sdk_aperture_runtime_is_zorro3(), fastram_can_advertise());
-	print_memory_line();
+	/* Pool reclamation stays synchronous. The direct RasterIX fence poll above
+	 * either proved the last committed list complete or quarantined every
+	 * MiniGL block before this reset releases ordinary allocations. */
+	finish_amiga_reset_pool();
+	scheduler_resume_minigl_submissions();
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;

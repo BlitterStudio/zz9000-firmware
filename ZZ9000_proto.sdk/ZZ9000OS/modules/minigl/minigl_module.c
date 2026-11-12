@@ -15,7 +15,6 @@
 #define ZZM_MINIGL_MODULE_QUOTA (4U * 1024U * 1024U)
 #define ZZM_MINIGL_TRANSPORT_QUOTA (4U * 1024U * 1024U)
 #define ZZM_MINIGL_CONTEXT_QUOTA (384U * 1024U * 1024U)
-#define ZZM_MINIGL_CAP_RASTERIX 1U
 #ifndef ZZM_MINIGL_BUILD_ID
 #define ZZM_MINIGL_BUILD_ID "unknown"
 #endif
@@ -67,6 +66,7 @@ static int minigl_has_work(void *context)
 }
 
 extern void zzm_module_set_worker_context(int active);
+extern int zzm_module_api_active(void);
 
 static int minigl_poll(void *context, uint32_t budget)
 {
@@ -80,8 +80,12 @@ static int minigl_poll(void *context, uint32_t budget)
         worked = mw_service_poll();
     if (!worked && minigl_raster_feed_pending()) {
         minigl_profile_feed_deadline_wake();
-        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER);
-        worked = 1;
+        /* A full FIFO or a DMA still in flight is no progress: the worker
+         * may then give the core up instead of retrying at once.  An app
+         * parked inside a GL call waits on this ring, so keep feeding it. */
+        worked = minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER) >
+                     RIX_DRV_FEED_BLOCKED ||
+                 zzm_module_api_active();
     }
     zzm_module_set_worker_context(0);
     return worked;
@@ -159,8 +163,10 @@ static int minigl_begin_reset(void *context)
     /* What the 68k last asked for and how long ago, before the reset tears
      * the context down: an Amiga-side crash leaves no other ARM trace. */
     mw_service_report_amiga_reset();
+    /* Retrying a stop that failed cannot succeed later: report it, and the
+     * firmware stops the engines and drops the module with core 1 halted. */
     if (!mw_rix_abort_engines())
-        return 0;
+        return ZZM_MINIGL_RESET_FAILED;
     minigl_release_app(module);
     minigl_release_transport(module);
     mw_service_reset();
@@ -191,14 +197,15 @@ static void minigl_fini(void *context)
 {
     minigl_module_context_t *module = context;
 
-    if (minigl_raster_feed_pending()) {
+    if (minigl_raster_work_outstanding()) {
         uint32_t bound = 100000U;
-        while (minigl_raster_feed_pending() && bound--) {
-            if (minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER) ==
+        /* Unload waits for the buffers back: a PARKED step polls fences. */
+        while (minigl_raster_work_outstanding() && bound--) {
+            if (minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_PARKED) ==
                 RIX_DRV_FEED_ERROR)
                 break;
         }
-        if (minigl_raster_feed_pending()) {
+        if (minigl_raster_work_outstanding()) {
             (void)mw_rix_abort_engines();
         } else {
             (void)minigl_raster_drain();
@@ -283,7 +290,7 @@ static const zzm_minigl_ops_v1_t g_ops = {
     minigl_begin_reset, minigl_reset_poll, minigl_abort_reset,
     minigl_begin_unload, minigl_fini,
     minigl_app_bind, minigl_app_swap, minigl_app_unbind, minigl_app_reclaim,
-    minigl_app_bind_flags
+    minigl_app_bind_flags, ZZM_MINIGL_RESET_PROTOCOL_V2
 };
 
 static const zzm_minigl_worker_ops_t g_worker_ops = {
@@ -333,6 +340,7 @@ int zzm_module_init(const zzm_services_t *services)
                                  ZZM_SERVICE_RECLAIM_V3,
                                  sizeof(*reclaim)) ||
         !reclaim->create_owner || !reclaim->close_owner ||
+        !reclaim->quarantine_owner ||
         !minigl_table_compatible(app_host->version, app_host->size,
                                  ZZM_SERVICE_APP_GL_HOST_V3,
                                  sizeof(*app_host)) ||

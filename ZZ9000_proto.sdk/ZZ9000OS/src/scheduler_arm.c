@@ -134,8 +134,13 @@ void scheduler_boot_init(void)
   sh->minigl_reset_request = 0;
   sh->minigl_reset_ack = 0;
   sh->minigl_in_flight = 0;
+  sh->minigl_submission_admission = 1U;
+  sh->minigl_submission_generation = 0U;
+  sh->minigl_submission_ack = 0U;
   sh->minigl_packets_on_core1 = 0;
-  sh->service_pending = 0;
+  sh->minigl_rix_fence_epoch = 0U;
+  sh->minigl_rix_fence_sequence = 0U;
+  sh->minigl_rix_fence_address = 0U;
   zzapp_kernel_stack_paint((uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
                            SDK_CORE1_SYSTEM_STACK_SIZE);
   {
@@ -357,6 +362,7 @@ static uint16_t scheduler_run_slot(taskq_desc_t *d)
 void scheduler_core1_service_once(void)
 {
   taskq_shared_t *sh = scheduler_shared();
+  sched_worker_action_t action;
   int slot = taskq_claim_any(&sh->queue);
 
   if (slot >= 0) {
@@ -365,11 +371,16 @@ void scheduler_core1_service_once(void)
     sh->core1_current_slot = -1;
     sh->tasks_on_core1++;
   }
-  sh->minigl_in_flight = 1;
-  dmb();
-  zzm_minigl_service_tick(0);
-  sh->minigl_in_flight = 0;
-  dmb();
+  action = sh->minigl_reset_request != 0U ? SCHED_WORKER_ACTION_RESET :
+                                           SCHED_WORKER_ACTION_MINIGL;
+  if (scheduler_minigl_submission_action(sh, action) ==
+      SCHED_WORKER_ACTION_MINIGL) {
+    sh->minigl_in_flight = 1;
+    dmb();
+    zzm_minigl_service_tick(0);
+    sh->minigl_in_flight = 0;
+    dmb();
+  }
 }
 
 static uint32_t scheduler_doorbell_drain(void *context, uint32_t batch)
@@ -442,8 +453,9 @@ void scheduler_core1_worker(void)
     int task_avail;
     int mgl_avail;
     int mgl_bound;
+    int mgl_progress = 0;
     int apps_runnable;
-    int should_wfe = 0;
+    int should_wfe;
     uint32_t drained = 0U;
     sched_worker_action_t action;
 
@@ -477,18 +489,28 @@ void scheduler_core1_worker(void)
     mgl_avail = zzm_minigl_has_work();
     mgl_bound = zzm_minigl_worker_registered();
     action = sched_worker_decide(reset_req, task_avail, mgl_avail, mgl_bound);
+    action = scheduler_minigl_submission_action(sh, action);
 
     switch (action) {
-    case SCHED_WORKER_ACTION_RESET:
-      /* The module owns context draining. It is polled only on core 1 and
-       * acknowledges after it has stopped its worker-facing resources. */
-      if (zzm_minigl_begin_reset() != ZZM_MINIGL_RESET_BUSY &&
-          zzm_minigl_reset_poll() == ZZM_MINIGL_RESET_QUIESCENT) {
+    case SCHED_WORKER_ACTION_RESET: {
+      /* A reset step can wait for a committed RasterIX fence. Publish that
+       * interval so core 0's mailbox quiesce cannot reclaim its buffers. */
+      int result;
+
+      sh->minigl_in_flight = 1;
+      dmb();
+      result = zzm_minigl_reset_step();
+      sh->minigl_in_flight = 0;
+      dmb();
+      if (result != ZZM_MINIGL_RESET_BUSY) {
         sh->minigl_reset_request = 0;
-        sh->minigl_reset_ack = 1;
+        sh->minigl_reset_ack = result == ZZM_MINIGL_RESET_FAILED ?
+                               SCHED_MINIGL_RESET_ACK_FAILED :
+                               SCHED_MINIGL_RESET_ACK_DONE;
         dmb();
       }
       break;
+    }
 
     case SCHED_WORKER_ACTION_TASK:
       sh->core1_current_slot = task_slot;
@@ -501,19 +523,20 @@ void scheduler_core1_worker(void)
     case SCHED_WORKER_ACTION_POLL_IDLE:
       sh->minigl_in_flight = 1;
       dmb();
-      zzm_minigl_service_tick(0);
+      mgl_progress = zzm_minigl_service_tick(0);
       sh->minigl_in_flight = 0;
       dmb();
       break;
 
     case SCHED_WORKER_ACTION_WFE:
     default:
-      should_wfe = !taskq_has_active(&sh->queue) &&
-                   !sh->minigl_reset_request &&
-                   !sh->minigl_doorbell &&
-                   !zzm_minigl_worker_registered();
       break;
     }
+    should_wfe = sched_worker_may_wfe(action, mgl_progress,
+                                      taskq_has_active(&sh->queue),
+                                      sh->minigl_reset_request != 0,
+                                      sh->minigl_doorbell != 0,
+                                      zzm_minigl_worker_registered());
     /* An app parked on host data (a file reply, console input, a flip) is
      * woken by this loop's next service pass. The launcher's reply raises
      * no interrupt, so idling in WFE would add up to one 5 ms tick to every
@@ -754,6 +777,9 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
       zzm_runtime_reset_heap_lock();
       zzapp_services_reclaim_halted_audio();
       sdk_compression_reclaim_core1_decode();
+      /* No worker will acknowledge RasterIX quiescence in this mode. Keep
+       * every MiniGL class reserved before any later reset reclaims owners. */
+      zzm_runtime_quarantine_module(ZZM_MODULE_MINIGL);
       g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
       /* MiniGL is never parsed on core 0.  A module worker can only resume
        * after core 1 returns; its transport remains unavailable meanwhile. */
@@ -800,12 +826,10 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
   }
 }
 
-/* Bounded quiesce wait: crypto tasks are sub-millisecond, so 5000 * 10us = 50ms
- * is far beyond a normal drain. If a task is still active when the cap expires
- * it is either wedged or a legitimately long op mid-write -- either way core 1
- * is force-reset (see below) rather than left to race the mailbox teardown. */
-#define SCHED_QUIESCE_SPINS  5000u
-#define SCHED_QUIESCE_US       10u
+/*
+ * A quiesce cap bounds reset while allowing MiniGL's 100-ms RasterIX drain
+ * to complete before the scheduler cold-restarts core 1.
+ */
 
 /*
  * Quiesce the scheduler before a mailbox teardown (sdk_mailbox_init on Amiga
@@ -827,17 +851,41 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
  * Race-free without a worker handshake: this runs on core 0's main loop, the
  * sole task producer, so once the queue reads empty no new task can appear.
  */
+void scheduler_resume_minigl_submissions(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  sh->minigl_submission_admission = 1U;
+  dmb();
+  sh->minigl_submission_ack = 0U;
+  dmb();
+  scheduler_core1_wake();
+}
+
 void scheduler_quiesce_for_reset(void)
 {
   taskq_shared_t *sh = scheduler_shared();
   uint32_t spins;
   int timed_out;
 
-  if (!scheduler_core1_available())
-    return;   /* no core-1 worker -> no in-flight writes to drain */
+  if (!scheduler_core1_available()) {
+    sh->minigl_submission_admission = 0U;
+    dmb();
+    if (++sh->minigl_submission_generation == 0U)
+      ++sh->minigl_submission_generation;
+    sh->minigl_submission_ack = sh->minigl_submission_generation;
+    return;
+  }
+  sh->minigl_submission_admission = 0U;
+  dmb();
+  if (++sh->minigl_submission_generation == 0U)
+    ++sh->minigl_submission_generation;
+  sh->minigl_submission_ack = 0U;
+  dmb();
+  scheduler_core1_wake();
 
   for (spins = 0; spins < SCHED_QUIESCE_SPINS; spins++) {
-    if (!taskq_has_active(&sh->queue) && !sh->minigl_in_flight)
+    if (scheduler_minigl_quiesce_done(sh))
       break;
     usleep(SCHED_QUIESCE_US);
   }
@@ -847,7 +895,7 @@ void scheduler_quiesce_for_reset(void)
    * taskq_init leaves zero QUEUED slots, and the worker only ever claims QUEUED,
    * so it cannot pick up a stale task and write into buffers the mailbox is
    * about to reuse. */
-  timed_out = taskq_has_active(&sh->queue) || sh->minigl_in_flight;
+  timed_out = !scheduler_minigl_quiesce_done(sh);
   taskq_init(&sh->queue);
   sh->core1_current_slot = -1;
 

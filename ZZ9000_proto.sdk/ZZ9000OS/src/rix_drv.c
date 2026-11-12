@@ -9,9 +9,11 @@
 #include "minigl_profile.h"
 
 #define RIX_DSE_STREAM 0x90000000U
+#define RIX_MEM_TO_ST1 RIX_DRV_MEMFETCH_ENVELOPE
 
-static uint32_t rix_drv_read(const struct rix_drv *driver, uint32_t offset)
+static uint32_t rix_drv_read(struct rix_drv *driver, uint32_t offset)
 {
+    ++driver->device_reads;
     return driver->read(driver->context, offset);
 }
 
@@ -21,8 +23,9 @@ static void rix_drv_write(const struct rix_drv *driver, uint32_t offset,
     driver->write(driver->context, offset, value);
 }
 
-static uint32_t rix_drv_fifo_read(const struct rix_drv *driver, uint32_t offset)
+static uint32_t rix_drv_fifo_read(struct rix_drv *driver, uint32_t offset)
 {
+    ++driver->device_reads;
     return driver->fifo_read(driver->context, offset);
 }
 
@@ -84,6 +87,7 @@ static void rix_drv_set_packet_words(struct rix_drv *driver)
 {
     uint32_t vacancy = rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV);
 
+    driver->fifo_vacancy_estimate = vacancy;
     if (vacancy > driver->fifo_capacity)
         driver->fifo_capacity = vacancy;
     if (vacancy == RIX_DRV_FIFO_LEGACY_VACANCY)
@@ -96,6 +100,19 @@ static void rix_drv_set_packet_words(struct rix_drv *driver)
         driver->packet_words = RIX_DRV_FIFO_MAX_PACKET_WORDS;
 }
 
+/* Free FIFO words for the next feed packet.  The estimate only shrinks as
+ * words are staged while RasterIX keeps draining, so it is a lower bound;
+ * TDFV is read again only when the estimate cannot hold `wanted` words. */
+static uint32_t rix_drv_feed_vacancy(struct rix_drv *driver, uint32_t wanted)
+{
+    if (driver->fifo_vacancy_estimate < wanted) {
+        driver->fifo_vacancy_estimate = rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV);
+        minigl_profile_feed_vacancy(driver->fifo_vacancy_estimate,
+                                    driver->fifo_capacity);
+    }
+    return driver->fifo_vacancy_estimate;
+}
+
 static uint32_t rix_drv_command_words(uint32_t word)
 {
     switch (word >> 28U) {
@@ -106,6 +123,64 @@ static uint32_t rix_drv_command_words(uint32_t word)
     case 5U: return 1U + (word & 0x7ffffU); /* OP_TEXTURE_STREAM */
     default: return 1U; /* OP_NOP */
     }
+}
+
+/* The CommandParser ignores envelope TLAST and keeps its command state
+ * between envelopes, so a list is cut into fixed 16 KiB pieces (the last
+ * one shorter) whatever the command boundaries; the list itself is a whole
+ * number of 64-byte bursts. */
+static uint32_t rix_drv_memfetch_chunk(uint32_t first, uint32_t command_words)
+{
+    uint32_t remaining = command_words - first;
+
+    return remaining < RIX_DRV_MEMFETCH_CHUNK_WORDS ? remaining :
+           RIX_DRV_MEMFETCH_CHUNK_WORDS;
+}
+
+static int rix_drv_memfetch_validate(uintptr_t command_address,
+                                     uint32_t command_words)
+{
+    size_t bytes = (size_t)command_words * sizeof(uint32_t);
+
+    if (command_address == (uintptr_t)0U ||
+        command_address > (uintptr_t)UINT32_MAX ||
+        (command_address & (RIX_DRV_MEMFETCH_ALIGN_BYTES - 1U)) != 0U ||
+        bytes == 0U ||
+        (bytes & (RIX_DRV_MEMFETCH_ALIGN_BYTES - 1U)) != 0U)
+        return RIX_DRV_BAD_ARGUMENT;
+    return RIX_DRV_OK;
+}
+
+static int rix_drv_memfetch_commit(struct rix_drv *driver, uintptr_t address,
+                                   uint32_t words)
+{
+    uint32_t bytes = words * sizeof(uint32_t);
+    uint32_t isr;
+
+    driver->last_packet_bytes = 2U * sizeof(uint32_t);
+    driver->pending_bytes = driver->last_packet_bytes;
+    driver->last_packet_dma = 0;
+    ++driver->packets;
+    minigl_profile_count(MGLP_N_DRV_PACKETS, 1U);
+    driver->memfetch_committed = 1U;
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, RIX_MEM_TO_ST1 | bytes);
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, (uint32_t)address);
+    if (driver->fifo_drain != NULL)
+        driver->fifo_drain(driver->context);
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TLF, 2U * sizeof(uint32_t));
+    ++driver->memfetch_commit_count;
+    driver->fifo_vacancy_estimate = driver->fifo_vacancy_estimate >= 2U ?
+                                    driver->fifo_vacancy_estimate - 2U : 0U;
+    isr = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR);
+    if ((isr & RIX_DRV_FIFO_ISR_ERRORS) != 0U) {
+        driver->last_error_status = isr;
+        driver->last_error_address = (uint32_t)address;
+        minigl_profile_feed_errors(isr);
+        rix_drv_fifo_write(driver, RIX_DRV_FIFO_ISR,
+                           isr & RIX_DRV_FIFO_ISR_ERRORS);
+        return RIX_DRV_ERROR;
+    }
+    return RIX_DRV_OK;
 }
 
 /* Ends the in-flight DMA packet: wait for the transfer, then establish its
@@ -266,12 +341,14 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
     driver->dma_start_nonblocking = config->dma_start_nonblocking;
     driver->dma_ready = config->dma_ready;
     driver->dma_abort = config->dma_abort;
+    driver->submit_mode = config->submit_mode;
     driver->pending_bytes = 0U;
     driver->pending_dma = 0;
     driver->last_status = 0U;
     driver->last_error_status = 0U;
     driver->last_error_address = 0U;
     driver->submitted_target = 0U;
+    driver->memfetch_commit_count = 0U;
     driver->last_packet_bytes = 0U;
     driver->packets = 0U;
     driver->dma_packets = 0U;
@@ -280,9 +357,13 @@ int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config)
     driver->fifo_capacity = RIX_DRV_FIFO_LEGACY_VACANCY;
     driver->available = 0;
     driver->enabled = 0;
+    driver->fifo_vacancy_estimate = 0U;
+    driver->device_reads = 0U;
 
-    if (!config->hardware_present || config->read == NULL || config->write == NULL ||
-        config->fifo_read == NULL || config->fifo_write == NULL)
+    if (!config->hardware_present || config->read == NULL ||
+        config->write == NULL || config->fifo_read == NULL ||
+        config->fifo_write == NULL ||
+        config->submit_mode > RIX_DRV_SUBMIT_MEMFETCH)
         return RIX_DRV_UNAVAILABLE;
     identity = rix_drv_read(driver, RIX_DRV_CSR_IDENTITY);
     version = rix_drv_read(driver, RIX_DRV_CSR_VERSION);
@@ -342,6 +423,32 @@ static int rix_drv_submit_packets(struct rix_drv *driver, const uint32_t *comman
     return RIX_DRV_OK;
 }
 
+static int rix_drv_submit_memfetch(struct rix_drv *driver,
+                                   const uint32_t *commands,
+                                   uintptr_t command_address,
+                                   uint32_t command_words, uint32_t timeout)
+{
+    uint32_t first = 0U;
+    int result;
+
+    result = rix_drv_memfetch_validate(command_address, command_words);
+    if (result != RIX_DRV_OK)
+        return result;
+    while (first < command_words) {
+        uint32_t count = rix_drv_memfetch_chunk(first, command_words);
+
+        result = rix_drv_wait_vacancy(driver, 2U, timeout);
+        if (result != RIX_DRV_OK)
+            return result;
+        result = rix_drv_memfetch_commit(
+            driver, command_address + first * sizeof(*commands), count);
+        if (result != RIX_DRV_OK)
+            return result;
+        first += count;
+    }
+    return RIX_DRV_OK;
+}
+
 int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
                    uintptr_t command_address, uint32_t command_words,
                    uint32_t timeout)
@@ -357,10 +464,16 @@ int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
     if (driver->clean_dcache != NULL && command_address != (uintptr_t)0U)
         driver->clean_dcache(driver->context, command_address,
                              (size_t)command_words * sizeof(*commands));
-    result = rix_drv_submit_packets(driver, commands, command_address,
+    driver->memfetch_committed = 0U;
+    result = driver->submit_mode == RIX_DRV_SUBMIT_MEMFETCH ?
+             rix_drv_submit_memfetch(driver, commands, command_address,
+                                     command_words, timeout) :
+             rix_drv_submit_packets(driver, commands, command_address,
                                     command_words, timeout);
     if (result == RIX_DRV_OK)
         result = rix_drv_flush_pending(driver);
+    /* The blocking path stages words without tracking them. */
+    driver->fifo_vacancy_estimate = 0U;
     minigl_profile_pop();
     if (result != RIX_DRV_OK)
         return result;
@@ -398,12 +511,34 @@ void rix_drv_feed_reset(struct rix_drv_feed *feed)
     feed->active = 0;
 }
 
+static int rix_drv_try_feed_memfetch(struct rix_drv *driver,
+                                     struct rix_drv_feed *feed);
+
+/* Nothing stops the FrameStreamingCore once it has accepted an envelope:
+ * resetting it mid-fetch can leave an accepted AXI transaction behind, and
+ * an envelope may end inside a command the next one completes.  Aborting a
+ * DDR list therefore finishes pushing it; the caller then waits for the
+ * list's fence and idle before any command memory is reused. */
+static int rix_drv_memfetch_abort(struct rix_drv *driver, struct rix_drv_feed *feed)
+{
+    int result;
+
+    if (!feed->active)
+        return RIX_DRV_FEED_DONE;
+    result = rix_drv_try_feed_memfetch(driver, feed);
+    if (result == RIX_DRV_FEED_PROGRESS)
+        return RIX_DRV_FEED_BLOCKED;
+    return result;
+}
+
 int rix_drv_feed_abort(struct rix_drv *driver, struct rix_drv_feed *feed)
 {
     int state;
 
     if (!rix_drv_usable(driver) || !driver->enabled || feed == NULL)
         return RIX_DRV_FEED_ERROR;
+    if (driver->submit_mode == RIX_DRV_SUBMIT_MEMFETCH)
+        return rix_drv_memfetch_abort(driver, feed);
     if (!feed->active)
         return RIX_DRV_FEED_DONE;
     if (feed->pending_launch) {
@@ -426,6 +561,7 @@ int rix_drv_feed_abort(struct rix_drv *driver, struct rix_drv_feed *feed)
             return RIX_DRV_FEED_ERROR;
     }
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    driver->fifo_vacancy_estimate = 0U;
     state = rix_drv_fifo_read(driver, RIX_DRV_FIFO_ISR) & RIX_DRV_FIFO_ISR_ERRORS;
     if (state != 0)
         rix_drv_fifo_write(driver, RIX_DRV_FIFO_ISR, (uint32_t)state);
@@ -433,6 +569,36 @@ int rix_drv_feed_abort(struct rix_drv *driver, struct rix_drv_feed *feed)
     return RIX_DRV_FEED_DONE;
 }
 
+static int rix_drv_try_feed_memfetch(struct rix_drv *driver,
+                                     struct rix_drv_feed *feed)
+{
+    uintptr_t command_address;
+    uint32_t count;
+    uint32_t vacancy;
+    int result;
+
+    result = rix_drv_memfetch_validate(feed->command_address,
+                                       feed->command_words);
+    if (result != RIX_DRV_OK)
+        return RIX_DRV_FEED_ERROR;
+    vacancy = rix_drv_feed_vacancy(driver, 2U);
+    if (vacancy < 2U) {
+        minigl_profile_feed_retry();
+        return RIX_DRV_FEED_BLOCKED;
+    }
+    count = rix_drv_memfetch_chunk(feed->command_offset, feed->command_words);
+    command_address = feed->command_address +
+                      feed->command_offset * sizeof(*feed->commands);
+    if (rix_drv_memfetch_commit(driver, command_address, count) != RIX_DRV_OK)
+        return RIX_DRV_FEED_ERROR;
+    feed->command_offset += count;
+    minigl_profile_feed_chunk(feed->source);
+    if (feed->command_offset == feed->command_words) {
+        feed->active = 0;
+        return RIX_DRV_FEED_DONE;
+    }
+    return RIX_DRV_FEED_PROGRESS;
+}
 int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed)
 {
     uint32_t vacancy, limit, count, physical_payload;
@@ -443,11 +609,14 @@ int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed)
         return RIX_DRV_FEED_ERROR;
     if (!feed->active)
         return RIX_DRV_FEED_DONE;
+    if (driver->submit_mode == RIX_DRV_SUBMIT_MEMFETCH)
+        return rix_drv_try_feed_memfetch(driver, feed);
     if (feed->pending_launch) {
         int state;
 
         if (driver->dma_start_nonblocking == NULL)
             return RIX_DRV_FEED_ERROR;
+        ++driver->device_reads;
         state = driver->dma_start_nonblocking(driver->context,
             feed->command_address + feed->command_offset * sizeof(*feed->commands),
             feed->staged_bytes / sizeof(uint32_t) - 2U, 16U);
@@ -464,6 +633,7 @@ int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed)
 
         if (driver->dma_complete == NULL)
             return RIX_DRV_FEED_ERROR;
+        ++driver->device_reads;
         state = driver->dma_complete(driver->context);
         if (state == RIX_DRV_DMA_PENDING)
             return RIX_DRV_FEED_BLOCKED;
@@ -474,9 +644,9 @@ int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed)
     }
 
     physical_payload = driver->fifo_capacity > 2U ? driver->fifo_capacity - 2U : 0U;
-    vacancy = rix_drv_fifo_read(driver, RIX_DRV_FIFO_TDFV);
-    minigl_profile_feed_vacancy(vacancy, driver->fifo_capacity);
+    vacancy = rix_drv_feed_vacancy(driver, RIX_DRV_FEED_MAX_WORDS + 2U);
     if (vacancy <= 2U) {
+        driver->fifo_vacancy_estimate = 0U;
         minigl_profile_feed_retry();
         return RIX_DRV_FEED_BLOCKED;
     }
@@ -499,6 +669,8 @@ int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed)
         count += words;
     }
     if (count == 0U) {
+        /* A large command waits for real vacancy, not the estimate. */
+        driver->fifo_vacancy_estimate = 0U;
         minigl_profile_feed_retry();
         return RIX_DRV_FEED_BLOCKED;
     }
@@ -510,11 +682,15 @@ int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed)
     if (dma && driver->dma_ready != NULL && !driver->dma_ready(driver->context))
         return RIX_DRV_FEED_ERROR;
     feed->staged_bytes = (count + 2U) * sizeof(*feed->commands);
+    driver->fifo_vacancy_estimate -= count + 2U;
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD,
                        RIX_DSE_STREAM | count * sizeof(*feed->commands));
     rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFD, 0U);
     if (dma) {
-        int state = driver->dma_start_nonblocking(driver->context, command_address,
+        int state;
+
+        ++driver->device_reads;
+        state = driver->dma_start_nonblocking(driver->context, command_address,
                                                    count, 16U);
 
         if (state == RIX_DRV_DMA_PENDING) {
@@ -556,11 +732,12 @@ int rix_drv_recover(struct rix_drv *driver, uint32_t timeout, int soft_reset)
     result = rix_drv_wait_idle(driver, timeout);
     if (result != RIX_DRV_OK)
         return result;
+    /* Drop queued packets or envelopes before the renderer leaves reset. */
+    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     if (soft_reset)
         rix_drv_write(driver, RIX_DRV_CSR_CONTROL,
                       RIX_DRV_CONTROL_ENABLE | RIX_DRV_CONTROL_SOFT_RESET);
     driver->pending_dma = 0;
-    rix_drv_fifo_write(driver, RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     rix_drv_set_packet_words(driver);
     return RIX_DRV_OK;
 }

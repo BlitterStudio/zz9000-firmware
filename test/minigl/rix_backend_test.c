@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "card_pool.h"
+#include "minigl_fence_guard.h"
 #include "minigl_rix_backend.h"
 #include "rix_texture.h"
 extern void (*g_rix_test_log)(const char *fmt, ...);
@@ -11,6 +13,19 @@ extern void (*g_rix_test_log)(const char *fmt, ...);
 static unsigned g_disabled_logs;
 static unsigned g_diagnostic_snapshots;
 static unsigned g_self_test_failures;
+int smp_cpu_id(void) { return 0; }
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t state) { (void)state; }
+void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1U; }
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+    if (*word)
+        return 0;
+    *word = 1U;
+    return 1;
+}
+void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0U; }
+
 
 static void count_log(const char *fmt, ...)
 {
@@ -57,6 +72,8 @@ struct model {
     unsigned invalidates;
     unsigned complete_packets;
     uint32_t fifo_vacancy;
+    uint32_t last_tlf;
+    unsigned fifo_reads;
     uintptr_t cleaned_address;
     size_t cleaned_bytes;
     uintptr_t invalidated_address;
@@ -78,7 +95,20 @@ struct model {
     unsigned idle_after_fence_yields;
     int fence_signaled;
     int fail_feed_on_yield;
+    int fail_memfetch_commit;
+    unsigned fail_memfetch_after_packet;
     unsigned command_count;
+    /* Parser state carried across packets and envelopes: a DDR list chunk
+     * may end inside a command. */
+    uint32_t parse_skip;
+    uint32_t parse_reg;       /* register number + 1 awaiting its value */
+    unsigned triangles_parsed;
+    uintptr_t published_address;
+    uint32_t published_sequence;
+    unsigned retired_publications;
+    unsigned publish_count;
+    unsigned guard_sleeps;
+    uint32_t quarantined_mask;
 };
 
 static uint16_t rgba_to_rgb565(uint32_t rgba)
@@ -88,59 +118,68 @@ static uint16_t rgba_to_rgb565(uint32_t rgba)
                       (rgba >> 11U & 31U));
 }
 
-static void render_packet(struct model *model)
+static void render_word(struct model *model, uint32_t word)
 {
-    size_t word = 2U;
-
-    while (word < model->fifo_words) {
-        uint32_t command = model->packet[word++];
-        uint32_t command_words = 1U;
-
-        switch (command >> 28U) {
-        case 1U:
-            assert(word < model->fifo_words);
-            if ((command & 0xffU) == RIX_REG_COLOR_BUFFER_ADDR)
-                model->color_address = model->packet[word];
-            else if ((command & 0xffU) == RIX_REG_CLEAR_COLOR)
-                model->clear_color = model->packet[word];
-            command_words = 2U;
-            break;
-        case 2U:
-            if ((command & (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR)) ==
-                (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR) &&
-                model->complete_packets != 0U) {
-                size_t index;
-
-                for (index = 0U; index < model->command_count; ++index)
-                    if (model->color_address ==
-                        model->command_address[index] + COMMAND_BYTES -
-                        MINIGL_RIX_TEXTURE_PAGE_BYTES)
-                        *(uint16_t *)(void *)(model->command[index] +
-                            COMMAND_BYTES - MINIGL_RIX_TEXTURE_PAGE_BYTES) =
-                            rgba_to_rgb565(model->clear_color);
-            }
-            break;
-        case 3U:
-            command_words += (command & 0x3ffU) / sizeof(uint32_t);
-            break;
-        case 4U:
-            command_words = 65U;
-            break;
-        case 5U:
-            command_words += command & 0x7ffffU;
-            break;
-        default:
-            break;
-        }
-        assert(command_words <= model->fifo_words - word + 1U);
-        word += command_words - 1U;
+    if (model->parse_skip != 0U) {
+        --model->parse_skip;
+        return;
     }
+    if (model->parse_reg != 0U) {
+        if (model->parse_reg - 1U == RIX_REG_COLOR_BUFFER_ADDR)
+            model->color_address = word;
+        else if (model->parse_reg - 1U == RIX_REG_CLEAR_COLOR)
+            model->clear_color = word;
+        model->parse_reg = 0U;
+        return;
+    }
+    switch (word >> 28U) {
+    case 1U:
+        model->parse_reg = (word & 0xffU) + 1U;
+        break;
+    case 2U:
+        if ((word & (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR)) ==
+            (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR) &&
+            model->complete_packets != 0U) {
+            size_t index;
+
+            for (index = 0U; index < model->command_count; ++index)
+                if (model->color_address ==
+                    model->command_address[index] + COMMAND_BYTES -
+                    MINIGL_RIX_TEXTURE_PAGE_BYTES)
+                    *(uint16_t *)(void *)(model->command[index] +
+                        COMMAND_BYTES - MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+                        rgba_to_rgb565(model->clear_color);
+        }
+        break;
+    case 3U:
+        model->parse_skip = (word & 0x3ffU) / sizeof(uint32_t);
+        ++model->triangles_parsed;
+        break;
+    case 4U:
+        model->parse_skip = 64U;
+        break;
+    case 5U:
+        model->parse_skip = word & 0x7ffffU;
+        break;
+    default:
+        break;
+    }
+}
+
+static void render_commands(struct model *model, const uint32_t *commands,
+                            size_t command_count)
+{
+    size_t word;
+
+    for (word = 0U; word < command_count; ++word)
+        render_word(model, commands[word]);
 }
 
 static uint32_t fifo_read(void *context, uint32_t offset)
 {
     struct model *model = context;
 
+    ++model->fifo_reads;
     if (offset == RIX_DRV_FIFO_TDFV)
         return model->fifo_vacancy;
     return model->fifo[offset / sizeof(uint32_t)];
@@ -162,13 +201,42 @@ static void fifo_write(void *context, uint32_t offset, uint32_t value)
         model->packet[model->fifo_words++] = value;
         --model->fifo_vacancy;
     } else if (offset == RIX_DRV_FIFO_TLF) {
+        model->last_tlf = value;
         assert(model->fifo_words >= 2U);
-        assert(value == model->fifo_words * sizeof(uint32_t));
-        assert(model->packet[0] == (0x90000000U |
-                                    (model->fifo_words - 2U) * sizeof(uint32_t)));
-        assert(model->packet[1] == 0U);
-        render_packet(model);
+        if ((model->packet[0] & 0xf0000000U) == RIX_DRV_MEMFETCH_ENVELOPE) {
+            const uint32_t *commands = NULL;
+            uint32_t bytes = model->packet[0] & 0x0fffffffU;
+            uintptr_t address = model->packet[1];
+            size_t index;
+
+            assert(value == 2U * sizeof(uint32_t));
+            assert(model->fifo_words == 2U);
+            assert((bytes & (RIX_DRV_MEMFETCH_ALIGN_BYTES - 1U)) == 0U);
+            for (index = 0U; index < model->command_count; ++index)
+                if (address >= model->command_address[index] &&
+                    address + bytes <= model->command_address[index] +
+                                       COMMAND_BYTES)
+                    commands = (const uint32_t *)(void *)(
+                        model->command[index] +
+                        (address - model->command_address[index]));
+            assert(commands != NULL);
+            render_commands(model, commands, bytes / sizeof(uint32_t));
+        } else {
+            assert(value == model->fifo_words * sizeof(uint32_t));
+            assert(model->packet[0] == (0x90000000U |
+                                        (model->fifo_words - 2U) *
+                                        sizeof(uint32_t)));
+            assert(model->packet[1] == 0U);
+            render_commands(model, model->packet + 2U,
+                            model->fifo_words - 2U);
+            /* An inline packet always ends on a command boundary. */
+            assert(model->parse_skip == 0U && model->parse_reg == 0U);
+        }
         ++model->packet_count;
+        if (model->fail_memfetch_commit != 0 ||
+            (model->fail_memfetch_after_packet != 0U &&
+             model->packet_count >= model->fail_memfetch_after_packet))
+            model->fifo[RIX_DRV_FIFO_ISR / sizeof(uint32_t)] = RIX_DRV_FIFO_ISR_ERRORS;
         model->fifo_words = 0U;
         model->fifo_vacancy = FIFO_CAPACITY;
     }
@@ -224,6 +292,80 @@ static int grow_texture_pool(void *context, size_t minimum_bytes,
 
 
 
+static void publish_fence(void *context, uintptr_t address, uint32_t sequence)
+{
+    struct model *model = context;
+
+    model->published_address = address;
+    model->published_sequence = sequence;
+    if (address == 0U && sequence == 0U)
+        ++model->retired_publications;
+    else
+        ++model->publish_count;
+}
+static int guard_snapshot(void *context, uint32_t *address, uint32_t *sequence)
+{
+    struct model *model = context;
+
+    *address = (uint32_t)model->published_address;
+    *sequence = model->published_sequence;
+    return *address != 0U;
+}
+
+static uint16_t guard_read(void *context, uint32_t address)
+{
+    (void)context;
+    (void)address;
+    return 0U;
+}
+
+static int guard_idle(void *context)
+{
+    (void)context;
+    return 1;
+}
+
+static uint32_t guard_clock(void *context)
+{
+    (void)context;
+    return 0U;
+}
+
+static void guard_sleep(void *context, uint32_t milliseconds)
+{
+    struct model *model = context;
+
+    (void)milliseconds;
+    ++model->guard_sleeps;
+}
+
+static const minigl_fence_guard_hooks_t guard_hooks = {
+    .snapshot = guard_snapshot,
+    .read_fence = guard_read,
+    .engine_idle = guard_idle,
+    .clock_ms = guard_clock,
+    .sleep_ms = guard_sleep
+};
+
+static uint32_t owner_for_address(void *context, uintptr_t address)
+{
+    struct model *model = context;
+
+    if (address >= model->command_address[0] &&
+        address < model->command_address[MINIGL_RIX_COMMAND_BUFFERS - 1U] +
+                  COMMAND_BYTES)
+        return 1U;
+    if (address == 0x03000000U)
+        return 2U;
+    return address == 0x03100000U ? 3U : 0U;
+}
+
+static void quarantine_owner(void *context, uint32_t owner)
+{
+    ((struct model *)context)->quarantined_mask |= 1U << (owner - 1U);
+}
+
+
 static MiniGLRixPlatform platform(struct model *model)
 {
     MiniGLRixPlatform value;
@@ -250,6 +392,9 @@ static MiniGLRixPlatform platform(struct model *model)
     value.cache_clean = cache_clean;
     value.cache_invalidate = cache_invalidate;
     value.white_texture_bytes = sizeof(model->white);
+    value.publish_fence = publish_fence;
+    value.owner_for_address = owner_for_address;
+    value.quarantine_owner = quarantine_owner;
     return value;
 }
 
@@ -1152,6 +1297,92 @@ static void test_dma_self_test_gates_transport(void)
     }
     g_rix_test_log = NULL;
 }
+/* A passed transport self-test retires its fence before the command buffer
+ * can be reused. A queued frame has not reached RasterIX, so reset must not
+ * wait on the self-test fence or quarantine its allocations. */
+static void test_self_test_retirement_clears_published_fence(void)
+{
+    static struct model model;
+    MiniGLRixPlatform io;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+    card_pool_t pool;
+    minigl_fence_guard_hooks_t hooks = guard_hooks;
+    uint32_t allocation;
+
+    hooks.context = &model;
+    memset(&model, 0, sizeof(model));
+    model.texture_bytes = TEXTURE_SLOTS * MINIGL_RIX_TEXTURE_PAGE_BYTES;
+    model.complete_packets = 1U;
+    model.fifo_vacancy = FIFO_CAPACITY;
+    model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    io = platform(&model);
+    io.dma_stream = dma_stream;
+    io.async_feed = 1U;
+    io.command_buffer_count = 2U;
+    minigl_rix_backend_init(&backend, &io);
+    assert(minigl_rix_backend_available(&backend));
+    assert(model.publish_count == 1U);
+    assert(model.retired_publications == 1U);
+    assert(model.published_address == 0U && model.published_sequence == 0U);
+
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
+                                    0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(minigl_rix_backend_submit(&backend));
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_QUEUED);
+    minigl_rix_backend_reset(&backend);
+    assert(model.published_address == 0U && model.published_sequence == 0U);
+    assert(model.retired_publications != 0U && model.quarantined_mask == 0U);
+    card_pool_init(&pool);
+    assert(card_pool_add_range(&pool, 0x10000000U, 0x10020000U, 0U) == 0);
+    card_pool_open_range(&pool, 0U);
+    allocation = card_pool_alloc(&pool, CARD_POOL_PAGE_BYTES,
+                                 CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 1U));
+    assert(allocation != 0U);
+    minigl_fence_guard_pool(&pool, 1, &hooks, 100U);
+    assert(model.guard_sleeps == 0U);
+    assert(card_pool_free(&pool, allocation,
+                          CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 1U)) == 1);
+}
+
+/* A DDR envelope accepted during the actual transport self-test remains
+ * owned across a second initialization of the same context. */
+static void test_failed_memfetch_self_test_retains_list(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    MiniGLRixPlatform io;
+    uint16_t *fence;
+    unsigned packets;
+
+    memset(&model, 0, sizeof(model));
+    model.texture_bytes = TEXTURE_SLOTS * MINIGL_RIX_TEXTURE_PAGE_BYTES;
+    model.fifo_vacancy = FIFO_CAPACITY;
+    model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    model.fail_memfetch_commit = 1;
+    io = platform(&model);
+    io.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
+    minigl_rix_backend_init(&backend, &io);
+    assert(!minigl_rix_backend_available(&backend));
+    assert(backend.pending[0] && backend.pending_fence[0] == 0xa55aU);
+    packets = model.packet_count;
+    assert(packets == 1U);
+    fence = (uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES);
+    assert(*fence == 0U);
+
+    minigl_rix_backend_reinit(&backend, &io);
+    assert(backend.pending[0] && backend.pending_fence[0] == 0xa55aU);
+    assert(model.packet_count == packets);
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
+    *fence = 0xa55aU;
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_DONE);
+}
 
 static void test_surface_handoff_and_recorded_texture_state(void)
 {
@@ -1431,13 +1662,404 @@ static void test_async_submit_queues_before_feed(void)
     io.async_feed = 1U;
     io.command_buffer_count = 2U;
     minigl_rix_backend_init(&backend, &io);
+    model.publish_count = 0U;
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
                                     0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
     assert(minigl_rix_backend_submit(&backend));
     assert(backend.ring_state[0] == MINIGL_RIX_RING_QUEUED);
+    assert(model.publish_count == 0U);
     assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) !=
            RIX_DRV_FEED_ERROR);
+    assert(model.publish_count == 1U);
+}
+
+static void test_async_memfetch_keeps_ring_and_fence_lifecycle(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    MiniGLRixPlatform io;
+    ZZ9KMiniGLPacketSetState state = state16();
+    unsigned cleans;
+
+    memset(&model, 0, sizeof(model));
+    model.texture_bytes = sizeof(model.textures);
+    model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    model.fifo_vacancy = FIFO_CAPACITY;
+    model.complete_packets = 1U;
+    io = platform(&model);
+    io.async_feed = 1U;
+    io.command_buffer_count = 2U;
+    io.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
+    minigl_rix_backend_init(&backend, &io);
+    assert(minigl_rix_backend_available(&backend));
+    assert(model.packet_count == 1U); /* Transport self-test. */
+
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
+                                    0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
+    cleans = model.cleans;
+    assert(minigl_rix_backend_submit(&backend));
+    assert(model.cleans > cleans);
+    assert((backend.submitted_command_words[0] & 15U) == 0U);
+    assert(model.cleaned_bytes ==
+           backend.submitted_command_words[0] * sizeof(uint32_t));
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_QUEUED);
+
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_DONE);
+    assert(model.last_tlf == 2U * sizeof(uint32_t));
+    assert((model.packet[0] & 0xf0000000U) == RIX_DRV_MEMFETCH_ENVELOPE);
+    assert(model.packet[1] == model.command_address[0]);
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
+    /* Retirement is demand-driven: the present poll observes fence and idle. */
+    assert(minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_FREE);
+}
+static void init_async_memfetch_backend(MiniGLRixBackend *backend,
+                                        struct model *model)
+{
+    MiniGLRixPlatform io;
+
+    memset(model, 0, sizeof(*model));
+    model->texture_bytes = sizeof(model->textures);
+    model->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    model->fifo_vacancy = FIFO_CAPACITY;
+    model->complete_packets = 1U;
+    io = platform(model);
+    io.async_feed = 1U;
+    io.command_buffer_count = 2U;
+    io.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
+    minigl_rix_backend_init(backend, &io);
+    assert(minigl_rix_backend_available(backend));
+    model->publish_count = 0U;
+    model->retired_publications = 0U;
+}
+
+static void test_async_memfetch_error_publishes_accepted_envelope(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+
+    init_async_memfetch_backend(&backend, &model);
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
+                                    0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(minigl_rix_backend_submit(&backend));
+    model.fail_memfetch_after_packet = model.packet_count + 1U;
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_ERROR);
+    assert(model.publish_count == 1U && model.published_address != 0U);
+}
+
+static void test_async_memfetch_abort_publishes_accepted_envelope(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+
+    init_async_memfetch_backend(&backend, &model);
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
+                                    0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(minigl_rix_backend_submit(&backend));
+    model.fifo_vacancy = 1U;
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_BLOCKED);
+    model.fifo_vacancy = FIFO_CAPACITY;
+    model.complete_packets = 0U;
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
+    assert(model.publish_count == 1U && model.published_address != 0U);
+}
+
+static void test_queued_work_does_not_keep_a_retired_fence_published(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    ZZ9KMiniGLPacketSetState state = state16();
+    card_pool_t pool;
+    minigl_fence_guard_hooks_t hooks = guard_hooks;
+    uint32_t allocation;
+    uint8_t queued;
+    uint8_t retired;
+
+    init_async_memfetch_backend(&backend, &model);
+    hooks.context = &model;
+    minigl_rix_backend_set_state(&backend, &state);
+    model.complete_packets = 0U;
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
+                                    0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(minigl_rix_backend_submit(&backend));
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_DONE);
+    for (retired = 0U; retired < 2U; ++retired)
+        if (backend.ring_state[retired] == MINIGL_RIX_RING_RENDERING)
+            break;
+    assert(retired < 2U);
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03200000U,
+                                    0x03300000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(minigl_rix_backend_submit(&backend));
+    for (queued = 0U; queued < 2U; ++queued)
+        if (backend.ring_state[queued] == MINIGL_RIX_RING_QUEUED)
+            break;
+    assert(queued < 2U && queued != retired);
+    *(uint16_t *)(void *)(model.command[retired] + COMMAND_BYTES -
+                          MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+        (uint16_t)backend.pending_fence[retired];
+    model.fifo_vacancy = 0U;
+    backend.driver.fifo_vacancy_estimate = 0U;
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_PARKED) ==
+           RIX_DRV_FEED_BLOCKED);
+    assert(backend.ring_state[retired] == MINIGL_RIX_RING_FREE);
+    assert(backend.ring_state[queued] == MINIGL_RIX_RING_FEEDING);
+    assert(model.published_address == 0U && model.published_sequence == 0U);
+
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03400000U,
+                                    0x03500000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(minigl_rix_backend_submit(&backend));
+    assert(backend.ring_state[retired] == MINIGL_RIX_RING_QUEUED);
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
+    minigl_rix_backend_abandon(&backend);
+
+    card_pool_init(&pool);
+    assert(card_pool_add_range(&pool, 0x10000000U, 0x10020000U, 0U) == 0);
+    card_pool_open_range(&pool, 0U);
+    allocation = card_pool_alloc(&pool, CARD_POOL_PAGE_BYTES,
+                                 CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 2U));
+    assert(allocation != 0U);
+    minigl_fence_guard_pool(&pool, 1, &hooks, 100U);
+    assert(model.quarantined_mask == 0U);
+    assert(model.guard_sleeps == 0U);
+    assert(card_pool_free(&pool, allocation,
+                          CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 2U)) == 1);
+}
+
+
+/* An ordinary untextured batch: an 18-word setup, then 40-word triangle
+ * commands, more than one 16 KiB DDR chunk.  Chunk ends fall inside
+ * triangles; the parser continues across envelopes, so every triangle and
+ * the frame fence must arrive and the backend must stay enabled. */
+static void test_memfetch_triangle_batch_spans_envelopes(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    MiniGLRixPlatform io;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(2.0f, 2.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 2.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(2.0f, 60.0f, 0x0000ffffU);
+    unsigned index;
+    int result;
+
+    memset(&model, 0, sizeof(model));
+    model.texture_bytes = sizeof(model.textures);
+    model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    model.fifo_vacancy = FIFO_CAPACITY;
+    model.complete_packets = 1U;
+    io = platform(&model);
+    io.async_feed = 1U;
+    io.command_buffer_count = 2U;
+    io.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
+    minigl_rix_backend_init(&backend, &io);
+    assert(minigl_rix_backend_available(&backend));
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U,
+                                         0x03100000U));
+    for (index = 0U; index < 103U; ++index)
+        assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_submit(&backend));
+    assert(backend.submitted_command_words[0] >
+           RIX_DRV_MEMFETCH_CHUNK_WORDS);
+
+    model.packet_count = 0U;
+    model.triangles_parsed = 0U;
+    model.publish_count = 0U;
+    result = minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC);
+    assert(result == RIX_DRV_FEED_PROGRESS);
+    assert(model.publish_count == 1U);
+    do
+        result = minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC);
+    while (result == RIX_DRV_FEED_PROGRESS);
+    assert(result == RIX_DRV_FEED_DONE);
+    assert(minigl_rix_backend_available(&backend));
+    assert(model.packet_count == 2U);
+    assert(model.triangles_parsed == 103U);
+    assert(model.parse_skip == 0U && model.parse_reg == 0U);
+    assert(minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_FREE);
+}
+
+/* A FIFO error following the first accepted envelope cannot make a synchronous
+ * multi-envelope submission relinquish its list before the fence is observed. */
+static void test_failed_sync_memfetch_submit_retains_list(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    MiniGLRixPlatform io;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(2.0f, 2.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 2.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(2.0f, 60.0f, 0x0000ffffU);
+    uint16_t *fence;
+    unsigned index;
+
+    memset(&model, 0, sizeof(model));
+    model.texture_bytes = sizeof(model.textures);
+    model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    model.fifo_vacancy = FIFO_CAPACITY;
+    model.complete_packets = 1U;
+    io = platform(&model);
+    io.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
+    minigl_rix_backend_init(&backend, &io);
+    assert(minigl_rix_backend_available(&backend));
+    model.complete_packets = 0U;
+    model.fail_memfetch_after_packet = model.packet_count + 1U;
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U,
+                                         0x03100000U));
+    for (index = 0U; index < 103U; ++index)
+        assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(!minigl_rix_backend_submit(&backend));
+    assert(backend.pending[0] && backend.pending_fence[0] != 0U);
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
+    fence = (uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
+                                 MINIGL_RIX_TEXTURE_PAGE_BYTES);
+    *fence = (uint16_t)backend.pending_fence[0];
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_DONE);
+}
+
+/* A forced stop in memfetch mode cannot recall the list: it pushes the rest
+ * of the list being fed and reports DONE only once the list's fence has
+ * landed with the engine idle. */
+static void test_memfetch_abort_waits_for_list_fence(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    MiniGLRixPlatform io;
+    ZZ9KMiniGLPacketSetState state = state16();
+    MiniGLRixVertex a = vertex(2.0f, 2.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 2.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(2.0f, 60.0f, 0x0000ffffU);
+    unsigned index;
+
+    memset(&model, 0, sizeof(model));
+    model.texture_bytes = sizeof(model.textures);
+    model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    model.fifo_vacancy = FIFO_CAPACITY;
+    model.complete_packets = 1U;
+    io = platform(&model);
+    io.async_feed = 1U;
+    io.command_buffer_count = 2U;
+    io.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
+    minigl_rix_backend_init(&backend, &io);
+    assert(minigl_rix_backend_available(&backend));
+    model.complete_packets = 0U; /* The GPU has not reached the fence yet. */
+    minigl_rix_backend_set_state(&backend, &state);
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, 0x03000000U,
+                                         0x03100000U));
+    for (index = 0U; index < 103U; ++index)
+        assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
+    assert(minigl_rix_backend_submit(&backend));
+    model.packet_count = 0U;
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_PROGRESS);
+
+    model.fifo[RIX_DRV_FIFO_TDFR / 4U] = 0U;
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
+    assert(model.packet_count == 2U);       /* the list was finished */
+    assert(model.fifo[RIX_DRV_FIFO_TDFR / 4U] == 0U);
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
+    minigl_rix_backend_quarantine_outstanding(&backend);
+    assert(model.quarantined_mask == 7U);
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
+    *(uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
+                          MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+        (uint16_t)backend.pending_fence[0];
+    assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_DONE);
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_FREE);
+}
+
+/* GL calls step the feeder on every SVC boundary.  With nothing left to
+ * feed and only rendering buffers, such a step must not touch RasterIX,
+ * maintain the cache or read a timer; only a caller that needs a buffer
+ * back (a PARKED step) polls the fence. */
+static void test_idle_feed_steps_touch_no_hardware(void)
+{
+    unsigned mode;
+
+    for (mode = RIX_DRV_SUBMIT_INLINE; mode <= RIX_DRV_SUBMIT_MEMFETCH; ++mode) {
+        static struct model model;
+        MiniGLRixBackend backend;
+        MiniGLRixPlatform io;
+        ZZ9KMiniGLPacketSetState state = state16();
+        unsigned step;
+
+        memset(&model, 0, sizeof(model));
+        model.texture_bytes = sizeof(model.textures);
+        model.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+        model.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+        model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+        model.fifo_vacancy = FIFO_CAPACITY;
+        model.complete_packets = 1U; /* Only the transport self-test fence lands. */
+        io = platform(&model);
+        io.async_feed = 1U;
+        io.command_buffer_count = 2U;
+        io.submit_mode = (uint8_t)mode;
+        minigl_rix_backend_init(&backend, &io);
+        assert(minigl_rix_backend_available(&backend));
+        model.complete_packets = 0U;
+        minigl_rix_backend_set_state(&backend, &state);
+        assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
+                                        0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
+        assert(minigl_rix_backend_submit(&backend));
+        assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+               RIX_DRV_FEED_DONE);
+        assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
+
+        model.csr_reads = 0U;
+        model.fifo_reads = 0U;
+        model.invalidates = 0U;
+        for (step = 0U; step < 1000U; ++step) {
+            assert(minigl_rix_backend_try_feed(&backend, step & 1U ?
+                                               RIX_DRV_FEED_SOURCE_SVC :
+                                               RIX_DRV_FEED_SOURCE_SCHEDULER) ==
+                   RIX_DRV_FEED_DONE);
+            assert(!minigl_rix_backend_feed_pending(&backend));
+            assert(minigl_rix_backend_work_outstanding(&backend));
+        }
+        assert(model.csr_reads == 0U && model.fifo_reads == 0U);
+        assert(model.invalidates == 0U);
+        assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
+
+        /* The fence lands: an ordinary step still does not look... */
+        *(uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
+                              MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+            (uint16_t)backend.pending_fence[0];
+        assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+               RIX_DRV_FEED_DONE);
+        assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
+        assert(model.invalidates == 0U && model.csr_reads == 0U);
+        /* ...a waiter observes fence and idle once. */
+        assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_PARKED) ==
+               RIX_DRV_FEED_DONE);
+        assert(backend.ring_state[0] == MINIGL_RIX_RING_FREE);
+        assert(model.invalidates == 1U && model.csr_reads == 1U);
+        assert(!minigl_rix_backend_work_outstanding(&backend));
+    }
 }
 
 /* Filling the async ring must park until the feeder retires a buffer, rather
@@ -1751,7 +2373,7 @@ static void assert_async_rebind_feeds_cleanly(MiniGLRixBackend *backend,
     *(uint16_t *)(void *)(model->command[0] + COMMAND_BYTES -
                           MINIGL_RIX_TEXTURE_PAGE_BYTES) =
         (uint16_t)backend->pending_fence[0];
-    assert(minigl_rix_backend_try_feed(backend, RIX_DRV_FEED_SOURCE_SVC) ==
+    assert(minigl_rix_backend_try_feed(backend, RIX_DRV_FEED_SOURCE_PARKED) ==
            RIX_DRV_FEED_DONE);
     assert(backend->ring_state[0] == MINIGL_RIX_RING_FREE);
     assert((model->fifo[RIX_DRV_FIFO_ISR / 4U] & RIX_DRV_FIFO_ISR_TSE) == 0U);
@@ -1807,7 +2429,7 @@ static void test_async_abort_waits_for_every_inflight_stage(void)
             *(uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
                                   MINIGL_RIX_TEXTURE_PAGE_BYTES) =
                 (uint16_t)backend.pending_fence[0];
-            assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+            assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_PARKED) ==
                    RIX_DRV_FEED_DONE);
             assert(backend.ring_state[0] == MINIGL_RIX_RING_FREE);
         }
@@ -1859,7 +2481,7 @@ static void test_async_drain_cannot_park_does_bounded_feed_and_returns_incomplet
     queue_async_clear(&backend, 0);
     assert(minigl_rix_backend_drain(&backend) == 0);
     assert(backend.error == 0);
-    assert(minigl_rix_backend_feed_pending(&backend));
+    assert(minigl_rix_backend_work_outstanding(&backend));
 }
 
 static void test_async_feed_mmio_when_dma_start_nonblocking_null(void)
@@ -1980,11 +2602,19 @@ int main(void)
 {
     test_probe_version_compatibility();
     test_async_submit_queues_before_feed();
+    test_async_memfetch_error_publishes_accepted_envelope();
+    test_async_memfetch_abort_publishes_accepted_envelope();
+    test_queued_work_does_not_keep_a_retired_fence_published();
     test_async_full_ring_parks();
     test_async_texture_reuse_parks();
     test_async_target_reuse_parks();
     test_async_feeds_submission_order_after_slot_reuse();
     test_async_stale_generation_is_not_fed();
+    test_async_memfetch_keeps_ring_and_fence_lifecycle();
+    test_idle_feed_steps_touch_no_hardware();
+    test_memfetch_triangle_batch_spans_envelopes();
+    test_failed_sync_memfetch_submit_retains_list();
+    test_memfetch_abort_waits_for_list_fence();
     test_async_abort_preserves_staged_and_rendering_buffers();
     test_async_abort_waits_for_every_inflight_stage();
     test_async_unbind_drain_renders_all_queued_work();
@@ -2095,6 +2725,8 @@ int main(void)
     test_disabled_backend_is_one_shot();
     test_two_texture_multipass_recording();
     test_dma_self_test_gates_transport();
+    test_failed_memfetch_self_test_retains_list();
+    test_self_test_retirement_clears_published_fence();
     test_empty_triangle_stays_on_rasterix();
     test_async_drain_cannot_park_does_bounded_feed_and_returns_incomplete();
     test_async_feed_mmio_when_dma_start_nonblocking_null();

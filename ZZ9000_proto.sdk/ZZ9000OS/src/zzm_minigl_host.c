@@ -5,6 +5,7 @@
 #include "memorymap.h"
 #include "sdk_aperture_layout.h"
 #include "rix_drv.h"
+#include "scheduler.h"
 
 #include <string.h>
 
@@ -778,6 +779,26 @@ static void graphics_v3_barrier(void)
     graphics_barrier(0);
 #endif
 }
+static void graphics_v3_publish_fence(uint32_t address, uint32_t sequence)
+{
+#if !defined(TASKQ_HOST_TEST) && !defined(MINIGL_HOST_TEST)
+    taskq_shared_t *sh = scheduler_shared();
+    uint32_t epoch;
+
+    if ((sh->minigl_rix_fence_epoch & 1U) == 0U)
+        ++sh->minigl_rix_fence_epoch;
+    ZZM_MINIGL_DSB();
+    sh->minigl_rix_fence_sequence = sequence;
+    sh->minigl_rix_fence_address = address;
+    ZZM_MINIGL_DSB();
+    epoch = sh->minigl_rix_fence_epoch + 1U;
+    sh->minigl_rix_fence_epoch = epoch == 0U ? 2U : epoch;
+#else
+    (void)address;
+    (void)sequence;
+#endif
+}
+
 
 static const zzm_graphics_hw_service_t graphics_hw_service = {
     ZZM_SERVICE_GRAPHICS_HW_V3, sizeof(graphics_hw_service),
@@ -788,7 +809,7 @@ static const zzm_graphics_hw_service_t graphics_hw_service = {
     graphics_v3_pl330_retire, graphics_v3_pl330_abort,
     graphics_v3_pl330_release, graphics_v3_barrier,
     graphics_v3_pl330_complete, graphics_v3_pl330_start_nonblocking,
-    graphics_v3_pl330_abort_nonblocking
+    graphics_v3_pl330_abort_nonblocking, graphics_v3_publish_fence
 };
 static int transport_publish_descriptor(uint32_t module_id,
                                         const void *descriptor,
@@ -903,6 +924,9 @@ int zzm_minigl_register(const zzm_minigl_ops_v1_t *ops, void *context,
 {
     if (ops == 0 || worker_ops == 0 || ops->version != ZZM_MINIGL_OPS_V1 ||
         worker_ops->version != ZZM_MINIGL_WORKER_OPS_V1 ||
+        !table_has(ops->size, offsetof(zzm_minigl_ops_v1_t, reset_protocol) +
+                              sizeof(ops->reset_protocol)) ||
+        ops->reset_protocol != ZZM_MINIGL_RESET_PROTOCOL_V2 ||
         !table_has(ops->size, offsetof(zzm_minigl_ops_v1_t, app_reclaim) +
                               sizeof(ops->app_reclaim)) ||
         !table_has(worker_ops->size, offsetof(zzm_minigl_worker_ops_t, poll) +
@@ -1007,27 +1031,37 @@ void zzm_minigl_test_set_poll_hook(void (*hook)(void))
 }
 #endif
 
-void zzm_minigl_service_tick(int in_api)
+int zzm_minigl_service_tick(int in_api)
 {
+    int worked;
+
     if (in_api || !g_worker || g_poll_active || !g_worker->has_work(g_context))
-        return;
+        return 0;
     g_poll_active = 1;
 #if defined(MINIGL_HOST_TEST)
     if (g_test_poll_hook)
         g_test_poll_hook();
 #endif
-    (void)g_worker->poll(g_context, ZZM_MINIGL_POLL_BUDGET);
+    worked = g_worker->poll(g_context, ZZM_MINIGL_POLL_BUDGET) != 0;
     g_poll_active = 0;
+    return worked;
 }
 
 int zzm_minigl_begin_reset(void)
 {
+    int result;
+
     if (g_reset_active)
         return ZZM_MINIGL_RESET_BUSY;
     if (!g_ops || !g_ops->begin_reset)
         return ZZM_MINIGL_RESET_QUIESCENT;
     g_reset_active = 1;
-    return g_ops->begin_reset(g_context);
+    result = g_ops->begin_reset(g_context);
+    /* Only a reset the module is still draining is continued by polls; a
+     * finished or failed one leaves the next request free to start. */
+    if (result != ZZM_MINIGL_RESET_BUSY)
+        g_reset_active = 0;
+    return result;
 }
 
 int zzm_minigl_reset_poll(void)
@@ -1040,6 +1074,17 @@ int zzm_minigl_reset_poll(void)
     result = g_ops->reset_poll(g_context);
     if (result != ZZM_MINIGL_RESET_BUSY)
         g_reset_active = 0;
+    return result;
+}
+
+int zzm_minigl_reset_step(void)
+{
+    int result = zzm_minigl_begin_reset();
+
+    /* BUSY from begin is a reset in progress, this one or an earlier
+     * request's: only polling moves it on. */
+    if (result == ZZM_MINIGL_RESET_BUSY)
+        result = zzm_minigl_reset_poll();
     return result;
 }
 
@@ -1076,6 +1121,67 @@ void zzm_minigl_on_core1_fault(void)
     g_doorbell_installed = 0;
     g_module_capabilities = 0U;
     graphics_pl330_abort(0);
+}
+int zzm_minigl_rasterix_active(void)
+{
+    return (g_module_capabilities & ZZM_MINIGL_CAP_RASTERIX) != 0U;
+}
+int zzm_minigl_rasterix_idle(void)
+{
+#if !defined(TASKQ_HOST_TEST) && !defined(MINIGL_HOST_TEST)
+    return g_caps.has_rasterix_ef &&
+           (graphics_csr_read(0, RIX_DRV_CSR_STATUS) & RIX_DRV_STATUS_IDLE) != 0U;
+#else
+    return 0;
+#endif
+}
+
+
+int zzm_minigl_fence_snapshot(uint32_t *address, uint32_t *sequence)
+{
+#if !defined(TASKQ_HOST_TEST) && !defined(MINIGL_HOST_TEST)
+    taskq_shared_t *sh = scheduler_shared();
+    uint32_t begin;
+    uint32_t end;
+    uint32_t attempts;
+
+    if (!address || !sequence)
+        return 0;
+    for (attempts = 0U; attempts < 1024U; ++attempts) {
+        begin = sh->minigl_rix_fence_epoch;
+        ZZM_MINIGL_DSB();
+        if (begin & 1U)
+            continue;
+        *address = sh->minigl_rix_fence_address;
+        *sequence = sh->minigl_rix_fence_sequence;
+        ZZM_MINIGL_DSB();
+        end = sh->minigl_rix_fence_epoch;
+        if (begin == end && (end & 1U) == 0U)
+            return *address != 0U;
+    }
+    return -1;
+#else
+    (void)address;
+    (void)sequence;
+    return 0;
+#endif
+}
+
+void zzm_minigl_forget_fence(void)
+{
+#if !defined(TASKQ_HOST_TEST) && !defined(MINIGL_HOST_TEST)
+    taskq_shared_t *sh = scheduler_shared();
+    uint32_t epoch;
+
+    if ((sh->minigl_rix_fence_epoch & 1U) == 0U)
+        ++sh->minigl_rix_fence_epoch;
+    ZZM_MINIGL_DSB();
+    sh->minigl_rix_fence_sequence = 0U;
+    sh->minigl_rix_fence_address = 0U;
+    ZZM_MINIGL_DSB();
+    epoch = sh->minigl_rix_fence_epoch + 1U;
+    sh->minigl_rix_fence_epoch = epoch == 0U ? 2U : epoch;
+#endif
 }
 
 void zzm_minigl_boot_caps_init(uint32_t image_flavour)

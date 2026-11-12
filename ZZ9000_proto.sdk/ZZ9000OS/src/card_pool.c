@@ -10,6 +10,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "card_pool.h"
@@ -95,19 +96,27 @@ static uint32_t lower_bound(const card_pool_t *pool, uint32_t addr)
     return lo;
 }
 
-/* Drop blocks [first, last) and return their bytes. One memmove, so a
- * whole revoked range costs no more than a single free. */
+/* Drop non-quarantined blocks [first, last) and return their bytes. A
+ * quarantined block permanently occupies its range, including a revocable
+ * one which must never be handed to the Amiga. */
 static uint32_t remove_blocks(card_pool_t *pool, uint32_t first, uint32_t last)
 {
     uint32_t bytes = 0;
+    uint32_t kept = first;
+
     for (uint32_t i = first; i < last; i++) {
-        const card_pool_block_t *b = &pool->blocks[i];
-        pool->class_used[CARD_POOL_OWNER_CLASS(b->owner)] -= b->size;
-        bytes += b->size;
+        card_pool_block_t b = pool->blocks[i];
+
+        if (b.flags & CARD_POOL_BLOCK_QUARANTINED) {
+            pool->blocks[kept++] = b;
+            continue;
+        }
+        pool->class_used[CARD_POOL_OWNER_CLASS(b.owner)] -= b.size;
+        bytes += b.size;
     }
-    memmove(&pool->blocks[first], &pool->blocks[last],
+    memmove(&pool->blocks[kept], &pool->blocks[last],
             (pool->block_count - last) * sizeof(pool->blocks[0]));
-    pool->block_count -= last - first;
+    pool->block_count -= last - kept;
     return bytes;
 }
 
@@ -206,6 +215,7 @@ uint32_t card_pool_alloc_aligned(card_pool_t *pool, uint32_t size,
                 pool->blocks[insert_at].addr = addr;
                 pool->blocks[insert_at].size = rounded;
                 pool->blocks[insert_at].owner = owner;
+                pool->blocks[insert_at].flags = 0U;
                 pool->block_count++;
                 pool->class_used[cls] += rounded;
             }
@@ -273,7 +283,8 @@ int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner)
     sdk_smp_lock_acquire(&pool->lock);
     uint32_t i = lower_bound(pool, addr);
     if (i < pool->block_count && pool->blocks[i].addr == addr &&
-        pool->blocks[i].owner == owner) {
+        pool->blocks[i].owner == owner &&
+        !(pool->blocks[i].flags & CARD_POOL_BLOCK_QUARANTINED)) {
         remove_blocks(pool, i, i + 1);
         freed = 1;
     } else {
@@ -283,8 +294,9 @@ int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner)
     return freed;
 }
 
-/* Free every block owned by `key`, or with `except_class` set, every block
- * whose class is not `key`. One compaction pass keeps the table sorted. */
+/* Free every non-quarantined block owned by `key`, or with `except_class`
+ * set, every non-quarantined block whose class is not `key`. One compaction
+ * pass keeps the table sorted. */
 static uint32_t release_where(card_pool_t *pool, uint32_t key,
                               int except_class)
 {
@@ -293,7 +305,9 @@ static uint32_t release_where(card_pool_t *pool, uint32_t key,
     for (uint32_t i = 0; i < pool->block_count; i++) {
         card_pool_block_t b = pool->blocks[i];
         uint32_t cls = CARD_POOL_OWNER_CLASS(b.owner);
-        if (except_class ? cls != key : b.owner == key) {
+
+        if ((except_class ? cls != key : b.owner == key) &&
+            !(b.flags & CARD_POOL_BLOCK_QUARANTINED)) {
             pool->class_used[cls] -= b.size;
             freed += b.size;
         } else {
@@ -308,6 +322,83 @@ static uint32_t release_where(card_pool_t *pool, uint32_t key,
 uint32_t card_pool_release_owner(card_pool_t *pool, uint32_t owner)
 {
     return release_where(pool, owner, 0);
+}
+
+static int owner_matches(uint32_t held, uint32_t requested)
+{
+    uint32_t held_class = CARD_POOL_OWNER_CLASS(held);
+    uint32_t requested_class = CARD_POOL_OWNER_CLASS(requested);
+
+    if (held == requested)
+        return 1;
+    return (held & 0x00ffffffU) == (requested & 0x00ffffffU) &&
+           ((held_class == CARD_POOL_CLASS_MINIGL &&
+             requested_class == CARD_POOL_CLASS_MINIGL_CONTEXT) ||
+            (held_class == CARD_POOL_CLASS_MINIGL_CONTEXT &&
+             requested_class == CARD_POOL_CLASS_MINIGL));
+}
+
+static void quarantine_block(card_pool_block_t *block)
+{
+    if (block->flags & CARD_POOL_BLOCK_QUARANTINED)
+        return;
+    block->flags |= CARD_POOL_BLOCK_QUARANTINED;
+    printf("[card-pool] quarantined %08lx-%08lx owner %08lx\r\n",
+           (unsigned long)block->addr,
+           (unsigned long)(block->addr + block->size - 1U),
+           (unsigned long)block->owner);
+}
+
+void card_pool_quarantine_owner(card_pool_t *pool, uint32_t owner)
+{
+    uint32_t i;
+
+    if (!pool || owner == 0U)
+        return;
+    sdk_smp_lock_acquire(&pool->lock);
+    for (i = 0U; i < pool->block_count; ++i)
+        if (owner_matches(pool->blocks[i].owner, owner))
+            quarantine_block(&pool->blocks[i]);
+    sdk_smp_lock_release(&pool->lock);
+}
+
+void card_pool_quarantine_minigl(card_pool_t *pool)
+{
+    uint32_t i;
+
+    if (!pool)
+        return;
+    sdk_smp_lock_acquire(&pool->lock);
+    for (i = 0U; i < pool->block_count; ++i) {
+        uint32_t cls = CARD_POOL_OWNER_CLASS(pool->blocks[i].owner);
+
+        if (cls == CARD_POOL_CLASS_MINIGL ||
+            (cls >= CARD_POOL_CLASS_MINIGL_MODULE &&
+             cls <= CARD_POOL_CLASS_MINIGL_RIX))
+            quarantine_block(&pool->blocks[i]);
+    }
+    sdk_smp_lock_release(&pool->lock);
+}
+
+int card_pool_can_lend_to_amiga(const card_pool_t *pool)
+{
+    uint32_t r;
+    uint32_t i;
+
+    for (r = 0U; r < pool->range_count; ++r) {
+        const card_pool_range_t *range = &pool->ranges[r];
+
+        if (!range->revocable)
+            continue;
+        for (i = 0U; i < pool->block_count; ++i) {
+            const card_pool_block_t *block = &pool->blocks[i];
+
+            if ((block->flags & CARD_POOL_BLOCK_QUARANTINED) &&
+                block->addr >= range->base && block->addr < range->end)
+                return 0;
+        }
+    }
+    return 1;
 }
 
 int card_pool_has_lent(const card_pool_t *pool)

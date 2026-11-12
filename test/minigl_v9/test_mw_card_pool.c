@@ -146,6 +146,8 @@ static void test_destroy_forces_failed_quiesce(void)
     host_card_pool_reset(128U << 20);
     context = mw_host_create_owned(64U, 48U, owner, 0);
     assert(context != NULL);
+    assert(context->rix_async == 0U);
+    assert(context->rix_submit_mode == RIX_DRV_SUBMIT_MEMFETCH);
     context->rix_enabled = 1U;
     minigl_raster_release_buffers();
     mw_host_destroy(context);
@@ -167,6 +169,8 @@ int main(void)
     assert(card_pool.block_count == 0U);
     context = mw_host_create_owned(640U, 480U, owner, 0);
     assert(context != NULL);
+    assert(context->rix_async == 0U);
+    assert(context->rix_submit_mode == RIX_DRV_SUBMIT_MEMFETCH);
     assert(card_pool.block_count <= 4U);
 
     for (texture = 1U; texture <= texture_count; ++texture) {

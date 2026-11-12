@@ -177,6 +177,7 @@ static void reset_module(void)
     g_ops.app_unbind = mock_app_unbind;
     g_ops.app_reclaim = mock_app_reclaim;
     g_ops.app_bind_flags = mock_app_bind_flags;
+    g_ops.reset_protocol = ZZM_MINIGL_RESET_PROTOCOL_V2;
     g_available = 0;
     g_acquires = 0;
     g_releases = 0;

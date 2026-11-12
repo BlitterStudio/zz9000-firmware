@@ -19,6 +19,18 @@ static uint32_t g_pl330_channel;
 static int g_pl330_claimed;
 #endif
 
+static int g_memfetch_enabled = 1;
+
+void minigl_platform_set_memfetch_enabled(int enabled)
+{
+    g_memfetch_enabled = enabled != 0;
+}
+
+int minigl_platform_memfetch_enabled(void)
+{
+    return g_memfetch_enabled;
+}
+
 
 int minigl_platform_set_graphics(const zzm_graphics_hw_service_t *graphics,
                                  const zzm_graphics_hw_caps_t *caps,
@@ -32,19 +44,32 @@ int minigl_platform_set_graphics(const zzm_graphics_hw_service_t *graphics,
     g_graphics = graphics;
     g_graphics_caps = *caps;
     g_graphics_owner = owner;
-    if (g_graphics_caps.pl330_available && g_graphics->pl330_claim &&
-        g_graphics->size >= offsetof(zzm_graphics_hw_service_t,
-                                     pl330_start_nonblocking) +
-                            sizeof(g_graphics->pl330_start_nonblocking) &&
-        g_graphics->pl330_start_nonblocking &&
-        g_graphics->pl330_claim(g_graphics_owner, &g_pl330_channel))
-        g_pl330_claimed = 1;
+    (void)minigl_platform_dma_claim();
 #else
     (void)graphics;
     (void)caps;
     (void)owner;
 #endif
     return 1;
+}
+
+int minigl_platform_dma_claim(void)
+{
+#if defined(MINIGL_MODULE)
+    if (g_pl330_claimed)
+        return 1;
+    if (!g_graphics || !g_graphics_caps.pl330_available || !g_graphics->pl330_claim ||
+        g_graphics->size < offsetof(zzm_graphics_hw_service_t,
+                                    pl330_start_nonblocking) +
+                           sizeof(g_graphics->pl330_start_nonblocking) ||
+        !g_graphics->pl330_start_nonblocking ||
+        !g_graphics->pl330_claim(g_graphics_owner, &g_pl330_channel))
+        return 0;
+    g_pl330_claimed = 1;
+    return 1;
+#else
+    return 0;
+#endif
 }
 
 int minigl_platform_has_rasterix(void)
@@ -158,6 +183,20 @@ void minigl_platform_barrier(void *context)
     __asm__ volatile ("dsb sy" ::: "memory");
 #endif
 }
+void minigl_platform_publish_fence(uint32_t address, uint32_t sequence)
+{
+#if defined(MINIGL_MODULE)
+    if (g_graphics &&
+        g_graphics->size >= offsetof(zzm_graphics_hw_service_t, publish_fence) +
+                            sizeof(g_graphics->publish_fence) &&
+        g_graphics->publish_fence)
+        g_graphics->publish_fence(address, sequence);
+#else
+    (void)address;
+    (void)sequence;
+#endif
+}
+
 
 int minigl_platform_dma_start_async(void *context, uintptr_t source,
                                     uint32_t words, uint32_t burst_words)
@@ -292,28 +331,26 @@ int minigl_platform_dma_stream(void *context, uintptr_t source, uint32_t words,
 int minigl_platform_abort_graphics(void)
 {
 #if defined(MINIGL_MODULE)
-    uint32_t attempts, status;
-
+    /* Without the service this module never drove RasterIX or the DMAC. */
     if (!g_graphics)
-        return 0;
+        return 1;
     if (g_pl330_claimed && g_graphics->pl330_abort)
         g_graphics->pl330_abort(g_pl330_channel);
     if (g_pl330_claimed && g_graphics->pl330_release)
         g_graphics->pl330_release(g_pl330_channel);
+    /* The next context bind claims the channel again (minigl_platform_dma_claim):
+     * a stop must not depend on the channel being free again. */
     g_pl330_claimed = 0;
-    /* Re-claim only after the synchronous abort has proved the channel can
-     * be reset.  A failed claim keeps the backend's buffers owned. */
-    if (g_graphics_caps.pl330_available && g_graphics->pl330_claim &&
-        g_graphics->pl330_claim(g_graphics_owner, &g_pl330_channel))
-        g_pl330_claimed = 1;
+    /* Stop admission, drop queued packets and reset the renderer.  An
+     * accepted DDR list is not recalled by any of this: the caller has
+     * either seen its fence and idle, or keeps every buffer RasterIX may
+     * still read quarantined. */
     g_graphics->csr_write(RIX_DRV_CSR_CONTROL, 0U);
     g_graphics->fifo_write(RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     g_graphics->barrier();
-    for (attempts = 0U; attempts < 32U; ++attempts)
-        if (g_graphics->csr_read(RIX_DRV_CSR_STATUS, &status) &&
-            (status & RIX_DRV_STATUS_IDLE) != 0U)
-            return !g_graphics_caps.pl330_available || g_pl330_claimed;
-    return 0;
+    g_graphics->csr_write(RIX_DRV_CSR_CONTROL, RIX_DRV_CONTROL_SOFT_RESET);
+    g_graphics->barrier();
+    return 1;
 #else
     return 0;
 #endif
