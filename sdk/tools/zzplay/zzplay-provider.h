@@ -264,6 +264,9 @@ typedef struct ZZPlayProvider {
                      char *err, uint32_t err_size);
   int (*form_delete)(void *ctx, const char *item_id,
                      char *err, uint32_t err_size);
+  /* Optional Browse menu label for editable rows. Appended after forms, so
+   * hosts must check size before reading it. */
+  const char *edit_label;
 } ZZPlayProvider;
 
 

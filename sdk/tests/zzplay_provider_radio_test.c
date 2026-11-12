@@ -365,6 +365,7 @@ static void test_radio_descriptor(void)
   assert(p->size == sizeof(ZZPlayProvider));
   assert(strcmp(p->scheme, "radio") == 0);
   assert(strcmp(p->name, "Internet radio") == 0);
+  assert(strcmp(p->edit_label, "Edit station...") == 0);
   assert(p->open != NULL);
   assert(p->close != NULL);
   assert(p->list != NULL);

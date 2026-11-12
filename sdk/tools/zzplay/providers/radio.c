@@ -1577,7 +1577,8 @@ static const ZZPlayProvider radio_provider = {
   NULL,
   radio_station_form_get,
   radio_station_form_submit,
-  radio_station_form_delete
+  radio_station_form_delete,
+  "Edit station..."
 };
 
 const ZZPlayProvider *zzplay_provider_entry(void)

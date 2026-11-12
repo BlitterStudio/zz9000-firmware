@@ -78,6 +78,10 @@ static int test_check(void)
   p.size = (uint32_t)offsetof(ZZPlayProvider, link_name);
   if (zzplay_provider_check(&p) != ZZPLAY_PROVIDER_VALID) return 11;
   p = make("radio");
+  p.size = (uint32_t)offsetof(ZZPlayProvider, edit_label);
+  if (zzplay_provider_check(&p) != ZZPLAY_PROVIDER_VALID) return 12;
+  p.edit_label = "Edit...";
+  if (zzplay_provider_check(&p) != ZZPLAY_PROVIDER_VALID) return 13;
   p.resolve = NULL;
   if (zzplay_provider_check(&p) != ZZPLAY_PROVIDER_INCOMPLETE) return 5;
   p = make("radio");

@@ -213,9 +213,9 @@ and `plex.zzprov` for [Plex](#plex). ZZPlay reads their names when it starts,
 then loads a module when Browse or Settings needs it.
 
 Choose **Browse...** (Amiga-R) in the **Services** menu to open the window.
-Each service also has **Browse** and **Settings...** entries in that menu.
-It can also be used from the keyboard and from its own menu; see **Browse
-menu** and **Browse keys** at the end of this section.
+Each installed service has a Browse item in **Services** and a settings item in
+**Settings**. It can also be used from the keyboard and from its own menu; see
+**Browse menu** and **Browse keys** at the end of this section.
 
 #### Finding music
 
@@ -305,19 +305,22 @@ file to empty the list.
 The Browse window has its own menu. An item is enabled when the matching
 button is.
 
-| Item | Shortcut | Action |
-| --- | --- | --- |
-| Play | Amiga-Y | Play the selected entry, as the **Play** button does. |
-| Play next | Amiga-T | Queue the selected entry right after the playing one. |
-| Add | Amiga-D | Append the selected entry, as the **Add** button does. |
-| Play all | Amiga-G | Play the folder being shown. |
-| Play all next | Amiga-H | Queue the folder being shown right after the playing entry. |
-| Add all | Amiga-M | Append the folder being shown. |
-| Favourite | Amiga-I | Add the selected entry to the favourites, or remove it. |
-| Edit station... | Amiga-J | Edit or delete the selected saved station. |
-| Reload | Amiga-E | Fetch the list or search again. |
-| Back | Amiga-K | Return to the previous list. |
-| Close | Amiga-W | Close the Browse window. |
+| Menu | Item | Shortcut | Action |
+| --- | --- | --- | --- |
+| Browse | Back | Amiga-K | Return to the previous list. |
+| Browse | Reload | Amiga-E | Fetch the list or search again. |
+| Browse | Search | Amiga-F | Activate the search field. |
+| Browse | Close | Amiga-W | Close the Browse window. |
+| Entry | Play | Amiga-Y | Play the selected entry, as the **Play** button does. |
+| Entry | Play next | Amiga-T | Queue the selected entry right after the playing one. |
+| Entry | Add | Amiga-D | Append the selected entry, as the **Add** button does. |
+| Entry | Favourite | Amiga-I | Add the selected entry to the favourites, or remove it. |
+| Entry | Edit... | Amiga-J | Edit the selected entry when the service supports it. Internet radio shows **Edit station...**. |
+| Folder | Play all | Amiga-G | Play the folder being shown. |
+| Folder | Play all next | Amiga-H | Queue the folder being shown right after the playing entry. |
+| Folder | Add all | Amiga-M | Append the folder being shown. |
+| Service | Each installed service | | Select that service. The current service has a checkmark. |
+| Service | Settings... | | Open the current service's settings. It is disabled when the service has none. |
 
 #### Browse keys
 
@@ -367,7 +370,7 @@ use `my_<n>=<name>|<address>`.
 
 To sign in:
 
-1. Choose **Services**, then **Plex Media Server**, then **Settings...**.
+1. Choose **Settings**, then **Plex Media Server...**.
    You can also use the Browse window's **Settings** button or its signed-out
    row.
 2. Click **Sign in with plex.tv**.
@@ -487,27 +490,29 @@ on. Changing the audio settings clears the marks; double-clicking the entry
 tries it again.
 
 ### Menus
-
 | Menu | Item | Shortcut | Action |
 | --- | --- | --- | --- |
 | Project | Open... | Amiga-O | Replace the playlist with the chosen files and play the first one. |
 | Project | Open URL... | Amiga-U | Add a network address to the playlist and play it. |
-| Project | Add files... | Amiga-A | Append files. |
-| Project | Add drawer... | | Append the media files of a drawer and its sub-drawers. |
-| Project | Load playlist... | Amiga-L | Append the entries of an M3U playlist. |
-| Project | Save playlist... | Amiga-S | Save the playlist as extended M3U. |
-| Project | Settings... | Amiga-P | Open the settings window. |
 | Project | About... | | Show the version, the ARexx port name, and the supported formats. |
 | Project | Quit | Amiga-Q | Quit ZZPlay. |
+| Playlist | Add files... | Amiga-A | Append files. |
+| Playlist | Add drawer... | | Append the media files of a drawer and its sub-drawers. |
+| Playlist | Load... | Amiga-L | Append the entries of an M3U playlist. |
+| Playlist | Save... | Amiga-S | Save the playlist as extended M3U. |
+| Playlist | Remove entry | | Remove the selected entry. It is disabled with no selection. |
+| Playlist | Clear | | Empty the playlist. It is disabled when the playlist is empty. |
 | Control | Play/Pause | | Pause or resume playback. Start playback when stopped. |
 | Control | Stop | | Stop. |
 | Control | Next, Previous | Amiga-N, Amiga-B | Next or previous item. |
 | Control | Seek forward, Seek back | | Seek 10 seconds in MP3 playback. |
-| Control | Repeat | | Off, Track, or All. |
-| Control | Shuffle | | Play the playlist in random order. |
-| Control | Fullscreen video | Amiga-F | Play videos fullscreen. See [Fullscreen video](#fullscreen-video). |
+| Control | Repeat off, Repeat track, Repeat all | | Select one repeat mode. The selected mode has a checkmark. |
+| Control | Shuffle | | Play the playlist in random order. A checkmark shows when it is on. |
+| Control | Fullscreen video | Amiga-F | Play videos fullscreen. A checkmark shows when it is on. See [Fullscreen video](#fullscreen-video). |
 | Services | Browse... | Amiga-R | Open the Browse window. |
-| Services | Each installed service | | Browse opens that service. Settings... opens its settings window. |
+| Services | Each installed service | | Open Browse on that service. |
+| Settings | Player... | Amiga-P | Open the player settings window. |
+| Settings | Each installed service... | | Open that service's settings window. |
 
 ### Keys
 
@@ -527,7 +532,7 @@ These keys work in the player window and in the video window.
 
 ## Settings
 
-**Settings...** in the Project menu opens the settings window:
+**Player...** in the Settings menu opens the settings window:
 
 | Setting | Values | Effect |
 | --- | --- | --- |

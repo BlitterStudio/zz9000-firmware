@@ -3,6 +3,7 @@
 
 #include "zzplay-browse.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -48,23 +49,22 @@ enum BrowseMode {
   BROWSE_TO_NEXT      /* insert after the playing entry */
 };
 
-/* The Browse menu: item numbers count the bars too. */
 enum BrowseMenuItem {
-  BMI_PLAY = 0,
+  BMI_BACK = 0,
+  BMI_RELOAD,
+  BMI_SEARCH,
+  BMI_CLOSE,
+  BMI_PLAY,
   BMI_PLAY_NEXT,
   BMI_ADD,
-  BMI_BAR1,
+  BMI_FAVOURITE,
+  BMI_EDIT,
   BMI_PLAY_ALL,
   BMI_PLAY_ALL_NEXT,
   BMI_ADD_ALL,
-  BMI_BAR2,
-  BMI_FAVOURITE,
-  BMI_EDIT,
-  BMI_RELOAD,
-  BMI_BACK,
-  BMI_BAR3,
-  BMI_CLOSE,
-  BMI_COUNT
+  BMI_SETTINGS,
+  BMI_COUNT,
+  BMI_SERVICE_BASE = 100
 };
 
 enum BrowseGadgetID {
@@ -201,44 +201,122 @@ static char gather_scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
 static int gather_note = 0;
 static ZZPlayBrowseItem gather_note_item;
 
-/* The Browse menu. Its Amiga-key shortcuts leave the player's (O U R A
- * L S P Q N B F) alone, and the string gadget's editing keys (C V X Q)
- * too. */
-static struct NewMenu browse_new_menu[] = {
-  { NM_TITLE, (CONST_STRPTR)"Browse", 0, 0, 0, 0 },
-  { NM_ITEM, (CONST_STRPTR)"Play", (CONST_STRPTR)"Y", 0, 0,
-    (APTR)BMI_PLAY },
-  { NM_ITEM, (CONST_STRPTR)"Play next", (CONST_STRPTR)"T", 0, 0,
-    (APTR)BMI_PLAY_NEXT },
-  { NM_ITEM, (CONST_STRPTR)"Add", (CONST_STRPTR)"D", 0, 0,
-    (APTR)BMI_ADD },
-  { NM_ITEM, NM_BARLABEL, 0, 0, 0, 0 },
-  { NM_ITEM, (CONST_STRPTR)"Play all", (CONST_STRPTR)"G", 0, 0,
-    (APTR)BMI_PLAY_ALL },
-  { NM_ITEM, (CONST_STRPTR)"Play all next", (CONST_STRPTR)"H", 0, 0,
-    (APTR)BMI_PLAY_ALL_NEXT },
-  { NM_ITEM, (CONST_STRPTR)"Add all", (CONST_STRPTR)"M", 0, 0,
-    (APTR)BMI_ADD_ALL },
-  { NM_ITEM, NM_BARLABEL, 0, 0, 0, 0 },
-  { NM_ITEM, (CONST_STRPTR)"Favourite", (CONST_STRPTR)"I", 0, 0,
-    (APTR)BMI_FAVOURITE },
-  { NM_ITEM, (CONST_STRPTR)"Edit station...", (CONST_STRPTR)"J", 0, 0,
-    (APTR)BMI_EDIT },
-  { NM_ITEM, (CONST_STRPTR)"Reload", (CONST_STRPTR)"E", 0, 0,
-    (APTR)BMI_RELOAD },
-  { NM_ITEM, (CONST_STRPTR)"Back", (CONST_STRPTR)"K", 0, 0,
-    (APTR)BMI_BACK },
-  { NM_ITEM, NM_BARLABEL, 0, 0, 0, 0 },
-  { NM_ITEM, (CONST_STRPTR)"Close", (CONST_STRPTR)"W", 0, 0,
-    (APTR)BMI_CLOSE },
-  { NM_END, 0, 0, 0, 0, 0 }
-};
+/* The menu is rebuilt when the service changes, so its Edit label and
+ * checked Service item always describe the active module. */
+#define BROWSE_MENU_MAX (24U + ZZPLAY_BROWSE_SERVICES_MAX)
+static struct NewMenu browse_new_menu[BROWSE_MENU_MAX];
 static struct Menu *browse_menus = NULL;
-/* What each menu item was last set to (1 on, 0 off, -1 not yet), so
- * the frequent button refreshes do not touch the strip needlessly. */
+static UWORD browse_menu_code[BMI_COUNT];
+/* What each fixed item was last set to (1 on, 0 off, -1 not yet). */
 static int browse_menu_on[BMI_COUNT];
 /* GTLV_MakeVisible needs the V39 gadtools. */
 static int browse_gt39 = 0;
+
+static void browse_menu_add(uint16_t *count, ULONG type, const char *label,
+                            const char *key, ULONG flags, ULONG exclude,
+                            ULONG id)
+{
+  struct NewMenu *entry = &browse_new_menu[*count];
+
+  entry->nm_Type = type;
+  entry->nm_Label = (CONST_STRPTR)label;
+  entry->nm_CommKey = (CONST_STRPTR)key;
+  entry->nm_Flags = flags;
+  entry->nm_MutualExclude = exclude;
+  entry->nm_UserData = (APTR)id;
+  (*count)++;
+}
+
+static void browse_build_menu(void)
+{
+  const ZZPlayBrowseServiceEntry *svc;
+  const char *edit_label = "Edit...";
+  uint16_t count = 0U;
+  uint32_t i;
+  ULONG exclude;
+
+  for (i = 0U; i < BMI_COUNT; i++) {
+    browse_menu_code[i] = MENUNULL;
+    browse_menu_on[i] = -1;
+  }
+  svc = zzplay_browse_model_current_service(&browse_model);
+  if (svc && svc->provider &&
+      svc->provider->size >= offsetof(ZZPlayProvider, edit_label) +
+                                 sizeof(svc->provider->edit_label) &&
+      svc->provider->edit_label && svc->provider->edit_label[0]) {
+    edit_label = svc->provider->edit_label;
+  }
+
+  browse_menu_add(&count, NM_TITLE, "Browse", NULL, 0, 0, 0);
+  browse_menu_add(&count, NM_ITEM, "Back", "K", 0, 0, BMI_BACK);
+  browse_menu_code[BMI_BACK] = FULLMENUNUM(0, 0, NOSUB);
+  browse_menu_add(&count, NM_ITEM, "Reload", "E", 0, 0, BMI_RELOAD);
+  browse_menu_code[BMI_RELOAD] = FULLMENUNUM(0, 1, NOSUB);
+  browse_menu_add(&count, NM_ITEM, "Search", "F", 0, 0, BMI_SEARCH);
+  browse_menu_code[BMI_SEARCH] = FULLMENUNUM(0, 2, NOSUB);
+  browse_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  browse_menu_add(&count, NM_ITEM, "Close", "W", 0, 0, BMI_CLOSE);
+  browse_menu_code[BMI_CLOSE] = FULLMENUNUM(0, 4, NOSUB);
+
+  browse_menu_add(&count, NM_TITLE, "Entry", NULL, 0, 0, 0);
+  browse_menu_add(&count, NM_ITEM, "Play", "Y", 0, 0, BMI_PLAY);
+  browse_menu_code[BMI_PLAY] = FULLMENUNUM(1, 0, NOSUB);
+  browse_menu_add(&count, NM_ITEM, "Play next", "T", 0, 0, BMI_PLAY_NEXT);
+  browse_menu_code[BMI_PLAY_NEXT] = FULLMENUNUM(1, 1, NOSUB);
+  browse_menu_add(&count, NM_ITEM, "Add", "D", 0, 0, BMI_ADD);
+  browse_menu_code[BMI_ADD] = FULLMENUNUM(1, 2, NOSUB);
+  browse_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  browse_menu_add(&count, NM_ITEM, "Favourite", "I", 0, 0, BMI_FAVOURITE);
+  browse_menu_code[BMI_FAVOURITE] = FULLMENUNUM(1, 4, NOSUB);
+  browse_menu_add(&count, NM_ITEM, edit_label, "J", 0, 0, BMI_EDIT);
+  browse_menu_code[BMI_EDIT] = FULLMENUNUM(1, 5, NOSUB);
+
+  browse_menu_add(&count, NM_TITLE, "Folder", NULL, 0, 0, 0);
+  browse_menu_add(&count, NM_ITEM, "Play all", "G", 0, 0, BMI_PLAY_ALL);
+  browse_menu_code[BMI_PLAY_ALL] = FULLMENUNUM(2, 0, NOSUB);
+  browse_menu_add(&count, NM_ITEM, "Play all next", "H", 0, 0,
+                  BMI_PLAY_ALL_NEXT);
+  browse_menu_code[BMI_PLAY_ALL_NEXT] = FULLMENUNUM(2, 1, NOSUB);
+  browse_menu_add(&count, NM_ITEM, "Add all", "M", 0, 0, BMI_ADD_ALL);
+  browse_menu_code[BMI_ADD_ALL] = FULLMENUNUM(2, 2, NOSUB);
+
+  browse_menu_add(&count, NM_TITLE, "Service", NULL, 0, 0, 0);
+  exclude = browse_model.service_count >= 32U
+                ? 0UL
+                : ((1UL << browse_model.service_count) - 1UL);
+  for (i = 0U; i < browse_model.service_count && i < 32U; i++) {
+    ULONG flags = CHECKIT;
+    if ((int32_t)i == browse_model.current_service) flags |= CHECKED;
+    browse_menu_add(&count, NM_ITEM, browse_model.services[i].name, NULL,
+                    flags, exclude & ~(1UL << i), BMI_SERVICE_BASE + i);
+  }
+  browse_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  browse_menu_add(&count, NM_ITEM, "Settings...", NULL, 0, 0, BMI_SETTINGS);
+  browse_menu_code[BMI_SETTINGS] =
+      FULLMENUNUM(3, (UWORD)(browse_model.service_count + 1U), NOSUB);
+  browse_menu_add(&count, NM_END, NULL, NULL, 0, 0, 0);
+}
+
+static void browse_rebuild_menu(void)
+{
+  if (!browse_win) {
+    return;
+  }
+  if (browse_menus) {
+    ClearMenuStrip(browse_win);
+    FreeMenus(browse_menus);
+    browse_menus = NULL;
+  }
+  browse_build_menu();
+  browse_menus = CreateMenus(browse_new_menu, TAG_DONE);
+  if (browse_menus &&
+      (!LayoutMenus(browse_menus, browse_vi, GTMN_NewLookMenus, TRUE,
+                    TAG_DONE) ||
+       !SetMenuStrip(browse_win, browse_menus))) {
+    FreeMenus(browse_menus);
+    browse_menus = NULL;
+  }
+}
 /* Whole rows the list shows, for page moves. */
 static int browse_list_rows = 1;
 
@@ -703,11 +781,11 @@ static void browse_menu_enable(int item, int on)
   ULONG num;
 
   if (!browse_win || !browse_menus || item < 0 || item >= BMI_COUNT ||
-      browse_menu_on[item] == on) {
+      browse_menu_code[item] == MENUNULL || browse_menu_on[item] == on) {
     return;
   }
   browse_menu_on[item] = on;
-  num = FULLMENUNUM(0, item, NOSUB);
+  num = browse_menu_code[item];
   if (on) {
     OnMenu(browse_win, num);
   } else {
@@ -718,9 +796,16 @@ static void browse_menu_enable(int item, int on)
 /* Buttons and menu items follow the same availability checks. */
 static void update_buttons(void)
 {
+  const ZZPlayBrowseServiceEntry *svc;
+  int has_settings;
+
   if (!browse_win) {
     return;
   }
+  svc = zzplay_browse_model_current_service(&browse_model);
+  has_settings = svc && svc->provider &&
+                 (svc->provider->field_count != 0U ||
+                  zzplay_browse_model_provider_has_link(svc->provider));
   if (back_gad) {
     GT_SetGadgetAttrs(back_gad, browse_win, NULL,
                       GA_Disabled, (ULONG)!zzplay_browse_model_can_back(&browse_model),
@@ -764,6 +849,10 @@ static void update_buttons(void)
                       GA_Disabled, (ULONG)!zzplay_browse_model_can_favourite(&browse_model),
                       TAG_DONE);
   }
+  if (settings_btn_gad) {
+    GT_SetGadgetAttrs(settings_btn_gad, browse_win, NULL,
+                      GA_Disabled, (ULONG)!has_settings, TAG_DONE);
+  }
   if (stop_gad) {
     GT_SetGadgetAttrs(stop_gad, browse_win, NULL,
                       GA_Disabled, (ULONG)!browse_model.busy,
@@ -779,17 +868,17 @@ static void update_buttons(void)
                        zzplay_browse_model_can_add(&browse_model) ? 1 : 0);
     browse_menu_enable(BMI_PLAY_ALL, play_all);
     browse_menu_enable(BMI_PLAY_ALL_NEXT, play_all);
-    browse_menu_enable(
-        BMI_ADD_ALL, zzplay_browse_model_can_add_all(&browse_model) ? 1 : 0);
-    browse_menu_enable(
-        BMI_FAVOURITE,
-        zzplay_browse_model_can_favourite(&browse_model) ? 1 : 0);
+    browse_menu_enable(BMI_ADD_ALL,
+                       zzplay_browse_model_can_add_all(&browse_model) ? 1 : 0);
+    browse_menu_enable(BMI_FAVOURITE,
+                       zzplay_browse_model_can_favourite(&browse_model) ? 1 : 0);
     browse_menu_enable(BMI_EDIT,
                        zzplay_browse_model_can_edit(&browse_model) ? 1 : 0);
     browse_menu_enable(BMI_RELOAD,
                        zzplay_browse_model_can_reload(&browse_model) ? 1 : 0);
     browse_menu_enable(BMI_BACK,
                        zzplay_browse_model_can_back(&browse_model) ? 1 : 0);
+    browse_menu_enable(BMI_SETTINGS, has_settings);
   }
 }
 
@@ -1404,20 +1493,31 @@ static void __attribute__((noinline)) open_settings_window(void)
 
   ng.ng_TextAttr = browse_text_attr;
 
-  settings_win = OpenWindowTags(
-      NULL,
-      WA_Title, (ULONG)(row_form_mode && row_form.title ? row_form.title : "Service Settings"),
-      WA_Left, browse_win ? (browse_win->LeftEdge + 30) : 60,
-      WA_Top, browse_win ? (browse_win->TopEdge + 30) : 60,
-      WA_InnerWidth, (ULONG)win_w,
-      WA_InnerHeight, (ULONG)cur_y,
-      WA_DragBar, TRUE,
-      WA_DepthGadget, TRUE,
-      WA_CloseGadget, TRUE,
-      WA_Activate, TRUE,
-      WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_GADGETUP | IDCMP_REFRESHWINDOW,
-      WA_CustomScreen, (ULONG)gui_screen,
-      TAG_DONE);
+  /* "Plex Media Server settings": the window says which service it is. */
+  {
+    static char title[ZZPLAY_PROVIDER_TEXT_MAX + 16];
+
+    if (row_form_mode && row_form.title) {
+      copy_string(title, sizeof(title), row_form.title);
+    } else {
+      (void)snprintf(title, sizeof(title), "%s settings",
+                     p->name ? p->name : "Service");
+    }
+    settings_win = OpenWindowTags(
+        NULL,
+        WA_Title, (ULONG)title,
+        WA_Left, browse_win ? (browse_win->LeftEdge + 30) : 60,
+        WA_Top, browse_win ? (browse_win->TopEdge + 30) : 60,
+        WA_InnerWidth, (ULONG)win_w,
+        WA_InnerHeight, (ULONG)cur_y,
+        WA_DragBar, TRUE,
+        WA_DepthGadget, TRUE,
+        WA_CloseGadget, TRUE,
+        WA_Activate, TRUE,
+        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_GADGETUP | IDCMP_REFRESHWINDOW,
+        WA_CustomScreen, (ULONG)gui_screen,
+        TAG_DONE);
+  }
 
   if (!settings_win) {
     close_settings_window();
@@ -2464,23 +2564,9 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
    * grows and rebuilds on its NEWSIZE. */
   browse_set_window_limits();
 
-  /* The Browse menu; the window works from its buttons and keys when
-   * the menu cannot be built. */
-  {
-    int k;
-
-    for (k = 0; k < BMI_COUNT; k++) {
-      browse_menu_on[k] = -1;
-    }
-  }
-  browse_menus = CreateMenus(browse_new_menu, TAG_DONE);
-  if (browse_menus &&
-      (!LayoutMenus(browse_menus, browse_vi, GTMN_NewLookMenus, TRUE,
-                    TAG_DONE) ||
-       !SetMenuStrip(browse_win, browse_menus))) {
-    FreeMenus(browse_menus);
-    browse_menus = NULL;
-  }
+  /* The window works from its buttons and keys when the menu cannot be
+   * built. Its labels and service checks are rebuilt after a switch. */
+  browse_rebuild_menu();
 
   /* Open a fresh top-level list. This also reloads a service whose
    * standalone Settings window changed it before Browse was opened. */
@@ -2493,6 +2579,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     } else {
       (void)zzplay_browse_model_reopen_service(&browse_model, &req);
     }
+    browse_rebuild_menu();
     provider = browse_provider();
     browse_load_recent();
     if (provider && browse_send(&req, provider)) {
@@ -2515,10 +2602,21 @@ static int browse_select_service_scheme(const char *scheme, int request)
   if (!model_inited || !scheme || !scheme[0]) return 0;
   for (i = 0U; i < browse_model.service_count; i++) {
     if (strcmp(browse_model.services[i].scheme, scheme) == 0) {
-      if (!zzplay_browse_model_select_service(&browse_model, i, &req)) {
+      /* The request goes out through poll_req (browse_after_navigation
+       * sends that one); without a request the local copy is dropped. */
+      if (!zzplay_browse_model_select_service(
+              &browse_model, i, request ? &poll_req : &req)) {
         return 0;
       }
       browse_load_recent();
+      if (browse_win && service_gad) {
+        GT_SetGadgetAttrs(service_gad, browse_win, NULL, GTCY_Active,
+                          (ULONG)i, TAG_DONE);
+      }
+      if (browse_win) {
+        browse_rebuild_menu();
+        update_buttons();
+      }
       if (request && browse_win) {
         browse_after_navigation("Loading service...");
       }
@@ -3082,10 +3180,23 @@ static int browse_menu_pick(UWORD code)
     case BMI_BACK:
       browse_do_back();
       break;
+    case BMI_SEARCH:
+      if (search_gad) {
+        (void)ActivateGadget(search_gad, browse_win, NULL);
+      }
+      break;
+    case BMI_SETTINGS:
+      open_settings_window();
+      break;
     case BMI_CLOSE:
       zzplay_browse_close();
       return 0;
     default:
+      if (id >= BMI_SERVICE_BASE &&
+          id < BMI_SERVICE_BASE + browse_model.service_count) {
+        (void)browse_select_service_scheme(
+            browse_model.services[id - BMI_SERVICE_BASE].scheme, 1);
+      }
       break;
     }
   }
@@ -3294,11 +3405,9 @@ void zzplay_browse_poll(void)
       UWORD gid = gad->GadgetID;
 
       if (gid == BGID_SERVICE) {
-        if ((uint32_t)code < browse_model.service_count &&
-            zzplay_browse_model_select_service(&browse_model, (uint32_t)code,
-                                               &poll_req)) {
-          browse_load_recent();
-          browse_after_navigation("Loading service...");
+        if ((uint32_t)code < browse_model.service_count) {
+          (void)browse_select_service_scheme(
+              browse_model.services[code].scheme, 1);
         }
       } else if (gid == BGID_SEARCH) {
         const char *query = "";
