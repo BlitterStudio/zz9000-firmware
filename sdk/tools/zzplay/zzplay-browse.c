@@ -28,10 +28,6 @@
 #include <proto/graphics.h>
 #include <proto/intuition.h>
 
-#define BROWSE_MARGIN 6
-#define BROWSE_SPACING 4
-/* Space between the marker, title, subtitle and length cells. */
-#define BROWSE_COLUMN_GAP 6
 #define BROWSE_FIELDS_MAX 8U
 #define BROWSE_CHOICES_MAX 16U
 
@@ -322,7 +318,7 @@ static LONG browse_row_render(REG(a0, struct Hook *hook),
   struct RastPort *rp;
   struct DrawInfo *dri;
   ZZPlayBrowseColumns cols;
-  int x, y, w, h, text_y, pen_text, len;
+  int x, y, w, h, text_y, pen_text, pen_bg, len;
 
   (void)hook;
   if (!msg || !node || msg->lvdm_MethodID != (ULONG)LV_DRAW ||
@@ -347,7 +343,12 @@ static LONG browse_row_render(REG(a0, struct Hook *hook),
   pen_text = (int)((msg->lvdm_State == (ULONG)LVR_SELECTED)
                        ? dri->dri_Pens[FILLTEXTPEN]
                        : dri->dri_Pens[TEXTPEN]);
+  pen_bg = (int)((msg->lvdm_State == (ULONG)LVR_SELECTED)
+                     ? dri->dri_Pens[FILLPEN]
+                     : dri->dri_Pens[BACKGROUNDPEN]);
   SetAPen(rp, (ULONG)pen_text);
+  SetBPen(rp, (ULONG)pen_bg);
+  SetDrMd(rp, JAM1);
   SetFont(rp, browse_font);
   text_y = y + ((h - (int)browse_font->tf_YSize) >> 1) +
            (int)browse_font->tf_Baseline;
@@ -486,6 +487,11 @@ static void update_status_text(const char *msg)
     /* Callers often format into status_buf itself. */
     (void)snprintf(status_buf, sizeof(status_buf), "%s", msg);
   }
+  EraseRect(browse_win->RPort,
+            (LONG)status_gad->LeftEdge,
+            (LONG)status_gad->TopEdge,
+            (LONG)(status_gad->LeftEdge + status_gad->Width - 1),
+            (LONG)(status_gad->TopEdge + status_gad->Height - 1));
   GT_SetGadgetAttrs(status_gad, browse_win, NULL,
                     GTTX_Text, (ULONG)status_buf,
                     TAG_DONE);
@@ -1218,12 +1224,28 @@ static void __attribute__((noinline)) poll_settings(void)
   }
 }
 
-/* Widest of the button labels plus their frame. */
-static int browse_button_min_width(void)
+/* Widest of a row's button labels plus their frame: navigation row
+ * (Back, Reload, Stop, Settings) and action row (Play, Add, Play all,
+ * Add all, Favourite). */
+static int browse_nav_button_min_width(void)
+{
+  static const char *const labels[] = { "Back", "Reload", "Stop", "Settings" };
+  int btn_w = 0;
+  uint32_t i;
+
+  for (i = 0U; i < sizeof(labels) / sizeof(labels[0]); i++) {
+    int w = browse_text_w(labels[i]);
+    if (w > btn_w) {
+      btn_w = w;
+    }
+  }
+  return btn_w + 16;
+}
+
+static int browse_act_button_min_width(void)
 {
   static const char *const labels[] = {
-    "Back", "Reload", "Play", "Add", "Play all", "Add all", "Favourite",
-    "Stop", "Settings"
+    "Play", "Add", "Play all", "Add all", "Favourite"
   };
   int btn_w = 0;
   uint32_t i;
@@ -1253,6 +1275,10 @@ static int browse_cycle_width(void)
   return cycle_w + 32;
 }
 
+static void browse_fill_layout_config(int font_h,
+                                      ZZPlayBrowseLayoutConfig *cfg);
+static void browse_set_window_limits(void);
+
 /* Builds every Browse gadget for the window's current size. GadTools
  * gadgets cannot be resized, so a size change removes the attached
  * list, frees it and calls this again; the rows, the selection, the
@@ -1263,18 +1289,12 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
   struct NewGadget ng;
   struct Gadget *gad;
   struct TagItem tags[6];
+  ZZPlayBrowseLayoutConfig cfg;
+  ZZPlayBrowseLayout layout;
   struct TextFont *font;
   int font_h;
-  int btn_h;
   int win_w;
   int win_h;
-  int content_w;
-  int cur_y;
-  int list_h;
-  int btn_w;
-  int cycle_w;
-  int search_w;
-  int search_label_w;
 
   if (!browse_win) {
     return 0;
@@ -1282,22 +1302,13 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
 
   font = gui_screen->RastPort.Font;
   font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
-  btn_h = font_h + 6;
   win_w = (int)browse_win->Width - browse_win->BorderLeft -
           browse_win->BorderRight;
   win_h = (int)browse_win->Height - browse_win->BorderTop -
           browse_win->BorderBottom;
-  content_w = win_w - 2 * BROWSE_MARGIN;
-  if (content_w < 100) {
-    content_w = 100;
-  }
 
-  cycle_w = browse_cycle_width();
-  search_label_w = browse_text_w("Search:") + 8;
-  search_w = content_w - cycle_w - BROWSE_SPACING - search_label_w;
-  if (search_w < 40) {
-    search_w = 40;
-  }
+  browse_fill_layout_config(font_h, &cfg);
+  zzplay_browse_compute_layout(win_w, win_h, &cfg, &layout);
 
   browse_glist = NULL;
   gad = CreateContext(&browse_glist);
@@ -1309,8 +1320,6 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
   ng.ng_TextAttr = browse_text_attr;
   ng.ng_VisualInfo = browse_vi;
 
-  cur_y = BROWSE_MARGIN;
-
   /* Service cycle + Search string; the search buffer keeps what was
    * typed across a rebuild. */
   tags[0].ti_Tag = GTCY_Labels;
@@ -1320,8 +1329,8 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
 
   service_gad = gad = create_gadget(
       browse_win, CYCLE_KIND, gad, &ng,
-      BROWSE_MARGIN, cur_y, cycle_w, btn_h,
-      NULL, BGID_SERVICE, 0, tags);
+      layout.service.x, layout.service.y, layout.service.w,
+      layout.service.h, NULL, BGID_SERVICE, 0, tags);
 
   tags[0].ti_Tag = GTST_String;
   tags[0].ti_Data = (ULONG)search_buf;
@@ -1334,20 +1343,13 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
 
   search_gad = gad = create_gadget(
       browse_win, STRING_KIND, gad, &ng,
-      BROWSE_MARGIN + cycle_w + BROWSE_SPACING + search_label_w, cur_y,
-      search_w, btn_h, "Search:", BGID_SEARCH, PLACETEXT_LEFT, tags);
+      layout.search.x, layout.search.y, layout.search.w, layout.search.h,
+      "Search:", BGID_SEARCH, PLACETEXT_LEFT, tags);
 
-  cur_y += btn_h + BROWSE_SPACING;
-
-  /* The list takes all height between the search row and the button
-   * row, and the full width. GadTools sizes it to whole rows. */
-  list_h = win_h - cur_y - (2 * BROWSE_SPACING + 2 * btn_h);
-  if (list_h < 2 * font_h + 4) {
-    list_h = 2 * font_h + 4;
-  }
-
-  /* The contents, the selection and the shown top row are reapplied by
-   * the tags; on V39 the render hook draws the column rows. */
+  /* The list takes the height between the search row and the button
+   * rows. The contents, the selection and the shown top row are
+   * reapplied by the tags; on V39 the render hook draws the column
+   * rows. */
   tags[0].ti_Tag = GTLV_Labels;
   tags[0].ti_Data = (ULONG)&browse_exec_list;
   tags[1].ti_Tag = GTLV_ShowSelected;
@@ -1371,81 +1373,102 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
 
   list_gad = gad = create_gadget(
       browse_win, LISTVIEW_KIND, gad, &ng,
-      BROWSE_MARGIN, cur_y, content_w, list_h,
+      layout.list.x, layout.list.y, layout.list.w, layout.list.h,
       NULL, BGID_LIST, 0, tags);
 
   /* Rows are one font line each inside the list's frame. */
-  browse_list_rows = (list_h - 4) / font_h;
+  browse_list_rows = (layout.list.h - 4) / font_h;
   if (browse_list_rows < 1) {
     browse_list_rows = 1;
   }
-  cur_y += list_h + BROWSE_SPACING;
 
-  /* Buttons: Back, Reload, Play, Add, Play all, Add all, Favourite,
-   * Stop, Settings, spread across the width. */
-  btn_w = (content_w - 8 * BROWSE_SPACING) / 9;
-  if (btn_w < 1) {
-    btn_w = 1;
-  }
-
+  /* Navigation row: Back, Reload, Stop, Settings */
   back_gad = gad = create_gadget(
       browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN, cur_y, btn_w, btn_h,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_BACK].x,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_BACK].y,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_BACK].w,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_BACK].h,
       "Back", BGID_BACK, PLACETEXT_IN, NULL);
 
   reload_gad = gad = create_gadget(
       browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_RELOAD].x,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_RELOAD].y,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_RELOAD].w,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_RELOAD].h,
       "Reload", BGID_RELOAD, PLACETEXT_IN, NULL);
-
-  play_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 2 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Play", BGID_PLAY, PLACETEXT_IN, NULL);
-
-  add_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 3 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Add", BGID_ADD, PLACETEXT_IN, NULL);
-
-  play_all_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 4 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Play all", BGID_PLAY_ALL, PLACETEXT_IN, NULL);
-
-  add_all_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 5 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Add all", BGID_ADD_ALL, PLACETEXT_IN, NULL);
-
-  fav_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 6 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Favourite", BGID_FAVOURITE, PLACETEXT_IN, NULL);
 
   stop_gad = gad = create_gadget(
       browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 7 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_STOP].x,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_STOP].y,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_STOP].w,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_STOP].h,
       "Stop", BGID_STOP, PLACETEXT_IN, NULL);
 
   settings_btn_gad = gad = create_gadget(
       browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 8 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_SETTINGS].x,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_SETTINGS].y,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_SETTINGS].w,
+      layout.nav_buttons[ZZPLAY_BROWSE_NAV_SETTINGS].h,
       "Settings", BGID_SETTINGS, PLACETEXT_IN, NULL);
 
-  cur_y += btn_h + BROWSE_SPACING;
+  /* Action row: Play, Add, Play all, Add all, Favourite */
+  play_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY].x,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY].y,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY].w,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY].h,
+      "Play", BGID_PLAY, PLACETEXT_IN, NULL);
 
-  /* Status line at the bottom */
+  add_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD].x,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD].y,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD].w,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD].h,
+      "Add", BGID_ADD, PLACETEXT_IN, NULL);
+
+  play_all_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY_ALL].x,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY_ALL].y,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY_ALL].w,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY_ALL].h,
+      "Play all", BGID_PLAY_ALL, PLACETEXT_IN, NULL);
+
+  add_all_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD_ALL].x,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD_ALL].y,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD_ALL].w,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD_ALL].h,
+      "Add all", BGID_ADD_ALL, PLACETEXT_IN, NULL);
+
+  fav_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_FAVOURITE].x,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_FAVOURITE].y,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_FAVOURITE].w,
+      layout.act_buttons[ZZPLAY_BROWSE_ACT_FAVOURITE].h,
+      "Favourite", BGID_FAVOURITE, PLACETEXT_IN, NULL);
+
+  /* Status line, kept clear of the sizing gadget in the corner */
   tags[0].ti_Tag = GTTX_Text;
   tags[0].ti_Data = (ULONG)status_buf;
   tags[1].ti_Tag = GTTX_CopyText;
   tags[1].ti_Data = TRUE;
-  tags[2].ti_Tag = TAG_DONE;
-  tags[2].ti_Data = 0;
+  tags[2].ti_Tag = GTTX_Clipped;
+  tags[2].ti_Data = TRUE;
+  tags[3].ti_Tag = TAG_DONE;
+  tags[3].ti_Data = 0;
 
   status_gad = gad = create_gadget(
       browse_win, TEXT_KIND, gad, &ng,
-      BROWSE_MARGIN, cur_y, content_w, btn_h,
+      layout.status.x, layout.status.y, layout.status.w, layout.status.h,
       NULL, BGID_STATUS, 0, tags);
 
   if (!gad || !service_gad || !search_gad || !list_gad || !back_gad ||
@@ -1459,8 +1482,8 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
   RefreshGList(browse_glist, browse_win, NULL, (UWORD)-1);
   GT_RefreshWindow(browse_win, NULL);
 
-  built_inner_w = win_w;
-  built_inner_h = win_h;
+  built_inner_w = layout.inner_w;
+  built_inner_h = layout.inner_h;
 
   update_buttons();
   update_busy_pointer();
@@ -1520,7 +1543,106 @@ static void browse_handle_resize(void)
   stop_gad = NULL;
   settings_btn_gad = NULL;
   status_gad = NULL;
+
+  /* Clear the whole inner area so old gadget imagery and text cannot
+   * survive the new layout. */
+  if (browse_win->Width > browse_win->BorderLeft + browse_win->BorderRight &&
+      browse_win->Height >
+          browse_win->BorderTop + browse_win->BorderBottom) {
+    EraseRect(browse_win->RPort,
+              (LONG)browse_win->BorderLeft,
+              (LONG)browse_win->BorderTop,
+              (LONG)(browse_win->Width - browse_win->BorderRight - 1),
+              (LONG)(browse_win->Height - browse_win->BorderBottom - 1));
+  }
+
+  browse_set_window_limits();
   (void)build_browse_gadgets();
+}
+
+/* Fill the layout configuration from the screen font and the measured
+ * control widths. */
+static void browse_fill_layout_config(int font_h,
+                                      ZZPlayBrowseLayoutConfig *cfg)
+{
+  if (!cfg) {
+    return;
+  }
+  cfg->font_h = font_h;
+  cfg->cycle_w = browse_cycle_width();
+  cfg->search_label_w = browse_text_w("Search:") + 8;
+  cfg->search_min_w = 80;
+  cfg->nav_btn_min_w = browse_nav_button_min_width();
+  cfg->act_btn_min_w = browse_act_button_min_width();
+  cfg->list_min_w = browse_marker_col_w + browse_len_col_w +
+                    3 * BROWSE_COLUMN_GAP + 100;
+  cfg->list_min_rows = 3;
+  cfg->size_clearance = font_h > 12 ? font_h + 8 : 20;
+}
+
+/* Size limits from the layout minimum and the window's real borders.
+ * WindowLimits leaves a limit unchanged when the window is already
+ * outside it, so a window smaller than the minimum (the borders at open
+ * were estimated) is grown first; its NEWSIZE then sets the limits. */
+static void browse_set_window_limits(void)
+{
+  struct TextFont *font;
+  ZZPlayBrowseLayoutConfig cfg;
+  ZZPlayBrowseLayout layout;
+  int font_h;
+  int min_w;
+  int min_h;
+  int grow_w;
+  int grow_h;
+
+  if (!browse_win) {
+    return;
+  }
+  font = gui_screen->RastPort.Font;
+  font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
+  browse_fill_layout_config(font_h, &cfg);
+  zzplay_browse_compute_layout(0, 0, &cfg, &layout);
+  min_w = layout.min_inner_w + browse_win->BorderLeft +
+          browse_win->BorderRight;
+  min_h = layout.min_inner_h + browse_win->BorderTop +
+          browse_win->BorderBottom;
+  if (min_w > (int)gui_screen->Width) {
+    min_w = (int)gui_screen->Width;
+  }
+  if (min_h > (int)gui_screen->Height) {
+    min_h = (int)gui_screen->Height;
+  }
+  grow_w = min_w - (int)browse_win->Width;
+  grow_h = min_h - (int)browse_win->Height;
+  if (grow_w > 0 || grow_h > 0) {
+    int dx = 0;
+    int dy = 0;
+
+    if (grow_w < 0) {
+      grow_w = 0;
+    }
+    if (grow_h < 0) {
+      grow_h = 0;
+    }
+    /* Move left/up first when growing in place would leave the screen. */
+    if ((int)browse_win->LeftEdge + (int)browse_win->Width + grow_w >
+        (int)gui_screen->Width) {
+      dx = (int)gui_screen->Width -
+           ((int)browse_win->LeftEdge + (int)browse_win->Width + grow_w);
+    }
+    if ((int)browse_win->TopEdge + (int)browse_win->Height + grow_h >
+        (int)gui_screen->Height) {
+      dy = (int)gui_screen->Height -
+           ((int)browse_win->TopEdge + (int)browse_win->Height + grow_h);
+    }
+    if (dx != 0 || dy != 0) {
+      MoveWindow(browse_win, (LONG)dx, (LONG)dy);
+    }
+    SizeWindow(browse_win, (LONG)grow_w, (LONG)grow_h);
+    return;
+  }
+  WindowLimits(browse_win, (LONG)min_w, (LONG)min_h,
+               (LONG)gui_screen->Width, (LONG)gui_screen->Height);
 }
 
 int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
@@ -1528,10 +1650,9 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
 {
   ZZPlayProviders *providers;
   struct TextFont *font;
+  ZZPlayBrowseLayoutConfig cfg;
+  ZZPlayBrowseLayout layout;
   int font_h;
-  int btn_h;
-  int min_w;
-  int min_h;
   int min_outer_w;
   int min_outer_h;
   int border_l;
@@ -1542,8 +1663,6 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   int top;
   int w;
   int h;
-  int cycle_w;
-  int search_label_w;
   uint32_t i;
   uint32_t loaded_count;
   int worker_ok;
@@ -1608,8 +1727,6 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   font = gui_screen->RastPort.Font;
   font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
   browse_font = font;
-  btn_h = font_h + 6;
-
   /* Aligned column rows need the V39 gadtools render hook; older
    * systems keep the window usable with the one-line rows. */
   browse_columns_ok =
@@ -1623,22 +1740,11 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   browse_len_col_w = browse_text_w(ZZPLAY_BROWSE_LEN_TEXT);
   browse_list_top = 0;
 
-  /* The smallest usable window: every button and the search row fit,
-   * and the list shows two whole rows. */
-  min_w = 9 * browse_button_min_width() + 8 * BROWSE_SPACING +
-          2 * BROWSE_MARGIN;
-  cycle_w = browse_cycle_width();
-  search_label_w = browse_text_w("Search:") + 8;
-  if (min_w < cycle_w + BROWSE_SPACING + search_label_w + 160 +
-                  2 * BROWSE_MARGIN) {
-    min_w = cycle_w + BROWSE_SPACING + search_label_w + 160 +
-            2 * BROWSE_MARGIN;
-  }
-  if (min_w < 460) {
-    min_w = 460;
-  }
-  min_h = BROWSE_MARGIN + btn_h + BROWSE_SPACING + (2 * font_h + 4) +
-          BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h;
+  /* The smallest usable window and the default layout: two button rows
+   * (navigation, action) from the widest label in each, a sensible list
+   * minimum and the service cycle + search line. */
+  browse_fill_layout_config(font_h, &cfg);
+  zzplay_browse_compute_layout(0, 0, &cfg, &layout);
 
   /* Window borders, for the size limits and for clamping a remembered
    * geometry; the sizing border's height is close enough for a limit. */
@@ -1646,8 +1752,8 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   border_r = (int)gui_screen->WBorRight;
   border_t = (int)gui_screen->WBorTop + font_h + 1;
   border_b = 10;
-  min_outer_w = min_w + border_l + border_r;
-  min_outer_h = min_h + border_t + border_b;
+  min_outer_w = layout.min_inner_w + border_l + border_r;
+  min_outer_h = layout.min_inner_h + border_t + border_b;
   if (min_outer_w > (int)gui_screen->Width) {
     min_outer_w = (int)gui_screen->Width;
   }
@@ -1656,12 +1762,13 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   }
 
   /* Today's defaults, or what the prefs remember of this window,
-   * clamped so the whole window is on the screen it opens on. */
+   * clamped so the whole window is on the screen it opens on. A
+   * remembered size below the new minimum grows to it; one larger than
+   * the screen shrinks to it. */
   left = 40;
   top = 40;
-  w = min_w;
-  h = BROWSE_MARGIN + btn_h + BROWSE_SPACING + (font_h * 8 + 8) +
-      BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h;
+  w = layout.min_inner_w;
+  h = layout.min_inner_h + 5 * font_h;
   if (browse_prefs) {
     if (browse_prefs->browse_width >= 0 && browse_prefs->browse_height >= 0) {
       w = (int)browse_prefs->browse_width;
@@ -1726,6 +1833,9 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     zzplay_browse_close();
     return 0;
   }
+  /* The borders are known now; a window opened below the minimum
+   * grows and rebuilds on its NEWSIZE. */
+  browse_set_window_limits();
 
   /* The Browse menu; the window works from its buttons and keys when
    * the menu cannot be built. */
