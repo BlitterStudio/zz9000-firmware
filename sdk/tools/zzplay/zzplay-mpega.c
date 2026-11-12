@@ -29,6 +29,7 @@ typedef struct ZZPlayMPEGAInput {
   ZZPlayFile *file;
   uint64_t file_size;
   int seekable;
+  int read_failed;
 } ZZPlayMPEGAInput;
 
 static ULONG zzplay_mpega_bs_access(REG(a0, struct Hook *hook),
@@ -72,6 +73,11 @@ static ULONG zzplay_mpega_bs_access(REG(a0, struct Hook *hook),
     }
     bytes = zzplay_file_read(input->file, access->data.read.buffer,
                              (size_t)access->data.read.num_bytes);
+    /* mpega.library takes 0 as the end of the stream; remember that it
+     * was a failure, so a cut-off track is not reported as finished. */
+    if (bytes == 0U && zzplay_file_error(input->file)) {
+      input->read_failed = 1;
+    }
     return (ULONG)bytes;
   case MPEGA_BSFUNC_SEEK:
     if (!input->file || !input->seekable ||
@@ -283,6 +289,11 @@ ZZPlayEngineResult zzplay_mpega_run(const ZZPlayEngineRun *run)
       continue;
     }
     decoded = MPEGA_decode_frame(stream, pcm);
+    if (decoded == MPEGA_ERR_EOF && input.read_failed) {
+      zzplay_launch_reportf(run->ctl, run->options,
+                            "the connection failed while playing");
+      break;
+    }
     if (decoded == MPEGA_ERR_EOF) {
       /* Another pass for --loop=N or repeat track, as the MHI and card
        * paths do: rewind and keep the queue running. */
