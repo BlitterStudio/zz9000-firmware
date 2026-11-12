@@ -25,12 +25,12 @@ A WebM file must declare the `webm` DocType, and a Matroska file the
 | Input | Extensions offered in scans and requesters | Supported content |
 | --- | --- | --- |
 | MPEG Program Stream | `.mpg`, `.mpeg`, `.vob` | MPEG-1 or MPEG-2 video in a Program Stream, up to a 1920-pixel long side and 1920x1088 pixels in either orientation. Supported audio is MP2, AC-3, or 16-bit 48 kHz mono or stereo LPCM. MPEG elementary streams are rejected. |
-| WebM | `.webm`, `.mkv` | One VP8 or VP9 video track, with at most one Opus or Vorbis audio track. Video-only files are accepted. Opus is 48 kHz; Vorbis is mono or stereo at 8–96 kHz. The maximum is a 1920-pixel long side and 1920x1088 pixels. |
-| Matroska | `.mkv` | One MPEG-1 or MPEG-2 video track, up to a 1920-pixel long side and 1920x1088 pixels in either orientation, with AC-3, MPEG audio (Layer I, II or III), or 16-bit 48 kHz mono or stereo little-endian PCM. Matroska with VP8 or VP9 video plays like WebM, with Opus or Vorbis audio. ZZPlay plays the first supported, enabled audio track and ignores the rest; disabled tracks are ignored. Video-only files are accepted. MPEG-2 needs firmware that advertises it. |
+| WebM | `.webm`, `.mkv` | One VP8 or VP9 video track, with at most one Opus or Vorbis audio track. Video-only files are accepted. Opus is 48 kHz; Vorbis is mono or stereo at 8 to 96 kHz. The maximum is a 1920-pixel long side and 1920x1088 pixels. |
+| Matroska | `.mkv` | One MPEG-1 or MPEG-2 video track, up to a 1920-pixel long side and 1920x1088 pixels in either orientation, with AC-3, MPEG audio (Layer I, II or III), or 16-bit 48 kHz mono or stereo little-endian PCM. Matroska with VP8 or VP9 video plays like WebM, with Opus or Vorbis audio. ZZPlay plays the first supported audio track that is enabled and ignores the others. Video-only files are accepted. MPEG-2 needs firmware that advertises it. |
 | MPEG Layer III | `.mp3` | MP3 audio. |
-| Native FLAC | `.flac` | Native `fLaC` streams with a STREAMINFO first block, mono or stereo, 4–24 bits, and 8–192 kHz. Ogg-FLAC is rejected. |
-| Ogg Vorbis | `.ogg`, `.oga` | A mono or stereo Vorbis stream at 8–192 kHz. Ogg Opus, Ogg-FLAC, and other Ogg codecs are rejected. |
-| Animated WebP | `.webp` | Animated WebP, 16–1920 pixels wide and 16–1080 pixels high. Still WebP images are rejected. |
+| Native FLAC | `.flac` | Native `fLaC` streams with a STREAMINFO first block, mono or stereo, 4 to 24 bits, and 8 to 192 kHz. Ogg-FLAC is rejected. |
+| Ogg Vorbis | `.ogg`, `.oga` | A mono or stereo Vorbis stream at 8 to 192 kHz. Ogg Opus, Ogg-FLAC, and other Ogg codecs are rejected. |
+| Animated WebP | `.webp` | Animated WebP, 16 to 1920 pixels wide and 16 to 1080 pixels high. Still WebP images are rejected. |
 | Playlist | `.m3u`, `.m3u8` | Files listed by the playlist. |
 | Network address | None | `http://` and `https://` addresses of MP3, FLAC and Ogg Vorbis audio, and Shoutcast or Icecast stations. See [Network playback](#network-playback). |
 
@@ -41,12 +41,12 @@ can skip B-pictures until the next reference picture. Above 800x600, MPEG
 playback is best effort: when video falls more than half a second behind, it
 skips ahead to the next I-picture. Audio continues while frames are skipped.
 
-WebM files with multiple video or audio tracks, unsupported codecs, invalid
-audio layouts, or oversized video are rejected; Matroska files may carry
-other audio tracks, which ZZPlay ignores. A WebM or Matroska file needs a video
-track; audio-only files are rejected. FLAC and Vorbis do not support seeking. A chained
-or multiplexed Ogg Vorbis file stops with an error when the card reaches an
-unsupported continuation.
+WebM files with more than one video or audio track, unsupported codecs,
+invalid audio layouts or oversized video are rejected. Matroska files may
+carry other audio tracks; ZZPlay ignores them. WebM and Matroska files need a
+video track. FLAC and Ogg Vorbis cannot be seeked. A chained or multiplexed
+Ogg Vorbis file stops with an error when the card reaches the part it does
+not support.
 
 ## Platform limits
 
@@ -55,9 +55,9 @@ Picasso96 API, and the firmware media-decode services required by the selected
 format. On Zorro II, the firmware must advertise an aperture layout and a PIP
 pool that fits the decoded video.
 
-Recorded compatibility: a matched 4 MiB Zorro II stack provides a 224 KiB PIP
-source pool, where an aligned 352x288 YUY2 frame fits and a 640x360 frame does
-not. The 2 MiB profile has no PIP pool. MP3 remains available on both profiles.
+On a matched 4 MiB Zorro II stack the PIP source pool is 224 KiB, which fits
+an aligned 352x288 YUY2 frame but not a 640x360 one. The 2 MiB profile has
+no PIP pool. MP3 plays on both.
 
 ## Start playback
 
@@ -115,9 +115,9 @@ remove the parentheses in Workbench's Information window to enable one.
 | `--audio=mhi` | `AUDIO=MHI` | Use the selected MHI driver. MHI supports MP3 only. |
 | `--audio=ax` | `AUDIO=AX` | Request ZZ9000AX output. |
 | `--audio=none` | `AUDIO=NONE` | Decode without audio output. |
-| `--ahiunit=N` | `AHIUNIT=N` | Select AHI unit 0–3. |
+| `--ahiunit=N` | `AHIUNIT=N` | Select AHI unit 0 to 3. |
 | `--mhidriver=name` | `MHIDRIVER=name` | Select an MHI driver from `LIBS:MHI/`. The default is `mhizz9000.library`. |
-| `--volume=N` | `VOLUME=N` | Set the initial volume from 0–100. |
+| `--volume=N` | `VOLUME=N` | Set the initial volume, 0 to 100. |
 | `--quiet` | `QUIET` | Suppress progress output. This is the default for Workbench launches unless `--fps` or `BENCHMARK` applies. |
 | `--verbose` | `VERBOSE` | Print progress output from Workbench as well as shell launches. |
 | `--trace` | `TRACE` | Write per-frame timing diagnostics to `T:zzplay.trace`. |
@@ -157,11 +157,12 @@ slider.
 ZZPlay plays MP3, FLAC and Ogg Vorbis from `http://` and `https://`
 addresses, including Shoutcast and Icecast radio stations. It needs a running
 TCP/IP stack that provides `bsdsocket.library` version 4, such as Roadshow,
-AmiTCP or MiamiDX. `https://` also needs AmiSSL 5: ZZPlay accepts TLS 1.2 or
-later and checks the server's certificate and name against AmiSSL's
-certificate store. Without AmiSSL, `https://` items fail with a message and
-`http://` keeps working. ZZPlay never follows a redirect from `https://` to
-`http://`.
+AmiTCP or MiamiDX.
+
+`https://` also needs AmiSSL 5. ZZPlay accepts TLS 1.2 or later and checks
+the server's certificate and name against AmiSSL's certificate store. Without
+AmiSSL, `https://` items fail with a message and `http://` keeps working.
+ZZPlay never follows a redirect from `https://` to `http://`.
 
 ### Adding an address
 
@@ -176,19 +177,19 @@ certificate store. Without AmiSSL, `https://` items fail with a message and
 - Use the ARexx `OPEN` or `ADD` command with the address.
 
 An address that ends in `.pls`, `.m3u` or `.m3u8` is a station's playlist. It
-stays one playlist entry, and ZZPlay downloads it when the entry starts and
-plays the first stream in it that answers.
+stays one playlist entry. When the entry starts, ZZPlay downloads it and plays
+the first stream in it that answers.
 
 ### What plays and how
 
 A network item uses the same audio settings as a file: MP3 through MHI,
-ZZ9000AX or AHI, FLAC and Ogg Vorbis decoded on the card.
+ZZ9000AX or AHI, and FLAC and Ogg Vorbis decoded on the card.
 
 | Situation | What ZZPlay does |
 | --- | --- |
 | Shoutcast or Icecast station | Shows the station name in the playlist and the current track in the title line, updated when the station announces a new one. |
 | A station drops the connection | Reconnects after 1, 2 and 4 seconds. Three failures in a row without any audio end the item, and the playlist moves on. |
-| Seeking | Works when the server reports the length and accepts byte ranges, as file servers normally do. Live stations and other sources are not seekable. |
+| Seeking | Works for MP3 when the server reports the length and accepts byte ranges, as file servers normally do. Live stations cannot be seeked. |
 | Video address (MPEG, WebM, WebP) | Refused with "video plays only from files". |
 | AAC, HE-AAC or Opus station | Not playable. |
 | Icecast Ogg Vorbis station | Stops at the first track change, because each new track starts a new Ogg stream. |
@@ -196,130 +197,101 @@ ZZ9000AX or AHI, FLAC and Ogg Vorbis decoded on the card.
 
 ### Browse window
 
-Service modules let ZZPlay list and search music services. Each module is a
-file in the `Providers` drawer next to ZZPlay (`PROGDIR:Providers/`), for
-example `radio.zzprov`. ZZPlay loads the modules the first time the Browse
-window opens or a playlist entry needs one, and uses no memory for them
-before that. The package ships two: [Internet radio](#internet-radio) and
-[Plex](#plex).
+The Browse window lists and searches music services. Each service is a
+module file in the `Providers` drawer next to ZZPlay (`PROGDIR:Providers/`).
+The package ships two: `radio.zzprov` for [Internet radio](#internet-radio)
+and `plex.zzprov` for [Plex](#plex). ZZPlay loads them the first time the
+Browse window opens or a playlist entry needs one.
 
 Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
-Everything in it also works from the keyboard and from its own menu; see
-**Browse menu** and **Browse keys** at the end of this section.
+It can also be used from the keyboard and from its own menu; see **Browse
+menu** and **Browse keys** at the end of this section.
 
 #### Finding music
 
 - The cycle gadget at the top chooses the service. Type in the search field
-  and press Return to search it.
-- Click a folder to open it. **Back** returns to the previous list
-  with the same entry selected. A long list ends in a "--- More items ---"
-  row; click it to load the next part.
-- Rows appear as they arrive, in groups, instead of all at once; the
-  selection and the scroll position stay.
-- While a list or search loads, the status line at the bottom says what is
-  happening: looking up the host, connecting, connecting securely, waiting
-  for the service, then "Loading 40 of 100 items..." while the rows arrive
-  (or "Loading 40 items..." when the total is unknown). Once the rows are
-  in, it shows how many there are. The pointer over the Browse window is
-  busy during the wait (AmigaOS 3.1 or newer; older systems keep the
-  normal pointer).
-- **Stop** cancels a list or search that is still loading and keeps the
-  rows that arrived. Network work runs in its own process, so the player
-  keeps playing meanwhile.
-- Every list and search ZZPlay finishes is remembered until ZZPlay quits,
-  at most 16 of them (the one unused for the longest time is dropped).
-  Opening a remembered folder or repeating a remembered search shows it
-  at once, with the selection you left, and sends no request.
-- **Reload** fetches the current list or search again from the beginning
-  and replaces the remembered copy. It is disabled while nothing is shown
-  or a request is already running.
+  and press Return to search.
+- Click a folder to open it. **Back** returns to the previous list with the
+  same entry selected. A long list ends in a "--- More items ---" row; click
+  it to load the next part.
+- While a list loads, the status line shows each step (looking up the host,
+  connecting, waiting for the service) and then "Loading 40 of 100
+  items..." as rows arrive. Rows appear in groups as they come in. When the
+  list is complete, the status line shows the number of items. On AmigaOS
+  3.1 and newer the pointer is busy while ZZPlay waits.
+- **Stop** cancels a list or search that is still loading and keeps the rows
+  that already arrived. The player keeps playing while Browse waits.
+- ZZPlay remembers the last 16 lists and searches until it quits. Opening
+  one of them again shows it at once, with the same selection, without
+  asking the service.
+- **Reload** fetches the current list or search again.
 
 #### Playing from Browse
 
 - Double-click a track or station to add it to the playlist and play it.
-  **Play** does the same for the selected entry, **Add** only adds it.
+  **Play** does the same for the selected entry, and **Add** only adds it.
   Entries the service marks as unplayable cannot be played or added.
-- **Play next** puts the selected track or station, or the tracks of the
-  selected collection, right after the entry that is playing, without
-  interrupting it; with nothing playing they go to the start of the
-  playlist. With shuffle on they still play next.
-- **Play all** plays the folder being shown as a whole, and **Add all**
-  appends it; **Play all next** in the menu queues it after the playing
-  entry. They are enabled when the service marks the shown folder playable
-  (such as a Plex album, artist or playlist) and its rows are shown;
-  folders open on a single click, so this is how a collection is played
-  without entering and selecting it. **Play all** replaces the playlist
-  with the folder's tracks and starts the first. ZZPlay lists the folder,
-  and each playable folder inside it, while the status line counts what it
-  found ("Adding 37 tracks..."). **Stop** cancels and leaves the playlist
-  unchanged, and so does going to another folder or search before the
-  tracks are in. At most as many tracks are added as the playlist holds
-  (4,096); the status line says when the collection held more, or when the
-  playlist had no room for all of them. A collection that holds nothing
-  playable changes nothing: the status line says "Nothing to add".
+- **Play next** puts the selected entry right after the one that is
+  playing, without interrupting it. With nothing playing, it goes to the
+  start of the playlist. This also works with shuffle on.
+- **Play all** replaces the playlist with the tracks of the folder being
+  shown and starts the first one. **Add all** appends them, and **Play all
+  next** in the menu puts them after the playing entry. These work on
+  folders the service marks as collections, such as a Plex album, artist or
+  playlist. Because one click on a folder opens it, this is how you play a
+  whole album or artist.
+- While ZZPlay collects the tracks, the status line counts them ("Adding 37
+  tracks..."). **Stop**, or opening another folder, cancels and leaves the
+  playlist as it was. The playlist holds at most 4,096 entries; the status
+  line says when tracks did not fit.
 - **Favourite** adds the selected entry to the service's favourites, or
-  removes it when it is already one. The button is disabled for services
-  without favourites.
+  removes it. Services without favourites have it disabled.
 - **Settings** shows the service's settings, such as a server address or a
-  token. **Save** stores them in `ENVARC:ZZPlay/<service>.prefs` and reopens
-  the service with them; **Cancel** keeps the old values. When the
-  settings cannot be saved (a full or write-protected disk), the service
-  says so and keeps the old ones.
+  token. **Save** stores them in `ENVARC:ZZPlay/<service>.prefs` and
+  reconnects the service. If they cannot be saved, for example on a full
+  disk, the service says so and keeps the old ones.
 
-An entry added from a service is stored in the playlist as `<service>://<id>`,
-for example `radio://9610c519-0601-11e8-ae97-52543be04c81`, with the entry's
-title. ZZPlay asks the module for the current address each time the entry
-starts, so such entries can be saved in M3U playlists, added with the Shell
-or ARexx, and keep playing as long as the module is installed. Without the
-module the entry fails with "no installed service module handles ...".
+A service entry is stored in the playlist as `<service>://<id>`, for example
+`radio://9610c519-0601-11e8-ae97-52543be04c81`, together with its title.
+ZZPlay asks the module for the stream address each time the entry starts,
+so these entries can be saved in M3U playlists and used from the Shell or
+ARexx. Without the module, the entry fails with "no installed service module
+handles ...".
 
 #### Recently played
 
-Each service's top level starts with a **Recently played** folder once
-something of that service was started from the Browse window. It lists the
-last 25 tracks, stations and collections started with **Play**, **Play
-next**, **Play all** or **Play all next** (a double-click or Return counts as
-**Play**), newest first; starting one again moves it to the top. **Add** and
-**Add all** do not count. Tracks and stations in it play as anywhere else,
-and a collection plays whole with **Play** or opens like any folder. The
-folder needs no network to open, so recent stations stay reachable when a
-service does not answer. It keeps the order it had when it was opened until
-**Reload**.
+Once you have played something from a service, its top level starts with a
+**Recently played** folder. It holds the last 25 tracks, stations and
+collections started with **Play**, **Play next**, **Play all** or **Play
+all next**, newest first. A double-click or Return counts as **Play**; **Add**
+and **Add all** do not count. The folder opens without the network, so
+recent stations are still there when a service does not answer.
 
-The lists are kept per service in `ENVARC:ZZPlay/<service>.recent` (and
-`ENV:`), one entry per line; delete the file to empty a list. When a list
-cannot be saved, the status line says "Could not save Recently played" once,
-and the next change tries again.
+Each service's list is kept in `ENVARC:ZZPlay/<service>.recent`. Delete the
+file to empty the list.
 
 #### Window layout
 
-- The buttons sit in two rows of five, all the same width: **Back**,
-  **Reload**, **Stop**, **Favourite** and **Settings**, then **Play**,
-  **Play next**, **Add**, **Play all** and **Add all**.
-- The window can be resized from its bottom right corner; the list takes
-  the extra height and width, the buttons widen with it and the status
-  line stays at the bottom. The window cannot be made smaller than its
-  buttons and three list rows, nor larger than the screen. Its place and
-  size are remembered in `ZZPlay.prefs` when it closes or ZZPlay quits
-  with it open, and restored the next time (brought back onto the screen
-  when it no longer fits).
-- On AmigaOS 3.0 or newer each row is drawn in aligned columns: a small
-  marker, the title, the artist and album (or the details the service
-  gives) and, right-aligned, the length when it is known (m:ss or
-  h:mm:ss). The columns follow the window width: the length column keeps
-  its size and the title gets about 55 percent of the rest; text that
-  does not fit is cut. The markers mean: an outline folder for a folder,
-  the folder with a filled play triangle for a collection that **Play
-  all** or **Add all** works on whole (such as a Plex album, artist or
-  playlist), a note for a track and a mast with waves for a station.
-  Selected rows use the Workbench selection colors, as other lists do.
-  Older systems (before AmigaOS 3.0) keep the simple one-line rows, with
-  "[+]" before a folder's title.
+- The buttons sit in two rows of five, all the same width.
+- Resize the window from its bottom right corner. The list and the buttons
+  grow with it. The smallest size still shows every button and three list
+  rows. ZZPlay remembers the window's place and size in `ZZPlay.prefs`.
+- On AmigaOS 3.0 and newer, each row shows a marker, the title, the artist
+  and album (or the service's details) and the length. Text that does not
+  fit is cut. Older systems show one line of text per row, with "[+]" in
+  front of folders.
+
+| Marker | Meaning |
+| --- | --- |
+| Outline folder | A folder. |
+| Folder with a play triangle | A collection that **Play all** and **Add all** work on. |
+| Note | A track. |
+| Mast with waves | A radio station. |
 
 #### Browse menu
 
-The Browse window has its own menu. Its items are enabled exactly when the
-matching button would be.
+The Browse window has its own menu. An item is enabled when the matching
+button is.
 
 | Item | Shortcut | Action |
 | --- | --- | --- |
@@ -336,8 +308,8 @@ matching button would be.
 
 #### Browse keys
 
-These keys work in the Browse window while the search field is not being
-edited.
+These keys work in the Browse window, except while you type in the search
+field.
 
 | Key | Action |
 | --- | --- |
@@ -352,21 +324,20 @@ edited.
 ### Internet radio
 
 `radio.zzprov` uses the radio-browser.info station directory over plain
-`http://`, so it needs no AmiSSL. Its top level has four folders:
+`http://`, so it does not need AmiSSL. Its top level has four folders:
 
 - **Favourites**: the stations you added with **Favourite** (up to 64).
 - **Top voted**: the directory's most popular stations.
 - **By tag**: genres and other tags, each opening a list of stations.
 - **By country**: countries, each opening a list of stations.
 
-Search looks for station names and leaves out stations the directory marks
-as broken. Each station shows its codec, bitrate and country. Stations in
-MP3 or Ogg Vorbis play; stations in other formats (AAC, HE-AAC, Opus) are
-listed as unsupported and cannot be played.
+Search finds stations by name and leaves out stations the directory marks
+as broken. Each station shows its codec, bitrate and country. MP3 and Ogg
+Vorbis stations play. Stations in other formats (AAC, HE-AAC, Opus) are
+marked as unsupported.
 
 Favourites are stored in `ENVARC:ZZPlay/radio.prefs`, one line per station:
-`fav_<n>=<id>|<name>|<codec>|<bitrate>|<country>`. A line break or a field
-separator in a station's name or country is stored as a space.
+`fav_<n>=<id>|<name>|<codec>|<bitrate>|<country>`.
 
 ### Plex
 
@@ -380,56 +351,55 @@ To sign in from the Browse window:
    and enter the code shown in ZZPlay.
 4. Open **Continue after entering the code**.
 
-ZZPlay then asks plex.tv for your servers and remembers both local addresses
-of the one you pick: its `https` address and its plain `http` address. Which
-one is used is set by the **Connection** setting (below); you can switch it
-later without signing in again. If your account has more than one server,
-they are listed as folders; open the one you want. The server's music library
-opens straight away, and later sessions go there directly. To sign in again,
-clear **Token** in Settings. When the server no longer accepts the token (it
-was revoked or the server was reset), opening Plex says so; clear **Token**
-and sign in again.
+ZZPlay then asks plex.tv for your servers. If your account has more than
+one, open the one you want. ZZPlay remembers the server's `https` and plain
+`http` addresses, and the **Connection** setting below picks which one it
+uses. The music library opens right away, and later sessions start there.
 
-To set the connection by hand instead, choose Plex Media Server in the Browse
+To sign in again, clear **Token** in Settings. If the server stops
+accepting the token, for example after it was revoked, opening Plex says so.
+
+To set up the connection by hand, choose Plex Media Server in the Browse
 window, click **Settings** and set:
 
 - **Server URL**: the server's address with its port, for example
   `http://192.168.1.10:32400`.
-- **Connection**: pick `Secure (https)` or `Plain (http, faster)` from the
-  list; `Secure (https)` is the default. After sign-in both addresses are
-  known and switching needs no new sign-in; plain `http` starts tracks
-  faster on a 68k but sends the token and what you play unencrypted over
-  the home network. When the chosen kind does not answer, the item fails
-  with a message naming this setting.
+- **Connection**: `Secure (https)`, the default, or `Plain (http, faster)`.
+  Plain `http` starts tracks much faster on a 68k, but the token and what
+  you play cross the home network unencrypted. After a plex.tv sign-in you
+  can switch without signing in again. If the chosen address does not
+  answer, the error message names this setting.
 - **Token**: your Plex token. In Plex Web, open a track's menu, choose
-  **Get Info**, then **View XML**; the address of the page that opens ends in
+  **Get Info**, then **View XML**. The address of the page that opens ends in
   `X-Plex-Token=` followed by the token.
-- **Bitrate**: the MP3 bitrate in kbit/s for tracks the server has to convert
-  (192 when empty).
+- **Bitrate**: the MP3 bitrate in kbit/s for tracks the server has to
+  convert. The default is 192.
 
-The token is stored in `ENVARC:ZZPlay/plex.prefs` as plain text and is sent
-only to that server and, during sign-in, to plex.tv. With a plain `http://`
-address, the server's **Secure connections** setting (Settings, Network) must
-be **Preferred**, not **Required**.
+The token is stored in `ENVARC:ZZPlay/plex.prefs` as plain text. ZZPlay sends
+it only to that server and, during sign-in, to plex.tv. For a plain `http://`
+connection, set the server's **Secure connections** option (Settings,
+Network) to **Preferred**, not **Required**.
 
-The top level has **Playlists** plus one folder per music library; a server
-with a single music library lists that library's views directly: **Artists**,
-**Albums**, **Genres**, **Recently added** and **Playlists**. **Artists** and
-**Albums** open to letter folders with their counts, such as "A (72)", with
-"#" first for names that start with a digit or symbol; a letter opens its
-artists or albums, 100 at a time. **Genres** opens the server's genre list
-and a genre opens the artists in it. **Recently added** lists albums newest
-first. Album rows show the artist and the year when Plex knows it. An artist
-opens to albums, and an album or playlist to tracks, each track shown with
-artist, album and length.
+A server with one music library opens on that library's folders:
+**Artists**, **Albums**, **Genres**, **Recently added** and **Playlists**.
+With more than one library, the top level has a folder per library plus
+**Playlists**.
 
-Search answers with up to three folders, **Artists (n)**, **Albums (n)** and
-**Tracks (n)**, each with its hit count; groups without hits are left out,
-and each folder opens its results.
+- **Artists** and **Albums** open on letter folders with counts, such as
+  "A (72)". "#" holds names that start with a digit or symbol. A letter
+  lists 100 entries at a time.
+- **Genres** lists the server's genres; a genre lists its artists.
+- **Recently added** lists albums, newest first.
+- An artist opens on its albums, and an album or playlist on its tracks.
+  Album rows show the artist and year; track rows show artist, album and
+  length.
 
-MP3, FLAC and Ogg Vorbis tracks play straight from the server and can be
-seeked. The server converts other formats (AAC, ALAC, WAV and so on) to MP3
-while they play; such tracks cannot be seeked.
+A search returns up to three folders, **Artists (n)**, **Albums (n)** and
+**Tracks (n)**, with the number of hits in each.
+
+MP3, FLAC and Ogg Vorbis tracks play straight from the server, and MP3
+tracks can be seeked. The server converts other formats (AAC, ALAC, WAV and
+so on) to MP3 while they play; those cannot be seeked.
 
 ## Preload to card memory
 
@@ -567,6 +537,7 @@ invalid value resets only that key:
 | `SHUFFLE` | `YES`, `NO` |
 | `FULLSCREEN` | `YES`, `NO` |
 | `WINDOW` | `left,top` of the player window, `-1,-1` for the default |
+| `BROWSE` | `left,top,width,height` of the Browse window |
 | `DRAWER` | the last drawer used in a file requester |
 
 ## Fullscreen video
@@ -577,15 +548,14 @@ remembers it in the prefs file (`FULLSCREEN`) for the next launch. It can be
 changed while nothing is playing. A one-shot launch plays fullscreen only when
 `--fullscreen` or `FULLSCREEN` is given.
 
-Fullscreen uses a dedicated screen and preserves the video's aspect ratio,
-scaling up or down to fit the screen. When the Workbench display mode is
-usable (15/16-bit or truecolor, not pixel-doubled), fullscreen opens in that
-same display mode without changing output resolution or refresh rate. An 8-bit
-(CLUT) Workbench switches depth only, opening at the Workbench's resolution in
-16-bit. If the mode cannot be opened or the Workbench mode is pixel-doubled,
-ZZPlay falls back to finding an available display mode. Press `F` to return to
-the previous window position and size. If no display mode can present the video,
-ZZPlay remains windowed.
+Fullscreen opens a screen of its own and scales the video up or down to fit
+it, keeping the aspect ratio. When the Workbench display mode is usable
+(15/16-bit or truecolor, not pixel-doubled), the fullscreen screen uses the
+same mode, so the resolution and refresh rate do not change. On an 8-bit
+(CLUT) Workbench it uses the same resolution in 16-bit. If that mode cannot
+be opened, or the Workbench mode is pixel-doubled, ZZPlay picks another
+available mode. If no mode can show the video, it stays in a window. Press
+`F` to return to the window at its previous place and size.
 
 When one video follows another in fullscreen, ZZPlay keeps the screen open
 between them, so the playlist does not return to the Workbench. It returns
@@ -641,15 +611,14 @@ from 1. Times are whole seconds.
 | `SHOW` | Bring the player window to the front. |
 | `BROWSE` | Open the Browse window, or bring it to the front. |
 | `SERVICES` | Return installed services, one `scheme name` per line. Modules load on first use. |
-| `SEARCH service query...` | Return at most 100 playable matches as `id title` lines. Playable folders end in `(collection)`. Plex result groups are expanded. |
+| `SEARCH service query...` | Return up to 100 playable matches, one `id title` per line. Collections end in `(collection)`. For Plex, the hits inside each result group are listed. |
 | `VERSION`, `HELP` | Return the version string or the command list. |
 | `QUIT` | Quit ZZPlay. |
 
-The service commands take a service's scheme, as `SERVICES` lists it
-(`radio`, `plex`). The ids `SEARCH` returns are the ones Browse uses: a track
-or station plays with `OPEN service://id` (for example
-`OPEN plex://34291`), and a collection id such as `alb:11113` goes to
-`PLAYALL` or `ADDALL`. Each service command can also be tried from the
+The service commands take the service name that `SERVICES` lists (`radio`,
+`plex`). The ids from `SEARCH` are the ones Browse uses. A track or station
+plays with `OPEN service://id`, for example `OPEN plex://34291`. A
+collection id such as `alb:11113` goes to `PLAYALL` or `ADDALL`. From the
 Shell:
 
 ```text
@@ -660,17 +629,17 @@ rx "address ZZPLAY PLAYALL plex alb:1234"
 rx "address ZZPLAY ADDALL plex alb:1234"
 ```
 
-Values come back in `RESULT` when the script uses `OPTIONS RESULTS`. The
-return code is 0 on success. It is 5 when the command cannot apply right now,
-for example `PAUSE` with nothing playing, `SEEK` on a format without seeking,
-an empty `SEARCH`, or a collection that adds nothing. It is 10 for an unknown
-command, a wrong argument, a position outside the playlist, an unknown or
-failed service, or `ADD`/`OPEN` paths that add nothing (`OPEN` then leaves the
-playlist unchanged).
+Values come back in `RESULT` when the script uses `OPTIONS RESULTS`.
+
+| Return code | Meaning |
+| --- | --- |
+| 0 | Success. |
+| 5 | The command cannot apply right now: `PAUSE` with nothing playing, `SEEK` on a format without seeking, a `SEARCH` with no matches, or a collection with nothing to add. |
+| 10 | An unknown command, a wrong argument, a position outside the playlist, an unknown or failed service, or `ADD`/`OPEN` paths that add nothing (`OPEN` then leaves the playlist unchanged). |
 
 `ADD`, `OPEN`, `SEARCH`, `PLAYALL` and `ADDALL` can take a while. Like a drop
-on the window, they pause the playing item while they run. The window stays
-responsive during network waits, so Stop or Quit cancels them. The script
+on the window, they pause the playing item while they run. The window keeps
+responding during network waits, so Stop or Quit cancels them. The script
 waits for the reply, and commands from other scripts wait their turn.
 
 ## Diagnostics
