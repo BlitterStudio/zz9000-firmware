@@ -82,4 +82,11 @@ const char *zzplay_net_url(const ZZPlayNet *net);
 /* Close the socket and free the connection. NULL is ignored. */
 void zzplay_net_close(ZZPlayNet *net);
 
+/* The calling process keeps bsdsocket.library, AmiSSL and its TLS
+ * context between connections, so the next https:// connection skips
+ * opening AmiSSL and loading certificates. Call this before a process
+ * that used the network ends; it does nothing while the process still
+ * has a connection open. */
+void zzplay_net_release_process(void);
+
 #endif /* ZZPLAY_NET_H */

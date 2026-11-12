@@ -5618,6 +5618,7 @@ int main(int argc, char **argv)
   zzplay_gui_close();
   zzplay_file_end_network_item();
   zzplay_providers_unload_shared();
+  zzplay_net_release_process();
   if (app.player_mode) {
     app.prefs.volume = app.ctl.volume;
     app.prefs.repeat = app.ctl.repeat;

@@ -20,6 +20,9 @@
 #include <exec/tasks.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
+
+#include "zzplay-net.h"
+
 typedef struct ZZPlayWorkerMsg {
   struct Message msg;
   int quit;
@@ -211,6 +214,7 @@ static void worker_process(void)
           curr_p->close(ctx);
           ctx = NULL;
         }
+        zzplay_net_release_process();
         Forbid();
         ReplyMsg(&wmsg->msg);
         DeleteMsgPort(my_port);

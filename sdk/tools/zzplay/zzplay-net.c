@@ -3,8 +3,10 @@
  *
  * Connection handling follows the ZZTop updater's HTTPS client
  * (zz9000-drivers ZZTop/Core/https.c), reworked so several processes can
- * each hold connections: all state lives in the connection, including the
- * bsdsocket.library and AmiSSL bases.
+ * each hold connections: each process owns one network context (its
+ * bsdsocket.library and AmiSSL bases and one TLS context), shared and
+ * counted by its connections, while the connection itself carries the
+ * request state.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
@@ -18,7 +20,7 @@
 #include <proto/exec.h>
 
 /* The per-process network context (defined after the library headers, so
- * it can hold an AmiSSL session): a bsdsocket.library base belongs to the
+ * it can hold the AmiSSL types): a bsdsocket.library base belongs to the
  * process that opened it, socket descriptors belong to that base, and
  * AmiSSL must be given the base that created the sockets it reads. Each
  * process that uses the network therefore gets one context holding its
@@ -62,7 +64,6 @@ static struct Library *net_amissl_ext_base(void);
 #define NET_IO_BYTES 8192U
 #define NET_POLL_MICROS 100000UL
 #define NET_IDLE_POLLS 300 /* 30 s without progress */
-#define NET_SESSIONS 4U    /* remembered TLS sessions per process */
 #define NET_TASKS 8U       /* processes with a network context */
 #define NET_USER_AGENT "ZZPlay (AmigaOS; ZZ9000)"
 
@@ -74,14 +75,9 @@ typedef struct NetTask {
   struct Library *amissl;
   struct Library *amissl_ext;
   int amissl_errno;
-  /* The last TLS session per host:port, offered on a later connection
-   * to the same host so it can resume instead of a full handshake.
-   * Sessions belong to the AmiSSL bases above and die with them. */
-  struct {
-    char host[ZZPLAY_HTTP_HOST_MAX];
-    uint16_t port;
-    SSL_SESSION *session;
-  } sessions[NET_SESSIONS];
+  /* One TLS context per process: loading AmiSSL's certificate store is
+   * slow on a 68k, so it happens once, not per connection. */
+  SSL_CTX *ctx;
 } NetTask;
 
 static NetTask net_tasks[NET_TASKS];
@@ -122,7 +118,6 @@ static struct Library *net_amissl_ext_base(void)
 
 struct ZZPlayNet {
   NetTask *task;
-  SSL_CTX *ctx;
   SSL *ssl;
   LONG fd;
   ZZPlayNetKeepRunning keep_running;
@@ -259,10 +254,6 @@ static void close_socket(ZZPlayNet *net)
     SSL_free(net->ssl);
     net->ssl = NULL;
   }
-  if (net->ctx != NULL) {
-    SSL_CTX_free(net->ctx);
-    net->ctx = NULL;
-  }
   if (net->fd >= 0) {
     CloseSocket(net->fd);
     net->fd = -1;
@@ -314,23 +305,29 @@ static NetTask *net_task_acquire(ZZPlayNet *net)
   return t;
 }
 
-/* The last connection of a process closes its libraries: AmiSSL before
- * the socket base it was given. */
+/* A connection ends. The process keeps its libraries and TLS context
+ * for its next connection; zzplay_net_release_process() gives them
+ * up. */
 static void net_task_release(NetTask *t)
 {
-  if (t == NULL || --t->users != 0U) {
+  if (t != NULL && t->users != 0U) {
+    t->users--;
+  }
+}
+
+void zzplay_net_release_process(void)
+{
+  NetTask *t;
+
+  Forbid();
+  t = net_task();
+  Permit();
+  if (t == NULL || t->users != 0U) {
     return;
   }
-  {
-    int i;
-
-    for (i = 0; i < (int)NET_SESSIONS; i++) {
-      if (t->sessions[i].session != NULL) {
-        SSL_SESSION_free(t->sessions[i].session);
-        t->sessions[i].session = NULL;
-        t->sessions[i].host[0] = '\0';
-      }
-    }
+  if (t->ctx != NULL) {
+    SSL_CTX_free(t->ctx);
+    t->ctx = NULL;
   }
   if (t->amissl != NULL) {
     CloseAmiSSL();
@@ -398,148 +395,47 @@ static int tls_open(ZZPlayNet *net)
   return ok;
 }
 
-/* The TLS session cache: the last session per host:port of this process,
- * offered on a later connection so the handshake can resume instead of
- * starting over. Sessions live as long as the process's AmiSSL bases. */
-static int host_equal(const char *a, const char *b)
-{
-  size_t i;
-
-  for (i = 0U; a[i] != '\0' && b[i] != '\0'; i++) {
-    char ca = a[i];
-    char cb = b[i];
-
-    if (ca >= 'A' && ca <= 'Z') {
-      ca = (char)(ca - 'A' + 'a');
-    }
-    if (cb >= 'A' && cb <= 'Z') {
-      cb = (char)(cb - 'A' + 'a');
-    }
-    if (ca != cb) {
-      return 0;
-    }
-  }
-  return a[i] == '\0' && b[i] == '\0';
-}
-
-static SSL_SESSION *session_cache_get(NetTask *t, const char *host,
-                                      uint16_t port)
-{
-  int i;
-
-  for (i = 0; i < (int)NET_SESSIONS; i++) {
-    if (t->sessions[i].session != NULL &&
-        t->sessions[i].port == port &&
-        host_equal(t->sessions[i].host, host)) {
-      return t->sessions[i].session;
-    }
-  }
-  return NULL;
-}
-
-static void session_cache_put(NetTask *t, const char *host, uint16_t port,
-                              SSL_SESSION *session)
-{
-  int i;
-  int slot = -1;
-
-  for (i = 0; i < (int)NET_SESSIONS; i++) {
-    if (t->sessions[i].session != NULL) {
-      if (t->sessions[i].port == port &&
-          host_equal(t->sessions[i].host, host)) {
-        slot = i; /* replace the entry for this host:port */
-        break;
-      }
-    } else if (slot < 0) {
-      slot = i; /* first free slot */
-    }
-  }
-  if (slot < 0) {
-    /* Full: recycle the oldest entry (index 0). */
-    slot = 0;
-  }
-  if (t->sessions[slot].session != NULL) {
-    SSL_SESSION_free(t->sessions[slot].session);
-  }
-  memset(t->sessions[slot].host, 0, sizeof(t->sessions[slot].host));
-  strncpy(t->sessions[slot].host, host, sizeof(t->sessions[slot].host) - 1U);
-  t->sessions[slot].port = port;
-  t->sessions[slot].session = session;
-}
-
-static void session_cache_drop(NetTask *t, const char *host, uint16_t port)
-{
-  int i;
-
-  for (i = 0; i < (int)NET_SESSIONS; i++) {
-    if (t->sessions[i].session != NULL &&
-        t->sessions[i].port == port &&
-        host_equal(t->sessions[i].host, host)) {
-      SSL_SESSION_free(t->sessions[i].session);
-      t->sessions[i].session = NULL;
-      t->sessions[i].host[0] = '\0';
-      return;
-    }
-  }
-}
-
 /* TLS 1.2 or later over the connected socket, with the certificate and
- * host name verified against AmiSSL's certificate store. A remembered
- * session for this host:port is offered first; the server falls back to
- * a full handshake when it no longer accepts it. */
+ * host name verified against AmiSSL's certificate store. */
 static int tls_connect(ZZPlayNet *net, const ZZPlayUrl *url)
 {
   int rc;
-  SSL_SESSION *resume;
 
-  net->ctx = SSL_CTX_new(TLS_client_method());
-  if (net->ctx == NULL) {
-    ssl_err(net, "TLS setup failed");
-    return 0;
-  }
-  SSL_CTX_set_min_proto_version(net->ctx, TLS1_2_VERSION);
-  if (net->tls12_only) {
-    SSL_CTX_set_max_proto_version(net->ctx, TLS1_2_VERSION);
-  }
-  /* Many stream servers close the connection without a TLS close_notify.
-   * AmiSSL 5 reports that as an error; treat it as the end of the data,
-   * as over plain HTTP, and let the HTTP framing decide whether the body
-   * was complete. */
+  if (net->task->ctx == NULL) {
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+
+    if (ctx == NULL) {
+      ssl_err(net, "TLS setup failed");
+      return 0;
+    }
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    /* Many stream servers close the connection without a TLS
+     * close_notify. AmiSSL 5 reports that as an error; treat it as the end
+     * of the data, as over plain HTTP, and let the HTTP framing decide
+     * whether the body was complete. */
 #ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
-  SSL_CTX_set_options(net->ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+    SSL_CTX_set_options(ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
 #endif
-  SSL_CTX_set_verify(net->ctx, SSL_VERIFY_PEER, NULL);
-  if (SSL_CTX_set_default_verify_paths(net->ctx) != 1) {
-    ssl_err(net, "Cannot load the AmiSSL certificates");
-    return 0;
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
+      SSL_CTX_free(ctx);
+      ssl_err(net, "Cannot load the AmiSSL certificates");
+      return 0;
+    }
+    net->task->ctx = ctx;
   }
-  net->ssl = SSL_new(net->ctx);
+  net->ssl = SSL_new(net->task->ctx);
   if (net->ssl == NULL || SSL_set_fd(net->ssl, (int)net->fd) != 1 ||
       SSL_set_tlsext_host_name(net->ssl, url->host) != 1 ||
-      SSL_set1_host(net->ssl, url->host) != 1) {
-    ssl_err(net, "TLS setup failed");
-    return 0;
-  }
-  resume = session_cache_get(net->task, url->host, (uint16_t)url->port);
-  if (resume != NULL && SSL_set_session(net->ssl, resume) != 1) {
+      SSL_set1_host(net->ssl, url->host) != 1 ||
+      (net->tls12_only &&
+       SSL_set_max_proto_version(net->ssl, TLS1_2_VERSION) != 1)) {
     ssl_err(net, "TLS setup failed");
     return 0;
   }
   while ((rc = SSL_connect(net->ssl)) != 1) {
     if (!ssl_retry(net, rc, "Secure connection failed")) {
-      if (resume != NULL) {
-        /* The remembered session did not work: a later connection to
-         * this host must do the full handshake again. */
-        session_cache_drop(net->task, url->host, (uint16_t)url->port);
-      }
       return 0;
-    }
-  }
-  {
-    SSL_SESSION *done = SSL_get1_session(net->ssl);
-
-    if (done != NULL) {
-      session_cache_put(net->task, url->host, (uint16_t)url->port, done);
     }
   }
   return 1;
