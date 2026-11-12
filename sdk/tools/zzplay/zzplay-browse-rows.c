@@ -107,6 +107,22 @@ void zzplay_browse_layout_columns(int avail_w, int marker_w, int len_w,
   }
 }
 
+void zzplay_browse_widen_title(ZZPlayBrowseColumns *cols, int avail_w,
+                               int gap, int has_subtitle, int has_length)
+{
+  int end;
+
+  if (!cols || has_subtitle) {
+    return;
+  }
+  end = has_length ? cols->len_x - gap : avail_w - 2;
+  if (end - cols->title_x > cols->title_w) {
+    cols->title_w = end - cols->title_x;
+    cols->sub_x = cols->title_x + cols->title_w;
+    cols->sub_w = 0;
+  }
+}
+
 void zzplay_browse_clamp_window(int *left, int *top, int *width, int *height,
                                 int screen_w, int screen_h,
                                 int min_w, int min_h)

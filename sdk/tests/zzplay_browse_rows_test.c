@@ -80,6 +80,30 @@ static int test_layout_columns(void)
   if (cols.sub_x + cols.sub_w > cols.len_x) return 10;
   if (cols.len_x + cols.len_w > 28) return 11;
 
+  /* A row with no subtitle (an instruction such as "On any device, open
+   * plex.tv/link") keeps the whole width up to the length cell, or to the
+   * right padding when it has no length either. */
+  {
+    ZZPlayBrowseColumns split;
+
+    zzplay_browse_layout_columns(400, 12, 50, 6, &split);
+    cols = split;
+    zzplay_browse_widen_title(&cols, 400, 6, 1, 1);
+    if (cols.title_w != split.title_w || cols.sub_w != split.sub_w) return 12;
+    cols = split;
+    zzplay_browse_widen_title(&cols, 400, 6, 0, 1);
+    if (cols.title_x + cols.title_w != cols.len_x - 6) return 13;
+    if (cols.sub_w != 0) return 14;
+    cols = split;
+    zzplay_browse_widen_title(&cols, 400, 6, 0, 0);
+    if (cols.title_x + cols.title_w != 398) return 15;
+    /* Never narrower than the plain split, even in a tiny row. */
+    zzplay_browse_layout_columns(30, 12, 50, 6, &split);
+    cols = split;
+    zzplay_browse_widen_title(&cols, 30, 6, 0, 1);
+    if (cols.title_w < split.title_w || cols.title_w < 0) return 16;
+  }
+
   return 0;
 }
 

@@ -369,6 +369,9 @@ static LONG browse_row_render(REG(a0, struct Hook *hook),
     return (LONG)LVCB_OK;
   }
 
+  zzplay_browse_widen_title(&cols, w, BROWSE_COLUMN_GAP,
+                            row->subtitle[0] != '\0',
+                            row->duration[0] != '\0');
   browse_draw_marker(rp, (int)msg->lvdm_Bounds.MinX + cols.marker_x,
                      y + ((h - 7) >> 1), row->kind, row->playable);
   browse_draw_text(rp, row->title, (int)msg->lvdm_Bounds.MinX + cols.title_x,
