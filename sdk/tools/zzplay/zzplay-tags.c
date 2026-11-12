@@ -475,3 +475,31 @@ void zzplay_tags_text_to_latin1(char *text)
   }
   *out = 0U;
 }
+
+size_t zzplay_tags_text_to_utf8(const char *text, char *out, size_t size)
+{
+  const uint8_t *in = (const uint8_t *)text;
+  size_t len = 0U;
+
+  if (!out || size == 0U) {
+    return 0U;
+  }
+  while (in && *in != 0U) {
+    uint8_t c = *in++;
+
+    if (c < 0x80U) {
+      if (len + 1U >= size) {
+        break;
+      }
+      out[len++] = (char)c;
+    } else {
+      if (len + 2U >= size) {
+        break;
+      }
+      out[len++] = (char)(0xc0U | (c >> 6));
+      out[len++] = (char)(0x80U | (c & 0x3fU));
+    }
+  }
+  out[len] = '\0';
+  return len;
+}

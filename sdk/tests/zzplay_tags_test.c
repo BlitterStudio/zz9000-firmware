@@ -308,6 +308,19 @@ static int test_text_to_latin1(void)
   return 0;
 }
 
+static int test_text_to_utf8(void)
+{
+  char out[8];
+
+  /* "Björk" as typed on the Amiga becomes UTF-8 for the services. */
+  if (zzplay_tags_text_to_utf8("Bj\xf6rk", out, sizeof(out)) != 6U ||
+      strcmp(out, "Bj\xc3\xb6rk") != 0) return 1;
+  /* Cut between characters: the last two-byte character does not fit. */
+  if (zzplay_tags_text_to_utf8("abcdef\xe9", out, sizeof(out)) != 6U ||
+      strcmp(out, "abcdef") != 0) return 2;
+  return 0;
+}
+
 int main(void)
 {
   int rc;
@@ -343,6 +356,9 @@ int main(void)
     return 6;
   }
   rc = test_text_to_latin1();
+  if (!rc) {
+    rc = test_text_to_utf8();
+  }
   if (rc) {
     fprintf(stderr, "test_text_to_latin1 failed: %d\n", rc);
     return 7;

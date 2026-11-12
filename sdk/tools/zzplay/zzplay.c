@@ -3561,6 +3561,7 @@ static int zzplay_app_rexx_search(void *user, const char *service,
   const ZZPlayProvider *provider = NULL;
   void *ctx;
   int ok;
+  static char rexx_search_query[ZZPLAY_PROVIDER_TEXT_MAX];
 
   reason[0] = '\0';
   ctx = zzplay_app_rexx_open_service(app, service, &binding, &provider,
@@ -3578,7 +3579,10 @@ static int zzplay_app_rexx_search(void *user, const char *service,
   sink.user = &rexx_search;
   sink.item = zzplay_app_rexx_search_item;
   sink.total = zzplay_app_rexx_search_total;
-  ok = provider->search(ctx, query, &sink, reason, reason_size);
+  /* Typed text is Latin-1; the services expect UTF-8. */
+  (void)zzplay_tags_text_to_utf8(query, rexx_search_query,
+                                 sizeof(rexx_search_query));
+  ok = provider->search(ctx, rexx_search_query, &sink, reason, reason_size);
   if (ok) {
     ok = zzplay_app_rexx_expand_search_groups(&rexx_search, reason,
                                                reason_size);

@@ -58,4 +58,9 @@ void zzplay_tags_display(const ZZPlayTags *tags, char *out, size_t capacity);
  * that do not form UTF-8 are kept, so Latin-1 text passes unchanged. */
 void zzplay_tags_text_to_latin1(char *text);
 
+/* Write Latin-1 text the user typed (Search, ARexx) as UTF-8 into `out`
+ * for a network service. A text too long for `out` is cut between
+ * characters. Returns the length written. */
+size_t zzplay_tags_text_to_utf8(const char *text, char *out, size_t size);
+
 #endif /* ZZPLAY_TAGS_H */

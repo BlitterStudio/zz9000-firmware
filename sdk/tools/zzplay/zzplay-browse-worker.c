@@ -422,11 +422,15 @@ static void worker_process(void)
           (void)snprintf(rep->error, sizeof(rep->error), "out of memory");
         } else {
           int ret;
+          char query[ZZPLAY_PROVIDER_TEXT_MAX];
+
           sink.user = &collector;
           sink.item = worker_sink_item;
           sink.total = worker_sink_total;
 
-          ret = p->search ? p->search(ctx, req->query, &sink, rep->error,
+          /* Typed text is Latin-1; the services expect UTF-8. */
+          (void)zzplay_tags_text_to_utf8(req->query, query, sizeof(query));
+          ret = p->search ? p->search(ctx, query, &sink, rep->error,
                                       sizeof(rep->error))
                           : 0;
           worker_flush_chunk(&collector);
