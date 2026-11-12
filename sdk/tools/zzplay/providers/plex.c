@@ -671,6 +671,7 @@ static int plex_resolve_xml_start(void *user, const char *name,
 
 static const ZZPlayProviderField plex_fields[] = {
   { "SERVER", "Server URL", ZZPLAY_FIELD_TEXT, 255U },
+  { "CONNECTION", "Connection", ZZPLAY_FIELD_TEXT, 16U },
   { "TOKEN", "Token", ZZPLAY_FIELD_SECRET, 64U },
   { "BITRATE", "Bitrate (kbit/s)", ZZPLAY_FIELD_NUMBER, 6U }
 };
@@ -749,49 +750,76 @@ static int plex_select_server(PlexContext *ctx, const PlexDiscoveredServer *srv,
 {
   char test_url[384];
   char headers[384];
-  char chosen_url[256];
+  char secure_url[256];
+  char plain_url[256];
+  char target_url[256];
+  char conn_pref[16];
   uint32_t i;
+  int is_plain;
   int connected = 0;
   size_t slen;
 
-  chosen_url[0] = '\0';
+  secure_url[0] = '\0';
+  plain_url[0] = '\0';
+  target_url[0] = '\0';
 
+  /* Collect both local addresses (https and http) when resources list them */
   for (i = 0U; i < srv->connection_count; i++) {
     const PlexDiscoveredConnection *conn = &srv->connections[i];
-    int status = 0;
-    int ok;
-
-    /* 1. Try local https connection URI if available */
-    if (conn->uri[0] != '\0' && (conn->is_https || plex_strncmp(conn->uri, "https://", 8) == 0)) {
-      size_t ulen = plex_strlen(conn->uri);
-      while (ulen > 0 && conn->uri[ulen - 1] == '/') {
-        ulen--;
+    if (secure_url[0] == '\0') {
+      if (conn->uri[0] != '\0' && (conn->is_https || plex_strncmp(conn->uri, "https://", 8) == 0)) {
+        plex_strlcpy(secure_url, conn->uri, sizeof(secure_url));
+        slen = plex_strlen(secure_url);
+        while (slen > 0 && secure_url[slen - 1] == '/') {
+          secure_url[--slen] = '\0';
+        }
       }
-      ctx->host->format(test_url, sizeof(test_url), "%.*s/identity", (int)ulen, conn->uri);
-      ctx->host->format(headers, sizeof(headers),
-                        "X-Plex-Token: %s\r\n"
-                        "X-Plex-Client-Identifier: %s\r\n"
-                        "X-Plex-Product: %s\r\n"
-                        "X-Plex-Version: %s\r\n"
-                        "X-Plex-Platform: %s\r\n"
-                        "Accept: application/xml\r\n",
-                        srv->access_token, ctx->client_id,
-                        PLEX_PRODUCT, PLEX_VERSION, PLEX_PLATFORM);
-      status = 0;
-      ok = ctx->host->http_get(ctx->host, test_url, headers,
-                               plex_discard_data_cb, NULL, &status, err, err_size);
-      if (ok && status == 200) {
-        plex_strlcpy(chosen_url, conn->uri, sizeof(chosen_url));
-        connected = 1;
-        break;
+    }
+    if (plain_url[0] == '\0') {
+      if (conn->address[0] != '\0') {
+        const char *port = (conn->port[0] != '\0') ? conn->port : "32400";
+        ctx->host->format(plain_url, sizeof(plain_url), "http://%s:%s", conn->address, port);
+      } else if (conn->uri[0] != '\0' && plex_strncmp(conn->uri, "http://", 7) == 0) {
+        plex_strlcpy(plain_url, conn->uri, sizeof(plain_url));
+        slen = plex_strlen(plain_url);
+        while (slen > 0 && plain_url[slen - 1] == '/') {
+          plain_url[--slen] = '\0';
+        }
+      }
+    }
+  }
+
+  conn_pref[0] = '\0';
+  ctx->host->pref_get(ctx->host, "CONNECTION", conn_pref, (uint32_t)sizeof(conn_pref));
+  is_plain = (plex_strcasecmp(conn_pref, "plain") == 0);
+
+  /* Probe only the address of the chosen kind */
+  for (i = 0U; i < srv->connection_count; i++) {
+    const PlexDiscoveredConnection *conn = &srv->connections[i];
+    char candidate[256];
+    candidate[0] = '\0';
+
+    if (is_plain) {
+      if (conn->address[0] != '\0') {
+        const char *port = (conn->port[0] != '\0') ? conn->port : "32400";
+        ctx->host->format(candidate, sizeof(candidate), "http://%s:%s", conn->address, port);
+      } else if (conn->uri[0] != '\0' && plex_strncmp(conn->uri, "http://", 7) == 0) {
+        plex_strlcpy(candidate, conn->uri, sizeof(candidate));
+      }
+    } else {
+      if (conn->uri[0] != '\0' && (conn->is_https || plex_strncmp(conn->uri, "https://", 8) == 0)) {
+        plex_strlcpy(candidate, conn->uri, sizeof(candidate));
       }
     }
 
-    /* 2. If https fails or is unavailable, use http://<address>:<port> of the same local connection */
-    if (conn->address[0] != '\0') {
-      const char *port = (conn->port[0] != '\0') ? conn->port : "32400";
-      ctx->host->format(test_url, sizeof(test_url), "http://%s:%s/identity",
-                        conn->address, port);
+    if (candidate[0] != '\0') {
+      int status = 0;
+      int ok;
+      slen = plex_strlen(candidate);
+      while (slen > 0 && candidate[slen - 1] == '/') {
+        candidate[--slen] = '\0';
+      }
+      ctx->host->format(test_url, sizeof(test_url), "%s/identity", candidate);
       ctx->host->format(headers, sizeof(headers),
                         "X-Plex-Token: %s\r\n"
                         "X-Plex-Client-Identifier: %s\r\n"
@@ -805,8 +833,7 @@ static int plex_select_server(PlexContext *ctx, const PlexDiscoveredServer *srv,
       ok = ctx->host->http_get(ctx->host, test_url, headers,
                                plex_discard_data_cb, NULL, &status, err, err_size);
       if (ok && status == 200) {
-        ctx->host->format(chosen_url, sizeof(chosen_url), "http://%s:%s",
-                          conn->address, port);
+        plex_strlcpy(target_url, candidate, sizeof(target_url));
         connected = 1;
         break;
       }
@@ -814,22 +841,33 @@ static int plex_select_server(PlexContext *ctx, const PlexDiscoveredServer *srv,
   }
 
   if (!connected) {
-    if (err && err_size > 0U && err[0] == '\0') {
-      ctx->host->format(err, err_size, "Could not connect to Plex server");
+    if (is_plain) {
+      ctx->host->format(err, err_size,
+                        "The server did not answer over http; set Connection to secure or check the server");
+    } else {
+      ctx->host->format(err, err_size,
+                        "The server did not answer over https; set Connection to plain or check the server");
     }
     return 0;
   }
 
-  slen = plex_strlen(chosen_url);
-  while (slen > 0 && chosen_url[slen - 1] == '/') {
-    chosen_url[--slen] = '\0';
+  if (is_plain) {
+    plex_strlcpy(plain_url, target_url, sizeof(plain_url));
+  } else {
+    plex_strlcpy(secure_url, target_url, sizeof(secure_url));
   }
 
-  /* Store SERVER and TOKEN with pref_set only after a connection answered */
-  ctx->host->pref_set(ctx->host, "SERVER", chosen_url);
+  /* Store both local addresses when resources list them, and SERVER for compatibility */
+  if (secure_url[0] != '\0') {
+    ctx->host->pref_set(ctx->host, "SERVER_SECURE", secure_url);
+  }
+  if (plain_url[0] != '\0') {
+    ctx->host->pref_set(ctx->host, "SERVER_PLAIN", plain_url);
+  }
+  ctx->host->pref_set(ctx->host, "SERVER", target_url);
   ctx->host->pref_set(ctx->host, "TOKEN", srv->access_token);
 
-  plex_strlcpy(ctx->server, chosen_url, sizeof(ctx->server));
+  plex_strlcpy(ctx->server, target_url, sizeof(ctx->server));
   plex_strlcpy(ctx->token, srv->access_token, sizeof(ctx->token));
   ctx->sections_loaded = 0;
   ctx->section_count = 0;
@@ -934,6 +972,11 @@ static void *plex_open(const ZZPlayHost *host, char *err, uint32_t err_size)
 {
   PlexContext *ctx;
   char bitrate_str[16];
+  char server_secure[256];
+  char server_plain[256];
+  char server_manual[256];
+  char conn_pref[16];
+  int is_plain;
   size_t slen;
 
   if (!host) return NULL;
@@ -945,8 +988,33 @@ static void *plex_open(const ZZPlayHost *host, char *err, uint32_t err_size)
   }
   ctx->host = host;
 
-  host->pref_get(host, "SERVER", ctx->server, (uint32_t)sizeof(ctx->server));
+  server_secure[0] = '\0';
+  server_plain[0] = '\0';
+  server_manual[0] = '\0';
+  conn_pref[0] = '\0';
+  ctx->server[0] = '\0';
+
+  host->pref_get(host, "CONNECTION", conn_pref, (uint32_t)sizeof(conn_pref));
+  host->pref_get(host, "SERVER_SECURE", server_secure, (uint32_t)sizeof(server_secure));
+  host->pref_get(host, "SERVER_PLAIN", server_plain, (uint32_t)sizeof(server_plain));
+  host->pref_get(host, "SERVER", server_manual, (uint32_t)sizeof(server_manual));
   host->pref_get(host, "TOKEN", ctx->token, (uint32_t)sizeof(ctx->token));
+
+  is_plain = (plex_strcasecmp(conn_pref, "plain") == 0);
+
+  if (is_plain) {
+    if (server_plain[0] != '\0') {
+      plex_strlcpy(ctx->server, server_plain, sizeof(ctx->server));
+    } else {
+      plex_strlcpy(ctx->server, server_manual, sizeof(ctx->server));
+    }
+  } else {
+    if (server_secure[0] != '\0') {
+      plex_strlcpy(ctx->server, server_secure, sizeof(ctx->server));
+    } else {
+      plex_strlcpy(ctx->server, server_manual, sizeof(ctx->server));
+    }
+  }
 
   slen = plex_strlen(ctx->server);
   while (slen > 0 && ctx->server[slen - 1] == '/') {

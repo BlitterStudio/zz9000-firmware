@@ -149,6 +149,7 @@ static int g_mock_poll_authenticated_after = 1;
 static int g_mock_sleep_cancelled = 0;
 static int g_mock_sleep_calls = 0;
 static int g_mock_https_identity_fails = 0;
+static int g_mock_http_identity_fails = 0;
 static int g_mock_two_servers = 0;
 static uint32_t g_total_requests = 0;
 static uint32_t g_headers_missing_count = 0;
@@ -288,6 +289,10 @@ static int fake_http_get(const ZZPlayHost *host, const char *url,
   }
   if (strstr(url, "/identity")) {
     if (strncmp(url, "https://", 8) == 0 && g_mock_https_identity_fails) {
+      if (status) *status = 0;
+      return 0;
+    }
+    if (strncmp(url, "http://", 7) == 0 && g_mock_http_identity_fails) {
       if (status) *status = 0;
       return 0;
     }
@@ -556,7 +561,7 @@ static void test_pin_poll_cancel_stores_nothing(const ZZPlayProvider *p)
   p->close(ctx);
 }
 
-static void test_resources_selection_https_and_http_fallback(const ZZPlayProvider *p)
+static void test_resources_signin_stores_both_addresses(const ZZPlayProvider *p)
 {
   char err[128];
   ItemCollector col;
@@ -565,13 +570,14 @@ static void test_resources_selection_https_and_http_fallback(const ZZPlayProvide
   char srv[256];
   char tok[128];
 
-  /* Part A: HTTPS identity check succeeds */
+  /* Sign-in with default/empty CONNECTION: probes https, stores both addresses */
   mock_prefs_clear();
   g_mock_poll_calls = 0;
   g_mock_poll_authenticated_after = 1;
   g_mock_sleep_calls = 0;
   g_mock_sleep_cancelled = 0;
   g_mock_https_identity_fails = 0;
+  g_mock_http_identity_fails = 0;
   g_mock_two_servers = 0;
 
   ctx = p->open(&g_test_host, err, sizeof(err));
@@ -583,6 +589,10 @@ static void test_resources_selection_https_and_http_fallback(const ZZPlayProvide
 
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 1);
   assert(strcmp(srv, "https://192-168-1-18.abcdef0123456789.plex.direct:32400") == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 1);
+  assert(strcmp(srv, "https://192-168-1-18.abcdef0123456789.plex.direct:32400") == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 1);
+  assert(strcmp(srv, "http://192.168.1.18:32400") == 0);
   assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 1);
   assert(strcmp(tok, "server-token-456") == 0);
 
@@ -590,14 +600,26 @@ static void test_resources_selection_https_and_http_fallback(const ZZPlayProvide
   assert(col.count > 0);
   assert(strcmp(col.items[0].id, "playlists") == 0);
   p->close(ctx);
+}
 
-  /* Part B: HTTPS identity check fails, falls back to http://<address>:32400 */
+static void test_resources_signin_connection_plain(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+  char srv[256];
+  char tok[128];
+
+  /* Sign-in with CONNECTION=plain: probes http, stores both addresses, SERVER is plain */
   mock_prefs_clear();
+  mock_pref_set("CONNECTION", "plain");
   g_mock_poll_calls = 0;
   g_mock_poll_authenticated_after = 1;
   g_mock_sleep_calls = 0;
   g_mock_sleep_cancelled = 0;
-  g_mock_https_identity_fails = 1;
+  g_mock_https_identity_fails = 1; /* https would fail, but plain probe is used */
+  g_mock_http_identity_fails = 0;
   g_mock_two_servers = 0;
 
   ctx = p->open(&g_test_host, err, sizeof(err));
@@ -609,10 +631,164 @@ static void test_resources_selection_https_and_http_fallback(const ZZPlayProvide
 
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 1);
   assert(strcmp(srv, "http://192.168.1.18:32400") == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 1);
+  assert(strcmp(srv, "https://192-168-1-18.abcdef0123456789.plex.direct:32400") == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 1);
+  assert(strcmp(srv, "http://192.168.1.18:32400") == 0);
   assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 1);
   assert(strcmp(tok, "server-token-456") == 0);
   assert(col.count > 0);
   assert(strcmp(col.items[0].id, "playlists") == 0);
+  p->close(ctx);
+}
+
+static void test_connection_selection_and_switching(const ZZPlayProvider *p)
+{
+  char err[128];
+  void *ctx;
+  int ok;
+  ZZPlayResolved res;
+
+  mock_prefs_clear();
+  mock_pref_set("SERVER_SECURE", "https://192-168-1-18.abcdef0123456789.plex.direct:32400");
+  mock_pref_set("SERVER_PLAIN", "http://192.168.1.18:32400");
+  mock_pref_set("SERVER", "http://manual.fallback:32400");
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+
+  /* 1. CONNECTION=plain uses SERVER_PLAIN */
+  mock_pref_set("CONNECTION", "plain");
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "http://192.168.1.18:32400/", strlen("http://192.168.1.18:32400/")) == 0);
+  p->close(ctx);
+
+  /* 2. Switching CONNECTION to secure uses SERVER_SECURE without re-signing in */
+  mock_pref_set("CONNECTION", "secure");
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "https://192-168-1-18.abcdef0123456789.plex.direct:32400/", strlen("https://192-168-1-18.abcdef0123456789.plex.direct:32400/")) == 0);
+  p->close(ctx);
+
+  /* 3. Empty CONNECTION means secure */
+  mock_pref_set("CONNECTION", "");
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "https://192-168-1-18.abcdef0123456789.plex.direct:32400/", strlen("https://192-168-1-18.abcdef0123456789.plex.direct:32400/")) == 0);
+  p->close(ctx);
+}
+
+static void test_manual_server_alone(const ZZPlayProvider *p)
+{
+  char err[128];
+  void *ctx;
+  int ok;
+  ZZPlayResolved res;
+
+  mock_prefs_clear();
+  mock_pref_set("SERVER", "http://192.168.1.10:32400");
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+
+  /* Empty CONNECTION */
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "http://192.168.1.10:32400/", strlen("http://192.168.1.10:32400/")) == 0);
+  p->close(ctx);
+
+  /* CONNECTION=plain */
+  mock_pref_set("CONNECTION", "plain");
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "http://192.168.1.10:32400/", strlen("http://192.168.1.10:32400/")) == 0);
+  p->close(ctx);
+
+  /* CONNECTION=secure */
+  mock_pref_set("CONNECTION", "secure");
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "http://192.168.1.10:32400/", strlen("http://192.168.1.10:32400/")) == 0);
+  p->close(ctx);
+}
+
+static void test_failed_probe_stores_nothing_and_names_connection(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+  char srv[256];
+  char tok[128];
+
+  /* Case A: HTTPS identity check fails on secure connection */
+  mock_prefs_clear();
+  g_mock_poll_calls = 0;
+  g_mock_poll_authenticated_after = 1;
+  g_mock_sleep_calls = 0;
+  g_mock_sleep_cancelled = 0;
+  g_mock_https_identity_fails = 1;
+  g_mock_http_identity_fails = 0;
+  g_mock_two_servers = 0;
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  collector_init(&col, 0);
+  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
+  assert(ok == 0);
+  assert(strstr(err, "Connection") != NULL);
+  assert(strcmp(err, "The server did not answer over https; set Connection to plain or check the server") == 0);
+
+  /* Nothing stored in prefs */
+  assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 0);
+  assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 0);
+  p->close(ctx);
+
+  /* Case B: HTTP identity check fails when CONNECTION=plain */
+  mock_prefs_clear();
+  mock_pref_set("CONNECTION", "plain");
+  g_mock_poll_calls = 0;
+  g_mock_poll_authenticated_after = 1;
+  g_mock_sleep_calls = 0;
+  g_mock_sleep_cancelled = 0;
+  g_mock_https_identity_fails = 0;
+  g_mock_http_identity_fails = 1;
+  g_mock_two_servers = 0;
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  collector_init(&col, 0);
+  ok = p->list(ctx, "signin:continue:736458353", 0, 10, &col.sink, err, sizeof(err));
+  assert(ok == 0);
+  assert(strstr(err, "Connection") != NULL);
+  assert(strcmp(err, "The server did not answer over http; set Connection to secure or check the server") == 0);
+
+  /* Only CONNECTION was in prefs; no server or token stored */
+  assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 0);
+  assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 0);
   p->close(ctx);
 }
 
@@ -662,6 +838,10 @@ static void test_resources_two_servers(const ZZPlayProvider *p)
 
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 1);
   assert(strcmp(srv, "https://192-168-1-20.1234567890abcdef.plex.direct:32400") == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv)) == 1);
+  assert(strcmp(srv, "https://192-168-1-20.1234567890abcdef.plex.direct:32400") == 0);
+  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 1);
+  assert(strcmp(srv, "http://192.168.1.20:32400") == 0);
   assert(fake_pref_get(&g_test_host, "TOKEN", tok, sizeof(tok)) == 1);
   assert(strcmp(tok, "server-two-token") == 0);
 
@@ -1023,13 +1203,23 @@ int main(void)
   assert(p->size == sizeof(ZZPlayProvider));
   assert(strcmp(p->scheme, "plex") == 0);
   assert(strcmp(p->name, "Plex Media Server") == 0);
-  assert(p->field_count == 3);
+  assert(p->field_count == 4);
+  assert(strcmp(p->fields[0].key, "SERVER") == 0);
+  assert(strcmp(p->fields[1].key, "CONNECTION") == 0);
+  assert(strcmp(p->fields[1].label, "Connection") == 0);
+  assert(p->fields[1].kind == ZZPLAY_FIELD_TEXT);
+  assert(strcmp(p->fields[2].key, "TOKEN") == 0);
+  assert(strcmp(p->fields[3].key, "BITRATE") == 0);
 
   test_no_token_shows_signin_folder(p);
   test_pin_request(p);
   test_pin_poll_waiting_then_token(p);
   test_pin_poll_cancel_stores_nothing(p);
-  test_resources_selection_https_and_http_fallback(p);
+  test_resources_signin_stores_both_addresses(p);
+  test_resources_signin_connection_plain(p);
+  test_connection_selection_and_switching(p);
+  test_manual_server_alone(p);
+  test_failed_probe_stores_nothing_and_names_connection(p);
   test_resources_two_servers(p);
   test_older_host_fails_signin_gracefully(p);
   test_sections_listing(p);

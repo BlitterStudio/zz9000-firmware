@@ -271,9 +271,10 @@ To sign in from the Browse window:
    and enter the code shown in ZZPlay.
 4. Open **Continue after entering the code**.
 
-ZZPlay then asks plex.tv for your servers and uses the first local connection
-that answers: `https` when AmiSSL is installed and the server's certificate
-checks out, otherwise plain `http`. If your account has more than one server,
+ZZPlay then asks plex.tv for your servers and remembers both local addresses
+of the one you pick: its `https` address and its plain `http` address. Which
+one is used is set by the **Connection** setting (below); you can switch it
+later without signing in again. If your account has more than one server,
 they are listed as folders; open the one you want. The server's music library
 opens straight away, and later sessions go there directly. To sign in again,
 clear **Token** in Settings.
@@ -283,6 +284,11 @@ window, click **Settings** and enter:
 
 - **Server URL**: the server's address with its port, for example
   `http://192.168.1.10:32400`.
+- **Connection**: `secure` (https) or `plain` (http); empty means `secure`.
+  After sign-in both addresses are known and switching needs no new sign-in;
+  plain `http` starts tracks faster on a 68k but sends the token and what you
+  play unencrypted over the home network. When the chosen kind does not
+  answer, the item fails with a message naming this setting.
 - **Token**: your Plex token. In Plex Web, open a track's menu, choose
   **Get Info**, then **View XML**; the address of the page that opens ends in
   `X-Plex-Token=` followed by the token.
