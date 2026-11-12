@@ -979,9 +979,13 @@ void zzplay_browse_poll(void)
             update_status_text("Loading more items...");
             update_buttons();
           }
-        } else if (clicked == last_clicked_idx &&
-                   DoubleClick(last_click_s, last_click_m, imsg_s, imsg_m)) {
-          /* Double-click */
+        } else if ((clicked >= 0 &&
+                    (uint32_t)clicked < browse_model.item_count &&
+                    browse_model.items[clicked].kind == ZZPLAY_ITEM_FOLDER) ||
+                   (clicked == last_clicked_idx &&
+                    DoubleClick(last_click_s, last_click_m, imsg_s, imsg_m))) {
+          /* A folder opens on one click, like a drawer in the ASL file
+           * requester; a track or station plays on a double-click. */
           ZZPlayBrowseAction act = zzplay_browse_model_activate(&browse_model, clicked, &poll_req);
           /* A third click starts a new pair, as in the playlist. */
           last_clicked_idx = -1;

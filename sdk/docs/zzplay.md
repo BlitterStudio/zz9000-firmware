@@ -203,7 +203,7 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
 
 - The cycle gadget at the top chooses the service. Type in the search field
   and press Return to search it.
-- Double-click a folder to open it. **Back** returns to the previous list
+- Click a folder (shown with `[+]`) to open it. **Back** returns to the previous list
   with the same entry selected. A long list ends in a "--- More items ---"
   row; click it to load the next part.
 - Double-click a track or station to add it to the playlist and play it.
