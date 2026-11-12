@@ -138,16 +138,16 @@ typedef struct RadioContext {
   /* The id the next added station gets (see radio_load_my_stations). */
   uint32_t my_next_id;
   uint32_t server;
+  /* Scratch for a my_<slot> line. Per context: Browse's worker and the
+   * player open the module from different processes at once. */
+  char my_scratch[ZZPLAY_PROVIDER_URL_MAX + ZZPLAY_PROVIDER_TEXT_MAX];
+  const char *form_values[2];
 } RadioContext;
-
-static char radio_my_line[ZZPLAY_PROVIDER_URL_MAX + ZZPLAY_PROVIDER_TEXT_MAX];
-static char radio_my_value[ZZPLAY_PROVIDER_URL_MAX + ZZPLAY_PROVIDER_TEXT_MAX];
 
 static const ZZPlayProviderField radio_station_fields[] = {
   {"name", "Name", ZZPLAY_FIELD_TEXT, ZZPLAY_PROVIDER_TEXT_MAX - 1U, NULL, NULL},
   {"address", "Address", ZZPLAY_FIELD_TEXT, ZZPLAY_PROVIDER_VALUE_MAX - 1U, NULL, NULL}
 };
-static const char *radio_station_values[2];
 
 static const char *radio_api_base(const RadioContext *rc)
 {
@@ -537,21 +537,22 @@ static void radio_load_my_stations(RadioContext *rc)
   }
   for (slot = 0U; slot < RADIO_MAX_MY_STATIONS; slot++) {
     char key[32];
-    char *name = radio_my_line;
+    char *line = rc->my_scratch;
+    char *name = line;
     char *bar;
     uint32_t id = slot;
     host->format(key, sizeof(key), "my_%u", slot);
-    if (!host->pref_get(host, key, radio_my_line, sizeof(radio_my_line)) ||
-        !radio_my_line[0]) continue;
-    bar = strchr(radio_my_line, '|');
+    if (!host->pref_get(host, key, line, sizeof(rc->my_scratch)) ||
+        !line[0]) continue;
+    bar = strchr(line, '|');
     if (!bar) continue;
     if (strchr(bar + 1, '|')) {
       const char *p;
       uint32_t n = 0U;
-      for (p = radio_my_line; p < bar && *p >= '0' && *p <= '9' && n < 100000U; p++) {
+      for (p = line; p < bar && *p >= '0' && *p <= '9' && n < 100000U; p++) {
         n = n * 10U + (uint32_t)(*p - '0');
       }
-      if (p != bar || p == radio_my_line) continue;
+      if (p != bar || p == line) continue;
       id = n;
       name = bar + 1;
       bar = strchr(name, '|');
@@ -569,14 +570,14 @@ static void radio_load_my_stations(RadioContext *rc)
   }
 }
 
-static int radio_store_my_station(const RadioContext *rc, uint32_t index)
+static int radio_store_my_station(RadioContext *rc, uint32_t index)
 {
   char key[32];
   const MyStationEntry *entry = &rc->my_stations[index];
   rc->host->format(key, sizeof(key), "my_%u", entry->slot);
-  rc->host->format(radio_my_value, sizeof(radio_my_value), "%u|%s|%s",
+  rc->host->format(rc->my_scratch, sizeof(rc->my_scratch), "%u|%s|%s",
                    entry->id, entry->name, entry->address);
-  return rc->host->pref_set(rc->host, key, radio_my_value) != 0;
+  return rc->host->pref_set(rc->host, key, rc->my_scratch) != 0;
 }
 
 /* XML streaming data receiver */
@@ -1259,19 +1260,19 @@ static int radio_station_form_get(void *ctx, const char *item_id,
   memset(out, 0, sizeof(*out));
   out->fields = radio_station_fields;
   out->field_count = 2U;
-  out->values = radio_station_values;
+  out->values = rc->form_values;
   if (strcmp(item_id, RADIO_ADD_ID) == 0) {
     out->title = "Add station";
-    radio_station_values[0] = "";
-    radio_station_values[1] = "";
+    rc->form_values[0] = "";
+    rc->form_values[1] = "";
     return 1;
   }
   index = radio_my_index(rc, item_id);
   if (index >= 0) {
     out->title = "Edit station";
     out->deletable = 1U;
-    radio_station_values[0] = rc->my_stations[index].name;
-    radio_station_values[1] = rc->my_stations[index].address;
+    rc->form_values[0] = rc->my_stations[index].name;
+    rc->form_values[1] = rc->my_stations[index].address;
     return 1;
   }
   if (err && err_size > 0U) rc->host->format(err, err_size, "Station not found");
