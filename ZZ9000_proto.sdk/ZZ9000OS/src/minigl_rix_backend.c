@@ -62,9 +62,18 @@ static int backend_yield_wait(MiniGLRixBackend *backend,
     return yielded && !backend->error;
 }
 
+#if defined(MINIGL_HOST_TEST)
+__attribute__((weak)) uint64_t minigl_platform_time_us(void)
+{
+    return 0U;
+}
+#endif
+
 #include <string.h>
 
 #define RIX_TIMEOUT 1000000U
+#define RIX_ASYNC_WAIT_LOG_US 1000000ULL
+#define RIX_ASYNC_WAIT_TIMEOUT_US 3000000ULL
 /* Start-up PL330 self-test: leading parser NOPs put the packet past one
  * 16-word burst plus a tail before the fence MEMSET that proves delivery. */
 #define RIX_DMA_SELF_TEST_NOPS 24U
@@ -1403,6 +1412,74 @@ static uint8_t backend_buffer_count(const MiniGLRixBackend *backend)
            MINIGL_RIX_SYNC_COMMAND_BUFFERS;
 }
 
+static void backend_end_async_wait(MiniGLRixBackend *backend)
+{
+    backend->wait_active = 0U;
+    backend->wait_started_us = 0U;
+    backend->wait_last_dump_us = 0U;
+}
+
+static void backend_log_async_wait(MiniGLRixBackend *backend)
+{
+    uint8_t index;
+    uint32_t status = backend->platform.csr_read ?
+        backend->platform.csr_read(backend->platform.context, RIX_DRV_CSR_STATUS) :
+        backend->driver.last_status;
+    uint32_t vacancy = backend->platform.fifo_read ?
+        backend->platform.fifo_read(backend->platform.context, RIX_DRV_FIFO_TDFV) : 0U;
+    uint32_t reads = RIX_DRV_STATUS_READS(status);
+
+    RIX_LOG("[RasterIX] wait watchdog reason=%u feed=%u/%lu next=%lu status=%08lx tdfv=%lu reads=%lu error=%u\r\n",
+            (unsigned)backend->wait_watchdog_reason, (unsigned)backend->feed_buffer,
+            (unsigned long)backend->feed.command_offset,
+            (unsigned long)backend->next_feed_sequence, (unsigned long)status,
+            (unsigned long)vacancy, (unsigned long)reads, (unsigned)backend->error);
+    for (index = 0U; index < backend_buffer_count(backend); ++index) {
+        volatile uint16_t *pixel = backend_fence_pixel(backend, index);
+        uint16_t live;
+
+        if (backend->platform.cache_invalidate != NULL) {
+            backend->platform.cache_invalidate(backend->platform.context,
+                                               (uintptr_t)pixel, sizeof(*pixel));
+            ++backend->cache_invalidates;
+        }
+        live = *pixel;
+        RIX_LOG("[RasterIX] wait ring[%u]=%u seq=%lu fence=%u/%u\r\n",
+                (unsigned)index, (unsigned)backend->ring_state[index],
+                (unsigned long)backend->submission_sequence[index],
+                (unsigned)backend->pending_fence[index], (unsigned)live);
+    }
+}
+
+static int backend_watch_async_wait(MiniGLRixBackend *backend,
+                                    MiniGLProfileFeedWait reason)
+{
+    uint64_t now = minigl_platform_time_us();
+    uint64_t elapsed;
+
+    if (!backend->wait_active) {
+        backend->wait_active = 1U;
+        backend->wait_watchdog_reason = (uint8_t)reason;
+        backend->wait_started_us = now;
+        backend->wait_last_dump_us = 0U;
+        return 1;
+    }
+    elapsed = now - backend->wait_started_us;
+    if (elapsed >= RIX_ASYNC_WAIT_LOG_US &&
+        (backend->wait_last_dump_us == 0U ||
+         now - backend->wait_last_dump_us >= RIX_ASYNC_WAIT_LOG_US)) {
+        backend_log_async_wait(backend);
+        backend->wait_last_dump_us = now;
+    }
+    if (elapsed < RIX_ASYNC_WAIT_TIMEOUT_US)
+        return 1;
+    RIX_LOG("[RasterIX] wait watchdog disabling after %lu us\r\n",
+            (unsigned long)elapsed);
+    backend_disable(backend, "async wait watchdog", RIX_DRV_TIMEOUT,
+                    backend->feed.active ? backend->feed_buffer : 0U);
+    return 0;
+}
+
 static uint32_t backend_queued_count(const MiniGLRixBackend *backend)
 {
     uint8_t index;
@@ -1474,8 +1551,17 @@ static int backend_feed_step(MiniGLRixBackend *backend, uint32_t source)
             if (backend->ring_state[index] == MINIGL_RIX_RING_QUEUED &&
                 backend->submission_sequence[index] == backend->next_feed_sequence)
                 break;
-        if (index == backend_buffer_count(backend))
+        if (index == backend_buffer_count(backend)) {
+            for (index = 0U; index < backend_buffer_count(backend); ++index)
+                if (backend->ring_state[index] == MINIGL_RIX_RING_QUEUED)
+                    break;
+            if (index != backend_buffer_count(backend)) {
+                backend_disable_feed(backend, "feed sequence", RIX_DRV_BAD_ARGUMENT,
+                                    index);
+                return RIX_DRV_FEED_ERROR;
+            }
             return RIX_DRV_FEED_DONE;
+        }
         backend->feed_buffer = index;
         if (backend->entry_owner_generation[index] != backend->platform.owner_generation) {
             backend_disable_feed(backend, "stale feed entry", RIX_DRV_BAD_ARGUMENT, index);
@@ -1520,15 +1606,16 @@ int minigl_rix_backend_try_feed(MiniGLRixBackend *backend, uint32_t source)
 
     if (backend == NULL || !backend->available || !backend->platform.async_feed)
         return RIX_DRV_FEED_DONE;
-    if (backend->error)
-        return RIX_DRV_FEED_ERROR;
     reads = backend->driver.device_reads;
     invalidates = backend->cache_invalidates;
-    /* Only a caller waiting for a buffer polls fences: an ordinary step with
-     * nothing to feed touches neither RasterIX nor the cache. */
+    /* A parked waiter needs retirement even after a feed error so a landed
+     * fence can preserve the normal quarantine and idle proof. */
     if (source == RIX_DRV_FEED_SOURCE_PARKED)
         (void)backend_retire_async(backend);
-    result = backend_feed_step(backend, source);
+    if (backend->error)
+        result = RIX_DRV_FEED_ERROR;
+    else
+        result = backend_feed_step(backend, source);
     minigl_profile_count(MGLP_N_FEED_STEPS, 1U);
     minigl_profile_count(MGLP_N_FEED_DEVICE_READS,
                          backend->driver.device_reads - reads);
@@ -2152,8 +2239,20 @@ static int backend_flush_now(MiniGLRixBackend *backend, int continue_frame)
             if (index != backend_buffer_count(backend))
                 break;
             if (minigl_rix_backend_try_feed(backend, RIX_DRV_FEED_SOURCE_PARKED) ==
-                RIX_DRV_FEED_ERROR || backend->error)
+                RIX_DRV_FEED_ERROR || backend->error) {
+                backend_report_error(backend);
+                backend_end_async_wait(backend);
                 return 0;
+            }
+            for (index = 0U; index < backend_buffer_count(backend); ++index)
+                if (backend->ring_state[index] == MINIGL_RIX_RING_FREE)
+                    break;
+            if (index != backend_buffer_count(backend))
+                break;
+            if (!backend_watch_async_wait(backend, MGLP_FEED_WAIT_RING)) {
+                backend_report_error(backend);
+                return 0;
+            }
             if (!backend_yield_wait(backend, MGLP_FEED_WAIT_RING)) {
                 uint32_t budget = RIX_TIMEOUT;
                 while (budget-- != 0U) {
@@ -2168,13 +2267,18 @@ static int backend_flush_now(MiniGLRixBackend *backend, int continue_frame)
                         RIX_DRV_FEED_ERROR || backend->error)
                         break;
                 }
-                if (index == backend_buffer_count(backend))
+                if (index == backend_buffer_count(backend)) {
+                    backend_report_error(backend);
                     return 0;
+                }
                 break;
             }
         }
-        if (index == backend_buffer_count(backend))
+        backend_end_async_wait(backend);
+        if (index == backend_buffer_count(backend)) {
+            backend_report_error(backend);
             return 0;
+        }
         backend->current_buffer = index;
         backend->ring_state[index] = MINIGL_RIX_RING_BUILDING;
     } else {
@@ -2890,15 +2994,22 @@ int minigl_rix_backend_drain(MiniGLRixBackend *backend)
         return 0;
     if (backend->platform.async_feed) {
         while (minigl_rix_backend_work_outstanding(backend)) {
+            MiniGLProfileFeedWait reason = backend->wait_reason < MGLP_FEED_WAIT_COUNT ?
+                (MiniGLProfileFeedWait)backend->wait_reason : MGLP_FEED_WAIT_DRAIN;
+
             if (minigl_rix_backend_try_feed(backend, RIX_DRV_FEED_SOURCE_PARKED) ==
                 RIX_DRV_FEED_ERROR || backend->error) {
                 backend_report_error(backend);
+                backend_end_async_wait(backend);
                 return 0;
             }
-            if (!backend_yield_wait(backend,
-                                    backend->wait_reason < MGLP_FEED_WAIT_COUNT ?
-                                    (MiniGLProfileFeedWait)backend->wait_reason :
-                                    MGLP_FEED_WAIT_DRAIN)) {
+            if (!minigl_rix_backend_work_outstanding(backend))
+                break;
+            if (!backend_watch_async_wait(backend, reason)) {
+                backend_report_error(backend);
+                return 0;
+            }
+            if (!backend_yield_wait(backend, reason)) {
                 uint32_t budget = RIX_TIMEOUT;
                 while (budget-- != 0U &&
                        minigl_rix_backend_work_outstanding(backend)) {
@@ -2913,6 +3024,7 @@ int minigl_rix_backend_drain(MiniGLRixBackend *backend)
                     return 0;
             }
         }
+        backend_end_async_wait(backend);
     } else for (index = 0U; index < backend_buffer_count(backend); ++index)
         if (!backend_wait_buffer(backend, index)) return 0;
     for (index = 0U; index < MINIGL_RIX_MAX_TEXTURES; ++index)

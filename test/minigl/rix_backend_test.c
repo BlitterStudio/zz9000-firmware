@@ -13,6 +13,8 @@ extern void (*g_rix_test_log)(const char *fmt, ...);
 static unsigned g_disabled_logs;
 static unsigned g_diagnostic_snapshots;
 static unsigned g_self_test_failures;
+static unsigned g_watchdog_logs;
+static uint64_t g_now_us;
 int smp_cpu_id(void) { return 0; }
 uint32_t smp_local_irq_save(void) { return 0U; }
 void smp_local_irq_restore(uint32_t state) { (void)state; }
@@ -33,8 +35,15 @@ static void count_log(const char *fmt, ...)
         ++g_disabled_logs;
     if (strstr(fmt, "diag csr") != NULL)
         ++g_diagnostic_snapshots;
+    if (strstr(fmt, "wait watchdog") != NULL)
+        ++g_watchdog_logs;
     if (strstr(fmt, "self-test failed") != NULL)
         ++g_self_test_failures;
+}
+
+uint64_t minigl_platform_time_us(void)
+{
+    return g_now_us;
 }
 
 #define COMMAND_BYTES MINIGL_RIX_COMMAND_BYTES
@@ -534,6 +543,29 @@ static void yield_delayed_completion(void *context)
          model->rendering_yields >= model->fence_signal_yield +
                                     model->idle_after_fence_yields))
         model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+}
+
+static void yield_watchdog(void *context)
+{
+    (void)context;
+    g_now_us += 1000000U;
+}
+
+static void yield_deadline_completion(void *context)
+{
+    struct model *model = context;
+    MiniGLRixBackend *backend = model->yield_backend;
+    unsigned index;
+
+    g_now_us += 1000000U;
+    if (g_now_us != 3000000U)
+        return;
+    for (index = 0U; index < backend->command_buffer_count; ++index)
+        if (backend->ring_state[index] == MINIGL_RIX_RING_RENDERING)
+            *(uint16_t *)(void *)(model->command[index] + COMMAND_BYTES -
+                                   MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+                (uint16_t)backend->pending_fence[index];
+    model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
 }
 
 static ZZ9KMiniGLPacketSetState state16(void)
@@ -2598,6 +2630,75 @@ static void test_async_readpixels_drain_waits_for_delayed_completion(void)
     assert(backend.ring_state[0] == MINIGL_RIX_RING_FREE);
 }
 
+static void test_async_wait_watchdog_disables_backend(void)
+{
+    MiniGLRixBackend backend;
+    struct model model;
+
+    init_async8(&backend, &model, 0);
+    backend.command_buffer_count = 2U;
+    backend.platform.yield_wait = yield_watchdog;
+    g_now_us = 0U;
+    g_watchdog_logs = 0U;
+    g_rix_test_log = count_log;
+    g_disabled_logs = 0U;
+    queue_async_clear(&backend, 0U);
+    queue_async_clear(&backend, 1U);
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
+                                    0x03100000U, GL_COLOR_BUFFER_BIT, 2U, 0U));
+    assert(!minigl_rix_backend_submit(&backend));
+    assert(g_now_us >= 3000000U);
+    assert(g_watchdog_logs == 4U);
+    assert(g_disabled_logs == 1U && backend.error);
+    g_rix_test_log = NULL;
+}
+
+static void test_async_wait_completion_at_deadline_succeeds(void)
+{
+    MiniGLRixBackend backend;
+    struct model model;
+
+    init_async8(&backend, &model, 0);
+    model.yield_backend = &backend;
+    backend.platform.yield_wait = yield_deadline_completion;
+    model.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_BUSY;
+    g_now_us = 0U;
+    queue_async_clear(&backend, 0U);
+    assert(minigl_rix_backend_drain(&backend));
+    assert(!backend.error && g_now_us == 3000000U);
+}
+
+static void test_async_error_does_not_block_retirement(void)
+{
+    MiniGLRixBackend backend;
+    struct model model;
+
+    init_async8(&backend, &model, 0);
+    queue_async_clear(&backend, 0U);
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_DONE);
+    *(uint16_t *)(void *)(model.command[0] + COMMAND_BYTES -
+                          MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+        (uint16_t)backend.pending_fence[0];
+    backend.error = 1U;
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_PARKED) ==
+           RIX_DRV_FEED_ERROR);
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_FREE);
+}
+
+static void test_async_sequence_mismatch_disables_backend(void)
+{
+    MiniGLRixBackend backend;
+    struct model model;
+
+    init_async8(&backend, &model, 0);
+    queue_async_clear(&backend, 0U);
+    ++backend.submission_sequence[0];
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_ERROR);
+    assert(backend.error);
+}
+
 int main(void)
 {
     test_probe_version_compatibility();
@@ -2621,6 +2722,10 @@ int main(void)
     test_async_drain_waits_for_fence_and_idle();
     test_async_readpixels_drain_waits_for_delayed_completion();
     test_async_feed_error_wakes_parked_waiters();
+    test_async_wait_watchdog_disables_backend();
+    test_async_wait_completion_at_deadline_succeeds();
+    test_async_error_does_not_block_retirement();
+    test_async_sequence_mismatch_disables_backend();
     MiniGLRixBackend backend;
     static struct model model;
     MiniGLRixPlatform io;

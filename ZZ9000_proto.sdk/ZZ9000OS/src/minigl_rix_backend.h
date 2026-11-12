@@ -249,10 +249,13 @@ typedef struct MiniGLRixBackend {
     size_t command_words_estimate;
     /* Fence-pixel cache invalidates issued by retirement polls. */
     uint32_t cache_invalidates;
+    uint8_t wait_active;
+    uint8_t wait_watchdog_reason;
+    uint64_t wait_started_us;
+    uint64_t wait_last_dump_us;
 } MiniGLRixBackend;
-/* Executes at most one FIFO feed/completion step.  It never waits.  Only a
- * PARKED step (a caller waiting for a buffer) polls fences for retirement,
- * so a step with nothing to feed touches neither RasterIX nor the cache. */
+/* Executes at most one FIFO feed/completion step. It never waits. Only a
+ * PARKED step polls fences, so an idle feed step touches no hardware. */
 int minigl_rix_backend_try_feed(MiniGLRixBackend *backend, uint32_t source);
 /* Queued or partly fed command buffers exist: feed steps can progress. */
 int minigl_rix_backend_feed_pending(const MiniGLRixBackend *backend);
