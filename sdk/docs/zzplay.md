@@ -3,13 +3,16 @@
 ZZPlay is the ZZ9000 media player for AmigaOS. It decodes supported media on
 the card and presents video through the Picasso96 overlay. On an accelerated
 Zorro III system, decoded video stays on the card rather than crossing the
-Zorro bus.
+Zorro bus. Audio also plays over the network: `http://` and `https://`
+streams, internet radio stations, and the music on a Plex Media Server,
+which the [Browse window](#browse-window) lists and searches.
 
 Start it as a desktop player from Workbench, or pass files or network URLs from
 a shell for a one-shot playlist. A shell launch with media exits after playback;
 a shell launch without arguments opens the player. Workbench launches open the
 player unless `FULLSCREEN` or `PLAYER=NO` selects one-shot playback. Scripts can
-control a running ZZPlay through its [ARexx port](#arexx).
+control a running ZZPlay, including the Browse services, through its
+[ARexx port](#arexx).
 
 ## Supported input
 
@@ -197,15 +200,99 @@ Service modules let ZZPlay list and search music services. Each module is a
 file in the `Providers` drawer next to ZZPlay (`PROGDIR:Providers/`), for
 example `radio.zzprov`. ZZPlay loads the modules the first time the Browse
 window opens or a playlist entry needs one, and uses no memory for them
-before that.
+before that. The package ships two: [Internet radio](#internet-radio) and
+[Plex](#plex).
 
 Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
+Everything in it also works from the keyboard and from its own menu; see
+**Browse menu** and **Browse keys** at the end of this section.
+
+#### Finding music
 
 - The cycle gadget at the top chooses the service. Type in the search field
   and press Return to search it.
 - Click a folder to open it. **Back** returns to the previous list
   with the same entry selected. A long list ends in a "--- More items ---"
   row; click it to load the next part.
+- Rows appear as they arrive, in groups, instead of all at once; the
+  selection and the scroll position stay.
+- While a list or search loads, the status line at the bottom says what is
+  happening: looking up the host, connecting, connecting securely, waiting
+  for the service, then "Loading 40 of 100 items..." while the rows arrive
+  (or "Loading 40 items..." when the total is unknown). Once the rows are
+  in, it shows how many there are. The pointer over the Browse window is
+  busy during the wait (AmigaOS 3.1 or newer; older systems keep the
+  normal pointer).
+- **Stop** cancels a list or search that is still loading and keeps the
+  rows that arrived. Network work runs in its own process, so the player
+  keeps playing meanwhile.
+- Every list and search ZZPlay finishes is remembered until ZZPlay quits,
+  at most 16 of them (the one unused for the longest time is dropped).
+  Opening a remembered folder or repeating a remembered search shows it
+  at once, with the selection you left, and sends no request.
+- **Reload** fetches the current list or search again from the beginning
+  and replaces the remembered copy. It is disabled while nothing is shown
+  or a request is already running.
+
+#### Playing from Browse
+
+- Double-click a track or station to add it to the playlist and play it.
+  **Play** does the same for the selected entry, **Add** only adds it.
+  Entries the service marks as unplayable cannot be played or added.
+- **Play next** puts the selected track or station, or the tracks of the
+  selected collection, right after the entry that is playing, without
+  interrupting it; with nothing playing they go to the start of the
+  playlist. With shuffle on they still play next.
+- **Play all** plays the folder being shown as a whole, and **Add all**
+  appends it; **Play all next** in the menu queues it after the playing
+  entry. They are enabled when the service marks the shown folder playable
+  (such as a Plex album, artist or playlist) and its rows are shown;
+  folders open on a single click, so this is how a collection is played
+  without entering and selecting it. **Play all** replaces the playlist
+  with the folder's tracks and starts the first. ZZPlay lists the folder,
+  and each playable folder inside it, while the status line counts what it
+  found ("Adding 37 tracks..."). **Stop** cancels and leaves the playlist
+  unchanged, and so does going to another folder or search before the
+  tracks are in. At most as many tracks are added as the playlist holds
+  (4,096); the status line says when the collection held more, or when the
+  playlist had no room for all of them. A collection that holds nothing
+  playable changes nothing: the status line says "Nothing to add".
+- **Favourite** adds the selected entry to the service's favourites, or
+  removes it when it is already one. The button is disabled for services
+  without favourites.
+- **Settings** shows the service's settings, such as a server address or a
+  token. **Save** stores them in `ENVARC:ZZPlay/<service>.prefs` and reopens
+  the service with them; **Cancel** keeps the old values. When the
+  settings cannot be saved (a full or write-protected disk), the service
+  says so and keeps the old ones.
+
+An entry added from a service is stored in the playlist as `<service>://<id>`,
+for example `radio://9610c519-0601-11e8-ae97-52543be04c81`, with the entry's
+title. ZZPlay asks the module for the current address each time the entry
+starts, so such entries can be saved in M3U playlists, added with the Shell
+or ARexx, and keep playing as long as the module is installed. Without the
+module the entry fails with "no installed service module handles ...".
+
+#### Recently played
+
+Each service's top level starts with a **Recently played** folder once
+something of that service was started from the Browse window. It lists the
+last 25 tracks, stations and collections started with **Play**, **Play
+next**, **Play all** or **Play all next** (a double-click or Return counts as
+**Play**), newest first; starting one again moves it to the top. **Add** and
+**Add all** do not count. Tracks and stations in it play as anywhere else,
+and a collection plays whole with **Play** or opens like any folder. The
+folder needs no network to open, so recent stations stay reachable when a
+service does not answer. It keeps the order it had when it was opened until
+**Reload**.
+
+The lists are kept per service in `ENVARC:ZZPlay/<service>.recent` (and
+`ENV:`), one entry per line; delete the file to empty a list. When a list
+cannot be saved, the status line says "Could not save Recently played" once,
+and the next change tries again.
+
+#### Window layout
+
 - The buttons sit in two rows of five, all the same width: **Back**,
   **Reload**, **Stop**, **Favourite** and **Settings**, then **Play**,
   **Play next**, **Add**, **Play all** and **Add all**.
@@ -222,77 +309,12 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
   h:mm:ss). The columns follow the window width: the length column keeps
   its size and the title gets about 55 percent of the rest; text that
   does not fit is cut. The markers mean: an outline folder for a folder,
-  the folder with a filled play triangle for a collection, one **Play
+  the folder with a filled play triangle for a collection that **Play
   all** or **Add all** works on whole (such as a Plex album, artist or
   playlist), a note for a track and a mast with waves for a station.
   Selected rows use the Workbench selection colors, as other lists do.
   Older systems (before AmigaOS 3.0) keep the simple one-line rows, with
   "[+]" before a folder's title.
-- Every list and search ZZPlay finishes is remembered until ZZPlay quits,
-  at most 16 of them (the one unused for the longest time is dropped).
-  Opening a remembered folder or repeating a remembered search shows it
-  at once, with the selection you left, and sends no request.
-- **Reload** fetches the current list or search again from the beginning
-  and replaces the remembered copy. It is disabled while nothing is shown
-  or a request is already running. In **Recently played** it shows the
-  list as it is now.
-- Rows appear as they arrive, in groups, instead of all at once; the
-  selection and the scroll position stay. **Stop** keeps the rows that
-  arrived.
-- While a list or search loads, the line under the buttons says what is
-  happening: looking up the host, connecting, connecting securely, waiting
-  for the service, then "Loading 40 of 100 items..." while the rows arrive
-  (or "Loading 40 items..." when the total is unknown). The pointer over
-  the Browse window is busy during the wait (AmigaOS 3.1 or newer; older
-  systems keep the normal pointer).
-- Double-click a track or station to add it to the playlist and play it.
-  **Play** does the same for the selected entry, **Add** only adds it.
-  Entries the service marks as unplayable cannot be played or added.
-- **Play all** plays the folder being shown as a whole, and **Add all**
-  appends it. The buttons are enabled when the service marks the shown
-  folder playable (such as a Plex album, artist or playlist) and its
-  rows are shown; folders open on a single click, so this is how a
-  collection is played without entering and selecting it. **Play all**
-  replaces the playlist with the
-  folder's tracks and starts the first. ZZPlay lists the folder, and each
-  playable folder inside it, while the status line counts what it found
-  ("Adding 37 tracks..."). **Stop** cancels and leaves the playlist
-  unchanged. At most as many tracks are added as the playlist holds
-  (4,096); the status line says when the collection held more, or when
-  the playlist had no room for all of them. A collection that holds
-  nothing playable changes nothing: the status line says "Nothing to
-  add".
-- **Play next** puts the selected track or station, or
-  the tracks of the selected collection, right after the entry that is
-  playing, without interrupting it; with nothing playing they go to the
-  start of the playlist. **Play all next** does the same for the folder
-  being shown. With shuffle on they still play next. The playlist limit
-  and the status line messages are those of **Add all**.
-- Each service's top level starts with a **Recently played** folder once
-  something of that service was started from the Browse window. It lists
-  the last 25 tracks, stations and collections started with **Play**,
-  **Play next**, **Play all** or **Play all next** (a double-click or
-  Return counts as **Play**), newest first; starting one again moves it
-  to the top. **Add** and **Add all** do not count. Tracks and stations in
-  it play as anywhere else, and a collection plays whole with **Play** or
-  opens like any folder. The folder keeps the order it had when it was
-  opened until **Reload**. The lists are kept per service in
-  `ENVARC:ZZPlay/<service>.recent` (and `ENV:`), one entry per line;
-  delete the file to empty a list.
-- **Favourite** adds the selected entry to the service's favourites, or
-  removes it when it is already one. The button is disabled for services
-  without favourites.
-- **Stop** cancels a list or search that is still loading. Network work runs
-  in its own process, so the player keeps playing meanwhile.
-- **Settings** shows the service's settings, such as a server address or a
-  token. **Save** stores them in `ENVARC:ZZPlay/<service>.prefs` and reconnects
-  the service; **Cancel** keeps the old values.
-An entry added from a service is stored in the playlist as `<service>://<id>`,
-for example `radio://9610c519-0601-11e8-ae97-52543be04c81`, with the entry's
-title. ZZPlay asks the module for the current address each time the entry
-starts, so such entries can be saved in M3U playlists, added with the Shell
-or ARexx, and keep playing as long as the module is installed. Without the
-module the entry fails with "no installed service module handles ...".
 
 #### Browse menu
 
@@ -623,8 +645,12 @@ from 1. Times are whole seconds.
 | `VERSION`, `HELP` | Return the version string or the command list. |
 | `QUIT` | Quit ZZPlay. |
 
-
-Each service command can also be tried from the Shell:
+The service commands take a service's scheme, as `SERVICES` lists it
+(`radio`, `plex`). The ids `SEARCH` returns are the ones Browse uses: a track
+or station plays with `OPEN service://id` (for example
+`OPEN plex://34291`), and a collection id such as `alb:11113` goes to
+`PLAYALL` or `ADDALL`. Each service command can also be tried from the
+Shell:
 
 ```text
 rx "address ZZPLAY BROWSE"
@@ -633,6 +659,7 @@ rx "address ZZPLAY SEARCH plex paris"
 rx "address ZZPLAY PLAYALL plex alb:1234"
 rx "address ZZPLAY ADDALL plex alb:1234"
 ```
+
 Values come back in `RESULT` when the script uses `OPTIONS RESULTS`. The
 return code is 0 on success. It is 5 when the command cannot apply right now,
 for example `PAUSE` with nothing playing, `SEEK` on a format without seeking,

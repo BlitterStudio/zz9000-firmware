@@ -215,6 +215,24 @@ default shared heap are Zorro III diagnostics.
     fits the 224 KiB pool, such as 352x288 YUY2; 640x360 must fail without
     reserving memory or changing overlay state.
 
+11. Check ZZPlay network playback. This needs a running TCP/IP stack;
+    the `https://` part also needs AmiSSL 5. Use an MP3 station that the
+    test network reaches.
+
+    ```text
+    ZZPlay http://<station>/stream
+    ZZPlay https://<station>/stream
+    rx "address ZZPLAY SERVICES"
+    ```
+
+    **Expected pass signal:** both streams play with the station name in the
+    playlist and the current track in the title line, and Stop ends them
+    cleanly. With ZZPlay open, **Browse...** (Amiga-R) lists Internet radio
+    and Plex Media Server, the radio's **Top voted** folder fills, and a
+    station from it plays. `SERVICES` returns `plex` and `radio` lines.
+    Without AmiSSL, the `https://` item fails with a message and `http://`
+    still plays.
+
 ## Failure routing
 
 - Stop on service discovery, mailbox, capability, opcode, or major-version
@@ -231,6 +249,9 @@ default shared heap are Zorro III diagnostics.
 - Route AHI failures to accelerated decode or AHI output, MHI-only failures to
   `mhizz9000.library` and ZZ9000AX ownership, and MPEGA-only failures to the
   resident compatibility shim.
+- Route network-only ZZPlay failures (files play, streams do not) to the
+  TCP/IP stack, AmiSSL, or the station before the audio services; Browse
+  failures with streams working belong to the service modules.
 - Treat corruption outside the PIP as a stop condition. Preserve the UART log
   and the exact artifact hashes.
 
