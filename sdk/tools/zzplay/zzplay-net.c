@@ -86,6 +86,7 @@ static struct Library *net_amissl_ext_base(void)
 
 #define BSDSOCKET_BASE_NAME (net_socket_base())
 #include <proto/socket.h>
+#include <libraries/bsdsocket.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/filio.h>
@@ -111,6 +112,10 @@ struct ZZPlayNet {
   ZZPlayNetKeepRunning keep_running;
   void *user;
   int cancelled;
+  /* The server closed the connection before any response bytes. */
+  int closed_early;
+  /* Retrying after a TLS 1.3 connection that the server closed unanswered. */
+  int tls12_only;
   char err[ZZPLAY_NET_ERROR_MAX];
   char url[ZZPLAY_HTTP_URL_MAX];
   /* Redirect bookkeeping: kept here rather than on the caller's stack. */
@@ -265,11 +270,21 @@ static NetTask *net_task_acquire(ZZPlayNet *net)
   }
   net->task = t;
   if (t->socket == NULL) {
+    struct TagItem errno_tags[2];
+
     t->socket = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);
     if (t->socket == NULL) {
       set_err(net, "No TCP/IP stack is running");
       return NULL;
     }
+    /* AmiSSL reads socket errors through the errno variable it is given
+     * (AmiSSL_ErrNoPtr), and bsdsocket.library writes that variable only
+     * when told to. */
+    errno_tags[0].ti_Tag = SBTM_SETVAL(SBTC_ERRNOLONGPTR);
+    errno_tags[0].ti_Data = (ULONG)&t->amissl_errno;
+    errno_tags[1].ti_Tag = TAG_DONE;
+    errno_tags[1].ti_Data = 0;
+    (void)SocketBaseTagList(errno_tags);
   }
   return t;
 }
@@ -359,6 +374,9 @@ static int tls_connect(ZZPlayNet *net, const char *host)
     return 0;
   }
   SSL_CTX_set_min_proto_version(net->ctx, TLS1_2_VERSION);
+  if (net->tls12_only) {
+    SSL_CTX_set_max_proto_version(net->ctx, TLS1_2_VERSION);
+  }
   /* Many stream servers close the connection without a TLS close_notify.
    * AmiSSL 5 reports that as an error; treat it as the end of the data,
    * as over plain HTTP, and let the HTTP framing decide whether the body
@@ -549,6 +567,7 @@ static int read_head(ZZPlayNet *net, ZZPlayHttpHead *head)
     }
     if (n == 0) {
       set_err(net, "The server closed the connection without answering");
+      net->closed_early = 1;
       return 0;
     }
     have += (uint32_t)n;
@@ -629,9 +648,23 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
       set_err(net, "The address is too long");
       goto fail;
     }
+    net->closed_early = 0;
     if (!connect_to(net, &net->at) ||
         (net->at.tls && !tls_connect(net, net->at.host)) ||
-        !send_all(net, net->head, len) || !read_head(net, head)) {
+        !send_all(net, net->head, len)) {
+      goto fail;
+    }
+    if (!read_head(net, head)) {
+      /* laut.fm's stream servers close a TLS 1.3 connection from AmiSSL
+       * without answering, while TLS 1.2 to the same server works and
+       * stays at least as strict as the minimum. Try once more that way. */
+      if (net->closed_early && net->ssl != NULL && !net->tls12_only &&
+          SSL_version(net->ssl) == TLS1_3_VERSION) {
+        net->tls12_only = 1;
+        close_socket(net);
+        redirects--;
+        continue;
+      }
       goto fail;
     }
     if (is_redirect(head->status) && head->location[0] != '\0') {
