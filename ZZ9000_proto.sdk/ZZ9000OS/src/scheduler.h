@@ -13,6 +13,10 @@
 
 #include <stdint.h>
 
+#ifndef ZZAPP_PERF_COUNTERS
+#define ZZAPP_PERF_COUNTERS 1
+#endif
+
 #define TASKQ_CAPACITY         16u
 #define TASKQ_SHORT_MAX_BYTES  4096u
 #define TASKQ_RESULT_PAYLOAD   48u
@@ -109,15 +113,22 @@ typedef struct {
   uint32_t out_cap;
   uint32_t request_id;
   uint32_t user_cookie;
+#if ZZAPP_PERF_COUNTERS
+  uint32_t perf_enqueue_stamp;  /* set before TASK_QUEUED is published */
+#endif
   uint16_t result_status;       /* SDK_STATUS_* to post on completion */
   uint16_t result_len;          /* completion payload length */
   uint8_t  result_payload[TASKQ_RESULT_PAYLOAD];
   uint8_t  op_params[TASKQ_OP_PARAM_BYTES]; /* producer-filled input params */
+
 } taskq_desc_t;
 
 typedef struct {
   taskq_desc_t descs[TASKQ_CAPACITY];
   uint32_t     enqueue_cursor;  /* single-producer hint (core 0 only) */
+#if ZZAPP_PERF_COUNTERS
+  uint32_t     perf_queued_count; /* incremented before TASK_QUEUED publication */
+#endif
 } taskq_t;
 
 typedef struct {                /* coherent control block at the queue region */
@@ -164,6 +175,12 @@ typedef struct {                /* coherent control block at the queue region */
   volatile uint32_t minigl_rix_fence_address;
   /* Core 0 raises the doorbell SGI only when this changes from zero to one. */
   volatile uint32_t service_pending;
+#if ZZAPP_PERF_COUNTERS
+  /* Core 0 publishes the coalesced doorbell stamp before its release count;
+   * core 1 acquires that count before sampling the low 32-bit timestamp. */
+  volatile uint32_t perf_doorbell_stamp;
+  volatile uint32_t perf_sgi_count;
+#endif
 } taskq_shared_t;
 
 typedef struct {
@@ -290,6 +307,9 @@ void *scheduler_core1_app_stack_top(uint32_t slot);
 void scheduler_boot_init(void);            /* core 0: init queue + watchdog at boot */
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
 void scheduler_core1_wake(void);           /* core 0: publish async app work, then wake worker */
+#if ZZAPP_PERF_COUNTERS
+uint32_t scheduler_perf_stamp(void);
+#endif
 void scheduler_confirm_core1_boot(void);   /* core 0: bounded wait for worker liveness at boot */
 void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
 void scheduler_core1_park_if_requested(void); /* core 1: clean L1 + park for a cold restart */

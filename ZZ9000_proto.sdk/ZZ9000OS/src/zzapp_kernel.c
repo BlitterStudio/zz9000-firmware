@@ -8,6 +8,10 @@
 #include "sdk_smp_lock.h"
 #include "zzapp_kernel.h"
 
+#if ZZAPP_PERF_COUNTERS
+#include <stdio.h>
+#endif
+
 #ifdef ZZAPP_HOST_TEST
 uint32_t __attribute__((weak)) smp_local_irq_save(void)
 {
@@ -26,6 +30,308 @@ volatile uintptr_t zzapp_kernel_svc_stack_top;
 #if ZZAPP_PERF_COUNTERS
 /* The SVC vector reads this directly to index its per-app PMU stamps. */
 volatile uint32_t zzapp_svc_counter_slot;
+volatile uint32_t zzapp_kernel_switch_entry_stamp;
+volatile uint32_t zzapp_kernel_switch_exit_stamp;
+volatile uint32_t zzapp_kernel_switch_complete;
+volatile uint32_t zzapp_kernel_switch_completed_entry_stamp;
+
+
+static void kernel_perf_add(zzapp_kernel_perf_metric_t *metric,
+			    uint32_t value)
+{
+	uint32_t bucket = 0U;
+	uint32_t original = value;
+
+	while (value > 1U && bucket + 1U < ZZAPP_PERF_HISTOGRAM_BUCKETS) {
+		value >>= 1;
+		bucket++;
+	}
+	metric->samples++;
+	metric->histogram[bucket]++;
+	if (original > metric->max)
+		metric->max = original;
+}
+
+static uint32_t kernel_perf_percentile(const zzapp_kernel_perf_metric_t *metric,
+				       uint32_t percentile)
+{
+	uint64_t target;
+	uint64_t seen = 0U;
+	uint32_t bucket;
+
+	if (!metric->samples)
+		return 0U;
+	target = ((uint64_t)metric->samples * percentile + 99U) / 100U;
+	for (bucket = 0U; bucket < ZZAPP_PERF_HISTOGRAM_BUCKETS; bucket++) {
+		seen += metric->histogram[bucket];
+		if (seen >= target)
+			return 1U << bucket;
+	}
+	return metric->max;
+}
+
+#ifdef ZZAPP_HOST_TEST
+uint32_t zzapp_kernel_perf_test_percentile(
+	const zzapp_kernel_perf_metric_t *metric, uint32_t percentile)
+{
+	return kernel_perf_percentile(metric, percentile);
+}
+#endif
+
+static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
+{
+	zzapp_kernel_perf_t *perf;
+	uint32_t instruction;
+	uint32_t data;
+	uint32_t irq_state;
+
+	if (!kernel)
+		return;
+	irq_state = smp_local_irq_save();
+	perf = &kernel->perf;
+	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS ||
+	    perf->tlb_slot != (uint32_t)slot) {
+		smp_local_irq_restore(irq_state);
+		return;
+	}
+#ifdef ZZAPP_HOST_TEST
+	instruction = perf->tlb_instruction_stamp;
+	data = perf->tlb_data_stamp;
+#else
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(0U));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mrc p15, 0, %0, c9, c13, 2" : "=r"(instruction));
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(1U));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mrc p15, 0, %0, c9, c13, 2" : "=r"(data));
+#endif
+	perf->tlb_instruction_refills[slot] += instruction -
+		perf->tlb_instruction_stamp;
+	perf->tlb_data_refills[slot] += data - perf->tlb_data_stamp;
+	perf->total.tlb_instruction_refills += instruction -
+		perf->tlb_instruction_stamp;
+	perf->total.tlb_data_refills += data - perf->tlb_data_stamp;
+	perf->tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
+	smp_local_irq_restore(irq_state);
+}
+
+static void kernel_perf_tlb_enter(zzapp_kernel_t *kernel, int slot)
+{
+	zzapp_kernel_perf_t *perf = &kernel->perf;
+
+	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS)
+		return;
+#ifndef ZZAPP_HOST_TEST
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(0U));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mrc p15, 0, %0, c9, c13, 2" :
+			     "=r"(perf->tlb_instruction_stamp));
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(1U));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mrc p15, 0, %0, c9, c13, 2" :
+			     "=r"(perf->tlb_data_stamp));
+#endif
+	perf->tlb_slot = (uint32_t)slot;
+}
+
+void zzapp_kernel_perf_sgi_raised(zzapp_kernel_t *kernel, uint32_t stamp)
+{
+	if (!kernel)
+		return;
+	kernel->perf.sgi_stamp = stamp;
+	kernel->perf.sgi_pending = 1U;
+	kernel->perf.total.sgis++;
+}
+
+void zzapp_kernel_perf_sgi_started(zzapp_kernel_t *kernel, uint32_t stamp)
+{
+	if (!kernel || !kernel->perf.sgi_pending)
+		return;
+	kernel_perf_add(&kernel->perf.total.sgi_to_service,
+			stamp - kernel->perf.sgi_stamp);
+	kernel->perf.sgi_pending = 0U;
+}
+
+void zzapp_kernel_perf_tasks_queued(zzapp_kernel_t *kernel, uint32_t count)
+{
+	if (kernel)
+		kernel->perf.total.queued_tasks += count;
+}
+
+void zzapp_kernel_perf_sdk_started(zzapp_kernel_t *kernel,
+				   uint32_t enqueue_stamp, uint32_t stamp)
+{
+	if (!kernel)
+		return;
+	kernel_perf_add(&kernel->perf.total.sdk_enqueue_to_start,
+			stamp - enqueue_stamp);
+}
+
+void zzapp_kernel_perf_service_begin(zzapp_kernel_t *kernel,
+				      zzapp_perf_service_t service,
+				      uint32_t stamp)
+{
+	if (kernel && service < ZZAPP_PERF_SERVICE_COUNT)
+		kernel->perf.service_start[service] = stamp;
+}
+
+void zzapp_kernel_perf_service_end(zzapp_kernel_t *kernel,
+				    zzapp_perf_service_t service,
+				    uint32_t stamp)
+{
+	if (!kernel || service >= ZZAPP_PERF_SERVICE_COUNT)
+		return;
+	kernel_perf_add(&kernel->perf.total.service[service], stamp -
+			kernel->perf.service_start[service]);
+}
+
+void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel, uint32_t slot,
+			      uint32_t low_water, uint32_t starved,
+			      uint32_t underruns)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	kernel->perf.audio_low_water[slot] += low_water;
+	kernel->perf.audio_starved[slot] += starved;
+	kernel->perf.audio_underruns[slot] += underruns;
+}
+
+void zzapp_kernel_perf_snapshot(const zzapp_kernel_t *kernel, uint32_t slot,
+				 zzapp_kernel_perf_snapshot_t *snapshot)
+{
+	if (!kernel || !snapshot || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	*snapshot = kernel->perf.total;
+	snapshot->audio_low_water = kernel->perf.audio_low_water[slot];
+	snapshot->audio_starved = kernel->perf.audio_starved[slot];
+	snapshot->audio_underruns = kernel->perf.audio_underruns[slot];
+	snapshot->tlb_instruction_refills =
+		kernel->perf.tlb_instruction_refills[slot];
+	snapshot->tlb_data_refills = kernel->perf.tlb_data_refills[slot];
+}
+
+void zzapp_kernel_perf_finish_slot(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	kernel_perf_tlb_leave(kernel, (int)slot);
+}
+
+void zzapp_kernel_perf_switch_finished(zzapp_kernel_t *kernel)
+{
+	uint32_t irq_state = smp_local_irq_save();
+
+	if (zzapp_kernel_switch_complete) {
+		if (kernel)
+			kernel_perf_add(&kernel->perf.total.switch_cycles,
+					zzapp_kernel_switch_exit_stamp -
+					zzapp_kernel_switch_completed_entry_stamp);
+		zzapp_kernel_switch_complete = 0U;
+	}
+	smp_local_irq_restore(irq_state);
+}
+
+void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t slot,
+				       int force)
+{
+	uint32_t bit;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	if (!force && kernel->perf.report_count &&
+	    (uint32_t)kernel->now - kernel->perf.last_report_ms < 10000U)
+		return;
+	bit = 1U << slot;
+	kernel->perf.report_pending |= bit;
+	if (force)
+		kernel->perf.report_force |= bit;
+}
+
+int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
+{
+	static const char *const service_names[ZZAPP_PERF_SERVICE_COUNT] = {
+		"sdk_span", "minigl_span", "launcher_span", "audio_span",
+		"svc_span"
+	};
+	uint32_t pending;
+	uint32_t force;
+	uint32_t slot;
+	uint32_t service;
+	zzapp_kernel_perf_snapshot_t snapshot = { 0 };
+	int offset;
+
+	if (!kernel || kernel->perf.report_ready)
+		return 0;
+	pending = kernel->perf.report_pending;
+	force = kernel->perf.report_force;
+	if (!pending)
+		return 0;
+	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
+		if (force & (1U << slot))
+			break;
+	if (slot == ZZAPP_KERNEL_APP_SLOTS) {
+		if (kernel->perf.report_count &&
+		    (uint32_t)kernel->now - kernel->perf.last_report_ms < 10000U)
+			return 0;
+		for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
+			if (pending & (1U << slot))
+				break;
+	}
+	zzapp_kernel_perf_snapshot(kernel, slot, &snapshot);
+	kernel->perf.report_pending &= ~(1U << slot);
+	kernel->perf.report_force &= ~(1U << slot);
+	if ((force & (1U << slot)) == 0U)
+		kernel->perf.last_report_ms = (uint32_t)kernel->now;
+	kernel->perf.report_count++;
+	offset = snprintf(kernel->perf.report_text, sizeof(kernel->perf.report_text),
+			  "[app] perf slot=%lu forced=%u switch=%lu/%lu/%lu "
+			  "sgi=%lu/%lu/%lu sdk=%lu/%lu/%lu sgi_burst=%lu/%lu "
+			  "audio=%lu/%lu/%lu tlb=%lu/%lu",
+			  (unsigned long)slot, (force & (1U << slot)) != 0U,
+			  (unsigned long)kernel_perf_percentile(
+				  &snapshot.switch_cycles, 50U),
+			  (unsigned long)kernel_perf_percentile(
+				  &snapshot.switch_cycles, 99U),
+			  (unsigned long)snapshot.switch_cycles.max,
+			  (unsigned long)kernel_perf_percentile(
+				  &snapshot.sgi_to_service, 50U),
+			  (unsigned long)kernel_perf_percentile(
+				  &snapshot.sgi_to_service, 99U),
+			  (unsigned long)snapshot.sgi_to_service.max,
+			  (unsigned long)kernel_perf_percentile(
+				  &snapshot.sdk_enqueue_to_start, 50U),
+			  (unsigned long)kernel_perf_percentile(
+				  &snapshot.sdk_enqueue_to_start, 99U),
+			  (unsigned long)snapshot.sdk_enqueue_to_start.max,
+			  (unsigned long)snapshot.sgis,
+			  (unsigned long)snapshot.queued_tasks,
+			  (unsigned long)snapshot.audio_low_water,
+			  (unsigned long)snapshot.audio_starved,
+			  (unsigned long)snapshot.audio_underruns,
+			  (unsigned long)snapshot.tlb_instruction_refills,
+			  (unsigned long)snapshot.tlb_data_refills);
+	for (service = 0U; service < ZZAPP_PERF_SERVICE_COUNT &&
+	     offset > 0 && (size_t)offset < sizeof(kernel->perf.report_text);
+	     service++)
+		offset += snprintf(kernel->perf.report_text + offset,
+				   sizeof(kernel->perf.report_text) - (size_t)offset,
+				   " %s=%lu/%lu", service_names[service],
+				   (unsigned long)kernel_perf_percentile(
+					   &snapshot.service[service], 99U),
+				   (unsigned long)snapshot.service[service].max);
+	if (offset > 0 && (size_t)offset < sizeof(kernel->perf.report_text) - 2U)
+		strcat(kernel->perf.report_text, "\r\n");
+	kernel->perf.report_ready = 1U;
+	return 1;
+}
+
+void zzapp_kernel_perf_print_reports(zzapp_kernel_t *kernel)
+{
+	if (!kernel || !kernel->perf.report_ready)
+		return;
+	printf("%s", kernel->perf.report_text);
+	kernel->perf.report_ready = 0U;
+}
 #endif
 void *scheduler_core1_app_stack_top(uint32_t slot) __attribute__((weak));
 void *scheduler_core1_app_stack_top(uint32_t slot)
@@ -116,6 +422,15 @@ int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
 
 	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS || !entry || !stack_top)
 		return -1;
+#if ZZAPP_PERF_COUNTERS
+	kernel->perf.audio_low_water[slot] = 0U;
+	kernel->perf.audio_starved[slot] = 0U;
+	kernel->perf.audio_underruns[slot] = 0U;
+	kernel->perf.tlb_instruction_refills[slot] = 0U;
+	kernel->perf.tlb_data_refills[slot] = 0U;
+	if (kernel->perf.tlb_slot == slot)
+		kernel->perf.tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
+#endif
 	context = &kernel->threads[slot].context;
 	memset(context, 0, sizeof(*context));
 	context->r[0] = api;
@@ -363,7 +678,13 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 
 	if (!kernel || !frame)
 		return frame;
+#if ZZAPP_PERF_COUNTERS
+	zzapp_kernel_perf_switch_finished(kernel);
+#endif
 	slot = zzapp_kernel_current_thread();
+#if ZZAPP_PERF_COUNTERS
+	kernel_perf_tlb_leave(kernel, slot);
+#endif
 	if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS) {
 		context_save(&kernel->threads[slot].context, frame, return_adjust);
 		pick = zzapp_kernel_dispatch(kernel, source,
@@ -396,6 +717,10 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 	zzapp_kernel_svc_stack_top =
 		(uintptr_t)scheduler_core1_app_stack_top((uint32_t)pick);
 	zzapp_kernel_switch_address_space((uint32_t)pick);
+#if ZZAPP_PERF_COUNTERS
+	kernel_perf_tlb_enter(kernel, pick);
+	zzapp_kernel_perf_request_report(kernel, (uint32_t)pick, 0);
+#endif
 	return context_restore(&kernel->threads[pick].context, return_adjust);
 }
 

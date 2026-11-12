@@ -157,6 +157,7 @@ void zzapp_svc_gl_telemetry_lock_end(uint32_t slot, int contended);
 /* Reset and print the core-1 PMU breakdown for one app lifecycle. */
 void zzapp_svc_counters_reset(uint32_t slot);
 void zzapp_svc_counters_report(uint32_t slot);
+int zzapp_svc_counters_sampled(uint32_t slot);
 /* Assembly-side PMCCNTR stamp for the entry stage. */
 extern volatile uint32_t zzapp_svc_entry_stamp[];
 extern volatile uint32_t zzapp_svc_counter_slot;
@@ -177,6 +178,8 @@ static inline void zzapp_svc_counters_reset(uint32_t slot)
 { (void)slot; }
 static inline void zzapp_svc_counters_report(uint32_t slot)
 { (void)slot; }
+static inline int zzapp_svc_counters_sampled(uint32_t slot)
+{ (void)slot; return 0; }
 #endif
 
 /* Called by the SVC vector after it has saved the user-call state. */

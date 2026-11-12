@@ -47,6 +47,9 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "zzapp_services.h"
 #include "zzm_runtime.h"
 #include <stdio.h>
+#if ZZAPP_PERF_COUNTERS
+#include "xtime_l.h"
+#endif
 
 #define SCHED_CORE1_DOORBELL_SGI 15U
 #define SCHED_CORE1_DOORBELL_CPU 2U
@@ -141,6 +144,10 @@ void scheduler_boot_init(void)
   sh->minigl_rix_fence_epoch = 0U;
   sh->minigl_rix_fence_sequence = 0U;
   sh->minigl_rix_fence_address = 0U;
+#if ZZAPP_PERF_COUNTERS
+  sh->perf_doorbell_stamp = 0U;
+  sh->perf_sgi_count = 0U;
+#endif
   zzapp_kernel_stack_paint((uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
                            SDK_CORE1_SYSTEM_STACK_SIZE);
   {
@@ -171,12 +178,47 @@ static void scheduler_send_doorbell(void *unused)
   __asm__ __volatile__("sev" ::: "memory");
 }
 
+#if ZZAPP_PERF_COUNTERS
+uint32_t scheduler_perf_stamp(void)
+{
+  XTime stamp;
+
+  XTime_GetTime(&stamp);
+  return (uint32_t)stamp;
+}
+
+uint32_t taskq_perf_enqueue_stamp(void)
+{
+  return scheduler_perf_stamp();
+}
+
+static void scheduler_perf_publish_doorbell(taskq_shared_t *sh)
+{
+  sh->perf_doorbell_stamp = scheduler_perf_stamp();
+  (void)__atomic_add_fetch(&sh->perf_sgi_count, 1U, __ATOMIC_RELEASE);
+}
+#endif
+
 void scheduler_core1_wake(void)
 {
   taskq_shared_t *sh = scheduler_shared();
 
+#if ZZAPP_PERF_COUNTERS
+  uint32_t expected = 0U;
+
+  /* State 2 reserves the transition while core 0 publishes the timestamp.
+   * Core 1 never services state 2; release state 1 publishes work and its
+   * matching doorbell sample together. */
+  if (!__atomic_compare_exchange_n(&sh->service_pending, &expected, 2U, 0,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    return;
+  scheduler_perf_publish_doorbell(sh);
+  __atomic_store_n(&sh->service_pending, 1U, __ATOMIC_RELEASE);
+  scheduler_send_doorbell(NULL);
+#else
   (void)taskq_doorbell_request(&sh->service_pending,
                                scheduler_send_doorbell, NULL);
+#endif
 }
 
 /* The SGI is a doorbell, not a work body. Mark service due and let the
@@ -357,29 +399,105 @@ static uint16_t scheduler_run_slot(taskq_desc_t *d)
   taskq_complete(&sh->queue, slot, status, payload, (uint16_t)len);
   return status;
 }
+
+#if ZZAPP_PERF_COUNTERS
+
+static void scheduler_perf_sync_doorbell(taskq_shared_t *sh,
+					 zzapp_kernel_t *kernel)
+{
+	static uint32_t seen_sgis;
+	static uint32_t seen_queued;
+	uint32_t published = __atomic_load_n(&sh->perf_sgi_count,
+					    __ATOMIC_ACQUIRE);
+	uint32_t queued = __atomic_load_n(&sh->queue.perf_queued_count,
+					  __ATOMIC_ACQUIRE);
+
+	while (seen_sgis != published) {
+		zzapp_kernel_perf_sgi_raised(kernel, sh->perf_doorbell_stamp);
+		seen_sgis++;
+	}
+	zzapp_kernel_perf_tasks_queued(kernel, queued - seen_queued);
+	seen_queued = queued;
+}
+
+static int scheduler_perf_consume_doorbell(taskq_shared_t *sh,
+					   zzapp_kernel_t *kernel)
+{
+	if (__atomic_load_n(&sh->service_pending, __ATOMIC_ACQUIRE) == 2U)
+		return 0;
+	scheduler_perf_sync_doorbell(sh, kernel);
+	if (__atomic_load_n(&sh->service_pending, __ATOMIC_ACQUIRE) == 2U)
+		return 0;
+	/* A producer may publish between the first acquire and this state
+	 * observation. Re-acquire the count before any service work begins. */
+	scheduler_perf_sync_doorbell(sh, kernel);
+	zzapp_kernel_perf_sgi_started(kernel, scheduler_perf_stamp());
+	return 1;
+}
+
+static zzapp_perf_service_t scheduler_perf_class(const taskq_desc_t *desc)
+{
+	uint32_t opcode = desc->opcode;
+
+	if (opcode == TASKQ_OP_DECODE_MP3 || opcode == TASKQ_OP_AUDIO_STREAM_FEED ||
+	    opcode == TASKQ_OP_AUDIO_STREAM_READ ||
+	    opcode == TASKQ_OP_AUDIO_STREAM_CLOSE ||
+	    opcode == TASKQ_OP_MEDIA_SESSION_AUDIO_READ)
+		return ZZAPP_PERF_SERVICE_AUDIO;
+	return ZZAPP_PERF_SERVICE_SDK;
+}
+#endif
 /* Bounded service body used between app calls. It never sleeps: while an
  * app is live the next timer tick or cooperative yield returns here. */
 void scheduler_core1_service_once(void)
 {
   taskq_shared_t *sh = scheduler_shared();
   sched_worker_action_t action;
-  int slot = taskq_claim_any(&sh->queue);
+  int slot;
 
+#if ZZAPP_PERF_COUNTERS
+  if (!scheduler_perf_consume_doorbell(sh, zzapp_runtime_kernel()))
+    return;
+#endif
+  slot = taskq_claim_any(&sh->queue);
   if (slot >= 0) {
+#if ZZAPP_PERF_COUNTERS
+    zzapp_perf_service_t service = scheduler_perf_class(&sh->queue.descs[slot]);
+    uint32_t stamp = scheduler_perf_stamp();
+
+    zzapp_kernel_perf_sdk_started(zzapp_runtime_kernel(),
+                                  sh->queue.descs[slot].perf_enqueue_stamp,
+                                  stamp);
+    zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(), service, stamp);
+#endif
     sh->core1_current_slot = slot;
     (void)scheduler_run_slot(&sh->queue.descs[slot]);
     sh->core1_current_slot = -1;
     sh->tasks_on_core1++;
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_service_end(zzapp_runtime_kernel(), service,
+                                  scheduler_perf_stamp());
+#endif
   }
   action = sh->minigl_reset_request != 0U ? SCHED_WORKER_ACTION_RESET :
                                            SCHED_WORKER_ACTION_MINIGL;
   if (scheduler_minigl_submission_action(sh, action) ==
       SCHED_WORKER_ACTION_MINIGL) {
+#if ZZAPP_PERF_COUNTERS
+    uint32_t stamp = scheduler_perf_stamp();
+    zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(),
+                                    ZZAPP_PERF_SERVICE_MINIGL, stamp);
+#endif
     sh->minigl_in_flight = 1;
     dmb();
     zzm_minigl_service_tick(0);
     sh->minigl_in_flight = 0;
     dmb();
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_service_end(zzapp_runtime_kernel(),
+                                  ZZAPP_PERF_SERVICE_MINIGL,
+                                  scheduler_perf_stamp());
+#endif
   }
 }
 
@@ -462,6 +580,12 @@ void scheduler_core1_worker(void)
     if (!scheduler_core1_kernel_lock_or_yield())
       continue;
     zzapp_kernel_set_current_thread(-1);
+#if ZZAPP_PERF_COUNTERS
+    if (!scheduler_perf_consume_doorbell(sh, zzapp_runtime_kernel())) {
+      (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+      continue;
+    }
+#endif
     if (sh->core1_park_request) {
       (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
       scheduler_core1_park_if_requested();
@@ -475,9 +599,22 @@ void scheduler_core1_worker(void)
       drained = taskq_doorbell_drain(&sh->service_pending,
                                      scheduler_doorbell_drain,
                                      scheduler_doorbell_more, sh, 1U);
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(),
+                                    ZZAPP_PERF_SERVICE_LAUNCHER,
+                                    scheduler_perf_stamp());
+#endif
     zzapp_worker_hook();
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_service_end(zzapp_runtime_kernel(),
+                                  ZZAPP_PERF_SERVICE_LAUNCHER,
+                                  scheduler_perf_stamp());
+#endif
     if (drained != 0U) {
       (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+#if ZZAPP_PERF_COUNTERS
+      zzapp_kernel_perf_print_reports(zzapp_runtime_kernel());
+#endif
       if (zzapp_kernel_apps_runnable(zzapp_runtime_kernel()))
         __asm__ __volatile__("svc #0" ::: "memory");
       continue;
@@ -512,21 +649,47 @@ void scheduler_core1_worker(void)
       break;
     }
 
-    case SCHED_WORKER_ACTION_TASK:
+    case SCHED_WORKER_ACTION_TASK: {
+#if ZZAPP_PERF_COUNTERS
+      zzapp_perf_service_t service =
+          scheduler_perf_class(&sh->queue.descs[task_slot]);
+      uint32_t stamp = scheduler_perf_stamp();
+
+      zzapp_kernel_perf_sdk_started(zzapp_runtime_kernel(),
+                                    sh->queue.descs[task_slot].perf_enqueue_stamp,
+                                    stamp);
+      zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(), service, stamp);
+#endif
       sh->core1_current_slot = task_slot;
       (void)scheduler_run_slot(&sh->queue.descs[task_slot]);
       sh->core1_current_slot = -1;
       sh->tasks_on_core1++;
+#if ZZAPP_PERF_COUNTERS
+      zzapp_kernel_perf_service_end(zzapp_runtime_kernel(), service,
+                                    scheduler_perf_stamp());
+#endif
       break;
+    }
 
     case SCHED_WORKER_ACTION_MINIGL:
-    case SCHED_WORKER_ACTION_POLL_IDLE:
+    case SCHED_WORKER_ACTION_POLL_IDLE: {
+#if ZZAPP_PERF_COUNTERS
+      uint32_t stamp = scheduler_perf_stamp();
+      zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(),
+                                      ZZAPP_PERF_SERVICE_MINIGL, stamp);
+#endif
       sh->minigl_in_flight = 1;
       dmb();
       mgl_progress = zzm_minigl_service_tick(0);
       sh->minigl_in_flight = 0;
       dmb();
+#if ZZAPP_PERF_COUNTERS
+      zzapp_kernel_perf_service_end(zzapp_runtime_kernel(),
+                                    ZZAPP_PERF_SERVICE_MINIGL,
+                                    scheduler_perf_stamp());
+#endif
       break;
+    }
 
     case SCHED_WORKER_ACTION_WFE:
     default:
@@ -553,6 +716,9 @@ void scheduler_core1_worker(void)
     }
 
     (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_print_reports(zzapp_runtime_kernel());
+#endif
     /* A runnable app gets the core back at once. Idling in WFE while an
      * app could run left it waiting for the next 5 ms tick after every
      * service pass, which made swquake take minutes to load (kit 66). */

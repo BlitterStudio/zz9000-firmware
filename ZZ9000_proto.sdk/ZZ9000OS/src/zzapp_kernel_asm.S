@@ -48,6 +48,48 @@ zzapp_core1_vectors:
 	stmia sp, {sp, lr}^
 .endm
 
+.macro perf_switch_entry
+#if ZZAPP_PERF_COUNTERS
+	stmdb sp!, {r0, r1}
+	mrc p15, 0, r0, c9, c13, 0
+	ldr r1, =zzapp_kernel_switch_entry_stamp
+	str r0, [r1]
+	ldmia sp!, {r0, r1}
+#endif
+.endm
+
+.macro perf_switch_exit
+#if ZZAPP_PERF_COUNTERS
+	stmdb sp!, {r0, r1}
+	mrc p15, 0, r0, c9, c13, 0
+	ldr r1, =zzapp_kernel_switch_exit_stamp
+	str r0, [r1]
+	ldr r1, =zzapp_kernel_switch_entry_stamp
+	ldr r0, [r1]
+	ldr r1, =zzapp_kernel_switch_completed_entry_stamp
+	str r0, [r1]
+	mov r0, #1
+	ldr r1, =zzapp_kernel_switch_complete
+	str r0, [r1]
+	ldmia sp!, {r0, r1}
+#endif
+.endm
+
+.macro restore_switch_frame, adjust
+	ldmia sp, {sp, lr}^
+	nop
+	add sp, sp, #8
+	pop {r0}
+	msr spsr_cxsf, r0
+	vpop {d16-d31}
+	vpop {d0-d15}
+	pop {r0}
+	vmsr fpscr, r0
+	ldmia sp!, {r0-r12, lr}
+	perf_switch_exit
+	subs pc, lr, #\adjust
+.endm
+
 .macro select_frame, source, adjust
 	mov r4, sp
 	mov r0, sp
@@ -89,19 +131,21 @@ core1_vector_reset:
 	b core1_entry
 
 core1_vector_irq:
+	perf_switch_entry
 	save_frame
 	bl zzapp_kernel_irq_dispatch
 	select_irq_frame 4
-	restore_frame 4
+	restore_switch_frame 4
 
 core1_vector_undef:
+	perf_switch_entry
 	save_frame
 	ldr r0, =UndefinedExceptionAddr
 	sub r1, lr, #4
 	str r1, [r0]
 	bl arm_exception_handler_illinst
 	select_frame 1, 0
-	restore_frame 0
+	restore_switch_frame 0
 
 /* Bytes in one save_frame: SYS SP/LR, SPSR, 32 D registers, FPSCR,
  * r0-r12 and LR.  zzapp_kernel.h asserts the C struct has this size. */
@@ -269,6 +313,7 @@ core1_vector_svc:
 	 * path.  r12 is caller-clobbered for the app, so it carries the compact
 	 * frame across save_frame. */
 	mov r12, r2
+	perf_switch_entry
 	save_frame
 	add r5, r12, #12
 	vldmia r5, {d0-d7}
@@ -293,7 +338,7 @@ core1_vector_svc:
 	ldr r5, [r12, #128]
 	str r5, [sp, #324]
 	select_frame 2, 0
-	restore_frame 0
+	restore_switch_frame 0
 3:
 	/* A privileged SVC remains the scheduler's voluntary switch.  Kernel
 	 * code issues it without declaring clobbers, so restore r0-r3 (used
@@ -301,9 +346,10 @@ core1_vector_svc:
 	add r1, sp, #4
 	ldmia r1, {r0-r3}
 	add sp, sp, #28
+	perf_switch_entry
 	save_frame
 	select_frame 2, 0
-	restore_frame 0
+	restore_switch_frame 0
 #if ZZAPP_SVC_PROBES
 .Lsvc_probe_p0_return:
 	/* P0 has only the six scratch words; SPSR is untouched in its bank. */
@@ -324,23 +370,25 @@ core1_vector_svc:
 #endif
 
 core1_vector_pabort:
+	perf_switch_entry
 	save_frame
 	ldr r0, =PrefetchAbortAddr
 	sub r1, lr, #4
 	str r1, [r0]
 	bl arm_exception_handler_id_prefetch_abort
 	select_frame 1, 4
-	restore_frame 4
+	restore_switch_frame 4
 
 core1_vector_dabort:
 	dsb
+	perf_switch_entry
 	save_frame
 	ldr r0, =DataAbortAddr
 	sub r1, lr, #8
 	str r1, [r0]
 	bl arm_exception_handler_id_data_abort
 	select_frame 1, 8
-	restore_frame 8
+	restore_switch_frame 8
 
 core1_vector_reserved:
 	b core1_vector_reserved

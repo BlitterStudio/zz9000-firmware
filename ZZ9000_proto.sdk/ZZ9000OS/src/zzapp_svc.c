@@ -156,6 +156,16 @@ static inline void counters_dispatch(uint32_t slot, int gl)
     counters->dispatch_stamp = stamp;
 }
 
+int zzapp_svc_counters_sampled(uint32_t slot)
+{
+	zzapp_svc_counters_t *counters;
+
+	if (slot >= ZZAPP_AS_SLOT_COUNT)
+		return 0;
+	counters = &zzapp_svc_counters[slot][zzapp_svc_counter_class[slot]];
+	return (counters->total_calls & 63U) == 0U;
+}
+
 static inline void counters_handler_start(uint32_t slot)
 {
     zzapp_svc_counters_t *counters =

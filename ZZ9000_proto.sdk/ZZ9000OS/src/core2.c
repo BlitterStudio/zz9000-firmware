@@ -22,6 +22,10 @@
 #include "zzapp_proto.h"
 #include "interrupt.h"
 #include "zzapp_services.h"
+
+#ifndef ZZAPP_SVC_PROBES
+#define ZZAPP_SVC_PROBES 0
+#endif
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
 #define A9_CLKSTOP1_MASK	0x00000020
@@ -563,6 +567,7 @@ __attribute__((naked, noreturn, used)) static void core1_enter_system_thread(voi
 		".ltorg\n\t");
 }
 
+#if ZZAPP_PERF_COUNTERS || ZZAPP_SVC_PROBES
 /* PMCCNTR is sampled only by privileged core-1 SVC code, except in the
  * explicitly instrumented probe firmware. */
 static void core1_enable_pmu_cycles(void)
@@ -570,14 +575,28 @@ static void core1_enable_pmu_cycles(void)
 	uint32_t pmcr;
 
 	__asm__ __volatile__("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
-	pmcr |= 0x01U;
+	pmcr |= 0x07U;
 	pmcr &= ~0x08U;
 	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
-	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x80000000U));
+	/* PMCR.E only enables the PMU globally; PMCNTENSET bit 31 enables
+	 * PMCCNTR itself in both counter and probes-only firmware. */
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : :
+			     "r"(0x80000000U));
+#if ZZAPP_PERF_COUNTERS
+	/* Counter 0/1 measure core-1 instruction/data TLB refills. */
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(0U));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c13, 1" : : "r"(0x02U));
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(1U));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c13, 1" : : "r"(0x05U));
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x03U));
+#endif
 #if ZZAPP_SVC_PROBES
 	__asm__ __volatile__("mcr p15, 0, %0, c9, c14, 0" : : "r"(1U));
 #endif
 }
+#endif
 
 
 
@@ -638,7 +657,9 @@ void core1_loop() {
 	// task-queue region shareable at boot, before this core started).
 	scheduler_coherency_init_core1();
 	C1_TRACE("[c1] R2 coherency-ok (mmu on)\r\n");  /* survived MMU/cache/SMP bring-up */
+#if ZZAPP_PERF_COUNTERS || ZZAPP_SVC_PROBES
 	core1_enable_pmu_cycles();
+#endif
 
 	// Program VBAR + banked exception stacks before running any task, so a
 	// data/prefetch/undefined fault vectors to the registered handlers and

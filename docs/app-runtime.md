@@ -43,6 +43,47 @@ or require one SGI per task. Timer IRQ, doorbell SGI, and SVC handoff save the
 current frame, choose the next thread, switch the address space when needed,
 and return through that frame.
 
+### Performance counters and probes
+
+`ZZAPP_PERF_COUNTERS=1` enables the kernel measurements. They are sampled on
+the SVC cadence and on exception-driven switches; `ZZAPP_PERF_COUNTERS=0`
+removes their code and storage. The PMU runs only in privileged core-1 code:
+it supplies context-switch cycles and per-slot instruction/data TLB-refill
+counts, and is also initialized when `ZZAPP_SVC_PROBES=1` with counters off.
+The other scheduler latencies use the shared core timer.
+
+While an app runs, periodic report requests are coalesced and emitted at most
+once every ten seconds across all slots; terminal paths record a `forced=1`
+report that is distinguished in the emitted line. The system-thread service
+path builds the report while it holds the kernel lock, then releases that lock
+before writing the resulting `[app] perf` line; neither exception handling nor
+a context switch prints or touches the UART. Each `p50/p99/max` triplet is
+reported as `p50/p99/max`. `switch` starts at the vector timestamp before the
+full scheduler frame is saved and ends after the selected frame is fully
+restored, immediately before the final exception-return instruction. It
+includes vector frame save, IRQ dispatch, scheduler/context copies, address
+space switching, and frame restoration; it excludes hardware exception entry
+and the final return instruction. `sgi` is one doorbell to the start of the
+next worker service pass, and `sdk` is each task's enqueue publication to its
+start. Sampling the pass boundary preserves the hot-path publication protocol;
+first-service attribution would require coupling every cross-core work claim
+to the publisher.
+`sgi_burst` is `SGIs/task publications`; `sdk_span`, `minigl_span`,
+`launcher_span`, `audio_span`, and `svc_span` are the 99th-percentile/maximum
+non-preemptible spans for SDK tasks, MiniGL, launcher deferred work, audio
+pumping, and sampled API-lock-held SVC work.
+`audio` is `low_water/starved/underruns`: low-water crossings on both AHI and
+card-fabric routes, retryable fabric fill failures, and played underruns.
+The zero-underrun gate uses only the final `underruns` value. `tlb` is
+instruction/data refills.
+Histogram percentiles are power-of-two buckets, so the exact maximum is the
+final number in each pair or triplet.
+
+`ZZAPP_SVC_PROBES=1` adds the `svcprobe` veneers used to characterize bare SVC
+paths. It defaults to off and is measurement tooling, not an application ABI.
+Build and run the dedicated probe firmware when enabling it; ordinary firmware
+does not expose those probe numbers.
+
 ### Address spaces and SVC
 
 Each slot has a private 16 KiB L1 table derived from a privileged kernel

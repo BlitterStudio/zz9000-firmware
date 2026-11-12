@@ -32,6 +32,9 @@
 #include <stdint.h>
 
 #include "audio_convert.h"
+#ifndef ZZAPP_PERF_COUNTERS
+#define ZZAPP_PERF_COUNTERS 1
+#endif
 
 enum audio_fabric_ownership {
 	AUDIO_FABRIC_IDLE = 0,
@@ -302,6 +305,11 @@ int audio_fabric_ring_release(uint32_t slot, uint32_t generation);
  */
 int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 	int hold_reset, struct audio_fabric_slot_state *out);
+#if ZZAPP_PERF_COUNTERS
+/* Counter-only starvation attribution after the existing slot starvation
+ * accounting; it is separate from the played-underrun callback contract. */
+void audio_fabric_starvation_event(uint32_t slot);
+#endif
 
 /* Host-test seam (scheduler.c TASKQ_HOST_TEST discipline): redirect
  * the TX ring the compositor fills. Firmware builds keep the standard

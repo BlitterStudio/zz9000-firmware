@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <stdint.h>
 #include <stdio.h>
-
+#include <string.h>
 #include "zzapp_kernel.h"
 
 static unsigned irq_save_calls;
@@ -496,6 +496,121 @@ static void test_system_lock_inheritance_is_throttled(void)
 	CHECK(kernel.overload_count == 1U);
 }
 
+/* Model the assembly order: entry, exit, another entry, then C consumes
+ * the completed pair. */
+#if ZZAPP_PERF_COUNTERS
+static void test_performance_counters(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+	zzapp_kernel_perf_snapshot_t snapshot;
+	zzapp_kernel_perf_metric_t overflow = { 0 };
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 1, 0x2000u, 2u, 0u, 0u,
+				       0x9000u) == 0);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	zzapp_kernel_set_current_thread(0);
+	zzapp_kernel_switch_entry_stamp = 100u;
+	zzapp_kernel_switch_exit_stamp = 160u;
+	zzapp_kernel_switch_completed_entry_stamp = 100u;
+	zzapp_kernel_switch_complete = 1u;
+	zzapp_kernel_switch_entry_stamp = 200u;
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+	zzapp_kernel_switch_exit_stamp = 280u;
+	zzapp_kernel_switch_completed_entry_stamp = 200u;
+	zzapp_kernel_switch_complete = 1u;
+	zzapp_kernel_switch_entry_stamp = 300u;
+	(void)zzapp_kernel_switch_frame(&kernel, next,
+					ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+	zzapp_kernel_perf_sgi_raised(&kernel, 200u);
+	zzapp_kernel_perf_sgi_started(&kernel, 260u);
+	zzapp_kernel_perf_sgi_started(&kernel, 300u);
+	zzapp_kernel_perf_sgi_raised(&kernel, 400u);
+	zzapp_kernel_perf_sgi_started(&kernel, 460u);
+	zzapp_kernel_perf_sdk_started(&kernel, 240u, 280u);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_AUDIO, 300u);
+	zzapp_kernel_perf_service_end(&kernel, ZZAPP_PERF_SERVICE_AUDIO, 380u);
+	zzapp_kernel_perf_audio(&kernel, 1u, 3u, 4u, 2u);
+	zzapp_kernel_perf_snapshot(&kernel, 1u, &snapshot);
+	CHECK(snapshot.switch_cycles.samples == 2u);
+	CHECK(snapshot.switch_cycles.max == 80u);
+	CHECK(snapshot.sgi_to_service.samples == 2u);
+	CHECK(snapshot.sgi_to_service.max == 60u);
+	CHECK(snapshot.sdk_enqueue_to_start.samples == 1u);
+	CHECK(snapshot.sdk_enqueue_to_start.max == 40u);
+	CHECK(snapshot.service[ZZAPP_PERF_SERVICE_AUDIO].max == 80u);
+	CHECK(snapshot.sgis == 2u);
+	CHECK(snapshot.audio_low_water == 3u);
+	CHECK(snapshot.audio_starved == 4u);
+	CHECK(snapshot.audio_underruns == 2u);
+
+	kernel.perf.report_pending = 0U;
+	kernel.perf.report_force = 0U;
+
+	zzapp_kernel_perf_request_report(&kernel, 1u, 0);
+	CHECK((kernel.perf.report_pending & (1U << 1)) != 0U);
+	CHECK(zzapp_kernel_perf_emit_reports(&kernel) == 1);
+	CHECK(strstr(kernel.perf.report_text, "audio=3/4/2") != NULL);
+	zzapp_kernel_perf_print_reports(&kernel);
+	CHECK(kernel.perf.report_pending == 0U);
+	zzapp_kernel_perf_request_report(&kernel, 1u, 0);
+	CHECK(kernel.perf.report_pending == 0U);
+	kernel.now += 10000u;
+	zzapp_kernel_perf_request_report(&kernel, 1u, 0);
+	zzapp_kernel_perf_request_report(&kernel, 2u, 0);
+	CHECK(zzapp_kernel_perf_emit_reports(&kernel) == 1);
+	CHECK((kernel.perf.report_pending & (1U << 2)) != 0U);
+	zzapp_kernel_perf_print_reports(&kernel);
+	CHECK(zzapp_kernel_perf_emit_reports(&kernel) == 0);
+	zzapp_kernel_perf_request_report(&kernel, 3u, 1);
+	CHECK(zzapp_kernel_perf_emit_reports(&kernel) == 1);
+	CHECK(strstr(kernel.perf.report_text, "forced=1") != NULL);
+	zzapp_kernel_perf_print_reports(&kernel);
+	kernel.perf.audio_low_water[1] = 9u;
+	kernel.perf.audio_starved[1] = 7u;
+	kernel.perf.audio_underruns[1] = 8u;
+	kernel.perf.tlb_instruction_refills[1] = 7u;
+	kernel.perf.tlb_data_refills[1] = 6u;
+	CHECK(zzapp_kernel_prepare_app(&kernel, 1, 0x3000u, 3u, 0u, 0u,
+				       0xa000u) == 0);
+	zzapp_kernel_perf_snapshot(&kernel, 1u, &snapshot);
+	CHECK(snapshot.audio_low_water == 0u);
+	CHECK(snapshot.audio_starved == 0u);
+	CHECK(snapshot.audio_underruns == 0u);
+	CHECK(snapshot.tlb_instruction_refills == 0u);
+	CHECK(snapshot.tlb_data_refills == 0u);
+
+	irq_save_calls = 0U;
+	irq_restore_calls = 0U;
+	zzapp_kernel_switch_completed_entry_stamp = 500u;
+	zzapp_kernel_switch_exit_stamp = 550u;
+	zzapp_kernel_switch_complete = 1u;
+	zzapp_kernel_perf_switch_finished(&kernel);
+	CHECK(irq_save_calls == 1U);
+	CHECK(irq_restore_calls == 1U);
+
+	irq_save_calls = 0U;
+	irq_restore_calls = 0U;
+	kernel.perf.tlb_slot = 0U;
+	kernel.perf.tlb_instruction_stamp = 10U;
+	kernel.perf.tlb_data_stamp = 20U;
+	zzapp_kernel_perf_finish_slot(&kernel, 0U);
+	CHECK(irq_save_calls == 1U);
+	CHECK(irq_restore_calls == 1U);
+
+	overflow.samples = 43383508u;
+	overflow.histogram[0] = 1u;
+	overflow.histogram[31] = overflow.samples - 1u;
+	CHECK(zzapp_kernel_perf_test_percentile(&overflow, 99u) == (1U << 31));
+}
+#endif
+
 
 int main(void)
 {
@@ -519,6 +634,9 @@ int main(void)
     test_system_ticks_wake_sleepers();
     test_restart_releases_kernel_lock_waiters();
     test_system_lock_inheritance_is_throttled();
+#if ZZAPP_PERF_COUNTERS
+    test_performance_counters();
+#endif
     printf("kernel_sched_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;
 }

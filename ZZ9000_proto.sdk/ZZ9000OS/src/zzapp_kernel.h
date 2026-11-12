@@ -25,6 +25,60 @@
 #define ZZAPP_KERNEL_WAIT_TIMEOUT (-8)
 #define ZZAPP_KERNEL_SYSTEM_OWNER (-2)
 
+#if ZZAPP_PERF_COUNTERS
+#define ZZAPP_PERF_HISTOGRAM_BUCKETS 32U
+
+typedef enum {
+	ZZAPP_PERF_SERVICE_SDK,
+	ZZAPP_PERF_SERVICE_MINIGL,
+	ZZAPP_PERF_SERVICE_LAUNCHER,
+	ZZAPP_PERF_SERVICE_AUDIO,
+	ZZAPP_PERF_SERVICE_SVC,
+	ZZAPP_PERF_SERVICE_COUNT
+} zzapp_perf_service_t;
+
+typedef struct {
+	uint32_t samples;
+	uint32_t max;
+	uint32_t histogram[ZZAPP_PERF_HISTOGRAM_BUCKETS];
+} zzapp_kernel_perf_metric_t;
+
+typedef struct {
+	zzapp_kernel_perf_metric_t switch_cycles;
+	zzapp_kernel_perf_metric_t sgi_to_service;
+	zzapp_kernel_perf_metric_t sdk_enqueue_to_start;
+	zzapp_kernel_perf_metric_t service[ZZAPP_PERF_SERVICE_COUNT];
+	uint32_t sgis;
+	uint32_t queued_tasks;
+	uint32_t audio_low_water;
+	uint32_t audio_starved;
+	uint32_t audio_underruns;
+	uint32_t tlb_instruction_refills;
+	uint32_t tlb_data_refills;
+} zzapp_kernel_perf_snapshot_t;
+
+typedef struct {
+	zzapp_kernel_perf_snapshot_t total;
+	uint32_t service_start[ZZAPP_PERF_SERVICE_COUNT];
+	uint32_t sgi_stamp;
+	uint32_t last_report_ms;
+	uint32_t report_count;
+	uint32_t report_pending;
+	uint32_t report_force;
+	uint32_t report_ready;
+	uint32_t sgi_pending;
+	uint32_t tlb_instruction_stamp;
+	uint32_t tlb_data_stamp;
+	uint32_t tlb_slot;
+	char report_text[512];
+	uint32_t audio_low_water[ZZAPP_KERNEL_APP_SLOTS];
+	uint32_t audio_starved[ZZAPP_KERNEL_APP_SLOTS];
+	uint32_t audio_underruns[ZZAPP_KERNEL_APP_SLOTS];
+	uint32_t tlb_instruction_refills[ZZAPP_KERNEL_APP_SLOTS];
+	uint32_t tlb_data_refills[ZZAPP_KERNEL_APP_SLOTS];
+} zzapp_kernel_perf_t;
+#endif
+
 typedef enum {
 	ZZAPP_KERNEL_DISPATCH_TICK = 0,
 	ZZAPP_KERNEL_DISPATCH_DOORBELL,
@@ -127,6 +181,9 @@ typedef struct {
 	uint32_t gl_generation;
 	uint32_t direct_audio_count;
 	zzapp_kernel_resources_t resources[ZZAPP_KERNEL_APP_SLOTS];
+#if ZZAPP_PERF_COUNTERS
+	zzapp_kernel_perf_t perf;
+#endif
 } zzapp_kernel_t;
 
 void zzapp_kernel_init(zzapp_kernel_t *kernel);
@@ -154,6 +211,40 @@ int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t slot,
 void zzapp_kernel_advance(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 void zzapp_kernel_service_due(zzapp_kernel_t *kernel);
 int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
+
+#if ZZAPP_PERF_COUNTERS
+void zzapp_kernel_perf_sgi_raised(zzapp_kernel_t *kernel, uint32_t stamp);
+void zzapp_kernel_perf_sgi_started(zzapp_kernel_t *kernel, uint32_t stamp);
+void zzapp_kernel_perf_tasks_queued(zzapp_kernel_t *kernel, uint32_t count);
+void zzapp_kernel_perf_sdk_started(zzapp_kernel_t *kernel, uint32_t enqueue_stamp,
+				   uint32_t stamp);
+void zzapp_kernel_perf_service_begin(zzapp_kernel_t *kernel,
+				      zzapp_perf_service_t service,
+				      uint32_t stamp);
+void zzapp_kernel_perf_service_end(zzapp_kernel_t *kernel,
+				    zzapp_perf_service_t service,
+				    uint32_t stamp);
+void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel, uint32_t slot,
+			      uint32_t low_water, uint32_t starved,
+			      uint32_t underruns);
+void zzapp_kernel_perf_finish_slot(zzapp_kernel_t *kernel, uint32_t slot);
+void zzapp_kernel_perf_snapshot(const zzapp_kernel_t *kernel, uint32_t slot,
+				 zzapp_kernel_perf_snapshot_t *snapshot);
+void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t slot,
+				       int force);
+int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel);
+void zzapp_kernel_perf_print_reports(zzapp_kernel_t *kernel);
+void zzapp_kernel_perf_switch_finished(zzapp_kernel_t *kernel);
+extern volatile uint32_t zzapp_kernel_switch_entry_stamp;
+extern volatile uint32_t zzapp_kernel_switch_exit_stamp;
+extern volatile uint32_t zzapp_kernel_switch_complete;
+extern volatile uint32_t zzapp_kernel_switch_completed_entry_stamp;
+#ifdef ZZAPP_HOST_TEST
+uint32_t zzapp_kernel_perf_test_percentile(
+	const zzapp_kernel_perf_metric_t *metric, uint32_t percentile);
+#endif
+#endif
+
 
 int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot);

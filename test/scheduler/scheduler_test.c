@@ -8,6 +8,15 @@
 
 static int failures;
 
+#if ZZAPP_PERF_COUNTERS
+static uint32_t enqueue_stamp;
+
+uint32_t taskq_perf_enqueue_stamp(void)
+{
+  return enqueue_stamp;
+}
+#endif
+
 static void expect_u32(const char *n, uint32_t a, uint32_t e)
 {
   if (a != e) { printf("%s: got %u expected %u\n", n, a, e); failures++; }
@@ -55,6 +64,9 @@ static void test_enqueue_fills_and_queues(void)
   taskq_t q;
   int s;
   taskq_init(&q);
+#if ZZAPP_PERF_COUNTERS
+  enqueue_stamp = 0x12345678u;
+#endif
   s = taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT,
                     0x100u, 32u, 0x200u, 64u, 0xAAu, 0xBBu, NULL, 0u);
   expect_int("enq_slot0", s, 0);
@@ -62,6 +74,10 @@ static void test_enqueue_fills_and_queues(void)
   expect_u32("enq_opcode", q.descs[0].opcode, TASKQ_OP_CRYPTO_KX);
   expect_u32("enq_in_addr", q.descs[0].in_addr, 0x100u);
   expect_u32("enq_cookie", q.descs[0].user_cookie, 0xBBu);
+#if ZZAPP_PERF_COUNTERS
+  expect_u32("enq_stamp_before_publish", q.descs[0].perf_enqueue_stamp,
+             0x12345678u);
+#endif
   expect_u32("enq_cursor", q.enqueue_cursor, 1u);
 }
 
@@ -190,6 +206,9 @@ static void test_claim_short_skips_long(void)
   s = taskq_claim_short(&q);
   expect_int("claim_short_slot1", s, 1);
   expect_u32("claim_short_left_long", q.descs[0].state, TASK_QUEUED);
+#if ZZAPP_PERF_COUNTERS
+  expect_u32("core0_drained_queue_publications", q.perf_queued_count, 2u);
+#endif
 }
 
 static void test_complete_sets_done_and_payload(void)

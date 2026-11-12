@@ -221,6 +221,9 @@ struct zzapp_service_runtime {
 	uint32_t audio_stream_epoch;
 	int audio_ahi_route;
 	uint32_t audio_host_tail_seen;
+#if ZZAPP_PERF_COUNTERS
+	uint8_t audio_low_water_latched;
+#endif
 	enum zzapp_wait_kind wait_kind;
 	uint32_t wait_value;
 	uint64_t wait_deadline;
@@ -325,6 +328,21 @@ __attribute__((weak)) zzapp_kernel_t *zzapp_runtime_kernel(void)
 {
 	return &service_fallback_kernel;
 }
+
+#if ZZAPP_PERF_COUNTERS
+__attribute__((weak)) void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel,
+						     uint32_t slot,
+						     uint32_t low_water,
+						     uint32_t starved,
+						     uint32_t underruns)
+{
+	(void)kernel;
+	(void)slot;
+	(void)low_water;
+	(void)starved;
+	(void)underruns;
+}
+#endif
 
 __attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
 {
@@ -829,6 +847,21 @@ __attribute__((weak)) zzapp_kernel_t *zzapp_runtime_kernel(void)
 {
 	return &service_test_kernel;
 }
+
+#if ZZAPP_PERF_COUNTERS
+__attribute__((weak)) void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel,
+						     uint32_t slot,
+						     uint32_t low_water,
+						     uint32_t starved,
+						     uint32_t underruns)
+{
+	(void)kernel;
+	(void)slot;
+	(void)low_water;
+	(void)starved;
+	(void)underruns;
+}
+#endif
 
 __attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
 {
@@ -2655,6 +2688,18 @@ static int app_audio_snapshot_for(uint32_t producer_slot,
 	source->sample_rate = ZZAPP_AUDIO_RATE;
 	source->channels = 2U;
 	source->sample_format = 1U; /* SDK_AUDIO_SAMPLE_FORMAT_S16LE */
+#if ZZAPP_PERF_COUNTERS
+	if (source->produced_bytes - source->staged_bytes <= source->capacity / 4U) {
+		if (!state->audio_low_water_latched) {
+			zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
+						(uint32_t)(state - runtime), 1U, 0U,
+						0U);
+			state->audio_low_water_latched = 1U;
+		}
+	} else {
+		state->audio_low_water_latched = 0U;
+	}
+#endif
 	return 1;
 }
 
@@ -2713,6 +2758,40 @@ static void app_audio_retire_reserved(uint32_t bytes)
 	app_audio_retire_for(AUDIO_FABRIC_SLOT_RESERVED, bytes);
 }
 
+#if ZZAPP_PERF_COUNTERS
+void audio_fabric_starvation_event(uint32_t producer_slot)
+{
+	struct zzapp_service_runtime *state = audio_runtime(producer_slot);
+
+	if (state)
+		zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
+					(uint32_t)(state - runtime), 0U, 1U, 0U);
+}
+#endif
+
+static void app_audio_underrun_for(uint32_t producer_slot)
+{
+#if ZZAPP_PERF_COUNTERS
+	struct zzapp_service_runtime *state = audio_runtime(producer_slot);
+
+	if (state)
+		zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
+					(uint32_t)(state - runtime), 0U, 0U, 1U);
+#else
+	(void)producer_slot;
+#endif
+}
+
+static void app_audio_underrun_mailbox(void)
+{
+	app_audio_underrun_for(AUDIO_FABRIC_SLOT_MAILBOX);
+}
+
+static void app_audio_underrun_reserved(void)
+{
+	app_audio_underrun_for(AUDIO_FABRIC_SLOT_RESERVED);
+}
+
 static void app_audio_nop(void)
 {
 }
@@ -2721,7 +2800,7 @@ static const struct audio_fabric_producer_ops app_audio_mailbox_ops = {
 	.snapshot = app_audio_snapshot_mailbox,
 	.stage = app_audio_stage_mailbox,
 	.retire = app_audio_retire_mailbox,
-	.underrun = app_audio_nop,
+	.underrun = app_audio_underrun_mailbox,
 	.gone = app_audio_nop,
 	.tail_real = app_audio_nop,
 	.tail_drained = app_audio_nop
@@ -2731,7 +2810,7 @@ static const struct audio_fabric_producer_ops app_audio_reserved_ops = {
 	.snapshot = app_audio_snapshot_reserved,
 	.stage = app_audio_stage_reserved,
 	.retire = app_audio_retire_reserved,
-	.underrun = app_audio_nop,
+	.underrun = app_audio_underrun_reserved,
 	.gone = app_audio_nop,
 	.tail_real = app_audio_nop,
 	.tail_drained = app_audio_nop
@@ -2782,6 +2861,17 @@ static void audio_pump_ahi_window(void)
 		return;
 	available = (source_write - source_staged) * 4U;
 	free_bytes = ZZAPP_AUDIO_CAP - (host_head - host_tail);
+#if ZZAPP_PERF_COUNTERS
+	if (available <= ZZAPP_AUDIO_CAP / 4U) {
+		if (!current_runtime()->audio_low_water_latched) {
+			zzapp_kernel_perf_audio(zzapp_runtime_kernel(), service_slot(),
+						1U, 0U, 0U);
+			current_runtime()->audio_low_water_latched = 1U;
+		}
+	} else {
+		current_runtime()->audio_low_water_latched = 0U;
+	}
+#endif
 	while (copied < available && copied < free_bytes) {
 		uint32_t src_at = (source_staged * 4U + copied) %
 			(ZZAPP_AUDIO_FRAMES * 4U);
@@ -2840,8 +2930,9 @@ static void audio_detach(void)
 #endif
 	revoke_audio_grant();
 #ifndef ZZAPP_HOST_TEST
-	if (!was_ahi_route)
+	if (!was_ahi_route) {
 		audio_fabric_producer_detach(current_runtime()->audio_slot);
+	}
 	if (current_runtime()->audio_block)
 		surface_allocator_free((uint32_t)(uintptr_t)current_runtime()->audio_block);
 #endif
@@ -2856,6 +2947,9 @@ static void audio_detach(void)
 	current_runtime()->audio_ahi_staged_frame = 0U;
 	current_runtime()->audio_ahi_route = 0;
 	current_runtime()->audio_host_tail_seen = 0U;
+#if ZZAPP_PERF_COUNTERS
+	current_runtime()->audio_low_water_latched = 0U;
+#endif
 	zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_slot());
 	zzapp_proc_slot(service_slot())->audio_direct = 0U;
 	if (have_window()) {
@@ -2921,6 +3015,9 @@ static int audio_attach(void)
 	current_runtime()->audio_ahi_staged_frame = 0U;
 	current_runtime()->audio_slot = slot;
 	current_runtime()->audio_host_tail_seen = 0U;
+#if ZZAPP_PERF_COUNTERS
+	current_runtime()->audio_low_water_latched = 0U;
+#endif
 	if (current_runtime()->audio_ahi_route) {
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HEAD_OFF, 0U);
 		win_put32(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF, 0U);
@@ -3402,6 +3499,11 @@ static void audio_core1_poll_all(void)
 	uint32_t slot;
 	uint32_t selected = selected_slot[service_context()];
 
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+	zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(),
+					ZZAPP_PERF_SERVICE_AUDIO,
+					scheduler_perf_stamp());
+#endif
 	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
 		select_slot(slot);
 		if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE) {
@@ -3413,6 +3515,11 @@ static void audio_core1_poll_all(void)
 		if (current_runtime()->audio_request != AUDIO_REQUEST_CLOSE_QUIESCED)
 			audio_pump_ahi_window();
 	}
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+	zzapp_kernel_perf_service_end(zzapp_runtime_kernel(),
+				      ZZAPP_PERF_SERVICE_AUDIO,
+				      scheduler_perf_stamp());
+#endif
 	select_slot(selected);
 }
 

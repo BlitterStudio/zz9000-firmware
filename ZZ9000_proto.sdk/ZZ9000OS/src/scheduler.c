@@ -71,6 +71,14 @@ static void taskq_acquire_barrier(void)
 }
 #endif
 
+#if ZZAPP_PERF_COUNTERS
+uint32_t __attribute__((weak)) taskq_perf_enqueue_stamp(void)
+{
+  return 0U;
+}
+#endif
+
+
 /* ---- coherency stress model (used by the Phase 0 two-core torture harness) ---- */
 uint32_t taskq_stress_fill(uint32_t seed, uint32_t index)
 {
@@ -94,6 +102,9 @@ void taskq_init(taskq_t *q)
     q->descs[i].state = TASK_FREE;
   }
   q->enqueue_cursor = 0;
+#if ZZAPP_PERF_COUNTERS
+  q->perf_queued_count = 0;
+#endif
 }
 
 int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
@@ -122,6 +133,10 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
       d->out_cap = out_cap;
       d->request_id = request_id;
       d->user_cookie = user_cookie;
+#if ZZAPP_PERF_COUNTERS
+      d->perf_enqueue_stamp = taskq_perf_enqueue_stamp();
+      (void)__atomic_add_fetch(&q->perf_queued_count, 1U, __ATOMIC_RELEASE);
+#endif
       d->result_status = 0;
       d->result_len = 0;
       /* Copy the opaque input params before publishing, so a consumer that

@@ -1202,6 +1202,9 @@ static void audio_fabric_compositor_fill(void)
 #endif
 				s->underruns =
 					fabric_underrun_bump(s->underruns);
+#if ZZAPP_PERF_COUNTERS
+				audio_fabric_starvation_event(i);
+#endif
 			}
 		}
 #ifdef AUDIO_FABRIC_BENCH

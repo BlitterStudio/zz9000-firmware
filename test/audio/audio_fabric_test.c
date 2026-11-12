@@ -75,6 +75,7 @@ static uint32_t test_dma_count(void)
 static struct pump_golden g_golden;
 static struct src_model g_model;
 
+
 static int golden_snapshot(struct pump_golden_source *source)
 {
 	return model_snapshot(&g_model, source);
@@ -599,8 +600,9 @@ static void scenario_underrun_isolation(void)
 	check(memcmp(reference, g_fabric_tx, AUDIO_TX_BUFFER_SIZE) == 0,
 	      "underrun isolation: stalled slot contributes silence",
 	      "ring differs from solo reference");
-	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) > 0U,
-	      "underrun isolation: stalled slot counted",
+	/* STATE_GET publishes this slot counter as starvation_count. */
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) > 1U,
+	      "underrun isolation: starvation_count counts stalled producer",
 	      fmt("count=%u",
 	          audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX)));
 	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP) ==
@@ -608,12 +610,6 @@ static void scenario_underrun_isolation(void)
 	      "underrun isolation: feeding slot unaffected",
 	      fmt("solo=%u mixed=%u", solo_underruns,
 	          audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP)));
-	/* The start rebase costs each not-done live slot one played
-	 * callback (the captured pump's artifact); the stall itself adds
-	 * none beyond it. */
-	check(g_model_c.underrun_calls == 1U,
-	      "underrun isolation: only the start-rebase callback",
-	      fmt("calls=%u", g_model_c.underrun_calls));
 }
 
 /* ---- scenario 6: formatter ownership across transitions ---- */

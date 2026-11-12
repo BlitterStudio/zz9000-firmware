@@ -131,6 +131,9 @@ struct zzapp_host_slot {
     volatile uint32_t api_calls;
     volatile uint32_t in_api;
     volatile uint32_t service_due;
+#if ZZAPP_PERF_COUNTERS
+    uint8_t perf_svc_sampled;
+#endif
     uint32_t seen_api_calls;
     uint64_t api_entered;
     uint64_t last_tick;
@@ -158,6 +161,7 @@ static struct zzapp_host_slot g_host[ZZAPP_AS_SLOT_COUNT];
 static zzapp_proc_t g_proc[ZZAPP_AS_SLOT_COUNT];
 static zzapp_kernel_t g_kernel;
 static int g_cold_restarts;
+static int g_finish_tlb_on_stop = 1;
 static uint8_t g_api_parked[ZZAPP_AS_SLOT_COUNT];
 
 /* Host tests may inject work at the system-thread handoff point. */
@@ -752,8 +756,11 @@ static void request_stop(uint32_t slot, uint32_t fault, uint32_t pc,
 
 static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
                             uint32_t sp, uint32_t lr, uint32_t far,
-                            uint32_t fsr, uint32_t cpsr)
+                            uint32_t fsr, uint32_t cpsr, int finish_tlb)
 {
+#if !ZZAPP_PERF_COUNTERS || defined(ZZAPP_HOST_TEST)
+    (void)finish_tlb;
+#endif
     struct zzapp_host_slot *host = host_slot(slot);
     struct zzapp_coherent *coh = coherent(slot);
 
@@ -768,6 +775,9 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
     snapshot_stop_diagnostics(slot);
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
+    if (finish_tlb)
+        zzapp_kernel_perf_finish_slot(&g_kernel, slot);
+    zzapp_kernel_perf_request_report(&g_kernel, slot, 1);
 #endif
     life32(ZZAPP_LIFE_LR_OFF, lr);
     life32(ZZAPP_LIFE_FAR_OFF, far);
@@ -825,7 +835,8 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
 static void force_stop(uint32_t fault, uint32_t pc, uint32_t sp,
                        uint32_t lr, uint32_t far, uint32_t fsr, uint32_t cpsr)
 {
-    force_stop_slot(current_slot(), fault, pc, sp, lr, far, fsr, cpsr);
+    force_stop_slot(current_slot(), fault, pc, sp, lr, far, fsr, cpsr,
+                    g_finish_tlb_on_stop);
 }
 
 static void complete_pending_stop(uint32_t slot)
@@ -838,7 +849,7 @@ static void complete_pending_stop(uint32_t slot)
         return;
     force_stop_slot(slot, host->pending_fault, host->pending_pc,
                     host->pending_sp, host->pending_lr, host->pending_far,
-                    host->pending_fsr, host->pending_cpsr);
+                    host->pending_fsr, host->pending_cpsr, 1);
 }
 
 static void maybe_expire_fault(uint64_t now)
@@ -1142,6 +1153,11 @@ void zzapp_host_yield_wait(void)
         return;
     }
     g_api_parked[slot] = zzapp_services_wait_registered(slot) ? 1u : 0u;
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+    if (g_kernel.api_lock_depth == 1U && host->perf_svc_sampled)
+        zzapp_kernel_perf_service_end(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
+                                      scheduler_perf_stamp());
+#endif
     (void)zzapp_kernel_api_block(&g_kernel, slot);
     if (!g_api_parked[slot])
         (void)zzapp_kernel_sleep(&g_kernel, slot, g_kernel.now + 1U);
@@ -1154,6 +1170,11 @@ void zzapp_host_yield_wait(void)
     __asm__ __volatile__("svc 0" ::: "memory");
     api_lock_until_acquired(slot);
     resume_parked_api(slot);
+#if ZZAPP_PERF_COUNTERS
+    if (host->perf_svc_sampled)
+        zzapp_kernel_perf_service_begin(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
+                                        scheduler_perf_stamp());
+#endif
 #else
     if (!g_api_parked[slot]) {
         api_lock_until_acquired(slot);
@@ -1168,6 +1189,11 @@ void zzapp_host_sleep(uint32_t us)
     if (zzapp_kernel_current_thread() < 0)
         return;
     g_api_parked[slot] = 1u;
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+    if (g_kernel.api_lock_depth == 1U && host_slot(slot)->perf_svc_sampled)
+        zzapp_kernel_perf_service_end(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
+                                      scheduler_perf_stamp());
+#endif
     (void)zzapp_kernel_api_block(&g_kernel, slot);
     (void)zzapp_kernel_sleep(&g_kernel, slot,
         g_kernel.now + (uint64_t)((us + 999u) / 1000u));
@@ -1175,6 +1201,11 @@ void zzapp_host_sleep(uint32_t us)
     __asm__ __volatile__("svc 0" ::: "memory");
     api_lock_until_acquired(slot);
     resume_parked_api(slot);
+#if ZZAPP_PERF_COUNTERS
+    if (host_slot(slot)->perf_svc_sampled)
+        zzapp_kernel_perf_service_begin(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
+                                        scheduler_perf_stamp());
+#endif
 #endif
 }
 
@@ -1201,6 +1232,13 @@ void zzapp_api_enter(void)
         contended = api_lock_until_acquired(slot);
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
         zzapp_svc_gl_telemetry_lock_end(slot, contended);
+        if (g_kernel.api_lock_depth == 1U) {
+            host->perf_svc_sampled = zzapp_svc_counters_sampled(slot);
+            if (host->perf_svc_sampled)
+                zzapp_kernel_perf_service_begin(&g_kernel,
+                                                ZZAPP_PERF_SERVICE_SVC,
+                                                scheduler_perf_stamp());
+        }
 #else
         (void)contended;
 #endif
@@ -1225,7 +1263,16 @@ void zzapp_api_leave(void)
     if (host->in_api)
         host->in_api--;
     if (zzapp_kernel_current_thread() >= 0) {
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+        if (g_kernel.api_lock_depth == 1U && host->perf_svc_sampled)
+            zzapp_kernel_perf_service_end(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
+                                          scheduler_perf_stamp());
+#endif
         (void)zzapp_kernel_api_unlock(&g_kernel, slot);
+#if ZZAPP_PERF_COUNTERS
+        if (g_kernel.api_lock_depth == 0U)
+            host->perf_svc_sampled = 0U;
+#endif
     }
     if (!host->in_api && host->service_due) {
         host->service_due = 0u;
@@ -1592,6 +1639,10 @@ void zzapp_worker_hook(void)
     if (coherent(selected)->reset_request)
         return;
     zzapp_services_poll();
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+    zzapp_kernel_perf_switch_finished(&g_kernel);
+    (void)zzapp_kernel_perf_emit_reports(&g_kernel);
+#endif
 #ifdef ZZAPP_HOST_TEST
     scheduler_core1_service_from_app();
 #endif
@@ -1725,6 +1776,7 @@ void zzapp_on_core1_restart(void)
     uint32_t slot;
     uint32_t selected = zzapp_services_current_slot();
 
+    g_finish_tlb_on_stop = 0;
     for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
         zzapp_services_select_slot(slot);
         if (coherent(slot)->running) {
@@ -1735,6 +1787,7 @@ void zzapp_on_core1_restart(void)
             zzapp_services_on_reset();
         }
     }
+    g_finish_tlb_on_stop = 1;
     zzapp_services_select_slot(selected);
     g_cold_restarts++;
 }
@@ -1817,6 +1870,8 @@ void zzapp_host_exit(int code)
     host->exit_code = (uint32_t)code;
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
+    zzapp_kernel_perf_finish_slot(&g_kernel, slot);
+    zzapp_kernel_perf_request_report(&g_kernel, slot, 1);
 #endif
 #ifndef ZZAPP_HOST_TEST
     struct zzapp_coherent *coh = coherent(slot);

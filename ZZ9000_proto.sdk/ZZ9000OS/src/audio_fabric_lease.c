@@ -27,6 +27,13 @@
 #include "sdk_smp_lock.h"
 #include "xil_cache.h"
 
+#if ZZAPP_PERF_COUNTERS
+__attribute__((weak)) void audio_fabric_starvation_event(uint32_t slot)
+{
+	(void)slot;
+}
+#endif
+
 /* Heartbeat budget (R11/R13): a producer token that goes this stale
  * revokes the lease. One ISR tick is SDK_AUDIO_RING_PERIOD_US (20 ms),
  * so the default tolerates a mailbox poll round-trip plus scheduler
