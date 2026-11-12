@@ -44,7 +44,7 @@ export MSYS_NO_PATHCONV=1
 
 mkdir -p "$OUT"
 
-docker run --rm -v "$IF_DOCKER:/if:ro" -v "$MG_DOCKER:/mg:ro" -v "$OUT_DOCKER:/out" gcc:13 sh -ec '
+timeout 660 docker run --rm -v "$IF_DOCKER:/if:ro" -v "$MG_DOCKER:/mg:ro" -v "$OUT_DOCKER:/out" gcc:13 timeout 600 sh -ec '
   gcc -std=c99 -Wall -Wextra -Werror -I /mg/ZZ9000_proto.sdk/ZZ9000OS/src \
       /if/test/rix_xsim/rix_xsim_gen.c \
       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_cmd.c \
@@ -136,6 +136,25 @@ if [ "$MATRIX" != fifo ]; then
     run_scene "$scene" "$OUT" mmio
     compare_scene "$scene" "$OUT_WIN/$scene.ppm" mmio
   done
+  # The FSC memory-fetch path carries only two FIFO words per envelope.
+  # Boundary-aware chunks end after complete parser commands and are padded
+  # with NOPs to the FSC's 64-byte memory-transfer unit.
+  mkdir -p "$OUT/memfetch"
+  cp "$OUT/textures.hex" "$OUT/memfetch/"
+  for scene in $SCENES; do
+    cp "$OUT/${scene}_memfetch.hex" "$OUT/${scene}_memfetch.ddr" "$OUT/memfetch/"
+    cp "$OUT/$scene.ppm" "$OUT/${scene}_inline.ppm"
+    run_scene "$scene" "$OUT/memfetch" memfetch MEMFETCH=1
+    compare_scene "$scene" "$OUT_WIN/memfetch/$scene.ppm" memfetch
+    cmp "$OUT/${scene}_inline.ppm" "$OUT/memfetch/$scene.ppm"
+  done
+  mkdir -p "$OUT/memfetch-split"
+  cp "$OUT/textures.hex" "$OUT/ef-stress_memfetch-split.hex" \
+     "$OUT/ef-stress_memfetch-split.ddr" "$OUT/memfetch-split/"
+  run_scene ef-stress "$OUT/memfetch-split" memfetch-split MEMFETCH=split
+  compare_scene ef-stress "$OUT_WIN/memfetch-split/ef-stress.ppm" memfetch-split
+  cmp "$OUT/ef-stress_inline.ppm" "$OUT/memfetch-split/ef-stress.ppm"
+  echo "memfetch reproduces every inline frame bit-exactly; split-command stress also matches"
   # COLOR_BYTE_SWAP preserves the renderer's logical RGB565 values while
   # storing every pixel in display (big-endian) byte order. ef-lm covers a
   # blend read/modify/write against the byte-order-invariant white base;
@@ -155,6 +174,15 @@ if [ "$MATRIX" != fifo ]; then
   done
   run_scene ef-lm-tmu2 "$OUT" tmu2 RASTERIX_TMU_COUNT=2
   compare_scene ef-lm-tmu2 "$OUT_WIN/ef-lm-tmu2.ppm" tmu2
+  cp "$OUT/ef-lm-tmu2.ppm" "$OUT/ef-lm-tmu2_inline.ppm"
+  mkdir -p "$OUT/memfetch-tmu2"
+  cp "$OUT/textures.hex" "$OUT/ef-lm-tmu2_memfetch.hex" \
+     "$OUT/ef-lm-tmu2_memfetch.ddr" "$OUT/memfetch-tmu2/"
+  run_scene ef-lm-tmu2 "$OUT/memfetch-tmu2" memfetch-tmu2 \
+            RASTERIX_TMU_COUNT=2 MEMFETCH=1
+  compare_scene ef-lm-tmu2 "$OUT_WIN/memfetch-tmu2/ef-lm-tmu2.ppm" \
+                memfetch-tmu2
+  cmp "$OUT/ef-lm-tmu2_inline.ppm" "$OUT/memfetch-tmu2/ef-lm-tmu2.ppm"
 
   # Transport coverage beyond plain MMIO-paced submission:
   #  - SHARED=1 routes every renderer read through one in-order response
@@ -205,7 +233,7 @@ if [ "$MATRIX" != stream ]; then
   }
   grep -E "^FIFO_PATH_TOPOLOGY" "$OUT/fifo_path_build.log"
   for scene in $SCENES; do
-    for transport in mmio pl330; do
+    for transport in mmio pl330 memfetch; do
       run_fifo_scene "$scene" "$transport"
       compare_scene "$scene" "$OUT_WIN/${scene}_fifo-$transport.ppm" "fifo-$transport"
       cmp "$OUT/${scene}_fifo-mmio.ppm" "$OUT/${scene}_fifo-$transport.ppm"

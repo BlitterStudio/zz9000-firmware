@@ -9,9 +9,9 @@ rem   run_fifo_path.bat build ROOT WORK
 rem       Generate the block design, export it, and compile and elaborate it
 rem       with the RasterIX EF wrapper and tb_zz9k_rasterix (FIFO_PATH).
 rem   run_fifo_path.bat run WORK OUT SCENE LATENCY TRANSPORT
-rem       Replay OUT\SCENE.hex as the packets in OUT\SCENE.fifo over TRANSPORT
-rem       (mmio, pl330 or pl330-early); writes OUT\SCENE_fifo-TRANSPORT.ppm
-rem       (except pl330-early) and OUT\SCENE_fifo-TRANSPORT.xsim.log.
+rem       Replay OUT\SCENE.hex / .fifo inline, or the generated memfetch
+rem       envelope and DDR files for TRANSPORT=memfetch.  Writes
+rem       OUT\SCENE_fifo-TRANSPORT.ppm (except pl330-early).
 rem
 rem WORK must be an absolute path without spaces.
 setlocal EnableExtensions
@@ -86,8 +86,16 @@ if /I "%TRANSPORT%"=="irq" (
   set SIM_TRANSPORT=mmio
   set FIFO_IRQ_ARG=--testplusarg "FIFO_IRQ=1"
 )
+set CMD_NAME=%SCENE%.hex
+set FIFO_NAME=%SCENE%.fifo
+set CMD_DDR_ARG=
+if /I "%TRANSPORT%"=="memfetch" (
+  set CMD_NAME=%SCENE%_memfetch.hex
+  set FIFO_NAME=%SCENE%_memfetch.fifo
+  set CMD_DDR_ARG=--testplusarg "CMD_DDR=%OUT_FWD%/%SCENE%_memfetch.ddr"
+)
 call D:\Xilinx\Vivado\2018.3\settings64.bat
 if errorlevel 1 exit /b %errorlevel%
 cd /d "%WORK%\bd\export\rix_fifo_path\xsim"
-call xsim tb_fifo_path -runall -log "%OUT%\%SCENE%_fifo-%TRANSPORT%.xsim.log" --testplusarg "CMD=%OUT_FWD%/%SCENE%.hex" --testplusarg "FIFO=%OUT_FWD%/%SCENE%.fifo" --testplusarg "FIFO_TRANSPORT=%SIM_TRANSPORT%" %FIFO_IRQ_ARG% --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%_fifo-%TRANSPORT%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=0"
+call xsim tb_fifo_path -runall -log "%OUT%\%SCENE%_fifo-%TRANSPORT%.xsim.log" --testplusarg "CMD=%OUT_FWD%/%CMD_NAME%" --testplusarg "FIFO=%OUT_FWD%/%FIFO_NAME%" --testplusarg "FIFO_TRANSPORT=%SIM_TRANSPORT%" %CMD_DDR_ARG% %FIFO_IRQ_ARG% --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%_fifo-%TRANSPORT%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=0"
 exit /b %errorlevel%

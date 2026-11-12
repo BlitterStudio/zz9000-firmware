@@ -40,6 +40,12 @@ if defined TRACE_AXI set TRACE_ARGS=--testplusarg "TRACE_AXI=%TRACE_AXI%"
 if defined DEADLOCK_LIMIT set TRACE_ARGS=%TRACE_ARGS% --testplusarg "DEADLOCK_LIMIT=%DEADLOCK_LIMIT%"
 if defined RAND_SEED set TRACE_ARGS=%TRACE_ARGS% --testplusarg "RAND_SEED=%RAND_SEED%"
 if defined RAND_LATENCY set TRACE_ARGS=%TRACE_ARGS% --testplusarg "RAND_LATENCY=%RAND_LATENCY%"
+set SYNTH_CMD=%OUT_FWD%/%SCENE%.hex
+set MEMFETCH_ARG=
+if /I "%MEMFETCH%"=="1" set SYNTH_CMD=%OUT_FWD%/%SCENE%_memfetch.hex
+if /I "%MEMFETCH%"=="1" set MEMFETCH_ARG=--testplusarg "CMD_DDR=%OUT_FWD%/%SCENE%_memfetch.ddr"
+if /I "%MEMFETCH%"=="split" set SYNTH_CMD=%OUT_FWD%/%SCENE%_memfetch-split.hex
+if /I "%MEMFETCH%"=="split" set MEMFETCH_ARG=--testplusarg "CMD_DDR=%OUT_FWD%/%SCENE%_memfetch-split.ddr"
 set CAPTURE_CMDS=
 set CAPTURE_DDR=
 if exist "%OUT%\%SCENE%\commands.hex" (
@@ -86,6 +92,6 @@ if defined CAPTURE_CMDS (
     call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %COLOR_SWAP_ARG% %DISABLE_ARG% %TRACE_ARGS%
   )
 ) else (
-  call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMD=%OUT_FWD%/%SCENE%.hex" --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %COLOR_SWAP_ARG% %DISABLE_ARG% %TRACE_ARGS%
+  call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMD=%SYNTH_CMD%" %MEMFETCH_ARG% --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %COLOR_SWAP_ARG% %DISABLE_ARG% %TRACE_ARGS%
 )
 exit /b %errorlevel%

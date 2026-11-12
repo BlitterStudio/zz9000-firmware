@@ -59,6 +59,10 @@
 #define TEXTURE_PAGES \
     (SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES + TEXENV_TEXTURE_PAGES)
 #define TEXTURE_BYTES (TEXTURE_PAGE_BYTES * TEXTURE_PAGES)
+
+#define MEMFETCH_CHUNK_BYTES 1024U
+#define MEMFETCH_SPLIT_CHUNK_BYTES 64U
+#define FSC_MEM_TO_ST1(bytes) (0xb0000000U | (uint32_t)(bytes))
 #define LIGHTMAP_ADDRESS (TEXTURE_ADDRESS + TEXTURE_PAGE_BYTES)
 #define LIGHTMAP_RGB565 0x8410U
 #define STRESS_TEXTURE_ADDRESS \
@@ -132,6 +136,174 @@ static int write_dse_hex(const char *path, const uint8_t *raw, size_t raw_bytes)
         ok = 0;
     }
     return ok;
+}
+
+static size_t command_bytes(const uint8_t *raw, size_t raw_bytes, size_t offset)
+{
+    uint32_t command;
+    size_t words;
+
+    if (offset + 4U > raw_bytes)
+        return 0U;
+    command = get_le32(raw + offset);
+    switch (command >> 28) {
+    case 0U: /* NOP */
+    case 2U: /* framebuffer */
+        words = 1U;
+        break;
+    case 1U: /* register + value */
+        words = 2U;
+        break;
+    case 3U: /* triangle byte count */
+        words = 1U + (size_t)((command & 0x3ffU) >> 2);
+        break;
+    case 4U: /* fog LUT byte count */
+        words = 1U + (size_t)((command & 0x1ffU) >> 2);
+        break;
+    case 5U: /* texture page-address count */
+        words = 1U + (size_t)(command & 0x7ffffU);
+        break;
+    default:
+        return 0U;
+    }
+    return words * 4U <= raw_bytes - offset ? words * 4U : 0U;
+}
+
+static int write_memfetch_files(const char *directory, const char *name,
+                                const uint8_t *raw, size_t raw_bytes,
+                                int split_commands)
+{
+    static uint8_t memory_image[COMMAND_CAPACITY];
+    static uint32_t envelope_words[COMMAND_CAPACITY / 32U];
+    char stem[1024];
+    char envelope_path[1024];
+    char ddr_path[1024];
+    char fifo_path[1024];
+    const size_t target = split_commands ? MEMFETCH_SPLIT_CHUNK_BYTES
+                                         : MEMFETCH_CHUNK_BYTES;
+    size_t source = 0U;
+    size_t image_bytes = 0U;
+    size_t chunk_start = 0U;
+    size_t chunk_bytes = 0U;
+    size_t envelope_count = 0U;
+    size_t bytes;
+    size_t boundary;
+    size_t index;
+    int split_seen = 0;
+    FILE *file;
+    int stem_length;
+
+    stem_length = snprintf(stem, sizeof(stem), "%s_memfetch%s", name,
+                           split_commands ? "-split" : "");
+    if (stem_length < 0 || (size_t)stem_length >= sizeof(stem) ||
+        !make_path(envelope_path, sizeof(envelope_path), directory, stem, ".hex") ||
+        !make_path(ddr_path, sizeof(ddr_path), directory, stem, ".ddr") ||
+        !make_path(fifo_path, sizeof(fifo_path), directory, stem, ".fifo"))
+        return 0;
+
+    memset(memory_image, 0, sizeof(memory_image));
+    if (split_commands) {
+        while (source < raw_bytes) {
+            bytes = command_bytes(raw, raw_bytes, source);
+            if (bytes == 0U)
+                return 0;
+            for (boundary = ((source / target) + 1U) * target;
+                 boundary < source + bytes; boundary += target)
+                split_seen = 1;
+            source += bytes;
+        }
+        if (!split_seen || raw_bytes > sizeof(memory_image))
+            return 0;
+        memcpy(memory_image, raw, raw_bytes);
+        image_bytes = (raw_bytes + 63U) & ~(size_t)63U;
+        if (image_bytes > sizeof(memory_image))
+            return 0;
+        while (chunk_start < image_bytes) {
+            envelope_words[envelope_count * 2U] = FSC_MEM_TO_ST1(target);
+            envelope_words[envelope_count * 2U + 1U] =
+                COMMAND_ADDRESS + (uint32_t)chunk_start;
+            ++envelope_count;
+            chunk_start += target;
+        }
+    } else {
+        source = 0U;
+        while (source < raw_bytes) {
+            bytes = command_bytes(raw, raw_bytes, source);
+            if (bytes == 0U)
+                return 0;
+            if (chunk_bytes != 0U && chunk_bytes + bytes > target) {
+                chunk_bytes = (chunk_bytes + 63U) & ~(size_t)63U;
+                if (chunk_start + chunk_bytes > sizeof(memory_image))
+                    return 0;
+                envelope_words[envelope_count * 2U] = FSC_MEM_TO_ST1(chunk_bytes);
+                envelope_words[envelope_count * 2U + 1U] =
+                    COMMAND_ADDRESS + (uint32_t)chunk_start;
+                ++envelope_count;
+                image_bytes = chunk_start + chunk_bytes;
+                chunk_start = image_bytes;
+                chunk_bytes = 0U;
+            }
+            if (chunk_start + chunk_bytes + bytes > sizeof(memory_image))
+                return 0;
+            memcpy(memory_image + chunk_start + chunk_bytes, raw + source, bytes);
+            chunk_bytes += bytes;
+            source += bytes;
+        }
+        if (chunk_bytes != 0U) {
+            chunk_bytes = (chunk_bytes + 63U) & ~(size_t)63U;
+            if (chunk_start + chunk_bytes > sizeof(memory_image))
+                return 0;
+            envelope_words[envelope_count * 2U] = FSC_MEM_TO_ST1(chunk_bytes);
+            envelope_words[envelope_count * 2U + 1U] =
+                COMMAND_ADDRESS + (uint32_t)chunk_start;
+            ++envelope_count;
+            image_bytes = chunk_start + chunk_bytes;
+        }
+    }
+
+    file = fopen(envelope_path, "w");
+    if (file == NULL)
+        return 0;
+    for (index = 0U; index < envelope_count * 2U; ++index)
+        if (fprintf(file, "%08x\n", (unsigned)envelope_words[index]) < 0) {
+            (void)fclose(file);
+            return 0;
+        }
+    if (fclose(file) != 0)
+        return 0;
+
+    file = fopen(ddr_path, "w");
+    if (file == NULL)
+        return 0;
+    if (fprintf(file, "@%08x\n", COMMAND_ADDRESS) < 0) {
+        (void)fclose(file);
+        return 0;
+    }
+    for (index = 0U; index < image_bytes; ++index)
+        if (fprintf(file, "%02x\n", memory_image[index]) < 0) {
+            (void)fclose(file);
+            return 0;
+        }
+    if (fclose(file) != 0)
+        return 0;
+
+    file = fopen(fifo_path, "w");
+    if (file == NULL)
+        return 0;
+    for (index = 0U; index < envelope_count; ++index)
+        if (fprintf(file, "P 2 0 0\n%08x\n%08x\n",
+                    (unsigned)envelope_words[index * 2U],
+                    (unsigned)envelope_words[index * 2U + 1U]) < 0) {
+            (void)fclose(file);
+            return 0;
+        }
+    if (fclose(file) != 0)
+        return 0;
+
+    printf("%s: memfetch envelopes=%zu command_bytes=%zu padded_bytes=%zu%s\n",
+           name, envelope_count, raw_bytes, image_bytes,
+           split_commands ? " command_split=yes" : " command_boundaries=yes");
+    return envelope_count != 0U;
 }
 
 /* rix_drv.c against a recording FIFO.  Each committed packet becomes
@@ -1562,6 +1734,9 @@ static int generate_scene(const char *directory, const char *name,
         !make_path(fifo_path, sizeof(fifo_path), directory, name, ".fifo") ||
         !write_dse_bin(binary_path, raw, writer.length) ||
         !write_dse_hex(hex_path, raw, writer.length) ||
+        !write_memfetch_files(directory, name, raw, writer.length, 0) ||
+        (scene == 7U &&
+         !write_memfetch_files(directory, name, raw, writer.length, 1)) ||
         !(scene == 9U || write_fifo_trace(fifo_path, raw, writer.length))) {
         return 0;
     }

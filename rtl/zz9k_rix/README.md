@@ -10,7 +10,7 @@ capture, and audio TX/RX share an interconnect on HP2.
 
 Firmware MUST read `IDENTITY` before any other access and require `RIX1`.
 `CONTROL.ENABLE` MUST be set before committing a FIFO packet.  This CSR has no
-command-buffer descriptors, fetcher, completion queue, or interrupt.
+separate command-buffer descriptor engine, completion queue, or interrupt.
 
 | Offset | Name | Description |
 | --- | --- | --- |
@@ -37,10 +37,13 @@ held high; streams MUST NOT request `OP_FRAMEBUFFER SWAP`.
 
 ## Command FIFO (registers `0x83c70000`, data `0x83c80000`)
 
-The command ingress is Xilinx `axi_fifo_mm_s` TX-only, depth 512 words.  Its
+The command ingress is Xilinx `axi_fifo_mm_s` TX-only, depth 4096 words.  Its
 `AXI_STR_TXD` connects directly to RasterIX `s_cmd_axis` (FrameStreamingCore
-ST0).  It is the sole normal command route: `zz9k_cmd_fetcher` and all
-`CMD_ADDR`/`CMD_WORDS`/`CMD_START` protocol are absent.
+ST0).  The FIFO is the sole command ingress: `zz9k_cmd_fetcher` and all
+`CMD_ADDR`/`CMD_WORDS`/`CMD_START` protocol are absent.  The FrameStreamingCore
+can either forward inline words from ST0 to the parser on ST1 or fetch parser
+words from DDR through RasterIX's HP3 AXI master; memory fetch needs no
+additional top-level port.
 
 The FIFO uses the AXI4 data interface (`C_DATA_INTERFACE_TYPE=1`): its
 registers stay on the AXI4-Lite `S_AXI` at `0x83c70000` (GP1 `M08`), while
@@ -60,12 +63,31 @@ MUST start at `0x83c80000`; an INCR burst then covers its beats.
 
 `rix_drv.h` expresses `TDFD` as offset `0x10000` from the register window.
 
-A packet is one complete FrameStreamingCore ST0 sequence: write its two-word
-DSE header/address followed by parser payload words to `TDFD`, execute the
-required ARM barrier, then write the byte count to `TLF`.  Producers MUST wait
-until `TDFV` covers the entire packet and never overrun the FIFO.  Firmware
-samples reset `TDFV`: legacy 512-word cores retain 248-word payload packets,
-while the 4096-word core uses up to 4090 payload words plus the two-word header.
+An inline packet is one complete FrameStreamingCore ST0 sequence: write its
+`0x90000000 | payload_bytes` header, unused address word, and parser payload
+words to `TDFD`, execute the required ARM barrier, then write the total packet
+byte count to `TLF`.  Producers MUST wait until `TDFV` covers the entire packet
+and never overrun the FIFO.  Firmware samples reset `TDFV`: legacy 512-word
+cores retain 248-word payload packets, while the 4096-word core uses up to
+4090 payload words plus the two-word header.
+
+A memory-fetch packet contains only two FIFO words:
+
+1. `0xb0000000 | list_bytes` (`out=ST1`, `in=MEM`, byte count in bits 27:0);
+2. the exact 32-bit DDR byte address of the parser command list.
+
+The list address and byte count MUST be 64-byte aligned.  The FSC converts the
+byte count to 32-bit beats and its linear address generator issues complete
+64-byte INCR transfers; a short final transfer would leave unread response
+beats.  Consequently lists MUST be padded with parser NOP words to a 64-byte
+boundary.  The largest encodable aligned list is `0x0fffffc0` bytes; 16 KiB
+ring chunks are a practical software limit, not a hardware limit.  A fetch
+envelope is itself a complete FIFO packet, so its `TLF` is exactly 8 bytes.
+Multiple envelopes may be queued in order.  The command parser ignores FSC
+`TLAST` and retains its command/argument state across envelopes, so an
+envelope boundary may split a parser command; ending chunks at command
+boundaries is nevertheless RECOMMENDED for diagnostics and independent
+validation.
 
 `TLF` MUST equal the bytes written to `TDFD` since the last accepted `TLF`,
 header words included.  The FIFO drops any other value and sets `ISR.TSE`
@@ -74,22 +96,17 @@ mismatches too, until `TDFR`.  Firmware reads `ISR` after each `TLF` and
 fails the packet on `TSE` or `TPOE` (bit 28).  `TDFR` leaves `ISR` intact, so
 enable clears stale error bits (W1C).
 
-PL330 transport uses a non-cacheable DDR source and the `TDFD` data window,
-with no peripheral handshake.  Firmware MUST first run an integrity/count
-self-test.  It MUST wait for DMA completion and only then write `TLF`.  FIFO
-reset is separate from CSR soft reset.
+Firmware may submit parser words inline or place them in DDR and submit
+memory-fetch envelopes.  Inline MMIO and PL330 transport use the `TDFD` data
+window; PL330 uses a non-cacheable DDR source with no peripheral handshake.
+Firmware MUST first run an integrity/count self-test.  It MUST wait for DMA
+completion and only then write `TLF`.  FIFO reset is separate from CSR soft
+reset.
 
-Firmware (`rix_drv.c`, `mw_ctx.c`) writes every word over MMIO by default.
-`./build_firmware.sh --rasterix MINIGL_RIX_DMA=1` builds the in-firmware PL330
-variant; the module host (`zzm_minigl_host.c`) uses the same program.  Both
-stream payloads of at least 16 words with PL330 channel 6: per 16 words one
-16-beat, 4-byte INCR source burst and one 16-beat INCR destination burst
-(shorter tail), with `DAR` reloaded to `0x83c80000` before each store.  They
-wait for the debug interface to go idle (DMAGO executed), then for channel
-Stopped with `SAR` at the end of the source, and only then write `TLF`.  At
-backend start-up it sends one DMA packet of parser NOPs plus a fence `MEMSET`;
-unless the commit is accepted, the fence pixel lands and the renderer drains,
-it soft-resets the renderer, resets the FIFO and uses MMIO.
+The DDR list MUST be visible to HP3 before its envelope is committed.  A
+non-cacheable list ring needs only the ordering barrier; a cacheable list MUST
+be cleaned to the point of coherency first.  Software MUST NOT overwrite a
+ring chunk until an in-order rendered-pixel fence after that chunk has passed.
 
 ## EF target rules
 
@@ -103,9 +120,12 @@ color/depth `MEMSET`, and then submits triangles.  A one-TMU lightmapped draw
 is two passes: base texture, then lightmap with `ZERO,SRC_COLOR` blending.
 
 `XACPCommandReadCredit.v` is GPL-3.0-or-later and is installed in front of
-every RasterIX crossbar read port (command list reads, colour, depth,
-stencil and both TMUs).  Each reserves response space for a whole burst
-before its AR is issued and accepts R unconditionally, so no read client can
-stall the single in-order HP3 read channel for the others; framebuffer
-writes present W together with AW.  It does not change the FIFO transport
-rules.
+every RasterIX crossbar read port: port 0 command-list reads, ports 1-3
+colour/depth/stencil, and ports 4-5 the two TMUs.  All six ports arbitrate
+through one AXI crossbar output dedicated to HP3; the crossbar permits at most
+eight issued reads.  Each port reserves response space for a whole burst
+before its AR is issued and accepts R unconditionally, so one client cannot
+stall the single shared response channel behind it.  Reservation depths are
+64 beats for command lists, 16 for each framebuffer port, and 32 for each TMU.
+Framebuffer writes present W together with AW.  These credits protect both
+inline and memory-fetch command transport.

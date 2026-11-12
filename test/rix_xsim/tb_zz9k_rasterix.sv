@@ -1,6 +1,7 @@
 `timescale 1ns/1ps
-// Real ZZ9000 RasterIX integration testbench.  The command buffer is an ARM
-// DDR image: FrameStreamingCore header/address followed by parser words.
+// Real ZZ9000 RasterIX integration testbench.  Inline scenes carry the FSC
+// header/address followed by parser words; memfetch scenes place parser words
+// in the DDR model and carry only MEM->ST1 envelopes on the command stream.
 module tb_zz9k_rasterix;
     // Keep low ARM DDR compact while translating MiniGL's physical buffers.
     localparam integer MEM_BYTES = 4 * 1024 * 1024;
@@ -134,8 +135,9 @@ module tb_zz9k_rasterix;
     reg m_cmd_axi_rvalid;
     wire m_cmd_axi_rready;
 `ifdef RASTERIX_VARIANT_EF
-    // EF has no command-read master (commands arrive on s_cmd_axis).  Tie the
-    // legacy model's master side idle so no X reaches the memory models.
+    // EF routes FSC command-list reads through its main AXI master.  It has
+    // no separate legacy command-read master, so tie that unused testbench
+    // interface idle.
     assign m_cmd_axi_arid = 0;
     assign m_cmd_axi_araddr = 0;
     assign m_cmd_axi_arlen = 0;
@@ -395,6 +397,9 @@ module tb_zz9k_rasterix;
                 if ((fifo_packets >= FIFO_TRACE_PACKETS) ||
                     (fifo_total_words + words > FIFO_TRACE_WORDS))
                     $fatal(1, "FIFO trace %0s is too large", name);
+                if (fifo_transport == "memfetch" && words != 2)
+                    $fatal(1, "memfetch FIFO packet %0d has %0d words; TLF must be 8 bytes",
+                           fifo_packets, words);
                 fifo_packet_words[fifo_packets] = words;
                 fifo_packet_dma_first[fifo_packets] = first;
                 fifo_packet_dma_words[fifo_packets] = dma;
@@ -637,6 +642,8 @@ module tb_zz9k_rasterix;
     reg [7:0] texture_memory [0:TEXTURE_POOL_BYTES-1];
     reg [31:0] command_words [0:262143];
     reg [7:0] texture_bytes [0:TEXTURE_BYTES-1];
+    integer memfetch;
+    integer memfetch_ar_count;
     integer i;
     reg color_byte_swap;
     integer latency;
@@ -1186,6 +1193,14 @@ module tb_zz9k_rasterix;
                 $fatal(1, "unknown renderer AXI handshake at cycle %0d", cycle_count);
             if (memory_progress || !dut.renderer.perfBusy) idle_cycles <= 0;
             else idle_cycles <= idle_cycles + 1;
+            if (memfetch && m_axi_arvalid && m_axi_arready &&
+                m_axi_arid[5:3] == 3'd0) begin
+                if (m_axi_araddr[5:0] != 0 || m_axi_arlen != 8'd7 ||
+                    m_axi_arsize != 3'd3 || m_axi_arburst != 2'b01)
+                    $fatal(1, "memfetch AR is not a 64-byte aligned INCR burst: addr=%08x len=%0d size=%0d burst=%0d",
+                           m_axi_araddr, m_axi_arlen, m_axi_arsize, m_axi_arburst);
+                memfetch_ar_count = memfetch_ar_count + 1;
+            end
             if (trace_axi && (cycle_count % 250000) == 0)
                 $display("HEARTBEAT cycle=%0d busy=%b ar=%0d r=%0d aw=%0d w=%0d b=%0d", cycle_count,
                          dut.renderer.perfBusy, dut.dbg_ar_count, dut.dbg_r_count,
@@ -1453,6 +1468,7 @@ module tb_zz9k_rasterix;
     reg [8*512-1:0] commands_file;
     reg [8*512-1:0] ddr_file;
     reg [8*512-1:0] patch_file;
+    reg [8*512-1:0] cmd_ddr_file;
     reg [8*512-1:0] texture_file;
     reg [8*512-1:0] ppm_file;
     reg [8*32-1:0] scene;
@@ -1472,6 +1488,7 @@ module tb_zz9k_rasterix;
     integer timeout;
     integer disable_during_work;
     integer poll_limit;
+    integer envelope_offset;
     reg [15:0] sample0, sample_mid, sample_out;
 
     // Byte-granular color write strobes: every 16-bit pixel lane whose two
@@ -1504,8 +1521,8 @@ module tb_zz9k_rasterix;
         if (!$value$plusargs("FIFO=%s", fifo_file)) $fatal(1, "FIFO_PATH needs FIFO=<scene>.fifo");
         if (!$value$plusargs("FIFO_TRANSPORT=%s", fifo_transport)) fifo_transport = "mmio";
         if (fifo_transport != "mmio" && fifo_transport != "pl330" &&
-            fifo_transport != "pl330-early")
-            $fatal(1, "FIFO_TRANSPORT must be mmio, pl330 or pl330-early");
+            fifo_transport != "pl330-early" && fifo_transport != "memfetch")
+            $fatal(1, "FIFO_TRANSPORT must be mmio, pl330, pl330-early or memfetch");
         load_fifo_trace(fifo_file);
 `else
         s_axi_awaddr = 0; s_axi_awprot = 0; s_axi_awvalid = 0; s_axi_wdata = 0; s_axi_wstrb = 0; s_axi_wvalid = 0; s_axi_bready = 1;
@@ -1516,6 +1533,7 @@ module tb_zz9k_rasterix;
         m_cmd_axi_arready = 0; m_cmd_axi_rid = 0; m_cmd_axi_rdata = 0; m_cmd_axi_rresp = 0; m_cmd_axi_rlast = 0; m_cmd_axi_rvalid = 0;
         cmd_read_active = 0; render_read_active = 0; write_active = 0; write_error = 0; cmd_read_left = 0; render_read_left = 0; write_left = 0;
         render_read_id = 0; render_read_size = 0;
+        memfetch_ar_count = 0;
 `ifdef RASTERIX_VARIANT_EF
         asym_strobe_01 = 0;
         asym_strobe_10 = 0;
@@ -1541,6 +1559,7 @@ module tb_zz9k_rasterix;
         end else
             command_file = commands_file;
         capture_mode = $value$plusargs("DDR=%s", ddr_file);
+        memfetch = $value$plusargs("CMD_DDR=%s", cmd_ddr_file);
         size_probe = $test$plusargs("SIZE_PROBE");
         if ($value$plusargs("PATCH=%s", patch_file)) begin
             if (!$value$plusargs("PATCH_AFTER=%d", patch_after) || patch_after < 0)
@@ -1572,12 +1591,29 @@ module tb_zz9k_rasterix;
         for (i = 0; i < MINIGL_DEPTH_MEMORY_BYTES; i = i + 1) depth_memory[i] = 0;
         for (i = 0; i < TEXTURE_POOL_BYTES; i = i + 1) texture_memory[i] = 0;
         if (capture_mode != 0) load_ddr(ddr_file);
+        if (memfetch != 0) load_ddr(cmd_ddr_file);
         if (texture_file != "") begin
             $readmemh(texture_file, texture_bytes);
             for (i = 0; i < TEXTURE_BYTES; i = i + 1) write_byte(32'h0034_0000 + i, texture_bytes[i]);
         end
         $readmemh(command_file, command_words);
-        if (multi_command != 0) begin
+        if (memfetch != 0) begin
+            cmd_count = 0;
+            while ((cmd_count + 1 < 262144) &&
+                   (command_words[cmd_count][31:28] === 4'hb)) begin
+                if (command_words[cmd_count][27:0] == 0 ||
+                    command_words[cmd_count][5:0] != 0 ||
+                    command_words[cmd_count + 1][5:0] != 0)
+                    $fatal(1, "invalid memfetch envelope at word %0d: %08x %08x",
+                           cmd_count, command_words[cmd_count],
+                           command_words[cmd_count + 1]);
+                cmd_count = cmd_count + 2;
+            end
+            if (cmd_count == 0) $fatal(1, "memfetch file contains no envelopes");
+`ifdef FIFO_PATH
+            cmd_count = 2;
+`endif
+        end else if (multi_command != 0) begin
             cmd_count = 0;
             while ((cmd_count < 262144) && (command_words[cmd_count][31:28] === 4'h9)) begin
                 if (command_words[cmd_count][1:0] != 0)
@@ -1616,8 +1652,19 @@ module tb_zz9k_rasterix;
         submission_offset = 0;
         submission_index = 0;
         while (submission_offset < cmd_count) begin
-            submission_words = (command_words[submission_offset] & 28'h0fff_ffff) / 4 + 2;
-            fifo_submit(submission_offset, submission_words);
+            if (memfetch != 0) begin
+`ifdef FIFO_PATH
+                fifo_submit(0, 2);
+`else
+                for (envelope_offset = 0; envelope_offset < cmd_count;
+                     envelope_offset = envelope_offset + 2)
+                    fifo_submit(envelope_offset, 2);
+`endif
+                submission_words = cmd_count;
+            end else begin
+                submission_words = (command_words[submission_offset] & 28'h0fff_ffff) / 4 + 2;
+                fifo_submit(submission_offset, submission_words);
+            end
             if (disable_during_work && submission_index == 0) begin
                 timeout = 0;
                 axi_read(16'h000c, status);
@@ -1635,6 +1682,8 @@ module tb_zz9k_rasterix;
                 $display("DISABLE_DRAIN busy status preserved: %08x", status);
                 axi_write(16'h0008, color_byte_swap ? 3'b101 : 3'b001);
             end
+            if (memfetch != 0)
+                repeat (16) @(posedge clk);
             axi_read(16'h0018, busy_cycles);
             if (busy_cycles == 0) $fatal(1, "busy-cycle CSR did not increment while rendering");
             timeout = 0;
@@ -1656,7 +1705,11 @@ module tb_zz9k_rasterix;
                         timeout = timeout + 16;
                         axi_read(16'h000c, status);
                         if (status[1] &&
-                            (dut.renderer.rixef.graphicCore.commandParser.fbControlState == 0))
+                            (dut.renderer.rixef.graphicCore.commandParser.fbControlState == 0) &&
+                            (dut.renderer.rixef.graphicCore.commandParser.state == 1) &&
+                            !dut.renderer.rixef.graphicCore.rasterizerRunning &&
+                            !dut.renderer.rixef.graphicCore.pixelInPipeline &&
+                            !dut.renderer.rixef.graphicCore.dataInTriangleInterpolator)
                             command_complete = 1;
                     end
 `else
@@ -1673,7 +1726,7 @@ module tb_zz9k_rasterix;
                     end
 `endif
                     if (timeout < poll_limit) begin
-                        $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d transport=%0s",
+                        $display("RESULT scene=%0s submission=%0d cycles=%0d fifo_words=%0d transport=%0s",
                                  scene, submission_index, cycle_count, submission_words,
 `ifdef FIFO_PATH
                                  fifo_transport);
@@ -1684,7 +1737,8 @@ module tb_zz9k_rasterix;
                                  fifo_packets, fifo_total_words);
                         fifo_axi4_report;
 `else
-                                 $test$plusargs("DMA_BURST") ? "dma-fixed" : "mmio");
+                                 memfetch ? "memfetch" :
+                                 ($test$plusargs("DMA_BURST") ? "dma-fixed" : "mmio"));
 `endif
                         if (shared_channel)
                             $display("SHARED_READS served=%0d reordered=%0d rand_seed=%0d",
@@ -1724,6 +1778,17 @@ module tb_zz9k_rasterix;
         if (color_byte_swap &&
             {byte_at(framebuffer_addr), byte_at(framebuffer_addr + 1)} != 16'hf800)
             $fatal(1, "byte-swapped RGB565 clear is not big-endian");
+        if (memfetch != 0) begin
+            if (memfetch_ar_count == 0)
+                $fatal(1, "memfetch issued no command-list reads");
+            $display("MEMFETCH command_read_bursts=%0d fifo_words=%0d tlf_bytes_per_envelope=8",
+                     memfetch_ar_count,
+`ifdef FIFO_PATH
+                     fifo_total_words);
+`else
+                     cmd_count);
+`endif
+        end
 `ifdef RASTERIX_VARIANT_EF
         $display("ASYM_STROBES lane_pairs_01=%0d lane_pairs_10=%0d",
                  asym_strobe_01, asym_strobe_10);
