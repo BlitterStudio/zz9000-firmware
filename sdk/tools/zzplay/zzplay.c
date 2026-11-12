@@ -5049,6 +5049,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   uint32_t seek_ms;
   int probed = 0;
   int source_seekable = 1;
+  int network_entry;
   char station[ZZPLAY_HTTP_NAME_MAX];
 
   if (index < 0 || (uint32_t)index >= app->playlist.count) {
@@ -5070,7 +5071,21 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
    * the same open file. */
   memset(&tags, 0, sizeof(tags));
   memset(&probe, 0, sizeof(probe));
+  /* Opening a network entry can take seconds (name lookup, TLS, a service
+   * module's request): say what is starting meanwhile. */
+  network_entry = zzplay_http_is_url(app->entry_path) ||
+                  zzplay_providers_uri_scheme(app->entry_path, NULL) != 0U;
+  if (network_entry) {
+    zzplay_controller_set_title(
+        &app->ctl, app->playlist.entries[index].title[0] != '\0'
+                       ? app->playlist.entries[index].title
+                       : app->entry_path);
+    zzplay_controller_set_message(&app->ctl, "Connecting...");
+  }
   file = zzplay_app_open_item(app);
+  if (network_entry) {
+    zzplay_controller_set_message(&app->ctl, "");
+  }
   if (file) {
     long length = 0L;
 
@@ -5138,12 +5153,17 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     const char *why = app->open_why[0] != '\0' ? app->open_why
                                                 : zzplay_file_open_error();
 
-    if (why[0] != '\0') {
-      zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s: %s",
-                            app->entry_path, why);
-    } else {
-      zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
-                            app->entry_path);
+    /* A network open stops when the user asks for something else (another
+     * entry, Stop): that is not a failure worth a message. */
+    if (app->ctl.request == ZZPLAY_REQUEST_NONE ||
+        app->ctl.request == ZZPLAY_REQUEST_SEEK) {
+      if (why[0] != '\0') {
+        zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s: %s",
+                              app->entry_path, why);
+      } else {
+        zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
+                              app->entry_path);
+      }
     }
   } else if (!engine && probe.network_video) {
     zzplay_launch_reportf(&app->ctl, &app->options,
