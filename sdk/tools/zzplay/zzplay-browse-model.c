@@ -141,6 +141,10 @@ static void cache_put(ZZPlayBrowseModel *model, const char *scheme,
   e->selection = selection;
   e->scroll = scroll;
   e->last_used = ++model->cache_clock;
+  /* Callers remember the current view, so its paging state goes too. */
+  e->total = model->total;
+  e->has_total = model->has_total;
+  e->has_more = model->has_more;
 }
 
 /* Show a remembered list at once. Returns 1 on a hit. The model gets
@@ -172,9 +176,10 @@ static int cache_restore(ZZPlayBrowseModel *model, const char *scheme,
   model->selection = e->selection;
   model->scroll = e->scroll;
   model->folder_is_collection = e->folder_is_collection;
-  model->total = 0U;
-  model->has_total = 0;
-  model->has_more = 0;
+  /* A remembered first page of a longer list still offers More. */
+  model->total = e->total;
+  model->has_total = e->has_total;
+  model->has_more = e->has_more;
   return 1;
 }
 

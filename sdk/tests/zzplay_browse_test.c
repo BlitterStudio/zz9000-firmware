@@ -171,6 +171,67 @@ static int test_page_two_appends(void)
   return 0;
 }
 
+/* A folder longer than one page, opened again from the cache after Back,
+ * still offers More. */
+static int test_cached_folder_keeps_more(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem root_items[1];
+  ZZPlayBrowseItem page1[2];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex Server", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+
+  memset(root_items, 0, sizeof(root_items));
+  snprintf(root_items[0].id, sizeof(root_items[0].id), "big");
+  snprintf(root_items[0].title, sizeof(root_items[0].title), "Big folder");
+  root_items[0].kind = ZZPLAY_ITEM_FOLDER;
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = root_items;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  memset(page1, 0, sizeof(page1));
+  snprintf(page1[0].id, sizeof(page1[0].id), "track_1");
+  page1[0].kind = ZZPLAY_ITEM_TRACK;
+  page1[0].playable = 1U;
+  snprintf(page1[1].id, sizeof(page1[1].id), "track_2");
+  page1[1].kind = ZZPLAY_ITEM_TRACK;
+  page1[1].playable = 1U;
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = page1;
+  reply.item_count = 2U;
+  reply.has_total = 1;
+  reply.total = 4U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.has_more == 1);
+
+  assert(zzplay_browse_model_back(&model, &req));
+  memset(&req, 0, sizeof(req));
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE); /* shown from the cache */
+  assert(model.item_count == 2U);
+  assert(model.has_more == 1);
+  assert(model.has_total == 1 && model.total == 4U);
+  assert(zzplay_browse_model_request_more(&model, &req));
+  assert(req.start == 2U);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
 static int test_new_search_drops_previous_query(void)
 {
   ZZPlayBrowseModel model;
@@ -2457,6 +2518,7 @@ int main(void)
 {
   assert(test_enter_folder_and_back() == 0);
   assert(test_page_two_appends() == 0);
+  assert(test_cached_folder_keeps_more() == 0);
   assert(test_new_search_drops_previous_query() == 0);
   assert(test_reply_after_stop_dropped() == 0);
   assert(test_play_add_unavailable_for_folders_and_unplayable() == 0);

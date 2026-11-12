@@ -151,6 +151,10 @@ typedef struct ZZPlayBrowseCacheEntry {
   uint32_t start;
   ZZPlayBrowseItem *items;
   uint32_t item_count;
+  /* Paging state of the list when it was remembered. */
+  uint32_t total;
+  int has_total;
+  int has_more;
   int32_t selection;
   uint32_t scroll;
   uint32_t last_used;
