@@ -164,6 +164,7 @@ static char row_form_item[ZZPLAY_PROVIDER_TEXT_MAX];
 /* The latest Edit request: only its reply opens a form, for this row. */
 static uint32_t form_get_generation = 0U;
 static char form_get_item[ZZPLAY_PROVIDER_TEXT_MAX];
+static char form_get_scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
 static int row_form_mode = 0;
 enum LinkWindowState {
   LINK_WINDOW_CLOSED = 0,
@@ -3126,11 +3127,23 @@ static void browse_open_row_form(void)
               browse_model.items[browse_model.selection].id);
   form_get_generation = poll_req.generation;
   copy_string(form_get_item, sizeof(form_get_item), poll_req.item_id);
+  copy_string(form_get_scheme, sizeof(form_get_scheme), svc->scheme);
   if (browse_send(&poll_req, svc->provider)) {
     browse_model.busy = 1;
     update_status_text("Opening form...");
     update_buttons();
   }
+}
+
+/* The reply to the latest Edit, while Browse is on the service it was
+ * asked of. */
+static int browse_form_reply_current(const ZZPlayBrowseReply *reply)
+{
+  const ZZPlayBrowseServiceEntry *svc =
+      zzplay_browse_model_current_service(&browse_model);
+
+  return reply->generation == form_get_generation && svc &&
+         strcmp(svc->scheme, form_get_scheme) == 0;
 }
 
 /* True while the search field is being edited: its keys are its own. */
@@ -3299,8 +3312,9 @@ void zzplay_browse_poll(void)
     if (handle_link_reply(&poll_worker_reply)) {
       zzplay_browse_worker_release_reply(&poll_worker_reply);
     } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FORM_GET &&
-               poll_worker_reply.generation != form_get_generation) {
-      /* Only the latest Edit opens a form. */
+               !browse_form_reply_current(&poll_worker_reply)) {
+      /* Only the latest Edit opens a form, and only while Browse is
+       * still on the service it was asked of. */
       zzplay_browse_worker_release_reply(&poll_worker_reply);
     } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FORM_GET) {
       uint32_t i;
