@@ -55,6 +55,8 @@ const char *zzplay_file_open_error(void);
 void zzplay_file_set_network_hooks(int (*poll)(void *user),
                                    void (*title)(void *user,
                                                  const char *text),
+                                   void (*stage)(void *user, int stage,
+                                                 const char *host),
                                    void *user);
 
 /* Read a complete file no larger than max_len. A successful read returns an

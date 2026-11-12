@@ -23,6 +23,10 @@ typedef struct ZZPlayHostBinding {
    * to cancel (the user pressed Stop). NULL never cancels. */
   int (*keep_running)(void *user);
   void *user;
+  /* Told what each of the module's transfers is waiting for (see
+   * ZZPlayNetStage in zzplay-net.h; an int here so host tests need no
+   * network headers). NULL reports nothing. Set after zzplay_host_bind. */
+  void (*stage)(void *user, int stage, const char *host);
 } ZZPlayHostBinding;
 
 /* Fill `binding` for the module serving `scheme`. A binding belongs to the

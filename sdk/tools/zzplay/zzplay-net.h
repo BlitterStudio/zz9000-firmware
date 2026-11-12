@@ -29,6 +29,19 @@ typedef struct ZZPlayNet ZZPlayNet;
 /* Return 0 to cancel the transfer. */
 typedef int (*ZZPlayNetKeepRunning)(void *user);
 
+/* What a request is waiting for, reported as it changes. */
+typedef enum ZZPlayNetStage {
+  ZZPLAY_NET_STAGE_LOOKUP = 1,   /* resolving the host name */
+  ZZPLAY_NET_STAGE_CONNECT,      /* TCP connect */
+  ZZPLAY_NET_STAGE_SECURE,       /* TLS handshake */
+  ZZPLAY_NET_STAGE_WAIT,         /* request sent, waiting for the answer */
+  ZZPLAY_NET_STAGE_BODY          /* response head received */
+} ZZPlayNetStage;
+
+/* Called from the requesting process; `host` is the host being reached. */
+typedef void (*ZZPlayNetStageHook)(void *user, ZZPlayNetStage stage,
+                                   const char *host);
+
 typedef struct ZZPlayNetRequest {
   const char *url;
   const char *method;               /* NULL means GET */
@@ -42,6 +55,7 @@ typedef struct ZZPlayNetRequest {
   uint32_t range_from;
   int icy;                          /* ask for Shoutcast metadata */
   ZZPlayNetKeepRunning keep_running; /* may be NULL */
+  ZZPlayNetStageHook stage;         /* may be NULL; gets `user` */
   void *user;
 } ZZPlayNetRequest;
 
