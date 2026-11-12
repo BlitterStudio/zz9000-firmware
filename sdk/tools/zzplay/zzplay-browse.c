@@ -653,13 +653,16 @@ static int gather_live(void)
                                          browse_model.gather_generation);
 }
 
-/* Set the status line to the view's count ("1 item", "6 items") or empty
- * when the view has no rows. */
+/* Set the status line to the view's count ("1 item", "6 items"). An empty
+ * view says so; a blank line looks like a request that never finished. */
 static void browse_update_count_status(void)
 {
   char buf[ZZPLAY_PROVIDER_ERROR_MAX];
 
-  (void)zzplay_browse_model_format_count(&browse_model, buf, sizeof(buf));
+  if (!zzplay_browse_model_format_count(&browse_model, buf, sizeof(buf))) {
+    update_status_text(browse_model.is_search ? "No matches" : "No items");
+    return;
+  }
   update_status_text(buf);
 }
 
