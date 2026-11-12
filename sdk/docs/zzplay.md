@@ -305,6 +305,7 @@ button is.
 | Play all next | Amiga-H | Queue the folder being shown right after the playing entry. |
 | Add all | Amiga-M | Append the folder being shown. |
 | Favourite | Amiga-I | Add the selected entry to the favourites, or remove it. |
+| Edit station... | Amiga-J | Edit or delete the selected saved station. |
 | Reload | Amiga-E | Fetch the list or search again. |
 | Back | Amiga-K | Return to the previous list. |
 | Close | Amiga-W | Close the Browse window. |
@@ -327,20 +328,29 @@ field.
 ### Internet radio
 
 `radio.zzprov` uses the radio-browser.info station directory over plain
-`http://`, so it does not need AmiSSL. Its top level has four folders:
+`http://`, so it does not need AmiSSL. Its top level has five folders:
 
 - **Favourites**: the stations you added with **Favourite** (up to 64).
+- **My stations**: your own station addresses.
 - **Top voted**: the directory's most popular stations.
 - **By tag**: genres and other tags, each opening a list of stations.
 - **By country**: countries, each opening a list of stations.
 
+Open **My stations** and choose **Add station...**. Enter a name and an
+`http://` or `https://` address. The address can point to a stream or to a
+`.pls`, `.m3u`, or `.m3u8` station playlist. Select a saved station and choose
+**Edit station...** (Amiga-J) to change or delete it. Deleting a station also
+removes it from Favourites. My stations and favourites are stored in
+`ENVARC:ZZPlay/radio.prefs`.
+
 Search finds stations by name and leaves out stations the directory marks
 as broken. Each station shows its codec, bitrate and country. MP3 and Ogg
 Vorbis stations play. Stations in other formats (AAC, HE-AAC, Opus) are
-marked as unsupported.
+marked as unsupported. If a directory server does not answer or returns a
+server error, ZZPlay tries another radio-browser.info mirror.
 
-Favourites are stored in `ENVARC:ZZPlay/radio.prefs`, one line per station:
-`fav_<n>=<id>|<name>|<codec>|<bitrate>|<country>`.
+Favourites use `fav_<n>=<id>|<name>|<codec>|<bitrate>|<country>`. My stations
+use `my_<n>=<name>|<address>`.
 
 ### Plex
 

@@ -62,6 +62,8 @@ typedef struct ZZPlayProviderLinkResult {
 #define ZZPLAY_ITEM_FOLDER 0U  /* opens another list */
 #define ZZPLAY_ITEM_TRACK 1U   /* a finite item */
 #define ZZPLAY_ITEM_STATION 2U /* a live stream */
+/* Opens a provider-owned form. Form rows are never playable. */
+#define ZZPLAY_ITEM_FORM 3U
 
 typedef struct ZZPlayProviderItem {
   /* Module-defined, at most ZZPLAY_PROVIDER_TEXT_MAX - 1 bytes. A folder's
@@ -79,6 +81,7 @@ typedef struct ZZPlayProviderItem {
                                * folder inside it, give its playable
                                * tracks and stations. */
   uint32_t favourite;        /* 1 when it is in the service's favourites */
+  uint32_t editable;         /* 1 when the Browse Edit menu may open a form */
 } ZZPlayProviderItem;
 
 /* Receives list and search results. ZZPlay copies every string before
@@ -115,6 +118,18 @@ typedef struct ZZPlayProviderField {
   const char *const *choice_values; /* stored in prefs */
   const char *const *choice_labels; /* shown */
 } ZZPlayProviderField;
+
+#define ZZPLAY_PROVIDER_FORM_FIELDS_MAX 8U
+
+/* A row form. fields and values belong to the provider and remain valid until
+ * the call returns. values has field_count entries, one per field. */
+typedef struct ZZPlayProviderForm {
+  const char *title;
+  const ZZPlayProviderField *fields;
+  const char *const *values;
+  uint32_t field_count;
+  uint32_t deletable;
+} ZZPlayProviderForm;
 
 /* XML element callback; see zzplay-xml.h for the scanner's behaviour. */
 typedef struct ZZPlayHostXmlAttr {
@@ -238,6 +253,16 @@ typedef struct ZZPlayProvider {
                    char *err, uint32_t err_size);
   int (*link_choose)(void *ctx, const char *choice_id,
                      ZZPlayProviderLinkResult *out,
+                     char *err, uint32_t err_size);
+  /* Optional row forms. These fields are appended, so hosts check size
+   * before reading them. item_id identifies either a form row or an
+   * editable row. submit receives field_count values in field order. */
+  int (*form_get)(void *ctx, const char *item_id, ZZPlayProviderForm *out,
+                  char *err, uint32_t err_size);
+  int (*form_submit)(void *ctx, const char *item_id,
+                     const char *const *values, uint32_t value_count,
+                     char *err, uint32_t err_size);
+  int (*form_delete)(void *ctx, const char *item_id,
                      char *err, uint32_t err_size);
 } ZZPlayProvider;
 

@@ -31,6 +31,7 @@ typedef struct ZZPlayBrowseItem {
   uint32_t kind;             /* ZZPLAY_ITEM_* */
   uint32_t playable;
   uint32_t favourite;        /* 1 when in favourites */
+  uint32_t editable;         /* opens the provider form from Edit */
 } ZZPlayBrowseItem;
 
 /* A service's Recently played list, newest first. */
@@ -44,7 +45,8 @@ typedef enum ZZPlayBrowseAction {
   ZZPLAY_BROWSE_ACTION_ENTER_FOLDER,
   ZZPLAY_BROWSE_ACTION_PLAY,
   ZZPLAY_BROWSE_ACTION_PAGE_MORE,
-  ZZPLAY_BROWSE_ACTION_OPEN_SETTINGS
+  ZZPLAY_BROWSE_ACTION_OPEN_SETTINGS,
+  ZZPLAY_BROWSE_ACTION_OPEN_FORM
 } ZZPlayBrowseAction;
 
 /* What Play or Add does with the current selection. */
@@ -65,7 +67,10 @@ typedef enum ZZPlayBrowseReqKind {
   ZZPLAY_BROWSE_REQ_CLOSE,
   ZZPLAY_BROWSE_REQ_LINK_START,
   ZZPLAY_BROWSE_REQ_LINK_POLL,
-  ZZPLAY_BROWSE_REQ_LINK_CHOOSE
+  ZZPLAY_BROWSE_REQ_LINK_CHOOSE,
+  ZZPLAY_BROWSE_REQ_FORM_GET,
+  ZZPLAY_BROWSE_REQ_FORM_SUBMIT,
+  ZZPLAY_BROWSE_REQ_FORM_DELETE
 } ZZPlayBrowseReqKind;
 
 typedef struct ZZPlayBrowseRequest {
@@ -83,6 +88,8 @@ typedef struct ZZPlayBrowseRequest {
   ZZPlayBrowseItem item;
   char link_id[ZZPLAY_PROVIDER_TEXT_MAX];
   char choice_id[ZZPLAY_PROVIDER_TEXT_MAX];
+  char form_values[ZZPLAY_PROVIDER_FORM_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
+  uint32_t form_value_count;
 } ZZPlayBrowseRequest;
 
 typedef struct ZZPlayBrowseReply {
@@ -105,6 +112,9 @@ typedef struct ZZPlayBrowseReply {
   ZZPlayResolved resolved;
   ZZPlayProviderLinkStart link_start;
   ZZPlayProviderLinkResult link_result;
+  ZZPlayProviderForm form;
+  char form_title[ZZPLAY_PROVIDER_TEXT_MAX];
+  char form_values[ZZPLAY_PROVIDER_FORM_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
 } ZZPlayBrowseReply;
 
 typedef struct ZZPlayBrowseFrame {
@@ -272,6 +282,8 @@ int zzplay_browse_model_provider_has_link(const ZZPlayProvider *provider);
 int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,
                                   ZZPlayBrowseRequest *out_req);
+/* True when the selected row is editable by the provider. */
+int zzplay_browse_model_can_edit(const ZZPlayBrowseModel *model);
 ZZPlayBrowseAction zzplay_browse_model_activate(ZZPlayBrowseModel *model,
                                                 int32_t index,
                                                 ZZPlayBrowseRequest *out_req);

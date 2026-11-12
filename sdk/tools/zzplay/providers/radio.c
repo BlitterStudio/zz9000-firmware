@@ -107,8 +107,11 @@ char *strstr(const char *haystack, const char *needle)
 
 #define RADIO_API_BASE "http://de1.api.radio-browser.info/xml"
 #define RADIO_MAX_FAVOURITES 64U
+#define RADIO_MAX_MY_STATIONS 64U
 #define RADIO_SEARCH_LIMIT 100U
 #define RADIO_UUID_MAX 40U
+#define RADIO_MY_ID_MAX 12U
+#define RADIO_ADD_ID "\037addstation"
 
 typedef struct FavouriteEntry {
   char uuid[RADIO_UUID_MAX];
@@ -118,11 +121,47 @@ typedef struct FavouriteEntry {
   char country[64];
 } FavouriteEntry;
 
+typedef struct MyStationEntry {
+  uint32_t slot;
+  char name[ZZPLAY_PROVIDER_TEXT_MAX];
+  char address[ZZPLAY_PROVIDER_URL_MAX];
+} MyStationEntry;
+
 typedef struct RadioContext {
   const ZZPlayHost *host;
   uint32_t fav_count;
   FavouriteEntry favs[RADIO_MAX_FAVOURITES];
+  uint32_t my_count;
+  MyStationEntry my_stations[RADIO_MAX_MY_STATIONS];
+  uint32_t server;
 } RadioContext;
+
+static char radio_my_line[ZZPLAY_PROVIDER_URL_MAX + ZZPLAY_PROVIDER_TEXT_MAX];
+static char radio_my_value[ZZPLAY_PROVIDER_URL_MAX + ZZPLAY_PROVIDER_TEXT_MAX];
+
+static const ZZPlayProviderField radio_station_fields[] = {
+  {"name", "Name", ZZPLAY_FIELD_TEXT, ZZPLAY_PROVIDER_TEXT_MAX - 1U, NULL, NULL},
+  {"address", "Address", ZZPLAY_FIELD_TEXT, ZZPLAY_PROVIDER_URL_MAX - 1U, NULL, NULL}
+};
+static const char *radio_station_values[2];
+
+static const char *radio_api_base(const RadioContext *rc)
+{
+  static const char *const bases[] = {
+    "http://de1.api.radio-browser.info/xml",
+    "http://de2.api.radio-browser.info/xml",
+    "http://fi1.api.radio-browser.info/xml"
+  };
+  return bases[rc && rc->server < 3U ? rc->server : 0U];
+}
+
+/* All mirrors have the same three-character prefix. */
+static void radio_set_server_url(char *url, uint32_t server)
+{
+  char *host = strstr(url, ".api.radio-browser.info");
+  static const char *const names[] = {"de1", "de2", "fi1"};
+  if (host && host - url >= 3) memcpy(host - 3, names[server], 3U);
+}
 
 static char radio_lower(char c)
 {
@@ -439,6 +478,71 @@ static void radio_load_favourites(RadioContext *rc)
   }
 }
 
+static int radio_is_address(const char *s)
+{
+  return s && (strncmp(s, "http://", 7U) == 0 ||
+               strncmp(s, "https://", 8U) == 0);
+}
+
+static int radio_my_slot(const char *id, uint32_t *slot)
+{
+  uint32_t n = 0U;
+  const char *p;
+  if (!id || strncmp(id, "my:", 3U) != 0 || id[3] == '\0') return 0;
+  for (p = id + 3; *p; p++) {
+    if (*p < '0' || *p > '9' || n > 999999U) return 0;
+    n = n * 10U + (uint32_t)(*p - '0');
+  }
+  if (n >= RADIO_MAX_MY_STATIONS) return 0;
+  if (slot) *slot = n;
+  return 1;
+}
+
+static int radio_my_index(const RadioContext *rc, const char *id)
+{
+  uint32_t slot;
+  uint32_t i;
+  if (!radio_my_slot(id, &slot)) return -1;
+  for (i = 0U; i < rc->my_count; i++) {
+    if (rc->my_stations[i].slot == slot) return (int)i;
+  }
+  return -1;
+}
+
+static void radio_load_my_stations(RadioContext *rc)
+{
+  const ZZPlayHost *host = rc->host;
+  uint32_t slot;
+  rc->my_count = 0U;
+  for (slot = 0U; slot < RADIO_MAX_MY_STATIONS; slot++) {
+    char key[32];
+    char *bar;
+    host->format(key, sizeof(key), "my_%u", slot);
+    if (!host->pref_get(host, key, radio_my_line, sizeof(radio_my_line)) ||
+        !radio_my_line[0]) continue;
+    bar = strchr(radio_my_line, '|');
+    if (!bar) continue;
+    *bar++ = '\0';
+    if (!radio_my_line[0] || !radio_is_address(bar)) continue;
+    rc->my_stations[rc->my_count].slot = slot;
+    radio_copy_text(rc->my_stations[rc->my_count].name,
+                    sizeof(rc->my_stations[0].name), radio_my_line, 1);
+    radio_copy_text(rc->my_stations[rc->my_count].address,
+                    sizeof(rc->my_stations[0].address), bar, 1);
+    rc->my_count++;
+  }
+}
+
+static int radio_store_my_station(const RadioContext *rc, uint32_t index)
+{
+  char key[32];
+  const MyStationEntry *entry = &rc->my_stations[index];
+  rc->host->format(key, sizeof(key), "my_%u", entry->slot);
+  rc->host->format(radio_my_value, sizeof(radio_my_value), "%s|%s",
+                   entry->name, entry->address);
+  return rc->host->pref_set(rc->host, key, radio_my_value) != 0;
+}
+
 /* XML streaming data receiver */
 typedef struct XmlDataFeed {
   const ZZPlayHost *host;
@@ -690,7 +794,9 @@ static void *radio_open(const ZZPlayHost *host, char *err, uint32_t err_size)
     return NULL;
   }
   ctx->host = host;
+  ctx->server = 0U;
   radio_load_favourites(ctx);
+  radio_load_my_stations(ctx);
   return ctx;
 }
 
@@ -744,6 +850,61 @@ static int list_favourites(RadioContext *rc, uint32_t start, uint32_t count,
   return 1;
 }
 
+static void radio_address_host(const char *address, char *out, uint32_t out_size)
+{
+  const char *start = strstr(address, "://");
+  const char *end;
+  size_t n;
+  if (start) start += 3; else start = address;
+  end = strchr(start, '/');
+  n = end ? (size_t)(end - start) : strlen(start);
+  if (n == 0U) {
+    radio_copy_text(out, out_size, "My station", 0);
+  } else {
+    if (n >= out_size) n = out_size - 1U;
+    memcpy(out, start, n);
+    out[n] = '\0';
+  }
+}
+
+static int list_my_stations(RadioContext *rc, uint32_t start, uint32_t count,
+                            const ZZPlayItemSink *sink)
+{
+  uint32_t total = rc->my_count + 1U;
+  uint32_t i;
+  uint32_t delivered = 0U;
+  if (sink && sink->total) sink->total(sink->user, total);
+  if (start == 0U && count > 0U) {
+    ZZPlayProviderItem add;
+    memset(&add, 0, sizeof(add));
+    add.id = RADIO_ADD_ID;
+    add.title = "Add station...";
+    add.subtitle = "";
+    add.kind = ZZPLAY_ITEM_FORM;
+    if (sink && sink->item) (void)sink->item(sink->user, &add);
+    delivered = 1U;
+  }
+  for (i = start > 0U ? start - 1U : 0U;
+       i < rc->my_count && delivered < count; i++) {
+    ZZPlayProviderItem item;
+    char id[RADIO_MY_ID_MAX];
+    char subtitle[ZZPLAY_PROVIDER_TEXT_MAX];
+    rc->host->format(id, sizeof(id), "my:%u", rc->my_stations[i].slot);
+    radio_address_host(rc->my_stations[i].address, subtitle, sizeof(subtitle));
+    memset(&item, 0, sizeof(item));
+    item.id = id;
+    item.title = rc->my_stations[i].name;
+    item.subtitle = subtitle;
+    item.kind = ZZPLAY_ITEM_STATION;
+    item.playable = 1U;
+    item.favourite = (uint32_t)radio_is_favourite(rc, id);
+    item.editable = 1U;
+    if (sink && sink->item && sink->item(sink->user, &item) != 0) break;
+    delivered++;
+  }
+  return 1;
+}
+
 /* 1 when the reply fed to `xml` was a whole document. A host older than
  * xml_finish cannot tell, so its replies count as whole. */
 static int radio_xml_complete(const ZZPlayHost *host, void *xml)
@@ -783,91 +944,113 @@ static int radio_reply_ok(const ZZPlayHost *host, int ok, int status,
   return 1;
 }
 
-static int fetch_and_scan_stations(RadioContext *rc, const char *url,
+static int fetch_and_scan_stations(RadioContext *rc, char *url,
                                    const ZZPlayItemSink *sink, char *err,
                                    uint32_t err_size)
 {
   const ZZPlayHost *host = rc->host;
-  ZZPlayHostXmlHandler handler;
-  StationCollector col;
-  XmlDataFeed feed;
-  void *xml;
-  int status = 0;
-  int ok;
-  int whole;
-
-  memset(&col, 0, sizeof(col));
-  col.rc = rc;
-  col.host = host;
-  col.sink = sink;
-
-  memset(&handler, 0, sizeof(handler));
-  handler.start = station_xml_start;
-  handler.user = &col;
-
-  xml = host->xml_open(host, &handler);
-  if (!xml) {
-    if (err && err_size > 0U) {
-      host->format(err, err_size, "Failed to initialize XML parser");
+  uint32_t attempt;
+  char first_error[ZZPLAY_PROVIDER_ERROR_MAX];
+  first_error[0] = '\0';
+  for (attempt = 0U; attempt < 3U; attempt++) {
+    ZZPlayHostXmlHandler handler;
+    StationCollector col;
+    XmlDataFeed feed;
+    void *xml;
+    int status = 0;
+    int ok;
+    int whole;
+    radio_set_server_url(url, rc->server);
+    memset(&col, 0, sizeof(col));
+    col.rc = rc;
+    col.host = host;
+    col.sink = sink;
+    memset(&handler, 0, sizeof(handler));
+    handler.start = station_xml_start;
+    handler.user = &col;
+    xml = host->xml_open(host, &handler);
+    if (!xml) {
+      if (err && err_size > 0U)
+        host->format(err, err_size, "Failed to initialize XML parser");
+      return 0;
     }
-    return 0;
-  }
-
-  feed.host = host;
-  feed.xml = xml;
-  feed.stopped = 0;
-
-  ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
-                      err_size);
-  whole = radio_xml_complete(host, xml);
-  host->xml_close(host, xml);
-
-  return radio_reply_ok(host, ok, status, col.saw_root && whole, err,
+    feed.host = host;
+    feed.xml = xml;
+    feed.stopped = 0;
+    if (err && err_size > 0U) err[0] = '\0';
+    ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
                         err_size);
+    whole = radio_xml_complete(host, xml);
+    host->xml_close(host, xml);
+    if (radio_reply_ok(host, ok, status, col.saw_root && whole, err, err_size))
+      return 1;
+    if ((!ok || status >= 500) && attempt + 1U < 3U) {
+      if (first_error[0] == '\0' && err)
+        radio_copy_text(first_error, sizeof(first_error), err, 0);
+      rc->server++;
+      if (rc->server >= 3U) rc->server = 0U;
+      continue;
+    }
+    break;
+  }
+  if (first_error[0] && err && err_size > 0U)
+    host->format(err, err_size, "%s", first_error);
+  return 0;
 }
 
-static int fetch_and_scan_folders(RadioContext *rc, const char *url,
+static int fetch_and_scan_folders(RadioContext *rc, char *url,
                                   const char *prefix,
                                   const ZZPlayItemSink *sink, char *err,
                                   uint32_t err_size)
 {
   const ZZPlayHost *host = rc->host;
-  ZZPlayHostXmlHandler handler;
-  FolderCollector col;
-  XmlDataFeed feed;
-  void *xml;
-  int status = 0;
-  int ok;
-  int whole;
-
-  memset(&col, 0, sizeof(col));
-  col.host = host;
-  col.sink = sink;
-  col.prefix = prefix;
-
-  memset(&handler, 0, sizeof(handler));
-  handler.start = folder_xml_start;
-  handler.user = &col;
-
-  xml = host->xml_open(host, &handler);
-  if (!xml) {
-    if (err && err_size > 0U) {
-      host->format(err, err_size, "Failed to initialize XML parser");
+  uint32_t attempt;
+  char first_error[ZZPLAY_PROVIDER_ERROR_MAX];
+  first_error[0] = '\0';
+  for (attempt = 0U; attempt < 3U; attempt++) {
+    ZZPlayHostXmlHandler handler;
+    FolderCollector col;
+    XmlDataFeed feed;
+    void *xml;
+    int status = 0;
+    int ok;
+    int whole;
+    radio_set_server_url(url, rc->server);
+    memset(&col, 0, sizeof(col));
+    col.host = host;
+    col.sink = sink;
+    col.prefix = prefix;
+    memset(&handler, 0, sizeof(handler));
+    handler.start = folder_xml_start;
+    handler.user = &col;
+    xml = host->xml_open(host, &handler);
+    if (!xml) {
+      if (err && err_size > 0U)
+        host->format(err, err_size, "Failed to initialize XML parser");
+      return 0;
     }
-    return 0;
-  }
-
-  feed.host = host;
-  feed.xml = xml;
-  feed.stopped = 0;
-
-  ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
-                      err_size);
-  whole = radio_xml_complete(host, xml);
-  host->xml_close(host, xml);
-
-  return radio_reply_ok(host, ok, status, col.saw_root && whole, err,
+    feed.host = host;
+    feed.xml = xml;
+    feed.stopped = 0;
+    if (err && err_size > 0U) err[0] = '\0';
+    ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
                         err_size);
+    whole = radio_xml_complete(host, xml);
+    host->xml_close(host, xml);
+    if (radio_reply_ok(host, ok, status, col.saw_root && whole, err, err_size))
+      return 1;
+    if ((!ok || status >= 500) && attempt + 1U < 3U) {
+      if (first_error[0] == '\0' && err)
+        radio_copy_text(first_error, sizeof(first_error), err, 0);
+      rc->server++;
+      if (rc->server >= 3U) rc->server = 0U;
+      continue;
+    }
+    break;
+  }
+  if (first_error[0] && err && err_size > 0U)
+    host->format(err, err_size, "%s", first_error);
+  return 0;
 }
 
 static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t count,
@@ -890,8 +1073,9 @@ static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t coun
     static const struct {
       const char *id;
       const char *title;
-    } roots[4] = {
+    } roots[5] = {
       {"fav", "Favourites"},
+      {"my", "My stations"},
       {"top", "Top voted"},
       {"tags", "By tag"},
       {"countries", "By country"}
@@ -899,9 +1083,9 @@ static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t coun
     uint32_t i;
 
     if (sink && sink->total) {
-      sink->total(sink->user, 4U);
+      sink->total(sink->user, 5U);
     }
-    for (i = start; i < 4U && (i - start) < count; i++) {
+    for (i = start; i < 5U && (i - start) < count; i++) {
       ZZPlayProviderItem item;
       memset(&item, 0, sizeof(item));
       item.id = roots[i].id;
@@ -924,17 +1108,21 @@ static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t coun
     return list_favourites(rc, start, count, sink);
   }
 
+  if (strcmp(node, "my") == 0) {
+    return list_my_stations(rc, start, count, sink);
+  }
+
   if (strcmp(node, "top") == 0) {
     host->format(url, sizeof(url),
                  "%s/stations/topvote?offset=%u&limit=%u&hidebroken=true",
-                 RADIO_API_BASE, start, count);
+                 radio_api_base(rc), start, count);
     return fetch_and_scan_stations(rc, url, sink, err, err_size);
   }
 
   if (strcmp(node, "tags") == 0) {
     host->format(url, sizeof(url),
                  "%s/tags?order=stationcount&reverse=true&offset=%u&limit=%u",
-                 RADIO_API_BASE, start, count);
+                 radio_api_base(rc), start, count);
     return fetch_and_scan_folders(rc, url, "tag:", sink, err, err_size);
   }
 
@@ -948,14 +1136,14 @@ static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t coun
     }
     host->format(url, sizeof(url),
                  "%s/stations/bytag/%s?order=votes&reverse=true&offset=%u&limit=%u&hidebroken=true",
-                 RADIO_API_BASE, escaped, start, count);
+                 radio_api_base(rc), escaped, start, count);
     return fetch_and_scan_stations(rc, url, sink, err, err_size);
   }
 
   if (strcmp(node, "countries") == 0) {
     host->format(url, sizeof(url),
                  "%s/countries?order=stationcount&reverse=true&offset=%u&limit=%u",
-                 RADIO_API_BASE, start, count);
+                 radio_api_base(rc), start, count);
     return fetch_and_scan_folders(rc, url, "country:", sink, err, err_size);
   }
 
@@ -969,7 +1157,7 @@ static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t coun
     }
     host->format(url, sizeof(url),
                  "%s/stations/bycountry/%s?order=votes&reverse=true&offset=%u&limit=%u&hidebroken=true",
-                 RADIO_API_BASE, escaped, start, count);
+                 radio_api_base(rc), escaped, start, count);
     return fetch_and_scan_stations(rc, url, sink, err, err_size);
   }
 
@@ -1001,9 +1189,121 @@ static int radio_search(void *ctx, const char *query, const ZZPlayItemSink *sink
   }
   host->format(url, sizeof(url),
                "%s/stations/search?name=%s&hidebroken=true&order=votes&reverse=true&limit=%u",
-               RADIO_API_BASE, escaped, RADIO_SEARCH_LIMIT);
+               radio_api_base(rc), escaped, RADIO_SEARCH_LIMIT);
 
   return fetch_and_scan_stations(rc, url, sink, err, err_size);
+}
+
+static int radio_save_failed(const ZZPlayHost *host, char *err,
+                             uint32_t err_size);
+static int radio_favourite(void *ctx, const ZZPlayProviderItem *item, int add,
+                           char *err, uint32_t err_size);
+
+static int radio_station_form_get(void *ctx, const char *item_id,
+                                  ZZPlayProviderForm *out, char *err,
+                                  uint32_t err_size)
+{
+  RadioContext *rc = (RadioContext *)ctx;
+  int index;
+  if (!rc || !out || !item_id) return 0;
+  memset(out, 0, sizeof(*out));
+  out->fields = radio_station_fields;
+  out->field_count = 2U;
+  out->values = radio_station_values;
+  if (strcmp(item_id, RADIO_ADD_ID) == 0) {
+    out->title = "Add station";
+    radio_station_values[0] = "";
+    radio_station_values[1] = "";
+    return 1;
+  }
+  index = radio_my_index(rc, item_id);
+  if (index >= 0) {
+    out->title = "Edit station";
+    out->deletable = 1U;
+    radio_station_values[0] = rc->my_stations[index].name;
+    radio_station_values[1] = rc->my_stations[index].address;
+    return 1;
+  }
+  if (err && err_size > 0U) rc->host->format(err, err_size, "Station not found");
+  return 0;
+}
+
+static int radio_station_form_submit(void *ctx, const char *item_id,
+                                     const char *const *values,
+                                     uint32_t value_count, char *err,
+                                     uint32_t err_size)
+{
+  RadioContext *rc = (RadioContext *)ctx;
+  int index;
+  uint32_t slot;
+  if (!rc || !item_id || !values || value_count != 2U) return 0;
+  if (!values[0] || !radio_trim(values[0])[0]) {
+    if (err && err_size > 0U) rc->host->format(err, err_size, "Name is required");
+    return 0;
+  }
+  if (!radio_is_address(values[1])) {
+    if (err && err_size > 0U)
+      rc->host->format(err, err_size, "Address must start with http:// or https://");
+    return 0;
+  }
+  if (strcmp(item_id, RADIO_ADD_ID) == 0) {
+    if (rc->my_count >= RADIO_MAX_MY_STATIONS) {
+      if (err && err_size > 0U)
+        rc->host->format(err, err_size, "My stations list is full (64 stations)");
+      return 0;
+    }
+    for (slot = 0U; slot < RADIO_MAX_MY_STATIONS; slot++) {
+      char id[RADIO_MY_ID_MAX];
+      rc->host->format(id, sizeof(id), "my:%u", slot);
+      if (radio_my_index(rc, id) < 0) break;
+    }
+    index = (int)rc->my_count;
+    rc->my_stations[index].slot = slot;
+  } else {
+    index = radio_my_index(rc, item_id);
+    if (index < 0) {
+      if (err && err_size > 0U) rc->host->format(err, err_size, "Station not found");
+      return 0;
+    }
+  }
+  radio_copy_text(rc->my_stations[index].name, sizeof(rc->my_stations[0].name),
+                  radio_trim(values[0]), 1);
+  radio_copy_text(rc->my_stations[index].address,
+                  sizeof(rc->my_stations[0].address), values[1], 1);
+  if (!radio_store_my_station(rc, (uint32_t)index)) {
+    return radio_save_failed(rc->host, err, err_size);
+  }
+  if ((uint32_t)index == rc->my_count) rc->my_count++;
+  return 1;
+}
+
+static int radio_station_form_delete(void *ctx, const char *item_id, char *err,
+                                     uint32_t err_size)
+{
+  RadioContext *rc = (RadioContext *)ctx;
+  int index = rc ? radio_my_index(rc, item_id) : -1;
+  char key[32];
+  uint32_t i;
+  if (index < 0) {
+    if (rc && err && err_size > 0U) rc->host->format(err, err_size, "Station not found");
+    return 0;
+  }
+  /* Deleting also removes its saved favourite. */
+  for (i = 0U; i < rc->fav_count; i++) {
+    if (strcmp(rc->favs[i].uuid, item_id) == 0) {
+      ZZPlayProviderItem item;
+      memset(&item, 0, sizeof(item));
+      item.id = item_id;
+      if (!radio_favourite(rc, &item, 0, err, err_size)) return 0;
+      break;
+    }
+  }
+  rc->host->format(key, sizeof(key), "my_%u", rc->my_stations[index].slot);
+  if (!rc->host->pref_set(rc->host, key, "")) return radio_save_failed(rc->host, err, err_size);
+  for (i = (uint32_t)index; i + 1U < rc->my_count; i++)
+    rc->my_stations[i] = rc->my_stations[i + 1U];
+  rc->my_count--;
+  return 1;
 }
 
 static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
@@ -1027,6 +1327,17 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
     return 0;
   }
   host = rc->host;
+  {
+    int my_index = radio_my_index(rc, item);
+    if (my_index >= 0) {
+      memset(out, 0, sizeof(*out));
+      host->format(out->url, sizeof(out->url), "%s",
+                   rc->my_stations[my_index].address);
+      host->format(out->title, sizeof(out->title), "%s",
+                   rc->my_stations[my_index].name);
+      return 1;
+    }
+  }
   if (!radio_valid_uuid(item)) {
     if (err && err_size > 0U) {
       host->format(err, err_size, "Not a radio station id");
@@ -1056,10 +1367,27 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
   feed.stopped = 0;
 
   host->url_escape(item, escaped, sizeof(escaped));
-  host->format(url, sizeof(url), "%s/stations/byuuid/%s", RADIO_API_BASE, escaped);
+  host->format(url, sizeof(url), "%s/stations/byuuid/%s", radio_api_base(rc), escaped);
 
+  radio_set_server_url(url, rc->server);
   ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
                       err_size);
+  if (!ok || status >= 500) {
+    uint32_t attempt;
+    char first_error[ZZPLAY_PROVIDER_ERROR_MAX];
+    radio_copy_text(first_error, sizeof(first_error), err ? err : "", 0);
+    for (attempt = 1U; attempt < 3U && (!ok || status >= 500); attempt++) {
+      rc->server++;
+      if (rc->server >= 3U) rc->server = 0U;
+      radio_set_server_url(url, rc->server);
+      status = 0;
+      if (err && err_size > 0U) err[0] = '\0';
+      ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status,
+                          err, err_size);
+    }
+    if ((!ok || status >= 500) && first_error[0] && err && err_size > 0U)
+      host->format(err, err_size, "%s", first_error);
+  }
   whole = radio_xml_complete(host, xml);
   host->xml_close(host, xml);
 
@@ -1152,7 +1480,7 @@ static int radio_favourite(void *ctx, const ZZPlayProviderItem *item, int add,
       }
       return 0;
     }
-    if (!radio_valid_uuid(item->id)) {
+    if (!radio_valid_uuid(item->id) && radio_my_index(rc, item->id) < 0) {
       if (err && err_size > 0U) {
         host->format(err, err_size, "Not a radio station id");
       }
@@ -1246,7 +1574,10 @@ static const ZZPlayProvider radio_provider = {
   NULL,
   NULL,
   NULL,
-  NULL
+  NULL,
+  radio_station_form_get,
+  radio_station_form_submit,
+  radio_station_form_delete
 };
 
 const ZZPlayProvider *zzplay_provider_entry(void)

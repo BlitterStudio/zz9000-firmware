@@ -182,6 +182,7 @@ static int worker_sink_item(void *user, const ZZPlayProviderItem *item)
   dst->kind = item->kind;
   dst->playable = item->playable;
   dst->favourite = item->favourite;
+  dst->editable = item->editable;
   c->count++;
 
   /* Group rows so the GUI can show them while the rest arrive. */
@@ -224,6 +225,15 @@ static int worker_provider_has_link(const ZZPlayProvider *p)
   }
   return p->link_start != NULL && p->link_poll != NULL &&
          p->link_choose != NULL;
+}
+
+static int worker_provider_has_form(const ZZPlayProvider *p)
+{
+  if (!p || p->size < offsetof(ZZPlayProvider, form_delete) +
+                        sizeof(p->form_delete)) {
+    return 0;
+  }
+  return p->form_get != NULL && p->form_submit != NULL;
 }
 
 
@@ -469,6 +479,54 @@ static void worker_process(void)
                            req->fav_add ? "cannot add favourite"
                                         : "cannot remove favourite");
           }
+        }
+      } else if (req->kind == ZZPLAY_BROWSE_REQ_FORM_GET) {
+        ZZPlayProviderForm form;
+        uint32_t i;
+        memset(&form, 0, sizeof(form));
+        if (!worker_provider_has_form(p)) {
+          (void)snprintf(rep->error, sizeof(rep->error),
+                         "service does not support forms");
+        } else {
+          rep->success = p->form_get(ctx, req->item_id, &form,
+                                     rep->error, sizeof(rep->error));
+          if (rep->success) {
+            rep->form = form;
+            rep->form.values = NULL;
+            if (rep->form.field_count > ZZPLAY_PROVIDER_FORM_FIELDS_MAX) {
+              rep->form.field_count = ZZPLAY_PROVIDER_FORM_FIELDS_MAX;
+            }
+            (void)snprintf(rep->form_title, sizeof(rep->form_title), "%s",
+                           form.title ? form.title : "Edit");
+            rep->form.title = rep->form_title;
+            for (i = 0U; i < rep->form.field_count; i++) {
+              (void)snprintf(rep->form_values[i],
+                             sizeof(rep->form_values[i]), "%s",
+                             form.values && form.values[i] ? form.values[i] : "");
+            }
+          }
+        }
+      } else if (req->kind == ZZPLAY_BROWSE_REQ_FORM_SUBMIT) {
+        const char *values[ZZPLAY_PROVIDER_FORM_FIELDS_MAX];
+        uint32_t i;
+        if (!worker_provider_has_form(p)) {
+          (void)snprintf(rep->error, sizeof(rep->error),
+                         "service does not support forms");
+        } else {
+          for (i = 0U; i < ZZPLAY_PROVIDER_FORM_FIELDS_MAX; i++) {
+            values[i] = req->form_values[i];
+          }
+          rep->success = p->form_submit(ctx, req->item_id, values,
+                                        req->form_value_count, rep->error,
+                                        sizeof(rep->error));
+        }
+      } else if (req->kind == ZZPLAY_BROWSE_REQ_FORM_DELETE) {
+        if (!worker_provider_has_form(p) || p->form_delete == NULL) {
+          (void)snprintf(rep->error, sizeof(rep->error),
+                         "service does not support deleting this row");
+        } else {
+          rep->success = p->form_delete(ctx, req->item_id, rep->error,
+                                        sizeof(rep->error));
         }
       } else if (req->kind == ZZPLAY_BROWSE_REQ_LINK_START) {
         if (!worker_provider_has_link(p)) {

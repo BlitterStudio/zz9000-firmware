@@ -59,6 +59,7 @@ enum BrowseMenuItem {
   BMI_ADD_ALL,
   BMI_BAR2,
   BMI_FAVOURITE,
+  BMI_EDIT,
   BMI_RELOAD,
   BMI_BACK,
   BMI_BAR3,
@@ -84,6 +85,7 @@ enum BrowseGadgetID {
   SGID_SAVE,
   SGID_CANCEL,
   SGID_LINK,
+  SGID_DELETE,
   SGID_STATUS,
   SGID_FIELD_BASE = 100,
   LGID_ACTION = 200,
@@ -156,6 +158,10 @@ static ZZPlayBrowseReqKind link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
 static uint32_t link_generation = 0U;
 static int link_choice_sel = 0;
 static const ZZPlayProvider *link_provider = NULL;
+static ZZPlayProvider form_provider;
+static ZZPlayProviderForm row_form;
+static char row_form_item[ZZPLAY_PROVIDER_TEXT_MAX];
+static int row_form_mode = 0;
 enum LinkWindowState {
   LINK_WINDOW_CLOSED = 0,
   LINK_WINDOW_STARTING,
@@ -216,6 +222,8 @@ static struct NewMenu browse_new_menu[] = {
   { NM_ITEM, NM_BARLABEL, 0, 0, 0, 0 },
   { NM_ITEM, (CONST_STRPTR)"Favourite", (CONST_STRPTR)"I", 0, 0,
     (APTR)BMI_FAVOURITE },
+  { NM_ITEM, (CONST_STRPTR)"Edit station...", (CONST_STRPTR)"J", 0, 0,
+    (APTR)BMI_EDIT },
   { NM_ITEM, (CONST_STRPTR)"Reload", (CONST_STRPTR)"E", 0, 0,
     (APTR)BMI_RELOAD },
   { NM_ITEM, (CONST_STRPTR)"Back", (CONST_STRPTR)"K", 0, 0,
@@ -776,6 +784,8 @@ static void update_buttons(void)
     browse_menu_enable(
         BMI_FAVOURITE,
         zzplay_browse_model_can_favourite(&browse_model) ? 1 : 0);
+    browse_menu_enable(BMI_EDIT,
+                       zzplay_browse_model_can_edit(&browse_model) ? 1 : 0);
     browse_menu_enable(BMI_RELOAD,
                        zzplay_browse_model_can_reload(&browse_model) ? 1 : 0);
     browse_menu_enable(BMI_BACK,
@@ -1300,7 +1310,13 @@ static void __attribute__((noinline)) open_settings_window(void)
 
   svc = zzplay_browse_model_current_service(&browse_model);
   p = svc ? svc->provider : NULL;
-  has_link = zzplay_browse_model_provider_has_link(p);
+  if (row_form_mode && p) {
+    form_provider = *p;
+    form_provider.fields = row_form.fields;
+    form_provider.field_count = row_form.field_count;
+    p = &form_provider;
+  }
+  has_link = !row_form_mode && zzplay_browse_model_provider_has_link(p);
   if (!p || (p->field_count == 0U && !has_link)) {
     update_status_text("Service has no settings");
     return;
@@ -1378,13 +1394,19 @@ static void __attribute__((noinline)) open_settings_window(void)
   if (has_link) {
     cur_y += 2 * (btn_h + BROWSE_SPACING);
   }
+  if (row_form_mode) {
+    cur_y += btn_h + BROWSE_SPACING;
+  }
+  if (row_form_mode && row_form.deletable) {
+    cur_y += btn_h + BROWSE_SPACING;
+  }
   cur_y += btn_h + BROWSE_MARGIN;
 
   ng.ng_TextAttr = browse_text_attr;
 
   settings_win = OpenWindowTags(
       NULL,
-      WA_Title, (ULONG)"Service Settings",
+      WA_Title, (ULONG)(row_form_mode && row_form.title ? row_form.title : "Service Settings"),
       WA_Left, browse_win ? (browse_win->LeftEdge + 30) : 60,
       WA_Top, browse_win ? (browse_win->TopEdge + 30) : 60,
       WA_InnerWidth, (ULONG)win_w,
@@ -1406,12 +1428,15 @@ static void __attribute__((noinline)) open_settings_window(void)
   for (i = 0U; i < count; i++) {
     const ZZPlayProviderField *f = &p->fields[i];
     struct TagItem cyc_tags[3];
-    struct TagItem str_tags[4];
+    struct TagItem str_tags[5];
     int is_choice;
 
     secret_orig[i][0] = '\0';
-    field_bufs[i][0] = '\0';
-    zzplay_host_pref_get(p->scheme, f->key, field_bufs[i], sizeof(field_bufs[i]));
+    if (!row_form_mode) {
+      field_bufs[i][0] = '\0';
+      zzplay_host_pref_get(p->scheme, f->key, field_bufs[i],
+                           sizeof(field_bufs[i]));
+    }
 
     /* A CHOICE field becomes a cycle gadget; a module without a list
      * falls back to a plain text field. */
@@ -1462,7 +1487,10 @@ static void __attribute__((noinline)) open_settings_window(void)
     str_tags[1].ti_Data = (ULONG)(sizeof(field_bufs[i]) - 1U);
     str_tags[2].ti_Tag = GA_RelVerify;
     str_tags[2].ti_Data = TRUE;
-    str_tags[3].ti_Tag = TAG_DONE;
+    /* Tab and Shift-Tab move between the text fields. */
+    str_tags[3].ti_Tag = GA_TabCycle;
+    str_tags[3].ti_Data = TRUE;
+    str_tags[4].ti_Tag = TAG_DONE;
 
     field_gads[i] = gad = create_gadget(
         settings_win, STRING_KIND, gad, &ng,
@@ -1491,6 +1519,20 @@ static void __attribute__((noinline)) open_settings_window(void)
         note_tags);
     cur_y += btn_h + BROWSE_SPACING;
   }
+  if (row_form_mode) {
+    struct TagItem note_tags[4];
+    note_tags[0].ti_Tag = GTTX_Text;
+    note_tags[0].ti_Data = (ULONG)settings_note;
+    note_tags[1].ti_Tag = GTTX_CopyText;
+    note_tags[1].ti_Data = TRUE;
+    note_tags[2].ti_Tag = GTTX_Clipped;
+    note_tags[2].ti_Data = TRUE;
+    note_tags[3].ti_Tag = TAG_DONE;
+    settings_note_gad = gad = create_gadget(
+        settings_win, TEXT_KIND, gad, &ng, BROWSE_MARGIN, cur_y,
+        win_w - 2 * BROWSE_MARGIN, btn_h, NULL, SGID_STATUS, 0, note_tags);
+    cur_y += btn_h + BROWSE_SPACING;
+  }
 
   gad = create_gadget(settings_win, BUTTON_KIND, gad, &ng,
                       BROWSE_MARGIN, cur_y, btn_w, btn_h,
@@ -1499,6 +1541,12 @@ static void __attribute__((noinline)) open_settings_window(void)
   gad = create_gadget(settings_win, BUTTON_KIND, gad, &ng,
                       win_w - BROWSE_MARGIN - btn_w, cur_y, btn_w, btn_h,
                       "Cancel", SGID_CANCEL, PLACETEXT_IN, NULL);
+  if (row_form_mode && row_form.deletable) {
+    gad = create_gadget(settings_win, BUTTON_KIND, gad, &ng,
+                        BROWSE_MARGIN, cur_y + btn_h + BROWSE_SPACING,
+                        btn_w, btn_h, "Delete", SGID_DELETE, PLACETEXT_IN,
+                        NULL);
+  }
 
   if (!gad) {
     close_settings_window();
@@ -1508,6 +1556,16 @@ static void __attribute__((noinline)) open_settings_window(void)
   AddGList(settings_win, settings_glist, (UWORD)-1, (UWORD)-1, NULL);
   RefreshGList(settings_glist, settings_win, NULL, (UWORD)-1);
   GT_RefreshWindow(settings_win, NULL);
+  /* A row form (such as Add station) is for typing: start in its first
+   * text field. */
+  if (row_form_mode) {
+    for (i = 0U; i < count; i++) {
+      if (field_gads[i] && field_choice_n[i] == 0) {
+        (void)ActivateGadget(field_gads[i], settings_win, NULL);
+        break;
+      }
+    }
+  }
 }
 
 static void settings_refresh_fields(const ZZPlayProvider *p)
@@ -1756,10 +1814,40 @@ static void __attribute__((noinline)) poll_settings(void)
         start_link_signin(p);
         continue;
       }
+      if (gad->GadgetID == SGID_DELETE && p && row_form_mode) {
+        ZZPlayBrowseRequest req;
+        memset(&req, 0, sizeof(req));
+        req.kind = ZZPLAY_BROWSE_REQ_FORM_DELETE;
+        req.generation = ++browse_model.generation;
+        copy_string(req.scheme, sizeof(req.scheme), p->scheme);
+        copy_string(req.item_id, sizeof(req.item_id), row_form_item);
+        if (browse_send(&req, p)) browse_model.busy = 1;
+        return;
+      }
       if (gad->GadgetID == SGID_SAVE && p) {
         uint32_t count = p->field_count > BROWSE_FIELDS_MAX ? BROWSE_FIELDS_MAX : p->field_count;
         uint32_t i;
         ZZPlayBrowseRequest req;
+        if (row_form_mode) {
+          memset(&req, 0, sizeof(req));
+          req.kind = ZZPLAY_BROWSE_REQ_FORM_SUBMIT;
+          req.generation = ++browse_model.generation;
+          copy_string(req.scheme, sizeof(req.scheme), p->scheme);
+          copy_string(req.item_id, sizeof(req.item_id), row_form_item);
+          req.form_value_count = count;
+          for (i = 0U; i < count; i++) {
+            const char *value = field_gads[i] && field_gads[i]->SpecialInfo
+                                    ? (const char *)((struct StringInfo *)
+                                          field_gads[i]->SpecialInfo)->Buffer
+                                    : field_bufs[i];
+            copy_string(req.form_values[i], sizeof(req.form_values[i]), value);
+          }
+          if (browse_send(&req, p)) {
+            browse_model.busy = 1;
+            copy_string(settings_note, sizeof(settings_note), "Saving...");
+          }
+          return;
+        }
 
         for (i = 0U; i < count; i++) {
           const ZZPlayProviderField *f = &p->fields[i];
@@ -2772,6 +2860,8 @@ static void browse_after_navigation(const char *loading)
 }
 
 /* A folder row opens; a track or station row plays. */
+static void browse_open_row_form(void);
+
 static void browse_activate_row(int32_t index)
 {
   ZZPlayBrowseAction act =
@@ -2784,6 +2874,8 @@ static void browse_activate_row(int32_t index)
     update_buttons();
   } else if (act == ZZPLAY_BROWSE_ACTION_OPEN_SETTINGS) {
     open_settings_window();
+  } else if (act == ZZPLAY_BROWSE_ACTION_OPEN_FORM) {
+    browse_open_row_form();
   }
 }
 
@@ -2829,6 +2921,25 @@ static void browse_do_favourite(void)
       update_status_text(last_fav_add ? "Adding to favourites..."
                                       : "Removing from favourites...");
     }
+    update_buttons();
+  }
+}
+
+static void browse_open_row_form(void)
+{
+  const ZZPlayBrowseServiceEntry *svc =
+      zzplay_browse_model_current_service(&browse_model);
+  if (!svc || browse_model.selection < 0 ||
+      (uint32_t)browse_model.selection >= browse_model.item_count) return;
+  memset(&poll_req, 0, sizeof(poll_req));
+  poll_req.kind = ZZPLAY_BROWSE_REQ_FORM_GET;
+  poll_req.generation = ++browse_model.generation;
+  copy_string(poll_req.scheme, sizeof(poll_req.scheme), svc->scheme);
+  copy_string(poll_req.item_id, sizeof(poll_req.item_id),
+              browse_model.items[browse_model.selection].id);
+  if (browse_send(&poll_req, svc->provider)) {
+    browse_model.busy = 1;
+    update_status_text("Opening form...");
     update_buttons();
   }
 }
@@ -2940,6 +3051,9 @@ static int browse_menu_pick(UWORD code)
     case BMI_FAVOURITE:
       browse_do_favourite();
       break;
+    case BMI_EDIT:
+      browse_open_row_form();
+      break;
     case BMI_RELOAD:
       browse_do_reload();
       break;
@@ -2981,6 +3095,41 @@ void zzplay_browse_poll(void)
   /* 1. Worker replies (rows arrive in groups; drain what queued) */
   while (zzplay_browse_worker_take_reply(&poll_worker_reply)) {
     if (handle_link_reply(&poll_worker_reply)) {
+      zzplay_browse_worker_release_reply(&poll_worker_reply);
+    } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FORM_GET) {
+      uint32_t i;
+      browse_model.busy = 0;
+      if (!poll_worker_reply.success) {
+        update_status_text(poll_worker_reply.error);
+      } else {
+        row_form = poll_worker_reply.form;
+        row_form.title = poll_worker_reply.form_title;
+        copy_string(row_form_item, sizeof(row_form_item), poll_req.item_id);
+        row_form_mode = 1;
+        for (i = 0U; i < row_form.field_count && i < BROWSE_FIELDS_MAX; i++) {
+          copy_string(field_bufs[i], sizeof(field_bufs[i]),
+                      poll_worker_reply.form_values[i]);
+        }
+        open_settings_window();
+        browse_update_count_status();
+      }
+      update_buttons();
+      zzplay_browse_worker_release_reply(&poll_worker_reply);
+    } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FORM_SUBMIT ||
+               poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FORM_DELETE) {
+      browse_model.busy = 0;
+      if (!poll_worker_reply.success) {
+        copy_string(settings_note, sizeof(settings_note), poll_worker_reply.error);
+        update_status_text(settings_note);
+        if (settings_note_gad) GT_SetGadgetAttrs(settings_note_gad, settings_win,
+                                                  NULL, GTTX_Text,
+                                                  (ULONG)settings_note, TAG_DONE);
+      } else {
+        close_settings_window();
+        row_form_mode = 0;
+        browse_do_reload();
+      }
+      update_buttons();
       zzplay_browse_worker_release_reply(&poll_worker_reply);
     } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_GATHER) {
       /* Rows of a superseded or stopped gather are discarded: it must
