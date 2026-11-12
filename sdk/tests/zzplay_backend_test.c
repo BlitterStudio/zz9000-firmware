@@ -73,6 +73,24 @@ static int check_selection(ZZPlayMediaAudio media,
          decision.fell_back == expected_fallback;
 }
 
+static int check_no_card_selection(
+    ZZPlayMediaAudio media, ZZPlayAudioBackend requested,
+    ZZPlayBackendAvailability ahi, ZZPlayBackendAvailability mhi,
+    ZZPlayBackendStatus expected_status, ZZPlayAudioBackend expected_backend,
+    int expected_fallback)
+{
+  ZZPlayAudioAvailability availability;
+  ZZPlayBackendDecision decision;
+
+  memset(&availability, 0, sizeof(availability));
+  availability.ahi = ahi;
+  availability.mhi = mhi;
+  decision = zzplay_audio_select_without_card(media, requested, &availability);
+  return decision.status == expected_status &&
+         decision.selected == expected_backend &&
+         decision.fell_back == expected_fallback;
+}
+
 static int check_audio_policy(void)
 {
   if (!check_selection(ZZPLAY_MEDIA_AUDIO_NONE, ZZPLAY_AUDIO_AUTO,
@@ -138,6 +156,34 @@ static int check_audio_policy(void)
     return 0;
   }
   return 1;
+}
+
+static int check_no_card_policy(void)
+{
+  return check_no_card_selection(
+             ZZPLAY_MEDIA_AUDIO_MP3, ZZPLAY_AUDIO_AUTO,
+             ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_OK,
+             ZZPLAY_AUDIO_MHI, 0) &&
+         check_no_card_selection(
+             ZZPLAY_MEDIA_AUDIO_MP3, ZZPLAY_AUDIO_AUTO,
+             ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_MISSING, ZZPLAY_BACKEND_OK,
+             ZZPLAY_AUDIO_AHI, 1) &&
+         check_no_card_selection(
+             ZZPLAY_MEDIA_AUDIO_MP3, ZZPLAY_AUDIO_AUTO,
+             ZZPLAY_BACKEND_MISSING, ZZPLAY_BACKEND_MISSING,
+             ZZPLAY_BACKEND_MISSING_RESULT, ZZPLAY_AUDIO_NONE, 0) &&
+         check_no_card_selection(
+             ZZPLAY_MEDIA_AUDIO_MP3, ZZPLAY_AUDIO_MHI,
+             ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_MISSING,
+             ZZPLAY_BACKEND_MISSING_RESULT, ZZPLAY_AUDIO_NONE, 0) &&
+         check_no_card_selection(
+             ZZPLAY_MEDIA_AUDIO_MP3, ZZPLAY_AUDIO_AHI,
+             ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_MISSING, ZZPLAY_BACKEND_OK,
+             ZZPLAY_AUDIO_AHI, 0) &&
+         check_no_card_selection(
+             ZZPLAY_MEDIA_AUDIO_MP2, ZZPLAY_AUDIO_AUTO,
+             ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_FREE,
+             ZZPLAY_BACKEND_MISSING_RESULT, ZZPLAY_AUDIO_NONE, 0);
 }
 
 /* Program Stream AC-3 and LPCM ride the same backends as MP2: card-decoded
@@ -299,6 +345,9 @@ int main(void)
   }
   if (!check_audio_policy()) {
     return 2;
+  }
+  if (!check_no_card_policy()) {
+    return 8;
   }
   if (!check_z2_aperture()) {
     return 3;

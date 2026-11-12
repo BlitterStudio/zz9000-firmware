@@ -43,6 +43,9 @@ typedef struct ZZPlayEngineRun {
   /* The source can be reopened at any offset (always true for files; a
    * network source needs byte ranges and a known length). */
   int source_seekable;
+  /* The application opened zz9k.library and found a responding card before
+   * this item. Card-only engines must not probe optional card libraries. */
+  int card_available;
   /* Called regularly from every wait loop so the GUI stays live while
    * the engine blocks; may be NULL when there is nothing to pump. */
   void (*pump)(void *user);

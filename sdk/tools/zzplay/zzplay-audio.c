@@ -129,6 +129,18 @@ ZZPlayBackendDecision zzplay_audio_select(
   return decision;
 }
 
+ZZPlayBackendDecision zzplay_audio_select_without_card(
+    ZZPlayMediaAudio media,
+    ZZPlayAudioBackend requested,
+    const ZZPlayAudioAvailability *availability)
+{
+  if (media != ZZPLAY_MEDIA_AUDIO_NONE && media != ZZPLAY_MEDIA_AUDIO_MP3) {
+    return zzplay_audio_decision(ZZPLAY_BACKEND_MISSING_RESULT,
+                                 ZZPLAY_AUDIO_NONE, 0);
+  }
+  return zzplay_audio_select(media, requested, availability);
+}
+
 int zzplay_audio_start_ready(uint64_t queued_frames,
                              uint64_t prebuffer_target_frames,
                              uint64_t high_water_frames,

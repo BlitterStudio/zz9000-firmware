@@ -28,6 +28,12 @@
 struct Library *MHIBase = 0;
 
 
+int zzplay_mhi_driver_is_card(const char *driver)
+{
+  return !driver || !*driver ||
+         zzplay_ascii_equal_fold(driver, ZZPLAY_MHI_DEFAULT_DRIVER);
+}
+
 ZZPlayMHIStatus zzplay_mhi_acquire(ZZPlayMHISink *sink,
                                    const char *driver)
 {
@@ -42,8 +48,7 @@ ZZPlayMHIStatus zzplay_mhi_acquire(ZZPlayMHISink *sink,
     driver = ZZPLAY_MHI_DEFAULT_DRIVER;
   }
   strcpy(sink->driver, driver);
-  sink->card_driver = (uint8_t)zzplay_ascii_equal_fold(
-      driver, ZZPLAY_MHI_DEFAULT_DRIVER);
+  sink->card_driver = (uint8_t)zzplay_mhi_driver_is_card(driver);
   strcpy(path, ZZPLAY_MHI_LIBRARY_PREFIX);
   strcat(path, driver);
   MHIBase = OpenLibrary((CONST_STRPTR)path, 0U);

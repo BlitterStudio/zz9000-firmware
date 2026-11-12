@@ -1,11 +1,11 @@
 # ZZPlay
 
-ZZPlay is the ZZ9000 media player for AmigaOS. It decodes supported media on
-the card and presents video through the Picasso96 overlay. On an accelerated
-Zorro III system, decoded video stays on the card rather than crossing the
-Zorro bus. Audio also plays over the network: `http://` and `https://`
-streams, internet radio stations, and the music on a Plex Media Server,
-which the [Browse window](#browse-window) lists and searches.
+ZZPlay is the ZZ9000 media player for AmigaOS. With a ZZ9000 it decodes
+supported media on the card and presents video through the Picasso96 overlay.
+On an accelerated Zorro III system, decoded video stays on the card rather than
+crossing the Zorro bus. Audio also plays over the network: `http://` and
+`https://` streams, internet radio stations, and the music on a Plex Media
+Server, which the [Browse window](#browse-window) lists and searches.
 
 Start it as a desktop player from Workbench, or pass files or network URLs from
 a shell for a one-shot playlist. A shell launch with media exits after playback;
@@ -50,14 +50,24 @@ not support.
 
 ## Platform limits
 
-ZZPlay requires a supported ZZ9000 Zorro II or Zorro III aperture, the
-Picasso96 API, and the firmware media-decode services required by the selected
-format. On Zorro II, the firmware must advertise an aperture layout and a PIP
+ZZPlay uses a supported ZZ9000 Zorro II or Zorro III aperture, the Picasso96
+API, and the required firmware media-decode services for video, FLAC and Ogg
+Vorbis. On Zorro II, the firmware must advertise an aperture layout and a PIP
 pool that fits the decoded video.
 
 On a matched 4 MiB Zorro II stack the PIP source pool is 224 KiB, which fits
-an aligned 352x288 YUY2 frame but not a 640x360 one. The 2 MiB profile has
-no PIP pool. MP3 plays on both.
+an aligned 352x288 YUY2 frame but not a 640x360 one. The 2 MiB profile has no
+PIP pool. MP3 plays on both.
+
+### Without a ZZ9000
+
+ZZPlay still opens its player window, settings, Browse services and ARexx port.
+It can play MP3 files, HTTP or HTTPS streams, radio stations and Plex MP3
+items. `AUTO` tries the selected MHI driver, then other drivers in `LIBS:MHI/`.
+If no MHI driver can play, it uses AHI with an installed software
+`mpega.library`. ZZPlay does not install an MP3 decoder. FLAC, Ogg Vorbis,
+MPEG and WebM video, and animated WebP need a ZZ9000. ZZPlay marks those
+playlist items unplayable and continues with the next item.
 
 ## Start playback
 
@@ -130,16 +140,16 @@ that begin with `--` are errors.
 
 ## Audio output
 
-`AUTO` uses MHI for MP3 when the selected MHI driver is available, otherwise
-it uses accelerated decode with AHI. For MPEG and WebM sound, `AUTO` tries the
-ZZ9000AX daughterboard first and then AHI. FLAC and Ogg Vorbis try card output
-and fall back to AHI if the card refuses the output or ZZ9000AX is busy; the
-MP3 and video settings do not apply to them. An explicit `AUDIO=AX` request is
-strict and reports failure instead of falling back. An explicit `AUDIO=MHI`
-request for FLAC or Ogg Vorbis is rejected.
-
-The required decoder service must be advertised by the firmware before
-playback begins. Video-only files can play without an audio backend.
+`AUTO` uses MHI for MP3 when an MHI driver can play it, otherwise it uses
+accelerated decode with AHI on a ZZ9000. Without a ZZ9000, `AUTO` tries other
+MHI drivers when the configured driver cannot play, then uses a software
+`mpega.library` decoder with AHI. `AUDIO=MHI` and `AUDIO=AHI` are strict.
+For MPEG and WebM sound, `AUTO` tries the ZZ9000AX daughterboard first and then
+AHI. FLAC and Ogg Vorbis try card output and fall back to AHI if the card
+refuses the output or ZZ9000AX is busy; the MP3 and video settings do not
+apply to them. An explicit `AUDIO=AX` request is strict and reports failure
+instead of falling back. An explicit `AUDIO=MHI` request for FLAC or Ogg
+Vorbis is rejected.
 
 Only one backend can use the ZZ9000AX daughterboard at a time. A strict request
 reports `BUSY` when another program owns it; automatic selection can fall back.
@@ -180,10 +190,9 @@ An address that ends in `.pls`, `.m3u` or `.m3u8` is a station's playlist. It
 stays one playlist entry. When the entry starts, ZZPlay downloads it and plays
 the first stream in it that answers.
 
-### What plays and how
-
-A network item uses the same audio settings as a file: MP3 through MHI,
-ZZ9000AX or AHI, and FLAC and Ogg Vorbis decoded on the card.
+A network item uses the same audio settings as a file. On a card-less Amiga,
+MP3 uses MHI or software `mpega.library` decoding through AHI. FLAC and Ogg
+Vorbis need the card.
 
 | Situation | What ZZPlay does |
 | --- | --- |

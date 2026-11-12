@@ -103,8 +103,9 @@
 #define ZZPLAY_SYNC_POLL_US 2000U
 #define ZZPLAY_FPS_REPORT_US 2000000U
 
-struct Library *P96Base;
-struct Device *TimerBase;
+/* Initializers keep libnix from binding auto-open stubs before main. */
+struct Library *P96Base = 0;
+struct Device *TimerBase = 0;
 
 static volatile sig_atomic_t zzplay_ctrl_c_requested;
 
@@ -281,6 +282,8 @@ typedef struct ZZPlayApp {
   ZZPlayPlaylist playlist;
   int player_mode;
   int had_failure;
+  int card_available;
+  char about_version[96];
   int32_t jump_index;      /* pending JUMP target */
   uint32_t start_seek_ms;  /* restart position for the next START */
   BPTR trace;
@@ -383,6 +386,17 @@ static void zzplay_app_close_screen(void)
   CloseLibrary(app.video_screen_p96);
   app.video_screen = 0;
   app.video_screen_p96 = 0;
+}
+
+static int zzplay_app_card_available(void)
+{
+  ZZ9KContext *ctx = 0;
+  int available = zz9k_open(&ctx) == ZZ9K_STATUS_OK && ctx != 0;
+
+  if (ctx) {
+    zz9k_close(ctx);
+  }
+  return available;
 }
 
 static uint32_t zzplay_elapsed_us(const TimeVal_Type *start,
@@ -3782,7 +3796,7 @@ static void zzplay_app_open_gui(ZZPlayApp *app)
   context.controller = &app->ctl;
   context.playlist = &app->playlist;
   context.prefs = &app->prefs;
-  context.version = zzplay_version + 6;
+  context.version = app->about_version;
   if (!zzplay_gui_open(&context)) {
     /* Headless fallback: playback still works, and the message line
      * state is kept for the day the window does open. */
@@ -5509,6 +5523,10 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
         &app->ctl, &app->options,
          "cannot play %s: not a supported MPEG Program Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
         app->entry_path);
+  } else if (!app->card_available && probe.kind != ZZPLAY_MEDIA_KIND_MP3) {
+    zzplay_launch_reportf(&app->ctl, &app->options,
+                          "%s needs a ZZ9000",
+                          format && format->name ? format->name : "This item");
   } else {
     /* A one-shot run shows only the video window; an audio-only item
      * opens the player window lazily, as the status window's
@@ -5528,6 +5546,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     run.file_size = file_size;
     run.seek_ms = app->start_seek_ms;
     run.source_seekable = source_seekable;
+    run.card_available = app->card_available;
     run.pump = zzplay_app_pump;
     run.pump_user = app;
     app->start_seek_ms = 0U;
@@ -5780,8 +5799,14 @@ int main(int argc, char **argv)
 
   zzplay_set_quiet(app.options.quiet);
   app.player_mode = zzplay_options_wants_player(&app.options);
-
-  /* Settings: defaults < ENV:ZZPlay.prefs < this launch's overrides. */
+  app.card_available = zzplay_app_card_available();
+  (void)snprintf(app.about_version, sizeof(app.about_version), "%s%s",
+                 zzplay_version + 6,
+                 app.card_available ? "" :
+                 "\nNo ZZ9000 found. MP3 plays through MHI or mpega.library and AHI.");
+  if (!app.card_available) {
+    zzplay_info("zzplay: no ZZ9000 found; MP3 can use MHI or mpega.library + AHI\n");
+  }
   zzplay_prefs_defaults(&app.prefs);
   (void)zzplay_prefs_load(&app.prefs, ZZPLAY_PREFS_ENV_PATH);
   app.stored_prefs = app.prefs;

@@ -48,6 +48,8 @@ typedef int (*ZZPlayMHIPaused)(void *user);
  * selects the default mhizz9000.library driver. */
 ZZPlayMHIStatus zzplay_mhi_acquire(ZZPlayMHISink *sink,
                                    const char *driver);
+/* Nonzero when `driver` is the card-only default mhizz9000.library. */
+int zzplay_mhi_driver_is_card(const char *driver);
 /* Feed the whole file from its current position. Returns ZZPLAY_MHI_OK
  * when the decoder drained the input, ZZPLAY_MHI_STOPPED when
  * `stop_requested` asked for the end of the item. */

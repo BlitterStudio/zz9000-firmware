@@ -44,7 +44,7 @@ for src in bitio crcio dhuf extract huf larc maketbl maketree shuf slide zz9k_lh
     -c tools/lha-unix/$src.c -o build/m68k/lha-$src.o
 done
 LHA_OBJS="build/m68k/lha-bitio.o build/m68k/lha-crcio.o build/m68k/lha-dhuf.o build/m68k/lha-extract.o build/m68k/lha-huf.o build/m68k/lha-larc.o build/m68k/lha-maketbl.o build/m68k/lha-maketree.o build/m68k/lha-shuf.o build/m68k/lha-slide.o build/m68k/lha-zz9k_lha_unix.o build/m68k/lha-zz9k_lha_unix_support.o"
-ZZPLAY_SOURCES="tools/zzplay/zzplay-ahi.c tools/zzplay/zzplay-ahiprefs.c tools/zzplay/zzplay-audio.c tools/zzplay/zzplay-audio-clock.c tools/zzplay/zzplay-ax.c tools/zzplay/zzplay-codec.c tools/zzplay/zzplay-codec-stream.c tools/zzplay/zzplay-controller.c tools/zzplay/zzplay-core.c tools/zzplay/zzplay-devices.c tools/zzplay/zzplay-files.c tools/zzplay/zzplay-formats.c tools/zzplay/zzplay-frame-clock.c tools/zzplay/zzplay-geometry.c tools/zzplay/zzplay-gui.c tools/zzplay/zzplay-launch.c tools/zzplay/zzplay-media.c tools/zzplay/zzplay-mhi.c tools/zzplay/zzplay-mp3.c tools/zzplay/zzplay-mp3-transport.c tools/zzplay/zzplay-options.c tools/zzplay/zzplay-path.c tools/zzplay/zzplay-playlist.c tools/zzplay/zzplay-prefs.c tools/zzplay/zzplay-probe.c tools/zzplay/zzplay-reader.c tools/zzplay/zzplay-stats.c tools/zzplay/zzplay-stream.c tools/zzplay/zzplay-sync.c tools/zzplay/zzplay-tags.c tools/zzplay/zzplay-video.c tools/zzplay/zzplay-webm.c tools/zzplay/zzplay.c"
+ZZPLAY_SOURCES="tools/zzplay/zzplay-ahi.c tools/zzplay/zzplay-ahiprefs.c tools/zzplay/zzplay-audio.c tools/zzplay/zzplay-audio-clock.c tools/zzplay/zzplay-ax.c tools/zzplay/zzplay-codec.c tools/zzplay/zzplay-codec-stream.c tools/zzplay/zzplay-controller.c tools/zzplay/zzplay-core.c tools/zzplay/zzplay-devices.c tools/zzplay/zzplay-files.c tools/zzplay/zzplay-formats.c tools/zzplay/zzplay-frame-clock.c tools/zzplay/zzplay-geometry.c tools/zzplay/zzplay-gui.c tools/zzplay/zzplay-launch.c tools/zzplay/zzplay-media.c tools/zzplay/zzplay-mhi.c tools/zzplay/zzplay-mpega.c tools/zzplay/zzplay-mp3.c tools/zzplay/zzplay-mp3-transport.c tools/zzplay/zzplay-options.c tools/zzplay/zzplay-path.c tools/zzplay/zzplay-playlist.c tools/zzplay/zzplay-prefs.c tools/zzplay/zzplay-probe.c tools/zzplay/zzplay-reader.c tools/zzplay/zzplay-stats.c tools/zzplay/zzplay-stream.c tools/zzplay/zzplay-sync.c tools/zzplay/zzplay-tags.c tools/zzplay/zzplay-video.c tools/zzplay/zzplay-webm.c tools/zzplay/zzplay.c"
 
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-requester.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-rexx.c tools/zzplay/zzplay-rexx-commands.c"
@@ -104,7 +104,7 @@ if [ ! -f "$SWAPSTACK" ]; then
   m68k-amigaos-ar p "$LIBNIX" swapstack.o > build/m68k/swapstack.o
   SWAPSTACK="build/m68k/swapstack.o"
 fi
-m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES "$SWAPSTACK" -o build/zzplay
+m68k-amigaos-gcc $CFLAGS -Iamiga/include -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES "$SWAPSTACK" -o build/zzplay
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-mpega-smoke.c -o build/zz9k-mpega-smoke
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-jpeg.c -o build/zz9k-jpeg
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-png.c -o build/zz9k-png
