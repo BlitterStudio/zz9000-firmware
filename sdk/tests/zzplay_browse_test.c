@@ -2151,6 +2151,207 @@ static int test_shown_collection(void)
   return 0;
 }
 
+/* A gather's replies count only while it is the latest request. */
+static int test_gather_liveness(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem top[2];
+  uint32_t g;
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  set_item(&top[0], "alb:1", "Album", "", ZZPLAY_ITEM_FOLDER, 1U);
+  set_item(&top[1], "lib:2", "Library", "", ZZPLAY_ITEM_FOLDER, 0U);
+  apply_list(&model, req.generation, 0U, top, 2U, 0U, 0);
+
+  /* Live until its final reply is handled. */
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  g = req.generation;
+  assert(zzplay_browse_model_gather_live(&model, g));
+  assert(!zzplay_browse_model_gather_live(&model, g - 1U));
+  zzplay_browse_model_gather_done(&model);
+  assert(!zzplay_browse_model_gather_live(&model, g));
+  assert(model.busy == 0);
+
+  /* Opening another folder supersedes it; its end leaves the folder's
+   * request busy. */
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  g = req.generation;
+  assert(zzplay_browse_model_activate(&model, 1, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(!zzplay_browse_model_gather_live(&model, g));
+  zzplay_browse_model_gather_done(&model);
+  assert(model.busy == 1);
+  assert(zzplay_browse_model_back(&model, &req));
+
+  /* Back, a search, Reload, Stop, a service switch and a newer gather
+   * supersede it too. */
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  g = req.generation;
+  assert(zzplay_browse_model_activate(&model, 1, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(!zzplay_browse_model_gather_live(&model, g));
+
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  g = req.generation;
+  assert(zzplay_browse_model_search(&model, "x", &req));
+  assert(!zzplay_browse_model_gather_live(&model, g));
+  assert(zzplay_browse_model_back(&model, &req));
+
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  g = req.generation;
+  model.busy = 0; /* Reload waits for an idle view */
+  assert(zzplay_browse_model_reload(&model, &req));
+  assert(!zzplay_browse_model_gather_live(&model, g));
+
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  g = req.generation;
+  zzplay_browse_model_stop(&model);
+  assert(!zzplay_browse_model_gather_live(&model, g));
+  assert(model.gathering == 0);
+
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  g = req.generation;
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  assert(!zzplay_browse_model_gather_live(&model, g));
+  assert(zzplay_browse_model_gather_live(&model, req.generation));
+  g = req.generation;
+  assert(zzplay_browse_model_select_service(&model, 1, &req));
+  assert(!zzplay_browse_model_gather_live(&model, g));
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+/* Saved settings drop the service's remembered lists and reopen it. */
+static int test_reopen_service(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem top[1];
+  ZZPlayBrowseItem inner[1];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  /* Radio's top level is remembered. */
+  assert(zzplay_browse_model_select_service(&model, 1, &req));
+  set_item(&top[0], "st", "Stations", "", ZZPLAY_ITEM_FOLDER, 0U);
+  apply_list(&model, req.generation, 0U, top, 1U, 0U, 0);
+
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  assert(req.reopen == 0);
+  set_item(&top[0], "lib:1", "Music", "", ZZPLAY_ITEM_FOLDER, 0U);
+  apply_list(&model, req.generation, 0U, top, 1U, 0U, 0);
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  set_item(&inner[0], "t1", "Track", "", ZZPLAY_ITEM_TRACK, 1U);
+  apply_list(&model, req.generation, 0U, inner, 1U, 0U, 0);
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+
+  /* Reopen: a real request that reopens the module, nothing remembered. */
+  assert(zzplay_browse_model_reopen_service(&model, &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+  assert(req.reopen == 1);
+  assert(req.node_id[0] == '\0' && req.start == 0U);
+  assert(strcmp(req.scheme, "plex") == 0);
+  assert(model.busy == 1);
+  apply_list(&model, req.generation, 0U, top, 1U, 0U, 0);
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+  assert(req.reopen == 0);
+
+  /* Other services keep theirs. */
+  assert(zzplay_browse_model_select_service(&model, 1, &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+typedef struct FakeWriter {
+  int fail;
+  int calls;
+  char text[1024];
+  uint32_t length;
+} FakeWriter;
+
+static int fake_write(void *user, const char *text, uint32_t length)
+{
+  FakeWriter *w = (FakeWriter *)user;
+
+  w->calls++;
+  if (w->fail || length >= sizeof(w->text)) {
+    return 0;
+  }
+  memcpy(w->text, text, length);
+  w->text[length] = '\0';
+  w->length = length;
+  return 1;
+}
+
+/* A failed save is reported once; the list stays, and the next save
+ * writes all of it. */
+static int test_recent_save_failure(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem it;
+  FakeWriter w;
+  int saved;
+
+  memset(&w, 0, sizeof(w));
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+
+  w.fail = 1;
+  set_item(&it, "a", "First", "", ZZPLAY_ITEM_STATION, 1U);
+  assert(zzplay_browse_model_note_started(&model, &it));
+  saved = zzplay_browse_recent_save(&model.recent, fake_write, &w);
+  assert(saved == 0 && w.calls == 1);
+  assert(zzplay_browse_model_note_recent_save(&model, saved) == 1);
+
+  set_item(&it, "b", "Second", "", ZZPLAY_ITEM_STATION, 1U);
+  assert(zzplay_browse_model_note_started(&model, &it));
+  saved = zzplay_browse_recent_save(&model.recent, fake_write, &w);
+  assert(saved == 0);
+  /* Already reported */
+  assert(zzplay_browse_model_note_recent_save(&model, saved) == 0);
+  assert(model.recent.count == 2U);
+
+  /* The writer works again: everything is written. */
+  w.fail = 0;
+  set_item(&it, "c", "Third", "", ZZPLAY_ITEM_STATION, 1U);
+  assert(zzplay_browse_model_note_started(&model, &it));
+  saved = zzplay_browse_recent_save(&model.recent, fake_write, &w);
+  assert(saved == 1);
+  assert(zzplay_browse_model_note_recent_save(&model, saved) == 0);
+  assert(strcmp(w.text, "station\tc\tThird\t\t1\n"
+                        "station\tb\tSecond\t\t1\n"
+                        "station\ta\tFirst\t\t1\n") == 0);
+
+  /* A new failure after a success is reported again. */
+  w.fail = 1;
+  saved = zzplay_browse_recent_save(&model.recent, fake_write, &w);
+  assert(zzplay_browse_model_note_recent_save(&model, saved) == 1);
+  assert(zzplay_browse_recent_save(&model.recent, NULL, &w) == 0);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
 int main(void)
 {
   assert(test_enter_folder_and_back() == 0);
@@ -2177,6 +2378,9 @@ int main(void)
   assert(test_recently_played_folder() == 0);
   assert(test_recent_row_with_paging() == 0);
   assert(test_shown_collection() == 0);
+  assert(test_gather_liveness() == 0);
+  assert(test_reopen_service() == 0);
+  assert(test_recent_save_failure() == 0);
   printf("zzplay_browse_test: all tests passed\n");
   return 0;
 }

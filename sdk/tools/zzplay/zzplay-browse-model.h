@@ -74,6 +74,8 @@ typedef struct ZZPlayBrowseRequest {
   uint32_t start;
   uint32_t count;            /* page size, or the gather item limit */
   int fav_add;               /* 1 to add, 0 to remove */
+  int reopen;                /* close and reopen the module first: its
+                                settings changed */
   ZZPlayBrowseItem item;
 } ZZPlayBrowseRequest;
 
@@ -185,6 +187,12 @@ typedef struct ZZPlayBrowseModel {
 
   /* Recently played list of the current service. */
   ZZPlayBrowseRecent recent;
+
+  /* The GATHER request in flight, while it is the latest request. */
+  int gathering;
+  uint32_t gather_generation;
+  /* The last Recently played save failed and was reported. */
+  int recent_save_failed;
 } ZZPlayBrowseModel;
 
 void zzplay_browse_model_init(ZZPlayBrowseModel *model);
@@ -199,6 +207,10 @@ int zzplay_browse_model_select_service(ZZPlayBrowseModel *model, uint32_t index,
                                        ZZPlayBrowseRequest *out_req);
 const ZZPlayBrowseServiceEntry *zzplay_browse_model_current_service(
     const ZZPlayBrowseModel *model);
+/* The service's settings changed: forget its remembered lists and show
+ * its top level again through a LIST request that reopens the module. */
+int zzplay_browse_model_reopen_service(ZZPlayBrowseModel *model,
+                                       ZZPlayBrowseRequest *out_req);
 
 /* Navigation and paging */
 int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
@@ -240,6 +252,13 @@ int zzplay_browse_model_can_add_all(const ZZPlayBrowseModel *model);
  * collection, has no rows, or a request is running. */
 int zzplay_browse_model_gather_shown(ZZPlayBrowseModel *model, uint32_t limit,
                                      ZZPlayBrowseRequest *out_req);
+/* Replies of a gather count only while it is the latest request: going
+ * to another folder, back, searching, reloading, stopping, choosing a
+ * service or starting another gather supersedes it. */
+int zzplay_browse_model_gather_live(const ZZPlayBrowseModel *model,
+                                    uint32_t generation);
+/* The live gather's final reply has been handled. */
+void zzplay_browse_model_gather_done(ZZPlayBrowseModel *model);
 int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider);
 int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,
@@ -294,6 +313,17 @@ void zzplay_browse_model_load_recent(ZZPlayBrowseModel *model,
  * Recently played list. Returns 1 when the list changed (save it). */
 int zzplay_browse_model_note_started(ZZPlayBrowseModel *model,
                                      const ZZPlayBrowseItem *item);
+/* A Recently played save ended (`saved` 1 when it worked). Returns 1
+ * when a failure should be reported: the first since the last save that
+ * worked. The list itself stays, so the next change saves it again. */
+int zzplay_browse_model_note_recent_save(ZZPlayBrowseModel *model,
+                                         int saved);
+
+/* Format the list and hand it to `write`; 1 when it was written. */
+typedef int (*ZZPlayBrowseRecentWriter)(void *user, const char *text,
+                                        uint32_t length);
+int zzplay_browse_recent_save(const ZZPlayBrowseRecent *recent,
+                              ZZPlayBrowseRecentWriter writer, void *user);
 
 /* Recently played list logic. add puts `item` first; an entry with the
  * same kind and id moves there instead of appearing twice, and the oldest

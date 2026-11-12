@@ -149,21 +149,17 @@ static const char *reload_note = NULL;
 static char status_shown[ZZPLAY_PROVIDER_ERROR_MAX];
 /* Stage text drawn from the worker's stage while a request runs. */
 static char stage_host[96];
-/* Collection gathering: the request in flight and what its rows do when
- * they have all arrived. The playlist is only touched at the end, so
- * Stop until then leaves it unchanged. */
-static int gather_active = 0;
+/* Collection gathering: what the gather's rows do when they have all
+ * arrived. The gather itself (its generation, whether it is still the
+ * latest request) is the model's. The playlist is only touched at the
+ * end, so Stop until then leaves it unchanged. */
 static int gather_mode = BROWSE_TO_PLAY;
-static uint32_t gather_generation = 0U;
 static uint32_t gather_seen = 0U;
 static char gather_scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
 /* What a gather that plays (not one that only adds) records under
  * Recently played once its tracks are in the playlist. */
 static int gather_note = 0;
 static ZZPlayBrowseItem gather_note_item;
-/* Another service's Recently played list, read, changed and saved when
- * something of it is started after the window switched service. */
-static ZZPlayBrowseRecent other_recent;
 
 /* The Browse menu. Its Amiga-key shortcuts leave the player's (O U R A
  * L S P Q N B F) alone, and the string gadget's editing keys (C V X Q)
@@ -497,7 +493,8 @@ static void update_status_text(const char *msg)
 /* True while the gathering request is still the one being waited for. */
 static int gather_live(void)
 {
-  return gather_active && gather_generation == browse_model.generation;
+  return zzplay_browse_model_gather_live(&browse_model,
+                                         browse_model.gather_generation);
 }
 
 
@@ -556,25 +553,52 @@ static int update_stage_status(void)
   return 1;
 }
 
+#define BROWSE_WORKER_FAILED "Cannot start the Browse worker (out of memory?)"
+
+static void update_buttons(void);
+
+/* A request that cannot go out: say why, and do not stay busy. */
+static void browse_send_failed(const char *why)
+{
+  browse_model.busy = 0;
+  browse_model.gathering = 0;
+  gather_note = 0;
+  update_status_text(why);
+  update_buttons();
+  update_busy_pointer();
+}
+
 /* The worker runs one request at a time. A new request (the user opened
  * a folder, searched, went back) supersedes a running one: cancel that and
- * send the new one once its reply, now stale, has come back. */
-static void browse_send(const ZZPlayBrowseRequest *req,
-                        const ZZPlayProvider *provider)
+ * send the new one once its reply, now stale, has come back. Returns 0,
+ * with the reason in the status line and the window no longer busy, when
+ * the request cannot be sent. */
+static int browse_send(const ZZPlayBrowseRequest *req,
+                       const ZZPlayProvider *provider)
 {
-  if (!req || !provider) {
-    return;
+  if (!req) {
+    return 0;
+  }
+  if (!provider) {
+    browse_send_failed("No service module for this list");
+    return 0;
   }
   if (!zzplay_browse_worker_active()) {
     have_pending = 0;
-    (void)zzplay_browse_worker_send(req, provider);
+    /* A worker that could not start is tried again for each request. */
+    if (!zzplay_browse_worker_start() ||
+        !zzplay_browse_worker_send(req, provider)) {
+      browse_send_failed(BROWSE_WORKER_FAILED);
+      return 0;
+    }
     update_busy_pointer();
-    return;
+    return 1;
   }
   pending_req = *req;
   pending_provider = provider;
   have_pending = 1;
   zzplay_browse_worker_cancel();
+  return 1;
 }
 
 /* Enable or disable one Browse menu item; only a change touches the
@@ -798,58 +822,38 @@ static void browse_load_recent(void)
   }
 }
 
-static void browse_save_recent(const char *scheme,
-                               const ZZPlayBrowseRecent *recent)
+/* Where the list of `user` (the service's scheme) is written. */
+static int browse_write_recent(void *user, const char *text,
+                               uint32_t length)
 {
-  size_t need = zzplay_browse_recent_format(recent, NULL, 0U);
-  char *text = (char *)zzplay_alloc(need + 1U);
-
-  if (!text) {
-    return;
-  }
-  (void)zzplay_browse_recent_format(recent, text, need + 1U);
-  (void)zzplay_host_text_save(scheme, BROWSE_RECENT_SUFFIX, text,
-                              (uint32_t)need);
-  zzplay_free(text);
+  return zzplay_host_text_save((const char *)user, BROWSE_RECENT_SUFFIX,
+                               text, length);
 }
 
-/* `item` of service `scheme` was started from Browse: put it first in
- * that service's Recently played list and save the list. A gather can
- * finish after the window switched to another service; that service's
- * list is then read, changed and saved without being shown. */
-static void browse_note_started(const char *scheme,
-                                const ZZPlayBrowseItem *item)
+/* `item` was started from Browse: put it first in the current service's
+ * Recently played list and save the list. A failed save is reported once;
+ * the list stays, and the next change saves all of it again. Only live
+ * requests get here, so the item is always the current service's. */
+static void browse_note_started(const ZZPlayBrowseItem *item)
 {
   const ZZPlayBrowseServiceEntry *svc =
       zzplay_browse_model_current_service(&browse_model);
-  char *text = NULL;
-  uint32_t len = 0U;
+  uint32_t before = browse_model.item_count;
+  int saved;
 
-  if (!scheme || !item) {
+  if (!svc || !item ||
+      !zzplay_browse_model_note_started(&browse_model, item)) {
     return;
   }
-  if (svc && strcmp(svc->scheme, scheme) == 0) {
-    uint32_t before = browse_model.item_count;
-
-    if (!zzplay_browse_model_note_started(&browse_model, item)) {
-      return;
-    }
-    if (browse_model.item_count != before) {
-      /* The Recently played row appeared at the top level. */
-      rebuild_list_nodes();
-      update_buttons();
-    }
-    browse_save_recent(scheme, &browse_model.recent);
-    return;
+  if (browse_model.item_count != before) {
+    /* The Recently played row appeared at the top level. */
+    rebuild_list_nodes();
+    update_buttons();
   }
-  (void)zzplay_host_text_load(scheme, BROWSE_RECENT_SUFFIX,
-                              BROWSE_RECENT_FILE_MAX, &text, &len);
-  (void)zzplay_browse_recent_parse(&other_recent, text, (size_t)len);
-  if (text) {
-    zzplay_free(text);
-  }
-  if (zzplay_browse_recent_add(&other_recent, item)) {
-    browse_save_recent(scheme, &other_recent);
+  saved = zzplay_browse_recent_save(&browse_model.recent, browse_write_recent,
+                                    (void *)svc->scheme);
+  if (zzplay_browse_model_note_recent_save(&browse_model, saved)) {
+    update_status_text("Could not save Recently played");
   }
 }
 
@@ -1187,13 +1191,17 @@ static void __attribute__((noinline)) poll_settings(void)
 
         close_settings_window();
 
-        /* Reopen service */
-        if (browse_model.current_service >= 0) {
-          zzplay_browse_model_select_service(&browse_model, (uint32_t)browse_model.current_service, &req);
+        /* Reopen the service with the new settings: its remembered
+         * lists are dropped and the module is opened again. */
+        if (zzplay_browse_model_reopen_service(&browse_model, &req)) {
+          int sent;
+
           browse_load_recent();
-          browse_send(&req, p);
+          sent = browse_send(&req, p);
           rebuild_list_nodes();
-          update_status_text("Reloading service...");
+          if (sent) {
+            update_status_text("Reloading service...");
+          }
           update_buttons();
         }
         return;
@@ -1530,6 +1538,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   int search_label_w;
   uint32_t i;
   uint32_t loaded_count;
+  int worker_ok;
 
   if (browse_win) {
     WindowToFront(browse_win);
@@ -1585,8 +1594,8 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     service_labels[loaded_count] = NULL;
   }
 
-  /* Start worker child process */
-  (void)zzplay_browse_worker_start();
+  /* Start worker child process; requests try again when it fails. */
+  worker_ok = zzplay_browse_worker_start();
 
   font = gui_screen->RastPort.Font;
   font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
@@ -1733,8 +1742,12 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     ZZPlayBrowseRequest req;
     zzplay_browse_model_select_service(&browse_model, 0U, &req);
     browse_load_recent();
-    browse_send(&req, browse_model.services[0].provider);
-    update_status_text("Loading service...");
+    if (browse_send(&req, browse_model.services[0].provider)) {
+      update_status_text("Loading service...");
+    }
+  }
+  if (!worker_ok && !browse_model.busy) {
+    update_status_text(BROWSE_WORKER_FAILED);
   }
 
   update_buttons();
@@ -1885,10 +1898,10 @@ static void browse_start_gather(int mode, int shown)
   gather_mode = mode;
   gather_note = have_item && mode != BROWSE_TO_ADD;
   gather_seen = 0U;
-  gather_generation = poll_req.generation;
-  gather_active = 1;
   copy_string(gather_scheme, sizeof(gather_scheme), poll_req.scheme);
-  browse_send(&poll_req, provider);
+  if (!browse_send(&poll_req, provider)) {
+    return;
+  }
   update_status_text("Adding tracks...");
   update_buttons();
   update_busy_pointer();
@@ -1905,12 +1918,8 @@ static void browse_apply_gather(const ZZPlayBrowseReply *reply)
   int32_t first = -1;
   int32_t anchor = -1;
 
-  gather_active = 0;
-  /* Only the view the gather started on is un-busied: the user may have
-   * navigated while it ran, and another request then owns the flag. */
-  if (browse_model.generation == gather_generation) {
-    browse_model.busy = 0;
-  }
+  /* Only a live gather gets here: no newer request owns the busy flag. */
+  zzplay_browse_model_gather_done(&browse_model);
 
   if (!reply->success) {
     update_status_text(reply->error[0] ? reply->error
@@ -1981,7 +1990,7 @@ static void browse_apply_gather(const ZZPlayBrowseReply *reply)
     (void)zzplay_controller_request(gui_ctl, ZZPLAY_REQUEST_PLAY);
   }
   if (gather_note && added > 0U) {
-    browse_note_started(gather_scheme, &gather_note_item);
+    browse_note_started(&gather_note_item);
   }
   gather_note = 0;
   update_buttons();
@@ -2034,8 +2043,7 @@ static void browse_use_selection(int mode)
     update_status_text(status_buf);
   }
   if (mode != BROWSE_TO_ADD) {
-    browse_note_started(svc->scheme,
-                        &browse_model.items[browse_model.selection]);
+    browse_note_started(&browse_model.items[browse_model.selection]);
   }
 }
 
@@ -2047,9 +2055,12 @@ static void browse_after_navigation(const char *loading)
     rebuild_list_nodes();
     update_status_text("");
   } else {
-    browse_send(&poll_req, browse_provider());
+    int sent = browse_send(&poll_req, browse_provider());
+
     rebuild_list_nodes();
-    update_status_text(loading);
+    if (sent) {
+      update_status_text(loading);
+    }
   }
   update_buttons();
   update_busy_pointer();
@@ -2072,8 +2083,9 @@ static void browse_activate_row(int32_t index)
 static void browse_load_more(void)
 {
   if (zzplay_browse_model_request_more(&browse_model, &poll_req)) {
-    browse_send(&poll_req, browse_provider());
-    update_status_text("Loading more items...");
+    if (browse_send(&poll_req, browse_provider())) {
+      update_status_text("Loading more items...");
+    }
     update_buttons();
   }
 }
@@ -2096,8 +2108,7 @@ static void browse_do_reload(void)
     /* Recently played shows its list as it is now. */
     rebuild_list_nodes();
     update_status_text("");
-  } else {
-    browse_send(&poll_req, browse_provider());
+  } else if (browse_send(&poll_req, browse_provider())) {
     update_status_text("Reloading...");
   }
   update_buttons();
@@ -2107,9 +2118,10 @@ static void browse_do_favourite(void)
 {
   if (zzplay_browse_model_favourite(&browse_model, &poll_req)) {
     last_fav_add = poll_req.fav_add;
-    browse_send(&poll_req, browse_provider());
-    update_status_text(last_fav_add ? "Adding to favourites..."
-                                    : "Removing from favourites...");
+    if (browse_send(&poll_req, browse_provider())) {
+      update_status_text(last_fav_add ? "Adding to favourites..."
+                                      : "Removing from favourites...");
+    }
     update_buttons();
   }
 }
@@ -2247,19 +2259,35 @@ void zzplay_browse_poll(void)
   svc = zzplay_browse_model_current_service(&browse_model);
   p = svc ? svc->provider : NULL;
 
+  /* A gather that a request-free navigation (a remembered list, Back)
+   * superseded is still running in the worker: stop it. A navigation
+   * that sent a request has cancelled it already. */
+  if (browse_model.gathering && !gather_live()) {
+    browse_model.gathering = 0;
+    gather_note = 0;
+    if (zzplay_browse_worker_active() && !have_pending) {
+      zzplay_browse_worker_cancel();
+    }
+  }
 
   /* 1. Worker replies (rows arrive in groups; drain what queued) */
   while (zzplay_browse_worker_take_reply(&poll_worker_reply)) {
     if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_GATHER) {
-      if (gather_active &&
-          poll_worker_reply.generation == gather_generation) {
+      /* Rows of a superseded or stopped gather are discarded: it must
+       * not change the playlist or Recently played any more. */
+      if (zzplay_browse_model_gather_live(&browse_model,
+                                          poll_worker_reply.generation)) {
         if (poll_worker_reply.is_partial) {
           gather_seen += poll_worker_reply.item_count;
         } else {
           browse_apply_gather(&poll_worker_reply);
         }
+      } else if (!poll_worker_reply.is_partial &&
+                 poll_worker_reply.generation ==
+                     browse_model.gather_generation) {
+        browse_model.gathering = 0;
+        gather_note = 0;
       }
-      /* Replies of a superseded or stopped gather are discarded. */
       zzplay_browse_worker_release_reply(&poll_worker_reply);
     } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FAVOURITE) {
       if (!poll_worker_reply.success) {
@@ -2281,6 +2309,7 @@ void zzplay_browse_poll(void)
           browse_model.saved_selection = browse_model.selection;
           browse_model.generation++;
           browse_model.busy = 1;
+          memset(&poll_req, 0, sizeof(poll_req));
           if (browse_model.is_search) {
             poll_req.kind = ZZPLAY_BROWSE_REQ_SEARCH;
             poll_req.generation = browse_model.generation;
@@ -2338,7 +2367,9 @@ void zzplay_browse_poll(void)
     }
     if (have_pending && !zzplay_browse_worker_active()) {
       have_pending = 0;
-      (void)zzplay_browse_worker_send(&pending_req, pending_provider);
+      if (!zzplay_browse_worker_send(&pending_req, pending_provider)) {
+        browse_send_failed(BROWSE_WORKER_FAILED);
+      }
     }
   }
 
@@ -2453,7 +2484,6 @@ void zzplay_browse_poll(void)
         browse_do_favourite();
       } else if (gid == BGID_STOP) {
         have_pending = 0;
-        gather_active = 0;
         gather_note = 0;
         zzplay_browse_worker_cancel();
         zzplay_browse_model_stop(&browse_model);

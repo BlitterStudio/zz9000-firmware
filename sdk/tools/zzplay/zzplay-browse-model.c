@@ -626,6 +626,35 @@ const ZZPlayBrowseServiceEntry *zzplay_browse_model_current_service(
   return &model->services[model->current_service];
 }
 
+int zzplay_browse_model_reopen_service(ZZPlayBrowseModel *model,
+                                       ZZPlayBrowseRequest *out_req)
+{
+  const ZZPlayBrowseServiceEntry *svc =
+      zzplay_browse_model_current_service(model);
+  uint32_t i;
+
+  if (!svc) {
+    return 0;
+  }
+  /* What was listed under the old settings may be wrong now. */
+  for (i = 0U; i < ZZPLAY_BROWSE_CACHE_MAX; i++) {
+    ZZPlayBrowseCacheEntry *e = &model->cache[i];
+
+    if (e->items != NULL && strcmp(e->scheme, svc->scheme) == 0) {
+      zzplay_free(e->items);
+      memset(e, 0, sizeof(*e));
+    }
+  }
+  if (!zzplay_browse_model_select_service(
+          model, (uint32_t)model->current_service, out_req)) {
+    return 0;
+  }
+  if (out_req) {
+    out_req->reopen = 1;
+  }
+  return 1;
+}
+
 int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
                                      ZZPlayBrowseRequest *out_req)
 {
@@ -1031,6 +1060,8 @@ int zzplay_browse_model_gather_shown(ZZPlayBrowseModel *model, uint32_t limit,
   model->generation++;
   model->busy = 1;
   model->status_message[0] = '\0';
+  model->gathering = 1;
+  model->gather_generation = model->generation;
 
   if (out_req) {
     memset(out_req, 0, sizeof(*out_req));
@@ -1060,6 +1091,8 @@ int zzplay_browse_model_gather(ZZPlayBrowseModel *model, uint32_t limit,
   model->generation++;
   model->busy = 1;
   model->status_message[0] = '\0';
+  model->gathering = 1;
+  model->gather_generation = model->generation;
 
   if (out_req) {
     memset(out_req, 0, sizeof(*out_req));
@@ -1072,6 +1105,28 @@ int zzplay_browse_model_gather(ZZPlayBrowseModel *model, uint32_t limit,
   }
   return 1;
 }
+
+int zzplay_browse_model_gather_live(const ZZPlayBrowseModel *model,
+                                    uint32_t generation)
+{
+  return (model && model->gathering &&
+          generation == model->gather_generation &&
+          generation == model->generation)
+             ? 1
+             : 0;
+}
+
+void zzplay_browse_model_gather_done(ZZPlayBrowseModel *model)
+{
+  if (!model) {
+    return;
+  }
+  if (zzplay_browse_model_gather_live(model, model->gather_generation)) {
+    model->busy = 0;
+  }
+  model->gathering = 0;
+}
+
 int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider)
 {
   if (!provider) {
@@ -1252,6 +1307,7 @@ void zzplay_browse_model_stop(ZZPlayBrowseModel *model)
   }
   model->generation++;
   model->busy = 0;
+  model->gathering = 0;
   /* A top level stopped before its rows came still offers Recently
    * played. */
   recent_sync(model);
@@ -1427,4 +1483,38 @@ int zzplay_browse_model_note_started(ZZPlayBrowseModel *model,
   }
   recent_sync(model);
   return 1;
+}
+
+int zzplay_browse_model_note_recent_save(ZZPlayBrowseModel *model,
+                                         int saved)
+{
+  int report;
+
+  if (!model) {
+    return 0;
+  }
+  report = !saved && !model->recent_save_failed;
+  model->recent_save_failed = saved ? 0 : 1;
+  return report;
+}
+
+int zzplay_browse_recent_save(const ZZPlayBrowseRecent *recent,
+                              ZZPlayBrowseRecentWriter writer, void *user)
+{
+  size_t need;
+  char *text;
+  int ok;
+
+  if (!recent || !writer) {
+    return 0;
+  }
+  need = zzplay_browse_recent_format(recent, NULL, 0U);
+  text = (char *)zzplay_alloc(need + 1U);
+  if (!text) {
+    return 0;
+  }
+  (void)zzplay_browse_recent_format(recent, text, need + 1U);
+  ok = writer(user, text, (uint32_t)need) ? 1 : 0;
+  zzplay_free(text);
+  return ok;
 }

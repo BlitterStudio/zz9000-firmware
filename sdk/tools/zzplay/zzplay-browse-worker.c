@@ -248,14 +248,19 @@ static void worker_process(void)
 
   curr_scheme[0] = '\0';
   my_port = CreateMsgPort();
-  if (!my_port) {
-    return;
-  }
 
-  /* Send handshake to GUI */
+  /* Always answer the handshake, with no port when this process has
+   * none, so the GUI never waits for a worker that is not there. The
+   * Forbid lasts until the process ends when it gives up here. */
+  if (!my_port) {
+    Forbid();
+  }
   startup_msg.mn_ReplyPort = my_port;
   startup_msg.mn_Length = sizeof(startup_msg);
   PutMsg(gui_port, &startup_msg);
+  if (!my_port) {
+    return;
+  }
 
   for (;;) {
     ZZPlayWorkerMsg *wmsg;
@@ -296,8 +301,9 @@ static void worker_process(void)
         continue;
       }
 
-      /* Ensure session open */
-      if (!ctx || curr_p != p || strcmp(curr_scheme, req->scheme) != 0) {
+      /* Ensure session open; changed settings reopen it. */
+      if (!ctx || curr_p != p || strcmp(curr_scheme, req->scheme) != 0 ||
+          req->reopen) {
         if (ctx && curr_p && curr_p->close) {
           curr_p->close(ctx);
           ctx = NULL;
@@ -568,14 +574,23 @@ int zzplay_browse_worker_start(void)
     return 0;
   }
 
-  /* Wait for child handshake */
-  WaitPort(gui_port);
-  msg = GetMsg(gui_port);
-  if (msg) {
-    worker_port = msg->mn_ReplyPort;
+  /* Wait for the child's handshake; it always comes, with no port when
+   * the child could not make one (it has ended by then). */
+  for (;;) {
+    WaitPort(gui_port);
+    msg = GetMsg(gui_port);
+    if (msg == &startup_msg) {
+      break;
+    }
   }
-
-  return worker_port ? 1 : 0;
+  worker_port = startup_msg.mn_ReplyPort;
+  if (!worker_port) {
+    worker_proc = NULL;
+    DeleteMsgPort(gui_port);
+    gui_port = NULL;
+    return 0;
+  }
+  return 1;
 }
 
 int zzplay_browse_worker_active(void)
@@ -657,24 +672,28 @@ void zzplay_browse_worker_release_reply(ZZPlayBrowseReply *reply)
   }
 }
 
-static void drain_worker_messages(void)
+/* Wait until `want` comes back to the GUI port. Rows arriving meanwhile
+ * (partial replies) and the replies of other messages are released. */
+static void wait_for_worker_message(struct Message *want)
 {
-  if (!gui_port) {
-    return;
-  }
-  while (1) {
-    struct Message *m = GetMsg(gui_port);
-    if (!m) {
-      break;
+  for (;;) {
+    struct Message *m;
+
+    while ((m = GetMsg(gui_port)) != NULL) {
+      if (m->mn_Length == sizeof(ZZPlayWorkerPartialMsg)) {
+        ZZPlayWorkerPartialMsg *pmsg = (ZZPlayWorkerPartialMsg *)m;
+        zzplay_browse_worker_release_reply(&pmsg->reply);
+        zzplay_free(pmsg);
+        continue;
+      }
+      if (m == &active_msg.msg) {
+        zzplay_browse_worker_release_reply(&active_msg.reply);
+      }
+      if (m == want) {
+        return;
+      }
     }
-    if (m->mn_Length == sizeof(ZZPlayWorkerPartialMsg)) {
-      ZZPlayWorkerPartialMsg *pmsg = (ZZPlayWorkerPartialMsg *)m;
-      zzplay_browse_worker_release_reply(&pmsg->reply);
-      zzplay_free(pmsg);
-    } else {
-      ZZPlayWorkerMsg *wmsg = (ZZPlayWorkerMsg *)m;
-      zzplay_browse_worker_release_reply(&wmsg->reply);
-    }
+    WaitPort(gui_port);
   }
 }
 
@@ -684,17 +703,16 @@ void zzplay_browse_worker_stop(void)
     return;
   }
 
-  /* If a request is active, cancel and wait for its reply */
-  if (worker_is_active) {
+  /* A running request is cancelled and its final reply awaited: the
+   * worker still owns the message (and its rows) until then. */
+  if (worker_is_active && gui_port) {
     worker_cancel_flag = 1;
-    if (gui_port) {
-      WaitPort(gui_port);
-    }
-    drain_worker_messages();
+    wait_for_worker_message(&active_msg.msg);
     worker_is_active = 0;
   }
 
-  /* Send quit message and wait for worker exit */
+  /* Quit, and wait for that very message: once it is back the worker
+   * has deleted its port and never sends again. */
   if (worker_port && gui_port) {
     memset(&quit_msg, 0, sizeof(quit_msg));
     quit_msg.msg.mn_ReplyPort = gui_port;
@@ -702,8 +720,7 @@ void zzplay_browse_worker_stop(void)
     quit_msg.quit = 1;
 
     PutMsg(worker_port, &quit_msg.msg);
-    WaitPort(gui_port);
-    (void)GetMsg(gui_port);
+    wait_for_worker_message(&quit_msg.msg);
   }
 
   if (gui_port) {
