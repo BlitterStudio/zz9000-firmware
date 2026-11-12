@@ -364,7 +364,8 @@ static ZZPlayCodecPassResult zzplay_card_play_once(ZZPlayCodecDecode *decode,
 
     if (!decode->eof_sent) {
       got = zzplay_file_read(decode->file, zzplay_codec_chunk,
-                             decode->staging.length);
+                             zzplay_file_read_size(decode->file,
+                                                   decode->staging.length));
       if (got == 0U && zzplay_file_error(decode->file)) {
         return ZZPLAY_CODEC_PASS_FAILED;
       }

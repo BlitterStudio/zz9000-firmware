@@ -354,6 +354,18 @@ const char *zzplay_file_url(ZZPlayFile *file)
   return file && file->http ? zzplay_httpfile_url(file->http) : "";
 }
 
+/* About a quarter second of a 128 kbit/s stream. */
+#define ZZPLAY_STREAM_READ_MAX 4096U
+
+size_t zzplay_file_read_size(ZZPlayFile *file, size_t want)
+{
+  if (file && file->http && !zzplay_httpfile_seekable(file->http) &&
+      want > ZZPLAY_STREAM_READ_MAX) {
+    return ZZPLAY_STREAM_READ_MAX;
+  }
+  return want;
+}
+
 
 int zzplay_file_read_all(const char *path, size_t max_len, void **buf,
                          size_t *len)
@@ -604,6 +616,12 @@ const char *zzplay_file_url(ZZPlayFile *file)
 {
   (void)file;
   return "";
+}
+
+size_t zzplay_file_read_size(ZZPlayFile *file, size_t want)
+{
+  (void)file;
+  return want;
 }
 
 const char *zzplay_file_open_error(void)

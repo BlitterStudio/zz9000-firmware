@@ -45,6 +45,10 @@ const char *zzplay_file_station(ZZPlayFile *file);
 /* The address a network file came from after redirects, or "" for a
  * local file. */
 const char *zzplay_file_url(ZZPlayFile *file);
+/* How much a decode loop should ask for in one read. A live stream gets
+ * its bytes at the playback rate, so a large read would wait seconds
+ * while the audio queue drains; it is read a little at a time instead. */
+size_t zzplay_file_read_size(ZZPlayFile *file, size_t want);
 
 /* Why the last zzplay_file_open() of a network path failed, for the
  * message line ("" after a file failure). The application opens network
