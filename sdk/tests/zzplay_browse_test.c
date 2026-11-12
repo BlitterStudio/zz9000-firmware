@@ -1966,6 +1966,55 @@ static int test_back_to_list_still_loading(void)
   return 0;
 }
 
+/* After a favourite change, a list remembered with the old state is not
+ * shown again: it is fetched afresh, so Favourite toggles the right way. */
+static int test_favourite_change_drops_cached_lists(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem top[2];
+  ZZPlayBrowseItem station[1];
+  ZZPlayProvider prov;
+
+  memset(&prov, 0, sizeof(prov));
+  prov.size = sizeof(ZZPlayProvider);
+  prov.scheme = "radio";
+  prov.favourite = fake_fav;
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", &prov));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  set_item(&top[0], "top", "Top voted", "", ZZPLAY_ITEM_FOLDER, 0U);
+  set_item(&top[1], "fav", "Favourites", "", ZZPLAY_ITEM_FOLDER, 0U);
+  apply_list(&model, req.generation, 0U, top, 2U, 2U, 0);
+  set_item(&station[0], "s1", "Radio One", "", ZZPLAY_ITEM_STATION, 1U);
+  station[0].favourite = 1U;
+
+  /* Top voted, then Favourites, both remembered */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  apply_list(&model, req.generation, 0U, station, 1U, 1U, 0);
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(zzplay_browse_model_activate(&model, 1, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  apply_list(&model, req.generation, 0U, station, 1U, 1U, 0);
+
+  /* Removed in Favourites */
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(zzplay_browse_model_favourite(&model, &req));
+  assert(req.fav_add == 0);
+  model.busy = 0;
+  (void)zzplay_browse_model_favourite_done(&model, "s1", 0);
+  assert(model.items[0].favourite == 0U);
+
+  /* Top voted is asked for again rather than shown with the old flag */
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
 /* The saved form reads back what was written; damaged lines are skipped. */
 static int test_recent_parse_format(void)
 {
@@ -2615,6 +2664,7 @@ int main(void)
   assert(test_recent_parse_format() == 0);
   assert(test_recently_played_folder() == 0);
   assert(test_recent_row_with_paging() == 0);
+  assert(test_favourite_change_drops_cached_lists() == 0);
   assert(test_shown_collection() == 0);
   assert(test_gather_liveness() == 0);
   assert(test_reopen_service() == 0);

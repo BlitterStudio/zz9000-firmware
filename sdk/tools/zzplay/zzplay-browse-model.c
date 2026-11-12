@@ -84,6 +84,21 @@ static void cache_save_view_state(const ZZPlayBrowseModel *model)
   }
 }
 
+/* Forget every remembered list of `scheme`. */
+static void cache_drop_service(ZZPlayBrowseModel *model, const char *scheme)
+{
+  uint32_t i;
+
+  for (i = 0U; i < ZZPLAY_BROWSE_CACHE_MAX; i++) {
+    ZZPlayBrowseCacheEntry *e = &model->cache[i];
+
+    if (e->items != NULL && strcmp(e->scheme, scheme) == 0) {
+      zzplay_free(e->items);
+      memset(e, 0, sizeof(*e));
+    }
+  }
+}
+
 /* Remember `count` items for (scheme, node or query, start). The least
  * recently used entry is dropped when the cache is full. */
 static void cache_put(ZZPlayBrowseModel *model, const char *scheme,
@@ -645,20 +660,12 @@ int zzplay_browse_model_reopen_service(ZZPlayBrowseModel *model,
 {
   const ZZPlayBrowseServiceEntry *svc =
       zzplay_browse_model_current_service(model);
-  uint32_t i;
 
   if (!svc) {
     return 0;
   }
   /* What was listed under the old settings may be wrong now. */
-  for (i = 0U; i < ZZPLAY_BROWSE_CACHE_MAX; i++) {
-    ZZPlayBrowseCacheEntry *e = &model->cache[i];
-
-    if (e->items != NULL && strcmp(e->scheme, svc->scheme) == 0) {
-      zzplay_free(e->items);
-      memset(e, 0, sizeof(*e));
-    }
-  }
+  cache_drop_service(model, svc->scheme);
   if (!zzplay_browse_model_select_service(
           model, (uint32_t)model->current_service, out_req)) {
     return 0;
@@ -1255,9 +1262,23 @@ int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,
   return 1;
 }
 
+/* Set the favourite flag of every row `id` among `count` items. */
+static void rows_set_favourite(ZZPlayBrowseItem *items, uint32_t count,
+                               const char *id, uint32_t flag)
+{
+  uint32_t i;
+
+  for (i = 0U; items != NULL && i < count; i++) {
+    if (strcmp(items[i].id, id) == 0) {
+      items[i].favourite = flag;
+    }
+  }
+}
+
 int zzplay_browse_model_favourite_done(ZZPlayBrowseModel *model,
                                        const char *id, int favourite)
 {
+  const ZZPlayBrowseServiceEntry *svc;
   uint32_t i;
   int changed = 0;
   uint32_t flag = favourite ? 1U : 0U;
@@ -1272,12 +1293,18 @@ int zzplay_browse_model_favourite_done(ZZPlayBrowseModel *model,
       changed = 1;
     }
   }
-  if (zzplay_browse_model_in_recent(model)) {
-    for (i = 0U; i < model->item_count; i++) {
-      if (strcmp(model->items[i].id, id) == 0) {
-        model->items[i].favourite = flag;
-      }
-    }
+  /* Every copy of the row the model holds: the shown list and the lists
+   * Back returns to. */
+  rows_set_favourite(model->items, model->item_count, id, flag);
+  for (i = 0U; i < model->stack_depth; i++) {
+    rows_set_favourite(model->stack[i].items, model->stack[i].item_count, id,
+                       flag);
+  }
+  /* Remembered lists may also have gained or lost the row (the
+   * Favourites folder): fetch them again when next opened. */
+  svc = zzplay_browse_model_current_service(model);
+  if (svc) {
+    cache_drop_service(model, svc->scheme);
   }
   return changed;
 }

@@ -288,9 +288,10 @@ int zzplay_browse_model_provider_has_link(const ZZPlayProvider *provider);
 int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,
                                   ZZPlayBrowseRequest *out_req);
-/* A favourite change for `id` was saved: Recently played keeps the new
- * state, in its list and in its shown rows. Returns 1 when the list
- * changed and should be saved. */
+/* A favourite change for `id` was saved: every row for it the model holds
+ * (shown, in Back's lists, in Recently played) gets the new state, and
+ * the service's remembered lists are dropped so they are fetched again.
+ * Returns 1 when Recently played changed and should be saved. */
 int zzplay_browse_model_favourite_done(ZZPlayBrowseModel *model,
                                        const char *id, int favourite);
 /* True when the selected row is editable by the provider. */
