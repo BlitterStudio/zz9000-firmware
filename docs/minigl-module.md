@@ -23,7 +23,7 @@ II because the window cannot fit [ZZ9000_proto.sdk/ZZ9000OS/src/minigl_transport
 ARM apps remain supported on a Z3 system whenever the module is available.
 
 This document uses `MUST`, `SHOULD`, and `MAY` as RFC 2119 terms. File and line
-citations describe the `feature/app-runtime` baseline at `eaf28c69`.
+citations describe the pre-kernel baseline at `eaf28c69`.
 
 ## Baseline and constraints
 

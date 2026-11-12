@@ -457,6 +457,15 @@ flags slot: 1, and the slot is appended, so gate with `ZZ_API_COVERS`.
 
 `2`. Debug. Drain and copy every frame before `zz_gl_swap` returns.
 
+## ZZ_GL_BIND_SYNC_RIX_FEED
+
+`4`. Debug. Keep the RasterIX command feed synchronous for A/B comparison.
+
+## ZZ_GL_BIND_INLINE_RIX_FEED
+
+`8`. Debug. Keep the asynchronous RasterIX ring but push command words from
+the calling path.
+
 ## Memory contract
 
 Apps with an API 0.1 or 0.2 note keep the old contract: load commits one
