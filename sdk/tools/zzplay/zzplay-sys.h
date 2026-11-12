@@ -42,6 +42,9 @@ int zzplay_file_seekable(ZZPlayFile *file);
 int zzplay_file_is_network(ZZPlayFile *file);
 /* The station name a live network stream announced, or "". */
 const char *zzplay_file_station(ZZPlayFile *file);
+/* The address a network file came from after redirects, or "" for a
+ * local file. */
+const char *zzplay_file_url(ZZPlayFile *file);
 
 /* Why the last zzplay_file_open() of a network path failed, for the
  * message line ("" after a file failure). The application opens network

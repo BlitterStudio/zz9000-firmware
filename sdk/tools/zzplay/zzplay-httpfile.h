@@ -41,6 +41,9 @@ typedef struct ZZPlayHttpStreamOps {
   /* Wait `ms` before a reconnect attempt; return 0 to give up (the user
    * stopped the item). */
   int (*pause)(void *ctx, uint32_t ms);
+  /* The address that answered after redirects, or NULL when the
+   * transport does not follow them. Optional: the op may be NULL. */
+  const char *(*url)(void *ctx, void *stream);
   void *ctx;
 } ZZPlayHttpStreamOps;
 
@@ -83,6 +86,9 @@ int zzplay_httpfile_live(const ZZPlayHttpFile *file);
 const char *zzplay_httpfile_station(const ZZPlayHttpFile *file);
 /* The reason for the last read or seek failure, or "". */
 const char *zzplay_httpfile_error_text(const ZZPlayHttpFile *file);
+/* The address the resource came from after redirects, for resolving
+ * relative addresses inside it. */
+const char *zzplay_httpfile_url(const ZZPlayHttpFile *file);
 
 /* The latest StreamTitle. Returns 1 once per change, copying the title
  * into `out`. */

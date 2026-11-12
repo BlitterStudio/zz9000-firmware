@@ -3688,6 +3688,7 @@ static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
   ZZPlayFile *file;
   size_t len;
   uint32_t i;
+  uint32_t found;
 
   app->open_why[0] = '\0';
   providers = zzplay_providers_shared();
@@ -3767,8 +3768,20 @@ static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
   }
   len = zzplay_file_read(file, text, sizeof(text) - 1U);
   text[len] = '\0';
-  zzplay_file_close(file);
-  if (zzplay_streamlist_parse(text, len, app->item_path, &streams) == 0U) {
+  /* Relative entries resolve against where the playlist came from after
+   * redirects, not the address that was asked for. */
+  {
+    static char base[ZZPLAY_HTTP_URL_MAX];
+    const char *answered = zzplay_file_url(file);
+
+    (void)snprintf(base, sizeof(base), "%s",
+                   answered[0] != '\0' && strlen(answered) < sizeof(base)
+                       ? answered
+                       : app->item_path);
+    zzplay_file_close(file);
+    found = zzplay_streamlist_parse(text, len, base, &streams);
+  }
+  if (found == 0U) {
     (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
                    "the playlist names no stream");
     return 0;

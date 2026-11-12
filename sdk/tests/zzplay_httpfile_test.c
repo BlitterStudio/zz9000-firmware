@@ -222,6 +222,7 @@ static ZZPlayHttpFile *open_server(Server *s)
   ops.error = fake_error;
   ops.close = fake_close;
   ops.pause = fake_pause;
+  ops.url = NULL;
   ops.ctx = s;
   return zzplay_httpfile_open(&ops, "http://h/x", err, sizeof(err));
 }
@@ -487,6 +488,7 @@ static int test_failure(void)
     ops.error = fake_error;
     ops.close = fake_close;
     ops.pause = fake_pause;
+    ops.url = NULL;
     ops.ctx = &s;
     if (zzplay_httpfile_open(&ops, "http://h/missing", err, sizeof(err)) !=
         NULL)
@@ -505,6 +507,7 @@ static ZZPlayHttpFile *open_server_err(Server *s, char *err, size_t err_size)
   ops.error = fake_error;
   ops.close = fake_close;
   ops.pause = fake_pause;
+  ops.url = NULL;
   ops.ctx = s;
   return zzplay_httpfile_open(&ops, "http://h/x", err, err_size);
 }
@@ -700,6 +703,7 @@ static int test_open_path_connections(void)
   ops.error = fake_error;
   ops.close = fake_close;
   ops.pause = fake_pause;
+  ops.url = NULL;
   ops.ctx = &s;
   f = zzplay_httpfile_open_cached(&ops, "http://h/x", err, sizeof(err));
   if (f == NULL || s.opens != 1) { rc = 1; goto done; }

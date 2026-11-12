@@ -120,8 +120,15 @@ static int network_pause(void *ctx, uint32_t ms)
   return network_keep_running(0);
 }
 
+static const char *network_url(void *ctx, void *stream)
+{
+  (void)ctx;
+  return zzplay_net_url((const ZZPlayNet *)stream);
+}
+
 static const ZZPlayHttpStreamOps network_ops = {
-  network_open, network_read, network_error, network_close, network_pause, 0
+  network_open, network_read, network_error, network_close, network_pause,
+  network_url, 0
 };
 
 void *zzplay_alloc(size_t size)
@@ -340,6 +347,11 @@ int zzplay_file_is_network(ZZPlayFile *file)
 const char *zzplay_file_station(ZZPlayFile *file)
 {
   return file && file->http ? zzplay_httpfile_station(file->http) : "";
+}
+
+const char *zzplay_file_url(ZZPlayFile *file)
+{
+  return file && file->http ? zzplay_httpfile_url(file->http) : "";
 }
 
 
@@ -583,6 +595,12 @@ int zzplay_file_is_network(ZZPlayFile *file)
 }
 
 const char *zzplay_file_station(ZZPlayFile *file)
+{
+  (void)file;
+  return "";
+}
+
+const char *zzplay_file_url(ZZPlayFile *file)
 {
   (void)file;
   return "";

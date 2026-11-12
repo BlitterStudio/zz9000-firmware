@@ -20,6 +20,8 @@ struct ZZPlayHttpFile {
   ZZPlayHttpStreamOps ops;
   void *stream;
   char url[ZZPLAY_HTTP_URL_MAX];
+  /* Where the first response came from after redirects ("" = url). */
+  char final_url[ZZPLAY_HTTP_URL_MAX];
 
   /* Positions are 64-bit: a live stream passes 4 GiB in about 74 hours at
    * 128 kbit/s, and a wrapped position would read the cached start. */
@@ -117,7 +119,13 @@ static int open_at(ZZPlayHttpFile *f, uint32_t from, int first)
   }
   f->stream_ended = 0;
   if (first) {
+    const char *answered =
+        f->ops.url != NULL ? f->ops.url(f->ops.ctx, f->stream) : NULL;
+
     take_head(f, &head);
+    if (answered != NULL && strlen(answered) < sizeof(f->final_url)) {
+      memcpy(f->final_url, answered, strlen(answered) + 1U);
+    }
   } else if (head.icy_metaint != 0U) {
     zzplay_icy_init(&f->icy, head.icy_metaint);
   }
@@ -495,6 +503,14 @@ const char *zzplay_httpfile_station(const ZZPlayHttpFile *file)
 const char *zzplay_httpfile_error_text(const ZZPlayHttpFile *file)
 {
   return file != NULL ? file->err : "";
+}
+
+const char *zzplay_httpfile_url(const ZZPlayHttpFile *file)
+{
+  if (file == NULL) {
+    return "";
+  }
+  return file->final_url[0] != '\0' ? file->final_url : file->url;
 }
 
 int zzplay_httpfile_take_title(ZZPlayHttpFile *file, char *out, size_t size)
