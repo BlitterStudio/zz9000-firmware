@@ -168,11 +168,18 @@ ZZPlayEngineResult zzplay_mpega_run(const ZZPlayEngineRun *run)
   uint32_t pending_frames = 0U;
   int playing = 0;
   ZZPlayEngineResult result = ZZPLAY_ENGINE_FAILED;
+  uint32_t repeats;
+  uint64_t decoded_frames = 0U;
+  uint64_t pass_start = 0U;
+  uint64_t next_pass_start = 0U;
+  uint32_t pass_base_ms;
 
   if (!run || !run->ctl || !run->path || !run->prefs) {
     return ZZPLAY_ENGINE_FAILED;
   }
   memset(&input, 0, sizeof(input));
+  repeats = run->options->loop_count;
+  pass_base_ms = run->seek_ms;
   memset(&hook, 0, sizeof(hook));
   memset(&control, 0, sizeof(control));
   memset(&ahi, 0, sizeof(ahi));
@@ -229,10 +236,18 @@ ZZPlayEngineResult zzplay_mpega_run(const ZZPlayEngineRun *run)
       break;
     }
     if (playing && sample_rate != 0U) {
+      uint64_t played = zzplay_ahi_played_frames(&ahi);
+
+      /* The position restarts when the next pass reaches the speaker. */
+      if (next_pass_start != 0U && played >= next_pass_start) {
+        pass_start = next_pass_start;
+        next_pass_start = 0U;
+        pass_base_ms = 0U;
+      }
       zzplay_controller_set_position(
           run->ctl,
-          zzplay_mp3_presented_ms(zzplay_ahi_played_frames(&ahi),
-                                  sample_rate, run->seek_ms),
+          zzplay_mp3_presented_ms(played - pass_start, sample_rate,
+                                  pass_base_ms),
           1);
     }
     if (pending_frames != 0U) {
@@ -269,6 +284,19 @@ ZZPlayEngineResult zzplay_mpega_run(const ZZPlayEngineRun *run)
     }
     decoded = MPEGA_decode_frame(stream, pcm);
     if (decoded == MPEGA_ERR_EOF) {
+      /* Another pass for --loop=N or repeat track, as the MHI and card
+       * paths do: rewind and keep the queue running. */
+      if (run->source_seekable &&
+          (zzplay_controller_loop_item(run->ctl) ||
+           (run->options->loop_mode == ZZPLAY_LOOP_FINITE &&
+            repeats != 0U)) &&
+          MPEGA_seek(stream, 0UL) == MPEGA_ERR_NONE) {
+        if (run->options->loop_mode == ZZPLAY_LOOP_FINITE) {
+          repeats--;
+        }
+        next_pass_start = decoded_frames;
+        continue;
+      }
       zzplay_ahi_mark_end_of_stream(&ahi);
       if (!playing) {
         result = ZZPLAY_ENGINE_EOF;
@@ -289,6 +317,7 @@ ZZPlayEngineResult zzplay_mpega_run(const ZZPlayEngineRun *run)
       break;
     }
     pending_frames = (uint32_t)decoded;
+    decoded_frames += (uint32_t)decoded;
   }
 
 done:
