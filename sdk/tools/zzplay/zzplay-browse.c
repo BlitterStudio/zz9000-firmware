@@ -73,6 +73,7 @@ enum BrowseGadgetID {
   BGID_BACK,
   BGID_RELOAD,
   BGID_PLAY,
+  BGID_PLAY_NEXT,
   BGID_ADD,
   BGID_PLAY_ALL,
   BGID_ADD_ALL,
@@ -102,6 +103,7 @@ static struct Gadget *add_gad = NULL;
 static struct Gadget *play_all_gad = NULL;
 static struct Gadget *add_all_gad = NULL;
 static struct Gadget *fav_gad = NULL;
+static struct Gadget *play_next_gad = NULL;
 static struct Gadget *stop_gad = NULL;
 static struct Gadget *settings_btn_gad = NULL;
 static struct Gadget *status_gad = NULL;
@@ -653,6 +655,11 @@ static void update_buttons(void)
   }
   if (play_gad) {
     GT_SetGadgetAttrs(play_gad, browse_win, NULL,
+                      GA_Disabled, (ULONG)!zzplay_browse_model_can_play(&browse_model),
+                      TAG_DONE);
+  }
+  if (play_next_gad) {
+    GT_SetGadgetAttrs(play_next_gad, browse_win, NULL,
                       GA_Disabled, (ULONG)!zzplay_browse_model_can_play(&browse_model),
                       TAG_DONE);
   }
@@ -1224,34 +1231,33 @@ static void __attribute__((noinline)) poll_settings(void)
   }
 }
 
-/* Widest of a row's button labels plus their frame: navigation row
- * (Back, Reload, Stop, Settings) and action row (Play, Add, Play all,
- * Add all, Favourite). */
-static int browse_nav_button_min_width(void)
+/* The button grid, row by row: navigation first, then what to do with
+ * the selection or the shown folder. */
+static const struct {
+  const char *label;
+  UWORD id;
+  struct Gadget **gad;
+} browse_buttons[ZZPLAY_BROWSE_BUTTON_COUNT] = {
+  { "Back", BGID_BACK, &back_gad },
+  { "Reload", BGID_RELOAD, &reload_gad },
+  { "Stop", BGID_STOP, &stop_gad },
+  { "Favourite", BGID_FAVOURITE, &fav_gad },
+  { "Settings", BGID_SETTINGS, &settings_btn_gad },
+  { "Play", BGID_PLAY, &play_gad },
+  { "Play next", BGID_PLAY_NEXT, &play_next_gad },
+  { "Add", BGID_ADD, &add_gad },
+  { "Play all", BGID_PLAY_ALL, &play_all_gad },
+  { "Add all", BGID_ADD_ALL, &add_all_gad }
+};
+
+/* Widest button label plus its frame; every button gets this width. */
+static int browse_button_min_width(void)
 {
-  static const char *const labels[] = { "Back", "Reload", "Stop", "Settings" };
   int btn_w = 0;
   uint32_t i;
 
-  for (i = 0U; i < sizeof(labels) / sizeof(labels[0]); i++) {
-    int w = browse_text_w(labels[i]);
-    if (w > btn_w) {
-      btn_w = w;
-    }
-  }
-  return btn_w + 16;
-}
-
-static int browse_act_button_min_width(void)
-{
-  static const char *const labels[] = {
-    "Play", "Add", "Play all", "Add all", "Favourite"
-  };
-  int btn_w = 0;
-  uint32_t i;
-
-  for (i = 0U; i < sizeof(labels) / sizeof(labels[0]); i++) {
-    int w = browse_text_w(labels[i]);
+  for (i = 0U; i < ZZPLAY_BROWSE_BUTTON_COUNT; i++) {
+    int w = browse_text_w(browse_buttons[i].label);
     if (w > btn_w) {
       btn_w = w;
     }
@@ -1382,79 +1388,18 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
     browse_list_rows = 1;
   }
 
-  /* Navigation row: Back, Reload, Stop, Settings */
-  back_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_BACK].x,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_BACK].y,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_BACK].w,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_BACK].h,
-      "Back", BGID_BACK, PLACETEXT_IN, NULL);
+  /* The button grid; every cell has the same width. */
+  {
+    uint32_t b;
 
-  reload_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_RELOAD].x,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_RELOAD].y,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_RELOAD].w,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_RELOAD].h,
-      "Reload", BGID_RELOAD, PLACETEXT_IN, NULL);
-
-  stop_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_STOP].x,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_STOP].y,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_STOP].w,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_STOP].h,
-      "Stop", BGID_STOP, PLACETEXT_IN, NULL);
-
-  settings_btn_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_SETTINGS].x,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_SETTINGS].y,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_SETTINGS].w,
-      layout.nav_buttons[ZZPLAY_BROWSE_NAV_SETTINGS].h,
-      "Settings", BGID_SETTINGS, PLACETEXT_IN, NULL);
-
-  /* Action row: Play, Add, Play all, Add all, Favourite */
-  play_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY].x,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY].y,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY].w,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY].h,
-      "Play", BGID_PLAY, PLACETEXT_IN, NULL);
-
-  add_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD].x,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD].y,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD].w,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD].h,
-      "Add", BGID_ADD, PLACETEXT_IN, NULL);
-
-  play_all_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY_ALL].x,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY_ALL].y,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY_ALL].w,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_PLAY_ALL].h,
-      "Play all", BGID_PLAY_ALL, PLACETEXT_IN, NULL);
-
-  add_all_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD_ALL].x,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD_ALL].y,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD_ALL].w,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_ADD_ALL].h,
-      "Add all", BGID_ADD_ALL, PLACETEXT_IN, NULL);
-
-  fav_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_FAVOURITE].x,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_FAVOURITE].y,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_FAVOURITE].w,
-      layout.act_buttons[ZZPLAY_BROWSE_ACT_FAVOURITE].h,
-      "Favourite", BGID_FAVOURITE, PLACETEXT_IN, NULL);
+    for (b = 0U; b < ZZPLAY_BROWSE_BUTTON_COUNT; b++) {
+      *browse_buttons[b].gad = gad = create_gadget(
+          browse_win, BUTTON_KIND, gad, &ng, layout.buttons[b].x,
+          layout.buttons[b].y, layout.buttons[b].w, layout.buttons[b].h,
+          browse_buttons[b].label, browse_buttons[b].id, PLACETEXT_IN,
+          NULL);
+    }
+  }
 
   /* Status line, kept clear of the sizing gadget in the corner */
   tags[0].ti_Tag = GTTX_Text;
@@ -1471,10 +1416,9 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
       layout.status.x, layout.status.y, layout.status.w, layout.status.h,
       NULL, BGID_STATUS, 0, tags);
 
-  if (!gad || !service_gad || !search_gad || !list_gad || !back_gad ||
-      !reload_gad || !play_gad || !add_gad || !play_all_gad ||
-      !add_all_gad || !fav_gad || !stop_gad || !settings_btn_gad ||
-      !status_gad) {
+  /* Each gadget is created after the one before, so a failure anywhere
+   * leaves the last one NULL. */
+  if (!gad) {
     return 0;
   }
 
@@ -1536,6 +1480,7 @@ static void browse_handle_resize(void)
   back_gad = NULL;
   reload_gad = NULL;
   play_gad = NULL;
+  play_next_gad = NULL;
   add_gad = NULL;
   play_all_gad = NULL;
   add_all_gad = NULL;
@@ -1572,8 +1517,7 @@ static void browse_fill_layout_config(int font_h,
   cfg->cycle_w = browse_cycle_width();
   cfg->search_label_w = browse_text_w("Search:") + 8;
   cfg->search_min_w = 80;
-  cfg->nav_btn_min_w = browse_nav_button_min_width();
-  cfg->act_btn_min_w = browse_act_button_min_width();
+  cfg->btn_min_w = browse_button_min_width();
   cfg->list_min_w = browse_marker_col_w + browse_len_col_w +
                     3 * BROWSE_COLUMN_GAP + 100;
   cfg->list_min_rows = 3;
@@ -1920,6 +1864,7 @@ void zzplay_browse_close(void)
   back_gad = NULL;
   reload_gad = NULL;
   play_gad = NULL;
+  play_next_gad = NULL;
   add_gad = NULL;
   play_all_gad = NULL;
   add_all_gad = NULL;
@@ -2575,6 +2520,8 @@ void zzplay_browse_poll(void)
         browse_do_reload();
       } else if (gid == BGID_PLAY) {
         browse_use_selection(BROWSE_TO_PLAY);
+      } else if (gid == BGID_PLAY_NEXT) {
+        browse_use_selection(BROWSE_TO_NEXT);
       } else if (gid == BGID_ADD) {
         browse_use_selection(BROWSE_TO_ADD);
       } else if (gid == BGID_PLAY_ALL) {

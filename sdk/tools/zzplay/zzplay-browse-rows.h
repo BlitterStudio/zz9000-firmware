@@ -33,31 +33,22 @@ typedef struct ZZPlayBrowseRect {
   int h;
 } ZZPlayBrowseRect;
 
-/* Button row 1: Navigation row (4 buttons) */
-#define ZZPLAY_BROWSE_NAV_BACK 0
-#define ZZPLAY_BROWSE_NAV_RELOAD 1
-#define ZZPLAY_BROWSE_NAV_STOP 2
-#define ZZPLAY_BROWSE_NAV_SETTINGS 3
-#define ZZPLAY_BROWSE_NAV_COUNT 4
-
-/* Button row 2: Action row (5 buttons) */
-#define ZZPLAY_BROWSE_ACT_PLAY 0
-#define ZZPLAY_BROWSE_ACT_ADD 1
-#define ZZPLAY_BROWSE_ACT_PLAY_ALL 2
-#define ZZPLAY_BROWSE_ACT_ADD_ALL 3
-#define ZZPLAY_BROWSE_ACT_FAVOURITE 4
-#define ZZPLAY_BROWSE_ACT_COUNT 5
+/* The buttons form a grid of equal cells, filled row by row: two rows
+ * of five, all the same width, so the columns line up. */
+#define ZZPLAY_BROWSE_BUTTON_ROWS 2
+#define ZZPLAY_BROWSE_BUTTON_COLS 5
+#define ZZPLAY_BROWSE_BUTTON_COUNT \
+  (ZZPLAY_BROWSE_BUTTON_ROWS * ZZPLAY_BROWSE_BUTTON_COLS)
 
 typedef struct ZZPlayBrowseLayoutConfig {
-  int font_h;          /* Screen font height (YSize) */
-  int cycle_w;         /* Measured width of the service cycle gadget */
-  int search_label_w;  /* Measured width of "Search:" label + padding */
-  int search_min_w;    /* Minimum width for search string field */
-  int nav_btn_min_w;   /* Minimum button width in navigation row */
-  int act_btn_min_w;   /* Minimum button width in action row */
-  int list_min_w;      /* Sensible minimum width for listview */
-  int list_min_rows;   /* Minimum visible rows in listview */
-  int size_clearance;  /* Space at right of status line for sizing gadget */
+  int font_h;          /* screen font height (tf_YSize) */
+  int cycle_w;         /* service cycle gadget width */
+  int search_label_w;  /* "Search:" label width plus padding */
+  int search_min_w;    /* narrowest search field */
+  int btn_min_w;       /* widest button label plus its frame */
+  int list_min_w;      /* narrowest list */
+  int list_min_rows;   /* fewest list rows */
+  int size_clearance;  /* room left of the sizing gadget for the status */
 } ZZPlayBrowseLayoutConfig;
 
 typedef struct ZZPlayBrowseLayout {
@@ -69,10 +60,10 @@ typedef struct ZZPlayBrowseLayout {
   ZZPlayBrowseRect service;
   ZZPlayBrowseRect search;
   ZZPlayBrowseRect list;
-  ZZPlayBrowseRect nav_buttons[ZZPLAY_BROWSE_NAV_COUNT];
-  ZZPlayBrowseRect act_buttons[ZZPLAY_BROWSE_ACT_COUNT];
+  ZZPlayBrowseRect buttons[ZZPLAY_BROWSE_BUTTON_COUNT]; /* row by row */
   ZZPlayBrowseRect status;
 } ZZPlayBrowseLayout;
+
 typedef struct ZZPlayBrowseColumns {
   int marker_x, marker_w; /* the row's kind marker */
   int title_x, title_w;
@@ -103,11 +94,10 @@ void zzplay_browse_clamp_window(int *left, int *top, int *width, int *height,
 uint32_t zzplay_browse_count_playable(const ZZPlayBrowseItem *items,
                                       uint32_t count);
 
-/* Compute the pure geometry for the Browse window controls with two
- * button rows (navigation and action). If target_inner_w or
- * target_inner_h are smaller than the computed minimums, they are
- * clamped up to min_inner_w and min_inner_h. Controls never overlap,
- * and the status line stays clear of size_clearance. */
+/* Geometry of the Browse window's controls inside its borders: the
+ * service and search line, the list, the button grid and the status
+ * line. A target size below the minimum is raised to it. Controls
+ * never overlap, and the status line stays clear of size_clearance. */
 void zzplay_browse_compute_layout(int target_inner_w, int target_inner_h,
                                   const ZZPlayBrowseLayoutConfig *cfg,
                                   ZZPlayBrowseLayout *out);

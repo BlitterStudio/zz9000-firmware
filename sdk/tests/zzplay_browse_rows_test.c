@@ -176,14 +176,15 @@ static int rects_overlap(const ZZPlayBrowseRect *a, const ZZPlayBrowseRect *b)
           a->y < b->y + b->h && a->y + a->h > b->y);
 }
 
+#define LAYOUT_RECTS (4 + ZZPLAY_BROWSE_BUTTON_COUNT)
+
 static int verify_layout(const ZZPlayBrowseLayout *l,
                          const ZZPlayBrowseLayoutConfig *cfg,
                          int target_w, int target_h)
 {
-  ZZPlayBrowseRect rects[13];
+  ZZPlayBrowseRect rects[LAYOUT_RECTS];
   int i, j;
 
-  if (!l || !cfg) return 1;
   if (l->inner_w < l->min_inner_w) return 2;
   if (l->inner_h < l->min_inner_h) return 3;
   if (target_w >= l->min_inner_w && l->inner_w != target_w) return 4;
@@ -194,45 +195,52 @@ static int verify_layout(const ZZPlayBrowseLayout *l,
   rects[0] = l->service;
   rects[1] = l->search;
   rects[2] = l->list;
-  for (i = 0; i < 4; i++) rects[3 + i] = l->nav_buttons[i];
-  for (i = 0; i < 5; i++) rects[7 + i] = l->act_buttons[i];
-  rects[12] = l->status;
+  rects[3] = l->status;
+  for (i = 0; i < ZZPLAY_BROWSE_BUTTON_COUNT; i++) {
+    rects[4 + i] = l->buttons[i];
+  }
 
-  for (i = 0; i < 13; i++) {
+  for (i = 0; i < LAYOUT_RECTS; i++) {
     if (rects[i].w <= 0 || rects[i].h <= 0) return 10 + i;
     if (rects[i].x < BROWSE_MARGIN || rects[i].y < BROWSE_MARGIN) return 30 + i;
     if (rects[i].x + rects[i].w > l->inner_w - BROWSE_MARGIN) return 50 + i;
     if (rects[i].y + rects[i].h > l->inner_h) return 70 + i;
   }
 
-  /* Status line stays clear of the size clearance */
-  if (l->status.x + l->status.w > l->inner_w - BROWSE_MARGIN - cfg->size_clearance) {
+  /* The status line stays clear of the sizing gadget. */
+  if (l->status.x + l->status.w >
+      l->inner_w - BROWSE_MARGIN - cfg->size_clearance) {
     return 90;
   }
-  /* Status line ends exactly at bottom of inner area */
-  if (l->status.y + l->status.h != l->inner_h) return 91;
 
-  /* Buttons in nav row share width evenly and do not overlap */
-  for (i = 1; i < 4; i++) {
-    if (l->nav_buttons[i].w != l->nav_buttons[0].w) return 92;
-    if (l->nav_buttons[i].x != l->nav_buttons[i - 1].x + l->nav_buttons[0].w + BROWSE_SPACING) {
-      return 93;
+  /* Every button is wide enough for the widest label; cells differ by
+   * at most the one pixel of the division's remainder. */
+  for (i = 0; i < ZZPLAY_BROWSE_BUTTON_COUNT; i++) {
+    if (l->buttons[i].w < cfg->btn_min_w) return 91;
+    if (l->buttons[i].w - l->buttons[0].w > 1 ||
+        l->buttons[0].w - l->buttons[i].w > 1) {
+      return 92;
     }
   }
+  /* The columns line up from row to row, and the grid ends flush with
+   * the list on both sides. */
+  for (i = ZZPLAY_BROWSE_BUTTON_COLS; i < ZZPLAY_BROWSE_BUTTON_COUNT; i++) {
+    const ZZPlayBrowseRect *above = &l->buttons[i - ZZPLAY_BROWSE_BUTTON_COLS];
 
-  /* Buttons in action row share width evenly and do not overlap */
-  for (i = 1; i < 5; i++) {
-    if (l->act_buttons[i].w != l->act_buttons[0].w) return 94;
-    if (l->act_buttons[i].x != l->act_buttons[i - 1].x + l->act_buttons[0].w + BROWSE_SPACING) {
-      return 95;
-    }
+    if (l->buttons[i].x != above->x || l->buttons[i].w != above->w) return 93;
+  }
+  for (i = 0; i < ZZPLAY_BROWSE_BUTTON_COUNT;
+       i += ZZPLAY_BROWSE_BUTTON_COLS) {
+    const ZZPlayBrowseRect *last = &l->buttons[i + ZZPLAY_BROWSE_BUTTON_COLS - 1];
+
+    if (l->buttons[i].x != l->list.x) return 94;
+    if (last->x + last->w != l->list.x + l->list.w) return 95;
   }
 
-  /* No two controls overlap */
-  for (i = 0; i < 13; i++) {
-    for (j = i + 1; j < 13; j++) {
+  for (i = 0; i < LAYOUT_RECTS; i++) {
+    for (j = i + 1; j < LAYOUT_RECTS; j++) {
       if (rects_overlap(&rects[i], &rects[j])) {
-        return 100 + i * 13 + j;
+        return 100 + i * LAYOUT_RECTS + j;
       }
     }
   }
@@ -244,8 +252,8 @@ static int test_compute_layout(void)
   static const int font_sizes[] = { 8, 11, 13, 16, 24 };
   static const int test_sizes[][2] = {
     { -10, -10 }, { 0, 0 }, { 50, 50 }, { 200, 100 },
-    { 450, 200 }, { 500, 350 }, { 640, 256 }, { 800, 600 },
-    { 1280, 720 }, { 1920, 1080 }
+    { 450, 200 }, { 500, 350 }, { 503, 351 }, { 640, 256 },
+    { 800, 600 }, { 1280, 720 }, { 1920, 1080 }
   };
   uint32_t f, s;
 
@@ -258,8 +266,7 @@ static int test_compute_layout(void)
     cfg.cycle_w = fh * 12 + 32;
     cfg.search_label_w = fh * 6 + 8;
     cfg.search_min_w = fh * 8;
-    cfg.nav_btn_min_w = fh * 7 + 16;
-    cfg.act_btn_min_w = fh * 8 + 16;
+    cfg.btn_min_w = fh * 8 + 16;
     cfg.list_min_w = (fh + 4) + (fh * 6) + 3 * BROWSE_COLUMN_GAP + 100;
     cfg.list_min_rows = 3;
     cfg.size_clearance = fh > 12 ? fh + 8 : 20;

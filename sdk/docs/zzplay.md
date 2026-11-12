@@ -206,10 +206,13 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
 - Click a folder to open it. **Back** returns to the previous list
   with the same entry selected. A long list ends in a "--- More items ---"
   row; click it to load the next part.
+- The buttons sit in two rows of five, all the same width: **Back**,
+  **Reload**, **Stop**, **Favourite** and **Settings**, then **Play**,
+  **Play next**, **Add**, **Play all** and **Add all**.
 - The window can be resized from its bottom right corner; the list takes
-  the extra height and width, the buttons spread across the width and the
-  status line stays at the bottom. The window cannot be made smaller than
-  its buttons and two list rows, nor larger than the screen. Its place and
+  the extra height and width, the buttons widen with it and the status
+  line stays at the bottom. The window cannot be made smaller than its
+  buttons and three list rows, nor larger than the screen. Its place and
   size are remembered in `ZZPlay.prefs` when it closes or ZZPlay quits
   with it open, and restored the next time (brought back onto the screen
   when it no longer fits).
@@ -259,7 +262,7 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
   the playlist had no room for all of them. A collection that holds
   nothing playable changes nothing: the status line says "Nothing to
   add".
-- **Play next** in the Browse menu puts the selected track or station, or
+- **Play next** puts the selected track or station, or
   the tracks of the selected collection, right after the entry that is
   playing, without interrupting it; with nothing playing they go to the
   start of the playlist. **Play all next** does the same for the folder
