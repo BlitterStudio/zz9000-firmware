@@ -936,7 +936,7 @@ Slice acceptance:
 - A: host tests 1–4 in section 9, plus an ARM link. Fault in the app does not call `core1_cold_restart`. Fault in a firmware PC still does.
 - B: host test of the seqlock, chunked read, drop-on-full input ring, audio-open when slot 2 is busy returns `ZZ_EBUSY`. Mailbox ops fit in 48 bytes.
 - C: 68k library suite green; host GL test 6 green; firmware link of the front end does not pull `amiberry_glu_quad.c`, `amiberry_backend.c`, or `vendor/`.
-- D: builds in the gcc 6.5 container; posts the ops in section 4; restores the screen in the hardware kit.
+- D: builds in the m68k toolchain container (`tools/amiga-docker.sh`); posts the ops in section 4; restores the screen in the hardware kit.
 - E: `hello` and `pixels` link as PIE with only `R_ARM_RELATIVE`; wrappers call the table.
 - F: `timedemo demo1` links and, on hardware, runs from a user-supplied pak. No id data in the repo.
 

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -e
 
-# GCC 16.2.1b (AmigaDev 16.2-rc23-20). The tag follows release candidates,
-# so the digest pins the compiler that was qualified on the card.
+# GCC 16. The tag follows release candidates, so the digest pins the
+# compiler; card runs of it happen before releases.
 IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:a018cd1de600ae1c704f2eb3501f86843636f9953dd4aba6cffdf62cd7d9e8bb}"
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
