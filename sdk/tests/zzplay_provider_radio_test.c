@@ -185,6 +185,8 @@ static size_t s_mock_body_len = 0U;
 static uint32_t s_split_rng = 1U;
 /* 1: the next request sends half an element, then drops; becomes 2. */
 static int s_mock_cut_first = 0;
+/* What the cut request sends before dropping; NULL: half an element. */
+static const char *s_mock_cut_text = NULL;
 
 static void mock_body(const char *body, size_t len)
 {
@@ -240,11 +242,11 @@ static int fake_http_get(const ZZPlayHost *host, const char *url,
   }
   if (s_mock_cut_first == 1) {
     static const char partial[] = "<result><station name=\"";
+    const char *text = s_mock_cut_text != NULL ? s_mock_cut_text : partial;
 
     s_mock_cut_first = 2;
     if (data) {
-      (void)data(user, (const uint8_t *)partial,
-                 (uint32_t)(sizeof(partial) - 1U));
+      (void)data(user, (const uint8_t *)text, (uint32_t)strlen(text));
     }
     if (status) {
       *status = 0;
@@ -529,6 +531,35 @@ static void test_radio_resolve_after_cut_reply(ZZPlayHost *host)
   assert(ok);
   assert(strncmp(s_last_requested_url, "http://de2.api.radio-browser.info/", 34) == 0);
   assert(strcmp(resolved.url, "http://resolved.laut.fm/blasmusik") == 0);
+  p->close(ctx);
+}
+
+/* The first server delivers one whole station, then drops. Another
+ * server would send that station again, so the error stands instead. */
+static void test_radio_search_cut_after_rows(ZZPlayHost *host)
+{
+  const ZZPlayProvider *p = zzplay_provider_entry();
+  void *ctx;
+  TestSinkData sink_data;
+  ZZPlayItemSink sink;
+  char err[128];
+
+  ctx = p->open(host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&sink_data, 0, sizeof(sink_data));
+  sink.item = sink_item_cb;
+  sink.total = sink_total_cb;
+  sink.user = &sink_data;
+  s_mock_cut_text =
+      "<result><station stationuuid=\"11111111-1111-1111-1111-111111111111\" "
+      "name=\"Blasmusikradio\" url=\"http://stream.laut.fm/blasmusik\" "
+      "codec=\"MP3\" bitrate=\"128\"></station><station name=\"";
+  s_mock_cut_first = 1;
+  assert(!p->search(ctx, "rock", &sink, err, sizeof(err)));
+  s_mock_cut_first = 0;
+  s_mock_cut_text = NULL;
+  assert(sink_data.count == 1);
+  assert(strcmp(err, "The connection was lost") == 0);
   p->close(ctx);
 }
 
@@ -1291,6 +1322,7 @@ int main(void)
   test_radio_search_empty(&fake_host);
   test_radio_resolve(&fake_host);
   test_radio_resolve_after_cut_reply(&fake_host);
+  test_radio_search_cut_after_rows(&fake_host);
   test_radio_favourites(&fake_host);
   test_radio_folders(&fake_host);
   test_my_stations(&fake_host);

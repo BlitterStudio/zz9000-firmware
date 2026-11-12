@@ -984,7 +984,9 @@ static int fetch_and_scan_stations(RadioContext *rc, char *url,
     host->xml_close(host, xml);
     if (radio_reply_ok(host, ok, status, col.saw_root && whole, err, err_size))
       return 1;
-    if ((!ok || status >= 500) && attempt + 1U < 3U) {
+    /* Another server only when this one delivered no rows: the sink has
+     * the rows already, and a retry would send them again. */
+    if ((!ok || status >= 500) && col.count == 0U && attempt + 1U < 3U) {
       if (first_error[0] == '\0' && err)
         radio_copy_text(first_error, sizeof(first_error), err, 0);
       rc->server++;
@@ -1039,7 +1041,9 @@ static int fetch_and_scan_folders(RadioContext *rc, char *url,
     host->xml_close(host, xml);
     if (radio_reply_ok(host, ok, status, col.saw_root && whole, err, err_size))
       return 1;
-    if ((!ok || status >= 500) && attempt + 1U < 3U) {
+    /* Another server only when this one delivered no rows: the sink has
+     * the rows already, and a retry would send them again. */
+    if ((!ok || status >= 500) && col.count == 0U && attempt + 1U < 3U) {
       if (first_error[0] == '\0' && err)
         radio_copy_text(first_error, sizeof(first_error), err, 0);
       rc->server++;
