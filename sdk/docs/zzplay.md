@@ -602,6 +602,8 @@ from 1. Times are whole seconds.
 | `FULLSCREEN [mode]` | Set the **Fullscreen video** setting to `ON`, `OFF` or `TOGGLE`, or return it. |
 | `ADD path...` | Append files, drawers, patterns or playlists, as a drop on the window does. Playback does not start. Returns the number of entries added. |
 | `OPEN path...` | Replace the playlist with the given paths and play the first entry. Returns the number of entries added. |
+| `PLAYALL service id` | Replace the playlist with a service collection and play its first entry. Returns the number added. |
+| `ADDALL service id` | Append a service collection. Returns the number added. |
 | `CLEAR` | Empty the playlist. The playing item continues. |
 | `REMOVE n` | Remove entry `n`. |
 | `SAVEPLAYLIST file` | Save the playlist as extended M3U under exactly the name given. |
@@ -612,19 +614,34 @@ from 1. Times are whole seconds.
 | `INDEX` | Return the position of the current entry, 0 when there is none. |
 | `ENTRY n` | Return the path of entry `n`. |
 | `SHOW` | Bring the player window to the front. |
+| `BROWSE` | Open the Browse window, or bring it to the front. |
+| `SERVICES` | Return installed services, one `scheme name` per line. Modules load on first use. |
+| `SEARCH service query...` | Return at most 100 playable matches as `id title` lines. Playable folders end in `(collection)`. Plex result groups are expanded. |
 | `VERSION`, `HELP` | Return the version string or the command list. |
 | `QUIT` | Quit ZZPlay. |
 
+
+Each service command can also be tried from the Shell:
+
+```text
+rx "address ZZPLAY BROWSE"
+rx "address ZZPLAY SERVICES"
+rx "address ZZPLAY SEARCH plex paris"
+rx "address ZZPLAY PLAYALL plex alb:1234"
+rx "address ZZPLAY ADDALL plex alb:1234"
+```
 Values come back in `RESULT` when the script uses `OPTIONS RESULTS`. The
 return code is 0 on success. It is 5 when the command cannot apply right now,
 for example `PAUSE` with nothing playing, `SEEK` on a format without seeking,
-or `QUIT` while a file requester is open. It is 10 for an unknown command, a
-wrong argument, a position outside the playlist, or `ADD`/`OPEN` paths that
-add nothing (`OPEN` then leaves the playlist unchanged).
+an empty `SEARCH`, or a collection that adds nothing. It is 10 for an unknown
+command, a wrong argument, a position outside the playlist, an unknown or
+failed service, or `ADD`/`OPEN` paths that add nothing (`OPEN` then leaves the
+playlist unchanged).
 
-`ADD` and `OPEN` read drawers and playlist files, which can take a while.
-Like a drop on the window, they pause the playing item while they run. The
-script waits for the reply, and commands from other scripts wait their turn.
+`ADD`, `OPEN`, `SEARCH`, `PLAYALL` and `ADDALL` can take a while. Like a drop
+on the window, they pause the playing item while they run. The window stays
+responsive during network waits, so Stop or Quit cancels them. The script
+waits for the reply, and commands from other scripts wait their turn.
 
 ## Diagnostics
 

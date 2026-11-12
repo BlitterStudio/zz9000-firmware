@@ -51,6 +51,10 @@ int zzplay_gui_is_open(void);
  * activate it. Returns 0 when it is not open. */
 int zzplay_gui_show(void);
 
+/* Open the service browser, or bring it to the front. Returns 0 when the
+ * player window is not open or the browser cannot open. */
+int zzplay_gui_browse(void);
+
 /* Signals to Wait() on while idle: window ports and the AppWindow port. */
 uint32_t zzplay_gui_signal_mask(void);
 

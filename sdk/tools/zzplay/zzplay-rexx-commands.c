@@ -23,6 +23,68 @@ typedef struct ZZPlayRexxCommand {
 
 /* The port runs on the player task only, one command at a time. */
 static char *zzplay_rexx_argv[ZZPLAY_REXX_MAX_ARGS];
+static char zzplay_rexx_query[ZZPLAY_REXX_LINE_MAX];
+
+void zzplay_rexx_result_init(ZZPlayRexxResultBuilder *result, char *text,
+                             uint32_t size)
+{
+  if (!result) {
+    return;
+  }
+  result->text = text;
+  result->size = size;
+  result->length = 0U;
+  result->lines = 0U;
+  if (text && size != 0U) {
+    text[0] = '\0';
+  }
+}
+
+static void zzplay_rexx_result_copy(ZZPlayRexxResultBuilder *result,
+                                    const char *text)
+{
+  while (*text != '\0') {
+    char c = *text++;
+
+    result->text[result->length++] =
+        (c == '\r' || c == '\n') ? ' ' : c;
+  }
+}
+
+int zzplay_rexx_result_add(ZZPlayRexxResultBuilder *result, const char *id,
+                           const char *title, int collection)
+{
+  const char *marker = collection ? ZZPLAY_REXX_COLLECTION_MARKER : "";
+  size_t needed;
+
+  if (!result || !result->text || result->size == 0U ||
+      result->lines >= ZZPLAY_REXX_RESULT_LINES_MAX) {
+    return 0;
+  }
+  if (!id) {
+    id = "";
+  }
+  if (!title) {
+    title = "";
+  }
+  needed = strlen(id) + 1U + strlen(title) + strlen(marker);
+  if (result->lines != 0U) {
+    needed++;
+  }
+  if (needed >= (size_t)(result->size - result->length)) {
+    return 0;
+  }
+  if (result->lines != 0U) {
+    result->text[result->length++] = '\n';
+  }
+  zzplay_rexx_result_copy(result, id);
+  result->text[result->length++] = ' ';
+  zzplay_rexx_result_copy(result, title);
+  zzplay_rexx_result_copy(result, marker);
+  result->text[result->length] = '\0';
+  result->lines++;
+  return 1;
+}
 
 static char zzplay_rexx_upper(char c)
 {
@@ -177,6 +239,37 @@ static void zzplay_rexx_warn_unless(ZZPlayRexxReply *reply, int done)
   if (!done) {
     reply->rc = ZZPLAY_REXX_RC_WARN;
   }
+}
+
+static void zzplay_rexx_reason(ZZPlayRexxReply *reply, int rc,
+                               const char *reason, const char *fallback)
+{
+  reply->rc = rc;
+  zzplay_rexx_text(reply,
+                   reason && reason[0] != '\0' ? reason : fallback);
+}
+
+static int zzplay_rexx_join_query(uint32_t argc, char **argv)
+{
+  uint32_t used = 0U;
+  uint32_t i;
+
+  for (i = 1U; i < argc; i++) {
+    size_t length = strlen(argv[i]);
+    uint32_t separator = (i != 1U) ? 1U : 0U;
+
+    if (separator > sizeof(zzplay_rexx_query) - used - 1U ||
+        length > sizeof(zzplay_rexx_query) - used - separator - 1U) {
+      return 0;
+    }
+    if (separator != 0U) {
+      zzplay_rexx_query[used++] = ' ';
+    }
+    memcpy(zzplay_rexx_query + used, argv[i], length);
+    used += (uint32_t)length;
+  }
+  zzplay_rexx_query[used] = '\0';
+  return 1;
 }
 
 /* --- Transport --- */
@@ -501,6 +594,84 @@ static void zzplay_rexx_saveplaylist(const ZZPlayRexxHost *host,
   }
 }
 
+static void zzplay_rexx_collection(const ZZPlayRexxHost *host,
+                                    const char *service, const char *id,
+                                    int replace, ZZPlayRexxReply *reply)
+{
+  ZZPlayPlaylist gathered;
+  char reason[128];
+  uint32_t limit;
+  uint32_t added = 0U;
+  uint32_t i;
+
+  if (!host->collection) {
+    zzplay_rexx_reason(reply, ZZPLAY_REXX_RC_ERROR, NULL,
+                       "service commands are unavailable");
+    return;
+  }
+  limit = replace ? ZZPLAY_PLAYLIST_MAX_ENTRIES
+                  : ZZPLAY_PLAYLIST_MAX_ENTRIES - host->playlist->count;
+  zzplay_playlist_init(&gathered);
+  gathered.repeat = host->playlist->repeat;
+  gathered.shuffle = host->playlist->shuffle;
+  gathered.rng = host->playlist->rng;
+  reason[0] = '\0';
+  if (!host->collection(host->user, service, id, limit, &gathered,
+                        reason, sizeof(reason))) {
+    zzplay_playlist_free(&gathered);
+    zzplay_rexx_reason(reply, ZZPLAY_REXX_RC_ERROR, reason,
+                       "cannot collect items");
+    return;
+  }
+  if (gathered.count == 0U) {
+    zzplay_playlist_free(&gathered);
+    reply->rc = ZZPLAY_REXX_RC_WARN;
+    zzplay_rexx_u32(reply, 0U);
+    return;
+  }
+  if (replace) {
+    added = gathered.count;
+    zzplay_playlist_free(host->playlist);
+    *host->playlist = gathered;
+    host->ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+    zzplay_rexx_warn_unless(reply,
+                            zzplay_controller_jump(host->ctl, 0));
+  } else {
+    for (i = 0U; i < gathered.count; i++) {
+      int32_t index = zzplay_playlist_add(host->playlist,
+                                          gathered.entries[i].path);
+
+      if (index < 0) {
+        break;
+      }
+      (void)zzplay_playlist_set_title(host->playlist, (uint32_t)index,
+                                      gathered.entries[i].title);
+      added++;
+    }
+    zzplay_playlist_free(&gathered);
+    if (added == 0U) {
+      reply->rc = ZZPLAY_REXX_RC_WARN;
+    } else {
+      host->ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+    }
+  }
+  zzplay_rexx_u32(reply, added);
+}
+
+static void zzplay_rexx_playall(const ZZPlayRexxHost *host, uint32_t argc,
+                                char **argv, ZZPlayRexxReply *reply)
+{
+  (void)argc;
+  zzplay_rexx_collection(host, argv[0], argv[1], 1, reply);
+}
+
+static void zzplay_rexx_addall(const ZZPlayRexxHost *host, uint32_t argc,
+                               char **argv, ZZPlayRexxReply *reply)
+{
+  (void)argc;
+  zzplay_rexx_collection(host, argv[0], argv[1], 0, reply);
+}
+
 /* --- Queries --- */
 
 static void zzplay_rexx_status(const ZZPlayRexxHost *host, uint32_t argc,
@@ -621,6 +792,68 @@ static void zzplay_rexx_version(const ZZPlayRexxHost *host, uint32_t argc,
   zzplay_rexx_text(reply, host->version ? host->version : "ZZPlay");
 }
 
+/* --- Services --- */
+
+static void zzplay_rexx_browse(const ZZPlayRexxHost *host, uint32_t argc,
+                               char **argv, ZZPlayRexxReply *reply)
+{
+  char reason[128];
+
+  (void)argc;
+  (void)argv;
+  reason[0] = '\0';
+  if (!host->browse ||
+      !host->browse(host->user, reason, sizeof(reason))) {
+    zzplay_rexx_reason(reply, ZZPLAY_REXX_RC_ERROR, reason,
+                       "Browse window is unavailable");
+  }
+}
+
+static void zzplay_rexx_services(const ZZPlayRexxHost *host, uint32_t argc,
+                                 char **argv, ZZPlayRexxReply *reply)
+{
+  ZZPlayRexxResultBuilder result;
+  char reason[128];
+
+  (void)argc;
+  (void)argv;
+  zzplay_rexx_result_init(&result, reply->result, sizeof(reply->result));
+  reason[0] = '\0';
+  if (!host->services ||
+      !host->services(host->user, &result, reason, sizeof(reason))) {
+    zzplay_rexx_reason(reply, ZZPLAY_REXX_RC_ERROR, reason,
+                       "cannot list services");
+    return;
+  }
+  reply->has_result = 1;
+}
+
+static void zzplay_rexx_search(const ZZPlayRexxHost *host, uint32_t argc,
+                               char **argv, ZZPlayRexxReply *reply)
+{
+  ZZPlayRexxResultBuilder result;
+  char reason[128];
+
+  if (!zzplay_rexx_join_query(argc, argv)) {
+    zzplay_rexx_reason(reply, ZZPLAY_REXX_RC_ERROR, NULL,
+                       "search query is too long");
+    return;
+  }
+  zzplay_rexx_result_init(&result, reply->result, sizeof(reply->result));
+  reason[0] = '\0';
+  if (!host->search ||
+      !host->search(host->user, argv[0], zzplay_rexx_query, &result,
+                    reason, sizeof(reason))) {
+    zzplay_rexx_reason(reply, ZZPLAY_REXX_RC_ERROR, reason,
+                       "search failed");
+    return;
+  }
+  reply->has_result = 1;
+  if (result.lines == 0U) {
+    reply->rc = ZZPLAY_REXX_RC_WARN;
+  }
+}
+
 /* --- Program --- */
 
 static void zzplay_rexx_show(const ZZPlayRexxHost *host, uint32_t argc,
@@ -661,6 +894,8 @@ static const ZZPlayRexxCommand zzplay_rexx_commands[] = {
   { "FULLSCREEN", zzplay_rexx_fullscreen, 0U, 1U },
   { "ADD", zzplay_rexx_add, 1U, ZZPLAY_REXX_MAX_ARGS - 1U },
   { "OPEN", zzplay_rexx_open, 1U, ZZPLAY_REXX_MAX_ARGS - 1U },
+  { "PLAYALL", zzplay_rexx_playall, 2U, 2U },
+  { "ADDALL", zzplay_rexx_addall, 2U, 2U },
   { "CLEAR", zzplay_rexx_clear, 0U, 0U },
   { "REMOVE", zzplay_rexx_remove, 1U, 1U },
   { "SAVEPLAYLIST", zzplay_rexx_saveplaylist, 1U, 1U },
@@ -674,6 +909,9 @@ static const ZZPlayRexxCommand zzplay_rexx_commands[] = {
   { "INDEX", zzplay_rexx_index, 0U, 0U },
   { "ENTRY", zzplay_rexx_entry, 1U, 1U },
   { "VERSION", zzplay_rexx_version, 0U, 0U },
+  { "BROWSE", zzplay_rexx_browse, 0U, 0U },
+  { "SERVICES", zzplay_rexx_services, 0U, 0U },
+  { "SEARCH", zzplay_rexx_search, 2U, ZZPLAY_REXX_MAX_ARGS - 1U },
   { "SHOW", zzplay_rexx_show, 0U, 0U },
   { "HELP", zzplay_rexx_help, 0U, 0U },
   { "QUIT", zzplay_rexx_quit, 0U, 0U }
@@ -742,7 +980,10 @@ int zzplay_rexx_needs_gate(const char *line)
     line++;
   }
   return zzplay_rexx_command_is(line, "ADD") ||
-         zzplay_rexx_command_is(line, "OPEN");
+         zzplay_rexx_command_is(line, "OPEN") ||
+         zzplay_rexx_command_is(line, "SEARCH") ||
+         zzplay_rexx_command_is(line, "PLAYALL") ||
+         zzplay_rexx_command_is(line, "ADDALL");
 }
 
 void zzplay_rexx_execute(const ZZPlayRexxHost *host, char *line,
@@ -773,10 +1014,6 @@ void zzplay_rexx_execute(const ZZPlayRexxHost *host, char *line,
     }
     reply->rc = ZZPLAY_REXX_RC_OK;
     command->run(host, args, zzplay_rexx_argv + 1, reply);
-    if (reply->rc != ZZPLAY_REXX_RC_OK) {
-      reply->has_result = 0;
-      reply->result[0] = '\0';
-    }
     return;
   }
 }

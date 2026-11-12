@@ -13,6 +13,7 @@
 
 #include "zz9k/sdk.h"
 #include "zzplay-ahi.h"
+#include "zzplay-browse-gather.h"
 #include "zzplay-audio.h"
 #include "zzplay-ax.h"
 #include "zzplay-codec-stream.h"
@@ -37,6 +38,7 @@
 #include "zzplay-probe.h"
 #include "zzplay-reader.h"
 #include "zzplay-rexx.h"
+#include "zzplay-rexx-commands.h"
 #include "zzplay-stats.h"
 #include "zzplay-stream.h"
 #include "zzplay-streamlist.h"
@@ -305,6 +307,32 @@ typedef struct ZZPlayApp {
 } ZZPlayApp;
 
 static ZZPlayApp app;
+
+typedef struct ZZPlayRexxSearchState {
+  const ZZPlayProvider *provider;
+  void *ctx;
+  ZZPlayRexxResultBuilder *result;
+  uint32_t page_rows;
+  uint32_t page_total;
+  int page_has_total;
+  char groups[ZZPLAY_REXX_RESULT_LINES_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
+  uint32_t group_count;
+} ZZPlayRexxSearchState;
+
+typedef struct ZZPlayRexxGatherLister {
+  const ZZPlayProvider *provider;
+  void *ctx;
+} ZZPlayRexxGatherLister;
+
+typedef struct ZZPlayRexxGatherOutput {
+  ZZPlayPlaylist *playlist;
+  const char *scheme;
+  const char *failed;
+} ZZPlayRexxGatherOutput;
+
+/* SEARCH can collect provider callbacks synchronously, so its largest
+ * scratch area belongs in static storage rather than the Amiga stack. */
+static ZZPlayRexxSearchState rexx_search;
 
 /* Keep a fullscreen screen across the gap between two videos, so a
  * fullscreen playlist never drops back to the Workbench between items.
@@ -3371,6 +3399,268 @@ static void zzplay_app_network_stage(void *user, int stage, const char *host)
   zzplay_app_pump(app);
 }
 
+static ZZPlayProviders *zzplay_app_rexx_providers(void)
+{
+  ZZPlayProviders *providers = zzplay_providers_shared();
+
+  if (providers->count == 0U) {
+    char ignored[ZZPLAY_PROVIDER_ERROR_MAX];
+
+    ignored[0] = '\0';
+    (void)zzplay_providers_load(providers, ignored, sizeof(ignored));
+  }
+  return providers;
+}
+
+static void *zzplay_app_rexx_open_service(
+    ZZPlayApp *app, const char *service, ZZPlayHostBinding *binding,
+    const ZZPlayProvider **provider, char *reason, uint32_t reason_size)
+{
+  const ZZPlayProviderSlot *slot =
+      zzplay_providers_find(zzplay_app_rexx_providers(), service);
+  void *ctx;
+
+  if (!slot || !slot->provider) {
+    (void)snprintf(reason, reason_size, "unknown service: %s", service);
+    return NULL;
+  }
+  *provider = slot->provider;
+  zzplay_host_bind(binding, service, zzplay_app_network_poll, app);
+  binding->stage = zzplay_app_network_stage;
+  ctx = (*provider)->open(&binding->table, reason, reason_size);
+  if (!ctx && reason[0] == '\0') {
+    (void)snprintf(reason, reason_size, "cannot open service");
+  }
+  return ctx;
+}
+
+static int zzplay_app_rexx_services(void *user,
+                                    ZZPlayRexxResultBuilder *result,
+                                    char *reason, uint32_t reason_size)
+{
+  ZZPlayProviders *providers = zzplay_app_rexx_providers();
+  uint32_t i;
+
+  (void)user;
+  (void)reason;
+  (void)reason_size;
+  for (i = 0U; i < providers->count; i++) {
+    const ZZPlayProvider *provider = providers->slot[i].provider;
+
+    if (provider &&
+        !zzplay_rexx_result_add(result, provider->scheme, provider->name, 0)) {
+      break;
+    }
+  }
+  return 1;
+}
+
+static void zzplay_app_rexx_search_total(void *user, uint32_t total)
+{
+  ZZPlayRexxSearchState *state = (ZZPlayRexxSearchState *)user;
+
+  state->page_total = total;
+  state->page_has_total = 1;
+}
+
+static int zzplay_app_rexx_search_item(
+    void *user, const ZZPlayProviderItem *item)
+{
+  ZZPlayRexxSearchState *state = (ZZPlayRexxSearchState *)user;
+
+  if (!item) {
+    return 0;
+  }
+  state->page_rows++;
+  if (item->kind == ZZPLAY_ITEM_FOLDER && item->playable == 0U) {
+    if (item->id && state->group_count < ZZPLAY_REXX_RESULT_LINES_MAX) {
+      (void)snprintf(state->groups[state->group_count],
+                     sizeof(state->groups[state->group_count]), "%s",
+                     item->id);
+      state->group_count++;
+    }
+    return 0;
+  }
+  if (item->playable == 0U ||
+      (item->kind != ZZPLAY_ITEM_FOLDER &&
+       item->kind != ZZPLAY_ITEM_TRACK &&
+       item->kind != ZZPLAY_ITEM_STATION)) {
+    return 0;
+  }
+  if (!zzplay_rexx_result_add(state->result, item->id, item->title,
+                              item->kind == ZZPLAY_ITEM_FOLDER)) {
+    return 1;
+  }
+  return state->result->lines >= ZZPLAY_REXX_RESULT_LINES_MAX;
+}
+
+static int zzplay_app_rexx_expand_search_groups(
+    ZZPlayRexxSearchState *state, char *reason, uint32_t reason_size)
+{
+  ZZPlayItemSink sink;
+  uint32_t group;
+
+  sink.user = state;
+  sink.item = zzplay_app_rexx_search_item;
+  sink.total = zzplay_app_rexx_search_total;
+  for (group = 0U;
+       group < state->group_count &&
+       state->result->lines < ZZPLAY_REXX_RESULT_LINES_MAX;
+       group++) {
+    uint32_t start = 0U;
+
+    for (;;) {
+      uint32_t rows;
+
+      state->page_rows = 0U;
+      state->page_total = 0U;
+      state->page_has_total = 0;
+      if (!state->provider->list(state->ctx, state->groups[group], start,
+                                 ZZPLAY_REXX_RESULT_LINES_MAX, &sink,
+                                 reason, reason_size)) {
+        return 0;
+      }
+      rows = state->page_rows;
+      if (state->result->lines >= ZZPLAY_REXX_RESULT_LINES_MAX ||
+          rows == 0U) {
+        break;
+      }
+      start += rows;
+      if ((state->page_has_total && start >= state->page_total) ||
+          (!state->page_has_total &&
+           rows < ZZPLAY_REXX_RESULT_LINES_MAX)) {
+        break;
+      }
+    }
+  }
+  return 1;
+}
+
+static int zzplay_app_rexx_search(void *user, const char *service,
+                                  const char *query,
+                                  ZZPlayRexxResultBuilder *result,
+                                  char *reason, uint32_t reason_size)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+  ZZPlayHostBinding binding;
+  ZZPlayItemSink sink;
+  const ZZPlayProvider *provider = NULL;
+  void *ctx;
+  int ok;
+
+  reason[0] = '\0';
+  ctx = zzplay_app_rexx_open_service(app, service, &binding, &provider,
+                                     reason, reason_size);
+  if (!ctx) {
+    return 0;
+  }
+  rexx_search.provider = provider;
+  rexx_search.ctx = ctx;
+  rexx_search.result = result;
+  rexx_search.page_rows = 0U;
+  rexx_search.page_total = 0U;
+  rexx_search.page_has_total = 0;
+  rexx_search.group_count = 0U;
+  sink.user = &rexx_search;
+  sink.item = zzplay_app_rexx_search_item;
+  sink.total = zzplay_app_rexx_search_total;
+  ok = provider->search(ctx, query, &sink, reason, reason_size);
+  if (ok) {
+    ok = zzplay_app_rexx_expand_search_groups(&rexx_search, reason,
+                                               reason_size);
+  }
+  provider->close(ctx);
+  if (!ok && reason[0] == '\0') {
+    (void)snprintf(reason, reason_size, "search failed");
+  }
+  return ok;
+}
+
+static int zzplay_app_rexx_gather_list(
+    void *user, const char *node, uint32_t start, uint32_t count,
+    const ZZPlayItemSink *sink, char *reason, uint32_t reason_size)
+{
+  ZZPlayRexxGatherLister *lister = (ZZPlayRexxGatherLister *)user;
+
+  return lister->provider->list(lister->ctx, node, start, count, sink,
+                                reason, reason_size);
+}
+
+static int zzplay_app_rexx_gather_item(
+    void *user, const ZZPlayProviderItem *item)
+{
+  ZZPlayRexxGatherOutput *output = (ZZPlayRexxGatherOutput *)user;
+  char uri[ZZPLAY_PLAYLIST_PATH_MAX];
+  int length;
+  int32_t index;
+
+  if (!item || !item->id) {
+    output->failed = "service returned an item without an id";
+    return 1;
+  }
+  length = snprintf(uri, sizeof(uri), "%s://%s", output->scheme, item->id);
+  if (length < 0 || (uint32_t)length >= sizeof(uri)) {
+    output->failed = "service item id is too long";
+    return 1;
+  }
+  index = zzplay_playlist_add(output->playlist, uri);
+  if (index < 0) {
+    output->failed = output->playlist->allocation_failed
+                         ? "out of memory"
+                         : "playlist is full";
+    return 1;
+  }
+  (void)zzplay_playlist_set_title(output->playlist, (uint32_t)index,
+                                  item->title);
+  return 0;
+}
+
+static int zzplay_app_rexx_collection(
+    void *user, const char *service, const char *id, uint32_t limit,
+    ZZPlayPlaylist *playlist, char *reason, uint32_t reason_size)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+  ZZPlayHostBinding binding;
+  ZZPlayRexxGatherLister lister;
+  ZZPlayRexxGatherOutput output;
+  ZZPlayGather gather;
+  ZZPlayItemSink sink;
+  const ZZPlayProvider *provider = NULL;
+  void *ctx;
+  int truncated;
+  int ok;
+
+  reason[0] = '\0';
+  ctx = zzplay_app_rexx_open_service(app, service, &binding, &provider,
+                                     reason, reason_size);
+  if (!ctx) {
+    return 0;
+  }
+  lister.provider = provider;
+  lister.ctx = ctx;
+  output.playlist = playlist;
+  output.scheme = service;
+  output.failed = NULL;
+  gather.user = &lister;
+  gather.list = zzplay_app_rexx_gather_list;
+  gather.progress = NULL;
+  gather.cancelled = NULL;
+  sink.user = &output;
+  sink.item = zzplay_app_rexx_gather_item;
+  sink.total = NULL;
+  ok = zzplay_gather_collection(&gather, id, limit, &sink, &truncated,
+                                 reason, reason_size);
+  provider->close(ctx);
+  if (output.failed) {
+    (void)snprintf(reason, reason_size, "%s", output.failed);
+    return 0;
+  }
+  if (!ok && reason[0] == '\0') {
+    (void)snprintf(reason, reason_size, "cannot collect items");
+  }
+  return ok;
+}
+
 /* Open the current item. A .pls or .m3u URL lists a station's stream
  * addresses: fetch it and open the first address that answers, which
  * becomes the item's path; the playlist entry keeps the list's URL. */
@@ -5604,6 +5894,10 @@ int main(int argc, char **argv)
     rexx.playlist = &app.playlist;
     rexx.item_path = app.item_path;
     rexx.version = zzplay_version + 6;
+    rexx.user = &app;
+    rexx.services = zzplay_app_rexx_services;
+    rexx.search = zzplay_app_rexx_search;
+    rexx.collection = zzplay_app_rexx_collection;
     /* Without ARexx ZZPlay simply has no port. */
     (void)zzplay_rexx_open(&rexx);
   }

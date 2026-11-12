@@ -31,6 +31,78 @@ typedef struct Fixture {
   int window_open;
 } Fixture;
 
+static int fake_browse(void *user, char *reason, uint32_t reason_size)
+{
+  Fixture *f = (Fixture *)user;
+
+  if (f->window_open) {
+    return 1;
+  }
+  snprintf(reason, reason_size, "player window is not open");
+  return 0;
+}
+
+static int fake_services(void *user, ZZPlayRexxResultBuilder *result,
+                         char *reason, uint32_t reason_size)
+{
+  (void)user;
+  (void)reason;
+  (void)reason_size;
+  (void)zzplay_rexx_result_add(result, "plex", "Plex Media Server", 0);
+  (void)zzplay_rexx_result_add(result, "radio", "Internet Radio", 0);
+  return 1;
+}
+
+static int fake_search(void *user, const char *service, const char *query,
+                       ZZPlayRexxResultBuilder *result, char *reason,
+                       uint32_t reason_size)
+{
+  Fixture *f = (Fixture *)user;
+
+  f->add_calls++;
+  snprintf(f->added[0], sizeof(f->added[0]), "%s", service);
+  snprintf(f->added[1], sizeof(f->added[1]), "%s", query);
+  if (strcmp(service, "plex") != 0) {
+    snprintf(reason, reason_size, "unknown service: %s", service);
+    return 0;
+  }
+  if (strcmp(query, "none") != 0) {
+    (void)zzplay_rexx_result_add(result, "42", "Paris", 0);
+    (void)zzplay_rexx_result_add(result, "album:7", "Paris Sessions", 1);
+  }
+  return 1;
+}
+
+static int fake_collection(void *user, const char *service, const char *id,
+                           uint32_t limit, ZZPlayPlaylist *list, char *reason,
+                           uint32_t reason_size)
+{
+  int32_t index;
+  char path[ZZPLAY_PLAYLIST_PATH_MAX];
+
+  (void)user;
+  if (strcmp(service, "plex") != 0) {
+    snprintf(reason, reason_size, "unknown service: %s", service);
+    return 0;
+  }
+  if (strcmp(id, "empty") == 0 || limit == 0U) {
+    return 1;
+  }
+  snprintf(path, sizeof(path), "%s://one", service);
+  index = zzplay_playlist_add(list, path);
+  if (index >= 0) {
+    (void)zzplay_playlist_set_title(list, (uint32_t)index, "First");
+  }
+  if (limit > 1U) {
+    snprintf(path, sizeof(path), "%s://two", service);
+    index = zzplay_playlist_add(list, path);
+    if (index >= 0) {
+      (void)zzplay_playlist_set_title(list, (uint32_t)index, "Second");
+    }
+  }
+  return 1;
+}
+
 /* A path naming a drawer "Empty:" adds nothing; any other path adds one
  * entry, as a single file would. */
 static uint32_t fake_add_path(void *user, ZZPlayPlaylist *list,
@@ -88,6 +160,10 @@ static void fixture_init(Fixture *f, uint32_t entries)
   f->host.save_playlist = fake_save;
   f->host.quit_blocked = fake_quit_blocked;
   f->host.show = fake_show;
+  f->host.browse = fake_browse;
+  f->host.services = fake_services;
+  f->host.search = fake_search;
+  f->host.collection = fake_collection;
 }
 
 static void fixture_free(Fixture *f)
@@ -376,6 +452,78 @@ static void test_program(void)
   fixture_free(&f);
 }
 
+static void test_services(void)
+{
+  Fixture f;
+  ZZPlayRexxResultBuilder result;
+  uint32_t i;
+
+  fixture_init(&f, 0U);
+  CHECK(run(&f, "BROWSE") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(result_is(&f, "player window is not open"));
+  f.window_open = 1;
+  CHECK(run(&f, "BROWSE") == ZZPLAY_REXX_RC_OK);
+
+  CHECK(run(&f, "SERVICES") == ZZPLAY_REXX_RC_OK);
+  CHECK(result_is(&f, "plex Plex Media Server\nradio Internet Radio"));
+
+  f.add_calls = 0U;
+  CHECK(run(&f, "SEARCH") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(run(&f, "SEARCH plex") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(f.add_calls == 0U);
+  CHECK(run(&f, "SEARCH missing query") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(result_is(&f, "unknown service: missing"));
+  CHECK(run(&f, "SEARCH plex paris jazz") == ZZPLAY_REXX_RC_OK);
+  CHECK(strcmp(f.added[0], "plex") == 0);
+  CHECK(strcmp(f.added[1], "paris jazz") == 0);
+  CHECK(result_is(&f, "42 Paris\nalbum:7 Paris Sessions (collection)"));
+  CHECK(run(&f, "SEARCH plex none") == ZZPLAY_REXX_RC_WARN);
+  CHECK(result_is(&f, ""));
+
+  zzplay_rexx_result_init(&result, f.reply.result, sizeof(f.reply.result));
+  CHECK(zzplay_rexx_result_add(&result, "id", "Title", 1));
+  CHECK(strcmp(f.reply.result, "id Title (collection)") == 0);
+  for (i = 1U; i < ZZPLAY_REXX_RESULT_LINES_MAX; i++) {
+    CHECK(zzplay_rexx_result_add(&result, "id", "Title", 0));
+  }
+  CHECK(result.lines == ZZPLAY_REXX_RESULT_LINES_MAX);
+  CHECK(!zzplay_rexx_result_add(&result, "overflow", "Hidden", 0));
+  CHECK(strstr(f.reply.result, "overflow") == NULL);
+  fixture_free(&f);
+}
+
+static void test_service_collections(void)
+{
+  Fixture f;
+
+  fixture_init(&f, 1U);
+  CHECK(run(&f, "PLAYALL") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(run(&f, "PLAYALL plex") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(run(&f, "ADDALL") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(run(&f, "ADDALL plex") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(run(&f, "PLAYALL missing album") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(result_is(&f, "unknown service: missing"));
+
+  CHECK(run(&f, "PLAYALL plex empty") == ZZPLAY_REXX_RC_WARN);
+  CHECK(f.playlist.count == 1U);
+  CHECK(run(&f, "PLAYALL plex album") == ZZPLAY_REXX_RC_OK);
+  CHECK(result_is(&f, "2"));
+  CHECK(f.playlist.count == 2U);
+  CHECK(strcmp(f.playlist.entries[0].path, "plex://one") == 0);
+  CHECK(strcmp(f.playlist.entries[0].title, "First") == 0);
+  CHECK(f.ctl.request == ZZPLAY_REQUEST_JUMP && f.ctl.jump_index == 0);
+  f.ctl.request = ZZPLAY_REQUEST_NONE;
+
+  CHECK(run(&f, "ADDALL plex album") == ZZPLAY_REXX_RC_OK);
+  CHECK(result_is(&f, "2"));
+  CHECK(f.playlist.count == 4U);
+  CHECK(strcmp(f.playlist.entries[3].path, "plex://two") == 0);
+  CHECK(strcmp(f.playlist.entries[3].title, "Second") == 0);
+  CHECK(f.ctl.request == ZZPLAY_REQUEST_NONE);
+  CHECK(run(&f, "ADDALL plex empty") == ZZPLAY_REXX_RC_WARN);
+  fixture_free(&f);
+}
+
 int main(void)
 {
   test_parsing();
@@ -384,6 +532,8 @@ int main(void)
   test_settings();
   test_playlist();
   test_program();
+  test_services();
+  test_service_collections();
   if (failures != 0) {
     fprintf(stderr, "zzplay_rexx_test: %d check(s) failed\n", failures);
     return 1;

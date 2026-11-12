@@ -34,6 +34,9 @@ static ZZPlayRexxHost rexx_host;
 static struct RexxMsg *rexx_held;
 static char rexx_line[ZZPLAY_REXX_LINE_MAX];
 static ZZPlayRexxReply rexx_reply;
+/* A module call may pump application input. Do not recursively take another
+ * command, or rerun the held command, from that pump. */
+static int rexx_running;
 
 static uint32_t rexx_add_path(void *user, ZZPlayPlaylist *list,
                               const char *path)
@@ -59,6 +62,21 @@ static int rexx_show(void *user)
 {
   (void)user;
   return zzplay_gui_show();
+}
+
+static int rexx_browse(void *user, char *reason, uint32_t reason_size)
+{
+  (void)user;
+  if (!zzplay_gui_is_open()) {
+    (void)snprintf(reason, reason_size,
+                   "player window is not open (Shell-only mode)");
+    return 0;
+  }
+  if (!zzplay_gui_browse()) {
+    (void)snprintf(reason, reason_size, "cannot open Browse window");
+    return 0;
+  }
+  return 1;
 }
 
 static void rexx_reply_rc(struct RexxMsg *msg, LONG rc, LONG rc2)
@@ -122,7 +140,9 @@ static int rexx_run_held(void)
   if (zzplay_controller_modal_ready(ctl) != ZZPLAY_MODAL_REXX) {
     return 0;
   }
+  rexx_running = 1;
   zzplay_rexx_execute(&rexx_host, rexx_line, &rexx_reply);
+  rexx_running = 0;
   zzplay_controller_end_modal(ctl);
   rexx_reply_msg(rexx_held, &rexx_reply);
   rexx_held = 0;
@@ -184,6 +204,11 @@ int zzplay_rexx_open(const ZZPlayRexxContext *context)
   rexx_host.save_playlist = rexx_save_playlist;
   rexx_host.quit_blocked = rexx_quit_blocked;
   rexx_host.show = rexx_show;
+  rexx_host.user = context->user;
+  rexx_host.browse = rexx_browse;
+  rexx_host.services = context->services;
+  rexx_host.search = context->search;
+  rexx_host.collection = context->collection;
   return 1;
 }
 
@@ -235,7 +260,7 @@ void zzplay_rexx_poll(void)
   struct RexxMsg *msg;
 
   /* Look at the queue, not the signal: the idle Wait() has cleared it. */
-  if (!rexx_port ||
+  if (rexx_running || !rexx_port ||
       (!rexx_held && rexx_port->mp_MsgList.lh_Head->ln_Succ == 0)) {
     return;
   }
@@ -253,7 +278,9 @@ void zzplay_rexx_poll(void)
       }
       continue;
     }
+    rexx_running = 1;
     zzplay_rexx_execute(&rexx_host, rexx_line, &rexx_reply);
+    rexx_running = 0;
     rexx_reply_msg(msg, &rexx_reply);
   }
 }

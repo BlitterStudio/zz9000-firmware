@@ -1910,6 +1910,16 @@ int zzplay_gui_show(void)
   return 1;
 }
 
+int zzplay_gui_browse(void)
+{
+  if (!player_screen || !gui_context || !gui_context->controller ||
+      !gui_context->playlist || !gui_context->prefs) {
+    return 0;
+  }
+  return zzplay_browse_open(player_screen, gui_context->controller,
+                            gui_context->playlist, gui_context->prefs);
+}
+
 uint32_t zzplay_gui_signal_mask(void)
 {
   uint32_t mask = 0U;
@@ -2364,8 +2374,7 @@ void zzplay_gui_poll(void)
                   open_url_window();
                   break;
                 case MID_BROWSE:
-                  zzplay_browse_open(player_screen, ctl, pl,
-                                     gui_context->prefs);
+                  (void)zzplay_gui_browse();
                   break;
                 case MID_ADD_FILES:
                   start_requester(ZZPLAY_MODAL_ADD_FILES);
