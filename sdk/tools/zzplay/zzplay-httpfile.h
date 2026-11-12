@@ -51,6 +51,17 @@ typedef struct ZZPlayHttpFile ZZPlayHttpFile;
 ZZPlayHttpFile *zzplay_httpfile_open(const ZZPlayHttpStreamOps *ops,
                                      const char *url, char *err,
                                      size_t err_size);
+/* Open and close through a one-slot per-process pool: a file closed and
+ * immediately reopened for the same URL (the probe's close, the engine's
+ * open) continues on the first connection and its cached bytes instead
+ * of paying for another handshake. Same contracts as the plain calls. */
+ZZPlayHttpFile *zzplay_httpfile_open_cached(const ZZPlayHttpStreamOps *ops,
+                                            const char *url, char *err,
+                                            size_t err_size);
+void zzplay_httpfile_close_cached(ZZPlayHttpFile *file);
+/* Close the file the pool still holds, if any: at the end of an item and
+ * before the process gives up its network context. */
+void zzplay_httpfile_drop_cached(void);
 void zzplay_httpfile_close(ZZPlayHttpFile *file);
 
 /* Same contracts as the zzplay_file_* calls of the same names. */

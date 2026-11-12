@@ -28,6 +28,7 @@
 #include "zzplay-gui.h"
 #include "zzplay-launch.h"
 #include "zzplay-media.h"
+#include "zzplay-net.h"
 #include "zzplay-mp3.h"
 #include "zzplay-options.h"
 #include "zzplay-path.h"
@@ -47,7 +48,6 @@
 #include "zzplay-provider.h"
 #include "zzplay-providers.h"
 #include "zzplay-host.h"
-
 
 #include <devices/timer.h>
 #include <exec/memory.h>
@@ -292,6 +292,9 @@ typedef struct ZZPlayApp {
   char item_title[ZZPLAY_PROVIDER_TEXT_MAX];
   /* The latest StreamTitle of the playing network stream, or "". */
   char stream_title[ZZPLAY_NOW_TEXT_MAX];
+  /* A network item has opened and is waiting for its first audio; the
+   * message line says "Starting playback..." until then. */
+  int starting_playback;
   /* Why a stream playlist gave nothing to play, for the message line. */
   char open_why[96];
   /* The fullscreen screen between two videos: the item that used it has
@@ -3308,6 +3311,12 @@ static void zzplay_app_pump(void *user)
   }
   zzplay_poll_input();
   zzplay_app_after_input(app);
+  /* The first position report means the item's audio has started:
+   * "Starting playback..." has done its job. */
+  if (app->starting_playback && app->ctl.now.elapsed_ms != 0U) {
+    app->starting_playback = 0;
+    zzplay_controller_set_message(&app->ctl, "");
+  }
 }
 
 /* Network waits run inside an item: keep the window live, and let any
@@ -3330,6 +3339,36 @@ static void zzplay_app_network_title(void *user, const char *text)
   (void)snprintf(app->stream_title, sizeof(app->stream_title), "%s", text);
   zzplay_tags_text_to_latin1(app->stream_title);
   zzplay_controller_set_title(&app->ctl, app->stream_title);
+}
+
+/* Name what a network open is waiting for, so the message line follows
+ * the stages instead of a blanket "Connecting...". The host table's
+ * transfers report here too, through the binding's stage hook. */
+static void zzplay_app_network_stage(void *user, int stage, const char *host)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+  char text[ZZPLAY_NOW_MESSAGE_MAX];
+
+  switch (stage) {
+    case ZZPLAY_NET_STAGE_LOOKUP:
+      (void)snprintf(text, sizeof(text), "Looking up %s...", host);
+      break;
+    case ZZPLAY_NET_STAGE_CONNECT:
+      (void)snprintf(text, sizeof(text), "Connecting to %s...", host);
+      break;
+    case ZZPLAY_NET_STAGE_SECURE:
+      (void)snprintf(text, sizeof(text), "Connecting securely...");
+      break;
+    case ZZPLAY_NET_STAGE_WAIT:
+      (void)snprintf(text, sizeof(text), "Waiting for %s...", host);
+      break;
+    default:
+      return;
+  }
+  zzplay_controller_set_message(&app->ctl, text);
+  /* Show it now: the next poll may be seconds away inside a lookup or
+   * a TLS handshake. */
+  zzplay_app_pump(app);
 }
 
 /* Open the current item. A .pls or .m3u URL lists a station's stream
@@ -3369,6 +3408,7 @@ static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
 
     err[0] = '\0';
     zzplay_host_bind(&binding, p->scheme, zzplay_app_network_poll, app);
+    binding.stage = zzplay_app_network_stage;
     ctx = p->open ? p->open(&binding.table, err, sizeof(err)) : NULL;
     if (!ctx) {
       (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
@@ -5072,17 +5112,22 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   memset(&tags, 0, sizeof(tags));
   memset(&probe, 0, sizeof(probe));
   /* Opening a network entry can take seconds (name lookup, TLS, a service
-   * module's request): say what is starting meanwhile. */
+   * module's request): the stage hook names each wait in the message
+   * line, and the window shows a busy pointer until the item is open. */
   network_entry = zzplay_http_is_url(app->entry_path) ||
                   zzplay_providers_uri_scheme(app->entry_path, NULL) != 0U;
+  app->starting_playback = 0;
   if (network_entry) {
     zzplay_controller_set_title(
         &app->ctl, app->playlist.entries[index].title[0] != '\0'
                        ? app->playlist.entries[index].title
                        : app->entry_path);
     zzplay_controller_set_message(&app->ctl, "Connecting...");
+    zzplay_app_pump(app);
+    zzplay_gui_set_busy(1);
   }
   file = zzplay_app_open_item(app);
+  zzplay_gui_set_busy(0);
   if (network_entry) {
     zzplay_controller_set_message(&app->ctl, "");
   }
@@ -5196,6 +5241,13 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     run.pump = zzplay_app_pump;
     run.pump_user = app;
     app->start_seek_ms = 0U;
+    if (network_entry) {
+      /* The open waits are over; the decoder still takes a moment before
+       * the first audio, and the message line says so until it arrives. */
+      app->starting_playback = 1;
+      zzplay_controller_set_message(&app->ctl, "Starting playback...");
+      zzplay_app_pump(app);
+    }
     outcome = engine(&run);
     /* Some failures (an animation the card cannot take, say) end the item
      * before it opens a window or reports anything: the screen the
@@ -5209,6 +5261,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   request = zzplay_controller_take_request(&app->ctl, &jump_index,
                                            &seek_ms);
   zzplay_controller_item_end(&app->ctl);
+  zzplay_file_end_network_item();
 
   switch (request) {
     case ZZPLAY_REQUEST_QUIT:
@@ -5459,7 +5512,8 @@ int main(int argc, char **argv)
                            app.prefs.shuffle);
     zzplay_controller_set_fullscreen(&app.ctl, app.prefs.fullscreen);
     zzplay_file_set_network_hooks(zzplay_app_network_poll,
-                                  zzplay_app_network_title, &app);
+                                  zzplay_app_network_title,
+                                  zzplay_app_network_stage, &app);
   }
   app.started_prefs = app.prefs;
   app.started_prefs.volume = app.ctl.volume;
@@ -5562,6 +5616,7 @@ int main(int argc, char **argv)
   /* Closing the window records its final position in prefs, so it must
    * happen before the session is saved. */
   zzplay_gui_close();
+  zzplay_file_end_network_item();
   zzplay_providers_unload_shared();
   if (app.player_mode) {
     app.prefs.volume = app.ctl.volume;

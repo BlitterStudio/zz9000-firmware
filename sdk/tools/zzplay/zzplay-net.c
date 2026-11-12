@@ -17,58 +17,18 @@
 #include <exec/types.h>
 #include <proto/exec.h>
 
-/* A bsdsocket.library base belongs to the process that opened it, socket
- * descriptors belong to that base, and AmiSSL must be given the base that
- * created the sockets it reads. Each process that uses the network
- * therefore gets one context holding its bsdsocket and AmiSSL bases,
- * shared by its connections and counted by them. The inline library stubs
- * look the bases up for the calling process. */
-typedef struct NetTask {
-  struct Task *task;           /* owner, or NULL for a free slot */
-  ULONG users;                 /* open connections */
-  struct Library *socket;
-  struct Library *master;      /* AmiSSL, from the first https:// hop */
-  struct Library *amissl;
-  struct Library *amissl_ext;
-  int amissl_errno;
-} NetTask;
-
-#define NET_TASKS 8
-static NetTask net_tasks[NET_TASKS];
-
-/* Only the owner writes a claimed slot; others only compare `task`. */
-static NetTask *net_task(void)
-{
-  struct Task *me = FindTask(NULL);
-  int i;
-
-  for (i = 0; i < NET_TASKS; i++) {
-    if (net_tasks[i].task == me) {
-      return &net_tasks[i];
-    }
-  }
-  return NULL;
-}
-
-static struct Library *net_socket_base(void)
-{
-  return net_task()->socket;
-}
-
-static struct Library *net_amissl_master_base(void)
-{
-  return net_task()->master;
-}
-
-static struct Library *net_amissl_base(void)
-{
-  return net_task()->amissl;
-}
-
-static struct Library *net_amissl_ext_base(void)
-{
-  return net_task()->amissl_ext;
-}
+/* The per-process network context (defined after the library headers, so
+ * it can hold an AmiSSL session): a bsdsocket.library base belongs to the
+ * process that opened it, socket descriptors belong to that base, and
+ * AmiSSL must be given the base that created the sockets it reads. Each
+ * process that uses the network therefore gets one context holding its
+ * bsdsocket and AmiSSL bases, shared by its connections and counted by
+ * them. The inline library stubs look the bases up for the calling
+ * process. */
+static struct Library *net_socket_base(void);
+static struct Library *net_amissl_master_base(void);
+static struct Library *net_amissl_base(void);
+static struct Library *net_amissl_ext_base(void);
 
 /* AmiSSL's call macros come first: its OpenSSL headers then skip the
  * plain prototypes. */
@@ -102,7 +62,63 @@ static struct Library *net_amissl_ext_base(void)
 #define NET_IO_BYTES 8192U
 #define NET_POLL_MICROS 100000UL
 #define NET_IDLE_POLLS 300 /* 30 s without progress */
+#define NET_SESSIONS 4U    /* remembered TLS sessions per process */
+#define NET_TASKS 8U       /* processes with a network context */
 #define NET_USER_AGENT "ZZPlay (AmigaOS; ZZ9000)"
+
+typedef struct NetTask {
+  struct Task *task;           /* owner, or NULL for a free slot */
+  ULONG users;                 /* open connections */
+  struct Library *socket;
+  struct Library *master;      /* AmiSSL, from the first https:// hop */
+  struct Library *amissl;
+  struct Library *amissl_ext;
+  int amissl_errno;
+  /* The last TLS session per host:port, offered on a later connection
+   * to the same host so it can resume instead of a full handshake.
+   * Sessions belong to the AmiSSL bases above and die with them. */
+  struct {
+    char host[ZZPLAY_HTTP_HOST_MAX];
+    uint16_t port;
+    SSL_SESSION *session;
+  } sessions[NET_SESSIONS];
+} NetTask;
+
+static NetTask net_tasks[NET_TASKS];
+
+/* Only the owner writes a claimed slot; others only compare `task`. */
+static NetTask *net_task(void)
+{
+  struct Task *me = FindTask(NULL);
+  int i;
+
+  for (i = 0; i < (int)NET_TASKS; i++) {
+    if (net_tasks[i].task == me) {
+      return &net_tasks[i];
+    }
+  }
+  return NULL;
+}
+
+static struct Library *net_socket_base(void)
+{
+  return net_task()->socket;
+}
+
+static struct Library *net_amissl_master_base(void)
+{
+  return net_task()->master;
+}
+
+static struct Library *net_amissl_base(void)
+{
+  return net_task()->amissl;
+}
+
+static struct Library *net_amissl_ext_base(void)
+{
+  return net_task()->amissl_ext;
+}
 
 struct ZZPlayNet {
   NetTask *task;
@@ -110,6 +126,7 @@ struct ZZPlayNet {
   SSL *ssl;
   LONG fd;
   ZZPlayNetKeepRunning keep_running;
+  ZZPlayNetStageHook stage;
   void *user;
   int cancelled;
   /* The server closed the connection before any response bytes. */
@@ -149,6 +166,14 @@ static void set_err(ZZPlayNet *net, const char *text)
 static void set_err_host(ZZPlayNet *net, const char *fmt, const char *host)
 {
   (void)snprintf(net->err, sizeof(net->err), fmt, host);
+}
+
+static void report_stage(ZZPlayNet *net, ZZPlayNetStage stage,
+                         const char *host)
+{
+  if (net->stage != NULL) {
+    net->stage(net->user, stage, host);
+  }
 }
 
 static int keep_running(ZZPlayNet *net)
@@ -254,7 +279,7 @@ static NetTask *net_task_acquire(ZZPlayNet *net)
 
   Forbid();
   t = net_task();
-  for (i = 0; t == NULL && i < NET_TASKS; i++) {
+  for (i = 0; t == NULL && i < (int)NET_TASKS; i++) {
     if (net_tasks[i].task == NULL) {
       t = &net_tasks[i];
       t->task = me;
@@ -295,6 +320,17 @@ static void net_task_release(NetTask *t)
 {
   if (t == NULL || --t->users != 0U) {
     return;
+  }
+  {
+    int i;
+
+    for (i = 0; i < (int)NET_SESSIONS; i++) {
+      if (t->sessions[i].session != NULL) {
+        SSL_SESSION_free(t->sessions[i].session);
+        t->sessions[i].session = NULL;
+        t->sessions[i].host[0] = '\0';
+      }
+    }
   }
   if (t->amissl != NULL) {
     CloseAmiSSL();
@@ -362,11 +398,99 @@ static int tls_open(ZZPlayNet *net)
   return ok;
 }
 
+/* The TLS session cache: the last session per host:port of this process,
+ * offered on a later connection so the handshake can resume instead of
+ * starting over. Sessions live as long as the process's AmiSSL bases. */
+static int host_equal(const char *a, const char *b)
+{
+  size_t i;
+
+  for (i = 0U; a[i] != '\0' && b[i] != '\0'; i++) {
+    char ca = a[i];
+    char cb = b[i];
+
+    if (ca >= 'A' && ca <= 'Z') {
+      ca = (char)(ca - 'A' + 'a');
+    }
+    if (cb >= 'A' && cb <= 'Z') {
+      cb = (char)(cb - 'A' + 'a');
+    }
+    if (ca != cb) {
+      return 0;
+    }
+  }
+  return a[i] == '\0' && b[i] == '\0';
+}
+
+static SSL_SESSION *session_cache_get(NetTask *t, const char *host,
+                                      uint16_t port)
+{
+  int i;
+
+  for (i = 0; i < (int)NET_SESSIONS; i++) {
+    if (t->sessions[i].session != NULL &&
+        t->sessions[i].port == port &&
+        host_equal(t->sessions[i].host, host)) {
+      return t->sessions[i].session;
+    }
+  }
+  return NULL;
+}
+
+static void session_cache_put(NetTask *t, const char *host, uint16_t port,
+                              SSL_SESSION *session)
+{
+  int i;
+  int slot = -1;
+
+  for (i = 0; i < (int)NET_SESSIONS; i++) {
+    if (t->sessions[i].session != NULL) {
+      if (t->sessions[i].port == port &&
+          host_equal(t->sessions[i].host, host)) {
+        slot = i; /* replace the entry for this host:port */
+        break;
+      }
+    } else if (slot < 0) {
+      slot = i; /* first free slot */
+    }
+  }
+  if (slot < 0) {
+    /* Full: recycle the oldest entry (index 0). */
+    slot = 0;
+  }
+  if (t->sessions[slot].session != NULL) {
+    SSL_SESSION_free(t->sessions[slot].session);
+  }
+  memset(t->sessions[slot].host, 0, sizeof(t->sessions[slot].host));
+  strncpy(t->sessions[slot].host, host, sizeof(t->sessions[slot].host) - 1U);
+  t->sessions[slot].port = port;
+  t->sessions[slot].session = session;
+}
+
+static void session_cache_drop(NetTask *t, const char *host, uint16_t port)
+{
+  int i;
+
+  for (i = 0; i < (int)NET_SESSIONS; i++) {
+    if (t->sessions[i].session != NULL &&
+        t->sessions[i].port == port &&
+        host_equal(t->sessions[i].host, host)) {
+      SSL_SESSION_free(t->sessions[i].session);
+      t->sessions[i].session = NULL;
+      t->sessions[i].host[0] = '\0';
+      return;
+    }
+  }
+}
+
 /* TLS 1.2 or later over the connected socket, with the certificate and
- * host name verified against AmiSSL's certificate store. */
-static int tls_connect(ZZPlayNet *net, const char *host)
+ * host name verified against AmiSSL's certificate store. A remembered
+ * session for this host:port is offered first; the server falls back to
+ * a full handshake when it no longer accepts it. */
+static int tls_connect(ZZPlayNet *net, const ZZPlayUrl *url)
 {
   int rc;
+  SSL_SESSION *resume;
 
   net->ctx = SSL_CTX_new(TLS_client_method());
   if (net->ctx == NULL) {
@@ -391,14 +515,31 @@ static int tls_connect(ZZPlayNet *net, const char *host)
   }
   net->ssl = SSL_new(net->ctx);
   if (net->ssl == NULL || SSL_set_fd(net->ssl, (int)net->fd) != 1 ||
-      SSL_set_tlsext_host_name(net->ssl, host) != 1 ||
-      SSL_set1_host(net->ssl, host) != 1) {
+      SSL_set_tlsext_host_name(net->ssl, url->host) != 1 ||
+      SSL_set1_host(net->ssl, url->host) != 1) {
+    ssl_err(net, "TLS setup failed");
+    return 0;
+  }
+  resume = session_cache_get(net->task, url->host, (uint16_t)url->port);
+  if (resume != NULL && SSL_set_session(net->ssl, resume) != 1) {
     ssl_err(net, "TLS setup failed");
     return 0;
   }
   while ((rc = SSL_connect(net->ssl)) != 1) {
     if (!ssl_retry(net, rc, "Secure connection failed")) {
+      if (resume != NULL) {
+        /* The remembered session did not work: a later connection to
+         * this host must do the full handshake again. */
+        session_cache_drop(net->task, url->host, (uint16_t)url->port);
+      }
       return 0;
+    }
+  }
+  {
+    SSL_SESSION *done = SSL_get1_session(net->ssl);
+
+    if (done != NULL) {
+      session_cache_put(net->task, url->host, (uint16_t)url->port, done);
     }
   }
   return 1;
@@ -424,8 +565,10 @@ static int connect_to(ZZPlayNet *net, const ZZPlayUrl *url)
   if (addr != (ULONG)INADDR_NONE) {
     sa.sin_addr.s_addr = addr;
   } else {
-    struct hostent *he = gethostbyname((STRPTR)url->host);
+    struct hostent *he;
 
+    report_stage(net, ZZPLAY_NET_STAGE_LOOKUP, url->host);
+    he = gethostbyname((STRPTR)url->host);
     if (he == NULL || he->h_addrtype != AF_INET ||
         he->h_addr_list[0] == NULL) {
       set_err_host(net, "Cannot find the server %s", url->host);
@@ -437,6 +580,7 @@ static int connect_to(ZZPlayNet *net, const ZZPlayUrl *url)
     return 0;
   }
 
+  report_stage(net, ZZPLAY_NET_STAGE_CONNECT, url->host);
   net->fd = socket(AF_INET, SOCK_STREAM, 0);
   if (net->fd < 0) {
     set_err(net, "Cannot create a network socket");
@@ -625,6 +769,7 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
     goto fail;
   }
   net->keep_running = req->keep_running;
+  net->stage = req->stage;
   net->user = req->user;
   if (net_task_acquire(net) == NULL) {
     goto fail;
@@ -649,9 +794,16 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
       goto fail;
     }
     net->closed_early = 0;
-    if (!connect_to(net, &net->at) ||
-        (net->at.tls && !tls_connect(net, net->at.host)) ||
-        !send_all(net, net->head, len)) {
+    if (!connect_to(net, &net->at)) {
+      goto fail;
+    }
+    if (net->at.tls) {
+      report_stage(net, ZZPLAY_NET_STAGE_SECURE, net->at.host);
+      if (!tls_connect(net, &net->at)) {
+        goto fail;
+      }
+    }
+    if (!send_all(net, net->head, len)) {
       goto fail;
     }
     if (req->body != NULL && req->body_len > 0U) {
@@ -659,6 +811,7 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
         goto fail;
       }
     }
+    report_stage(net, ZZPLAY_NET_STAGE_WAIT, net->at.host);
     if (!read_head(net, head)) {
       /* laut.fm's stream servers close a TLS 1.3 connection from AmiSSL
        * without answering, while TLS 1.2 to the same server works and
@@ -672,6 +825,7 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
       }
       goto fail;
     }
+    report_stage(net, ZZPLAY_NET_STAGE_BODY, net->at.host);
     if (is_redirect(head->status) && head->location[0] != '\0') {
       if (redirects == NET_MAX_REDIRECTS) {
         set_err(net, "Too many redirects");

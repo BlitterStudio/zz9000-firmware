@@ -1952,6 +1952,23 @@ int zzplay_gui_report(const char *message)
   return 1;
 }
 
+/* Busy pointer on the player window while a network entry opens. V39+
+ * only; on older Intuition the request is skipped silently. */
+void zzplay_gui_set_busy(int busy)
+{
+  struct TagItem tags[2];
+
+  if (!player_win || !IntuitionBase ||
+      IntuitionBase->LibNode.lib_Version < 39) {
+    return;
+  }
+  tags[0].ti_Tag = WA_BusyPointer;
+  tags[0].ti_Data = busy ? TRUE : FALSE;
+  tags[1].ti_Tag = TAG_DONE;
+  tags[1].ti_Data = 0;
+  SetWindowPointerA(player_win, tags);
+}
+
 /* True when the port has a queued message. Reads the list directly: the
  * port's signal bit is not a reliable indicator, because the caller's
  * Wait() has already cleared it by the time we look. */

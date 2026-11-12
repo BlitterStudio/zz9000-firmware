@@ -77,4 +77,7 @@ int zzplay_gui_screen_free(struct Window *window);
  * when it is open. Returns 0 when there is no window to show it in. */
 int zzplay_gui_report(const char *message);
 
+/* Show (1) or clear (0) the busy pointer on the player window while an
+ * entry opens. Needs Intuition V39; older versions skip it silently. */
+void zzplay_gui_set_busy(int busy);
 #endif /* ZZPLAY_GUI_H */

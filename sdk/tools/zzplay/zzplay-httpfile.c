@@ -263,6 +263,54 @@ void zzplay_httpfile_close(ZZPlayHttpFile *file)
   zzplay_free(file);
 }
 
+/* A closed file is remembered rather than torn down, so the file an
+ * engine reopens right after the probe continues on the first
+ * connection instead of paying for another (a full TLS handshake on
+ * https). One slot per process: the application opens network paths
+ * from one process only, and the file keeps its stream only while it
+ * can still serve reads without a new connection. */
+static ZZPlayHttpFile *parked_file;
+
+void zzplay_httpfile_drop_cached(void)
+{
+  if (parked_file != NULL) {
+    zzplay_httpfile_close(parked_file);
+    parked_file = NULL;
+  }
+}
+
+ZZPlayHttpFile *zzplay_httpfile_open_cached(const ZZPlayHttpStreamOps *ops,
+                                            const char *url, char *err,
+                                            size_t err_size)
+{
+  ZZPlayHttpFile *f;
+
+  if (parked_file != NULL && url != NULL &&
+      strcmp(parked_file->url, url) == 0) {
+    f = parked_file;
+    parked_file = NULL;
+    f->error = 0;
+    f->err[0] = '\0';
+    f->eof = 0;
+    f->drops = 0;
+    f->pos = 0U;
+    return f;
+  }
+  zzplay_httpfile_drop_cached();
+  return zzplay_httpfile_open(ops, url, err, err_size);
+}
+
+void zzplay_httpfile_close_cached(ZZPlayHttpFile *file)
+{
+  if (file != NULL && file->stream != NULL && !file->error &&
+      (file->seekable || file->conn_pos <= file->head_len)) {
+    zzplay_httpfile_drop_cached();
+    parked_file = file;
+    return;
+  }
+  zzplay_httpfile_close(file);
+}
+
 /* Copy cached bytes at file->pos. Returns how many were copied. */
 static size_t copy_cached(ZZPlayHttpFile *f, uint8_t *out, size_t want)
 {

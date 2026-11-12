@@ -381,7 +381,11 @@ int zzplay_tags_read(ZZPlayFile *file, ZZPlayTags *tags)
     }
   }
 
-  if (file_len >= 128) {
+  /* An ID3v1 trailer costs a network source a second connection to the
+   * far end of the file. Skip it when the ID3v2 tag already gave a
+   * title; a local file still reads it. */
+  if (file_len >= 128 &&
+      !(zzplay_file_is_network(file) && tags->title[0] != '\0')) {
     uint8_t v1_buf[128];
     if (zzplay_file_seek(file, file_len - 128L, ZZPLAY_FILE_BEGIN)) {
       if (zzplay_file_read(file, v1_buf, 128U) == 128U) {

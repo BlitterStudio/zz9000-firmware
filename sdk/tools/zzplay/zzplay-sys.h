@@ -59,6 +59,11 @@ void zzplay_file_set_network_hooks(int (*poll)(void *user),
                                                  const char *host),
                                    void *user);
 
+/* A network file closed by the probe stays open for the engine's reopen of
+ * the same path. Call this when the item ends and before exit so that
+ * connection does not outlive it. */
+void zzplay_file_end_network_item(void);
+
 /* Read a complete file no larger than max_len. A successful read returns an
  * owned buffer (including for an empty file) which must be released with
  * zzplay_free(). */

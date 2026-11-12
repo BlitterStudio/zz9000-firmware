@@ -437,6 +437,124 @@ static int test_failure(void)
   return 0;
 }
 
+/* The open path for one network track: the byte accesses zzplay.c makes
+ * between choosing the entry and the engine's first reads - the tag
+ * reader's length seek and ID3v2 read (its title is known, so the ID3v1
+ * trailer at the far end is skipped), the file-size seek, the probe's
+ * reads, then the close and the engine's reopen. Open, tags and probe
+ * share the first connection, and so does the engine start; only a real
+ * seek pays for a new ranged request. */
+static int test_open_path_connections(void)
+{
+  static uint8_t got[16384];
+  static const char title[] = "Net Title";
+  uint8_t orig[30];
+  ZZPlayHttpStreamOps ops;
+  Server s;
+  ZZPlayHttpFile *f;
+  char err[64];
+  const uint32_t tag_total = 30U;
+  int rc = 0;
+  size_t n;
+  size_t r;
+
+  memcpy(orig, resource, sizeof(orig));
+  /* ID3v2.3 with one TIT2 frame: 10-byte tag header, 10-byte frame
+   * header, encoding byte, 9 characters of title. */
+  memset(resource, 0, tag_total);
+  resource[0] = 'I';
+  resource[1] = 'D';
+  resource[2] = '3';
+  resource[3] = 3;
+  resource[9] = 20;   /* synchsafe body size */
+  memcpy(resource + 10, "TIT2", 4);
+  resource[17] = 10;  /* frame size */
+  memcpy(resource + 19, title, sizeof(title) - 1U);
+
+  server_defaults(&s);
+  s.size = RESOURCE_BYTES;
+  ops.open = fake_open;
+  ops.read = fake_read;
+  ops.error = fake_error;
+  ops.close = fake_close;
+  ops.pause = fake_pause;
+  ops.ctx = &s;
+  f = zzplay_httpfile_open_cached(&ops, "http://h/x", err, sizeof(err));
+  if (f == NULL || s.opens != 1) { rc = 1; goto done; }
+  /* zzplay_tags_read. */
+  if (!zzplay_httpfile_seek(f, 0L, ZZPLAY_FILE_END) ||
+      zzplay_httpfile_tell(f) != (long)RESOURCE_BYTES ||
+      !zzplay_httpfile_seek(f, 0L, ZZPLAY_FILE_BEGIN)) {
+    rc = 2;
+    goto done;
+  }
+  if (zzplay_httpfile_read(f, got, 10U) != 10U) { rc = 3; goto done; }
+  if (!zzplay_httpfile_seek(f, 0L, ZZPLAY_FILE_BEGIN) ||
+      zzplay_httpfile_read(f, got, tag_total) != tag_total ||
+      memcmp(got, resource, tag_total) != 0) {
+    rc = 4;
+    goto done;
+  }
+  /* zzplay.c: the file-size seek. */
+  if (!zzplay_httpfile_seek(f, 0L, ZZPLAY_FILE_END) ||
+      zzplay_httpfile_tell(f) != (long)RESOURCE_BYTES ||
+      !zzplay_httpfile_seek(f, 0L, ZZPLAY_FILE_BEGIN)) {
+    rc = 5;
+    goto done;
+  }
+  /* zzplay_probe_media_file. */
+  if (zzplay_httpfile_read(f, got, 4096U) != 4096U ||
+      memcmp(got, resource, 4096U) != 0) {
+    rc = 6;
+    goto done;
+  }
+  if (!zzplay_httpfile_seek(f, 0L, ZZPLAY_FILE_BEGIN) ||
+      zzplay_httpfile_read(f, got, 10U) != 10U) {
+    rc = 7;
+    goto done;
+  }
+  if (!zzplay_httpfile_seek(f, (long)tag_total, ZZPLAY_FILE_BEGIN) ||
+      zzplay_httpfile_read(f, got, 4096U) != 4096U ||
+      memcmp(got, resource + tag_total, 4096U) != 0) {
+    rc = 8;
+    goto done;
+  }
+  if (!zzplay_httpfile_seek(f, 0L, ZZPLAY_FILE_BEGIN)) { rc = 9; goto done; }
+  if (s.opens != 1) { rc = 10; goto done; }
+  /* The engine reopens the path: the pool hands back the same file. */
+  zzplay_httpfile_close_cached(f);
+  f = zzplay_httpfile_open_cached(&ops, "http://h/x", err, sizeof(err));
+  if (f == NULL || !zzplay_httpfile_seekable(f)) { rc = 11; goto done; }
+  if (!zzplay_httpfile_seek(f, (long)tag_total, ZZPLAY_FILE_BEGIN)) {
+    rc = 12;
+    goto done;
+  }
+  n = 0U;
+  while (n < sizeof(got)) {
+    r = zzplay_httpfile_read(f, got + n, sizeof(got) - n);
+    if (r == 0U) break;
+    n += r;
+  }
+  if (n != sizeof(got) || memcmp(got, resource + tag_total, n) != 0) {
+    rc = 13;
+    goto done;
+  }
+  if (s.opens != 1) { rc = 14; goto done; }
+  /* A real seek still makes a new ranged request. */
+  if (!zzplay_httpfile_seek(f, 150000L, ZZPLAY_FILE_BEGIN) ||
+      zzplay_httpfile_read(f, got, 200U) != 200U ||
+      memcmp(got, resource + 150000U, 200U) != 0) {
+    rc = 15;
+    goto done;
+  }
+  if (s.opens != 2) rc = 16;
+
+done:
+  zzplay_httpfile_close(f);
+  memcpy(resource, orig, sizeof(orig));
+  return rc;
+}
+
 int main(void)
 {
   uint32_t i;
@@ -459,6 +577,8 @@ int main(void)
   if (rc != 0) { printf("live_reconnect %d\n", rc); return 130 + rc; }
   rc = test_failure();
   if (rc != 0) { printf("failure %d\n", rc); return 110 + rc; }
+  rc = test_open_path_connections();
+  if (rc != 0) { printf("open_path_connections %d\n", rc); return 150 + rc; }
   printf("zzplay_httpfile_test: all checks passed\n");
   return 0;
 }

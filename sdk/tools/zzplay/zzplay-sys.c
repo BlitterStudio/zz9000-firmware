@@ -25,17 +25,26 @@ struct ZZPlayFile {
 
 static int (*network_poll)(void *user);
 static void (*network_title)(void *user, const char *text);
+static void (*network_stage)(void *user, int stage, const char *host);
 static void *network_user;
 static char open_error[ZZPLAY_NET_ERROR_MAX];
 
 void zzplay_file_set_network_hooks(int (*poll)(void *user),
                                    void (*title)(void *user,
                                                  const char *text),
+                                   void (*stage)(void *user, int stage,
+                                                 const char *host),
                                    void *user)
 {
   network_poll = poll;
   network_title = title;
+  network_stage = stage;
   network_user = user;
+}
+
+void zzplay_file_end_network_item(void)
+{
+  zzplay_httpfile_drop_cached();
 }
 
 const char *zzplay_file_open_error(void)
@@ -47,6 +56,14 @@ static int network_keep_running(void *user)
 {
   (void)user;
   return network_poll == 0 || network_poll(network_user);
+}
+
+static void network_stage_forward(void *user, ZZPlayNetStage stage,
+                                  const char *host)
+{
+  if (network_stage != NULL) {
+    network_stage(user, (int)stage, host);
+  }
 }
 
 static void *network_open(void *ctx, const char *url, int has_range,
@@ -62,6 +79,8 @@ static void *network_open(void *ctx, const char *url, int has_range,
   req.range_from = from;
   req.icy = 1;
   req.keep_running = network_keep_running;
+  req.stage = network_stage != NULL ? network_stage_forward : NULL;
+  req.user = network_user;
   return zzplay_net_get(&req, head, err, err_size, 0);
 }
 
@@ -135,8 +154,8 @@ ZZPlayFile *zzplay_file_open(const char *path, int writable)
   open_error[0] = '\0';
   if (zzplay_http_is_url(path)) {
     if (!writable) {
-      file->http = zzplay_httpfile_open(&network_ops, path, open_error,
-                                        sizeof(open_error));
+      file->http = zzplay_httpfile_open_cached(&network_ops, path, open_error,
+                                               sizeof(open_error));
     }
     if (!file->http) {
       zzplay_free(file);
@@ -161,7 +180,7 @@ int zzplay_file_close(ZZPlayFile *file)
     return 0;
   }
   if (file->http) {
-    zzplay_httpfile_close(file->http);
+    zzplay_httpfile_close_cached(file->http);
     ok = 1;
   } else {
     ok = Close(file->handle) != 0;
@@ -466,11 +485,18 @@ const char *zzplay_file_open_error(void)
 void zzplay_file_set_network_hooks(int (*poll)(void *user),
                                    void (*title)(void *user,
                                                  const char *text),
+                                   void (*stage)(void *user, int stage,
+                                                 const char *host),
                                    void *user)
 {
   (void)poll;
   (void)title;
+  (void)stage;
   (void)user;
+}
+
+void zzplay_file_end_network_item(void)
+{
 }
 
 
