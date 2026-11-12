@@ -90,6 +90,8 @@ typedef struct ZZPlayBrowseFrame {
   char title[ZZPLAY_PROVIDER_TEXT_MAX];
   int is_search;
   char search_query[ZZPLAY_PROVIDER_TEXT_MAX];
+  /* 1 when the folder this frame returns to is a playable collection. */
+  int folder_is_collection;
   int32_t selection;
   uint32_t scroll;
   ZZPlayBrowseItem *items;
@@ -111,6 +113,8 @@ typedef struct ZZPlayBrowseCacheEntry {
   char node_id[ZZPLAY_PROVIDER_TEXT_MAX];  /* folder when not a search */
   char query[ZZPLAY_PROVIDER_TEXT_MAX];    /* used when is_search */
   int is_search;
+  /* 1 when a remembered folder is a playable collection. */
+  int folder_is_collection;
   uint32_t start;
   ZZPlayBrowseItem *items;
   uint32_t item_count;
@@ -130,6 +134,11 @@ typedef struct ZZPlayBrowseModel {
   char current_title[ZZPLAY_PROVIDER_TEXT_MAX];
   int is_search;
   char search_query[ZZPLAY_PROVIDER_TEXT_MAX];
+
+  /* 1 when the folder being shown is one the module marks playable, so
+   * Play all / Add all work on it. Never set for a search or the top
+   * level. */
+  int folder_is_collection;
 
   /* Items */
   ZZPlayBrowseItem *items;
@@ -201,6 +210,19 @@ ZZPlayBrowseTarget zzplay_browse_model_play_target(const ZZPlayBrowseModel *mode
  * capacity for Play). Returns 0 when the selection is no collection. */
 int zzplay_browse_model_gather(ZZPlayBrowseModel *model, uint32_t limit,
                                ZZPlayBrowseRequest *out_req);
+
+/* Play all / Add all act on the folder being shown: true only when that
+ * folder is a collection the module marks playable and no request is
+ * running. */
+int zzplay_browse_model_can_play_all(const ZZPlayBrowseModel *model);
+int zzplay_browse_model_can_add_all(const ZZPlayBrowseModel *model);
+
+/* Start gathering the folder being shown into a GATHER request that asks
+ * for at most `limit` items (the playlist's free space for Add all, its
+ * capacity for Play all). Returns 0 when the shown folder is no
+ * collection or a request is running. */
+int zzplay_browse_model_gather_shown(ZZPlayBrowseModel *model, uint32_t limit,
+                                     ZZPlayBrowseRequest *out_req);
 int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider);
 int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,

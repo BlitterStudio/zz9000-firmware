@@ -219,12 +219,12 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
   h:mm:ss). The columns follow the window width: the length column keeps
   its size and the title gets about 55 percent of the rest; text that
   does not fit is cut. The markers mean: an outline folder for a folder,
-  the folder with a filled play triangle for a collection that **Play**
-  or **Add** can use whole (such as a Plex album, artist or playlist), a
-  note for a track and a mast with waves for a station. Selected rows
-  use the Workbench selection colors, as other lists do. Older systems
-  (before AmigaOS 3.0) keep the simple one-line rows, with "[+]" before a
-  folder's title.
+  the folder with a filled play triangle for a collection, one **Play
+  all** or **Add all** works on whole (such as a Plex album, artist or
+  playlist), a note for a track and a mast with waves for a station.
+  Selected rows use the Workbench selection colors, as other lists do.
+  Older systems (before AmigaOS 3.0) keep the simple one-line rows, with
+  "[+]" before a folder's title.
 - Every list and search ZZPlay finishes is remembered until ZZPlay quits,
   at most 16 of them (the one unused for the longest time is dropped).
   Opening a remembered folder or repeating a remembered search shows it
@@ -244,15 +244,17 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
 - Double-click a track or station to add it to the playlist and play it.
   **Play** does the same for the selected entry, **Add** only adds it.
   Entries the service marks as unplayable cannot be played or added.
-- A folder the service marks playable, such as a Plex album, artist or
-  playlist, can also be played whole: **Play** replaces the playlist with
-  its tracks and starts the first, **Add** appends them. ZZPlay lists the
-  folder, and each playable folder inside it, while the status line
-  counts what it found ("Adding 37 tracks..."). **Stop** cancels and
-  leaves the playlist unchanged. At most as many tracks are added as the
-  playlist holds (4,096); the status line says when the collection held
-  more, or when the playlist had no room for all of them. Double-clicking
-  such a folder still opens it.
+- **Play all** plays the folder being shown as a whole, and **Add all**
+  appends it. The buttons are enabled when the service marks the shown
+  folder playable, such as a Plex album, artist or playlist; folders open
+  on a single click, so this is how a collection is played without
+  entering and selecting it. **Play all** replaces the playlist with the
+  folder's tracks and starts the first. ZZPlay lists the folder, and each
+  playable folder inside it, while the status line counts what it found
+  ("Adding 37 tracks..."). **Stop** cancels and leaves the playlist
+  unchanged. At most as many tracks are added as the playlist holds
+  (4,096); the status line says when the collection held more, or when
+  the playlist had no room for all of them.
 - **Favourite** adds the selected entry to the service's favourites, or
   removes it when it is already one. The button is disabled for services
   without favourites.

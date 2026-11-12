@@ -89,7 +89,8 @@ static void cache_save_view_state(const ZZPlayBrowseModel *model)
 static void cache_put(ZZPlayBrowseModel *model, const char *scheme,
                       int is_search, const char *node_or_query,
                       uint32_t start, const ZZPlayBrowseItem *items,
-                      uint32_t count, int32_t selection, uint32_t scroll)
+                      uint32_t count, int32_t selection, uint32_t scroll,
+                      int folder_is_collection)
 {
   ZZPlayBrowseCacheEntry *e = cache_find(model, scheme, is_search,
                                          node_or_query, start);
@@ -133,6 +134,7 @@ static void cache_put(ZZPlayBrowseModel *model, const char *scheme,
     copy_string(e->node_id, sizeof(e->node_id), node_or_query);
   }
   e->is_search = is_search ? 1 : 0;
+  e->folder_is_collection = folder_is_collection ? 1 : 0;
   e->start = start;
   e->items = copy;
   e->item_count = count;
@@ -169,6 +171,7 @@ static int cache_restore(ZZPlayBrowseModel *model, const char *scheme,
   model->item_capacity = e->item_count;
   model->selection = e->selection;
   model->scroll = e->scroll;
+  model->folder_is_collection = e->folder_is_collection;
   model->total = 0U;
   model->has_total = 0;
   model->has_more = 0;
@@ -255,6 +258,7 @@ int zzplay_browse_model_select_service(ZZPlayBrowseModel *model, uint32_t index,
   model->current_title[0] = '\0';
   model->is_search = 0;
   model->search_query[0] = '\0';
+  model->folder_is_collection = 0;
   model->selection = -1;
   model->scroll = 0U;
   model->total = 0U;
@@ -330,6 +334,7 @@ int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
   frame->total = model->total;
   frame->has_total = model->has_total;
   frame->has_more = model->has_more;
+  frame->folder_is_collection = model->folder_is_collection;
   model->stack_depth++;
 
   /* Adopt new folder */
@@ -337,6 +342,9 @@ int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
   copy_string(model->current_title, sizeof(model->current_title), item->title);
   model->is_search = 0;
   model->search_query[0] = '\0';
+  /* Play all / Add all work on this folder when the module marks it
+   * playable. */
+  model->folder_is_collection = item->playable != 0U ? 1 : 0;
   model->items = NULL;
   model->item_count = 0U;
   model->item_capacity = 0U;
@@ -406,6 +414,7 @@ int zzplay_browse_model_back(ZZPlayBrowseModel *model,
   model->total = frame->total;
   model->has_total = frame->has_total;
   model->has_more = frame->has_more;
+  model->folder_is_collection = frame->folder_is_collection;
   model->selection = frame->selection;
   model->scroll = frame->scroll;
   model->busy = 0;
@@ -447,6 +456,7 @@ int zzplay_browse_model_search(ZZPlayBrowseModel *model, const char *query,
     frame->total = model->total;
     frame->has_total = model->has_total;
     frame->has_more = model->has_more;
+    frame->folder_is_collection = model->folder_is_collection;
     model->stack_depth++;
     model->items = NULL;
     model->item_count = 0U;
@@ -459,6 +469,8 @@ int zzplay_browse_model_search(ZZPlayBrowseModel *model, const char *query,
   }
 
   model->is_search = 1;
+  /* Search results are not a collection. */
+  model->folder_is_collection = 0;
   copy_string(model->search_query, sizeof(model->search_query), query);
   model->selection = -1;
   model->scroll = 0U;
@@ -559,6 +571,48 @@ int zzplay_browse_model_can_play(const ZZPlayBrowseModel *model)
 int zzplay_browse_model_can_add(const ZZPlayBrowseModel *model)
 {
   return zzplay_browse_model_can_play(model);
+}
+
+int zzplay_browse_model_can_play_all(const ZZPlayBrowseModel *model)
+{
+  return (model && model->folder_is_collection && !model->busy &&
+          model->current_service >= 0)
+             ? 1
+             : 0;
+}
+
+int zzplay_browse_model_can_add_all(const ZZPlayBrowseModel *model)
+{
+  return zzplay_browse_model_can_play_all(model);
+}
+
+int zzplay_browse_model_gather_shown(ZZPlayBrowseModel *model, uint32_t limit,
+                                     ZZPlayBrowseRequest *out_req)
+{
+  const ZZPlayBrowseServiceEntry *svc;
+
+  if (!model || !model->folder_is_collection || model->busy ||
+      model->current_service < 0) {
+    return 0;
+  }
+  svc = zzplay_browse_model_current_service(model);
+  if (!svc) {
+    return 0;
+  }
+  model->generation++;
+  model->busy = 1;
+  model->status_message[0] = '\0';
+
+  if (out_req) {
+    memset(out_req, 0, sizeof(*out_req));
+    out_req->kind = ZZPLAY_BROWSE_REQ_GATHER;
+    out_req->generation = model->generation;
+    copy_string(out_req->scheme, sizeof(out_req->scheme), svc->scheme);
+    copy_string(out_req->node_id, sizeof(out_req->node_id),
+                model->current_node);
+    out_req->count = limit;
+  }
+  return 1;
 }
 
 int zzplay_browse_model_gather(ZZPlayBrowseModel *model, uint32_t limit,
@@ -852,7 +906,8 @@ int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
     if (!reply->is_partial && reply->start == 0U && reply->items != NULL) {
       cache_put(model, model->services[model->current_service].scheme, 0,
                 model->current_node, 0U, model->items, model->item_count,
-                model->selection, model->scroll);
+                model->selection, model->scroll,
+                model->folder_is_collection);
     }
     return 1;
   }
@@ -865,7 +920,7 @@ int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
       model->has_more = 0;
       cache_put(model, model->services[model->current_service].scheme, 1,
                 model->search_query, 0U, model->items, model->item_count,
-                model->selection, model->scroll);
+                model->selection, model->scroll, 0);
     }
     return 1;
   }

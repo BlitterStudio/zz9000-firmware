@@ -43,6 +43,8 @@ enum BrowseGadgetID {
   BGID_RELOAD,
   BGID_PLAY,
   BGID_ADD,
+  BGID_PLAY_ALL,
+  BGID_ADD_ALL,
   BGID_FAVOURITE,
   BGID_STOP,
   BGID_SETTINGS,
@@ -66,6 +68,8 @@ static struct Gadget *back_gad = NULL;
 static struct Gadget *reload_gad = NULL;
 static struct Gadget *play_gad = NULL;
 static struct Gadget *add_gad = NULL;
+static struct Gadget *play_all_gad = NULL;
+static struct Gadget *add_all_gad = NULL;
 static struct Gadget *fav_gad = NULL;
 static struct Gadget *stop_gad = NULL;
 static struct Gadget *settings_btn_gad = NULL;
@@ -511,6 +515,18 @@ static void update_buttons(void)
                       GA_Disabled, (ULONG)!zzplay_browse_model_can_add(&browse_model),
                       TAG_DONE);
   }
+  if (play_all_gad) {
+    GT_SetGadgetAttrs(play_all_gad, browse_win, NULL,
+                      GA_Disabled,
+                      (ULONG)!zzplay_browse_model_can_play_all(&browse_model),
+                      TAG_DONE);
+  }
+  if (add_all_gad) {
+    GT_SetGadgetAttrs(add_all_gad, browse_win, NULL,
+                      GA_Disabled,
+                      (ULONG)!zzplay_browse_model_can_add_all(&browse_model),
+                      TAG_DONE);
+  }
   if (fav_gad) {
     GT_SetGadgetAttrs(fav_gad, browse_win, NULL,
                       GA_Disabled, (ULONG)!zzplay_browse_model_can_favourite(&browse_model),
@@ -941,7 +957,8 @@ static void __attribute__((noinline)) poll_settings(void)
 static int browse_button_min_width(void)
 {
   static const char *const labels[] = {
-    "Back", "Reload", "Play", "Add", "Favourite", "Stop", "Settings"
+    "Back", "Reload", "Play", "Add", "Play all", "Add all", "Favourite",
+    "Stop", "Settings"
   };
   int btn_w = 0;
   uint32_t i;
@@ -1059,7 +1076,7 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
 
   /* The list takes all height between the search row and the button
    * row, and the full width. GadTools sizes it to whole rows. */
-  list_h = win_h - cur_y - (2 * BROWSE_SPACING + 2 * btn_h + BROWSE_MARGIN);
+  list_h = win_h - cur_y - (2 * BROWSE_SPACING + 2 * btn_h);
   if (list_h < 2 * font_h + 4) {
     list_h = 2 * font_h + 4;
   }
@@ -1094,9 +1111,9 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
 
   cur_y += list_h + BROWSE_SPACING;
 
-  /* Buttons: Back, Reload, Play, Add, Favourite, Stop, Settings,
-   * spread across the width. */
-  btn_w = (content_w - 6 * BROWSE_SPACING) / 7;
+  /* Buttons: Back, Reload, Play, Add, Play all, Add all, Favourite,
+   * Stop, Settings, spread across the width. */
+  btn_w = (content_w - 8 * BROWSE_SPACING) / 9;
   if (btn_w < 1) {
     btn_w = 1;
   }
@@ -1121,19 +1138,29 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
       BROWSE_MARGIN + 3 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
       "Add", BGID_ADD, PLACETEXT_IN, NULL);
 
-  fav_gad = gad = create_gadget(
+  play_all_gad = gad = create_gadget(
       browse_win, BUTTON_KIND, gad, &ng,
       BROWSE_MARGIN + 4 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      "Play all", BGID_PLAY_ALL, PLACETEXT_IN, NULL);
+
+  add_all_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN + 5 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      "Add all", BGID_ADD_ALL, PLACETEXT_IN, NULL);
+
+  fav_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN + 6 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
       "Favourite", BGID_FAVOURITE, PLACETEXT_IN, NULL);
 
   stop_gad = gad = create_gadget(
       browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 5 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      BROWSE_MARGIN + 7 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
       "Stop", BGID_STOP, PLACETEXT_IN, NULL);
 
   settings_btn_gad = gad = create_gadget(
       browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 6 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      BROWSE_MARGIN + 8 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
       "Settings", BGID_SETTINGS, PLACETEXT_IN, NULL);
 
   cur_y += btn_h + BROWSE_SPACING;
@@ -1152,8 +1179,9 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
       NULL, BGID_STATUS, 0, tags);
 
   if (!gad || !service_gad || !search_gad || !list_gad || !back_gad ||
-      !reload_gad || !play_gad || !add_gad || !fav_gad || !stop_gad ||
-      !settings_btn_gad || !status_gad) {
+      !reload_gad || !play_gad || !add_gad || !play_all_gad ||
+      !add_all_gad || !fav_gad || !stop_gad || !settings_btn_gad ||
+      !status_gad) {
     return 0;
   }
 
@@ -1216,6 +1244,8 @@ static void browse_handle_resize(void)
   reload_gad = NULL;
   play_gad = NULL;
   add_gad = NULL;
+  play_all_gad = NULL;
+  add_all_gad = NULL;
   fav_gad = NULL;
   stop_gad = NULL;
   settings_btn_gad = NULL;
@@ -1322,7 +1352,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
 
   /* The smallest usable window: every button and the search row fit,
    * and the list shows two whole rows. */
-  min_w = 7 * browse_button_min_width() + 6 * BROWSE_SPACING +
+  min_w = 9 * browse_button_min_width() + 8 * BROWSE_SPACING +
           2 * BROWSE_MARGIN;
   cycle_w = browse_cycle_width();
   search_label_w = browse_text_w("Search:") + 8;
@@ -1335,7 +1365,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     min_w = 460;
   }
   min_h = BROWSE_MARGIN + btn_h + BROWSE_SPACING + (2 * font_h + 4) +
-          BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h + BROWSE_MARGIN;
+          BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h;
 
   /* Window borders, for the size limits and for clamping a remembered
    * geometry; the sizing border's height is close enough for a limit. */
@@ -1358,7 +1388,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   top = 40;
   w = min_w;
   h = BROWSE_MARGIN + btn_h + BROWSE_SPACING + (font_h * 8 + 8) +
-      BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h + BROWSE_MARGIN;
+      BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h;
   if (browse_prefs) {
     if (browse_prefs->browse_width >= 0 && browse_prefs->browse_height >= 0) {
       w = (int)browse_prefs->browse_width;
@@ -1477,6 +1507,8 @@ void zzplay_browse_close(void)
   reload_gad = NULL;
   play_gad = NULL;
   add_gad = NULL;
+  play_all_gad = NULL;
+  add_all_gad = NULL;
   fav_gad = NULL;
   stop_gad = NULL;
   settings_btn_gad = NULL;
@@ -1522,10 +1554,12 @@ uint32_t zzplay_browse_signal_mask(void)
   return mask;
 }
 
-/* Play or Add on a folder the module marks playable: collect its tracks
- * in the worker (up to the room the playlist offers) before anything is
- * replaced or appended. */
-static void browse_start_gather(int add, const ZZPlayProvider *provider)
+/* Play or Add on a folder the module marks playable, and Play all / Add
+ * all on the folder being shown: collect its tracks in the worker (up
+ * to the room the playlist offers) before anything is replaced or
+ * appended. */
+static void browse_start_gather(int add, const ZZPlayProvider *provider,
+                                int shown)
 {
   uint32_t limit;
 
@@ -1538,7 +1572,9 @@ static void browse_start_gather(int add, const ZZPlayProvider *provider)
     update_status_text("The playlist is full");
     return;
   }
-  if (!zzplay_browse_model_gather(&browse_model, limit, &poll_req)) {
+  if (shown ? !zzplay_browse_model_gather_shown(&browse_model, limit,
+                                                &poll_req)
+            : !zzplay_browse_model_gather(&browse_model, limit, &poll_req)) {
     return;
   }
   gather_add = add;
@@ -1871,7 +1907,7 @@ void zzplay_browse_poll(void)
             }
           }
         } else if (target == ZZPLAY_BROWSE_TARGET_COLLECTION) {
-          browse_start_gather(0, p);
+          browse_start_gather(0, p, 0);
         }
       } else if (gid == BGID_ADD) {
         ZZPlayBrowseTarget target = zzplay_browse_model_play_target(&browse_model);
@@ -1885,8 +1921,15 @@ void zzplay_browse_poll(void)
             }
           }
         } else if (target == ZZPLAY_BROWSE_TARGET_COLLECTION) {
-          browse_start_gather(1, p);
+          browse_start_gather(1, p, 0);
         }
+      } else if (gid == BGID_PLAY_ALL) {
+        /* The folder being shown as a whole: replace the playlist and
+         * start its first track. */
+        browse_start_gather(0, p, 1);
+      } else if (gid == BGID_ADD_ALL) {
+        /* The folder being shown as a whole, appended. */
+        browse_start_gather(1, p, 1);
       } else if (gid == BGID_FAVOURITE) {
         if (zzplay_browse_model_can_favourite(&browse_model)) {
           if (zzplay_browse_model_favourite(&browse_model, &poll_req)) {

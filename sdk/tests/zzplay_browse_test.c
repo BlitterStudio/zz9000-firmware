@@ -889,6 +889,149 @@ static int test_cache_bound_drops_oldest(void)
   return 0;
 }
 
+/* Play all / Add all act on the folder being shown: availability and
+ * the gather request they start. */
+static int test_play_all_add_all_on_shown_folder(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem root[2];
+  ZZPlayBrowseItem artist_albums[1];
+  ZZPlayBrowseItem album_tracks[2];
+  uint32_t gen;
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+
+  /* Top level: an artist (a playable collection) and a plain folder */
+  memset(root, 0, sizeof(root));
+  snprintf(root[0].id, sizeof(root[0].id), "art:7");
+  snprintf(root[0].title, sizeof(root[0].title), "An Artist");
+  root[0].kind = ZZPLAY_ITEM_FOLDER;
+  root[0].playable = 1U;
+
+  snprintf(root[1].id, sizeof(root[1].id), "ltr:A");
+  snprintf(root[1].title, sizeof(root[1].title), "A");
+  root[1].kind = ZZPLAY_ITEM_FOLDER;
+  root[1].playable = 0U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = root;
+  reply.item_count = 2U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* The top level is not a collection */
+  assert(!zzplay_browse_model_can_play_all(&model));
+  assert(!zzplay_browse_model_can_add_all(&model));
+  assert(!zzplay_browse_model_gather_shown(&model, 4096U, &req));
+
+  /* Enter the artist: its list is shown and it is a collection, but not
+   * while the list is still loading. */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(strcmp(req.node_id, "art:7") == 0);
+  assert(model.busy == 1);
+  assert(!zzplay_browse_model_can_play_all(&model));
+
+  memset(artist_albums, 0, sizeof(artist_albums));
+  snprintf(artist_albums[0].id, sizeof(artist_albums[0].id), "alb:9");
+  snprintf(artist_albums[0].title, sizeof(artist_albums[0].title), "An Album");
+  artist_albums[0].kind = ZZPLAY_ITEM_FOLDER;
+  artist_albums[0].playable = 1U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = artist_albums;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(zzplay_browse_model_can_play_all(&model));
+  assert(zzplay_browse_model_can_add_all(&model));
+
+  /* The gather asks for the shown folder, not a selected row */
+  assert(zzplay_browse_model_gather_shown(&model, 4096U, &req));
+  gen = model.generation;
+  assert(req.kind == ZZPLAY_BROWSE_REQ_GATHER);
+  assert(req.generation == gen);
+  assert(strcmp(req.scheme, "plex") == 0);
+  assert(strcmp(req.node_id, "art:7") == 0);
+  assert(req.count == 4096U);
+  assert(model.busy == 1);
+  /* While it runs the buttons are unavailable */
+  assert(!zzplay_browse_model_can_play_all(&model));
+  assert(!zzplay_browse_model_gather_shown(&model, 4096U, &req));
+
+  /* Enter the album inside; Back returns to the artist, still a
+   * collection. */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  memset(album_tracks, 0, sizeof(album_tracks));
+  snprintf(album_tracks[0].id, sizeof(album_tracks[0].id), "t1");
+  snprintf(album_tracks[0].title, sizeof(album_tracks[0].title), "One");
+  album_tracks[0].kind = ZZPLAY_ITEM_TRACK;
+  album_tracks[0].playable = 1U;
+  snprintf(album_tracks[1].id, sizeof(album_tracks[1].id), "t2");
+  snprintf(album_tracks[1].title, sizeof(album_tracks[1].title), "Two");
+  album_tracks[1].kind = ZZPLAY_ITEM_TRACK;
+  album_tracks[1].playable = 1U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = album_tracks;
+  reply.item_count = 2U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(zzplay_browse_model_can_play_all(&model));
+
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(zzplay_browse_model_can_play_all(&model));
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(!zzplay_browse_model_can_play_all(&model));
+
+  /* A plain folder is no collection */
+  assert(zzplay_browse_model_activate(&model, 1, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = root;
+  reply.item_count = 2U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(!zzplay_browse_model_can_play_all(&model));
+
+  /* Search results are not a collection either */
+  assert(zzplay_browse_model_search(&model, "album", &req));
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_SEARCH;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = album_tracks;
+  reply.item_count = 2U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(!zzplay_browse_model_can_play_all(&model));
+
+  /* A remembered collection folder reopens at once with its buttons
+   * available, without a request. */
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+  assert(model.busy == 0);
+  assert(zzplay_browse_model_can_play_all(&model));
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+
 int main(void)
 {
   assert(test_enter_folder_and_back() == 0);
@@ -897,7 +1040,7 @@ int main(void)
   assert(test_reply_after_stop_dropped() == 0);
   assert(test_play_add_unavailable_for_folders_and_unplayable() == 0);
   assert(test_gather_request_for_collection() == 0);
-  assert(test_activation_folder_enters_station_plays() == 0);
+  assert(test_play_all_add_all_on_shown_folder() == 0);
   assert(test_favourite_action() == 0);
   assert(test_remembered_folder_reopens_without_request() == 0);
   assert(test_reload_sends_request_and_replaces_copy() == 0);
