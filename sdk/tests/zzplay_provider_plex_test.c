@@ -163,6 +163,7 @@ static int g_mock_sleep_calls = 0;
 static int g_mock_https_identity_fails = 0;
 static int g_mock_http_identity_fails = 0;
 static int g_mock_two_servers = 0;
+static int g_mock_http_only_server = 0;
 static uint32_t g_total_requests = 0;
 static uint32_t g_headers_missing_count = 0;
 static uint32_t g_missing_exclude_count = 0;
@@ -332,6 +333,9 @@ static int fake_http_get(const ZZPlayHost *host, const char *url,
   if (strstr(url, "/api/v2/resources")) {
     if (g_mock_two_servers) {
       return load_fixture("resources-multi.xml", data, user);
+    }
+    if (g_mock_http_only_server) {
+      return load_fixture("resources-http-only.xml", data, user);
     }
     return load_fixture("resources.xml", data, user);
   }
@@ -725,6 +729,52 @@ static void test_link_poll_connection_plain(const ZZPlayProvider *p)
   assert(result.state == ZZPLAY_LINK_DONE);
   assert(fake_pref_get(&g_test_host, "SERVER", srv, sizeof(srv)) == 1);
   assert(strcmp(srv, "http://192.168.1.18:32400") == 0);
+  p->close(ctx);
+}
+
+/* Signing in to a server with only an http address clears the https
+ * address an earlier server left, so Secure cannot reach that server with
+ * the new token. */
+static void test_link_to_http_only_server(const ZZPlayProvider *p)
+{
+  char err[128];
+  ZZPlayProviderLinkResult result;
+  ZZPlayResolved res;
+  void *ctx;
+  char srv[256];
+
+  mock_prefs_clear();
+  mock_pref_set("CONNECTION", "plain");
+  mock_pref_set("SERVER_SECURE", "https://old.example:32400");
+  g_mock_poll_calls = 0;
+  g_mock_poll_authenticated_after = 1;
+  g_mock_sleep_calls = 0;
+  g_mock_sleep_cancelled = 0;
+  g_mock_https_identity_fails = 0;
+  g_mock_http_identity_fails = 0;
+  g_mock_two_servers = 0;
+  g_mock_http_only_server = 1;
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  assert(p->link_poll(ctx, "736458353", &result, err, sizeof(err)) == 1);
+  assert(result.state == ZZPLAY_LINK_DONE);
+  p->close(ctx);
+  g_mock_http_only_server = 0;
+  assert(fake_pref_get(&g_test_host, "SERVER_PLAIN", srv, sizeof(srv)) == 1);
+  assert(strcmp(srv, "http://192.168.1.30:32400") == 0);
+  srv[0] = 'x';
+  (void)fake_pref_get(&g_test_host, "SERVER_SECURE", srv, sizeof(srv));
+  assert(srv[0] == '\0');
+
+  mock_pref_set("CONNECTION", "secure");
+  g_mock_status = 200;
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  assert(p->resolve(ctx, "plex://302", &res, err, sizeof(err)) == 1);
+  assert(strstr(res.url, "old.example") == NULL);
+  assert(strncmp(res.url, "http://192.168.1.30:32400/",
+                 strlen("http://192.168.1.30:32400/")) == 0);
   p->close(ctx);
 }
 
@@ -2184,6 +2234,7 @@ int main(void)
   test_link_poll_errors(p);
   test_link_poll_stores_both_addresses(p);
   test_link_poll_connection_plain(p);
+  test_link_to_http_only_server(p);
   test_connection_selection_and_switching(p);
   test_manual_server_alone(p);
   test_plain_plexdirect_fallback(p);

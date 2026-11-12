@@ -1242,13 +1242,13 @@ static int plex_select_server(PlexContext *ctx, const PlexDiscoveredServer *srv,
     plex_strlcpy(secure_url, target_url, sizeof(secure_url));
   }
 
-  /* Store both local addresses when resources list them, and SERVER for
-   * compatibility. The token goes last: a save that stops part way leaves
-   * the service signed out, never signed in only for this session. */
-  if ((secure_url[0] != '\0' &&
-       !ctx->host->pref_set(ctx->host, "SERVER_SECURE", secure_url)) ||
-      (plain_url[0] != '\0' &&
-       !ctx->host->pref_set(ctx->host, "SERVER_PLAIN", plain_url)) ||
+  /* Store both local addresses, and SERVER for compatibility. One the
+   * server does not offer is stored empty, so a pair can never mix this
+   * server with an earlier one. The token goes last: a save that stops
+   * part way leaves the service signed out, never signed in only for
+   * this session. */
+  if (!ctx->host->pref_set(ctx->host, "SERVER_SECURE", secure_url) ||
+      !ctx->host->pref_set(ctx->host, "SERVER_PLAIN", plain_url) ||
       !ctx->host->pref_set(ctx->host, "SERVER", target_url) ||
       !ctx->host->pref_set(ctx->host, "TOKEN", srv->access_token)) {
     ctx->host->format(err, err_size, "Could not save the settings");
