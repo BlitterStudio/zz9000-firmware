@@ -200,10 +200,11 @@ ZZ9000AX or AHI, and FLAC and Ogg Vorbis decoded on the card.
 The Browse window lists and searches music services. Each service is a
 module file in the `Providers` drawer next to ZZPlay (`PROGDIR:Providers/`).
 The package ships two: `radio.zzprov` for [Internet radio](#internet-radio)
-and `plex.zzprov` for [Plex](#plex). ZZPlay loads them the first time the
-Browse window opens or a playlist entry needs one.
+and `plex.zzprov` for [Plex](#plex). ZZPlay reads their names when it starts,
+then loads a module when Browse or Settings needs it.
 
-Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
+Choose **Browse...** (Amiga-R) in the **Services** menu to open the window.
+Each service also has **Browse** and **Settings...** entries in that menu.
 It can also be used from the keyboard and from its own menu; see **Browse
 menu** and **Browse keys** at the end of this section.
 
@@ -347,8 +348,9 @@ Favourites are stored in `ENVARC:ZZPlay/radio.prefs`, one line per station:
 
 To sign in:
 
-1. Choose Plex Media Server in the Browse window and click **Settings**.
-   When signed out, the only Browse row also opens Settings.
+1. Choose **Services**, then **Plex Media Server**, then **Settings...**.
+   You can also use the Browse window's **Settings** button or its signed-out
+   row.
 2. Click **Sign in with plex.tv**.
 3. On a phone or computer, open `plex.tv/link` and enter the code shown
    in the Plex sign-in window. ZZPlay waits in the background; music keeps
@@ -471,7 +473,6 @@ tries it again.
 | --- | --- | --- | --- |
 | Project | Open... | Amiga-O | Replace the playlist with the chosen files and play the first one. |
 | Project | Open URL... | Amiga-U | Add a network address to the playlist and play it. |
-| Project | Browse... | Amiga-R | Open the Browse window for service modules. |
 | Project | Add files... | Amiga-A | Append files. |
 | Project | Add drawer... | | Append the media files of a drawer and its sub-drawers. |
 | Project | Load playlist... | Amiga-L | Append the entries of an M3U playlist. |
@@ -486,6 +487,8 @@ tries it again.
 | Control | Repeat | | Off, Track, or All. |
 | Control | Shuffle | | Play the playlist in random order. |
 | Control | Fullscreen video | Amiga-F | Play videos fullscreen. See [Fullscreen video](#fullscreen-video). |
+| Services | Browse... | Amiga-R | Open the Browse window. |
+| Services | Each installed service | | Browse opens that service. Settings... opens its settings window. |
 
 ### Keys
 

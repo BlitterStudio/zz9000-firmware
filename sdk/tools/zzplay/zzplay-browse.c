@@ -128,6 +128,7 @@ static ZZPlayController *gui_ctl = NULL;
 static ZZPlayPlaylist *gui_playlist = NULL;
 static struct Screen *gui_screen = NULL;
 
+static char settings_scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
 static char service_labels_storage[ZZPLAY_BROWSE_SERVICES_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
 static const char *service_labels[ZZPLAY_BROWSE_SERVICES_MAX + 1U];
 
@@ -632,6 +633,8 @@ static int update_stage_status(void)
 #define BROWSE_WORKER_FAILED "Cannot start the Browse worker (out of memory?)"
 
 static void update_buttons(void);
+static const ZZPlayProvider *browse_provider(void);
+static void browse_after_navigation(const char *loading);
 
 /* A request that cannot go out: say why, and do not stay busy. */
 static void browse_send_failed(const char *why)
@@ -986,6 +989,24 @@ static void browse_show_selection(void)
 
 static void close_link_window(int cancel);
 
+static void release_service_state(void)
+{
+  if (browse_win || settings_win || link_win) {
+    return;
+  }
+  zzplay_browse_worker_stop();
+  if (model_inited) {
+    zzplay_browse_model_free(&browse_model);
+    model_inited = 0;
+  }
+  free_exec_list_nodes(&browse_exec_list);
+  gui_ctl = NULL;
+  gui_playlist = NULL;
+  gui_screen = NULL;
+  browse_prefs = NULL;
+  settings_scheme[0] = '\0';
+}
+
 static void close_settings_window(void)
 {
   close_link_window(1);
@@ -1010,6 +1031,8 @@ static void close_settings_window(void)
     settings_vi = NULL;
   }
   settings_note[0] = '\0';
+  settings_scheme[0] = '\0';
+  release_service_state();
 }
 
 /* Width of `text` in the screen font, which every gadget here uses. */
@@ -1064,6 +1087,9 @@ static void close_link_window(int cancel)
     link_request_kind = ZZPLAY_BROWSE_REQ_NONE;
     link_window_state = LINK_WINDOW_CLOSED;
     link_provider = NULL;
+    if (!browse_win) {
+      zzplay_browse_worker_stop();
+    }
   }
 }
 
@@ -1279,6 +1305,7 @@ static void __attribute__((noinline)) open_settings_window(void)
     update_status_text("Service has no settings");
     return;
   }
+  copy_string(settings_scheme, sizeof(settings_scheme), p->scheme);
 
   settings_vi = GetVisualInfo(gui_screen, TAG_DONE);
   if (!settings_vi) {
@@ -1539,7 +1566,7 @@ static void link_finish_success(const char *server_name)
   if (settings_win && svc && svc->provider == p) {
     settings_refresh_fields(p);
   }
-  if (svc && svc->provider == p &&
+  if (browse_win && svc && svc->provider == p &&
       zzplay_browse_model_reopen_service(&browse_model, &req)) {
     browse_load_recent();
     (void)browse_send(&req, p);
@@ -1548,6 +1575,9 @@ static void link_finish_success(const char *server_name)
     update_buttons();
   }
   link_provider = NULL;
+  if (!browse_win) {
+    zzplay_browse_worker_stop();
+  }
 }
 
 static void link_send_poll(void)
@@ -1754,7 +1784,8 @@ static void __attribute__((noinline)) poll_settings(void)
 
         /* Reopen the service with the new settings: its remembered
          * lists are dropped and the module is opened again. */
-        if (zzplay_browse_model_reopen_service(&browse_model, &req)) {
+        if (browse_win &&
+            zzplay_browse_model_reopen_service(&browse_model, &req)) {
           int sent;
 
           browse_load_recent();
@@ -2133,10 +2164,51 @@ static void browse_set_window_limits(void)
                (LONG)gui_screen->Width, (LONG)gui_screen->Height);
 }
 
+static int browse_prepare_services(struct Screen *screen, ZZPlayController *ctl,
+                                   ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs)
+{
+  ZZPlayProviders *providers;
+  uint32_t i;
+
+  gui_screen = screen;
+  gui_ctl = ctl;
+  gui_playlist = playlist;
+  browse_prefs = prefs;
+  if (!gui_screen || !gui_ctl || !gui_playlist) return 0;
+  providers = zzplay_providers_shared();
+  if (providers->count == 0U) {
+    char why[ZZPLAY_PROVIDER_ERROR_MAX];
+    why[0] = '\0';
+    (void)zzplay_providers_load(providers, why, sizeof(why));
+  }
+  if (!model_inited) {
+    zzplay_browse_model_init(&browse_model);
+    model_inited = 1;
+  }
+  browse_model.service_count = 0U;
+  for (i = 0U; i < providers->count; i++) {
+    const ZZPlayProvider *p = providers->slot[i].provider;
+    if (p) {
+      zzplay_browse_model_add_service(&browse_model, p->scheme, p->name, p);
+      (void)snprintf(service_labels_storage[i],
+                     sizeof(service_labels_storage[i]), "%s", p->name);
+      service_labels[i] = service_labels_storage[i];
+    }
+  }
+  if (providers->count == 0U) {
+    copy_string(service_labels_storage[0], sizeof(service_labels_storage[0]),
+                "(No services)");
+    service_labels[0] = service_labels_storage[0];
+    service_labels[1] = NULL;
+  } else {
+    service_labels[providers->count] = NULL;
+  }
+  return 1;
+}
+
 int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
                        ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs)
 {
-  ZZPlayProviders *providers;
   struct TextFont *font;
   ZZPlayBrowseLayoutConfig cfg;
   ZZPlayBrowseLayout layout;
@@ -2151,9 +2223,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   int top;
   int w;
   int h;
-  uint32_t i;
-  uint32_t loaded_count;
-  int worker_ok;
+  int worker_ok = 1;
 
   if (browse_win) {
     WindowToFront(browse_win);
@@ -2161,12 +2231,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     return 1;
   }
 
-  gui_screen = screen;
-  gui_ctl = ctl;
-  gui_playlist = playlist;
-  browse_prefs = prefs;
-
-  if (!gui_screen || !gui_ctl || !gui_playlist) {
+  if (!browse_prepare_services(screen, ctl, playlist, prefs)) {
     return 0;
   }
 
@@ -2174,43 +2239,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   if (!browse_vi) {
     return 0;
   }
-
   browse_text_attr = gui_screen->Font;
-
-  /* Load providers on first open */
-  providers = zzplay_providers_shared();
-  if (providers->count == 0U) {
-    char why[ZZPLAY_PROVIDER_ERROR_MAX];
-    why[0] = '\0';
-    (void)zzplay_providers_load(providers, why, sizeof(why));
-  }
-
-  if (!model_inited) {
-    zzplay_browse_model_init(&browse_model);
-    model_inited = 1;
-  }
-
-  /* Refresh services in model */
-  browse_model.service_count = 0U;
-  loaded_count = providers->count;
-  for (i = 0U; i < loaded_count; i++) {
-    const ZZPlayProvider *p = providers->slot[i].provider;
-    if (p) {
-      zzplay_browse_model_add_service(&browse_model, p->scheme, p->name, p);
-      (void)snprintf(service_labels_storage[i], sizeof(service_labels_storage[i]), "%s", p->name);
-      service_labels[i] = service_labels_storage[i];
-    }
-  }
-  if (loaded_count == 0U) {
-    (void)snprintf(service_labels_storage[0], sizeof(service_labels_storage[0]), "(No services)");
-    service_labels[0] = service_labels_storage[0];
-    service_labels[1] = NULL;
-  } else {
-    service_labels[loaded_count] = NULL;
-  }
-
-  /* Start worker child process; requests try again when it fails. */
-  worker_ok = zzplay_browse_worker_start();
 
   font = gui_screen->RastPort.Font;
   font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
@@ -2343,12 +2372,20 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     browse_menus = NULL;
   }
 
-  /* Select initial service if available */
-  if (browse_model.service_count > 0U && browse_model.current_service < 0) {
+  /* Open a fresh top-level list. This also reloads a service whose
+   * standalone Settings window changed it before Browse was opened. */
+  if (browse_model.service_count > 0U) {
     ZZPlayBrowseRequest req;
-    zzplay_browse_model_select_service(&browse_model, 0U, &req);
+    const ZZPlayProvider *provider;
+
+    if (browse_model.current_service < 0) {
+      (void)zzplay_browse_model_select_service(&browse_model, 0U, &req);
+    } else {
+      (void)zzplay_browse_model_reopen_service(&browse_model, &req);
+    }
+    provider = browse_provider();
     browse_load_recent();
-    if (browse_send(&req, browse_model.services[0].provider)) {
+    if (provider && browse_send(&req, provider)) {
       update_status_text("Loading service...");
     }
   }
@@ -2360,11 +2397,61 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   return 1;
 }
 
+static int browse_select_service_scheme(const char *scheme, int request)
+{
+  uint32_t i;
+  ZZPlayBrowseRequest req;
+
+  if (!model_inited || !scheme || !scheme[0]) return 0;
+  for (i = 0U; i < browse_model.service_count; i++) {
+    if (strcmp(browse_model.services[i].scheme, scheme) == 0) {
+      if (!zzplay_browse_model_select_service(&browse_model, i, &req)) {
+        return 0;
+      }
+      browse_load_recent();
+      if (request && browse_win) {
+        browse_after_navigation("Loading service...");
+      }
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int zzplay_browse_open_service(struct Screen *screen, ZZPlayController *ctl,
+                               ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs,
+                               const char *scheme)
+{
+  if (!zzplay_browse_open(screen, ctl, playlist, prefs)) return 0;
+  if (scheme && scheme[0]) {
+    return browse_select_service_scheme(scheme, 1);
+  }
+  return 1;
+}
+
+int zzplay_browse_settings_open(struct Screen *screen, ZZPlayController *ctl,
+                                ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs,
+                                const char *scheme)
+{
+  if (settings_win && scheme && strcmp(settings_scheme, scheme) == 0) {
+    WindowToFront(settings_win);
+    ActivateWindow(settings_win);
+    return 1;
+  }
+  if (settings_win) close_settings_window();
+  if (!browse_prepare_services(screen, ctl, playlist, prefs) ||
+      !browse_select_service_scheme(scheme, 0)) {
+    return 0;
+  }
+  browse_text_attr = gui_screen->Font;
+  open_settings_window();
+  return settings_win != NULL;
+}
+
 void zzplay_browse_close(void)
 {
   int remember = (browse_win != NULL && browse_prefs != NULL);
 
-  close_settings_window();
 
   /* The window's place and size are remembered when it closes, and
    * again when ZZPlay quits with it open (this runs then too, before
@@ -2424,18 +2511,26 @@ void zzplay_browse_close(void)
   }
 
   free_exec_list_nodes(&browse_exec_list);
-  zzplay_browse_worker_stop();
-
-  if (model_inited) {
-    zzplay_browse_model_free(&browse_model);
-    model_inited = 0;
+  if (link_window_state == LINK_WINDOW_CLOSED) {
+    zzplay_browse_worker_stop();
   }
-
   if (remember) {
     (void)zzplay_prefs_save_session(browse_prefs,
                                     ZZPLAY_PREFS_ENVARC_PATH);
     (void)zzplay_prefs_save_session(browse_prefs, ZZPLAY_PREFS_ENV_PATH);
   }
+  release_service_state();
+}
+
+void zzplay_browse_shutdown(void)
+{
+  close_settings_window();
+  zzplay_browse_close();
+}
+
+int zzplay_browse_has_windows(void)
+{
+  return (browse_win || settings_win || link_win) ? 1 : 0;
 }
 
 int zzplay_browse_is_open(void)
@@ -3112,6 +3207,22 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   return 0;
 }
 void zzplay_browse_close(void) {}
+void zzplay_browse_shutdown(void) {}
+int zzplay_browse_has_windows(void) { return 0; }
+int zzplay_browse_open_service(struct Screen *screen, ZZPlayController *ctl,
+                               ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs,
+                               const char *scheme)
+{
+  (void)screen; (void)ctl; (void)playlist; (void)prefs; (void)scheme;
+  return 0;
+}
+int zzplay_browse_settings_open(struct Screen *screen, ZZPlayController *ctl,
+                                ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs,
+                                const char *scheme)
+{
+  (void)screen; (void)ctl; (void)playlist; (void)prefs; (void)scheme;
+  return 0;
+}
 int zzplay_browse_is_open(void) { return 0; }
 uint32_t zzplay_browse_signal_mask(void) { return 0U; }
 void zzplay_browse_poll(void) {}

@@ -136,6 +136,32 @@ static int test_registry(void)
   return 0;
 }
 
+static int test_catalog(void)
+{
+  ZZPlayProviders set;
+  ZZPlayProvider radio = make("radio");
+  ZZPlayProvider plex = make("plex");
+  ZZPlayProviderCatalog catalog;
+  const char *why;
+
+  memset(&set, 0, sizeof(set));
+  radio.name = "Internet radio";
+  radio.field_count = 1U;
+  plex.name = "Plex Media Server";
+  if (!zzplay_providers_add(&set, "radio.zzprov", &radio, NULL, &why) ||
+      !zzplay_providers_add(&set, "plex.zzprov", &plex, NULL, &why)) {
+    return 1;
+  }
+  if (zzplay_provider_catalog_from_set(&catalog, &set) != 2U) return 2;
+  if (strcmp(catalog.info[0].name, "Internet radio") != 0 ||
+      strcmp(catalog.info[0].scheme, "radio") != 0 ||
+      !catalog.info[0].has_settings) return 3;
+  if (strcmp(catalog.info[1].name, "Plex Media Server") != 0 ||
+      strcmp(catalog.info[1].file, "plex.zzprov") != 0 ||
+      catalog.info[1].has_settings) return 4;
+  return 0;
+}
+
 static int test_uri_scheme(void)
 {
   char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
@@ -166,8 +192,10 @@ int main(void)
   if (rc != 0) { printf("check %d\n", rc); return 10 + rc; }
   rc = test_registry();
   if (rc != 0) { printf("registry %d\n", rc); return 30 + rc; }
+  rc = test_catalog();
+  if (rc != 0) { printf("catalog %d\n", rc); return 50 + rc; }
   rc = test_uri_scheme();
-  if (rc != 0) { printf("uri scheme %d\n", rc); return 50 + rc; }
+  if (rc != 0) { printf("uri scheme %d\n", rc); return 70 + rc; }
   printf("zzplay_providers_test: all checks passed\n");
   return 0;
 }

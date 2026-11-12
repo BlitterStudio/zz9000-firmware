@@ -16,6 +16,7 @@
 #define ZZPLAY_PROVIDERS_MAX 16U
 #define ZZPLAY_PROVIDER_FILE_MAX 64U
 #define ZZPLAY_PROVIDER_SCHEME_MAX 16U
+#define ZZPLAY_PROVIDER_NAME_MAX 96U
 
 typedef enum ZZPlayProviderCheck {
   ZZPLAY_PROVIDER_VALID = 0,
@@ -36,10 +37,27 @@ typedef struct ZZPlayProviderSlot {
   void *segment;                          /* the loaded hunks (AmigaOS) */
 } ZZPlayProviderSlot;
 
+typedef struct ZZPlayProviderInfo {
+  char file[ZZPLAY_PROVIDER_FILE_MAX];
+  char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
+  char name[ZZPLAY_PROVIDER_NAME_MAX];
+  int has_settings;
+} ZZPlayProviderInfo;
+
+typedef struct ZZPlayProviderCatalog {
+  uint32_t count;
+  ZZPlayProviderInfo info[ZZPLAY_PROVIDERS_MAX];
+} ZZPlayProviderCatalog;
+
 typedef struct ZZPlayProviders {
   uint32_t count;
   ZZPlayProviderSlot slot[ZZPLAY_PROVIDERS_MAX];
 } ZZPlayProviders;
+
+/* Copy menu-safe service names and settings capability from loaded
+ * descriptors. This does not retain descriptor pointers. */
+uint32_t zzplay_provider_catalog_from_set(ZZPlayProviderCatalog *catalog,
+                                          const ZZPlayProviders *set);
 
 /* Add a module whose descriptor passed the check. Returns 1, or 0 when
  * another module already serves the scheme (the earlier one stays) or the
@@ -67,9 +85,11 @@ const ZZPlayProviderSlot *zzplay_providers_for_uri(const ZZPlayProviders *set,
                                                    const char **id);
 
 #if defined(__amigaos__) || defined(AMIGA)
-/* Load every PROGDIR:Providers/#?.zzprov in name order. Modules that fail
- * the check are unloaded, and the first such message is copied to `why`
- * (empty when all loaded). Returns the number loaded. */
+/* Build a startup menu catalog by loading descriptors briefly, then unload
+ * them. A later Browse or Settings action loads the modules normally. */
+uint32_t zzplay_providers_discover(ZZPlayProviderCatalog *catalog,
+                                   char *why, uint32_t why_size);
+/* Load every provider for an operation that needs executable descriptors. */
 uint32_t zzplay_providers_load(ZZPlayProviders *set, char *why,
                                uint32_t why_size);
 void zzplay_providers_unload(ZZPlayProviders *set);

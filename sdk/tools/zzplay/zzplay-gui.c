@@ -28,6 +28,7 @@
 #include "zzplay-requester.h"
 #include "zzplay-http.h"
 #include "zzplay-browse.h"
+#include "zzplay-providers.h"
 
 /* Program-wide library base ownership per plan. */
 struct GfxBase *GfxBase;
@@ -105,7 +106,11 @@ enum {
   MID_REPEAT_TRACK,
   MID_REPEAT_ALL,
   MID_SHUFFLE,
-  MID_FULLSCREEN
+  MID_FULLSCREEN,
+
+  MID_SERVICES,
+  MID_SERVICE_BROWSE_BASE = 1000,
+  MID_SERVICE_SETTINGS_BASE = 1100
 };
 
 /* Gadget IDs for Settings window */
@@ -136,6 +141,80 @@ static struct Window *player_win;
 static struct Gadget *player_gadgets;
 static struct Menu *player_menus;
 
+
+#define PLAYER_MENU_MAX (32U + 3U * ZZPLAY_PROVIDERS_MAX)
+static struct NewMenu player_new_menu[PLAYER_MENU_MAX];
+static ZZPlayProviderCatalog services_catalog;
+
+static void player_menu_add(uint16_t *count, ULONG type, const char *label,
+                            const char *key, ULONG flags, ULONG exclude,
+                            uint32_t id)
+{
+  struct NewMenu *entry = &player_new_menu[*count];
+
+  entry->nm_Type = type;
+  entry->nm_Label = (CONST_STRPTR)label;
+  entry->nm_CommKey = (CONST_STRPTR)key;
+  entry->nm_Flags = flags;
+  entry->nm_MutualExclude = exclude;
+  entry->nm_UserData = (APTR)(ULONG)id;
+  (*count)++;
+}
+
+static void build_player_menu(void)
+{
+  uint16_t count = 0U;
+  uint32_t i;
+
+  player_menu_add(&count, NM_TITLE, "Project", NULL, 0, 0, MID_PROJECT);
+  player_menu_add(&count, NM_ITEM, "Open...", "O", 0, 0, MID_OPEN);
+  player_menu_add(&count, NM_ITEM, "Open URL...", "U", 0, 0, MID_OPEN_URL);
+  player_menu_add(&count, NM_ITEM, "Add files...", "A", 0, 0, MID_ADD_FILES);
+  player_menu_add(&count, NM_ITEM, "Add drawer...", NULL, 0, 0, MID_ADD_DRAWER);
+  player_menu_add(&count, NM_ITEM, "Load playlist...", "L", 0, 0,
+                  MID_LOAD_PLAYLIST);
+  player_menu_add(&count, NM_ITEM, "Save playlist...", "S", 0, 0,
+                  MID_SAVE_PLAYLIST);
+  player_menu_add(&count, NM_ITEM, "Settings...", "P", 0, 0, MID_SETTINGS);
+  player_menu_add(&count, NM_ITEM, "About...", NULL, 0, 0, MID_ABOUT);
+  player_menu_add(&count, NM_ITEM, "Quit", "Q", 0, 0, MID_QUIT);
+
+  player_menu_add(&count, NM_TITLE, "Control", NULL, 0, 0, MID_CONTROL);
+  player_menu_add(&count, NM_ITEM, "Play/Pause", NULL, 0, 0, MID_PLAY_PAUSE);
+  player_menu_add(&count, NM_ITEM, "Stop", NULL, 0, 0, MID_STOP);
+  player_menu_add(&count, NM_ITEM, "Next", "N", 0, 0, MID_NEXT);
+  player_menu_add(&count, NM_ITEM, "Previous", "B", 0, 0, MID_PREVIOUS);
+  player_menu_add(&count, NM_ITEM, "Seek forward", NULL, 0, 0, MID_SEEK_FWD);
+  player_menu_add(&count, NM_ITEM, "Seek back", NULL, 0, 0, MID_SEEK_BACK);
+  player_menu_add(&count, NM_ITEM, "Repeat", NULL, 0, 0, 0);
+  player_menu_add(&count, NM_SUB, "Off", NULL, CHECKIT, 6, MID_REPEAT_OFF);
+  player_menu_add(&count, NM_SUB, "Track", NULL, CHECKIT, 5, MID_REPEAT_TRACK);
+  player_menu_add(&count, NM_SUB, "All", NULL, CHECKIT, 3, MID_REPEAT_ALL);
+  player_menu_add(&count, NM_ITEM, "Shuffle", NULL, CHECKIT | MENUTOGGLE, 0,
+                  MID_SHUFFLE);
+  player_menu_add(&count, NM_ITEM, "Fullscreen video", "F",
+                  CHECKIT | MENUTOGGLE, 0, MID_FULLSCREEN);
+
+  player_menu_add(&count, NM_TITLE, "Services", NULL, 0, 0, MID_SERVICES);
+  player_menu_add(&count, NM_ITEM, "Browse...", "R",
+                  services_catalog.count == 0U ? NM_ITEMDISABLED : 0, 0,
+                  MID_BROWSE);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  if (services_catalog.count == 0U) {
+    player_menu_add(&count, NM_ITEM, "No services installed", NULL,
+                    NM_ITEMDISABLED, 0, 0);
+  } else {
+    for (i = 0U; i < services_catalog.count; i++) {
+      player_menu_add(&count, NM_ITEM, services_catalog.info[i].name, NULL,
+                      0, 0, 0);
+      player_menu_add(&count, NM_SUB, "Browse", NULL, 0, 0,
+                      MID_SERVICE_BROWSE_BASE + i);
+      player_menu_add(&count, NM_SUB, "Settings...", NULL, 0, 0,
+                      MID_SERVICE_SETTINGS_BASE + i);
+    }
+  }
+  player_menu_add(&count, NM_END, NULL, NULL, 0, 0, 0);
+}
 static struct Gadget *pos_slider_gad;
 static struct Gadget *vol_slider_gad;
 static struct Gadget *repeat_gad;
@@ -1522,35 +1601,6 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
   int left;
   int top;
 
-  static struct NewMenu new_menu[] = {
-    { NM_TITLE, (CONST_STRPTR)"Project",       0, 0, 0, (APTR)MID_PROJECT },
-    { NM_ITEM,  (CONST_STRPTR)"Open...",       (CONST_STRPTR)"O", 0, 0, (APTR)MID_OPEN },
-    { NM_ITEM,  (CONST_STRPTR)"Open URL...",   (CONST_STRPTR)"U", 0, 0, (APTR)MID_OPEN_URL },
-    { NM_ITEM,  (CONST_STRPTR)"Browse...",     (CONST_STRPTR)"R", 0, 0, (APTR)MID_BROWSE },
-    { NM_ITEM,  (CONST_STRPTR)"Add files...",  (CONST_STRPTR)"A", 0, 0, (APTR)MID_ADD_FILES },
-    { NM_ITEM,  (CONST_STRPTR)"Add drawer...", 0, 0, 0, (APTR)MID_ADD_DRAWER },
-    { NM_ITEM,  (CONST_STRPTR)"Load playlist...", (CONST_STRPTR)"L", 0, 0, (APTR)MID_LOAD_PLAYLIST },
-    { NM_ITEM,  (CONST_STRPTR)"Save playlist...", (CONST_STRPTR)"S", 0, 0, (APTR)MID_SAVE_PLAYLIST },
-    { NM_ITEM,  (CONST_STRPTR)"Settings...",   (CONST_STRPTR)"P", 0, 0, (APTR)MID_SETTINGS },
-    { NM_ITEM,  (CONST_STRPTR)"About...",      0, 0, 0, (APTR)MID_ABOUT },
-    { NM_ITEM,  (CONST_STRPTR)"Quit",          (CONST_STRPTR)"Q", 0, 0, (APTR)MID_QUIT },
-
-    { NM_TITLE, (CONST_STRPTR)"Control",       0, 0, 0, (APTR)MID_CONTROL },
-    { NM_ITEM,  (CONST_STRPTR)"Play/Pause",    0, 0, 0, (APTR)MID_PLAY_PAUSE },
-    { NM_ITEM,  (CONST_STRPTR)"Stop",          0, 0, 0, (APTR)MID_STOP },
-    { NM_ITEM,  (CONST_STRPTR)"Next",          (CONST_STRPTR)"N", 0, 0, (APTR)MID_NEXT },
-    { NM_ITEM,  (CONST_STRPTR)"Previous",      (CONST_STRPTR)"B", 0, 0, (APTR)MID_PREVIOUS },
-    { NM_ITEM,  (CONST_STRPTR)"Seek forward",  0, 0, 0, (APTR)MID_SEEK_FWD },
-    { NM_ITEM,  (CONST_STRPTR)"Seek back",     0, 0, 0, (APTR)MID_SEEK_BACK },
-    { NM_ITEM,  (CONST_STRPTR)"Repeat",        0, 0, 0, 0 },
-    { NM_SUB,   (CONST_STRPTR)"Off",           0, CHECKIT, 6, (APTR)MID_REPEAT_OFF },
-    { NM_SUB,   (CONST_STRPTR)"Track",         0, CHECKIT, 5, (APTR)MID_REPEAT_TRACK },
-    { NM_SUB,   (CONST_STRPTR)"All",           0, CHECKIT, 3, (APTR)MID_REPEAT_ALL },
-    { NM_ITEM,  (CONST_STRPTR)"Shuffle",       0, CHECKIT | MENUTOGGLE, 0, (APTR)MID_SHUFFLE },
-    { NM_ITEM,  (CONST_STRPTR)"Fullscreen video", (CONST_STRPTR)"F", CHECKIT | MENUTOGGLE, 0, (APTR)MID_FULLSCREEN },
-
-    { NM_END, 0, 0, 0, 0, 0 }
-  };
 
   if (!context || !context->controller || !context->playlist) {
     return 0;
@@ -1729,8 +1779,12 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
     return 0;
   }
 
-  /* Menus */
-  player_menus = CreateMenus(new_menu, TAG_DONE);
+  /* Menu labels need module descriptors, but keep no module loaded merely
+   * for the menu. Browse and Settings load them on their first use. */
+  memset(&services_catalog, 0, sizeof(services_catalog));
+  (void)zzplay_providers_discover(&services_catalog, NULL, 0U);
+  build_player_menu();
+  player_menus = CreateMenus(player_new_menu, TAG_DONE);
   if (player_menus &&
       !LayoutMenus(player_menus, player_vi, GTMN_NewLookMenus, TRUE,
                    TAG_DONE)) {
@@ -1783,6 +1837,9 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
 
   if (player_menus) {
     SetMenuStrip(player_win, player_menus);
+    if (services_catalog.count == 0U) {
+      OffMenu(player_win, FULLMENUNUM(2, 0, NOSUB));
+    }
   }
 
   GT_RefreshWindow(player_win, 0);
@@ -1838,7 +1895,7 @@ void zzplay_gui_close(void)
 
   free_exec_list_nodes(&playlist_exec_list);
   drop_queue_free();
-  zzplay_browse_close();
+  zzplay_browse_shutdown();
 
   if (player_win && player_menus) {
     ClearMenuStrip(player_win);
@@ -1912,12 +1969,29 @@ int zzplay_gui_show(void)
 
 int zzplay_gui_browse(void)
 {
+  return zzplay_gui_browse_service(NULL);
+}
+
+int zzplay_gui_browse_service(const char *scheme)
+{
   if (!player_screen || !gui_context || !gui_context->controller ||
       !gui_context->playlist || !gui_context->prefs) {
     return 0;
   }
-  return zzplay_browse_open(player_screen, gui_context->controller,
-                            gui_context->playlist, gui_context->prefs);
+  return zzplay_browse_open_service(player_screen, gui_context->controller,
+                                    gui_context->playlist, gui_context->prefs,
+                                    scheme);
+}
+
+int zzplay_gui_service_settings(const char *scheme)
+{
+  if (!player_screen || !gui_context || !gui_context->controller ||
+      !gui_context->playlist || !gui_context->prefs || !scheme || !scheme[0]) {
+    return 0;
+  }
+  return zzplay_browse_settings_open(player_screen, gui_context->controller,
+                                     gui_context->playlist, gui_context->prefs,
+                                     scheme);
 }
 
 uint32_t zzplay_gui_signal_mask(void)
@@ -2010,7 +2084,7 @@ void zzplay_gui_poll(void)
     apply_requester_result(ctl, pl, prefs, &requester_result);
     zzplay_requester_result_release(&requester_result);
   }
-  if (zzplay_browse_is_open()) {
+  if (zzplay_browse_has_windows()) {
     zzplay_browse_poll();
   }
   /* Cheap when idle: this runs on every pass of the playback loops. It
@@ -2457,6 +2531,16 @@ void zzplay_gui_poll(void)
                   break;
 
                 default:
+                  if (mid >= MID_SERVICE_BROWSE_BASE &&
+                      mid < MID_SERVICE_BROWSE_BASE + services_catalog.count) {
+                    (void)zzplay_gui_browse_service(
+                        services_catalog.info[mid - MID_SERVICE_BROWSE_BASE].scheme);
+                  } else if (mid >= MID_SERVICE_SETTINGS_BASE &&
+                             mid < MID_SERVICE_SETTINGS_BASE +
+                                       services_catalog.count) {
+                    (void)zzplay_gui_service_settings(
+                        services_catalog.info[mid - MID_SERVICE_SETTINGS_BASE].scheme);
+                  }
                   break;
               }
               next_code = item->NextSelect;

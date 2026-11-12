@@ -63,6 +63,39 @@ const char *zzplay_provider_check_text(ZZPlayProviderCheck check)
   return "unknown problem";
 }
 
+uint32_t zzplay_provider_catalog_from_set(ZZPlayProviderCatalog *catalog,
+                                          const ZZPlayProviders *set)
+{
+  uint32_t i;
+
+  if (!catalog) {
+    return 0U;
+  }
+  memset(catalog, 0, sizeof(*catalog));
+  if (!set) {
+    return 0U;
+  }
+  for (i = 0U; i < set->count && catalog->count < ZZPLAY_PROVIDERS_MAX; i++) {
+    const ZZPlayProviderSlot *slot = &set->slot[i];
+    const ZZPlayProvider *provider = slot->provider;
+    ZZPlayProviderInfo *info;
+
+    if (!provider || !provider->name || !provider->scheme) {
+      continue;
+    }
+    info = &catalog->info[catalog->count++];
+    (void)snprintf(info->file, sizeof(info->file), "%s", slot->file);
+    (void)snprintf(info->scheme, sizeof(info->scheme), "%s", provider->scheme);
+    (void)snprintf(info->name, sizeof(info->name), "%s", provider->name);
+    info->has_settings = provider->field_count != 0U ||
+        (provider->size >= offsetof(ZZPlayProvider, link_choose) +
+                           sizeof(provider->link_choose) &&
+         provider->link_start != NULL && provider->link_poll != NULL &&
+         provider->link_choose != NULL);
+  }
+  return catalog->count;
+}
+
 const ZZPlayProviderSlot *zzplay_providers_find(const ZZPlayProviders *set,
                                                 const char *scheme)
 {
@@ -254,6 +287,18 @@ uint32_t zzplay_providers_load(ZZPlayProviders *set, char *why,
     }
   }
   return loaded;
+}
+
+uint32_t zzplay_providers_discover(ZZPlayProviderCatalog *catalog,
+                                   char *why, uint32_t why_size)
+{
+  ZZPlayProviders temporary;
+
+  memset(&temporary, 0, sizeof(temporary));
+  (void)zzplay_providers_load(&temporary, why, why_size);
+  (void)zzplay_provider_catalog_from_set(catalog, &temporary);
+  zzplay_providers_unload(&temporary);
+  return catalog ? catalog->count : 0U;
 }
 
 void zzplay_providers_unload(ZZPlayProviders *set)
