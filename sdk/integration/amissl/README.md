@@ -111,7 +111,7 @@ A recorded hardware comparison found that the `os3-68020` build runs on a
 
 `build-cryptoprofile.sh` builds `zz9k-cryptoprofile`, an AmiSSL client that
 times the installed library's default context against a software-only context.
-It expects the `amigadev/crosstools:m68k-amigaos-gcc10` image and writes the
+It expects the `amigadev/crosstools:m68k-amigaos` image and writes the
 executable to `work/out/`. Use it after installation when a per-operation
 comparison is needed.
 

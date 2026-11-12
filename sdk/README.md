@@ -45,7 +45,7 @@ cd sdk
 ./scripts/package-m68k-amigaos.sh
 ```
 
-Both build scripts use the `amigadev/crosstools:m68k-amigaos-gcc10` Docker
+Both build scripts use the `amigadev/crosstools:m68k-amigaos` Docker
 image (GCC 16), pinned by digest because the tag follows release candidates.
 Supply `-Image` to the PowerShell build script or set `IMAGE` when running the
 shell build script to try another image. The drivers repository builds with
