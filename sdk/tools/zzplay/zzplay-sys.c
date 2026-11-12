@@ -7,6 +7,8 @@
 
 #if defined(__amigaos__) || defined(AMIGA)
 
+#include <stdio.h>
+
 #include <dos/dos.h>
 #include <exec/memory.h>
 #include <proto/dos.h>
@@ -377,21 +379,86 @@ int zzplay_file_read_all(const char *path, size_t max_len, void **buf,
   return 1;
 }
 
+/* "<drawer of path>.zz<task>.<ext>": a file beside the target, named after
+ * the writing task so two processes never share one, and short enough for
+ * any file system. Owned; NULL when out of memory. */
+static char *sibling_path(const char *path, const char *ext)
+{
+  const char *p;
+  size_t dir_len = 0U;
+  char *out;
+
+  for (p = path; *p != '\0'; p++) {
+    if (*p == ':' || *p == '/') {
+      dir_len = (size_t)(p - path) + 1U;
+    }
+  }
+  out = (char *)zzplay_alloc(dir_len + 32U);
+  if (out) {
+    memcpy(out, path, dir_len);
+    (void)snprintf(out + dir_len, 32U, ".zz%08lx.%s",
+                   (unsigned long)FindTask(NULL), ext);
+  }
+  return out;
+}
+
+/* Put `tmp` in place of `path`. AmigaDOS does not rename over an existing
+ * file, so the old copy moves aside first and comes back if the new one
+ * cannot take its place. */
+static int replace_file(const char *tmp, const char *path, const char *old)
+{
+  if (Rename((CONST_STRPTR)tmp, (CONST_STRPTR)path)) {
+    return 1;
+  }
+  (void)DeleteFile((CONST_STRPTR)old);
+  if (!Rename((CONST_STRPTR)path, (CONST_STRPTR)old)) {
+    return 0;
+  }
+  if (!Rename((CONST_STRPTR)tmp, (CONST_STRPTR)path)) {
+    (void)Rename((CONST_STRPTR)old, (CONST_STRPTR)path);
+    return 0;
+  }
+  (void)DeleteFile((CONST_STRPTR)old);
+  return 1;
+}
+
 int zzplay_file_write_all(const char *path, const void *buf, size_t len)
 {
-  ZZPlayFile *file;
-  size_t written;
+  char *tmp;
+  char *old;
+  BPTR handle;
+  size_t total = 0U;
+  int ok = 0;
 
-  if (!path || (!buf && len != 0U) || len > 0x7fffffffUL) {
+  if (!path || (!buf && len != 0U) || len > 0x7fffffffUL ||
+      zzplay_http_is_url(path)) {
     return 0;
   }
-  file = zzplay_file_open(path, 1);
-  if (!file) {
-    return 0;
+  tmp = sibling_path(path, "new");
+  old = sibling_path(path, "old");
+  if (tmp && old) {
+    handle = Open((CONST_STRPTR)tmp, MODE_NEWFILE);
+    if (handle) {
+      while (total < len) {
+        LONG n = Write(handle, (APTR)((const UBYTE *)buf + total),
+                       (LONG)(len - total));
+
+        if (n <= 0L) {
+          break;
+        }
+        total += (size_t)n;
+      }
+      /* A full disk can show only when the buffers are flushed. */
+      ok = Close(handle) != 0 && total == len;
+      ok = ok && replace_file(tmp, path, old);
+      if (!ok) {
+        (void)DeleteFile((CONST_STRPTR)tmp);
+      }
+    }
   }
-  written = zzplay_file_write(file, buf, len);
-  zzplay_file_close(file);
-  return written == len;
+  zzplay_free(tmp);
+  zzplay_free(old);
+  return ok;
 }
 
 #else
@@ -536,23 +603,40 @@ int zzplay_file_read_all(const char *path, size_t max_len, void **buf,
   return 1;
 }
 
+/* Write beside the target, then rename over it: the old file stays until
+ * the new one is complete. */
 int zzplay_file_write_all(const char *path, const void *buf, size_t len)
 {
-  ZZPlayFile *file;
+  char *tmp;
+  FILE *file;
   size_t written;
+  int ok;
 
   if (!path || (!buf && len != 0U)) {
     return 0;
   }
-  file = zzplay_file_open(path, 1);
+  tmp = (char *)malloc(strlen(path) + 5U);
+  if (!tmp) {
+    return 0;
+  }
+  memcpy(tmp, path, strlen(path));
+  memcpy(tmp + strlen(path), ".new", 5U);
+  file = fopen(tmp, "wb");
   if (!file) {
+    free(tmp);
     return 0;
   }
-  written = zzplay_file_write(file, buf, len);
-  if (!zzplay_file_close(file)) {
-    return 0;
+  written = len != 0U ? fwrite(buf, 1U, len, file) : 0U;
+  ok = fclose(file) == 0 && written == len;
+  if (ok && rename(tmp, path) != 0) {
+    /* Where rename cannot replace a file. */
+    ok = remove(path) == 0 && rename(tmp, path) == 0;
   }
-  return written == len;
+  if (!ok) {
+    (void)remove(tmp);
+  }
+  free(tmp);
+  return ok;
 }
 
 #endif

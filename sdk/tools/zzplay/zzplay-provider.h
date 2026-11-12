@@ -155,6 +155,12 @@ struct ZZPlayHost {
   /* Sleep for up to `ms` milliseconds, polling keep_running in steps of at
    * most 100 ms. Returns 0 if cancelled, 1 if completed. */
   int (*sleep)(const ZZPlayHost *host, uint32_t ms);
+
+  /* After the body was fed: 1 when the XML document was complete (every
+   * element closed, nothing cut inside markup) or a handler stopped the
+   * scan, 0 for a reply cut short. Added after sleep: check `size` before
+   * calling. */
+  int (*xml_finish)(const ZZPlayHost *host, void *xml);
 };
 
 typedef struct ZZPlayProvider {

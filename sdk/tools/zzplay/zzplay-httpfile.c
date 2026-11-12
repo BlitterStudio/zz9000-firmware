@@ -21,8 +21,10 @@ struct ZZPlayHttpFile {
   void *stream;
   char url[ZZPLAY_HTTP_URL_MAX];
 
-  uint32_t pos;       /* next byte the reader asks for */
-  uint32_t conn_pos;  /* next byte the open stream delivers */
+  /* Positions are 64-bit: a live stream passes 4 GiB in about 74 hours at
+   * 128 kbit/s, and a wrapped position would read the cached start. */
+  uint64_t pos;       /* next byte the reader asks for */
+  uint64_t conn_pos;  /* next byte the open stream delivers */
   int seekable;
   int live;
   int has_total;
@@ -40,7 +42,7 @@ struct ZZPlayHttpFile {
   int title_pending;
 
   uint32_t head_len;
-  uint32_t win_start;
+  uint64_t win_start;
   uint32_t win_len;
   uint8_t head[HTTPFILE_HEAD_BYTES];
   uint8_t win[HTTPFILE_WINDOW_BYTES];
@@ -176,7 +178,7 @@ static long fill_window(ZZPlayHttpFile *f)
         return 0;
       }
       if (got > f->total - f->conn_pos) {
-        got = f->total - f->conn_pos;
+        got = (uint32_t)(f->total - f->conn_pos);
         f->stream_ended = 1;
       }
     }
@@ -335,11 +337,13 @@ static size_t copy_cached(ZZPlayHttpFile *f, uint8_t *out, size_t want)
   uint32_t avail = 0U;
 
   if (f->pos < f->head_len) {
-    src = f->head + f->pos;
-    avail = f->head_len - f->pos;
+    src = f->head + (size_t)f->pos;
+    avail = f->head_len - (uint32_t)f->pos;
   } else if (f->pos >= f->win_start && f->pos - f->win_start < f->win_len) {
-    src = f->win + (f->pos - f->win_start);
-    avail = f->win_len - (f->pos - f->win_start);
+    uint32_t at = (uint32_t)(f->pos - f->win_start);
+
+    src = f->win + at;
+    avail = f->win_len - at;
   }
   if (src == NULL) {
     return 0U;
@@ -348,7 +352,7 @@ static size_t copy_cached(ZZPlayHttpFile *f, uint8_t *out, size_t want)
     want = avail;
   }
   memcpy(out, src, want);
-  f->pos += (uint32_t)want;
+  f->pos += want;
   return want;
 }
 
@@ -380,7 +384,9 @@ size_t zzplay_httpfile_read(ZZPlayHttpFile *file, void *buf, size_t len)
         set_error(file, "Cannot go back in a stream that has no byte ranges");
         break;
       }
-      if (!open_at(file, file->pos, 0)) {
+      /* Seekable means the length is known and pos is below it, so pos
+       * fits a range request. */
+      if (!open_at(file, (uint32_t)file->pos, 0)) {
         break;
       }
     }
@@ -415,12 +421,16 @@ int zzplay_httpfile_seek(ZZPlayHttpFile *file, long offset,
   if (file == NULL) {
     return 0;
   }
+  /* The interface is a long: positions it cannot hold are refused. */
   if (origin == ZZPLAY_FILE_BEGIN) {
     base = 0L;
   } else if (origin == ZZPLAY_FILE_CURRENT) {
+    if (file->pos > 0x7fffffffUL) {
+      return 0;
+    }
     base = (long)file->pos;
   } else {
-    if (!file->has_total) {
+    if (!file->has_total || file->total > 0x7fffffffUL) {
       return 0;
     }
     base = (long)file->total;
@@ -430,21 +440,24 @@ int zzplay_httpfile_seek(ZZPlayHttpFile *file, long offset,
     return 0;
   }
   target = base + offset;
-  if (!file->seekable && (uint32_t)target < file->conn_pos &&
-      (uint32_t)target >= file->head_len &&
-      !((uint32_t)target >= file->win_start &&
-        (uint32_t)target - file->win_start < file->win_len)) {
+  if (!file->seekable && (uint64_t)target < file->conn_pos &&
+      (uint64_t)target >= file->head_len &&
+      !((uint64_t)target >= file->win_start &&
+        (uint64_t)target - file->win_start < file->win_len)) {
     /* Neither cached nor ahead of the stream. */
     return 0;
   }
-  file->pos = (uint32_t)target;
+  file->pos = (uint64_t)target;
   file->eof = 0;
   return 1;
 }
 
 long zzplay_httpfile_tell(const ZZPlayHttpFile *file)
 {
-  return file != NULL ? (long)file->pos : -1L;
+  if (file == NULL || file->pos > 0x7fffffffUL) {
+    return -1L;
+  }
+  return (long)file->pos;
 }
 
 int zzplay_httpfile_error(const ZZPlayHttpFile *file)

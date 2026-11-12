@@ -482,7 +482,13 @@ static int connect_to(ZZPlayNet *net, const ZZPlayUrl *url)
     set_err(net, "Cannot create a network socket");
     return 0;
   }
-  IoctlSocket(net->fd, FIONBIO, (APTR)&one);
+  /* Every wait below relies on a non-blocking socket: a blocking one
+   * would hang outside the cancel path. */
+  if (IoctlSocket(net->fd, FIONBIO, (APTR)&one) < 0) {
+    close_socket(net);
+    set_err_host(net, "Cannot connect to %s", url->host);
+    return 0;
+  }
   if (connect(net->fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
     LONG soerr = 0;
     socklen_t len = sizeof(soerr);

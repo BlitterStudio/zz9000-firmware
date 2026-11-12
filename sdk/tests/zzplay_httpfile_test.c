@@ -31,6 +31,8 @@ typedef struct Server {
   uint32_t close_after;  /* the body ends once this many bytes were sent */
   uint32_t extra_bytes;  /* bytes sent past the length the head named */
   const char *read_error; /* error() text, NULL for the default */
+  int fast_live;         /* endless live stream of pattern blocks, no
+                          * metadata, filled a block at a time */
   int pauses;
   uint32_t paused_ms;
   /* What the client asked for. */
@@ -45,8 +47,16 @@ typedef struct Stream {
   uint32_t audio_in;  /* audio bytes sent since the last metadata block */
   uint32_t sent;
   uint32_t extra;     /* bytes sent past the resource */
+  uint64_t live_pos;  /* fast_live: stream offset of the next byte */
   int failed;
 } Stream;
+
+/* The byte value of 4 KiB block `block` of a fast_live stream: block
+ * 2^20 (4 GiB) and on differ from the blocks 2^20 earlier. */
+static uint8_t live_value(uint64_t block)
+{
+  return (uint8_t)((block ^ ((block >> 20) * 0x55U)) & 0xFFU);
+}
 
 static void *fake_open(void *ctx, const char *url, int has_range,
                        uint32_t from, ZZPlayHttpHead *head, char *err,
@@ -75,6 +85,13 @@ static void *fake_open(void *ctx, const char *url, int has_range,
     return NULL;
   }
   s->last_has_range = has_range;
+  if (s->fast_live) {
+    st = (Stream *)calloc(1U, sizeof(*st));
+    st->server = s;
+    head->status = 200;
+    head->icy = 1;
+    return st;
+  }
   s->last_from = from;
   if (has_range && s->refuse_range_416) {
     head->status = 416;
@@ -118,6 +135,20 @@ static long fake_read(void *ctx, void *stream, uint8_t *buf, size_t size)
   Stream *st = (Stream *)stream;
   size_t n = 0U;
 
+  if (s->fast_live) {
+    /* Every 4 KiB block holds one value, which changes past 4 GiB in a
+     * way the first 4 GiB never repeat. */
+    while (n < size) {
+      uint64_t block = st->live_pos >> 12;
+      size_t left = (size_t)(4096U - (st->live_pos & 4095U));
+
+      if (left > size - n) left = size - n;
+      memset(buf + n, (int)live_value(block), left);
+      n += left;
+      st->live_pos += left;
+    }
+    return (long)n;
+  }
   if (s->fail_after != 0U && st->sent >= s->fail_after) {
     st->failed = 1;
     return -1;
@@ -478,6 +509,52 @@ static ZZPlayHttpFile *open_server_err(Server *s, char *err, size_t err_size)
   return zzplay_httpfile_open(&ops, "http://h/x", err, err_size);
 }
 
+/* A live stream keeps going past 4 GiB (about 74 hours at 128 kbit/s):
+ * the bytes after it come from the stream, not from the cached start a
+ * wrapped 32-bit position would point at; tell and seek, whose interface
+ * is a long, refuse positions they cannot hold. */
+static int test_live_past_4gib(void)
+{
+  static uint8_t got[1024U * 1024U];
+  const uint64_t four_gib = (uint64_t)1U << 32;
+  uint64_t at = 0U;
+  Server s;
+  ZZPlayHttpFile *f;
+  size_t i;
+  int rc = 0;
+
+  server_defaults(&s);
+  s.fast_live = 1;
+  f = open_server(&s);
+  if (f == NULL) return 1;
+  if (!zzplay_httpfile_live(f)) { rc = 2; goto done; }
+  while (at < four_gib) {
+    if (zzplay_httpfile_read(f, got, sizeof(got)) != sizeof(got)) {
+      rc = 3;
+      goto done;
+    }
+    if (got[0] != live_value(at >> 12)) { rc = 4; goto done; }
+    at += sizeof(got);
+  }
+  if (zzplay_httpfile_tell(f) != -1L) { rc = 5; goto done; }
+  if (zzplay_httpfile_seek(f, 1L, ZZPLAY_FILE_CURRENT)) { rc = 6; goto done; }
+  /* The first 64 KiB past 4 GiB, where a wrapped position would read the
+   * cached first 32 KiB. */
+  if (zzplay_httpfile_read(f, got, 65536U) != 65536U) { rc = 7; goto done; }
+  for (i = 0U; i < 65536U; i++) {
+    if (got[i] != live_value((at + i) >> 12)) { rc = 8; goto done; }
+  }
+  if (s.opens != 1 || zzplay_httpfile_error(f)) { rc = 9; goto done; }
+  /* The cached start can still be reached from the beginning. */
+  if (!zzplay_httpfile_seek(f, 0L, ZZPLAY_FILE_BEGIN) ||
+      zzplay_httpfile_read(f, got, 16U) != 16U || got[0] != live_value(0U)) {
+    rc = 10;
+  }
+done:
+  zzplay_httpfile_close(f);
+  return rc;
+}
+
 /* Faults a server or the network produce: each ends with a reason to
  * show, and nothing stays open (the sanitizer's leak check sees to it). */
 static int test_faults(void)
@@ -726,6 +803,8 @@ int main(void)
   if (rc != 0) { printf("open_path_connections %d\n", rc); return 150 + rc; }
   rc = test_faults();
   if (rc != 0) { printf("faults %d\n", rc); return 170 + rc; }
+  rc = test_live_past_4gib();
+  if (rc != 0) { printf("live_past_4gib %d\n", rc); return 200 + rc; }
   printf("zzplay_httpfile_test: all checks passed\n");
   return 0;
 }

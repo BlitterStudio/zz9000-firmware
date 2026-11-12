@@ -186,6 +186,8 @@ static int emit_start(ZZPlayXml *xml)
     attrs[n].value = xml->text + xml->value_off[i];
     n++;
   }
+  xml->seen_element = 1;
+  xml->depth++;
   if (xml->handler.start != NULL &&
       xml->handler.start(xml->handler.user, xml->name, attrs, n,
                          xml->truncated) != 0) {
@@ -196,6 +198,9 @@ static int emit_start(ZZPlayXml *xml)
 
 static int emit_end(ZZPlayXml *xml)
 {
+  if (xml->depth != 0U) {
+    xml->depth--;
+  }
   if (xml->handler.end != NULL &&
       xml->handler.end(xml->handler.user, xml->name) != 0) {
     xml->stopped = 1;
@@ -415,6 +420,15 @@ int zzplay_xml_feed(ZZPlayXml *xml, const char *data, size_t len)
   }
   xml->attr_stored = stored;
   return xml->stopped;
+}
+
+int zzplay_xml_finish(const ZZPlayXml *xml)
+{
+  if (xml == NULL) {
+    return 0;
+  }
+  return xml->stopped ||
+         (xml->state == X_TEXT && xml->seen_element && xml->depth == 0U);
 }
 
 const char *zzplay_xml_attr(const ZZPlayXmlAttr *attrs, uint32_t count,

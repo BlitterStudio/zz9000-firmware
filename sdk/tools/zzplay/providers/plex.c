@@ -334,6 +334,41 @@ static int plex_reply_ok(const ZZPlayHost *host, int ok, int status,
   return 1;
 }
 
+#define PLEX_UNREADABLE "Plex sent an unreadable reply"
+
+/* Close the scanner of a reply. Returns 1 when the reply was a whole
+ * document; a host older than xml_finish cannot tell, so its replies
+ * count as whole. */
+static int plex_xml_done(const ZZPlayHost *host, void *xml)
+{
+  int whole = 1;
+
+  if (host->size >= (uint32_t)(offsetof(ZZPlayHost, xml_finish) +
+                               sizeof(host->xml_finish)) &&
+      host->xml_finish != NULL) {
+    whole = host->xml_finish(host, xml);
+  }
+  host->xml_close(host, xml);
+  return whole;
+}
+
+/* Close the scanner and judge a Plex server reply: plex_reply_ok, then a
+ * document cut short is unreadable. */
+static int plex_finish_reply(const ZZPlayHost *host, void *xml, int ok,
+                             int status, char *err, uint32_t err_size)
+{
+  int whole = plex_xml_done(host, xml);
+
+  if (!plex_reply_ok(host, ok, status, err, err_size)) {
+    return 0;
+  }
+  if (!whole) {
+    host->format(err, err_size, "%s", PLEX_UNREADABLE);
+    return 0;
+  }
+  return 1;
+}
+
 /* Recognises "https://A-B-C-D.<hash>.plex.direct:<port>" and writes
  * "http://A.B.C.D:<port>" into out. IPv4 addresses only; anything else
  * returns 0 and leaves out untouched. */
@@ -691,9 +726,7 @@ static int plex_load_sections(PlexContext *ctx, char *err, uint32_t err_size)
 
   ok = ctx->host->http_get(ctx->host, url, headers, plex_xml_data_cb,
                            &feed, &status, err, err_size);
-  ctx->host->xml_close(ctx->host, xml);
-
-  if (!plex_reply_ok(ctx->host, ok, status, err, err_size)) {
+  if (!plex_finish_reply(ctx->host, xml, ok, status, err, err_size)) {
     return 0;
   }
 
@@ -914,14 +947,13 @@ static int plex_fetch_list(PlexContext *ctx, const PlexListOpts *opts,
 
   ok = ctx->host->http_get(ctx->host, url, headers, plex_xml_data_cb,
                            &feed, &status, err, err_size);
-  ctx->host->xml_close(ctx->host, xml);
-
   if (xst.stopped) {
+    ctx->host->xml_close(ctx->host, xml);
     if (stopped_out) *stopped_out = 1;
     return 1;
   }
 
-  if (!plex_reply_ok(ctx->host, ok, status, err, err_size)) {
+  if (!plex_finish_reply(ctx->host, xml, ok, status, err, err_size)) {
     return 0;
   }
 
@@ -1039,6 +1071,7 @@ static int plex_fetch_resources(PlexContext *ctx, const char *account_token,
   void *xml;
   int status = 0;
   int ok;
+  int whole;
 
   ctx->discovered_server_count = 0;
 
@@ -1073,7 +1106,7 @@ static int plex_fetch_resources(PlexContext *ctx, const char *account_token,
   ok = ctx->host->http_get(ctx->host,
                            "https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1",
                            headers, plex_xml_data_cb, &feed, &status, err, err_size);
-  ctx->host->xml_close(ctx->host, xml);
+  whole = plex_xml_done(ctx->host, xml);
 
   if (status == 401) {
     ctx->host->format(err, err_size, "%s", PLEX_SIGNIN_REJECTED);
@@ -1089,7 +1122,11 @@ static int plex_fetch_resources(PlexContext *ctx, const char *account_token,
     }
     return 0;
   }
-
+  if (!whole) {
+    ctx->discovered_server_count = 0;
+    ctx->host->format(err, err_size, "%s", PLEX_UNREADABLE);
+    return 0;
+  }
   return 1;
 }
 
@@ -1205,15 +1242,18 @@ static int plex_select_server(PlexContext *ctx, const PlexDiscoveredServer *srv,
     plex_strlcpy(secure_url, target_url, sizeof(secure_url));
   }
 
-  /* Store both local addresses when resources list them, and SERVER for compatibility */
-  if (secure_url[0] != '\0') {
-    ctx->host->pref_set(ctx->host, "SERVER_SECURE", secure_url);
+  /* Store both local addresses when resources list them, and SERVER for
+   * compatibility. The token goes last: a save that stops part way leaves
+   * the service signed out, never signed in only for this session. */
+  if ((secure_url[0] != '\0' &&
+       !ctx->host->pref_set(ctx->host, "SERVER_SECURE", secure_url)) ||
+      (plain_url[0] != '\0' &&
+       !ctx->host->pref_set(ctx->host, "SERVER_PLAIN", plain_url)) ||
+      !ctx->host->pref_set(ctx->host, "SERVER", target_url) ||
+      !ctx->host->pref_set(ctx->host, "TOKEN", srv->access_token)) {
+    ctx->host->format(err, err_size, "Could not save the settings");
+    return 0;
   }
-  if (plain_url[0] != '\0') {
-    ctx->host->pref_set(ctx->host, "SERVER_PLAIN", plain_url);
-  }
-  ctx->host->pref_set(ctx->host, "SERVER", target_url);
-  ctx->host->pref_set(ctx->host, "TOKEN", srv->access_token);
 
   plex_strlcpy(ctx->server, target_url, sizeof(ctx->server));
   plex_strlcpy(ctx->token, srv->access_token, sizeof(ctx->token));
@@ -1546,6 +1586,7 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
     void *xml;
     int status = 0;
     int ok;
+    int whole;
 
     if (!plex_host_has_signin(ctx->host)) {
       ctx->host->format(err, err_size, "ZZPlay update required for plex.tv sign-in");
@@ -1577,8 +1618,12 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
 
     ok = ctx->host->http_post(ctx->host, post_url, headers, NULL, 0U,
                               plex_xml_data_cb, &feed, &status, err, err_size);
-    ctx->host->xml_close(ctx->host, xml);
+    whole = plex_xml_done(ctx->host, xml);
 
+    if (ok && status == 201 && !whole) {
+      ctx->host->format(err, err_size, "%s", PLEX_UNREADABLE);
+      return 0;
+    }
     if (!ok || status != 201 || pst.id[0] == '\0' || pst.code[0] == '\0') {
       if (err && err_size > 0U && err[0] == '\0') {
         ctx->host->format(err, err_size, "Failed to request PIN from plex.tv");
@@ -1660,6 +1705,7 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
       void *xml;
       int status = 0;
       int ok;
+      int whole;
 
       plex_memset(&pst, 0, sizeof(pst));
       pst.host = ctx->host;
@@ -1677,8 +1723,12 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
 
       ok = ctx->host->http_get(ctx->host, poll_url, poll_headers,
                                plex_xml_data_cb, &feed, &status, err, err_size);
-      ctx->host->xml_close(ctx->host, xml);
+      whole = plex_xml_done(ctx->host, xml);
 
+      if (ok && status == 200 && !whole) {
+        ctx->host->format(err, err_size, "%s", PLEX_UNREADABLE);
+        return 0;
+      }
       if (ok && status == 200) {
         if (pst.auth_token[0] != '\0') {
           plex_strlcpy(account_token, pst.auth_token, sizeof(account_token));
@@ -2115,9 +2165,7 @@ static int plex_fetch_metadata(PlexContext *ctx, const char *rk,
 
   ok = ctx->host->http_get(ctx->host, url, headers, plex_xml_data_cb,
                            &feed, &status, err, err_size);
-  ctx->host->xml_close(ctx->host, xml);
-
-  if (!plex_reply_ok(ctx->host, ok, status, err, err_size)) {
+  if (!plex_finish_reply(ctx->host, xml, ok, status, err, err_size)) {
     return 0;
   }
 

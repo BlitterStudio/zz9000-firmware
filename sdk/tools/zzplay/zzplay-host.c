@@ -282,10 +282,43 @@ static void host_ensure_drawer(const char *drawer)
     }
   }
 }
+
+#include <exec/semaphores.h>
+#include <proto/exec.h>
+
+/* The Browse worker (sign-in, favourites) and the GUI (Settings, Recently
+ * played) both read, change and write these files: one at a time, or a
+ * save could drop the keys another just wrote. */
+static struct SignalSemaphore host_files_lock;
+static int host_files_lock_ready;
+
+static void host_files_obtain(void)
+{
+  Forbid();
+  if (!host_files_lock_ready) {
+    InitSemaphore(&host_files_lock);
+    host_files_lock_ready = 1;
+  }
+  Permit();
+  ObtainSemaphore(&host_files_lock);
+}
+
+static void host_files_release(void)
+{
+  ReleaseSemaphore(&host_files_lock);
+}
+#else
+static void host_files_obtain(void)
+{
+}
+
+static void host_files_release(void)
+{
+}
 #endif
 
-int zzplay_host_pref_get(const char *scheme, const char *key, char *out,
-                         uint32_t size)
+static int host_pref_get_locked(const char *scheme, const char *key,
+                                char *out, uint32_t size)
 {
   char env_path[64];
   char envarc_path[64];
@@ -322,8 +355,19 @@ int zzplay_host_pref_get(const char *scheme, const char *key, char *out,
   return 0;
 }
 
-int zzplay_host_pref_set(const char *scheme, const char *key,
-                         const char *value)
+int zzplay_host_pref_get(const char *scheme, const char *key, char *out,
+                         uint32_t size)
+{
+  int found;
+
+  host_files_obtain();
+  found = host_pref_get_locked(scheme, key, out, size);
+  host_files_release();
+  return found;
+}
+
+static int host_pref_set_locked(const char *scheme, const char *key,
+                                const char *value)
 {
   char env_path[64];
   char envarc_path[64];
@@ -388,6 +432,17 @@ int zzplay_host_pref_set(const char *scheme, const char *key,
   }
 }
 
+int zzplay_host_pref_set(const char *scheme, const char *key,
+                         const char *value)
+{
+  int ok;
+
+  host_files_obtain();
+  ok = host_pref_set_locked(scheme, key, value);
+  host_files_release();
+  return ok;
+}
+
 /* "ENV:ZZPlay/<scheme><suffix>" and its ENVARC: twin; 0 when either
  * does not fit. */
 static int host_text_paths(const char *scheme, const char *suffix,
@@ -421,10 +476,13 @@ int zzplay_host_text_load(const char *scheme, const char *suffix,
                        sizeof(env_path))) {
     return 0;
   }
+  host_files_obtain();
   if (!zzplay_file_read_all(env_path, (size_t)max_len, &buf, &len) &&
       !zzplay_file_read_all(envarc_path, (size_t)max_len, &buf, &len)) {
+    host_files_release();
     return 0;
   }
+  host_files_release();
   *text = (char *)buf;
   *length = (uint32_t)len;
   return 1;
@@ -442,12 +500,14 @@ int zzplay_host_text_save(const char *scheme, const char *suffix,
                                 sizeof(env_path))) {
     return 0;
   }
+  host_files_obtain();
 #if defined(__amigaos__) || defined(AMIGA)
   host_ensure_drawer("ENV:ZZPlay");
   host_ensure_drawer("ENVARC:ZZPlay");
 #endif
   w1 = zzplay_file_write_all(env_path, text, (size_t)length);
   w2 = zzplay_file_write_all(envarc_path, text, (size_t)length);
+  host_files_release();
   return (w1 && w2) ? 1 : 0;
 }
 
@@ -534,6 +594,13 @@ static int host_xml_feed(const ZZPlayHost *host, void *xml, const char *data,
     return 0;
   }
   return zzplay_xml_feed(&w->xml, data, (size_t)len);
+}
+
+static int host_xml_finish(const ZZPlayHost *host, void *xml)
+{
+  HostXmlWrapper *w = (HostXmlWrapper *)xml;
+  (void)host;
+  return w != NULL && zzplay_xml_finish(&w->xml);
 }
 
 static void host_xml_close(const ZZPlayHost *host, void *xml)
@@ -777,6 +844,7 @@ void zzplay_host_bind(ZZPlayHostBinding *binding, const char *scheme,
   binding->table.pref_set = host_table_pref_set;
   binding->table.http_post = host_http_post;
   binding->table.sleep = host_sleep;
+  binding->table.xml_finish = host_xml_finish;
   if (scheme) {
     strncpy(binding->scheme, scheme, sizeof(binding->scheme) - 1U);
     binding->scheme[sizeof(binding->scheme) - 1U] = '\0';

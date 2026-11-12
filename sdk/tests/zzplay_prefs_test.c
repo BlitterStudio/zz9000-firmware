@@ -1,13 +1,29 @@
 /* Behavioural tests for preferences, ahiprefs, and backend resolution.
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200112L
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <direct.h>
+#define test_mkdir(p) _mkdir(p)
+#define test_rmdir(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define test_mkdir(p) mkdir((p), 0755)
+#define test_rmdir(p) rmdir(p)
+#endif
+
 #include "../tools/zzplay/zzplay-ahiprefs.h"
 #include "../tools/zzplay/zzplay-options.h"
 #include "../tools/zzplay/zzplay-prefs.h"
+#include "../tools/zzplay/zzplay-sys.h"
 
 static int test_prefs_parse_and_format(void)
 {
@@ -414,6 +430,42 @@ static int test_ahiprefs_parser(void)
   return 0;
 }
 
+/* A save writes a new file beside the old one and only then puts it in
+ * the old one's place: when the new file cannot be written, the saved
+ * settings stay as they were. The host build names the new file
+ * "<path>.new"; a drawer of that name makes it impossible to create. */
+static int test_save_keeps_old_file_on_failure(void)
+{
+  const char *path = "T_zzplay_atomic.prefs";
+  const char *blocker = "T_zzplay_atomic.prefs.new";
+  ZZPlayPrefs prefs;
+  ZZPlayPrefs got;
+  FILE *f;
+  int rc = 0;
+
+  zzplay_prefs_defaults(&prefs);
+  prefs.volume = 10U;
+  if (!zzplay_prefs_save(&prefs, path)) return 1;
+  prefs.volume = 90U;
+  if (!zzplay_prefs_save(&prefs, path)) { rc = 2; goto done; }
+  zzplay_prefs_defaults(&got);
+  if (!zzplay_prefs_load(&got, path) || got.volume != 90U) { rc = 3; goto done; }
+  f = fopen(blocker, "rb");
+  if (f != NULL) { fclose(f); rc = 4; goto done; } /* nothing left behind */
+
+  if (test_mkdir(blocker) != 0) { rc = 5; goto done; }
+  prefs.volume = 20U;
+  if (zzplay_prefs_save(&prefs, path)) rc = 6;
+  if (zzplay_file_write_all(path, "x", 1U)) rc = 7;
+  (void)test_rmdir(blocker);
+  if (rc != 0) goto done;
+  zzplay_prefs_defaults(&got);
+  if (!zzplay_prefs_load(&got, path) || got.volume != 90U) rc = 8;
+done:
+  remove(path);
+  return rc;
+}
+
 int main(void)
 {
   int rc;
@@ -448,6 +500,11 @@ int main(void)
     fprintf(stderr, "test_session_settle_drops_launch_overrides failed: %d\n",
             rc);
     return 6;
+  }
+  rc = test_save_keeps_old_file_on_failure();
+  if (rc) {
+    fprintf(stderr, "test_save_keeps_old_file_on_failure failed: %d\n", rc);
+    return 7;
   }
 
   printf("zzplay_prefs_test: all tests passed\n");

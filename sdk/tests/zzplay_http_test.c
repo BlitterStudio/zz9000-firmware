@@ -78,6 +78,52 @@ static int test_resolve(void)
   if (!zzplay_http_resolve(&base, "/b", out, sizeof(out)) ||
       strcmp(out, "https://h/b") != 0)
     return 8;
+  /* A query-only redirect keeps the whole path. */
+  if (!zzplay_http_parse_url("http://host/a/b", &base)) return 9;
+  if (!zzplay_http_resolve(&base, "?token=2", out, sizeof(out)) ||
+      strcmp(out, "http://host/a/b?token=2") != 0)
+    return 10;
+  /* Another scheme is nothing to fetch. */
+  if (zzplay_http_resolve(&base, "ftp://x/y", out, sizeof(out))) return 11;
+  /* The examples of RFC 3986 section 5.4, without the empty reference
+   * (an empty Location is refused). Fragments are dropped: they are
+   * never sent. */
+  {
+    static const char *const cases[][2] = {
+      { "g", "http://a/b/c/g" },        { "./g", "http://a/b/c/g" },
+      { "g/", "http://a/b/c/g/" },      { "/g", "http://a/g" },
+      { "//g", "http://g" },            { "?y", "http://a/b/c/d;p?y" },
+      { "g?y", "http://a/b/c/g?y" },    { "#s", "http://a/b/c/d;p?q" },
+      { "g#s", "http://a/b/c/g" },      { "g?y#s", "http://a/b/c/g?y" },
+      { ";x", "http://a/b/c/;x" },      { "g;x", "http://a/b/c/g;x" },
+      { "g;x?y#s", "http://a/b/c/g;x?y" },
+      { ".", "http://a/b/c/" },         { "./", "http://a/b/c/" },
+      { "..", "http://a/b/" },          { "../", "http://a/b/" },
+      { "../g", "http://a/b/g" },       { "../..", "http://a/" },
+      { "../../", "http://a/" },        { "../../g", "http://a/g" },
+      { "../../../g", "http://a/g" },   { "../../../../g", "http://a/g" },
+      { "/./g", "http://a/g" },         { "/../g", "http://a/g" },
+      { "g.", "http://a/b/c/g." },      { ".g", "http://a/b/c/.g" },
+      { "g..", "http://a/b/c/g.." },    { "..g", "http://a/b/c/..g" },
+      { "./../g", "http://a/b/g" },     { "./g/.", "http://a/b/c/g/" },
+      { "g/./h", "http://a/b/c/g/h" },  { "g/../h", "http://a/b/c/h" },
+      { "g;x=1/./y", "http://a/b/c/g;x=1/y" },
+      { "g;x=1/../y", "http://a/b/c/y" },
+      { "g?y/./x", "http://a/b/c/g?y/./x" },
+      { "g?y/../x", "http://a/b/c/g?y/../x" },
+      { "g#s/./x", "http://a/b/c/g" },  { "g#s/../x", "http://a/b/c/g" }
+    };
+    size_t i;
+
+    if (!zzplay_http_parse_url("http://a/b/c/d;p?q", &base)) return 12;
+    for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      if (!zzplay_http_resolve(&base, cases[i][0], out, sizeof(out)) ||
+          strcmp(out, cases[i][1]) != 0) {
+        printf("resolve \"%s\" gave \"%s\"\n", cases[i][0], out);
+        return 13;
+      }
+    }
+  }
   return 0;
 }
 

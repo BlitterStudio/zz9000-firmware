@@ -379,9 +379,9 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       "DRAWER=%s\n",
       zzplay_prefs_backend_name(prefs->mp3_output),
       zzplay_prefs_backend_name(prefs->video_audio),
-      prefs->ahi_unit,
+      (unsigned)prefs->ahi_unit,
       prefs->mhi_driver,
-      prefs->volume,
+      (unsigned)prefs->volume,
       zzplay_prefs_repeat_name(prefs->repeat),
       prefs->shuffle ? "YES" : "NO",
       prefs->fullscreen ? "YES" : "NO",
@@ -459,8 +459,6 @@ int zzplay_prefs_save(const ZZPlayPrefs *prefs, const char *path)
 {
   static char buf[ZZPLAY_PREFS_TEXT_MAX];
   size_t needed;
-  ZZPlayFile *f;
-  size_t written;
 
   if (!prefs || !path) {
     return 0;
@@ -469,15 +467,8 @@ int zzplay_prefs_save(const ZZPlayPrefs *prefs, const char *path)
   if (needed >= sizeof(buf)) {
     return 0;
   }
-  f = zzplay_file_open(path, 1);
-  if (!f) {
-    return 0;
-  }
-  written = zzplay_file_write(f, buf, needed);
-  if (!zzplay_file_close(f)) {
-    return 0;
-  }
-  return (written == needed) ? 1 : 0;
+  /* The old file stays until the new one is complete. */
+  return zzplay_file_write_all(path, buf, needed);
 }
 
 void zzplay_prefs_copy_session(ZZPlayPrefs *to, const ZZPlayPrefs *from)

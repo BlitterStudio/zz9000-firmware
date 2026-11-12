@@ -163,11 +163,66 @@ static int format_authority(const ZZPlayUrl *url, char *out, size_t size)
   return n > 0 && (size_t)n < size;
 }
 
+/* RFC 3986 5.2.4: remove "." and ".." segments from a path that starts
+ * with '/', in place. */
+static void remove_dot_segments(char *path)
+{
+  char *in = path;
+  char *out = path;
+
+  while (*in != '\0') {
+    /* `in` is at the '/' before a segment. */
+    char *seg = in + 1;
+    size_t len = strcspn(seg, "/");
+
+    if ((len == 1U && seg[0] == '.') ||
+        (len == 2U && seg[0] == '.' && seg[1] == '.')) {
+      if (len == 2U) {
+        while (out > path && *--out != '/') {
+        }
+      }
+      in = seg + len;
+      if (*in == '\0') {
+        *out++ = '/'; /* "/a/.." ends as "/", not "" */
+      }
+      continue;
+    }
+    memmove(out, in, len + 1U);
+    out += len + 1U;
+    in = seg + len;
+  }
+  *out = '\0';
+  if (out == path) {
+    path[0] = '/';
+    path[1] = '\0';
+  }
+}
+
+/* A reference that starts with its own scheme ("ftp:", "data:"). */
+static int has_scheme(const char *ref)
+{
+  size_t i = 0U;
+
+  if (!((ref[0] >= 'a' && ref[0] <= 'z') || (ref[0] >= 'A' && ref[0] <= 'Z'))) {
+    return 0;
+  }
+  while ((ref[i] >= 'a' && ref[i] <= 'z') || (ref[i] >= 'A' && ref[i] <= 'Z') ||
+         (ref[i] >= '0' && ref[i] <= '9') || ref[i] == '+' || ref[i] == '-' ||
+         ref[i] == '.') {
+    i++;
+  }
+  return ref[i] == ':';
+}
+
 int zzplay_http_resolve(const ZZPlayUrl *base, const char *location,
                         char *out, size_t size)
 {
   char authority[ZZPLAY_HTTP_HOST_MAX + 8U];
+  char path[ZZPLAY_HTTP_URL_MAX];
   const char *scheme;
+  size_t base_path_len;
+  size_t ref_end;
+  size_t ref_path_len;
   int n;
 
   if (base == NULL || location == NULL || out == NULL || size == 0U ||
@@ -178,6 +233,9 @@ int zzplay_http_resolve(const ZZPlayUrl *base, const char *location,
     n = snprintf(out, size, "%s", location);
     return n > 0 && (size_t)n < size;
   }
+  if (has_scheme(location)) {
+    return 0; /* another scheme: nothing ZZPlay can fetch */
+  }
   scheme = base->tls ? "https:" : "http:";
   if (location[0] == '/' && location[1] == '/') {
     n = snprintf(out, size, "%s%s", scheme, location);
@@ -186,22 +244,45 @@ int zzplay_http_resolve(const ZZPlayUrl *base, const char *location,
   if (!format_authority(base, authority, sizeof(authority))) {
     return 0;
   }
+  /* RFC 3986 5.2.2. A fragment is never sent, so it is dropped. */
+  ref_end = strcspn(location, "#");
+  ref_path_len = strcspn(location, "?#");
+  base_path_len = strcspn(base->path, "?");
+  if (ref_path_len == 0U) {
+    /* "?q" replaces the base query; "#f" keeps the base path and query. */
+    const char *query = location[0] == '?' ? location : base->path + base_path_len;
+    size_t query_len = location[0] == '?' ? ref_end : strlen(query);
+
+    n = snprintf(out, size, "%s//%s%.*s%.*s", scheme, authority,
+                 (int)base_path_len, base->path, (int)query_len, query);
+    return n > 0 && (size_t)n < size;
+  }
   if (location[0] == '/') {
-    n = snprintf(out, size, "%s//%s%s", scheme, authority, location);
+    if (ref_path_len >= sizeof(path)) {
+      return 0;
+    }
+    memcpy(path, location, ref_path_len);
+    path[ref_path_len] = '\0';
   } else {
-    /* Relative: replace the last segment of the base path (before any
-     * query string). */
+    /* Merge: the base path up to its last '/', then the reference. */
     size_t dir = 0U;
     size_t i;
 
-    for (i = 0U; base->path[i] != '\0' && base->path[i] != '?'; i++) {
+    for (i = 0U; i < base_path_len; i++) {
       if (base->path[i] == '/') {
         dir = i + 1U;
       }
     }
-    n = snprintf(out, size, "%s//%s%.*s%s", scheme, authority, (int)dir,
-                 base->path, location);
+    if (dir == 0U || ref_path_len >= sizeof(path) - dir) {
+      return 0;
+    }
+    memcpy(path, base->path, dir);
+    memcpy(path + dir, location, ref_path_len);
+    path[dir + ref_path_len] = '\0';
   }
+  remove_dot_segments(path);
+  n = snprintf(out, size, "%s//%s%s%.*s", scheme, authority, path,
+               (int)(ref_end - ref_path_len), location + ref_path_len);
   return n > 0 && (size_t)n < size;
 }
 

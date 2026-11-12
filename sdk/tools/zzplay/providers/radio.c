@@ -744,6 +744,18 @@ static int list_favourites(RadioContext *rc, uint32_t start, uint32_t count,
   return 1;
 }
 
+/* 1 when the reply fed to `xml` was a whole document. A host older than
+ * xml_finish cannot tell, so its replies count as whole. */
+static int radio_xml_complete(const ZZPlayHost *host, void *xml)
+{
+  if (host->size < (uint32_t)(offsetof(ZZPlayHost, xml_finish) +
+                              sizeof(host->xml_finish)) ||
+      host->xml_finish == NULL) {
+    return 1;
+  }
+  return host->xml_finish(host, xml);
+}
+
 /* After a directory request: a failed transfer keeps the host's reason
  * (or gets one), and a reply without the <result> root is an error page
  * or garbage, not an empty directory. */
@@ -782,6 +794,7 @@ static int fetch_and_scan_stations(RadioContext *rc, const char *url,
   void *xml;
   int status = 0;
   int ok;
+  int whole;
 
   memset(&col, 0, sizeof(col));
   col.rc = rc;
@@ -806,9 +819,11 @@ static int fetch_and_scan_stations(RadioContext *rc, const char *url,
 
   ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
                       err_size);
+  whole = radio_xml_complete(host, xml);
   host->xml_close(host, xml);
 
-  return radio_reply_ok(host, ok, status, col.saw_root, err, err_size);
+  return radio_reply_ok(host, ok, status, col.saw_root && whole, err,
+                        err_size);
 }
 
 static int fetch_and_scan_folders(RadioContext *rc, const char *url,
@@ -823,6 +838,7 @@ static int fetch_and_scan_folders(RadioContext *rc, const char *url,
   void *xml;
   int status = 0;
   int ok;
+  int whole;
 
   memset(&col, 0, sizeof(col));
   col.host = host;
@@ -847,9 +863,11 @@ static int fetch_and_scan_folders(RadioContext *rc, const char *url,
 
   ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
                       err_size);
+  whole = radio_xml_complete(host, xml);
   host->xml_close(host, xml);
 
-  return radio_reply_ok(host, ok, status, col.saw_root, err, err_size);
+  return radio_reply_ok(host, ok, status, col.saw_root && whole, err,
+                        err_size);
 }
 
 static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t count,
@@ -993,14 +1011,17 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
 {
   RadioContext *rc = (RadioContext *)ctx;
   const ZZPlayHost *host;
-  char escaped[128];
-  char url[512];
+  /* The id is a checked UUID (under 40 safe characters): these hold the
+   * whole request. */
+  char escaped[48];
+  char url[128];
   ZZPlayHostXmlHandler handler;
   ResolveCollector col;
   XmlDataFeed feed;
   void *xml;
   int status = 0;
   int ok;
+  int whole;
 
   if (!rc || !rc->host || !item || !out) {
     return 0;
@@ -1039,9 +1060,11 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
 
   ok = host->http_get(host, url, NULL, xml_data_feed_cb, &feed, &status, err,
                       err_size);
+  whole = radio_xml_complete(host, xml);
   host->xml_close(host, xml);
 
-  if (!radio_reply_ok(host, ok, status, col.saw_root, err, err_size)) {
+  if (!radio_reply_ok(host, ok, status, col.saw_root && whole, err,
+                      err_size)) {
     return 0;
   }
 
@@ -1072,6 +1095,29 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
   out->duration_ms = 0U;
 
   return 1;
+}
+
+/* Store favourite `index` as its prefs line. Returns 0 when it could not
+ * be saved. */
+static int radio_store_favourite(const ZZPlayHost *host, uint32_t index,
+                                 const FavouriteEntry *fav)
+{
+  char key[32];
+  char val[256];
+
+  host->format(key, sizeof(key), "fav_%u", index);
+  host->format(val, sizeof(val), "%s|%s|%s|%s|%s", fav->uuid, fav->name,
+               fav->codec, fav->bitrate, fav->country);
+  return host->pref_set(host, key, val) != 0;
+}
+
+static int radio_save_failed(const ZZPlayHost *host, char *err,
+                             uint32_t err_size)
+{
+  if (err && err_size > 0U) {
+    host->format(err, err_size, "Could not save the settings");
+  }
+  return 0;
 }
 
 static int radio_favourite(void *ctx, const ZZPlayProviderItem *item, int add,
@@ -1132,19 +1178,19 @@ static int radio_favourite(void *ctx, const ZZPlayProviderItem *item, int add,
     radio_copy_text(rc->favs[rc->fav_count].country,
                     sizeof(rc->favs[0].country), country, 1);
 
-    host->format(key, sizeof(key), "fav_%u", rc->fav_count);
-    host->format(val, sizeof(val), "%s|%s|%s|%s|%s",
-                 rc->favs[rc->fav_count].uuid,
-                 rc->favs[rc->fav_count].name,
-                 rc->favs[rc->fav_count].codec,
-                 rc->favs[rc->fav_count].bitrate,
-                 rc->favs[rc->fav_count].country);
-    host->pref_set(host, key, val);
-
+    /* Shown as saved only once it is: the count stays until both lines
+     * are stored. */
+    if (!radio_store_favourite(host, rc->fav_count,
+                               &rc->favs[rc->fav_count])) {
+      return radio_save_failed(host, err, err_size);
+    }
+    host->format(val, sizeof(val), "%u", rc->fav_count + 1U);
+    if (!host->pref_set(host, "fav_count", val)) {
+      host->format(key, sizeof(key), "fav_%u", rc->fav_count);
+      (void)host->pref_set(host, key, "");
+      return radio_save_failed(host, err, err_size);
+    }
     rc->fav_count++;
-    host->format(val, sizeof(val), "%u", rc->fav_count);
-    host->pref_set(host, "fav_count", val);
-
     return 1;
   } else {
     int found_idx = -1;
@@ -1160,27 +1206,24 @@ static int radio_favourite(void *ctx, const ZZPlayProviderItem *item, int add,
       return 1;
     }
 
+    /* Store the shortened list first; the list in memory changes only
+     * when every line was saved. */
+    for (i = (uint32_t)found_idx; i + 1U < rc->fav_count; i++) {
+      if (!radio_store_favourite(host, i, &rc->favs[i + 1U])) {
+        return radio_save_failed(host, err, err_size);
+      }
+    }
+    host->format(key, sizeof(key), "fav_%u", rc->fav_count - 1U);
+    host->format(val, sizeof(val), "%u", rc->fav_count - 1U);
+    if (!host->pref_set(host, key, "") ||
+        !host->pref_set(host, "fav_count", val)) {
+      return radio_save_failed(host, err, err_size);
+    }
+
     for (i = (uint32_t)found_idx; i + 1U < rc->fav_count; i++) {
       rc->favs[i] = rc->favs[i + 1U];
     }
     rc->fav_count--;
-
-    for (i = 0U; i < rc->fav_count; i++) {
-      host->format(key, sizeof(key), "fav_%u", i);
-      host->format(val, sizeof(val), "%s|%s|%s|%s|%s",
-                   rc->favs[i].uuid,
-                   rc->favs[i].name,
-                   rc->favs[i].codec,
-                   rc->favs[i].bitrate,
-                   rc->favs[i].country);
-      host->pref_set(host, key, val);
-    }
-    host->format(key, sizeof(key), "fav_%u", rc->fav_count);
-    host->pref_set(host, key, "");
-
-    host->format(val, sizeof(val), "%u", rc->fav_count);
-    host->pref_set(host, "fav_count", val);
-
     return 1;
   }
 }

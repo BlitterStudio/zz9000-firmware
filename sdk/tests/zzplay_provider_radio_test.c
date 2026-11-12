@@ -45,12 +45,15 @@ static int fake_pref_get(const ZZPlayHost *host, const char *key, char *out,
   return 0;
 }
 
+/* Set to make every save fail, as a full or write-protected ENVARC: does. */
+static int s_pref_fail = 0;
+
 static int fake_pref_set(const ZZPlayHost *host, const char *key,
                          const char *value)
 {
   int i;
   (void)host;
-  if (!key || !value) {
+  if (!key || !value || s_pref_fail) {
     return 0;
   }
   for (i = 0; i < s_pref_count; i++) {
@@ -158,6 +161,12 @@ static void fake_xml_close(const ZZPlayHost *host, void *xml)
 {
   (void)host;
   free(xml);
+}
+
+static int fake_xml_finish(const ZZPlayHost *host, void *xml)
+{
+  (void)host;
+  return zzplay_xml_finish(&((FakeXmlWrapper *)xml)->xml);
 }
 
 static const char *fake_xml_attr(const ZZPlayHostXmlAttr *attrs, uint32_t count,
@@ -302,6 +311,7 @@ static ZZPlayHost make_fake_host(void)
   h.format = fake_format;
   h.pref_get = fake_pref_get;
   h.pref_set = fake_pref_set;
+  h.xml_finish = fake_xml_finish;
   return h;
 }
 
@@ -838,6 +848,68 @@ static void test_radio_faults(ZZPlayHost *host)
   }
   assert(!p->resolve(ctx, "../../etc", &resolved, err, sizeof(err)));
   assert(strcmp(err, "Not a radio station id") == 0);
+  /* A reply cut short is not a shorter list. */
+  {
+    static const char *const cut[] = {
+      "<result><station stationuuid=\"aaaa-1\" name=\"One\" codec=\"MP3\"/>",
+      "<result><station stationuuid=\"aaaa-1\" name=\"On",
+      "<result><tag name=\"pop\" stationcount=\"1\"/><!-- x"
+    };
+    for (i = 0U; i < sizeof(cut) / sizeof(cut[0]); i++) {
+      mock_body(cut[i], strlen(cut[i]));
+      sink = check_sink(&got);
+      assert(!p->search(ctx, "rock", &sink, err, sizeof(err)));
+      assert(strcmp(err, "The station directory sent an unreadable reply") == 0);
+      assert(!p->list(ctx, "tags", 0, 10, &sink, err, sizeof(err)));
+      assert(strcmp(err, "The station directory sent an unreadable reply") == 0);
+    }
+    mock_body(NULL, 0U);
+  }
+  p->close(ctx);
+}
+
+/* A favourite that cannot be saved is reported and not shown as one. */
+static void test_radio_save_failures(ZZPlayHost *host)
+{
+  const ZZPlayProvider *p = zzplay_provider_entry();
+  ZZPlayProviderItem a;
+  ZZPlayProviderItem b;
+  CheckSink got;
+  ZZPlayItemSink sink;
+  char err[128];
+  void *ctx;
+
+  s_pref_count = 0;
+  ctx = p->open(host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&a, 0, sizeof(a));
+  a.id = "aaaa-1";
+  a.title = "One";
+  a.subtitle = "MP3, 128 kbps";
+  a.kind = ZZPLAY_ITEM_STATION;
+  b = a;
+  b.id = "bbbb-2";
+  b.title = "Two";
+
+  s_pref_fail = 1;
+  assert(!p->favourite(ctx, &a, 1, err, sizeof(err)));
+  assert(strcmp(err, "Could not save the settings") == 0);
+  sink = check_sink(&got);
+  assert(p->list(ctx, "fav", 0, 10, &sink, err, sizeof(err)) && got.seen == 0U);
+
+  /* Saved, then a removal that cannot be saved keeps both. */
+  s_pref_fail = 0;
+  assert(p->favourite(ctx, &a, 1, err, sizeof(err)));
+  assert(p->favourite(ctx, &b, 1, err, sizeof(err)));
+  s_pref_fail = 1;
+  assert(!p->favourite(ctx, &a, 0, err, sizeof(err)));
+  assert(strcmp(err, "Could not save the settings") == 0);
+  sink = check_sink(&got);
+  assert(p->list(ctx, "fav", 0, 10, &sink, err, sizeof(err)) && got.seen == 2U);
+  assert(strcmp(got.rows[0].id, "aaaa-1") == 0);
+  s_pref_fail = 0;
+  assert(p->favourite(ctx, &a, 0, err, sizeof(err)));
+  assert(p->favourite(ctx, &b, 0, err, sizeof(err)));
   p->close(ctx);
 }
 
@@ -1133,6 +1205,7 @@ int main(void)
   test_radio_folders(&fake_host);
   test_radio_faults(&fake_host);
   test_radio_odd_text(&fake_host);
+  test_radio_save_failures(&fake_host);
   test_radio_reply_fuzz(&fake_host);
 
   printf("zzplay_provider_radio_test: all assertions passed\n");

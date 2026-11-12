@@ -54,6 +54,8 @@ typedef struct ZZPlayXml {
   uint32_t value_start;
   uint32_t name_off[ZZPLAY_XML_ATTRS_MAX];
   uint32_t value_off[ZZPLAY_XML_ATTRS_MAX];
+  uint32_t depth;                     /* elements open */
+  int seen_element;
   char text[ZZPLAY_XML_TEXT_MAX];
 } ZZPlayXml;
 
@@ -62,6 +64,11 @@ void zzplay_xml_init(ZZPlayXml *xml, const ZZPlayXmlHandler *handler);
 /* Scan the next chunk. Returns 1 once a handler asked to stop (further
  * chunks are ignored), else 0. */
 int zzplay_xml_feed(ZZPlayXml *xml, const char *data, size_t len);
+
+/* After the last chunk: 1 when the document was complete (at least one
+ * element, every element closed, and the text did not end inside markup)
+ * or a handler stopped the scan; 0 for a document that was cut short. */
+int zzplay_xml_finish(const ZZPlayXml *xml);
 
 /* The value of attribute `name` in a start callback's list, or NULL. */
 const char *zzplay_xml_attr(const ZZPlayXmlAttr *attrs, uint32_t count,

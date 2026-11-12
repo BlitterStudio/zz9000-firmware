@@ -601,6 +601,8 @@ static void xml_run(const uint8_t *data, size_t len, uint32_t stop_after)
       break;
     }
   }
+  /* A handler that stopped always counts as whole. */
+  CHECK(!xml->stopped || zzplay_xml_finish(xml));
   free(xml);
 }
 

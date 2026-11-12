@@ -69,6 +69,9 @@ void zzplay_file_end_network_item(void);
  * zzplay_free(). */
 int zzplay_file_read_all(const char *path, size_t max_len, void **buf,
                          size_t *len);
+/* Replace a file with `len` bytes: they go to a new file beside it first,
+ * which takes the old one's place only once completely written and
+ * closed. On failure the old file is left as it was. */
 int zzplay_file_write_all(const char *path, const void *buf, size_t len);
 
 #endif /* ZZPLAY_SYS_H */

@@ -63,9 +63,13 @@ static int fake_pref_get(const ZZPlayHost *host, const char *key, char *out, uin
   return 0;
 }
 
+/* Set to make every save fail, as a full or write-protected ENVARC: does. */
+static int g_mock_pref_fail = 0;
+
 static int fake_pref_set(const ZZPlayHost *host, const char *key, const char *value)
 {
   (void)host;
+  if (g_mock_pref_fail) return 0;
   mock_pref_set(key, value);
   return 1;
 }
@@ -135,6 +139,12 @@ static void fake_xml_close(const ZZPlayHost *host, void *xml)
 {
   (void)host;
   free(xml);
+}
+
+static int fake_xml_finish(const ZZPlayHost *host, void *xml)
+{
+  (void)host;
+  return zzplay_xml_finish((const ZZPlayXml *)xml);
 }
 
 static const char *fake_xml_attr(const ZZPlayHostXmlAttr *attrs, uint32_t count, const char *name)
@@ -452,7 +462,8 @@ static const ZZPlayHost g_test_host = {
   fake_pref_get,
   fake_pref_set,
   fake_http_post,
-  fake_sleep
+  fake_sleep,
+  fake_xml_finish
 };
 
 /* Item collector sink */
@@ -1765,9 +1776,24 @@ static void test_empty_library(const ZZPlayProvider *p)
 {
   static const char *const bodies[] = {
     "<?xml version=\"1.0\"?><MediaContainer size=\"0\"></MediaContainer>",
-    "<html><body>Welcome to the router</body></html>",
-    ""
+    "<html><body>Welcome to the router</body></html>"
   };
+  /* Replies cut short, for each request that reads one. */
+  static const struct {
+    const char *path;
+    const char *node; /* NULL: resolve("302") */
+    const char *body;
+  } cut[] = {
+    { "/library/sections", "", "" },
+    { "/library/sections", "",
+      "<MediaContainer><Directory type=\"artist\" key=\"3\" title=\"Music\"/>" },
+    { "/library/metadata/201/children", "alb:201",
+      "<MediaContainer><Track ratingKey=\"5\" title=\"One\"/><Track rat" },
+    { "/library/metadata/302", NULL,
+      "<MediaContainer><Track title=\"T\"><Media audioCodec=\"mp3\"><Part "
+      "key=\"/library/parts/1/f.mp3\"/></Media>" }
+  };
+  ZZPlayResolved res;
   char err[128];
   ItemCollector col;
   void *ctx;
@@ -1784,7 +1810,49 @@ static void test_empty_library(const ZZPlayProvider *p)
     assert(strcmp(err, "The Plex server has no music library") == 0);
     assert(col.count == 0);
   }
+  for (i = 0U; i < sizeof(cut) / sizeof(cut[0]); i++) {
+    g_mock_body = cut[i].body;
+    g_mock_body_path = cut[i].path;
+    collector_init(&col, 0);
+    if (cut[i].node != NULL) {
+      ok = p->list(ctx, cut[i].node, 0, 50, &col.sink, err, sizeof(err));
+    } else {
+      ok = p->resolve(ctx, "302", &res, err, sizeof(err));
+    }
+    assert(ok == 0);
+    assert(strcmp(err, "Plex sent an unreadable reply") == 0);
+  }
   g_mock_body = NULL;
+  p->close(ctx);
+}
+
+/* A sign-in whose settings cannot be saved says so and does not leave
+ * the session signed in. */
+static void test_signin_save_failure(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+
+  mock_prefs_clear();
+  g_mock_status = 200;
+  g_mock_two_servers = 0;
+  g_mock_poll_calls = 0;
+  g_mock_poll_authenticated_after = 1;
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  g_mock_pref_fail = 1;
+  collector_init(&col, 0);
+  ok = p->list(ctx, "signin:continue:736458353", 0, 50, &col.sink, err,
+               sizeof(err));
+  g_mock_pref_fail = 0;
+  assert(ok == 0);
+  assert(strcmp(err, "Could not save the settings") == 0);
+  /* Still signed out: the top level offers sign-in. */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1 && col.count == 1 && strcmp(col.items[0].id, "signin") == 0);
   p->close(ctx);
 }
 
@@ -2189,6 +2257,7 @@ int main(void)
   test_empty_library(p);
   test_odd_text(p);
   test_reply_fuzz(p);
+  test_signin_save_failure(p);
   test_headers_on_every_request();
 
   printf("All zzplay_provider_plex_test checks passed (%u HTTP requests verified).\n",

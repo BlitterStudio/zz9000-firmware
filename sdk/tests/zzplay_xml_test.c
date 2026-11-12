@@ -183,6 +183,74 @@ static int test_stop_and_lookup(void)
   return 0;
 }
 
+static int finished(const char *doc, size_t step)
+{
+  ZZPlayXml xml;
+  ZZPlayXmlHandler h;
+  size_t len = strlen(doc);
+  size_t pos;
+
+  h.start = NULL;
+  h.end = NULL;
+  h.user = NULL;
+  zzplay_xml_init(&xml, &h);
+  for (pos = 0U; pos < len; pos += step) {
+    size_t n = len - pos < step ? len - pos : step;
+    (void)zzplay_xml_feed(&xml, doc + pos, n);
+  }
+  return zzplay_xml_finish(&xml);
+}
+
+/* A reply cut short anywhere is told from a whole one. */
+static int test_finish(void)
+{
+  static const char *const whole[] = {
+    "<?xml version=\"1.0\"?>\n<MediaContainer size=\"1\"><Track a=\"1\"/>"
+    "</MediaContainer>\n",
+    "<result/>", "<a><b></b><!-- c --></a>", "<a><![CDATA[<x>]]></a>  "
+  };
+  static const char *const cut[] = {
+    "",                                       /* nothing at all */
+    "<?xml version=\"1.0\"?>",                /* no element */
+    "<MediaContainer size=\"1\"><Track a=\"1\"/>", /* root left open */
+    "<result><station name=\"x",              /* inside an attribute */
+    "<result><station name=\"x\" ",           /* inside a tag */
+    "<result></result",                       /* inside an end tag */
+    "<a><!-- c -",                            /* inside a comment */
+    "<a></a><!-- c",                          /* comment after the root */
+    "<a><![CDATA[ x ]",                       /* inside CDATA */
+    "<a/><!DOCTYPE"                           /* inside a declaration */
+  };
+  size_t i;
+  size_t step;
+
+  for (step = 1U; step <= 7U; step += 3U) {
+    for (i = 0U; i < sizeof(whole) / sizeof(whole[0]); i++) {
+      if (!finished(whole[i], step)) return 1;
+    }
+    for (i = 0U; i < sizeof(cut) / sizeof(cut[0]); i++) {
+      if (finished(cut[i], step)) {
+        printf("accepted: %s\n", cut[i]);
+        return 2;
+      }
+    }
+  }
+  {
+    /* A handler that stopped the scan read what it wanted. */
+    ZZPlayXml xml;
+    ZZPlayXmlHandler h;
+    int seen = 0;
+
+    h.start = stop_after_first;
+    h.end = NULL;
+    h.user = &seen;
+    zzplay_xml_init(&xml, &h);
+    (void)zzplay_xml_feed(&xml, "<a><b", 5U);
+    if (!zzplay_xml_finish(&xml)) return 3;
+  }
+  return 0;
+}
+
 int main(void)
 {
   int rc;
@@ -195,6 +263,8 @@ int main(void)
   if (rc != 0) { printf("limits %d\n%s", rc, log_text); return 50 + rc; }
   rc = test_stop_and_lookup();
   if (rc != 0) { printf("stop %d\n", rc); return 70 + rc; }
+  rc = test_finish();
+  if (rc != 0) { printf("finish %d\n", rc); return 90 + rc; }
   printf("zzplay_xml_test: all checks passed\n");
   return 0;
 }
