@@ -7,3 +7,5 @@ minigl_present_test
 rix_core_test
 rix_drv_test
 rix_backend_test
+minigl_profile_test
+pl330_abort_test

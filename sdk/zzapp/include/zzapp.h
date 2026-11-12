@@ -327,6 +327,8 @@ typedef struct zzapp_gl {
 #define ZZ_GL_BIND_DIRECT_PRESENT 1u
 /* Debug switch: drain and copy every frame before zz_gl_swap returns. */
 #define ZZ_GL_BIND_SYNC_PRESENT 2u
+/* Debug switch: keep RasterIX command feed synchronous for A/B comparison. */
+#define ZZ_GL_BIND_SYNC_RIX_FEED 4u
 
 
 typedef struct zzapp_api {

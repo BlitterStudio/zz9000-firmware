@@ -963,6 +963,15 @@ static void assert_rix_ownership_transitions(void)
     assert(minigl_raster_quiesce());
     model.complete = 1;
     minigl_raster_set_rix_platform(&platform);
+    {
+        /* A retire releases the colour binding; like MW_PRESENT's rebind of
+         * the next back buffer, bind one before using the raster again. */
+        MiniGLRasterBuffers buffers = {
+            color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
+            staging, sizeof(staging), textures, sizeof(textures), W, H
+        };
+        assert(minigl_raster_configure_buffers(&buffers));
+    }
     minigl_raster_init();
     minigl_raster_set_state(&s);
 

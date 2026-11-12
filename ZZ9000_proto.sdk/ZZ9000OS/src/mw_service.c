@@ -517,7 +517,7 @@ int mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
     if (!mw_service_create_context_owner(&owner))
         return MW_STATUS_FAILED;
 #endif
-    context = mw_host_create_owned(width, height, owner);
+    context = mw_host_create_owned(width, height, owner, 0);
     if (!context) {
 #if defined(MINIGL_MODULE)
         mw_service_close_context_owner(owner);
@@ -563,6 +563,8 @@ int mw_service_close(uint32_t handle)
 void mw_service_reset_local(void)
 {
     uint32_t i;
+    if (!mw_rix_abort_engines())
+        return;
     for (i = 0; i < MW_MAX_CONTEXTS; ++i) {
         if (g_contexts[i]) {
 #if defined(MINIGL_MODULE)
@@ -668,6 +670,11 @@ int mw_service_poll(void)
 
     if (!g_ctrl)
         return 0;
+
+    if (minigl_raster_feed_pending()) {
+        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER);
+        return 1;
+    }
 
     g_doorbell_pending = 0;
     mw_wire_st32(&g_ctrl->firmware_heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat) + 1U);

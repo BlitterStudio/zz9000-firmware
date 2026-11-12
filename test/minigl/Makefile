@@ -8,7 +8,7 @@ FIRMWARE := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/src
 MINIGL_MODULE_BACKEND ?= $(FIRMWARE)
 CPPFLAGS := -I$(FIRMWARE) -DMINIGL_HOST_TEST
 RIX_BACKEND := $(MINIGL_MODULE_BACKEND)/minigl_rix_backend.c $(MINIGL_MODULE_BACKEND)/rix_cmd.c $(MINIGL_MODULE_BACKEND)/rix_texture.c $(MINIGL_MODULE_BACKEND)/rix_setup.c $(MINIGL_MODULE_BACKEND)/rix_drv.c
-TARGETS := minigl_raster_test minigl_polygon_test minigl_present_test minigl_lighting_test minigl_oracle_test rix_core_test rix_drv_test rix_backend_test
+TARGETS := minigl_raster_test minigl_polygon_test minigl_present_test minigl_lighting_test minigl_oracle_test rix_core_test rix_drv_test rix_backend_test minigl_profile_test pl330_abort_test
 
 .PHONY: test differential clean
 
@@ -21,6 +21,8 @@ test: $(TARGETS)
 	./rix_core_test
 	./rix_drv_test
 	./rix_backend_test
+	./minigl_profile_test
+	./pl330_abort_test
 differential:
 	sh ./run_rix_differential.sh
 
@@ -39,6 +41,12 @@ rix_drv_test: rix_drv_test.c $(MINIGL_MODULE_BACKEND)/rix_drv.c
 
 rix_backend_test: rix_backend_test.c $(RIX_BACKEND)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -lm -o $@
+
+minigl_profile_test: minigl_profile_test.c $(MINIGL_MODULE_BACKEND)/minigl_profile.c
+	$(CC) $(CPPFLAGS) -DMINIGL_PROFILE_TEST $(CFLAGS) $^ -o $@
+
+pl330_abort_test: pl330_abort_test.c $(FIRMWARE)/zzm_minigl_host.c $(FIRMWARE)/minigl_platform.c
+	$(CC) $(CPPFLAGS) -DMINIGL_MODULE -fno-asm -I../zzm_resources/mock $(CFLAGS) $^ -o $@
 
 
 minigl_present_test: test_minigl_present.c $(MINIGL_MODULE_BACKEND)/minigl_present.c $(MINIGL_MODULE_BACKEND)/minigl_platform.c

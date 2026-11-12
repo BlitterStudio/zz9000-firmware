@@ -792,7 +792,7 @@ static void mw_ctx_configure_rix(mw_ctx *c)
         minigl_raster_set_rix_platform(NULL);
         return;
     }
-    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+    for (index = 0U; index < MINIGL_RIX_SYNC_COMMAND_BUFFERS; ++index) {
         c->rix_command_buffers[index] = (uint8_t *)mw_context_alloc(
             c, MINIGL_RIX_COMMAND_BYTES, &c->rix_command_buffer_addresses[index]);
         if (!c->rix_command_buffers[index])
@@ -868,6 +868,41 @@ static int mw_rix_dma_retire(void *context)
 {
     return minigl_platform_dma_retire(context);
 }
+static int mw_rix_dma_complete(void *context)
+{
+    return minigl_platform_dma_complete(context);
+}
+
+static int mw_rix_dma_start_nonblocking(void *context, uintptr_t source,
+                                        uint32_t words, uint32_t burst_words)
+{
+    return minigl_platform_dma_start_nonblocking(context, source, words, burst_words);
+}
+
+static int mw_rix_dma_ready(void *context)
+{
+    return minigl_platform_dma_ready(context);
+}
+
+static int mw_rix_dma_abort(void *context)
+{
+    return minigl_platform_dma_abort(context);
+}
+#if MINIGL_MODULE
+extern void zzm_module_yield_wait(void);
+static void mw_rix_yield_wait(void *context)
+{
+    (void)context;
+    zzm_module_yield_wait();
+}
+
+extern int zzm_module_can_park(void);
+static int mw_rix_can_park(void *context)
+{
+    (void)context;
+    return zzm_module_can_park();
+}
+#endif
 
 static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
 {
@@ -961,13 +996,27 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.dma_stream = mw_rix_dma_stream;
     platform.dma_start_async = mw_rix_dma_start_async;
     platform.dma_retire = mw_rix_dma_retire;
+    if (minigl_platform_dma_ready(NULL)) {
+        platform.dma_complete = mw_rix_dma_complete;
+        platform.dma_start_nonblocking = mw_rix_dma_start_nonblocking;
+        platform.dma_ready = mw_rix_dma_ready;
+        platform.dma_abort = mw_rix_dma_abort;
+    }
+#if MINIGL_MODULE
+    platform.can_park = mw_rix_can_park;
+    platform.yield_wait = mw_rix_yield_wait;
+#endif
+    platform.async_feed = c->rix_async != 0U;
+    platform.owner_generation = c->handle;
+    platform.command_buffer_count = platform.async_feed ? MINIGL_RIX_COMMAND_BUFFERS :
+                                    MINIGL_RIX_SYNC_COMMAND_BUFFERS;
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
     if (!minigl_rix_backend_probe_platform(&platform)) {
         minigl_raster_set_rix_platform(NULL);
         return;
     }
-    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+    for (index = 0U; index < platform.command_buffer_count; ++index) {
         c->rix_command_buffers[index] = (uint8_t *)mw_context_alloc(
             c, MINIGL_RIX_COMMAND_BYTES, &c->rix_command_buffer_addresses[index]);
         if (!c->rix_command_buffers[index])
@@ -1005,7 +1054,7 @@ static void mw_ctx_configure_rix(mw_ctx *c)
 #endif
 
 
-void mw_rix_abort_engines(void)
+int mw_rix_abort_engines(void)
 {
 #if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)
 #if MINIGL_RIX_DMA
@@ -1020,9 +1069,11 @@ void mw_rix_abort_engines(void)
     Xil_Out32(MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     __asm__ volatile("dsb sy" ::: "memory");
 #elif defined(MINIGL_RASTERIX) && defined(MINIGL_MODULE)
-    minigl_platform_abort_graphics();
+    if (!minigl_platform_abort_graphics())
+        return 0;
 #endif
     minigl_raster_abandon();
+    return 1;
 }
 
 static inline void mw_ctx_update_latest(mw_ctx *c)
@@ -1280,10 +1331,12 @@ mw_ctx *mw_host_create(uint32_t width, uint32_t height)
 {
     return mw_host_create_owned(width, height,
                                 CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL,
-                                                g_next_handle));
+                                                g_next_handle),
+                                minigl_raster_async_feed_enabled());
 }
 
-mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
+mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner,
+                             int rix_async)
 {
     mw_ctx *c;
     int i;
@@ -1299,6 +1352,7 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     if (!c)
         return NULL;
     c->card_pool_owner = owner;
+    c->rix_async = rix_async != 0;
     c->card_pool_backed = MW_CONTEXT_CARD_POOL;
     c->width = width;
     c->height = height;

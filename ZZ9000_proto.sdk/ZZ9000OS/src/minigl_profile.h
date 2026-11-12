@@ -77,8 +77,21 @@ typedef enum {
     MGLP_GEOM_SUB_STAGES
 } MiniGLProfileGeomSubStage;
 
-#if defined(__arm__) && !defined(MINIGL_HOST_TEST) && \
-    !defined(MINIGL_SERVICE_HOST_TEST)
+typedef enum {
+    MGLP_FEED_WAIT_RING = 0,
+    MGLP_FEED_WAIT_DRAIN,
+    MGLP_FEED_WAIT_TARGET,
+    MGLP_FEED_WAIT_TEXTURE,
+    MGLP_FEED_WAIT_COUNT
+} MiniGLProfileFeedWait;
+
+static inline uint32_t minigl_profile_counter_delta(uint32_t end, uint32_t start)
+{
+    return end - start;
+}
+
+#if (defined(__arm__) && !defined(MINIGL_HOST_TEST) && \
+     !defined(MINIGL_SERVICE_HOST_TEST)) || defined(MINIGL_PROFILE_TEST)
 #define MINIGL_PROFILE_ACTIVE 1
 
 extern volatile int g_minigl_profile_on;
@@ -160,6 +173,15 @@ void minigl_profile_packet_end(uint32_t bytes, uint32_t commands);
 void minigl_profile_fallback(uint32_t reason, uint32_t triangles);
 /* Service poll exit: prints the summary once 5 s have elapsed. */
 void minigl_profile_report(void);
+/* FIFO feeder telemetry.  Source tags are owned by rix_drv. */
+void minigl_profile_feed_chunk(uint32_t source);
+void minigl_profile_feed_vacancy(uint32_t vacancy, uint32_t capacity);
+void minigl_profile_feed_retry(void);
+void minigl_profile_feed_errors(uint32_t errors);
+void minigl_profile_feed_dma_complete(void);
+void minigl_profile_feed_queued(uint32_t queued);
+void minigl_profile_feed_deadline_wake(void);
+void minigl_profile_feed_wait(MiniGLProfileFeedWait reason, uint64_t us);
 #else
 static inline void minigl_profile_push(MiniGLProfileStage stage) { (void)stage; }
 static inline void minigl_profile_pop(void) { }
@@ -200,6 +222,16 @@ static inline void minigl_profile_fallback(uint32_t reason, uint32_t triangles)
     (void)triangles;
 }
 static inline void minigl_profile_report(void) { }
+static inline void minigl_profile_feed_chunk(uint32_t source) { (void)source; }
+static inline void minigl_profile_feed_vacancy(uint32_t vacancy, uint32_t capacity)
+{ (void)vacancy; (void)capacity; }
+static inline void minigl_profile_feed_retry(void) { }
+static inline void minigl_profile_feed_errors(uint32_t errors) { (void)errors; }
+static inline void minigl_profile_feed_dma_complete(void) { }
+static inline void minigl_profile_feed_queued(uint32_t queued) { (void)queued; }
+static inline void minigl_profile_feed_deadline_wake(void) { }
+static inline void minigl_profile_feed_wait(MiniGLProfileFeedWait reason, uint64_t us)
+{ (void)reason; (void)us; }
 #endif
 
 #endif /* MINIGL_PROFILE_H */

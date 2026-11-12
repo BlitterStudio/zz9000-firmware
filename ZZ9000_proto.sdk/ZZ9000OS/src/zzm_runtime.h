@@ -242,6 +242,11 @@ typedef struct zzm_graphics_hw_service {
     void (*pl330_abort)(uint32_t channel);
     void (*pl330_release)(uint32_t channel);
     void (*barrier)(void);
+    /* Appended optional callbacks; size-gate before use with V3 modules. */
+    int (*pl330_complete)(uint32_t channel);
+    int (*pl330_start_nonblocking)(uint32_t channel, uint32_t source_address,
+                                   uint32_t bytes);
+    int (*pl330_abort_nonblocking)(uint32_t channel);
 } zzm_graphics_hw_service_t;
 typedef const void *(*zzm_get_service_fn)(uint32_t id, uint32_t min_version);
 

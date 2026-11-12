@@ -231,13 +231,29 @@ int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
     return ZZ_OK;
 }
 
+static int g_module_in_api;
+static int g_module_in_worker;
+
+void zzm_module_set_worker_context(int active)
+{
+    g_module_in_worker = active != 0;
+}
+
+int zzm_module_can_park(void)
+{
+    return g_module_in_api > 0 && !g_module_in_worker;
+}
+
 void zzm_module_api_enter(void)
 {
+    g_module_in_api++;
     g_module_app_host->api_enter();
 }
 
 void zzm_module_api_leave(void)
 {
+    if (g_module_in_api > 0)
+        g_module_in_api--;
     g_module_app_host->api_leave();
 }
 
@@ -290,6 +306,8 @@ uint32_t zzm_module_current_generation(void)
     return g_module_app_host->generation();
 }
 #else
+__attribute__((weak)) int zzm_module_can_park(void) { return 0; }
+__attribute__((weak)) void zzm_module_set_worker_context(int active) { (void)active; }
 __attribute__((weak)) void zzapp_api_enter(void) {}
 __attribute__((weak)) void zzapp_api_leave(void) {}
 
@@ -644,8 +662,11 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         g_zero_copy = 1U;
         present_mode = "direct";
     }
-    if (!amiberry_inproc_open(w, h))
+    minigl_raster_set_async_feed((flags & ZZ_GL_BIND_SYNC_RIX_FEED) == 0U);
+    if (!amiberry_inproc_open(w, h)) {
+        minigl_raster_set_async_feed(0);
         return ZZ_ENOMEM;
+    }
     mw = amiberry_transport_inproc_ctx();
     if (g_zero_copy && (!mw || !mw_host_bind_direct_rgb565(mw, front, back,
                                                             w * h * 2U))) {
@@ -658,6 +679,8 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         return ZZ_ENOMEM;
     }
     printf("[app] present: %s\r\n", present_mode);
+    printf("[app] gl feed: %s\r\n",
+           (flags & ZZ_GL_BIND_SYNC_RIX_FEED) != 0U ? "sync" : "async");
     fill_table();
     g_bound = 1;
     g_surface_id = surface_id;
@@ -684,6 +707,7 @@ void zzapp_gl_unbind(void)
     g_sync_present = 0U;
     g_bound_layout = 0U;
     g_bound = 0;
+    minigl_raster_set_async_feed(0);
     minigl_profile_set_enabled(0);
 }
 

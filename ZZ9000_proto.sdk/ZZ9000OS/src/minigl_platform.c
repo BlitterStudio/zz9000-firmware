@@ -19,6 +19,7 @@ static uint32_t g_pl330_channel;
 static int g_pl330_claimed;
 #endif
 
+
 int minigl_platform_set_graphics(const zzm_graphics_hw_service_t *graphics,
                                  const zzm_graphics_hw_caps_t *caps,
                                  uint32_t owner)
@@ -31,6 +32,13 @@ int minigl_platform_set_graphics(const zzm_graphics_hw_service_t *graphics,
     g_graphics = graphics;
     g_graphics_caps = *caps;
     g_graphics_owner = owner;
+    if (g_graphics_caps.pl330_available && g_graphics->pl330_claim &&
+        g_graphics->size >= offsetof(zzm_graphics_hw_service_t,
+                                     pl330_start_nonblocking) +
+                            sizeof(g_graphics->pl330_start_nonblocking) &&
+        g_graphics->pl330_start_nonblocking &&
+        g_graphics->pl330_claim(g_graphics_owner, &g_pl330_channel))
+        g_pl330_claimed = 1;
 #else
     (void)graphics;
     (void)caps;
@@ -189,6 +197,72 @@ int minigl_platform_dma_retire(void *context)
 #endif
 }
 
+int minigl_platform_dma_complete(void *context)
+{
+    (void)context;
+#if defined(MINIGL_MODULE)
+    if (!g_graphics || !g_pl330_claimed ||
+        g_graphics->size < offsetof(zzm_graphics_hw_service_t, pl330_complete) +
+                           sizeof(g_graphics->pl330_complete) ||
+        !g_graphics->pl330_complete)
+        return RIX_DRV_DMA_ERROR;
+    return g_graphics->pl330_complete(g_pl330_channel);
+#else
+    return RIX_DRV_DMA_ERROR;
+#endif
+}
+
+int minigl_platform_dma_ready(void *context)
+{
+    (void)context;
+#if defined(MINIGL_MODULE)
+    return g_graphics && g_pl330_claimed && g_graphics_caps.pl330_available &&
+           g_graphics->size >= offsetof(zzm_graphics_hw_service_t,
+                                        pl330_abort_nonblocking) +
+                               sizeof(g_graphics->pl330_abort_nonblocking) &&
+           g_graphics->pl330_start_nonblocking &&
+           g_graphics->pl330_complete &&
+           g_graphics->pl330_abort_nonblocking;
+#else
+    return 0;
+#endif
+}
+
+int minigl_platform_dma_abort(void *context)
+{
+    (void)context;
+#if defined(MINIGL_MODULE)
+    if (!minigl_platform_dma_ready(0))
+        return RIX_DRV_DMA_ERROR;
+    return g_graphics->pl330_abort_nonblocking(g_pl330_channel);
+#else
+    return RIX_DRV_DMA_ERROR;
+#endif
+}
+
+int minigl_platform_dma_start_nonblocking(void *context, uintptr_t source,
+                                          uint32_t words, uint32_t burst_words)
+{
+    (void)context;
+#if defined(MINIGL_MODULE)
+    if (!g_graphics || !g_graphics_caps.pl330_available || !g_graphics->pl330_claim ||
+        g_graphics->size < offsetof(zzm_graphics_hw_service_t, pl330_start_nonblocking) +
+                           sizeof(g_graphics->pl330_start_nonblocking) ||
+        !g_graphics->pl330_start_nonblocking || source == 0U || words == 0U ||
+        burst_words != 16U)
+        return RIX_DRV_DMA_ERROR;
+    if (!g_pl330_claimed)
+        return RIX_DRV_DMA_ERROR;
+    return g_graphics->pl330_start_nonblocking(g_pl330_channel, (uint32_t)source,
+                                                words * sizeof(uint32_t));
+#else
+    (void)source;
+    (void)words;
+    (void)burst_words;
+    return RIX_DRV_DMA_ERROR;
+#endif
+}
+
 int minigl_platform_dma_stream(void *context, uintptr_t source, uint32_t words,
                                uint32_t burst_words)
 {
@@ -215,26 +289,33 @@ int minigl_platform_dma_stream(void *context, uintptr_t source, uint32_t words,
 #endif
 }
 
-void minigl_platform_abort_graphics(void)
+int minigl_platform_abort_graphics(void)
 {
 #if defined(MINIGL_MODULE)
-    if (g_graphics) {
-        if (g_pl330_claimed && g_graphics->pl330_abort)
-            g_graphics->pl330_abort(g_pl330_channel);
-        if (g_pl330_claimed && g_graphics->pl330_release)
-            g_graphics->pl330_release(g_pl330_channel);
-        g_pl330_claimed = 0;
-        /* Re-claim now: the claim hard-resets the channel and the FIFO.  Left
-         * to the first DMA start, that reset ran after rix_drv had staged
-         * the packet's two header words in TDFD and wiped them, so the
-         * self-test packet failed its TLF (ISR.TSE, kit 35 68k UART). */
-        if (g_graphics_caps.pl330_available && g_graphics->pl330_claim &&
-            g_graphics->pl330_claim(g_graphics_owner, &g_pl330_channel))
-            g_pl330_claimed = 1;
-        g_graphics->csr_write(RIX_DRV_CSR_CONTROL, 0U);
-        g_graphics->fifo_write(RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
-        g_graphics->barrier();
-    }
+    uint32_t attempts, status;
+
+    if (!g_graphics)
+        return 0;
+    if (g_pl330_claimed && g_graphics->pl330_abort)
+        g_graphics->pl330_abort(g_pl330_channel);
+    if (g_pl330_claimed && g_graphics->pl330_release)
+        g_graphics->pl330_release(g_pl330_channel);
+    g_pl330_claimed = 0;
+    /* Re-claim only after the synchronous abort has proved the channel can
+     * be reset.  A failed claim keeps the backend's buffers owned. */
+    if (g_graphics_caps.pl330_available && g_graphics->pl330_claim &&
+        g_graphics->pl330_claim(g_graphics_owner, &g_pl330_channel))
+        g_pl330_claimed = 1;
+    g_graphics->csr_write(RIX_DRV_CSR_CONTROL, 0U);
+    g_graphics->fifo_write(RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
+    g_graphics->barrier();
+    for (attempts = 0U; attempts < 32U; ++attempts)
+        if (g_graphics->csr_read(RIX_DRV_CSR_STATUS, &status) &&
+            (status & RIX_DRV_STATUS_IDLE) != 0U)
+            return !g_graphics_caps.pl330_available || g_pl330_claimed;
+    return 0;
+#else
+    return 0;
 #endif
 }
 

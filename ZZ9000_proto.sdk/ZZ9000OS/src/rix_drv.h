@@ -12,6 +12,7 @@
 
 #define RIX_DRV_IDENTITY_VALUE 0x52495831U
 #define RIX_DRV_VERSION_VALUE  0x00020000U
+#define RIX_DRV_VERSION_BUSY_CYCLES 0x00020001U
 
 #define RIX_DRV_CSR_IDENTITY     0x00U
 #define RIX_DRV_CSR_VERSION      0x04U
@@ -19,6 +20,8 @@
 #define RIX_DRV_CSR_STATUS       0x0cU
 #define RIX_DRV_CSR_DBG_STREAM   0x10U
 #define RIX_DRV_CSR_DBG_RESPONSE 0x14U
+/* Available with CSR ABI 2.1 and newer; counts non-idle RasterIX cycles. */
+#define RIX_DRV_CSR_DBG_BUSY_CYCLES 0x18U
 #define RIX_DRV_CSR_DBG_AW       0x38U
 #define RIX_DRV_CSR_DBG_W        0x3cU
 #define RIX_DRV_CSR_DBG_B        0x40U
@@ -88,6 +91,21 @@ typedef int (*rix_drv_dma_stream_fn)(void *context, uintptr_t source,
 typedef int (*rix_drv_dma_start_async_fn)(void *context, uintptr_t source,
                                           uint32_t words, uint32_t burst_words);
 typedef int (*rix_drv_dma_retire_fn)(void *context);
+/* One nonblocking PL330 channel-state observation. */
+typedef int (*rix_drv_dma_complete_fn)(void *context);
+/* Attempts one launch handshake observation; does not wait for DMAGO. */
+typedef int (*rix_drv_dma_start_nonblocking_fn)(void *context, uintptr_t source,
+                                                 uint32_t words, uint32_t burst_words);
+/* Verifies that the channel was claimed before FIFO data is admitted. */
+typedef int (*rix_drv_dma_ready_fn)(void *context);
+/* Advances an in-flight DMA abort through launch completion and quiescence. */
+typedef int (*rix_drv_dma_abort_fn)(void *context);
+
+enum rix_drv_dma_state {
+    RIX_DRV_DMA_PENDING = 0,
+    RIX_DRV_DMA_COMPLETE = 1,
+    RIX_DRV_DMA_ERROR = -1
+};
 
 /* The caller must set hardware_present from its build-time capability gate.
  * When it is zero, rix_drv_init() does not access the CSR window. */
@@ -103,6 +121,10 @@ struct rix_drv_config {
     rix_drv_dma_stream_fn dma_stream;
     rix_drv_dma_start_async_fn dma_start_async;
     rix_drv_dma_retire_fn dma_retire;
+    rix_drv_dma_complete_fn dma_complete;
+    rix_drv_dma_start_nonblocking_fn dma_start_nonblocking;
+    rix_drv_dma_ready_fn dma_ready;
+    rix_drv_dma_abort_fn dma_abort;
     int hardware_present;
 };
 
@@ -118,6 +140,10 @@ struct rix_drv {
     rix_drv_dma_stream_fn dma_stream;
     rix_drv_dma_start_async_fn dma_start_async;
     rix_drv_dma_retire_fn dma_retire;
+    rix_drv_dma_complete_fn dma_complete;
+    rix_drv_dma_start_nonblocking_fn dma_start_nonblocking;
+    rix_drv_dma_ready_fn dma_ready;
+    rix_drv_dma_abort_fn dma_abort;
     /* DMA transfer launched whose payload is in the FIFO but whose packet
      * boundary (TLF) is not written yet: retired before the next packet's
      * boundary so the parser still sees packets in order. */
@@ -134,10 +160,43 @@ struct rix_drv {
     uint32_t packets;
     uint32_t dma_packets;
     int last_packet_dma;
-    /* Payload words per packet, sampled from TDFV after the FIFO reset. */
+    /* Payload words per synchronous packet and usable FIFO capacity sampled
+     * from TDFV after the FIFO reset. */
     uint32_t packet_words;
+    uint32_t fifo_capacity;
     int available;
     int enabled;
+};
+
+#define RIX_DRV_FEED_MAX_WORDS 1024U
+
+enum rix_drv_feed_source {
+    RIX_DRV_FEED_SOURCE_SVC = 0U,
+    RIX_DRV_FEED_SOURCE_SCHEDULER,
+    RIX_DRV_FEED_SOURCE_PARKED,
+    RIX_DRV_FEED_SOURCE_SWAP,
+    RIX_DRV_FEED_SOURCE_COUNT
+};
+
+enum rix_drv_feed_result {
+    RIX_DRV_FEED_ERROR = RIX_DRV_ERROR,
+    RIX_DRV_FEED_BLOCKED = 0,
+    RIX_DRV_FEED_PROGRESS = 1,
+    RIX_DRV_FEED_DONE = 2
+};
+
+/* Opt-in single-flight FIFO feed state.  The buffer remains owned by the
+ * caller until this state reaches DONE or is reset after hardware recovery. */
+struct rix_drv_feed {
+    const uint32_t *commands;
+    uintptr_t command_address;
+    uint32_t command_words;
+    uint32_t command_offset;
+    uint32_t staged_bytes;
+    uint32_t source;
+    int pending_dma;
+    int pending_launch;
+    int active;
 };
 
 int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config);
@@ -147,6 +206,15 @@ int rix_drv_enable(struct rix_drv *driver);
 int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
                    uintptr_t command_address, uint32_t command_words,
                    uint32_t timeout);
+int rix_drv_feed_begin(struct rix_drv_feed *feed, const uint32_t *commands,
+                       uintptr_t command_address, uint32_t command_words,
+                       uint32_t source);
+/* Does at most one nonblocking DMA completion or FIFO staging/commit step. */
+int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed);
+/* Quiesces pending DMA before resetting the FIFO and clearing the feed. */
+int rix_drv_feed_abort(struct rix_drv *driver, struct rix_drv_feed *feed);
+/* Reset only after the caller has quiesced DMA and reset the FIFO hardware. */
+void rix_drv_feed_reset(struct rix_drv_feed *feed);
 /* Waits for the renderer to become idle after a pixel fence has passed. */
 int rix_drv_poll(struct rix_drv *driver, uint32_t timeout);
 int rix_drv_recover(struct rix_drv *driver, uint32_t timeout, int soft_reset);

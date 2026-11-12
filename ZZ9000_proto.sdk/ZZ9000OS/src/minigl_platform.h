@@ -22,13 +22,19 @@ void minigl_platform_fifo_write_words(void *context, const uint32_t *words,
 void minigl_platform_cache_clean(void *context, uintptr_t address, size_t bytes);
 void minigl_platform_cache_invalidate(void *context, uintptr_t address,
                                       size_t bytes);
+
 void minigl_platform_barrier(void *context);
 int minigl_platform_dma_stream(void *context, uintptr_t source, uint32_t words,
                                uint32_t burst_words);
 int minigl_platform_dma_start_async(void *context, uintptr_t source,
                                     uint32_t words, uint32_t burst_words);
 int minigl_platform_dma_retire(void *context);
-void minigl_platform_abort_graphics(void);
+int minigl_platform_dma_complete(void *context);
+int minigl_platform_dma_start_nonblocking(void *context, uintptr_t source,
+                                          uint32_t words, uint32_t burst_words);
+int minigl_platform_dma_ready(void *context);
+int minigl_platform_dma_abort(void *context);
+int minigl_platform_abort_graphics(void);
 uint64_t minigl_platform_time_us(void);
 void minigl_platform_log(const char *message);
 void minigl_platform_logf(const char *format, ...);

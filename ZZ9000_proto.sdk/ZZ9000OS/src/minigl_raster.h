@@ -77,6 +77,12 @@ void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes,
 /* Called by the core-1 service before initialization; it is safe to omit on
  * old bitstreams and host tests, which leaves RasterIX unavailable. */
 void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform);
+/* ARM in-process contexts opt into the kernel-owned asynchronous command ring. */
+void minigl_raster_set_async_feed(int enabled);
+int minigl_raster_async_feed_enabled(void);
+int minigl_raster_feed_pending(void);
+int minigl_raster_try_feed(uint32_t source);
+int minigl_raster_abort_feed(void);
 /* Submit the current frame without waiting for RasterIX, then poll its fences. */
 int minigl_raster_submit_present(void);
 int minigl_raster_present_ready(void);
@@ -148,5 +154,9 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
                                 const uint32_t *edge_mask);
 struct mw_state;
 void minigl_raster_set_wire_v9_state(const struct mw_state *state);
+#ifdef MINIGL_HOST_TEST
+void minigl_raster_test_retire_fences(void);
+uint8_t minigl_raster_test_command_buffer_count(void);
+#endif
 
 #endif /* MINIGL_RASTER_H */

@@ -5,6 +5,8 @@
 
 #include "minigl_transport.h"
 #include "minigl_platform.h"
+#include "minigl_raster.h"
+#include "minigl_profile.h"
 #include "mw_service.h"
 #include "zzapp_services.h"
 #include "zzm_minigl_host.h"
@@ -61,15 +63,28 @@ static void minigl_doorbell(void *context)
 static int minigl_has_work(void *context)
 {
     (void)context;
-    return mw_service_has_work();
+    return mw_service_has_work() || minigl_raster_feed_pending();
 }
+
+extern void zzm_module_set_worker_context(int active);
 
 static int minigl_poll(void *context, uint32_t budget)
 {
+    int worked = 0;
+
     (void)context;
     if (budget == 0U)
         return 0;
-    return mw_service_poll();
+    zzm_module_set_worker_context(1);
+    if (mw_service_has_work())
+        worked = mw_service_poll();
+    if (!worked && minigl_raster_feed_pending()) {
+        minigl_profile_feed_deadline_wake();
+        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER);
+        worked = 1;
+    }
+    zzm_module_set_worker_context(0);
+    return worked;
 }
 
 static int minigl_open_68k(void *context, const zzm_minigl_wire_open_t *request,
@@ -144,6 +159,8 @@ static int minigl_begin_reset(void *context)
     /* What the 68k last asked for and how long ago, before the reset tears
      * the context down: an Amiga-side crash leaves no other ARM trace. */
     mw_service_report_amiga_reset();
+    if (!mw_rix_abort_engines())
+        return 0;
     minigl_release_app(module);
     minigl_release_transport(module);
     mw_service_reset();
@@ -165,13 +182,28 @@ static void minigl_abort_reset(void *context)
 static int minigl_begin_unload(void *context)
 {
     (void)context;
-    return mw_service_has_work() ? 0 : 1;
+    if (mw_service_has_work())
+        return 0;
+    return 1;
 }
 
 static void minigl_fini(void *context)
 {
     minigl_module_context_t *module = context;
 
+    if (minigl_raster_feed_pending()) {
+        uint32_t bound = 100000U;
+        while (minigl_raster_feed_pending() && bound--) {
+            if (minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER) ==
+                RIX_DRV_FEED_ERROR)
+                break;
+        }
+        if (minigl_raster_feed_pending()) {
+            (void)mw_rix_abort_engines();
+        } else {
+            (void)minigl_raster_drain();
+        }
+    }
     minigl_release_app(module);
     minigl_release_transport(module);
     if (module && module->transport && module->transport->remove_doorbell)
@@ -239,7 +271,8 @@ static void minigl_app_unbind(void *context)
 static void minigl_app_reclaim(void *context, uint32_t generation)
 {
     (void)generation;
-    minigl_release_app(context);
+    if (mw_rix_abort_engines())
+        minigl_release_app(context);
 }
 
 static const zzm_minigl_ops_v1_t g_ops = {
@@ -308,7 +341,8 @@ int zzm_module_init(const zzm_services_t *services)
                                  sizeof(*palette)) ||
         !minigl_table_compatible(graphics->version, graphics->size,
                                  ZZM_SERVICE_GRAPHICS_HW_V3,
-                                 sizeof(*graphics)) || !graphics->caps ||
+                                 offsetof(zzm_graphics_hw_service_t, barrier) +
+                                 sizeof(graphics->barrier)) || !graphics->caps ||
         graphics->caps(&graphics_caps) <= 0)
         return -1;
 

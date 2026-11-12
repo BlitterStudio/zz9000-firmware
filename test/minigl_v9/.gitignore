@@ -7,3 +7,5 @@ test_mw_texture
 test_mw_host_api
 test_mw_e2e
 test_mw_rasterix_mapper
+test_mw_card_pool
+test_mw_transport_guard

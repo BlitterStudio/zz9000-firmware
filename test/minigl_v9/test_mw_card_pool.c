@@ -144,7 +144,7 @@ static void test_destroy_forces_failed_quiesce(void)
     mw_ctx *context;
 
     host_card_pool_reset(128U << 20);
-    context = mw_host_create_owned(64U, 48U, owner);
+    context = mw_host_create_owned(64U, 48U, owner, 0);
     assert(context != NULL);
     context->rix_enabled = 1U;
     minigl_raster_release_buffers();
@@ -165,7 +165,7 @@ int main(void)
     test_destroy_forces_failed_quiesce();
     host_card_pool_reset(128U << 20);
     assert(card_pool.block_count == 0U);
-    context = mw_host_create_owned(640U, 480U, owner);
+    context = mw_host_create_owned(640U, 480U, owner, 0);
     assert(context != NULL);
     assert(card_pool.block_count <= 4U);
 
