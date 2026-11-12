@@ -2364,7 +2364,8 @@ void zzplay_gui_poll(void)
                   open_url_window();
                   break;
                 case MID_BROWSE:
-                  zzplay_browse_open(player_screen, ctl, pl);
+                  zzplay_browse_open(player_screen, ctl, pl,
+                                     gui_context->prefs);
                   break;
                 case MID_ADD_FILES:
                   start_requester(ZZPLAY_MODAL_ADD_FILES);

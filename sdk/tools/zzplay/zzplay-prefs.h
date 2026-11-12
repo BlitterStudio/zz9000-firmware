@@ -17,6 +17,8 @@
  *   FULLSCREEN=NO         YES | NO: play videos on a dedicated screen
  *   PRELOAD=NO            YES | NO
  *   WINDOW=-1,-1          player window left,top; -1,-1 = default
+ *   BROWSE=-1,-1,-1,-1    browse window left,top and inner width,height;
+ *                         -1 = default place and size
  *   DRAWER=Work:Music     last drawer used in a file requester
  *
  * Precedence, lowest first: built-in defaults, the saved file, then
@@ -59,6 +61,10 @@ typedef struct ZZPlayPrefs {
   int fullscreen;
   int16_t window_left;             /* -1 = default placement */
   int16_t window_top;
+  int16_t browse_left;             /* Browse window; -1 = default */
+  int16_t browse_top;
+  int16_t browse_width;            /* inner size; -1 = default */
+  int16_t browse_height;
   char last_drawer[ZZPLAY_PREFS_DRAWER_MAX];
 } ZZPlayPrefs;
 

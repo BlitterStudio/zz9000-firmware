@@ -203,9 +203,28 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
 
 - The cycle gadget at the top chooses the service. Type in the search field
   and press Return to search it.
-- Click a folder (shown with `[+]`) to open it. **Back** returns to the previous list
+- Click a folder to open it. **Back** returns to the previous list
   with the same entry selected. A long list ends in a "--- More items ---"
   row; click it to load the next part.
+- The window can be resized from its bottom right corner; the list takes
+  the extra height and width, the buttons spread across the width and the
+  status line stays at the bottom. The window cannot be made smaller than
+  its buttons and two list rows, nor larger than the screen. Its place and
+  size are remembered in `ZZPlay.prefs` when it closes or ZZPlay quits
+  with it open, and restored the next time (brought back onto the screen
+  when it no longer fits).
+- On AmigaOS 3.0 or newer each row is drawn in aligned columns: a small
+  marker, the title, the artist and album (or the details the service
+  gives) and, right-aligned, the length when it is known (m:ss or
+  h:mm:ss). The columns follow the window width: the length column keeps
+  its size and the title gets about 55 percent of the rest; text that
+  does not fit is cut. The markers mean: an outline folder for a folder,
+  the folder with a filled play triangle for a collection that **Play**
+  or **Add** can use whole (such as a Plex album, artist or playlist), a
+  note for a track and a mast with waves for a station. Selected rows
+  use the Workbench selection colors, as other lists do. Older systems
+  (before AmigaOS 3.0) keep the simple one-line rows, with "[+]" before a
+  folder's title.
 - Every list and search ZZPlay finishes is remembered until ZZPlay quits,
   at most 16 of them (the one unused for the longest time is dropped).
   Opening a remembered folder or repeating a remembered search shows it

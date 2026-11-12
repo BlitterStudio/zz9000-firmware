@@ -8,12 +8,14 @@
 
 #include "zzplay-controller.h"
 #include "zzplay-playlist.h"
+#include "zzplay-prefs.h"
 
 struct Screen;
 
-/* Open the service browser window on the given screen. */
+/* Open the service browser window on the given screen. `prefs` is where
+ * the window's place and size are remembered when it closes. */
 int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
-                       ZZPlayPlaylist *playlist);
+                       ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs);
 
 /* Close the Browse window and any open settings form. */
 void zzplay_browse_close(void);

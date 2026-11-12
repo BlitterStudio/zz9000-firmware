@@ -492,6 +492,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-ax.c
   tools/zzplay/zzplay-browse-model.c
   tools/zzplay/zzplay-browse-gather.c
+  tools/zzplay/zzplay-browse-rows.c
   tools/zzplay/zzplay-controller.c
   tools/zzplay/zzplay-core.c
   tools/zzplay/zzplay-formats.c
@@ -596,6 +597,12 @@ add_executable(zzplay_browse_gather_test
 )
 target_link_libraries(zzplay_browse_gather_test PRIVATE zzplay_core)
 add_test(NAME zzplay_browse_gather_test COMMAND zzplay_browse_gather_test)
+
+add_executable(zzplay_browse_rows_test
+  tests/zzplay_browse_rows_test.c
+)
+target_link_libraries(zzplay_browse_rows_test PRIVATE zzplay_core)
+add_test(NAME zzplay_browse_rows_test COMMAND zzplay_browse_rows_test)
 
 add_executable(zzplay_webm_test
   tests/zzplay_webm_test.c

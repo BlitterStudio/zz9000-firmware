@@ -23,6 +23,7 @@ static int test_prefs_parse_and_format(void)
       "FULLSCREEN=yes\n"
       "PRELOAD=YES\n"
       "WINDOW=120,45\n"
+      "BROWSE=30,60,520,300\n"
       "DRAWER=DH0:Music/MP3\n";
 
   ZZPlayPrefs prefs;
@@ -32,8 +33,7 @@ static int test_prefs_parse_and_format(void)
 
   zzplay_prefs_defaults(&prefs);
   accepted = zzplay_prefs_parse(&prefs, prefs_text, strlen(prefs_text));
-  if (accepted != 11U) return 1;
-
+  if (accepted != 12U) return 1;
   if (prefs.mp3_output != ZZPLAY_AUDIO_MHI) return 2;
   if (prefs.video_audio != ZZPLAY_AUDIO_AX) return 3;
   if (prefs.ahi_unit != 2U) return 4;
@@ -44,7 +44,8 @@ static int test_prefs_parse_and_format(void)
   if (!prefs.fullscreen) return 84;
   if (!prefs.preload) return 81;
   if (prefs.window_left != 120 || prefs.window_top != 45) return 9;
-  if (strcmp(prefs.last_drawer, "DH0:Music/MP3") != 0) return 10;
+  if (prefs.browse_left != 30 || prefs.browse_top != 60) return 90;
+  if (prefs.browse_width != 520 || prefs.browse_height != 300) return 91;
 
   /* Format */
   needed = zzplay_prefs_format(&prefs, out_buf, sizeof(out_buf));
@@ -59,13 +60,13 @@ static int test_prefs_parse_and_format(void)
   if (strstr(out_buf, "FULLSCREEN=YES\n") == NULL) return 85;
   if (strstr(out_buf, "PRELOAD=YES\n") == NULL) return 82;
   if (strstr(out_buf, "WINDOW=120,45\n") == NULL) return 19;
-  if (strstr(out_buf, "DRAWER=DH0:Music/MP3\n") == NULL) return 20;
+  if (strstr(out_buf, "BROWSE=30,60,520,300\n") == NULL) return 92;
 
   /* Round trip */
   {
     ZZPlayPrefs roundtrip;
     zzplay_prefs_defaults(&roundtrip);
-    if (zzplay_prefs_parse(&roundtrip, out_buf, strlen(out_buf)) != 11U)
+    if (zzplay_prefs_parse(&roundtrip, out_buf, strlen(out_buf)) != 12U)
       return 21;
     if (roundtrip.mp3_output != ZZPLAY_AUDIO_MHI) return 22;
     if (roundtrip.video_audio != ZZPLAY_AUDIO_AX) return 23;
@@ -74,6 +75,8 @@ static int test_prefs_parse_and_format(void)
     if (roundtrip.repeat != ZZPLAY_REPEAT_ONE) return 26;
     if (!roundtrip.preload) return 83;
     if (!roundtrip.fullscreen) return 86;
+    if (roundtrip.browse_left != 30 || roundtrip.browse_width != 520)
+      return 87;
   }
 
   return 0;
@@ -116,12 +119,26 @@ static int test_prefs_bad_values(void)
   zzplay_prefs_parse(&prefs, "PRELOAD=maybe\n", 14U);
   if (!prefs.preload) return 14;
 
+  /* A Browse window value missing a part, with a non-number or with a
+   * nonsensical size leaves the defaults (no remembered window) */
+  zzplay_prefs_parse(&prefs, "BROWSE=40,50\n", 13U);
+  if (prefs.browse_left != -1 || prefs.browse_top != -1) return 15;
+  zzplay_prefs_parse(&prefs, "BROWSE=40,50,640,x\n", 19U);
+  if (prefs.browse_left != -1 || prefs.browse_width != -1) return 16;
+  zzplay_prefs_parse(&prefs, "BROWSE=40,50,640\n", 17U);
+  if (prefs.browse_width != -1) return 17;
+  zzplay_prefs_parse(&prefs, "BROWSE=40,50,10,300\n", 20U);
+  if (prefs.browse_width != -1 || prefs.browse_height != -1) return 18;
+  /* A value that parses is accepted (negative places are fine) */
+  zzplay_prefs_parse(&prefs, "BROWSE=-10,20,480,256\n", 22U);
+  if (prefs.browse_left != -10 || prefs.browse_top != 20) return 19;
+  if (prefs.browse_width != 480 || prefs.browse_height != 256) return 20;
+
   /* Valid driver validation helper */
   if (zzplay_prefs_valid_driver("mhizz9000.library") != 1) return 9;
   if (zzplay_prefs_valid_driver("LIBS:mhizz9000.library") != 0) return 10;
   if (zzplay_prefs_valid_driver("dir/mhizz9000.library") != 0) return 11;
   if (zzplay_prefs_valid_driver("") != 0) return 12;
-
   return 0;
 }
 
@@ -149,6 +166,10 @@ static int test_session_read_modify_write(void)
   session.fullscreen = 1;
   session.window_left = 200;
   session.window_top = 150;
+  session.browse_left = 30;
+  session.browse_top = 60;
+  session.browse_width = 520;
+  session.browse_height = 300;
   strcpy(session.last_drawer, "RAM:T");
 
   /* Device settings in 'session' differ from saved (e.g. defaults) */
@@ -181,7 +202,9 @@ static int test_session_read_modify_write(void)
   if (!verified.shuffle) return 10;
   if (!verified.fullscreen) return 13;
   if (verified.window_left != 200 || verified.window_top != 150) return 11;
-  if (strcmp(verified.last_drawer, "RAM:T") != 0) return 12;
+  if (verified.browse_left != 30 || verified.browse_top != 60) return 14;
+  if (verified.browse_width != 520 || verified.browse_height != 300)
+    return 15;
 
   return 0;
 }

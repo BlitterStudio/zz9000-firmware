@@ -47,6 +47,10 @@ void zzplay_prefs_defaults(ZZPlayPrefs *prefs)
   prefs->preload = 0U;
   prefs->window_left = -1;
   prefs->window_top = -1;
+  prefs->browse_left = -1;
+  prefs->browse_top = -1;
+  prefs->browse_width = -1;
+  prefs->browse_height = -1;
   prefs->last_drawer[0] = '\0';
 }
 
@@ -275,6 +279,39 @@ uint32_t zzplay_prefs_parse(ZZPlayPrefs *prefs, const char *text,
           }
         }
       }
+    } else if (zzplay_prefs_case_eq(key, "BROWSE")) {
+      /* "x,y,w,h": the Browse window's place and inner size. A value
+       * with a part missing, a non-number or a nonsensical size leaves
+       * the window at its defaults, like a missing key. */
+      const char *part = val;
+      int nums[4];
+      int n = 0;
+      while (n < 4) {
+        const char *comma = strchr(part, ',');
+        char num_buf[16];
+        size_t len = comma ? (size_t)(comma - part) : strlen(part);
+        if (len == 0U || len >= sizeof(num_buf)) {
+          break;
+        }
+        memcpy(num_buf, part, len);
+        num_buf[len] = '\0';
+        if (!zzplay_parse_int(num_buf, &nums[n])) {
+          break;
+        }
+        n++;
+        if (!comma) {
+          break;
+        }
+        part = comma + 1;
+      }
+      if (n == 4 && nums[2] >= 40 && nums[2] <= 32000 &&
+          nums[3] >= 40 && nums[3] <= 32000) {
+        prefs->browse_left = (int16_t)nums[0];
+        prefs->browse_top = (int16_t)nums[1];
+        prefs->browse_width = (int16_t)nums[2];
+        prefs->browse_height = (int16_t)nums[3];
+        accepted++;
+      }
     } else if (zzplay_prefs_case_eq(key, "DRAWER")) {
       if (vlen < sizeof(prefs->last_drawer)) {
         strncpy(prefs->last_drawer, val, sizeof(prefs->last_drawer) - 1U);
@@ -338,6 +375,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       "FULLSCREEN=%s\n"
       "PRELOAD=%s\n"
       "WINDOW=%d,%d\n"
+      "BROWSE=%d,%d,%d,%d\n"
       "DRAWER=%s\n",
       zzplay_prefs_backend_name(prefs->mp3_output),
       zzplay_prefs_backend_name(prefs->video_audio),
@@ -349,6 +387,8 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       prefs->fullscreen ? "YES" : "NO",
       prefs->preload ? "YES" : "NO",
       (int)prefs->window_left, (int)prefs->window_top,
+      (int)prefs->browse_left, (int)prefs->browse_top,
+      (int)prefs->browse_width, (int)prefs->browse_height,
       prefs->last_drawer);
 
   if (written < 0) {
@@ -451,6 +491,10 @@ void zzplay_prefs_copy_session(ZZPlayPrefs *to, const ZZPlayPrefs *from)
   to->fullscreen = from->fullscreen;
   to->window_left = from->window_left;
   to->window_top = from->window_top;
+  to->browse_left = from->browse_left;
+  to->browse_top = from->browse_top;
+  to->browse_width = from->browse_width;
+  to->browse_height = from->browse_height;
   strncpy(to->last_drawer, from->last_drawer, sizeof(to->last_drawer) - 1U);
   to->last_drawer[sizeof(to->last_drawer) - 1U] = '\0';
 }

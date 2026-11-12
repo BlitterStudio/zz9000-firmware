@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "zzplay-browse-model.h"
+#include "zzplay-browse-rows.h"
 #include "zzplay-browse-worker.h"
 #include "zzplay-host.h"
 #include "zzplay-http.h"
@@ -16,8 +17,10 @@
 
 #if defined(__amigaos__) || defined(AMIGA)
 
+#include <SDI_compiler.h>
 #include <graphics/gfxbase.h>
 #include <intuition/intuition.h>
+#include <intuition/screens.h>
 #include <libraries/gadtools.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
@@ -27,6 +30,8 @@
 
 #define BROWSE_MARGIN 6
 #define BROWSE_SPACING 4
+/* Space between the marker, title, subtitle and length cells. */
+#define BROWSE_COLUMN_GAP 6
 #define BROWSE_FIELDS_MAX 8U
 #define BROWSE_CHOICES_MAX 16U
 
@@ -114,6 +119,191 @@ static uint32_t gather_generation = 0U;
 static uint32_t gather_seen = 0U;
 static char gather_scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
 
+/* The prefs the window remembers its place and size in, set at open. */
+static ZZPlayPrefs *browse_prefs = NULL;
+/* Aligned column rows through a GTLV_CallBack render hook; needs the
+ * V39 gadtools. Without it the window keeps its one-line rows. */
+static int browse_columns_ok = 0;
+static int browse_marker_col_w = 0;
+static int browse_len_col_w = 0;
+static struct TextFont *browse_font = NULL;
+/* What the list shows and where it is scrolled, kept across the gadget
+ * rebuilds a resize causes. */
+static int browse_list_top = 0;
+static int built_inner_w = -1;
+static int built_inner_h = -1;
+
+/* One list row. The strings live here, not in the model: the render
+ * hook runs where GadTools renders (this task, or Intuition's input
+ * task during a scroll drag), which must not read memory the GUI task
+ * is about to grow or replace. */
+struct browse_row_node {
+  struct Node node; /* ln_Name points at title */
+  int32_t index;    /* row in browse_model.items, -1 = the More row */
+  uint32_t kind;
+  uint32_t playable;
+  char duration[12]; /* "88:88:88" or "" when unknown */
+  char title[ZZPLAY_PROVIDER_TEXT_MAX];
+  char subtitle[ZZPLAY_PROVIDER_TEXT_MAX];
+};
+
+static LONG browse_row_render(REG(a0, struct Hook *hook),
+                              REG(a2, struct Node *node),
+                              REG(a1, struct LVDrawMsg *msg));
+
+static struct Hook browse_list_hook = {
+  {0, 0}, (ULONG (*)())browse_row_render, 0, 0
+};
+
+/* Text width in the font the rows render in. */
+static int browse_text_len(struct RastPort *rp, const char *s)
+{
+  return (int)TextLength(rp, (CONST_STRPTR)s, (ULONG)strlen(s));
+}
+
+/* Draws `s` cut to `max_w` pixels: TextFit counts the characters that
+ * fit, and the cut happens at that count, never inside a cell's
+ * neighbour. */
+static void browse_draw_text(struct RastPort *rp, const char *s, int x,
+                             int y, int max_w)
+{
+  struct TextExtent fit;
+  ULONG n;
+
+  if (!s || s[0] == '\0' || max_w <= 0) {
+    return;
+  }
+  n = TextFit(rp, (CONST_STRPTR)s, (ULONG)strlen(s), &fit, NULL, 1L,
+              (ULONG)max_w, 0x3FFFU);
+  if (n == 0U) {
+    return;
+  }
+  Move(rp, (WORD)x, (WORD)y);
+  Text(rp, (CONST_STRPTR)s, n);
+}
+
+/* The row marker, an eight by seven pixel glyph: an outline folder for a
+ * plain folder, the folder with a filled play triangle for a collection
+ * Play or Add works on whole, a note for a track and a mast with waves
+ * for a station. */
+static void browse_draw_marker(struct RastPort *rp, int x, int top,
+                               uint32_t kind, uint32_t playable)
+{
+  if (kind == ZZPLAY_ITEM_FOLDER) {
+    RectFill(rp, (WORD)x, (WORD)top, (WORD)x, (WORD)(top + 6));
+    RectFill(rp, (WORD)(x + 7), (WORD)top, (WORD)(x + 7), (WORD)(top + 6));
+    RectFill(rp, (WORD)(x + 1), (WORD)top, (WORD)(x + 6), (WORD)top);
+    RectFill(rp, (WORD)(x + 1), (WORD)(top + 6), (WORD)(x + 6),
+             (WORD)(top + 6));
+    RectFill(rp, (WORD)(x + 1), (WORD)(top + 1), (WORD)(x + 3),
+             (WORD)(top + 1));
+    if (playable) {
+      RectFill(rp, (WORD)(x + 2), (WORD)(top + 2), (WORD)(x + 3),
+               (WORD)(top + 2));
+      RectFill(rp, (WORD)(x + 2), (WORD)(top + 3), (WORD)(x + 4),
+               (WORD)(top + 3));
+      RectFill(rp, (WORD)(x + 2), (WORD)(top + 4), (WORD)(x + 4),
+               (WORD)(top + 4));
+      RectFill(rp, (WORD)(x + 2), (WORD)(top + 5), (WORD)(x + 3),
+               (WORD)(top + 5));
+    }
+  } else if (kind == ZZPLAY_ITEM_STATION) {
+    RectFill(rp, (WORD)(x + 3), (WORD)(top + 2), (WORD)(x + 4),
+             (WORD)(top + 3));
+    RectFill(rp, (WORD)(x + 3), (WORD)(top + 4), (WORD)(x + 3),
+             (WORD)(top + 6));
+    Move(rp, (WORD)(x + 1), (WORD)(top + 5));
+    Draw(rp, (WORD)(x + 2), (WORD)(top + 4));
+    Move(rp, (WORD)(x + 6), (WORD)(top + 5));
+    Draw(rp, (WORD)(x + 5), (WORD)(top + 4));
+  } else {
+    RectFill(rp, (WORD)(x + 1), (WORD)(top + 4), (WORD)(x + 3),
+             (WORD)(top + 6));
+    RectFill(rp, (WORD)(x + 4), (WORD)(top + 1), (WORD)(x + 4),
+             (WORD)(top + 6));
+    RectFill(rp, (WORD)(x + 5), (WORD)(top + 1), (WORD)(x + 6),
+             (WORD)(top + 2));
+  }
+}
+
+/* Renders one row: marker, title, subtitle, then the length right
+ * aligned when known. GadTools calls this hook wherever it renders the
+ * list, which includes Intuition's input task during a scroll drag, so
+ * it only reads the row node's own memory and draws: no allocation, no
+ * waiting. Selected rows use the selection pens, as GadTools' own rows
+ * do. */
+static LONG browse_row_render(REG(a0, struct Hook *hook),
+                              REG(a2, struct Node *node),
+                              REG(a1, struct LVDrawMsg *msg))
+{
+  struct browse_row_node *row;
+  struct RastPort *rp;
+  struct DrawInfo *dri;
+  ZZPlayBrowseColumns cols;
+  int x, y, w, h, text_y, pen_text, len;
+
+  (void)hook;
+  if (!msg || !node || msg->lvdm_MethodID != (ULONG)LV_DRAW ||
+      !msg->lvdm_RastPort || !msg->lvdm_DrawInfo || !browse_font) {
+    return (LONG)LVCB_UNKNOWN;
+  }
+  rp = msg->lvdm_RastPort;
+  dri = msg->lvdm_DrawInfo;
+  x = (int)msg->lvdm_Bounds.MinX;
+  y = (int)msg->lvdm_Bounds.MinY;
+  w = (int)msg->lvdm_Bounds.MaxX - x + 1;
+  h = (int)msg->lvdm_Bounds.MaxY - y + 1;
+  if (w <= 0 || h <= 0) {
+    return (LONG)LVCB_OK;
+  }
+  row = (struct browse_row_node *)node;
+
+  SetAPen(rp, (ULONG)((msg->lvdm_State == (ULONG)LVR_SELECTED)
+                          ? dri->dri_Pens[FILLPEN]
+                          : dri->dri_Pens[BACKGROUNDPEN]));
+  RectFill(rp, (WORD)x, (WORD)y, (WORD)(x + w - 1), (WORD)(y + h - 1));
+  pen_text = (int)((msg->lvdm_State == (ULONG)LVR_SELECTED)
+                       ? dri->dri_Pens[FILLTEXTPEN]
+                       : dri->dri_Pens[TEXTPEN]);
+  SetAPen(rp, (ULONG)pen_text);
+  SetFont(rp, browse_font);
+  text_y = y + ((h - (int)browse_font->tf_YSize) >> 1) +
+           (int)browse_font->tf_Baseline;
+
+  zzplay_browse_layout_columns(w, browse_marker_col_w, browse_len_col_w,
+                               BROWSE_COLUMN_GAP, &cols);
+
+  if (row->index < 0) {
+    /* "--- More items ---" stays a plain centred row. */
+    len = browse_text_len(rp, row->title);
+    x += (w - len) >> 1;
+    if (x < (int)msg->lvdm_Bounds.MinX) {
+      x = (int)msg->lvdm_Bounds.MinX;
+    }
+    browse_draw_text(rp, row->title, x, text_y, w);
+    return (LONG)LVCB_OK;
+  }
+
+  browse_draw_marker(rp, (int)msg->lvdm_Bounds.MinX + cols.marker_x,
+                     y + ((h - 7) >> 1), row->kind, row->playable);
+  browse_draw_text(rp, row->title, (int)msg->lvdm_Bounds.MinX + cols.title_x,
+                   text_y, cols.title_w);
+  browse_draw_text(rp, row->subtitle,
+                   (int)msg->lvdm_Bounds.MinX + cols.sub_x, text_y,
+                   cols.sub_w);
+  if (row->duration[0] != '\0') {
+    len = browse_text_len(rp, row->duration);
+    if (len > cols.len_w) {
+      len = cols.len_w;
+    }
+    browse_draw_text(rp, row->duration,
+                     (int)msg->lvdm_Bounds.MinX + cols.len_x +
+                         (cols.len_w - len),
+                     text_y, cols.len_w);
+  }
+  return (LONG)LVCB_OK;
+}
+
 extern struct IntuitionBase *IntuitionBase;
 
 /* Busy pointer on the Browse window and the settings form while a
@@ -158,22 +348,6 @@ static void copy_string(char *dst, size_t dst_size, const char *src)
   (void)snprintf(dst, dst_size, "%s", src);
 }
 
-static char *gui_strdup(const char *s)
-{
-  size_t len;
-  char *copy;
-
-  if (!s) {
-    return NULL;
-  }
-  len = strlen(s);
-  copy = (char *)zzplay_alloc(len + 1U);
-  if (copy) {
-    memcpy(copy, s, len + 1U);
-  }
-  return copy;
-}
-
 static void init_exec_list(struct List *list)
 {
   list->lh_TailPred = (struct Node *)list;
@@ -188,10 +362,9 @@ static void free_exec_list_nodes(struct List *list)
   if (!list || !list->lh_Head) {
     return;
   }
+  /* Nodes are struct browse_row_node; ln_Name points into the node, so
+   * freeing the node frees its strings too. */
   while ((node = RemHead(list)) != 0) {
-    if (node->ln_Name) {
-      zzplay_free(node->ln_Name);
-    }
     zzplay_free(node);
   }
 }
@@ -361,7 +534,7 @@ static void rebuild_list_nodes(void)
   struct TagItem tags[4];
   int fresh;
   uint32_t i;
-  static char row_text[256];
+  uint32_t rows = 0U;
 
   if (!browse_win || !list_gad) {
     return;
@@ -376,38 +549,50 @@ static void rebuild_list_nodes(void)
 
   for (i = 0U; i < browse_model.item_count; i++) {
     const ZZPlayBrowseItem *it = &browse_model.items[i];
-    struct Node *node = (struct Node *)zzplay_alloc(sizeof(struct Node));
+    struct browse_row_node *row =
+        (struct browse_row_node *)zzplay_alloc(sizeof(*row));
 
-    if (!node) {
+    if (!row) {
       break;
     }
-    memset(node, 0, sizeof(*node));
-    if (it->kind == ZZPLAY_ITEM_FOLDER) {
-      (void)snprintf(row_text, sizeof(row_text), "[+] %s", it->title);
-    } else if (it->subtitle[0] != '\0') {
-      (void)snprintf(row_text, sizeof(row_text), "%s - %s", it->title, it->subtitle);
+    memset(row, 0, sizeof(*row));
+    row->index = (int32_t)i;
+    row->kind = it->kind;
+    row->playable = it->playable;
+    zzplay_browse_format_duration(it->duration_ms, row->duration,
+                                  sizeof(row->duration));
+    if (browse_columns_ok) {
+      /* The render hook draws the columns from these. */
+      copy_string(row->title, sizeof(row->title), it->title);
+      copy_string(row->subtitle, sizeof(row->subtitle), it->subtitle);
     } else {
-      (void)snprintf(row_text, sizeof(row_text), "%s", it->title);
+      /* One-line rows, what the window showed before the column
+       * layout: "[+] folder" or "title - subtitle". */
+      if (it->kind == ZZPLAY_ITEM_FOLDER) {
+        (void)snprintf(row->title, sizeof(row->title), "[+] %s", it->title);
+      } else if (it->subtitle[0] != '\0') {
+        (void)snprintf(row->title, sizeof(row->title), "%s - %s",
+                       it->title, it->subtitle);
+      } else {
+        copy_string(row->title, sizeof(row->title), it->title);
+      }
     }
-    node->ln_Name = gui_strdup(row_text);
-    if (!node->ln_Name) {
-      zzplay_free(node);
-      break;
-    }
-    AddTail(&browse_exec_list, node);
+    row->node.ln_Name = row->title;
+    AddTail(&browse_exec_list, &row->node);
+    rows++;
   }
 
-  /* Synthetic More row */
+  /* Synthetic More row, a plain centred row either way */
   if (browse_model.has_more) {
-    struct Node *node = (struct Node *)zzplay_alloc(sizeof(struct Node));
-    if (node) {
-      memset(node, 0, sizeof(*node));
-      node->ln_Name = gui_strdup("--- More items ---");
-      if (node->ln_Name) {
-        AddTail(&browse_exec_list, node);
-      } else {
-        zzplay_free(node);
-      }
+    struct browse_row_node *row =
+        (struct browse_row_node *)zzplay_alloc(sizeof(*row));
+    if (row) {
+      memset(row, 0, sizeof(*row));
+      row->index = -1;
+      copy_string(row->title, sizeof(row->title), "--- More items ---");
+      row->node.ln_Name = row->title;
+      AddTail(&browse_exec_list, &row->node);
+      rows++;
     }
   }
 
@@ -425,9 +610,15 @@ static void rebuild_list_nodes(void)
   tags[1].ti_Tag = GTLV_Selected;
   tags[1].ti_Data = browse_model.selection >= 0
                         ? (ULONG)browse_model.selection : ~0UL;
+  if (fresh) {
+    browse_list_top = browse_model.selection >= 0
+                          ? (int)browse_model.selection : 0;
+  } else if (browse_list_top > 0 && rows > 0U &&
+             (uint32_t)browse_list_top > rows - 1U) {
+    browse_list_top = (int)(rows - 1U);
+  }
   tags[2].ti_Tag = fresh ? GTLV_Top : TAG_IGNORE;
-  tags[2].ti_Data = browse_model.selection >= 0
-                        ? (ULONG)browse_model.selection : 0UL;
+  tags[2].ti_Data = (ULONG)browse_list_top;
   tags[3].ti_Tag = TAG_DONE;
   tags[3].ti_Data = 0;
   GT_SetGadgetAttrsA(list_gad, browse_win, NULL, tags);
@@ -746,22 +937,312 @@ static void __attribute__((noinline)) poll_settings(void)
   }
 }
 
-int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
-                       ZZPlayPlaylist *playlist)
+/* Widest of the button labels plus their frame. */
+static int browse_button_min_width(void)
 {
-  ZZPlayProviders *providers;
+  static const char *const labels[] = {
+    "Back", "Reload", "Play", "Add", "Favourite", "Stop", "Settings"
+  };
+  int btn_w = 0;
+  uint32_t i;
+
+  for (i = 0U; i < sizeof(labels) / sizeof(labels[0]); i++) {
+    int w = browse_text_w(labels[i]);
+    if (w > btn_w) {
+      btn_w = w;
+    }
+  }
+  return btn_w + 16;
+}
+
+/* The service cycle gadget: the longest name plus its glyph. */
+static int browse_cycle_width(void)
+{
+  int cycle_w = browse_text_w("(No services)");
+  uint32_t i;
+
+  for (i = 0U; i < ZZPLAY_BROWSE_SERVICES_MAX && service_labels[i] != NULL;
+       i++) {
+    int w = browse_text_w(service_labels[i]);
+    if (w > cycle_w) {
+      cycle_w = w;
+    }
+  }
+  return cycle_w + 32;
+}
+
+/* Builds every Browse gadget for the window's current size. GadTools
+ * gadgets cannot be resized, so a size change removes the attached
+ * list, frees it and calls this again; the rows, the selection, the
+ * shown top row and the status text live in this module's state and
+ * are reapplied here. */
+static int __attribute__((noinline)) build_browse_gadgets(void)
+{
   struct NewGadget ng;
   struct Gadget *gad;
-  struct TagItem tags[4];
+  struct TagItem tags[6];
+  struct TextFont *font;
   int font_h;
   int btn_h;
   int win_w;
   int win_h;
-  int cur_y;
   int content_w;
+  int cur_y;
+  int list_h;
   int btn_w;
   int cycle_w;
   int search_w;
+  int search_label_w;
+
+  if (!browse_win) {
+    return 0;
+  }
+
+  font = gui_screen->RastPort.Font;
+  font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
+  btn_h = font_h + 6;
+  win_w = (int)browse_win->Width - browse_win->BorderLeft -
+          browse_win->BorderRight;
+  win_h = (int)browse_win->Height - browse_win->BorderTop -
+          browse_win->BorderBottom;
+  content_w = win_w - 2 * BROWSE_MARGIN;
+  if (content_w < 100) {
+    content_w = 100;
+  }
+
+  cycle_w = browse_cycle_width();
+  search_label_w = browse_text_w("Search:") + 8;
+  search_w = content_w - cycle_w - BROWSE_SPACING - search_label_w;
+  if (search_w < 40) {
+    search_w = 40;
+  }
+
+  browse_glist = NULL;
+  gad = CreateContext(&browse_glist);
+  if (!gad) {
+    return 0;
+  }
+
+  memset(&ng, 0, sizeof(ng));
+  ng.ng_TextAttr = browse_text_attr;
+  ng.ng_VisualInfo = browse_vi;
+
+  cur_y = BROWSE_MARGIN;
+
+  /* Service cycle + Search string; the search buffer keeps what was
+   * typed across a rebuild. */
+  tags[0].ti_Tag = GTCY_Labels;
+  tags[0].ti_Data = (ULONG)service_labels;
+  tags[1].ti_Tag = TAG_DONE;
+  tags[1].ti_Data = 0;
+
+  service_gad = gad = create_gadget(
+      browse_win, CYCLE_KIND, gad, &ng,
+      BROWSE_MARGIN, cur_y, cycle_w, btn_h,
+      NULL, BGID_SERVICE, 0, tags);
+
+  tags[0].ti_Tag = GTST_String;
+  tags[0].ti_Data = (ULONG)search_buf;
+  tags[1].ti_Tag = GTST_MaxChars;
+  tags[1].ti_Data = (ULONG)(sizeof(search_buf) - 1U);
+  tags[2].ti_Tag = GA_RelVerify;
+  tags[2].ti_Data = TRUE;
+  tags[3].ti_Tag = TAG_DONE;
+  tags[3].ti_Data = 0;
+
+  search_gad = gad = create_gadget(
+      browse_win, STRING_KIND, gad, &ng,
+      BROWSE_MARGIN + cycle_w + BROWSE_SPACING + search_label_w, cur_y,
+      search_w, btn_h, "Search:", BGID_SEARCH, PLACETEXT_LEFT, tags);
+
+  cur_y += btn_h + BROWSE_SPACING;
+
+  /* The list takes all height between the search row and the button
+   * row, and the full width. GadTools sizes it to whole rows. */
+  list_h = win_h - cur_y - (2 * BROWSE_SPACING + 2 * btn_h + BROWSE_MARGIN);
+  if (list_h < 2 * font_h + 4) {
+    list_h = 2 * font_h + 4;
+  }
+
+  /* The contents, the selection and the shown top row are reapplied by
+   * the tags; on V39 the render hook draws the column rows. */
+  tags[0].ti_Tag = GTLV_Labels;
+  tags[0].ti_Data = (ULONG)&browse_exec_list;
+  tags[1].ti_Tag = GTLV_ShowSelected;
+  tags[1].ti_Data = 0;
+  if (browse_columns_ok) {
+    tags[2].ti_Tag = GTLV_CallBack;
+    tags[2].ti_Data = (ULONG)&browse_list_hook;
+  } else {
+    tags[2].ti_Tag = TAG_IGNORE;
+    tags[2].ti_Data = 0;
+  }
+  tags[3].ti_Tag = GTLV_Selected;
+  tags[3].ti_Data =
+      (browse_model.item_count > 0U && browse_model.selection >= 0)
+          ? (ULONG)browse_model.selection
+          : ~0UL;
+  tags[4].ti_Tag = GTLV_Top;
+  tags[4].ti_Data = (ULONG)browse_list_top;
+  tags[5].ti_Tag = TAG_DONE;
+  tags[5].ti_Data = 0;
+
+  list_gad = gad = create_gadget(
+      browse_win, LISTVIEW_KIND, gad, &ng,
+      BROWSE_MARGIN, cur_y, content_w, list_h,
+      NULL, BGID_LIST, 0, tags);
+
+  cur_y += list_h + BROWSE_SPACING;
+
+  /* Buttons: Back, Reload, Play, Add, Favourite, Stop, Settings,
+   * spread across the width. */
+  btn_w = (content_w - 6 * BROWSE_SPACING) / 7;
+  if (btn_w < 1) {
+    btn_w = 1;
+  }
+
+  back_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN, cur_y, btn_w, btn_h,
+      "Back", BGID_BACK, PLACETEXT_IN, NULL);
+
+  reload_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN + (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      "Reload", BGID_RELOAD, PLACETEXT_IN, NULL);
+
+  play_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN + 2 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      "Play", BGID_PLAY, PLACETEXT_IN, NULL);
+
+  add_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN + 3 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      "Add", BGID_ADD, PLACETEXT_IN, NULL);
+
+  fav_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN + 4 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      "Favourite", BGID_FAVOURITE, PLACETEXT_IN, NULL);
+
+  stop_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN + 5 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      "Stop", BGID_STOP, PLACETEXT_IN, NULL);
+
+  settings_btn_gad = gad = create_gadget(
+      browse_win, BUTTON_KIND, gad, &ng,
+      BROWSE_MARGIN + 6 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
+      "Settings", BGID_SETTINGS, PLACETEXT_IN, NULL);
+
+  cur_y += btn_h + BROWSE_SPACING;
+
+  /* Status line at the bottom */
+  tags[0].ti_Tag = GTTX_Text;
+  tags[0].ti_Data = (ULONG)status_buf;
+  tags[1].ti_Tag = GTTX_CopyText;
+  tags[1].ti_Data = TRUE;
+  tags[2].ti_Tag = TAG_DONE;
+  tags[2].ti_Data = 0;
+
+  status_gad = gad = create_gadget(
+      browse_win, TEXT_KIND, gad, &ng,
+      BROWSE_MARGIN, cur_y, content_w, btn_h,
+      NULL, BGID_STATUS, 0, tags);
+
+  if (!gad || !service_gad || !search_gad || !list_gad || !back_gad ||
+      !reload_gad || !play_gad || !add_gad || !fav_gad || !stop_gad ||
+      !settings_btn_gad || !status_gad) {
+    return 0;
+  }
+
+  AddGList(browse_win, browse_glist, (UWORD)-1, (UWORD)-1, NULL);
+  RefreshGList(browse_glist, browse_win, NULL, (UWORD)-1);
+  GT_RefreshWindow(browse_win, NULL);
+
+  built_inner_w = win_w;
+  built_inner_h = win_h;
+
+  update_buttons();
+  update_busy_pointer();
+  /* The status gadget is new and empty; show the last text again. */
+  status_shown[0] = '\0';
+  update_status_text(status_buf);
+  return 1;
+}
+
+/* A size change rebuilds the gadget list at the new size, keeping the
+ * rows, the selection, the shown top row and the status text. */
+static void browse_handle_resize(void)
+{
+  int w;
+  int h;
+
+  if (!browse_win || !browse_glist) {
+    return;
+  }
+  w = (int)browse_win->Width - browse_win->BorderLeft -
+      browse_win->BorderRight;
+  h = (int)browse_win->Height - browse_win->BorderTop -
+      browse_win->BorderBottom;
+  if (w == built_inner_w && h == built_inner_h) {
+    return;
+  }
+
+  /* Where the list is scrolled can only be read back through
+   * GT_GetGadgetAttrs (V39); on V37 the last value this module set is
+   * reused. */
+  if (browse_columns_ok && list_gad) {
+    struct TagItem get_tags[2];
+    ULONG top = (ULONG)browse_list_top;
+
+    get_tags[0].ti_Tag = GTLV_Top;
+    get_tags[0].ti_Data = (ULONG)&top;
+    get_tags[1].ti_Tag = TAG_DONE;
+    get_tags[1].ti_Data = 0;
+    if (GT_GetGadgetAttrsA(list_gad, browse_win, NULL, get_tags) != 0) {
+      browse_list_top = (int)top;
+    }
+  }
+
+  RemoveGList(browse_win, browse_glist, (UWORD)-1);
+  FreeGadgets(browse_glist);
+  browse_glist = NULL;
+  list_gad = NULL;
+  service_gad = NULL;
+  search_gad = NULL;
+  back_gad = NULL;
+  reload_gad = NULL;
+  play_gad = NULL;
+  add_gad = NULL;
+  fav_gad = NULL;
+  stop_gad = NULL;
+  settings_btn_gad = NULL;
+  status_gad = NULL;
+  (void)build_browse_gadgets();
+}
+
+int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
+                       ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs)
+{
+  ZZPlayProviders *providers;
+  struct TextFont *font;
+  int font_h;
+  int btn_h;
+  int min_w;
+  int min_h;
+  int min_outer_w;
+  int min_outer_h;
+  int border_l;
+  int border_r;
+  int border_t;
+  int border_b;
+  int left;
+  int top;
+  int w;
+  int h;
+  int cycle_w;
   int search_label_w;
   uint32_t i;
   uint32_t loaded_count;
@@ -775,6 +1256,7 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   gui_screen = screen;
   gui_ctl = ctl;
   gui_playlist = playlist;
+  browse_prefs = prefs;
 
   if (!gui_screen || !gui_ctl || !gui_playlist) {
     return 0;
@@ -822,68 +1304,112 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
   /* Start worker child process */
   (void)zzplay_browse_worker_start();
 
-  {
-    struct TextFont *font = gui_screen->RastPort.Font;
-    font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
-  }
+  font = gui_screen->RastPort.Font;
+  font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
+  browse_font = font;
   btn_h = font_h + 6;
-  /* Six buttons as wide as the widest label; the cycle gadget as wide as
-   * the longest service name plus its glyph. */
-  btn_w = 0;
-  {
-    static const char *const labels[] = {
-      "Back", "Reload", "Play", "Add", "Favourite", "Stop", "Settings"
-    };
-    for (i = 0U; i < sizeof(labels) / sizeof(labels[0]); i++) {
-      int w = browse_text_w(labels[i]);
-      if (w > btn_w) {
-        btn_w = w;
-      }
-    }
-  }
-  btn_w += 16;
-  cycle_w = browse_text_w("(No services)");
-  for (i = 0U; i < loaded_count; i++) {
-    int w = browse_text_w(service_labels[i]);
-    if (w > cycle_w) {
-      cycle_w = w;
-    }
-  }
-  cycle_w += 32;
+
+  /* Aligned column rows need the V39 gadtools render hook; older
+   * systems keep the window usable with the one-line rows. */
+  browse_columns_ok =
+      (GadToolsBase != NULL && GadToolsBase->lib_Version >= 39 &&
+       IntuitionBase != NULL && IntuitionBase->LibNode.lib_Version >= 39)
+          ? 1
+          : 0;
+  browse_marker_col_w = font_h + 4;
+  browse_len_col_w = browse_text_w(ZZPLAY_BROWSE_LEN_TEXT);
+  browse_list_top = 0;
+
+  /* The smallest usable window: every button and the search row fit,
+   * and the list shows two whole rows. */
+  min_w = 7 * browse_button_min_width() + 6 * BROWSE_SPACING +
+          2 * BROWSE_MARGIN;
+  cycle_w = browse_cycle_width();
   search_label_w = browse_text_w("Search:") + 8;
-  win_w = 7 * btn_w + 6 * BROWSE_SPACING + 2 * BROWSE_MARGIN;
-  if (win_w < cycle_w + BROWSE_SPACING + search_label_w + 160 +
+  if (min_w < cycle_w + BROWSE_SPACING + search_label_w + 160 +
                   2 * BROWSE_MARGIN) {
-    win_w = cycle_w + BROWSE_SPACING + search_label_w + 160 +
+    min_w = cycle_w + BROWSE_SPACING + search_label_w + 160 +
             2 * BROWSE_MARGIN;
   }
-  if (win_w < 460) {
-    win_w = 460;
+  if (min_w < 460) {
+    min_w = 460;
   }
-  if (win_w > gui_screen->Width - gui_screen->WBorLeft - gui_screen->WBorRight) {
-    win_w = gui_screen->Width - gui_screen->WBorLeft - gui_screen->WBorRight;
-  }
-  content_w = win_w - 2 * BROWSE_MARGIN;
-  btn_w = (content_w - 6 * BROWSE_SPACING) / 7;
-  /* Service row, list, button row, status line. */
-  win_h = BROWSE_MARGIN + btn_h + BROWSE_SPACING + (font_h * 8 + 8) +
+  min_h = BROWSE_MARGIN + btn_h + BROWSE_SPACING + (2 * font_h + 4) +
           BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h + BROWSE_MARGIN;
 
-  init_exec_list(&browse_exec_list);
+  /* Window borders, for the size limits and for clamping a remembered
+   * geometry; the sizing border's height is close enough for a limit. */
+  border_l = (int)gui_screen->WBorLeft;
+  border_r = (int)gui_screen->WBorRight;
+  border_t = (int)gui_screen->WBorTop + font_h + 1;
+  border_b = 10;
+  min_outer_w = min_w + border_l + border_r;
+  min_outer_h = min_h + border_t + border_b;
+  if (min_outer_w > (int)gui_screen->Width) {
+    min_outer_w = (int)gui_screen->Width;
+  }
+  if (min_outer_h > (int)gui_screen->Height) {
+    min_outer_h = (int)gui_screen->Height;
+  }
 
+  /* Today's defaults, or what the prefs remember of this window,
+   * clamped so the whole window is on the screen it opens on. */
+  left = 40;
+  top = 40;
+  w = min_w;
+  h = BROWSE_MARGIN + btn_h + BROWSE_SPACING + (font_h * 8 + 8) +
+      BROWSE_SPACING + btn_h + BROWSE_SPACING + btn_h + BROWSE_MARGIN;
+  if (browse_prefs) {
+    if (browse_prefs->browse_width >= 0 && browse_prefs->browse_height >= 0) {
+      w = (int)browse_prefs->browse_width;
+      h = (int)browse_prefs->browse_height;
+    }
+    if (browse_prefs->browse_left >= 0) {
+      left = (int)browse_prefs->browse_left;
+      top = (int)browse_prefs->browse_top;
+    }
+  }
+  {
+    int outer_w = w + border_l + border_r;
+    int outer_h = h + border_t + border_b;
+    zzplay_browse_clamp_window(&left, &top, &outer_w, &outer_h,
+                               (int)gui_screen->Width,
+                               (int)gui_screen->Height, min_outer_w,
+                               min_outer_h);
+    w = outer_w - border_l - border_r;
+    h = outer_h - border_t - border_b;
+  }
+
+  /* A fresh window starts with an empty search field and status line;
+   * rebuilds later keep whatever they hold. */
+  search_buf[0] = '\0';
+  status_buf[0] = '\0';
+  status_shown[0] = '\0';
+
+  init_exec_list(&browse_exec_list);
   browse_win = OpenWindowTags(
       NULL,
       WA_Title, (ULONG)"Browse Services",
-      WA_Left, 40,
-      WA_Top, 40,
-      WA_InnerWidth, (ULONG)win_w,
-      WA_InnerHeight, (ULONG)win_h,
+      WA_Left, (ULONG)left,
+      WA_Top, (ULONG)top,
+      WA_InnerWidth, (ULONG)w,
+      WA_InnerHeight, (ULONG)h,
       WA_DragBar, TRUE,
       WA_DepthGadget, TRUE,
       WA_CloseGadget, TRUE,
       WA_Activate, TRUE,
       WA_NewLookMenus, TRUE,
-      WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_GADGETUP | IDCMP_REFRESHWINDOW,
+      /* Resizable: the list takes the extra height and width, the
+       * buttons spread across the width, the status line stays at the
+       * bottom, and the size can be remembered in the prefs. */
+      WA_SizeGadget, TRUE,
+      WA_SizeBBottom, TRUE,
+      WA_MinWidth, (ULONG)min_outer_w,
+      WA_MinHeight, (ULONG)min_outer_h,
+      WA_MaxWidth, (ULONG)gui_screen->Width,
+      WA_MaxHeight, (ULONG)gui_screen->Height,
+      WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_GADGETUP | IDCMP_REFRESHWINDOW |
+                    IDCMP_NEWSIZE,
       WA_CustomScreen, (ULONG)gui_screen,
       TAG_DONE);
 
@@ -892,119 +1418,10 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     return 0;
   }
 
-  browse_glist = NULL;
-  gad = CreateContext(&browse_glist);
-  if (!gad) {
+  if (!build_browse_gadgets()) {
     zzplay_browse_close();
     return 0;
   }
-
-  ng.ng_TextAttr = browse_text_attr;
-  ng.ng_VisualInfo = browse_vi;
-
-  cur_y = BROWSE_MARGIN;
-
-  /* Service cycle + Search string (cycle_w measured above) */
-  tags[0].ti_Tag = GTCY_Labels;
-  tags[0].ti_Data = (ULONG)service_labels;
-  tags[1].ti_Tag = TAG_DONE;
-
-  service_gad = gad = create_gadget(
-      browse_win, CYCLE_KIND, gad, &ng,
-      BROWSE_MARGIN, cur_y, cycle_w, btn_h,
-      NULL, BGID_SERVICE, 0, tags);
-
-  search_w = content_w - cycle_w - BROWSE_SPACING - search_label_w;
-  search_buf[0] = '\0';
-  tags[0].ti_Tag = GTST_String;
-  tags[0].ti_Data = (ULONG)search_buf;
-  tags[1].ti_Tag = GTST_MaxChars;
-  tags[1].ti_Data = (ULONG)(sizeof(search_buf) - 1U);
-  tags[2].ti_Tag = GA_RelVerify;
-  tags[2].ti_Data = TRUE;
-  tags[3].ti_Tag = TAG_DONE;
-
-  search_gad = gad = create_gadget(
-      browse_win, STRING_KIND, gad, &ng,
-      BROWSE_MARGIN + cycle_w + BROWSE_SPACING + search_label_w, cur_y,
-      search_w, btn_h, "Search:", BGID_SEARCH, PLACETEXT_LEFT, tags);
-
-  cur_y += btn_h + BROWSE_SPACING;
-
-  /* List view */
-  tags[0].ti_Tag = GTLV_Labels;
-  tags[0].ti_Data = (ULONG)&browse_exec_list;
-  tags[1].ti_Tag = GTLV_ShowSelected;
-  tags[1].ti_Data = 0;
-  tags[2].ti_Tag = TAG_DONE;
-
-  list_gad = gad = create_gadget(
-      browse_win, LISTVIEW_KIND, gad, &ng,
-      BROWSE_MARGIN, cur_y, content_w, font_h * 8 + 8,
-      NULL, BGID_LIST, 0, tags);
-
-  cur_y += font_h * 8 + 8 + BROWSE_SPACING;
-
-  /* Buttons: Back, Reload, Play, Add, Favourite, Stop, Settings */
-
-  back_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN, cur_y, btn_w, btn_h,
-      "Back", BGID_BACK, PLACETEXT_IN, NULL);
-
-  reload_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Reload", BGID_RELOAD, PLACETEXT_IN, NULL);
-
-  play_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 2 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Play", BGID_PLAY, PLACETEXT_IN, NULL);
-
-  add_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 3 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Add", BGID_ADD, PLACETEXT_IN, NULL);
-
-  fav_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 4 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Favourite", BGID_FAVOURITE, PLACETEXT_IN, NULL);
-
-  stop_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 5 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Stop", BGID_STOP, PLACETEXT_IN, NULL);
-
-  settings_btn_gad = gad = create_gadget(
-      browse_win, BUTTON_KIND, gad, &ng,
-      BROWSE_MARGIN + 6 * (btn_w + BROWSE_SPACING), cur_y, btn_w, btn_h,
-      "Settings", BGID_SETTINGS, PLACETEXT_IN, NULL);
-
-  cur_y += btn_h + BROWSE_SPACING;
-
-  /* Status text */
-  status_buf[0] = '\0';
-  tags[0].ti_Tag = GTTX_Text;
-  tags[0].ti_Data = (ULONG)status_buf;
-  tags[1].ti_Tag = GTTX_CopyText;
-  tags[1].ti_Data = TRUE;
-  tags[2].ti_Tag = TAG_DONE;
-
-  status_gad = gad = create_gadget(
-      browse_win, TEXT_KIND, gad, &ng,
-      BROWSE_MARGIN, cur_y, content_w, btn_h,
-      NULL, BGID_STATUS, 0, tags);
-
-  if (!gad) {
-    zzplay_browse_close();
-    return 0;
-  }
-
-  AddGList(browse_win, browse_glist, (UWORD)-1, (UWORD)-1, NULL);
-  RefreshGList(browse_glist, browse_win, NULL, (UWORD)-1);
-  GT_RefreshWindow(browse_win, NULL);
 
   /* Select initial service if available */
   if (browse_model.service_count > 0U && browse_model.current_service < 0) {
@@ -1020,7 +1437,23 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
 
 void zzplay_browse_close(void)
 {
+  int remember = (browse_win != NULL && browse_prefs != NULL);
+
   close_settings_window();
+
+  /* The window's place and size are remembered when it closes, and
+   * again when ZZPlay quits with it open (this runs then too, before
+   * the app writes the session). */
+  if (remember) {
+    browse_prefs->browse_left = (int16_t)browse_win->LeftEdge;
+    browse_prefs->browse_top = (int16_t)browse_win->TopEdge;
+    browse_prefs->browse_width =
+        (int16_t)(browse_win->Width - browse_win->BorderLeft -
+                  browse_win->BorderRight);
+    browse_prefs->browse_height =
+        (int16_t)(browse_win->Height - browse_win->BorderTop -
+                  browse_win->BorderBottom);
+  }
 
   if (browse_win) {
     if (browse_win->UserPort) {
@@ -1037,6 +1470,19 @@ void zzplay_browse_close(void)
     FreeGadgets(browse_glist);
     browse_glist = NULL;
   }
+  list_gad = NULL;
+  service_gad = NULL;
+  search_gad = NULL;
+  back_gad = NULL;
+  reload_gad = NULL;
+  play_gad = NULL;
+  add_gad = NULL;
+  fav_gad = NULL;
+  stop_gad = NULL;
+  settings_btn_gad = NULL;
+  status_gad = NULL;
+  built_inner_w = -1;
+  built_inner_h = -1;
   if (browse_vi) {
     FreeVisualInfo(browse_vi);
     browse_vi = NULL;
@@ -1048,6 +1494,12 @@ void zzplay_browse_close(void)
   if (model_inited) {
     zzplay_browse_model_free(&browse_model);
     model_inited = 0;
+  }
+
+  if (remember) {
+    (void)zzplay_prefs_save_session(browse_prefs, ZZPLAY_PREFS_ENV_PATH);
+    (void)zzplay_prefs_save_session(browse_prefs,
+                                    ZZPLAY_PREFS_ENVARC_PATH);
   }
 }
 
@@ -1295,6 +1747,10 @@ void zzplay_browse_poll(void)
       GT_EndRefresh(browse_win, TRUE);
       continue;
     }
+    if (class == IDCMP_NEWSIZE) {
+      browse_handle_resize();
+      continue;
+    }
     if (class == IDCMP_GADGETUP && gad) {
       UWORD gid = gad->GadgetID;
 
@@ -1459,9 +1915,9 @@ void zzplay_browse_poll(void)
 #else /* !defined(__amigaos__) && !defined(AMIGA) */
 
 int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
-                       ZZPlayPlaylist *playlist)
+                       ZZPlayPlaylist *playlist, ZZPlayPrefs *prefs)
 {
-  (void)screen; (void)ctl; (void)playlist;
+  (void)screen; (void)ctl; (void)playlist; (void)prefs;
   return 0;
 }
 void zzplay_browse_close(void) {}
