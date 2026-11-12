@@ -5921,9 +5921,9 @@ int main(int argc, char **argv)
     zzplay_prefs_settle_session(&app.prefs, &app.stored_prefs,
                                 &app.started_prefs);
     (void)zzplay_prefs_save_session(&app.prefs,
-                                    ZZPLAY_PREFS_ENV_PATH);
-    (void)zzplay_prefs_save_session(&app.prefs,
                                     ZZPLAY_PREFS_ENVARC_PATH);
+    (void)zzplay_prefs_save_session(&app.prefs,
+                                    ZZPLAY_PREFS_ENV_PATH);
   }
   if (app.trace) {
     Close(app.trace);

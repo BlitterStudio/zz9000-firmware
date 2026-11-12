@@ -421,8 +421,8 @@ static int host_pref_set_locked(const char *scheme, const char *key,
 
   {
     size_t new_len = strlen(new_buf);
-    int w1 = zzplay_file_write_all(env_path, new_buf, new_len);
     int w2 = zzplay_file_write_all(envarc_path, new_buf, new_len);
+    int w1 = zzplay_file_write_all(env_path, new_buf, new_len);
     zzplay_free(new_buf);
 #if defined(__amigaos__) || defined(AMIGA)
     return (w1 && w2) ? 1 : 0;
@@ -505,8 +505,8 @@ int zzplay_host_text_save(const char *scheme, const char *suffix,
   host_ensure_drawer("ENV:ZZPlay");
   host_ensure_drawer("ENVARC:ZZPlay");
 #endif
-  w1 = zzplay_file_write_all(env_path, text, (size_t)length);
   w2 = zzplay_file_write_all(envarc_path, text, (size_t)length);
+  w1 = zzplay_file_write_all(env_path, text, (size_t)length);
   host_files_release();
   return (w1 && w2) ? 1 : 0;
 }
