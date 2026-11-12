@@ -43,6 +43,16 @@ int zzplay_host_pref_get(const char *scheme, const char *key, char *out,
 int zzplay_host_pref_set(const char *scheme, const char *key,
                          const char *value);
 
+/* ZZPlay's own per-service files beside the settings, such as the
+ * Recently played list ("<scheme>.recent"): load reads
+ * ENV:ZZPlay/<scheme><suffix>, or ENVARC: when ENV: has none, into an
+ * owned buffer (release with zzplay_free) of at most `max_len` bytes;
+ * save writes both. Return 0 on failure. */
+int zzplay_host_text_load(const char *scheme, const char *suffix,
+                          uint32_t max_len, char **text, uint32_t *length);
+int zzplay_host_text_save(const char *scheme, const char *suffix,
+                          const char *text, uint32_t length);
+
 /* Percent-encode `in` for a URL query component (unreserved characters
  * stay, everything else becomes %XX). Returns the length written, or 0
  * when it does not fit in `size` with its terminator. */

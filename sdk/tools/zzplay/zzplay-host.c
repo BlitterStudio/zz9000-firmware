@@ -388,6 +388,69 @@ int zzplay_host_pref_set(const char *scheme, const char *key,
   }
 }
 
+/* "ENV:ZZPlay/<scheme><suffix>" and its ENVARC: twin; 0 when either
+ * does not fit. */
+static int host_text_paths(const char *scheme, const char *suffix,
+                           char *env_path, char *envarc_path, size_t size)
+{
+  int n1;
+  int n2;
+
+  if (!scheme || !*scheme || !suffix) {
+    return 0;
+  }
+  n1 = snprintf(env_path, size, "ENV:ZZPlay/%s%s", scheme, suffix);
+  n2 = snprintf(envarc_path, size, "ENVARC:ZZPlay/%s%s", scheme, suffix);
+  return n1 > 0 && n2 > 0 && (size_t)n1 < size && (size_t)n2 < size;
+}
+
+int zzplay_host_text_load(const char *scheme, const char *suffix,
+                          uint32_t max_len, char **text, uint32_t *length)
+{
+  char env_path[64];
+  char envarc_path[64];
+  void *buf = NULL;
+  size_t len = 0U;
+
+  if (!text || !length) {
+    return 0;
+  }
+  *text = NULL;
+  *length = 0U;
+  if (!host_text_paths(scheme, suffix, env_path, envarc_path,
+                       sizeof(env_path))) {
+    return 0;
+  }
+  if (!zzplay_file_read_all(env_path, (size_t)max_len, &buf, &len) &&
+      !zzplay_file_read_all(envarc_path, (size_t)max_len, &buf, &len)) {
+    return 0;
+  }
+  *text = (char *)buf;
+  *length = (uint32_t)len;
+  return 1;
+}
+
+int zzplay_host_text_save(const char *scheme, const char *suffix,
+                          const char *text, uint32_t length)
+{
+  char env_path[64];
+  char envarc_path[64];
+  int w1;
+  int w2;
+
+  if (!text || !host_text_paths(scheme, suffix, env_path, envarc_path,
+                                sizeof(env_path))) {
+    return 0;
+  }
+#if defined(__amigaos__) || defined(AMIGA)
+  host_ensure_drawer("ENV:ZZPlay");
+  host_ensure_drawer("ENVARC:ZZPlay");
+#endif
+  w1 = zzplay_file_write_all(env_path, text, (size_t)length);
+  w2 = zzplay_file_write_all(envarc_path, text, (size_t)length);
+  return (w1 && w2) ? 1 : 0;
+}
+
 static void *host_alloc(const ZZPlayHost *host, uint32_t size)
 {
   (void)host;

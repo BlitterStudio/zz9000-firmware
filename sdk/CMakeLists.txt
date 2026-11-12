@@ -559,6 +559,12 @@ add_executable(zzplay_xml_test
 target_link_libraries(zzplay_xml_test PRIVATE zzplay_core)
 add_test(NAME zzplay_xml_test COMMAND zzplay_xml_test)
 
+add_executable(zzplay_parser_fuzz_test
+  tests/zzplay_parser_fuzz_test.c
+)
+target_link_libraries(zzplay_parser_fuzz_test PRIVATE zzplay_core)
+add_test(NAME zzplay_parser_fuzz_test COMMAND zzplay_parser_fuzz_test)
+
 add_executable(zzplay_providers_test
   tests/zzplay_providers_test.c
 )
@@ -603,6 +609,12 @@ add_executable(zzplay_browse_rows_test
 )
 target_link_libraries(zzplay_browse_rows_test PRIVATE zzplay_core)
 add_test(NAME zzplay_browse_rows_test COMMAND zzplay_browse_rows_test)
+
+add_executable(zzplay_play_next_test
+  tests/zzplay_play_next_test.c
+)
+target_link_libraries(zzplay_play_next_test PRIVATE zzplay_core)
+add_test(NAME zzplay_play_next_test COMMAND zzplay_play_next_test)
 
 add_executable(zzplay_webm_test
   tests/zzplay_webm_test.c

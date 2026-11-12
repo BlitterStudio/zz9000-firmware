@@ -94,18 +94,19 @@ void zzplay_playlist_free(ZZPlayPlaylist *list)
   list->capacity = 0U;
 }
 
-int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path)
+/* Room for one more entry and an owned copy of `path`: NULL for an empty
+ * or over-long path, a full list, or no memory. */
+static char *playlist_take_path(ZZPlayPlaylist *list, const char *path)
 {
   char *copy;
-  uint32_t idx;
   size_t len;
 
   if (!list || !path || !*path) {
-    return -1;
+    return NULL;
   }
   len = strlen(path);
   if (len >= ZZPLAY_PLAYLIST_PATH_MAX || list->count >= ZZPLAY_PLAYLIST_MAX_ENTRIES) {
-    return -1;
+    return NULL;
   }
   if (list->count >= list->capacity) {
     uint32_t new_cap = (list->capacity == 0U) ? 16U : (list->capacity * 2U);
@@ -122,7 +123,7 @@ int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path)
       zzplay_free(new_entries);
       zzplay_free(new_order);
       list->allocation_failed = 1;
-      return -1;
+      return NULL;
     }
     if (list->count != 0U) {
       memcpy(new_entries, list->entries,
@@ -139,9 +140,21 @@ int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path)
   copy = (char *)zzplay_alloc(len + 1U);
   if (!copy) {
     list->allocation_failed = 1;
-    return -1;
+    return NULL;
   }
   memcpy(copy, path, len + 1U);
+  return copy;
+}
+
+int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path)
+{
+  char *copy;
+  uint32_t idx;
+
+  copy = playlist_take_path(list, path);
+  if (!copy) {
+    return -1;
+  }
 
   idx = list->count;
   list->entries[idx].path = copy;
@@ -185,6 +198,84 @@ int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path)
 
   list->count++;
   return (int32_t)idx;
+}
+
+int32_t zzplay_playlist_insert_after(ZZPlayPlaylist *list, int32_t after,
+                                     const char *path)
+{
+  char *copy;
+  uint32_t at;
+  uint32_t pos;
+  uint32_t k;
+
+  if (!list || after < -1 || (after >= 0 && (uint32_t)after >= list->count)) {
+    return -1;
+  }
+  copy = playlist_take_path(list, path);
+  if (!copy) {
+    return -1;
+  }
+  at = (uint32_t)(after + 1);
+
+  /* Play-order slot: right behind `after`, or the very first. Without
+   * shuffle the order is the identity, so this is `at` too. */
+  pos = 0U;
+  if (after >= 0) {
+    for (k = 0U; k < list->count; k++) {
+      if (list->order[k] == (uint32_t)after) {
+        pos = k + 1U;
+        break;
+      }
+    }
+  }
+
+  if (at < list->count) {
+    memmove(&list->entries[at + 1U], &list->entries[at],
+            (list->count - at) * sizeof(ZZPlayPlaylistEntry));
+  }
+  list->entries[at].path = copy;
+  list->entries[at].title[0] = '\0';
+  list->entries[at].duration_ms = 0U;
+  list->entries[at].failed = 0U;
+  if (list->current >= (int32_t)at) {
+    list->current++;
+  }
+
+  for (k = 0U; k < list->count; k++) {
+    if (list->order[k] >= at) {
+      list->order[k]++;
+    }
+  }
+  if (pos < list->count) {
+    memmove(&list->order[pos + 1U], &list->order[pos],
+            (list->count - pos) * sizeof(uint32_t));
+  }
+  list->order[pos] = at;
+  /* An entry put exactly where play resumes (the playing entry was
+   * removed) is the one that plays next; anything earlier pushes the
+   * resume point along. */
+  if (list->resume_pos >= 0 && pos < (uint32_t)list->resume_pos) {
+    list->resume_pos++;
+  }
+
+  list->count++;
+  return (int32_t)at;
+}
+
+int32_t zzplay_playlist_next_anchor(const ZZPlayPlaylist *list, int playing)
+{
+  if (!list || !playing) {
+    return -1;
+  }
+  if (list->current >= 0 && (uint32_t)list->current < list->count) {
+    return list->current;
+  }
+  /* The playing entry was removed: play continues from resume_pos, so
+   * new entries go behind the entry before that place. */
+  if (list->resume_pos > 0 && (uint32_t)list->resume_pos <= list->count) {
+    return (int32_t)list->order[list->resume_pos - 1];
+  }
+  return -1;
 }
 
 int zzplay_playlist_remove(ZZPlayPlaylist *list, uint32_t index)
@@ -788,10 +879,16 @@ uint32_t zzplay_playlist_parse_m3u(ZZPlayPlaylist *list, const char *text,
         if (scan < line_stop && *scan == ',') {
           const char *title_str = scan + 1;
           size_t tlen = (size_t)(line_stop - title_str);
+          size_t k;
           if (tlen >= sizeof(pending_title)) {
             tlen = sizeof(pending_title) - 1U;
           }
-          memcpy(pending_title, title_str, tlen);
+          /* Control characters would break the line when the list is
+           * saved again. */
+          for (k = 0U; k < tlen; k++) {
+            unsigned char tc = (unsigned char)title_str[k];
+            pending_title[k] = (tc < 0x20U || tc == 0x7FU) ? ' ' : (char)tc;
+          }
           pending_title[tlen] = '\0';
         } else {
           pending_title[0] = '\0';
@@ -803,8 +900,13 @@ uint32_t zzplay_playlist_parse_m3u(ZZPlayPlaylist *list, const char *text,
       continue;
     }
 
+    /* A longer line is not a path this list can hold; cutting it would
+     * add a different file. */
     if (line_len >= sizeof(line_buf)) {
-      line_len = sizeof(line_buf) - 1U;
+      pending_extinf = 0;
+      pending_title[0] = '\0';
+      pending_duration_ms = 0U;
+      continue;
     }
     memcpy(line_buf, line_start, line_len);
     line_buf[line_len] = '\0';
@@ -886,7 +988,15 @@ size_t zzplay_playlist_format_m3u(const ZZPlayPlaylist *list, char *out,
         extinf[elen++] = '1';
       }
       extinf[elen++] = ',';
-      memcpy(extinf + elen, e->title, title_len);
+      {
+        size_t k;
+
+        /* A line break in a title would start a new line. */
+        for (k = 0U; k < title_len; k++) {
+          char tc = e->title[k];
+          extinf[elen + k] = (tc == '\r' || tc == '\n') ? ' ' : tc;
+        }
+      }
       elen += title_len;
       extinf[elen++] = '\n';
       ulen = elen;

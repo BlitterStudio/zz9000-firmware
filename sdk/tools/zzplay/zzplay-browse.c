@@ -35,6 +35,41 @@
 #define BROWSE_FIELDS_MAX 8U
 #define BROWSE_CHOICES_MAX 16U
 
+/* Raw key codes of keys that send no VANILLAKEY. Page Up/Down, Home and
+ * End are the codes AmigaOS 3.9 and later keymaps give those PC keys. */
+#define BROWSE_RAW_UP 0x4CU
+#define BROWSE_RAW_DOWN 0x4DU
+#define BROWSE_RAW_PAGE_UP 0x48U
+#define BROWSE_RAW_PAGE_DOWN 0x49U
+#define BROWSE_RAW_HOME 0x70U
+#define BROWSE_RAW_END 0x71U
+
+/* What Play, Add and Play next do with the entries they put in the
+ * playlist. */
+enum BrowseMode {
+  BROWSE_TO_PLAY = 0, /* replace (a collection) or append, then play */
+  BROWSE_TO_ADD,      /* append */
+  BROWSE_TO_NEXT      /* insert after the playing entry */
+};
+
+/* The Browse menu: item numbers count the bars too. */
+enum BrowseMenuItem {
+  BMI_PLAY = 0,
+  BMI_PLAY_NEXT,
+  BMI_ADD,
+  BMI_BAR1,
+  BMI_PLAY_ALL,
+  BMI_PLAY_ALL_NEXT,
+  BMI_ADD_ALL,
+  BMI_BAR2,
+  BMI_FAVOURITE,
+  BMI_RELOAD,
+  BMI_BACK,
+  BMI_BAR3,
+  BMI_CLOSE,
+  BMI_COUNT
+};
+
 enum BrowseGadgetID {
   BGID_SERVICE = 1,
   BGID_SEARCH,
@@ -118,10 +153,56 @@ static char stage_host[96];
  * they have all arrived. The playlist is only touched at the end, so
  * Stop until then leaves it unchanged. */
 static int gather_active = 0;
-static int gather_add = 0;     /* 1: append to the playlist, 0: replace */
+static int gather_mode = BROWSE_TO_PLAY;
 static uint32_t gather_generation = 0U;
 static uint32_t gather_seen = 0U;
 static char gather_scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
+/* What a gather that plays (not one that only adds) records under
+ * Recently played once its tracks are in the playlist. */
+static int gather_note = 0;
+static ZZPlayBrowseItem gather_note_item;
+/* Another service's Recently played list, read, changed and saved when
+ * something of it is started after the window switched service. */
+static ZZPlayBrowseRecent other_recent;
+
+/* The Browse menu. Its Amiga-key shortcuts leave the player's (O U R A
+ * L S P Q N B F) alone, and the string gadget's editing keys (C V X Q)
+ * too. */
+static struct NewMenu browse_new_menu[] = {
+  { NM_TITLE, (CONST_STRPTR)"Browse", 0, 0, 0, 0 },
+  { NM_ITEM, (CONST_STRPTR)"Play", (CONST_STRPTR)"Y", 0, 0,
+    (APTR)BMI_PLAY },
+  { NM_ITEM, (CONST_STRPTR)"Play next", (CONST_STRPTR)"T", 0, 0,
+    (APTR)BMI_PLAY_NEXT },
+  { NM_ITEM, (CONST_STRPTR)"Add", (CONST_STRPTR)"D", 0, 0,
+    (APTR)BMI_ADD },
+  { NM_ITEM, NM_BARLABEL, 0, 0, 0, 0 },
+  { NM_ITEM, (CONST_STRPTR)"Play all", (CONST_STRPTR)"G", 0, 0,
+    (APTR)BMI_PLAY_ALL },
+  { NM_ITEM, (CONST_STRPTR)"Play all next", (CONST_STRPTR)"H", 0, 0,
+    (APTR)BMI_PLAY_ALL_NEXT },
+  { NM_ITEM, (CONST_STRPTR)"Add all", (CONST_STRPTR)"M", 0, 0,
+    (APTR)BMI_ADD_ALL },
+  { NM_ITEM, NM_BARLABEL, 0, 0, 0, 0 },
+  { NM_ITEM, (CONST_STRPTR)"Favourite", (CONST_STRPTR)"I", 0, 0,
+    (APTR)BMI_FAVOURITE },
+  { NM_ITEM, (CONST_STRPTR)"Reload", (CONST_STRPTR)"E", 0, 0,
+    (APTR)BMI_RELOAD },
+  { NM_ITEM, (CONST_STRPTR)"Back", (CONST_STRPTR)"K", 0, 0,
+    (APTR)BMI_BACK },
+  { NM_ITEM, NM_BARLABEL, 0, 0, 0, 0 },
+  { NM_ITEM, (CONST_STRPTR)"Close", (CONST_STRPTR)"W", 0, 0,
+    (APTR)BMI_CLOSE },
+  { NM_END, 0, 0, 0, 0, 0 }
+};
+static struct Menu *browse_menus = NULL;
+/* What each menu item was last set to (1 on, 0 off, -1 not yet), so
+ * the frequent button refreshes do not touch the strip needlessly. */
+static int browse_menu_on[BMI_COUNT];
+/* GTLV_MakeVisible needs the V39 gadtools. */
+static int browse_gt39 = 0;
+/* Whole rows the list shows, for page moves. */
+static int browse_list_rows = 1;
 
 /* The prefs the window remembers its place and size in, set at open. */
 static ZZPlayPrefs *browse_prefs = NULL;
@@ -156,7 +237,8 @@ static LONG browse_row_render(REG(a0, struct Hook *hook),
                               REG(a1, struct LVDrawMsg *msg));
 
 static struct Hook browse_list_hook = {
-  {0, 0}, (ULONG (*)())browse_row_render, 0, 0
+  /* Through void (*)(void), the type GCC lets any function cast to. */
+  {0, 0}, (ULONG (*)())(void (*)(void))browse_row_render, 0, 0
 };
 
 /* Text width in the font the rows render in. */
@@ -404,7 +486,10 @@ static void update_status_text(const char *msg)
   if (!browse_win || !status_gad) {
     return;
   }
-  (void)snprintf(status_buf, sizeof(status_buf), "%s", msg);
+  if (msg != status_buf) {
+    /* Callers often format into status_buf itself. */
+    (void)snprintf(status_buf, sizeof(status_buf), "%s", msg);
+  }
   GT_SetGadgetAttrs(status_gad, browse_win, NULL,
                     GTTX_Text, (ULONG)status_buf,
                     TAG_DONE);
@@ -435,15 +520,17 @@ static int update_stage_status(void)
   if (!browse_model.busy) {
     return 0;
   }
-  if (browse_model.item_count > 0U) {
+  if (zzplay_browse_model_service_rows(&browse_model) > 0U) {
     if (browse_model.has_total) {
       (void)snprintf(status_buf, sizeof(status_buf),
                      "Loading %lu of %lu items...",
-                     (unsigned long)browse_model.item_count,
+                     (unsigned long)zzplay_browse_model_service_rows(
+                         &browse_model),
                      (unsigned long)browse_model.total);
     } else {
       (void)snprintf(status_buf, sizeof(status_buf), "Loading %lu items...",
-                     (unsigned long)browse_model.item_count);
+                     (unsigned long)zzplay_browse_model_service_rows(
+                         &browse_model));
     }
     update_status_text(status_buf);
     return 1;
@@ -484,11 +571,32 @@ static void browse_send(const ZZPlayBrowseRequest *req,
     update_busy_pointer();
     return;
   }
+  pending_req = *req;
   pending_provider = provider;
   have_pending = 1;
   zzplay_browse_worker_cancel();
 }
 
+/* Enable or disable one Browse menu item; only a change touches the
+ * strip. */
+static void browse_menu_enable(int item, int on)
+{
+  ULONG num;
+
+  if (!browse_win || !browse_menus || item < 0 || item >= BMI_COUNT ||
+      browse_menu_on[item] == on) {
+    return;
+  }
+  browse_menu_on[item] = on;
+  num = FULLMENUNUM(0, item, NOSUB);
+  if (on) {
+    OnMenu(browse_win, num);
+  } else {
+    OffMenu(browse_win, num);
+  }
+}
+
+/* Buttons and menu items follow the same availability checks. */
 static void update_buttons(void)
 {
   if (!browse_win) {
@@ -537,6 +645,26 @@ static void update_buttons(void)
                       GA_Disabled, (ULONG)!browse_model.busy,
                       TAG_DONE);
   }
+  {
+    int play = zzplay_browse_model_can_play(&browse_model) ? 1 : 0;
+    int play_all = zzplay_browse_model_can_play_all(&browse_model) ? 1 : 0;
+
+    browse_menu_enable(BMI_PLAY, play);
+    browse_menu_enable(BMI_PLAY_NEXT, play);
+    browse_menu_enable(BMI_ADD,
+                       zzplay_browse_model_can_add(&browse_model) ? 1 : 0);
+    browse_menu_enable(BMI_PLAY_ALL, play_all);
+    browse_menu_enable(BMI_PLAY_ALL_NEXT, play_all);
+    browse_menu_enable(
+        BMI_ADD_ALL, zzplay_browse_model_can_add_all(&browse_model) ? 1 : 0);
+    browse_menu_enable(
+        BMI_FAVOURITE,
+        zzplay_browse_model_can_favourite(&browse_model) ? 1 : 0);
+    browse_menu_enable(BMI_RELOAD,
+                       zzplay_browse_model_can_reload(&browse_model) ? 1 : 0);
+    browse_menu_enable(BMI_BACK,
+                       zzplay_browse_model_can_back(&browse_model) ? 1 : 0);
+  }
 }
 
 static void rebuild_list_nodes(void)
@@ -583,14 +711,20 @@ static void rebuild_list_nodes(void)
       copy_string(row->subtitle, sizeof(row->subtitle), it->subtitle);
     } else {
       /* One-line rows, what the window showed before the column
-       * layout: "[+] folder" or "title - subtitle". */
+       * layout: "[+] folder" or "title - subtitle", cut to the row. */
+      int n;
+
       if (it->kind == ZZPLAY_ITEM_FOLDER) {
-        (void)snprintf(row->title, sizeof(row->title), "[+] %s", it->title);
+        n = snprintf(row->title, sizeof(row->title), "[+] %s", it->title);
       } else if (it->subtitle[0] != '\0') {
-        (void)snprintf(row->title, sizeof(row->title), "%s - %s",
-                       it->title, it->subtitle);
+        n = snprintf(row->title, sizeof(row->title), "%s - %s", it->title,
+                     it->subtitle);
       } else {
+        n = 0;
         copy_string(row->title, sizeof(row->title), it->title);
+      }
+      if (n < 0) {
+        row->title[0] = '\0';
       }
     }
     row->node.ln_Name = row->title;
@@ -638,6 +772,120 @@ static void rebuild_list_nodes(void)
   tags[3].ti_Tag = TAG_DONE;
   tags[3].ti_Data = 0;
   GT_SetGadgetAttrsA(list_gad, browse_win, NULL, tags);
+}
+
+/* --- Recently played ------------------------------------------------- */
+
+#define BROWSE_RECENT_SUFFIX ".recent"
+#define BROWSE_RECENT_FILE_MAX 16384U
+
+/* Show the current service's saved Recently played list. */
+static void browse_load_recent(void)
+{
+  const ZZPlayBrowseServiceEntry *svc =
+      zzplay_browse_model_current_service(&browse_model);
+  char *text = NULL;
+  uint32_t len = 0U;
+
+  if (!svc) {
+    return;
+  }
+  (void)zzplay_host_text_load(svc->scheme, BROWSE_RECENT_SUFFIX,
+                              BROWSE_RECENT_FILE_MAX, &text, &len);
+  zzplay_browse_model_load_recent(&browse_model, text, (size_t)len);
+  if (text) {
+    zzplay_free(text);
+  }
+}
+
+static void browse_save_recent(const char *scheme,
+                               const ZZPlayBrowseRecent *recent)
+{
+  size_t need = zzplay_browse_recent_format(recent, NULL, 0U);
+  char *text = (char *)zzplay_alloc(need + 1U);
+
+  if (!text) {
+    return;
+  }
+  (void)zzplay_browse_recent_format(recent, text, need + 1U);
+  (void)zzplay_host_text_save(scheme, BROWSE_RECENT_SUFFIX, text,
+                              (uint32_t)need);
+  zzplay_free(text);
+}
+
+/* `item` of service `scheme` was started from Browse: put it first in
+ * that service's Recently played list and save the list. A gather can
+ * finish after the window switched to another service; that service's
+ * list is then read, changed and saved without being shown. */
+static void browse_note_started(const char *scheme,
+                                const ZZPlayBrowseItem *item)
+{
+  const ZZPlayBrowseServiceEntry *svc =
+      zzplay_browse_model_current_service(&browse_model);
+  char *text = NULL;
+  uint32_t len = 0U;
+
+  if (!scheme || !item) {
+    return;
+  }
+  if (svc && strcmp(svc->scheme, scheme) == 0) {
+    uint32_t before = browse_model.item_count;
+
+    if (!zzplay_browse_model_note_started(&browse_model, item)) {
+      return;
+    }
+    if (browse_model.item_count != before) {
+      /* The Recently played row appeared at the top level. */
+      rebuild_list_nodes();
+      update_buttons();
+    }
+    browse_save_recent(scheme, &browse_model.recent);
+    return;
+  }
+  (void)zzplay_host_text_load(scheme, BROWSE_RECENT_SUFFIX,
+                              BROWSE_RECENT_FILE_MAX, &text, &len);
+  (void)zzplay_browse_recent_parse(&other_recent, text, (size_t)len);
+  if (text) {
+    zzplay_free(text);
+  }
+  if (zzplay_browse_recent_add(&other_recent, item)) {
+    browse_save_recent(scheme, &other_recent);
+  }
+}
+
+/* Show the model's selection in the list, scrolled into view. */
+static void browse_show_selection(void)
+{
+  struct TagItem tags[3];
+  int32_t sel = browse_model.selection;
+
+  if (!browse_win || !list_gad) {
+    return;
+  }
+  tags[0].ti_Tag = GTLV_Selected;
+  tags[0].ti_Data = sel >= 0 ? (ULONG)sel : ~0UL;
+  tags[1].ti_Tag = TAG_IGNORE;
+  tags[1].ti_Data = 0;
+  if (sel >= 0) {
+    /* Where the list is scrolled is only known from what this module
+     * set; on V39 GadTools scrolls the row into view itself. */
+    if (sel < browse_list_top) {
+      browse_list_top = (int)sel;
+    } else if (sel >= browse_list_top + browse_list_rows) {
+      browse_list_top = (int)sel - browse_list_rows + 1;
+    }
+    if (browse_gt39) {
+      tags[1].ti_Tag = GTLV_MakeVisible;
+      tags[1].ti_Data = (ULONG)sel;
+    } else {
+      tags[1].ti_Tag = GTLV_Top;
+      tags[1].ti_Data = (ULONG)browse_list_top;
+    }
+  }
+  tags[2].ti_Tag = TAG_DONE;
+  tags[2].ti_Data = 0;
+  GT_SetGadgetAttrsA(list_gad, browse_win, NULL, tags);
+  update_buttons();
 }
 
 static void close_settings_window(void)
@@ -942,6 +1190,7 @@ static void __attribute__((noinline)) poll_settings(void)
         /* Reopen service */
         if (browse_model.current_service >= 0) {
           zzplay_browse_model_select_service(&browse_model, (uint32_t)browse_model.current_service, &req);
+          browse_load_recent();
           browse_send(&req, p);
           rebuild_list_nodes();
           update_status_text("Reloading service...");
@@ -1109,6 +1358,11 @@ static int __attribute__((noinline)) build_browse_gadgets(void)
       BROWSE_MARGIN, cur_y, content_w, list_h,
       NULL, BGID_LIST, 0, tags);
 
+  /* Rows are one font line each inside the list's frame. */
+  browse_list_rows = (list_h - 4) / font_h;
+  if (browse_list_rows < 1) {
+    browse_list_rows = 1;
+  }
   cur_y += list_h + BROWSE_SPACING;
 
   /* Buttons: Back, Reload, Play, Add, Play all, Add all, Favourite,
@@ -1346,6 +1600,8 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
        IntuitionBase != NULL && IntuitionBase->LibNode.lib_Version >= 39)
           ? 1
           : 0;
+  browse_gt39 =
+      (GadToolsBase != NULL && GadToolsBase->lib_Version >= 39) ? 1 : 0;
   browse_marker_col_w = font_h + 4;
   browse_len_col_w = browse_text_w(ZZPLAY_BROWSE_LEN_TEXT);
   browse_list_top = 0;
@@ -1439,7 +1695,8 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
       WA_MaxWidth, (ULONG)gui_screen->Width,
       WA_MaxHeight, (ULONG)gui_screen->Height,
       WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_GADGETUP | IDCMP_REFRESHWINDOW |
-                    IDCMP_NEWSIZE,
+                    IDCMP_NEWSIZE | IDCMP_MENUPICK | IDCMP_RAWKEY |
+                    IDCMP_VANILLAKEY,
       WA_CustomScreen, (ULONG)gui_screen,
       TAG_DONE);
 
@@ -1453,10 +1710,29 @@ int zzplay_browse_open(struct Screen *screen, ZZPlayController *ctl,
     return 0;
   }
 
+  /* The Browse menu; the window works from its buttons and keys when
+   * the menu cannot be built. */
+  {
+    int k;
+
+    for (k = 0; k < BMI_COUNT; k++) {
+      browse_menu_on[k] = -1;
+    }
+  }
+  browse_menus = CreateMenus(browse_new_menu, TAG_DONE);
+  if (browse_menus &&
+      (!LayoutMenus(browse_menus, browse_vi, GTMN_NewLookMenus, TRUE,
+                    TAG_DONE) ||
+       !SetMenuStrip(browse_win, browse_menus))) {
+    FreeMenus(browse_menus);
+    browse_menus = NULL;
+  }
+
   /* Select initial service if available */
   if (browse_model.service_count > 0U && browse_model.current_service < 0) {
     ZZPlayBrowseRequest req;
     zzplay_browse_model_select_service(&browse_model, 0U, &req);
+    browse_load_recent();
     browse_send(&req, browse_model.services[0].provider);
     update_status_text("Loading service...");
   }
@@ -1492,8 +1768,15 @@ void zzplay_browse_close(void)
         GT_ReplyIMsg(msg);
       }
     }
+    if (browse_menus) {
+      ClearMenuStrip(browse_win);
+    }
     CloseWindow(browse_win);
     browse_win = NULL;
+  }
+  if (browse_menus) {
+    FreeMenus(browse_menus);
+    browse_menus = NULL;
   }
 
   if (browse_glist) {
@@ -1554,30 +1837,53 @@ uint32_t zzplay_browse_signal_mask(void)
   return mask;
 }
 
-/* Play or Add on a folder the module marks playable, and Play all / Add
- * all on the folder being shown: collect its tracks in the worker (up
- * to the room the playlist offers) before anything is replaced or
- * appended. */
-static void browse_start_gather(int add, const ZZPlayProvider *provider,
-                                int shown)
+/* The module serving the current service. */
+static const ZZPlayProvider *browse_provider(void)
 {
-  uint32_t limit;
+  const ZZPlayBrowseServiceEntry *svc =
+      zzplay_browse_model_current_service(&browse_model);
 
-  if (!gui_playlist || !gui_ctl) {
+  return svc ? svc->provider : NULL;
+}
+
+/* Play, Add or Play next on a folder the module marks playable, and Play
+ * all, Play all next or Add all on the folder being shown (`shown`):
+ * collect its tracks in the worker (up to the room the playlist offers)
+ * before anything is replaced, appended or inserted. */
+static void browse_start_gather(int mode, int shown)
+{
+  const ZZPlayProvider *provider = browse_provider();
+  uint32_t limit;
+  int have_item;
+
+  if (!gui_playlist || !gui_ctl || !provider) {
     return;
   }
-  limit = add ? ZZPLAY_PLAYLIST_MAX_ENTRIES - gui_playlist->count
-              : ZZPLAY_PLAYLIST_MAX_ENTRIES;
+  limit = mode == BROWSE_TO_PLAY
+              ? ZZPLAY_PLAYLIST_MAX_ENTRIES
+              : ZZPLAY_PLAYLIST_MAX_ENTRIES - gui_playlist->count;
   if (limit == 0U) {
     update_status_text("The playlist is full");
     return;
+  }
+  /* The collection as a row, for Recently played once it is in. */
+  if (shown) {
+    have_item = zzplay_browse_model_shown_collection(&browse_model,
+                                                     &gather_note_item);
+  } else {
+    have_item = browse_model.selection >= 0 &&
+                (uint32_t)browse_model.selection < browse_model.item_count;
+    if (have_item) {
+      gather_note_item = browse_model.items[browse_model.selection];
+    }
   }
   if (shown ? !zzplay_browse_model_gather_shown(&browse_model, limit,
                                                 &poll_req)
             : !zzplay_browse_model_gather(&browse_model, limit, &poll_req)) {
     return;
   }
-  gather_add = add;
+  gather_mode = mode;
+  gather_note = have_item && mode != BROWSE_TO_ADD;
   gather_seen = 0U;
   gather_generation = poll_req.generation;
   gather_active = 1;
@@ -1588,14 +1894,16 @@ static void browse_start_gather(int add, const ZZPlayProvider *provider,
   update_busy_pointer();
 }
 
-/* The gathered rows have all arrived: put them in the playlist (replacing
- * it for Play, appending for Add) and report what fit. Play starts the
- * first added track. */
+/* The gathered rows have all arrived: put them in the playlist
+ * (replacing it for Play, appending for Add, behind the playing entry
+ * for Play next) and report what fit. Play starts the first added
+ * track; Play next leaves playback alone. */
 static void browse_apply_gather(const ZZPlayBrowseReply *reply)
 {
   uint32_t added = 0U;
   uint32_t i;
   int32_t first = -1;
+  int32_t anchor = -1;
 
   gather_active = 0;
   /* Only the view the gather started on is un-busied: the user may have
@@ -1621,8 +1929,11 @@ static void browse_apply_gather(const ZZPlayBrowseReply *reply)
     return;
   }
 
-  if (!gather_add) {
+  if (gather_mode == BROWSE_TO_PLAY) {
     zzplay_playlist_clear(gui_playlist);
+  } else if (gather_mode == BROWSE_TO_NEXT) {
+    /* Whatever plays now, not what played when the gather started. */
+    anchor = zzplay_playlist_next_anchor(gui_playlist, gui_ctl->item_active);
   }
   for (i = 0U; i < reply->item_count; i++) {
     const ZZPlayBrowseItem *item = &reply->items[i];
@@ -1633,7 +1944,12 @@ static void browse_apply_gather(const ZZPlayBrowseReply *reply)
     }
     (void)snprintf(poll_uri, sizeof(poll_uri), "%s://%s",
                    gather_scheme, item->id);
-    idx = zzplay_playlist_add(gui_playlist, poll_uri);
+    if (gather_mode == BROWSE_TO_NEXT) {
+      idx = zzplay_playlist_insert_after(gui_playlist, anchor, poll_uri);
+      anchor = idx;
+    } else {
+      idx = zzplay_playlist_add(gui_playlist, poll_uri);
+    }
     if (idx < 0) {
       break;
     }
@@ -1660,12 +1976,265 @@ static void browse_apply_gather(const ZZPlayBrowseReply *reply)
   }
   update_status_text(status_buf);
 
-  if (!gather_add && first >= 0) {
+  if (gather_mode == BROWSE_TO_PLAY && first >= 0) {
     (void)zzplay_playlist_set_current(gui_playlist, first);
     (void)zzplay_controller_request(gui_ctl, ZZPLAY_REQUEST_PLAY);
   }
+  if (gather_note && added > 0U) {
+    browse_note_started(gather_scheme, &gather_note_item);
+  }
+  gather_note = 0;
   update_buttons();
   update_busy_pointer();
+}
+
+/* Play, Add or Play next on the selection: a track or station goes in
+ * the playlist at once, a collection is gathered first. */
+static void browse_use_selection(int mode)
+{
+  ZZPlayBrowseTarget target = zzplay_browse_model_play_target(&browse_model);
+  const ZZPlayBrowseServiceEntry *svc =
+      zzplay_browse_model_current_service(&browse_model);
+  int32_t idx;
+
+  if (target == ZZPLAY_BROWSE_TARGET_COLLECTION) {
+    browse_start_gather(mode, 0);
+    return;
+  }
+  if (target != ZZPLAY_BROWSE_TARGET_ITEM || !gui_playlist || !gui_ctl ||
+      !svc ||
+      !zzplay_browse_model_format_uri(&browse_model, browse_model.selection,
+                                      poll_uri, sizeof(poll_uri), poll_title,
+                                      sizeof(poll_title))) {
+    return;
+  }
+  if (mode == BROWSE_TO_NEXT) {
+    if (gui_playlist->count >= ZZPLAY_PLAYLIST_MAX_ENTRIES) {
+      update_status_text("The playlist is full");
+      return;
+    }
+    idx = zzplay_playlist_insert_after(
+        gui_playlist,
+        zzplay_playlist_next_anchor(gui_playlist, gui_ctl->item_active),
+        poll_uri);
+  } else {
+    idx = zzplay_playlist_add(gui_playlist, poll_uri);
+  }
+  if (idx < 0) {
+    return;
+  }
+  zzplay_playlist_set_title(gui_playlist, (uint32_t)idx, poll_title);
+  gui_ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+  if (mode == BROWSE_TO_PLAY) {
+    (void)zzplay_playlist_set_current(gui_playlist, idx);
+    (void)zzplay_controller_request(gui_ctl, ZZPLAY_REQUEST_PLAY);
+  } else if (mode == BROWSE_TO_NEXT) {
+    (void)snprintf(status_buf, sizeof(status_buf), "Plays next: %s",
+                   poll_title);
+    update_status_text(status_buf);
+  }
+  if (mode != BROWSE_TO_ADD) {
+    browse_note_started(svc->scheme,
+                        &browse_model.items[browse_model.selection]);
+  }
+}
+
+/* Show what a navigation produced: a remembered list at once, or the
+ * request sent with `loading` in the status line. */
+static void browse_after_navigation(const char *loading)
+{
+  if (poll_req.kind == ZZPLAY_BROWSE_REQ_NONE) {
+    rebuild_list_nodes();
+    update_status_text("");
+  } else {
+    browse_send(&poll_req, browse_provider());
+    rebuild_list_nodes();
+    update_status_text(loading);
+  }
+  update_buttons();
+  update_busy_pointer();
+}
+
+/* A folder row opens; a track or station row plays. */
+static void browse_activate_row(int32_t index)
+{
+  ZZPlayBrowseAction act =
+      zzplay_browse_model_activate(&browse_model, index, &poll_req);
+
+  if (act == ZZPLAY_BROWSE_ACTION_ENTER_FOLDER) {
+    browse_after_navigation("Opening folder...");
+  } else if (act == ZZPLAY_BROWSE_ACTION_PLAY) {
+    browse_use_selection(BROWSE_TO_PLAY);
+    update_buttons();
+  }
+}
+
+static void browse_load_more(void)
+{
+  if (zzplay_browse_model_request_more(&browse_model, &poll_req)) {
+    browse_send(&poll_req, browse_provider());
+    update_status_text("Loading more items...");
+    update_buttons();
+  }
+}
+
+static void browse_do_back(void)
+{
+  if (zzplay_browse_model_back(&browse_model, &poll_req)) {
+    rebuild_list_nodes();
+    update_status_text("");
+    update_buttons();
+  }
+}
+
+static void browse_do_reload(void)
+{
+  if (!zzplay_browse_model_reload(&browse_model, &poll_req)) {
+    return;
+  }
+  if (poll_req.kind == ZZPLAY_BROWSE_REQ_NONE) {
+    /* Recently played shows its list as it is now. */
+    rebuild_list_nodes();
+    update_status_text("");
+  } else {
+    browse_send(&poll_req, browse_provider());
+    update_status_text("Reloading...");
+  }
+  update_buttons();
+}
+
+static void browse_do_favourite(void)
+{
+  if (zzplay_browse_model_favourite(&browse_model, &poll_req)) {
+    last_fav_add = poll_req.fav_add;
+    browse_send(&poll_req, browse_provider());
+    update_status_text(last_fav_add ? "Adding to favourites..."
+                                    : "Removing from favourites...");
+    update_buttons();
+  }
+}
+
+/* True while the search field is being edited: its keys are its own. */
+static int browse_search_active(void)
+{
+  return search_gad != NULL && (search_gad->Flags & GFLG_SELECTED) != 0;
+}
+
+static void browse_move(int32_t delta)
+{
+  int32_t sel = browse_model.selection;
+
+  /* Down from the last row loads the next part of a long list, as the
+   * More row does. */
+  if (delta > 0 && sel >= 0 &&
+      (uint32_t)sel + 1U == browse_model.item_count &&
+      browse_model.has_more) {
+    browse_load_more();
+    return;
+  }
+  if (zzplay_browse_model_move_selection(&browse_model, delta) >= 0) {
+    browse_show_selection();
+  }
+}
+
+/* Cursor keys: one row; with Shift, Page Up or Page Down a page; with
+ * Alt or Ctrl, Home or End the first or last row. */
+static void browse_raw_key(UWORD code, UWORD qual)
+{
+  int32_t all = (int32_t)browse_model.item_count;
+  int32_t page = browse_list_rows > 1 ? (int32_t)browse_list_rows - 1 : 1;
+  int shift = (qual & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT)) != 0;
+  int to_end = (qual & (IEQUALIFIER_LALT | IEQUALIFIER_RALT |
+                        IEQUALIFIER_CONTROL)) != 0;
+
+  if (code & IECODE_UP_PREFIX) {
+    return;
+  }
+  if (code == BROWSE_RAW_UP) {
+    browse_move(to_end ? -all : (shift ? -page : -1));
+  } else if (code == BROWSE_RAW_DOWN) {
+    browse_move(to_end ? all : (shift ? page : 1));
+  } else if (code == BROWSE_RAW_PAGE_UP) {
+    browse_move(-page);
+  } else if (code == BROWSE_RAW_PAGE_DOWN) {
+    browse_move(page);
+  } else if (code == BROWSE_RAW_HOME) {
+    browse_move(-all);
+  } else if (code == BROWSE_RAW_END) {
+    browse_move(all);
+  }
+}
+
+/* Return opens or plays the selection, Backspace goes back, Tab moves to
+ * the search field and a printable key jumps to the next row starting
+ * with it. */
+static void browse_vanilla_key(UWORD code)
+{
+  if (code == 13U) {
+    if (browse_model.selection >= 0) {
+      browse_activate_row(browse_model.selection);
+    }
+  } else if (code == 8U) {
+    browse_do_back();
+  } else if (code == 9U) {
+    if (search_gad) {
+      (void)ActivateGadget(search_gad, browse_win, NULL);
+    }
+  } else if (code > 32U && code != 127U && (code < 128U || code >= 160U)) {
+    if (zzplay_browse_model_jump_to_letter(&browse_model, (int)code) >= 0) {
+      browse_show_selection();
+    }
+  }
+}
+
+/* Act on every item of a menu pick. Returns 0 once the window closed. */
+static int browse_menu_pick(UWORD code)
+{
+  while (code != MENUNULL && browse_win && browse_menus) {
+    struct MenuItem *item = ItemAddress(browse_menus, (ULONG)code);
+    ULONG id;
+
+    if (!item) {
+      break;
+    }
+    id = (ULONG)GTMENUITEM_USERDATA(item);
+    code = item->NextSelect;
+    switch (id) {
+    case BMI_PLAY:
+      browse_use_selection(BROWSE_TO_PLAY);
+      break;
+    case BMI_PLAY_NEXT:
+      browse_use_selection(BROWSE_TO_NEXT);
+      break;
+    case BMI_ADD:
+      browse_use_selection(BROWSE_TO_ADD);
+      break;
+    case BMI_PLAY_ALL:
+      browse_start_gather(BROWSE_TO_PLAY, 1);
+      break;
+    case BMI_PLAY_ALL_NEXT:
+      browse_start_gather(BROWSE_TO_NEXT, 1);
+      break;
+    case BMI_ADD_ALL:
+      browse_start_gather(BROWSE_TO_ADD, 1);
+      break;
+    case BMI_FAVOURITE:
+      browse_do_favourite();
+      break;
+    case BMI_RELOAD:
+      browse_do_reload();
+      break;
+    case BMI_BACK:
+      browse_do_back();
+      break;
+    case BMI_CLOSE:
+      zzplay_browse_close();
+      return 0;
+    default:
+      break;
+    }
+  }
+  return browse_win != NULL;
 }
 
 void zzplay_browse_poll(void)
@@ -1702,9 +2271,13 @@ void zzplay_browse_poll(void)
         reload_note = poll_worker_reply.fav_add ? "Added to favourites"
                                                 : "Removed from favourites";
         update_status_text(reload_note);
-        /* Reload the list (the Favourites folder changes), unless the user
-         * has already asked for something else. */
-        if (!have_pending) {
+        if (zzplay_browse_model_in_recent(&browse_model)) {
+          /* ZZPlay's own list: there is nothing to fetch again. */
+          browse_model.busy = 0;
+          reload_note = NULL;
+        } else if (!have_pending) {
+          /* Reload the list (the Favourites folder changes), unless the
+           * user has already asked for something else. */
           browse_model.saved_selection = browse_model.selection;
           browse_model.generation++;
           browse_model.busy = 1;
@@ -1732,6 +2305,9 @@ void zzplay_browse_poll(void)
       zzplay_browse_worker_release_reply(&poll_worker_reply);
 
       if (ok) {
+        /* The count leaves out the Recently played row. */
+        uint32_t rows = zzplay_browse_model_service_rows(&browse_model);
+
         rebuild_list_nodes();
         if (partial) {
           (void)update_stage_status();
@@ -1740,17 +2316,15 @@ void zzplay_browse_poll(void)
         } else if (reload_note) {
           update_status_text(reload_note);
           reload_note = NULL;
-        } else if (browse_model.item_count > 0U) {
-          if (browse_model.has_total &&
-              browse_model.total > browse_model.item_count) {
+        } else if (rows > 0U) {
+          if (browse_model.has_total && browse_model.total > rows) {
             (void)snprintf(status_buf, sizeof(status_buf),
-                           "%lu of %lu items",
-                           (unsigned long)browse_model.item_count,
+                           "%lu of %lu items", (unsigned long)rows,
                            (unsigned long)browse_model.total);
           } else {
             (void)snprintf(status_buf, sizeof(status_buf), "%lu %s",
-                           (unsigned long)browse_model.item_count,
-                           browse_model.item_count == 1U ? "item" : "items");
+                           (unsigned long)rows,
+                           rows == 1U ? "item" : "items");
           }
           update_status_text(status_buf);
         } else {
@@ -1782,6 +2356,7 @@ void zzplay_browse_poll(void)
   while ((imsg = GT_GetIMsg(browse_win->UserPort)) != NULL) {
     ULONG class = imsg->Class;
     UWORD code = imsg->Code;
+    UWORD qual = imsg->Qualifier;
     struct Gadget *gad = (struct Gadget *)imsg->IAddress;
     ULONG imsg_s = imsg->Seconds;
     ULONG imsg_m = imsg->Micros;
@@ -1801,93 +2376,57 @@ void zzplay_browse_poll(void)
       browse_handle_resize();
       continue;
     }
+    if (class == IDCMP_MENUPICK) {
+      if (!browse_menu_pick(code)) {
+        return;
+      }
+      continue;
+    }
+    if (class == IDCMP_VANILLAKEY || class == IDCMP_RAWKEY) {
+      if (!browse_search_active()) {
+        if (class == IDCMP_VANILLAKEY) {
+          browse_vanilla_key(code);
+        } else {
+          browse_raw_key(code, qual);
+        }
+      }
+      continue;
+    }
     if (class == IDCMP_GADGETUP && gad) {
       UWORD gid = gad->GadgetID;
 
       if (gid == BGID_SERVICE) {
-        if ((uint32_t)code < browse_model.service_count) {
-          if (zzplay_browse_model_select_service(&browse_model, (uint32_t)code,
-                                                 &poll_req)) {
-            svc = zzplay_browse_model_current_service(&browse_model);
-            p = svc ? svc->provider : NULL;
-            if (poll_req.kind == ZZPLAY_BROWSE_REQ_NONE) {
-              /* Remembered from earlier in this session */
-              rebuild_list_nodes();
-              update_status_text("");
-            } else {
-              browse_send(&poll_req, p);
-              rebuild_list_nodes();
-              update_status_text("Loading service...");
-            }
-            update_buttons();
-            update_busy_pointer();
-          }
+        if ((uint32_t)code < browse_model.service_count &&
+            zzplay_browse_model_select_service(&browse_model, (uint32_t)code,
+                                               &poll_req)) {
+          browse_load_recent();
+          browse_after_navigation("Loading service...");
         }
       } else if (gid == BGID_SEARCH) {
         const char *query = "";
         if (search_gad && search_gad->SpecialInfo) {
           query = (const char *)((struct StringInfo *)search_gad->SpecialInfo)->Buffer;
         }
-        if (query && query[0] != '\0') {
-          if (zzplay_browse_model_search(&browse_model, query, &poll_req)) {
-            if (poll_req.kind == ZZPLAY_BROWSE_REQ_NONE) {
-              /* This search is remembered from earlier */
-              rebuild_list_nodes();
-              update_status_text("");
-            } else {
-              browse_send(&poll_req, p);
-              rebuild_list_nodes();
-              update_status_text("Searching...");
-            }
-            update_buttons();
-            update_busy_pointer();
-          }
+        if (query && query[0] != '\0' &&
+            zzplay_browse_model_search(&browse_model, query, &poll_req)) {
+          browse_after_navigation("Searching...");
         }
       } else if (gid == BGID_LIST) {
         int32_t clicked = (int32_t)code;
 
         if (clicked == (int32_t)browse_model.item_count && browse_model.has_more) {
           /* Clicked More row */
-          if (zzplay_browse_model_request_more(&browse_model, &poll_req)) {
-            browse_send(&poll_req, p);
-            update_status_text("Loading more items...");
-            update_buttons();
-          }
+          browse_load_more();
         } else if ((clicked >= 0 &&
                     (uint32_t)clicked < browse_model.item_count &&
                     browse_model.items[clicked].kind == ZZPLAY_ITEM_FOLDER) ||
                    (clicked == last_clicked_idx &&
                     DoubleClick(last_click_s, last_click_m, imsg_s, imsg_m))) {
           /* A folder opens on one click, like a drawer in the ASL file
-           * requester; a track or station plays on a double-click. */
-          ZZPlayBrowseAction act = zzplay_browse_model_activate(&browse_model, clicked, &poll_req);
-          /* A third click starts a new pair, as in the playlist. */
+           * requester; a track or station plays on a double-click. A
+           * third click starts a new pair, as in the playlist. */
           last_clicked_idx = -1;
-
-          if (act == ZZPLAY_BROWSE_ACTION_ENTER_FOLDER) {
-            if (poll_req.kind == ZZPLAY_BROWSE_REQ_NONE) {
-              /* Folder remembered from earlier in this session */
-              rebuild_list_nodes();
-              update_status_text("");
-            } else {
-              browse_send(&poll_req, p);
-              rebuild_list_nodes();
-              update_status_text("Opening folder...");
-            }
-            update_buttons();
-            update_busy_pointer();
-          } else if (act == ZZPLAY_BROWSE_ACTION_PLAY) {
-            if (zzplay_browse_model_format_uri(&browse_model, clicked, poll_uri, sizeof(poll_uri),
-                                               poll_title, sizeof(poll_title))) {
-              int32_t pl_idx = zzplay_playlist_add(gui_playlist, poll_uri);
-              if (pl_idx >= 0) {
-                zzplay_playlist_set_title(gui_playlist, (uint32_t)pl_idx, poll_title);
-                (void)zzplay_playlist_set_current(gui_playlist, pl_idx);
-                gui_ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
-                (void)zzplay_controller_request(gui_ctl, ZZPLAY_REQUEST_PLAY);
-              }
-            }
-          }
+          browse_activate_row(clicked);
         } else {
           last_clicked_idx = clicked;
           last_click_s = imsg_s;
@@ -1896,69 +2435,29 @@ void zzplay_browse_poll(void)
           update_buttons();
         }
       } else if (gid == BGID_BACK) {
-        if (zzplay_browse_model_back(&browse_model, &poll_req)) {
-          rebuild_list_nodes();
-          update_status_text("");
-          update_buttons();
-        }
+        browse_do_back();
       } else if (gid == BGID_RELOAD) {
-        if (zzplay_browse_model_reload(&browse_model, &poll_req)) {
-          browse_send(&poll_req, p);
-          update_status_text("Reloading...");
-          update_buttons();
-        }
+        browse_do_reload();
       } else if (gid == BGID_PLAY) {
-        ZZPlayBrowseTarget target = zzplay_browse_model_play_target(&browse_model);
-        if (target == ZZPLAY_BROWSE_TARGET_ITEM) {
-          if (zzplay_browse_model_format_uri(&browse_model, browse_model.selection,
-                                             poll_uri, sizeof(poll_uri), poll_title, sizeof(poll_title))) {
-            int32_t pl_idx = zzplay_playlist_add(gui_playlist, poll_uri);
-            if (pl_idx >= 0) {
-              zzplay_playlist_set_title(gui_playlist, (uint32_t)pl_idx, poll_title);
-              (void)zzplay_playlist_set_current(gui_playlist, pl_idx);
-              gui_ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
-              (void)zzplay_controller_request(gui_ctl, ZZPLAY_REQUEST_PLAY);
-            }
-          }
-        } else if (target == ZZPLAY_BROWSE_TARGET_COLLECTION) {
-          browse_start_gather(0, p, 0);
-        }
+        browse_use_selection(BROWSE_TO_PLAY);
       } else if (gid == BGID_ADD) {
-        ZZPlayBrowseTarget target = zzplay_browse_model_play_target(&browse_model);
-        if (target == ZZPLAY_BROWSE_TARGET_ITEM) {
-          if (zzplay_browse_model_format_uri(&browse_model, browse_model.selection,
-                                             poll_uri, sizeof(poll_uri), poll_title, sizeof(poll_title))) {
-            int32_t pl_idx = zzplay_playlist_add(gui_playlist, poll_uri);
-            if (pl_idx >= 0) {
-              zzplay_playlist_set_title(gui_playlist, (uint32_t)pl_idx, poll_title);
-              gui_ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
-            }
-          }
-        } else if (target == ZZPLAY_BROWSE_TARGET_COLLECTION) {
-          browse_start_gather(1, p, 0);
-        }
+        browse_use_selection(BROWSE_TO_ADD);
       } else if (gid == BGID_PLAY_ALL) {
         /* The folder being shown as a whole: replace the playlist and
          * start its first track. */
-        browse_start_gather(0, p, 1);
+        browse_start_gather(BROWSE_TO_PLAY, 1);
       } else if (gid == BGID_ADD_ALL) {
         /* The folder being shown as a whole, appended. */
-        browse_start_gather(1, p, 1);
+        browse_start_gather(BROWSE_TO_ADD, 1);
       } else if (gid == BGID_FAVOURITE) {
-        if (zzplay_browse_model_can_favourite(&browse_model)) {
-          if (zzplay_browse_model_favourite(&browse_model, &poll_req)) {
-            last_fav_add = poll_req.fav_add;
-            browse_send(&poll_req, p);
-            update_status_text(last_fav_add ? "Adding to favourites..."
-                                            : "Removing from favourites...");
-            update_buttons();
-          }
-        }
+        browse_do_favourite();
       } else if (gid == BGID_STOP) {
         have_pending = 0;
         gather_active = 0;
+        gather_note = 0;
         zzplay_browse_worker_cancel();
         zzplay_browse_model_stop(&browse_model);
+        rebuild_list_nodes();
         update_status_text("Stopped");
         update_buttons();
         update_busy_pointer();

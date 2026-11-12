@@ -231,7 +231,8 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
   at once, with the selection you left, and sends no request.
 - **Reload** fetches the current list or search again from the beginning
   and replaces the remembered copy. It is disabled while nothing is shown
-  or a request is already running.
+  or a request is already running. In **Recently played** it shows the
+  list as it is now.
 - Rows appear as they arrive, in groups, instead of all at once; the
   selection and the scroll position stay. **Stop** keeps the rows that
   arrived.
@@ -258,6 +259,23 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
   the playlist had no room for all of them. A collection that holds
   nothing playable changes nothing: the status line says "Nothing to
   add".
+- **Play next** in the Browse menu puts the selected track or station, or
+  the tracks of the selected collection, right after the entry that is
+  playing, without interrupting it; with nothing playing they go to the
+  start of the playlist. **Play all next** does the same for the folder
+  being shown. With shuffle on they still play next. The playlist limit
+  and the status line messages are those of **Add all**.
+- Each service's top level starts with a **Recently played** folder once
+  something of that service was started from the Browse window. It lists
+  the last 25 tracks, stations and collections started with **Play**,
+  **Play next**, **Play all** or **Play all next** (a double-click or
+  Return counts as **Play**), newest first; starting one again moves it
+  to the top. **Add** and **Add all** do not count. Tracks and stations in
+  it play as anywhere else, and a collection plays whole with **Play** or
+  opens like any folder. The folder keeps the order it had when it was
+  opened until **Reload**. The lists are kept per service in
+  `ENVARC:ZZPlay/<service>.recent` (and `ENV:`), one entry per line;
+  delete the file to empty a list.
 - **Favourite** adds the selected entry to the service's favourites, or
   removes it when it is already one. The button is disabled for services
   without favourites.
@@ -272,6 +290,39 @@ title. ZZPlay asks the module for the current address each time the entry
 starts, so such entries can be saved in M3U playlists, added with the Shell
 or ARexx, and keep playing as long as the module is installed. Without the
 module the entry fails with "no installed service module handles ...".
+
+#### Browse menu
+
+The Browse window has its own menu. Its items are enabled exactly when the
+matching button would be.
+
+| Item | Shortcut | Action |
+| --- | --- | --- |
+| Play | Amiga-Y | Play the selected entry, as the **Play** button does. |
+| Play next | Amiga-T | Queue the selected entry right after the playing one. |
+| Add | Amiga-D | Append the selected entry, as the **Add** button does. |
+| Play all | Amiga-G | Play the folder being shown. |
+| Play all next | Amiga-H | Queue the folder being shown right after the playing entry. |
+| Add all | Amiga-M | Append the folder being shown. |
+| Favourite | Amiga-I | Add the selected entry to the favourites, or remove it. |
+| Reload | Amiga-E | Fetch the list or search again. |
+| Back | Amiga-K | Return to the previous list. |
+| Close | Amiga-W | Close the Browse window. |
+
+#### Browse keys
+
+These keys work in the Browse window while the search field is not being
+edited.
+
+| Key | Action |
+| --- | --- |
+| Cursor up, Cursor down | Select the previous or next row. Down on the last row of a long list loads its next part. |
+| Shift with Cursor up or down, Page Up, Page Down | Move the selection a page. |
+| Alt or Ctrl with Cursor up or down, Home, End | Select the first or the last row. |
+| Return | Open the selected folder, or play the selected track or station. |
+| Backspace | Back to the previous list. |
+| A letter or digit | Select the next row whose title starts with it, from the top again after the last. |
+| Tab | Move to the search field. Return there searches. |
 
 ### Internet radio
 
@@ -289,7 +340,8 @@ MP3 or Ogg Vorbis play; stations in other formats (AAC, HE-AAC, Opus) are
 listed as unsupported and cannot be played.
 
 Favourites are stored in `ENVARC:ZZPlay/radio.prefs`, one line per station:
-`fav_<n>=<id>|<name>|<codec>|<bitrate>|<country>`.
+`fav_<n>=<id>|<name>|<codec>|<bitrate>|<country>`. A line break or a field
+separator in a station's name or country is stored as a space.
 
 ### Plex
 
@@ -309,7 +361,9 @@ one is used is set by the **Connection** setting (below); you can switch it
 later without signing in again. If your account has more than one server,
 they are listed as folders; open the one you want. The server's music library
 opens straight away, and later sessions go there directly. To sign in again,
-clear **Token** in Settings.
+clear **Token** in Settings. When the server no longer accepts the token (it
+was revoked or the server was reset), opening Plex says so; clear **Token**
+and sign in again.
 
 To set the connection by hand instead, choose Plex Media Server in the Browse
 window, click **Settings** and set:

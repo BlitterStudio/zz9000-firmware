@@ -16,6 +16,12 @@
 /* How many completed lists and searches the session remembers. The least
  * recently used one is dropped when the cache is full. */
 #define ZZPLAY_BROWSE_CACHE_MAX 16U
+/* Recently played: what was last started from Browse, per service. */
+#define ZZPLAY_BROWSE_RECENT_MAX 25U
+/* The id of the "Recently played" folder row at a service's top level.
+ * The control character keeps it apart from every module id. */
+#define ZZPLAY_BROWSE_RECENT_ID "\037recent"
+#define ZZPLAY_BROWSE_RECENT_TITLE "Recently played"
 
 typedef struct ZZPlayBrowseItem {
   char id[ZZPLAY_PROVIDER_TEXT_MAX];
@@ -26,6 +32,12 @@ typedef struct ZZPlayBrowseItem {
   uint32_t playable;
   uint32_t favourite;        /* 1 when in favourites */
 } ZZPlayBrowseItem;
+
+/* A service's Recently played list, newest first. */
+typedef struct ZZPlayBrowseRecent {
+  ZZPlayBrowseItem items[ZZPLAY_BROWSE_RECENT_MAX];
+  uint32_t count;
+} ZZPlayBrowseRecent;
 
 typedef enum ZZPlayBrowseAction {
   ZZPLAY_BROWSE_ACTION_NONE = 0,
@@ -88,6 +100,7 @@ typedef struct ZZPlayBrowseReply {
 typedef struct ZZPlayBrowseFrame {
   char node_id[ZZPLAY_PROVIDER_TEXT_MAX];
   char title[ZZPLAY_PROVIDER_TEXT_MAX];
+  char subtitle[ZZPLAY_PROVIDER_TEXT_MAX];
   int is_search;
   char search_query[ZZPLAY_PROVIDER_TEXT_MAX];
   /* 1 when the folder this frame returns to is a playable collection. */
@@ -132,6 +145,7 @@ typedef struct ZZPlayBrowseModel {
   /* Current view */
   char current_node[ZZPLAY_PROVIDER_TEXT_MAX];
   char current_title[ZZPLAY_PROVIDER_TEXT_MAX];
+  char current_subtitle[ZZPLAY_PROVIDER_TEXT_MAX];
   int is_search;
   char search_query[ZZPLAY_PROVIDER_TEXT_MAX];
 
@@ -168,6 +182,9 @@ typedef struct ZZPlayBrowseModel {
   /* Session list cache: remembered lists and searches. */
   ZZPlayBrowseCacheEntry cache[ZZPLAY_BROWSE_CACHE_MAX];
   uint32_t cache_clock;
+
+  /* Recently played list of the current service. */
+  ZZPlayBrowseRecent recent;
 } ZZPlayBrowseModel;
 
 void zzplay_browse_model_init(ZZPlayBrowseModel *model);
@@ -235,7 +252,9 @@ int zzplay_browse_model_format_uri(const ZZPlayBrowseModel *model,
                                    char *uri, size_t uri_size,
                                    char *title, size_t title_size);
 
-/* Reload: fetch the current list or search again from start 0. */
+/* Reload: fetch the current list or search again from start 0. In the
+ * Recently played folder it shows the list again and asks for nothing
+ * (`out_req` kind NONE). */
 void zzplay_browse_model_stop(ZZPlayBrowseModel *model);
 int zzplay_browse_model_can_reload(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_reload(ZZPlayBrowseModel *model,
@@ -244,5 +263,55 @@ int zzplay_browse_model_reload(ZZPlayBrowseModel *model,
 /* Applying worker replies. Returns 1 if accepted, 0 if dropped. */
 int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
                                     const ZZPlayBrowseReply *reply);
+
+/* Keyboard selection. Move the selection `delta` rows (negative: up),
+ * stopping at the first and the last row; with nothing selected, moving
+ * down selects the first row and up the last. Returns the new selection,
+ * -1 for an empty list. */
+int32_t zzplay_browse_model_move_selection(ZZPlayBrowseModel *model,
+                                           int32_t delta);
+/* Select the next row after the selection (from the top when nothing is
+ * selected, wrapping round) whose title starts with `letter`, in either
+ * case. Returns its index, or -1 with the selection unchanged. */
+int32_t zzplay_browse_model_jump_to_letter(ZZPlayBrowseModel *model,
+                                           int letter);
+
+/* Rows the service sent for the view: the Recently played row is not
+ * counted. */
+uint32_t zzplay_browse_model_service_rows(const ZZPlayBrowseModel *model);
+/* True while the Recently played folder is shown. */
+int zzplay_browse_model_in_recent(const ZZPlayBrowseModel *model);
+/* The folder being shown as a row, for Play all and Play all next:
+ * returns 1 and fills `out` when it is a playable collection. */
+int zzplay_browse_model_shown_collection(const ZZPlayBrowseModel *model,
+                                         ZZPlayBrowseItem *out);
+/* Replace the current service's Recently played list with the lines of
+ * its saved file (NULL or empty: none), and show or hide the folder row
+ * at the top level to match. */
+void zzplay_browse_model_load_recent(ZZPlayBrowseModel *model,
+                                     const char *text, size_t length);
+/* `item` was started from Browse: put it first in the current service's
+ * Recently played list. Returns 1 when the list changed (save it). */
+int zzplay_browse_model_note_started(ZZPlayBrowseModel *model,
+                                     const ZZPlayBrowseItem *item);
+
+/* Recently played list logic. add puts `item` first; an entry with the
+ * same kind and id moves there instead of appearing twice, and the oldest
+ * drops off past ZZPLAY_BROWSE_RECENT_MAX. Returns 0 for an item with no
+ * id. */
+void zzplay_browse_recent_clear(ZZPlayBrowseRecent *recent);
+int zzplay_browse_recent_add(ZZPlayBrowseRecent *recent,
+                             const ZZPlayBrowseItem *item);
+/* Read the saved form: one entry per line, newest first, as
+ * "kind<TAB>id<TAB>title<TAB>subtitle<TAB>playable" with kind "folder",
+ * "track" or "station" and playable "0" or "1". Damaged lines (missing or
+ * extra fields, an unknown kind, an empty or over-long id) are skipped,
+ * and so are repeats. Returns the number of entries read. */
+uint32_t zzplay_browse_recent_parse(ZZPlayBrowseRecent *recent,
+                                    const char *text, size_t length);
+/* Write the saved form. Returns the bytes needed, excluding the NUL; the
+ * output is cut (still NUL-terminated) when `capacity` is too small. */
+size_t zzplay_browse_recent_format(const ZZPlayBrowseRecent *recent,
+                                   char *out, size_t capacity);
 
 #endif /* ZZPLAY_BROWSE_MODEL_H */

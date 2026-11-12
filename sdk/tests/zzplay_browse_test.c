@@ -1652,9 +1652,504 @@ static int test_back_skips_dead_frames(void)
   return 0;
 }
 
+static void set_item(ZZPlayBrowseItem *it, const char *id, const char *title,
+                     const char *subtitle, uint32_t kind, uint32_t playable)
+{
+  memset(it, 0, sizeof(*it));
+  snprintf(it->id, sizeof(it->id), "%s", id);
+  snprintf(it->title, sizeof(it->title), "%s", title);
+  snprintf(it->subtitle, sizeof(it->subtitle), "%s", subtitle);
+  it->kind = kind;
+  it->playable = playable;
+}
 
+static void apply_list(ZZPlayBrowseModel *model, uint32_t gen, uint32_t start,
+                       const ZZPlayBrowseItem *items, uint32_t n,
+                       uint32_t total, int partial)
+{
+  ZZPlayBrowseReply reply;
 
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = gen;
+  reply.success = 1;
+  reply.items = items;
+  reply.item_count = n;
+  reply.start = start;
+  reply.has_total = total > 0U;
+  reply.total = total;
+  reply.is_partial = partial;
+  assert(zzplay_browse_model_apply_reply(model, &reply) == 1);
+}
 
+/* Cursor keys move the selection and stop at the ends; letters jump to
+ * the next row starting with them, in either case, wrapping round. */
+static int test_keyboard_selection(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem rows[6];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  assert(zzplay_browse_model_move_selection(&model, 1) == -1);
+  assert(zzplay_browse_model_jump_to_letter(&model, 'a') == -1);
+
+  set_item(&rows[0], "1", "Alpha", "", ZZPLAY_ITEM_STATION, 1U);
+  set_item(&rows[1], "2", "beta", "", ZZPLAY_ITEM_STATION, 1U);
+  set_item(&rows[2], "3", "Bravo", "", ZZPLAY_ITEM_FOLDER, 0U);
+  set_item(&rows[3], "4", "Charlie", "", ZZPLAY_ITEM_STATION, 1U);
+  set_item(&rows[4], "5", "bob", "", ZZPLAY_ITEM_TRACK, 1U);
+  set_item(&rows[5], "6", "\xE9" "cole", "", ZZPLAY_ITEM_TRACK, 1U);
+  apply_list(&model, req.generation, 0U, rows, 6U, 0U, 0);
+
+  /* Nothing selected: down picks the first row, up the last. */
+  assert(zzplay_browse_model_move_selection(&model, 1) == 0);
+  assert(zzplay_browse_model_move_selection(&model, 1) == 1);
+  assert(zzplay_browse_model_move_selection(&model, 10) == 5);
+  assert(model.selection == 5);
+  assert(zzplay_browse_model_move_selection(&model, -2) == 3);
+  assert(zzplay_browse_model_move_selection(&model, -100) == 0);
+  assert(zzplay_browse_model_move_selection(&model, 0x7FFFFFFF) == 5);
+  assert(zzplay_browse_model_move_selection(&model, -0x7FFFFFFF) == 0);
+  zzplay_browse_model_set_selection(&model, -1);
+  assert(zzplay_browse_model_move_selection(&model, -1) == 5);
+  zzplay_browse_model_set_selection(&model, -1);
+  assert(zzplay_browse_model_move_selection(&model, 4) == 0);
+
+  /* Letters */
+  zzplay_browse_model_set_selection(&model, -1);
+  assert(zzplay_browse_model_jump_to_letter(&model, 'b') == 1);
+  assert(zzplay_browse_model_jump_to_letter(&model, 'B') == 2);
+  assert(zzplay_browse_model_jump_to_letter(&model, 'b') == 4);
+  assert(zzplay_browse_model_jump_to_letter(&model, 'b') == 1);
+  assert(model.selection == 1);
+  assert(zzplay_browse_model_jump_to_letter(&model, 'z') == -1);
+  assert(model.selection == 1);
+  assert(zzplay_browse_model_jump_to_letter(&model, ' ') == -1);
+  assert(zzplay_browse_model_jump_to_letter(&model, 'A') == 0);
+  /* The only C row, from itself, is found again. */
+  assert(zzplay_browse_model_jump_to_letter(&model, 'c') == 3);
+  assert(zzplay_browse_model_jump_to_letter(&model, 'C') == 3);
+  /* Latin-1 capitals match their small letters. */
+  assert(zzplay_browse_model_jump_to_letter(&model, 0xC9) == 5);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+/* The list keeps 25 entries, newest first; a repeat moves to the top. */
+static int test_recent_list_add_dedupe_cap(void)
+{
+  static ZZPlayBrowseRecent recent;
+  ZZPlayBrowseItem it;
+  char id[16];
+  uint32_t i;
+  uint32_t seen;
+
+  zzplay_browse_recent_clear(&recent);
+  for (i = 0U; i < 30U; i++) {
+    snprintf(id, sizeof(id), "t%lu", (unsigned long)i);
+    set_item(&it, id, "Title", "", ZZPLAY_ITEM_TRACK, 1U);
+    assert(zzplay_browse_recent_add(&recent, &it) == 1);
+  }
+  assert(recent.count == ZZPLAY_BROWSE_RECENT_MAX);
+  assert(strcmp(recent.items[0].id, "t29") == 0);
+  assert(strcmp(recent.items[24].id, "t5") == 0);
+
+  /* A repeat moves to the top instead of appearing twice. */
+  set_item(&it, "t10", "Again", "", ZZPLAY_ITEM_TRACK, 1U);
+  assert(zzplay_browse_recent_add(&recent, &it) == 1);
+  assert(recent.count == ZZPLAY_BROWSE_RECENT_MAX);
+  assert(strcmp(recent.items[0].id, "t10") == 0);
+  assert(strcmp(recent.items[0].title, "Again") == 0);
+  assert(strcmp(recent.items[1].id, "t29") == 0);
+  assert(strcmp(recent.items[24].id, "t5") == 0);
+  for (i = 0U, seen = 0U; i < recent.count; i++) {
+    seen += strcmp(recent.items[i].id, "t10") == 0 ? 1U : 0U;
+  }
+  assert(seen == 1U);
+
+  /* The same id of another kind is another entry; the oldest drops. */
+  set_item(&it, "t29", "Folder", "", ZZPLAY_ITEM_FOLDER, 1U);
+  assert(zzplay_browse_recent_add(&recent, &it) == 1);
+  assert(recent.count == ZZPLAY_BROWSE_RECENT_MAX);
+  assert(recent.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(strcmp(recent.items[2].id, "t29") == 0);
+  assert(recent.items[2].kind == ZZPLAY_ITEM_TRACK);
+  assert(strcmp(recent.items[24].id, "t6") == 0);
+
+  /* Refused: no id, an unknown kind, a control character in the id,
+   * the Recently played row itself. */
+  set_item(&it, "", "x", "", ZZPLAY_ITEM_TRACK, 1U);
+  assert(zzplay_browse_recent_add(&recent, &it) == 0);
+  set_item(&it, "k", "x", "", 7U, 1U);
+  assert(zzplay_browse_recent_add(&recent, &it) == 0);
+  set_item(&it, "a\tb", "x", "", ZZPLAY_ITEM_TRACK, 1U);
+  assert(zzplay_browse_recent_add(&recent, &it) == 0);
+  set_item(&it, ZZPLAY_BROWSE_RECENT_ID, "x", "", ZZPLAY_ITEM_FOLDER, 0U);
+  assert(zzplay_browse_recent_add(&recent, &it) == 0);
+  assert(strcmp(recent.items[0].id, "t29") == 0);
+
+  /* Line ends and tabs in the text become spaces; playable is 0 or 1. */
+  set_item(&it, "s1", "A\tB\nC", "x\ry", ZZPLAY_ITEM_STATION, 5U);
+  it.duration_ms = 1234U;
+  it.favourite = 1U;
+  assert(zzplay_browse_recent_add(&recent, &it) == 1);
+  assert(strcmp(recent.items[0].title, "A B C") == 0);
+  assert(strcmp(recent.items[0].subtitle, "x y") == 0);
+  assert(recent.items[0].playable == 1U);
+  assert(recent.items[0].duration_ms == 0U);
+  assert(recent.items[0].favourite == 0U);
+  return 0;
+}
+
+/* The saved form reads back what was written; damaged lines are skipped. */
+static int test_recent_parse_format(void)
+{
+  static ZZPlayBrowseRecent recent;
+  static ZZPlayBrowseRecent back;
+  static char text[8192];
+  static char damaged[4096];
+  static const char nul_line[] = "track\tnu\0l\ta\tb\t1\n";
+  char small[10];
+  char longf[160];
+  size_t need;
+  size_t used;
+  uint32_t i;
+  ZZPlayBrowseItem it;
+
+  zzplay_browse_recent_clear(&recent);
+  set_item(&it, "t:2", "Song", "", ZZPLAY_ITEM_TRACK, 1U);
+  assert(zzplay_browse_recent_add(&recent, &it));
+  set_item(&it, "alb:1", "Abbey Road", "The Beatles", ZZPLAY_ITEM_FOLDER, 1U);
+  assert(zzplay_browse_recent_add(&recent, &it));
+  set_item(&it, "s1", "Radio One", "Pop", ZZPLAY_ITEM_STATION, 1U);
+  assert(zzplay_browse_recent_add(&recent, &it));
+
+  need = zzplay_browse_recent_format(&recent, NULL, 0U);
+  assert(zzplay_browse_recent_format(&recent, text, sizeof(text)) == need);
+  assert(strlen(text) == need);
+  assert(strcmp(text, "station\ts1\tRadio One\tPop\t1\n"
+                      "folder\talb:1\tAbbey Road\tThe Beatles\t1\n"
+                      "track\tt:2\tSong\t\t1\n") == 0);
+  assert(zzplay_browse_recent_parse(&back, text, need) == 3U);
+  for (i = 0U; i < 3U; i++) {
+    assert(strcmp(back.items[i].id, recent.items[i].id) == 0);
+    assert(strcmp(back.items[i].title, recent.items[i].title) == 0);
+    assert(strcmp(back.items[i].subtitle, recent.items[i].subtitle) == 0);
+    assert(back.items[i].kind == recent.items[i].kind);
+    assert(back.items[i].playable == recent.items[i].playable);
+  }
+
+  /* A short buffer gets the start, still terminated. */
+  assert(zzplay_browse_recent_format(&recent, small, sizeof(small)) == need);
+  assert(strlen(small) == sizeof(small) - 1U);
+  assert(memcmp(small, text, sizeof(small) - 1U) == 0);
+
+  /* Damaged lines */
+  memset(longf, 'x', sizeof(longf) - 1U);
+  longf[sizeof(longf) - 1U] = '\0';
+  used = (size_t)snprintf(
+      damaged, sizeof(damaged),
+      "# a comment\n"
+      "\n"
+      "track\tgood1\tGood one\tsub\t1\r\n"
+      "track\tmissing\tfields\n"
+      "track\textra\ta\tb\t1\tzz\n"
+      "album\tbadkind\ta\tb\t1\n"
+      "track\t\tempty id\tb\t1\n"
+      "track\tbadplay\ta\tb\t2\n"
+      "track\tbadplay2\ta\tb\t10\n"
+      "folder\tgood2\tGood two\t\t0\n"
+      "track\tgood1\tRepeat\tsub\t1\n"
+      "folder\t\037recent\tsneaky\t\t0\n"
+      "track\t%s\tlong id\t\t1\n"
+      "station\tgood3\t%s\t\t1",
+      longf, longf);
+  assert(used < sizeof(damaged) - sizeof(nul_line));
+  /* A NUL inside a line damages it too. */
+  memmove(damaged + sizeof(nul_line) - 1U, damaged, used);
+  memcpy(damaged, nul_line, sizeof(nul_line) - 1U);
+  used += sizeof(nul_line) - 1U;
+
+  assert(zzplay_browse_recent_parse(&back, damaged, used) == 3U);
+  assert(strcmp(back.items[0].id, "good1") == 0);
+  assert(strcmp(back.items[0].title, "Good one") == 0);
+  assert(strcmp(back.items[0].subtitle, "sub") == 0);
+  assert(back.items[0].kind == ZZPLAY_ITEM_TRACK);
+  assert(strcmp(back.items[1].id, "good2") == 0);
+  assert(back.items[1].kind == ZZPLAY_ITEM_FOLDER);
+  assert(back.items[1].playable == 0U);
+  assert(strcmp(back.items[2].id, "good3") == 0);
+  assert(strlen(back.items[2].title) == ZZPLAY_PROVIDER_TEXT_MAX - 1U);
+  assert(back.items[2].kind == ZZPLAY_ITEM_STATION);
+
+  /* More lines than the list holds: the first 25 count. */
+  used = 0U;
+  for (i = 0U; i < 30U; i++) {
+    used += (size_t)snprintf(damaged + used, sizeof(damaged) - used,
+                             "track\tid%lu\tT\t\t1\n", (unsigned long)i);
+  }
+  assert(zzplay_browse_recent_parse(&back, damaged, used) ==
+         ZZPLAY_BROWSE_RECENT_MAX);
+  assert(strcmp(back.items[24].id, "id24") == 0);
+
+  /* No file */
+  assert(zzplay_browse_recent_parse(&back, NULL, 0U) == 0U);
+  assert(back.count == 0U);
+  return 0;
+}
+
+/* The Recently played folder: first at the top level while the list has
+ * entries, opened without a request, its entries playable as usual. */
+static int test_recently_played_folder(void)
+{
+  static const char saved[] =
+      "station\ts1\tRadio One\tPop\t1\n"
+      "folder\talb:1\tAbbey Road\tThe Beatles\t1\n";
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem top[2];
+  ZZPlayBrowseItem found[1];
+  ZZPlayBrowseItem it;
+  char uri[64];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+  zzplay_browse_model_load_recent(&model, saved, strlen(saved));
+  assert(model.recent.count == 2U);
+  /* The top level is still loading: no row yet. */
+  assert(model.item_count == 0U);
+
+  set_item(&top[0], "lib:1", "Music", "", ZZPLAY_ITEM_FOLDER, 0U);
+  set_item(&top[1], "lib:2", "Films", "", ZZPLAY_ITEM_FOLDER, 0U);
+  apply_list(&model, req.generation, 0U, top, 2U, 2U, 0);
+  assert(model.item_count == 3U);
+  assert(strcmp(model.items[0].id, ZZPLAY_BROWSE_RECENT_ID) == 0);
+  assert(strcmp(model.items[0].title, ZZPLAY_BROWSE_RECENT_TITLE) == 0);
+  assert(model.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(strcmp(model.items[1].id, "lib:1") == 0);
+  assert(zzplay_browse_model_service_rows(&model) == 2U);
+  assert(model.has_more == 0);
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(!zzplay_browse_model_can_play(&model));
+
+  /* Open it: shown at once, nothing asked of the service. */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+  assert(zzplay_browse_model_in_recent(&model));
+  assert(model.busy == 0);
+  assert(model.item_count == 2U);
+  assert(strcmp(model.items[0].id, "s1") == 0);
+  assert(!zzplay_browse_model_can_play_all(&model));
+  assert(zzplay_browse_model_can_reload(&model));
+
+  /* A station plays; a collection is gathered whole. */
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(zzplay_browse_model_play_target(&model) == ZZPLAY_BROWSE_TARGET_ITEM);
+  assert(zzplay_browse_model_format_uri(&model, 0, uri, sizeof(uri), NULL, 0U));
+  assert(strcmp(uri, "plex://s1") == 0);
+  zzplay_browse_model_set_selection(&model, 1);
+  assert(zzplay_browse_model_play_target(&model) ==
+         ZZPLAY_BROWSE_TARGET_COLLECTION);
+  assert(zzplay_browse_model_gather(&model, 100U, &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_GATHER);
+  assert(strcmp(req.node_id, "alb:1") == 0);
+  model.busy = 0; /* the gather's reply arrived */
+
+  /* Something started moves to the top of the list; the open view
+   * stays as it is until it is reloaded. */
+  set_item(&it, "t9", "Song", "", ZZPLAY_ITEM_TRACK, 1U);
+  assert(zzplay_browse_model_note_started(&model, &it) == 1);
+  assert(model.recent.count == 3U);
+  assert(model.item_count == 2U);
+  assert(zzplay_browse_model_reload(&model, &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+  assert(model.item_count == 3U);
+  assert(strcmp(model.items[0].id, "t9") == 0);
+
+  /* Back to the top level, the row still first. */
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(model.current_node[0] == '\0');
+  assert(model.item_count == 3U);
+  assert(strcmp(model.items[0].id, ZZPLAY_BROWSE_RECENT_ID) == 0);
+  assert(model.selection == 0);
+
+  /* Search results never show it. */
+  assert(zzplay_browse_model_search(&model, "song", &req));
+  set_item(&found[0], "t9", "Song", "", ZZPLAY_ITEM_TRACK, 1U);
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_SEARCH;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = found;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.item_count == 1U);
+  assert(strcmp(model.items[0].id, "t9") == 0);
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(model.item_count == 3U);
+
+  /* An empty list hides the row; the selection stays on its row. */
+  zzplay_browse_model_set_selection(&model, 2);
+  zzplay_browse_model_load_recent(&model, NULL, 0U);
+  assert(model.item_count == 2U);
+  assert(model.selection == 1);
+  assert(strcmp(model.items[1].id, "lib:2") == 0);
+  /* Starting something brings it back. */
+  assert(zzplay_browse_model_note_started(&model, &it) == 1);
+  assert(model.item_count == 3U);
+  assert(model.selection == 2);
+  assert(strcmp(model.items[0].id, ZZPLAY_BROWSE_RECENT_ID) == 0);
+
+  /* Selecting the service again drops the list until the caller loads
+   * the service's own. */
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+  assert(model.recent.count == 0U);
+  assert(model.item_count == 2U);
+  assert(strcmp(model.items[0].id, "lib:1") == 0);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+/* With the row shown, paging and partial rows still count service rows
+ * only; a failed or stopped top level still offers the folder. */
+static int test_recent_row_with_paging(void)
+{
+  static const char saved[] = "track\tt1\tOne\t\t1\n";
+  static ZZPlayBrowseItem page[ZZPLAY_BROWSE_PAGE_SIZE];
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  uint32_t i;
+
+  for (i = 0U; i < ZZPLAY_BROWSE_PAGE_SIZE; i++) {
+    char id[16];
+    snprintf(id, sizeof(id), "r%lu", (unsigned long)i);
+    set_item(&page[i], id, "Row", "", ZZPLAY_ITEM_FOLDER, 0U);
+  }
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  zzplay_browse_model_load_recent(&model, saved, strlen(saved));
+  apply_list(&model, req.generation, 0U, page, ZZPLAY_BROWSE_PAGE_SIZE, 150U,
+             0);
+  assert(model.item_count == ZZPLAY_BROWSE_PAGE_SIZE + 1U);
+  assert(zzplay_browse_model_service_rows(&model) == ZZPLAY_BROWSE_PAGE_SIZE);
+  assert(model.has_more == 1);
+
+  assert(zzplay_browse_model_request_more(&model, &req));
+  assert(req.start == ZZPLAY_BROWSE_PAGE_SIZE);
+  for (i = 0U; i < 50U; i++) {
+    char id[16];
+    snprintf(id, sizeof(id), "r%lu", (unsigned long)(100U + i));
+    set_item(&page[i], id, "Row", "", ZZPLAY_ITEM_FOLDER, 0U);
+  }
+  apply_list(&model, req.generation, 100U, page, 50U, 150U, 0);
+  assert(model.item_count == 151U);
+  assert(zzplay_browse_model_service_rows(&model) == 150U);
+  assert(model.has_more == 0);
+  assert(strcmp(model.items[0].id, ZZPLAY_BROWSE_RECENT_ID) == 0);
+  assert(strcmp(model.items[100].id, "r99") == 0);
+  assert(strcmp(model.items[101].id, "r100") == 0);
+
+  /* A reload's first group replaces the rows, not the folder row. */
+  for (i = 0U; i < ZZPLAY_BROWSE_PAGE_SIZE; i++) {
+    char id[16];
+    snprintf(id, sizeof(id), "n%lu", (unsigned long)i);
+    set_item(&page[i], id, "Row", "", ZZPLAY_ITEM_FOLDER, 0U);
+  }
+  assert(zzplay_browse_model_reload(&model, &req));
+  apply_list(&model, req.generation, 0U, page, 10U, 0U, 1);
+  assert(model.item_count == 11U);
+  assert(strcmp(model.items[0].id, ZZPLAY_BROWSE_RECENT_ID) == 0);
+  assert(strcmp(model.items[1].id, "n0") == 0);
+  apply_list(&model, req.generation, 0U, page, 20U, 0U, 0);
+  assert(model.item_count == 21U);
+  assert(strcmp(model.items[20].id, "n19") == 0);
+  zzplay_browse_model_free(&model);
+
+  /* The service fails: the folder is still offered. */
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  zzplay_browse_model_load_recent(&model, saved, strlen(saved));
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 0;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.item_count == 1U);
+  assert(strcmp(model.items[0].id, ZZPLAY_BROWSE_RECENT_ID) == 0);
+  zzplay_browse_model_free(&model);
+
+  /* Stopped before any row came: likewise. */
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  zzplay_browse_model_load_recent(&model, saved, strlen(saved));
+  zzplay_browse_model_stop(&model);
+  assert(model.item_count == 1U);
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+/* Play all on a shown collection records it with its subtitle. */
+static int test_shown_collection(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem top[1];
+  ZZPlayBrowseItem tracks[1];
+  ZZPlayBrowseItem found[1];
+  ZZPlayBrowseItem shown;
+  ZZPlayBrowseReply reply;
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  set_item(&top[0], "alb:7", "Revolver", "The Beatles", ZZPLAY_ITEM_FOLDER,
+           1U);
+  apply_list(&model, req.generation, 0U, top, 1U, 0U, 0);
+  assert(!zzplay_browse_model_shown_collection(&model, &shown));
+
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  set_item(&tracks[0], "t1", "Taxman", "", ZZPLAY_ITEM_TRACK, 1U);
+  apply_list(&model, req.generation, 0U, tracks, 1U, 0U, 0);
+  assert(zzplay_browse_model_shown_collection(&model, &shown));
+  assert(strcmp(shown.id, "alb:7") == 0);
+  assert(strcmp(shown.title, "Revolver") == 0);
+  assert(strcmp(shown.subtitle, "The Beatles") == 0);
+  assert(shown.kind == ZZPLAY_ITEM_FOLDER && shown.playable == 1U);
+
+  /* A search is no collection; Back brings the folder's details back. */
+  assert(zzplay_browse_model_search(&model, "tax", &req));
+  set_item(&found[0], "t1", "Taxman", "", ZZPLAY_ITEM_TRACK, 1U);
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_SEARCH;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = found;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(!zzplay_browse_model_shown_collection(&model, &shown));
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(zzplay_browse_model_shown_collection(&model, &shown));
+  assert(strcmp(shown.subtitle, "The Beatles") == 0);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
 
 int main(void)
 {
@@ -1676,6 +2171,12 @@ int main(void)
   assert(test_replay_click_during_letter_load() == 0);
   assert(test_search_during_load_pushes_no_dead_frame() == 0);
   assert(test_back_skips_dead_frames() == 0);
+  assert(test_keyboard_selection() == 0);
+  assert(test_recent_list_add_dedupe_cap() == 0);
+  assert(test_recent_parse_format() == 0);
+  assert(test_recently_played_folder() == 0);
+  assert(test_recent_row_with_paging() == 0);
+  assert(test_shown_collection() == 0);
   printf("zzplay_browse_test: all tests passed\n");
   return 0;
 }
