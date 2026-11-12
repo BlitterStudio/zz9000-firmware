@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="3" totalSize="3" offset="0" librarySectionID="3" title1="Music" title2="By Genre" viewGroup="secondary">
+<Directory fastKey="/library/sections/3/all?genre=9001" key="9001" title="Jazz" type="genre" />
+<Directory fastKey="/library/sections/3/all?genre=9002" key="9002" title="Blues" type="genre" />
+<Directory fastKey="/library/sections/3/all?genre=9003" key="9003" title="Ambient" type="genre" />
+</MediaContainer>

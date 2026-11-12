@@ -301,10 +301,20 @@ only to that server and, during sign-in, to plex.tv. With a plain `http://`
 address, the server's **Secure connections** setting (Settings, Network) must
 be **Preferred**, not **Required**.
 
-The top level shows an Audio playlists folder and your music libraries; a
-server with one music library shows its artists there directly. An artist
-opens to albums and an album or playlist to tracks, each shown with artist,
-album and length. Search finds artists, albums and tracks.
+The top level has **Playlists** plus one folder per music library; a server
+with a single music library lists that library's views directly: **Artists**,
+**Albums**, **Genres**, **Recently added** and **Playlists**. **Artists** and
+**Albums** open to letter folders with their counts, such as "A (72)", with
+"#" first for names that start with a digit or symbol; a letter opens its
+artists or albums, 100 at a time. **Genres** opens the server's genre list
+and a genre opens the artists in it. **Recently added** lists albums newest
+first. Album rows show the artist and the year when Plex knows it. An artist
+opens to albums, and an album or playlist to tracks, each track shown with
+artist, album and length.
+
+Search answers with up to three folders, **Artists (n)**, **Albums (n)** and
+**Tracks (n)**, each with its hit count; groups without hits are left out,
+and each folder opens its results.
 
 MP3, FLAC and Ogg Vorbis tracks play straight from the server and can be
 seeked. The server converts other formats (AAC, ALAC, WAV and so on) to MP3

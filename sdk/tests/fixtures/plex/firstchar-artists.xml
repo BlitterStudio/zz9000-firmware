@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="3" totalSize="3" offset="0" librarySectionID="3" title1="Music" title2="By First Letter" viewGroup="secondary">
+<Directory size="3" key="%23" title="#" />
+<Directory size="3" key="A" title="A" />
+<Directory size="1" key="B" title="B" />
+</MediaContainer>

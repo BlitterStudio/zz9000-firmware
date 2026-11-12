@@ -94,13 +94,33 @@ typedef struct PlexSectionsXmlState {
   PlexContext *ctx;
 } PlexSectionsXmlState;
 
+/* What a list request asks Plex for. */
+#define PLEX_FETCH_ITEMS 0   /* artist, album and track rows */
+#define PLEX_FETCH_LETTERS 1 /* firstCharacter letter folders */
+#define PLEX_FETCH_GENRES 2  /* genre folders */
+#define PLEX_FETCH_COUNT 3   /* size-0 request: only the total */
+
 typedef struct PlexItemXmlState {
   const PlexContext *ctx;
   const ZZPlayItemSink *sink;
   int stopped;
-  int is_search;
+  int mode;
+  const char *folder_prefix; /* id prefix for the folder modes */
+  int report_total;
   uint32_t total_bias;
+  uint32_t count_total;      /* PLEX_FETCH_COUNT: totalSize seen */
 } PlexItemXmlState;
+
+typedef struct PlexListOpts {
+  const char *path;
+  uint32_t start;
+  uint32_t count;            /* 0: no window */
+  int paged;                 /* send the container headers */
+  int mode;                  /* PLEX_FETCH_* */
+  const char *folder_prefix; /* PLEX_FETCH_LETTERS/GENRES */
+  int report_total;
+  uint32_t total_bias;
+} PlexListOpts;
 
 /* --- Freestanding helpers --- */
 
@@ -203,6 +223,22 @@ static int plex_is_direct_codec(const char *codec)
   if (plex_strcasecmp(codec, "flac") == 0) return 1;
   if (plex_strcasecmp(codec, "vorbis") == 0) return 1;
   return 0;
+}
+
+/* Bytes that are safe to paste from a folder id into a request path:
+ * no separators, spaces or controls. */
+static int plex_is_safe_token(const char *s)
+{
+  if (!s || s[0] == '\0') return 0;
+  while (*s) {
+    unsigned char c = (unsigned char)*s;
+    if (c < 0x20U || c == 0x7FU) return 0;
+    if (c == ' ' || c == '?' || c == '#' || c == '&' || c == '/' || c == '"') {
+      return 0;
+    }
+    s++;
+  }
+  return 1;
 }
 
 /* Recognises "https://A-B-C-D.<hash>.plex.direct:<port>" and writes
@@ -565,6 +601,23 @@ static int plex_load_sections(PlexContext *ctx, char *err, uint32_t err_size)
 
 /* --- Item browsing and search XML parsing --- */
 
+static int plex_emit_folder(PlexItemXmlState *st, const char *id, const char *title)
+{
+  ZZPlayProviderItem it;
+
+  plex_memset(&it, 0, sizeof(it));
+  it.id = id;
+  it.title = title;
+  it.subtitle = "";
+  it.kind = ZZPLAY_ITEM_FOLDER;
+  it.playable = 0;
+  if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
+    st->stopped = 1;
+    return 1;
+  }
+  return 0;
+}
+
 static int plex_item_xml_start(void *user, const char *name,
                                const ZZPlayHostXmlAttr *attrs,
                                uint32_t count, int truncated)
@@ -576,70 +629,97 @@ static int plex_item_xml_start(void *user, const char *name,
   if (st->stopped) return 1;
 
   if (plex_strcmp(name, "MediaContainer") == 0) {
-    if (!st->is_search && st->sink && st->sink->total) {
-      const char *tot = host->xml_attr(attrs, count, "totalSize");
-      if (!tot) {
-        tot = host->xml_attr(attrs, count, "size");
-      }
-      if (tot) {
-        uint32_t total = plex_parse_uint(tot) + st->total_bias;
-        st->sink->total(st->sink->user, total);
+    const char *tot = host->xml_attr(attrs, count, "totalSize");
+    if (!tot) {
+      tot = host->xml_attr(attrs, count, "size");
+    }
+    if (tot) {
+      if (st->mode == PLEX_FETCH_COUNT) {
+        st->count_total = plex_parse_uint(tot);
+      } else if (st->report_total && st->sink && st->sink->total) {
+        st->sink->total(st->sink->user, plex_parse_uint(tot) + st->total_bias);
       }
     }
   } else if (plex_strcmp(name, "Directory") == 0) {
-    const char *type = host->xml_attr(attrs, count, "type");
-    const char *rk = host->xml_attr(attrs, count, "ratingKey");
-    const char *title = host->xml_attr(attrs, count, "title");
-    if (!title) title = "";
-    if (!rk) rk = "";
+    if (st->mode == PLEX_FETCH_LETTERS) {
+      const char *key = host->xml_attr(attrs, count, "key");
+      const char *title = host->xml_attr(attrs, count, "title");
+      const char *size = host->xml_attr(attrs, count, "size");
+      char id[96];
+      char title_buf[96];
 
-    if (type && plex_strcmp(type, "artist") == 0) {
-      char id[48];
-      ZZPlayProviderItem it;
-      host->format(id, sizeof(id), "art:%s", rk);
-      plex_memset(&it, 0, sizeof(it));
-      it.id = id;
-      it.title = title;
-      it.subtitle = "";
-      it.kind = ZZPLAY_ITEM_FOLDER;
-      it.playable = 0;
-      if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
-        st->stopped = 1;
-        return 1;
+      if (!key || !title) return 0;
+      host->format(id, sizeof(id), "%s%s", st->folder_prefix, key);
+      if (size && size[0] != '\0') {
+        host->format(title_buf, sizeof(title_buf), "%s (%lu)", title,
+                     (unsigned long)plex_parse_uint(size));
+      } else {
+        plex_strlcpy(title_buf, title, sizeof(title_buf));
       }
-    } else if (type && plex_strcmp(type, "album") == 0) {
-      char id[48];
-      const char *year = host->xml_attr(attrs, count, "year");
-      const char *parent = host->xml_attr(attrs, count, "parentTitle");
-      ZZPlayProviderItem it;
-      host->format(id, sizeof(id), "alb:%s", rk);
-      plex_memset(&it, 0, sizeof(it));
-      it.id = id;
-      it.title = title;
-      it.subtitle = year ? year : (parent ? parent : "");
-      it.kind = ZZPLAY_ITEM_FOLDER;
-      it.playable = 0;
-      if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
-        st->stopped = 1;
-        return 1;
+      return plex_emit_folder(st, id, title_buf);
+    }
+    if (st->mode == PLEX_FETCH_GENRES) {
+      const char *key = host->xml_attr(attrs, count, "key");
+      const char *title = host->xml_attr(attrs, count, "title");
+      char id[96];
+
+      if (!key || !title) return 0;
+      host->format(id, sizeof(id), "%s%s", st->folder_prefix, key);
+      return plex_emit_folder(st, id, title);
+    }
+    {
+      const char *type = host->xml_attr(attrs, count, "type");
+      const char *rk = host->xml_attr(attrs, count, "ratingKey");
+      const char *title = host->xml_attr(attrs, count, "title");
+
+      if (!title) title = "";
+      if (!rk) rk = "";
+
+      if (type && plex_strcmp(type, "artist") == 0) {
+        char id[48];
+
+        host->format(id, sizeof(id), "art:%s", rk);
+        return plex_emit_folder(st, id, title);
+      }
+      if (type && plex_strcmp(type, "album") == 0) {
+        char id[48];
+        const char *year = host->xml_attr(attrs, count, "year");
+        const char *parent = host->xml_attr(attrs, count, "parentTitle");
+        char sub[96];
+
+        host->format(id, sizeof(id), "alb:%s", rk);
+        sub[0] = '\0';
+        if (parent && parent[0] && year && year[0]) {
+          host->format(sub, sizeof(sub), "%s - %s", parent, year);
+        } else if (year && year[0]) {
+          plex_strlcpy(sub, year, sizeof(sub));
+        } else if (parent && parent[0]) {
+          plex_strlcpy(sub, parent, sizeof(sub));
+        }
+        {
+          ZZPlayProviderItem it;
+
+          plex_memset(&it, 0, sizeof(it));
+          it.id = id;
+          it.title = title;
+          it.subtitle = sub;
+          it.kind = ZZPLAY_ITEM_FOLDER;
+          it.playable = 0;
+          if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
+            st->stopped = 1;
+            return 1;
+          }
+        }
+        return 0;
       }
     }
   } else if (plex_strcmp(name, "Playlist") == 0) {
     const char *rk = host->xml_attr(attrs, count, "ratingKey");
     const char *title = host->xml_attr(attrs, count, "title");
     char id[48];
-    ZZPlayProviderItem it;
+
     host->format(id, sizeof(id), "pl:%s", rk ? rk : "");
-    plex_memset(&it, 0, sizeof(it));
-    it.id = id;
-    it.title = title ? title : "";
-    it.subtitle = "";
-    it.kind = ZZPLAY_ITEM_FOLDER;
-    it.playable = 0;
-    if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
-      st->stopped = 1;
-      return 1;
-    }
+    return plex_emit_folder(st, id, title ? title : "");
   } else if (plex_strcmp(name, "Track") == 0) {
     const char *rk = host->xml_attr(attrs, count, "ratingKey");
     const char *title = host->xml_attr(attrs, count, "title");
@@ -676,13 +756,11 @@ static int plex_item_xml_start(void *user, const char *name,
   return 0;
 }
 
-static int plex_fetch_items(PlexContext *ctx, const char *path,
-                            uint32_t start, uint32_t count, int paged,
-                            const ZZPlayItemSink *sink, int is_search,
-                            uint32_t total_bias, int *stopped_out,
-                            char *err, uint32_t err_size)
+static int plex_fetch_list(PlexContext *ctx, const PlexListOpts *opts,
+                           const ZZPlayItemSink *sink, uint32_t *count_out,
+                           int *stopped_out, char *err, uint32_t err_size)
 {
-  char url[384];
+  char url[416];
   char headers[384];
   PlexItemXmlState xst;
   ZZPlayHostXmlHandler h;
@@ -690,20 +768,35 @@ static int plex_fetch_items(PlexContext *ctx, const char *path,
   PlexXmlFeedState feed;
   int status = 0;
   int ok;
+  size_t ulen;
 
   if (stopped_out) *stopped_out = 0;
+  if (count_out) *count_out = 0;
 
-  if (!plex_build_url(ctx, path, url, sizeof(url))) {
+  if (!plex_build_url(ctx, opts->path, url, sizeof(url))) {
     ctx->host->format(err, err_size, "Failed to build URL");
     return 0;
   }
-  plex_format_headers(ctx, start, count, paged, headers, sizeof(headers));
+
+  /* Lists never show summaries and leaving them out makes artist and album
+   * pages many times smaller. */
+  ulen = plex_strlen(url);
+  if (ulen + 23U <= sizeof(url)) {
+    const char *suffix = plex_strstr(url, "?") ? "&excludeFields=summary"
+                                               : "?excludeFields=summary";
+    plex_strlcpy(url + ulen, suffix, sizeof(url) - ulen);
+  }
+
+  plex_format_headers(ctx, opts->start, opts->count, opts->paged,
+                      headers, sizeof(headers));
 
   plex_memset(&xst, 0, sizeof(xst));
   xst.ctx = ctx;
   xst.sink = sink;
-  xst.is_search = is_search;
-  xst.total_bias = total_bias;
+  xst.mode = opts->mode;
+  xst.folder_prefix = opts->folder_prefix ? opts->folder_prefix : "";
+  xst.report_total = opts->report_total;
+  xst.total_bias = opts->total_bias;
 
   plex_memset(&h, 0, sizeof(h));
   h.start = plex_item_xml_start;
@@ -739,7 +832,38 @@ static int plex_fetch_items(PlexContext *ctx, const char *path,
     return 0;
   }
 
+  if (count_out) *count_out = xst.count_total;
   return 1;
+}
+
+static int plex_list_items(PlexContext *ctx, const char *path,
+                           uint32_t start, uint32_t count, int paged,
+                           const ZZPlayItemSink *sink, int report_total,
+                           int *stopped_out, char *err, uint32_t err_size)
+{
+  PlexListOpts o;
+
+  plex_memset(&o, 0, sizeof(o));
+  o.path = path;
+  o.start = start;
+  o.count = count;
+  o.paged = paged;
+  o.mode = PLEX_FETCH_ITEMS;
+  o.report_total = report_total;
+  return plex_fetch_list(ctx, &o, sink, NULL, stopped_out, err, err_size);
+}
+
+/* A size-0 request that answers with only the container total. */
+static int plex_count_items(PlexContext *ctx, const char *path,
+                            uint32_t *total_out, char *err, uint32_t err_size)
+{
+  PlexListOpts o;
+
+  plex_memset(&o, 0, sizeof(o));
+  o.path = path;
+  o.paged = 1;
+  o.mode = PLEX_FETCH_COUNT;
+  return plex_fetch_list(ctx, &o, NULL, total_out, NULL, err, err_size);
 }
 
 /* --- Metadata XML parsing for resolve --- */
@@ -1000,11 +1124,68 @@ static int plex_select_server(PlexContext *ctx, const PlexDiscoveredServer *srv,
   return 1;
 }
 
+static const char *plex_find_section(PlexContext *ctx, const char *key)
+{
+  uint32_t i;
+
+  for (i = 0U; i < ctx->section_count; i++) {
+    if (plex_strcmp(ctx->sections[i].key, key) == 0) {
+      return ctx->sections[i].key;
+    }
+  }
+  return NULL;
+}
+
+/* Emits "Artists, Albums, Genres, Recently added", plus Playlists when a
+ * single library holds the whole top level. */
+static int plex_emit_library_views(PlexContext *ctx, const char *sec_key,
+                                   uint32_t start, uint32_t count,
+                                   const ZZPlayItemSink *sink, int with_playlists)
+{
+  static const char *const views[4] = { "art", "alb", "gen", "new" };
+  static const char *const titles[4] = {
+    "Artists", "Albums", "Genres", "Recently added"
+  };
+  uint32_t total = with_playlists ? 5U : 4U;
+  uint32_t i;
+
+  if (sink->total) {
+    sink->total(sink->user, total);
+  }
+  for (i = 0U; i < total; i++) {
+    ZZPlayProviderItem it;
+    char id[48];
+    const char *row_id;
+
+    if (i < start) continue;
+    if (count > 0U && i >= start + count) break;
+
+    plex_memset(&it, 0, sizeof(it));
+    if (i < 4U) {
+      ctx->host->format(id, sizeof(id), "lib:%s:%s", sec_key, views[i]);
+      it.title = titles[i];
+      row_id = id;
+    } else {
+      row_id = "playlists";
+      it.title = "Playlists";
+    }
+    it.id = row_id;
+    it.subtitle = "";
+    it.kind = ZZPLAY_ITEM_FOLDER;
+    it.playable = 0;
+    if (sink->item(sink->user, &it) != 0) {
+      return 1;
+    }
+  }
+  return 1;
+}
+
 static int plex_list_library_top(PlexContext *ctx, uint32_t start, uint32_t count,
                                  const ZZPlayItemSink *sink, char *err, uint32_t err_size)
 {
+  uint32_t total;
+  uint32_t cur = 0U;
   uint32_t i;
-  int stopped = 0;
 
   if (ctx->server[0] == '\0') {
     ctx->host->format(err, err_size, "Set the server in Settings");
@@ -1018,79 +1199,39 @@ static int plex_list_library_top(PlexContext *ctx, uint32_t start, uint32_t coun
   }
 
   if (ctx->section_count == 1) {
-    const char *sec_key = ctx->sections[0].key;
-    char path[64];
-    ctx->host->format(path, sizeof(path), "/library/sections/%s/all?type=8", sec_key);
+    return plex_emit_library_views(ctx, ctx->sections[0].key, start, count, sink, 1);
+  }
 
-    if (start == 0) {
-      ZZPlayProviderItem it;
-      uint32_t artist_count;
+  /* Several libraries: Playlists stays at the top level, one folder per
+   * library below it. */
+  total = 1U + ctx->section_count;
+  if (sink->total) {
+    sink->total(sink->user, total);
+  }
+  for (i = 0U; i <= ctx->section_count; i++) {
+    ZZPlayProviderItem it;
+    char id[48];
 
+    if (cur >= start && (count == 0U || cur < start + count)) {
       plex_memset(&it, 0, sizeof(it));
-      it.id = "playlists";
-      it.title = "Audio Playlists";
+      if (i == 0U) {
+        it.id = "playlists";
+        it.title = "Playlists";
+      } else {
+        ctx->host->format(id, sizeof(id), "sec:%s", ctx->sections[i - 1U].key);
+        it.id = id;
+        it.title = ctx->sections[i - 1U].title;
+      }
       it.subtitle = "";
       it.kind = ZZPLAY_ITEM_FOLDER;
       it.playable = 0;
       if (sink->item(sink->user, &it) != 0) {
         return 1;
       }
-      if (count == 1) {
-        return 1;
-      }
-      artist_count = (count > 1) ? (count - 1) : 0;
-      return plex_fetch_items(ctx, path, 0, artist_count, count > 0,
-                              sink, 0, 1, &stopped, err, err_size);
-    } else {
-      uint32_t artist_start = start - 1;
-      return plex_fetch_items(ctx, path, artist_start, count, count > 0,
-                              sink, 0, 1, &stopped, err, err_size);
-    }
-  } else {
-    uint32_t total_items = 1 + ctx->section_count;
-    uint32_t emitted = 0;
-    uint32_t cur = 0;
-
-    if (sink->total) {
-      sink->total(sink->user, total_items);
-    }
-
-    if (start == 0) {
-      ZZPlayProviderItem it;
-      plex_memset(&it, 0, sizeof(it));
-      it.id = "playlists";
-      it.title = "Audio Playlists";
-      it.subtitle = "";
-      it.kind = ZZPLAY_ITEM_FOLDER;
-      it.playable = 0;
-      if (sink->item(sink->user, &it) != 0) {
-        return 1;
-      }
-      emitted++;
     }
     cur++;
-
-    for (i = 0U; i < ctx->section_count; i++) {
-      if (count > 0 && emitted >= count) break;
-      if (cur >= start) {
-        char id[48];
-        ZZPlayProviderItem it;
-        ctx->host->format(id, sizeof(id), "sec:%s", ctx->sections[i].key);
-        plex_memset(&it, 0, sizeof(it));
-        it.id = id;
-        it.title = ctx->sections[i].title;
-        it.subtitle = "";
-        it.kind = ZZPLAY_ITEM_FOLDER;
-        it.playable = 0;
-        if (sink->item(sink->user, &it) != 0) {
-          return 1;
-        }
-        emitted++;
-      }
-      cur++;
-    }
-    return 1;
   }
+  return 1;
 }
 
 static void *plex_open(const ZZPlayHost *host, char *err, uint32_t err_size)
@@ -1179,6 +1320,89 @@ static void plex_close(void *ctx_in)
   PlexContext *ctx = (PlexContext *)ctx_in;
   if (!ctx) return;
   ctx->host->free(ctx->host, ctx);
+}
+
+/* Opens one search group ("sq:<type>:<escaped query>"): its results, paged,
+ * with the total reported. */
+static int plex_list_search_group(PlexContext *ctx, const char *type_and_query,
+                                  uint32_t start, uint32_t count,
+                                  const ZZPlayItemSink *sink,
+                                  char *err, uint32_t err_size)
+{
+  const char *p = type_and_query;
+  const char *esc_query;
+  char path[320];
+  uint32_t type = 0U;
+
+  while (*p >= '0' && *p <= '9') {
+    type = type * 10U + (uint32_t)(*p - '0');
+    p++;
+  }
+  if (*p != ':' || (type != 8U && type != 9U && type != 10U)) {
+    ctx->host->format(err, err_size, "Unknown browse node");
+    return 0;
+  }
+  esc_query = p + 1;
+  if (!plex_is_safe_token(esc_query)) {
+    ctx->host->format(err, err_size, "Unknown browse node");
+    return 0;
+  }
+  if (!plex_load_sections(ctx, err, err_size)) {
+    return 0;
+  }
+
+  if (ctx->section_count == 1) {
+    int stopped = 0;
+
+    ctx->host->format(path, sizeof(path),
+                      "/library/sections/%s/search?type=%lu&query=%s",
+                      ctx->sections[0].key, (unsigned long)type, esc_query);
+    return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
+                           &stopped, err, err_size);
+  }
+
+  /* Several libraries: count each, then fetch only the asked-for window. */
+  {
+    uint32_t counts[PLEX_MAX_SECTIONS];
+    uint32_t grand = 0U;
+    uint32_t start_rem = start;
+    uint32_t count_rem = (count > 0U) ? count : 0xFFFFFFFFU;
+    uint32_t i;
+
+    for (i = 0U; i < ctx->section_count; i++) {
+      ctx->host->format(path, sizeof(path),
+                        "/library/sections/%s/search?type=%lu&query=%s",
+                        ctx->sections[i].key, (unsigned long)type, esc_query);
+      if (!plex_count_items(ctx, path, &counts[i], err, err_size)) {
+        return 0;
+      }
+      grand += counts[i];
+    }
+    if (sink->total) {
+      sink->total(sink->user, grand);
+    }
+
+    for (i = 0U; i < ctx->section_count; i++) {
+      uint32_t skip = (start_rem < counts[i]) ? start_rem : counts[i];
+      uint32_t avail = counts[i] - skip;
+      int stopped = 0;
+
+      start_rem -= skip;
+      if (count_rem == 0U) break;
+      if (avail == 0U) continue;
+      if (avail > count_rem) avail = count_rem;
+      ctx->host->format(path, sizeof(path),
+                        "/library/sections/%s/search?type=%lu&query=%s",
+                        ctx->sections[i].key, (unsigned long)type, esc_query);
+      if (!plex_list_items(ctx, path, skip, avail, 1, sink, 0,
+                           &stopped, err, err_size)) {
+        return 0;
+      }
+      count_rem -= avail;
+      if (stopped) return 1;
+    }
+  }
+  return 1;
 }
 
 static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t count,
@@ -1435,46 +1659,191 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
 
   if (plex_strcmp(node, "playlists") == 0) {
     int stopped = 0;
-    return plex_fetch_items(ctx, "/playlists?playlistType=audio",
-                            start, count, count > 0, sink, 0, 0, &stopped, err, err_size);
+    return plex_list_items(ctx, "/playlists?playlistType=audio",
+                           start, count, count > 0, sink, 1,
+                           &stopped, err, err_size);
   }
 
   if (plex_strncmp(node, "sec:", 4) == 0) {
-    char path[64];
+    const char *sec;
+
+    if (!plex_load_sections(ctx, err, err_size)) {
+      return 0;
+    }
+    sec = plex_find_section(ctx, node + 4);
+    if (!sec) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    return plex_emit_library_views(ctx, sec, start, count, sink, 0);
+  }
+
+  if (plex_strncmp(node, "lib:", 4) == 0) {
+    const char *sep = plex_strstr(node + 4, ":");
+    const char *view;
+    const char *sec;
+    char sec_buf[PLEX_SECTION_KEY_MAX];
+    char path[160];
+    char prefix[48];
+
+    if (!sep) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    view = sep + 1;
+    if (!plex_load_sections(ctx, err, err_size)) {
+      return 0;
+    }
+    plex_strlcpy(sec_buf, node + 4,
+                 (size_t)(sep - (node + 4)) + 1U);
+    sec = plex_find_section(ctx, sec_buf);
+    if (!sec) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+
+    if (plex_strcmp(view, "art") == 0 || plex_strcmp(view, "alb") == 0) {
+      PlexListOpts o;
+      int is_album = (view[0] == 'a' && view[1] == 'l');
+
+      ctx->host->format(path, sizeof(path),
+                        "/library/sections/%s/firstCharacter?type=%d",
+                        sec, is_album ? 9 : 8);
+      ctx->host->format(prefix, sizeof(prefix), "ltr:%s:%d:",
+                        sec, is_album ? 9 : 8);
+      plex_memset(&o, 0, sizeof(o));
+      o.path = path;
+      o.mode = PLEX_FETCH_LETTERS;
+      o.folder_prefix = prefix;
+      o.report_total = 1;
+      return plex_fetch_list(ctx, &o, sink, NULL, NULL, err, err_size);
+    }
+    if (plex_strcmp(view, "gen") == 0) {
+      PlexListOpts o;
+
+      ctx->host->format(path, sizeof(path), "/library/sections/%s/genre?type=8", sec);
+      ctx->host->format(prefix, sizeof(prefix), "gen:%s:", sec);
+      plex_memset(&o, 0, sizeof(o));
+      o.path = path;
+      o.mode = PLEX_FETCH_GENRES;
+      o.folder_prefix = prefix;
+      o.report_total = 1;
+      return plex_fetch_list(ctx, &o, sink, NULL, NULL, err, err_size);
+    }
+    if (plex_strcmp(view, "new") == 0) {
+      int stopped = 0;
+
+      ctx->host->format(path, sizeof(path),
+                        "/library/sections/%s/all?type=9&sort=addedAt:desc", sec);
+      return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
+                             &stopped, err, err_size);
+    }
+    ctx->host->format(err, err_size, "Unknown browse node");
+    return 0;
+  }
+
+  if (plex_strncmp(node, "ltr:", 4) == 0) {
+    /* ltr:<section>:<8|9>:<letter key> */
+    const char *sep = plex_strstr(node + 4, ":");
+    const char *key;
+    const char *sec;
+    char sec_buf[PLEX_SECTION_KEY_MAX];
+    char path[192];
+    char type_char;
     int stopped = 0;
-    ctx->host->format(path, sizeof(path), "/library/sections/%s/all?type=8", node + 4);
-    return plex_fetch_items(ctx, path, start, count, count > 0,
-                            sink, 0, 0, &stopped, err, err_size);
+
+    if (!sep || sep == node + 4) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    plex_strlcpy(sec_buf, node + 4, (size_t)(sep - (node + 4)) + 1U);
+    type_char = sep[1];
+    key = sep + 3;
+    if ((type_char != '8' && type_char != '9') || sep[2] != ':' ||
+        !plex_is_safe_token(key)) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    if (!plex_load_sections(ctx, err, err_size)) {
+      return 0;
+    }
+    sec = plex_find_section(ctx, sec_buf);
+    if (!sec) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    ctx->host->format(path, sizeof(path),
+                      "/library/sections/%s/firstCharacter/%s?type=%c",
+                      sec, key, type_char);
+    return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
+                           &stopped, err, err_size);
+  }
+
+  if (plex_strncmp(node, "gen:", 4) == 0) {
+    /* gen:<section>:<genre id> */
+    const char *sep = plex_strstr(node + 4, ":");
+    const char *gid;
+    const char *sec;
+    char sec_buf[PLEX_SECTION_KEY_MAX];
+    char path[160];
+    int stopped = 0;
+
+    if (!sep || sep == node + 4) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    plex_strlcpy(sec_buf, node + 4, (size_t)(sep - (node + 4)) + 1U);
+    gid = sep + 1;
+    if (!plex_is_safe_token(gid)) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    if (!plex_load_sections(ctx, err, err_size)) {
+      return 0;
+    }
+    sec = plex_find_section(ctx, sec_buf);
+    if (!sec) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    ctx->host->format(path, sizeof(path),
+                      "/library/sections/%s/all?type=8&genre=%s", sec, gid);
+    return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
+                           &stopped, err, err_size);
+  }
+
+  if (plex_strncmp(node, "sq:", 3) == 0) {
+    return plex_list_search_group(ctx, node + 3, start, count, sink, err, err_size);
   }
 
   if (plex_strncmp(node, "art:", 4) == 0) {
-    char path[64];
+    char path[96];
     int stopped = 0;
     ctx->host->format(path, sizeof(path), "/library/metadata/%s/children", node + 4);
-    return plex_fetch_items(ctx, path, start, count, count > 0,
-                            sink, 0, 0, &stopped, err, err_size);
+    return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
+                           &stopped, err, err_size);
   }
 
   if (plex_strncmp(node, "alb:", 4) == 0) {
-    char path[64];
+    char path[96];
     int stopped = 0;
     ctx->host->format(path, sizeof(path), "/library/metadata/%s/children", node + 4);
-    return plex_fetch_items(ctx, path, start, count, count > 0,
-                            sink, 0, 0, &stopped, err, err_size);
+    return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
+                           &stopped, err, err_size);
   }
 
   if (plex_strncmp(node, "pl:", 3) == 0) {
-    char path[64];
+    char path[96];
     int stopped = 0;
     ctx->host->format(path, sizeof(path), "/playlists/%s/items", node + 3);
-    return plex_fetch_items(ctx, path, start, count, count > 0,
-                            sink, 0, 0, &stopped, err, err_size);
+    return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
+                           &stopped, err, err_size);
   }
 
   if (node[0] == '/') {
     int stopped = 0;
-    return plex_fetch_items(ctx, node, start, count, count > 0,
-                            sink, 0, 0, &stopped, err, err_size);
+    return plex_list_items(ctx, node, start, count, count > 0, sink, 1,
+                           &stopped, err, err_size);
   }
 
   ctx->host->format(err, err_size, "Unknown browse node");
@@ -1482,12 +1851,17 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
 }
 
 static int plex_search(void *ctx_in, const char *query, const ZZPlayItemSink *sink,
-                      char *err, uint32_t err_size)
+                       char *err, uint32_t err_size)
 {
   PlexContext *ctx = (PlexContext *)ctx_in;
+  static const int group_types[3] = {8, 9, 10};
+  static const char *const group_titles[3] = {"Artists", "Albums", "Tracks"};
+  static const int flat_types[3] = {10, 9, 8};
   char esc_query[256];
   uint32_t esc_len;
-  static const int types[3] = {10, 9, 8};
+  uint32_t counts[3];
+  uint32_t s;
+  int t;
 
   if (!ctx || !query || !sink) return 0;
 
@@ -1504,18 +1878,70 @@ static int plex_search(void *ctx_in, const char *query, const ZZPlayItemSink *si
     return 1;
   }
 
-  for (uint32_t s = 0; s < ctx->section_count; s++) {
-    const char *sec_key = ctx->sections[s].key;
-    for (int t = 0; t < 3; t++) {
-      char path[256];
-      int stopped = 0;
+  /* The group folders carry the query in their id; fall back to one mixed
+   * list when it does not fit. */
+  if (esc_len + 7U > ZZPLAY_PROVIDER_TEXT_MAX) {
+    for (s = 0U; s < ctx->section_count; s++) {
+      for (t = 0; t < 3; t++) {
+        char path[320];
+        int stopped = 0;
+
+        ctx->host->format(path, sizeof(path),
+                          "/library/sections/%s/search?type=%d&query=%s",
+                          ctx->sections[s].key, flat_types[t], esc_query);
+        if (!plex_list_items(ctx, path, 0, 0, 0, sink, 0,
+                             &stopped, err, err_size)) {
+          return 0;
+        }
+        if (stopped) {
+          return 1;
+        }
+      }
+    }
+    return 1;
+  }
+
+  plex_memset(counts, 0, sizeof(counts));
+  for (s = 0U; s < ctx->section_count; s++) {
+    for (t = 0; t < 3; t++) {
+      char path[320];
+      uint32_t n = 0U;
+
       ctx->host->format(path, sizeof(path),
                         "/library/sections/%s/search?type=%d&query=%s",
-                        sec_key, types[t], esc_query);
-      if (!plex_fetch_items(ctx, path, 0, 0, 0, sink, 1, 0, &stopped, err, err_size)) {
+                        ctx->sections[s].key, group_types[t], esc_query);
+      if (!plex_count_items(ctx, path, &n, err, err_size)) {
         return 0;
       }
-      if (stopped) {
+      counts[t] += n;
+    }
+  }
+
+  {
+    uint32_t groups = 0U;
+
+    for (t = 0; t < 3; t++) {
+      if (counts[t] > 0U) groups++;
+    }
+    if (sink->total) {
+      sink->total(sink->user, groups);
+    }
+    for (t = 0; t < 3; t++) {
+      ZZPlayProviderItem it;
+      char id[96];
+      char title[96];
+
+      if (counts[t] == 0U) continue;
+      ctx->host->format(id, sizeof(id), "sq:%d:%s", group_types[t], esc_query);
+      ctx->host->format(title, sizeof(title), "%s (%lu)",
+                        group_titles[t], (unsigned long)counts[t]);
+      plex_memset(&it, 0, sizeof(it));
+      it.id = id;
+      it.title = title;
+      it.subtitle = "";
+      it.kind = ZZPLAY_ITEM_FOLDER;
+      it.playable = 0;
+      if (sink->item(sink->user, &it) != 0) {
         return 1;
       }
     }

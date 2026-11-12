@@ -153,6 +153,7 @@ static int g_mock_http_identity_fails = 0;
 static int g_mock_two_servers = 0;
 static uint32_t g_total_requests = 0;
 static uint32_t g_headers_missing_count = 0;
+static uint32_t g_missing_exclude_count = 0;
 static char g_last_request_url[512];
 static char g_last_request_headers[512];
 static char g_last_decision_url[1024];
@@ -304,20 +305,72 @@ static int fake_http_get(const ZZPlayHost *host, const char *url,
     g_last_decision_url[sizeof(g_last_decision_url) - 1] = '\0';
     return load_fixture("decision.xml", data, user);
   }
-  if (strstr(url, "/library/sections/3/search") || strstr(url, "/library/sections/5/search")) {
-    if (strstr(url, "type=10")) {
-      return load_fixture("search-tracks.xml", data, user);
-    } else {
+  /* Every list request must ask Plex to leave summaries out. */
+  {
+    int is_list = (strstr(url, "/all?") != NULL) ||
+                  (strstr(url, "/children") != NULL) ||
+                  (strstr(url, "/items") != NULL) ||
+                  (strstr(url, "/search?") != NULL) ||
+                  (strstr(url, "/firstCharacter") != NULL) ||
+                  (strstr(url, "/genre?") != NULL);
+    if (is_list && !strstr(url, "excludeFields=summary")) {
+      g_missing_exclude_count++;
+    }
+  }
+
+  if (strstr(url, "/search?")) {
+    int count_only = headers && strstr(headers, "X-Plex-Container-Size: 0");
+    int is_paris = strstr(url, "query=paris") != NULL;
+
+    if (count_only) {
+      char buf[128];
+      int n = 0;
+      if (strstr(url, "type=9")) {
+        n = is_paris ? 2 : 0;
+      } else if (strstr(url, "type=10")) {
+        n = is_paris ? 21 : 1;
+      }
+      snprintf(buf, sizeof(buf),
+               "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+               "<MediaContainer size=\"0\" totalSize=\"%d\"/>", n);
+      if (data) data(user, (const uint8_t *)buf, (uint32_t)strlen(buf));
+      return 1;
+    }
+    if (strstr(url, "type=9")) {
+      return load_fixture("search-album-results.xml", data, user);
+    }
+    if (strstr(url, "type=8")) {
       const char empty[] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><MediaContainer size=\"0\"/>";
       if (data) data(user, (const uint8_t *)empty, (uint32_t)strlen(empty));
       return 1;
     }
+    if (strstr(url, "/library/sections/5/")) {
+      return load_fixture("search-tracks-5.xml", data, user);
+    }
+    return load_fixture("search-tracks.xml", data, user);
   }
-  if (strstr(url, "/library/sections/3/all?type=8")) {
+  if (strstr(url, "/firstCharacter?")) {
+    return load_fixture(strstr(url, "type=9") ? "firstchar-albums.xml"
+                                              : "firstchar-artists.xml",
+                        data, user);
+  }
+  if (strstr(url, "/firstCharacter/")) {
+    if (strstr(url, "type=9")) {
+      return load_fixture("letter-a-albums.xml", data, user);
+    }
     if (headers && strstr(headers, "X-Plex-Container-Start: 2")) {
       return load_fixture("artists-page2.xml", data, user);
     }
-    return load_fixture("artists-page1.xml", data, user);
+    return load_fixture("letter-a-artists.xml", data, user);
+  }
+  if (strstr(url, "/genre?")) {
+    return load_fixture("genres.xml", data, user);
+  }
+  if (strstr(url, "genre=9001")) {
+    return load_fixture("genre-artists.xml", data, user);
+  }
+  if (strstr(url, "type=9&sort=addedAt:desc")) {
+    return load_fixture("recent-albums.xml", data, user);
   }
   if (strstr(url, "/library/sections")) {
     if (g_mock_single_section) {
@@ -966,7 +1019,7 @@ static void test_sections_listing(const ZZPlayProvider *p)
 
   /* sections.xml has 1 movie (key 1), 2 artist sections (key 3 "Music", key 5 "Audiobooks & Talk")
    * Top level should output:
-   * 0: Audio Playlists folder
+   * 0: Playlists folder
    * 1: Music (sec:3)
    * 2: Audiobooks & Talk (sec:5)
    * Movie section must be filtered out!
@@ -974,7 +1027,7 @@ static void test_sections_listing(const ZZPlayProvider *p)
   assert(col.count == 3);
   assert(col.total == 3);
   assert(strcmp(col.items[0].id, "playlists") == 0);
-  assert(strcmp(col.items[0].title, "Audio Playlists") == 0);
+  assert(strcmp(col.items[0].title, "Playlists") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
 
   assert(strcmp(col.items[1].id, "sec:3") == 0);
@@ -985,10 +1038,29 @@ static void test_sections_listing(const ZZPlayProvider *p)
   assert(strcmp(col.items[2].title, "Audiobooks & Talk") == 0);
   assert(col.items[2].kind == ZZPLAY_ITEM_FOLDER);
 
+  /* A library folder opens the four views; Playlists stays at the top level */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "sec:3", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 4);
+  assert(col.total == 4);
+  assert(strcmp(col.items[0].id, "lib:3:art") == 0);
+  assert(strcmp(col.items[0].title, "Artists") == 0);
+  assert(strcmp(col.items[1].id, "lib:3:alb") == 0);
+  assert(strcmp(col.items[1].title, "Albums") == 0);
+  assert(strcmp(col.items[2].id, "lib:3:gen") == 0);
+  assert(strcmp(col.items[2].title, "Genres") == 0);
+  assert(strcmp(col.items[3].id, "lib:3:new") == 0);
+  assert(strcmp(col.items[3].title, "Recently added") == 0);
+  for (int i = 0; i < 4; i++) {
+    assert(col.items[i].kind == ZZPLAY_ITEM_FOLDER);
+    assert(col.items[i].playable == 0);
+  }
+
   p->close(ctx);
 }
 
-static void test_single_section_flattening(const ZZPlayProvider *p)
+static void test_single_library_top(const ZZPlayProvider *p)
 {
   char err[128];
   ItemCollector col;
@@ -1008,25 +1080,30 @@ static void test_single_section_flattening(const ZZPlayProvider *p)
   ok = p->list(ctx, "", 0, 50, &col.sink, err, sizeof(err));
   assert(ok == 1);
 
-  /* sections-single.xml has 1 movie section and exactly 1 music section ("Music", key 3).
-   * Artists should appear directly at top level after the playlists folder!
-   * Item 0: Audio Playlists
-   * Item 1: Alpha Band (art:101)
-   * Item 2: Café & Co (art:102)
-   * Total reported should be totalSize + 1 = 3 + 1 = 4.
-   */
-  assert(col.count >= 3);
-  assert(col.total == 4);
-  assert(strcmp(col.items[0].id, "playlists") == 0);
-  assert(strcmp(col.items[1].id, "art:101") == 0);
-  assert(strcmp(col.items[1].title, "Alpha Band") == 0);
-  assert(col.items[1].kind == ZZPLAY_ITEM_FOLDER);
+  /* sections-single.xml has 1 movie section and exactly 1 music section
+   * ("Music", key 3), so the top level holds the library's views directly:
+   * Artists, Albums, Genres, Recently added, Playlists. */
+  assert(col.count == 5);
+  assert(col.total == 5);
+  assert(strcmp(col.items[0].id, "lib:3:art") == 0);
+  assert(strcmp(col.items[0].title, "Artists") == 0);
+  assert(strcmp(col.items[1].id, "lib:3:alb") == 0);
+  assert(strcmp(col.items[1].title, "Albums") == 0);
+  assert(strcmp(col.items[2].id, "lib:3:gen") == 0);
+  assert(strcmp(col.items[2].title, "Genres") == 0);
+  assert(strcmp(col.items[3].id, "lib:3:new") == 0);
+  assert(strcmp(col.items[3].title, "Recently added") == 0);
+  assert(strcmp(col.items[4].id, "playlists") == 0);
+  assert(strcmp(col.items[4].title, "Playlists") == 0);
+  for (int i = 0; i < 5; i++) {
+    assert(col.items[i].kind == ZZPLAY_ITEM_FOLDER);
+  }
 
   p->close(ctx);
   g_mock_single_section = 0;
 }
 
-static void test_artist_paging(const ZZPlayProvider *p)
+static void test_letter_folders(const ZZPlayProvider *p)
 {
   char err[128];
   ItemCollector col;
@@ -1041,21 +1118,143 @@ static void test_artist_paging(const ZZPlayProvider *p)
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
 
-  /* Request page two: start = 2, count = 2 */
+  /* Artists opens to letter folders with counts, "#" first */
   collector_init(&col, 0);
-  ok = p->list(ctx, "sec:3", 2, 2, &col.sink, err, sizeof(err));
+  ok = p->list(ctx, "lib:3:art", 0, 50, &col.sink, err, sizeof(err));
   assert(ok == 1);
+  assert(col.count == 3);
+  assert(col.total == 3);
+  assert(strcmp(col.items[0].id, "ltr:3:8:%23") == 0);
+  assert(strcmp(col.items[0].title, "# (3)") == 0);
+  assert(strcmp(col.items[1].id, "ltr:3:8:A") == 0);
+  assert(strcmp(col.items[1].title, "A (3)") == 0);
+  assert(strcmp(col.items[2].id, "ltr:3:8:B") == 0);
+  assert(strcmp(col.items[2].title, "B (1)") == 0);
+  assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(strstr(g_last_request_url, "/firstCharacter?type=8") != NULL);
 
-  /* Verify start header was sent */
+  /* A letter opens its artists in Plex's order, paged */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "ltr:3:8:A", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(col.total == 3); /* letter-a-artists.xml: totalSize 3, 2 on the page */
+  assert(strcmp(col.items[0].id, "art:101") == 0);
+  assert(strcmp(col.items[0].title, "Alpha Band") == 0);
+  assert(strcmp(col.items[1].id, "art:102") == 0);
+  assert(strcmp(col.items[1].title, "Caf\xc3\xa9 & Co") == 0);
+  assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(strstr(g_last_request_url, "/firstCharacter/A?type=8") != NULL);
+
+  /* Request page two of a letter: start = 2, count = 2 */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "ltr:3:8:A", 2, 2, &col.sink, err, sizeof(err));
+  assert(ok == 1);
   assert(strstr(g_last_request_headers, "X-Plex-Container-Start: 2\r\n") != NULL);
   assert(strstr(g_last_request_headers, "X-Plex-Container-Size: 2\r\n") != NULL);
-
-  /* artists-page2.xml has totalSize="3", 1 directory "Zeta" (ratingKey 103) */
   assert(col.total == 3);
   assert(col.count == 1);
   assert(strcmp(col.items[0].id, "art:103") == 0);
   assert(strcmp(col.items[0].title, "Zeta") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+
+  /* Album letters and an album letter's rows, with the year in the subtitle */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "lib:3:alb", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(strcmp(col.items[0].id, "ltr:3:9:%23") == 0);
+  assert(strcmp(col.items[0].title, "# (4)") == 0);
+  assert(strcmp(col.items[1].id, "ltr:3:9:A") == 0);
+  assert(strcmp(col.items[1].title, "A (2)") == 0);
+
+  collector_init(&col, 0);
+  ok = p->list(ctx, "ltr:3:9:A", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(col.total == 2);
+  assert(strcmp(col.items[0].id, "alb:203") == 0);
+  assert(strcmp(col.items[0].title, "Aria") == 0);
+  assert(strcmp(col.items[0].subtitle, "Alpha Band - 1981") == 0);
+  assert(strcmp(col.items[1].id, "alb:204") == 0);
+  assert(strcmp(col.items[1].title, "Ave Maria") == 0);
+  assert(strcmp(col.items[1].subtitle, "Caf\xc3\xa9 & Co") == 0);
+
+  p->close(ctx);
+}
+
+static void test_genres(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+
+  mock_prefs_clear();
+  mock_pref_set("SERVER", TEST_SERVER);
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  /* Genres opens the genre list, without counts */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "lib:3:gen", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 3);
+  assert(col.total == 3);
+  assert(strcmp(col.items[0].id, "gen:3:9001") == 0);
+  assert(strcmp(col.items[0].title, "Jazz") == 0);
+  assert(strcmp(col.items[1].id, "gen:3:9002") == 0);
+  assert(strcmp(col.items[1].title, "Blues") == 0);
+  assert(strcmp(col.items[2].id, "gen:3:9003") == 0);
+  assert(strcmp(col.items[2].title, "Ambient") == 0);
+  assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(strstr(g_last_request_url, "/genre?type=8") != NULL);
+
+  /* A genre opens the artists in it */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "gen:3:9001", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(col.total == 2);
+  assert(strcmp(col.items[0].id, "art:104") == 0);
+  assert(strcmp(col.items[0].title, "Blue Note Trio") == 0);
+  assert(strcmp(col.items[1].id, "art:105") == 0);
+  assert(strcmp(col.items[1].title, "Delta Five") == 0);
+  assert(strstr(g_last_request_url, "type=8&genre=9001") != NULL);
+
+  p->close(ctx);
+}
+
+static void test_recently_added(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+
+  mock_prefs_clear();
+  mock_pref_set("SERVER", TEST_SERVER);
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  collector_init(&col, 0);
+  ok = p->list(ctx, "lib:3:new", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(col.total == 2);
+  assert(strcmp(col.items[0].id, "alb:210") == 0);
+  assert(strcmp(col.items[0].title, "Night Works") == 0);
+  assert(strcmp(col.items[0].subtitle, "Delta Five - 2024") == 0);
+  assert(strcmp(col.items[1].id, "alb:211") == 0);
+  assert(strcmp(col.items[1].title, "Old Songs") == 0);
+  assert(strcmp(col.items[1].subtitle, "1999") == 0);
+  assert(strstr(g_last_request_url, "type=9&sort=addedAt:desc") != NULL);
 
   p->close(ctx);
 }
@@ -1082,13 +1281,13 @@ static void test_album_and_track_rows(const ZZPlayProvider *p)
   assert(col.count == 2);
   assert(strcmp(col.items[0].id, "alb:201") == 0);
   assert(strcmp(col.items[0].title, "First Light") == 0);
-  assert(strcmp(col.items[0].subtitle, "1975") == 0);
+  assert(strcmp(col.items[0].subtitle, "Alpha Band - 1975") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
   assert(col.items[0].playable == 0);
 
   assert(strcmp(col.items[1].id, "alb:202") == 0);
   assert(strcmp(col.items[1].title, "Second Wind") == 0);
-  assert(strcmp(col.items[1].subtitle, "1978") == 0);
+  assert(strcmp(col.items[1].subtitle, "Alpha Band - 1978") == 0);
 
   /* 2. Album lists tracks */
   collector_init(&col, 0);
@@ -1123,7 +1322,158 @@ static void test_album_and_track_rows(const ZZPlayProvider *p)
   p->close(ctx);
 }
 
-static void test_search(const ZZPlayProvider *p)
+static void test_search_grouped(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+
+  mock_prefs_clear();
+  mock_pref_set("SERVER", TEST_SERVER);
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+  g_mock_single_section = 1;
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  /* "paris": artists 0 (left out), albums 2, tracks 21 */
+  collector_init(&col, 0);
+  ok = p->search(ctx, "paris", &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(col.total == 2);
+  assert(strcmp(col.items[0].id, "sq:9:paris") == 0);
+  assert(strcmp(col.items[0].title, "Albums (2)") == 0);
+  assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(strcmp(col.items[1].id, "sq:10:paris") == 0);
+  assert(strcmp(col.items[1].title, "Tracks (21)") == 0);
+  assert(col.items[1].kind == ZZPLAY_ITEM_FOLDER);
+
+  /* The album group opens its results, with the year in the subtitle */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "sq:9:paris", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(col.total == 2);
+  assert(strcmp(col.items[0].id, "alb:401") == 0);
+  assert(strcmp(col.items[0].title, "Paris Concert") == 0);
+  assert(strcmp(col.items[0].subtitle, "Blue Note Trio - 1990") == 0);
+  assert(strcmp(col.items[1].id, "alb:402") == 0);
+  assert(strcmp(col.items[1].subtitle, "Alpha Band - 2001") == 0);
+  assert(strstr(g_last_request_url, "/search?type=9&query=paris") != NULL);
+
+  /* "Lossless": only the track group has hits */
+  collector_init(&col, 0);
+  ok = p->search(ctx, "Lossless", &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 1);
+  assert(col.total == 1);
+  assert(strcmp(col.items[0].id, "sq:10:Lossless") == 0);
+  assert(strcmp(col.items[0].title, "Tracks (1)") == 0);
+
+  /* The track group opens its results */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "sq:10:Lossless", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 1);
+  assert(col.total == 1);
+  assert(strcmp(col.items[0].id, "302") == 0);
+  assert(strcmp(col.items[0].title, "Lossless") == 0);
+  assert(strcmp(col.items[0].subtitle, "Alpha Band - First Light") == 0);
+  assert(col.items[0].duration_ms == 245500);
+  assert(col.items[0].kind == ZZPLAY_ITEM_TRACK);
+
+  p->close(ctx);
+  g_mock_single_section = 0;
+}
+
+static void test_search_group_across_libraries(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+
+  mock_prefs_clear();
+  mock_pref_set("SERVER", TEST_SERVER);
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+  g_mock_single_section = 0; /* sections.xml: music sections 3 and 5 */
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  /* Each library has one hit, so the group counts both */
+  collector_init(&col, 0);
+  ok = p->search(ctx, "Lossless", &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 1);
+  assert(col.total == 1);
+  assert(strcmp(col.items[0].id, "sq:10:Lossless") == 0);
+  assert(strcmp(col.items[0].title, "Tracks (2)") == 0);
+
+  /* Opening it walks both libraries */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "sq:10:Lossless", 0, 100, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(col.total == 2);
+  assert(strcmp(col.items[0].id, "302") == 0);
+  assert(strcmp(col.items[1].id, "309") == 0);
+  assert(strcmp(col.items[1].title, "Lossless Too") == 0);
+
+  /* A window inside the second library only */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "sq:10:Lossless", 1, 1, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 1);
+  assert(col.total == 2);
+  assert(strcmp(col.items[0].id, "309") == 0);
+  assert(strstr(g_last_request_url, "/library/sections/5/search?type=10") != NULL);
+  assert(strstr(g_last_request_headers, "X-Plex-Container-Start: 0\r\n") != NULL);
+  assert(strstr(g_last_request_headers, "X-Plex-Container-Size: 1\r\n") != NULL);
+
+  p->close(ctx);
+}
+
+static void test_search_flat_when_query_too_long(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+  char query[100];
+
+  memset(query, 'L', sizeof(query));
+  query[sizeof(query) - 1] = '\0';
+
+  mock_prefs_clear();
+  mock_pref_set("SERVER", TEST_SERVER);
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+  g_mock_single_section = 1;
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  /* The query does not fit in a folder id, so search stays one mixed list */
+  collector_init(&col, 0);
+  ok = p->search(ctx, query, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 3);
+  assert(strcmp(col.items[0].id, "302") == 0);
+  assert(col.items[0].kind == ZZPLAY_ITEM_TRACK);
+  assert(strcmp(col.items[1].id, "alb:401") == 0);
+  assert(col.items[1].kind == ZZPLAY_ITEM_FOLDER);
+  assert(strcmp(col.items[2].id, "alb:402") == 0);
+
+  p->close(ctx);
+  g_mock_single_section = 0;
+}
+
+static void test_list_requests_exclude_summaries(const ZZPlayProvider *p)
 {
   char err[128];
   ItemCollector col;
@@ -1139,16 +1489,11 @@ static void test_search(const ZZPlayProvider *p)
   assert(ctx != NULL);
 
   collector_init(&col, 0);
-  ok = p->search(ctx, "Lossless", &col.sink, err, sizeof(err));
+  ok = p->list(ctx, "ltr:3:8:A", 0, 50, &col.sink, err, sizeof(err));
   assert(ok == 1);
+  assert(strstr(g_last_request_url, "excludeFields=summary") != NULL);
 
-  assert(col.count >= 1);
-  assert(strcmp(col.items[0].id, "302") == 0);
-  assert(strcmp(col.items[0].title, "Lossless") == 0);
-  assert(strcmp(col.items[0].subtitle, "Alpha Band - First Light") == 0);
-  assert(col.items[0].duration_ms == 245500);
-  assert(col.items[0].kind == ZZPLAY_ITEM_TRACK);
-
+  assert(g_missing_exclude_count == 0);
   p->close(ctx);
 }
 
@@ -1237,7 +1582,7 @@ static void test_error_401(const ZZPlayProvider *p)
 
   g_mock_status = 401;
   collector_init(&col, 0);
-  ok = p->list(ctx, "sec:3", 0, 50, &col.sink, err, sizeof(err));
+  ok = p->list(ctx, "playlists", 0, 50, &col.sink, err, sizeof(err));
   assert(ok == 0);
   assert(strcmp(err, "Plex rejected the token") == 0);
 
@@ -1290,10 +1635,15 @@ int main(void)
   test_resources_two_servers(p);
   test_older_host_fails_signin_gracefully(p);
   test_sections_listing(p);
-  test_single_section_flattening(p);
-  test_artist_paging(p);
+  test_single_library_top(p);
+  test_letter_folders(p);
+  test_genres(p);
+  test_recently_added(p);
   test_album_and_track_rows(p);
-  test_search(p);
+  test_search_grouped(p);
+  test_search_group_across_libraries(p);
+  test_search_flat_when_query_too_long(p);
+  test_list_requests_exclude_summaries(p);
   test_resolve_flac(p);
   test_resolve_aac_transcode(p);
   test_error_401(p);
