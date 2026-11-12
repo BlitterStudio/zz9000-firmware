@@ -1108,8 +1108,16 @@ void zzplay_browse_poll(void)
           update_status_text(reload_note);
           reload_note = NULL;
         } else if (browse_model.item_count > 0U) {
-          (void)snprintf(status_buf, sizeof(status_buf), "%lu items",
-                         (unsigned long)browse_model.item_count);
+          if (browse_model.has_total &&
+              browse_model.total > browse_model.item_count) {
+            (void)snprintf(status_buf, sizeof(status_buf),
+                           "%lu of %lu items",
+                           (unsigned long)browse_model.item_count,
+                           (unsigned long)browse_model.total);
+          } else {
+            (void)snprintf(status_buf, sizeof(status_buf), "%lu items",
+                           (unsigned long)browse_model.item_count);
+          }
           update_status_text(status_buf);
         } else {
           update_status_text("");

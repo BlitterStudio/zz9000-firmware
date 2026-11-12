@@ -133,6 +133,9 @@ typedef struct ZZPlayBrowseModel {
   uint32_t scroll;
 
   int32_t saved_selection;   /* for restoring selection across reload */
+  /* The request whose partial rows are being shown (see apply_reply). */
+  uint32_t rows_generation;
+  int rows_open;
   /* Navigation stack */
   ZZPlayBrowseFrame stack[ZZPLAY_BROWSE_STACK_MAX];
   uint32_t stack_depth;

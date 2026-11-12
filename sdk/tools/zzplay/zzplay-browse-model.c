@@ -723,6 +723,50 @@ void zzplay_browse_model_stop(ZZPlayBrowseModel *model)
   copy_string(model->status_message, sizeof(model->status_message), "Stopped");
 }
 
+/* Put a reply's rows in place. A request's rows replace whatever was shown
+ * from its `start` on, once: by its first partial group, or by the final
+ * reply, which carries the whole page again. Later partial groups of the
+ * same request append. */
+static void model_take_rows(ZZPlayBrowseModel *model,
+                            const ZZPlayBrowseReply *reply)
+{
+  uint32_t keep;
+  uint32_t new_count;
+  ZZPlayBrowseItem *new_items;
+
+  if (!reply->is_partial || !model->rows_open ||
+      model->rows_generation != reply->generation) {
+    keep = reply->start < model->item_count ? reply->start : model->item_count;
+  } else {
+    keep = model->item_count;
+  }
+  model->rows_open = reply->is_partial;
+  model->rows_generation = reply->generation;
+
+  new_count = keep + reply->item_count;
+  new_items = NULL;
+  if (new_count > 0U) {
+    new_items = (ZZPlayBrowseItem *)zzplay_alloc(
+        (size_t)new_count * sizeof(ZZPlayBrowseItem));
+    if (new_items == NULL) {
+      return;
+    }
+    if (keep > 0U) {
+      memcpy(new_items, model->items, (size_t)keep * sizeof(ZZPlayBrowseItem));
+    }
+    if (reply->item_count > 0U) {
+      memcpy(&new_items[keep], reply->items,
+             (size_t)reply->item_count * sizeof(ZZPlayBrowseItem));
+    }
+  }
+  if (model->items) {
+    zzplay_free(model->items);
+  }
+  model->items = new_items;
+  model->item_count = new_count;
+  model->item_capacity = new_count;
+}
+
 int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
                                     const ZZPlayBrowseReply *reply)
 {
@@ -747,45 +791,7 @@ int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
   model->status_message[0] = '\0';
 
   if (reply->kind == ZZPLAY_BROWSE_REQ_LIST) {
-    if (reply->start == 0U) {
-      /* First rows of a fresh list (or a Reload) replace what is shown */
-      if (model->items) {
-        zzplay_free(model->items);
-        model->items = NULL;
-      }
-      model->item_count = 0U;
-      model->item_capacity = 0U;
-
-      if (reply->item_count > 0U) {
-        size_t bytes = (size_t)reply->item_count * sizeof(ZZPlayBrowseItem);
-        model->items = (ZZPlayBrowseItem *)zzplay_alloc(bytes);
-        if (model->items) {
-          memcpy(model->items, reply->items, bytes);
-          model->item_count = reply->item_count;
-          model->item_capacity = reply->item_count;
-        }
-      }
-    } else {
-      /* Append page or later rows */
-      if (reply->item_count > 0U) {
-        uint32_t new_count = model->item_count + reply->item_count;
-        size_t new_bytes = (size_t)new_count * sizeof(ZZPlayBrowseItem);
-        ZZPlayBrowseItem *new_items = (ZZPlayBrowseItem *)zzplay_alloc(new_bytes);
-
-        if (new_items) {
-          if (model->items && model->item_count > 0U) {
-            memcpy(new_items, model->items,
-                   (size_t)model->item_count * sizeof(ZZPlayBrowseItem));
-            zzplay_free(model->items);
-          }
-          memcpy(&new_items[model->item_count], reply->items,
-                 (size_t)reply->item_count * sizeof(ZZPlayBrowseItem));
-          model->items = new_items;
-          model->item_count = new_count;
-          model->item_capacity = new_count;
-        }
-      }
-    }
+    model_take_rows(model, reply);
 
     if (reply->has_total) {
       model->total = reply->total;
@@ -815,47 +821,14 @@ int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
   }
 
   if (reply->kind == ZZPLAY_BROWSE_REQ_SEARCH) {
+    model_take_rows(model, reply);
     if (!reply->is_partial) {
-      if (model->items) {
-        zzplay_free(model->items);
-        model->items = NULL;
-      }
-      model->item_count = 0U;
-      model->item_capacity = 0U;
-
-      if (reply->item_count > 0U) {
-        size_t bytes = (size_t)reply->item_count * sizeof(ZZPlayBrowseItem);
-        model->items = (ZZPlayBrowseItem *)zzplay_alloc(bytes);
-        if (model->items) {
-          memcpy(model->items, reply->items, bytes);
-          model->item_count = reply->item_count;
-          model->item_capacity = reply->item_count;
-        }
-      }
       model->has_total = reply->has_total;
       model->total = reply->total;
       model->has_more = 0;
       cache_put(model, model->services[model->current_service].scheme, 1,
                 model->search_query, 0U, model->items, model->item_count,
                 model->selection, model->scroll);
-    } else if (reply->item_count > 0U) {
-      /* Search rows arrive in groups too; keep the rows already shown. */
-      uint32_t new_count = model->item_count + reply->item_count;
-      size_t new_bytes = (size_t)new_count * sizeof(ZZPlayBrowseItem);
-      ZZPlayBrowseItem *new_items = (ZZPlayBrowseItem *)zzplay_alloc(new_bytes);
-
-      if (new_items) {
-        if (model->items && model->item_count > 0U) {
-          memcpy(new_items, model->items,
-                 (size_t)model->item_count * sizeof(ZZPlayBrowseItem));
-          zzplay_free(model->items);
-        }
-        memcpy(&new_items[model->item_count], reply->items,
-               (size_t)reply->item_count * sizeof(ZZPlayBrowseItem));
-        model->items = new_items;
-        model->item_count = new_count;
-        model->item_capacity = new_count;
-      }
     }
     return 1;
   }

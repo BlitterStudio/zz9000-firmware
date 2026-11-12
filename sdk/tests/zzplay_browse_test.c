@@ -652,40 +652,70 @@ static int test_reload_sends_request_and_replaces_copy(void)
   return 0;
 }
 
+/* Rows numbered from `first`, as the worker groups them for a request. */
+static ZZPlayBrowseReply make_rows(uint32_t gen, uint32_t start,
+                                   ZZPlayBrowseItem *items, uint32_t first,
+                                   uint32_t n, int partial)
+{
+  ZZPlayBrowseReply r = make_list_reply(gen, start, items, n, partial);
+  uint32_t i;
+
+  for (i = 0U; i < n; i++) {
+    snprintf(items[i].title, sizeof(items[i].title), "Row %lu",
+             (unsigned long)(first + i));
+  }
+  return r;
+}
+
+/* The worker sends every group of a request with the request's start and
+ * then a final reply carrying the whole page again. */
 static int test_partial_replies_append_and_stale_dropped(void)
 {
   ZZPlayBrowseModel model;
   ZZPlayBrowseRequest req;
   ZZPlayBrowseReply reply;
-  ZZPlayBrowseItem items[4];
+  ZZPlayBrowseItem items[6];
 
   zzplay_browse_model_init(&model);
   assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
   assert(zzplay_browse_model_select_service(&model, 0U, &req) == 1);
 
-  /* First group of rows */
-  reply = make_list_reply(req.generation, 0U, items, 2U, 1);
+  /* First group, then a second group of the same request: appended. */
+  reply = make_rows(req.generation, 0U, items, 0U, 2U, 1);
   assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
   assert(model.item_count == 2U);
   assert(model.busy == 1);
-
-  /* Second group appends in order */
-  reply = make_list_reply(req.generation, 2U, items, 2U, 1);
+  reply = make_rows(req.generation, 0U, items, 2U, 2U, 1);
   assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
   assert(model.item_count == 4U);
-  assert(strcmp(model.items[2].title, "Item 2_0") == 0);
-  assert(strcmp(model.items[3].title, "Item 2_1") == 0);
+  assert(strcmp(model.items[0].title, "Row 0") == 0);
+  assert(strcmp(model.items[3].title, "Row 3") == 0);
 
   /* A stale partial (older generation) is dropped */
-  reply = make_list_reply(req.generation - 1U, 0U, items, 1U, 1);
+  reply = make_rows(req.generation - 1U, 0U, items, 0U, 1U, 1);
   assert(zzplay_browse_model_apply_reply(&model, &reply) == 0);
   assert(model.item_count == 4U);
 
-  /* The final reply ends the busy state */
-  reply = make_list_reply(req.generation, 4U, items, 0U, 0);
+  /* The final reply carries the whole page: the rows are not doubled. */
+  reply = make_rows(req.generation, 0U, items, 0U, 5U, 0);
+  reply.has_total = 1;
+  reply.total = 8U;
   assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
   assert(model.busy == 0);
-  assert(model.item_count == 4U);
+  assert(model.item_count == 5U);
+  assert(strcmp(model.items[4].title, "Row 4") == 0);
+
+  /* Page two: its groups follow the first page, its final reply
+   * replaces only what its groups added. */
+  assert(zzplay_browse_model_request_more(&model, &req) == 1);
+  reply = make_rows(req.generation, 5U, items, 5U, 2U, 1);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.item_count == 7U);
+  reply = make_rows(req.generation, 5U, items, 5U, 3U, 0);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.item_count == 8U);
+  assert(strcmp(model.items[0].title, "Row 0") == 0);
+  assert(strcmp(model.items[7].title, "Row 7") == 0);
 
   zzplay_browse_model_free(&model);
   return 0;
