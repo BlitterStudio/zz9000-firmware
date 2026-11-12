@@ -25,11 +25,10 @@ concurrency:
   group: m68k-toolchain-update
 
 env:
-  # The image tag to follow. amigadev/crosstools renames it to
-  # m68k-amigaos-16 when GCC 16 leaves release candidates: change it here
-  # then, and the next run moves every pin to the new tag. A manual run can
+  # The image tag to follow. If amigadev/crosstools renames it again, change
+  # it here and the next run moves every pin to the new tag. A manual run can
   # try another tag first (input `image`).
-  TOOLCHAIN_IMAGE: ${{ inputs.image || 'amigadev/crosstools:m68k-amigaos-gcc10' }}
+  TOOLCHAIN_IMAGE: ${{ inputs.image || 'amigadev/crosstools:m68k-amigaos' }}
   BRANCH: build/m68k-toolchain
 
 jobs:

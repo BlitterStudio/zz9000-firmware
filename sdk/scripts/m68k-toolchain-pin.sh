@@ -14,7 +14,7 @@
 # .github/workflows/m68k-toolchain.yml uses it to follow the tag.
 set -eu
 
-pattern='amigadev/crosstools:m68k-amigaos-[A-Za-z0-9._-]*@sha256:[0-9a-f]\{64\}'
+pattern='amigadev/crosstools:m68k-amigaos[A-Za-z0-9._-]*@sha256:[0-9a-f]\{64\}'
 cd "$(git rev-parse --show-toplevel)"
 
 current() {
