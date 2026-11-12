@@ -122,7 +122,9 @@ typedef struct FavouriteEntry {
 } FavouriteEntry;
 
 typedef struct MyStationEntry {
-  uint32_t slot;
+  uint32_t slot;   /* my_<slot> in the prefs; reused after a delete */
+  uint32_t id;     /* "my:<id>": never reused, so old playlist entries
+                      cannot play another station */
   char name[ZZPLAY_PROVIDER_TEXT_MAX];
   char address[ZZPLAY_PROVIDER_URL_MAX];
 } MyStationEntry;
@@ -133,6 +135,8 @@ typedef struct RadioContext {
   FavouriteEntry favs[RADIO_MAX_FAVOURITES];
   uint32_t my_count;
   MyStationEntry my_stations[RADIO_MAX_MY_STATIONS];
+  /* The id the next added station gets (see radio_load_my_stations). */
+  uint32_t my_next_id;
   uint32_t server;
 } RadioContext;
 
@@ -484,7 +488,8 @@ static int radio_is_address(const char *s)
                strncmp(s, "https://", 8U) == 0);
 }
 
-static int radio_my_slot(const char *id, uint32_t *slot)
+/* The number in a "my:<id>" item id. */
+static int radio_my_id(const char *id, uint32_t *out)
 {
   uint32_t n = 0U;
   const char *p;
@@ -493,40 +498,71 @@ static int radio_my_slot(const char *id, uint32_t *slot)
     if (*p < '0' || *p > '9' || n > 999999U) return 0;
     n = n * 10U + (uint32_t)(*p - '0');
   }
-  if (n >= RADIO_MAX_MY_STATIONS) return 0;
-  if (slot) *slot = n;
+  if (out) *out = n;
   return 1;
 }
 
 static int radio_my_index(const RadioContext *rc, const char *id)
 {
-  uint32_t slot;
+  uint32_t wanted;
   uint32_t i;
-  if (!radio_my_slot(id, &slot)) return -1;
+  if (!radio_my_id(id, &wanted)) return -1;
   for (i = 0U; i < rc->my_count; i++) {
-    if (rc->my_stations[i].slot == slot) return (int)i;
+    if (rc->my_stations[i].id == wanted) return (int)i;
   }
   return -1;
 }
 
+/* Ids at or above this were given out by a counter; stations saved
+ * before the counter existed keep their storage slot as their id. */
+#define RADIO_MY_FIRST_ID RADIO_MAX_MY_STATIONS
+
+/* my_<slot> holds "<id>|<name>|<address>", or "<name>|<address>" from
+ * before ids were kept apart from slots. Neither part can hold a '|'. */
 static void radio_load_my_stations(RadioContext *rc)
 {
   const ZZPlayHost *host = rc->host;
   uint32_t slot;
+  char next[16];
+
   rc->my_count = 0U;
+  rc->my_next_id = RADIO_MY_FIRST_ID;
+  if (host->pref_get(host, "my_next", next, sizeof(next))) {
+    uint32_t n = 0U;
+    const char *p;
+    for (p = next; *p >= '0' && *p <= '9' && n < 100000U; p++) {
+      n = n * 10U + (uint32_t)(*p - '0');
+    }
+    if (*p == '\0' && n > rc->my_next_id) rc->my_next_id = n;
+  }
   for (slot = 0U; slot < RADIO_MAX_MY_STATIONS; slot++) {
     char key[32];
+    char *name = radio_my_line;
     char *bar;
+    uint32_t id = slot;
     host->format(key, sizeof(key), "my_%u", slot);
     if (!host->pref_get(host, key, radio_my_line, sizeof(radio_my_line)) ||
         !radio_my_line[0]) continue;
     bar = strchr(radio_my_line, '|');
     if (!bar) continue;
+    if (strchr(bar + 1, '|')) {
+      const char *p;
+      uint32_t n = 0U;
+      for (p = radio_my_line; p < bar && *p >= '0' && *p <= '9' && n < 100000U; p++) {
+        n = n * 10U + (uint32_t)(*p - '0');
+      }
+      if (p != bar || p == radio_my_line) continue;
+      id = n;
+      name = bar + 1;
+      bar = strchr(name, '|');
+    }
     *bar++ = '\0';
-    if (!radio_my_line[0] || !radio_is_address(bar)) continue;
+    if (!name[0] || !radio_is_address(bar)) continue;
     rc->my_stations[rc->my_count].slot = slot;
+    rc->my_stations[rc->my_count].id = id;
+    if (id >= rc->my_next_id) rc->my_next_id = id + 1U;
     radio_copy_text(rc->my_stations[rc->my_count].name,
-                    sizeof(rc->my_stations[0].name), radio_my_line, 1);
+                    sizeof(rc->my_stations[0].name), name, 1);
     radio_copy_text(rc->my_stations[rc->my_count].address,
                     sizeof(rc->my_stations[0].address), bar, 1);
     rc->my_count++;
@@ -538,8 +574,8 @@ static int radio_store_my_station(const RadioContext *rc, uint32_t index)
   char key[32];
   const MyStationEntry *entry = &rc->my_stations[index];
   rc->host->format(key, sizeof(key), "my_%u", entry->slot);
-  rc->host->format(radio_my_value, sizeof(radio_my_value), "%s|%s",
-                   entry->name, entry->address);
+  rc->host->format(radio_my_value, sizeof(radio_my_value), "%u|%s|%s",
+                   entry->id, entry->name, entry->address);
   return rc->host->pref_set(rc->host, key, radio_my_value) != 0;
 }
 
@@ -899,7 +935,7 @@ static int list_my_stations(RadioContext *rc, uint32_t start, uint32_t count,
     ZZPlayProviderItem item;
     char id[RADIO_MY_ID_MAX];
     char subtitle[ZZPLAY_PROVIDER_TEXT_MAX];
-    rc->host->format(id, sizeof(id), "my:%u", rc->my_stations[i].slot);
+    rc->host->format(id, sizeof(id), "my:%u", rc->my_stations[i].id);
     radio_address_host(rc->my_stations[i].address, subtitle, sizeof(subtitle));
     memset(&item, 0, sizeof(item));
     item.id = id;
@@ -1266,13 +1302,26 @@ static int radio_station_form_submit(void *ctx, const char *item_id,
         rc->host->format(err, err_size, "My stations list is full (64 stations)");
       return 0;
     }
+    /* A free storage slot, and an id never given out before: a playlist
+     * entry for a deleted station must not play its replacement. */
     for (slot = 0U; slot < RADIO_MAX_MY_STATIONS; slot++) {
-      char id[RADIO_MY_ID_MAX];
-      rc->host->format(id, sizeof(id), "my:%u", slot);
-      if (radio_my_index(rc, id) < 0) break;
+      uint32_t i;
+      for (i = 0U; i < rc->my_count; i++) {
+        if (rc->my_stations[i].slot == slot) break;
+      }
+      if (i == rc->my_count) break;
     }
     index = (int)rc->my_count;
     rc->my_stations[index].slot = slot;
+    rc->my_stations[index].id = rc->my_next_id;
+    {
+      char next[16];
+      rc->host->format(next, sizeof(next), "%u", rc->my_next_id + 1U);
+      if (!rc->host->pref_set(rc->host, "my_next", next)) {
+        return radio_save_failed(rc->host, err, err_size);
+      }
+      rc->my_next_id++;
+    }
   } else {
     index = radio_my_index(rc, item_id);
     if (index < 0) {
