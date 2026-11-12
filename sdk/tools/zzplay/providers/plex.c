@@ -1378,6 +1378,17 @@ static int plex_list_library_top(PlexContext *ctx, uint32_t start, uint32_t coun
   return 1;
 }
 
+/* Same address, ignoring trailing slashes. */
+static int plex_same_server(const char *a, const char *b)
+{
+  size_t alen = plex_strlen(a);
+  size_t blen = plex_strlen(b);
+
+  while (alen > 0U && a[alen - 1U] == '/') alen--;
+  while (blen > 0U && b[blen - 1U] == '/') blen--;
+  return alen != 0U && alen == blen && plex_strncmp(a, b, alen) == 0;
+}
+
 static void *plex_open(const ZZPlayHost *host, char *err, uint32_t err_size)
 {
   PlexContext *ctx;
@@ -1411,6 +1422,15 @@ static void *plex_open(const ZZPlayHost *host, char *err, uint32_t err_size)
   host->pref_get(host, "TOKEN", ctx->token, (uint32_t)sizeof(ctx->token));
 
   is_plain = (plex_strcasecmp(conn_pref, "plain") == 0);
+
+  /* Sign-in stores SERVER as one of the pair. A Server URL the user has
+   * since changed in Settings wins over both. */
+  if (server_manual[0] != '\0' &&
+      !plex_same_server(server_manual, server_secure) &&
+      !plex_same_server(server_manual, server_plain)) {
+    server_secure[0] = '\0';
+    server_plain[0] = '\0';
+  }
 
   if (is_plain) {
     if (server_plain[0] != '\0') {
@@ -1858,6 +1878,9 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
                         sec, is_album ? 9 : 8);
       plex_memset(&o, 0, sizeof(o));
       o.path = path;
+      o.start = start;
+      o.count = count;
+      o.paged = count > 0;
       o.mode = PLEX_FETCH_LETTERS;
       o.folder_prefix = prefix;
       o.report_total = 1;
@@ -1870,6 +1893,9 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
       ctx->host->format(prefix, sizeof(prefix), "gen:%s:", sec);
       plex_memset(&o, 0, sizeof(o));
       o.path = path;
+      o.start = start;
+      o.count = count;
+      o.paged = count > 0;
       o.mode = PLEX_FETCH_GENRES;
       o.folder_prefix = prefix;
       o.report_total = 1;

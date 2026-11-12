@@ -738,7 +738,8 @@ static void test_connection_selection_and_switching(const ZZPlayProvider *p)
   mock_prefs_clear();
   mock_pref_set("SERVER_SECURE", "https://192-168-1-18.abcdef0123456789.plex.direct:32400");
   mock_pref_set("SERVER_PLAIN", "http://192.168.1.18:32400");
-  mock_pref_set("SERVER", "http://manual.fallback:32400");
+  /* As sign-in leaves it: SERVER is one of the pair. */
+  mock_pref_set("SERVER", "https://192-168-1-18.abcdef0123456789.plex.direct:32400");
   mock_pref_set("TOKEN", TEST_TOKEN);
   g_mock_status = 200;
 
@@ -770,6 +771,26 @@ static void test_connection_selection_and_switching(const ZZPlayProvider *p)
   ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
   assert(ok == 1);
   assert(strncmp(res.url, "https://192-168-1-18.abcdef0123456789.plex.direct:32400/", strlen("https://192-168-1-18.abcdef0123456789.plex.direct:32400/")) == 0);
+  p->close(ctx);
+
+  /* 4. A Server URL edited in Settings wins in both modes */
+  mock_pref_set("SERVER", "http://192.168.1.50:32400/");
+  mock_pref_set("CONNECTION", "secure");
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "http://192.168.1.50:32400/", strlen("http://192.168.1.50:32400/")) == 0);
+  p->close(ctx);
+
+  mock_pref_set("CONNECTION", "plain");
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "http://192.168.1.50:32400/", strlen("http://192.168.1.50:32400/")) == 0);
   p->close(ctx);
 }
 
@@ -1201,6 +1222,13 @@ static void test_genres(const ZZPlayProvider *p)
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
   assert(col.items[0].playable == 0); /* genres are not collections */
   assert(strstr(g_last_request_url, "/genre?type=8") != NULL);
+
+  /* More asks the server for the next window, not the first one again */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "lib:3:gen", 100, 100, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(strstr(g_last_request_headers, "X-Plex-Container-Start: 100\r\n") != NULL);
+  assert(strstr(g_last_request_headers, "X-Plex-Container-Size: 100\r\n") != NULL);
 
   /* A genre opens the artists in it */
   collector_init(&col, 0);
