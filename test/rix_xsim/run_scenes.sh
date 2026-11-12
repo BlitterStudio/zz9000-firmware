@@ -11,7 +11,12 @@ set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd | tr '\\' '/')
 IF=${HERE%/test/rix_xsim}
 MG=${RIX_MINIGL_WORKTREE:-$IF}
-OUT=${1:-$HERE/out/scenes}
+if [ -n "${1:-}" ]; then
+  mkdir -p "$1"
+  OUT=$(CDPATH= cd -- "$1" && pwd | tr '\\' '/')
+else
+  OUT=$HERE/out/scenes
+fi
 LATENCY=${2:-2}
 MATRIX=${3:-all}
 case "$MATRIX" in
@@ -111,23 +116,45 @@ run_fifo_scene() {
   grep -E "^(RESULT|FIFO_PATH|PASS)" "$log" || true
   if [ "$transport" = pl330-early ]; then
     expected="^PASS scene=$scene early TLF rejected"
+  elif [ "$transport" = irq ]; then
+    expected="^PASS scene=$scene fifo irq"
   else
     expected="^FIFO_PATH packets=[0-9]+ words=[0-9]+ streamed exactly"
   fi
   if [ "$status" -ne 0 ] || ! grep -Eq "$expected" "$log" || ! grep -Eq "^PASS scene=$scene" "$log" ||
-     { [ "$transport" != pl330-early ] && [ ! -f "$OUT/${scene}_fifo-$transport.ppm" ]; }; then
+     { [ "$transport" != pl330-early ] && [ "$transport" != irq ] &&
+       [ ! -f "$OUT/${scene}_fifo-$transport.ppm" ]; }; then
     grep -E "Fatal|FATAL|ERROR" "$log" >&2 || true
     echo "$scene fifo-$transport failed (exit $status), see $log" >&2
     exit 1
   fi
 }
 
-SCENES="ef-s1 ef-s2 ef-s3 ef-s4 ef-probe ef-lm ef-stress ef-texenv"
+SCENES="ef-s1 ef-s2 ef-s3 ef-s4 ef-probe ef-lm ef-stress ef-texenv ef-mask ef-blendbe ef-logicbe"
 if [ "$MATRIX" != fifo ]; then
   for scene in $SCENES; do
     run_scene "$scene" "$OUT" mmio
     compare_scene "$scene" "$OUT_WIN/$scene.ppm" mmio
   done
+  # COLOR_BYTE_SWAP preserves the renderer's logical RGB565 values while
+  # storing every pixel in display (big-endian) byte order. ef-lm covers a
+  # blend read/modify/write against the byte-order-invariant white base;
+  # ef-mask (G-only and B-only color masks = byte-granular strobes 10 and
+  # 01), ef-blendbe (ZERO,SRC_COLOR blend against the non-symmetric 0x8410
+  # base) and ef-logicbe (XOR fragment logic op against the same base) are
+  # the directed regressions for the WSTRB pair swap and the read unswap:
+  # with the swap on each must still match its analytic reference and be
+  # byte-identical to its swap-off frame (dump_ppm un-swaps on read).
+  for scene in ef-lm ef-mask ef-blendbe ef-logicbe; do
+    cp "$OUT/$scene.ppm" "$OUT/$scene-noswap.ppm"
+  done
+  for scene in ef-lm ef-mask ef-blendbe ef-logicbe; do
+    run_scene "$scene" "$OUT" rgb565be COLOR_BYTE_SWAP=1
+    compare_scene "$scene" "$OUT_WIN/$scene.ppm" rgb565be
+    cmp "$OUT/$scene-noswap.ppm" "$OUT/$scene.ppm"
+  done
+  run_scene ef-lm-tmu2 "$OUT" tmu2 RASTERIX_TMU_COUNT=2
+  compare_scene ef-lm-tmu2 "$OUT_WIN/ef-lm-tmu2.ppm" tmu2
 
   # Transport coverage beyond plain MMIO-paced submission:
   #  - SHARED=1 routes every renderer read through one in-order response
@@ -188,7 +215,16 @@ if [ "$MATRIX" != stream ]; then
     fi
     run_fifo_scene "$scene" pl330-early
   done
+  # Directed gpu_cmd_fifo interrupt check through the same generated BD:
+  # IER=0 masks ISR.TFPE, with IER.TFPE the line rises when the TX FIFO
+  # drains back to the 1024-word programmable-empty threshold, and the
+  # W1C clears it.  The testbench first enables the engine, then stages a
+  # 3520-word DSE packet of OP_NOP_STREAM words (the parser consumes each
+  # NOP in ~2 cycles), so the occupancy crosses the threshold both ways
+  # quickly without framebuffer traffic.
+  run_fifo_scene ef-s4 irq
   echo "fifo path delivers every committed packet over mmio and pl330 bit-exactly"
   echo "fifo path rejects the early-TLF race with ISR.TSE and streams nothing"
+  echo "fifo path IRQ: IER=0 masks TFPE, IER.TFPE rises at the 1024-word threshold, W1C clears"
 fi
 echo "all scenes match their references"

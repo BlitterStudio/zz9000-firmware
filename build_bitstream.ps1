@@ -27,7 +27,7 @@ Build the RasterIX renderer for a release variant. Use -OutputBitstream to
 select the matrix row's release path explicitly.
 
 .PARAMETER RasterIXTMUCount
-RasterIX texture-mapping units (1 or 2; default 1; EF requires 1).
+RasterIX texture-mapping units (1 or 2; default 1).
 
  .PARAMETER RasterIXVariant
 RasterIX implementation: external framebuffer EF (the only supported variant).
@@ -39,6 +39,11 @@ Deprecated compatibility option; ignored by EF.
  Optional output bitstream path, relative to the repository or absolute.
  RasterIX builds require this explicit path so a diagnostic invocation cannot
  silently overwrite a release image.
+
+.PARAMETER AllowMarginalTiming
+Permit a diagnostic bitstream when all timing paths close but the stricter
+release slack floor is not met. This is intended for separately named
+experimental outputs only.
 #>
 
 [CmdletBinding()]
@@ -53,11 +58,13 @@ param(
     [string]$RasterIXVariant = 'ef',
     [ValidateSet(14, 15)]
     [int]$RasterIXFramebufferSizeLog2 = 14,
-    [string]$OutputBitstream
+    [string]$OutputBitstream,
+    [switch]$AllowMarginalTiming
 )
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
+
 
 function Resolve-VivadoBat {
     param([string]$RequestedPath)
@@ -97,6 +104,26 @@ function Invoke-Checked {
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
+    }
+}
+
+function Invoke-Vivado {
+    param([string[]]$Arguments)
+
+    $hadMarginalTiming = Test-Path Env:ZZ9000_ALLOW_NONRELEASE_TIMING
+    $previousMarginalTiming = $env:ZZ9000_ALLOW_NONRELEASE_TIMING
+    try {
+        if ($AllowMarginalTiming) {
+            $env:ZZ9000_ALLOW_NONRELEASE_TIMING = '1'
+        }
+        & $vivado @Arguments
+        $script:vivadoExitCode = $LASTEXITCODE
+    } finally {
+        if ($hadMarginalTiming) {
+            $env:ZZ9000_ALLOW_NONRELEASE_TIMING = $previousMarginalTiming
+        } else {
+            Remove-Item Env:ZZ9000_ALLOW_NONRELEASE_TIMING -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -182,8 +209,8 @@ if ($CaptureC28 -and [string]::Equals($output, $packagedOutput,
     throw 'A C28 build must use a separate output path from the zorro3 image.'
 }
 
-if ($RasterIXVariant -eq 'ef' -and $RasterIXTMUCount -ne 1) {
-    throw 'RasterIX EF supports the TMU1 fit configuration only.'
+if ($RasterIXTMUCount -notin 1, 2) {
+    throw 'RasterIX TMU count must be 1 or 2.'
 }
 
 $vivado = Resolve-VivadoBat -RequestedPath $VivadoBat
@@ -271,8 +298,8 @@ for ($attempt = 1; $attempt -le 3; $attempt++) {
     Clear-GeneratedProjectIfPresent
 
     Write-Host '[bitstream] regenerating project from zz9000_project.tcl'
-    & $vivado @vivadoProjectArgs 2>&1 | Tee-Object -FilePath $genLog
-    $genExit = $LASTEXITCODE
+    Invoke-Vivado -Arguments $vivadoProjectArgs 2>&1 | Tee-Object -FilePath $genLog
+    $genExit = $script:vivadoExitCode
     $genErrors = @(Select-String -LiteralPath $genLog -Pattern $generationFatal)
 
     if ($genExit -eq 0 -and $genErrors.Count -eq 0) {
@@ -289,10 +316,13 @@ for ($attempt = 1; $attempt -le 3; $attempt++) {
 }
 
 Write-Host '[bitstream] running synthesis + implementation + write_bitstream'
-Invoke-Checked -FilePath $vivado -Arguments @(
+Invoke-Vivado -Arguments @(
     '-mode', 'batch',
     '-source', 'build_run_synthesis.tcl'
 )
+if ($script:vivadoExitCode -ne 0) {
+    throw "Command failed with exit code $($script:vivadoExitCode): $vivado -mode batch -source build_run_synthesis.tcl"
+}
 
 $bitstream = Get-ChildItem -LiteralPath $projectDir -Recurse -Filter 'zz9000_ps_wrapper.bit' |
     Where-Object { $_.FullName -match '[\\/]impl_1[\\/]' } |

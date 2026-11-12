@@ -17,6 +17,13 @@ if /I "%VARIANT%"=="ef" (
   echo RasterIX EF is the only supported variant
   exit /b 2
 )
+if "%RASTERIX_TMU_COUNT%"=="" set RASTERIX_TMU_COUNT=1
+if not "%RASTERIX_TMU_COUNT%"=="1" if not "%RASTERIX_TMU_COUNT%"=="2" (
+  echo RASTERIX_TMU_COUNT must be 1 or 2
+  exit /b 2
+)
+set XVLOG_TMU=
+if "%RASTERIX_TMU_COUNT%"=="2" set XVLOG_TMU=-d RASTERIX_TMU_COUNT_2
 if "%POLL_LIMIT%"=="" set POLL_LIMIT=2000000
 if "%TRACE_PIPE%"=="" set TRACE_PIPE=0
 set OUT_FWD=%OUT:\=/%
@@ -24,6 +31,10 @@ set SHARED_ARG=
 if defined SHARED set SHARED_ARG=--testplusarg "SHARED=1"
 set DMA_ARG=
 if defined DMA_BURST set DMA_ARG=--testplusarg "DMA_BURST=1"
+set COLOR_SWAP_ARG=
+if defined COLOR_BYTE_SWAP set COLOR_SWAP_ARG=--testplusarg "COLOR_BYTE_SWAP=1"
+set DISABLE_ARG=
+if defined DISABLE_DURING_WORK set DISABLE_ARG=--testplusarg "DISABLE_DURING_WORK=1"
 set TRACE_ARGS=
 if defined TRACE_AXI set TRACE_ARGS=--testplusarg "TRACE_AXI=%TRACE_AXI%"
 if defined DEADLOCK_LIMIT set TRACE_ARGS=%TRACE_ARGS% --testplusarg "DEADLOCK_LIMIT=%DEADLOCK_LIMIT%"
@@ -62,7 +73,7 @@ for %%F in ("%SIMROOT%\Float\rtl\float\*.v") do call xvlog --relax -sv -d UNITTE
 if errorlevel 1 exit /b %errorlevel%
 for %%F in ("%SIMROOT%\RasterIX\*.v") do call xvlog --relax -sv -d UNITTEST -i "%SIMROOT%\RasterIX" -i "%SIMROOT%\Float\rtl\float" -i "%SIMROOT%\3rdParty" -i "%SIMROOT%\3rdParty\verilog-axi" -i "%SIMROOT%\3rdParty\verilog-axis" "%%F"
 if errorlevel 1 exit /b %errorlevel%
-call xvlog --relax -sv -d UNITTEST %XVLOG_VARIANT% -i "%SIMROOT%\RasterIX" -i "%SIMROOT%\Float\rtl\float" -i "%SIMROOT%\3rdParty" -i "%SIMROOT%\3rdParty\verilog-axi" -i "%SIMROOT%\3rdParty\verilog-axis" "%ROOT%\rtl\zz9k_rix\zz9k_rasterix.v" "%ROOT%\test\rix_xsim\tb_zz9k_rasterix.sv"
+call xvlog --relax -sv -d UNITTEST %XVLOG_VARIANT% %XVLOG_TMU% -i "%SIMROOT%\RasterIX" -i "%SIMROOT%\Float\rtl\float" -i "%SIMROOT%\3rdParty" -i "%SIMROOT%\3rdParty\verilog-axi" -i "%SIMROOT%\3rdParty\verilog-axis" "%ROOT%\rtl\zz9k_rix\zz9k_rasterix.v" "%ROOT%\test\rix_xsim\tb_zz9k_rasterix.sv"
 if errorlevel 1 exit /b %errorlevel%
 call xvlog --relax "%XILINX_VIVADO%\data\verilog\src\glbl.v"
 if errorlevel 1 exit /b %errorlevel%
@@ -70,11 +81,11 @@ call xelab -debug typical -timescale 1ns/1ps -L xpm -L unisims_ver -top tb_zz9k_
 if errorlevel 1 exit /b %errorlevel%
 if defined CAPTURE_CMDS (
   if defined CAPTURE_PATCH (
-    call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PATCH=%CAPTURE_PATCH%" --testplusarg "PATCH_AFTER=0" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %TRACE_ARGS%
+    call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PATCH=%CAPTURE_PATCH%" --testplusarg "PATCH_AFTER=0" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %COLOR_SWAP_ARG% %DISABLE_ARG% %TRACE_ARGS%
   ) else (
-    call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %TRACE_ARGS%
+    call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMDS=%CAPTURE_CMDS%" --testplusarg "DDR=%CAPTURE_DDR%" --testplusarg "PPM=%OUT_FWD%/%SCENE%/frame.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %COLOR_SWAP_ARG% %DISABLE_ARG% %TRACE_ARGS%
   )
 ) else (
-  call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMD=%OUT_FWD%/%SCENE%.hex" --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %TRACE_ARGS%
+  call xsim tb_zz9k_rasterix_sim -runall --testplusarg "CMD=%OUT_FWD%/%SCENE%.hex" --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=%TRACE_PIPE%" %SHARED_ARG% %DMA_ARG% %COLOR_SWAP_ARG% %DISABLE_ARG% %TRACE_ARGS%
 )
 exit /b %errorlevel%

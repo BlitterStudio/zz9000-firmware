@@ -11,6 +11,11 @@ mismatch).  `run_scenes.sh OUT LATENCY stream` runs only the stream-level
 matrix, `run_scenes.sh OUT LATENCY fifo` (or `run_fifo_path.sh [OUT]
 [LATENCY]`) only the FIFO path.
 
+`DISABLE_DURING_WORK=1 run_xsim.bat ROOT OUT ef-s1 2 ef` disables CSR
+command intake only after the renderer is active. The run requires STATUS.BUSY
+to remain asserted and STATUS.IDLE to remain clear until the outstanding work
+drains; it is the regression for treating ENABLE as a drain indication.
+
 | Scene | Workload | TMU0 state |
 | --- | --- | --- |
 | `ef-s1` | Full color/depth clear | Enabled with an 8x8 white texture so the renderer configuration is consistent with draw scenes. |
@@ -21,6 +26,9 @@ matrix, `run_scenes.sh OUT LATENCY fifo` (or `run_fifo_path.sh [OUT]
 | `ef-lm` | Two-pass lightmap: white textured base, then `ZERO,SRC_COLOR` with the uniform `0x8410` lightmap page | 8x8 white page, then the 8x8 lightmap page. |
 | `ef-stress` | Read-channel stress: 40 large overlapping triangles in shuffled depth order (`LESS`, depth writes), then six disjoint `ZERO,SRC_COLOR` lightmap triangles with the depth test still on | 256x256 RGB565 texture of uniform 64x64 blocks (zero/full channels, UVs 4 texels inside each block) so the texture cache keeps missing; then the 8x8 lightmap page. |
 | `ef-texenv` | TexEnv operand timing: one triangle with `MODULATE` (gradient texel x interpolated primary colour) under a second `INTERPOLATE` triangle using the constant env colour. | 64x64 RGB565 per-texel gradient page; reference frame is the committed RTL-derived baseline `refs/ef-texenv_ref.ppm.gz` (perspective texture-coordinate interpolation is not bit-exactly reproducible in C). |
+| `ef-mask` | Directed partial byte-mask writes: a G-only color mask (RGB565 high byte, strobes `10`) and a B-only mask (low byte, `01`) over the byte-asymmetric red clear; the regression for the WSTRB pair swap of `swap_rgb565_strobes`. | Enabled with the 8x8 white texture; texenv uses primary colour. |
+| `ef-blendbe` | Directed non-symmetric blend destination: flat `0x8410` base pass, then the `ZERO,SRC_COLOR` lightmap multiply against it; the regression for the read unswap (`color_axi_rdata`). | 8x8 white page for the base pass, then the 8x8 lightmap page. |
+| `ef-logicbe` | Directed fragment logic op: flat `0x8410` base pass, then an XOR logic op (feature bit `RIX_FEATURE_LOGIC`, op 10) against it; also depends on the read unswap. | 8x8 white texture; texenv uses primary colour. |
 
 Each scene sets the 640×480 RGB565 color target and Z16 depth target, then
 performs a single full-target color/depth `MEMSET` and renders directly to
@@ -144,6 +152,7 @@ how the payload reaches `TDFD`:
 | `mmio` | One single-beat INCR store to `0x83c80000` per word, each waiting for its response (strongly ordered CPU stores). |
 | `pl330` | The firmware's PL330 program: header words as CPU stores, then the payload as 16-beat INCR bursts of 4-byte beats (shorter tail), each from `0x83c80000`, posted back to back, then the DMAWMB wait before `TLF`. |
 | `pl330-early` | The pre-fix completion race: `TLF` written after the header words, before the DMA payload.  The run passes only if `ISR.TSE` is set and nothing streamed, the failure mode observed on hardware. |
+| `irq` | Directed `gpu_cmd_fifo` interrupt check over the mmio transport (`FIFO_IRQ=1`, run as `run_fifo_scene ef-s4 irq`): enables the engine (CSR `0x0008`), then stages a 3520-word DSE packet of `OP_NOP_STREAM` words — the parser consumes each NOP in ~2 cycles, so the TX FIFO occupancy crosses the 1024-word programmable-empty threshold both ways quickly without framebuffer traffic.  Passes only if the interrupt line stays low with `IER=0` while `ISR.TFPE` is set, rises with `IER.TFPE` when the FIFO drains back to the threshold, and clears on the `ISR.TFPE` W1C. |
 
 `run_scenes.sh` (or `run_fifo_path.sh`) builds the design once with
 `fifo_path\run_fifo_path.bat build ROOT WORK` (Vivado 2018.3 batch, about

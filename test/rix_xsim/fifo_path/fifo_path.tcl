@@ -139,6 +139,12 @@ for {set index 0} {$index < 8} {incr index} {
 }
 set stream [create_bd_intf_port -mode Master -vlnv xilinx.com:interface:axis_rtl:1.0 M_AXIS_CMD]
 connect_bd_intf_net $stream [get_bd_intf_pins gpu_cmd_fifo/AXI_STR_TXD]
+
+# The FIFO interrupt (ISR & IER, IRQ 64 via xlconcat_0/In3 in the real
+# design) becomes a top-level output so tb_zz9k_rasterix can drive the
+# directed IER masking / TFPE threshold / W1C checks.
+set fifo_irq [create_bd_port -dir O fifo_irq]
+connect_bd_net $fifo_irq [get_bd_pins gpu_cmd_fifo/interrupt]
 set_property CONFIG.ASSOCIATED_BUSIF $gp_busif $gp_aclk
 set_property CONFIG.ASSOCIATED_RESET gp_aresetn $gp_aclk
 set_property CONFIG.ASSOCIATED_BUSIF M07_AXI:M_AXIS_CMD $rix_aclk

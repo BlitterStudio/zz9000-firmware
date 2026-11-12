@@ -90,6 +90,7 @@ module RasterIX_EF #(
     output wire [ADDR_WIDTH - 1 : 0]        fb_addr,
     output wire [FB_SIZE_IN_PIXEL_LG - 1 : 0] fb_size,
     input  wire                             fb_swapped,
+    input  wire                             color_byte_swap,
 
     // Memory Interface
     output wire [ID_WIDTH - 1 : 0]          m_axi_awid,
@@ -606,6 +607,7 @@ module RasterIX_EF #(
     ) rixef (
         .aclk(aclk),
         .resetn(resetn),
+        .color_byte_swap(color_byte_swap),
         
         .s_cmd_axis_tvalid(cmd_axis_tvalid),
         .s_cmd_axis_tready(cmd_axis_tready),

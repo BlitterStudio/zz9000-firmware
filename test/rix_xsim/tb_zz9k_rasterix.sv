@@ -197,12 +197,22 @@ module tb_zz9k_rasterix;
     localparam [31:0] FIFO_TLF = 32'h14;
     localparam [31:0] FIFO_ISR_TSE = 32'h0200_0000;
     localparam [31:0] FIFO_ISR_ERRORS = 32'h1200_0000;
+    localparam [31:0] FIFO_IER = 32'h04;
+    localparam [31:0] FIFO_ISR_TFPE = 32'h0020_0000;
+    // The interrupt line of gpu_cmd_fifo (axi_fifo_mm_s), exported by
+    // fifo_path.tcl as the BD port fifo_irq and wired to xlconcat_0/In3
+    // (IRQ 64) in the real design.
+    wire fifo_irq;
+    reg fifo_irq_seen;
+    integer fifo_irq_mode;
+    always @(posedge clk)
+        if (resetn && fifo_irq && !fifo_irq_seen) fifo_irq_seen <= 1'b1;
     localparam [1:0] BURST_INCR = 2'b01;
     localparam integer FIFO_TRACE_WORDS = 65536;
     localparam integer FIFO_TRACE_PACKETS = 1024;
-    // A FIFO packet is at most RIX_DRV_FIFO_PACKET_WORDS (248) plus the two
+    // The feed API caps a packet at 1,024 payload words plus the two
     // DSE header words.
-    localparam integer RIX_PACKET_BEATS = 250;
+    localparam integer RIX_PACKET_BEATS = 1026;
 
     reg gp_clk;
     reg gp_resetn;
@@ -277,7 +287,8 @@ module tb_zz9k_rasterix;
         .M07_AXI_rdata(s_axi_rdata), .M07_AXI_rresp(s_axi_rresp),
         .M07_AXI_rvalid(s_axi_rvalid), .M07_AXI_rready(s_axi_rready),
         .M_AXIS_CMD_tdata(s_cmd_axis_tdata), .M_AXIS_CMD_tlast(s_cmd_axis_tlast),
-        .M_AXIS_CMD_tvalid(s_cmd_axis_tvalid), .M_AXIS_CMD_tready(s_cmd_axis_tready)
+        .M_AXIS_CMD_tvalid(s_cmd_axis_tvalid), .M_AXIS_CMD_tready(s_cmd_axis_tready),
+        .fifo_irq(fifo_irq)
     );
 
     always @(posedge gp_clk) begin
@@ -496,6 +507,128 @@ module tb_zz9k_rasterix;
             if ((isr & FIFO_ISR_ERRORS) != 0) gp_store(GP_FIFO | FIFO_ISR, isr & FIFO_ISR_ERRORS);
         end
     endtask
+
+    // Directed FIFO interrupt check (run_fifo_path.bat transport "irq"):
+    // with IER = 0 the interrupt line stays low even while ISR.TFPE is set;
+    // with IER.TFPE enabled the line rises exactly when the TX FIFO drains
+    // back to the 1024-word programmable-empty threshold (occupancy falls to
+    // <= 1024 of the 4096-word FIFO); a W1C of ISR.TFPE clears the line.
+    // The check first enables the engine (CSR 0x0008) and then stages a
+    // 3520-word DSE packet of OP_NOP_STREAM words (the parser consumes
+    // each NOP in ~2 cycles), so the occupancy crosses the threshold in
+    // both directions quickly without framebuffer traffic.
+    task fifo_irq_check;
+        integer n, words, fill, i, guard;
+        reg [31:0] isr, tdfv, full_vacancy, tdfv_rise;
+        begin
+            axi_write(16'h0008, color_byte_swap ? 3'b101 : 3'b001);
+            words = fifo_packet_words[0];
+            fill = 3520;
+            if (words <= 0 || fill >= FIFO_TRACE_WORDS)
+                $fatal(1, "FIFO_IRQ cannot build a %0d-word packet", fill);
+            // Synthetic NOP filler: a DSE buffer of repeated OP_NOP_STREAM
+            // words (0x00000000) so the parser consumes each word in ~2 cycles
+            // and the occupancy crosses the 1024-word threshold quickly without
+            // memory or framebuffer traffic.
+            fifo_words[0] = 32'h9000_0000 | ((fill - 2) * 4);
+            fifo_words[1] = 32'h0000_0000;
+            for (i = 2; i < fill; i = i + 1) begin
+                fifo_words[i] = 32'h0000_0000;
+            end
+            for (i = 0; i < fill; i = i + 1) begin
+                fifo_words[fill + i] = fifo_words[i];
+            end
+            fifo_total_words = fill * 2;
+            fifo_packet_words[0] = fill;
+            fifo_packet_words[1] = fill;
+            fifo_packets = 2;
+            fifo_packet_end = fill - 1;
+
+            gp_read(GP_FIFO | FIFO_TDFV, full_vacancy);
+            // Phase 1: IER = 0 (reset value) must mask a latched TFPE.
+            gp_read(GP_FIFO | FIFO_ISR, isr);
+            if (fifo_irq)
+                $fatal(1, "FIFO_IRQ line high before any IER write");
+            for (n = 0; n < fill; n = n + 1) begin
+                gp_read(GP_FIFO | FIFO_TDFV, tdfv);
+                while (tdfv < 1) gp_read(GP_FIFO | FIFO_TDFV, tdfv);
+                gp_write(GP_FIFO_DATA, BURST_INCR, 1, n, 0);
+            end
+            gp_wait_writes;
+            gp_read(GP_FIFO | FIFO_TDFV, tdfv);
+            if (tdfv >= full_vacancy - 1024)
+                $fatal(1, "FIFO_IRQ staging left vacancy %0d: occupancy never exceeded the 1024-word threshold", tdfv);
+            $display("FIFO_IRQ staged=%0d words, vacancy=%0d of %0d, line=%b (IER=0)",
+                     fill, tdfv, full_vacancy, fifo_irq);
+            gp_store(GP_FIFO | FIFO_TLF, fill * 4);
+            fifo_irq_seen = 0;
+            guard = 0;
+            isr = 0;
+            while (((isr & FIFO_ISR_TFPE) == 0) && (guard < poll_limit)) begin
+                gp_read(GP_FIFO | FIFO_ISR, isr);
+                if (fifo_irq)
+                    $fatal(1, "FIFO_IRQ line rose while IER=0 masks TFPE");
+                guard = guard + 1;
+            end
+            if ((isr & FIFO_ISR_TFPE) == 0)
+                $fatal(1, "FIFO_IRQ ISR.TFPE never latched while the FIFO drained");
+            $display("FIFO_IRQ masked: ISR.TFPE latched (%08x) and the line stayed %b",
+                     isr, fifo_irq);
+            gp_store(GP_FIFO | FIFO_ISR, FIFO_ISR_TFPE);
+            repeat (8) @(posedge clk);
+            if (fifo_irq)
+                $fatal(1, "FIFO_IRQ line high after W1C with IER=0");
+            // Wait for Phase 1 to finish draining so Phase 2 starts with an empty FIFO
+            guard = 0;
+            tdfv = 0;
+            while ((tdfv < full_vacancy) && (guard < poll_limit)) begin
+                gp_read(GP_FIFO | FIFO_TDFV, tdfv);
+                guard = guard + 1;
+            end
+
+            // Phase 2: unmask TFPE, re-cross the threshold and watch the
+            // line rise exactly at the 1024-word boundary.
+            gp_read(GP_FIFO | FIFO_ISR, isr);
+            if ((isr & FIFO_ISR_TFPE) != 0)
+                $fatal(1, "FIFO_IRQ TFPE relatched without a threshold crossing");
+            gp_store(GP_FIFO | FIFO_IER, FIFO_ISR_TFPE);
+            repeat (8) @(posedge clk);
+            if (fifo_irq)
+                $fatal(1, "FIFO_IRQ line high with TFPE clear");
+            for (n = 0; n < fill; n = n + 1) begin
+                gp_read(GP_FIFO | FIFO_TDFV, tdfv);
+                while (tdfv < 1) gp_read(GP_FIFO | FIFO_TDFV, tdfv);
+                gp_write(GP_FIFO_DATA, BURST_INCR, 1, n, 0);
+            end
+            gp_wait_writes;
+            gp_store(GP_FIFO | FIFO_TLF, fill * 4);
+            fifo_irq_seen = 0;
+            guard = 0;
+            while (!fifo_irq_seen && (guard < poll_limit)) begin
+                @(posedge clk);
+                guard = guard + 1;
+            end
+            if (!fifo_irq_seen)
+                $fatal(1, "FIFO_IRQ line never rose with IER.TFPE set");
+            gp_read(GP_FIFO | FIFO_TDFV, tdfv_rise);
+            gp_read(GP_FIFO | FIFO_ISR, isr);
+            if ((isr & FIFO_ISR_TFPE) == 0)
+                $fatal(1, "FIFO_IRQ line rose without ISR.TFPE set");
+            if (!((tdfv_rise >= (full_vacancy - 1024) && tdfv_rise <= (full_vacancy - 1024 + 70)) ||
+                  (tdfv_rise >= (32'd1024 - 70) && tdfv_rise <= (32'd1024 + 70))))
+                $fatal(1, "FIFO_IRQ rise at vacancy %0d: not at the 1024-word threshold (window [%0d..%0d] or [%0d..%0d])",
+                       tdfv_rise, full_vacancy - 1024, full_vacancy - 1024 + 70,
+                       32'd1024 - 70, 32'd1024 + 70);
+            $display("FIFO_IRQ unmasked: line rose at vacancy=%0d (occupancy %0d of %0d), ISR=%08x",
+                     tdfv_rise, full_vacancy - tdfv_rise, full_vacancy, isr);
+            gp_store(GP_FIFO | FIFO_ISR, FIFO_ISR_TFPE);
+            repeat (8) @(posedge clk);
+            if (fifo_irq)
+                $fatal(1, "FIFO_IRQ line did not clear on the ISR.TFPE W1C");
+            $display("PASS scene=%0s fifo irq: IER=0 masks TFPE, IER.TFPE rises at the 1024-word threshold, W1C clears", scene);
+            $finish;
+        end
+    endtask
 `endif
 
     reg [7:0] memory [0:MEM_BYTES-1];
@@ -505,6 +638,7 @@ module tb_zz9k_rasterix;
     reg [31:0] command_words [0:262143];
     reg [7:0] texture_bytes [0:TEXTURE_BYTES-1];
     integer i;
+    reg color_byte_swap;
     integer latency;
     integer cycle_count;
     integer trace_pipeline;
@@ -589,6 +723,14 @@ module tb_zz9k_rasterix;
                 byte_at = memory[address];
             else
                 byte_at = 8'h00;
+        end
+    endfunction
+    function [15:0] color_pixel_at;
+        input [31:0] address;
+        begin
+            color_pixel_at = {byte_at(address + 1), byte_at(address)};
+            if (color_byte_swap)
+                color_pixel_at = {color_pixel_at[7:0], color_pixel_at[15:8]};
         end
     endfunction
     function address_mapped;
@@ -1231,8 +1373,7 @@ module tb_zz9k_rasterix;
             $fwrite(fd, "P6\n640 480\n255\n");
             for (y = 0; y < HEIGHT; y = y + 1) begin
                 for (x = 0; x < WIDTH; x = x + 1) begin
-                    pixel = {byte_at(framebuffer_addr + ((HEIGHT - 1 - y) * WIDTH + x) * 2 + 1),
-                             byte_at(framebuffer_addr + ((HEIGHT - 1 - y) * WIDTH + x) * 2)};
+                    pixel = color_pixel_at(framebuffer_addr + ((HEIGHT - 1 - y) * WIDTH + x) * 2);
                     red = {pixel[15:11], 3'b000};
                     green = {pixel[10:5], 2'b00};
                     blue = {pixel[4:0], 3'b000};
@@ -1318,6 +1459,7 @@ module tb_zz9k_rasterix;
     reg [31:0] framebuffer_addr;
     reg [31:0] status;
     reg [31:0] completed_before;
+    reg [31:0] busy_cycles;
     integer cmd_count;
     integer submission_offset;
     integer submission_words;
@@ -1328,9 +1470,31 @@ module tb_zz9k_rasterix;
     integer size_probe;
     integer patch_after;
     integer timeout;
+    integer disable_during_work;
     integer poll_limit;
     reg [15:0] sample0, sample_mid, sample_out;
 
+    // Byte-granular color write strobes: every 16-bit pixel lane whose two
+    // strobe bits are 01 or 10 (a partial RGB565 byte mask).  With the
+    // byte swap on, swap_rgb565_strobes must exchange exactly these pairs
+    // so the masked byte lands on the big-endian side; ef-mask draws with
+    // G-only (10) and B-only (01) masks, so both patterns must occur.
+`ifdef RASTERIX_VARIANT_EF
+    integer asym_strobe_01;
+    integer asym_strobe_10;
+    integer asym_lane;
+    always @(posedge clk) begin
+        if (resetn && dut.renderer.rixef.m_color_axi_wvalid &&
+            dut.renderer.rixef.m_color_axi_wready) begin
+            for (asym_lane = 0; asym_lane < 8; asym_lane = asym_lane + 2) begin
+                if (dut.renderer.rixef.color_axi_wstrb[asym_lane +: 2] == 2'b01)
+                    asym_strobe_01 = asym_strobe_01 + 1;
+                if (dut.renderer.rixef.color_axi_wstrb[asym_lane +: 2] == 2'b10)
+                    asym_strobe_10 = asym_strobe_10 + 1;
+            end
+        end
+    end
+`endif
     initial begin
         clk = 0; resetn = 0; cycle_count = 0; latency = 2;
 `ifdef FIFO_PATH
@@ -1352,6 +1516,10 @@ module tb_zz9k_rasterix;
         m_cmd_axi_arready = 0; m_cmd_axi_rid = 0; m_cmd_axi_rdata = 0; m_cmd_axi_rresp = 0; m_cmd_axi_rlast = 0; m_cmd_axi_rvalid = 0;
         cmd_read_active = 0; render_read_active = 0; write_active = 0; write_error = 0; cmd_read_left = 0; render_read_left = 0; write_left = 0;
         render_read_id = 0; render_read_size = 0;
+`ifdef RASTERIX_VARIANT_EF
+        asym_strobe_01 = 0;
+        asym_strobe_10 = 0;
+`endif
         shared_channel = $test$plusargs("SHARED");
         rand_seed = 0;
         if ($value$plusargs("RAND_SEED=%d", rand_seed)) ;
@@ -1384,7 +1552,13 @@ module tb_zz9k_rasterix;
         if (!$value$plusargs("SCENE=%s", scene)) scene = "s1";
         if ($value$plusargs("LATENCY=%d", latency)) ;
         trace_pipeline = 0;
+        color_byte_swap = $test$plusargs("COLOR_BYTE_SWAP");
+        disable_during_work = $test$plusargs("DISABLE_DURING_WORK");
         if ($value$plusargs("TRACE_PIPE=%d", trace_pipeline)) ;
+`ifdef FIFO_PATH
+        fifo_irq_mode = $test$plusargs("FIFO_IRQ");
+        fifo_irq_seen = 0;
+`endif
 `ifdef RASTERIX_VARIANT_EF
         trace_axi = 0;
         if ($value$plusargs("TRACE_AXI=%d", trace_axi)) ;
@@ -1424,19 +1598,45 @@ module tb_zz9k_rasterix;
         gp_resetn = 1;
 `else
         repeat (8) @(posedge clk);
+        if (dut.dbg_busy_cycles != 0)
+            $fatal(1, "busy-cycle CSR did not reset: %08x", dut.dbg_busy_cycles);
         resetn = 1;
 `endif
         axi_read(16'h0000, status);
         if (status != 32'h52495831) $fatal(1, "bad RIX identity %08x", status);
+        axi_read(16'h0004, status);
+        if (status != 32'h00020002) $fatal(1, "missing RGB565 byte-swap capability %08x", status);
 `ifdef FIFO_PATH
         fifo_enable;
+        if (fifo_irq_mode) fifo_irq_check;
 `endif
-        axi_write(16'h0008, 1);
+        axi_write(16'h0008, color_byte_swap ? 3'b101 : 3'b001);
+        axi_read(16'h0008, status);
+        if (status[2] != color_byte_swap) $fatal(1, "RGB565 byte-swap control did not read back");
         submission_offset = 0;
         submission_index = 0;
         while (submission_offset < cmd_count) begin
             submission_words = (command_words[submission_offset] & 28'h0fff_ffff) / 4 + 2;
             fifo_submit(submission_offset, submission_words);
+            if (disable_during_work && submission_index == 0) begin
+                timeout = 0;
+                axi_read(16'h000c, status);
+                while (timeout < poll_limit && !status[2]) begin
+                    @(posedge clk);
+                    timeout = timeout + 1;
+                    axi_read(16'h000c, status);
+                end
+                if (!status[2])
+                    $fatal(1, "renderer never became busy before disable");
+                axi_write(16'h0008, color_byte_swap ? 3'b100 : 3'b000);
+                axi_read(16'h000c, status);
+                if (status[1] || !status[2])
+                    $fatal(1, "disabling intake reported idle before the renderer drained: %08x", status);
+                $display("DISABLE_DRAIN busy status preserved: %08x", status);
+                axi_write(16'h0008, color_byte_swap ? 3'b101 : 3'b001);
+            end
+            axi_read(16'h0018, busy_cycles);
+            if (busy_cycles == 0) $fatal(1, "busy-cycle CSR did not increment while rendering");
             timeout = 0;
             command_complete = 0;
             while ((timeout < poll_limit) && (command_complete == 0)) begin
@@ -1503,10 +1703,34 @@ module tb_zz9k_rasterix;
             submission_offset = submission_offset + submission_words;
             submission_index = submission_index + 1;
         end
+        repeat (16) @(posedge clk);
+        axi_read(16'h0018, busy_cycles);
+        repeat (16) @(posedge clk);
+        axi_read(16'h0018, status);
+        if (status != busy_cycles)
+            $fatal(1, "busy-cycle CSR changed while idle: %08x -> %08x", busy_cycles, status);
+        axi_write(16'h0008, 0);
+        repeat (16) @(posedge clk);
+        axi_write(16'h0008, 2);
+        repeat (16) @(posedge clk);
+        axi_write(16'h0008, 0);
+        repeat (16) @(posedge clk);
+        axi_read(16'h0018, status);
+        if (status != 0) $fatal(1, "busy-cycle CSR did not reset on soft reset: %08x", status);
         dump_ppm(ppm_file);
         for (i = 0; i < COLOR_BYTES; i = i + 1)
             if (^byte_at(framebuffer_addr + i) === 1'bx)
                 $fatal(1, "framebuffer contains unknown byte at %0d", i);
+        if (color_byte_swap &&
+            {byte_at(framebuffer_addr), byte_at(framebuffer_addr + 1)} != 16'hf800)
+            $fatal(1, "byte-swapped RGB565 clear is not big-endian");
+`ifdef RASTERIX_VARIANT_EF
+        $display("ASYM_STROBES lane_pairs_01=%0d lane_pairs_10=%0d",
+                 asym_strobe_01, asym_strobe_10);
+        if (scene == "ef-mask" && (asym_strobe_01 == 0 || asym_strobe_10 == 0))
+            $fatal(1, "ef-mask did not produce both byte-granular strobe patterns (01=%0d, 10=%0d)",
+                   asym_strobe_01, asym_strobe_10);
+`endif
         if (capture_mode != 0 || size_probe != 0) begin
             $display("PASS scene=%0s submissions=%0d", scene, submission_index);
         end else begin
@@ -1515,25 +1739,22 @@ module tb_zz9k_rasterix;
                 reg [15:0] first_nc_val;
                 non_clear_count = 0; first_nc_addr = -1; first_nc_val = 0;
                 for (i = 0; i < COLOR_BYTES; i = i + 2) begin
-                    if ({byte_at(framebuffer_addr + i + 1), byte_at(framebuffer_addr + i)} != 16'hf800) begin
+                    if (color_pixel_at(framebuffer_addr + i) != 16'hf800) begin
                         if (non_clear_count == 0) begin
                             first_nc_addr = i;
-                            first_nc_val = {byte_at(framebuffer_addr + i + 1), byte_at(framebuffer_addr + i)};
+                            first_nc_val = color_pixel_at(framebuffer_addr + i);
                         end
                         non_clear_count = non_clear_count + 1;
                     end
                 end
                 $display("NON_CLEAR_PIXELS = %0d first_addr=%x first_val=%04x", non_clear_count, first_nc_addr, first_nc_val);
             end
-            sample0 = {byte_at(framebuffer_addr + 1), byte_at(framebuffer_addr)};
-            sample_out = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2 + 1),
-                          byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2)};
+            sample0 = color_pixel_at(framebuffer_addr);
+            sample_out = color_pixel_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2);
             if (scene == "s4" || scene == "ef-s4")
-                sample_mid = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 330) * WIDTH + 200) * 2 + 1),
-                              byte_at(framebuffer_addr + ((HEIGHT - 1 - 330) * WIDTH + 200) * 2)};
+                sample_mid = color_pixel_at(framebuffer_addr + ((HEIGHT - 1 - 330) * WIDTH + 200) * 2);
             else
-                sample_mid = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2 + 1),
-                              byte_at(framebuffer_addr + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2)};
+                sample_mid = color_pixel_at(framebuffer_addr + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2);
             $display("SAMPLES scene=%0s clear=%04x interior=%04x exterior=%04x", scene, sample0, sample_mid, sample_out);
             if (sample0 !== 16'hf800 || sample_out !== 16'hf800) $fatal(1, "clear/exterior expected red got %04x %04x", sample0, sample_out);
             if (scene != "s1" && scene != "ef-s1" &&

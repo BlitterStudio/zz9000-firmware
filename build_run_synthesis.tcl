@@ -76,6 +76,13 @@ if { [string match "*ERROR*" $impl_status] || [string match "*FAILED*" $impl_sta
 }
 
 open_run impl_1
+if {[info exists ::env(ZZ9000_ALLOW_NONRELEASE_TIMING)] &&
+    $::env(ZZ9000_ALLOW_NONRELEASE_TIMING) ne {}} {
+    set runtime_pixel_setup_floor_ns 0.000
+    set overall_setup_floor_ns 0.000
+    set i2s_setup_floor_ns 0.000
+    puts "Allowing non-release timing floors; all paths must still close."
+}
 source [file join $script_dir verify_vcap_iob_placement.tcl]
 source [file join $script_dir verify_vcap_cdc_timing.tcl]
 source [file join $script_dir verify_runtime_pixel_timing.tcl]

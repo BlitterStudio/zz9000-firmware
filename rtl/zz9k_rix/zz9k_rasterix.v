@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // ZZ9000 RasterIX EF control/status wrapper. Commands enter RasterIX through
 // the separate AXI-Stream FIFO MMIO peripheral; this module has no DDR fetcher.
+`ifdef RASTERIX_TMU_COUNT_2
+`define RASTERIX_TMU_COUNT 2
+`else
+`define RASTERIX_TMU_COUNT 1
+`endif
+
 module zz9k_rasterix #(
     parameter integer C_S_AXI_ADDR_WIDTH = 16,
-    parameter integer C_S_AXI_DATA_WIDTH = 32
+    parameter integer C_S_AXI_DATA_WIDTH = 32,
+    parameter integer TMU_COUNT = `RASTERIX_TMU_COUNT
 ) (
     input wire s_axi_aclk,
     input wire s_axi_aresetn,
@@ -71,7 +78,7 @@ module zz9k_rasterix #(
     output wire m_axi_rready
 );
     localparam [31:0] IDENTITY = 32'h5249_5831; // RIX1
-    localparam [31:0] VERSION = 32'h0002_0000;
+    localparam [31:0] VERSION = 32'h0002_0002;
     reg [C_S_AXI_ADDR_WIDTH-1:0] write_addr;
     reg [31:0] write_data;
     reg [3:0] write_strb;
@@ -83,8 +90,10 @@ module zz9k_rasterix #(
     reg read_response_valid;
     reg enable_requested;
     reg soft_reset;
+    reg color_byte_swap;
     reg [15:0] writes_outstanding;
     reg [15:0] reads_outstanding;
+    reg [31:0] dbg_busy_cycles;
     reg [31:0] dbg_aw_count;
     reg [31:0] dbg_w_count;
     reg [31:0] dbg_b_count;
@@ -110,8 +119,9 @@ module zz9k_rasterix #(
     wire write_complete = m_axi_bvalid && m_axi_bready;
     wire read_issue = m_axi_arvalid && m_axi_arready;
     wire read_complete = m_axi_rvalid && m_axi_rready && m_axi_rlast;
-    wire idle = !renderer_busy && (writes_outstanding == 0) && (reads_outstanding == 0);
-
+    wire idle = !renderer_busy &&
+                (writes_outstanding == 0) &&
+                (reads_outstanding == 0);
     assign s_axi_awready = !write_addr_valid && !write_response_valid;
     assign s_axi_wready = !write_data_valid && !write_response_valid;
     assign s_axi_bvalid = write_response_valid;
@@ -128,7 +138,7 @@ module zz9k_rasterix #(
         case (s_axi_araddr[7:2])
             6'h00: read_value = IDENTITY;
             6'h01: read_value = VERSION;
-            6'h02: read_value = {29'd0, soft_reset, 1'b0, enable_requested};
+            6'h02: read_value = {29'd0, color_byte_swap, soft_reset, enable_requested};
             6'h03: read_value = {8'd0, reads_outstanding[7:0], writes_outstanding[7:0],
                                  3'd0, renderer_stall, renderer_triangle_rendering,
                                  renderer_busy, idle, enable_requested};
@@ -139,6 +149,7 @@ module zz9k_rasterix #(
             6'h0f: read_value = dbg_w_count;
             6'h10: read_value = dbg_b_count;
             6'h11: read_value = dbg_ar_count;
+            6'h06: read_value = dbg_busy_cycles;
             6'h12: read_value = dbg_r_count;
             6'h13: read_value = dbg_last_araddr;
             6'h14: read_value = {26'd0, dbg_last_arid};
@@ -158,6 +169,7 @@ module zz9k_rasterix #(
             read_data <= 0;
             enable_requested <= 0;
             soft_reset <= 0;
+            color_byte_swap <= 0;
             writes_outstanding <= 0;
             reads_outstanding <= 0;
             dbg_aw_count <= 0;
@@ -167,6 +179,7 @@ module zz9k_rasterix #(
             dbg_r_count <= 0;
             dbg_last_araddr <= 0;
             dbg_last_arid <= 0;
+            dbg_busy_cycles <= 0;
         end else begin
             soft_reset <= 0;
             if (s_axi_awvalid && s_axi_awready) begin
@@ -185,6 +198,7 @@ module zz9k_rasterix #(
                 if (control_write) begin
                     enable_requested <= write_data[0];
                     soft_reset <= write_data[1];
+                    color_byte_swap <= write_data[2];
                 end
             end
             if (write_response_valid && s_axi_bready)
@@ -221,11 +235,14 @@ module zz9k_rasterix #(
             if (soft_reset) begin
                 writes_outstanding <= 0;
                 reads_outstanding <= 0;
+                dbg_busy_cycles <= 0;
                 dbg_aw_count <= 0;
                 dbg_w_count <= 0;
                 dbg_b_count <= 0;
                 dbg_ar_count <= 0;
                 dbg_r_count <= 0;
+            end else if (!idle && enable_requested) begin
+                dbg_busy_cycles <= dbg_busy_cycles + 1'b1;
             end
         end
     end
@@ -238,9 +255,8 @@ module zz9k_rasterix #(
         .SUB_PIXEL_CALC_PRECISION(8),
         .ENABLE_STENCIL_BUFFER(0),
         .ENABLE_DEPTH_BUFFER(1),
-        .TMU_COUNT(1),
+        .TMU_COUNT(TMU_COUNT),
         .ENABLE_MIPMAPPING(1),
-        .ENABLE_TEXTURE_FILTERING(1),
         .TEXTURE_PAGE_SIZE(2048),
         .ENABLE_EXTERNAL_TEXTURE_MEMORY(1),
         .CACHE_SIZE(8192),
@@ -265,6 +281,7 @@ module zz9k_rasterix #(
         .m_cmd_resp_axis_tlast(rix_response_last), .m_cmd_resp_axis_tdata(rix_response_data),
         .swap_fb(rix_swap_fb), .swap_fb_enable_vsync(rix_swap_fb_enable_vsync),
         .fb_addr(rix_fb_addr), .fb_size(rix_fb_size), .fb_swapped(1'b1),
+        .color_byte_swap(color_byte_swap),
         .m_axi_awid(m_axi_awid), .m_axi_awaddr(m_axi_awaddr), .m_axi_awlen(m_axi_awlen),
         .m_axi_awsize(m_axi_awsize), .m_axi_awburst(m_axi_awburst), .m_axi_awlock(m_axi_awlock),
         .m_axi_awcache(m_axi_awcache), .m_axi_awprot(m_axi_awprot), .m_axi_awvalid(m_axi_awvalid),

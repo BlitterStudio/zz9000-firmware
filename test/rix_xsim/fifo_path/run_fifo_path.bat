@@ -24,19 +24,29 @@ exit /b 2
 :build
 set ROOT=%~2
 set WORK=%~3
-call D:\Xilinx\Vivado\2018.3\settings64.bat
-if errorlevel 1 exit /b %errorlevel%
-if exist "%WORK%" rmdir /s /q "%WORK%"
-mkdir "%WORK%"
-cd /d "%WORK%"
-call vivado -mode batch -nojournal -log bd.log -source "%ROOT%\test\rix_xsim\fifo_path\fifo_path.tcl" -tclargs "%ROOT%" "%WORK%\bd"
-if errorlevel 1 exit /b 1
+set VIVADO=D:\Xilinx\Vivado\2018.3\bin\vivado.bat
+if not exist "%VIVADO%" (
+  echo Vivado 2018.3 not found at "%VIVADO%"
+  exit /b 1
+)
+for /L %%A in (1,1,3) do (
+  if exist "%WORK%" rmdir /s /q "%WORK%"
+  mkdir "%WORK%"
+  cd /d "%WORK%"
+  call "%VIVADO%" -mode batch -nojournal -log bd.log -source "%ROOT%\test\rix_xsim\fifo_path\fifo_path.tcl" -tclargs "%ROOT%" "%WORK%\bd"
+  if not errorlevel 1 goto generated
+)
+exit /b 1
+
+:generated
 set XSIMDIR=%WORK%\bd\export\rix_fifo_path\xsim
 if not exist "%XSIMDIR%\vlog.prj" (
   echo fifo_path.tcl did not export "%XSIMDIR%"
   exit /b 1
 )
 cd /d "%XSIMDIR%"
+call D:\Xilinx\Vivado\2018.3\settings64.bat
+if errorlevel 1 exit /b %errorlevel%
 call xvlog --relax -prj vlog.prj
 if errorlevel 1 exit /b %errorlevel%
 call xvhdl --relax -prj vhdl.prj
@@ -66,8 +76,18 @@ set LATENCY=%~5
 set TRANSPORT=%~6
 if "%POLL_LIMIT%"=="" set POLL_LIMIT=2000000
 set OUT_FWD=%OUT:\=/%
+rem transport "irq" replays over mmio with FIFO_IRQ=1: the directed
+rem gpu_cmd_fifo interrupt check (IER masking, the 1024-word TFPE
+rem threshold and the W1C clear) instead of a frame comparison.  The
+rem log keeps the requested transport name.
+set FIFO_IRQ_ARG=
+set SIM_TRANSPORT=%TRANSPORT%
+if /I "%TRANSPORT%"=="irq" (
+  set SIM_TRANSPORT=mmio
+  set FIFO_IRQ_ARG=--testplusarg "FIFO_IRQ=1"
+)
 call D:\Xilinx\Vivado\2018.3\settings64.bat
 if errorlevel 1 exit /b %errorlevel%
 cd /d "%WORK%\bd\export\rix_fifo_path\xsim"
-call xsim tb_fifo_path -runall -log "%OUT%\%SCENE%_fifo-%TRANSPORT%.xsim.log" --testplusarg "CMD=%OUT_FWD%/%SCENE%.hex" --testplusarg "FIFO=%OUT_FWD%/%SCENE%.fifo" --testplusarg "FIFO_TRANSPORT=%TRANSPORT%" --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%_fifo-%TRANSPORT%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=0"
+call xsim tb_fifo_path -runall -log "%OUT%\%SCENE%_fifo-%TRANSPORT%.xsim.log" --testplusarg "CMD=%OUT_FWD%/%SCENE%.hex" --testplusarg "FIFO=%OUT_FWD%/%SCENE%.fifo" --testplusarg "FIFO_TRANSPORT=%SIM_TRANSPORT%" %FIFO_IRQ_ARG% --testplusarg "TEXTURE=%OUT_FWD%/textures.hex" --testplusarg "PPM=%OUT_FWD%/%SCENE%_fifo-%TRANSPORT%.ppm" --testplusarg "SCENE=%SCENE%" --testplusarg "LATENCY=%LATENCY%" --testplusarg "POLL_LIMIT=%POLL_LIMIT%" --testplusarg "TRACE_PIPE=0"
 exit /b %errorlevel%
