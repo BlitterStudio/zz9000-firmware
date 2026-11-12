@@ -25,6 +25,12 @@ typedef struct Server {
   int not_found;         /* answers 404 */
   uint32_t fail_after;   /* fail a read once this many bytes were sent */
   int stop;              /* the user stopped the item: pauses give up */
+  int fail_status;       /* with fail_text: open answers this status (0 for */
+  const char *fail_text; /* none) and gives this reason */
+  int silent_fail;       /* open fails and says nothing at all */
+  uint32_t close_after;  /* the body ends once this many bytes were sent */
+  uint32_t extra_bytes;  /* bytes sent past the length the head named */
+  const char *read_error; /* error() text, NULL for the default */
   int pauses;
   uint32_t paused_ms;
   /* What the client asked for. */
@@ -38,6 +44,7 @@ typedef struct Stream {
   uint32_t pos;       /* resource offset of the next audio byte */
   uint32_t audio_in;  /* audio bytes sent since the last metadata block */
   uint32_t sent;
+  uint32_t extra;     /* bytes sent past the resource */
   int failed;
 } Stream;
 
@@ -49,11 +56,22 @@ static void *fake_open(void *ctx, const char *url, int has_range,
   Stream *st;
 
   (void)url;
+  if (s->silent_fail) {
+    /* A transport that fails before any answer, leaving head and err
+     * untouched. */
+    s->opens++;
+    return NULL;
+  }
   memset(head, 0, sizeof(*head));
   s->opens++;
   if (s->not_found) {
     head->status = 404;
     (void)snprintf(err, err_size, "The server answered HTTP 404");
+    return NULL;
+  }
+  if (s->fail_text != NULL) {
+    head->status = s->fail_status;
+    (void)snprintf(err, err_size, "%s", s->fail_text);
     return NULL;
   }
   s->last_has_range = has_range;
@@ -104,6 +122,10 @@ static long fake_read(void *ctx, void *stream, uint8_t *buf, size_t size)
     st->failed = 1;
     return -1;
   }
+  if (s->close_after != 0U) {
+    if (st->sent >= s->close_after) return 0;
+    if (size > s->close_after - st->sent) size = s->close_after - st->sent;
+  }
   if (size > s->read_size) size = s->read_size;
   while (n < size) {
     if (s->icy_interval != 0U && st->audio_in == s->icy_interval) {
@@ -123,7 +145,12 @@ static long fake_read(void *ctx, void *stream, uint8_t *buf, size_t size)
       st->audio_in = 0U;
       continue;
     }
-    if (st->pos >= s->size) break;
+    if (st->pos >= s->size) {
+      if (st->extra >= s->extra_bytes) break;
+      buf[n++] = 0xEEU;
+      st->extra++;
+      continue;
+    }
     buf[n++] = resource[st->pos++];
     st->audio_in++;
   }
@@ -133,9 +160,10 @@ static long fake_read(void *ctx, void *stream, uint8_t *buf, size_t size)
 
 static const char *fake_error(void *ctx, void *stream)
 {
-  (void)ctx;
+  Server *s = (Server *)ctx;
+
   (void)stream;
-  return "connection reset";
+  return s->read_error != NULL ? s->read_error : "connection reset";
 }
 
 static void fake_close(void *ctx, void *stream)
@@ -437,6 +465,123 @@ static int test_failure(void)
   return 0;
 }
 
+static ZZPlayHttpFile *open_server_err(Server *s, char *err, size_t err_size)
+{
+  ZZPlayHttpStreamOps ops;
+
+  ops.open = fake_open;
+  ops.read = fake_read;
+  ops.error = fake_error;
+  ops.close = fake_close;
+  ops.pause = fake_pause;
+  ops.ctx = s;
+  return zzplay_httpfile_open(&ops, "http://h/x", err, err_size);
+}
+
+/* Faults a server or the network produce: each ends with a reason to
+ * show, and nothing stays open (the sanitizer's leak check sees to it). */
+static int test_faults(void)
+{
+  static const struct {
+    int status;
+    const char *text;
+  } refusals[] = {
+    { 401, "The server answered HTTP 401" },
+    { 404, "The server answered HTTP 404" },
+    { 500, "The server answered HTTP 500" },
+    { 0, "The server sent a malformed response" },  /* a truncated head */
+    { 0, "The server stopped responding" },         /* a stalled answer */
+    { 0, "Cancelled" },                             /* stopped while stalled */
+    { 0, "Cannot connect to h" }                    /* the server is down */
+  };
+  static uint8_t got[9000];
+  Server s;
+  ZZPlayHttpFile *f;
+  char err[128];
+  size_t i;
+
+  for (i = 0U; i < sizeof(refusals) / sizeof(refusals[0]); i++) {
+    server_defaults(&s);
+    s.fail_status = refusals[i].status;
+    s.fail_text = refusals[i].text;
+    if (open_server_err(&s, err, sizeof(err)) != NULL) return 1;
+    if (strcmp(err, refusals[i].text) != 0) return 2;
+    if (s.opens != 1) return 3;
+  }
+
+  /* A transport that fails without a word still leaves a reason. */
+  server_defaults(&s);
+  s.silent_fail = 1;
+  memset(err, 'x', sizeof(err));
+  if (open_server_err(&s, err, sizeof(err)) != NULL) return 4;
+  if (strcmp(err, "The network connection failed") != 0) return 5;
+
+  /* The server drops the connection mid-body. */
+  server_defaults(&s);
+  s.close_after = 3000U;
+  f = open_server(&s);
+  if (f == NULL) return 6;
+  if (zzplay_httpfile_read(f, got, 5000U) != 3000U || !same(got, 0U, 3000U))
+    return 7;
+  if (!zzplay_httpfile_error(f) ||
+      strcmp(zzplay_httpfile_error_text(f),
+             "The connection closed before the end of the data") != 0)
+    return 8;
+  zzplay_httpfile_close(f);
+
+  /* A stalled read the user stops fails with the transport's reason. */
+  server_defaults(&s);
+  s.fail_after = 2000U;
+  s.read_error = "Cancelled";
+  f = open_server(&s);
+  if (f == NULL) return 9;
+  if (zzplay_httpfile_read(f, got, 5000U) != 2000U) return 10;
+  if (strcmp(zzplay_httpfile_error_text(f), "Cancelled") != 0) return 11;
+  zzplay_httpfile_close(f);
+
+  /* A read failure without a reason still has one to show. */
+  server_defaults(&s);
+  s.fail_after = 1000U;
+  s.read_error = "";
+  f = open_server(&s);
+  if (f == NULL) return 12;
+  if (zzplay_httpfile_read(f, got, 5000U) != 1000U) return 13;
+  if (strcmp(zzplay_httpfile_error_text(f), "The network connection failed") !=
+      0)
+    return 14;
+  zzplay_httpfile_close(f);
+
+  /* A body longer than its Content-Length: the reader gets the named
+   * bytes and the end, never the surplus. 700-byte reads put the end of
+   * the resource inside one block. */
+  server_defaults(&s);
+  s.ranges = 0;
+  s.extra_bytes = 3000U;
+  s.read_size = 700U;
+  f = open_server(&s);
+  if (f == NULL) return 15;
+  if (zzplay_httpfile_read(f, got, sizeof(got)) != 5000U || !same(got, 0U, 5000U))
+    return 16;
+  if (!zzplay_httpfile_eof(f) || zzplay_httpfile_error(f)) return 17;
+  zzplay_httpfile_close(f);
+
+  /* A live stream that stalls, then the user stops the item while it
+   * waits to reconnect. */
+  server_defaults(&s);
+  s.size = RESOURCE_BYTES;
+  s.icy_interval = 1000U;
+  s.icy_title = "A";
+  s.fail_after = 3000U;
+  s.read_error = "The server stopped responding";
+  f = open_server(&s);
+  if (f == NULL) return 18;
+  s.stop = 1;
+  if (zzplay_httpfile_read(f, got, sizeof(got)) >= sizeof(got)) return 19;
+  if (strcmp(zzplay_httpfile_error_text(f), "Cancelled") != 0) return 20;
+  zzplay_httpfile_close(f);
+  return 0;
+}
+
 /* The open path for one network track: the byte accesses zzplay.c makes
  * between choosing the entry and the engine's first reads - the tag
  * reader's length seek and ID3v2 read (network sources never fetch the
@@ -579,6 +724,8 @@ int main(void)
   if (rc != 0) { printf("failure %d\n", rc); return 110 + rc; }
   rc = test_open_path_connections();
   if (rc != 0) { printf("open_path_connections %d\n", rc); return 150 + rc; }
+  rc = test_faults();
+  if (rc != 0) { printf("faults %d\n", rc); return 170 + rc; }
   printf("zzplay_httpfile_test: all checks passed\n");
   return 0;
 }

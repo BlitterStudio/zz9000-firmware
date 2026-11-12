@@ -108,9 +108,10 @@ char *strstr(const char *haystack, const char *needle)
 #define RADIO_API_BASE "http://de1.api.radio-browser.info/xml"
 #define RADIO_MAX_FAVOURITES 64U
 #define RADIO_SEARCH_LIMIT 100U
+#define RADIO_UUID_MAX 40U
 
 typedef struct FavouriteEntry {
-  char uuid[40];
+  char uuid[RADIO_UUID_MAX];
   char name[ZZPLAY_PROVIDER_TEXT_MAX];
   char codec[16];
   char bitrate[16];
@@ -164,6 +165,78 @@ static const char *radio_trim(const char *s)
   return s;
 }
 
+/* Length of the first `len` bytes of `s` without a UTF-8 sequence that a
+ * cut at `len` left incomplete. */
+static size_t radio_utf8_cut(const char *s, size_t len)
+{
+  size_t i = len;
+  size_t back = 0U;
+
+  while (i > 0U && back < 3U && ((unsigned char)s[i - 1U] & 0xC0U) == 0x80U) {
+    i--;
+    back++;
+  }
+  if (i > 0U) {
+    unsigned char lead = (unsigned char)s[i - 1U];
+    size_t need = lead >= 0xF0U ? 4U : lead >= 0xE0U ? 3U : lead >= 0xC0U ? 2U : 1U;
+
+    if (need > 1U && back + 1U < need) {
+      return i - 1U;
+    }
+  }
+  return len;
+}
+
+/* Copy text the directory sent for showing or storing: control characters
+ * become spaces, and so does '|' when `bar` is set (it separates the
+ * fields of a stored favourite). A longer text is cut without splitting a
+ * UTF-8 sequence. */
+static void radio_copy_text(char *out, size_t size, const char *src, int bar)
+{
+  size_t len = 0U;
+  size_t i;
+
+  if (size == 0U) {
+    return;
+  }
+  if (!src) {
+    src = "";
+  }
+  while (len < size - 1U && src[len] != '\0') {
+    len++;
+  }
+  if (src[len] != '\0') {
+    len = radio_utf8_cut(src, len);
+  }
+  for (i = 0U; i < len; i++) {
+    unsigned char c = (unsigned char)src[i];
+
+    out[i] = (c < 0x20U || c == 0x7FU || (bar && c == '|')) ? ' ' : (char)c;
+  }
+  out[len] = '\0';
+}
+
+/* radio-browser station ids are UUIDs. Anything else cannot be resolved
+ * or kept as a favourite. */
+static int radio_valid_uuid(const char *s)
+{
+  size_t n;
+
+  if (!s) {
+    return 0;
+  }
+  for (n = 0U; s[n] != '\0'; n++) {
+    char c = s[n];
+
+    if (n + 1U >= RADIO_UUID_MAX ||
+        !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+          (c >= 'A' && c <= 'Z') || c == '-')) {
+      return 0;
+    }
+  }
+  return n != 0U;
+}
+
 static void radio_format_station_subtitle(const ZZPlayHost *host,
                                           const char *codec,
                                           const char *bitrate,
@@ -175,28 +248,31 @@ static void radio_format_station_subtitle(const ZZPlayHost *host,
   const char *cd = (codec && *codec) ? codec : "unknown";
   const char *ct = (country && *country) ? country : "";
   const char *br = (bitrate && *bitrate && strcmp(bitrate, "0") != 0) ? bitrate : "";
+  char text[256];
+  const uint32_t ts = (uint32_t)sizeof(text);
 
   if (!playable) {
     if (*br && *ct) {
-      host->format(out, out_size, "Unsupported (%s), %s kbps, %s", cd, br, ct);
+      host->format(text, ts, "Unsupported (%s), %s kbps, %s", cd, br, ct);
     } else if (*ct) {
-      host->format(out, out_size, "Unsupported (%s), %s", cd, ct);
+      host->format(text, ts, "Unsupported (%s), %s", cd, ct);
     } else if (*br) {
-      host->format(out, out_size, "Unsupported (%s), %s kbps", cd, br);
+      host->format(text, ts, "Unsupported (%s), %s kbps", cd, br);
     } else {
-      host->format(out, out_size, "Unsupported (%s)", cd);
+      host->format(text, ts, "Unsupported (%s)", cd);
     }
   } else {
     if (*br && *ct) {
-      host->format(out, out_size, "%s, %s kbps, %s", cd, br, ct);
+      host->format(text, ts, "%s, %s kbps, %s", cd, br, ct);
     } else if (*ct) {
-      host->format(out, out_size, "%s, %s", cd, ct);
+      host->format(text, ts, "%s, %s", cd, ct);
     } else if (*br) {
-      host->format(out, out_size, "%s, %s kbps", cd, br);
+      host->format(text, ts, "%s, %s kbps", cd, br);
     } else {
-      host->format(out, out_size, "%s", cd);
+      host->format(text, ts, "%s", cd);
     }
   }
+  radio_copy_text(out, out_size, text, 0);
 }
 
 static void parse_subtitle(const char *sub, char *codec, size_t codec_sz,
@@ -383,13 +459,15 @@ static int xml_data_feed_cb(void *user, const uint8_t *bytes, uint32_t len)
   return 0;
 }
 
-/* Stations collector */
+/* Stations collector. `saw_root` tells a directory reply (an empty
+ * <result/> included) from an error page or garbage. */
 typedef struct StationCollector {
   RadioContext *rc;
   const ZZPlayHost *host;
   const ZZPlayItemSink *sink;
   uint32_t count;
   int stopped;
+  int saw_root;
 } StationCollector;
 
 static int station_xml_start(void *user, const char *name,
@@ -408,6 +486,9 @@ static int station_xml_start(void *user, const char *name,
   int playable;
   (void)truncated;
 
+  if (strcmp(name, "result") == 0) {
+    col->saw_root = 1;
+  }
   if (col->stopped || strcmp(name, "station") != 0) {
     return col->stopped;
   }
@@ -418,12 +499,12 @@ static int station_xml_start(void *user, const char *name,
   bitrate = col->host->xml_attr(attrs, attr_count, "bitrate");
   country = col->host->xml_attr(attrs, attr_count, "country");
 
-  if (!uuid || !st_name) {
+  if (!radio_valid_uuid(uuid) || !st_name) {
     return 0;
   }
 
   st_name = radio_trim(st_name);
-  col->host->format(title, sizeof(title), "%s", st_name);
+  radio_copy_text(title, sizeof(title), st_name, 0);
 
   playable = radio_is_codec_supported(codec);
   radio_format_station_subtitle(col->host, codec, bitrate, country, playable,
@@ -455,6 +536,7 @@ typedef struct FolderCollector {
   const char *prefix; /* "tag:" or "country:" */
   uint32_t count;
   int stopped;
+  int saw_root;
 } FolderCollector;
 
 static int folder_xml_start(void *user, const char *name,
@@ -470,6 +552,9 @@ static int folder_xml_start(void *user, const char *name,
   ZZPlayProviderItem item;
   (void)truncated;
 
+  if (strcmp(name, "result") == 0) {
+    col->saw_root = 1;
+  }
   if (col->stopped) {
     return 1;
   }
@@ -487,10 +572,21 @@ static int folder_xml_start(void *user, const char *name,
   }
 
   elem_name = radio_trim(elem_name);
-  col->host->format(id, sizeof(id), "%s%s", col->prefix, elem_name);
-  col->host->format(title, sizeof(title), "%s", elem_name);
+  {
+    /* The id comes back to list(); a cut one would name another folder. */
+    int n = col->host->format(id, sizeof(id), "%s%s", col->prefix, elem_name);
+
+    if (n < 0 || (uint32_t)n >= sizeof(id)) {
+      return 0;
+    }
+  }
+  radio_copy_text(title, sizeof(title), elem_name, 0);
   if (stationcount && *stationcount) {
-    col->host->format(subtitle, sizeof(subtitle), "%s stations", stationcount);
+    char count_text[ZZPLAY_PROVIDER_TEXT_MAX];
+
+    col->host->format(count_text, sizeof(count_text), "%s stations",
+                      stationcount);
+    radio_copy_text(subtitle, sizeof(subtitle), count_text, 0);
   } else {
     subtitle[0] = '\0';
   }
@@ -522,6 +618,7 @@ typedef struct ResolveCollector {
   char title[ZZPLAY_PROVIDER_TEXT_MAX];
   char codec[32];
   int found;
+  int saw_root;
 } ResolveCollector;
 
 static int resolve_xml_start(void *user, const char *name,
@@ -536,6 +633,9 @@ static int resolve_xml_start(void *user, const char *name,
   const char *url_resolved;
   (void)truncated;
 
+  if (strcmp(name, "result") == 0) {
+    col->saw_root = 1;
+  }
   if (col->found || strcmp(name, "station") != 0) {
     return col->found;
   }
@@ -552,15 +652,21 @@ static int resolve_xml_start(void *user, const char *name,
 
   if (st_name) {
     st_name = radio_trim(st_name);
-    col->host->format(col->title, sizeof(col->title), "%s", st_name);
+    radio_copy_text(col->title, sizeof(col->title), st_name, 0);
   }
   if (codec) {
-    col->host->format(col->codec, sizeof(col->codec), "%s", codec);
+    radio_copy_text(col->codec, sizeof(col->codec), codec, 0);
+  }
+  if (!url_resolved || !*url_resolved) {
+    url_resolved = url;
   }
   if (url_resolved && *url_resolved) {
-    col->host->format(col->url, sizeof(col->url), "%s", url_resolved);
-  } else if (url && *url) {
-    col->host->format(col->url, sizeof(col->url), "%s", url);
+    /* A cut address would be another address: keep only one that fits. */
+    int n = col->host->format(col->url, sizeof(col->url), "%s", url_resolved);
+
+    if (n < 0 || (uint32_t)n >= sizeof(col->url)) {
+      col->url[0] = '\0';
+    }
   }
 
   col->found = 1;
@@ -613,7 +719,7 @@ static int list_favourites(RadioContext *rc, uint32_t start, uint32_t count,
     int playable = radio_is_codec_supported(rc->favs[i].codec);
     ZZPlayProviderItem item;
 
-    host->format(title, sizeof(title), "%s", rc->favs[i].name);
+    radio_copy_text(title, sizeof(title), rc->favs[i].name, 0);
     radio_format_station_subtitle(host, rc->favs[i].codec, rc->favs[i].bitrate,
                                   rc->favs[i].country, playable, subtitle,
                                   sizeof(subtitle));
@@ -635,6 +741,33 @@ static int list_favourites(RadioContext *rc, uint32_t start, uint32_t count,
     delivered++;
   }
 
+  return 1;
+}
+
+/* After a directory request: a failed transfer keeps the host's reason
+ * (or gets one), and a reply without the <result> root is an error page
+ * or garbage, not an empty directory. */
+static int radio_reply_ok(const ZZPlayHost *host, int ok, int status,
+                          int saw_root, char *err, uint32_t err_size)
+{
+  if (!ok) {
+    if (err && err_size > 0U && err[0] == '\0') {
+      if (status != 0) {
+        host->format(err, err_size, "The station directory answered HTTP %d",
+                     status);
+      } else {
+        host->format(err, err_size, "The station directory did not answer");
+      }
+    }
+    return 0;
+  }
+  if (!saw_root) {
+    if (err && err_size > 0U) {
+      host->format(err, err_size,
+                   "The station directory sent an unreadable reply");
+    }
+    return 0;
+  }
   return 1;
 }
 
@@ -675,7 +808,7 @@ static int fetch_and_scan_stations(RadioContext *rc, const char *url,
                       err_size);
   host->xml_close(host, xml);
 
-  return ok;
+  return radio_reply_ok(host, ok, status, col.saw_root, err, err_size);
 }
 
 static int fetch_and_scan_folders(RadioContext *rc, const char *url,
@@ -716,7 +849,7 @@ static int fetch_and_scan_folders(RadioContext *rc, const char *url,
                       err_size);
   host->xml_close(host, xml);
 
-  return ok;
+  return radio_reply_ok(host, ok, status, col.saw_root, err, err_size);
 }
 
 static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t count,
@@ -789,7 +922,12 @@ static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t coun
 
   if (strncmp(node, "tag:", 4) == 0) {
     char escaped[128];
-    host->url_escape(node + 4, escaped, sizeof(escaped));
+    if (host->url_escape(node + 4, escaped, sizeof(escaped)) == 0U) {
+      if (err && err_size > 0U) {
+        host->format(err, err_size, "The tag name is empty or too long");
+      }
+      return 0;
+    }
     host->format(url, sizeof(url),
                  "%s/stations/bytag/%s?order=votes&reverse=true&offset=%u&limit=%u&hidebroken=true",
                  RADIO_API_BASE, escaped, start, count);
@@ -805,7 +943,12 @@ static int radio_list(void *ctx, const char *node, uint32_t start, uint32_t coun
 
   if (strncmp(node, "country:", 8) == 0) {
     char escaped[128];
-    host->url_escape(node + 8, escaped, sizeof(escaped));
+    if (host->url_escape(node + 8, escaped, sizeof(escaped)) == 0U) {
+      if (err && err_size > 0U) {
+        host->format(err, err_size, "The country name is empty or too long");
+      }
+      return 0;
+    }
     host->format(url, sizeof(url),
                  "%s/stations/bycountry/%s?order=votes&reverse=true&offset=%u&limit=%u&hidebroken=true",
                  RADIO_API_BASE, escaped, start, count);
@@ -831,7 +974,13 @@ static int radio_search(void *ctx, const char *query, const ZZPlayItemSink *sink
   }
   host = rc->host;
 
-  host->url_escape(query, escaped, sizeof(escaped));
+  if (host->url_escape(query, escaped, sizeof(escaped)) == 0U &&
+      query[0] != '\0') {
+    if (err && err_size > 0U) {
+      host->format(err, err_size, "The search text is too long");
+    }
+    return 0;
+  }
   host->format(url, sizeof(url),
                "%s/stations/search?name=%s&hidebroken=true&order=votes&reverse=true&limit=%u",
                RADIO_API_BASE, escaped, RADIO_SEARCH_LIMIT);
@@ -857,6 +1006,12 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
     return 0;
   }
   host = rc->host;
+  if (!radio_valid_uuid(item)) {
+    if (err && err_size > 0U) {
+      host->format(err, err_size, "Not a radio station id");
+    }
+    return 0;
+  }
 
   memset(out, 0, sizeof(*out));
   memset(&col, 0, sizeof(col));
@@ -886,13 +1041,20 @@ static int radio_resolve(void *ctx, const char *item, ZZPlayResolved *out,
                       err_size);
   host->xml_close(host, xml);
 
-  if (!ok) {
+  if (!radio_reply_ok(host, ok, status, col.saw_root, err, err_size)) {
     return 0;
   }
 
   if (!col.found) {
     if (err && err_size > 0U) {
       host->format(err, err_size, "Station not found");
+    }
+    return 0;
+  }
+
+  if (col.url[0] == '\0') {
+    if (err && err_size > 0U) {
+      host->format(err, err_size, "The station has no usable stream address");
     }
     return 0;
   }
@@ -944,6 +1106,12 @@ static int radio_favourite(void *ctx, const ZZPlayProviderItem *item, int add,
       }
       return 0;
     }
+    if (!radio_valid_uuid(item->id)) {
+      if (err && err_size > 0U) {
+        host->format(err, err_size, "Not a radio station id");
+      }
+      return 0;
+    }
 
     parse_subtitle(item->subtitle, codec, sizeof(codec), bitrate, sizeof(bitrate),
                    country, sizeof(country));
@@ -951,25 +1119,18 @@ static int radio_favourite(void *ctx, const ZZPlayProviderItem *item, int add,
     name = item->title ? item->title : "";
     name = radio_trim(name);
 
-    strncpy(rc->favs[rc->fav_count].uuid, item->id,
-            sizeof(rc->favs[0].uuid) - 1U);
-    rc->favs[rc->fav_count].uuid[sizeof(rc->favs[0].uuid) - 1U] = '\0';
-
-    strncpy(rc->favs[rc->fav_count].name, name,
-            sizeof(rc->favs[0].name) - 1U);
-    rc->favs[rc->fav_count].name[sizeof(rc->favs[0].name) - 1U] = '\0';
-
-    strncpy(rc->favs[rc->fav_count].codec, codec,
-            sizeof(rc->favs[0].codec) - 1U);
-    rc->favs[rc->fav_count].codec[sizeof(rc->favs[0].codec) - 1U] = '\0';
-
-    strncpy(rc->favs[rc->fav_count].bitrate, bitrate,
-            sizeof(rc->favs[0].bitrate) - 1U);
-    rc->favs[rc->fav_count].bitrate[sizeof(rc->favs[0].bitrate) - 1U] = '\0';
-
-    strncpy(rc->favs[rc->fav_count].country, country,
-            sizeof(rc->favs[0].country) - 1U);
-    rc->favs[rc->fav_count].country[sizeof(rc->favs[0].country) - 1U] = '\0';
+    /* Stored as one prefs line of '|'-separated fields: a line break or a
+     * '|' in a field would corrupt it. */
+    radio_copy_text(rc->favs[rc->fav_count].uuid,
+                    sizeof(rc->favs[0].uuid), item->id, 1);
+    radio_copy_text(rc->favs[rc->fav_count].name,
+                    sizeof(rc->favs[0].name), name, 1);
+    radio_copy_text(rc->favs[rc->fav_count].codec,
+                    sizeof(rc->favs[0].codec), codec, 1);
+    radio_copy_text(rc->favs[rc->fav_count].bitrate,
+                    sizeof(rc->favs[0].bitrate), bitrate, 1);
+    radio_copy_text(rc->favs[rc->fav_count].country,
+                    sizeof(rc->favs[0].country), country, 1);
 
     host->format(key, sizeof(key), "fav_%u", rc->fav_count);
     host->format(val, sizeof(val), "%s|%s|%s|%s|%s",

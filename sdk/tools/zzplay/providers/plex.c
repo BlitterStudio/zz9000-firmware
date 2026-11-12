@@ -241,6 +241,99 @@ static int plex_is_safe_token(const char *s)
   return 1;
 }
 
+/* Longest ratingKey taken from a reply: "art:<key>" and friends fit a
+ * 48-byte id. */
+#define PLEX_KEY_MAX 40U
+
+/* A ratingKey: short, and only characters that need no escaping in a
+ * request path or an id. */
+static int plex_is_key(const char *s)
+{
+  size_t n;
+
+  if (!s) return 0;
+  for (n = 0U; s[n] != '\0'; n++) {
+    char c = s[n];
+    if (n + 1U >= PLEX_KEY_MAX) return 0;
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+          (c >= 'A' && c <= 'Z') || c == '-' || c == '_' || c == '.')) {
+      return 0;
+    }
+  }
+  return n != 0U;
+}
+
+/* Length of the first `len` bytes of `s` without a UTF-8 sequence that a
+ * cut at `len` left incomplete. */
+static size_t plex_utf8_cut(const char *s, size_t len)
+{
+  size_t i = len;
+  size_t back = 0U;
+
+  while (i > 0U && back < 3U && ((unsigned char)s[i - 1U] & 0xC0U) == 0x80U) {
+    i--;
+    back++;
+  }
+  if (i > 0U) {
+    unsigned char lead = (unsigned char)s[i - 1U];
+    size_t need = lead >= 0xF0U ? 4U : lead >= 0xE0U ? 3U : lead >= 0xC0U ? 2U : 1U;
+
+    if (need > 1U && back + 1U < need) {
+      return i - 1U;
+    }
+  }
+  return len;
+}
+
+/* Copy text from a reply for showing: control characters become spaces
+ * and a longer text is cut without splitting a UTF-8 sequence. */
+static void plex_copy_text(char *out, size_t size, const char *src)
+{
+  size_t len = 0U;
+  size_t i;
+
+  if (size == 0U) return;
+  if (!src) src = "";
+  while (len < size - 1U && src[len] != '\0') {
+    len++;
+  }
+  if (src[len] != '\0') {
+    len = plex_utf8_cut(src, len);
+  }
+  for (i = 0U; i < len; i++) {
+    unsigned char c = (unsigned char)src[i];
+    out[i] = (c < 0x20U || c == 0x7FU) ? ' ' : (char)c;
+  }
+  out[len] = '\0';
+}
+
+#define PLEX_TOKEN_REJECTED \
+  "Plex rejected the token; clear Token in Settings to sign in again"
+#define PLEX_SIGNIN_REJECTED "plex.tv rejected the sign-in. Start sign-in again."
+
+/* The outcome of a request to the Plex server: 401 means the token is no
+ * longer accepted, any other status but 200 is named, and a transfer
+ * that failed keeps the host's reason (or gets one). */
+static int plex_reply_ok(const ZZPlayHost *host, int ok, int status,
+                         char *err, uint32_t err_size)
+{
+  if (status == 401) {
+    host->format(err, err_size, "%s", PLEX_TOKEN_REJECTED);
+    return 0;
+  }
+  if (status != 200 && status != 0) {
+    host->format(err, err_size, "Plex answered HTTP %d", status);
+    return 0;
+  }
+  if (!ok) {
+    if (err && err_size > 0U && err[0] == '\0') {
+      host->format(err, err_size, "The Plex server did not answer");
+    }
+    return 0;
+  }
+  return 1;
+}
+
 /* Recognises "https://A-B-C-D.<hash>.plex.direct:<port>" and writes
  * "http://A.B.C.D:<port>" into out. IPv4 addresses only; anything else
  * returns 0 and leaves out untouched. */
@@ -360,17 +453,22 @@ static int plex_plexdirect_plain(const ZZPlayHost *host, const char *url,
   return 1;
 }
 
+/* Returns 0 when the address does not fit: a cut one asks for another
+ * resource. */
 static int plex_build_url(const PlexContext *ctx, const char *path, char *out, uint32_t size)
 {
+  int n;
+
   if (!ctx || !path || !out || size == 0) return 0;
   if (path[0] == 'h' && path[1] == 't' && path[2] == 't' && path[3] == 'p') {
-    plex_strlcpy(out, path, size);
-    return 1;
+    return plex_strlcpy(out, path, size) < size;
   }
   if (path[0] == '/') {
-    return ctx->host->format(out, size, "%s%s", ctx->server, path) >= 0;
+    n = ctx->host->format(out, size, "%s%s", ctx->server, path);
+  } else {
+    n = ctx->host->format(out, size, "%s/%s", ctx->server, path);
   }
-  return ctx->host->format(out, size, "%s/%s", ctx->server, path) >= 0;
+  return n >= 0 && (uint32_t)n < size;
 }
 
 static int plex_format_headers(const PlexContext *ctx, uint32_t start, uint32_t count,
@@ -423,9 +521,18 @@ static int plex_pin_xml_start(void *user, const char *name,
     const char *code = st->host->xml_attr(attrs, count, "code");
     const char *tok = st->host->xml_attr(attrs, count, "authToken");
     const char *exp = st->host->xml_attr(attrs, count, "expiresIn");
-    if (id) plex_strlcpy(st->id, id, sizeof(st->id));
-    if (code) plex_strlcpy(st->code, code, sizeof(st->code));
-    if (tok) plex_strlcpy(st->auth_token, tok, sizeof(st->auth_token));
+    /* The id goes into a request path and the code is shown: anything
+     * odd counts as missing. A token that is not a plain token would
+     * break the header it is sent in. */
+    if (plex_is_key(id) && plex_strlen(id) < sizeof(st->id)) {
+      plex_strlcpy(st->id, id, sizeof(st->id));
+    }
+    if (plex_is_key(code) && plex_strlen(code) < sizeof(st->code)) {
+      plex_strlcpy(st->code, code, sizeof(st->code));
+    }
+    if (plex_is_safe_token(tok) && plex_strlen(tok) < sizeof(st->auth_token)) {
+      plex_strlcpy(st->auth_token, tok, sizeof(st->auth_token));
+    }
     if (exp) plex_strlcpy(st->expires_in, exp, sizeof(st->expires_in));
   }
   return 0;
@@ -450,11 +557,11 @@ static int plex_resources_xml_start(void *user, const char *name,
 
         plex_memset(srv, 0, sizeof(*srv));
         if (rname) {
-          plex_strlcpy(srv->name, rname, sizeof(srv->name));
+          plex_copy_text(srv->name, sizeof(srv->name), rname);
         } else {
           plex_strlcpy(srv->name, "Plex Media Server", sizeof(srv->name));
         }
-        if (tok) {
+        if (plex_is_safe_token(tok) && plex_strlen(tok) < sizeof(srv->access_token)) {
           plex_strlcpy(srv->access_token, tok, sizeof(srv->access_token));
         }
         if (owned && plex_strcmp(owned, "1") == 0) {
@@ -529,10 +636,13 @@ static int plex_sections_xml_start(void *user, const char *name,
     if (type && plex_strcmp(type, "artist") == 0) {
       const char *key = st->host->xml_attr(attrs, count, "key");
       const char *title = st->host->xml_attr(attrs, count, "title");
-      if (key && title && st->ctx->section_count < PLEX_MAX_SECTIONS) {
+      /* The key goes into ids and request paths: a cut or odd one would
+       * name another library. */
+      if (plex_is_key(key) && plex_strlen(key) < PLEX_SECTION_KEY_MAX &&
+          title && st->ctx->section_count < PLEX_MAX_SECTIONS) {
         PlexSection *sec = &st->ctx->sections[st->ctx->section_count++];
         plex_strlcpy(sec->key, key, sizeof(sec->key));
-        plex_strlcpy(sec->title, title, sizeof(sec->title));
+        plex_copy_text(sec->title, sizeof(sec->title), title);
       }
     }
   }
@@ -583,15 +693,7 @@ static int plex_load_sections(PlexContext *ctx, char *err, uint32_t err_size)
                            &feed, &status, err, err_size);
   ctx->host->xml_close(ctx->host, xml);
 
-  if (status == 401) {
-    ctx->host->format(err, err_size, "Plex rejected the token");
-    return 0;
-  }
-  if (status != 200 && status != 0) {
-    ctx->host->format(err, err_size, "Plex answered HTTP %d", status);
-    return 0;
-  }
-  if (!ok) {
+  if (!plex_reply_ok(ctx->host, ok, status, err, err_size)) {
     return 0;
   }
 
@@ -601,18 +703,26 @@ static int plex_load_sections(PlexContext *ctx, char *err, uint32_t err_size)
 
 /* --- Item browsing and search XML parsing --- */
 
-/* `playable` marks a collection ZZPlay can play whole (an artist, an
- * album, a playlist); letter, genre and library folders pass 0. */
-static int plex_emit_folder(PlexItemXmlState *st, const char *id,
-                            const char *title, int playable)
+/* Hand one row to the sink. `playable` marks a collection ZZPlay can play
+ * whole (an artist, an album, a playlist); letter, genre and library
+ * folders pass 0. Title and subtitle come from the reply and are cleaned
+ * and cut here. */
+static int plex_emit(PlexItemXmlState *st, const char *id, const char *title,
+                     const char *subtitle, uint32_t kind, int playable,
+                     uint32_t duration_ms)
 {
   ZZPlayProviderItem it;
+  char title_buf[ZZPLAY_PROVIDER_TEXT_MAX];
+  char sub_buf[ZZPLAY_PROVIDER_TEXT_MAX];
 
+  plex_copy_text(title_buf, sizeof(title_buf), title);
+  plex_copy_text(sub_buf, sizeof(sub_buf), subtitle);
   plex_memset(&it, 0, sizeof(it));
   it.id = id;
-  it.title = title;
-  it.subtitle = "";
-  it.kind = ZZPLAY_ITEM_FOLDER;
+  it.title = title_buf;
+  it.subtitle = sub_buf;
+  it.duration_ms = duration_ms;
+  it.kind = kind;
   it.playable = playable ? 1U : 0U;
   if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
     st->stopped = 1;
@@ -621,12 +731,25 @@ static int plex_emit_folder(PlexItemXmlState *st, const char *id,
   return 0;
 }
 
+/* "<prefix><key>" into `id`. Returns 0 when it does not fit: a cut id
+ * would open another folder. */
+static int plex_make_id(const ZZPlayHost *host, char *id, uint32_t size,
+                        const char *prefix, const char *key)
+{
+  int n = host->format(id, size, "%s%s", prefix, key);
+
+  return n >= 0 && (uint32_t)n < size;
+}
+
 static int plex_item_xml_start(void *user, const char *name,
                                const ZZPlayHostXmlAttr *attrs,
                                uint32_t count, int truncated)
 {
   PlexItemXmlState *st = (PlexItemXmlState *)user;
   const ZZPlayHost *host = st->ctx->host;
+  /* Subtitles are put together here, then cleaned and cut by plex_emit. */
+  char text[256];
+  char id[ZZPLAY_PROVIDER_TEXT_MAX];
   (void)truncated;
 
   if (st->stopped) return 1;
@@ -648,27 +771,28 @@ static int plex_item_xml_start(void *user, const char *name,
       const char *key = host->xml_attr(attrs, count, "key");
       const char *title = host->xml_attr(attrs, count, "title");
       const char *size = host->xml_attr(attrs, count, "size");
-      char id[96];
-      char title_buf[96];
 
-      if (!key || !title) return 0;
-      host->format(id, sizeof(id), "%s%s", st->folder_prefix, key);
-      if (size && size[0] != '\0') {
-        host->format(title_buf, sizeof(title_buf), "%s (%lu)", title,
-                     (unsigned long)plex_parse_uint(size));
-      } else {
-        plex_strlcpy(title_buf, title, sizeof(title_buf));
+      /* The key is pasted into a request path when the folder opens. */
+      if (!title || !plex_is_safe_token(key) ||
+          !plex_make_id(host, id, sizeof(id), st->folder_prefix, key)) {
+        return 0;
       }
-      return plex_emit_folder(st, id, title_buf, 0);
+      if (size && size[0] != '\0') {
+        host->format(text, sizeof(text), "%s (%lu)", title,
+                     (unsigned long)plex_parse_uint(size));
+        title = text;
+      }
+      return plex_emit(st, id, title, "", ZZPLAY_ITEM_FOLDER, 0, 0U);
     }
     if (st->mode == PLEX_FETCH_GENRES) {
       const char *key = host->xml_attr(attrs, count, "key");
       const char *title = host->xml_attr(attrs, count, "title");
-      char id[96];
 
-      if (!key || !title) return 0;
-      host->format(id, sizeof(id), "%s%s", st->folder_prefix, key);
-      return plex_emit_folder(st, id, title, 0);
+      if (!title || !plex_is_safe_token(key) ||
+          !plex_make_id(host, id, sizeof(id), st->folder_prefix, key)) {
+        return 0;
+      }
+      return plex_emit(st, id, title, "", ZZPLAY_ITEM_FOLDER, 0, 0U);
     }
     {
       const char *type = host->xml_attr(attrs, count, "type");
@@ -676,85 +800,59 @@ static int plex_item_xml_start(void *user, const char *name,
       const char *title = host->xml_attr(attrs, count, "title");
 
       if (!title) title = "";
-      if (!rk) rk = "";
+      /* Without a usable ratingKey the row could not be opened. */
+      if (!plex_is_key(rk)) return 0;
 
       if (type && plex_strcmp(type, "artist") == 0) {
-        char id[48];
-
-        host->format(id, sizeof(id), "art:%s", rk);
-        return plex_emit_folder(st, id, title, 1);
+        (void)plex_make_id(host, id, sizeof(id), "art:", rk);
+        return plex_emit(st, id, title, "", ZZPLAY_ITEM_FOLDER, 1, 0U);
       }
       if (type && plex_strcmp(type, "album") == 0) {
-        char id[48];
         const char *year = host->xml_attr(attrs, count, "year");
         const char *parent = host->xml_attr(attrs, count, "parentTitle");
-        char sub[96];
 
-        host->format(id, sizeof(id), "alb:%s", rk);
-        sub[0] = '\0';
+        (void)plex_make_id(host, id, sizeof(id), "alb:", rk);
+        text[0] = '\0';
         if (parent && parent[0] && year && year[0]) {
-          host->format(sub, sizeof(sub), "%s - %s", parent, year);
+          host->format(text, sizeof(text), "%s - %s", parent, year);
         } else if (year && year[0]) {
-          plex_strlcpy(sub, year, sizeof(sub));
+          plex_strlcpy(text, year, sizeof(text));
         } else if (parent && parent[0]) {
-          plex_strlcpy(sub, parent, sizeof(sub));
+          plex_strlcpy(text, parent, sizeof(text));
         }
-        {
-          ZZPlayProviderItem it;
-
-          plex_memset(&it, 0, sizeof(it));
-          it.id = id;
-          it.title = title;
-          it.subtitle = sub;
-          it.kind = ZZPLAY_ITEM_FOLDER;
-          it.playable = 1; /* an album is a collection */
-          if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
-            st->stopped = 1;
-            return 1;
-          }
-        }
-        return 0;
+        /* An album is a collection. */
+        return plex_emit(st, id, title, text, ZZPLAY_ITEM_FOLDER, 1, 0U);
       }
     }
   } else if (plex_strcmp(name, "Playlist") == 0) {
     const char *rk = host->xml_attr(attrs, count, "ratingKey");
     const char *title = host->xml_attr(attrs, count, "title");
-    char id[48];
 
-    host->format(id, sizeof(id), "pl:%s", rk ? rk : "");
-    return plex_emit_folder(st, id, title ? title : "", 1);
+    if (!plex_is_key(rk)) return 0;
+    (void)plex_make_id(host, id, sizeof(id), "pl:", rk);
+    return plex_emit(st, id, title ? title : "", "", ZZPLAY_ITEM_FOLDER, 1, 0U);
   } else if (plex_strcmp(name, "Track") == 0) {
     const char *rk = host->xml_attr(attrs, count, "ratingKey");
     const char *title = host->xml_attr(attrs, count, "title");
     const char *artist = host->xml_attr(attrs, count, "grandparentTitle");
     const char *album = host->xml_attr(attrs, count, "parentTitle");
     const char *dur = host->xml_attr(attrs, count, "duration");
-    char sub[96];
-    ZZPlayProviderItem it;
 
+    /* The id is what resolve() gets back. */
+    if (!plex_is_key(rk)) return 0;
     if (!artist || artist[0] == '\0') {
       artist = host->xml_attr(attrs, count, "originalTitle");
     }
-    sub[0] = '\0';
+    text[0] = '\0';
     if (artist && album && artist[0] && album[0]) {
-      host->format(sub, sizeof(sub), "%s - %s", artist, album);
+      host->format(text, sizeof(text), "%s - %s", artist, album);
     } else if (artist && artist[0]) {
-      host->format(sub, sizeof(sub), "%s", artist);
+      plex_strlcpy(text, artist, sizeof(text));
     } else if (album && album[0]) {
-      host->format(sub, sizeof(sub), "%s", album);
+      plex_strlcpy(text, album, sizeof(text));
     }
-
-    plex_memset(&it, 0, sizeof(it));
-    it.id = rk ? rk : "";
-    it.title = title ? title : "";
-    it.subtitle = sub;
-    it.duration_ms = dur ? plex_parse_uint(dur) : 0;
-    it.kind = ZZPLAY_ITEM_TRACK;
-    it.playable = 1;
-    if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
-      st->stopped = 1;
-      return 1;
-    }
+    return plex_emit(st, rk, title ? title : "", text, ZZPLAY_ITEM_TRACK, 1,
+                     dur ? plex_parse_uint(dur) : 0U);
   }
   return 0;
 }
@@ -823,15 +921,7 @@ static int plex_fetch_list(PlexContext *ctx, const PlexListOpts *opts,
     return 1;
   }
 
-  if (status == 401) {
-    ctx->host->format(err, err_size, "Plex rejected the token");
-    return 0;
-  }
-  if (status != 200 && status != 0) {
-    ctx->host->format(err, err_size, "Plex answered HTTP %d", status);
-    return 0;
-  }
-  if (!ok) {
+  if (!plex_reply_ok(ctx->host, ok, status, err, err_size)) {
     return 0;
   }
 
@@ -887,10 +977,10 @@ static int plex_resolve_xml_start(void *user, const char *name,
       artist = st->host->xml_attr(attrs, count, "originalTitle");
     }
     if (title && st->title[0] == '\0') {
-      plex_strlcpy(st->title, title, sizeof(st->title));
+      plex_copy_text(st->title, sizeof(st->title), title);
     }
     if (artist && st->artist[0] == '\0') {
-      plex_strlcpy(st->artist, artist, sizeof(st->artist));
+      plex_copy_text(st->artist, sizeof(st->artist), artist);
     }
     if (dur && st->duration[0] == '\0') {
       plex_strlcpy(st->duration, dur, sizeof(st->duration));
@@ -906,7 +996,9 @@ static int plex_resolve_xml_start(void *user, const char *name,
     }
   } else if (plex_strcmp(name, "Part") == 0) {
     const char *key = st->host->xml_attr(attrs, count, "key");
-    if (key && st->part_key[0] == '\0') {
+    /* A cut part key would ask for another file. */
+    if (key && st->part_key[0] == '\0' &&
+        plex_strlen(key) < sizeof(st->part_key)) {
       plex_strlcpy(st->part_key, key, sizeof(st->part_key));
     }
   }
@@ -984,12 +1076,16 @@ static int plex_fetch_resources(PlexContext *ctx, const char *account_token,
   ctx->host->xml_close(ctx->host, xml);
 
   if (status == 401) {
-    ctx->host->format(err, err_size, "Plex rejected the token");
+    ctx->host->format(err, err_size, "%s", PLEX_SIGNIN_REJECTED);
     return 0;
   }
   if (!ok || status != 200) {
     if (err && err_size > 0U && err[0] == '\0') {
-      ctx->host->format(err, err_size, "Plex answered HTTP %d", status);
+      if (status != 0) {
+        ctx->host->format(err, err_size, "plex.tv answered HTTP %d", status);
+      } else {
+        ctx->host->format(err, err_size, "plex.tv did not answer");
+      }
     }
     return 0;
   }
@@ -1201,6 +1297,11 @@ static int plex_list_library_top(PlexContext *ctx, uint32_t start, uint32_t coun
     return 0;
   }
 
+  if (ctx->section_count == 0) {
+    /* Also what an answer that is not a library list looks like. */
+    ctx->host->format(err, err_size, "The Plex server has no music library");
+    return 0;
+  }
   if (ctx->section_count == 1) {
     return plex_emit_library_views(ctx, ctx->sections[0].key, start, count, sink, 1);
   }
@@ -1537,6 +1638,10 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
       ctx->host->format(err, err_size, "ZZPlay update required for plex.tv sign-in");
       return 0;
     }
+    if (!plex_is_key(pin_id)) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
 
     account_token[0] = '\0';
     ctx->host->format(poll_url, sizeof(poll_url), "https://plex.tv/api/v2/pins/%s", pin_id);
@@ -1586,6 +1691,16 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
         }
       } else if (status == 404) {
         ctx->host->format(err, err_size, "The PIN has expired. Start sign-in again.");
+        return 0;
+      } else if (status == 401) {
+        ctx->host->format(err, err_size, "%s", PLEX_SIGNIN_REJECTED);
+        return 0;
+      } else if (!ok && status == 0) {
+        /* No answer at all (or the user stopped): polling on would only
+         * wait out the time limit. */
+        if (err && err_size > 0U && err[0] == '\0') {
+          ctx->host->format(err, err_size, "plex.tv did not answer");
+        }
         return 0;
       }
 
@@ -1819,26 +1934,22 @@ static int plex_list(void *ctx_in, const char *node, uint32_t start, uint32_t co
     return plex_list_search_group(ctx, node + 3, start, count, sink, err, err_size);
   }
 
-  if (plex_strncmp(node, "art:", 4) == 0) {
+  if (plex_strncmp(node, "art:", 4) == 0 || plex_strncmp(node, "alb:", 4) == 0 ||
+      plex_strncmp(node, "pl:", 3) == 0) {
+    /* Ids can come from a saved list or ARexx too: only a plain key goes
+     * into the request path. */
+    const char *rk = node + (node[0] == 'p' ? 3 : 4);
     char path[96];
     int stopped = 0;
-    ctx->host->format(path, sizeof(path), "/library/metadata/%s/children", node + 4);
-    return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
-                           &stopped, err, err_size);
-  }
 
-  if (plex_strncmp(node, "alb:", 4) == 0) {
-    char path[96];
-    int stopped = 0;
-    ctx->host->format(path, sizeof(path), "/library/metadata/%s/children", node + 4);
-    return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
-                           &stopped, err, err_size);
-  }
-
-  if (plex_strncmp(node, "pl:", 3) == 0) {
-    char path[96];
-    int stopped = 0;
-    ctx->host->format(path, sizeof(path), "/playlists/%s/items", node + 3);
+    if (!plex_is_key(rk)) {
+      ctx->host->format(err, err_size, "Unknown browse node");
+      return 0;
+    }
+    ctx->host->format(path, sizeof(path),
+                      node[0] == 'p' ? "/playlists/%s/items"
+                                     : "/library/metadata/%s/children",
+                      rk);
     return plex_list_items(ctx, path, start, count, count > 0, sink, 1,
                            &stopped, err, err_size);
   }
@@ -1952,6 +2063,21 @@ static int plex_search(void *ctx_in, const char *query, const ZZPlayItemSink *si
   return 1;
 }
 
+/* "Artist - Title" of the track metadata just read, cleaned and cut to
+ * the resolved title. */
+static void plex_resolved_title(const PlexContext *ctx, ZZPlayResolved *out)
+{
+  char text[sizeof(ctx->rst.artist) + sizeof(ctx->rst.title) + 4U];
+
+  if (ctx->rst.artist[0] != '\0') {
+    ctx->host->format(text, sizeof(text), "%s - %s", ctx->rst.artist,
+                      ctx->rst.title);
+  } else {
+    plex_strlcpy(text, ctx->rst.title, sizeof(text));
+  }
+  plex_copy_text(out->title, sizeof(out->title), text);
+}
+
 static int plex_fetch_metadata(PlexContext *ctx, const char *rk,
                                char *err, uint32_t err_size)
 {
@@ -1991,15 +2117,7 @@ static int plex_fetch_metadata(PlexContext *ctx, const char *rk,
                            &feed, &status, err, err_size);
   ctx->host->xml_close(ctx->host, xml);
 
-  if (status == 401) {
-    ctx->host->format(err, err_size, "Plex rejected the token");
-    return 0;
-  }
-  if (status != 200 && status != 0) {
-    ctx->host->format(err, err_size, "Plex answered HTTP %d", status);
-    return 0;
-  }
-  if (!ok) {
+  if (!plex_reply_ok(ctx->host, ok, status, err, err_size)) {
     return 0;
   }
 
@@ -2058,15 +2176,7 @@ static int plex_resolve_transcode(PlexContext *ctx, const char *rk,
   plex_format_headers(ctx, 0, 0, 0, headers, sizeof(headers));
   ok = ctx->host->http_get(ctx->host, out->url, headers, plex_discard_data_cb,
                            NULL, &status, err, err_size);
-  if (status == 401) {
-    ctx->host->format(err, err_size, "Plex rejected the token");
-    return 0;
-  }
-  if (status != 200 && status != 0) {
-    ctx->host->format(err, err_size, "Plex answered HTTP %d", status);
-    return 0;
-  }
-  if (!ok) {
+  if (!plex_reply_ok(ctx->host, ok, status, err, err_size)) {
     return 0;
   }
 
@@ -2078,11 +2188,7 @@ static int plex_resolve_transcode(PlexContext *ctx, const char *rk,
     return 0;
   }
 
-  if (ctx->rst.artist[0] != '\0') {
-    ctx->host->format(out->title, sizeof(out->title), "%s - %s", ctx->rst.artist, ctx->rst.title);
-  } else {
-    plex_strlcpy(out->title, ctx->rst.title, sizeof(out->title));
-  }
+  plex_resolved_title(ctx, out);
   out->duration_ms = plex_parse_uint(ctx->rst.duration);
   return 1;
 }
@@ -2102,7 +2208,7 @@ static int plex_resolve(void *ctx_in, const char *item, ZZPlayResolved *out,
   while (*rk == '/') {
     rk++;
   }
-  if (*rk == '\0') {
+  if (!plex_is_key(rk)) {
     ctx->host->format(err, err_size, "Invalid Plex item ID");
     return 0;
   }
@@ -2135,11 +2241,7 @@ static int plex_resolve(void *ctx_in, const char *item, ZZPlayResolved *out,
       return 0;
     }
 
-    if (ctx->rst.artist[0] != '\0') {
-      ctx->host->format(out->title, sizeof(out->title), "%s - %s", ctx->rst.artist, ctx->rst.title);
-    } else {
-      plex_strlcpy(out->title, ctx->rst.title, sizeof(out->title));
-    }
+    plex_resolved_title(ctx, out);
     out->duration_ms = plex_parse_uint(ctx->rst.duration);
     return 1;
   }

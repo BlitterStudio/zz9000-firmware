@@ -345,6 +345,12 @@ int zzplay_xml_feed(ZZPlayXml *xml, const char *data, size_t len)
     case X_AEQ:
       if (c == '"' || c == '\'') {
         xml->quote = c;
+        if (stored && xml->used >= sizeof(xml->text)) {
+          /* The name filled the buffer: no room for the value's
+           * terminator, so the attribute is dropped. */
+          stored = 0;
+          xml->truncated = 1;
+        }
         if (stored) {
           xml->value_start = xml->used;
           xml->value_off[xml->count] = xml->used;

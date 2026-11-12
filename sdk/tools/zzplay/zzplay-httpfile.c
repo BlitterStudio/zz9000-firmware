@@ -46,10 +46,13 @@ struct ZZPlayHttpFile {
   uint8_t win[HTTPFILE_WINDOW_BYTES];
 };
 
+/* A transport that gives no reason still leaves a message to show. */
 static void set_error(ZZPlayHttpFile *f, const char *text)
 {
   f->error = 1;
-  (void)snprintf(f->err, sizeof(f->err), "%s", text != NULL ? text : "");
+  (void)snprintf(f->err, sizeof(f->err), "%s",
+                 text != NULL && text[0] != '\0' ? text
+                                                 : "The network connection failed");
 }
 
 static void close_stream(ZZPlayHttpFile *f)
@@ -95,6 +98,9 @@ static int open_at(ZZPlayHttpFile *f, uint32_t from, int first)
   char err[HTTPFILE_ERROR_MAX];
 
   close_stream(f);
+  /* open() fills these only when it has something to say. */
+  memset(&head, 0, sizeof(head));
+  err[0] = '\0';
   f->stream = f->ops.open(f->ops.ctx, f->url, 1, from, &head, err,
                           sizeof(err));
   if (f->stream == NULL && head.status == 416 && from == 0U) {
@@ -161,6 +167,17 @@ static long fill_window(ZZPlayHttpFile *f)
       }
       if (got == 0U) {
         continue; /* the block held only metadata */
+      }
+    }
+    if (f->has_total) {
+      /* Bytes past the length the server named are not the resource. */
+      if (f->conn_pos >= f->total) {
+        f->stream_ended = 1;
+        return 0;
+      }
+      if (got > f->total - f->conn_pos) {
+        got = f->total - f->conn_pos;
+        f->stream_ended = 1;
       }
     }
     f->win_start = f->conn_pos;

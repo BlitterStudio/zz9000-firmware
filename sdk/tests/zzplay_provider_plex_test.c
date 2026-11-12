@@ -10,6 +10,8 @@
 #include <string.h>
 
 #include "../tools/zzplay/zzplay-provider.h"
+#include "../tools/zzplay/zzplay-browse-model.h"
+#include "../tools/zzplay/zzplay-tags.h"
 #include "../tools/zzplay/zzplay-xml.h"
 
 #define TEST_SERVER "http://192.168.1.10:32400"
@@ -157,6 +159,15 @@ static uint32_t g_missing_exclude_count = 0;
 static char g_last_request_url[512];
 static char g_last_request_headers[512];
 static char g_last_decision_url[1024];
+/* Faults: 1 = no answer with the transport's reason, 2 = no answer and no
+ * reason at all. */
+static int g_mock_unreachable = 0;
+/* A reply body for any GET whose URL contains g_mock_body_path; its
+ * length is strlen() when g_mock_body_len is 0. */
+static const char *g_mock_body = NULL;
+static const char *g_mock_body_path = NULL;
+static size_t g_mock_body_len = 0U;
+static uint32_t g_split_rng = 1U;
 
 static int load_fixture(const char *rel_path,
                         int (*data)(void *user, const uint8_t *bytes, uint32_t len),
@@ -265,6 +276,32 @@ static int fake_http_get(const ZZPlayHost *host, const char *url,
     }
   }
 
+  if (g_mock_unreachable) {
+    if (status) *status = 0;
+    if (g_mock_unreachable == 1 && err && err_size > 0U) {
+      snprintf(err, err_size, "Cannot connect to 192.168.1.10");
+    }
+    return 0;
+  }
+  if (g_mock_body != NULL && strstr(url, g_mock_body_path) != NULL) {
+    size_t len = g_mock_body_len != 0U ? g_mock_body_len : strlen(g_mock_body);
+    size_t pos = 0U;
+
+    if (status) *status = 200;
+    /* In pieces of any size, as a network delivers them. */
+    while (pos < len) {
+      size_t piece;
+
+      g_split_rng = g_split_rng * 1103515245U + 12345U;
+      piece = 1U + (size_t)((g_split_rng >> 16) % 300U);
+      if (piece > len - pos) piece = len - pos;
+      if (data && data(user, (const uint8_t *)g_mock_body + pos, (uint32_t)piece) != 0) {
+        break;
+      }
+      pos += piece;
+    }
+    return 1;
+  }
   if (g_mock_status != 200) {
     if (status) *status = g_mock_status;
     if (g_mock_status == 401) {
@@ -1614,28 +1651,479 @@ static void test_resolve_aac_transcode(const ZZPlayProvider *p)
   p->close(ctx);
 }
 
-static void test_error_401(const ZZPlayProvider *p)
+#define TOKEN_REJECTED \
+  "Plex rejected the token; clear Token in Settings to sign in again"
+
+static void *open_with_server(const ZZPlayProvider *p, const char *token)
 {
   char err[128];
-  ItemCollector col;
   void *ctx;
-  int ok;
 
   mock_prefs_clear();
   mock_pref_set("SERVER", TEST_SERVER);
-  mock_pref_set("TOKEN", "bad-token");
+  mock_pref_set("TOKEN", token);
   g_mock_status = 200;
-
   ctx = p->open(&g_test_host, err, sizeof(err));
   assert(ctx != NULL);
+  return ctx;
+}
 
+/* A revoked token answers 401 wherever it is used: the reason names the
+ * token and where to fix it, and nothing waits. */
+static void test_error_401(const ZZPlayProvider *p)
+{
+  static const char *const nodes[] = { "", "playlists", "alb:201",
+                                       "lib:3:art", "sq:10:paris" };
+  char err[128];
+  ItemCollector col;
+  ZZPlayResolved res;
+  void *ctx;
+  size_t i;
+  int ok;
+
+  ctx = open_with_server(p, "bad-token");
   g_mock_status = 401;
+  for (i = 0U; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
+    collector_init(&col, 0);
+    err[0] = '\0';
+    ok = p->list(ctx, nodes[i], 0, 50, &col.sink, err, sizeof(err));
+    assert(ok == 0);
+    assert(strcmp(err, TOKEN_REJECTED) == 0);
+  }
   collector_init(&col, 0);
-  ok = p->list(ctx, "playlists", 0, 50, &col.sink, err, sizeof(err));
+  ok = p->search(ctx, "paris", &col.sink, err, sizeof(err));
   assert(ok == 0);
-  assert(strcmp(err, "Plex rejected the token") == 0);
-
+  assert(strcmp(err, TOKEN_REJECTED) == 0);
+  ok = p->resolve(ctx, "302", &res, err, sizeof(err));
+  assert(ok == 0);
+  assert(strcmp(err, TOKEN_REJECTED) == 0);
   p->close(ctx);
+
+  /* plex.tv refusing the sign-in poll ends it at once instead of polling
+   * until the time limit. */
+  mock_prefs_clear();
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  g_mock_sleep_calls = 0;
+  collector_init(&col, 0);
+  ok = p->list(ctx, "signin:continue:736458353", 0, 50, &col.sink, err,
+               sizeof(err));
+  assert(ok == 0);
+  assert(strcmp(err, "plex.tv rejected the sign-in. Start sign-in again.") == 0);
+  assert(g_mock_sleep_calls == 0);
+  assert(g_pref_count == 1U); /* only CLIENTID was stored */
+
+  /* A PIN request plex.tv refuses. */
+  g_mock_status = 200;
+  g_mock_post_status = 401;
+  collector_init(&col, 0);
+  ok = p->list(ctx, "signin", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 0 && err[0] != '\0');
+  g_mock_post_status = 201;
+  p->close(ctx);
+  g_mock_status = 200;
+}
+
+/* The server cannot be reached: the transport's reason is passed on, and
+ * a transport without one still leaves a message. */
+static void test_unreachable_server(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  ZZPlayResolved res;
+  void *ctx;
+  int ok;
+
+  ctx = open_with_server(p, TEST_TOKEN);
+  g_mock_unreachable = 1;
+  collector_init(&col, 0);
+  ok = p->list(ctx, "", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 0 && strcmp(err, "Cannot connect to 192.168.1.10") == 0);
+  ok = p->resolve(ctx, "302", &res, err, sizeof(err));
+  assert(ok == 0 && strcmp(err, "Cannot connect to 192.168.1.10") == 0);
+
+  g_mock_unreachable = 2;
+  collector_init(&col, 0);
+  ok = p->list(ctx, "alb:201", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 0 && strcmp(err, "The Plex server did not answer") == 0);
+
+  /* plex.tv unreachable during the sign-in poll: no waiting it out. */
+  g_mock_unreachable = 1;
+  g_mock_sleep_calls = 0;
+  collector_init(&col, 0);
+  ok = p->list(ctx, "signin:continue:736458353", 0, 50, &col.sink, err,
+               sizeof(err));
+  assert(ok == 0 && strcmp(err, "Cannot connect to 192.168.1.10") == 0);
+  assert(g_mock_sleep_calls == 0);
+  g_mock_unreachable = 0;
+  p->close(ctx);
+}
+
+/* A server without a music library, or an answer that is no library list
+ * at all, says so instead of showing an empty top level. */
+static void test_empty_library(const ZZPlayProvider *p)
+{
+  static const char *const bodies[] = {
+    "<?xml version=\"1.0\"?><MediaContainer size=\"0\"></MediaContainer>",
+    "<html><body>Welcome to the router</body></html>",
+    ""
+  };
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  size_t i;
+  int ok;
+
+  ctx = open_with_server(p, TEST_TOKEN);
+  g_mock_body_path = "/library/sections";
+  for (i = 0U; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+    g_mock_body = bodies[i];
+    collector_init(&col, 0);
+    ok = p->list(ctx, "", 0, 50, &col.sink, err, sizeof(err));
+    assert(ok == 0);
+    assert(strcmp(err, "The Plex server has no music library") == 0);
+    assert(col.count == 0);
+  }
+  g_mock_body = NULL;
+  p->close(ctx);
+}
+
+static int has_control(const char *s)
+{
+  for (; *s != '\0'; s++) {
+    if ((unsigned char)*s < 0x20U || (unsigned char)*s == 0x7FU) return 1;
+  }
+  return 0;
+}
+
+/* No UTF-8 sequence left without its continuation bytes at the end. */
+static int utf8_tail_complete(const char *s)
+{
+  size_t len = strlen(s);
+  size_t back = 0U;
+
+  while (len > 0U && back < 3U && ((unsigned char)s[len - 1U] & 0xC0U) == 0x80U) {
+    len--;
+    back++;
+  }
+  if (len > 0U) {
+    unsigned char lead = (unsigned char)s[len - 1U];
+    size_t need = lead >= 0xF0U ? 4U : lead >= 0xE0U ? 3U : lead >= 0xC0U ? 2U : 1U;
+    return need == 1U || back + 1U >= need;
+  }
+  return 1;
+}
+
+/* Rows as the Browse worker stores them: copied, then shown in Latin-1. */
+typedef struct RowSink {
+  ZZPlayBrowseItem rows[16];
+  uint32_t count;
+} RowSink;
+
+static int row_sink_item(void *user, const ZZPlayProviderItem *item)
+{
+  RowSink *s = (RowSink *)user;
+  ZZPlayBrowseItem *dst;
+
+  /* What the module hands over already keeps to the limits. */
+  assert(strlen(item->id) < ZZPLAY_PROVIDER_TEXT_MAX);
+  assert(strlen(item->title) < ZZPLAY_PROVIDER_TEXT_MAX);
+  assert(strlen(item->subtitle) < ZZPLAY_PROVIDER_TEXT_MAX);
+  assert(!has_control(item->id) && !has_control(item->title) &&
+         !has_control(item->subtitle));
+  /* A cut text ends on a whole sequence; short invalid text is left to
+   * the Latin-1 conversion. */
+  assert(strlen(item->title) < 90U || utf8_tail_complete(item->title));
+  assert(strlen(item->subtitle) < 90U || utf8_tail_complete(item->subtitle));
+  if (s->count >= sizeof(s->rows) / sizeof(s->rows[0])) return 1;
+  dst = &s->rows[s->count++];
+  memset(dst, 0, sizeof(*dst));
+  snprintf(dst->id, sizeof(dst->id), "%s", item->id);
+  snprintf(dst->title, sizeof(dst->title), "%s", item->title);
+  zzplay_tags_text_to_latin1(dst->title);
+  snprintf(dst->subtitle, sizeof(dst->subtitle), "%s", item->subtitle);
+  zzplay_tags_text_to_latin1(dst->subtitle);
+  dst->kind = item->kind;
+  dst->playable = item->playable;
+  return 0;
+}
+
+/* Titles with control characters, far past every limit, or not UTF-8 at
+ * all come out cut and clean through the module and the Browse model;
+ * rows whose ids could not be used are left out. */
+static void test_odd_text(const ZZPlayProvider *p)
+{
+  static char body[16384];
+  static char long_title[4096];
+  char err[128];
+  RowSink rows;
+  ZZPlayItemSink sink;
+  ZZPlayResolved res;
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  void *ctx;
+  size_t i;
+  uint32_t k;
+  int ok;
+  int found = 0;
+
+  /* 1000 x "e acute" (two bytes each) and a final emoji. */
+  long_title[0] = '\0';
+  for (i = 0U; i < 1000U; i++) {
+    strcat(long_title, "\xc3\xa9");
+  }
+  strcat(long_title, "\xf0\x9f\x8e\xb5");
+  snprintf(body, sizeof(body),
+           "<MediaContainer size=\"6\">"
+           "<Directory type=\"album\" ratingKey=\"900\" title=\"%s\" "
+           "parentTitle=\"%s\" year=\"1999\"/>"
+           "<Track ratingKey=\"901\" title=\"Bell&#7;Tab&#9;Line&#10;End\" "
+           "grandparentTitle=\"Ctl\x01\x1f\x7f\" duration=\"1000\"/>"
+           "<Track ratingKey=\"902\" title=\"%s\" duration=\"2000\"/>"
+           "<Track ratingKey=\"903\" title=\"bad \xff\xfe \x80 \xc3\" "
+           "parentTitle=\"\xe2\x80\"/>"
+           "<Track ratingKey=\"1/../2\" title=\"unsafe key\"/>"
+           "<Track ratingKey=\"123456789012345678901234567890123456789012345\" "
+           "title=\"key too long\"/>"
+           "</MediaContainer>",
+           long_title, long_title, long_title);
+
+  ctx = open_with_server(p, TEST_TOKEN);
+  g_mock_body = body;
+  g_mock_body_path = "/library/metadata/77/children";
+  memset(&rows, 0, sizeof(rows));
+  sink.item = row_sink_item;
+  sink.total = NULL;
+  sink.user = &rows;
+  ok = p->list(ctx, "alb:77", 0, 50, &sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(rows.count == 4U);
+  assert(strcmp(rows.rows[0].id, "alb:900") == 0);
+  assert(strcmp(rows.rows[1].title, "Bell Tab Line End") == 0);
+  assert(strcmp(rows.rows[1].subtitle, "Ctl   ") == 0);
+  assert(strcmp(rows.rows[3].id, "903") == 0);
+
+  /* Into the Browse model and out as a playlist entry. */
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = rows.rows;
+  reply.item_count = rows.count;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  for (k = 0U; k < model.item_count; k++) {
+    char uri[ZZPLAY_PROVIDER_URL_MAX];
+    char title[24];
+
+    assert(strlen(model.items[k].title) < sizeof(model.items[k].title));
+    assert(!has_control(model.items[k].title));
+    if (strcmp(model.items[k].id, "902") != 0) continue;
+    found = 1;
+    assert(zzplay_browse_model_format_uri(&model, (int32_t)k, uri, sizeof(uri),
+                                          title, sizeof(title)));
+    assert(strcmp(uri, "plex://902") == 0);
+    assert(strlen(title) == sizeof(title) - 1U);
+  }
+  assert(found);
+  zzplay_browse_model_free(&model);
+
+  /* A resolved title gets the same treatment. */
+  snprintf(body, sizeof(body),
+           "<MediaContainer><Track title=\"%s&#10;x\" grandparentTitle=\"A&#13;B\">"
+           "<Media audioCodec=\"mp3\"><Part key=\"/library/parts/1/f.mp3\"/>"
+           "</Media></Track></MediaContainer>",
+           long_title);
+  g_mock_body_path = "/library/metadata/778";
+  ok = p->resolve(ctx, "778", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.title, "A B - ", 6) == 0);
+  assert(strlen(res.title) < sizeof(res.title));
+  assert(!has_control(res.title) && utf8_tail_complete(res.title));
+  g_mock_body = NULL;
+
+  /* Ids that are no plain ratingKey never reach a request. */
+  ok = p->resolve(ctx, "1/../2", &res, err, sizeof(err));
+  assert(ok == 0 && strcmp(err, "Invalid Plex item ID") == 0);
+  ok = p->list(ctx, "art:1?x=2", 0, 50, &sink, err, sizeof(err));
+  assert(ok == 0 && strcmp(err, "Unknown browse node") == 0);
+  p->close(ctx);
+}
+
+/* --- Mutated server replies --- */
+
+static uint32_t fz_state = 0x9E3779B9U;
+
+static uint32_t fz(void)
+{
+  fz_state ^= fz_state << 13;
+  fz_state ^= fz_state >> 17;
+  fz_state ^= fz_state << 5;
+  return fz_state;
+}
+
+/* A few random edits: byte changes, XML tokens, cuts and copies. */
+static size_t fz_mutate(char *buf, size_t len, size_t cap)
+{
+  static const char *const tokens[] = {
+    "<", ">", "/>", "</", "\"", "'", "=", "&amp;", "&#10;", "&#x1;", "&#0;",
+    "&#x10FFFF;", "<Track ratingKey=\"5\" title=\"", "<Directory key=\"",
+    "<MediaContainer totalSize=\"4294967295\">", "</MediaContainer>",
+    " type=\"artist\"", " type=\"album\"", " ratingKey=\"", "\n", "\xc3",
+    "\xff", " title=\"", "<Part key=\"", " audioCodec=\"mp3\"",
+    "<connection local=\"1\" uri=\"https://", "<resource provides=\"server\""
+  };
+  uint32_t edits = 1U + fz() % 6U;
+  uint32_t e;
+
+  for (e = 0U; e < edits; e++) {
+    size_t at = len != 0U ? fz() % (len + 1U) : 0U;
+
+    switch (fz() % 6U) {
+    case 0:
+      if (at < len) buf[at] = (char)fz();
+      break;
+    case 1:
+    case 2: {
+      const char *t = tokens[fz() % (sizeof(tokens) / sizeof(tokens[0]))];
+      size_t n = strlen(t);
+      if (len + n <= cap) {
+        memmove(buf + at + n, buf + at, len - at);
+        memcpy(buf + at, t, n);
+        len += n;
+      }
+      break;
+    }
+    case 3:
+      if (at < len) {
+        size_t n = 1U + fz() % (len - at);
+        memmove(buf + at, buf + at + n, len - at - n);
+        len -= n;
+      }
+      break;
+    case 4:
+      len = at;
+      break;
+    default:
+      if (at < len) {
+        size_t n = 1U + fz() % (len - at);
+        size_t to = fz() % (len + 1U);
+        if (n > 200U) n = 200U;
+        if (len + n <= cap) {
+          char copy[200];
+          memcpy(copy, buf + at, n);
+          memmove(buf + to + n, buf + to, len - to);
+          memcpy(buf + to, copy, n);
+          len += n;
+        }
+      }
+      break;
+    }
+  }
+  return len;
+}
+
+static size_t read_fixture(const char *name, char *buf, size_t cap)
+{
+  char path[256];
+  FILE *f;
+  size_t n;
+
+  snprintf(path, sizeof(path), "tests/fixtures/plex/%s", name);
+  f = fopen(path, "rb");
+  assert(f != NULL);
+  n = fread(buf, 1U, cap, f);
+  fclose(f);
+  return n;
+}
+
+static int fuzz_sink_item(void *user, const ZZPlayProviderItem *item)
+{
+  uint32_t *seen = (uint32_t *)user;
+
+  assert(item->id && item->title && item->subtitle);
+  assert(item->id[0] != '\0' && strlen(item->id) < ZZPLAY_PROVIDER_TEXT_MAX);
+  assert(strlen(item->title) < ZZPLAY_PROVIDER_TEXT_MAX);
+  assert(strlen(item->subtitle) < ZZPLAY_PROVIDER_TEXT_MAX);
+  assert(!has_control(item->id) && !has_control(item->title) &&
+         !has_control(item->subtitle));
+  (*seen)++;
+  return 0;
+}
+
+/* Each fixture mutated and served for the call that reads it; whatever
+ * comes back, rows keep to the limits and a failure has a reason. */
+static void test_reply_fuzz(const ZZPlayProvider *p)
+{
+  static const struct {
+    const char *fixture;
+    const char *path;   /* URL part the reply is served for */
+    const char *node;   /* list() node, or NULL for resolve("302") */
+  } cases[] = {
+    { "sections.xml", "/library/sections", "" },
+    { "albums.xml", "/library/metadata/201/children", "alb:201" },
+    { "tracks.xml", "/library/metadata/201/children", "alb:201" },
+    { "playlists.xml", "/playlists?playlistType", "playlists" },
+    { "firstchar-artists.xml", "/firstCharacter?", "lib:3:art" },
+    { "letter-a-artists.xml", "/firstCharacter/", "ltr:3:8:A" },
+    { "genres.xml", "/genre?", "lib:3:gen" },
+    { "metadata-302.xml", "/library/metadata/302", NULL },
+    { "resources.xml", "/api/v2/resources", "signin:continue:736458353" }
+  };
+  static char seeds[9][8192];
+  static size_t seed_len[9];
+  static char buf[24576];
+  ZZPlayItemSink sink;
+  ZZPlayResolved res;
+  uint32_t seen;
+  char err[128];
+  void *ctx;
+  uint32_t r;
+  size_t i;
+
+  for (i = 0U; i < 9U; i++) {
+    seed_len[i] = read_fixture(cases[i].fixture, seeds[i], sizeof(seeds[i]));
+  }
+  sink.item = fuzz_sink_item;
+  sink.total = NULL;
+  sink.user = &seen;
+  g_mock_poll_authenticated_after = 1;
+  for (r = 0U; r < 3000U; r++) {
+    size_t which = fz() % 9U;
+    int ok;
+
+    /* A fresh session each time: sign-in replaces the server and token. */
+    ctx = open_with_server(p, TEST_TOKEN);
+    memcpy(buf, seeds[which], seed_len[which]);
+    g_mock_body = buf;
+    g_mock_body_len = fz_mutate(buf, seed_len[which], sizeof(buf));
+    g_mock_body_path = cases[which].path;
+    if (g_mock_body_len == 0U) {
+      g_mock_body = "";  /* strlen() of "" is the empty reply */
+    }
+    seen = 0U;
+    err[0] = '\0';
+    if (cases[which].node != NULL) {
+      ok = p->list(ctx, cases[which].node, 0, 50, &sink, err, sizeof(err));
+    } else {
+      memset(&res, 0, sizeof(res));
+      ok = p->resolve(ctx, "302", &res, err, sizeof(err));
+      if (ok) {
+        assert(strlen(res.url) < sizeof(res.url) && res.url[0] != '\0');
+        assert(strlen(res.title) < sizeof(res.title));
+        assert(!has_control(res.title));
+      }
+    }
+    if (!ok) {
+      assert(err[0] != '\0' && strlen(err) < sizeof(err));
+    }
+    p->close(ctx);
+  }
+  g_mock_body = NULL;
+  g_mock_body_len = 0U;
 }
 
 static void test_headers_on_every_request(void)
@@ -1697,6 +2185,10 @@ int main(void)
   test_resolve_flac(p);
   test_resolve_aac_transcode(p);
   test_error_401(p);
+  test_unreachable_server(p);
+  test_empty_library(p);
+  test_odd_text(p);
+  test_reply_fuzz(p);
   test_headers_on_every_request();
 
   printf("All zzplay_provider_plex_test checks passed (%u HTTP requests verified).\n",

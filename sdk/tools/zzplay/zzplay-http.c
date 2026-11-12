@@ -694,6 +694,34 @@ size_t zzplay_icy_strip(ZZPlayIcy *icy, uint8_t *buf, size_t len)
   return out;
 }
 
+/* Length of the first `len` bytes of `text` without a UTF-8 sequence that
+ * the cut at `len` left incomplete. */
+static size_t utf8_cut(const char *text, size_t len)
+{
+  size_t i = len;
+  size_t back = 0U;
+
+  while (i > 0U && back < 3U && ((unsigned char)text[i - 1U] & 0xC0U) == 0x80U) {
+    i--;
+    back++;
+  }
+  if (i > 0U) {
+    unsigned char lead = (unsigned char)text[i - 1U];
+    size_t need = lead >= 0xF0U ? 4U : lead >= 0xE0U ? 3U : lead >= 0xC0U ? 2U : 1U;
+
+    if (need > 1U && back + 1U < need) {
+      return i - 1U;
+    }
+  }
+  return len;
+}
+
+/* Blanks and control characters, which a title line cannot show. */
+static int title_blank(char c)
+{
+  return (unsigned char)c <= 0x20U || (unsigned char)c == 0x7FU;
+}
+
 int zzplay_icy_stream_title(const char *meta, size_t len, char *out,
                             size_t size)
 {
@@ -741,19 +769,21 @@ int zzplay_icy_stream_title(const char *meta, size_t len, char *out,
     }
     stop = i - 1U;
   }
-  while (start < stop && meta[start] == ' ') {
+  while (start < stop && title_blank(meta[start])) {
     start++;
   }
-  while (stop > start && meta[stop - 1U] == ' ') {
+  while (stop > start && title_blank(meta[stop - 1U])) {
     stop--;
   }
   if (stop == start) {
     return 0;
   }
   if (stop - start >= size) {
-    stop = start + size - 1U;
+    stop = start + utf8_cut(meta + start, size - 1U);
   }
-  memcpy(out, meta + start, stop - start);
+  for (i = start; i < stop; i++) {
+    out[i - start] = title_blank(meta[i]) ? ' ' : meta[i];
+  }
   out[stop - start] = '\0';
   return 1;
 }

@@ -124,7 +124,9 @@ void zzplay_icy_init(ZZPlayIcy *icy, uint32_t interval);
 size_t zzplay_icy_strip(ZZPlayIcy *icy, uint8_t *buf, size_t len);
 
 /* Extract StreamTitle='...'; from a metadata block. Returns 1 and the
- * title (truncated to `size`) when one is present and non-empty. */
+ * title when one is present and non-empty. Control characters become
+ * spaces, and a title longer than `size` is cut without splitting a UTF-8
+ * sequence. */
 int zzplay_icy_stream_title(const char *meta, size_t len, char *out,
                             size_t size);
 
