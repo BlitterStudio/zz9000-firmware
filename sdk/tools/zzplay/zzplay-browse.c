@@ -1824,8 +1824,23 @@ static void __attribute__((noinline)) poll_settings(void)
         if (browse_send(&req, p)) browse_model.busy = 1;
         return;
       }
-      if (gad->GadgetID == SGID_SAVE && p) {
-        uint32_t count = p->field_count > BROWSE_FIELDS_MAX ? BROWSE_FIELDS_MAX : p->field_count;
+      /* In a row form, Return in the last text field saves, like the
+       * Save button (Tab, code 9, only moves between the fields). */
+      if (row_form_mode && code != 9U && row_form.field_count > 0U &&
+          gad->GadgetID == (UWORD)(SGID_FIELD_BASE +
+                                   (row_form.field_count > BROWSE_FIELDS_MAX
+                                        ? BROWSE_FIELDS_MAX
+                                        : row_form.field_count) -
+                                   1U) &&
+          field_choice_n[gad->GadgetID - SGID_FIELD_BASE] == 0) {
+        gad = NULL;
+      }
+      if ((!gad || gad->GadgetID == SGID_SAVE) && p) {
+        /* A row form has its own fields, not the service's settings. */
+        uint32_t field_total = row_form_mode ? row_form.field_count
+                                             : p->field_count;
+        uint32_t count = field_total > BROWSE_FIELDS_MAX ? BROWSE_FIELDS_MAX
+                                                         : field_total;
         uint32_t i;
         ZZPlayBrowseRequest req;
         if (row_form_mode) {
@@ -1845,6 +1860,13 @@ static void __attribute__((noinline)) poll_settings(void)
           if (browse_send(&req, p)) {
             browse_model.busy = 1;
             copy_string(settings_note, sizeof(settings_note), "Saving...");
+          } else {
+            copy_string(settings_note, sizeof(settings_note),
+                        BROWSE_WORKER_FAILED);
+          }
+          if (settings_note_gad) {
+            GT_SetGadgetAttrs(settings_note_gad, settings_win, NULL,
+                              GTTX_Text, (ULONG)settings_note, TAG_DONE);
           }
           return;
         }
