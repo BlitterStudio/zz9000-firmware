@@ -708,10 +708,13 @@ ZZPlayEngineResult zzplay_vorbis_run(const ZZPlayEngineRun *run)
   engine.channels = info->channels;
   /* The duration is the last page's granule position (the stream's sample
    * count) when that page belongs to the same logical stream; otherwise it
-   * stays unknown rather than estimated. */
+   * stays unknown rather than estimated. Only where the tail can be reached
+   * by a seek: on a network file without byte ranges it would mean
+   * downloading the whole file before playing it. */
   file = zzplay_file_open(run->path, 0);
   if (file) {
-    if (zzplay_ogg_last_granule(file, info->serial, &granule) &&
+    if (zzplay_file_seekable(file) &&
+        zzplay_ogg_last_granule(file, info->serial, &granule) &&
         info->sample_rate != 0U) {
       engine.total_ms = (uint32_t)(granule * 1000ULL / info->sample_rate);
     }
