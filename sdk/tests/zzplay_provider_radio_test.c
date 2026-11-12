@@ -746,6 +746,26 @@ static void test_my_stations(ZZPlayHost *host)
   assert(sink_data.items[1].editable == 1U);
   assert(p->resolve(ctx, "my:0", &resolved, err, sizeof(err)));
   assert(strcmp(resolved.url, values[1]) == 0);
+  /* A favourite made from it stays playable, with its host as subtitle */
+  {
+    ZZPlayProviderItem fav;
+
+    memset(&fav, 0, sizeof(fav));
+    /* What the My stations row showed: the stream's host as subtitle. */
+    fav.id = "my:0";
+    fav.title = "Local radio";
+    fav.subtitle = "radio.example";
+    fav.kind = ZZPLAY_ITEM_STATION;
+    fav.playable = 1U;
+    assert(p->favourite(ctx, &fav, 1, err, sizeof(err)));
+    memset(&sink_data, 0, sizeof(sink_data));
+    assert(p->list(ctx, "fav", 0, 10, &sink, err, sizeof(err)));
+    assert(sink_data.count == 1);
+    assert(strcmp(sink_data.items[0].id, "my:0") == 0);
+    assert(sink_data.items[0].playable == 1U);
+    assert(strcmp(sink_data.items[0].subtitle, "radio.example") == 0);
+    assert(p->favourite(ctx, &fav, 0, err, sizeof(err)));
+  }
   values[0] = "";
   assert(!p->form_submit(ctx, "my:0", values, 2U, err, sizeof(err)));
   assert(strcmp(err, "Name is required") == 0);

@@ -808,6 +808,9 @@ static void radio_close(void *ctx)
   }
 }
 
+static void radio_address_host(const char *address, char *out,
+                               uint32_t out_size);
+
 static int list_favourites(RadioContext *rc, uint32_t start, uint32_t count,
                            const ZZPlayItemSink *sink)
 {
@@ -822,13 +825,20 @@ static int list_favourites(RadioContext *rc, uint32_t start, uint32_t count,
   }
 
   for (i = start; i < rc->fav_count && delivered < count; i++) {
-    int playable = radio_is_codec_supported(rc->favs[i].codec);
+    int my_index = radio_my_index(rc, rc->favs[i].uuid);
+    int playable = my_index >= 0 ||
+                   radio_is_codec_supported(rc->favs[i].codec);
     ZZPlayProviderItem item;
 
     radio_copy_text(title, sizeof(title), rc->favs[i].name, 0);
-    radio_format_station_subtitle(host, rc->favs[i].codec, rc->favs[i].bitrate,
-                                  rc->favs[i].country, playable, subtitle,
-                                  sizeof(subtitle));
+    if (my_index >= 0) {
+      radio_address_host(rc->my_stations[my_index].address, subtitle,
+                         sizeof(subtitle));
+    } else {
+      radio_format_station_subtitle(host, rc->favs[i].codec,
+                                    rc->favs[i].bitrate, rc->favs[i].country,
+                                    playable, subtitle, sizeof(subtitle));
+    }
 
     memset(&item, 0, sizeof(item));
     item.id = rc->favs[i].uuid;
@@ -1496,8 +1506,17 @@ static int radio_favourite(void *ctx, const ZZPlayProviderItem *item, int add,
       return 0;
     }
 
-    parse_subtitle(item->subtitle, codec, sizeof(codec), bitrate, sizeof(bitrate),
-                   country, sizeof(country));
+    if (radio_my_index(rc, item->id) >= 0) {
+      /* A My stations entry has no directory details: its subtitle is
+       * the stream's host, not a codec. The list shows it from the
+       * station itself. */
+      codec[0] = '\0';
+      bitrate[0] = '\0';
+      country[0] = '\0';
+    } else {
+      parse_subtitle(item->subtitle, codec, sizeof(codec), bitrate,
+                     sizeof(bitrate), country, sizeof(country));
+    }
 
     name = item->title ? item->title : "";
     name = radio_trim(name);
