@@ -7,9 +7,9 @@
 #include <string.h>
 
 #include "zzplay-host.h"
+#include "zzplay-http.h"
 #include "zzplay-sys.h"
 #include "zzplay-tags.h"
-
 #if defined(__amigaos__) || defined(AMIGA)
 
 #include <dos/dosextens.h>
@@ -20,7 +20,6 @@
 #include <exec/tasks.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
-
 typedef struct ZZPlayWorkerMsg {
   struct Message msg;
   int quit;
@@ -29,19 +28,36 @@ typedef struct ZZPlayWorkerMsg {
   ZZPlayBrowseReply reply;
 } ZZPlayWorkerMsg;
 
+/* A mid-request message: rows as they arrive (see ZZPLAY_BROWSE_PARTIAL). */
+typedef struct ZZPlayWorkerPartialMsg {
+  struct Message msg;
+  ZZPlayBrowseReply reply;
+} ZZPlayWorkerPartialMsg;
+
+#define ZZPLAY_BROWSE_PARTIAL 10U
+
 typedef struct WorkerCollector {
-  ZZPlayBrowseItem *items;
+  ZZPlayBrowseItem *items;      /* full-page buffer, freed with the reply */
+  ZZPlayBrowseItem *chunk;      /* ZZPLAY_BROWSE_PARTIAL rows being grouped */
+  uint32_t chunk_count;
   uint32_t capacity;
   uint32_t count;
   uint32_t total;
   int has_total;
   volatile int *cancelled;
+  /* Set for list and search requests, so rows are sent as they arrive. */
+  struct MsgPort *gui_port;
+  ZZPlayBrowseReqKind kind;
+  uint32_t generation;
+  uint32_t start;
 } WorkerCollector;
 
 static struct MsgPort *gui_port = NULL;
 static struct MsgPort *worker_port = NULL;
 static struct Process *worker_proc = NULL;
 static volatile int worker_cancel_flag = 0;
+static volatile int worker_stage = 0;
+static char worker_stage_host[ZZPLAY_HTTP_HOST_MAX + 1U];
 static int worker_is_active = 0;
 static ZZPlayWorkerMsg active_msg;
 static ZZPlayWorkerMsg quit_msg;
@@ -51,6 +67,53 @@ static int worker_keep_running(void *user)
 {
   volatile int *cancelled = (volatile int *)user;
   return cancelled ? !(*cancelled) : 1;
+}
+
+static void worker_stage_hook(void *user, int stage, const char *host)
+{
+  (void)user;
+  worker_stage = stage;
+  if (host) {
+    (void)snprintf(worker_stage_host, sizeof(worker_stage_host), "%s", host);
+  } else {
+    worker_stage_host[0] = '\0';
+  }
+}
+
+/* Send the rows gathered so far to the GUI as a partial reply. The final
+ * reply (with any remaining rows) follows when the request ends. */
+static void worker_flush_chunk(WorkerCollector *c)
+{
+  ZZPlayWorkerPartialMsg *pmsg;
+  ZZPlayBrowseItem *copy;
+
+  if (!c || !c->gui_port || c->chunk_count == 0U) {
+    return;
+  }
+  pmsg = (ZZPlayWorkerPartialMsg *)zzplay_alloc(sizeof(*pmsg));
+  copy = (ZZPlayBrowseItem *)zzplay_alloc(
+      (size_t)c->chunk_count * sizeof(ZZPlayBrowseItem));
+  if (!pmsg || !copy) {
+    zzplay_free(pmsg);
+    zzplay_free(copy);
+    c->chunk_count = 0U;
+    return;
+  }
+  memcpy(copy, c->chunk, (size_t)c->chunk_count * sizeof(ZZPlayBrowseItem));
+  memset(pmsg, 0, sizeof(*pmsg));
+  pmsg->msg.mn_ReplyPort = c->gui_port;
+  pmsg->msg.mn_Length = sizeof(*pmsg);
+  pmsg->reply.kind = c->kind;
+  pmsg->reply.generation = c->generation;
+  pmsg->reply.success = 1;
+  pmsg->reply.items = copy;
+  pmsg->reply.item_count = c->chunk_count;
+  pmsg->reply.start = c->start;
+  pmsg->reply.total = c->total;
+  pmsg->reply.has_total = c->has_total;
+  pmsg->reply.is_partial = 1;
+  PutMsg(c->gui_port, &pmsg->msg);
+  c->chunk_count = 0U;
 }
 
 static int worker_sink_item(void *user, const ZZPlayProviderItem *item)
@@ -82,6 +145,15 @@ static int worker_sink_item(void *user, const ZZPlayProviderItem *item)
   dst->playable = item->playable;
   dst->favourite = item->favourite;
   c->count++;
+
+  /* Group rows so the GUI can show them while the rest arrive. */
+  if (c->chunk) {
+    memcpy(&c->chunk[c->chunk_count], dst, sizeof(*dst));
+    c->chunk_count++;
+    if (c->chunk_count >= ZZPLAY_BROWSE_PARTIAL) {
+      worker_flush_chunk(c);
+    }
+  }
   return 0;
 }
 
@@ -93,6 +165,7 @@ static void worker_sink_total(void *user, uint32_t total)
     c->has_total = 1;
   }
 }
+
 static int worker_provider_has_favourite(const ZZPlayProvider *p)
 {
   if (!p) {
@@ -151,7 +224,10 @@ static void worker_process(void)
       rep->generation = req->generation;
       rep->start = req->start;
       rep->success = 0;
+      rep->is_partial = 0;
       rep->error[0] = '\0';
+      worker_stage = 0;
+      worker_stage_host[0] = '\0';
 
       if (!p) {
         (void)snprintf(rep->error, sizeof(rep->error), "no provider");
@@ -169,6 +245,7 @@ static void worker_process(void)
         (void)snprintf(curr_scheme, sizeof(curr_scheme), "%s", req->scheme);
         zzplay_host_bind(&binding, curr_scheme, worker_keep_running,
                          (void *)&worker_cancel_flag);
+        binding.stage = worker_stage_hook;
         if (p->open) {
           ctx = p->open(&binding.table, rep->error, sizeof(rep->error));
         }
@@ -189,10 +266,20 @@ static void worker_process(void)
         memset(&collector, 0, sizeof(collector));
         collector.capacity = want_count;
         collector.cancelled = &worker_cancel_flag;
+        collector.kind = req->kind;
+        collector.generation = req->generation;
+        collector.start = req->start;
+        collector.gui_port = gui_port;
         collector.items = (ZZPlayBrowseItem *)zzplay_alloc(
             (size_t)want_count * sizeof(ZZPlayBrowseItem));
+        collector.chunk = (ZZPlayBrowseItem *)zzplay_alloc(
+            (size_t)ZZPLAY_BROWSE_PARTIAL * sizeof(ZZPlayBrowseItem));
 
-        if (!collector.items) {
+        if (!collector.items || !collector.chunk) {
+          zzplay_free(collector.items);
+          zzplay_free(collector.chunk);
+          collector.items = NULL;
+          collector.chunk = NULL;
           (void)snprintf(rep->error, sizeof(rep->error), "out of memory");
         } else {
           int ret;
@@ -203,6 +290,9 @@ static void worker_process(void)
           ret = p->list ? p->list(ctx, req->node_id, req->start, want_count,
                                   &sink, rep->error, sizeof(rep->error))
                         : 0;
+          worker_flush_chunk(&collector);
+          zzplay_free(collector.chunk);
+          collector.chunk = NULL;
           if (ret) {
             rep->success = 1;
             rep->items = collector.items;
@@ -226,10 +316,20 @@ static void worker_process(void)
         memset(&collector, 0, sizeof(collector));
         collector.capacity = max_search;
         collector.cancelled = &worker_cancel_flag;
+        collector.kind = req->kind;
+        collector.generation = req->generation;
+        collector.start = 0U;
+        collector.gui_port = gui_port;
         collector.items = (ZZPlayBrowseItem *)zzplay_alloc(
             (size_t)max_search * sizeof(ZZPlayBrowseItem));
+        collector.chunk = (ZZPlayBrowseItem *)zzplay_alloc(
+            (size_t)ZZPLAY_BROWSE_PARTIAL * sizeof(ZZPlayBrowseItem));
 
-        if (!collector.items) {
+        if (!collector.items || !collector.chunk) {
+          zzplay_free(collector.items);
+          zzplay_free(collector.chunk);
+          collector.items = NULL;
+          collector.chunk = NULL;
           (void)snprintf(rep->error, sizeof(rep->error), "out of memory");
         } else {
           int ret;
@@ -240,6 +340,9 @@ static void worker_process(void)
           ret = p->search ? p->search(ctx, req->query, &sink, rep->error,
                                       sizeof(rep->error))
                           : 0;
+          worker_flush_chunk(&collector);
+          zzplay_free(collector.chunk);
+          collector.chunk = NULL;
           if (ret) {
             rep->success = 1;
             rep->items = collector.items;
@@ -379,19 +482,39 @@ void zzplay_browse_worker_cancel(void)
   worker_cancel_flag = 1;
 }
 
+int zzplay_browse_worker_get_stage(char *host, uint32_t host_size)
+{
+  if (host && host_size > 0U) {
+    Forbid();
+    (void)snprintf(host, host_size, "%s", worker_stage_host);
+    Permit();
+  }
+  return worker_is_active ? worker_stage : 0;
+}
+
 int zzplay_browse_worker_take_reply(ZZPlayBrowseReply *reply)
 {
-  ZZPlayWorkerMsg *wmsg;
+  struct Message *m;
 
   if (!gui_port || !reply) {
     return 0;
   }
-  wmsg = (ZZPlayWorkerMsg *)GetMsg(gui_port);
-  if (!wmsg) {
+  m = GetMsg(gui_port);
+  if (!m) {
     return 0;
   }
-  *reply = wmsg->reply;
-  worker_is_active = 0;
+  if (m->mn_Length == sizeof(ZZPlayWorkerPartialMsg)) {
+    /* Rows that arrived while the request runs; more follow. */
+    ZZPlayWorkerPartialMsg *pmsg = (ZZPlayWorkerPartialMsg *)m;
+    *reply = pmsg->reply;
+    zzplay_free(pmsg);
+    return 1;
+  }
+  {
+    ZZPlayWorkerMsg *wmsg = (ZZPlayWorkerMsg *)m;
+    *reply = wmsg->reply;
+    worker_is_active = 0;
+  }
   return 1;
 }
 
@@ -404,10 +527,29 @@ void zzplay_browse_worker_release_reply(ZZPlayBrowseReply *reply)
   }
 }
 
+static void drain_worker_messages(void)
+{
+  if (!gui_port) {
+    return;
+  }
+  while (1) {
+    struct Message *m = GetMsg(gui_port);
+    if (!m) {
+      break;
+    }
+    if (m->mn_Length == sizeof(ZZPlayWorkerPartialMsg)) {
+      ZZPlayWorkerPartialMsg *pmsg = (ZZPlayWorkerPartialMsg *)m;
+      zzplay_browse_worker_release_reply(&pmsg->reply);
+      zzplay_free(pmsg);
+    } else {
+      ZZPlayWorkerMsg *wmsg = (ZZPlayWorkerMsg *)m;
+      zzplay_browse_worker_release_reply(&wmsg->reply);
+    }
+  }
+}
+
 void zzplay_browse_worker_stop(void)
 {
-  ZZPlayWorkerMsg *wmsg;
-
   if (!worker_proc) {
     return;
   }
@@ -417,11 +559,8 @@ void zzplay_browse_worker_stop(void)
     worker_cancel_flag = 1;
     if (gui_port) {
       WaitPort(gui_port);
-      wmsg = (ZZPlayWorkerMsg *)GetMsg(gui_port);
-      if (wmsg) {
-        zzplay_browse_worker_release_reply(&wmsg->reply);
-      }
     }
+    drain_worker_messages();
     worker_is_active = 0;
   }
 
@@ -445,7 +584,10 @@ void zzplay_browse_worker_stop(void)
   worker_proc = NULL;
   worker_is_active = 0;
   worker_cancel_flag = 0;
+  worker_stage = 0;
+  worker_stage_host[0] = '\0';
 }
+
 
 #else /* !defined(__amigaos__) && !defined(AMIGA) */
 
@@ -458,6 +600,10 @@ int zzplay_browse_worker_send(const ZZPlayBrowseRequest *req,
   (void)req; (void)provider; return 0;
 }
 void zzplay_browse_worker_cancel(void) {}
+int zzplay_browse_worker_get_stage(char *host, uint32_t host_size)
+{
+  (void)host; (void)host_size; return 0;
+}
 int zzplay_browse_worker_take_reply(ZZPlayBrowseReply *reply)
 {
   (void)reply; return 0;

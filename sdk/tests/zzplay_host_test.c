@@ -8,7 +8,28 @@
 #include <string.h>
 
 #include "../tools/zzplay/zzplay-host.h"
+#include "../tools/zzplay/zzplay-net.h"
 
+static ZZPlayNetRequest captured_net_req;
+static int net_req_captured = 0;
+
+ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
+                          char *err, size_t err_size, int *cancelled)
+{
+  (void)head;
+  (void)err;
+  (void)err_size;
+  (void)cancelled;
+  if (req) {
+    captured_net_req = *req;
+    net_req_captured = 1;
+    if (req->stage) {
+      req->stage(req->user, ZZPLAY_NET_STAGE_LOOKUP, "stage.test");
+      req->stage(req->user, ZZPLAY_NET_STAGE_CONNECT, "stage.test");
+    }
+  }
+  return NULL;
+}
 static void test_url_escape(void)
 {
   char out[64];
@@ -306,6 +327,55 @@ static void test_host_xml_wrapper(void)
   assert(strcmp(state.last_element, "station") == 0);
   assert(strcmp(state.last_attr_val, "Rock FM") == 0);
 }
+static int stage_test_count = 0;
+static int stage_test_last = 0;
+static char stage_test_host[64];
+
+static void dummy_stage_hook(void *user, int stage, const char *host)
+{
+  assert(user == (void *)0x5678);
+  stage_test_count++;
+  stage_test_last = stage;
+  if (host) {
+    (void)snprintf(stage_test_host, sizeof(stage_test_host), "%s", host);
+  }
+}
+
+static void test_host_stage_pass_through(void)
+{
+  ZZPlayHostBinding binding;
+  char err[64];
+  int status = 0;
+
+  stage_test_count = 0;
+  stage_test_last = 0;
+  stage_test_host[0] = '\0';
+
+  zzplay_host_bind(&binding, "test_scheme", NULL, (void *)0x5678);
+  binding.stage = dummy_stage_hook;
+
+  assert(binding.stage == dummy_stage_hook);
+
+  /* Send GET */
+  net_req_captured = 0;
+  binding.table.http_get(&binding.table, "http://stage.test/get", NULL,
+                         NULL, NULL, &status, err, sizeof(err));
+
+  assert(net_req_captured != 0);
+  assert(captured_net_req.stage != NULL);
+  assert(stage_test_count == 2);
+  assert(stage_test_last == ZZPLAY_NET_STAGE_CONNECT);
+  assert(strcmp(stage_test_host, "stage.test") == 0);
+
+  /* Send POST */
+  net_req_captured = 0;
+  stage_test_count = 0;
+  binding.table.http_post(&binding.table, "http://stage.test/post", NULL,
+                          NULL, 0U, NULL, NULL, &status, err, sizeof(err));
+  assert(net_req_captured != 0);
+  assert(captured_net_req.stage != NULL);
+  assert(stage_test_count == 2);
+}
 
 int main(void)
 {
@@ -314,6 +384,7 @@ int main(void)
   test_pref_text_set();
   test_host_binding_and_table();
   test_host_xml_wrapper();
+  test_host_stage_pass_through();
 
   printf("zzplay_host_test: all assertions passed\n");
   return 0;

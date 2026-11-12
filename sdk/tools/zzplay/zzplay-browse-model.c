@@ -30,6 +30,151 @@ static void free_frame(ZZPlayBrowseFrame *frame)
   }
 }
 
+/* --- Session list cache -------------------------------------------- */
+
+static ZZPlayBrowseCacheEntry *cache_lookup(ZZPlayBrowseModel *model,
+                                            const char *scheme, int is_search,
+                                            const char *node_or_query,
+                                            uint32_t start, int touch)
+{
+  uint32_t i;
+
+  for (i = 0U; i < ZZPLAY_BROWSE_CACHE_MAX; i++) {
+    ZZPlayBrowseCacheEntry *e = &model->cache[i];
+    if (e->items == NULL) {
+      continue;
+    }
+    if (e->is_search == (is_search ? 1 : 0) && e->start == start &&
+        strcmp(e->scheme, scheme) == 0 &&
+        strcmp(e->is_search ? e->query : e->node_id, node_or_query) == 0) {
+      if (touch) {
+        e->last_used = ++model->cache_clock;
+      }
+      return e;
+    }
+  }
+  return NULL;
+}
+
+static ZZPlayBrowseCacheEntry *cache_find(ZZPlayBrowseModel *model,
+                                          const char *scheme, int is_search,
+                                          const char *node_or_query,
+                                          uint32_t start)
+{
+  return cache_lookup(model, scheme, is_search, node_or_query, start, 1);
+}
+
+/* Keep the remembered copy of the current view in step with the
+ * selection and scroll the user leaves it in. */
+static void cache_save_view_state(const ZZPlayBrowseModel *model)
+{
+  const ZZPlayBrowseServiceEntry *svc;
+  ZZPlayBrowseCacheEntry *e;
+
+  if (model->current_service < 0) {
+    return;
+  }
+  svc = &model->services[model->current_service];
+  e = cache_lookup((ZZPlayBrowseModel *)model, svc->scheme, model->is_search,
+                   model->is_search ? model->search_query : model->current_node,
+                   0U, 0);
+  if (e) {
+    e->selection = model->selection;
+    e->scroll = model->scroll;
+  }
+}
+
+/* Remember `count` items for (scheme, node or query, start). The least
+ * recently used entry is dropped when the cache is full. */
+static void cache_put(ZZPlayBrowseModel *model, const char *scheme,
+                      int is_search, const char *node_or_query,
+                      uint32_t start, const ZZPlayBrowseItem *items,
+                      uint32_t count, int32_t selection, uint32_t scroll)
+{
+  ZZPlayBrowseCacheEntry *e = cache_find(model, scheme, is_search,
+                                         node_or_query, start);
+  ZZPlayBrowseItem *copy = NULL;
+
+  if (count > 0U) {
+    copy = (ZZPlayBrowseItem *)zzplay_alloc(
+        (size_t)count * sizeof(ZZPlayBrowseItem));
+    if (!copy) {
+      return;
+    }
+    memcpy(copy, items, (size_t)count * sizeof(ZZPlayBrowseItem));
+  }
+
+  if (!e) {
+    uint32_t i;
+    uint32_t oldest = 0U;
+
+    for (i = 0U; i < ZZPLAY_BROWSE_CACHE_MAX; i++) {
+      if (model->cache[i].items == NULL) {
+        oldest = i;
+        break;
+      }
+      if (model->cache[i].last_used < model->cache[oldest].last_used) {
+        oldest = i;
+      }
+    }
+    e = &model->cache[oldest];
+    if (e->items) {
+      zzplay_free(e->items);
+    }
+  } else if (e->items) {
+    zzplay_free(e->items);
+  }
+
+  memset(e, 0, sizeof(*e));
+  copy_string(e->scheme, sizeof(e->scheme), scheme);
+  if (is_search) {
+    copy_string(e->query, sizeof(e->query), node_or_query);
+  } else {
+    copy_string(e->node_id, sizeof(e->node_id), node_or_query);
+  }
+  e->is_search = is_search ? 1 : 0;
+  e->start = start;
+  e->items = copy;
+  e->item_count = count;
+  e->selection = selection;
+  e->scroll = scroll;
+  e->last_used = ++model->cache_clock;
+}
+
+/* Show a remembered list at once. Returns 1 on a hit. The model gets
+ * its own copy, so the remembered entry stays untouched. */
+static int cache_restore(ZZPlayBrowseModel *model, const char *scheme,
+                         int is_search, const char *node_or_query)
+{
+  ZZPlayBrowseCacheEntry *e = cache_find(model, scheme, is_search,
+                                         node_or_query, 0U);
+  ZZPlayBrowseItem *copy = NULL;
+
+  if (!e) {
+    return 0;
+  }
+  if (e->item_count > 0U) {
+    copy = (ZZPlayBrowseItem *)zzplay_alloc(
+        (size_t)e->item_count * sizeof(ZZPlayBrowseItem));
+    if (!copy) {
+      return 0;
+    }
+    memcpy(copy, e->items, (size_t)e->item_count * sizeof(ZZPlayBrowseItem));
+  }
+  if (model->items) {
+    zzplay_free(model->items);
+  }
+  model->items = copy;
+  model->item_count = e->item_count;
+  model->item_capacity = e->item_count;
+  model->selection = e->selection;
+  model->scroll = e->scroll;
+  model->total = 0U;
+  model->has_total = 0;
+  model->has_more = 0;
+  return 1;
+}
+
 void zzplay_browse_model_init(ZZPlayBrowseModel *model)
 {
   if (!model) {
@@ -44,7 +189,6 @@ void zzplay_browse_model_init(ZZPlayBrowseModel *model)
 void zzplay_browse_model_free(ZZPlayBrowseModel *model)
 {
   uint32_t i;
-
   if (!model) {
     return;
   }
@@ -58,6 +202,12 @@ void zzplay_browse_model_free(ZZPlayBrowseModel *model)
     free_frame(&model->stack[i]);
   }
   model->stack_depth = 0U;
+  for (i = 0U; i < ZZPLAY_BROWSE_CACHE_MAX; i++) {
+    if (model->cache[i].items) {
+      zzplay_free(model->cache[i].items);
+      model->cache[i].items = NULL;
+    }
+  }
 }
 
 int zzplay_browse_model_add_service(ZZPlayBrowseModel *model,
@@ -87,6 +237,7 @@ int zzplay_browse_model_select_service(ZZPlayBrowseModel *model, uint32_t index,
   if (!model || index >= model->service_count) {
     return 0;
   }
+  cache_save_view_state(model);
   model->generation++;
   if (model->items) {
     zzplay_free(model->items);
@@ -111,6 +262,15 @@ int zzplay_browse_model_select_service(ZZPlayBrowseModel *model, uint32_t index,
   model->has_more = 0;
   model->busy = 1;
   model->status_message[0] = '\0';
+
+  if (cache_restore(model, model->services[index].scheme, 0, "")) {
+    model->busy = 0;
+    if (out_req) {
+      memset(out_req, 0, sizeof(*out_req));
+      out_req->kind = ZZPLAY_BROWSE_REQ_NONE;
+    }
+    return 1;
+  }
 
   if (out_req) {
     memset(out_req, 0, sizeof(*out_req));
@@ -153,6 +313,7 @@ int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
     return 0;
   }
 
+  cache_save_view_state(model);
   model->generation++;
   frame = &model->stack[model->stack_depth];
   memset(frame, 0, sizeof(*frame));
@@ -186,6 +347,16 @@ int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
   model->scroll = 0U;
   model->busy = 1;
   model->status_message[0] = '\0';
+
+  if (cache_restore(model, model->services[model->current_service].scheme, 0,
+                    model->current_node)) {
+    model->busy = 0;
+    if (out_req) {
+      memset(out_req, 0, sizeof(*out_req));
+      out_req->kind = ZZPLAY_BROWSE_REQ_NONE;
+    }
+    return 1;
+  }
 
   if (out_req) {
     memset(out_req, 0, sizeof(*out_req));
@@ -257,6 +428,7 @@ int zzplay_browse_model_search(ZZPlayBrowseModel *model, const char *query,
   if (!model || !query || model->current_service < 0) {
     return 0;
   }
+  cache_save_view_state(model);
   model->generation++;
 
   /* If starting a search from a browse view, save view on stack */
@@ -295,6 +467,16 @@ int zzplay_browse_model_search(ZZPlayBrowseModel *model, const char *query,
   model->has_more = 0;
   model->busy = 1;
   model->status_message[0] = '\0';
+
+  if (cache_restore(model, model->services[model->current_service].scheme, 1,
+                    query)) {
+    model->busy = 0;
+    if (out_req) {
+      memset(out_req, 0, sizeof(*out_req));
+      out_req->kind = ZZPLAY_BROWSE_REQ_NONE;
+    }
+    return 1;
+  }
 
   if (out_req) {
     memset(out_req, 0, sizeof(*out_req));
@@ -340,12 +522,14 @@ void zzplay_browse_model_set_selection(ZZPlayBrowseModel *model, int32_t index)
   } else {
     model->selection = index;
   }
+  cache_save_view_state(model);
 }
 
 void zzplay_browse_model_set_scroll(ZZPlayBrowseModel *model, uint32_t scroll)
 {
   if (model) {
     model->scroll = scroll;
+    cache_save_view_state(model);
   }
 }
 
@@ -477,6 +661,58 @@ int zzplay_browse_model_format_uri(const ZZPlayBrowseModel *model,
   return 1;
 }
 
+int zzplay_browse_model_can_reload(const ZZPlayBrowseModel *model)
+{
+  const ZZPlayBrowseServiceEntry *svc;
+
+  if (!model || model->busy || model->current_service < 0) {
+    return 0;
+  }
+  /* Disabled while nothing is shown for the current service. */
+  svc = &model->services[model->current_service];
+  if (model->item_count > 0U) {
+    return 1;
+  }
+  return cache_lookup((ZZPlayBrowseModel *)model, svc->scheme,
+                      model->is_search,
+                      model->is_search ? model->search_query
+                                       : model->current_node,
+                      0U, 0) != NULL;
+}
+
+int zzplay_browse_model_reload(ZZPlayBrowseModel *model,
+                              ZZPlayBrowseRequest *out_req)
+{
+  const ZZPlayBrowseServiceEntry *svc;
+
+  if (!zzplay_browse_model_can_reload(model)) {
+    return 0;
+  }
+  svc = &model->services[model->current_service];
+  model->generation++;
+  model->busy = 1;
+  model->status_message[0] = '\0';
+  model->saved_selection = model->selection;
+
+  if (out_req) {
+    memset(out_req, 0, sizeof(*out_req));
+    out_req->generation = model->generation;
+    copy_string(out_req->scheme, sizeof(out_req->scheme), svc->scheme);
+    if (model->is_search) {
+      out_req->kind = ZZPLAY_BROWSE_REQ_SEARCH;
+      copy_string(out_req->query, sizeof(out_req->query),
+                  model->search_query);
+    } else {
+      out_req->kind = ZZPLAY_BROWSE_REQ_LIST;
+      copy_string(out_req->node_id, sizeof(out_req->node_id),
+                  model->current_node);
+      out_req->start = 0U;
+      out_req->count = ZZPLAY_BROWSE_PAGE_SIZE;
+    }
+  }
+  return 1;
+}
+
 void zzplay_browse_model_stop(ZZPlayBrowseModel *model)
 {
   if (!model) {
@@ -493,12 +729,15 @@ int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
   if (!model || !reply) {
     return 0;
   }
-  /* Drop replies for abandoned generations */
+  /* Drop replies for abandoned generations, stale partials included */
   if (reply->generation != model->generation) {
     return 0;
   }
 
-  model->busy = 0;
+  /* A partial reply only adds rows; the request stays busy. */
+  if (!reply->is_partial) {
+    model->busy = 0;
+  }
   if (!reply->success) {
     copy_string(model->status_message, sizeof(model->status_message),
                 reply->error[0] ? reply->error : "Operation failed");
@@ -509,7 +748,7 @@ int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
 
   if (reply->kind == ZZPLAY_BROWSE_REQ_LIST) {
     if (reply->start == 0U) {
-      /* Replace whole list */
+      /* First rows of a fresh list (or a Reload) replace what is shown */
       if (model->items) {
         zzplay_free(model->items);
         model->items = NULL;
@@ -527,7 +766,7 @@ int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
         }
       }
     } else {
-      /* Append page */
+      /* Append page or later rows */
       if (reply->item_count > 0U) {
         uint32_t new_count = model->item_count + reply->item_count;
         size_t new_bytes = (size_t)new_count * sizeof(ZZPlayBrowseItem);
@@ -566,29 +805,58 @@ int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,
       }
       model->saved_selection = -1;
     }
+    /* Remember completed lists (a Reload replaces its copy) */
+    if (!reply->is_partial && reply->start == 0U && reply->items != NULL) {
+      cache_put(model, model->services[model->current_service].scheme, 0,
+                model->current_node, 0U, model->items, model->item_count,
+                model->selection, model->scroll);
+    }
     return 1;
   }
 
   if (reply->kind == ZZPLAY_BROWSE_REQ_SEARCH) {
-    if (model->items) {
-      zzplay_free(model->items);
-      model->items = NULL;
-    }
-    model->item_count = 0U;
-    model->item_capacity = 0U;
-
-    if (reply->item_count > 0U) {
-      size_t bytes = (size_t)reply->item_count * sizeof(ZZPlayBrowseItem);
-      model->items = (ZZPlayBrowseItem *)zzplay_alloc(bytes);
+    if (!reply->is_partial) {
       if (model->items) {
-        memcpy(model->items, reply->items, bytes);
-        model->item_count = reply->item_count;
-        model->item_capacity = reply->item_count;
+        zzplay_free(model->items);
+        model->items = NULL;
+      }
+      model->item_count = 0U;
+      model->item_capacity = 0U;
+
+      if (reply->item_count > 0U) {
+        size_t bytes = (size_t)reply->item_count * sizeof(ZZPlayBrowseItem);
+        model->items = (ZZPlayBrowseItem *)zzplay_alloc(bytes);
+        if (model->items) {
+          memcpy(model->items, reply->items, bytes);
+          model->item_count = reply->item_count;
+          model->item_capacity = reply->item_count;
+        }
+      }
+      model->has_total = reply->has_total;
+      model->total = reply->total;
+      model->has_more = 0;
+      cache_put(model, model->services[model->current_service].scheme, 1,
+                model->search_query, 0U, model->items, model->item_count,
+                model->selection, model->scroll);
+    } else if (reply->item_count > 0U) {
+      /* Search rows arrive in groups too; keep the rows already shown. */
+      uint32_t new_count = model->item_count + reply->item_count;
+      size_t new_bytes = (size_t)new_count * sizeof(ZZPlayBrowseItem);
+      ZZPlayBrowseItem *new_items = (ZZPlayBrowseItem *)zzplay_alloc(new_bytes);
+
+      if (new_items) {
+        if (model->items && model->item_count > 0U) {
+          memcpy(new_items, model->items,
+                 (size_t)model->item_count * sizeof(ZZPlayBrowseItem));
+          zzplay_free(model->items);
+        }
+        memcpy(&new_items[model->item_count], reply->items,
+               (size_t)reply->item_count * sizeof(ZZPlayBrowseItem));
+        model->items = new_items;
+        model->item_count = new_count;
+        model->item_capacity = new_count;
       }
     }
-    model->has_total = reply->has_total;
-    model->total = reply->total;
-    model->has_more = 0;
     return 1;
   }
 

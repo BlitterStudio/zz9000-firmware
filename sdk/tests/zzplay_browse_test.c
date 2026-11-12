@@ -529,7 +529,252 @@ static int test_favourite_action(void)
   zzplay_browse_model_free(&model);
   return 0;
 }
+/* Build a reply for `gen` carrying `n` items titled t0..t(n-1). */
+static ZZPlayBrowseReply make_list_reply(uint32_t gen, uint32_t start,
+                                         ZZPlayBrowseItem *items, uint32_t n,
+                                         int partial)
+{
+  ZZPlayBrowseReply r;
+  uint32_t i;
 
+  memset(items, 0, (size_t)n * sizeof(*items));
+  for (i = 0U; i < n; i++) {
+    snprintf(items[i].id, sizeof(items[i].id), "id_%lu_%lu",
+             (unsigned long)start, (unsigned long)i);
+    snprintf(items[i].title, sizeof(items[i].title), "Item %lu_%lu",
+             (unsigned long)start, (unsigned long)i);
+    items[i].kind = ZZPLAY_ITEM_STATION;
+    items[i].playable = 1U;
+  }
+  memset(&r, 0, sizeof(r));
+  r.kind = ZZPLAY_BROWSE_REQ_LIST;
+  r.generation = gen;
+  r.success = 1;
+  r.items = items;
+  r.item_count = n;
+  r.start = start;
+  r.is_partial = partial;
+  return r;
+}
+
+static int test_remembered_folder_reopens_without_request(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem items[2];
+  ZZPlayBrowseAction act;
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+
+  /* Root: one folder */
+  reply = make_list_reply(1U, 0U, items, 1U, 0);
+  snprintf(items[0].id, sizeof(items[0].id), "artist1");
+  snprintf(items[0].title, sizeof(items[0].title), "Artist One");
+  items[0].kind = ZZPLAY_ITEM_FOLDER;
+  items[0].playable = 0U;
+  assert(zzplay_browse_model_select_service(&model, 0U, &req) == 1);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Enter the folder, list completes */
+  act = zzplay_browse_model_activate(&model, 0, &req);
+  assert(act == ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+  reply = make_list_reply(req.generation, 0U, items, 2U, 0);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.item_count == 2U);
+  zzplay_browse_model_set_selection(&model, 1);
+  assert(model.selection == 1);
+
+  /* Back to the root, then re-enter: remembered, no request */
+  assert(zzplay_browse_model_back(&model, &req) == 1);
+  act = zzplay_browse_model_activate(&model, 0, &req);
+  assert(act == ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+  assert(model.busy == 0);
+  assert(model.item_count == 2U);
+  assert(model.selection == 1);
+  assert(strcmp(model.items[1].title, "Item 0_1") == 0);
+
+  /* A remembered search repeats without a request too */
+  assert(zzplay_browse_model_back(&model, &req) == 1);
+  assert(zzplay_browse_model_search(&model, "beatles", &req) == 1);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_SEARCH);
+  reply = make_list_reply(req.generation, 0U, items, 1U, 0);
+  reply.kind = ZZPLAY_BROWSE_REQ_SEARCH;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(zzplay_browse_model_search(&model, "beatles", &req) == 1);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+  assert(model.item_count == 1U);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+static int test_reload_sends_request_and_replaces_copy(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem items[1];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0U, &req) == 1);
+  reply = make_list_reply(req.generation, 0U, items, 1U, 0);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Disabled while nothing loads; enabled with a list shown */
+  assert(zzplay_browse_model_can_reload(&model) == 1);
+
+  /* Reload sends a request from start 0 */
+  assert(zzplay_browse_model_reload(&model, &req) == 1);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+  assert(req.start == 0U);
+  assert(model.busy == 1);
+  assert(zzplay_browse_model_can_reload(&model) == 0);
+
+  /* The new list replaces the remembered copy */
+  reply = make_list_reply(req.generation, 0U, items, 1U, 0);
+  snprintf(items[0].title, sizeof(items[0].title), "Fresh");
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(strcmp(model.items[0].title, "Fresh") == 0);
+
+  /* Back into the folder state: switching service away and back uses cache */
+  /* (root here) — the cached root now holds the fresh row */
+  assert(zzplay_browse_model_select_service(&model, 0U, &req) == 1);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+  assert(strcmp(model.items[0].title, "Fresh") == 0);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+static int test_partial_replies_append_and_stale_dropped(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem items[4];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0U, &req) == 1);
+
+  /* First group of rows */
+  reply = make_list_reply(req.generation, 0U, items, 2U, 1);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.item_count == 2U);
+  assert(model.busy == 1);
+
+  /* Second group appends in order */
+  reply = make_list_reply(req.generation, 2U, items, 2U, 1);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.item_count == 4U);
+  assert(strcmp(model.items[2].title, "Item 2_0") == 0);
+  assert(strcmp(model.items[3].title, "Item 2_1") == 0);
+
+  /* A stale partial (older generation) is dropped */
+  reply = make_list_reply(req.generation - 1U, 0U, items, 1U, 1);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 0);
+  assert(model.item_count == 4U);
+
+  /* The final reply ends the busy state */
+  reply = make_list_reply(req.generation, 4U, items, 0U, 0);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.busy == 0);
+  assert(model.item_count == 4U);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+static int test_stop_keeps_arrived_rows(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem items[2];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0U, &req) == 1);
+
+  reply = make_list_reply(req.generation, 0U, items, 2U, 1);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  zzplay_browse_model_stop(&model);
+  assert(model.busy == 0);
+  assert(model.item_count == 2U);
+
+  /* Late rows for the stopped request are dropped */
+  reply = make_list_reply(req.generation - 1U, 2U, items, 2U, 1);
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 0);
+  assert(model.item_count == 2U);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+static int test_cache_bound_drops_oldest(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem items[1];
+  uint32_t i;
+  char title[ZZPLAY_PROVIDER_TEXT_MAX];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+
+  /* Root list with folders f0..fN; each opened list completes (cached) */
+  for (i = 0U; i <= ZZPLAY_BROWSE_CACHE_MAX; i++) {
+    snprintf(title, sizeof(title), "folder_%lu", (unsigned long)i);
+    if (i == 0U) {
+      assert(zzplay_browse_model_select_service(&model, 0U, &req) == 1);
+      reply = make_list_reply(req.generation, 0U, items, 1U, 0);
+      snprintf(items[0].id, sizeof(items[0].id), "%s", title);
+      items[0].kind = ZZPLAY_ITEM_FOLDER;
+      items[0].playable = 0U;
+      assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+    } else {
+      assert(zzplay_browse_model_activate(&model, 0, &req) ==
+             ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+      /* The first folder's list was dropped once the cache filled */
+      if (i == 1U) {
+        assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+      }
+      if (req.kind == ZZPLAY_BROWSE_REQ_LIST) {
+        reply = make_list_reply(req.generation, 0U, items, 1U, 0);
+        snprintf(items[0].id, sizeof(items[0].id), "station_%lu",
+                 (unsigned long)i);
+        assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+      }
+      assert(zzplay_browse_model_back(&model, &req) == 1);
+      /* Touch the root again so folder_1 ages fastest after the root */
+      assert(zzplay_browse_model_activate(&model, 0, &req) ==
+             ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+      if (req.kind == ZZPLAY_BROWSE_REQ_LIST) {
+        reply = make_list_reply(req.generation, 0U, items, 1U, 0);
+        snprintf(items[0].id, sizeof(items[0].id), "station_%lu",
+                 (unsigned long)i);
+        assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+      }
+      assert(zzplay_browse_model_back(&model, &req) == 1);
+    }
+  }
+
+  /* The cache held the root plus folder lists; the oldest folder
+   * (folder_1's list) was dropped. Root survives (touched last). */
+  assert(zzplay_browse_model_select_service(&model, 0U, &req) == 1);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_NONE);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
 
 int main(void)
 {
@@ -540,6 +785,11 @@ int main(void)
   assert(test_play_add_unavailable_for_folders_and_unplayable() == 0);
   assert(test_activation_folder_enters_station_plays() == 0);
   assert(test_favourite_action() == 0);
+  assert(test_remembered_folder_reopens_without_request() == 0);
+  assert(test_reload_sends_request_and_replaces_copy() == 0);
+  assert(test_partial_replies_append_and_stale_dropped() == 0);
+  assert(test_stop_keeps_arrived_rows() == 0);
+  assert(test_cache_bound_drops_oldest() == 0);
   printf("zzplay_browse_test: all tests passed\n");
   return 0;
 }

@@ -18,8 +18,8 @@
 #if defined(__amigaos__) || defined(AMIGA)
 #include <dos/dos.h>
 #include <proto/dos.h>
-#include "zzplay-net.h"
 #endif
+#include "zzplay-net.h"
 
 #define ZZPLAY_HOST_PREF_FILE_MAX 65536U
 
@@ -487,7 +487,20 @@ static const char *host_xml_attr(const ZZPlayHostXmlAttr *attrs, uint32_t count,
   return zzplay_xml_attr((const ZZPlayXmlAttr *)attrs, count, name);
 }
 
-#if defined(__amigaos__) || defined(AMIGA)
+static void host_stage_cb(void *user, ZZPlayNetStage stage, const char *host)
+{
+  const ZZPlayHostBinding *b = (const ZZPlayHostBinding *)user;
+  if (b && b->stage) {
+    b->stage(b->user, (int)stage, host);
+  }
+}
+
+static int host_keep_running_cb(void *user)
+{
+  const ZZPlayHostBinding *b = (const ZZPlayHostBinding *)user;
+  return (b && b->keep_running) ? b->keep_running(b->user) : 1;
+}
+
 static int host_http_request(const ZZPlayHost *host, const char *method,
                              const char *url, const char *headers,
                              const uint8_t *body, uint32_t body_len,
@@ -524,9 +537,9 @@ static int host_http_request(const ZZPlayHost *host, const char *method,
   req.body = body;
   req.body_len = (size_t)body_len;
   req.extra_headers = headers;
-  req.keep_running = b ? b->keep_running : NULL;
-  req.user = b ? b->user : NULL;
-
+  req.keep_running = (b && b->keep_running) ? host_keep_running_cb : NULL;
+  req.stage = (b && b->stage) ? host_stage_cb : NULL;
+  req.user = (void *)b;
   net = zzplay_net_get(&req, &head, err, err_size, &cancelled);
   if (head.status > 0 && status) {
     *status = head.status;
@@ -598,87 +611,71 @@ static int host_http_post(const ZZPlayHost *host, const char *url,
                            user, status, err, err_size);
 }
 
-static int host_sleep(const ZZPlayHost *host, uint32_t ms)
+#if !defined(__amigaos__) && !defined(AMIGA)
+__attribute__((weak)) ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req,
+                                                ZZPlayHttpHead *head,
+                                                char *err, size_t err_size,
+                                                int *cancelled)
 {
-  const ZZPlayHostBinding *b = (const ZZPlayHostBinding *)host;
-  while (ms > 0U) {
-    uint32_t step = ms > 100U ? 100U : ms;
-    uint32_t ticks;
-    if (b && b->keep_running && !b->keep_running(b->user)) {
-      return 0;
-    }
-    ticks = (step * 50U + 999U) / 1000U;
-    if (ticks == 0U) {
-      ticks = 1U;
-    }
-    Delay(ticks);
-    ms -= step;
-  }
-  if (b && b->keep_running && !b->keep_running(b->user)) {
-    return 0;
-  }
-  return 1;
-}
-#else
-static int host_http_get(const ZZPlayHost *host, const char *url,
-                         const char *headers,
-                         int (*data)(void *user, const uint8_t *bytes,
-                                     uint32_t len),
-                         void *user, int *status, char *err, uint32_t err_size)
-{
-  (void)host;
-  (void)url;
-  (void)headers;
-  (void)data;
-  (void)user;
-  if (status) {
-    *status = 0;
-  }
+  (void)req;
+  (void)head;
+  (void)cancelled;
   if (err && err_size > 0U) {
     (void)snprintf(err, err_size, "HTTP requests not supported on host");
   }
+  return NULL;
+}
+
+__attribute__((weak)) long zzplay_net_read(ZZPlayNet *net, uint8_t *buf, size_t size)
+{
+  (void)net;
+  (void)buf;
+  (void)size;
+  return -1;
+}
+
+__attribute__((weak)) const char *zzplay_net_error(const ZZPlayNet *net)
+{
+  (void)net;
+  return "";
+}
+
+__attribute__((weak)) int zzplay_net_cancelled(const ZZPlayNet *net)
+{
+  (void)net;
   return 0;
 }
 
-static int host_http_post(const ZZPlayHost *host, const char *url,
-                          const char *headers, const uint8_t *body,
-                          uint32_t body_len,
-                          int (*data)(void *user, const uint8_t *bytes,
-                                      uint32_t len),
-                          void *user, int *status, char *err, uint32_t err_size)
+__attribute__((weak)) void zzplay_net_close(ZZPlayNet *net)
 {
-  (void)host;
-  (void)url;
-  (void)headers;
-  (void)body;
-  (void)body_len;
-  (void)data;
-  (void)user;
-  if (status) {
-    *status = 0;
-  }
-  if (err && err_size > 0U) {
-    (void)snprintf(err, err_size, "HTTP requests not supported on host");
-  }
-  return 0;
-}
-
-static int host_sleep(const ZZPlayHost *host, uint32_t ms)
-{
-  const ZZPlayHostBinding *b = (const ZZPlayHostBinding *)host;
-  while (ms > 0U) {
-    uint32_t step = ms > 100U ? 100U : ms;
-    if (b && b->keep_running && !b->keep_running(b->user)) {
-      return 0;
-    }
-    ms -= step;
-  }
-  if (b && b->keep_running && !b->keep_running(b->user)) {
-    return 0;
-  }
-  return 1;
+  (void)net;
 }
 #endif
+
+static int host_sleep(const ZZPlayHost *host, uint32_t ms)
+{
+  const ZZPlayHostBinding *b = (const ZZPlayHostBinding *)host;
+  while (ms > 0U) {
+    uint32_t step = ms > 100U ? 100U : ms;
+    if (b && b->keep_running && !b->keep_running(b->user)) {
+      return 0;
+    }
+#if defined(__amigaos__) || defined(AMIGA)
+    {
+      uint32_t ticks = (step * 50U + 999U) / 1000U;
+      if (ticks == 0U) {
+        ticks = 1U;
+      }
+      Delay(ticks);
+    }
+#endif
+    ms -= step;
+  }
+  if (b && b->keep_running && !b->keep_running(b->user)) {
+    return 0;
+  }
+  return 1;
+}
 
 static int host_table_pref_get(const ZZPlayHost *host, const char *key,
                                char *out, uint32_t size)

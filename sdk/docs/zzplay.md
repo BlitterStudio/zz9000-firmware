@@ -206,6 +206,22 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
 - Click a folder (shown with `[+]`) to open it. **Back** returns to the previous list
   with the same entry selected. A long list ends in a "--- More items ---"
   row; click it to load the next part.
+- Every list and search ZZPlay finishes is remembered until ZZPlay quits,
+  at most 16 of them (the one unused for the longest time is dropped).
+  Opening a remembered folder or repeating a remembered search shows it
+  at once, with the selection you left, and sends no request.
+- **Reload** fetches the current list or search again from the beginning
+  and replaces the remembered copy. It is disabled while nothing is shown
+  or a request is already running.
+- Rows appear as they arrive, in groups, instead of all at once; the
+  selection and the scroll position stay. **Stop** keeps the rows that
+  arrived.
+- While a list or search loads, the line under the buttons says what is
+  happening: looking up the host, connecting, connecting securely, waiting
+  for the service, then "Loading 40 of 100 items..." while the rows arrive
+  (or "Loading 40 items..." when the total is unknown). The pointer over
+  the Browse window is busy during the wait (AmigaOS 3.1 or newer; older
+  systems keep the normal pointer).
 - Double-click a track or station to add it to the playlist and play it.
   **Play** does the same for the selected entry, **Add** only adds it.
   Folders, and entries the service marks as unplayable, cannot be played or
@@ -218,7 +234,6 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
 - **Settings** shows the service's settings, such as a server address or a
   token. **Save** stores them in `ENVARC:ZZPlay/<service>.prefs` and reconnects
   the service; **Cancel** keeps the old values.
-
 An entry added from a service is stored in the playlist as `<service>://<id>`,
 for example `radio://9610c519-0601-11e8-ae97-52543be04c81`, with the entry's
 title. ZZPlay asks the module for the current address each time the entry

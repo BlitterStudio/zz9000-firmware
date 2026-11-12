@@ -13,6 +13,9 @@
 #define ZZPLAY_BROWSE_PAGE_SIZE 100U
 #define ZZPLAY_BROWSE_STACK_MAX 16U
 #define ZZPLAY_BROWSE_SERVICES_MAX ZZPLAY_PROVIDERS_MAX
+/* How many completed lists and searches the session remembers. The least
+ * recently used one is dropped when the cache is full. */
+#define ZZPLAY_BROWSE_CACHE_MAX 16U
 
 typedef struct ZZPlayBrowseItem {
   char id[ZZPLAY_PROVIDER_TEXT_MAX];
@@ -65,6 +68,9 @@ typedef struct ZZPlayBrowseReply {
   uint32_t total;
   int has_total;
   int fav_add;
+  /* 1 when more replies for the same request follow: the worker sends
+   * rows in groups while a list or search loads. */
+  int is_partial;
   ZZPlayResolved resolved;
 } ZZPlayBrowseReply;
 
@@ -88,6 +94,19 @@ typedef struct ZZPlayBrowseServiceEntry {
   char name[ZZPLAY_PROVIDER_TEXT_MAX];
   const ZZPlayProvider *provider;
 } ZZPlayBrowseServiceEntry;
+/* One remembered completed list or search page. */
+typedef struct ZZPlayBrowseCacheEntry {
+  char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
+  char node_id[ZZPLAY_PROVIDER_TEXT_MAX];  /* folder when not a search */
+  char query[ZZPLAY_PROVIDER_TEXT_MAX];    /* used when is_search */
+  int is_search;
+  uint32_t start;
+  ZZPlayBrowseItem *items;
+  uint32_t item_count;
+  int32_t selection;
+  uint32_t scroll;
+  uint32_t last_used;
+} ZZPlayBrowseCacheEntry;
 
 typedef struct ZZPlayBrowseModel {
   /* Installed services */
@@ -117,12 +136,15 @@ typedef struct ZZPlayBrowseModel {
   /* Navigation stack */
   ZZPlayBrowseFrame stack[ZZPLAY_BROWSE_STACK_MAX];
   uint32_t stack_depth;
-
   /* Generation and pending request */
   uint32_t generation;
   int busy;
   ZZPlayBrowseRequest pending_request;
   char status_message[ZZPLAY_PROVIDER_ERROR_MAX];
+
+  /* Session list cache: remembered lists and searches. */
+  ZZPlayBrowseCacheEntry cache[ZZPLAY_BROWSE_CACHE_MAX];
+  uint32_t cache_clock;
 } ZZPlayBrowseModel;
 
 void zzplay_browse_model_init(ZZPlayBrowseModel *model);
@@ -167,8 +189,11 @@ int zzplay_browse_model_format_uri(const ZZPlayBrowseModel *model,
                                    char *uri, size_t uri_size,
                                    char *title, size_t title_size);
 
-/* Stop and generation */
+/* Reload: fetch the current list or search again from start 0. */
 void zzplay_browse_model_stop(ZZPlayBrowseModel *model);
+int zzplay_browse_model_can_reload(const ZZPlayBrowseModel *model);
+int zzplay_browse_model_reload(ZZPlayBrowseModel *model,
+                              ZZPlayBrowseRequest *out_req);
 
 /* Applying worker replies. Returns 1 if accepted, 0 if dropped. */
 int zzplay_browse_model_apply_reply(ZZPlayBrowseModel *model,

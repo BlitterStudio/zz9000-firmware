@@ -31,6 +31,11 @@ int zzplay_browse_worker_send(const ZZPlayBrowseRequest *req,
  * network operations abort quickly. */
 void zzplay_browse_worker_cancel(void);
 
+/* What the active request is waiting for, or 0 when none runs. `host`
+ * receives the host being reached ("" when none). The GUI polls this to
+ * show stage text; values match ZZPlayNetStage in zzplay-net.h. */
+int zzplay_browse_worker_get_stage(char *host, uint32_t host_size);
+
 /* Check if a completed reply is available. If so, copies the reply header to
  * *reply and returns 1. The caller owns reply->items and must release them
  * with zzplay_browse_worker_release_reply(). Returns 0 if none pending. */
