@@ -355,6 +355,7 @@ int zzplay_browse_recent_add(ZZPlayBrowseRecent *recent,
   recent_clean_text(copy.subtitle);
   copy.kind = item->kind;
   copy.playable = item->playable != 0U ? 1U : 0U;
+  copy.favourite = item->favourite != 0U ? 1U : 0U;
 
   at = recent_find(recent, copy.kind, copy.id);
   if (at == recent->count) {
@@ -434,7 +435,7 @@ uint32_t zzplay_browse_recent_parse(ZZPlayBrowseRecent *recent,
     }
     if (kind > ZZPLAY_ITEM_STATION || field_len[1] == 0U ||
         field_len[1] >= ZZPLAY_PROVIDER_TEXT_MAX ||
-        field_len[4] != 1U || (field[4][0] != '0' && field[4][0] != '1') ||
+        field_len[4] != 1U || field[4][0] < '0' || field[4][0] > '3' ||
         !recent_field_clean(field[1], field_len[1]) ||
         !recent_field_clean(field[2], field_len[2]) ||
         !recent_field_clean(field[3], field_len[3])) {
@@ -452,7 +453,8 @@ uint32_t zzplay_browse_recent_parse(ZZPlayBrowseRecent *recent,
            field_len[3] < sizeof(it->subtitle) ? field_len[3]
                                                : sizeof(it->subtitle) - 1U);
     it->kind = kind;
-    it->playable = field[4][0] == '1' ? 1U : 0U;
+    it->playable = (field[4][0] - '0') & 1 ? 1U : 0U;
+    it->favourite = (field[4][0] - '0') & 2 ? 1U : 0U;
     if (strcmp(it->id, ZZPLAY_BROWSE_RECENT_ID) == 0 ||
         recent_find(recent, kind, it->id) < recent->count) {
       continue; /* a repeat: the newer line already counts */
@@ -498,7 +500,14 @@ size_t zzplay_browse_recent_format(const ZZPlayBrowseRecent *recent,
     recent_put(out, capacity, &used, it->title, strlen(it->title));
     recent_put(out, capacity, &used, "\t", 1U);
     recent_put(out, capacity, &used, it->subtitle, strlen(it->subtitle));
-    recent_put(out, capacity, &used, it->playable ? "\t1\n" : "\t0\n", 3U);
+    /* Last field: 1 playable, 2 a favourite, added together. */
+    {
+      char flags[3];
+      flags[0] = '\t';
+      flags[1] = (char)('0' + (it->playable ? 1 : 0) + (it->favourite ? 2 : 0));
+      flags[2] = '\n';
+      recent_put(out, capacity, &used, flags, 3U);
+    }
   }
   if (out && capacity > 0U) {
     out[used < capacity ? used : capacity - 1U] = '\0';
@@ -660,11 +669,20 @@ int zzplay_browse_model_reopen_service(ZZPlayBrowseModel *model,
   return 1;
 }
 
+/* The shown list's rows are still arriving: its request has sent some
+ * groups and not the final reply. A gather or a favourite change running
+ * does not count. */
+static int model_rows_loading(const ZZPlayBrowseModel *model)
+{
+  return model->rows_open && model->rows_generation == model->generation;
+}
+
 int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
                                      ZZPlayBrowseRequest *out_req)
 {
   ZZPlayBrowseFrame *frame;
   const ZZPlayBrowseItem *item;
+  int loading;
 
   if (!model || index < 0 || (uint32_t)index >= model->item_count ||
       model->current_service < 0) {
@@ -678,6 +696,7 @@ int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
     return 0;
   }
 
+  loading = model_rows_loading(model);
   cache_save_view_state(model);
   model->generation++;
   frame = &model->stack[model->stack_depth];
@@ -698,6 +717,7 @@ int zzplay_browse_model_enter_folder(ZZPlayBrowseModel *model, int32_t index,
   frame->has_total = model->has_total;
   frame->has_more = model->has_more;
   frame->folder_is_collection = model->folder_is_collection;
+  frame->incomplete = loading;
   model->stack_depth++;
 
   /* Adopt new folder */
@@ -813,9 +833,18 @@ int zzplay_browse_model_back(ZZPlayBrowseModel *model,
   model->busy = 0;
   model->status_message[0] = '\0';
 
-  memset(frame, 0, sizeof(*frame));
-  /* The list may have changed while a folder was open. */
-  recent_sync(model);
+  {
+    int incomplete = frame->incomplete;
+
+    memset(frame, 0, sizeof(*frame));
+    /* The list may have changed while a folder was open. */
+    recent_sync(model);
+    /* Its request was cut short when the folder was opened: ask again,
+     * or the rows that had not come yet could never be reached. */
+    if (incomplete && zzplay_browse_model_reload(model, out_req)) {
+      return 1;
+    }
+  }
 
   if (out_req) {
     memset(out_req, 0, sizeof(*out_req));
@@ -828,10 +857,12 @@ int zzplay_browse_model_search(ZZPlayBrowseModel *model, const char *query,
                                ZZPlayBrowseRequest *out_req)
 {
   ZZPlayBrowseFrame *frame;
+  int loading;
 
   if (!model || !query || model->current_service < 0) {
     return 0;
   }
+  loading = model_rows_loading(model);
   cache_save_view_state(model);
   model->generation++;
 
@@ -858,6 +889,7 @@ int zzplay_browse_model_search(ZZPlayBrowseModel *model, const char *query,
     frame->has_total = model->has_total;
     frame->has_more = model->has_more;
     frame->folder_is_collection = model->folder_is_collection;
+    frame->incomplete = loading;
     model->stack_depth++;
     model->items = NULL;
     model->item_count = 0U;
@@ -1221,6 +1253,33 @@ int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,
     out_req->fav_add = (item->favourite == 0U) ? 1 : 0;
   }
   return 1;
+}
+
+int zzplay_browse_model_favourite_done(ZZPlayBrowseModel *model,
+                                       const char *id, int favourite)
+{
+  uint32_t i;
+  int changed = 0;
+  uint32_t flag = favourite ? 1U : 0U;
+
+  if (!model || !id || id[0] == '\0') {
+    return 0;
+  }
+  for (i = 0U; i < model->recent.count; i++) {
+    if (strcmp(model->recent.items[i].id, id) == 0 &&
+        model->recent.items[i].favourite != flag) {
+      model->recent.items[i].favourite = flag;
+      changed = 1;
+    }
+  }
+  if (zzplay_browse_model_in_recent(model)) {
+    for (i = 0U; i < model->item_count; i++) {
+      if (strcmp(model->items[i].id, id) == 0) {
+        model->items[i].favourite = flag;
+      }
+    }
+  }
+  return changed;
 }
 
 

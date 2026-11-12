@@ -1884,7 +1884,8 @@ static int test_recent_list_add_dedupe_cap(void)
   assert(zzplay_browse_recent_add(&recent, &it) == 0);
   assert(strcmp(recent.items[0].id, "t29") == 0);
 
-  /* Line ends and tabs in the text become spaces; playable is 0 or 1. */
+  /* Line ends and tabs in the text become spaces; playable is 0 or 1; the
+   * favourite flag is kept so Favourite in the list removes it. */
   set_item(&it, "s1", "A\tB\nC", "x\ry", ZZPLAY_ITEM_STATION, 5U);
   it.duration_ms = 1234U;
   it.favourite = 1U;
@@ -1893,7 +1894,75 @@ static int test_recent_list_add_dedupe_cap(void)
   assert(strcmp(recent.items[0].subtitle, "x y") == 0);
   assert(recent.items[0].playable == 1U);
   assert(recent.items[0].duration_ms == 0U);
-  assert(recent.items[0].favourite == 0U);
+  assert(recent.items[0].favourite == 1U);
+  return 0;
+}
+
+/* A favourite played from Browse can be removed from Recently played, and
+ * the list follows each change after that. */
+static int test_recent_favourite_toggle(void)
+{
+  static const char saved[] = "station\ts1\tRadio One\tPop\t3\n";
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem top[1];
+  ZZPlayProvider prov;
+  char text[128];
+
+  memset(&prov, 0, sizeof(prov));
+  prov.size = sizeof(ZZPlayProvider);
+  prov.scheme = "radio";
+  prov.favourite = fake_fav;
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", &prov));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  zzplay_browse_model_load_recent(&model, saved, strlen(saved));
+  set_item(&top[0], "fav", "Favourites", "", ZZPLAY_ITEM_FOLDER, 0U);
+  apply_list(&model, req.generation, 0U, top, 1U, 1U, 0);
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(zzplay_browse_model_in_recent(&model));
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(zzplay_browse_model_favourite(&model, &req));
+  assert(req.fav_add == 0); /* a favourite: Favourite removes it */
+  model.busy = 0;
+
+  /* The removal was saved: the row and the list follow. */
+  assert(zzplay_browse_model_favourite_done(&model, "s1", 0) == 1);
+  assert(model.items[0].favourite == 0U);
+  assert(model.recent.items[0].favourite == 0U);
+  (void)zzplay_browse_recent_format(&model.recent, text, sizeof(text));
+  assert(strcmp(text, "station\ts1\tRadio One\tPop\t1\n") == 0);
+  assert(zzplay_browse_model_favourite(&model, &req));
+  assert(req.fav_add == 1);
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+/* A folder opened while its parent's rows were still arriving: Back shows
+ * those rows and asks for the list again, so the rest can be reached. */
+static int test_back_to_list_still_loading(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseItem rows[3];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "radio", "Radio", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  set_item(&rows[0], "country:A", "A", "", ZZPLAY_ITEM_FOLDER, 0U);
+  set_item(&rows[1], "country:B", "B", "", ZZPLAY_ITEM_FOLDER, 0U);
+  set_item(&rows[2], "country:C", "C", "", ZZPLAY_ITEM_FOLDER, 0U);
+  apply_list(&model, req.generation, 0U, rows, 3U, 0U, 1); /* partial */
+  assert(model.busy == 1);
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(model.item_count == 3U);
+  assert(req.kind == ZZPLAY_BROWSE_REQ_LIST);
+  assert(req.node_id[0] == '\0');
+  assert(model.busy == 1);
+  zzplay_browse_model_free(&model);
   return 0;
 }
 
@@ -1918,12 +1987,14 @@ static int test_recent_parse_format(void)
   set_item(&it, "alb:1", "Abbey Road", "The Beatles", ZZPLAY_ITEM_FOLDER, 1U);
   assert(zzplay_browse_recent_add(&recent, &it));
   set_item(&it, "s1", "Radio One", "Pop", ZZPLAY_ITEM_STATION, 1U);
+  it.favourite = 1U;
   assert(zzplay_browse_recent_add(&recent, &it));
 
   need = zzplay_browse_recent_format(&recent, NULL, 0U);
   assert(zzplay_browse_recent_format(&recent, text, sizeof(text)) == need);
   assert(strlen(text) == need);
-  assert(strcmp(text, "station\ts1\tRadio One\tPop\t1\n"
+  /* A favourite adds 2 to the last field. */
+  assert(strcmp(text, "station\ts1\tRadio One\tPop\t3\n"
                       "folder\talb:1\tAbbey Road\tThe Beatles\t1\n"
                       "track\tt:2\tSong\t\t1\n") == 0);
   assert(zzplay_browse_recent_parse(&back, text, need) == 3U);
@@ -1933,6 +2004,7 @@ static int test_recent_parse_format(void)
     assert(strcmp(back.items[i].subtitle, recent.items[i].subtitle) == 0);
     assert(back.items[i].kind == recent.items[i].kind);
     assert(back.items[i].playable == recent.items[i].playable);
+    assert(back.items[i].favourite == recent.items[i].favourite);
   }
 
   /* A short buffer gets the start, still terminated. */
@@ -1952,7 +2024,7 @@ static int test_recent_parse_format(void)
       "track\textra\ta\tb\t1\tzz\n"
       "album\tbadkind\ta\tb\t1\n"
       "track\t\tempty id\tb\t1\n"
-      "track\tbadplay\ta\tb\t2\n"
+      "track\tbadplay\ta\tb\t4\n"
       "track\tbadplay2\ta\tb\t10\n"
       "folder\tgood2\tGood two\t\t0\n"
       "track\tgood1\tRepeat\tsub\t1\n"
@@ -2538,6 +2610,8 @@ int main(void)
   assert(test_back_skips_dead_frames() == 0);
   assert(test_keyboard_selection() == 0);
   assert(test_recent_list_add_dedupe_cap() == 0);
+  assert(test_recent_favourite_toggle() == 0);
+  assert(test_back_to_list_still_loading() == 0);
   assert(test_recent_parse_format() == 0);
   assert(test_recently_played_folder() == 0);
   assert(test_recent_row_with_paging() == 0);

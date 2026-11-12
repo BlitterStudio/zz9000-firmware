@@ -133,6 +133,8 @@ typedef struct ZZPlayBrowseFrame {
   uint32_t total;
   int has_total;
   int has_more;
+  /* 1 when the list was still loading as it was left: Back asks again. */
+  int incomplete;
 } ZZPlayBrowseFrame;
 
 typedef struct ZZPlayBrowseServiceEntry {
@@ -286,6 +288,11 @@ int zzplay_browse_model_provider_has_link(const ZZPlayProvider *provider);
 int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,
                                   ZZPlayBrowseRequest *out_req);
+/* A favourite change for `id` was saved: Recently played keeps the new
+ * state, in its list and in its shown rows. Returns 1 when the list
+ * changed and should be saved. */
+int zzplay_browse_model_favourite_done(ZZPlayBrowseModel *model,
+                                       const char *id, int favourite);
 /* True when the selected row is editable by the provider. */
 int zzplay_browse_model_can_edit(const ZZPlayBrowseModel *model);
 ZZPlayBrowseAction zzplay_browse_model_activate(ZZPlayBrowseModel *model,
@@ -364,10 +371,11 @@ void zzplay_browse_recent_clear(ZZPlayBrowseRecent *recent);
 int zzplay_browse_recent_add(ZZPlayBrowseRecent *recent,
                              const ZZPlayBrowseItem *item);
 /* Read the saved form: one entry per line, newest first, as
- * "kind<TAB>id<TAB>title<TAB>subtitle<TAB>playable" with kind "folder",
- * "track" or "station" and playable "0" or "1". Damaged lines (missing or
- * extra fields, an unknown kind, an empty or over-long id) are skipped,
- * and so are repeats. Returns the number of entries read. */
+ * "kind<TAB>id<TAB>title<TAB>subtitle<TAB>flags" with kind "folder",
+ * "track" or "station" and flags one digit: 1 playable plus 2 a
+ * favourite. Damaged lines (missing or extra fields, an unknown kind, an
+ * empty or over-long id) are skipped, and so are repeats. Returns the
+ * number of entries read. */
 uint32_t zzplay_browse_recent_parse(ZZPlayBrowseRecent *recent,
                                     const char *text, size_t length);
 /* Write the saved form. Returns the bytes needed, excluding the NUL; the

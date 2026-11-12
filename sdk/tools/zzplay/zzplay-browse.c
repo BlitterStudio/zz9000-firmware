@@ -179,6 +179,8 @@ static ZZPlayBrowseReply poll_worker_reply;
 static ZZPlayBrowseRequest poll_req;
 static char poll_uri[ZZPLAY_PLAYLIST_PATH_MAX];
 static int last_fav_add = 0;
+/* The row the running Favourite request is for. */
+static char last_fav_id[ZZPLAY_PROVIDER_TEXT_MAX];
 static char poll_title[ZZPLAY_PLAYLIST_TITLE_MAX];
 static ULONG last_click_s = 0UL;
 static ULONG last_click_m = 0UL;
@@ -1030,16 +1032,33 @@ static int browse_write_recent(void *user, const char *text,
                                text, length);
 }
 
+/* Save the current service's Recently played list. A failed save is
+ * reported once; the list stays, and the next change saves all of it
+ * again. */
+static void browse_save_recent(void)
+{
+  const ZZPlayBrowseServiceEntry *svc =
+      zzplay_browse_model_current_service(&browse_model);
+  int saved;
+
+  if (!svc) {
+    return;
+  }
+  saved = zzplay_browse_recent_save(&browse_model.recent, browse_write_recent,
+                                    (void *)svc->scheme);
+  if (zzplay_browse_model_note_recent_save(&browse_model, saved)) {
+    update_status_text("Could not save Recently played");
+  }
+}
+
 /* `item` was started from Browse: put it first in the current service's
- * Recently played list and save the list. A failed save is reported once;
- * the list stays, and the next change saves all of it again. Only live
- * requests get here, so the item is always the current service's. */
+ * Recently played list and save the list. Only live requests get here,
+ * so the item is always the current service's. */
 static void browse_note_started(const ZZPlayBrowseItem *item)
 {
   const ZZPlayBrowseServiceEntry *svc =
       zzplay_browse_model_current_service(&browse_model);
   uint32_t before = browse_model.item_count;
-  int saved;
 
   if (!svc || !item ||
       !zzplay_browse_model_note_started(&browse_model, item)) {
@@ -1050,11 +1069,7 @@ static void browse_note_started(const ZZPlayBrowseItem *item)
     rebuild_list_nodes();
     update_buttons();
   }
-  saved = zzplay_browse_recent_save(&browse_model.recent, browse_write_recent,
-                                    (void *)svc->scheme);
-  if (zzplay_browse_model_note_recent_save(&browse_model, saved)) {
-    update_status_text("Could not save Recently played");
-  }
+  browse_save_recent();
 }
 
 /* Show the model's selection in the list, scrolled into view. */
@@ -3050,7 +3065,12 @@ static void browse_do_back(void)
 {
   if (zzplay_browse_model_back(&browse_model, &poll_req)) {
     rebuild_list_nodes();
-    browse_update_count_status();
+    if (poll_req.kind != ZZPLAY_BROWSE_REQ_NONE &&
+        browse_send(&poll_req, browse_provider())) {
+      update_status_text("Loading...");
+    } else {
+      browse_update_count_status();
+    }
     update_buttons();
   }
 }
@@ -3074,6 +3094,7 @@ static void browse_do_favourite(void)
 {
   if (zzplay_browse_model_favourite(&browse_model, &poll_req)) {
     last_fav_add = poll_req.fav_add;
+    copy_string(last_fav_id, sizeof(last_fav_id), poll_req.item.id);
     if (browse_send(&poll_req, browse_provider())) {
       update_status_text(last_fav_add ? "Adding to favourites..."
                                       : "Removing from favourites...");
@@ -3336,10 +3357,17 @@ void zzplay_browse_poll(void)
         reload_note = poll_worker_reply.fav_add ? "Added to favourites"
                                                 : "Removed from favourites";
         update_status_text(reload_note);
+        /* Recently played keeps the row's favourite state, so Favourite
+         * there toggles the right way next time. */
+        if (zzplay_browse_model_favourite_done(&browse_model, last_fav_id,
+                                               poll_worker_reply.fav_add)) {
+          browse_save_recent();
+        }
         if (zzplay_browse_model_in_recent(&browse_model)) {
           /* ZZPlay's own list: there is nothing to fetch again. */
           browse_model.busy = 0;
           reload_note = NULL;
+          rebuild_list_nodes();
         } else if (!have_pending) {
           /* Reload the list (the Favourites folder changes), unless the
            * user has already asked for something else. */
