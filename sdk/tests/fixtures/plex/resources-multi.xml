@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<resources>
+  <resource name="Server One" product="Plex Media Server" provides="server" accessToken="server-one-token" owned="1">
+    <connections>
+      <connection protocol="https" address="192.168.1.18" port="32400" uri="https://192-168-1-18.abcdef0123456789.plex.direct:32400" local="1" relay="0"/>
+    </connections>
+  </resource>
+  <resource name="Server Two" product="Plex Media Server" provides="server" accessToken="server-two-token" owned="0">
+    <connections>
+      <connection protocol="https" address="192.168.1.20" port="32400" uri="https://192-168-1-20.1234567890abcdef.plex.direct:32400" local="1" relay="0"/>
+    </connections>
+  </resource>
+</resources>

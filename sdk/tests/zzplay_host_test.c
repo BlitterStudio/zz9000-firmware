@@ -200,6 +200,13 @@ static void test_pref_text_set(void)
   }
 }
 
+static int dummy_keep_running_cancel(void *user)
+{
+  int *count = (int *)user;
+  (*count)--;
+  return *count > 0 ? 1 : 0;
+}
+
 static void test_host_binding_and_table(void)
 {
   ZZPlayHostBinding binding;
@@ -227,6 +234,21 @@ static void test_host_binding_and_table(void)
   /* URL escape via host table */
   binding.table.url_escape("a b", buf, sizeof(buf));
   assert(strcmp(buf, "a%20b") == 0);
+
+  /* http_post and sleep pointers are filled */
+  assert(binding.table.http_post != NULL);
+  assert(binding.table.sleep != NULL);
+
+  /* Sleep without cancel */
+  assert(binding.table.sleep(&binding.table, 500U) == 1);
+
+  /* Sleep with cancel */
+  {
+    int cancel_after = 2;
+    ZZPlayHostBinding cancel_binding;
+    zzplay_host_bind(&cancel_binding, "test_scheme", dummy_keep_running_cancel, &cancel_after);
+    assert(cancel_binding.table.sleep(&cancel_binding.table, 500U) == 0);
+  }
 }
 
 typedef struct XmlTestState {

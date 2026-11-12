@@ -31,6 +31,9 @@ typedef int (*ZZPlayNetKeepRunning)(void *user);
 
 typedef struct ZZPlayNetRequest {
   const char *url;
+  const char *method;               /* NULL means GET */
+  const uint8_t *body;              /* may be NULL */
+  size_t body_len;
   /* Complete header lines ending in CRLF, or NULL. They can carry service
    * credentials, so they are sent only while redirects stay on the
    * origin (scheme, host and port) of `url`. */

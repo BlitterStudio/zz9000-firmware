@@ -641,8 +641,8 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
     }
     /* The head buffer holds the request until the response replaces it. */
     len = zzplay_http_format_request(
-        net->head, sizeof(net->head), &net->at, NET_USER_AGENT,
-        req->has_range, req->range_from, req->icy,
+        net->head, sizeof(net->head), req->method, &net->at, NET_USER_AGENT,
+        req->has_range, req->range_from, req->icy, req->body_len,
         same_origin ? req->extra_headers : NULL);
     if (len == 0U) {
       set_err(net, "The address is too long");
@@ -653,6 +653,11 @@ ZZPlayNet *zzplay_net_get(const ZZPlayNetRequest *req, ZZPlayHttpHead *head,
         (net->at.tls && !tls_connect(net, net->at.host)) ||
         !send_all(net, net->head, len)) {
       goto fail;
+    }
+    if (req->body != NULL && req->body_len > 0U) {
+      if (!send_all(net, (const char *)req->body, req->body_len)) {
+        goto fail;
+      }
     }
     if (!read_head(net, head)) {
       /* laut.fm's stream servers close a TLS 1.3 connection from AmiSSL

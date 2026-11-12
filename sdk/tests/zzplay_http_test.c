@@ -115,8 +115,8 @@ static int test_request(void)
   size_t n;
 
   if (!zzplay_http_parse_url("http://h:8000/s", &url)) return 1;
-  n = zzplay_http_format_request(out, sizeof(out), &url, "ZZPlay/1", 1,
-                                 4900U, 1, "X-Plex-Token: t\r\n");
+  n = zzplay_http_format_request(out, sizeof(out), NULL, &url, "ZZPlay/1", 1,
+                                 4900U, 1, 0U, "X-Plex-Token: t\r\n");
   if (n == 0U || n != strlen(out)) return 2;
   if (strncmp(out, "GET /s HTTP/1.1\r\nHost: h:8000\r\n", 31) != 0) return 3;
   if (strstr(out, "Range: bytes=4900-\r\n") == NULL) return 4;
@@ -125,14 +125,26 @@ static int test_request(void)
   if (strcmp(out + n - 4U, "\r\n\r\n") != 0) return 7;
   /* Default ports stay out of the Host header; no Range unless asked. */
   if (!zzplay_http_parse_url("https://h/s", &url)) return 8;
-  n = zzplay_http_format_request(out, sizeof(out), &url, "ZZPlay/1", 0, 0U, 0,
-                                 NULL);
+  n = zzplay_http_format_request(out, sizeof(out), NULL, &url, "ZZPlay/1", 0, 0U, 0,
+                                 0U, NULL);
   if (n == 0U || strstr(out, "Host: h\r\n") == NULL ||
       strstr(out, "Range:") != NULL || strstr(out, "Icy-MetaData") != NULL)
     return 9;
-  if (zzplay_http_format_request(out, 40U, &url, "ZZPlay/1", 0, 0U, 0, NULL) !=
+  if (zzplay_http_format_request(out, 40U, NULL, &url, "ZZPlay/1", 0, 0U, 0, 0U, NULL) !=
       0U)
     return 10;
+
+  /* POST request with Content-Length (including 0 body length) */
+  n = zzplay_http_format_request(out, sizeof(out), "POST", &url, "ZZPlay/1", 0,
+                                 0U, 0, 0U, "Accept: application/xml\r\n");
+  if (n == 0U || n != strlen(out)) return 11;
+  if (strncmp(out, "POST /s HTTP/1.1\r\nHost: h\r\n", 27) != 0) return 12;
+  if (strstr(out, "Content-Length: 0\r\n") == NULL) return 13;
+  if (strstr(out, "Accept: application/xml\r\n") == NULL) return 14;
+
+  n = zzplay_http_format_request(out, sizeof(out), "POST", &url, "ZZPlay/1", 0,
+                                 0U, 0, 42U, NULL);
+  if (n == 0U || strstr(out, "Content-Length: 42\r\n") == NULL) return 15;
   return 0;
 }
 

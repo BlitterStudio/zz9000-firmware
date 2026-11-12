@@ -246,8 +246,25 @@ Favourites are stored in `ENVARC:ZZPlay/radio.prefs`, one line per station:
 
 ### Plex
 
-`plex.zzprov` plays the music libraries of a Plex Media Server. Choose Plex
-Media Server in the Browse window, click **Settings** and enter:
+`plex.zzprov` plays the music libraries of a Plex Media Server.
+
+To sign in from the Browse window:
+
+1. Open Plex Media Server in the Browse window.
+2. Open **Sign in with plex.tv**.
+3. On another device (such as a phone or PC), open `plex.tv/link` in a browser
+   and enter the code shown in ZZPlay.
+4. Open **Continue after entering the code**.
+
+ZZPlay then asks plex.tv for your servers and uses the first local connection
+that answers: `https` when AmiSSL is installed and the server's certificate
+checks out, otherwise plain `http`. If your account has more than one server,
+they are listed as folders; open the one you want. The server's music library
+opens straight away, and later sessions go there directly. To sign in again,
+clear **Token** in Settings.
+
+To set the connection by hand instead, choose Plex Media Server in the Browse
+window, click **Settings** and enter:
 
 - **Server URL**: the server's address with its port, for example
   `http://192.168.1.10:32400`.
@@ -258,9 +275,9 @@ Media Server in the Browse window, click **Settings** and enter:
   (192 when empty).
 
 The token is stored in `ENVARC:ZZPlay/plex.prefs` as plain text and is sent
-only to the server you entered. With a plain `http://` address, the server's
-**Secure connections** setting (Settings, Network) must be **Preferred**, not
-**Required**.
+only to that server and, during sign-in, to plex.tv. With a plain `http://`
+address, the server's **Secure connections** setting (Settings, Network) must
+be **Preferred**, not **Required**.
 
 The top level shows an Audio playlists folder and your music libraries; a
 server with one music library shows its artists there directly. An artist

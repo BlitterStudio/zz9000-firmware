@@ -225,34 +225,46 @@ int zzplay_http_same_origin(const ZZPlayUrl *a, const ZZPlayUrl *b)
   return 1;
 }
 
-size_t zzplay_http_format_request(char *out, size_t size, const ZZPlayUrl *url,
-                                  const char *user_agent, int has_range,
-                                  uint32_t range_from, int icy,
-                                  const char *extra)
+size_t zzplay_http_format_request(char *out, size_t size, const char *method,
+                                  const ZZPlayUrl *url, const char *user_agent,
+                                  int has_range, uint32_t range_from, int icy,
+                                  size_t body_len, const char *extra)
 {
   char authority[ZZPLAY_HTTP_HOST_MAX + 8U];
   char range[48];
+  char clen[48];
+  const char *m;
+  int is_body_method;
   int n;
 
   if (out == NULL || size == 0U || url == NULL ||
       !format_authority(url, authority, sizeof(authority))) {
     return 0U;
   }
+  m = method != NULL ? method : "GET";
+  is_body_method = (strcmp(m, "GET") != 0 && strcmp(m, "HEAD") != 0) ||
+                   body_len > 0U;
   range[0] = '\0';
   if (has_range) {
     (void)snprintf(range, sizeof(range), "Range: bytes=%lu-\r\n",
                    (unsigned long)range_from);
   }
+  clen[0] = '\0';
+  if (is_body_method) {
+    (void)snprintf(clen, sizeof(clen), "Content-Length: %lu\r\n",
+                   (unsigned long)body_len);
+  }
   n = snprintf(out, size,
-               "GET %s HTTP/1.1\r\n"
+               "%s %s HTTP/1.1\r\n"
                "Host: %s\r\n"
                "User-Agent: %s\r\n"
                "Accept: */*\r\n"
-               "%s%s%s"
+               "%s%s%s%s"
                "Connection: close\r\n\r\n",
-               url->path, authority,
+               m, url->path, authority,
                user_agent != NULL ? user_agent : "ZZPlay (AmigaOS)", range,
-               icy ? "Icy-MetaData: 1\r\n" : "", extra != NULL ? extra : "");
+               clen, icy ? "Icy-MetaData: 1\r\n" : "",
+               extra != NULL ? extra : "");
   if (n <= 0 || (size_t)n >= size) {
     return 0U;
   }

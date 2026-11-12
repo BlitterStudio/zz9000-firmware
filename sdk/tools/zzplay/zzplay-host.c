@@ -488,11 +488,13 @@ static const char *host_xml_attr(const ZZPlayHostXmlAttr *attrs, uint32_t count,
 }
 
 #if defined(__amigaos__) || defined(AMIGA)
-static int host_http_get(const ZZPlayHost *host, const char *url,
-                         const char *headers,
-                         int (*data)(void *user, const uint8_t *bytes,
-                                     uint32_t len),
-                         void *user, int *status, char *err, uint32_t err_size)
+static int host_http_request(const ZZPlayHost *host, const char *method,
+                             const char *url, const char *headers,
+                             const uint8_t *body, uint32_t body_len,
+                             int (*data)(void *user, const uint8_t *bytes,
+                                         uint32_t len),
+                             void *user, int *status, char *err,
+                             uint32_t err_size)
 {
   const ZZPlayHostBinding *b = (const ZZPlayHostBinding *)host;
   ZZPlayNetRequest req;
@@ -518,6 +520,9 @@ static int host_http_get(const ZZPlayHost *host, const char *url,
 
   memset(&req, 0, sizeof(req));
   req.url = url;
+  req.method = method;
+  req.body = body;
+  req.body_len = (size_t)body_len;
   req.extra_headers = headers;
   req.keep_running = b ? b->keep_running : NULL;
   req.user = b ? b->user : NULL;
@@ -571,6 +576,49 @@ static int host_http_get(const ZZPlayHost *host, const char *url,
   zzplay_net_close(net);
   return 1;
 }
+
+static int host_http_get(const ZZPlayHost *host, const char *url,
+                         const char *headers,
+                         int (*data)(void *user, const uint8_t *bytes,
+                                     uint32_t len),
+                         void *user, int *status, char *err, uint32_t err_size)
+{
+  return host_http_request(host, "GET", url, headers, NULL, 0U, data, user,
+                           status, err, err_size);
+}
+
+static int host_http_post(const ZZPlayHost *host, const char *url,
+                          const char *headers, const uint8_t *body,
+                          uint32_t body_len,
+                          int (*data)(void *user, const uint8_t *bytes,
+                                      uint32_t len),
+                          void *user, int *status, char *err, uint32_t err_size)
+{
+  return host_http_request(host, "POST", url, headers, body, body_len, data,
+                           user, status, err, err_size);
+}
+
+static int host_sleep(const ZZPlayHost *host, uint32_t ms)
+{
+  const ZZPlayHostBinding *b = (const ZZPlayHostBinding *)host;
+  while (ms > 0U) {
+    uint32_t step = ms > 100U ? 100U : ms;
+    uint32_t ticks;
+    if (b && b->keep_running && !b->keep_running(b->user)) {
+      return 0;
+    }
+    ticks = (step * 50U + 999U) / 1000U;
+    if (ticks == 0U) {
+      ticks = 1U;
+    }
+    Delay(ticks);
+    ms -= step;
+  }
+  if (b && b->keep_running && !b->keep_running(b->user)) {
+    return 0;
+  }
+  return 1;
+}
 #else
 static int host_http_get(const ZZPlayHost *host, const char *url,
                          const char *headers,
@@ -590,6 +638,45 @@ static int host_http_get(const ZZPlayHost *host, const char *url,
     (void)snprintf(err, err_size, "HTTP requests not supported on host");
   }
   return 0;
+}
+
+static int host_http_post(const ZZPlayHost *host, const char *url,
+                          const char *headers, const uint8_t *body,
+                          uint32_t body_len,
+                          int (*data)(void *user, const uint8_t *bytes,
+                                      uint32_t len),
+                          void *user, int *status, char *err, uint32_t err_size)
+{
+  (void)host;
+  (void)url;
+  (void)headers;
+  (void)body;
+  (void)body_len;
+  (void)data;
+  (void)user;
+  if (status) {
+    *status = 0;
+  }
+  if (err && err_size > 0U) {
+    (void)snprintf(err, err_size, "HTTP requests not supported on host");
+  }
+  return 0;
+}
+
+static int host_sleep(const ZZPlayHost *host, uint32_t ms)
+{
+  const ZZPlayHostBinding *b = (const ZZPlayHostBinding *)host;
+  while (ms > 0U) {
+    uint32_t step = ms > 100U ? 100U : ms;
+    if (b && b->keep_running && !b->keep_running(b->user)) {
+      return 0;
+    }
+    ms -= step;
+  }
+  if (b && b->keep_running && !b->keep_running(b->user)) {
+    return 0;
+  }
+  return 1;
 }
 #endif
 
@@ -628,7 +715,8 @@ void zzplay_host_bind(ZZPlayHostBinding *binding, const char *scheme,
   binding->table.format = host_format;
   binding->table.pref_get = host_table_pref_get;
   binding->table.pref_set = host_table_pref_set;
-
+  binding->table.http_post = host_http_post;
+  binding->table.sleep = host_sleep;
   if (scheme) {
     strncpy(binding->scheme, scheme, sizeof(binding->scheme) - 1U);
     binding->scheme[sizeof(binding->scheme) - 1U] = '\0';

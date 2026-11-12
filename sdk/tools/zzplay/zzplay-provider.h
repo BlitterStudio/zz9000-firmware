@@ -132,6 +132,18 @@ struct ZZPlayHost {
                   uint32_t size);
   int (*pref_set)(const ZZPlayHost *host, const char *key,
                   const char *value);
+
+  /* POST `url` with an optional `body`. Same semantics as http_get. */
+  int (*http_post)(const ZZPlayHost *host, const char *url,
+                   const char *headers, const uint8_t *body,
+                   uint32_t body_len,
+                   int (*data)(void *user, const uint8_t *bytes,
+                               uint32_t len),
+                   void *user, int *status, char *err, uint32_t err_size);
+
+  /* Sleep for up to `ms` milliseconds, polling keep_running in steps of at
+   * most 100 ms. Returns 0 if cancelled, 1 if completed. */
+  int (*sleep)(const ZZPlayHost *host, uint32_t ms);
 };
 
 typedef struct ZZPlayProvider {

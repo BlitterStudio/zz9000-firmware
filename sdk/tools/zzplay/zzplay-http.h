@@ -51,14 +51,16 @@ int zzplay_http_redirect_allowed(const ZZPlayUrl *from, const ZZPlayUrl *to);
  * carry service credentials, follow a redirect only within one origin. */
 int zzplay_http_same_origin(const ZZPlayUrl *a, const ZZPlayUrl *b);
 
-/* Format a GET request. `range_from` asks for "bytes=N-" when has_range is
- * set; `icy` asks a Shoutcast/Icecast server to interleave metadata;
- * `extra` holds complete header lines, each ending in CRLF, or is NULL.
- * Returns the request length, or 0 when it does not fit in `size`. */
-size_t zzplay_http_format_request(char *out, size_t size, const ZZPlayUrl *url,
-                                  const char *user_agent, int has_range,
-                                  uint32_t range_from, int icy,
-                                  const char *extra);
+/* Format an HTTP request. `method` defaults to "GET" when NULL. For a
+ * body-carrying method (or when body_len > 0), a Content-Length header is
+ * added, including Content-Length: 0. `range_from` asks for "bytes=N-" when
+ * has_range is set; `icy` asks a Shoutcast/Icecast server to interleave
+ * metadata; `extra` holds complete header lines, each ending in CRLF, or is
+ * NULL. Returns the request length, or 0 when it does not fit in `size`. */
+size_t zzplay_http_format_request(char *out, size_t size, const char *method,
+                                  const ZZPlayUrl *url, const char *user_agent,
+                                  int has_range, uint32_t range_from, int icy,
+                                  size_t body_len, const char *extra);
 
 typedef struct ZZPlayHttpHead {
   int status;                 /* 200, 206, 302, ... */
