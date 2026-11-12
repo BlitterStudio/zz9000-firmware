@@ -136,8 +136,8 @@ static const char *service_labels[ZZPLAY_BROWSE_SERVICES_MAX + 1U];
 
 static char search_buf[ZZPLAY_PROVIDER_TEXT_MAX];
 static char status_buf[ZZPLAY_PROVIDER_ERROR_MAX];
-static char field_bufs[BROWSE_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
-static char secret_orig[BROWSE_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
+static char field_bufs[BROWSE_FIELDS_MAX][ZZPLAY_PROVIDER_VALUE_MAX];
+static char secret_orig[BROWSE_FIELDS_MAX][ZZPLAY_PROVIDER_VALUE_MAX];
 /* CHOICE fields: how many choices the form found and which is selected.
  * Zero means the field is shown as a text field instead. */
 static int field_choice_n[BROWSE_FIELDS_MAX];
@@ -161,6 +161,9 @@ static const ZZPlayProvider *link_provider = NULL;
 static ZZPlayProvider form_provider;
 static ZZPlayProviderForm row_form;
 static char row_form_item[ZZPLAY_PROVIDER_TEXT_MAX];
+/* The latest Edit request: only its reply opens a form, for this row. */
+static uint32_t form_get_generation = 0U;
+static char form_get_item[ZZPLAY_PROVIDER_TEXT_MAX];
 static int row_form_mode = 0;
 enum LinkWindowState {
   LINK_WINDOW_CLOSED = 0,
@@ -1587,7 +1590,11 @@ static void __attribute__((noinline)) open_settings_window(void)
     str_tags[0].ti_Tag = GTST_String;
     str_tags[0].ti_Data = (ULONG)field_bufs[i];
     str_tags[1].ti_Tag = GTST_MaxChars;
-    str_tags[1].ti_Data = (ULONG)(sizeof(field_bufs[i]) - 1U);
+    /* The module's limit, within what ZZPlay carries. */
+    str_tags[1].ti_Data = (ULONG)(f->max_len != 0U &&
+                                          f->max_len < sizeof(field_bufs[i]) - 1U
+                                      ? f->max_len
+                                      : sizeof(field_bufs[i]) - 1U);
     str_tags[2].ti_Tag = GA_RelVerify;
     str_tags[2].ti_Data = TRUE;
     /* Tab and Shift-Tab move between the text fields. */
@@ -1945,6 +1952,7 @@ static void __attribute__((noinline)) poll_settings(void)
         uint32_t count = field_total > BROWSE_FIELDS_MAX ? BROWSE_FIELDS_MAX
                                                          : field_total;
         uint32_t i;
+        int saved = 1;
         ZZPlayBrowseRequest req;
         if (row_form_mode) {
           memset(&req, 0, sizeof(req));
@@ -1990,7 +1998,20 @@ static void __attribute__((noinline)) poll_settings(void)
               }
             }
           }
-          zzplay_host_pref_set(p->scheme, f->key, val);
+          if (!zzplay_host_pref_set(p->scheme, f->key, val)) {
+            saved = 0;
+          }
+        }
+        if (!saved) {
+          /* Keep the form and what was typed, so Save can be tried
+           * again once ENVARC: can be written. */
+          copy_string(settings_note, sizeof(settings_note),
+                      "Could not save the settings to ENVARC:");
+          if (settings_note_gad) {
+            GT_SetGadgetAttrs(settings_note_gad, settings_win, NULL,
+                              GTTX_Text, (ULONG)settings_note, TAG_DONE);
+          }
+          return;
         }
 
         close_settings_window();
@@ -3073,6 +3094,8 @@ static void browse_open_row_form(void)
   copy_string(poll_req.scheme, sizeof(poll_req.scheme), svc->scheme);
   copy_string(poll_req.item_id, sizeof(poll_req.item_id),
               browse_model.items[browse_model.selection].id);
+  form_get_generation = poll_req.generation;
+  copy_string(form_get_item, sizeof(form_get_item), poll_req.item_id);
   if (browse_send(&poll_req, svc->provider)) {
     browse_model.busy = 1;
     update_status_text("Opening form...");
@@ -3245,15 +3268,21 @@ void zzplay_browse_poll(void)
   while (zzplay_browse_worker_take_reply(&poll_worker_reply)) {
     if (handle_link_reply(&poll_worker_reply)) {
       zzplay_browse_worker_release_reply(&poll_worker_reply);
+    } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FORM_GET &&
+               poll_worker_reply.generation != form_get_generation) {
+      /* Only the latest Edit opens a form. */
+      zzplay_browse_worker_release_reply(&poll_worker_reply);
     } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FORM_GET) {
       uint32_t i;
+      /* The form edits the row Edit was chosen on, whatever was asked
+       * since. */
       browse_model.busy = 0;
       if (!poll_worker_reply.success) {
         update_status_text(poll_worker_reply.error);
       } else {
         row_form = poll_worker_reply.form;
         row_form.title = poll_worker_reply.form_title;
-        copy_string(row_form_item, sizeof(row_form_item), poll_req.item_id);
+        copy_string(row_form_item, sizeof(row_form_item), form_get_item);
         row_form_mode = 1;
         for (i = 0U; i < row_form.field_count && i < BROWSE_FIELDS_MAX; i++) {
           copy_string(field_bufs[i], sizeof(field_bufs[i]),

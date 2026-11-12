@@ -88,7 +88,7 @@ typedef struct ZZPlayBrowseRequest {
   ZZPlayBrowseItem item;
   char link_id[ZZPLAY_PROVIDER_TEXT_MAX];
   char choice_id[ZZPLAY_PROVIDER_TEXT_MAX];
-  char form_values[ZZPLAY_PROVIDER_FORM_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
+  char form_values[ZZPLAY_PROVIDER_FORM_FIELDS_MAX][ZZPLAY_PROVIDER_VALUE_MAX];
   uint32_t form_value_count;
 } ZZPlayBrowseRequest;
 
@@ -114,7 +114,7 @@ typedef struct ZZPlayBrowseReply {
   ZZPlayProviderLinkResult link_result;
   ZZPlayProviderForm form;
   char form_title[ZZPLAY_PROVIDER_TEXT_MAX];
-  char form_values[ZZPLAY_PROVIDER_FORM_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
+  char form_values[ZZPLAY_PROVIDER_FORM_FIELDS_MAX][ZZPLAY_PROVIDER_VALUE_MAX];
 } ZZPlayBrowseReply;
 
 typedef struct ZZPlayBrowseFrame {

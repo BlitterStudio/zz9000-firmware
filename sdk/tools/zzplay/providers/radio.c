@@ -141,7 +141,7 @@ static char radio_my_value[ZZPLAY_PROVIDER_URL_MAX + ZZPLAY_PROVIDER_TEXT_MAX];
 
 static const ZZPlayProviderField radio_station_fields[] = {
   {"name", "Name", ZZPLAY_FIELD_TEXT, ZZPLAY_PROVIDER_TEXT_MAX - 1U, NULL, NULL},
-  {"address", "Address", ZZPLAY_FIELD_TEXT, ZZPLAY_PROVIDER_URL_MAX - 1U, NULL, NULL}
+  {"address", "Address", ZZPLAY_FIELD_TEXT, ZZPLAY_PROVIDER_VALUE_MAX - 1U, NULL, NULL}
 };
 static const char *radio_station_values[2];
 

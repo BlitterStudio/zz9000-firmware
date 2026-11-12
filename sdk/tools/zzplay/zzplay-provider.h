@@ -27,6 +27,8 @@
 #define ZZPLAY_PROVIDER_URL_MAX 1168U
 #define ZZPLAY_PROVIDER_TEXT_MAX 96U
 #define ZZPLAY_PROVIDER_ERROR_MAX 128U
+/* Longest settings or form value ZZPlay carries, with its terminator. */
+#define ZZPLAY_PROVIDER_VALUE_MAX 512U
 
 /* A non-playable row with this id asks ZZPlay to open the service's
  * Settings window instead of trying to browse or play it. */
@@ -111,7 +113,8 @@ typedef struct ZZPlayProviderField {
   const char *key;      /* prefs key: letters, digits and '_' */
   const char *label;
   uint32_t kind;        /* ZZPLAY_FIELD_* */
-  uint32_t max_len;     /* longest value, excluding the terminator */
+  uint32_t max_len;     /* longest value, excluding the terminator; ZZPlay
+                           carries at most ZZPLAY_PROVIDER_VALUE_MAX - 1 */
   /* ZZPLAY_FIELD_CHOICE only: parallel NULL-terminated arrays; the first
    * choice is the default when the pref is empty or unknown. NULL for
    * the other kinds. */
