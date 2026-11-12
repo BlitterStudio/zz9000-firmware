@@ -280,15 +280,16 @@ opens straight away, and later sessions go there directly. To sign in again,
 clear **Token** in Settings.
 
 To set the connection by hand instead, choose Plex Media Server in the Browse
-window, click **Settings** and enter:
+window, click **Settings** and set:
 
 - **Server URL**: the server's address with its port, for example
   `http://192.168.1.10:32400`.
-- **Connection**: `secure` (https) or `plain` (http); empty means `secure`.
-  After sign-in both addresses are known and switching needs no new sign-in;
-  plain `http` starts tracks faster on a 68k but sends the token and what you
-  play unencrypted over the home network. When the chosen kind does not
-  answer, the item fails with a message naming this setting.
+- **Connection**: pick `Secure (https)` or `Plain (http, faster)` from the
+  list; `Secure (https)` is the default. After sign-in both addresses are
+  known and switching needs no new sign-in; plain `http` starts tracks
+  faster on a 68k but sends the token and what you play unencrypted over
+  the home network. When the chosen kind does not answer, the item fails
+  with a message naming this setting.
 - **Token**: your Plex token. In Plex Web, open a track's menu, choose
   **Get Info**, then **View XML**; the address of the page that opens ends in
   `X-Plex-Token=` followed by the token.

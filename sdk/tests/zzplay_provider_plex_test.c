@@ -729,6 +729,62 @@ static void test_manual_server_alone(const ZZPlayProvider *p)
   p->close(ctx);
 }
 
+static void test_plain_plexdirect_fallback(const ZZPlayProvider *p)
+{
+  char err[128];
+  void *ctx;
+  int ok;
+  ZZPlayResolved res;
+
+  /* Signed in before SERVER_PLAIN was stored: plain converts the stored
+   * plex.direct address */
+  mock_prefs_clear();
+  mock_pref_set("CONNECTION", "plain");
+  mock_pref_set("SERVER_SECURE", "https://192-168-1-18.abcdef0123456789.plex.direct:32400");
+  mock_pref_set("SERVER", "https://192-168-1-18.abcdef0123456789.plex.direct:32400");
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "http://192.168.1.18:32400/",
+                 strlen("http://192.168.1.18:32400/")) == 0);
+  p->close(ctx);
+
+  /* SERVER alone converts too */
+  mock_prefs_clear();
+  mock_pref_set("CONNECTION", "plain");
+  mock_pref_set("SERVER", "https://10-1-2-3.0123456789abcdef.plex.direct:32401");
+  mock_pref_set("TOKEN", TEST_TOKEN);
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "http://10.1.2.3:32401/",
+                 strlen("http://10.1.2.3:32401/")) == 0);
+  p->close(ctx);
+
+  /* A non-IPv4 plex.direct address keeps the stored address */
+  mock_prefs_clear();
+  mock_pref_set("CONNECTION", "plain");
+  mock_pref_set("SERVER", "https://2001-db8--12.hash.plex.direct:32400");
+  mock_pref_set("TOKEN", TEST_TOKEN);
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+  memset(&res, 0, sizeof(res));
+  ok = p->resolve(ctx, "plex://302", &res, err, sizeof(err));
+  assert(ok == 1);
+  assert(strncmp(res.url, "https://2001-db8--12.hash.plex.direct:32400/",
+                 strlen("https://2001-db8--12.hash.plex.direct:32400/")) == 0);
+  p->close(ctx);
+}
+
 static void test_failed_probe_stores_nothing_and_names_connection(const ZZPlayProvider *p)
 {
   char err[128];
@@ -1207,7 +1263,17 @@ int main(void)
   assert(strcmp(p->fields[0].key, "SERVER") == 0);
   assert(strcmp(p->fields[1].key, "CONNECTION") == 0);
   assert(strcmp(p->fields[1].label, "Connection") == 0);
-  assert(p->fields[1].kind == ZZPLAY_FIELD_TEXT);
+  assert(p->fields[1].kind == ZZPLAY_FIELD_CHOICE);
+  assert(p->fields[1].choice_values != NULL && p->fields[1].choice_labels != NULL);
+  assert(strcmp(p->fields[1].choice_values[0], "secure") == 0);
+  assert(strcmp(p->fields[1].choice_values[1], "plain") == 0);
+  assert(p->fields[1].choice_values[2] == NULL);
+  assert(strcmp(p->fields[1].choice_labels[0], "Secure (https)") == 0);
+  assert(strcmp(p->fields[1].choice_labels[1], "Plain (http, faster)") == 0);
+  assert(p->fields[1].choice_labels[2] == NULL);
+  assert(p->fields[0].choice_values == NULL && p->fields[0].choice_labels == NULL);
+  assert(p->fields[2].choice_values == NULL && p->fields[2].choice_labels == NULL);
+  assert(p->fields[3].choice_values == NULL && p->fields[3].choice_labels == NULL);
   assert(strcmp(p->fields[2].key, "TOKEN") == 0);
   assert(strcmp(p->fields[3].key, "BITRATE") == 0);
 
@@ -1219,6 +1285,7 @@ int main(void)
   test_resources_signin_connection_plain(p);
   test_connection_selection_and_switching(p);
   test_manual_server_alone(p);
+  test_plain_plexdirect_fallback(p);
   test_failed_probe_stores_nothing_and_names_connection(p);
   test_resources_two_servers(p);
   test_older_host_fails_signin_gracefully(p);

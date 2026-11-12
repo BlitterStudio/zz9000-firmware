@@ -28,6 +28,7 @@
 #define BROWSE_MARGIN 6
 #define BROWSE_SPACING 4
 #define BROWSE_FIELDS_MAX 8U
+#define BROWSE_CHOICES_MAX 16U
 
 enum BrowseGadgetID {
   BGID_SERVICE = 1,
@@ -81,6 +82,10 @@ static char search_buf[ZZPLAY_PROVIDER_TEXT_MAX];
 static char status_buf[ZZPLAY_PROVIDER_ERROR_MAX];
 static char field_bufs[BROWSE_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
 static char secret_orig[BROWSE_FIELDS_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
+/* CHOICE fields: how many choices the form found and which is selected.
+ * Zero means the field is shown as a text field instead. */
+static int field_choice_n[BROWSE_FIELDS_MAX];
+static int field_choice_sel[BROWSE_FIELDS_MAX];
 
 static int32_t last_clicked_idx = -1;
 static ZZPlayBrowseReply poll_worker_reply;
@@ -323,6 +328,14 @@ static void update_buttons(void)
 
 static void rebuild_list_nodes(void)
 {
+  /* Which list the gadget shows, so a different list starts at its top
+   * (or its remembered selection) while rows appended to the same list
+   * leave the view where it is. */
+  static char shown_key[2 * ZZPLAY_PROVIDER_TEXT_MAX + 16];
+  static uint32_t shown_count;
+  static char key[2 * ZZPLAY_PROVIDER_TEXT_MAX + 16];
+  struct TagItem tags[4];
+  int fresh;
   uint32_t i;
   static char row_text[256];
 
@@ -374,10 +387,26 @@ static void rebuild_list_nodes(void)
     }
   }
 
-  GT_SetGadgetAttrs(list_gad, browse_win, NULL,
-                    GTLV_Labels, (ULONG)&browse_exec_list,
-                    GTLV_Selected, (browse_model.selection >= 0 ? (ULONG)browse_model.selection : ~0UL),
-                    TAG_DONE);
+  (void)snprintf(key, sizeof(key), "%ld/%d/%s/%s",
+                 (long)browse_model.current_service, browse_model.is_search,
+                 browse_model.current_node,
+                 browse_model.is_search ? browse_model.search_query : "");
+  fresh = strcmp(key, shown_key) != 0 ||
+          browse_model.item_count < shown_count;
+  (void)snprintf(shown_key, sizeof(shown_key), "%s", key);
+  shown_count = browse_model.item_count;
+
+  tags[0].ti_Tag = GTLV_Labels;
+  tags[0].ti_Data = (ULONG)&browse_exec_list;
+  tags[1].ti_Tag = GTLV_Selected;
+  tags[1].ti_Data = browse_model.selection >= 0
+                        ? (ULONG)browse_model.selection : ~0UL;
+  tags[2].ti_Tag = fresh ? GTLV_Top : TAG_IGNORE;
+  tags[2].ti_Data = browse_model.selection >= 0
+                        ? (ULONG)browse_model.selection : 0UL;
+  tags[3].ti_Tag = TAG_DONE;
+  tags[3].ti_Data = 0;
+  GT_SetGadgetAttrsA(list_gad, browse_win, NULL, tags);
 }
 
 static void close_settings_window(void)
@@ -421,6 +450,7 @@ static void __attribute__((noinline)) open_settings_window(void)
   int cur_y;
   int label_w;
   int val_w;
+  int val_min_w;
   int btn_w;
   uint32_t i;
   uint32_t count;
@@ -451,15 +481,32 @@ static void __attribute__((noinline)) open_settings_window(void)
   font_h = (font && font->tf_YSize > 0) ? (int)font->tf_YSize : 8;
   btn_h = font_h + 6;
   label_w = 0;
+  val_min_w = 260; /* room to type an address, as the form always had */
   for (i = 0U; i < count; i++) {
-    int w = browse_text_w(p->fields[i].label);
+    const ZZPlayProviderField *f = &p->fields[i];
+    int w = browse_text_w(f->label);
     if (w > label_w) {
       label_w = w;
+    }
+    if (f->kind == ZZPLAY_FIELD_CHOICE && f->choice_labels != NULL) {
+      /* The cycle gadget needs its widest choice plus its glyph */
+      uint32_t c;
+      w = 0;
+      for (c = 0U; c < BROWSE_CHOICES_MAX && f->choice_labels[c] != NULL; c++) {
+        int cw = browse_text_w(f->choice_labels[c]);
+        if (cw > w) {
+          w = cw;
+        }
+      }
+      w += 32;
+      if (w > val_min_w) {
+        val_min_w = w;
+      }
     }
   }
   label_w += 12;
   btn_w = browse_text_w("Cancel") + 24;
-  win_w = label_w + 260 + 2 * BROWSE_MARGIN;
+  win_w = label_w + val_min_w + 2 * BROWSE_MARGIN;
   if (win_w < 2 * btn_w + BROWSE_SPACING + 2 * BROWSE_MARGIN) {
     win_w = 2 * btn_w + BROWSE_SPACING + 2 * BROWSE_MARGIN;
   }
@@ -508,11 +555,48 @@ static void __attribute__((noinline)) open_settings_window(void)
   cur_y = BROWSE_MARGIN;
   for (i = 0U; i < count; i++) {
     const ZZPlayProviderField *f = &p->fields[i];
+    struct TagItem cyc_tags[3];
     struct TagItem str_tags[4];
+    int is_choice;
 
     secret_orig[i][0] = '\0';
     field_bufs[i][0] = '\0';
     zzplay_host_pref_get(p->scheme, f->key, field_bufs[i], sizeof(field_bufs[i]));
+
+    /* A CHOICE field becomes a cycle gadget; a module without a list
+     * falls back to a plain text field. */
+    field_choice_n[i] = 0;
+    field_choice_sel[i] = 0;
+    is_choice = (f->kind == ZZPLAY_FIELD_CHOICE &&
+                 f->choice_labels != NULL && f->choice_labels[0] != NULL &&
+                 f->choice_values != NULL && f->choice_values[0] != NULL);
+    if (is_choice) {
+      uint32_t c;
+      int sel = 0;
+      for (c = 0U; c < BROWSE_CHOICES_MAX &&
+                   f->choice_labels[c] != NULL && f->choice_values[c] != NULL;
+           c++) {
+        field_choice_n[i] = (int)c + 1;
+        if (strcmp(field_bufs[i], f->choice_values[c]) == 0) {
+          sel = (int)c;
+        }
+      }
+      field_choice_sel[i] = sel;
+
+      cyc_tags[0].ti_Tag = GTCY_Labels;
+      cyc_tags[0].ti_Data = (ULONG)f->choice_labels;
+      cyc_tags[1].ti_Tag = GTCY_Active;
+      cyc_tags[1].ti_Data = (ULONG)sel;
+      cyc_tags[2].ti_Tag = TAG_DONE;
+
+      field_gads[i] = gad = create_gadget(
+          settings_win, CYCLE_KIND, gad, &ng,
+          BROWSE_MARGIN + label_w, cur_y, val_w, btn_h,
+          f->label, (UWORD)(SGID_FIELD_BASE + i), PLACETEXT_LEFT, cyc_tags);
+
+      cur_y += btn_h + BROWSE_SPACING;
+      continue;
+    }
 
     if (f->kind == ZZPLAY_FIELD_SECRET) {
       if (field_bufs[i][0] != '\0') {
@@ -574,7 +658,6 @@ static void __attribute__((noinline)) poll_settings(void)
     UWORD code = imsg->Code;
     struct Gadget *gad = (struct Gadget *)imsg->IAddress;
 
-    (void)code;
     GT_ReplyIMsg(imsg);
 
     if (class == IDCMP_CLOSEWINDOW) {
@@ -587,6 +670,14 @@ static void __attribute__((noinline)) poll_settings(void)
       continue;
     }
     if (class == IDCMP_GADGETUP && gad) {
+      /* A cycle gadget reports the entry it now shows in Code */
+      if (gad->GadgetID >= SGID_FIELD_BASE &&
+          gad->GadgetID < (UWORD)(SGID_FIELD_BASE + BROWSE_FIELDS_MAX)) {
+        uint32_t idx = (uint32_t)(gad->GadgetID - SGID_FIELD_BASE);
+        if (field_choice_n[idx] > 0 && (int)code < field_choice_n[idx]) {
+          field_choice_sel[idx] = (int)code;
+        }
+      }
       if (gad->GadgetID == SGID_CANCEL) {
         close_settings_window();
         return;
@@ -599,12 +690,17 @@ static void __attribute__((noinline)) poll_settings(void)
         for (i = 0U; i < count; i++) {
           const ZZPlayProviderField *f = &p->fields[i];
           const char *val = "";
-          if (field_gads[i] && field_gads[i]->SpecialInfo) {
-            val = (const char *)((struct StringInfo *)field_gads[i]->SpecialInfo)->Buffer;
-          }
-          if (f->kind == ZZPLAY_FIELD_SECRET) {
-            if (strcmp(val, "********") == 0) {
-              val = secret_orig[i];
+          if (field_choice_n[i] > 0) {
+            /* Save the value of the shown choice, not its label */
+            val = f->choice_values[field_choice_sel[i]];
+          } else {
+            if (field_gads[i] && field_gads[i]->SpecialInfo) {
+              val = (const char *)((struct StringInfo *)field_gads[i]->SpecialInfo)->Buffer;
+            }
+            if (f->kind == ZZPLAY_FIELD_SECRET) {
+              if (strcmp(val, "********") == 0) {
+                val = secret_orig[i];
+              }
             }
           }
           zzplay_host_pref_set(p->scheme, f->key, val);

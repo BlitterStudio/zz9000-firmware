@@ -67,12 +67,18 @@ typedef struct ZZPlayResolved {
 #define ZZPLAY_FIELD_TEXT 0U
 #define ZZPLAY_FIELD_SECRET 1U /* shown as dots */
 #define ZZPLAY_FIELD_NUMBER 2U
+#define ZZPLAY_FIELD_CHOICE 3U /* pick one of choice_labels */
 
 typedef struct ZZPlayProviderField {
   const char *key;      /* prefs key: letters, digits and '_' */
   const char *label;
   uint32_t kind;        /* ZZPLAY_FIELD_* */
   uint32_t max_len;     /* longest value, excluding the terminator */
+  /* ZZPLAY_FIELD_CHOICE only: parallel NULL-terminated arrays; the first
+   * choice is the default when the pref is empty or unknown. NULL for
+   * the other kinds. */
+  const char *const *choice_values; /* stored in prefs */
+  const char *const *choice_labels; /* shown */
 } ZZPlayProviderField;
 
 /* XML element callback; see zzplay-xml.h for the scanner's behaviour. */

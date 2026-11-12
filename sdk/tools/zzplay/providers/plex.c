@@ -205,6 +205,125 @@ static int plex_is_direct_codec(const char *codec)
   return 0;
 }
 
+/* Recognises "https://A-B-C-D.<hash>.plex.direct:<port>" and writes
+ * "http://A.B.C.D:<port>" into out. IPv4 addresses only; anything else
+ * returns 0 and leaves out untouched. */
+static int plex_plexdirect_plain(const ZZPlayHost *host, const char *url,
+                                 char *out, uint32_t out_size)
+{
+  static const char suffix[] = ".plex.direct";
+  const char *hp;
+  const char *port;
+  const char *p;
+  const char *quad_end;
+  uint32_t octet[4];
+  uint32_t octets;
+  uint32_t digits;
+  uint32_t port_val;
+  uint32_t i;
+  size_t host_len;
+  size_t suffix_len = sizeof(suffix) - 1U;
+
+  if (!host || !url || out_size == 0U) {
+    return 0;
+  }
+  if (plex_strncmp(url, "https://", 8) != 0) {
+    return 0;
+  }
+
+  /* The host runs to the port, a path or the end of the address */
+  hp = url + 8;
+  host_len = 0U;
+  while (hp[host_len] != '\0' && hp[host_len] != ':' && hp[host_len] != '/') {
+    host_len++;
+  }
+  port = hp + host_len;
+  if (*port != ':') {
+    return 0; /* a plex.direct address always carries its port */
+  }
+  port++;
+  digits = 0U;
+  port_val = 0U;
+  p = port;
+  while (*p >= '0' && *p <= '9') {
+    port_val = port_val * 10U + (uint32_t)(*p - '0');
+    p++;
+    digits++;
+  }
+  if (digits == 0U || digits > 5U || (*p != '\0' && *p != '/')) {
+    return 0;
+  }
+
+  /* The host is A-B-C-D.<hash>.plex.direct */
+  if (host_len < suffix_len + 9U) {
+    return 0; /* shortest quad, the separator and a one-char hash */
+  }
+  for (i = 0U; (size_t)i < suffix_len; i++) {
+    char c1 = hp[host_len - suffix_len + (size_t)i];
+    char c2 = suffix[i];
+    c1 = (c1 >= 'A' && c1 <= 'Z') ? (char)(c1 + 32) : c1;
+    if (c1 != c2) {
+      return 0;
+    }
+  }
+
+  /* Find the dot between the address and the hash; the hash needs at
+   * least one character. */
+  i = (uint32_t)(host_len - suffix_len);
+  if (i < 2U) {
+    return 0;
+  }
+  i--;
+  while (i > 0U && hp[i] != '.') {
+    i--;
+  }
+  if (i == 0U || hp[i] != '.') {
+    return 0;
+  }
+  if (host_len - suffix_len - (size_t)i < 2U) {
+    return 0;
+  }
+  quad_end = hp + (size_t)i;
+
+  /* The address itself: four 0-255 groups separated by dashes */
+  p = hp;
+  octets = 0U;
+  while (p < quad_end) {
+    uint32_t v = 0U;
+    digits = 0U;
+    while (p < quad_end && *p >= '0' && *p <= '9') {
+      v = v * 10U + (uint32_t)(*p - '0');
+      p++;
+      digits++;
+    }
+    if (digits == 0U || digits > 3U || v > 255U) {
+      return 0;
+    }
+    if (octets < 4U) {
+      octet[octets] = v;
+    }
+    octets++;
+    if (p < quad_end) {
+      if (*p != '-') {
+        return 0;
+      }
+      p++;
+      if (p == quad_end) {
+        return 0; /* the address cannot end on a dash */
+      }
+    }
+  }
+  if (p != quad_end || octets != 4U) {
+    return 0;
+  }
+
+  host->format(out, out_size, "http://%lu.%lu.%lu.%lu:%lu",
+               (unsigned long)octet[0], (unsigned long)octet[1],
+               (unsigned long)octet[2], (unsigned long)octet[3],
+               (unsigned long)port_val);
+  return 1;
+}
+
 static int plex_build_url(const PlexContext *ctx, const char *path, char *out, uint32_t size)
 {
   if (!ctx || !path || !out || size == 0) return 0;
@@ -669,11 +788,17 @@ static int plex_resolve_xml_start(void *user, const char *name,
 
 /* --- Provider API implementation --- */
 
+static const char *const plex_connection_values[] = { "secure", "plain", NULL };
+static const char *const plex_connection_labels[] = {
+  "Secure (https)", "Plain (http, faster)", NULL
+};
+
 static const ZZPlayProviderField plex_fields[] = {
-  { "SERVER", "Server URL", ZZPLAY_FIELD_TEXT, 255U },
-  { "CONNECTION", "Connection", ZZPLAY_FIELD_TEXT, 16U },
-  { "TOKEN", "Token", ZZPLAY_FIELD_SECRET, 64U },
-  { "BITRATE", "Bitrate (kbit/s)", ZZPLAY_FIELD_NUMBER, 6U }
+  { "SERVER", "Server URL", ZZPLAY_FIELD_TEXT, 255U, NULL, NULL },
+  { "CONNECTION", "Connection", ZZPLAY_FIELD_CHOICE, 6U,
+    plex_connection_values, plex_connection_labels },
+  { "TOKEN", "Token", ZZPLAY_FIELD_SECRET, 64U, NULL, NULL },
+  { "BITRATE", "Bitrate (kbit/s)", ZZPLAY_FIELD_NUMBER, 6U, NULL, NULL }
 };
 
 static int plex_host_has_signin(const ZZPlayHost *host)
@@ -1005,7 +1130,10 @@ static void *plex_open(const ZZPlayHost *host, char *err, uint32_t err_size)
   if (is_plain) {
     if (server_plain[0] != '\0') {
       plex_strlcpy(ctx->server, server_plain, sizeof(ctx->server));
-    } else {
+    } else if (!plex_plexdirect_plain(host, server_secure, ctx->server, (uint32_t)sizeof(ctx->server)) &&
+               !plex_plexdirect_plain(host, server_manual, ctx->server, (uint32_t)sizeof(ctx->server))) {
+      /* Signed in before both addresses were stored: turn a plex.direct
+       * address into its plain form, else use SERVER as before. */
       plex_strlcpy(ctx->server, server_manual, sizeof(ctx->server));
     }
   } else {
