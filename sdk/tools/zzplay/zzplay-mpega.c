@@ -164,6 +164,7 @@ ZZPlayEngineResult zzplay_mpega_run(const ZZPlayEngineRun *run)
   uint32_t channels;
   uint32_t period;
   uint32_t frame_offset = 0U;
+  int draining = 0;
   uint32_t pending_frames = 0U;
   int playing = 0;
   ZZPlayEngineResult result = ZZPLAY_ENGINE_FAILED;
@@ -257,13 +258,29 @@ ZZPlayEngineResult zzplay_mpega_run(const ZZPlayEngineRun *run)
       frame_offset = 0U;
       continue;
     }
-    decoded = MPEGA_decode_frame(stream, pcm);
-    if (decoded == MPEGA_ERR_EOF) {
-      zzplay_ahi_mark_end_of_stream(&ahi);
-      if (!playing || zzplay_ahi_drained(&ahi)) {
+    if (draining) {
+      /* Everything is queued: wait for AHI to play it out. */
+      if (zzplay_ahi_drained(&ahi)) {
         result = ZZPLAY_ENGINE_EOF;
         break;
       }
+      Delay(1);
+      continue;
+    }
+    decoded = MPEGA_decode_frame(stream, pcm);
+    if (decoded == MPEGA_ERR_EOF) {
+      zzplay_ahi_mark_end_of_stream(&ahi);
+      if (!playing) {
+        result = ZZPLAY_ENGINE_EOF;
+        break;
+      }
+      /* Send the last ready buffers and let the clock finish; without
+       * this the item never ends. */
+      if (!zzplay_ahi_begin_drain(&ahi)) {
+        result = ZZPLAY_ENGINE_FAILED;
+        break;
+      }
+      draining = 1;
       continue;
     }
     if (decoded <= 0 || (uint32_t)decoded > MPEGA_PCM_SIZE) {

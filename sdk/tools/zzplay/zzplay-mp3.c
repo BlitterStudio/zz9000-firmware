@@ -125,10 +125,6 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
       engine->audio_start, engine->audio_end, engine->total_ms,
       run->seek_ms);
   bridge.base_ms = run->seek_ms;
-  if (!run->card_available && zzplay_mhi_driver_is_card(driver)) {
-    *open_status = ZZPLAY_MHI_UNSUPPORTED;
-    return ZZPLAY_ENGINE_FAILED;
-  }
   status = zzplay_mhi_acquire(&sink, driver);
   *open_status = status;
   if (status != ZZPLAY_MHI_OK) {
