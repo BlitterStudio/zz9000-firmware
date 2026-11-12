@@ -42,7 +42,12 @@ typedef struct ZZPlayProviderItem {
   const char *subtitle;      /* artist and album, codec and bitrate, or "" */
   uint32_t duration_ms;      /* 0 when unknown */
   uint32_t kind;             /* ZZPLAY_ITEM_* */
-  uint32_t playable;         /* 0 for an item shown but not playable */
+  uint32_t playable;         /* 0 for an item shown but not playable. On a
+                               * FOLDER, 1 marks a collection ZZPlay may
+                               * play whole by listing it: the folder's
+                               * rows, then the rows of each playable
+                               * folder inside it, give its playable
+                               * tracks and stations. */
   uint32_t favourite;        /* 1 when it is in the service's favourites */
 } ZZPlayProviderItem;
 

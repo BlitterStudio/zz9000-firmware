@@ -601,7 +601,10 @@ static int plex_load_sections(PlexContext *ctx, char *err, uint32_t err_size)
 
 /* --- Item browsing and search XML parsing --- */
 
-static int plex_emit_folder(PlexItemXmlState *st, const char *id, const char *title)
+/* `playable` marks a collection ZZPlay can play whole (an artist, an
+ * album, a playlist); letter, genre and library folders pass 0. */
+static int plex_emit_folder(PlexItemXmlState *st, const char *id,
+                            const char *title, int playable)
 {
   ZZPlayProviderItem it;
 
@@ -610,7 +613,7 @@ static int plex_emit_folder(PlexItemXmlState *st, const char *id, const char *ti
   it.title = title;
   it.subtitle = "";
   it.kind = ZZPLAY_ITEM_FOLDER;
-  it.playable = 0;
+  it.playable = playable ? 1U : 0U;
   if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
     st->stopped = 1;
     return 1;
@@ -656,7 +659,7 @@ static int plex_item_xml_start(void *user, const char *name,
       } else {
         plex_strlcpy(title_buf, title, sizeof(title_buf));
       }
-      return plex_emit_folder(st, id, title_buf);
+      return plex_emit_folder(st, id, title_buf, 0);
     }
     if (st->mode == PLEX_FETCH_GENRES) {
       const char *key = host->xml_attr(attrs, count, "key");
@@ -665,7 +668,7 @@ static int plex_item_xml_start(void *user, const char *name,
 
       if (!key || !title) return 0;
       host->format(id, sizeof(id), "%s%s", st->folder_prefix, key);
-      return plex_emit_folder(st, id, title);
+      return plex_emit_folder(st, id, title, 0);
     }
     {
       const char *type = host->xml_attr(attrs, count, "type");
@@ -679,7 +682,7 @@ static int plex_item_xml_start(void *user, const char *name,
         char id[48];
 
         host->format(id, sizeof(id), "art:%s", rk);
-        return plex_emit_folder(st, id, title);
+        return plex_emit_folder(st, id, title, 1);
       }
       if (type && plex_strcmp(type, "album") == 0) {
         char id[48];
@@ -704,7 +707,7 @@ static int plex_item_xml_start(void *user, const char *name,
           it.title = title;
           it.subtitle = sub;
           it.kind = ZZPLAY_ITEM_FOLDER;
-          it.playable = 0;
+          it.playable = 1; /* an album is a collection */
           if (st->sink && st->sink->item(st->sink->user, &it) != 0) {
             st->stopped = 1;
             return 1;
@@ -719,7 +722,7 @@ static int plex_item_xml_start(void *user, const char *name,
     char id[48];
 
     host->format(id, sizeof(id), "pl:%s", rk ? rk : "");
-    return plex_emit_folder(st, id, title ? title : "");
+    return plex_emit_folder(st, id, title ? title : "", 1);
   } else if (plex_strcmp(name, "Track") == 0) {
     const char *rk = host->xml_attr(attrs, count, "ratingKey");
     const char *title = host->xml_attr(attrs, count, "title");

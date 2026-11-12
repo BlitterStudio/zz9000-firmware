@@ -533,24 +533,61 @@ void zzplay_browse_model_set_scroll(ZZPlayBrowseModel *model, uint32_t scroll)
   }
 }
 
-int zzplay_browse_model_can_play(const ZZPlayBrowseModel *model)
+ZZPlayBrowseTarget zzplay_browse_model_play_target(const ZZPlayBrowseModel *model)
 {
   const ZZPlayBrowseItem *item;
 
   if (!model || model->selection < 0 ||
       (uint32_t)model->selection >= model->item_count) {
-    return 0;
+    return ZZPLAY_BROWSE_TARGET_NONE;
   }
   item = &model->items[model->selection];
-  if (item->kind == ZZPLAY_ITEM_FOLDER || item->playable == 0U) {
-    return 0;
+  if (item->playable == 0U) {
+    return ZZPLAY_BROWSE_TARGET_NONE;
   }
-  return 1;
+  if (item->kind == ZZPLAY_ITEM_FOLDER) {
+    return ZZPLAY_BROWSE_TARGET_COLLECTION;
+  }
+  return ZZPLAY_BROWSE_TARGET_ITEM;
+}
+
+int zzplay_browse_model_can_play(const ZZPlayBrowseModel *model)
+{
+  return zzplay_browse_model_play_target(model) != ZZPLAY_BROWSE_TARGET_NONE;
 }
 
 int zzplay_browse_model_can_add(const ZZPlayBrowseModel *model)
 {
   return zzplay_browse_model_can_play(model);
+}
+
+int zzplay_browse_model_gather(ZZPlayBrowseModel *model, uint32_t limit,
+                               ZZPlayBrowseRequest *out_req)
+{
+  const ZZPlayBrowseServiceEntry *svc;
+
+  if (zzplay_browse_model_play_target(model) !=
+      ZZPLAY_BROWSE_TARGET_COLLECTION) {
+    return 0;
+  }
+  svc = zzplay_browse_model_current_service(model);
+  if (!svc) {
+    return 0;
+  }
+  model->generation++;
+  model->busy = 1;
+  model->status_message[0] = '\0';
+
+  if (out_req) {
+    memset(out_req, 0, sizeof(*out_req));
+    out_req->kind = ZZPLAY_BROWSE_REQ_GATHER;
+    out_req->generation = model->generation;
+    copy_string(out_req->scheme, sizeof(out_req->scheme), svc->scheme);
+    copy_string(out_req->node_id, sizeof(out_req->node_id),
+                model->items[model->selection].id);
+    out_req->count = limit;
+  }
+  return 1;
 }
 int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider)
 {

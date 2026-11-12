@@ -224,8 +224,16 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
   systems keep the normal pointer).
 - Double-click a track or station to add it to the playlist and play it.
   **Play** does the same for the selected entry, **Add** only adds it.
-  Folders, and entries the service marks as unplayable, cannot be played or
-  added.
+  Entries the service marks as unplayable cannot be played or added.
+- A folder the service marks playable, such as a Plex album, artist or
+  playlist, can also be played whole: **Play** replaces the playlist with
+  its tracks and starts the first, **Add** appends them. ZZPlay lists the
+  folder, and each playable folder inside it, while the status line
+  counts what it found ("Adding 37 tracks..."). **Stop** cancels and
+  leaves the playlist unchanged. At most as many tracks are added as the
+  playlist holds (4,096); the status line says when the collection held
+  more, or when the playlist had no room for all of them. Double-clicking
+  such a folder still opens it.
 - **Favourite** adds the selected entry to the service's favourites, or
   removes it when it is already one. The button is disabled for services
   without favourites.

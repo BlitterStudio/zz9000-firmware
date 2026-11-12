@@ -105,6 +105,14 @@ static const char *reload_note = NULL;
 static char status_shown[ZZPLAY_PROVIDER_ERROR_MAX];
 /* Stage text drawn from the worker's stage while a request runs. */
 static char stage_host[96];
+/* Collection gathering: the request in flight and what its rows do when
+ * they have all arrived. The playlist is only touched at the end, so
+ * Stop until then leaves it unchanged. */
+static int gather_active = 0;
+static int gather_add = 0;     /* 1: append to the playlist, 0: replace */
+static uint32_t gather_generation = 0U;
+static uint32_t gather_seen = 0U;
+static char gather_scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
 
 extern struct IntuitionBase *IntuitionBase;
 
@@ -224,6 +232,12 @@ static void update_status_text(const char *msg)
                     GTTX_Text, (ULONG)status_buf,
                     TAG_DONE);
 }
+/* True while the gathering request is still the one being waited for. */
+static int gather_live(void)
+{
+  return gather_active && gather_generation == browse_model.generation;
+}
+
 
 /* While a request runs, name what it waits for; once rows arrive, count
  * them. Returns 1 when stage text was drawn. */
@@ -231,6 +245,16 @@ static int update_stage_status(void)
 {
   int stage;
 
+  if (gather_live()) {
+    if (gather_seen > 0U) {
+      (void)snprintf(status_buf, sizeof(status_buf),
+                     "Adding %lu tracks...", (unsigned long)gather_seen);
+    } else {
+      (void)snprintf(status_buf, sizeof(status_buf), "Adding tracks...");
+    }
+    update_status_text(status_buf);
+    return 1;
+  }
   if (!browse_model.busy) {
     return 0;
   }
@@ -1046,6 +1070,103 @@ uint32_t zzplay_browse_signal_mask(void)
   return mask;
 }
 
+/* Play or Add on a folder the module marks playable: collect its tracks
+ * in the worker (up to the room the playlist offers) before anything is
+ * replaced or appended. */
+static void browse_start_gather(int add, const ZZPlayProvider *provider)
+{
+  uint32_t limit;
+
+  if (!gui_playlist || !gui_ctl) {
+    return;
+  }
+  limit = add ? ZZPLAY_PLAYLIST_MAX_ENTRIES - gui_playlist->count
+              : ZZPLAY_PLAYLIST_MAX_ENTRIES;
+  if (limit == 0U) {
+    update_status_text("The playlist is full");
+    return;
+  }
+  if (!zzplay_browse_model_gather(&browse_model, limit, &poll_req)) {
+    return;
+  }
+  gather_add = add;
+  gather_seen = 0U;
+  gather_generation = poll_req.generation;
+  gather_active = 1;
+  copy_string(gather_scheme, sizeof(gather_scheme), poll_req.scheme);
+  browse_send(&poll_req, provider);
+  update_status_text("Adding tracks...");
+  update_buttons();
+  update_busy_pointer();
+}
+
+/* The gathered rows have all arrived: put them in the playlist (replacing
+ * it for Play, appending for Add) and report what fit. Play starts the
+ * first added track. */
+static void browse_apply_gather(const ZZPlayBrowseReply *reply)
+{
+  uint32_t added = 0U;
+  uint32_t i;
+  int32_t first = -1;
+
+  gather_active = 0;
+  browse_model.busy = 0;
+
+  if (!reply->success) {
+    update_status_text(reply->error[0] ? reply->error
+                                       : "Could not collect the tracks");
+    update_buttons();
+    update_busy_pointer();
+    return;
+  }
+
+  if (!gather_add) {
+    zzplay_playlist_clear(gui_playlist);
+  }
+  for (i = 0U; i < reply->item_count; i++) {
+    const ZZPlayBrowseItem *item = &reply->items[i];
+    int32_t idx;
+
+    if (item->kind == ZZPLAY_ITEM_FOLDER || item->playable == 0U) {
+      continue;
+    }
+    (void)snprintf(poll_uri, sizeof(poll_uri), "%s://%s",
+                   gather_scheme, item->id);
+    idx = zzplay_playlist_add(gui_playlist, poll_uri);
+    if (idx < 0) {
+      break;
+    }
+    zzplay_playlist_set_title(gui_playlist, (uint32_t)idx, item->title);
+    if (first < 0) {
+      first = idx;
+    }
+    added++;
+  }
+  gui_ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+
+  if (added == reply->item_count && !reply->truncated) {
+    (void)snprintf(status_buf, sizeof(status_buf), "Added %lu tracks",
+                   (unsigned long)added);
+  } else if (added < reply->item_count) {
+    (void)snprintf(status_buf, sizeof(status_buf),
+                   "Added %lu tracks; %lu did not fit",
+                   (unsigned long)added,
+                   (unsigned long)(reply->item_count - added));
+  } else {
+    (void)snprintf(status_buf, sizeof(status_buf),
+                   "Added %lu tracks; more did not fit",
+                   (unsigned long)added);
+  }
+  update_status_text(status_buf);
+
+  if (!gather_add && first >= 0) {
+    (void)zzplay_playlist_set_current(gui_playlist, first);
+    (void)zzplay_controller_request(gui_ctl, ZZPLAY_REQUEST_PLAY);
+  }
+  update_buttons();
+  update_busy_pointer();
+}
+
 void zzplay_browse_poll(void)
 {
   struct IntuiMessage *imsg;
@@ -1059,7 +1180,18 @@ void zzplay_browse_poll(void)
 
   /* 1. Worker replies (rows arrive in groups; drain what queued) */
   while (zzplay_browse_worker_take_reply(&poll_worker_reply)) {
-    if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FAVOURITE) {
+    if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_GATHER) {
+      if (gather_active &&
+          poll_worker_reply.generation == gather_generation) {
+        if (poll_worker_reply.is_partial) {
+          gather_seen += poll_worker_reply.item_count;
+        } else {
+          browse_apply_gather(&poll_worker_reply);
+        }
+      }
+      /* Replies of a superseded or stopped gather are discarded. */
+      zzplay_browse_worker_release_reply(&poll_worker_reply);
+    } else if (poll_worker_reply.kind == ZZPLAY_BROWSE_REQ_FAVOURITE) {
       if (!poll_worker_reply.success) {
         update_status_text(poll_worker_reply.error[0] ? poll_worker_reply.error
                                                       : "Failed to update favourite");
@@ -1270,7 +1402,8 @@ void zzplay_browse_poll(void)
           update_buttons();
         }
       } else if (gid == BGID_PLAY) {
-        if (zzplay_browse_model_can_play(&browse_model)) {
+        ZZPlayBrowseTarget target = zzplay_browse_model_play_target(&browse_model);
+        if (target == ZZPLAY_BROWSE_TARGET_ITEM) {
           if (zzplay_browse_model_format_uri(&browse_model, browse_model.selection,
                                              poll_uri, sizeof(poll_uri), poll_title, sizeof(poll_title))) {
             int32_t pl_idx = zzplay_playlist_add(gui_playlist, poll_uri);
@@ -1281,9 +1414,12 @@ void zzplay_browse_poll(void)
               (void)zzplay_controller_request(gui_ctl, ZZPLAY_REQUEST_PLAY);
             }
           }
+        } else if (target == ZZPLAY_BROWSE_TARGET_COLLECTION) {
+          browse_start_gather(0, p);
         }
       } else if (gid == BGID_ADD) {
-        if (zzplay_browse_model_can_add(&browse_model)) {
+        ZZPlayBrowseTarget target = zzplay_browse_model_play_target(&browse_model);
+        if (target == ZZPLAY_BROWSE_TARGET_ITEM) {
           if (zzplay_browse_model_format_uri(&browse_model, browse_model.selection,
                                              poll_uri, sizeof(poll_uri), poll_title, sizeof(poll_title))) {
             int32_t pl_idx = zzplay_playlist_add(gui_playlist, poll_uri);
@@ -1292,6 +1428,8 @@ void zzplay_browse_poll(void)
               gui_ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
             }
           }
+        } else if (target == ZZPLAY_BROWSE_TARGET_COLLECTION) {
+          browse_start_gather(1, p);
         }
       } else if (gid == BGID_FAVOURITE) {
         if (zzplay_browse_model_can_favourite(&browse_model)) {
@@ -1305,6 +1443,7 @@ void zzplay_browse_poll(void)
         }
       } else if (gid == BGID_STOP) {
         have_pending = 0;
+        gather_active = 0;
         zzplay_browse_worker_cancel();
         zzplay_browse_model_stop(&browse_model);
         update_status_text("Stopped");

@@ -34,6 +34,13 @@ typedef enum ZZPlayBrowseAction {
   ZZPLAY_BROWSE_ACTION_PAGE_MORE
 } ZZPlayBrowseAction;
 
+/* What Play or Add does with the current selection. */
+typedef enum ZZPlayBrowseTarget {
+  ZZPLAY_BROWSE_TARGET_NONE = 0,
+  ZZPLAY_BROWSE_TARGET_ITEM,       /* a playable track or station */
+  ZZPLAY_BROWSE_TARGET_COLLECTION  /* a folder the module marks playable */
+} ZZPlayBrowseTarget;
+
 typedef enum ZZPlayBrowseReqKind {
   ZZPLAY_BROWSE_REQ_NONE = 0,
   ZZPLAY_BROWSE_REQ_OPEN,
@@ -41,6 +48,7 @@ typedef enum ZZPlayBrowseReqKind {
   ZZPLAY_BROWSE_REQ_SEARCH,
   ZZPLAY_BROWSE_REQ_RESOLVE,
   ZZPLAY_BROWSE_REQ_FAVOURITE,
+  ZZPLAY_BROWSE_REQ_GATHER,
   ZZPLAY_BROWSE_REQ_CLOSE
 } ZZPlayBrowseReqKind;
 
@@ -52,7 +60,7 @@ typedef struct ZZPlayBrowseRequest {
   char query[ZZPLAY_PROVIDER_TEXT_MAX];
   char item_id[ZZPLAY_PROVIDER_TEXT_MAX];
   uint32_t start;
-  uint32_t count;
+  uint32_t count;            /* page size, or the gather item limit */
   int fav_add;               /* 1 to add, 0 to remove */
   ZZPlayBrowseItem item;
 } ZZPlayBrowseRequest;
@@ -71,6 +79,9 @@ typedef struct ZZPlayBrowseReply {
   /* 1 when more replies for the same request follow: the worker sends
    * rows in groups while a list or search loads. */
   int is_partial;
+  /* GATHER: the limit stopped the walk before the collection was
+   * exhausted. */
+  int truncated;
   ZZPlayResolved resolved;
 } ZZPlayBrowseReply;
 
@@ -180,6 +191,16 @@ void zzplay_browse_model_set_selection(ZZPlayBrowseModel *model, int32_t index);
 void zzplay_browse_model_set_scroll(ZZPlayBrowseModel *model, uint32_t scroll);
 int zzplay_browse_model_can_play(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_can_add(const ZZPlayBrowseModel *model);
+/* What Play or Add does with the current selection: a playable track or
+ * station plays as one entry, a folder the module marks playable is a
+ * collection gathered whole, anything else does nothing. */
+ZZPlayBrowseTarget zzplay_browse_model_play_target(const ZZPlayBrowseModel *model);
+
+/* Start gathering the selected collection into a GATHER request that asks
+ * for at most `limit` items (the playlist's free space for Add, its
+ * capacity for Play). Returns 0 when the selection is no collection. */
+int zzplay_browse_model_gather(ZZPlayBrowseModel *model, uint32_t limit,
+                               ZZPlayBrowseRequest *out_req);
 int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider);
 int zzplay_browse_model_can_favourite(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_favourite(ZZPlayBrowseModel *model,

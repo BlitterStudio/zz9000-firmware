@@ -10,6 +10,7 @@
 #include "zzplay-http.h"
 #include "zzplay-sys.h"
 #include "zzplay-tags.h"
+#include "zzplay-browse-gather.h"
 #if defined(__amigaos__) || defined(AMIGA)
 
 #include <dos/dosextens.h>
@@ -44,9 +45,12 @@ typedef struct WorkerCollector {
   ZZPlayBrowseItem *chunk;      /* ZZPLAY_BROWSE_PARTIAL rows being grouped */
   uint32_t chunk_count;
   uint32_t capacity;
+  uint32_t limit;               /* grow no further than this */
   uint32_t count;
   uint32_t total;
   int has_total;
+  int grow;                     /* double the buffer while below limit */
+  int oom;                      /* a growth allocation failed */
   volatile int *cancelled;
   /* Set for list and search requests, so rows are sent as they arrive. */
   struct MsgPort *gui_port;
@@ -118,6 +122,31 @@ static void worker_flush_chunk(WorkerCollector *c)
   PutMsg(c->gui_port, &pmsg->msg);
   c->chunk_count = 0U;
 }
+/* Double the row buffer of a growing collector (GATHER), capped at its
+ * limit. Returns 1 on success. */
+static int worker_collector_grow(WorkerCollector *c)
+{
+  uint32_t grown = c->capacity * 2U;
+  ZZPlayBrowseItem *fresh;
+
+  if (grown > c->limit) {
+    grown = c->limit;
+  }
+  if (grown <= c->capacity) {
+    return 0;
+  }
+  fresh = (ZZPlayBrowseItem *)zzplay_alloc(
+      (size_t)grown * sizeof(ZZPlayBrowseItem));
+  if (!fresh) {
+    return 0;
+  }
+  memcpy(fresh, c->items, (size_t)c->count * sizeof(ZZPlayBrowseItem));
+  zzplay_free(c->items);
+  c->items = fresh;
+  c->capacity = grown;
+  return 1;
+}
+
 
 static int worker_sink_item(void *user, const ZZPlayProviderItem *item)
 {
@@ -128,7 +157,13 @@ static int worker_sink_item(void *user, const ZZPlayProviderItem *item)
     return 1;
   }
   if (c->count >= c->capacity) {
-    return 1;
+    if (!c->grow) {
+      return 1;
+    }
+    if (!worker_collector_grow(c)) {
+      c->oom = 1;
+      return 1;
+    }
   }
   dst = &c->items[c->count];
   memset(dst, 0, sizeof(*dst));
@@ -178,6 +213,28 @@ static int worker_provider_has_favourite(const ZZPlayProvider *p)
     return 0;
   }
   return p->favourite != NULL;
+}
+
+/* The provider list call, shaped for ZZPlayGather. */
+typedef struct WorkerGatherLister {
+  const ZZPlayProvider *provider;
+  void *ctx;
+} WorkerGatherLister;
+
+static int worker_gather_list(void *user, const char *node, uint32_t start,
+                              uint32_t count, const ZZPlayItemSink *sink,
+                              char *err, uint32_t err_size)
+{
+  WorkerGatherLister *lister = (WorkerGatherLister *)user;
+
+  if (!lister || !lister->provider || !lister->provider->list) {
+    if (err && err_size > 0U) {
+      (void)snprintf(err, err_size, "service cannot list items");
+    }
+    return 0;
+  }
+  return lister->provider->list(lister->ctx, node, start, count, sink,
+                                err, err_size);
 }
 
 
@@ -393,6 +450,75 @@ static void worker_process(void)
             (void)snprintf(rep->error, sizeof(rep->error),
                            req->fav_add ? "cannot add favourite"
                                         : "cannot remove favourite");
+          }
+        }
+      } else if (req->kind == ZZPLAY_BROWSE_REQ_GATHER) {
+        WorkerCollector collector;
+        ZZPlayItemSink sink;
+        ZZPlayGather gather;
+        WorkerGatherLister lister;
+        uint32_t limit = req->count > 0U ? req->count : 1U;
+        uint32_t first = limit < ZZPLAY_BROWSE_PAGE_SIZE
+                             ? limit
+                             : ZZPLAY_BROWSE_PAGE_SIZE;
+        int truncated = 0;
+
+        memset(&collector, 0, sizeof(collector));
+        collector.capacity = first;
+        collector.limit = limit;
+        collector.grow = 1;
+        collector.cancelled = &worker_cancel_flag;
+        collector.kind = req->kind;
+        collector.generation = req->generation;
+        collector.start = 0U;
+        collector.gui_port = gui_port;
+        collector.items = (ZZPlayBrowseItem *)zzplay_alloc(
+            (size_t)first * sizeof(ZZPlayBrowseItem));
+        collector.chunk = (ZZPlayBrowseItem *)zzplay_alloc(
+            (size_t)ZZPLAY_BROWSE_PARTIAL * sizeof(ZZPlayBrowseItem));
+
+        if (!collector.items || !collector.chunk) {
+          zzplay_free(collector.items);
+          zzplay_free(collector.chunk);
+          collector.items = NULL;
+          collector.chunk = NULL;
+          (void)snprintf(rep->error, sizeof(rep->error), "out of memory");
+        } else {
+          int ret;
+
+          sink.user = &collector;
+          sink.item = worker_sink_item;
+          sink.total = worker_sink_total;
+          lister.provider = p;
+          lister.ctx = ctx;
+
+          memset(&gather, 0, sizeof(gather));
+          gather.user = &lister;
+          gather.list = worker_gather_list;
+          gather.cancelled = &worker_cancel_flag;
+
+          ret = zzplay_gather_collection(&gather, req->node_id, limit,
+                                         &sink, &truncated, rep->error,
+                                         sizeof(rep->error));
+          worker_flush_chunk(&collector);
+          zzplay_free(collector.chunk);
+          collector.chunk = NULL;
+          if (ret && !collector.oom) {
+            rep->success = 1;
+            rep->items = collector.items;
+            rep->item_count = collector.count;
+            rep->truncated = truncated;
+          } else {
+            zzplay_free(collector.items);
+            rep->success = 0;
+            if (collector.oom) {
+              (void)snprintf(rep->error, sizeof(rep->error),
+                             "out of memory");
+            } else if (rep->error[0] == '\0') {
+              (void)snprintf(rep->error, sizeof(rep->error),
+                             worker_cancel_flag ? "cancelled"
+                                                : "cannot collect tracks");
+            }
           }
         }
       } else if (req->kind == ZZPLAY_BROWSE_REQ_CLOSE) {

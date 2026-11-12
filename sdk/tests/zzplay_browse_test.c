@@ -279,7 +279,7 @@ static int test_play_add_unavailable_for_folders_and_unplayable(void)
   ZZPlayBrowseModel model;
   ZZPlayBrowseRequest req;
   ZZPlayBrowseReply reply;
-  ZZPlayBrowseItem items[4];
+  ZZPlayBrowseItem items[5];
 
   zzplay_browse_model_init(&model);
   assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
@@ -310,12 +310,18 @@ static int test_play_add_unavailable_for_folders_and_unplayable(void)
   items[3].kind = ZZPLAY_ITEM_STATION;
   items[3].playable = 1U;
 
+  /* 4: Playable folder, a collection */
+  snprintf(items[4].id, sizeof(items[4].id), "alb:201");
+  snprintf(items[4].title, sizeof(items[4].title), "First Light");
+  items[4].kind = ZZPLAY_ITEM_FOLDER;
+  items[4].playable = 1U;
+
   memset(&reply, 0, sizeof(reply));
   reply.kind = ZZPLAY_BROWSE_REQ_LIST;
   reply.generation = req.generation;
   reply.success = 1;
   reply.items = items;
-  reply.item_count = 4U;
+  reply.item_count = 5U;
 
   assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
 
@@ -333,16 +339,29 @@ static int test_play_add_unavailable_for_folders_and_unplayable(void)
   zzplay_browse_model_set_selection(&model, 1);
   assert(!zzplay_browse_model_can_play(&model));
   assert(!zzplay_browse_model_can_add(&model));
+  assert(zzplay_browse_model_play_target(&model) == ZZPLAY_BROWSE_TARGET_NONE);
 
   /* Select playable track */
   zzplay_browse_model_set_selection(&model, 2);
   assert(zzplay_browse_model_can_play(&model));
   assert(zzplay_browse_model_can_add(&model));
+  assert(zzplay_browse_model_play_target(&model) == ZZPLAY_BROWSE_TARGET_ITEM);
 
   /* Select playable station */
   zzplay_browse_model_set_selection(&model, 3);
   assert(zzplay_browse_model_can_play(&model));
   assert(zzplay_browse_model_can_add(&model));
+  assert(zzplay_browse_model_play_target(&model) == ZZPLAY_BROWSE_TARGET_ITEM);
+
+  /* Select a playable folder: a collection Play and Add gather */
+  zzplay_browse_model_set_selection(&model, 4);
+  assert(zzplay_browse_model_can_play(&model));
+  assert(zzplay_browse_model_can_add(&model));
+  assert(zzplay_browse_model_play_target(&model) ==
+         ZZPLAY_BROWSE_TARGET_COLLECTION);
+
+  /* A collection is not a favourite */
+  assert(!zzplay_browse_model_can_favourite(&model));
 
   zzplay_browse_model_free(&model);
   return 0;
@@ -402,6 +421,70 @@ static int test_activation_folder_enters_station_plays(void)
                                         title, sizeof(title)) == 1);
   assert(strcmp(uri, "radio://station_def_leppard") == 0);
   assert(strcmp(title, "Def Leppard Radio") == 0);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+static int test_gather_request_for_collection(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem items[3];
+  uint32_t gen;
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+
+  memset(items, 0, sizeof(items));
+  snprintf(items[0].id, sizeof(items[0].id), "alb:201");
+  snprintf(items[0].title, sizeof(items[0].title), "First Light");
+  items[0].kind = ZZPLAY_ITEM_FOLDER;
+  items[0].playable = 1U;
+
+  snprintf(items[1].id, sizeof(items[1].id), "ltr:3:9:A");
+  snprintf(items[1].title, sizeof(items[1].title), "A (2)");
+  items[1].kind = ZZPLAY_ITEM_FOLDER;
+  items[1].playable = 0U;
+
+  snprintf(items[2].id, sizeof(items[2].id), "301");
+  snprintf(items[2].title, sizeof(items[2].title), "Opening");
+  items[2].kind = ZZPLAY_ITEM_TRACK;
+  items[2].playable = 1U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = items;
+  reply.item_count = 3U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Only a playable folder starts a gather */
+  assert(model.selection == -1);
+  assert(!zzplay_browse_model_gather(&model, 4096U, &req));
+  zzplay_browse_model_set_selection(&model, 2);
+  assert(!zzplay_browse_model_gather(&model, 4096U, &req));
+  zzplay_browse_model_set_selection(&model, 1);
+  assert(!zzplay_browse_model_gather(&model, 4096U, &req));
+
+  zzplay_browse_model_set_selection(&model, 0);
+  assert(zzplay_browse_model_gather(&model, 4096U, &req));
+  gen = model.generation;
+  assert(req.kind == ZZPLAY_BROWSE_REQ_GATHER);
+  assert(req.generation == gen);
+  assert(model.busy == 1);
+  assert(strcmp(req.scheme, "plex") == 0);
+  assert(strcmp(req.node_id, "alb:201") == 0);
+  assert(req.count == 4096U);
+
+  /* A second gather supersedes the first */
+  assert(zzplay_browse_model_gather(&model, 12U, &req));
+  assert(req.generation == gen + 1U);
+  assert(req.count == 12U);
+  assert(model.busy == 1);
 
   zzplay_browse_model_free(&model);
   return 0;
@@ -813,6 +896,7 @@ int main(void)
   assert(test_new_search_drops_previous_query() == 0);
   assert(test_reply_after_stop_dropped() == 0);
   assert(test_play_add_unavailable_for_folders_and_unplayable() == 0);
+  assert(test_gather_request_for_collection() == 0);
   assert(test_activation_folder_enters_station_plays() == 0);
   assert(test_favourite_action() == 0);
   assert(test_remembered_folder_reopens_without_request() == 0);

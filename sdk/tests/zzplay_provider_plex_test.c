@@ -1029,14 +1029,17 @@ static void test_sections_listing(const ZZPlayProvider *p)
   assert(strcmp(col.items[0].id, "playlists") == 0);
   assert(strcmp(col.items[0].title, "Playlists") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[0].playable == 0); /* the top level is not a collection */
 
   assert(strcmp(col.items[1].id, "sec:3") == 0);
   assert(strcmp(col.items[1].title, "Music") == 0);
   assert(col.items[1].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[1].playable == 0); /* libraries are not collections */
 
   assert(strcmp(col.items[2].id, "sec:5") == 0);
   assert(strcmp(col.items[2].title, "Audiobooks & Talk") == 0);
   assert(col.items[2].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[2].playable == 0);
 
   /* A library folder opens the four views; Playlists stays at the top level */
   collector_init(&col, 0);
@@ -1131,6 +1134,7 @@ static void test_letter_folders(const ZZPlayProvider *p)
   assert(strcmp(col.items[2].id, "ltr:3:8:B") == 0);
   assert(strcmp(col.items[2].title, "B (1)") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[0].playable == 0); /* letters are not collections */
   assert(strstr(g_last_request_url, "/firstCharacter?type=8") != NULL);
 
   /* A letter opens its artists in Plex's order, paged */
@@ -1144,6 +1148,7 @@ static void test_letter_folders(const ZZPlayProvider *p)
   assert(strcmp(col.items[1].id, "art:102") == 0);
   assert(strcmp(col.items[1].title, "Caf\xc3\xa9 & Co") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[0].playable == 1); /* an artist is a collection */
   assert(strstr(g_last_request_url, "/firstCharacter/A?type=8") != NULL);
 
   /* Request page two of a letter: start = 2, count = 2 */
@@ -1211,6 +1216,7 @@ static void test_genres(const ZZPlayProvider *p)
   assert(strcmp(col.items[2].id, "gen:3:9003") == 0);
   assert(strcmp(col.items[2].title, "Ambient") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[0].playable == 0); /* genres are not collections */
   assert(strstr(g_last_request_url, "/genre?type=8") != NULL);
 
   /* A genre opens the artists in it */
@@ -1221,8 +1227,8 @@ static void test_genres(const ZZPlayProvider *p)
   assert(col.total == 2);
   assert(strcmp(col.items[0].id, "art:104") == 0);
   assert(strcmp(col.items[0].title, "Blue Note Trio") == 0);
-  assert(strcmp(col.items[1].id, "art:105") == 0);
   assert(strcmp(col.items[1].title, "Delta Five") == 0);
+  assert(col.items[0].playable == 1); /* an artist is a collection */
   assert(strstr(g_last_request_url, "type=8&genre=9001") != NULL);
 
   p->close(ctx);
@@ -1259,6 +1265,47 @@ static void test_recently_added(const ZZPlayProvider *p)
   p->close(ctx);
 }
 
+static void test_playlists_are_collections(const ZZPlayProvider *p)
+{
+  char err[128];
+  ItemCollector col;
+  void *ctx;
+  int ok;
+
+  mock_prefs_clear();
+  mock_pref_set("SERVER", TEST_SERVER);
+  mock_pref_set("TOKEN", TEST_TOKEN);
+  g_mock_status = 200;
+
+  ctx = p->open(&g_test_host, err, sizeof(err));
+  assert(ctx != NULL);
+
+  /* The Playlists folder lists playlists, each playable as a collection */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "playlists", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 2);
+  assert(strcmp(col.items[0].id, "pl:601") == 0);
+  assert(strcmp(col.items[0].title, "\xe2\x9d\xa4\xef\xb8\x8f Tracks") == 0);
+  assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[0].playable == 1);
+  assert(strcmp(col.items[1].id, "pl:602") == 0);
+  assert(strcmp(col.items[1].title, "Road Trip") == 0);
+  assert(col.items[1].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[1].playable == 1);
+
+  /* A playlist opens its items like any collection */
+  collector_init(&col, 0);
+  ok = p->list(ctx, "pl:601", 0, 50, &col.sink, err, sizeof(err));
+  assert(ok == 1);
+  assert(col.count == 3);
+  assert(col.items[0].kind == ZZPLAY_ITEM_TRACK);
+  assert(col.items[0].playable == 1);
+
+  p->close(ctx);
+}
+
+
 static void test_album_and_track_rows(const ZZPlayProvider *p)
 {
   char err[128];
@@ -1283,7 +1330,7 @@ static void test_album_and_track_rows(const ZZPlayProvider *p)
   assert(strcmp(col.items[0].title, "First Light") == 0);
   assert(strcmp(col.items[0].subtitle, "Alpha Band - 1975") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
-  assert(col.items[0].playable == 0);
+  assert(col.items[0].playable == 1); /* an album is a collection */
 
   assert(strcmp(col.items[1].id, "alb:202") == 0);
   assert(strcmp(col.items[1].title, "Second Wind") == 0);
@@ -1347,6 +1394,7 @@ static void test_search_grouped(const ZZPlayProvider *p)
   assert(strcmp(col.items[0].id, "sq:9:paris") == 0);
   assert(strcmp(col.items[0].title, "Albums (2)") == 0);
   assert(col.items[0].kind == ZZPLAY_ITEM_FOLDER);
+  assert(col.items[0].playable == 0); /* search groups are not collections */
   assert(strcmp(col.items[1].id, "sq:10:paris") == 0);
   assert(strcmp(col.items[1].title, "Tracks (21)") == 0);
   assert(col.items[1].kind == ZZPLAY_ITEM_FOLDER);
@@ -1360,6 +1408,7 @@ static void test_search_grouped(const ZZPlayProvider *p)
   assert(strcmp(col.items[0].id, "alb:401") == 0);
   assert(strcmp(col.items[0].title, "Paris Concert") == 0);
   assert(strcmp(col.items[0].subtitle, "Blue Note Trio - 1990") == 0);
+  assert(col.items[0].playable == 1); /* an album is a collection */
   assert(strcmp(col.items[1].id, "alb:402") == 0);
   assert(strcmp(col.items[1].subtitle, "Alpha Band - 2001") == 0);
   assert(strstr(g_last_request_url, "/search?type=9&query=paris") != NULL);
@@ -1639,6 +1688,7 @@ int main(void)
   test_letter_folders(p);
   test_genres(p);
   test_recently_added(p);
+  test_playlists_are_collections(p);
   test_album_and_track_rows(p);
   test_search_grouped(p);
   test_search_group_across_libraries(p);

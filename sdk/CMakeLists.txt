@@ -491,6 +491,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-audio-clock.c
   tools/zzplay/zzplay-ax.c
   tools/zzplay/zzplay-browse-model.c
+  tools/zzplay/zzplay-browse-gather.c
   tools/zzplay/zzplay-controller.c
   tools/zzplay/zzplay-core.c
   tools/zzplay/zzplay-formats.c
@@ -589,6 +590,12 @@ add_executable(zzplay_browse_test
 )
 target_link_libraries(zzplay_browse_test PRIVATE zzplay_core)
 add_test(NAME zzplay_browse_test COMMAND zzplay_browse_test)
+
+add_executable(zzplay_browse_gather_test
+  tests/zzplay_browse_gather_test.c
+)
+target_link_libraries(zzplay_browse_gather_test PRIVATE zzplay_core)
+add_test(NAME zzplay_browse_gather_test COMMAND zzplay_browse_gather_test)
 
 add_executable(zzplay_webm_test
   tests/zzplay_webm_test.c

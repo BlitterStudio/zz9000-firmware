@@ -45,7 +45,7 @@ ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-rexx.c tools/zzplay/zzplay-r
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-sys.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-http.c tools/zzplay/zzplay-httpfile.c tools/zzplay/zzplay-net.c tools/zzplay/zzplay-streamlist.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-xml.c tools/zzplay/zzplay-providers.c tools/zzplay/zzplay-host.c"
-ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-browse.c tools/zzplay/zzplay-browse-model.c tools/zzplay/zzplay-browse-worker.c"
+ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-browse.c tools/zzplay/zzplay-browse-model.c tools/zzplay/zzplay-browse-worker.c tools/zzplay/zzplay-browse-gather.c"
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Werror -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
   build/m68k/zz9k_app_client.o build/m68k/zz9k_host.o -o build/zz9k.library
