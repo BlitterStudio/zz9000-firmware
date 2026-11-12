@@ -103,6 +103,8 @@ typedef struct ZZPlayBrowseReply {
   uint32_t total;
   int has_total;
   int fav_add;
+  /* FAVOURITE and FORM_GET: the row the request was for. */
+  char item_id[ZZPLAY_PROVIDER_TEXT_MAX];
   /* 1 when more replies for the same request follow: the worker sends
    * rows in groups while a list or search loads. */
   int is_partial;

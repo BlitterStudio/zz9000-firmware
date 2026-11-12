@@ -476,6 +476,8 @@ static void worker_process(void)
           prov_item.favourite = req->item.favourite;
 
           rep->fav_add = req->fav_add;
+          (void)snprintf(rep->item_id, sizeof(rep->item_id), "%s",
+                         req->item.id);
           rep->success = p->favourite(ctx, &prov_item, req->fav_add,
                                       rep->error, sizeof(rep->error));
           if (!rep->success && rep->error[0] == '\0') {
@@ -492,6 +494,8 @@ static void worker_process(void)
           (void)snprintf(rep->error, sizeof(rep->error),
                          "service does not support forms");
         } else {
+          (void)snprintf(rep->item_id, sizeof(rep->item_id), "%s",
+                         req->item_id);
           rep->success = p->form_get(ctx, req->item_id, &form,
                                      rep->error, sizeof(rep->error));
           if (rep->success) {

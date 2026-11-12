@@ -161,9 +161,9 @@ static const ZZPlayProvider *link_provider = NULL;
 static ZZPlayProvider form_provider;
 static ZZPlayProviderForm row_form;
 static char row_form_item[ZZPLAY_PROVIDER_TEXT_MAX];
-/* The latest Edit request: only its reply opens a form, for this row. */
+/* The latest Edit request and its service: only its reply opens a form.
+ * The reply names the row it is for. */
 static uint32_t form_get_generation = 0U;
-static char form_get_item[ZZPLAY_PROVIDER_TEXT_MAX];
 static char form_get_scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
 static int row_form_mode = 0;
 enum LinkWindowState {
@@ -180,8 +180,6 @@ static ZZPlayBrowseReply poll_worker_reply;
 static ZZPlayBrowseRequest poll_req;
 static char poll_uri[ZZPLAY_PLAYLIST_PATH_MAX];
 static int last_fav_add = 0;
-/* The row the running Favourite request is for. */
-static char last_fav_id[ZZPLAY_PROVIDER_TEXT_MAX];
 static char poll_title[ZZPLAY_PLAYLIST_TITLE_MAX];
 static ULONG last_click_s = 0UL;
 static ULONG last_click_m = 0UL;
@@ -3104,7 +3102,6 @@ static void browse_do_favourite(void)
 {
   if (zzplay_browse_model_favourite(&browse_model, &poll_req)) {
     last_fav_add = poll_req.fav_add;
-    copy_string(last_fav_id, sizeof(last_fav_id), poll_req.item.id);
     if (browse_send(&poll_req, browse_provider())) {
       update_status_text(last_fav_add ? "Adding to favourites..."
                                       : "Removing from favourites...");
@@ -3126,7 +3123,6 @@ static void browse_open_row_form(void)
   copy_string(poll_req.item_id, sizeof(poll_req.item_id),
               browse_model.items[browse_model.selection].id);
   form_get_generation = poll_req.generation;
-  copy_string(form_get_item, sizeof(form_get_item), poll_req.item_id);
   copy_string(form_get_scheme, sizeof(form_get_scheme), svc->scheme);
   if (browse_send(&poll_req, svc->provider)) {
     browse_model.busy = 1;
@@ -3328,7 +3324,8 @@ void zzplay_browse_poll(void)
         row_form.title = poll_worker_reply.form_title;
         /* A form replaces whatever the settings window showed. */
         close_settings_window();
-        copy_string(row_form_item, sizeof(row_form_item), form_get_item);
+        copy_string(row_form_item, sizeof(row_form_item),
+                    poll_worker_reply.item_id);
         row_form_mode = 1;
         for (i = 0U; i < row_form.field_count && i < BROWSE_FIELDS_MAX; i++) {
           copy_string(field_bufs[i], sizeof(field_bufs[i]),
@@ -3384,7 +3381,8 @@ void zzplay_browse_poll(void)
         update_status_text(reload_note);
         /* Recently played keeps the row's favourite state, so Favourite
          * there toggles the right way next time. */
-        if (zzplay_browse_model_favourite_done(&browse_model, last_fav_id,
+        if (zzplay_browse_model_favourite_done(&browse_model,
+                                               poll_worker_reply.item_id,
                                                poll_worker_reply.fav_add)) {
           browse_save_recent();
         }
