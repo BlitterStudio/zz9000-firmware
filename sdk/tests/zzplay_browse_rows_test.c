@@ -91,6 +91,7 @@ static int test_clamp_window(void)
    * comes back on it. */
   left = 800;
   top = 600;
+
   w = 640;
   h = 480;
   zzplay_browse_clamp_window(&left, &top, &w, &h, 640, 256, 200, 120);
@@ -141,6 +142,32 @@ static int test_clamp_window(void)
   return 0;
 }
 
+static int test_count_playable(void)
+{
+  ZZPlayBrowseItem items[4];
+
+  memset(items, 0, sizeof(items));
+  snprintf(items[0].id, sizeof(items[0].id), "alb:1");
+  items[0].kind = ZZPLAY_ITEM_FOLDER;
+  items[0].playable = 1U;
+  snprintf(items[1].id, sizeof(items[1].id), "201");
+  items[1].kind = ZZPLAY_ITEM_TRACK;
+  items[1].playable = 1U;
+  snprintf(items[2].id, sizeof(items[2].id), "202");
+  items[2].kind = ZZPLAY_ITEM_TRACK;
+  items[2].playable = 0U;
+  snprintf(items[3].id, sizeof(items[3].id), "radio:1");
+  items[3].kind = ZZPLAY_ITEM_STATION;
+  items[3].playable = 1U;
+
+  if (zzplay_browse_count_playable(items, 4U) != 2U) return 1;
+  if (zzplay_browse_count_playable(items, 0U) != 0U) return 2;
+  if (zzplay_browse_count_playable(NULL, 4U) != 0U) return 3;
+
+  return 0;
+}
+
+
 int main(void)
 {
   int failures = 0;
@@ -157,7 +184,10 @@ int main(void)
     failures++;
     printf("fail: window clamp\n");
   }
-
+  if (test_count_playable() != 0) {
+    failures++;
+    printf("fail: count playable\n");
+  }
   if (failures == 0) {
     printf("zzplay_browse_rows_test: ok\n");
     return 0;

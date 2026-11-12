@@ -5,6 +5,8 @@
 
 #include <stdio.h>
 
+#include "zzplay-browse-model.h"
+
 void zzplay_browse_format_duration(uint32_t duration_ms, char *buf,
                                    size_t size)
 {
@@ -35,6 +37,22 @@ void zzplay_browse_format_duration(uint32_t duration_ms, char *buf,
   }
 }
 
+uint32_t zzplay_browse_count_playable(const ZZPlayBrowseItem *items,
+                                      uint32_t count)
+{
+  uint32_t playable = 0U;
+  uint32_t i;
+
+  if (!items) {
+    return 0U;
+  }
+  for (i = 0U; i < count; i++) {
+    if (items[i].kind != ZZPLAY_ITEM_FOLDER && items[i].playable != 0U) {
+      playable++;
+    }
+  }
+  return playable;
+}
 void zzplay_browse_layout_columns(int avail_w, int marker_w, int len_w,
                                   int gap, ZZPlayBrowseColumns *out)
 {

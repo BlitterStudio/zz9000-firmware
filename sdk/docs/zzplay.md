@@ -246,15 +246,18 @@ Choose **Browse...** (Amiga-R) in the **Project** menu to open the window.
   Entries the service marks as unplayable cannot be played or added.
 - **Play all** plays the folder being shown as a whole, and **Add all**
   appends it. The buttons are enabled when the service marks the shown
-  folder playable, such as a Plex album, artist or playlist; folders open
-  on a single click, so this is how a collection is played without
-  entering and selecting it. **Play all** replaces the playlist with the
+  folder playable (such as a Plex album, artist or playlist) and its
+  rows are shown; folders open on a single click, so this is how a
+  collection is played without entering and selecting it. **Play all**
+  replaces the playlist with the
   folder's tracks and starts the first. ZZPlay lists the folder, and each
   playable folder inside it, while the status line counts what it found
   ("Adding 37 tracks..."). **Stop** cancels and leaves the playlist
   unchanged. At most as many tracks are added as the playlist holds
   (4,096); the status line says when the collection held more, or when
-  the playlist had no room for all of them.
+  the playlist had no room for all of them. A collection that holds
+  nothing playable changes nothing: the status line says "Nothing to
+  add".
 - **Favourite** adds the selected entry to the service's favourites, or
   removes it when it is already one. The button is disabled for services
   without favourites.

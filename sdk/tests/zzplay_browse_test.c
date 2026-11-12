@@ -8,6 +8,9 @@
 #include <string.h>
 
 #include "../tools/zzplay/zzplay-browse-model.h"
+#include "../tools/zzplay/zzplay-browse-gather.h"
+#include "../tools/zzplay/zzplay-sys.h"
+#include <stdlib.h>
 
 static int test_enter_folder_and_back(void)
 {
@@ -954,6 +957,50 @@ static int test_play_all_add_all_on_shown_folder(void)
   assert(zzplay_browse_model_can_play_all(&model));
   assert(zzplay_browse_model_can_add_all(&model));
 
+  /* A collection view with no rows yet (its list arrived empty, or is
+   * still loading) offers neither button: Play all on nothing must not
+   * be possible. */
+  {
+    ZZPlayBrowseModel empty_model;
+    ZZPlayBrowseRequest empty_req;
+    ZZPlayBrowseReply empty_reply;
+    ZZPlayBrowseItem root[1];
+
+    zzplay_browse_model_init(&empty_model);
+    assert(zzplay_browse_model_add_service(&empty_model, "plex", "Plex",
+                                           NULL));
+    assert(zzplay_browse_model_select_service(&empty_model, 0, &empty_req));
+    memset(root, 0, sizeof(root));
+    snprintf(root[0].id, sizeof(root[0].id), "art:1");
+    snprintf(root[0].title, sizeof(root[0].title), "Empty Artist");
+    root[0].kind = ZZPLAY_ITEM_FOLDER;
+    root[0].playable = 1U;
+
+    memset(&empty_reply, 0, sizeof(empty_reply));
+    empty_reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+    empty_reply.generation = empty_req.generation;
+    empty_reply.success = 1;
+    empty_reply.items = root;
+    empty_reply.item_count = 1U;
+    assert(zzplay_browse_model_apply_reply(&empty_model, &empty_reply) == 1);
+
+    assert(zzplay_browse_model_activate(&empty_model, 0, &empty_req) ==
+           ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+    memset(&empty_reply, 0, sizeof(empty_reply));
+    empty_reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+    empty_reply.generation = empty_req.generation;
+    empty_reply.success = 1;
+    empty_reply.item_count = 0U;
+    assert(zzplay_browse_model_apply_reply(&empty_model, &empty_reply) == 1);
+    assert(empty_model.busy == 0);
+    assert(empty_model.folder_is_collection == 1);
+    assert(empty_model.item_count == 0U);
+    assert(!zzplay_browse_model_can_play_all(&empty_model));
+    assert(!zzplay_browse_model_gather_shown(&empty_model, 4096U,
+                                             &empty_req));
+    zzplay_browse_model_free(&empty_model);
+  }
+
   /* The gather asks for the shown folder, not a selected row */
   assert(zzplay_browse_model_gather_shown(&model, 4096U, &req));
   gen = model.generation;
@@ -1031,6 +1078,583 @@ static int test_play_all_add_all_on_shown_folder(void)
   return 0;
 }
 
+/* The reported Amiberry sequence: section -> letter -> artist -> Play
+ * all -> Back must show the letter's artists again with Play all off.
+ * The gather reply is handled like zzplay-browse.c handles it: the model
+ * only gets its busy flag cleared, no apply_reply runs for it. */
+static int test_back_after_play_all_shows_letter_rows(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem sections[1];
+  ZZPlayBrowseItem letters[1];
+  ZZPlayBrowseItem artists[2];
+  ZZPlayBrowseItem albums[1];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+
+  memset(sections, 0, sizeof(sections));
+  snprintf(sections[0].id, sizeof(sections[0].id), "sec:1");
+  snprintf(sections[0].title, sizeof(sections[0].title), "Artists");
+  sections[0].kind = ZZPLAY_ITEM_FOLDER;
+  sections[0].playable = 0U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = sections;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Enter the Artists section */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(strcmp(req.node_id, "sec:1") == 0);
+
+  memset(letters, 0, sizeof(letters));
+  snprintf(letters[0].id, sizeof(letters[0].id), "ltr:1:9:A");
+  snprintf(letters[0].title, sizeof(letters[0].title), "A (72)");
+  letters[0].kind = ZZPLAY_ITEM_FOLDER;
+  letters[0].playable = 0U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = letters;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Enter letter A */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(strcmp(req.node_id, "ltr:1:9:A") == 0);
+
+  memset(artists, 0, sizeof(artists));
+  snprintf(artists[0].id, sizeof(artists[0].id), "art:17");
+  snprintf(artists[0].title, sizeof(artists[0].title), "ABBA");
+  artists[0].kind = ZZPLAY_ITEM_FOLDER;
+  artists[0].playable = 1U;
+
+  snprintf(artists[1].id, sizeof(artists[1].id), "art:42");
+  snprintf(artists[1].title, sizeof(artists[1].title), "Ace of Base");
+  artists[1].kind = ZZPLAY_ITEM_FOLDER;
+  artists[1].playable = 1U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = artists;
+  reply.item_count = 2U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Enter the artist: its list shows one playable album */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(strcmp(req.node_id, "art:17") == 0);
+
+  memset(albums, 0, sizeof(albums));
+  snprintf(albums[0].id, sizeof(albums[0].id), "alb:9");
+  snprintf(albums[0].title, sizeof(albums[0].title), "Happy New Year");
+  albums[0].kind = ZZPLAY_ITEM_FOLDER;
+  albums[0].playable = 1U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = albums;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+  assert(model.folder_is_collection == 1);
+  assert(zzplay_browse_model_can_play_all(&model));
+
+  /* Play all: a GATHER for the shown artist */
+  assert(zzplay_browse_model_gather_shown(&model, 4096U, &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_GATHER);
+  assert(strcmp(req.node_id, "art:17") == 0);
+  assert(model.busy == 1);
+
+  /* The gather's reply never reaches apply_reply; the GUI only clears
+   * the busy flag once the tracks were added. */
+  model.busy = 0;
+
+  /* Back: the letter's artists again, not a collection */
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(strcmp(model.current_node, "ltr:1:9:A") == 0);
+  assert(model.item_count == 2U);
+  assert(model.items != NULL);
+  assert(strcmp(model.items[0].id, "art:17") == 0);
+  assert(model.folder_is_collection == 0);
+  assert(!zzplay_browse_model_can_play_all(&model));
+  assert(!zzplay_browse_model_gather_shown(&model, 4096U, &req));
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+
+/* ------------------------------------------------------------------ *
+ * A faithful replay of zzplay-browse.c's worker-reply loop over a
+ * scripted service, so click timing (pending, cancel, partials) can be
+ * varied against the real model. */
+
+typedef struct ReplayNode {
+  const char *id;
+  const char *titles[4];
+  uint32_t kinds[4];
+  uint32_t playable[4];
+  const char *child_ids[4];
+  uint32_t count;
+} ReplayNode;
+
+/* "" -> lib:1:art -> ltr:1:8:A (artists) -> art:N (one album each) */
+static ReplayNode g_replay_tree[] = {
+    {"", {"Artists"}, {0}, {0}, {"lib:1:art"}, 1},
+    {"lib:1:art", {"A"}, {0}, {0}, {"ltr:1:8:A"}, 1},
+    {"ltr:1:8:A",
+     {"Artist One", "Artist Two", "Artist Three", "Artist Four"},
+     {0, 0, 0, 0},
+     {1, 1, 1, 1},
+     {"art:1", "art:2", "art:3", "art:4"},
+     4},
+    {"art:1", {"One Album"}, {0}, {1}, {"alb:1"}, 1},
+    {"art:2", {"Two Album"}, {0}, {1}, {"alb:2"}, 1},
+    {"art:3", {"Three Album"}, {0}, {1}, {"alb:3"}, 1},
+    {"art:4", {"Four Album"}, {0}, {1}, {"alb:4"}, 1},
+    {"alb:1", {"Track A"}, {1}, {1}, {"301"}, 1},
+    {"alb:2", {"Track B"}, {1}, {1}, {"302"}, 1},
+    {"alb:3", {"Track C"}, {1}, {1}, {"303"}, 1},
+    {"alb:4", {"Track D"}, {1}, {1}, {"304"}, 1},
+};
+
+static ReplayNode *replay_find(const char *id)
+{
+  uint32_t i;
+  for (i = 0U; i < sizeof(g_replay_tree) / sizeof(g_replay_tree[0]); i++) {
+    if (strcmp(g_replay_tree[i].id, id) == 0) {
+      return &g_replay_tree[i];
+    }
+  }
+  return NULL;
+}
+
+typedef struct ReplayState {
+  ZZPlayBrowseModel *model;
+  ZZPlayBrowseReply queue[16];
+  uint32_t queued;
+  uint32_t taken;
+  int worker_busy;
+  ZZPlayBrowseRequest pending;
+  int have_pending;
+  int gather_active;
+  uint32_t gather_generation;
+  uint32_t gather_seen;
+  uint32_t gather_added;
+} ReplayState;
+
+static ReplayState g_replay;
+
+static void replay_queue_reply(const ZZPlayBrowseReply *reply)
+{
+  if (g_replay.queued < sizeof(g_replay.queue) / sizeof(g_replay.queue[0])) {
+    g_replay.queue[g_replay.queued++] = *reply;
+  }
+}
+
+/* The worker runs one request to completion, queueing its replies. */
+static void replay_run(const ZZPlayBrowseRequest *req)
+{
+  ZZPlayBrowseItem *items;
+  ReplayNode *node;
+  ZZPlayBrowseReply reply;
+  uint32_t i;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = req->kind;
+  reply.generation = req->generation;
+  reply.start = req->start;
+  reply.success = 1;
+
+  if (req->kind == ZZPLAY_BROWSE_REQ_LIST) {
+    node = replay_find(req->node_id);
+    if (!node) {
+      reply.success = 0;
+      snprintf(reply.error, sizeof(reply.error), "unknown node");
+      replay_queue_reply(&reply);
+      return;
+    }
+    items = NULL;
+    if (node->count > 0U) {
+      items = (ZZPlayBrowseItem *)calloc((size_t)node->count,
+                                         sizeof(ZZPlayBrowseItem));
+      assert(items != NULL);
+      for (i = 0U; i < node->count; i++) {
+        snprintf(items[i].id, sizeof(items[i].id), "%s",
+                 node->child_ids[i]);
+        snprintf(items[i].title, sizeof(items[i].title), "%s",
+                 node->titles[i]);
+        items[i].kind = node->kinds[i];
+        items[i].playable = node->playable[i];
+      }
+    }
+    reply.items = items;
+    reply.item_count = node->count;
+    reply.has_total = 1;
+    reply.total = node->count;
+    reply.is_partial = 0;
+    replay_queue_reply(&reply);
+    return;
+  }
+
+  if (req->kind == ZZPLAY_BROWSE_REQ_GATHER) {
+    ReplayNode *root = replay_find(req->node_id);
+    uint32_t collected = 0U;
+    assert(root != NULL);
+    items = (ZZPlayBrowseItem *)calloc(8U, sizeof(ZZPlayBrowseItem));
+    assert(items != NULL);
+    for (i = 0U; i < root->count; i++) {
+      ReplayNode *child = replay_find(root->child_ids[i]);
+      uint32_t t;
+      assert(child != NULL);
+      for (t = 0U; t < child->count; t++) {
+        snprintf(items[collected].id, sizeof(items[collected].id), "%s",
+                 child->child_ids[t]);
+        snprintf(items[collected].title, sizeof(items[collected].title),
+                 "%s", child->titles[t]);
+        items[collected].kind = child->kinds[t];
+        items[collected].playable = child->playable[t];
+        collected++;
+      }
+    }
+    reply.items = items;
+    reply.item_count = collected;
+    reply.is_partial = 0;
+    replay_queue_reply(&reply);
+    return;
+  }
+
+  replay_queue_reply(&reply);
+}
+
+/* browse_send: send now, or hold as pending while one runs */
+static void replay_send(const ZZPlayBrowseRequest *req)
+{
+  if (g_replay.worker_busy) {
+    g_replay.pending = *req;
+    g_replay.have_pending = 1;
+    return;
+  }
+  g_replay.worker_busy = 1;
+  replay_run(req);
+}
+
+static void replay_apply_gather(const ZZPlayBrowseReply *reply)
+{
+  g_replay.gather_active = 0;
+  g_replay.model->busy = 0;
+  if (reply->success) {
+    g_replay.gather_added = reply->item_count;
+  }
+}
+
+/* zzplay_browse_poll's worker-reply loop, replayed */
+static void replay_drain(uint32_t max_replies)
+{
+  uint32_t processed = 0U;
+
+  while (g_replay.taken < g_replay.queued &&
+         (max_replies == 0U || processed < max_replies)) {
+    ZZPlayBrowseReply reply = g_replay.queue[g_replay.taken++];
+    processed++;
+
+    if (!reply.is_partial) {
+      g_replay.worker_busy = 0;
+    }
+    if (reply.kind == ZZPLAY_BROWSE_REQ_GATHER) {
+      if (g_replay.gather_active &&
+          reply.generation == g_replay.gather_generation) {
+        if (reply.is_partial) {
+          g_replay.gather_seen += reply.item_count;
+        } else {
+          replay_apply_gather(&reply);
+        }
+      }
+      free((void *)reply.items);
+      continue;
+    }
+    {
+      int ok = zzplay_browse_model_apply_reply(g_replay.model, &reply);
+      (void)ok;
+      free((void *)reply.items);
+    }
+    if (g_replay.have_pending && !g_replay.worker_busy) {
+      g_replay.have_pending = 0;
+      g_replay.worker_busy = 1;
+      replay_run(&g_replay.pending);
+    }
+  }
+  if (g_replay.taken == g_replay.queued) {
+    g_replay.queued = 0U;
+    g_replay.taken = 0U;
+  }
+}
+
+static void replay_click_folder(int32_t index)
+{
+  ZZPlayBrowseRequest req;
+
+  if (zzplay_browse_model_activate(g_replay.model, index, &req) ==
+      ZZPLAY_BROWSE_ACTION_ENTER_FOLDER) {
+    if (req.kind != ZZPLAY_BROWSE_REQ_NONE) {
+      replay_send(&req);
+    }
+  }
+}
+
+static void replay_play_all(void)
+{
+  ZZPlayBrowseRequest req;
+
+  if (zzplay_browse_model_gather_shown(g_replay.model, 4096U, &req)) {
+    g_replay.gather_active = 1;
+    g_replay.gather_generation = req.generation;
+    g_replay.gather_seen = 0U;
+    g_replay.gather_added = 0U;
+    replay_send(&req);
+  }
+}
+
+static void replay_back(void)
+{
+  ZZPlayBrowseRequest req;
+  (void)zzplay_browse_model_back(g_replay.model, &req);
+}
+
+/* The reported Amiberry sequence with the artist clicked while the
+ * letter's rows were still arriving: the list is clickable then, so the
+ * artist's list becomes the pending request while the letter's finishes
+ * as a stale reply. */
+static int test_replay_click_during_letter_load(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+
+  memset(&g_replay, 0, sizeof(g_replay));
+  g_replay.model = &model;
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+  replay_send(&req);
+  replay_drain(0);
+  assert(model.item_count == 1U);
+
+  replay_click_folder(0); /* "Artists" */
+  replay_drain(0);
+  assert(strcmp(model.current_node, "lib:1:art") == 0);
+  assert(model.item_count == 1U);
+
+  replay_click_folder(0); /* letter A */
+  replay_drain(0);
+  assert(strcmp(model.current_node, "ltr:1:8:A") == 0);
+  assert(model.item_count == 4U);
+
+  replay_click_folder(1); /* Artist Two */
+  replay_drain(0);
+  assert(strcmp(model.current_node, "art:2") == 0);
+  assert(model.item_count == 1U);
+  assert(model.folder_is_collection == 1);
+  assert(zzplay_browse_model_can_play_all(&model));
+
+  replay_play_all();
+  replay_drain(0);
+  assert(g_replay.gather_added == 1U);
+  assert(model.busy == 0);
+
+  replay_back();
+  assert(strcmp(model.current_node, "ltr:1:8:A") == 0);
+  assert(model.item_count == 4U);
+  assert(model.items != NULL);
+  assert(model.folder_is_collection == 0);
+  assert(!zzplay_browse_model_can_play_all(&model));
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+/* The Amiberry dead frame: a search started while a folder's list was
+ * still loading used to push that never-shown view (no rows, the
+ * collection flag already set); Back then landed on an empty view with
+ * Play all enabled. The search field uses GA_RelVerify, so clicking out
+ * of it fires the search with whatever text it holds. */
+static int test_search_during_load_pushes_no_dead_frame(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem letters[1];
+  ZZPlayBrowseItem artists[2];
+  ZZPlayBrowseItem results[1];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+
+  memset(letters, 0, sizeof(letters));
+  snprintf(letters[0].id, sizeof(letters[0].id), "ltr:1:8:A");
+  snprintf(letters[0].title, sizeof(letters[0].title), "A");
+  letters[0].kind = ZZPLAY_ITEM_FOLDER;
+  letters[0].playable = 0U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = letters;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Enter the letter, load its artists */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  memset(artists, 0, sizeof(artists));
+  snprintf(artists[0].id, sizeof(artists[0].id), "art:1");
+  snprintf(artists[0].title, sizeof(artists[0].title), "ABBA");
+  artists[0].kind = ZZPLAY_ITEM_FOLDER;
+  artists[0].playable = 1U;
+  snprintf(artists[1].id, sizeof(artists[1].id), "art:2");
+  snprintf(artists[1].title, sizeof(artists[1].title), "Ace");
+  artists[1].kind = ZZPLAY_ITEM_FOLDER;
+  artists[1].playable = 1U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = artists;
+  reply.item_count = 2U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Enter the artist: its list (one album) is requested but has not
+   * arrived when the search fires. */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  assert(strcmp(req.node_id, "art:1") == 0);
+  assert(model.busy == 1);
+  assert(model.item_count == 0U);
+  assert(model.folder_is_collection == 1);
+
+  assert(zzplay_browse_model_search(&model, "album", &req));
+  assert(req.kind == ZZPLAY_BROWSE_REQ_SEARCH);
+  assert(model.stack_depth == 2U);
+
+  memset(results, 0, sizeof(results));
+  snprintf(results[0].id, sizeof(results[0].id), "alb:9");
+  snprintf(results[0].title, sizeof(results[0].title), "Christmas");
+  results[0].kind = ZZPLAY_ITEM_FOLDER;
+  results[0].playable = 1U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_SEARCH;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = results;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Leaving the search returns to the letter's artists, not to a dead
+   * empty view of the artist. */
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(strcmp(model.current_node, "ltr:1:8:A") == 0);
+  assert(model.item_count == 2U);
+  assert(model.folder_is_collection == 0);
+  assert(!zzplay_browse_model_can_play_all(&model));
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+/* Back steps past a frame whose view never got rows (its list was
+ * superseded before anything arrived) instead of stranding the user on
+ * an empty view that Play all would accept. */
+static int test_back_skips_dead_frames(void)
+{
+  ZZPlayBrowseModel model;
+  ZZPlayBrowseRequest req;
+  ZZPlayBrowseReply reply;
+  ZZPlayBrowseItem top[1];
+  ZZPlayBrowseItem artists[1];
+
+  zzplay_browse_model_init(&model);
+  assert(zzplay_browse_model_add_service(&model, "plex", "Plex", NULL));
+  assert(zzplay_browse_model_select_service(&model, 0, &req));
+
+  memset(top, 0, sizeof(top));
+  snprintf(top[0].id, sizeof(top[0].id), "ltr:1:8:A");
+  snprintf(top[0].title, sizeof(top[0].title), "A");
+  top[0].kind = ZZPLAY_ITEM_FOLDER;
+  top[0].playable = 0U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = top;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Enter the letter; its artists load */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  memset(artists, 0, sizeof(artists));
+  snprintf(artists[0].id, sizeof(artists[0].id), "art:1");
+  snprintf(artists[0].title, sizeof(artists[0].title), "ABBA");
+  artists[0].kind = ZZPLAY_ITEM_FOLDER;
+  artists[0].playable = 1U;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.kind = ZZPLAY_BROWSE_REQ_LIST;
+  reply.generation = req.generation;
+  reply.success = 1;
+  reply.items = artists;
+  reply.item_count = 1U;
+  assert(zzplay_browse_model_apply_reply(&model, &reply) == 1);
+
+  /* Enter the artist, then plant its frame (the letter view) as one
+   * whose rows were never shown, the way a superseded navigation left
+   * it: the frame's items are gone and its count is zero. */
+  assert(zzplay_browse_model_activate(&model, 0, &req) ==
+         ZZPLAY_BROWSE_ACTION_ENTER_FOLDER);
+  {
+    ZZPlayBrowseFrame *dead = &model.stack[model.stack_depth - 1U];
+    zzplay_free(dead->items);
+    dead->items = NULL;
+    dead->item_count = 0U;
+    dead->item_capacity = 0U;
+    dead->folder_is_collection = 1;
+  }
+  assert(model.stack_depth == 2U);
+
+  /* Back steps past the dead frame to the top view */
+  assert(zzplay_browse_model_back(&model, &req));
+  assert(model.stack_depth == 0U);
+  assert(strcmp(model.current_node, "") == 0);
+  assert(model.item_count == 1U);
+  assert(model.folder_is_collection == 0);
+
+  zzplay_browse_model_free(&model);
+  return 0;
+}
+
+
+
+
 
 int main(void)
 {
@@ -1040,13 +1664,18 @@ int main(void)
   assert(test_reply_after_stop_dropped() == 0);
   assert(test_play_add_unavailable_for_folders_and_unplayable() == 0);
   assert(test_gather_request_for_collection() == 0);
-  assert(test_play_all_add_all_on_shown_folder() == 0);
+  assert(test_activation_folder_enters_station_plays() == 0);
   assert(test_favourite_action() == 0);
+  assert(test_play_all_add_all_on_shown_folder() == 0);
+  assert(test_back_after_play_all_shows_letter_rows() == 0);
   assert(test_remembered_folder_reopens_without_request() == 0);
   assert(test_reload_sends_request_and_replaces_copy() == 0);
   assert(test_partial_replies_append_and_stale_dropped() == 0);
   assert(test_stop_keeps_arrived_rows() == 0);
   assert(test_cache_bound_drops_oldest() == 0);
+  assert(test_replay_click_during_letter_load() == 0);
+  assert(test_search_during_load_pushes_no_dead_frame() == 0);
+  assert(test_back_skips_dead_frames() == 0);
   printf("zzplay_browse_test: all tests passed\n");
   return 0;
 }

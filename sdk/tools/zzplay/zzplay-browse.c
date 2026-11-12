@@ -1598,11 +1598,24 @@ static void browse_apply_gather(const ZZPlayBrowseReply *reply)
   int32_t first = -1;
 
   gather_active = 0;
-  browse_model.busy = 0;
+  /* Only the view the gather started on is un-busied: the user may have
+   * navigated while it ran, and another request then owns the flag. */
+  if (browse_model.generation == gather_generation) {
+    browse_model.busy = 0;
+  }
 
   if (!reply->success) {
     update_status_text(reply->error[0] ? reply->error
                                        : "Could not collect the tracks");
+    update_buttons();
+    update_busy_pointer();
+    return;
+  }
+
+  /* A collection that held nothing playable adds nothing, and Play all
+   * must not clear the playlist for it. */
+  if (zzplay_browse_count_playable(reply->items, reply->item_count) == 0U) {
+    update_status_text("Nothing to add");
     update_buttons();
     update_busy_pointer();
     return;
@@ -1633,17 +1646,17 @@ static void browse_apply_gather(const ZZPlayBrowseReply *reply)
   gui_ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
 
   if (added == reply->item_count && !reply->truncated) {
-    (void)snprintf(status_buf, sizeof(status_buf), "Added %lu tracks",
-                   (unsigned long)added);
+    (void)snprintf(status_buf, sizeof(status_buf), "Added %lu %s",
+                   (unsigned long)added, added == 1U ? "track" : "tracks");
   } else if (added < reply->item_count) {
     (void)snprintf(status_buf, sizeof(status_buf),
-                   "Added %lu tracks; %lu did not fit",
-                   (unsigned long)added,
+                   "Added %lu %s; %lu did not fit",
+                   (unsigned long)added, added == 1U ? "track" : "tracks",
                    (unsigned long)(reply->item_count - added));
   } else {
     (void)snprintf(status_buf, sizeof(status_buf),
-                   "Added %lu tracks; more did not fit",
-                   (unsigned long)added);
+                   "Added %lu %s; more did not fit",
+                   (unsigned long)added, added == 1U ? "track" : "tracks");
   }
   update_status_text(status_buf);
 
@@ -1735,8 +1748,9 @@ void zzplay_browse_poll(void)
                            (unsigned long)browse_model.item_count,
                            (unsigned long)browse_model.total);
           } else {
-            (void)snprintf(status_buf, sizeof(status_buf), "%lu items",
-                           (unsigned long)browse_model.item_count);
+            (void)snprintf(status_buf, sizeof(status_buf), "%lu %s",
+                           (unsigned long)browse_model.item_count,
+                           browse_model.item_count == 1U ? "item" : "items");
           }
           update_status_text(status_buf);
         } else {

@@ -212,15 +212,15 @@ int zzplay_browse_model_gather(ZZPlayBrowseModel *model, uint32_t limit,
                                ZZPlayBrowseRequest *out_req);
 
 /* Play all / Add all act on the folder being shown: true only when that
- * folder is a collection the module marks playable and no request is
- * running. */
+ * folder is a collection the module marks playable, its rows are shown
+ * and no request is running. */
 int zzplay_browse_model_can_play_all(const ZZPlayBrowseModel *model);
 int zzplay_browse_model_can_add_all(const ZZPlayBrowseModel *model);
 
 /* Start gathering the folder being shown into a GATHER request that asks
  * for at most `limit` items (the playlist's free space for Add all, its
  * capacity for Play all). Returns 0 when the shown folder is no
- * collection or a request is running. */
+ * collection, has no rows, or a request is running. */
 int zzplay_browse_model_gather_shown(ZZPlayBrowseModel *model, uint32_t limit,
                                      ZZPlayBrowseRequest *out_req);
 int zzplay_browse_model_provider_has_favourite(const ZZPlayProvider *provider);

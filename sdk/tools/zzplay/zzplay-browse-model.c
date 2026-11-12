@@ -392,6 +392,22 @@ int zzplay_browse_model_back(ZZPlayBrowseModel *model,
   if (!model || model->stack_depth == 0U) {
     return 0;
   }
+
+  /* Step past frames whose view never got rows: their list was
+   * superseded before anything arrived, so restoring one would show an
+   * empty list (and, for a collection, enable Play all on nothing). */
+  while (model->stack_depth > 0U) {
+    frame = &model->stack[model->stack_depth - 1U];
+    if (frame->items != NULL || frame->item_count != 0U) {
+      break;
+    }
+    memset(frame, 0, sizeof(*frame));
+    model->stack_depth--;
+  }
+  if (model->stack_depth == 0U) {
+    return 0;
+  }
+
   model->generation++;
   if (model->items) {
     zzplay_free(model->items);
@@ -440,8 +456,12 @@ int zzplay_browse_model_search(ZZPlayBrowseModel *model, const char *query,
   cache_save_view_state(model);
   model->generation++;
 
-  /* If starting a search from a browse view, save view on stack */
-  if (!model->is_search && model->stack_depth < ZZPLAY_BROWSE_STACK_MAX) {
+  /* If starting a search from a browse view, save that view on the
+   * stack. A view whose rows have not arrived is not saved: the search
+   * supersedes its request, so it could never be shown again and Back
+   * would land on an empty list. */
+  if (!model->is_search && model->items != NULL &&
+      model->stack_depth < ZZPLAY_BROWSE_STACK_MAX) {
     frame = &model->stack[model->stack_depth];
     memset(frame, 0, sizeof(*frame));
     copy_string(frame->node_id, sizeof(frame->node_id), model->current_node);
@@ -576,7 +596,7 @@ int zzplay_browse_model_can_add(const ZZPlayBrowseModel *model)
 int zzplay_browse_model_can_play_all(const ZZPlayBrowseModel *model)
 {
   return (model && model->folder_is_collection && !model->busy &&
-          model->current_service >= 0)
+          model->current_service >= 0 && model->item_count > 0U)
              ? 1
              : 0;
 }
@@ -592,7 +612,7 @@ int zzplay_browse_model_gather_shown(ZZPlayBrowseModel *model, uint32_t limit,
   const ZZPlayBrowseServiceEntry *svc;
 
   if (!model || !model->folder_is_collection || model->busy ||
-      model->current_service < 0) {
+      model->current_service < 0 || model->item_count == 0U) {
     return 0;
   }
   svc = zzplay_browse_model_current_service(model);
