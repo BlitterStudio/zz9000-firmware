@@ -780,7 +780,10 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] zorro_ram_write_data;
   reg [3:0] zorro_ram_write_bytes;
 
-  reg [15:0] default_data = 'hffff; // causes read/write glitches on A2000 (data bus interference) when 0
+  // Z3 read preload; the original design notes A2000 data bus glitches when 0.
+  // Z2 reads don't preload it: driving 0xffff while the read data was fetched
+  // kept an A2000 with a 68040 card from booting (MNT 93501420 dropped it too).
+  reg [15:0] default_data = 'hffff;
   reg [1:0] zorro_write_capture_bytes;
   reg [15:0] zorro_write_capture_data;
 
@@ -2651,8 +2654,8 @@ module MNTZorro_v0_1_S00_AXI
 
             end else if (z2_read && z2addr_in_reg) begin
               // read from registers
+              // data_out keeps the previous value until the read data arrives
               dataout_enable <= 1;
-              data_out <= default_data;
               slaven <= 1;
               z_ovr <= 1;
               zaddr_regpart <= z2_mapped_addr[15:0];
@@ -2662,7 +2665,6 @@ module MNTZorro_v0_1_S00_AXI
               // read RAM
               // request ram access from arbiter
               last_addr <= z2_mapped_addr-ram_low; // differently done in z3
-              data_out <= default_data;
               dataout_enable <= 1;
               slaven <= 1;
               z_ovr <= 1;
