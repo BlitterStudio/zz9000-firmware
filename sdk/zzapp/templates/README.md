@@ -74,7 +74,8 @@ or a stack other than 0 or 64 KiB–1 MiB aligned to 8.
   `svc` mode verifies that a text pointer is rejected by a pointer-taking call.
 - `spin.c`: CPU-bound scheduler fairness probe; run it as `spin [name]`.
 - `memhog.c`: allocates and touches 1 MiB blocks until `malloc` fails, reports
-  each 16 MiB, reports low-memory events, frees every block, and exits normally.
+  each 16 MiB and low-memory events, holds the memory until Ctrl-C, then frees
+  every block and exits normally.
 - `svcbench.c`: times table calls in `zz_time_us` batches and reports
   667 MHz timer-derived cycle estimates because PMU access is unavailable in
   user mode.

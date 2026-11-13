@@ -360,7 +360,7 @@ are not a second core.
 A filter that hashes a file and writes 32 bytes is `sdk/zzapp/templates/filter.c`.
 `sdk/zzapp/templates/memhog.c` is an allocator-limit probe: it touches 1 MiB
 blocks until `malloc` returns `NULL`, reports each 16 MiB and low-memory events,
-then frees every block.
+then holds the memory until stopped and frees every block.
 
 ## Porting an SDL-style game loop
 

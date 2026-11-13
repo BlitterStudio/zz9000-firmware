@@ -1,5 +1,7 @@
 /*
- * Allocates and touches 1 MiB heap blocks until allocation fails.
+ * Allocates and touches 1 MiB heap blocks until allocation fails, then
+ * holds them until stopped (Ctrl-C), so a second app can push the card
+ * below its low-memory mark.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -52,7 +54,12 @@ int zz_main(int argc, char **argv)
             printf("memhog: %llu MiB\n", (unsigned long long)total_mib);
         report_events();
     }
-    printf("memhog: total %llu MiB\n", (unsigned long long)total_mib);
+    printf("memhog: total %llu MiB, holding until Ctrl-C\n",
+           (unsigned long long)total_mib);
+    while (!zz_should_stop()) {
+        report_events();
+        zz_sleep_us(100000u);
+    }
     while (head != NULL) {
         void *next = *(void **)head;
 
