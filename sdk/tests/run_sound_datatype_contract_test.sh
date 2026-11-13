@@ -5,7 +5,7 @@ set -eu
 
 SDK_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUTPUT_DIR=${ZZ9K_SOUND_DATATYPE_TEST_OUTPUT:-"$SDK_ROOT/build/datatype-verification"}
-IMAGE=${ZZ9K_M68K_IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:a018cd1de600ae1c704f2eb3501f86843636f9953dd4aba6cffdf62cd7d9e8bb}
+IMAGE=${ZZ9K_M68K_IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:276673ed4aa6ac6105192f66c826aacc7f79c119df4e7d5e73756d2ffe4b8c6b}
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR=$(CDPATH= cd -- "$OUTPUT_DIR" && pwd)
