@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="2" totalSize="2" offset="0" librarySectionID="3" title1="Music" title2="Start with &#39;A&#39;" viewGroup="album">
+<Directory ratingKey="203" key="/library/metadata/203/children" type="album" title="Aria" parentTitle="Alpha Band" year="1981" leafCount="2" />
+<Directory ratingKey="204" key="/library/metadata/204/children" type="album" title="Ave Maria" parentTitle="Caf&#233; &amp; Co" leafCount="1" />
+</MediaContainer>

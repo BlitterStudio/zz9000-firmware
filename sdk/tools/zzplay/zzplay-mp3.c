@@ -8,8 +8,10 @@
 #include "zzplay-audio-clock.h"
 #include "zzplay-core.h"
 #include "zzplay-gui.h"
+#include "zzplay-devices.h"
 #include "zzplay-launch.h"
 #include "zzplay-mhi.h"
+#include "zzplay-mpega.h"
 #include "zzplay-mp3-transport.h"
 
 #include <stdint.h>
@@ -32,6 +34,9 @@ typedef struct ZZPlayMHIBridge {
   int clock_armed;
   int seek_restart;
 } ZZPlayMHIBridge;
+
+static char zzplay_mp3_mhi_candidates[ZZPLAY_DEVICES_MAX_MHI]
+    [ZZPLAY_PREFS_DRIVER_MAX];
 
 static int zzplay_mp3_mhi_stop_thunk(void *user)
 {
@@ -101,6 +106,7 @@ static int zzplay_mp3_mhi_paused_thunk(void *user)
 }
 
 static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
+                                         const char *driver,
                                          ZZPlayMHIStatus *open_status)
 {
   const ZZPlayEngineRun *run = engine->run;
@@ -119,13 +125,13 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
       engine->audio_start, engine->audio_end, engine->total_ms,
       run->seek_ms);
   bridge.base_ms = run->seek_ms;
-  status = zzplay_mhi_acquire(&sink, run->prefs->mhi_driver);
+  status = zzplay_mhi_acquire(&sink, driver);
   *open_status = status;
   if (status != ZZPLAY_MHI_OK) {
     return ZZPLAY_ENGINE_FAILED;
   }
   zzplay_controller_set_capabilities(
-      run->ctl, 1, sink.volume_supported != 0, 0);
+      run->ctl, run->source_seekable, sink.volume_supported != 0, 0);
   {
     char output[ZZPLAY_NOW_OUTPUT_MAX];
 
@@ -200,6 +206,37 @@ done:
   return result;
 }
 
+static ZZPlayEngineResult zzplay_mp3_auto_mhi(
+    ZZPlayCodecEngine *engine, ZZPlayMHIStatus *status)
+{
+  const ZZPlayEngineRun *run = engine->run;
+  uint32_t count;
+  uint32_t i;
+  ZZPlayEngineResult result;
+
+  result = zzplay_mp3_mhi(engine, run->prefs->mhi_driver, status);
+  if (result != ZZPLAY_ENGINE_FAILED ||
+      *status == ZZPLAY_MHI_IO_ERROR ||
+      zzplay_controller_item_should_end(run->ctl)) {
+    return result;
+  }
+  count = zzplay_devices_mhi_drivers(zzplay_mp3_mhi_candidates,
+                                     ZZPLAY_DEVICES_MAX_MHI);
+  for (i = 0U; i < count; i++) {
+    if (zzplay_ascii_equal_fold(zzplay_mp3_mhi_candidates[i],
+                                run->prefs->mhi_driver)) {
+      continue;
+    }
+    result = zzplay_mp3_mhi(engine, zzplay_mp3_mhi_candidates[i], status);
+    if (result != ZZPLAY_ENGINE_FAILED ||
+        *status == ZZPLAY_MHI_IO_ERROR ||
+        zzplay_controller_item_should_end(run->ctl)) {
+      return result;
+    }
+  }
+  return ZZPLAY_ENGINE_FAILED;
+}
+
 ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
 {
   ZZPlayCodecEngine engine;
@@ -234,7 +271,7 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
       engine.audio_end - engine.audio_start,
       engine.info->bitrate_kbps);
   zzplay_controller_set_duration(run->ctl, engine.total_ms);
-  zzplay_controller_set_capabilities(run->ctl, 1, 0, 0);
+  zzplay_controller_set_capabilities(run->ctl, run->source_seekable, 0, 0);
   {
     char format[ZZPLAY_NOW_TEXT_MAX];
 
@@ -258,7 +295,10 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
     requested = ZZPLAY_AUDIO_AUTO;
   }
   if (requested == ZZPLAY_AUDIO_MHI || requested == ZZPLAY_AUDIO_AUTO) {
-    ZZPlayEngineResult mhi_result = zzplay_mp3_mhi(&engine, &mhi_status);
+    ZZPlayEngineResult mhi_result =
+        requested == ZZPLAY_AUDIO_AUTO
+            ? zzplay_mp3_auto_mhi(&engine, &mhi_status)
+            : zzplay_mp3_mhi(&engine, run->prefs->mhi_driver, &mhi_status);
 
     if (mhi_result != ZZPLAY_ENGINE_FAILED) {
       return mhi_result;
@@ -279,19 +319,30 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
       return ZZPLAY_ENGINE_FAILED;
     }
     zzplay_info("zzplay: MHI unavailable before playback (%s); "
-           "AUTO falling back to accelerated decode + AHI\n",
-           zzplay_mhi_status_name(mhi_status));
+                "AUTO falling back to accelerated decode + AHI or software "
+                "mpega.library\n",
+                zzplay_mhi_status_name(mhi_status));
+  }
+  if (!run->card_available) {
+    if (requested == ZZPLAY_AUDIO_NONE) {
+      zzplay_launch_reportf(engine.ctl, engine.run->options,
+                            "MP3 benchmark decoding needs a ZZ9000");
+      return ZZPLAY_ENGINE_FAILED;
+    }
+    zzplay_info("zzplay: selected audio backend AHI "
+                "(software mpega.library decode)\n");
+    return zzplay_mpega_run(run);
   }
   if (requested == ZZPLAY_AUDIO_NONE) {
     zzplay_info("zzplay: selected audio backend NONE "
            "(accelerated Layer III decode benchmark)\n");
     engine.muted = 1;
-    zzplay_controller_set_capabilities(run->ctl, 1, 0, 0);
+    zzplay_controller_set_capabilities(run->ctl, run->source_seekable, 0, 0);
     zzplay_codec_set_output(&engine, "none");
   } else {
     zzplay_info("zzplay: selected audio backend AHI "
            "(accelerated Layer III decode, S16BE)\n");
-    zzplay_controller_set_capabilities(run->ctl, 1, 1, 0);
+    zzplay_controller_set_capabilities(run->ctl, run->source_seekable, 1, 0);
     sprintf(engine.output_base, "AHI unit %lu",
             (unsigned long)run->prefs->ahi_unit);
     zzplay_codec_refresh_output(&engine);
@@ -307,7 +358,7 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
     }
     zzplay_info("zzplay: saved AHI output unavailable before playback; "
            "falling back to MHI\n");
-    result = zzplay_mp3_mhi(&engine, &mhi_status);
+    result = zzplay_mp3_mhi(&engine, run->prefs->mhi_driver, &mhi_status);
     if (result != ZZPLAY_ENGINE_FAILED) {
       return result;
     }

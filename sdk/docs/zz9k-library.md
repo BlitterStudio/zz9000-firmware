@@ -858,12 +858,19 @@ ZZPlay --audio=mhi Work:Audio/test.mp3
 ZZPlay --audio=none --benchmark Work:Audio/test.mp3
 ```
 
-It accepts MPEG-1 and MPEG-2 Program Streams and standalone Layer III files
-(see `zzplay.md` for the full format list). MPEG video
+It accepts MPEG-1 and MPEG-2 Program Streams, WebM and Matroska, MP3, FLAC and
+Ogg Vorbis (see `zzplay.md` for the full format list). MPEG video
 opens a P96 overlay window, publishes decoder-owned planar frames directly,
 and paces through `timer.device`. Standalone MP3 playback uses the accelerated
 audio-stream service and generic AHI output, or the optional runtime
 `mhizz9000.library` path when ZZ9000AX is available.
+
+ZZPlay also plays MP3, FLAC and Ogg Vorbis audio from `http://` and
+`https://` addresses through `bsdsocket.library` (and AmiSSL 5 for
+`https://`), and lists and searches music services through service modules
+in `C/Providers/`: internet radio and Plex Media Server. Network audio uses
+the same card decode and output paths as files; the network, Browse window,
+module and ARexx details are in `zzplay.md`.
 
 On a matched Zorro 2 stack, Program Stream video is enabled only after the
 driver has acknowledged a generation-1 layout with a PIP pool large enough for

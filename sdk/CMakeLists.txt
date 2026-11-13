@@ -490,12 +490,18 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-audio.c
   tools/zzplay/zzplay-audio-clock.c
   tools/zzplay/zzplay-ax.c
+  tools/zzplay/zzplay-browse-model.c
+  tools/zzplay/zzplay-browse-gather.c
+  tools/zzplay/zzplay-browse-rows.c
   tools/zzplay/zzplay-controller.c
   tools/zzplay/zzplay-core.c
   tools/zzplay/zzplay-formats.c
   tools/zzplay/zzplay-frame-clock.c
   tools/zzplay/zzplay-geometry.c
   tools/zzplay/zzplay-media.c
+  tools/zzplay/zzplay-http.c
+  tools/zzplay/zzplay-httpfile.c
+  tools/zzplay/zzplay-host.c
   tools/zzplay/zzplay-mp3-transport.c
   tools/zzplay/zzplay-options.c
   tools/zzplay/zzplay-path.c
@@ -504,12 +510,15 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-sys.c
   tools/zzplay/zzplay-prefs.c
   tools/zzplay/zzplay-probe.c
+  tools/zzplay/zzplay-providers.c
   tools/zzplay/zzplay-stats.c
   tools/zzplay/zzplay-stream.c
+  tools/zzplay/zzplay-streamlist.c
   tools/zzplay/zzplay-sync.c
   tools/zzplay/zzplay-tags.c
   tools/zzplay/zzplay-video.c
   tools/zzplay/zzplay-webm.c
+  tools/zzplay/zzplay-xml.c
 )
 
 target_include_directories(zzplay_core
@@ -525,6 +534,87 @@ add_executable(zzplay_probe_test
 
 target_link_libraries(zzplay_probe_test PRIVATE zzplay_core)
 add_test(NAME zzplay_probe_test COMMAND zzplay_probe_test)
+
+add_executable(zzplay_http_test
+  tests/zzplay_http_test.c
+)
+target_link_libraries(zzplay_http_test PRIVATE zzplay_core)
+add_test(NAME zzplay_http_test COMMAND zzplay_http_test)
+
+add_executable(zzplay_httpfile_test
+  tests/zzplay_httpfile_test.c
+)
+target_link_libraries(zzplay_httpfile_test PRIVATE zzplay_core)
+add_test(NAME zzplay_httpfile_test COMMAND zzplay_httpfile_test)
+
+add_executable(zzplay_streamlist_test
+  tests/zzplay_streamlist_test.c
+)
+target_link_libraries(zzplay_streamlist_test PRIVATE zzplay_core)
+add_test(NAME zzplay_streamlist_test COMMAND zzplay_streamlist_test)
+
+add_executable(zzplay_xml_test
+  tests/zzplay_xml_test.c
+)
+target_link_libraries(zzplay_xml_test PRIVATE zzplay_core)
+add_test(NAME zzplay_xml_test COMMAND zzplay_xml_test)
+
+add_executable(zzplay_parser_fuzz_test
+  tests/zzplay_parser_fuzz_test.c
+)
+target_link_libraries(zzplay_parser_fuzz_test PRIVATE zzplay_core)
+add_test(NAME zzplay_parser_fuzz_test COMMAND zzplay_parser_fuzz_test)
+
+add_executable(zzplay_providers_test
+  tests/zzplay_providers_test.c
+)
+target_link_libraries(zzplay_providers_test PRIVATE zzplay_core)
+add_test(NAME zzplay_providers_test COMMAND zzplay_providers_test)
+add_executable(zzplay_provider_plex_test
+  tests/zzplay_provider_plex_test.c
+  tools/zzplay/providers/plex.c
+)
+target_link_libraries(zzplay_provider_plex_test PRIVATE zzplay_core)
+add_test(NAME zzplay_provider_plex_test COMMAND zzplay_provider_plex_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(zzplay_host_test
+  tests/zzplay_host_test.c
+)
+target_link_libraries(zzplay_host_test PRIVATE zzplay_core)
+add_test(NAME zzplay_host_test COMMAND zzplay_host_test)
+
+add_executable(zzplay_provider_radio_test
+  tests/zzplay_provider_radio_test.c
+  tools/zzplay/providers/radio.c
+)
+target_link_libraries(zzplay_provider_radio_test PRIVATE zzplay_core)
+add_test(NAME zzplay_provider_radio_test COMMAND zzplay_provider_radio_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(zzplay_browse_test
+  tests/zzplay_browse_test.c
+)
+target_link_libraries(zzplay_browse_test PRIVATE zzplay_core)
+add_test(NAME zzplay_browse_test COMMAND zzplay_browse_test)
+
+add_executable(zzplay_browse_gather_test
+  tests/zzplay_browse_gather_test.c
+)
+target_link_libraries(zzplay_browse_gather_test PRIVATE zzplay_core)
+add_test(NAME zzplay_browse_gather_test COMMAND zzplay_browse_gather_test)
+
+add_executable(zzplay_browse_rows_test
+  tests/zzplay_browse_rows_test.c
+)
+target_link_libraries(zzplay_browse_rows_test PRIVATE zzplay_core)
+add_test(NAME zzplay_browse_rows_test COMMAND zzplay_browse_rows_test)
+
+add_executable(zzplay_play_next_test
+  tests/zzplay_play_next_test.c
+)
+target_link_libraries(zzplay_play_next_test PRIVATE zzplay_core)
+add_test(NAME zzplay_play_next_test COMMAND zzplay_play_next_test)
 
 add_executable(zzplay_webm_test
   tests/zzplay_webm_test.c

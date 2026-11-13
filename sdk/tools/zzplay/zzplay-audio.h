@@ -69,6 +69,12 @@ ZZPlayBackendDecision zzplay_audio_select(
     ZZPlayMediaAudio media,
     ZZPlayAudioBackend requested,
     const ZZPlayAudioAvailability *availability);
+/* The only card-less audio path is MP3.  MHI can decode it independently;
+ * AHI needs a software mpega.library decoder. */
+ZZPlayBackendDecision zzplay_audio_select_without_card(
+    ZZPlayMediaAudio media,
+    ZZPlayAudioBackend requested,
+    const ZZPlayAudioAvailability *availability);
 /* A complete pre-roll is preferred. Once the backend cannot add a complete
  * audio unit, input has ended, or the armed pre-roll deadline expires, a
  * nonempty lead is enough to prevent an unstartable session. */

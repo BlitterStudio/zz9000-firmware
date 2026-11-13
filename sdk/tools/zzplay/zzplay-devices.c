@@ -17,7 +17,7 @@
 
 /* Program-wide owner of AHIBase per plan. Kept non-zero only while querying
  * audio mode names, then restored to 0. */
-struct Library *AHIBase;
+struct Library *AHIBase = 0;
 
 #define ZZPLAY_AHI_PREFS_BUF_MAX 4096U
 

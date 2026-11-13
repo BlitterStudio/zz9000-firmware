@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="2" key="101" parentTitle="Alpha Band" title1="Alpha Band" viewGroup="album">
+<Directory ratingKey="201" key="/library/metadata/201/children" parentRatingKey="101" type="album" title="First Light" parentTitle="Alpha Band" year="1975" leafCount="3" />
+<Directory ratingKey="202" key="/library/metadata/202/children" parentRatingKey="101" type="album" title="Second Wind" parentTitle="Alpha Band" year="1978" leafCount="1" />
+</MediaContainer>

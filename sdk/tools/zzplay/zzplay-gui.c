@@ -26,6 +26,9 @@
 #include "zzplay-devices.h"
 #include "zzplay-files.h"
 #include "zzplay-requester.h"
+#include "zzplay-http.h"
+#include "zzplay-browse.h"
+#include "zzplay-providers.h"
 
 /* Program-wide library base ownership per plan. */
 struct GfxBase *GfxBase;
@@ -82,13 +85,17 @@ enum {
 enum {
   MID_PROJECT = 1,
   MID_OPEN,
+  MID_OPEN_URL,
+  MID_ABOUT,
+  MID_QUIT,
+
+  MID_PLAYLIST,
   MID_ADD_FILES,
   MID_ADD_DRAWER,
   MID_LOAD_PLAYLIST,
   MID_SAVE_PLAYLIST,
-  MID_SETTINGS,
-  MID_ABOUT,
-  MID_QUIT,
+  MID_REMOVE_ENTRY,
+  MID_CLEAR_PLAYLIST,
 
   MID_CONTROL,
   MID_PLAY_PAUSE,
@@ -101,7 +108,15 @@ enum {
   MID_REPEAT_TRACK,
   MID_REPEAT_ALL,
   MID_SHUFFLE,
-  MID_FULLSCREEN
+  MID_FULLSCREEN,
+
+  MID_SERVICES,
+  MID_BROWSE,
+  MID_SERVICE_BROWSE_BASE = 1000,
+
+  MID_SETTINGS,
+  MID_PLAYER_SETTINGS,
+  MID_SERVICE_SETTINGS_BASE = 1100
 };
 
 /* Gadget IDs for Settings window */
@@ -117,6 +132,13 @@ enum {
   SGID_CANCEL
 };
 
+/* Gadget IDs for Open URL window */
+enum {
+  UGID_STRING = 201,
+  UGID_OPEN,
+  UGID_CANCEL
+};
+
 /* --- Player Window State --- */
 static struct Screen *player_screen;
 static struct DrawInfo *player_draw_info;
@@ -125,6 +147,111 @@ static struct Window *player_win;
 static struct Gadget *player_gadgets;
 static struct Menu *player_menus;
 
+
+#define PLAYER_MENU_MAX (40U + 2U * ZZPLAY_PROVIDERS_MAX)
+static struct NewMenu player_new_menu[PLAYER_MENU_MAX];
+static ZZPlayProviderCatalog services_catalog;
+/* "<service name>..." for the Settings menu: the items open a window. */
+static char service_settings_label[ZZPLAY_PROVIDERS_MAX]
+                                  [ZZPLAY_PROVIDER_NAME_MAX + 4U];
+
+static void player_menu_add(uint16_t *count, ULONG type, const char *label,
+                            const char *key, ULONG flags, ULONG exclude,
+                            uint32_t id)
+{
+  struct NewMenu *entry = &player_new_menu[*count];
+
+  entry->nm_Type = type;
+  entry->nm_Label = (CONST_STRPTR)label;
+  entry->nm_CommKey = (CONST_STRPTR)key;
+  entry->nm_Flags = flags;
+  entry->nm_MutualExclude = exclude;
+  entry->nm_UserData = (APTR)(ULONG)id;
+  (*count)++;
+}
+
+static void build_player_menu(void)
+{
+  uint16_t count = 0U;
+  uint32_t i;
+  const ULONG repeat_off_exclude = 0x00000C00UL;
+  const ULONG repeat_track_exclude = 0x00000A00UL;
+  const ULONG repeat_all_exclude = 0x00000600UL;
+
+  player_menu_add(&count, NM_TITLE, "Project", NULL, 0, 0, MID_PROJECT);
+  player_menu_add(&count, NM_ITEM, "Open...", "O", 0, 0, MID_OPEN);
+  player_menu_add(&count, NM_ITEM, "Open URL...", "U", 0, 0, MID_OPEN_URL);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  player_menu_add(&count, NM_ITEM, "About...", NULL, 0, 0, MID_ABOUT);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  player_menu_add(&count, NM_ITEM, "Quit", "Q", 0, 0, MID_QUIT);
+
+  player_menu_add(&count, NM_TITLE, "Playlist", NULL, 0, 0, MID_PLAYLIST);
+  player_menu_add(&count, NM_ITEM, "Add files...", "A", 0, 0, MID_ADD_FILES);
+  player_menu_add(&count, NM_ITEM, "Add drawer...", NULL, 0, 0, MID_ADD_DRAWER);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  player_menu_add(&count, NM_ITEM, "Load...", "L", 0, 0, MID_LOAD_PLAYLIST);
+  player_menu_add(&count, NM_ITEM, "Save...", "S", 0, 0, MID_SAVE_PLAYLIST);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  player_menu_add(&count, NM_ITEM, "Remove entry", NULL, NM_ITEMDISABLED, 0,
+                  MID_REMOVE_ENTRY);
+  player_menu_add(&count, NM_ITEM, "Clear", NULL, NM_ITEMDISABLED, 0,
+                  MID_CLEAR_PLAYLIST);
+
+  player_menu_add(&count, NM_TITLE, "Control", NULL, 0, 0, MID_CONTROL);
+  player_menu_add(&count, NM_ITEM, "Play/Pause", NULL, 0, 0, MID_PLAY_PAUSE);
+  player_menu_add(&count, NM_ITEM, "Stop", NULL, 0, 0, MID_STOP);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  player_menu_add(&count, NM_ITEM, "Next", "N", 0, 0, MID_NEXT);
+  player_menu_add(&count, NM_ITEM, "Previous", "B", 0, 0, MID_PREVIOUS);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  player_menu_add(&count, NM_ITEM, "Seek forward", NULL, 0, 0, MID_SEEK_FWD);
+  player_menu_add(&count, NM_ITEM, "Seek back", NULL, 0, 0, MID_SEEK_BACK);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  player_menu_add(&count, NM_ITEM, "Repeat off", NULL, CHECKIT,
+                  repeat_off_exclude, MID_REPEAT_OFF);
+  player_menu_add(&count, NM_ITEM, "Repeat track", NULL, CHECKIT,
+                  repeat_track_exclude, MID_REPEAT_TRACK);
+  player_menu_add(&count, NM_ITEM, "Repeat all", NULL, CHECKIT,
+                  repeat_all_exclude, MID_REPEAT_ALL);
+  player_menu_add(&count, NM_ITEM, "Shuffle", NULL, CHECKIT | MENUTOGGLE, 0,
+                  MID_SHUFFLE);
+  player_menu_add(&count, NM_ITEM, "Fullscreen video", "F",
+                  CHECKIT | MENUTOGGLE, 0, MID_FULLSCREEN);
+
+  player_menu_add(&count, NM_TITLE, "Services", NULL, 0, 0, MID_SERVICES);
+  player_menu_add(&count, NM_ITEM, "Browse...", "R",
+                  services_catalog.count == 0U ? NM_ITEMDISABLED : 0, 0,
+                  MID_BROWSE);
+  player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+  if (services_catalog.count == 0U) {
+    player_menu_add(&count, NM_ITEM, "No services installed", NULL,
+                    NM_ITEMDISABLED, 0, 0);
+  } else {
+    for (i = 0U; i < services_catalog.count; i++) {
+      player_menu_add(&count, NM_ITEM, services_catalog.info[i].name, NULL,
+                      0, 0, MID_SERVICE_BROWSE_BASE + i);
+    }
+  }
+
+  player_menu_add(&count, NM_TITLE, "Settings", NULL, 0, 0, MID_SETTINGS);
+  player_menu_add(&count, NM_ITEM, "Player...", "P", 0, 0,
+                  MID_PLAYER_SETTINGS);
+  if (services_catalog.count != 0U) {
+    player_menu_add(&count, NM_ITEM, (const char *)NM_BARLABEL, NULL, 0, 0, 0);
+    for (i = 0U; i < services_catalog.count; i++) {
+      (void)snprintf(service_settings_label[i],
+                     sizeof(service_settings_label[i]), "%s...",
+                     services_catalog.info[i].name);
+      player_menu_add(&count, NM_ITEM, service_settings_label[i], NULL,
+                      services_catalog.info[i].has_settings
+                          ? 0
+                          : NM_ITEMDISABLED,
+                      0, MID_SERVICE_SETTINGS_BASE + i);
+    }
+  }
+  player_menu_add(&count, NM_END, NULL, NULL, 0, 0, 0);
+}
 static struct Gadget *pos_slider_gad;
 static struct Gadget *vol_slider_gad;
 static struct Gadget *repeat_gad;
@@ -242,6 +369,13 @@ static struct Window *settings_win;
 static APTR settings_vi;
 static struct Gadget *settings_gadgets;
 static ZZPlayPrefs settings_copy;
+
+/* --- Open URL Window State --- */
+static struct Window *url_win;
+static APTR url_vi;
+static struct Gadget *url_gadgets;
+static struct Gadget *url_string_gad;
+static char url_input_buf[ZZPLAY_PLAYLIST_PATH_MAX];
 
 static char ahi_unit_labels[ZZPLAY_PREFS_AHI_UNITS][ZZPLAY_DEVICES_NAME_MAX];
 static const char *ahi_cycle_ptrs[ZZPLAY_PREFS_AHI_UNITS + 1];
@@ -442,59 +576,57 @@ static void update_menu_checks(void)
 {
   struct Menu *menu;
   struct MenuItem *item;
+  ZZPlayController *ctl;
+  int can_remove;
 
   if (!player_win || !player_menus || !gui_context ||
-      !gui_context->controller) {
+      !gui_context->controller || !gui_context->playlist) {
     return;
   }
+  ctl = gui_context->controller;
+  can_remove = playlist_selected_row >= 0 &&
+               (uint32_t)playlist_selected_row < gui_context->playlist->count;
 
   ClearMenuStrip(player_win);
-
   for (menu = player_menus; menu; menu = menu->NextMenu) {
     for (item = menu->FirstItem; item; item = item->NextItem) {
       uint32_t id = (uint32_t)GTMENUITEM_USERDATA(item);
+      int checked = -1;
+
       if (id == MID_SHUFFLE) {
-        if (gui_context->controller->shuffle) {
-          item->Flags |= CHECKED;
-        } else {
-          item->Flags &= ~CHECKED;
-        }
+        checked = ctl->shuffle;
       } else if (id == MID_FULLSCREEN) {
-        if (gui_context->controller->fullscreen) {
+        checked = ctl->fullscreen;
+      } else if (id == MID_REPEAT_OFF) {
+        checked = ctl->repeat == ZZPLAY_REPEAT_OFF;
+      } else if (id == MID_REPEAT_TRACK) {
+        checked = ctl->repeat == ZZPLAY_REPEAT_ONE;
+      } else if (id == MID_REPEAT_ALL) {
+        checked = ctl->repeat == ZZPLAY_REPEAT_ALL;
+      }
+      if (checked >= 0) {
+        if (checked) {
           item->Flags |= CHECKED;
         } else {
           item->Flags &= ~CHECKED;
-        }
-      }
-      if (item->SubItem) {
-        struct MenuItem *sub;
-        for (sub = item->SubItem; sub; sub = sub->NextItem) {
-          uint32_t sub_id = (uint32_t)GTMENUITEM_USERDATA(sub);
-          if (sub_id == MID_REPEAT_OFF) {
-            if (gui_context->controller->repeat == ZZPLAY_REPEAT_OFF) {
-              sub->Flags |= CHECKED;
-            } else {
-              sub->Flags &= ~CHECKED;
-            }
-          } else if (sub_id == MID_REPEAT_TRACK) {
-            if (gui_context->controller->repeat == ZZPLAY_REPEAT_ONE) {
-              sub->Flags |= CHECKED;
-            } else {
-              sub->Flags &= ~CHECKED;
-            }
-          } else if (sub_id == MID_REPEAT_ALL) {
-            if (gui_context->controller->repeat == ZZPLAY_REPEAT_ALL) {
-              sub->Flags |= CHECKED;
-            } else {
-              sub->Flags &= ~CHECKED;
-            }
-          }
         }
       }
     }
   }
-
   ResetMenuStrip(player_win, player_menus);
+  if (can_remove) {
+    OnMenu(player_win, FULLMENUNUM(1, 6, NOSUB));
+  } else {
+    OffMenu(player_win, FULLMENUNUM(1, 6, NOSUB));
+  }
+  /* Clear and Save need entries. */
+  if (gui_context->playlist->count != 0U) {
+    OnMenu(player_win, FULLMENUNUM(1, 7, NOSUB));
+    OnMenu(player_win, FULLMENUNUM(1, 4, NOSUB));
+  } else {
+    OffMenu(player_win, FULLMENUNUM(1, 7, NOSUB));
+    OffMenu(player_win, FULLMENUNUM(1, 4, NOSUB));
+  }
 }
 
 /* Take the window's screen LayerInfo lock and then its layer lock, the
@@ -1255,9 +1387,9 @@ static void start_requester(ZZPlayModal op)
 
 static void request_quit(ZZPlayController *ctl)
 {
-  if (zzplay_requester_active()) {
+  if (zzplay_requester_active() || url_win) {
     zzplay_controller_set_message(ctl,
-                                  "Close the file requester before quitting");
+                                  "Close the open window before quitting");
     return;
   }
   zzplay_controller_request(ctl, ZZPLAY_REQUEST_QUIT);
@@ -1291,6 +1423,189 @@ static struct Gadget *gui_gadget(ULONG kind, struct Gadget *prev,
   return CreateGadgetA(kind, prev, ng, (struct TagItem *)tags);
 }
 
+static void close_url_window(int cancel)
+{
+  ZZPlayController *ctl = gui_context ? gui_context->controller : 0;
+
+  (void)cancel;
+  if (url_win) {
+    if (url_win->UserPort) {
+      struct IntuiMessage *msg;
+      while ((msg = GT_GetIMsg(url_win->UserPort)) != 0) {
+        GT_ReplyIMsg(msg);
+      }
+    }
+    CloseWindow(url_win);
+    url_win = 0;
+  }
+  if (url_gadgets) {
+    FreeGadgets(url_gadgets);
+    url_gadgets = 0;
+  }
+  if (url_vi) {
+    FreeVisualInfo(url_vi);
+    url_vi = 0;
+  }
+  url_string_gad = 0;
+  if (ctl && ctl->modal == ZZPLAY_MODAL_OPEN_FILES) {
+    zzplay_controller_end_modal(ctl);
+  }
+}
+
+/* The gadget's own StringInfo buffer: GT_GetGadgetAttrs() is V39, and
+ * ZZPlay opens gadtools.library 37. */
+static void get_string_gadget_text(struct Gadget *gad, char *buf,
+                                   size_t max_len)
+{
+  struct StringInfo *si;
+
+  if (!gad || !buf || max_len == 0U) {
+    return;
+  }
+  buf[0] = '\0';
+  si = (struct StringInfo *)gad->SpecialInfo;
+  if (si && si->Buffer) {
+    strncpy(buf, (const char *)si->Buffer, max_len - 1U);
+    buf[max_len - 1U] = '\0';
+  }
+}
+
+static void open_url_window(void)
+{
+  ZZPlayController *ctl;
+  struct RastPort *srp;
+  struct NewGadget ng;
+  struct Gadget *gad;
+  struct TagItem str_tags[4];
+  int btn_h;
+  int s_width;
+  int btn_w;
+  int cur_y;
+  int label_w;
+  int str_w;
+  int left;
+  int top;
+  int max_w;
+
+  if (url_win) {
+    WindowToFront(url_win);
+    ActivateWindow(url_win);
+    return;
+  }
+
+  ctl = gui_context ? gui_context->controller : 0;
+  if (!ctl || !player_screen || !gui_context->playlist) {
+    return;
+  }
+
+  if (ctl->modal != ZZPLAY_MODAL_NONE || zzplay_requester_active()) {
+    zzplay_controller_set_message(ctl, "Another operation is active");
+    return;
+  }
+
+  if (!zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_OPEN_FILES)) {
+    return;
+  }
+
+  url_vi = GetVisualInfo(player_screen, TAG_DONE);
+  if (!url_vi) {
+    close_url_window(1);
+    return;
+  }
+
+  srp = &player_screen->RastPort;
+  btn_h = font_height + 6;
+  s_width = 380;
+  max_w = player_screen->Width - player_screen->WBorLeft - player_screen->WBorRight;
+  if (s_width > max_w) {
+    s_width = max_w;
+  }
+
+  label_w = gui_text_width(srp, "URL:") + 12;
+  str_w = s_width - 2 * ZZPLAY_GUI_MARGIN - label_w;
+  if (str_w < 100) {
+    str_w = 100;
+  }
+  btn_w = (s_width - 2 * ZZPLAY_GUI_MARGIN - ZZPLAY_GUI_SPACING) / 2;
+  cur_y = ZZPLAY_GUI_MARGIN;
+
+  url_input_buf[0] = '\0';
+
+  str_tags[0].ti_Tag = GTST_String;
+  str_tags[0].ti_Data = (ULONG)url_input_buf;
+  str_tags[1].ti_Tag = GTST_MaxChars;
+  str_tags[1].ti_Data = (ULONG)(sizeof(url_input_buf) - 1U);
+  str_tags[2].ti_Tag = GA_RelVerify;
+  str_tags[2].ti_Data = TRUE;
+  str_tags[3].ti_Tag = TAG_DONE;
+  str_tags[3].ti_Data = 0;
+
+  url_gadgets = 0;
+  gad = CreateContext(&url_gadgets);
+  if (!gad) {
+    close_url_window(1);
+    return;
+  }
+
+  memset(&ng, 0, sizeof(ng));
+  ng.ng_VisualInfo = url_vi;
+  ng.ng_TextAttr = gui_text_attr;
+
+  url_string_gad = gad = gui_gadget(
+      STRING_KIND, gad, &ng, ZZPLAY_GUI_MARGIN + label_w, cur_y,
+      str_w, btn_h, "URL:",
+      UGID_STRING, PLACETEXT_LEFT,
+      str_tags);
+  cur_y += btn_h + ZZPLAY_GUI_SPACING;
+
+  gad = gui_gadget(BUTTON_KIND, gad, &ng, ZZPLAY_GUI_MARGIN, cur_y,
+                   btn_w, btn_h, "Open", UGID_OPEN, PLACETEXT_IN,
+                   GUI_TAGS(TAG_DONE));
+  gad = gui_gadget(BUTTON_KIND, gad, &ng,
+                   s_width - ZZPLAY_GUI_MARGIN - btn_w, cur_y,
+                   btn_w, btn_h, "Cancel", UGID_CANCEL, PLACETEXT_IN,
+                   GUI_TAGS(TAG_DONE));
+  cur_y += btn_h + ZZPLAY_GUI_MARGIN;
+
+  if (!gad) {
+    close_url_window(1);
+    zzplay_controller_set_message(ctl, "Not enough memory for URL window");
+    return;
+  }
+
+  left = player_win ? (player_win->LeftEdge + 40) : 40;
+  top = player_win ? (player_win->TopEdge + 40) : 40;
+
+  url_win = OpenWindowTags(
+      0,
+      WA_Title, (ULONG)"Open URL",
+      WA_Left, (ULONG)left,
+      WA_Top, (ULONG)top,
+      WA_InnerWidth, (ULONG)s_width,
+      WA_InnerHeight, (ULONG)cur_y,
+      WA_AutoAdjust, TRUE,
+      WA_PubScreen, (ULONG)player_screen,
+      WA_Gadgets, (ULONG)url_gadgets,
+      WA_DragBar, TRUE,
+      WA_CloseGadget, TRUE,
+      WA_DepthGadget, TRUE,
+      WA_Activate, TRUE,
+      WA_SmartRefresh, TRUE,
+      WA_NewLookMenus, TRUE,
+      WA_IDCMP,
+      IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+      BUTTONIDCMP | STRINGIDCMP,
+      TAG_DONE);
+
+  if (!url_win) {
+    close_url_window(1);
+    return;
+  }
+
+  GT_RefreshWindow(url_win, 0);
+  ActivateGadget(url_string_gad, url_win, 0);
+}
+
 /* --- Public API --- */
 
 int zzplay_gui_open(const ZZPlayGuiContext *context)
@@ -1321,33 +1636,6 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
   int left;
   int top;
 
-  static struct NewMenu new_menu[] = {
-    { NM_TITLE, (CONST_STRPTR)"Project",       0, 0, 0, (APTR)MID_PROJECT },
-    { NM_ITEM,  (CONST_STRPTR)"Open...",       (CONST_STRPTR)"O", 0, 0, (APTR)MID_OPEN },
-    { NM_ITEM,  (CONST_STRPTR)"Add files...",  (CONST_STRPTR)"A", 0, 0, (APTR)MID_ADD_FILES },
-    { NM_ITEM,  (CONST_STRPTR)"Add drawer...", 0, 0, 0, (APTR)MID_ADD_DRAWER },
-    { NM_ITEM,  (CONST_STRPTR)"Load playlist...", (CONST_STRPTR)"L", 0, 0, (APTR)MID_LOAD_PLAYLIST },
-    { NM_ITEM,  (CONST_STRPTR)"Save playlist...", (CONST_STRPTR)"S", 0, 0, (APTR)MID_SAVE_PLAYLIST },
-    { NM_ITEM,  (CONST_STRPTR)"Settings...",   (CONST_STRPTR)"P", 0, 0, (APTR)MID_SETTINGS },
-    { NM_ITEM,  (CONST_STRPTR)"About...",      0, 0, 0, (APTR)MID_ABOUT },
-    { NM_ITEM,  (CONST_STRPTR)"Quit",          (CONST_STRPTR)"Q", 0, 0, (APTR)MID_QUIT },
-
-    { NM_TITLE, (CONST_STRPTR)"Control",       0, 0, 0, (APTR)MID_CONTROL },
-    { NM_ITEM,  (CONST_STRPTR)"Play/Pause",    0, 0, 0, (APTR)MID_PLAY_PAUSE },
-    { NM_ITEM,  (CONST_STRPTR)"Stop",          0, 0, 0, (APTR)MID_STOP },
-    { NM_ITEM,  (CONST_STRPTR)"Next",          (CONST_STRPTR)"N", 0, 0, (APTR)MID_NEXT },
-    { NM_ITEM,  (CONST_STRPTR)"Previous",      (CONST_STRPTR)"B", 0, 0, (APTR)MID_PREVIOUS },
-    { NM_ITEM,  (CONST_STRPTR)"Seek forward",  0, 0, 0, (APTR)MID_SEEK_FWD },
-    { NM_ITEM,  (CONST_STRPTR)"Seek back",     0, 0, 0, (APTR)MID_SEEK_BACK },
-    { NM_ITEM,  (CONST_STRPTR)"Repeat",        0, 0, 0, 0 },
-    { NM_SUB,   (CONST_STRPTR)"Off",           0, CHECKIT, 6, (APTR)MID_REPEAT_OFF },
-    { NM_SUB,   (CONST_STRPTR)"Track",         0, CHECKIT, 5, (APTR)MID_REPEAT_TRACK },
-    { NM_SUB,   (CONST_STRPTR)"All",           0, CHECKIT, 3, (APTR)MID_REPEAT_ALL },
-    { NM_ITEM,  (CONST_STRPTR)"Shuffle",       0, CHECKIT | MENUTOGGLE, 0, (APTR)MID_SHUFFLE },
-    { NM_ITEM,  (CONST_STRPTR)"Fullscreen video", (CONST_STRPTR)"F", CHECKIT | MENUTOGGLE, 0, (APTR)MID_FULLSCREEN },
-
-    { NM_END, 0, 0, 0, 0, 0 }
-  };
 
   if (!context || !context->controller || !context->playlist) {
     return 0;
@@ -1526,8 +1814,12 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
     return 0;
   }
 
-  /* Menus */
-  player_menus = CreateMenus(new_menu, TAG_DONE);
+  /* Menu labels need module descriptors, but keep no module loaded merely
+   * for the menu. Browse and Settings load them on their first use. */
+  memset(&services_catalog, 0, sizeof(services_catalog));
+  (void)zzplay_providers_discover(&services_catalog, NULL, 0U);
+  build_player_menu();
+  player_menus = CreateMenus(player_new_menu, TAG_DONE);
   if (player_menus &&
       !LayoutMenus(player_menus, player_vi, GTMN_NewLookMenus, TRUE,
                    TAG_DONE)) {
@@ -1617,6 +1909,7 @@ void zzplay_gui_close(void)
   /* An ASL requester cannot be closed from another task. Wait for its child
    * before tearing down the screen or letting this task exit. */
   zzplay_requester_close();
+  close_url_window(1);
   close_settings_window();
 
   if (app_window) {
@@ -1634,6 +1927,7 @@ void zzplay_gui_close(void)
 
   free_exec_list_nodes(&playlist_exec_list);
   drop_queue_free();
+  zzplay_browse_shutdown();
 
   if (player_win && player_menus) {
     ClearMenuStrip(player_win);
@@ -1705,6 +1999,33 @@ int zzplay_gui_show(void)
   return 1;
 }
 
+int zzplay_gui_browse(void)
+{
+  return zzplay_gui_browse_service(NULL);
+}
+
+int zzplay_gui_browse_service(const char *scheme)
+{
+  if (!player_screen || !gui_context || !gui_context->controller ||
+      !gui_context->playlist || !gui_context->prefs) {
+    return 0;
+  }
+  return zzplay_browse_open_service(player_screen, gui_context->controller,
+                                    gui_context->playlist, gui_context->prefs,
+                                    scheme);
+}
+
+int zzplay_gui_service_settings(const char *scheme)
+{
+  if (!player_screen || !gui_context || !gui_context->controller ||
+      !gui_context->playlist || !gui_context->prefs || !scheme || !scheme[0]) {
+    return 0;
+  }
+  return zzplay_browse_settings_open(player_screen, gui_context->controller,
+                                     gui_context->playlist, gui_context->prefs,
+                                     scheme);
+}
+
 uint32_t zzplay_gui_signal_mask(void)
 {
   uint32_t mask = 0U;
@@ -1715,10 +2036,14 @@ uint32_t zzplay_gui_signal_mask(void)
   if (settings_win && settings_win->UserPort) {
     mask |= (1UL << settings_win->UserPort->mp_SigBit);
   }
+  if (url_win && url_win->UserPort) {
+    mask |= (1UL << url_win->UserPort->mp_SigBit);
+  }
   if (app_port) {
     mask |= (1UL << app_port->mp_SigBit);
   }
   mask |= zzplay_requester_signal_mask();
+  mask |= zzplay_browse_signal_mask();
   return mask;
 }
 
@@ -1741,6 +2066,23 @@ int zzplay_gui_report(const char *message)
   }
   zzplay_controller_set_message(gui_context->controller, message);
   return 1;
+}
+
+/* Busy pointer on the player window while a network entry opens. V39+
+ * only; on older Intuition the request is skipped silently. */
+void zzplay_gui_set_busy(int busy)
+{
+  struct TagItem tags[2];
+
+  if (!player_win || !IntuitionBase ||
+      IntuitionBase->LibNode.lib_Version < 39) {
+    return;
+  }
+  tags[0].ti_Tag = WA_BusyPointer;
+  tags[0].ti_Data = busy ? TRUE : FALSE;
+  tags[1].ti_Tag = TAG_DONE;
+  tags[1].ti_Data = 0;
+  SetWindowPointerA(player_win, tags);
 }
 
 /* True when the port has a queued message. Reads the list directly: the
@@ -1774,6 +2116,9 @@ void zzplay_gui_poll(void)
     apply_requester_result(ctl, pl, prefs, &requester_result);
     zzplay_requester_result_release(&requester_result);
   }
+  if (zzplay_browse_has_windows()) {
+    zzplay_browse_poll();
+  }
   /* Cheap when idle: this runs on every pass of the playback loops. It
    * must look at the message queues themselves, not the signal bits - the
    * idle loop's Wait() clears those, and testing them made every message
@@ -1781,6 +2126,7 @@ void zzplay_gui_poll(void)
    * input events). */
   if (!gui_port_pending(player_win->UserPort) &&
       !(settings_win && gui_port_pending(settings_win->UserPort)) &&
+      !(url_win && gui_port_pending(url_win->UserPort)) &&
       !gui_port_pending(app_port) && ctl->dirty == 0U && !refresh_pending &&
       !settings_refresh_pending &&
       zzplay_controller_modal_ready(ctl) != ZZPLAY_MODAL_ADD_DROPPED) {
@@ -1892,6 +2238,56 @@ void zzplay_gui_poll(void)
     settings_refresh_pending = 0;
     GT_BeginRefresh(settings_win);
     GT_EndRefresh(settings_win, TRUE);
+  }
+
+  /* 2b. URL window IDCMP */
+  if (url_win && url_win->UserPort) {
+    while (url_win &&
+           (imsg = GT_GetIMsg(url_win->UserPort)) != 0) {
+      ULONG m_class = imsg->Class;
+      struct Gadget *gad = (struct Gadget *)imsg->IAddress;
+      GT_ReplyIMsg(imsg);
+
+      switch (m_class) {
+        case IDCMP_CLOSEWINDOW:
+          close_url_window(1);
+          break;
+
+        case IDCMP_REFRESHWINDOW:
+          GT_BeginRefresh(url_win);
+          GT_EndRefresh(url_win, TRUE);
+          break;
+
+        case IDCMP_GADGETUP:
+          if (gad) {
+            UWORD gid = gad->GadgetID;
+            if (gid == UGID_CANCEL) {
+              close_url_window(1);
+            } else if (gid == UGID_OPEN || gid == UGID_STRING) {
+              get_string_gadget_text(url_string_gad, url_input_buf,
+                                     sizeof(url_input_buf));
+              if (zzplay_http_is_url(url_input_buf)) {
+                int32_t idx;
+                close_url_window(0);
+                idx = zzplay_playlist_add(pl, url_input_buf);
+                if (idx >= 0) {
+                  ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+                  zzplay_controller_jump(ctl, idx);
+                } else {
+                  zzplay_controller_set_message(ctl, "Failed to add URL to playlist");
+                }
+              } else {
+                close_url_window(1);
+                zzplay_controller_set_message(ctl, "Not an HTTP or HTTPS URL");
+              }
+            }
+          }
+          break;
+
+        default:
+          break;
+      }
+    }
   }
 
   /* 3. Player window IDCMP */
@@ -2006,7 +2402,8 @@ void zzplay_gui_poll(void)
               case GID_SHUFFLE_CHECK:
                 {
                   int shuf = m_code ? 1 : 0;
-                  uint32_t seed = (uint32_t)(last_event_s ^ (last_event_m << 10) ^ (uint32_t)VBeamPos());
+                  uint32_t seed = (uint32_t)(last_event_s ^ (last_event_m << 10) ^
+                                             (uint32_t)VBeamPos());
                   if (seed == 0U) seed = 1U;
                   zzplay_controller_set_shuffle(ctl, shuf);
                   zzplay_playlist_set_shuffle(pl, shuf, seed);
@@ -2019,7 +2416,8 @@ void zzplay_gui_poll(void)
                 {
                   int32_t clicked = (int32_t)m_code;
                   if (clicked == last_click_row &&
-                      DoubleClick(last_click_s, last_click_m, last_event_s, last_event_m)) {
+                      DoubleClick(last_click_s, last_click_m, last_event_s,
+                                  last_event_m)) {
                     zzplay_controller_jump(ctl, clicked);
                     last_click_row = -1;
                   } else {
@@ -2028,6 +2426,7 @@ void zzplay_gui_poll(void)
                     last_click_m = last_event_m;
                     playlist_selected_row = clicked;
                   }
+                  update_menu_checks();
                 }
                 break;
 
@@ -2040,18 +2439,22 @@ void zzplay_gui_poll(void)
                     (uint32_t)playlist_selected_row < pl->count) {
                   zzplay_playlist_remove(pl, (uint32_t)playlist_selected_row);
                   if (playlist_selected_row >= (int32_t)pl->count) {
-                    playlist_selected_row = (pl->count > 0U)
+                    playlist_selected_row = pl->count != 0U
                                                 ? (int32_t)(pl->count - 1U)
                                                 : -1;
                   }
                   ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+                  update_menu_checks();
                 }
                 break;
 
               case GID_PL_CLEAR:
-                zzplay_playlist_clear(pl);
-                playlist_selected_row = -1;
-                ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+                if (pl->count != 0U) {
+                  zzplay_playlist_clear(pl);
+                  playlist_selected_row = -1;
+                  ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+                  update_menu_checks();
+                }
                 break;
 
               case GID_PL_LOAD:
@@ -2080,6 +2483,12 @@ void zzplay_gui_poll(void)
                 case MID_OPEN:
                   start_requester(ZZPLAY_MODAL_OPEN_FILES);
                   break;
+                case MID_OPEN_URL:
+                  open_url_window();
+                  break;
+                case MID_BROWSE:
+                  (void)zzplay_gui_browse();
+                  break;
                 case MID_ADD_FILES:
                   start_requester(ZZPLAY_MODAL_ADD_FILES);
                   break;
@@ -2092,7 +2501,28 @@ void zzplay_gui_poll(void)
                 case MID_SAVE_PLAYLIST:
                   start_requester(ZZPLAY_MODAL_SAVE_PLAYLIST);
                   break;
-                case MID_SETTINGS:
+                case MID_REMOVE_ENTRY:
+                  if (playlist_selected_row >= 0 &&
+                      (uint32_t)playlist_selected_row < pl->count) {
+                    zzplay_playlist_remove(pl, (uint32_t)playlist_selected_row);
+                    if (playlist_selected_row >= (int32_t)pl->count) {
+                      playlist_selected_row = pl->count != 0U
+                                                  ? (int32_t)(pl->count - 1U)
+                                                  : -1;
+                    }
+                    ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+                    update_menu_checks();
+                  }
+                  break;
+                case MID_CLEAR_PLAYLIST:
+                  if (pl->count != 0U) {
+                    zzplay_playlist_clear(pl);
+                    playlist_selected_row = -1;
+                    ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+                    update_menu_checks();
+                  }
+                  break;
+                case MID_PLAYER_SETTINGS:
                   open_settings_window();
                   break;
                 case MID_ABOUT:
@@ -2161,6 +2591,16 @@ void zzplay_gui_poll(void)
                   break;
 
                 default:
+                  if (mid >= MID_SERVICE_BROWSE_BASE &&
+                      mid < MID_SERVICE_BROWSE_BASE + services_catalog.count) {
+                    (void)zzplay_gui_browse_service(
+                        services_catalog.info[mid - MID_SERVICE_BROWSE_BASE].scheme);
+                  } else if (mid >= MID_SERVICE_SETTINGS_BASE &&
+                             mid < MID_SERVICE_SETTINGS_BASE +
+                                       services_catalog.count) {
+                    (void)zzplay_gui_service_settings(
+                        services_catalog.info[mid - MID_SERVICE_SETTINGS_BASE].scheme);
+                  }
                   break;
               }
               next_code = item->NextSelect;
@@ -2212,6 +2652,9 @@ void zzplay_gui_poll(void)
 
     if (d & ZZPLAY_DIRTY_PLAYLIST) {
       rebuild_playlist_nodes();
+      /* Remove entry, Clear and Save follow the playlist, whoever changed
+       * it (a requester, Load, a drop, ARexx). */
+      update_menu_checks();
     } else if (d & ZZPLAY_DIRTY_CURRENT) {
       update_current_playlist_node();
     }

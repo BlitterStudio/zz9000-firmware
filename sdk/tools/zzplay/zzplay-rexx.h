@@ -20,12 +20,23 @@
 #include "zzplay-controller.h"
 #include "zzplay-playlist.h"
 
+typedef struct ZZPlayRexxResultBuilder ZZPlayRexxResultBuilder;
+
 typedef struct ZZPlayRexxContext {
   ZZPlayController *controller;
   ZZPlayPlaylist *playlist;
   /* The playing item's own path copy (outlives the port). */
   const char *item_path;
   const char *version;
+  void *user;
+  int (*services)(void *user, ZZPlayRexxResultBuilder *result, char *reason,
+                  uint32_t reason_size);
+  int (*search)(void *user, const char *service, const char *query,
+                ZZPlayRexxResultBuilder *result, char *reason,
+                uint32_t reason_size);
+  int (*collection)(void *user, const char *service, const char *id,
+                    uint32_t limit, ZZPlayPlaylist *list, char *reason,
+                    uint32_t reason_size);
 } ZZPlayRexxContext;
 
 /* Open the port. The context is copied; what it points to must outlive the

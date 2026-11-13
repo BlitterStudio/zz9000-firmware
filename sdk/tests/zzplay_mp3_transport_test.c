@@ -108,11 +108,25 @@ static void test_partial_flush(void)
             1U);
 }
 
+static void test_presented_position(void)
+{
+  check_u32("presented one second",
+            zzplay_mp3_presented_ms(44100U, 44100U, 0U), 1000U);
+  check_u32("presented seek base",
+            zzplay_mp3_presented_ms(22050U, 44100U, 3000U), 3500U);
+  check_u32("presented no rate",
+            zzplay_mp3_presented_ms(44100U, 0U, 3000U), 3000U);
+  check_u32("presented saturates",
+            zzplay_mp3_presented_ms(0xffffffffULL, 1U, 1U),
+            0xffffffffU);
+}
+
 int main(void)
 {
   test_duration();
   test_seek_offset();
   test_partial_flush();
+  test_presented_position();
   if (failures != 0) {
     printf("zzplay_mp3_transport_test: %d failure(s)\n", failures);
     return 1;

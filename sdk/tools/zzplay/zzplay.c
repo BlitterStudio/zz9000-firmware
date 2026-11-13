@@ -13,6 +13,7 @@
 
 #include "zz9k/sdk.h"
 #include "zzplay-ahi.h"
+#include "zzplay-browse-gather.h"
 #include "zzplay-audio.h"
 #include "zzplay-ax.h"
 #include "zzplay-codec-stream.h"
@@ -28,6 +29,7 @@
 #include "zzplay-gui.h"
 #include "zzplay-launch.h"
 #include "zzplay-media.h"
+#include "zzplay-net.h"
 #include "zzplay-mp3.h"
 #include "zzplay-options.h"
 #include "zzplay-path.h"
@@ -36,14 +38,18 @@
 #include "zzplay-probe.h"
 #include "zzplay-reader.h"
 #include "zzplay-rexx.h"
+#include "zzplay-rexx-commands.h"
 #include "zzplay-stats.h"
 #include "zzplay-stream.h"
+#include "zzplay-streamlist.h"
 #include "zzplay-decode-policy.h"
 #include "zzplay-sync.h"
 #include "zzplay-tags.h"
 #include "zzplay-video.h"
 #include "zzplay-webm.h"
-
+#include "zzplay-provider.h"
+#include "zzplay-providers.h"
+#include "zzplay-host.h"
 
 #include <devices/timer.h>
 #include <exec/memory.h>
@@ -97,8 +103,9 @@
 #define ZZPLAY_SYNC_POLL_US 2000U
 #define ZZPLAY_FPS_REPORT_US 2000000U
 
-struct Library *P96Base;
-struct Device *TimerBase;
+/* Initializers keep libnix from binding auto-open stubs before main. */
+struct Library *P96Base = 0;
+struct Device *TimerBase = 0;
 
 static volatile sig_atomic_t zzplay_ctrl_c_requested;
 
@@ -275,12 +282,26 @@ typedef struct ZZPlayApp {
   ZZPlayPlaylist playlist;
   int player_mode;
   int had_failure;
+  int card_available;
+  char about_version[96];
   int32_t jump_index;      /* pending JUMP target */
   uint32_t start_seek_ms;  /* restart position for the next START */
   BPTR trace;
-  /* Private copy of the playing entry's path: playlist edits must not
-   * free the path an engine is reading from. */
-  char item_path[ZZPLAY_PLAYLIST_PATH_MAX];
+  /* Private copy of the playing playlist entry: playlist edits must not
+   * free the path an engine is reading from. Messages name this. */
+  char entry_path[ZZPLAY_PLAYLIST_PATH_MAX];
+  /* What is opened: the entry, or the address a service module turned a
+   * <scheme>:// entry into (which may carry the service's credentials). */
+  char item_path[ZZPLAY_HTTP_URL_MAX];
+  /* The service module's title for the item, or "". */
+  char item_title[ZZPLAY_PROVIDER_TEXT_MAX];
+  /* The latest StreamTitle of the playing network stream, or "". */
+  char stream_title[ZZPLAY_NOW_TEXT_MAX];
+  /* A network item has opened and is waiting for its first audio; the
+   * message line says "Starting playback..." until then. */
+  int starting_playback;
+  /* Why a stream playlist gave nothing to play, for the message line. */
+  char open_why[96];
   /* The fullscreen screen between two videos: the item that used it has
    * ended and the next one has not taken it yet. It holds its own
    * Picasso96API reference, since every engine closes P96Base. */
@@ -289,6 +310,32 @@ typedef struct ZZPlayApp {
 } ZZPlayApp;
 
 static ZZPlayApp app;
+
+typedef struct ZZPlayRexxSearchState {
+  const ZZPlayProvider *provider;
+  void *ctx;
+  ZZPlayRexxResultBuilder *result;
+  uint32_t page_rows;
+  uint32_t page_total;
+  int page_has_total;
+  char groups[ZZPLAY_REXX_RESULT_LINES_MAX][ZZPLAY_PROVIDER_TEXT_MAX];
+  uint32_t group_count;
+} ZZPlayRexxSearchState;
+
+typedef struct ZZPlayRexxGatherLister {
+  const ZZPlayProvider *provider;
+  void *ctx;
+} ZZPlayRexxGatherLister;
+
+typedef struct ZZPlayRexxGatherOutput {
+  ZZPlayPlaylist *playlist;
+  const char *scheme;
+  const char *failed;
+} ZZPlayRexxGatherOutput;
+
+/* SEARCH can collect provider callbacks synchronously, so its largest
+ * scratch area belongs in static storage rather than the Amiga stack. */
+static ZZPlayRexxSearchState rexx_search;
 
 /* Keep a fullscreen screen across the gap between two videos, so a
  * fullscreen playlist never drops back to the Workbench between items.
@@ -339,6 +386,17 @@ static void zzplay_app_close_screen(void)
   CloseLibrary(app.video_screen_p96);
   app.video_screen = 0;
   app.video_screen_p96 = 0;
+}
+
+static int zzplay_app_card_available(void)
+{
+  ZZ9KContext *ctx = 0;
+  int available = zz9k_open(&ctx) == ZZ9K_STATUS_OK && ctx != 0;
+
+  if (ctx) {
+    zz9k_close(ctx);
+  }
+  return available;
 }
 
 static uint32_t zzplay_elapsed_us(const TimeVal_Type *start,
@@ -3295,6 +3353,454 @@ static void zzplay_app_pump(void *user)
   }
   zzplay_poll_input();
   zzplay_app_after_input(app);
+  /* The first position report means the item's audio has started:
+   * "Starting playback..." has done its job. */
+  if (app->starting_playback && app->ctl.now.elapsed_ms != 0U) {
+    app->starting_playback = 0;
+    zzplay_controller_set_message(&app->ctl, "");
+  }
+}
+
+/* Network waits run inside an item: keep the window live, and let any
+ * request that ends the item cancel the transfer. A seek restarts the item
+ * at its own pace, so it leaves the transfer alone. */
+static int zzplay_app_network_poll(void *user)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+
+  zzplay_app_pump(app);
+  return app->ctl.request == ZZPLAY_REQUEST_NONE ||
+         app->ctl.request == ZZPLAY_REQUEST_SEEK;
+}
+
+/* A live stream announced a new track: show it while it plays. */
+static void zzplay_app_network_title(void *user, const char *text)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+
+  (void)snprintf(app->stream_title, sizeof(app->stream_title), "%s", text);
+  zzplay_tags_text_to_latin1(app->stream_title);
+  zzplay_controller_set_title(&app->ctl, app->stream_title);
+}
+
+/* Name what a network open is waiting for, so the message line follows
+ * the stages instead of a blanket "Connecting...". The host table's
+ * transfers report here too, through the binding's stage hook. */
+static void zzplay_app_network_stage(void *user, int stage, const char *host)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+  char text[ZZPLAY_NOW_MESSAGE_MAX];
+
+  switch (stage) {
+    case ZZPLAY_NET_STAGE_LOOKUP:
+      (void)snprintf(text, sizeof(text), "Looking up %s...", host);
+      break;
+    case ZZPLAY_NET_STAGE_CONNECT:
+      (void)snprintf(text, sizeof(text), "Connecting to %s...", host);
+      break;
+    case ZZPLAY_NET_STAGE_SECURE:
+      (void)snprintf(text, sizeof(text), "Connecting securely...");
+      break;
+    case ZZPLAY_NET_STAGE_WAIT:
+      (void)snprintf(text, sizeof(text), "Waiting for %s...", host);
+      break;
+    default:
+      return;
+  }
+  zzplay_controller_set_message(&app->ctl, text);
+  /* Show it now: the next poll may be seconds away inside a lookup or
+   * a TLS handshake. */
+  zzplay_app_pump(app);
+}
+
+static ZZPlayProviders *zzplay_app_rexx_providers(void)
+{
+  ZZPlayProviders *providers = zzplay_providers_shared();
+
+  if (providers->count == 0U) {
+    char ignored[ZZPLAY_PROVIDER_ERROR_MAX];
+
+    ignored[0] = '\0';
+    (void)zzplay_providers_load(providers, ignored, sizeof(ignored));
+  }
+  return providers;
+}
+
+static void *zzplay_app_rexx_open_service(
+    ZZPlayApp *app, const char *service, ZZPlayHostBinding *binding,
+    const ZZPlayProvider **provider, char *reason, uint32_t reason_size)
+{
+  const ZZPlayProviderSlot *slot =
+      zzplay_providers_find(zzplay_app_rexx_providers(), service);
+  void *ctx;
+
+  if (!slot || !slot->provider) {
+    (void)snprintf(reason, reason_size, "unknown service: %s", service);
+    return NULL;
+  }
+  *provider = slot->provider;
+  zzplay_host_bind(binding, service, zzplay_app_network_poll, app);
+  binding->stage = zzplay_app_network_stage;
+  ctx = (*provider)->open(&binding->table, reason, reason_size);
+  if (!ctx && reason[0] == '\0') {
+    (void)snprintf(reason, reason_size, "cannot open service");
+  }
+  return ctx;
+}
+
+static int zzplay_app_rexx_services(void *user,
+                                    ZZPlayRexxResultBuilder *result,
+                                    char *reason, uint32_t reason_size)
+{
+  ZZPlayProviders *providers = zzplay_app_rexx_providers();
+  uint32_t i;
+
+  (void)user;
+  (void)reason;
+  (void)reason_size;
+  for (i = 0U; i < providers->count; i++) {
+    const ZZPlayProvider *provider = providers->slot[i].provider;
+
+    if (provider &&
+        !zzplay_rexx_result_add(result, provider->scheme, provider->name, 0)) {
+      break;
+    }
+  }
+  return 1;
+}
+
+static void zzplay_app_rexx_search_total(void *user, uint32_t total)
+{
+  ZZPlayRexxSearchState *state = (ZZPlayRexxSearchState *)user;
+
+  state->page_total = total;
+  state->page_has_total = 1;
+}
+
+static int zzplay_app_rexx_search_item(
+    void *user, const ZZPlayProviderItem *item)
+{
+  ZZPlayRexxSearchState *state = (ZZPlayRexxSearchState *)user;
+
+  if (!item) {
+    return 0;
+  }
+  state->page_rows++;
+  if (item->kind == ZZPLAY_ITEM_FOLDER && item->playable == 0U) {
+    if (item->id && state->group_count < ZZPLAY_REXX_RESULT_LINES_MAX) {
+      (void)snprintf(state->groups[state->group_count],
+                     sizeof(state->groups[state->group_count]), "%s",
+                     item->id);
+      state->group_count++;
+    }
+    return 0;
+  }
+  if (item->playable == 0U ||
+      (item->kind != ZZPLAY_ITEM_FOLDER &&
+       item->kind != ZZPLAY_ITEM_TRACK &&
+       item->kind != ZZPLAY_ITEM_STATION)) {
+    return 0;
+  }
+  if (!zzplay_rexx_result_add(state->result, item->id, item->title,
+                              item->kind == ZZPLAY_ITEM_FOLDER)) {
+    return 1;
+  }
+  return state->result->lines >= ZZPLAY_REXX_RESULT_LINES_MAX;
+}
+
+static int zzplay_app_rexx_expand_search_groups(
+    ZZPlayRexxSearchState *state, char *reason, uint32_t reason_size)
+{
+  ZZPlayItemSink sink;
+  uint32_t group;
+
+  sink.user = state;
+  sink.item = zzplay_app_rexx_search_item;
+  sink.total = zzplay_app_rexx_search_total;
+  for (group = 0U;
+       group < state->group_count &&
+       state->result->lines < ZZPLAY_REXX_RESULT_LINES_MAX;
+       group++) {
+    uint32_t start = 0U;
+
+    for (;;) {
+      uint32_t rows;
+
+      state->page_rows = 0U;
+      state->page_total = 0U;
+      state->page_has_total = 0;
+      if (!state->provider->list(state->ctx, state->groups[group], start,
+                                 ZZPLAY_REXX_RESULT_LINES_MAX, &sink,
+                                 reason, reason_size)) {
+        return 0;
+      }
+      rows = state->page_rows;
+      if (state->result->lines >= ZZPLAY_REXX_RESULT_LINES_MAX ||
+          rows == 0U) {
+        break;
+      }
+      start += rows;
+      if ((state->page_has_total && start >= state->page_total) ||
+          (!state->page_has_total &&
+           rows < ZZPLAY_REXX_RESULT_LINES_MAX)) {
+        break;
+      }
+    }
+  }
+  return 1;
+}
+
+static int zzplay_app_rexx_search(void *user, const char *service,
+                                  const char *query,
+                                  ZZPlayRexxResultBuilder *result,
+                                  char *reason, uint32_t reason_size)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+  ZZPlayHostBinding binding;
+  ZZPlayItemSink sink;
+  const ZZPlayProvider *provider = NULL;
+  void *ctx;
+  int ok;
+  static char rexx_search_query[ZZPLAY_PROVIDER_TEXT_MAX];
+
+  reason[0] = '\0';
+  ctx = zzplay_app_rexx_open_service(app, service, &binding, &provider,
+                                     reason, reason_size);
+  if (!ctx) {
+    return 0;
+  }
+  rexx_search.provider = provider;
+  rexx_search.ctx = ctx;
+  rexx_search.result = result;
+  rexx_search.page_rows = 0U;
+  rexx_search.page_total = 0U;
+  rexx_search.page_has_total = 0;
+  rexx_search.group_count = 0U;
+  sink.user = &rexx_search;
+  sink.item = zzplay_app_rexx_search_item;
+  sink.total = zzplay_app_rexx_search_total;
+  /* Typed text is Latin-1; the services expect UTF-8. */
+  (void)zzplay_tags_text_to_utf8(query, rexx_search_query,
+                                 sizeof(rexx_search_query));
+  ok = provider->search(ctx, rexx_search_query, &sink, reason, reason_size);
+  if (ok) {
+    ok = zzplay_app_rexx_expand_search_groups(&rexx_search, reason,
+                                               reason_size);
+  }
+  provider->close(ctx);
+  if (!ok && reason[0] == '\0') {
+    (void)snprintf(reason, reason_size, "search failed");
+  }
+  return ok;
+}
+
+static int zzplay_app_rexx_gather_list(
+    void *user, const char *node, uint32_t start, uint32_t count,
+    const ZZPlayItemSink *sink, char *reason, uint32_t reason_size)
+{
+  ZZPlayRexxGatherLister *lister = (ZZPlayRexxGatherLister *)user;
+
+  return lister->provider->list(lister->ctx, node, start, count, sink,
+                                reason, reason_size);
+}
+
+static int zzplay_app_rexx_gather_item(
+    void *user, const ZZPlayProviderItem *item)
+{
+  ZZPlayRexxGatherOutput *output = (ZZPlayRexxGatherOutput *)user;
+  char uri[ZZPLAY_PLAYLIST_PATH_MAX];
+  int length;
+  int32_t index;
+
+  if (!item || !item->id) {
+    output->failed = "service returned an item without an id";
+    return 1;
+  }
+  length = snprintf(uri, sizeof(uri), "%s://%s", output->scheme, item->id);
+  if (length < 0 || (uint32_t)length >= sizeof(uri)) {
+    output->failed = "service item id is too long";
+    return 1;
+  }
+  index = zzplay_playlist_add(output->playlist, uri);
+  if (index < 0) {
+    output->failed = output->playlist->allocation_failed
+                         ? "out of memory"
+                         : "playlist is full";
+    return 1;
+  }
+  (void)zzplay_playlist_set_title(output->playlist, (uint32_t)index,
+                                  item->title);
+  return 0;
+}
+
+static int zzplay_app_rexx_collection(
+    void *user, const char *service, const char *id, uint32_t limit,
+    ZZPlayPlaylist *playlist, char *reason, uint32_t reason_size)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+  ZZPlayHostBinding binding;
+  ZZPlayRexxGatherLister lister;
+  ZZPlayRexxGatherOutput output;
+  ZZPlayGather gather;
+  ZZPlayItemSink sink;
+  const ZZPlayProvider *provider = NULL;
+  void *ctx;
+  int truncated;
+  int ok;
+
+  reason[0] = '\0';
+  ctx = zzplay_app_rexx_open_service(app, service, &binding, &provider,
+                                     reason, reason_size);
+  if (!ctx) {
+    return 0;
+  }
+  lister.provider = provider;
+  lister.ctx = ctx;
+  output.playlist = playlist;
+  output.scheme = service;
+  output.failed = NULL;
+  gather.user = &lister;
+  gather.list = zzplay_app_rexx_gather_list;
+  gather.progress = NULL;
+  gather.cancelled = NULL;
+  sink.user = &output;
+  sink.item = zzplay_app_rexx_gather_item;
+  sink.total = NULL;
+  ok = zzplay_gather_collection(&gather, id, limit, &sink, &truncated,
+                                 reason, reason_size);
+  provider->close(ctx);
+  if (output.failed) {
+    (void)snprintf(reason, reason_size, "%s", output.failed);
+    return 0;
+  }
+  if (!ok && reason[0] == '\0') {
+    (void)snprintf(reason, reason_size, "cannot collect items");
+  }
+  return ok;
+}
+
+/* Open the current item. A .pls or .m3u URL lists a station's stream
+ * addresses: fetch it and open the first address that answers, which
+ * becomes the item's path; the playlist entry keeps the list's URL. */
+static ZZPlayFile *zzplay_app_open_item(ZZPlayApp *app)
+{
+  static ZZPlayStreamList streams;
+  static char text[ZZPLAY_STREAMLIST_TEXT_MAX];
+  const ZZPlayProviderSlot *slot;
+  const char *item_id = NULL;
+  ZZPlayProviders *providers;
+  ZZPlayFile *file;
+  size_t len;
+  uint32_t i;
+  uint32_t found;
+
+  app->open_why[0] = '\0';
+  providers = zzplay_providers_shared();
+
+#if defined(__amigaos__) || defined(AMIGA)
+  if (providers->count == 0U &&
+      zzplay_providers_uri_scheme(app->item_path, NULL) != 0U) {
+    char why[ZZPLAY_PROVIDER_ERROR_MAX];
+    why[0] = '\0';
+    (void)zzplay_providers_load(providers, why, sizeof(why));
+  }
+#endif
+
+  slot = zzplay_providers_for_uri(providers, app->item_path, &item_id);
+  if (slot != NULL && slot->provider != NULL) {
+    const ZZPlayProvider *p = slot->provider;
+    ZZPlayHostBinding binding;
+    char err[ZZPLAY_PROVIDER_ERROR_MAX];
+    ZZPlayResolved resolved;
+    void *ctx;
+    int res_ok;
+
+    err[0] = '\0';
+    zzplay_host_bind(&binding, p->scheme, zzplay_app_network_poll, app);
+    binding.stage = zzplay_app_network_stage;
+    ctx = p->open ? p->open(&binding.table, err, sizeof(err)) : NULL;
+    if (!ctx) {
+      (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
+                     err[0] != '\0' ? err : "cannot open service");
+      return 0;
+    }
+
+    memset(&resolved, 0, sizeof(resolved));
+    err[0] = '\0';
+    res_ok = p->resolve ? p->resolve(ctx, item_id, &resolved, err, sizeof(err)) : 0;
+    if (p->close) {
+      p->close(ctx);
+    }
+
+    if (!res_ok) {
+      (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
+                     err[0] != '\0' ? err : "cannot resolve item");
+      return 0;
+    }
+
+    if (strlen(resolved.url) >= sizeof(app->item_path)) {
+      (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
+                     "resolved address is too long");
+      return 0;
+    }
+
+    strcpy(app->item_path, resolved.url);
+    if (resolved.title[0] != '\0') {
+      zzplay_tags_text_to_latin1(resolved.title);
+      if ((uint32_t)app->playlist.current < app->playlist.count) {
+        zzplay_playlist_set_title(&app->playlist, (uint32_t)app->playlist.current,
+                                  resolved.title);
+        app->ctl.dirty |= ZZPLAY_DIRTY_PLAYLIST;
+      }
+      (void)snprintf(app->item_title, sizeof(app->item_title), "%s",
+                     resolved.title);
+    }
+  } else {
+    char scheme[ZZPLAY_PROVIDER_SCHEME_MAX];
+
+    if (zzplay_providers_uri_scheme(app->item_path, scheme) != 0U) {
+      (void)snprintf(app->open_why, sizeof(app->open_why),
+                     "no installed service module handles %s:// addresses",
+                     scheme);
+      return 0;
+    }
+  }
+
+  file = zzplay_file_open(app->item_path, 0);
+  if (!file || !zzplay_streamlist_is_playlist(app->item_path)) {
+    return file;
+  }
+  len = zzplay_file_read(file, text, sizeof(text) - 1U);
+  text[len] = '\0';
+  /* Relative entries resolve against where the playlist came from after
+   * redirects, not the address that was asked for. */
+  {
+    static char base[ZZPLAY_HTTP_URL_MAX];
+    const char *answered = zzplay_file_url(file);
+
+    (void)snprintf(base, sizeof(base), "%s",
+                   answered[0] != '\0' && strlen(answered) < sizeof(base)
+                       ? answered
+                       : app->item_path);
+    zzplay_file_close(file);
+    found = zzplay_streamlist_parse(text, len, base, &streams);
+  }
+  if (found == 0U) {
+    (void)snprintf(app->open_why, sizeof(app->open_why), "%s",
+                   "the playlist names no stream");
+    return 0;
+  }
+  for (i = 0U; i < streams.count; i++) {
+    if (strlen(streams.url[i]) >= sizeof(app->item_path)) {
+      continue;
+    }
+    file = zzplay_file_open(streams.url[i], 0);
+    if (file) {
+      strcpy(app->item_path, streams.url[i]);
+      return file;
+    }
+  }
+  return 0;
 }
 
 static void zzplay_app_open_gui(ZZPlayApp *app)
@@ -3307,7 +3813,7 @@ static void zzplay_app_open_gui(ZZPlayApp *app)
   context.controller = &app->ctl;
   context.playlist = &app->playlist;
   context.prefs = &app->prefs;
-  context.version = zzplay_version + 6;
+  context.version = app->about_version;
   if (!zzplay_gui_open(&context)) {
     /* Headless fallback: playback still works, and the message line
      * state is kept for the day the window does open. */
@@ -4903,23 +5409,49 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   int32_t jump_index;
   uint32_t seek_ms;
   int probed = 0;
+  int source_seekable = 1;
+  int network_entry;
+  char station[ZZPLAY_HTTP_NAME_MAX];
 
   if (index < 0 || (uint32_t)index >= app->playlist.count) {
     return app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_EXIT;
   }
   /* Private copy: the playlist may be edited while this item plays. */
-  strncpy(app->item_path, app->playlist.entries[index].path,
-          sizeof(app->item_path) - 1U);
-  app->item_path[sizeof(app->item_path) - 1U] = '\0';
+  strncpy(app->entry_path, app->playlist.entries[index].path,
+          sizeof(app->entry_path) - 1U);
+  app->entry_path[sizeof(app->entry_path) - 1U] = '\0';
+  strcpy(app->item_path, app->entry_path);
+  app->item_title[0] = '\0';
   (void)zzplay_playlist_set_current(&app->playlist, index);
   zzplay_controller_item_begin(&app->ctl);
+  app->stream_title[0] = '\0';
+  station[0] = '\0';
 
   /* Title first, so the window shows the item even when it fails: an
    * ID3 "Artist - Title" for MP3, else the file name. Probing shares
    * the same open file. */
   memset(&tags, 0, sizeof(tags));
   memset(&probe, 0, sizeof(probe));
-  file = zzplay_file_open(app->item_path, 0);
+  /* Opening a network entry can take seconds (name lookup, TLS, a service
+   * module's request): the stage hook names each wait in the message
+   * line, and the window shows a busy pointer until the item is open. */
+  network_entry = zzplay_http_is_url(app->entry_path) ||
+                  zzplay_providers_uri_scheme(app->entry_path, NULL) != 0U;
+  app->starting_playback = 0;
+  if (network_entry) {
+    zzplay_controller_set_title(
+        &app->ctl, app->playlist.entries[index].title[0] != '\0'
+                       ? app->playlist.entries[index].title
+                       : app->entry_path);
+    zzplay_controller_set_message(&app->ctl, "Connecting...");
+    zzplay_app_pump(app);
+    zzplay_gui_set_busy(1);
+  }
+  file = zzplay_app_open_item(app);
+  zzplay_gui_set_busy(0);
+  if (network_entry) {
+    zzplay_controller_set_message(&app->ctl, "");
+  }
   if (file) {
     long length = 0L;
 
@@ -4932,6 +5464,10 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
       file_size = (uint64_t)length;
     }
     probed = zzplay_probe_media_file(file, &probe);
+    source_seekable = zzplay_file_seekable(file);
+    (void)snprintf(station, sizeof(station), "%s",
+                   zzplay_file_station(file));
+    zzplay_tags_text_to_latin1(station);
     zzplay_file_close(file);
   }
   {
@@ -4940,6 +5476,9 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     display[0] = '\0';
     if (probe.kind == ZZPLAY_MEDIA_KIND_MP3) {
       zzplay_tags_display(&tags, display, sizeof(display));
+    }
+    if (display[0] == '\0' && station[0] != '\0') {
+      (void)snprintf(display, sizeof(display), "%s", station);
     }
     if (display[0] != '\0') {
       /* The row was drawn from the file name; redraw it only when the
@@ -4952,10 +5491,16 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
         app->ctl.dirty |= ZZPLAY_DIRTY_PLAYLIST;
       }
       zzplay_controller_set_title(&app->ctl, display);
+    } else if (app->item_title[0] != '\0') {
+      zzplay_controller_set_title(&app->ctl, app->item_title);
     } else {
       zzplay_controller_set_title(
           &app->ctl,
-          zzplay_playlist_basename(app->item_path));
+          zzplay_playlist_basename(app->entry_path));
+    }
+    /* A stream that already announced its track shows that instead. */
+    if (app->stream_title[0] != '\0') {
+      zzplay_controller_set_title(&app->ctl, app->stream_title);
     }
   }
 
@@ -4971,13 +5516,34 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     zzplay_app_close_screen();
   }
   if (!file) {
-    zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
-                          app->item_path);
+    const char *why = app->open_why[0] != '\0' ? app->open_why
+                                                : zzplay_file_open_error();
+
+    /* A network open stops when the user asks for something else (another
+     * entry, Stop): that is not a failure worth a message. */
+    if (app->ctl.request == ZZPLAY_REQUEST_NONE ||
+        app->ctl.request == ZZPLAY_REQUEST_SEEK) {
+      if (why[0] != '\0') {
+        zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s: %s",
+                              app->entry_path, why);
+      } else {
+        zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
+                              app->entry_path);
+      }
+    }
+  } else if (!engine && probe.network_video) {
+    zzplay_launch_reportf(&app->ctl, &app->options,
+                          "cannot play %s: video plays only from files",
+                          app->entry_path);
   } else if (!engine) {
     zzplay_launch_reportf(
         &app->ctl, &app->options,
          "cannot play %s: not a supported MPEG Program Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
-        app->item_path);
+        app->entry_path);
+  } else if (!app->card_available && probe.kind != ZZPLAY_MEDIA_KIND_MP3) {
+    zzplay_launch_reportf(&app->ctl, &app->options,
+                          "%s needs a ZZ9000",
+                          format && format->name ? format->name : "This item");
   } else {
     /* A one-shot run shows only the video window; an audio-only item
      * opens the player window lazily, as the status window's
@@ -4996,9 +5562,18 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     run.trailer_bytes = tags.trailer_bytes;
     run.file_size = file_size;
     run.seek_ms = app->start_seek_ms;
+    run.source_seekable = source_seekable;
+    run.card_available = app->card_available;
     run.pump = zzplay_app_pump;
     run.pump_user = app;
     app->start_seek_ms = 0U;
+    if (network_entry) {
+      /* The open waits are over; the decoder still takes a moment before
+       * the first audio, and the message line says so until it arrives. */
+      app->starting_playback = 1;
+      zzplay_controller_set_message(&app->ctl, "Starting playback...");
+      zzplay_app_pump(app);
+    }
     outcome = engine(&run);
     /* Some failures (an animation the card cannot take, say) end the item
      * before it opens a window or reports anything: the screen the
@@ -5012,6 +5587,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   request = zzplay_controller_take_request(&app->ctl, &jump_index,
                                            &seek_ms);
   zzplay_controller_item_end(&app->ctl);
+  zzplay_file_end_network_item();
 
   switch (request) {
     case ZZPLAY_REQUEST_QUIT:
@@ -5240,8 +5816,14 @@ int main(int argc, char **argv)
 
   zzplay_set_quiet(app.options.quiet);
   app.player_mode = zzplay_options_wants_player(&app.options);
-
-  /* Settings: defaults < ENV:ZZPlay.prefs < this launch's overrides. */
+  app.card_available = zzplay_app_card_available();
+  (void)snprintf(app.about_version, sizeof(app.about_version), "%s%s",
+                 zzplay_version + 6,
+                 app.card_available ? "" :
+                 "\nNo ZZ9000 found. MP3 plays through MHI or mpega.library and AHI.");
+  if (!app.card_available) {
+    zzplay_info("zzplay: no ZZ9000 found; MP3 can use MHI or mpega.library + AHI\n");
+  }
   zzplay_prefs_defaults(&app.prefs);
   (void)zzplay_prefs_load(&app.prefs, ZZPLAY_PREFS_ENV_PATH);
   app.stored_prefs = app.prefs;
@@ -5261,6 +5843,9 @@ int main(int argc, char **argv)
     zzplay_controller_init(&app.ctl, app.prefs.volume, repeat,
                            app.prefs.shuffle);
     zzplay_controller_set_fullscreen(&app.ctl, app.prefs.fullscreen);
+    zzplay_file_set_network_hooks(zzplay_app_network_poll,
+                                  zzplay_app_network_title,
+                                  zzplay_app_network_stage, &app);
   }
   app.started_prefs = app.prefs;
   app.started_prefs.volume = app.ctl.volume;
@@ -5351,6 +5936,10 @@ int main(int argc, char **argv)
     rexx.playlist = &app.playlist;
     rexx.item_path = app.item_path;
     rexx.version = zzplay_version + 6;
+    rexx.user = &app;
+    rexx.services = zzplay_app_rexx_services;
+    rexx.search = zzplay_app_rexx_search;
+    rexx.collection = zzplay_app_rexx_collection;
     /* Without ARexx ZZPlay simply has no port. */
     (void)zzplay_rexx_open(&rexx);
   }
@@ -5363,6 +5952,9 @@ int main(int argc, char **argv)
   /* Closing the window records its final position in prefs, so it must
    * happen before the session is saved. */
   zzplay_gui_close();
+  zzplay_file_end_network_item();
+  zzplay_providers_unload_shared();
+  zzplay_net_release_process();
   if (app.player_mode) {
     app.prefs.volume = app.ctl.volume;
     app.prefs.repeat = app.ctl.repeat;
@@ -5371,9 +5963,9 @@ int main(int argc, char **argv)
     zzplay_prefs_settle_session(&app.prefs, &app.stored_prefs,
                                 &app.started_prefs);
     (void)zzplay_prefs_save_session(&app.prefs,
-                                    ZZPLAY_PREFS_ENV_PATH);
-    (void)zzplay_prefs_save_session(&app.prefs,
                                     ZZPLAY_PREFS_ENVARC_PATH);
+    (void)zzplay_prefs_save_session(&app.prefs,
+                                    ZZPLAY_PREFS_ENV_PATH);
   }
   if (app.trace) {
     Close(app.trace);

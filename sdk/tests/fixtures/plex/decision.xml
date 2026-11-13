@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="1" directPlayDecisionCode="3000" generalDecisionCode="1001" generalDecisionText="Direct play not available; Conversion OK." transcodeDecisionCode="1001" transcodeDecisionText="Direct play not available; Conversion OK.">
+<Metadata ratingKey="303" type="track" title="Apple Format"><Media audioCodec="mp3" container="mp3" selected="1" /></Metadata>
+</MediaContainer>

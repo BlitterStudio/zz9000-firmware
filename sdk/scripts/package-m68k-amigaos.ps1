@@ -52,6 +52,7 @@ $Dirs = @(
   "Developer\FD",
   "Docs",
   "Examples",
+  "C\Providers",
   "Archives"
 )
 foreach ($Dir in $Dirs) {
@@ -113,6 +114,8 @@ Copy-One "build/zz9k-m68kbench" "C/zz9k-m68kbench"
 Copy-One "build/zz9k-mp3" "C/zz9k-mp3"
 Copy-One "build/zzplay" "C/ZZPlay"
 Copy-One "amiga/icons/zzplay.info" "C/ZZPlay.info"
+Copy-One "build/providers/radio.zzprov" "C/Providers/radio.zzprov"
+Copy-One "build/providers/plex.zzprov" "C/Providers/plex.zzprov"
 Copy-One "amiga/icons/zzplay-project.info" "Docs/ZZPlay-project.info"
 Copy-One "build/zz9k-mpega-smoke" "C/zz9k-mpega-smoke"
 Copy-One "build/zz9k-jpeg" "C/zz9k-jpeg"

@@ -155,6 +155,21 @@ uint32_t zzplay_mp3_duration_ms(uint64_t audio_bytes,
   return (uint32_t)milliseconds;
 }
 
+uint32_t zzplay_mp3_presented_ms(uint64_t frames, uint32_t sample_rate,
+                                 uint32_t base_ms)
+{
+  uint64_t milliseconds;
+
+  if (sample_rate == 0U) {
+    return base_ms;
+  }
+  milliseconds = frames * 1000ULL / sample_rate;
+  if (milliseconds > 0xffffffffULL - base_ms) {
+    return 0xffffffffU;
+  }
+  return base_ms + (uint32_t)milliseconds;
+}
+
 uint64_t zzplay_mp3_seek_offset(uint64_t audio_start,
                                 uint64_t audio_end,
                                 uint64_t total_ms,

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="2" totalSize="2" offset="0" librarySectionID="3" title1="Music" title2="Recently Added" viewGroup="album">
+<Directory ratingKey="210" key="/library/metadata/210/children" type="album" title="Night Works" parentTitle="Delta Five" year="2024" leafCount="4" addedAt="1790000000" />
+<Directory ratingKey="211" key="/library/metadata/211/children" type="album" title="Old Songs" year="1999" leafCount="9" addedAt="1600000000" />
+</MediaContainer>

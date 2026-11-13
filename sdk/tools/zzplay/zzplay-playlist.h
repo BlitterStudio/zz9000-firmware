@@ -64,6 +64,19 @@ void zzplay_playlist_clear(ZZPlayPlaylist *list);
  * one in the play order. */
 int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path);
 
+/* Insert one path as entry `after + 1` (-1: the first entry) so that it
+ * plays straight after entry `after` (first for -1), shuffled or not.
+ * `current` keeps pointing at the same entry. Returns the new entry index,
+ * or -1 on the failures of add() or a bad `after`. */
+int32_t zzplay_playlist_insert_after(ZZPlayPlaylist *list, int32_t after,
+                                     const char *path);
+
+/* The entry that entries meant to play next go behind: the current entry
+ * while `playing`; when the playing entry was removed from the list, the
+ * entry before the place play continues from. -1 (the start of the list)
+ * when nothing plays. */
+int32_t zzplay_playlist_next_anchor(const ZZPlayPlaylist *list, int playing);
+
 /* Remove entry `index`. Keeps `current` pointing at the same entry, or -1
  * when the current entry itself was removed, in which case next() and
  * previous() continue from the removed entry's place in the play order.

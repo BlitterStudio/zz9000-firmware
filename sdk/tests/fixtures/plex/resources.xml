@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<resources>
+  <resource name="SHIELD Player" product="Plex for Android" provides="player,pubsub-player,controller" accessToken="token-player" owned="1">
+    <connections>
+      <connection protocol="http" address="192.168.1.200" port="32500" uri="http://192.168.1.200:32500" local="1" relay="0"/>
+    </connections>
+  </resource>
+  <resource name="Koula" product="Plex Media Server" provides="server" accessToken="server-token-456" owned="1">
+    <connections>
+      <connection protocol="https" address="192.168.1.18" port="32400" uri="https://192-168-1-18.abcdef0123456789.plex.direct:32400" local="1" relay="0"/>
+      <connection protocol="https" address="203.0.113.10" port="23497" uri="https://203-0-113-10.abcdef0123456789.plex.direct:23497" local="0" relay="0"/>
+      <connection protocol="https" address="198.51.100.5" port="8443" uri="https://198-51-100-5.abcdef0123456789.plex.direct:8443" local="0" relay="1"/>
+    </connections>
+  </resource>
+</resources>

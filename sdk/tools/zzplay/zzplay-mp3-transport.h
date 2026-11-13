@@ -50,6 +50,10 @@ int zzplay_mp3_partial_flush_due(uint32_t unsent_bytes,
 uint32_t zzplay_mp3_duration_ms(uint64_t audio_bytes,
                                 uint32_t bitrate_kbps);
 
+/* Presented PCM frames to a bounded millisecond position. */
+uint32_t zzplay_mp3_presented_ms(uint64_t frames, uint32_t sample_rate,
+                                 uint32_t base_ms);
+
 /* Byte offset to restart a CBR pass at `target_ms`, proportionally inside
  * the audio range [audio_start, audio_end] of a `total_ms` stream. Always
  * clamped into that range: target 0 restarts, a target at or past the end

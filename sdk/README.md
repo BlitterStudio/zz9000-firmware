@@ -85,7 +85,10 @@ The generated `build/package/amigaos3` tree contains:
 
 - `Libs/zz9k.library` and `Libs/mpega.library`
 - `C/` command-line tools, including `zz9k-services`, `zz9k-jpeg`,
-  `zz9k-png`, `zz9k-view`, `zzplay`, and the diagnostics
+  `zz9k-png`, `zz9k-view`, and the diagnostics
+- `C/ZZPlay`, the media player, with its service modules in
+  `C/Providers/` (`radio.zzprov` for internet radio, `plex.zzprov` for Plex
+  Media Server)
 - `Classes/DataTypes/zz9k-picture.datatype` and
   `Classes/DataTypes/zz9k-sound.datatype`
 - DataType descriptors in `Storage/DataTypes/`

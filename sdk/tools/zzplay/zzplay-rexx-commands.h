@@ -27,8 +27,26 @@
 
 /* Longest command string the port accepts, including the NUL. */
 #define ZZPLAY_REXX_LINE_MAX 1024U
-/* Room for the longest result: a playlist path, or the HELP list. */
-#define ZZPLAY_REXX_RESULT_MAX 320U
+/* SEARCH returns no more than this many rows. */
+#define ZZPLAY_REXX_RESULT_LINES_MAX 100U
+#define ZZPLAY_REXX_COLLECTION_MARKER " (collection)"
+/* 100 maximum-size provider ids and titles, markers and line separators. */
+#define ZZPLAY_REXX_RESULT_MAX 20501U
+
+typedef struct ZZPlayRexxResultBuilder {
+  char *text;
+  uint32_t size;
+  uint32_t length;
+  uint32_t lines;
+} ZZPlayRexxResultBuilder;
+
+void zzplay_rexx_result_init(ZZPlayRexxResultBuilder *result, char *text,
+                             uint32_t size);
+/* Add "<id> <title>", with the documented marker for a collection.
+ * Newlines inside either field become spaces. Returns 0 at 100 lines or
+ * when the line does not fit. */
+int zzplay_rexx_result_add(ZZPlayRexxResultBuilder *result, const char *id,
+                           const char *title, int collection);
 
 typedef struct ZZPlayRexxHost {
   ZZPlayController *ctl;
@@ -49,11 +67,24 @@ typedef struct ZZPlayRexxHost {
   int (*quit_blocked)(void *user);
   /* Bring the player window to the front. Returns 0 without a window. */
   int (*show)(void *user);
+  /* Open or front the service browser. */
+  int (*browse)(void *user, char *reason, uint32_t reason_size);
+  /* Load and list installed services into `result`. */
+  int (*services)(void *user, ZZPlayRexxResultBuilder *result, char *reason,
+                  uint32_t reason_size);
+  /* Search one installed service. */
+  int (*search)(void *user, const char *service, const char *query,
+                ZZPlayRexxResultBuilder *result, char *reason,
+                uint32_t reason_size);
+  /* Gather a collection into an otherwise empty playlist. */
+  int (*collection)(void *user, const char *service, const char *id,
+                    uint32_t limit, ZZPlayPlaylist *list, char *reason,
+                    uint32_t reason_size);
 } ZZPlayRexxHost;
 
 typedef struct ZZPlayRexxReply {
   int rc;
-  /* The command produced a RESULT string (only for rc ZZPLAY_REXX_RC_OK). */
+  /* The command produced a RESULT string. */
   int has_result;
   char result[ZZPLAY_REXX_RESULT_MAX];
 } ZZPlayRexxReply;

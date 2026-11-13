@@ -90,6 +90,25 @@ int zzplay_probe_mp3_frame(const uint8_t *data,
   return info->frame_bytes >= 4U;
 }
 
+/* True when the Layer III frame at `data` carries a Xing or Info header
+ * after its side information instead of audio. */
+static int zzplay_mp3_is_info_frame(const uint8_t *data, size_t length,
+                                    const ZZPlayMP3Info *frame)
+{
+  size_t side;
+
+  if (frame->mpeg_version == 1U) {
+    side = frame->channels == 1U ? 17U : 32U;
+  } else {
+    side = frame->channels == 1U ? 9U : 17U;
+  }
+  if (length < 4U + side + 4U) {
+    return 0;
+  }
+  data += 4U + side;
+  return memcmp(data, "Xing", 4U) == 0 || memcmp(data, "Info", 4U) == 0;
+}
+
 int zzplay_probe_mp3(const uint8_t *data,
                      size_t length,
                      ZZPlayMP3Info *info)
@@ -114,6 +133,8 @@ int zzplay_probe_mp3(const uint8_t *data,
   }
   for (; offset + 4U <= length; offset++) {
     ZZPlayMP3Info candidate;
+    ZZPlayMP3Info next;
+    int have_next = 0;
 
     if (!zzplay_probe_mp3_frame(data + offset, length - offset,
                                 &candidate)) {
@@ -122,12 +143,19 @@ int zzplay_probe_mp3(const uint8_t *data,
     /* If another complete frame header is in the probe, require it to be
      * Layer III too. This rejects most sync-like byte sequences in junk. */
     if (candidate.frame_bytes <= length - offset - 4U) {
-      ZZPlayMP3Info next;
       if (!zzplay_probe_mp3_frame(data + offset + candidate.frame_bytes,
                                   length - offset - candidate.frame_bytes,
                                   &next)) {
         continue;
       }
+      have_next = 1;
+    }
+    /* A Xing or Info frame (VBR encoders, and streams converted on the
+     * fly) is coded at whatever bitrate fits the header, often 32 kbps;
+     * the first audio frame says what the stream carries. */
+    if (have_next && zzplay_mp3_is_info_frame(data + offset, length - offset,
+                                              &candidate)) {
+      candidate.bitrate_kbps = next.bitrate_kbps;
     }
     *info = candidate;
     return 1;
@@ -712,11 +740,13 @@ int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info)
   uint8_t id3[10];
   long audio_offset = 0L;
   size_t got;
+  int network;
 
   if (!file || !info) {
     return 0;
   }
   memset(info, 0, sizeof(*info));
+  network = zzplay_file_is_network(file);
 
   if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
     zzplay_file_clear_error(file);
@@ -724,14 +754,21 @@ int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info)
   }
   got = zzplay_file_read(file, buffer, sizeof(buffer));
   if (got >= 4U && buffer[0] == 0x1AU && buffer[1] == 0x45U &&
-      buffer[2] == 0xDFU && buffer[3] == 0xA3U &&
-      zzplay_probe_webm_file(file, &info->webm)) {
-    info->kind = ZZPLAY_MEDIA_KIND_WEBM;
-    goto done;
+      buffer[2] == 0xDFU && buffer[3] == 0xA3U) {
+    if (network) {
+      info->network_video = 1;
+      goto done;
+    }
+    if (zzplay_probe_webm_file(file, &info->webm)) {
+      info->kind = ZZPLAY_MEDIA_KIND_WEBM;
+      goto done;
+    }
   }
   if (got >= ZZ9K_WEBP_HEADER_MIN_BYTES &&
       zzplay_probe_webp(buffer, got, &info->webp)) {
-    if (info->webp.is_animated) {
+    if (network) {
+      info->network_video = 1;
+    } else if (info->webp.is_animated) {
       info->kind = ZZPLAY_MEDIA_KIND_WEBP;
     } else {
       info->kind = ZZPLAY_MEDIA_KIND_UNSUPPORTED;
@@ -772,9 +809,17 @@ int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info)
     return 0;
   }
 
-  if (zzplay_probe_file(file, &info->video) &&
-      info->video.is_program_stream &&
-      info->video.has_video_pes) {
+  if (network) {
+    /* The Program Stream scan reads 256 KiB and then rewinds, which a
+     * stream cannot do; a pack start code is enough to refuse it. */
+    if (got >= 4U && buffer[0] == 0U && buffer[1] == 0U &&
+        buffer[2] == 1U && buffer[3] == 0xBAU) {
+      info->network_video = 1;
+      goto done;
+    }
+  } else if (zzplay_probe_file(file, &info->video) &&
+             info->video.is_program_stream &&
+             info->video.has_video_pes) {
     info->kind = ZZPLAY_MEDIA_KIND_MPEG_PS;
     return 1;
   }
@@ -801,7 +846,11 @@ done:
   zzplay_file_clear_error(file);
   if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
     zzplay_file_clear_error(file);
-    return 0;
+    /* A stream that cannot go back past its cached start is reopened by
+     * the engine anyway; only a seekable source must rewind. */
+    if (zzplay_file_seekable(file)) {
+      return 0;
+    }
   }
   return info->kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED;
 }

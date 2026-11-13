@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="1" identifier="com.plexapp.plugins.library">
+<Track ratingKey="302" key="/library/metadata/302" type="track" title="Lossless" grandparentTitle="Alpha Band" parentTitle="First Light" duration="245500">
+<Media id="402" duration="245500" audioCodec="flac" container="flac"><Part id="502" key="/library/parts/502/1653313047/file.flac" size="27000000" container="flac" /></Media>
+</Track>
+</MediaContainer>

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="2" totalSize="2" identifier="com.plexapp.plugins.library">
+<Directory ratingKey="401" key="/library/metadata/401/children" type="album" title="Paris Concert" parentTitle="Blue Note Trio" year="1990" leafCount="3" />
+<Directory ratingKey="402" key="/library/metadata/402/children" type="album" title="Paris" parentTitle="Alpha Band" year="2001" leafCount="2" />
+</MediaContainer>

@@ -83,6 +83,10 @@ typedef struct ZZPlayProbeInfo {
   ZZPlayFLACInfo flac;
   ZZPlayVorbisInfo vorbis;
   ZZPlayWebMInfo webm;
+  /* A network source that starts like video (WebM, WebP or an MPEG
+   * Program Stream). Video plays only from files, so kind stays
+   * UNSUPPORTED. */
+  int network_video;
 } ZZPlayProbeInfo;
 
 uint32_t zzplay_mpeg_frame_rate_milli(uint8_t code);

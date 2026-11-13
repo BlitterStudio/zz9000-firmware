@@ -518,7 +518,8 @@ static ZZPlayCodecPassResult zzplay_codec_decode_once(ZZPlayCodecDecode *decode)
     zzplay_controller_set_engine_paused(decode->engine->ctl, 0);
     zzplay_codec_report_progress(decode);
     got = zzplay_file_read(decode->file, zzplay_codec_chunk,
-                           decode->staging.length);
+                           zzplay_file_read_size(decode->file,
+                                                 decode->staging.length));
     if (got == 0U && zzplay_file_error(decode->file)) {
       return ZZPLAY_CODEC_PASS_FAILED;
     }

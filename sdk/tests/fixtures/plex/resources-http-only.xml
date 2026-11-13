@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<resources>
+  <resource name="Plain Server" product="Plex Media Server" provides="server" accessToken="plain-server-token" owned="1">
+    <connections>
+      <connection protocol="http" address="192.168.1.30" port="32400" uri="http://192.168.1.30:32400" local="1" relay="0"/>
+    </connections>
+  </resource>
+</resources>

@@ -51,6 +51,13 @@ int zzplay_gui_is_open(void);
  * activate it. Returns 0 when it is not open. */
 int zzplay_gui_show(void);
 
+/* Open the service browser, or bring it to the front. */
+int zzplay_gui_browse(void);
+
+/* Open Browse or Settings for an installed service identified by its scheme. */
+int zzplay_gui_browse_service(const char *scheme);
+int zzplay_gui_service_settings(const char *scheme);
+
 /* Signals to Wait() on while idle: window ports and the AppWindow port. */
 uint32_t zzplay_gui_signal_mask(void);
 
@@ -77,4 +84,7 @@ int zzplay_gui_screen_free(struct Window *window);
  * when it is open. Returns 0 when there is no window to show it in. */
 int zzplay_gui_report(const char *message);
 
+/* Show (1) or clear (0) the busy pointer on the player window while an
+ * entry opens. Needs Intuition V39; older versions skip it silently. */
+void zzplay_gui_set_busy(int busy);
 #endif /* ZZPLAY_GUI_H */

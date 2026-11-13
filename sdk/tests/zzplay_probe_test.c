@@ -680,6 +680,34 @@ static int check_mp3_probe(void)
          info.sample_rate == 44100U && info.channels == 2U;
 }
 
+/* A converted stream starts with a 32 kbps Info frame; the bitrate the
+ * position and format line use is the 192 kbps of the audio after it. */
+static int check_mp3_info_frame(void)
+{
+  static const uint8_t info32[] = {0xffU, 0xfbU, 0x10U, 0x00U};
+  static const uint8_t audio192[] = {0xffU, 0xfbU, 0xb0U, 0x00U};
+  static uint8_t stream[104U + 626U + 4U];
+  ZZPlayMP3Info info;
+
+  memset(stream, 0, sizeof(stream));
+  memcpy(stream, info32, sizeof(info32));
+  memcpy(stream + 104U, audio192, sizeof(audio192));
+  memcpy(stream + 104U + 626U, audio192, sizeof(audio192));
+  /* Without the tag the first frame is audio and keeps its own rate. */
+  if (!zzplay_probe_mp3(stream, sizeof(stream), &info) ||
+      info.bitrate_kbps != 32U || info.frame_bytes != 104U) {
+    return 0;
+  }
+  memcpy(stream + 4U + 32U, "Info", 4U);
+  if (!zzplay_probe_mp3(stream, sizeof(stream), &info) ||
+      info.bitrate_kbps != 192U) {
+    return 0;
+  }
+  memcpy(stream + 4U + 32U, "Xing", 4U);
+  return zzplay_probe_mp3(stream, sizeof(stream), &info) &&
+         info.bitrate_kbps == 192U;
+}
+
 static int check_mp3_file_probe(void)
 {
   static const uint8_t header[] = {0xffU, 0xfbU, 0x90U, 0x00U};
@@ -1218,6 +1246,9 @@ int main(void)
   }
   if (!check_mp3_probe()) {
     return 13;
+  }
+  if (!check_mp3_info_frame()) {
+    return 37;
   }
   if (!check_mp3_file_probe()) {
     return 14;

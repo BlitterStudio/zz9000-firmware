@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="1">
+<Track ratingKey="303" key="/library/metadata/303" parentRatingKey="201" grandparentRatingKey="101" type="track" title="Apple Format" grandparentTitle="Alpha Band" parentTitle="First Light" index="3" duration="180000">
+<Media id="403" duration="180000" bitrate="256" audioChannels="2" audioCodec="aac" container="mp4">
+<Part id="503" key="/library/parts/503/1653313048/file.m4a" duration="180000" file="/music/c.m4a" size="5760000" container="mp4" />
+</Media>
+</Track>
+</MediaContainer>
