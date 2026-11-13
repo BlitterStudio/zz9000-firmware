@@ -16,12 +16,13 @@ zzmembench_SRCS := templates/zzmembench.c
 isolate_SRCS := templates/isolate.c
 spin_SRCS := templates/spin.c
 svcbench_SRCS := templates/svcbench.c
+memhog_SRCS := templates/memhog.c
 svcprobe_SRCS := templates/svcprobe.c
 mgl-conformance_SRCS := templates/mgl_conformance.c
 filter_SRCS := templates/filter.c
 sbrk_smoke_SRCS := sbrk_smoke.c
 
-TEMPLATES := hello pixels fault tone echo console zzmembench isolate spin svcbench svcprobe mgl-conformance filter
+TEMPLATES := hello pixels fault tone echo console zzmembench isolate spin svcbench memhog svcprobe mgl-conformance filter
 CHECK_APPS := $(TEMPLATES) sbrk_smoke
 
 .PHONY: all check clean check-tool $(TEMPLATES) $(CHECK_APPS)
