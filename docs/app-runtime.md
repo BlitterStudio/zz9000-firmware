@@ -134,8 +134,9 @@ reason.
 
 The app service is `0x0c00`; its catalog version is `0x00030000`. Integers
 in mailbox payloads and windows are big-endian. `ZZAPP_CAP_SLOTS` advertises
-four slots. A client with that capability uses the extended request form for
-all operations after allocation and carries the returned slot and generation.
+four slots. `ZZAPP_CAP_LOW_MEMORY` is append-only in the extended `QUERY`
+capability word; a client with `ZZAPP_CAP_SLOTS` uses the extended request form
+for all operations after allocation and carries the returned slot and generation.
 
 An extended request is exactly 48 payload bytes. The selector is at byte 40
 (`slot`) and byte 44 (`generation`). Existing fields retain their old offsets;
@@ -152,17 +153,39 @@ renew the slot heartbeat within the same two-second lease.
 Extended `LOAD_BEGIN` carries the launcher memory limit in MiB at byte 0;
 zero means no limit beyond the pool. `LOAD_CHUNK`, `LOAD_END`, `START`,
 `STATUS`, and `DISPLAY_BIND` retain their old fields and append the selector.
-Extended `STOP` is conditional on that selector. `DISPLAY_BIND` always carries
-the spare-buffer field at byte 28; zero means none.
+For API 0.3 images, the limit applies to the initial image, stack, and
+minimum heap commit as well as later heap growth. `DISPLAY_BIND` always
+carries the spare-buffer field at byte 28; zero means none.
 
 `LIST` (`0x0c09`) is extended-only. The selector names the slot and ignores
 its generation. Its 48-byte reply has state, generation, committed bytes,
 limit, app CPU milliseconds, and kernel service milliseconds at bytes 0
-through 23. Byte 24 is the block reason and is currently zero; byte 25 is the
-terminal reason. Bytes 26-27 hold the overload flag, and bytes 28-47 are
-currently zeroed. Terminal reasons are `NONE` (0), `EXIT` (1), `FORCED` (2),
+through 23. Byte 24 is the block reason: `NONE` (0), `FILE` (1), `CONSOLE`
+(2), `EVENT` (3), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6). Byte 25 is the
+terminal reason. Bytes 26-27 hold the overload flag, and bytes 28-47 are the
+app name. Terminal reasons are `NONE` (0), `EXIT` (1), `FORCED` (2),
 `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
 `AMIGA_RESET` (7), and `CORE_RESTART` (8).
+
+### Low-memory crossings
+
+Version 2's lifecycle block reserves the unused bytes after `terminal_reason`
+at `0xA4`; `0xA8` is its first append-only word. Existing version-2 launchers
+continue their exact-version check and ignore that unadvertised word. A launcher
+that needs the counter first sends extended `QUERY` and requires its capability
+bit.
+
+```text
+capability bit: ZZAPP_CAP_LOW_MEMORY = 0x00000040
+launcher caps: extended QUERY reply, big-endian u32 at byte 12
+counter: lifecycle window offset 0xA8, big-endian u32
+semantics: zeroed when a slot generation is claimed; increments once per
+free-pool low-water crossing while that slot is running; wraps modulo 2^32
+```
+
+The same crossing queues one `ZZ_EV_LOW_MEMORY` event for the app; no
+additional crossing is counted or queued until the allocator has re-armed
+above its high-water mark.
 
 ### Legacy slot 0
 

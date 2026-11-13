@@ -148,6 +148,10 @@ uint32_t zzapp_runtime_state(void);
 uint32_t zzapp_runtime_caps(void);
 void zzapp_status_observed(void);
 int zzapp_flip_ack_is_current(uint32_t gen);
+void zzapp_host_low_memory(void *context);
+int zzapp_host_take_low_memory_event(uint32_t slot);
+void zzapp_host_register_low_memory_callback(zzapp_mem_t *memory);
+void zzapp_host_reset_low_memory(uint32_t slot);
 
 /* 1: core2 must fall through to record_fault (cold restart).
  * 0: app PC, already force-stopped, do not restart. */
@@ -182,6 +186,7 @@ void zzapp_services_cancel_start(int status);
 void zzapp_services_on_launch(void);
 void zzapp_services_set_terminal(uint32_t reason);
 void zzapp_services_expire_claims(uint64_t now_us);
+void zzapp_services_set_low_memory_crossings(uint32_t slot, uint32_t crossings);
 
 void zzapp_svc_log(const char *msg, uint32_t len);
 int zzapp_svc_should_stop(void);

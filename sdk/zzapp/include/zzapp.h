@@ -55,6 +55,7 @@ extern "C" {
 #define ZZ_EV_STOP     5u
 #define ZZ_EV_RESIZE   6u
 #define ZZ_EV_BREAK    7u
+#define ZZ_EV_LOW_MEMORY 8u
 
 #define ZZ_BREAK_CTRL_D 4u
 #define ZZ_BREAK_CTRL_E 5u

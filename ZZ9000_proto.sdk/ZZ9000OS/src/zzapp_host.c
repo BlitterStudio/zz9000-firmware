@@ -34,6 +34,10 @@
 #include <stdlib.h>
 #endif
 
+extern void zzapp_mem_set_low_memory_callback(
+    zzapp_mem_t *memory, zzapp_mem_low_callback_t callback, void *context)
+    __attribute__((weak));
+
 #ifdef ZZAPP_HOST_TEST
 static uint8_t g_test_wait_registered[ZZAPP_AS_SLOT_COUNT];
 #endif
@@ -68,6 +72,13 @@ void __attribute__((weak)) zzapp_services_set_terminal(uint32_t reason)
 void __attribute__((weak)) zzapp_services_expire_claims(uint64_t now)
 {
     (void)now;
+}
+
+void __attribute__((weak)) zzapp_services_set_low_memory_crossings(
+    uint32_t slot, uint32_t crossings)
+{
+    (void)slot;
+    (void)crossings;
 }
 
 int __attribute__((weak)) zzapp_services_wait_registered(uint32_t slot)
@@ -155,6 +166,8 @@ struct zzapp_host_slot {
     uint32_t stop_wait_registered;
     uint32_t stop_svc_number;
     uint32_t stop_diagnostics_valid;
+    volatile uint32_t low_memory_pending;
+    volatile uint32_t low_memory_crossings;
 };
 
 static struct zzapp_host_slot g_host[ZZAPP_AS_SLOT_COUNT];
@@ -537,6 +550,23 @@ static void publish_state(uint32_t state)
     life32(ZZAPP_LIFE_STATE_OFF, state);
 }
 
+void zzapp_host_register_low_memory_callback(zzapp_mem_t *memory)
+{
+    if (zzapp_mem_set_low_memory_callback)
+        zzapp_mem_set_low_memory_callback(memory, zzapp_host_low_memory, NULL);
+}
+
+void zzapp_host_reset_low_memory(uint32_t slot)
+{
+    struct zzapp_host_slot *host;
+
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        return;
+    host = host_slot(slot);
+    __atomic_store_n(&host->low_memory_pending, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&host->low_memory_crossings, 0u, __ATOMIC_RELAXED);
+}
+
 void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
                         uint32_t owner, uint32_t generation)
 {
@@ -548,6 +578,7 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
     host->mem = mem;
     host->owner = owner;
     host->stop_requested = 0u;
+    zzapp_host_reset_low_memory(slot);
     g_proc[slot].owner = owner;
     g_proc[slot].generation = generation;
     coh->running = 0;
@@ -568,6 +599,42 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
     life32(ZZAPP_LIFE_FSR_OFF, 0u);
     life32(ZZAPP_LIFE_CPSR_OFF, 0u);
     life32(ZZAPP_LIFE_EXIT_OFF, 0u);
+    life32(ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, 0u);
+}
+
+void zzapp_host_low_memory(void *context)
+{
+    uint32_t slot;
+
+    (void)context;
+    for (slot = 0u; slot < ZZAPP_AS_SLOT_COUNT; slot++) {
+        struct zzapp_host_slot *host = host_slot(slot);
+
+        if (!__atomic_load_n(&coherent(slot)->running, __ATOMIC_ACQUIRE))
+            continue;
+        __atomic_add_fetch(&host->low_memory_pending, 1u, __ATOMIC_RELAXED);
+        zzapp_services_set_low_memory_crossings(
+            slot, __atomic_add_fetch(&host->low_memory_crossings, 1u,
+                                     __ATOMIC_RELAXED));
+    }
+}
+
+int zzapp_host_take_low_memory_event(uint32_t slot)
+{
+    struct zzapp_host_slot *host;
+    uint32_t pending;
+
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        return 0;
+    host = host_slot(slot);
+    pending = __atomic_load_n(&host->low_memory_pending, __ATOMIC_ACQUIRE);
+    while (pending != 0u) {
+        if (__atomic_compare_exchange_n(&host->low_memory_pending, &pending,
+                                        pending - 1u, 0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+            return 1;
+    }
+    return 0;
 }
 
 extern void zzapp_api_reclaim_resources(void) __attribute__((weak));
@@ -618,7 +685,8 @@ int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
                      ZZAPP_MEM_PRIVATE_WINDOW_BYTES;
     uint32_t requested_limit = zzapp_services_memory_limit();
 
-    if (requested_limit && requested_limit < limit)
+    if (note_minor >= 3u && requested_limit != 0u &&
+        requested_limit < limit)
         limit = requested_limit;
     if (commit > limit)
         return ZZ_ENOMEM;

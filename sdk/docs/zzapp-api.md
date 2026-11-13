@@ -264,6 +264,13 @@ and does not drive the port pins.
 normal raw-key event. `code` is `ZZ_BREAK_CTRL_D`, `ZZ_BREAK_CTRL_E`, or
 `ZZ_BREAK_CTRL_F`. Minimum minor: 2. Older input producers do not emit it.
 
+## ZZ_EV_LOW_MEMORY
+
+`8`. The free app-memory pool crossed below its low-water mark. Each running
+app receives one event for each crossing; another crossing is reported only
+after the pool has risen above the high-water mark. `code`, `dx`, `dy`,
+`buttons`, and `time_ms` are zero. Minimum minor: 3.
+
 ## ZZ_BREAK_CTRL_D
 
 `4`. `code` for Ctrl-D on `ZZ_EV_BREAK`.

@@ -51,10 +51,26 @@ int main(void)
     assert(dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request), reply,
                     &reply_len) == SDK_STATUS_BUSY);
 
+    memset(reply, 0xa5, sizeof(reply));
+    assert(dispatch(ZZAPP_OP_QUERY, NULL, 0U, reply, &reply_len) ==
+           SDK_STATUS_OK);
+    assert(reply_len == ZZAPP_QUERY_REPLY_BYTES);
+    {
+        uint8_t legacy[ZZAPP_QUERY_REPLY_BYTES] = { 0 };
+
+        zzapp_put_be32(legacy + ZZAPP_QUERY_ABI_MAJOR, ZZAPP_ABI_MAJOR);
+        zzapp_put_be32(legacy + ZZAPP_QUERY_ABI_MINOR, ZZAPP_ABI_MINOR);
+        zzapp_put_be32(legacy + ZZAPP_QUERY_STATE, ZZAPP_ST_CLAIMED);
+        zzapp_put_be32(legacy + ZZAPP_QUERY_CAPS,
+                       ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO |
+                       ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8 | ZZAPP_CAP_SLOTS);
+        assert(memcmp(reply, legacy, sizeof(legacy)) == 0);
+    }
     extended_request(request, 0U, 0U);
     assert(dispatch(ZZAPP_OP_QUERY, request, sizeof(request), reply, &reply_len) ==
            SDK_STATUS_OK);
     assert(reply_len == ZZAPP_QUERY_EXT_REPLY_BYTES);
+    assert(zzapp_get_be32(reply + ZZAPP_QUERY_CAPS) & (1U << 6));
     assert(zzapp_get_be32(reply + ZZAPP_QUERY_SLOTS) == ZZAPP_SLOT_COUNT);
     assert(zzapp_get_be32(reply + ZZAPP_QUERY_FREE_SLOTS) == 0U);
     extended_request(request, 2U, generation[2]);
@@ -74,6 +90,27 @@ int main(void)
     assert(reply_len == ZZAPP_LIST_REPLY_BYTES);
     assert(zzapp_get_be32(reply + ZZAPP_LIST_STATE) == ZZAPP_ST_CLAIMED);
     assert(zzapp_get_be32(reply + ZZAPP_LIST_GENERATION) == generation[1]);
+    service_test_kernel.threads[1].state = ZZAPP_THREAD_BLOCKED;
+    runtime[1].wait_kind = ZZAPP_WAIT_FILE;
+    assert(dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply, &reply_len) ==
+           SDK_STATUS_OK);
+    assert(reply[ZZAPP_LIST_REASONS] == ZZAPP_BLOCK_FILE);
+    runtime[1].wait_kind = ZZAPP_WAIT_NONE;
+    service_test_kernel.threads[1].state = ZZAPP_THREAD_SLEEPING;
+    assert(dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply, &reply_len) ==
+           SDK_STATUS_OK);
+    assert(reply[ZZAPP_LIST_REASONS] == ZZAPP_BLOCK_SLEEP);
+    service_test_kernel.threads[1].state = ZZAPP_THREAD_BLOCKED;
+    runtime[1].wait_kind = ZZAPP_WAIT_FILE;
+    extended_request(request, 1U, generation[1]);
+    assert(dispatch(ZZAPP_OP_STATUS, request, sizeof(request), reply, &reply_len) ==
+           SDK_STATUS_OK);
+    zzapp_services_on_app_end();
+    service_test_kernel.threads[1].state = ZZAPP_THREAD_STOPPED;
+    assert(dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply, &reply_len) ==
+           SDK_STATUS_OK);
+    assert(zzapp_get_be32(reply + ZZAPP_LIST_STATE) == ZZAPP_ST_IDLE);
+    assert(reply[ZZAPP_LIST_REASONS] == ZZAPP_BLOCK_NONE);
 
     assert(dispatch(ZZAPP_OP_STATUS, NULL, 0U, reply, &reply_len) ==
            SDK_STATUS_OK);
@@ -101,5 +138,9 @@ int main(void)
     assert(dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request), reply,
                     &reply_len) == SDK_STATUS_OK);
     assert(zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION) == generation[0] + 1U);
-    return 0;
+    zzapp_put_be32(windows[0] + ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, 7U);
+    zzapp_services_on_app_end();
+    assert(dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request), reply,
+                    &reply_len) == SDK_STATUS_OK);
+    assert(zzapp_get_be32(windows[0] + ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF) == 0U);
 }

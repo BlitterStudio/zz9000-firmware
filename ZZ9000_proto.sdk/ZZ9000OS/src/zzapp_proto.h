@@ -42,6 +42,8 @@
 #define ZZAPP_CAP_CLUT8            (1u << 4)
 /* ZZAPP_SLOT_COUNT apps at once; the extended request forms below work. */
 #define ZZAPP_CAP_SLOTS            (1u << 5)
+/* Extended QUERY advertises low-memory crossing counters in lifecycle blocks. */
+#define ZZAPP_CAP_LOW_MEMORY       (1u << 6)
 #define ZZAPP_SLOT_COUNT           4u
 
 /* Extended-request ownership mismatch. Matches SDK_STATUS_BAD_HANDLE. */
@@ -290,6 +292,7 @@
 #define ZZAPP_LIFE_AUDIO_FORMAT_OFF    0x9Cu
 #define ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF 0xA0u
 #define ZZAPP_LIFE_TERMINAL_OFF     0xA4u
+#define ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF 0xA8u
 
 /* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
  * 5 stopping, 6 faulted. */
@@ -339,6 +342,7 @@
 #define ZZAPP_EV_STOP              5u
 #define ZZAPP_EV_RESIZE            6u
 #define ZZAPP_EV_BREAK             7u
+#define ZZAPP_EV_LOW_MEMORY        8u
 
 #define ZZAPP_BREAK_CTRL_D         4u
 #define ZZAPP_BREAK_CTRL_E         5u
@@ -459,6 +463,8 @@ struct zzapp_life {
     uint32_t audio_channels;
     uint32_t audio_format;
     uint32_t audio_underruns;
+    uint32_t terminal_reason;
+    uint32_t low_memory_crossings;
 };
 
 struct zzapp_input_hdr {
@@ -607,6 +613,9 @@ _Static_assert(offsetof(struct zzapp_life, audio_rate) == ZZAPP_LIFE_AUDIO_RATE_
 _Static_assert(offsetof(struct zzapp_life, audio_channels) == ZZAPP_LIFE_AUDIO_CHANNELS_OFF, "achannels");
 _Static_assert(offsetof(struct zzapp_life, audio_format) == ZZAPP_LIFE_AUDIO_FORMAT_OFF, "aformat");
 _Static_assert(offsetof(struct zzapp_life, audio_underruns) == ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF, "aunderruns");
+_Static_assert(offsetof(struct zzapp_life, terminal_reason) == ZZAPP_LIFE_TERMINAL_OFF, "terminal");
+_Static_assert(offsetof(struct zzapp_life, low_memory_crossings) ==
+               ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, "lowmem");
 _Static_assert(sizeof(struct zzapp_life) <= ZZAPP_LIFE_BYTES, "life bytes");
 
 static inline void zzapp_put_be16(void *p, uint16_t value)

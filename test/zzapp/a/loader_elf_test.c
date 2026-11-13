@@ -16,6 +16,13 @@ static int start_pending;
 static int dynamic_started;
 static uint32_t start_argc;
 static int argv_started;
+static uint32_t launcher_memory_limit;
+
+uint32_t zzapp_services_memory_limit(void)
+{
+    return launcher_memory_limit;
+}
+
 
 uint8_t *zzapp_services_window(void)
 {
@@ -296,6 +303,22 @@ int main(void)
     dynamic_started = 0;
     zzapp_worker_hook();
     assert(dynamic_started);
+
+    zzapp_boot_init(); make_image(image);
+    launcher_memory_limit = 16u << 20;
+    put32(image + NOTE_OFF + 28u, 3u);
+    assert(load_end(image) == ZZ_OK);
+    assert(zzapp_proc_slot(0)->memory.limit == launcher_memory_limit);
+    zzapp_proc_slot(0)->heap_base = 0u;
+    zzapp_proc_slot(0)->heap_start = 0u;
+    zzapp_proc_slot(0)->heap_break = 0u;
+    zzapp_proc_slot(0)->heap_limit = 32u << 20;
+    api = zzapp_api_table();
+    for (card = 0; card < 14u; card++)
+        assert(api->heap_grow(1u << 20, NULL) == ZZ_OK);
+    assert(api->heap_grow(1u << 20, NULL) == ZZ_ENOMEM);
+    zzapp_loader_release();
+    launcher_memory_limit = 0u;
 
     zzapp_boot_init(); make_image(image);
     put32(image + NOTE_OFF + 28u, 3u);

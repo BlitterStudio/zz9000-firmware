@@ -19,6 +19,10 @@ void __attribute__((weak)) zzapp_host_latch_stop(uint32_t slot)
 {
 	(void)slot;
 }
+extern int zzapp_host_take_low_memory_event(uint32_t slot)
+	__attribute__((weak));
+extern void zzapp_host_reset_low_memory(uint32_t slot)
+	__attribute__((weak));
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
 #include "zzapp.h"
@@ -700,6 +704,11 @@ static void life_put_slot(uint32_t slot, uint32_t off, uint32_t value)
 		Xil_DCacheFlushRange((INTPTR)(entry->window + ZZAPP_LIFE_OFF + off),
 				     4U);
 #endif
+}
+
+void zzapp_services_set_low_memory_crossings(uint32_t slot, uint32_t crossings)
+{
+	life_put_slot(slot, ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, crossings);
 }
 
 
@@ -1836,6 +1845,12 @@ int zzapp_svc_input_poll(zzapp_event *out, uint32_t max, uint32_t *out_n)
 		return ZZ_OK;
 	if (max != 0U && !out)
 		return ZZ_EINVAL;
+	if (n < max && zzapp_host_take_low_memory_event &&
+	    zzapp_host_take_low_memory_event(service_slot())) {
+		memset(&out[n], 0, sizeof(out[n]));
+		out[n].type = ZZAPP_EV_LOW_MEMORY;
+		n++;
+	}
 	head = win_get32(ZZAPP_INPUT_OFF + 0U);
 	tail = win_get32(ZZAPP_INPUT_OFF + 4U);
 	barrier();
@@ -3789,6 +3804,9 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
 	life_put(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
 	life_put(ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
 	life_put(ZZAPP_LIFE_GENERATION_OFF, generation);
+	life_put(ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, 0U);
+	if (zzapp_host_reset_low_memory)
+		zzapp_host_reset_low_memory(slot);
 	life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_NONE);
 	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_CLAIMED);
 	return ZZ_OK;
@@ -3800,6 +3818,7 @@ static void put_list(uint8_t *reply, uint16_t *reply_len, uint32_t slot)
 	zzapp_kernel_t *kernel = zzapp_runtime_kernel();
 	uint64_t cpu = 0U;
 	uint64_t service = 0U;
+	uint8_t block = ZZAPP_BLOCK_NONE;
 
 	if (kernel) {
 		cpu = kernel->threads[slot].user_ticks +
@@ -3817,6 +3836,29 @@ static void put_list(uint8_t *reply, uint16_t *reply_len, uint32_t slot)
 	zzapp_put_be32(reply + ZZAPP_LIST_SERVICE_MS,
 		       service > UINT32_MAX ? UINT32_MAX : (uint32_t)service);
 	reply[ZZAPP_LIST_REASONS + 1U] = (uint8_t)slots[slot].terminal_reason;
+	if (kernel && kernel->threads[slot].state == ZZAPP_THREAD_SLEEPING) {
+		block = ZZAPP_BLOCK_SLEEP;
+	} else if (kernel && kernel->threads[slot].state == ZZAPP_THREAD_BLOCKED) {
+		switch (runtime_for_slot(slot)->wait_kind) {
+		case ZZAPP_WAIT_FILE:
+			block = ZZAPP_BLOCK_FILE;
+			break;
+		case ZZAPP_WAIT_CONSOLE_WRITE:
+		case ZZAPP_WAIT_CONSOLE_READ:
+			block = ZZAPP_BLOCK_CONSOLE;
+			break;
+		case ZZAPP_WAIT_DISPLAY_OPEN:
+		case ZZAPP_WAIT_FLIP:
+			block = ZZAPP_BLOCK_VSYNC;
+			break;
+		case ZZAPP_WAIT_AUDIO:
+			block = ZZAPP_BLOCK_AUDIO;
+			break;
+		default:
+			break;
+		}
+	}
+	reply[ZZAPP_LIST_REASONS] = block;
 	memcpy(reply + ZZAPP_LIST_NAME, slots[slot].name,
 	       sizeof(slots[slot].name));
 	if (kernel && kernel->overload_count != 0U)
@@ -3847,7 +3889,8 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		select_slot(0U);
 		put_query(reply, reply_len,
 			  ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO |
-			  ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8 | ZZAPP_CAP_SLOTS,
+			  ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8 | ZZAPP_CAP_SLOTS |
+			  (extended ? ZZAPP_CAP_LOW_MEMORY : 0U),
 			  extended);
 		return SDK_STATUS_OK;
 	}

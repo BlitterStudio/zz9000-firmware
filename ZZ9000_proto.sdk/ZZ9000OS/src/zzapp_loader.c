@@ -58,6 +58,29 @@ struct load_image {
     struct load_seg seg[ZZAPP_MAX_LOAD];
 };
 
+static uint32_t image_proc_limit(const struct load_image *img)
+{
+    uint32_t limit;
+
+    if (img->note_minor < 3u)
+        return ZZAPP_ARENA_BYTES;
+    limit = zzapp_services_memory_limit();
+    return limit != 0u && limit < ZZAPP_MEM_PRIVATE_WINDOW_BYTES ?
+           limit : ZZAPP_MEM_PRIVATE_WINDOW_BYTES;
+}
+
+static int image_commit_fits_limit(const struct load_image *img)
+{
+    uint32_t image = (img->image_end + ZZAPP_MEM_FRAME_BYTES - 1u) &
+                     ~(ZZAPP_MEM_FRAME_BYTES - 1u);
+    uint32_t stack = (img->stack_bytes + ZZAPP_MEM_FRAME_BYTES - 1u) &
+                     ~(ZZAPP_MEM_FRAME_BYTES - 1u);
+    uint32_t commit = img->note_minor < 3u ? ZZAPP_ARENA_BYTES :
+                      image + stack + img->min_heap_bytes;
+
+    return commit <= image_proc_limit(img);
+}
+
 /* Defined in zzapp_host.c. The loader does not own the lifecycle words. */
 void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
                         uint32_t owner, uint32_t generation);
@@ -169,8 +192,10 @@ static int g_app_memory_ready;
 void zzapp_loader_memory_init(void)
 {
     if (!g_app_memory_ready &&
-        zzapp_mem_init(&g_app_memory, &card_pool) == 0)
+        zzapp_mem_init(&g_app_memory, &card_pool) == 0) {
+        zzapp_host_register_low_memory_callback(&g_app_memory);
         g_app_memory_ready = 1;
+    }
 }
 
 static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
@@ -198,6 +223,7 @@ static int map_loaded_image(const struct load_image *img)
     uint32_t stack_frames;
     uint32_t heap_frames;
     uint32_t total_frames;
+    uint32_t proc_limit;
     uint32_t i;
 
     if (!g_app_memory_ready || !proc ||
@@ -213,8 +239,8 @@ static int map_loaded_image(const struct load_image *img)
         total_frames > ZZAPP_MEM_MAX_FRAMES)
         return ZZ_ENOMEM;
     heap_frames = total_frames - image_frames - stack_frames;
-    zzapp_mem_proc_init(&proc->memory, img->note_minor < 3u ?
-                        ZZAPP_ARENA_BYTES : ZZAPP_MEM_PRIVATE_WINDOW_BYTES);
+    proc_limit = image_proc_limit(img);
+    zzapp_mem_proc_init(&proc->memory, proc_limit);
     if (zzapp_mem_alloc(&g_app_memory, &proc->memory, image_frames,
                         proc->image_frames) ||
         (heap_frames && zzapp_mem_alloc(&g_app_memory, &proc->memory,
@@ -931,6 +957,11 @@ int zzapp_loader_end(void)
         drop_arena();
         zzapp_loader_set_state(ZZAPP_ST_IDLE);
         return rc;
+    }
+    if (!image_commit_fits_limit(&img)) {
+        drop_arena();
+        zzapp_loader_set_state(ZZAPP_ST_IDLE);
+        return ZZ_ENOMEM;
     }
     shoff = rd32(g_mem + 32u);
     shentsize = rd16(g_mem + 46u);
