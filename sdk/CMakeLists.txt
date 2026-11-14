@@ -956,6 +956,17 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src/zz9k_library_resident.c
 )
 
+add_executable(library_resident_sync_test
+  tests/library_resident_sync_test.c
+)
+
+target_include_directories(library_resident_sync_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src
+)
+
+add_test(NAME library_resident_sync_test COMMAND library_resident_sync_test)
+
 add_executable(library_irq_source_test
   tests/library_irq_source_test.c
 )

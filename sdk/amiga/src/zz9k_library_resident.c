@@ -132,6 +132,44 @@ static void zz9k_lib_app_destroy_locked(struct ZZ9KBase *base,
                                         ZZ9KAppHandle *handle);
 static void zz9k_lib_app_destroy_owner_locked(struct ZZ9KBase *base,
                                                struct Task *owner);
+static void zz9k_lib_app_cache(volatile uint8_t *window, uint32_t offset,
+                               uint32_t length);
+static int zz9k_lib_app_event_queued(const ZZ9KAppHandle *handle);
+
+#define ZZ9K_LIB_SYNC_OBTAIN(lock) \
+  ObtainSemaphore((struct SignalSemaphore *)(lock))
+#define ZZ9K_LIB_SYNC_ATTEMPT(lock) \
+  AttemptSemaphore((struct SignalSemaphore *)(lock))
+#define ZZ9K_LIB_SYNC_RELEASE(lock) \
+  ReleaseSemaphore((struct SignalSemaphore *)(lock))
+#define ZZ9K_LIB_SYNC_SERVICE(base) \
+  zz9k_lib_app_service_locked((struct ZZ9KBase *)(base))
+#define ZZ9K_LIB_SYNC_MESSAGE_POP(handle, message, status) do { \
+  ZZ9KAppHandle *sync_handle = (ZZ9KAppHandle *)(handle); \
+  ZZ9KAppMessage *sync_message = (ZZ9KAppMessage *)(message); \
+  zz9k_lib_app_cache(sync_handle->window, ZZ9K_APP_MESSAGE_A2H_OFFSET, \
+                      ZZ9K_APP_MESSAGE_RING_BYTES); \
+  (status) = zz9k_app_ring_pop(sync_handle->window + \
+      ZZ9K_APP_MESSAGE_A2H_OFFSET, sync_message->bytes); \
+  if ((status) == ZZ9K_STATUS_OK) zz9k_lib_app_cache(sync_handle->window, \
+      ZZ9K_APP_MESSAGE_A2H_OFFSET, ZZ9K_APP_MESSAGE_RING_BYTES); \
+} while (0)
+#define ZZ9K_LIB_SYNC_EVENT_POSTED(handle) \
+  (((ZZ9KAppHandle *)(handle))->event_posted)
+#define ZZ9K_LIB_SYNC_EVENT_QUEUED(handle) \
+  zz9k_lib_app_event_queued((const ZZ9KAppHandle *)(handle))
+#define ZZ9K_LIB_SYNC_CLEAR_EVENT_POSTED(handle) \
+  (((ZZ9KAppHandle *)(handle))->event_posted = 0U)
+#include "zz9k_library_resident_sync.h"
+#undef ZZ9K_LIB_SYNC_OBTAIN
+#undef ZZ9K_LIB_SYNC_ATTEMPT
+#undef ZZ9K_LIB_SYNC_RELEASE
+#undef ZZ9K_LIB_SYNC_SERVICE
+#undef ZZ9K_LIB_SYNC_MESSAGE_POP
+#undef ZZ9K_LIB_SYNC_EVENT_POSTED
+#undef ZZ9K_LIB_SYNC_EVENT_QUEUED
+#undef ZZ9K_LIB_SYNC_CLEAR_EVENT_POSTED
+
 
 static int zz9k_lib_query_caps(REG(a6, struct ZZ9KBase *base),
                                REG(a0, ZZ9KCaps *caps));
@@ -857,10 +895,8 @@ static void zz9k_lib_dispatcher_proc(void)
       uint32_t completed;
 
       completed = 0;
-      ObtainSemaphore(&base->app_lock);
-      zz9k_lib_app_service_locked(base);
-      ReleaseSemaphore(&base->app_lock);
-      if (!AttemptSemaphore(&base->lock)) {
+      if (!zz9k_lib_dispatcher_service_apps(base, &base->app_lock,
+                                             &base->lock)) {
         break;
       }
       if (base->dispatcher_stop_requested) {

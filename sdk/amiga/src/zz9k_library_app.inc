@@ -798,17 +798,8 @@ static int zz9k_lib_app_get_message(REG(a6, struct ZZ9KBase *base),
     status = ZZ9K_STATUS_BAD_HANDLE;
   }
   if (status == ZZ9K_STATUS_OK) {
-    ObtainSemaphore(&base->app_lock);
-    zz9k_lib_app_cache(handle->window, ZZ9K_APP_MESSAGE_A2H_OFFSET,
-                        ZZ9K_APP_MESSAGE_RING_BYTES);
-    status = zz9k_app_ring_pop(handle->window + ZZ9K_APP_MESSAGE_A2H_OFFSET,
-                               message->bytes);
-    if (status == ZZ9K_STATUS_OK) zz9k_lib_app_cache(handle->window,
-        ZZ9K_APP_MESSAGE_A2H_OFFSET, ZZ9K_APP_MESSAGE_RING_BYTES);
-    if (handle->event_posted && !zz9k_lib_app_event_queued(handle)) {
-      handle->event_posted = 0U;
-    }
-    ReleaseSemaphore(&base->app_lock);
+    status = zz9k_lib_app_pop_and_acknowledge(&base->app_lock, handle,
+                                               message);
   }
   zz9k_lib_leave(base);
   return status;
