@@ -114,8 +114,12 @@ function Invoke-Vivado {
     $hadMarginalTiming = Test-Path Env:ZZ9000_ALLOW_NONRELEASE_TIMING
     $previousMarginalTiming = $env:ZZ9000_ALLOW_NONRELEASE_TIMING
     try {
+        # A relaxed timing floor is an explicit per-invocation choice. The
+        # output-path guard below therefore covers every relaxed build.
         if ($AllowMarginalTiming) {
             $env:ZZ9000_ALLOW_NONRELEASE_TIMING = '1'
+        } else {
+            Remove-Item Env:ZZ9000_ALLOW_NONRELEASE_TIMING -ErrorAction SilentlyContinue
         }
         & $vivado @Arguments
         $script:vivadoExitCode = $LASTEXITCODE
