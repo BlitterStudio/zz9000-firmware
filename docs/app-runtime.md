@@ -122,13 +122,16 @@ All terminal paths call the same generation-guarded teardown: stop new calls,
 wake and cancel waits, quiesce work and DMA holding app pointers, hand off or
 unbind display, detach audio, release GL and decoder sessions, unmap grants,
 return frames and host-visible blocks, release the slot, and publish one
-terminal reason. `LIST` retains that reason after the slot returns to idle.
+terminal reason. A slot remains `STOPPING` until its audio teardown is
+acknowledged; only then can it become reusable. `LIST` retains that reason
+after the slot returns to idle.
 The reasons are none, normal exit, forced stop, user fault, stall watchdog,
-stuck API call, lease loss, Amiga reset, and core-1 restart. Per-slot
-30-second stall and 10-second stuck-call watchdogs stop only their slot. A
-separate core-0 backstop cold-restarts core 1 after two seconds without both
-progress and timer ticks; that ends every non-idle slot with the restart
-reason.
+stuck API call, lease loss, Amiga reset, and core-1 restart. Only user-mode
+faults stop a single app. A fault in firmware code restarts core 1 and ends
+every app. Per-slot 30-second stall and 10-second stuck-call watchdogs stop
+only their slot. A separate core-0 backstop cold-restarts core 1 after two
+seconds without both progress and timer ticks; that ends every non-idle slot
+with the restart reason.
 
 ## Slot protocol
 
@@ -160,11 +163,12 @@ carries the spare-buffer field at byte 28; zero means none.
 `LIST` (`0x0c09`) is extended-only. The selector names the slot and ignores
 its generation. Its 48-byte reply has state, generation, committed bytes,
 limit, app CPU milliseconds, and kernel service milliseconds at bytes 0
-through 23. Byte 24 is the block reason: `NONE` (0), `FILE` (1), `CONSOLE`
-(2), `EVENT` (3), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6). Byte 25 is the
-terminal reason. Bytes 26-27 hold the overload flag, and bytes 28-47 are the
-app name. Terminal reasons are `NONE` (0), `EXIT` (1), `FORCED` (2),
-`USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
+through 23. STATUS CPU time is user execution plus SVC execution; it excludes
+idle and recovery intervals. Byte 24 is the block reason: `NONE` (0),
+`FILE` (1), `CONSOLE` (2), `EVENT` (3), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6).
+Byte 25 is the terminal reason. Bytes 26-27 hold the overload flag, and bytes
+28-47 are the app name. Terminal reasons are `NONE` (0), `EXIT` (1),
+`FORCED` (2), `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
 `AMIGA_RESET` (7), and `CORE_RESTART` (8).
 
 ### Low-memory crossings

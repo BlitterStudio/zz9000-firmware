@@ -23,10 +23,11 @@ The public header is `sdk/zzapp/include/zzapp.h`. The call reference is
 
 Each launch owns one of four slots, its launcher window, and a generation.
 States progress from free to claimed, loading, starting, runnable or blocked,
-then through stopping and reclaiming back to free. A launch fails without
-changing another slot when every slot is occupied or admission fails. A
-`CLAIMED` slot that never begins loading expires after two seconds and records
-lease loss.
+then through stopping and reclaiming back to free. A STOPPING slot remains
+unavailable until its audio teardown is acknowledged, then becomes reusable.
+A launch fails without changing another slot when every slot is occupied or
+admission fails. A `CLAIMED` slot that never begins loading expires after two
+seconds and records lease loss.
 
 ZZRun, or a `zz9k.library` client, streams the ELF. Firmware checks the note,
 applies `R_ARM_RELATIVE` relocations, zeroes BSS, and enters at `e_entry` with
@@ -35,11 +36,11 @@ private stack. crt0 calls `zz_main`. Return is `zz_exit` of that status.
 
 Stop is Ctrl-C, `ZZ9KAppStop`, or the library handle closing. The app sees
 `zz_should_stop` and `ZZ_EV_STOP`. Grace is 500 ms, then the runtime stops
-that app. A user-mode data abort, prefetch abort, or undefined instruction
-stops and reclaims only its slot. Firmware code faults retain the core-1
-cold-restart recovery and end every non-idle slot. Amiga reset also ends every
-slot; an exit racing that reset records the reset reason. Loss of a running
-slot's heartbeat for two seconds stops that slot.
+that app. Only user-mode data aborts, prefetch aborts, or undefined
+instructions stop and reclaim a single slot. A firmware-code fault restarts
+core 1 and ends every app. Amiga reset also ends every slot; an exit racing
+that reset records the reset reason. Loss of a running slot's heartbeat for
+two seconds stops that slot.
 
 Teardown is ordered and idempotent: new calls are blocked; waits and work
 holding app pointers are cancelled; display, audio, GL, and decoder resources
@@ -261,6 +262,9 @@ A display open makes ZZRun open the P96 screen and bind the bitmap's real
 pitch and card addresses. RGB565 is the first path. CLUT8 is supported.
 BGRA8888 is accepted when P96 returns that format. If the mode cannot be
 opened, ZZRun sets the stop word and `zz_display_open` returns `ZZ_EIO`.
+
+ZZRun `STATUS` CPU time is user execution plus SVC execution. It excludes idle
+and recovery intervals.
 
 ## zz9k.library client
 
