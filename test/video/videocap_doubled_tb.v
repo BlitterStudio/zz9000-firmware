@@ -246,9 +246,11 @@ initial begin
         5: begin LINECLKS = 1016; LINES = 574; FULLWIDTH = 1;
                  EXPECT_CROPH = 213; EXPECT_CROPV = 16;
                  EXPECT_TALL = 1; EXPECT_NTSC = 0; EXPECT_LACED = 0; end
+        /* Plain PAL on the filtered path: automatic crop keeps the
+         * compatible 188 / 26 (40 is the full-width calibration). */
         4: begin LINECLKS = 1816; LINES = 312; PIXSPAN = 2; HSLOW = 133;
                  EXPECT_DOUBLED = 0; EXPECT_SHORT = 0; EXPECT_NTSC = 0;
-                 EXPECT_CROPH = 188; EXPECT_CROPV = 40; end
+                 EXPECT_CROPH = 188; EXPECT_CROPV = 26; end
         default: ;
     endcase
     $display("videocap_doubled_tb CASE %0d: %0d clocks a line, %0d lines, %0s, %0s",
