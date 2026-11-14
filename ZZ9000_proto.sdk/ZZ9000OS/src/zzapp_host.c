@@ -40,6 +40,10 @@ extern void zzapp_mem_set_low_memory_callback(
 
 #ifdef ZZAPP_HOST_TEST
 static uint8_t g_test_wait_registered[ZZAPP_AS_SLOT_COUNT];
+void __attribute__((weak)) scheduler_core1_service_clean_request(void)
+{
+}
+
 #endif
 
 uint32_t __attribute__((weak)) zzapp_services_current_slot(void)
@@ -219,20 +223,14 @@ zzapp_kernel_t *zzapp_runtime_kernel(void)
     return &g_kernel;
 }
 
-/* The vectors restore from the returned frame and leave the exception-mode
- * SP just above it. Copy the chosen context onto the exception stack in
- * place, so that SP stays inside the exception stack and the next exception
- * cannot push into another thread's saved context. */
+/* The selected context is restored onto the current exception stack, keeping
+ * each exception mode's banked SP on the stack it owns. */
 zzapp_arm_frame_t *zzapp_kernel_arch_dispatch(zzapp_arm_frame_t *frame,
                                                uint32_t source,
                                                uint32_t return_adjust)
 {
-    zzapp_arm_frame_t *next = zzapp_kernel_switch_frame(&g_kernel, frame,
+    return zzapp_kernel_switch_frame(&g_kernel, frame,
         (zzapp_kernel_dispatch_t)source, return_adjust);
-
-    if (next && next != frame)
-        memcpy(frame, next, sizeof(*frame));
-    return frame;
 }
 
 /* After an API call, service work takes precedence over returning to an app.
@@ -1770,6 +1768,9 @@ void zzapp_worker_hook(void)
             continue;
         zzapp_services_select_slot(slot);
         service_reset(slot);
+        /* service_reset returns only after this slot's teardown has no
+         * worker task in flight, so a pending core-1 cache clean is safe. */
+        scheduler_core1_service_clean_request();
     }
     for (slot = 0; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
         zzapp_services_select_slot(slot);

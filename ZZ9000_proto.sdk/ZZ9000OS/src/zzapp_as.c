@@ -67,6 +67,10 @@ static int template_ready;
 static uint32_t firmware_text_start;
 static uint32_t firmware_text_end;
 static sdk_smp_lock_t as_lock = SDK_SMP_LOCK_INIT;
+#ifdef MMU_PAGE_HOST_TEST
+unsigned zzapp_as_test_asid_invalidations;
+#endif
+
 
 static void as_clean(const void *address, uint32_t bytes)
 {
@@ -94,6 +98,7 @@ static void invalidate_asid(uint32_t asid)
 		"dsb sy\n\tisb" : : "r" (asid) : "memory");
 #else
 	(void)asid;
+	zzapp_as_test_asid_invalidations++;
 #endif
 }
 
@@ -427,6 +432,7 @@ int zzapp_as_create(zzapp_as_t *as, uint32_t slot, uint32_t generation)
 	memset(alias_used[slot], 0, sizeof(alias_used[slot]));
 	memset(alias_length[slot], 0, sizeof(alias_length[slot]));
 	slot_live[slot] = 1U;
+	asid_generation[slot] = generation;
 	as_clean(as->l1, sizeof(app_l1[slot]));
 	sdk_smp_lock_release(&as_lock);
 	return 0;
@@ -766,23 +772,21 @@ void zzapp_as_switch(zzapp_as_t *as)
 {
 	if (!as || !as->active)
 		return;
+	if (asid_generation[as->slot] != as->generation) {
+		invalidate_asid(as->asid);
+		asid_generation[as->slot] = as->generation;
+	}
 #ifndef MMU_PAGE_HOST_TEST
 	{
 		uint32_t asid = as->asid;
 		uint32_t ttbr0 = (uint32_t)(uintptr_t)as->l1 | TTBR0_ATTR;
 
-		if (asid_generation[as->slot] != as->generation) {
-			invalidate_asid(asid);
-			asid_generation[as->slot] = as->generation;
-		}
 		__asm__ __volatile__("dsb sy\n\t"
 			"mcr p15, 0, %0, c13, c0, 1\n\tisb\n\t"
 			"mcr p15, 0, %1, c2, c0, 0\n\tisb\n\t"
 			"dsb sy\n\tdsb sy\n\tisb"
 			: : "r" (asid), "r" (ttbr0) : "memory");
 	}
-#else
-	(void)asid_generation;
 #endif
 }
 

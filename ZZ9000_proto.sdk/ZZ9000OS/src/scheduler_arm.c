@@ -17,7 +17,107 @@
   zzm_runtime_quarantine_module(ZZM_MODULE_MINIGL); \
   g_core1_started = 0; \
 } while (0)
-#if defined(TASKQ_HOST_TEST) && defined(SCHEDULER_ARM_FALLBACK_HOST_TEST)
+#if defined(TASKQ_HOST_TEST) && \
+    (defined(SCHEDULER_PUBLISH_HOST_TEST) || defined(SCHEDULER_CLEAN_HOST_TEST))
+
+#include "scheduler.h"
+
+static taskq_shared_t *publish_shared;
+static uint32_t publish_doorbells;
+
+static void scheduler_publish_host_doorbell(void *unused)
+{
+  (void)unused;
+  publish_doorbells++;
+}
+
+void scheduler_core1_publish_host_test_bind(taskq_shared_t *shared)
+{
+  publish_shared = shared;
+  publish_doorbells = 0U;
+}
+
+uint32_t scheduler_core1_publish_host_test_doorbells(void)
+{
+  return publish_doorbells;
+}
+
+static void scheduler_core1_wake(taskq_shared_t *shared)
+{
+  if (shared)
+    (void)taskq_doorbell_request(&shared->service_pending,
+                                 scheduler_publish_host_doorbell, 0);
+}
+
+void scheduler_core1_publish(void)
+{
+  scheduler_core1_publish_work(publish_shared, scheduler_core1_wake);
+}
+#if defined(SCHEDULER_CLEAN_HOST_TEST)
+static taskq_shared_t *clean_shared;
+static uint32_t clean_delay_us;
+static uint32_t clean_elapsed_us;
+static int clean_acknowledge;
+
+static int scheduler_clean_host_available(void *unused)
+{
+  (void)unused;
+  return 1;
+}
+
+static void scheduler_clean_host_publish(void *unused)
+{
+  (void)unused;
+}
+static void scheduler_clean_host_cache(void *unused)
+{
+  (void)unused;
+}
+
+
+static void scheduler_clean_host_wait(void *unused, uint32_t usecs)
+{
+  (void)unused;
+  clean_elapsed_us += usecs;
+  if (clean_acknowledge && clean_elapsed_us >= clean_delay_us &&
+      clean_shared->core1_current_slot < 0 &&
+      clean_shared->core1_clean_request) {
+    clean_shared->core1_clean_request = 0U;
+    clean_shared->core1_clean_done = 1U;
+  }
+}
+
+void scheduler_core1_clean_host_test_bind(taskq_shared_t *shared,
+                                          uint32_t delay_us, int acknowledge)
+{
+  clean_shared = shared;
+  clean_delay_us = delay_us;
+  clean_elapsed_us = 0U;
+  clean_acknowledge = acknowledge;
+}
+
+uint32_t scheduler_core1_clean_host_test_elapsed(void)
+{
+  return clean_elapsed_us;
+}
+
+void scheduler_core1_service_clean_request(void)
+{
+  scheduler_core1_service_clean_request_with(
+      clean_shared, scheduler_clean_host_cache, scheduler_clean_host_publish, 0);
+}
+
+int scheduler_core1_clean_dcache(void)
+{
+  return scheduler_core1_clean_dcache_wait(
+      clean_shared, scheduler_clean_host_available, scheduler_clean_host_publish,
+      scheduler_clean_host_wait, 0,
+      SCHED_CORE1_CLEAN_WAIT_US / SCHED_CORE1_CLEAN_POLL_US);
+}
+#endif
+
+
+#elif defined(TASKQ_HOST_TEST) && defined(SCHEDULER_ARM_FALLBACK_HOST_TEST)
 
 #include "scheduler.h"
 #include "zzm_format.h"
@@ -94,7 +194,6 @@ static uint8_t scheduler_app_stacks[ZZAPP_KERNEL_APP_SLOTS]
   __attribute__((aligned(8)));
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
-static void scheduler_core1_clean_if_requested(taskq_shared_t *sh);
 
 /* BSP flat 1 MB-section translation table (translation_table.S). */
 extern u32 MMUTable;
@@ -230,10 +329,8 @@ static void scheduler_perf_publish_doorbell(taskq_shared_t *sh)
 }
 #endif
 
-void scheduler_core1_wake(void)
+static void scheduler_core1_wake(taskq_shared_t *sh)
 {
-  taskq_shared_t *sh = scheduler_shared();
-
 #if ZZAPP_PERF_COUNTERS
   uint32_t expected = 0U;
 
@@ -251,6 +348,11 @@ void scheduler_core1_wake(void)
                                scheduler_send_doorbell, NULL);
 #endif
 }
+void scheduler_core1_publish(void)
+{
+  scheduler_core1_publish_work(scheduler_shared(), scheduler_core1_wake);
+}
+
 
 /* The SGI is a doorbell, not a work body. Mark service due and let the
  * exception return path select the system thread before another app runs. */
@@ -437,18 +539,19 @@ static void scheduler_perf_sync_doorbell(taskq_shared_t *sh,
 					 zzapp_kernel_t *kernel)
 {
 	static uint32_t seen_sgis;
-	static uint32_t seen_queued;
+	static uint32_t seen_work_publications;
 	uint32_t published = __atomic_load_n(&sh->perf_sgi_count,
 					    __ATOMIC_ACQUIRE);
-	uint32_t queued = __atomic_load_n(&sh->queue.perf_queued_count,
-					  __ATOMIC_ACQUIRE);
+	uint32_t work_publications =
+		__atomic_load_n(&sh->perf_work_publications, __ATOMIC_ACQUIRE);
 
 	while (seen_sgis != published) {
 		zzapp_kernel_perf_sgi_raised(kernel, sh->perf_doorbell_stamp);
 		seen_sgis++;
 	}
-	zzapp_kernel_perf_tasks_queued(kernel, queued - seen_queued);
-	seen_queued = queued;
+	zzapp_kernel_perf_work_published(kernel,
+					 work_publications - seen_work_publications);
+	seen_work_publications = work_publications;
 }
 
 static int scheduler_perf_consume_doorbell(taskq_shared_t *sh,
@@ -568,8 +671,9 @@ static int scheduler_core1_kernel_lock_or_yield(void)
 
   if (zzapp_kernel_system_lock(kernel) == 0)
     return 1;
-  /* An app owns firmware state. Let its API epilogue run; retry only after
-   * the voluntary context switch instead of spinning on this core. */
+  /* No worker task is active while yielding an app-owned kernel lock, so
+   * servicing a pending L1 clean cannot interrupt task-local state. */
+  scheduler_core1_service_clean_request();
   zzapp_kernel_service_due(kernel);
   __asm__ __volatile__("svc #0" ::: "memory");
   return 0;
@@ -625,7 +729,7 @@ void scheduler_core1_worker(void)
 
     /* Checked before every claim: once core 0 asks, no further task runs. */
     scheduler_core1_reclaim_if_requested(sh);
-    scheduler_core1_clean_if_requested(sh);
+    scheduler_core1_service_clean_request();
     if (sh->service_pending)
       drained = taskq_doorbell_drain(&sh->service_pending,
                                      scheduler_doorbell_drain,
@@ -806,6 +910,8 @@ static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh)
 }
 
 #define SCHED_RECLAIM_SPINS 2000U   /* x 10 us */
+/* Clean runs only from the Amiga-reset pool handoff; keep it inside that
+ * path's 150-ms reset budget without extending reclaim's normal deadline. */
 
 int scheduler_core1_reclaim(void)
 {
@@ -830,42 +936,49 @@ int scheduler_core1_reclaim(void)
   return -1;
 }
 
-/* Core 1 side of the cache clean: no task is running, so a set/way clean
- * of this core's L1 leaves no dirty line behind. */
-static void scheduler_core1_clean_if_requested(taskq_shared_t *sh)
+/* Core 1 cleans only after the shared helper has established that no worker
+ * task is active and no restart is pending. */
+static void scheduler_clean_cache(void *unused)
 {
-  if (!sh->core1_clean_request)
-    return;
-  sh->core1_clean_request = 0;
+  (void)unused;
   Xil_L1DCacheFlush();
-  dsb();
-  sh->core1_clean_done = 1;
+}
+
+static int scheduler_clean_available(void *unused)
+{
+  (void)unused;
+  return scheduler_core1_available();
+}
+
+static void scheduler_clean_publish(void *unused)
+{
+  (void)unused;
   dsb();
   __asm__ __volatile__("sev" ::: "memory");
 }
 
+void scheduler_core1_service_clean_request(void)
+{
+  scheduler_core1_service_clean_request_with(
+      scheduler_shared(), scheduler_clean_cache, scheduler_clean_publish, NULL);
+}
+
+static void scheduler_clean_wait(void *unused, uint32_t usecs)
+{
+  (void)unused;
+  usleep(usecs);
+}
+
 int scheduler_core1_clean_dcache(void)
 {
-  taskq_shared_t *sh = scheduler_shared();
-  uint32_t spins;
+  int result = scheduler_core1_clean_dcache_wait(
+      scheduler_shared(), scheduler_clean_available, scheduler_clean_publish,
+      scheduler_clean_wait, NULL,
+      SCHED_CORE1_CLEAN_WAIT_US / SCHED_CORE1_CLEAN_POLL_US);
 
-  if (!scheduler_core1_available() || !sh->core1_alive)
-    return 0;
-  if (sh->core1_current_slot >= 0 || sh->core1_restart_request)
-    return -1;
-  sh->core1_clean_done = 0;
-  sh->core1_clean_request = 1;
-  dsb();
-  __asm__ __volatile__("sev" ::: "memory");
-  for (spins = 0U; spins < SCHED_RECLAIM_SPINS && !sh->core1_clean_done;
-       spins++)
-    usleep(10);
-  if (sh->core1_clean_done)
-    return 0;
-  sh->core1_clean_request = 0;
-  dsb();
-  printf("[sched] core 1 did not clean its cache; cold restart\n");
-  return -1;
+  if (result != 0)
+    printf("[sched] core 1 did not clean its cache; cold restart\n");
+  return result;
 }
 
 /*
@@ -1034,7 +1147,7 @@ void scheduler_resume_minigl_submissions(void)
   dmb();
   sh->minigl_submission_ack = 0U;
   dmb();
-  scheduler_core1_wake();
+  scheduler_core1_publish();
 }
 
 void scheduler_quiesce_for_reset(void)
@@ -1057,7 +1170,7 @@ void scheduler_quiesce_for_reset(void)
     ++sh->minigl_submission_generation;
   sh->minigl_submission_ack = 0U;
   dmb();
-  scheduler_core1_wake();
+  scheduler_core1_publish();
 
   for (spins = 0; spins < SCHED_QUIESCE_SPINS; spins++) {
     if (scheduler_minigl_quiesce_done(sh))

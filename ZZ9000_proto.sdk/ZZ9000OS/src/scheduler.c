@@ -102,9 +102,6 @@ void taskq_init(taskq_t *q)
     q->descs[i].state = TASK_FREE;
   }
   q->enqueue_cursor = 0;
-#if ZZAPP_PERF_COUNTERS
-  q->perf_queued_count = 0;
-#endif
 }
 
 void taskq_shared_boot_init(taskq_shared_t *sh)
@@ -140,10 +137,71 @@ void taskq_shared_boot_init(taskq_shared_t *sh)
    * serviced nor replaceable, so the worker never drains again. */
   sh->service_pending = 0;
 #if ZZAPP_PERF_COUNTERS
+  sh->perf_work_publications = 0U;
   sh->perf_doorbell_stamp = 0U;
   sh->perf_sgi_count = 0U;
 #endif
 }
+#if ZZAPP_PERF_COUNTERS
+void scheduler_perf_work_published(taskq_shared_t *shared)
+{
+  if (shared)
+    (void)__atomic_add_fetch(&shared->perf_work_publications, 1U,
+                             __ATOMIC_RELEASE);
+}
+#endif
+void scheduler_core1_publish_work(taskq_shared_t *shared,
+				  scheduler_core1_wake_fn wake)
+{
+	if (!shared || !wake)
+		return;
+#if ZZAPP_PERF_COUNTERS
+	scheduler_perf_work_published(shared);
+#endif
+	wake(shared);
+}
+void scheduler_core1_service_clean_request_with(
+    taskq_shared_t *shared, scheduler_core1_clean_cache_fn clean_cache,
+    scheduler_core1_clean_publish_fn publish, void *context)
+{
+	if (!shared || !clean_cache || !publish ||
+	    shared->core1_current_slot >= 0 || shared->core1_restart_request ||
+	    !shared->core1_clean_request)
+		return;
+	shared->core1_clean_request = 0U;
+	clean_cache(context);
+	publish(context);
+	shared->core1_clean_done = 1U;
+	publish(context);
+}
+
+int scheduler_core1_clean_dcache_wait(taskq_shared_t *shared,
+				      scheduler_core1_available_fn available,
+				      scheduler_core1_clean_publish_fn publish,
+				      scheduler_core1_clean_wait_fn wait,
+				      void *context, uint32_t spins)
+{
+	uint32_t spin;
+
+	if (!shared || !available || !publish || !wait || !available(context) ||
+	    !shared->core1_alive)
+		return 0;
+	if (shared->core1_current_slot >= 0 || shared->core1_restart_request)
+		return -1;
+	shared->core1_clean_done = 0U;
+	shared->core1_clean_request = 1U;
+	publish(context);
+	for (spin = 0U; spin < spins && !shared->core1_clean_done; spin++)
+		wait(context, SCHED_CORE1_CLEAN_POLL_US);
+	if (shared->core1_clean_done)
+		return 0;
+	shared->core1_clean_request = 0U;
+	publish(context);
+	return -1;
+}
+
+
+
 
 int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                   uint32_t in_addr, uint32_t in_len,
@@ -173,7 +231,6 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
       d->user_cookie = user_cookie;
 #if ZZAPP_PERF_COUNTERS
       d->perf_enqueue_stamp = taskq_perf_enqueue_stamp();
-      (void)__atomic_add_fetch(&q->perf_queued_count, 1U, __ATOMIC_RELEASE);
 #endif
       d->result_status = 0;
       d->result_len = 0;

@@ -5,9 +5,9 @@ SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/scheduler_test
 
-CPPFLAGS += -DTASKQ_HOST_TEST -I$(SRC_DIR)
+CPPFLAGS += -DTASKQ_HOST_TEST -DSCHEDULER_PUBLISH_HOST_TEST -DSCHEDULER_CLEAN_HOST_TEST -I$(SRC_DIR)
 
-SOURCES := scheduler_test.c $(SRC_DIR)/scheduler.c
+SOURCES := scheduler_test.c $(SRC_DIR)/scheduler.c $(SRC_DIR)/scheduler_arm.c
 DEPS := $(SRC_DIR)/scheduler.h
 
 HOST_TARGET := $(BUILD_DIR)/minigl_host_test

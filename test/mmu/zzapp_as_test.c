@@ -22,6 +22,8 @@ struct xil_cache_mock_state g_xil_cache_mock;
 static int test_cpu;
 int smp_cpu_id(void) { return test_cpu; }
 uint32_t smp_local_irq_save(void) { return 0u; }
+extern unsigned zzapp_as_test_asid_invalidations;
+
 void smp_local_irq_restore(uint32_t state) { (void)state; }
 void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1u; }
 int smp_raw_spin_try_lock(volatile uint32_t *word)
@@ -368,6 +370,24 @@ static void test_firmware_text_is_l2_before_launch(void)
 	g_xil_cache_mock.watch_word = NULL;
 	zzapp_as_set_firmware_text(0U, 0U);
 }
+static void test_reused_asid_is_invalidated_before_dispatch(void)
+{
+	zzapp_as_t first;
+	zzapp_as_t second;
+
+	setup();
+	CHECK(zzapp_as_create(&first, 0U, 1U) == 0);
+	zzapp_as_switch(&first);
+	zzapp_as_test_asid_invalidations = 0U;
+	zzapp_as_destroy(&first);
+	CHECK(zzapp_as_test_asid_invalidations == 1U);
+	CHECK(zzapp_as_create(&second, 0U, 2U) == 0);
+	CHECK(zzapp_as_test_asid_invalidations == 1U);
+	zzapp_as_switch(&second);
+	CHECK(zzapp_as_test_asid_invalidations == 1U);
+	zzapp_as_destroy(&second);
+}
+
 
 int main(void)
 {
@@ -385,6 +405,7 @@ int main(void)
 	test_destroy_on_core0_keeps_bsp_table();
 	test_orphaned_as_lock_does_not_deadlock_destroy();
 	test_firmware_text_is_l2_before_launch();
+	test_reused_asid_is_invalidated_before_dispatch();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

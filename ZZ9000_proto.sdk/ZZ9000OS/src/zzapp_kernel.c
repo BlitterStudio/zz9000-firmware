@@ -155,10 +155,10 @@ void zzapp_kernel_perf_sgi_started(zzapp_kernel_t *kernel, uint32_t stamp)
 	kernel->perf.sgi_pending = 0U;
 }
 
-void zzapp_kernel_perf_tasks_queued(zzapp_kernel_t *kernel, uint32_t count)
+void zzapp_kernel_perf_work_published(zzapp_kernel_t *kernel, uint32_t count)
 {
 	if (kernel)
-		kernel->perf.total.queued_tasks += count;
+		kernel->perf.total.work_publications += count;
 }
 
 void zzapp_kernel_perf_sdk_started(zzapp_kernel_t *kernel,
@@ -307,7 +307,7 @@ int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
 				  &snapshot.sdk_enqueue_to_start, 99U),
 			  (unsigned long)snapshot.sdk_enqueue_to_start.max,
 			  (unsigned long)snapshot.sgis,
-			  (unsigned long)snapshot.queued_tasks,
+			  (unsigned long)snapshot.work_publications,
 			  (unsigned long)snapshot.audio_low_water,
 			  (unsigned long)snapshot.audio_starved,
 			  (unsigned long)snapshot.audio_underruns,
@@ -445,12 +445,6 @@ int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
 #endif
 	context = &kernel->threads[slot].context;
 	memset(context, 0, sizeof(*context));
-	context->r[0] = api;
-	context->r[1] = argc;
-	context->r[2] = argv;
-	context->r[13] = stack_top;
-	context->r[15] = entry;
-	context->cpsr = ZZAPP_KERNEL_APP_CPSR;
 	context->frame.user_sp = stack_top;
 	context->frame.spsr = ZZAPP_KERNEL_APP_CPSR;
 	context->frame.r[0] = api;
@@ -754,27 +748,15 @@ static void context_save(zzapp_thread_context_t *context,
 			 const zzapp_arm_frame_t *frame, uint32_t adjust)
 {
 	memcpy(&context->frame, frame, sizeof(*frame));
-	memcpy(context->d, frame->vfp, sizeof(frame->vfp));
-	memcpy(context->r, frame->r, sizeof(frame->r));
-	context->r[13] = frame->user_sp;
-	context->r[14] = frame->user_lr;
-	context->r[15] = frame->exception_lr - adjust;
-	context->cpsr = frame->spsr;
-	context->fpscr = frame->fpscr;
+	context->frame.exception_lr -= adjust;
 }
 
-static zzapp_arm_frame_t *context_restore(zzapp_thread_context_t *context,
+static zzapp_arm_frame_t *context_restore(const zzapp_thread_context_t *context,
+					   zzapp_arm_frame_t *frame,
 					   uint32_t adjust)
 {
-	zzapp_arm_frame_t *frame = &context->frame;
-
-	frame->user_sp = context->r[13];
-	frame->user_lr = context->r[14];
-	frame->spsr = context->cpsr;
-	memcpy(frame->vfp, context->d, sizeof(frame->vfp));
-	frame->fpscr = context->fpscr;
-	memcpy(frame->r, context->r, sizeof(frame->r));
-	frame->exception_lr = context->r[15] + adjust;
+	memcpy(frame, &context->frame, sizeof(*frame));
+	frame->exception_lr += adjust;
 	return frame;
 }
 
@@ -843,7 +825,7 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 	    kernel->system_context_valid) {
 		zzapp_kernel_set_current_thread(-1);
 		zzapp_kernel_switch_kernel_address_space();
-		return context_restore(&kernel->system_context, return_adjust);
+		return context_restore(&kernel->system_context, frame, return_adjust);
 	}
 	if (pick < 0)
 		return frame;
@@ -855,7 +837,7 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 	kernel_perf_tlb_enter(kernel, pick);
 	zzapp_kernel_perf_request_report(kernel, (uint32_t)pick, 0);
 #endif
-	return context_restore(&kernel->threads[pick].context, return_adjust);
+	return context_restore(&kernel->threads[pick].context, frame, return_adjust);
 }
 
 

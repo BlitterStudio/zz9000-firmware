@@ -68,9 +68,9 @@ static void test_boot_init_clears_dirty_doorbell(void)
   memset(&sh, 0xa5, sizeof(sh));
   sh.service_pending = 2U;
 #if ZZAPP_PERF_COUNTERS
+  sh.perf_work_publications = 4U;
   sh.perf_doorbell_stamp = 0xdeadbeefU;
   sh.perf_sgi_count = 9U;
-  sh.queue.perf_queued_count = 4U;
 #endif
   taskq_shared_boot_init(&sh);
   expect_u32("boot_pending", sh.service_pending, 0U);
@@ -78,13 +78,66 @@ static void test_boot_init_clears_dirty_doorbell(void)
   expect_u32("boot_park", sh.core1_park_request, 0U);
   expect_int("boot_slot", sh.core1_current_slot, -1);
 #if ZZAPP_PERF_COUNTERS
+  expect_u32("boot_perf_work", sh.perf_work_publications, 0U);
   expect_u32("boot_perf_stamp", sh.perf_doorbell_stamp, 0U);
   expect_u32("boot_perf_sgi", sh.perf_sgi_count, 0U);
-  expect_u32("boot_perf_queued", sh.queue.perf_queued_count, 0U);
 #endif
   for (i = 0; i < TASKQ_CAPACITY; i++)
     expect_u32("boot_free", sh.queue.descs[i].state, TASK_FREE);
 }
+#if ZZAPP_PERF_COUNTERS
+static void test_mixed_publications_coalesce_doorbells(void)
+{
+  taskq_shared_t sh;
+  uint32_t doorbells;
+
+  taskq_shared_boot_init(&sh);
+  scheduler_core1_publish_host_test_bind(&sh);
+  scheduler_core1_publish(); /* SDK task enqueue */
+  scheduler_core1_publish(); /* deferred launcher operation */
+  scheduler_core1_publish(); /* audio refill */
+  scheduler_core1_publish(); /* quiesce request */
+  doorbells = scheduler_core1_publish_host_test_doorbells();
+  expect_u32("mixed_work_publications", sh.perf_work_publications, 4U);
+  expect_int("mixed_doorbell_ratio_below_one",
+             doorbells < sh.perf_work_publications, 1);
+}
+#endif
+static void test_cache_clean_handshake(void)
+{
+  taskq_shared_t sh;
+  unsigned cold_restarts = 0U;
+
+  taskq_shared_boot_init(&sh);
+  sh.core1_alive = 1U;
+  sh.core1_current_slot = -1;
+  scheduler_core1_clean_host_test_bind(&sh, 60000U, 1);
+  expect_int("clean_after_60ms", scheduler_core1_clean_dcache(), 0);
+  expect_u32("clean_elapsed_over_20ms",
+             scheduler_core1_clean_host_test_elapsed(), 60000U);
+  expect_u32("clean_done_after_delay", sh.core1_clean_done, 1U);
+
+  taskq_shared_boot_init(&sh);
+  sh.core1_alive = 1U;
+  sh.core1_clean_request = 1U;
+  sh.core1_current_slot = 0;
+  scheduler_core1_clean_host_test_bind(&sh, 0U, 1);
+  scheduler_core1_service_clean_request();
+  expect_u32("clean_waits_for_task", sh.core1_clean_done, 0U);
+  sh.core1_current_slot = -1;
+  scheduler_core1_service_clean_request();
+  expect_u32("clean_after_task", sh.core1_clean_done, 1U);
+
+  taskq_shared_boot_init(&sh);
+  sh.core1_alive = 1U;
+  sh.core1_current_slot = -1;
+  scheduler_core1_clean_host_test_bind(&sh, 0U, 0);
+  if (scheduler_core1_clean_dcache() != 0)
+    cold_restarts++;
+  expect_u32("clean_timeout_cold_restart", cold_restarts, 1U);
+}
+
+
 
 static void test_enqueue_fills_and_queues(void)
 {
@@ -233,9 +286,6 @@ static void test_claim_short_skips_long(void)
   s = taskq_claim_short(&q);
   expect_int("claim_short_slot1", s, 1);
   expect_u32("claim_short_left_long", q.descs[0].state, TASK_QUEUED);
-#if ZZAPP_PERF_COUNTERS
-  expect_u32("core0_drained_queue_publications", q.perf_queued_count, 2u);
-#endif
 }
 
 static void test_complete_sets_done_and_payload(void)
@@ -690,6 +740,10 @@ int main(void)
   test_stress_check_matches_fill();
   test_init_marks_all_free();
   test_boot_init_clears_dirty_doorbell();
+#if ZZAPP_PERF_COUNTERS
+  test_mixed_publications_coalesce_doorbells();
+#endif
+  test_cache_clean_handshake();
   test_enqueue_fills_and_queues();
   test_enqueue_full_returns_minus1();
   test_enqueue_copies_op_params();

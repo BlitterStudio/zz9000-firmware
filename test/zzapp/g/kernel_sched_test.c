@@ -71,13 +71,13 @@ static void test_first_context_and_dispatch(void)
 	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x12345678u,
 				       0x23456789u, 3u, 0x34567890u,
 				       0x45678000u) == 0);
-	CHECK(kernel.threads[0].context.r[15] == 0x12345678u);
-	CHECK(kernel.threads[0].context.r[0] == 0x23456789u);
-	CHECK(kernel.threads[0].context.r[1] == 3u);
-	CHECK(kernel.threads[0].context.r[2] == 0x34567890u);
-	CHECK(kernel.threads[0].context.r[13] == 0x45678000u);
-	CHECK(kernel.threads[0].context.cpsr == ZZAPP_KERNEL_APP_CPSR);
-	CHECK(kernel.threads[0].context.fpscr == 0u);
+	CHECK(kernel.threads[0].context.frame.exception_lr == 0x12345678u);
+	CHECK(kernel.threads[0].context.frame.r[0] == 0x23456789u);
+	CHECK(kernel.threads[0].context.frame.r[1] == 3u);
+	CHECK(kernel.threads[0].context.frame.r[2] == 0x34567890u);
+	CHECK(kernel.threads[0].context.frame.user_sp == 0x45678000u);
+	CHECK(kernel.threads[0].context.frame.spsr == ZZAPP_KERNEL_APP_CPSR);
+	CHECK(kernel.threads[0].context.frame.fpscr == 0u);
 	for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
 		make_runnable(&kernel, slot);
 	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_TICK, 5u) ==
@@ -114,13 +114,13 @@ static void test_frame_switch(void)
 	clock_ms = 0;
 	next = zzapp_kernel_switch_frame(&kernel, &frame,
 					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
-	CHECK(next == &kernel.threads[0].context.frame);
-	CHECK(kernel.threads[0].context.r[15] == 0x1000u);
-	CHECK(kernel.threads[0].context.r[13] == 0x8000u);
+	CHECK(next == &frame);
+	CHECK(kernel.threads[0].context.frame.exception_lr == 0x1000u);
+	CHECK(kernel.threads[0].context.frame.user_sp == 0x8000u);
 	clock_ms = 5;
 	next = zzapp_kernel_switch_frame(&kernel, next,
 					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
-	CHECK(next == &kernel.threads[1].context.frame);
+	CHECK(next == &frame);
 	CHECK(zzapp_kernel_current_thread() == 1);
 }
 
@@ -139,11 +139,11 @@ static void test_system_frame_runs_service_before_apps(void)
 	zzapp_kernel_set_current_thread(-1);
 	next = zzapp_kernel_switch_frame(&kernel, &system_frame,
 					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
-	CHECK(next == &kernel.threads[0].context.frame);
+	CHECK(next == &system_frame);
 	zzapp_kernel_service_due(&kernel);
 	next = zzapp_kernel_switch_frame(&kernel, next,
 					 ZZAPP_KERNEL_DISPATCH_DOORBELL, 0u);
-	CHECK(next == &kernel.system_context.frame);
+	CHECK(next == &system_frame);
 	CHECK(zzapp_kernel_current_thread() == -1);
 }
 
@@ -738,14 +738,14 @@ static void test_system_ticks_wake_sleepers(void)
 	clock_ms = 5;
 	next = zzapp_kernel_switch_frame(&kernel, next,
 					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
-	CHECK(next == &kernel.system_context.frame);
+	CHECK(next == &system_frame);
 	CHECK(kernel.now == 5u);
 	CHECK(kernel.threads[0].state == ZZAPP_THREAD_SLEEPING);
 	clock_ms = 10;
 	next = zzapp_kernel_switch_frame(&kernel, next,
 					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
 	CHECK(kernel.now == 10u);
-	CHECK(next == &kernel.threads[0].context.frame);
+	CHECK(next == &system_frame);
 	CHECK(kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
 }
 static void test_restart_releases_kernel_lock_waiters(void)
@@ -833,6 +833,7 @@ static void test_performance_counters(void)
 	zzapp_kernel_perf_sgi_started(&kernel, 300u);
 	zzapp_kernel_perf_sgi_raised(&kernel, 400u);
 	zzapp_kernel_perf_sgi_started(&kernel, 460u);
+	zzapp_kernel_perf_work_published(&kernel, 4u);
 	zzapp_kernel_perf_sdk_started(&kernel, 240u, 280u);
 	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_AUDIO, 300u);
 	zzapp_kernel_perf_service_end(&kernel, ZZAPP_PERF_SERVICE_AUDIO, 380u);
@@ -846,6 +847,7 @@ static void test_performance_counters(void)
 	CHECK(snapshot.sdk_enqueue_to_start.max == 40u);
 	CHECK(snapshot.service[ZZAPP_PERF_SERVICE_AUDIO].max == 80u);
 	CHECK(snapshot.sgis == 2u);
+	CHECK(snapshot.work_publications == 4u);
 	CHECK(snapshot.audio_low_water == 3u);
 	CHECK(snapshot.audio_starved == 4u);
 	CHECK(snapshot.audio_underruns == 2u);

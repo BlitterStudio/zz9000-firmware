@@ -4053,7 +4053,7 @@ static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 	defer->state = DEFER_POSTED;
 	slot_state_lock_release();
 #ifndef ZZAPP_HOST_TEST
-	scheduler_core1_wake();
+	scheduler_core1_publish();
 #endif
 	return 1;
 }

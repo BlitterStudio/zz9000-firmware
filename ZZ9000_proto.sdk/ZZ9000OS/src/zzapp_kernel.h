@@ -49,7 +49,7 @@ typedef struct {
 	zzapp_kernel_perf_metric_t sdk_enqueue_to_start;
 	zzapp_kernel_perf_metric_t service[ZZAPP_PERF_SERVICE_COUNT];
 	uint32_t sgis;
-	uint32_t queued_tasks;
+	uint32_t work_publications;
 	uint32_t audio_low_water;
 	uint32_t audio_starved;
 	uint32_t audio_underruns;
@@ -104,12 +104,10 @@ typedef struct {
 /* FRAME_BYTES in zzapp_kernel_asm.S copies this struct. */
 _Static_assert(sizeof(zzapp_arm_frame_t) == 328, "exception frame size");
 
-/* Scheduler-visible context. r15 is the interrupted or first-entry PC. */
+/* The exception handler uses this scratch stack below frame while saving
+ * the current context. */
 typedef struct {
-	uint32_t r[16];
-	uint32_t cpsr;
-	uint32_t fpscr;
-	uint64_t d[32];
+	uint32_t exception_stack[sizeof(zzapp_arm_frame_t) / sizeof(uint32_t)];
 	zzapp_arm_frame_t frame;
 } zzapp_thread_context_t;
 
@@ -205,8 +203,7 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 					      zzapp_kernel_dispatch_t source,
 					      uint32_t return_adjust);
 /* Runtime glue in zzapp_host.c, called by the SVC vector after an API
- * call: returns `frame` while the caller stays runnable, otherwise the
- * scheduler's choice copied into it. */
+ * call: returns the selected return frame. */
 zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame);
 int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t slot);
 /* Atomically release API lock, snapshot now, and enter SLEEPING under IRQ mask. */
@@ -228,7 +225,7 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 #if ZZAPP_PERF_COUNTERS
 void zzapp_kernel_perf_sgi_raised(zzapp_kernel_t *kernel, uint32_t stamp);
 void zzapp_kernel_perf_sgi_started(zzapp_kernel_t *kernel, uint32_t stamp);
-void zzapp_kernel_perf_tasks_queued(zzapp_kernel_t *kernel, uint32_t count);
+void zzapp_kernel_perf_work_published(zzapp_kernel_t *kernel, uint32_t count);
 void zzapp_kernel_perf_sdk_started(zzapp_kernel_t *kernel, uint32_t enqueue_stamp,
 				   uint32_t stamp);
 void zzapp_kernel_perf_service_begin(zzapp_kernel_t *kernel,

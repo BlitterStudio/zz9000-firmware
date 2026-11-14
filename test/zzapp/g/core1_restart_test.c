@@ -39,7 +39,7 @@ void __wrap_zzapp_loader_release(void)
     release_calls++;
     for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
         if (kernel->threads[slot].state != ZZAPP_THREAD_STOPPED ||
-            kernel->threads[slot].context.r[15] != 0U)
+            kernel->threads[slot].context.frame.exception_lr != 0U)
             retired = 0;
     }
     if (retired && zzapp_kernel_current_thread() < 0)
@@ -92,7 +92,7 @@ int main(void)
         selected_slot = slot;
         assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
         assert(kernel->threads[slot].state == ZZAPP_THREAD_STOPPED);
-        assert(kernel->threads[slot].context.r[15] == 0U);
+        assert(kernel->threads[slot].context.frame.exception_lr == 0U);
     }
     zzapp_core0_poll();
     assert(zzapp_test_cold_restarts() == 1);

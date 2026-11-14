@@ -68,7 +68,9 @@ next worker service pass, and `sdk` is each task's enqueue publication to its
 start. Sampling the pass boundary preserves the hot-path publication protocol;
 first-service attribution would require coupling every cross-core work claim
 to the publisher.
-`sgi_burst` is `SGIs/task publications`; `sdk_span`, `minigl_span`,
+`sgi_burst` is `SGIs/work publications`; publications include SDK tasks,
+launcher deferred operations, audio refill triggers, and quiesce requests, so
+a value below one shows doorbell coalescing. `sdk_span`, `minigl_span`,
 `launcher_span`, `audio_span`, and `svc_span` are the 99th-percentile/maximum
 non-preemptible spans for SDK tasks, MiniGL, launcher deferred work, audio
 pumping, and sampled API-lock-held SVC work.

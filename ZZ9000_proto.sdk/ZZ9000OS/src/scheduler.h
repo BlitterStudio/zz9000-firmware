@@ -126,9 +126,6 @@ typedef struct {
 typedef struct {
   taskq_desc_t descs[TASKQ_CAPACITY];
   uint32_t     enqueue_cursor;  /* single-producer hint (core 0 only) */
-#if ZZAPP_PERF_COUNTERS
-  uint32_t     perf_queued_count; /* incremented before TASK_QUEUED publication */
-#endif
 } taskq_t;
 
 typedef struct {                /* coherent control block at the queue region */
@@ -176,6 +173,8 @@ typedef struct {                /* coherent control block at the queue region */
   /* Core 0 raises the doorbell SGI only when this changes from zero to one. */
   volatile uint32_t service_pending;
 #if ZZAPP_PERF_COUNTERS
+  /* Counts every core-0 work publication that may wake core 1. */
+  volatile uint32_t perf_work_publications;
   /* Core 0 publishes the coalesced doorbell stamp before its release count;
    * core 1 acquires that count before sampling the low 32-bit timestamp. */
   volatile uint32_t perf_doorbell_stamp;
@@ -297,6 +296,43 @@ int scheduler_minigl_submission_admit(taskq_shared_t *shared);
 
 /* ---- atomic primitive seam ---- */
 int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired);
+#if ZZAPP_PERF_COUNTERS
+void scheduler_perf_work_published(taskq_shared_t *shared);
+#endif
+typedef void (*scheduler_core1_wake_fn)(taskq_shared_t *shared);
+void scheduler_core1_publish_work(taskq_shared_t *shared,
+				  scheduler_core1_wake_fn wake);
+#define SCHED_CORE1_CLEAN_WAIT_US 150000U
+#define SCHED_CORE1_CLEAN_POLL_US 10U
+
+typedef int (*scheduler_core1_available_fn)(void *context);
+typedef void (*scheduler_core1_clean_publish_fn)(void *context);
+typedef void (*scheduler_core1_clean_wait_fn)(void *context, uint32_t usecs);
+typedef void (*scheduler_core1_clean_cache_fn)(void *context);
+void scheduler_core1_service_clean_request_with(
+    taskq_shared_t *shared, scheduler_core1_clean_cache_fn clean_cache,
+    scheduler_core1_clean_publish_fn publish, void *context);
+int scheduler_core1_clean_dcache_wait(taskq_shared_t *shared,
+				      scheduler_core1_available_fn available,
+				      scheduler_core1_clean_publish_fn publish,
+				      scheduler_core1_clean_wait_fn wait,
+				      void *context, uint32_t spins);
+
+
+#if defined(TASKQ_HOST_TEST) && defined(SCHEDULER_PUBLISH_HOST_TEST)
+void scheduler_core1_publish(void);
+void scheduler_core1_publish_host_test_bind(taskq_shared_t *shared);
+uint32_t scheduler_core1_publish_host_test_doorbells(void);
+#endif
+#if defined(TASKQ_HOST_TEST) && defined(SCHEDULER_CLEAN_HOST_TEST)
+int scheduler_core1_clean_dcache(void);
+void scheduler_core1_service_clean_request(void);
+void scheduler_core1_clean_host_test_bind(taskq_shared_t *shared,
+					 uint32_t delay_us, int acknowledge);
+uint32_t scheduler_core1_clean_host_test_elapsed(void);
+#endif
+
+
 #ifdef TASKQ_HOST_TEST
 extern int taskq_test_force_cas_fail;  /* >0: force the next N CAS calls to fail */
 #endif
@@ -315,7 +351,7 @@ uint32_t scheduler_core1_stack_high_water(uint32_t slot);
 void *scheduler_core1_app_stack_top(uint32_t slot);
 void scheduler_boot_init(void);            /* core 0: init queue + watchdog at boot */
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
-void scheduler_core1_wake(void);           /* core 0: publish async app work, then wake worker */
+void scheduler_core1_publish(void);        /* core 0: only work-publication entry */
 #if ZZAPP_PERF_COUNTERS
 uint32_t scheduler_perf_stamp(void);
 #endif
@@ -337,6 +373,8 @@ int  scheduler_core1_reclaim(void);
  * L1 D-cache. 0 on success or when core 1 is not running; nonzero means
  * the caller must cold-restart it. */
 int  scheduler_core1_clean_dcache(void);
+/* Core 1: acknowledge a pending clean only while no worker task is active. */
+void scheduler_core1_service_clean_request(void);
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)
