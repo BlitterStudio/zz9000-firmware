@@ -5,9 +5,11 @@
 #include <sys/mman.h>
 
 #include "card_pool.h"
+#include "sdk_compression.h"
 #include "sdk_palette.h"
 #include "surface_allocator.h"
 #include "memorymap.h"
+#include "zzm_format.h"
 #include "zzm_runtime.h"
 
 static int failures;
@@ -358,6 +360,46 @@ static void test_quarantined_owner_survives_module_reclaim(void)
     CHECK(card_pool.block_count == 1U);
 }
 
+static void test_app_decoder_owners_survive_minigl_unload(void)
+{
+    uint32_t app_owner;
+    uint32_t module_owner;
+    uint32_t app_block;
+    uint32_t module_block;
+    uint32_t slot;
+    uint32_t generation;
+    uint32_t span = (SDK_MEDIA_APP_INSTANCE_LIMIT -
+                     SDK_MEDIA_APP_INSTANCE_BASE) >> 2;
+    int namespace_ok = 1;
+
+    reset_resources();
+    for (generation = 0U; generation < span; ++generation) {
+        for (slot = 0U; slot < 4U; ++slot) {
+            app_owner = sdk_compression_app_owner_bits(slot, generation);
+            if (CARD_POOL_OWNER_CLASS(app_owner) != CARD_POOL_CLASS_MEDIA ||
+                (app_owner & ZZM_MODULE_OWNER_TAG) != 0U ||
+                (app_owner & 0x00ffffffU) < SDK_MEDIA_APP_INSTANCE_BASE ||
+                (app_owner & 0x00ffffffU) >= SDK_MEDIA_APP_INSTANCE_LIMIT ||
+                app_owner == SDK_DECODE_POOL_OWNER)
+                namespace_ok = 0;
+        }
+    }
+    CHECK(namespace_ok);
+
+    app_owner = sdk_compression_app_owner_bits(0U, 1U);
+    module_owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA,
+                                   ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL));
+    app_block = card_pool_alloc(&card_pool, CARD_POOL_PAGE_BYTES, app_owner);
+    module_block = card_pool_alloc(&card_pool, CARD_POOL_PAGE_BYTES,
+                                   module_owner);
+    CHECK(app_block != 0U && module_block != 0U);
+    CHECK(zzm_runtime_release_module(ZZM_MODULE_MINIGL) ==
+          CARD_POOL_PAGE_BYTES);
+    CHECK(card_pool.block_count == 1U);
+    CHECK(card_pool.blocks[0].addr == app_block);
+    CHECK(card_pool.blocks[0].owner == app_owner);
+}
+
 static void test_cold_restart_rescans_new_minigl_owners(void)
 {
     const zzm_services_t *services = zzm_runtime_services_v3();
@@ -408,6 +450,7 @@ int main(void)
     test_host_window_palette_and_app_guard();
     test_log_rate_limit();
     test_quarantined_owner_survives_module_reclaim();
+    test_app_decoder_owners_survive_minigl_unload();
     test_cold_restart_rescans_new_minigl_owners();
     test_orphaned_heap_lock_does_not_deadlock();
     if (failures)

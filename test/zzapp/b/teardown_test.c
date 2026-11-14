@@ -500,6 +500,85 @@ static void test_stopped_load_aborts_when_another_slot_is_selected(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
 }
 
+static uint32_t list_cpu(uint32_t slot)
+{
+    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    uint16_t reply_bytes = 0U;
+
+    extended_request(request, slot, 0U);
+    assert(zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request),
+                                  reply, &reply_bytes, 1, 0U, 0U) ==
+           SDK_STATUS_OK);
+    assert(reply_bytes == ZZAPP_LIST_REPLY_BYTES);
+    return zzapp_get_be32(reply + ZZAPP_LIST_CPU_MS);
+}
+
+static void test_list_cpu_starts_at_new_generation(void)
+{
+    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    uint32_t generation;
+
+    memset(windows, 0, sizeof(windows));
+    request_id = 0U;
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
+    zzapp_test_set_entry(NULL);
+    generation = claim_slot();
+    load_slot(0U, generation, 2U, 0U);
+    extended_request(request, 0U, generation);
+    assert(dispatch(ZZAPP_OP_START, request, sizeof(request)) == SDK_STATUS_OK);
+    zzapp_runtime_kernel()->threads[0].user_ticks = 17U;
+    zzapp_runtime_kernel()->threads[0].svc_ticks = 23U;
+    assert(list_cpu(0U) == 40U);
+    generation = claim_slot();
+    load_slot(0U, generation, 2U, 0U);
+    extended_request(request, 0U, generation);
+    assert(dispatch(ZZAPP_OP_START, request, sizeof(request)) == SDK_STATUS_OK);
+    assert(list_cpu(0U) == 0U);
+}
+
+static void test_core_restart_aborts_unstarted_load(void)
+{
+    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    uint32_t generation[2];
+    uint32_t state;
+    uint32_t committed;
+    uint8_t reason;
+    uint32_t card;
+
+    memset(windows, 0, sizeof(windows));
+    request_id = 0U;
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
+    zzapp_services_test_set_window_slot(1U, windows[1], sizeof(windows[1]));
+    generation[0] = claim_slot();
+    generation[1] = claim_slot();
+    extended_request(request, 0U, generation[0]);
+    assert(dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
+           SDK_STATUS_OK);
+    select_test_slot(0U);
+    card = zzapp_test_arena_card();
+    assert(card != 0U);
+    select_test_slot(1U);
+    zzapp_services_set_state(ZZAPP_ST_RUNNING);
+    zzapp_test_mark_running();
+    zzapp_on_core1_restart();
+    select_test_slot(0U);
+    list_slot(0U, &state, &committed, &reason);
+    assert(state == ZZAPP_ST_IDLE);
+    assert(reason == ZZAPP_END_CORE_RESTART);
+    assert(committed == 0U);
+    assert(zzapp_test_arena_card() == 0U);
+    extended_request(request, 0U, generation[0]);
+    assert(dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
+           SDK_STATUS_OK);
+    assert(zzapp_test_arena_card() != 0U);
+    assert(zzapp_loader_abort() == ZZ_OK);
+}
+
 int main(void)
 {
     enum teardown_path value;
@@ -508,5 +587,7 @@ int main(void)
         run_case(value);
     test_abort_republishes_service_state();
     test_stopped_load_aborts_when_another_slot_is_selected();
+    test_core_restart_aborts_unstarted_load();
+    test_list_cpu_starts_at_new_generation();
     return 0;
 }

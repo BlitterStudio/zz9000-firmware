@@ -1970,6 +1970,8 @@ void zzapp_on_core1_restart(void)
             force_stop(ZZAPP_FAULT_WATCHDOG_RESTART, 0, 0, 0, 0, 0, 0);
         } else if (zzapp_services_state() != ZZAPP_ST_IDLE) {
             zzapp_services_set_terminal(ZZAPP_END_CORE_RESTART);
+            if (zzapp_loader_abort() != ZZ_OK)
+                zzapp_loader_release();
             zzapp_services_on_reset();
         }
     }

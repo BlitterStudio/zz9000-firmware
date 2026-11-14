@@ -65,22 +65,25 @@ uint16_t sdk_decompress_stream_read(
 uint16_t sdk_decompress_stream_close(uint32_t session);
 
 /*
- * Reclaim card-pool-owned decode working sets after a core-1 cold reset.
- * An app owner encodes its slot and generation in the high half of the
- * MEDIA instance space. SDK video sessions use the low half and never
- * assign those instances, so an app force-stop cannot free a live video
- * decoder. The top instances stay reserved for the shared decode heap.
+ * MEDIA instances are partitioned: 1 through 0xff are SDK video-session
+ * owners; 0x100 through 0x7fffff are app decoder owners; 0x800000 through
+ * 0xffffff are ZZM resident-module owners.  The shared core-1 decode heap
+ * uses 0xfffffe in the module-reserved range and is reclaimed only on a
+ * core-1 reset.  MEDIA_INPUT has its own card-pool class, so mailbox media
+ * buffers are outside this map.
  */
-#define SDK_MEDIA_APP_INSTANCE_BASE 0x00800000U
+#define SDK_MEDIA_VIDEO_INSTANCE_LIMIT 0x00000100U
+#define SDK_MEDIA_APP_INSTANCE_BASE SDK_MEDIA_VIDEO_INSTANCE_LIMIT
+#define SDK_MEDIA_APP_INSTANCE_LIMIT 0x00800000U
 #define SDK_MEDIA_SHARED_INSTANCE   0x00FFFFFCU
 
 static inline uint32_t sdk_compression_app_owner_bits(uint32_t slot,
 						      uint32_t generation)
 {
-	uint32_t span = (SDK_MEDIA_SHARED_INSTANCE -
+	uint32_t span = (SDK_MEDIA_APP_INSTANCE_LIMIT -
 			 SDK_MEDIA_APP_INSTANCE_BASE) >> 2;
-	uint32_t instance = SDK_MEDIA_APP_INSTANCE_BASE |
-		(((generation % span) << 2) | (slot & 3U));
+	uint32_t instance = SDK_MEDIA_APP_INSTANCE_BASE +
+		((generation % span) << 2) + (slot & 3U);
 
 	return ((uint32_t)2u << 24) | instance;
 }

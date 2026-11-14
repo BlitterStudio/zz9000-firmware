@@ -85,6 +85,11 @@ static struct SDKVideoStreamSession *find_free_session(void)
 	}
 	return 0;
 }
+static uint32_t session_pool_owner(const struct SDKVideoStreamSession *session)
+{
+	return CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA,
+			       (uint32_t)(session - video_sessions) + 1U);
+}
 
 static uint32_t next_session_id(void)
 {
@@ -92,16 +97,6 @@ static uint32_t next_session_id(void)
 
 	if (next_video_session_id == 0U || next_video_session_id == 0xffffffffU)
 		next_video_session_id = 1U;
-	/* App decoder owners and the shared decode heap own this half of
-	 * the MEDIA instance space. Jump past it instead of recursing
-	 * through eight million skipped ids. */
-	if ((id & 0x00ffffffU) >= SDK_MEDIA_APP_INSTANCE_BASE) {
-		uint32_t low = id & 0x00ffffffU;
-		uint32_t next = id + (0x01000001U - low);
-
-		next_video_session_id = next < id || next == 0U ? 1U : next;
-		return next_session_id();
-	}
 	if (id == 0U || id == 0xffffffffU)
 		return next_session_id();
 	return id;
@@ -168,6 +163,12 @@ void sdk_video_stream_init(void)
 	Xil_DCacheFlushRange((INTPTR)(uintptr_t)video_sessions, bytes);
 	next_video_session_id = 1U;
 }
+#ifdef SDK_VIDEO_HOST_TEST
+void sdk_video_stream_test_set_next_session_id(uint32_t id)
+{
+	next_video_session_id = id;
+}
+#endif
 
 uint32_t sdk_video_stream_active_count(void)
 {
@@ -384,8 +385,7 @@ static uint16_t sdk_video_stream_begin_owned_locked(
 		begin->pcm_low_water_bytes;
 	session->media.pcm_high_water_bytes =
 		begin->pcm_high_water_bytes;
-	session->pool_owner =
-		CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, session->id);
+	session->pool_owner = session_pool_owner(session);
 	session->owner = (uint8_t)owner;
 	session->in_use = 1U;
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,

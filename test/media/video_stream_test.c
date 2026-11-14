@@ -497,10 +497,9 @@ static int begin_and_write(uint32_t owner, uint32_t *session)
 	return sdk_video_stream_write(&write, &result) == SDK_STATUS_OK;
 }
 
-/* The backend's decoder memory belongs to a card pool owner unique to the
- * session, whichever API opened it, so a reused slot never inherits the
- * previous owner, and a core-1 fault frees the session's pool memory by
- * owner. */
+/* The backend's decoder memory belongs to its active session slot. The
+ * owner remains in the reserved low MEDIA range while the public session
+ * handle advances independently across its full rollover period. */
 static int test_pool_owner_per_session(void)
 {
 	struct SDKVideoStreamResult result;
@@ -524,7 +523,8 @@ static int test_pool_owner_per_session(void)
 		return 42;
 	owner_b = created_pool_owner;
 	if (CARD_POOL_OWNER_CLASS(owner_b) != CARD_POOL_CLASS_MEDIA ||
-	    owner_b == owner_a)
+	    (owner_b & 0x00ffffffU) >= SDK_MEDIA_APP_INSTANCE_BASE ||
+	    owner_b != owner_a)
 		return 43;
 
 	/* Core-1 fault: poisoning frees this session's pool memory only. */
@@ -540,8 +540,30 @@ static int test_pool_owner_per_session(void)
 	return 0;
 }
 
-/* Slot 0 generation 1 must not share video session 4's pool owner, and
- * releasing the app owner must leave that session's decoder block live. */
+static int test_public_session_rollover_keeps_owner_reserved(void)
+{
+	struct SDKVideoStreamResult result;
+	uint32_t session;
+	uint32_t expected[] = { 0xfffffffdu, 0xfffffffeu, 1U };
+	uint32_t i;
+
+	sdk_video_stream_init();
+	sdk_video_stream_test_set_next_session_id(expected[0]);
+	for (i = 0U; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+		created_pool_owner = 0U;
+		if (!begin_and_write(SDK_VIDEO_STREAM_OWNER_MEDIA, &session))
+			return 46;
+		if (session != expected[i] ||
+		    (created_pool_owner & 0x00ffffffU) >=
+			SDK_MEDIA_APP_INSTANCE_BASE)
+			return 47;
+		sdk_video_stream_close(session, &result);
+	}
+	return 0;
+}
+
+/* App decoder owners must remain disjoint from every video session owner,
+ * so releasing an app owner leaves a live session's decoder block intact. */
 static int test_app_owner_does_not_reclaim_video_session(void)
 {
 	struct SDKVideoStreamResult result;
@@ -550,6 +572,9 @@ static int test_app_owner_does_not_reclaim_video_session(void)
 	uint32_t video_owner;
 	uint32_t video_block;
 	uint32_t app_block;
+	uint32_t generation;
+	uint32_t slot;
+	uint32_t span;
 	uint32_t i;
 
 	card_pool_init(&card_pool);
@@ -567,10 +592,17 @@ static int test_app_owner_does_not_reclaim_video_session(void)
 	if (session != 4U)
 		return 52;
 	video_owner = created_pool_owner;
+	span = (SDK_MEDIA_APP_INSTANCE_LIMIT -
+		SDK_MEDIA_APP_INSTANCE_BASE) >> 2;
+	for (generation = 0U; generation < span; ++generation) {
+		for (slot = 0U; slot < 4U; ++slot) {
+			app_owner = sdk_compression_app_owner_bits(slot, generation);
+			if (app_owner == video_owner ||
+			    CARD_POOL_OWNER_CLASS(app_owner) != CARD_POOL_CLASS_MEDIA)
+				return 53;
+		}
+	}
 	app_owner = sdk_compression_app_owner_bits(0U, 1U);
-	if (app_owner == video_owner ||
-	    CARD_POOL_OWNER_CLASS(app_owner) != CARD_POOL_CLASS_MEDIA)
-		return 53;
 	video_block = card_pool_alloc(&card_pool, 0x10000U, video_owner);
 	app_block = card_pool_alloc(&card_pool, 0x10000U, app_owner);
 	if (!video_block || !app_block)
@@ -600,6 +632,8 @@ int main(void)
 	rc = test_partial_write_progress();
 	if (rc != 0) return rc;
 	rc = test_pool_owner_per_session();
+	if (rc != 0) return rc;
+	rc = test_public_session_rollover_keeps_owner_reserved();
 	if (rc != 0) return rc;
 	rc = test_app_owner_does_not_reclaim_video_session();
 	if (rc != 0) return rc;
