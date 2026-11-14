@@ -589,14 +589,15 @@ static int rix_drv_try_feed_memfetch(struct rix_drv *driver,
     count = rix_drv_memfetch_chunk(feed->command_offset, feed->command_words);
     command_address = feed->command_address +
                       feed->command_offset * sizeof(*feed->commands);
-    if (rix_drv_memfetch_commit(driver, command_address, count) != RIX_DRV_OK)
-        return RIX_DRV_FEED_ERROR;
+    result = rix_drv_memfetch_commit(driver, command_address, count);
     feed->command_offset += count;
-    minigl_profile_feed_chunk(feed->source);
-    if (feed->command_offset == feed->command_words) {
+    if (feed->command_offset == feed->command_words)
         feed->active = 0;
+    if (result != RIX_DRV_OK)
+        return RIX_DRV_FEED_ERROR;
+    minigl_profile_feed_chunk(feed->source);
+    if (!feed->active)
         return RIX_DRV_FEED_DONE;
-    }
     return RIX_DRV_FEED_PROGRESS;
 }
 int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed)

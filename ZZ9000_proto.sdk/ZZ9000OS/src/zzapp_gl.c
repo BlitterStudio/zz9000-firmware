@@ -26,6 +26,7 @@
 #include "mw_ctx.h"
 #include "mw_types.h"
 #include "amiberry_types.h"
+#include "zzm_minigl_host.h"
 
 #ifndef ZZ_OK
 #define ZZ_OK 0
@@ -255,8 +256,6 @@ int zzm_module_api_active(void)
 {
     return g_module_in_api > 0;
 }
-extern int zzm_minigl_take_deferred_dispatch(void);
-
 
 void zzm_module_api_enter(void)
 {

@@ -138,6 +138,8 @@ void zzm_minigl_test_set_poll_hook(void (*hook)(void));
 /* Nonzero when the module's poll made progress; zero when it had nothing to
  * do or its feed step was blocked (full FIFO, DMA in flight). */
 int zzm_minigl_service_tick(int in_api);
+/* Consumes the worker's deferred wire-dispatch request after an app GL call. */
+int zzm_minigl_take_deferred_dispatch(void);
 int zzm_minigl_begin_reset(void);
 int zzm_minigl_reset_poll(void);
 /* One core-1 RESET action: starts the reset or moves one in progress on.

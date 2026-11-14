@@ -172,7 +172,6 @@ static uint32_t g_pl330_expect;   /* SAR value that proves the launch finished *
 static int g_pl330_launch_pending;
 static int g_pl330_abort_phase;
 static uint32_t g_pl330_abort_observations;
-static int g_pl330_nonblocking_error;
 static uint32_t g_dmac_go_ns;
 /* An APB access to an unclocked or reset DMAC can stall the interconnect, so
  * the SLCR (always readable) is checked before DSR.  The secure view's DSR is
@@ -253,10 +252,8 @@ static int graphics_pl330_abort_nonblocking(void *context)
     if (g_pl330_launch_pending) {
         if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) != 0U) {
             if (++g_pl330_abort_observations >=
-                ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT) {
-                g_pl330_nonblocking_error = 4;
+                ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT)
                 return RIX_DRV_DMA_ERROR;
-            }
             return RIX_DRV_DMA_PENDING;
         }
         g_pl330_launch_pending = 0;
@@ -266,10 +263,8 @@ static int graphics_pl330_abort_nonblocking(void *context)
         if (!debug_idle &&
             (Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) != 0U) {
             if (++g_pl330_abort_observations >=
-                ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT) {
-                g_pl330_nonblocking_error = 4;
+                ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT)
                 return RIX_DRV_DMA_ERROR;
-            }
             return RIX_DRV_DMA_PENDING;
         }
         Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
@@ -285,10 +280,8 @@ static int graphics_pl330_abort_nonblocking(void *context)
     state = Xil_In32(g_dmac_base + ZZM_RIX_DMAC_CSR(ZZM_RIX_DMAC_CHANNEL)) & 15U;
     if (state != ZZM_RIX_DMAC_STOPPED) {
         if (++g_pl330_abort_observations >=
-            ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT) {
-            g_pl330_nonblocking_error = 5;
+            ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT)
             return RIX_DRV_DMA_ERROR;
-        }
         return RIX_DRV_DMA_PENDING;
     }
     g_pl330_expect = 0U;
@@ -316,7 +309,6 @@ static void graphics_pl330_abort(void *context)
     g_pl330_launch_pending = 0;
     g_pl330_abort_phase = 0;
     g_pl330_abort_observations = 0U;
-    g_pl330_nonblocking_error = 0;
 }
 
 static int graphics_pl330_retire(void *context);
@@ -338,10 +330,8 @@ static int graphics_pl330_start_async_impl(void *context, uintptr_t source,
     }
     if (!g_pl330_claimed || source == 0U || words == 0U ||
         words > ZZM_RIX_DMA_MAX_WORDS || burst_words != 16U) {
-        if (nonblocking) {
-            g_pl330_nonblocking_error = 1;
+        if (nonblocking)
             return RIX_DRV_DMA_ERROR;
-        }
         pl330_report(!g_pl330_claimed ? "start: not claimed" : "start: bad request");
         return 0;
     }
@@ -477,17 +467,13 @@ static int graphics_pl330_complete(void *context)
                      ZZM_RIX_DMAC_CSR(ZZM_RIX_DMAC_CHANNEL)) & 15U;
     if (state == ZZM_RIX_DMAC_STOPPED) {
         if (Xil_In32(g_dmac_base + ZZM_RIX_DMAC_SAR(ZZM_RIX_DMAC_CHANNEL)) !=
-            g_pl330_expect) {
-            g_pl330_nonblocking_error = 2;
+            g_pl330_expect)
             return -1;
-        }
         return 1;
     }
     if (state == ZZM_RIX_DMAC_FAULTING_COMPLETING ||
-        state == ZZM_RIX_DMAC_FAULTING) {
-        g_pl330_nonblocking_error = 3;
+        state == ZZM_RIX_DMAC_FAULTING)
         return -1;
-    }
     return 0;
 }
 

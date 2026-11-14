@@ -28,6 +28,7 @@ struct model {
     unsigned async_launches, retires, complete_observations;
     unsigned nonblocking_launches;
     int debug_busy, dma_claimed, dma_abort_phase, record_abort;
+    unsigned isr_error_after_packet;
     int dma_done;
 };
 
@@ -84,6 +85,8 @@ static void fifo_write(void *context, uint32_t offset, uint32_t value)
     if (offset == RIX_DRV_FIFO_TLF) {
         assert(model->packet_count < 8U);
         model->lengths[model->packet_count++] = value;
+        if (model->packet_count == model->isr_error_after_packet)
+            model->fifo[RIX_DRV_FIFO_ISR / 4U] = RIX_DRV_FIFO_ISR_ERRORS;
         if (model->event_count < sizeof(model->events))
             model->events[model->event_count++] = 't';
     }
@@ -895,6 +898,40 @@ static void test_memfetch_abort_finishes_the_list(void)
     assert(rix_drv_feed_abort(&driver, &feed) == RIX_DRV_FEED_DONE);
     assert(model.packet_count == 3U && model.abort_log_count == 0U);
 }
+static void test_memfetch_abort_skips_accepted_error_envelope(void)
+{
+    static uint32_t commands[3U * RIX_DRV_MEMFETCH_CHUNK_WORDS]
+        __attribute__((aligned(64)));
+    struct model model;
+    struct rix_drv driver;
+    struct rix_drv_config io;
+    struct rix_drv_feed feed;
+
+    memset(commands, 0, sizeof(commands));
+    memset(&model, 0, sizeof(model));
+    identify(&model);
+    io = memfetch_config(&model);
+    assert(rix_drv_init(&driver, &io) == RIX_DRV_OK);
+    assert(rix_drv_enable(&driver) == RIX_DRV_OK);
+    assert(rix_drv_feed_begin(&feed, commands, 0x01000000U,
+                              (uint32_t)(sizeof(commands) / sizeof(commands[0])),
+                              RIX_DRV_FEED_SOURCE_SVC) == RIX_DRV_OK);
+    model.isr_error_after_packet = 1U;
+    assert(rix_drv_try_feed(&driver, &feed) == RIX_DRV_FEED_ERROR);
+    assert(rix_drv_feed_abort(&driver, &feed) == RIX_DRV_FEED_BLOCKED);
+    assert(rix_drv_feed_abort(&driver, &feed) == RIX_DRV_FEED_DONE);
+    assert(model.packet_count == 3U && !feed.active);
+    assert(model.words[0] == (RIX_DRV_MEMFETCH_ENVELOPE |
+                              RIX_DRV_MEMFETCH_CHUNK_BYTES));
+    assert(model.words[1] == 0x01000000U);
+    assert(model.words[2] == (RIX_DRV_MEMFETCH_ENVELOPE |
+                              RIX_DRV_MEMFETCH_CHUNK_BYTES));
+    assert(model.words[3] == 0x01000000U + RIX_DRV_MEMFETCH_CHUNK_BYTES);
+    assert(model.words[4] == (RIX_DRV_MEMFETCH_ENVELOPE |
+                              RIX_DRV_MEMFETCH_CHUNK_BYTES));
+    assert(model.words[5] == 0x01000000U + 2U * RIX_DRV_MEMFETCH_CHUNK_BYTES);
+}
+
 
 static unsigned g_tdfv_reads;
 
@@ -996,6 +1033,7 @@ int main(void)
     test_memfetch_tracks_fifo_vacancy_in_software();
     test_feed_pending_launch_does_not_restage_header();
     test_feed_rejects_unclaimed_dma_before_staging();
+    test_memfetch_abort_skips_accepted_error_envelope();
     test_feed_rejects_nonblocking_launch_failure();
     test_submit_propagates_synchronous_dma_failure();
     test_feed_abort_waits_for_dma_and_resets_in_order();

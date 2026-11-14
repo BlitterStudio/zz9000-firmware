@@ -816,17 +816,16 @@ int main(void)
         assert(mw_wire_ld32(&ctrl->consumer_seq) == init_consumer + 1U);
     }
     {
-        /* Finding 1: a mid-flight async ring drained from a context that
-         * cannot park (the worker) completes through bounded feed steps
-         * instead of failing into a GL error. */
+        /* A mid-flight async ring drained from worker context completes
+         * through bounded feed steps instead of failing into a GL error. */
         extern int zzm_module_can_park(void);
         extern void zzm_module_set_worker_context(int active);
         const zzapp_gl *draw = (const zzapp_gl *)gl;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
         unsigned long fed_bytes;
 
-        /* P1's close packet retired the platform; rebind it like a fresh
-         * session so this drain drives a live backend. */
+        /* The prior close packet retired the platform; rebind it like a
+         * fresh session so this drain drives a live backend. */
         ops->app_unbind(context);
         ops->app_reclaim(context, 1U);
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
@@ -860,8 +859,8 @@ int main(void)
         assert(g_test_rix_tlf_bytes > fed_bytes);
     }
     {
-        /* Finding 2: with an app parked inside a GL call (g_module_in_api > 0),
-         * a worker-context drain doesn't call yield_wait. */
+        /* A worker-context drain must not call yield_wait while an app GL
+         * call remains active. */
         extern int zzm_module_can_park(void);
         extern void zzm_module_api_enter(void);
         extern void zzm_module_api_leave(void);
