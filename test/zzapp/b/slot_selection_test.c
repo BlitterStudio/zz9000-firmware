@@ -33,6 +33,7 @@ static int exit_after_stop;
 static unsigned slot1_starts;
 static int run_spin_template;
 static uint64_t spin_now;
+static uint32_t stop_generation;
 
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv));
 void zzapp_test_mark_running(void);
@@ -164,6 +165,8 @@ static void load_begin_and_chunk(uint32_t slot, uint32_t generation)
     request_for_slot(request, slot, generation);
     assert(run_request(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
            SDK_STATUS_OK);
+    assert(zzapp_get_be32(windows[slot] + ZZAPP_LIFE_GENERATION_OFF) ==
+           generation);
     memcpy(windows[slot] + ZZAPP_STAGING_OFF, image, sizeof(image));
     request_for_slot(request, slot, generation);
     zzapp_put_be32(request + ZZAPP_CHUNK_FILE_OFF, 0U);
@@ -260,8 +263,16 @@ static void app_entry(const void *api, int argc, char **argv)
         slot1_starts++;
     if (!exit_after_stop)
         return;
-    zzapp_put_be32(zzapp_services_window() + ZZAPP_LIFE_OFF +
-                   ZZAPP_LIFE_STOP_OFF, 1U);
+    {
+        uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+        uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+        uint16_t reply_bytes = 0U;
+
+        request_for_slot(request, zzapp_services_current_slot(), stop_generation);
+        assert(zzapp_mailbox_dispatch(ZZAPP_OP_STOP, request, sizeof(request),
+                                      reply, &reply_bytes, 1, ++request_id,
+                                      0U) == SDK_STATUS_OK);
+    }
     zzapp_host_tick_at(1U);
     zzapp_host_tick_at(100000U);
     assert(table->should_stop());
@@ -276,6 +287,7 @@ static void setup(void)
     slot1_starts = 0U;
     run_spin_template = 0;
     spin_now = 0U;
+    stop_generation = 0U;
     host_card_pool_reset(256U << 20);
     zzapp_boot_init();
     zzapp_services_test_reset();
@@ -367,6 +379,7 @@ static void test_stop_grace_allows_cooperative_spin_exit(void)
     generation = claim_slot(0U);
     load_begin_and_chunk(0U, generation);
     finish_load(0U, generation);
+    stop_generation = generation;
     request_for_slot(request, 0U, generation);
     assert(run_request(ZZAPP_OP_START, request, sizeof(request)) ==
            SDK_STATUS_OK);

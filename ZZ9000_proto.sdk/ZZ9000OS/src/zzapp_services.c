@@ -168,6 +168,7 @@ struct zzapp_service_slot {
 	uint64_t claim_started;
 	uint8_t name[ZZAPP_LIST_NAME_BYTES];
 	int window_uncached;
+	int legacy_claim;
 };
 
 struct zzapp_service_runtime {
@@ -3878,10 +3879,15 @@ static void run_deferred(void)
 			rc = ZZ_EBUSY;
 			break;
 		}
-		if (slots[service_slot()].generation == 0U) {
-			slots[service_slot()].generation = 1U;
-			defer->generation = 1U;
-			life_put(ZZAPP_LIFE_GENERATION_OFF, 1U);
+		if (slots[service_slot()].legacy_claim ||
+		    slots[service_slot()].generation == 0U) {
+			uint32_t generation = slots[service_slot()].generation + 1U;
+
+			if (generation == 0U)
+				generation = 1U;
+			slots[service_slot()].generation = generation;
+			defer->generation = generation;
+			life_put(ZZAPP_LIFE_GENERATION_OFF, generation);
 		}
 		if (defer_load() != DEFER_RUNNING || defer_cancelled(defer)) {
 			discard_deferred_run(defer);
@@ -4135,7 +4141,8 @@ static void put_query(uint8_t *reply, uint16_t *reply_len, uint32_t caps,
 	*reply_len = ZZAPP_QUERY_EXT_REPLY_BYTES;
 }
 
-static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
+static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host,
+			int legacy_claim)
 {
 	uint32_t generation;
 	int rc;
@@ -4155,6 +4162,7 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
 		generation = 1U;
 	zzapp_kernel_reset_cpu_ticks(zzapp_runtime_kernel(), slot);
 	slots[slot].generation = generation;
+	slots[slot].legacy_claim = legacy_claim;
 	slots[slot].memory_limit = 0U;
 	slots[slot].terminal_reason = ZZAPP_END_NONE;
 	if (zzapp_host_claimed)
@@ -4271,7 +4279,7 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 			if (slot == ZZAPP_SLOT_COUNT)
 				return SDK_STATUS_BUSY;
 		}
-		rc = claim_window(slot, &arm, &host);
+		rc = claim_window(slot, &arm, &host, !extended);
 		if (rc != ZZ_OK)
 			return zz_to_sdk(rc);
 		zzapp_put_be32(reply + ZZAPP_ALLOC_ARM_ADDRESS, arm);

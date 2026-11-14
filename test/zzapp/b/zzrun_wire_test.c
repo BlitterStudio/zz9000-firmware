@@ -116,7 +116,8 @@ int main(void)
     uint16_t completed_status;
     uint32_t request_id;
     uint32_t argc;
-
+    uint32_t generation;
+    uint32_t prior_generation;
     zzapp_services_test_reset();
     memset(launcher_window, 0, sizeof(launcher_window));
     zzapp_services_test_set_window(launcher_window, sizeof(launcher_window));
@@ -135,9 +136,18 @@ int main(void)
     zzapp_put_be32(launcher_window + ZZAPP_AUDIO_OFF +
                    ZZAPP_AUDIO_ROUTE_OFF, ZZAPP_AUDIO_ROUTE_AHI);
 
+    status = dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, 0U, reply, &reply_len);
+    assert(status == SDK_STATUS_OK);
+    prior_generation = zzapp_get_be32(launcher_window +
+                                      ZZAPP_LIFE_GENERATION_OFF);
+    assert(prior_generation != 0U);
+
     status = dispatch_deferred(ZZAPP_OP_LOAD_BEGIN, 0, 0U, 1U, reply,
                                &reply_len);
     assert(status == SDK_STATUS_OK);
+    generation = zzapp_get_be32(launcher_window + ZZAPP_LIFE_GENERATION_OFF);
+    assert(generation != 0U);
+    assert(generation != prior_generation);
     assert(begun == 1U);
     assert(zzapp_services_state() == ZZAPP_ST_LOADING);
     assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF) == 0u);
@@ -328,7 +338,10 @@ int main(void)
         assert(status == SDK_STATUS_OK);
         assert(zzapp_services_state() == ZZAPP_ST_LOADING);
         assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_STOP_OFF) == 0u);
-        zzapp_put_be32(stop + ZZAPP_STOP_GENERATION, 7u);
+        generation = zzapp_get_be32(launcher_window +
+                                    ZZAPP_LIFE_GENERATION_OFF);
+        assert(generation != 7U);
+        zzapp_put_be32(stop + ZZAPP_STOP_GENERATION, generation);
         status = dispatch(ZZAPP_OP_STOP, stop, ZZAPP_STOP_REQ_BYTES, 11u,
                           reply, &reply_len);
         assert(status == SDK_STATUS_OK);

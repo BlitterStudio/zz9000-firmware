@@ -25,6 +25,8 @@ static uint16_t expiry_claim_status;
 static uint16_t stop_completing_status;
 static uint16_t stop_completing_claim_status;
 static uint32_t stop_completing_slot_state;
+static uint32_t expiry_deferred_generation;
+static uint32_t expiry_slot_generation;
 
 static int start_posted_deferred(void)
 {
@@ -831,15 +833,76 @@ static void test_load_uses_claim_generation(void)
 				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_OK)
 		fail("second window claim");
 	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
-	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
-	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
-	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
-				   reply, &reply_len, 1, 3U, 0U) != SDK_STATUS_QUEUED)
-		fail("load begin queued");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, NULL, 0U, reply,
+				   &reply_len, 1, 3U, 0U) != SDK_STATUS_QUEUED)
+		fail("empty load begin queued");
 	zzapp_services_test_set_core(1);
 	zzapp_services_poll();
 	if (service_loader_generation != generation)
 		fail("load generation differs from claim");
+	if (zzapp_get_be32(g_window + ZZAPP_LIFE_GENERATION_OFF) != generation)
+		fail("empty load changed slots generation");
+}
+static void loader_begin_succeeds(void);
+static void test_mixed_legacy_and_slots_load_generation(void)
+{
+	uint8_t slots_request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint16_t status;
+	uint32_t legacy_generation;
+	uint32_t slots_generation;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
+				   &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("legacy claim before mixed load");
+	legacy_generation = zzapp_get_be32(g_slot_windows[0] +
+					   ZZAPP_LIFE_GENERATION_OFF);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, slots_request,
+				   sizeof(slots_request), reply, &reply_len, 1,
+				   2U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) != 1U)
+		fail("slots claim before mixed load");
+	slots_generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(slots_request + ZZAPP_SEL_SLOT, 1U);
+	zzapp_put_be32(slots_request + ZZAPP_SEL_GENERATION, slots_generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, NULL, 0U, reply,
+				   &reply_len, 1, 3U, 0U) != SDK_STATUS_QUEUED ||
+	    zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, slots_request,
+				   sizeof(slots_request), reply, &reply_len, 1,
+				   4U, 0U) != SDK_STATUS_QUEUED)
+		fail("mixed load begins queued");
+	service_test_loader_begin_hook = loader_begin_succeeds;
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL, &reply_len) ||
+	    status != SDK_STATUS_OK)
+		fail("legacy mixed load completion");
+	zzapp_mailbox_harvest_ack();
+	if (zzapp_get_be32(g_slot_windows[0] + ZZAPP_LIFE_GENERATION_OFF) ==
+	    legacy_generation)
+		fail("legacy mixed load did not advance generation");
+	zzapp_services_poll();
+	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL, &reply_len) ||
+	    status != SDK_STATUS_OK)
+		fail("slots mixed load completion");
+	zzapp_mailbox_harvest_ack();
+	service_test_loader_begin_hook = NULL;
+	if (zzapp_get_be32(g_slot_windows[1] + ZZAPP_LIFE_GENERATION_OFF) !=
+	    slots_generation)
+		fail("slots mixed load changed allocation generation");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_STOP, slots_request,
+				   sizeof(slots_request), reply, &reply_len, 1,
+				   5U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(g_slot_windows[1] + ZZAPP_LIFE_STOP_OFF) != 1U)
+		fail("slots stop rejected allocation generation");
 }
 static void test_returned_buffers_are_user_granted(void)
 {
@@ -915,6 +978,8 @@ static void expire_running_load(void)
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	uint16_t reply_len;
 
+	expiry_deferred_generation = deferred[0].generation;
+	expiry_slot_generation = slots[0].generation;
 	zzapp_services_expire_claims(ZZAPP_LEASE_US);
 	expiry_claim_status = zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW,
 						     request, 0U, reply,
@@ -1036,33 +1101,41 @@ static void test_claim_expiry_cancels_running_load(void)
 
 static void test_preload_cancellation_releases_deferred_record(void)
 {
-	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	uint16_t reply_len;
 	uint32_t generation;
+	uint32_t load_generation;
 
 	zzapp_services_test_reset();
 	memset(g_window, 0, sizeof(g_window));
 	zzapp_services_test_set_window(g_window, sizeof(g_window));
 	zzapp_services_test_set_core(0);
-	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
-				   sizeof(request), reply, &reply_len,
-				   1, 1U, 0U) != SDK_STATUS_OK)
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
+				   &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
 		fail("claim before pre-load cancellation");
-	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
-	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
-	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
-	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
-				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED)
+	generation = zzapp_get_be32(g_window + ZZAPP_LIFE_GENERATION_OFF);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, NULL, 0U, reply,
+				   &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED)
 		fail("queue load before pre-load cancellation");
 	if (!start_posted_deferred())
 		fail("start pre-load cancellation");
+	load_generation = generation + 1U;
+	if (load_generation == 0U)
+		load_generation = 1U;
 	service_test_loader_set_generation_hook = expire_running_load;
 	run_deferred();
 	service_test_loader_set_generation_hook = NULL;
+	if (expiry_deferred_generation != load_generation ||
+	    expiry_deferred_generation != expiry_slot_generation ||
+	    service_loader_generation != load_generation)
+		fail("cancelled load did not keep its bumped generation");
 	if (slots[0].state != ZZAPP_ST_IDLE ||
-	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE)
-		fail("pre-load cancellation retained deferred record");
+	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
+	    service_test_loader_abort_count != 1U ||
+	    slots[0].generation == 0U ||
+	    zzapp_get_be32(g_window + ZZAPP_LIFE_GENERATION_OFF) !=
+		    slots[0].generation)
+		fail("pre-load cancellation left inconsistent lifecycle state");
 }
 
 static void test_harvest_racing_completion_reads_reply(void)
@@ -1609,6 +1682,7 @@ int main(void)
 	test_core1_wakes_ready_waiter();
 	test_deferred_waits_for_system_thread();
 	test_load_uses_claim_generation();
+	test_mixed_legacy_and_slots_load_generation();
 	test_load_end_resumes_and_cancels();
 	test_returned_buffers_are_user_granted();
 	test_failed_starts_release_admission();
