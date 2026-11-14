@@ -55,6 +55,7 @@ static void test_dynamic_heap_through_table(void)
     uint32_t range_bytes = 0;
     uint32_t committed;
     uint8_t *grown;
+    uint8_t *reported_end;
     int (*saved_shrink)(uint32_t, void **);
 
     memset(&api, 0, sizeof api);
@@ -69,10 +70,11 @@ static void test_dynamic_heap_through_table(void)
 
     api.heap_range(&range, &range_bytes);
     assert(range != NULL);
-    assert(range_bytes >= (2u << 20));
+    assert(range_bytes == 0u);
+    reported_end = range;
     assert(api.heap_info(&info) == ZZ_OK);
-    assert(info.committed == 0u);
-    assert(info.limit == range_bytes);
+    assert(info.committed == range_bytes);
+    assert(info.limit >= (2u << 20));
     assert(info.pool_free == info.limit);
     assert(api.heap_info(NULL) == ZZ_EINVAL);
 
@@ -81,13 +83,16 @@ static void test_dynamic_heap_through_table(void)
     assert(zz_heap_grow(0u, &old_break) == ZZ_EINVAL);
 
     assert(api.heap_grow(1u << 20, &old_break) == ZZ_OK);
-    assert(old_break == range);
+    assert(old_break == reported_end);
+    api.heap_range(&range, &range_bytes);
+    assert(range_bytes == (1u << 20));
     grown = old_break;
     grown[0] = 0x5a;
     grown[(1u << 20) - 1u] = 0xa5;
 
+    reported_end = (uint8_t *)range + range_bytes;
     assert(zz_heap_grow(1u << 20, &second) == ZZ_OK);
-    assert(second == (uint8_t *)range + (1u << 20));
+    assert(second == reported_end);
     assert(grown[0] == 0x5a);
     assert(grown[(1u << 20) - 1u] == 0xa5);
 
@@ -109,12 +114,20 @@ static void test_dynamic_heap_through_table(void)
 
     assert(zz_heap_shrink(1u << 20, &new_break) == ZZ_OK);
     assert(new_break == (uint8_t *)range + committed - (1u << 20));
+    api.heap_range(&range, &range_bytes);
+    assert(range_bytes == committed - (1u << 20));
+    reported_end = (uint8_t *)range + range_bytes;
     assert(api.heap_shrink(0u, &new_break) == ZZ_EINVAL);
     assert(api.heap_shrink(4096u, &new_break) == ZZ_EINVAL);
     assert(api.heap_info(&info) == ZZ_OK);
+    assert(info.committed == range_bytes);
     assert(api.heap_shrink(info.committed + (1u << 20), NULL) == ZZ_EINVAL);
     assert(api.heap_info(&info) == ZZ_OK);
-    assert(info.committed == committed - (1u << 20));
+    assert(info.committed == range_bytes);
+    assert(api.heap_grow(1u << 20, &old_break) == ZZ_OK);
+    assert(old_break == reported_end);
+    api.heap_range(&range, &range_bytes);
+    assert(range_bytes == committed);
 
     api.size = (uint32_t)offsetof(zzapp_api, heap_grow);
     assert(zz_heap_grow(1u << 20, &old_break) == ZZ_ENOSYS);
@@ -125,7 +138,7 @@ static void test_dynamic_heap_through_table(void)
     assert(zz_heap_shrink(1u << 20, &new_break) == ZZ_ENOSYS);
     api.heap_shrink = saved_shrink;
     assert(api.heap_info(&info) == ZZ_OK);
-    assert(info.committed == committed - (1u << 20));
+    assert(info.committed == committed);
 
     host_memory_shutdown();
 }

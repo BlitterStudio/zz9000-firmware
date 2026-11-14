@@ -3,8 +3,8 @@
  *
  * Ordinary zz_alloc (no HOST_VISIBLE) is served by malloc, not by this file.
  * As on the card, the table slot allocates host-visible memory only.
- * heap_range reports the reserved arena. heap_grow and heap_shrink commit
- * and release whole 1 MiB frames inside that fixed region, up to its limit.
+ * heap_range reports the committed arena span. heap_grow and heap_shrink
+ * commit and release whole 1 MiB frames inside that fixed region, up to its limit.
  * HOST_VISIBLE allocations are ordinary process memory under a 16 MiB quota.
  * host_address returns a synthetic board offset, not a Zorro address, and
  * rejects interior pointers.
@@ -110,7 +110,7 @@ static void api_heap_range(void **base, uint32_t *bytes)
     if (base)
         *base = arena;
     if (bytes)
-        *bytes = arena ? HOST_ARENA_BYTES : 0u;
+        *bytes = arena ? heap_committed : 0u;
 }
 
 static int api_host_address(const void *p, uint32_t *host_offset)
