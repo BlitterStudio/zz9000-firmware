@@ -81,7 +81,9 @@ or a stack other than 0 or 64 KiB–1 MiB aligned to 8.
   user mode.
 - `svcprobe.c`: with firmware built using `ZZAPP_SVC_PROBES=1`, times
   individual SVC path boundaries with PMCCNTR.
-- `zzmembench.c`: allocator benchmark.
+- `zzmembench.c`: memory bandwidth benchmark. It times sequential and
+  pointer-chase traffic with `zz_time_us`. PMU, SCTLR/ACTLR, and PL310/DDRC
+  registers are not available to apps.
 - `filter.c`: file-in/file-out Shell template. It maps an input through the
   ZZRun file proxy, computes SHA-256 with the card service, and writes the
   32-byte digest to its output path. Invoke it as `filter input output`.
