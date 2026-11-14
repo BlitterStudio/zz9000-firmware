@@ -12,7 +12,11 @@
 #define ZZ9K_LIBRARY_REVISION 36
 #define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.36 (10.11.2026)"
 #define ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT 35
-#define ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY 34
+/* Static clients proxy async completions through the resident library.
+ * Revision 36 routes a foreign completion seen during a synchronous call
+ * into the pending-request registry. Revisions 34 and 35 drop it, so a
+ * proxied request can stay pending forever. */
+#define ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY 36
 #define ZZ9K_LIBRARY_MIN_REVISION_CALL_ASYNC_BATCH_MSG 1
 #define ZZ9K_LIBRARY_MIN_REVISION_CANCEL_ASYNC 2
 #define ZZ9K_LIBRARY_MIN_REVISION_WAIT_ASYNC 3

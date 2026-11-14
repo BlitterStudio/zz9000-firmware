@@ -51,6 +51,7 @@ struct FakeLibrary {
   uint32_t submits;
   uint32_t polls;
   uint32_t cancels;
+  uint16_t revision;
 };
 
 static void init_mailbox(struct TestMailbox *mailbox)
@@ -76,7 +77,7 @@ static int fake_open(void *user, ZZ9KBoard *board, void **base,
   memset(board, 0, sizeof(*board));
   *base = library;
   *version = 2U;
-  *revision = 34U;
+  *revision = library->revision ? library->revision : 36U;
   return ZZ9K_STATUS_OK;
 }
 
@@ -272,6 +273,54 @@ static int test_library_irq_refusal(void)
   return library.closes == 1U ? 0 : 4;
 }
 
+static int test_static_proxy_requires_foreign_completion_revision(void)
+{
+  struct FakeLibrary too_old;
+  struct FakeLibrary current;
+  ZZ9KLibraryTransport transport;
+  ZZ9KContext *ctx = 0;
+  int failed = 0;
+
+  memset(&too_old, 0, sizeof too_old);
+  too_old.revision = 35U;
+  init_transport(&transport, &too_old);
+  zz9k_set_library_transport_for_test(&transport);
+  if (zz9k_open(&ctx) != ZZ9K_STATUS_LIBRARY_TOO_OLD || ctx != 0 ||
+      too_old.opens != 1U || too_old.closes != 1U)
+    failed = 1;
+
+  if (!failed) {
+    too_old.revision = 34U;
+    too_old.opens = 0U;
+    too_old.closes = 0U;
+    ctx = 0;
+    if (zz9k_open(&ctx) != ZZ9K_STATUS_LIBRARY_TOO_OLD || ctx != 0 ||
+        too_old.closes != 1U)
+      failed = 2;
+  }
+
+  if (!failed) {
+    memset(&current, 0, sizeof current);
+    current.revision = 36U;
+    init_transport(&transport, &current);
+    zz9k_set_library_transport_for_test(&transport);
+    ctx = 0;
+    if (zz9k_open(&ctx) != ZZ9K_STATUS_OK || ctx == 0)
+      failed = 3;
+    else {
+      zz9k_close(ctx);
+      ctx = 0;
+      if (current.closes != 1U)
+        failed = 4;
+    }
+  }
+
+  if (ctx)
+    zz9k_close(ctx);
+  zz9k_set_library_transport_for_test(0);
+  return failed;
+}
+
 static int test_direct_fallback(void)
 {
   struct TestMailbox mailbox;
@@ -308,6 +357,8 @@ int main(void)
   if (result) return 40 + result;
   result = test_direct_fallback();
   if (result) return 50 + result;
-  printf("host library transport: 5 passed\n");
+  result = test_static_proxy_requires_foreign_completion_revision();
+  if (result) return 60 + result;
+  printf("host library transport: 6 passed\n");
   return 0;
 }

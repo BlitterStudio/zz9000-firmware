@@ -185,6 +185,7 @@ struct ZZ9KContext {
 static int zz9k_library_version_supported(uint16_t version,
                                           uint16_t revision)
 {
+  /* 36 routes foreign completions; 34 and 35 drop them. */
   return version == ZZ9K_LIBRARY_VERSION &&
          revision >= ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY;
 }

@@ -373,6 +373,13 @@ For custom service calls, fill a `ZZ9KRequest` and call `ZZ9KCall()`.
 
 `zz9k_open(ZZ9KContext **ctx)` discovers and opens a board context. `zz9k_attach_mailbox(ZZ9KContext **ctx, const ZZ9KBoard *board, volatile ZZ9KMailboxDescriptor *mailbox, volatile uint16_t *doorbell, volatile uint16_t *irq_ack)` attaches a context to already-known transport addresses. Close either with `zz9k_close()`.
 
+The static library transport inside `zz9k_open()` requires revision
+`ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY` (36). Revisions 34 and 35 expose
+the same LVOs, but a synchronous convenience call such as `ZZ9KPing()`
+discards a nonmatching reply instead of forwarding it to the resident
+pending-request registry. A proxied asynchronous request can then remain
+pending indefinitely. An older resident returns `ZZ9K_STATUS_LIBRARY_TOO_OLD`.
+
 Raw contexts poll by default. `zz9k_arm_completion_irq(ctx)` makes `zz9k_call()` wait on the SDK completion interrupt when firmware advertises `ZZ9K_CAP_IRQ_COMPLETION`; it returns `ZZ9K_STATUS_UNSUPPORTED` on the host or without that capability. The arming task is the wake target, so one task must own every armed call. Use `zz9k_disarm_completion_irq()` to reverse it. An armed wait is bounded by a context offload budget set with `zz9k_set_offload_timeout_ms()`, or by `ENV:ZZ9K_SYNC_WAIT_TIMEOUT_MS` (default 5 seconds), read once per context. A slow call serializes the shared mailbox lock until it completes or times out.
 
 
@@ -1839,7 +1846,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 32 | `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION` | `ZZ9KImageAnimationFrameNext()`, Present, Retire, and Restart |
 | 33 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX` | `ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX` (`-348`); older firmware returns `ZZ9K_STATUS_UNSUPPORTED`, with no implicit MP3-only fallback |
 | 35 | `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT` | `ZZ9KAppOpen`, load/start/stop/status, 32-byte message rings, VBlank lease, and close |
-| 36 | None | Synchronous completion waits poll for up to 250 microseconds before their existing event or DOS-tick wait. |
+| 36 | `ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY` | Synchronous completion waits poll for up to 250 microseconds before their existing event or DOS-tick wait. A synchronous call also routes foreign completions to the resident pending-request registry; the static host client requires this revision. |
 
 ### Async submission and wait helpers
 
