@@ -118,6 +118,9 @@ uint32_t zzapp_loader_reset_requested(void);
 void zzapp_boot_init(void);
 void zzapp_worker_hook(void);
 void zzapp_core0_poll(void);
+void zzapp_recover_halted_core1(void);
+/* Every cross-core lock core 1 could hold. Before context retirement. */
+void zzapp_recover_external_locks(void);
 void zzapp_on_core1_restart(void);
 void zzapp_on_amiga_reset(void);
 void zzapp_private_timer_init_core1(void);
@@ -128,7 +131,8 @@ void scheduler_core1_service_once(void);
  * the queue drains. */
 void scheduler_core1_service_from_app(void);
 
-int zzapp_fault_is_app(uint32_t pc, uint32_t abort_lr);
+/* spsr is the interrupted CPSR. Only user mode is an app fault. */
+int zzapp_fault_is_app(uint32_t pc, uint32_t abort_lr, uint32_t spsr);
 void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
                           uint32_t lr, uint32_t far, uint32_t fsr,
                           uint32_t cpsr);
@@ -154,8 +158,9 @@ void zzapp_host_register_low_memory_callback(zzapp_mem_t *memory);
 void zzapp_host_reset_low_memory(uint32_t slot);
 
 /* 1: core2 must fall through to record_fault (cold restart).
- * 0: app PC, already force-stopped, do not restart. */
-int zzapp_fault_wants_restart(uint32_t pc, uint32_t abort_lr);
+ * 0: user-mode app fault, already force-stopped, do not restart.
+ * A fault in SYS or SVC, including inside an API body, restarts. */
+int zzapp_fault_wants_restart(uint32_t pc, uint32_t abort_lr, uint32_t spsr);
 
 const struct zzapp_api *zzapp_api_table(void);
 
@@ -217,7 +222,7 @@ int zzapp_svc_audio_close(void);
 int zzapp_minigl_bind(uint32_t surface_id, const struct zzapp_gl **out);
 int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
                             const struct zzapp_gl **out);
-void zzapp_minigl_swap(void);
+int zzapp_minigl_swap(void);
 void zzapp_minigl_unbind(void);
 void zzapp_minigl_reclaim(uint32_t generation);
 /* Core 0, while core 1 is halted: drops the binding without module code. */

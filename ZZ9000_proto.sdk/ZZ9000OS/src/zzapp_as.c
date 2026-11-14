@@ -8,8 +8,8 @@
 #include "mmu_page.h"
 #include "zzapp_as.h"
 #include "sdk_smp_lock.h"
-#ifndef MMU_PAGE_HOST_TEST
 #include "xil_cache.h"
+#ifndef MMU_PAGE_HOST_TEST
 #include "xil_types.h"
 #include "xpseudo_asm.h"
 #include "xreg_cortexa9.h"
@@ -64,16 +64,13 @@ static uint32_t asid_generation[ZZAPP_AS_SLOT_COUNT];
 static uint8_t alias_used[ZZAPP_AS_SLOT_COUNT][ZZAPP_AS_ALIAS_PAGE_COUNT];
 static uint16_t alias_length[ZZAPP_AS_SLOT_COUNT][ZZAPP_AS_ALIAS_PAGE_COUNT];
 static int template_ready;
+static uint32_t firmware_text_start;
+static uint32_t firmware_text_end;
 static sdk_smp_lock_t as_lock = SDK_SMP_LOCK_INIT;
 
 static void as_clean(const void *address, uint32_t bytes)
 {
-#ifndef MMU_PAGE_HOST_TEST
 	Xil_DCacheFlushRange((INTPTR)(uintptr_t)address, bytes);
-#else
-	(void)address;
-	(void)bytes;
-#endif
 }
 
 /* Inner-shareable: a change may come from core 0 (mmu_page) while core 1
@@ -223,21 +220,67 @@ static void populate_section_pages(uint32_t *table, uint32_t section,
 			section_page_descriptor(section, page, descriptor));
 }
 
+static int section_covers_firmware_text(uint32_t section)
+{
+	uint32_t base = section << SECTION_SHIFT;
+	uint32_t end = base + (1U << SECTION_SHIFT);
+
+	return firmware_text_end > firmware_text_start &&
+		end > firmware_text_start && base < firmware_text_end;
+}
+
 static int template_l2(uint32_t section, const uint32_t *pages)
 {
 	int index = l2_index_for_descriptor(template_l1[section]);
+	int fresh = 0;
 	uint32_t page;
+	uint32_t descriptor;
 
 	if (index < 0 || l2_owner[index] != 0U) {
+		/* The template is already walked. Clearing a section that
+		 * contains this code faults the instruction fetch. Those
+		 * sections were split to L2 before the template went live. */
+		if (template_ready && section_covers_firmware_text(section))
+			return ZZAPP_AS_ENOMEM;
 		index = l2_alloc(0U);
 		if (index < 0)
 			return ZZAPP_AS_ENOMEM;
-		template_l1[section] = l2_descriptor(l2_pool[index], 15U << 5);
+		fresh = 1;
 	}
 	for (page = 0U; page < L2_ENTRIES; page++)
 		l2_pool[index][page] = priv_global_page(pages[page]);
 	as_clean(l2_pool[index], sizeof(l2_pool[index]));
+	if (!fresh)
+		return 0;
+	descriptor = l2_descriptor(l2_pool[index], 15U << 5);
+	if (!template_ready)
+		template_l1[section] = descriptor;
+	else
+		replace_live_descriptor(&template_l1[section], descriptor);
 	return 0;
+}
+
+/* Template is not walked yet: a direct store cannot unmap executing code. */
+static int split_text_section(uint32_t section)
+{
+	uint32_t descriptor = template_l1[section];
+	int index;
+
+	if ((descriptor & L1_TYPE_MASK) != L1_SECTION)
+		return 0;
+	index = l2_alloc(0U);
+	if (index < 0)
+		return -1;
+	populate_section_pages(l2_pool[index], section, descriptor);
+	as_clean(l2_pool[index], sizeof(l2_pool[index]));
+	template_l1[section] = l2_descriptor(l2_pool[index], 15U << 5);
+	return 0;
+}
+
+void zzapp_as_set_firmware_text(uint32_t start, uint32_t end)
+{
+	firmware_text_start = start;
+	firmware_text_end = end;
 }
 
 static uint32_t template_page(uint32_t section, uint32_t page)
@@ -353,6 +396,14 @@ void zzapp_as_init(const uint32_t *bsp_l1)
 			(void)template_l2(section, pages);
 		}
 	}
+	if (firmware_text_end > firmware_text_start) {
+		uint32_t first = firmware_text_start >> SECTION_SHIFT;
+		uint32_t last = (firmware_text_end - 1U) >> SECTION_SHIFT;
+
+		for (section = first; section <= last && section < L1_ENTRIES;
+		     section++)
+			(void)split_text_section(section);
+	}
 	as_clean(template_l1, sizeof(template_l1));
 	mmu_page_set_change_hook(zzapp_as_mmu_page_changed);
 	template_ready = 1;
@@ -385,7 +436,10 @@ void zzapp_as_destroy(zzapp_as_t *as)
 {
 	if (!as || !as->active)
 		return;
-	zzapp_as_switch_kernel();
+	/* Core 0 keeps the BSP table. The template's domain 15 is Manager in
+	 * core 0's DACR, which would drop the BSP's read-only text protection. */
+	if (smp_cpu_id() == 1)
+		zzapp_as_switch_kernel();
 	invalidate_asid(as->asid);
 	sdk_smp_lock_acquire(&as_lock);
 	l2_release_owner(as->slot + 1U);
@@ -743,8 +797,31 @@ void zzapp_as_switch_kernel(void)
 		"mcr p15, 0, %1, c2, c0, 0\n\tisb\n\t"
 		"dsb sy\n\tdsb sy\n\tisb"
 		: : "r" (asid), "r" (ttbr0) : "memory");
+#else
+	zzapp_as_test_kernel_switches++;
 #endif
 }
+
+void zzapp_as_reset_lock(void)
+{
+	sdk_smp_lock_reset(&as_lock);
+}
+
+#ifdef MMU_PAGE_HOST_TEST
+unsigned zzapp_as_test_kernel_switches;
+
+void zzapp_as_test_orphan_lock(void)
+{
+	as_lock.owner = 1;
+	as_lock.depth = 1U;
+	as_lock.raw = 1U;
+}
+
+int zzapp_as_test_lock_held(void)
+{
+	return as_lock.owner >= 0 || as_lock.depth != 0U || as_lock.raw != 0U;
+}
+#endif
 
 const uint32_t *zzapp_as_template(void)
 {

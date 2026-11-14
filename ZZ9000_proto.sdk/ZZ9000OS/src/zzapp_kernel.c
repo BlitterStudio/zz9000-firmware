@@ -22,8 +22,11 @@ void __attribute__((weak)) smp_local_irq_restore(uint32_t state)
 {
 	(void)state;
 }
+uint64_t __attribute__((weak)) zzapp_kernel_now_ms(void)
+{
+	return 0U;
+}
 #endif
-
 
 static volatile int current_thread = -1;
 volatile uintptr_t zzapp_kernel_svc_stack_top;
@@ -524,6 +527,93 @@ void zzapp_kernel_service_due(zzapp_kernel_t *kernel)
 		kernel->service_due = 1;
 }
 
+uint64_t zzapp_kernel_now(const zzapp_kernel_t *kernel)
+{
+	if (!kernel)
+		return 0U;
+	uint64_t now = kernel->now;
+	if (kernel->slice_valid && !kernel->idle) {
+		uint64_t now_ms = zzapp_kernel_now_ms();
+		if (now_ms > kernel->slice_started_ms)
+			now += (now_ms - kernel->slice_started_ms);
+	}
+	return now;
+}
+
+void zzapp_kernel_reset_slice(zzapp_kernel_t *kernel)
+{
+	if (!kernel)
+		return;
+	kernel->slice_valid = 0U;
+	kernel->slice_started_ms = 0U;
+	kernel->idle = 0U;
+}
+
+void zzapp_kernel_idle_begin(zzapp_kernel_t *kernel)
+{
+	uint32_t irq_state;
+	uint64_t now_ms;
+	uint32_t elapsed = 0U;
+
+	if (!kernel)
+		return;
+	irq_state = smp_local_irq_save();
+	if (kernel->idle) {
+		smp_local_irq_restore(irq_state);
+		return;
+	}
+	now_ms = zzapp_kernel_now_ms();
+	if (kernel->slice_valid && now_ms >= kernel->slice_started_ms) {
+		uint64_t delta = now_ms - kernel->slice_started_ms;
+
+		elapsed = delta > UINT32_MAX ? UINT32_MAX : (uint32_t)delta;
+	}
+	kernel->slice_started_ms = now_ms;
+	kernel->slice_valid = 1U;
+	zzapp_kernel_advance(kernel, elapsed);
+	if (kernel->now - kernel->window_start > ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
+		kernel->window_start = kernel->now;
+		kernel->service_in_window = 0;
+	}
+	if (elapsed != 0U) {
+		kernel->service_ticks += elapsed;
+		kernel->service_in_window += elapsed;
+	}
+	kernel->idle = 1U;
+	smp_local_irq_restore(irq_state);
+}
+
+void zzapp_kernel_idle_end(zzapp_kernel_t *kernel)
+{
+	uint32_t irq_state;
+	uint64_t now_ms;
+	uint32_t elapsed = 0U;
+
+	if (!kernel)
+		return;
+	irq_state = smp_local_irq_save();
+	if (!kernel->idle) {
+		smp_local_irq_restore(irq_state);
+		return;
+	}
+	now_ms = zzapp_kernel_now_ms();
+	if (kernel->slice_valid && now_ms >= kernel->slice_started_ms) {
+		uint64_t delta = now_ms - kernel->slice_started_ms;
+
+		elapsed = delta > UINT32_MAX ? UINT32_MAX : (uint32_t)delta;
+	}
+	kernel->slice_started_ms = now_ms;
+	kernel->slice_valid = 1U;
+	kernel->idle = 0U;
+	kernel->idle_ticks += elapsed;
+	zzapp_kernel_advance(kernel, elapsed);
+	if (kernel->now - kernel->window_start > ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
+		kernel->window_start = kernel->now;
+		kernel->service_in_window = 0;
+	}
+	smp_local_irq_restore(irq_state);
+}
+
 static int choose_app(zzapp_kernel_t *kernel)
 {
 	uint32_t offset;
@@ -547,17 +637,28 @@ static int choose_app(zzapp_kernel_t *kernel)
 }
 
 /* Charge `slot` for a slice of up to `elapsed_ms`; an exhausted quantum
- * lets the next pick rotate to another runnable app. */
+ * lets the next pick rotate to another runnable app. Privileged time is
+ * the API body, recorded separately from user mode. */
 static void charge_slice(zzapp_kernel_t *kernel, uint32_t slot,
-			 uint32_t elapsed_ms)
+			 uint32_t elapsed_ms, int privileged)
 {
 	zzapp_thread_t *thread = &kernel->threads[slot];
-	uint32_t charged = elapsed_ms;
 
-	if (charged > thread->quantum_left)
-		charged = thread->quantum_left;
-	thread->user_ticks += charged;
-	thread->quantum_left -= charged;
+	/* Accumulate the full elapsed interval that ran. An app that
+	 * blocked or went to sleep had its quantum zeroed before the
+	 * switch, but the interval it executed before blocking must
+	 * not be lost. */
+	if (privileged)
+		thread->svc_ticks += elapsed_ms;
+	else
+		thread->user_ticks += elapsed_ms;
+
+	/* Clamp only the quantum decrement. */
+	if (thread->quantum_left <= elapsed_ms)
+		thread->quantum_left = 0U;
+	else
+		thread->quantum_left -= elapsed_ms;
+
 	if (thread->quantum_left == 0U)
 		kernel->active = NO_ACTIVE;
 }
@@ -610,7 +711,7 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	pick = choose_app(kernel);
 	if (pick >= 0) {
 charge_app:
-		charge_slice(kernel, (uint32_t)pick, elapsed_ms);
+		charge_slice(kernel, (uint32_t)pick, elapsed_ms, 0);
 		return pick;
 	}
 	return ZZAPP_KERNEL_IDLE;
@@ -685,25 +786,49 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 #if ZZAPP_PERF_COUNTERS
 	kernel_perf_tlb_leave(kernel, slot);
 #endif
+	/* The interval since this context was dispatched, not a fixed quantum
+	 * and not zero on a voluntary handoff. */
+	{
+		uint64_t now_ms = zzapp_kernel_now_ms();
+		uint32_t elapsed = 0U;
+		int privileged = 0;
+		int was_idle = kernel->idle;
+
+		if (kernel->slice_valid && now_ms >= kernel->slice_started_ms) {
+			uint64_t delta = now_ms - kernel->slice_started_ms;
+
+			elapsed = delta > UINT32_MAX ? UINT32_MAX : (uint32_t)delta;
+		}
+		kernel->slice_started_ms = now_ms;
+		kernel->slice_valid = 1U;
+		kernel->idle = 0U;
+		if (was_idle)
+			kernel->idle_ticks += elapsed;
+		if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS && frame)
+			privileged = (frame->spsr & 0x1fU) != ZZAPP_KERNEL_APP_CPSR;
+		zzapp_kernel_advance(kernel, elapsed);
+		if (kernel->now - kernel->window_start >
+		    ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
+			kernel->window_start = kernel->now;
+			kernel->service_in_window = 0;
+		}
+		if (elapsed != 0U && !was_idle) {
+			if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS)
+				charge_slice(kernel, (uint32_t)slot, elapsed,
+					     privileged);
+			else {
+				kernel->service_ticks += elapsed;
+				kernel->service_in_window += elapsed;
+			}
+		}
+	}
 	if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS) {
 		context_save(&kernel->threads[slot].context, frame, return_adjust);
-		pick = zzapp_kernel_dispatch(kernel, source,
-					     source == ZZAPP_KERNEL_DISPATCH_TICK ?
-					     ZZAPP_KERNEL_QUANTUM_MS : 0U);
+		pick = zzapp_kernel_dispatch(kernel, source, 0U);
 	} else {
 		context_save(&kernel->system_context, frame, return_adjust);
 		kernel->system_context_valid = 1U;
-		pick = zzapp_kernel_schedule(kernel,
-			source == ZZAPP_KERNEL_DISPATCH_TICK ?
-			ZZAPP_KERNEL_QUANTUM_MS : 0U);
-		/* Ticks are charged to the app the scheduler picks for the next
-		 * slice. Every tick also makes service due, so the tick usually
-		 * goes to this thread, and the app it hands the core to after its
-		 * pass would run uncharged: the same app kept its quantum forever
-		 * and a second CPU-bound app got about 5% of the core (kit 66,
-		 * two spin apps). Charge that slice too. */
-		if (pick >= 0 && source != ZZAPP_KERNEL_DISPATCH_TICK)
-			charge_slice(kernel, (uint32_t)pick, ZZAPP_KERNEL_QUANTUM_MS);
+		pick = zzapp_kernel_schedule(kernel, 0U);
 	}
 	if ((pick == ZZAPP_KERNEL_SYSTEM || pick == ZZAPP_KERNEL_IDLE) &&
 	    kernel->system_context_valid) {
@@ -858,6 +983,22 @@ int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot)
 	rc = zzapp_kernel_block(kernel, slot);
 	smp_local_irq_restore(irq_state);
 	return rc;
+}
+
+int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t slot, uint64_t sleep_ms)
+{
+	uint32_t irq_state;
+	uint64_t deadline;
+
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return -1;
+	irq_state = smp_local_irq_save();
+	if (kernel->api_lock_owner == (int)slot)
+		release_api_lock(kernel);
+	deadline = zzapp_kernel_now(kernel) + sleep_ms;
+	(void)zzapp_kernel_sleep(kernel, slot, deadline);
+	smp_local_irq_restore(irq_state);
+	return 0;
 }
 
 static int surface_overlaps(uint32_t base_a, uint32_t bytes_a,

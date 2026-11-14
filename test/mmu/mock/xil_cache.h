@@ -19,11 +19,13 @@ struct xil_cache_mock_flush {
 	unsigned long len;
 	uint32_t l1_entry;   /* mmu_page_test_l1[watch_section] */
 	uint32_t page_entry; /* page table[watch_page] */
+	uint32_t watch_value;
 };
 
 struct xil_cache_mock_state {
 	unsigned watch_section;
 	unsigned watch_page;
+	const volatile uint32_t *watch_word;
 	unsigned count;
 	struct xil_cache_mock_flush ops[XIL_CACHE_MOCK_CAPACITY];
 };
@@ -44,6 +46,8 @@ static inline void Xil_DCacheFlushRange(INTPTR adr, unsigned long len)
 	op->l1_entry = mmu_page_test_l1[g_xil_cache_mock.watch_section & 0xfffU];
 	op->page_entry =
 		mmu_page_test_page_table()[g_xil_cache_mock.watch_page & 0xffU];
+	op->watch_value = g_xil_cache_mock.watch_word ?
+		*g_xil_cache_mock.watch_word : 0U;
 }
 
 #endif

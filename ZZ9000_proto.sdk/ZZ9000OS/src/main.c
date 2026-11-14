@@ -1324,7 +1324,12 @@ int main() {
 	       ZZ9000_BUILD_DIRTY " date=" ZZ9000_BUILD_DATE "\r\n");
 
 	/* Build the core-1-only privileged template after every boot-time page
-	 * split. Subsequent splits propagate through its mmu_page hook. */
+	 * split. Firmware text is already an L2 table before core 1 walks it,
+	 * so the first app's text protection only rewrites page entries. */
+	extern char __firmware_text_start[];
+	extern char __firmware_text_end[];
+	zzapp_as_set_firmware_text((uint32_t)(uintptr_t)__firmware_text_start,
+				   (uint32_t)(uintptr_t)__firmware_text_end);
 	zzapp_as_init(&MMUTable);
 
 	// Mark the task-queue region shareable-cacheable in the shared MMU table

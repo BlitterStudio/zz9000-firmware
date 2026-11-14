@@ -145,7 +145,7 @@ WEAK unsigned sdk_compression_reclaim_app_decode(uint32_t owner)
 { (void)owner; return 0; }
 WEAK uint32_t sdk_compression_app_decode_owner(uint32_t slot,
                                                 uint32_t generation)
-{ return ((uint32_t)2u << 24) | ((generation << 2) | slot); }
+{ return sdk_compression_app_owner_bits(slot, generation); }
 WEAK uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *b,
                                      struct SDKImageStreamResult *r)
 { (void)b; (void)r; return SDK_STATUS_UNSUPPORTED; }
@@ -190,6 +190,7 @@ struct zzapp_minigl_binding {
 
 static struct zzapp_minigl_binding g_minigl;
 static uint32_t api_slot(void);
+static int minigl_binding_matches(uint32_t owner, uint32_t generation);
 static uint32_t app_decode_owner(void);
 
 static int minigl_app_ops_ready(const zzm_minigl_ops_v1_t *ops)
@@ -287,10 +288,15 @@ int zzapp_minigl_bind(uint32_t surface_id, const zzapp_gl **out)
     return zzapp_minigl_bind_flags(surface_id, 0U, out);
 }
 
-void zzapp_minigl_swap(void)
+int zzapp_minigl_swap(void)
 {
-    if (g_minigl.ops)
-        (void)g_minigl.ops->app_swap(g_minigl.context);
+    uint32_t owner = api_slot();
+    uint32_t generation = zzapp_current_generation();
+
+    if (!minigl_binding_matches(owner, generation))
+        return ZZ_EBUSY;
+    (void)g_minigl.ops->app_swap(g_minigl.context);
+    return ZZ_OK;
 }
 
 static int minigl_binding_matches(uint32_t owner, uint32_t generation)
@@ -620,7 +626,8 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
     int rc;
 
     if (!open || !session || !out || !open->tile || !open->stride ||
-        !open->rows || !open->tile_bytes)
+        !open->rows || !open->tile_bytes ||
+        open->output_format != ZZ_FMT_BGRA8888)
         return ZZ_EINVAL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
                 g_image_sessions[owner][i].id; ++i) {}
@@ -630,15 +637,12 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
     memset(&begin, 0, sizeof(begin));
     begin.codec = open->codec;
     begin.output_mode = SDK_IMAGE_OUTPUT_TILE_BUFFER;
-    begin.output_format = open->output_format == ZZ_FMT_BGRA8888 ?
-        SDK_SURFACE_FORMAT_BGRA8888 : SDK_SURFACE_FORMAT_UNKNOWN;
+    begin.output_format = SDK_SURFACE_FORMAT_BGRA8888;
     begin.tile_stride = open->stride;
     begin.tile_rows = open->rows;
     begin.tile_address = (uintptr_t)open->tile;
     begin.tile_length = open->tile_bytes;
     begin.flags = open->flags;
-    if (begin.output_format == SDK_SURFACE_FORMAT_UNKNOWN)
-        return ZZ_EINVAL;
     begin.core1_affine = 1u;
     begin.direct_arm_local = 1u;
     zzapp_api_enter();
@@ -942,11 +946,15 @@ static void api_gl_swap(void)
 {
     zzapp_gl_telemetry_snapshot_t snapshot;
     uint32_t slot = api_slot();
-    int report;
+    int report = 0;
 
     zzapp_api_enter();
-    report = zzapp_svc_gl_telemetry_swap(slot, zzapp_host_time_us(), &snapshot);
-    zzapp_minigl_swap();
+    if (minigl_binding_matches(slot, zzapp_current_generation())) {
+        report = zzapp_svc_gl_telemetry_swap(slot, zzapp_host_time_us(),
+                                             &snapshot);
+        if (zzapp_minigl_swap() != ZZ_OK)
+            report = 0;
+    }
     zzapp_api_leave();
     if (report)
         zzapp_svc_gl_telemetry_report(slot, &snapshot);
@@ -955,7 +963,7 @@ static void api_gl_swap(void)
 static void api_gl_swap(void)
 {
     zzapp_api_enter();
-    zzapp_minigl_swap();
+    (void)zzapp_minigl_swap();
     zzapp_api_leave();
 }
 #endif

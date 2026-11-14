@@ -74,6 +74,29 @@ static void dynamic_entry(const void *api_ptr, int argc, char **argv)
     dynamic_started = 1;
 }
 
+static int boundary_started;
+static int boundary_argc;
+static char *boundary_argv0;
+static uint32_t boundary_frames;
+
+static void boundary_entry(const void *api_ptr, int argc, char **argv)
+{
+    (void)api_ptr;
+    boundary_argc = argc;
+    boundary_argv0 = argv ? argv[0] : (char *)1;
+    boundary_frames = zzapp_proc_slot(0)->heap_frame_count;
+    boundary_started = 1;
+}
+
+static void crossing_entry(const void *api_ptr, int argc, char **argv)
+{
+    (void)api_ptr;
+    assert(argc == 1);
+    assert(argv != NULL && argv[0] != NULL);
+    assert(strcmp(argv[0], "frame-crossing-arg") == 0);
+    boundary_started = 1;
+}
+
 
 
 #define IMAGE_BYTES 0x200u
@@ -325,5 +348,42 @@ int main(void)
     put32(image + NOTE_OFF + 40u, 600u);
     assert(load_end(image) == ZZ_ENOMEM);
     assert(zzapp_loader_state() == ZZAPP_ST_IDLE);
+
+    /* API 0.3 image ending on a frame with no reserved heap must still
+     * start, including argc 0: the terminating argv pointer needs a frame. */
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + PHOFF + 20u, (1u << 20) - LOAD_OFF);
+    put32(image + NOTE_OFF + 28u, 3u);
+    put32(image + NOTE_OFF + 40u, 0u);
+    assert(load_end(image) == ZZ_OK);
+    assert(zzapp_proc_slot(0)->heap_frame_count == 0u);
+    boundary_started = 0;
+    start_argc = 0u;
+    zzapp_test_set_entry(boundary_entry);
+    start_pending = 1;
+    zzapp_worker_hook();
+    assert(boundary_started);
+    assert(boundary_argc == 0);
+    assert(boundary_argv0 == NULL);
+    assert(boundary_frames >= 1u);
+
+    /* An argv string that starts in one frame and ends in the next. */
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + PHOFF + 20u, 0xFFFE0u - LOAD_OFF);
+    put32(image + NOTE_OFF + 28u, 3u);
+    put32(image + NOTE_OFF + 40u, 1u);
+    assert(load_end(image) == ZZ_OK);
+    zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
+                   ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
+    memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
+           "frame-crossing-arg", 19u);
+    boundary_started = 0;
+    start_argc = 1u;
+    zzapp_test_set_entry(crossing_entry);
+    start_pending = 1;
+    zzapp_worker_hook();
+    assert(boundary_started);
     return 0;
 }

@@ -18,6 +18,8 @@ int zzapp_mem_boot_check(uint32_t reserve)
     return permanent - reserve <= ZZAPP_MEM_PRIVATE_WINDOW_BYTES ? 0 : -1;
 }
 
+static zzapp_mem_t *live_memory;
+
 int zzapp_mem_init(zzapp_mem_t *memory, card_pool_t *pool)
 {
     if (!memory || !pool || zzapp_mem_boot_check(ZZAPP_MEM_SYSTEM_RESERVE_BYTES))
@@ -26,7 +28,19 @@ int zzapp_mem_init(zzapp_mem_t *memory, card_pool_t *pool)
     memory->lock = (sdk_smp_lock_t)SDK_SMP_LOCK_INIT;
     memory->pool = pool;
     memory->low_armed = 1;
+    live_memory = memory;
     return 0;
+}
+
+void zzapp_mem_reset_lock(zzapp_mem_t *memory)
+{
+    if (memory)
+        sdk_smp_lock_reset(&memory->lock);
+}
+
+void zzapp_mem_reset_live_lock(void)
+{
+    zzapp_mem_reset_lock(live_memory);
 }
 
 void zzapp_mem_proc_init(zzapp_mem_proc_t *proc, uint32_t limit)

@@ -69,13 +69,11 @@ typedef char decode_owner_is_media[
 	CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffeu) ? 1 : -1];
 static uint32_t app_decode_owners[4];
 
-/* Reserve the top three MEDIA instances for shared decoders. Two low bits
- * carry the app slot; the remaining instance range carries a generation
- * without colliding with those shared instances. */
+/* App owners live at or above SDK_MEDIA_APP_INSTANCE_BASE. Video session
+ * pool owners stay below that line, including session 4. */
 uint32_t sdk_compression_app_decode_owner(uint32_t slot, uint32_t generation)
 {
-	uint32_t owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA,
-		((generation % 0x003fffffU) << 2) | (slot & 3U));
+	uint32_t owner = sdk_compression_app_owner_bits(slot, generation);
 
 	app_decode_owners[slot & 3U] = owner;
 	return owner;

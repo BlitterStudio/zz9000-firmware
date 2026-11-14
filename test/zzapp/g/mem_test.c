@@ -176,6 +176,23 @@ static void test_frames_leave_legacy_arena_class_alone(void)
     CHECK(card_pool_alloc(&card_pool, MB(1), legacy) == 0);
 }
 
+static void test_orphaned_allocator_lock_does_not_deadlock_release(void)
+{
+    uint32_t frames[2];
+
+    reset_memory();
+    CHECK(zzapp_mem_alloc(&memory, &proc_a, 2, frames) == 0);
+    memory.lock.owner = 1;
+    memory.lock.depth = 1U;
+    memory.lock.raw = 1U;
+    zzapp_mem_reset_live_lock();
+    CHECK(memory.lock.owner == -1);
+    CHECK(memory.lock.depth == 0U);
+    CHECK(memory.lock.raw == 0U);
+    CHECK(zzapp_mem_release_proc(&memory, &proc_a) == MB(2));
+    CHECK(proc_a.frame_count == 0U);
+}
+
 int main(void)
 {
     test_frames_and_empty_extent_return();
@@ -186,6 +203,7 @@ int main(void)
     test_frames_are_zeroed();
     test_proc_release_is_idempotent();
     test_low_water_rearms_above_high_water();
+    test_orphaned_allocator_lock_does_not_deadlock_release();
     test_frames_leave_legacy_arena_class_alone();
     printf("zzapp_mem: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

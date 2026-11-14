@@ -30,6 +30,9 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "sdk_media_session.h"
 #include "sdk_smp_lock.h"
 #include "card_pool.h"
+#include "l2_maint.h"
+#include "surface_allocator.h"
+#include "zzm_loader.h"
 #include "zzm_minigl_host.h"
 #include "core2.h"
 #include "interrupt.h"
@@ -117,37 +120,29 @@ taskq_shared_t *scheduler_shared(void)
   return (taskq_shared_t *)SDK_TASKQ_REGION_ADDRESS;
 }
 
+void zzapp_recover_external_locks(void)
+{
+  /* One list, used by cold restart, the watchdog and the single-core
+   * fallback, always before context retirement and teardown. */
+  card_pool_reset_lock(&card_pool);
+  l2_maint_reset_core1_lock();
+  zzapp_services_reset_core1_lock();
+  sdk_smp_lock_reset_malloc();
+  sdk_image_stream_reset_locks();
+  zzm_loader_reset_session_lock();
+  zzapp_as_reset_lock();
+  zzapp_mem_reset_live_lock();
+  surface_allocator_reset_lock();
+  zzm_runtime_reset_heap_lock();
+}
+
 void scheduler_boot_init(void)
 {
   taskq_shared_t *sh = scheduler_shared();
-  taskq_init(&sh->queue);
-  sh->core1_current_slot = -1;
-  sh->core1_restart_request = 0;
-  sh->core1_fault_code = 0;
-  sh->core1_alive = 0;
-  sh->tasks_on_core1 = 0;   /* observability counters live in uninitialised DDR */
-  sh->tasks_on_core0 = 0;   /* until zeroed here -- must not read back as garbage */
-  sh->core1_park_request = 0;  /* garbage here would park core 1 at launch */
-  sh->core1_parked = 0;
-  sh->core1_reclaim_request = 0;
-  sh->core1_reclaim_done = 0;
-  sh->core1_clean_request = 0;
-  sh->core1_clean_done = 0;
-  sh->minigl_doorbell = 0;
-  sh->minigl_reset_request = 0;
-  sh->minigl_reset_ack = 0;
-  sh->minigl_in_flight = 0;
-  sh->minigl_submission_admission = 1U;
-  sh->minigl_submission_generation = 0U;
-  sh->minigl_submission_ack = 0U;
-  sh->minigl_packets_on_core1 = 0;
-  sh->minigl_rix_fence_epoch = 0U;
-  sh->minigl_rix_fence_sequence = 0U;
-  sh->minigl_rix_fence_address = 0U;
-#if ZZAPP_PERF_COUNTERS
-  sh->perf_doorbell_stamp = 0U;
-  sh->perf_sgi_count = 0U;
-#endif
+
+  /* Doorbell and perf words live in uninitialised DDR. Clear them before
+   * core 1 starts, including when performance counters are compiled out. */
+  taskq_shared_boot_init(sh);
   zzapp_kernel_stack_paint((uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
                            SDK_CORE1_SYSTEM_STACK_SIZE);
   {
@@ -156,7 +151,6 @@ void scheduler_boot_init(void)
       zzapp_kernel_stack_paint(scheduler_app_stacks[slot],
                                sizeof(scheduler_app_stacks[slot]));
   }
-  sh->minigl_packets_on_core0 = 0;
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   zzapp_boot_init();
   g_core1_started = 0;
@@ -725,8 +719,11 @@ void scheduler_core1_worker(void)
     apps_runnable = zzapp_kernel_apps_runnable(zzapp_runtime_kernel());
     if (apps_runnable)
       __asm__ __volatile__("svc #0" ::: "memory");
-    else if (should_wfe)
+    else if (should_wfe) {
+      zzapp_kernel_idle_begin(zzapp_runtime_kernel());
       __asm__ __volatile__("wfe" ::: "memory");
+      zzapp_kernel_idle_end(zzapp_runtime_kernel());
+    }
   }
 }
 
@@ -911,18 +908,8 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     sh->core1_restart_request = 0;
     dmb();  /* publish the clear before the reset re-enters the worker */
     taskq_watchdog_on_fault(&g_sched_watchdog);
-    /* Core 1 is parked in its fault handler. If it faulted inside the card
-     * pool, its lock is still held; free it before the poison handlers
-     * below release their sessions' pool memory. */
+    /* Poison may take the card pool before either branch retires apps. */
     card_pool_reset_lock(&card_pool);
-    zzapp_on_core1_restart();
-    /* Core-1-affine image sessions lost their codec heap objects with the
-     * fault; both branches below reclaim the decode blocks core 1 left
-     * allocated (the cold restart inside core1_cold_restart, the
-     * single-core fallback inline). Drop the dangling references in BOTH
-     * branches so core 0 never destroys against reclaimed memory. Audio
-     * streams hold no heap objects, but their embedded decoder state may
-     * be mid-frame; mark them faulted so feeds/reads fail cleanly. */
     sdk_image_stream_poison_core1_sessions();
     sdk_video_stream_poison_core1_sessions();
     sdk_media_session_poison_core1();
@@ -930,25 +917,14 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     if (taskq_watchdog_core1_enabled(&g_sched_watchdog)) {
       core1_cold_restart();
     } else {
-      /* Single-core fallback: core 1 never runs again, so the
-       * cold-restart recovery duties cannot run in core1_cold_restart.
-       * Mirror them inline: core 1 is halted on the fault, the malloc
-       * lock reset clears any spinlock it may hold, the decode-state
-       * lock reset clears any budget lock it orphaned, and the reclaim
-       * frees the decode blocks it left allocated (the poisoned sessions
-       * above have already released their charges, so the 72 MiB budget
-       * stays usable). */
-      sdk_smp_lock_reset_malloc();
-      sdk_image_stream_reset_locks();
-      zzm_runtime_reset_heap_lock();
-      zzapp_services_reclaim_halted_audio();
+      /* Same order as a cold restart: every lock, then contexts, then
+       * teardown. The helper owns that order; only non-lock reclaim
+       * remains here because core 1 will not run it. */
+      zzapp_recover_halted_core1();
       sdk_compression_reclaim_core1_decode();
-      /* No worker will acknowledge RasterIX quiescence in this mode. Keep
-       * every MiniGL class reserved before any later reset reclaims owners. */
+      zzapp_services_reclaim_halted_audio();
       zzm_runtime_quarantine_module(ZZM_MODULE_MINIGL);
-      g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
-      /* MiniGL is never parsed on core 0.  A module worker can only resume
-       * after core 1 returns; its transport remains unavailable meanwhile. */
+      g_core1_started = 0;
     }
   }
 

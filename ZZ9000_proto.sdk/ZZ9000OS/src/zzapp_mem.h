@@ -54,6 +54,10 @@ int zzapp_mem_boot_check(uint32_t reserve);
 /* Initialize the frame allocator. Returns nonzero when the configured
  * reserve cannot satisfy the private-window bound. */
 int zzapp_mem_init(zzapp_mem_t *memory, card_pool_t *pool);
+/* Core 1 is halted. Free the lock if that core died holding it. */
+void zzapp_mem_reset_lock(zzapp_mem_t *memory);
+/* Reset the allocator last passed to zzapp_mem_init, if any. */
+void zzapp_mem_reset_live_lock(void);
 void zzapp_mem_proc_init(zzapp_mem_proc_t *proc, uint32_t limit);
 void zzapp_mem_set_low_memory_callback(zzapp_mem_t *memory,
                                        zzapp_mem_low_callback_t callback,

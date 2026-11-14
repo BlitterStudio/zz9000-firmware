@@ -66,9 +66,25 @@ uint16_t sdk_decompress_stream_close(uint32_t session);
 
 /*
  * Reclaim card-pool-owned decode working sets after a core-1 cold reset.
- * An app owner encodes its slot and generation, so an ordinary app
- * force-stop only reclaims that app's decoder allocations.
+ * An app owner encodes its slot and generation in the high half of the
+ * MEDIA instance space. SDK video sessions use the low half and never
+ * assign those instances, so an app force-stop cannot free a live video
+ * decoder. The top instances stay reserved for the shared decode heap.
  */
+#define SDK_MEDIA_APP_INSTANCE_BASE 0x00800000U
+#define SDK_MEDIA_SHARED_INSTANCE   0x00FFFFFCU
+
+static inline uint32_t sdk_compression_app_owner_bits(uint32_t slot,
+						      uint32_t generation)
+{
+	uint32_t span = (SDK_MEDIA_SHARED_INSTANCE -
+			 SDK_MEDIA_APP_INSTANCE_BASE) >> 2;
+	uint32_t instance = SDK_MEDIA_APP_INSTANCE_BASE |
+		(((generation % span) << 2) | (slot & 3U));
+
+	return ((uint32_t)2u << 24) | instance;
+}
+
 unsigned sdk_compression_reclaim_core1_decode(void);
 unsigned sdk_compression_reclaim_app_decode(uint32_t owner);
 uint32_t sdk_compression_app_decode_owner(uint32_t slot,

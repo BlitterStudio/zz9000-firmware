@@ -251,6 +251,13 @@ int main(void)
     assert(g_telemetry_swaps == 1U);
     assert(g_telemetry_reports == 1U);
     zzapp_kernel_set_current_thread(1);
+    assert(zzapp_minigl_swap() == ZZ_EBUSY);
+    api->gl_swap();
+    assert(g_swaps == 1);
+    assert(g_flips == 1);
+    assert(g_telemetry_swaps == 1U);
+    assert(g_telemetry_reports == 1U);
+    zzapp_kernel_set_current_thread(1);
     api->gl_unbind();
     assert(g_unbinds == 0);
     assert(g_releases == 1);

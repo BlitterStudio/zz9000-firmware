@@ -12,6 +12,7 @@
 #include "sdk_smp_lock.h"
 #include "l2_maint.h"
 #include "card_pool.h"
+#include "surface_allocator.h"
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
 #include "zzm_minigl_host.h"
@@ -368,21 +369,10 @@ void core1_cold_restart(void)
 	 * restart paths: the fault path (record_fault -> scheduler_core0_poll)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
-	/* The card pool, PL310 and app mailbox locks have the same exposure. */
-	card_pool_reset_lock(&card_pool);
-	l2_maint_reset_core1_lock();
-	zzapp_services_reset_core1_lock();
-	sdk_smp_lock_reset_malloc();
-	zzapp_kernel_reset_lock(zzapp_runtime_kernel());
-	/*
-	 * Same orphan-lock exposure as the malloc lock: the cold reset
-	 * can land inside the image-stream decode-state budget
-	 * critical section (the few-instruction check-and-reserve
-	 * window in header parsing), leaving that lock owned by the
-	 * dead core.
-	 */
-	sdk_image_stream_reset_locks();
-	zzm_loader_reset_session_lock();
+	/* One order for every caller: locks, then contexts, then teardown,
+	 * while CPU1 is still held in reset. */
+	zzapp_recover_halted_core1();
+
 
 	/*
 	 * CPU1 is still halted and the malloc lock is now free: reclaim any heap
@@ -398,8 +388,6 @@ void core1_cold_restart(void)
 	dsb();
 	/* Core 1 is halted; the module host owns any active graphics abort. */
 	zzm_minigl_abort_reset();
-	/* heap_forget_owner takes heap_lock. Core 1 may have died holding it. */
-	zzm_runtime_reset_heap_lock();
 	zzapp_services_reclaim_halted_audio();
 	/* Core 0 has no fence proof after halting core 1. RasterIX can continue
 	 * reading DDR lists, so retain every MiniGL owner before discarding the
@@ -762,7 +750,7 @@ void arm_exception_handler_id_data_abort(void *callback) {
 	__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 0" : "=r"(fsr));
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
-	if (!zzapp_fault_wants_restart(DataAbortAddr, DataAbortAddr + 8u)) {
+	if (!zzapp_fault_wants_restart(DataAbortAddr, DataAbortAddr + 8u, cpsr)) {
 		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_DATA, DataAbortAddr, sp, lr, far, fsr, cpsr);
 		return;
@@ -777,7 +765,7 @@ void arm_exception_handler_id_prefetch_abort(void *callback) {
 	__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 1" : "=r"(fsr));
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
-	if (!zzapp_fault_wants_restart(PrefetchAbortAddr, PrefetchAbortAddr + 4u)) {
+	if (!zzapp_fault_wants_restart(PrefetchAbortAddr, PrefetchAbortAddr + 4u, cpsr)) {
 		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_PREFETCH, PrefetchAbortAddr, sp, lr, far, fsr, cpsr);
 		return;
@@ -795,7 +783,7 @@ void arm_exception_handler_illinst(void *callback) {
 	(void)callback;
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
-	if (!zzapp_fault_wants_restart(UndefinedExceptionAddr, UndefinedExceptionAddr + 4u)) {
+	if (!zzapp_fault_wants_restart(UndefinedExceptionAddr, UndefinedExceptionAddr + 4u, cpsr)) {
 		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_UNDEF, UndefinedExceptionAddr, sp, lr, 0, 0, cpsr);
 		return;

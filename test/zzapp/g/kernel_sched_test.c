@@ -6,17 +6,44 @@
 
 static unsigned irq_save_calls;
 static unsigned irq_restore_calls;
+static uint64_t clock_ms;
+static int test_irqs_masked;
+static void (*test_pending_irq_fn)(void);
+static void (*test_clock_hook)(void);
+
+uint64_t zzapp_kernel_now_ms(void)
+{
+	if (test_clock_hook)
+		test_clock_hook();
+	return clock_ms;
+}
 
 uint32_t smp_local_irq_save(void)
 {
+	uint32_t prior = (uint32_t)test_irqs_masked;
 	irq_save_calls++;
-	return 0U;
+	test_irqs_masked = 1;
+	return prior;
 }
 
 void smp_local_irq_restore(uint32_t state)
 {
-	(void)state;
 	irq_restore_calls++;
+	test_irqs_masked = (int)state;
+	if (!test_irqs_masked && test_pending_irq_fn) {
+		void (*fn)(void) = test_pending_irq_fn;
+		test_pending_irq_fn = NULL;
+		fn();
+	}
+}
+
+static void test_request_irq(void (*fn)(void))
+{
+	if (!test_irqs_masked) {
+		fn();
+	} else {
+		test_pending_irq_fn = fn;
+	}
 }
 
 static int failures;
@@ -84,11 +111,13 @@ static void test_frame_switch(void)
 	frame = kernel.threads[0].context.frame;
 	frame.exception_lr = 0x1004u;
 	zzapp_kernel_set_current_thread(0);
+	clock_ms = 0;
 	next = zzapp_kernel_switch_frame(&kernel, &frame,
 					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
 	CHECK(next == &kernel.threads[0].context.frame);
 	CHECK(kernel.threads[0].context.r[15] == 0x1000u);
 	CHECK(kernel.threads[0].context.r[13] == 0x8000u);
+	clock_ms = 5;
 	next = zzapp_kernel_switch_frame(&kernel, next,
 					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
 	CHECK(next == &kernel.threads[1].context.frame);
@@ -167,6 +196,7 @@ static void test_ticks_through_system_thread_share_fairly(void)
 		 * is spent; the system thread then finishes its pass and
 		 * yields. */
 		zzapp_kernel_service_due(&kernel);
+		clock_ms += 5;
 		next = zzapp_kernel_switch_frame(&kernel, next,
 						 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
 		if (zzapp_kernel_current_thread() == -1)
@@ -175,6 +205,259 @@ static void test_ticks_through_system_thread_share_fairly(void)
 	}
 	CHECK(runs[0] + runs[1] == 200u);
 	CHECK(runs[0] >= 95u && runs[1] >= 95u);
+}
+
+/* 4 ms of services then 1 ms of the app before the tick charges 4 and 1.
+ * A voluntary handoff after 2 ms charges those 2 ms, not a full quantum. */
+static void test_tick_charges_the_context_that_ran(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	kernel.threads[0].state = ZZAPP_THREAD_BLOCKED;
+	frame.spsr = ZZAPP_KERNEL_APP_CPSR;
+	clock_ms = 0;
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(zzapp_kernel_current_thread() == -1);
+	kernel.threads[0].state = ZZAPP_THREAD_RUNNABLE;
+	clock_ms = 4;
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(kernel.service_ticks == 4u);
+	CHECK(kernel.threads[0].user_ticks == 0u);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	clock_ms = 5;
+	next->spsr = ZZAPP_KERNEL_APP_CPSR;
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+	CHECK(kernel.threads[0].user_ticks == 1u);
+	CHECK(kernel.service_ticks == 4u);
+	CHECK(kernel.threads[0].svc_ticks == 0u);
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	frame.spsr = ZZAPP_KERNEL_APP_CPSR;
+	clock_ms = 10;
+	zzapp_kernel_set_current_thread(0);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	clock_ms = 12;
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(kernel.threads[0].user_ticks == 2u);
+	CHECK(kernel.service_ticks == 0u);
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	frame.spsr = 0x1fu;
+	clock_ms = 20;
+	zzapp_kernel_set_current_thread(0);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	clock_ms = 23;
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(kernel.threads[0].svc_ticks == 3u);
+	CHECK(kernel.threads[0].user_ticks == 0u);
+	(void)next;
+}
+
+static void test_blocking_after_3ms_charges_3(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	frame.spsr = ZZAPP_KERNEL_APP_CPSR;
+	clock_ms = 0;
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	clock_ms = 3;
+	CHECK(zzapp_kernel_block(&kernel, 0) == 0);
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(kernel.threads[0].user_ticks == 3u);
+	(void)next;
+}
+
+static void test_wfe_idle_gap_charges_nothing(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	zzapp_kernel_set_current_thread(-1);
+	clock_ms = 0;
+	zzapp_kernel_idle_begin(&kernel);
+	CHECK(kernel.idle == 1u);
+	clock_ms = 50;
+	zzapp_kernel_service_due(&kernel);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_DOORBELL, 0u);
+	CHECK(kernel.idle == 0u);
+	CHECK(kernel.idle_ticks == 50u);
+	CHECK(kernel.service_ticks == 0u);
+	CHECK(kernel.service_in_window == 0u);
+	CHECK(kernel.overload_count == 0u);
+	CHECK(zzapp_kernel_current_thread() == -1);
+	(void)next;
+}
+
+static void test_recovery_gap_charges_nothing(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	zzapp_kernel_set_current_thread(-1);
+	clock_ms = 10;
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	clock_ms = 15;
+	zzapp_kernel_reset_slice(&kernel);
+	CHECK(kernel.slice_valid == 0u);
+	clock_ms = 215;
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(kernel.service_ticks == 0u);
+	CHECK(kernel.service_in_window == 0u);
+	(void)next;
+}
+
+static zzapp_kernel_t *g_test_kernel;
+static zzapp_arm_frame_t g_test_irq_frame;
+static int g_test_irq_fired;
+static int g_test_state_at_irq;
+static uint64_t g_test_deadline_at_irq;
+
+static void simulate_timer_irq(void)
+{
+	g_test_irq_fired++;
+	g_test_state_at_irq = (int)g_test_kernel->threads[0].state;
+	g_test_deadline_at_irq = g_test_kernel->threads[0].sleep_deadline;
+	(void)zzapp_kernel_switch_frame(g_test_kernel, &g_test_irq_frame,
+					ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+}
+
+static void hook_trigger_sleep_irq(void)
+{
+	test_clock_hook = NULL;
+	test_request_irq(simulate_timer_irq);
+}
+
+static void test_api_sleep_atomic_against_injected_irq(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	clock_ms = 0;
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(zzapp_kernel_current_thread() == 0);
+
+	/* Arm the clock hook: inside zzapp_kernel_api_sleep(), the clock lookup
+	 * occurs while IRQs are masked. The hook requests an IRQ. Because IRQs
+	 * are masked, the IRQ is pended and does not fire until unmask after sleep
+	 * deadline publication. */
+	g_test_kernel = &kernel;
+	g_test_irq_frame = *next;
+	g_test_irq_fired = 0;
+	g_test_state_at_irq = -1;
+	g_test_deadline_at_irq = 0U;
+	test_clock_hook = hook_trigger_sleep_irq;
+
+	CHECK(zzapp_kernel_api_sleep(&kernel, 0, 10u) == 0);
+	/* Unmask delivered the pended IRQ, which ran switch_frame. */
+	CHECK(g_test_irq_fired == 1);
+	CHECK(g_test_state_at_irq == ZZAPP_THREAD_SLEEPING);
+	CHECK(g_test_deadline_at_irq == 10u);
+	CHECK(kernel.api_lock_owner == -1);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_SLEEPING);
+	CHECK(kernel.threads[0].sleep_deadline == 10u);
+
+	/* 10 ms elapse: the deadline arrives and the sleeper wakes up. */
+	clock_ms = 10;
+	zzapp_kernel_advance(&kernel, 10u);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
+}
+
+static void simulate_idle_timer_irq(void)
+{
+	g_test_irq_fired++;
+	clock_ms = 20;
+	(void)zzapp_kernel_switch_frame(g_test_kernel, &g_test_irq_frame,
+					ZZAPP_KERNEL_DISPATCH_TICK, 4u);
+}
+
+static void hook_trigger_idle_irq(void)
+{
+	test_clock_hook = NULL;
+	test_request_irq(simulate_idle_timer_irq);
+}
+
+static void test_idle_irq_no_double_charge(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+
+	zzapp_kernel_init(&kernel);
+	zzapp_kernel_set_current_thread(-1);
+	clock_ms = 0;
+
+	/* Arm the clock hook: inside zzapp_kernel_idle_begin(), zzapp_kernel_now_ms()
+	 * runs while IRQs are masked. The hook requests an IRQ.
+	 * Because IRQs are masked, idle_begin sets idle = 1 before the IRQ fires
+	 * at unmask. Switch_frame sees was_idle = 1, charges idle_ticks, and
+	 * does not charge service_ticks. */
+	g_test_kernel = &kernel;
+	g_test_irq_frame = frame;
+	g_test_irq_fired = 0;
+	test_clock_hook = hook_trigger_idle_irq;
+
+	zzapp_kernel_idle_begin(&kernel);
+	/* smp_local_irq_restore at the end of idle_begin delivered the IRQ. */
+	CHECK(g_test_irq_fired == 1);
+	CHECK(kernel.idle == 0u);
+	CHECK(kernel.idle_ticks == 20u);
+	CHECK(kernel.service_ticks == 0u);
+	CHECK(kernel.service_in_window == 0u);
+
+	/* Returning to core 1 loop after IRQ executes idle_end at t = 25 ms.
+	 * Since idle is 0, idle_end does not double-charge. */
+	clock_ms = 25;
+	zzapp_kernel_idle_end(&kernel);
+	CHECK(kernel.idle == 0u);
+	CHECK(kernel.idle_ticks == 20u);
+	CHECK(kernel.service_ticks == 0u);
+	CHECK(kernel.service_in_window == 0u);
 }
 
 static void test_service_precedes_app_and_preserves_remainder(void)
@@ -437,11 +720,16 @@ static void test_system_ticks_wake_sleepers(void)
 	make_runnable(&kernel, 0);
 	CHECK(zzapp_kernel_sleep(&kernel, 0, 10u) == 0);
 	zzapp_kernel_set_current_thread(-1);
+	clock_ms = 0;
 	next = zzapp_kernel_switch_frame(&kernel, &system_frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	clock_ms = 5;
+	next = zzapp_kernel_switch_frame(&kernel, next,
 					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
 	CHECK(next == &kernel.system_context.frame);
 	CHECK(kernel.now == 5u);
 	CHECK(kernel.threads[0].state == ZZAPP_THREAD_SLEEPING);
+	clock_ms = 10;
 	next = zzapp_kernel_switch_frame(&kernel, next,
 					 ZZAPP_KERNEL_DISPATCH_TICK, 4u);
 	CHECK(kernel.now == 10u);
@@ -619,6 +907,12 @@ int main(void)
     test_system_frame_runs_service_before_apps();
     test_round_robin_quantum();
     test_ticks_through_system_thread_share_fairly();
+    test_tick_charges_the_context_that_ran();
+    test_blocking_after_3ms_charges_3();
+    test_wfe_idle_gap_charges_nothing();
+    test_recovery_gap_charges_nothing();
+    test_api_sleep_atomic_against_injected_irq();
+    test_idle_irq_no_double_charge();
     test_service_precedes_app_and_preserves_remainder();
     test_block_wake_and_idle();
     test_sleep_deadline_order();

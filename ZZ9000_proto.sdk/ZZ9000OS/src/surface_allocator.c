@@ -40,6 +40,11 @@ void surface_allocator_init(uint32_t base, uint32_t size) {
     sdk_smp_lock_release(&sa_lock);
 }
 
+void surface_allocator_reset_lock(void)
+{
+    sdk_smp_lock_reset(&sa_lock);
+}
+
 /* Index of the block at exactly `addr`, or -1. Caller holds sa_lock. */
 static int sa_find(uint32_t addr) {
     uint32_t lo = 0, hi = sa_count;

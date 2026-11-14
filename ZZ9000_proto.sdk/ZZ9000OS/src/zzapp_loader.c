@@ -88,6 +88,7 @@ void zzapp_loader_unbound(void);
 uint32_t zzapp_loader_generation(void);
 uint32_t zzapp_loader_state(void);
 void zzapp_loader_set_state(uint32_t state);
+void zzapp_services_set_state(uint32_t state);
 int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
                            uint32_t stack_bytes, uint32_t note_flags,
                            uint32_t note_minor, uint32_t min_heap_bytes);
@@ -1092,7 +1093,7 @@ int zzapp_loader_abort(void)
     if (state != ZZAPP_ST_LOADING && state != ZZAPP_ST_STARTING)
         return ZZ_EBUSY;
     drop_arena();
-    zzapp_loader_set_state(ZZAPP_ST_IDLE);
+    zzapp_services_set_state(ZZAPP_ST_IDLE);
     return ZZ_OK;
 }
 

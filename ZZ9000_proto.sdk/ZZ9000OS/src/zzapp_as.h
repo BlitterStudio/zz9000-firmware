@@ -41,11 +41,17 @@ typedef struct {
 	uint8_t active;
 } zzapp_as_t;
 
+/* Sections covering executing firmware. Set before init, while the template
+ * is not walked. Init splits them to L2 so a later protection change only
+ * edits page entries. */
+void zzapp_as_set_firmware_text(uint32_t start, uint32_t end);
 /* Build the privileged kernel template from the BSP's identity table. */
 void zzapp_as_init(const uint32_t *bsp_l1);
 /* Allocate the fixed table for one slot. ASIDs are permanently slot + 1. */
 int zzapp_as_create(zzapp_as_t *as, uint32_t slot, uint32_t generation);
 void zzapp_as_destroy(zzapp_as_t *as);
+/* Core 1 is halted. Free as_lock if that core died holding it. */
+void zzapp_as_reset_lock(void);
 /* Map 1 MiB app frames at a private virtual address. */
 int zzapp_as_map_frames(zzapp_as_t *as, uint32_t virtual_base,
 			const uint32_t *frames, uint32_t frame_count);
@@ -84,5 +90,11 @@ const uint32_t *zzapp_as_l2_for(const zzapp_as_t *as, uint32_t address);
 /* mmu_page.c calls this after changing a BSP mapping. */
 void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 				const uint32_t *pages);
+
+#ifdef MMU_PAGE_HOST_TEST
+extern unsigned zzapp_as_test_kernel_switches;
+void zzapp_as_test_orphan_lock(void);
+int zzapp_as_test_lock_held(void);
+#endif
 
 #endif

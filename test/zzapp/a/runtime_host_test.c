@@ -279,6 +279,25 @@ int main(void)
     assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_SLEEPING);
     assert(zzapp_runtime_kernel()->threads[0].sleep_deadline == 1U);
 
+    /* An app that executes for 4 ms before calling sleep_us(2000) must sleep
+     * for ~2 ms, not return at once due to stale scheduler time. */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_test_mark_running();
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_test_set_xtime(4000u);
+    zzapp_host_sleep(2000u);
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_SLEEPING);
+    assert(zzapp_runtime_kernel()->threads[0].sleep_deadline == 6U);
+    zzapp_kernel_advance(zzapp_runtime_kernel(), 5U);
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_SLEEPING);
+    zzapp_kernel_advance(zzapp_runtime_kernel(), 1U);
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    zzapp_api_leave();
+    zzapp_kernel_set_current_thread(-1);
+
     zzapp_boot_init();
     zzapp_test_set_wait_registered(0U, 1);
     assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
@@ -398,8 +417,15 @@ int main(void)
     assert(zzapp_host_mem_info(&mem) == ZZ_OK);
     assert(mem.host_visible_used == 4096u);
     assert(mem.host_visible_limit >= mem.host_visible_used);
-    assert(zzapp_fault_is_app(card + 4u, 0u));
-    assert(!zzapp_fault_wants_restart(card + 4u, 0u));
+    assert(zzapp_fault_is_app(card + 4u, 0u, ZZAPP_KERNEL_APP_CPSR));
+    assert(!zzapp_fault_wants_restart(card + 4u, 0u, ZZAPP_KERNEL_APP_CPSR));
+    /* SYS and SVC faults inside an API body are privileged, even while
+     * this app is current and the PC is in its arena. */
+    assert(!zzapp_fault_is_app(card + 4u, 0u, 0x1fu));
+    assert(zzapp_fault_wants_restart(card + 4u, 0u, 0x1fu));
+    assert(!zzapp_fault_is_app(card + 4u, 0u, 0x13u));
+    assert(zzapp_fault_wants_restart(card + 4u, 0u, 0x13u));
+    assert(zzapp_fault_wants_restart(card + 4u, 0u, 0u));
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, card + 4u, card + 8u,
                          card + 12u, 0x1234u, 0x5678u, 0x13u);
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);

@@ -300,11 +300,17 @@ int main(void)
 
     memset(&image, 0, sizeof(image));
     image.codec = ZZ_IMAGE_PNG;
-    image.output_format = ZZ_FMT_BGRA8888;
+    image.output_format = 99u;
     image.tile = source;
     image.stride = 4u;
     image.rows = 2u;
     image.tile_bytes = sizeof(source);
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_EINVAL);
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_EINVAL);
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_EINVAL);
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_EINVAL);
+    assert(zzapp_runtime_kernel()->resources[0].image_sessions == 0u);
+    image.output_format = ZZ_FMT_BGRA8888;
     assert(api->image_open(&image, &image_session, &image_result) == ZZ_OK);
     tile_writable = 0;
     assert(api->image_decode(image_session, source, sizeof(source), 0u,

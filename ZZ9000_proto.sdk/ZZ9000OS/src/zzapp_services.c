@@ -513,11 +513,16 @@ static int display_mailbox_owns_state(
 
 void zzapp_services_reset_core1_lock(void)
 {
+	uint32_t slot;
+
+	/* Core 1 can hold any slot's mailbox lock, not only the selected one. */
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
 #ifndef ZZAPP_HOST_TEST
-	sdk_smp_lock_reset(&current_runtime()->display_mailbox_lock);
+		sdk_smp_lock_reset(&runtime[slot].display_mailbox_lock);
 #else
-	__atomic_clear(&current_runtime()->display_mailbox_lock, __ATOMIC_RELEASE);
+		__atomic_clear(&runtime[slot].display_mailbox_lock, __ATOMIC_RELEASE);
 #endif
+	}
 }
 
 static int display_mailbox_enabled(void)
@@ -1308,7 +1313,14 @@ void zzapp_services_on_app_end(void)
 	life_put(ZZAPP_LIFE_FLIP_ADDRESS_OFF, 0U);
 	life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0U);
 	life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF, 0U);
-	slots[service_slot()].state = ZZAPP_ST_IDLE;
+	if (state->audio_teardown ||
+	    state->audio_request == AUDIO_REQUEST_CLOSE ||
+	    state->audio_request == AUDIO_REQUEST_CLOSE_QUIESCED) {
+		slots[service_slot()].state = ZZAPP_ST_STOPPING;
+		life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
+	} else {
+		slots[service_slot()].state = ZZAPP_ST_IDLE;
+	}
 }
 
 void zzapp_services_on_reset(void)
@@ -1476,6 +1488,14 @@ static int wait_file(uint32_t *out_n, uint64_t *out_pos, uint32_t *mode,
 			return ZZ_ETIMEDOUT;
 		}
 		yield_wait_once();
+		if (wait_status() == ZZ_ETIMEDOUT) {
+			win_put32(ZZAPP_FILE_OFF + 0U, state->file_seq + 1U);
+			barrier();
+			win_put32(ZZAPP_FILE_OFF + 4U, 0U);
+			state->file_seq = expect;
+			wait_end();
+			return ZZ_ETIMEDOUT;
+		}
 		if (wait_status() != ZZ_OK) {
 			wait_end();
 			return wait_status();
@@ -1953,15 +1973,19 @@ int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n)
 		uint32_t at;
 		uint32_t n;
 
-		if (head - tail > ZZAPP_CONSOLE_IN_CAP)
+		if (head - tail > ZZAPP_CONSOLE_IN_CAP) {
+			wait_end();
 			return ZZ_EIO;
+		}
 		if (available == 0U) {
 			if (win_get32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF)) {
 				win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 0U);
+				wait_end();
 				return ZZ_OK;
 			}
 			if (zzapp_services_stop_requested()) {
 				win_put32(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_WANT_OFF, 0U);
+				wait_end();
 				return ZZ_EIO;
 			}
 			/* The launcher reads the keyboard only while this is set. */
@@ -3181,24 +3205,56 @@ static void audio_post_teardown(void)
 		current_runtime()->audio_request = AUDIO_REQUEST_CLOSE;
 }
 
-void zzapp_services_reclaim_halted_audio(void)
+static int audio_handoff_pending(const struct zzapp_service_runtime *state)
+{
+	return state->audio_teardown ||
+	       state->audio_request == AUDIO_REQUEST_CLOSE ||
+	       state->audio_request == AUDIO_REQUEST_CLOSE_QUIESCED;
+}
+
+static void finish_audio_slot_release(void)
+{
+	if (slots[service_slot()].state != ZZAPP_ST_STOPPING ||
+	    audio_handoff_pending(current_runtime()))
+		return;
+	slots[service_slot()].state = ZZAPP_ST_IDLE;
+	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
+}
+
+static void reclaim_halted_audio_slot(void)
 {
 	if (current_runtime()->audio_request == AUDIO_REQUEST_OPEN) {
 		current_runtime()->audio_result = ZZ_EIO;
 		current_runtime()->audio_teardown = 0;
 		barrier();
 		current_runtime()->audio_request = AUDIO_REQUEST_NONE;
+		finish_audio_slot_release();
 		return;
 	}
 	if (!current_runtime()->audio_open && !current_runtime()->audio_block &&
 	    current_runtime()->audio_request != AUDIO_REQUEST_CLOSE &&
-	    current_runtime()->audio_request != AUDIO_REQUEST_CLOSE_QUIESCED)
+	    current_runtime()->audio_request != AUDIO_REQUEST_CLOSE_QUIESCED) {
+		finish_audio_slot_release();
 		return;
+	}
 	audio_detach();
 	current_runtime()->audio_teardown = 0;
 	current_runtime()->audio_result = ZZ_OK;
 	barrier();
 	current_runtime()->audio_request = AUDIO_REQUEST_NONE;
+	finish_audio_slot_release();
+}
+
+void zzapp_services_reclaim_halted_audio(void)
+{
+	uint32_t slot;
+	uint32_t selected = selected_slot[service_context()];
+
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		select_slot(slot);
+		reclaim_halted_audio_slot();
+	}
+	select_slot(selected);
 }
 
 static void wake_ready_waits(void)
@@ -3267,15 +3323,21 @@ static void audio_core0_poll_slot(void)
 		if (current_runtime()->audio_teardown &&
 		    (current_runtime()->audio_open || current_runtime()->audio_block))
 			current_runtime()->audio_request = AUDIO_REQUEST_CLOSE;
+		else
+			current_runtime()->audio_teardown = 0;
+		finish_audio_slot_release();
 		return;
 	}
-	if (request != AUDIO_REQUEST_CLOSE_QUIESCED)
+	if (request != AUDIO_REQUEST_CLOSE_QUIESCED) {
+		finish_audio_slot_release();
 		return;
+	}
 	audio_detach();
 	current_runtime()->audio_teardown = 0;
 	current_runtime()->audio_result = ZZ_OK;
 	barrier();
 	current_runtime()->audio_request = AUDIO_REQUEST_NONE;
+	finish_audio_slot_release();
 }
 
 void zzapp_services_core0_poll(void)
@@ -3787,7 +3849,8 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
 	uint32_t generation;
 	int rc;
 
-	if (slots[slot].state != ZZAPP_ST_IDLE)
+	if (slots[slot].state != ZZAPP_ST_IDLE ||
+	    audio_handoff_pending(runtime_for_slot(slot)))
 		return ZZ_EBUSY;
 	rc = alloc_window(slot, arm, host);
 	if (rc != ZZ_OK)

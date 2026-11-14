@@ -107,6 +107,44 @@ void taskq_init(taskq_t *q)
 #endif
 }
 
+void taskq_shared_boot_init(taskq_shared_t *sh)
+{
+  if (!sh)
+    return;
+  taskq_init(&sh->queue);
+  sh->core1_current_slot = -1;
+  sh->core1_restart_request = 0;
+  sh->core1_fault_code = 0;
+  sh->core1_alive = 0;
+  sh->tasks_on_core1 = 0;
+  sh->tasks_on_core0 = 0;
+  sh->core1_park_request = 0;
+  sh->core1_parked = 0;
+  sh->core1_reclaim_request = 0;
+  sh->core1_reclaim_done = 0;
+  sh->core1_clean_request = 0;
+  sh->core1_clean_done = 0;
+  sh->minigl_doorbell = 0;
+  sh->minigl_reset_request = 0;
+  sh->minigl_reset_ack = 0;
+  sh->minigl_in_flight = 0;
+  sh->minigl_submission_admission = 1U;
+  sh->minigl_submission_generation = 0U;
+  sh->minigl_submission_ack = 0U;
+  sh->minigl_packets_on_core1 = 0;
+  sh->minigl_packets_on_core0 = 0;
+  sh->minigl_rix_fence_epoch = 0U;
+  sh->minigl_rix_fence_sequence = 0U;
+  sh->minigl_rix_fence_address = 0U;
+  /* Producers compare-exchange this from zero. A leftover 2 is neither
+   * serviced nor replaceable, so the worker never drains again. */
+  sh->service_pending = 0;
+#if ZZAPP_PERF_COUNTERS
+  sh->perf_doorbell_stamp = 0U;
+  sh->perf_sgi_count = 0U;
+#endif
+}
+
 int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                   uint32_t in_addr, uint32_t in_len,
                   uint32_t out_addr, uint32_t out_cap,

@@ -19,7 +19,8 @@
 #define PAGE_USER_RW (3U << 4)
 #define PAGE_USER_RO (2U << 4)
 struct xil_cache_mock_state g_xil_cache_mock;
-int smp_cpu_id(void) { return 0; }
+static int test_cpu;
+int smp_cpu_id(void) { return test_cpu; }
 uint32_t smp_local_irq_save(void) { return 0u; }
 void smp_local_irq_restore(uint32_t state) { (void)state; }
 void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1u; }
@@ -272,6 +273,102 @@ static void test_alias_l2_exhaustion_is_atomic(void)
 	zzapp_as_destroy(&fourth);
 }
 
+static void test_template_l2_published_after_clean(void)
+{
+	uint32_t pages[256];
+	uint32_t section = 5U;
+	uint32_t old;
+	unsigned i;
+	int saw_l2_clean = 0;
+	const uint32_t *published;
+
+	setup();
+	old = zzapp_as_template()[section];
+	for (i = 0U; i < 256U; i++)
+		pages[i] = (section << 20) | (i << 12) | 0x576U;
+	g_xil_cache_mock.watch_word = &zzapp_as_template()[section];
+	g_xil_cache_mock.count = 0U;
+	zzapp_as_mmu_page_changed(section, 1U | (15U << 5), pages);
+	for (i = 0U; i < g_xil_cache_mock.count; i++) {
+		const struct xil_cache_mock_flush *op = &g_xil_cache_mock.ops[i];
+
+		if (op->len != 1024U)
+			continue;
+		saw_l2_clean = 1;
+		CHECK(op->watch_value == old);
+		CHECK((op->watch_value & 3U) != 1U);
+	}
+	CHECK(saw_l2_clean);
+	published = zzapp_as_template();
+	CHECK((published[section] & 3U) == 1U);
+	CHECK(((const uint32_t *)(uintptr_t)(published[section] & 0xfffffc00U))[0] != 0U);
+	CHECK(((const uint32_t *)(uintptr_t)(published[section] & 0xfffffc00U))[255] != 0U);
+	g_xil_cache_mock.watch_word = NULL;
+}
+
+static void test_destroy_on_core0_keeps_bsp_table(void)
+{
+	zzapp_as_t as;
+	unsigned before;
+
+	CHECK(zzapp_as_create(&as, 0U, 9U) == 0);
+	before = zzapp_as_test_kernel_switches;
+	test_cpu = 0;
+	zzapp_as_destroy(&as);
+	CHECK(zzapp_as_test_kernel_switches == before);
+
+	CHECK(zzapp_as_create(&as, 0U, 10U) == 0);
+	test_cpu = 1;
+	zzapp_as_destroy(&as);
+	CHECK(zzapp_as_test_kernel_switches == before + 1U);
+	test_cpu = 0;
+}
+
+static void test_orphaned_as_lock_does_not_deadlock_destroy(void)
+{
+	zzapp_as_t as;
+
+	CHECK(zzapp_as_create(&as, 1U, 4U) == 0);
+	zzapp_as_test_orphan_lock();
+	CHECK(zzapp_as_test_lock_held());
+	zzapp_as_reset_lock();
+	CHECK(!zzapp_as_test_lock_held());
+	zzapp_as_destroy(&as);
+	CHECK(!zzapp_as_test_lock_held());
+}
+
+static void test_firmware_text_is_l2_before_launch(void)
+{
+	const uint32_t *l2;
+	uint32_t pages[256];
+	uint32_t before;
+	unsigned i;
+	int saw_break = 0;
+
+	zzapp_as_set_firmware_text(0x00500000U, 0x00700000U);
+	setup();
+	CHECK((zzapp_as_template()[5] & 3U) == 1U);
+	CHECK((zzapp_as_template()[6] & 3U) == 1U);
+	l2 = (const uint32_t *)(uintptr_t)(zzapp_as_template()[5] & 0xfffffc00U);
+	CHECK(l2[0] != 0U);
+	CHECK(l2[255] != 0U);
+	before = zzapp_as_template()[5];
+	for (i = 0U; i < 256U; i++)
+		pages[i] = (5U << 20) | (i << 12) | 0x756U;
+	g_xil_cache_mock.watch_word = &zzapp_as_template()[5];
+	g_xil_cache_mock.count = 0U;
+	zzapp_as_mmu_page_changed(5U, before, pages);
+	for (i = 0U; i < g_xil_cache_mock.count; i++) {
+		if (g_xil_cache_mock.ops[i].watch_value == 0U)
+			saw_break = 1;
+		CHECK((g_xil_cache_mock.ops[i].watch_value & 3U) == 1U);
+	}
+	CHECK(!saw_break);
+	CHECK(zzapp_as_template()[5] == before);
+	g_xil_cache_mock.watch_word = NULL;
+	zzapp_as_set_firmware_text(0U, 0U);
+}
+
 int main(void)
 {
 	setup();
@@ -284,6 +381,10 @@ int main(void)
 	test_alias_l2_exhaustion_is_atomic();
 	test_alias_rejects_larger_than_private_region();
 	test_alias_honours_virtual_alignment();
+	test_template_l2_published_after_clean();
+	test_destroy_on_core0_keeps_bsp_table();
+	test_orphaned_as_lock_does_not_deadlock_destroy();
+	test_firmware_text_is_l2_before_launch();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

@@ -8,6 +8,7 @@
 #include "sdk_video_stream.h"
 
 #include "card_pool.h"
+#include "sdk_compression.h"
 #include "memorymap.h"
 #include "overlay.h"
 #include "sdk_video_backend.h"
@@ -91,6 +92,16 @@ static uint32_t next_session_id(void)
 
 	if (next_video_session_id == 0U || next_video_session_id == 0xffffffffU)
 		next_video_session_id = 1U;
+	/* App decoder owners and the shared decode heap own this half of
+	 * the MEDIA instance space. Jump past it instead of recursing
+	 * through eight million skipped ids. */
+	if ((id & 0x00ffffffU) >= SDK_MEDIA_APP_INSTANCE_BASE) {
+		uint32_t low = id & 0x00ffffffU;
+		uint32_t next = id + (0x01000001U - low);
+
+		next_video_session_id = next < id || next == 0U ? 1U : next;
+		return next_session_id();
+	}
 	if (id == 0U || id == 0xffffffffU)
 		return next_session_id();
 	return id;

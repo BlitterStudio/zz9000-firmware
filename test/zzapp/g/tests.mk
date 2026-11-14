@@ -24,6 +24,10 @@ $(BUILD)/g/kernel_sched_test: $(KERNEL_SCHED_TEST_SOURCES) $(KERNEL_SCHED_TEST_D
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $(KERNEL_SCHED_TEST_SOURCES)
 
+$(BUILD)/g/core1_restart_test: g/core1_restart_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -Wl,--wrap=zzapp_loader_release -Wl,--wrap=zzapp_minigl_reclaim -o $@ $< $(A_RUNTIME_OBJS)
+
 SVC_TEST_SOURCES := g/svc_test.c $(FW)/zzapp_svc.c $(FW)/zzapp_as.c \
 	$(FW)/mmu_page.c $(FW)/sdk_smp_lock.c
 SVC_TEST_DEPS := $(FW)/zzapp_svc.h $(FW)/zzapp_gl_contract.h $(FW)/zzapp_as.h \

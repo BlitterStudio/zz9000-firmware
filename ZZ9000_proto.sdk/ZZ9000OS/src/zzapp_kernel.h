@@ -171,6 +171,10 @@ typedef struct {
 	uint32_t service_due;
 	uint64_t window_start;
 	uint32_t service_in_window;
+	uint64_t slice_started_ms;
+	uint32_t slice_valid;
+	uint32_t idle;
+	uint64_t idle_ticks;
 	uint32_t wake_serial;
 	uint8_t wake_log[ZZAPP_KERNEL_APP_SLOTS];
 	uint32_t wake_log_count;
@@ -204,12 +208,20 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
  * scheduler's choice copied into it. */
 zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame);
 int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t slot);
+/* Atomically release API lock, snapshot now, and enter SLEEPING under IRQ mask. */
+int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t slot, uint64_t sleep_ms);
 int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
 		zzapp_wake_reason_t reason);
 int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t slot,
 		uint64_t deadline);
 void zzapp_kernel_advance(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 void zzapp_kernel_service_due(zzapp_kernel_t *kernel);
+/* Milliseconds since boot. Firmware supplies the global timer; tests inject one. */
+uint64_t zzapp_kernel_now_ms(void);
+uint64_t zzapp_kernel_now(const zzapp_kernel_t *kernel);
+void zzapp_kernel_idle_begin(zzapp_kernel_t *kernel);
+void zzapp_kernel_idle_end(zzapp_kernel_t *kernel);
+void zzapp_kernel_reset_slice(zzapp_kernel_t *kernel);
 int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 
 #if ZZAPP_PERF_COUNTERS

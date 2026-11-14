@@ -195,6 +195,9 @@ typedef int (*taskq_doorbell_more_fn)(void *context);
 
 /* ---- queue lifecycle (portable) ---- */
 void taskq_init(taskq_t *q);
+/* Zero the coherent control block, including the doorbell word. The block
+ * lives in uninitialised DDR, so a leftover 2 strands the worker. */
+void taskq_shared_boot_init(taskq_shared_t *sh);
 int  taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                    uint32_t in_addr, uint32_t in_len,
                    uint32_t out_addr, uint32_t out_cap,

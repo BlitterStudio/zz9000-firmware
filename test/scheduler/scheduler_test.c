@@ -5,6 +5,7 @@
  */
 #include "scheduler.h"
 #include <stdio.h>
+#include <string.h>
 
 static int failures;
 
@@ -57,6 +58,32 @@ static void test_init_marks_all_free(void)
     expect_u32("init_free", q.descs[i].state, TASK_FREE);
   }
   expect_u32("init_cursor", q.enqueue_cursor, 0u);
+}
+
+static void test_boot_init_clears_dirty_doorbell(void)
+{
+  taskq_shared_t sh;
+  uint32_t i;
+
+  memset(&sh, 0xa5, sizeof(sh));
+  sh.service_pending = 2U;
+#if ZZAPP_PERF_COUNTERS
+  sh.perf_doorbell_stamp = 0xdeadbeefU;
+  sh.perf_sgi_count = 9U;
+  sh.queue.perf_queued_count = 4U;
+#endif
+  taskq_shared_boot_init(&sh);
+  expect_u32("boot_pending", sh.service_pending, 0U);
+  expect_u32("boot_doorbell", sh.minigl_doorbell, 0U);
+  expect_u32("boot_park", sh.core1_park_request, 0U);
+  expect_int("boot_slot", sh.core1_current_slot, -1);
+#if ZZAPP_PERF_COUNTERS
+  expect_u32("boot_perf_stamp", sh.perf_doorbell_stamp, 0U);
+  expect_u32("boot_perf_sgi", sh.perf_sgi_count, 0U);
+  expect_u32("boot_perf_queued", sh.queue.perf_queued_count, 0U);
+#endif
+  for (i = 0; i < TASKQ_CAPACITY; i++)
+    expect_u32("boot_free", sh.queue.descs[i].state, TASK_FREE);
 }
 
 static void test_enqueue_fills_and_queues(void)
@@ -638,6 +665,7 @@ int main(void)
   test_stress_fill_varies_by_index();
   test_stress_check_matches_fill();
   test_init_marks_all_free();
+  test_boot_init_clears_dirty_doorbell();
   test_enqueue_fills_and_queues();
   test_enqueue_full_returns_minus1();
   test_enqueue_copies_op_params();
