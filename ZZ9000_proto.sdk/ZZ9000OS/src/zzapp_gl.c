@@ -255,6 +255,8 @@ int zzm_module_api_active(void)
 {
     return g_module_in_api > 0;
 }
+extern int zzm_minigl_take_deferred_dispatch(void);
+
 
 void zzm_module_api_enter(void)
 {
@@ -266,10 +268,13 @@ void zzm_module_api_leave(void)
 {
     if (g_module_in_api > 0)
         g_module_in_api--;
-    /* The app feeds its own ring at every GL call instead of waiting for
-     * the worker's turn.  With nothing queued this touches no hardware. */
+    /* The module no longer owns backend state after its outermost API call.
+     * Park through the host while its API lock is still held, so the
+     * scheduler executes the deferred wire pass before this call returns. */
     if (minigl_raster_feed_pending())
         (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SVC);
+    if (g_module_in_api == 0 && zzm_minigl_take_deferred_dispatch())
+        g_module_app_host->yield_wait();
     g_module_app_host->api_leave();
 }
 
@@ -754,6 +759,9 @@ void zzapp_gl_unbind(void)
 
 void zzapp_gl_reclaim(void)
 {
+    /* Forced app reclamation discards a parked GL stack without its normal
+     * API epilogue, so no stale call may keep worker dispatch deferred. */
+    g_module_in_api = 0;
     zzapp_gl_unbind();
 }
 

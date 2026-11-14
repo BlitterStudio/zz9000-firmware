@@ -62,6 +62,7 @@ static uint32_t display_flags;
 static int flip_idle = 1;
 static int hold_flip;
 static unsigned wait_yields;
+static int g_yield_runs_worker;
 static unsigned flip_waits;
 /* Set while an app GL call is inside the module (host api_enter/leave):
  * device accesses made then are counted. */
@@ -133,6 +134,22 @@ int zzm_test_printf(const char *format, ...)
     return result;
 }
 
+static void test_capture_rix_log(const char *fmt, ...)
+{
+    va_list args;
+    int added;
+
+    va_start(args, fmt);
+    if (g_log_used < sizeof(g_log) - 1U) {
+        added = vsnprintf(g_log + g_log_used, sizeof(g_log) - g_log_used,
+                          fmt, args);
+        if (added > 0)
+            g_log_used += (size_t)added < sizeof(g_log) - g_log_used ?
+                          (size_t)added : sizeof(g_log) - g_log_used - 1U;
+    }
+    va_end(args);
+}
+
 static int test_rix_caps(zzm_graphics_hw_caps_t *caps)
 {
     memset(caps, 0, sizeof(*caps));
@@ -160,7 +177,9 @@ static struct {
     int reg;
     uint32_t color_address;
     uint32_t clear_color;
-} g_fsc = { 0U, -1, 0U, 0U };
+    uint32_t watch_address;
+    int watch_hit;
+} g_fsc = { 0U, -1, 0U, 0U, 0U, 0 };
 
 static uint32_t g_test_rix_status = RIX_DRV_STATUS_IDLE;
 /* While held lists exist, STATUS first reports idle this many times (the
@@ -257,11 +276,14 @@ static void test_rix_fsc_word(uint32_t word)
     case 2U:
         if ((word & (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR)) ==
             (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR) &&
-            g_fsc.color_address != 0U)
+            g_fsc.color_address != 0U) {
+            if (g_fsc.color_address == g_fsc.watch_address)
+                g_fsc.watch_hit = 1;
             *(uint16_t *)(uintptr_t)g_fsc.color_address = (uint16_t)(
                 ((g_fsc.clear_color >> 27U) << 11U) |
                 (((g_fsc.clear_color >> 18U) & 63U) << 5U) |
                 ((g_fsc.clear_color >> 11U) & 31U));
+        }
         break;
     case 3U:
         g_fsc.skip = (word & 0x3ffU) / sizeof(uint32_t);
@@ -452,6 +474,10 @@ void zzapp_host_yield_wait(void)
 {
     ++wait_yields;
     flip_idle = 1;
+    if (g_yield_runs_worker) {
+        g_yield_runs_worker = 0;
+        (void)zzm_minigl_service_tick(0);
+    }
 }
 
 int zzm_registry_register_ops(uint32_t module_id, const void *ops, uint32_t bytes)
@@ -911,6 +937,237 @@ int main(void)
         zzm_module_api_leave();
         g_test_rix_full_reads = 0U;
         assert(minigl_raster_drain());
+    }
+    {
+        /* A wire command that arrives while an ARM GL call is parked is
+         * not dispatched until that call returns, and the call's backend
+         * state is unchanged when it resumes. The worker still retires
+         * the ring the call is waiting on. */
+        extern void zzm_module_api_enter(void);
+        extern void zzm_module_api_leave(void);
+        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
+        ZZ9KMiniGLTransportDescriptor desc;
+        volatile ZZ9KMiniGLControlBlockV9 *ctrl;
+        uint32_t *color;
+        const uint32_t *bound;
+        uint32_t saved;
+        uint32_t consumer;
+        uint32_t slot_idx;
+        uint8_t *slot_buf;
+        unsigned step;
+
+        assert(mw_service_get_transport_descriptor(&desc) == 0);
+        ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)(void *)(
+            desc.window_address + desc.ctrl_offset);
+        assert(minigl_raster_drain());
+        while (mw_service_has_work())
+            (void)zzm_minigl_service_tick(0);
+        g_fetch_hold = 1;
+        g_fetch_release_us = ~(uint64_t)0;
+        draw->VertexPointer(2, 0x1406U, 8, quad);
+        draw->EnableClientState(0x8074U);
+        draw->DrawArrays(0x0005U, 0, 4);
+        draw->DisableClientState(0x8074U);
+        assert(ops->app_swap(context) == 0);
+        assert(minigl_raster_work_outstanding() != 0);
+        bound = minigl_raster_color_buffer();
+        assert(bound != NULL);
+        color = (uint32_t *)(uintptr_t)bound;
+        saved = color[0];
+        color[0] = 0x11223344U;
+
+        zzm_module_api_enter();
+        consumer = mw_wire_ld32(&ctrl->consumer_seq);
+        slot_idx = consumer % mw_wire_ld32(&ctrl->slot_count);
+        slot_buf = (uint8_t *)(void *)desc.window_address +
+            (slot_idx == 0U ? desc.slot0_offset : desc.slot1_offset);
+        mw_put_be32(slot_buf, 0x414D3344U);
+        mw_put_be32(slot_buf + 4, 9U);
+        mw_put_be32(slot_buf + 8, 16U);
+        mw_put_be32(slot_buf + 12, 0U);
+        mw_wire_st32((volatile uint32_t *)&ctrl->producer_seq, consumer + 1U);
+        assert(mw_service_has_work());
+        g_fetch_hold = 0;
+        test_rix_run_fetches();
+        for (step = 0U; step < 8U && minigl_raster_work_outstanding(); ++step)
+            (void)zzm_minigl_service_tick(0);
+        (void)zzm_minigl_service_tick(0);
+        assert(!minigl_raster_work_outstanding());
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer);
+        assert(color[0] == 0x11223344U);
+        assert(minigl_raster_color_buffer() == bound);
+        g_yield_runs_worker = 1;
+        zzm_module_api_leave();
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer + 1U);
+        color[0] = saved;
+        g_fetch_count = 0U;
+    }
+    {
+        /* Forced reclamation drops a parked GL stack, so it must clear the
+         * module API/deferred-dispatch state and let retained wire work run. */
+        extern void zzm_module_api_enter(void);
+        extern int zzm_module_api_active(void);
+        ZZ9KMiniGLTransportDescriptor desc;
+        volatile ZZ9KMiniGLControlBlockV9 *ctrl;
+        uint32_t consumer;
+        uint32_t slot_idx;
+        uint8_t *slot_buf;
+
+        assert(mw_service_get_transport_descriptor(&desc) == 0);
+        ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)(void *)(
+            desc.window_address + desc.ctrl_offset);
+        consumer = mw_wire_ld32(&ctrl->consumer_seq);
+        slot_idx = consumer % mw_wire_ld32(&ctrl->slot_count);
+        slot_buf = (uint8_t *)(void *)desc.window_address +
+            (slot_idx == 0U ? desc.slot0_offset : desc.slot1_offset);
+        zzm_module_api_enter();
+        mw_put_be32(slot_buf, 0x414D3344U);
+        mw_put_be32(slot_buf + 4, 9U);
+        mw_put_be32(slot_buf + 8, 16U);
+        mw_put_be32(slot_buf + 12, 0U);
+        mw_wire_st32((volatile uint32_t *)&ctrl->producer_seq, consumer + 1U);
+        assert(zzm_minigl_service_tick(0) == 0);
+        assert(zzm_module_api_active());
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer);
+        ops->app_reclaim(context, 1U);
+        assert(!zzm_module_api_active());
+        assert(zzm_minigl_service_tick(0) != 0);
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer + 1U);
+    }
+    {
+        /* MW_PRESENT rotates from A's submitted target to a fresh target.
+         * B must retire A's fence before replacing backend owner state, for
+         * both the async app ring and a synchronous wire context. */
+        const zzapp_gl *draw;
+        float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f,
+                          0.5f, 0.5f, -0.5f, 0.5f };
+        uint32_t handle_a = 0U;
+        uint32_t handle_b = 0U;
+        uint8_t present[24] = { 0U };
+        mw_ctx *wire;
+        unsigned step;
+
+        assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
+                                            ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+        assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
+        draw = (const zzapp_gl *)gl;
+        draw->VertexPointer(2, 0x1406U, 8, quad);
+        draw->EnableClientState(0x8074U);
+        draw->DrawArrays(0x0005U, 0, 4);
+        draw->DisableClientState(0x8074U);
+        g_fetch_hold = 1;
+        g_fetch_release_us = ~(uint64_t)0;
+        assert(ops->app_swap(context) == 0);
+        for (step = 0U; step < 64U && minigl_raster_feed_pending(); ++step)
+            (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER);
+        assert(g_fetch_count != 0U);
+        g_fetch_release_us = now_us + 2000U;
+        assert(ops->open_68k(context, &request, &handle_b));
+        assert(g_fetch_count == 0U);
+        ops->close_68k(context, handle_b);
+        ops->app_unbind(context);
+        ops->app_reclaim(context, 1U);
+
+        assert(ops->open_68k(context, &request, &handle_a));
+        wire = mw_service_test_context(handle_a);
+        assert(wire != NULL);
+        minigl_raster_clear(0x4000U, 0xff0000ffU, 0U);
+        mw_put_be32(present, MW_MAGIC);
+        mw_put_be32(present + 4, MW_VERSION);
+        mw_put_be32(present + 8, sizeof(present));
+        mw_put_be32(present + 12, 1U);
+        mw_put_be32(present + 16, MW_PRESENT);
+        g_fetch_hold = 1;
+        g_fetch_release_us = ~(uint64_t)0;
+        assert(mw_host_submit(wire, present, sizeof(present)) == MW_STATUS_OK);
+        for (step = 0U; step < 64U && minigl_raster_feed_pending(); ++step)
+            (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER);
+        assert(g_fetch_count != 0U);
+        g_fetch_release_us = now_us + 2000U;
+        assert(ops->open_68k(context, &request, &handle_b));
+        assert(g_fetch_count == 0U);
+        ops->close_68k(context, handle_a);
+        ops->close_68k(context, handle_b);
+        g_fetch_hold = 0;
+        g_fetch_count = 0U;
+    }
+    {
+        /* A recorded clear still runs when another context replaces the
+         * platform, instead of being dropped by the abort path. */
+        const uint32_t *target;
+        uint32_t handle68k = 0U;
+        unsigned long fed;
+
+        ops->app_unbind(context);
+        ops->app_reclaim(context, 1U);
+        assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
+                                            ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+        assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
+        assert(minigl_raster_hardware_available());
+        assert(minigl_raster_drain());
+        target = minigl_raster_color_buffer();
+        assert(target != NULL);
+        fed = g_test_rix_tlf_bytes;
+        g_fsc.watch_address = (uint32_t)(uintptr_t)target;
+        g_fsc.watch_hit = 0;
+        minigl_raster_clear(0x4000U, 0xff0000ffU, 0U);
+        assert(g_test_rix_tlf_bytes == fed);
+        assert(!g_fsc.watch_hit);
+        assert(ops->open_68k(context, &request, &handle68k));
+        assert(g_fsc.watch_hit);
+        assert(target[0] == 0xff0000ffU);
+        ops->close_68k(context, handle68k);
+        ops->app_unbind(context);
+        ops->app_reclaim(context, 1U);
+    {
+        /* Once a closed context retires the current target, closing another
+         * context must still drain the live backend rather than quarantining
+         * the platform owner solely because no target is bound. */
+        const zzm_minigl_wire_open_t small = { 4U, 4U, 0U };
+        uint32_t handle_a = 0U;
+        uint32_t handle_b = 0U;
+        uint32_t handle_c = 0U;
+        uint8_t vertices[4] = { 0U };
+        uint8_t staging[4] = { 0U };
+        MiniGLRasterBuffers buffers;
+        mw_ctx *a;
+        mw_ctx *c;
+        uint32_t quarantines;
+
+        assert(ops->open_68k(context, &small, &handle_a));
+        assert(ops->open_68k(context, &small, &handle_b));
+        assert(ops->open_68k(context, &small, &handle_c));
+        a = mw_service_test_context(handle_a);
+        c = mw_service_test_context(handle_c);
+        assert(a != NULL && c != NULL);
+        memset(&buffers, 0, sizeof(buffers));
+        buffers.color = a->color_buffers[0];
+        buffers.color_bytes = a->width * a->height * sizeof(*buffers.color);
+        buffers.depth = a->depth_buffer;
+        buffers.depth_bytes = a->width * a->height * 4U;
+        buffers.vertices = vertices;
+        buffers.vertices_bytes = sizeof(vertices);
+        buffers.texture_staging = staging;
+        buffers.texture_staging_bytes = sizeof(staging);
+        buffers.texture_pool = a->texture_pool;
+        buffers.texture_pool_bytes = a->texture_pool_bytes;
+        buffers.width = (uint16_t)a->width;
+        buffers.height = (uint16_t)a->height;
+        assert(minigl_raster_configure_buffers(&buffers));
+        assert(minigl_raster_color_buffer() == a->color_buffers[0]);
+        quarantines = mw_rix_quarantine_count();
+        ops->close_68k(context, handle_a);
+        assert(minigl_raster_color_buffer() == NULL);
+        ops->close_68k(context, handle_b);
+        assert(mw_rix_quarantine_count() == quarantines);
+        assert(!c->rix_memory_quarantined);
+        assert(test_card_pool_holds(c->color_buffer_addresses[0]));
+        ops->close_68k(context, handle_c);
+    }
+        assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
+                                            ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+        assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
     }
     {
         /* A DDR list the GPU is still fetching must complete before the
@@ -1401,6 +1658,77 @@ int main(void)
         g_fetch_wedged = 0;
         g_fetch_count = 0U;
     }
+    {
+        /* A fence that never lands must not defer wire packets forever.
+         * Past the wait deadline the backend is disabled and the packet
+         * is processed. */
+        extern void (*g_rix_test_log)(const char *fmt, ...);
+        const zzapp_gl *draw;
+        float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
+        ZZ9KMiniGLTransportDescriptor desc;
+        volatile ZZ9KMiniGLControlBlockV9 *ctrl;
+        uint32_t consumer;
+        uint32_t slot_idx;
+        uint8_t *slot_buf;
+        uint64_t armed;
+        unsigned step;
+
+        assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
+                                            ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+        assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
+        draw = (const zzapp_gl *)gl;
+        assert(minigl_raster_drain());
+        g_fetch_hold = 1;
+        g_fetch_wedged = 1;
+        g_fetch_release_us = ~(uint64_t)0;
+        draw->VertexPointer(2, 0x1406U, 8, quad);
+        draw->EnableClientState(0x8074U);
+        draw->DrawArrays(0x0005U, 0, 4);
+        draw->DisableClientState(0x8074U);
+        assert(ops->app_swap(context) == 0);
+        for (step = 0U; step < 64U && minigl_raster_feed_pending(); ++step)
+            (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER);
+        assert(minigl_raster_work_outstanding() != 0);
+
+        {
+            uint32_t generation = 0U;
+
+            assert(zzm_minigl_transport_acquire(&generation));
+        }
+        assert(mw_service_get_transport_descriptor(&desc) == 0);
+        ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)(void *)(
+            desc.window_address + desc.ctrl_offset);
+        consumer = mw_wire_ld32(&ctrl->consumer_seq);
+        slot_idx = consumer % mw_wire_ld32(&ctrl->slot_count);
+        slot_buf = (uint8_t *)(void *)desc.window_address +
+            (slot_idx == 0U ? desc.slot0_offset : desc.slot1_offset);
+        mw_put_be32(slot_buf, 0x414D3344U);
+        mw_put_be32(slot_buf + 4, 9U);
+        mw_put_be32(slot_buf + 8, 16U);
+        mw_put_be32(slot_buf + 12, 0U);
+        mw_wire_st32((volatile uint32_t *)&ctrl->producer_seq, consumer + 1U);
+
+        g_log_used = 0U;
+        g_log[0] = '\0';
+        g_rix_test_log = test_capture_rix_log;
+        armed = now_us;
+        (void)zzm_minigl_service_tick(0);
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer);
+        now_us = armed + 1000000ULL;
+        (void)zzm_minigl_service_tick(0);
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer);
+        now_us = armed + 4000000ULL;
+        (void)zzm_minigl_service_tick(0);
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer + 1U);
+        assert(strstr(g_log, "wait watchdog disabling") != NULL);
+        g_rix_test_log = NULL;
+        g_fetch_hold = 0;
+        g_fetch_wedged = 0;
+        g_fetch_count = 0U;
+        ops->app_unbind(context);
+        ops->app_reclaim(context, 1U);
+    }
+
     zzm_loader_release(ZZM_MODULE_MINIGL);
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
     assert(status.state == ZZM_STATE_AVAILABLE);

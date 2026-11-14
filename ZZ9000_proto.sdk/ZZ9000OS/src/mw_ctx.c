@@ -1054,10 +1054,13 @@ static void mw_ctx_configure_rix(mw_ctx *c)
 
     if (!minigl_platform_has_rasterix())
         return;
-    /* Rebinding resets RasterIX. Retire the previous context's committed
-     * lists before its backend bookkeeping can be overwritten. */
-    if (g_rix_platform_ctx != NULL && g_rix_platform_ctx != c)
-        (void)mw_rix_abort_engines();
+    /* Rebinding resets RasterIX. Finish the previous context's recorded
+     * frame first so its target returns to CPU-readable RGBA, then retire
+     * every submission before backend owner/fence bookkeeping is replaced. */
+    if (g_rix_platform_ctx != NULL && g_rix_platform_ctx != c) {
+        if (!minigl_raster_finish() || !minigl_raster_retire_submitted())
+            (void)mw_rix_abort_engines();
+    }
     memset(&platform, 0, sizeof(platform));
     platform.context = c;
     platform.csr_read = mw_rix_csr_read;
@@ -1621,8 +1624,17 @@ void mw_host_destroy(mw_ctx *c)
      * bound must leave the app both, and only finishes the work it may have
      * queued on the app's ring. */
     platform_elsewhere = g_rix_platform_ctx != NULL && g_rix_platform_ctx != c;
-    if (!(platform_elsewhere && minigl_raster_drain()) &&
-        !minigl_raster_quiesce() && c->rix_enabled) {
+    if (platform_elsewhere && !minigl_raster_retire_submitted()) {
+        /* Backend retirement is independent of a currently bound target. A
+         * stopped engine cannot retain this context's freed memory; if it
+         * cannot be stopped, quarantine both owners instead. */
+        if (!mw_rix_abort_engines()) {
+            minigl_raster_quarantine_outstanding();
+            mw_rix_quarantine(c);
+            if (g_rix_platform_ctx != NULL)
+                mw_rix_quarantine(g_rix_platform_ctx);
+        }
+    } else if (!platform_elsewhere && !minigl_raster_quiesce() && c->rix_enabled) {
         MiniGLRasterRixDiagnostics rix;
 
         memset(&rix, 0, sizeof(rix));

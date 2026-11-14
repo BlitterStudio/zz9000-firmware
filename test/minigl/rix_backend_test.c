@@ -94,6 +94,7 @@ struct model {
     unsigned yield_calls;
     int dma_launch_error;
     int dma_launch_state;
+    unsigned dma_pending_grants;
     int dma_complete_state;
     int dma_abort_state;
     unsigned fence_after_yields;
@@ -491,6 +492,10 @@ static int dma_start_delayed(void *context, uintptr_t source, uint32_t words,
 {
     struct model *model = context;
 
+    if (model->dma_pending_grants != 0U) {
+        --model->dma_pending_grants;
+        return RIX_DRV_DMA_PENDING;
+    }
     if (model->dma_launch_state != RIX_DRV_DMA_COMPLETE)
         return model->dma_launch_state;
     return dma_stream(context, source, words, burst_words) ?
@@ -2699,6 +2704,70 @@ static void test_async_sequence_mismatch_disables_backend(void)
     assert(backend.error);
 }
 
+/* A feed error in the non-parking drain must not look like completion:
+ * texture fence bookkeeping stays, and the caller must not reuse storage. */
+static void test_bounded_drain_feed_error_is_not_success(void)
+{
+    MiniGLRixBackend backend;
+    struct model model;
+
+    init_async8(&backend, &model, 1);
+    backend.platform.can_park = test_cannot_park;
+    model.dma_pending_grants = 1U;
+    model.dma_launch_state = RIX_DRV_DMA_ERROR;
+    queue_async_clear(&backend, 1U);
+    backend.textures[0].last_used_fence = 7U;
+    assert(!minigl_rix_backend_drain(&backend));
+    assert(backend.error);
+    assert(backend.textures[0].last_used_fence == 7U);
+}
+
+static void test_async_poll_feed_error_is_not_success(void)
+{
+    MiniGLRixBackend backend;
+    struct model model;
+
+    init_async8(&backend, &model, 1);
+    model.dma_launch_state = RIX_DRV_DMA_ERROR;
+    queue_async_clear(&backend, 1U);
+    backend.textures[0].last_used_fence = 9U;
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.error);
+    assert(backend.textures[0].last_used_fence == 9U);
+}
+
+static void test_pinned_reupload_keeps_storage_when_drain_fails(void)
+{
+    static uint32_t source[16U * 16U];
+    MiniGLRixBackend backend;
+    struct model model;
+    uint16_t page;
+    uint16_t old;
+
+    init_async8(&backend, &model, 1);
+    backend.platform.can_park = test_cannot_park;
+    model.texture_bytes = MINIGL_RIX_TEXTURE_PAGE_BYTES;
+    backend.platform.texture_bytes = model.texture_bytes;
+    memset(source, 0xff, sizeof(source));
+    assert(minigl_rix_backend_upload_texture(&backend, 4U, 0U, source, 16U, 16U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 4U, GL_NEAREST, GL_NEAREST,
+                                  GL_REPEAT, GL_REPEAT);
+    assert(submit_texture(&backend, 4U));
+    assert(minigl_rix_backend_submit(&backend));
+    assert(backend.textures[0].pin_count != 0U);
+    page = backend.textures[0].first_page;
+    old = stored_texel(&backend, &backend.textures[0], 0U);
+    model.dma_pending_grants = 1U;
+    model.dma_launch_state = RIX_DRV_DMA_ERROR;
+    source[0] = 0x00ff00ffU;
+    assert(!minigl_rix_backend_upload_texture(&backend, 4U, 0U, source, 16U, 16U,
+                                               ZZ9K_MGL_TEX_INTERNAL_RGB));
+    assert(backend.textures[0].valid);
+    assert(backend.textures[0].first_page == page);
+    assert(stored_texel(&backend, &backend.textures[0], 0U) == old);
+}
+
 int main(void)
 {
     test_probe_version_compatibility();
@@ -2726,6 +2795,9 @@ int main(void)
     test_async_wait_completion_at_deadline_succeeds();
     test_async_error_does_not_block_retirement();
     test_async_sequence_mismatch_disables_backend();
+    test_bounded_drain_feed_error_is_not_success();
+    test_async_poll_feed_error_is_not_success();
+    test_pinned_reupload_keeps_storage_when_drain_fails();
     MiniGLRixBackend backend;
     static struct model model;
     MiniGLRixPlatform io;

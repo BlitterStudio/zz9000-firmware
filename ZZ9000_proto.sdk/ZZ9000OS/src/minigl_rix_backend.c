@@ -2951,6 +2951,31 @@ void minigl_rix_backend_quarantine_outstanding(MiniGLRixBackend *backend)
                                  owners, &count);
     }
 }
+
+/* 1 while wire dispatch must keep waiting for this ring. 0 when the ring
+ * is idle, already failed, or the three-second wait expired: expiry disables
+ * the backend (the watchdog log) and quarantines outstanding owners. */
+int minigl_rix_backend_service_wait_blocks(MiniGLRixBackend *backend)
+{
+    if (backend == NULL || !backend->platform.async_feed)
+        return 0;
+    if (backend->error) {
+        minigl_rix_backend_quarantine_outstanding(backend);
+        backend_end_async_wait(backend);
+        return 0;
+    }
+    if (!minigl_rix_backend_work_outstanding(backend)) {
+        backend_end_async_wait(backend);
+        return 0;
+    }
+    if (!backend_watch_async_wait(backend, MGLP_FEED_WAIT_DRAIN)) {
+        backend_report_error(backend);
+        minigl_rix_backend_quarantine_outstanding(backend);
+        backend_end_async_wait(backend);
+        return 0;
+    }
+    return 1;
+}
 int minigl_rix_backend_engine_idle(MiniGLRixBackend *backend)
 {
     return backend != NULL && rix_drv_poll(&backend->driver, 0U) == RIX_DRV_OK;
@@ -2966,10 +2991,15 @@ int minigl_rix_backend_poll(MiniGLRixBackend *backend)
     if (backend->error)
         return 0;
     if (backend->platform.async_feed) {
-        /* Only the swap path asks whether a frame is ready to present. */
-        (void)minigl_rix_backend_try_feed(backend, RIX_DRV_FEED_SOURCE_SWAP);
-        /* The presenter needs the frame: observe fences and idle now. */
+        if (minigl_rix_backend_try_feed(backend, RIX_DRV_FEED_SOURCE_SWAP) ==
+                RIX_DRV_FEED_ERROR ||
+            backend->error) {
+            backend_report_error(backend);
+            return 0;
+        }
         (void)backend_retire_async(backend);
+        if (backend->error)
+            return 0;
         return !minigl_rix_backend_work_outstanding(backend);
     }
     if (!backend_retire_sync(backend))
@@ -3018,8 +3048,10 @@ int minigl_rix_backend_drain(MiniGLRixBackend *backend)
                         RIX_DRV_FEED_ERROR || backend->error)
                         break;
                 }
-                if (backend->error)
+                if (backend->error) {
                     backend_report_error(backend);
+                    return 0;
+                }
                 if (minigl_rix_backend_work_outstanding(backend))
                     return 0;
             }

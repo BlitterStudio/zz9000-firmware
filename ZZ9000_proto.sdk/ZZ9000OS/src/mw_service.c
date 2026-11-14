@@ -680,12 +680,13 @@ int mw_service_poll(void)
 
     /* 68k packets wait until the ARM ring has retired: they may switch the
      * shared backend to another context.  Waiting work is a demand, so this
-     * step polls fences. */
-    if (minigl_raster_work_outstanding()) {
+     * step polls fences.  A fence that never lands must not defer wire-v9
+     * forever: the wait shares the feed watchdog, and on expiry the backend
+     * is disabled and outstanding owners are quarantined. */
+    if (minigl_raster_work_outstanding())
         (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_PARKED);
-        if (minigl_raster_work_outstanding())
-            return 1;
-    }
+    if (minigl_raster_service_wait_blocks())
+        return 1;
 
     g_doorbell_pending = 0;
     mw_wire_st32(&g_ctrl->firmware_heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat) + 1U);

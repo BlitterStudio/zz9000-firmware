@@ -84,6 +84,8 @@ int minigl_raster_async_feed_enabled(void);
 int minigl_raster_feed_pending(void);
 /* Submitted RasterIX work not yet retired, including rendering buffers. */
 int minigl_raster_work_outstanding(void);
+/* 1 while wire dispatch must keep waiting for ARM ring retirement. */
+int minigl_raster_service_wait_blocks(void);
 int minigl_raster_try_feed(uint32_t source);
 int minigl_raster_abort_feed(void);
 int minigl_raster_engine_idle(void);
@@ -102,6 +104,8 @@ int minigl_raster_present_is_bottom_up(void);
 /* Drains RasterIX and restores the shared target to CPU RGBA before readback. */
 int minigl_raster_finish(void);
 int minigl_raster_drain(void);
+/* Retires backend work even after target retirement left no bound buffers. */
+int minigl_raster_retire_submitted(void);
 void minigl_raster_target_discard(int rgb565);
 void minigl_raster_target_retire(void);
 int minigl_raster_buffer_to_rgba(uint32_t *rgba, size_t pixels);

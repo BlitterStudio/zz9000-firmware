@@ -262,6 +262,8 @@ int minigl_rix_backend_feed_pending(const MiniGLRixBackend *backend);
 /* Asynchronous ring buffers submitted and not yet retired: queued, feeding
  * or rendering. */
 int minigl_rix_backend_work_outstanding(const MiniGLRixBackend *backend);
+/* 1 while wire dispatch must keep waiting for ARM ring retirement. */
+int minigl_rix_backend_service_wait_blocks(MiniGLRixBackend *backend);
 /* One step of a forced stop.  DONE once no command memory can still be
  * read: inline packets dropped, or every committed DDR list fenced and the
  * engine idle.  BLOCKED while a list is still being pushed or executed. */

@@ -67,6 +67,21 @@ static int minigl_has_work(void *context)
 
 extern void zzm_module_set_worker_context(int active);
 extern int zzm_module_api_active(void);
+static int g_wire_dispatch_deferred;
+
+int zzm_minigl_take_deferred_dispatch(void)
+{
+    if (!g_wire_dispatch_deferred)
+        return 0;
+    g_wire_dispatch_deferred = 0;
+    return 1;
+}
+
+void zzm_minigl_clear_deferred_dispatch(void)
+{
+    g_wire_dispatch_deferred = 0;
+}
+
 
 static int minigl_poll(void *context, uint32_t budget)
 {
@@ -76,8 +91,22 @@ static int minigl_poll(void *context, uint32_t budget)
     if (budget == 0U)
         return 0;
     zzm_module_set_worker_context(1);
-    if (mw_service_has_work())
+    if (zzm_module_api_active()) {
+        /* An ARM GL call is parked on this ring. Feed and retire so it
+         * can resume, but do not dispatch wire commands: they share this
+         * backend and would change it before the call returns. */
+        if (mw_service_has_work())
+            g_wire_dispatch_deferred = 1;
+        if (minigl_raster_work_outstanding() || minigl_raster_feed_pending()) {
+            int feed = minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_PARKED);
+
+            worked = feed > RIX_DRV_FEED_BLOCKED ||
+                     minigl_raster_work_outstanding() ||
+                     minigl_raster_feed_pending();
+        }
+    } else if (mw_service_has_work()) {
         worked = mw_service_poll();
+    }
     if (!worked && minigl_raster_feed_pending()) {
         minigl_profile_feed_deadline_wake();
         /* A full FIFO or a DMA still in flight is no progress: the worker
@@ -224,6 +253,7 @@ static void minigl_release_app(minigl_module_context_t *module)
 {
     if (!module || module->app_owner == 0U)
         return;
+    zzm_minigl_clear_deferred_dispatch();
     zzapp_gl_reclaim();
     if (module->reclaim && module->reclaim->close_owner)
         (void)module->reclaim->close_owner(module->app_owner);

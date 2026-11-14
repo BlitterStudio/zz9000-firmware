@@ -646,6 +646,11 @@ int minigl_raster_drain(void)
         return 0;
     return minigl_rix_backend_drain(&g_rix);
 }
+
+int minigl_raster_retire_submitted(void)
+{
+    return minigl_rix_backend_drain(&g_rix);
+}
 static int g_async_feed;
 
 void minigl_raster_set_async_feed(int enabled)
@@ -666,6 +671,11 @@ int minigl_raster_feed_pending(void)
 int minigl_raster_work_outstanding(void)
 {
     return minigl_rix_backend_work_outstanding(&g_rix);
+}
+
+int minigl_raster_service_wait_blocks(void)
+{
+    return minigl_rix_backend_service_wait_blocks(&g_rix);
 }
 
 int minigl_raster_try_feed(uint32_t source)
