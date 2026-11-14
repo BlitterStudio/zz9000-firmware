@@ -435,6 +435,8 @@ int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
 		kernel->perf.tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
 #endif
 	context = &kernel->threads[slot].context;
+	kernel->threads[slot].user_ticks = 0U;
+	kernel->threads[slot].svc_ticks = 0U;
 	memset(context, 0, sizeof(*context));
 	context->r[0] = api;
 	context->r[1] = argc;

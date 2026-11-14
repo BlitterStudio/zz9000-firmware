@@ -369,6 +369,30 @@ static void test_should_drain_gates(void)
   expect_int("drain_no_core1", taskq_should_drain(0, 0, 0), 0);
 }
 
+static int recovery_step;
+static int recovery_calls;
+
+static void halt_core1(void)
+{
+  recovery_step = 1;
+}
+
+static void reset_core1_locks(void)
+{
+  expect_int("fallback_halts_before_lock_reset", recovery_step, 1);
+  recovery_calls++;
+  recovery_step = 2;
+}
+
+static void test_fallback_halts_before_lock_recovery(void)
+{
+  recovery_step = 0;
+  recovery_calls = 0;
+  scheduler_core1_halt_before_recover(halt_core1, reset_core1_locks);
+  expect_int("fallback_recovery_runs", recovery_step, 2);
+  expect_int("fallback_recovers_once", recovery_calls, 1);
+}
+
 static void test_watchdog_trips_at_threshold(void)
 {
   taskq_watchdog_t w;
@@ -687,6 +711,7 @@ int main(void)
   test_class_unknown_is_long();
   test_class_video_sessions_are_core1_long();
   test_should_drain_gates();
+  test_fallback_halts_before_lock_recovery();
   test_watchdog_trips_at_threshold();
   test_watchdog_success_resets_counter();
   test_sched_worker_decide_priorities();

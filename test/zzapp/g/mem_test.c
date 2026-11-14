@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <setjmp.h>
 
 #include "card_pool.h"
 #include "host_card_pool.h"
@@ -36,6 +37,22 @@ void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0u; }
 static zzapp_mem_t memory;
 static zzapp_mem_proc_t proc_a;
 static zzapp_mem_proc_t proc_b;
+
+static jmp_buf interrupted_allocation;
+static int interrupt_allocation;
+static enum zzapp_mem_test_store interrupt_store;
+
+void zzapp_mem_test_frame_store(zzapp_mem_t *test_memory,
+                                zzapp_mem_proc_t *test_proc,
+                                enum zzapp_mem_test_store store)
+{
+    (void)test_memory;
+    (void)test_proc;
+    if (interrupt_allocation && store == interrupt_store) {
+        interrupt_allocation = 0;
+        longjmp(interrupted_allocation, 1);
+    }
+}
 
 static void reset_memory(void)
 {
@@ -137,6 +154,167 @@ static void test_proc_release_is_idempotent(void)
     CHECK(proc_a.committed == 0);
 }
 
+static void test_interrupted_allocation_reconciles_each_store(void)
+{
+    volatile enum zzapp_mem_test_store store;
+
+    for (store = ZZAPP_MEM_TEST_AFTER_PROC_POINTER;
+         store <= ZZAPP_MEM_TEST_AFTER_MEMORY_CHARGE; store++) {
+        uint32_t frame;
+        uint32_t committed;
+        uint32_t free_bytes;
+        uint32_t pool_free;
+
+        reset_memory();
+        pool_free = card_pool_range_free_bytes(&card_pool, 0);
+        CHECK(zzapp_mem_alloc(&memory, &proc_a, 1, &frame) == 0);
+        committed = memory.committed;
+        free_bytes = zzapp_mem_free_bytes(&memory);
+        if (setjmp(interrupted_allocation) == 0) {
+            interrupt_store = store;
+            interrupt_allocation = 1;
+            (void)zzapp_mem_alloc(&memory, &proc_b, 1, &frame);
+            CHECK(0);
+        }
+        card_pool_reset_lock(&card_pool);
+        zzapp_mem_reset_live_lock();
+        zzapp_mem_reconcile_halted();
+        (void)zzapp_mem_release_proc(&memory, &proc_b);
+        CHECK(proc_b.committed == 0U);
+        CHECK(memory.proc_count == 1U);
+        CHECK(memory.committed == committed);
+        CHECK(zzapp_mem_free_bytes(&memory) == free_bytes);
+        CHECK(zzapp_mem_release_proc(&memory, &proc_a) == MB(1));
+        CHECK(card_pool_range_free_bytes(&card_pool, 0) == pool_free);
+    }
+}
+
+static void test_unpublished_extent_is_reclaimed(void)
+{
+    uint32_t frame;
+    uint32_t pool_free;
+
+    reset_memory();
+    pool_free = card_pool_range_free_bytes(&card_pool, 0);
+    if (setjmp(interrupted_allocation) == 0) {
+        interrupt_store = ZZAPP_MEM_TEST_AFTER_POOL_ALLOCATION;
+        interrupt_allocation = 1;
+        (void)zzapp_mem_alloc(&memory, &proc_b, 1, &frame);
+        CHECK(0);
+    }
+    card_pool_reset_lock(&card_pool);
+    zzapp_mem_reset_live_lock();
+    zzapp_mem_reconcile_halted();
+    CHECK(memory.extent_count == 0U);
+    CHECK(memory.committed == 0U);
+    CHECK(card_pool_range_free_bytes(&card_pool, 0) == pool_free);
+}
+
+static void test_compacted_proc_registry_reconciles_once(void)
+{
+    uint32_t frame_a;
+    uint32_t frame_b;
+    uint32_t pool_free;
+
+    reset_memory();
+    pool_free = card_pool_range_free_bytes(&card_pool, 0);
+    CHECK(zzapp_mem_alloc(&memory, &proc_a, 1, &frame_a) == 0);
+    CHECK(zzapp_mem_alloc(&memory, &proc_b, 1, &frame_b) == 0);
+    if (setjmp(interrupted_allocation) == 0) {
+        interrupt_store = ZZAPP_MEM_TEST_AFTER_PROC_COMPACT;
+        interrupt_allocation = 1;
+        (void)zzapp_mem_release_proc(&memory, &proc_a);
+        CHECK(0);
+    }
+    card_pool_reset_lock(&card_pool);
+    zzapp_mem_reset_live_lock();
+    zzapp_mem_reconcile_halted();
+    CHECK(memory.proc_count == 1U);
+    CHECK(memory.committed == MB(1));
+    CHECK(zzapp_mem_release_proc(&memory, &proc_b) == MB(1));
+    CHECK(memory.committed == 0U);
+    CHECK(card_pool_range_free_bytes(&card_pool, 0) == pool_free);
+}
+
+static void test_compacted_frame_records_reconcile_once(void)
+{
+    uint32_t frames[2];
+    uint32_t pool_free;
+
+    reset_memory();
+    pool_free = card_pool_range_free_bytes(&card_pool, 0);
+    CHECK(zzapp_mem_alloc(&memory, &proc_a, 2, frames) == 0);
+    if (setjmp(interrupted_allocation) == 0) {
+        interrupt_store = ZZAPP_MEM_TEST_AFTER_FRAME_COMPACT;
+        interrupt_allocation = 1;
+        (void)zzapp_mem_release(&memory, &proc_a, frames[0]);
+        CHECK(0);
+    }
+    card_pool_reset_lock(&card_pool);
+    zzapp_mem_reset_live_lock();
+    zzapp_mem_reconcile_halted();
+    CHECK(proc_a.frame_count == 1U);
+    CHECK(proc_a.frames[1] == 0U);
+    CHECK(proc_a.committed == MB(1));
+    CHECK(memory.committed == MB(1));
+    CHECK(zzapp_mem_release_proc(&memory, &proc_a) == MB(1));
+    CHECK(memory.committed == 0U);
+    CHECK(card_pool_range_free_bytes(&card_pool, 0) == pool_free);
+}
+
+static void test_compacted_extent_registry_reconciles_once(void)
+{
+    uint32_t frames[ZZAPP_MEM_FRAMES_PER_EXTENT + 1U];
+    uint32_t pool_free;
+    uint32_t i;
+
+    reset_memory();
+    pool_free = card_pool_range_free_bytes(&card_pool, 0);
+    CHECK(zzapp_mem_alloc(&memory, &proc_a,
+                          ZZAPP_MEM_FRAMES_PER_EXTENT + 1U, frames) == 0);
+    if (setjmp(interrupted_allocation) == 0) {
+        interrupt_store = ZZAPP_MEM_TEST_AFTER_EXTENT_COMPACT;
+        interrupt_allocation = 1;
+        for (i = 0; i < ZZAPP_MEM_FRAMES_PER_EXTENT; i++)
+            CHECK(zzapp_mem_release(&memory, &proc_a, frames[i]) == 0);
+        CHECK(0);
+    }
+    card_pool_reset_lock(&card_pool);
+    zzapp_mem_reset_live_lock();
+    zzapp_mem_reconcile_halted();
+    CHECK(memory.extent_count == 1U);
+    CHECK(proc_a.frame_count == 1U);
+    CHECK(memory.committed == MB(1));
+    CHECK(card_pool_range_free_bytes(&card_pool, 0) ==
+          pool_free - ZZAPP_MEM_EXTENT_BYTES);
+    CHECK(zzapp_mem_release_proc(&memory, &proc_a) == MB(1));
+    CHECK(card_pool_range_free_bytes(&card_pool, 0) == pool_free);
+}
+
+static void test_last_frame_count_reconciles_commitment(void)
+{
+    uint32_t frame;
+
+    reset_memory();
+    zzapp_mem_proc_init(&proc_a, MB(1));
+    CHECK(zzapp_mem_alloc(&memory, &proc_a, 1, &frame) == 0);
+    if (setjmp(interrupted_allocation) == 0) {
+        interrupt_store = ZZAPP_MEM_TEST_AFTER_FRAME_COUNT;
+        interrupt_allocation = 1;
+        (void)zzapp_mem_release(&memory, &proc_a, frame);
+        CHECK(0);
+    }
+    card_pool_reset_lock(&card_pool);
+    zzapp_mem_reset_live_lock();
+    zzapp_mem_reconcile_halted();
+    CHECK(proc_a.frame_count == 0U);
+    CHECK(proc_a.committed == 0U);
+    CHECK(memory.committed == 0U);
+    CHECK(memory.proc_count == 0U);
+    CHECK(zzapp_mem_alloc(&memory, &proc_a, 1, &frame) == 0);
+    CHECK(zzapp_mem_release_proc(&memory, &proc_a) == MB(1));
+}
+
 static uint32_t low_events;
 
 static void low_memory(void *context)
@@ -205,6 +383,12 @@ int main(void)
     test_low_water_rearms_above_high_water();
     test_orphaned_allocator_lock_does_not_deadlock_release();
     test_frames_leave_legacy_arena_class_alone();
+    test_interrupted_allocation_reconciles_each_store();
+    test_unpublished_extent_is_reclaimed();
+    test_compacted_proc_registry_reconciles_once();
+    test_compacted_frame_records_reconcile_once();
+    test_compacted_extent_registry_reconciles_once();
+    test_last_frame_count_reconciles_commitment();
     printf("zzapp_mem: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

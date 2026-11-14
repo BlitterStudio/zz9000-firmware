@@ -244,6 +244,12 @@ int sched_worker_may_wfe(sched_worker_action_t action, int minigl_progress,
                          int task_active, int reset_requested, int doorbell,
                          int minigl_registered);
 
+typedef void (*scheduler_core1_recovery_step_t)(void);
+/* Execute the halt fence before resetting locks that core 1 could hold. */
+void scheduler_core1_halt_before_recover(
+    scheduler_core1_recovery_step_t halt,
+    scheduler_core1_recovery_step_t recover);
+
 /* minigl_reset_ack values.  FAILED: core 1 could not stop the module's
  * engines; core 0 then stops them and drops the module with core 1 halted. */
 #define SCHED_MINIGL_RESET_ACK_DONE 1U

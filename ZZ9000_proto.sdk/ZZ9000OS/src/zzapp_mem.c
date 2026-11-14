@@ -43,6 +43,13 @@ void zzapp_mem_reset_live_lock(void)
     zzapp_mem_reset_lock(live_memory);
 }
 
+#ifdef ZZAPP_MEM_HOST_TEST
+#define FRAME_STORE(memory, proc, store) \
+    zzapp_mem_test_frame_store(memory, proc, store)
+#else
+#define FRAME_STORE(memory, proc, store) ((void)0)
+#endif
+
 void zzapp_mem_proc_init(zzapp_mem_proc_t *proc, uint32_t limit)
 {
     memset(proc, 0, sizeof(*proc));
@@ -119,11 +126,193 @@ static int add_extents_locked(zzapp_mem_t *memory, uint32_t count)
             }
             return -1;
         }
+        FRAME_STORE(memory, NULL, ZZAPP_MEM_TEST_AFTER_POOL_ALLOCATION);
         memory->extents[memory->extent_count].base = base;
         memory->extents[memory->extent_count].used_frames = 0;
-        memory->extent_count++;
+        __atomic_store_n(&memory->extent_count, memory->extent_count + 1U,
+                         __ATOMIC_RELEASE);
     }
     return 0;
+}
+
+static int register_proc_locked(zzapp_mem_t *memory, zzapp_mem_proc_t *proc)
+{
+    uint32_t count = __atomic_load_n(&memory->proc_count, __ATOMIC_ACQUIRE);
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        if (memory->procs[i] == proc)
+            return 0;
+    }
+    if (count == ZZAPP_MEM_MAX_PROCS)
+        return -1;
+    memory->procs[count] = proc;
+    FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_PROC_POINTER);
+    __atomic_store_n(&memory->proc_count, count + 1U, __ATOMIC_RELEASE);
+    return 0;
+}
+
+static void unregister_proc_locked(zzapp_mem_t *memory, zzapp_mem_proc_t *proc)
+{
+    uint32_t count = __atomic_load_n(&memory->proc_count, __ATOMIC_ACQUIRE);
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        if (memory->procs[i] != proc)
+            continue;
+        memmove(&memory->procs[i], &memory->procs[i + 1],
+                (count - i - 1U) * sizeof(memory->procs[0]));
+        FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_PROC_COMPACT);
+        __atomic_store_n(&memory->proc_count, count - 1U, __ATOMIC_RELEASE);
+        memory->procs[count - 1U] = NULL;
+        return;
+    }
+}
+
+static int extent_is_published(const zzapp_mem_t *memory, uint32_t base)
+{
+    uint32_t extent;
+
+    for (extent = 0; extent < memory->extent_count; extent++) {
+        if (memory->extents[extent].base == base)
+            return 1;
+    }
+    return 0;
+}
+
+static void free_unpublished_extents(zzapp_mem_t *memory)
+{
+    uint32_t block = 0U;
+
+    while (block < memory->pool->block_count) {
+        card_pool_block_t *entry = &memory->pool->blocks[block];
+
+        if (entry->owner == ZZAPP_MEM_POOL_OWNER &&
+            !(entry->flags & CARD_POOL_BLOCK_QUARANTINED) &&
+            !extent_is_published(memory, entry->addr)) {
+            card_pool_free(memory->pool, entry->addr, ZZAPP_MEM_POOL_OWNER);
+            continue;
+        }
+        block++;
+    }
+}
+
+static void dedupe_extents(zzapp_mem_t *memory)
+{
+    uint32_t count = memory->extent_count;
+    uint32_t extent;
+    uint32_t unique = 0U;
+
+    for (extent = 0; extent < count; extent++) {
+        uint32_t seen;
+
+        for (seen = 0U; seen < unique; seen++) {
+            if (memory->extents[seen].base == memory->extents[extent].base)
+                break;
+        }
+        if (seen < unique)
+            continue;
+        memory->extents[unique++] = memory->extents[extent];
+    }
+    for (extent = unique; extent < count; extent++)
+        memory->extents[extent] = (zzapp_mem_extent_t){0};
+    memory->extent_count = unique;
+}
+
+static void rebuild_extent_bits(zzapp_mem_t *memory)
+{
+    uint32_t extent;
+    uint32_t proc;
+    uint32_t proc_count = __atomic_load_n(&memory->proc_count,
+                                          __ATOMIC_ACQUIRE);
+    uint32_t unique = 0U;
+
+    dedupe_extents(memory);
+    for (extent = 0; extent < memory->extent_count; extent++)
+        memory->extents[extent].used_frames = 0U;
+    memory->committed = 0U;
+    for (proc = 0; proc < proc_count; proc++) {
+        zzapp_mem_proc_t *entry = memory->procs[proc];
+        uint32_t seen;
+        uint32_t frame;
+        uint32_t unique_frames = 0U;
+
+        for (seen = 0U; seen < unique; seen++) {
+            if (memory->procs[seen] == entry)
+                break;
+        }
+        if (seen < unique)
+            continue;
+        for (frame = 0; frame < entry->frame_count; frame++) {
+            uint32_t frame_seen;
+            uint32_t address = entry->frames[frame];
+
+            for (frame_seen = 0U; frame_seen < unique_frames; frame_seen++) {
+                if (entry->frames[frame_seen] == address)
+                    break;
+            }
+            if (frame_seen < unique_frames)
+                continue;
+            entry->frames[unique_frames++] = address;
+        }
+        for (frame = unique_frames; frame < entry->frame_count; frame++)
+            entry->frames[frame] = 0U;
+        entry->frame_count = unique_frames;
+        entry->committed = unique_frames * ZZAPP_MEM_FRAME_BYTES;
+        if (unique_frames == 0U)
+            continue;
+        memory->procs[unique++] = entry;
+        memory->committed += entry->committed;
+        for (frame = 0; frame < unique_frames; frame++) {
+            uint32_t address = entry->frames[frame];
+
+            for (extent = 0; extent < memory->extent_count; extent++) {
+                zzapp_mem_extent_t *current = &memory->extents[extent];
+                uint32_t offset;
+
+                if (address < current->base)
+                    continue;
+                offset = address - current->base;
+                if (offset < ZZAPP_MEM_EXTENT_BYTES &&
+                    offset % ZZAPP_MEM_FRAME_BYTES == 0U) {
+                    current->used_frames |=
+                        1u << (offset / ZZAPP_MEM_FRAME_BYTES);
+                    break;
+                }
+            }
+        }
+    }
+    for (proc = unique; proc < proc_count; proc++)
+        memory->procs[proc] = NULL;
+    __atomic_store_n(&memory->proc_count, unique, __ATOMIC_RELEASE);
+}
+
+void zzapp_mem_reconcile_halted(void)
+{
+    zzapp_mem_t *memory = live_memory;
+    uint32_t extent;
+
+    if (!memory)
+        return;
+    sdk_smp_lock_acquire(&memory->lock);
+    sdk_smp_lock_acquire(&memory->pool->lock);
+    rebuild_extent_bits(memory);
+    for (extent = 0; extent < memory->extent_count;) {
+        zzapp_mem_extent_t *entry = &memory->extents[extent];
+
+        if (entry->used_frames != 0U) {
+            extent++;
+            continue;
+        }
+        card_pool_free(memory->pool, entry->base, ZZAPP_MEM_POOL_OWNER);
+        memmove(entry, entry + 1,
+                (memory->extent_count - extent - 1u) * sizeof(*entry));
+        memory->extent_count--;
+    }
+    free_unpublished_extents(memory);
+    update_water_locked(memory);
+    sdk_smp_lock_release(&memory->pool->lock);
+    sdk_smp_lock_release(&memory->lock);
 }
 
 int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
@@ -164,6 +353,11 @@ int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
         sdk_smp_lock_release(&memory->lock);
         return -1;
     }
+    if (register_proc_locked(memory, proc)) {
+        sdk_smp_lock_release(&memory->pool->lock);
+        sdk_smp_lock_release(&memory->lock);
+        return -1;
+    }
     for (uint32_t extent = 0, out = 0;
          extent < memory->extent_count && out < frame_count; extent++) {
         zzapp_mem_extent_t *entry = &memory->extents[extent];
@@ -174,15 +368,23 @@ int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
             if (!(entry->used_frames & (1u << frame))) {
                 uint32_t address = entry->base + frame * ZZAPP_MEM_FRAME_BYTES;
 
+                uint32_t count = proc->frame_count;
+
                 entry->used_frames |= 1u << frame;
-                proc->frames[proc->frame_count++] = address;
+                FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_EXTENT_BIT);
+                proc->frames[count] = address;
+                __atomic_store_n(&proc->frame_count, count + 1U,
+                                 __ATOMIC_RELEASE);
+                FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_FRAME_RECORD);
+                proc->committed += ZZAPP_MEM_FRAME_BYTES;
+                FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_PROC_CHARGE);
+                memory->committed += ZZAPP_MEM_FRAME_BYTES;
+                FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_MEMORY_CHARGE);
                 frames[out++] = address;
                 memset((void *)(uintptr_t)address, 0, ZZAPP_MEM_FRAME_BYTES);
             }
         }
     }
-    proc->committed += bytes;
-    memory->committed += bytes;
     low_event = update_water_locked(memory);
     sdk_smp_lock_release(&memory->pool->lock);
     sdk_smp_lock_release(&memory->lock);
@@ -191,13 +393,21 @@ int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
     return 0;
 }
 
-static int remove_proc_frame(zzapp_mem_proc_t *proc, uint32_t frame)
+static int remove_proc_frame(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
+                             uint32_t frame)
 {
+#ifndef ZZAPP_MEM_HOST_TEST
+    (void)memory;
+#endif
     for (uint32_t i = 0; i < proc->frame_count; i++) {
         if (proc->frames[i] == frame) {
             memmove(&proc->frames[i], &proc->frames[i + 1],
                     (proc->frame_count - i - 1u) * sizeof(proc->frames[0]));
-            proc->frame_count--;
+            FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_FRAME_COMPACT);
+            /* Publish after compaction so recovery sees its replacement prefix. */
+            __atomic_store_n(&proc->frame_count, proc->frame_count - 1U,
+                             __ATOMIC_RELEASE);
+            FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_FRAME_COUNT);
             return 0;
         }
     }
@@ -210,7 +420,7 @@ static int release_frame_locked(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
     uint32_t extent_index;
     uint32_t frame_index;
 
-    if (remove_proc_frame(proc, frame))
+    if (remove_proc_frame(memory, proc, frame))
         return -1;
     for (extent_index = 0; extent_index < memory->extent_count; extent_index++) {
         zzapp_mem_extent_t *extent = &memory->extents[extent_index];
@@ -233,7 +443,10 @@ static int release_frame_locked(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
             memmove(extent, extent + 1,
                     (memory->extent_count - extent_index - 1u) *
                     sizeof(*extent));
-            memory->extent_count--;
+            FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_EXTENT_COMPACT);
+            /* Publish after compaction so recovery sees its replacement prefix. */
+            __atomic_store_n(&memory->extent_count,
+                             memory->extent_count - 1U, __ATOMIC_RELEASE);
         }
         return 0;
     }
@@ -250,8 +463,11 @@ int zzapp_mem_release(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
     sdk_smp_lock_acquire(&memory->lock);
     sdk_smp_lock_acquire(&memory->pool->lock);
     result = release_frame_locked(memory, proc, frame);
-    if (!result)
+    if (!result) {
+        if (proc->frame_count == 0U)
+            unregister_proc_locked(memory, proc);
         update_water_locked(memory);
+    }
     sdk_smp_lock_release(&memory->pool->lock);
     sdk_smp_lock_release(&memory->lock);
     return result;
@@ -272,6 +488,8 @@ uint32_t zzapp_mem_release_proc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc)
             break;
         released += ZZAPP_MEM_FRAME_BYTES;
     }
+    if (proc->frame_count == 0U)
+        unregister_proc_locked(memory, proc);
     update_water_locked(memory);
     sdk_smp_lock_release(&memory->pool->lock);
     sdk_smp_lock_release(&memory->lock);

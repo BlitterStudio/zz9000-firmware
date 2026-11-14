@@ -342,22 +342,29 @@ static void core1_park_for_reset(void)
  * (scheduler_core0_poll) to recover a worker that faulted and parked. 0xFFFFFFF0
  * is re-pointed at core1_entry first in case the OCM word was disturbed.
  */
+void core1_halt(void)
+{
+	uint32_t reg;
+
+	core1_park_for_reset();
+	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
+	reg = Xil_In32(A9_CPU_RST_CTRL);
+	reg |= A9_RST1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, reg);
+	reg |= A9_CLKSTOP1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, reg);
+	Xil_Out32(XSLCR_LOCK_ADDR, XSLCR_LOCK_CODE);
+}
+
 void core1_cold_restart(void)
 {
 	volatile uint32_t *core1_addr = (volatile uint32_t *) 0xFFFFFFF0;
 	uint32_t RegVal;
 	taskq_shared_t *sh = scheduler_shared();
 
-	core1_park_for_reset();
 	*core1_addr = (uint32_t) core1_entry;
 	Xil_DCacheFlush();  /* the reset vector write must reach OCM before CPU1 reads it */
-
-	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
-	RegVal = Xil_In32(A9_CPU_RST_CTRL);
-	RegVal |= A9_RST1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	RegVal |= A9_CLKSTOP1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	core1_halt();
 
 	/*
 	 * CPU1 is now held in reset with its clock stopped, i.e. provably
@@ -404,6 +411,8 @@ void core1_cold_restart(void)
 	/* Its module state died with core 1: reload it on the next acquire. */
 	zzm_loader_forget_core1_modules();
 
+	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
+	RegVal = Xil_In32(A9_CPU_RST_CTRL);
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
 	RegVal &= ~A9_CLKSTOP1_MASK;

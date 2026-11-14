@@ -381,6 +381,14 @@ int taskq_should_drain(int zorro_pending, int display_pending, int core1_enabled
   return (!zorro_pending && !display_pending) ? 1 : 0;
 }
 
+void scheduler_core1_halt_before_recover(
+    scheduler_core1_recovery_step_t halt,
+    scheduler_core1_recovery_step_t recover)
+{
+  halt();
+  recover();
+}
+
 /* ---- core-1 worker action policy (portable, host-tested) ---- */
 sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
                                           int minigl_work_available, int minigl_bound)

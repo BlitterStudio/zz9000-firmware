@@ -549,6 +549,21 @@ static void test_accounting_and_throttle(void)
 	CHECK(zzapp_kernel_schedule(&kernel, 0) != ZZAPP_KERNEL_IDLE);
 }
 
+static void test_new_generation_resets_cpu_ticks(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	kernel.threads[0].user_ticks = 17U;
+	kernel.threads[0].svc_ticks = 23U;
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x2000u, 2u, 0u, 0u,
+				       0x9000u) == 0);
+	CHECK(kernel.threads[0].user_ticks == 0U);
+	CHECK(kernel.threads[0].svc_ticks == 0U);
+}
+
 static void test_blocking_api_lock_and_slot_resources(void)
 {
 	zzapp_kernel_t kernel;
@@ -918,6 +933,7 @@ int main(void)
     test_sleep_deadline_order();
     test_wait_completion_timeout_and_cancel();
     test_accounting_and_throttle();
+    test_new_generation_resets_cpu_ticks();
     test_blocking_api_lock_and_slot_resources();
     test_waiter_isolation_timeout_and_stop();
     test_stop_wakes_api_lock_waiter();

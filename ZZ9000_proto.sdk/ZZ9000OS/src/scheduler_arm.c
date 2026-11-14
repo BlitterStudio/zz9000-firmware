@@ -8,8 +8,39 @@
  * coherency bring-up, the coherent shared control block, the core-1 worker,
  * and the core-0 poll. The portable state machine it drives lives in
  * scheduler.c (host-tested); a focused host seam covers worker initialization.
+
  */
-#if defined(TASKQ_HOST_TEST) && defined(MINIGL_HOST_TEST)
+#define SCHEDULER_CORE1_FALLBACK_BODY() do { \
+  scheduler_core1_halt_before_recover(core1_halt, zzapp_recover_halted_core1); \
+  sdk_compression_reclaim_core1_decode(); \
+  zzapp_services_reclaim_halted_audio(); \
+  zzm_runtime_quarantine_module(ZZM_MODULE_MINIGL); \
+  g_core1_started = 0; \
+} while (0)
+#if defined(TASKQ_HOST_TEST) && defined(SCHEDULER_ARM_FALLBACK_HOST_TEST)
+
+#include "scheduler.h"
+#include "zzm_format.h"
+
+static volatile uint32_t g_core1_started;
+
+extern void core1_halt(void);
+extern void zzapp_recover_halted_core1(void);
+extern void sdk_compression_reclaim_core1_decode(void);
+extern void zzapp_services_reclaim_halted_audio(void);
+extern void zzm_runtime_quarantine_module(uint32_t module);
+
+static void scheduler_core1_fallback_recover(void)
+{
+  SCHEDULER_CORE1_FALLBACK_BODY();
+}
+
+void scheduler_core1_fallback_host_test(void)
+{
+  scheduler_core1_fallback_recover();
+}
+
+#elif defined(TASKQ_HOST_TEST) && defined(MINIGL_HOST_TEST)
 
 #include "scheduler.h"
 #include "scheduler_core1_minigl_init.h"
@@ -115,6 +146,11 @@ typedef char sched_sessions_offset_check[
 static taskq_watchdog_t g_sched_watchdog;
 static volatile uint32_t g_core1_started;
 
+static void scheduler_core1_fallback_recover(void)
+{
+  SCHEDULER_CORE1_FALLBACK_BODY();
+}
+
 taskq_shared_t *scheduler_shared(void)
 {
   return (taskq_shared_t *)SDK_TASKQ_REGION_ADDRESS;
@@ -132,6 +168,7 @@ void zzapp_recover_external_locks(void)
   zzm_loader_reset_session_lock();
   zzapp_as_reset_lock();
   zzapp_mem_reset_live_lock();
+  zzapp_mem_reconcile_halted();
   surface_allocator_reset_lock();
   zzm_runtime_reset_heap_lock();
 }
@@ -920,11 +957,7 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
       /* Same order as a cold restart: every lock, then contexts, then
        * teardown. The helper owns that order; only non-lock reclaim
        * remains here because core 1 will not run it. */
-      zzapp_recover_halted_core1();
-      sdk_compression_reclaim_core1_decode();
-      zzapp_services_reclaim_halted_audio();
-      zzm_runtime_quarantine_module(ZZM_MODULE_MINIGL);
-      g_core1_started = 0;
+      scheduler_core1_fallback_recover();
     }
   }
 
