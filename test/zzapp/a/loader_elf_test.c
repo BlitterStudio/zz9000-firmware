@@ -4,8 +4,19 @@
 
 #include "zzapp.h"
 #include "zzapp_runtime.h"
+#include "host_card_pool.h"
 int zzapp_loader_have_image(void);
 static uint32_t selected_slot;
+int smp_cpu_id(void) { return 0; }
+void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1U; }
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+    if (*word)
+        return 0;
+    *word = 1U;
+    return 1;
+}
+void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0U; }
 
 uint32_t zzapp_services_current_slot(void)
 {
@@ -104,6 +115,7 @@ static void crossing_entry(const void *api_ptr, int argc, char **argv)
 #define LOAD_OFF 0x100u
 #define NOTE_OFF 0x0a0u
 #define RELA_OFF 0x0d0u
+#define ZERO_CHUNK_FRAMES 2U
 #define SHOFF 0x180u
 
 static void put16(uint8_t *p, uint16_t v)
@@ -125,6 +137,14 @@ static uint32_t get32(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
+static uint8_t *app_memory(uint32_t slot, uint32_t offset)
+{
+    zzapp_proc_t *proc = zzapp_proc_slot(slot);
+
+    return (uint8_t *)(uintptr_t)(proc->image_frames[offset >> 20] +
+                                  (offset & ((1U << 20) - 1U)));
+}
+
 
 static void make_image(uint8_t image[IMAGE_BYTES])
 {
@@ -175,36 +195,61 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     put32(sh + 20, 12);
     put32(sh + 36, 12);
 }
+static uint32_t successful_loads;
 
 static int load_end(uint8_t image[IMAGE_BYTES])
 {
+    int rc;
+    uint32_t passes = 0U;
+
     assert(zzapp_loader_begin() == ZZ_OK);
     assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == ZZ_OK);
-    return zzapp_loader_end();
+    do {
+        rc = zzapp_loader_end();
+        if (rc == ZZAPP_LOADER_IN_PROGRESS) {
+            assert(zzapp_test_loader_zero_last_frames() != 0U);
+            assert(zzapp_test_loader_zero_last_frames() <=
+                   ZERO_CHUNK_FRAMES);
+            assert(zzapp_test_loader_mapping_calls() == 0U);
+        }
+        passes++;
+    } while (rc == ZZAPP_LOADER_IN_PROGRESS);
+    if (rc == ZZ_OK)
+        assert(successful_loads++ != 0U || passes > 1U);
+    return rc;
 }
 
 int main(void)
 {
     uint8_t image[IMAGE_BYTES];
     uint32_t card;
+    uint32_t i;
     const zzapp_api *api;
     zzapp_heap_info mem;
+    host_card_pool_reset(256U << 20);
     zzapp_boot_init();
     assert(sizeof(zzapp_proc_slot(0)->image_frames) /
            sizeof(zzapp_proc_slot(0)->image_frames[0]) == ZZAPP_MEM_MAX_FRAMES);
     make_image(image);
     assert(load_end(image) == ZZ_OK);
+    assert(zzapp_test_loader_mapping_calls() != 0U);
     card = zzapp_test_arena_card();
     assert(card == 0xc0000000u);
-    assert(get32(zzapp_test_arena_mem() + LOAD_OFF) == card + LOAD_OFF);
+    assert(get32(app_memory(0U, LOAD_OFF)) == card + LOAD_OFF);
+    for (i = 0U; i < (1U << 20); i++)
+        assert(((uint8_t *)(uintptr_t)zzapp_proc_slot(0)->heap_frames[3])[i] ==
+               0U);
     assert(zzapp_proc_slot(0)->memory.committed == ZZAPP_ARENA_BYTES);
-    selected_slot = 1U;
+    zzapp_loader_release();
+    zzapp_boot_init();
     make_image(image);
-    assert(load_end(image) == ZZ_OK);
-    assert(zzapp_proc_slot(1)->owner != zzapp_proc_slot(0)->owner);
-    zzapp_loader_release();
-    selected_slot = 0U;
-    zzapp_loader_release();
+    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == ZZ_OK);
+    assert(zzapp_loader_end() == ZZAPP_LOADER_IN_PROGRESS);
+    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_test_arena_mem() == NULL);
+    assert(zzapp_proc_slot(0)->memory.committed == 0U);
+
 
     /* Stock GNU ld emits SHT_REL: its addend is the target word, not a
      * third relocation-field as in RELA. */
@@ -217,7 +262,7 @@ int main(void)
     put32(image + LOAD_OFF, LOAD_OFF);
     assert(load_end(image) == ZZ_OK);
     card = zzapp_test_arena_card();
-    assert(get32(zzapp_test_arena_mem() + LOAD_OFF) == card + LOAD_OFF);
+    assert(get32(app_memory(0U, LOAD_OFF)) == card + LOAD_OFF);
     zzapp_loader_release();
     /* REL's implicit addend is read from its virtual target after PT_LOAD
      * placement, not from the source-file offset. */
@@ -233,7 +278,7 @@ int main(void)
     put32(image + LOAD_OFF, LOAD_OFF + 0x20u);
     assert(load_end(image) == ZZ_OK);
     card = zzapp_test_arena_card();
-    assert(get32(zzapp_test_arena_mem() + LOAD_OFF + 0x20u) ==
+    assert(get32(app_memory(0U, LOAD_OFF + 0x20u)) ==
            card + LOAD_OFF + 0x20u);
     zzapp_loader_release();
 

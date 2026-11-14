@@ -36,6 +36,10 @@
 #define ZZAPP_FILE_TIMEOUT_US  30000000u
 
 #define ZZAPP_ARENA_BYTES      (96u << 20)
+
+/* zzapp_loader_end() keeps the deferred LOAD_END request running while it
+ * zeroes a private frame batch; this never crosses the mailbox ABI. */
+#define ZZAPP_LOADER_IN_PROGRESS 1
 #define ZZAPP_STACK_DEFAULT    (1u << 20)
 #define ZZAPP_STACK_MIN        (64u << 10)
 #define ZZAPP_FILE_MAX         ZZAPP_IMAGE_MAX_BYTES
@@ -237,6 +241,8 @@ uint32_t zzapp_test_service_calls(void);
 uint32_t zzapp_test_in_api(void);
 uint32_t zzapp_test_arena_card(void);
 uint8_t *zzapp_test_arena_mem(void);
+uint32_t zzapp_test_loader_zero_last_frames(void);
+uint32_t zzapp_test_loader_mapping_calls(void);
 int zzapp_test_cold_restarts(void);
 uint32_t zzapp_test_exit_code(void);
 void zzapp_test_set_wait_registered(uint32_t slot, int registered);

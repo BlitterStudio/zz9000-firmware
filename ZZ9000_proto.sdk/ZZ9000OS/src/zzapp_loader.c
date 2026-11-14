@@ -104,9 +104,17 @@ struct loader_slot {
     uint32_t back;
     uint32_t back_owner;
     int ready;
+    uint32_t zero_frames;
+    uint32_t zeroed_frames;
+    struct load_image image;
+    uint8_t *relocs;
+    uint32_t relocs_bytes;
+    int image_prepared;
 #ifdef ZZAPP_HOST_TEST
     uint8_t *host_mem;
     uint8_t *host_back;
+    uint8_t *host_file;
+    uint32_t host_zero_last_frames;
 #endif
 };
 
@@ -127,6 +135,12 @@ static uint32_t loader_slot(void)
 #define g_owner      (g_loader[loader_slot()].owner)
 #define g_file_end   (g_loader[loader_slot()].file_end)
 #define g_back       (g_loader[loader_slot()].back)
+#define g_zero_frames (g_loader[loader_slot()].zero_frames)
+#define g_zeroed_frames (g_loader[loader_slot()].zeroed_frames)
+#define g_image      (g_loader[loader_slot()].image)
+#define g_relocs     (g_loader[loader_slot()].relocs)
+#define g_relocs_bytes (g_loader[loader_slot()].relocs_bytes)
+#define g_image_prepared (g_loader[loader_slot()].image_prepared)
 #define g_back_owner (g_loader[loader_slot()].back_owner)
 #define g_generation (g_loader[loader_slot()].generation)
 #define g_ready      (g_loader[loader_slot()].ready)
@@ -134,6 +148,9 @@ static uint32_t loader_slot(void)
 #define g_host_mem   (g_loader[loader_slot()].host_mem)
 #define g_host_back  (g_loader[loader_slot()].host_back)
 #define HOST_CARD 0xc0000000u
+#define g_host_file  (g_loader[loader_slot()].host_file)
+#define g_host_zero_last_frames \
+    (g_loader[loader_slot()].host_zero_last_frames)
 #endif
 #define CARD_POOL_OWNER_SLOT_SHIFT 22u
 #define CARD_POOL_OWNER_GENERATION_MASK ((1u << CARD_POOL_OWNER_SLOT_SHIFT) - 1u)
@@ -181,11 +198,19 @@ uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
     return flags;
 }
 
-#ifndef ZZAPP_HOST_TEST
+#define ZZAPP_LOADER_ZERO_CHUNK_FRAMES 2u
+
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
 #include "card_pool.h"
+#if !defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
 #include "memorymap.h"
 #include "xil_cache.h"
 #include "xil_cache_l.h"
+#else
+typedef uintptr_t INTPTR;
+#define Xil_L1DCacheFlushRange(address, bytes) ((void)(address), (void)(bytes))
+#define Xil_ICacheInvalidateRange(address, bytes) ((void)(address), (void)(bytes))
+#endif
 
 static zzapp_mem_t g_app_memory;
 static int g_app_memory_ready;
@@ -199,6 +224,18 @@ void zzapp_loader_memory_init(void)
     }
 }
 
+#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
+{
+    (void)owner;
+    if (bytes == ZZAPP_ARENA_BYTES) {
+        g_host_mem = (uint8_t *)malloc(bytes);
+        return g_host_mem ? HOST_CARD : 0U;
+    }
+    g_host_back = (uint8_t *)malloc(bytes);
+    return g_host_back ? HOST_CARD - 0x01000000U : 0U;
+}
+#else
 static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
 {
     uint32_t addr;
@@ -215,6 +252,42 @@ static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
     }
     return addr;
 }
+#endif
+#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+static uint32_t g_host_mapping_calls;
+static int host_as_create(zzapp_as_t *as, uint32_t slot, uint32_t generation)
+{
+    (void)as;
+    (void)slot;
+    (void)generation;
+    g_host_mapping_calls++;
+    return 0;
+}
+static void host_as_destroy(zzapp_as_t *as) { (void)as; }
+static int host_as_map_frames(zzapp_as_t *as, uint32_t va,
+                              const uint32_t *frames, uint32_t count)
+{
+    (void)as; (void)va; (void)frames; (void)count;
+    return 0;
+}
+static int host_as_map_image(zzapp_as_t *as, uint32_t va, uint32_t pa,
+                             uint32_t bytes, uint32_t permissions)
+{
+    (void)as; (void)va; (void)pa; (void)bytes; (void)permissions;
+    return 0;
+}
+static int host_as_unmap_frames(zzapp_as_t *as, uint32_t va, uint32_t count)
+{
+    (void)as; (void)va; (void)count;
+    return 0;
+}
+#define zzapp_as_create host_as_create
+#define zzapp_as_destroy host_as_destroy
+#define zzapp_as_map_frames host_as_map_frames
+#define zzapp_as_map_image host_as_map_image
+#define zzapp_as_unmap_frames host_as_unmap_frames
+#endif
+
 
 
 static int map_loaded_image(const struct load_image *img)
@@ -241,17 +314,36 @@ static int map_loaded_image(const struct load_image *img)
         return ZZ_ENOMEM;
     heap_frames = total_frames - image_frames - stack_frames;
     proc_limit = image_proc_limit(img);
-    zzapp_mem_proc_init(&proc->memory, proc_limit);
-    if (zzapp_mem_alloc(&g_app_memory, &proc->memory, image_frames,
-                        proc->image_frames) ||
-        (heap_frames && zzapp_mem_alloc(&g_app_memory, &proc->memory,
-                                        heap_frames, proc->heap_frames)) ||
-        zzapp_mem_alloc(&g_app_memory, &proc->memory, stack_frames,
-                        proc->stack_frames))
-        goto failed;
-    proc->image_frame_count = image_frames;
-    proc->heap_frame_count = heap_frames;
-    proc->stack_frame_count = stack_frames;
+    if (g_zero_frames == 0U) {
+        zzapp_mem_proc_init(&proc->memory, proc_limit);
+        if (zzapp_mem_alloc_unzeroed(&g_app_memory, &proc->memory,
+                                     image_frames, proc->image_frames) ||
+            (heap_frames &&
+             zzapp_mem_alloc_unzeroed(&g_app_memory, &proc->memory,
+                                      heap_frames, proc->heap_frames)) ||
+            zzapp_mem_alloc_unzeroed(&g_app_memory, &proc->memory,
+                                     stack_frames, proc->stack_frames))
+            goto failed;
+        proc->image_frame_count = image_frames;
+        proc->heap_frame_count = heap_frames;
+        proc->stack_frame_count = stack_frames;
+        g_zero_frames = total_frames;
+        g_zeroed_frames = 0U;
+    }
+    if (g_zeroed_frames < g_zero_frames) {
+        uint32_t zeroed = zzapp_mem_zero_frames(
+            &proc->memory, g_zeroed_frames, ZZAPP_LOADER_ZERO_CHUNK_FRAMES);
+
+        g_zeroed_frames += zeroed;
+#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+        g_host_zero_last_frames = zeroed;
+#endif
+        if (g_zeroed_frames < g_zero_frames)
+            return ZZAPP_LOADER_IN_PROGRESS;
+    }
+#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+    g_host_zero_last_frames = 0U;
+#endif
     if (zzapp_as_create(&proc->as, loader_slot(), proc->generation))
         goto failed;
     proc->heap_base = image_frames * ZZAPP_MEM_FRAME_BYTES;
@@ -370,7 +462,9 @@ static int map_loaded_image(const struct load_image *img)
             map_start += count;
         }
     }
+#ifndef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
     __asm__ __volatile__("dsb\n\tmcr p15, 0, r0, c7, c5, 6\n\tdsb\n\tisb" ::: "memory");
+#endif
     return ZZ_OK;
 
 failed:
@@ -456,6 +550,15 @@ static void cache_image(const struct load_image *img)
 #define CARD_POOL_CLASS_APP_DISPLAY 14
 void zzapp_loader_memory_init(void) {}
 #endif
+static void free_relocs(void)
+{
+    uint8_t *relocs = g_relocs;
+
+    g_relocs = NULL;
+    g_relocs_bytes = 0U;
+    free(relocs);
+}
+
 
 static void drop_arena(void)
 {
@@ -472,10 +575,23 @@ static void drop_arena(void)
     if (g_back)
         card_pool_free(&card_pool, g_back, g_back_owner);
 #else
+#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+    {
+        zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
+
+        if (proc) {
+            zzapp_as_destroy(&proc->as);
+            (void)zzapp_mem_release_proc(&g_app_memory, &proc->memory);
+        }
+    }
+#endif
     free(g_host_mem);
     free(g_host_back);
+    free(g_host_file);
     g_host_mem = NULL;
     g_host_back = NULL;
+    g_host_file = NULL;
+    g_host_zero_last_frames = 0U;
 #endif
     g_card = 0;
     g_mem = NULL;
@@ -483,6 +599,10 @@ static void drop_arena(void)
     g_owner = 0;
     g_generation = 0;
     g_file_end = 0;
+    free_relocs();
+    g_image_prepared = 0;
+    g_zero_frames = 0U;
+    g_zeroed_frames = 0U;
     g_back = 0;
     g_back_owner = 0;
     g_ready = 0;
@@ -525,6 +645,9 @@ int zzapp_loader_begin(void)
     g_owner = owner;
     g_file_end = 0;
     g_ready = 0;
+#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+    g_host_mapping_calls = 0U;
+#endif
 #ifdef ZZAPP_HOST_TEST
     g_card = addr;
     g_bytes = ZZAPP_ARENA_BYTES;
@@ -883,7 +1006,7 @@ static int parse_elf(struct load_image *img)
     return relocs_ok(shnum, shentsize, shoff, image_limit);
 }
 
-#ifdef ZZAPP_HOST_TEST
+#if defined(ZZAPP_HOST_TEST) && !defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
 static int overlap(uint32_t a, uint32_t an, uint32_t b, uint32_t bn)
 {
     return an && bn && a < b + bn && b < a + an;
@@ -896,6 +1019,7 @@ static int overlap(uint32_t a, uint32_t an, uint32_t b, uint32_t bn)
  * held by the arena. */
 static int place_segments(const struct load_image *img)
 {
+    const uint8_t *file = g_host_file ? g_host_file : g_mem;
     uint8_t done[ZZAPP_MAX_LOAD];
     uint32_t left = img->nseg;
     uint32_t guard = 0;
@@ -914,15 +1038,16 @@ static int place_segments(const struct load_image *img)
             for (j = 0; j < img->nseg; j++) {
                 if (j == i || done[j])
                     continue;
-                if (overlap(img->seg[i].vaddr, img->seg[i].filesz,
+                if (!g_host_file &&
+                    overlap(img->seg[i].vaddr, img->seg[i].filesz,
                             img->seg[j].off, img->seg[j].filesz))
                     blocked = 1;
             }
             if (blocked)
                 continue;
-            if (img->seg[i].filesz && img->seg[i].vaddr != img->seg[i].off)
-                memmove(g_mem + img->seg[i].vaddr, g_mem + img->seg[i].off,
-                        img->seg[i].filesz);
+            if (img->seg[i].filesz)
+                memmove(g_mem + img->seg[i].vaddr,
+                        file + img->seg[i].off, img->seg[i].filesz);
             done[i] = 1;
             left--;
             moved = 1;
@@ -943,147 +1068,142 @@ static int place_segments(const struct load_image *img)
 }
 #endif
 
-int zzapp_loader_end(void)
+static int prepare_loaded_image(void)
 {
-    struct load_image img;
     uint16_t shnum;
     uint16_t shentsize;
     uint32_t shoff;
+    uint32_t saved_n = 0U;
+    uint16_t i;
+    int rc;
+
+    rc = parse_elf(&g_image);
+    if (rc != ZZ_OK)
+        return rc;
+    if (!image_commit_fits_limit(&g_image))
+        return ZZ_ENOMEM;
+    shoff = rd32(g_mem + 32u);
+    shentsize = rd16(g_mem + 46u);
+    shnum = rd16(g_mem + 48u);
+    for (i = 0U; i < shnum; i++) {
+        const uint8_t *sh = g_mem + shoff + (uint32_t)i * shentsize;
+        uint32_t type = rd32(sh + 4u);
+        uint32_t size = rd32(sh + 20u);
+        uint32_t entries;
+
+        if (type != SHT_RELA && type != SHT_REL)
+            continue;
+        entries = size / (type == SHT_RELA ? 12u : 8u);
+        if (entries > (UINT32_MAX - saved_n) / 16u)
+            return ZZ_ENOMEM;
+        saved_n += entries * 16u;
+    }
+    g_relocs = saved_n ? (uint8_t *)malloc(saved_n) : NULL;
+    if (saved_n && !g_relocs)
+        return ZZ_ENOMEM;
+    g_relocs_bytes = saved_n;
+    for (i = 0U, saved_n = 0U; i < shnum; i++) {
+        const uint8_t *sh = g_mem + shoff + (uint32_t)i * shentsize;
+        uint32_t type = rd32(sh + 4u);
+        uint32_t size = rd32(sh + 20u);
+        uint32_t stride;
+        uint32_t r;
+
+        if (type != SHT_RELA && type != SHT_REL)
+            continue;
+        stride = type == SHT_RELA ? 12u : 8u;
+        for (r = 0U; r < size / stride; r++) {
+            const uint8_t *rel = g_mem + rd32(sh + 16u) + r * stride;
+
+            memcpy(g_relocs + saved_n, rel, 8u);
+            memcpy(g_relocs + saved_n + 8u, &type, 4u);
+            if (type == SHT_RELA)
+                memcpy(g_relocs + saved_n + 12u, rel + 8u, 4u);
+            else
+                memset(g_relocs + saved_n + 12u, 0, 4u);
+            saved_n += 16u;
+        }
+    }
+    g_image_prepared = 1;
+    return ZZ_OK;
+}
+
+static int apply_loaded_relocations(void)
+{
+    uint32_t at;
+
+    for (at = 0U; at < g_relocs_bytes; at += 16u) {
+        uint32_t roff = rd32(g_relocs + at);
+        uint32_t type = rd32(g_relocs + at + 8u);
+#if defined(ZZAPP_HOST_TEST) && !defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
+        uint32_t addend = type == SHT_REL ? rd32(g_mem + roff) :
+                                             rd32(g_relocs + at + 12u);
+        uint32_t place = addend + g_card;
+
+        memcpy(g_mem + roff, &place, sizeof(place));
+#else
+        zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
+        uint8_t *target = proc ? image_frame_ptr(proc, roff) : NULL;
+        uint32_t addend;
+        uint32_t place;
+
+        if (!target)
+            return ZZ_EINVAL;
+        addend = type == SHT_REL ? rd32(target) : rd32(g_relocs + at + 12u);
+        place = addend + g_card;
+        memcpy(target, &place, sizeof(place));
+        Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)target, sizeof(place));
+#endif
+    }
+    return ZZ_OK;
+}
+
+int zzapp_loader_end(void)
+{
     int rc;
 
     if (zzapp_loader_state() != ZZAPP_ST_LOADING || !g_mem)
         return ZZ_EINVAL;
-    rc = parse_elf(&img);
-    if (rc != ZZ_OK) {
-        drop_arena();
-        zzapp_loader_set_state(ZZAPP_ST_IDLE);
-        return rc;
-    }
-    if (!image_commit_fits_limit(&img)) {
-        drop_arena();
-        zzapp_loader_set_state(ZZAPP_ST_IDLE);
-        return ZZ_ENOMEM;
-    }
-    shoff = rd32(g_mem + 32u);
-    shentsize = rd16(g_mem + 46u);
-    shnum = rd16(g_mem + 48u);
-    /* Relocs are applied after the segments move, from the bounce copy
-     * of the section bytes. Copy the reloc records first: place_segments
-     * wipes the file image. */
-    {
-        /* Normalise REL and RELA into 16-byte records: offset, type, kind,
-         * addend.  REL's addend is deliberately read only after PT_LOAD
-         * placement, from the relocated target word. */
-        uint8_t *saved = NULL;
-        uint32_t saved_n = 0;
-        uint16_t i;
-
-        for (i = 0; i < shnum; i++) {
-            const uint8_t *sh = g_mem + shoff + (uint32_t)i * shentsize;
-            uint32_t type = rd32(sh + 4u);
-            uint32_t size = rd32(sh + 20u);
-            uint32_t entries;
-
-            if (type != SHT_RELA && type != SHT_REL)
-                continue;
-            entries = size / (type == SHT_RELA ? 12u : 8u);
-            if (entries > (UINT32_MAX - saved_n) / 16u) {
-                drop_arena();
-                zzapp_loader_set_state(ZZAPP_ST_IDLE);
-                return ZZ_ENOMEM;
-            }
-            saved_n += entries * 16u;
-        }
-        saved = saved_n ? (uint8_t *)malloc(saved_n) : NULL;
-        if (saved_n && !saved) {
-            drop_arena();
-            zzapp_loader_set_state(ZZAPP_ST_IDLE);
-            return ZZ_ENOMEM;
-        }
-        if (saved_n) {
-            uint32_t at = 0;
-
-            for (i = 0; i < shnum; i++) {
-                const uint8_t *sh = g_mem + shoff + (uint32_t)i * shentsize;
-                uint32_t type = rd32(sh + 4u);
-                uint32_t size = rd32(sh + 20u);
-                uint32_t stride;
-                uint32_t r;
-
-                if (type != SHT_RELA && type != SHT_REL)
-                    continue;
-                stride = type == SHT_RELA ? 12u : 8u;
-                for (r = 0; r < size / stride; ++r) {
-                    const uint8_t *rel = g_mem + rd32(sh + 16u) + r * stride;
-
-                    memcpy(saved + at, rel, 8u);
-                    memcpy(saved + at + 8u, &type, 4u);
-                    if (type == SHT_RELA)
-                        memcpy(saved + at + 12u, rel + 8u, 4u);
-                    else
-                        memset(saved + at + 12u, 0, 4u);
-                    at += 16u;
-                }
-            }
-        }
-#ifdef ZZAPP_HOST_TEST
-        rc = place_segments(&img);
-#else
-        rc = map_loaded_image(&img);
-#endif
+    if (!g_image_prepared) {
+        rc = prepare_loaded_image();
         if (rc != ZZ_OK) {
-            free(saved);
             drop_arena();
             zzapp_loader_set_state(ZZAPP_ST_IDLE);
             return rc;
         }
-        if (saved_n) {
-            uint32_t at;
-
-            for (at = 0; at < saved_n; at += 16u) {
-                uint32_t roff = rd32(saved + at);
-                uint32_t type = rd32(saved + at + 8u);
+    }
 #ifdef ZZAPP_HOST_TEST
-                uint32_t addend = type == SHT_REL ? rd32(g_mem + roff) :
-                                                     rd32(saved + at + 12u);
-                uint32_t place = addend + g_card;
-
-                memcpy(g_mem + roff, &place, 4u);
+#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+    rc = map_loaded_image(&g_image);
 #else
-                zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
-                uint8_t *target = proc ? image_frame_ptr(proc, roff) : NULL;
-                uint32_t addend;
-                uint32_t place;
-
-                if (!target) {
-                    free(saved);
-                    drop_arena();
-                    zzapp_loader_set_state(ZZAPP_ST_IDLE);
-                    return ZZ_EINVAL;
-                }
-                addend = type == SHT_REL ? rd32(target) : rd32(saved + at + 12u);
-                place = addend + g_card;
-                memcpy(target, &place, sizeof(place));
-                Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)target, sizeof(place));
+    rc = place_segments(&g_image);
 #endif
-            }
-            free(saved);
-        }
-    }
-
-#ifdef ZZAPP_HOST_TEST
-    cache_image(&img);
+#else
+    rc = map_loaded_image(&g_image);
 #endif
-    rc = zzapp_loader_set_image(img.entry, img.image_end, img.stack_bytes,
-                                img.note_flags, img.note_minor, img.min_heap_bytes);
-    if (rc != ZZ_OK) {
-        drop_arena();
-        zzapp_loader_set_state(ZZAPP_ST_IDLE);
+    if (rc == ZZAPP_LOADER_IN_PROGRESS)
         return rc;
-    }
+    if (rc != ZZ_OK)
+        goto failed;
+    rc = apply_loaded_relocations();
+    if (rc != ZZ_OK)
+        goto failed;
+    free_relocs();
+#if defined(ZZAPP_HOST_TEST) && !defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
+    cache_image(&g_image);
+#endif
+    rc = zzapp_loader_set_image(g_image.entry, g_image.image_end,
+                                g_image.stack_bytes, g_image.note_flags,
+                                g_image.note_minor, g_image.min_heap_bytes);
+    if (rc != ZZ_OK)
+        goto failed;
     g_ready = 1;
-    /* STARTING is published only by APP_START. */
     return ZZ_OK;
+
+failed:
+    drop_arena();
+    zzapp_loader_set_state(ZZAPP_ST_IDLE);
+    return rc;
 }
 
 int zzapp_loader_abort(void)
@@ -1164,4 +1284,19 @@ uint8_t *zzapp_test_arena_mem(void)
 {
     return g_mem;
 }
+uint32_t zzapp_test_loader_zero_last_frames(void)
+{
+    return g_host_zero_last_frames;
+}
+#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+uint32_t zzapp_test_loader_mapping_calls(void)
+{
+    return g_host_mapping_calls;
+}
+#else
+uint32_t zzapp_test_loader_mapping_calls(void)
+{
+    return 0U;
+}
+#endif
 #endif

@@ -71,6 +71,14 @@ void zzapp_mem_set_low_memory_callback(zzapp_mem_t *memory,
 /* Allocate whole 1 MiB frames and charge them to `proc`. */
 int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
                     uint32_t frame_count, uint32_t *frames);
+/* Reserve frames for a loader-private mapping. The caller MUST zero them
+ * with zzapp_mem_zero_frames before exposing any mapping to an app. */
+int zzapp_mem_alloc_unzeroed(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
+                             uint32_t frame_count, uint32_t *frames);
+/* Zero at most `max_frames` frames in the recorded prefix. Returns the
+ * number zeroed; the loader uses this between service passes. */
+uint32_t zzapp_mem_zero_frames(const zzapp_mem_proc_t *proc,
+                               uint32_t first_frame, uint32_t max_frames);
 /* Release one frame previously returned for `proc`. */
 int zzapp_mem_release(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
                       uint32_t frame);

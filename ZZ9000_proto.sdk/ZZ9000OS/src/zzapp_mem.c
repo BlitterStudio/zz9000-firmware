@@ -315,8 +315,9 @@ void zzapp_mem_reconcile_halted(void)
     sdk_smp_lock_release(&memory->lock);
 }
 
-int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
-                    uint32_t frame_count, uint32_t *frames)
+static int alloc_frames(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
+                        uint32_t frame_count, uint32_t *frames,
+                        int zero_frames)
 {
     uint32_t bytes;
     uint32_t free_frames = 0;
@@ -381,7 +382,9 @@ int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
                 memory->committed += ZZAPP_MEM_FRAME_BYTES;
                 FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_MEMORY_CHARGE);
                 frames[out++] = address;
-                memset((void *)(uintptr_t)address, 0, ZZAPP_MEM_FRAME_BYTES);
+                if (zero_frames)
+                    memset((void *)(uintptr_t)address, 0,
+                           ZZAPP_MEM_FRAME_BYTES);
             }
         }
     }
@@ -391,6 +394,35 @@ int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
     if (low_event && memory->low_callback)
         memory->low_callback(memory->low_context);
     return 0;
+}
+
+int zzapp_mem_alloc(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
+                    uint32_t frame_count, uint32_t *frames)
+{
+    return alloc_frames(memory, proc, frame_count, frames, 1);
+}
+
+int zzapp_mem_alloc_unzeroed(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,
+                             uint32_t frame_count, uint32_t *frames)
+{
+    return alloc_frames(memory, proc, frame_count, frames, 0);
+}
+
+uint32_t zzapp_mem_zero_frames(const zzapp_mem_proc_t *proc,
+                               uint32_t first_frame, uint32_t max_frames)
+{
+    uint32_t count;
+    uint32_t frame;
+
+    if (!proc || first_frame >= proc->frame_count || max_frames == 0U)
+        return 0U;
+    count = proc->frame_count - first_frame;
+    if (count > max_frames)
+        count = max_frames;
+    for (frame = 0U; frame < count; frame++)
+        memset((void *)(uintptr_t)proc->frames[first_frame + frame], 0,
+               ZZAPP_MEM_FRAME_BYTES);
+    return count;
 }
 
 static int remove_proc_frame(zzapp_mem_t *memory, zzapp_mem_proc_t *proc,

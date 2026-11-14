@@ -215,6 +215,7 @@ struct zzapp_service_runtime {
 	int16_t *audio_samples;
 	uint64_t audio_staged;
 	uint32_t audio_ahi_staged_frame;
+	volatile uint32_t audio_first_write_seen;
 	void *audio_block;
 	uint32_t audio_grant_base;
 	uint32_t audio_grant_bytes;
@@ -873,6 +874,7 @@ static uint32_t service_test_grant_count;
 static uint32_t service_test_ungrant_count;
 static void (*service_test_loader_begin_hook)(void);
 static void (*service_test_loader_set_generation_hook)(void);
+static int (*service_test_loader_end_hook)(void);
 static void (*service_test_deferred_completion_hook)(void);
 static void (*service_test_deferred_completing_hook)(void);
 static void (*service_test_deferred_reply_hook)(void);
@@ -1053,7 +1055,8 @@ __attribute__((weak)) int zzapp_loader_chunk(uint32_t file_off, const void *src,
 
 __attribute__((weak)) int zzapp_loader_end(void)
 {
-	return ZZ_ENOSYS;
+	return service_test_loader_end_hook ? service_test_loader_end_hook() :
+		ZZ_ENOSYS;
 }
 
 __attribute__((weak)) int zzapp_loader_abort(void)
@@ -1392,6 +1395,7 @@ static void forget_window(void)
 	state->audio_samples = saved.audio_samples;
 	state->audio_staged = saved.audio_staged;
 	state->audio_ahi_staged_frame = saved.audio_ahi_staged_frame;
+	state->audio_first_write_seen = saved.audio_first_write_seen;
 	state->audio_block = saved.audio_block;
 	state->audio_grant_base = saved.audio_grant_base;
 	state->audio_grant_bytes = saved.audio_grant_bytes;
@@ -3135,6 +3139,7 @@ static void audio_detach(void)
 	current_runtime()->audio_write_frame = NULL;
 	current_runtime()->audio_staged = 0U;
 	current_runtime()->audio_ahi_staged_frame = 0U;
+	current_runtime()->audio_first_write_seen = 0U;
 	current_runtime()->audio_ahi_route = 0;
 	current_runtime()->audio_host_tail_seen = 0U;
 #if ZZAPP_PERF_COUNTERS
@@ -3203,6 +3208,7 @@ static int audio_attach(void)
 	*current_runtime()->audio_write_frame = 0U;
 	current_runtime()->audio_staged = 0U;
 	current_runtime()->audio_ahi_staged_frame = 0U;
+	current_runtime()->audio_first_write_seen = 0U;
 	current_runtime()->audio_slot = slot;
 	current_runtime()->audio_host_tail_seen = 0U;
 #if ZZAPP_PERF_COUNTERS
@@ -3239,9 +3245,6 @@ static int audio_attach(void)
 			return ZZ_EBUSY;
 		}
 		audio_fabric_producer_rate_set(slot, ZZAPP_AUDIO_RATE);
-		if (!audio_fabric_others_live(slot))
-			audio_fabric_producer_restart(slot);
-		audio_fabric_producer_go_live(slot);
 	}
 #endif
 	if (have_window()) {
@@ -3477,6 +3480,18 @@ static void audio_core0_poll_slot(void)
 			current_runtime()->audio_request = AUDIO_REQUEST_CLOSE;
 		else
 			current_runtime()->audio_teardown = 0;
+		finish_audio_slot_release();
+		return;
+	}
+	if (request == AUDIO_REQUEST_NONE) {
+#ifndef ZZAPP_HOST_TEST
+		if (current_runtime()->audio_first_write_seen &&
+		    current_runtime()->audio_open &&
+		    !current_runtime()->audio_ahi_route) {
+			(void)audio_fabric_producer_go_live_when_ready(
+				current_runtime()->audio_slot, 1);
+		}
+#endif
 		finish_audio_slot_release();
 		return;
 	}
@@ -3743,8 +3758,18 @@ static void audio_core1_poll_all(void)
 				AUDIO_REQUEST_CLOSE_QUIESCED;
 			continue;
 		}
-		if (current_runtime()->audio_request != AUDIO_REQUEST_CLOSE_QUIESCED)
-			audio_pump_ahi_window();
+		if (current_runtime()->audio_request != AUDIO_REQUEST_NONE)
+			continue;
+		audio_pump_ahi_window();
+#ifndef ZZAPP_HOST_TEST
+		if (current_runtime()->audio_open &&
+		    !current_runtime()->audio_ahi_route &&
+		    current_runtime()->audio_write_frame &&
+		    *current_runtime()->audio_write_frame != 0U) {
+			barrier();
+			current_runtime()->audio_first_write_seen = 1U;
+		}
+#endif
 	}
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
 	zzapp_kernel_perf_service_end(zzapp_runtime_kernel(),
@@ -3908,6 +3933,8 @@ static void run_deferred(void)
 			break;
 		}
 		rc = zzapp_loader_end();
+		if (rc == ZZAPP_LOADER_IN_PROGRESS)
+			return;
 		if (rc != ZZ_OK)
 			publish_state = ZZAPP_ST_IDLE;
 		break;
@@ -3969,7 +3996,9 @@ void zzapp_services_poll(void)
 		for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
 			select_slot(slot);
 			slot_state_lock_acquire();
-			if (current_deferred()->state == DEFER_POSTED) {
+			if (current_deferred()->state == DEFER_POSTED ||
+			    (current_deferred()->state == DEFER_RUNNING &&
+			     current_deferred()->opcode == ZZAPP_OP_LOAD_END)) {
 				current_deferred()->state = DEFER_RUNNING;
 				slot_state_lock_release();
 				run_deferred();
@@ -4424,6 +4453,7 @@ void zzapp_services_test_reset(void)
 	service_test_grant_count = 0U;
 	service_test_ungrant_count = 0U;
 	service_test_loader_begin_hook = NULL;
+	service_test_loader_end_hook = NULL;
 	service_test_deferred_completion_hook = NULL;
 	service_test_deferred_completing_hook = NULL;
 	service_test_deferred_reply_hook = NULL;

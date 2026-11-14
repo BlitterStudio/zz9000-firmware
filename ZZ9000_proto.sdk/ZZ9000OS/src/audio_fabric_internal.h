@@ -103,6 +103,7 @@ struct audio_fabric_slot {
 	uint8_t attached;
 	uint8_t live;            /* attached and filling/retiring */
 	uint8_t frozen;          /* attached, parked by the owner */
+	uint8_t priming;         /* initial reserve fill is not a played underrun */
 	uint8_t tail_pending;    /* real PCM staged, tail not played out */
 	/* Cached producer snapshot (KTD2): ring, capacity, cursors. */
 	struct audio_fabric_source source;

@@ -1536,6 +1536,57 @@ static void test_console_eof_ends_wait(void)
 
 
 
+static unsigned loader_end_passes;
+static unsigned loader_end_complete_after;
+
+static int loader_end_in_passes(void)
+{
+	loader_end_passes++;
+	return loader_end_passes < loader_end_complete_after ?
+		ZZAPP_LOADER_IN_PROGRESS : ZZ_OK;
+}
+
+static void queue_loading_end(void)
+{
+	zzapp_services_test_reset();
+	slots[0].state = ZZAPP_ST_LOADING;
+	slots[0].generation = 1U;
+	service_loader_state = ZZAPP_ST_LOADING;
+	deferred[0].state = DEFER_POSTED;
+	deferred[0].opcode = ZZAPP_OP_LOAD_END;
+	deferred[0].generation = 1U;
+	loader_end_passes = 0U;
+	service_test_loader_end_hook = loader_end_in_passes;
+}
+
+static void test_load_end_resumes_and_cancels(void)
+{
+	unsigned pass;
+
+	queue_loading_end();
+	loader_end_complete_after = 48U;
+	for (pass = 0U; pass < loader_end_complete_after; pass++) {
+		zzapp_services_poll();
+		if (pass + 1U < loader_end_complete_after &&
+		    deferred[0].state != DEFER_RUNNING)
+			fail("load end did not remain running between zero batches");
+	}
+	if (loader_end_passes != loader_end_complete_after ||
+	    deferred[0].state != DEFER_DONE)
+		fail("load end did not finish after bounded zero batches");
+
+	queue_loading_end();
+	loader_end_complete_after = UINT32_MAX;
+	zzapp_services_poll();
+	if (deferred[0].state != DEFER_RUNNING || loader_end_passes != 1U)
+		fail("load end did not begin bounded zero batch");
+	deferred[0].cancelled = 1U;
+	zzapp_services_poll();
+	if (deferred[0].state != DEFER_IDLE ||
+	    service_test_loader_abort_count != 1U)
+		fail("cancelled load end did not abort");
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -1558,6 +1609,7 @@ int main(void)
 	test_core1_wakes_ready_waiter();
 	test_deferred_waits_for_system_thread();
 	test_load_uses_claim_generation();
+	test_load_end_resumes_and_cancels();
 	test_returned_buffers_are_user_granted();
 	test_failed_starts_release_admission();
 	test_claim_expiry_cancels_running_load();

@@ -435,6 +435,59 @@ static void scenario_start_prime(void)
 	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP) == 0U,
 	      "primed first formatter period has no underrun", "");
 }
+/* An app producer stays frozen after audio_open. Its first write activates
+ * and primes it; only starvation after that activation is an underrun. */
+static void scenario_app_first_write_activation(void)
+{
+	uint32_t baseline;
+	uint32_t tick;
+
+	fabric_reset_state();
+	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	g_dma_count = 0U;
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_MAILBOX,
+					   &g_ops_c);
+	for (tick = 0U; tick < 5U; tick++) {
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) == 0U &&
+	      g_model_c.underrun_calls == 0U,
+	      "app open without writes has no played underrun", "");
+	check(audio_fabric_producer_go_live_when_ready(
+			AUDIO_FABRIC_SLOT_MAILBOX, 0) == 0,
+	      "app remains frozen before first write", "");
+	model_publish(&g_model_c, 4U * TICK_BYTES);
+	baseline = audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(audio_fabric_producer_go_live_when_ready(
+			AUDIO_FABRIC_SLOT_MAILBOX, 1) != 0,
+	      "app first write activates producer", "");
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) == baseline,
+	      "first app write has no played underrun", "");
+	for (tick = 0U; tick < 32U; tick++) {
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) > baseline,
+	      "app starvation after activation counts", "");
+}
+/* Generic SDK priming still accounts starvation while it fills a finite
+ * reserve; only the app's first-write path suppresses its played underrun. */
+static void scenario_sdk_prime_starvation(void)
+{
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_publish(&g_model_b, 4U * TICK_BYTES);
+	g_dma_count = 0U;
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
+	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, 48000U);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+	(void)audio_fabric_producer_prime_and_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP) != 0U,
+	      "SDK prime starvation remains counted", "");
+}
+
+
 /* A direct peer may wake after the mailbox takes its optimistic no-peer
  * branch. The atomic prime then refuses to touch the shared frontier; the
  * caller must still publish the prepared pump into that live mix. */
@@ -1138,6 +1191,8 @@ int main(int argc, char **argv)
 
 	scenario_mix();
 	scenario_start_prime();
+	scenario_app_first_write_activation();
+	scenario_sdk_prime_starvation();
 	scenario_peer_wakes_during_start();
 	scenario_pump_gain();
 	scenario_gate();
