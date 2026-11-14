@@ -29,14 +29,14 @@ int zz_main(int argc, char **argv)
             spin_sink = spin_sink * 1664525u + 1013904223u;
         count += SPIN_BATCH;
         now = zz_time_us();
+        if (zz_should_stop())
+            break;
         if (now - start < 1000000u)
             continue;
         printf("spin %s: %llu/s\n", name, (unsigned long long)count);
         fflush(stdout);
         count = 0u;
         start = now;
-        if (zz_should_stop())
-            break;
     }
     return 0;
 }

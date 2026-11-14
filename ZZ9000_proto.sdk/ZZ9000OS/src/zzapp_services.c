@@ -23,6 +23,8 @@ extern int zzapp_host_take_low_memory_event(uint32_t slot)
 	__attribute__((weak));
 extern void zzapp_host_reset_low_memory(uint32_t slot)
 	__attribute__((weak));
+extern void zzapp_host_claimed(uint32_t slot)
+	__attribute__((weak));
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
 #include "zzapp.h"
@@ -3886,8 +3888,11 @@ static void run_deferred(void)
 			return;
 		}
 		rc = zzapp_loader_set_generation(slots[service_slot()].generation);
-		if (rc != ZZ_OK)
+		if (rc != ZZ_OK) {
+			if (rc == ZZ_EINVAL)
+				reject_reason = "loader arena remains bound";
 			break;
+		}
 		rc = zzapp_loader_begin();
 		if (rc == ZZ_OK)
 			publish_state = ZZAPP_ST_LOADING;
@@ -4006,8 +4011,7 @@ void zzapp_services_poll(void)
 			}
 			slot_state_lock_release();
 		}
-		if (slot == ZZAPP_SLOT_COUNT)
-			select_slot(selected);
+		select_slot(selected);
 	}
 	wake_ready_waits();
 	audio_core1_poll_all();
@@ -4153,6 +4157,8 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
 	slots[slot].generation = generation;
 	slots[slot].memory_limit = 0U;
 	slots[slot].terminal_reason = ZZAPP_END_NONE;
+	if (zzapp_host_claimed)
+		zzapp_host_claimed(slot);
 	memset(slots[slot].name, 0, sizeof(slots[slot].name));
 	slots[slot].claim_started = now_us();
 	slots[slot].state = ZZAPP_ST_CLAIMED;

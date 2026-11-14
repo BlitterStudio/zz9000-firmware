@@ -160,6 +160,7 @@ void zzapp_host_low_memory(void *context);
 int zzapp_host_take_low_memory_event(uint32_t slot);
 void zzapp_host_register_low_memory_callback(zzapp_mem_t *memory);
 void zzapp_host_reset_low_memory(uint32_t slot);
+void zzapp_host_claimed(uint32_t slot);
 
 /* 1: core2 must fall through to record_fault (cold restart).
  * 0: user-mode app fault, already force-stopped, do not restart.

@@ -1,6 +1,7 @@
 B_DEFERRED_OBJS := $(BUILD)/b/zz9k_host.o $(BUILD)/b/zz9k_library.o
 ZZAPP_TESTS += $(BUILD)/b/deferred_mailbox_test $(BUILD)/b/reset_lifecycle_test \
-	$(BUILD)/b/teardown_test $(BUILD)/b/loader_zero_test
+	$(BUILD)/b/teardown_test $(BUILD)/b/loader_zero_test \
+	$(BUILD)/b/slot_selection_test
 
 # zz9k_host.c is also built by SDK CMake without -Werror; its Amiga-only
 # payload-copy loop is intentionally unused on native host builds.
@@ -35,3 +36,16 @@ $(BUILD)/b/loader_zero_test: $(LOADER_ZERO_TEST_SOURCES) $(FW)/zzapp_mem.h \
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -I../card_pool -o $@ \
 		$(LOADER_ZERO_TEST_SOURCES)
+
+
+$(BUILD)/b/spin_template.o: ../../sdk/zzapp/templates/spin.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -Dzz_main=spin_template_main -c -o $@ $<
+$(BUILD)/b/slot_selection_test: b/slot_selection_test.c \
+	$(BUILD)/b/spin_template.o $(BUILD)/zzapp.o \
+	$(LOADER_INCREMENTAL_HOST_OBJS) $(LOADER_INCREMENTAL_HOST_SOURCES) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -I../card_pool \
+		-DZZAPP_HOST_DEFERRED_TEST -o $@ $< $(BUILD)/b/spin_template.o \
+		$(BUILD)/zzapp.o $(LOADER_INCREMENTAL_HOST_OBJS) \
+		$(LOADER_INCREMENTAL_HOST_SOURCES)

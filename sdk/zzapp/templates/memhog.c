@@ -39,14 +39,22 @@ int zz_main(int argc, char **argv)
     (void)argc;
     (void)argv;
     for (;;) {
-        uint8_t *block = malloc(MEMHOG_BLOCK_BYTES);
+        uint8_t *block;
         uint32_t offset;
 
+        if (zz_should_stop())
+            goto release;
+        block = malloc(MEMHOG_BLOCK_BYTES);
         if (block == NULL)
             break;
         for (offset = 0u; offset < MEMHOG_BLOCK_BYTES;
-             offset += MEMHOG_PAGE_BYTES)
+             offset += MEMHOG_PAGE_BYTES) {
             block[offset] = (uint8_t)total_mib;
+            if (zz_should_stop()) {
+                free(block);
+                goto release;
+            }
+        }
         *(void **)block = head;
         head = block;
         total_mib++;
@@ -60,6 +68,8 @@ int zz_main(int argc, char **argv)
         report_events();
         zz_sleep_us(100000u);
     }
+
+release:
     while (head != NULL) {
         void *next = *(void **)head;
 

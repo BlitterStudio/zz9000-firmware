@@ -45,7 +45,7 @@ static void report(const char *call, uint32_t samples[SVCBENCH_SAMPLES])
            (unsigned long)samples[p99_index]);
 }
 
-static void benchmark_should_stop(void)
+static int benchmark_should_stop(void)
 {
     uint32_t sample;
 
@@ -54,9 +54,11 @@ static void benchmark_should_stop(void)
         uint32_t call;
 
         for (call = 0u; call < SVCBENCH_CALLS_PER_SAMPLE; call++)
-            (void)zz_should_stop();
+            if (zz_should_stop())
+                return 1;
         should_stop_samples[sample] = timer_cycles(zz_time_us() - begin);
     }
+    return 0;
 }
 
 static void benchmark_time_us(void)
@@ -101,7 +103,8 @@ int zz_main(int argc, char **argv)
     (void)argv;
     printf("svcbench: zz_time_us batches; 667 MHz timer-derived cycle estimates "
            "(PMU unavailable in user mode)\n");
-    benchmark_should_stop();
+    if (benchmark_should_stop())
+        return 0;
     report("should_stop", should_stop_samples);
     benchmark_time_us();
     report("time_us", time_us_samples);
