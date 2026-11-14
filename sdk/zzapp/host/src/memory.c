@@ -2,11 +2,12 @@
  * Host stand-in for the card arena and the host-visible heap.
  *
  * Ordinary zz_alloc (no HOST_VISIBLE) is served by malloc, not by this file.
- * As on the card, the table slot allocates host-visible memory only;
- * heap_range reports a reserved span for apps that size their own heaps.
- * HOST_VISIBLE allocations
- * are ordinary process memory under a 16 MiB quota. host_address returns a
- * synthetic board offset, not a Zorro address, and rejects interior pointers.
+ * As on the card, the table slot allocates host-visible memory only.
+ * heap_range reports the reserved arena. heap_grow and heap_shrink commit
+ * and release whole 1 MiB frames inside that fixed region, up to its limit.
+ * HOST_VISIBLE allocations are ordinary process memory under a 16 MiB quota.
+ * host_address returns a synthetic board offset, not a Zorro address, and
+ * rejects interior pointers.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -26,6 +27,14 @@ static uint8_t *arena;
 static struct host_visible visible[HOST_VISIBLE_SLOTS];
 static uint32_t visible_used;
 static uint32_t visible_next = 0x033f0000u;
+static uint32_t heap_committed;
+
+#define HOST_HEAP_FRAME (1u << 20)
+
+static int whole_mib(uint32_t bytes)
+{
+    return bytes != 0u && (bytes & (HOST_HEAP_FRAME - 1u)) == 0u;
+}
 
 static int pow2_align(uint32_t align)
 {
@@ -133,11 +142,46 @@ static int api_mem_info(zzapp_mem_info *out)
     return ZZ_OK;
 }
 
+static int api_heap_grow(uint32_t bytes, void **old_break)
+{
+    if (!arena)
+        return ZZ_ENOMEM;
+    if (!whole_mib(bytes))
+        return ZZ_EINVAL;
+    if (bytes > HOST_ARENA_BYTES - heap_committed)
+        return ZZ_ENOMEM;
+    if (old_break)
+        *old_break = arena + heap_committed;
+    heap_committed += bytes;
+    return ZZ_OK;
+}
+
+static int api_heap_shrink(uint32_t bytes, void **new_break)
+{
+    if (!whole_mib(bytes) || bytes > heap_committed)
+        return ZZ_EINVAL;
+    heap_committed -= bytes;
+    if (new_break)
+        *new_break = arena ? arena + heap_committed : 0;
+    return ZZ_OK;
+}
+
+static int api_heap_info(zzapp_heap_info *out)
+{
+    if (!out)
+        return ZZ_EINVAL;
+    out->committed = heap_committed;
+    out->limit = arena ? HOST_ARENA_BYTES : 0u;
+    out->pool_free = arena ? HOST_ARENA_BYTES - heap_committed : 0u;
+    return ZZ_OK;
+}
+
 void host_memory_init(void)
 {
     arena = (uint8_t *)malloc(HOST_ARENA_BYTES);
     visible_used = 0;
     visible_next = 0x033f0000u;
+    heap_committed = 0;
     memset(visible, 0, sizeof visible);
     if (arena)
         memset(arena, 0, HOST_ARENA_BYTES);
@@ -155,6 +199,7 @@ void host_memory_shutdown(void)
     free(arena);
     arena = 0;
     visible_used = 0;
+    heap_committed = 0;
 }
 
 void host_memory_bind(zzapp_api *api)
@@ -164,4 +209,7 @@ void host_memory_bind(zzapp_api *api)
     api->heap_range = api_heap_range;
     api->host_address = api_host_address;
     api->mem_info = api_mem_info;
+    api->heap_grow = api_heap_grow;
+    api->heap_shrink = api_heap_shrink;
+    api->heap_info = api_heap_info;
 }

@@ -1,5 +1,5 @@
 # Host build of ZZ9000 apps. libzzapp-host provides main() and an SDL2
-# API 0.2 table. Apps supply zz_main. Do not link the ARM crt0 or syscalls.
+# API 0.3 table. Apps supply zz_main. Do not link the ARM crt0 or syscalls.
 #
 # SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.16)
@@ -114,7 +114,7 @@ target_include_directories(files_unit PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-add_executable(memory_unit tests/memory_unit.c)
+add_executable(memory_unit tests/memory_unit.c ../src/zzapp.c)
 target_include_directories(memory_unit PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_SOURCE_DIR}/src

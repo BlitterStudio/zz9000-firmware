@@ -119,6 +119,20 @@ void zz_heap_range(void **base, uint32_t *bytes)
     }
 }
 
+int zz_heap_grow(uint32_t bytes, void **old_break)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, heap_grow) && zzapp_api_ptr->heap_grow)
+        return zzapp_api_ptr->heap_grow(bytes, old_break);
+    return ZZ_ENOSYS;
+}
+
+int zz_heap_shrink(uint32_t bytes, void **new_break)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, heap_shrink) && zzapp_api_ptr->heap_shrink)
+        return zzapp_api_ptr->heap_shrink(bytes, new_break);
+    return ZZ_ENOSYS;
+}
+
 int zz_host_address(const void *p, uint32_t *host_offset)
 {
     if (ZZ_API_COVERS(zzapp_api_ptr, host_address) &&
