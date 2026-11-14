@@ -42,8 +42,9 @@ Deprecated compatibility option; ignored by EF.
 
 .PARAMETER AllowMarginalTiming
 Permit a diagnostic bitstream when all timing paths close but the stricter
-release slack floor is not met. This is intended for separately named
-experimental outputs only.
+release slack floor is not met. Requires -OutputBitstream, and that path
+must be outside bootimage_work/, so a marginal build cannot replace the
+release input that build_bootimage.sh packages.
 #>
 
 [CmdletBinding()]
@@ -207,6 +208,16 @@ if ($RasterIX -and -not $OutputBitstream) {
 if ($CaptureC28 -and [string]::Equals($output, $packagedOutput,
         [System.StringComparison]::OrdinalIgnoreCase)) {
     throw 'A C28 build must use a separate output path from the zorro3 image.'
+}
+if ($AllowMarginalTiming) {
+    $bootimageRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'bootimage_work'))
+    $bootimagePrefix = $bootimageRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    $marginalOutput = [System.IO.Path]::GetFullPath($output)
+    $insideReleaseInputs = $marginalOutput.StartsWith($bootimagePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($marginalOutput, $bootimageRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $OutputBitstream -or $insideReleaseInputs) {
+        throw '-AllowMarginalTiming requires -OutputBitstream outside bootimage_work/. A marginal bitstream must not replace the release input.'
+    }
 }
 
 if ($RasterIXTMUCount -notin 1, 2) {
