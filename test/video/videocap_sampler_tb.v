@@ -1429,14 +1429,43 @@ initial begin
         force_control_frame_boundary;
         wait_control_complete;
 
+        /* Filtered capture with automatic crop (the stock-CFG default)
+         * keeps the compatible 26-line crop across frames; the
+         * per-frame standard re-resolution is a full-width rule and
+         * must not move a filtered picture up to 40/39. */
+        drive_plain_field(0);
+        drive_plain_field(1);
+        check_eq("filtered_auto_crop_v_kept", dut.ctl_crop_v_cap, 26);
+        check_eq("filtered_auto_crop_v_kept_legacy",
+                 legacy_dut.ctl_crop_v_cap, 26);
+
         pulse_control_request(32'h80000000 | (1 << 2), 1'b1);
         wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
         check_eq("width_only_auto_payload", control_payload,
                  (3 << 27) | (40 << 15) | (278 << 3) | (1 << 2) | 2);
         force_control_frame_boundary;
         wait_control_complete;
+
+        /* Full width with automatic crop still follows the detected
+         * standard at every frame. */
+        drive_plain_field(0);
+        drive_plain_field(1);
+        check_eq("fullwidth_auto_crop_v_resolved", dut.ctl_crop_v_cap,
+                 dut.cap_ntsc ? 39 : 40);
         check_eq("width_only_auto_set_raw", control_applied_raw,
                  focused_raw | (1 << 2));
+
+        /* Back to filtered: the width-only commit installs the
+         * compatible 26 and later frames keep it. */
+        pulse_control_request(32'h80000000, 1'b1);
+        wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+        force_control_frame_boundary;
+        wait_control_complete;
+        drive_plain_field(0);
+        drive_plain_field(1);
+        check_eq("filtered_again_auto_crop_v_kept", dut.ctl_crop_v_cap, 26);
+        check_eq("filtered_again_auto_raw", control_applied_raw,
+                 focused_raw);
     end
 
     /* A width request colliding with an in-flight ordinary commit is

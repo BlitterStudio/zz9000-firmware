@@ -1,9 +1,9 @@
 {
-  "source_revision": "6c1a1af605908475149fcf50b8fd59a5050069bd",
+  "source_revision": "3efb593301ef589d7e2304fc418fb445d37894c2",
   "bitstreams": {
     "zorro3-aga": {
-      "sha256": "9c7c8effe15a7b1cee35f38f2cd01a3142218498fb9a836a74bc0213ebcb041f",
-      "diagnostic_build_id": "6c1a1af6",
+      "sha256": "2fc1c8d2858a9b389a40698ea64fb7ce5ec2467895b32f23178a0c7a68dbf2cc",
+      "diagnostic_build_id": "3efb5933",
       "variant_id": "0001008b"
     }
   }

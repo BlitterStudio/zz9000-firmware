@@ -926,14 +926,16 @@ always @(posedge cap_clk) begin
     /* Automatic vertical crop follows the detected standard. The boot
      * commit resolves before NTSC detection settles (the source domain
      * cannot see the detector), so re-resolve at every frame boundary
-     * while automatic. Full-rate only: the Denise path's compatible
-     * crop is 26 lines, and 40/39 would over-crop it. A short-line
+     * while automatic. Full-width capture on a full-rate build only:
+     * the filtered path (and the Denise path) keeps the compatible
+     * 26-line crop its commit applied, and 40/39 would move that
+     * picture 14 lines up. A short-line
      * source's cap_ntsc means "fits 480 rows", not the 15 kHz crop, so
      * it must not clobber the register the 15 kHz path reads next.
      * An explicit commit arriving in the same cycle clears the flag
      * and wins. */
     if (frame_sync && !cap_reset && ctl_crop_v_auto_cap &&
-            FULLRATE != 0 && !cap_short &&
+            FULLRATE != 0 && ctl_full_width_cap && !cap_short &&
             !(ctl_dest_req && !ctl_dest_ack)) begin
         ctl_crop_v_cap <= cap_ntsc ?
             CROP_V_AUTO_NTSC : CROP_V_AUTO_PAL;
