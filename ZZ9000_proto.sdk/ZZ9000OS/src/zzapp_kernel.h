@@ -191,6 +191,7 @@ typedef struct {
 } zzapp_kernel_t;
 
 void zzapp_kernel_init(zzapp_kernel_t *kernel);
+void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t slot);
 int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
 			      uint32_t entry, uint32_t api, uint32_t argc,

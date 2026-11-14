@@ -408,6 +408,15 @@ void zzapp_kernel_init(zzapp_kernel_t *kernel)
 	kernel->gl_owner = -1;
 }
 
+void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	kernel->threads[slot].user_ticks = 0U;
+	kernel->threads[slot].svc_ticks = 0U;
+}
+
+
 int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t slot)
 {
 	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
@@ -435,8 +444,6 @@ int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
 		kernel->perf.tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
 #endif
 	context = &kernel->threads[slot].context;
-	kernel->threads[slot].user_ticks = 0U;
-	kernel->threads[slot].svc_ticks = 0U;
 	memset(context, 0, sizeof(*context));
 	context->r[0] = api;
 	context->r[1] = argc;

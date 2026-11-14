@@ -554,12 +554,9 @@ static void test_new_generation_resets_cpu_ticks(void)
 	zzapp_kernel_t kernel;
 
 	zzapp_kernel_init(&kernel);
-	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
-				       0x8000u) == 0);
 	kernel.threads[0].user_ticks = 17U;
 	kernel.threads[0].svc_ticks = 23U;
-	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x2000u, 2u, 0u, 0u,
-				       0x9000u) == 0);
+	zzapp_kernel_reset_cpu_ticks(&kernel, 0U);
 	CHECK(kernel.threads[0].user_ticks == 0U);
 	CHECK(kernel.threads[0].svc_ticks == 0U);
 }

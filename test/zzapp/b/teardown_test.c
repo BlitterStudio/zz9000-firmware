@@ -533,9 +533,8 @@ static void test_list_cpu_starts_at_new_generation(void)
     zzapp_runtime_kernel()->threads[0].svc_ticks = 23U;
     assert(list_cpu(0U) == 40U);
     generation = claim_slot();
+    assert(list_cpu(0U) == 0U);
     load_slot(0U, generation, 2U, 0U);
-    extended_request(request, 0U, generation);
-    assert(dispatch(ZZAPP_OP_START, request, sizeof(request)) == SDK_STATUS_OK);
     assert(list_cpu(0U) == 0U);
 }
 

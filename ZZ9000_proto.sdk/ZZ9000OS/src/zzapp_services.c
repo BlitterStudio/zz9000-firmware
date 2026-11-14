@@ -908,6 +908,15 @@ __attribute__((weak)) zzapp_kernel_t *zzapp_runtime_kernel(void)
 	return &service_test_kernel;
 }
 
+__attribute__((weak)) void zzapp_kernel_reset_cpu_ticks(
+	zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	kernel->threads[slot].user_ticks = 0U;
+	kernel->threads[slot].svc_ticks = 0U;
+}
+
 #if ZZAPP_PERF_COUNTERS
 __attribute__((weak)) void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel,
 						     uint32_t slot,
@@ -1063,6 +1072,17 @@ __attribute__((weak)) int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr
 __attribute__((weak)) void zzapp_loader_free_back(uint32_t addr)
 {
 	(void)addr;
+}
+#endif
+
+#ifdef ZZAPP_SERVICES_TEST_LOADER_STUBS
+__attribute__((weak)) void zzapp_kernel_reset_cpu_ticks(
+	zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	kernel->threads[slot].user_ticks = 0U;
+	kernel->threads[slot].svc_ticks = 0U;
 }
 #endif
 #if defined(ZZAPP_HOST_TEST) && !defined(ZZAPP_SERVICES_STANDALONE_TEST)
@@ -4096,9 +4116,11 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
 	if (rc != ZZ_OK)
 		return rc;
 	wait_end();
+	slot_state_lock_acquire();
 	generation = slots[slot].generation + 1U;
 	if (generation == 0U)
 		generation = 1U;
+	zzapp_kernel_reset_cpu_ticks(zzapp_runtime_kernel(), slot);
 	slots[slot].generation = generation;
 	slots[slot].memory_limit = 0U;
 	slots[slot].terminal_reason = ZZAPP_END_NONE;
@@ -4113,6 +4135,7 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host)
 		zzapp_host_reset_low_memory(slot);
 	life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_NONE);
 	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_CLAIMED);
+	slot_state_lock_release();
 	return ZZ_OK;
 }
 
