@@ -3,7 +3,7 @@
 
 param(
   # Same pinned GCC 16 image as build-m68k-amigaos.sh.
-  [string]$Image = "amigadev/crosstools:m68k-amigaos@sha256:981e3065b0b97bba2acf2dc9a835dce94c722066adf435a962539943df508548"
+  [string]$Image = "amigadev/crosstools:m68k-amigaos@sha256:cbd0b1816235d9ed409b57020b13a4542a45d5b3ee6b6ad828d0def1e9e750fd"
 )
 
 $ErrorActionPreference = "Stop"
