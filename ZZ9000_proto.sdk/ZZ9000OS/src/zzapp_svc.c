@@ -15,6 +15,8 @@
 #define L1_SECTION 2U
 #define L1_TABLE 1U
 #define L1_AP_MASK (3U << 10)
+#define L2_TYPE_MASK 3U
+#define L2_LARGE 1U
 #define L2_AP_MASK (3U << 4)
 #define PAGE_BYTES 4096U
 #define VENEER_BYTES 12U
@@ -933,12 +935,17 @@ static int zzapp_svc_copy_gl_for_slot(uint32_t slot, zzapp_gl *destination,
 static int section_allows(uint32_t descriptor, int write)
 {
     uint32_t ap = (descriptor & L1_AP_MASK) >> 10;
-    return (descriptor & L1_TYPE_MASK) == L1_SECTION && (ap == 3U || (!write && ap == 2U));
+
+    return (descriptor & L1_TYPE_MASK) == L1_SECTION &&
+           (ap == 3U || (!write && ap == 2U));
 }
 static int page_allows(uint32_t descriptor, int write)
 {
     uint32_t ap = (descriptor & L2_AP_MASK) >> 4;
-    return (descriptor & 2U) != 0U && (ap == 3U || (!write && ap == 2U));
+    uint32_t type = descriptor & L2_TYPE_MASK;
+
+    return (type == L2_LARGE || (type & 2U) != 0U) &&
+           (ap == 3U || (!write && ap == 2U));
 }
 int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address, uint32_t bytes, int write)
 {

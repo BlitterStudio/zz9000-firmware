@@ -608,6 +608,24 @@ static void test_pointer_checks(void)
     CHECK(zzapp_svc_check_user(&as, 0xfffffff0U, 32U, 0) == ZZ_EFAULT);
     zzapp_as_destroy(&as);
 }
+static void test_large_and_section_pointer_checks(void)
+{
+    zzapp_as_t as;
+    const uint32_t frame = 0x01200000U;
+
+    setup(&as);
+    CHECK(zzapp_as_map_image(&as, WINDOW + 0x000f0000U, 0x011f0000U,
+                             0x10000U, ZZAPP_AS_IMAGE_RX) == 0);
+    CHECK(zzapp_as_map_frames(&as, WINDOW + 0x00100000U, &frame, 1U) == 0);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x000f2345U, 4U, 0) == ZZ_OK);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x000f2345U, 4U, 1) == ZZ_EFAULT);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00101234U, 4U, 1) == ZZ_OK);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x000ffff0U, 32U, 0) == ZZ_OK);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x000ffff0U, 32U, 1) == ZZ_EFAULT);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00080000U, 4U, 0) == ZZ_EFAULT);
+    zzapp_as_destroy(&as);
+}
+
 
 static void test_gl_deferred_pointer_checks(void)
 {
@@ -1361,6 +1379,7 @@ int main(void)
     test_table_copy_uses_only_veneers();
     test_gl_table_copy_uses_only_veneers();
     test_pointer_checks();
+    test_large_and_section_pointer_checks();
     test_gl_span_validation();
     test_gl_span_fallback_reference();
     test_gl_lock_calls_stay_kernel_side();
