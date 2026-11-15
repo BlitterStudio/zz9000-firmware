@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 37 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 38 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -68,6 +68,22 @@ printf("service: %s\n", zz9k_service_text(ZZ9K_SERVICE_IMAGE));
 SDK v2 is paired with the new SDK-service firmware. The pre-service firmware is
 not a supported runtime for SDK v2 tools or `zz9k.library`, because the mailbox
 service registry did not exist before this release pair.
+
+### Mailbox consumer pairing
+
+The mailbox has one completion ring and no complete or sound detector for a
+second direct consumer: an older statically linked client that reads the
+ring itself can steal a completion and hang the library. Install
+`zz9k.library` and `amissl.library` from the same SDK release: the current
+`amissl.library` proxies its SDK work through `zz9k.library`.
+
+Revision 38 tags each request made through a library opener with a nonzero
+client id in reserved entry-flag bits. Older direct clients leave those bits
+clear and remain unowned. On an opener's final `CloseLibrary()`, the library
+sends `ZZ9K_OP_CLIENT_RELEASE` and resubmits it while the firmware answers
+`ZZ9K_STATUS_BUSY`, so the release tracks the client's worker activity --
+sessions, streams and buffers still finishing on the ARM side -- before that
+opener's owned resources are reclaimed.
 
 ## ARM app client
 
@@ -1851,6 +1867,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 35 | `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT` | `ZZ9KAppOpen`, load/start/stop/status, 32-byte message rings, VBlank lease, and close |
 | 36 | `ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY` | Synchronous completion waits poll for up to 250 microseconds before their existing event or DOS-tick wait. A synchronous call also routes foreign completions to the resident pending-request registry; the static host client requires this revision. |
 | 37 | `ZZ9K_LIBRARY_MIN_REVISION_SYNC_CONCURRENT` | A synchronous caller holds the transport lock only to submit, drain, route, or cancel. Its pending record has an owner signal, so another drainer wakes it after routing its completion. |
+| 38 | `ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM` | Per-opener client ids and `ZZ9K_OP_CLIENT_RELEASE`; the final `CloseLibrary()` resubmits the release while the firmware answers `BUSY` and reclaims that opener's owned SDK resources after worker quiescence |
 
 ### Async submission and wait helpers
 

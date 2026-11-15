@@ -9,8 +9,8 @@
 
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 37
-#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.37 (15.11.2026)"
+#define ZZ9K_LIBRARY_REVISION 38
+#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.38 (15.11.2026)"
 #define ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT 35
 /* Static clients proxy async completions through the resident library.
  * Revision 36 routes a foreign completion seen during a synchronous call
@@ -20,6 +20,9 @@
 /* Revision 37 releases the resident transport lock while a synchronous
  * caller waits, so another task can submit and route its completion. */
 #define ZZ9K_LIBRARY_MIN_REVISION_SYNC_CONCURRENT 37
+/* Revision 38 tags each resident opener's resource allocations and releases
+ * them after that opener's final CloseLibrary(). */
+#define ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM 38
 #define ZZ9K_LIBRARY_MIN_REVISION_CALL_ASYNC_BATCH_MSG 1
 #define ZZ9K_LIBRARY_MIN_REVISION_CANCEL_ASYNC 2
 #define ZZ9K_LIBRARY_MIN_REVISION_WAIT_ASYNC 3

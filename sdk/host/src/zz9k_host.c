@@ -159,6 +159,7 @@ struct ZZ9KContext {
   uint32_t offload_timeout_ms;
   uint32_t sync_wait_timeout_ms;   /* armed-wait ENV bound, read once; 0 = unread */
   uint32_t wait_heartbeats;        /* coarse clock when timer.device is unusable */
+  uint16_t client_id;
   unsigned char irq_armed;
   unsigned char late_irq_expected; /* cancelled op still in flight */
   unsigned char aperture_layout_valid;
@@ -1413,6 +1414,16 @@ void zz9k_set_completion_dispatcher(ZZ9KContext *ctx,
     ctx->completion_dispatcher = dispatcher;
     ctx->completion_dispatcher_user_data = user_data;
   }
+}
+
+int zz9k_set_client_id(ZZ9KContext *ctx, uint16_t client_id)
+{
+  if (!ctx || client_id > (ZZ9K_ENTRY_CLIENT_ID_MASK >>
+                           ZZ9K_ENTRY_CLIENT_ID_SHIFT)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  ctx->client_id = client_id;
+  return ZZ9K_STATUS_OK;
 }
 
 int zz9k_completion_irq_supported(ZZ9KContext *ctx)
@@ -3804,6 +3815,10 @@ int zz9k_submit(ZZ9KContext *ctx, ZZ9KRequest *request, uint32_t *request_id)
     return ZZ9K_STATUS_UNSUPPORTED;
 #endif
   }
+
+  request->entry.flags &= (uint16_t)~ZZ9K_ENTRY_CLIENT_ID_MASK;
+  request->entry.flags |= (uint16_t)(ctx->client_id <<
+                                     ZZ9K_ENTRY_CLIENT_ID_SHIFT);
 
   lock_status = zz9k_mailbox_lock(ctx);
   if (lock_status != ZZ9K_STATUS_OK) {

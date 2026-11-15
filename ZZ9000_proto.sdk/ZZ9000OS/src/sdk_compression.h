@@ -53,6 +53,11 @@ uint16_t sdk_decompress_stream_begin(
 	const uint8_t *src, uint32_t src_length,
 	uint32_t output_limit,
 	struct SDKDecompressStreamResult *result);
+uint16_t sdk_decompress_stream_begin_owned(
+	uint32_t algorithm, uint32_t flags,
+	const uint8_t *src, uint32_t src_length, uint32_t output_limit,
+	uint16_t owner_id, struct SDKDecompressStreamResult *result);
+int sdk_decompress_stream_release_client(uint16_t owner_id);
 uint16_t sdk_decompress_stream_feed(
 	uint32_t session,
 	const uint8_t *src, uint32_t src_length,

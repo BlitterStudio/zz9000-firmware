@@ -496,6 +496,12 @@ void zz9k_set_completion_dispatcher(ZZ9KContext *ctx,
                                     ZZ9KCompletionDispatcher dispatcher,
                                     void *user_data);
 
+/*
+ * Tags subsequent submissions from this context. A zero id leaves requests
+ * unowned, preserving direct-mailbox client behavior.
+ */
+int zz9k_set_client_id(ZZ9KContext *ctx, uint16_t client_id);
+
 int zz9k_submit(ZZ9KContext *ctx, ZZ9KRequest *request,
                 uint32_t *request_id);
 int zz9k_submit_batch(ZZ9KContext *ctx, ZZ9KRequest *requests,

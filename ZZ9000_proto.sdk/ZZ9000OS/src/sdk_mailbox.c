@@ -19,6 +19,8 @@
 #include "sdk_palette.h"
 #include "sdk_mailbox.h"
 #include "sdk_service_catalog.h"
+#include "sdk_client_release.h"
+#include "sdk_internal_completion.h"
 #include "sdk_compression.h"
 #include <zlib.h>
 #include "lzh/zz9k_lzh.h"
@@ -723,15 +725,8 @@ struct SDKDecompressStreamResultPayload {
 	uint8_t reserved[24];
 };
 
-struct SDKSharedBuffer {
-	uint32_t handle;
-	uint32_t address;
-	uint32_t length;
-	uint32_t flags;
-	uint32_t pin_count;
-	uint32_t pool_owner;
-	uint8_t in_use;
-};
+/* struct SDKSharedBuffer lives in sdk_client_release.h so the host-built
+ * client-release quiesce tests share the exact production entry shape. */
 
 struct SDKSurface {
 	uint32_t handle;
@@ -743,6 +738,7 @@ struct SDKSurface {
 	uint32_t flags;
 	uint32_t length;
 	uint32_t pool_owner;
+	uint16_t owner_id;
 	uint8_t in_use;
 };
 
@@ -924,7 +920,8 @@ struct media_begin_op_params {
 	uint32_t pcm_ring_capacity;
 	uint32_t pcm_low_water_bytes;
 	uint32_t pcm_high_water_bytes;
-	uint32_t flags;
+	uint16_t client_owner_id;
+	uint16_t reserved;
 	uint32_t pcm_ring_addr;
 };
 
@@ -935,6 +932,7 @@ struct video_begin_op_params {
 	uint32_t height;
 	uint32_t output_format;
 	uint32_t flags;
+	uint16_t client_owner_id;
 };
 
 struct image_begin_op_params {
@@ -943,6 +941,7 @@ struct image_begin_op_params {
 
 struct image_begin_pending {
 	struct SDKImageStreamBegin begin;
+	uint16_t owner_id;
 	uint8_t in_use;
 };
 
@@ -1032,6 +1031,7 @@ struct SDKAudioStream {
 	 * Written by core 0 only. */
 	uint8_t closing;
 	uint8_t release_queued;
+	uint16_t owner_id;
 	union {
 		struct sdk_flac_state flac;
 		struct sdk_vorbis_state vorbis;
@@ -1234,6 +1234,7 @@ static uint32_t sdk_mailbox_generation;
 static uint32_t g_task_generation[TASKQ_CAPACITY];
 static uint32_t zzm_load_pending_id;
 
+
 #define ZZM_LOAD_WAIT_TICKS (3ULL * (uint64_t)COUNTS_PER_SECOND)
 static XTime zzm_load_deadline;
 
@@ -1244,6 +1245,9 @@ static int zzm_module_loaded(uint32_t module_id)
 	return zzm_loader_status_by_id(module_id, &status) &&
 	       status.state == ZZM_STATE_LOADED;
 }
+
+static void deferred_task_track(int slot, uint16_t client_id,
+                                const taskq_desc_t *task);
 
 /* Enqueue an internal core-1 task (request_id 0, no client completion).
  * Core-0 main-loop context ONLY: the task queue is single-producer.
@@ -1263,6 +1267,7 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
 	if (slot < 0)
 		return 0;
 
+	deferred_task_track(slot, 0U, &sh->queue.descs[slot]);
 	g_task_generation[slot] = sdk_mailbox_generation;
 	scheduler_core1_publish();
 	return 1;
@@ -1436,6 +1441,12 @@ static inline uint32_t get_be32(const volatile void *p)
 	const volatile uint8_t *b = (const volatile uint8_t *)p;
 	return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
 	       ((uint32_t)b[2] << 8) | b[3];
+}
+
+static uint16_t request_client_id(const volatile struct SDKMailboxEntry *req)
+{
+	return (uint16_t)((get_be16(req->flags) & SDK_ENTRY_CLIENT_ID_MASK) >>
+	                  SDK_ENTRY_CLIENT_ID_SHIFT);
 }
 
 static int bytes_are_zero(const volatile uint8_t *bytes, uint32_t length)
@@ -2212,6 +2223,21 @@ static void shared_buffer_unpin(struct SDKSharedBuffer *buffer)
 		buffer->pin_count--;
 }
 
+static struct SDKClientReleaseState g_client_release;
+
+static void deferred_task_track(int slot, uint16_t client_id,
+                                const taskq_desc_t *task)
+{
+	sdk_client_track_deferred(&g_client_release, shared_buffers, slot,
+	                          client_id, task);
+}
+
+static void deferred_task_release(int slot)
+{
+	sdk_client_deferred_done(&g_client_release, shared_buffers, slot);
+}
+
+
 static void release_media_pcm_ring(uint32_t session)
 {
 	if (media_pcm_ring && media_pcm_ring_session == session) {
@@ -2484,6 +2510,7 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	slot->length = length;
 	slot->flags = flags;
 	slot->pool_owner = owner;
+	slot->owner_id = request_client_id(req);
 	slot->in_use = 1;
 
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*info));
@@ -2832,6 +2859,7 @@ static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
 	else
 		slot->flags = flags | SDK_SURFACE_FLAG_CPU_VISIBLE;
 	slot->length = length;
+	slot->owner_id = request_client_id(req);
 	slot->in_use = 1;
 
 	memset((void *)(uintptr_t)address, 0, length);
@@ -3471,6 +3499,8 @@ static void free_audio_stream(struct SDKAudioStream *stream)
 {
 	if (stream) {
 		audio_stream_release_decoder(stream);
+		shared_buffer_unpin(stream->mp3_ring);
+		shared_buffer_unpin(stream->pcm_ring);
 		memset(stream, 0, sizeof(*stream));
 	}
 }
@@ -4448,6 +4478,8 @@ void sdk_mailbox_audio_playback_pump(void)
 				                     TASK_LONG, 0u, 0u, 0u, 0u,
 				                     0u, 0u, &p, sizeof(p));
 				if (slot >= 0) {
+					deferred_task_track(slot, stream->owner_id,
+					                    &sh->queue.descs[slot]);
 					g_task_generation[slot] =
 					    sdk_mailbox_generation;
 					scheduler_core1_publish();
@@ -4984,7 +5016,7 @@ static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
                                   uint32_t high_water_bytes)
 {
 	struct SDKAudioStream *stream;
-
+	int input_pinned;
 	if (input_capacity == 0U || pcm_capacity <
 	    (MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t)) ||
 	    input_capacity > input_ring->length ||
@@ -4997,6 +5029,13 @@ static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
 	stream = alloc_audio_stream();
 	if (!stream)
 		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+	input_pinned = shared_buffer_pin(input_ring);
+	if (!input_pinned || !shared_buffer_pin(pcm_ring)) {
+		if (input_pinned)
+			shared_buffer_unpin(input_ring);
+		memset(stream, 0, sizeof(*stream));
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
 	stream->codec = codec;
 	stream->mp3_ring = input_ring;
 	stream->pcm_ring = pcm_ring;
@@ -5009,6 +5048,7 @@ static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
 	stream->low_water_bytes = low_water_bytes;
 	stream->high_water_bytes = high_water_bytes & ~1UL;
 	stream->sample_format = output_format;
+	stream->owner_id = request_client_id(req);
 	/* Affinity is fixed for the stream's whole life: the input staging
 	 * ring becomes cache-owned by whichever core runs the decoder. */
 	stream->core1_affine = scheduler_core1_available() ? 1U : 0U;
@@ -5374,6 +5414,183 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, &snapshot);
 }
 
+static int client_audio_streams_released(uint16_t client_id)
+{
+	uint32_t i;
+
+	for (i = 0U; i < SDK_MAX_AUDIO_STREAMS; i++) {
+		struct SDKAudioStream *stream = &audio_streams[i];
+
+		if (stream->id == 0U || stream->owner_id != client_id)
+			continue;
+		if (!stream->closing) {
+			if (g_audio_playback.session == stream->id &&
+			    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM)
+				audio_playback_stop();
+			stream->closing = 1U;
+		}
+	}
+	sdk_mailbox_audio_stream_reap();
+	for (i = 0U; i < SDK_MAX_AUDIO_STREAMS; i++) {
+		if (audio_streams[i].id != 0U &&
+		    audio_streams[i].owner_id == client_id)
+			return 0;
+	}
+	return 1;
+}
+
+static int client_deferred_tasks_released(uint16_t client_id)
+{
+	return !sdk_client_deferred_pending(&g_client_release,
+	                                    &scheduler_shared()->queue,
+	                                    client_id);
+}
+
+static int client_image_sessions_released(uint16_t client_id)
+{
+	struct imgsess_op_params close_params;
+	uint32_t core1_close_session;
+
+	core1_close_session = 0U;
+	if (sdk_image_stream_release_client(client_id, &core1_close_session))
+		return 1;
+	if (core1_close_session == 0U)
+		return 0;
+	if (!scheduler_core1_available()) {
+		sdk_image_stream_poison_session(core1_close_session);
+		return sdk_image_stream_release_poisoned(core1_close_session) ==
+		    SDK_STATUS_OK;
+	}
+	memset(&close_params, 0, sizeof(close_params));
+	close_params.session = core1_close_session;
+	if (!sdk_mailbox_enqueue_internal(SDK_OP_IMAGE_SESSION_CLOSE,
+	                                 &close_params, sizeof(close_params)))
+		return 0;
+	return 0;
+}
+
+static int client_media_sessions_released(uint16_t client_id)
+{
+	struct video_session_op_params close_params;
+	struct SDKMediaSessionMainResult close_result;
+	uint32_t close_session;
+
+	/* Stop the AX media pump before the release path unbinds the session's
+	 * audio: the pump's ISR view must not race the staging rewind. */
+	if (g_audio_playback.session != 0U &&
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+		audio_playback_stop();
+	close_session = 0U;
+	if (sdk_media_session_release_client(client_id, &close_session))
+		return 1;
+	if (close_session == 0U)
+		return 0;
+	if (!scheduler_core1_available()) {
+		if (sdk_media_session_close(close_session, 0U, &close_result) !=
+		    SDK_STATUS_OK)
+			return 0;
+		sdk_media_session_close_retired(close_session);
+		release_media_pcm_ring(close_session);
+		return 1;
+	}
+	memset(&close_params, 0, sizeof(close_params));
+	close_params.session = close_session;
+	if (!sdk_mailbox_enqueue_internal(SDK_OP_MEDIA_SESSION_CLOSE,
+	                                  &close_params, sizeof(close_params)))
+		return 0;
+	return 0;
+}
+
+static int client_video_sessions_released(uint16_t client_id)
+{
+	struct video_session_op_params close_params;
+	struct SDKVideoStreamResult close_result;
+	uint32_t close_session;
+
+	close_session = 0U;
+	if (sdk_video_stream_release_client(client_id, &close_session))
+		return 1;
+	if (close_session == 0U)
+		return 0;
+	if (!scheduler_core1_available()) {
+		if (sdk_video_stream_close(close_session, &close_result) !=
+		    SDK_STATUS_OK)
+			return 0;
+		overlay_video_session_closed(close_session);
+		return 1;
+	}
+	memset(&close_params, 0, sizeof(close_params));
+	close_params.session = close_session;
+	if (!sdk_mailbox_enqueue_internal(SDK_OP_VIDEO_SESSION_CLOSE,
+	                                 &close_params, sizeof(close_params)))
+		return 0;
+	return 0;
+}
+
+static int client_decompress_streams_released(uint16_t client_id)
+{
+	return sdk_decompress_stream_release_client(client_id);
+}
+
+static int client_shared_buffers_released(uint16_t client_id)
+{
+	uint32_t i;
+
+	for (i = 0U; i < SDK_MAX_SHARED_BUFFERS; i++) {
+		struct SDKSharedBuffer *buffer = &shared_buffers[i];
+
+		if (!shared_buffer_live(buffer) || buffer->owner_id != client_id)
+			continue;
+		if (buffer->pin_count != 0U)
+			return 0;
+		if (buffer->pool_owner != 0U)
+			(void)card_pool_free(&card_pool, buffer->address,
+			                     buffer->pool_owner);
+		else if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) == 0U)
+			(void)surface_allocator_free(buffer->address);
+		memset(buffer, 0, sizeof(*buffer));
+	}
+	return 1;
+}
+
+static void client_surfaces_release(uint16_t client_id)
+{
+	uint32_t i;
+
+	for (i = 0U; i < SDK_MAX_SURFACES; i++) {
+		struct SDKSurface *surface = &surfaces[i];
+
+		if (!surface_live(surface) || surface->owner_id != client_id)
+			continue;
+		if (surface->pool_owner != 0U)
+			(void)card_pool_free(&card_pool, surface->address,
+			                     surface->pool_owner);
+		else
+			(void)surface_allocator_free(surface->address);
+		memset(surface, 0, sizeof(*surface));
+	}
+}
+
+static uint16_t handle_client_release(volatile struct SDKMailboxEntry *req,
+                                      volatile struct SDKMailboxEntry *comp,
+                                      uint16_t payload_len)
+{
+	uint16_t client_id = request_client_id(req);
+
+	if (payload_len != 0U || client_id == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (!client_deferred_tasks_released(client_id) ||
+	    !client_image_sessions_released(client_id) ||
+	    !client_media_sessions_released(client_id) ||
+	    !client_video_sessions_released(client_id) ||
+	    !client_audio_streams_released(client_id) ||
+	    !client_decompress_streams_released(client_id) ||
+	    !client_shared_buffers_released(client_id))
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	client_surfaces_release(client_id);
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
 static uint16_t validate_image_session_buffers(
 	struct SDKImageStreamBegin *begin)
 {
@@ -5489,7 +5706,8 @@ static uint16_t handle_image_session_begin(
 		 * fallback on core 0 would queue a load then reject this request. */
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	}
-	status = sdk_image_stream_begin(&begin, &result);
+	status = sdk_image_stream_begin_owned(&begin, request_client_id(req),
+	                                      &result);
 	return complete_image_session_result(req, comp, status, &result);
 }
 
@@ -5616,6 +5834,7 @@ static uint16_t handle_video_session_begin(
 	p.height = get_be32(payload->height);
 	p.output_format = get_be32(payload->output_format);
 	p.flags = get_be32(payload->flags);
+	p.client_owner_id = request_client_id(req);
 	status = service_try_defer(SDK_OP_VIDEO_SESSION_BEGIN, req, &p,
 	                           sizeof(p), 0U);
 	if (status == SDK_STATUS_QUEUED)
@@ -5729,7 +5948,9 @@ static uint16_t handle_media_session_begin(
 	p.pcm_ring_capacity = get_be32(payload->pcm_ring_capacity);
 	p.pcm_low_water_bytes = get_be32(payload->pcm_low_water_bytes);
 	p.pcm_high_water_bytes = get_be32(payload->pcm_high_water_bytes);
-	p.flags = get_be32(payload->flags);
+	if (get_be32(payload->flags) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	p.client_owner_id = request_client_id(req);
 	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (sdk_media_session_audio_uses_ring(p.audio_codec)) {
@@ -6796,7 +7017,9 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		if (!image_begin_pending[p->pending_slot].in_use)
 			return SDK_STATUS_IO_ERROR;
 		begin = image_begin_pending[p->pending_slot].begin;
-		s = sdk_image_stream_begin(&begin, &image_result);
+		s = sdk_image_stream_begin_owned(
+			&begin, image_begin_pending[p->pending_slot].owner_id,
+			&image_result);
 		image_begin_pending[p->pending_slot].in_use = 0U;
 		Xil_DCacheFlushRange(
 			(INTPTR)(uintptr_t)&image_begin_pending[p->pending_slot],
@@ -6935,6 +7158,9 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		begin.output_format = p->output_format;
 		begin.flags = p->flags;
 		s = sdk_video_stream_begin(&begin, &video_result);
+		if (s == SDK_STATUS_OK)
+			(void)sdk_video_stream_set_client_owner(video_result.session,
+			                                         p->client_owner_id);
 		if (s != SDK_STATUS_OK)
 			return s;
 		memset(result_payload, 0,
@@ -6966,9 +7192,10 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		begin.pcm_ring_capacity = p->pcm_ring_capacity;
 		begin.pcm_low_water_bytes = p->pcm_low_water_bytes;
 		begin.pcm_high_water_bytes = p->pcm_high_water_bytes;
-		begin.flags = p->flags;
+		begin.flags = 0U;
 		begin.pcm_ring = (uint8_t *)(uintptr_t)p->pcm_ring_addr;
-		s = sdk_media_session_begin(&begin, &media_result);
+		s = sdk_media_session_begin_owned(&begin, p->client_owner_id,
+		                                  &media_result);
 		if (s != SDK_STATUS_OK)
 			return s;
 		memset(result_payload, 0,
@@ -7452,6 +7679,8 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 		                         get_be32(req->request_id),
 		                         get_be32(req->user_cookie), params, param_len);
 		if (slot >= 0) {
+			deferred_task_track(slot, request_client_id(req),
+			                    &sh->queue.descs[slot]);
 			/* Stamp the current mailbox generation so this task is dropped
 			 * rather than posted if the mailbox is re-initialised before it
 			 * finishes. Core-0-only field; safe to write after the QUEUED
@@ -7501,6 +7730,8 @@ static uint16_t service_try_defer(uint16_t opcode,
 		                         get_be32(req->user_cookie),
 		                         params, param_len);
 		if (slot >= 0) {
+			deferred_task_track(slot, request_client_id(req),
+			                    &sh->queue.descs[slot]);
 			/* Stamp the current mailbox generation so this task is dropped
 			 * rather than posted if the mailbox is re-initialised before it
 			 * finishes (see g_task_generation). */
@@ -7535,6 +7766,7 @@ static uint16_t image_session_begin_try_defer(
 	if (i == TASKQ_CAPACITY)
 		return SDK_STATUS_BUSY;
 	image_begin_pending[i].begin = *begin;
+	image_begin_pending[i].owner_id = request_client_id(req);
 	image_begin_pending[i].in_use = 1U;
 	Xil_DCacheFlushRange((INTPTR)(uintptr_t)&image_begin_pending[i],
 	                     sizeof(image_begin_pending[i]));
@@ -7549,6 +7781,7 @@ static uint16_t image_session_begin_try_defer(
 		                     sizeof(image_begin_pending[i]));
 		return SDK_STATUS_BUSY;
 	}
+	deferred_task_track(slot, request_client_id(req), &sh->queue.descs[slot]);
 	g_task_generation[slot] = sdk_mailbox_generation;
 	scheduler_core1_publish();
 	return SDK_STATUS_QUEUED;
@@ -7608,6 +7841,8 @@ static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
 		                         get_be32(req->request_id),
 		                         get_be32(req->user_cookie), &p, sizeof(p));
 		if (slot >= 0) {
+			deferred_task_track(slot, request_client_id(req),
+			                    &sh->queue.descs[slot]);
 			/* Stamp the current mailbox generation so this task is dropped
 			 * rather than posted if the mailbox is re-initialised before it
 			 * finishes. Core-0-only field; safe to write after the QUEUED
@@ -8154,6 +8389,7 @@ static uint16_t handle_decompress_batch(volatile struct SDKMailboxEntry *req,
 	if (slot < 0)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 
+	deferred_task_track(slot, request_client_id(req), &sh->queue.descs[slot]);
 	/* Stamp the current mailbox generation so this task is dropped rather
 	 * than posted if the mailbox is re-initialised before it finishes.
 	 * Core-0-only field; safe to write after the QUEUED release-store
@@ -8280,10 +8516,10 @@ static uint16_t handle_decompress_stream_begin(
 		                          src_length);
 	}
 
-	status = sdk_decompress_stream_begin(
+	status = sdk_decompress_stream_begin_owned(
 		algorithm, flags,
 		src ? (const uint8_t *)(uintptr_t)(src->address + src_offset) : 0,
-		src_length, output_limit, &result);
+		src_length, output_limit, request_client_id(req), &result);
 	if (status != SDK_STATUS_OK)
 		return complete_status(req, comp, status);
 
@@ -8819,6 +9055,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		write_completion(comp, req, SDK_STATUS_OK, payload_len);
 		copy_payload(comp->payload, req->payload, payload_len);
 		return SDK_STATUS_OK;
+	case SDK_OP_CLIENT_RELEASE:
+		return handle_client_release(req, comp, payload_len);
 	case SDK_OP_QUERY_CAPS: {
 		volatile struct SDKCapsPayload *caps =
 			(volatile struct SDKCapsPayload *)comp->payload;
@@ -8879,6 +9117,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 			                         get_be32(req->user_cookie), 0, 0U);
 			if (slot < 0)
 				return complete_status(req, comp, SDK_STATUS_BUSY);
+			deferred_task_track(slot, request_client_id(req),
+			                    &sh->queue.descs[slot]);
 			g_task_generation[slot] = sdk_mailbox_generation;
 			scheduler_core1_publish();
 			return SDK_STATUS_QUEUED;
@@ -8896,6 +9136,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 			                         get_be32(req->user_cookie), 0, 0U);
 			if (slot < 0)
 				return complete_status(req, comp, SDK_STATUS_BUSY);
+			deferred_task_track(slot, request_client_id(req),
+			                    &sh->queue.descs[slot]);
 			g_task_generation[slot] = sdk_mailbox_generation;
 			scheduler_core1_publish();
 			return SDK_STATUS_QUEUED;
@@ -9303,7 +9545,7 @@ static void harvest_app_ops(void)
 	if (!zzapp_mailbox_harvest(&request_id, &cookie, &opcode, &status,
 				   payload, &len))
 		return;
-	if (sdk_mailbox_post_deferred(request_id, cookie, opcode, status,
+	if (sdk_mailbox_post_deferred(-1, request_id, cookie, opcode, status,
 				      payload, len))
 		zzapp_mailbox_harvest_ack();
 }
@@ -9441,6 +9683,64 @@ int sdk_mailbox_task_gen_ok(int slot)
 	return g_task_generation[slot] == sdk_mailbox_generation;
 }
 
+void sdk_mailbox_task_forget(int slot)
+{
+	deferred_task_release(slot);
+}
+
+static void internal_zzm_load_finished(int ok)
+{
+	if (!ok && zzm_load_pending_id != 0U)
+		zzm_loader_mark_faulted(zzm_load_pending_id, "core-1 load fault");
+	zzm_load_pending_id = 0U;
+}
+
+static void internal_media_close_retired(uint32_t session)
+{
+	sdk_media_session_close_retired(session);
+}
+
+static void internal_pcm_ring_release(uint32_t session)
+{
+	release_media_pcm_ring(session);
+}
+
+static void internal_overlay_video_closed(uint32_t session)
+{
+	overlay_video_session_closed(session);
+}
+
+static void internal_fw_update_retire(uint16_t code)
+{
+	fw_update_retire(code);
+}
+
+static void internal_fw_update_retire_failed(void)
+{
+	fw_update_retire_failed();
+}
+
+static void internal_compose_retired(int ok)
+{
+	overlay_compose_retired(ok);
+}
+
+static void internal_ax_refill_done(void)
+{
+	g_audio_playback.refill_pending = 0U;
+}
+
+static const struct sdk_internal_completion_hooks g_internal_completion = {
+	.overlay_compose_retired = internal_compose_retired,
+	.fw_update_retire = internal_fw_update_retire,
+	.fw_update_retire_failed = internal_fw_update_retire_failed,
+	.zzm_load_finished = internal_zzm_load_finished,
+	.overlay_video_closed = internal_overlay_video_closed,
+	.media_close_retired = internal_media_close_retired,
+	.pcm_ring_release = internal_pcm_ring_release,
+	.ax_refill_done = internal_ax_refill_done,
+};
+
 /*
  * Post a deferred completion for a task the core-1 scheduler finished. Reuses
  * the exact completion machinery of sdk_mailbox_task -- grab the next slot,
@@ -9453,9 +9753,10 @@ int sdk_mailbox_task_gen_ok(int slot)
  * crypto requests never set the entry flags word, so this matches the
  * synchronous path (which echoes the request's zero flags) byte-for-byte.
  */
-int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
-                              uint16_t opcode, uint16_t status,
-                              const uint8_t *payload, uint16_t payload_len)
+int sdk_mailbox_post_deferred(int slot, uint32_t request_id,
+                              uint32_t user_cookie, uint16_t opcode,
+                              uint16_t status, const uint8_t *payload,
+                              uint16_t payload_len)
 {
 	volatile struct SDKMailboxDescriptor *desc = descriptor();
 	volatile struct SDKMailboxEntry *comp_ring = completion_ring();
@@ -9467,26 +9768,9 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 	if (request_id == 0U) {
 		/* Internal task: no client completion to post; retire the
 		 * producer's in-flight marker, dispatched by opcode. */
-		if (opcode == (uint16_t)TASKQ_OP_VIDEO_COMPOSE)
-			overlay_compose_retired(status == SDK_STATUS_OK);
-		else if (opcode == (uint16_t)TASKQ_OP_FWUP) {
-			if (status == SDK_STATUS_OK && payload && payload_len >= 2U)
-				fw_update_retire((uint16_t)((payload[0] << 8) |
-				                            payload[1]));
-			else
-				fw_update_retire_failed(); /* faulted on core 1 */
-		}
-		else if (opcode == (uint16_t)TASKQ_OP_ZZM_LOAD) {
-			if (status != SDK_STATUS_OK && zzm_load_pending_id != 0U)
-				zzm_loader_mark_faulted(zzm_load_pending_id, "core-1 load fault");
-			zzm_load_pending_id = 0U;
-		}
-		else if (opcode == (uint16_t)SDK_OP_AUDIO_STREAM_CLOSE) {
-			/* Background close: sdk_mailbox_audio_stream_reap
-			 * clears the slot once the task has left the queue. */
-		} else {
-			g_audio_playback.refill_pending = 0U; /* AX refill */
-		}
+		sdk_internal_completion_dispatch(&g_internal_completion, opcode,
+		                                 status, payload, payload_len);
+		deferred_task_release(slot);
 		return 1;
 	}
 
@@ -9614,6 +9898,7 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 	if (sdk_completion_irq_enabled)
 		amiga_interrupt_set(AMIGA_INTERRUPT_SDK);
 
+	deferred_task_release(slot);
 	return 1;
 }
 

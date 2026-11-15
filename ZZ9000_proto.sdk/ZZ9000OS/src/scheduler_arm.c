@@ -1027,7 +1027,6 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
   taskq_shared_t *sh = scheduler_shared();
   int slot;
 
-    if (!sdk_mailbox_post_deferred(d->request_id, d->user_cookie,
   scheduler_post_task_completions();
   zzapp_core0_poll();
 

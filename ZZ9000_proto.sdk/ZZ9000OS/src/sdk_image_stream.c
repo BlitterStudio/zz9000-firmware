@@ -124,6 +124,7 @@ struct SDKImageStreamSession {
 	uint8_t in_use;
 	uint8_t module_ref;
 	uint8_t core1_affine;
+	uint16_t owner_id;
 	uint8_t direct_scale_row_valid[2];
 	uint32_t direct_scale_row_y[2];
 	uint8_t direct_scale_rows[2][SDK_IMAGE_STREAM_MAX_DECODE_WIDTH * 4U];
@@ -2176,7 +2177,7 @@ uint32_t sdk_image_stream_active_count(void)
 }
 
 static uint16_t image_stream_begin_locked(
-	const struct SDKImageStreamBegin *begin,
+	const struct SDKImageStreamBegin *begin, uint16_t owner_id,
 	struct SDKImageStreamResult *result)
 {
 	struct SDKImageStreamSession *session;
@@ -2255,6 +2256,7 @@ static uint16_t image_stream_begin_locked(
 	session->tile_length = begin->tile_length;
 	session->core1_affine = begin->core1_affine ? 1U : 0U;
 	session->direct_arm_local = begin->direct_arm_local ? 1U : 0U;
+	session->owner_id = owner_id;
 	session->in_use = 1U;
 	session->module_ref = begin->codec == SDK_IMAGE_CODEC_WEBP ? 1U : 0U;
 	if (session->codec == SDK_IMAGE_CODEC_WEBP) {
@@ -2271,8 +2273,9 @@ static uint16_t image_stream_begin_locked(
 	fill_result(session, SDK_IMAGE_SESSION_STATE_NEED_INPUT, 0U, result);
 	return SDK_STATUS_OK;
 }
-uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
-                                struct SDKImageStreamResult *result)
+static uint16_t sdk_image_stream_begin_with_owner(
+	const struct SDKImageStreamBegin *begin, uint16_t owner_id,
+	struct SDKImageStreamResult *result)
 {
 	uint16_t status;
 	int module_guard = begin && begin->codec == SDK_IMAGE_CODEC_WEBP;
@@ -2290,11 +2293,48 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 			zzm_loader_session_begin_unlock();
 		return SDK_STATUS_BUSY;
 	}
-	status = image_stream_begin_locked(begin, result);
+	status = image_stream_begin_locked(begin, owner_id, result);
 	sdk_smp_lock_release(&image_session_lock);
 	if (module_guard)
 		zzm_loader_session_begin_unlock();
 	return status;
+}
+
+uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
+                                struct SDKImageStreamResult *result)
+{
+	return sdk_image_stream_begin_with_owner(begin, 0U, result);
+}
+
+uint16_t sdk_image_stream_begin_owned(
+	const struct SDKImageStreamBegin *begin, uint16_t owner_id,
+	struct SDKImageStreamResult *result)
+{
+	return sdk_image_stream_begin_with_owner(begin, owner_id, result);
+}
+
+int sdk_image_stream_release_client(uint16_t owner_id,
+                                    uint32_t *core1_close_session)
+{
+	uint32_t i;
+
+	if (core1_close_session)
+		*core1_close_session = 0U;
+	for (i = 0U; i < SDK_MAX_IMAGE_SESSIONS; i++) {
+		struct SDKImageStreamSession *session = &image_sessions[i];
+
+		if (!session->in_use || session->owner_id != owner_id)
+			continue;
+		if (session->core1_affine) {
+			if (core1_close_session)
+				*core1_close_session = session->session;
+			return 0;
+		}
+		if (sdk_image_stream_close(session->session) != SDK_STATUS_OK)
+			return 0;
+		i = 0xffffffffU;
+	}
+	return 1;
 }
 
 uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *feed,

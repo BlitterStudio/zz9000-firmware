@@ -351,6 +351,75 @@ int ZZ9KSetEventWaiter(ZZ9KLibrary *library, ZZ9KEventWaiter waiter,
   return ZZ9K_STATUS_OK;
 }
 
+int ZZ9KSetClientId(ZZ9KLibrary *library, uint16_t client_id)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  return zz9k_set_client_id(library->ctx, client_id);
+}
+
+int ZZ9KReleaseClient(ZZ9KLibrary *library, uint16_t client_id,
+                      uint32_t timeout_ticks)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (client_id == 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  status = ZZ9KSetClientId(library, client_id);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_OP_CLIENT_RELEASE;
+  request.entry.flags = ZZ9K_ENTRY_INLINE_PAYLOAD;
+  for (;;) {
+    memset(&reply, 0, sizeof(reply));
+    status = ZZ9KCall(library, &request, &reply, timeout_ticks);
+    if (status != ZZ9K_STATUS_BUSY) {
+      return status;
+    }
+    status = zz9k_wait_for_transport_event(library);
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+  }
+}
+
+void ZZ9KClientLeaseInit(ZZ9KClientLease *lease, uint16_t client_id)
+{
+  if (lease) {
+    lease->client_id = client_id;
+    lease->references = client_id != 0U ? 1U : 0U;
+  }
+}
+
+int ZZ9KClientLeaseRetain(ZZ9KClientLease *lease)
+{
+  if (!lease || lease->client_id == 0U || lease->references == 0U ||
+      lease->references == 0xffffffffU) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  lease->references++;
+  return ZZ9K_STATUS_OK;
+}
+
+int ZZ9KClientLeaseClose(ZZ9KLibrary *library, ZZ9KClientLease *lease,
+                         uint32_t timeout_ticks)
+{
+  if (!lease || lease->client_id == 0U || lease->references == 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  lease->references--;
+  if (lease->references != 0U) {
+    return ZZ9K_STATUS_OK;
+  }
+  return ZZ9KReleaseClient(library, lease->client_id, timeout_ticks);
+}
+
 int ZZ9KQueryCaps(ZZ9KLibrary *library, ZZ9KCaps *caps)
 {
   if (!zz9k_library_has_context(library)) {

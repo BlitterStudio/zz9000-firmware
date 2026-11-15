@@ -46,6 +46,7 @@ struct SDKDecompressStreamSession {
 	uint32_t header_bytes;
 	uint8_t header[LZMA_PROPS_SIZE + 8U];
 	int feed_eof;
+	uint16_t owner_id;
 	CLzmaDec lzma;
 	z_stream zlib;
 	int zlib_mode;
@@ -713,10 +714,10 @@ void sdk_decompress_stream_reset_all(void)
 	next_decompress_stream_id = 1U;
 }
 
-uint16_t sdk_decompress_stream_begin(
+uint16_t sdk_decompress_stream_begin_owned(
 	uint32_t algorithm, uint32_t flags,
 	const uint8_t *src, uint32_t src_length,
-	uint32_t output_limit,
+	uint32_t output_limit, uint16_t owner_id,
 	struct SDKDecompressStreamResult *result)
 {
 	struct SDKDecompressStreamSession *stream;
@@ -757,6 +758,7 @@ uint16_t sdk_decompress_stream_begin(
 	stream->algorithm = algorithm;
 	stream->flags = flags;
 	stream->crc = crc32(0L, Z_NULL, 0);
+	stream->owner_id = owner_id;
 	stream->feed_mode = feed_mode;
 	if (algorithm == SDK_COMPRESSION_LZMA_ALONE && feed_mode) {
 		stream->target_size = output_limit;
@@ -802,6 +804,16 @@ uint16_t sdk_decompress_stream_begin(
 	result->session = stream->id;
 	result->algorithm = algorithm;
 	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_decompress_stream_begin(
+	uint32_t algorithm, uint32_t flags,
+	const uint8_t *src, uint32_t src_length,
+	uint32_t output_limit,
+	struct SDKDecompressStreamResult *result)
+{
+	return sdk_decompress_stream_begin_owned(algorithm, flags, src, src_length,
+	                                         output_limit, 0U, result);
 }
 
 uint16_t sdk_decompress_stream_feed(
@@ -1141,6 +1153,22 @@ uint16_t sdk_decompress_stream_close(uint32_t session)
 		return SDK_STATUS_BAD_HANDLE;
 	free_decompress_stream(stream);
 	return SDK_STATUS_OK;
+}
+
+int sdk_decompress_stream_release_client(uint16_t owner_id)
+{
+	uint32_t i;
+
+	for (i = 0U; i < SDK_DECOMPRESS_STREAM_SESSIONS; i++) {
+		struct SDKDecompressStreamSession *stream = &decompress_streams[i];
+
+		if (!stream->allocated || stream->owner_id != owner_id)
+			continue;
+		if (sdk_decompress_stream_close(stream->id) != SDK_STATUS_OK)
+			return 0;
+		i = 0xffffffffU;
+	}
+	return 1;
 }
 
 uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,

@@ -47,6 +47,7 @@ struct SDKVideoStreamSession {
 	uint8_t in_use;
 	uint8_t direct_frame_valid;
 	uint8_t owner;
+	uint16_t client_owner_id;
 };
 
 #ifdef SDK_VIDEO_HOST_TEST
@@ -552,3 +553,34 @@ uint16_t sdk_video_stream_close(uint32_t id,
 	memset(session, 0, sizeof(*session));
 	return SDK_STATUS_OK;
 }
+
+int sdk_video_stream_set_client_owner(uint32_t session, uint16_t owner_id)
+{
+	struct SDKVideoStreamSession *state = find_session(session);
+
+	if (!state)
+		return 0;
+	state->client_owner_id = owner_id;
+	return 1;
+}
+
+int sdk_video_stream_release_client(uint16_t owner_id, uint32_t *close_session)
+{
+	uint32_t i;
+
+	if (close_session)
+		*close_session = 0U;
+	for (i = 0U; i < SDK_MAX_VIDEO_SESSIONS; i++) {
+		struct SDKVideoStreamSession *session = &video_sessions[i];
+
+		if (!session->in_use ||
+		    session->owner != SDK_VIDEO_STREAM_OWNER_LEGACY ||
+		    session->client_owner_id != owner_id)
+			continue;
+		if (close_session)
+			*close_session = session->id;
+		return 0;
+	}
+	return 1;
+}
+

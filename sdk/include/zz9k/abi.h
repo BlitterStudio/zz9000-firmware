@@ -134,7 +134,13 @@ enum ZZ9KEntryFlags {
   ZZ9K_ENTRY_BUFFER_PAYLOAD = 1U << 1,
   ZZ9K_ENTRY_ASYNC = 1U << 2,
   ZZ9K_ENTRY_NEEDS_IRQ = 1U << 3,
-  ZZ9K_ENTRY_CANCEL_REQUEST = 1U << 4
+  ZZ9K_ENTRY_CANCEL_REQUEST = 1U << 4,
+  /*
+   * A nonzero client id occupies the otherwise-reserved high eleven bits.
+   * Untagged requests remain ABI-compatible unowned requests.
+   */
+  ZZ9K_ENTRY_CLIENT_ID_SHIFT = 5,
+  ZZ9K_ENTRY_CLIENT_ID_MASK = 0xffe0U
 };
 
 enum ZZ9KService {
@@ -164,6 +170,11 @@ enum ZZ9KOpcode {
   ZZ9K_OP_CANCEL = ZZ9K_SERVICE_CORE + 0x03,
   ZZ9K_OP_QUERY_SERVICE = ZZ9K_SERVICE_CORE + 0x04,
   ZZ9K_OP_QUERY_APERTURE_LAYOUT = ZZ9K_SERVICE_CORE + 0x05,
+  /*
+   * Reclaim every resource owned by the tagged client. The client id is in
+   * ZZ9K_ENTRY_CLIENT_ID_MASK; no payload is carried.
+   */
+  ZZ9K_OP_CLIENT_RELEASE = ZZ9K_SERVICE_CORE + 0x06,
 
   ZZ9K_OP_ALLOC_SHARED = ZZ9K_SERVICE_MEMORY + 0x00,
   ZZ9K_OP_FREE_SHARED = ZZ9K_SERVICE_MEMORY + 0x01,

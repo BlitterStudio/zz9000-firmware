@@ -937,6 +937,56 @@ static int test_mp2_direct_audio_cursor_rollover(void)
 	return 0;
 }
 
+/* CLIENT_RELEASE on an audio-bound session: release_client must unbind the
+ * session's audio (rewinding staging) so the close it reports can actually
+ * run -- before the fix, a bound session answered BUSY from close forever,
+ * pinning the client's PCM ring for good. */
+static int test_release_client_unbinds_audio(void)
+{
+	struct SDKMediaSessionBegin begin;
+	struct SDKMediaSessionMainResult result;
+	struct SDKMediaSessionAudioResult audio;
+	uint32_t close_session = 0U;
+
+	reset_mocks();
+	sdk_media_session_init();
+	fill_begin(&begin);
+	begin.audio_codec = SDK_MEDIA_AUDIO_MP2;
+	begin.pcm_ring_handle = 0x40000001U;
+	begin.pcm_ring = pcm_ring;
+	begin.pcm_ring_capacity = sizeof(pcm_ring);
+	begin.pcm_low_water_bytes = 4608U;
+	begin.pcm_high_water_bytes = 24576U;
+	if (sdk_media_session_begin_owned(&begin, 17U, &result) != SDK_STATUS_OK)
+		return 1;
+	mock_pcm_produced = 9216U;
+	if (sdk_media_session_decode(mock_session, 0U, &result) !=
+	        SDK_STATUS_OK ||
+	    sdk_media_session_discard(mock_session, 0U, &result) !=
+	        SDK_STATUS_OK ||
+	    sdk_media_session_audio_bind(mock_session, 0U, &audio) !=
+	        SDK_STATUS_OK)
+		return 2;
+	/* Bound sessions refuse close: the hazard CLIENT_RELEASE must clear. */
+	if (sdk_media_session_close(mock_session, 0U, &result) != SDK_STATUS_BUSY)
+		return 3;
+	/* The owner going away: release reports the session for closing... */
+	if (sdk_media_session_release_client(17U, &close_session) != 0 ||
+	    close_session != mock_session)
+		return 4;
+	/* ...and the close it asked for now succeeds without any further
+	 * unbind call from the mailbox. */
+	if (sdk_media_session_close(close_session, 0U, &result) != SDK_STATUS_OK)
+		return 5;
+	sdk_media_session_close_retired(close_session);
+	/* A second release pass finds nothing left of the owner. */
+	if (sdk_media_session_release_client(17U, &close_session) != 1 ||
+	    close_session != 0U)
+		return 6;
+	return 0;
+}
+
+
 int main(void)
 {
 	int rc;
@@ -961,5 +1011,7 @@ int main(void)
 	if (rc != 0) return 170 + rc;
 	rc = test_mp2_direct_audio_cursor_rollover();
 	if (rc != 0) return 210 + rc;
+	rc = test_release_client_unbinds_audio();
+	if (rc != 0) return 250 + rc;
 	return 0;
 }

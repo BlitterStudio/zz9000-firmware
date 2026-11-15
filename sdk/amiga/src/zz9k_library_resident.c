@@ -71,7 +71,7 @@ struct ZZ9KAppHandle {
 struct ZZ9KOpener {
   struct ZZ9KOpener *next;
   struct Task *task;
-  uint32_t references;
+  ZZ9KClientLease lease;
 };
 
 struct ZZ9KBase {
@@ -106,6 +106,7 @@ struct ZZ9KBase {
   ZZ9KAppSlotRegistry apps;
   ZZ9KAppHandle *app_handles;
   struct ZZ9KOpener *openers;
+  uint16_t next_client_id;
   int last_open_status;
 };
 
@@ -161,6 +162,8 @@ static int zz9k_lib_sync_call_wait(void *record);
 static void zz9k_lib_timer_wait_arm(struct ZZ9KTimerWait *timer,
                                     uint32_t seconds, uint32_t micros);
 static int zz9k_lib_sync_call_fallback(void *record);
+static struct ZZ9KOpener *zz9k_lib_find_opener_locked(
+    struct ZZ9KBase *base, struct Task *task, struct ZZ9KOpener **previous);
 
 
 #define ZZ9K_LIB_SYNC_OBTAIN(lock) \
@@ -898,10 +901,17 @@ static int zz9k_lib_sync_call_submit(void *opaque, void *record)
 {
   struct ZZ9KBase *base = (struct ZZ9KBase *)opaque;
   struct ZZ9KSyncCall *call = (struct ZZ9KSyncCall *)record;
+  struct ZZ9KOpener *opener;
   int status;
 
-  status = ZZ9KCallAsync(&base->core, &call->async, call->request,
-                         zz9k_lib_sync_call_notify, call);
+  opener = zz9k_lib_find_opener_locked(base, call->task, 0);
+  status = ZZ9KSetClientId(&base->core,
+                           opener ? opener->lease.client_id : 0U);
+  if (status == ZZ9K_STATUS_OK) {
+    status = ZZ9KCallAsync(&base->core, &call->async, call->request,
+                           zz9k_lib_sync_call_notify, call);
+    (void)ZZ9KSetClientId(&base->core, 0U);
+  }
   if (status == ZZ9K_STATUS_QUEUED && call->deadline_timer.request &&
       call->timeout_ticks != 0U) {
     zz9k_lib_timer_wait_arm(&call->deadline_timer,
@@ -1271,8 +1281,12 @@ static int zz9k_lib_open_core_locked(struct ZZ9KBase *base)
   return status;
 }
 
+static struct ZZ9KOpener *zz9k_lib_find_opener_locked(
+    struct ZZ9KBase *base, struct Task *task, struct ZZ9KOpener **previous);
+
 static int zz9k_lib_enter(struct ZZ9KBase *base)
 {
+  struct ZZ9KOpener *opener;
   int status;
 
   if (!base) {
@@ -1281,6 +1295,11 @@ static int zz9k_lib_enter(struct ZZ9KBase *base)
 
   ObtainSemaphore(&base->lock);
   status = zz9k_lib_open_core_locked(base);
+  if (status == ZZ9K_STATUS_OK) {
+    opener = zz9k_lib_find_opener_locked(base, FindTask(0), 0);
+    status = ZZ9KSetClientId(&base->core,
+                             opener ? opener->lease.client_id : 0U);
+  }
   if (status != ZZ9K_STATUS_OK) {
     ReleaseSemaphore(&base->lock);
   }
@@ -1291,6 +1310,7 @@ static int zz9k_lib_enter(struct ZZ9KBase *base)
 static void zz9k_lib_leave(struct ZZ9KBase *base)
 {
   if (base) {
+    (void)ZZ9KSetClientId(&base->core, 0U);
     ReleaseSemaphore(&base->lock);
   }
 }
@@ -1312,6 +1332,9 @@ static struct ZZ9KOpener *zz9k_lib_find_opener_locked(
   return 0;
 }
 
+static uint16_t zz9k_lib_allocate_client_id_locked(
+    struct ZZ9KBase *base);
+
 static struct ZZ9KBase *zz9k_lib_open(REG(a6, struct ZZ9KBase *base))
 {
   struct ZZ9KOpener *opener;
@@ -1321,20 +1344,38 @@ static struct ZZ9KBase *zz9k_lib_open(REG(a6, struct ZZ9KBase *base))
   task = FindTask(0);
   ObtainSemaphore(&base->lock);
   opener = zz9k_lib_find_opener_locked(base, task, 0);
-  if (opener) opener->references++;
-  ReleaseSemaphore(&base->lock);
-  if (!opener) {
+  if (opener) {
+    if (ZZ9KClientLeaseRetain(&opener->lease) != ZZ9K_STATUS_OK) {
+      ReleaseSemaphore(&base->lock);
+      return 0;
+    }
+    ReleaseSemaphore(&base->lock);
+  } else {
+    ReleaseSemaphore(&base->lock);
     opener = (struct ZZ9KOpener *)AllocVec(sizeof(*opener),
                                             MEMF_PUBLIC | MEMF_CLEAR);
     if (!opener) return 0;
     opener->task = task;
-    opener->references = 1U;
     ObtainSemaphore(&base->lock);
     if (zz9k_lib_find_opener_locked(base, task, 0)) {
-      zz9k_lib_find_opener_locked(base, task, 0)->references++;
+      if (ZZ9KClientLeaseRetain(
+              &zz9k_lib_find_opener_locked(base, task, 0)->lease) !=
+          ZZ9K_STATUS_OK) {
+        ReleaseSemaphore(&base->lock);
+        FreeVec(opener);
+        return 0;
+      }
       ReleaseSemaphore(&base->lock);
       FreeVec(opener);
     } else {
+      uint16_t client_id = zz9k_lib_allocate_client_id_locked(base);
+
+      if (client_id == 0U) {
+        ReleaseSemaphore(&base->lock);
+        FreeVec(opener);
+        return 0;
+      }
+      ZZ9KClientLeaseInit(&opener->lease, client_id);
       opener->next = base->openers;
       base->openers = opener;
       ReleaseSemaphore(&base->lock);
@@ -1343,6 +1384,35 @@ static struct ZZ9KBase *zz9k_lib_open(REG(a6, struct ZZ9KBase *base))
   base->library.lib_OpenCnt++;
   base->library.lib_Flags &= (uint8_t)~LIBF_DELEXP;
   return base;
+}
+
+static uint16_t zz9k_lib_allocate_client_id_locked(struct ZZ9KBase *base)
+{
+  uint16_t candidate;
+  uint16_t attempts;
+
+  for (attempts = 0U;
+       attempts < (ZZ9K_ENTRY_CLIENT_ID_MASK >> ZZ9K_ENTRY_CLIENT_ID_SHIFT);
+       attempts++) {
+    struct ZZ9KOpener *opener;
+
+    candidate = base->next_client_id;
+    if (candidate == 0U ||
+        candidate > (ZZ9K_ENTRY_CLIENT_ID_MASK >>
+                     ZZ9K_ENTRY_CLIENT_ID_SHIFT)) {
+      candidate = 1U;
+    }
+    base->next_client_id = (uint16_t)(candidate + 1U);
+    for (opener = base->openers; opener; opener = opener->next) {
+      if (opener->lease.client_id == candidate) {
+        break;
+      }
+    }
+    if (!opener) {
+      return candidate;
+    }
+  }
+  return 0U;
 }
 
 static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
@@ -1361,12 +1431,40 @@ static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
     ReleaseSemaphore(&base->lock);
     return 0;
   }
-  opener->references--;
-  release_opener = opener->references == 0U;
+  release_opener = opener->lease.references == 1U;
+  if (!release_opener) {
+    opener->lease.references--;
+  } else {
+    /*
+     * Keep the closing opener linked until the firmware has quiesced its
+     * resources, but never hold the transport lock over a BUSY retry.  Each
+     * zz9k_lib_call submits, polls, and waits with the lock released.
+     */
+    opener->lease.references = 0U;
+    ReleaseSemaphore(&base->lock);
+    if (base->core.ctx) {
+      ZZ9KRequest request;
+      ZZ9KMailboxEntry reply;
+      int status;
+
+      memset(&request, 0, sizeof(request));
+      request.entry.opcode = ZZ9K_OP_CLIENT_RELEASE;
+      request.entry.flags = ZZ9K_ENTRY_INLINE_PAYLOAD;
+      do {
+        status = zz9k_lib_call(base, &request, &reply,
+                               ZZ9K_DEFAULT_TIMEOUT_TICKS);
+      } while (status == ZZ9K_STATUS_BUSY);
+    }
+    ObtainSemaphore(&base->lock);
+  }
   if (release_opener) {
     zz9k_lib_app_destroy_owner_locked(base, task);
-    if (previous) previous->next = opener->next;
-    else base->openers = opener->next;
+    /* The list may have gained openers while the lock was released for
+     * the BUSY retries; unlink through a fresh predecessor. */
+    if (zz9k_lib_find_opener_locked(base, task, &previous) == opener) {
+      if (previous) previous->next = opener->next;
+      else base->openers = opener->next;
+    }
   }
   base->library.lib_OpenCnt--;
   ReleaseSemaphore(&base->lock);

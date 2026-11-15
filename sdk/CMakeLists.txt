@@ -912,6 +912,13 @@ add_executable(library_async_test
 target_link_libraries(library_async_test PRIVATE zz9k_library_core)
 add_test(NAME library_async_test COMMAND library_async_test)
 
+add_executable(library_client_release_test
+  tests/library_client_release_test.c
+)
+
+target_link_libraries(library_client_release_test PRIVATE zz9k_library_core)
+add_test(NAME library_client_release_test COMMAND library_client_release_test)
+
 add_executable(host_library_transport_test
   tests/host_library_transport_test.c
 )

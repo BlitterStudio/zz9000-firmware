@@ -122,6 +122,15 @@ uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *feed,
                                const uint8_t *src,
                                struct SDKImageStreamResult *result);
 uint16_t sdk_image_stream_close(uint32_t session);
+uint16_t sdk_image_stream_begin_owned(
+	const struct SDKImageStreamBegin *begin, uint16_t owner_id,
+	struct SDKImageStreamResult *result);
+/*
+ * Reclaims core-0 sessions immediately. For a core-1 session, returns zero
+ * and supplies one close request that the mailbox must enqueue on core 1.
+ */
+int sdk_image_stream_release_client(uint16_t owner_id,
+                                    uint32_t *core1_close_session);
 uint16_t sdk_image_stream_frame_next(uint32_t session,
                                      uint32_t flags,
                                      struct SDKImageAnimationFrameResult *result);
