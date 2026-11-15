@@ -962,6 +962,9 @@ add_executable(library_resident_sync_test
 
 target_include_directories(library_resident_sync_test
   PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
     ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src
 )
 

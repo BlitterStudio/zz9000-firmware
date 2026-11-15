@@ -45,7 +45,7 @@ struct mmu_context;
 
 
 #define ZZ9K_LIB_IRQ_WAIT_MICROS 10UL
-
+#define ZZ9K_LIB_SYNC_POLL_MICROS 20000UL
 struct ZZ9KAppHandle {
   struct ZZ9KAppHandle *next;
   struct Task *owner_task;
@@ -116,6 +116,23 @@ struct ZZ9KTimerWait {
   UBYTE device_open;
 };
 
+struct ZZ9KSyncCall {
+  ZZ9KAsyncRequest async;
+  const ZZ9KRequest *request;
+  struct Task *task;
+  struct ZZ9KTimerWait busy_timer;
+  struct ZZ9KTimerWait deadline_timer;
+  ULONG signal_mask;
+  uint32_t timeout_ticks;
+  uint32_t drained;
+  uint32_t fallback_ticks;
+  BYTE signal_bit;
+  UBYTE busy_armed;
+  UBYTE busy_done;
+  UBYTE tick_armed;
+  UBYTE deadline_armed;
+};
+
 static struct ZZ9KBase *zz9k_lib_open(REG(a6, struct ZZ9KBase *base));
 static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base));
 static BPTR zz9k_lib_expunge(REG(a6, struct ZZ9KBase *base));
@@ -135,6 +152,16 @@ static void zz9k_lib_app_destroy_owner_locked(struct ZZ9KBase *base,
 static void zz9k_lib_app_cache(volatile uint8_t *window, uint32_t offset,
                                uint32_t length);
 static int zz9k_lib_app_event_queued(const ZZ9KAppHandle *handle);
+static int zz9k_lib_sync_call_submit(void *opaque, void *record);
+static int zz9k_lib_sync_call_poll(void *opaque, void *record);
+static int zz9k_lib_sync_call_completed(void *record);
+static int zz9k_lib_sync_call_status(void *record);
+static int zz9k_lib_sync_call_cancel(void *opaque, void *record);
+static int zz9k_lib_sync_call_wait(void *record);
+static void zz9k_lib_timer_wait_arm(struct ZZ9KTimerWait *timer,
+                                    uint32_t seconds, uint32_t micros);
+static int zz9k_lib_sync_call_fallback(void *record);
+
 
 #define ZZ9K_LIB_SYNC_OBTAIN(lock) \
   ObtainSemaphore((struct SignalSemaphore *)(lock))
@@ -160,6 +187,69 @@ static int zz9k_lib_app_event_queued(const ZZ9KAppHandle *handle);
   zz9k_lib_app_event_queued((const ZZ9KAppHandle *)(handle))
 #define ZZ9K_LIB_SYNC_CLEAR_EVENT_POSTED(handle) \
   (((ZZ9KAppHandle *)(handle))->event_posted = 0U)
+#define ZZ9K_LIB_SYNC_CALL_SUBMIT(base, record) \
+  zz9k_lib_sync_call_submit(base, record)
+#define ZZ9K_LIB_SYNC_CALL_POLL(base, record) \
+  zz9k_lib_sync_call_poll(base, record)
+#define ZZ9K_LIB_SYNC_CALL_COMPLETED(record) \
+  zz9k_lib_sync_call_completed(record)
+#define ZZ9K_LIB_SYNC_CALL_DRAINED(record) \
+  (((struct ZZ9KSyncCall *)(record))->drained != 0U)
+#define ZZ9K_LIB_SYNC_CALL_STATUS(record) \
+  zz9k_lib_sync_call_status(record)
+#define ZZ9K_LIB_SYNC_CALL_CANCEL(base, record) \
+  zz9k_lib_sync_call_cancel(base, record)
+#define ZZ9K_LIB_SYNC_CALL_WAIT(record) zz9k_lib_sync_call_wait(record)
+#define ZZ9K_LIB_SYNC_CALL_SIGNAL(task, signal_mask) \
+  Signal((struct Task *)(task), signal_mask)
+#define ZZ9K_LIB_SYNC_WAIT_BUSY_AVAILABLE(record) \
+  (((struct ZZ9KSyncCall *)(record))->busy_timer.request != 0)
+#define ZZ9K_LIB_SYNC_WAIT_BUSY_DONE(record) \
+  (((struct ZZ9KSyncCall *)(record))->busy_done)
+#define ZZ9K_LIB_SYNC_WAIT_MARK_BUSY_DONE(record) \
+  (((struct ZZ9KSyncCall *)(record))->busy_done = 1U)
+#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record) do { \
+  struct ZZ9KSyncCall *wait_call = (struct ZZ9KSyncCall *)(record); \
+  if (!wait_call->busy_armed) { \
+    zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, 250U); \
+    wait_call->busy_armed = 1U; \
+  } \
+} while (0)
+#define ZZ9K_LIB_SYNC_WAIT_BUSY_EXPIRED(record) \
+  CheckIO((struct IORequest *)((struct ZZ9KSyncCall *)(record))->busy_timer.request)
+#define ZZ9K_LIB_SYNC_WAIT_FINISH_BUSY(record) do { \
+  struct ZZ9KSyncCall *wait_call = (struct ZZ9KSyncCall *)(record); \
+  WaitIO((struct IORequest *)wait_call->busy_timer.request); \
+  wait_call->busy_armed = 0U; \
+} while (0)
+#define ZZ9K_LIB_SYNC_WAIT_TIMEOUT_ZERO(record) \
+  (((struct ZZ9KSyncCall *)(record))->timeout_ticks == 0U)
+#define ZZ9K_LIB_SYNC_WAIT_TIMERS_AVAILABLE(record) \
+  (((struct ZZ9KSyncCall *)(record))->deadline_timer.request != 0 && \
+   ((struct ZZ9KSyncCall *)(record))->busy_timer.request != 0)
+#define ZZ9K_LIB_SYNC_WAIT_TICK_ARMED(record) \
+  (((struct ZZ9KSyncCall *)(record))->tick_armed)
+#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record) do { \
+  struct ZZ9KSyncCall *wait_call = (struct ZZ9KSyncCall *)(record); \
+  zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, \
+                          ZZ9K_LIB_SYNC_POLL_MICROS); \
+  wait_call->tick_armed = 1U; \
+} while (0)
+#define ZZ9K_LIB_SYNC_WAIT_OWNER_MASK(record) \
+  (((struct ZZ9KSyncCall *)(record))->signal_mask)
+#define ZZ9K_LIB_SYNC_WAIT_DEADLINE_MASK(record) \
+  (((struct ZZ9KSyncCall *)(record))->deadline_timer.signal_mask)
+#define ZZ9K_LIB_SYNC_WAIT_TICK_MASK(record) \
+  (((struct ZZ9KSyncCall *)(record))->busy_timer.signal_mask)
+#define ZZ9K_LIB_SYNC_WAIT_BREAK_MASK(record) SIGBREAKF_CTRL_C
+#define ZZ9K_LIB_SYNC_WAIT_BLOCK(record, mask) Wait(mask)
+#define ZZ9K_LIB_SYNC_WAIT_FINISH_TICK(record) do { \
+  struct ZZ9KSyncCall *wait_call = (struct ZZ9KSyncCall *)(record); \
+  WaitIO((struct IORequest *)wait_call->busy_timer.request); \
+  wait_call->tick_armed = 0U; \
+} while (0)
+#define ZZ9K_LIB_SYNC_WAIT_FALLBACK(record) \
+  zz9k_lib_sync_call_fallback(record)
 #include "zz9k_library_resident_sync.h"
 #undef ZZ9K_LIB_SYNC_OBTAIN
 #undef ZZ9K_LIB_SYNC_ATTEMPT
@@ -169,6 +259,31 @@ static int zz9k_lib_app_event_queued(const ZZ9KAppHandle *handle);
 #undef ZZ9K_LIB_SYNC_EVENT_POSTED
 #undef ZZ9K_LIB_SYNC_EVENT_QUEUED
 #undef ZZ9K_LIB_SYNC_CLEAR_EVENT_POSTED
+#undef ZZ9K_LIB_SYNC_CALL_SUBMIT
+#undef ZZ9K_LIB_SYNC_CALL_POLL
+#undef ZZ9K_LIB_SYNC_CALL_COMPLETED
+#undef ZZ9K_LIB_SYNC_CALL_DRAINED
+#undef ZZ9K_LIB_SYNC_CALL_STATUS
+#undef ZZ9K_LIB_SYNC_CALL_CANCEL
+#undef ZZ9K_LIB_SYNC_CALL_WAIT
+#undef ZZ9K_LIB_SYNC_CALL_SIGNAL
+#undef ZZ9K_LIB_SYNC_WAIT_BUSY_AVAILABLE
+#undef ZZ9K_LIB_SYNC_WAIT_BUSY_DONE
+#undef ZZ9K_LIB_SYNC_WAIT_MARK_BUSY_DONE
+#undef ZZ9K_LIB_SYNC_WAIT_START_BUSY
+#undef ZZ9K_LIB_SYNC_WAIT_BUSY_EXPIRED
+#undef ZZ9K_LIB_SYNC_WAIT_FINISH_BUSY
+#undef ZZ9K_LIB_SYNC_WAIT_TIMEOUT_ZERO
+#undef ZZ9K_LIB_SYNC_WAIT_TIMERS_AVAILABLE
+#undef ZZ9K_LIB_SYNC_WAIT_TICK_ARMED
+#undef ZZ9K_LIB_SYNC_WAIT_ARM_TICK
+#undef ZZ9K_LIB_SYNC_WAIT_OWNER_MASK
+#undef ZZ9K_LIB_SYNC_WAIT_DEADLINE_MASK
+#undef ZZ9K_LIB_SYNC_WAIT_TICK_MASK
+#undef ZZ9K_LIB_SYNC_WAIT_BREAK_MASK
+#undef ZZ9K_LIB_SYNC_WAIT_BLOCK
+#undef ZZ9K_LIB_SYNC_WAIT_FINISH_TICK
+#undef ZZ9K_LIB_SYNC_WAIT_FALLBACK
 
 
 static int zz9k_lib_query_caps(REG(a6, struct ZZ9KBase *base),
@@ -746,6 +861,100 @@ static void zz9k_lib_timer_wait_close(struct ZZ9KTimerWait *timer)
   memset(timer, 0, sizeof(*timer));
 }
 
+static void zz9k_lib_timer_wait_arm(struct ZZ9KTimerWait *timer,
+                                    uint32_t seconds, uint32_t micros)
+{
+  timer->request->tr_node.io_Command = TR_ADDREQUEST;
+  timer->request->tr_time.tv_secs = seconds;
+  timer->request->tr_time.tv_micro = micros;
+  SendIO((struct IORequest *)timer->request);
+}
+
+static void zz9k_lib_timer_wait_disarm(struct ZZ9KTimerWait *timer,
+                                       UBYTE *armed)
+{
+  if (!timer || !timer->request || !armed || !*armed) {
+    return;
+  }
+  if (!CheckIO((struct IORequest *)timer->request)) {
+    AbortIO((struct IORequest *)timer->request);
+  }
+  WaitIO((struct IORequest *)timer->request);
+  *armed = 0;
+}
+
+static void zz9k_lib_sync_call_notify(ZZ9KAsyncRequest *async,
+                                      void *user_data)
+{
+  struct ZZ9KSyncCall *call = (struct ZZ9KSyncCall *)user_data;
+
+  (void)async;
+  if (call && call->task && call->signal_mask) {
+    zz9k_lib_sync_call_signal(call->task, call->signal_mask);
+  }
+}
+
+static int zz9k_lib_sync_call_submit(void *opaque, void *record)
+{
+  struct ZZ9KBase *base = (struct ZZ9KBase *)opaque;
+  struct ZZ9KSyncCall *call = (struct ZZ9KSyncCall *)record;
+  int status;
+
+  status = ZZ9KCallAsync(&base->core, &call->async, call->request,
+                         zz9k_lib_sync_call_notify, call);
+  if (status == ZZ9K_STATUS_QUEUED && call->deadline_timer.request &&
+      call->timeout_ticks != 0U) {
+    zz9k_lib_timer_wait_arm(&call->deadline_timer,
+                            call->timeout_ticks / 50U,
+                            (call->timeout_ticks % 50U) * 20000U);
+    call->deadline_armed = 1U;
+  }
+  return status;
+}
+
+static int zz9k_lib_sync_call_poll(void *opaque, void *record)
+{
+  struct ZZ9KBase *base = (struct ZZ9KBase *)opaque;
+  struct ZZ9KSyncCall *call = (struct ZZ9KSyncCall *)record;
+
+  call->drained = 0U;
+  return ZZ9KPoll(&base->core, 16U, &call->drained);
+}
+
+static int zz9k_lib_sync_call_completed(void *record)
+{
+  return ((struct ZZ9KSyncCall *)record)->async.completed != 0U;
+}
+
+static int zz9k_lib_sync_call_status(void *record)
+{
+  return ((struct ZZ9KSyncCall *)record)->async.status;
+}
+
+static int zz9k_lib_sync_call_cancel(void *opaque, void *record)
+{
+  struct ZZ9KBase *base = (struct ZZ9KBase *)opaque;
+  struct ZZ9KSyncCall *call = (struct ZZ9KSyncCall *)record;
+
+  return ZZ9KCancelAsync(&base->core, &call->async);
+}
+
+static int zz9k_lib_sync_call_fallback(void *record)
+{
+  struct ZZ9KSyncCall *call = (struct ZZ9KSyncCall *)record;
+
+  Delay(1);
+  call->fallback_ticks++;
+  return call->fallback_ticks >= call->timeout_ticks
+             ? ZZ9K_STATUS_TIMEOUT
+             : ZZ9K_STATUS_OK;
+}
+
+static int zz9k_lib_sync_call_wait(void *record)
+{
+  return zz9k_lib_sync_call_wait_step(record);
+}
+
 static int zz9k_lib_wait_for_irq_event(ZZ9KLibrary *library,
                                        void *user_data)
 {
@@ -1303,12 +1512,42 @@ static int zz9k_lib_call(REG(a6, struct ZZ9KBase *base),
                          REG(a1, ZZ9KMailboxEntry *reply),
                          REG(d0, uint32_t timeout_ticks))
 {
-  int status = zz9k_lib_enter(base);
-  if (status != ZZ9K_STATUS_OK) {
-    return status;
+  struct ZZ9KSyncCall call;
+  int status;
+
+  if (!base || !request || !reply) {
+    return ZZ9K_STATUS_BAD_REQUEST;
   }
-  status = ZZ9KCall(&base->core, request, reply, timeout_ticks);
-  zz9k_lib_leave(base);
+
+  memset(&call, 0, sizeof(call));
+  call.signal_bit = -1;
+  call.request = request;
+  call.task = FindTask(0);
+  call.timeout_ticks = timeout_ticks;
+  call.signal_bit = AllocSignal(-1);
+  if (call.signal_bit < 0) {
+    return ZZ9K_STATUS_NO_MEMORY;
+  }
+  call.signal_mask = 1UL << call.signal_bit;
+  (void)SetSignal(0, call.signal_mask);
+  (void)zz9k_lib_timer_wait_open(&call.busy_timer);
+  (void)zz9k_lib_timer_wait_open(&call.deadline_timer);
+
+  status = zz9k_lib_enter(base);
+  if (status == ZZ9K_STATUS_OK) {
+    zz9k_lib_leave(base);
+    status = zz9k_lib_sync_call(base, &base->lock, &call);
+  }
+  if (call.async.completed) {
+    *reply = call.async.reply;
+  }
+
+  zz9k_lib_timer_wait_disarm(&call.busy_timer, &call.busy_armed);
+  zz9k_lib_timer_wait_disarm(&call.busy_timer, &call.tick_armed);
+  zz9k_lib_timer_wait_disarm(&call.deadline_timer, &call.deadline_armed);
+  zz9k_lib_timer_wait_close(&call.busy_timer);
+  zz9k_lib_timer_wait_close(&call.deadline_timer);
+  FreeSignal(call.signal_bit);
   return status;
 }
 
