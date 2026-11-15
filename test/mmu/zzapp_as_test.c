@@ -158,10 +158,26 @@ static void test_section_attribute_change_reaches_alias_pages(void)
 	const uint32_t noncache = 0x03400000U | 0x11de2U;
 	const uint32_t mem_type = (7U << 6) | (1U << 3) | (1U << 2);
 	uint32_t va;
+	unsigned before;
+	unsigned i;
+	int at_alias = 0;
 
 	CHECK(zzapp_as_create(&as, 1U, 7U) == 0);
 	CHECK(zzapp_as_alias_map(&as, 0x03405000U, 5U * 4096U, 1, &va) == 0);
+	if (&zzapp_as_test_tlb_mva_invalidations)
+		zzapp_as_test_tlb_mva_invalidations = 0U;
+	before = &zzapp_as_test_tlb_mva_invalidations ?
+		zzapp_as_test_tlb_mva_invalidations : 0U;
 	zzapp_as_mmu_page_changed(0x034U, noncache, NULL);
+	/* The alias table's rewrites retire at the alias VA the app uses,
+	 * not at section 0 or some other address. */
+	for (i = before; i < (&zzapp_as_test_tlb_mva_invalidations ?
+	      zzapp_as_test_tlb_mva_invalidations : 0U) && i < 256U; i++)
+		if (zzapp_as_test_tlb_mva_pages[i] == va ||
+		    zzapp_as_test_tlb_mva_pages[i] == va + 4U * 4096U)
+			at_alias = 1;
+	CHECK(at_alias);
+
 	CHECK((zzapp_as_template()[0x034U] & ~(SECTION_AP_MASK | SECTION_NG)) ==
 	      (noncache & ~(SECTION_AP_MASK | SECTION_NG)));
 	l2 = zzapp_as_l2_for(&as, va);
@@ -387,7 +403,106 @@ static void test_reused_asid_is_invalidated_before_dispatch(void)
 	CHECK(zzapp_as_test_asid_invalidations == 1U);
 	zzapp_as_destroy(&second);
 }
+static unsigned tlb_mva_count(void)
+{
+	return &zzapp_as_test_tlb_mva_invalidations ?
+		zzapp_as_test_tlb_mva_invalidations : 0U;
+}
 
+static unsigned tlb_bp_count(void)
+{
+	return &zzapp_as_test_bp_invalidations ?
+		zzapp_as_test_bp_invalidations : 0U;
+}
+
+static void reset_tlb_counters(void)
+{
+	zzapp_as_test_asid_invalidations = 0U;
+	if (&zzapp_as_test_tlb_mva_invalidations)
+		zzapp_as_test_tlb_mva_invalidations = 0U;
+	if (&zzapp_as_test_bp_invalidations)
+		zzapp_as_test_bp_invalidations = 0U;
+}
+
+/* A data mapping change retires exactly the translations it rewrote: one
+ * MVA invalidation per page, no ASID-wide or whole-TLB broadcast. */
+static void test_alias_mapping_change_retires_by_mva(void)
+{
+	zzapp_as_t as;
+	uint32_t alias = 0U;
+	unsigned before;
+	unsigned i;
+	int covered;
+
+	setup();
+	CHECK(zzapp_as_create(&as, 0U, 11U) == 0);
+	reset_tlb_counters();
+	CHECK(zzapp_as_alias_map(&as, 0x03405000U, 5U * 4096U, 1,
+				 &alias) == 0);
+	CHECK(alias != 0U);
+	CHECK(zzapp_as_test_asid_invalidations == 0U);
+	before = tlb_mva_count();
+	CHECK(before >= 5U);
+	covered = 0;
+	for (i = 0U; i < before && i < 256U; i++)
+		if (zzapp_as_test_tlb_mva_pages[i] == alias)
+			covered = 1;
+	CHECK(covered);
+	/* A data alias never touches the branch predictor. */
+	CHECK(tlb_bp_count() == 0U);
+	CHECK(zzapp_as_alias_unmap(&as, alias, 5U * 4096U) == 0);
+	CHECK(zzapp_as_test_asid_invalidations == 0U);
+	CHECK(tlb_mva_count() >= before + 5U);
+	zzapp_as_destroy(&as);
+}
+
+/* Frame sections retire by one MVA op per 1 MiB section. */
+static void test_frame_mapping_change_retires_by_section(void)
+{
+	zzapp_as_t as;
+	uint32_t frames[2] = { 0x14000000U, 0x15000000U };
+
+	setup();
+	CHECK(zzapp_as_create(&as, 1U, 12U) == 0);
+	reset_tlb_counters();
+	CHECK(zzapp_as_map_frames(&as, ZZAPP_AS_WINDOW_BASE, frames, 2U) == 0);
+	CHECK(zzapp_as_test_asid_invalidations == 0U);
+	CHECK(tlb_mva_count() == 2U);
+	CHECK(zzapp_as_unmap_frames(&as, ZZAPP_AS_WINDOW_BASE, 2U) == 0);
+	CHECK(tlb_mva_count() == 4U);
+	zzapp_as_destroy(&as);
+}
+
+/* An executable mapping must also retire branch predictor entries; a
+ * data-only mapping must not (ARM ARM VA-reuse rule). */
+static void test_executable_mapping_invalidates_predictors(void)
+{
+	zzapp_as_t as;
+	uint32_t va = 0U;
+	unsigned bp;
+
+	setup();
+	CHECK(zzapp_as_create(&as, 0U, 13U) == 0);
+	reset_tlb_counters();
+	CHECK(zzapp_as_map_image(&as, ZZAPP_AS_WINDOW_BASE, 0x03400000U,
+				 4U * 4096U, ZZAPP_AS_IMAGE_RX) == 0);
+	bp = tlb_bp_count();
+	CHECK(bp >= 1U);
+	CHECK(zzapp_as_map_image(&as, ZZAPP_AS_WINDOW_BASE + 4U * 4096U,
+				 0x03404000U, 4U * 4096U,
+				 ZZAPP_AS_IMAGE_RW) == 0);
+	CHECK(tlb_bp_count() == bp);
+	CHECK(zzapp_as_map_image(&as, ZZAPP_AS_WINDOW_BASE, 0x03400000U,
+				 4U * 4096U, ZZAPP_AS_IMAGE_RWX) == 0);
+	CHECK(tlb_bp_count() > bp);
+	CHECK(zzapp_as_alias_map_flags(&as, 0x03408000U, 4096U,
+				       ZZAPP_AS_ALIAS_RX, &va) == 0);
+	CHECK(va != 0U);
+	CHECK(tlb_bp_count() > bp + 1U);
+	CHECK(zzapp_as_alias_map(&as, 0x03409000U, 4096U, 1, &va) == 0);
+	CHECK(tlb_mva_count() > 0U);
+	zzapp_as_destroy(&as);
+}
 
 int main(void)
 {
@@ -403,9 +518,12 @@ int main(void)
 	test_alias_honours_virtual_alignment();
 	test_template_l2_published_after_clean();
 	test_destroy_on_core0_keeps_bsp_table();
+	test_reused_asid_is_invalidated_before_dispatch();
+	test_alias_mapping_change_retires_by_mva();
+	test_frame_mapping_change_retires_by_section();
+	test_executable_mapping_invalidates_predictors();
 	test_orphaned_as_lock_does_not_deadlock_destroy();
 	test_firmware_text_is_l2_before_launch();
-	test_reused_asid_is_invalidated_before_dispatch();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

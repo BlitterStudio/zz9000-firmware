@@ -21,6 +21,8 @@
 #define PAGE_SHIFT 12U
 #define SECTION_MASK 0xfff00000U
 #define PAGE_MASK 0xfffff000U
+#define PAGE_BYTES (1U << PAGE_SHIFT)
+#define SECTION_BYTES (1U << SECTION_SHIFT)
 #define L1_TYPE_MASK 3U
 #define L1_SECTION 2U
 #define L1_TABLE 1U
@@ -59,6 +61,9 @@ static uint32_t app_l1[ZZAPP_AS_SLOT_COUNT][L1_ENTRIES] ZZAPP_AS_TABLES
 static uint32_t l2_pool[ZZAPP_AS_L2_TABLE_COUNT][L2_ENTRIES] ZZAPP_AS_TABLES
 	__attribute__((aligned(1024)));
 static uint8_t l2_owner[ZZAPP_AS_L2_TABLE_COUNT];
+/* The virtual section each L2 table serves, recorded where the owning
+ * path installs the table's only L1 pointer. */
+static uint16_t l2_vsection[ZZAPP_AS_L2_TABLE_COUNT];
 static uint8_t slot_live[ZZAPP_AS_SLOT_COUNT];
 static uint32_t asid_generation[ZZAPP_AS_SLOT_COUNT];
 static uint8_t alias_used[ZZAPP_AS_SLOT_COUNT][ZZAPP_AS_ALIAS_PAGE_COUNT];
@@ -69,24 +74,57 @@ static uint32_t firmware_text_end;
 static sdk_smp_lock_t as_lock = SDK_SMP_LOCK_INIT;
 #ifdef MMU_PAGE_HOST_TEST
 unsigned zzapp_as_test_asid_invalidations;
+unsigned zzapp_as_test_tlb_mva_invalidations;
+uint32_t zzapp_as_test_tlb_mva_pages[256];
+unsigned zzapp_as_test_bp_invalidations;
 #endif
-
 
 static void as_clean(const void *address, uint32_t bytes)
 {
 	Xil_DCacheFlushRange((INTPTR)(uintptr_t)address, bytes);
 }
 
-/* Inner-shareable: a change may come from core 0 (mmu_page) while core 1
- * walks the same template or app table. */
-static void as_sync(void)
+/* Retire every cached translation that covers [first, end): one
+ * TLBIMVAAIS per step hits the section or page entry mapping the address,
+ * in any ASID on both cores, so a mapping change no longer broadcasts the
+ * whole-TLB invalidate and refill storm of the previous full sync.
+ * Callers pick the step from what the outgoing descriptor could have
+ * cached: 1 MiB for section entries, one page otherwise. */
+static void as_invalidate_range(uint32_t first, uint32_t end, uint32_t step)
+{
+	uint32_t va;
+
+	if (!step || first >= end)
+		return;
+#ifndef MMU_PAGE_HOST_TEST
+	dsb();
+	for (va = first; va < end; va += step)
+		__asm__ __volatile__("mcr p15, 0, %0, c8, c3, 3" : : "r" (va)
+			: "memory");
+	dsb();
+	isb();
+#else
+	for (va = first; va < end; va += step) {
+		if (zzapp_as_test_tlb_mva_invalidations < 256U)
+			zzapp_as_test_tlb_mva_pages[
+				zzapp_as_test_tlb_mva_invalidations] = va;
+		zzapp_as_test_tlb_mva_invalidations++;
+	}
+#endif
+}
+
+/* The branch predictor is not tagged by context: the ARM ARM requires
+ * invalidation whenever an executable mapping is created or replaced, so
+ * VA reuse cannot fetch a stale branch.  Data-only paths do not call it. */
+static void as_invalidate_predictors(void)
 {
 #ifndef MMU_PAGE_HOST_TEST
 	dsb();
-	mtcp(XREG_CP15_INVAL_TLB_IS, 0U);
 	mtcp(XREG_CP15_INVAL_BRANCH_ARRAY_IS, 0U);
 	dsb();
 	isb();
+#else
+	zzapp_as_test_bp_invalidations++;
 #endif
 }
 
@@ -102,21 +140,47 @@ static void invalidate_asid(uint32_t asid)
 #endif
 }
 
-static void replace_live_descriptor(uint32_t *entry, uint32_t descriptor)
+/* Invalidation granularity for one live descriptor slot swap: page step
+ * whenever either side is a page table, because the outgoing table may
+ * have cached any of its 256 pages; one section-wide op otherwise. */
+static uint32_t as_entry_granularity(uint32_t descriptor)
+{
+	return (descriptor & L1_TYPE_MASK) == L1_TABLE ?
+		PAGE_BYTES : SECTION_BYTES;
+}
+
+/* Break-before-make on one live descriptor: the zeroed entry is cleaned
+ * and its cached translation retired before the replacement is
+ * published. */
+static void replace_live_descriptor(uint32_t va, uint32_t *entry,
+				    uint32_t descriptor)
+{
+	uint32_t step;
+
+	if (*entry == descriptor)
+		return;
+	step = as_entry_granularity(*entry);
+	if (as_entry_granularity(descriptor) < step)
+		step = as_entry_granularity(descriptor);
+	va &= ~(step - 1U);
+	*entry = 0U;
+	as_clean(entry, sizeof(*entry));
+	as_invalidate_range(va, va + step, step);
+	*entry = descriptor;
+	as_clean(entry, sizeof(*entry));
+	as_invalidate_range(va, va + step, step);
+}
+
+static void replace_live_page(uint32_t va, uint32_t *entry, uint32_t descriptor)
 {
 	if (*entry == descriptor)
 		return;
 	*entry = 0U;
 	as_clean(entry, sizeof(*entry));
-	as_sync();
+	as_invalidate_range(va, va + PAGE_BYTES, PAGE_BYTES);
 	*entry = descriptor;
 	as_clean(entry, sizeof(*entry));
-	as_sync();
-}
-
-static void replace_live_page(uint32_t *entry, uint32_t descriptor)
-{
-	replace_live_descriptor(entry, descriptor);
+	as_invalidate_range(va, va + PAGE_BYTES, PAGE_BYTES);
 }
 
 static uint32_t priv_global_section(uint32_t descriptor)
@@ -171,6 +235,7 @@ static int l2_alloc(uint8_t owner)
 	for (i = 0U; i < ZZAPP_AS_L2_TABLE_COUNT; i++) {
 		if (l2_owner[i] == 0xffU) {
 			l2_owner[i] = owner;
+			l2_vsection[i] = 0xffffU;
 			memset(l2_pool[i], 0, sizeof(l2_pool[i]));
 			return (int)i;
 		}
@@ -185,6 +250,7 @@ static void l2_release_owner(uint8_t owner)
 	for (i = 0U; i < ZZAPP_AS_L2_TABLE_COUNT; i++) {
 		if (l2_owner[i] == owner) {
 			l2_owner[i] = 0xffU;
+			l2_vsection[i] = 0xffffU;
 			memset(l2_pool[i], 0, sizeof(l2_pool[i]));
 		}
 	}
@@ -261,7 +327,8 @@ static int template_l2(uint32_t section, const uint32_t *pages)
 	if (!template_ready)
 		template_l1[section] = descriptor;
 	else
-		replace_live_descriptor(&template_l1[section], descriptor);
+		replace_live_descriptor(section << SECTION_SHIFT,
+					&template_l1[section], descriptor);
 	return 0;
 }
 
@@ -318,6 +385,7 @@ static int ensure_l2(zzapp_as_t *as, uint32_t section)
 		memcpy(l2_pool[new_index], l2_pool[old_index],
 		       sizeof(l2_pool[new_index]));
 		as->l1[section] = l2_descriptor(l2_pool[new_index], descriptor);
+		l2_vsection[new_index] = (uint16_t)section;
 		as_clean(l2_pool[new_index], sizeof(l2_pool[new_index]));
 		return new_index;
 	}
@@ -328,6 +396,7 @@ static int ensure_l2(zzapp_as_t *as, uint32_t section)
 		populate_section_pages(l2_pool[new_index], section, descriptor);
 	as->l1[section] = l2_descriptor(l2_pool[new_index],
 		descriptor ? descriptor : 15U << 5);
+	l2_vsection[new_index] = (uint16_t)section;
 	as_clean(l2_pool[new_index], sizeof(l2_pool[new_index]));
 	return new_index;
 }
@@ -384,6 +453,7 @@ void zzapp_as_init(const uint32_t *bsp_l1)
 	memset(alias_used, 0, sizeof(alias_used));
 	memset(alias_length, 0, sizeof(alias_length));
 	memset(l2_owner, 0xff, sizeof(l2_owner));
+	memset(l2_vsection, 0xff, sizeof(l2_vsection));
 	if (!bsp_l1)
 		return;
 	for (section = 0U; section < L1_ENTRIES; section++) {
@@ -477,7 +547,9 @@ int zzapp_as_map_frames(zzapp_as_t *as, uint32_t virtual_base,
 		as->l1[(virtual_base >> SECTION_SHIFT) + i] = frames[i] |
 			DDR_SECTION | L1_NG;
 	as_clean(as->l1, sizeof(app_l1[0]));
-	as_sync();
+	as_invalidate_range(virtual_base,
+			    virtual_base + (frame_count << SECTION_SHIFT),
+			    SECTION_BYTES);
 	sdk_smp_lock_release(&as_lock);
 	return 0;
 }
@@ -496,7 +568,9 @@ int zzapp_as_unmap_frames(zzapp_as_t *as, uint32_t virtual_base,
 	for (i = 0U; i < frame_count; i++)
 		as->l1[(virtual_base >> SECTION_SHIFT) + i] = 0U;
 	as_clean(as->l1, sizeof(app_l1[0]));
-	as_sync();
+	as_invalidate_range(virtual_base,
+			    virtual_base + (frame_count << SECTION_SHIFT),
+			    SECTION_BYTES);
 	sdk_smp_lock_release(&as_lock);
 	return 0;
 }
@@ -558,7 +632,9 @@ int zzapp_as_alias_map_flags_aligned(zzapp_as_t *as, uint32_t phys,
 	}
 	alias_length[as->slot][first] = (uint16_t)pages;
 	as_clean(as->l1, sizeof(app_l1[0]));
-	as_sync();
+	as_invalidate_range(virtual_base, virtual_base + bytes, PAGE_BYTES);
+	if (flags == ZZAPP_AS_ALIAS_RX)
+		as_invalidate_predictors();
 	sdk_smp_lock_release(&as_lock);
 	*va = virtual_base;
 	return 0;
@@ -616,8 +692,7 @@ int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va, uint32_t bytes)
 	}
 	alias_length[as->slot][first] = 0U;
 	as_clean(as->l1, sizeof(app_l1[0]));
-	as_sync();
-	invalidate_asid(as->asid);
+	as_invalidate_range(va, va + bytes, PAGE_BYTES);
 	sdk_smp_lock_release(&as_lock);
 	return 0;
 }
@@ -679,18 +754,23 @@ int zzapp_as_map_image(zzapp_as_t *as, uint32_t virtual_base,
 		as_clean(&l2_pool[index][page], sizeof(l2_pool[index][page]));
 	}
 	as_clean(as->l1, sizeof(app_l1[0]));
-	as_sync();
+	as_invalidate_range(virtual_base, virtual_base + bytes, PAGE_BYTES);
+	if (permissions == ZZAPP_AS_IMAGE_RX ||
+	    permissions == ZZAPP_AS_IMAGE_RWX)
+		as_invalidate_predictors();
 	sdk_smp_lock_release(&as_lock);
 	return 0;
 }
 
-static void replace_memory_attributes(uint32_t *entry, uint32_t source)
+static void replace_memory_attributes(uint32_t va, uint32_t *entry,
+				      uint32_t source)
 {
 	uint32_t descriptor = (*entry & ~L2_MEMORY_MASK) |
 		(source & L2_MEMORY_MASK);
 
-	replace_live_page(entry, descriptor);
+	replace_live_page(va, entry, descriptor);
 }
+
 
 void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 				const uint32_t *pages)
@@ -706,11 +786,13 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 			return;
 		}
 	} else {
-		replace_live_descriptor(&template_l1[section],
+		replace_live_descriptor(section << SECTION_SHIFT,
+					&template_l1[section],
 					priv_global_section(descriptor));
 	}
 	for (slot = 0U; slot < ZZAPP_AS_SLOT_COUNT; slot++) {
 		uint32_t app_descriptor;
+		uint32_t virtual_section;
 		int index;
 
 		if (!slot_live[slot])
@@ -718,7 +800,8 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 		app_descriptor = app_l1[slot][section];
 		index = l2_index_for_descriptor(app_descriptor);
 		if (index < 0 || l2_owner[index] == 0U) {
-			replace_live_descriptor(&app_l1[slot][section],
+			replace_live_descriptor(section << SECTION_SHIFT,
+						&app_l1[slot][section],
 						template_l1[section]);
 		} else {
 			uint32_t page;
@@ -726,7 +809,10 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 			/* A section-wide change (Xil_SetTlbAttributes) carries
 			 * no page table; every page takes the section's type. */
 			for (page = 0U; page < L2_ENTRIES; page++)
-				replace_memory_attributes(&l2_pool[index][page],
+				replace_memory_attributes(
+					(section << SECTION_SHIFT) +
+					page * PAGE_BYTES,
+					&l2_pool[index][page],
 					pages ? pages[page] :
 					section_page_descriptor(section, page,
 								descriptor));
@@ -742,6 +828,11 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 
 				if (l2_owner[table] != slot + 1U)
 					continue;
+				/* l2_vsection records the section whose L1
+				 * pointer ensure_l2 installed for this
+				 * table, so its pages retire at the VA the
+				 * app actually used them at. */
+				virtual_section = l2_vsection[table];
 				for (page = 0U; page < L2_ENTRIES; page++) {
 					uint32_t mapped = l2_pool[table][page];
 					uint32_t physical = mapped & PAGE_MASK;
@@ -755,8 +846,11 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 						section_page_descriptor(section,
 							(physical >> PAGE_SHIFT) & 0xffU,
 							descriptor);
-					replace_memory_attributes(&l2_pool[table][page],
-								  source);
+					replace_memory_attributes(
+						(virtual_section <<
+						 SECTION_SHIFT) +
+						page * PAGE_BYTES,
+						&l2_pool[table][page], source);
 				}
 				as_clean(l2_pool[table], sizeof(l2_pool[table]));
 			}
@@ -764,7 +858,12 @@ void zzapp_as_mmu_page_changed(uint32_t section, uint32_t descriptor,
 	}
 	as_clean(template_l1, sizeof(template_l1));
 	as_clean(app_l1, sizeof(app_l1));
-	as_sync();
+	as_invalidate_range(section << SECTION_SHIFT,
+			    (section << SECTION_SHIFT) + SECTION_BYTES,
+			    PAGE_BYTES);
+	/* The changed section may be firmware text; the predictor cannot keep
+	 * stale branches into a rewritten executable mapping. */
+	as_invalidate_predictors();
 	sdk_smp_lock_release(&as_lock);
 }
 
@@ -784,7 +883,7 @@ void zzapp_as_switch(zzapp_as_t *as)
 		__asm__ __volatile__("dsb sy\n\t"
 			"mcr p15, 0, %0, c13, c0, 1\n\tisb\n\t"
 			"mcr p15, 0, %1, c2, c0, 0\n\tisb\n\t"
-			"dsb sy\n\tdsb sy\n\tisb"
+			"dsb sy\n\tisb"
 			: : "r" (asid), "r" (ttbr0) : "memory");
 	}
 #endif
@@ -799,7 +898,7 @@ void zzapp_as_switch_kernel(void)
 	__asm__ __volatile__("dsb sy\n\t"
 		"mcr p15, 0, %0, c13, c0, 1\n\tisb\n\t"
 		"mcr p15, 0, %1, c2, c0, 0\n\tisb\n\t"
-		"dsb sy\n\tdsb sy\n\tisb"
+		"dsb sy\n\tisb"
 		: : "r" (asid), "r" (ttbr0) : "memory");
 #else
 	zzapp_as_test_kernel_switches++;
