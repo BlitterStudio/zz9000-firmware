@@ -73,6 +73,12 @@ void __attribute__((weak)) zzapp_services_set_state(uint32_t state)
     zzapp_loader_set_state(state);
 }
 
+void __attribute__((weak)) zzapp_services_set_idle_for(uint32_t generation)
+{
+    (void)generation;
+    zzapp_loader_set_state(ZZAPP_ST_IDLE);
+}
+
 void __attribute__((weak)) zzapp_services_set_terminal(uint32_t reason)
 {
     (void)reason;
@@ -197,6 +203,38 @@ void scheduler_core1_service_from_app(void)
         g_test_service_hook();
 }
 void zzapp_test_set_service_hook(void (*fn)(void)) { g_test_service_hook = fn; }
+static int g_test_fail_start;
+void zzapp_test_set_fail_start(int fail) { g_test_fail_start = fail; }
+static void (*g_test_start_race_hook)(void);
+void zzapp_test_set_start_race_hook(void (*fn)(void))
+{
+    g_test_start_race_hook = fn;
+}
+/* Runs once: core 0 may expire the claim between START's handoff and its
+ * completion. */
+static void test_start_race_point(void)
+{
+    void (*race_hook)(void) = g_test_start_race_hook;
+
+    g_test_start_race_hook = NULL;
+    if (race_hook)
+        race_hook();
+}
+static void (*g_test_admission_hook)(void);
+void zzapp_test_set_admission_hook(void (*fn)(void))
+{
+    g_test_admission_hook = fn;
+}
+/* Injection at a possible admission boundary: core 0 may claim the slot
+ * here, and nothing core 1 writes afterwards may overwrite that claim. */
+static void test_admission_point(void)
+{
+    if (g_test_admission_hook)
+        g_test_admission_hook();
+}
+#else
+static inline void test_start_race_point(void) {}
+static inline void test_admission_point(void) {}
 #endif
 
 static struct zzapp_coherent *coherent(uint32_t slot)
@@ -590,6 +628,18 @@ void zzapp_host_claimed(uint32_t slot)
 {
     if (slot < ZZAPP_AS_SLOT_COUNT)
         host_slot(slot)->terminal_reason = ZZAPP_END_NONE;
+}
+
+void zzapp_host_quarantine_released(uint32_t slot)
+{
+    if (slot >= ZZAPP_AS_SLOT_COUNT)
+        return;
+    /*
+     * Services calls this while its slot lock still bars a new claim.  Make
+     * the loader's state view IDLE before services exposes that release.
+     */
+    host_slot(slot)->state = ZZAPP_ST_IDLE;
+    coherent_publish();
 }
 
 void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
@@ -1645,9 +1695,33 @@ static void start_failed(uint32_t slot, int status)
 {
     uint32_t selected = select_teardown_slot(slot);
 
-    zzapp_services_start_entered(status);
+    zzapp_services_cancel_start(status);
     zzapp_loader_release();
+    /* cancel_start holds service admission closed in STOPPING until the
+     * arena is gone.  Reopen it only for the claim this START belongs to;
+     * quarantined slots keep STOPPING, and their release acknowledgement
+     * is the last state write. */
+    zzapp_services_set_idle_for(coherent(slot)->generation);
+    zzapp_services_loader_aborted();
+    test_admission_point();
     restore_teardown_slot(selected);
+}
+
+static void abort_loading_stop(void)
+{
+    zzapp_services_cancel_start(ZZ_EIO);
+    (void)zzapp_loader_abort();
+    /*
+     * A lease-expired LOAD_BEGIN has already quarantined its service slot.
+     * The loader may consequently report EBUSY, but the host must still
+     * publish STOPPING before telling services that its arena is gone.
+     */
+    if (zzapp_services_state() == ZZAPP_ST_STOPPING) {
+        publish_state(ZZAPP_ST_STOPPING);
+        zzapp_services_loader_aborted();
+    } else {
+        publish_state(ZZAPP_ST_IDLE);
+    }
 }
 
 static void run_app(uint32_t argc)
@@ -1663,6 +1737,16 @@ static void run_app(uint32_t argc)
     uint32_t teardown_selected;
 #endif
 
+#ifdef ZZAPP_HOST_TEST
+    if (g_test_fail_start) {
+        g_test_fail_start = 0;
+        /* The injected failure stands for any preparation failure; all of
+         * them follow the START handoff that core 0 may race. */
+        test_start_race_point();
+        start_failed(slot, ZZ_EIO);
+        return;
+    }
+#endif
     if (!host->image_loaded || !host->mem) { start_failed(slot, ZZ_EINVAL); return; }
     host->heap_off = (host->image_end + 7u) & ~7u;
 #ifdef ZZAPP_HOST_TEST
@@ -1754,9 +1838,26 @@ static void run_app(uint32_t argc)
         start_failed(slot, ZZ_EINVAL);
         return;
     }
+    /* Host tests inject core 0 here, between START preparation and its
+     * completion: it may expire the claim, so start_entered rejects. */
+    test_start_race_point();
+    rc = zzapp_services_start_entered(coh->generation);
+    if (rc != ZZ_OK) {
+        /*
+         * A cancelled START is completed inside start_entered, which may
+         * already reopen the slot to core 0.  The IDLE publication below is
+         * fenced by this claim's generation; a quarantine keeps STOPPING
+         * until its release acknowledgement, the last state write here.
+         */
+        test_admission_point();
+        zzapp_loader_release();
+        zzapp_services_set_idle_for(coh->generation);
+        zzapp_services_loader_aborted();
+        test_admission_point();
+        return;
+    }
     coh->running = 1;
     publish_state(ZZAPP_ST_RUNNING);
-    zzapp_services_start_entered(ZZ_OK);
     (void)zzapp_kernel_start_app(&g_kernel, slot);
 #ifdef ZZAPP_HOST_TEST
     zzapp_kernel_set_current_thread((int)slot);
@@ -1802,11 +1903,23 @@ static void service_reset(uint32_t slot)
     if (host->state == ZZAPP_ST_LOADING || host->state == ZZAPP_ST_STARTING) {
         zzapp_services_cancel_start(ZZ_EIO);
         (void)zzapp_loader_abort();
+        /*
+         * zzapp_services_on_reset() releases a claim, so the host state must
+         * be visible as IDLE before that admission point even when abort saw
+         * no arena and returned EBUSY.
+         */
+        publish_state(ZZAPP_ST_IDLE);
     } else if (coh->running) {
         force_stop(ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
     }
     if (host->state == ZZAPP_ST_FAULTED) {
         zzapp_loader_release();
+        publish_state(ZZAPP_ST_IDLE);
+    } else if (host->state == ZZAPP_ST_STOPPING) {
+        /*
+         * services_on_reset() admits a new claim.  A reclaimed loading
+         * quarantine is STOPPING here, so make the host IDLE first.
+         */
         publish_state(ZZAPP_ST_IDLE);
     }
     zzapp_services_on_reset();
@@ -1848,10 +1961,8 @@ void zzapp_worker_hook(void)
         zzapp_services_select_slot(slot);
         service_watch_slot(now);
         complete_pending_stop(slot);
-        if (host_slot(slot)->state == ZZAPP_ST_LOADING && stop_requested()) {
-            zzapp_services_cancel_start(ZZ_EIO);
-            (void)zzapp_loader_abort();
-        }
+        if (host_slot(slot)->state == ZZAPP_ST_LOADING && stop_requested())
+            abort_loading_stop();
     }
     zzapp_services_select_slot(selected);
     if (coherent(selected)->reset_request)
@@ -1871,8 +1982,7 @@ void zzapp_worker_hook(void)
             life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
             zzapp_host_latch_stop(slot);
         if (host->state == ZZAPP_ST_LOADING && stop_requested()) {
-            zzapp_services_cancel_start(ZZ_EIO);
-            (void)zzapp_loader_abort();
+            abort_loading_stop();
             continue;
         }
         argc = 0U;
@@ -1959,11 +2069,13 @@ void zzapp_core0_poll(void)
         uint64_t age;
         uint64_t now;
         uint32_t heartbeat;
+        uint32_t flags;
 
         zzapp_services_select_slot(slot);
         coherent_barrier();
         age = core1_stamp_age_us(&coh->progress);
         now = now_ticks();
+        flags = life_get32(ZZAPP_LIFE_FLAGS_OFF);
         heartbeat = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
         maybe_expire_fault(now);
         if (heartbeat != coh->heartbeat_value) {
@@ -1971,7 +2083,9 @@ void zzapp_core0_poll(void)
             coh->heartbeat_seen = now;
         }
         if (running && host->state == ZZAPP_ST_RUNNING &&
-            core1_stamp_age_us(&coh->heartbeat_seen) >= ZZAPP_LEASE_US) {
+            core1_stamp_age_us(&coh->heartbeat_seen) >=
+                ((flags & ZZAPP_F_LAUNCHER_HEARTBEAT) ?
+                 ZZAPP_LAUNCHER_LEASE_US : ZZAPP_LEASE_US)) {
             host->terminal_reason = ZZAPP_END_LEASE;
             zzapp_host_latch_stop(slot);
             life32(ZZAPP_LIFE_STOP_OFF, 1u);

@@ -30,6 +30,7 @@ enum teardown_path {
     TEARDOWN_STALL,
     TEARDOWN_STUCK_CALL,
     TEARDOWN_LEASE,
+    TEARDOWN_ADVERTISED_LEASE,
     TEARDOWN_AMIGA_RESET,
     TEARDOWN_CORE_RESTART,
     TEARDOWN_DIRECT_STOP_PARKED,
@@ -257,20 +258,47 @@ static void app_entry(const void *api, int argc, char **argv)
         zzapp_host_tick_at(1U);
         zzapp_host_tick_at(ZZAPP_API_STUCK_US + 1U);
         break;
-    case TEARDOWN_LEASE:
+    case TEARDOWN_LEASE: {
+        uint8_t *life;
+
         zzapp_kernel_set_current_thread(-1);
-        zzapp_test_set_xtime(ZZAPP_LEASE_US - 1U);
+        life = zzapp_services_window();
+        assert(life != NULL);
+        zzapp_put_be32(windows[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
         zzapp_host_tick_at(ZZAPP_LEASE_US - 1U);
-        select_test_slot(2U);
-        zzapp_host_tick_at(ZZAPP_LEASE_US - 1U);
-        zzapp_put_be32(zzapp_services_window() + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
         zzapp_core0_poll();
+        assert(zzapp_get_be32(life + ZZAPP_LIFE_STOP_OFF) == 0U);
+        zzapp_put_be32(windows[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 2U);
+        zzapp_host_tick_at(ZZAPP_LEASE_US);
+        zzapp_core0_poll();
+        assert(zzapp_get_be32(life + ZZAPP_LIFE_STOP_OFF) == 1U);
         select_test_slot(1U);
-        zzapp_test_set_xtime(ZZAPP_LEASE_US);
-        zzapp_core0_poll();
         zzapp_host_tick_at(ZZAPP_LEASE_US);
         zzapp_host_tick_at(ZZAPP_LEASE_US + ZZAPP_STOP_GRACE_US);
         break;
+    }
+    case TEARDOWN_ADVERTISED_LEASE: {
+        uint8_t *life;
+
+        zzapp_kernel_set_current_thread(-1);
+        life = zzapp_services_window();
+        assert(life != NULL);
+        zzapp_put_be32(life + ZZAPP_LIFE_FLAGS_OFF,
+                       zzapp_get_be32(life + ZZAPP_LIFE_FLAGS_OFF) |
+                       ZZAPP_F_LAUNCHER_HEARTBEAT);
+        zzapp_put_be32(windows[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
+        zzapp_host_tick_at(ZZAPP_LAUNCHER_LEASE_US - 1U);
+        zzapp_core0_poll();
+        assert(zzapp_get_be32(life + ZZAPP_LIFE_STOP_OFF) == 0U);
+        zzapp_put_be32(windows[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 2U);
+        zzapp_host_tick_at(ZZAPP_LAUNCHER_LEASE_US);
+        zzapp_core0_poll();
+        assert(zzapp_get_be32(life + ZZAPP_LIFE_STOP_OFF) == 1U);
+        select_test_slot(1U);
+        zzapp_host_tick_at(ZZAPP_LAUNCHER_LEASE_US);
+        zzapp_host_tick_at(ZZAPP_LAUNCHER_LEASE_US + ZZAPP_STOP_GRACE_US);
+        break;
+    }
     case TEARDOWN_AMIGA_RESET:
         zzapp_kernel_set_current_thread(-1);
         zzapp_on_amiga_reset();
@@ -335,12 +363,17 @@ static void assert_slot2_unchanged(void)
     uint32_t committed;
     uint8_t reason;
 
+    uint8_t *window;
+
     select_test_slot(2U);
     list_slot(2U, &state, &committed, &reason);
     assert(state == ZZAPP_ST_RUNNING);
     assert(reason == ZZAPP_END_NONE);
     assert(committed == live_slot2_commit);
     assert(zzapp_proc_slot(2U)->memory.committed == live_slot2_commit);
+    window = zzapp_services_window();
+    assert(window != NULL);
+    assert(zzapp_get_be32(window + ZZAPP_LIFE_STOP_OFF) == 0U);
     assert(zzapp_host_mem_info(&memory) == ZZ_OK);
     assert(memory.arena_size == ZZAPP_ARENA_BYTES);
 }
@@ -353,6 +386,7 @@ static uint8_t expected_reason(enum teardown_path value)
         ZZAPP_END_USER_FAULT,
         ZZAPP_END_STALL,
         ZZAPP_END_STUCK_CALL,
+        ZZAPP_END_LEASE,
         ZZAPP_END_LEASE,
         ZZAPP_END_AMIGA_RESET,
         ZZAPP_END_CORE_RESTART,

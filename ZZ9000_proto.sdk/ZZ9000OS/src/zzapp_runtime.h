@@ -21,7 +21,10 @@
 /* Core 1 no longer answers at all (no app progress and no timer tick). */
 #define ZZAPP_WATCHDOG_US      2000000u
 #define ZZAPP_STOP_GRACE_US    500000u
+/* Legacy launchers refresh the app heartbeat from their work loop. */
 #define ZZAPP_LEASE_US         2000000u
+/* Advertised launchers tolerate a short Amiga scheduling blackout. */
+#define ZZAPP_LAUNCHER_LEASE_US 10000000u
 #define ZZAPP_GL_CALL_LOG_US   50000u
 /*
  * Automatic stops of an app that is still taking timer ticks.  Ctrl-C and
@@ -161,6 +164,7 @@ int zzapp_host_take_low_memory_event(uint32_t slot);
 void zzapp_host_register_low_memory_callback(zzapp_mem_t *memory);
 void zzapp_host_reset_low_memory(uint32_t slot);
 void zzapp_host_claimed(uint32_t slot);
+void zzapp_host_quarantine_released(uint32_t slot);
 
 /* 1: core2 must fall through to record_fault (cold restart).
  * 0: user-mode app fault, already force-stopped, do not restart.
@@ -189,7 +193,9 @@ void zzapp_services_select_slot(uint32_t slot);
 uint32_t zzapp_services_state(void);
 uint32_t zzapp_services_memory_limit(void);
 int zzapp_services_wait_registered(uint32_t slot);
-void zzapp_services_start_entered(int status);
+int zzapp_services_start_entered(uint32_t generation);
+void zzapp_services_loader_aborted(void);
+void zzapp_services_set_idle_for(uint32_t generation);
 void zzapp_services_on_reset(void);
 void zzapp_services_on_app_end(void);
 void zzapp_services_cancel_start(int status);

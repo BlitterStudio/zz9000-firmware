@@ -29,7 +29,10 @@
 #define ZZAPP_OP_FIRST             ZZAPP_OP_QUERY
 /* Per-slot snapshot for status listings (extended requests only). */
 #define ZZAPP_OP_LIST              0x0c09u
-#define ZZAPP_OP_LAST              ZZAPP_OP_LIST
+/* Explicitly releases an expired launcher window after the user confirms
+ * its process cannot still write the card mapping. Extended request only. */
+#define ZZAPP_OP_RELEASE           0x0c0au
+#define ZZAPP_OP_LAST              ZZAPP_OP_RELEASE
 /* 0x0c00..0x0c1f is reserved. v0 uses FIRST..LAST. */
 #define ZZAPP_OP_RANGE_LO          0x0c00u
 #define ZZAPP_OP_RANGE_HI          0x0c1fu
@@ -154,6 +157,7 @@
 #define ZZAPP_END_LEASE            6u
 #define ZZAPP_END_AMIGA_RESET      7u
 #define ZZAPP_END_CORE_RESTART     8u
+#define ZZAPP_END_QUARANTINED      9u
 
 /* LIST block reasons. */
 #define ZZAPP_BLOCK_NONE           0u
@@ -320,7 +324,8 @@
  * bit8 display requested and not yet bound, bit9 vsync wanted.
  * Launcher/Firmware scanout-ack bits negotiate strict vblank-safe panning;
  * mailbox bits negotiate card-owned triple-buffer presentation. Bit16 marks
- * an app that has used the console; bit17 selects AHI for the audio ring. */
+ * an app that has used the console; bit17 selects AHI for the audio ring.
+ * Bit18 selects the launcher's extended main-loop lease. */
 #define ZZAPP_F_DISPLAY                 (1u << 0)
 #define ZZAPP_F_AUDIO                   (1u << 1)
 #define ZZAPP_F_GL                      (1u << 2)
@@ -334,6 +339,7 @@
 #define ZZAPP_F_MAILBOX                 (1u << 15)
 #define ZZAPP_F_CONSOLE                 (1u << 16)
 #define ZZAPP_F_LAUNCHER_AUDIO_AHI      (1u << 17)
+#define ZZAPP_F_LAUNCHER_HEARTBEAT     (1u << 18)
 
 #define ZZAPP_EV_KEY_DOWN          1u
 #define ZZAPP_EV_KEY_UP            2u

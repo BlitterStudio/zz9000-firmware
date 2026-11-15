@@ -67,9 +67,15 @@ void zzapp_services_set_terminal(uint32_t reason);
 void zzapp_services_expire_claims(uint64_t now_us);
 
 /* After poll: nonzero means APP_START is waiting for the worker to enter.
- * Copy argv from the window, then start_entered before the branch. */
+ * Copy argv from the window, then start_entered with the captured generation
+ * before publishing RUNNING or branching into the app. */
 int zzapp_services_take_start(uint32_t *argc);
-void zzapp_services_start_entered(int status);
+int zzapp_services_start_entered(uint32_t generation);
+/* Core 1 teardown: publish IDLE only while the slot still belongs to the
+ * generation it started with, then acknowledge the loader abort last (a
+ * quarantine with recorded release intent is released there). */
+void zzapp_services_set_idle_for(uint32_t generation);
+void zzapp_services_loader_aborted(void);
 
 void zzapp_svc_log(const char *msg, uint32_t len);
 int zzapp_svc_should_stop(void);

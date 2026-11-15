@@ -27,6 +27,21 @@ static uint16_t stop_completing_claim_status;
 static uint32_t stop_completing_slot_state;
 static uint32_t expiry_deferred_generation;
 static uint32_t expiry_slot_generation;
+static uint64_t loading_now;
+
+static uint64_t loading_test_time(void)
+{
+	return loading_now;
+}
+
+static int loader_chunk_succeeds(uint32_t file_off, const void *src,
+				 uint32_t len)
+{
+	(void)file_off;
+	(void)src;
+	(void)len;
+	return ZZ_OK;
+}
 
 static int start_posted_deferred(void)
 {
@@ -828,7 +843,7 @@ static void test_load_uses_claim_generation(void)
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
 				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
 		fail("first window claim");
-	zzapp_services_expire_claims(ZZAPP_LEASE_US);
+	zzapp_services_expire_claims(ZZAPP_CLAIM_LEASE_US);
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
 				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_OK)
 		fail("second window claim");
@@ -961,10 +976,7 @@ static void test_failed_starts_release_admission(void)
 					   sizeof(request), reply, &reply_len,
 					   1, slot + 1U, 0U) != SDK_STATUS_OK)
 			fail("claim before failed start");
-		zzapp_services_start_entered(ZZ_EINVAL);
-		if (!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL))
-			fail("failed start completion was not harvestable");
-		zzapp_mailbox_harvest_ack();
+		zzapp_services_on_app_end();
 	}
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
 				   sizeof(request), reply, &reply_len,
@@ -980,7 +992,7 @@ static void expire_running_load(void)
 
 	expiry_deferred_generation = deferred[0].generation;
 	expiry_slot_generation = slots[0].generation;
-	zzapp_services_expire_claims(ZZAPP_LEASE_US);
+	zzapp_services_expire_claims(ZZAPP_LOAD_LEASE_US);
 	expiry_claim_status = zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW,
 						     request, 0U, reply,
 						     &reply_len, 1, 3U, 0U);
@@ -1063,6 +1075,8 @@ static void test_claim_expiry_cancels_running_load(void)
 	memset(g_window, 0, sizeof(g_window));
 	zzapp_services_test_set_window(g_window, sizeof(g_window));
 	zzapp_services_test_set_core(0);
+	loading_now = 0U;
+	zzapp_services_test_set_time(loading_test_time);
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
 				   sizeof(request), reply, &reply_len,
 				   1, 1U, 0U) != SDK_STATUS_OK)
@@ -1078,25 +1092,217 @@ static void test_claim_expiry_cancels_running_load(void)
 	service_test_deferred_completion_hook = expire_running_load;
 	run_deferred();
 	service_test_deferred_completion_hook = NULL;
-	if (slots[0].state != ZZAPP_ST_IDLE ||
+	if (slots[0].state != ZZAPP_ST_STOPPING ||
 	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
 	    service_test_loader_abort_count != 1U)
-		fail("expired running load survived");
+		fail("expired running load was not quarantined");
 	if (expiry_claim_status != SDK_STATUS_BUSY)
 		fail("expiry admitted a replacement before running load finished");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_CHUNK, request, sizeof(request),
+				   reply, &reply_len, 1, 3U, 0U) !=
+	    SDK_STATUS_BAD_HANDLE)
+		fail("stale running loader did not release quarantine");
 	memset(request, 0, sizeof(request));
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
 				   sizeof(request), reply, &reply_len,
-				   1, 3U, 0U) != SDK_STATUS_OK)
+				   1, 4U, 0U) != SDK_STATUS_OK)
 		fail("claim after running expiry");
 	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
 	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
 	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
-				   reply, &reply_len, 1, 4U, 0U) != SDK_STATUS_QUEUED ||
+				   reply, &reply_len, 1, 5U, 0U) != SDK_STATUS_QUEUED ||
 	    slots[0].state != ZZAPP_ST_CLAIMED ||
 	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_POSTED)
 		fail("replacement load was affected by expiry");
+	zzapp_services_test_set_time(NULL);
+}
+static void start_loading(uint8_t *request, uint8_t *reply, uint16_t *reply_len,
+			  int legacy, int harvest)
+{
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	zzapp_services_test_set_time(loading_test_time);
+	loading_now = 0U;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, legacy ? NULL : request,
+				   legacy ? 0U : ZZAPP_MAILBOX_PAYLOAD_BYTES, reply,
+				   reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before loading deadline");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	memset(request, 0, ZZAPP_MAILBOX_PAYLOAD_BYTES);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, legacy ? NULL : request,
+				   legacy ? 0U : ZZAPP_MAILBOX_PAYLOAD_BYTES, reply,
+				   reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED ||
+	    !start_posted_deferred())
+		fail("queue loading deadline");
+	service_test_loader_begin_hook = loader_begin_succeeds;
+	run_deferred();
+	if (harvest) {
+		if (!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL))
+			fail("finish loading deadline");
+		zzapp_mailbox_harvest_ack();
+	}
+	if (slots[0].state != ZZAPP_ST_LOADING)
+		fail("enter loading deadline");
+}
+
+static void test_abandoned_loading_is_quarantined(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	start_loading(request, reply, &reply_len, 1, 0);
+	loading_now = ZZAPP_LOAD_LEASE_US;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_STOPPING ||
+	    service_test_loader_abort_count != 0U)
+		fail("expired load was not quarantined");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply,
+				   &reply_len, 1, 2U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_LIST_STATE) != ZZAPP_ST_STOPPING ||
+	    reply[ZZAPP_LIST_REASONS + 1U] != ZZAPP_END_QUARANTINED)
+		fail("status did not report quarantined load");
+	zzapp_build_chunk_request(request, 0U, 1U);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 0U);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_CHUNK, request, sizeof(request),
+				   reply, &reply_len, 1, 4U, 0U) !=
+	    SDK_STATUS_BAD_HANDLE)
+		fail("stale launcher contact did not receive terminal error");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
+				   &reply_len, 1, 5U, 0U) != SDK_STATUS_BUSY)
+		fail("stale contact released a live quarantined window");
+	(void)zzapp_loader_abort();
+	if (slots[0].quarantined || service_test_loader_abort_count != 1U)
+		fail("stale contact did not release after loader teardown");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   ZZAPP_MAILBOX_PAYLOAD_BYTES, reply, &reply_len,
+				   1, 6U, 0U) != SDK_STATUS_OK)
+		fail("stale launcher contact did not release window");
+	zzapp_services_test_set_time(NULL);
+}
+
+
+static void test_explicit_quarantine_release_and_reset(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	start_loading(request, reply, &reply_len, 1, 0);
+	loading_now = ZZAPP_LOAD_LEASE_US;
+	zzapp_services_expire_claims(loading_now);
+	(void)zzapp_loader_abort();
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, slots[0].generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_RELEASE, request, sizeof(request),
+				   reply, &reply_len, 1, 4U, 0U) != SDK_STATUS_OK)
+		fail("explicit release did not free quarantine");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_RELEASE, request, sizeof(request),
+				   reply, &reply_len, 1, 5U, 0U) != SDK_STATUS_BUSY)
+		fail("explicit release accepted non-quarantined slot");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
+				   &reply_len, 1, 6U, 0U) != SDK_STATUS_OK)
+		fail("explicit release did not restore admission");
+
+	start_loading(request, reply, &reply_len, 1, 0);
+	loading_now = ZZAPP_LOAD_LEASE_US;
+	zzapp_services_expire_claims(loading_now);
+	(void)zzapp_loader_abort();
+	zzapp_services_on_reset();
+	if (slots[0].quarantined || slots[0].state != ZZAPP_ST_IDLE)
+		fail("reset did not clear quarantine");
+	zzapp_services_test_set_time(NULL);
+}
+static void test_loading_chunk_renews_deadline(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t payload[ZZAPP_CHUNK_REQ_BYTES];
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	start_loading(request, reply, &reply_len, 0, 1);
+	loading_now = ZZAPP_LOAD_LEASE_US - 1U;
+	zzapp_build_chunk_request(payload, 0U, 1U);
+	zzapp_services_test_set_core(0);
+	service_test_loader_chunk_hook = loader_chunk_succeeds;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_CHUNK, payload, sizeof(payload),
+				   reply, &reply_len, 1, 3U, 0U) != SDK_STATUS_QUEUED ||
+	    !start_posted_deferred())
+		fail("queue slow loading chunk");
+	zzapp_services_test_set_core(1);
+	run_deferred();
+	service_test_loader_chunk_hook = NULL;
+	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL))
+		fail("finish slow loading chunk");
+	zzapp_mailbox_harvest_ack();
+	loading_now += ZZAPP_LOAD_LEASE_US - 1U;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_LOADING ||
+	    service_test_loader_abort_count != 0U)
+		fail("slow loading chunk did not renew deadline");
+	loading_now++;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_STOPPING ||
+	    service_test_loader_abort_count != 0U)
+		fail("renewed loading deadline was not quarantined");
+	zzapp_services_test_set_time(NULL);
+}
+
+static void test_loading_heartbeat_renews_deadline(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	start_loading(request, reply, &reply_len, 0, 1);
+	loading_now = ZZAPP_LOAD_LEASE_US;
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_LOADING)
+		fail("launcher heartbeat did not renew loading deadline");
+	loading_now += ZZAPP_LOAD_LEASE_US - 1U;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_LOADING)
+		fail("active slow load was reclaimed");
+	loading_now++;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_STOPPING)
+		fail("heartbeat-renewed loading deadline did not expire");
+	zzapp_services_test_set_time(NULL);
+}
+
+static void test_claim_heartbeat_renews_deadline(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_time(loading_test_time);
+	loading_now = 0U;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before claim heartbeat");
+	loading_now = ZZAPP_CLAIM_LEASE_US;
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_CLAIMED)
+		fail("launcher heartbeat did not renew claimed slot");
+	loading_now += ZZAPP_CLAIM_LEASE_US;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_IDLE)
+		fail("renewed claimed slot did not expire");
+	zzapp_services_test_set_time(NULL);
 }
 
 static void test_preload_cancellation_releases_deferred_record(void)
@@ -1110,6 +1316,8 @@ static void test_preload_cancellation_releases_deferred_record(void)
 	memset(g_window, 0, sizeof(g_window));
 	zzapp_services_test_set_window(g_window, sizeof(g_window));
 	zzapp_services_test_set_core(0);
+	loading_now = 0U;
+	zzapp_services_test_set_time(loading_test_time);
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
 				   &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
 		fail("claim before pre-load cancellation");
@@ -1129,13 +1337,14 @@ static void test_preload_cancellation_releases_deferred_record(void)
 	    expiry_deferred_generation != expiry_slot_generation ||
 	    service_loader_generation != load_generation)
 		fail("cancelled load did not keep its bumped generation");
-	if (slots[0].state != ZZAPP_ST_IDLE ||
+	if (slots[0].state != ZZAPP_ST_STOPPING ||
 	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
 	    service_test_loader_abort_count != 1U ||
 	    slots[0].generation == 0U ||
 	    zzapp_get_be32(g_window + ZZAPP_LIFE_GENERATION_OFF) !=
 		    slots[0].generation)
-		fail("pre-load cancellation left inconsistent lifecycle state");
+		fail("pre-load cancellation did not quarantine lifecycle state");
+	zzapp_services_test_set_time(NULL);
 }
 
 static void test_harvest_racing_completion_reads_reply(void)
@@ -1340,7 +1549,8 @@ static void test_list_name_uses_start_argv(void)
 	zzapp_services_poll();
 	if (!zzapp_services_take_start(NULL))
 		fail("start pending for list name");
-	zzapp_services_start_entered(ZZ_OK);
+	if (zzapp_services_start_entered(slots[0].generation) != ZZ_OK)
+		fail("start completion for list name");
 	zzapp_services_test_set_core(0);
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply,
 				   &reply_len, 1, 2U, 0U) != SDK_STATUS_OK ||
@@ -1687,6 +1897,11 @@ int main(void)
 	test_returned_buffers_are_user_granted();
 	test_failed_starts_release_admission();
 	test_claim_expiry_cancels_running_load();
+	test_abandoned_loading_is_quarantined();
+	test_explicit_quarantine_release_and_reset();
+	test_loading_chunk_renews_deadline();
+	test_loading_heartbeat_renews_deadline();
+	test_claim_heartbeat_renews_deadline();
 	test_stop_cancels_completing_load();
 	test_preload_cancellation_releases_deferred_record();
 	test_new_generation_does_not_inherit_wait();

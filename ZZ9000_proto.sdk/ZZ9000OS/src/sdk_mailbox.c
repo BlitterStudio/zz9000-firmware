@@ -8791,7 +8791,8 @@ typedef char zzapp_opcode_drift[
 	 SDK_OP_APP_STOP == ZZAPP_OP_STOP &&
 	 SDK_OP_APP_STATUS == ZZAPP_OP_STATUS &&
 	 SDK_OP_APP_DISPLAY_BIND == ZZAPP_OP_DISPLAY_BIND &&
-	 SDK_OP_APP_LIST == ZZAPP_OP_LIST) ? 1 : -1];
+	 SDK_OP_APP_LIST == ZZAPP_OP_LIST &&
+	 SDK_OP_APP_RELEASE == ZZAPP_OP_RELEASE) ? 1 : -1];
 
 static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
                                volatile struct SDKMailboxEntry *comp,
@@ -9051,6 +9052,7 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_APP_STATUS:
 	case SDK_OP_APP_DISPLAY_BIND:
 	case SDK_OP_APP_LIST:
+	case SDK_OP_APP_RELEASE:
 		return handle_app_op(req, comp, payload_len, opcode);
 	default:
 		write_completion(comp, req, SDK_STATUS_UNSUPPORTED, 0);

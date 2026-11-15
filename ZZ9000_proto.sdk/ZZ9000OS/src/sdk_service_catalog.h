@@ -180,7 +180,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		.capability_bits = 0U,
 		.flags = SDK_SERVICE_FLAG_FIRMWARE,
 		.opcode_base = SDK_SERVICE_APP,
-		.opcode_count = 10,	/* 0x0c00..0x0c09 */
+		.opcode_count = 11,	/* 0x0c00..0x0c0a */
 		.name = "app"
 	},
 	{

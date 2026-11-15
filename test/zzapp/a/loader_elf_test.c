@@ -28,6 +28,15 @@ static int dynamic_started;
 static uint32_t start_argc;
 static int argv_started;
 static uint32_t launcher_memory_limit;
+static int start_entered_result = ZZ_OK;
+static uint32_t start_entered_generation;
+
+int zzapp_services_start_entered(uint32_t generation)
+{
+    start_entered_generation = generation;
+    return start_entered_result;
+}
+
 
 uint32_t zzapp_services_memory_limit(void)
 {
@@ -64,6 +73,16 @@ static void argv_entry(const void *api_ptr, int argc, char **argv)
     assert(bytes != 0u);
     argv_started = 1;
 }
+static int rejected_started;
+
+static void rejected_entry(const void *api_ptr, int argc, char **argv)
+{
+    (void)api_ptr;
+    (void)argc;
+    (void)argv;
+    rejected_started = 1;
+}
+
 
 
 static void dynamic_entry(const void *api_ptr, int argc, char **argv)
@@ -520,6 +539,26 @@ int main(void)
     assert(api->heap_grow(1u << 20, NULL) == ZZ_ENOMEM);
     assert(zzapp_proc_slot(0)->heap_break == (16u << 20));
     zzapp_loader_release();
+    /*
+     * A START can expire after the worker has claimed it.  The host must
+     * validate the generation before publishing RUNNING or entering it.
+     */
+    zzapp_boot_init();
+    make_image(image);
+    assert(load_end(image) == ZZ_OK);
+    start_argc = 0U;
+    rejected_started = 0;
+    start_entered_result = ZZ_EIO;
+    zzapp_test_set_entry(rejected_entry);
+    start_pending = 1;
+    zzapp_worker_hook();
+    assert(!rejected_started);
+    /* A raced, non-quarantined start rejection finishes in IDLE: the slot
+     * reopens for the next claim instead of wedging in STOPPING. */
+    assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
+    assert(start_entered_generation == zzapp_current_generation());
+    start_entered_result = ZZ_OK;
+
     zzapp_boot_init();
     make_image(image);
     assert(load_end(image) == ZZ_OK);

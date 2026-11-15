@@ -159,9 +159,28 @@ nothing.
 
 Extended `ALLOC_WINDOW` atomically claims the lowest free slot and returns the
 old 12-byte window reply followed by slot and generation at bytes 12 and 16.
-A `CLAIMED` slot that does not start loading expires after two seconds, returns
-to idle, and records the lease-loss reason. Once running, the launcher must
-renew the slot heartbeat within the same two-second lease.
+A `CLAIMED` or `LOADING` slot has a 30-second lease. `LOAD_BEGIN`, every
+completed `LOAD_CHUNK`, and each changed launcher heartbeat renew it. This
+permits slow Zorro transfers and long asynchronous file reads while reclaiming
+a launcher that has disappeared before or during a load.
+
+Once the app runs, the launcher must change the slot heartbeat at least every
+two seconds. A launcher that sets lifecycle flag bit 18
+(`ZZAPP_F_LAUNCHER_HEARTBEAT`) gets ten seconds instead, so a briefly starved
+Amiga task does not lose its app; it still renews only from its own main
+loop, so a launcher that has died is still detected.
+
+An expired load becomes `STOPPING` with terminal reason `QUARANTINED` (9).
+Core 1 aborts the loader and frees the app memory, but its card window remains
+reserved: a late `Read` from the old Amiga process must never write into a
+replacement launcher's window. No allocator can choose a quarantined slot.
+The old launcher releases that reservation by making its next stale load
+request, which returns the stale-ownership error. A stale request arriving
+while core 1 is still tearing down records that release intent and still
+receives the terminal error; the window is released as soon as teardown
+finishes. If it will never return, the user may send extended `RELEASE`
+(`0x0c0a`) with the slot and current generation; it succeeds only after loader
+teardown and only for a quarantined slot. Card reset clears all quarantine.
 
 Extended `LOAD_BEGIN` carries the launcher memory limit in MiB at byte 0;
 zero means no limit beyond the pool. `LOAD_CHUNK`, `LOAD_END`, `START`,
@@ -181,7 +200,7 @@ intervals. Byte 24 is the block reason: `NONE` (0), `FILE` (1), `CONSOLE` (2),
 Byte 25 is the terminal reason. Bytes 26-27 hold the overload flag, and bytes
 28-47 are the app name. Terminal reasons are `NONE` (0), `EXIT` (1),
 `FORCED` (2), `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
-`AMIGA_RESET` (7), and `CORE_RESTART` (8).
+`AMIGA_RESET` (7), `CORE_RESTART` (8), and `QUARANTINED` (9).
 
 ### Low-memory crossings
 

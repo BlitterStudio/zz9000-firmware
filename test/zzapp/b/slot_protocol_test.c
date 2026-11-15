@@ -132,13 +132,13 @@ int main(void)
                     &reply_len) == SDK_STATUS_QUEUED);
     assert(__atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) ==
            DEFER_POSTED);
-    zzapp_services_expire_claims(1999999U);
+    zzapp_services_expire_claims(ZZAPP_CLAIM_LEASE_US - 1U);
     extended_request(request, 0U, 0U);
     assert(dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply, &reply_len) ==
            SDK_STATUS_OK);
     assert(zzapp_get_be32(reply + ZZAPP_LIST_STATE) == ZZAPP_ST_CLAIMED);
     assert(reply[ZZAPP_LIST_REASONS + 1U] == ZZAPP_END_NONE);
-    zzapp_services_expire_claims(2000000U);
+    zzapp_services_expire_claims(ZZAPP_CLAIM_LEASE_US);
     assert(dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply, &reply_len) ==
            SDK_STATUS_OK);
     assert(zzapp_get_be32(reply + ZZAPP_LIST_STATE) == ZZAPP_ST_IDLE);
