@@ -138,12 +138,13 @@ jobs:
           make -C test/fuzz/minigl replay
       - name: Video pipeline regression suite
         run: make -C test/video test
-      - name: Native capture and RasterIX RTL regressions
+      - name: Native capture, Zorro AXI, and RasterIX RTL regressions
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends verilator
           bash test/video/run_videocap_clock_verilator.sh
           bash test/video/run_videocap_verilator_sim.sh
+          bash test/zorro_order/run_verilator.sh
           bash test/rasterix/run_texenv_modulate_sim.sh
       - name: Video codec regression suite
         run: make -C test/video_codec test
