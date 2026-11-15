@@ -273,6 +273,7 @@ C_SRCS = \
 	$(SRC_DIR)/usb_proxy_diag.c \
 	$(SRC_DIR)/usb_proxy_iso.c \
 	$(SRC_DIR)/sdk_compression.c \
+	$(SRC_DIR)/sdk_core1_reclaim.c \
 	$(SRC_DIR)/lzh/extract.c \
 	$(SRC_DIR)/lzh/huf.c \
 	$(SRC_DIR)/lzh/dhuf.c \

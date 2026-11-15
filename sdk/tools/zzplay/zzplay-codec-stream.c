@@ -7,10 +7,10 @@
 #include "zz9k/host.h"
 #include "zz9k/shared.h"
 #include "zzplay-codec.h"
+#include "zzplay-feed-retry.h"
 #include "zzplay-audio-clock.h"
 #include "zzplay-core.h"
 #include "zzplay-launch.h"
-
 #include <proto/dos.h>
 
 #include <stdint.h>
@@ -22,6 +22,7 @@
  * Position counts PCM the pump has staged (pcm_read is that cursor modulo
  * the ring; bytes_produced is the cumulative write). Seeking stays off. */
 #define ZZPLAY_CARD_OUTPUT "ZZ9000AX direct"
+#define ZZPLAY_CARD_FEED_BUSY_GUARD 64U
 #define ZZPLAY_CARD_WAIT_GUARD 4000U
 
 typedef struct ZZPlayCardAttempt {
@@ -344,10 +345,12 @@ static ZZPlayCodecPassResult zzplay_card_play_once(ZZPlayCodecDecode *decode,
 
   for (;;) {
     ZZ9KAudioStreamFeedDesc feed;
+    ZZ9KAudioStreamResult feed_result;
     size_t got = 0U;
     uint32_t flags = 0U;
     int held;
-    unsigned retry;
+    unsigned busy_retry;
+    unsigned backpressure_retry;
 
     if (zzplay_card_service(decode)) {
       return ZZPLAY_CODEC_PASS_STOPPED;
@@ -375,14 +378,31 @@ static ZZPlayCodecPassResult zzplay_card_play_once(ZZPlayCodecDecode *decode,
                                (uint32_t)got)) {
         return ZZPLAY_CODEC_PASS_FAILED;
       }
-      for (retry = 0U;; retry++) {
-        if (retry > 64U ||
-            !zz9k_audio_build_stream_feed_desc(
+      busy_retry = 0U;
+      backpressure_retry = 0U;
+      for (;;) {
+        if (!zz9k_audio_build_stream_feed_desc(
                 &feed, decode->result.session, decode->staging.handle, 0U,
                 (uint32_t)got, flags)) {
           return ZZPLAY_CODEC_PASS_FAILED;
         }
-        status = zz9k_audio_stream_feed(decode->ctx, &feed, &decode->result);
+        status = zz9k_audio_stream_feed(decode->ctx, &feed, &feed_result);
+        zzplay_card_feed_result(status, &feed_result, &decode->result);
+        if (status == ZZ9K_STATUS_BUSY) {
+          /* BUSY accepted none of this chunk. Keep the staging data and
+           * input cursor intact, service Ctrl-C/volume, then back off before
+           * resubmitting this exact descriptor. */
+          if (++busy_retry > ZZPLAY_CARD_FEED_BUSY_GUARD) {
+            decode->stream_status = status;
+            return zzplay_card_stop_or_fail(decode);
+          }
+          if (zzplay_card_service(decode)) {
+            return ZZPLAY_CODEC_PASS_STOPPED;
+          }
+          zzplay_codec_pump(decode->engine);
+          Delay(1);
+          continue;
+        }
         if (status == ZZ9K_STATUS_UNSUPPORTED) {
           decode->stream_status = status;
           if (decode->ax_committed) {
@@ -399,6 +419,9 @@ static ZZPlayCodecPassResult zzplay_card_play_once(ZZPlayCodecDecode *decode,
         if ((decode->result.flags &
              ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) == 0U) {
           break;
+        }
+        if (backpressure_retry++ > 64U) {
+          return ZZPLAY_CODEC_PASS_FAILED;
         }
         if (!zzplay_card_wait_room(decode, (uint32_t)got, shown, refusal)) {
           if (*refusal == ZZPLAY_CARD_UNSUPPORTED ||

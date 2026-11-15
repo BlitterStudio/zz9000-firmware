@@ -36,12 +36,18 @@ static inline enum audio_stream_close_action audio_stream_close_step(
 		int release_queued, int release_task_live, int io_tasks_live,
 		int core1_available, int core1_affine, int holds_decoder)
 {
-	/* The release task left the queue. If it failed with core 1 (a
-	 * fault) the heap may be half released: wait until the restart's
-	 * reclaim and poison pass have dropped it. */
-	if (release_queued)
-		return (release_task_live || holds_decoder) ?
-		       AUDIO_STREAM_CLOSE_WAIT : AUDIO_STREAM_CLOSE_FREE;
+	/* A live release task still owns the decoder. Once it has disappeared,
+	 * either it released the heap and the slot can go, or it was interrupted
+	 * before doing so. With a healthy core 1, requeue that release; otherwise
+	 * wait for the reset-time poison/reclaim path to drop the heap pointer. */
+	if (release_queued) {
+		if (release_task_live)
+			return AUDIO_STREAM_CLOSE_WAIT;
+		if (!holds_decoder)
+			return AUDIO_STREAM_CLOSE_FREE;
+		return core1_available ? AUDIO_STREAM_CLOSE_QUEUE :
+		                         AUDIO_STREAM_CLOSE_WAIT;
+	}
 	/* Core 1 died with the heap: wait for the poison/reclaim pass to
 	 * drop it, never free core-1 tracked blocks from core 0. */
 	if (core1_affine && holds_decoder && !core1_available)

@@ -12,6 +12,7 @@
 #include "zzapp_runtime.h"
 int zzapp_host_mem_info(zzapp_mem_info *out);
 void zzapp_api_reclaim_resources(void);
+void zzapp_api_poison_resources(void);
 
 static const uint8_t file_data[] = "mapped";
 static uint32_t image_begin_calls;
@@ -328,6 +329,10 @@ int main(void)
     assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
     zzapp_api_reclaim_resources();
     assert(audio_release_calls == 1u);
+    assert(zzapp_runtime_kernel()->resources[1].audio_sessions == 0u);
+    assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
+    zzapp_api_poison_resources();
+    assert(zzapp_runtime_kernel()->resources[1].audio_sessions == 0u);
     audio_release_calls = 0u;
     selected_service_slot = 0U;
     zzapp_kernel_set_current_thread(-1);
@@ -383,8 +388,8 @@ int main(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(image_close_calls == 1u && image_poisoned_close_calls == 1u);
     assert(image_poison_calls == 0u && image_poison_session_calls == 1u);
-    assert(audio_release_calls == 1u && audio_forget_calls == 2u);
-    assert(decode_reclaim_calls == 0u && app_decode_reclaim_calls == 1u);
+    assert(audio_release_calls == 1u && audio_forget_calls == 3u);
+    assert(decode_reclaim_calls == 0u && app_decode_reclaim_calls == 2u);
     assert(zzapp_host_mem_info(&mem) == ZZ_OK && mem.host_visible_used == 0u);
 
     zzapp_loader_release();

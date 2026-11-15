@@ -536,6 +536,16 @@ add_executable(zzplay_probe_test
 target_link_libraries(zzplay_probe_test PRIVATE zzplay_core)
 add_test(NAME zzplay_probe_test COMMAND zzplay_probe_test)
 
+add_executable(zzplay_feed_retry_test
+  tests/zzplay_feed_retry_test.c
+)
+target_include_directories(zzplay_feed_retry_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay
+)
+add_test(NAME zzplay_feed_retry_test COMMAND zzplay_feed_retry_test)
+
 add_executable(zzplay_http_test
   tests/zzplay_http_test.c
 )

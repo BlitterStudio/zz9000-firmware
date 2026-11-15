@@ -348,6 +348,36 @@ static void test_fail_sets_failed(void)
   expect_u32("fail_status", q.descs[0].result_status, 5u);
 }
 
+static void test_worker_interrupt_fails_deferred_audio(void)
+{
+  taskq_t q;
+  int slot;
+
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_AUDIO_STREAM_FEED, TASK_LONG,
+                      0, 4096u, 0, 0, 71u, 19u, NULL, 0u);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_HASH, TASK_LONG,
+                      0, 8192u, 0, 0, 72u, 20u, NULL, 0u);
+  expect_int("interrupt_claims_audio", taskq_claim_any(&q), 0);
+
+  taskq_abort_active(&q, 0x55u);
+  expect_u32("interrupt_audio_failed", q.descs[0].state, TASK_FAILED);
+  expect_u32("interrupt_audio_status", q.descs[0].result_status, 0x55u);
+  expect_u32("interrupt_queued_failed", q.descs[1].state, TASK_FAILED);
+  expect_u32("interrupt_queued_status", q.descs[1].result_status, 0x55u);
+
+  slot = taskq_harvest(&q);
+  expect_int("interrupt_harvest_audio", slot, 0);
+  taskq_release(&q, slot);
+  slot = taskq_harvest(&q);
+  expect_int("interrupt_harvest_queued", slot, 1);
+  taskq_release(&q, slot);
+  expect_int("interrupt_slot_reusable",
+             taskq_enqueue(&q, TASKQ_OP_AUDIO_STREAM_FEED, TASK_LONG,
+                           0, 4096u, 0, 0, 73u, 21u, NULL, 0u) >= 0,
+             1);
+}
+
 static void test_harvest_finds_done_then_release(void)
 {
   taskq_t q;
@@ -781,6 +811,7 @@ int main(void)
   test_complete_sets_done_and_payload();
   test_complete_clamps_payload();
   test_fail_sets_failed();
+  test_worker_interrupt_fails_deferred_audio();
   test_harvest_finds_done_then_release();
   test_has_active_tracks_queued_and_claimed();
   test_has_active_ignores_failed();

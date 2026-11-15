@@ -748,10 +748,13 @@ If the slot is missing the wrapper loops. Core 1. Minimum minor: 0.
 void zz_yield(void);
 ```
 
-Runs one service tick and returns. Use it in an idle loop and at least every
-few seconds during a long compute. A spinning `zz_input_poll` does not wait
-and does not replace this. Gate: `ZZ_API_COVERS(api, yield)`. Missing slot:
-return. Core 1. Does not block past one tick. Minimum minor: 0.
+Runs one service tick and returns. When called inside an API body, it releases
+the API lock, permits one due core-1 service pass, then reacquires the lock
+before returning. A non-yielding API body remains non-preemptible. Use it in an
+idle loop and at least every few seconds during a long compute. A spinning
+`zz_input_poll` does not wait and does not replace this. Gate:
+`ZZ_API_COVERS(api, yield)`. Missing slot: return. Core 1. Does not block past
+one tick. Minimum minor: 0.
 
 ## zz_should_stop
 

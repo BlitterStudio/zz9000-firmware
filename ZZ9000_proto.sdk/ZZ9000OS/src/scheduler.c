@@ -356,6 +356,19 @@ void taskq_fail(taskq_t *q, int slot, uint16_t status)
   taskq_store_release(&d->state, TASK_FAILED);
 }
 
+void taskq_abort_active(taskq_t *q, uint16_t status)
+{
+  uint32_t i;
+
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    uint32_t state = q->descs[i].state;
+
+    if (state == TASK_QUEUED || state == TASK_CLAIMED) {
+      taskq_fail(q, (int)i, status);
+    }
+  }
+}
+
 int taskq_harvest(taskq_t *q)
 {
   uint32_t i;
@@ -460,6 +473,21 @@ void scheduler_core1_halt_before_recover(
   recover();
 }
 
+void scheduler_core1_fallback_recover_with(
+    scheduler_core1_recovery_step_t halt,
+    scheduler_core1_recovery_step_t recover,
+    scheduler_core1_queue_reclaim_fn reclaim_after_halt, taskq_t *queue,
+    scheduler_core1_recovery_step_t reclaim_audio,
+    scheduler_core1_module_quarantine_fn quarantine_module, uint32_t module,
+    volatile uint32_t *core1_started)
+{
+  scheduler_core1_halt_before_recover(halt, recover);
+  reclaim_after_halt(queue);
+  reclaim_audio();
+  quarantine_module(module);
+  *core1_started = 0U;
+}
+
 /* ---- core-1 worker action policy (portable, host-tested) ---- */
 sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
                                           int minigl_work_available, int minigl_bound)
@@ -522,6 +550,61 @@ int scheduler_minigl_quiesce_done(taskq_shared_t *shared)
 {
   return shared->minigl_submission_ack == shared->minigl_submission_generation &&
          !taskq_has_active(&shared->queue) && !shared->minigl_in_flight;
+}
+
+void scheduler_harvest_post_with(taskq_t *q, taskq_watchdog_t *watchdog,
+                                 uint16_t failed_status,
+                                 taskq_slot_gen_ok_fn gen_ok,
+                                 taskq_slot_post_fn post,
+                                 taskq_slot_forget_fn forget)
+{
+  int slot;
+
+  while ((slot = taskq_harvest(q)) >= 0) {
+    taskq_desc_t *d = &q->descs[slot];
+    int failed;
+
+    if (!gen_ok(slot)) {
+      /* Task submitted under a previous mailbox lifetime (the mailbox was
+       * re-initialised while it was in flight). Drop it without posting so
+       * its stale request_id/user_cookie never lands in the new completion
+       * ring. */
+      forget(slot);
+      taskq_release(q, slot);
+      continue;
+    }
+    failed = (d->state == TASK_FAILED);
+    if (!post(slot, d->request_id, d->user_cookie, (uint16_t)d->opcode,
+              failed ? failed_status : d->result_status,
+              d->result_payload, d->result_len)) {
+      break;  /* completion ring full -> task stays harvested, retry next poll */
+    }
+    if (!failed && watchdog)
+      taskq_watchdog_on_success(watchdog);
+    taskq_release(q, slot);
+  }
+}
+
+void scheduler_quiesce_finish(taskq_shared_t *shared, int timed_out,
+                              scheduler_quiesce_step_fn cold_restart,
+                              scheduler_quiesce_step_fn post_completions)
+{
+  if (timed_out) {
+    /* A task outlived the wait and is still writing its buffers. Cold-reset
+     * core 1 first: that halts the worker mid-op so no write survives into
+     * the next lifetime, and the halt-path reclaim marks its in-flight
+     * tasks FAILED. */
+    cold_restart();
+    shared->core1_restart_request = 0U; /* consumed here; don't double-restart */
+    /* Deliver those failures to their waiting clients before the queue is
+     * reinitialised: taskq_init below erases the request ids, and without
+     * this posting the in-flight clients see only the mailbox wall-clock
+     * timeout. */
+    post_completions();
+  }
+  /* A restarted worker must find no queued descriptor. */
+  taskq_init(&shared->queue);
+  shared->core1_current_slot = -1;
 }
 
 

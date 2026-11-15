@@ -7,16 +7,9 @@
  * This file carries the Cortex-A9 / Xilinx-BSP integration: SCU/SMP
  * coherency bring-up, the coherent shared control block, the core-1 worker,
  * and the core-0 poll. The portable state machine it drives lives in
- * scheduler.c (host-tested); a focused host seam covers worker initialization.
-
+ * scheduler.c (host-tested); focused host seams cover publish and clean
+ * requests.
  */
-#define SCHEDULER_CORE1_FALLBACK_BODY() do { \
-  scheduler_core1_halt_before_recover(core1_halt, zzapp_recover_halted_core1); \
-  sdk_compression_reclaim_core1_decode(); \
-  zzapp_services_reclaim_halted_audio(); \
-  zzm_runtime_quarantine_module(ZZM_MODULE_MINIGL); \
-  g_core1_started = 0; \
-} while (0)
 #if defined(TASKQ_HOST_TEST) && \
     (defined(SCHEDULER_PUBLISH_HOST_TEST) || defined(SCHEDULER_CLEAN_HOST_TEST))
 
@@ -117,29 +110,6 @@ int scheduler_core1_clean_dcache(void)
 #endif
 
 
-#elif defined(TASKQ_HOST_TEST) && defined(SCHEDULER_ARM_FALLBACK_HOST_TEST)
-
-#include "scheduler.h"
-#include "zzm_format.h"
-
-static volatile uint32_t g_core1_started;
-
-extern void core1_halt(void);
-extern void zzapp_recover_halted_core1(void);
-extern void sdk_compression_reclaim_core1_decode(void);
-extern void zzapp_services_reclaim_halted_audio(void);
-extern void zzm_runtime_quarantine_module(uint32_t module);
-
-static void scheduler_core1_fallback_recover(void)
-{
-  SCHEDULER_CORE1_FALLBACK_BODY();
-}
-
-void scheduler_core1_fallback_host_test(void)
-{
-  scheduler_core1_fallback_recover();
-}
-
 #elif defined(TASKQ_HOST_TEST) && defined(MINIGL_HOST_TEST)
 
 #include "scheduler.h"
@@ -156,6 +126,7 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "memorymap.h"
 #include "sdk_mailbox.h"
 #include "sdk_compression.h"
+#include "sdk_core1_reclaim.h"
 #include "sdk_image_stream.h"
 #include "sdk_video_stream.h"
 #include "sdk_media_session.h"
@@ -247,7 +218,13 @@ static volatile uint32_t g_core1_started;
 
 static void scheduler_core1_fallback_recover(void)
 {
-  SCHEDULER_CORE1_FALLBACK_BODY();
+  /* The ordering is production logic and lives in the host-tested seam
+   * (scheduler.c); this only supplies the firmware implementations. */
+  scheduler_core1_fallback_recover_with(
+      core1_halt, zzapp_recover_halted_core1,
+      sdk_core1_reclaim_after_halt, &scheduler_shared()->queue,
+      zzapp_services_reclaim_halted_audio, zzm_runtime_quarantine_module,
+      ZZM_MODULE_MINIGL, &g_core1_started);
 }
 
 taskq_shared_t *scheduler_shared(void)
@@ -1031,32 +1008,27 @@ void scheduler_core1_park_if_requested(void)
  *      work is pending this iteration (taskq_should_drain). This soaks up
  *      latency-sensitive work without stealing cycles from Amiga-facing I/O.
  */
+/* Harvest finished/failed tasks and post their completions. Shared by the
+ * core-0 poll and the quiesce-timeout teardown; the loop itself is the
+ * host-tested seam in scheduler.c. */
+static void scheduler_post_task_completions(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  scheduler_harvest_post_with(&sh->queue, &g_sched_watchdog,
+                              SDK_STATUS_INTERNAL_ERROR,
+                              sdk_mailbox_task_gen_ok,
+                              sdk_mailbox_post_deferred,
+                              sdk_mailbox_task_forget);
+}
+
 void scheduler_core0_poll(int zorro_pending, int display_pending)
 {
   taskq_shared_t *sh = scheduler_shared();
   int slot;
 
-  while ((slot = taskq_harvest(&sh->queue)) >= 0) {
-    taskq_desc_t *d = &sh->queue.descs[slot];
-    if (!sdk_mailbox_task_gen_ok(slot)) {
-      /* Task submitted under a previous mailbox lifetime (the mailbox was
-       * re-initialised while it was in flight). Drop it without posting so its
-       * stale request_id/user_cookie never lands in the new completion ring. */
-      taskq_release(&sh->queue, slot);
-      continue;
-    }
-    int failed = (d->state == TASK_FAILED);
-    uint16_t status = failed ? SDK_STATUS_INTERNAL_ERROR : d->result_status;
     if (!sdk_mailbox_post_deferred(d->request_id, d->user_cookie,
-                                   (uint16_t)d->opcode, status,
-                                   d->result_payload, d->result_len)) {
-      break;  /* completion ring full -> retry next poll */
-    }
-    if (!failed) {
-      taskq_watchdog_on_success(&g_sched_watchdog);
-    }
-    taskq_release(&sh->queue, slot);
-  }
+  scheduler_post_task_completions();
   zzapp_core0_poll();
 
   if (sh->core1_restart_request) {
@@ -1068,7 +1040,6 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     sdk_image_stream_poison_core1_sessions();
     sdk_video_stream_poison_core1_sessions();
     sdk_media_session_poison_core1();
-    sdk_mailbox_poison_core1_audio_streams();
     if (taskq_watchdog_core1_enabled(&g_sched_watchdog)) {
       core1_cold_restart();
     } else {
@@ -1183,23 +1154,14 @@ void scheduler_quiesce_for_reset(void)
     usleep(SCHED_QUIESCE_US);
   }
 
-  /* Clear the queue BEFORE any restart, so a restarted worker finds no QUEUED
-   * descriptor to claim. Capture the timeout first -- taskq_init would mask it.
-   * taskq_init leaves zero QUEUED slots, and the worker only ever claims QUEUED,
-   * so it cannot pick up a stale task and write into buffers the mailbox is
-   * about to reuse. */
+  /* On timeout the teardown (cold restart, posting the halted tasks'
+   * failures to their clients, queue re-init) runs in the host-tested
+   * seam: the restart marks every in-flight task FAILED and each client
+   * gets an immediate completion instead of the mailbox wall-clock
+   * timeout. */
   timed_out = !scheduler_minigl_quiesce_done(sh);
-  taskq_init(&sh->queue);
-  sh->core1_current_slot = -1;
-
-  if (timed_out) {
-    /* A task outlived the wait and is still writing its buffers. Cold-reset
-     * core 1 to halt it before those buffers are freed. The queue is already
-     * cleared above and core1_cold_restart flushes the whole D-cache before
-     * releasing CPU1, so the restarted worker re-enters onto the empty queue. */
-    core1_cold_restart();
-    sh->core1_restart_request = 0;   /* consumed here; don't double-restart */
-  }
+  scheduler_quiesce_finish(sh, timed_out, core1_cold_restart,
+                           scheduler_post_task_completions);
 }
 
 #endif /* TASKQ_HOST_TEST */

@@ -13,8 +13,9 @@
 #include "l2_maint.h"
 #include "card_pool.h"
 #include "surface_allocator.h"
-#include "sdk_compression.h"
+#include "sdk_mailbox.h"
 #include "sdk_image_stream.h"
+#include "sdk_core1_reclaim.h"
 #include "zzm_minigl_host.h"
 #include "zzm_loader.h"
 #include "zzm_runtime.h"
@@ -365,6 +366,7 @@ void core1_cold_restart(void)
 	*core1_addr = (uint32_t) core1_entry;
 	Xil_DCacheFlush();  /* the reset vector write must reach OCM before CPU1 reads it */
 	core1_halt();
+	/* CPU1 cannot finish any deferred SDK request after this point. */
 
 	/*
 	 * CPU1 is now held in reset with its clock stopped, i.e. provably
@@ -382,12 +384,11 @@ void core1_cold_restart(void)
 
 
 	/*
-	 * CPU1 is still halted and the malloc lock is now free: reclaim any heap
-	 * blocks a one-shot decode still held when it was reset. inflateEnd /
-	 * LzmaDec_Free never ran on the killed worker, so without this the
-	 * inflate state/window and LZMA probs/dict leak on every mid-decode reset.
+	 * CPU1 is still halted and the malloc lock is now free. Poison decoder
+	 * pointers before reclaiming their pool, then fail requests the halted
+	 * worker could not complete.
 	 */
-	sdk_compression_reclaim_core1_decode();
+	sdk_core1_reclaim_after_halt(&sh->queue);
 
 	/* Halted: the restarted worker must not find the old park request. */
 	sh->core1_park_request = 0U;

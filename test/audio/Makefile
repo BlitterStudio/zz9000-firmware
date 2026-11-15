@@ -13,6 +13,7 @@ RATE_TARGET := $(BUILD_DIR)/audio_playback_rate_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
 CLOSE_TARGET := $(BUILD_DIR)/audio_stream_close_test
 PRECONVERT_TARGET := $(BUILD_DIR)/audio_pump_preconvert_test
+RECLAIM_TARGET := $(BUILD_DIR)/core1_reclaim_test
 SCENE_TARGET := $(BUILD_DIR)/audio_scene_test
 METER_TARGET := $(BUILD_DIR)/audio_meter_test
 CONTROL_TARGET := $(BUILD_DIR)/audio_control_test
@@ -25,7 +26,7 @@ BENCH_SMOKE_TARGET := $(BUILD_DIR)/bench_smoke_test
 MEDIA_VIEW_TARGET := $(BUILD_DIR)/audio_pump_media_view_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
-	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) \
+	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) $(RECLAIM_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET)
@@ -49,6 +50,7 @@ test: $(TARGETS)
 	$(PLAYBACK_TARGET)
 	$(DRAIN_TARGET)
 	$(CLOSE_TARGET)
+	$(RECLAIM_TARGET)
 	$(SCENE_TARGET)
 	$(CONFIG_TARGET)
 	$(METER_TARGET)
@@ -185,6 +187,14 @@ $(CLOSE_TARGET): audio_stream_close_test.c \
 	$(SRC_DIR)/audio_stream_close.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_stream_close_test.c
+
+$(RECLAIM_TARGET): core1_reclaim_test.c \
+	$(SRC_DIR)/sdk_core1_reclaim.c $(SRC_DIR)/sdk_core1_reclaim.h \
+	$(SRC_DIR)/scheduler.c $(SRC_DIR)/scheduler.h \
+	$(SRC_DIR)/audio_stream_close.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DTASKQ_HOST_TEST -o $@ \
+		core1_reclaim_test.c $(SRC_DIR)/sdk_core1_reclaim.c $(SRC_DIR)/scheduler.c
 
 $(SCENE_TARGET): audio_scene_test.c $(SRC_DIR)/audio_scene.c \
 	$(SRC_DIR)/audio_scene.h $(SRC_DIR)/ax.h \

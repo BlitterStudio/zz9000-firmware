@@ -876,8 +876,9 @@ static int api_audio_close_decode(uint32_t session)
 
 void zzapp_api_reclaim_resources(void)
 {
-    struct zzapp_audio_session *audio_sessions = g_audio_sessions[api_slot()];
-    struct zzapp_image_session *image_sessions = g_image_sessions[api_slot()];
+    uint32_t owner = api_slot();
+    struct zzapp_audio_session *audio_sessions = g_audio_sessions[owner];
+    struct zzapp_image_session *image_sessions = g_image_sessions[owner];
     uint32_t i;
 
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
@@ -886,14 +887,19 @@ void zzapp_api_reclaim_resources(void)
             memset(&image_sessions[i], 0, sizeof(image_sessions[i]));
         }
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (audio_sessions[i].id)
+        if (audio_sessions[i].id) {
             audio_session_release(&audio_sessions[i]);
+            zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 1);
+            if (zzapp_proc_slot(owner)->audio_sessions)
+                zzapp_proc_slot(owner)->audio_sessions--;
+        }
 }
 
 void zzapp_api_poison_resources(void)
 {
-    struct zzapp_audio_session *audio_sessions = g_audio_sessions[api_slot()];
-    struct zzapp_image_session *image_sessions = g_image_sessions[api_slot()];
+    uint32_t owner = api_slot();
+    struct zzapp_audio_session *audio_sessions = g_audio_sessions[owner];
+    struct zzapp_image_session *image_sessions = g_image_sessions[owner];
     uint32_t i;
 
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
@@ -909,6 +915,9 @@ void zzapp_api_poison_resources(void)
             else if (audio_sessions[i].codec == ZZ_AUDIO_VORBIS)
                 sdk_vorbis_forget(&audio_sessions[i].state.vorbis);
             memset(&audio_sessions[i], 0, sizeof(audio_sessions[i]));
+            zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 1);
+            if (zzapp_proc_slot(owner)->audio_sessions)
+                zzapp_proc_slot(owner)->audio_sessions--;
         }
     sdk_compression_reclaim_app_decode(app_decode_owner());
 }

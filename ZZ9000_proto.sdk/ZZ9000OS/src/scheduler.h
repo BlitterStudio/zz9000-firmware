@@ -211,9 +211,11 @@ void taskq_requeue(taskq_t *q, int slot);
 void taskq_complete(taskq_t *q, int slot, uint16_t status,
                     const uint8_t *payload, uint16_t payload_len);
 void taskq_fail(taskq_t *q, int slot, uint16_t status);
+/* Core 1 is halted before this call. Every task it could no longer run is
+ * made harvestable so its client receives an error completion. */
+void taskq_abort_active(taskq_t *q, uint16_t status);
 int  taskq_harvest(taskq_t *q);
 void taskq_release(taskq_t *q, int slot);
-
 /* Coalesced producer-to-core-1 notification. The producer sends only when it
  * changes pending from zero to one; the consumer clears only after rechecking
  * its work source. */
@@ -252,6 +254,19 @@ typedef void (*scheduler_core1_recovery_step_t)(void);
 void scheduler_core1_halt_before_recover(
     scheduler_core1_recovery_step_t halt,
     scheduler_core1_recovery_step_t recover);
+typedef void (*scheduler_core1_queue_reclaim_fn)(taskq_t *queue);
+typedef void (*scheduler_core1_module_quarantine_fn)(uint32_t module);
+/* Single-core fallback recovery, in the one order every halt path keeps:
+ * halt fence, locks, queue reclaim, audio contexts, module quarantine,
+ * liveness flag. The ARM glue (scheduler_arm.c) supplies the production
+ * steps; the host test drives this seam directly. */
+void scheduler_core1_fallback_recover_with(
+    scheduler_core1_recovery_step_t halt,
+    scheduler_core1_recovery_step_t recover,
+    scheduler_core1_queue_reclaim_fn reclaim_after_halt, taskq_t *queue,
+    scheduler_core1_recovery_step_t reclaim_audio,
+    scheduler_core1_module_quarantine_fn quarantine_module, uint32_t module,
+    volatile uint32_t *core1_started);
 
 /* minigl_reset_ack values.  FAILED: core 1 could not stop the module's
  * engines; core 0 then stops them and drops the module with core 1 halted. */
@@ -283,6 +298,32 @@ sched_worker_action_t scheduler_minigl_submission_action(
 /* True only after the worker has acknowledged closed admission and stopped
  * every MiniGL submission and queued task. */
 int scheduler_minigl_quiesce_done(taskq_shared_t *shared);
+typedef int (*taskq_slot_gen_ok_fn)(int slot);
+typedef int (*taskq_slot_post_fn)(int slot, uint32_t request_id,
+                                  uint32_t user_cookie, uint16_t opcode,
+                                  uint16_t status, const uint8_t *payload,
+                                  uint16_t payload_len);
+typedef void (*taskq_slot_forget_fn)(int slot);
+typedef void (*scheduler_quiesce_step_fn)(void);
+/* Harvest every DONE/FAILED task and hand it to `post` (which reports each
+ * client completion): FAILED tasks carry `failed_status`, DONE tasks their
+ * own result. A slot whose generation check fails is dropped via `forget`
+ * so a stale request id never reaches the current mailbox. Stops early
+ * (task left harvested) when `post` reports the completion ring full; the
+ * next core-0 poll retries. `watchdog` may be NULL. */
+void scheduler_harvest_post_with(taskq_t *q, taskq_watchdog_t *watchdog,
+                                 uint16_t failed_status,
+                                 taskq_slot_gen_ok_fn gen_ok,
+                                 taskq_slot_post_fn post,
+                                 taskq_slot_forget_fn forget);
+/* Teardown after the quiesce wait: on timeout cold-restart core 1 (which
+ * marks its in-flight tasks FAILED), then post those failures to their
+ * clients BEFORE the queue is reinitialised -- afterwards the request ids
+ * are gone and the clients would wait out the mailbox timeout. Finally
+ * re-init the queue so no descriptor survives into the next lifetime. */
+void scheduler_quiesce_finish(taskq_shared_t *shared, int timed_out,
+                              scheduler_quiesce_step_fn cold_restart,
+                              scheduler_quiesce_step_fn post_completions);
 
 
 /* ---- fault watchdog (portable) ---- */

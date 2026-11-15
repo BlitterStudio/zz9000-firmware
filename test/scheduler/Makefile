@@ -16,9 +16,14 @@ HOST_SOURCES := minigl_host_test.c $(SRC_DIR)/zzm_minigl_host.c
 HOST_DEPS := $(SRC_DIR)/zzm_minigl_host.h
 
 FALLBACK_RECOVERY_TARGET := $(BUILD_DIR)/fallback_recovery_test
-FALLBACK_RECOVERY_CPPFLAGS := -DTASKQ_HOST_TEST -DSCHEDULER_ARM_FALLBACK_HOST_TEST -I$(SRC_DIR)
-FALLBACK_RECOVERY_SOURCES := fallback_recovery_test.c $(SRC_DIR)/scheduler_arm.c $(SRC_DIR)/scheduler.c
-FALLBACK_RECOVERY_DEPS := $(SRC_DIR)/scheduler.h $(SRC_DIR)/zzm_format.h
+FALLBACK_RECOVERY_CPPFLAGS := -DTASKQ_HOST_TEST -I$(SRC_DIR)
+FALLBACK_RECOVERY_SOURCES := fallback_recovery_test.c $(SRC_DIR)/scheduler.c
+FALLBACK_RECOVERY_DEPS := $(SRC_DIR)/scheduler.h
+
+QUIESCE_POST_TARGET := $(BUILD_DIR)/quiesce_post_test
+QUIESCE_POST_CPPFLAGS := -DTASKQ_HOST_TEST -I$(SRC_DIR)
+QUIESCE_POST_SOURCES := quiesce_post_test.c $(SRC_DIR)/scheduler.c
+QUIESCE_POST_DEPS := $(SRC_DIR)/scheduler.h
 
 SMP_LOCK_TARGET := $(BUILD_DIR)/smp_lock_test
 SMP_LOCK_CPPFLAGS := -DSMP_LOCK_HOST_TEST -I$(SRC_DIR)
@@ -51,13 +56,28 @@ LZH_DECODE_CONTRACT_CPPFLAGS := -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H -I$(SRC_DIR)
 LZH_DECODE_CONTRACT_SOURCES := lzh_decode_contract_test.c $(SRC_DIR)/lzh/sdk_decompress_lzh.c
 LZH_DECODE_CONTRACT_DEPS := $(SRC_DIR)/lzh/zz9k_lzh.h
 
-.PHONY: test clean host smp_lock l2_maint offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract fallback_recovery
+.PHONY: test clean host smp_lock l2_maint offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract fallback_recovery quiesce_post
 
-test: $(TARGET) $(HOST_TARGET) $(L2_MAINT_TARGET) $(FALLBACK_RECOVERY_TARGET)
+test: $(TARGET) $(HOST_TARGET) $(L2_MAINT_TARGET) $(FALLBACK_RECOVERY_TARGET) $(QUIESCE_POST_TARGET)
 	$(TARGET)
 	$(HOST_TARGET)
 	$(L2_MAINT_TARGET)
 	$(FALLBACK_RECOVERY_TARGET)
+	$(QUIESCE_POST_TARGET)
+
+fallback_recovery: $(FALLBACK_RECOVERY_TARGET)
+	$(FALLBACK_RECOVERY_TARGET)
+
+$(FALLBACK_RECOVERY_TARGET): $(FALLBACK_RECOVERY_SOURCES) $(FALLBACK_RECOVERY_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(FALLBACK_RECOVERY_CPPFLAGS) $(CFLAGS) -o $@ $(FALLBACK_RECOVERY_SOURCES)
+
+quiesce_post: $(QUIESCE_POST_TARGET)
+	$(QUIESCE_POST_TARGET)
+
+$(QUIESCE_POST_TARGET): $(QUIESCE_POST_SOURCES) $(QUIESCE_POST_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(QUIESCE_POST_CPPFLAGS) $(CFLAGS) -o $@ $(QUIESCE_POST_SOURCES)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
@@ -70,12 +90,6 @@ $(HOST_TARGET): $(HOST_SOURCES) $(HOST_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(HOST_CPPFLAGS) $(CFLAGS) -o $@ $(HOST_SOURCES)
 
-fallback_recovery: $(FALLBACK_RECOVERY_TARGET)
-	$(FALLBACK_RECOVERY_TARGET)
-
-$(FALLBACK_RECOVERY_TARGET): $(FALLBACK_RECOVERY_SOURCES) $(FALLBACK_RECOVERY_DEPS)
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(FALLBACK_RECOVERY_CPPFLAGS) $(CFLAGS) -o $@ $(FALLBACK_RECOVERY_SOURCES)
 
 smp_lock: $(SMP_LOCK_TARGET)
 	$(SMP_LOCK_TARGET)

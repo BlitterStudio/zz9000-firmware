@@ -131,6 +131,7 @@ static uint16_t run_request(uint16_t opcode, const uint8_t *request,
     assert(zzapp_mailbox_dispatch(opcode, request, request_bytes, reply,
                                   &reply_bytes, 1, ++request_id, 0U) ==
            SDK_STATUS_QUEUED);
+    zzapp_kernel_set_current_thread(-1);
     for (pass = 0U; pass < 64U; pass++) {
         zzapp_worker_hook();
         if (zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL,
