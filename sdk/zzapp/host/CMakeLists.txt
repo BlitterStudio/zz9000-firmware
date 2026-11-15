@@ -163,6 +163,14 @@ if(BUILD_TESTING)
     TIMEOUT 60
     ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
   )
+  add_test(
+    NAME pixelsstop
+    COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} pixelsstop $<TARGET_FILE:pixels>
+  )
+  set_tests_properties(pixelsstop PROPERTIES
+    TIMEOUT 60
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
+  )
   add_test(NAME files_unit COMMAND files_unit)
   add_test(NAME memory_unit COMMAND memory_unit)
   add_test(NAME sleep_unit COMMAND sleep_unit)

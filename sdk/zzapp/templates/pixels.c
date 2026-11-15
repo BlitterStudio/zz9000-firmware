@@ -72,11 +72,17 @@ int zz_main(int argc, char **argv)
             (ev.type == ZZ_EV_STOP || ev.type == ZZ_EV_KEY_DOWN))
             break;
         rc = zz_display_flip(surface.id);
-        if (rc != ZZ_OK)
+        if (rc != ZZ_OK) {
+            if (zz_should_stop())
+                break;
             zz_exit(rc);
+        }
         rc = zz_display_refresh(&surface);
-        if (rc != ZZ_OK && rc != ZZ_ENOSYS)
+        if (rc != ZZ_OK && rc != ZZ_ENOSYS) {
+            if (zz_should_stop())
+                break;
             zz_exit(rc);
+        }
         zz_yield();
     }
     zz_display_close(surface.id);
