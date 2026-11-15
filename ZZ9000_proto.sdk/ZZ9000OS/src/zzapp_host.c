@@ -1230,9 +1230,42 @@ static void resume_parked_api(uint32_t slot)
 
 void zzapp_host_yield(void)
 {
+    uint32_t slot = current_slot();
+    struct zzapp_host_slot *host = host_slot(slot);
+
     zzapp_note_progress();
-    host_slot(current_slot())->service_due = 1u;
+    host->service_due = 1u;
     zzapp_kernel_service_due(&g_kernel);
+    /* Yield is the API body's safe interleaving point.  Never preempt a
+     * non-yielding body: it may hold service-visible state on its stack. */
+    if (zzapp_kernel_current_thread() < 0 || host->in_api == 0u ||
+        g_kernel.api_lock_owner != (int)slot ||
+        g_kernel.api_lock_depth != 1U)
+        return;
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+    if (host->perf_svc_sampled)
+        zzapp_kernel_perf_service_end(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
+                                      scheduler_perf_stamp());
+#endif
+    g_api_parked[slot] = 1u;
+    (void)zzapp_kernel_api_unlock(&g_kernel, slot);
+#ifndef ZZAPP_HOST_TEST
+    __asm__ __volatile__("svc 0" ::: "memory");
+#else
+    {
+        extern void zzapp_test_api_yield_hook(void) __attribute__((weak));
+
+        if (zzapp_test_api_yield_hook)
+            zzapp_test_api_yield_hook();
+    }
+#endif
+    (void)api_lock_until_acquired(slot);
+    resume_parked_api(slot);
+#if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
+    if (host->perf_svc_sampled)
+        zzapp_kernel_perf_service_begin(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
+                                        scheduler_perf_stamp());
+#endif
 }
 
 void zzapp_host_yield_wait(void)

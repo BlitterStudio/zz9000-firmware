@@ -10,6 +10,8 @@ int zzapp_host_mem_info(zzapp_mem_info *out);
 void zzapp_kernel_switch_address_space(uint32_t slot);
 static uint32_t selected_slot;
 static int api_wait_hook_called;
+static int api_yield_service_calls;
+static int api_yield_stall_watchdog;
 
 static uint32_t service_poll_depth;
 static uint32_t service_poll_max_depth;
@@ -59,6 +61,23 @@ void zzapp_test_api_wait_hook(void)
     selected_slot = 1U;
     zzapp_kernel_set_current_thread(1);
     api_wait_hook_called++;
+}
+
+void zzapp_test_api_yield_hook(void)
+{
+    zzapp_kernel_t *kernel = zzapp_runtime_kernel();
+
+    assert(kernel->api_lock_owner == -1);
+    assert(kernel->service_due != 0U);
+    assert(zzapp_kernel_schedule(kernel, 0U) == ZZAPP_KERNEL_SYSTEM);
+    assert(zzapp_kernel_system_lock(kernel) == 0);
+    zzapp_worker_hook();
+    assert(zzapp_kernel_system_unlock(kernel) == 0);
+    if (api_yield_stall_watchdog) {
+        zzapp_test_set_xtime(ZZAPP_API_STUCK_US + ZZAPP_TICK_US);
+        zzapp_host_tick_at(ZZAPP_API_STUCK_US + ZZAPP_TICK_US);
+    }
+    api_yield_service_calls++;
 }
 
 
@@ -227,6 +246,40 @@ int main(void)
     zzapp_api_leave();
     zzapp_kernel_set_current_thread(-1);
     selected_slot = 0U;
+
+    /* API yield releases the kernel lock, so due service runs before the
+     * yielding body reacquires it. */
+    zzapp_boot_init();
+    selected_slot = 0U;
+    api_yield_service_calls = 0;
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_runtime_kernel()->threads[0].quantum_left = 0U;
+    zzapp_host_yield();
+    assert(api_yield_service_calls == 1);
+    assert(zzapp_runtime_kernel()->api_lock_owner == 0);
+    zzapp_api_leave();
+    zzapp_kernel_set_current_thread(-1);
+    /*
+     * The yielding API body is descheduled while its safe-point service pass
+     * runs.  That interval is not an in-flight API call for watchdog purposes.
+     */
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_test_mark_running();
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    api_yield_stall_watchdog = 1;
+    zzapp_host_yield();
+    api_yield_stall_watchdog = 0;
+    zzapp_worker_hook();
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    zzapp_api_leave();
+    zzapp_kernel_set_current_thread(-1);
+
 
     /* A blocked app can keep an old per-slot tick while the core continues
      * servicing another context. That must not trigger a cold restart. */

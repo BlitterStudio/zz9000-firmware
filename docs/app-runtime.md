@@ -28,6 +28,13 @@ due system work—SDK tasks, MiniGL service, launcher work, and audio feeding—
 then selects runnable app threads round-robin. In an overload window, service
 work is limited so runnable apps retain a 5% floor.
 
+An API body remains unpreemptible while it owns the API lock. Its explicit
+`zz_yield` safe point releases that lock, lets one due system-service pass run,
+then reacquires the lock before returning to the body. This bounds audio-service
+delay at cooperative yield points to the current API segment plus one scheduler
+handoff; a body that does not yield remains subject to the API watchdog rather
+than a scheduler preemption.
+
 File and directory operations, console read and backpressure, display open and
 flip, non-host audio open and close, and sleep park the caller at the SVC
 handoff. `zz_gl_swap` parks through its flip. Completion wakes the slot READY;

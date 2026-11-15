@@ -405,6 +405,7 @@ void zzapp_kernel_init(zzapp_kernel_t *kernel)
 	memset(kernel, 0, sizeof(*kernel));
 	kernel->active = NO_ACTIVE;
 	kernel->api_lock_owner = -1;
+	kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
 	kernel->gl_owner = -1;
 }
 
@@ -679,6 +680,15 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 		kernel->service_in_window = 0;
 	}
 	runnable = app_runnable(kernel);
+	if (kernel->api_lock_owner == -1 &&
+	    kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS &&
+	    !kernel->api_handoff_service_deferred) {
+		pick = (int)kernel->api_handoff;
+		if (kernel->threads[pick].state == ZZAPP_THREAD_RUNNABLE)
+			goto charge_app;
+		kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+		kernel->api_handoff_service_deferred = 0U;
+	}
 	if (kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER) {
 		uint32_t slot;
 
@@ -711,6 +721,14 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	}
 	if (kernel->service_due && runnable)
 		kernel->overload_count++;
+	if (kernel->api_lock_owner == -1 &&
+	    kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS) {
+		pick = (int)kernel->api_handoff;
+		if (kernel->threads[pick].state == ZZAPP_THREAD_RUNNABLE)
+			goto charge_app;
+		kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+		kernel->api_handoff_service_deferred = 0U;
+	}
 	pick = choose_app(kernel);
 	if (pick >= 0) {
 charge_app:
@@ -859,22 +877,64 @@ static void wake_api_waiters(zzapp_kernel_t *kernel)
 		if (!kernel->api_waiting[slot])
 			continue;
 		kernel->api_waiting[slot] = 0U;
+		kernel->api_wait_sequence[slot] = 0U;
 		(void)zzapp_kernel_wake(kernel, slot, ZZAPP_WAKE_READY);
 	}
 }
 
+static void handoff_api_lock(zzapp_kernel_t *kernel)
+{
+	uint32_t slot;
+	uint32_t next = ZZAPP_KERNEL_APP_SLOTS;
+
+	kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
+		if (!kernel->api_waiting[slot] ||
+		    kernel->threads[slot].state == ZZAPP_THREAD_STOPPED)
+			continue;
+		if (next == ZZAPP_KERNEL_APP_SLOTS ||
+		    (int32_t)(kernel->api_wait_sequence[slot] -
+			      kernel->api_wait_sequence[next]) < 0)
+			next = slot;
+	}
+	if (next == ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	kernel->api_waiting[next] = 0U;
+	kernel->api_wait_sequence[next] = 0U;
+	kernel->api_handoff = next;
+	(void)zzapp_kernel_wake(kernel, next, ZZAPP_WAKE_READY);
+}
+
 static void release_api_lock(zzapp_kernel_t *kernel)
 {
+	int owner = kernel->api_lock_owner;
+
 	kernel->api_lock_owner = -1;
 	kernel->api_lock_depth = 0U;
-	wake_api_waiters(kernel);
+	/* Preserve a selected waiter while its deferred service pass runs. */
+	if (owner == ZZAPP_KERNEL_SYSTEM_OWNER &&
+	    kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS) {
+		kernel->api_handoff_service_deferred = 0U;
+		return;
+	}
+	kernel->api_handoff_service_deferred = 0U;
+	handoff_api_lock(kernel);
+	/* A service request that arrived during one API body runs before this
+	 * reservation, unless its service-window budget is exhausted. */
+	if (owner >= 0 && kernel->service_due &&
+	    kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS)
+		kernel->api_handoff_service_deferred = 1U;
 }
 
 void zzapp_kernel_reset_lock(zzapp_kernel_t *kernel)
 {
 	if (!kernel)
 		return;
-	release_api_lock(kernel);
+	kernel->api_lock_owner = -1;
+	kernel->api_lock_depth = 0U;
+	kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+	kernel->api_handoff_service_deferred = 0U;
+	wake_api_waiters(kernel);
 }
 
 int zzapp_kernel_system_lock(zzapp_kernel_t *kernel)
@@ -885,7 +945,9 @@ int zzapp_kernel_system_lock(zzapp_kernel_t *kernel)
 		kernel->api_lock_depth++;
 		return 0;
 	}
-	if (kernel->api_lock_owner >= 0)
+	if (kernel->api_lock_owner >= 0 ||
+	    (kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS &&
+	     !kernel->api_handoff_service_deferred))
 		return -1;
 	kernel->api_lock_owner = ZZAPP_KERNEL_SYSTEM_OWNER;
 	kernel->api_lock_depth = 1U;
@@ -934,11 +996,19 @@ int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot)
 		return 0;
 	}
 	if (kernel->api_lock_owner >= 0 ||
-	    kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER) {
-		kernel->api_waiting[slot] = 1U;
+	    kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER ||
+	    (kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS &&
+	     kernel->api_handoff != slot)) {
+		if (!kernel->api_waiting[slot]) {
+			kernel->api_waiting[slot] = 1U;
+			kernel->api_wait_sequence[slot] = ++kernel->api_wait_serial;
+		}
 		return -1;
 	}
+	kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+	kernel->api_handoff_service_deferred = 0U;
 	kernel->api_waiting[slot] = 0U;
+	kernel->api_wait_sequence[slot] = 0U;
 	kernel->api_lock_owner = (int)slot;
 	kernel->api_lock_depth = 1U;
 	return 0;
@@ -1138,7 +1208,12 @@ void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot)
 		kernel->active = NO_ACTIVE;
 	if (kernel->api_lock_owner == (int)slot)
 		release_api_lock(kernel);
+	else if (kernel->api_handoff == slot) {
+		kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+		handoff_api_lock(kernel);
+	}
 	kernel->api_waiting[slot] = 0U;
+	kernel->api_wait_sequence[slot] = 0U;
 }
 
 void zzapp_kernel_stack_paint(uint8_t *stack, uint32_t bytes)

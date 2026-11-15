@@ -178,6 +178,10 @@ typedef struct {
 	uint32_t wake_log_count;
 	int api_lock_owner;
 	uint32_t api_lock_depth;
+	uint32_t api_handoff;
+	uint32_t api_handoff_service_deferred;
+	uint32_t api_wait_serial;
+	uint32_t api_wait_sequence[ZZAPP_KERNEL_APP_SLOTS];
 	uint8_t api_waiting[ZZAPP_KERNEL_APP_SLOTS];
 	int gl_owner;
 	uint32_t gl_generation;

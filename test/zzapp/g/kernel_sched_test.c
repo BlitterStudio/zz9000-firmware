@@ -687,6 +687,105 @@ static void test_system_kernel_lock_handoffs(void)
 	CHECK(zzapp_kernel_api_unlock(&kernel, 0) == 0);
 }
 
+/* SDK/audio doorbells can make the system thread release and immediately
+ * retake the API lock several times within one millisecond.  An app that
+ * blocked while entering an API call must receive that release before the
+ * next service pass; round-robin never advances while all dispatches have
+ * zero elapsed milliseconds. */
+static void test_api_waiter_handoff_beats_continuous_service(void)
+{
+	zzapp_kernel_t kernel;
+	unsigned calls = 0U;
+	unsigned burst;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	make_runnable(&kernel, 2);
+	make_runnable(&kernel, 3);
+
+	for (burst = 0U; burst < 3U; ++burst) {
+		CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+		CHECK(zzapp_kernel_api_lock(&kernel, 0) != 0);
+		CHECK(zzapp_kernel_block(&kernel, 0) == 0);
+		CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+		/* The worker can loop immediately after an empty perf doorbell. */
+		CHECK(zzapp_kernel_system_lock(&kernel) != 0);
+		zzapp_kernel_service_due(&kernel);
+		CHECK(zzapp_kernel_schedule(&kernel, 0U) == ZZAPP_KERNEL_APP0);
+		CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+		calls++;
+		CHECK(zzapp_kernel_api_unlock(&kernel, 0) == 0);
+	}
+	CHECK(calls == 3U);
+}
+
+static void test_api_lock_handoff_is_fifo(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	make_runnable(&kernel, 2);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 2) != 0);
+	CHECK(zzapp_kernel_block(&kernel, 2) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) != 0);
+	CHECK(zzapp_kernel_block(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0U) == ZZAPP_KERNEL_APP2);
+	CHECK(zzapp_kernel_api_lock(&kernel, 2) == 0);
+	CHECK(zzapp_kernel_api_unlock(&kernel, 2) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0U) == ZZAPP_KERNEL_APP1);
+}
+
+static void test_pending_service_runs_between_api_handoffs(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	make_runnable(&kernel, 2);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) != 0);
+	CHECK(zzapp_kernel_block(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) != 0);
+	CHECK(zzapp_kernel_block(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0U) == ZZAPP_KERNEL_APP0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	zzapp_kernel_service_due(&kernel);
+	CHECK(zzapp_kernel_api_unlock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0U) == ZZAPP_KERNEL_SYSTEM);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0U) == ZZAPP_KERNEL_APP1);
+}
+
+static void test_service_budget_preserves_deferred_handoff(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	make_runnable(&kernel, 2);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) != 0);
+	CHECK(zzapp_kernel_block(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 2) != 0);
+	CHECK(zzapp_kernel_block(&kernel, 2) == 0);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0U) == ZZAPP_KERNEL_APP1);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) == 0);
+	zzapp_kernel_service_due(&kernel);
+	kernel.service_in_window = ZZAPP_KERNEL_SERVICE_LIMIT_MS;
+	CHECK(zzapp_kernel_api_unlock(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 5U) == ZZAPP_KERNEL_APP2);
+}
+
 static void test_fault_releases_kernel_lock(void)
 {
 	zzapp_kernel_t kernel;
@@ -937,6 +1036,10 @@ int main(void)
     test_waiter_isolation_timeout_and_stop();
     test_stop_wakes_api_lock_waiter();
     test_system_kernel_lock_handoffs();
+    test_api_waiter_handoff_beats_continuous_service();
+    test_api_lock_handoff_is_fifo();
+    test_pending_service_runs_between_api_handoffs();
+    test_service_budget_preserves_deferred_handoff();
     test_fault_releases_kernel_lock();
     test_kernel_stack_covers_decoder_call_chain();
     test_non_timer_interrupt_does_not_advance_time();
