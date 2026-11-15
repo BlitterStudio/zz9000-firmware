@@ -127,6 +127,8 @@ struct loader_slot {
     uint8_t *host_file;
     uint32_t host_zero_last_bytes;
     uint32_t host_work_last_bytes;
+    uint32_t host_reloc_last_entries;
+    uint32_t host_work_last_kind;
 #endif
 
 };
@@ -176,6 +178,9 @@ static uint32_t loader_slot(void)
     (g_loader[loader_slot()].host_zero_last_bytes)
 #define g_host_work_last_bytes \
     (g_loader[loader_slot()].host_work_last_bytes)
+#define g_host_reloc_last_entries \
+    (g_loader[loader_slot()].host_reloc_last_entries)
+#define g_host_work_last_kind (g_loader[loader_slot()].host_work_last_kind)
 #endif
 #define CARD_POOL_OWNER_SLOT_SHIFT 22u
 #define CARD_POOL_OWNER_GENERATION_MASK ((1u << CARD_POOL_OWNER_SLOT_SHIFT) - 1u)
@@ -223,10 +228,26 @@ uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
     return flags;
 }
 
-#ifndef ZZAPP_LOADER_WORK_CHUNK_BYTES
-#define ZZAPP_LOADER_WORK_CHUNK_BYTES (1024u * 1024u)
+/* One loader pass is bounded to about 1 ms (666k cycles) of core-1
+ * time: the card measured ~3.3 cycles per zeroed byte, twice that per
+ * copied byte, and ~847 cycles per L1 flush call, so a pass moves at
+ * most 192 KiB of zero or map work, 96 KiB of copy, or 512 applied
+ * relocations.  A pass never splits inside a 4 KiB page: every bound is
+ * a multiple of the page size, so frame-boundary splitting and image
+ * mapping still line up below the 1 MiB frame size. */
+#ifndef ZZAPP_LOADER_ZERO_CHUNK_BYTES
+#define ZZAPP_LOADER_ZERO_CHUNK_BYTES (192u * 1024u)
+#endif
+#ifndef ZZAPP_LOADER_COPY_CHUNK_BYTES
+#define ZZAPP_LOADER_COPY_CHUNK_BYTES (96u * 1024u)
+#endif
+#ifndef ZZAPP_LOADER_MAP_CHUNK_BYTES
+#define ZZAPP_LOADER_MAP_CHUNK_BYTES (192u * 1024u)
 #endif
 #define ZZAPP_LOADER_RELOC_CHUNK_ENTRIES 4096U
+#define ZZAPP_LOADER_RELOC_APPLY_CHUNK_ENTRIES 512U
+/* Cortex-A9 L1 line: relocations within this distance share a flush. */
+#define ZZAPP_LOADER_CACHE_LINE_BYTES 32u
 
 enum loader_map_phase {
     LOADER_MAP_ZERO = 0,
@@ -236,12 +257,30 @@ enum loader_map_phase {
     LOADER_MAP_TAIL
 };
 
-static void loader_note_work(uint32_t bytes)
+/* Loader pass kinds, observed by host tests via
+ * zzapp_test_loader_work_last_kind(). */
+#define ZZAPP_LOADER_WORK_ZERO  1u
+#define ZZAPP_LOADER_WORK_COPY  2u
+#define ZZAPP_LOADER_WORK_MAP   3u
+#define ZZAPP_LOADER_WORK_RELOC 4u
+
+static void loader_note_work(uint32_t bytes, uint32_t kind)
 {
 #ifdef ZZAPP_HOST_TEST
     g_host_work_last_bytes = bytes;
+    g_host_work_last_kind = kind;
 #else
     (void)bytes;
+    (void)kind;
+#endif
+}
+
+static void loader_note_relocs(uint32_t entries)
+{
+#ifdef ZZAPP_HOST_TEST
+    g_host_reloc_last_entries = entries;
+#else
+    (void)entries;
 #endif
 }
 
@@ -254,7 +293,29 @@ static void loader_note_work(uint32_t bytes)
 #include "xil_cache_l.h"
 #else
 typedef uintptr_t INTPTR;
-#define Xil_L1DCacheFlushRange(address, bytes) ((void)(address), (void)(bytes))
+/* Host build: L1 flush calls are recorded so tests can prove every
+ * relocated word is flushed in the pass that writes it. */
+#define ZZAPP_TEST_FLUSH_MAX 4096U
+static struct {
+    uintptr_t addr;
+    uint32_t bytes;
+} g_host_flush[ZZAPP_TEST_FLUSH_MAX];
+static uint32_t g_host_flush_count;
+static uint32_t g_host_flush_dropped;
+
+static void host_note_flush(uintptr_t address, uint32_t bytes)
+{
+    if (g_host_flush_count < ZZAPP_TEST_FLUSH_MAX) {
+        g_host_flush[g_host_flush_count].addr = address;
+        g_host_flush[g_host_flush_count].bytes = bytes;
+        g_host_flush_count++;
+    } else {
+        g_host_flush_dropped++;
+    }
+}
+
+#define Xil_L1DCacheFlushRange(address, bytes) \
+    host_note_flush((uintptr_t)(address), (uint32_t)(bytes))
 #define Xil_ICacheInvalidateRange(address, bytes) ((void)(address), (void)(bytes))
 #endif
 
@@ -400,12 +461,12 @@ static int map_loaded_image(const struct load_image *img)
             return ZZAPP_LOADER_IN_PROGRESS;
         }
         count = ZZAPP_MEM_FRAME_BYTES - g_zero_offset;
-        if (count > ZZAPP_LOADER_WORK_CHUNK_BYTES)
-            count = ZZAPP_LOADER_WORK_CHUNK_BYTES;
+        if (count > ZZAPP_LOADER_ZERO_CHUNK_BYTES)
+            count = ZZAPP_LOADER_ZERO_CHUNK_BYTES;
         dst = (uint8_t *)(uintptr_t)proc->memory.frames[g_zeroed_frames] +
               g_zero_offset;
         memset(dst, 0, count);
-        loader_note_work(count);
+        loader_note_work(count, ZZAPP_LOADER_WORK_ZERO);
 #ifdef ZZAPP_HOST_TEST
         g_host_zero_last_bytes = count;
 #endif
@@ -470,8 +531,8 @@ static int map_loaded_image(const struct load_image *img)
             count = seg->memsz - g_map_offset;
             if (count > ZZAPP_MEM_FRAME_BYTES - in_frame)
                 count = ZZAPP_MEM_FRAME_BYTES - in_frame;
-            if (count > ZZAPP_LOADER_WORK_CHUNK_BYTES)
-                count = ZZAPP_LOADER_WORK_CHUNK_BYTES;
+            if (count > ZZAPP_LOADER_COPY_CHUNK_BYTES)
+                count = ZZAPP_LOADER_COPY_CHUNK_BYTES;
             dst = (uint8_t *)(uintptr_t)(proc->image_frames[va >> 20] +
                                          in_frame);
             if (g_map_offset < seg->filesz) {
@@ -484,7 +545,7 @@ static int map_loaded_image(const struct load_image *img)
                 memset(dst, 0, count);
             }
             g_map_offset += count;
-            loader_note_work(count);
+            loader_note_work(count, ZZAPP_LOADER_WORK_COPY);
             return ZZAPP_LOADER_IN_PROGRESS;
         }
         g_map_page = 0U;
@@ -503,7 +564,7 @@ static int map_loaded_image(const struct load_image *img)
             segs[i][2] = (img->seg[i].flags & (PF_X | PF_W)) | PF_R;
         }
         while (g_map_page < image_pages_end &&
-               scanned < ZZAPP_LOADER_WORK_CHUNK_BYTES) {
+               scanned < ZZAPP_LOADER_MAP_CHUNK_BYTES) {
             uint32_t flags = zzapp_loader_page_flags(
                 segs, img->nseg, img->image_end, g_map_page);
             uint32_t count = 0U;
@@ -514,7 +575,7 @@ static int map_loaded_image(const struct load_image *img)
                 continue;
             }
             while (g_map_page + count < image_pages_end &&
-                   count < ZZAPP_LOADER_WORK_CHUNK_BYTES &&
+                   count < ZZAPP_LOADER_MAP_CHUNK_BYTES &&
                    (g_map_page + count) / ZZAPP_MEM_FRAME_BYTES ==
                        g_map_page / ZZAPP_MEM_FRAME_BYTES &&
                    zzapp_loader_page_flags(segs, img->nseg, img->image_end,
@@ -538,7 +599,7 @@ static int map_loaded_image(const struct load_image *img)
                         (g_map_page & (ZZAPP_MEM_FRAME_BYTES - 1u))),
                     count);
             g_map_page += count;
-            loader_note_work(count);
+            loader_note_work(count, ZZAPP_LOADER_WORK_MAP);
         }
         if (g_map_page < image_pages_end)
             return ZZAPP_LOADER_IN_PROGRESS;
@@ -556,15 +617,15 @@ static int map_loaded_image(const struct load_image *img)
             count = map_end - g_map_tail;
             if (count > ZZAPP_MEM_FRAME_BYTES - in_frame)
                 count = ZZAPP_MEM_FRAME_BYTES - in_frame;
-            if (count > ZZAPP_LOADER_WORK_CHUNK_BYTES)
-                count = ZZAPP_LOADER_WORK_CHUNK_BYTES;
+            if (count > ZZAPP_LOADER_MAP_CHUNK_BYTES)
+                count = ZZAPP_LOADER_MAP_CHUNK_BYTES;
             if (zzapp_as_map_image(
                     &proc->as, ZZAPP_AS_WINDOW_BASE + g_map_tail,
                     proc->image_frames[g_map_tail >> 20] + in_frame,
                     count, ZZAPP_AS_IMAGE_RW))
                 goto failed;
             g_map_tail += count;
-            loader_note_work(count);
+            loader_note_work(count, ZZAPP_LOADER_WORK_MAP);
             return ZZAPP_LOADER_IN_PROGRESS;
         }
 #ifndef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
@@ -706,6 +767,8 @@ static void drop_arena(void)
     g_host_file = NULL;
     g_host_zero_last_bytes = 0U;
     g_host_work_last_bytes = 0U;
+    g_host_reloc_last_entries = 0U;
+    g_host_work_last_kind = 0U;
 #endif
     g_card = 0;
     g_mem = NULL;
@@ -767,6 +830,9 @@ int zzapp_loader_begin(void)
     g_ready = 0;
 #ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
     g_host_mapping_calls = 0U;
+    g_host_flush_count = 0U;
+    g_host_flush_dropped = 0U;
+    g_host_reloc_last_entries = 0U;
 #endif
 #ifdef ZZAPP_HOST_TEST
     g_card = addr;
@@ -1242,7 +1308,7 @@ static int prepare_loaded_image(void)
             g_reloc_entry = 0U;
         }
     }
-    loader_note_work(copied * 16U);
+    loader_note_work(copied * 16U, ZZAPP_LOADER_WORK_RELOC);
     if (g_reloc_section != shnum)
         return ZZAPP_LOADER_IN_PROGRESS;
     g_image_prepared = 1;
@@ -1252,9 +1318,13 @@ static int prepare_loaded_image(void)
 static int apply_loaded_relocations(void)
 {
     uint32_t applied = 0U;
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
+    uintptr_t span_lo = 0U;
+    uintptr_t span_hi = 0U;
+#endif
 
     while (g_reloc_apply < g_relocs_bytes &&
-           applied < ZZAPP_LOADER_RELOC_CHUNK_ENTRIES) {
+           applied < ZZAPP_LOADER_RELOC_APPLY_CHUNK_ENTRIES) {
         uint32_t at = g_reloc_apply;
         uint32_t roff = rd32(g_relocs + at);
         uint32_t type = rd32(g_relocs + at + 8u);
@@ -1275,12 +1345,35 @@ static int apply_loaded_relocations(void)
         addend = type == SHT_REL ? rd32(target) : rd32(g_relocs + at + 12u);
         place = addend + g_card;
         memcpy(target, &place, sizeof(place));
-        Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)target, sizeof(place));
+        /* One flush per contiguous span replaces one flush per word.
+         * Each word is flushed after its write and before this pass
+         * returns, so the point of coherency is reached exactly as
+         * before; words farther apart than a cache line never merge
+         * into an over-wide range flush. */
+        if (span_lo &&
+            ((uintptr_t)target > span_hi + ZZAPP_LOADER_CACHE_LINE_BYTES ||
+             (uintptr_t)target + sizeof(place) +
+                     ZZAPP_LOADER_CACHE_LINE_BYTES < span_lo)) {
+            Xil_L1DCacheFlushRange((INTPTR)span_lo,
+                                   (uint32_t)(span_hi - span_lo));
+            span_lo = (uintptr_t)target;
+            span_hi = span_lo + sizeof(place);
+        } else {
+            if (span_lo == 0U || (uintptr_t)target < span_lo)
+                span_lo = (uintptr_t)target;
+            if ((uintptr_t)target + sizeof(place) > span_hi)
+                span_hi = (uintptr_t)target + sizeof(place);
+        }
 #endif
         g_reloc_apply += 16u;
         applied++;
     }
-    loader_note_work(applied * 16U);
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
+    if (span_lo)
+        Xil_L1DCacheFlushRange((INTPTR)span_lo, (uint32_t)(span_hi - span_lo));
+#endif
+    loader_note_relocs(applied);
+    loader_note_work(applied * 16U, ZZAPP_LOADER_WORK_RELOC);
     return g_reloc_apply == g_relocs_bytes ? ZZ_OK :
         ZZAPP_LOADER_IN_PROGRESS;
 }
@@ -1423,11 +1516,45 @@ uint32_t zzapp_test_loader_work_last_bytes(void)
 {
     return g_host_work_last_bytes;
 }
+
+#if defined(ZZAPP_HOST_TEST) && defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
+uint32_t zzapp_test_loader_flush_count(void)
+{
+    return g_host_flush_count;
+}
+
+int zzapp_test_loader_flush_range(uint32_t index, uintptr_t *addr,
+                                  uint32_t *bytes)
+{
+    if (index >= g_host_flush_count)
+        return 0;
+    *addr = g_host_flush[index].addr;
+    *bytes = g_host_flush[index].bytes;
+    return 1;
+}
+
+uint32_t zzapp_test_loader_flush_dropped(void)
+{
+    return g_host_flush_dropped;
+}
+
+uint32_t zzapp_test_loader_reloc_entries_last(void)
+{
+    return g_host_reloc_last_entries;
+}
+#endif
 #ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
 uint32_t zzapp_test_loader_mapping_calls(void)
 {
     return g_host_mapping_calls;
 }
+
+#ifdef ZZAPP_HOST_TEST
+uint32_t zzapp_test_loader_work_last_kind(void)
+{
+    return g_host_work_last_kind;
+}
+#endif
 #else
 uint32_t zzapp_test_loader_mapping_calls(void)
 {

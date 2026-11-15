@@ -2,10 +2,17 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include "zzapp.h"
 #include "zzapp_runtime.h"
 #include "host_card_pool.h"
 int zzapp_loader_have_image(void);
+uint32_t zzapp_test_loader_flush_count(void);
+int zzapp_test_loader_flush_range(uint32_t index, uintptr_t *addr,
+                                  uint32_t *bytes);
+uint32_t zzapp_test_loader_flush_dropped(void);
+uint32_t zzapp_test_loader_reloc_entries_last(void);
+uint32_t zzapp_test_loader_work_last_kind(void);
 static uint32_t selected_slot;
 int smp_cpu_id(void) { return 0; }
 void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1U; }
@@ -135,7 +142,16 @@ static void crossing_entry(const void *api_ptr, int argc, char **argv)
 #define NOTE_OFF 0x0a0u
 #define RELA_OFF 0x0d0u
 #define LOADER_UPLOAD_CHUNK_BYTES (64U * 1024U)
-#define LOADER_WORK_CHUNK_BYTES (1024U * 1024U)
+#define LOADER_ZERO_CHUNK_BYTES (192U * 1024U)
+#define LOADER_COPY_CHUNK_BYTES (96U * 1024U)
+#define LOADER_MAP_CHUNK_BYTES (192U * 1024U)
+#define LOADER_RELOC_PREPARE_ENTRIES 4096U
+#define LOADER_RELOC_APPLY_ENTRIES 512U
+/* Mirror of the loader's pass kinds (zzapp_loader.c). */
+#define TEST_WORK_KIND_ZERO  1U
+#define TEST_WORK_KIND_COPY  2U
+#define TEST_WORK_KIND_MAP   3U
+#define TEST_WORK_KIND_RELOC 4U
 #define SHOFF 0x180u
 
 static void put16(uint8_t *p, uint16_t v)
@@ -217,6 +233,38 @@ static void make_image(uint8_t image[IMAGE_BYTES])
 }
 static uint32_t successful_loads;
 
+static void assert_pass_work_bounded(void)
+{
+    uint32_t zero = zzapp_test_loader_zero_last_bytes();
+    uint32_t work = zzapp_test_loader_work_last_bytes();
+    uint32_t kind = zzapp_test_loader_work_last_kind();
+
+    /* One loader pass must stay under ~1 ms (666k cycles) on the card:
+     * ~3.3 cycles per zeroed byte, ~6.6 per copied byte, and the
+     * relocation flush dominates at ~847 cycles per call. */
+    assert(zero <= LOADER_ZERO_CHUNK_BYTES);
+    assert(zzapp_test_loader_reloc_entries_last() <=
+           LOADER_RELOC_APPLY_ENTRIES);
+    if (work == 0U)
+        return;
+    switch (kind) {
+    case TEST_WORK_KIND_ZERO:
+        assert(work <= LOADER_ZERO_CHUNK_BYTES);
+        break;
+    case TEST_WORK_KIND_COPY:
+        assert(work <= LOADER_COPY_CHUNK_BYTES);
+        break;
+    case TEST_WORK_KIND_MAP:
+        assert(work <= LOADER_MAP_CHUNK_BYTES);
+        break;
+    case TEST_WORK_KIND_RELOC:
+        assert(work <= LOADER_RELOC_PREPARE_ENTRIES * 16U);
+        break;
+    default:
+        assert(0);
+    }
+}
+
 static int load_end(uint8_t image[IMAGE_BYTES])
 {
     int rc;
@@ -226,12 +274,8 @@ static int load_end(uint8_t image[IMAGE_BYTES])
     assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == ZZ_OK);
     do {
         rc = zzapp_loader_end();
-        if (rc == ZZAPP_LOADER_IN_PROGRESS) {
-            assert(zzapp_test_loader_zero_last_bytes() <=
-                   LOADER_WORK_CHUNK_BYTES);
-            assert(zzapp_test_loader_work_last_bytes() <=
-                   LOADER_WORK_CHUNK_BYTES);
-        }
+        if (rc == ZZAPP_LOADER_IN_PROGRESS)
+            assert_pass_work_bounded();
         passes++;
     } while (rc == ZZAPP_LOADER_IN_PROGRESS);
     if (rc == ZZ_OK)
@@ -246,7 +290,9 @@ static void test_large_load_is_bounded_and_exact(void)
     const uint32_t image_bytes = LOAD_OFF + filesz;
     uint8_t *image = malloc(image_bytes);
     uint32_t offset;
-    uint32_t steps = 0U;
+    uint32_t passes = 0U;
+    uint32_t max_work = 0U;
+    uint32_t max_zero = 0U;
     int rc;
 
     assert(image != NULL);
@@ -272,15 +318,21 @@ static void test_large_load_is_bounded_and_exact(void)
     do {
         rc = zzapp_loader_end();
         if (rc == ZZAPP_LOADER_IN_PROGRESS) {
-            uint32_t work = zzapp_test_loader_work_last_bytes();
-
-            assert(work <= LOADER_WORK_CHUNK_BYTES);
-            if (work != 0U)
-                steps++;
+            assert_pass_work_bounded();
+            if (zzapp_test_loader_work_last_bytes() > max_work)
+                max_work = zzapp_test_loader_work_last_bytes();
+            if (zzapp_test_loader_zero_last_bytes() > max_zero)
+                max_zero = zzapp_test_loader_zero_last_bytes();
         }
+        passes++;
     } while (rc == ZZAPP_LOADER_IN_PROGRESS);
     assert(rc == ZZ_OK);
-    assert(steps > 7U);
+    /* The per-pass budget splits this 2 MiB image with 1 MiB of .bss
+     * across many passes of every phase. */
+    assert(passes > 30U);
+    assert(max_zero > LOADER_ZERO_CHUNK_BYTES / 2U);
+    printf("large load: %u passes, max work %u bytes, max zero %u bytes\n",
+           passes, max_work, max_zero);
     assert(memcmp(app_memory(0U, LOAD_OFF), image + LOAD_OFF, filesz) == 0);
     for (offset = 0U; offset < memsz - filesz; offset++)
         assert(app_memory(0U, LOAD_OFF + filesz)[offset] == 0U);
@@ -400,6 +452,130 @@ static void test_relocation_validation_is_sliced(void)
     free(image);
 }
 
+#define SPAN_PACKED_RELOCS 1600U
+#define SPAN_STRIDED_RELOCS 448U
+#define SPAN_RELOC_COUNT (SPAN_PACKED_RELOCS + SPAN_STRIDED_RELOCS)
+
+static uint32_t span_reloc_offset(uint32_t i)
+{
+    if (i < SPAN_PACKED_RELOCS)
+        return LOAD_OFF + i * 8U;
+    return (1U << 20) + (i - SPAN_PACKED_RELOCS) * 0x1000U;
+}
+
+static void make_span_relocation_image(uint8_t *image, uint32_t bytes)
+{
+    uint32_t shoff = RELA_OFF + SPAN_RELOC_COUNT * 12U;
+    uint32_t i;
+    uint8_t *sh;
+
+    assert(bytes >= shoff + 40U);
+    make_image(image);
+    put32(image + 32U, shoff);
+    put32(image + PHOFF + 16U, bytes - LOAD_OFF);
+    put32(image + PHOFF + 20U, 3U << 20);
+    put32(image + NOTE_OFF + 28U, 3U);
+    for (i = 0U; i < SPAN_RELOC_COUNT; i++) {
+        uint8_t *rel = image + RELA_OFF + i * 12U;
+        uint32_t off = span_reloc_offset(i);
+
+        put32(rel + 0U, off);
+        put32(rel + 4U, 23U);
+        put32(rel + 8U, off);
+    }
+    sh = image + shoff;
+    put32(sh + 4, 4);
+    put32(sh + 16, RELA_OFF);
+    put32(sh + 20, SPAN_RELOC_COUNT * 12U);
+    put32(sh + 36, 12);
+}
+
+static void test_relocation_passes_are_bounded_and_flushed(void)
+{
+    const uint32_t bytes = RELA_OFF + SPAN_RELOC_COUNT * 12U + 40U;
+    uint8_t *image = malloc(bytes);
+    uint32_t applied_total = 0U;
+    uint32_t apply_flushes = 0U;
+    uint32_t seen_flushes = 0U;
+    uint32_t max_entries = 0U;
+    uint32_t max_span = 0U;
+    uint32_t card;
+    uint32_t offset;
+    uint32_t i;
+    int rc = ZZAPP_LOADER_IN_PROGRESS;
+
+    assert(image != NULL);
+    zzapp_boot_init();
+    make_span_relocation_image(image, bytes);
+    assert(zzapp_loader_begin() == ZZ_OK);
+    for (offset = 0U; offset < bytes;) {
+        uint32_t chunk = bytes - offset;
+
+        if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
+            chunk = LOADER_UPLOAD_CHUNK_BYTES;
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        offset += chunk;
+    }
+    while (rc == ZZAPP_LOADER_IN_PROGRESS) {
+        uint32_t entries;
+        uint32_t flushes;
+        uint32_t j;
+
+        rc = zzapp_loader_end();
+        entries = zzapp_test_loader_reloc_entries_last();
+        flushes = zzapp_test_loader_flush_count();
+        if (entries > max_entries)
+            max_entries = entries;
+        assert(entries <= LOADER_RELOC_APPLY_ENTRIES);
+        if (entries != 0U) {
+            /* Every word written this pass is flushed this pass, after
+             * the write: the flush may not slip to a later pass, or the
+             * app's I-side could read a stale word. */
+            apply_flushes += flushes - seen_flushes;
+            for (j = 0U; j < entries; j++) {
+                uintptr_t word = (uintptr_t)app_memory(
+                    0U, span_reloc_offset(applied_total + j));
+                uint32_t f;
+                int covered = 0;
+
+                for (f = seen_flushes; f < flushes; f++) {
+                    uintptr_t addr;
+                    uint32_t len;
+
+                    assert(zzapp_test_loader_flush_range(f, &addr, &len));
+                    if (len > max_span)
+                        max_span = len;
+                    if (word >= addr && word + 4U <= addr + len)
+                        covered = 1;
+                }
+                assert(covered);
+            }
+            applied_total += entries;
+        }
+        seen_flushes = flushes;
+    }
+    assert(rc == ZZ_OK);
+    assert(applied_total == SPAN_RELOC_COUNT);
+    assert(zzapp_test_loader_flush_dropped() == 0U);
+    assert(max_entries > 1U);
+    /* Packed relocations share one flush per span instead of one per
+     * word: fewer than half as many flush calls as relocated words. */
+    assert(apply_flushes * 2U < SPAN_RELOC_COUNT);
+    /* No span grew wider than one pass of packed words plus slack. */
+    assert(max_span <= LOADER_RELOC_APPLY_ENTRIES * 8U + 64U);
+    card = zzapp_test_arena_card();
+    for (i = 0U; i < SPAN_RELOC_COUNT; i++) {
+        uint32_t off = span_reloc_offset(i);
+
+        assert(get32(app_memory(0U, off)) == card + off);
+    }
+    printf("span relocs: %u entries, %u flushes, max span %u bytes, "
+           "max entries/pass %u\n",
+           SPAN_RELOC_COUNT, apply_flushes, max_span, max_entries);
+    zzapp_loader_release();
+    free(image);
+}
+
 int main(void)
 {
     uint8_t image[IMAGE_BYTES];
@@ -426,6 +602,7 @@ int main(void)
     test_large_load_is_bounded_and_exact();
     test_abort_releases_each_loader_slice();
     test_relocation_validation_is_sliced();
+    test_relocation_passes_are_bounded_and_flushed();
     zzapp_boot_init();
     make_image(image);
     assert(zzapp_loader_begin() == ZZ_OK);
