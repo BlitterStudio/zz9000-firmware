@@ -125,7 +125,9 @@ typedef struct {
 
 typedef struct {
   taskq_desc_t descs[TASKQ_CAPACITY];
-  uint32_t     enqueue_cursor;  /* single-producer hint (core 0 only) */
+  uint32_t     enqueue_cursor;      /* single-producer hint (core 0 only) */
+  uint32_t     claim_cursor;        /* core-1 task rotation */
+  uint32_t     short_claim_cursor;  /* core-0 short-task rotation */
 } taskq_t;
 
 typedef struct {                /* coherent control block at the queue region */
@@ -204,6 +206,8 @@ int  taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                    const void *op_params, uint32_t param_len);
 int  taskq_claim_any(taskq_t *q);
 int  taskq_claim_short(taskq_t *q);
+/* A bounded task slice finished without a client-visible result. */
+void taskq_requeue(taskq_t *q, int slot);
 void taskq_complete(taskq_t *q, int slot, uint16_t status,
                     const uint8_t *payload, uint16_t payload_len);
 void taskq_fail(taskq_t *q, int slot, uint16_t status);

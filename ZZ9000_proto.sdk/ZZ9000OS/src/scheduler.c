@@ -102,6 +102,8 @@ void taskq_init(taskq_t *q)
     q->descs[i].state = TASK_FREE;
   }
   q->enqueue_cursor = 0;
+  q->claim_cursor = 0;
+  q->short_claim_cursor = 0;
 }
 
 void taskq_shared_boot_init(taskq_shared_t *sh)
@@ -286,10 +288,14 @@ uint32_t taskq_doorbell_drain(volatile uint32_t *pending,
 int taskq_claim_any(taskq_t *q)
 {
   uint32_t i;
+  uint32_t cursor = __atomic_load_n(&q->claim_cursor, __ATOMIC_RELAXED);
   for (i = 0; i < TASKQ_CAPACITY; i++) {
-    volatile uint32_t *s = &q->descs[i].state;
+    uint32_t idx = (cursor + i) % TASKQ_CAPACITY;
+    volatile uint32_t *s = &q->descs[idx].state;
     if (*s == TASK_QUEUED && taskq_cas_u32(s, TASK_QUEUED, TASK_CLAIMED)) {
-      return (int)i;
+      __atomic_store_n(&q->claim_cursor, (idx + 1U) % TASKQ_CAPACITY,
+                       __ATOMIC_RELAXED);
+      return (int)idx;
     }
   }
   return -1;
@@ -298,24 +304,32 @@ int taskq_claim_any(taskq_t *q)
 int taskq_claim_short(taskq_t *q)
 {
   uint32_t i;
+  uint32_t cursor = __atomic_load_n(&q->short_claim_cursor,
+                                    __ATOMIC_RELAXED);
   for (i = 0; i < TASKQ_CAPACITY; i++) {
-    if (q->descs[i].state != TASK_QUEUED) {
+    uint32_t idx = (cursor + i) % TASKQ_CAPACITY;
+    if (q->descs[idx].state != TASK_QUEUED) {
       continue;
     }
-    /* Acquire: order the cls load after observing TASK_QUEUED, pairing with the
-     * dmb-release store of state in taskq_enqueue. Without it the weakly-ordered
-     * A9 could pair a freshly published QUEUED state with a stale cls left over
-     * from this slot's previous task -- a SHORT->LONG reuse would then read
-     * cls == TASK_SHORT and run a LONG crypto op inline on core 0. */
+    /* Acquire: order cls after observing TASK_QUEUED, pairing with enqueue. */
     taskq_acquire_barrier();
-    if (q->descs[i].cls == (uint32_t)TASK_SHORT) {
-      volatile uint32_t *s = &q->descs[i].state;
+    if (q->descs[idx].cls == (uint32_t)TASK_SHORT) {
+      volatile uint32_t *s = &q->descs[idx].state;
       if (taskq_cas_u32(s, TASK_QUEUED, TASK_CLAIMED)) {
-        return (int)i;
+        __atomic_store_n(&q->short_claim_cursor, (idx + 1U) % TASKQ_CAPACITY,
+                         __ATOMIC_RELAXED);
+        return (int)idx;
       }
     }
   }
   return -1;
+}
+
+void taskq_requeue(taskq_t *q, int slot)
+{
+  if (!q || slot < 0 || slot >= (int)TASKQ_CAPACITY)
+    return;
+  taskq_store_release(&q->descs[slot].state, TASK_QUEUED);
 }
 
 /* ---- completion transitions ---- */

@@ -9,7 +9,12 @@
 #include "sdk_jpeg.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#ifndef SDK_JPEG_TEST_ROWS_PER_STEP
+#define SDK_JPEG_TEST_ROWS_PER_STEP 4U
+#endif
 
 static const uint8_t jpeg_2x2[] = {
 	0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
@@ -131,14 +136,345 @@ static int near_white(const uint8_t *pixel)
 	       pixel[2] > 200U && pixel[3] == 0xff;
 }
 
+static int make_solid_rgb_jpeg_vector(uint32_t width, uint32_t height,
+				      int progressive, int noise,
+				      uint8_t **jpeg, unsigned long *jpeg_length)
+{
+	struct jpeg_compress_struct cinfo;
+	struct jpeg_error_mgr error;
+	uint8_t *row;
+	JSAMPROW rows;
+	uint32_t y;
+	int ok = 0;
+
+	row = malloc(width * 3U);
+	if (!row)
+		return 0;
+	memset(row, 0x5a, width * 3U);
+	rows = row;
+	*jpeg = NULL;
+	*jpeg_length = 0U;
+	cinfo.err = jpeg_std_error(&error);
+	jpeg_create_compress(&cinfo);
+	jpeg_mem_dest(&cinfo, jpeg, jpeg_length);
+	cinfo.image_width = width;
+	cinfo.image_height = height;
+	cinfo.input_components = 3;
+	cinfo.in_color_space = JCS_RGB;
+	jpeg_set_defaults(&cinfo);
+	if (progressive)
+		jpeg_simple_progression(&cinfo);
+	jpeg_start_compress(&cinfo, TRUE);
+	for (y = 0U; y < height; y++) {
+		uint32_t x;
+
+		if (noise)
+			for (x = 0U; x < width * 3U; x++)
+				row[x] = (uint8_t)(x * 37U + y * 19U);
+		jpeg_write_scanlines(&cinfo, &rows, 1U);
+	}
+	jpeg_finish_compress(&cinfo);
+	ok = *jpeg != NULL && *jpeg_length != 0U;
+	jpeg_destroy_compress(&cinfo);
+	free(row);
+	return ok;
+}
+
+static int test_large_decode_is_sliced(void)
+{
+	struct SDKJpegDecode decode = {0};
+	uint8_t *jpeg;
+	uint8_t *sliced;
+	uint8_t *reference;
+	unsigned long jpeg_length;
+	uint32_t rows;
+	uint32_t steps = 0U;
+	uint32_t width;
+	uint32_t height;
+	uint32_t bytes_written;
+	int complete = 0;
+	int result = 1;
+
+	if (!make_solid_rgb_jpeg_vector(256U, 128U, 0, 0, &jpeg, &jpeg_length))
+		return result;
+	sliced = calloc(256U * 128U, 4U);
+	reference = calloc(256U * 128U, 4U);
+	if (!sliced || !reference)
+		goto out;
+	sdk_jpeg_decode_init(&decode);
+	if (!sdk_jpeg_decode_begin(&decode, jpeg, jpeg_length,
+	                           sliced, 256U, 128U, 256U * 4U,
+	                           SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U))
+		goto out;
+	while (!complete) {
+		if (!sdk_jpeg_decode_step(&decode, SDK_JPEG_TEST_ROWS_PER_STEP,
+		                          &rows, &complete) ||
+		    rows == 0U || rows > SDK_JPEG_TEST_ROWS_PER_STEP)
+			goto out_destroy;
+		steps++;
+	}
+	if (steps != (128U / SDK_JPEG_TEST_ROWS_PER_STEP) ||
+	    !sdk_jpeg_decode_to_surface(jpeg, jpeg_length,
+	                                reference, 256U, 128U, 256U * 4U,
+	                                SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U,
+	                                &width, &height, &bytes_written) ||
+	    width != 256U || height != 128U ||
+	    bytes_written != 256U * 128U * 4U ||
+	    memcmp(sliced, reference, 256U * 128U * 4U) != 0)
+		goto out;
+	result = 0;
+	goto out;
+
+out_destroy:
+	sdk_jpeg_decode_destroy(&decode);
+out:
+	free(reference);
+	free(sliced);
+	free(jpeg);
+	return result;
+}
+
+static int test_wide_progressive_decode_is_sliced(void)
+{
+	struct SDKJpegDecode decode = {0};
+	uint8_t *jpeg;
+	uint8_t *sliced;
+	uint8_t *reference;
+	unsigned long jpeg_length;
+	uint32_t rows;
+	uint32_t steps = 0U;
+	uint32_t input_only_steps = 0U;
+	uint32_t width = 0U;
+	uint32_t height = 0U;
+	uint32_t bytes_written = 0U;
+	int complete = 0;
+	int result = 1;
+
+	if (!make_solid_rgb_jpeg_vector(4096U, 64U, 1, 1, &jpeg, &jpeg_length))
+		return result;
+	sliced = calloc(4096U * 64U, 4U);
+	reference = calloc(4096U * 64U, 4U);
+	if (!sliced || !reference)
+		goto out;
+	sdk_jpeg_decode_init(&decode);
+	if (!sdk_jpeg_decode_begin(&decode, jpeg, jpeg_length,
+	                           sliced, 4096U, 64U, 4096U * 4U,
+	                           SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U))
+		goto out;
+	while (!complete) {
+		if (!sdk_jpeg_decode_step(&decode, SDK_JPEG_TEST_ROWS_PER_STEP,
+		                          &rows, &complete) ||
+		    rows > SDK_JPEG_TEST_ROWS_PER_STEP ||
+		    sdk_jpeg_decode_input_bytes(&decode) > 4096U) {
+			printf("wide progressive step bounds failed: rows=%u input=%u\n",
+			       rows, sdk_jpeg_decode_input_bytes(&decode));
+			goto out_destroy;
+		}
+		if (rows == 0U && !complete)
+			input_only_steps++;
+		if (++steps > 512U) {
+			printf("wide progressive decode did not complete\n");
+			goto out_destroy;
+		}
+	}
+	if (steps == 0U || input_only_steps == 0U ||
+	    !sdk_jpeg_decode_to_surface(jpeg, jpeg_length,
+	                                reference, 4096U, 64U, 4096U * 4U,
+	                                SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U,
+	                                &width, &height, &bytes_written) ||
+	    width != 4096U || height != 64U ||
+	    bytes_written != 4096U * 64U * 4U ||
+	    memcmp(sliced, reference, 4096U * 64U * 4U) != 0) {
+		printf("wide progressive output mismatch: steps=%u %ux%u bytes=%u\n",
+		       steps, width, height, bytes_written);
+		goto out;
+	}
+	result = 0;
+	goto out;
+
+out_destroy:
+	sdk_jpeg_decode_destroy(&decode);
+out:
+	free(reference);
+	free(sliced);
+	free(jpeg);
+	return result;
+}
+
+static int test_progressive_work_is_sliced(void)
+{
+	struct SDKJpegDecode decode = {0};
+	uint8_t *jpeg;
+	uint8_t *sliced;
+	uint8_t *reference;
+	unsigned long jpeg_length;
+	uint32_t rows;
+	uint32_t steps = 0U;
+	uint32_t idle_steps = 0U;
+	uint32_t monitor_steps = 0U;
+	uint32_t width = 0U;
+	uint32_t height = 0U;
+	uint32_t bytes_written = 0U;
+	int complete = 0;
+
+	/* A solid progressive frame compresses to almost nothing, so the
+	 * input budget never suspends the preload: only the work bound can
+	 * cut the coefficient passes into steps.  512 rows is 32 iMCU rows
+	 * per scan, exactly one step's work allowance. */
+	if (!make_solid_rgb_jpeg_vector(4096U, 512U, 1, 0, &jpeg,
+	                                &jpeg_length))
+		return 1;
+	sliced = calloc(4096U * 512U, 4U);
+	reference = calloc(4096U * 512U, 4U);
+	if (!sliced || !reference)
+		goto out;
+	sdk_jpeg_decode_init(&decode);
+	if (!sdk_jpeg_decode_begin(&decode, jpeg, jpeg_length,
+	                           sliced, 4096U, 512U, 4096U * 4U,
+	                           SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U))
+		goto out;
+	while (!complete) {
+		if (!sdk_jpeg_decode_step(&decode, 4U, &rows, &complete) ||
+		    rows > 4U ||
+		    sdk_jpeg_decode_input_bytes(&decode) > 4096U)
+			goto out_destroy;
+		if (++steps > 2048U)
+			goto out_destroy;
+		if (sdk_jpeg_decode_monitor_suspended(&decode)) {
+			idle_steps++;
+			monitor_steps++;
+		}
+	}
+	/* Each scan's preload must suspend on the 32-iMCU-row work bound
+	 * (the whole solid file fits one input budget, so input never
+	 * suspends); without that bound no step ends monitor-suspended. */
+	if (monitor_steps < 2U ||
+	    !sdk_jpeg_decode_to_surface(jpeg, jpeg_length, reference, 4096U,
+	                                512U, 4096U * 4U,
+	                                SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U,
+	                                &width, &height, &bytes_written) ||
+	    memcmp(sliced, reference, 4096U * 512U * 4U) != 0) {
+		printf("progressive work bound not enforced: steps=%u "
+		       "idle=%u monitor=%u\n", steps, idle_steps,
+		       monitor_steps);
+		goto out;
+	}
+	printf("progressive work steps=%u\n", steps);
+	return 0;
+
+out_destroy:
+	sdk_jpeg_decode_destroy(&decode);
+out:
+	free(reference);
+	free(sliced);
+	free(jpeg);
+	return 1;
+}
+
+static int test_app_skip_is_resumable(void)
+{
+	struct SDKJpegDecode decode = {0};
+	uint8_t *base;
+	uint8_t *jpeg;
+	uint8_t *sliced;
+	uint8_t *reference;
+	unsigned long base_length;
+	uint32_t total_length = 0U;
+	uint32_t payload = 8192U;
+	uint32_t rows;
+	uint32_t width = 0U;
+	uint32_t height = 0U;
+	uint32_t bytes_written = 0U;
+	int complete = 0;
+
+	/* Markers exercising every skip shape: a small APP1 and a COM that
+	 * fit inside one exposed window, one APPn spanning a window
+	 * boundary, and one far larger than the whole step allowance whose
+	 * dropped tail would end the file at a fake EOI. */
+	static const uint32_t app1_bytes = 200U;
+	static const uint32_t com_bytes = 100U;
+	static const uint32_t span_bytes = 4096U + 100U;
+	uint32_t extra = (app1_bytes + 4U) + (com_bytes + 4U) +
+	                 (span_bytes + 4U) + (payload + 4U);
+	uint32_t at = 2U;
+
+	if (!make_solid_rgb_jpeg_vector(256U, 64U, 0, 0, &base, &base_length))
+		return 1;
+	jpeg = malloc(base_length + extra);
+	sliced = calloc(256U * 64U, 4U);
+	reference = calloc(256U * 64U, 4U);
+	if (!jpeg || !sliced || !reference)
+		goto out;
+	jpeg[0] = base[0];
+	jpeg[1] = base[1];
+	jpeg[at] = 0xffU; jpeg[at + 1] = 0xe1U;
+	jpeg[at + 2] = (uint8_t)(((app1_bytes + 2U) >> 8) & 0xffU);
+	jpeg[at + 3] = (uint8_t)((app1_bytes + 2U) & 0xffU);
+	memset(jpeg + at + 4, 0x5aU, app1_bytes);
+	at += app1_bytes + 4U;
+	jpeg[at] = 0xffU; jpeg[at + 1] = 0xfeU;
+	jpeg[at + 2] = (uint8_t)(((com_bytes + 2U) >> 8) & 0xffU);
+	jpeg[at + 3] = (uint8_t)((com_bytes + 2U) & 0xffU);
+	memset(jpeg + at + 4, 0x5aU, com_bytes);
+	at += com_bytes + 4U;
+	jpeg[at] = 0xffU; jpeg[at + 1] = 0xe2U;
+	jpeg[at + 2] = (uint8_t)(((span_bytes + 2U) >> 8) & 0xffU);
+	jpeg[at + 3] = (uint8_t)((span_bytes + 2U) & 0xffU);
+	memset(jpeg + at + 4, 0x5aU, span_bytes);
+	at += span_bytes + 4U;
+	jpeg[at] = 0xffU; jpeg[at + 1] = 0xe3U;
+	jpeg[at + 2] = (uint8_t)(((payload + 2U) >> 8) & 0xffU);
+	jpeg[at + 3] = (uint8_t)((payload + 2U) & 0xffU);
+	memset(jpeg + at + 4, 0x5aU, payload);
+	/* A dropped skip tail makes next_marker resync through the filler;
+	 * the trailing fake EOI ends the file before the real SOF. */
+	jpeg[at + 2U + payload] = 0xffU;
+	jpeg[at + 3U + payload] = 0xd9U;
+	at += payload + 4U;
+	memcpy(jpeg + at, base + 2U, base_length - 2U);
+	total_length = base_length - 2U + at;
+	sdk_jpeg_decode_init(&decode);
+	if (!sdk_jpeg_decode_begin(&decode, jpeg, total_length,
+	                           sliced, 256U, 64U, 256U * 4U,
+	                           SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U))
+		goto out;
+	while (!complete) {
+		if (!sdk_jpeg_decode_step(&decode, 4U, &rows, &complete))
+			goto out_destroy;
+	}
+	if (!sdk_jpeg_decode_to_surface(jpeg, total_length,
+	                                reference, 256U, 64U, 256U * 4U,
+	                                SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U,
+	                                &width, &height, &bytes_written) ||
+	    memcmp(sliced, reference, 256U * 64U * 4U) != 0) {
+		printf("app-skip output mismatch\n");
+		goto out;
+	}
+	return 0;
+
+out_destroy:
+	sdk_jpeg_decode_destroy(&decode);
+out:
+	free(reference);
+	free(sliced);
+	free(jpeg);
+	free(base);
+	return 1;
+}
+
 int main(void)
 {
 	uint8_t dst[4U * 4U * 4U];
+	uint8_t sliced[4U * 4U * 4U];
 	uint8_t rgb[4U * 4U * 3U];
+	struct SDKJpegDecode decode = {0};
 	uint32_t width = 0;
 	uint32_t height = 0;
 	uint32_t bytes_written = 0;
+	uint32_t rows;
+	uint32_t steps = 0U;
 	uint32_t backend_flags;
+	int complete = 0;
 
 	if (strcmp(sdk_jpeg_backend_name(), "libjpeg-turbo") != 0) {
 		printf("unexpected JPEG backend '%s'\n", sdk_jpeg_backend_name());
@@ -223,6 +559,47 @@ int main(void)
 	if (!near_white(&dst[(2U * 16U) + (2U * 4U)])) {
 		printf("bottom-right pixel was not white\n");
 		return 6;
+	}
+
+	memset(sliced, 0, sizeof(sliced));
+	sdk_jpeg_decode_init(&decode);
+	if (!sdk_jpeg_decode_begin(&decode, jpeg_2x2, sizeof(jpeg_2x2),
+	                           sliced, 4U, 4U, 16U,
+	                           SDK_SURFACE_FORMAT_BGRA8888, 1U, 1U)) {
+		printf("sliced jpeg begin failed\n");
+		return 22;
+	}
+	while (!complete) {
+		if (!sdk_jpeg_decode_step(&decode, 1U, &rows, &complete) ||
+		    rows != 1U) {
+			printf("sliced jpeg step exceeded one row\n");
+			return 23;
+		}
+		steps++;
+	}
+	if (steps != 2U || memcmp(sliced, dst, sizeof(dst)) != 0) {
+		printf("sliced jpeg output was not byte-exact\n");
+		return 24;
+	}
+
+	if (test_large_decode_is_sliced()) {
+		printf("large JPEG decode was not sliced byte-exactly\n");
+		return 25;
+	}
+
+	if (test_wide_progressive_decode_is_sliced()) {
+		printf("wide progressive JPEG decode was not sliced byte-exactly\n");
+		return 26;
+	}
+
+	if (test_progressive_work_is_sliced()) {
+		printf("progressive work was not sliced\n");
+		return 27;
+	}
+
+	if (test_app_skip_is_resumable()) {
+		printf("APP skip was not resumable\n");
+		return 28;
 	}
 
 	if (sdk_jpeg_decode_to_surface(jpeg_2x2, sizeof(jpeg_2x2),

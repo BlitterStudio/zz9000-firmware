@@ -19,6 +19,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include "memorymap.h"
+#include "host_card_pool.h"
 #include "sdk_smp_lock.h"
 
 /*
@@ -39,6 +40,29 @@ static int host_map_session_region(void)
 		return 1;
 	}
 
+	return 0;
+}
+
+static int test_one_shot_jpeg_uses_decode_heap_owner(void)
+{
+	struct SDKJpegDecode decode;
+	uint8_t dst[4U * 4U * 4U];
+	void *allocation;
+	size_t card_before = host_card_pool_used();
+
+	sdk_jpeg_decode_init(&decode);
+	if (!sdk_jpeg_decode_begin(&decode, jpeg_2x2, sizeof(jpeg_2x2),
+	                           dst, 4U, 4U, 16U,
+	                           SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U))
+		return 1;
+	allocation = sdk_image_decode_alloc(decode.cinfo.client_data, 64U);
+	if (!allocation || host_card_pool_used() != card_before) {
+		sdk_image_decode_free(allocation);
+		sdk_jpeg_decode_destroy(&decode);
+		return 2;
+	}
+	sdk_image_decode_free(allocation);
+	sdk_jpeg_decode_destroy(&decode);
 	return 0;
 }
 
@@ -1682,12 +1706,30 @@ out:
 	return step;
 }
 
+
 int main(void)
 {
 	int result;
 
 	if (host_map_session_region() != 0)
 		return 1;
+
+	result = test_one_shot_jpeg_uses_decode_heap_owner();
+	if (result) {
+		printf("one-shot JPEG allocator ownership failed: %d\n", result);
+		return 2 + result;
+	}
+	result = sdk_jpeg_vector_owner_main();
+	if (result) {
+		printf("JPEG slice vector failed: %d\n", result);
+		return 4 + result;
+	}
+
+	result = test_direct_scale_row_uses_bilinear_filter();
+	if (result) {
+		printf("direct row scaler failed: %d\n", result);
+		return 5 + result;
+	}
 
 	result = test_direct_scale_row_uses_bilinear_filter();
 	if (result) {

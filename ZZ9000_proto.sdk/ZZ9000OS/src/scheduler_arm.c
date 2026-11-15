@@ -529,7 +529,11 @@ static uint16_t scheduler_run_slot(taskq_desc_t *d)
   uint32_t len = 0;
   int slot = (int)(d - sh->queue.descs);
   uint16_t status = sdk_mailbox_run_offload_task(d, payload, &len);
-  taskq_complete(&sh->queue, slot, status, payload, (uint16_t)len);
+
+  if (status == SDK_TASK_IN_PROGRESS)
+    taskq_requeue(&sh->queue, slot);
+  else
+    taskq_complete(&sh->queue, slot, status, payload, (uint16_t)len);
   return status;
 }
 
@@ -698,6 +702,7 @@ void scheduler_core1_worker(void)
       break;
   }
   scheduler_core1_minigl_init(sh);
+  sdk_mailbox_reset_jpeg_tasks();
   (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
 
   for (;;) {

@@ -36,6 +36,9 @@
 #define SDK_STATUS_MODULE_MISSING      11U
 #define SDK_STATUS_MODULE_MISMATCH     12U
 #define SDK_STATUS_INTERNAL_ERROR      0xffffU
+/* Worker-private result: scheduler requeues the claimed descriptor and never
+ * exposes this value to a mailbox client. */
+#define SDK_TASK_IN_PROGRESS           0xfffeU
 
 #define SDK_CAP_MAILBOX                (1U << 0)
 #define SDK_CAP_IRQ_COMPLETION         (1U << 1)
@@ -1388,6 +1391,9 @@ uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
 uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
                                       uint8_t *result_payload,
                                       uint32_t *result_len);
+/* Core-1 restart drops resumable JPEG task contexts after their tracked heap
+ * allocations have been reclaimed. */
+void sdk_mailbox_reset_jpeg_tasks(void);
 
 /*
  * Post a deferred completion for a task the core-1 scheduler finished (see

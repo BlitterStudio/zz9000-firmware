@@ -789,10 +789,34 @@ struct jpeg_op_params {
 	uint16_t dst_width, dst_height;   /* decode-bounds output rect */
 	uint16_t dst_surf_w, dst_surf_h;  /* surface dims (flush bounds) */
 	uint16_t flags;                   /* reserved, 0 */
+	uint32_t state_index;             /* core-1 decoder slot + 1 */
 };
 
 typedef char jpeg_op_params_size_check[
     (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
+#define SDK_JPEG_DECODE_ROWS_PER_SLICE 4U
+#define SDK_JPEG_CACHE_CHUNK_BYTES (64U * 1024U)
+
+struct jpeg_task_state {
+	struct SDKJpegDecode decode;
+	uint32_t src_cache_offset;
+	uint32_t dst_flush_offset;
+	uint32_t dst_flush_bytes;
+	uint8_t active;
+	uint8_t begun;
+	uint8_t decoded;
+};
+
+static struct jpeg_task_state jpeg_task_states[TASKQ_CAPACITY];
+
+void sdk_mailbox_reset_jpeg_tasks(void)
+{
+	uint32_t i;
+
+	for (i = 0U; i < TASKQ_CAPACITY; i++)
+		jpeg_task_states[i].active = 0U;
+}
 
 /* One-shot minimp3 retains an index over the supplied complete buffer. Keep
  * it bounded; callers needing arbitrarily long media use AUDIO_STREAM_*. */
@@ -6593,37 +6617,104 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_DECODE_JPEG: {
-		const struct jpeg_op_params *p =
-		    (const struct jpeg_op_params *)d->op_params;
+		struct jpeg_op_params *p =
+		    (struct jpeg_op_params *)(void *)d->op_params;
 		volatile struct SDKImageDecodeResultPayload *reply;
-		struct SDKSurface dst;
-		uint32_t image_width = 0;
-		uint32_t image_height = 0;
-		uint32_t bytes_written = 0;
+		struct jpeg_task_state *state;
+		uint32_t rows;
+		uint32_t image_width;
+		uint32_t image_height;
+		uint32_t bytes_written;
+		uint32_t cache_bytes;
+		int complete;
 
-		Xil_DCacheInvalidateRange((INTPTR)p->src_addr, p->src_len);
-		if (!sdk_jpeg_decode_to_surface(
-		            (const uint8_t *)(uintptr_t)p->src_addr, p->src_len,
-		            (uint8_t *)(uintptr_t)p->dst_addr,
-		            p->dst_width, p->dst_height, p->dst_pitch,
-		            p->output_format, p->dst_x, p->dst_y,
-		            &image_width, &image_height, &bytes_written)) {
-			*result_len = 0;
-			return SDK_STATUS_IO_ERROR;
+		if (p->state_index == 0U) {
+			uint32_t i;
+
+			for (i = 0U; i < TASKQ_CAPACITY; i++) {
+				if (!jpeg_task_states[i].active)
+					break;
+			}
+			if (i == TASKQ_CAPACITY) {
+				*result_len = 0U;
+				return SDK_STATUS_BUSY;
+			}
+			state = &jpeg_task_states[i];
+			memset(state, 0, sizeof(*state));
+			sdk_jpeg_decode_init(&state->decode);
+			state->active = 1U;
+			p->state_index = i + 1U;
 		}
-
-		/* Just enough of the dst surface for flush_surface_rect;
-		 * geometry was resolved and validated on core 0. ARM-local
-		 * destinations never arrive here (excluded from deferral). */
-		memset(&dst, 0, sizeof(dst));
-		dst.address = p->dst_addr;
-		dst.width = p->dst_surf_w;
-		dst.height = p->dst_surf_h;
-		dst.pitch = p->dst_pitch;
-		dst.format = p->output_format;
-		dst.length = (uint32_t)p->dst_pitch * p->dst_surf_h;
-		flush_surface_rect(&dst, p->dst_x, p->dst_y,
-		                   p->dst_width, p->dst_height);
+		if (p->state_index > TASKQ_CAPACITY) {
+			*result_len = 0U;
+			return SDK_STATUS_INTERNAL_ERROR;
+		}
+		state = &jpeg_task_states[p->state_index - 1U];
+		if (!state->active) {
+			*result_len = 0U;
+			return SDK_STATUS_INTERNAL_ERROR;
+		}
+		if (state->src_cache_offset < p->src_len) {
+			cache_bytes = p->src_len - state->src_cache_offset;
+			if (cache_bytes > SDK_JPEG_CACHE_CHUNK_BYTES)
+				cache_bytes = SDK_JPEG_CACHE_CHUNK_BYTES;
+			Xil_DCacheInvalidateRange((INTPTR)p->src_addr +
+			                          state->src_cache_offset, cache_bytes);
+			state->src_cache_offset += cache_bytes;
+			*result_len = 0U;
+			return SDK_TASK_IN_PROGRESS;
+		}
+		if (!state->begun) {
+			if (!sdk_jpeg_decode_begin(
+				    &state->decode,
+				    (const uint8_t *)(uintptr_t)p->src_addr, p->src_len,
+				    (uint8_t *)(uintptr_t)p->dst_addr,
+				    p->dst_width, p->dst_height, p->dst_pitch,
+				    p->output_format, p->dst_x, p->dst_y)) {
+				state->active = 0U;
+				p->state_index = 0U;
+				*result_len = 0U;
+				return SDK_STATUS_IO_ERROR;
+			}
+			state->begun = 1U;
+		}
+		if (!state->decoded) {
+			if (!sdk_jpeg_decode_step(&state->decode,
+			                          SDK_JPEG_DECODE_ROWS_PER_SLICE, &rows,
+			                          &complete)) {
+				sdk_jpeg_decode_destroy(&state->decode);
+				state->active = 0U;
+				p->state_index = 0U;
+				*result_len = 0U;
+				return SDK_STATUS_IO_ERROR;
+			}
+			if (!complete) {
+				*result_len = 0U;
+				return SDK_TASK_IN_PROGRESS;
+			}
+			state->decoded = 1U;
+			state->dst_flush_bytes =
+				(state->decode.height - 1U) * p->dst_pitch +
+				state->decode.width * state->decode.bytes_per_pixel;
+		}
+		if (state->dst_flush_offset < state->dst_flush_bytes) {
+			cache_bytes = state->dst_flush_bytes - state->dst_flush_offset;
+			if (cache_bytes > SDK_JPEG_CACHE_CHUNK_BYTES)
+				cache_bytes = SDK_JPEG_CACHE_CHUNK_BYTES;
+			Xil_DCacheFlushRange((INTPTR)p->dst_addr +
+			                     (p->dst_y * p->dst_pitch) +
+			                     (p->dst_x * state->decode.bytes_per_pixel) +
+			                     state->dst_flush_offset, cache_bytes);
+			state->dst_flush_offset += cache_bytes;
+			*result_len = 0U;
+			return SDK_TASK_IN_PROGRESS;
+		}
+		image_width = state->decode.width;
+		image_height = state->decode.height;
+		bytes_written = image_width * image_height *
+		                state->decode.bytes_per_pixel;
+		state->active = 0U;
+		p->state_index = 0U;
 
 		memset(result_payload, 0,
 		       sizeof(struct SDKImageDecodeResultPayload));

@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
-
 #include "zzapp.h"
 #include "zzapp_runtime.h"
 #include "host_card_pool.h"
@@ -115,7 +115,8 @@ static void crossing_entry(const void *api_ptr, int argc, char **argv)
 #define LOAD_OFF 0x100u
 #define NOTE_OFF 0x0a0u
 #define RELA_OFF 0x0d0u
-#define ZERO_CHUNK_FRAMES 2U
+#define LOADER_UPLOAD_CHUNK_BYTES (64U * 1024U)
+#define LOADER_WORK_CHUNK_BYTES (1024U * 1024U)
 #define SHOFF 0x180u
 
 static void put16(uint8_t *p, uint16_t v)
@@ -207,16 +208,177 @@ static int load_end(uint8_t image[IMAGE_BYTES])
     do {
         rc = zzapp_loader_end();
         if (rc == ZZAPP_LOADER_IN_PROGRESS) {
-            assert(zzapp_test_loader_zero_last_frames() != 0U);
-            assert(zzapp_test_loader_zero_last_frames() <=
-                   ZERO_CHUNK_FRAMES);
-            assert(zzapp_test_loader_mapping_calls() == 0U);
+            assert(zzapp_test_loader_zero_last_bytes() <=
+                   LOADER_WORK_CHUNK_BYTES);
+            assert(zzapp_test_loader_work_last_bytes() <=
+                   LOADER_WORK_CHUNK_BYTES);
         }
         passes++;
     } while (rc == ZZAPP_LOADER_IN_PROGRESS);
     if (rc == ZZ_OK)
         assert(successful_loads++ != 0U || passes > 1U);
     return rc;
+}
+
+static void test_large_load_is_bounded_and_exact(void)
+{
+    const uint32_t filesz = 2U << 20;
+    const uint32_t memsz = 3U << 20;
+    const uint32_t image_bytes = LOAD_OFF + filesz;
+    uint8_t *image = malloc(image_bytes);
+    uint32_t offset;
+    uint32_t steps = 0U;
+    int rc;
+
+    assert(image != NULL);
+    memset(image, 0, image_bytes);
+    make_image(image);
+    put32(image + PHOFF + 16U, filesz);
+    put32(image + PHOFF + 20U, memsz);
+    put32(image + NOTE_OFF + 28U, 3U);
+    put32(image + NOTE_OFF + 40U, 1U);
+    put32(image + SHOFF + 4U, 0U);
+    for (offset = 0U; offset < filesz; offset++)
+        image[LOAD_OFF + offset] = (uint8_t)(offset * 29U + 17U);
+
+    assert(zzapp_loader_begin() == ZZ_OK);
+    for (offset = 0U; offset < image_bytes;) {
+        uint32_t chunk = image_bytes - offset;
+
+        if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
+            chunk = LOADER_UPLOAD_CHUNK_BYTES;
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        offset += chunk;
+    }
+    do {
+        rc = zzapp_loader_end();
+        if (rc == ZZAPP_LOADER_IN_PROGRESS) {
+            uint32_t work = zzapp_test_loader_work_last_bytes();
+
+            assert(work <= LOADER_WORK_CHUNK_BYTES);
+            if (work != 0U)
+                steps++;
+        }
+    } while (rc == ZZAPP_LOADER_IN_PROGRESS);
+    assert(rc == ZZ_OK);
+    assert(steps > 7U);
+    assert(memcmp(app_memory(0U, LOAD_OFF), image + LOAD_OFF, filesz) == 0);
+    for (offset = 0U; offset < memsz - filesz; offset++)
+        assert(app_memory(0U, LOAD_OFF + filesz)[offset] == 0U);
+    zzapp_loader_release();
+    free(image);
+}
+
+static void make_relocation_stress_image(uint8_t *image, uint32_t bytes,
+                                         uint32_t relocation_count)
+{
+    uint32_t shoff = RELA_OFF + relocation_count * 12U;
+    uint32_t i;
+    uint8_t *sh;
+
+    assert(bytes >= shoff + 40U);
+    make_image(image);
+    memset(image + RELA_OFF, 0, relocation_count * 12U);
+    memset(image + shoff, 0, 40U);
+    put32(image + 32U, shoff);
+    put32(image + PHOFF + 16U, bytes - LOAD_OFF);
+    put32(image + PHOFF + 20U, 3U << 20);
+    put32(image + NOTE_OFF + 28U, 3U);
+    for (i = 0U; i < relocation_count; i++) {
+        uint8_t *rel = image + RELA_OFF + i * 12U;
+
+        put32(rel + 0U, LOAD_OFF);
+        put32(rel + 4U, 23U);
+        put32(rel + 8U, LOAD_OFF);
+    }
+    sh = image + shoff;
+    put32(sh + 4U, 4U);
+    put32(sh + 16U, RELA_OFF);
+    put32(sh + 20U, relocation_count * 12U);
+    put32(sh + 36U, 12U);
+}
+
+static void test_abort_releases_each_loader_slice(void)
+{
+    const uint32_t relocation_count = 2U * 4096U + 1U;
+    const uint32_t bytes = RELA_OFF + relocation_count * 12U + 40U;
+    uint8_t *image = malloc(bytes);
+    uint32_t abort_after = 0U;
+    uint32_t aborted = 0U;
+    int rc = ZZAPP_LOADER_IN_PROGRESS;
+
+    assert(image != NULL);
+    while (rc == ZZAPP_LOADER_IN_PROGRESS && aborted < 512U) {
+        uint32_t in_progress = 0U;
+        uint32_t offset;
+
+        zzapp_boot_init();
+        make_relocation_stress_image(image, bytes, relocation_count);
+        assert(zzapp_loader_begin() == ZZ_OK);
+        for (offset = 0U; offset < bytes;) {
+            uint32_t chunk = bytes - offset;
+
+            if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
+                chunk = LOADER_UPLOAD_CHUNK_BYTES;
+            assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+            offset += chunk;
+        }
+        do {
+            rc = zzapp_loader_end();
+            if (rc == ZZAPP_LOADER_IN_PROGRESS &&
+                in_progress++ == abort_after) {
+                assert(zzapp_loader_abort() == ZZ_OK);
+                assert(zzapp_test_arena_mem() == NULL);
+                assert(zzapp_proc_slot(0)->memory.committed == 0U);
+                aborted++;
+                break;
+            }
+        } while (rc == ZZAPP_LOADER_IN_PROGRESS);
+        abort_after++;
+    }
+    /* Covers relocation extraction, frame zero/copy/map/cache and relocation
+     * application slices; every interrupted load must release its arena. */
+    assert(rc == ZZ_OK);
+    zzapp_loader_release();
+    free(image);
+}
+
+static void test_relocation_validation_is_sliced(void)
+{
+    const uint32_t relocation_count = 2U * 4096U + 1U;
+    const uint32_t bytes = RELA_OFF + relocation_count * 12U + 40U;
+    uint8_t *image = malloc(bytes);
+    uint32_t in_progress = 0U;
+    uint32_t offset;
+    int rc;
+
+    /* The malformed entry sits in the third extraction chunk: a loader
+     * that validates every entry in parse_elf's single pass rejects the
+     * image on the first zzapp_loader_end() call, before any relocation
+     * work has been reported. */
+    assert(image != NULL);
+    zzapp_boot_init();
+    make_relocation_stress_image(image, bytes, relocation_count);
+    put32(image + RELA_OFF + (relocation_count - 1U) * 12U + 4U, 22U);
+    assert(zzapp_loader_begin() == ZZ_OK);
+    for (offset = 0U; offset < bytes;) {
+        uint32_t chunk = bytes - offset;
+
+        if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
+            chunk = LOADER_UPLOAD_CHUNK_BYTES;
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        offset += chunk;
+    }
+    do {
+        rc = zzapp_loader_end();
+        if (rc == ZZAPP_LOADER_IN_PROGRESS)
+            in_progress++;
+    } while (rc == ZZAPP_LOADER_IN_PROGRESS);
+    assert(rc == ZZ_EINVAL);
+    assert(in_progress >= 2U);
+    assert(zzapp_test_arena_mem() == NULL);
+    assert(zzapp_loader_state() == ZZAPP_ST_IDLE);
+    free(image);
 }
 
 int main(void)
@@ -242,6 +404,22 @@ int main(void)
     assert(zzapp_proc_slot(0)->memory.committed == ZZAPP_ARENA_BYTES);
     zzapp_loader_release();
     zzapp_boot_init();
+    test_large_load_is_bounded_and_exact();
+    test_abort_releases_each_loader_slice();
+    test_relocation_validation_is_sliced();
+    zzapp_boot_init();
+    make_image(image);
+    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == ZZ_OK);
+    while (zzapp_loader_end() == ZZAPP_LOADER_IN_PROGRESS)
+        ;
+    assert(zzapp_loader_state() == ZZAPP_ST_LOADING);
+    zzapp_loader_release();
+    assert(zzapp_test_arena_mem() == NULL);
+    assert(zzapp_proc_slot(0)->memory.committed == 0U);
+
+    /* Every suspension point aborts cleanly, including the first. */
+    zzapp_boot_init();
     make_image(image);
     assert(zzapp_loader_begin() == ZZ_OK);
     assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == ZZ_OK);
@@ -249,7 +427,6 @@ int main(void)
     assert(zzapp_loader_abort() == ZZ_OK);
     assert(zzapp_test_arena_mem() == NULL);
     assert(zzapp_proc_slot(0)->memory.committed == 0U);
-
 
     /* Stock GNU ld emits SHT_REL: its addend is the target word, not a
      * third relocation-field as in RELA. */

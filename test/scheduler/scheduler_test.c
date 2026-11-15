@@ -263,6 +263,29 @@ static void test_long_codec_tasks_interleave_after_completion(void)
   expect_int("codec_interleave_video_next", video_slot, 1);
 }
 
+static void test_requeued_slice_yields_to_next_task(void)
+{
+  taskq_t q;
+  int jpeg_slot;
+  int crypto_slot;
+  int audio_slot;
+
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_DECODE_JPEG, TASK_LONG,
+                      0, 0, 0, 0, 1, 1, NULL, 0u);
+  (void)taskq_enqueue(&q, TASKQ_OP_AUDIO_STREAM_FEED, TASK_LONG,
+                      0, 0, 0, 0, 2, 2, NULL, 0u);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT,
+                      0, 0, 0, 0, 3, 3, NULL, 0u);
+  jpeg_slot = taskq_claim_any(&q);
+  expect_int("slice_claims_jpeg", jpeg_slot, 0);
+  crypto_slot = taskq_claim_short(&q);
+  expect_int("slice_core0_claims_crypto", crypto_slot, 2);
+  taskq_requeue(&q, jpeg_slot);
+  audio_slot = taskq_claim_any(&q);
+  expect_int("slice_yields_to_audio", audio_slot, 1);
+}
+
 static void test_claim_advances_past_lost_cas(void)
 {
   taskq_t q;
@@ -752,6 +775,7 @@ int main(void)
   test_claim_any_returns_queued_and_marks_claimed();
   test_two_claims_never_collide();
   test_long_codec_tasks_interleave_after_completion();
+  test_requeued_slice_yields_to_next_task();
   test_claim_advances_past_lost_cas();
   test_claim_short_skips_long();
   test_complete_sets_done_and_payload();
