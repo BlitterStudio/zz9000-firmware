@@ -1,0 +1,324 @@
+/*
+ * MP3 ring-decode pass for the codec-aware audio stream.
+ *
+ * Moved verbatim from sdk_mailbox.c (with the session struct, now in
+ * sdk_audio_stream.h) so the host tests drive the exact production
+ * decode loop; sdk_mailbox.c keeps the codec dispatch. Cache maintenance
+ * here uses the resolved ring addresses exactly like the firmware: the
+ * flush before pcm_ready_total publication orders the PCM bytes ahead of
+ * the consumer's observation of the new total.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#include <stdint.h>
+#include <string.h>
+
+#include "sdk_audio_stream.h"
+#include "sdk_audio_codec_io.h"
+#include "audio_stream_drain.h"
+#include "xil_cache.h"
+#include "mp3/mp3.h"
+
+uint32_t audio_stream_pcm_used(const struct SDKAudioStream *stream)
+{
+	return stream->pcm_ready_total - stream->pcm_consumed_total;
+}
+
+/* Producer's free space: against written_total (conservative -- counts
+ * frames not yet published by the end-of-decode flush too). */
+uint32_t audio_stream_pcm_free(const struct SDKAudioStream *stream)
+{
+	uint32_t used;
+
+	if (!stream)
+		return 0;
+	used = stream->pcm_written_total - stream->pcm_consumed_total;
+	if (used >= stream->pcm_capacity)
+		return 0;
+	return stream->pcm_capacity - used;
+}
+
+void flush_audio_pcm_written(const struct SDKAudioStream *stream,
+                             uint8_t *dst, uint32_t offset,
+                             uint32_t bytes)
+{
+	uint32_t first;
+
+	if (!stream || !dst || bytes == 0U || stream->pcm_capacity == 0U)
+		return;
+	if (offset >= stream->pcm_capacity)
+		offset %= stream->pcm_capacity;
+	first = stream->pcm_capacity - offset;
+	if (first > bytes)
+		first = bytes;
+	Xil_DCacheFlushRange((INTPTR)(dst + offset), first);
+	if (bytes > first)
+		Xil_DCacheFlushRange((INTPTR)dst, bytes - first);
+}
+
+void audio_stream_pcm_write(struct SDKAudioStream *stream,
+                            const uint8_t *src, uint32_t bytes)
+{
+	uint8_t *dst = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+	uint32_t offset = stream->pcm_written_total % stream->pcm_capacity;
+	uint32_t first = stream->pcm_capacity - offset;
+
+	if (first > bytes)
+		first = bytes;
+	memcpy(dst + offset, src, first);
+	if (bytes > first)
+		memcpy(dst, src + first, bytes - first);
+	stream->pcm_written_total += bytes;
+	stream->bytes_produced += bytes;
+}
+
+void audio_stream_consume_input(struct SDKAudioStream *stream,
+                                uint32_t bytes)
+{
+	if (bytes >= stream->input_length) {
+		stream->input_offset = 0U;
+		stream->input_length = 0;
+		return;
+	}
+	stream->input_offset += bytes;
+	stream->input_length -= bytes;
+}
+
+void audio_stream_discard_input(struct SDKAudioStream *stream)
+{
+	uint32_t bytes;
+
+	if (!stream || stream->input_length == 0U)
+		return;
+	bytes = stream->input_length;
+	audio_stream_consume_input(stream, bytes);
+	stream->bytes_consumed += bytes;
+}
+
+void byteswap_pcm16(uint8_t *data, uint32_t bytes)
+{
+	uint32_t i;
+	uint8_t tmp;
+
+	for (i = 0U; i + 1U < bytes; i += 2U) {
+		tmp = data[i];
+		data[i] = data[i + 1U];
+		data[i + 1U] = tmp;
+	}
+}
+
+static uint32_t audio_stream_get_be32(const uint8_t *data)
+{
+	return ((uint32_t)data[0] << 24) |
+	       ((uint32_t)data[1] << 16) |
+	       ((uint32_t)data[2] << 8) |
+	       (uint32_t)data[3];
+}
+
+static int audio_stream_check_vbr_tag(const uint8_t *frame,
+                                      uint32_t frame_size,
+                                      uint32_t *frame_count)
+{
+	uint32_t tag_off;
+	uint32_t flags;
+
+	if (!frame || !frame_count || frame_size < 12U)
+		return 0;
+	tag_off = 4U;
+	if ((frame[1] & 1U) == 0U)
+		tag_off += 2U;
+	if ((frame[1] & 0x08U) != 0U)
+		tag_off += ((frame[3] & 0xC0U) == 0xC0U) ? 17U : 32U;
+	else
+		tag_off += ((frame[3] & 0xC0U) == 0xC0U) ? 9U : 17U;
+	if (tag_off > frame_size || frame_size - tag_off < 12U)
+		return 0;
+	if (memcmp(frame + tag_off, "Xing", 4U) != 0 &&
+	    memcmp(frame + tag_off, "Info", 4U) != 0)
+		return 0;
+	flags = frame[tag_off + 7U];
+	if ((flags & 1U) == 0U)
+		return -1;
+	tag_off += 8U;
+	if (frame_size - tag_off < 4U)
+		return 0;
+	*frame_count = audio_stream_get_be32(frame + tag_off);
+	if (*frame_count == 0U)
+		return 0;
+	return 1;
+}
+
+static int audio_stream_process_vbr_tag(struct SDKAudioStream *stream,
+                                        const uint8_t *input,
+                                        const mp3dec_frame_info_t *info)
+{
+	uint32_t frame_count = 0U;
+	uint32_t frame_size;
+	int ret;
+
+	if (!stream || !input || !info || stream->vbr_checked ||
+	    info->frame_bytes <= info->frame_offset)
+		return 0;
+	stream->vbr_checked = 1U;
+	frame_size = (uint32_t)(info->frame_bytes - info->frame_offset);
+	ret = audio_stream_check_vbr_tag(
+		input + info->frame_offset, frame_size, &frame_count);
+	if (ret > 0)
+		stream->output_frame_limit = frame_count;
+	return ret != 0;
+}
+
+uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
+{
+	const uint32_t frame_pcm_bytes =
+		MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t);
+	uint32_t produced_this_call = 0U;
+	uint32_t frames_this_call = 0U;
+	uint32_t max_pcm_this_call;
+	uint32_t pcm_flush_start;
+	uint32_t progress = 0U;
+	int drain_blocked_on_input = 0;
+	uint8_t *input;
+	uint8_t *pcm_dst;
+
+	if (!stream || stream->mp3_ring_addr == 0U ||
+	    stream->pcm_ring_addr == 0U)
+		return 0;
+	input = (uint8_t *)(uintptr_t)stream->mp3_ring_addr;
+	pcm_dst = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+	if (stream->decode_complete) {
+		if (stream->input_length != 0U) {
+			audio_stream_discard_input(stream);
+			progress = 1U;
+		}
+		if (audio_stream_drain_input_done(
+			    stream->drain_requested, stream->decode_complete,
+			    stream->input_length, 0))
+			stream->drain_input_complete = 1;
+		return progress;
+	}
+	max_pcm_this_call = stream->high_water_bytes;
+	if (max_pcm_this_call == 0U ||
+	    max_pcm_this_call > stream->pcm_capacity)
+		max_pcm_this_call = stream->pcm_capacity;
+	/* Bound this pass to ~1 ms of core-1 service regardless of the
+	 * client's high-water budget (same cap as the native codecs); see
+	 * sdk_audio_codec_io.h. */
+	max_pcm_this_call = sdk_audio_decode_pass_budget(max_pcm_this_call);
+	if (max_pcm_this_call < frame_pcm_bytes)
+		max_pcm_this_call = frame_pcm_bytes;
+	pcm_flush_start = stream->pcm_written_total % stream->pcm_capacity;
+
+	while (stream->input_length > 0U &&
+	       audio_stream_pcm_free(stream) >= frame_pcm_bytes) {
+		mp3dec_frame_info_t info;
+		int decode_input_size = (int)stream->input_length;
+		int samples;
+		uint32_t consumed;
+		uint32_t bytes;
+
+		if (!audio_stream_decode_quantum_available(
+			    frames_this_call, audio_stream_pcm_used(stream),
+			    stream->low_water_bytes))
+			break;
+		if (!audio_stream_decode_may_run(
+			    stream->input_length,
+			    SDK_AUDIO_STREAM_MIN_INPUT_BYTES,
+			    stream->eof, stream->drain_requested))
+			break;
+		if (produced_this_call != 0U &&
+		    (max_pcm_this_call - produced_this_call) <
+		        frame_pcm_bytes) {
+			break;
+		}
+		if (stream->drain_requested && !stream->eof &&
+		    !mp3_probe_complete_frame(
+			    &stream->decoder, input + stream->input_offset,
+			    (int)stream->input_length, &decode_input_size)) {
+			drain_blocked_on_input = 1;
+			break;
+		}
+		memset(&info, 0, sizeof(info));
+		samples = mp3dec_decode_frame(
+			&stream->decoder,
+			input + stream->input_offset,
+			decode_input_size,
+			stream->scratch, &info);
+		frames_this_call++;
+		consumed = (uint32_t)info.frame_bytes;
+		if (consumed == 0U) {
+			drain_blocked_on_input = 1;
+			break;
+		}
+		if (stream->eof && stream->frames_decoded != 0U &&
+		    info.frame_offset != 0) {
+			audio_stream_discard_input(stream);
+			progress = 1U;
+			break;
+		}
+
+		if (samples > 0) {
+			if (stream->sample_rate == 0U) {
+				stream->sample_rate = (uint32_t)info.hz;
+				stream->channels = (uint32_t)info.channels;
+			}
+			if ((uint32_t)info.hz != stream->sample_rate ||
+			    (uint32_t)info.channels != stream->channels) {
+				stream->faulted = 1U;
+				break;
+			}
+			if (audio_stream_process_vbr_tag(
+				    stream, input + stream->input_offset,
+				    &info)) {
+				bytes = 0U;
+			} else if (stream->output_frame_limit != 0U &&
+			           stream->frames_decoded >=
+			                   stream->output_frame_limit) {
+				stream->decode_complete = 1;
+				bytes = 0U;
+			} else {
+				bytes = (uint32_t)samples *
+				        (uint32_t)info.channels *
+				        sizeof(mp3d_sample_t);
+			}
+			if (bytes != 0U) {
+				if (stream->sample_format ==
+				    SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+					byteswap_pcm16((uint8_t *)stream->scratch,
+					               bytes);
+				audio_stream_pcm_write(
+					stream, (uint8_t *)stream->scratch, bytes);
+				stream->frames_decoded++;
+				produced_this_call += bytes;
+				progress = 1U;
+				if (stream->output_frame_limit != 0U &&
+				    stream->frames_decoded >=
+				            stream->output_frame_limit)
+					stream->decode_complete = 1;
+			}
+		}
+
+		audio_stream_consume_input(stream, consumed);
+		stream->bytes_consumed += consumed;
+		progress = 1U;
+		if (stream->decode_complete) {
+			audio_stream_discard_input(stream);
+			break;
+		}
+	}
+
+	if (produced_this_call != 0U) {
+		flush_audio_pcm_written(stream, pcm_dst, pcm_flush_start,
+		                        produced_this_call);
+		/* Publish only after the flush: Xil_DCacheFlushRange ends in
+		 * a DSB, so consumers that see the new ready total also see
+		 * the PCM bytes in DRAM. */
+		stream->pcm_ready_total = stream->pcm_written_total;
+	}
+	if (audio_stream_drain_input_done(
+		    stream->drain_requested, stream->decode_complete,
+		    stream->input_length, drain_blocked_on_input))
+		stream->drain_input_complete = 1;
+	return progress;
+}

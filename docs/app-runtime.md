@@ -28,6 +28,14 @@ due system work—SDK tasks, MiniGL service, launcher work, and audio feeding—
 then selects runnable app threads round-robin. In an overload window, service
 work is limited so runnable apps retain a 5% floor.
 
+A system-service pass runs to completion, and no app runs on core 1 meanwhile,
+so long work is cut into steps of about 1 ms: per pass the loader zeroes or
+maps at most 192 KiB, copies 96 KiB, extracts 4096 relocation entries or
+applies 512, and a FLAC, Vorbis or MP3 decode pass produces at most 24 KiB of
+PCM plus one frame. TLS key exchange and signature checks offloaded by the
+AmiSSL provider can't be split: one X25519, P-256 or RSA-2048 operation holds
+core 1 for about 5 to 25 ms, so a handshake stalls running apps for that long.
+
 An API body remains unpreemptible while it owns the API lock. Its explicit
 `zz_yield` safe point releases that lock, lets one due system-service pass run,
 then reacquires the lock before returning to the body. This bounds audio-service

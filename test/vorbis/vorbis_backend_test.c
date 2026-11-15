@@ -206,6 +206,26 @@ static uint16_t run_stream(struct sim *s, const uint8_t *data, uint32_t size,
 	return run_fed(s, data, size, chunk, drain_each);
 }
 
+/* Decode in bounded passes until the backend stops making progress (it
+ * reports starvation or completion, or a pass consumes nothing). */
+static uint16_t sim_drain_passes(struct sim *s, int drain)
+{
+	uint16_t st = SDK_STATUS_OK;
+	uint32_t guard = 0U;
+
+	while (guard++ < 1000U) {
+		uint32_t out_before = s->out_len;
+		uint32_t len_before = s->len;
+
+		st = sim_decode(s, drain);
+		if (st != SDK_STATUS_OK || s->complete || s->starved)
+			break;
+		if (s->out_len == out_before && s->len == len_before)
+			break;
+	}
+	return st;
+}
+
 static void check_clean(const char *what)
 {
 	CHECK(host_runtime_allocated_bytes() == 0U && host_runtime_live_blocks() == 0U &&
@@ -495,12 +515,13 @@ static void test_starvation_and_trailer(void)
 
 	/* Everything but the last 10 bytes, no EOF: starved, not complete,
 	 * every byte taken into the page buffer. Then the tail with EOF. The
-	 * PCM ring holds the whole stream so one call decodes everything. */
+	 * PCM ring holds the whole stream, so draining the bounded passes
+	 * decodes everything. */
 	host_runtime_reset();
 	sim_init(s, MAX_IN_CAP, MAX_PCM_CAP);
 	memcpy(s->in, ogg.data, ogg.len - 10U);
 	s->len = ogg.len - 10U;
-	st = sim_decode(s, 1);
+	st = sim_drain_passes(s, 1);
 	CHECK(st == SDK_STATUS_OK && s->starved && !s->complete && s->len == 0U &&
 	      s->out_len < full, "starved on the partial last page");
 	CHECK(sim_decode(s, 1) == SDK_STATUS_OK && s->starved,
@@ -508,7 +529,7 @@ static void test_starvation_and_trailer(void)
 	memcpy(s->in, ogg.data + ogg.len - 10U, 10U);
 	s->len = 10U;
 	s->eof = 1;
-	st = sim_decode(s, 0);
+	st = sim_drain_passes(s, 0);
 	CHECK(st == SDK_STATUS_OK && s->complete && s->out_len == full &&
 	      memcmp(s->out, g_out_a, full) == 0, "resume after starvation");
 	/* After completion further input is discarded. */
@@ -522,12 +543,65 @@ static void test_starvation_and_trailer(void)
 	sim_init(s, MAX_IN_CAP, MAX_PCM_CAP);
 	memcpy(s->in, ogg.data, ogg.len);
 	s->len = ogg.len;
-	st = sim_decode(s, 0);
+	st = sim_drain_passes(s, 0);
 	CHECK(st == SDK_STATUS_OK && !s->complete && s->starved &&
 	      s->out_len == full, "EOS without FEED_EOF");
 	s->eof = 1;
-	CHECK(sim_decode(s, 0) == SDK_STATUS_OK && s->complete, "EOF completes");
+	CHECK(sim_drain_passes(s, 0) == SDK_STATUS_OK && s->complete,
+	      "EOF completes");
 	finish(s, "eos");
+	free(ogg.data);
+}
+
+/* One decode pass must be bounded by the service-time PCM cap even when
+ * the caller hands it the whole stream with a full-ring budget; later
+ * passes continue it to the identical output. */
+static void test_pass_cap(void)
+{
+	struct blob ogg = load("stereo44k", ".ogg");
+	const uint32_t max_packet_pcm = 2048U * 2U * 2U;
+	struct sim *s = &g_sim;
+	uint32_t base_len;
+	uint32_t calls = 0U;
+	uint16_t st;
+
+	/* Baseline: the same stream through a normally-fed decode. */
+	host_runtime_reset();
+	st = run_stream(s, ogg.data, ogg.len, 4096U, IN_CAP, 65536U, 0);
+	CHECK(st == SDK_STATUS_OK && s->complete, "pass cap baseline: st %u", st);
+	base_len = s->out_len;
+	memcpy(g_out_a, s->out, base_len);
+	finish(s, "pass cap baseline");
+
+	host_runtime_reset();
+	CHECK(ogg.len <= MAX_IN_CAP, "pass cap: fixture %u > ring %u",
+	      ogg.len, MAX_IN_CAP);
+	sim_init(s, MAX_IN_CAP, MAX_PCM_CAP);
+	memcpy(s->in, ogg.data, ogg.len);
+	s->len = ogg.len;
+	s->eof = 1;
+	st = sim_decode(s, 0);
+	CHECK(st == SDK_STATUS_OK && !s->complete && s->out_len > 0U &&
+	      s->out_len <= SDK_AUDIO_DECODE_PASS_PCM_BYTES + max_packet_pcm,
+	      "pass cap first pass: %u of %u bytes (st %u)",
+	      s->out_len, base_len, st);
+	while (!s->complete && calls++ < 1000U) {
+		uint32_t before = s->out_len;
+		uint32_t chunk;
+
+		st = sim_decode(s, 0);
+		chunk = s->out_len - before;
+		CHECK(st == SDK_STATUS_OK, "pass cap loop: st %u", st);
+		CHECK(chunk <= SDK_AUDIO_DECODE_PASS_PCM_BYTES + max_packet_pcm,
+		      "pass cap loop: pass decoded %u bytes", chunk);
+		if (st != SDK_STATUS_OK)
+			break;
+	}
+	CHECK(s->complete && s->out_len == base_len &&
+	      memcmp(s->out, g_out_a, base_len) == 0 && calls >= 2U && calls <= 20U,
+	      "pass cap finish: %u of %u bytes in %u calls",
+	      s->out_len, base_len, calls);
+	finish(s, "pass cap");
 	free(ogg.data);
 }
 
@@ -855,6 +929,7 @@ int main(int argc, char **argv)
 	test_rejections();
 	test_chained();
 	test_starvation_and_trailer();
+	test_pass_cap();
 	test_allocation_failures();
 	test_restart_reclaim();
 	if (failures) {
