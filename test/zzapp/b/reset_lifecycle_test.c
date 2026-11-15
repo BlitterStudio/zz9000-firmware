@@ -47,6 +47,8 @@ static int direct_stop_running;
 static unsigned direct_stop_seen;
 static const zzapp_api *app_api;
 static int start_stop_written;
+static int lease_exit_running;
+static int launcher_stop_exit_running;
 
 static void put16(uint8_t *p, uint16_t v)
 {
@@ -142,6 +144,25 @@ static void app_entry(const void *api, int argc, char **argv)
     if (app_runs == 1) {
         brk = zzapp_sbrk(64);
         assert(brk == heap_base && heap_bytes >= 64u);
+    }
+    if (lease_exit_running) {
+        zzapp_host_tick_at(ZZAPP_LEASE_US - 1U);
+        zzapp_test_set_xtime(ZZAPP_LEASE_US);
+        zzapp_core0_poll();
+        assert(table->should_stop() == 1);
+        zzapp_host_exit(0);
+        return;
+    }
+    if (launcher_stop_exit_running) {
+        uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+        uint16_t reply_bytes = 0U;
+
+        assert(zzapp_mailbox_dispatch(ZZAPP_OP_STOP, NULL, 0U, reply,
+                                      &reply_bytes, 1, ++request_id, 0) ==
+               SDK_STATUS_OK);
+        assert(table->should_stop() == 1);
+        zzapp_host_exit(0);
+        return;
     }
     if (direct_stop_running) {
         zzapp_put_be32(launcher_window + ZZAPP_LIFE_OFF +
@@ -468,5 +489,33 @@ int main(void)
     zzapp_test_mark_running();
     zzapp_on_core1_restart();
     assert(terminal_reason() == ZZAPP_END_CORE_RESTART);
+    /* A normal exit remains EXIT. Firmware-latched lease loss survives a
+     * cooperative exit, while a launcher STOP does not supply a reason. */
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    bind_window();
+    zzapp_test_set_xtime(0U);
+    load_hello();
+    start_and_exit();
+    assert(terminal_reason() == ZZAPP_END_EXIT);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_TERMINAL_OFF) == ZZAPP_END_EXIT);
+
+    lease_exit_running = 1;
+    load_hello();
+    start_and_exit();
+    lease_exit_running = 0;
+    assert(terminal_reason() == ZZAPP_END_LEASE);
+    assert(status() == SDK_STATUS_OK);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_TERMINAL_OFF) == ZZAPP_END_LEASE);
+
+    launcher_stop_exit_running = 1;
+    load_hello();
+    start_and_exit();
+    launcher_stop_exit_running = 0;
+    assert(terminal_reason() == ZZAPP_END_EXIT);
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_TERMINAL_OFF) == ZZAPP_END_EXIT);
     return 0;
 }

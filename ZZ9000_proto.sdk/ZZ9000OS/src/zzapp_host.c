@@ -1742,7 +1742,8 @@ static void run_app(uint32_t argc)
             zzapp_services_on_reset();
         } else {
             life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
-            zzapp_services_set_terminal(ZZAPP_END_EXIT);
+            zzapp_services_set_terminal(host->terminal_reason ?
+                                        host->terminal_reason : ZZAPP_END_EXIT);
             zzapp_services_on_app_end();
         }
         zzapp_minigl_reclaim(coh->generation);
@@ -2124,7 +2125,8 @@ void zzapp_host_exit(int code)
             zzapp_services_on_reset();
         } else {
             life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
-            zzapp_services_set_terminal(ZZAPP_END_EXIT);
+            zzapp_services_set_terminal(host->terminal_reason ?
+                                        host->terminal_reason : ZZAPP_END_EXIT);
             zzapp_services_on_app_end();
         }
         zzapp_minigl_reclaim(coh->generation);

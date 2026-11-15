@@ -123,10 +123,11 @@ fixed.
 All terminal paths call the same generation-guarded teardown: stop new calls,
 wake and cancel waits, quiesce work and DMA holding app pointers, hand off or
 unbind display, detach audio, release GL and decoder sessions, unmap grants,
-return frames and host-visible blocks, release the slot, and publish one
-terminal reason. A slot remains `STOPPING` until audio teardown is acknowledged
-and any running deferred load cancellation completes; only then can it become
-reusable. `LIST` retains that reason after the slot returns to idle.
+return frames and host-visible blocks, release the slot, and publish the
+firmware-latched end reason, or `EXIT` when no reason was latched. A slot
+remains `STOPPING` until audio teardown is acknowledged and any running deferred
+load cancellation completes; only then can it become reusable. `LIST` retains
+that reason after the slot returns to idle.
 The reasons are none, normal exit, forced stop, user fault, stall watchdog,
 stuck API call, lease loss, Amiga reset, and core-1 restart. Only user-mode
 faults stop a single app. A fault in firmware code restarts core 1 and ends
