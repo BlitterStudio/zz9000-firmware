@@ -71,6 +71,8 @@ void Xil_ICacheInvalidateRange(uint32_t address, uint32_t length)
 int zzm_test_printf(const char *format, ...)
 {
     va_list ap;
+    /* C23 va_start ignores its second argument, so GCC 15 sees format unused. */
+    (void)format;
     va_start(ap, format);
     va_end(ap);
     ++log_lines;
