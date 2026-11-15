@@ -15,7 +15,9 @@
 # ZZ9000_SDK points into the clone's sdk/ subdirectory.
 #
 # Trigger manually (Actions tab -> Run workflow) or on changes to the provider
-# or integration files. Artifacts: amissl-zz9000-<platform>.
+# or integration files. Each AmiSSL series (5.27 -> amissl_v362.library,
+# 6.1 -> amissl_v41x.library) is built for both CPU targets. Artifacts:
+# amissl-zz9000-v<major>-<platform>.
 name: Build AmiSSL + ZZ9000 provider
 
 on:
@@ -42,6 +44,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [os3-68020, os3-68060]
+        amissl: [5, 6]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -49,14 +52,16 @@ jobs:
       # The library is fully determined by the provider / integration / host
       # crypto sources and the toolchain image, so cache the built libs keyed on
       # those — unchanged runs skip the slow OpenSSL-for-m68k build entirely.
+      # Only the selected series' pin is hashed, so a bump of one series keeps
+      # the other's cache.
       - name: Restore cached amissl.library
         id: amisslcache
         uses: actions/cache@v5
         with:
           path: sdk/integration/amissl/work/out
           key: >-
-            amissl-${{ matrix.platform }}-${{ hashFiles(
-              'sdk/integration/amissl/AMISSL_REF',
+            amissl-v${{ matrix.amissl }}-${{ matrix.platform }}-${{ hashFiles(
+              format('sdk/integration/amissl/AMISSL_REF.v{0}', matrix.amissl),
               'sdk/integration/amissl/amissl-zz9000.patch',
               'sdk/integration/amissl/build.sh',
               'sdk/integration/amissl/Dockerfile',
@@ -67,7 +72,7 @@ jobs:
               'sdk/tools/zz9k-crypto-soft.c',
               'sdk/tools/zz9k-crypto-soft.h') }}
 
-      - name: Build amissl.library (${{ matrix.platform }})
+      - name: Build amissl.library (AmiSSL ${{ matrix.amissl }}, ${{ matrix.platform }})
         if: steps.amisslcache.outputs.cache-hit != 'true'
         run: |
           docker build -t zz9000-amissl-adtools sdk/integration/amissl
@@ -76,6 +81,7 @@ jobs:
             -v "$PWD":/fw-src:ro \
             -v "$PWD/sdk/integration/amissl/work/out":/out \
             -e OS=${{ matrix.platform }} \
+            -e AMISSL_MAJOR=${{ matrix.amissl }} \
             zz9000-amissl-adtools sh -ec '
               git config --global --add safe.directory "*"
               git clone -q /fw-src /build/zz9000-fw
@@ -84,7 +90,7 @@ jobs:
                 os3-68060) libdir=68060 ;;
                 *) echo "unknown OS target: $OS" >&2; exit 1 ;;
               esac
-              AMISSL_DIR= ZZ9000_SDK=/build/zz9000-fw/sdk OS="$OS" WORK=/build/work \
+              AMISSL_DIR= ZZ9000_SDK=/build/zz9000-fw/sdk OS="$OS" AMISSL_MAJOR="$AMISSL_MAJOR" WORK=/build/work \
                 sh /build/zz9000-fw/sdk/integration/amissl/build.sh
               mkdir -p "/out/$libdir"
               cp -v /build/work/out/"$OS"/amissl_v*.library "/out/$libdir/"
@@ -93,6 +99,6 @@ jobs:
       - name: Upload library artifact
         uses: actions/upload-artifact@v7
         with:
-          name: amissl-zz9000-${{ matrix.platform }}
+          name: amissl-zz9000-v${{ matrix.amissl }}-${{ matrix.platform }}
           path: sdk/integration/amissl/work/out/*/amissl_v*.library
           if-no-files-found: error

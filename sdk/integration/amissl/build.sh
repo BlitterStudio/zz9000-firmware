@@ -11,7 +11,10 @@
 #
 # Environment overrides:
 #   ZZ9000_SDK   path to the zz9000-sdk checkout      (default: repo root)
-#   AMISSL_DIR   use an existing AmiSSL checkout       (default: clone into work/)
+#   AMISSL_MAJOR AmiSSL series: 5 (5.27, amissl_v362.library) or
+#                6 (6.1, amissl_v41x.library)           (default: 6)
+#   AMISSL_DIR   use an existing AmiSSL checkout       (default: clone into
+#                work/amissl-v<AMISSL_MAJOR>)
 #   AMISSL_REPO  git URL to clone when AMISSL_DIR unset
 #   OS           AmiSSL build target                   (default: os3-68020)
 #   DEBUG        AmiSSL DEBUG flags; empty = release   (default: empty)
@@ -22,7 +25,12 @@ set -e
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ZZ9000_SDK=${ZZ9000_SDK:-$(cd "$HERE/../.." && pwd)}
-AMISSL_REF=$(cat "$HERE/AMISSL_REF")
+AMISSL_MAJOR=${AMISSL_MAJOR:-6}
+case "$AMISSL_MAJOR" in
+  5|6) ;;
+  *) echo "!! AMISSL_MAJOR must be 5 or 6, not '$AMISSL_MAJOR'" >&2; exit 1 ;;
+esac
+AMISSL_REF=$(cat "$HERE/AMISSL_REF.v$AMISSL_MAJOR")
 AMISSL_REPO=${AMISSL_REPO:-https://github.com/jens-maus/amissl.git}
 OS=${OS:-os3-68020}
 WORK=${WORK:-$HERE/work}
@@ -34,12 +42,14 @@ if [ -n "$AMISSL_DIR" ]; then
   SRC="$AMISSL_DIR"
   echo ">> Using existing AmiSSL checkout: $SRC"
 else
-  SRC="$WORK/amissl"
+  # One clone per series: AmiSSL builds in-tree (build_$OS), so sharing a
+  # checkout between series would mix OpenSSL 3.6 and 4.1 objects.
+  SRC="$WORK/amissl-v$AMISSL_MAJOR"
   if [ ! -d "$SRC/.git" ]; then
     echo ">> Cloning AmiSSL into $SRC"
     git clone "$AMISSL_REPO" "$SRC"
   fi
-  echo ">> Checking out pinned ref $AMISSL_REF"
+  echo ">> Checking out pinned AmiSSL $AMISSL_MAJOR ref $AMISSL_REF"
   git -C "$SRC" fetch --tags origin 2>/dev/null || true
   git -C "$SRC" checkout -f "$AMISSL_REF"
 fi
@@ -52,7 +62,7 @@ git -C "$SRC" apply "$PATCH"
 # AmiSSL's Makefile hard-assigns DEBUG (-DDEBUG -g -gstabs), so a release
 # build needs the override on the make command line, exactly like AmiSSL's
 # own release targets (`make OS=... DEBUG=`).
-echo ">> Building amissl.library (OS=$OS, DEBUG='${DEBUG-}', ZZ9000_SDK=$ZZ9000_SDK)"
+echo ">> Building amissl.library (AmiSSL $AMISSL_MAJOR, OS=$OS, DEBUG='${DEBUG-}', ZZ9000_SDK=$ZZ9000_SDK)"
 make -C "$SRC" OS="$OS" ZZ9000_SDK="$ZZ9000_SDK" DEBUG="${DEBUG-}"
 
 # Collect the build products deterministically and fail loudly if the expected
