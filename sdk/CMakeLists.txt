@@ -266,7 +266,7 @@ add_test(NAME offload_retry_policy_test COMMAND offload_retry_policy_test)
 
 # OpenSSL 3 provider unit test (Phase 4). Optional: built only when an OpenSSL 3
 # development install is found, since the host suite is otherwise dependency
-# free. On the Amiga the same provider source builds against AmiSSL 5.x.
+# free. On the Amiga the same provider source builds against AmiSSL 5.x and 6.x.
 find_package(OpenSSL 3.0 QUIET COMPONENTS Crypto)
 if(OpenSSL_FOUND)
   set(ZZ9K_PROVIDER_SOURCES

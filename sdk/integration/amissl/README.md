@@ -1,11 +1,21 @@
 # ZZ9000 provider built into AmiSSL
 
-This directory builds a replacement AmiSSL library with the ZZ9000 OpenSSL 3
-provider compiled into it. When an application initializes that library, the
-provider is registered in its OpenSSL context and preferred with
+This directory builds replacement AmiSSL core libraries with the ZZ9000
+OpenSSL provider compiled into them. When an application initializes such a
+library, the provider is registered in its OpenSSL context and preferred with
 `?provider=zz9000`. Applications continue to use AmiSSL normally. Operations
 that the provider does not advertise, and hardware paths that cannot run, use
 AmiSSL's default software provider.
+
+Two AmiSSL series are supported. An application opens the library of the
+series whose SDK it was built with, and AmiSSL 6 installs beside AmiSSL 5:
+
+| `AMISSL_MAJOR` | Pin | AmiSSL | OpenSSL | Library |
+| --- | --- | --- | --- | --- |
+| `5` | `AMISSL_REF.v5` | 5.27 | 3.6 | `amissl_v362.library` |
+| `6` | `AMISSL_REF.v6` | 6.1 | 4.1 | `amissl_v41x.library` |
+
+The same patch and provider sources build both series.
 
 For an application that compiles and registers the provider itself, see
 [`../../docs/zz9k-amissl-provider.md`](../../docs/zz9k-amissl-provider.md).
@@ -33,22 +43,25 @@ default provider to serve algorithms outside the ZZ9000 implementation.
 
 ## Build
 
-`AMISSL_REF` identifies the AmiSSL revision that `build.sh` checks out before
-it applies `amissl-zz9000.patch`. The script resets the two patched files before
-applying the patch, builds AmiSSL, and copies stripped libraries to `work/out/`.
-It fails if no `amissl_v*.library` is produced.
+`AMISSL_REF.v5` and `AMISSL_REF.v6` identify the AmiSSL revision that
+`build.sh` checks out for each series before it applies
+`amissl-zz9000.patch`. Each series uses its own clone, `work/amissl-v5` or
+`work/amissl-v6`, because AmiSSL builds in its source tree. The script resets
+the two patched files before applying the patch, builds AmiSSL, and copies
+stripped libraries to `work/out/`. It fails if no `amissl_v*.library` is
+produced.
 
 ### GitHub Actions
 
 Run **Build AmiSSL + ZZ9000 provider** from the Actions tab. The workflow builds
-both `os3-68020` and `os3-68060`, then uploads
-`amissl-zz9000-<platform>` artifacts. It runs on pushes that change the
+AmiSSL 5 and 6 for both `os3-68020` and `os3-68060`, then uploads
+`amissl-zz9000-v<major>-<platform>` artifacts. It runs on pushes that change the
 provider, its SDK dependencies, this integration directory, or the workflow.
 
 The workflow builds the `sdk/integration/amissl/Dockerfile` image, clones the
 repository to the container filesystem, and runs `build.sh` with
 `ZZ9000_SDK=/build/zz9000-fw/sdk`. The Dockerfile supplies the adtools m68k
-compiler and utilities used by the build. Workflow artifacts place the two
+compiler and utilities used by the build. Workflow artifacts place the
 libraries under `68020-40/` and `68060/`.
 
 ### Local build
@@ -59,10 +72,11 @@ Run the script from this directory with the adtools tools on `PATH`:
 sh build.sh
 ```
 
-The default target is `os3-68020`. Build the other target with:
+The default build is AmiSSL 6 for `os3-68020`. Select another series or
+target with:
 
 ```sh
-OS=os3-68060 sh build.sh
+AMISSL_MAJOR=5 OS=os3-68060 sh build.sh
 ```
 
 The script accepts these environment variables:
@@ -70,7 +84,8 @@ The script accepts these environment variables:
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `ZZ9000_SDK` | SDK root, resolved as `../..` from this directory | SDK tree containing `amiga/`, `host/`, `include/`, and `tools/`. |
-| `AMISSL_DIR` | unset | Existing AmiSSL checkout. When unset, the script clones AmiSSL into `work/amissl`. |
+| `AMISSL_MAJOR` | `6` | AmiSSL series: `5` (5.27, `amissl_v362.library`) or `6` (6.1, `amissl_v41x.library`). Selects the pin file and the clone directory. |
+| `AMISSL_DIR` | unset | Existing AmiSSL checkout, used as-is. When unset, the script clones AmiSSL into `work/amissl-v<AMISSL_MAJOR>` and checks out the series pin. |
 | `AMISSL_REPO` | `https://github.com/jens-maus/amissl.git` | Repository used when cloning AmiSSL. |
 | `OS` | `os3-68020` | AmiSSL target: `os3-68020` or `os3-68060`. |
 | `DEBUG` | empty | Flags passed to AmiSSL's `DEBUG` make variable. Empty selects the release build. |
@@ -101,8 +116,10 @@ workflow container path above.
    `68060/`.
    The drivers-repo installer selects the target for the detected CPU. When
    installing manually, choose this directory yourself.
-2. Back up the matching `amissl_v*.library` in `LIBS:AmiSSL/`.
-3. Copy the artifact's matching `amissl_v*.library` into `LIBS:AmiSSL/`.
+2. Back up each `amissl_v*.library` in `LIBS:AmiSSL/` that the artifact
+   replaces: `amissl_v362.library` for AmiSSL 5, `amissl_v41x.library` for
+   AmiSSL 6.
+3. Copy the artifact's matching libraries into `LIBS:AmiSSL/`.
 4. Run a TLS application. The provider is registered during AmiSSL
    initialization, so no application-side registration call is required.
 
@@ -156,6 +173,6 @@ when diagnosing display or bus contention.
 
 ## Licensing
 
-The provider sources are GPL-3.0-or-later. AmiSSL and OpenSSL 3.x are
-Apache-2.0. The resulting combined `amissl.library` is a GPLv3 work, so a
+The provider sources are GPL-3.0-or-later. AmiSSL and OpenSSL are Apache-2.0.
+Each resulting combined `amissl_v*.library` is a GPLv3 work, so a
 redistributor must meet the GPLv3 source and notice requirements.
