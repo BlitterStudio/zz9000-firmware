@@ -20,7 +20,6 @@ struct xil_cache_mock_flush {
 	uint32_t l1_entry;   /* mmu_page_test_l1[watch_section] */
 	uint32_t page_entry; /* page table[watch_page] */
 	uint32_t watch_value;
-	unsigned asid_invalidations;
 };
 
 struct xil_cache_mock_state {
@@ -34,7 +33,6 @@ struct xil_cache_mock_state {
 extern struct xil_cache_mock_state g_xil_cache_mock;
 extern uint32_t mmu_page_test_l1[4096];
 const uint32_t *mmu_page_test_page_table(void);
-extern unsigned zzapp_as_test_asid_invalidations __attribute__((weak));
 
 static inline void Xil_DCacheFlushRange(INTPTR adr, unsigned long len)
 {
@@ -50,8 +48,6 @@ static inline void Xil_DCacheFlushRange(INTPTR adr, unsigned long len)
 		mmu_page_test_page_table()[g_xil_cache_mock.watch_page & 0xffU];
 	op->watch_value = g_xil_cache_mock.watch_word ?
 		*g_xil_cache_mock.watch_word : 0U;
-	op->asid_invalidations = &zzapp_as_test_asid_invalidations ?
-		zzapp_as_test_asid_invalidations : 0U;
 }
 
 #endif
