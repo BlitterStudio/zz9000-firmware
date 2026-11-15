@@ -84,7 +84,10 @@ pumping, and sampled API-lock-held SVC work.
 `audio` is `low_water/starved/underruns`: low-water crossings on both AHI and
 card-fabric routes, retryable fabric fill failures, and played underruns.
 The zero-underrun gate uses only the final `underruns` value. `tlb` is
-instruction/data refills.
+instruction/data refills, sampled in the one-second windows that open when a
+perf report is requested (reports are ten seconds apart): the counts cover
+those windows only, not the whole run, and are per-slot totals of micro-TLB
+refills observed while the slot held the core.
 Histogram percentiles are power-of-two buckets, so the exact maximum is the
 final number in each pair or triplet.
 

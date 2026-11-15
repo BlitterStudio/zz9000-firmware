@@ -70,6 +70,8 @@ typedef struct {
 	uint32_t tlb_instruction_stamp;
 	uint32_t tlb_data_stamp;
 	uint32_t tlb_slot;
+	uint64_t tlb_sample_until_ms;
+	uint32_t tlb_stamps_valid;
 	char report_text[512];
 	uint32_t audio_low_water[ZZAPP_KERNEL_APP_SLOTS];
 	uint32_t audio_starved[ZZAPP_KERNEL_APP_SLOTS];

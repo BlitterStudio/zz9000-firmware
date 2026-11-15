@@ -30,6 +30,15 @@ extern void zzapp_host_quarantine_released(uint32_t slot)
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
 #include "zzapp.h"
+/* Host recorder for the present-path flush: production code decides what
+ * to clean; suites assert the presented card range and that the size is
+ * the surface, never more. */
+struct zzapp_present_flush_record {
+	unsigned long card;
+	unsigned long bytes;
+};
+struct zzapp_present_flush_record zzapp_test_present_flushes[32];
+unsigned zzapp_test_present_flush_count;
 __attribute__((weak)) int scheduler_core1_available(void) { return 1; }
 #else
 #undef SDK_STATUS_OK
@@ -206,6 +215,7 @@ struct zzapp_service_runtime {
 	uint32_t display_present;
 	uint32_t display_alias_phys[3];
 	uint32_t display_alias[3];
+	uint32_t display_flip_gen;
 	uint32_t display_ack_seen;
 	uint32_t display_queued;
 	volatile int display_mailbox_active;
@@ -2449,9 +2459,11 @@ int zzapp_display_flip_idle(void)
 		return 0;
 	if (display_mailbox_enabled())
 		return 1;
+	/* One window read per poll: reap reads the ack, and the generation
+	 * counter is core-1-private state cached beside it. */
 	display_reap_flip();
-	return life_get(ZZAPP_LIFE_FLIP_GEN_OFF) ==
-	       life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
+	return current_runtime()->display_flip_gen ==
+	       current_runtime()->display_ack_seen;
 }
 
 /*
@@ -2622,17 +2634,15 @@ static int fill_surface(zzapp_surface *out)
 
 int zzapp_display_flip_bound(void)
 {
-	uint32_t gen;
-	uint32_t ack;
+	struct zzapp_service_runtime *state = current_runtime();
 
-	if (!current_runtime()->display_bound)
+	if (!state->display_bound)
 		return ZZ_EINVAL;
 	display_reap_flip();
-	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
-	ack = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
-	if (gen != ack)
+	if (state->display_flip_gen != state->display_ack_seen)
 		return ZZ_EBUSY;
-	life_put(ZZAPP_LIFE_FLIP_GEN_OFF, gen + 1U);
+	state->display_flip_gen++;
+	life_put(ZZAPP_LIFE_FLIP_GEN_OFF, state->display_flip_gen);
 	return ZZ_OK;
 }
 
@@ -2663,12 +2673,27 @@ static void report_slow_flip(uint32_t gen, uint64_t waited_us)
 #endif
 }
 
+/* A short bounded poll before parking: when the VBlank ack is already on
+ * the life page - the common case for an app that presents triple-buffered
+ * frames - the wait completes with no scheduler round trip at all. */
+#define FLIP_POLL_ACKS 8U
+
 static int wait_flip(uint32_t gen)
 {
     uint32_t generation = zzapp_services_generation();
     uint64_t started = now_us();
     int reported = 0;
+    uint32_t poll;
 
+    for (poll = 0U; poll < FLIP_POLL_ACKS; poll++) {
+        if (zzapp_services_stop_requested() ||
+            zzapp_services_generation() != generation)
+            return ZZ_EIO;
+        if (life_get(ZZAPP_LIFE_FLIP_ACK_OFF) == gen) {
+            display_reap_flip();
+            return ZZ_OK;
+        }
+    }
     for (;;) {
         uint32_t ack;
         int status;
@@ -2707,7 +2732,7 @@ int zzapp_display_wait_flip_idle(void)
 		return ZZ_EINVAL;
 	if (display_mailbox_enabled())
 		return ZZ_OK;
-	return wait_flip(life_get(ZZAPP_LIFE_FLIP_GEN_OFF));
+	return wait_flip(current_runtime()->display_flip_gen);
 }
 
 
@@ -2755,35 +2780,50 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 	return fill_surface(out);
 }
 
+static void record_present_flush(unsigned long card, unsigned long bytes)
+{
+#ifdef ZZAPP_HOST_TEST
+	if (zzapp_test_present_flush_count < 32U) {
+		zzapp_test_present_flushes[zzapp_test_present_flush_count] =
+			(struct zzapp_present_flush_record){
+				.card = card, .bytes = bytes
+			};
+		zzapp_test_present_flush_count++;
+	}
+#endif
+}
+
 static void flush_presented(uint32_t addr, uint32_t bytes)
 {
+	if (addr != 0U && bytes != 0U) {
+		record_present_flush(addr, bytes);
 #ifndef ZZAPP_HOST_TEST
-	/*
-	 * Write the frame through L1 and L2 before the flip is queued.  Core
-	 * 0's vblank way flush is not enough on its own: scanout of the new
-	 * buffer can start before that flush has reached its lines, and a frame
-	 * smaller than L2 (an 8-bit 640x480 screen is 300 KiB) can sit there
-	 * whole: the likely cause of flicker in the top lines seen on 8-bit
-	 * screens.  l2_maint serialises with core 0 in 4 KiB chunks (PL310
-	 * background-operation rule).
-	 */
-	if (addr != 0U && bytes != 0U)
+		/*
+		 * Write the frame through L1 and L2 before the flip is
+		 * queued.  The L1 data cache is PIPT, so this clean by the
+		 * card VA also reaches the lines the app dirtied through
+		 * its private alias of the same memory: one range, the
+		 * surface's size, exactly as master presents it.  Core 0's
+		 * vblank way flush is not enough on its own: scanout of the
+		 * new buffer can start before that flush has reached its
+		 * lines, and a frame smaller than L2 (an 8-bit 640x480
+		 * screen is 300 KiB) can sit there whole.  l2_maint
+		 * serialises with core 0 in 4 KiB chunks (PL310
+		 * background-operation rule).
+		 */
 		l2_maint_dcache_flush_range((intptr_t)addr, bytes);
-#else
-	(void)addr;
-	(void)bytes;
 #endif
+	}
 	barrier();
 }
 
-static int display_mailbox_flip(uint32_t back, uint32_t bytes)
+static int display_mailbox_flip(uint32_t back)
 {
 	uint32_t spare;
 	uint32_t gen;
 
 	if (back == 0U)
 		return ZZ_EINVAL;
-	flush_presented(back, bytes);
 	display_mailbox_lock_acquire();
 	if (!current_runtime()->display_mailbox_active) {
 		display_mailbox_lock_release();
@@ -2810,9 +2850,10 @@ static int display_mailbox_flip(uint32_t back, uint32_t bytes)
 		life_put(ZZAPP_LIFE_CARD_SPARE_OFF, 0U);
 	}
 	/* Keep generic flip clients idle without exposing a VBlank wait. */
-	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF) + 1U;
+	gen = current_runtime()->display_flip_gen + 1U;
 	life_put(ZZAPP_LIFE_FLIP_GEN_OFF, gen);
 	life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+	current_runtime()->display_flip_gen = gen;
 	current_runtime()->display_ack_seen = gen;
 	display_mailbox_lock_release();
 	return ZZ_OK;
@@ -2855,8 +2896,10 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
 		return ZZ_EBUSY;
 	front = state->display_front;
 	back = state->display_back;
-	if (display_mailbox_enabled())
-		return display_mailbox_flip(back, state->display_bytes);
+	if (display_mailbox_enabled()) {
+		flush_presented(back, state->display_bytes);
+		return display_mailbox_flip(back);
+	}
 	if (state->display_back_owned) {
 		if (front == 0U || back == 0U)
 			return ZZ_EINVAL;
@@ -2895,7 +2938,7 @@ int zzapp_svc_display_flip(uint32_t surface_id)
 	rc = zzapp_svc_display_flip_async(surface_id);
 	if (rc != ZZ_OK)
 		return rc;
-	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
+	gen = current_runtime()->display_flip_gen;
 	return wait_flip(gen);
 }
 
@@ -3796,6 +3839,7 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 	current_runtime()->display_back = back;
 	current_runtime()->display_spare = spare;
 	current_runtime()->display_present = 0U;
+	current_runtime()->display_flip_gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
 	current_runtime()->display_ack_seen = life_get(ZZAPP_LIFE_FLIP_ACK_OFF);
 	current_runtime()->display_bound = 1;
 	current_runtime()->display_id = 1U;

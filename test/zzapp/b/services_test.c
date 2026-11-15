@@ -273,9 +273,12 @@ static void test_display_refresh_rotation_and_layout(void)
 	    surface.back != (void *)(uintptr_t)back ||
 	    surface.layout != ZZ_LAYOUT_RGB565_LE)
 		fail("display initial surface");
-	/* An old launcher does not negotiate scanout acknowledgement, so its
+	/* The generation counter is core-1-private state: raise it through
+	 * the kernel so its cache and the life page stay in step.  An old
+	 * launcher does not negotiate scanout acknowledgement, so its
 	 * established lifecycle ack remains authoritative. */
-	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_GEN_OFF, 1U);
+	if (zzapp_display_flip_bound() != ZZ_OK)
+		fail("display gen bump");
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_ADDRESS_OFF,
 		       back);
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_SUBMIT_OFF,

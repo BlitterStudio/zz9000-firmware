@@ -81,6 +81,25 @@ uint32_t zzapp_kernel_perf_test_percentile(
 }
 #endif
 
+/*
+ * TLB refill sampling runs only inside short windows opened when a report
+ * is requested.  Reading both selectable PMU counters at every dispatch and
+ * undispatch - four counter reads, four selections and their ISBs per
+ * switch - cost measurable frame time on every one of the ~268k switches of
+ * a swquake run, so between windows the PMU is not touched at all.
+ *
+ * Inside a window there is one sample per switch, taken where the slot is
+ * undispatched: both counters are read with one selection change each, and
+ * the delta from the previous sample is charged to the slot that held the
+ * core in between.  Kernel gaps between two samples of the same app are
+ * charged to that app instead of being dropped; the alternative - sampling
+ * at both edges - doubles the PMU traffic.
+ */
+static int kernel_perf_tlb_sampling(const zzapp_kernel_t *kernel)
+{
+	return kernel->now < kernel->perf.tlb_sample_until_ms;
+}
+
 static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
 {
 	zzapp_kernel_perf_t *perf;
@@ -93,13 +112,15 @@ static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
 	irq_state = smp_local_irq_save();
 	perf = &kernel->perf;
 	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS ||
-	    perf->tlb_slot != (uint32_t)slot) {
+	    perf->tlb_slot != (uint32_t)slot || !kernel_perf_tlb_sampling(kernel)) {
+		perf->tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
+		perf->tlb_stamps_valid = 0U;
 		smp_local_irq_restore(irq_state);
 		return;
 	}
 #ifdef ZZAPP_HOST_TEST
-	instruction = perf->tlb_instruction_stamp;
-	data = perf->tlb_data_stamp;
+	instruction = perf->tlb_instruction_stamp + 1U;
+	data = perf->tlb_data_stamp + 1U;
 #else
 	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(0U));
 	__asm__ __volatile__("isb" ::: "memory");
@@ -108,33 +129,34 @@ static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
 	__asm__ __volatile__("isb" ::: "memory");
 	__asm__ __volatile__("mrc p15, 0, %0, c9, c13, 2" : "=r"(data));
 #endif
-	perf->tlb_instruction_refills[slot] += instruction -
-		perf->tlb_instruction_stamp;
-	perf->tlb_data_refills[slot] += data - perf->tlb_data_stamp;
-	perf->total.tlb_instruction_refills += instruction -
-		perf->tlb_instruction_stamp;
-	perf->total.tlb_data_refills += data - perf->tlb_data_stamp;
+	if (perf->tlb_stamps_valid) {
+		perf->tlb_instruction_refills[slot] += instruction -
+			perf->tlb_instruction_stamp;
+		perf->tlb_data_refills[slot] += data - perf->tlb_data_stamp;
+		perf->total.tlb_instruction_refills += instruction -
+			perf->tlb_instruction_stamp;
+		perf->total.tlb_data_refills += data - perf->tlb_data_stamp;
+	}
+	perf->tlb_instruction_stamp = instruction;
+	perf->tlb_data_stamp = data;
+	perf->tlb_stamps_valid = 1U;
 	perf->tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
 	smp_local_irq_restore(irq_state);
 }
 
 static void kernel_perf_tlb_enter(zzapp_kernel_t *kernel, int slot)
 {
-	zzapp_kernel_perf_t *perf = &kernel->perf;
-
 	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS)
 		return;
-#ifndef ZZAPP_HOST_TEST
-	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(0U));
-	__asm__ __volatile__("isb" ::: "memory");
-	__asm__ __volatile__("mrc p15, 0, %0, c9, c13, 2" :
-			     "=r"(perf->tlb_instruction_stamp));
-	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(1U));
-	__asm__ __volatile__("isb" ::: "memory");
-	__asm__ __volatile__("mrc p15, 0, %0, c9, c13, 2" :
-			     "=r"(perf->tlb_data_stamp));
-#endif
-	perf->tlb_slot = (uint32_t)slot;
+	/* No PMU access here: the next leave folds the interval into this
+	 * slot from the previous sample, so entering is two plain stores. */
+	kernel->perf.tlb_slot = (uint32_t)slot;
+}
+
+static void kernel_perf_tlb_window_open(zzapp_kernel_t *kernel)
+{
+	if (kernel->now + 1000U > kernel->perf.tlb_sample_until_ms)
+		kernel->perf.tlb_sample_until_ms = kernel->now + 1000U;
 }
 
 void zzapp_kernel_perf_sgi_raised(zzapp_kernel_t *kernel, uint32_t stamp)
@@ -244,6 +266,8 @@ void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t slot,
 	if (!force && kernel->perf.report_count &&
 	    (uint32_t)kernel->now - kernel->perf.last_report_ms < 10000U)
 		return;
+	if (!kernel->perf.report_pending)
+		kernel_perf_tlb_window_open(kernel);
 	bit = 1U << slot;
 	kernel->perf.report_pending |= bit;
 	if (force)
@@ -286,6 +310,10 @@ int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
 	if ((force & (1U << slot)) == 0U)
 		kernel->perf.last_report_ms = (uint32_t)kernel->now;
 	kernel->perf.report_count++;
+	/* tlb below is window-sampled: the PMU counters are read only in
+	 * the one-second windows each report request opens (see
+	 * kernel_perf_tlb_leave), so the counts cover those windows, not
+	 * the whole run. */
 	offset = snprintf(kernel->perf.report_text, sizeof(kernel->perf.report_text),
 			  "[app] perf slot=%lu forced=%u switch=%lu/%lu/%lu "
 			  "sgi=%lu/%lu/%lu sdk=%lu/%lu/%lu sgi_burst=%lu/%lu "
