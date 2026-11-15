@@ -108,13 +108,14 @@ static const char *zz9k_aead_evp_name(int alg)
 /* The record-size offload threshold, read once from ENV:ZZ9K_AEAD_OFFLOAD_MIN
  * (bytes) so the crossover can be retuned on hardware without a rebuild;
  * defaults to the measured ZZ9K_AEAD_OFFLOAD_MIN_BYTES. getenv on AmigaOS hits
- * ENV: so it is cached rather than read per record. */
+ * ENV: so it is cached rather than read per record. strtol, not atol: AmiSSL 6
+ * links the library against its own libcmt, which has no atol. */
 static size_t zz9k_aead_offload_min(void)
 {
   static long cached = -1;   /* -1 = not yet read */
   if (cached < 0) {
     const char *e = getenv("ZZ9K_AEAD_OFFLOAD_MIN");
-    long v = (e != NULL) ? atol(e) : (long)ZZ9K_AEAD_OFFLOAD_MIN_BYTES;
+    long v = (e != NULL) ? strtol(e, NULL, 10) : (long)ZZ9K_AEAD_OFFLOAD_MIN_BYTES;
     cached = (v < 0) ? 0 : v;
   }
   return (size_t)cached;

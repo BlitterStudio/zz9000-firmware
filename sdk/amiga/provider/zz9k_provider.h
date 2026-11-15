@@ -11,7 +11,8 @@
  *
  * The same source builds against host OpenSSL 3 (for the unit tests) and
  * against AmiSSL 5.x (OpenSSL 3.6) on the Amiga, which exports the provider
- * registration API through amisslext_lib.fd.
+ * registration API through amisslext_lib.fd. The Path A integration also
+ * builds it into the AmiSSL 6.x (OpenSSL 4.1) core library.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

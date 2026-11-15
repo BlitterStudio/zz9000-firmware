@@ -6,7 +6,8 @@
  * advertises no algorithms yet; the key-exchange, cipher and signature
  * operations are layered on in later steps. Keeping this stage isolated lets
  * the registration boundary be validated on its own against host OpenSSL 3,
- * which is the same provider API AmiSSL 5.x (OpenSSL 3.6) exposes on the Amiga.
+ * which is the same provider API AmiSSL 5.x (OpenSSL 3.6) and AmiSSL 6.x
+ * (OpenSSL 4.1) expose on the Amiga.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

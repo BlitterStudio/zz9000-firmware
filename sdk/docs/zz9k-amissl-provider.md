@@ -10,7 +10,9 @@ provider.
 The provider is application-local. An application must call
 `zz9k_amissl_register()` for its own AmiSSL library context. The separate
 [Path A integration](../integration/amissl/README.md) builds the provider into
-`amissl.library` for applications that cannot be changed.
+the AmiSSL 5.27 (`amissl_v362.library`) and AmiSSL 6.1
+(`amissl_v41x.library`) core libraries for applications that cannot be
+changed.
 
 [zz9k-crypto-acceleration.md](zz9k-crypto-acceleration.md) records the
 operation timings and measurement method.
