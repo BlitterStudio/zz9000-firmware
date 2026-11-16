@@ -617,7 +617,7 @@ static int map_loaded_image(const struct load_image *img)
                 count = ZZAPP_MEM_FRAME_BYTES;
             else
                 while (g_map_page + count < image_pages_end &&
-                       count < ZZAPP_LOADER_MAP_CHUNK_BYTES &&
+                       count < ZZAPP_LOADER_MAP_CHUNK_BYTES - scanned &&
                        (g_map_page + count) / ZZAPP_MEM_FRAME_BYTES ==
                            g_map_page / ZZAPP_MEM_FRAME_BYTES &&
                        zzapp_loader_page_flags(
@@ -641,8 +641,9 @@ static int map_loaded_image(const struct load_image *img)
             if (flags & PF_X)
                 Xil_ICacheInvalidateRange((INTPTR)(uintptr_t)address, count);
             g_map_page += count;
-            loader_note_work(count, ZZAPP_LOADER_WORK_MAP);
+            scanned += count;
         }
+        loader_note_work(scanned, ZZAPP_LOADER_WORK_MAP);
         if (g_map_page < image_pages_end)
             return ZZAPP_LOADER_IN_PROGRESS;
         g_map_tail = image_pages_end;

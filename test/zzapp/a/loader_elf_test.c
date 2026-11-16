@@ -419,6 +419,79 @@ static void test_uniform_megabyte_segments_map_as_sections(void)
     free(image);
 }
 
+static void test_page_mapped_flush_work_is_bounded(void)
+{
+    const uint32_t segment_bytes = 512U * 1024U;
+    const uint32_t image_bytes = LOAD_OFF + segment_bytes;
+    uint8_t *image = malloc(image_bytes);
+    const uint32_t *l1;
+    uint32_t offset;
+    uint32_t seen_flushes;
+    int rc;
+
+    assert(image != NULL);
+    make_image(image);
+    memcpy(image + PHOFF + 64U, image + PHOFF + 32U, 32U);
+    put16(image + 44U, 3U);
+    put16(image + 48U, 0U);
+    put32(image + PHOFF + 8U, 0U);
+    put32(image + PHOFF + 16U, segment_bytes);
+    put32(image + PHOFF + 20U, segment_bytes);
+    put32(image + PHOFF + 24U, 5U);
+    put32(image + PHOFF + 32U, 1U);
+    put32(image + PHOFF + 36U, 0U);
+    put32(image + PHOFF + 40U, segment_bytes);
+    put32(image + PHOFF + 48U, 0U);
+    put32(image + PHOFF + 52U, segment_bytes);
+    put32(image + PHOFF + 56U, 6U);
+    put32(image + NOTE_OFF + 28U, 3U);
+    for (offset = 0U; offset < segment_bytes; offset++)
+        image[LOAD_OFF + offset] = (uint8_t)(offset * 29U + 17U);
+
+    assert(zzapp_loader_begin() == ZZ_OK);
+    for (offset = 0U; offset < image_bytes;) {
+        uint32_t count = image_bytes - offset;
+
+        if (count > LOADER_UPLOAD_CHUNK_BYTES)
+            count = LOADER_UPLOAD_CHUNK_BYTES;
+        assert(zzapp_loader_chunk(offset, image + offset, count) == ZZ_OK);
+        offset += count;
+    }
+    seen_flushes = zzapp_test_loader_flush_count();
+    do {
+        uint32_t flushes;
+        uint32_t flushed = 0U;
+        uint32_t f;
+
+        rc = zzapp_loader_end();
+        flushes = zzapp_test_loader_flush_count();
+        for (f = seen_flushes; f < flushes; f++) {
+            uintptr_t addr;
+            uint32_t bytes;
+
+            assert(zzapp_test_loader_flush_range(f, &addr, &bytes));
+            (void)addr;
+            flushed += bytes;
+        }
+        assert(flushed <= LOADER_MAP_CHUNK_BYTES);
+        if (flushed != 0U) {
+            assert(zzapp_test_loader_work_last_kind() ==
+                   TEST_WORK_KIND_MAP);
+            assert(zzapp_test_loader_work_last_bytes() == flushed);
+        }
+        seen_flushes = flushes;
+    } while (rc == ZZAPP_LOADER_IN_PROGRESS);
+    assert(rc == ZZ_OK);
+    assert(seen_flushes != 0U);
+    assert(zzapp_test_loader_flush_dropped() == 0U);
+    l1 = zzapp_as_l1(&zzapp_proc_slot(0U)->as);
+    assert((l1[ZZAPP_AS_WINDOW_BASE >> 20] & 3U) == 1U);
+    assert(memcmp(app_memory(0U, 0U), image + LOAD_OFF, segment_bytes) == 0);
+    assert(app_memory(0U, segment_bytes)[0] == 0U);
+    zzapp_loader_release();
+    free(image);
+}
+
 static void make_relocation_stress_image(uint8_t *image, uint32_t bytes,
                                          uint32_t relocation_count)
 {
@@ -681,6 +754,8 @@ int main(void)
     zzapp_loader_release();
     zzapp_boot_init();
     test_uniform_megabyte_segments_map_as_sections();
+    zzapp_boot_init();
+    test_page_mapped_flush_work_is_bounded();
     zzapp_boot_init();
     test_large_load_is_bounded_and_exact();
     test_abort_releases_each_loader_slice();
