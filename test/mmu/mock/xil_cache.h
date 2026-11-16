@@ -29,6 +29,7 @@ struct xil_cache_mock_state {
 	const volatile uint32_t *watch_word;
 	unsigned count;
 	struct xil_cache_mock_flush ops[XIL_CACHE_MOCK_CAPACITY];
+	uint32_t mva_watch_values[256];
 };
 
 extern struct xil_cache_mock_state g_xil_cache_mock;
@@ -57,4 +58,12 @@ static inline void Xil_DCacheFlushRange(INTPTR adr, unsigned long len)
 		zzapp_as_test_tlb_mva_invalidations : 0U;
 }
 
+
+static inline void xil_cache_mock_note_mva(unsigned index)
+{
+	if (index < 256U)
+		g_xil_cache_mock.mva_watch_values[index] =
+			g_xil_cache_mock.watch_word ?
+			*g_xil_cache_mock.watch_word : 0U;
+}
 #endif

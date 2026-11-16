@@ -6,6 +6,8 @@
 #include "zzapp.h"
 #include "zzapp_runtime.h"
 #include "host_card_pool.h"
+#include "xil_cache.h"
+#include "zzapp_as.h"
 int zzapp_loader_have_image(void);
 uint32_t zzapp_test_loader_flush_count(void);
 int zzapp_test_loader_flush_range(uint32_t index, uintptr_t *addr,
@@ -23,6 +25,9 @@ int smp_raw_spin_try_lock(volatile uint32_t *word)
     *word = 1U;
     return 1;
 }
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t state) { (void)state; }
+struct xil_cache_mock_state g_xil_cache_mock;
 void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0U; }
 
 uint32_t zzapp_services_current_slot(void)
@@ -340,6 +345,80 @@ static void test_large_load_is_bounded_and_exact(void)
     free(image);
 }
 
+static void test_uniform_megabyte_segments_map_as_sections(void)
+{
+    const uint32_t text_bytes = 1U << 20;
+    const uint32_t image_bytes = LOAD_OFF + text_bytes;
+    const uint32_t section_memory = (7U << 12) | (1U << 16) |
+                                    (1U << 3) | (1U << 2);
+    uint8_t *image = calloc(1U, image_bytes);
+    uint8_t *load;
+    uint8_t *note;
+    const uint32_t *l1;
+    zzapp_proc_t *proc;
+    uint32_t offset;
+    int rc;
+
+    assert(image != NULL);
+    make_image(image);
+    memcpy(image + PHOFF + 64U, image + PHOFF + 32U, 32U);
+    put16(image + 44U, 3U);
+    put32(image + 24U, 0U);
+    load = image + PHOFF;
+    put32(load + 8U, 0U);
+    put32(load + 16U, text_bytes);
+    put32(load + 20U, text_bytes);
+    put32(load + 24U, 5U);
+    load += 32U;
+    put32(load + 0U, 1U);
+    put32(load + 4U, 0U);
+    put32(load + 8U, 1U << 20);
+    put32(load + 16U, 0U);
+    put32(load + 20U, 1U << 20);
+    put32(load + 24U, 6U);
+    put32(image + SHOFF + 4U, 0U);
+    note = image + NOTE_OFF;
+    put32(note + 28U, 3U);
+    put32(note + 40U, 1U);
+
+    assert(zzapp_loader_begin() == ZZ_OK);
+    for (offset = 0U; offset < image_bytes;) {
+        uint32_t count = image_bytes - offset;
+
+        if (count > LOADER_UPLOAD_CHUNK_BYTES)
+            count = LOADER_UPLOAD_CHUNK_BYTES;
+        assert(zzapp_loader_chunk(offset, image + offset, count) == ZZ_OK);
+        offset += count;
+    }
+    do {
+        rc = zzapp_loader_end();
+        if (rc == ZZAPP_LOADER_IN_PROGRESS)
+            assert_pass_work_bounded();
+    } while (rc == ZZAPP_LOADER_IN_PROGRESS);
+    assert(rc == ZZ_OK);
+    proc = zzapp_proc_slot(0U);
+    l1 = zzapp_as_l1(&proc->as);
+    assert((l1[ZZAPP_AS_WINDOW_BASE >> 20] & 3U) == 2U);
+    assert((l1[(ZZAPP_AS_WINDOW_BASE >> 20) + 1U] & 3U) == 2U);
+    assert((l1[ZZAPP_AS_WINDOW_BASE >> 20] & 0xfff00000U) ==
+           proc->image_frames[0]);
+    assert((l1[(ZZAPP_AS_WINDOW_BASE >> 20) + 1U] & 0xfff00000U) ==
+           proc->image_frames[1]);
+    assert((l1[ZZAPP_AS_WINDOW_BASE >> 20] & (3U << 10)) == (2U << 10));
+    assert((l1[ZZAPP_AS_WINDOW_BASE >> 20] & (1U << 4)) == 0U);
+    assert((l1[(ZZAPP_AS_WINDOW_BASE >> 20) + 1U] & (3U << 10)) ==
+           (3U << 10));
+    assert((l1[(ZZAPP_AS_WINDOW_BASE >> 20) + 1U] & (1U << 4)) != 0U);
+    assert((l1[ZZAPP_AS_WINDOW_BASE >> 20] & (1U << 17)) != 0U);
+    assert((l1[(ZZAPP_AS_WINDOW_BASE >> 20) + 1U] & (1U << 17)) != 0U);
+    assert((l1[ZZAPP_AS_WINDOW_BASE >> 20] & section_memory) ==
+           (0x15de6U & section_memory));
+    assert((l1[(ZZAPP_AS_WINDOW_BASE >> 20) + 1U] & section_memory) ==
+           (0x15de6U & section_memory));
+    zzapp_loader_release();
+    free(image);
+}
+
 static void make_relocation_stress_image(uint8_t *image, uint32_t bytes,
                                          uint32_t relocation_count)
 {
@@ -583,13 +662,15 @@ int main(void)
     uint32_t i;
     const zzapp_api *api;
     zzapp_heap_info mem;
+    uint32_t bsp[4096] = { 0U };
     host_card_pool_reset(256U << 20);
+    zzapp_as_init(bsp);
     zzapp_boot_init();
     assert(sizeof(zzapp_proc_slot(0)->image_frames) /
            sizeof(zzapp_proc_slot(0)->image_frames[0]) == ZZAPP_MEM_MAX_FRAMES);
     make_image(image);
     assert(load_end(image) == ZZ_OK);
-    assert(zzapp_test_loader_mapping_calls() != 0U);
+    /* This host build uses the production address-space implementation. */
     card = zzapp_test_arena_card();
     assert(card == 0xc0000000u);
     assert(get32(app_memory(0U, LOAD_OFF)) == card + LOAD_OFF);
@@ -598,6 +679,8 @@ int main(void)
                0U);
     assert(zzapp_proc_slot(0)->memory.committed == ZZAPP_ARENA_BYTES);
     zzapp_loader_release();
+    zzapp_boot_init();
+    test_uniform_megabyte_segments_map_as_sections();
     zzapp_boot_init();
     test_large_load_is_bounded_and_exact();
     test_abort_releases_each_loader_slice();

@@ -11,6 +11,10 @@ $(BUILD)/a/zzapp_loader.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
 $(BUILD)/a/zzapp_loader_incremental.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_LOADER_INCREMENTAL_HOST_TEST -c -o $@ $<
+$(BUILD)/a/zzapp_loader_real_as_incremental.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_LOADER_INCREMENTAL_HOST_TEST \
+		-DZZAPP_LOADER_REAL_AS_HOST_TEST -c -o $@ $<
 $(BUILD)/a/zzapp_host.o: $(FW)/zzapp_host.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
@@ -33,9 +37,16 @@ LOADER_INCREMENTAL_HOST_OBJS := $(BUILD)/a/zzapp_loader_incremental.o \
 	$(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o
 LOADER_INCREMENTAL_HOST_SOURCES := $(FW)/zzapp_mem.c $(FW)/card_pool.c \
 	$(FW)/sdk_smp_lock.c ../card_pool/host_card_pool.c
-$(BUILD)/a/loader_elf_test: a/loader_elf_test.c $(LOADER_INCREMENTAL_HOST_OBJS) $(LOADER_INCREMENTAL_HOST_SOURCES) | $(BUILD)
+LOADER_REAL_AS_HOST_OBJS := $(BUILD)/a/zzapp_loader_real_as_incremental.o \
+	$(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o
+LOADER_REAL_AS_HOST_SOURCES := $(FW)/zzapp_mem.c $(FW)/card_pool.c \
+	$(FW)/sdk_smp_lock.c $(FW)/zzapp_as.c $(FW)/mmu_page.c \
+	../card_pool/host_card_pool.c
+$(BUILD)/a/loader_elf_test: a/loader_elf_test.c $(LOADER_REAL_AS_HOST_OBJS) $(LOADER_REAL_AS_HOST_SOURCES) | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -I../card_pool -o $@ $< $(LOADER_INCREMENTAL_HOST_OBJS) $(LOADER_INCREMENTAL_HOST_SOURCES)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -DMMU_PAGE_HOST_TEST \
+		-I../card_pool -I../mmu/mock -o $@ $< \
+		$(LOADER_REAL_AS_HOST_OBJS) $(LOADER_REAL_AS_HOST_SOURCES)
 $(BUILD)/a/display_fallback_test: a/display_fallback_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o

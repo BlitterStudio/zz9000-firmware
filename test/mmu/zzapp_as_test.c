@@ -13,9 +13,13 @@
 #define SECTION_AP_MASK (3U << 10)
 #define SECTION_NG (1U << 17)
 #define PAGE_AP_MASK (3U << 4)
-#define PAGE_XN 1U
+#define PAGE_SMALL_XN 1U
+#define PAGE_XN PAGE_SMALL_XN
+#define PAGE_LARGE_XN (1U << 15)
 #define PAGE_NG (1U << 11)
-#define PAGE_TYPE 2U
+#define PAGE_SMALL 2U
+#define PAGE_LARGE 1U
+#define PAGE_TYPE PAGE_SMALL
 #define PAGE_USER_RW (3U << 4)
 #define PAGE_USER_RO (2U << 4)
 struct xil_cache_mock_state g_xil_cache_mock;
@@ -504,6 +508,165 @@ static void test_executable_mapping_invalidates_predictors(void)
 	zzapp_as_destroy(&as);
 }
 
+static void test_attribute_change_reaches_private_mapping_forms(void)
+{
+	zzapp_as_t as;
+	const uint32_t table_va = ZZAPP_AS_WINDOW_BASE + 0x00400000U;
+	const uint32_t large_va = ZZAPP_AS_WINDOW_BASE + 0x00500000U;
+	const uint32_t section_va = ZZAPP_AS_WINDOW_BASE + 0x00600000U;
+	const uint32_t duplicate_section_va =
+		ZZAPP_AS_WINDOW_BASE + 0x00700000U;
+	const uint32_t table_pa = 0x03401000U;
+	const uint32_t large_pa = 0x03410000U;
+	const uint32_t noncache = 0x03400000U | 0x11de2U;
+	const uint32_t frames[] = { 0x03400000U };
+	const uint32_t page_memory = (7U << 6) | (1U << 10) |
+				     (1U << 3) | (1U << 2);
+	const uint32_t section_memory = (7U << 12) | (1U << 16) |
+					(1U << 3) | (1U << 2);
+	const uint32_t *l1;
+	const uint32_t *l2;
+	uint32_t i;
+
+	setup();
+	CHECK(zzapp_as_create(&as, 2U, 16U) == 0);
+	CHECK(zzapp_as_map_image(&as, table_va, table_pa, 4096U,
+				 ZZAPP_AS_IMAGE_RW) == 0);
+	CHECK(zzapp_as_map_image(&as, large_va, large_pa, 0x10000U,
+				 ZZAPP_AS_IMAGE_RX) == 0);
+	CHECK(zzapp_as_map_frames(&as, section_va, frames, 1U) == 0);
+	CHECK(zzapp_as_map_frames(&as, duplicate_section_va, frames, 1U) == 0);
+	zzapp_as_mmu_page_changed(0x034U, noncache, NULL);
+
+	l2 = zzapp_as_l2_for(&as, table_va);
+	CHECK((l2[(table_va >> 12) & 0xffU] & 0xfffff000U) == table_pa);
+	CHECK((l2[(table_va >> 12) & 0xffU] & page_memory) ==
+	      ((1U << 6) | (1U << 10)));
+	CHECK((l2[(table_va >> 12) & 0xffU] & PAGE_AP_MASK) == PAGE_USER_RW);
+	CHECK((l2[(table_va >> 12) & 0xffU] & PAGE_XN) != 0U);
+	CHECK((l2[(table_va >> 12) & 0xffU] & PAGE_NG) != 0U);
+
+	l2 = zzapp_as_l2_for(&as, large_va);
+	for (i = 0U; i < 16U; i++) {
+		uint32_t mapped = l2[((large_va >> 12) & 0xffU) + i];
+
+		CHECK((mapped & 3U) == PAGE_SMALL);
+		CHECK((mapped & 0xfffff000U) == large_pa + i * 4096U);
+		CHECK((mapped & page_memory) == ((1U << 6) | (1U << 10)));
+		CHECK((mapped & PAGE_AP_MASK) == PAGE_USER_RO);
+		CHECK((mapped & PAGE_XN) == 0U);
+		CHECK((mapped & PAGE_NG) != 0U);
+	}
+	l1 = zzapp_as_l1(&as);
+	CHECK((l1[section_va >> 20] & 0xfff00000U) == frames[0]);
+	CHECK((l1[section_va >> 20] & section_memory) ==
+	      (noncache & section_memory));
+	CHECK((l1[section_va >> 20] & SECTION_AP_MASK) == PAGE_USER_RW << 6);
+	CHECK((l1[section_va >> 20] & (1U << 4)) != 0U);
+	CHECK((l1[section_va >> 20] & SECTION_NG) != 0U);
+	CHECK((l1[duplicate_section_va >> 20] & 0xfff00000U) == frames[0]);
+	CHECK((l1[duplicate_section_va >> 20] & section_memory) ==
+	      (noncache & section_memory));
+	CHECK((l1[duplicate_section_va >> 20] & SECTION_AP_MASK) ==
+	      PAGE_USER_RW << 6);
+	CHECK((l1[duplicate_section_va >> 20] & (1U << 4)) != 0U);
+	CHECK((l1[duplicate_section_va >> 20] & SECTION_NG) != 0U);
+	zzapp_as_destroy(&as);
+}
+
+static void test_typical_image_uses_large_descriptors(void)
+{
+	zzapp_as_t as;
+	const uint32_t text_va = ZZAPP_AS_WINDOW_BASE + 0x1000U;
+	const uint32_t text_pa = 0x12001000U;
+	const uint32_t bss_va = ZZAPP_AS_WINDOW_BASE + 0x00200000U;
+	const uint32_t bss_pa = 0x12200000U;
+	const uint32_t *l1;
+	const uint32_t *l2;
+
+	setup();
+	CHECK(zzapp_as_create(&as, 0U, 14U) == 0);
+	reset_tlb_counters();
+	CHECK(zzapp_as_map_image(&as, text_va, text_pa, 0x32000U,
+				 ZZAPP_AS_IMAGE_RX) == 0);
+	l2 = zzapp_as_l2_for(&as, text_va);
+	CHECK(l2 != NULL);
+	CHECK((l2[(text_va >> 12) & 0xffU] & 3U) == PAGE_SMALL);
+	CHECK((l2[((text_va + 0xf000U) >> 12) & 0xffU] & 3U) == PAGE_LARGE);
+	CHECK((l2[((text_va + 0x1f000U) >> 12) & 0xffU] & 3U) == PAGE_LARGE);
+	CHECK((l2[((text_va + 0xf000U) >> 12) & 0xffU] & 0xffff0000U) ==
+	      (text_pa + 0xf000U));
+	CHECK((l2[((text_va + 0xf000U) >> 12) & 0xffU] & PAGE_AP_MASK) ==
+	      PAGE_USER_RO);
+	CHECK((l2[((text_va + 0xf000U) >> 12) & 0xffU] & PAGE_LARGE_XN) == 0U);
+	CHECK((l2[((text_va + 0xf000U) >> 12) & 0xffU] & PAGE_NG) != 0U);
+	CHECK(zzapp_as_map_image(&as, bss_va, bss_pa, 0x100000U,
+				 ZZAPP_AS_IMAGE_RW) == 0);
+	l1 = zzapp_as_l1(&as);
+	CHECK((l1[bss_va >> 20] & 3U) == 2U);
+	CHECK((l1[bss_va >> 20] & 0xfff00000U) == bss_pa);
+	CHECK((l1[bss_va >> 20] & (7U << 12)) == (0x15de6U & (7U << 12)));
+	CHECK((l1[bss_va >> 20] & (1U << 16)) != 0U);
+	CHECK((l1[bss_va >> 20] & (3U << 10)) == (3U << 10));
+	CHECK((l1[bss_va >> 20] & (1U << 4)) != 0U);
+	CHECK((l1[bss_va >> 20] & SECTION_NG) != 0U);
+	zzapp_as_destroy(&as);
+}
+
+static void test_large_alias_splits_on_attribute_change(void)
+{
+	zzapp_as_t as;
+	uint32_t source[256];
+	uint32_t va;
+	const uint32_t *l2;
+	uint32_t i;
+	uint32_t page;
+	int saw_break_before_make = 0;
+
+	setup();
+	for (i = 0U; i < 256U; i++)
+		source[i] = (0x00600000U + i * 4096U) | 0x576U;
+	zzapp_as_mmu_page_changed(6U, 1U | (15U << 5), source);
+	CHECK(zzapp_as_create(&as, 0U, 15U) == 0);
+	CHECK(zzapp_as_alias_map(&as, 0x006d0000U, 0x10000U, 1, &va) == 0);
+	l2 = zzapp_as_l2_for(&as, va);
+	page = (va >> 12) & 0xffU;
+	CHECK((l2[page] & 3U) == PAGE_LARGE);
+	reset_tlb_counters();
+	memset(&g_xil_cache_mock, 0, sizeof(g_xil_cache_mock));
+	g_xil_cache_mock.watch_word = &l2[page];
+	source[0xdfU] = 0x006df000U | 0x472U;
+	zzapp_as_mmu_page_changed(6U, 1U | (15U << 5), source);
+	for (i = 0U; i + 1U < g_xil_cache_mock.count; i++) {
+		unsigned mva = g_xil_cache_mock.ops[i].mva_invalidations;
+
+		if (g_xil_cache_mock.ops[i].watch_value == 0U &&
+		    (g_xil_cache_mock.ops[i + 1U].watch_value & PAGE_SMALL) != 0U &&
+		    g_xil_cache_mock.ops[i + 1U].mva_invalidations > mva) {
+			CHECK(zzapp_as_test_tlb_mva_pages[mva] == va);
+			CHECK(g_xil_cache_mock.mva_watch_values[mva] == 0U);
+			saw_break_before_make = 1;
+			break;
+		}
+	}
+	CHECK(saw_break_before_make);
+	for (i = 0U; i < 16U; i++) {
+		uint32_t mapped = l2[page + i];
+		uint32_t expected = source[0xd0U + i];
+
+		CHECK((mapped & PAGE_SMALL) != 0U);
+		CHECK((mapped & 0xfffff000U) == (expected & 0xfffff000U));
+		CHECK(((mapped >> 6) & 7U) == ((expected >> 6) & 7U));
+		CHECK((mapped & ((1U << 3) | (1U << 2) | (1U << 10))) ==
+		      (expected & ((1U << 3) | (1U << 2) | (1U << 10))));
+		CHECK((mapped & PAGE_AP_MASK) == PAGE_USER_RW);
+		CHECK((mapped & PAGE_XN) != 0U);
+		CHECK((mapped & PAGE_NG) != 0U);
+	}
+	g_xil_cache_mock.watch_word = NULL;
+	zzapp_as_destroy(&as);
+}
+
 int main(void)
 {
 	setup();
@@ -522,6 +685,9 @@ int main(void)
 	test_alias_mapping_change_retires_by_mva();
 	test_frame_mapping_change_retires_by_section();
 	test_executable_mapping_invalidates_predictors();
+	test_attribute_change_reaches_private_mapping_forms();
+	test_typical_image_uses_large_descriptors();
+	test_large_alias_splits_on_attribute_change();
 	test_orphaned_as_lock_does_not_deadlock_destroy();
 	test_firmware_text_is_l2_before_launch();
 	printf("%d checks, %d failures\n", checks, failures);

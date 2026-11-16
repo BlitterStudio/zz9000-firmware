@@ -110,6 +110,7 @@ struct loader_slot {
     uint32_t map_segment;
     uint32_t map_offset;
     uint32_t map_page;
+    uint32_t map_flush_end;
     uint32_t map_tail;
     uint8_t map_phase;
     struct load_image image;
@@ -167,6 +168,7 @@ static uint32_t loader_slot(void)
 #define g_map_segment (g_loader[loader_slot()].map_segment)
 #define g_map_offset (g_loader[loader_slot()].map_offset)
 #define g_map_page (g_loader[loader_slot()].map_page)
+#define g_map_flush_end (g_loader[loader_slot()].map_flush_end)
 #define g_map_tail (g_loader[loader_slot()].map_tail)
 #define g_map_phase (g_loader[loader_slot()].map_phase)
 #ifdef ZZAPP_HOST_TEST
@@ -360,7 +362,8 @@ static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
     return addr;
 }
 #endif
-#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+#if defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST) && \
+    !defined(ZZAPP_LOADER_REAL_AS_HOST_TEST)
 static uint32_t g_host_mapping_calls;
 static int host_as_create(zzapp_as_t *as, uint32_t slot, uint32_t generation)
 {
@@ -403,6 +406,19 @@ static uint32_t loader_image_permissions(uint32_t flags)
     if (flags & PF_X)
         return (flags & PF_W) ? ZZAPP_AS_IMAGE_RWX : ZZAPP_AS_IMAGE_RX;
     return (flags & PF_W) ? ZZAPP_AS_IMAGE_RW : ZZAPP_AS_IMAGE_RO;
+}
+
+static int loader_section_has_flags(const uint32_t (*segs)[3], uint32_t nseg,
+				    uint32_t image_end, uint32_t page,
+				    uint32_t flags)
+{
+    uint32_t offset;
+
+    for (offset = 0U; offset < ZZAPP_MEM_FRAME_BYTES; offset += 0x1000U)
+        if (zzapp_loader_page_flags(segs, nseg, image_end, page + offset) !=
+            flags)
+            return 0;
+    return 1;
 }
 
 static int map_loaded_image(const struct load_image *img)
@@ -549,6 +565,7 @@ static int map_loaded_image(const struct load_image *img)
             return ZZAPP_LOADER_IN_PROGRESS;
         }
         g_map_page = 0U;
+        g_map_flush_end = 0U;
         g_map_phase = LOADER_MAP_IMAGE;
         return ZZAPP_LOADER_IN_PROGRESS;
     }
@@ -563,41 +580,66 @@ static int map_loaded_image(const struct load_image *img)
             segs[i][1] = img->seg[i].memsz;
             segs[i][2] = (img->seg[i].flags & (PF_X | PF_W)) | PF_R;
         }
+        if (g_map_page < g_map_flush_end) {
+            uint32_t flags = zzapp_loader_page_flags(
+                segs, img->nseg, img->image_end, g_map_page);
+            uint32_t count = g_map_flush_end - g_map_page;
+            uint8_t *address;
+
+            if (count > ZZAPP_LOADER_MAP_CHUNK_BYTES)
+                count = ZZAPP_LOADER_MAP_CHUNK_BYTES;
+            address = (uint8_t *)(uintptr_t)(
+                proc->image_frames[g_map_page >> 20] +
+                (g_map_page & (ZZAPP_MEM_FRAME_BYTES - 1u)));
+            Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)address, count);
+            if (flags & PF_X)
+                Xil_ICacheInvalidateRange((INTPTR)(uintptr_t)address, count);
+            g_map_page += count;
+            loader_note_work(count, ZZAPP_LOADER_WORK_MAP);
+            return ZZAPP_LOADER_IN_PROGRESS;
+        }
         while (g_map_page < image_pages_end &&
                scanned < ZZAPP_LOADER_MAP_CHUNK_BYTES) {
             uint32_t flags = zzapp_loader_page_flags(
                 segs, img->nseg, img->image_end, g_map_page);
             uint32_t count = 0U;
+            uint8_t *address;
 
             if (flags == 0U) {
                 g_map_page += 0x1000U;
                 scanned += 0x1000U;
                 continue;
             }
-            while (g_map_page + count < image_pages_end &&
-                   count < ZZAPP_LOADER_MAP_CHUNK_BYTES &&
-                   (g_map_page + count) / ZZAPP_MEM_FRAME_BYTES ==
-                       g_map_page / ZZAPP_MEM_FRAME_BYTES &&
-                   zzapp_loader_page_flags(segs, img->nseg, img->image_end,
-                                           g_map_page + count) == flags)
-                count += 0x1000U;
+            if ((g_map_page & (ZZAPP_MEM_FRAME_BYTES - 1u)) == 0U &&
+                g_map_page + ZZAPP_MEM_FRAME_BYTES <= image_pages_end &&
+                loader_section_has_flags(segs, img->nseg, img->image_end,
+                                         g_map_page, flags))
+                count = ZZAPP_MEM_FRAME_BYTES;
+            else
+                while (g_map_page + count < image_pages_end &&
+                       count < ZZAPP_LOADER_MAP_CHUNK_BYTES &&
+                       (g_map_page + count) / ZZAPP_MEM_FRAME_BYTES ==
+                           g_map_page / ZZAPP_MEM_FRAME_BYTES &&
+                       zzapp_loader_page_flags(
+                           segs, img->nseg, img->image_end,
+                           g_map_page + count) == flags)
+                    count += 0x1000U;
             if (zzapp_as_map_image(
                     &proc->as, ZZAPP_AS_WINDOW_BASE + g_map_page,
                     proc->image_frames[g_map_page >> 20] +
                         (g_map_page & (ZZAPP_MEM_FRAME_BYTES - 1u)),
                     count, loader_image_permissions(flags)))
                 goto failed;
-            Xil_L1DCacheFlushRange(
-                (INTPTR)(uintptr_t)(proc->image_frames[g_map_page >> 20] +
-                                     (g_map_page &
-                                      (ZZAPP_MEM_FRAME_BYTES - 1u))),
-                count);
+            if (count == ZZAPP_MEM_FRAME_BYTES) {
+                g_map_flush_end = g_map_page + count;
+                return ZZAPP_LOADER_IN_PROGRESS;
+            }
+            address = (uint8_t *)(uintptr_t)(
+                proc->image_frames[g_map_page >> 20] +
+                (g_map_page & (ZZAPP_MEM_FRAME_BYTES - 1u)));
+            Xil_L1DCacheFlushRange((INTPTR)(uintptr_t)address, count);
             if (flags & PF_X)
-                Xil_ICacheInvalidateRange(
-                    (INTPTR)(uintptr_t)(
-                        proc->image_frames[g_map_page >> 20] +
-                        (g_map_page & (ZZAPP_MEM_FRAME_BYTES - 1u))),
-                    count);
+                Xil_ICacheInvalidateRange((INTPTR)(uintptr_t)address, count);
             g_map_page += count;
             loader_note_work(count, ZZAPP_LOADER_WORK_MAP);
         }
@@ -829,7 +871,9 @@ int zzapp_loader_begin(void)
     g_file_end = 0;
     g_ready = 0;
 #ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+#if !defined(ZZAPP_LOADER_REAL_AS_HOST_TEST)
     g_host_mapping_calls = 0U;
+#endif
     g_host_flush_count = 0U;
     g_host_flush_dropped = 0U;
     g_host_reloc_last_entries = 0U;
@@ -1543,22 +1587,21 @@ uint32_t zzapp_test_loader_reloc_entries_last(void)
     return g_host_reloc_last_entries;
 }
 #endif
-#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
+#if defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST) && \
+    !defined(ZZAPP_LOADER_REAL_AS_HOST_TEST)
 uint32_t zzapp_test_loader_mapping_calls(void)
 {
     return g_host_mapping_calls;
 }
-
-#ifdef ZZAPP_HOST_TEST
-uint32_t zzapp_test_loader_work_last_kind(void)
-{
-    return g_host_work_last_kind;
-}
-#endif
 #else
 uint32_t zzapp_test_loader_mapping_calls(void)
 {
     return 0U;
 }
 #endif
+
+uint32_t zzapp_test_loader_work_last_kind(void)
+{
+    return g_host_work_last_kind;
+}
 #endif
