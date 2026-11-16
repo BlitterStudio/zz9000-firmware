@@ -61,26 +61,32 @@ static int check_feed_dirty_span(void)
 
 static int check_source_tail_state(void)
 {
-	if (audio_stream_source_tail_ready(0, 17U, 0, 0))
+	if (audio_stream_source_tail_ready(0, 0, 17U, 0, 0))
 		return 0;
-	if (!audio_stream_source_tail_ready(0, 17U, 1, 1))
+	if (!audio_stream_source_tail_ready(0, 0, 17U, 1, 1))
 		return 0;
-	if (!audio_stream_source_tail_ready(1, 0U, 0, 0))
+	if (audio_stream_source_tail_ready(1, 0, 0U, 0, 0))
 		return 0;
-	return !audio_stream_source_tail_ready(1, 17U, 0, 0);
+	if (!audio_stream_source_tail_ready(1, 1, 0U, 0, 0))
+		return 0;
+	return !audio_stream_source_tail_ready(1, 1, 17U, 0, 0);
 }
 
 static int check_drain_input_state(void)
 {
-	if (audio_stream_drain_input_done(0, 1, 0U, 0))
+	if (audio_stream_drain_input_done(0, 1, 0U, 0, 0))
 		return 0;
-	if (!audio_stream_drain_input_done(1, 1, 17U, 0))
+	if (!audio_stream_drain_input_done(1, 1, 17U, 0, 1))
 		return 0;
-	if (!audio_stream_drain_input_done(1, 0, 0U, 0))
+	/* MP3 has no deferred decoder output once its ring is empty. */
+	if (!audio_stream_drain_input_done(1, 0, 0U, 0, 0))
 		return 0;
-	if (!audio_stream_drain_input_done(1, 0, 17U, 1))
+	/* Native codecs must keep refilling their retained decoder tail. */
+	if (audio_stream_drain_input_done(1, 0, 0U, 0, 1))
 		return 0;
-	return !audio_stream_drain_input_done(1, 0, 17U, 0);
+	if (!audio_stream_drain_input_done(1, 0, 17U, 1, 1))
+		return 0;
+	return !audio_stream_drain_input_done(1, 0, 17U, 0, 0);
 }
 
 static int check_transient_drain_completion(void)
@@ -98,13 +104,18 @@ static int check_transient_drain_completion(void)
 
 static int check_refill_gate(void)
 {
-	if (!audio_stream_refill_may_run(17U, 0, 0, 0, 4U, 4U))
+	/* A native codec can retain a decoded tail after consuming its ring. */
+	if (!audio_stream_refill_may_run(0U, 0, 0, 0, 0, 4U, 4U))
 		return 0;
-	if (audio_stream_refill_may_run(17U, 0, 0, 1, 4U, 4U))
+	if (audio_stream_refill_may_run(0U, 1, 0, 0, 0, 4U, 4U))
 		return 0;
-	if (audio_stream_refill_may_run(17U, 0, 1, 0, 4U, 4U))
+	if (!audio_stream_refill_may_run(17U, 0, 0, 0, 0, 4U, 4U))
 		return 0;
-	return !audio_stream_refill_may_run(0U, 0, 0, 0, 4U, 4U);
+	if (audio_stream_refill_may_run(17U, 0, 0, 0, 1, 4U, 4U))
+		return 0;
+	if (audio_stream_refill_may_run(17U, 0, 0, 1, 0, 4U, 4U))
+		return 0;
+	return !audio_stream_refill_may_run(0U, 1, 0, 0, 0, 4U, 4U);
 }
 
 int main(void)

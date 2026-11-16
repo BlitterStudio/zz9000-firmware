@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sdk_audio_codec_io.h"
+#include "audio_stream_drain.h"
 #include "sdk_audio_vorbis.h"
 #include "sdk_decode_reclaim.h"
 #include "sdk_mailbox.h"
@@ -560,6 +562,7 @@ static void test_pass_cap(void)
 {
 	struct blob ogg = load("stereo44k", ".ogg");
 	const uint32_t max_packet_pcm = 2048U * 2U * 2U;
+	const uint32_t expected_pass_pcm_cap = 24U * 1024U;
 	struct sim *s = &g_sim;
 	uint32_t base_len;
 	uint32_t calls = 0U;
@@ -579,10 +582,13 @@ static void test_pass_cap(void)
 	sim_init(s, MAX_IN_CAP, MAX_PCM_CAP);
 	memcpy(s->in, ogg.data, ogg.len);
 	s->len = ogg.len;
+	CHECK(sdk_audio_decode_pass_budget(MAX_PCM_CAP) == expected_pass_pcm_cap,
+	      "pass cap budget: %u",
+	      sdk_audio_decode_pass_budget(MAX_PCM_CAP));
 	s->eof = 1;
 	st = sim_decode(s, 0);
 	CHECK(st == SDK_STATUS_OK && !s->complete && s->out_len > 0U &&
-	      s->out_len <= SDK_AUDIO_DECODE_PASS_PCM_BYTES + max_packet_pcm,
+	      s->out_len <= expected_pass_pcm_cap + max_packet_pcm,
 	      "pass cap first pass: %u of %u bytes (st %u)",
 	      s->out_len, base_len, st);
 	while (!s->complete && calls++ < 1000U) {
@@ -592,7 +598,7 @@ static void test_pass_cap(void)
 		st = sim_decode(s, 0);
 		chunk = s->out_len - before;
 		CHECK(st == SDK_STATUS_OK, "pass cap loop: st %u", st);
-		CHECK(chunk <= SDK_AUDIO_DECODE_PASS_PCM_BYTES + max_packet_pcm,
+		CHECK(chunk <= expected_pass_pcm_cap + max_packet_pcm,
 		      "pass cap loop: pass decoded %u bytes", chunk);
 		if (st != SDK_STATUS_OK)
 			break;
@@ -602,6 +608,51 @@ static void test_pass_cap(void)
 	      "pass cap finish: %u of %u bytes in %u calls",
 	      s->out_len, base_len, calls);
 	finish(s, "pass cap");
+	free(ogg.data);
+}
+
+/*
+ * The mailbox playback pump must keep issuing empty FEEDs after EOF when
+ * Tremor has consumed its external ring but still holds packet/PCM state.
+ * A one-byte budget forces that state; this drives the production Vorbis
+ * decoder through the same production pump gate until it reports complete.
+ */
+static void test_eof_tail_refill(void)
+{
+	struct blob ogg = load("stereo44k", ".ogg");
+	struct sim *s = &g_sim;
+	uint32_t input_passes = 0U;
+	uint32_t tail_passes = 0U;
+	uint16_t st = SDK_STATUS_OK;
+
+	host_runtime_reset();
+	sim_init(s, MAX_IN_CAP, MAX_PCM_CAP);
+	memcpy(s->in, ogg.data, ogg.len);
+	s->len = ogg.len;
+	s->eof = 1;
+	s->pcm_budget = 1U;
+	while (s->len != 0U && !s->complete && input_passes++ < 1000U) {
+		st = sim_decode(s, 0);
+		if (st != SDK_STATUS_OK)
+			break;
+	}
+	CHECK(st == SDK_STATUS_OK && s->len == 0U && !s->complete,
+	      "EOF tail setup: st %u len %u complete %d after %u passes",
+	      st, s->len, s->complete, input_passes);
+	while (!s->complete && tail_passes++ < 1000U) {
+		if (!audio_stream_refill_may_run(
+			    s->len, s->complete, 0, 0, 0, 0U, MAX_PCM_CAP)) {
+			CHECK(0, "pump did not schedule EOF decoder tail");
+			break;
+		}
+		st = sim_decode(s, 0);
+		if (st != SDK_STATUS_OK)
+			break;
+	}
+	CHECK(st == SDK_STATUS_OK && s->complete && tail_passes != 0U,
+	      "EOF tail refill: st %u complete %d passes %u",
+	      st, s->complete, tail_passes);
+	finish(s, "EOF tail refill");
 	free(ogg.data);
 }
 
@@ -930,6 +981,7 @@ int main(int argc, char **argv)
 	test_chained();
 	test_starvation_and_trailer();
 	test_pass_cap();
+	test_eof_tail_refill();
 	test_allocation_failures();
 	test_restart_reclaim();
 	if (failures) {

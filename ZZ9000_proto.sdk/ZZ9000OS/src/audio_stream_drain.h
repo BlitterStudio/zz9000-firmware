@@ -48,34 +48,42 @@ static inline int audio_stream_decode_may_run(uint32_t input_length,
 		(input_length >= minimum_input || eof || drain_requested);
 }
 
+/* A resumable drain finishes at decoder completion, an incomplete retained
+ * frame, or an empty ring for a decoder with no internal PCM tail (MP3).
+ * Native decoders can retain a complete PCM tail after their input empties,
+ * so they must explicitly report completion. */
 static inline int audio_stream_drain_input_done(int drain_requested,
 		int decode_complete, uint32_t input_length,
-		int blocked_on_incomplete_frame)
+		int blocked_on_incomplete_frame, int may_hold_output)
 {
 	return drain_requested &&
-		(decode_complete || input_length == 0U ||
-		 blocked_on_incomplete_frame);
+		(decode_complete || blocked_on_incomplete_frame ||
+		 (!may_hold_output && input_length == 0U));
 }
 
 /* Once a resumable drain has classified the retained compressed tail as an
  * incomplete frame, the playback pump must wait for new input instead of
- * scheduling the same no-progress refill on every main-loop pass. */
+ * scheduling the same no-progress refill on every main-loop pass. Native
+ * codecs may retain decoded state after consuming their external input, so
+ * EOF refills continue until the decoder itself reports completion. */
 static inline int audio_stream_refill_may_run(uint32_t input_length,
-		int faulted, int needs_more_input, int drain_input_complete,
-		uint32_t pcm_used, uint32_t low_water)
+		int decode_complete, int faulted, int needs_more_input,
+		int drain_input_complete, uint32_t pcm_used, uint32_t low_water)
 {
-	return input_length != 0U && !faulted && !needs_more_input &&
-		!drain_input_complete && pcm_used <= low_water;
+	return (input_length != 0U || !decode_complete) && !faulted &&
+		!needs_more_input && !drain_input_complete &&
+		pcm_used <= low_water;
 }
 
 /* A bound AX pump may zero-pad a final short PCM period only after the
  * compressed side has reached a real boundary. A resumable drain retains
- * incomplete compressed input; permanent EOF requires no input remaining. */
-static inline int audio_stream_source_tail_ready(int eof,
+ * incomplete compressed input; permanent EOF requires both no external
+ * input and decoder completion. */
+static inline int audio_stream_source_tail_ready(int eof, int decode_complete,
 		uint32_t input_length, int drain_requested,
 		int drain_input_complete)
 {
-	return (eof && input_length == 0U) ||
+	return (eof && decode_complete && input_length == 0U) ||
 		(drain_requested && drain_input_complete);
 }
 

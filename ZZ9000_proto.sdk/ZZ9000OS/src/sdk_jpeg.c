@@ -16,10 +16,10 @@
 
 #define SDK_JPEG_MAX_DIMENSION 4096U
 #define SDK_JPEG_MAX_PIXELS    (2048U * 2048U)
-#define SDK_JPEG_INPUT_BYTES_PER_STEP 4096U
+#define SDK_JPEG_INPUT_BYTES_PER_STEP 2048U
 /* iMCU rows of coefficient work a decode step may absorb before the
  * progress monitor forces the entropy decoder to suspend. */
-#define SDK_JPEG_WORK_ROWS_PER_STEP 32U
+#define SDK_JPEG_WORK_ROWS_PER_STEP 16U
 static struct SDKJpegDecode *sdk_jpeg_from_cinfo(j_common_ptr cinfo)
 {
 	return (struct SDKJpegDecode *)((uint8_t *)cinfo->err -

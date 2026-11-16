@@ -1,6 +1,6 @@
 /*
  * Behavioural test for the MP3 stream decode pass bound: one decode call
- * must be bounded by the ~1 ms service cap (sdk_audio_codec_io.h) even
+ * must be bounded by the ~2 ms service cap (sdk_audio_codec_io.h) even
  * when the client's high-water budget is the whole PCM ring, and the
  * stream must finish across passes with byte-identical PCM. Drives the
  * production loop in sdk_audio_stream.c -- the exact function
@@ -15,8 +15,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "sdk_audio_stream.h"
+#include "audio_stream_drain.h"
 #include "sdk_audio_codec_io.h"
+#include "sdk_audio_stream.h"
 
 #define IN_CAP   (128U * 1024U)
 #define PCM_CAP  (256U * 1024U)
@@ -24,6 +25,8 @@
 
 /* 1152-sample stereo S16 frame, the production frame_pcm_bytes quantum. */
 #define FRAME_PCM (1152U * 2U * 2U)
+#define EXPECTED_PASS_PCM_CAP (24U * 1024U)
+
 
 static int failures;
 
@@ -109,10 +112,72 @@ static uint32_t pass_and_drain(void)
 	return delta;
 }
 
+/* Find the four-frame audio prefix in tone.mp3. Its first complete MPEG
+ * frame carries the Xing metadata and is consumed without becoming PCM in
+ * the production path, so include it before the four PCM frames. */
+static uint32_t input_for_output_frames(uint32_t wanted_frames)
+{
+	mp3dec_t decoder;
+	mp3d_sample_t scratch[MINIMP3_MAX_SAMPLES_PER_FRAME];
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+
+	memset(&decoder, 0, sizeof(decoder));
+	while (offset < g_mp3_len && frames < wanted_frames + 1U) {
+		mp3dec_frame_info_t info;
+		int samples;
+
+		memset(&info, 0, sizeof(info));
+		samples = mp3dec_decode_frame(
+			&decoder, g_mp3 + offset, (int)(g_mp3_len - offset),
+			scratch, &info);
+		if (info.frame_bytes <= 0)
+			return 0U;
+		offset += (uint32_t)info.frame_bytes;
+		if (samples > 0)
+			frames++;
+	}
+	return frames == wanted_frames + 1U ? offset : 0U;
+}
+
+/* A DRAIN at an exact MP3 frame boundary has no native decoder tail. The
+ * production MP3 pass must classify it complete, or the pump reschedules a
+ * useless empty-input refill forever. */
+static void test_drain_at_exact_frame_boundary(void)
+{
+	struct SDKAudioStream *s = &g_stream;
+	uint32_t input_bytes = input_for_output_frames(4U);
+	uint32_t produced;
+	uint32_t pass;
+
+	CHECK(input_bytes != 0U, "could not find four MP3 frames");
+	if (input_bytes == 0U)
+		return;
+	stream_init();
+	s->input_length = input_bytes;
+	s->drain_requested = 1;
+	g_out_len = 0U;
+	produced = pass_and_drain();
+	CHECK(produced == 4U * FRAME_PCM,
+	      "four-frame drain produced %u bytes", produced);
+	CHECK(s->frames_decoded == 4U && s->input_length == 0U,
+	      "drain state frames=%u input=%u", s->frames_decoded,
+	      s->input_length);
+	CHECK(s->drain_input_complete,
+	      "exact MP3 frame-boundary drain was not complete");
+	for (pass = 0U; pass < 20U; pass++) {
+		CHECK(!audio_stream_refill_may_run(
+			      s->input_length, s->decode_complete, s->faulted, 0,
+			      s->drain_input_complete, audio_stream_pcm_used(s),
+			      s->low_water_bytes),
+		      "pump would schedule empty MP3 drain refill %u", pass);
+	}
+}
+
 static void test_pass_cap(void)
 {
 	struct SDKAudioStream *s = &g_stream;
-	uint32_t pass_bound = SDK_AUDIO_DECODE_PASS_PCM_BYTES + FRAME_PCM;
+	uint32_t pass_bound = EXPECTED_PASS_PCM_CAP + FRAME_PCM;
 	uint32_t ref_len;
 	uint32_t total;
 	uint32_t passes = 0U;
@@ -122,6 +187,7 @@ static void test_pass_cap(void)
 	/* Reference: the same production loop, drained every pass, until it
 	 * stops making progress (the compressed tail drops below the
 	 * lookahead gate without EOF). */
+	g_out_len = 0U;
 	stream_init();
 	ref_len = 0U;
 	for (guard = 0U; guard < 1000U; guard++) {
@@ -159,7 +225,7 @@ static void test_pass_cap(void)
 	      "capped decode produced %u of %u bytes, %s",
 	      g_out_len, ref_len,
 	      g_out_len == ref_len ? "differs" : "short");
-	CHECK(passes >= ref_len / SDK_AUDIO_DECODE_PASS_PCM_BYTES,
+	CHECK(passes >= ref_len / EXPECTED_PASS_PCM_CAP,
 	      "stream finished in %u extra passes", passes);
 }
 
@@ -168,6 +234,7 @@ int main(int argc, char **argv)
 	const char *fixture = argc > 1 ? argv[1] : "fixtures/tone.mp3";
 
 	load_mp3(fixture);
+	test_drain_at_exact_frame_boundary();
 	test_pass_cap();
 	if (failures) {
 		printf("audio_stream_decode_test: %d failure(s)\n", failures);

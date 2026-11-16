@@ -34,11 +34,11 @@ struct sdk_audio_codec_io {
  * One decode call runs as a core-1 service task under the kernel system
  * lock, so no app thread can run on core 1 for its whole duration. The
  * client's high-water budget (up to the whole PCM ring) would hold the
- * lock for the full refill -- a measured 7.1M cycles / 10.6 ms FLAC FEED
- * -- so every decode path caps one pass to about a millisecond of decode
- * (24 KiB of PCM at the measured ~27 cycles/byte) and later passes (the
- * playback pump's refill kick, the next FEED or READ) continue the
- * stream. A pass still always makes progress: the first frame decodes
+ * lock for the full refill -- a measured 7.1M XTime global-timer ticks,
+ * about 21.3 ms at COUNTS_PER_SECOND = CPU/2 = 333 MHz. Every decode path
+ * therefore caps one pass to about 2 ms of decode (24 KiB of PCM) and later
+ * passes (the playback pump's refill kick, the next FEED or READ) continue
+ * the stream. A pass still always makes progress: the first frame decodes
  * even when larger than the cap, so a pass is bounded by the cap plus one
  * frame.
  */

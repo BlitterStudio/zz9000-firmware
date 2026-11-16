@@ -290,6 +290,8 @@ uint32_t scheduler_perf_stamp(void)
 {
   XTime stamp;
 
+  /* XTime is the PS global timer. COUNTS_PER_SECOND is CPU/2, so these
+   * report spans are 333 MHz global-timer ticks on the 666 MHz CPU. */
   XTime_GetTime(&stamp);
   return (uint32_t)stamp;
 }

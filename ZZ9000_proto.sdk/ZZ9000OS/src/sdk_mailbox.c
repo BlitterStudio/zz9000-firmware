@@ -790,8 +790,8 @@ struct jpeg_op_params {
 typedef char jpeg_op_params_size_check[
     (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
-#define SDK_JPEG_DECODE_ROWS_PER_SLICE 4U
-#define SDK_JPEG_CACHE_CHUNK_BYTES (64U * 1024U)
+#define SDK_JPEG_DECODE_ROWS_PER_SLICE 2U
+#define SDK_JPEG_CACHE_CHUNK_BYTES (32U * 1024U)
 
 struct jpeg_task_state {
 	struct SDKJpegDecode decode;
@@ -3508,7 +3508,7 @@ static uint32_t audio_stream_decode_native(struct SDKAudioStream *stream)
 		}
 		if (audio_stream_drain_input_done(
 			    stream->drain_requested, stream->decode_complete,
-			    stream->input_length, 0))
+			    stream->input_length, 0, 1))
 			stream->drain_input_complete = 1;
 		return progress;
 	}
@@ -3565,7 +3565,7 @@ static uint32_t audio_stream_decode_native(struct SDKAudioStream *stream)
 	}
 	if (audio_stream_drain_input_done(
 		    stream->drain_requested, stream->decode_complete,
-		    stream->input_length, io.starved))
+		    stream->input_length, io.starved, 1))
 		stream->drain_input_complete = 1;
 	return progress;
 }
@@ -3583,8 +3583,8 @@ static uint32_t audio_stream_state(const struct SDKAudioStream *stream)
 {
 	if (!stream)
 		return SDK_AUDIO_STREAM_STATE_ERROR;
-	if (stream->eof && stream->input_length == 0U &&
-	    audio_stream_pcm_used(stream) == 0U) {
+	if (stream->eof && stream->decode_complete &&
+	    stream->input_length == 0U && audio_stream_pcm_used(stream) == 0U) {
 		/* Source exhausted, but a bound pump may still be playing the
 		 * staged tail out of the TX ring -- report STREAMING until it
 		 * drains so DONE does not race ahead of the DMA. */
@@ -3598,6 +3598,8 @@ static uint32_t audio_stream_state(const struct SDKAudioStream *stream)
 		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
 	if (audio_stream_needs_more_input(stream))
 		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
+	if (stream->eof && !stream->decode_complete)
+		return SDK_AUDIO_STREAM_STATE_STREAMING;
 	if (stream->input_length == 0U &&
 	    audio_stream_pcm_used(stream) < stream->pcm_capacity)
 		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
@@ -3614,7 +3616,8 @@ static uint32_t audio_stream_result_flags(const struct SDKAudioStream *stream)
 		flags |= SDK_AUDIO_STREAM_RESULT_PCM_READY;
 	if (audio_stream_needs_more_input(stream))
 		flags |= SDK_AUDIO_STREAM_RESULT_NEED_INPUT;
-	if (stream->eof && stream->input_length == 0U &&
+	if (stream->eof && stream->decode_complete &&
+	    stream->input_length == 0U &&
 	    audio_stream_pcm_used(stream) == 0U && !stream->pump_tail_pending)
 		flags |= SDK_AUDIO_STREAM_RESULT_DONE;
 	if (stream->backpressure)
@@ -3804,7 +3807,7 @@ static int audio_pump_source_snapshot(struct audio_fabric_source *source)
 		source->channels = 2U;
 		source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 		source->done = audio_stream_source_tail_ready(
-			stream->eof, stream->input_length,
+			stream->eof, stream->decode_complete, stream->input_length,
 			stream->drain_requested,
 			stream->drain_input_complete) &&
 			audio_stream_pcm_used(stream) == 0U;
@@ -3984,7 +3987,7 @@ static void audio_playback_preconvert(
 		source.channels = stream->channels;
 		source.sample_format = stream->sample_format;
 		source.done = audio_stream_source_tail_ready(
-			stream->eof, stream->input_length,
+			stream->eof, stream->decode_complete, stream->input_length,
 			stream->drain_requested,
 			stream->drain_input_complete);
 		result = audio_pump_preconvert_fill(
@@ -4070,14 +4073,14 @@ void sdk_mailbox_audio_playback_pump(void)
 
 	/* Keep the decoder ahead of the pump. Session FEEDs drive decode, but
 	 * once the client has fed everything it just waits -- so when the PCM
-	 * ring is at/below the low-water mark and undecoded input remains,
-	 * kick a refill: a FEED with no new bytes. For core-1-affine streams
-	 * it goes through the queue as an INTERNAL task (request_id 0 -> no
-	 * client completion is posted); a core-0-affine stream (begun while
-	 * the scheduler was down) refills inline, matching the legacy CPU
-	 * profile of that degraded mode. */
+	 * ring is at/below the low-water mark and external input or decoder
+	 * tail work remains, kick a refill: a FEED with no new bytes. For
+	 * core-1-affine streams it goes through the queue as an INTERNAL task
+	 * (request_id 0 -> no client completion is posted); a core-0-affine
+	 * stream (begun while the scheduler was down) refills inline, matching
+	 * the legacy CPU profile of that degraded mode. */
 	if (audio_stream_refill_may_run(
-	        stream->input_length, stream->faulted,
+	        stream->input_length, stream->decode_complete, stream->faulted,
 	        audio_stream_needs_more_input(stream),
 	        stream->drain_input_complete, audio_stream_pcm_used(stream),
 	        stream->low_water_bytes)) {

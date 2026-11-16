@@ -274,13 +274,13 @@ static void test_legacy_module_load_is_sliced(void)
     loader_close_calls = 0U;
     loader_open_result = FR_OK;
     set_loader_file(file, file_size, 0);
-    loader_read_limit = 24U * 1024U;
+    loader_read_limit = 12U * 1024U;
     zzm_loader_boot_load();
     CHECK(zzm_loader_acquire(ZZM_MODULE_MPEG2) == ZZM_LOAD_IN_PROGRESS);
     CHECK(zzm_loader_acquire(ZZM_MODULE_MPEG2) == ZZM_LOAD_IN_PROGRESS);
     CHECK(zzm_loader_test_work_kind() == ZZM_LOADER_TEST_WORK_READ_HASH);
-    CHECK(zzm_loader_test_work_bytes() == 24U * 1024U);
-    CHECK(loader_file_offset == ZZM_HEADER_SIZE + 24U * 1024U);
+    CHECK(zzm_loader_test_work_bytes() == 12U * 1024U);
+    CHECK(loader_file_offset == ZZM_HEADER_SIZE + 12U * 1024U);
     zzm_loader_cancel_loading(ZZM_MODULE_MPEG2);
     CHECK(zzm_loader_status_by_id(ZZM_MODULE_MPEG2, &status));
     CHECK(status.state == ZZM_STATE_AVAILABLE);
@@ -309,10 +309,29 @@ static void check_zero(const uint8_t *bytes, uint32_t count)
         CHECK(bytes[offset] == 0U);
 }
 
+static void check_loader_work_bound(void)
+{
+    uint32_t bytes = zzm_loader_test_work_bytes();
+
+    switch (zzm_loader_test_work_kind()) {
+    case ZZM_LOADER_TEST_WORK_READ_HASH:
+        CHECK(bytes <= 12U * 1024U);
+        break;
+    case ZZM_LOADER_TEST_WORK_BSS_ZERO:
+    case ZZM_LOADER_TEST_WORK_DCACHE_FLUSH:
+    case ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE:
+    case ZZM_LOADER_TEST_WORK_POISON:
+        CHECK(bytes <= 64U * 1024U);
+        break;
+    default:
+        break;
+    }
+}
+
 static void test_legacy_module_load_lifecycle(void)
 {
     const uint32_t image_size = 128U * 1024U;
-    const uint32_t bss_size = 64U;
+    const uint32_t bss_size = 128U * 1024U;
     const uint32_t file_size = ZZM_HEADER_SIZE + image_size;
     uint8_t *file = calloc(1U, file_size);
     zzm_header_t header = valid_header(image_size);
@@ -343,6 +362,7 @@ static void test_legacy_module_load_lifecycle(void)
     zzm_loader_boot_load();
     do {
         result = zzm_loader_acquire(ZZM_MODULE_MPEG2);
+        check_loader_work_bound();
         passes++;
     } while (result == ZZM_LOAD_IN_PROGRESS && passes < 64U);
     CHECK(result == ZZM_LOAD_READY);

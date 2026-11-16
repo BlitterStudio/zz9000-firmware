@@ -13,8 +13,11 @@
 #include <string.h>
 
 #ifndef SDK_JPEG_TEST_ROWS_PER_STEP
-#define SDK_JPEG_TEST_ROWS_PER_STEP 4U
+#define SDK_JPEG_TEST_ROWS_PER_STEP 2U
 #endif
+
+#define PROGRESSIVE_WORK_WIDTH  64U
+#define PROGRESSIVE_WORK_HEIGHT 512U
 
 static const uint8_t jpeg_2x2[] = {
 	0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
@@ -265,7 +268,7 @@ static int test_wide_progressive_decode_is_sliced(void)
 		if (!sdk_jpeg_decode_step(&decode, SDK_JPEG_TEST_ROWS_PER_STEP,
 		                          &rows, &complete) ||
 		    rows > SDK_JPEG_TEST_ROWS_PER_STEP ||
-		    sdk_jpeg_decode_input_bytes(&decode) > 4096U) {
+		    sdk_jpeg_decode_input_bytes(&decode) > 2048U) {
 			printf("wide progressive step bounds failed: rows=%u input=%u\n",
 			       rows, sdk_jpeg_decode_input_bytes(&decode));
 			goto out_destroy;
@@ -317,43 +320,58 @@ static int test_progressive_work_is_sliced(void)
 	uint32_t bytes_written = 0U;
 	int complete = 0;
 
-	/* A solid progressive frame compresses to almost nothing, so the
-	 * input budget never suspends the preload: only the work bound can
-	 * cut the coefficient passes into steps.  512 rows is 32 iMCU rows
-	 * per scan, exactly one step's work allowance. */
-	if (!make_solid_rgb_jpeg_vector(4096U, 512U, 1, 0, &jpeg,
+	/* The solid 64-pixel-wide progressive input fits below the 2 KiB
+	 * exposure cap, and this step permits every output row. The input and
+	 * output throttles therefore cannot suspend preload; each scan's 32
+	 * iMCU rows must cross the 16-iMCU-row work allowance twice. */
+	if (!make_solid_rgb_jpeg_vector(PROGRESSIVE_WORK_WIDTH,
+	                                PROGRESSIVE_WORK_HEIGHT, 1, 0, &jpeg,
 	                                &jpeg_length))
 		return 1;
-	sliced = calloc(4096U * 512U, 4U);
-	reference = calloc(4096U * 512U, 4U);
+	sliced = calloc(PROGRESSIVE_WORK_WIDTH, PROGRESSIVE_WORK_HEIGHT * 4U);
+	reference = calloc(PROGRESSIVE_WORK_WIDTH,
+	                   PROGRESSIVE_WORK_HEIGHT * 4U);
 	if (!sliced || !reference)
 		goto out;
 	sdk_jpeg_decode_init(&decode);
 	if (!sdk_jpeg_decode_begin(&decode, jpeg, jpeg_length,
-	                           sliced, 4096U, 512U, 4096U * 4U,
+	                           sliced, PROGRESSIVE_WORK_WIDTH,
+	                           PROGRESSIVE_WORK_HEIGHT,
+	                           PROGRESSIVE_WORK_WIDTH * 4U,
 	                           SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U))
 		goto out;
 	while (!complete) {
-		if (!sdk_jpeg_decode_step(&decode, 4U, &rows, &complete) ||
-		    rows > 4U ||
-		    sdk_jpeg_decode_input_bytes(&decode) > 4096U)
+		if (!sdk_jpeg_decode_step(&decode, PROGRESSIVE_WORK_HEIGHT,
+		                          &rows, &complete) ||
+		    rows > PROGRESSIVE_WORK_HEIGHT ||
+		    sdk_jpeg_decode_input_bytes(&decode) > 2048U)
 			goto out_destroy;
 		if (++steps > 2048U)
 			goto out_destroy;
 		if (sdk_jpeg_decode_monitor_suspended(&decode)) {
+			/* The input is below the 2 KiB cap and all output rows are
+			 * allowed, so this can only be the 16-iMCU-row
+			 * coefficient-work bound. */
+			if (sdk_jpeg_decode_input_bytes(&decode) >= 2048U) {
+				printf("progressive work suspension input=%u\n",
+				       sdk_jpeg_decode_input_bytes(&decode));
+				goto out_destroy;
+			}
 			idle_steps++;
 			monitor_steps++;
 		}
 	}
-	/* Each scan's preload must suspend on the 32-iMCU-row work bound
-	 * (the whole solid file fits one input budget, so input never
-	 * suspends); without that bound no step ends monitor-suspended. */
-	if (monitor_steps < 2U ||
-	    !sdk_jpeg_decode_to_surface(jpeg, jpeg_length, reference, 4096U,
-	                                512U, 4096U * 4U,
-	                                SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U,
-	                                &width, &height, &bytes_written) ||
-	    memcmp(sliced, reference, 4096U * 512U * 4U) != 0) {
+	/* The 16-iMCU-row budget produces twelve monitor suspensions here; the
+	 * old 32-row allowance produces ten, so eleven distinguishes the real
+	 * work bound without input or output throttling. */
+	if (monitor_steps < 11U ||
+	    !sdk_jpeg_decode_to_surface(
+		    jpeg, jpeg_length, reference, PROGRESSIVE_WORK_WIDTH,
+		    PROGRESSIVE_WORK_HEIGHT, PROGRESSIVE_WORK_WIDTH * 4U,
+		    SDK_SURFACE_FORMAT_BGRA8888, 0U, 0U,
+		    &width, &height, &bytes_written) ||
+	    memcmp(sliced, reference,
+	           PROGRESSIVE_WORK_WIDTH * PROGRESSIVE_WORK_HEIGHT * 4U) != 0) {
 		printf("progressive work bound not enforced: steps=%u "
 		       "idle=%u monitor=%u\n", steps, idle_steps,
 		       monitor_steps);

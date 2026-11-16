@@ -16,6 +16,42 @@
 #define RELA_OFF 0x0d0u
 #define SHOFF 0x180u
 
+/*
+ * The synthetic v3 image commits one image frame, three 1 MiB heap frames,
+ * and the default one-frame stack. LOAD_END advances exactly one loader
+ * service pass per worker hook. Bound its wait from that materialized work,
+ * rather than assuming a fixed number of worker passes.
+ */
+#define TEST_HEAP_FRAMES 3U
+#define TEST_IMAGE_BYTES ZZAPP_MEM_FRAME_BYTES
+#define TEST_LOAD_BYTES \
+    (TEST_IMAGE_BYTES + TEST_HEAP_FRAMES * ZZAPP_MEM_FRAME_BYTES + \
+     ZZAPP_STACK_DEFAULT)
+#define TEST_LOADER_ZERO_BYTES_PER_PASS (96U * 1024U)
+#define TEST_LOADER_COPY_BYTES_PER_PASS (48U * 1024U)
+#define TEST_LOADER_MAP_BYTES_PER_PASS (96U * 1024U)
+#define TEST_RELOC_ENTRIES 1U
+/*
+ * Besides material chunks, the incremental loader needs one worker pass to
+ * observe zero completion, set up the address space, leave copy, enter image
+ * mapping, flush a full image frame, enter tail mapping, and finish the tail:
+ * 1 + 1 + 1 + 1 + 1 + 1 + 1 = 7 transitions, plus the initial preparation
+ * pass that parses the ELF and allocates relocation storage.
+ */
+#define TEST_LOADER_PHASE_PASSES (7U + 1U)
+#define DIV_ROUND_UP(value, unit) (((value) + (unit) - 1U) / (unit))
+#define TEST_LOAD_END_PASS_LIMIT \
+    (DIV_ROUND_UP(TEST_LOAD_BYTES, TEST_LOADER_ZERO_BYTES_PER_PASS) + \
+     DIV_ROUND_UP(TEST_IMAGE_BYTES, TEST_LOADER_COPY_BYTES_PER_PASS) + \
+     2U * DIV_ROUND_UP(TEST_IMAGE_BYTES, TEST_LOADER_MAP_BYTES_PER_PASS) + \
+     DIV_ROUND_UP(TEST_RELOC_ENTRIES, 2048U) + \
+     DIV_ROUND_UP(TEST_RELOC_ENTRIES, 256U) + \
+     TEST_LOADER_PHASE_PASSES)
+_Static_assert((uint64_t)TEST_LOAD_END_PASS_LIMIT * 1000U <
+               ZZAPP_LOAD_LEASE_US,
+               "synthetic LOAD_END must finish inside the load lease");
+
+
 static uint8_t windows[2][ZZAPP_WINDOW_BYTES];
 
 int smp_cpu_id(void) { return 0; }
@@ -101,7 +137,7 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     put32(note + 20, ZZAPP_NOTE_MAGIC);
     put32(note + 28, 3);
     put32(note + 36, ZZAPP_NOTE_FLAG_DYNAMIC_HEAP);
-    put32(note + 40, 3);
+    put32(note + 40, TEST_HEAP_FRAMES);
     put32(image + RELA_OFF + 0, LOAD_OFF);
     put32(image + RELA_OFF + 4, 23);
     put32(image + RELA_OFF + 8, LOAD_OFF);
@@ -119,6 +155,11 @@ static void request_for_slot(uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES],
     zzapp_put_be32(request + ZZAPP_SEL_SLOT, slot);
     zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
 }
+static unsigned request_pass_limit(uint16_t opcode)
+{
+    return opcode == ZZAPP_OP_LOAD_END ? TEST_LOAD_END_PASS_LIMIT : 1U;
+}
+
 
 static uint16_t run_request(uint16_t opcode, const uint8_t *request,
                             uint16_t request_bytes)
@@ -132,7 +173,7 @@ static uint16_t run_request(uint16_t opcode, const uint8_t *request,
                                   &reply_bytes, 1, ++request_id, 0U) ==
            SDK_STATUS_QUEUED);
     zzapp_kernel_set_current_thread(-1);
-    for (pass = 0U; pass < 64U; pass++) {
+    for (pass = 0U; pass < request_pass_limit(opcode); pass++) {
         zzapp_worker_hook();
         if (zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL,
                                   &reply_bytes)) {
@@ -208,7 +249,7 @@ static void complete_load_end(void)
     uint16_t reply_bytes = 0U;
     unsigned pass;
 
-    for (pass = 0U; pass < 64U; pass++) {
+    for (pass = 0U; pass < TEST_LOAD_END_PASS_LIMIT; pass++) {
         zzapp_services_poll();
         if (zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL,
                                   &reply_bytes)) {

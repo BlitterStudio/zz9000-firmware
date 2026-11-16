@@ -554,8 +554,9 @@ uint16_t sdk_vorbis_decode(struct sdk_vorbis_state *st,
 	}
 	if (!io->pcm || io->pcm_capacity == 0U)
 		return SDK_STATUS_BAD_REQUEST;
-	/* Bound this pass to ~1 ms of core-1 service regardless of the
-	 * caller's high-water budget; see sdk_audio_codec_io.h. */
+	/* Bound this pass to about 2 ms of core-1 service regardless of the
+	 * caller's high-water budget; see sdk_audio_codec_io.h for the
+	 * 333 MHz global-timer basis. */
 	io->pcm_budget = sdk_audio_decode_pass_budget(io->pcm_budget);
 
 	/* libogg and Tremor do not check most allocations: an arena failure

@@ -194,7 +194,7 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 		}
 		if (audio_stream_drain_input_done(
 			    stream->drain_requested, stream->decode_complete,
-			    stream->input_length, 0))
+			    stream->input_length, 0, 0))
 			stream->drain_input_complete = 1;
 		return progress;
 	}
@@ -202,9 +202,9 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 	if (max_pcm_this_call == 0U ||
 	    max_pcm_this_call > stream->pcm_capacity)
 		max_pcm_this_call = stream->pcm_capacity;
-	/* Bound this pass to ~1 ms of core-1 service regardless of the
-	 * client's high-water budget (same cap as the native codecs); see
-	 * sdk_audio_codec_io.h. */
+	/* Bound this pass to about 2 ms of core-1 service regardless of the
+	 * client's high-water budget; see sdk_audio_codec_io.h for the
+	 * 333 MHz global-timer basis. */
 	max_pcm_this_call = sdk_audio_decode_pass_budget(max_pcm_this_call);
 	if (max_pcm_this_call < frame_pcm_bytes)
 		max_pcm_this_call = frame_pcm_bytes;
@@ -316,9 +316,11 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 		 * the PCM bytes in DRAM. */
 		stream->pcm_ready_total = stream->pcm_written_total;
 	}
+	if (stream->eof && stream->input_length == 0U)
+		stream->decode_complete = 1U;
 	if (audio_stream_drain_input_done(
 		    stream->drain_requested, stream->decode_complete,
-		    stream->input_length, drain_blocked_on_input))
+		    stream->input_length, drain_blocked_on_input, 0))
 		stream->drain_input_complete = 1;
 	return progress;
 }

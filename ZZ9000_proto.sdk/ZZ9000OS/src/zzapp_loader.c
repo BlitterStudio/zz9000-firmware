@@ -230,24 +230,24 @@ uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
     return flags;
 }
 
-/* One loader pass is bounded to about 1 ms (666k cycles) of core-1
- * time: the card measured ~3.3 cycles per zeroed byte, twice that per
- * copied byte, and ~847 cycles per L1 flush call, so a pass moves at
- * most 192 KiB of zero or map work, 96 KiB of copy, or 512 applied
- * relocations.  A pass never splits inside a 4 KiB page: every bound is
- * a multiple of the page size, so frame-boundary splitting and image
- * mapping still line up below the 1 MiB frame size. */
+/* One loader pass is bounded to about 1 ms (333k global-timer ticks) of
+ * core-1 time. COUNTS_PER_SECOND is the CPU clock divided by two, so the
+ * 666 MHz CPU's global timer runs at about 333 MHz. Card measurements bound
+ * a pass to 96 KiB of zero or map work, 48 KiB of copy, or 256 applied
+ * relocations. A pass never splits inside a 4 KiB page: every byte bound is
+ * a multiple of the page size, so frame-boundary splitting and image mapping
+ * still line up below the 1 MiB frame size. */
 #ifndef ZZAPP_LOADER_ZERO_CHUNK_BYTES
-#define ZZAPP_LOADER_ZERO_CHUNK_BYTES (192u * 1024u)
+#define ZZAPP_LOADER_ZERO_CHUNK_BYTES (96u * 1024u)
 #endif
 #ifndef ZZAPP_LOADER_COPY_CHUNK_BYTES
-#define ZZAPP_LOADER_COPY_CHUNK_BYTES (96u * 1024u)
+#define ZZAPP_LOADER_COPY_CHUNK_BYTES (48u * 1024u)
 #endif
 #ifndef ZZAPP_LOADER_MAP_CHUNK_BYTES
-#define ZZAPP_LOADER_MAP_CHUNK_BYTES (192u * 1024u)
+#define ZZAPP_LOADER_MAP_CHUNK_BYTES (96u * 1024u)
 #endif
-#define ZZAPP_LOADER_RELOC_CHUNK_ENTRIES 4096U
-#define ZZAPP_LOADER_RELOC_APPLY_CHUNK_ENTRIES 512U
+#define ZZAPP_LOADER_RELOC_CHUNK_ENTRIES 2048U
+#define ZZAPP_LOADER_RELOC_APPLY_CHUNK_ENTRIES 256U
 /* Cortex-A9 L1 line: relocations within this distance share a flush. */
 #define ZZAPP_LOADER_CACHE_LINE_BYTES 32u
 

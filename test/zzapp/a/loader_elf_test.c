@@ -147,11 +147,11 @@ static void crossing_entry(const void *api_ptr, int argc, char **argv)
 #define NOTE_OFF 0x0a0u
 #define RELA_OFF 0x0d0u
 #define LOADER_UPLOAD_CHUNK_BYTES (64U * 1024U)
-#define LOADER_ZERO_CHUNK_BYTES (192U * 1024U)
-#define LOADER_COPY_CHUNK_BYTES (96U * 1024U)
-#define LOADER_MAP_CHUNK_BYTES (192U * 1024U)
-#define LOADER_RELOC_PREPARE_ENTRIES 4096U
-#define LOADER_RELOC_APPLY_ENTRIES 512U
+#define LOADER_ZERO_CHUNK_BYTES (96U * 1024U)
+#define LOADER_COPY_CHUNK_BYTES (48U * 1024U)
+#define LOADER_MAP_CHUNK_BYTES (96U * 1024U)
+#define LOADER_RELOC_PREPARE_ENTRIES 2048U
+#define LOADER_RELOC_APPLY_ENTRIES 256U
 /* Mirror of the loader's pass kinds (zzapp_loader.c). */
 #define TEST_WORK_KIND_ZERO  1U
 #define TEST_WORK_KIND_COPY  2U
@@ -244,9 +244,8 @@ static void assert_pass_work_bounded(void)
     uint32_t work = zzapp_test_loader_work_last_bytes();
     uint32_t kind = zzapp_test_loader_work_last_kind();
 
-    /* One loader pass must stay under ~1 ms (666k cycles) on the card:
-     * ~3.3 cycles per zeroed byte, ~6.6 per copied byte, and the
-     * relocation flush dominates at ~847 cycles per call. */
+    /* One loader pass must stay under ~1 ms (333k global-timer ticks) on the
+     * card. COUNTS_PER_SECOND is CPU/2: 333 MHz on the 666 MHz CPU. */
     assert(zero <= LOADER_ZERO_CHUNK_BYTES);
     assert(zzapp_test_loader_reloc_entries_last() <=
            LOADER_RELOC_APPLY_ENTRIES);
@@ -568,7 +567,7 @@ static void test_abort_releases_each_loader_slice(void)
 
 static void test_relocation_validation_is_sliced(void)
 {
-    const uint32_t relocation_count = 2U * 4096U + 1U;
+    const uint32_t relocation_count = 2U * LOADER_RELOC_PREPARE_ENTRIES + 1U;
     const uint32_t bytes = RELA_OFF + relocation_count * 12U + 40U;
     uint8_t *image = malloc(bytes);
     uint32_t in_progress = 0U;

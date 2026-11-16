@@ -7,18 +7,20 @@
 /* A32 UDF #0. Unlike an unallocated opcode, this encoding is permanently
  * undefined by the architecture, so a stale module entry faults reliably. */
 #define ZZM_POISON_WORD 0xE7F000F0U
+/* Core-1 module loading is sliced to about 1 ms (333k global-timer ticks).
+ * COUNTS_PER_SECOND is CPU/2, so the 666 MHz CPU's global timer is 333 MHz. */
 #ifndef ZZM_LOAD_READ_HASH_CHUNK_BYTES
 #ifdef ZZM_V3_READ_HASH_CHUNK_BYTES
 #define ZZM_LOAD_READ_HASH_CHUNK_BYTES ZZM_V3_READ_HASH_CHUNK_BYTES
 #else
-#define ZZM_LOAD_READ_HASH_CHUNK_BYTES (24U * 1024U)
+#define ZZM_LOAD_READ_HASH_CHUNK_BYTES (12U * 1024U)
 #endif
 #endif
 #ifndef ZZM_LOAD_MEMORY_CHUNK_BYTES
 #ifdef ZZM_V3_MEMORY_CHUNK_BYTES
 #define ZZM_LOAD_MEMORY_CHUNK_BYTES ZZM_V3_MEMORY_CHUNK_BYTES
 #else
-#define ZZM_LOAD_MEMORY_CHUNK_BYTES (128U * 1024U)
+#define ZZM_LOAD_MEMORY_CHUNK_BYTES (64U * 1024U)
 #endif
 #endif
 #ifndef ZZM_V3_READ_HASH_CHUNK_BYTES

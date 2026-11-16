@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sdk_audio_codec_io.h"
 #include "sdk_audio_flac.h"
 #include "sdk_decode_reclaim.h"
 #include "sdk_mailbox.h"
@@ -380,6 +381,8 @@ static void test_drain_and_budget(void)
 #define SIL_BLOCKSIZE  4096U
 #define SIL_FRAME_PCM  (SIL_BLOCKSIZE * 2U * 2U)
 #define SIL_PCM_BYTES  (SIL_FRAMES * SIL_FRAME_PCM)
+#define EXPECTED_PASS_PCM_CAP (24U * 1024U)
+
 
 static const uint8_t g_silence_flac[] = {
 	0x66U, 0x4cU, 0x61U, 0x43U, 0x00U, 0x00U, 0x00U, 0x22U, 0x10U, 0x00U, 0x10U, 0x00U,
@@ -423,6 +426,8 @@ static void test_pass_cap(void)
 	memcpy(s->in, g_silence_flac, len);
 	s->len = len;
 	s->eof = 1;
+	CHECK(sdk_audio_decode_pass_budget(SIL_PCM_BYTES) == EXPECTED_PASS_PCM_CAP,
+	      "pass cap budget: %u", sdk_audio_decode_pass_budget(SIL_PCM_BYTES));
 	st = sim_decode(s, 0);
 	CHECK(st == SDK_STATUS_OK && !s->complete && s->starved == 0 &&
 	      s->frames == 1U && s->out_len == SIL_FRAME_PCM,
@@ -435,7 +440,7 @@ static void test_pass_cap(void)
 		st = sim_decode(s, 0);
 		chunk = s->out_len - before;
 		CHECK(st == SDK_STATUS_OK, "pass cap loop: st %u", st);
-		CHECK(chunk <= SDK_AUDIO_DECODE_PASS_PCM_BYTES + SIL_FRAME_PCM,
+		CHECK(chunk <= EXPECTED_PASS_PCM_CAP + SIL_FRAME_PCM,
 		      "pass cap loop: pass decoded %u bytes", chunk);
 		if (st != SDK_STATUS_OK)
 			break;

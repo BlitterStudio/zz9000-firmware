@@ -129,8 +129,9 @@ void flush_audio_pcm_written(const struct SDKAudioStream *stream,
 void byteswap_pcm16(uint8_t *data, uint32_t bytes);
 
 /* One bounded MP3 decode pass over the stream's rings: as many frames as
- * input, PCM room, the low-water quantum and the ~1 ms service cap allow
- * (see sdk_audio_codec_io.h). Returns 1 when the pass made progress. */
+ * input, PCM room, the low-water quantum and the ~2 ms service cap allow
+ * (see sdk_audio_codec_io.h for the 333 MHz global-timer basis). Returns 1
+ * when the pass made progress. */
 uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream);
 
 #endif /* SDK_AUDIO_STREAM_H */

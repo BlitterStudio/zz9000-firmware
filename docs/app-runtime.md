@@ -28,13 +28,24 @@ due system work—SDK tasks, MiniGL service, launcher work, and audio feeding—
 then selects runnable app threads round-robin. In an overload window, service
 work is limited so runnable apps retain a 5% floor.
 
-A system-service pass runs to completion, and no app runs on core 1 meanwhile,
-so long work is cut into steps of about 1 ms: per pass the app loader zeroes
-or maps at most 192 KiB, copies 96 KiB, extracts 4096 relocation entries or
-applies 512; an on-demand v3 module load reads and hashes at most 24 KiB, then
-zeroes, flushes, invalidates, or failure-poisons at most 128 KiB; and a FLAC,
-Vorbis or MP3 decode pass produces at most 24 KiB of PCM plus one frame. TLS
-key exchange and signature checks offloaded by the AmiSSL provider can't be
+A system-service pass runs to completion, and no app runs on core 1 meanwhile.
+A CPU-bound app therefore gets about one service turn per 5 ms timer quantum;
+there is no universal 1 ms guarantee. The app loader and the progressive-JPEG
+coefficient step are each bounded to about 1 ms: the loader zeroes or maps at
+most 96 KiB, copies 48 KiB, extracts 2048 relocation entries, or applies 256.
+An on-demand v3 module load reads and hashes at most 12 KiB, then zeroes,
+flushes, invalidates, or failure-poisons at most 64 KiB. A FLAC, Vorbis, or
+MP3 decode pass produces at most 24 KiB of PCM plus one frame, about 2 ms.
+At 44.1 kHz stereo S16, 24 KiB is about 139 ms of playback and needs about
+7.2 refill passes per second, well below the roughly 200 service turns per
+second available to a CPU-bound app when the pump refills below low water.
+
+Those pass bounds do not make 64 KiB uploads, MiniGL batches, or whole image
+and JPEG operations universally 1 ms. The mailbox JPEG task decodes two rows
+per invocation and invalidates or flushes at most 32 KiB of cache per
+invocation; host bound tests do not cover those limits. Image setup, scaling,
+and non-coefficient work remain outside the progressive-JPEG step bound. TLS
+key exchange and signature checks offloaded by the AmiSSL provider cannot be
 split: one X25519, P-256 or RSA-2048 operation holds core 1 for about 5 to
 25 ms, so a handshake stalls running apps for that long.
 
@@ -68,7 +79,8 @@ the SVC cadence and on exception-driven switches; `ZZAPP_PERF_COUNTERS=0`
 removes their code and storage. The PMU runs only in privileged core-1 code:
 it supplies context-switch cycles and per-slot instruction/data TLB-refill
 counts, and is also initialized when `ZZAPP_SVC_PROBES=1` with counters off.
-The other scheduler latencies use the shared core timer.
+The other scheduler latencies and every `*_span` are XTime global-timer ticks:
+`COUNTS_PER_SECOND` is CPU/2, or about 333 MHz on the 666 MHz CPU.
 
 While an app runs, periodic report requests are coalesced and emitted at most
 once every ten seconds across all slots; terminal paths record a `forced=1`
