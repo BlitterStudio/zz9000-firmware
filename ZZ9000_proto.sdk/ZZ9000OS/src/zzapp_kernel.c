@@ -200,14 +200,32 @@ void zzapp_kernel_perf_service_begin(zzapp_kernel_t *kernel,
 		kernel->perf.service_start[service] = stamp;
 }
 
+void zzapp_kernel_perf_service_end_detail(zzapp_kernel_t *kernel,
+					   zzapp_perf_service_t service,
+					   uint32_t stamp, uint32_t detail,
+					   uint32_t bytes)
+{
+	zzapp_kernel_perf_metric_t *metric;
+	uint32_t elapsed;
+	uint32_t old_max;
+
+	if (!kernel || service >= ZZAPP_PERF_SERVICE_COUNT)
+		return;
+	metric = &kernel->perf.total.service[service];
+	elapsed = stamp - kernel->perf.service_start[service];
+	old_max = metric->max;
+	kernel_perf_add(metric, elapsed);
+	if (elapsed > old_max) {
+		kernel->perf.total.service_max_detail[service] = detail;
+		kernel->perf.total.service_max_bytes[service] = bytes;
+	}
+}
+
 void zzapp_kernel_perf_service_end(zzapp_kernel_t *kernel,
 				    zzapp_perf_service_t service,
 				    uint32_t stamp)
 {
-	if (!kernel || service >= ZZAPP_PERF_SERVICE_COUNT)
-		return;
-	kernel_perf_add(&kernel->perf.total.service[service], stamp -
-			kernel->perf.service_start[service]);
+	zzapp_kernel_perf_service_end_detail(kernel, service, stamp, 0U, 0U);
 }
 
 void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel, uint32_t slot,
@@ -272,6 +290,22 @@ void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t slot,
 	kernel->perf.report_pending |= bit;
 	if (force)
 		kernel->perf.report_force |= bit;
+}
+
+static const char *launcher_detail_name(uint32_t detail)
+{
+	switch (detail) {
+	case 0x101U:
+		return "loader-zero";
+	case 0x102U:
+		return "loader-copy";
+	case 0x103U:
+		return "loader-map";
+	case 0x104U:
+		return "loader-reloc";
+	default:
+		return "worker";
+	}
 }
 
 int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
@@ -350,6 +384,16 @@ int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
 				   (unsigned long)kernel_perf_percentile(
 					   &snapshot.service[service], 99U),
 				   (unsigned long)snapshot.service[service].max);
+	if (offset > 0 && (size_t)offset < sizeof(kernel->perf.report_text))
+		offset += snprintf(kernel->perf.report_text + offset,
+				   sizeof(kernel->perf.report_text) - (size_t)offset,
+				   " sdk_max_op=0x%04lx launcher_max_step=%s:%lu",
+				   (unsigned long)snapshot.service_max_detail[
+					   ZZAPP_PERF_SERVICE_SDK],
+				   launcher_detail_name(snapshot.service_max_detail[
+					   ZZAPP_PERF_SERVICE_LAUNCHER]),
+				   (unsigned long)snapshot.service_max_bytes[
+					   ZZAPP_PERF_SERVICE_LAUNCHER]);
 	if (offset > 0 && (size_t)offset < sizeof(kernel->perf.report_text) - 2U)
 		strcat(kernel->perf.report_text, "\r\n");
 	kernel->perf.report_ready = 1U;

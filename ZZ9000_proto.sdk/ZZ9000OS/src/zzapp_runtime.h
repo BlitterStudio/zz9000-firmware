@@ -114,6 +114,9 @@ uint64_t zzapp_ticks_to_us(uint64_t ticks);
 void zzapp_loader_release(void);
 uint32_t zzapp_loader_state(void);
 void zzapp_loader_set_state(uint32_t state);
+void zzapp_loader_work_begin_pass(void);
+uint32_t zzapp_loader_work_last_bytes(void);
+uint32_t zzapp_loader_work_last_kind(void);
 /* Union of the PF_X/PF_W/PF_R flags ({vaddr, memsz, flags} per PT_LOAD)
  * of every segment that touches the image page starting at `page`; the page
  * holding `image_end` is also writable because the heap follows it. */

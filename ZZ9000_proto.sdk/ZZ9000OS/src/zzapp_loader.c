@@ -259,23 +259,59 @@ enum loader_map_phase {
     LOADER_MAP_TAIL
 };
 
-/* Loader pass kinds, observed by host tests via
- * zzapp_test_loader_work_last_kind(). */
+/* Loader pass kinds, recorded for the core-1 launcher perf attribution. */
 #define ZZAPP_LOADER_WORK_ZERO  1u
 #define ZZAPP_LOADER_WORK_COPY  2u
 #define ZZAPP_LOADER_WORK_MAP   3u
 #define ZZAPP_LOADER_WORK_RELOC 4u
 
+#if ZZAPP_PERF_COUNTERS || defined(ZZAPP_HOST_TEST)
+static uint32_t worker_work_bytes;
+static uint32_t worker_work_kind;
+
+void zzapp_loader_work_begin_pass(void)
+{
+    worker_work_bytes = 0U;
+    worker_work_kind = 0U;
+}
+
+uint32_t zzapp_loader_work_last_bytes(void)
+{
+    return worker_work_bytes;
+}
+
+uint32_t zzapp_loader_work_last_kind(void)
+{
+    return worker_work_kind;
+}
+
 static void loader_note_work(uint32_t bytes, uint32_t kind)
 {
+    worker_work_bytes = bytes;
+    worker_work_kind = kind;
 #ifdef ZZAPP_HOST_TEST
     g_host_work_last_bytes = bytes;
     g_host_work_last_kind = kind;
-#else
-    (void)bytes;
-    (void)kind;
 #endif
 }
+#else
+void zzapp_loader_work_begin_pass(void)
+{
+}
+
+uint32_t zzapp_loader_work_last_bytes(void)
+{
+    return 0U;
+}
+
+uint32_t zzapp_loader_work_last_kind(void)
+{
+    return 0U;
+}
+
+#define loader_note_work(bytes, kind) \
+    do { (void)(bytes); (void)(kind); } while (0)
+#endif
 
 static void loader_note_relocs(uint32_t entries)
 {
@@ -430,8 +466,12 @@ static int map_loaded_image(const struct load_image *img)
     uint32_t total_frames;
     uint32_t proc_limit;
 
+#if ZZAPP_PERF_COUNTERS || defined(ZZAPP_HOST_TEST)
+    zzapp_loader_work_begin_pass();
+#endif
 #ifdef ZZAPP_HOST_TEST
     g_host_work_last_bytes = 0U;
+    g_host_work_last_kind = 0U;
 #endif
     if (!g_app_memory_ready || !proc ||
         img->image_end > ZZAPP_AS_ALIAS_BASE - ZZAPP_AS_WINDOW_BASE)

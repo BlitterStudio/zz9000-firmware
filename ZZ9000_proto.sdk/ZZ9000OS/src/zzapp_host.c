@@ -1954,6 +1954,9 @@ void zzapp_worker_hook(void)
     uint32_t argc = 0;
     uint64_t now = now_ticks();
 
+#if ZZAPP_PERF_COUNTERS || defined(ZZAPP_HOST_TEST)
+    zzapp_loader_work_begin_pass();
+#endif
     for (slot = 0; slot < ZZAPP_AS_SLOT_COUNT; ++slot) {
         if (coherent(slot)->reset_request && coherent(slot)->running &&
             !g_host_visible_commit_active[slot])

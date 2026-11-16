@@ -25,6 +25,7 @@ static uint32_t audio_forget_calls;
 static uint32_t decode_reclaim_calls;
 static uint32_t image_poison_session_calls;
 static uint32_t app_decode_reclaim_calls;
+static int image_begin_in_progress;
 static int stop_during_host_alloc;
 static int stop_during_image_begin;
 static uint32_t flac_pool_owner[2];
@@ -93,6 +94,10 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
         zzapp_host_latch_stop(0U);
         zzapp_host_tick_at(1u);
         zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    }
+    if (image_begin_in_progress) {
+        image_begin_in_progress--;
+        return SDK_TASK_IN_PROGRESS;
     }
     memset(out, 0, sizeof(*out));
     out->session = 0x100u + image_begin_calls;
@@ -339,7 +344,9 @@ int main(void)
     assert(api->image_close(image_session) == ZZ_OK);
     assert(image_begin_calls == 1u && image_feed_calls == 1u &&
            image_close_calls == 1u);
+    image_begin_in_progress = 1;
     assert(api->image_open(&image, &image_session, &image_result) == ZZ_OK);
+    assert(image_begin_calls == 3u);
 
     mp3[0] = 0xffu; mp3[1] = 0xfbu; mp3[2] = 0x90u; mp3[3] = 0x64u;
     mp3[417] = 0xffu; mp3[418] = 0xfbu;

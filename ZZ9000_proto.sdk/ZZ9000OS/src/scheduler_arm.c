@@ -579,6 +579,7 @@ void scheduler_core1_service_once(void)
 #if ZZAPP_PERF_COUNTERS
     zzapp_perf_service_t service = scheduler_perf_class(&sh->queue.descs[slot]);
     uint32_t stamp = scheduler_perf_stamp();
+    uint32_t opcode = sh->queue.descs[slot].opcode;
 
     zzapp_kernel_perf_sdk_started(zzapp_runtime_kernel(),
                                   sh->queue.descs[slot].perf_enqueue_stamp,
@@ -590,8 +591,9 @@ void scheduler_core1_service_once(void)
     sh->core1_current_slot = -1;
     sh->tasks_on_core1++;
 #if ZZAPP_PERF_COUNTERS
-    zzapp_kernel_perf_service_end(zzapp_runtime_kernel(), service,
-                                  scheduler_perf_stamp());
+    zzapp_kernel_perf_service_end_detail(zzapp_runtime_kernel(), service,
+                                         scheduler_perf_stamp(),
+                                         opcode, 0U);
 #endif
   }
   action = sh->minigl_reset_request != 0U ? SCHED_WORKER_ACTION_RESET :
@@ -723,9 +725,14 @@ void scheduler_core1_worker(void)
 #endif
     zzapp_worker_hook();
 #if ZZAPP_PERF_COUNTERS
-    zzapp_kernel_perf_service_end(zzapp_runtime_kernel(),
-                                  ZZAPP_PERF_SERVICE_LAUNCHER,
-                                  scheduler_perf_stamp());
+    {
+      uint32_t work_kind = zzapp_loader_work_last_kind();
+
+      zzapp_kernel_perf_service_end_detail(
+          zzapp_runtime_kernel(), ZZAPP_PERF_SERVICE_LAUNCHER,
+          scheduler_perf_stamp(), work_kind ? 0x100U | work_kind : 1U,
+          zzapp_loader_work_last_bytes());
+    }
 #endif
     if (drained != 0U) {
       (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
@@ -771,6 +778,7 @@ void scheduler_core1_worker(void)
       zzapp_perf_service_t service =
           scheduler_perf_class(&sh->queue.descs[task_slot]);
       uint32_t stamp = scheduler_perf_stamp();
+      uint32_t opcode = sh->queue.descs[task_slot].opcode;
 
       zzapp_kernel_perf_sdk_started(zzapp_runtime_kernel(),
                                     sh->queue.descs[task_slot].perf_enqueue_stamp,
@@ -782,8 +790,10 @@ void scheduler_core1_worker(void)
       sh->core1_current_slot = -1;
       sh->tasks_on_core1++;
 #if ZZAPP_PERF_COUNTERS
-      zzapp_kernel_perf_service_end(zzapp_runtime_kernel(), service,
-                                    scheduler_perf_stamp());
+      zzapp_kernel_perf_service_end_detail(zzapp_runtime_kernel(), service,
+                                            scheduler_perf_stamp(),
+                                            opcode,
+                                            0U);
 #endif
       break;
     }

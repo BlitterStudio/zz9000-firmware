@@ -632,6 +632,7 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
 {
     struct SDKImageStreamBegin begin;
     struct SDKImageStreamResult result;
+    uint16_t status;
     uint32_t owner = api_slot();
     uint32_t i;
     int rc;
@@ -661,7 +662,15 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
      * before it returns. Hold the same commit guard host-visible
      * allocations use until the ledger records the new session. */
     zzapp_host_commit_begin();
-    rc = sdk_to_zz(sdk_image_stream_begin(&begin, &result));
+    do {
+        status = sdk_image_stream_begin(&begin, &result);
+        if (status != SDK_TASK_IN_PROGRESS)
+            break;
+        zzapp_host_yield_wait();
+    } while (!api_stop() && !zzapp_host_faulted());
+    if (status == SDK_TASK_IN_PROGRESS)
+        status = SDK_STATUS_BUSY;
+    rc = sdk_to_zz(status);
     if (rc == ZZ_OK) {
         g_image_sessions[owner][i].id = result.session;
         g_image_sessions[owner][i].tile_address = (uint32_t)(uintptr_t)open->tile;

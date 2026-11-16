@@ -728,6 +728,7 @@ static void test_relocation_passes_are_bounded_and_flushed(void)
     free(image);
 }
 
+
 int main(void)
 {
     uint8_t image[IMAGE_BYTES];

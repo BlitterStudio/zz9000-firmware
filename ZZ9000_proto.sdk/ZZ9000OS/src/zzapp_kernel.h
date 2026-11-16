@@ -48,6 +48,8 @@ typedef struct {
 	zzapp_kernel_perf_metric_t sgi_to_service;
 	zzapp_kernel_perf_metric_t sdk_enqueue_to_start;
 	zzapp_kernel_perf_metric_t service[ZZAPP_PERF_SERVICE_COUNT];
+	uint32_t service_max_detail[ZZAPP_PERF_SERVICE_COUNT];
+	uint32_t service_max_bytes[ZZAPP_PERF_SERVICE_COUNT];
 	uint32_t sgis;
 	uint32_t work_publications;
 	uint32_t audio_low_water;
@@ -242,6 +244,10 @@ void zzapp_kernel_perf_service_begin(zzapp_kernel_t *kernel,
 void zzapp_kernel_perf_service_end(zzapp_kernel_t *kernel,
 				    zzapp_perf_service_t service,
 				    uint32_t stamp);
+void zzapp_kernel_perf_service_end_detail(zzapp_kernel_t *kernel,
+					   zzapp_perf_service_t service,
+					   uint32_t stamp, uint32_t detail,
+					   uint32_t bytes);
 void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel, uint32_t slot,
 			      uint32_t low_water, uint32_t starved,
 			      uint32_t underruns);

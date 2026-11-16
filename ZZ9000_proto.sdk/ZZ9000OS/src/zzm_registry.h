@@ -10,6 +10,7 @@ enum zzm_codec_availability {
     ZZM_CODEC_AVAILABLE = 0,
     ZZM_CODEC_MISSING = 1,
     ZZM_CODEC_MISMATCH = 2,
+    ZZM_CODEC_LOADING = 3,
 };
 
 enum zzm_codec_availability zzm_registry_availability(uint32_t module_id);

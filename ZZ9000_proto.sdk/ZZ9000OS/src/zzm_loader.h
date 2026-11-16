@@ -7,11 +7,25 @@
 /* A32 UDF #0. Unlike an unallocated opcode, this encoding is permanently
  * undefined by the architecture, so a stale module entry faults reliably. */
 #define ZZM_POISON_WORD 0xE7F000F0U
+#ifndef ZZM_LOAD_READ_HASH_CHUNK_BYTES
+#ifdef ZZM_V3_READ_HASH_CHUNK_BYTES
+#define ZZM_LOAD_READ_HASH_CHUNK_BYTES ZZM_V3_READ_HASH_CHUNK_BYTES
+#else
+#define ZZM_LOAD_READ_HASH_CHUNK_BYTES (24U * 1024U)
+#endif
+#endif
+#ifndef ZZM_LOAD_MEMORY_CHUNK_BYTES
+#ifdef ZZM_V3_MEMORY_CHUNK_BYTES
+#define ZZM_LOAD_MEMORY_CHUNK_BYTES ZZM_V3_MEMORY_CHUNK_BYTES
+#else
+#define ZZM_LOAD_MEMORY_CHUNK_BYTES (128U * 1024U)
+#endif
+#endif
 #ifndef ZZM_V3_READ_HASH_CHUNK_BYTES
-#define ZZM_V3_READ_HASH_CHUNK_BYTES (24U * 1024U)
+#define ZZM_V3_READ_HASH_CHUNK_BYTES ZZM_LOAD_READ_HASH_CHUNK_BYTES
 #endif
 #ifndef ZZM_V3_MEMORY_CHUNK_BYTES
-#define ZZM_V3_MEMORY_CHUNK_BYTES (128U * 1024U)
+#define ZZM_V3_MEMORY_CHUNK_BYTES ZZM_LOAD_MEMORY_CHUNK_BYTES
 #endif
 
 
@@ -113,7 +127,7 @@ uint32_t zzm_loader_service_declared_count(uint32_t module_id);
 void zzm_loader_set_storage_idle(int (*storage_idle)(void));
 int zzm_loader_ensure_service(uint32_t service_id, uint32_t min_version);
 int zzm_loader_load_on_owner(uint32_t module_id);
-/* Core 0 reset path: cancel a resumable v3 load before core 1 drains it. */
+/* Core 0 reset path: cancel a resumable module load before core 1 drains it. */
 void zzm_loader_cancel_loading(uint32_t module_id);
 void zzm_loader_set_load_dispatch(int (*dispatch)(uint32_t module_id));
 #ifdef ZZM_LOADER_HOST_TEST

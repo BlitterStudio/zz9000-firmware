@@ -944,6 +944,14 @@ static void test_performance_counters(void)
 	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_AUDIO, 300u);
 	zzapp_kernel_perf_service_end(&kernel, ZZAPP_PERF_SERVICE_AUDIO, 380u);
 	zzapp_kernel_perf_audio(&kernel, 1u, 3u, 4u, 2u);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_SDK, 400u);
+	zzapp_kernel_perf_service_end_detail(&kernel, ZZAPP_PERF_SERVICE_SDK,
+					     480u, 0x1234u, 0u);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_LAUNCHER,
+					500u);
+	zzapp_kernel_perf_service_end_detail(&kernel,
+					     ZZAPP_PERF_SERVICE_LAUNCHER,
+					     700u, 0x103u, 192u * 1024u);
 	zzapp_kernel_perf_snapshot(&kernel, 1u, &snapshot);
 	CHECK(snapshot.switch_cycles.samples == 2u);
 	CHECK(snapshot.switch_cycles.max == 80u);
@@ -952,6 +960,10 @@ static void test_performance_counters(void)
 	CHECK(snapshot.sdk_enqueue_to_start.samples == 1u);
 	CHECK(snapshot.sdk_enqueue_to_start.max == 40u);
 	CHECK(snapshot.service[ZZAPP_PERF_SERVICE_AUDIO].max == 80u);
+	CHECK(snapshot.service_max_detail[ZZAPP_PERF_SERVICE_SDK] == 0x1234u);
+	CHECK(snapshot.service_max_detail[ZZAPP_PERF_SERVICE_LAUNCHER] == 0x103u);
+	CHECK(snapshot.service_max_bytes[ZZAPP_PERF_SERVICE_LAUNCHER] ==
+	      (192u * 1024u));
 	CHECK(snapshot.sgis == 2u);
 	CHECK(snapshot.work_publications == 4u);
 	CHECK(snapshot.audio_low_water == 3u);
@@ -964,7 +976,9 @@ static void test_performance_counters(void)
 	zzapp_kernel_perf_request_report(&kernel, 1u, 0);
 	CHECK((kernel.perf.report_pending & (1U << 1)) != 0U);
 	CHECK(zzapp_kernel_perf_emit_reports(&kernel) == 1);
-	CHECK(strstr(kernel.perf.report_text, "audio=3/4/2") != NULL);
+	CHECK(strstr(kernel.perf.report_text,
+		     "sdk_max_op=0x1234 launcher_max_step=loader-map:196608") !=
+	      NULL);
 	zzapp_kernel_perf_print_reports(&kernel);
 	CHECK(kernel.perf.report_pending == 0U);
 	zzapp_kernel_perf_request_report(&kernel, 1u, 0);

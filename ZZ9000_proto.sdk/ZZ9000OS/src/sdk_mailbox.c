@@ -63,6 +63,12 @@
 #include "sdk_audio_vorbis.h"
 #include "zzm_loader.h"
 #include "zzm_minigl_host.h"
+#ifdef SDK_MAILBOX_HOST_TEST
+#define sdk_mailbox_dsb() do {} while (0)
+#else
+#define sdk_mailbox_dsb() __asm__ __volatile__("dsb" ::: "memory")
+#endif
+
 
 /* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
  * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
@@ -6633,10 +6639,12 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		s = sdk_image_stream_begin_owned(
 			&begin, image_begin_pending[p->pending_slot].owner_id,
 			&image_result);
-		image_begin_pending[p->pending_slot].in_use = 0U;
-		Xil_DCacheFlushRange(
-			(INTPTR)(uintptr_t)&image_begin_pending[p->pending_slot],
-			sizeof(image_begin_pending[p->pending_slot]));
+		if (s != SDK_TASK_IN_PROGRESS) {
+			image_begin_pending[p->pending_slot].in_use = 0U;
+			Xil_DCacheFlushRange(
+				(INTPTR)(uintptr_t)&image_begin_pending[p->pending_slot],
+				sizeof(image_begin_pending[p->pending_slot]));
+		}
 		if (s != SDK_STATUS_OK)
 			return s;
 		memset(result_payload, 0,
@@ -7399,6 +7407,20 @@ static uint16_t image_session_begin_try_defer(
 	scheduler_core1_publish();
 	return SDK_STATUS_QUEUED;
 }
+#ifdef SDK_MAILBOX_HOST_TEST
+uint16_t sdk_mailbox_test_image_begin_try_defer(
+	volatile struct SDKMailboxEntry *req,
+	const struct SDKImageStreamBegin *begin)
+{
+	int batch_tail = g_request_is_batch_tail;
+	uint16_t status;
+
+	g_request_is_batch_tail = 1;
+	status = image_session_begin_try_defer(req, begin);
+	g_request_is_batch_tail = batch_tail;
+	return status;
+}
+#endif
 
 /*
  * Front dispatch helper for decompress, mirroring crypto_dispatch exactly
@@ -8984,7 +9006,7 @@ static void write_mailbox_descriptor(void)
 	put_be32(desc->completion_ring_entries, mailbox_ring_entries);
 	put_be32(desc->capability_bits, mailbox_capability_bits());
 	Xil_DCacheFlushRange(mailbox_base, mailbox_total_size());
-	__asm__ __volatile__("dsb" ::: "memory");
+	sdk_mailbox_dsb();
 }
 
 void sdk_mailbox_publish_after_aperture_ack(void)
@@ -9206,7 +9228,7 @@ void sdk_mailbox_task(void)
 	 * are flushed at their write sites.
 	 */
 	Xil_DCacheInvalidateRange(mailbox_base, mailbox_total_size());
-	__asm__ __volatile__("dsb" ::: "memory");
+	sdk_mailbox_dsb();
 
 	if (!descriptor_valid(desc)) {
 		sdk_mailbox_pending = 0;
@@ -9260,7 +9282,7 @@ void sdk_mailbox_task(void)
 			req_head = next_index(req_head);
 			put_be32(desc->request_head, req_head);
 			Xil_DCacheFlushRange((INTPTR)desc, sizeof(*desc));
-			__asm__ __volatile__("dsb" ::: "memory");
+			sdk_mailbox_dsb();
 			continue;
 		}
 
@@ -9276,7 +9298,7 @@ void sdk_mailbox_task(void)
 		put_be32(desc->request_head, req_head);
 		put_be32(desc->completion_tail, comp_tail);
 		Xil_DCacheFlushRange((INTPTR)desc, sizeof(*desc));
-		__asm__ __volatile__("dsb" ::: "memory");
+		sdk_mailbox_dsb();
 	}
 
 	if (req_head == req_tail)
@@ -9395,7 +9417,7 @@ int sdk_mailbox_post_deferred(int slot, uint32_t request_id,
 
 	/* Refresh the Amiga-owned completion_head before checking for room. */
 	Xil_DCacheInvalidateRange((INTPTR)desc, sizeof(*desc));
-	__asm__ __volatile__("dsb" ::: "memory");
+	sdk_mailbox_dsb();
 
 	if (!descriptor_valid(desc))
 		return 0;
@@ -9475,7 +9497,7 @@ int sdk_mailbox_post_deferred(int slot, uint32_t request_id,
 	comp_tail = next_comp_tail;
 	put_be32(desc->completion_tail, comp_tail);
 	Xil_DCacheFlushRange((INTPTR)desc, sizeof(*desc));
-	__asm__ __volatile__("dsb" ::: "memory");
+	sdk_mailbox_dsb();
 
 	/* Video decode and overlay composition share core 1. Retire the decoded
 	 * frame into the overlay scheduler before raising the client IRQ: the
