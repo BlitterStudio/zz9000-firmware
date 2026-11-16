@@ -38,12 +38,13 @@ key exchange and signature checks offloaded by the AmiSSL provider can't be
 split: one X25519, P-256 or RSA-2048 operation holds core 1 for about 5 to
 25 ms, so a handshake stalls running apps for that long.
 
-An API body remains unpreemptible while it owns the API lock. Its explicit
-`zz_yield` safe point releases that lock, lets one due system-service pass run,
-then reacquires the lock before returning to the body. This bounds audio-service
-delay at cooperative yield points to the current API segment plus one scheduler
-handoff; a body that does not yield remains subject to the API watchdog rather
-than a scheduler preemption.
+An API body remains unpreemptible while it owns the API lock. Its internal
+explicit `zz_yield` safe point releases that lock, lets one due system-service
+pass run, then reacquires the lock before returning to the body. A standalone
+`zz_yield` rotates to another runnable app and runs a system-service pass only
+when service work is due. This bounds audio-service delay at cooperative yield
+points to the current API segment plus one scheduler handoff; a body that does
+not yield remains subject to the API watchdog rather than a scheduler preemption.
 
 File and directory operations, console read and backpressure, display open and
 flip, non-host audio open and close, and sleep park the caller at the SVC

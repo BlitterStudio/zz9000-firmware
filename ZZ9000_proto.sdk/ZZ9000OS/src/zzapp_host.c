@@ -130,6 +130,7 @@ static struct zzapp_coherent *const g_coh =
 static struct zzapp_coherent g_coh_store[ZZAPP_AS_SLOT_COUNT];
 static struct zzapp_coherent *const g_coh = g_coh_store;
 static uint64_t g_test_ticks;
+static uint32_t g_test_system_tick;
 #endif
 
 _Static_assert(sizeof(struct zzapp_coherent) * ZZAPP_AS_SLOT_COUNT <= 0x1000u,
@@ -279,7 +280,7 @@ zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame)
 
     if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS &&
         g_kernel.threads[slot].state == ZZAPP_THREAD_RUNNABLE &&
-        !g_kernel.service_due)
+        !g_kernel.service_due && !g_kernel.threads[slot].yield_pending)
         return frame;
     return zzapp_kernel_arch_dispatch(frame, ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0U);
 }
@@ -290,7 +291,7 @@ int zzapp_kernel_svc_can_return(void)
 
     return slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS &&
            g_kernel.threads[slot].state == ZZAPP_THREAD_RUNNABLE &&
-           !g_kernel.service_due;
+           !g_kernel.service_due && !g_kernel.threads[slot].yield_pending;
 }
 
 void zzapp_kernel_switch_address_space(uint32_t slot)
@@ -1023,6 +1024,8 @@ static void begin_tick_observation(void)
     coherent(0)->core_heartbeat = host->last_tick;
 }
 
+static void check_stack_canary(void);
+
 /* The private timer may interrupt an app API or system service pass. It only
  * updates scheduler-visible state; teardown and service code stay on the
  * system thread. */
@@ -1037,8 +1040,11 @@ static void service_tick_irq(uint64_t now)
     zzapp_kernel_service_due(&g_kernel);
     slot = (uint32_t)zzapp_kernel_current_thread();
 #ifdef ZZAPP_HOST_TEST
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
+    if (slot >= ZZAPP_AS_SLOT_COUNT) {
+        if (g_test_system_tick != 0U)
+            return;
         slot = current_slot();
+    }
 #else
     if (slot >= ZZAPP_AS_SLOT_COUNT)
         return;
@@ -1056,22 +1062,19 @@ static void service_tick_irq(uint64_t now)
     }
     host->last_tick = now;
     /* ZZRun can set this host-visible word before its best-effort APP_STOP
-     * reaches firmware.  Sample it at the scheduler tick, never per SVC. */
+     * reaches firmware. Sample it at the scheduler tick, never per SVC. */
     if (life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
         zzapp_host_latch_stop(slot);
-    host->service_due = 1u;
     if (g_host_visible_commit_active[slot] || !coh->running)
-        return;
+        goto finish;
     if (coh->reset_request || host->stop_requested != 0u) {
         if (!host->stop_mark)
             host->stop_mark = now;
         if (coh->reset_request ||
             ticks_to_us(now - host->stop_mark) >= ZZAPP_STOP_GRACE_US)
             request_stop(slot, ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
-        return;
-    }
-    if (host->in_api == 0u &&
-        ticks_to_us(now - coh->progress) >= ZZAPP_APP_STALL_US) {
+    } else if (host->in_api == 0u &&
+               ticks_to_us(now - coh->progress) >= ZZAPP_APP_STALL_US) {
         host->watchdog_reason = 1u;
         request_stop(slot, ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
     } else if (host->in_api != 0u && !g_api_parked[slot] &&
@@ -1079,22 +1082,23 @@ static void service_tick_irq(uint64_t now)
         host->watchdog_reason = 2u;
         request_stop(slot, ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
     }
+
+finish:
+    host->service_due = 1u;
 }
 
 
-static void check_stack_canary(void);
 
 static void service_watch_slot(uint64_t now)
 {
     uint32_t slot = current_slot();
     struct zzapp_host_slot *host = host_slot(slot);
     struct zzapp_coherent *coh = coherent(slot);
-
     check_stack_canary();
-    /* The worker runs once per service tick and visits every slot.  ZZRun can
-     * write this host-visible word even when its best-effort APP_STOP is
-     * dropped, so sample every valid slot here rather than only the app that
-     * received the timer interrupt. */
+
+    /* The worker visits every slot on each system pass. ZZRun can write this
+     * host-visible word even when its best-effort APP_STOP is dropped, so
+     * sample every valid slot rather than only the timer's interrupted app. */
     if (life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
         zzapp_host_latch_stop(slot);
     if (g_host_visible_commit_active[slot])
@@ -1284,14 +1288,23 @@ void zzapp_host_yield(void)
     struct zzapp_host_slot *host = host_slot(slot);
 
     zzapp_note_progress();
-    host->service_due = 1u;
-    zzapp_kernel_service_due(&g_kernel);
-    /* Yield is the API body's safe interleaving point.  Never preempt a
+    if (zzapp_kernel_current_thread() >= 0 && host->in_api == 0u)
+        check_stack_canary();
+    /* Yield is the API body's safe interleaving point. Never preempt a
      * non-yielding body: it may hold service-visible state on its stack. */
     if (zzapp_kernel_current_thread() < 0 || host->in_api == 0u ||
         g_kernel.api_lock_owner != (int)slot ||
-        g_kernel.api_lock_depth != 1U)
+        g_kernel.api_lock_depth != 1U) {
+        if (zzapp_kernel_current_thread() < 0) {
+            host->service_due = 1u;
+            zzapp_kernel_service_due(&g_kernel);
+        } else {
+            zzapp_kernel_yield(&g_kernel);
+        }
         return;
+    }
+    host->service_due = 1u;
+    zzapp_kernel_service_due(&g_kernel);
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     if (host->perf_svc_sampled)
         zzapp_kernel_perf_service_end(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
@@ -2436,6 +2449,13 @@ int zzapp_host_mem_info(zzapp_mem_info *out)
 void zzapp_test_set_xtime(uint64_t ticks) { g_test_ticks = ticks; }
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv)) { g_test_entry = fn; }
 void zzapp_host_tick_at(uint64_t now) { g_test_ticks = now; service_tick_irq(now); }
+void zzapp_test_system_tick_at(uint64_t now)
+{
+    g_test_ticks = now;
+    g_test_system_tick = 1U;
+    service_tick_irq(now);
+    g_test_system_tick = 0U;
+}
 void zzapp_test_set_time_hook(uint64_t (*hook)(void)) { g_test_time_hook = hook; }
 void zzapp_test_request_reset(uint32_t slot)
 {

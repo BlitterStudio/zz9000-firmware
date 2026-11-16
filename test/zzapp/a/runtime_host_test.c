@@ -18,6 +18,13 @@ static uint32_t service_poll_max_depth;
 static int tick_during_service_poll;
 static unsigned service_core = 1U;
 
+static unsigned kernel_wake_events;
+
+void zzapp_test_kernel_wake_event(void)
+{
+    kernel_wake_events++;
+}
+
 static void set_service_core(unsigned core)
 {
     service_core = core;
@@ -147,6 +154,164 @@ static void test_ticks_to_us(void)
         assert_ticks_to_us(next_random(&random) % (limit + 1U));
 }
 
+static void run_system_pass_if_due(void)
+{
+    zzapp_arm_frame_t frame = { 0 };
+    int service_due = zzapp_runtime_kernel()->service_due != 0U;
+
+    if (!zzapp_kernel_svc_can_return()) {
+        (void)zzapp_kernel_svc_return(&frame);
+        if (service_due || zzapp_kernel_current_thread() < 0) {
+            zzapp_kernel_set_current_thread(-1);
+            zzapp_worker_hook();
+        }
+    }
+}
+
+static void test_yield_and_tick_scheduling(void)
+{
+    zzapp_kernel_t *kernel;
+    uint32_t service_calls;
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    service_calls = zzapp_test_service_calls();
+    zzapp_api_table()->yield();
+    assert(zzapp_kernel_svc_can_return());
+    run_system_pass_if_due();
+    assert(zzapp_test_service_calls() == service_calls);
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 1U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    zzapp_api_table()->yield();
+    assert(!zzapp_kernel_svc_can_return());
+    run_system_pass_if_due();
+    assert(zzapp_kernel_current_thread() == 1);
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 1U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    zzapp_host_yield();
+    {
+        zzapp_arm_frame_t frame = { 0 };
+
+        (void)zzapp_kernel_switch_frame(zzapp_runtime_kernel(), &frame,
+                                        ZZAPP_KERNEL_DISPATCH_TICK, 0U);
+    }
+    assert(zzapp_kernel_current_thread() == 1);
+    assert(zzapp_kernel_svc_can_return());
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    service_calls = zzapp_test_service_calls();
+    zzapp_kernel_service_due(zzapp_runtime_kernel());
+    zzapp_api_table()->yield();
+    assert(!zzapp_kernel_svc_can_return());
+    run_system_pass_if_due();
+    assert(zzapp_test_service_calls() > service_calls);
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(-1);
+    assert(zzapp_runtime_kernel()->service_due == 0U);
+    zzapp_test_system_tick_at(ZZAPP_TICK_US);
+    assert(zzapp_kernel_dispatch(zzapp_runtime_kernel(),
+                                 ZZAPP_KERNEL_DISPATCH_TICK, 0U) ==
+           ZZAPP_KERNEL_SYSTEM);
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    service_calls = zzapp_test_service_calls();
+    zzapp_host_tick_at(ZZAPP_TICK_US);
+    assert(!zzapp_kernel_svc_can_return());
+    run_system_pass_if_due();
+    assert(zzapp_test_service_calls() > service_calls);
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    kernel_wake_events = 0U;
+    assert(zzapp_kernel_sleep(zzapp_runtime_kernel(), 0U, 5U) == 0);
+    zzapp_host_tick_at(ZZAPP_TICK_US);
+    assert(!zzapp_kernel_svc_can_return());
+    zzapp_kernel_advance(zzapp_runtime_kernel(), 5U);
+    assert(kernel_wake_events == 1U);
+    run_system_pass_if_due();
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    zzapp_host_tick_at(ZZAPP_APP_STALL_US);
+    assert(!zzapp_kernel_svc_can_return());
+    run_system_pass_if_due();
+    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    zzapp_host_latch_stop(0U);
+    zzapp_host_tick_at(1U);
+    zzapp_host_tick_at(ZZAPP_STOP_GRACE_US + 1U);
+    assert(!zzapp_kernel_svc_can_return());
+    run_system_pass_if_due();
+    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_kernel_set_current_thread(0);
+    zzapp_test_mark_running();
+    zzapp_kernel_service_due(zzapp_runtime_kernel());
+    zzapp_host_tick_at(ZZAPP_TICK_US);
+    assert(!zzapp_kernel_svc_can_return());
+
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 1U) == 0);
+    zzapp_kernel_set_current_thread(1);
+    zzapp_test_mark_running();
+    assert(zzapp_kernel_system_lock(zzapp_runtime_kernel()) == 0);
+    assert(zzapp_kernel_api_lock(zzapp_runtime_kernel(), 0U) != 0);
+    assert(zzapp_kernel_api_block(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_host_tick_at(ZZAPP_TICK_US);
+    assert(!zzapp_kernel_svc_can_return());
+    kernel = zzapp_runtime_kernel();
+    assert(kernel->service_due != 0U);
+    zzapp_kernel_set_current_thread(-1);
+}
+
 int main(void)
 {
     uint32_t card;
@@ -161,6 +326,7 @@ int main(void)
      */
     assert(ZZAPP_ENTRY_FPSCR == 0u);
     test_ticks_to_us();
+    test_yield_and_tick_scheduling();
 
     zzapp_test_set_xtime(0);
     zzapp_test_mark_running();

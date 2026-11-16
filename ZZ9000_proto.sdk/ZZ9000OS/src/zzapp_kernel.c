@@ -511,6 +511,20 @@ int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t slot)
 	return 0;
 }
 
+/* A wake can race the system worker's final runnable-app check. Leave an
+ * event pending so a following WFE cannot hide that app until another tick. */
+static void kernel_wake_event(void)
+{
+#ifdef ZZAPP_HOST_TEST
+	extern void zzapp_test_kernel_wake_event(void) __attribute__((weak));
+
+	if (zzapp_test_kernel_wake_event)
+		zzapp_test_kernel_wake_event();
+#else
+	__asm__ __volatile__("sev" ::: "memory");
+#endif
+}
+
 int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
 		zzapp_wake_reason_t reason)
 {
@@ -528,6 +542,7 @@ int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
 	thread->wake_sequence = ++kernel->wake_serial;
 	if (kernel->wake_log_count < ZZAPP_KERNEL_APP_SLOTS)
 		kernel->wake_log[kernel->wake_log_count++] = (uint8_t)slot;
+	kernel_wake_event();
 	return 0;
 }
 
@@ -558,6 +573,28 @@ void zzapp_kernel_service_due(zzapp_kernel_t *kernel)
 	if (kernel)
 		kernel->service_due = 1;
 }
+
+void zzapp_kernel_yield(zzapp_kernel_t *kernel)
+{
+	uint32_t slot;
+	int current;
+
+	if (!kernel)
+		return;
+	current = zzapp_kernel_current_thread();
+	if (current < 0 || current >= (int)ZZAPP_KERNEL_APP_SLOTS)
+		return;
+	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
+		if (slot != (uint32_t)current &&
+		    kernel->threads[slot].state == ZZAPP_THREAD_RUNNABLE) {
+			kernel->rr_next = ((uint32_t)current + 1U) %
+				ZZAPP_KERNEL_APP_SLOTS;
+			kernel->threads[current].yield_pending = 1U;
+			return;
+		}
+	}
+}
+
 
 uint64_t zzapp_kernel_now(const zzapp_kernel_t *kernel)
 {
@@ -772,10 +809,15 @@ int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
 		return ZZAPP_KERNEL_IDLE;
 	if (source == ZZAPP_KERNEL_DISPATCH_DOORBELL)
 		zzapp_kernel_service_due(kernel);
-	else if (source == ZZAPP_KERNEL_DISPATCH_VOLUNTARY &&
-		 kernel->active < ZZAPP_KERNEL_APP_SLOTS) {
-		kernel->threads[kernel->active].quantum_left = 0U;
-		kernel->active = NO_ACTIVE;
+	else if (source == ZZAPP_KERNEL_DISPATCH_VOLUNTARY) {
+		int current = zzapp_kernel_current_thread();
+
+		if (current >= 0 && current < (int)ZZAPP_KERNEL_APP_SLOTS)
+			kernel->threads[current].yield_pending = 0U;
+		if (kernel->active < ZZAPP_KERNEL_APP_SLOTS) {
+			kernel->threads[kernel->active].quantum_left = 0U;
+			kernel->active = NO_ACTIVE;
+		}
 	}
 	return zzapp_kernel_schedule(kernel, elapsed_ms);
 }

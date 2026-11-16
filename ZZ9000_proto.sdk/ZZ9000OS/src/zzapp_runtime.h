@@ -243,6 +243,7 @@ void zzapp_minigl_forget(void);
 void zzapp_test_set_xtime(uint64_t ticks);
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv));
 void zzapp_host_tick_at(uint64_t now);
+void zzapp_test_system_tick_at(uint64_t now);
 void zzapp_test_mark_running(void);
 uint32_t zzapp_test_service_calls(void);
 uint32_t zzapp_test_in_api(void);

@@ -368,7 +368,7 @@ static void api_exit(int code)
     extern void zzapp_host_exit(int);
     zzapp_host_exit(code);
 }
-static void api_yield(void) { zzapp_api_enter(); zzapp_host_yield(); zzapp_api_leave(); }
+static void api_yield(void) { zzapp_host_yield(); }
 static int api_stop(void)
 {
     zzapp_api_touch();

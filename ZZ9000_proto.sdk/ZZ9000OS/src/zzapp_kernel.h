@@ -140,6 +140,7 @@ typedef enum {
 typedef struct {
 	zzapp_thread_state_t state;
 	zzapp_wake_reason_t wake_reason;
+	uint8_t yield_pending;
 	uint32_t quantum_left;
 	uint64_t user_ticks;
 	uint64_t svc_ticks;
@@ -220,6 +221,7 @@ int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t slot,
 		uint64_t deadline);
 void zzapp_kernel_advance(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 void zzapp_kernel_service_due(zzapp_kernel_t *kernel);
+void zzapp_kernel_yield(zzapp_kernel_t *kernel);
 /* Milliseconds since boot. Firmware supplies the global timer; tests inject one. */
 uint64_t zzapp_kernel_now_ms(void);
 uint64_t zzapp_kernel_now(const zzapp_kernel_t *kernel);

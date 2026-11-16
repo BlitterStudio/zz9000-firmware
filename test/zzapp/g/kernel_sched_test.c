@@ -11,6 +11,13 @@ static int test_irqs_masked;
 static void (*test_pending_irq_fn)(void);
 static void (*test_clock_hook)(void);
 
+static unsigned wake_events;
+
+void zzapp_test_kernel_wake_event(void)
+{
+	wake_events++;
+}
+
 uint64_t zzapp_kernel_now_ms(void)
 {
 	if (test_clock_hook)
@@ -1013,6 +1020,35 @@ static void test_performance_counters(void)
 #endif
 
 
+static void test_wake_hands_back_to_runnable_app(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame;
+	zzapp_arm_frame_t *next;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	frame = kernel.threads[0].context.frame;
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	CHECK(zzapp_kernel_block(&kernel, 0) == 0);
+	zzapp_kernel_service_due(&kernel);
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_DOORBELL, 0u);
+	CHECK(zzapp_kernel_current_thread() == -1);
+	wake_events = 0U;
+	CHECK(zzapp_kernel_wake(&kernel, 0, ZZAPP_WAKE_READY) == 0);
+	CHECK(wake_events == 1U);
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u);
+	CHECK(zzapp_kernel_current_thread() == 0);
+}
+
+
 int main(void)
 {
     test_first_context_and_dispatch();
@@ -1046,6 +1082,7 @@ int main(void)
     test_system_ticks_wake_sleepers();
     test_restart_releases_kernel_lock_waiters();
     test_system_lock_inheritance_is_throttled();
+    test_wake_hands_back_to_runnable_app();
 #if ZZAPP_PERF_COUNTERS
     test_performance_counters();
 #endif
