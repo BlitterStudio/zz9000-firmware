@@ -19,6 +19,7 @@
 #include "sdk_mailbox.h"
 #include "sdk_audio_flac.h"
 #include "sdk_audio_vorbis.h"
+#include "audio_stream_drain.h"
 #include "mp3/minimp3.h"
 
 /* The MP3 stream loop keeps a lookahead reserve of compressed input; EOF
@@ -71,6 +72,10 @@ struct SDKAudioStream {
 	int backpressure;
 	int vbr_checked;
 	int decode_complete;
+	/* Native decoders can reach a terminal output boundary before they
+	 * publish a deferred terminal status; the pump must drain that PCM. */
+	uint8_t output_terminal;
+	struct audio_stream_refill_checkpoint refill_checkpoint;
 	/* Ring addresses resolved from the shared-buffer registry at BEGIN:
 	 * the registry is core-0-only, so core-1 feeds/reads must never
 	 * dereference mp3_ring/pcm_ring -- they use these instead. */

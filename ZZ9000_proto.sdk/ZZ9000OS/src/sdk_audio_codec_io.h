@@ -28,7 +28,11 @@ struct sdk_audio_codec_io {
 	uint32_t frames;            /* codec units (frames/packets) decoded */
 	int starved;                /* blocked on an incomplete compressed unit */
 	int complete;               /* end of stream reached and validated */
+	/* The decoder cannot produce further PCM. A terminal status may remain
+	 * deferred until the caller drains already-published PCM. */
+	int output_terminal;
 };
+
 
 /*
  * One decode call runs as a core-1 service task under the kernel system

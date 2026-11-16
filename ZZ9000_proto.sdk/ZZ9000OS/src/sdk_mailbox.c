@@ -3484,6 +3484,15 @@ static uint16_t audio_stream_fault_status(const struct SDKAudioStream *stream)
 	return stream->fault_status != 0U ? stream->fault_status :
 	                                    SDK_STATUS_IO_ERROR;
 }
+static uint32_t audio_stream_refill_decoder_state(
+	const struct SDKAudioStream *stream)
+{
+	return (stream->decode_complete ? 1U : 0U) |
+		(stream->faulted ? 2U : 0U) |
+		(stream->backend_starved ? 4U : 0U) |
+		(stream->output_terminal ? 8U : 0U);
+}
+
 
 
 /* Native codec sessions (FLAC U7, Vorbis U8): the backend decodes straight
@@ -3555,6 +3564,8 @@ static uint32_t audio_stream_decode_native(struct SDKAudioStream *stream)
 		progress = 1U;
 	}
 	stream->backend_starved = io.starved ? 1U : 0U;
+	if (io.output_terminal || status != SDK_STATUS_OK)
+		stream->output_terminal = 1U;
 	if (io.complete) {
 		stream->decode_complete = 1;
 		audio_stream_discard_input(stream);
@@ -3684,7 +3695,19 @@ static void audio_stream_feed_compute(struct SDKAudioStream *stream,
                                       uint32_t flags)
 {
 	uint8_t *dst;
+	uint32_t input_before;
+	uint32_t pcm_written_before;
+	uint32_t pcm_consumed_before;
+	uint32_t decoder_state_before;
+	int is_empty_refill;
 
+	is_empty_refill = src_length == 0U && flags == 0U;
+	if (!is_empty_refill)
+		stream->refill_checkpoint.stalled = 0;
+	input_before = stream->input_length;
+	pcm_written_before = stream->pcm_written_total;
+	pcm_consumed_before = stream->pcm_consumed_total;
+	decoder_state_before = audio_stream_refill_decoder_state(stream);
 	if (src_length != 0U) {
 		if (src_length > stream->mp3_capacity - stream->input_length) {
 			/* Result reflects backpressure; EOF/decode skipped,
@@ -3722,6 +3745,20 @@ static void audio_stream_feed_compute(struct SDKAudioStream *stream,
 		stream->drain_input_complete = 0;
 	}
 	audio_stream_decode(stream);
+	if (is_empty_refill) {
+		uint32_t pcm_written_after = stream->pcm_written_total;
+		uint32_t pcm_consumed_after = stream->pcm_consumed_total;
+		uint32_t decoder_state_after =
+			audio_stream_refill_decoder_state(stream);
+
+		audio_stream_refill_checkpoint_note(
+			&stream->refill_checkpoint, stream->input_length,
+			pcm_written_after, pcm_consumed_after, decoder_state_after,
+			input_before != stream->input_length ||
+			pcm_written_before != pcm_written_after ||
+			pcm_consumed_before != pcm_consumed_after ||
+			decoder_state_before != decoder_state_after);
+	}
 }
 
 static void audio_stream_read_compute(struct SDKAudioStream *stream,
@@ -3807,11 +3844,14 @@ static int audio_pump_source_snapshot(struct audio_fabric_source *source)
 		source->channels = 2U;
 		source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 		source->done = audio_stream_source_tail_ready(
-			stream->eof, stream->decode_complete, stream->input_length,
-			stream->drain_requested,
+			stream->eof, stream->decode_complete, stream->output_terminal,
+			stream->input_length, stream->drain_requested,
 			stream->drain_input_complete) &&
 			audio_stream_pcm_used(stream) == 0U;
-		source->faulted = stream->faulted != 0U;
+		source->faulted = audio_stream_playback_fault_ready(
+			stream->faulted != 0U,
+			audio_pump_preconvert_used(&g_audio_playback.preconvert),
+			stream->pump_tail_pending);
 		return 1;
 	}
 	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
@@ -3987,8 +4027,8 @@ static void audio_playback_preconvert(
 		source.channels = stream->channels;
 		source.sample_format = stream->sample_format;
 		source.done = audio_stream_source_tail_ready(
-			stream->eof, stream->decode_complete, stream->input_length,
-			stream->drain_requested,
+			stream->eof, stream->decode_complete, stream->output_terminal,
+			stream->input_length, stream->drain_requested,
 			stream->drain_input_complete);
 		result = audio_pump_preconvert_fill(
 			&g_audio_playback.preconvert, &source, &consumed);
@@ -4083,7 +4123,10 @@ void sdk_mailbox_audio_playback_pump(void)
 	        stream->input_length, stream->decode_complete, stream->faulted,
 	        audio_stream_needs_more_input(stream),
 	        stream->drain_input_complete, audio_stream_pcm_used(stream),
-	        stream->low_water_bytes)) {
+	        stream->low_water_bytes, stream->pcm_written_total,
+	        stream->pcm_consumed_total,
+	        audio_stream_refill_decoder_state(stream),
+	        &stream->refill_checkpoint)) {
 		/* needs_more_input guard: a refill FEED would no-op below the
 		 * decoder's minimum-input gate, and the pump runs every main
 		 * loop pass -- without the guard the sub-minimum tail of a

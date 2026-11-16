@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "audio_pump_preconvert.h"
+#include "audio_stream_drain.h"
+
 #include "sdk_audio_codec_io.h"
 #include "sdk_audio_flac.h"
 #include "sdk_decode_reclaim.h"
@@ -42,6 +45,9 @@ struct sim {
 };
 
 static struct sim g_sim;
+static uint8_t g_space_convert[
+	32U * AUDIO_PUMP_PRECONVERT_PERIOD_BYTES];
+
 
 static uint16_t sim_decode(struct sim *s, int drain)
 {
@@ -327,6 +333,109 @@ static void test_corruption(void)
 	}
 }
 
+/*
+ * A refill can stop only because the next FLAC frame does not fit in the PCM
+ * ring. Playback then frees a 20-ms source period without changing compressed
+ * input or decoder flags; that consumer cursor movement must re-arm refill.
+ */
+static void test_refill_after_space_recovery(void)
+{
+	const struct flac_fixture *fx = fixture("stereo16");
+	struct sdk_flac_state state;
+	struct audio_stream_refill_checkpoint checkpoint =
+		{ 0U, 0U, 0U, 0U, 0 };
+	struct audio_pump_preconvert convert;
+	struct audio_pump_preconvert_source source;
+	struct sdk_audio_codec_io io;
+	uint32_t input_offset = 0U;
+	uint32_t pcm_written = 0U;
+	uint32_t pcm_consumed = 0U;
+	uint64_t converted_consumed;
+	uint16_t status;
+
+	host_runtime_reset();
+	memset(g_sim.pcm, 0, 8192U);
+	sdk_flac_init(&state, SDK_AUDIO_SAMPLE_FORMAT_S16BE);
+	memset(&io, 0, sizeof(io));
+	io.input = fx->flac;
+	io.input_length = fx->flac_len;
+	io.eof = 1;
+	io.pcm = g_sim.pcm;
+	io.pcm_capacity = 8192U;
+	io.pcm_free = 8192U;
+	io.pcm_budget = 8192U;
+	status = sdk_flac_decode(&state, &io);
+	input_offset += io.consumed;
+	pcm_written += io.produced;
+	CHECK(status == SDK_STATUS_OK && io.produced == 4608U,
+	      "space recovery setup produced %u status %u",
+	      io.produced, status);
+
+	memset(&io, 0, sizeof(io));
+	io.input = fx->flac + input_offset;
+	io.input_length = fx->flac_len - input_offset;
+	io.eof = 1;
+	io.pcm = g_sim.pcm;
+	io.pcm_capacity = 8192U;
+	io.pcm_write = pcm_written % 8192U;
+	io.pcm_free = 8192U - (pcm_written - pcm_consumed);
+	io.pcm_budget = 8192U;
+	io.pcm_unread = pcm_written - pcm_consumed;
+	status = sdk_flac_decode(&state, &io);
+	input_offset += io.consumed;
+	pcm_written += io.produced;
+	CHECK(status == SDK_STATUS_OK && io.produced == 0U,
+	      "full-ring refill unexpectedly produced %u status %u",
+	      io.produced, status);
+	audio_stream_refill_checkpoint_note(&checkpoint,
+		fx->flac_len - input_offset, pcm_written, pcm_consumed, 0U, 0);
+	CHECK(!audio_stream_refill_may_run(
+		      fx->flac_len - input_offset, 0, 0, 0, 0,
+		      pcm_written - pcm_consumed, 6144U, pcm_written,
+		      pcm_consumed, 0U, &checkpoint),
+	      "unchanged stalled refill was not suppressed");
+
+	audio_pump_preconvert_reset(
+		&convert, g_space_convert, sizeof(g_space_convert));
+	memset(&source, 0, sizeof(source));
+	source.ring = g_sim.pcm;
+	source.capacity = 8192U;
+	source.produced = pcm_written;
+	source.consumed = pcm_consumed;
+	source.sample_rate = state.sample_rate;
+	source.channels = state.channels;
+	source.sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16BE;
+	converted_consumed = pcm_consumed;
+	CHECK(audio_pump_preconvert_fill(
+		      &convert, &source, &converted_consumed) == 1,
+	      "preconverter did not consume a source period");
+	pcm_consumed = (uint32_t)converted_consumed;
+	CHECK(pcm_consumed == 3528U,
+	      "preconverter consumed %u, expected 3528", pcm_consumed);
+	CHECK(audio_stream_refill_may_run(
+		      fx->flac_len - input_offset, 0, 0, 0, 0,
+		      pcm_written - pcm_consumed, 6144U, pcm_written,
+		      pcm_consumed, 0U, &checkpoint),
+	      "consumer progress did not re-arm stalled refill");
+
+	memset(&io, 0, sizeof(io));
+	io.input = fx->flac + input_offset;
+	io.input_length = fx->flac_len - input_offset;
+	io.eof = 1;
+	io.pcm = g_sim.pcm;
+	io.pcm_capacity = 8192U;
+	io.pcm_write = pcm_written % 8192U;
+	io.pcm_free = 8192U - (pcm_written - pcm_consumed);
+	io.pcm_budget = 8192U;
+	io.pcm_unread = pcm_written - pcm_consumed;
+	status = sdk_flac_decode(&state, &io);
+	CHECK(status == SDK_STATUS_OK && io.produced == 4608U,
+	      "space-recovered refill produced %u status %u",
+	      io.produced, status);
+	sdk_flac_release(&state);
+	check_clean("space recovery");
+}
+
 static void test_drain_and_budget(void)
 {
 	const struct flac_fixture *fx = fixture("stereo16");
@@ -563,6 +672,7 @@ int main(void)
 	test_fixtures_exact();
 	test_rejections();
 	test_corruption();
+	test_refill_after_space_recovery();
 	test_drain_and_budget();
 	test_pass_cap();
 	test_allocation_failures();

@@ -44,6 +44,8 @@
 #include <unistd.h>
 
 #include "audio_fabric.h"
+#include "audio_stream_drain.h"
+
 #include "fabric_test_common.h"
 #include "memorymap.h"
 #include "pump_golden.h"
@@ -718,6 +720,46 @@ static void scenario_formatter(void)
 	      (uint8_t *)AUDIO_TX_BUFFER_ADDRESS,
 	      "formatter: DMA captured the standard ring", "");
 }
+
+/*
+ * A terminal decoder failure can be discovered after preconversion has
+ * produced audio. Its source snapshot must remain live through the fabric's
+ * real-DMA tail; otherwise fabric_slot_fill() silences that queued audio.
+ */
+static void scenario_terminal_fault_tail(void)
+{
+	static const uint8_t zero[AUDIO_TX_BUFFER_SIZE];
+	uint32_t preconvert_used = TICK_BYTES;
+	int tick;
+
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_publish(&g_model_b, preconvert_used);
+	g_model_b.done = 1;
+	g_model_b.faulted = audio_stream_playback_fault_ready(
+		1, preconvert_used, g_model_b.tail_pending);
+	g_dma_count = 0U;
+	fabric_pump_start();
+	dma_tick(1);
+	audio_fabric_isr();
+	check(g_model_b.staged != 0U,
+	      "terminal fault: fabric stages converted tail", "");
+	check(memcmp(g_fabric_tx, zero, sizeof(zero)) != 0,
+	      "terminal fault: staged tail is audible", "");
+
+	preconvert_used = 0U;
+	for (tick = 0; tick < AUDIO_NUM_PERIODS + 2; tick++) {
+		g_model_b.faulted = audio_stream_playback_fault_ready(
+			1, preconvert_used, g_model_b.tail_pending);
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	check(g_model_b.tail_pending == 0,
+	      "terminal fault: fabric drained real tail", "");
+	check(audio_stream_playback_fault_ready(
+		      1, preconvert_used, g_model_b.tail_pending),
+	      "terminal fault: fault publishes after tail drain", "");
+}
 /* Faulted and done producers contribute silence WITHOUT moving the
  * per-slot underrun counter (the R8 exclusion), in both the per-period
  * path and the start-rebase path. */
@@ -1199,6 +1241,7 @@ int main(int argc, char **argv)
 	scenario_silence_policy();
 	scenario_underrun_isolation();
 	scenario_formatter();
+	scenario_terminal_fault_tail();
 	scenario_excluded_underrun();
 	scenario_snapshot_midloop();
 	scenario_ring_authority();

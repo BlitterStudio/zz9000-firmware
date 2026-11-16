@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "sdk_audio_codec_io.h"
+#include "audio_pump_preconvert.h"
 #include "audio_stream_drain.h"
 #include "sdk_audio_vorbis.h"
 #include "sdk_decode_reclaim.h"
@@ -26,6 +27,8 @@
 #include "card_pool.h"
 #include "host_card_pool.h"
 #include "vorbis_fixtures.h"
+
+#include <ogg/ogg.h>
 
 /* Tremor (full-precision 32x32->64 fixed point, then >> 9 and clip) against
  * ffmpeg's float decoder rounded to nearest by libswresample: the >> 9
@@ -95,6 +98,8 @@ struct sim {
 
 static struct sim g_sim;
 static uint8_t g_out_a[MAX_OUT];
+static uint8_t g_tail_pcm[MAX_PCM_CAP];
+static uint8_t g_tail_output[MAX_OUT];
 
 static uint16_t sim_decode(struct sim *s, int drain)
 {
@@ -641,8 +646,8 @@ static void test_eof_tail_refill(void)
 	      st, s->len, s->complete, input_passes);
 	while (!s->complete && tail_passes++ < 1000U) {
 		if (!audio_stream_refill_may_run(
-			    s->len, s->complete, 0, 0, 0, 0U, MAX_PCM_CAP)) {
-			CHECK(0, "pump did not schedule EOF decoder tail");
+			    s->len, s->complete, 0, 0, 0, 0U, MAX_PCM_CAP,
+			    0U, 0U, s->complete ? 1U : 0U, 0)) {
 			break;
 		}
 		st = sim_decode(s, 0);
@@ -655,6 +660,172 @@ static void test_eof_tail_refill(void)
 	finish(s, "EOF tail refill");
 	free(ogg.data);
 }
+
+static int shorten_first_eos_granule(struct blob *ogg)
+{
+	uint32_t offset;
+
+	for (offset = 0U; offset + 27U <= ogg->len;) {
+		uint8_t *header = ogg->data + offset;
+		uint32_t header_length = 27U + header[26];
+		uint32_t body_length = 0U;
+		uint32_t i;
+
+		if (offset + header_length > ogg->len)
+			return 0;
+		for (i = 0U; i < header[26]; i++)
+			body_length += header[27U + i];
+		if (offset + header_length + body_length > ogg->len)
+			return 0;
+		if ((header[5] & 4U) != 0U) {
+			uint64_t granule = 0U;
+			ogg_page page;
+
+			for (i = 0U; i < 8U; i++)
+				granule |= (uint64_t)header[6U + i] << (8U * i);
+			if (granule == 0U)
+				return 0;
+			granule--;
+			for (i = 0U; i < 8U; i++)
+				header[6U + i] = (uint8_t)(granule >> (8U * i));
+			page.header = header;
+			page.header_len = (long)header_length;
+			page.body = header + header_length;
+			page.body_len = (long)body_length;
+			ogg_page_checksum_set(&page);
+			return 1;
+		}
+		offset += header_length + body_length;
+	}
+	return 0;
+}
+
+static uint32_t tail_decoder_state(int complete, int output_terminal,
+	uint16_t status)
+{
+	return (complete ? 1U : 0U) |
+		(status != SDK_STATUS_OK ? 2U : 0U) |
+		(output_terminal ? 8U : 0U);
+}
+
+/*
+ * An unsupported second logical stream is terminal, but its status is
+ * deferred until first-link PCM is consumed. The production tail predicate
+ * must let the converter consume and zero-pad the last short period, then
+ * the next empty refill reports the deferred status exactly once.
+ */
+static void test_deferred_terminal_tail(void)
+{
+	struct blob ogg = load("neg_chained", ".ogg");
+	struct sdk_vorbis_state state;
+	struct audio_pump_preconvert convert;
+	struct audio_stream_refill_checkpoint checkpoint =
+		{ 0U, 0U, 0U, 0U, 0 };
+	uint32_t input_offset = 0U;
+	uint32_t pcm_written = 0U;
+	uint32_t pcm_consumed = 0U;
+	uint32_t pass;
+	uint16_t status = SDK_STATUS_OK;
+	int complete = 0;
+	int output_terminal = 0;
+	int saw_deferred_terminal = 0;
+	uint32_t no_progress_refills = 0U;
+
+	CHECK(shorten_first_eos_granule(&ogg), "deferred tail fixture mutation");
+	host_runtime_reset();
+	sdk_vorbis_init(&state, SDK_AUDIO_SAMPLE_FORMAT_S16BE);
+	audio_pump_preconvert_reset(&convert, g_tail_output, sizeof(g_tail_output));
+	for (pass = 0U; pass < 1000U && status == SDK_STATUS_OK; pass++) {
+		struct audio_pump_preconvert_source source;
+		uint32_t decoder_state;
+		int refill;
+		uint32_t i;
+
+		memset(&source, 0, sizeof(source));
+		source.ring = g_tail_pcm;
+		source.capacity = sizeof(g_tail_pcm);
+		source.produced = pcm_written;
+		source.consumed = pcm_consumed;
+		source.sample_rate = state.sample_rate;
+		source.channels = state.channels;
+		source.sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16BE;
+		source.done = audio_stream_source_tail_ready(1, complete,
+			output_terminal, ogg.len - input_offset, 0, 0);
+		if (output_terminal && !complete &&
+		    pcm_written != pcm_consumed)
+			saw_deferred_terminal = 1;
+		for (i = 0U; source.sample_rate != 0U && i < 8U; i++) {
+			uint64_t consumed = source.consumed;
+
+			if (audio_pump_preconvert_fill(
+				    &convert, &source, &consumed) <= 0)
+				break;
+			pcm_consumed = (uint32_t)consumed;
+			source.consumed = consumed;
+			(void)audio_pump_preconvert_stage(
+				&convert, audio_pump_preconvert_used(&convert));
+		}
+		decoder_state = tail_decoder_state(complete, output_terminal,
+			status);
+		refill = audio_stream_refill_may_run(ogg.len - input_offset,
+			complete, status != SDK_STATUS_OK, 0, 0,
+			pcm_written - pcm_consumed, MAX_PCM_CAP / 2U, pcm_written,
+			pcm_consumed, decoder_state, &checkpoint);
+		if (!refill) {
+			if (pcm_written == pcm_consumed)
+				break;
+			continue;
+		}
+		{
+			struct sdk_audio_codec_io io;
+			uint32_t before_input = input_offset;
+			uint32_t before_written = pcm_written;
+			uint32_t before_state = decoder_state;
+
+			memset(&io, 0, sizeof(io));
+			io.input = ogg.data + input_offset;
+			io.input_length = ogg.len - input_offset;
+			io.eof = 1;
+			io.pcm = g_tail_pcm;
+			io.pcm_capacity = sizeof(g_tail_pcm);
+			io.pcm_write = pcm_written % sizeof(g_tail_pcm);
+			io.pcm_free = sizeof(g_tail_pcm) -
+				(pcm_written - pcm_consumed);
+			io.pcm_budget = sizeof(g_tail_pcm);
+			io.pcm_unread = pcm_written - pcm_consumed;
+			status = sdk_vorbis_decode(&state, &io);
+			input_offset += io.consumed;
+			pcm_written += io.produced;
+			complete = io.complete;
+			output_terminal = output_terminal || io.output_terminal ||
+				status != SDK_STATUS_OK;
+			decoder_state = tail_decoder_state(complete,
+				output_terminal, status);
+			audio_stream_refill_checkpoint_note(&checkpoint,
+				ogg.len - input_offset, pcm_written, pcm_consumed,
+				decoder_state, before_input != input_offset ||
+				before_written != pcm_written ||
+				before_state != decoder_state);
+			if (before_input == input_offset &&
+			    before_written == pcm_written &&
+			    before_state == decoder_state)
+				no_progress_refills++;
+		}
+	}
+	CHECK(saw_deferred_terminal,
+	      "deferred terminal did not expose its final PCM tail");
+	CHECK(status == SDK_STATUS_UNSUPPORTED &&
+	      input_offset == ogg.len && pcm_written == pcm_consumed,
+	      "deferred terminal tail: status %u input %u unread %u",
+	      status, ogg.len - input_offset, pcm_written - pcm_consumed);
+	CHECK(no_progress_refills <= 1U,
+	      "deferred terminal scheduled %u no-progress refills",
+	      no_progress_refills);
+	sdk_vorbis_release(&state);
+	check_clean("deferred terminal tail");
+	free(ogg.data);
+}
+
 
 static void test_allocation_failures(void)
 {
@@ -982,6 +1153,7 @@ int main(int argc, char **argv)
 	test_starvation_and_trailer();
 	test_pass_cap();
 	test_eof_tail_refill();
+	test_deferred_terminal_tail();
 	test_allocation_failures();
 	test_restart_reclaim();
 	if (failures) {

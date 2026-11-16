@@ -542,12 +542,14 @@ uint16_t sdk_vorbis_decode(struct sdk_vorbis_state *st,
 	io->frames = 0U;
 	io->starved = 0;
 	io->complete = 0;
+	io->output_terminal = 0;
 	if (st->status != SDK_STATUS_OK)
 		return st->status;
 	if (st->pending_status != SDK_STATUS_OK || st->done) {
 		/* Nothing more is decoded; input is discarded. */
 		io->consumed = io->input_length;
 		io->complete = st->done;
+		io->output_terminal = 1;
 		if (st->pending_status != SDK_STATUS_OK && io->pcm_unread == 0U)
 			st->status = st->pending_status;
 		return st->status;
@@ -577,6 +579,8 @@ uint16_t sdk_vorbis_decode(struct sdk_vorbis_state *st,
 	    st->pending_status != SDK_STATUS_OK &&
 	    io->produced == 0U && io->pcm_unread == 0U)
 		st->status = st->pending_status;
+	io->output_terminal = st->status != SDK_STATUS_OK ||
+		st->pending_status != SDK_STATUS_OK || st->done;
 	return st->status;
 }
 

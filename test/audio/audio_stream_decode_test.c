@@ -169,7 +169,8 @@ static void test_drain_at_exact_frame_boundary(void)
 		CHECK(!audio_stream_refill_may_run(
 			      s->input_length, s->decode_complete, s->faulted, 0,
 			      s->drain_input_complete, audio_stream_pcm_used(s),
-			      s->low_water_bytes),
+			      s->low_water_bytes, s->pcm_written_total,
+			      s->pcm_consumed_total, 0U, &s->refill_checkpoint),
 		      "pump would schedule empty MP3 drain refill %u", pass);
 	}
 }

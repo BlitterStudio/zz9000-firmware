@@ -61,30 +61,70 @@ static inline int audio_stream_drain_input_done(int drain_requested,
 		 (!may_hold_output && input_length == 0U));
 }
 
-/* Once a resumable drain has classified the retained compressed tail as an
- * incomplete frame, the playback pump must wait for new input instead of
- * scheduling the same no-progress refill on every main-loop pass. Native
- * codecs may retain decoded state after consuming their external input, so
- * EOF refills continue until the decoder itself reports completion. */
+/* An empty refill that left its compressed input, PCM producer/consumer
+ * cursors and decoder-visible state unchanged cannot make progress again
+ * until one of those inputs changes. Tracking both cursors distinguishes a
+ * productive refill from space freed concurrently by the playback consumer. */
+struct audio_stream_refill_checkpoint {
+	uint32_t input_length;
+	uint32_t pcm_written_total;
+	uint32_t pcm_consumed_total;
+	uint32_t decoder_state;
+	int stalled;
+};
+
 static inline int audio_stream_refill_may_run(uint32_t input_length,
 		int decode_complete, int faulted, int needs_more_input,
-		int drain_input_complete, uint32_t pcm_used, uint32_t low_water)
+		int drain_input_complete, uint32_t pcm_used, uint32_t low_water,
+		uint32_t pcm_written_total, uint32_t pcm_consumed_total,
+		uint32_t decoder_state,
+		const struct audio_stream_refill_checkpoint *checkpoint)
 {
-	return (input_length != 0U || !decode_complete) && !faulted &&
-		!needs_more_input && !drain_input_complete &&
-		pcm_used <= low_water;
+	if (!((input_length != 0U || !decode_complete) && !faulted &&
+	      !needs_more_input && !drain_input_complete &&
+	      pcm_used <= low_water))
+		return 0;
+	return !checkpoint || !checkpoint->stalled ||
+		checkpoint->input_length != input_length ||
+		checkpoint->pcm_written_total != pcm_written_total ||
+		checkpoint->pcm_consumed_total != pcm_consumed_total ||
+		checkpoint->decoder_state != decoder_state;
+}
+
+static inline void audio_stream_refill_checkpoint_note(
+		struct audio_stream_refill_checkpoint *checkpoint,
+		uint32_t input_length, uint32_t pcm_written_total,
+		uint32_t pcm_consumed_total, uint32_t decoder_state,
+		int made_progress)
+{
+	checkpoint->input_length = input_length;
+	checkpoint->pcm_written_total = pcm_written_total;
+	checkpoint->pcm_consumed_total = pcm_consumed_total;
+	checkpoint->decoder_state = decoder_state;
+	checkpoint->stalled = !made_progress;
 }
 
 /* A bound AX pump may zero-pad a final short PCM period only after the
  * compressed side has reached a real boundary. A resumable drain retains
- * incomplete compressed input; permanent EOF requires both no external
- * input and decoder completion. */
+ * incomplete compressed input; permanent EOF requires no external input and
+ * either validated completion or a decoder terminal boundary whose status is
+ * deferred until published PCM is drained. */
 static inline int audio_stream_source_tail_ready(int eof, int decode_complete,
-		uint32_t input_length, int drain_requested,
+		int output_terminal, uint32_t input_length, int drain_requested,
 		int drain_input_complete)
 {
-	return (eof && decode_complete && input_length == 0U) ||
+	return (eof && (decode_complete || output_terminal) &&
+		input_length == 0U) ||
 		(drain_requested && drain_input_complete);
+}
+
+/* A decoder error found while moving source PCM into the preconversion ring
+ * must not silence audio that the fabric has already staged. Publish it to
+ * the fabric only after that ring and its real-DMA tail are both drained. */
+static inline int audio_stream_playback_fault_ready(int faulted,
+		uint32_t preconvert_used, int pump_tail_pending)
+{
+	return faulted && preconvert_used == 0U && !pump_tail_pending;
 }
 
 /* Transient OUT_OF_DATA is published only after decoded PCM and the real DMA

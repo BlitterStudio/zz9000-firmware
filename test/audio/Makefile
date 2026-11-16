@@ -75,6 +75,7 @@ $(FABRIC_TARGET): audio_fabric_test.c pump_golden.c pump_golden.h \
 	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h \
 	$(SRC_DIR)/audio_playback_frontier.h $(SRC_DIR)/ax.h \
 	$(SRC_DIR)/memorymap.h $(SRC_DIR)/sdk_mailbox.h \
+	$(SRC_DIR)/audio_stream_drain.h \
 	$(MOCK_DIR)/xil_cache.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DAUDIO_FABRIC_HOST_TEST \
