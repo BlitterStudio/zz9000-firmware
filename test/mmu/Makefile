@@ -8,6 +8,9 @@ MMU_PAGE_TARGET := $(BUILD_DIR)/mmu_page_test
 ZZAPP_AS_TARGET := $(BUILD_DIR)/zzapp_as_test
 
 CPPFLAGS += -DMMU_PAGE_HOST_TEST -I$(MOCK_DIR) -I$(SRC_DIR)
+# zzapp_as.c stores table addresses in 32-bit descriptors, as on the card;
+# a position-independent host binary can place them above 4 GiB.
+NO_PIE := -fno-pie -no-pie
 MMU_PAGE_SOURCES := mmu_page_test.c $(SRC_DIR)/mmu_page.c
 MMU_PAGE_DEPS := $(MOCK_DIR)/xil_cache.h $(SRC_DIR)/mmu_page.h
 ZZAPP_AS_SOURCES := zzapp_as_test.c $(SRC_DIR)/zzapp_as.c $(SRC_DIR)/mmu_page.c \
@@ -23,11 +26,11 @@ test: $(MMU_PAGE_TARGET) $(ZZAPP_AS_TARGET)
 
 $(MMU_PAGE_TARGET): $(MMU_PAGE_SOURCES) $(MMU_PAGE_DEPS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(MMU_PAGE_SOURCES)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(NO_PIE) -o $@ $(MMU_PAGE_SOURCES)
 
 $(ZZAPP_AS_TARGET): $(ZZAPP_AS_SOURCES) $(ZZAPP_AS_DEPS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(ZZAPP_AS_SOURCES)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(NO_PIE) -o $@ $(ZZAPP_AS_SOURCES)
 
 clean:
 	rm -rf $(BUILD_DIR)
