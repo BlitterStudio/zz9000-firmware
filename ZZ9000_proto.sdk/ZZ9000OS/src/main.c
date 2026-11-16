@@ -57,6 +57,7 @@ void Xil_AssertNonVoid() {}
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
+#include "core1_console.h"
 #include "scheduler.h"
 #include "zzapp_runtime.h"
 #include "adc.h"
@@ -1108,6 +1109,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 int main() {
 	init_platform();
+	core1_console_init();
 	/* The BSP leaves TPIDRURO at 0, which would put thread-local
 	 * variables at physical address 0x8. */
 	if (cpu_tls_init(0u) != 0)
@@ -1414,6 +1416,7 @@ int main() {
 
 	while (1) {
 		watchdog_kick();
+		core1_console_drain();
 		sd_activity_led_poll();
 		{
 			XTime module_now;

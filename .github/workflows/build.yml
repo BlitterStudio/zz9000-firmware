@@ -200,6 +200,8 @@ jobs:
         run: make -C test/eth_irq_throttle test
       - name: Console encoder suite
         run: make -C test/console test
+      - name: Core-1 console ring suite
+        run: make -C test/core1_console test
       - name: Ethernet async TX completion-order suite
         run: make -C test/eth_tx_order test
       - name: SDK surface helper suite

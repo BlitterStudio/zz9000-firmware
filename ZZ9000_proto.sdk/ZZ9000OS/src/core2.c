@@ -6,6 +6,7 @@
 #include "xparameters.h"
 #include "xil_misc_psreset_api.h"
 #include "core2.h"
+#include "core1_console.h"
 #include "sleep.h"
 #include "scheduler.h"
 #include "memorymap.h"
@@ -176,6 +177,8 @@ static void print_fault_detail(uint32_t code)
 
 	__asm__ __volatile__("mrc p15, 0, %0, c0, c0, 5" : "=r"(cpu));
 	cpu &= 3U;
+	if (cpu == 0U)
+		core1_console_flush_sync();
 	if (code == CORE_FAULT_DATA_ABORT) {
 		__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 0" : "=r"(status));
 		__asm__ __volatile__("mrc p15, 0, %0, c6, c0, 0" : "=r"(addr));
@@ -654,6 +657,7 @@ void core1_loop() {
 	// cross-core LDREX/STREX and SCU coherency work (core 0 marked the
 	// task-queue region shareable at boot, before this core started).
 	scheduler_coherency_init_core1();
+	core1_console_reset_producer();
 	C1_TRACE("[c1] R2 coherency-ok (mmu on)\r\n");  /* survived MMU/cache/SMP bring-up */
 #if ZZAPP_PERF_COUNTERS || ZZAPP_SVC_PROBES
 	core1_enable_pmu_cycles();
