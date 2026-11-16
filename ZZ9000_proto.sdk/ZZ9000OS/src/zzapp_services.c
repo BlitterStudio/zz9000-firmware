@@ -2799,19 +2799,16 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 		record_present_flush(addr, bytes);
 #ifndef ZZAPP_HOST_TEST
 		/*
-		 * Write the frame through L1 and L2 before the flip is
-		 * queued.  The L1 data cache is PIPT, so this clean by the
-		 * card VA also reaches the lines the app dirtied through
-		 * its private alias of the same memory: one range, the
-		 * surface's size, exactly as master presents it.  Core 0's
-		 * vblank way flush is not enough on its own: scanout of the
-		 * new buffer can start before that flush has reached its
-		 * lines, and a frame smaller than L2 (an 8-bit 640x480
-		 * screen is 300 KiB) can sit there whole.  l2_maint
-		 * serialises with core 0 in 4 KiB chunks (PL310
-		 * background-operation rule).
+		 * Clean the frame through L1 and L2 to DDR before queuing the
+		 * flip.  The HP scanout port observes DDR, so invalidation is
+		 * unnecessary; retaining the lines avoids the next frame's
+		 * write-allocate misses.  The L1 data cache is PIPT, so this
+		 * clean by the card VA also reaches lines dirtied through the
+		 * app's private alias.  Core 0's vblank way flush is not enough:
+		 * scanout can select this buffer before it reaches its lines.
+		 * l2_maint serializes with core 0 in 4 KiB chunks.
 		 */
-		l2_maint_dcache_flush_range((intptr_t)addr, bytes);
+		l2_maint_dcache_clean_range((intptr_t)addr, bytes);
 #endif
 	}
 	barrier();

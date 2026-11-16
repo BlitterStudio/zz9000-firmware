@@ -63,19 +63,48 @@ static void l2_maint_release(void)
 #define L2_MAINT_LINE_BYTES 32U
 
 #ifdef L2_MAINT_HOST_TEST
+#define L2_MAINT_REG_CACHE_SYNC       0x0730U
+#define L2_MAINT_REG_CACHE_INVLD_PA   0x0770U
+#define L2_MAINT_REG_CACHE_CLEAN_PA   0x07B0U
+#define L2_MAINT_REG_CACHE_INV_CLN_PA 0x07F0U
+#define L2_MAINT_REG_DEBUG_CTRL       0x0F40U
+#else
+#define L2_MAINT_REG_CACHE_SYNC       XPS_L2CC_CACHE_SYNC_OFFSET
+#define L2_MAINT_REG_CACHE_INVLD_PA   XPS_L2CC_CACHE_INVLD_PA_OFFSET
+#define L2_MAINT_REG_CACHE_CLEAN_PA   XPS_L2CC_CACHE_CLEAN_PA_OFFSET
+#define L2_MAINT_REG_CACHE_INV_CLN_PA XPS_L2CC_CACHE_INV_CLN_PA_OFFSET
+#define L2_MAINT_REG_DEBUG_CTRL       XPS_L2CC_DEBUG_CTRL_OFFSET
+#endif
+
+
+#ifdef L2_MAINT_HOST_TEST
 extern void l2_maint_platform_l1_flush_range(INTPTR address, u32 length);
+extern void l2_maint_platform_l1_clean_range(INTPTR address, u32 length);
 extern void l2_maint_platform_l1_flush(void);
 extern void l2_maint_platform_l1_clean_inv_line(INTPTR address);
 extern void l2_maint_platform_l1_inv_line(INTPTR address);
-extern void l2_maint_platform_l2_clean_inv_line(INTPTR address);
-extern void l2_maint_platform_l2_inv_line(INTPTR address);
-extern void l2_maint_platform_l2_sync(void);
+extern void l2_maint_platform_l2_write(u32 offset, u32 value);
 extern void l2_maint_platform_l2_flush(void);
 extern void l2_maint_platform_l1_icache_invalidate_range(INTPTR address, u32 length);
 #else
 static void l2_maint_platform_l1_flush_range(INTPTR address, u32 length)
 {
     Xil_L1DCacheFlushRange((u32)address, length);
+}
+
+/* Scanout only needs dirty L1 lines to reach the shared PL310.  Keep the
+ * lines valid so the next frame does not incur a write-allocate miss. */
+static void l2_maint_platform_l1_clean_range(INTPTR address, u32 length)
+{
+    u32 line = (u32)address & ~(L2_MAINT_LINE_BYTES - 1U);
+    u32 end = (u32)address + length;
+
+    mtcp(XREG_CP15_CACHE_SIZE_SEL, 0U);
+    while (line < end) {
+        mtcp(XREG_CP15_CLEAN_DC_LINE_MVA_POC, line);
+        line += L2_MAINT_LINE_BYTES;
+    }
+    dsb();
 }
 
 static void l2_maint_platform_l1_flush(void)
@@ -93,28 +122,11 @@ static void l2_maint_platform_l1_inv_line(INTPTR address)
     Xil_L1DCacheInvalidateLine((u32)address);
 }
 
-static void l2_maint_platform_l2_clean_inv_line(INTPTR address)
+static void l2_maint_platform_l2_write(u32 offset, u32 value)
 {
-#ifdef CONFIG_PL310_ERRATA_588369
-    Xil_Out32(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_CLEAN_PA_OFFSET, (u32)address);
-    Xil_Out32(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_INVLD_PA_OFFSET, (u32)address);
-#else
-    Xil_Out32(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_INV_CLN_PA_OFFSET, (u32)address);
-#endif
+    Xil_Out32(XPS_L2CC_BASEADDR + offset, value);
 }
 
-static void l2_maint_platform_l2_inv_line(INTPTR address)
-{
-    Xil_Out32(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_INVLD_PA_OFFSET, (u32)address);
-}
-
-/* PL310 r3p2 PA maintenance operations are atomic. Cache Sync closes each
- * serialized batch before its L1 invalidations or unlock. */
-static void l2_maint_platform_l2_sync(void)
-{
-    Xil_Out32(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_SYNC_OFFSET, 0x0U);
-    dsb();
-}
 
 /* The BSP's own way flush: l2_maint.o is linked with --wrap like every other
  * object, so the unwrapped symbol has to be named explicitly. */
@@ -131,21 +143,33 @@ static void l2_maint_platform_l1_icache_invalidate_range(INTPTR address, u32 len
 }
 #endif
 
-static void l2_maint_platform_l2_begin(void)
+static void l2_maint_platform_l2_clean_line(INTPTR address)
 {
-#if !defined(L2_MAINT_HOST_TEST) && (defined(CONFIG_PL310_ERRATA_588369) || \
-    defined(CONFIG_PL310_ERRATA_727915))
-    Xil_Out32(XPS_L2CC_BASEADDR + XPS_L2CC_DEBUG_CTRL_OFFSET, 0x3U);
+    l2_maint_platform_l2_write(L2_MAINT_REG_CACHE_CLEAN_PA, (u32)address);
+}
+
+/* Zynq's PL310 r3p2 is not affected by 588369, so its atomic combined
+ * operation is correct.  Erratum 727915 only concerns by-way operations. */
+static void l2_maint_platform_l2_clean_inv_line(INTPTR address)
+{
+    l2_maint_platform_l2_write(L2_MAINT_REG_CACHE_INV_CLN_PA, (u32)address);
+}
+
+static void l2_maint_platform_l2_inv_line(INTPTR address)
+{
+    l2_maint_platform_l2_write(L2_MAINT_REG_CACHE_INVLD_PA, (u32)address);
+}
+
+/* PL310 r3p2 PA maintenance operations are atomic. Cache Sync closes each
+ * serialized batch before its L1 invalidations or unlock. */
+static void l2_maint_platform_l2_sync(void)
+{
+    l2_maint_platform_l2_write(L2_MAINT_REG_CACHE_SYNC, 0x0U);
+#ifndef L2_MAINT_HOST_TEST
+    dsb();
 #endif
 }
 
-static void l2_maint_platform_l2_end(void)
-{
-#if !defined(L2_MAINT_HOST_TEST) && (defined(CONFIG_PL310_ERRATA_588369) || \
-    defined(CONFIG_PL310_ERRATA_727915))
-    Xil_Out32(XPS_L2CC_BASEADDR + XPS_L2CC_DEBUG_CTRL_OFFSET, 0x0U);
-#endif
-}
 
 static void l2_maint_clean_inv_lines(INTPTR address, u32 length)
 {
@@ -158,15 +182,45 @@ static void l2_maint_clean_inv_lines(INTPTR address, u32 length)
         if (chunk_end > end)
             chunk_end = end;
         l2_maint_acquire();
-        l2_maint_platform_l2_begin();
         while (start < chunk_end) {
             l2_maint_platform_l2_clean_inv_line(start);
             start += (INTPTR)L2_MAINT_LINE_BYTES;
         }
         l2_maint_platform_l2_sync();
-        l2_maint_platform_l2_end();
         l2_maint_release();
     }
+}
+
+/* A scanout reader on the HP port observes DDR, not the PL310.  Clean the
+ * surface without invalidating it; the r3p2 PA clean operation needs neither
+ * of the BSP's legacy 588369/727915 debug-control workarounds. */
+static void l2_maint_clean_lines(INTPTR address, u32 length)
+{
+    INTPTR start = address & ~(INTPTR)(L2_MAINT_LINE_BYTES - 1U);
+    INTPTR end = address + (INTPTR)length;
+
+    while (start < end) {
+        INTPTR chunk_end = start + (INTPTR)L2_MAINT_CHUNK_BYTES;
+
+        if (chunk_end > end)
+            chunk_end = end;
+        l2_maint_acquire();
+        while (start < chunk_end) {
+            l2_maint_platform_l2_clean_line(start);
+            start += (INTPTR)L2_MAINT_LINE_BYTES;
+        }
+        l2_maint_platform_l2_sync();
+        l2_maint_release();
+    }
+}
+
+void l2_maint_dcache_clean_range(INTPTR address, u32 length)
+{
+    if (length == 0U)
+        return;
+    /* L1 is private to the executing core; it must not extend the PL310 lock. */
+    l2_maint_platform_l1_clean_range(address, length);
+    l2_maint_clean_lines(address, length);
 }
 
 void l2_maint_dcache_flush_range(INTPTR address, u32 length)
@@ -199,10 +253,8 @@ static void l2_maint_invalidate_lines(INTPTR address, u32 length, int with_l1)
         l2_maint_acquire();
         if (with_l1)
             l2_maint_platform_l1_clean_inv_line(start);
-        l2_maint_platform_l2_begin();
         l2_maint_platform_l2_clean_inv_line(start);
         l2_maint_platform_l2_sync();
-        l2_maint_platform_l2_end();
         l2_maint_release();
         start += (INTPTR)L2_MAINT_LINE_BYTES;
     }
@@ -213,10 +265,8 @@ static void l2_maint_invalidate_lines(INTPTR address, u32 length, int with_l1)
             l2_maint_acquire();
             if (with_l1)
                 l2_maint_platform_l1_clean_inv_line(last);
-            l2_maint_platform_l2_begin();
             l2_maint_platform_l2_clean_inv_line(last);
             l2_maint_platform_l2_sync();
-            l2_maint_platform_l2_end();
             l2_maint_release();
         }
         end = last;
@@ -228,7 +278,6 @@ static void l2_maint_invalidate_lines(INTPTR address, u32 length, int with_l1)
         if (chunk_end > end)
             chunk_end = end;
         l2_maint_acquire();
-        l2_maint_platform_l2_begin();
         for (line = start; line < chunk_end;
              line += (INTPTR)L2_MAINT_LINE_BYTES)
             l2_maint_platform_l2_inv_line(line);
@@ -238,7 +287,6 @@ static void l2_maint_invalidate_lines(INTPTR address, u32 length, int with_l1)
                  line += (INTPTR)L2_MAINT_LINE_BYTES)
                 l2_maint_platform_l1_inv_line(line);
         }
-        l2_maint_platform_l2_end();
         l2_maint_release();
         start = chunk_end;
     }
