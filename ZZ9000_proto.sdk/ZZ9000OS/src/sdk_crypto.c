@@ -14,12 +14,7 @@
 #include "bearssl/bearssl_hash.h"
 #include <string.h>
 
-typedef struct SDKSHA256Context {
-	uint32_t state[8];
-	uint64_t bit_length;
-	uint8_t buffer[SDK_SHA256_BLOCK_SIZE];
-	uint32_t buffer_length;
-} SDKSHA256Context;
+typedef sdk_sha256_context_t SDKSHA256Context;
 
 typedef struct SDKSHA1Context {
 	uint32_t state[5];
@@ -346,16 +341,33 @@ static void sha256_final(SDKSHA256Context *ctx,
 		store_be32(digest + (i * 4U), ctx->state[i]);
 }
 
+void sdk_sha256_init(sdk_sha256_context_t *ctx)
+{
+	sha256_init(ctx);
+}
+
+void sdk_sha256_update(sdk_sha256_context_t *ctx, const uint8_t *data,
+                       uint32_t length)
+{
+	if (length != 0U)
+		sha256_update(ctx, data, length);
+}
+
+void sdk_sha256_final(sdk_sha256_context_t *ctx,
+                      uint8_t digest[SDK_SHA256_DIGEST_SIZE])
+{
+	sha256_final(ctx, digest);
+	memset(ctx, 0, sizeof(*ctx));
+}
+
 void sdk_sha256(const uint8_t *data, uint32_t length,
                 uint8_t digest[SDK_SHA256_DIGEST_SIZE])
 {
-	SDKSHA256Context ctx;
+	sdk_sha256_context_t ctx;
 
-	sha256_init(&ctx);
-	if (length != 0U)
-		sha256_update(&ctx, data, length);
-	sha256_final(&ctx, digest);
-	memset(&ctx, 0, sizeof(ctx));
+	sdk_sha256_init(&ctx);
+	sdk_sha256_update(&ctx, data, length);
+	sdk_sha256_final(&ctx, digest);
 }
 
 void sdk_sha1(const uint8_t *data, uint32_t length,

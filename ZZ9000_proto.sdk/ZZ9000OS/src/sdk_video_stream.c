@@ -364,7 +364,8 @@ static uint16_t sdk_video_stream_begin_owned_locked(
 	session = find_free_session();
 	if (!session)
 		return SDK_STATUS_NO_MEMORY;
-	if (module_id != 0U && !zzm_loader_acquire(module_id)) {
+	if (module_id != 0U &&
+	    zzm_loader_acquire(module_id) != ZZM_LOAD_READY) {
 		log_module_begin_failure(module_id, "acquire",
 		                         SDK_STATUS_MODULE_MISMATCH);
 		return SDK_STATUS_MODULE_MISMATCH;

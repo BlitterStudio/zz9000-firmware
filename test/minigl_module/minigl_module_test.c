@@ -12,6 +12,8 @@
 #include "host_card_pool.h"
 #include "memorymap.h"
 #include "surface_allocator.h"
+#include "sdk_crypto.h"
+#include "sdk_mailbox.h"
 #include "zzm_manifest.h"
 #include "zzm_loader.h"
 #include "zzm_minigl_host.h"
@@ -48,8 +50,23 @@ extern void *mini_CurrentContext;
 
 
 static int reject_module_open;
+static int admit_reset_on_register_ops;
+static int admit_reset_on_aperture_query;
+static unsigned reset_admissions;
+static unsigned aperture_queries;
 static uint8_t module_file[ZZM_V3_HEADER_SIZE + 32U];
 static uint32_t module_offset;
+static unsigned module_open_calls;
+static unsigned module_close_calls;
+static unsigned module_read_calls;
+static unsigned module_read_fail_call;
+static uint32_t module_max_read_request;
+static int track_module_load;
+static unsigned module_flush_calls;
+static unsigned module_icache_calls;
+static uint32_t module_max_flush;
+static uint32_t module_max_icache;
+static unsigned module_load_passes;
 static uint64_t now_us;
 static uint32_t display_width = 640U;
 static uint32_t display_height = 480U;
@@ -87,11 +104,25 @@ int smp_raw_spin_try_lock(volatile uint32_t *word)
 void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0U; }
 
 void Xil_DCacheFlushRange(uint32_t address, uint32_t length)
-{ (void)address; (void)length; }
+{
+    if (track_module_load && address >= ZZM_MINIGL_SLOT_ADDRESS &&
+        address < ZZM_MINIGL_SLOT_ADDRESS + ZZM_MINIGL_SLOT_SIZE) {
+        module_flush_calls++;
+        if (length > module_max_flush)
+            module_max_flush = length;
+    }
+}
 void Xil_DCacheInvalidateRange(uint32_t address, uint32_t length)
 { (void)address; (void)length; }
 void Xil_ICacheInvalidateRange(uint32_t address, uint32_t length)
-{ (void)address; (void)length; }
+{
+    if (track_module_load && address >= ZZM_MINIGL_SLOT_ADDRESS &&
+        address < ZZM_MINIGL_SLOT_ADDRESS + ZZM_MINIGL_SLOT_SIZE) {
+        module_icache_calls++;
+        if (length > module_max_icache)
+            module_max_icache = length;
+    }
+}
 /* MEM -> ST1 envelopes the FrameStreamingCore has accepted but not yet
  * executed.  Normally they run at their TLF; a test can hold them (the GPU is
  * still fetching) until a deadline, or forever (a wedged GPU). */
@@ -111,7 +142,16 @@ void XTime_GetTime(uint64_t *time)
         test_rix_run_fetches();
     }
 }
-int sdk_aperture_runtime_is_zorro3(void) { return 1; }
+int sdk_aperture_runtime_is_zorro3(void)
+{
+    ++aperture_queries;
+    if (admit_reset_on_aperture_query) {
+        admit_reset_on_aperture_query = 0;
+        ++reset_admissions;
+        sdk_mailbox_begin_amiga_reset();
+    }
+    return 1;
+}
 int zzm_test_printf(const char *format, ...)
 {
     va_list args;
@@ -482,7 +522,14 @@ void zzapp_host_yield_wait(void)
 
 int zzm_registry_register_ops(uint32_t module_id, const void *ops, uint32_t bytes)
 {
-    return module_id == ZZM_MODULE_MINIGL && ops != NULL && bytes != 0U;
+    if (module_id != ZZM_MODULE_MINIGL || ops == NULL || bytes == 0U)
+        return 0;
+    if (admit_reset_on_register_ops) {
+        admit_reset_on_register_ops = 0;
+        ++reset_admissions;
+        sdk_mailbox_begin_amiga_reset();
+    }
+    return 1;
 }
 
 int zzm_registry_register_service(uint32_t module_id, uint32_t id,
@@ -498,6 +545,8 @@ FRESULT f_open(FIL *file, const char *path, unsigned char mode)
     (void)mode;
     if (strstr(path, "/MINIGL.ZZM") == NULL || reject_module_open)
         return FR_NO_FILE;
+    if (track_module_load)
+        module_open_calls++;
     file->size = sizeof(module_file);
     module_offset = 0U;
     return FR_OK;
@@ -510,6 +559,15 @@ FRESULT f_lseek(FIL *file, FSIZE_t offset)
 }
 FRESULT f_read(FIL *file, void *buffer, UINT bytes, UINT *read)
 {
+    if (track_module_load) {
+        module_read_calls++;
+        if (bytes > module_max_read_request)
+            module_max_read_request = bytes;
+        if (module_read_fail_call == module_read_calls) {
+            *read = 0U;
+            return FR_NOT_READY;
+        }
+    }
     if (module_offset > file->size || bytes > file->size - module_offset) {
         *read = 0U;
         return FR_NOT_READY;
@@ -519,9 +577,52 @@ FRESULT f_read(FIL *file, void *buffer, UINT bytes, UINT *read)
     *read = bytes;
     return FR_OK;
 }
-FRESULT f_close(FIL *file) { (void)file; return FR_OK; }
+FRESULT f_close(FIL *file)
+{
+    (void)file;
+    if (track_module_load)
+        module_close_calls++;
+    return FR_OK;
+}
+
+void sdk_sha256_init(sdk_sha256_context_t *ctx)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->state[0] = 2166136261U;
+}
+
+void sdk_sha256_update(sdk_sha256_context_t *ctx, const uint8_t *data,
+                       uint32_t bytes)
+{
+    uint32_t i;
+
+    for (i = 0U; i < bytes; i++) {
+        ctx->state[0] = (ctx->state[0] ^ data[i]) * 16777619U;
+        ctx->state[1] += (uint32_t)data[i] + (uint32_t)ctx->bit_length;
+        ctx->bit_length += 8U;
+    }
+}
+
+void sdk_sha256_final(sdk_sha256_context_t *ctx, uint8_t digest[32])
+{
+    uint32_t i;
+
+    for (i = 0U; i < 32U; i++) {
+        uint32_t value = ctx->state[i & 1U] ^
+            (uint32_t)(ctx->bit_length >> ((i & 7U) * 8U));
+        digest[i] = (uint8_t)(value >> ((i & 3U) * 8U));
+    }
+    memset(ctx, 0, sizeof(*ctx));
+}
+
 void sdk_sha256(const uint8_t *data, uint32_t bytes, uint8_t digest[32])
-{ (void)data; (void)bytes; memset(digest, 0, 32U); }
+{
+    sdk_sha256_context_t ctx;
+
+    sdk_sha256_init(&ctx);
+    sdk_sha256_update(&ctx, data, bytes);
+    sdk_sha256_final(&ctx, digest);
+}
 
 static void emit_trampoline(uint8_t *code, const void *target)
 {
@@ -543,6 +644,7 @@ static void prepare_module_file(void)
     header->abi_major = ZZM_V3_ABI_MAJOR;
     header->slot_load_address = ZZM_MINIGL_SLOT_ADDRESS;
     header->image_size = 32U;
+    header->bss_size = 40U;
     header->init_entry = ZZM_MINIGL_SLOT_ADDRESS;
     header->fini_entry = ZZM_MINIGL_SLOT_ADDRESS + 16U;
     header->load_policy = ZZM_LOAD_ON_DEMAND;
@@ -563,6 +665,8 @@ static void prepare_module_file(void)
     memcpy(header->name, "MINIGL", 7U);
     emit_trampoline(module_file + ZZM_V3_HEADER_SIZE, zzm_module_entry);
     emit_trampoline(module_file + ZZM_V3_HEADER_SIZE + 16U, zzm_module_exit);
+    sdk_sha256(module_file + ZZM_V3_HEADER_SIZE, header->image_size,
+               header->image_sha256);
 }
 
 static void setup_host_memory(void)
@@ -580,10 +684,230 @@ static void setup_host_memory(void)
     host_card_pool_reset(CARD_POOL_LIMIT_MINIGL + (64U << 20));
     surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
 }
+static void assert_load_work_bounded(void)
+{
+    uint32_t bytes = zzm_loader_test_work_bytes();
+
+    switch (zzm_loader_test_work_kind()) {
+    case ZZM_LOADER_TEST_WORK_NONE:
+        assert(bytes == 0U);
+        break;
+    case ZZM_LOADER_TEST_WORK_READ_HASH:
+        assert(bytes <= ZZM_V3_READ_HASH_CHUNK_BYTES);
+        break;
+    case ZZM_LOADER_TEST_WORK_BSS_ZERO:
+    case ZZM_LOADER_TEST_WORK_DCACHE_FLUSH:
+    case ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE:
+    case ZZM_LOADER_TEST_WORK_POISON:
+        assert(bytes <= ZZM_V3_MEMORY_CHUNK_BYTES);
+        break;
+    }
+}
+
+static int acquire_module_bounded(void)
+{
+    zzm_status_t status;
+    int result;
+
+    module_open_calls = 0U;
+    module_close_calls = 0U;
+    module_read_calls = 0U;
+    module_max_read_request = 0U;
+    module_flush_calls = 0U;
+    module_icache_calls = 0U;
+    module_max_flush = 0U;
+    module_max_icache = 0U;
+    module_load_passes = 0U;
+    track_module_load = 1;
+    do {
+        result = zzm_loader_acquire(ZZM_MODULE_MINIGL);
+        module_load_passes++;
+        assert(module_load_passes < 128U);
+        assert_load_work_bounded();
+        if (result == ZZM_LOAD_IN_PROGRESS) {
+            assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+            assert(status.state == ZZM_STATE_LOADING);
+            assert(status.ref_count == 0U);
+            assert(!zzm_minigl_worker_registered());
+        }
+    } while (result == ZZM_LOAD_IN_PROGRESS);
+    track_module_load = 0;
+    assert(module_max_read_request <= ZZM_V3_READ_HASH_CHUNK_BYTES);
+    assert(module_max_flush <= ZZM_V3_MEMORY_CHUNK_BYTES);
+    assert(module_max_icache <= ZZM_V3_MEMORY_CHUNK_BYTES);
+    return result;
+}
+
+static uint16_t mailbox_acquire_bounded(uint32_t *final_result_len)
+{
+    uint8_t result_payload[sizeof(uint32_t)];
+    uint32_t result_len;
+    uint16_t result;
+    unsigned passes = 0U;
+
+    do {
+        result_len = 0U;
+        result = sdk_mailbox_minigl_acquire_on_owner(result_payload,
+                                                      &result_len);
+        assert(++passes < 128U);
+        assert_load_work_bounded();
+    } while (result == SDK_TASK_IN_PROGRESS);
+    if (final_result_len)
+        *final_result_len = result_len;
+    return result;
+}
+
+static void assert_module_poisoned(void)
+{
+    const zzm_v3_header_t *header = (const zzm_v3_header_t *)module_file;
+    const uint32_t *word = (const uint32_t *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS;
+    uint32_t words = (header->image_size + header->bss_size) / sizeof(*word);
+    uint32_t i;
+
+    for (i = 0U; i < words; i++)
+        assert(word[i] == ZZM_POISON_WORD);
+}
+
+static void prepare_available_module(void)
+{
+    zzm_status_t status;
+
+    reject_module_open = 0;
+    module_read_fail_call = 0U;
+    prepare_module_file();
+    zzm_loader_boot_load();
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_AVAILABLE);
+    assert(status.ref_count == 0U);
+}
+
+static void assert_cancelled_acquire_cleanup(void)
+{
+    zzm_status_t status;
+    uint32_t generation;
+
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_AVAILABLE);
+    assert(status.ref_count == 0U);
+    assert(!zzm_minigl_worker_registered());
+    assert(!zzm_minigl_transport_acquire(&generation));
+    assert_module_poisoned();
+}
+
+static void test_reset_during_final_module_init(void)
+{
+    uint32_t result_len = ~(uint32_t)0;
+
+    prepare_available_module();
+    reset_admissions = 0U;
+    aperture_queries = 0U;
+    admit_reset_on_register_ops = 1;
+    assert(mailbox_acquire_bounded(&result_len) == SDK_STATUS_IO_ERROR);
+    assert(result_len == 0U);
+    assert(reset_admissions == 1U);
+    assert(aperture_queries == 0U);
+    sdk_mailbox_finish_amiga_reset();
+}
+
+static void test_reset_during_transport_acquire(void)
+{
+    uint32_t result_len = ~(uint32_t)0;
+    uint32_t allocated_before;
+
+    prepare_available_module();
+    allocated_before = surface_allocator_used_bytes();
+    reset_admissions = 0U;
+    admit_reset_on_aperture_query = 1;
+    assert(mailbox_acquire_bounded(&result_len) == SDK_STATUS_IO_ERROR);
+    assert(result_len == 0U);
+    assert(reset_admissions == 1U);
+    assert(surface_allocator_used_bytes() == allocated_before);
+    assert_cancelled_acquire_cleanup();
+    sdk_mailbox_finish_amiga_reset();
+}
+
+static void test_reset_releases_public_acquire_reference(void)
+{
+    zzm_status_t status;
+
+    prepare_available_module();
+    assert(mailbox_acquire_bounded(NULL) == SDK_STATUS_OK);
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_LOADED);
+    assert(status.ref_count == 1U);
+
+    sdk_mailbox_begin_amiga_reset();
+    assert(zzm_minigl_begin_reset() == ZZM_MINIGL_RESET_QUIESCENT);
+    sdk_mailbox_minigl_reset_release_all();
+    sdk_mailbox_finish_amiga_reset();
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_AVAILABLE);
+    assert(status.ref_count == 0U);
+
+    assert(mailbox_acquire_bounded(NULL) == SDK_STATUS_OK);
+    assert(sdk_mailbox_minigl_release_on_owner());
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.ref_count == 0U);
+
+    assert(mailbox_acquire_bounded(NULL) == SDK_STATUS_OK);
+    assert(sdk_mailbox_minigl_release_on_owner());
+    sdk_mailbox_begin_amiga_reset();
+    assert(zzm_minigl_begin_reset() == ZZM_MINIGL_RESET_QUIESCENT);
+    sdk_mailbox_minigl_reset_release_all();
+    sdk_mailbox_finish_amiga_reset();
+    assert(!sdk_mailbox_minigl_release_on_owner());
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_AVAILABLE);
+    assert(status.ref_count == 0U);
+}
+
 static void release_transport_from_worker_poll(void)
 {
     assert(zzm_minigl_transport_release());
     zzm_loader_release(ZZM_MODULE_MINIGL);
+}
+
+static void test_reset_cancels_resumable_load(void)
+{
+    zzm_status_t status;
+    uint32_t generation;
+
+    reject_module_open = 0;
+    module_read_fail_call = 0U;
+    prepare_module_file();
+    zzm_loader_boot_load();
+    {
+        uint8_t result_payload[sizeof(uint32_t)];
+        uint32_t result_len = 0U;
+
+        assert(sdk_mailbox_minigl_acquire_on_owner(
+                   result_payload, &result_len) == SDK_TASK_IN_PROGRESS);
+        assert(sdk_mailbox_minigl_acquire_on_owner(
+                   result_payload, &result_len) == SDK_TASK_IN_PROGRESS);
+        assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+        assert(status.state == ZZM_STATE_LOADING);
+        assert(status.ref_count == 0U);
+
+        sdk_mailbox_begin_amiga_reset();
+        assert(sdk_mailbox_minigl_acquire_on_owner(
+                   result_payload, &result_len) == SDK_STATUS_IO_ERROR);
+    }
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_AVAILABLE);
+    assert(status.ref_count == 0U);
+    assert(!zzm_minigl_worker_registered());
+    assert(!zzm_minigl_transport_acquire(&generation));
+    assert_module_poisoned();
+
+    sdk_mailbox_finish_amiga_reset();
+    assert(mailbox_acquire_bounded(NULL) == SDK_STATUS_OK);
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_LOADED);
+    assert(status.ref_count == 1U);
+    assert(zzm_minigl_begin_reset() == ZZM_MINIGL_RESET_QUIESCENT);
+    sdk_mailbox_minigl_reset_release_all();
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.ref_count == 0U);
 }
 
 
@@ -615,7 +939,24 @@ int main(void)
     zzm_loader_boot_load();
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
     assert(status.state == ZZM_STATE_AVAILABLE);
-    assert(zzm_loader_acquire(ZZM_MODULE_MINIGL));
+    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5, 72U);
+    assert(acquire_module_bounded() == ZZM_LOAD_READY);
+    assert(module_load_passes > 8U);
+    assert(module_open_calls == 1U);
+    assert(module_close_calls == 1U);
+    assert(module_read_calls == 4U);
+    assert(module_flush_calls == 5U);
+    assert(module_icache_calls == 2U);
+    assert(memcmp((const void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS,
+                  module_file + ZZM_V3_HEADER_SIZE, 32U) == 0);
+    {
+        const uint8_t *bss =
+            (const uint8_t *)(uintptr_t)(ZZM_MINIGL_SLOT_ADDRESS + 32U);
+        uint32_t i;
+
+        for (i = 0U; i < 40U; i++)
+            assert(bss[i] == 0U);
+    }
     assert(zzm_minigl_worker_registered());
     ops = zzm_minigl_ops(&context);
     assert(ops != NULL && context != NULL);
@@ -1245,7 +1586,7 @@ int main(void)
         zzm_loader_release(ZZM_MODULE_MINIGL);
         assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
         assert(status.state == ZZM_STATE_AVAILABLE);
-        assert(zzm_loader_acquire(ZZM_MODULE_MINIGL));
+        assert(acquire_module_bounded() == ZZM_LOAD_READY);
         ops = zzm_minigl_ops(&context);
         assert(ops != NULL && context != NULL);
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
@@ -1463,7 +1804,7 @@ int main(void)
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
     assert(status.state == ZZM_STATE_LOADED);
     assert(zzm_minigl_worker_registered());
-    assert(zzm_loader_acquire(ZZM_MODULE_MINIGL));
+    assert(acquire_module_bounded() == ZZM_LOAD_READY);
     ops = zzm_minigl_ops(&context);
     assert(ops != NULL && context != NULL);
     assert(ops->app_bind(context, 1U, &gl) == 0 && gl != NULL);
@@ -1536,7 +1877,7 @@ int main(void)
     assert(card_pool.class_used[CARD_POOL_CLASS_MINIGL_MODULE] == 0U);
 
     /* The next owner is an ARM application: it must reload and bind cleanly. */
-    assert(zzm_loader_acquire(ZZM_MODULE_MINIGL));
+    assert(acquire_module_bounded() == ZZM_LOAD_READY);
     ops = zzm_minigl_ops(&context);
     assert(ops != NULL && context != NULL);
     assert(ops->app_bind(context, 1U, &gl) == 0 && gl != NULL);
@@ -1735,15 +2076,48 @@ int main(void)
     /* Core-0 recovery invokes the same runtime reclamation after forgetting
      * the core-1 image; it must preserve these accepted DDR lists too. */
     (void)zzm_runtime_release_module(ZZM_MODULE_MINIGL);
-    /*
-     * The released slot is poison. A following SD-open failure must report
-     * LOAD_FAILED without entering its stale fini entry.
-     */
-    reject_module_open = 1;
-    assert(!zzm_loader_acquire(ZZM_MODULE_MINIGL));
+    /* Corruption is detected only after every bounded read/hash pass, and
+     * the acquire remains pending until the slot is coherently poisoned. */
+    prepare_module_file();
+    zzm_loader_boot_load();
+    module_file[ZZM_V3_HEADER_SIZE + 31U] ^= 0x5aU;
+    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5, 72U);
+    assert(acquire_module_bounded() == ZZM_LOAD_FAILED);
+    assert(module_open_calls == 1U && module_close_calls == 1U);
+    assert(module_read_calls == 4U);
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
     assert(status.state == ZZM_STATE_LOAD_FAILED);
+    assert(status.reason == ZZM_REASON_IMAGE_INVALID);
     assert(!zzm_minigl_worker_registered());
+    assert_module_poisoned();
+    module_file[ZZM_V3_HEADER_SIZE + 31U] ^= 0x5aU;
+
+    /* A later read failure closes the persistent FIL and reports the same
+     * FILE_READ reason as the former one-shot f_read. */
+    zzm_loader_boot_load();
+    module_read_fail_call = 2U;
+    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5, 72U);
+    assert(acquire_module_bounded() == ZZM_LOAD_FAILED);
+    module_read_fail_call = 0U;
+    assert(module_open_calls == 1U && module_close_calls == 1U);
+    assert(module_read_calls == 2U);
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_LOAD_FAILED);
+    assert(status.reason == ZZM_REASON_FILE_READ);
+    assert(!zzm_minigl_worker_registered());
+    assert_module_poisoned();
+
+    /* The released slot is poison. A following SD-open failure must report
+     * LOAD_FAILED without entering its stale fini entry. */
+    zzm_loader_boot_load();
+    reject_module_open = 1;
+    assert(acquire_module_bounded() == ZZM_LOAD_FAILED);
+    assert(module_open_calls == 0U && module_close_calls == 0U);
+    assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
+    assert(status.state == ZZM_STATE_LOAD_FAILED);
+    assert(status.reason == ZZM_REASON_FILE_OPEN);
+    assert(!zzm_minigl_worker_registered());
+    assert_module_poisoned();
     /* Reclamation must retain every address that an unfinished DDR list may
      * still fetch, rather than merely retaining an owner record. */
     {
@@ -1753,6 +2127,10 @@ int main(void)
         for (index = 0U; index < quarantined_kept_count; ++index)
             assert(test_card_pool_holds(quarantined_kept[index]));
     }
+    test_reset_during_final_module_init();
+    test_reset_during_transport_acquire();
+    test_reset_releases_public_acquire_reference();
+    test_reset_cancels_resumable_load();
     puts("MiniGL real module loader/runtime integration passed");
     return 0;
 }

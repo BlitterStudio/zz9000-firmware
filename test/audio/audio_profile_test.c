@@ -35,11 +35,25 @@ static int digest_matches_hex(const uint8_t *data, size_t length,
 {
 	static const char hex[] = "0123456789abcdef";
 	uint8_t digest[SDK_SHA256_DIGEST_SIZE];
+	uint8_t incremental[SDK_SHA256_DIGEST_SIZE];
+	sdk_sha256_context_t context;
 	char actual[SDK_SHA256_DIGEST_SIZE * 2U + 1U];
+	size_t offset = 0U;
 	size_t i;
 
 	CHECK(length <= UINT32_MAX);
 	sdk_sha256(data, (uint32_t)length, digest);
+	sdk_sha256_init(&context);
+	while (offset < length) {
+		size_t bytes = length - offset;
+
+		if (bytes > 257U)
+			bytes = 257U;
+		sdk_sha256_update(&context, data + offset, (uint32_t)bytes);
+		offset += bytes;
+	}
+	sdk_sha256_final(&context, incremental);
+	CHECK(memcmp(digest, incremental, sizeof(digest)) == 0);
 	for (i = 0; i < SDK_SHA256_DIGEST_SIZE; ++i) {
 		actual[i * 2U] = hex[digest[i] >> 4];
 		actual[i * 2U + 1U] = hex[digest[i] & 0x0fU];

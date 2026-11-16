@@ -6587,34 +6587,31 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		*result_len = 2U;
 		return SDK_STATUS_OK;
 	}
+
 	case TASKQ_OP_ZZM_LOAD: {
 		uint32_t module_id;
+		int load_result;
+
 		memcpy(&module_id, d->op_params, sizeof(module_id));
 		*result_len = 0U;
+		if (sdk_mailbox_minigl_acquire_cancelled() &&
+		    module_id == ZZM_MODULE_MINIGL) {
+			zzm_loader_cancel_loading(module_id);
+			zzm_load_pending_id = 0U;
+			return SDK_STATUS_OK;
+		}
 		/* The loader exposes ordinary failures in module status. A non-OK
 		 * task status therefore identifies a failed core-1 worker. */
-		(void)zzm_loader_load_on_owner(module_id);
-		return SDK_STATUS_OK;
+		load_result = zzm_loader_load_on_owner(module_id);
+		return load_result == ZZM_LOAD_IN_PROGRESS ?
+			SDK_TASK_IN_PROGRESS : SDK_STATUS_OK;
 	}
-	case SDK_OP_MINIGL_MODULE_ACQUIRE: {
-		uint32_t generation = 0U;
-
-		*result_len = 0U;
-		if (!zzm_loader_acquire(ZZM_MODULE_MINIGL))
-			return SDK_STATUS_MODULE_MISSING;
-		if (!zzm_minigl_transport_acquire(&generation)) {
-			zzm_loader_release(ZZM_MODULE_MINIGL);
-			return SDK_STATUS_MODULE_MISMATCH;
-		}
-		put_be32(result_payload, generation);
-		*result_len = sizeof(generation);
-		return SDK_STATUS_OK;
-	}
+	case SDK_OP_MINIGL_MODULE_ACQUIRE:
+		return sdk_mailbox_minigl_acquire_on_owner(result_payload, result_len);
 	case SDK_OP_MINIGL_MODULE_RELEASE:
 		*result_len = 0U;
-		if (!zzm_minigl_transport_release())
+		if (!sdk_mailbox_minigl_release_on_owner())
 			return SDK_STATUS_BAD_REQUEST;
-		zzm_loader_release(ZZM_MODULE_MINIGL);
 		return SDK_STATUS_OK;
 	case SDK_OP_IMAGE_SESSION_BEGIN: {
 		const struct image_begin_op_params *p =
@@ -9006,10 +9003,12 @@ void sdk_mailbox_publish_after_aperture_ack(void)
 	sdk_mailbox_pending = 0;
 }
 
+
 void sdk_mailbox_init(void)
 {
 	int backend_core1_heap;
 
+	sdk_mailbox_begin_amiga_reset();
 	/* Drain any in-flight core-1 task before we tear the mailbox down. A task
 	 * still executing on core 1 is mid-write into its resolved data buffers;
 	 * the shared-buffer allocator reset below (next_shared_handle = 1 +
@@ -9024,6 +9023,7 @@ void sdk_mailbox_init(void)
 	fw_update_forget_queued();
 	zzm_load_pending_id = 0U;
 	zzm_load_deadline = 0U;
+	sdk_mailbox_finish_amiga_reset();
 
 	select_mailbox_placement();
 	if (mailbox_base != 0U)

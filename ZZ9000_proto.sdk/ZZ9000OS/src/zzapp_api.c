@@ -241,7 +241,13 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
         return ZZ_ENOSYS;
     }
 #endif
-    if (!zzm_loader_acquire(ZZM_MODULE_MINIGL)) {
+    for (;;) {
+        status = zzm_loader_acquire(ZZM_MODULE_MINIGL);
+        if (status != ZZM_LOAD_IN_PROGRESS)
+            break;
+        zzapp_host_yield_wait();
+    }
+    if (status != ZZM_LOAD_READY) {
         zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
         return ZZ_ENOSYS;
     }

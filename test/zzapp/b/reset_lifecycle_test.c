@@ -485,6 +485,45 @@ static uint16_t claim_slot0_from_core0(void)
     zzapp_services_test_set_core(1);
     return status;
 }
+static void assert_window_payload_zero(void)
+{
+    uint32_t offset;
+
+    for (offset = ZZAPP_LIFE_BYTES; offset < ZZAPP_WINDOW_BYTES; offset++)
+        assert(launcher_window[offset] == 0U);
+}
+
+static void window_claim_initialization_lifecycle(void)
+{
+    zzapp_boot_init();
+    zzapp_services_test_reset();
+    zzapp_services_test_set_core(0);
+    memset(launcher_window, 0xa5, sizeof(launcher_window));
+    zzapp_services_test_set_window(launcher_window, sizeof(launcher_window));
+    assert_window_payload_zero();
+    assert(claim_slot0_from_core0() == SDK_STATUS_OK);
+    assert_window_payload_zero();
+
+    /* A normal app end retains the mapped window. A later claim therefore
+     * does not pay the whole-window initialization cost again. */
+    launcher_window[ZZAPP_STAGING_OFF] = 0x5aU;
+    zzapp_services_on_app_end();
+    assert(claim_slot0_from_core0() == SDK_STATUS_OK);
+    assert(launcher_window[ZZAPP_STAGING_OFF] == 0x5aU);
+
+    /* Reset forgets the mapping. No claim is published until core 0 binds
+     * and completely initializes the replacement window. */
+    zzapp_services_on_reset();
+    assert(claim_slot0_from_core0() == SDK_STATUS_NO_MEMORY);
+    zzapp_services_test_set_core(0);
+    memset(launcher_window, 0xa5, sizeof(launcher_window));
+    zzapp_services_test_set_window(launcher_window, sizeof(launcher_window));
+    assert_window_payload_zero();
+    assert(claim_slot0_from_core0() == SDK_STATUS_OK);
+    assert_window_payload_zero();
+    zzapp_services_test_set_core(1);
+}
+
 
 /* Claims slot 0 the moment it is admissible again; BUSY means core 1
  * still holds it. */
@@ -656,6 +695,7 @@ static void start_and_exit(void)
 
 int main(void)
 {
+    window_claim_initialization_lifecycle();
     zzapp_boot_init();
     zzapp_services_test_reset();
     zzapp_test_set_entry(app_entry);

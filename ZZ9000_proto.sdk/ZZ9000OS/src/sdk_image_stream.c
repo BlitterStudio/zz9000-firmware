@@ -2232,7 +2232,7 @@ static uint16_t image_stream_begin_locked(
 		}
 	}
 	if (begin->codec == SDK_IMAGE_CODEC_WEBP &&
-	    !zzm_loader_acquire(ZZM_MODULE_WEBP)) {
+	    zzm_loader_acquire(ZZM_MODULE_WEBP) != ZZM_LOAD_READY) {
 		printf("[ZZM] begin WEBP acquire status %u\n",
 		       (unsigned)SDK_STATUS_MODULE_MISMATCH);
 		return SDK_STATUS_MODULE_MISMATCH;

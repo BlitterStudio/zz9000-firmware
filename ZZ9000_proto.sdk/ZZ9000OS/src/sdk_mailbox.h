@@ -1340,6 +1340,15 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_DECOMPRESS_RESULT_NEED_INPUT      (1U << 2)
 
 void sdk_mailbox_init(void);
+/* Close MiniGL acquires before reset quiesces core 1; non-blocking. */
+void sdk_mailbox_begin_amiga_reset(void);
+void sdk_mailbox_finish_amiga_reset(void);
+int sdk_mailbox_minigl_acquire_cancelled(void);
+int sdk_mailbox_minigl_release_on_owner(void);
+void sdk_mailbox_minigl_reset_release_all(void);
+/* Core-1 completion of a deferred MiniGL acquire. */
+uint16_t sdk_mailbox_minigl_acquire_on_owner(uint8_t *result_payload,
+                                             uint32_t *result_len);
 /* Map the Zorro II mailbox page non-cacheable. Boot only, after
  * sdk_aperture_runtime_init() and before core 1 or interrupts start:
  * splitting the section is break-before-make (mmu_page.h). */

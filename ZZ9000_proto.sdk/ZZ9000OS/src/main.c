@@ -834,6 +834,7 @@ static void minigl_begin_amiga_reset(void)
 	sched_minigl_reset_phase_t phase;
 	uint32_t ack = 0U;
 	zzapp_on_amiga_reset();
+	sdk_mailbox_begin_amiga_reset();
 
 	if (scheduler_core1_available() && zzm_minigl_worker_registered()) {
 		scheduler_request_minigl_reset();
@@ -842,6 +843,7 @@ static void minigl_begin_amiga_reset(void)
 		ack = scheduler_shared()->minigl_reset_ack;
 	}
 	handle_amiga_reset(AMIGA_RESET_FAST);
+	sdk_mailbox_minigl_reset_release_all();
 	phase = sched_minigl_reset_phase(scheduler_core1_available(),
 	                                 mgl_reset_posted, ack, 0,
 	                                 MINIGL_RESET_BUDGET_MS);
@@ -914,6 +916,7 @@ static void audio_dsp_watch(void)
 void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* amiga_boot_reset_pass is consumed by the Fast-RAM step below. */
 	const int boot_pass = amiga_boot_reset_pass;
+	sdk_mailbox_begin_amiga_reset();
 
 	/* A FWUP job on core 1 may still own FatFs and the SD card; the
 	 * Fast-RAM re-read and the storage reset below use both, and the

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "sdk_crypto.h"
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
 #include "ff.h"
@@ -74,6 +75,25 @@ FRESULT f_close(FIL *file)
     (void)file;
     loader_close_calls++;
     return FR_OK;
+}
+
+void sdk_sha256_init(sdk_sha256_context_t *ctx)
+{
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+void sdk_sha256_update(sdk_sha256_context_t *ctx, const uint8_t *data,
+                       uint32_t length)
+{
+    (void)ctx;
+    (void)data;
+    (void)length;
+}
+
+void sdk_sha256_final(sdk_sha256_context_t *ctx, uint8_t digest[32])
+{
+    memset(ctx, 0, sizeof(*ctx));
+    memset(digest, 0, 32U);
 }
 
 void sdk_sha256(const uint8_t *data, uint32_t length, uint8_t digest[32])
