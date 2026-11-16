@@ -726,6 +726,29 @@ static void test_api_waiter_handoff_beats_continuous_service(void)
 	}
 	CHECK(calls == 3U);
 }
+/* A wait inside an API body releases the lock before blocking.  Its service
+ * pass wakes the app while holding the system lock; that wake must reserve
+ * the next lock handoff so the worker cannot immediately retake it. */
+static void test_woken_api_waiter_beats_continuous_service(void)
+{
+	zzapp_kernel_t kernel;
+
+	zzapp_kernel_init(&kernel);
+	make_runnable(&kernel, 0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_api_block(&kernel, 0) == 0);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_BLOCKED);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(kernel.threads[0].state == ZZAPP_THREAD_BLOCKED);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_wake(&kernel, 0, ZZAPP_WAKE_READY) == 0);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(zzapp_kernel_system_lock(&kernel) != 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 0U) == ZZAPP_KERNEL_APP0);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+}
+
 
 static void test_api_lock_handoff_is_fifo(void)
 {
@@ -1086,6 +1109,7 @@ int main(void)
     test_waiter_isolation_timeout_and_stop();
     test_stop_wakes_api_lock_waiter();
     test_system_kernel_lock_handoffs();
+    test_woken_api_waiter_beats_continuous_service();
     test_api_waiter_handoff_beats_continuous_service();
     test_api_lock_handoff_is_fifo();
     test_pending_service_runs_between_api_handoffs();

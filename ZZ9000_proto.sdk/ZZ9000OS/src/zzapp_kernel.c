@@ -444,6 +444,9 @@ int zzapp_kernel_apps_runnable(const zzapp_kernel_t *kernel)
 }
 
 
+static void handoff_api_lock(zzapp_kernel_t *kernel);
+static void register_api_waiter(zzapp_kernel_t *kernel, uint32_t slot);
+
 static void wake_due(zzapp_kernel_t *kernel)
 {
 	for (;;) {
@@ -584,6 +587,13 @@ int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
 	thread->wake_reason = reason;
 	thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
 	thread->wake_sequence = ++kernel->wake_serial;
+	if (kernel->api_resume_waiting[slot]) {
+		kernel->api_resume_waiting[slot] = 0U;
+		register_api_waiter(kernel, slot);
+		if (kernel->api_lock_owner == -1 &&
+		    kernel->api_handoff >= ZZAPP_KERNEL_APP_SLOTS)
+			handoff_api_lock(kernel);
+	}
 	if (kernel->wake_log_count < ZZAPP_KERNEL_APP_SLOTS)
 		kernel->wake_log[kernel->wake_log_count++] = (uint8_t)slot;
 	kernel_wake_event();
@@ -988,12 +998,15 @@ static void wake_api_waiters(zzapp_kernel_t *kernel)
 	uint32_t slot;
 
 	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
-		if (!kernel->api_waiting[slot])
+		if (!kernel->api_waiting[slot] &&
+		    !kernel->api_resume_waiting[slot])
 			continue;
 		kernel->api_waiting[slot] = 0U;
+		kernel->api_resume_waiting[slot] = 0U;
 		kernel->api_wait_sequence[slot] = 0U;
 		(void)zzapp_kernel_wake(kernel, slot, ZZAPP_WAKE_READY);
 	}
+
 }
 
 static void handoff_api_lock(zzapp_kernel_t *kernel)
@@ -1145,6 +1158,17 @@ int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot)
 	return 0;
 }
 
+/* An API wait releases the lock before parking.  Reserve the next handoff
+ * only after its event wakes it, so the service thread cannot overtake the
+ * suspended API body or spuriously complete an unready wait. */
+static void register_api_waiter(zzapp_kernel_t *kernel, uint32_t slot)
+{
+	if (!kernel->api_waiting[slot]) {
+		kernel->api_waiting[slot] = 1U;
+		kernel->api_wait_sequence[slot] = ++kernel->api_wait_serial;
+	}
+}
+
 int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot)
 {
 	uint32_t irq_state;
@@ -1156,6 +1180,8 @@ int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot)
 	if (kernel->api_lock_owner == (int)slot)
 		release_api_lock(kernel);
 	rc = zzapp_kernel_block(kernel, slot);
+	if (rc == 0)
+		kernel->api_resume_waiting[slot] = 1U;
 	smp_local_irq_restore(irq_state);
 	return rc;
 }
@@ -1171,7 +1197,8 @@ int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t slot, uint64_t sleep
 	if (kernel->api_lock_owner == (int)slot)
 		release_api_lock(kernel);
 	deadline = zzapp_kernel_now(kernel) + sleep_ms;
-	(void)zzapp_kernel_sleep(kernel, slot, deadline);
+	if (zzapp_kernel_sleep(kernel, slot, deadline) == 0)
+		kernel->api_resume_waiting[slot] = 1U;
 	smp_local_irq_restore(irq_state);
 	return 0;
 }
@@ -1327,6 +1354,7 @@ void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot)
 		handoff_api_lock(kernel);
 	}
 	kernel->api_waiting[slot] = 0U;
+	kernel->api_resume_waiting[slot] = 0U;
 	kernel->api_wait_sequence[slot] = 0U;
 }
 

@@ -188,6 +188,7 @@ typedef struct {
 	uint32_t api_wait_serial;
 	uint32_t api_wait_sequence[ZZAPP_KERNEL_APP_SLOTS];
 	uint8_t api_waiting[ZZAPP_KERNEL_APP_SLOTS];
+	uint8_t api_resume_waiting[ZZAPP_KERNEL_APP_SLOTS];
 	int gl_owner;
 	uint32_t gl_generation;
 	uint32_t direct_audio_count;
