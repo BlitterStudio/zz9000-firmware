@@ -10,6 +10,7 @@
 #define ZZ9K_ARCHIVE_NO_MAIN 1
 #include "../tools/zz9k-archive.c"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -5128,7 +5129,7 @@ static int test_lha_file_collision_identity_and_modes(void)
   const char *rel = "archive_tool_alias.lha";
   const char *other = "other.txt";
   const char *path = "archive_tool_alias.lha";
-  char abs_path[1024];
+  char abs_path[PATH_MAX];
   uint8_t first[256];
   uint8_t second[256];
   uint8_t archive[512];
