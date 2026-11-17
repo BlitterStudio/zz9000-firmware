@@ -1,9 +1,9 @@
 /*
  * Present-path steady state: a flip must not remap the surface alias, must
- * clean exactly what the app wrote (the alias range of the presented
- * buffer, surface-sized) and the presented card range, and must not issue
- * any wider flush.  Drives the production display bind/flip/refresh code
- * through the recorded host flush hooks.
+ * clean exactly the presented card range (surface-sized), and must not issue
+ * any wider flush. The L1 data cache is PIPT, so this clean also covers app
+ * alias writes. Drives the production display bind/flip/refresh code through
+ * the recorded host flush hooks.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

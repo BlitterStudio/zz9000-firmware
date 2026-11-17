@@ -27,7 +27,6 @@ struct core1_console_state {
 	uint32_t drop_report_len;
 	uint32_t drop_report_pos;
 	uint32_t consumer_line_active;
-	uint32_t consumer_report_active;
 };
 
 static struct core1_console_state console __attribute__((aligned(64)));
@@ -225,16 +224,10 @@ static void begin_drop_report(void)
 	format_drop_report(count);
 }
 
-static void consumer_sent_byte(uint8_t c, int report)
+static void consumer_sent_byte(uint8_t c)
 {
 	uart_write_fifo(c);
-	if (c == '\n') {
-		console.consumer_line_active = 0u;
-		console.consumer_report_active = 0u;
-	} else {
-		console.consumer_line_active = 1u;
-		console.consumer_report_active = report ? 1u : 0u;
-	}
+	console.consumer_line_active = c == '\n' ? 0u : 1u;
 }
 
 static int drain_one(int synchronous)
@@ -258,7 +251,7 @@ static int drain_one(int synchronous)
 	}
 	if (console.drop_report_pos != console.drop_report_len) {
 		c = (uint8_t)console.drop_report[console.drop_report_pos++];
-		consumer_sent_byte(c, 1);
+		consumer_sent_byte(c);
 		irq_restore(irq_state);
 		return 1;
 	}
@@ -271,12 +264,12 @@ static int drain_one(int synchronous)
 			return 0;
 		}
 		c = (uint8_t)console.drop_report[console.drop_report_pos++];
-		consumer_sent_byte(c, 1);
+		consumer_sent_byte(c);
 		irq_restore(irq_state);
 		return 1;
 	}
 	c = console.ring[tail & (CORE1_CONSOLE_RING_BYTES - 1u)];
-	consumer_sent_byte(c, 0);
+	consumer_sent_byte(c);
 	__atomic_store_n(&console.tail, tail + 1u, __ATOMIC_RELEASE);
 	irq_restore(irq_state);
 	return 1;
@@ -298,7 +291,7 @@ static int drain_snapshot_one(uint32_t snapshot_head)
 	}
 	if (console.drop_report_pos != console.drop_report_len) {
 		c = (uint8_t)console.drop_report[console.drop_report_pos++];
-		consumer_sent_byte(c, 1);
+		consumer_sent_byte(c);
 		irq_restore(irq_state);
 		return 1;
 	}
@@ -308,7 +301,7 @@ static int drain_snapshot_one(uint32_t snapshot_head)
 		return 0;
 	}
 	c = console.ring[tail & (CORE1_CONSOLE_RING_BYTES - 1u)];
-	consumer_sent_byte(c, 0);
+	consumer_sent_byte(c);
 	__atomic_store_n(&console.tail, tail + 1u, __ATOMIC_RELEASE);
 	irq_restore(irq_state);
 	return 1;

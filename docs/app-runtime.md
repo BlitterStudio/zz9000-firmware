@@ -140,9 +140,10 @@ does not expose those probe numbers.
 Each slot has a private 16 KiB L1 table derived from a privileged kernel
 template and a fixed ASID. The private virtual window is
 `0xC0000000`–`0xDFFFFFFF`. Image, heap, and stack are mapped there as
-non-global 1 MiB sections. The app sees only its private pages plus grants for
-its launcher window, host-visible blocks, and owned display surfaces. The
-rest of DDR, firmware, devices, and other apps remain privileged-only.
+non-global sections, 64 KiB large pages, or 4 KiB small pages as appropriate.
+The app sees only its private pages plus grants for its launcher window,
+host-visible blocks, and owned display surfaces. The rest of DDR, firmware,
+devices, and other apps remain privileged-only.
 
 The app-facing API and GL tables retain their layout and `size` semantics, but
 their entries point to user-RX `svc; bx lr` veneers. On a user veneer call,
@@ -300,9 +301,8 @@ window is allocated when the launcher claims that slot.
 The firmware links with `-Wl,--wrap=Xil_SetTlbAttributes`. Every BSP call,
 including calls originating inside the BSP archive, enters
 `__wrap_Xil_SetTlbAttributes` in `zzapp_as.c`. The wrapper calls the real BSP
-function first, then copies the changed section descriptor into the address
-space template and every live app table through the normal break-before-make
-path. Without that wrap, a later BSP section-attribute change would leave
-core 1's template stale. Template-only changes do not invalidate core 0;
-changes to a table core 1 may walk perform the required cache, TLB, and branch
-predictor maintenance.
+function first, then copies changed descriptors into the address-space template
+and every live app table through the normal break-before-make path. Each
+affected section, large page, or small page receives the required cache,
+per-address TLB, and branch-predictor maintenance; core 0's unrelated
+translations remain valid.
