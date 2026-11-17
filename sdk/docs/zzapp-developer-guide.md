@@ -95,14 +95,18 @@ base to `zz_host_address`. The returned board-relative Zorro III offset names
 the same allocation for the 68k client. `zz_host_address` rejects arena and
 interior pointers.
 
-The block keeps the normal cacheable mapping of the host-visible heap;
-`ZZ_ALLOC_UNCACHED` is accepted and ignored. The runtime does not clean the
-data cache for these blocks, and the API has no call that does, so a 68k reader
-is not guaranteed to see the latest ARM stores. This is a known gap in the
-current runtime. The allocation is separate from the private arena and display
-surfaces. The total of these allocations is limited to 16 MiB per app; use
-`zz_mem_info` to inspect the used and allowed amounts, and release each block
-with `zz_free` when the 68k side no longer needs it.
+The block is Normal write-back shareable memory like the rest of DDR. Zorro
+III accesses go through the Zynq ACP, which is coherent with the ARM caches,
+so the app needs no ARM cache call; the API has none. The 68k program must
+read the block through a cache-inhibited mapping (for example with
+`mmu.library`) or flush its own caches before reading, because the ACP does
+not reach the 68k's caches. `ZZ_ALLOC_UNCACHED` is accepted and has no effect.
+The CPU can still reorder plain stores. Put a barrier
+(`__sync_synchronize()`) between filling the data and updating the flag or
+index the 68k polls. The allocation is separate from the private arena and
+display surfaces. The total of these allocations is limited to 16 MiB per
+app; use `zz_mem_info` to inspect the used and allowed amounts, and release
+each block with `zz_free` when the 68k side no longer needs it.
 
 ## Isolation
 
@@ -124,7 +128,7 @@ share the remaining time round-robin in 5 ms quanta. File and directory
 operations, console read and output backpressure, display open and flip,
 non-host audio open and close, and sleep park the calling slot. Completion
 wakes it; file and directory calls time out after 30 seconds with
-`ZZ_ETIMEDOUT`; stop marks a parked waiter CANCELLED and waiting service calls
+`ZZ_ETIMEDOUT`; stop wakes a parked waiter and waiting service calls
 return `ZZ_EIO`. `zz_input_poll` and `zz_display_vsync` do not park. Do not
 poll or spin for readiness. Use the blocking call, `zz_sleep_us`, or
 `zz_yield`.
@@ -236,7 +240,7 @@ the app uses.
 
 ## Running on a PC
 
-The runner implements the API 0.3 table with host semantics, including plain
+The runner implements the API 0.4 table with host semantics, including plain
 host-memory dynamic heap growth. Decompress, image and audio decode and GL
 return `ZZ_ENOSYS` there. Timing, memory limits and the watchdog are not the
 card's, so check performance and limits on hardware. Options and the
@@ -308,8 +312,30 @@ completion, or fault). Before `ZZ9KAppClose`, drain the notify port and call
 `ZZ9KAppGetMessage` until it returns `ZZ9K_STATUS_BUSY`. The message signal
 is also available without a port.
 
-The app side is `zz_msg_poll` and `zz_msg_send`. A full app-to-host ring
-returns `ZZ_EBUSY`. Poll does not block.
+The app side is `zz_msg_poll`, `zz_msg_send`, and `zz_msg_wait`. A full
+app-to-host ring returns `ZZ_EBUSY`. Poll does not block. `zz_msg_wait`
+parks the app until the ring holds a message or a timeout in microseconds
+passes, so a server loop does not spin on `zz_yield`:
+
+```c
+while (!zz_should_stop()) {
+    int rc = zz_msg_wait(500000u);
+
+    if (rc == ZZ_ENOSYS) {      /* firmware older than API 0.4 */
+        zz_yield();
+        rc = ZZ_OK;
+    }
+    if (rc == ZZ_ETIMEDOUT)
+        continue;               /* idle work, then wait again */
+    if (rc != ZZ_OK)
+        break;                  /* stop, or a corrupt ring */
+    while (zz_msg_poll(message) == 1)
+        handle(message);
+}
+```
+
+`zz_msg_wait` returns `ZZ_OK` without taking the message, so drain with
+`zz_msg_poll`. A parked app is not counted by the 30 second stall watchdog.
 
 ## Debugging
 
@@ -414,11 +440,13 @@ table.
 ## Versioning
 
 The table is append-only. A new call is a new field at the end and a minor
-bump. `ZZAPP_API_MINOR` is 3. Minor 0 published the table through
+bump. `ZZAPP_API_MINOR` is 4. Minor 0 published the table through
 `gl_unbind`. Minor 1 appended the async flip, refresh, palette, mailbox
 counter, and `gl_bind_flags` slots. Minor 2 appended host-visible memory,
-file maps, card services, the console, and messages. Minor 3 appends dynamic
-heap growth, shrink, and accounting.
+file maps, card services, the console, and messages. Minor 3 appended dynamic
+heap growth, shrink, and accounting. Minor 4 appends `msg_wait`. No note
+macro requires minor 4, so an app that uses `zz_msg_wait` must handle
+`ZZ_ENOSYS` on older firmware.
 
 Gate every appended slot with `ZZ_API_COVERS` and a non-NULL function
 pointer. `libzzapp` already does this and returns `ZZ_ENOSYS` when the

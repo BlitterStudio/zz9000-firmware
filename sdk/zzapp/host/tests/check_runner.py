@@ -243,6 +243,56 @@ def check_pixelsstop(exe):
         proc.wait()
 
 
+def check_msgwaitidle(exe):
+    if os.name != "posix":
+        return
+    import resource
+    import time
+
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    start = time.monotonic()
+    proc = run(exe, ["--headless", "--", "msgwaitidle"])
+    wall = time.monotonic() - start
+    expect_ok(proc)
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)
+    if wall < 1.4:
+        raise SystemExit(f"idle wait ended after {wall:.2f} s")
+    if cpu > 0.3 * wall:
+        raise SystemExit(f"idle wait burned {cpu:.2f} s CPU in {wall:.2f} s")
+
+
+def check_msgwaitstop(exe):
+    if os.name != "posix":
+        return
+    import signal
+    import time
+
+    merged = os.environ.copy()
+    merged["SDL_VIDEODRIVER"] = "dummy"
+    merged["SDL_AUDIODRIVER"] = "dummy"
+    proc = subprocess.Popen(
+        [exe, "--headless", "--", "msgwaitstop"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=merged,
+    )
+    try:
+        time.sleep(0.5)  # let the app park in zz_msg_wait with 30 s to go
+        proc.send_signal(signal.SIGTERM)
+        try:
+            rc = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise SystemExit("zz_msg_wait not interrupted by SIGTERM")
+        if rc != 0:
+            raise SystemExit(f"expected ZZ_EIO and exit 0, got {rc}")
+    finally:
+        proc.stdin.close()
+        proc.kill()
+        proc.wait()
+
+
 def check_pixels(exe):
     want = checkerboard()
     with tempfile.TemporaryDirectory() as root:
@@ -320,6 +370,8 @@ def check_contract(exe):
         expect_ok(proc)
         proc = run(exe, ["--", "services"])
         expect_ok(proc)
+        proc = run(exe, ["--headless", "--", "msgwait"])
+        expect_ok(proc)
         script = os.path.join(root, "input.txt")
         with open(script, "w", encoding="ascii") as fh:
             fh.write("key down 0x22 8\nbreak 4\n")
@@ -346,6 +398,8 @@ CHECKS = {
     "mailbox": check_mailbox,
     "constop": check_constop,
     "pixelsstop": check_pixelsstop,
+    "msgwaitstop": check_msgwaitstop,
+    "msgwaitidle": check_msgwaitidle,
 }
 
 

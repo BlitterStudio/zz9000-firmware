@@ -423,6 +423,13 @@ int zz_msg_poll(void *msg)
     return ZZ_ENOSYS;
 }
 
+int zz_msg_wait(uint32_t timeout_us)
+{
+    if (ZZ_API_COVERS(zzapp_api_ptr, msg_wait) && zzapp_api_ptr->msg_wait)
+        return zzapp_api_ptr->msg_wait(timeout_us);
+    return ZZ_ENOSYS;
+}
+
 const zzapp_gl *zz_gl_bind_flags(uint32_t surface_id, uint32_t flags)
 {
     const zzapp_gl *gl;

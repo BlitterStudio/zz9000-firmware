@@ -186,6 +186,7 @@ WEAK int zzapp_svc_console_write(const void *p,uint32_t n,uint32_t *o) { (void)p
 WEAK int zzapp_svc_console_read(void *p,uint32_t n,uint32_t *o) { (void)p;(void)n;if(o)*o=0;return ZZ_ENOSYS; }
 WEAK int zzapp_svc_msg_send(const void *p) { (void)p; return ZZ_ENOSYS; }
 WEAK int zzapp_svc_msg_poll(void *p) { (void)p; return ZZ_ENOSYS; }
+WEAK int zzapp_svc_msg_wait(uint32_t timeout_us) { (void)timeout_us; return ZZ_ENOSYS; }
 struct zzapp_minigl_binding {
     const zzm_minigl_ops_v1_t *ops;
     void *context;
@@ -968,6 +969,7 @@ static int api_console_write(const void *p,uint32_t n,uint32_t *out){zzapp_api_e
 static int api_console_read(void *p,uint32_t n,uint32_t *out){zzapp_api_enter();int r=zzapp_svc_console_read(p,n,out);zzapp_api_leave();return r;}
 static int api_msg_send(const void *p){zzapp_api_enter();int r=zzapp_svc_msg_send(p);zzapp_api_leave();return r;}
 static int api_msg_poll(void *p){zzapp_api_enter();int r=zzapp_svc_msg_poll(p);zzapp_api_leave();return r;}
+static int api_msg_wait(uint32_t timeout_us){zzapp_api_enter();int r=zzapp_svc_msg_wait(timeout_us);zzapp_api_leave();return r;}
 static const zzapp_gl *api_gl_bind(uint32_t id){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
 static const zzapp_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind_flags(id,flags,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
 #if ZZAPP_PERF_COUNTERS
@@ -1022,6 +1024,8 @@ static const zzapp_api g_api = {
     .msg_send=api_msg_send,.msg_poll=api_msg_poll,
     /* API 0.3: the private heap grows and shrinks in frames. */
     .heap_grow=api_heap_grow,.heap_shrink=api_heap_shrink,
-    .heap_info=api_heap_info
+    .heap_info=api_heap_info,
+    /* API 0.4: park until a host-to-app message is ready. */
+    .msg_wait=api_msg_wait
 };
 const zzapp_api *zzapp_api_table(void) { return &g_api; }

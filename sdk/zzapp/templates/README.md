@@ -90,8 +90,10 @@ or a stack other than 0 or 64 KiB–1 MiB aligned to 8.
 - `tone.c`: opens the normal stereo S16LE `zzapp_audio` ring and produces a
   440 Hz square wave. It is route-agnostic: ZZRun's default card-fabric route
   and its `AUDIO=AHI` route use the same app binary.
-- `echo.c`: echoes each fixed 32-byte client message using `zz_msg_poll` and
-  `zz_msg_send`; use it with the `zz9k.library` app-client smoke tool.
+- `echo.c`: echoes each fixed 32-byte client message. It parks in
+  `zz_msg_wait` between messages, falls back to `zz_msg_poll` with `zz_yield`
+  on firmware older than API 0.4, and replies with `zz_msg_send`; use it with
+  the `zz9k.library` app-client smoke tool.
 - `console.c`: Shell console example. Prints its arguments to stdout and a
   line to stderr, echoes each stdin line in upper case, reports Ctrl-D/E/F
   break events, and exits at EOF (Ctrl-\ in a Shell window).

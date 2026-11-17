@@ -135,6 +135,12 @@ non-coherent control pages, which use the existing second-level 4 KiB
 non-cacheable mappings. The RTL-pinned audio belt is non-cacheable; Ethernet
 descriptor/backlog storage uses its required strongly ordered mapping.
 
+Zorro III accesses use the Zynq ACP, which is coherent with the ARM caches
+for shareable write-back memory. That is why ordinary host-visible
+allocations, including `ZZ_ALLOC_HOST_VISIBLE` blocks, need no ARM cache
+maintenance for the 68k. The 68k's own caches are not covered; see
+[app-runtime.md](app-runtime.md).
+
 The PL310 is shared by both Cortex-A9 cores. Its r3p3 TRM “Background
 operations” rule forbids a maintenance-register write while a way operation is
 active. Firmware cache maintenance must therefore use `l2_maint_*`; the wrapper

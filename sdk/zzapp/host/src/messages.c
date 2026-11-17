@@ -200,6 +200,31 @@ static int api_msg_poll(void *msg)
     return 1;
 }
 
+/* Ready, then a zero timeout, then stop, then the deadline: the same order
+ * as the card, where a message already queued always wins. */
+static int api_msg_wait(uint32_t timeout_us)
+{
+    uint64_t deadline = host_time_us() + timeout_us;
+
+    for (;;) {
+        uint64_t now;
+
+        if (h2a_head != h2a_tail)
+            return ZZ_OK;
+        if (timeout_us == 0u)
+            return ZZ_ETIMEDOUT;
+        if (host_stop_requested())
+            return ZZ_EIO;
+        now = host_time_us();
+        if (now >= deadline)
+            return ZZ_ETIMEDOUT;
+        host_pump();
+        if (h2a_head != h2a_tail)
+            continue;
+        host_idle_slice();
+    }
+}
+
 void host_messages_pump(void)
 {
     while (script_mode && script_injected < script_count &&
@@ -251,4 +276,5 @@ void host_messages_bind(zzapp_api *api)
 {
     api->msg_send = api_msg_send;
     api->msg_poll = api_msg_poll;
+    api->msg_wait = api_msg_wait;
 }

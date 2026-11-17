@@ -109,6 +109,10 @@ int zzapp_svc_console_write(const void *buf, uint32_t len, uint32_t *out_n);
 int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n);
 int zzapp_svc_msg_send(const void *msg);
 int zzapp_svc_msg_poll(void *msg);
+/* Parks until the host-to-app ring holds a message (ZZ_OK), the timeout in
+ * microseconds passes (ZZ_ETIMEDOUT), or the app is stopped (ZZ_EIO). Zero
+ * only tests the ring. The message stays queued for zzapp_svc_msg_poll. */
+int zzapp_svc_msg_wait(uint32_t timeout_us);
 
 /* Slice C. card_* are ARM physical. flip publishes flip_gen and does not wait. */
 int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,

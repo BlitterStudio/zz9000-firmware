@@ -173,7 +173,8 @@ enum zzapp_wait_kind {
 	ZZAPP_WAIT_CONSOLE_READ,
 	ZZAPP_WAIT_DISPLAY_OPEN,
 	ZZAPP_WAIT_FLIP,
-	ZZAPP_WAIT_AUDIO
+	ZZAPP_WAIT_AUDIO,
+	ZZAPP_WAIT_EVENT
 };
 
 struct zzapp_service_slot {
@@ -2355,6 +2356,56 @@ int zzapp_svc_msg_poll(void *msg)
 	return 1;
 }
 
+/*
+ * A queued message ends the wait before anything else, so a stop never
+ * drops one. The wait is level-triggered: it re-reads the ring after every
+ * resume, and the service pass wakes any parked EVENT waiter whose ring is
+ * not empty, so a push between the check and the park cannot be missed.
+ */
+int zzapp_svc_msg_wait(uint32_t timeout_us)
+{
+	uint64_t deadline = 0U;
+	int resume_status = ZZ_OK;
+
+	if (!have_window())
+		return ZZ_EIO;
+	if (timeout_us != 0U)
+		deadline = now_us() + timeout_us;
+	for (;;) {
+		uint32_t head = win_get32(ZZAPP_MSG_H2A_OFF);
+		uint32_t tail = win_get32(ZZAPP_MSG_H2A_OFF + 4U);
+
+		if (head - tail > ZZAPP_MSG_CAP) {
+			wait_end();
+			return ZZ_EIO;
+		}
+		if (head != tail) {
+			wait_end();
+			return ZZ_OK;
+		}
+		/* The ring is read before the wake reason is honoured, so a
+		 * message that arrived while the wake said timeout or cancel
+		 * is still returned. */
+		if (resume_status != ZZ_OK) {
+			wait_end();
+			return resume_status;
+		}
+		if (timeout_us == 0U)
+			return ZZ_ETIMEDOUT;
+		if (zzapp_services_stop_requested()) {
+			wait_end();
+			return ZZ_EIO;
+		}
+		if (now_us() >= deadline) {
+			wait_end();
+			return ZZ_ETIMEDOUT;
+		}
+		wait_begin(ZZAPP_WAIT_EVENT, tail, deadline);
+		yield_wait_once();
+		resume_status = wait_status();
+	}
+}
+
 static int span_ok(uint32_t addr, uint32_t bytes)
 {
 	uint64_t end;
@@ -3573,6 +3624,17 @@ void zzapp_services_reclaim_halted_audio(void)
 	select_slot(selected);
 }
 
+/* The Amiga rings no doorbell, so a parked EVENT waiter is a level test of
+ * the host-to-app ring on every service pass; a push that landed before the
+ * app finished parking is found here. APP_STOP only latches the stop word,
+ * so a stop wakes the waiter too, and it then reports ZZ_EIO. */
+static int event_wait_ready(void)
+{
+	return win_get32(ZZAPP_MSG_H2A_OFF) !=
+		       win_get32(ZZAPP_MSG_H2A_OFF + 4U) ||
+	       zzapp_services_stop_requested();
+}
+
 static void wake_ready_waits(void)
 {
 	uint32_t slot;
@@ -3585,6 +3647,14 @@ static void wake_ready_waits(void)
 		select_slot(slot);
 		if (state->wait_kind == ZZAPP_WAIT_NONE)
 			continue;
+		/* An arrived message or a stop beats the deadline: the waiter
+		 * reports a message that landed while it was timing out. */
+		if (state->wait_kind == ZZAPP_WAIT_EVENT &&
+		    event_wait_ready()) {
+			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), slot,
+						 ZZAPP_WAKE_READY);
+			continue;
+		}
 		if (state->wait_deadline != 0U && now_us() >= state->wait_deadline) {
 			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), slot,
 						 ZZAPP_WAKE_TIMEOUT);
@@ -3614,6 +3684,8 @@ static void wake_ready_waits(void)
 			break;
 		case ZZAPP_WAIT_AUDIO:
 			ready = state->audio_request == AUDIO_REQUEST_NONE;
+			break;
+		case ZZAPP_WAIT_EVENT:
 			break;
 		default:
 			break;
@@ -4437,6 +4509,9 @@ static void put_list(uint8_t *reply, uint16_t *reply_len, uint32_t slot)
 			break;
 		case ZZAPP_WAIT_AUDIO:
 			block = ZZAPP_BLOCK_AUDIO;
+			break;
+		case ZZAPP_WAIT_EVENT:
+			block = ZZAPP_BLOCK_EVENT;
 			break;
 		default:
 			break;

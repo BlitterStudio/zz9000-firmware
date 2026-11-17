@@ -26,3 +26,11 @@ void host_sleep_until(uint64_t deadline)
             host_pump();
     }
 }
+
+/* One idle slice for a wait that has nothing to do but poll: the caller pumps,
+ * rechecks its condition, deadline and stop, then comes back. host_sleep_until
+ * busy-pumps the last 10 ms, which would burn a CPU on an empty wait. */
+void host_idle_slice(void)
+{
+    SDL_Delay(1);
+}
