@@ -121,22 +121,23 @@ void ZZ9KAppClose(ZZ9KAppHandle *handle);
 `ZZ9KAppStart` passes `argv` to the app unchanged. Put the program name in
 `argv[0]`, as ZZRun does, so the app sees a standard C argument vector.
 
-`Open` checks for Zorro III, app-runtime ABI major 0, and an Amiga
-`mmu.library` mapping that can keep the shared window cache-inhibited for the
-handle lifetime. When the extended `QUERY` reply advertises
-`ZZ9K_APP_CAP_SLOTS`, the library can open up to `ZZ9K_APP_SLOT_COUNT` (four)
-handles. Each one claims its own window and generation, so a stale generation
-or terminal state affects only that handle; a new claim detaches a stale
-handle while leaving it safe to close. A claimed slot that does not begin
-loading expires after two seconds. If `Open` cannot finish setup after a
-successful claim, it cancels that claim. With firmware that lacks that cap,
-the library retains API 0.2 behaviour: one handle claims legacy slot 0 and a
-second `Open` returns `ZZ9K_STATUS_BUSY`. Legacy firmware assigns that
-handle's generation at `LOAD_BEGIN`, so `Open` also succeeds while the
-unloaded window reports generation zero. `LoadFile` streams the ELF through
-the handle's runtime staging window; `LoadMemory` accepts at most 16 MiB.
-`Start` copies no more than 16 argv strings of 127 bytes each. `Status`
-returns the fault/exit snapshot for its handle.
+A `ZZ9KAppHandle` belongs to the task that calls `ZZ9KAppOpen`. Do not pass it
+to another task: only its owner can operate on it or close it. `Open` checks
+for Zorro III, app-runtime ABI major 0, and an Amiga `mmu.library` mapping
+that can keep the shared window cache-inhibited for the handle lifetime. When
+the extended `QUERY` reply advertises `ZZ9K_APP_CAP_SLOTS`, the library can
+open up to `ZZ9K_APP_SLOT_COUNT` (four) handles. Each one claims its own
+window and generation, so a stale generation or terminal state affects only
+that handle; a new claim detaches a stale handle while leaving it safe to
+close. A claimed slot that does not begin loading expires after two seconds.
+If `Open` cannot finish setup after a successful claim, it cancels that claim.
+With firmware that lacks that cap, the library retains API 0.2 behaviour: one
+handle claims legacy slot 0 and a second `Open` returns `ZZ9K_STATUS_BUSY`.
+Legacy firmware assigns that handle's generation at `LOAD_BEGIN`, so `Open`
+also succeeds while the unloaded window reports generation zero. `LoadFile`
+streams the ELF through the handle's runtime staging window; `LoadMemory`
+accepts at most 16 MiB. `Start` copies no more than 16 argv strings of 127
+bytes each. `Status` returns the fault/exit snapshot for its handle.
 
 `ZZ9KAppMessage` is exactly 32 opaque bytes. Send returns `ZZ9K_STATUS_BUSY`
 when the host-to-app ring is full; get returns it when the app-to-host ring is
@@ -144,8 +145,10 @@ empty. The library's real Amiga VBlank interrupt server renews every active
 handle's runtime lease independently of the caller's task and a concurrent
 load. It signals `ZZ9KAppMessageSignal(handle)` for an app message, exit, or
 fault. When a `notify_port` was supplied, it posts one coalesced
-`ZZ9KAppEvent`: dequeue that event before draining messages with
-`ZZ9KAppGetMessage`, and drain the port before `Close`.
+`ZZ9KAppEvent`. Dequeue that event before draining messages with
+`ZZ9KAppGetMessage`; the library posts the next event only after the previous
+one has left the port. Before `Close`, drain the port, then call
+`ZZ9KAppGetMessage` until it returns `ZZ9K_STATUS_BUSY`.
 
 Always call `ZZ9KAppClose`: it stops only the generation loaded by that handle
 and releases the owner. Closing the owning task's final `zz9k.library`
@@ -973,7 +976,7 @@ the video clock, so a client can catch up without holding audio behind video.
 
 The card accepts any frame size up to a safety cap: longest side &le; 1920
 and pixel count &le; 1920&times;1088 (2,088,960), in either orientation
-(landscape or portrait like phone captures) and with odd dimensions allowed.
+(horizontal or vertical like phone captures) and with odd dimensions allowed.
 Streams exceeding this cap fail closed at `ZZ9K_OP_MEDIA_SESSION_BEGIN` with
 `ZZ9K_STATUS_UNSUPPORTED`.
 
@@ -1046,7 +1049,7 @@ shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
 
 #### Native FLAC sessions (`ZZ9K_AUDIO_CODEC_FLAC`, gated by
 `ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM` and `ZZ9K_CAP_AUDIO_FLAC`; firmware
-that does not advertise them refuses FLAC). Feed the whole native file from
+that does not advertise them refuses FLAC). Feed the complete native file from
 byte 0 (`fLaC`);
 firmware skips non-STREAMINFO metadata itself. `output_format` must be
 `S16BE` (sources of at most 16 bits), `S16LE` (the little-endian form of
@@ -1078,12 +1081,11 @@ quanta because 20 ms is not an integer frame count.
 
 #### Ogg Vorbis sessions (`ZZ9K_AUDIO_CODEC_VORBIS`, gated by
 `ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM` and `ZZ9K_CAP_AUDIO_VORBIS`;
-firmware that does not advertise them refuses Vorbis). Feed the whole
-`.ogg`/`.oga` file
-from byte 0 (the identification BOS page). `output_format` must be `S16BE`
-or `S16LE` (Tremor's fixed-point output narrowed to 16 bits, stored in the
-requested byte order); 32-bit formats answer `ZZ9K_STATUS_UNSUPPORTED` at
-Begin, as does firmware running without its
+firmware that does not advertise them refuses Vorbis). Feed the complete
+`.ogg`/`.oga` file from byte 0 (the identification BOS page). `output_format`
+must be `S16BE` or `S16LE` (Tremor's fixed-point output narrowed to 16 bits,
+stored in the requested byte order); 32-bit formats answer
+`ZZ9K_STATUS_UNSUPPORTED` at Begin, as does firmware running without its
 second core (Vorbis decodes only on core 1). Samples are interleaved at the
 native rate and channels; `sample_rate`/`channels` stay 0 until the
 identification header is parsed. The Feed that parses it returns
@@ -1193,11 +1195,10 @@ submit the reserved word.
 `ZZ9K_OP_AUDIO_SCENE_SAVE` runs the temp-then-replace SD sequence as a
 firmware state machine stepped by the service loop; at most one FatFs
 call per loop pass; so normal SD traffic interleaves with Zorro service
-instead of holding the mailbox dispatch across the whole save. The
-firmware's SDPS command/read/write polls also carry a two-second
-deadline; a controller that never signals completion returns an I/O
-error instead of spinning core 0 forever (the historical freeze locked
-up the whole Amiga). The reply is therefore immediate:
+instead of holding the mailbox dispatch during the save. The firmware's
+SDPS command/read/write polls also carry a two-second deadline; a controller
+that never signals completion returns an I/O error instead of spinning core 0
+forever (the historical freeze locked up the Amiga). The reply is immediate:
 `ZZ9K_AUDIO_SCENE_SAVE_QUEUED` (3) when the machine started or queued
 behind an active DSP commit, `ZZ9K_AUDIO_SCENE_SAVE_BUSY` (4) when a
 previous save is still running (the new request is refused; retry
@@ -1464,7 +1465,7 @@ normalized with the same slash and current-directory component rules as archive
 member names before list/extract paths use them. Files that look like
 `.tar.gz`/`.tgz` use the same gzip feed path plus a streaming tar parser:
 decoded tar blocks are consumed as they arrive, so `l`, `t`, and `x` preserve
-tar semantics without materializing the whole decoded tar image in memory.
+tar semantics without materializing the complete decoded tar image in memory.
 Firmware without explicit `gzip-feed` still falls back to the older full-read
 path for compatibility. The tar parser normalizes current-directory path
 components such as leading `./` and embedded `/./`, collapses duplicate slash
@@ -1883,6 +1884,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 36 | `ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY` | Synchronous completion waits poll for up to 250 microseconds before their existing event or DOS-tick wait. A synchronous call also routes foreign completions to the resident pending-request registry; the static host client requires this revision. |
 | 37 | `ZZ9K_LIBRARY_MIN_REVISION_SYNC_CONCURRENT` | A synchronous caller holds the transport lock only to submit, drain, route, or cancel. Its pending record has an owner signal, so another drainer wakes it after routing its completion. |
 | 38 | `ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM` | Per-opener client ids and `ZZ9K_OP_CLIENT_RELEASE`; the final `CloseLibrary()` resubmits the release while the firmware answers `BUSY` and reclaims that opener's owned SDK resources after worker quiescence |
+| 39 | `ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE` | ARM-app `LOAD_END` waits use lifecycle progress when firmware advertises `ZZ9K_APP_CAP_LOAD_PROGRESS`; older firmware retains a 32-second lease-covering wait. |
 
 ### Async submission and wait helpers
 

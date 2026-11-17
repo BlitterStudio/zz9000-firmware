@@ -124,8 +124,8 @@ To confirm the board runs firmware capable of Wire Protocol v9 without triggerin
    control/status/slot/reply offsets and capacities, the required
    alignment, cache rules, the BLIT/CAPTURE VRAM limit, and an allocation
    generation. The library must reject an absent, invalid, or
-   newer-version descriptor and fall back — it must never compute
-   addresses by arithmetic on a fixed base. The live control block may
+   newer-version descriptor and fall back. It must never compute addresses by
+   arithmetic on a fixed base. The live control block may
    narrow the descriptor geometry (a constrained session) but never
    widen it.
 5. **MiniGL Wire-v9 Capability Bits**:
@@ -168,9 +168,9 @@ Card DDR is mapped to the Amiga Zorro bus through an address adjustment:
 
 
 ### 3.2 Transport Window Layout (2.9.0)
-On Zorro III the transport is **one dynamic allocation** from the firmware
+On Zorro III the transport is one dynamic allocation from the firmware
 host-visible heap (`surface_allocator_alloc_range`, 0x91000 bytes, 4 KiB
-aligned), constrained to `0x08110000..0x081C0000` — the free gap between
+aligned). It is constrained to `0x08110000..0x081C0000`, the free gap between
 the SDK mailbox and direct-ring reservations inside the 1 MiB MMU section
 the mailbox already maps Normal non-cacheable. The window's exact address
 is published in the transport descriptor (§2.3); nothing computes it from

@@ -16,15 +16,18 @@ Research GmbH. SDK issues and fork-specific discussion belong here.
 | `include/zz9k/` | Public SDK v2 ABI and helper headers |
 | `host/` | Mailbox host implementation and request/reply headers |
 | `amiga/` | `zz9k.library`, `mpega.library`, DataTypes, AmiSSL provider code, Amiga headers, and icons |
-| `tools/` | AmigaOS command-line tools and ZZPlay sources |
+| `tools/` | AmigaOS command-line tools, including the ARM-app client smoke tool, and ZZPlay sources |
 | `examples/` | AmigaOS library, JPEG streaming, typed decode, and crypto examples |
 | `docs/` | SDK reference, including the ARM app guide and API reference |
 | `scripts/` | m68k build, package, descriptor-generation, and icon-generation scripts |
 | `tests/` | Host-side tests and test fixtures |
 
 ARM apps on core 1 use [the developer guide](docs/zzapp-developer-guide.md)
-and [the API reference](docs/zzapp-api.md). Those two files are MIT. The rest
-of this tree stays GPL-3.0-or-later unless a file says otherwise.
+and [the API reference](docs/zzapp-api.md). The Amiga package includes
+`zz9k-app-echo-test`, which loads an `echo.elf` built from the ARM app
+template and verifies its 32-byte message round trip. The
+[License](#license) section lists which files are MIT and which are
+GPL-3.0-or-later.
 
 ## Build an AmigaOS 3 package
 
@@ -85,14 +88,15 @@ The generated `build/package/amigaos3` tree contains:
 
 - `Libs/zz9k.library` and `Libs/mpega.library`
 - `C/` command-line tools, including `zz9k-services`, `zz9k-jpeg`,
-  `zz9k-png`, `zz9k-view`, and the diagnostics
+  `zz9k-png`, `zz9k-view`, `zz9k-app-echo-test`, and the diagnostics
 - `C/ZZPlay`, the media player, with its service modules in
   `C/Providers/` (`radio.zzprov` for internet radio, `plex.zzprov` for Plex
   Media Server)
 - `Classes/DataTypes/zz9k-picture.datatype` and
   `Classes/DataTypes/zz9k-sound.datatype`
 - DataType descriptors in `Storage/DataTypes/`
-- Public headers and FD files in `Developer/`
+- Public headers and FD files in `Developer/`, with `LICENSE-MIT.txt` and
+  `LICENSE-GPL-3.0.txt`
 - AmigaGuide manuals in `Docs/` and source examples in `Examples/`
 - `MANIFEST.sha256`, containing a SHA-256 digest for every other packaged file
 

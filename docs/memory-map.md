@@ -66,12 +66,13 @@ overlap P96 VRAM. The former `0x005D0000` range remains the unchanged legacy
 Zorro II fallback; the firmware publishes the active address in allocation
 replies and `DIAG_MEMORY`.
 
-The linker gives image/static and heap their own memory regions, so neither
+The linker-managed image/static and heap regions cannot grow across the task
+queue, core-1 stack, or first card-pool byte.
 
 ### MiniGL wire-v9 transport window
 
-MiniGL's host-visible transport (control/status page, two 256 KiB packet
-slots, 64 KiB reply buffer — 0x91000 bytes) is **one dynamic allocation**
+MiniGL's host-visible transport has a control/status page, two 256 KiB packet
+slots, and a 64 KiB reply buffer (0x91000 bytes). It is one dynamic allocation
 from the host-visible heap, taken by `minigl_transport_init()` at boot and
 after every Amiga reset. There is deliberately no fixed MiniGL DDR
 carve-out. The allocation is constrained (`surface_allocator_alloc_range`)
@@ -80,19 +81,18 @@ direct-ring reservations inside the 1 MiB MMU section the mailbox already
 maps Normal non-cacheable: both CPUs poll the control block, so the
 window must not be cacheable, and confining it to that existing section
 avoids new MMU work. The gap (704 KiB) exceeds the window with the
-partition checks in `memorymap.h` holding. On allocation failure — or on
-Zorro II, whose host window cannot hold even a single-slot window — the
+partition checks in `memorymap.h` holding. On allocation failure, or on
+Zorro II where the host window cannot hold even a single-slot window, the
 service reports unavailable and the Amiga library falls back exactly as
 on firmware built without it.
 
 The Amiga side discovers the window through a versioned big-endian
 transport descriptor ('MGTD') published at offset 0x8000 inside the
 64 KiB SDK mailbox reservation (descriptor plus both 64-entry rings end
-at 0x2080, and no mailbox ABI user — firmware or host library — reads or
+at 0x2080, and no mailbox ABI user, firmware or host library, reads or
 writes beyond them). The library locates the mailbox via
 `REG_ZZ_SDK_MAILBOX_HI/LO`, validates the descriptor, and uses its
 addresses verbatim.
-can grow across the task queue, core-1 stack, or first card-pool byte.
 
 ## RTL-pinned top belt
 

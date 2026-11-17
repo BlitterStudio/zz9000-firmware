@@ -1,12 +1,12 @@
 /*
- * PIE ELF loader for one trusted ARM app.
+ * PIE ELF loader for up to four user-mode ARM apps.
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Relocations are SHT_RELA / R_ARM_RELATIVE only. A raw Arm ld image still
- * has SHT_REL; that is rejected. The place is overwritten with
- * r_addend + load_bias. It is not added to the old word.
+ * Relocations are SHT_REL or SHT_RELA, R_ARM_RELATIVE only. SHT_REL takes its
+ * addend from the relocation target; SHT_RELA provides it in the entry. The
+ * relocated word is addend + load_bias.
  */
 #include <stdint.h>
 #include <stdlib.h>

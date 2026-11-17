@@ -29,13 +29,14 @@ typedef struct ZZ9KAppEvent {
   ZZ9KAppStatusInfo status;
 } ZZ9KAppEvent;
 
-/* When the runtime advertises ZZ9K_APP_CAP_SLOTS, up to
- * ZZ9K_APP_SLOT_COUNT handles may be open at once. Older firmware accepts
- * one handle, preserving the API 0.2 behaviour. `notify_port` receives at
- * most one outstanding ZZ9KAppEvent. Dequeue it before closing the handle;
- * then call ZZ9KAppGetMessage until it reports ZZ9K_STATUS_BUSY. The message
- * signal is also available independently for tasks that do not use a message
- * port. */
+/* A handle belongs to the task that calls ZZ9KAppOpen; do not pass it to
+ * another task. Only its owner can operate on or close it. When the runtime
+ * advertises ZZ9K_APP_CAP_SLOTS, up to ZZ9K_APP_SLOT_COUNT handles may be
+ * open at once. Older firmware accepts one handle, preserving the API 0.2
+ * behaviour. `notify_port` receives at most one outstanding ZZ9KAppEvent.
+ * Before closing the handle, drain that port, then call ZZ9KAppGetMessage
+ * until it reports ZZ9K_STATUS_BUSY. The message signal is also available
+ * independently for tasks that do not use a message port. */
 int ZZ9KAppOpen(ZZ9KAppHandle **handle, struct MsgPort *notify_port);
 int ZZ9KAppLoadFile(ZZ9KAppHandle *handle, const char *path);
 int ZZ9KAppLoadMemory(ZZ9KAppHandle *handle, const void *data,

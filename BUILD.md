@@ -289,6 +289,7 @@ Run the host checks for the area you changed before building the BOOT image.
 | JPEG, PNG, or WebP decoder | `make -C test/image test` |
 | FLAC decoder | `make -C test/flac test` |
 | Ogg Vorbis decoder | `make -C test/vorbis test` |
+| ARM app runtime | `make -C test/zzapp test` |
 
 The image, FLAC, and Vorbis suites also provide a `sanitize` target:
 
