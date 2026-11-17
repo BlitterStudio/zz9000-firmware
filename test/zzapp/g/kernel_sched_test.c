@@ -1100,6 +1100,81 @@ static void test_performance_counters(void)
 	overflow.histogram[31] = overflow.samples - 1u;
 	CHECK(zzapp_kernel_perf_test_percentile(&overflow, 99u) == (1U << 31));
 }
+static void test_tlb_samples_survive_system_dispatch(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+	zzapp_kernel_perf_snapshot_t snapshot;
+	unsigned i;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	frame.spsr = ZZAPP_KERNEL_APP_CPSR;
+	clock_ms = 0U;
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0U);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	for (i = 0U; i < 10U; i++) {
+		zzapp_kernel_service_due(&kernel);
+		clock_ms++;
+		next = zzapp_kernel_switch_frame(&kernel, next,
+						 ZZAPP_KERNEL_DISPATCH_TICK, 4U);
+		CHECK(zzapp_kernel_current_thread() == -1);
+		clock_ms++;
+		next = zzapp_kernel_switch_frame(&kernel, next,
+						 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0U);
+		CHECK(zzapp_kernel_current_thread() == 0);
+	}
+	zzapp_kernel_perf_snapshot(&kernel, 0U, &snapshot);
+	CHECK(snapshot.tlb_instruction_refills == 9U);
+	CHECK(snapshot.tlb_data_refills == 9U);
+}
+static void test_tlb_window_expiry_drops_system_baseline(void)
+{
+	zzapp_kernel_t kernel;
+	zzapp_arm_frame_t frame = { 0 };
+	zzapp_arm_frame_t *next;
+	zzapp_kernel_perf_snapshot_t snapshot;
+
+	zzapp_kernel_init(&kernel);
+	CHECK(zzapp_kernel_prepare_app(&kernel, 0, 0x1000u, 1u, 0u, 0u,
+				       0x8000u) == 0);
+	make_runnable(&kernel, 0);
+	frame.spsr = ZZAPP_KERNEL_APP_CPSR;
+	clock_ms = 0U;
+	zzapp_kernel_set_current_thread(-1);
+	next = zzapp_kernel_switch_frame(&kernel, &frame,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0U);
+	zzapp_kernel_service_due(&kernel);
+	clock_ms = 1U;
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_TICK, 4U);
+	CHECK(zzapp_kernel_current_thread() == -1);
+	CHECK(kernel.perf.tlb_stamps_valid != 0U);
+
+	kernel.now = 8000U;
+	clock_ms = 12000U;
+	next = zzapp_kernel_switch_frame(&kernel, next,
+					 ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0U);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	CHECK(kernel.perf.tlb_stamps_valid == 0U);
+
+	CHECK(zzapp_kernel_perf_emit_reports(&kernel) == 1);
+	zzapp_kernel_perf_request_report(&kernel, 0U, 1);
+	zzapp_kernel_service_due(&kernel);
+	clock_ms++;
+	(void)zzapp_kernel_switch_frame(&kernel, next,
+					ZZAPP_KERNEL_DISPATCH_TICK, 4U);
+	zzapp_kernel_perf_snapshot(&kernel, 0U, &snapshot);
+	CHECK(snapshot.tlb_instruction_refills == 0U);
+	CHECK(snapshot.tlb_data_refills == 0U);
+}
+
+
 #endif
 
 
@@ -1169,6 +1244,8 @@ int main(void)
     test_wake_hands_back_to_runnable_app();
 #if ZZAPP_PERF_COUNTERS
     test_performance_counters();
+    test_tlb_samples_survive_system_dispatch();
+    test_tlb_window_expiry_drops_system_baseline();
 #endif
     printf("kernel_sched_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;

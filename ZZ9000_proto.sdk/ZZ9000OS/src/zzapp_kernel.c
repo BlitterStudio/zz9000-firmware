@@ -111,8 +111,16 @@ static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
 		return;
 	irq_state = smp_local_irq_save();
 	perf = &kernel->perf;
-	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS ||
-	    perf->tlb_slot != (uint32_t)slot || !kernel_perf_tlb_sampling(kernel)) {
+	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS) {
+		if (!kernel_perf_tlb_sampling(kernel)) {
+			perf->tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
+			perf->tlb_stamps_valid = 0U;
+		}
+		smp_local_irq_restore(irq_state);
+		return;
+	}
+	if (perf->tlb_slot != (uint32_t)slot ||
+	    !kernel_perf_tlb_sampling(kernel)) {
 		perf->tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
 		perf->tlb_stamps_valid = 0U;
 		smp_local_irq_restore(irq_state);
