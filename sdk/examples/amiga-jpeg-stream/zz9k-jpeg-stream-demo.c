@@ -1,7 +1,8 @@
 /*
  * Public zz9k.library JPEG image-session example.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #include "proto/zz9k.h"

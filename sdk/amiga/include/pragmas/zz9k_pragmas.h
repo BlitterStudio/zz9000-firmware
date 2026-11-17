@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
+ */
 /* SAS/C-style app-client pragmas for zz9k.library. */
 #ifndef PRAGMAS_ZZ9K_PRAGMAS_H
 #define PRAGMAS_ZZ9K_PRAGMAS_H

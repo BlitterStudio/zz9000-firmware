@@ -4,7 +4,8 @@
  * arena image, the firmware mirrors the parse/validation logic, and the
  * host tests use both sides as an executable specification.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef ZZ9K_BATCH_H

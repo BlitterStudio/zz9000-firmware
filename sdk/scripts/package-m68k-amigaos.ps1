@@ -173,6 +173,8 @@ Copy-One "amiga/fd/zz9k_lib.fd" "Developer/FD/zz9k_lib.fd"
 Copy-One "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
+Copy-One "LICENSES/MIT.txt" "Developer/LICENSE-MIT.txt"
+Copy-One "../LICENSE" "Developer/LICENSE-GPL-3.0.txt"
 
 $GuideSpecs = @(
   "README.md:ZZ9000-SDK",
@@ -181,7 +183,8 @@ $GuideSpecs = @(
   "docs/zz9k-picture-datatype.md:zz9k-picture-datatype",
   "docs/zz9k-sound-datatype.md:zz9k-sound-datatype",
   "docs/zzplay.md:ZZPlay",
-  "docs/zz9k-amissl-provider.md:zz9k-amissl-provider"
+  "docs/zz9k-amissl-provider.md:zz9k-amissl-provider",
+  "../LICENSING.md:LICENSING"
 )
 $GuideSiblings = @()
 foreach ($spec in $GuideSpecs) {

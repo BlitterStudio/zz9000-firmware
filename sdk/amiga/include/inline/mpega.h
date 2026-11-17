@@ -1,7 +1,8 @@
 /*
  * GCC inline callers for mpega.library compatibility.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef INLINE_MPEGA_H

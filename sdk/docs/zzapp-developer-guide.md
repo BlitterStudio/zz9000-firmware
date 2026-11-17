@@ -418,6 +418,8 @@ is GPL-3.0-or-later. The GL front end that the firmware compiles is
 
 The boundary is the API table. An app links MIT `libzzapp` only. It reaches
 GL, files, and the display through that table. It must not be linked
-against firmware objects, the GL front-end objects, or `libzzm_rt`. That
-is a project rule, not a legal opinion. Revisit it before a closed app
-ships. The firmware sources are not a public header.
+against firmware objects, the GL front-end objects, or `libzzm_rt`. An app
+built that way can use any licence, including a closed one: the firmware
+licence does not cover programs that use the card through its published
+interfaces. [LICENSING.md](../../LICENSING.md) states this for the whole
+project. The firmware sources are not a public header.

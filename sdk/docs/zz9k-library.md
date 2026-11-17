@@ -48,6 +48,13 @@ caller header:
 New C programs can include `proto/zz9k.h`. Ported code or build systems that
 expect Amiga FD/clib metadata can use the FD and clib files instead.
 
+These files, the headers under `amiga/include/` and `include/zz9k/` (except
+the firmware-module headers `module.h` and `service_registry.h`), and the
+header-only helpers are MIT, so a program under any licence can include them
+to call `zz9k.library`. `zz9k.library` itself stays GPL-3.0-or-later. See
+[LICENSING.md](../../LICENSING.md) at the top of the firmware repository
+(`Docs/LICENSING.guide` in the SDK package).
+
 For application-side helper code, `zz9k/sdk.h` is the umbrella include. It
 pulls in the SDK v2 ABI, host/request/reply types, and helper headers. AmigaOS
 programs still include `proto/zz9k.h` when they need to call the resident

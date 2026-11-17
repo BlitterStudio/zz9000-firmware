@@ -1,7 +1,8 @@
 /*
  * ZZ9000 SDK v2 Amiga-side host API.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef ZZ9K_HOST_H

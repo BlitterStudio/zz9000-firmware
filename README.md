@@ -114,4 +114,7 @@ Original firmware sources are credited to MNT Research GmbH and contributors.
 Scanlines V1/V2 are by Xanxi and were adapted for this fork by Dimitris
 Panokostas. Per-file copyright notices remain in the source tree.
 
-SPDX-License-Identifier: `GPL-3.0-or-later`. See [LICENSE](LICENSE).
+SPDX-License-Identifier: `GPL-3.0-or-later`. See [LICENSE](LICENSE). The SDK
+client headers, fd files, examples, and the ARM app library are MIT, and the
+firmware licence does not cover programs that use the card through its
+published interfaces; see [LICENSING.md](LICENSING.md).
