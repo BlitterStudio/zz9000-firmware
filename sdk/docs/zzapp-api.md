@@ -297,8 +297,9 @@ allocator there would hand out bytes `malloc` already owns.
 ## ZZ_ALLOC_HOST_VISIBLE
 
 `2`. Allocate from the shared host-visible heap below `0x08200000`, not
-from the app arena. The memory is shareable and non-cacheable. Zorro III
-readers see stores without an extra cache publish. The per-app limit is
+from the app arena. The block keeps the heap's normal cacheable mapping, and
+the runtime does not clean the data cache for it, so a Zorro III reader is not
+guaranteed to see the latest stores. The per-app limit is
 16 MiB, in at most 64 firmware slots. `libzzapp` tracks 64 of those pointers
 so `zz_free` can tell them from newlib blocks; a 65th success is freed and
 the wrapper returns NULL. Minimum minor for the flag's table path: 2

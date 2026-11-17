@@ -63,9 +63,12 @@ Firmware 2.9.0 moves the Fast-RAM landing window and guards it in the FPGA.
 Install its matching bitstream and drivers as one update; do not pair the
 2.9.0 firmware with an older image.
 
-Other focused implementation and protocol documents are in [`docs/`](docs/).
-The SDK material in [`sdk/docs/`](sdk/docs/) covers SDK-facing formats,
-services, and AmigaOS packaging.
+The [documentation index](docs/README.md) lists every document by task:
+setting up the card, writing Amiga programs that use card services, writing
+ARM apps, and working on the firmware. The core-1 app kernel runs up to four
+user-mode apps in private address spaces; its slot protocol, memory limits,
+lifecycle, and SVC interface are in the
+[app runtime contract](docs/app-runtime.md).
 
 ## Build and contribute
 

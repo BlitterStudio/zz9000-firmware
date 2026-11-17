@@ -1,9 +1,9 @@
 # Licensing
 
 The firmware is licensed under GPL-3.0-or-later; the full text is in
-[LICENSE](LICENSE). This file covers three things: how that licence applies to
-programs that use the card, how programs may call the SDK's Amiga libraries,
-and which SDK files are under MIT instead.
+[LICENSE](LICENSE). Some SDK files are under MIT instead, and programs that use
+the card or call the SDK's Amiga libraries can use any licence, as described
+below.
 
 ## Programs that use the card
 

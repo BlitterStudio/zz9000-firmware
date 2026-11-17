@@ -87,6 +87,23 @@ mark and falls again. A launcher may cap its own app.
 up to 16 MiB per app, for Amiga-visible buffers rather than private working
 memory.
 
+## Sharing pixels with AmigaOS
+
+For pixels that an Amiga program reads, allocate a shared card block with
+`zz_alloc(bytes, align, ZZ_ALLOC_HOST_VISIBLE)`, then pass that allocation's
+base to `zz_host_address`. The returned board-relative Zorro III offset names
+the same allocation for the 68k client. `zz_host_address` rejects arena and
+interior pointers.
+
+The block keeps the normal cacheable mapping of the host-visible heap;
+`ZZ_ALLOC_UNCACHED` is accepted and ignored. The runtime does not clean the
+data cache for these blocks, and the API has no call that does, so a 68k reader
+is not guaranteed to see the latest ARM stores. This is a known gap in the
+current runtime. The allocation is separate from the private arena and display
+surfaces. The total of these allocations is limited to 16 MiB per app; use
+`zz_mem_info` to inspect the used and allowed amounts, and release each block
+with `zz_free` when the 68k side no longer needs it.
+
 ## Isolation
 
 User code may access its private window, its granted host-visible allocations,
@@ -101,9 +118,9 @@ the user who launched it.
 
 ## Scheduling and shared resources
 
-Core 1 runs the system thread before app threads. Service work—SDK tasks,
-MiniGL, launcher processing, and audio feeding—has priority, then runnable
-apps share the remaining time round-robin in 5 ms quanta. File and directory
+Core 1 runs the system thread before app threads. Service work has priority:
+SDK tasks, MiniGL, launcher processing, and audio feeding. Runnable apps
+share the remaining time round-robin in 5 ms quanta. File and directory
 operations, console read and output backpressure, display open and flip,
 non-host audio open and close, and sleep park the calling slot. Completion
 wakes it; file and directory calls time out after 30 seconds with
@@ -268,14 +285,18 @@ and recovery intervals.
 
 ## zz9k.library client
 
-`zz9k.library` revision 35 exposes the same runtime without ZZRun. Include
+`zz9k.library` version 2, revision 39 exposes the same runtime without
+ZZRun. The ARM-app client first appeared in revision 35; programs that use it
+require at least `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT`. Include
 `proto/zz9k.h`. The calls are `ZZ9KAppOpen`, `ZZ9KAppLoadFile`,
 `ZZ9KAppLoadMemory`, `ZZ9KAppStart`, `ZZ9KAppStop`, `ZZ9KAppStatus`,
 `ZZ9KAppSendMessage`, `ZZ9KAppGetMessage`, `ZZ9KAppMessageSignal`, and
 `ZZ9KAppClose`.
 
-New firmware gives a handle its claimed slot and generation; operations affect
-only that pair. An unchanged library uses the legacy slot-0 request shape.
+`ZZ9KAppOpen` creates a handle owned by the calling task. Do not use or close
+that handle from another task. New firmware gives a handle its claimed slot
+and generation; operations affect only that pair. An unchanged library uses
+the legacy slot-0 request shape. `ZZ9KAppLoadMemory` accepts at most 16 MiB.
 The library's VBlank server renews each open handle's lease. A task that dies
 holding a handle is reclaimed by lease expiry or Amiga reset.
 
@@ -283,8 +304,9 @@ holding a handle is reclaimed by lease expiry or Amiga reset.
 if the app expects the ZZRun convention. Messages are 32 opaque bytes.
 `ZZ9KAppGetMessage` returns `ZZ9K_STATUS_BUSY` when the ring is empty.
 `notify_port` receives at most one outstanding `ZZ9KAppEvent` (message,
-completion, or fault). Dequeue it before close. The message signal is also
-available without a port.
+completion, or fault). Before `ZZ9KAppClose`, drain the notify port and call
+`ZZ9KAppGetMessage` until it returns `ZZ9K_STATUS_BUSY`. The message signal
+is also available without a port.
 
 The app side is `zz_msg_poll` and `zz_msg_send`. A full app-to-host ring
 returns `ZZ_EBUSY`. Poll does not block.
@@ -323,7 +345,7 @@ until that call's RasterIX work has drained. Between GL calls the engine is
 idle and one 68k packet may run. Do not stay inside one GL call for long. A
 call over 50 ms is logged. A call over 10 seconds stops the app.
 
-The arena is cacheable. Host-visible memory and the audio ring are not.
+The arena and host-visible allocations are cacheable. The audio ring is not.
 Do not use host-visible memory as a framebuffer scratch pad. Draw in the
 arena or in the surface back buffer, then present. Pitch is the bitmap
 stride, not `width * bytes_per_pixel`. After a flip, refresh the surface
@@ -421,5 +443,5 @@ GL, files, and the display through that table. It must not be linked
 against firmware objects, the GL front-end objects, or `libzzm_rt`. An app
 built that way can use any licence, including a closed one: the firmware
 licence does not cover programs that use the card through its published
-interfaces. [LICENSING.md](../../LICENSING.md) states this for the whole
-project. The firmware sources are not a public header.
+interfaces. [LICENSING.md](../../LICENSING.md) states this for the project.
+The firmware sources are not a public header.

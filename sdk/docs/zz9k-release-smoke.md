@@ -19,7 +19,7 @@ default shared heap are Zorro III diagnostics.
    zz9k-info
    ```
 
-   **Expected pass signal:** `zz9k-services --check-release` exits with status
+   Expected result: `zz9k-services --check-release` exits with status
    `0` and ends with `release check ok`. `zz9k-services --all` and `zz9k-info`
    complete without mailbox or query errors and report the available services,
    capabilities, and memory information. A missing required capability, service
@@ -35,7 +35,7 @@ default shared heap are Zorro III diagnostics.
    zz9k-surfaceops --hold-ticks 0 --loops 1000 --stats --stats-interval 100
    ```
 
-   **Expected pass signal:** each command completes without a timeout or SDK
+   Expected result: each command completes without a timeout or SDK
    status error. `zz9k-surfaceops` reports loop progress with no failed
    operations, and the RTG display remains usable afterwards. On Zorro II, use
    `zz9k-info` and the adapted client checks below instead; `zz9k-smoke`
@@ -51,7 +51,7 @@ default shared heap are Zorro III diagnostics.
    zz9k-aead
    ```
 
-   **Expected pass signal:** every built-in hash, ChaCha20, and AEAD vector
+   Expected result: every built-in hash, ChaCha20, and AEAD vector
    passes. A digest or vector failure blocks archive and TLS qualification. On
    Zorro II, use the accelerated AmiSSL provider self-test or an HTTPS GET
    through an AmiSSL TLS application instead. With the drop-in
@@ -79,7 +79,7 @@ default shared heap are Zorro III diagnostics.
    zz9k-archive x --dry-run -o RAM:zz9k-split Archives/split-lzma2.7z
    ```
 
-   **Expected pass signal:** `zz9k-inflate --selftest` completes its built-in
+   Expected result: `zz9k-inflate --selftest` completes its built-in
    payload checks. Each archive command finishes without CRC, path-safety, or
    unexpected unsupported-method errors. The packaged `split-*.7z` fixtures
    list two files. `--dry-run` must not create or overwrite output files.
@@ -99,7 +99,7 @@ default shared heap are Zorro III diagnostics.
    AddDataTypes LIST
    ```
 
-   **Expected pass signal:** DataType descriptors are activated from
+   Expected result: DataType descriptors are activated from
    `Storage/DataTypes`, and `AddDataTypes LIST` shows `ZZ9000-JPEG`,
    `ZZ9000-PNG`, and `ZZ9000-MP3`.
 
@@ -117,13 +117,12 @@ default shared heap are Zorro III diagnostics.
    MultiView Work:Pictures/test.png
    ```
 
-   **Expected pass signal:** the listed decoders complete without SDK status
-   errors. `zz9k-view` opens one resizable window and its next/previous keys
-   navigate between the images. Check JPEG, PNG, and WebP in RGB555 (15-bit),
-   RGB565 (16-bit), and BGRA8888 (32-bit) RTG modes. Check that resize and
-   occlusion redraw through visible clips leave surrounding RTG contents
-   intact. MultiView and `zz9k-dtprobe --client` display JPEG and PNG through
-   `zz9k-picture.datatype`.
+   Expected result: the listed decoders complete without SDK status errors. `zz9k-view` opens
+   one resizable window and its next/previous keys move between the images.
+   Check JPEG, PNG, and WebP in RGB555 (15-bit), RGB565 (16-bit), and
+   BGRA8888 (32-bit) RTG modes. Check that resize and occlusion redraw through
+   visible clips leave surrounding RTG contents intact. MultiView and
+   `zz9k-dtprobe --client` display JPEG and PNG through `zz9k-picture.datatype`.
 
    On Zorro II, skip the plain `zz9k-jpeg` command because it uses a
    legacy-default CPU-visible output tile. Run `zz9k-jpeg --fb`, both PNG
@@ -139,7 +138,7 @@ default shared heap are Zorro III diagnostics.
    MultiView Work:Audio/test.mp3
    ```
 
-   **Expected pass signal:** `AddDataTypes LIST` routes `ZZ9000-MP3` to
+   Expected result: `AddDataTypes LIST` routes `ZZ9000-MP3` to
    `zz9k-sound.datatype`, and both an untagged Layer III file and a file with a
    leading ID3v2 tag open through the system `sound.datatype`. On version 47,
    stereo output uses 16-bit left and right planes at the source rate; earlier
@@ -162,7 +161,7 @@ default shared heap are Zorro III diagnostics.
    ZZPlay --audio=ahi Work:Audio/test.ogg
    ```
 
-   **Expected pass signal:** `AddDataTypes LIST` routes `ZZ9000-FLAC` and
+   Expected result: `AddDataTypes LIST` routes `ZZ9000-FLAC` and
    `ZZ9000-OggVorbis` to `zz9k-sound.datatype`; Ogg Opus and Ogg-FLAC are not
    claimed. Firmware without the required `FLAC_STREAM` or `VORBIS_STREAM`
    capability (releases older than the one that advertises them) refuses the
@@ -181,7 +180,7 @@ default shared heap are Zorro III diagnostics.
    ZZPlay --audio=ahi Work:Video/test.mpg
    ```
 
-   **Expected pass signal:** `zz9k-mp3 --stats` reports decoded frames and
+   Expected result: `zz9k-mp3 --stats` reports decoded frames and
    samples without stream-status errors. `zz9k-mpega-smoke --trace
    --null-api-check` prints `null-api check ok`; the stream-info run reports
    the installed `mpega.library` version and revision and finishes without a
@@ -200,7 +199,7 @@ default shared heap are Zorro III diagnostics.
     ZZPlay --benchmark Work:Video/test.mpg
     ```
 
-    **Expected pass signal:** ZZPlay identifies the stream and reports `direct
+    Expected result: ZZPlay identifies the stream and reports `direct
     planar overlay`. Inspect the pixels before treating FPS output as a pass.
     At 1:1 and after resizing, colors, horizontal placement, and all rows are
     correct. Moving, resizing, obscuring, and closing the PIP leave the desktop
@@ -225,13 +224,29 @@ default shared heap are Zorro III diagnostics.
     rx "address ZZPLAY SERVICES"
     ```
 
-    **Expected pass signal:** both streams play with the station name in the
+    Expected result: both streams play with the station name in the
     playlist and the current track in the title line, and Stop ends them
     cleanly. With ZZPlay open, **Browse...** (Amiga-R) lists Internet radio
     and Plex Media Server, the radio's **Top voted** folder fills, and a
     station from it plays. `SERVICES` returns `plex` and `radio` lines.
     Without AmiSSL, the `https://` item fails with a message and `http://`
     still plays.
+
+12. Check the ARM app runtime on Zorro III. Install `ZZRun` from the matched
+    driver package and build `hello.elf` and `echo.elf` from
+    `sdk/zzapp/templates/` with the ARM app SDK.
+
+    ```text
+    Stack 32768
+    ZZRun RAM:hello.elf
+    zz9k-app-echo-test RAM:echo.elf 300
+    ```
+
+    Expected result: `ZZRun` returns after `hello.elf` exits, and
+    `zz9k-app-echo-test` ends with `zz9k-app-echo-test: PASS (300 messages)`.
+    The tool covers the `zz9k.library` app-client load, start, 32-byte message
+    rings, notification handling, stop, status, and close. A failure reports
+    the last recorded phase; keep the trace lines printed before it.
 
 ## Failure routing
 
@@ -254,4 +269,7 @@ default shared heap are Zorro III diagnostics.
   failures with streams working belong to the service modules.
 - Treat corruption outside the PIP as a stop condition. Preserve the UART log
   and the exact artifact hashes.
+- Route `ZZRun` load or exit failures to the app runtime and launcher, and
+  `zz9k-app-echo-test` failures to the `zz9k.library` app client. Keep the
+  `[app]` lines from the UART log.
 

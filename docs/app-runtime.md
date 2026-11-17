@@ -24,9 +24,9 @@ nested call into app code.
 ### Scheduling and doorbell
 
 The core-1 private timer gives apps a 5 ms quantum. The scheduler first runs
-due system work—SDK tasks, MiniGL service, launcher work, and audio feeding—
-then selects runnable app threads round-robin. In an overload window, service
-work is limited so runnable apps retain a 5% floor.
+due system work: SDK tasks, MiniGL service, launcher work, and audio feeding.
+It then selects runnable app threads round-robin. In an overload window,
+service work is limited so runnable apps retain a 5% floor.
 Deferred launcher operations are selected round-robin across slots. Each
 service pass advances at most one slot by one bounded step, preserving
 per-slot request order without letting a long `LOAD_END` starve another
@@ -125,8 +125,8 @@ card-fabric routes, retryable fabric fill failures, and played underruns.
 The zero-underrun gate uses only the final `underruns` value. `tlb` is
 instruction/data refills, sampled in the one-second windows that open when a
 perf report is requested (reports are ten seconds apart): the counts cover
-those windows only, not the whole run, and are per-slot totals of micro-TLB
-refills observed while the slot held the core.
+those windows only, not the full run, and are per-slot totals of
+micro-TLB refills observed while the slot held the core.
 Histogram percentiles are power-of-two buckets, so the exact maximum is the
 final number in each pair or triplet.
 
@@ -240,7 +240,7 @@ limit, app CPU milliseconds, and kernel service milliseconds at bytes 0
 through 23. CPU time starts at zero when a generation is claimed. STATUS CPU
 time is user execution plus SVC execution; it excludes idle and recovery
 intervals. Byte 24 is the block reason: `NONE` (0), `FILE` (1), `CONSOLE` (2),
-`EVENT` (3), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6).
+`EVENT` (3, reserved and not emitted), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6).
 Byte 25 is the terminal reason. Bytes 26-27 hold the overload flag, and bytes
 28-47 are the app name. Terminal reasons are `NONE` (0), `EXIT` (1),
 `FORCED` (2), `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
