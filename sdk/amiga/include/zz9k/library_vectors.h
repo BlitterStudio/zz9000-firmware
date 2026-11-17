@@ -9,8 +9,8 @@
 
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 38
-#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.38 (15.11.2026)"
+#define ZZ9K_LIBRARY_REVISION 39
+#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.39 (16.11.2026)"
 #define ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT 35
 /* Static clients proxy async completions through the resident library.
  * Revision 36 routes a foreign completion seen during a synchronous call
@@ -23,6 +23,8 @@
 /* Revision 38 tags each resident opener's resource allocations and releases
  * them after that opener's final CloseLibrary(). */
 #define ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM 38
+/* Revision 39 lets app LOAD_END wait through the firmware's load lease. */
+#define ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE 39
 #define ZZ9K_LIBRARY_MIN_REVISION_CALL_ASYNC_BATCH_MSG 1
 #define ZZ9K_LIBRARY_MIN_REVISION_CANCEL_ASYNC 2
 #define ZZ9K_LIBRARY_MIN_REVISION_WAIT_ASYNC 3

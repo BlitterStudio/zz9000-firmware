@@ -66,6 +66,7 @@ struct ZZ9KAppHandle {
   UBYTE started;
   UBYTE event_posted;
   UBYTE slot_addressed;
+  UBYTE load_progress;
 };
 
 struct ZZ9KOpener {

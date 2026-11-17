@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 38 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 39 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -84,6 +84,14 @@ sends `ZZ9K_OP_CLIENT_RELEASE` and resubmits it while the firmware answers
 `ZZ9K_STATUS_BUSY`, so the release tracks the client's worker activity --
 sessions, streams and buffers still finishing on the ARM side -- before that
 opener's owned resources are reclaimed.
+
+Revision 39 makes ARM-app `LOAD_END` waits progress-aware. Firmware that
+advertises `ZZ9K_APP_CAP_LOAD_PROGRESS` increments lifecycle offset `0x68`
+after every incremental loader step; each change resets the library's normal
+five-second inactivity deadline, so progressing loads may run longer than the
+30-second firmware lease window. A stalled load still times out after five
+seconds. Older firmware has no progress signal, so revision 39 retains a
+fixed 32-second lease-covering fallback for it.
 
 ## ARM app client
 

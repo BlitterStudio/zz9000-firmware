@@ -5,6 +5,7 @@
  */
 
 #include "zz9k/library.h"
+#include "zz9k/app.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -41,6 +42,7 @@ struct EventWaitState {
   uint32_t wait_calls;
   uint32_t complete_after_calls;
   uint32_t fail_after_calls;
+  uint16_t opcode;
 };
 
 struct DrainEventState {
@@ -235,10 +237,22 @@ static int prepare_completion_on_event(ZZ9KLibrary *library,
     return ZZ9K_STATUS_OK;
   }
 
-  prepare_completion(state->mailbox, state->request_id, ZZ9K_OP_PING,
+  prepare_completion(state->mailbox, state->request_id,
+                     state->opcode ? state->opcode : ZZ9K_OP_PING,
                      ZZ9K_STATUS_OK, 4);
   memcpy((void *)state->mailbox->completion_ring[0].payload, "wake", 4);
   return ZZ9K_STATUS_OK;
+}
+
+static uint32_t event_wait_progress(void *user_data)
+{
+  return ((struct EventWaitState *)user_data)->wait_calls;
+}
+
+static uint32_t stalled_progress(void *user_data)
+{
+  (void)user_data;
+  return 1U;
 }
 
 static int prepare_drain_completions_on_event(ZZ9KLibrary *library,
@@ -1604,6 +1618,96 @@ static int test_call_waits_for_late_completion(void)
   return 0;
 }
 
+static int test_old_firmware_load_end_uses_lease_timeout(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct EventWaitState event_state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_APP_OP_LOAD_END;
+  memset(&event_state, 0, sizeof(event_state));
+  event_state.mailbox = &mailbox;
+  event_state.request_id = 1U;
+  event_state.opcode = ZZ9K_APP_OP_LOAD_END;
+  event_state.complete_after_calls = 1001U;
+  if (ZZ9KSetEventWaiter(&library, prepare_completion_on_event,
+                         &event_state) != ZZ9K_STATUS_OK) return 2;
+
+  status = zz9k_library_app_call_progress(
+      &library, &request, &reply, event_wait_progress, &event_state, 0);
+  if (status != ZZ9K_STATUS_OK) return 3;
+  if (event_state.wait_calls != 1001U) return 4;
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_progressing_app_load_exceeds_firmware_lease(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct EventWaitState event_state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_APP_OP_LOAD_END;
+  memset(&event_state, 0, sizeof(event_state));
+  event_state.mailbox = &mailbox;
+  event_state.request_id = 1U;
+  event_state.opcode = ZZ9K_APP_OP_LOAD_END;
+  event_state.complete_after_calls = 2051U;
+  if (ZZ9KSetEventWaiter(&library, prepare_completion_on_event,
+                         &event_state) != ZZ9K_STATUS_OK) return 2;
+
+  status = zz9k_library_app_call_progress(
+      &library, &request, &reply, event_wait_progress, &event_state, 1);
+  if (status != ZZ9K_STATUS_OK) return 3;
+  if (event_state.wait_calls != 2051U) return 4;
+  ZZ9KClose(&library);
+  return 0;
+}
+
+static int test_stalled_app_load_uses_normal_timeout(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  struct EventWaitState event_state;
+  int status;
+
+  init_mailbox(&mailbox);
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+  memset(&request, 0, sizeof(request));
+  request.entry.opcode = ZZ9K_APP_OP_LOAD_END;
+  memset(&event_state, 0, sizeof(event_state));
+  event_state.mailbox = &mailbox;
+  event_state.request_id = 1U;
+  event_state.opcode = ZZ9K_APP_OP_LOAD_END;
+  event_state.complete_after_calls = UINT32_MAX;
+  if (ZZ9KSetEventWaiter(&library, prepare_completion_on_event,
+                         &event_state) != ZZ9K_STATUS_OK) return 2;
+
+  status = zz9k_library_app_call_progress(
+      &library, &request, &reply, stalled_progress, NULL, 1);
+  if (status != ZZ9K_STATUS_TIMEOUT) return 3;
+  if (event_state.wait_calls != ZZ9K_DEFAULT_TIMEOUT_TICKS) return 4;
+  ZZ9KClose(&library);
+  return 0;
+}
+
 static int test_call_drains_foreign_completions_before_waiting(void)
 {
   struct DrainTestMailbox mailbox;
@@ -2044,6 +2148,13 @@ int main(void)
   if (result) return 79 + result;
   result = test_call_waits_for_late_completion();
   if (result) return 80 + result;
+
+  result = test_old_firmware_load_end_uses_lease_timeout();
+  if (result) return 81 + result;
+  result = test_progressing_app_load_exceeds_firmware_lease();
+  if (result) return 82 + result;
+  result = test_stalled_app_load_uses_normal_timeout();
+  if (result) return 83 + result;
 
   result = test_call_drains_foreign_completions_before_waiting();
   if (result) return 77 + result;

@@ -207,7 +207,16 @@ static int zz9k_lib_app_valid_locked(struct ZZ9KBase *base,
 static int zz9k_lib_app_call_locked(struct ZZ9KBase *base, ZZ9KRequest *request,
                                     ZZ9KMailboxEntry *reply)
 {
-  return ZZ9KCall(&base->core, request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  return zz9k_library_app_call(&base->core, request, reply);
+}
+
+static uint32_t zz9k_lib_app_load_progress(void *opaque)
+{
+  ZZ9KAppHandle *handle = (ZZ9KAppHandle *)opaque;
+
+  return handle && handle->window ?
+      zz9k_lib_app_life_get(handle->window,
+                            ZZ9K_APP_LIFE_PROGRESS_LO_OFFSET) : 0U;
 }
 
 static int zz9k_lib_app_select_request(const ZZ9KAppHandle *handle,
@@ -458,6 +467,8 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
   }
   handle->slot = slot;
   handle->slot_addressed = slot_addressed;
+  handle->load_progress =
+      (caps & ZZ9K_APP_CAP_LOAD_PROGRESS) != 0U;
   if (slot >= ZZ9K_APP_SLOT_COUNT ||
       (slot_addressed && handle->generation == 0U)) {
     status = ZZ9K_STATUS_INTERNAL_ERROR;
@@ -561,8 +572,10 @@ static int zz9k_lib_app_load_end_locked(struct ZZ9KBase *base,
   if (status == ZZ9K_STATUS_OK) {
     status = zz9k_lib_app_select_request(handle, &request);
   }
-  return status == ZZ9K_STATUS_OK ? zz9k_lib_app_call_locked(base, &request, &reply)
-                                  : status;
+  return status == ZZ9K_STATUS_OK ?
+      zz9k_library_app_call_progress(
+          &base->core, &request, &reply, zz9k_lib_app_load_progress, handle,
+          handle->load_progress) : status;
 }
 
 static int zz9k_lib_app_load_memory(REG(a6, struct ZZ9KBase *base),
