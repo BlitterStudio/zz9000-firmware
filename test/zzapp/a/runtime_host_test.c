@@ -7,11 +7,29 @@
 void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
 int zzapp_host_address(const void *p, uint32_t *host_offset);
 int zzapp_host_mem_info(zzapp_mem_info *out);
+void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
+                        uint32_t owner, uint32_t generation);
+void zzapp_loader_unbound(void);
+void zzapp_test_set_time_hook(uint64_t (*hook)(void));
 void zzapp_kernel_switch_address_space(uint32_t slot);
 static uint32_t selected_slot;
 static int api_wait_hook_called;
 static int api_yield_service_calls;
-static int api_yield_stall_watchdog;
+static uint64_t api_yield_watchdog_tick;
+static uint64_t api_wait_wake_tick;
+static unsigned api_yield_post_resume_clock_reads;
+static uint64_t api_yield_post_resume_irq_tick;
+static uint8_t replacement_mem[4096];
+
+static uint64_t api_yield_post_resume_time(void)
+{
+    api_yield_post_resume_clock_reads++;
+    if (api_yield_post_resume_clock_reads == 2U) {
+        zzapp_test_set_time_hook(NULL);
+        zzapp_host_tick_at(api_yield_post_resume_irq_tick);
+    }
+    return api_yield_post_resume_irq_tick;
+}
 
 static uint32_t service_poll_depth;
 static uint32_t service_poll_max_depth;
@@ -67,6 +85,10 @@ void zzapp_test_api_wait_hook(void)
     zzapp_api_leave();
     selected_slot = 1U;
     zzapp_kernel_set_current_thread(1);
+    if (api_wait_wake_tick != 0U) {
+        zzapp_test_set_xtime(api_wait_wake_tick);
+        zzapp_host_tick_at(api_wait_wake_tick);
+    }
     api_wait_hook_called++;
 }
 
@@ -80,9 +102,13 @@ void zzapp_test_api_yield_hook(void)
     assert(zzapp_kernel_system_lock(kernel) == 0);
     zzapp_worker_hook();
     assert(zzapp_kernel_system_unlock(kernel) == 0);
-    if (api_yield_stall_watchdog) {
-        zzapp_test_set_xtime(ZZAPP_API_STUCK_US + ZZAPP_TICK_US);
-        zzapp_host_tick_at(ZZAPP_API_STUCK_US + ZZAPP_TICK_US);
+    if (api_yield_watchdog_tick != 0U) {
+        zzapp_test_set_xtime(api_yield_watchdog_tick);
+        zzapp_host_tick_at(api_yield_watchdog_tick);
+    }
+    if (api_yield_post_resume_irq_tick != 0U) {
+        api_yield_post_resume_clock_reads = 0U;
+        zzapp_test_set_time_hook(api_yield_post_resume_time);
     }
     api_yield_service_calls++;
 }
@@ -438,11 +464,121 @@ int main(void)
     zzapp_test_mark_running();
     zzapp_kernel_set_current_thread(0);
     zzapp_api_enter();
-    api_yield_stall_watchdog = 1;
+    api_yield_watchdog_tick = ZZAPP_API_STUCK_US + ZZAPP_TICK_US;
     zzapp_host_yield();
-    api_yield_stall_watchdog = 0;
+    api_yield_watchdog_tick = 0U;
     zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    zzapp_api_leave();
+    zzapp_kernel_set_current_thread(-1);
+
+    /*
+     * Keep the parked state through the deadline refresh.  An IRQ between
+     * reacquiring the lock and publishing the renewed API deadline is safe.
+     */
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_test_mark_running();
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_test_set_xtime(ZZAPP_API_STUCK_US + ZZAPP_TICK_US);
+    api_yield_post_resume_irq_tick = ZZAPP_API_STUCK_US + ZZAPP_TICK_US;
+    zzapp_host_yield();
+    zzapp_test_set_time_hook(NULL);
+    api_yield_post_resume_irq_tick = 0U;
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    zzapp_api_leave();
+    zzapp_kernel_set_current_thread(-1);
+
+    /*
+     * A parked API can wait longer than the ordinary app-progress deadline.
+     * Returning from that wait is progress, even before the next API entry.
+     */
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_test_mark_running();
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_host_tick_at(1U);
+    api_yield_watchdog_tick = ZZAPP_APP_STALL_US + ZZAPP_TICK_US;
+    zzapp_host_yield();
+    api_yield_watchdog_tick = 0U;
+    zzapp_api_leave();
+    zzapp_host_tick_at(ZZAPP_APP_STALL_US + 2U * ZZAPP_TICK_US);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    zzapp_kernel_set_current_thread(-1);
+
+    /*
+     * A queued API-lock waiter may wake only after several owners have used
+     * the lock.  Its wake-to-entry interval is not a stalled app.
+     */
+    zzapp_boot_init();
+    zzapp_test_set_xtime(0U);
+    selected_slot = 0U;
+    zzapp_test_mark_running();
+    selected_slot = 1U;
+    zzapp_test_mark_running();
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 1U) == 0);
+    selected_slot = 0U;
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_test_set_xtime(1000000U);
+    selected_slot = 1U;
+    zzapp_kernel_set_current_thread(1);
+    api_wait_wake_tick = 1000000U + 3U * 9900000U;
+    zzapp_api_enter();
+    api_wait_wake_tick = 0U;
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    assert(zzapp_runtime_kernel()->threads[1].state == ZZAPP_THREAD_RUNNABLE);
+    zzapp_api_leave();
+    zzapp_kernel_set_current_thread(-1);
+
+    /*
+     * A stopped parked app must not transfer its parked-watchdog exemption
+     * to the next binding in the same slot.
+     */
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_test_mark_running();
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_host_sleep(1000U);
+    zzapp_loader_unbound();
+    zzapp_loader_bound(0x04000000U, replacement_mem, sizeof(replacement_mem),
+                       1U, 2U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_test_mark_running();
+    zzapp_host_tick_at(ZZAPP_APP_STALL_US);
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+    zzapp_kernel_set_current_thread(-1);
+
+    /*
+     * A slot can go many timer ticks without running.  A later API entry
+     * starts its own watchdog interval; it must not inherit that old tick.
+     */
+    zzapp_boot_init();
+    selected_slot = 0U;
+    zzapp_test_set_xtime(0U);
+    assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
+    zzapp_test_mark_running();
+    zzapp_kernel_set_current_thread(0);
+    zzapp_api_enter();
+    zzapp_api_leave();
+    zzapp_host_tick_at(1U);
+    zzapp_test_set_xtime(ZZAPP_API_STUCK_US + 1U);
+    zzapp_api_enter();
+    zzapp_host_tick_at(ZZAPP_API_STUCK_US + 2U);
+    assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
+    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
     zzapp_api_leave();
     zzapp_kernel_set_current_thread(-1);
 

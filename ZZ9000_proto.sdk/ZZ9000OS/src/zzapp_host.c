@@ -655,6 +655,10 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
     host->owner = owner;
     host->terminal_reason = ZZAPP_END_NONE;
     host->stop_requested = 0u;
+    if (slot < ZZAPP_AS_SLOT_COUNT) {
+        g_api_parked[slot] = 0u;
+        g_host_visible_commit_active[slot] = 0u;
+    }
     zzapp_host_reset_low_memory(slot);
     g_proc[slot].owner = owner;
     g_proc[slot].generation = generation;
@@ -729,6 +733,10 @@ void zzapp_loader_unbound(void)
     if (zzapp_api_reclaim_resources)
         zzapp_api_reclaim_resources();
     zzapp_kernel_stop_app(&g_kernel, slot);
+    if (slot < ZZAPP_AS_SLOT_COUNT) {
+        g_api_parked[slot] = 0u;
+        g_host_visible_commit_active[slot] = 0u;
+    }
     memset(host, 0, sizeof(*host));
     host->state = state;
     host->fault_mark = fault_mark;
@@ -1017,6 +1025,8 @@ static void begin_tick_observation(void)
     struct zzapp_host_slot *host = host_slot(slot);
 
     host->in_api = 0u;
+    if (slot < ZZAPP_AS_SLOT_COUNT)
+        g_api_parked[slot] = 0u;
     host->service_due = 0u;
     host->seen_api_calls = host->api_calls;
     host->last_tick = now_ticks();
@@ -1057,8 +1067,6 @@ static void service_tick_irq(uint64_t now)
     if (calls != host->seen_api_calls) {
         host->seen_api_calls = calls;
         coh->progress = now;
-        if (host->in_api != 0u)
-            host->api_entered = host->last_tick;
     }
     host->last_tick = now;
     /* ZZRun can set this host-visible word before its best-effort APP_STOP
@@ -1073,7 +1081,7 @@ static void service_tick_irq(uint64_t now)
         if (coh->reset_request ||
             ticks_to_us(now - host->stop_mark) >= ZZAPP_STOP_GRACE_US)
             request_stop(slot, ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
-    } else if (host->in_api == 0u &&
+    } else if (host->in_api == 0u && !g_api_parked[slot] &&
                ticks_to_us(now - coh->progress) >= ZZAPP_APP_STALL_US) {
         host->watchdog_reason = 1u;
         request_stop(slot, ZZAPP_FAULT_WATCHDOG, 0, 0, 0, 0, 0, 0);
@@ -1246,6 +1254,12 @@ static int api_lock_until_acquired(uint32_t slot)
 {
     int contended = 0;
 
+    /*
+     * A timer can interrupt immediately after the scheduler wakes this
+     * waiter, before zzapp_api_enter publishes its API call.  Keep the
+     * normal stall watchdog out of that handoff window.
+     */
+    g_api_parked[slot] = 1u;
     while (1) {
 #ifndef ZZAPP_HOST_TEST
         uint32_t cpsr = api_lock_irq_save();
@@ -1255,6 +1269,7 @@ static int api_lock_until_acquired(uint32_t slot)
 #ifndef ZZAPP_HOST_TEST
             api_lock_irq_restore(cpsr);
 #endif
+            zzapp_note_progress();
             return contended;
         }
         contended = 1;
@@ -1269,15 +1284,19 @@ static int api_lock_until_acquired(uint32_t slot)
             abort();
         zzapp_test_api_wait_hook();
 #endif
+        zzapp_note_progress();
     }
 }
 
 static void resume_parked_api(uint32_t slot)
 {
     struct zzapp_host_slot *host = host_slot(slot);
+    uint64_t now = now_ticks();
 
-    host->api_entered = now_ticks();
+    host->api_entered = now;
     host->seen_api_calls = host->api_calls;
+    coherent(slot)->progress = now;
+    life_progress(now);
     g_api_parked[slot] = 0u;
 }
 
@@ -1428,7 +1447,6 @@ void zzapp_api_enter(void)
     uint32_t slot = current_slot();
     struct zzapp_host_slot *host = host_slot(slot);
 
-    g_api_parked[slot] = 0u;
     if (zzapp_kernel_current_thread() >= 0) {
         int contended;
 
@@ -1449,8 +1467,13 @@ void zzapp_api_enter(void)
         (void)contended;
 #endif
     }
+    /* Stamp before publishing this call so a timer IRQ never backdates it
+     * from this slot's previous scheduling tick. */
+    if (host->in_api == 0u)
+        host->api_entered = now_ticks();
     host->api_calls++;
     host->in_api++;
+    g_api_parked[slot] = 0u;
 }
 
 /* Hot non-blocking calls (should_stop, time_us). Count as an API call so a
