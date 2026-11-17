@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: 2026 Dimitris Panokostas <midwan@gmail.com>
 SPDX-License-Identifier: MIT
 -->
 
-# ZZApp API reference (0.3)
+# ZZApp API reference (0.4)
 
 Public contract of `sdk/zzapp/include/zzapp.h`. The firmware entry is the
 `zzapp_api` table passed in `r0` at start. Call the `zz_*` wrappers. The table
@@ -11,7 +11,7 @@ points at user-mode SVC veneers, not firmware functions: an app must not call
 or retain a firmware address. Code that calls through the table needs no
 change.
 
-`ZZAPP_API_MAJOR` is 0 and `ZZAPP_API_MINOR` is 3.
+`ZZAPP_API_MAJOR` is 0 and `ZZAPP_API_MINOR` is 4.
 `ZZAPP_API_VERSION` is `(major << 16) | minor`. The loader rejects a note
 whose major is not 0. A higher note minor is accepted only when the runtime
 minor is at least that value.
@@ -26,11 +26,12 @@ SYS mode with IRQs enabled, and then invokes the handler. Core 0 does not
 execute the call.
 
 File and directory operations, console read and output backpressure, display
-open and flip, non-host audio open and close, and `zz_sleep_us` park their
-slot. `zz_gl_swap` parks through its flip. A launcher completion wakes the
-slot READY. File and directory waits time out after 30 seconds with
-`ZZ_ETIMEDOUT`; stop marks a parked waiter CANCELLED and waiting service calls
-return `ZZ_EIO`. `zz_input_poll` and `zz_display_vsync` do not park.
+open and flip, non-host audio open and close, `zz_msg_wait`, and
+`zz_sleep_us` park their slot. `zz_gl_swap` parks through its flip. A
+launcher completion wakes the slot READY. File and directory waits time out
+after 30 seconds with `ZZ_ETIMEDOUT`; stop wakes a parked waiter and waiting
+service calls return `ZZ_EIO`. `zz_input_poll` and
+`zz_display_vsync` do not park.
 
 Image decode, audio decode, SHA-256, and decompress run inline on core 1.
 They are not queued as core-1 jobs, so they cannot deadlock the worker that
@@ -55,8 +56,9 @@ Minor 0 published the table through `gl_unbind`. Minor 1 appends
 `display_flip_async` through `build_id`, plus `ZZ_DISPLAY_MAILBOX` and
 `ZZ_GL_BIND_*`. Minor 2 appends `host_address` through `msg_poll`, plus
 break events, host-visible allocation, compression, and image/audio decode.
-Minor 3 appends the dynamic heap slots. API 0.1 at `4b4e3198` is the
-minor-1 table. Size-gating still applies to every appended slot.
+Minor 3 appends the dynamic heap slots. Minor 4 appends `msg_wait`. API 0.1
+at `4b4e3198` is the minor-1 table. Size-gating still applies to every
+appended slot.
 
 ## ZZ_API_COVERS
 
@@ -143,6 +145,7 @@ wrapper result on firmware older than the slot.
 without the launcher completion `request_seq + 2`. The runtime retires that
 request before returning, so a late reply cannot satisfy the next call, and
 the file or directory id is not reused for the rest of the app.
+`zz_msg_wait` also returns it when its timeout passes with no message queued.
 
 ## ZZ_EFAULT
 
@@ -287,23 +290,29 @@ after the pool has risen above the high-water mark. `code`, `dx`, `dy`,
 
 ## ZZ_ALLOC_UNCACHED
 
-`1`. Accepted. Ignored while the arena is a normal cacheable mapping. Pass
-it now if the app needs the uncached meaning once user mode exists.
-`zz_alloc` without `ZZ_ALLOC_HOST_VISIBLE` does not call the table; it uses
-newlib `malloc`. The table `alloc` itself returns NULL without
-`ZZ_ALLOC_HOST_VISIBLE`: the arena heap belongs to newlib, and a second
-allocator there would hand out bytes `malloc` already owns.
+`1`. Accepted and has no effect. Host-visible blocks keep the cacheable
+mapping of the rest of DDR, so there is no uncached variant to select. The
+wrapper ignores the flag without `ZZ_ALLOC_HOST_VISIBLE`: such a `zz_alloc`
+does not call the table and returns an ordinary newlib block. The table
+`alloc` itself returns NULL without `ZZ_ALLOC_HOST_VISIBLE`: the arena heap
+belongs to newlib, and a second allocator there would hand out bytes
+`malloc` already owns.
 
 ## ZZ_ALLOC_HOST_VISIBLE
 
 `2`. Allocate from the shared host-visible heap below `0x08200000`, not
-from the app arena. The block keeps the heap's normal cacheable mapping, and
-the runtime does not clean the data cache for it, so a Zorro III reader is not
-guaranteed to see the latest stores. The per-app limit is
-16 MiB, in at most 64 firmware slots. `libzzapp` tracks 64 of those pointers
-so `zz_free` can tell them from newlib blocks; a 65th success is freed and
-the wrapper returns NULL. Minimum minor for the flag's table path: 2
-(`alloc` itself is minor 0; the flag is rejected by a wrapper that does not
+from the app arena. The block is Normal write-back shareable memory like the
+rest of DDR. Zorro III accesses reach it through the Zynq ACP, which is
+coherent with the ARM caches, so the app needs no ARM cache call and the API
+has none. The 68k side must still read the block through a cache-inhibited
+mapping or do its own cache maintenance before reading; the ACP does not
+reach the 68k's caches. The CPU may still reorder plain stores:
+put a barrier (`__sync_synchronize()`) between the data and the flag or
+index that the 68k polls. The per-app limit
+is 16 MiB, in at most 64 firmware slots. `libzzapp` tracks 64 of those
+pointers so `zz_free` can tell them from newlib blocks; a 65th success is
+freed and the wrapper returns NULL. Minimum minor for the flag's table path:
+2 (`alloc` itself is minor 0; the flag is rejected by a wrapper that does not
 understand it, and older firmware has no host-visible path).
 
 ## Compression algorithms
@@ -1340,6 +1349,31 @@ Copies one 32-byte host-to-app record and returns 1. Returns 0 when the ring
 is empty. NULL is `ZZ_EINVAL`. A corrupt ring is `ZZ_EIO`. Does not block.
 Gate: `ZZ_API_COVERS(api, msg_poll)`. Missing slot: `ZZ_ENOSYS`. Core 1.
 Minimum minor: 2. Capacity is 64 records. This ring is not keyboard input.
+
+## zz_msg_wait
+
+```c
+int zz_msg_wait(uint32_t timeout_us);
+```
+
+Parks the app until the host-to-app ring holds a message or `timeout_us`
+microseconds pass. `ZZ_OK` means a message is queued and the next
+`zz_msg_poll` returns it; the wait does not consume it. A message that is
+already queued returns at once. `ZZ_ETIMEDOUT` means the timeout passed with
+the ring empty. A timeout of 0 only tests the ring and never parks. A stop
+request ends the wait with `ZZ_EIO`, but a queued message is reported first,
+so a stop never hides one. A corrupt ring is `ZZ_EIO`.
+
+While parked the slot reports `EVENT` as its `LIST` block reason, and it does
+not count toward the stall or stuck-call watchdogs. The Amiga writes the ring
+without a doorbell. The core-1 service pass reads the ring on every pass and
+wakes the app when it is not empty, so a message queued while the app is
+still parking is not missed.
+
+The table slot is `int (*msg_wait)(uint32_t timeout_us)`. Gate:
+`ZZ_API_COVERS(api, msg_wait)`. Missing slot: `ZZ_ENOSYS`, which is the result
+on firmware older than API 0.4; an app that must run there falls back to
+`zz_msg_poll` and `zz_yield`. Core 1. Minimum minor: 4.
 
 ## zz_gl_bind
 

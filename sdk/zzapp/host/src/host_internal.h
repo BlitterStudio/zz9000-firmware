@@ -49,6 +49,7 @@ uint64_t host_time_us(void);
 uint32_t host_time_ms(void);
 void host_pump(void);
 void host_sleep_until(uint64_t deadline);
+void host_idle_slice(void);
 
 int host_files_init(const char *root, int abs_paths);
 void host_files_shutdown(void);

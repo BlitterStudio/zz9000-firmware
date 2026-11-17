@@ -1,6 +1,6 @@
 # ZZ9000 app runtime
 
-This is the firmware and launcher contract for the API 0.3 app kernel. The
+This is the firmware and launcher contract for the API 0.4 app kernel. The
 public app interface is [zzapp-api.md](../sdk/docs/zzapp-api.md); application
 build and usage guidance is in
 [zzapp-developer-guide.md](../sdk/docs/zzapp-developer-guide.md). The shared
@@ -70,12 +70,23 @@ points to the current API segment plus one scheduler handoff; a body that does
 not yield remains subject to the API watchdog rather than a scheduler preemption.
 
 File and directory operations, console read and backpressure, display open and
-flip, non-host audio open and close, and sleep park the caller at the SVC
-handoff. `zz_gl_swap` parks through its flip. Completion wakes the slot READY;
-file and directory waits wake TIMEOUT after 30 seconds and return
-`ZZ_ETIMEDOUT`. Stop marks a parked waiter CANCELLED; waiting service calls
-return `ZZ_EIO`. `zz_input_poll` and `zz_display_vsync` do not park; the
+flip, non-host audio open and close, `zz_msg_wait`, and sleep park the caller
+at the SVC handoff. `zz_gl_swap` parks through its flip. Completion wakes the
+slot READY; file and directory waits wake TIMEOUT after 30 seconds and return
+`ZZ_ETIMEDOUT`. Stop wakes a parked waiter (an EVENT waiter wakes READY and
+then sees the stop); waiting service calls return `ZZ_EIO`. `zz_input_poll`
+and `zz_display_vsync` do not park; the
 latter only yields once.
+
+`zz_msg_wait` parks as an `EVENT` wait with the caller's timeout as its
+deadline. The Amiga writes the host-to-app ring in the launcher window and
+rings no doorbell, so the wait is a level test. The service pass reads the
+ring head and tail for every parked `EVENT` waiter and wakes it when they
+differ. The waiter reads the ring again after every resume and before it
+parks, so a message that lands in that gap is found by the next service pass.
+A queued message ends the wait before a pending stop does. Like every
+declared wait it keeps the slot out of the 30-second stall and 10-second
+stuck-call watchdogs.
 
 Core 0 does not wait for core 1. It publishes work and raises doorbell SGI 15
 only when `service_pending` changes from zero to one. Core 1 drains a bounded
@@ -144,6 +155,16 @@ non-global sections, 64 KiB large pages, or 4 KiB small pages as appropriate.
 The app sees only its private pages plus grants for its launcher window,
 host-visible blocks, and owned display surfaces. The rest of DDR, firmware,
 devices, and other apps remain privileged-only.
+
+A host-visible block uses the same mapping as the rest of DDR, Normal
+write-back shareable (descriptor `0x15de6`). Zorro III accesses reach DDR
+through the Zynq ACP (`m00_axi` of the Zorro master, ARCACHE `0xF` for reads
+and AWCACHE `0x3` for writes). The ACP snoops the ARM L1 caches, so neither
+side needs ARM cache maintenance. The 68k's own caches are outside the ACP:
+a 68k client reads through a cache-inhibited mapping, as `zz9k.library` does
+for the launcher window, or maintains its caches itself. The Zorro
+master's second port, `m01_axi`, goes to HP1 but only writes video-capture
+frames; it carries no Zorro access to the host-visible heap.
 
 The app-facing API and GL tables retain their layout and `size` semantics, but
 their entries point to user-RX `svc; bx lr` veneers. On a user veneer call,
@@ -240,7 +261,7 @@ limit, app CPU milliseconds, and kernel service milliseconds at bytes 0
 through 23. CPU time starts at zero when a generation is claimed. STATUS CPU
 time is user execution plus SVC execution; it excludes idle and recovery
 intervals. Byte 24 is the block reason: `NONE` (0), `FILE` (1), `CONSOLE` (2),
-`EVENT` (3, reserved and not emitted), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6).
+`EVENT` (3, `zz_msg_wait`), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6).
 Byte 25 is the terminal reason. Bytes 26-27 hold the overload flag, and bytes
 28-47 are the app name. Terminal reasons are `NONE` (0), `EXIT` (1),
 `FORCED` (2), `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),

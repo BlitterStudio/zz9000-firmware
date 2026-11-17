@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 #define ZZAPP_API_MAJOR 0u
-#define ZZAPP_API_MINOR 3u
+#define ZZAPP_API_MINOR 4u
 #define ZZAPP_API_VERSION ((ZZAPP_API_MAJOR << 16) | ZZAPP_API_MINOR)
 
 #define ZZ_OK         0
@@ -423,6 +423,9 @@ typedef struct zzapp_api {
     int      (*heap_grow)(uint32_t bytes, void **old_break);
     int      (*heap_shrink)(uint32_t bytes, void **new_break);
     int      (*heap_info)(zzapp_heap_info *out);
+    /* API 0.4: park until a host-to-app message is ready or the timeout
+     * passes. ZZ_OK: ready (zz_msg_poll then returns it). */
+    int      (*msg_wait)(uint32_t timeout_us);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -534,6 +537,14 @@ int      zz_console_read(void *buf, uint32_t len, uint32_t *out_n);
  * copied one message, 0 when the ring is empty, or a negative ZZ_E* code. */
 int      zz_msg_send(const void *msg);
 int      zz_msg_poll(void *msg);
+
+/* Parks the app until a host-to-app message is ready, then returns ZZ_OK;
+ * call zz_msg_poll to take it. A message already waiting returns at once. If
+ * timeout_us passes first the result is ZZ_ETIMEDOUT; timeout_us 0 only tests
+ * the ring. A stop request ends the wait with ZZ_EIO. A parked app does not
+ * trip the stall watchdog. Needs API 0.4; older firmware returns ZZ_ENOSYS,
+ * so keep a zz_msg_poll and zz_yield fallback. */
+int      zz_msg_wait(uint32_t timeout_us);
 
 const zzapp_gl *zz_gl_bind(uint32_t surface_id);
 const zzapp_gl *zz_gl_bind_flags(uint32_t surface_id, uint32_t flags);

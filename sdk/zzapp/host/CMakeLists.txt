@@ -1,5 +1,5 @@
 # Host build of ZZ9000 apps. libzzapp-host provides main() and an SDL2
-# API 0.3 table. Apps supply zz_main. Do not link the ARM crt0 or syscalls.
+# API 0.4 table. Apps supply zz_main. Do not link the ARM crt0 or syscalls.
 #
 # SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.16)
@@ -168,6 +168,22 @@ if(BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} pixelsstop $<TARGET_FILE:pixels>
   )
   set_tests_properties(pixelsstop PROPERTIES
+    TIMEOUT 60
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
+  )
+  add_test(
+    NAME msgwaitstop
+    COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} msgwaitstop $<TARGET_FILE:contract>
+  )
+  set_tests_properties(msgwaitstop PROPERTIES
+    TIMEOUT 60
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
+  )
+  add_test(
+    NAME msgwaitidle
+    COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} msgwaitidle $<TARGET_FILE:contract>
+  )
+  set_tests_properties(msgwaitidle PROPERTIES
     TIMEOUT 60
     ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
   )

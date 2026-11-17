@@ -758,7 +758,8 @@ static const zzapp_svc_descriptor_t api_descriptors[API_COUNT] = {
     [API_SLOT(msg_poll)] = DP(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, 32U, 1U), N, N),
     [API_SLOT(heap_grow)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, 4U, 1U), N, N),
     [API_SLOT(heap_shrink)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, 4U, 1U), N, N),
-    [API_SLOT(heap_info)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, sizeof(zzapp_heap_info), 1U), N, N)
+    [API_SLOT(heap_info)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, sizeof(zzapp_heap_info), 1U), N, N),
+    [API_SLOT(msg_wait)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N)
 };
 
 #define G0(f, r) [GL_SLOT(f)] = D(0, r, N, N, N)

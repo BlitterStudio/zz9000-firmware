@@ -3,7 +3,7 @@
 `libzzapp-host` runs a native build of a ZZ9000 app. SDL2 stands in for the
 card. The app includes `zzapp.h`, defines `zz_main`, and links this library.
 The library provides `main()`, the `zz_*` wrappers, and a fully populated
-API 0.3 table. It does not link the ARM `crt0`, `syscalls.c`, or `gl_wrap.c`.
+API 0.4 table. It does not link the ARM `crt0`, `syscalls.c`, or `gl_wrap.c`.
 
 ## Build
 
@@ -93,6 +93,12 @@ instead of fed back. A line is 64 hex digits, a quoted string padded with
 NULs to 32 bytes, or `stop`. `stop` requests stop once every injected message
 has been sent back. Both rings hold 64 messages; a full send returns
 `ZZ_EBUSY`.
+
+`zz_msg_wait` returns `ZZ_OK` at once when a message is queued, and
+`ZZ_ETIMEDOUT` when its timeout passes. It sleeps in 1 ms slices and keeps
+pumping the runner, and SIGTERM, Ctrl-C, or a window close ends it with
+`ZZ_EIO`. In loopback mode only the app's own sends queue messages, so a
+wait on an empty ring runs to its timeout.
 
 ## Keys
 

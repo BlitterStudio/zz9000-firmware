@@ -3,7 +3,8 @@ A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
 ZZAPP_TESTS += $(BUILD)/a/loader_smoke $(BUILD)/a/runtime_host_test \
 	$(BUILD)/a/loader_elf_test $(BUILD)/a/display_fallback_test \
 	$(BUILD)/a/core_api_test $(BUILD)/a/map_unmap_test \
-	$(BUILD)/a/svc_return_test $(BUILD)/a/page_flags_test
+	$(BUILD)/a/svc_return_test $(BUILD)/a/page_flags_test \
+	$(BUILD)/a/msg_wait_stall_test
 
 $(BUILD)/a/zzapp_loader.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
@@ -48,6 +49,9 @@ $(BUILD)/a/loader_elf_test: a/loader_elf_test.c $(LOADER_REAL_AS_HOST_OBJS) $(LO
 		-I../card_pool -I../mmu/mock -o $@ $< \
 		$(LOADER_REAL_AS_HOST_OBJS) $(LOADER_REAL_AS_HOST_SOURCES)
 $(BUILD)/a/display_fallback_test: a/display_fallback_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o
+$(BUILD)/a/msg_wait_stall_test: a/msg_wait_stall_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o
 

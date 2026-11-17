@@ -253,6 +253,54 @@ static int test_services(void)
     return 0;
 }
 
+/* zz_msg_wait without a script: sends loop back into the queue. */
+static int test_msgwait(void)
+{
+    uint8_t msg[32];
+    uint64_t start;
+    uint64_t took;
+
+    memset(msg, 0x11, sizeof msg);
+    if (zz_msg_wait(0u) != ZZ_ETIMEDOUT)
+        return fail(90, "zero timeout on an empty ring");
+    start = zz_time_us();
+    if (zz_msg_wait(40000u) != ZZ_ETIMEDOUT)
+        return fail(91, "empty ring did not time out");
+    took = zz_time_us() - start;
+    if (took < 35000u || took > 5000000u)
+        return fail(92, "timeout length");
+    if (zz_msg_send(msg) != ZZ_OK)
+        return fail(93, "loopback send");
+    start = zz_time_us();
+    if (zz_msg_wait(5000000u) != ZZ_OK)
+        return fail(94, "queued message not ready");
+    if (zz_time_us() - start > 1000000u)
+        return fail(95, "a queued message still waited");
+    if (zz_msg_wait(0u) != ZZ_OK)
+        return fail(96, "wait consumed the message");
+    if (zz_msg_poll(msg) != 1)
+        return fail(97, "poll after wait");
+    if (zz_msg_wait(0u) != ZZ_ETIMEDOUT)
+        return fail(98, "ring not empty after poll");
+    return 0;
+}
+
+/* Parks on an empty ring; the test harness stops the runner. */
+static int test_msgwaitstop(void)
+{
+    if (zz_msg_wait(30000000u) != ZZ_EIO)
+        return fail(99, "stop did not end the wait with ZZ_EIO");
+    return 0;
+}
+
+/* An empty wait must sleep: the harness measures the CPU time it burns. */
+static int test_msgwaitidle(void)
+{
+    if (zz_msg_wait(1500000u) != ZZ_ETIMEDOUT)
+        return fail(100, "idle wait did not time out");
+    return 0;
+}
+
 int zz_main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "";
@@ -267,5 +315,12 @@ int zz_main(int argc, char **argv)
         return test_display();
     if (strcmp(mode, "services") == 0)
         return test_services();
-    return fail(1, "usage: contract <reject|abs|input|display|services>");
+    if (strcmp(mode, "msgwait") == 0)
+        return test_msgwait();
+    if (strcmp(mode, "msgwaitstop") == 0)
+        return test_msgwaitstop();
+    if (strcmp(mode, "msgwaitidle") == 0)
+        return test_msgwaitidle();
+    return fail(1, "usage: contract <reject|abs|input|display|services|msgwait|"
+                   "msgwaitstop|msgwaitidle>");
 }

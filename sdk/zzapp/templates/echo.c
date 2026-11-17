@@ -1,5 +1,7 @@
 /*
- * Echo every 32-byte client message until the launcher stops the app.
+ * Echo every 32-byte client message until the launcher stops the app. The app
+ * parks in zz_msg_wait between messages. Firmware older than API 0.4 has no
+ * wait, so the app falls back to polling with zz_yield.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -15,8 +17,13 @@ int zz_main(int argc, char **argv)
     (void)argc;
     (void)argv;
     while (!zz_should_stop()) {
-        int rc = zz_msg_poll(message);
+        int rc = zz_msg_wait(500000u);
 
+        if (rc == ZZ_ETIMEDOUT)
+            continue;
+        if (rc != ZZ_OK && rc != ZZ_ENOSYS)
+            break;              /* stop, or a corrupt ring */
+        rc = zz_msg_poll(message);
         if (rc < 0)
             return 20;
         if (rc == 0) {
