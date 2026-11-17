@@ -230,15 +230,18 @@ uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
     return flags;
 }
 
-/* One loader pass is bounded to about 1 ms (333k global-timer ticks) of
- * core-1 time. COUNTS_PER_SECOND is the CPU clock divided by two, so the
- * 666 MHz CPU's global timer runs at about 333 MHz. Card measurements bound
- * a pass to 96 KiB of zero or map work, 48 KiB of copy, or 256 applied
- * relocations. A pass never splits inside a 4 KiB page: every byte bound is
- * a multiple of the page size, so frame-boundary splitting and image mapping
- * still line up below the 1 MiB frame size. */
+/* Loader service spans use XTime global-timer ticks. COUNTS_PER_SECOND is the
+ * CPU clock divided by two, so the 666 MHz CPU's timer runs at about 333 MHz.
+ * A zero-attributed 96 KiB pass measured 848570 ticks (about 2.5 ms); that
+ * span also covers first-pass frame allocation before the memset. The 32 KiB
+ * zero slice targets about 0.8 ms at the measured effective rate. The
+ * existing 96 KiB map, 48 KiB copy, 2048-relocation extraction, and
+ * 256-relocation apply bounds remain; zero was the longest measured step.
+ * A pass never splits inside a 4 KiB page: every byte bound is a multiple of
+ * the page size, so frame-boundary splitting and image mapping still line up
+ * below the 1 MiB frame size. */
 #ifndef ZZAPP_LOADER_ZERO_CHUNK_BYTES
-#define ZZAPP_LOADER_ZERO_CHUNK_BYTES (96u * 1024u)
+#define ZZAPP_LOADER_ZERO_CHUNK_BYTES (32u * 1024u)
 #endif
 #ifndef ZZAPP_LOADER_COPY_CHUNK_BYTES
 #define ZZAPP_LOADER_COPY_CHUNK_BYTES (48u * 1024u)
@@ -504,6 +507,9 @@ static int map_loaded_image(const struct load_image *img)
         g_zeroed_frames = 0U;
         g_zero_offset = 0U;
         g_map_phase = LOADER_MAP_ZERO;
+        /* Frame allocation can scale with the image commit. Keep it out of
+         * the first bounded zero slice and give it its own service pass. */
+        return ZZAPP_LOADER_IN_PROGRESS;
     }
     if (g_map_phase == LOADER_MAP_ZERO) {
         uint32_t count;
@@ -1397,7 +1403,8 @@ static int prepare_loaded_image(void)
     if (g_reloc_section != shnum)
         return ZZAPP_LOADER_IN_PROGRESS;
     g_image_prepared = 1;
-    return ZZ_OK;
+    /* Do not combine the final extraction slice with allocation or zeroing. */
+    return ZZAPP_LOADER_IN_PROGRESS;
 }
 
 static int apply_loaded_relocations(void)

@@ -18,7 +18,6 @@ PACKED_MODULE := $(BUILD)/MINIGL.ZZM
 
 CPPFLAGS := -D_GNU_SOURCE -DMINIGL_MODULE -DMINIGL_HOST_TEST -DMINIGL_RASTERIX \
 	-DTASKQ_HOST_TEST -DMGL_PLATFORM_ZZARM -DZZM_LOADER_HOST_TEST \
-	-DZZM_V3_READ_HASH_CHUNK_BYTES=8U -DZZM_V3_MEMORY_CHUNK_BYTES=16U \
 	-I$(SRC) -I$(ROOT)/sdk/zzapp/include -I../card_pool \
 	-I../zzm_resources/mock -I../modules/mock -I$(LIB)/include \
 	-I$(LIB)/src -I$(LIB)/vendor/minigl-framework/include

@@ -595,8 +595,8 @@ uint16_t sdk_flac_decode(struct sdk_flac_state *st,
 		return st->status;
 	if (!io->pcm || io->pcm_capacity == 0U)
 		return SDK_STATUS_BAD_REQUEST;
-	/* Bound this pass to about 2 ms of core-1 service regardless of the
-	 * caller's high-water budget; see sdk_audio_codec_io.h for the
+	/* Bound this pass to the measured ~3.5 ms of core-1 service regardless
+	 * of the caller's high-water budget; see sdk_audio_codec_io.h for the
 	 * 333 MHz global-timer basis. */
 	io->pcm_budget = sdk_audio_decode_pass_budget(io->pcm_budget);
 

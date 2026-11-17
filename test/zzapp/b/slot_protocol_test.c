@@ -70,7 +70,10 @@ int main(void)
     assert(dispatch(ZZAPP_OP_QUERY, request, sizeof(request), reply, &reply_len) ==
            SDK_STATUS_OK);
     assert(reply_len == ZZAPP_QUERY_EXT_REPLY_BYTES);
-    assert(zzapp_get_be32(reply + ZZAPP_QUERY_CAPS) & (1U << 6));
+    assert(zzapp_get_be32(reply + ZZAPP_QUERY_CAPS) &
+           ZZAPP_CAP_LOW_MEMORY);
+    assert(zzapp_get_be32(reply + ZZAPP_QUERY_CAPS) &
+           ZZAPP_CAP_LOAD_PROGRESS);
     assert(zzapp_get_be32(reply + ZZAPP_QUERY_SLOTS) == ZZAPP_SLOT_COUNT);
     assert(zzapp_get_be32(reply + ZZAPP_QUERY_FREE_SLOTS) == 0U);
     extended_request(request, 2U, generation[2]);

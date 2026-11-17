@@ -202,8 +202,8 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 	if (max_pcm_this_call == 0U ||
 	    max_pcm_this_call > stream->pcm_capacity)
 		max_pcm_this_call = stream->pcm_capacity;
-	/* Bound this pass to about 2 ms of core-1 service regardless of the
-	 * client's high-water budget; see sdk_audio_codec_io.h for the
+	/* Bound this pass to the measured ~3.5 ms of core-1 service regardless
+	 * of the client's high-water budget; see sdk_audio_codec_io.h for the
 	 * 333 MHz global-timer basis. */
 	max_pcm_this_call = sdk_audio_decode_pass_budget(max_pcm_this_call);
 	if (max_pcm_this_call < frame_pcm_bytes)

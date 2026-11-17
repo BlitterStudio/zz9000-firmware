@@ -147,7 +147,7 @@ static void crossing_entry(const void *api_ptr, int argc, char **argv)
 #define NOTE_OFF 0x0a0u
 #define RELA_OFF 0x0d0u
 #define LOADER_UPLOAD_CHUNK_BYTES (64U * 1024U)
-#define LOADER_ZERO_CHUNK_BYTES (96U * 1024U)
+#define LOADER_ZERO_CHUNK_BYTES (32U * 1024U)
 #define LOADER_COPY_CHUNK_BYTES (48U * 1024U)
 #define LOADER_MAP_CHUNK_BYTES (96U * 1024U)
 #define LOADER_RELOC_PREPARE_ENTRIES 2048U
@@ -244,8 +244,8 @@ static void assert_pass_work_bounded(void)
     uint32_t work = zzapp_test_loader_work_last_bytes();
     uint32_t kind = zzapp_test_loader_work_last_kind();
 
-    /* One loader pass must stay under ~1 ms (333k global-timer ticks) on the
-     * card. COUNTS_PER_SECOND is CPU/2: 333 MHz on the 666 MHz CPU. */
+    /* XTime spans use COUNTS_PER_SECOND = CPU/2, about 333 MHz on the
+     * 666 MHz CPU. These are the production loader's measured pass bounds. */
     assert(zero <= LOADER_ZERO_CHUNK_BYTES);
     assert(zzapp_test_loader_reloc_entries_last() <=
            LOADER_RELOC_APPLY_ENTRIES);
@@ -520,6 +520,48 @@ static void make_relocation_stress_image(uint8_t *image, uint32_t bytes,
     put32(sh + 36U, 12U);
 }
 
+static void test_relocation_allocation_and_zero_use_separate_passes(void)
+{
+    const uint32_t relocation_count = 1517U;
+    const uint32_t bytes = RELA_OFF + relocation_count * 12U + 40U;
+    uint8_t *image = malloc(bytes);
+    uint32_t offset;
+    int rc;
+
+    assert(image != NULL);
+    zzapp_boot_init();
+    make_relocation_stress_image(image, bytes, relocation_count);
+    assert(zzapp_loader_begin() == ZZ_OK);
+    for (offset = 0U; offset < bytes;) {
+        uint32_t chunk = bytes - offset;
+
+        if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
+            chunk = LOADER_UPLOAD_CHUNK_BYTES;
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        offset += chunk;
+    }
+
+    rc = zzapp_loader_end();
+    assert(rc == ZZAPP_LOADER_IN_PROGRESS);
+    assert(zzapp_test_loader_work_last_kind() == TEST_WORK_KIND_RELOC);
+    assert(zzapp_test_loader_work_last_bytes() == relocation_count * 16U);
+    assert(zzapp_test_loader_zero_last_bytes() == 0U);
+
+    rc = zzapp_loader_end();
+    assert(rc == ZZAPP_LOADER_IN_PROGRESS);
+    assert(zzapp_test_loader_work_last_kind() == 0U);
+    assert(zzapp_test_loader_work_last_bytes() == 0U);
+    assert(zzapp_test_loader_zero_last_bytes() == 0U);
+
+    rc = zzapp_loader_end();
+    assert(rc == ZZAPP_LOADER_IN_PROGRESS);
+    assert(zzapp_test_loader_work_last_kind() == TEST_WORK_KIND_ZERO);
+    assert(zzapp_test_loader_zero_last_bytes() == LOADER_ZERO_CHUNK_BYTES);
+
+    assert(zzapp_loader_abort() == ZZ_OK);
+    free(image);
+}
+
 static void test_abort_releases_each_loader_slice(void)
 {
     const uint32_t relocation_count = 2U * 4096U + 1U;
@@ -760,6 +802,7 @@ int main(void)
     test_large_load_is_bounded_and_exact();
     test_abort_releases_each_loader_slice();
     test_relocation_validation_is_sliced();
+    test_relocation_allocation_and_zero_use_separate_passes();
     test_relocation_passes_are_bounded_and_flushed();
     zzapp_boot_init();
     make_image(image);

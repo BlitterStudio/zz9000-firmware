@@ -54,7 +54,9 @@ static int admit_reset_on_register_ops;
 static int admit_reset_on_aperture_query;
 static unsigned reset_admissions;
 static unsigned aperture_queries;
-static uint8_t module_file[ZZM_V3_HEADER_SIZE + 32U];
+#define TEST_MODULE_IMAGE_BYTES (48U * 1024U)
+#define TEST_MODULE_BSS_BYTES (128U * 1024U)
+static uint8_t module_file[ZZM_V3_HEADER_SIZE + TEST_MODULE_IMAGE_BYTES];
 static uint32_t module_offset;
 static unsigned module_open_calls;
 static unsigned module_close_calls;
@@ -643,8 +645,8 @@ static void prepare_module_file(void)
     header->module_id = ZZM_MODULE_MINIGL;
     header->abi_major = ZZM_V3_ABI_MAJOR;
     header->slot_load_address = ZZM_MINIGL_SLOT_ADDRESS;
-    header->image_size = 32U;
-    header->bss_size = 40U;
+    header->image_size = TEST_MODULE_IMAGE_BYTES;
+    header->bss_size = TEST_MODULE_BSS_BYTES;
     header->init_entry = ZZM_MINIGL_SLOT_ADDRESS;
     header->fini_entry = ZZM_MINIGL_SLOT_ADDRESS + 16U;
     header->load_policy = ZZM_LOAD_ON_DEMAND;
@@ -684,6 +686,9 @@ static void setup_host_memory(void)
     host_card_pool_reset(CARD_POOL_LIMIT_MINIGL + (64U << 20));
     surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
 }
+#define TEST_V3_READ_HASH_PASS_BYTES (12U * 1024U)
+#define TEST_V3_MEMORY_PASS_BYTES (64U * 1024U)
+
 static void assert_load_work_bounded(void)
 {
     uint32_t bytes = zzm_loader_test_work_bytes();
@@ -693,13 +698,13 @@ static void assert_load_work_bounded(void)
         assert(bytes == 0U);
         break;
     case ZZM_LOADER_TEST_WORK_READ_HASH:
-        assert(bytes <= ZZM_V3_READ_HASH_CHUNK_BYTES);
+        assert(bytes <= TEST_V3_READ_HASH_PASS_BYTES);
         break;
     case ZZM_LOADER_TEST_WORK_BSS_ZERO:
     case ZZM_LOADER_TEST_WORK_DCACHE_FLUSH:
     case ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE:
     case ZZM_LOADER_TEST_WORK_POISON:
-        assert(bytes <= ZZM_V3_MEMORY_CHUNK_BYTES);
+        assert(bytes <= TEST_V3_MEMORY_PASS_BYTES);
         break;
     }
 }
@@ -732,9 +737,9 @@ static int acquire_module_bounded(void)
         }
     } while (result == ZZM_LOAD_IN_PROGRESS);
     track_module_load = 0;
-    assert(module_max_read_request <= ZZM_V3_READ_HASH_CHUNK_BYTES);
-    assert(module_max_flush <= ZZM_V3_MEMORY_CHUNK_BYTES);
-    assert(module_max_icache <= ZZM_V3_MEMORY_CHUNK_BYTES);
+    assert(module_max_read_request <= TEST_V3_READ_HASH_PASS_BYTES);
+    assert(module_max_flush <= TEST_V3_MEMORY_PASS_BYTES);
+    assert(module_max_icache <= TEST_V3_MEMORY_PASS_BYTES);
     return result;
 }
 
@@ -939,19 +944,21 @@ int main(void)
     zzm_loader_boot_load();
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
     assert(status.state == ZZM_STATE_AVAILABLE);
-    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5, 72U);
+    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5,
+           TEST_MODULE_IMAGE_BYTES + TEST_MODULE_BSS_BYTES);
     assert(acquire_module_bounded() == ZZM_LOAD_READY);
     assert(module_load_passes > 8U);
     assert(module_open_calls == 1U);
     assert(module_close_calls == 1U);
     assert(module_read_calls == 4U);
-    assert(module_flush_calls == 5U);
-    assert(module_icache_calls == 2U);
+    assert(module_flush_calls == 3U);
+    assert(module_icache_calls == 1U);
     assert(memcmp((const void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS,
                   module_file + ZZM_V3_HEADER_SIZE, 32U) == 0);
     {
         const uint8_t *bss =
-            (const uint8_t *)(uintptr_t)(ZZM_MINIGL_SLOT_ADDRESS + 32U);
+            (const uint8_t *)(uintptr_t)(ZZM_MINIGL_SLOT_ADDRESS +
+                                         TEST_MODULE_IMAGE_BYTES);
         uint32_t i;
 
         for (i = 0U; i < 40U; i++)
@@ -2081,7 +2088,8 @@ int main(void)
     prepare_module_file();
     zzm_loader_boot_load();
     module_file[ZZM_V3_HEADER_SIZE + 31U] ^= 0x5aU;
-    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5, 72U);
+    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5,
+           TEST_MODULE_IMAGE_BYTES + TEST_MODULE_BSS_BYTES);
     assert(acquire_module_bounded() == ZZM_LOAD_FAILED);
     assert(module_open_calls == 1U && module_close_calls == 1U);
     assert(module_read_calls == 4U);
@@ -2096,7 +2104,8 @@ int main(void)
      * FILE_READ reason as the former one-shot f_read. */
     zzm_loader_boot_load();
     module_read_fail_call = 2U;
-    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5, 72U);
+    memset((void *)(uintptr_t)ZZM_MINIGL_SLOT_ADDRESS, 0xa5,
+           TEST_MODULE_IMAGE_BYTES + TEST_MODULE_BSS_BYTES);
     assert(acquire_module_bounded() == ZZM_LOAD_FAILED);
     module_read_fail_call = 0U;
     assert(module_open_calls == 1U && module_close_calls == 1U);

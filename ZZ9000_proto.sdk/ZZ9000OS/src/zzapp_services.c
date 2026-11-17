@@ -185,6 +185,7 @@ struct zzapp_service_slot {
 	uint32_t terminal_reason;
 	uint64_t claim_started;
 	uint64_t load_progress;
+	uint32_t load_step;
 	uint32_t launcher_heartbeat;
 	int quarantined;
 	int quarantine_reclaimed;
@@ -287,6 +288,7 @@ static struct zzapp_service_runtime runtime[ZZAPP_SLOT_COUNT];
 static struct zzapp_deferred deferred[ZZAPP_SLOT_COUNT];
 static uint32_t selected_slot[2];
 static uint32_t deferred_harvest_slot = ZZAPP_SLOT_COUNT;
+static uint32_t deferred_poll_next_slot;
 static int window_mapping_available;
 static uint32_t load_diag_seen;
 static int slot_busy_test[4];
@@ -4075,6 +4077,11 @@ static void run_deferred(void)
 		rc = zzapp_loader_begin();
 		if (rc == ZZ_OK)
 			publish_state = ZZAPP_ST_LOADING;
+		if (rc == ZZ_OK) {
+			slots[service_slot()].load_step = 0U;
+			life_put(ZZAPP_LIFE_PROGRESS_LO_OFF, 0U);
+			life_put(ZZAPP_LIFE_PROGRESS_HI_OFF, 0U);
+		}
 		break;
 	case ZZAPP_OP_LOAD_CHUNK: {
 		uint32_t off;
@@ -4125,8 +4132,17 @@ static void run_deferred(void)
 			break;
 		}
 		rc = zzapp_loader_end();
-		if (rc == ZZAPP_LOADER_IN_PROGRESS)
+		if (rc == ZZAPP_LOADER_IN_PROGRESS) {
+			uint32_t step;
+
+			slot_state_lock_acquire();
+			slots[service_slot()].load_progress = now_us();
+			step = ++slots[service_slot()].load_step;
+			slot_state_lock_release();
+			life_put(ZZAPP_LIFE_PROGRESS_LO_OFF, step);
+			life_put(ZZAPP_LIFE_PROGRESS_HI_OFF, 0U);
 			return;
+		}
 		if (rc != ZZ_OK)
 			publish_state = ZZAPP_ST_IDLE;
 		break;
@@ -4172,7 +4188,7 @@ static void run_deferred(void)
 
 void zzapp_services_poll(void)
 {
-	uint32_t slot;
+	uint32_t checked;
 	uint32_t selected = selected_slot[service_context()];
 
 	if (!defer_on_core1()) {
@@ -4185,13 +4201,18 @@ void zzapp_services_poll(void)
 		return;
 	}
 	if (zzapp_kernel_current_thread() < 0) {
-		for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		for (checked = 0U; checked < ZZAPP_SLOT_COUNT; checked++) {
+			uint32_t slot =
+				(deferred_poll_next_slot + checked) % ZZAPP_SLOT_COUNT;
+
 			select_slot(slot);
 			slot_state_lock_acquire();
 			if (current_deferred()->state == DEFER_POSTED ||
 			    (current_deferred()->state == DEFER_RUNNING &&
 			     current_deferred()->opcode == ZZAPP_OP_LOAD_END)) {
 				current_deferred()->state = DEFER_RUNNING;
+				deferred_poll_next_slot =
+					(slot + 1U) % ZZAPP_SLOT_COUNT;
 				slot_state_lock_release();
 				run_deferred();
 				break;
@@ -4515,7 +4536,8 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		put_query(reply, reply_len,
 			  ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO |
 			  ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8 | ZZAPP_CAP_SLOTS |
-			  (extended ? ZZAPP_CAP_LOW_MEMORY : 0U),
+			  (extended ? ZZAPP_CAP_LOW_MEMORY |
+				      ZZAPP_CAP_LOAD_PROGRESS : 0U),
 			  extended);
 		return SDK_STATUS_OK;
 	}
@@ -4735,6 +4757,7 @@ void zzapp_services_test_reset(void)
 	selected_slot[0] = 0U;
 	selected_slot[1] = 0U;
 	deferred_harvest_slot = ZZAPP_SLOT_COUNT;
+	deferred_poll_next_slot = 0U;
 	display_mailbox_slot = -1;
 	defer_test_core = 1;
 	yield_hook = NULL;

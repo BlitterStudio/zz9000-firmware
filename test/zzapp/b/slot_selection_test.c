@@ -27,18 +27,19 @@
 #define TEST_LOAD_BYTES \
     (TEST_IMAGE_BYTES + TEST_HEAP_FRAMES * ZZAPP_MEM_FRAME_BYTES + \
      ZZAPP_STACK_DEFAULT)
-#define TEST_LOADER_ZERO_BYTES_PER_PASS (96U * 1024U)
+#define TEST_LOADER_ZERO_BYTES_PER_PASS (32U * 1024U)
 #define TEST_LOADER_COPY_BYTES_PER_PASS (48U * 1024U)
 #define TEST_LOADER_MAP_BYTES_PER_PASS (96U * 1024U)
 #define TEST_RELOC_ENTRIES 1U
 /*
  * Besides material chunks, the incremental loader needs one worker pass to
- * observe zero completion, set up the address space, leave copy, enter image
- * mapping, flush a full image frame, enter tail mapping, and finish the tail:
- * 1 + 1 + 1 + 1 + 1 + 1 + 1 = 7 transitions, plus the initial preparation
- * pass that parses the ELF and allocates relocation storage.
+ * leave relocation extraction, allocate frames, observe zero completion, set
+ * up the address space, leave copy, enter image mapping, flush a full image
+ * frame, enter tail mapping, and finish the tail: 9 transitions, plus the
+ * initial preparation pass that parses the ELF and allocates relocation
+ * storage.
  */
-#define TEST_LOADER_PHASE_PASSES (7U + 1U)
+#define TEST_LOADER_PHASE_PASSES (9U + 1U)
 #define DIV_ROUND_UP(value, unit) (((value) + (unit) - 1U) / (unit))
 #define TEST_LOAD_END_PASS_LIMIT \
     (DIV_ROUND_UP(TEST_LOAD_BYTES, TEST_LOADER_ZERO_BYTES_PER_PASS) + \
@@ -69,6 +70,7 @@ static int exit_after_stop;
 static unsigned slot1_starts;
 static int run_spin_template;
 static uint64_t spin_now;
+static uint64_t service_now;
 static uint32_t stop_generation;
 
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv));
@@ -175,6 +177,8 @@ static uint16_t run_request(uint16_t opcode, const uint8_t *request,
     zzapp_kernel_set_current_thread(-1);
     for (pass = 0U; pass < request_pass_limit(opcode); pass++) {
         zzapp_worker_hook();
+        assert(zzapp_test_loader_zero_last_bytes() <=
+               TEST_LOADER_ZERO_BYTES_PER_PASS);
         if (zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL,
                                   &reply_bytes)) {
             zzapp_mailbox_harvest_ack();
@@ -198,12 +202,14 @@ static uint32_t claim_slot(uint32_t slot)
     return zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
 }
 
-static void load_begin_and_chunk(uint32_t slot, uint32_t generation)
+static void load_begin_and_chunk_heap(uint32_t slot, uint32_t generation,
+                                      uint32_t heap_frames)
 {
     uint8_t image[IMAGE_BYTES];
     uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 
     make_image(image);
+    put32(image + NOTE_OFF + 40U, heap_frames);
     request_for_slot(request, slot, generation);
     assert(run_request(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
            SDK_STATUS_OK);
@@ -216,6 +222,11 @@ static void load_begin_and_chunk(uint32_t slot, uint32_t generation)
     zzapp_put_be32(request + ZZAPP_CHUNK_STAGING, ZZAPP_STAGING_OFF);
     assert(run_request(ZZAPP_OP_LOAD_CHUNK, request, sizeof(request)) ==
            SDK_STATUS_OK);
+}
+
+static void load_begin_and_chunk(uint32_t slot, uint32_t generation)
+{
+    load_begin_and_chunk_heap(slot, generation, TEST_HEAP_FRAMES);
 }
 
 static void finish_load(uint32_t slot, uint32_t generation)
@@ -251,6 +262,8 @@ static void complete_load_end(void)
 
     for (pass = 0U; pass < TEST_LOAD_END_PASS_LIMIT; pass++) {
         zzapp_services_poll();
+        assert(zzapp_test_loader_zero_last_bytes() <=
+               TEST_LOADER_ZERO_BYTES_PER_PASS);
         if (zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL,
                                   &reply_bytes)) {
             assert(status == SDK_STATUS_OK);
@@ -286,6 +299,11 @@ static uint64_t spin_time(void)
         zzapp_host_tick_at(spin_now);
     }
     return spin_now;
+}
+
+static uint64_t service_time(void)
+{
+    return service_now;
 }
 
 static void app_entry(const void *api, int argc, char **argv)
@@ -329,6 +347,8 @@ static void setup(void)
     slot1_starts = 0U;
     run_spin_template = 0;
     spin_now = 0U;
+    service_now = 0U;
+    zzapp_services_test_set_time(NULL);
     stop_generation = 0U;
     host_card_pool_reset(256U << 20);
     zzapp_boot_init();
@@ -555,6 +575,101 @@ static void test_slot_reset_preserves_incremental_slot1(void)
     reload_slot0();
 }
 
+static void test_short_slot_request_bypasses_long_load(void)
+{
+    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    uint16_t reply_bytes = 0U;
+    uint16_t status;
+    uint32_t generation[2];
+    uint32_t begin_id;
+    unsigned pass;
+
+    setup();
+    generation[0] = claim_slot(0U);
+    generation[1] = claim_slot(1U);
+    load_begin_and_chunk_heap(0U, generation[0], 30U);
+    start_load_end(0U, generation[0]);
+
+    request_for_slot(request, 1U, generation[1]);
+    begin_id = ++request_id;
+    assert(zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request,
+                                  sizeof(request), reply, &reply_bytes, 1,
+                                  begin_id, 0U) == SDK_STATUS_QUEUED);
+    for (pass = 0U; pass < 4U; pass++) {
+        uint32_t completed_id = 0U;
+
+        zzapp_services_poll();
+        if (zzapp_mailbox_harvest(&completed_id, NULL, NULL, &status, NULL,
+                                  &reply_bytes)) {
+            assert(completed_id == begin_id);
+            assert(status == SDK_STATUS_OK);
+            zzapp_mailbox_harvest_ack();
+            break;
+        }
+    }
+    assert(pass < 4U);
+
+    zzapp_services_select_slot(0U);
+    assert(zzapp_loader_abort() == ZZ_OK);
+    zzapp_services_select_slot(1U);
+    assert(zzapp_loader_abort() == ZZ_OK);
+}
+
+static void test_concurrent_loads_each_advance(void)
+{
+    uint32_t generation[2];
+    uint32_t progress[2];
+
+    setup();
+    generation[0] = claim_slot(0U);
+    generation[1] = claim_slot(1U);
+    load_begin_and_chunk(0U, generation[0]);
+    load_begin_and_chunk(1U, generation[1]);
+    start_load_end(0U, generation[0]);
+    start_load_end(1U, generation[1]);
+
+    progress[0] = zzapp_get_be32(windows[0] + ZZAPP_LIFE_OFF +
+                                 ZZAPP_LIFE_PROGRESS_LO_OFF);
+    progress[1] = zzapp_get_be32(windows[1] + ZZAPP_LIFE_OFF +
+                                 ZZAPP_LIFE_PROGRESS_LO_OFF);
+    assert(progress[0] != 0U);
+    assert(progress[1] != 0U);
+
+    zzapp_services_select_slot(0U);
+    assert(zzapp_loader_abort() == ZZ_OK);
+    zzapp_services_select_slot(1U);
+    assert(zzapp_loader_abort() == ZZ_OK);
+}
+
+static void test_advancing_load_renews_lease(void)
+{
+    uint32_t generation;
+    uint32_t state;
+    uint8_t reason;
+    unsigned pass;
+
+    setup();
+    zzapp_services_test_set_time(service_time);
+    generation = claim_slot(0U);
+    load_begin_and_chunk_heap(0U, generation, 30U);
+    start_load_end(0U, generation);
+    for (pass = 0U; pass < 4U; pass++) {
+        service_now += 10U * 1000U * 1000U;
+        zzapp_services_expire_claims(service_now);
+        zzapp_services_poll();
+    }
+    list_slot(0U, &state, &reason);
+    assert(state == ZZAPP_ST_LOADING);
+    assert(reason == ZZAPP_END_NONE);
+    assert(zzapp_get_be32(windows[0] + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_PROGRESS_LO_OFF) >= 5U);
+
+    zzapp_services_select_slot(0U);
+    assert(zzapp_loader_abort() == ZZ_OK);
+    zzapp_services_test_set_time(NULL);
+}
+
 int main(void)
 {
     test_force_stop_preserves_incremental_slot1();
@@ -564,5 +679,8 @@ int main(void)
     test_spin_template_stops_within_grace();
     test_start_uses_deferred_slot_not_caller_selection();
     test_slot_reset_preserves_incremental_slot1();
+    test_short_slot_request_bypasses_long_load();
+    test_concurrent_loads_each_advance();
+    test_advancing_load_renews_lease();
     return 0;
 }

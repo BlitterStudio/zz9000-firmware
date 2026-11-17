@@ -206,18 +206,24 @@ static uint16_t dispatch(uint16_t opcode, const uint8_t *request,
     uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
     uint16_t reply_bytes = 0;
     uint16_t status;
+    uint32_t pass;
 
     status = zzapp_mailbox_dispatch(opcode, request, request_bytes, reply,
                                     &reply_bytes, 1, ++request_id, 0);
     assert(status == SDK_STATUS_QUEUED);
-    zzapp_worker_hook();
-    if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL,
-                               &reply_bytes)) {
-        assert(opcode == ZZAPP_OP_START && reset_running);
-        return SDK_STATUS_QUEUED;
+    for (pass = 0U; pass < 16U; pass++) {
+        zzapp_worker_hook();
+        if (zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL,
+                                  &reply_bytes)) {
+            zzapp_mailbox_harvest_ack();
+            return status;
+        }
+        if (opcode == ZZAPP_OP_START && reset_running)
+            return SDK_STATUS_QUEUED;
+        assert(opcode == ZZAPP_OP_LOAD_END);
     }
-    zzapp_mailbox_harvest_ack();
-    return status;
+    assert(0 && "deferred request did not complete");
+    return SDK_STATUS_IO_ERROR;
 }
 
 static uint16_t status(void)

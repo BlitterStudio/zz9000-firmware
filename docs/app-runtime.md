@@ -27,27 +27,39 @@ The core-1 private timer gives apps a 5 ms quantum. The scheduler first runs
 due system work—SDK tasks, MiniGL service, launcher work, and audio feeding—
 then selects runnable app threads round-robin. In an overload window, service
 work is limited so runnable apps retain a 5% floor.
+Deferred launcher operations are selected round-robin across slots. Each
+service pass advances at most one slot by one bounded step, preserving
+per-slot request order without letting a long `LOAD_END` starve another
+slot's `LOAD_BEGIN`, `LOAD_CHUNK`, or `START`.
 
 A system-service pass runs to completion, and no app runs on core 1 meanwhile.
 A CPU-bound app therefore gets about one service turn per 5 ms timer quantum;
-there is no universal 1 ms guarantee. The app loader and the progressive-JPEG
-coefficient step are each bounded to about 1 ms: the loader zeroes or maps at
-most 96 KiB, copies 48 KiB, extracts 2048 relocation entries, or applies 256.
+there is no universal 1 ms guarantee. The app loader zeroes at most 32 KiB,
+maps at most 96 KiB, copies at most 48 KiB, extracts at most 2048 relocation
+entries, or applies at most 256 per pass. A zero-attributed 96 KiB launcher
+span measured 848570 XTime ticks, about 2.5 ms at 333 MHz, before the zero
+slice was reduced; the span also includes first-pass frame allocation before
+the `memset`. The 32 KiB zero slice targets about 0.8 ms at the observed
+effective rate. The progressive-JPEG coefficient step remains bounded to
+about 1 ms.
 An on-demand v3 module load reads and hashes at most 12 KiB, then zeroes,
 flushes, invalidates, or failure-poisons at most 64 KiB. A FLAC, Vorbis, or
-MP3 decode pass produces at most 24 KiB of PCM plus one frame, about 2 ms.
+MP3 decode pass produces at most 24 KiB of PCM plus one frame. A measured
+24 KiB pass took 1172743 XTime ticks, about 3.5 ms at 333 MHz.
 At 44.1 kHz stereo S16, 24 KiB is about 139 ms of playback and needs about
 7.2 refill passes per second, well below the roughly 200 service turns per
 second available to a CPU-bound app when the pump refills below low water.
 
 Those pass bounds do not make 64 KiB uploads, MiniGL batches, or whole image
-and JPEG operations universally 1 ms. The mailbox JPEG task decodes two rows
-per invocation and invalidates or flushes at most 32 KiB of cache per
-invocation; host bound tests do not cover those limits. Image setup, scaling,
-and non-coefficient work remain outside the progressive-JPEG step bound. TLS
-key exchange and signature checks offloaded by the AmiSSL provider cannot be
-split: one X25519, P-256 or RSA-2048 operation holds core 1 for about 5 to
-25 ms, so a handshake stalls running apps for that long.
+and JPEG operations universally 1 ms. Boot-time `IMAGE_SESSION_FEED` reached
+14.9 ms in the same measurement and is not covered by these app-runtime pass
+bounds. The mailbox JPEG task decodes two rows per invocation and invalidates
+or flushes at most 32 KiB of cache per invocation; host bound tests do not
+cover those limits. Image setup, scaling, and non-coefficient work remain
+outside the progressive-JPEG step bound. TLS key exchange and signature
+checks offloaded by the AmiSSL provider cannot be split: one X25519, P-256 or
+RSA-2048 operation holds core 1 for about 5 to 25 ms, so a handshake stalls
+running apps for that long.
 
 An API body remains unpreemptible while it owns the API lock. Its internal
 explicit `zz_yield` safe point releases that lock, lets one due system-service
@@ -173,9 +185,10 @@ with the restart reason.
 
 The app service is `0x0c00`; its catalog version is `0x00030000`. Integers
 in mailbox payloads and windows are big-endian. `ZZAPP_CAP_SLOTS` advertises
-four slots. `ZZAPP_CAP_LOW_MEMORY` is append-only in the extended `QUERY`
-capability word; a client with `ZZAPP_CAP_SLOTS` uses the extended request form
-for all operations after allocation and carries the returned slot and generation.
+four slots. `ZZAPP_CAP_LOW_MEMORY` and `ZZAPP_CAP_LOAD_PROGRESS` are
+append-only bits in the extended `QUERY` capability word; a client with
+`ZZAPP_CAP_SLOTS` uses the extended request form for all operations after
+allocation and carries the returned slot and generation.
 
 An extended request is exactly 48 payload bytes. The selector is at byte 40
 (`slot`) and byte 44 (`generation`). Existing fields retain their old offsets;
@@ -227,6 +240,17 @@ Byte 25 is the terminal reason. Bytes 26-27 hold the overload flag, and bytes
 28-47 are the app name. Terminal reasons are `NONE` (0), `EXIT` (1),
 `FORCED` (2), `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
 `AMIGA_RESET` (7), `CORE_RESTART` (8), and `QUARANTINED` (9).
+
+### Incremental-load progress
+
+Firmware advertising `ZZAPP_CAP_LOAD_PROGRESS` increments the big-endian
+32-bit word at lifecycle offset `0x68` after every incomplete `LOAD_END`
+step. `LOAD_BEGIN` resets it to zero. The word wraps modulo $2^{32}$ and only
+denotes loader progress while the slot is `LOADING`; once the app runs, the
+existing runtime progress timestamp again owns offsets `0x68` and `0x6C`.
+Revision 39 of `zz9k.library` resets its normal five-second inactivity
+deadline whenever this word changes. With older firmware, which does not
+advertise the bit, it retains the fixed 32-second load-lease fallback.
 
 ### Low-memory crossings
 

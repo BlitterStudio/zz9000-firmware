@@ -47,6 +47,8 @@
 #define ZZAPP_CAP_SLOTS            (1u << 5)
 /* Extended QUERY advertises low-memory crossing counters in lifecycle blocks. */
 #define ZZAPP_CAP_LOW_MEMORY       (1u << 6)
+/* Lifecycle progress advances after every incremental LOAD_END step. */
+#define ZZAPP_CAP_LOAD_PROGRESS    (1u << 7)
 #define ZZAPP_SLOT_COUNT           4u
 
 /* Extended-request ownership mismatch. Matches SDK_STATUS_BAD_HANDLE. */
