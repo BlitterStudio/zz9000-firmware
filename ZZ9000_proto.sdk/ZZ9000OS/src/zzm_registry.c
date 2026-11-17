@@ -49,8 +49,10 @@ enum zzm_codec_availability zzm_registry_availability(uint32_t module_id)
 
     if (index < 0 || !zzm_loader_status((uint32_t)index, &status))
         return ZZM_CODEC_MISMATCH;
-    if (status.state == ZZM_STATE_AVAILABLE || status.state == ZZM_STATE_LOADING)
-        (void)zzm_loader_ensure_loaded(module_id);
+    if (status.state == ZZM_STATE_AVAILABLE || status.state == ZZM_STATE_LOADING) {
+        if (zzm_loader_ensure_loaded(module_id) == ZZM_LOAD_IN_PROGRESS)
+            return ZZM_CODEC_LOADING;
+    }
     if (!zzm_loader_status((uint32_t)index, &status))
         return ZZM_CODEC_MISMATCH;
     return status.state == ZZM_STATE_LOADED ? ZZM_CODEC_AVAILABLE :

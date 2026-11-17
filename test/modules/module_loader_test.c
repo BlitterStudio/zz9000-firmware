@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "sdk_crypto.h"
+#include "sdk_image_stream.h"
 #include "sdk_video_stream.h"
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
@@ -26,18 +27,48 @@ int smp_raw_spin_try_lock(volatile uint32_t *word)
 static unsigned loader_open_calls;
 static unsigned loader_close_calls;
 static FRESULT loader_open_result;
-static const uint8_t *loader_file_data;
-static uint32_t loader_file_size;
+struct loader_file {
+    const uint8_t *data;
+    uint32_t size;
+};
+static struct loader_file loader_files[8];
 static uint32_t loader_file_offset;
 static int loader_minigl_file_only;
 static uint32_t loader_read_limit = UINT32_MAX;
 static uint32_t loader_fail_offset = UINT32_MAX;
 
+static int loader_file_index(const char *path)
+{
+    uint32_t i;
+
+    for (i = 0U; i < zzm_slot_count; i++)
+        if (strstr(path, zzm_slots[i].name))
+            return (int)i;
+    return -1;
+}
+
+static void set_loader_module_file(uint32_t module_id, const uint8_t *data,
+                                   uint32_t size)
+{
+    uint32_t i;
+
+    for (i = 0U; i < zzm_slot_count; i++)
+        if (zzm_slots[i].id == module_id) {
+            loader_files[i].data = data;
+            loader_files[i].size = size;
+            return;
+        }
+}
+
 static void set_loader_file(const uint8_t *data, uint32_t size,
                             int minigl_file_only)
 {
-    loader_file_data = data;
-    loader_file_size = size;
+    uint32_t i;
+
+    for (i = 0U; i < zzm_slot_count; i++) {
+        loader_files[i].data = data;
+        loader_files[i].size = size;
+    }
     loader_minigl_file_only = minigl_file_only;
     loader_read_limit = UINT32_MAX;
     loader_fail_offset = UINT32_MAX;
@@ -45,13 +76,19 @@ static void set_loader_file(const uint8_t *data, uint32_t size,
 
 FRESULT f_open(FIL *file, const char *path, unsigned char mode)
 {
+    int index;
+
     (void)mode;
     loader_open_calls++;
     if (loader_minigl_file_only && strstr(path, "/MINIGL.ZZM") == 0)
         return FR_NO_FILE;
     if (loader_open_result != FR_OK)
         return loader_open_result;
-    file->size = loader_file_size;
+    index = loader_file_index(path);
+    if (index < 0 || !loader_files[index].data)
+        return FR_NO_FILE;
+    file->id = (uint32_t)index;
+    file->size = loader_files[index].size;
     loader_file_offset = 0U;
     return FR_OK;
 }
@@ -66,13 +103,15 @@ FRESULT f_lseek(FIL *file, FSIZE_t offset)
 
 FRESULT f_read(FIL *file, void *buffer, UINT length, UINT *read)
 {
-    if (!loader_file_data || loader_file_offset > file->size ||
+    const struct loader_file *source = &loader_files[file->id];
+
+    if (!source->data || loader_file_offset > file->size ||
         length > loader_read_limit || loader_file_offset >= loader_fail_offset ||
         length > file->size - loader_file_offset) {
         *read = 0U;
         return FR_NOT_READY;
     }
-    memcpy(buffer, loader_file_data + loader_file_offset, length);
+    memcpy(buffer, source->data + loader_file_offset, length);
     loader_file_offset += length;
     *read = length;
     return FR_OK;
@@ -422,6 +461,54 @@ static void test_legacy_module_failure_poisoning(void)
     free(file);
 }
 
+static void test_webp_begin_requeues_for_loading_dependency(void)
+{
+    const uint32_t image_size = 16U;
+    uint8_t provider_file[ZZM_HEADER_SIZE + 16U] = { 0 };
+    uint8_t webp_file[ZZM_HEADER_SIZE + 16U] = { 0 };
+    zzm_header_t provider = valid_header(image_size);
+    zzm_header_t webp = valid_header(image_size);
+    struct SDKImageStreamBegin begin = {
+        .codec = SDK_IMAGE_CODEC_WEBP,
+        .output_mode = SDK_IMAGE_OUTPUT_TILE_BUFFER,
+        .output_format = SDK_SURFACE_FORMAT_BGRA8888,
+        .tile_handle = 1U,
+        .tile_stride = 4U,
+        .tile_rows = 1U,
+        .tile_address = (uintptr_t)provider_file,
+        .tile_length = 4U,
+        .core1_affine = 1U,
+    };
+    struct SDKImageStreamResult result;
+    void *slot;
+
+    provider.provided_count = 1U;
+    provider.provided[0].service_id = 0xfaceU;
+    provider.provided[0].min_version = 1U;
+    webp.module_id = ZZM_MODULE_WEBP;
+    webp.slot_load_address = zzm_slots[2].address;
+    webp.init_entry = webp.slot_load_address;
+    strcpy(webp.name, "WEBP");
+    webp.required_count = 1U;
+    webp.required[0] = provider.provided[0];
+    memcpy(provider_file, &provider, sizeof(provider));
+    memcpy(webp_file, &webp, sizeof(webp));
+    slot = mmap((void *)(uintptr_t)provider.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED)
+        return;
+    loader_open_result = FR_OK;
+    set_loader_file(0, 0U, 0);
+    set_loader_module_file(ZZM_MODULE_MPEG2, provider_file,
+                           sizeof(provider_file));
+    set_loader_module_file(ZZM_MODULE_WEBP, webp_file, sizeof(webp_file));
+    zzm_loader_boot_load();
+    CHECK(sdk_image_stream_begin(&begin, &result) == SDK_TASK_IN_PROGRESS);
+    CHECK(munmap(slot, 2U << 20) == 0);
+}
+
 static void test_v1_codec_begin_requeues_until_loaded(void)
 {
     const uint32_t image_size = 128U * 1024U;
@@ -562,6 +649,7 @@ int main(int argc, char **argv)
     test_legacy_module_load_is_sliced();
     test_legacy_module_load_lifecycle();
     test_legacy_module_failure_poisoning();
+    test_webp_begin_requeues_for_loading_dependency();
     test_v1_codec_begin_requeues_until_loaded();
     if (argc == 2)
         check_kit_minigl(argv[1]);
