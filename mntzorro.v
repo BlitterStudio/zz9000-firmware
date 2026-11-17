@@ -1332,11 +1332,15 @@ module MNTZorro_v0_1_S00_AXI
   reg        rd_fill = 0;      // ... and it is a read-ahead fill
   reg        rd_discard = 0;   // ... and nobody wants its beats
   reg        rd_req_fill = 0;  // what the pending request will be once accepted
+  // Writes can finish their Zorro cycle before the ACP returns BRESP.  Do
+  // not issue a later m00 read until every accepted write has reached DDR.
+  reg [3:0]  m00_write_outstanding = 0;
   // ARVALID powers up low (synthesis takes this as the flop's INIT value);
   // rd_idle depends on it before the first request.
   initial m00_axi_arvalid = 1'b0;
-  // a new request may go out: no transaction, and the fabric not in reset
-  wire       rd_idle = m00_axi_aresetn && !m00_axi_arvalid && !rd_out;
+  // A new request may go out only after prior m00 writes have responded.
+  wire       rd_idle = m00_axi_aresetn && !m00_axi_arvalid && !rd_out &&
+                       !m00_write_outstanding;
   reg sdk_doorbell_pending;
   reg sdk_irq_ack_pending;
   reg sdk_aperture_layout_ack;
@@ -1946,6 +1950,20 @@ module MNTZorro_v0_1_S00_AXI
     m01_axi_awlock <= 'h0;
     m01_axi_awprot <= 'h0;
     m01_axi_bready <= 'h1;
+  end
+
+  // AXI can accept a new AW before returning a prior B.  Keep the count
+  // balanced when those handshakes coincide so read-after-write ordering
+  // remains enforced without delaying Zorro DTACK.
+  always @(posedge S_AXI_ACLK) begin
+    if (!m00_axi_aresetn)
+      m00_write_outstanding <= 0;
+    else case ({m00_axi_awvalid_z3 && m00_axi_awready,
+                m00_axi_bvalid && m00_axi_bready})
+      2'b10: m00_write_outstanding <= m00_write_outstanding + 1'b1;
+      2'b01: m00_write_outstanding <= m00_write_outstanding - 1'b1;
+      default: m00_write_outstanding <= m00_write_outstanding;
+    endcase
   end
 
   reg [9:0] videocap_x_sync;

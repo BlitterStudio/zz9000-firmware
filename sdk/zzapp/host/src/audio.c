@@ -89,6 +89,8 @@ static int api_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out)
     size_t bytes;
     SDL_AudioSpec want, have;
 
+    if (host_stop_requested())
+        return ZZ_EIO;
     if (!out)
         return ZZ_EINVAL;
     if (channels != 2u || rate != HOST_AUDIO_RATE)
@@ -135,6 +137,8 @@ static int api_audio_open(uint32_t rate, uint32_t channels, zzapp_audio *out)
 
 static int api_audio_close(void)
 {
+    if (host_stop_requested())
+        return ZZ_EIO;
     if (!audio.open)
         return ZZ_EINVAL;
     if (audio.dev) {

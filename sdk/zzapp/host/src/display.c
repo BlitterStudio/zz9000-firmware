@@ -255,6 +255,8 @@ static int api_display_open(uint32_t w, uint32_t h, uint32_t format,
     uint32_t pitch;
     uint64_t bytes;
     int i;
+    if (host_stop_requested())
+        return ZZ_EIO;
 
     if (!out)
         return ZZ_EINVAL;
@@ -343,11 +345,15 @@ static int valid_id(uint32_t id)
 
 static int api_display_flip(uint32_t surface_id)
 {
+    if (host_stop_requested())
+        return ZZ_EIO;
     if (!valid_id(surface_id))
         return ZZ_EINVAL;
     if (disp.pending >= 0)
         complete_pending();
     present_buffer(disp.drawing);
+    if (host_stop_requested())
+        return ZZ_EIO;
     disp.showing = disp.drawing;
     /*
      * Pick the next drawing buffer from the live rotation (showing /

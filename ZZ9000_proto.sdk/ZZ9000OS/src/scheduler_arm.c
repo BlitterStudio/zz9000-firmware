@@ -7,9 +7,110 @@
  * This file carries the Cortex-A9 / Xilinx-BSP integration: SCU/SMP
  * coherency bring-up, the coherent shared control block, the core-1 worker,
  * and the core-0 poll. The portable state machine it drives lives in
- * scheduler.c (host-tested); a focused host seam covers worker initialization.
+ * scheduler.c (host-tested); focused host seams cover publish and clean
+ * requests.
  */
-#if defined(TASKQ_HOST_TEST) && defined(MINIGL_HOST_TEST)
+#if defined(TASKQ_HOST_TEST) && \
+    (defined(SCHEDULER_PUBLISH_HOST_TEST) || defined(SCHEDULER_CLEAN_HOST_TEST))
+
+#include "scheduler.h"
+
+static taskq_shared_t *publish_shared;
+static uint32_t publish_doorbells;
+
+static void scheduler_publish_host_doorbell(void *unused)
+{
+  (void)unused;
+  publish_doorbells++;
+}
+
+void scheduler_core1_publish_host_test_bind(taskq_shared_t *shared)
+{
+  publish_shared = shared;
+  publish_doorbells = 0U;
+}
+
+uint32_t scheduler_core1_publish_host_test_doorbells(void)
+{
+  return publish_doorbells;
+}
+
+static void scheduler_core1_wake(taskq_shared_t *shared)
+{
+  if (shared)
+    (void)taskq_doorbell_request(&shared->service_pending,
+                                 scheduler_publish_host_doorbell, 0);
+}
+
+void scheduler_core1_publish(void)
+{
+  scheduler_core1_publish_work(publish_shared, scheduler_core1_wake);
+}
+#if defined(SCHEDULER_CLEAN_HOST_TEST)
+static taskq_shared_t *clean_shared;
+static uint32_t clean_delay_us;
+static uint32_t clean_elapsed_us;
+static int clean_acknowledge;
+
+static int scheduler_clean_host_available(void *unused)
+{
+  (void)unused;
+  return 1;
+}
+
+static void scheduler_clean_host_publish(void *unused)
+{
+  (void)unused;
+}
+static void scheduler_clean_host_cache(void *unused)
+{
+  (void)unused;
+}
+
+
+static void scheduler_clean_host_wait(void *unused, uint32_t usecs)
+{
+  (void)unused;
+  clean_elapsed_us += usecs;
+  if (clean_acknowledge && clean_elapsed_us >= clean_delay_us &&
+      clean_shared->core1_current_slot < 0 &&
+      clean_shared->core1_clean_request) {
+    clean_shared->core1_clean_request = 0U;
+    clean_shared->core1_clean_done = 1U;
+  }
+}
+
+void scheduler_core1_clean_host_test_bind(taskq_shared_t *shared,
+                                          uint32_t delay_us, int acknowledge)
+{
+  clean_shared = shared;
+  clean_delay_us = delay_us;
+  clean_elapsed_us = 0U;
+  clean_acknowledge = acknowledge;
+}
+
+uint32_t scheduler_core1_clean_host_test_elapsed(void)
+{
+  return clean_elapsed_us;
+}
+
+void scheduler_core1_service_clean_request(void)
+{
+  scheduler_core1_service_clean_request_with(
+      clean_shared, scheduler_clean_host_cache, scheduler_clean_host_publish, 0);
+}
+
+int scheduler_core1_clean_dcache(void)
+{
+  return scheduler_core1_clean_dcache_wait(
+      clean_shared, scheduler_clean_host_available, scheduler_clean_host_publish,
+      scheduler_clean_host_wait, 0,
+      SCHED_CORE1_CLEAN_WAIT_US / SCHED_CORE1_CLEAN_POLL_US);
+}
+#endif
+
+
+#elif defined(TASKQ_HOST_TEST) && defined(MINIGL_HOST_TEST)
 
 #include "scheduler.h"
 #include "scheduler_core1_minigl_init.h"
@@ -25,13 +126,18 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "memorymap.h"
 #include "sdk_mailbox.h"
 #include "sdk_compression.h"
+#include "sdk_core1_reclaim.h"
 #include "sdk_image_stream.h"
 #include "sdk_video_stream.h"
 #include "sdk_media_session.h"
 #include "sdk_smp_lock.h"
 #include "card_pool.h"
+#include "l2_maint.h"
+#include "surface_allocator.h"
+#include "zzm_loader.h"
 #include "zzm_minigl_host.h"
 #include "core2.h"
+#include "interrupt.h"
 #include "sleep.h"
 #include "xil_types.h"
 #include "xil_mmu.h"
@@ -40,13 +146,25 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "xpseudo_asm.h"
 #include "xreg_cortexa9.h"
 #include "scheduler_core1_minigl_init.h"
+#include "zzapp_as.h"
+#include "zzapp_kernel.h"
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
 #include "zzm_runtime.h"
 #include <stdio.h>
+#if ZZAPP_PERF_COUNTERS
+#include "xtime_l.h"
+#endif
+
+#define SCHED_CORE1_DOORBELL_SGI 15U
+#define SCHED_CORE1_DOORBELL_CPU 2U
+
+/* The system thread keeps the established 1 MiB core-1 stack. */
+static uint8_t scheduler_app_stacks[ZZAPP_KERNEL_APP_SLOTS]
+                                   [ZZAPP_KERNEL_STACK_BYTES]
+  __attribute__((aligned(8)));
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
-static void scheduler_core1_clean_if_requested(taskq_shared_t *sh);
 
 /* BSP flat 1 MB-section translation table (translation_table.S). */
 extern u32 MMUTable;
@@ -98,33 +216,54 @@ typedef char sched_sessions_offset_check[
 static taskq_watchdog_t g_sched_watchdog;
 static volatile uint32_t g_core1_started;
 
+static void scheduler_core1_fallback_recover(void)
+{
+  /* The ordering is production logic and lives in the host-tested seam
+   * (scheduler.c); this only supplies the firmware implementations. */
+  scheduler_core1_fallback_recover_with(
+      core1_halt, zzapp_recover_halted_core1,
+      sdk_core1_reclaim_after_halt, &scheduler_shared()->queue,
+      zzapp_services_reclaim_halted_audio, zzm_runtime_quarantine_module,
+      ZZM_MODULE_MINIGL, &g_core1_started);
+}
+
 taskq_shared_t *scheduler_shared(void)
 {
   return (taskq_shared_t *)SDK_TASKQ_REGION_ADDRESS;
 }
 
+void zzapp_recover_external_locks(void)
+{
+  /* One list, used by cold restart, the watchdog and the single-core
+   * fallback, always before context retirement and teardown. */
+  card_pool_reset_lock(&card_pool);
+  l2_maint_reset_core1_lock();
+  zzapp_services_reset_core1_lock();
+  sdk_smp_lock_reset_malloc();
+  sdk_image_stream_reset_locks();
+  zzm_loader_reset_session_lock();
+  zzapp_as_reset_lock();
+  zzapp_mem_reset_live_lock();
+  zzapp_mem_reconcile_halted();
+  surface_allocator_reset_lock();
+  zzm_runtime_reset_heap_lock();
+}
+
 void scheduler_boot_init(void)
 {
   taskq_shared_t *sh = scheduler_shared();
-  taskq_init(&sh->queue);
-  sh->core1_current_slot = -1;
-  sh->core1_restart_request = 0;
-  sh->core1_fault_code = 0;
-  sh->core1_alive = 0;
-  sh->tasks_on_core1 = 0;   /* observability counters live in uninitialised DDR */
-  sh->tasks_on_core0 = 0;   /* until zeroed here -- must not read back as garbage */
-  sh->core1_park_request = 0;  /* garbage here would park core 1 at launch */
-  sh->core1_parked = 0;
-  sh->core1_reclaim_request = 0;
-  sh->core1_reclaim_done = 0;
-  sh->core1_clean_request = 0;
-  sh->core1_clean_done = 0;
-  sh->minigl_doorbell = 0;
-  sh->minigl_reset_request = 0;
-  sh->minigl_reset_ack = 0;
-  sh->minigl_in_flight = 0;
-  sh->minigl_packets_on_core1 = 0;
-  sh->minigl_packets_on_core0 = 0;
+
+  /* Doorbell and perf words live in uninitialised DDR. Clear them before
+   * core 1 starts, including when performance counters are compiled out. */
+  taskq_shared_boot_init(sh);
+  zzapp_kernel_stack_paint((uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
+                           SDK_CORE1_SYSTEM_STACK_SIZE);
+  {
+    uint32_t slot;
+    for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
+      zzapp_kernel_stack_paint(scheduler_app_stacks[slot],
+                               sizeof(scheduler_app_stacks[slot]));
+  }
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   zzapp_boot_init();
   g_core1_started = 0;
@@ -136,11 +275,97 @@ int scheduler_core1_available(void)
           taskq_watchdog_core1_enabled(&g_sched_watchdog)) ? 1 : 0;
 }
 
-void scheduler_core1_wake(void)
+static void scheduler_send_doorbell(void *unused)
 {
-  /* The producer's release-store publishes its payload before this event. */
+  (void)unused;
   dsb();
+  (void)XScuGic_SoftwareIntr(interrupt_get_intc(),
+                              SCHED_CORE1_DOORBELL_SGI,
+                              SCHED_CORE1_DOORBELL_CPU);
   __asm__ __volatile__("sev" ::: "memory");
+}
+
+#if ZZAPP_PERF_COUNTERS
+uint32_t scheduler_perf_stamp(void)
+{
+  XTime stamp;
+
+  /* XTime is the PS global timer. COUNTS_PER_SECOND is CPU/2, so these
+   * report spans are 333 MHz global-timer ticks on the 666 MHz CPU. */
+  XTime_GetTime(&stamp);
+  return (uint32_t)stamp;
+}
+
+uint32_t taskq_perf_enqueue_stamp(void)
+{
+  return scheduler_perf_stamp();
+}
+
+static void scheduler_perf_publish_doorbell(taskq_shared_t *sh)
+{
+  sh->perf_doorbell_stamp = scheduler_perf_stamp();
+  (void)__atomic_add_fetch(&sh->perf_sgi_count, 1U, __ATOMIC_RELEASE);
+}
+#endif
+
+static void scheduler_core1_wake(taskq_shared_t *sh)
+{
+#if ZZAPP_PERF_COUNTERS
+  uint32_t expected = 0U;
+
+  /* State 2 reserves the transition while core 0 publishes the timestamp.
+   * Core 1 never services state 2; release state 1 publishes work and its
+   * matching doorbell sample together. */
+  if (!__atomic_compare_exchange_n(&sh->service_pending, &expected, 2U, 0,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    return;
+  scheduler_perf_publish_doorbell(sh);
+  __atomic_store_n(&sh->service_pending, 1U, __ATOMIC_RELEASE);
+  scheduler_send_doorbell(NULL);
+#else
+  (void)taskq_doorbell_request(&sh->service_pending,
+                               scheduler_send_doorbell, NULL);
+#endif
+}
+void scheduler_core1_publish(void)
+{
+  scheduler_core1_publish_work(scheduler_shared(), scheduler_core1_wake);
+}
+
+
+/* The SGI is a doorbell, not a work body. Mark service due and let the
+ * exception return path select the system thread before another app runs. */
+static void scheduler_core1_doorbell_irq(void *unused)
+{
+  (void)unused;
+  zzapp_kernel_service_due(zzapp_runtime_kernel());
+}
+
+void scheduler_core1_enable_doorbell(void)
+{
+  XScuGic *intc = interrupt_get_intc();
+
+  (void)XScuGic_Connect(intc, SCHED_CORE1_DOORBELL_SGI,
+                         (Xil_InterruptHandler)scheduler_core1_doorbell_irq,
+                         NULL);
+  XScuGic_Enable(intc, SCHED_CORE1_DOORBELL_SGI);
+}
+
+uint32_t scheduler_core1_stack_high_water(uint32_t slot)
+{
+  if (slot >= ZZAPP_KERNEL_APP_SLOTS)
+    return zzapp_kernel_stack_used(
+        (const uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
+        SDK_CORE1_SYSTEM_STACK_SIZE);
+  return zzapp_kernel_stack_used(scheduler_app_stacks[slot],
+                                 sizeof(scheduler_app_stacks[slot]));
+}
+
+void *scheduler_core1_app_stack_top(uint32_t slot)
+{
+  if (slot >= ZZAPP_KERNEL_APP_SLOTS)
+    return NULL;
+  return scheduler_app_stacks[slot] + sizeof(scheduler_app_stacks[slot]);
 }
 
 /* Bounded wait for core 1's worker to come up, ~100 ms total. */
@@ -225,12 +450,20 @@ void scheduler_coherency_init_core1(void)
 {
   /* Core 1 is entered straight from the CPU1 reset vector (core1_loop),
    * bypassing boot.S, so it starts with MMU + caches + SMP OFF. Bring it up to
-   * match core 0 and make domain 14 Client, matching the firmware-text L2
-   * descriptors installed by mmu_page_set_readonly_executable(). */
-  u32 ttbr0 = (u32)(UINTPTR)&MMUTable | TASKQ_TTBR0_ATTR;
+   * match core 0. Unlike core 0, every domain is Client: app-table AP bits
+   * must protect both DDR (domain 15) and the domain-0 device, FPGA and OCM
+   * mappings, and domain 14 keeps the firmware-text L2 pages read-only. */
+  u32 ttbr0 = (u32)(UINTPTR)zzapp_as_template() | TASKQ_TTBR0_ATTR;
+  uint32_t contextidr = 0U;
+
+  __asm__ __volatile__("mcr p15, 0, %0, c13, c0, 1\n\tisb"
+                       : : "r" (contextidr) : "memory");
 
   mtcp(XREG_CP15_TTBR0, ttbr0);
-  mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0xDFFFFFFFU);
+  dsb();
+  mtcp(XREG_CP15_INVAL_UTLB_UNLOCKED, 0U);
+  mtcp(XREG_CP15_INVAL_BRANCH_ARRAY, 0U);
+  mtcp(XREG_CP15_DOMAIN_ACCESS_CTRL, 0x55555555U);
   dsb();
   isb();
 
@@ -275,29 +508,161 @@ static uint16_t scheduler_run_slot(taskq_desc_t *d)
   uint32_t len = 0;
   int slot = (int)(d - sh->queue.descs);
   uint16_t status = sdk_mailbox_run_offload_task(d, payload, &len);
-  taskq_complete(&sh->queue, slot, status, payload, (uint16_t)len);
+
+  if (status == SDK_TASK_IN_PROGRESS)
+    taskq_requeue(&sh->queue, slot);
+  else
+    taskq_complete(&sh->queue, slot, status, payload, (uint16_t)len);
   return status;
 }
+
+#if ZZAPP_PERF_COUNTERS
+
+static void scheduler_perf_sync_doorbell(taskq_shared_t *sh,
+					 zzapp_kernel_t *kernel)
+{
+	static uint32_t seen_sgis;
+	static uint32_t seen_work_publications;
+	uint32_t published = __atomic_load_n(&sh->perf_sgi_count,
+					    __ATOMIC_ACQUIRE);
+	uint32_t work_publications =
+		__atomic_load_n(&sh->perf_work_publications, __ATOMIC_ACQUIRE);
+
+	while (seen_sgis != published) {
+		zzapp_kernel_perf_sgi_raised(kernel, sh->perf_doorbell_stamp);
+		seen_sgis++;
+	}
+	zzapp_kernel_perf_work_published(kernel,
+					 work_publications - seen_work_publications);
+	seen_work_publications = work_publications;
+}
+
+static int scheduler_perf_consume_doorbell(taskq_shared_t *sh,
+					   zzapp_kernel_t *kernel)
+{
+	if (__atomic_load_n(&sh->service_pending, __ATOMIC_ACQUIRE) == 2U)
+		return 0;
+	scheduler_perf_sync_doorbell(sh, kernel);
+	if (__atomic_load_n(&sh->service_pending, __ATOMIC_ACQUIRE) == 2U)
+		return 0;
+	/* A producer may publish between the first acquire and this state
+	 * observation. Re-acquire the count before any service work begins. */
+	scheduler_perf_sync_doorbell(sh, kernel);
+	zzapp_kernel_perf_sgi_started(kernel, scheduler_perf_stamp());
+	return 1;
+}
+
+static zzapp_perf_service_t scheduler_perf_class(const taskq_desc_t *desc)
+{
+	uint32_t opcode = desc->opcode;
+
+	if (opcode == TASKQ_OP_DECODE_MP3 || opcode == TASKQ_OP_AUDIO_STREAM_FEED ||
+	    opcode == TASKQ_OP_AUDIO_STREAM_READ ||
+	    opcode == TASKQ_OP_AUDIO_STREAM_CLOSE ||
+	    opcode == TASKQ_OP_MEDIA_SESSION_AUDIO_READ)
+		return ZZAPP_PERF_SERVICE_AUDIO;
+	return ZZAPP_PERF_SERVICE_SDK;
+}
+#endif
 /* Bounded service body used between app calls. It never sleeps: while an
  * app is live the next timer tick or cooperative yield returns here. */
 void scheduler_core1_service_once(void)
 {
   taskq_shared_t *sh = scheduler_shared();
-  int slot = taskq_claim_any(&sh->queue);
+  sched_worker_action_t action;
+  int slot;
 
+#if ZZAPP_PERF_COUNTERS
+  if (!scheduler_perf_consume_doorbell(sh, zzapp_runtime_kernel()))
+    return;
+#endif
+  slot = taskq_claim_any(&sh->queue);
   if (slot >= 0) {
+#if ZZAPP_PERF_COUNTERS
+    zzapp_perf_service_t service = scheduler_perf_class(&sh->queue.descs[slot]);
+    uint32_t stamp = scheduler_perf_stamp();
+    uint32_t opcode = sh->queue.descs[slot].opcode;
+
+    zzapp_kernel_perf_sdk_started(zzapp_runtime_kernel(),
+                                  sh->queue.descs[slot].perf_enqueue_stamp,
+                                  stamp);
+    zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(), service, stamp);
+#endif
     sh->core1_current_slot = slot;
     (void)scheduler_run_slot(&sh->queue.descs[slot]);
     sh->core1_current_slot = -1;
     sh->tasks_on_core1++;
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_service_end_detail(zzapp_runtime_kernel(), service,
+                                         scheduler_perf_stamp(),
+                                         opcode, 0U);
+#endif
   }
-  sh->minigl_in_flight = 1;
-  dmb();
-  zzm_minigl_service_tick(0);
-  sh->minigl_in_flight = 0;
-  dmb();
+  action = sh->minigl_reset_request != 0U ? SCHED_WORKER_ACTION_RESET :
+                                           SCHED_WORKER_ACTION_MINIGL;
+  if (scheduler_minigl_submission_action(sh, action) ==
+      SCHED_WORKER_ACTION_MINIGL) {
+#if ZZAPP_PERF_COUNTERS
+    uint32_t stamp = scheduler_perf_stamp();
+    zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(),
+                                    ZZAPP_PERF_SERVICE_MINIGL, stamp);
+#endif
+    sh->minigl_in_flight = 1;
+    dmb();
+    zzm_minigl_service_tick(0);
+    sh->minigl_in_flight = 0;
+    dmb();
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_service_end(zzapp_runtime_kernel(),
+                                  ZZAPP_PERF_SERVICE_MINIGL,
+                                  scheduler_perf_stamp());
+#endif
+  }
 }
 
+static uint32_t scheduler_doorbell_drain(void *context, uint32_t batch)
+{
+  taskq_shared_t *sh = context;
+  uint32_t done = 0;
+
+  while (done < batch && taskq_has_active(&sh->queue)) {
+    scheduler_core1_service_once();
+    done++;
+  }
+  return done;
+}
+
+static int scheduler_doorbell_more(void *context)
+{
+  return taskq_has_active(&((taskq_shared_t *)context)->queue);
+}
+
+void scheduler_core1_service_from_app(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  /* One queued task per app tick, as before; the step also runs the MiniGL
+   * tick. Without queued work only the MiniGL tick runs. */
+  if (sh->service_pending &&
+      taskq_doorbell_drain(&sh->service_pending, scheduler_doorbell_drain,
+                           scheduler_doorbell_more, sh, 1U) != 0U)
+    return;
+  scheduler_core1_service_once();
+}
+
+static int scheduler_core1_kernel_lock_or_yield(void)
+{
+  zzapp_kernel_t *kernel = zzapp_runtime_kernel();
+
+  if (zzapp_kernel_system_lock(kernel) == 0)
+    return 1;
+  /* No worker task is active while yielding an app-owned kernel lock, so
+   * servicing a pending L1 clean cannot interrupt task-local state. */
+  scheduler_core1_service_clean_request();
+  zzapp_kernel_service_due(kernel);
+  __asm__ __volatile__("svc #0" ::: "memory");
+  return 0;
+}
 
 /*
  * Core-1 dedicated worker. Entered from core1_loop (core2.c) after coherency
@@ -313,8 +678,13 @@ void scheduler_core1_worker(void)
 {
   taskq_shared_t *sh = scheduler_shared();
 
-
+  for (;;) {
+    if (scheduler_core1_kernel_lock_or_yield())
+      break;
+  }
   scheduler_core1_minigl_init(sh);
+  sdk_mailbox_reset_jpeg_tasks();
+  (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
 
   for (;;) {
     int reset_req;
@@ -322,13 +692,59 @@ void scheduler_core1_worker(void)
     int task_avail;
     int mgl_avail;
     int mgl_bound;
+    int mgl_progress = 0;
+    int apps_runnable;
+    int should_wfe;
+    uint32_t drained = 0U;
     sched_worker_action_t action;
+
+    if (!scheduler_core1_kernel_lock_or_yield())
+      continue;
+    zzapp_kernel_set_current_thread(-1);
+#if ZZAPP_PERF_COUNTERS
+    if (!scheduler_perf_consume_doorbell(sh, zzapp_runtime_kernel())) {
+      (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+      continue;
+    }
+#endif
+    if (sh->core1_park_request) {
+      (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+      scheduler_core1_park_if_requested();
+      continue;
+    }
 
     /* Checked before every claim: once core 0 asks, no further task runs. */
     scheduler_core1_reclaim_if_requested(sh);
-    scheduler_core1_clean_if_requested(sh);
-    scheduler_core1_park_if_requested();
+    scheduler_core1_service_clean_request();
+    if (sh->service_pending)
+      drained = taskq_doorbell_drain(&sh->service_pending,
+                                     scheduler_doorbell_drain,
+                                     scheduler_doorbell_more, sh, 1U);
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(),
+                                    ZZAPP_PERF_SERVICE_LAUNCHER,
+                                    scheduler_perf_stamp());
+#endif
     zzapp_worker_hook();
+#if ZZAPP_PERF_COUNTERS
+    {
+      uint32_t work_kind = zzapp_loader_work_last_kind();
+
+      zzapp_kernel_perf_service_end_detail(
+          zzapp_runtime_kernel(), ZZAPP_PERF_SERVICE_LAUNCHER,
+          scheduler_perf_stamp(), work_kind ? 0x100U | work_kind : 1U,
+          zzapp_loader_work_last_bytes());
+    }
+#endif
+    if (drained != 0U) {
+      (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+#if ZZAPP_PERF_COUNTERS
+      zzapp_kernel_perf_print_reports(zzapp_runtime_kernel());
+#endif
+      if (zzapp_kernel_apps_runnable(zzapp_runtime_kernel()))
+        __asm__ __volatile__("svc #0" ::: "memory");
+      continue;
+    }
 
     reset_req = (sh->minigl_reset_request != 0);
     task_slot = reset_req ? -1 : taskq_claim_any(&sh->queue);
@@ -336,43 +752,112 @@ void scheduler_core1_worker(void)
     mgl_avail = zzm_minigl_has_work();
     mgl_bound = zzm_minigl_worker_registered();
     action = sched_worker_decide(reset_req, task_avail, mgl_avail, mgl_bound);
+    action = scheduler_minigl_submission_action(sh, action);
 
     switch (action) {
-    case SCHED_WORKER_ACTION_RESET:
-      /* The module owns context draining.  It is polled only on core 1 and
-       * acknowledges after it has stopped its worker-facing resources. */
-      if (zzm_minigl_begin_reset() != ZZM_MINIGL_RESET_BUSY &&
-          zzm_minigl_reset_poll() == ZZM_MINIGL_RESET_QUIESCENT) {
+    case SCHED_WORKER_ACTION_RESET: {
+      /* A reset step can wait for a committed RasterIX fence. Publish that
+       * interval so core 0's mailbox quiesce cannot reclaim its buffers. */
+      int result;
+
+      sh->minigl_in_flight = 1;
+      dmb();
+      result = zzm_minigl_reset_step();
+      sh->minigl_in_flight = 0;
+      dmb();
+      if (result != ZZM_MINIGL_RESET_BUSY) {
         sh->minigl_reset_request = 0;
-        sh->minigl_reset_ack = 1;
+        sh->minigl_reset_ack = result == ZZM_MINIGL_RESET_FAILED ?
+                               SCHED_MINIGL_RESET_ACK_FAILED :
+                               SCHED_MINIGL_RESET_ACK_DONE;
         dmb();
       }
       break;
+    }
 
-    case SCHED_WORKER_ACTION_TASK:
+    case SCHED_WORKER_ACTION_TASK: {
+#if ZZAPP_PERF_COUNTERS
+      zzapp_perf_service_t service =
+          scheduler_perf_class(&sh->queue.descs[task_slot]);
+      uint32_t stamp = scheduler_perf_stamp();
+      uint32_t opcode = sh->queue.descs[task_slot].opcode;
+
+      zzapp_kernel_perf_sdk_started(zzapp_runtime_kernel(),
+                                    sh->queue.descs[task_slot].perf_enqueue_stamp,
+                                    stamp);
+      zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(), service, stamp);
+#endif
       sh->core1_current_slot = task_slot;
       (void)scheduler_run_slot(&sh->queue.descs[task_slot]);
       sh->core1_current_slot = -1;
       sh->tasks_on_core1++;
+#if ZZAPP_PERF_COUNTERS
+      zzapp_kernel_perf_service_end_detail(zzapp_runtime_kernel(), service,
+                                            scheduler_perf_stamp(),
+                                            opcode,
+                                            0U);
+#endif
       break;
+    }
 
     case SCHED_WORKER_ACTION_MINIGL:
-    case SCHED_WORKER_ACTION_POLL_IDLE:
+    case SCHED_WORKER_ACTION_POLL_IDLE: {
+#if ZZAPP_PERF_COUNTERS
+      uint32_t stamp = scheduler_perf_stamp();
+      zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(),
+                                      ZZAPP_PERF_SERVICE_MINIGL, stamp);
+#endif
       sh->minigl_in_flight = 1;
       dmb();
-      zzm_minigl_service_tick(0);
+      mgl_progress = zzm_minigl_service_tick(0);
       sh->minigl_in_flight = 0;
       dmb();
+#if ZZAPP_PERF_COUNTERS
+      zzapp_kernel_perf_service_end(zzapp_runtime_kernel(),
+                                    ZZAPP_PERF_SERVICE_MINIGL,
+                                    scheduler_perf_stamp());
+#endif
       break;
+    }
 
     case SCHED_WORKER_ACTION_WFE:
     default:
-      if (!taskq_has_active(&sh->queue) &&
-          !sh->minigl_reset_request &&
-          !sh->minigl_doorbell &&
-          !zzm_minigl_worker_registered())
-        __asm__ __volatile__("wfe" ::: "memory");
       break;
+    }
+    should_wfe = sched_worker_may_wfe(action, mgl_progress,
+                                      taskq_has_active(&sh->queue),
+                                      sh->minigl_reset_request != 0,
+                                      sh->minigl_doorbell != 0,
+                                      zzm_minigl_worker_registered());
+    /* An app parked on host data (a file reply, console input, a flip) is
+     * woken by this loop's next service pass. The launcher's reply raises
+     * no interrupt, so idling in WFE would add up to one 5 ms tick to every
+     * request; keep polling while any wait is registered. */
+    if (should_wfe) {
+      uint32_t slot;
+
+      for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
+        if (zzapp_services_wait_registered(slot)) {
+          should_wfe = 0;
+          break;
+        }
+      }
+    }
+
+    (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
+#if ZZAPP_PERF_COUNTERS
+    zzapp_kernel_perf_print_reports(zzapp_runtime_kernel());
+#endif
+    /* A runnable app gets the core back at once. Idling in WFE while an
+     * app could run left it waiting for the next 5 ms tick after every
+     * service pass, which made swquake take minutes to load (kit 66). */
+    apps_runnable = zzapp_kernel_apps_runnable(zzapp_runtime_kernel());
+    if (apps_runnable)
+      __asm__ __volatile__("svc #0" ::: "memory");
+    else if (should_wfe) {
+      zzapp_kernel_idle_begin(zzapp_runtime_kernel());
+      __asm__ __volatile__("wfe" ::: "memory");
+      zzapp_kernel_idle_end(zzapp_runtime_kernel());
     }
   }
 }
@@ -419,6 +904,8 @@ static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh)
 }
 
 #define SCHED_RECLAIM_SPINS 2000U   /* x 10 us */
+/* Clean runs only from the Amiga-reset pool handoff; keep it inside that
+ * path's 150-ms reset budget without extending reclaim's normal deadline. */
 
 int scheduler_core1_reclaim(void)
 {
@@ -443,42 +930,49 @@ int scheduler_core1_reclaim(void)
   return -1;
 }
 
-/* Core 1 side of the cache clean: no task is running, so a set/way clean
- * of this core's L1 leaves no dirty line behind. */
-static void scheduler_core1_clean_if_requested(taskq_shared_t *sh)
+/* Core 1 cleans only after the shared helper has established that no worker
+ * task is active and no restart is pending. */
+static void scheduler_clean_cache(void *unused)
 {
-  if (!sh->core1_clean_request)
-    return;
-  sh->core1_clean_request = 0;
+  (void)unused;
   Xil_L1DCacheFlush();
-  dsb();
-  sh->core1_clean_done = 1;
+}
+
+static int scheduler_clean_available(void *unused)
+{
+  (void)unused;
+  return scheduler_core1_available();
+}
+
+static void scheduler_clean_publish(void *unused)
+{
+  (void)unused;
   dsb();
   __asm__ __volatile__("sev" ::: "memory");
 }
 
+void scheduler_core1_service_clean_request(void)
+{
+  scheduler_core1_service_clean_request_with(
+      scheduler_shared(), scheduler_clean_cache, scheduler_clean_publish, NULL);
+}
+
+static void scheduler_clean_wait(void *unused, uint32_t usecs)
+{
+  (void)unused;
+  usleep(usecs);
+}
+
 int scheduler_core1_clean_dcache(void)
 {
-  taskq_shared_t *sh = scheduler_shared();
-  uint32_t spins;
+  int result = scheduler_core1_clean_dcache_wait(
+      scheduler_shared(), scheduler_clean_available, scheduler_clean_publish,
+      scheduler_clean_wait, NULL,
+      SCHED_CORE1_CLEAN_WAIT_US / SCHED_CORE1_CLEAN_POLL_US);
 
-  if (!scheduler_core1_available() || !sh->core1_alive)
-    return 0;
-  if (sh->core1_current_slot >= 0 || sh->core1_restart_request)
-    return -1;
-  sh->core1_clean_done = 0;
-  sh->core1_clean_request = 1;
-  dsb();
-  __asm__ __volatile__("sev" ::: "memory");
-  for (spins = 0U; spins < SCHED_RECLAIM_SPINS && !sh->core1_clean_done;
-       spins++)
-    usleep(10);
-  if (sh->core1_clean_done)
-    return 0;
-  sh->core1_clean_request = 0;
-  dsb();
-  printf("[sched] core 1 did not clean its cache; cold restart\n");
-  return -1;
+  if (result != 0)
+    printf("[sched] core 1 did not clean its cache; cold restart\n");
+  return result;
 }
 
 /*
@@ -526,73 +1020,44 @@ void scheduler_core1_park_if_requested(void)
  *      work is pending this iteration (taskq_should_drain). This soaks up
  *      latency-sensitive work without stealing cycles from Amiga-facing I/O.
  */
+/* Harvest finished/failed tasks and post their completions. Shared by the
+ * core-0 poll and the quiesce-timeout teardown; the loop itself is the
+ * host-tested seam in scheduler.c. */
+static void scheduler_post_task_completions(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  scheduler_harvest_post_with(&sh->queue, &g_sched_watchdog,
+                              SDK_STATUS_INTERNAL_ERROR,
+                              sdk_mailbox_task_gen_ok,
+                              sdk_mailbox_post_deferred,
+                              sdk_mailbox_task_forget);
+}
+
 void scheduler_core0_poll(int zorro_pending, int display_pending)
 {
   taskq_shared_t *sh = scheduler_shared();
   int slot;
 
-  while ((slot = taskq_harvest(&sh->queue)) >= 0) {
-    taskq_desc_t *d = &sh->queue.descs[slot];
-    if (!sdk_mailbox_task_gen_ok(slot)) {
-      /* Task submitted under a previous mailbox lifetime (the mailbox was
-       * re-initialised while it was in flight). Drop it without posting so its
-       * stale request_id/user_cookie never lands in the new completion ring. */
-      taskq_release(&sh->queue, slot);
-      continue;
-    }
-    int failed = (d->state == TASK_FAILED);
-    uint16_t status = failed ? SDK_STATUS_INTERNAL_ERROR : d->result_status;
-    if (!sdk_mailbox_post_deferred(d->request_id, d->user_cookie,
-                                   (uint16_t)d->opcode, status,
-                                   d->result_payload, d->result_len)) {
-      break;  /* completion ring full -> retry next poll */
-    }
-    if (!failed) {
-      taskq_watchdog_on_success(&g_sched_watchdog);
-    }
-    taskq_release(&sh->queue, slot);
-  }
+  scheduler_post_task_completions();
   zzapp_core0_poll();
 
   if (sh->core1_restart_request) {
     sh->core1_restart_request = 0;
     dmb();  /* publish the clear before the reset re-enters the worker */
     taskq_watchdog_on_fault(&g_sched_watchdog);
-    /* Core 1 is parked in its fault handler. If it faulted inside the card
-     * pool, its lock is still held; free it before the poison handlers
-     * below release their sessions' pool memory. */
+    /* Poison may take the card pool before either branch retires apps. */
     card_pool_reset_lock(&card_pool);
-    zzapp_on_core1_restart();
-    /* Core-1-affine image sessions lost their codec heap objects with the
-     * fault; both branches below reclaim the decode blocks core 1 left
-     * allocated (the cold restart inside core1_cold_restart, the
-     * single-core fallback inline). Drop the dangling references in BOTH
-     * branches so core 0 never destroys against reclaimed memory. Audio
-     * streams hold no heap objects, but their embedded decoder state may
-     * be mid-frame; mark them faulted so feeds/reads fail cleanly. */
     sdk_image_stream_poison_core1_sessions();
     sdk_video_stream_poison_core1_sessions();
     sdk_media_session_poison_core1();
-    sdk_mailbox_poison_core1_audio_streams();
     if (taskq_watchdog_core1_enabled(&g_sched_watchdog)) {
       core1_cold_restart();
     } else {
-      /* Single-core fallback: core 1 never runs again, so the
-       * cold-restart recovery duties cannot run in core1_cold_restart.
-       * Mirror them inline: core 1 is halted on the fault, the malloc
-       * lock reset clears any spinlock it may hold, the decode-state
-       * lock reset clears any budget lock it orphaned, and the reclaim
-       * frees the decode blocks it left allocated (the poisoned sessions
-       * above have already released their charges, so the 72 MiB budget
-       * stays usable). */
-      sdk_smp_lock_reset_malloc();
-      sdk_image_stream_reset_locks();
-      zzm_runtime_reset_heap_lock();
-      zzapp_services_reclaim_halted_audio();
-      sdk_compression_reclaim_core1_decode();
-      g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
-      /* MiniGL is never parsed on core 0.  A module worker can only resume
-       * after core 1 returns; its transport remains unavailable meanwhile. */
+      /* Same order as a cold restart: every lock, then contexts, then
+       * teardown. The helper owns that order; only non-lock reclaim
+       * remains here because core 1 will not run it. */
+      scheduler_core1_fallback_recover();
     }
   }
 
@@ -636,12 +1101,10 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
   }
 }
 
-/* Bounded quiesce wait: crypto tasks are sub-millisecond, so 5000 * 10us = 50ms
- * is far beyond a normal drain. If a task is still active when the cap expires
- * it is either wedged or a legitimately long op mid-write -- either way core 1
- * is force-reset (see below) rather than left to race the mailbox teardown. */
-#define SCHED_QUIESCE_SPINS  5000u
-#define SCHED_QUIESCE_US       10u
+/*
+ * A quiesce cap bounds reset while allowing MiniGL's 100-ms RasterIX drain
+ * to complete before the scheduler cold-restarts core 1.
+ */
 
 /*
  * Quiesce the scheduler before a mailbox teardown (sdk_mailbox_init on Amiga
@@ -663,38 +1126,53 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
  * Race-free without a worker handshake: this runs on core 0's main loop, the
  * sole task producer, so once the queue reads empty no new task can appear.
  */
+void scheduler_resume_minigl_submissions(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  sh->minigl_submission_admission = 1U;
+  dmb();
+  sh->minigl_submission_ack = 0U;
+  dmb();
+  scheduler_core1_publish();
+}
+
 void scheduler_quiesce_for_reset(void)
 {
   taskq_shared_t *sh = scheduler_shared();
   uint32_t spins;
   int timed_out;
 
-  if (!scheduler_core1_available())
-    return;   /* no core-1 worker -> no in-flight writes to drain */
+  if (!scheduler_core1_available()) {
+    sh->minigl_submission_admission = 0U;
+    dmb();
+    if (++sh->minigl_submission_generation == 0U)
+      ++sh->minigl_submission_generation;
+    sh->minigl_submission_ack = sh->minigl_submission_generation;
+    return;
+  }
+  sh->minigl_submission_admission = 0U;
+  dmb();
+  if (++sh->minigl_submission_generation == 0U)
+    ++sh->minigl_submission_generation;
+  sh->minigl_submission_ack = 0U;
+  dmb();
+  scheduler_core1_publish();
 
   for (spins = 0; spins < SCHED_QUIESCE_SPINS; spins++) {
-    if (!taskq_has_active(&sh->queue) && !sh->minigl_in_flight)
+    if (scheduler_minigl_quiesce_done(sh))
       break;
     usleep(SCHED_QUIESCE_US);
   }
 
-  /* Clear the queue BEFORE any restart, so a restarted worker finds no QUEUED
-   * descriptor to claim. Capture the timeout first -- taskq_init would mask it.
-   * taskq_init leaves zero QUEUED slots, and the worker only ever claims QUEUED,
-   * so it cannot pick up a stale task and write into buffers the mailbox is
-   * about to reuse. */
-  timed_out = taskq_has_active(&sh->queue) || sh->minigl_in_flight;
-  taskq_init(&sh->queue);
-  sh->core1_current_slot = -1;
-
-  if (timed_out) {
-    /* A task outlived the wait and is still writing its buffers. Cold-reset
-     * core 1 to halt it before those buffers are freed. The queue is already
-     * cleared above and core1_cold_restart flushes the whole D-cache before
-     * releasing CPU1, so the restarted worker re-enters onto the empty queue. */
-    core1_cold_restart();
-    sh->core1_restart_request = 0;   /* consumed here; don't double-restart */
-  }
+  /* On timeout the teardown (cold restart, posting the halted tasks'
+   * failures to their clients, queue re-init) runs in the host-tested
+   * seam: the restart marks every in-flight task FAILED and each client
+   * gets an immediate completion instead of the mailbox wall-clock
+   * timeout. */
+  timed_out = !scheduler_minigl_quiesce_done(sh);
+  scheduler_quiesce_finish(sh, timed_out, core1_cold_restart,
+                           scheduler_post_task_completions);
 }
 
 #endif /* TASKQ_HOST_TEST */

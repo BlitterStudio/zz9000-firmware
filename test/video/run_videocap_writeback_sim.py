@@ -22,6 +22,13 @@ def between(source, start, end):
     return source[source.index(start):source.index(end, source.index(start))]
 
 
+def through(source, start, end):
+    if source.count(start) != 1 or source.count(end) != 1:
+        raise SystemExit(f"Production extraction marker changed: {start!r} / {end!r}")
+    begin = source.index(start)
+    return source[begin:source.index(end, begin) + len(end)]
+
+
 def make_wrapper(source):
     geometry = between(source, "  reg [9:0] videocap_y_sync;",
                        "  // Diagnostic target selected")
@@ -33,7 +40,8 @@ def make_wrapper(source):
                   "  // Snapshot the exact WDATA values accepted")
     outputs = between(source, "  assign m01_axi_awaddr  =",
                       "  // AXI DMA defaults")
-    constants = between(source, "    m01_axi_awlen <=", "  reg [9:0] videocap_x_sync;")
+    constants = through(source, "    m01_axi_awlen <=",
+                        "    m01_axi_bready <= 'h1;\n  end")
     # This slice starts inside the production defaults always block and
     # already includes its matching end; retain all actual M01 assignments.
     sampler = between(source, "  videocap_sampler #(", "  xpm_cdc_single #(\n      .DEST_SYNC_FF(3),\n      .INIT_SYNC_FF(1),\n      .SIM_ASSERT_CHK(0),\n      .SRC_INPUT_REG(0)\n  ) videocap_probe_seen_cdc")
@@ -72,7 +80,7 @@ wire [10:0] vcap_woven_rows = 11'd512;
 reg video_control_interlace;
 """
     return (prefix + geometry + declaration + read_address + "\n" + outputs +
-            "always @(posedge S_AXI_ACLK) begin\n" + constants +
+            "always @(posedge S_AXI_ACLK) begin\n" + constants + "\n" +
             "always @(posedge S_AXI_ACLK) begin\n" + pitch_tracker + "\n  end\n" + fsm +
             f"assign memory_bank = {bank};\nassign memory_address = {address};\n" +
             "assign state = videocap_save_state;\nassign beat = vc_beat;\nendmodule\n")

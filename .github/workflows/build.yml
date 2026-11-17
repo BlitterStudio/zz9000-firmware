@@ -107,10 +107,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Install host-test multilib support
+      - name: Install host-test build tools and image codec headers
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends gcc-multilib
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential gcc-multilib libjpeg-dev libpng-dev
       # Pinned third-party source archives (checked by SHA-256 in the
       # build_*.sh scripts). gitlab.xiph.org and downloads.xiph.org go down
       # for hours at a time; restoring the archives keeps CI off them.
@@ -138,12 +139,13 @@ jobs:
           make -C test/fuzz/minigl replay
       - name: Video pipeline regression suite
         run: make -C test/video test
-      - name: Native capture and RasterIX RTL regressions
+      - name: Native capture, Zorro AXI, and RasterIX RTL regressions
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends verilator
           bash test/video/run_videocap_clock_verilator.sh
           bash test/video/run_videocap_verilator_sim.sh
+          bash test/zorro_order/run_verilator.sh
           bash test/rasterix/run_texenv_modulate_sim.sh
       - name: Video codec regression suite
         run: make -C test/video_codec test
@@ -199,6 +201,8 @@ jobs:
         run: make -C test/eth_irq_throttle test
       - name: Console encoder suite
         run: make -C test/console test
+      - name: Core-1 console ring suite
+        run: make -C test/core1_console test
       - name: Ethernet async TX completion-order suite
         run: make -C test/eth_tx_order test
       - name: SDK surface helper suite
@@ -216,6 +220,7 @@ jobs:
             -o /tmp/test_sdk_service_flags
           /tmp/test_sdk_service_flags \
             ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.c \
+            ZZ9000_proto.sdk/ZZ9000OS/src/sdk_audio_stream.c \
             ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.h \
             ZZ9000_proto.sdk/ZZ9000OS/src/sdk_service_catalog.h
       - name: SDK service discovery descriptors

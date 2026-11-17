@@ -3,22 +3,32 @@
 #include "xil_cache.h"
 #include "xil_exception.h"
 #include "xil_io.h"
+#include "xparameters.h"
 #include "xil_misc_psreset_api.h"
 #include "core2.h"
+#include "core1_console.h"
 #include "sleep.h"
 #include "scheduler.h"
 #include "memorymap.h"
 #include "sdk_smp_lock.h"
 #include "l2_maint.h"
 #include "card_pool.h"
-#include "sdk_compression.h"
+#include "surface_allocator.h"
+#include "sdk_mailbox.h"
 #include "sdk_image_stream.h"
+#include "sdk_core1_reclaim.h"
 #include "zzm_minigl_host.h"
 #include "zzm_loader.h"
 #include "zzm_runtime.h"
 #include "zzapp_runtime.h"
+#include "cpu_tls.h"
 #include "zzapp_proto.h"
+#include "interrupt.h"
 #include "zzapp_services.h"
+
+#ifndef ZZAPP_SVC_PROBES
+#define ZZAPP_SVC_PROBES 0
+#endif
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
 #define A9_CLKSTOP1_MASK	0x00000020
@@ -97,6 +107,27 @@ struct core_fault_slot core1_fault __attribute__((aligned(32))) = { CORE_FAULT_N
 /* Saved by the BSP vectors (asm_vectors.S) before the handler runs. */
 extern u32 DataAbortAddr;
 extern u32 PrefetchAbortAddr;
+
+extern void zzapp_core1_vectors(void);
+
+/* Core 1 owns its GIC CPU interface. Read the acknowledged interrupt ID here
+ * so the exception return path advances scheduler time only for its timer. */
+uint32_t zzapp_kernel_irq_dispatch(void)
+{
+	XScuGic *intc = interrupt_get_intc();
+	uint32_t full_id = XScuGic_CPUReadReg(intc, XSCUGIC_INT_ACK_OFFSET);
+	uint32_t interrupt_id = full_id & XSCUGIC_ACK_INTID_MASK;
+
+	if (interrupt_id < XSCUGIC_MAX_NUM_INTR_INPUTS) {
+		XScuGic_VectorTableEntry *entry =
+			&intc->Config->HandlerTable[interrupt_id];
+
+		entry->Handler(entry->CallBackRef);
+	}
+	XScuGic_CPUWriteReg(intc, XSCUGIC_EOI_OFFSET, full_id);
+	return interrupt_id == XPAR_PS7_SCUTIMER_0_INTR ?
+		ZZAPP_KERNEL_DISPATCH_TICK : ZZAPP_KERNEL_DISPATCH_INTERRUPT;
+}
 extern u32 UndefinedExceptionAddr;
 
 /* The interrupted code's lr and sp: switch to its mode (SPSR) to read the
@@ -146,6 +177,8 @@ static void print_fault_detail(uint32_t code)
 
 	__asm__ __volatile__("mrc p15, 0, %0, c0, c0, 5" : "=r"(cpu));
 	cpu &= 3U;
+	if (cpu == 0U)
+		core1_console_flush_sync();
 	if (code == CORE_FAULT_DATA_ABORT) {
 		__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 0" : "=r"(status));
 		__asm__ __volatile__("mrc p15, 0, %0, c6, c0, 0" : "=r"(addr));
@@ -185,6 +218,17 @@ static void print_fault_detail(uint32_t code)
 			       (unsigned long)stack[i + 4U], (unsigned long)stack[i + 5U],
 			       (unsigned long)stack[i + 6U], (unsigned long)stack[i + 7U]);
 	}
+}
+
+static void recover_app_fault_locks(void)
+{
+	/*
+	 * An app fault can only orphan locks held by its own core-1 API call.
+	 * The kernel lock excludes every other core-1 thread from firmware while
+	 * that call runs, and the owner-checked resets leave a core-0 owner alone.
+	 */
+	sdk_smp_lock_reset_malloc_if_owned();
+	sdk_smp_lock_reset_if_owned(&card_pool.lock);
 }
 
 static void record_fault(uint32_t code, const char *name)
@@ -302,22 +346,30 @@ static void core1_park_for_reset(void)
  * (scheduler_core0_poll) to recover a worker that faulted and parked. 0xFFFFFFF0
  * is re-pointed at core1_entry first in case the OCM word was disturbed.
  */
+void core1_halt(void)
+{
+	uint32_t reg;
+
+	core1_park_for_reset();
+	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
+	reg = Xil_In32(A9_CPU_RST_CTRL);
+	reg |= A9_RST1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, reg);
+	reg |= A9_CLKSTOP1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, reg);
+	Xil_Out32(XSLCR_LOCK_ADDR, XSLCR_LOCK_CODE);
+}
+
 void core1_cold_restart(void)
 {
 	volatile uint32_t *core1_addr = (volatile uint32_t *) 0xFFFFFFF0;
 	uint32_t RegVal;
 	taskq_shared_t *sh = scheduler_shared();
 
-	core1_park_for_reset();
 	*core1_addr = (uint32_t) core1_entry;
 	Xil_DCacheFlush();  /* the reset vector write must reach OCM before CPU1 reads it */
-
-	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
-	RegVal = Xil_In32(A9_CPU_RST_CTRL);
-	RegVal |= A9_RST1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	RegVal |= A9_CLKSTOP1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	core1_halt();
+	/* CPU1 cannot finish any deferred SDK request after this point. */
 
 	/*
 	 * CPU1 is now held in reset with its clock stopped, i.e. provably
@@ -329,28 +381,17 @@ void core1_cold_restart(void)
 	 * restart paths: the fault path (record_fault -> scheduler_core0_poll)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
-	/* The card pool, PL310 and app mailbox locks have the same exposure. */
-	card_pool_reset_lock(&card_pool);
-	l2_maint_reset_core1_lock();
-	zzapp_services_reset_core1_lock();
-	sdk_smp_lock_reset_malloc();
-	/*
-	 * Same orphan-lock exposure as the malloc lock: the cold reset
-	 * can land inside the image-stream decode-state budget
-	 * critical section (the few-instruction check-and-reserve
-	 * window in header parsing), leaving that lock owned by the
-	 * dead core.
-	 */
-	sdk_image_stream_reset_locks();
-	zzm_loader_reset_session_lock();
+	/* One order for every caller: locks, then contexts, then teardown,
+	 * while CPU1 is still held in reset. */
+	zzapp_recover_halted_core1();
+
 
 	/*
-	 * CPU1 is still halted and the malloc lock is now free: reclaim any heap
-	 * blocks a one-shot decode still held when it was reset. inflateEnd /
-	 * LzmaDec_Free never ran on the killed worker, so without this the
-	 * inflate state/window and LZMA probs/dict leak on every mid-decode reset.
+	 * CPU1 is still halted and the malloc lock is now free. Poison decoder
+	 * pointers before reclaiming their pool, then fail requests the halted
+	 * worker could not complete.
 	 */
-	sdk_compression_reclaim_core1_decode();
+	sdk_core1_reclaim_after_halt(&sh->queue);
 
 	/* Halted: the restarted worker must not find the old park request. */
 	sh->core1_park_request = 0U;
@@ -358,15 +399,24 @@ void core1_cold_restart(void)
 	dsb();
 	/* Core 1 is halted; the module host owns any active graphics abort. */
 	zzm_minigl_abort_reset();
-	/* heap_forget_owner takes heap_lock. Core 1 may have died holding it. */
-	zzm_runtime_reset_heap_lock();
 	zzapp_services_reclaim_halted_audio();
+	/* Core 0 has no fence proof after halting core 1. RasterIX can continue
+	 * reading DDR lists, so retain every MiniGL owner before discarding the
+	 * module image. */
+	zzm_runtime_quarantine_module(ZZM_MODULE_MINIGL);
+	/* The module lifetime is quarantined before abandoning a torn fence
+	 * publication from the halted producer. */
+	sh->minigl_rix_fence_epoch = 0U;
+	sh->minigl_rix_fence_sequence = 0U;
+	sh->minigl_rix_fence_address = 0U;
 	/* The app's GL binding points into the module image; forget it before
 	 * zzm_loader_forget_core1_modules poisons that image. */
 	zzapp_minigl_forget();
 	/* Its module state died with core 1: reload it on the next acquire. */
 	zzm_loader_forget_core1_modules();
 
+	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
+	RegVal = Xil_In32(A9_CPU_RST_CTRL);
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
 	RegVal &= ~A9_CLKSTOP1_MASK;
@@ -448,7 +498,7 @@ static uint8_t core1_abort_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), 
 static uint8_t core1_undef_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), used));
 
 /*
- * Program VBAR = _vector_table, then point each exception mode's banked SP at
+ * Program core 1's private VBAR, then point each exception mode's banked SP at
  * its own stack and return to the entry mode. Naked with PC-relative literals
  * (`ldr ..., =sym`) so no value is carried across a mode switch -- FIQ banks
  * r8-r12, which would corrupt register operands. I+F are masked while switching;
@@ -458,7 +508,7 @@ static uint8_t core1_undef_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), 
 __attribute__((naked, used)) static void core1_init_exception_state(void)
 {
 	__asm__ volatile(
-		"ldr	r0, =_vector_table\n\t"            /* VBAR = BSP vector table */
+		"ldr	r0, =zzapp_core1_vectors\n\t"
 		"mcr	p15, 0, r0, c12, c0, 0\n\t"
 		"mrs	r0, cpsr\n\t"
 		"bic	r1, r0, #0x1f\n\t"
@@ -504,6 +554,52 @@ __attribute__((naked, used)) void core1_reset_exception_stacks(void)
 		"bx	lr\n\t"
 		".ltorg\n\t");
 }
+/* The worker is a privileged system thread in SYS mode. Its exception frame
+ * can therefore use the same SYS banked SP/LR layout as app frames. SVC keeps
+ * a separate stack for API exceptions and voluntary context switches. */
+__attribute__((naked, noreturn, used)) static void core1_enter_system_thread(void)
+{
+	__asm__ volatile(
+		"cps	#0x13\n\t"
+		"ldr	sp, =" CORE1_STR(SDK_CORE1_SVC_STACK_TOP) "\n\t"
+		"cps	#0x1f\n\t"
+		"mov	sp, #" CORE1_STR(SDK_CORE1_SYSTEM_STACK_TOP) "\n\t"
+		"b	scheduler_core1_worker\n\t"
+		".ltorg\n\t");
+}
+
+#if ZZAPP_PERF_COUNTERS || ZZAPP_SVC_PROBES
+/* PMCCNTR is sampled only by privileged core-1 SVC code, except in the
+ * explicitly instrumented probe firmware. */
+static void core1_enable_pmu_cycles(void)
+{
+	uint32_t pmcr;
+
+	__asm__ __volatile__("mrc p15, 0, %0, c9, c12, 0" : "=r"(pmcr));
+	pmcr |= 0x07U;
+	pmcr &= ~0x08U;
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 0" : : "r"(pmcr));
+	/* PMCR.E only enables the PMU globally; PMCNTENSET bit 31 enables
+	 * PMCCNTR itself in both counter and probes-only firmware. */
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : :
+			     "r"(0x80000000U));
+#if ZZAPP_PERF_COUNTERS
+	/* Counter 0/1 measure core-1 instruction/data TLB refills. */
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(0U));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c13, 1" : : "r"(0x02U));
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 5" : : "r"(1U));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c13, 1" : : "r"(0x05U));
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c12, 1" : : "r"(0x03U));
+#endif
+#if ZZAPP_SVC_PROBES
+	__asm__ __volatile__("mcr p15, 0, %0, c9, c14, 0" : : "r"(1U));
+#endif
+}
+#endif
+
+
 
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
@@ -542,6 +638,12 @@ void core1_loop() {
 	asm("mcr	p15,0,r0,c1,c0,1");
 	/* write Auxiliary Control Register */
 
+	/* Core 1 skips the BSP boot code, so TPIDRURO still holds its unknown
+	 * reset value. Point it at core 1's own TLS block before any C code
+	 * that uses thread-local variables (libjpeg-turbo) can run. */
+	if (cpu_tls_init(1u) != 0)
+		C1_TRACE("[c1] TLS image larger than its block\r\n");
+
 	// SP was established by the core1_entry reset stub (SDK_CORE1_STACK_TOP),
 	// before any C ran -- do NOT reset it here.
 
@@ -555,7 +657,11 @@ void core1_loop() {
 	// cross-core LDREX/STREX and SCU coherency work (core 0 marked the
 	// task-queue region shareable at boot, before this core started).
 	scheduler_coherency_init_core1();
+	core1_console_reset_producer();
 	C1_TRACE("[c1] R2 coherency-ok (mmu on)\r\n");  /* survived MMU/cache/SMP bring-up */
+#if ZZAPP_PERF_COUNTERS || ZZAPP_SVC_PROBES
+	core1_enable_pmu_cycles();
+#endif
 
 	// Program VBAR + banked exception stacks before running any task, so a
 	// data/prefetch/undefined fault vectors to the registered handlers and
@@ -565,6 +671,7 @@ void core1_loop() {
 	/* PPI 29 is configured locally on core 1. It remains disabled until an
 	 * app runs; core 0 never enables or handles this private timer. */
 	zzapp_private_timer_init_core1();
+	scheduler_core1_enable_doorbell();
 	C1_TRACE("[c1] R2b exc-state-ok\r\n");
 
 #ifdef SCHED_STRESS_TEST
@@ -579,7 +686,7 @@ void core1_loop() {
 	// an uncached environment) has been removed; the v2 ARM-hosted app platform
 	// launches apps through the scheduler instead.
 	C1_TRACE("[c1] R3 worker-start\r\n");
-	scheduler_core1_worker();  // dual-core task worker; never returns
+	core1_enter_system_thread();
 }
 #pragma GCC pop_options
 
@@ -657,9 +764,8 @@ void arm_exception_handler_id_data_abort(void *callback) {
 	__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 0" : "=r"(fsr));
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
-	if (!zzapp_fault_wants_restart(DataAbortAddr, DataAbortAddr + 8u)) {
-		sdk_smp_lock_reset_malloc_if_owned();
-		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+	if (!zzapp_fault_wants_restart(DataAbortAddr, DataAbortAddr + 8u, cpsr)) {
+		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_DATA, DataAbortAddr, sp, lr, far, fsr, cpsr);
 		return;
 	}
@@ -673,9 +779,8 @@ void arm_exception_handler_id_prefetch_abort(void *callback) {
 	__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 1" : "=r"(fsr));
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
-	if (!zzapp_fault_wants_restart(PrefetchAbortAddr, PrefetchAbortAddr + 4u)) {
-		sdk_smp_lock_reset_malloc_if_owned();
-		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+	if (!zzapp_fault_wants_restart(PrefetchAbortAddr, PrefetchAbortAddr + 4u, cpsr)) {
+		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_PREFETCH, PrefetchAbortAddr, sp, lr, far, fsr, cpsr);
 		return;
 	}
@@ -692,9 +797,8 @@ void arm_exception_handler_illinst(void *callback) {
 	(void)callback;
 	__asm__ __volatile__("mrs %0, spsr" : "=r"(cpsr));
 	(void)read_interrupted_lr_sp(&lr, &sp);
-	if (!zzapp_fault_wants_restart(UndefinedExceptionAddr, UndefinedExceptionAddr + 4u)) {
-		sdk_smp_lock_reset_malloc_if_owned();
-		sdk_smp_lock_reset_if_owned(&card_pool.lock);
+	if (!zzapp_fault_wants_restart(UndefinedExceptionAddr, UndefinedExceptionAddr + 4u, cpsr)) {
+		recover_app_fault_locks();
 		zzapp_take_app_fault(ZZAPP_FAULT_UNDEF, UndefinedExceptionAddr, sp, lr, 0, 0, cpsr);
 		return;
 	}

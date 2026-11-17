@@ -12,6 +12,7 @@
 
 #define RIX_DRV_IDENTITY_VALUE 0x52495831U
 #define RIX_DRV_VERSION_VALUE  0x00020000U
+#define RIX_DRV_VERSION_BUSY_CYCLES 0x00020001U
 
 #define RIX_DRV_CSR_IDENTITY     0x00U
 #define RIX_DRV_CSR_VERSION      0x04U
@@ -19,6 +20,8 @@
 #define RIX_DRV_CSR_STATUS       0x0cU
 #define RIX_DRV_CSR_DBG_STREAM   0x10U
 #define RIX_DRV_CSR_DBG_RESPONSE 0x14U
+/* Available with CSR ABI 2.1 and newer; counts non-idle RasterIX cycles. */
+#define RIX_DRV_CSR_DBG_BUSY_CYCLES 0x18U
 #define RIX_DRV_CSR_DBG_AW       0x38U
 #define RIX_DRV_CSR_DBG_W        0x3cU
 #define RIX_DRV_CSR_DBG_B        0x40U
@@ -54,6 +57,16 @@
 #define RIX_DRV_FIFO_ISR_TSE     (1U << 25)
 #define RIX_DRV_FIFO_ISR_ERRORS  (RIX_DRV_FIFO_ISR_TPOE | RIX_DRV_FIFO_ISR_TSE)
 
+/* FrameStreamingCore MEM -> ST1 envelopes.  Its linear reader always issues
+ * complete 64-byte bursts, so every list address and byte count must share
+ * that alignment.  Lists are fetched in 16 KiB envelopes, cut without regard
+ * to command boundaries (the parser carries a command across envelopes). */
+#define RIX_DRV_MEMFETCH_ENVELOPE 0xb0000000U
+#define RIX_DRV_MEMFETCH_ALIGN_BYTES 64U
+#define RIX_DRV_MEMFETCH_CHUNK_BYTES 0x00004000U
+#define RIX_DRV_MEMFETCH_CHUNK_WORDS \
+    (RIX_DRV_MEMFETCH_CHUNK_BYTES / sizeof(uint32_t))
+
 #define RIX_DRV_CONTROL_ENABLE     (1U << 0)
 #define RIX_DRV_CONTROL_SOFT_RESET (1U << 1)
 
@@ -88,6 +101,26 @@ typedef int (*rix_drv_dma_stream_fn)(void *context, uintptr_t source,
 typedef int (*rix_drv_dma_start_async_fn)(void *context, uintptr_t source,
                                           uint32_t words, uint32_t burst_words);
 typedef int (*rix_drv_dma_retire_fn)(void *context);
+/* One nonblocking PL330 channel-state observation. */
+typedef int (*rix_drv_dma_complete_fn)(void *context);
+/* Attempts one launch handshake observation; does not wait for DMAGO. */
+typedef int (*rix_drv_dma_start_nonblocking_fn)(void *context, uintptr_t source,
+                                                 uint32_t words, uint32_t burst_words);
+/* Verifies that the channel was claimed before FIFO data is admitted. */
+typedef int (*rix_drv_dma_ready_fn)(void *context);
+/* Advances an in-flight DMA abort through launch completion and quiescence. */
+typedef int (*rix_drv_dma_abort_fn)(void *context);
+
+enum rix_drv_dma_state {
+    RIX_DRV_DMA_PENDING = 0,
+    RIX_DRV_DMA_COMPLETE = 1,
+    RIX_DRV_DMA_ERROR = -1
+};
+
+enum rix_drv_submit_mode {
+    RIX_DRV_SUBMIT_INLINE = 0,
+    RIX_DRV_SUBMIT_MEMFETCH = 1
+};
 
 /* The caller must set hardware_present from its build-time capability gate.
  * When it is zero, rix_drv_init() does not access the CSR window. */
@@ -103,6 +136,11 @@ struct rix_drv_config {
     rix_drv_dma_stream_fn dma_stream;
     rix_drv_dma_start_async_fn dma_start_async;
     rix_drv_dma_retire_fn dma_retire;
+    rix_drv_dma_complete_fn dma_complete;
+    rix_drv_dma_start_nonblocking_fn dma_start_nonblocking;
+    rix_drv_dma_ready_fn dma_ready;
+    rix_drv_dma_abort_fn dma_abort;
+    uint8_t submit_mode;
     int hardware_present;
 };
 
@@ -118,6 +156,10 @@ struct rix_drv {
     rix_drv_dma_stream_fn dma_stream;
     rix_drv_dma_start_async_fn dma_start_async;
     rix_drv_dma_retire_fn dma_retire;
+    rix_drv_dma_complete_fn dma_complete;
+    rix_drv_dma_start_nonblocking_fn dma_start_nonblocking;
+    rix_drv_dma_ready_fn dma_ready;
+    rix_drv_dma_abort_fn dma_abort;
     /* DMA transfer launched whose payload is in the FIFO but whose packet
      * boundary (TLF) is not written yet: retired before the next packet's
      * boundary so the parser still sees packets in order. */
@@ -134,19 +176,78 @@ struct rix_drv {
     uint32_t packets;
     uint32_t dma_packets;
     int last_packet_dma;
-    /* Payload words per packet, sampled from TDFV after the FIFO reset. */
+    /* Set after the first DDR envelope reaches the FIFO. A later error cannot
+     * revoke RasterIX's read of that source list. */
+    uint8_t memfetch_committed;
+    /* Monotonic count of DDR envelopes accepted by TLF. The ISR reports
+     * acceptance errors after that boundary, so callers use this to retain
+     * ownership even when a feed step returns ERROR. */
+    uint32_t memfetch_commit_count;
+    /* Payload words per synchronous packet and usable FIFO capacity sampled
+     * from TDFV after the FIFO reset. */
     uint32_t packet_words;
+    uint32_t fifo_capacity;
+    uint8_t submit_mode;
+    /* Lower bound of free FIFO words: read from TDFV, decremented by every
+     * staged word, re-read only when it cannot hold the next packet. */
+    uint32_t fifo_vacancy_estimate;
+    /* Device accesses (CSR/FIFO reads, DMA status observations) made by
+     * this driver; feed telemetry samples it per step. */
+    uint32_t device_reads;
     int available;
     int enabled;
 };
 
+#define RIX_DRV_FEED_MAX_WORDS 1024U
+
+enum rix_drv_feed_source {
+    RIX_DRV_FEED_SOURCE_SVC = 0U,
+    RIX_DRV_FEED_SOURCE_SCHEDULER,
+    RIX_DRV_FEED_SOURCE_PARKED,
+    RIX_DRV_FEED_SOURCE_SWAP,
+    RIX_DRV_FEED_SOURCE_COUNT
+};
+
+enum rix_drv_feed_result {
+    RIX_DRV_FEED_ERROR = RIX_DRV_ERROR,
+    RIX_DRV_FEED_BLOCKED = 0,
+    RIX_DRV_FEED_PROGRESS = 1,
+    RIX_DRV_FEED_DONE = 2
+};
+
+/* Opt-in single-flight feed state.  The buffer remains owned by the caller
+ * until this state reaches DONE or is reset after hardware recovery. */
+struct rix_drv_feed {
+    const uint32_t *commands;
+    uintptr_t command_address;
+    uint32_t command_words;
+    uint32_t command_offset;
+    uint32_t staged_bytes;
+    uint32_t source;
+    int pending_dma;
+    int pending_launch;
+    int active;
+};
+
 int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config);
 int rix_drv_enable(struct rix_drv *driver);
-/* Streams parser words as bounded DSE packets. `command_address` is the
- * non-cacheable physical source used by optional PL330 transport. */
+/* Submits parser words inline or by bounded DDR fetch. `command_address` is
+ * the physical DDR source; clean_dcache publishes a cached source at seal. */
 int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,
                    uintptr_t command_address, uint32_t command_words,
                    uint32_t timeout);
+int rix_drv_feed_begin(struct rix_drv_feed *feed, const uint32_t *commands,
+                       uintptr_t command_address, uint32_t command_words,
+                       uint32_t source);
+/* Does at most one nonblocking DMA/FIFO step or one two-word DDR envelope. */
+int rix_drv_try_feed(struct rix_drv *driver, struct rix_drv_feed *feed);
+/* Quiesces pending DMA before resetting the FIFO and clearing the feed.  In
+ * memfetch mode an envelope cannot be recalled: it finishes pushing the list
+ * (BLOCKED until done) and the caller must wait for the list's fence and
+ * idle before reusing its memory. */
+int rix_drv_feed_abort(struct rix_drv *driver, struct rix_drv_feed *feed);
+/* Reset only after the caller has quiesced DMA and reset the FIFO hardware. */
+void rix_drv_feed_reset(struct rix_drv_feed *feed);
 /* Waits for the renderer to become idle after a pixel fence has passed. */
 int rix_drv_poll(struct rix_drv *driver, uint32_t timeout);
 int rix_drv_recover(struct rix_drv *driver, uint32_t timeout, int soft_reset);

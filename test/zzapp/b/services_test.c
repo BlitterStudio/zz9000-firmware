@@ -21,6 +21,43 @@ static uint32_t g_produced;
 static uint32_t g_last_seq;
 static int g_bump;
 static int g_fails;
+static uint16_t expiry_claim_status;
+static uint16_t stop_completing_status;
+static uint16_t stop_completing_claim_status;
+static uint32_t stop_completing_slot_state;
+static uint32_t expiry_deferred_generation;
+static uint32_t expiry_slot_generation;
+static uint64_t loading_now;
+
+static uint64_t loading_test_time(void)
+{
+	return loading_now;
+}
+
+static int loader_chunk_succeeds(uint32_t file_off, const void *src,
+				 uint32_t len)
+{
+	(void)file_off;
+	(void)src;
+	(void)len;
+	return ZZ_OK;
+}
+
+static int start_posted_deferred(void)
+{
+	if (deferred[0].state != DEFER_POSTED)
+		return 0;
+	deferred[0].state = DEFER_RUNNING;
+	return 1;
+}
+static int harvest_reply_hook_result;
+static uint16_t harvest_reply_hook_status;
+
+static void harvest_between_reply_and_done(void)
+{
+	harvest_reply_hook_result = zzapp_mailbox_harvest(
+		NULL, NULL, NULL, &harvest_reply_hook_status, NULL, NULL);
+}
 
 static void fail(const char *what)
 {
@@ -236,9 +273,12 @@ static void test_display_refresh_rotation_and_layout(void)
 	    surface.back != (void *)(uintptr_t)back ||
 	    surface.layout != ZZ_LAYOUT_RGB565_LE)
 		fail("display initial surface");
-	/* An old launcher does not negotiate scanout acknowledgement, so its
+	/* The generation counter is core-1-private state: raise it through
+	 * the kernel so its cache and the life page stay in step.  An old
+	 * launcher does not negotiate scanout acknowledgement, so its
 	 * established lifecycle ack remains authoritative. */
-	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_GEN_OFF, 1U);
+	if (zzapp_display_flip_bound() != ZZ_OK)
+		fail("display gen bump");
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_ADDRESS_OFF,
 		       back);
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_SUBMIT_OFF,
@@ -300,6 +340,75 @@ static void test_display_scanout_ack(void)
 	    surface.front != (void *)(uintptr_t)back ||
 	    surface.back != (void *)(uintptr_t)spare)
 		fail("display scanout-ack recycle");
+}
+
+static uint64_t g_flip_us;
+static unsigned g_flip_yields;
+static unsigned g_flip_unregistered_yields;
+
+static uint64_t flip_time(void)
+{
+	return g_flip_us;
+}
+
+/* Model a parked app: it resumes only after the service pass wakes its
+ * registered wait, first at the 50 ms diagnostic deadline and then at ack. */
+static void flip_yield(void)
+{
+	if (!zzapp_services_wait_registered(service_slot()))
+		g_flip_unregistered_yields++;
+	g_flip_yields++;
+	if (current_runtime()->wait_deadline != 0U) {
+		g_flip_us = current_runtime()->wait_deadline;
+	} else {
+		g_flip_us = 80000U;
+		zzapp_put_be32(g_window + ZZAPP_LIFE_OFF +
+			       ZZAPP_LIFE_FLIP_ACK_OFF, 1U);
+	}
+	zzapp_services_poll();
+}
+
+static void test_display_wait_flip_idle(void)
+{
+	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_LAUNCHER_SCANOUT_ACK);
+	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
+						ZZ_FMT_RGB565, 0x00200000U,
+						0x00210000U, ZZ_LAYOUT_RGB565_LE,
+						0x00220000U);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("flip wait display bind");
+	g_flip_us = 0U;
+	g_flip_yields = 0U;
+	g_flip_unregistered_yields = 0U;
+	flip_wait_reports = 0U;
+	zzapp_services_test_set_time(flip_time);
+	zzapp_services_test_set_yield(flip_yield);
+	/* Nothing queued: idle at once, no wait. */
+	if (zzapp_display_wait_flip_idle() != ZZ_OK || g_flip_yields != 0U)
+		fail("flip wait while idle");
+	if (zzapp_svc_display_flip_async(1U) != ZZ_OK)
+		fail("flip wait queue");
+	/* The first pass wakes at the 50 ms diagnostic deadline. The second
+	 * remains parked until VBlank acknowledges the queued flip at 80 ms. */
+	if (zzapp_display_wait_flip_idle() != ZZ_OK)
+		fail("flip wait result");
+	if (g_flip_yields != 2U || g_flip_unregistered_yields != 0U)
+		fail("flip wait registers with the service pass");
+	if (zzapp_services_wait_registered(service_slot()))
+		fail("flip wait ended");
+	if (flip_wait_reports != 1U)
+		fail("slow flip reported once");
+	zzapp_services_test_set_time(NULL);
+	zzapp_services_test_set_yield(NULL);
 }
 
 static void test_clut8_palette_publication(void)
@@ -407,6 +516,36 @@ static void test_display_mailbox(void)
 	    (zzapp_services_flags() & ZZAPP_F_MAILBOX) != 0U)
 		fail("display mailbox old launcher fallback");
 }
+static void test_display_mailbox_uses_scanout_owner(void)
+{
+	uint8_t windows[2][ZZAPP_WINDOW_BYTES];
+	uint32_t scanout;
+
+	zzapp_services_test_reset();
+	memset(windows, 0, sizeof(windows));
+	zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
+	zzapp_services_test_set_window_slot(1U, windows[1], sizeof(windows[1]));
+	runtime[1].display_mailbox_active = 1;
+	runtime[1].display_mailbox_shown = 0x00200000U;
+	runtime[1].display_mailbox_pending = 0x00210000U;
+	runtime[1].display_mailbox_buffers[0] = 0x00200000U;
+	runtime[1].display_mailbox_buffers[1] = 0x00210000U;
+	runtime[1].display_mailbox_buffers[2] = 0x00220000U;
+	runtime[1].display_mailbox_bytes = 0x10000U;
+	zzapp_services_test_set_core(0);
+	zzapp_services_select_slot(0U);
+	if (!zzapp_services_display_mailbox_begin(0x00200000U, &scanout) ||
+	    scanout != 0x00210000U)
+		fail("display mailbox scanout owner");
+	zzapp_services_display_mailbox_end(1);
+	if (runtime[1].display_mailbox_shown != 0x00210000U ||
+	    runtime[1].display_mailbox_pending != 0U ||
+	    zzapp_get_be32(windows[1] + ZZAPP_LIFE_CARD_FRONT_OFF) !=
+		0x00210000U)
+		fail("display mailbox owner completion");
+	zzapp_services_test_set_core(1);
+}
+
 
 static uint64_t file_now;
 static int file_phase;
@@ -508,6 +647,25 @@ static void test_audio_teardown_handoff(void)
 	if (zzapp_svc_audio_close() != ZZ_OK)
 		fail("close after reclaim");
 }
+static void test_reset_preserves_audio_teardown(void)
+{
+	zzapp_audio audio;
+
+	zzapp_services_test_reset();
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_OK)
+		fail("audio open before reset");
+	zzapp_services_on_reset();
+	if (zzapp_services_test_audio_request() != AUDIO_REQUEST_CLOSE)
+		fail("reset discarded audio close request");
+	zzapp_services_poll();
+	if (zzapp_services_test_audio_request() != AUDIO_REQUEST_CLOSE_QUIESCED)
+		fail("reset did not quiesce audio close");
+	zzapp_services_core0_poll();
+	if (zzapp_services_test_audio_detach_count() != 1U ||
+	    zzapp_services_test_audio_request() != AUDIO_REQUEST_NONE)
+		fail("reset did not complete audio detach");
+}
+
 
 static void test_audio_write_cursor_wrap(void)
 {
@@ -527,6 +685,1194 @@ static void test_audio_write_cursor_wrap(void)
 		fail("cursor equal to staged");
 }
 
+static uint8_t g_slot_windows[2][ZZAPP_WINDOW_BYTES];
+
+static void slot_launcher(void)
+{
+	uint8_t *slot_window = slots[service_slot()].window;
+	uint32_t seq;
+
+	if (!slot_window)
+		return;
+	seq = zzapp_get_be32(slot_window + ZZAPP_FILE_OFF);
+	if ((seq & 1U) != 0U || seq == 0U)
+		return;
+	zzapp_put_be32(slot_window + ZZAPP_FILE_OFF, seq + 1U);
+	zzapp_put_be32(slot_window + ZZAPP_FILE_OFF + 20U, 0U);
+	zzapp_put_be32(slot_window + ZZAPP_FILE_OFF, seq + 2U);
+}
+
+static void test_per_slot_file_and_audio_state(void)
+{
+	zzapp_audio first;
+	zzapp_audio second;
+	int first_fd;
+	int second_fd;
+	uint32_t written;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_test_set_yield(slot_launcher);
+	zzapp_services_select_slot(0U);
+	first_fd = zzapp_svc_file_open("slot0", ZZ_FILE_READ);
+	zzapp_services_select_slot(1U);
+	second_fd = zzapp_svc_file_open("slot1", ZZ_FILE_READ);
+	if (first_fd != ZZAPP_FD_BASE || second_fd != ZZAPP_FD_BASE)
+		fail("per-slot file handles");
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_console_write("a", 1U, &written) != ZZ_OK ||
+	    written != 1U ||
+	    g_slot_windows[0][ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] != 'a' ||
+	    zzapp_get_be32(g_slot_windows[1] + ZZAPP_CONSOLE_OUT_OFF) != 0U)
+		fail("slot zero console data");
+	zzapp_services_select_slot(1U);
+	if (zzapp_svc_console_write("b", 1U, &written) != ZZ_OK ||
+	    written != 1U ||
+	    g_slot_windows[1][ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] != 'b' ||
+	    g_slot_windows[0][ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] != 'a')
+		fail("slot one console data");
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_audio_open(22050U, 2U, &first) != ZZ_OK)
+		fail("first slot audio open");
+	zzapp_services_select_slot(1U);
+	if (zzapp_svc_audio_open(22050U, 2U, &second) != ZZ_OK ||
+	    first.samples == second.samples)
+		fail("per-slot audio state");
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_audio_close() != ZZ_OK)
+		fail("first slot audio close");
+	zzapp_services_select_slot(1U);
+	if (zzapp_svc_audio_close() != ZZ_OK)
+		fail("second slot audio close");
+}
+
+static void test_app_window_ignores_mailbox_selection(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(2U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_test_set_core(0);
+	zzapp_services_select_slot(1U);
+	zzapp_services_set_generation(1U);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 1U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 1U);
+	reply_len = 0U;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_STATUS, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("slot one mailbox selection");
+	zzapp_services_test_set_core(1);
+	service_test_current_thread = 2;
+	if (zzapp_services_window() != g_slot_windows[1])
+		fail("app window ignores mailbox selection");
+	service_test_current_thread = -1;
+}
+
+static void test_core1_wakes_ready_waiter(void)
+{
+	zzapp_kernel_t *kernel;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(2U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	runtime[2].wait_kind = ZZAPP_WAIT_CONSOLE_READ;
+	runtime[2].wait_value = 0U;
+	zzapp_put_be32(g_slot_windows[1] + ZZAPP_CONSOLE_IN_OFF, 1U);
+	kernel = zzapp_runtime_kernel();
+	kernel->threads[2].state = ZZAPP_THREAD_BLOCKED;
+	zzapp_services_test_set_core(0);
+	zzapp_services_core0_poll();
+	if (kernel->threads[2].state != ZZAPP_THREAD_BLOCKED)
+		fail("core zero woke waiter");
+	if (service_test_wake_count != 0U)
+		fail("core zero called wake");
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (kernel->threads[2].state != ZZAPP_THREAD_RUNNABLE)
+		fail("core one did not wake waiter");
+	if (service_test_wake_count != 1U)
+		fail("core one wake count");
+}
+static void test_deferred_waits_for_system_thread(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_test_set_core(0);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 1U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 0U);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_QUEUED)
+		fail("deferred request queued");
+	zzapp_services_test_set_core(1);
+	service_test_current_thread = 0;
+	zzapp_services_poll();
+	if (__atomic_load_n(&deferred[1].state, __ATOMIC_ACQUIRE) != DEFER_POSTED)
+		fail("app thread ran deferred request");
+	service_test_current_thread = -1;
+	zzapp_services_poll();
+	if (__atomic_load_n(&deferred[1].state, __ATOMIC_ACQUIRE) != DEFER_DONE)
+		fail("system thread did not run deferred request");
+}
+static void test_load_uses_claim_generation(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("first window claim");
+	zzapp_services_expire_claims(ZZAPP_CLAIM_LEASE_US);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_OK)
+		fail("second window claim");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, NULL, 0U, reply,
+				   &reply_len, 1, 3U, 0U) != SDK_STATUS_QUEUED)
+		fail("empty load begin queued");
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (service_loader_generation != generation)
+		fail("load generation differs from claim");
+	if (zzapp_get_be32(g_window + ZZAPP_LIFE_GENERATION_OFF) != generation)
+		fail("empty load changed slots generation");
+}
+static void loader_begin_succeeds(void);
+static void test_mixed_legacy_and_slots_load_generation(void)
+{
+	uint8_t slots_request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint16_t status;
+	uint32_t legacy_generation;
+	uint32_t slots_generation;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
+				   &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("legacy claim before mixed load");
+	legacy_generation = zzapp_get_be32(g_slot_windows[0] +
+					   ZZAPP_LIFE_GENERATION_OFF);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, slots_request,
+				   sizeof(slots_request), reply, &reply_len, 1,
+				   2U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) != 1U)
+		fail("slots claim before mixed load");
+	slots_generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(slots_request + ZZAPP_SEL_SLOT, 1U);
+	zzapp_put_be32(slots_request + ZZAPP_SEL_GENERATION, slots_generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, NULL, 0U, reply,
+				   &reply_len, 1, 3U, 0U) != SDK_STATUS_QUEUED ||
+	    zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, slots_request,
+				   sizeof(slots_request), reply, &reply_len, 1,
+				   4U, 0U) != SDK_STATUS_QUEUED)
+		fail("mixed load begins queued");
+	service_test_loader_begin_hook = loader_begin_succeeds;
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL, &reply_len) ||
+	    status != SDK_STATUS_OK)
+		fail("legacy mixed load completion");
+	zzapp_mailbox_harvest_ack();
+	if (zzapp_get_be32(g_slot_windows[0] + ZZAPP_LIFE_GENERATION_OFF) ==
+	    legacy_generation)
+		fail("legacy mixed load did not advance generation");
+	zzapp_services_poll();
+	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL, &reply_len) ||
+	    status != SDK_STATUS_OK)
+		fail("slots mixed load completion");
+	zzapp_mailbox_harvest_ack();
+	service_test_loader_begin_hook = NULL;
+	if (zzapp_get_be32(g_slot_windows[1] + ZZAPP_LIFE_GENERATION_OFF) !=
+	    slots_generation)
+		fail("slots mixed load changed allocation generation");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_STOP, slots_request,
+				   sizeof(slots_request), reply, &reply_len, 1,
+				   5U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(g_slot_windows[1] + ZZAPP_LIFE_STOP_OFF) != 1U)
+		fail("slots stop rejected allocation generation");
+}
+static void test_returned_buffers_are_user_granted(void)
+{
+	uint8_t payload[ZZAPP_BIND_REQ_BYTES];
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	zzapp_audio audio;
+	uint32_t grants;
+	uint32_t revokes;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_build_display_bind_request_layout(payload, 320U, 200U, 640U,
+						ZZ_FMT_RGB565, 0x00200000U,
+						0x00210000U, ZZ_LAYOUT_RGB565_LE);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("surface bind for grant");
+	if (service_test_grant_count != 2U)
+		fail("surface buffers were not granted");
+	grants = service_test_grant_count;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_BUSY)
+		fail("second surface bind was accepted");
+	if (service_test_grant_count != 2U)
+		fail("second surface bind created aliases");
+	if (zzapp_svc_display_close(1U) != ZZ_OK)
+		fail("surface close for revoke");
+	if (service_test_ungrant_count != 2U)
+		fail("surface close left a display alias");
+	revokes = service_test_ungrant_count;
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_OK)
+		fail("audio open for grant");
+	if (service_test_grant_count != grants + 1U)
+		fail("audio buffer was not granted");
+	if (zzapp_svc_audio_close() != ZZ_OK)
+		fail("audio close for revoke");
+	if (service_test_ungrant_count != revokes + 1U)
+		fail("audio buffer was not revoked");
+}
+static void test_failed_starts_release_admission(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t slot;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; ++slot)
+		zzapp_services_test_set_window_slot(slot, g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; ++slot) {
+		if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+					   sizeof(request), reply, &reply_len,
+					   1, slot + 1U, 0U) != SDK_STATUS_OK)
+			fail("claim before failed start");
+		zzapp_services_on_app_end();
+	}
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 9U, 0U) != SDK_STATUS_OK)
+		fail("failed starts exhausted admission");
+}
+
+static void expire_running_load(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	expiry_deferred_generation = deferred[0].generation;
+	expiry_slot_generation = slots[0].generation;
+	zzapp_services_expire_claims(ZZAPP_LOAD_LEASE_US);
+	expiry_claim_status = zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW,
+						     request, 0U, reply,
+						     &reply_len, 1, 3U, 0U);
+}
+
+static void loader_begin_succeeds(void)
+{
+}
+
+static void stop_completing_load(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, slots[0].generation);
+	stop_completing_status = zzapp_mailbox_dispatch(ZZAPP_OP_STOP, request,
+							sizeof(request), reply,
+							&reply_len, 1, 3U, 0U);
+	zzapp_services_core0_poll();
+	stop_completing_slot_state = slots[0].state;
+	memset(request, 0, sizeof(request));
+	stop_completing_claim_status = zzapp_mailbox_dispatch(
+		ZZAPP_OP_ALLOC_WINDOW, request, 0U, reply, &reply_len, 1, 4U, 0U);
+}
+
+static void test_stop_cancels_completing_load(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before completing stop");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED ||
+	    !start_posted_deferred())
+		fail("queue load before completing stop");
+	service_test_loader_begin_hook = loader_begin_succeeds;
+	service_test_deferred_completing_hook = stop_completing_load;
+	run_deferred();
+	service_test_deferred_completing_hook = NULL;
+	service_test_loader_begin_hook = NULL;
+	if (stop_completing_status != SDK_STATUS_OK)
+		fail("stop did not take completing load");
+	if (stop_completing_slot_state != ZZAPP_ST_STOPPING)
+		fail("audio poll released completing load");
+	if (stop_completing_claim_status != SDK_STATUS_BUSY)
+		fail("replacement claim raced completing cancellation");
+	if (slots[0].state != ZZAPP_ST_IDLE ||
+	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
+	    service_test_loader_abort_count != 1U)
+		fail("completing stop was published after cancellation");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 5U, 0U) != SDK_STATUS_OK)
+		fail("claim after completing stop");
+}
+
+static void test_claim_expiry_cancels_running_load(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	loading_now = 0U;
+	zzapp_services_test_set_time(loading_test_time);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before expiry");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED)
+		fail("queue load before expiry");
+	if (!start_posted_deferred())
+		fail("start load before expiry");
+	service_test_deferred_completion_hook = expire_running_load;
+	run_deferred();
+	service_test_deferred_completion_hook = NULL;
+	if (slots[0].state != ZZAPP_ST_STOPPING ||
+	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
+	    service_test_loader_abort_count != 1U)
+		fail("expired running load was not quarantined");
+	if (expiry_claim_status != SDK_STATUS_BUSY)
+		fail("expiry admitted a replacement before running load finished");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_CHUNK, request, sizeof(request),
+				   reply, &reply_len, 1, 3U, 0U) !=
+	    SDK_STATUS_BAD_HANDLE)
+		fail("stale running loader did not release quarantine");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 4U, 0U) != SDK_STATUS_OK)
+		fail("claim after running expiry");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 5U, 0U) != SDK_STATUS_QUEUED ||
+	    slots[0].state != ZZAPP_ST_CLAIMED ||
+	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_POSTED)
+		fail("replacement load was affected by expiry");
+	zzapp_services_test_set_time(NULL);
+}
+static void start_loading(uint8_t *request, uint8_t *reply, uint16_t *reply_len,
+			  int legacy, int harvest)
+{
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	zzapp_services_test_set_time(loading_test_time);
+	loading_now = 0U;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, legacy ? NULL : request,
+				   legacy ? 0U : ZZAPP_MAILBOX_PAYLOAD_BYTES, reply,
+				   reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before loading deadline");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	memset(request, 0, ZZAPP_MAILBOX_PAYLOAD_BYTES);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, legacy ? NULL : request,
+				   legacy ? 0U : ZZAPP_MAILBOX_PAYLOAD_BYTES, reply,
+				   reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED ||
+	    !start_posted_deferred())
+		fail("queue loading deadline");
+	service_test_loader_begin_hook = loader_begin_succeeds;
+	run_deferred();
+	if (harvest) {
+		if (!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL))
+			fail("finish loading deadline");
+		zzapp_mailbox_harvest_ack();
+	}
+	if (slots[0].state != ZZAPP_ST_LOADING)
+		fail("enter loading deadline");
+}
+
+static void test_abandoned_loading_is_quarantined(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	start_loading(request, reply, &reply_len, 1, 0);
+	loading_now = ZZAPP_LOAD_LEASE_US;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_STOPPING ||
+	    service_test_loader_abort_count != 0U)
+		fail("expired load was not quarantined");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply,
+				   &reply_len, 1, 2U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_LIST_STATE) != ZZAPP_ST_STOPPING ||
+	    reply[ZZAPP_LIST_REASONS + 1U] != ZZAPP_END_QUARANTINED)
+		fail("status did not report quarantined load");
+	zzapp_build_chunk_request(request, 0U, 1U);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 0U);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_CHUNK, request, sizeof(request),
+				   reply, &reply_len, 1, 4U, 0U) !=
+	    SDK_STATUS_BAD_HANDLE)
+		fail("stale launcher contact did not receive terminal error");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
+				   &reply_len, 1, 5U, 0U) != SDK_STATUS_BUSY)
+		fail("stale contact released a live quarantined window");
+	(void)zzapp_loader_abort();
+	if (slots[0].quarantined || service_test_loader_abort_count != 1U)
+		fail("stale contact did not release after loader teardown");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   ZZAPP_MAILBOX_PAYLOAD_BYTES, reply, &reply_len,
+				   1, 6U, 0U) != SDK_STATUS_OK)
+		fail("stale launcher contact did not release window");
+	zzapp_services_test_set_time(NULL);
+}
+
+
+static void test_explicit_quarantine_release_and_reset(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	start_loading(request, reply, &reply_len, 1, 0);
+	loading_now = ZZAPP_LOAD_LEASE_US;
+	zzapp_services_expire_claims(loading_now);
+	(void)zzapp_loader_abort();
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, slots[0].generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_RELEASE, request, sizeof(request),
+				   reply, &reply_len, 1, 4U, 0U) != SDK_STATUS_OK)
+		fail("explicit release did not free quarantine");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_RELEASE, request, sizeof(request),
+				   reply, &reply_len, 1, 5U, 0U) != SDK_STATUS_BUSY)
+		fail("explicit release accepted non-quarantined slot");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
+				   &reply_len, 1, 6U, 0U) != SDK_STATUS_OK)
+		fail("explicit release did not restore admission");
+
+	start_loading(request, reply, &reply_len, 1, 0);
+	loading_now = ZZAPP_LOAD_LEASE_US;
+	zzapp_services_expire_claims(loading_now);
+	(void)zzapp_loader_abort();
+	zzapp_services_on_reset();
+	if (slots[0].quarantined || slots[0].state != ZZAPP_ST_IDLE)
+		fail("reset did not clear quarantine");
+	zzapp_services_test_set_time(NULL);
+}
+static void test_loading_chunk_renews_deadline(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t payload[ZZAPP_CHUNK_REQ_BYTES];
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	start_loading(request, reply, &reply_len, 0, 1);
+	loading_now = ZZAPP_LOAD_LEASE_US - 1U;
+	zzapp_build_chunk_request(payload, 0U, 1U);
+	zzapp_services_test_set_core(0);
+	service_test_loader_chunk_hook = loader_chunk_succeeds;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_CHUNK, payload, sizeof(payload),
+				   reply, &reply_len, 1, 3U, 0U) != SDK_STATUS_QUEUED ||
+	    !start_posted_deferred())
+		fail("queue slow loading chunk");
+	zzapp_services_test_set_core(1);
+	run_deferred();
+	service_test_loader_chunk_hook = NULL;
+	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL))
+		fail("finish slow loading chunk");
+	zzapp_mailbox_harvest_ack();
+	loading_now += ZZAPP_LOAD_LEASE_US - 1U;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_LOADING ||
+	    service_test_loader_abort_count != 0U)
+		fail("slow loading chunk did not renew deadline");
+	loading_now++;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_STOPPING ||
+	    service_test_loader_abort_count != 0U)
+		fail("renewed loading deadline was not quarantined");
+	zzapp_services_test_set_time(NULL);
+}
+
+static void test_loading_heartbeat_renews_deadline(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	start_loading(request, reply, &reply_len, 0, 1);
+	loading_now = ZZAPP_LOAD_LEASE_US;
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_LOADING)
+		fail("launcher heartbeat did not renew loading deadline");
+	loading_now += ZZAPP_LOAD_LEASE_US - 1U;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_LOADING)
+		fail("active slow load was reclaimed");
+	loading_now++;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_STOPPING)
+		fail("heartbeat-renewed loading deadline did not expire");
+	zzapp_services_test_set_time(NULL);
+}
+
+static void test_claim_heartbeat_renews_deadline(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_time(loading_test_time);
+	loading_now = 0U;
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before claim heartbeat");
+	loading_now = ZZAPP_CLAIM_LEASE_US;
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_CLAIMED)
+		fail("launcher heartbeat did not renew claimed slot");
+	loading_now += ZZAPP_CLAIM_LEASE_US;
+	zzapp_services_expire_claims(loading_now);
+	if (slots[0].state != ZZAPP_ST_IDLE)
+		fail("renewed claimed slot did not expire");
+	zzapp_services_test_set_time(NULL);
+}
+
+static void test_preload_cancellation_releases_deferred_record(void)
+{
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t generation;
+	uint32_t load_generation;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	loading_now = 0U;
+	zzapp_services_test_set_time(loading_test_time);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
+				   &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before pre-load cancellation");
+	generation = zzapp_get_be32(g_window + ZZAPP_LIFE_GENERATION_OFF);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, NULL, 0U, reply,
+				   &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED)
+		fail("queue load before pre-load cancellation");
+	if (!start_posted_deferred())
+		fail("start pre-load cancellation");
+	load_generation = generation + 1U;
+	if (load_generation == 0U)
+		load_generation = 1U;
+	service_test_loader_set_generation_hook = expire_running_load;
+	run_deferred();
+	service_test_loader_set_generation_hook = NULL;
+	if (expiry_deferred_generation != load_generation ||
+	    expiry_deferred_generation != expiry_slot_generation ||
+	    service_loader_generation != load_generation)
+		fail("cancelled load did not keep its bumped generation");
+	if (slots[0].state != ZZAPP_ST_STOPPING ||
+	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
+	    service_test_loader_abort_count != 1U ||
+	    slots[0].generation == 0U ||
+	    zzapp_get_be32(g_window + ZZAPP_LIFE_GENERATION_OFF) !=
+		    slots[0].generation)
+		fail("pre-load cancellation did not quarantine lifecycle state");
+	zzapp_services_test_set_time(NULL);
+}
+
+static void test_harvest_racing_completion_reads_reply(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint16_t status;
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before harvest race");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED ||
+	    !start_posted_deferred())
+		fail("queue load before harvest race");
+	service_test_deferred_reply_hook = harvest_between_reply_and_done;
+	run_deferred();
+	service_test_deferred_reply_hook = NULL;
+	if (harvest_reply_hook_result != 0)
+		fail("harvest posted completion before DONE");
+	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL, NULL) ||
+	    status != SDK_STATUS_UNSUPPORTED)
+		fail("harvest posted stale completion status");
+	zzapp_mailbox_harvest_ack();
+}
+
+static uint64_t replacement_wait_time(void)
+{
+	return 1U;
+}
+
+static void test_new_generation_does_not_inherit_wait(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	zzapp_kernel_t *kernel;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim before parked teardown");
+	current_runtime()->wait_kind = ZZAPP_WAIT_FILE;
+	current_runtime()->wait_value = 0U;
+	current_runtime()->wait_deadline = 1U;
+	zzapp_services_on_app_end();
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 2U, 0U) != SDK_STATUS_OK)
+		fail("claim after parked teardown");
+	kernel = zzapp_runtime_kernel();
+	kernel->threads[0].state = ZZAPP_THREAD_SLEEPING;
+	zzapp_services_test_set_time(replacement_wait_time);
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	zzapp_services_test_set_time(NULL);
+	if (kernel->threads[0].state != ZZAPP_THREAD_SLEEPING)
+		fail("old file wait woke replacement sleep");
+}
+
+
+static void test_deferred_slots_queue_independently(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	slots[0].generation = 1U;
+	slots[1].generation = 1U;
+	slots[0].state = ZZAPP_ST_CLAIMED;
+	slots[1].state = ZZAPP_ST_CLAIMED;
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 1U);
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_QUEUED)
+		fail("first deferred slot request");
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 1U);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED)
+		fail("second deferred slot request");
+}
+
+static void test_stop_releases_claimed_slot(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t generation[ZZAPP_SLOT_COUNT];
+	uint32_t slot;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++)
+		zzapp_services_test_set_window_slot(slot, g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+					   sizeof(request), reply, &reply_len,
+					   1, slot + 1U, 0U) != SDK_STATUS_OK)
+			fail("claim slot before stop");
+		generation[slot] = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	}
+	memset(request, 0, sizeof(request));
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation[0]);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_STOP, request, sizeof(request), reply,
+				   &reply_len, 1, 5U, 0U) != SDK_STATUS_OK)
+		fail("stop claimed slot");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 6U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) != 0U ||
+	    zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION) != generation[0] + 1U)
+		fail("claimed slot was not released");
+}
+static void test_stop_cancels_queued_claim_load(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t generation;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 1U, 0U) != SDK_STATUS_OK)
+		fail("claim slot before queued load");
+	generation = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
+				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_QUEUED)
+		fail("queue claimed load");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_STOP, request, sizeof(request), reply,
+				   &reply_len, 1, 3U, 0U) != SDK_STATUS_OK)
+		fail("stop queued claimed load");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+				   sizeof(request), reply, &reply_len,
+				   1, 4U, 0U) != SDK_STATUS_OK)
+		fail("reclaim stopped slot");
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (service_loader_generation != 0U)
+		fail("stale claimed load reached loader");
+	if (slots[0].state != ZZAPP_ST_CLAIMED)
+		fail("stale claimed load changed replacement state");
+}
+
+static void test_list_name_uses_start_argv(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	slots[0].generation = 1U;
+	slots[0].state = ZZAPP_ST_LOADING;
+	zzapp_services_set_state(ZZAPP_ST_LOADING);
+	zzapp_put_be32(g_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_ARGC_OFF, 1U);
+	zzapp_put_be32(g_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
+		       ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
+	memcpy(g_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
+	       "PROGDIR:bin/demo", sizeof("PROGDIR:bin/demo"));
+	memset(request, 0, sizeof(request));
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 1U);
+	zzapp_put_be32(request + ZZAPP_START_ARGC, 1U);
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_START, request, sizeof(request), reply,
+				   &reply_len, 1, 1U, 0U) != SDK_STATUS_QUEUED)
+		fail("start queued for list name");
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	if (!zzapp_services_take_start(NULL))
+		fail("start pending for list name");
+	if (zzapp_services_start_entered(slots[0].generation) != ZZ_OK)
+		fail("start completion for list name");
+	zzapp_services_test_set_core(0);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply,
+				   &reply_len, 1, 2U, 0U) != SDK_STATUS_OK ||
+	    memcmp(reply + ZZAPP_LIST_NAME, "demo", sizeof("demo")) != 0)
+		fail("list name from argv");
+}
+
+static void test_display_state_ignores_window_tampering(void)
+{
+	uint8_t payload[ZZAPP_BIND_REQ_BYTES];
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len;
+	uint32_t front;
+	uint32_t back;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_build_display_bind_request_layout(payload, 320U, 200U, 640U,
+						ZZ_FMT_RGB565, 0x00200000U,
+						0x00210000U, ZZ_LAYOUT_RGB565_LE);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+		fail("display bind for private state");
+	zzapp_put_be32(g_window + ZZAPP_LIFE_CARD_FRONT_OFF, 0x01000000U);
+	zzapp_put_be32(g_window + ZZAPP_LIFE_CARD_BACK_OFF, 0x01010000U);
+	if (zzapp_display_bound(NULL, NULL, NULL, NULL, &front, &back) != ZZ_OK ||
+	    front != 0x00200000U || back != 0x00210000U)
+		fail("display trusted launcher addresses");
+}
+
+static void test_audio_teardown_quiesces_every_slot(void)
+{
+	zzapp_audio audio;
+
+	zzapp_services_test_reset();
+	memset(g_slot_windows, 0, sizeof(g_slot_windows));
+	zzapp_services_test_set_window_slot(0U, g_slot_windows[0],
+					     sizeof(g_slot_windows[0]));
+	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
+					     sizeof(g_slot_windows[1]));
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_OK)
+		fail("audio open for cross-slot teardown");
+	zzapp_services_on_app_end();
+	zzapp_services_select_slot(1U);
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	zzapp_services_test_set_core(0);
+	zzapp_services_core0_poll();
+	zzapp_services_select_slot(0U);
+	if (zzapp_services_test_audio_request() != AUDIO_REQUEST_NONE ||
+	    zzapp_services_test_audio_detach_count() != 1U)
+		fail("audio teardown stranded by another slot");
+}
+
+static void test_audio_handoff_blocks_reclaim(void)
+{
+	zzapp_audio audio;
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len = 0U;
+	void *block;
+	uint32_t handed;
+	uint32_t slot;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++)
+		zzapp_services_test_set_window_slot(slot, g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+					   sizeof(request), reply, &reply_len,
+					   1, slot + 1U, 0U) != SDK_STATUS_OK)
+			fail("claim before audio handoff");
+	}
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_audio_open(22050U, 2U, &audio) != ZZ_OK)
+		fail("audio open before blocked reclaim");
+	block = current_runtime()->audio_block;
+	zzapp_services_on_app_end();
+	handed = zzapp_services_test_audio_request();
+	if (slots[0].state == ZZAPP_ST_IDLE)
+		fail("slot idle before audio handoff finished");
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 8U, 0U) == SDK_STATUS_OK)
+		fail("alloc reclaimed a slot during audio handoff");
+	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 1U);
+	(void)zzapp_mailbox_dispatch(ZZAPP_OP_STOP, request, sizeof(request),
+				     reply, &reply_len, 1, 9U, 0U);
+	zzapp_services_select_slot(0U);
+	if (current_runtime()->audio_block != block ||
+	    zzapp_services_test_audio_request() != handed ||
+	    zzapp_services_test_audio_detach_count() != 0U)
+		fail("stop zeroed live audio during handoff");
+	zzapp_services_test_set_core(1);
+	zzapp_services_poll();
+	zzapp_services_test_set_core(0);
+	zzapp_services_core0_poll();
+	zzapp_services_select_slot(0U);
+	if (slots[0].state != ZZAPP_ST_IDLE ||
+	    zzapp_services_test_audio_detach_count() != 1U ||
+	    zzapp_services_test_audio_request() != AUDIO_REQUEST_NONE)
+		fail("slot stayed busy after audio handoff");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 10U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) != 0U)
+		fail("alloc after audio handoff");
+}
+static void test_cancelled_pending_open_releases_slot(void)
+{
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len = 0U;
+	uint32_t slot;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++)
+		zzapp_services_test_set_window_slot(slot, g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+					   sizeof(request), reply, &reply_len,
+					   1, slot + 1U, 0U) != SDK_STATUS_OK)
+			fail("claim before cancelled open");
+	}
+	zzapp_services_select_slot(0U);
+	zzapp_services_test_set_audio_request(AUDIO_REQUEST_OPEN);
+	zzapp_services_on_app_end();
+	if (slots[0].state == ZZAPP_ST_IDLE)
+		fail("slot idle while open was still pending teardown");
+	zzapp_services_core0_poll();
+	zzapp_services_select_slot(0U);
+	if (current_runtime()->audio_teardown != 0U ||
+	    current_runtime()->audio_request != AUDIO_REQUEST_NONE ||
+	    slots[0].state != ZZAPP_ST_IDLE)
+		fail("cancelled open left slot unreleased");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 8U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) != 0U)
+		fail("alloc failed after cancelled open release");
+}
+
+static void test_reclaim_halted_audio_reclaims_every_slot(void)
+{
+	zzapp_audio audio[2];
+	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint16_t reply_len = 0U;
+	uint32_t slot;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++)
+		zzapp_services_test_set_window_slot(slot, g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+		if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
+					   sizeof(request), reply, &reply_len,
+					   1, slot + 1U, 0U) != SDK_STATUS_OK)
+			fail("claim before multi-producer open");
+	}
+	zzapp_services_select_slot(0U);
+	if (zzapp_svc_audio_open(22050U, 2U, &audio[0]) != ZZ_OK)
+		fail("producer 0 open");
+	zzapp_services_select_slot(1U);
+	if (zzapp_svc_audio_open(22050U, 2U, &audio[1]) != ZZ_OK)
+		fail("producer 1 open");
+	zzapp_services_select_slot(0U);
+	zzapp_services_on_app_end();
+	zzapp_services_select_slot(1U);
+	zzapp_services_on_app_end();
+	if (slots[0].state == ZZAPP_ST_IDLE || slots[1].state == ZZAPP_ST_IDLE)
+		fail("producer idle before halted reclaim");
+	/* Core 1 is halted: no services_poll() runs to quiesce CLOSE.
+	 * Select slot 0 and invoke reclaim once: both slots must be freed
+	 * and slot 0 must remain selected. */
+	zzapp_services_select_slot(0U);
+	zzapp_services_reclaim_halted_audio();
+	if (zzapp_services_current_slot() != 0U)
+		fail("halted reclaim did not preserve slot selection");
+	if (slots[0].state != ZZAPP_ST_IDLE || slots[1].state != ZZAPP_ST_IDLE)
+		fail("halted reclaim left a producer slot unreleased");
+	if (runtime_for_slot(0U)->audio_block != NULL ||
+	    runtime_for_slot(1U)->audio_block != NULL)
+		fail("halted reclaim left an audio block allocated");
+	if (runtime_for_slot(0U)->audio_detach_count != 1U ||
+	    runtime_for_slot(1U)->audio_detach_count != 1U)
+		fail("halted reclaim did not detach both producers");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 9U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) != 0U)
+		fail("alloc slot 0 after halted reclaim");
+	memset(request, 0, sizeof(request));
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
+				   reply, &reply_len, 1, 10U, 0U) != SDK_STATUS_OK ||
+	    zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) != 1U)
+		fail("alloc slot 1 after halted reclaim");
+}
+static uint64_t frozen_file_time(void)
+{
+	return 0U;
+}
+
+static void scheduler_file_timeout(void)
+{
+	zzapp_runtime_kernel()->threads[service_slot()].wake_reason =
+		ZZAPP_WAKE_TIMEOUT;
+}
+
+static void test_scheduler_file_timeout_cancels_seqlock(void)
+{
+	int fd;
+	uint32_t seq;
+	uint32_t op;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_set_generation(1U);
+	zzapp_services_test_set_time(frozen_file_time);
+	zzapp_services_test_set_yield(scheduler_file_timeout);
+	fd = zzapp_svc_file_open("late.pak", ZZ_FILE_READ);
+	if (fd != ZZ_ETIMEDOUT)
+		fail("scheduler file timeout");
+	seq = zzapp_get_be32(g_window + ZZAPP_FILE_OFF);
+	op = zzapp_get_be32(g_window + ZZAPP_FILE_OFF + 4U);
+	if ((seq & 1U) == 0U)
+		fail("scheduler timeout left an even file sequence");
+	if (op != 0U)
+		fail("scheduler timeout left the file op armed");
+	if (current_runtime()->file_seq < 2U ||
+	    (current_runtime()->file_seq & 1U) != 0U)
+		fail("scheduler timeout did not advance file_seq");
+}
+
+static void console_eof_yield(void)
+{
+	zzapp_put_be32(g_window + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF, 1U);
+}
+
+static void test_console_eof_ends_wait(void)
+{
+	uint8_t buf[4];
+	uint32_t n = 99U;
+
+	zzapp_services_test_reset();
+	memset(&service_test_kernel, 0, sizeof(service_test_kernel));
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_set_generation(1U);
+	zzapp_services_test_set_yield(console_eof_yield);
+	if (zzapp_svc_console_read(buf, sizeof(buf), &n) != ZZ_OK || n != 0U)
+		fail("console eof read");
+	if (zzapp_services_wait_registered(0U))
+		fail("console eof left the wait registered");
+}
+
+
+
+
+
+static unsigned loader_end_passes;
+static unsigned loader_end_complete_after;
+
+static int loader_end_in_passes(void)
+{
+	loader_end_passes++;
+	return loader_end_passes < loader_end_complete_after ?
+		ZZAPP_LOADER_IN_PROGRESS : ZZ_OK;
+}
+
+static void queue_loading_end(void)
+{
+	zzapp_services_test_reset();
+	slots[0].state = ZZAPP_ST_LOADING;
+	slots[0].generation = 1U;
+	service_loader_state = ZZAPP_ST_LOADING;
+	deferred[0].state = DEFER_POSTED;
+	deferred[0].opcode = ZZAPP_OP_LOAD_END;
+	deferred[0].generation = 1U;
+	loader_end_passes = 0U;
+	service_test_loader_end_hook = loader_end_in_passes;
+}
+
+static void test_load_end_resumes_and_cancels(void)
+{
+	unsigned pass;
+
+	queue_loading_end();
+	loader_end_complete_after = 48U;
+	for (pass = 0U; pass < loader_end_complete_after; pass++) {
+		zzapp_services_poll();
+		if (pass + 1U < loader_end_complete_after &&
+		    deferred[0].state != DEFER_RUNNING)
+			fail("load end did not remain running between zero batches");
+	}
+	if (loader_end_passes != loader_end_complete_after ||
+	    deferred[0].state != DEFER_DONE)
+		fail("load end did not finish after bounded zero batches");
+
+	queue_loading_end();
+	loader_end_complete_after = UINT32_MAX;
+	zzapp_services_poll();
+	if (deferred[0].state != DEFER_RUNNING || loader_end_passes != 1U)
+		fail("load end did not begin bounded zero batch");
+	deferred[0].cancelled = 1U;
+	zzapp_services_poll();
+	if (deferred[0].state != DEFER_IDLE ||
+	    service_test_loader_abort_count != 1U)
+		fail("cancelled load end did not abort");
+}
+
 int main(void)
 {
 	test_payload_sizes();
@@ -536,11 +1882,44 @@ int main(void)
 	test_audio_busy();
 	test_late_file_reply();
 	test_audio_teardown_handoff();
+	test_reset_preserves_audio_teardown();
 	test_audio_write_cursor_wrap();
 	test_display_refresh_rotation_and_layout();
 	test_display_scanout_ack();
+	test_display_wait_flip_idle();
 	test_clut8_palette_publication();
 	test_display_mailbox();
+	test_display_mailbox_uses_scanout_owner();
+	test_per_slot_file_and_audio_state();
+	test_app_window_ignores_mailbox_selection();
+	test_core1_wakes_ready_waiter();
+	test_deferred_waits_for_system_thread();
+	test_load_uses_claim_generation();
+	test_mixed_legacy_and_slots_load_generation();
+	test_load_end_resumes_and_cancels();
+	test_returned_buffers_are_user_granted();
+	test_failed_starts_release_admission();
+	test_claim_expiry_cancels_running_load();
+	test_abandoned_loading_is_quarantined();
+	test_explicit_quarantine_release_and_reset();
+	test_loading_chunk_renews_deadline();
+	test_loading_heartbeat_renews_deadline();
+	test_claim_heartbeat_renews_deadline();
+	test_stop_cancels_completing_load();
+	test_preload_cancellation_releases_deferred_record();
+	test_new_generation_does_not_inherit_wait();
+	test_deferred_slots_queue_independently();
+	test_harvest_racing_completion_reads_reply();
+	test_stop_releases_claimed_slot();
+	test_stop_cancels_queued_claim_load();
+	test_list_name_uses_start_argv();
+	test_display_state_ignores_window_tampering();
+	test_audio_teardown_quiesces_every_slot();
+	test_audio_handoff_blocks_reclaim();
+	test_cancelled_pending_open_releases_slot();
+	test_reclaim_halted_audio_reclaims_every_slot();
+	test_scheduler_file_timeout_cancels_seqlock();
+	test_console_eof_ends_wait();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;

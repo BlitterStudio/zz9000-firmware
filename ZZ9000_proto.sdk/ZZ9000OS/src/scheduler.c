@@ -71,6 +71,14 @@ static void taskq_acquire_barrier(void)
 }
 #endif
 
+#if ZZAPP_PERF_COUNTERS
+uint32_t __attribute__((weak)) taskq_perf_enqueue_stamp(void)
+{
+  return 0U;
+}
+#endif
+
+
 /* ---- coherency stress model (used by the Phase 0 two-core torture harness) ---- */
 uint32_t taskq_stress_fill(uint32_t seed, uint32_t index)
 {
@@ -94,7 +102,108 @@ void taskq_init(taskq_t *q)
     q->descs[i].state = TASK_FREE;
   }
   q->enqueue_cursor = 0;
+  q->claim_cursor = 0;
+  q->short_claim_cursor = 0;
 }
+
+void taskq_shared_boot_init(taskq_shared_t *sh)
+{
+  if (!sh)
+    return;
+  taskq_init(&sh->queue);
+  sh->core1_current_slot = -1;
+  sh->core1_restart_request = 0;
+  sh->core1_fault_code = 0;
+  sh->core1_alive = 0;
+  sh->tasks_on_core1 = 0;
+  sh->tasks_on_core0 = 0;
+  sh->core1_park_request = 0;
+  sh->core1_parked = 0;
+  sh->core1_reclaim_request = 0;
+  sh->core1_reclaim_done = 0;
+  sh->core1_clean_request = 0;
+  sh->core1_clean_done = 0;
+  sh->minigl_doorbell = 0;
+  sh->minigl_reset_request = 0;
+  sh->minigl_reset_ack = 0;
+  sh->minigl_in_flight = 0;
+  sh->minigl_submission_admission = 1U;
+  sh->minigl_submission_generation = 0U;
+  sh->minigl_submission_ack = 0U;
+  sh->minigl_packets_on_core1 = 0;
+  sh->minigl_packets_on_core0 = 0;
+  sh->minigl_rix_fence_epoch = 0U;
+  sh->minigl_rix_fence_sequence = 0U;
+  sh->minigl_rix_fence_address = 0U;
+  /* Producers compare-exchange this from zero. A leftover 2 is neither
+   * serviced nor replaceable, so the worker never drains again. */
+  sh->service_pending = 0;
+#if ZZAPP_PERF_COUNTERS
+  sh->perf_work_publications = 0U;
+  sh->perf_doorbell_stamp = 0U;
+  sh->perf_sgi_count = 0U;
+#endif
+}
+#if ZZAPP_PERF_COUNTERS
+void scheduler_perf_work_published(taskq_shared_t *shared)
+{
+  if (shared)
+    (void)__atomic_add_fetch(&shared->perf_work_publications, 1U,
+                             __ATOMIC_RELEASE);
+}
+#endif
+void scheduler_core1_publish_work(taskq_shared_t *shared,
+				  scheduler_core1_wake_fn wake)
+{
+	if (!shared || !wake)
+		return;
+#if ZZAPP_PERF_COUNTERS
+	scheduler_perf_work_published(shared);
+#endif
+	wake(shared);
+}
+void scheduler_core1_service_clean_request_with(
+    taskq_shared_t *shared, scheduler_core1_clean_cache_fn clean_cache,
+    scheduler_core1_clean_publish_fn publish, void *context)
+{
+	if (!shared || !clean_cache || !publish ||
+	    shared->core1_current_slot >= 0 || shared->core1_restart_request ||
+	    !shared->core1_clean_request)
+		return;
+	shared->core1_clean_request = 0U;
+	clean_cache(context);
+	publish(context);
+	shared->core1_clean_done = 1U;
+	publish(context);
+}
+
+int scheduler_core1_clean_dcache_wait(taskq_shared_t *shared,
+				      scheduler_core1_available_fn available,
+				      scheduler_core1_clean_publish_fn publish,
+				      scheduler_core1_clean_wait_fn wait,
+				      void *context, uint32_t spins)
+{
+	uint32_t spin;
+
+	if (!shared || !available || !publish || !wait || !available(context) ||
+	    !shared->core1_alive)
+		return 0;
+	if (shared->core1_current_slot >= 0 || shared->core1_restart_request)
+		return -1;
+	shared->core1_clean_done = 0U;
+	shared->core1_clean_request = 1U;
+	publish(context);
+	for (spin = 0U; spin < spins && !shared->core1_clean_done; spin++)
+		wait(context, SCHED_CORE1_CLEAN_POLL_US);
+	if (shared->core1_clean_done)
+		return 0;
+	shared->core1_clean_request = 0U;
+	publish(context);
+	return -1;
+}
+
+
+
 
 int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                   uint32_t in_addr, uint32_t in_len,
@@ -122,6 +231,9 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
       d->out_cap = out_cap;
       d->request_id = request_id;
       d->user_cookie = user_cookie;
+#if ZZAPP_PERF_COUNTERS
+      d->perf_enqueue_stamp = taskq_perf_enqueue_stamp();
+#endif
       d->result_status = 0;
       d->result_len = 0;
       /* Copy the opaque input params before publishing, so a consumer that
@@ -138,14 +250,52 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
   return -1;
 }
 
+int taskq_doorbell_request(volatile uint32_t *pending,
+                           taskq_doorbell_send_fn send, void *context)
+{
+  if (!pending || !taskq_cas_u32(pending, 0U, 1U))
+    return 0;
+  taskq_store_release(pending, 1U);
+  if (send)
+    send(context);
+  return 1;
+}
+
+uint32_t taskq_doorbell_drain(volatile uint32_t *pending,
+                              taskq_doorbell_drain_fn drain,
+                              taskq_doorbell_more_fn more, void *context,
+                              uint32_t batch)
+{
+  uint32_t drained;
+
+  if (!pending || !drain || !more || batch == 0U)
+    return 0;
+  drained = drain(context, batch);
+  if (more(context))
+    return drained;
+  taskq_store_release(pending, 0U);
+  taskq_acquire_barrier();
+  if (!more(context))
+    return drained;
+  /* Work arrived between the empty check and clear. It is already either
+   * accompanied by the producer's SGI or remains visible to the next worker
+   * pass; retain the pending state in both cases. */
+  (void)taskq_cas_u32(pending, 0U, 1U);
+  return drained;
+}
+
 /* ---- atomic claim (consumer): CAS QUEUED -> CLAIMED ---- */
 int taskq_claim_any(taskq_t *q)
 {
   uint32_t i;
+  uint32_t cursor = __atomic_load_n(&q->claim_cursor, __ATOMIC_RELAXED);
   for (i = 0; i < TASKQ_CAPACITY; i++) {
-    volatile uint32_t *s = &q->descs[i].state;
+    uint32_t idx = (cursor + i) % TASKQ_CAPACITY;
+    volatile uint32_t *s = &q->descs[idx].state;
     if (*s == TASK_QUEUED && taskq_cas_u32(s, TASK_QUEUED, TASK_CLAIMED)) {
-      return (int)i;
+      __atomic_store_n(&q->claim_cursor, (idx + 1U) % TASKQ_CAPACITY,
+                       __ATOMIC_RELAXED);
+      return (int)idx;
     }
   }
   return -1;
@@ -154,24 +304,32 @@ int taskq_claim_any(taskq_t *q)
 int taskq_claim_short(taskq_t *q)
 {
   uint32_t i;
+  uint32_t cursor = __atomic_load_n(&q->short_claim_cursor,
+                                    __ATOMIC_RELAXED);
   for (i = 0; i < TASKQ_CAPACITY; i++) {
-    if (q->descs[i].state != TASK_QUEUED) {
+    uint32_t idx = (cursor + i) % TASKQ_CAPACITY;
+    if (q->descs[idx].state != TASK_QUEUED) {
       continue;
     }
-    /* Acquire: order the cls load after observing TASK_QUEUED, pairing with the
-     * dmb-release store of state in taskq_enqueue. Without it the weakly-ordered
-     * A9 could pair a freshly published QUEUED state with a stale cls left over
-     * from this slot's previous task -- a SHORT->LONG reuse would then read
-     * cls == TASK_SHORT and run a LONG crypto op inline on core 0. */
+    /* Acquire: order cls after observing TASK_QUEUED, pairing with enqueue. */
     taskq_acquire_barrier();
-    if (q->descs[i].cls == (uint32_t)TASK_SHORT) {
-      volatile uint32_t *s = &q->descs[i].state;
+    if (q->descs[idx].cls == (uint32_t)TASK_SHORT) {
+      volatile uint32_t *s = &q->descs[idx].state;
       if (taskq_cas_u32(s, TASK_QUEUED, TASK_CLAIMED)) {
-        return (int)i;
+        __atomic_store_n(&q->short_claim_cursor, (idx + 1U) % TASKQ_CAPACITY,
+                         __ATOMIC_RELAXED);
+        return (int)idx;
       }
     }
   }
   return -1;
+}
+
+void taskq_requeue(taskq_t *q, int slot)
+{
+  if (!q || slot < 0 || slot >= (int)TASKQ_CAPACITY)
+    return;
+  taskq_store_release(&q->descs[slot].state, TASK_QUEUED);
 }
 
 /* ---- completion transitions ---- */
@@ -196,6 +354,19 @@ void taskq_fail(taskq_t *q, int slot, uint16_t status)
   d->result_status = status;
   d->result_len = 0;
   taskq_store_release(&d->state, TASK_FAILED);
+}
+
+void taskq_abort_active(taskq_t *q, uint16_t status)
+{
+  uint32_t i;
+
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    uint32_t state = q->descs[i].state;
+
+    if (state == TASK_QUEUED || state == TASK_CLAIMED) {
+      taskq_fail(q, (int)i, status);
+    }
+  }
 }
 
 int taskq_harvest(taskq_t *q)
@@ -294,6 +465,29 @@ int taskq_should_drain(int zorro_pending, int display_pending, int core1_enabled
   return (!zorro_pending && !display_pending) ? 1 : 0;
 }
 
+void scheduler_core1_halt_before_recover(
+    scheduler_core1_recovery_step_t halt,
+    scheduler_core1_recovery_step_t recover)
+{
+  halt();
+  recover();
+}
+
+void scheduler_core1_fallback_recover_with(
+    scheduler_core1_recovery_step_t halt,
+    scheduler_core1_recovery_step_t recover,
+    scheduler_core1_queue_reclaim_fn reclaim_after_halt, taskq_t *queue,
+    scheduler_core1_recovery_step_t reclaim_audio,
+    scheduler_core1_module_quarantine_fn quarantine_module, uint32_t module,
+    volatile uint32_t *core1_started)
+{
+  scheduler_core1_halt_before_recover(halt, recover);
+  reclaim_after_halt(queue);
+  reclaim_audio();
+  quarantine_module(module);
+  *core1_started = 0U;
+}
+
 /* ---- core-1 worker action policy (portable, host-tested) ---- */
 sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
                                           int minigl_work_available, int minigl_bound)
@@ -313,11 +507,115 @@ sched_worker_action_t sched_worker_decide(int reset_requested, int task_availabl
   return SCHED_WORKER_ACTION_WFE;
 }
 
+int sched_worker_may_wfe(sched_worker_action_t action, int minigl_progress,
+                         int task_active, int reset_requested, int doorbell,
+                         int minigl_registered)
+{
+  if (task_active || reset_requested || doorbell)
+    return 0;
+  if (action == SCHED_WORKER_ACTION_WFE)
+    return !minigl_registered;
+  /* An idle bound worker keeps polling the 68k ring, which raises no event. */
+  return action == SCHED_WORKER_ACTION_MINIGL && !minigl_progress;
+}
+
+int scheduler_minigl_submission_admit(taskq_shared_t *shared)
+{
+  if (shared->minigl_submission_admission != 0U)
+    return 1;
+  taskq_acquire_barrier();
+  /* The reset request precedes closed admission. Do not acknowledge until the
+   * worker's reset step has cleared it, even after a stale action selection. */
+  if (shared->minigl_reset_request != 0U)
+    return 0;
+  taskq_store_release(&shared->minigl_submission_ack,
+                      shared->minigl_submission_generation);
+  return 0;
+}
+sched_worker_action_t scheduler_minigl_submission_action(
+    taskq_shared_t *shared, sched_worker_action_t action)
+{
+  /* A reset step can still abort a feed and publish its accepted envelope.
+   * Let it complete before acknowledging closed submission admission. */
+  if (action == SCHED_WORKER_ACTION_RESET)
+    return action;
+  if (!scheduler_minigl_submission_admit(shared) &&
+      (action == SCHED_WORKER_ACTION_MINIGL ||
+       action == SCHED_WORKER_ACTION_POLL_IDLE))
+    return SCHED_WORKER_ACTION_WFE;
+  return action;
+}
+
+int scheduler_minigl_quiesce_done(taskq_shared_t *shared)
+{
+  return shared->minigl_submission_ack == shared->minigl_submission_generation &&
+         !taskq_has_active(&shared->queue) && !shared->minigl_in_flight;
+}
+
+void scheduler_harvest_post_with(taskq_t *q, taskq_watchdog_t *watchdog,
+                                 uint16_t failed_status,
+                                 taskq_slot_gen_ok_fn gen_ok,
+                                 taskq_slot_post_fn post,
+                                 taskq_slot_forget_fn forget)
+{
+  int slot;
+
+  while ((slot = taskq_harvest(q)) >= 0) {
+    taskq_desc_t *d = &q->descs[slot];
+    int failed;
+
+    if (!gen_ok(slot)) {
+      /* Task submitted under a previous mailbox lifetime (the mailbox was
+       * re-initialised while it was in flight). Drop it without posting so
+       * its stale request_id/user_cookie never lands in the new completion
+       * ring. */
+      forget(slot);
+      taskq_release(q, slot);
+      continue;
+    }
+    failed = (d->state == TASK_FAILED);
+    if (!post(slot, d->request_id, d->user_cookie, (uint16_t)d->opcode,
+              failed ? failed_status : d->result_status,
+              d->result_payload, d->result_len)) {
+      break;  /* completion ring full -> task stays harvested, retry next poll */
+    }
+    if (!failed && watchdog)
+      taskq_watchdog_on_success(watchdog);
+    taskq_release(q, slot);
+  }
+}
+
+void scheduler_quiesce_finish(taskq_shared_t *shared, int timed_out,
+                              scheduler_quiesce_step_fn cold_restart,
+                              scheduler_quiesce_step_fn post_completions)
+{
+  if (timed_out) {
+    /* A task outlived the wait and is still writing its buffers. Cold-reset
+     * core 1 first: that halts the worker mid-op so no write survives into
+     * the next lifetime, and the halt-path reclaim marks its in-flight
+     * tasks FAILED. */
+    cold_restart();
+    shared->core1_restart_request = 0U; /* consumed here; don't double-restart */
+    /* Deliver those failures to their waiting clients before the queue is
+     * reinitialised: taskq_init below erases the request ids, and without
+     * this posting the in-flight clients see only the mailbox wall-clock
+     * timeout. */
+    post_completions();
+  }
+  /* A restarted worker must find no queued descriptor. */
+  taskq_init(&shared->queue);
+  shared->core1_current_slot = -1;
+}
+
+
 sched_minigl_reset_phase_t sched_minigl_reset_phase(int core1_up, int posted,
-                                                    int acked, int elapsed_ms,
+                                                    uint32_t ack, int elapsed_ms,
                                                     int budget_ms)
 {
-  if (acked)
+  /* Core 1 could not stop the engines: stop them here, with it halted. */
+  if (ack == SCHED_MINIGL_RESET_ACK_FAILED)
+    return SCHED_MINIGL_RESET_ABORT;
+  if (ack != 0U)
     return SCHED_MINIGL_RESET_ACKED;
   if (!core1_up)
     return posted ? SCHED_MINIGL_RESET_ABORT : SCHED_MINIGL_RESET_LOCAL;

@@ -211,6 +211,13 @@ static mw_ctx *mw_service_find_context(uint32_t handle)
     }
     return NULL;
 }
+#if defined(MINIGL_HOST_TEST)
+mw_ctx *mw_service_test_context(uint32_t handle)
+{
+    return mw_service_find_context(handle);
+}
+#endif
+
 #if defined(MINIGL_MODULE)
 static int mw_service_create_context_owner(uint32_t *owner)
 {
@@ -517,7 +524,7 @@ int mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
     if (!mw_service_create_context_owner(&owner))
         return MW_STATUS_FAILED;
 #endif
-    context = mw_host_create_owned(width, height, owner);
+    context = mw_host_create_owned(width, height, owner, 0);
     if (!context) {
 #if defined(MINIGL_MODULE)
         mw_service_close_context_owner(owner);
@@ -563,6 +570,8 @@ int mw_service_close(uint32_t handle)
 void mw_service_reset_local(void)
 {
     uint32_t i;
+    if (!mw_rix_abort_engines())
+        return;
     for (i = 0; i < MW_MAX_CONTEXTS; ++i) {
         if (g_contexts[i]) {
 #if defined(MINIGL_MODULE)
@@ -668,6 +677,16 @@ int mw_service_poll(void)
 
     if (!g_ctrl)
         return 0;
+
+    /* 68k packets wait until the ARM ring has retired: they may switch the
+     * shared backend to another context.  Waiting work is a demand, so this
+     * step polls fences.  A fence that never lands must not defer wire-v9
+     * forever: the wait shares the feed watchdog, and on expiry the backend
+     * is disabled and outstanding owners are quarantined. */
+    if (minigl_raster_work_outstanding())
+        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_PARKED);
+    if (minigl_raster_service_wait_blocks())
+        return 1;
 
     g_doorbell_pending = 0;
     mw_wire_st32(&g_ctrl->firmware_heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat) + 1U);

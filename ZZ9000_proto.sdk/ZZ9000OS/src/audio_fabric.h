@@ -32,6 +32,9 @@
 #include <stdint.h>
 
 #include "audio_convert.h"
+#ifndef ZZAPP_PERF_COUNTERS
+#define ZZAPP_PERF_COUNTERS 1
+#endif
 
 enum audio_fabric_ownership {
 	AUDIO_FABRIC_IDLE = 0,
@@ -137,6 +140,9 @@ void audio_fabric_producer_freeze(uint32_t slot);
  * under one local-IRQ critical section. Returns nonzero when real PCM staged. */
 int audio_fabric_producer_prime_and_go_live(uint32_t slot);
 void audio_fabric_producer_go_live(uint32_t slot);
+/* Publish a frozen producer only after its first source bytes are ready.
+ * Returns nonzero only when this call activates the slot. */
+int audio_fabric_producer_go_live_when_ready(uint32_t slot, int ready);
 /* Shared-frontier guard for restart callers: nonzero when any slot
  * other than `slot` is live. Re-arming the shared fill frontier under
  * a live mix would re-fill the other producers' staged periods and
@@ -302,6 +308,11 @@ int audio_fabric_ring_release(uint32_t slot, uint32_t generation);
  */
 int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 	int hold_reset, struct audio_fabric_slot_state *out);
+#if ZZAPP_PERF_COUNTERS
+/* Counter-only starvation attribution after the existing slot starvation
+ * accounting; it is separate from the played-underrun callback contract. */
+void audio_fabric_starvation_event(uint32_t slot);
+#endif
 
 /* Host-test seam (scheduler.c TASKQ_HOST_TEST discipline): redirect
  * the TX ring the compositor fills. Firmware builds keep the standard

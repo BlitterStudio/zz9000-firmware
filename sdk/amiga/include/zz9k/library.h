@@ -15,6 +15,9 @@
 #include <exec/ports.h>
 #endif
 
+struct Device;
+struct timerequest;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -24,6 +27,11 @@ typedef struct ZZ9KLibrary ZZ9KLibrary;
 typedef void (*ZZ9KAsyncCallback)(ZZ9KAsyncRequest *request,
                                   void *user_data);
 typedef int (*ZZ9KEventWaiter)(ZZ9KLibrary *library, void *user_data);
+
+typedef struct ZZ9KClientLease {
+  uint16_t client_id;
+  uint32_t references;
+} ZZ9KClientLease;
 
 struct ZZ9KAsyncRequest {
 #if ZZ9K_LIBRARY_AMIGA
@@ -49,6 +57,10 @@ struct ZZ9KLibrary {
   ZZ9KAsyncRequest *pending_head;
   ZZ9KEventWaiter event_waiter;
   void *event_user_data;
+#if ZZ9K_LIBRARY_AMIGA
+  struct timerequest *busy_poll_timer_request;
+  struct Device *busy_poll_timer_base;
+#endif
 };
 
 #ifndef ZZ9K_LIBRARY_TYPES_ONLY
@@ -60,6 +72,18 @@ int ZZ9KAttachContext(ZZ9KLibrary *library, ZZ9KContext *ctx,
                       int take_ownership);
 int ZZ9KSetEventWaiter(ZZ9KLibrary *library, ZZ9KEventWaiter waiter,
                        void *user_data);
+
+/*
+ * The resident wrapper sets this from its current library opener before
+ * every submission. Standalone users normally leave it zero (unowned).
+ */
+int ZZ9KSetClientId(ZZ9KLibrary *library, uint16_t client_id);
+int ZZ9KReleaseClient(ZZ9KLibrary *library, uint16_t client_id,
+                      uint32_t timeout_ticks);
+void ZZ9KClientLeaseInit(ZZ9KClientLease *lease, uint16_t client_id);
+int ZZ9KClientLeaseRetain(ZZ9KClientLease *lease);
+int ZZ9KClientLeaseClose(ZZ9KLibrary *library, ZZ9KClientLease *lease,
+                         uint32_t timeout_ticks);
 
 int ZZ9KQueryCaps(ZZ9KLibrary *library, ZZ9KCaps *caps);
 int ZZ9KQueryService(ZZ9KLibrary *library, uint32_t service_id,
@@ -73,6 +97,15 @@ int ZZ9KPing(ZZ9KLibrary *library, const uint8_t *payload,
  */
 int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
              ZZ9KMailboxEntry *reply, uint32_t timeout_ticks);
+int zz9k_library_app_call(ZZ9KLibrary *library, ZZ9KRequest *request,
+                          ZZ9KMailboxEntry *reply);
+typedef uint32_t (*ZZ9KProgressReader)(void *user_data);
+int zz9k_library_app_call_progress(ZZ9KLibrary *library,
+                                   ZZ9KRequest *request,
+                                   ZZ9KMailboxEntry *reply,
+                                   ZZ9KProgressReader progress_reader,
+                                   void *progress_data,
+                                   int progress_supported);
 int ZZ9KCallAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async,
                   const ZZ9KRequest *request, ZZ9KAsyncCallback callback,
                   void *user_data);

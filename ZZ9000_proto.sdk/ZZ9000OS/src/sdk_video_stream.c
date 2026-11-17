@@ -8,6 +8,7 @@
 #include "sdk_video_stream.h"
 
 #include "card_pool.h"
+#include "sdk_compression.h"
 #include "memorymap.h"
 #include "overlay.h"
 #include "sdk_video_backend.h"
@@ -46,6 +47,7 @@ struct SDKVideoStreamSession {
 	uint8_t in_use;
 	uint8_t direct_frame_valid;
 	uint8_t owner;
+	uint16_t client_owner_id;
 };
 
 #ifdef SDK_VIDEO_HOST_TEST
@@ -83,6 +85,11 @@ static struct SDKVideoStreamSession *find_free_session(void)
 			return &video_sessions[i];
 	}
 	return 0;
+}
+static uint32_t session_pool_owner(const struct SDKVideoStreamSession *session)
+{
+	return CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA,
+			       (uint32_t)(session - video_sessions) + 1U);
 }
 
 static uint32_t next_session_id(void)
@@ -157,6 +164,12 @@ void sdk_video_stream_init(void)
 	Xil_DCacheFlushRange((INTPTR)(uintptr_t)video_sessions, bytes);
 	next_video_session_id = 1U;
 }
+#ifdef SDK_VIDEO_HOST_TEST
+void sdk_video_stream_test_set_next_session_id(uint32_t id)
+{
+	next_video_session_id = id;
+}
+#endif
 
 uint32_t sdk_video_stream_active_count(void)
 {
@@ -351,7 +364,8 @@ static uint16_t sdk_video_stream_begin_owned_locked(
 	session = find_free_session();
 	if (!session)
 		return SDK_STATUS_NO_MEMORY;
-	if (module_id != 0U && !zzm_loader_acquire(module_id)) {
+	if (module_id != 0U &&
+	    zzm_loader_acquire(module_id) != ZZM_LOAD_READY) {
 		log_module_begin_failure(module_id, "acquire",
 		                         SDK_STATUS_MODULE_MISMATCH);
 		return SDK_STATUS_MODULE_MISMATCH;
@@ -373,8 +387,7 @@ static uint16_t sdk_video_stream_begin_owned_locked(
 		begin->pcm_low_water_bytes;
 	session->media.pcm_high_water_bytes =
 		begin->pcm_high_water_bytes;
-	session->pool_owner =
-		CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, session->id);
+	session->pool_owner = session_pool_owner(session);
 	session->owner = (uint8_t)owner;
 	session->in_use = 1U;
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,
@@ -541,3 +554,34 @@ uint16_t sdk_video_stream_close(uint32_t id,
 	memset(session, 0, sizeof(*session));
 	return SDK_STATUS_OK;
 }
+
+int sdk_video_stream_set_client_owner(uint32_t session, uint16_t owner_id)
+{
+	struct SDKVideoStreamSession *state = find_session(session);
+
+	if (!state)
+		return 0;
+	state->client_owner_id = owner_id;
+	return 1;
+}
+
+int sdk_video_stream_release_client(uint16_t owner_id, uint32_t *close_session)
+{
+	uint32_t i;
+
+	if (close_session)
+		*close_session = 0U;
+	for (i = 0U; i < SDK_MAX_VIDEO_SESSIONS; i++) {
+		struct SDKVideoStreamSession *session = &video_sessions[i];
+
+		if (!session->in_use ||
+		    session->owner != SDK_VIDEO_STREAM_OWNER_LEGACY ||
+		    session->client_owner_id != owner_id)
+			continue;
+		if (close_session)
+			*close_session = session->id;
+		return 0;
+	}
+	return 1;
+}
+

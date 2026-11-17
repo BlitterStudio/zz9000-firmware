@@ -1,15 +1,27 @@
-A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o
+A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
+	$(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o
 ZZAPP_TESTS += $(BUILD)/a/loader_smoke $(BUILD)/a/runtime_host_test \
 	$(BUILD)/a/loader_elf_test $(BUILD)/a/display_fallback_test \
-	$(BUILD)/a/core_api_test $(BUILD)/a/map_unmap_test
+	$(BUILD)/a/core_api_test $(BUILD)/a/map_unmap_test \
+	$(BUILD)/a/svc_return_test $(BUILD)/a/page_flags_test
 
 $(BUILD)/a/zzapp_loader.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
+$(BUILD)/a/zzapp_loader_incremental.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_LOADER_INCREMENTAL_HOST_TEST -c -o $@ $<
+$(BUILD)/a/zzapp_loader_real_as_incremental.o: $(FW)/zzapp_loader.c $(FW)/zzapp_runtime.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_LOADER_INCREMENTAL_HOST_TEST \
+		-DZZAPP_LOADER_REAL_AS_HOST_TEST -c -o $@ $<
 $(BUILD)/a/zzapp_host.o: $(FW)/zzapp_host.c $(FW)/zzapp_runtime.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
 $(BUILD)/a/zzapp_api.o: $(FW)/zzapp_api.c $(FW)/zzapp_runtime.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
+$(BUILD)/a/zzapp_kernel.o: $(FW)/zzapp_kernel.c $(FW)/zzapp_kernel.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
 $(BUILD)/a/zzapp_services.o: $(FW)/zzapp_services.c $(FW)/zzapp_services.h | $(BUILD)
@@ -21,9 +33,20 @@ $(BUILD)/a/loader_smoke: a/loader_smoke.c $(A_RUNTIME_OBJS) | $(BUILD)
 $(BUILD)/a/runtime_host_test: a/runtime_host_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
-$(BUILD)/a/loader_elf_test: a/loader_elf_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+LOADER_INCREMENTAL_HOST_OBJS := $(BUILD)/a/zzapp_loader_incremental.o \
+	$(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o
+LOADER_INCREMENTAL_HOST_SOURCES := $(FW)/zzapp_mem.c $(FW)/card_pool.c \
+	$(FW)/sdk_smp_lock.c ../card_pool/host_card_pool.c
+LOADER_REAL_AS_HOST_OBJS := $(BUILD)/a/zzapp_loader_real_as_incremental.o \
+	$(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o
+LOADER_REAL_AS_HOST_SOURCES := $(FW)/zzapp_mem.c $(FW)/card_pool.c \
+	$(FW)/sdk_smp_lock.c $(FW)/zzapp_as.c $(FW)/mmu_page.c \
+	../card_pool/host_card_pool.c
+$(BUILD)/a/loader_elf_test: a/loader_elf_test.c $(LOADER_REAL_AS_HOST_OBJS) $(LOADER_REAL_AS_HOST_SOURCES) | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -DMMU_PAGE_HOST_TEST \
+		-I../card_pool -I../mmu/mock -o $@ $< \
+		$(LOADER_REAL_AS_HOST_OBJS) $(LOADER_REAL_AS_HOST_SOURCES)
 $(BUILD)/a/display_fallback_test: a/display_fallback_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o
@@ -33,6 +56,14 @@ $(BUILD)/a/core_api_test: a/core_api_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
 
 $(BUILD)/a/map_unmap_test: a/map_unmap_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
+
+$(BUILD)/a/svc_return_test: a/svc_return_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
+
+$(BUILD)/a/page_flags_test: a/page_flags_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
 

@@ -8,8 +8,11 @@
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
 #include "zzapp.h"
+#include "zzapp_svc.h"
 #include "zzapp_runtime.h"
 int zzapp_host_mem_info(zzapp_mem_info *out);
+void zzapp_api_reclaim_resources(void);
+void zzapp_api_poison_resources(void);
 
 static const uint8_t file_data[] = "mapped";
 static uint32_t image_begin_calls;
@@ -22,15 +25,30 @@ static uint32_t audio_forget_calls;
 static uint32_t decode_reclaim_calls;
 static uint32_t image_poison_session_calls;
 static uint32_t app_decode_reclaim_calls;
+static int image_begin_in_progress;
 static int stop_during_host_alloc;
 static int stop_during_image_begin;
-int zzapp_svc_should_stop(void)
+static uint32_t flac_pool_owner[2];
+static uint32_t flac_pool_owner_count;
+static int tile_writable = 1;
+static uint32_t selected_service_slot;
+uint32_t zzapp_services_current_slot(void)
 {
-    return stop_during_host_alloc || stop_during_image_begin;
+    return selected_service_slot;
+}
+int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address,
+                         uint32_t bytes, int write)
+{
+    (void)as;
+    (void)address;
+    (void)bytes;
+    return write && tile_writable ? ZZ_OK : ZZ_EFAULT;
 }
 
 void zzapp_test_host_visible_allocated(void)
 {
+    if (stop_during_host_alloc)
+        zzapp_host_latch_stop(0U);
     zzapp_host_tick_at(1u);
     zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
 }
@@ -73,8 +91,13 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
     assert(begin->output_format == SDK_SURFACE_FORMAT_BGRA8888);
     image_begin_calls++;
     if (stop_during_image_begin) {
+        zzapp_host_latch_stop(0U);
         zzapp_host_tick_at(1u);
         zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    }
+    if (image_begin_in_progress) {
+        image_begin_in_progress--;
+        return SDK_TASK_IN_PROGRESS;
     }
     memset(out, 0, sizeof(*out));
     out->session = 0x100u + image_begin_calls;
@@ -129,6 +152,8 @@ uint16_t sdk_flac_decode(struct sdk_flac_state *state,
                          struct sdk_audio_codec_io *io)
 {
     assert(io->input_length != 0u || (io->eof && io->drain));
+    if (flac_pool_owner_count < 2u)
+        flac_pool_owner[flac_pool_owner_count++] = state->pool_owner;
     state->sample_rate = 44100u;
     state->channels = 2u;
     io->consumed = io->input_length;
@@ -191,10 +216,15 @@ unsigned sdk_compression_reclaim_core1_decode(void)
     return 1u;
 }
 
-unsigned sdk_compression_reclaim_app_decode(void)
+unsigned sdk_compression_reclaim_app_decode(uint32_t owner)
 {
+    (void)owner;
     app_decode_reclaim_calls++;
     return 1u;
+}
+uint32_t sdk_compression_app_decode_owner(uint32_t slot, uint32_t generation)
+{
+    return 0x02000000u | (generation << 2) | slot;
 }
 
 static uint32_t decompress_owner_seen;
@@ -248,6 +278,7 @@ int main(void)
     uint32_t bytes;
     uint32_t image_session;
     uint32_t audio_session;
+    uint32_t slot_audio_session;
     uint8_t source[8] = { 0 };
     uint8_t mp3[834] = { 0 };
     int16_t pcm[8];
@@ -262,7 +293,7 @@ int main(void)
     assert(bytes == sizeof(file_data) - 1u);
     assert(memcmp(mapped, file_data, bytes) == 0);
     assert(api->mem_info(&mem) == ZZ_OK);
-    assert(mem.host_visible_used == bytes);
+    assert(mem.host_visible_used == 4096u);
     api->unmap_file(mapped);
     assert(api->mem_info(&mem) == ZZ_OK);
     assert(mem.host_visible_used == 0u);
@@ -275,18 +306,47 @@ int main(void)
 
     memset(&image, 0, sizeof(image));
     image.codec = ZZ_IMAGE_PNG;
-    image.output_format = ZZ_FMT_BGRA8888;
+    image.output_format = 99u;
     image.tile = source;
     image.stride = 4u;
     image.rows = 2u;
     image.tile_bytes = sizeof(source);
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_EINVAL);
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_EINVAL);
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_EINVAL);
+    assert(api->image_open(&image, &image_session, &image_result) == ZZ_EINVAL);
+    assert(zzapp_runtime_kernel()->resources[0].image_sessions == 0u);
+    image.output_format = ZZ_FMT_BGRA8888;
     assert(api->image_open(&image, &image_session, &image_result) == ZZ_OK);
+    tile_writable = 0;
+    assert(api->image_decode(image_session, source, sizeof(source), 0u,
+                             &image_result) == ZZ_EFAULT);
+    assert(image_feed_calls == 0u);
+    tile_writable = 1;
     assert(api->image_decode(image_session, source, sizeof(source), 0u,
                              &image_result) == ZZ_OK);
+    zzapp_kernel_set_current_thread(0);
+    assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
+    assert(api->audio_decode(slot_audio_session, source, sizeof(source), 0u,
+                             pcm, 2u, &audio_result) == ZZ_OK);
+    selected_service_slot = 1U;
+    zzapp_kernel_set_current_thread(-1);
+    assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
+    zzapp_api_reclaim_resources();
+    assert(audio_release_calls == 1u);
+    assert(zzapp_runtime_kernel()->resources[1].audio_sessions == 0u);
+    assert(api->audio_decode_open(ZZ_AUDIO_FLAC, &slot_audio_session) == ZZ_OK);
+    zzapp_api_poison_resources();
+    assert(zzapp_runtime_kernel()->resources[1].audio_sessions == 0u);
+    audio_release_calls = 0u;
+    selected_service_slot = 0U;
+    zzapp_kernel_set_current_thread(-1);
     assert(api->image_close(image_session) == ZZ_OK);
     assert(image_begin_calls == 1u && image_feed_calls == 1u &&
            image_close_calls == 1u);
+    image_begin_in_progress = 1;
     assert(api->image_open(&image, &image_session, &image_result) == ZZ_OK);
+    assert(image_begin_calls == 3u);
 
     mp3[0] = 0xffu; mp3[1] = 0xfbu; mp3[2] = 0x90u; mp3[3] = 0x64u;
     mp3[417] = 0xffu; mp3[418] = 0xfbu;
@@ -319,22 +379,24 @@ int main(void)
                                mp3_pcm, sizeof(mp3_pcm),
                                &decompressed) == ZZ_EIO);
         assert(decompress_calls == 1u);
-        assert(decompress_owner_seen == SDK_APP_DECODE_POOL_OWNER);
+        assert(decompress_owner_seen == flac_pool_owner[0]);
     }
 
     /* The host allocator must publish its ledger entry before a stop tick
      * can unwind it; host-only seam because ARM entry/FPSCR cannot run here. */
     stop_during_host_alloc = 1;
     assert(api->alloc(64u, 8u, ZZ_ALLOC_HOST_VISIBLE) != NULL);
-    assert(api->mem_info(&mem) == ZZ_OK && mem.host_visible_used == 4160u);
+    assert(api->mem_info(&mem) == ZZ_OK && mem.host_visible_used == 8192u);
     zzapp_test_mark_running();
     zzapp_host_tick_at(1u);
+    zzapp_worker_hook();
     zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(image_close_calls == 1u && image_poisoned_close_calls == 1u);
     assert(image_poison_calls == 0u && image_poison_session_calls == 1u);
-    assert(audio_release_calls == 1u && audio_forget_calls == 1u);
-    assert(decode_reclaim_calls == 0u && app_decode_reclaim_calls == 1u);
+    assert(audio_release_calls == 1u && audio_forget_calls == 3u);
+    assert(decode_reclaim_calls == 0u && app_decode_reclaim_calls == 2u);
     assert(zzapp_host_mem_info(&mem) == ZZ_OK && mem.host_visible_used == 0u);
 
     zzapp_loader_release();
@@ -351,7 +413,9 @@ int main(void)
     stop_during_image_begin = 0;
     stop_during_host_alloc = 1;
     zzapp_host_tick_at(1u);
+    zzapp_worker_hook();
     zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
+    zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(image_poison_session_calls == 1u);
     assert(image_poison_calls == 0u);

@@ -14,10 +14,10 @@ ZZAPP_HARNESS_CFLAGS := $(HOST_CPPFLAGS) $(HOST_CFLAGS)
 ZZAPP_HARNESS_OBJS := $(BUILD)/mock_window.o $(BUILD)/mock_api.o $(BUILD)/host_loader.o \
 	$(BUILD)/zzapp.o $(BUILD)/gl_wrap.o $(BUILD)/syscalls.o
 
-# Hook for A/B/C test owners. They may append custom binaries/rules here.
--include $(wildcard [a-f]/tests.mk)
+# Hook for test owners. They may append custom binaries/rules here.
+-include $(wildcard [a-g]/tests.mk)
 
-AUTO_TEST_SOURCES := $(wildcard [a-f]/*_test.c)
+AUTO_TEST_SOURCES := $(wildcard [a-g]/*_test.c)
 AUTO_TESTS := $(patsubst %.c,$(BUILD)/%,$(AUTO_TEST_SOURCES))
 ZZAPP_TESTS ?=
 ALL_TESTS := $(AUTO_TESTS) $(ZZAPP_TESTS)

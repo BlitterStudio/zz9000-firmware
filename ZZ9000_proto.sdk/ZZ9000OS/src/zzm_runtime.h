@@ -142,6 +142,7 @@ typedef struct zzm_reclaim_service {
     uint32_t (*close_owner)(uint32_t owner);
     uint32_t (*force_reclaim)(uint32_t owner);
     uint32_t (*owner_refcount)(uint32_t owner);
+    void (*quarantine_owner)(uint32_t owner);
 } zzm_reclaim_service_t;
 
 typedef struct zzm_host_window {
@@ -183,6 +184,10 @@ typedef struct zzm_app_gl_host_service {
     uint32_t (*display_flags)(void);
     int (*stop_requested)(void);
     void (*yield_wait)(void);
+    /* Blocks the calling app thread until the bound display's last flip is
+     * acknowledged, as a wait the core-1 service pass wakes.  0 when idle;
+     * nonzero for a stale generation, a stop or a lost display. */
+    int (*wait_flip)(uint32_t generation);
 } zzm_app_gl_host_service_t;
 
 typedef struct zzm_profile_service {
@@ -242,6 +247,13 @@ typedef struct zzm_graphics_hw_service {
     void (*pl330_abort)(uint32_t channel);
     void (*pl330_release)(uint32_t channel);
     void (*barrier)(void);
+    /* Appended optional callbacks; size-gate before use with V3 modules. */
+    int (*pl330_complete)(uint32_t channel);
+    int (*pl330_start_nonblocking)(uint32_t channel, uint32_t source_address,
+                                   uint32_t bytes);
+    int (*pl330_abort_nonblocking)(uint32_t channel);
+    /* Core 1 publishes a committed RasterIX fence for core-0 reset safety. */
+    void (*publish_fence)(uint32_t address, uint32_t sequence);
 } zzm_graphics_hw_service_t;
 typedef const void *(*zzm_get_service_fn)(uint32_t id, uint32_t min_version);
 
@@ -263,6 +275,10 @@ int zzm_runtime_register_ops(uint32_t module_id, const void *ops,
                              uint32_t ops_size);
 void zzm_runtime_module_fault(uint32_t module_id, const char *reason);
 uint32_t zzm_runtime_release_module(uint32_t module_id);
+/* A quarantined owner can still be referenced by a failed device operation;
+ * its card-pool blocks remain allocated until firmware restart. */
+void zzm_runtime_quarantine_owner(uint32_t owner);
+void zzm_runtime_quarantine_module(uint32_t module_id);
 /* Core 0 only, while core 1 is halted and cannot hold heap_lock. */
 void zzm_runtime_reset_heap_lock(void);
 int zzm_runtime_quota_available(uint32_t memory_class, uint32_t quota);
@@ -281,6 +297,7 @@ int zzm_rt_dcache_clean_owned(uint32_t owner, uint32_t address,
                                uint32_t length);
 void zzm_rt_barrier(void);
 uint64_t zzm_rt_time_us(void);
+void zzm_rt_quarantine_owner(uint32_t owner);
 
 /* Codec plug-in contracts. Payload addresses are card addresses; formats are
  * intentionally fixed to 8-bit 4:2:0 video and interleaved signed PCM. */

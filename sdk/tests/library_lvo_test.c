@@ -32,7 +32,9 @@ static void test_library_identity(void)
 {
   expect_str("name", ZZ9K_LIBRARY_NAME, "zz9k.library");
   expect_u32("version", ZZ9K_LIBRARY_VERSION, 2);
-  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 35);
+  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 39);
+  expect_u32("client reclaim", ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM, 38);
+  expect_u32("app load lease", ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE, 39);
 }
 
 static void test_standard_lvos(void)

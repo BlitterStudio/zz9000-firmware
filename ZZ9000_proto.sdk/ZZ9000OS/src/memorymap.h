@@ -327,6 +327,17 @@
 // The 4 MiB high-image region ends 1,511,824 bytes above the measured
 // 0x0848f670 image/BSS high-water (qualification build 141c121).
 #define FIRMWARE_IMAGE_END          0x08600000
+// Core-1 app address spaces keep four 16 KiB app L1 tables, one private
+// 16 KiB template, and 128 1 KiB L2 tables in the high firmware image.
+#define ZZAPP_AS_L1_TABLE_COUNT      4U
+#define ZZAPP_AS_L2_TABLE_COUNT      128U
+#define ZZAPP_AS_TABLE_SLAB_BYTES \
+    ((ZZAPP_AS_L1_TABLE_COUNT + 1U) * 0x4000U + \
+     ZZAPP_AS_L2_TABLE_COUNT * 0x0400U)
+#if ZZAPP_AS_TABLE_SLAB_BYTES != 0x00034000U
+#error "app translation-table slab budget must remain 208 KiB"
+#endif
+
 #define SDK_TASKQ_REGION_ADDRESS    FIRMWARE_IMAGE_END
 #define SDK_TASKQ_REGION_SIZE       0x00100000
 #define SDK_TASKQ_REGION_END \
@@ -359,12 +370,20 @@
 #define SDK_AUDIO_STREAMS_MAX_BYTES \
     (SDK_TASKQ_REGION_SIZE - SDK_AUDIO_STREAMS_OFFSET)
 
-// Core 1 uses a full-descending stack. Its top is encodable by the naked
-// reset stub's single ARM `mov sp, #immediate`.
+// Core 1 uses separate full-descending SVC and SYS stacks. Its reservation
+// top is encodable by the naked reset stub's single ARM `mov sp, #immediate`.
 #define SDK_CORE1_STACK_BASE         SDK_TASKQ_REGION_END
 #define SDK_CORE1_STACK_SIZE         0x00100000
 #define SDK_CORE1_STACK_TOP \
     (SDK_CORE1_STACK_BASE + SDK_CORE1_STACK_SIZE)
+#define SDK_CORE1_SVC_STACK_BASE     SDK_CORE1_STACK_BASE
+#define SDK_CORE1_SVC_STACK_SIZE     0x00002000
+#define SDK_CORE1_SVC_STACK_TOP \
+    (SDK_CORE1_SVC_STACK_BASE + SDK_CORE1_SVC_STACK_SIZE)
+#define SDK_CORE1_SYSTEM_STACK_BASE  SDK_CORE1_SVC_STACK_TOP
+#define SDK_CORE1_SYSTEM_STACK_SIZE \
+    (SDK_CORE1_STACK_SIZE - SDK_CORE1_SVC_STACK_SIZE)
+#define SDK_CORE1_SYSTEM_STACK_TOP   SDK_CORE1_STACK_TOP
 
 // Measured service-path peak is below 1 MiB after decoder, console, and
 // media working sets moved to the card pool. Keep the 8 MiB minimum
@@ -428,6 +447,16 @@
 #if SDK_CORE1_STACK_TOP != 0x08800000
 #error "core-1 stack top must remain a single-instruction ARM immediate"
 #endif
+#if SDK_CORE1_SVC_STACK_TOP != SDK_CORE1_SYSTEM_STACK_BASE || \
+    SDK_CORE1_SYSTEM_STACK_TOP != SDK_CORE1_STACK_TOP || \
+    SDK_CORE1_SVC_STACK_SIZE == 0 || SDK_CORE1_SYSTEM_STACK_SIZE == 0
+#error "core-1 SVC and SYS stacks must tile the stack reservation"
+#endif
+#if (SDK_CORE1_SVC_STACK_BASE | SDK_CORE1_SVC_STACK_TOP | \
+     SDK_CORE1_SYSTEM_STACK_BASE | SDK_CORE1_SYSTEM_STACK_TOP) & 7
+#error "core-1 SVC and SYS stack bounds must be 8-byte aligned"
+#endif
+
 
 // SDK v2 bootstrap mailbox (descriptor plus both rings; firmware publishes
 // the chosen ARM address through REG_ZZ_SDK_MAILBOX_HI/LO and the Amiga
@@ -471,15 +500,24 @@
 #error "Z3 host window lies outside the Zorro III main board aperture"
 #endif
 /*
- * The app rings allocation is made on APP_ALLOC_WINDOW, never at boot. Its
- * placement is fixed to pages which main.c maps Normal non-cacheable before
- * core 1 starts. Board offsets are ARM - ADDR_ADJ:
- * 0x07e6c000..0x07f00000, inside the 128 MiB Z3 main aperture.
+ * App windows are allocated on APP_ALLOC_WINDOW, never at boot, each in a
+ * fixed range that main.c maps Normal non-cacheable before core 1 starts.
+ * Slot 0 keeps the legacy range, which ends at the fixed Z3 host window;
+ * slots 1-3 sit directly below it. Board offsets are ARM - ADDR_ADJ.
  */
 #define ZZAPP_WINDOW_Z3_ADDRESS       0x0805C000U
 #define ZZAPP_WINDOW_Z3_SIZE          0x00094000U
+#define ZZAPP_WINDOW_Z3_SLOTS         4U
+#define ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot) \
+	(ZZAPP_WINDOW_Z3_ADDRESS - (slot) * ZZAPP_WINDOW_Z3_SIZE)
+#define ZZAPP_WINDOW_Z3_LOWEST \
+	ZZAPP_WINDOW_Z3_SLOT_ADDRESS(ZZAPP_WINDOW_Z3_SLOTS - 1U)
 #define ZZAPP_WINDOW_Z3_END \
 	(ZZAPP_WINDOW_Z3_ADDRESS + ZZAPP_WINDOW_Z3_SIZE)
+
+#if ZZAPP_WINDOW_Z3_LOWEST < HOST_VISIBLE_HEAP_ADDRESS
+#error "every app window must fit the host-visible heap"
+#endif
 
 #if ZZAPP_WINDOW_Z3_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS || \
     ZZAPP_WINDOW_Z3_END > HOST_VISIBLE_HEAP_END

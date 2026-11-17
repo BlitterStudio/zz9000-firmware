@@ -59,6 +59,10 @@
 #define TEXTURE_PAGES \
     (SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES + TEXENV_TEXTURE_PAGES)
 #define TEXTURE_BYTES (TEXTURE_PAGE_BYTES * TEXTURE_PAGES)
+
+#define MEMFETCH_CHUNK_BYTES 1024U
+#define MEMFETCH_SPLIT_CHUNK_BYTES 64U
+#define FSC_MEM_TO_ST1(bytes) (0xb0000000U | (uint32_t)(bytes))
 #define LIGHTMAP_ADDRESS (TEXTURE_ADDRESS + TEXTURE_PAGE_BYTES)
 #define LIGHTMAP_RGB565 0x8410U
 #define STRESS_TEXTURE_ADDRESS \
@@ -134,13 +138,181 @@ static int write_dse_hex(const char *path, const uint8_t *raw, size_t raw_bytes)
     return ok;
 }
 
+static size_t command_bytes(const uint8_t *raw, size_t raw_bytes, size_t offset)
+{
+    uint32_t command;
+    size_t words;
+
+    if (offset + 4U > raw_bytes)
+        return 0U;
+    command = get_le32(raw + offset);
+    switch (command >> 28) {
+    case 0U: /* NOP */
+    case 2U: /* framebuffer */
+        words = 1U;
+        break;
+    case 1U: /* register + value */
+        words = 2U;
+        break;
+    case 3U: /* triangle byte count */
+        words = 1U + (size_t)((command & 0x3ffU) >> 2);
+        break;
+    case 4U: /* fog LUT byte count */
+        words = 1U + (size_t)((command & 0x1ffU) >> 2);
+        break;
+    case 5U: /* texture page-address count */
+        words = 1U + (size_t)(command & 0x7ffffU);
+        break;
+    default:
+        return 0U;
+    }
+    return words * 4U <= raw_bytes - offset ? words * 4U : 0U;
+}
+
+static int write_memfetch_files(const char *directory, const char *name,
+                                const uint8_t *raw, size_t raw_bytes,
+                                int split_commands)
+{
+    static uint8_t memory_image[COMMAND_CAPACITY];
+    static uint32_t envelope_words[COMMAND_CAPACITY / 32U];
+    char stem[1024];
+    char envelope_path[1024];
+    char ddr_path[1024];
+    char fifo_path[1024];
+    const size_t target = split_commands ? MEMFETCH_SPLIT_CHUNK_BYTES
+                                         : MEMFETCH_CHUNK_BYTES;
+    size_t source = 0U;
+    size_t image_bytes = 0U;
+    size_t chunk_start = 0U;
+    size_t chunk_bytes = 0U;
+    size_t envelope_count = 0U;
+    size_t bytes;
+    size_t boundary;
+    size_t index;
+    int split_seen = 0;
+    FILE *file;
+    int stem_length;
+
+    stem_length = snprintf(stem, sizeof(stem), "%s_memfetch%s", name,
+                           split_commands ? "-split" : "");
+    if (stem_length < 0 || (size_t)stem_length >= sizeof(stem) ||
+        !make_path(envelope_path, sizeof(envelope_path), directory, stem, ".hex") ||
+        !make_path(ddr_path, sizeof(ddr_path), directory, stem, ".ddr") ||
+        !make_path(fifo_path, sizeof(fifo_path), directory, stem, ".fifo"))
+        return 0;
+
+    memset(memory_image, 0, sizeof(memory_image));
+    if (split_commands) {
+        while (source < raw_bytes) {
+            bytes = command_bytes(raw, raw_bytes, source);
+            if (bytes == 0U)
+                return 0;
+            for (boundary = ((source / target) + 1U) * target;
+                 boundary < source + bytes; boundary += target)
+                split_seen = 1;
+            source += bytes;
+        }
+        if (!split_seen || raw_bytes > sizeof(memory_image))
+            return 0;
+        memcpy(memory_image, raw, raw_bytes);
+        image_bytes = (raw_bytes + 63U) & ~(size_t)63U;
+        if (image_bytes > sizeof(memory_image))
+            return 0;
+        while (chunk_start < image_bytes) {
+            envelope_words[envelope_count * 2U] = FSC_MEM_TO_ST1(target);
+            envelope_words[envelope_count * 2U + 1U] =
+                COMMAND_ADDRESS + (uint32_t)chunk_start;
+            ++envelope_count;
+            chunk_start += target;
+        }
+    } else {
+        source = 0U;
+        while (source < raw_bytes) {
+            bytes = command_bytes(raw, raw_bytes, source);
+            if (bytes == 0U)
+                return 0;
+            if (chunk_bytes != 0U && chunk_bytes + bytes > target) {
+                chunk_bytes = (chunk_bytes + 63U) & ~(size_t)63U;
+                if (chunk_start + chunk_bytes > sizeof(memory_image))
+                    return 0;
+                envelope_words[envelope_count * 2U] = FSC_MEM_TO_ST1(chunk_bytes);
+                envelope_words[envelope_count * 2U + 1U] =
+                    COMMAND_ADDRESS + (uint32_t)chunk_start;
+                ++envelope_count;
+                image_bytes = chunk_start + chunk_bytes;
+                chunk_start = image_bytes;
+                chunk_bytes = 0U;
+            }
+            if (chunk_start + chunk_bytes + bytes > sizeof(memory_image))
+                return 0;
+            memcpy(memory_image + chunk_start + chunk_bytes, raw + source, bytes);
+            chunk_bytes += bytes;
+            source += bytes;
+        }
+        if (chunk_bytes != 0U) {
+            chunk_bytes = (chunk_bytes + 63U) & ~(size_t)63U;
+            if (chunk_start + chunk_bytes > sizeof(memory_image))
+                return 0;
+            envelope_words[envelope_count * 2U] = FSC_MEM_TO_ST1(chunk_bytes);
+            envelope_words[envelope_count * 2U + 1U] =
+                COMMAND_ADDRESS + (uint32_t)chunk_start;
+            ++envelope_count;
+            image_bytes = chunk_start + chunk_bytes;
+        }
+    }
+
+    file = fopen(envelope_path, "w");
+    if (file == NULL)
+        return 0;
+    for (index = 0U; index < envelope_count * 2U; ++index)
+        if (fprintf(file, "%08x\n", (unsigned)envelope_words[index]) < 0) {
+            (void)fclose(file);
+            return 0;
+        }
+    if (fclose(file) != 0)
+        return 0;
+
+    file = fopen(ddr_path, "w");
+    if (file == NULL)
+        return 0;
+    if (fprintf(file, "@%08x\n", COMMAND_ADDRESS) < 0) {
+        (void)fclose(file);
+        return 0;
+    }
+    for (index = 0U; index < image_bytes; ++index)
+        if (fprintf(file, "%02x\n", memory_image[index]) < 0) {
+            (void)fclose(file);
+            return 0;
+        }
+    if (fclose(file) != 0)
+        return 0;
+
+    file = fopen(fifo_path, "w");
+    if (file == NULL)
+        return 0;
+    for (index = 0U; index < envelope_count; ++index)
+        if (fprintf(file, "P 2 0 0\n%08x\n%08x\n",
+                    (unsigned)envelope_words[index * 2U],
+                    (unsigned)envelope_words[index * 2U + 1U]) < 0) {
+            (void)fclose(file);
+            return 0;
+        }
+    if (fclose(file) != 0)
+        return 0;
+
+    printf("%s: memfetch envelopes=%zu command_bytes=%zu padded_bytes=%zu%s\n",
+           name, envelope_count, raw_bytes, image_bytes,
+           split_commands ? " command_split=yes" : " command_boundaries=yes");
+    return envelope_count != 0U;
+}
+
 /* rix_drv.c against a recording FIFO.  Each committed packet becomes
  *   P <words> <dma-first> <dma-words>
  * followed by its <words> TDFD words in hex; <dma-first>/<dma-words> mark the
  * payload the firmware hands to its PL330 callback (0/0 for pure MMIO). */
 typedef struct FifoTrace {
     FILE *file;
-    uint32_t words[RIX_DRV_FIFO_PACKET_WORDS + 2U];
+    uint32_t words[RIX_DRV_FEED_MAX_WORDS + 2U];
     uint32_t count;
     uint32_t dma_first;
     uint32_t dma_words;
@@ -199,8 +371,8 @@ static void trace_fifo_write(void *context, uint32_t offset, uint32_t value)
     }
 }
 
-static int trace_dma_stream(void *context, uintptr_t source, uint32_t words,
-                            uint32_t burst_words)
+static int trace_dma_start_nonblocking(void *context, uintptr_t source,
+                                       uint32_t words, uint32_t burst_words)
 {
     FifoTrace *trace = context;
     const uint32_t *payload = (const uint32_t *)source;
@@ -211,7 +383,13 @@ static int trace_dma_stream(void *context, uintptr_t source, uint32_t words,
     trace->dma_words = words;
     for (index = 0U; index < words; ++index)
         trace_word(trace, payload[index]);
-    return 1;
+    return RIX_DRV_DMA_COMPLETE;
+}
+
+static int trace_dma_complete(void *context)
+{
+    (void)context;
+    return RIX_DRV_DMA_COMPLETE;
 }
 
 static int write_fifo_trace(const char *path, const uint8_t *raw, size_t raw_bytes)
@@ -220,8 +398,9 @@ static int write_fifo_trace(const char *path, const uint8_t *raw, size_t raw_byt
     static FifoTrace trace;
     struct rix_drv_config config;
     struct rix_drv driver;
+    struct rix_drv_feed feed;
+    int result;
     int ok;
-
     memset(&trace, 0, sizeof(trace));
     trace.file = fopen(path, "w");
     if (trace.file == NULL)
@@ -234,13 +413,18 @@ static int write_fifo_trace(const char *path, const uint8_t *raw, size_t raw_byt
     config.write = trace_csr_write;
     config.fifo_read = trace_fifo_read;
     config.fifo_write = trace_fifo_write;
-    config.dma_stream = trace_dma_stream;
+    config.dma_start_nonblocking = trace_dma_start_nonblocking;
+    config.dma_complete = trace_dma_complete;
     config.hardware_present = 1;
     ok = rix_drv_init(&driver, &config) == RIX_DRV_OK &&
          rix_drv_enable(&driver) == RIX_DRV_OK &&
-         rix_drv_submit(&driver, commands, (uintptr_t)commands,
-                        (uint32_t)(raw_bytes / 4U), 0U) == RIX_DRV_OK &&
-         trace.ok && trace.count == 0U;
+         rix_drv_feed_begin(&feed, commands, (uintptr_t)commands,
+                            (uint32_t)(raw_bytes / 4U),
+                            RIX_DRV_FEED_SOURCE_SVC) == RIX_DRV_OK;
+    while (ok && (result = rix_drv_try_feed(&driver, &feed)) ==
+           RIX_DRV_FEED_PROGRESS)
+        ;
+    ok = ok && result == RIX_DRV_FEED_DONE && trace.ok && trace.count == 0U;
     if (fclose(trace.file) != 0)
         ok = 0;
     return ok;
@@ -277,6 +461,61 @@ static int emit_external_frame(RixCmdWriter *writer, const RixTriangle *triangle
     for (index = 0U; index < triangle_count; ++index) {
         if (!rix_cmd_triangle(writer, triangles[index].words,
                               RIX_TRIANGLE_WORDS)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+#define RIX_TMU1_FEATURE (1U << 7)
+#define RIX_TMU2_TRIANGLE_WORDS (RIX_TRIANGLE_WORDS + 9U)
+
+static int emit_tmu1_pages(RixCmdWriter *writer, const uint32_t *pages, size_t count)
+{
+    size_t index;
+
+    if (pages == NULL || count == 0U || count > 0x7ffffU ||
+        !rix_cmd_word(writer, RIX_OP_TEXTURE_STREAM | (uint32_t)count | (1U << 19))) {
+        return 0;
+    }
+    for (index = 0U; index < count; ++index) {
+        if (!rix_cmd_word(writer, pages[index])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int emit_tmu2_triangle(RixCmdWriter *writer, const RixTriangle *triangle)
+{
+    uint32_t words[RIX_TMU2_TRIANGLE_WORDS];
+
+    memcpy(words, triangle->words, sizeof(triangle->words));
+    memcpy(&words[RIX_TRIANGLE_WORDS], &triangle->words[RIX_WORD_TEXTURE],
+           9U * sizeof(words[0]));
+    return rix_cmd_triangle(writer, words, RIX_TMU2_TRIANGLE_WORDS);
+}
+
+static int emit_external_frame_tmu2(RixCmdWriter *writer, const RixTriangle *triangles,
+                                    size_t triangle_count, const EfFrameConfig *config)
+{
+    size_t index;
+    uint32_t pixels = (uint32_t)config->width * (uint32_t)config->height;
+
+    if (!rix_cmd_resolution(writer, config->width, config->height) ||
+        !rix_cmd_clear_color(writer, config->clear_color) ||
+        !rix_cmd_clear_depth(writer, config->clear_depth) ||
+        !rix_cmd_buffer_address(writer, RIX_REG_COLOR_BUFFER_ADDR,
+                                config->color_addr) ||
+        !rix_cmd_buffer_address(writer, RIX_REG_DEPTH_BUFFER_ADDR,
+                                config->depth_addr) ||
+        !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET |
+                              RIX_FRAMEBUFFER_COLOR |
+                              RIX_FRAMEBUFFER_DEPTH, pixels)) {
+        return 0;
+    }
+    for (index = 0U; index < triangle_count; ++index) {
+        if (!emit_tmu2_triangle(writer, &triangles[index])) {
             return 0;
         }
     }
@@ -354,6 +593,68 @@ static uint16_t rgba_to_rgb565(uint32_t rgba)
     return (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
 }
 
+/* Mirror expansion of PixelUtil.vh's RGB5652XXX / TexelColorUnpack.v's
+ * RGB565TO8888: the top bits are replicated into the remainder, so a 5-bit
+ * channel c becomes (c << 3) | (c >> 2) and a 6-bit channel
+ * (c << 2) | (c >> 4). */
+static uint8_t expand_channel(uint8_t value, unsigned int bits)
+{
+    return (uint8_t)((value << (8U - bits)) | (value >> (2U * bits - 8U)));
+}
+
+static void rgb565_to_channels(uint16_t pixel, uint8_t channels[3])
+{
+    channels[0] = expand_channel((uint8_t)(pixel >> 11), 5U);
+    channels[1] = expand_channel((uint8_t)((pixel >> 5) & 0x3fU), 6U);
+    channels[2] = expand_channel((uint8_t)(pixel & 0x1fU), 5U);
+}
+
+static uint16_t channels_to_rgb565(const uint8_t channels[3])
+{
+    return (uint16_t)((((uint32_t)channels[0] >> 3) << 11) |
+                      (((uint32_t)channels[1] >> 2) << 5) |
+                      ((uint32_t)channels[2] >> 3));
+}
+
+/* ColorBlender.v + ColorMixer.v with funcS = ZERO and funcD = SRC_COLOR:
+ * every 8-bit channel is ((src * dst + 255) >> 8), saturated, then
+ * re-quantized to RGB565 by XXX2RGB565 (top bits).  The source is the
+ * lightmap texel after the TMU's RGB565TO8888 expansion. */
+static uint16_t blend_lightmap_over(uint16_t stored)
+{
+    uint8_t dst[3];
+    uint8_t src[3];
+    uint8_t out[3];
+    unsigned int channel;
+
+    rgb565_to_channels(stored, dst);
+    rgb565_to_channels(LIGHTMAP_RGB565, src);
+    for (channel = 0U; channel < 3U; ++channel) {
+        unsigned int product = (unsigned int)src[channel] * (unsigned int)dst[channel] + 255U;
+
+        out[channel] = (uint8_t)(product > 65280U ? 255U : product >> 8);
+    }
+    return channels_to_rgb565(out);
+}
+
+/* LogicOp.v with op = XOR (10) applied to the 32-bit fragment colour and
+ * the destination expanded by RasterIXCoreEF.v's
+ * ColorBufferExpandVec(RGB5652XXX(...)); the alpha channel is dropped by
+ * the write-side XXX2RGB565 quantization. */
+#define SCENE_LOGIC_OP_XOR 10U
+
+static uint16_t logic_xor_over(uint16_t stored, uint32_t src_rgba)
+{
+    uint8_t dst[3];
+    uint8_t out[3];
+
+    rgb565_to_channels(stored, dst);
+    out[0] = (uint8_t)(dst[0] ^ (uint8_t)(src_rgba >> 24));
+    out[1] = (uint8_t)(dst[1] ^ (uint8_t)(src_rgba >> 16));
+    out[2] = (uint8_t)(dst[2] ^ (uint8_t)(src_rgba >> 8));
+    return channels_to_rgb565(out);
+}
+
 static int triangle_covers(const RixTriangle *triangle, int32_t x, int32_t y)
 {
     int32_t bx = (int32_t)(triangle->words[RIX_WORD_BB_START] & 0xffffU);
@@ -389,6 +690,53 @@ static void paint_reference(uint16_t *frame, const RixTriangle *triangle,
         for (x = 0; x < (int32_t)SCREEN_WIDTH; ++x) {
             if (triangle_covers(triangle, x, y)) {
                 frame[y * (int32_t)SCREEN_WIDTH + x] = color565;
+            }
+        }
+    }
+}
+
+/* Reference paint operations for the directed byte-swap scenes.  MASK_G
+ * and MASK_B model the byte-granular write strobes of a G-only / B-only
+ * color mask (only that byte of the stored pixel changes); BLEND_LM and
+ * LOGIC_XOR model a read-modify-write second pass whose destination is
+ * the first pass's non-symmetric stored pixel. */
+typedef enum RefPaint {
+    REF_SOLID,
+    REF_MASK_G,
+    REF_MASK_B,
+    REF_BLEND_LM,
+    REF_LOGIC_XOR
+} RefPaint;
+
+static void paint_reference_op(uint16_t *frame, const RixTriangle *triangle,
+                               uint32_t paint_rgba, RefPaint op)
+{
+    uint16_t color565 = rgba_to_rgb565(paint_rgba);
+    int32_t x;
+    int32_t y;
+
+    for (y = 0; y < (int32_t)SCREEN_HEIGHT; ++y) {
+        for (x = 0; x < (int32_t)SCREEN_WIDTH; ++x) {
+            if (triangle_covers(triangle, x, y)) {
+                uint16_t *pixel = &frame[y * (int32_t)SCREEN_WIDTH + x];
+
+                switch (op) {
+                case REF_SOLID:
+                    *pixel = color565;
+                    break;
+                case REF_MASK_G:
+                    *pixel = (uint16_t)((*pixel & 0x00ffU) | (color565 & 0xff00U));
+                    break;
+                case REF_MASK_B:
+                    *pixel = (uint16_t)((*pixel & 0xff00U) | (color565 & 0x00ffU));
+                    break;
+                case REF_BLEND_LM:
+                    *pixel = blend_lightmap_over(*pixel);
+                    break;
+                case REF_LOGIC_XOR:
+                    *pixel = logic_xor_over(*pixel, paint_rgba);
+                    break;
+                }
             }
         }
     }
@@ -496,6 +844,19 @@ static int setup_state(RixCmdWriter *writer, int textured)
     return 1;
 }
 
+static int setup_state_tmu2(RixCmdWriter *writer, int textured)
+{
+    uint32_t pages[1];
+
+    pages[0] = TEXTURE_ADDRESS;
+    return setup_state(writer, textured) &&
+           rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0 | RIX_TMU1_FEATURE) &&
+           rix_cmd_register(writer, 13U, 0U) &&
+           rix_cmd_register(writer, 14U, 0U) &&
+           rix_cmd_register(writer, 15U, 0x2333U) &&
+           emit_tmu1_pages(writer, pages, 1U);
+}
+
 static int build_s2(RixTriangle *triangles, size_t *count)
 {
     RixVertex v0 = vertex(220.0f, 140.0f, 0.5f, 0x00ff00ffU, 0.0f, 0.0f);
@@ -521,6 +882,33 @@ static int build_lm(RixTriangle *triangles, size_t *count)
     RixVertex v0 = vertex(220.0f, 140.0f, 0.5f, 0x848284ffU, 0.0f, 0.0f);
     RixVertex v1 = vertex(420.0f, 160.0f, 0.5f, 0x848284ffU, 1.0f, 0.0f);
     RixVertex v2 = vertex(320.0f, 360.0f, 0.5f, 0x848284ffU, 0.5f, 1.0f);
+    return add_triangle(triangles, count, &v0, &v1, &v2);
+}
+
+/* ef-mask: two disjoint byte-asymmetric triangles drawn with byte-granular
+ * write masks.  The first keeps only the G color-mask bit (RGB565 high
+ * byte, strobes 2'b10), the second only B (low byte, strobes 2'b01). */
+static int build_maskblend(RixTriangle *triangles, size_t *count)
+{
+    RixVertex g0 = vertex(220.0f, 140.0f, 0.5f, 0x848284ffU, 0.0f, 0.0f);
+    RixVertex g1 = vertex(420.0f, 160.0f, 0.5f, 0x848284ffU, 1.0f, 0.0f);
+    RixVertex g2 = vertex(320.0f, 360.0f, 0.5f, 0x848284ffU, 0.5f, 1.0f);
+    RixVertex b0 = vertex(20.0f, 380.0f, 0.5f, 0x21a4c6ffU, 0.0f, 0.0f);
+    RixVertex b1 = vertex(200.0f, 380.0f, 0.5f, 0x21a4c6ffU, 1.0f, 0.0f);
+    RixVertex b2 = vertex(20.0f, 460.0f, 0.5f, 0x21a4c6ffU, 0.0f, 1.0f);
+
+    return add_triangle(triangles, count, &g0, &g1, &g2) &&
+           add_triangle(triangles, count, &b0, &b1, &b2);
+}
+
+/* ef-logicbe second pass: identical footprint to build_lm but painted
+ * 0x21a4c6ff, so the XOR logic op mixes two different byte-asymmetric
+ * colours. */
+static int build_lm_xor(RixTriangle *triangles, size_t *count)
+{
+    RixVertex v0 = vertex(220.0f, 140.0f, 0.5f, 0x21a4c6ffU, 0.0f, 0.0f);
+    RixVertex v1 = vertex(420.0f, 160.0f, 0.5f, 0x21a4c6ffU, 1.0f, 0.0f);
+    RixVertex v2 = vertex(320.0f, 360.0f, 0.5f, 0x21a4c6ffU, 0.5f, 1.0f);
     return add_triangle(triangles, count, &v0, &v1, &v2);
 }
 
@@ -1014,6 +1402,204 @@ static int emit_lightmap_pass(RixCmdWriter *writer, const RixTriangle *triangles
     return 1;
 }
 
+/* ef-mask: draw with a byte-granular color mask.  mask_g keeps only the G
+ * bit (RGB565 high byte, per-lane strobes 2'b10), mask_b only B (low byte,
+ * 2'b01).  Blending and logic ops stay off, so this isolates the masked
+ * write path. */
+static int emit_masked_triangles(RixCmdWriter *writer, const RixTriangle *triangles,
+                                 size_t first, size_t triangle_count,
+                                 uint8_t mask_g, uint8_t mask_b)
+{
+    RixFragmentState fragment;
+    size_t index;
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_ALWAYS;
+    fragment.depth_mask = 0U;
+    fragment.color_mask_g = mask_g;
+    fragment.color_mask_b = mask_b;
+    fragment.src_factor = RIX_BLEND_ONE;
+    fragment.dst_factor = RIX_BLEND_ZERO;
+    if (!rix_cmd_fragment_state(writer, &fragment)) {
+        return 0;
+    }
+    for (index = first; index < first + triangle_count; ++index) {
+        if (!rix_cmd_triangle(writer, triangles[index].words,
+                              RIX_TRIANGLE_WORDS)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ef-blendbe second pass: like emit_lightmap_pass but the destination is
+ * the non-symmetric first pass (0x8410), not the white base, and the TMU
+ * source switches from PRIMARY_COLOR to the lightmap TEXTURE. */
+static int emit_blendbe_lightmap_pass(RixCmdWriter *writer,
+                                      const RixTriangle *triangles,
+                                      size_t triangle_count)
+{
+    RixFragmentState fragment;
+    RixTexEnvState environment;
+    uint32_t pages[1];
+    size_t index;
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_ALWAYS;
+    fragment.depth_mask = 0U;
+    fragment.color_mask_r = 1U;
+    fragment.color_mask_g = 1U;
+    fragment.color_mask_b = 1U;
+    fragment.color_mask_a = 1U;
+    fragment.src_factor = RIX_BLEND_ZERO;
+    fragment.dst_factor = RIX_BLEND_SRC_COLOR;
+    memset(&environment, 0, sizeof(environment));
+    environment.combine_rgb = RIX_TEX_REPLACE;
+    environment.combine_alpha = RIX_TEX_REPLACE;
+    environment.src_rgb[0] = RIX_TEXSRC_TEXTURE;
+    environment.src_alpha[0] = RIX_TEXSRC_TEXTURE;
+    environment.operand_rgb[0] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_alpha[0] = RIX_TEXAOP_SRC_ALPHA;
+    pages[0] = LIGHTMAP_ADDRESS;
+    if (!rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0 | RIX_FEATURE_BLEND) ||
+        !rix_cmd_fragment_state(writer, &fragment) ||
+        !rix_cmd_tex_env(writer, 0U, &environment) ||
+        !rix_cmd_texture_pages(writer, 0U, pages, 1U)) {
+        return 0;
+    }
+    for (index = 0U; index < triangle_count; ++index) {
+        if (!rix_cmd_triangle(writer, triangles[index].words,
+                              RIX_TRIANGLE_WORDS)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ef-logicbe second pass: XOR logic op against the non-symmetric stored
+ * destination.  Blending is enabled too, because the destination fetch is
+ * gated on the BLENDING feature bit (RasterIXRenderCore.v colorBufferEnable)
+ * while the write-back mux selects the logic-op result whenever the LOGIC
+ * feature bit is set (PerFragmentPipeline.v). */
+static int emit_logicbe_pass(RixCmdWriter *writer, const RixTriangle *triangles,
+                             size_t triangle_count)
+{
+    RixFragmentState fragment;
+    size_t index;
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_ALWAYS;
+    fragment.depth_mask = 0U;
+    fragment.color_mask_r = 1U;
+    fragment.color_mask_g = 1U;
+    fragment.color_mask_b = 1U;
+    fragment.color_mask_a = 1U;
+    fragment.src_factor = RIX_BLEND_ZERO;
+    fragment.dst_factor = RIX_BLEND_ZERO;
+    fragment.logic_op = SCENE_LOGIC_OP_XOR;
+    if (!rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0 | RIX_FEATURE_BLEND |
+                                         RIX_FEATURE_LOGIC) ||
+        !rix_cmd_fragment_state(writer, &fragment)) {
+        return 0;
+    }
+    for (index = 0U; index < triangle_count; ++index) {
+        if (!rix_cmd_triangle(writer, triangles[index].words,
+                              RIX_TRIANGLE_WORDS)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* First pass of ef-blendbe / ef-logicbe: flat non-symmetric REPLACE draw
+ * (0x848284ff stores as RGB565 0x8410, bytes 0x84/0x10). */
+static int emit_flat_pass(RixCmdWriter *writer, const RixTriangle *triangles,
+                          size_t triangle_count)
+{
+    RixFragmentState fragment;
+    size_t index;
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_ALWAYS;
+    fragment.depth_mask = 0U;
+    fragment.color_mask_r = 1U;
+    fragment.color_mask_g = 1U;
+    fragment.color_mask_b = 1U;
+    fragment.color_mask_a = 1U;
+    fragment.src_factor = RIX_BLEND_ONE;
+    fragment.dst_factor = RIX_BLEND_ZERO;
+    if (!rix_cmd_fragment_state(writer, &fragment)) {
+        return 0;
+    }
+    for (index = 0U; index < triangle_count; ++index) {
+        if (!rix_cmd_triangle(writer, triangles[index].words,
+                              RIX_TRIANGLE_WORDS)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int write_directed_reference(const char *directory, const char *name,
+                                    unsigned int scene)
+{
+    static uint16_t frame[SCREEN_WIDTH * SCREEN_HEIGHT];
+    unsigned int index;
+
+    for (index = 0U; index < SCREEN_WIDTH * SCREEN_HEIGHT; ++index) {
+        frame[index] = rgba_to_rgb565(CLEAR_RGBA);
+    }
+    if (scene == 10U) {
+        paint_reference_op(frame, &scene_triangles[0].prepared,
+                           0x848284ffU, REF_MASK_G);
+        paint_reference_op(frame, &scene_triangles[1].prepared,
+                           0x21a4c6ffU, REF_MASK_B);
+    } else if (scene == 11U) {
+        paint_reference_op(frame, &scene_triangles[0].prepared,
+                           0x848284ffU, REF_SOLID);
+        paint_reference_op(frame, &scene_triangles[0].prepared,
+                           0x848284ffU, REF_BLEND_LM);
+    } else {
+        paint_reference_op(frame, &scene_triangles[0].prepared,
+                           0x848284ffU, REF_SOLID);
+        paint_reference_op(frame, &scene_triangles[1].prepared,
+                           0x21a4c6ffU, REF_LOGIC_XOR);
+    }
+    return write_frame(directory, name, frame);
+}
+
+static int emit_lightmap_pass_tmu2(RixCmdWriter *writer,
+                                   const RixTriangle *triangles, size_t triangle_count)
+{
+    RixFragmentState fragment;
+    uint32_t pages[1];
+    size_t index;
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_ALWAYS;
+    fragment.depth_mask = 0U;
+    fragment.color_mask_r = 1U;
+    fragment.color_mask_g = 1U;
+    fragment.color_mask_b = 1U;
+    fragment.color_mask_a = 1U;
+    fragment.src_factor = RIX_BLEND_ZERO;
+    fragment.dst_factor = RIX_BLEND_SRC_COLOR;
+    pages[0] = LIGHTMAP_ADDRESS;
+    if (!rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0 | RIX_TMU1_FEATURE |
+                                        RIX_FEATURE_BLEND) ||
+        !rix_cmd_fragment_state(writer, &fragment) ||
+        !rix_cmd_texture_pages(writer, 0U, pages, 1U) ||
+        !emit_tmu1_pages(writer, pages, 1U)) {
+        return 0;
+    }
+    for (index = 0U; index < triangle_count; ++index) {
+        if (!emit_tmu2_triangle(writer, &triangles[index])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int write_texture_files(const char *directory, const uint8_t texture[TEXTURE_BYTES])
 {
     char binary_path[1024];
@@ -1065,7 +1651,7 @@ static int generate_scene(const char *directory, const char *name,
     char binary_path[1024];
     char hex_path[1024];
     char fifo_path[1024];
-    int textured = scene == 3U || scene == 4U || scene == 6U;
+    int textured = scene == 3U || scene == 4U || scene == 6U || scene == 9U;
     int valid_scene;
 
     memset(triangles, 0, sizeof(triangles));
@@ -1087,12 +1673,19 @@ static int generate_scene(const char *directory, const char *name,
         valid_scene = build_s4(triangles, &triangle_count);
     } else if (scene == 5U) {
         valid_scene = build_probe(triangles, &triangle_count);
-    } else if (scene == 6U) {
+    } else if (scene == 6U || scene == 9U) {
         valid_scene = build_lm(triangles, &triangle_count);
     } else if (scene == 7U) {
         valid_scene = build_stress(triangles, &triangle_count);
     } else if (scene == 8U) {
         valid_scene = build_texenv(triangles, &triangle_count);
+    } else if (scene == 10U) {
+        valid_scene = build_maskblend(triangles, &triangle_count);
+    } else if (scene == 11U) {
+        valid_scene = build_lm(triangles, &triangle_count);
+    } else if (scene == 12U) {
+        valid_scene = build_lm(triangles, &triangle_count) &&
+                      build_lm_xor(triangles, &triangle_count);
     } else {
         valid_scene = 0;
     }
@@ -1109,6 +1702,24 @@ static int generate_scene(const char *directory, const char *name,
         /* No analytic reference: the runner restores the committed post-fix
          * RTL baseline from refs/ef-texenv_ref.ppm.gz. */
         valid_scene = emit_texenv(&writer, triangles, &config);
+    } else if (scene == 10U || scene == 11U || scene == 12U) {
+        valid_scene = setup_state(&writer, 0) &&
+                      emit_external_frame(&writer, triangles, 0U, &config) &&
+                      (scene != 10U ||
+                       (emit_masked_triangles(&writer, triangles, 0U, 1U, 1U, 0U) &&
+                        emit_masked_triangles(&writer, triangles, 1U, 1U, 0U, 1U))) &&
+                      (scene != 11U ||
+                       (emit_flat_pass(&writer, triangles, triangle_count) &&
+                        emit_blendbe_lightmap_pass(&writer, triangles, triangle_count))) &&
+                      (scene != 12U ||
+                       (emit_flat_pass(&writer, triangles, 1U) &&
+                        emit_logicbe_pass(&writer, &triangles[1], 1U))) &&
+                      write_directed_reference(directory, name, scene);
+    } else if (scene == 9U) {
+        valid_scene = setup_state_tmu2(&writer, textured) &&
+                      emit_external_frame_tmu2(&writer, triangles, triangle_count, &config) &&
+                      emit_lightmap_pass_tmu2(&writer, triangles, triangle_count) &&
+                      write_reference(directory, name, CLEAR_RGBA, 0);
     } else {
         valid_scene = setup_state(&writer, textured) &&
                       emit_external_frame(&writer, triangles, triangle_count, &config) &&
@@ -1123,7 +1734,10 @@ static int generate_scene(const char *directory, const char *name,
         !make_path(fifo_path, sizeof(fifo_path), directory, name, ".fifo") ||
         !write_dse_bin(binary_path, raw, writer.length) ||
         !write_dse_hex(hex_path, raw, writer.length) ||
-        !write_fifo_trace(fifo_path, raw, writer.length)) {
+        !write_memfetch_files(directory, name, raw, writer.length, 0) ||
+        (scene == 7U &&
+         !write_memfetch_files(directory, name, raw, writer.length, 1)) ||
+        !(scene == 9U || write_fifo_trace(fifo_path, raw, writer.length))) {
         return 0;
     }
     printf("%s: words=%zu bytes=%zu triangles=%zu\n", name,
@@ -1135,13 +1749,16 @@ int main(int argc, char **argv)
 {
     static uint8_t texture[TEXTURE_BYTES];
 
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <output-dir>\n", argv[0]);
+    if (argc != 2 && (argc != 3 || strcmp(argv[2], "tmu2") != 0)) {
+        fprintf(stderr, "usage: %s <output-dir> [tmu2]\n", argv[0]);
         return 2;
     }
     make_texture(texture);
     printf("layout: commands=0x%08x color=0x%08x depth=0x%08x texture=0x%08x\n",
            COMMAND_ADDRESS, COLOR_ADDRESS, DEPTH_ADDRESS, TEXTURE_ADDRESS);
+    if (argc == 3)
+        return write_texture_files(argv[1], texture) &&
+               generate_scene(argv[1], "ef-lm-tmu2", 9U) ? 0 : 1;
     if (!write_texture_files(argv[1], texture) ||
         !generate_scene(argv[1], "ef-s1", 1U) ||
         !generate_scene(argv[1], "ef-s2", 2U) ||
@@ -1149,9 +1766,12 @@ int main(int argc, char **argv)
         !generate_scene(argv[1], "ef-s4", 4U) ||
         !generate_scene(argv[1], "ef-probe", 5U) ||
         !generate_scene(argv[1], "ef-lm", 6U) ||
+        !generate_scene(argv[1], "ef-lm-tmu2", 9U) ||
         !generate_scene(argv[1], "ef-stress", 7U) ||
-        !generate_scene(argv[1], "ef-texenv", 8U)) {
-        fprintf(stderr, "failed to write RasterIX XSim scene output to %s\n", argv[1]);
+        !generate_scene(argv[1], "ef-texenv", 8U) ||
+        !generate_scene(argv[1], "ef-mask", 10U) ||
+        !generate_scene(argv[1], "ef-blendbe", 11U) ||
+        !generate_scene(argv[1], "ef-logicbe", 12U)) {
         return 1;
     }
     return 0;

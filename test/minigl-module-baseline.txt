@@ -1,7 +1,7 @@
 MiniGL module migration baseline
 ===============================
 
-Base: origin/feature/app-runtime e727df6f
+Base: pre-kernel baseline e727df6f
 Recorded from an isolated debian:bookworm-slim ARM-toolchain build and an
 isolated ubuntu:24.04 host-test build.  The firmware source and private
 library checkout were mounted read-only and copied before either build.

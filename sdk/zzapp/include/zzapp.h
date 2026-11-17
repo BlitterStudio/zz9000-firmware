@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 #define ZZAPP_API_MAJOR 0u
-#define ZZAPP_API_MINOR 2u
+#define ZZAPP_API_MINOR 3u
 #define ZZAPP_API_VERSION ((ZZAPP_API_MAJOR << 16) | ZZAPP_API_MINOR)
 
 #define ZZ_OK         0
@@ -55,6 +55,7 @@ extern "C" {
 #define ZZ_EV_STOP     5u
 #define ZZ_EV_RESIZE   6u
 #define ZZ_EV_BREAK    7u
+#define ZZ_EV_LOW_MEMORY 8u
 
 #define ZZ_BREAK_CTRL_D 4u
 #define ZZ_BREAK_CTRL_E 5u
@@ -95,6 +96,9 @@ extern "C" {
 #define ZZAPP_NOTE_FLAG_DISPLAY 1u
 #define ZZAPP_NOTE_FLAG_AUDIO   2u
 #define ZZAPP_NOTE_FLAG_GL      4u
+/* The app grows its heap through heap_grow (set by ZZAPP_NOTE in the 0.3
+ * SDK). Without it the loader commits the fixed 96 MiB 0.2 region. */
+#define ZZAPP_NOTE_FLAG_DYNAMIC_HEAP 8u
 
 struct zzapp_note {
     uint32_t magic;       /* 0x50505A41 */
@@ -153,6 +157,12 @@ typedef struct zzapp_mem_info {
     uint32_t host_visible_used;
     uint32_t host_visible_limit;
 } zzapp_mem_info;
+
+typedef struct zzapp_heap_info {
+    uint32_t committed;
+    uint32_t limit;
+    uint32_t pool_free;
+} zzapp_heap_info;
 
 /* A small synchronous, buffer-only service ABI.  It deliberately exposes no
  * SDK mailbox handles: callers retain ownership of every input/output buffer.
@@ -318,6 +328,10 @@ typedef struct zzapp_gl {
 #define ZZ_GL_BIND_DIRECT_PRESENT 1u
 /* Debug switch: drain and copy every frame before zz_gl_swap returns. */
 #define ZZ_GL_BIND_SYNC_PRESENT 2u
+/* Debug switch: keep RasterIX command feed synchronous for A/B comparison. */
+#define ZZ_GL_BIND_SYNC_RIX_FEED 4u
+/* Debug switch: keep the asynchronous ring but push command words inline. */
+#define ZZ_GL_BIND_INLINE_RIX_FEED 8u
 
 
 typedef struct zzapp_api {
@@ -405,6 +419,10 @@ typedef struct zzapp_api {
     int      (*console_read)(void *buf, uint32_t len, uint32_t *out_n);
     int      (*msg_send)(const void *msg);
     int      (*msg_poll)(void *msg); /* 1 message, 0 empty, negative error */
+    /* API 0.3: grow and shrink the private heap in whole MiB frames. */
+    int      (*heap_grow)(uint32_t bytes, void **old_break);
+    int      (*heap_shrink)(uint32_t bytes, void **new_break);
+    int      (*heap_info)(zzapp_heap_info *out);
 } zzapp_api;
 
 /* True when size covers field. A NULL function still returns ZZ_ENOSYS. */
@@ -465,6 +483,8 @@ int      zz_audio_decode(uint32_t session, const void *src, uint32_t src_bytes,
 int      zz_audio_decode_close(uint32_t session);
 void     zz_free(void *p);
 void     zz_heap_range(void **base, uint32_t *bytes);
+int      zz_heap_grow(uint32_t bytes, void **old_break);
+int      zz_heap_shrink(uint32_t bytes, void **new_break);
 
 void     zz_log(const char *msg, uint32_t len);
 

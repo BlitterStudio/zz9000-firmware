@@ -127,8 +127,22 @@ ifeq ($(MINIGL_RASTERIX),1)
 EXTRA_CFLAGS += -DMINIGL_RASTERIX=1 -DMINIGL_RIX_DMA=$(MINIGL_RIX_DMA)
 endif
 
+# Set to 1 only for the SVC round-trip measurement firmware.
+ZZAPP_SVC_PROBES ?= 0
+ifneq ($(filter 0 1,$(ZZAPP_SVC_PROBES)),$(ZZAPP_SVC_PROBES))
+$(error ZZAPP_SVC_PROBES must be 0 or 1)
+endif
+
+# Set to 0 to remove app SVC and GL performance instrumentation.
+ZZAPP_PERF_COUNTERS ?= 1
+ifneq ($(filter 0 1,$(ZZAPP_PERF_COUNTERS)),$(ZZAPP_PERF_COUNTERS))
+$(error ZZAPP_PERF_COUNTERS must be 0 or 1)
+endif
+
 # -O2 flags (default for all files)
 EXTRA_CFLAGS ?=
+override EXTRA_CFLAGS += -DZZAPP_PERF_COUNTERS=$(ZZAPP_PERF_COUNTERS) \
+	-DZZAPP_SVC_PROBES=$(ZZAPP_SVC_PROBES)
 ZZ9000_BUILD_GIT ?= unknown
 ZZ9000_BUILD_DIRTY ?= unknown
 ZZ9000_BUILD_DATE ?= unknown
@@ -181,6 +195,9 @@ LDFLAGS += -L$(BSP_LIB)
 LDFLAGS += -Wl,--wrap=Xil_DCacheFlushRange -Wl,--wrap=Xil_DCacheInvalidateRange
 LDFLAGS += -Wl,--wrap=Xil_DCacheFlush -Wl,--wrap=Xil_L2CacheFlush
 LDFLAGS += -Wl,--wrap=Xil_ICacheInvalidateRange
+# Section attribute changes also reach the core-1 template and app tables
+# (src/zzapp_as.c).
+LDFLAGS += -Wl,--wrap=Xil_SetTlbAttributes
 
 # Libraries (order matters for --start-group)
 LIBS = $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
@@ -209,6 +226,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_audio_control.c \
 	$(SRC_DIR)/bootrom.c \
 	$(SRC_DIR)/core2.c \
+	$(SRC_DIR)/core1_console.c \
 	$(SRC_DIR)/scheduler.c \
 	$(SRC_DIR)/scheduler_arm.c \
 	$(SRC_DIR)/zzm_minigl_host.c \
@@ -222,7 +240,13 @@ C_SRCS = \
 	$(SRC_DIR)/dma_rtg.c \
 	$(SRC_DIR)/surface_allocator.c \
 	$(SRC_DIR)/card_pool.c \
+	$(SRC_DIR)/rasterix_fence_guard.c \
+	$(SRC_DIR)/zzapp_mem.c \
+	$(SRC_DIR)/zzapp_as.c \
+	$(SRC_DIR)/zzapp_kernel.c \
+	$(SRC_DIR)/cpu_tls.c \
 	$(SRC_DIR)/sdk_palette.c \
+	$(SRC_DIR)/zzapp_svc.c \
 	$(SRC_DIR)/zzapp_loader.c \
 	$(SRC_DIR)/zzapp_host.c \
 	$(SRC_DIR)/zzapp_api.c \
@@ -250,6 +274,7 @@ C_SRCS = \
 	$(SRC_DIR)/usb_proxy_diag.c \
 	$(SRC_DIR)/usb_proxy_iso.c \
 	$(SRC_DIR)/sdk_compression.c \
+	$(SRC_DIR)/sdk_core1_reclaim.c \
 	$(SRC_DIR)/lzh/extract.c \
 	$(SRC_DIR)/lzh/huf.c \
 	$(SRC_DIR)/lzh/dhuf.c \
@@ -306,6 +331,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_audio_flac.c \
 	$(SRC_DIR)/sdk_vorbis_alloc.c \
 	$(SRC_DIR)/sdk_audio_vorbis.c \
+	$(SRC_DIR)/sdk_audio_stream.c \
 	$(SRC_DIR)/sdk_video_stream.c \
 	$(SRC_DIR)/sdk_video_mpeg2_glue.c \
 	$(SRC_DIR)/sdk_media_profile.c \
@@ -317,6 +343,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_surface.c \
 	$(SRC_DIR)/sdk_aperture_layout.c \
 	$(SRC_DIR)/mmu_page.c \
+	$(SRC_DIR)/sdk_minigl_acquire.c \
 	$(SRC_DIR)/sdk_mailbox.c \
 	$(SRC_DIR)/zzapp_services.c \
 	$(SRC_DIR)/sdk_console_encode.c \
@@ -327,8 +354,11 @@ C_SRCS = \
 	$(SRC_DIR)/newlib_heap.c \
 	$(SRC_DIR)/sd_boot_deadline.c
 
+ASM_SRCS = $(SRC_DIR)/zzapp_kernel_asm.S
+
 # Object files shared by both bitstream-capability firmware images.
 COMMON_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
+COMMON_OBJS += $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRCS))
 COMMON_OBJS += $(LZMA_SDK_BUILD)/LzmaDec.o
 COMMON_OBJS += $(LZMA_SDK_BUILD)/Lzma2Dec.o
 BOOTROM_TOOL = $(BUILD_DIR)/make_bootrom_image
@@ -348,12 +378,14 @@ TARGET = $(BUILD_DIR)/ZZ9000OS.elf
 FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 
-# The two bitstream flavors compile common source with different preprocessor
-# inputs.  Stable stamps force every source object to rebuild whenever the
-# requested flavor or RasterIX transport changes, while preserving incremental
-# builds of one configuration.
+# The bitstream flavors and performance counter mode compile common source
+# with different preprocessor inputs. Stable stamps force every source object
+# to rebuild whenever a requested configuration changes, while preserving
+# incremental builds of one configuration.
 BUILD_CONFIG_STAMP = $(BUILD_DIR)/.minigl-rasterix
 BUILD_TRANSPORT_STAMP = $(BUILD_DIR)/.minigl-rix-dma
+BUILD_PERF_COUNTERS_STAMP = $(BUILD_DIR)/.zzapp-perf-counters
+BUILD_SVC_PROBES_STAMP = $(BUILD_DIR)/.zzapp-svc-probes
 
 $(BUILD_CONFIG_STAMP): FORCE
 	@mkdir -p $(dir $@)
@@ -367,9 +399,22 @@ $(BUILD_TRANSPORT_STAMP): FORCE
 		printf '%s\n' "$(MINIGL_RIX_DMA)" > "$@"; \
 	fi
 
+$(BUILD_PERF_COUNTERS_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@if test ! -f "$@" || test "$$(cat "$@")" != "$(ZZAPP_PERF_COUNTERS)"; then \
+		printf '%s\n' "$(ZZAPP_PERF_COUNTERS)" > "$@"; \
+	fi
+
+$(BUILD_SVC_PROBES_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@if test ! -f "$@" || test "$$(cat "$@")" != "$(ZZAPP_SVC_PROBES)"; then \
+		printf '%s\n' "$(ZZAPP_SVC_PROBES)" > "$@"; \
+	fi
+
 $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS)) \
+$(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRCS)) \
 $(BSP_SDPS_OBJ) $(BSP_SDPSOPT_OBJ) $(BSP_DISKIO_OBJ) \
-$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP) $(BUILD_TRANSPORT_STAMP)
+$(OVERLAY_HW_OBJ) $(OVERLAY_HW_FALLBACK_OBJ): $(BUILD_CONFIG_STAMP) $(BUILD_TRANSPORT_STAMP) $(BUILD_PERF_COUNTERS_STAMP) $(BUILD_SVC_PROBES_STAMP)
 
 .DEFAULT_GOAL := all
 
@@ -551,6 +596,10 @@ $(BUILD_DIR)/lzh/%.o: $(SRC_DIR)/lzh/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H $(CFLAGS) -MMD -MP -o $@ $<
 
+
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(INCLUDES) $(WERROR) $(EXTRA_CFLAGS) -c -o $@ $<
 
 # Default rule for all other files (-O2).
 # -MMD emits a .d file next to the .o listing every header the source

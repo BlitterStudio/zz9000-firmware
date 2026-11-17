@@ -12,7 +12,7 @@
  * Map one 4 KiB DDR page Normal non-cacheable while the rest of its 1 MB
  * section keeps the BSP's cached attributes. The BSP translation table maps
  * DDR in 1 MB sections only, so the first call for a cached section swaps
- * that section for a page table; one section can be split per boot.
+ * that section for one of the available page tables.
  *
  * The change is break-before-make: the section (or page) is unmapped while
  * the TLBs are invalidated, so any access to it in that window faults.
@@ -23,12 +23,17 @@
  * Returns 1 when the page is non-cacheable on return: newly split, already
  * split, or inside a section firmware already mapped non-cacheable or
  * strongly ordered. Returns 0 (and changes nothing) for an unaligned
- * address, a section with any other mapping, or a second cached section.
+ * address, a section with any other mapping, or no available page table.
  */
 int mmu_page_set_noncacheable(uintptr_t page_addr);
 /* Change whole 4 KiB pages of firmware code to privileged read-only,
  * executable mappings. start/end must be page aligned. */
 int mmu_page_set_readonly_executable(uintptr_t start, uintptr_t end);
+/* Receive a completed BSP mapping change so app tables remain in sync. */
+typedef void (*mmu_page_change_hook_t)(uint32_t section, uint32_t descriptor,
+				       const uint32_t *pages);
+void mmu_page_set_change_hook(mmu_page_change_hook_t hook);
+
 #ifdef MMU_PAGE_HOST_TEST
 /* Host tests supply the L1 table and read back the page table. */
 extern uint32_t mmu_page_test_l1[4096];

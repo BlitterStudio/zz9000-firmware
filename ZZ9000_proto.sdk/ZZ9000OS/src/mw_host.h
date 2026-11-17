@@ -17,8 +17,10 @@ typedef struct mw_ctx mw_ctx;
 
 /* Allocates a new renderer context (NULL on failure). */
 mw_ctx  *mw_host_create(uint32_t width, uint32_t height);
-/* Firmware service variant with a stable card-pool owner. */
-mw_ctx  *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner);
+/* Firmware service variant with a stable card-pool owner.  rix_async selects
+ * the asynchronous RasterIX feed ring for this context only. */
+mw_ctx  *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner,
+                              int rix_async);
 /* Binds the two physical RGB565 P96 buffers as RasterIX colour targets.
  * CPU fallbacks move the current target back to its private RGBA buffer. */
 int mw_host_bind_direct_rgb565(mw_ctx *c, uint32_t front, uint32_t back,

@@ -82,5 +82,10 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 	                             struct SDKVideoStreamResult *result);
 uint16_t sdk_video_stream_close(uint32_t session,
 	                            struct SDKVideoStreamResult *result);
+int sdk_video_stream_set_client_owner(uint32_t session, uint16_t owner_id);
+int sdk_video_stream_release_client(uint16_t owner_id, uint32_t *close_session);
+#ifdef SDK_VIDEO_HOST_TEST
+void sdk_video_stream_test_set_next_session_id(uint32_t id);
+#endif
 
 #endif /* SDK_VIDEO_STREAM_H */

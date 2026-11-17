@@ -12,6 +12,8 @@ REGIONS = {
     "newlib heap/stacks": (0x08800000, 0x09000000),
     "boot ROM image": (0x3FEF0000, 0x3FEF2000),
 }
+TABLE_SLAB_MAX = 0x34000
+
 SECTION = re.compile(r"^\s*\d+\s+(\S+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)")
 
 def parse_sections(objdump, elf):
@@ -40,9 +42,14 @@ def main():
         raise SystemExit("firmware size gate needs the built ELF and BOOT.bin")
 
     usage = {name: 0 for name in REGIONS}
+    failed = False
     for section, size, address in parse_sections(args.objdump, args.elf):
         if size == 0:
             continue
+        if section == ".zzapp_as_tables":
+            print(f"app translation tables used {size:8d} / {TABLE_SLAB_MAX:8d} bytes")
+            if size > TABLE_SLAB_MAX:
+                failed = True
         end = address + size
         for name, (base, limit) in REGIONS.items():
             if base <= address and end <= limit:
@@ -53,7 +60,6 @@ def main():
                 print(f"unbudgeted DDR section: {section} 0x{address:08x}-0x{end:08x}", file=sys.stderr)
                 return 1
 
-    failed = False
     for name, (base, limit) in REGIONS.items():
         budget = limit - base
         used = usage[name]

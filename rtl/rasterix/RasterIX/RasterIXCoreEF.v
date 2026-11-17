@@ -92,6 +92,7 @@ module RasterIXCoreEF #(
 (
     input  wire                             aclk,
     input  wire                             resetn,
+    input  wire                             color_byte_swap,
 
     // AXI Stream command interface
     input  wire                             s_cmd_axis_tvalid,
@@ -341,6 +342,9 @@ module RasterIXCoreEF #(
     wire                                             m_color_wlast;
     wire [SCREEN_POS_WIDTH - 1 : 0]                  m_color_wscreenPosX;
     wire [SCREEN_POS_WIDTH - 1 : 0]                  m_color_wscreenPosY;
+    wire [DATA_WIDTH - 1 : 0]                       color_axi_wdata;
+    wire [STRB_WIDTH - 1 : 0]                       color_axi_wstrb;
+    wire [DATA_WIDTH - 1 : 0]                       color_axi_rdata;
 
     // Depth buffer access
     wire [DEPTH_WIDTH - 1 : 0]                       depthBufferClearDepth;
@@ -399,6 +403,31 @@ module RasterIXCoreEF #(
     assign m_stencil_rdata = m_stencil_rdata_byte[0 +: STENCIL_WIDTH];
 
     assign fb_addr = colorBufferAddr;
+    function [DATA_WIDTH - 1 : 0] swap_rgb565_bytes;
+        input [DATA_WIDTH - 1 : 0] value;
+        integer byte_index;
+        begin
+            for (byte_index = 0; byte_index < DATA_WIDTH; byte_index = byte_index + 16)
+                swap_rgb565_bytes[byte_index +: 16] =
+                    {value[byte_index +: 8], value[byte_index + 8 +: 8]};
+        end
+    endfunction
+    function [STRB_WIDTH - 1 : 0] swap_rgb565_strobes;
+        input [STRB_WIDTH - 1 : 0] value;
+        integer strobe_index;
+        begin
+            for (strobe_index = 0; strobe_index < STRB_WIDTH; strobe_index = strobe_index + 2)
+                swap_rgb565_strobes[strobe_index +: 2] =
+                    {value[strobe_index], value[strobe_index + 1]};
+        end
+    endfunction
+
+    assign m_color_axi_wdata = color_byte_swap ? swap_rgb565_bytes(color_axi_wdata) :
+                                                  color_axi_wdata;
+    assign m_color_axi_wstrb = color_byte_swap ? swap_rgb565_strobes(color_axi_wstrb) :
+                                                  color_axi_wstrb;
+    assign color_axi_rdata = color_byte_swap ? swap_rgb565_bytes(m_color_axi_rdata) :
+                                                m_color_axi_rdata;
 
     generate
         if (ENABLE_DEPTH_BUFFER)
@@ -583,8 +612,8 @@ module RasterIXCoreEF #(
         .m_mem_axi_awvalid(m_color_axi_awvalid),
         .m_mem_axi_awready(m_color_axi_awready),
 
-        .m_mem_axi_wdata(m_color_axi_wdata),
-        .m_mem_axi_wstrb(m_color_axi_wstrb),
+        .m_mem_axi_wdata(color_axi_wdata),
+        .m_mem_axi_wstrb(color_axi_wstrb),
         .m_mem_axi_wlast(m_color_axi_wlast),
         .m_mem_axi_wvalid(m_color_axi_wvalid),
         .m_mem_axi_wready(m_color_axi_wready),
@@ -606,7 +635,7 @@ module RasterIXCoreEF #(
         .m_mem_axi_arready(m_color_axi_arready),
 
         .m_mem_axi_rid(m_color_axi_rid),
-        .m_mem_axi_rdata(m_color_axi_rdata),
+        .m_mem_axi_rdata(color_axi_rdata),
         .m_mem_axi_rresp(m_color_axi_rresp),
         .m_mem_axi_rlast(m_color_axi_rlast),
         .m_mem_axi_rvalid(m_color_axi_rvalid),

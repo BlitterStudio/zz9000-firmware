@@ -3,13 +3,19 @@
 `rix_xsim_gen.c` emits RasterIX EF command streams for
 `tb_zz9k_rasterix.sv` and `run_xsim.bat`, renders an analytic reference frame
 per scene with the exact `Rasterizer.v` edge rules, and gates replay through
-`compare_frames.py` full-image comparison via `run_scenes.sh` (builds the
-generator in gcc:13, replays every scene below over MMIO, `SHARED=1` and
-`DMA_BURST=1`, replays `ef-stress` with four randomized seeds, then replays
-every scene through the real FIFO command path (see below), and fails on any
-mismatch).  `run_scenes.sh OUT LATENCY stream` runs only the stream-level
-matrix, `run_scenes.sh OUT LATENCY fifo` (or `run_fifo_path.sh [OUT]
-[LATENCY]`) only the FIFO path.
+`compare_frames.py` full-image comparison via `run_scenes.sh`.  The matrix
+replays every scene inline, through FSC DDR memory fetch, with `SHARED=1` and
+`DMA_BURST=1`; it replays `ef-stress` with four randomized seeds and with a
+parser command split between memory-fetch envelopes.  It then replays every
+scene through the real FIFO command path and fails on any mismatch.
+`run_scenes.sh OUT LATENCY stream` runs only the stream-level matrix;
+`run_scenes.sh OUT LATENCY fifo` (or `run_fifo_path.sh [OUT] [LATENCY]`) runs
+only the FIFO path.
+
+`DISABLE_DURING_WORK=1 run_xsim.bat ROOT OUT ef-s1 2 ef` disables CSR
+command intake only after the renderer is active. The run requires STATUS.BUSY
+to remain asserted and STATUS.IDLE to remain clear until the outstanding work
+drains; it is the regression for treating ENABLE as a drain indication.
 
 | Scene | Workload | TMU0 state |
 | --- | --- | --- |
@@ -21,6 +27,9 @@ matrix, `run_scenes.sh OUT LATENCY fifo` (or `run_fifo_path.sh [OUT]
 | `ef-lm` | Two-pass lightmap: white textured base, then `ZERO,SRC_COLOR` with the uniform `0x8410` lightmap page | 8x8 white page, then the 8x8 lightmap page. |
 | `ef-stress` | Read-channel stress: 40 large overlapping triangles in shuffled depth order (`LESS`, depth writes), then six disjoint `ZERO,SRC_COLOR` lightmap triangles with the depth test still on | 256x256 RGB565 texture of uniform 64x64 blocks (zero/full channels, UVs 4 texels inside each block) so the texture cache keeps missing; then the 8x8 lightmap page. |
 | `ef-texenv` | TexEnv operand timing: one triangle with `MODULATE` (gradient texel x interpolated primary colour) under a second `INTERPOLATE` triangle using the constant env colour. | 64x64 RGB565 per-texel gradient page; reference frame is the committed RTL-derived baseline `refs/ef-texenv_ref.ppm.gz` (perspective texture-coordinate interpolation is not bit-exactly reproducible in C). |
+| `ef-mask` | Directed partial byte-mask writes: a G-only color mask (RGB565 high byte, strobes `10`) and a B-only mask (low byte, `01`) over the byte-asymmetric red clear; the regression for the WSTRB pair swap of `swap_rgb565_strobes`. | Enabled with the 8x8 white texture; texenv uses primary colour. |
+| `ef-blendbe` | Directed non-symmetric blend destination: flat `0x8410` base pass, then the `ZERO,SRC_COLOR` lightmap multiply against it; the regression for the read unswap (`color_axi_rdata`). | 8x8 white page for the base pass, then the 8x8 lightmap page. |
+| `ef-logicbe` | Directed fragment logic op: flat `0x8410` base pass, then an XOR logic op (feature bit `RIX_FEATURE_LOGIC`, op 10) against it; also depends on the read unswap. | 8x8 white texture; texenv uses primary colour. |
 
 Each scene sets the 640×480 RGB565 color target and Z16 depth target, then
 performs a single full-target color/depth `MEMSET` and renders directly to
@@ -43,16 +52,77 @@ interleaves bursts, so a crossbar port that refuses a beat blocks every
 response behind it.  `RAND_SEED=n` (nonzero) adds 0..`RAND_LATENCY` (default
 16) extra cycles before every beat and serves next the oldest queued request
 with the ID of a randomly chosen one, reordering responses across IDs as AXI
-allows.  The EF wrapper has no command-read master; the testbench ties the
-legacy model's master side idle and fails on any unknown renderer AXI
-handshake.  When the renderer is busy and no memory or command handshake
-happens for `DEADLOCK_LIMIT` cycles (default 200000; 0 disables), the run
+allows.  EF command-list reads share the renderer's main AXI master; the
+testbench ties only the unused legacy command-read test port idle and fails on
+any unknown renderer AXI handshake.
+When the renderer is busy and no memory or command handshake happens for
+`DEADLOCK_LIMIT` cycles (default 200000; 0 disables), the run
 prints the presented read beat's owning crossbar port, the queued responses,
 the last 48 accepted read addresses and the per-port and fragment-pipeline
 handshakes, then fails; the same dump accompanies a completion timeout.
 `TRACE_AXI=1` adds a 250000-cycle counter heartbeat and `TRACE_AXI=2` prints
 every accepted read address.  All of these are `run_xsim.bat` environment
 variables.
+
+## DDR memory-fetch transport
+
+For every scene the generator writes:
+
+- `<scene>_memfetch.hex`: only two-word `MEM -> ST1` FSC envelopes;
+- `<scene>_memfetch.ddr`: parser words at 64-byte-aligned DDR addresses,
+  grouped into command-boundary chunks no larger than 1024 bytes and padded
+  with parser NOPs to 64 bytes;
+- `<scene>_memfetch.fifo`: the same envelopes as real FIFO packets, each with
+  two `TDFD` words and `TLF=8`.
+
+The intentionally short test chunks force multiple envelopes in `ef-s4` and
+`ef-stress`; production may use 16 KiB chunks.  The testbench requires every
+command-read AR to be a 64-byte-aligned, eight-beat, 64-bit INCR burst on
+crossbar port 0.  It also requires at least one such read and reports the
+number of command-read bursts.
+
+`ef-stress_memfetch-split.*` instead uses consecutive 64-byte chunks without
+inserting NOPs at command boundaries.  At least one envelope boundary is
+inside a parser command, or generation fails.  This proves the parser retains
+its command/argument counter across FSC `TLAST`; the split stream must render
+the same frame bit for bit.
+
+Run one boundary-aware replay with
+`MEMFETCH=1 run_xsim.bat ROOT OUT SCENE 2`; use `MEMFETCH=split` for the
+directed `ef-stress` split-command variant.
+
+### Memory-fetch results (`LATENCY=2`, 2026-11-12)
+
+All stream-level memory-fetch frames were byte-identical to their inline
+MMIO frames:
+
+| Scene | Inline words | Envelopes | Inline cycles | Memfetch cycles |
+| --- | ---: | ---: | ---: | ---: |
+| `ef-s1` | 23 | 1 | 307,294 | 307,339 |
+| `ef-s2` | 63 | 1 | 330,238 | 330,315 |
+| `ef-s3` | 63 | 1 | 330,238 | 330,315 |
+| `ef-s4` | 1,943 | 9 | 380,566 | 382,868 |
+| `ef-probe` | 143 | 1 | 313,251 | 313,407 |
+| `ef-lm` | 109 | 1 | 356,190 | 356,303 |
+| `ef-lm-tmu2` | 139 | 1 | 356,975 | 357,135 |
+| `ef-stress` | 1,934 | 8 | 1,479,876 | 1,482,455 |
+| `ef-texenv` | 110 | 1 | 423,897 | 424,035 |
+| `ef-mask` | 107 | 1 | 338,530 | 338,635 |
+| `ef-blendbe` | 113 | 1 | 356,194 | 356,335 |
+| `ef-logicbe` | 109 | 1 | 356,114 | 356,215 |
+
+This direct 100 MHz stream model intentionally has no 25 MHz GP1 command
+cost, so memory reads add a small overhead.  The real-FIFO comparison below
+measures the command-transport gain.  The 121-envelope split-command
+`ef-stress` run completed in 1,483,419 cycles and was also byte-identical.
+
+The real `axi_fifo_mm_s`/GP1 path gives the transport comparison.  For
+`ef-stress`, inline MMIO used 4 FIFO packets and 1,940 FIFO words, while
+memory-fetch used 8 packets and 16 FIFO words.  The byte-identical frames took
+1,511,750 and 1,483,378 renderer cycles respectively: memory-fetch saved
+28,372 cycles (1.88%, or 0.284 ms at 100 MHz).  The latter issued 122
+eight-beat DDR command-read bursts.  This is a simulation estimate, not a
+hardware frame-rate measurement.
 
 ## Coalescing cycle matrix (LATENCY=2, 2026-11-01)
 
@@ -128,11 +198,13 @@ go through M07 at the real `0x83c60000` window, FIFO register accesses
 through M08 at `0x83c70000`, and every `TDFD` word through M09 at
 `0x83c80000`.
 
-The generator also writes `<scene>.fifo`: the exact FIFO packets
+The generator writes `<scene>.fifo`: the exact inline FIFO packets
 `rix_drv.c` commits for the scene (`P <words> <dma-first> <dma-words>` plus
 the TDFD words), including which payload the firmware hands to its PL330
-callback.  The testbench waits for `TDFV`, stages each packet, commits it with
-`TLF`, and fails if `ISR` then reports `TSE` or `TPOE`; it also checks every
+callback.  It also writes `<scene>_memfetch.fifo`, containing one two-word
+packet per DDR list.
+The testbench waits for `TDFV`, stages each packet, commits it with `TLF`,
+and fails if `ISR` then reports `TSE` or `TPOE`; it also checks every
 accepted stream beat and its `TLAST` against the committed packets and that
 every committed word streamed.  A monitor on the FIFO's `S_AXI_FULL` fails on
 any write that does not start at `0x83c80000` as an INCR burst of 4-byte
@@ -143,7 +215,9 @@ how the payload reaches `TDFD`:
 | --- | --- |
 | `mmio` | One single-beat INCR store to `0x83c80000` per word, each waiting for its response (strongly ordered CPU stores). |
 | `pl330` | The firmware's PL330 program: header words as CPU stores, then the payload as 16-beat INCR bursts of 4-byte beats (shorter tail), each from `0x83c80000`, posted back to back, then the DMAWMB wait before `TLF`. |
+| `memfetch` | One two-word packet per DDR list: `0xb0000000 | bytes`, address, then `TLF=8`.  The parser payload never crosses GP1. |
 | `pl330-early` | The pre-fix completion race: `TLF` written after the header words, before the DMA payload.  The run passes only if `ISR.TSE` is set and nothing streamed, the failure mode observed on hardware. |
+| `irq` | Directed `gpu_cmd_fifo` interrupt check over the mmio transport (`FIFO_IRQ=1`, run as `run_fifo_scene ef-s4 irq`): enables the engine (CSR `0x0008`), then stages a 3520-word DSE packet of `OP_NOP_STREAM` words — the parser consumes each NOP in ~2 cycles, so the TX FIFO occupancy crosses the 1024-word programmable-empty threshold both ways quickly without framebuffer traffic.  Passes only if the interrupt line stays low with `IER=0` while `ISR.TFPE` is set, rises with `IER.TFPE` when the FIFO drains back to the threshold, and clears on the `ISR.TFPE` W1C. |
 
 `run_scenes.sh` (or `run_fifo_path.sh`) builds the design once with
 `fifo_path\run_fifo_path.bat build ROOT WORK` (Vivado 2018.3 batch, about

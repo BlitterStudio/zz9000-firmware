@@ -16,6 +16,13 @@
 #define SDK_SHA1_DIGEST_SIZE 20U
 #define SDK_SHA256_BLOCK_SIZE 64U
 #define SDK_SHA256_DIGEST_SIZE 32U
+typedef struct {
+	uint32_t state[8];
+	uint64_t bit_length;
+	uint8_t buffer[SDK_SHA256_BLOCK_SIZE];
+	uint32_t buffer_length;
+} sdk_sha256_context_t;
+
 #define SDK_CHACHA20_KEY_SIZE 32U
 #define SDK_CHACHA20_NONCE_SIZE 12U
 #define SDK_CHACHA20_BLOCK_SIZE 64U
@@ -50,6 +57,11 @@ void sdk_sha1(const uint8_t *data, uint32_t length,
 void sdk_hmac_sha1(const uint8_t *key, uint32_t key_length,
                    const uint8_t *data, uint32_t data_length,
                    uint8_t digest[SDK_SHA1_DIGEST_SIZE]);
+void sdk_sha256_init(sdk_sha256_context_t *ctx);
+void sdk_sha256_update(sdk_sha256_context_t *ctx, const uint8_t *data,
+                       uint32_t length);
+void sdk_sha256_final(sdk_sha256_context_t *ctx,
+                      uint8_t digest[SDK_SHA256_DIGEST_SIZE]);
 void sdk_sha256(const uint8_t *data, uint32_t length,
                 uint8_t digest[SDK_SHA256_DIGEST_SIZE]);
 void sdk_hmac_sha256(const uint8_t *key, uint32_t key_length,

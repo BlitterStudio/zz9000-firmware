@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+
 static int failures;
 
 static void expect_u32(const char *name, uint32_t actual, uint32_t expected)
@@ -68,6 +69,100 @@ static void test_request_builders(void)
              9U);
   expect_status("stop zero generation", zz9k_app_request_stop(&request, 0U),
                 ZZ9K_STATUS_BAD_REQUEST);
+}
+
+static void test_slot_selectors(void)
+{
+  ZZ9KRequest first;
+  ZZ9KRequest second;
+  ZZ9KRequest third;
+
+  expect_status("first selector request",
+                zz9k_app_request_init(&first, ZZ9K_APP_OP_STATUS),
+                ZZ9K_STATUS_OK);
+  expect_status("first selector", zz9k_app_request_select(&first, 0U, 101U),
+                ZZ9K_STATUS_OK);
+  expect_status("second selector request",
+                zz9k_app_request_init(&second, ZZ9K_APP_OP_STATUS),
+                ZZ9K_STATUS_OK);
+  expect_status("second selector",
+                zz9k_app_request_select(&second, 1U, 202U), ZZ9K_STATUS_OK);
+  expect_status("third selector request",
+                zz9k_app_request_init(&third, ZZ9K_APP_OP_STATUS),
+                ZZ9K_STATUS_OK);
+  expect_status("third selector", zz9k_app_request_select(&third, 3U, 303U),
+                ZZ9K_STATUS_OK);
+  expect_u32("first selector bytes", first.entry.payload_len,
+             ZZ9K_APP_MAILBOX_PAYLOAD_BYTES);
+  expect_u32("second selector bytes", second.entry.payload_len,
+             ZZ9K_APP_MAILBOX_PAYLOAD_BYTES);
+  expect_u32("third selector bytes", third.entry.payload_len,
+             ZZ9K_APP_MAILBOX_PAYLOAD_BYTES);
+  expect_u32("first selector slot",
+             zz9k_get_be32(first.entry.payload.inline_data + ZZ9K_APP_SEL_SLOT),
+             0U);
+  expect_u32("second selector slot",
+             zz9k_get_be32(second.entry.payload.inline_data + ZZ9K_APP_SEL_SLOT),
+             1U);
+  expect_u32("third selector slot",
+             zz9k_get_be32(third.entry.payload.inline_data + ZZ9K_APP_SEL_SLOT),
+             3U);
+  expect_u32("first selector generation",
+             zz9k_get_be32(first.entry.payload.inline_data +
+                            ZZ9K_APP_SEL_GENERATION), 101U);
+  expect_u32("second selector generation",
+             zz9k_get_be32(second.entry.payload.inline_data +
+                            ZZ9K_APP_SEL_GENERATION), 202U);
+  expect_u32("third selector generation",
+             zz9k_get_be32(third.entry.payload.inline_data +
+                            ZZ9K_APP_SEL_GENERATION), 303U);
+  expect_u32("stale second generation",
+             zz9k_app_generation_matches(202U, 999U), 0U);
+  expect_u32("first selector survives stale second",
+             zz9k_get_be32(first.entry.payload.inline_data +
+                            ZZ9K_APP_SEL_GENERATION), 101U);
+  expect_u32("third selector survives stale second",
+             zz9k_get_be32(third.entry.payload.inline_data +
+                            ZZ9K_APP_SEL_GENERATION), 303U);
+}
+
+static void test_slot_registry(void)
+{
+  ZZ9KAppSlotRegistry registry;
+  void *previous;
+  uint32_t first;
+  uint32_t second;
+  uint32_t third;
+
+  memset(&registry, 0, sizeof(registry));
+  expect_status("claim first", zz9k_app_slot_claim(&registry, 0U, &first),
+                ZZ9K_STATUS_OK);
+  expect_status("claim second", zz9k_app_slot_claim(&registry, 1U, &second),
+                ZZ9K_STATUS_OK);
+  expect_status("claim third", zz9k_app_slot_claim(&registry, 3U, &third),
+                ZZ9K_STATUS_OK);
+  expect_u32("first active", zz9k_app_slot_get(&registry, 0U) == &first, 1U);
+  expect_u32("second active", zz9k_app_slot_get(&registry, 1U) == &second, 1U);
+  expect_u32("third active", zz9k_app_slot_get(&registry, 3U) == &third, 1U);
+  expect_status("close second",
+                zz9k_app_slot_release(&registry, 1U, &second), ZZ9K_STATUS_OK);
+  expect_u32("first lease remains", zz9k_app_slot_get(&registry, 0U) == &first,
+             1U);
+  expect_u32("second inactive", zz9k_app_slot_get(&registry, 1U) == 0, 1U);
+  expect_u32("third lease remains", zz9k_app_slot_get(&registry, 3U) == &third,
+             1U);
+
+  memset(&registry, 0, sizeof(registry));
+  expect_status("legacy first open",
+                zz9k_app_slot_claim(&registry, 0U, &first), ZZ9K_STATUS_OK);
+  expect_status("legacy second open",
+                zz9k_app_slot_claim(&registry, 0U, &second), ZZ9K_STATUS_BUSY);
+  expect_status("replace stale first",
+                zz9k_app_slot_replace(&registry, 0U, &second, &previous),
+                ZZ9K_STATUS_OK);
+  expect_u32("replace returns stale handle", previous == &first, 1U);
+  expect_u32("replacement becomes active",
+             zz9k_app_slot_get(&registry, 0U) == &second, 1U);
 }
 
 static void test_status_parser(void)
@@ -145,6 +240,8 @@ int main(void)
   test_request_builders();
   test_status_parser();
   test_message_rings();
+  test_slot_selectors();
+  test_slot_registry();
   test_generation_fence();
   return failures != 0;
 }

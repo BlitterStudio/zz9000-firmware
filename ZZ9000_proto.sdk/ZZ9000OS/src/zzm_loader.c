@@ -38,6 +38,77 @@ static uint64_t last_poll_ms;
 static int (*storage_idle)(void);
 static int (*load_dispatch)(uint32_t module_id);
 static zzm_v3_capabilities_t v3_capabilities;
+enum v1_load_phase {
+    V1_LOAD_IDLE = 0,
+    V1_LOAD_READ_HASH,
+    V1_LOAD_BSS_ZERO,
+    V1_LOAD_DCACHE_FLUSH,
+    V1_LOAD_ICACHE_INVALIDATE,
+    V1_LOAD_INIT,
+    V1_LOAD_FAIL_POISON,
+    V1_LOAD_FAIL_DCACHE_FLUSH,
+    V1_LOAD_FAIL_ICACHE_INVALIDATE,
+    V1_LOAD_FAIL_DONE,
+};
+enum v3_load_phase {
+    V3_LOAD_IDLE = 0,
+    V3_LOAD_READ_HASH,
+    V3_LOAD_BSS_ZERO,
+    V3_LOAD_DCACHE_FLUSH,
+    V3_LOAD_ICACHE_INVALIDATE,
+    V3_LOAD_INIT,
+    V3_LOAD_FAIL_POISON,
+    V3_LOAD_FAIL_DCACHE_FLUSH,
+    V3_LOAD_FAIL_ICACHE_INVALIDATE,
+    V3_LOAD_FAIL_DONE,
+};
+
+struct v1_load_state {
+    FIL file;
+    sdk_sha256_context_t sha256;
+    uint32_t offset;
+    uint32_t failure_reason;
+    enum zzm_state failure_state;
+    enum v1_load_phase phase;
+    uint8_t file_open;
+};
+
+struct v3_load_state {
+    FIL file;
+    sdk_sha256_context_t sha256;
+    uint32_t offset;
+    uint32_t failure_reason;
+    enum zzm_state failure_state;
+    enum v3_load_phase phase;
+    uint8_t file_open;
+};
+
+static struct v1_load_state v1_loads[ZZM_MODULE_MAX];
+static struct v3_load_state v3_loads[ZZM_MODULE_MAX];
+
+#ifdef ZZM_LOADER_HOST_TEST
+static uint32_t test_work_bytes;
+static enum zzm_loader_test_work test_work_kind;
+
+static void note_test_work(enum zzm_loader_test_work kind, uint32_t bytes)
+{
+    test_work_kind = kind;
+    test_work_bytes = bytes;
+}
+
+uint32_t zzm_loader_test_work_bytes(void)
+{
+    return test_work_bytes;
+}
+
+enum zzm_loader_test_work zzm_loader_test_work_kind(void)
+{
+    return test_work_kind;
+}
+#else
+#define note_test_work(...) ((void)0)
+#endif
+
 
 /* Session-begin module callbacks run on core 1 while core 0 services idle
  * unloading.  This lock prevents a callback from observing a reclaimed
@@ -207,15 +278,14 @@ static enum zzm_state verify_header_shape(const zzm_header_t *header,
     return file_size == expected_size ? ZZM_STATE_AVAILABLE : ZZM_STATE_REJECTED_SLOT;
 }
 
-enum zzm_state zzm_verify_image(const zzm_header_t *header,
-                                const uint8_t *image, uint32_t file_size,
-                                zzm_sha256_fn sha256)
+static enum zzm_state verify_v1_metadata(const zzm_header_t *header,
+                                         uint32_t file_size)
 {
-    uint8_t digest[ZZM_SHA256_SIZE];
     enum zzm_state state = verify_header_shape(header, file_size);
     uint32_t i;
 
-    if (state != ZZM_STATE_AVAILABLE) return state;
+    if (state != ZZM_STATE_AVAILABLE)
+        return state;
     for (i = 0; i < header->required_count; i++) {
         if (!runtime_service_present(header->required[i].service_id,
                                      header->required[i].min_version) &&
@@ -224,7 +294,20 @@ enum zzm_state zzm_verify_image(const zzm_header_t *header,
                                        header->required[i].min_version)))
             return ZZM_STATE_REJECTED_SERVICE;
     }
-    if (!image || !sha256) return ZZM_STATE_REJECTED_SLOT;
+    return ZZM_STATE_AVAILABLE;
+}
+
+enum zzm_state zzm_verify_image(const zzm_header_t *header,
+                                const uint8_t *image, uint32_t file_size,
+                                zzm_sha256_fn sha256)
+{
+    uint8_t digest[ZZM_SHA256_SIZE];
+    enum zzm_state state = verify_v1_metadata(header, file_size);
+
+    if (state != ZZM_STATE_AVAILABLE)
+        return state;
+    if (!image || !sha256)
+        return ZZM_STATE_REJECTED_SLOT;
     sha256(image, header->image_size, digest);
     return memcmp(digest, header->image_sha256, sizeof(digest)) == 0
                ? ZZM_STATE_LOADED : ZZM_STATE_REJECTED_HASH;
@@ -304,17 +387,15 @@ static enum zzm_state verify_v3_header_shape(const zzm_v3_header_t *header,
     expected_size = ZZM_V3_HEADER_SIZE + header->image_size;
     return file_size == expected_size ? ZZM_STATE_AVAILABLE : ZZM_STATE_REJECTED_SLOT;
 }
-
-enum zzm_state zzm_verify_v3_image(const zzm_v3_header_t *header,
-                                   const uint8_t *image, uint32_t file_size,
-                                   const zzm_v3_capabilities_t *caps,
-                                   zzm_sha256_fn sha256)
+static enum zzm_state verify_v3_metadata(const zzm_v3_header_t *header,
+                                         uint32_t file_size,
+                                         const zzm_v3_capabilities_t *caps)
 {
-    uint8_t digest[ZZM_SHA256_SIZE];
     enum zzm_state state = verify_v3_header_shape(header, file_size, caps);
     uint32_t i;
 
-    if (state != ZZM_STATE_AVAILABLE) return state;
+    if (state != ZZM_STATE_AVAILABLE)
+        return state;
     for (i = 0; i < header->required_count; i++) {
         if (!runtime_service_present(header->required[i].service_id,
                                      header->required[i].min_version) &&
@@ -323,7 +404,22 @@ enum zzm_state zzm_verify_v3_image(const zzm_v3_header_t *header,
                                        header->required[i].min_version)))
             return ZZM_STATE_REJECTED_SERVICE;
     }
-    if (!image || !sha256) return ZZM_STATE_REJECTED_SLOT;
+    return ZZM_STATE_AVAILABLE;
+}
+
+
+enum zzm_state zzm_verify_v3_image(const zzm_v3_header_t *header,
+                                   const uint8_t *image, uint32_t file_size,
+                                   const zzm_v3_capabilities_t *caps,
+                                   zzm_sha256_fn sha256)
+{
+    uint8_t digest[ZZM_SHA256_SIZE];
+    enum zzm_state state = verify_v3_metadata(header, file_size, caps);
+
+    if (state != ZZM_STATE_AVAILABLE)
+        return state;
+    if (!image || !sha256)
+        return ZZM_STATE_REJECTED_SLOT;
     sha256(image, header->image_size, digest);
     return memcmp(digest, header->image_sha256, sizeof(digest)) == 0
                ? ZZM_STATE_LOADED : ZZM_STATE_REJECTED_HASH;
@@ -448,22 +544,283 @@ static void load_failed(uint32_t index, enum zzm_state state, uint32_t reason)
     status_from_slot(index, state, &module_header[index], reason);
 }
 
-static void poison_v3_slot(uint32_t index)
+static void close_v1_file(struct v1_load_state *load)
 {
-    const zzm_v3_header_t *header = &module_v3_header[index];
-    uint32_t bytes = header->image_size + header->bss_size;
-    uint32_t *word = (uint32_t *)(uintptr_t)header->slot_load_address;
+    if (!load->file_open)
+        return;
+    (void)f_close(&load->file);
+    load->file_open = 0U;
+}
+
+static void clear_v1_load(uint32_t index)
+{
+    close_v1_file(&v1_loads[index]);
+    memset(&v1_loads[index], 0, sizeof(v1_loads[index]));
+}
+
+static void poison_v1_range(uint32_t index, uint32_t offset, uint32_t bytes)
+{
+    const zzm_header_t *header = &module_header[index];
+    uint32_t *word =
+        (uint32_t *)(uintptr_t)(header->slot_load_address + offset);
     uint32_t count = bytes / sizeof(*word);
     uint32_t i;
 
-    if (!module_header_valid[index] || bytes == 0U)
-        return;
     for (i = 0; i < count; i++)
         word[i] = ZZM_POISON_WORD;
     if (bytes & (sizeof(*word) - 1U))
         memset((uint8_t *)(void *)(word + count), 0xf0, bytes & 3U);
-    Xil_DCacheFlushRange(header->slot_load_address, bytes);
-    Xil_ICacheInvalidateRange(header->slot_load_address, bytes);
+}
+
+static void begin_v1_failure(uint32_t index, enum zzm_state state,
+                             uint32_t reason, int init_called)
+{
+    struct v1_load_state *load = &v1_loads[index];
+
+    close_v1_file(load);
+    unregister_module(index);
+    if (init_called && module_header[index].fini_entry)
+        ((zzm_fini_fn)(uintptr_t)module_header[index].fini_entry)();
+    if (zzm_runtime_release_module)
+        (void)zzm_runtime_release_module(module_status[index].id);
+    release_dependencies(index);
+    load->offset = 0U;
+    load->failure_state = state;
+    load->failure_reason = reason;
+    load->phase = V1_LOAD_FAIL_POISON;
+}
+
+static int finish_v1_failure_step(uint32_t index)
+{
+    const zzm_header_t *header = &module_header[index];
+    struct v1_load_state *load = &v1_loads[index];
+    uint32_t total = header->image_size + header->bss_size;
+    uint32_t bytes;
+
+    if (load->phase == V1_LOAD_FAIL_POISON) {
+        if (load->offset == total) {
+            load->offset = 0U;
+            load->phase = V1_LOAD_FAIL_DCACHE_FLUSH;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = total - load->offset;
+        if (bytes > ZZM_LOAD_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_LOAD_MEMORY_CHUNK_BYTES;
+        poison_v1_range(index, load->offset, bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_POISON, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V1_LOAD_FAIL_DCACHE_FLUSH) {
+        if (load->offset == total) {
+            load->offset = 0U;
+            load->phase = V1_LOAD_FAIL_ICACHE_INVALIDATE;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = total - load->offset;
+        if (bytes > ZZM_LOAD_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_LOAD_MEMORY_CHUNK_BYTES;
+        Xil_DCacheFlushRange(header->slot_load_address + load->offset, bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_DCACHE_FLUSH, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V1_LOAD_FAIL_ICACHE_INVALIDATE) {
+        if (load->offset == header->image_size) {
+            load->phase = V1_LOAD_FAIL_DONE;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = header->image_size - load->offset;
+        if (bytes > ZZM_LOAD_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_LOAD_MEMORY_CHUNK_BYTES;
+        Xil_ICacheInvalidateRange(header->slot_load_address + load->offset,
+                                  bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V1_LOAD_FAIL_DONE) {
+        enum zzm_state state = load->failure_state;
+        uint32_t reason = load->failure_reason;
+
+        module_status[index].ref_count = 0U;
+        status_from_slot(index, state, header, reason);
+        clear_v1_load(index);
+    }
+    return ZZM_LOAD_FAILED;
+}
+
+static int load_v1_module(uint32_t index)
+{
+    const zzm_slot_t *slot = &zzm_slots[index];
+    zzm_header_t *header = &module_header[index];
+    struct v1_load_state *load = &v1_loads[index];
+    FRESULT fatfs;
+    uint32_t total;
+    uint32_t bytes;
+    UINT read = 0U;
+
+    note_test_work(ZZM_LOADER_TEST_WORK_NONE, 0U);
+    if (module_status[index].state == ZZM_STATE_LOADED)
+        return ZZM_LOAD_READY;
+    if (module_status[index].state != ZZM_STATE_LOADING)
+        return ZZM_LOAD_FAILED;
+    if (load->phase >= V1_LOAD_FAIL_POISON)
+        return finish_v1_failure_step(index);
+    if (load->phase == V1_LOAD_IDLE) {
+        char path[32];
+
+        snprintf(path, sizeof(path), "0:/ZZ9K/%s.ZZM", slot->name);
+        fatfs = f_open(&load->file, path, FA_READ);
+        if (fatfs != FR_OK) {
+            begin_v1_failure(index, ZZM_STATE_LOAD_FAILED,
+                             ZZM_REASON_FILE_OPEN, 0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        load->file_open = 1U;
+        fatfs = f_lseek(&load->file, ZZM_HEADER_SIZE);
+        if (fatfs != FR_OK) {
+            begin_v1_failure(index, ZZM_STATE_LOAD_FAILED,
+                             ZZM_REASON_FILE_READ, 0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        sdk_sha256_init(&load->sha256);
+        load->phase = V1_LOAD_READ_HASH;
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V1_LOAD_READ_HASH) {
+        uint8_t digest[ZZM_SHA256_SIZE];
+        enum zzm_state verified;
+
+        bytes = header->image_size - load->offset;
+        if (bytes > ZZM_LOAD_READ_HASH_CHUNK_BYTES)
+            bytes = ZZM_LOAD_READ_HASH_CHUNK_BYTES;
+        fatfs = f_read(&load->file,
+                       (void *)(uintptr_t)(header->slot_load_address +
+                                           load->offset),
+                       bytes, &read);
+        if (fatfs != FR_OK || read != bytes) {
+            note_test_work(ZZM_LOADER_TEST_WORK_READ_HASH, read);
+            begin_v1_failure(index, ZZM_STATE_LOAD_FAILED,
+                             ZZM_REASON_FILE_READ, 0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        sdk_sha256_update(
+            &load->sha256,
+            (const uint8_t *)(uintptr_t)(header->slot_load_address +
+                                         load->offset),
+            bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_READ_HASH, bytes);
+        if (load->offset != header->image_size)
+            return ZZM_LOAD_IN_PROGRESS;
+        close_v1_file(load);
+        verified = verify_v1_metadata(header,
+                                      ZZM_HEADER_SIZE + header->image_size);
+        sdk_sha256_final(&load->sha256, digest);
+        if (verified != ZZM_STATE_AVAILABLE ||
+            memcmp(digest, header->image_sha256, sizeof(digest)) != 0) {
+            begin_v1_failure(index, ZZM_STATE_LOAD_FAILED,
+                             ZZM_REASON_IMAGE_INVALID, 0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        load->offset = 0U;
+        load->phase = V1_LOAD_BSS_ZERO;
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V1_LOAD_BSS_ZERO) {
+        if (load->offset == header->bss_size) {
+            load->offset = 0U;
+            load->phase = V1_LOAD_DCACHE_FLUSH;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = header->bss_size - load->offset;
+        if (bytes > ZZM_LOAD_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_LOAD_MEMORY_CHUNK_BYTES;
+        memset((void *)(uintptr_t)(header->slot_load_address +
+                                   header->image_size + load->offset),
+               0, bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_BSS_ZERO, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    total = header->image_size + header->bss_size;
+    if (load->phase == V1_LOAD_DCACHE_FLUSH) {
+        if (load->offset == total) {
+            load->offset = 0U;
+            load->phase = V1_LOAD_ICACHE_INVALIDATE;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = total - load->offset;
+        if (bytes > ZZM_LOAD_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_LOAD_MEMORY_CHUNK_BYTES;
+        Xil_DCacheFlushRange(header->slot_load_address + load->offset, bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_DCACHE_FLUSH, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V1_LOAD_ICACHE_INVALIDATE) {
+        if (load->offset == header->image_size) {
+            load->phase = V1_LOAD_INIT;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = header->image_size - load->offset;
+        if (bytes > ZZM_LOAD_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_LOAD_MEMORY_CHUNK_BYTES;
+        Xil_ICacheInvalidateRange(header->slot_load_address + load->offset,
+                                  bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase != V1_LOAD_INIT)
+        return ZZM_LOAD_FAILED;
+    if (((zzm_init_fn)(uintptr_t)header->init_entry)(zzm_runtime_services()) != 0 ||
+        (zzm_registry_module_services_ready &&
+         !zzm_registry_module_services_ready(module_status[index].id))) {
+        begin_v1_failure(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 1);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    status_from_slot(index, ZZM_STATE_LOADED, header, ZZM_REASON_NONE);
+    module_idle_since[index] = last_poll_ms;
+    clear_v1_load(index);
+    printf("[ZZM] %s loaded v%lu\n", slot->name,
+           (unsigned long)header->module_version);
+    return ZZM_LOAD_READY;
+}
+
+static void poison_v3_range(uint32_t index, uint32_t offset, uint32_t bytes)
+{
+    const zzm_v3_header_t *header = &module_v3_header[index];
+    uint32_t *word =
+        (uint32_t *)(uintptr_t)(header->slot_load_address + offset);
+    uint32_t count = bytes / sizeof(*word);
+    uint32_t i;
+
+    for (i = 0; i < count; i++)
+        word[i] = ZZM_POISON_WORD;
+    if (bytes & (sizeof(*word) - 1U))
+        memset((uint8_t *)(void *)(word + count), 0xf0, bytes & 3U);
+}
+
+static void poison_v3_slot(uint32_t index)
+{
+    const zzm_v3_header_t *header = &module_v3_header[index];
+    uint32_t total = header->image_size + header->bss_size;
+    uint32_t offset;
+
+    if (!module_header_valid[index])
+        return;
+    for (offset = 0U; offset < total;) {
+        uint32_t bytes = total - offset;
+
+        if (bytes > ZZM_V3_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_V3_MEMORY_CHUNK_BYTES;
+        poison_v3_range(index, offset, bytes);
+        Xil_DCacheFlushRange(header->slot_load_address + offset, bytes);
+        Xil_ICacheInvalidateRange(header->slot_load_address + offset, bytes);
+        offset += bytes;
+    }
 }
 
 static void report_v3_load_failure(const zzm_slot_t *slot, uint32_t reason,
@@ -487,15 +844,30 @@ static void report_v3_load_failure(const zzm_slot_t *slot, uint32_t reason,
            slot->name, name, (unsigned long)reason, (unsigned)fatfs);
 }
 
-static void load_v3_failed(uint32_t index, enum zzm_state state, uint32_t reason,
-                           int init_called)
+static void close_v3_file(struct v3_load_state *load)
 {
+    if (!load->file_open)
+        return;
+    (void)f_close(&load->file);
+    load->file_open = 0U;
+}
+
+static void clear_v3_load(uint32_t index)
+{
+    close_v3_file(&v3_loads[index]);
+    memset(&v3_loads[index], 0, sizeof(v3_loads[index]));
+}
+
+static void begin_v3_failure(uint32_t index, enum zzm_state state,
+                             uint32_t reason, int init_called)
+{
+    struct v3_load_state *load = &v3_loads[index];
+
+    close_v3_file(load);
     unregister_module(index);
     /*
      * Before init_entry() runs, the slot may still contain the poison from a
-     * previous unload. Never follow the old fini_entry in that state: a
-     * failed SD reload would otherwise branch into the poison and fault core
-     * 1 while load_v3_failed is on the stack.
+     * previous unload. Never follow the old fini_entry in that state.
      */
     if (init_called && module_v3_header[index].fini_entry)
         ((zzm_fini_fn)(uintptr_t)module_v3_header[index].fini_entry)();
@@ -504,89 +876,242 @@ static void load_v3_failed(uint32_t index, enum zzm_state state, uint32_t reason
         zzm_minigl_unregister();
     if (zzm_runtime_release_module)
         (void)zzm_runtime_release_module(module_status[index].id);
-    poison_v3_slot(index);
-    module_status[index].ref_count = 0U;
-    status_from_v3_slot(index, state, &module_v3_header[index], reason);
+    load->offset = 0U;
+    load->failure_state = state;
+    load->failure_reason = reason;
+    load->phase = V3_LOAD_FAIL_POISON;
+}
+
+static int finish_v3_failure_step(uint32_t index)
+{
+    const zzm_v3_header_t *header = &module_v3_header[index];
+    struct v3_load_state *load = &v3_loads[index];
+    uint32_t total = header->image_size + header->bss_size;
+    uint32_t bytes;
+
+    if (load->phase == V3_LOAD_FAIL_POISON) {
+        if (load->offset == total) {
+            load->offset = 0U;
+            load->phase = V3_LOAD_FAIL_DCACHE_FLUSH;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = total - load->offset;
+        if (bytes > ZZM_V3_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_V3_MEMORY_CHUNK_BYTES;
+        poison_v3_range(index, load->offset, bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_POISON, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V3_LOAD_FAIL_DCACHE_FLUSH) {
+        if (load->offset == total) {
+            load->offset = 0U;
+            load->phase = V3_LOAD_FAIL_ICACHE_INVALIDATE;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = total - load->offset;
+        if (bytes > ZZM_V3_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_V3_MEMORY_CHUNK_BYTES;
+        Xil_DCacheFlushRange(header->slot_load_address + load->offset, bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_DCACHE_FLUSH, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V3_LOAD_FAIL_ICACHE_INVALIDATE) {
+        if (load->offset == total) {
+            load->phase = V3_LOAD_FAIL_DONE;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = total - load->offset;
+        if (bytes > ZZM_V3_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_V3_MEMORY_CHUNK_BYTES;
+        Xil_ICacheInvalidateRange(header->slot_load_address + load->offset,
+                                  bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase == V3_LOAD_FAIL_DONE) {
+        enum zzm_state state = load->failure_state;
+        uint32_t reason = load->failure_reason;
+
+        module_status[index].ref_count = 0U;
+        status_from_v3_slot(index, state, header, reason);
+        clear_v3_load(index);
+        return ZZM_LOAD_FAILED;
+    }
+    return ZZM_LOAD_FAILED;
 }
 
 static int load_v3_module(uint32_t index)
 {
     const zzm_slot_t *slot = &zzm_slots[index];
     zzm_v3_header_t *header = &module_v3_header[index];
-    FIL file;
+    struct v3_load_state *load = &v3_loads[index];
     FRESULT fatfs;
-    UINT read = 0;
-    char path[32];
+    uint32_t total;
+    uint32_t bytes;
+    UINT read = 0U;
 
+    note_test_work(ZZM_LOADER_TEST_WORK_NONE, 0U);
     if (module_status[index].state == ZZM_STATE_LOADED)
-        return 1;
-    if (module_status[index].state != ZZM_STATE_AVAILABLE ||
-        !module_header_valid[index])
-        return 0;
-    if (storage_idle && !storage_idle()) {
-        report_v3_load_failure(slot, ZZM_REASON_STORAGE_BUSY, FR_OK);
-        status_from_v3_slot(index, ZZM_STATE_LOAD_FAILED, header,
-                            ZZM_REASON_STORAGE_BUSY);
-        return 0;
-    }
-    module_status[index].state = ZZM_STATE_LOADING;
+        return ZZM_LOAD_READY;
+    if (module_status[index].state == ZZM_STATE_AVAILABLE) {
+        char path[32];
 
-    if (zzm_runtime_quota_available &&
-        !zzm_runtime_quota_available(ZZM_MEMORY_CLASS_MINIGL_MODULE,
-                                     header->resident_quota)) {
-        report_v3_load_failure(slot, ZZM_REASON_QUOTA, FR_OK);
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_QUOTA, 0);
-        return 0;
+        if (!module_header_valid[index])
+            return ZZM_LOAD_FAILED;
+        if (storage_idle && !storage_idle()) {
+            report_v3_load_failure(slot, ZZM_REASON_STORAGE_BUSY, FR_OK);
+            status_from_v3_slot(index, ZZM_STATE_LOAD_FAILED, header,
+                                ZZM_REASON_STORAGE_BUSY);
+            return ZZM_LOAD_FAILED;
+        }
+        clear_v3_load(index);
+        module_status[index].state = ZZM_STATE_LOADING;
+        if (zzm_runtime_quota_available &&
+            !zzm_runtime_quota_available(ZZM_MEMORY_CLASS_MINIGL_MODULE,
+                                         header->resident_quota)) {
+            report_v3_load_failure(slot, ZZM_REASON_QUOTA, FR_OK);
+            begin_v3_failure(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_QUOTA,
+                             0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        snprintf(path, sizeof(path), "0:/ZZ9K/%s.ZZM", slot->name);
+        fatfs = f_open(&load->file, path, FA_READ);
+        if (fatfs != FR_OK) {
+            report_v3_load_failure(slot, ZZM_REASON_FILE_OPEN, fatfs);
+            begin_v3_failure(index, ZZM_STATE_LOAD_FAILED,
+                             ZZM_REASON_FILE_OPEN, 0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        load->file_open = 1U;
+        fatfs = f_lseek(&load->file, ZZM_V3_HEADER_SIZE);
+        if (fatfs != FR_OK) {
+            report_v3_load_failure(slot, ZZM_REASON_FILE_READ, fatfs);
+            begin_v3_failure(index, ZZM_STATE_LOAD_FAILED,
+                             ZZM_REASON_FILE_READ, 0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        sdk_sha256_init(&load->sha256);
+        load->phase = V3_LOAD_READ_HASH;
+        return ZZM_LOAD_IN_PROGRESS;
     }
-    snprintf(path, sizeof(path), "0:/ZZ9K/%s.ZZM", slot->name);
-    fatfs = f_open(&file, path, FA_READ);
-    if (fatfs != FR_OK) {
-        report_v3_load_failure(slot, ZZM_REASON_FILE_OPEN, fatfs);
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_OPEN, 0);
-        return 0;
+    if (module_status[index].state != ZZM_STATE_LOADING)
+        return ZZM_LOAD_FAILED;
+    if (load->phase >= V3_LOAD_FAIL_POISON)
+        return finish_v3_failure_step(index);
+
+    if (load->phase == V3_LOAD_READ_HASH) {
+        uint8_t digest[ZZM_SHA256_SIZE];
+        enum zzm_state verified;
+
+        bytes = header->image_size - load->offset;
+        if (bytes > ZZM_V3_READ_HASH_CHUNK_BYTES)
+            bytes = ZZM_V3_READ_HASH_CHUNK_BYTES;
+        fatfs = f_read(&load->file,
+                       (void *)(uintptr_t)(header->slot_load_address +
+                                           load->offset),
+                       bytes, &read);
+        if (fatfs != FR_OK || read != bytes) {
+            note_test_work(ZZM_LOADER_TEST_WORK_READ_HASH, read);
+            report_v3_load_failure(slot, ZZM_REASON_FILE_READ, fatfs);
+            begin_v3_failure(index, ZZM_STATE_LOAD_FAILED,
+                             ZZM_REASON_FILE_READ, 0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        sdk_sha256_update(
+            &load->sha256,
+            (const uint8_t *)(uintptr_t)(header->slot_load_address +
+                                         load->offset),
+            bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_READ_HASH, bytes);
+        if (load->offset != header->image_size)
+            return ZZM_LOAD_IN_PROGRESS;
+        close_v3_file(load);
+        verified = verify_v3_metadata(
+            header, ZZM_V3_HEADER_SIZE + header->image_size,
+            &v3_capabilities);
+        sdk_sha256_final(&load->sha256, digest);
+        if (verified != ZZM_STATE_AVAILABLE ||
+            memcmp(digest, header->image_sha256, sizeof(digest)) != 0) {
+            report_v3_load_failure(slot, ZZM_REASON_IMAGE_INVALID, FR_OK);
+            begin_v3_failure(index, ZZM_STATE_LOAD_FAILED,
+                             ZZM_REASON_IMAGE_INVALID, 0);
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        load->offset = 0U;
+        load->phase = V3_LOAD_BSS_ZERO;
+        return ZZM_LOAD_IN_PROGRESS;
     }
-    fatfs = f_lseek(&file, ZZM_V3_HEADER_SIZE);
-    if (fatfs == FR_OK)
-        fatfs = f_read(&file, (void *)(uintptr_t)header->slot_load_address,
-                       header->image_size, &read);
-    if (fatfs != FR_OK || read != header->image_size) {
-        (void)f_close(&file);
-        report_v3_load_failure(slot, ZZM_REASON_FILE_READ, fatfs);
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_READ, 0);
-        return 0;
+    if (load->phase == V3_LOAD_BSS_ZERO) {
+        if (load->offset == header->bss_size) {
+            load->offset = 0U;
+            load->phase = V3_LOAD_DCACHE_FLUSH;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = header->bss_size - load->offset;
+        if (bytes > ZZM_V3_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_V3_MEMORY_CHUNK_BYTES;
+        memset((void *)(uintptr_t)(header->slot_load_address +
+                                   header->image_size + load->offset),
+               0, bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_BSS_ZERO, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
     }
-    (void)f_close(&file);
-    if (zzm_verify_v3_image(header,
-                            (const uint8_t *)(uintptr_t)header->slot_load_address,
-                            ZZM_V3_HEADER_SIZE + header->image_size,
-                            &v3_capabilities, sdk_sha256) != ZZM_STATE_LOADED) {
-        report_v3_load_failure(slot, ZZM_REASON_IMAGE_INVALID, FR_OK);
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_IMAGE_INVALID, 0);
-        return 0;
+    total = header->image_size + header->bss_size;
+    if (load->phase == V3_LOAD_DCACHE_FLUSH) {
+        if (load->offset == total) {
+            load->offset = 0U;
+            load->phase = V3_LOAD_ICACHE_INVALIDATE;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = total - load->offset;
+        if (bytes > ZZM_V3_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_V3_MEMORY_CHUNK_BYTES;
+        Xil_DCacheFlushRange(header->slot_load_address + load->offset, bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_DCACHE_FLUSH, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
     }
-    memset((void *)(uintptr_t)(header->slot_load_address + header->image_size), 0,
-           header->bss_size);
-    Xil_DCacheFlushRange(header->slot_load_address,
-                         header->image_size + header->bss_size);
-    Xil_ICacheInvalidateRange(header->slot_load_address, header->image_size);
+    if (load->phase == V3_LOAD_ICACHE_INVALIDATE) {
+        if (load->offset == header->image_size) {
+            load->offset = 0U;
+            load->phase = V3_LOAD_INIT;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        bytes = header->image_size - load->offset;
+        if (bytes > ZZM_V3_MEMORY_CHUNK_BYTES)
+            bytes = ZZM_V3_MEMORY_CHUNK_BYTES;
+        Xil_ICacheInvalidateRange(header->slot_load_address + load->offset,
+                                  bytes);
+        load->offset += bytes;
+        note_test_work(ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE, bytes);
+        return ZZM_LOAD_IN_PROGRESS;
+    }
+    if (load->phase != V3_LOAD_INIT)
+        return ZZM_LOAD_FAILED;
     if (!zzm_runtime_services_v3) {
         report_v3_load_failure(slot, ZZM_REASON_INIT, FR_OK);
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 0);
-        return 0;
+        begin_v3_failure(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 0);
+        return ZZM_LOAD_IN_PROGRESS;
     }
     if (((int (*)(const void *))(uintptr_t)header->init_entry)(
             zzm_runtime_services_v3()) != 0 ||
         (zzm_registry_module_services_ready &&
          !zzm_registry_module_services_ready(module_status[index].id))) {
         report_v3_load_failure(slot, ZZM_REASON_INIT, FR_OK);
-        load_v3_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 1);
-        return 0;
+        begin_v3_failure(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT, 1);
+        return ZZM_LOAD_IN_PROGRESS;
     }
     status_from_v3_slot(index, ZZM_STATE_LOADED, header, ZZM_REASON_NONE);
     module_idle_since[index] = last_poll_ms;
+    clear_v3_load(index);
     printf("[ZZM] %s loaded v%lu\n", slot->name,
            (unsigned long)header->module_version);
-    return 1;
+    return ZZM_LOAD_READY;
 }
 static void unload_v3_on_owner(uint32_t index)
 {
@@ -616,90 +1141,66 @@ static void unload_v3_on_owner(uint32_t index)
 }
 static int load_module(uint32_t index, uint8_t visiting[ZZM_MODULE_COUNT])
 {
-    const zzm_slot_t *slot = &zzm_slots[index];
     zzm_header_t *header = &module_header[index];
-    FIL file;
-    UINT read = 0;
-    char path[32];
     uint32_t i;
+
     if (module_format[index] == ZZM_V3_FORMAT_VERSION)
         return load_v3_module(index);
-
-
     if (module_status[index].state == ZZM_STATE_LOADED)
-        return 1;
-    if (module_status[index].state == ZZM_STATE_LOADING || visiting[index]) {
-        status_from_slot(index, ZZM_STATE_REJECTED_SERVICE, header, ZZM_REASON_CYCLE);
-        return 0;
+        return ZZM_LOAD_READY;
+    if (module_status[index].state == ZZM_STATE_LOADING)
+        return load_v1_module(index);
+    if (visiting[index]) {
+        status_from_slot(index, ZZM_STATE_REJECTED_SERVICE, header,
+                         ZZM_REASON_CYCLE);
+        return ZZM_LOAD_FAILED;
     }
     if (module_status[index].state == ZZM_STATE_LOAD_FAILED)
         status_from_slot(index, ZZM_STATE_AVAILABLE, header, ZZM_REASON_NONE);
-    if (module_status[index].state != ZZM_STATE_AVAILABLE || !module_header_valid[index])
-        return 0;
+    if (module_status[index].state != ZZM_STATE_AVAILABLE ||
+        !module_header_valid[index])
+        return ZZM_LOAD_FAILED;
     if (storage_idle && !storage_idle()) {
-        status_from_slot(index, ZZM_STATE_LOAD_FAILED, header, ZZM_REASON_STORAGE_BUSY);
-        return 0;
+        status_from_slot(index, ZZM_STATE_LOAD_FAILED, header,
+                         ZZM_REASON_STORAGE_BUSY);
+        return ZZM_LOAD_FAILED;
     }
 
     visiting[index] = 1U;
     module_status[index].state = ZZM_STATE_LOADING;
     for (i = 0; i < module_dependency_count[index]; i++) {
         uint32_t dependency = module_dependencies[index][i];
-        if (!load_module(dependency, visiting)) {
+        int dependency_result = load_module(dependency, visiting);
+
+        if (dependency_result == ZZM_LOAD_IN_PROGRESS) {
+            release_dependencies(index);
+            status_from_slot(index, ZZM_STATE_AVAILABLE, header,
+                             ZZM_REASON_NONE);
+            visiting[index] = 0U;
+            return ZZM_LOAD_IN_PROGRESS;
+        }
+        if (dependency_result != ZZM_LOAD_READY) {
             uint32_t reason = module_status[dependency].reason;
+
             load_failed(index, reason == ZZM_REASON_CYCLE ?
                         ZZM_STATE_REJECTED_SERVICE : ZZM_STATE_LOAD_FAILED,
-                        reason == ZZM_REASON_CYCLE ? reason : ZZM_REASON_DEPENDENCY);
+                        reason == ZZM_REASON_CYCLE ? reason :
+                                                    ZZM_REASON_DEPENDENCY);
             visiting[index] = 0U;
-            return 0;
+            return ZZM_LOAD_FAILED;
         }
         module_status[dependency].ref_count++;
         module_dependencies_held[index] = (uint8_t)(i + 1U);
     }
     if (zzm_runtime_quota_available &&
-        !zzm_runtime_quota_available(header->memory_class, header->memory_quota)) {
-        load_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_QUOTA);
+        !zzm_runtime_quota_available(header->memory_class,
+                                      header->memory_quota)) {
+        begin_v1_failure(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_QUOTA, 0);
         visiting[index] = 0U;
-        return 0;
+        return ZZM_LOAD_IN_PROGRESS;
     }
-    snprintf(path, sizeof(path), "0:/ZZ9K/%s.ZZM", slot->name);
-    if (f_open(&file, path, FA_READ) != FR_OK) {
-        load_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_OPEN);
-        visiting[index] = 0U;
-        return 0;
-    }
-    if (f_lseek(&file, ZZM_HEADER_SIZE) != FR_OK ||
-        f_read(&file, (void *)(uintptr_t)header->slot_load_address,
-               header->image_size, &read) != FR_OK || read != header->image_size) {
-        (void)f_close(&file);
-        load_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_FILE_READ);
-        visiting[index] = 0U;
-        return 0;
-    }
-    (void)f_close(&file);
-    if (zzm_verify_image(header,
-                         (const uint8_t *)(uintptr_t)header->slot_load_address,
-                         ZZM_HEADER_SIZE + header->image_size, sdk_sha256) != ZZM_STATE_LOADED) {
-        load_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_IMAGE_INVALID);
-        visiting[index] = 0U;
-        return 0;
-    }
-    memset((void *)(uintptr_t)(header->slot_load_address + header->image_size), 0,
-           header->bss_size);
-    Xil_DCacheFlushRange(header->slot_load_address, header->image_size + header->bss_size);
-    Xil_ICacheInvalidateRange(header->slot_load_address, header->image_size);
-    if (((zzm_init_fn)(uintptr_t)header->init_entry)(zzm_runtime_services()) != 0 ||
-        (zzm_registry_module_services_ready &&
-         !zzm_registry_module_services_ready(module_status[index].id))) {
-        load_failed(index, ZZM_STATE_LOAD_FAILED, ZZM_REASON_INIT);
-        visiting[index] = 0U;
-        return 0;
-    }
-    status_from_slot(index, ZZM_STATE_LOADED, header, ZZM_REASON_NONE);
-    module_idle_since[index] = last_poll_ms;
     visiting[index] = 0U;
-    printf("[ZZM] %s loaded v%lu\n", slot->name, (unsigned long)header->module_version);
-    return 1;
+    return load_v1_module(index);
 }
 
 void zzm_loader_boot_load(void)
@@ -716,6 +1217,8 @@ void zzm_loader_boot_load(void)
         char path[32];
         enum zzm_state state;
 
+        clear_v1_load(i);
+        clear_v3_load(i);
         module_header_valid[i] = 0U;
         module_format[i] = 0U;
         module_idle_since[i] = 0U;
@@ -797,7 +1300,7 @@ static int load_on_owner_locked(uint32_t module_id)
     int index = module_index(module_id);
 
     if (index < 0)
-        return 0;
+        return ZZM_LOAD_FAILED;
     return load_module((uint32_t)index, visiting);
 }
 
@@ -809,6 +1312,33 @@ int zzm_loader_load_on_owner(uint32_t module_id)
     loaded = load_on_owner_locked(module_id);
     zzm_loader_session_begin_unlock();
     return loaded;
+}
+
+void zzm_loader_cancel_loading(uint32_t module_id)
+{
+    int index;
+
+    zzm_loader_session_begin_lock();
+    index = module_index(module_id);
+    if (index >= 0 && module_status[index].state == ZZM_STATE_LOADING) {
+        if (module_format[index] == ZZM_V3_FORMAT_VERSION) {
+            clear_v3_load((uint32_t)index);
+            unregister_module((uint32_t)index);
+            poison_v3_slot((uint32_t)index);
+            status_from_v3_slot((uint32_t)index, ZZM_STATE_AVAILABLE,
+                                &module_v3_header[index], ZZM_REASON_NONE);
+        } else {
+            clear_v1_load((uint32_t)index);
+            unregister_module((uint32_t)index);
+            poison_slot((uint32_t)index);
+            status_from_slot((uint32_t)index, ZZM_STATE_AVAILABLE,
+                             &module_header[index], ZZM_REASON_NONE);
+        }
+        module_status[index].ref_count = 0U;
+        module_idle_since[index] = 0U;
+        release_dependencies((uint32_t)index);
+    }
+    zzm_loader_session_begin_unlock();
 }
 
 int zzm_loader_ensure_loaded(uint32_t module_id)
@@ -825,17 +1355,18 @@ int zzm_loader_ensure_loaded(uint32_t module_id)
 int zzm_loader_acquire(uint32_t module_id)
 {
     int index;
-    int acquired = 0;
+    int result = ZZM_LOAD_FAILED;
 
     zzm_loader_session_begin_lock();
     index = module_index(module_id);
-    if (index >= 0 && zzm_loader_ensure_loaded(module_id)) {
+    if (index >= 0)
+        result = zzm_loader_ensure_loaded(module_id);
+    if (result == ZZM_LOAD_READY) {
         module_status[index].ref_count++;
         module_idle_since[index] = 0U;
-        acquired = 1;
     }
     zzm_loader_session_begin_unlock();
-    return acquired;
+    return result;
 }
 
 void zzm_loader_release(uint32_t module_id)
@@ -902,11 +1433,9 @@ void zzm_loader_poll(uint64_t now_ms)
 }
 
 /*
- * Core 0, with core 1 held in reset by core1_cold_restart.  A v3 module's
- * state lives on core 1 and the host has already dropped its MiniGL entry
- * points (zzm_minigl_on_core1_fault), so a module left LOADED would accept
- * every later acquire and then fail it (68k minigl.library could not open
- * until reboot).  Discard the image without entering module code; the next
+ * Core 0, with core 1 held in reset by core1_cold_restart. A core-1 module's
+ * image and resumable load state live on core 1. Discard either a loaded
+ * image or a partially read one without entering module code; the next
  * acquire loads it afresh from SD.
  */
 void zzm_loader_forget_core1_modules(void)
@@ -914,18 +1443,31 @@ void zzm_loader_forget_core1_modules(void)
     uint32_t i;
 
     for (i = 0; i < zzm_slot_count; i++) {
-        if (module_format[i] != ZZM_V3_FORMAT_VERSION ||
-            module_status[i].state != ZZM_STATE_LOADED)
+        int is_v3 = module_format[i] == ZZM_V3_FORMAT_VERSION;
+
+        if ((!is_v3 && module_status[i].id != ZZM_MODULE_MINIGL) ||
+            (module_status[i].state != ZZM_STATE_LOADED &&
+             module_status[i].state != ZZM_STATE_LOADING))
             continue;
+        if (is_v3)
+            clear_v3_load(i);
+        else
+            clear_v1_load(i);
         unregister_module(i);
         if (module_status[i].id == ZZM_MODULE_MINIGL &&
             zzm_minigl_on_core1_fault)
             zzm_minigl_on_core1_fault();
         if (zzm_runtime_release_module)
             (void)zzm_runtime_release_module(module_status[i].id);
-        poison_v3_slot(i);
-        status_from_v3_slot(i, ZZM_STATE_AVAILABLE, &module_v3_header[i],
-                            ZZM_REASON_NONE);
+        if (is_v3) {
+            poison_v3_slot(i);
+            status_from_v3_slot(i, ZZM_STATE_AVAILABLE, &module_v3_header[i],
+                                ZZM_REASON_NONE);
+        } else {
+            poison_slot(i);
+            status_from_slot(i, ZZM_STATE_AVAILABLE, &module_header[i],
+                             ZZM_REASON_NONE);
+        }
         module_status[i].ref_count = 0U;
         module_idle_since[i] = 0U;
         release_dependencies(i);
@@ -949,6 +1491,10 @@ void zzm_loader_mark_faulted(uint32_t module_id, const char *reason)
         zzm_minigl_on_core1_fault();
     if (zzm_runtime_release_module)
         (void)zzm_runtime_release_module(module_status[index].id);
+    if (module_format[index] == ZZM_V3_FORMAT_VERSION)
+        clear_v3_load((uint32_t)index);
+    else
+        clear_v1_load((uint32_t)index);
     if (module_format[index] == ZZM_V3_FORMAT_VERSION)
         status_from_v3_slot((uint32_t)index, ZZM_STATE_FAULTED,
                             &module_v3_header[index], ZZM_REASON_FAULT);

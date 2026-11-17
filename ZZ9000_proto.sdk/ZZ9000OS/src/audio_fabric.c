@@ -1116,7 +1116,7 @@ static void audio_fabric_compositor_fill(void)
 
 			if (!s->live)
 				continue;
-			if (!s->source.done && !s->source.faulted) {
+			if (!s->priming && !s->source.done && !s->source.faulted) {
 				s->underruns =
 					fabric_underrun_bump(s->underruns);
 				if (s->ops->underrun)
@@ -1182,8 +1182,7 @@ static void audio_fabric_compositor_fill(void)
 #endif
 				committed++;
 				s->staged_real = 1U;
-			} else if (!s->source.done &&
-			           !s->source.faulted) {
+			} else if (!s->source.done && !s->source.faulted) {
 				/* Owed but silent: this slot's underrun
 				 * alone moves; the other slots and the
 				 * frontier are unaffected (R8). */
@@ -1200,8 +1199,12 @@ static void audio_fabric_compositor_fill(void)
 					available > UINT32_MAX
 					? UINT32_MAX : (uint32_t)available;
 #endif
-				s->underruns =
-					fabric_underrun_bump(s->underruns);
+				if (!s->priming)
+					s->underruns =
+						fabric_underrun_bump(s->underruns);
+#if ZZAPP_PERF_COUNTERS
+				audio_fabric_starvation_event(i);
+#endif
 			}
 		}
 #ifdef AUDIO_FABRIC_BENCH
@@ -1412,34 +1415,29 @@ void audio_fabric_producer_freeze(uint32_t slot)
 	s->frozen = 1U;
 }
 
-int audio_fabric_producer_prime_and_go_live(uint32_t slot)
+static int producer_prime_and_go_live(uint32_t slot, int suppress_underrun)
 {
 	struct audio_fabric_slot *s = fabric_slot(slot);
 	uint32_t irq_state;
 	uint32_t i;
 	int primed = 0;
 
-	/* Priming rewrites the shared TX frontier, so it is only valid before
-	 * this slot or any peer becomes live. Publication is atomic with it: a
-	 * waiting lease must not activate and reset that frontier in between. */
 	if (s == NULL || !s->attached || !s->frozen || s->live ||
 	    audio_fabric_others_live(slot))
 		return 0;
 	irq_state = smp_local_irq_save();
-	/* The first live-peer check above avoids taking the critical section in
-	 * the ordinary mixed case. Recheck after masking the formatter: a direct
-	 * producer may have woken between that check and the mask. */
 	if (audio_fabric_others_live(slot)) {
 		smp_local_irq_restore(irq_state);
 		return 0;
 	}
+	audio_fabric_producer_restart(slot);
 	if (s->ops->snapshot(&s->source) &&
 	    s->source.produced_bytes > s->source.staged_bytes) {
-		/* Reuse the bounded, cache-coherent fill path without advancing the
-		 * direct-ring heartbeat/lifecycle tick: this is not a formatter period. */
+		s->priming = suppress_underrun ? 1U : 0U;
 		s->frozen = 0U;
 		s->live = 1U;
 		audio_fabric_compositor_fill();
+		s->priming = 0U;
 		for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
 			if (s->period_staged[i] != 0U) {
 				primed = 1;
@@ -1447,12 +1445,15 @@ int audio_fabric_producer_prime_and_go_live(uint32_t slot)
 			}
 		}
 	}
-	/* EOF/starved startup still publishes (the player has its bounded
-	 * preroll escape); it simply has no real reserve to report. */
 	s->frozen = 0U;
 	s->live = 1U;
 	smp_local_irq_restore(irq_state);
 	return primed;
+}
+
+int audio_fabric_producer_prime_and_go_live(uint32_t slot)
+{
+	return producer_prime_and_go_live(slot, 0);
 }
 
 void audio_fabric_producer_go_live(uint32_t slot)
@@ -1465,6 +1466,18 @@ void audio_fabric_producer_go_live(uint32_t slot)
 	s->live = 1U;
 }
 
+
+int audio_fabric_producer_go_live_when_ready(uint32_t slot, int ready)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+
+	if (!ready || s == NULL || !s->attached || s->live)
+		return 0;
+	(void)producer_prime_and_go_live(slot, 1);
+	if (!s->live)
+		audio_fabric_producer_go_live(slot);
+	return 1;
+}
 void audio_fabric_producer_restart(uint32_t slot)
 {
 	struct audio_fabric_slot *s = fabric_slot(slot);

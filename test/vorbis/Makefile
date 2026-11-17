@@ -10,11 +10,15 @@ HOST_LIBVORBIS := $(LIBVORBIS_ROOT)/libvorbisdec.a
 BUILD := build
 RUNTIME := $(FIRMWARE_SRC)/sdk_audio_vorbis.c $(FIRMWARE_SRC)/sdk_vorbis_alloc.c \
 	$(FIRMWARE_SRC)/sdk_decode_reclaim.c $(FIRMWARE_SRC)/card_pool.c \
-	$(FIRMWARE_SRC)/sdk_smp_lock.c ../card_pool/host_card_pool.c host_runtime.c
+	$(FIRMWARE_SRC)/sdk_smp_lock.c $(FIRMWARE_SRC)/audio_pump_preconvert.c \
+	$(FIRMWARE_SRC)/audio_convert.c $(FIRMWARE_SRC)/audio_convert_tables.c \
+	../card_pool/host_card_pool.c host_runtime.c
 HEADERS := $(FIRMWARE_SRC)/sdk_audio_vorbis.h $(FIRMWARE_SRC)/sdk_vorbis_alloc.h \
-	$(FIRMWARE_SRC)/sdk_audio_codec_io.h $(FIRMWARE_SRC)/card_pool.h \
+	$(FIRMWARE_SRC)/sdk_audio_codec_io.h $(FIRMWARE_SRC)/audio_pump_preconvert.h \
+	$(FIRMWARE_SRC)/audio_convert.h $(FIRMWARE_SRC)/audio_stream_drain.h \
+	$(FIRMWARE_SRC)/card_pool.h \
 	../card_pool/host_card_pool.h host_runtime.h vorbis_fixtures.h
-INCLUDES := -I$(FIRMWARE_SRC) -I$(LIBVORBIS_ROOT)/include -I../card_pool -I.
+INCLUDES := -I$(FIRMWARE_SRC) -I$(LIBVORBIS_ROOT)/include -I../card_pool -I../audio/mock -I.
 
 .PHONY: test sanitize clean
 

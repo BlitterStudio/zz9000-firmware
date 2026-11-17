@@ -7,8 +7,10 @@ LIBFLAC_ROOT := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/build/deps/flac/1.5.0/host
 HOST_LIBFLAC := $(LIBFLAC_ROOT)/libflacdec.a
 BUILD := build
 RUNTIME := $(FIRMWARE_SRC)/sdk_audio_flac.c $(FIRMWARE_SRC)/sdk_flac_alloc.c \
-	$(FIRMWARE_SRC)/sdk_decode_reclaim.c host_runtime.c
-INCLUDES := -I$(FIRMWARE_SRC) -I$(LIBFLAC_ROOT)/include -I.
+	$(FIRMWARE_SRC)/sdk_decode_reclaim.c $(FIRMWARE_SRC)/audio_pump_preconvert.c \
+	$(FIRMWARE_SRC)/audio_convert.c $(FIRMWARE_SRC)/audio_convert_tables.c \
+	$(FIRMWARE_SRC)/sdk_smp_lock.c host_runtime.c
+INCLUDES := -I$(FIRMWARE_SRC) -I$(LIBFLAC_ROOT)/include -I../audio/mock -I.
 
 .PHONY: test sanitize clean
 
@@ -23,9 +25,10 @@ $(BUILD):
 
 $(BUILD)/flac_backend_test: flac_backend_test.c flac_fixtures.h host_runtime.c host_runtime.h \
 	$(RUNTIME) $(FIRMWARE_SRC)/sdk_audio_flac.h $(FIRMWARE_SRC)/sdk_flac_alloc.h \
-	$(FIRMWARE_SRC)/sdk_audio_codec_io.h \
+	$(FIRMWARE_SRC)/sdk_audio_codec_io.h $(FIRMWARE_SRC)/audio_pump_preconvert.h \
+	$(FIRMWARE_SRC)/audio_convert.h $(FIRMWARE_SRC)/audio_stream_drain.h \
 	$(HOST_LIBFLAC) | $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ flac_backend_test.c $(RUNTIME) $(HOST_LIBFLAC)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ flac_backend_test.c $(RUNTIME) $(HOST_LIBFLAC) -lm
 
 # Instruments the backend, allocation shim, tracker and harness; the pinned
 # libFLAC archive keeps its release build configuration.

@@ -25,6 +25,13 @@ them, or build anyway with `WERROR= ./build_firmware.sh`.
 ./build_bootimage.sh
 ```
 
+App SVC and GL performance instrumentation is enabled by default. To build
+the same firmware without it, keep the other options and add the switch:
+
+```bash
+ZZAPP_PERF_COUNTERS=0 ./build_firmware.sh --rasterix
+```
+
 The commands create these files:
 
 | File | Purpose |

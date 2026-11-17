@@ -17,6 +17,7 @@ int main(void)
     long size;
     uint8_t *image;
     uint32_t offset;
+    int result;
 
     file = fopen(ZZAPP_PROBE_ELF, "rb");
     assert(file != NULL);
@@ -38,7 +39,10 @@ int main(void)
         assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
         offset += chunk;
     }
-    assert(zzapp_loader_end() == ZZ_OK);
+    do {
+        result = zzapp_loader_end();
+    } while (result == ZZAPP_LOADER_IN_PROGRESS);
+    assert(result == ZZ_OK);
     zzapp_loader_release();
     free(image);
     return 0;

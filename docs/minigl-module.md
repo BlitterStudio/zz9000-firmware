@@ -23,7 +23,7 @@ II because the window cannot fit [ZZ9000_proto.sdk/ZZ9000OS/src/minigl_transport
 ARM apps remain supported on a Z3 system whenever the module is available.
 
 This document uses `MUST`, `SHOULD`, and `MAY` as RFC 2119 terms. File and line
-citations describe the `feature/app-runtime` baseline at `eaf28c69`.
+citations describe the pre-kernel baseline at `eaf28c69`.
 
 ## Baseline and constraints
 
@@ -165,7 +165,9 @@ sets the AFI3 width once at boot, validates the selected image, maps the CSR and
 FIFO with the correct attributes, and reserves the PL330 channel. The module
 may submit through the table only after `has_rasterix_ef` and the CSR ABI range
 match its header. On failure it releases its claim and changes only its own
-context to CPU fallback. The existing backend already has a CPU fallback when
+context to CPU fallback. A stop (reset, forced teardown) releases the PL330
+channel and never depends on claiming it again; the next RasterIX context bind
+claims it. The existing backend already has a CPU fallback when
 platform probing fails [ZZ9000_proto.sdk/ZZ9000OS/src/mw_ctx.c:437-492].
 
 ### Module-to-firmware registration and calls
@@ -182,7 +184,7 @@ The table is the sole firmware-to-MiniGL call surface.
 | `open_68k()` / `close_68k(handle)` | accepted wire create / destroy | acquires/releases one strong context reference |
 | `transport_acquire()` / `transport_release()` | firmware's pre-discovery MiniGL mailbox operation | starts or detaches the guest transport lease; acquire returns only after `MGTD` is published |
 | `app_bind(surface, out_gl)` / `app_swap()` / `app_unbind()` / `app_reclaim(generation)` | `zzapp` runtime | exports the existing named `zzapp_gl` table and holds one app-context reference |
-| `begin_reset()` / `reset_poll()` / `abort_reset()` | Amiga-reset coordinator | stops admission, drains or abandons hardware, retracts descriptor, and reports quiescence |
+| `begin_reset()` / `reset_poll()` / `abort_reset()` | Amiga-reset coordinator | stops admission, drains or abandons hardware, retracts descriptor, and reports quiescence; reports FAILED, never BUSY, when it cannot stop the engines |
 | `begin_unload()` / `fini()` | module loader on core 1 | unregisters worker/doorbell after quiescence, then releases resident state |
 
 The module obtains services through the init table and calls only the operations
@@ -240,8 +242,9 @@ path likewise cancels the MiniGL reset before abort/free
 while a still-running CPU rasterizer can write it.
 
 On Amiga reset, ordering is fixed: stop new clients; call the module reset
-operation on core 1; wait only for its bounded acknowledgement; on timeout
-stop/cold-restart core 1 before aborting hardware; retract the descriptor and
+operation on core 1; wait only for its bounded acknowledgement; on timeout, or
+when core 1 acknowledges the reset as failed, stop/cold-restart core 1 before
+aborting hardware; retract the descriptor and
 capability; reclaim MiniGL owners; then continue normal transport/card-pool
 reset. App hosting must first force-stop a bound app and call `app_reclaim`, as
 it already requires app reset before transport teardown [docs/app-runtime.md:90-94].

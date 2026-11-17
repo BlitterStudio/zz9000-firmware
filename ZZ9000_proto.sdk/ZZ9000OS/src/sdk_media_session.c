@@ -50,6 +50,7 @@ struct SDKMediaSessionState {
 	uint32_t audio_underruns;
 	uint32_t oneshot_flags;
 	uint32_t just_closed_session;
+	uint16_t owner_id;
 	uint8_t active;
 	uint8_t held;
 	uint8_t header_ready;
@@ -432,8 +433,8 @@ int sdk_media_session_audio_uses_ring(uint32_t codec)
 	       codec == SDK_MEDIA_AUDIO_VORBIS;
 }
 
-uint16_t sdk_media_session_begin(
-	const struct SDKMediaSessionBegin *begin,
+uint16_t sdk_media_session_begin_owned(
+	const struct SDKMediaSessionBegin *begin, uint16_t owner_id,
 	struct SDKMediaSessionMainResult *result)
 {
 	struct SDKVideoStreamBegin video_begin;
@@ -497,6 +498,7 @@ uint16_t sdk_media_session_begin(
 	 * profiling comparison always states which kernel it measured. */
 	sdk_video_yuy2_reset_dispatch();
 	media.session = video_result.session;
+	media.owner_id = owner_id;
 	media.state = mapped_state(video_result.state);
 	media.audio_codec = begin->audio_codec;
 	media.pcm_ring = begin->pcm_ring;
@@ -513,6 +515,13 @@ uint16_t sdk_media_session_begin(
 	fill_main(video_result.bytes_written,
 	          mapped_flags(video_result.flags), result);
 	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_media_session_begin(
+	const struct SDKMediaSessionBegin *begin,
+	struct SDKMediaSessionMainResult *result)
+{
+	return sdk_media_session_begin_owned(begin, 0U, result);
 }
 
 uint16_t sdk_media_session_write(
@@ -924,4 +933,27 @@ uint16_t sdk_media_session_close(
 	media.close_retired = 0U;
 	media.active = 0U;
 	return SDK_STATUS_OK;
+}
+
+int sdk_media_session_release_client(uint16_t owner_id, uint32_t *close_session)
+{
+	if (close_session)
+		*close_session = 0U;
+	if (!media.active || media.owner_id != owner_id)
+		return 1;
+	/* A bound session refuses CLOSE until its audio is unbound (the PCM
+	 * ring stays pinned meanwhile). CLIENT_RELEASE is the owner going
+	 * away, so unbind here: rewind staging to retirement exactly as the
+	 * explicit unbind op does, leaving the close free to proceed on
+	 * whichever core runs it. The AX pump is stopped by the mailbox
+	 * before it calls this, so no ISR reads the view between the rewind
+	 * and the close. */
+	if (media.audio_bound) {
+		media.audio_staged_bytes = media.audio_retired_bytes;
+		media.audio_bound = 0U;
+		media.audio_paused = 0U;
+	}
+	if (close_session)
+		*close_session = media.session;
+	return 0;
 }

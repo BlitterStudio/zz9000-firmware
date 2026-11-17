@@ -48,9 +48,12 @@ void zzapp_services_set_window_mapping_available(int available);
 uint8_t *zzapp_services_window(void);
 uint32_t zzapp_services_generation(void);
 uint32_t zzapp_services_state(void);
+uint32_t zzapp_services_current_slot(void);
 int zzapp_services_stop_requested(void);
+int zzapp_services_wait_registered(uint32_t slot);
 void zzapp_services_set_state(uint32_t state);
 void zzapp_services_set_generation(uint32_t generation);
+uint32_t zzapp_services_memory_limit(void);
 void zzapp_services_set_fault(uint32_t code, uint32_t pc, uint32_t sp,
 			      uint32_t lr, uint32_t far, uint32_t fsr,
 			      uint32_t cpsr);
@@ -59,11 +62,20 @@ void zzapp_services_note_progress(uint32_t lo, uint32_t hi);
 void zzapp_services_or_flags(uint32_t flags);
 void zzapp_services_and_flags(uint32_t mask);
 uint32_t zzapp_services_flags(void);
+/* Terminal status survives slot reclamation for APP_LIST. */
+void zzapp_services_set_terminal(uint32_t reason);
+void zzapp_services_expire_claims(uint64_t now_us);
 
 /* After poll: nonzero means APP_START is waiting for the worker to enter.
- * Copy argv from the window, then start_entered before the branch. */
+ * Copy argv from the window, then start_entered with the captured generation
+ * before publishing RUNNING or branching into the app. */
 int zzapp_services_take_start(uint32_t *argc);
-void zzapp_services_start_entered(int status);
+int zzapp_services_start_entered(uint32_t generation);
+/* Core 1 teardown: publish IDLE only while the slot still belongs to the
+ * generation it started with, then acknowledge the loader abort last (a
+ * quarantine with recorded release intent is released there). */
+void zzapp_services_set_idle_for(uint32_t generation);
+void zzapp_services_loader_aborted(void);
 
 void zzapp_svc_log(const char *msg, uint32_t len);
 int zzapp_svc_should_stop(void);
@@ -85,6 +97,9 @@ int zzapp_svc_display_refresh(struct zzapp_surface *out);
 int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
                                   uint32_t count, const uint32_t *rgb);
 int zzapp_display_flip_idle(void);
+/* Blocks the app thread until the last queued flip is acknowledged, as a
+ * registered wait the core-1 service pass wakes.  ZZ_OK once idle. */
+int zzapp_display_wait_flip_idle(void);
 uint32_t zzapp_svc_display_mailbox_replaced(void);
 int zzapp_svc_display_vsync(void);
 int zzapp_svc_input_poll(struct zzapp_event *out, uint32_t max, uint32_t *out_n);
@@ -136,6 +151,8 @@ uint64_t zzapp_host_time_us(void);
 void zzapp_services_test_reset(void);
 void zzapp_services_test_set_core(int core);
 void zzapp_services_test_set_window(void *window, uint32_t bytes);
+void zzapp_services_test_set_window_slot(uint32_t slot, void *window,
+					 uint32_t bytes);
 void zzapp_services_test_set_yield(void (*fn)(void));
 void zzapp_services_test_set_time(uint64_t (*fn)(void));
 void zzapp_services_test_set_slot_busy(uint32_t slot, int busy);

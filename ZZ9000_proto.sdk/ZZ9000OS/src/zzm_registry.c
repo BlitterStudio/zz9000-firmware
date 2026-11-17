@@ -49,11 +49,14 @@ enum zzm_codec_availability zzm_registry_availability(uint32_t module_id)
 
     if (index < 0 || !zzm_loader_status((uint32_t)index, &status))
         return ZZM_CODEC_MISMATCH;
-    if (status.state == ZZM_STATE_AVAILABLE)
-        (void)zzm_loader_ensure_loaded(module_id);
+    if (status.state == ZZM_STATE_AVAILABLE || status.state == ZZM_STATE_LOADING) {
+        if (zzm_loader_ensure_loaded(module_id) == ZZM_LOAD_IN_PROGRESS)
+            return ZZM_CODEC_LOADING;
+    }
     if (!zzm_loader_status((uint32_t)index, &status))
         return ZZM_CODEC_MISMATCH;
     return status.state == ZZM_STATE_LOADED ? ZZM_CODEC_AVAILABLE :
+           status.state == ZZM_STATE_LOADING ? ZZM_CODEC_LOADING :
            status.state == ZZM_STATE_MISSING ? ZZM_CODEC_MISSING :
                                                ZZM_CODEC_MISMATCH;
 }
@@ -63,6 +66,7 @@ uint16_t zzm_registry_sdk_status(uint32_t module_id)
     const enum zzm_codec_availability availability =
         zzm_registry_availability(module_id);
     return availability == ZZM_CODEC_AVAILABLE ? SDK_STATUS_OK :
+           availability == ZZM_CODEC_LOADING ? SDK_TASK_IN_PROGRESS :
            availability == ZZM_CODEC_MISSING ? SDK_STATUS_MODULE_MISSING :
                                                 SDK_STATUS_MODULE_MISMATCH;
 }

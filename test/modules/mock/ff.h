@@ -3,7 +3,7 @@
 #include <stdint.h>
 typedef unsigned int UINT;
 typedef uint32_t FSIZE_t;
-typedef struct { uint32_t size; } FIL;
+typedef struct { uint32_t size; uint32_t id; } FIL;
 typedef int FRESULT;
 #define FR_OK 0
 #define FR_NOT_READY 3

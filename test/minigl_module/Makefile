@@ -17,8 +17,9 @@ PACKER_ELF := $(BUILD)/MINIGL.elf
 PACKED_MODULE := $(BUILD)/MINIGL.ZZM
 
 CPPFLAGS := -D_GNU_SOURCE -DMINIGL_MODULE -DMINIGL_HOST_TEST -DMINIGL_RASTERIX \
-	-DTASKQ_HOST_TEST -DMGL_PLATFORM_ZZARM -I$(SRC) -I$(ROOT)/sdk/zzapp/include \
-	-I../card_pool -I../zzm_resources/mock -I../modules/mock -I$(LIB)/include \
+	-DTASKQ_HOST_TEST -DMGL_PLATFORM_ZZARM -DZZM_LOADER_HOST_TEST \
+	-I$(SRC) -I$(ROOT)/sdk/zzapp/include -I../card_pool \
+	-I../zzm_resources/mock -I../modules/mock -I$(LIB)/include \
 	-I$(LIB)/src -I$(LIB)/vendor/minigl-framework/include
 
 BACKEND := $(SRC)/minigl_platform.c $(SRC)/mw_service.c $(SRC)/mw_parse.c \
@@ -33,8 +34,9 @@ FRONTEND := $(addprefix $(LIB)/src/,amiberry_gl_state.c amiberry_gl_draw.c \
 	amiberry_backend_inproc.c amiberry_transport_inproc.c)
 HOST := minigl_module_test.c module_arrays.c ../card_pool/host_card_pool.c \
 	$(SRC)/zzm_loader.c $(SRC)/zzm_manifest.c $(SRC)/zzm_runtime.c \
-	$(SRC)/zzm_minigl_host.c $(SRC)/card_pool.c $(SRC)/surface_allocator.c \
-	$(SRC)/sdk_palette.c $(SRC)/sdk_smp_lock.c \
+	$(SRC)/zzm_minigl_host.c $(SRC)/sdk_minigl_acquire.c \
+	$(SRC)/card_pool.c $(SRC)/surface_allocator.c $(SRC)/sdk_palette.c \
+	$(SRC)/sdk_smp_lock.c \
 	$(FIRMWARE)/modules/minigl/minigl_module.c \
 	$(FIRMWARE)/modules/libzzm_rt/zzm_rt.c
 

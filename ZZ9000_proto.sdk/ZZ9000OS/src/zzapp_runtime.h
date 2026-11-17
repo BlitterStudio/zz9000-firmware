@@ -13,12 +13,18 @@
 
 #include <stdint.h>
 
+#include "zzapp_as.h"
+#include "zzapp_kernel.h"
+#include "zzapp_mem.h"
 #include "zzapp_proto.h"
 #define ZZAPP_TICK_US          5000u
 /* Core 1 no longer answers at all (no app progress and no timer tick). */
 #define ZZAPP_WATCHDOG_US      2000000u
 #define ZZAPP_STOP_GRACE_US    500000u
+/* Legacy launchers refresh the app heartbeat from their work loop. */
 #define ZZAPP_LEASE_US         2000000u
+/* Advertised launchers tolerate a short Amiga scheduling blackout. */
+#define ZZAPP_LAUNCHER_LEASE_US 10000000u
 #define ZZAPP_GL_CALL_LOG_US   50000u
 /*
  * Automatic stops of an app that is still taking timer ticks.  Ctrl-C and
@@ -33,6 +39,10 @@
 #define ZZAPP_FILE_TIMEOUT_US  30000000u
 
 #define ZZAPP_ARENA_BYTES      (96u << 20)
+
+/* zzapp_loader_end() keeps the deferred LOAD_END request running while it
+ * zeroes a private frame batch; this never crosses the mailbox ABI. */
+#define ZZAPP_LOADER_IN_PROGRESS 1
 #define ZZAPP_STACK_DEFAULT    (1u << 20)
 #define ZZAPP_STACK_MIN        (64u << 10)
 #define ZZAPP_FILE_MAX         ZZAPP_IMAGE_MAX_BYTES
@@ -41,6 +51,40 @@
 #define ZZAPP_LOG_RING_PER_SEC 32u
 #define ZZAPP_LOG_UART_PER_SEC 8u
 #define ZZAPP_ENTRY_FPSCR      0u
+
+typedef struct zzapp_proc {
+    zzapp_mem_proc_t memory;
+    zzapp_as_t as;
+    uint32_t owner;
+    uint32_t generation;
+    uint32_t image_entry;
+    uint32_t image_end;
+    uint32_t image_frames[ZZAPP_MEM_MAX_FRAMES];
+    uint32_t image_frame_count;
+    uint32_t heap_base;
+    uint32_t heap_start;
+    uint32_t heap_break;
+    uint32_t heap_limit;
+    uint32_t heap_frames[ZZAPP_MEM_MAX_FRAMES];
+    uint32_t heap_frame_count;
+    uint32_t stack_base;
+    uint32_t stack_top;
+    uint32_t stack_frames[1];
+    uint32_t stack_frame_count;
+    uint32_t stack_bytes;
+    uint32_t note_minor;
+    uint32_t host_visible_used;
+    uint32_t display_lease_base;
+    uint32_t display_lease_bytes;
+    uint32_t display_lease_generation;
+    uint32_t audio_direct;
+    uint32_t image_sessions;
+    uint32_t audio_sessions;
+    void *coherent;
+    uint64_t watchdog_stamp;
+    uint64_t lease_stamp;
+    uint64_t stop_stamp;
+} zzapp_proc_t;
 
 
 /* Just below the image-session table in the coherent task-queue region.
@@ -60,26 +104,45 @@ int zzapp_loader_begin(void);
 int zzapp_loader_chunk(uint32_t file_off, const void *src, uint32_t len);
 int zzapp_loader_end(void);
 int zzapp_loader_abort(void);
+int zzapp_loader_set_generation(uint32_t generation);
 int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr_out);
-void zzapp_loader_free_back(uint32_t addr);
 void zzapp_host_yield(void);
 void zzapp_host_yield_wait(void);
+void zzapp_host_sleep(uint32_t us);
 uint64_t zzapp_host_time_us(void);
+uint64_t zzapp_ticks_to_us(uint64_t ticks);
 void zzapp_loader_release(void);
 uint32_t zzapp_loader_state(void);
 void zzapp_loader_set_state(uint32_t state);
+void zzapp_loader_work_begin_pass(void);
+uint32_t zzapp_loader_work_last_bytes(void);
+uint32_t zzapp_loader_work_last_kind(void);
+/* Union of the PF_X/PF_W/PF_R flags ({vaddr, memsz, flags} per PT_LOAD)
+ * of every segment that touches the image page starting at `page`; the page
+ * holding `image_end` is also writable because the heap follows it. */
+uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
+                                 uint32_t image_end, uint32_t page);
 uint32_t zzapp_loader_reset_requested(void);
 
 /* ---- firmware hooks ---- */
 void zzapp_boot_init(void);
 void zzapp_worker_hook(void);
 void zzapp_core0_poll(void);
+void zzapp_recover_halted_core1(void);
+/* Every cross-core lock core 1 could hold. Before context retirement. */
+void zzapp_recover_external_locks(void);
 void zzapp_on_core1_restart(void);
 void zzapp_on_amiga_reset(void);
 void zzapp_private_timer_init_core1(void);
+/* Fire the running app's service tick now (doorbell SGI on core 1). */
+void zzapp_private_timer_kick(void);
 void scheduler_core1_service_once(void);
+/* One bounded service step from an app's tick; clears the doorbell when
+ * the queue drains. */
+void scheduler_core1_service_from_app(void);
 
-int zzapp_fault_is_app(uint32_t pc, uint32_t abort_lr);
+/* spsr is the interrupted CPSR. Only user mode is an app fault. */
+int zzapp_fault_is_app(uint32_t pc, uint32_t abort_lr, uint32_t spsr);
 void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
                           uint32_t lr, uint32_t far, uint32_t fsr,
                           uint32_t cpsr);
@@ -87,6 +150,10 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
 void zzapp_api_enter(void);
 void zzapp_api_leave(void);
 void zzapp_api_touch(void);
+int zzapp_host_stop_requested(void);
+void zzapp_host_latch_stop(uint32_t slot);
+void zzapp_host_clear_stop_requested(uint32_t slot);
+void zzapp_host_revoke_visible(void);
 void zzapp_host_commit_begin(void);
 void zzapp_host_commit_end(void);
 void zzapp_note_progress(void);
@@ -95,22 +162,50 @@ uint32_t zzapp_runtime_state(void);
 uint32_t zzapp_runtime_caps(void);
 void zzapp_status_observed(void);
 int zzapp_flip_ack_is_current(uint32_t gen);
+void zzapp_host_low_memory(void *context);
+int zzapp_host_take_low_memory_event(uint32_t slot);
+void zzapp_host_register_low_memory_callback(zzapp_mem_t *memory);
+void zzapp_host_reset_low_memory(uint32_t slot);
+void zzapp_host_claimed(uint32_t slot);
+void zzapp_host_quarantine_released(uint32_t slot);
 
 /* 1: core2 must fall through to record_fault (cold restart).
- * 0: app PC, already force-stopped, do not restart. */
-int zzapp_fault_wants_restart(uint32_t pc, uint32_t abort_lr);
+ * 0: user-mode app fault, already force-stopped, do not restart.
+ * A fault in SYS or SVC, including inside an API body, restarts. */
+int zzapp_fault_wants_restart(uint32_t pc, uint32_t abort_lr, uint32_t spsr);
 
 const struct zzapp_api *zzapp_api_table(void);
+
+zzapp_proc_t *zzapp_proc_slot(uint32_t slot);
+int zzapp_proc_heap_grow(uint32_t bytes, void **old_break);
+int zzapp_proc_heap_shrink(uint32_t bytes, void **new_break);
+int zzapp_proc_heap_info(uint32_t *committed, uint32_t *limit,
+                         uint32_t *pool_free);
+void zzapp_loader_memory_init(void);
+int zzapp_loader_heap_grow(uint32_t bytes);
+int zzapp_loader_heap_shrink(uint32_t bytes);
+zzapp_kernel_t *zzapp_runtime_kernel(void);
+uint32_t zzapp_loader_pool_free(void);
 
 /* ---- B defines these. Weak no-ops here. ---- */
 void zzapp_services_poll(void);
 int zzapp_services_take_start(uint32_t *argc);
 uint8_t *zzapp_services_window(void);
-void zzapp_services_start_entered(int status);
+uint32_t zzapp_services_current_slot(void);
+void zzapp_services_select_slot(uint32_t slot);
+uint32_t zzapp_services_state(void);
+uint32_t zzapp_services_memory_limit(void);
+int zzapp_services_wait_registered(uint32_t slot);
+int zzapp_services_start_entered(uint32_t generation);
+void zzapp_services_loader_aborted(void);
+void zzapp_services_set_idle_for(uint32_t generation);
 void zzapp_services_on_reset(void);
 void zzapp_services_on_app_end(void);
 void zzapp_services_cancel_start(int status);
 void zzapp_services_on_launch(void);
+void zzapp_services_set_terminal(uint32_t reason);
+void zzapp_services_expire_claims(uint64_t now_us);
+void zzapp_services_set_low_memory_crossings(uint32_t slot, uint32_t crossings);
 
 void zzapp_svc_log(const char *msg, uint32_t len);
 int zzapp_svc_should_stop(void);
@@ -141,7 +236,7 @@ int zzapp_svc_audio_close(void);
 int zzapp_minigl_bind(uint32_t surface_id, const struct zzapp_gl **out);
 int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
                             const struct zzapp_gl **out);
-void zzapp_minigl_swap(void);
+int zzapp_minigl_swap(void);
 void zzapp_minigl_unbind(void);
 void zzapp_minigl_reclaim(uint32_t generation);
 /* Core 0, while core 1 is halted: drops the binding without module code. */
@@ -151,13 +246,18 @@ void zzapp_minigl_forget(void);
 void zzapp_test_set_xtime(uint64_t ticks);
 void zzapp_test_set_entry(void (*fn)(const void *api, int argc, char **argv));
 void zzapp_host_tick_at(uint64_t now);
+void zzapp_test_system_tick_at(uint64_t now);
 void zzapp_test_mark_running(void);
 uint32_t zzapp_test_service_calls(void);
 uint32_t zzapp_test_in_api(void);
 uint32_t zzapp_test_arena_card(void);
 uint8_t *zzapp_test_arena_mem(void);
+uint32_t zzapp_test_loader_zero_last_bytes(void);
+uint32_t zzapp_test_loader_work_last_bytes(void);
+uint32_t zzapp_test_loader_mapping_calls(void);
 int zzapp_test_cold_restarts(void);
 uint32_t zzapp_test_exit_code(void);
+void zzapp_test_set_wait_registered(uint32_t slot, int registered);
 #endif
 
 #endif /* ZZAPP_RUNTIME_H */

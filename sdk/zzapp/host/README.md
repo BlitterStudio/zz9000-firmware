@@ -3,7 +3,7 @@
 `libzzapp-host` runs a native build of a ZZ9000 app. SDL2 stands in for the
 card. The app includes `zzapp.h`, defines `zz_main`, and links this library.
 The library provides `main()`, the `zz_*` wrappers, and a fully populated
-API 0.2 table. It does not link the ARM `crt0`, `syscalls.c`, or `gl_wrap.c`.
+API 0.3 table. It does not link the ARM `crt0`, `syscalls.c`, or `gl_wrap.c`.
 
 ## Build
 
@@ -147,6 +147,11 @@ port); joystick 1 is port 0. `dx`/`dy` are `-1`, `0`, or `1`. Fire is button
 - `printf` uses the host C library. On the card, newlib routes fd 1 and fd 2
   through one console ring. `zz_console_write` writes stdout; `zz_console_read`
   reads stdin and returns `ZZ_OK` with zero bytes at EOF.
+- `heap_grow` and `heap_shrink` commit and release whole 1 MiB frames inside
+  the reserved 8 MiB arena. The range does not move. Growth past that limit,
+  or when the arena could not be reserved, returns `ZZ_ENOMEM`. A zero or
+  non-MiB size is `ZZ_EINVAL`. `heap_info` reports the commit, that limit, and
+  the uncommitted remainder as `pool_free`.
 - SHA-256 is implemented. `zz_decompress`, `zz_image_open` / `zz_image_decode`
   / `zz_image_close`, and `zz_audio_decode_open` / `zz_audio_decode` /
   `zz_audio_decode_close` return `ZZ_ENOSYS`. The in-tree decoders are GPL

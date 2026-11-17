@@ -23,7 +23,7 @@ above it.
 | `0x00100000`–`0x00200000` | 1 MiB | Low exception vectors and MMU table only. |
 | `0x00200000`–`0x033F0000` | 49.9375 MiB | P96 VRAM, managed by rtg.library. The RTG driver's MemorySize ends here. |
 | `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages, the MiniGL wire-v9 transport window (one dynamic allocation, see below) and the AHI/MHI scratch. |
-| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. |
+| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. The high image also reserves a 208 KiB app translation-table slab: four 16 KiB app L1 tables, one 16 KiB template, and 128 1 KiB L2 tables. |
 | `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
 | `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. |
@@ -31,6 +31,31 @@ above it.
 | `0x0A000000`–`0x2FE00000` | 606 MiB | Permanent prefix of the card pool. |
 | `0x2FE00000`–`0x3FE00000` | 256 MiB | Fast-RAM landing window when advertised; otherwise contiguous revocable card-pool tail. |
 | `0x3FE00000`–`0x40000000` | 2 MiB | RTL-pinned audio, Ethernet, boot ROM, and USB/SD belt. |
+
+### App kernel mappings
+
+App-private frames have physical addresses in the permanent card-pool prefix;
+they do not have a fixed DDR range. The app-frame allocator obtains 1 MiB
+frames from 8 MiB-aligned pool extents and returns an empty extent to the pool.
+`CARD_POOL_CLASS_APP_FRAMES` has no class cap: aggregate commit admission,
+the system reserve, and the 512 MiB private-window bound limit it instead.
+
+Each app maps its private image, heap, and stack at
+`0xC0000000`–`0xDFFFFFFF`. This 512 MiB virtual range is non-global and
+private to the slot's ASID; it is not an identity mapping. The low identity
+map is privileged-only except for user grants to that app's host-visible
+blocks, display surfaces, and launcher window.
+
+The four 592 KiB launcher windows use fixed ranges in the host-visible heap:
+slot 0 `0x0805C000`–`0x080F0000`, slot 1
+`0x07FC8000`–`0x0805C000`, slot 2
+`0x07F34000`–`0x07FC8000`, and slot 3
+`0x07EA0000`–`0x07F34000`. Slot 0 is the legacy range and ends at the fixed
+Z3 host window. Firmware maps all four ranges non-cacheable before core 1
+runs and allocates a slot's window from its range when a launcher claims it.
+Legacy app-service requests continue to use slot 0's window and do not expose
+the other three windows.
+
 
 ### Zorro III SDK host window
 
@@ -124,9 +149,11 @@ the Amiga protocol requires a stable address. A true fixed range must have
 derived exclusive bounds, overlap assertions in `memorymap.h`, matching RTL
 definitions where applicable, and an entry in this document.
 
-The card-pool class table: `FIRMWARE` 64 MiB, `MEDIA` 128 MiB,
-`MEDIA_INPUT` 64 MiB, `IMAGE` 72 MiB, `SDK_SURFACE` 128 MiB,
-`CONSOLE` 32 MiB, `MINIGL` 128 MiB (colour/depth/texture working sets of
-live wire-v9 render contexts; released per context destroy, by owner on
-fault recovery, and on every Amiga reset).
+The card-pool has 16 classes including `NONE`. Capped classes are `FIRMWARE`
+64 MiB, `MEDIA` 128 MiB, `IMAGE` 72 MiB, `MEDIA_INPUT` 64 MiB,
+`SDK_SURFACE` 128 MiB, `CONSOLE` 32 MiB, `MINIGL` 384 MiB, `APP` 96 MiB,
+`MINIGL_MODULE` and `MINIGL_TRANSPORT` 4 MiB each, `MINIGL_CONTEXT`,
+`MINIGL_APP_CONTEXT`, and `MINIGL_RIX` 384 MiB each, and `APP_DISPLAY`
+32 MiB. `APP_FRAMES` has no class cap; commit admission, the system reserve,
+and the private-window bound limit it.
 

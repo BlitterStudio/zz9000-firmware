@@ -14,6 +14,7 @@ target_include_directories(zz9k_host
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include
 )
 
 add_library(zz9k_fb_common STATIC
@@ -535,6 +536,16 @@ add_executable(zzplay_probe_test
 target_link_libraries(zzplay_probe_test PRIVATE zzplay_core)
 add_test(NAME zzplay_probe_test COMMAND zzplay_probe_test)
 
+add_executable(zzplay_feed_retry_test
+  tests/zzplay_feed_retry_test.c
+)
+target_include_directories(zzplay_feed_retry_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay
+)
+add_test(NAME zzplay_feed_retry_test COMMAND zzplay_feed_retry_test)
+
 add_executable(zzplay_http_test
   tests/zzplay_http_test.c
 )
@@ -901,6 +912,26 @@ add_executable(library_async_test
 target_link_libraries(library_async_test PRIVATE zz9k_library_core)
 add_test(NAME library_async_test COMMAND library_async_test)
 
+add_executable(library_client_release_test
+  tests/library_client_release_test.c
+)
+
+target_link_libraries(library_client_release_test PRIVATE zz9k_library_core)
+add_test(NAME library_client_release_test COMMAND library_client_release_test)
+
+add_executable(host_library_transport_test
+  tests/host_library_transport_test.c
+)
+
+target_include_directories(host_library_transport_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+)
+
+target_link_libraries(host_library_transport_test PRIVATE zz9k_host)
+add_test(NAME host_library_transport_test COMMAND host_library_transport_test)
+
 add_executable(library_lvo_test
   tests/library_lvo_test.c
 )
@@ -941,6 +972,20 @@ add_test(
   COMMAND library_resident_lock_test
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src/zz9k_library_resident.c
 )
+
+add_executable(library_resident_sync_test
+  tests/library_resident_sync_test.c
+)
+
+target_include_directories(library_resident_sync_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src
+)
+
+add_test(NAME library_resident_sync_test COMMAND library_resident_sync_test)
 
 add_executable(library_irq_source_test
   tests/library_irq_source_test.c

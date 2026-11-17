@@ -1,5 +1,5 @@
 # Host build of ZZ9000 apps. libzzapp-host provides main() and an SDL2
-# API 0.2 table. Apps supply zz_main. Do not link the ARM crt0 or syscalls.
+# API 0.3 table. Apps supply zz_main. Do not link the ARM crt0 or syscalls.
 #
 # SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.16)
@@ -101,6 +101,7 @@ zzapp_host_executable(filter SOURCES ${ZZAPP_TEMPLATE_DIR}/filter.c)
 zzapp_host_executable(echo SOURCES ${ZZAPP_TEMPLATE_DIR}/echo.c)
 zzapp_host_executable(pixels SOURCES ${ZZAPP_TEMPLATE_DIR}/pixels.c)
 zzapp_host_executable(tone SOURCES ${ZZAPP_TEMPLATE_DIR}/tone.c)
+zzapp_host_executable(memhog SOURCES ${ZZAPP_TEMPLATE_DIR}/memhog.c)
 zzapp_host_executable(contract SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/contract.c)
 zzapp_host_executable(msgflood SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/msgflood.c)
 zzapp_host_executable(conshort SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/conshort.c)
@@ -113,7 +114,7 @@ target_include_directories(files_unit PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-add_executable(memory_unit tests/memory_unit.c)
+add_executable(memory_unit tests/memory_unit.c ../src/zzapp.c)
 target_include_directories(memory_unit PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -159,6 +160,14 @@ if(BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} constop $<TARGET_FILE:conshort>
   )
   set_tests_properties(constop PROPERTIES
+    TIMEOUT 60
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
+  )
+  add_test(
+    NAME pixelsstop
+    COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} pixelsstop $<TARGET_FILE:pixels>
+  )
+  set_tests_properties(pixelsstop PROPERTIES
     TIMEOUT 60
     ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
   )

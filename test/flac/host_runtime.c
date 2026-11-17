@@ -98,3 +98,15 @@ void sdk_decode_heap_free(void *ptr)
 
 /* Decode work runs on the core-1 worker in firmware. */
 int smp_cpu_id(void) { return 1; }
+
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t state) { (void)state; }
+void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1U; }
+int smp_raw_spin_try_lock(volatile uint32_t *word)
+{
+	if (*word != 0U)
+		return 0;
+	*word = 1U;
+	return 1;
+}
+void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0U; }

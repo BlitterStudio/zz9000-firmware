@@ -45,9 +45,9 @@
 /* The CPU rasterizer can retain this many texture identities.  RasterIX
  * residency is page-based and evicts unpinned LRU images on demand. */
 #define MINIGL_RIX_MAX_TEXTURES ZZ9K_MINIGL_MAX_TEXTURES
-/* Commands are broken at parser-command boundaries into 248-word FIFO packets. */
+#define MINIGL_RIX_COMMAND_BUFFERS 8U
+#define MINIGL_RIX_SYNC_COMMAND_BUFFERS 2U
 #define MINIGL_RIX_COMMAND_BYTES 0x00010000U
-#define MINIGL_RIX_COMMAND_BUFFERS 2U
 #define MINIGL_RIX_MAX_TRIANGLES 1024U
 #define MINIGL_RIX_MAX_OPS 1024U
 #define MINIGL_RIX_COMMAND_WORD_BUDGET 15000U
@@ -69,12 +69,21 @@ typedef int (*MiniGLRixDmaStreamFn)(void *context, uintptr_t source,
 typedef int (*MiniGLRixDmaStartAsyncFn)(void *context, uintptr_t source,
                                         uint32_t words, uint32_t burst_words);
 typedef int (*MiniGLRixDmaRetireFn)(void *context);
-
+typedef int (*MiniGLRixDmaCompleteFn)(void *context);
+typedef int (*MiniGLRixDmaStartNonblockingFn)(void *context, uintptr_t source,
+                                               uint32_t words, uint32_t burst_words);
+typedef int (*MiniGLRixDmaReadyFn)(void *context);
+typedef int (*MiniGLRixDmaAbortFn)(void *context);
+typedef void (*MiniGLRixYieldWaitFn)(void *context);
+typedef int (*MiniGLRixCanParkFn)(void *context);
+typedef void (*MiniGLRixFencePublishFn)(void *context, uintptr_t address,
+                                        uint32_t sequence);
+typedef uint32_t (*MiniGLRixOwnerForAddressFn)(void *context, uintptr_t address);
+typedef void (*MiniGLRixQuarantineOwnerFn)(void *context, uint32_t owner);
 
 typedef int (*MiniGLRixTexturePoolGrowFn)(void *context, size_t minimum_bytes,
                                           uint8_t **memory,
-                                          uintptr_t *address,
-                                          size_t *bytes);
+                                          uintptr_t *address, size_t *bytes);
 
 typedef struct MiniGLRixPlatform {
     void *context;
@@ -84,29 +93,42 @@ typedef struct MiniGLRixPlatform {
     MiniGLRixWriteFn fifo_write;
     MiniGLRixFifoWordsFn fifo_write_words;
     MiniGLRixBarrierFn fifo_drain;
+    MiniGLRixCacheCleanFn cache_clean;
+    MiniGLRixCacheInvalidateFn cache_invalidate;
     MiniGLRixDmaStreamFn dma_stream;
     MiniGLRixDmaStartAsyncFn dma_start_async;
     MiniGLRixDmaRetireFn dma_retire;
-    MiniGLRixCacheCleanFn cache_clean;
-    MiniGLRixCacheInvalidateFn cache_invalidate;
+    MiniGLRixDmaCompleteFn dma_complete;
+    MiniGLRixDmaStartNonblockingFn dma_start_nonblocking;
+    MiniGLRixDmaReadyFn dma_ready;
+    MiniGLRixDmaAbortFn dma_abort;
+    MiniGLRixYieldWaitFn yield_wait;
+    MiniGLRixCanParkFn can_park;
+    MiniGLRixFencePublishFn publish_fence;
+    MiniGLRixOwnerForAddressFn owner_for_address;
+    MiniGLRixQuarantineOwnerFn quarantine_owner;
     uint8_t *command_buffer[MINIGL_RIX_COMMAND_BUFFERS];
     uintptr_t command_address[MINIGL_RIX_COMMAND_BUFFERS];
+    size_t command_capacity;
+    uint8_t command_buffer_count;
+    uint8_t async_feed;
+    uint8_t submit_mode;
+    uint32_t owner_generation;
     uint8_t *white_texture;
     uintptr_t white_texture_address;
     size_t white_texture_bytes;
     uint8_t *texture_memory;
     uintptr_t texture_address;
     size_t texture_bytes;
-    size_t command_capacity;
     MiniGLRixTexturePoolGrowFn grow_texture_pool;
 } MiniGLRixPlatform;
-
 typedef struct MiniGLRixVertex {
     float x, y, z, reciprocal_w;
     uint32_t rgba;
     float s, t, q;
     float s1, t1, q1;
 } MiniGLRixVertex;
+
 typedef struct MiniGLRixTexture {
     uint32_t id;
     uint32_t last_used_fence;
@@ -166,6 +188,14 @@ typedef struct MiniGLRixRecordedOp {
 } MiniGLRixRecordedOp;
 
 
+typedef enum MiniGLRixRingState {
+    MINIGL_RIX_RING_FREE,
+    MINIGL_RIX_RING_BUILDING,
+    MINIGL_RIX_RING_QUEUED,
+    MINIGL_RIX_RING_FEEDING,
+    MINIGL_RIX_RING_RENDERING
+} MiniGLRixRingState;
+
 typedef struct MiniGLRixBackend {
     struct rix_drv driver;
     MiniGLRixPlatform platform;
@@ -189,9 +219,26 @@ typedef struct MiniGLRixBackend {
     uint8_t reject_stage;
     uint32_t pending_fence[MINIGL_RIX_COMMAND_BUFFERS];
     uint32_t submitted_command_words[MINIGL_RIX_COMMAND_BUFFERS];
+    uint32_t submission_sequence[MINIGL_RIX_COMMAND_BUFFERS];
+    uint32_t entry_owner_generation[MINIGL_RIX_COMMAND_BUFFERS];
+    uint32_t pending_command_owner[MINIGL_RIX_COMMAND_BUFFERS];
+    uint32_t pending_color_owner[MINIGL_RIX_COMMAND_BUFFERS];
+    uint32_t pending_depth_owner[MINIGL_RIX_COMMAND_BUFFERS];
+    uint32_t next_submission_sequence;
+    uint32_t next_feed_sequence;
     uint8_t pending[MINIGL_RIX_COMMAND_BUFFERS];
     uint8_t pending_pins[MINIGL_RIX_COMMAND_BUFFERS][MINIGL_RIX_MAX_TEXTURES];
     uint8_t recorded_pins[MINIGL_RIX_MAX_TEXTURES];
+    uint8_t ring_state[MINIGL_RIX_COMMAND_BUFFERS];
+    uint8_t feed_buffer;
+    uint8_t command_buffer_count;
+    uint8_t wait_reason;
+    uint8_t error_report_pending;
+    uint32_t error_result;
+    uint32_t error_buffer_index;
+    const char *error_operation;
+    uint32_t pending_color_address[MINIGL_RIX_COMMAND_BUFFERS];
+    struct rix_drv_feed feed;
     MiniGLRixTexture textures[MINIGL_RIX_MAX_TEXTURES];
     uint32_t bound_texture;
     uint32_t bound_texture1;
@@ -200,7 +247,27 @@ typedef struct MiniGLRixBackend {
     size_t triangle_count;
     size_t op_count;
     size_t command_words_estimate;
+    /* Fence-pixel cache invalidates issued by retirement polls. */
+    uint32_t cache_invalidates;
+    uint8_t wait_active;
+    uint8_t wait_watchdog_reason;
+    uint64_t wait_started_us;
+    uint64_t wait_last_dump_us;
 } MiniGLRixBackend;
+/* Executes at most one FIFO feed/completion step. It never waits. Only a
+ * PARKED step polls fences, so an idle feed step touches no hardware. */
+int minigl_rix_backend_try_feed(MiniGLRixBackend *backend, uint32_t source);
+/* Queued or partly fed command buffers exist: feed steps can progress. */
+int minigl_rix_backend_feed_pending(const MiniGLRixBackend *backend);
+/* Asynchronous ring buffers submitted and not yet retired: queued, feeding
+ * or rendering. */
+int minigl_rix_backend_work_outstanding(const MiniGLRixBackend *backend);
+/* 1 while wire dispatch must keep waiting for ARM ring retirement. */
+int minigl_rix_backend_service_wait_blocks(MiniGLRixBackend *backend);
+/* One step of a forced stop.  DONE once no command memory can still be
+ * read: inline packets dropped, or every committed DDR list fenced and the
+ * engine idle.  BLOCKED while a list is still being pushed or executed. */
+int minigl_rix_backend_abort_feed(MiniGLRixBackend *backend);
 
 /* Probe only the versioned CSR identity contract. This is the sole CSR access
  * permitted before the RasterIX ABI has been validated. */
@@ -208,6 +275,10 @@ int minigl_rix_backend_probe_platform(const MiniGLRixPlatform *platform);
 /* Validates the RasterIX CSR identity before rix_drv_init can access it. */
 void minigl_rix_backend_init(MiniGLRixBackend *backend,
                              const MiniGLRixPlatform *platform);
+/* Reinitialize a backend whose lifetime is already known. A retained failed
+ * self-test fence keeps its command buffer owned until it lands. */
+void minigl_rix_backend_reinit(MiniGLRixBackend *backend,
+                               const MiniGLRixPlatform *platform);
 void minigl_rix_backend_reset(MiniGLRixBackend *backend);
 int minigl_rix_backend_available(const MiniGLRixBackend *backend);
 void minigl_rix_backend_set_state(MiniGLRixBackend *backend,
@@ -269,6 +340,10 @@ int minigl_rix_backend_drain(MiniGLRixBackend *backend);
  * `poll` returns true only after every submitted stream has reached its fence. */
 int minigl_rix_backend_submit(MiniGLRixBackend *backend);
 int minigl_rix_backend_poll(MiniGLRixBackend *backend);
+/* One non-blocking hardware-idle observation without retiring ownership. */
+int minigl_rix_backend_engine_idle(MiniGLRixBackend *backend);
+/* Retains every owner referenced by a committed list that did not retire. */
+void minigl_rix_backend_quarantine_outstanding(MiniGLRixBackend *backend);
 /* Releases pins and retired copy-on-write pages without waiting. The caller
  * must already have stopped PL330 and RasterIX; a live engine may still
  * sample those pages. */
@@ -277,6 +352,10 @@ uint32_t minigl_rix_backend_eval_fallback(const MiniGLRixBackend *backend);
 const char *minigl_rix_backend_fallback_name(uint32_t reason);
 void minigl_rix_backend_log_fallback(uint32_t reason);
 void minigl_rix_backend_log_context_backend(const MiniGLRixBackend *backend);
+#ifdef MINIGL_HOST_TEST
+void minigl_rix_backend_test_retire_fences(MiniGLRixBackend *backend);
+uint8_t minigl_rix_backend_test_command_buffer_count(const MiniGLRixBackend *backend);
+#endif
 
 /* Stage at which RasterIX refused a draw that eval_fallback accepts. */
 #define MINIGL_RIX_REJECT_NONE          0U

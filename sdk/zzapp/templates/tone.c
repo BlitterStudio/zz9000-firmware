@@ -16,11 +16,16 @@ int zz_main(int argc, char **argv)
 {
     zzapp_audio audio;
     uint32_t phase = 0u;
+    int rc;
 
     (void)argc;
     (void)argv;
-    if (zz_audio_open(TONE_RATE, 2u, &audio) != ZZ_OK)
+    rc = zz_audio_open(TONE_RATE, 2u, &audio);
+    if (rc != ZZ_OK) {
+        if (zz_should_stop())
+            return 0;
         return 20;
+    }
     while (!zz_should_stop()) {
         uint32_t read = *audio.read_frame;
         uint32_t write = *audio.write_frame;

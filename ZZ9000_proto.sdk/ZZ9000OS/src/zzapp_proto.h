@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 #define ZZAPP_ABI_MAJOR            0u
-#define ZZAPP_ABI_MINOR            2u
+#define ZZAPP_ABI_MINOR            3u
 
 #define ZZAPP_OP_QUERY             0x0c00u
 #define ZZAPP_OP_ALLOC_WINDOW      0x0c01u
@@ -27,7 +27,12 @@
 #define ZZAPP_OP_STATUS            0x0c07u
 #define ZZAPP_OP_DISPLAY_BIND      0x0c08u
 #define ZZAPP_OP_FIRST             ZZAPP_OP_QUERY
-#define ZZAPP_OP_LAST              ZZAPP_OP_DISPLAY_BIND
+/* Per-slot snapshot for status listings (extended requests only). */
+#define ZZAPP_OP_LIST              0x0c09u
+/* Explicitly releases an expired launcher window after the user confirms
+ * its process cannot still write the card mapping. Extended request only. */
+#define ZZAPP_OP_RELEASE           0x0c0au
+#define ZZAPP_OP_LAST              ZZAPP_OP_RELEASE
 /* 0x0c00..0x0c1f is reserved. v0 uses FIRST..LAST. */
 #define ZZAPP_OP_RANGE_LO          0x0c00u
 #define ZZAPP_OP_RANGE_HI          0x0c1fu
@@ -38,6 +43,16 @@
 #define ZZAPP_CAP_AUDIO            (1u << 2)
 #define ZZAPP_CAP_GL               (1u << 3)
 #define ZZAPP_CAP_CLUT8            (1u << 4)
+/* ZZAPP_SLOT_COUNT apps at once; the extended request forms below work. */
+#define ZZAPP_CAP_SLOTS            (1u << 5)
+/* Extended QUERY advertises low-memory crossing counters in lifecycle blocks. */
+#define ZZAPP_CAP_LOW_MEMORY       (1u << 6)
+/* Lifecycle progress advances after every incremental LOAD_END step. */
+#define ZZAPP_CAP_LOAD_PROGRESS    (1u << 7)
+#define ZZAPP_SLOT_COUNT           4u
+
+/* Extended-request ownership mismatch. Matches SDK_STATUS_BAD_HANDLE. */
+#define ZZAPP_ERR_STALE            5u
 
 /*
  * Mailbox payloads are big-endian in the 48-byte entry payload.
@@ -96,6 +111,64 @@
 #define ZZAPP_STATUS_REPLY_BYTES   48u
 
 #define ZZAPP_MAILBOX_PAYLOAD_BYTES 48u
+
+/*
+ * Extended requests. A payload of exactly ZZAPP_MAILBOX_PAYLOAD_BYTES
+ * carries the slot and its generation in the last 8 bytes; legacy fields
+ * keep their offsets and unused bytes are zero. Any other payload length
+ * is a legacy request and addresses slot 0 only.
+ */
+#define ZZAPP_SEL_SLOT             40u
+#define ZZAPP_SEL_GENERATION       44u
+
+/* Extended QUERY reply: the legacy 16 bytes, then slot and commit counts. */
+#define ZZAPP_QUERY_SLOTS          16u
+#define ZZAPP_QUERY_FREE_SLOTS     20u
+#define ZZAPP_QUERY_COMMIT_FREE    24u
+#define ZZAPP_QUERY_COMMIT_TOTAL   28u
+#define ZZAPP_QUERY_EXT_REPLY_BYTES 32u
+
+/* Extended ALLOC_WINDOW reply: the legacy 12 bytes, then the claim. */
+#define ZZAPP_ALLOC_SLOT           12u
+#define ZZAPP_ALLOC_GENERATION     16u
+#define ZZAPP_ALLOC_EXT_REPLY_BYTES 20u
+
+/* Extended LOAD_BEGIN: launcher memory cap in MiB, 0 for none. */
+#define ZZAPP_LOAD_MEM_LIMIT_MIB   0u
+
+/* LIST reply for the selector's slot. */
+#define ZZAPP_LIST_STATE           0u
+#define ZZAPP_LIST_GENERATION      4u
+#define ZZAPP_LIST_COMMITTED       8u
+#define ZZAPP_LIST_LIMIT           12u
+#define ZZAPP_LIST_CPU_MS          16u
+#define ZZAPP_LIST_SERVICE_MS      20u
+#define ZZAPP_LIST_REASONS         24u   /* block, terminal, flags (u16) */
+#define ZZAPP_LIST_NAME            28u
+#define ZZAPP_LIST_NAME_BYTES      20u
+#define ZZAPP_LIST_REPLY_BYTES     48u
+#define ZZAPP_LIST_FLAG_OVERLOAD   1u
+
+/* LIST terminal reasons. */
+#define ZZAPP_END_NONE             0u
+#define ZZAPP_END_EXIT             1u
+#define ZZAPP_END_FORCED           2u
+#define ZZAPP_END_USER_FAULT       3u
+#define ZZAPP_END_STALL            4u
+#define ZZAPP_END_STUCK_CALL       5u
+#define ZZAPP_END_LEASE            6u
+#define ZZAPP_END_AMIGA_RESET      7u
+#define ZZAPP_END_CORE_RESTART     8u
+#define ZZAPP_END_QUARANTINED      9u
+
+/* LIST block reasons. */
+#define ZZAPP_BLOCK_NONE           0u
+#define ZZAPP_BLOCK_FILE           1u
+#define ZZAPP_BLOCK_CONSOLE        2u
+#define ZZAPP_BLOCK_EVENT          3u
+#define ZZAPP_BLOCK_SLEEP          4u
+#define ZZAPP_BLOCK_VSYNC          5u
+#define ZZAPP_BLOCK_AUDIO          6u
 
 #define ZZAPP_WINDOW_BYTES     0x00094000u   /* 592 KiB allocation */
 
@@ -224,6 +297,8 @@
 #define ZZAPP_LIFE_AUDIO_CHANNELS_OFF  0x98u
 #define ZZAPP_LIFE_AUDIO_FORMAT_OFF    0x9Cu
 #define ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF 0xA0u
+#define ZZAPP_LIFE_TERMINAL_OFF     0xA4u
+#define ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF 0xA8u
 
 /* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
  * 5 stopping, 6 faulted. */
@@ -234,6 +309,8 @@
 #define ZZAPP_ST_PAUSED            4u
 #define ZZAPP_ST_STOPPING          5u
 #define ZZAPP_ST_FAULTED           6u
+/* A launcher claimed the slot and has not loaded an image yet. */
+#define ZZAPP_ST_CLAIMED           7u
 
 /* Fault: 0 none, 1 data abort, 2 prefetch, 3 undefined, 4 watchdog,
  * 5 forced stop (grace or reset), 6 watchdog that fell through to cold restart. */
@@ -249,7 +326,8 @@
  * bit8 display requested and not yet bound, bit9 vsync wanted.
  * Launcher/Firmware scanout-ack bits negotiate strict vblank-safe panning;
  * mailbox bits negotiate card-owned triple-buffer presentation. Bit16 marks
- * an app that has used the console; bit17 selects AHI for the audio ring. */
+ * an app that has used the console; bit17 selects AHI for the audio ring.
+ * Bit18 selects the launcher's extended main-loop lease. */
 #define ZZAPP_F_DISPLAY                 (1u << 0)
 #define ZZAPP_F_AUDIO                   (1u << 1)
 #define ZZAPP_F_GL                      (1u << 2)
@@ -263,6 +341,7 @@
 #define ZZAPP_F_MAILBOX                 (1u << 15)
 #define ZZAPP_F_CONSOLE                 (1u << 16)
 #define ZZAPP_F_LAUNCHER_AUDIO_AHI      (1u << 17)
+#define ZZAPP_F_LAUNCHER_HEARTBEAT     (1u << 18)
 
 #define ZZAPP_EV_KEY_DOWN          1u
 #define ZZAPP_EV_KEY_UP            2u
@@ -271,6 +350,7 @@
 #define ZZAPP_EV_STOP              5u
 #define ZZAPP_EV_RESIZE            6u
 #define ZZAPP_EV_BREAK             7u
+#define ZZAPP_EV_LOW_MEMORY        8u
 
 #define ZZAPP_BREAK_CTRL_D         4u
 #define ZZAPP_BREAK_CTRL_E         5u
@@ -391,6 +471,8 @@ struct zzapp_life {
     uint32_t audio_channels;
     uint32_t audio_format;
     uint32_t audio_underruns;
+    uint32_t terminal_reason;
+    uint32_t low_memory_crossings;
 };
 
 struct zzapp_input_hdr {
@@ -412,6 +494,13 @@ _Static_assert(ZZAPP_START_REQ_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "start");
 _Static_assert(ZZAPP_BIND_REQ_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "bind");
 _Static_assert(ZZAPP_STATUS_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "status");
 _Static_assert(ZZAPP_STATUS_REPLY_BYTES == 48, "status fills the payload");
+_Static_assert(ZZAPP_SEL_GENERATION + 4u == ZZAPP_MAILBOX_PAYLOAD_BYTES,
+               "selector ends the payload");
+_Static_assert(ZZAPP_BIND_EXT_REQ_BYTES <= ZZAPP_SEL_SLOT, "bind below selector");
+_Static_assert(ZZAPP_QUERY_EXT_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "query ext");
+_Static_assert(ZZAPP_ALLOC_EXT_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "alloc ext");
+_Static_assert(ZZAPP_LIST_NAME + ZZAPP_LIST_NAME_BYTES == ZZAPP_LIST_REPLY_BYTES,
+               "list name ends the reply");
 
 _Static_assert(ZZAPP_LIFE_OFF == 0u, "life");
 _Static_assert(ZZAPP_LIFE_OFF + ZZAPP_LIFE_BYTES == ZZAPP_INPUT_OFF, "life end");
@@ -532,6 +621,9 @@ _Static_assert(offsetof(struct zzapp_life, audio_rate) == ZZAPP_LIFE_AUDIO_RATE_
 _Static_assert(offsetof(struct zzapp_life, audio_channels) == ZZAPP_LIFE_AUDIO_CHANNELS_OFF, "achannels");
 _Static_assert(offsetof(struct zzapp_life, audio_format) == ZZAPP_LIFE_AUDIO_FORMAT_OFF, "aformat");
 _Static_assert(offsetof(struct zzapp_life, audio_underruns) == ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF, "aunderruns");
+_Static_assert(offsetof(struct zzapp_life, terminal_reason) == ZZAPP_LIFE_TERMINAL_OFF, "terminal");
+_Static_assert(offsetof(struct zzapp_life, low_memory_crossings) ==
+               ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, "lowmem");
 _Static_assert(sizeof(struct zzapp_life) <= ZZAPP_LIFE_BYTES, "life bytes");
 
 static inline void zzapp_put_be16(void *p, uint16_t value)

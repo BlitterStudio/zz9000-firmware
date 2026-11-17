@@ -61,26 +61,34 @@ static int check_feed_dirty_span(void)
 
 static int check_source_tail_state(void)
 {
-	if (audio_stream_source_tail_ready(0, 17U, 0, 0))
+	if (audio_stream_source_tail_ready(0, 0, 0, 17U, 0, 0))
 		return 0;
-	if (!audio_stream_source_tail_ready(0, 17U, 1, 1))
+	if (!audio_stream_source_tail_ready(0, 0, 0, 17U, 1, 1))
 		return 0;
-	if (!audio_stream_source_tail_ready(1, 0U, 0, 0))
+	if (audio_stream_source_tail_ready(1, 0, 0, 0U, 0, 0))
 		return 0;
-	return !audio_stream_source_tail_ready(1, 17U, 0, 0);
+	if (!audio_stream_source_tail_ready(1, 0, 1, 0U, 0, 0))
+		return 0;
+	if (!audio_stream_source_tail_ready(1, 1, 0, 0U, 0, 0))
+		return 0;
+	return !audio_stream_source_tail_ready(1, 1, 0, 17U, 0, 0);
 }
 
 static int check_drain_input_state(void)
 {
-	if (audio_stream_drain_input_done(0, 1, 0U, 0))
+	if (audio_stream_drain_input_done(0, 1, 0U, 0, 0))
 		return 0;
-	if (!audio_stream_drain_input_done(1, 1, 17U, 0))
+	if (!audio_stream_drain_input_done(1, 1, 17U, 0, 1))
 		return 0;
-	if (!audio_stream_drain_input_done(1, 0, 0U, 0))
+	/* MP3 has no deferred decoder output once its ring is empty. */
+	if (!audio_stream_drain_input_done(1, 0, 0U, 0, 0))
 		return 0;
-	if (!audio_stream_drain_input_done(1, 0, 17U, 1))
+	/* Native codecs must keep refilling their retained decoder tail. */
+	if (audio_stream_drain_input_done(1, 0, 0U, 0, 1))
 		return 0;
-	return !audio_stream_drain_input_done(1, 0, 17U, 0);
+	if (!audio_stream_drain_input_done(1, 0, 17U, 1, 1))
+		return 0;
+	return !audio_stream_drain_input_done(1, 0, 17U, 0, 0);
 }
 
 static int check_transient_drain_completion(void)
@@ -96,15 +104,57 @@ static int check_transient_drain_completion(void)
 	return audio_stream_transient_drained(1, 1, 0U, 0);
 }
 
+static int check_playback_fault_tail(void)
+{
+	if (audio_stream_playback_fault_ready(0, 0U, 0))
+		return 0;
+	if (audio_stream_playback_fault_ready(1, 4U, 0))
+		return 0;
+	if (audio_stream_playback_fault_ready(1, 0U, 1))
+		return 0;
+	return audio_stream_playback_fault_ready(1, 0U, 0);
+}
+
 static int check_refill_gate(void)
 {
-	if (!audio_stream_refill_may_run(17U, 0, 0, 0, 4U, 4U))
+	struct audio_stream_refill_checkpoint checkpoint =
+		{ 0U, 4U, 2U, 3U, 1 };
+
+	/* A native codec can retain a decoded tail after consuming its ring. */
+	if (!audio_stream_refill_may_run(
+		    0U, 0, 0, 0, 0, 2U, 4U, 4U, 2U, 3U, 0))
 		return 0;
-	if (audio_stream_refill_may_run(17U, 0, 0, 1, 4U, 4U))
+	if (audio_stream_refill_may_run(
+		    0U, 0, 0, 0, 0, 2U, 4U, 4U, 2U, 3U, &checkpoint))
 		return 0;
-	if (audio_stream_refill_may_run(17U, 0, 1, 0, 4U, 4U))
+	/* Occupancy is not a producer-progress cursor, but consumer cursor
+	 * movement must wake a frame that previously did not fit. */
+	if (audio_stream_refill_may_run(
+		    0U, 0, 0, 0, 0, 1U, 4U, 4U, 2U, 3U, &checkpoint))
 		return 0;
-	return !audio_stream_refill_may_run(0U, 0, 0, 0, 4U, 4U);
+	if (!audio_stream_refill_may_run(
+		    0U, 0, 0, 0, 0, 1U, 4U, 4U, 3U, 3U, &checkpoint))
+		return 0;
+	if (!audio_stream_refill_may_run(
+		    0U, 0, 0, 0, 0, 4U, 4U, 8U, 2U, 3U, &checkpoint))
+		return 0;
+	if (!audio_stream_refill_may_run(
+		    0U, 0, 0, 0, 0, 2U, 4U, 4U, 2U, 7U, &checkpoint))
+		return 0;
+	if (audio_stream_refill_may_run(
+		    0U, 1, 0, 0, 0, 2U, 4U, 4U, 2U, 3U, 0))
+		return 0;
+	if (!audio_stream_refill_may_run(
+		    17U, 0, 0, 0, 0, 2U, 4U, 4U, 2U, 3U, 0))
+		return 0;
+	if (audio_stream_refill_may_run(
+		    17U, 0, 0, 0, 1, 2U, 4U, 4U, 2U, 3U, 0))
+		return 0;
+	if (audio_stream_refill_may_run(
+		    17U, 0, 0, 1, 0, 2U, 4U, 4U, 2U, 3U, 0))
+		return 0;
+	return !audio_stream_refill_may_run(
+		0U, 1, 0, 0, 0, 2U, 4U, 4U, 2U, 3U, 0);
 }
 
 int main(void)
@@ -121,7 +171,9 @@ int main(void)
 		return 5;
 	if (!check_transient_drain_completion())
 		return 6;
-	if (!check_refill_gate())
+	if (!check_playback_fault_tail())
 		return 7;
+	if (!check_refill_gate())
+		return 8;
 	return 0;
 }

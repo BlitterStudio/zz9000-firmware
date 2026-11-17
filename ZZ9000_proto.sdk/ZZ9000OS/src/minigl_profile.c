@@ -14,6 +14,7 @@
 #include "minigl_renderer.h"
 
 #include "minigl_platform.h"
+#include "rix_drv.h"
 #if defined(MINIGL_PROFILE_ACTIVE)
 #include <stdio.h>
 #include <string.h>
@@ -35,6 +36,18 @@ static struct {
     uint64_t packet_busy_start;
     uint64_t packet_max;
     uint64_t last_log;
+    uint32_t busy_start;
+    uint32_t feed_chunks[RIX_DRV_FEED_SOURCE_COUNT];
+    uint32_t feed_empty;
+    uint32_t feed_full;
+    uint32_t feed_retries;
+    uint32_t feed_tse;
+    uint32_t feed_tpoe;
+    uint32_t feed_dma_complete;
+    uint32_t feed_deadline_wakeups;
+    uint32_t feed_waits[MGLP_FEED_WAIT_COUNT];
+    uint64_t feed_wait_us[MGLP_FEED_WAIT_COUNT];
+    uint32_t queued_high_water;
     uint32_t depth;
     uint32_t overflow;
     uint32_t packets;
@@ -43,12 +56,32 @@ static struct {
     uint32_t fallback_reason;
     uint32_t fallback_draws[ZZ9K_MGL_FALLBACK_MAX];
     uint32_t fallback_triangles[ZZ9K_MGL_FALLBACK_MAX];
+    int busy_valid;
     uint8_t stack[MGLP_STACK_DEPTH];
 } g_mglp;
 
 static uint64_t mglp_now(void)
 {
     return minigl_platform_time_us();
+}
+
+static void mglp_snapshot_busy(void)
+{
+    uint32_t version;
+
+    if (!minigl_platform_has_rasterix() ||
+        minigl_platform_csr_read(0, RIX_DRV_CSR_IDENTITY) != RIX_DRV_IDENTITY_VALUE) {
+        g_mglp.busy_valid = 0;
+        return;
+    }
+    version = minigl_platform_csr_read(0, RIX_DRV_CSR_VERSION);
+    if ((version & 0xffff0000U) != (RIX_DRV_VERSION_VALUE & 0xffff0000U) ||
+        version < RIX_DRV_VERSION_BUSY_CYCLES) {
+        g_mglp.busy_valid = 0;
+        return;
+    }
+    g_mglp.busy_start = minigl_platform_csr_read(0, RIX_DRV_CSR_DBG_BUSY_CYCLES);
+    g_mglp.busy_valid = 1;
 }
 
 static void mglp_charge(void)
@@ -76,16 +109,28 @@ static void mglp_window_reset(void)
     memset(g_mglp.ticks, 0, sizeof(g_mglp.ticks));
     memset(g_minigl_profile_counts, 0, sizeof(g_minigl_profile_counts));
     memset(g_minigl_profile_geom_cycles, 0, sizeof(g_minigl_profile_geom_cycles));
+    memset(g_mglp.feed_chunks, 0, sizeof(g_mglp.feed_chunks));
     g_minigl_profile_geom_total_cycles = 0U;
     g_mglp.packet_max = 0U;
     g_mglp.packets = 0U;
     g_mglp.bytes = 0U;
     g_mglp.commands = 0U;
+    g_mglp.feed_empty = 0U;
+    g_mglp.feed_full = 0U;
+    g_mglp.feed_retries = 0U;
+    g_mglp.feed_tse = 0U;
+    g_mglp.feed_tpoe = 0U;
+    g_mglp.feed_dma_complete = 0U;
+    g_mglp.queued_high_water = 0U;
+    g_mglp.feed_deadline_wakeups = 0U;
+    memset(g_mglp.feed_waits, 0, sizeof(g_mglp.feed_waits));
+    memset(g_mglp.feed_wait_us, 0, sizeof(g_mglp.feed_wait_us));
     g_mglp.fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
     memset(g_mglp.fallback_draws, 0, sizeof(g_mglp.fallback_draws));
     memset(g_mglp.fallback_triangles, 0, sizeof(g_mglp.fallback_triangles));
     g_mglp.mark = mglp_now();
     g_mglp.window_start = g_mglp.mark;
+    mglp_snapshot_busy();
 }
 
 void minigl_profile_push_on(MiniGLProfileStage stage)
@@ -172,6 +217,64 @@ void minigl_profile_fallback(uint32_t reason, uint32_t triangles)
     g_mglp.fallback_triangles[reason] += triangles;
 }
 
+void minigl_profile_feed_chunk(uint32_t source)
+{
+    if (g_minigl_profile_on && source < RIX_DRV_FEED_SOURCE_COUNT)
+        ++g_mglp.feed_chunks[source];
+}
+
+void minigl_profile_feed_vacancy(uint32_t vacancy, uint32_t capacity)
+{
+    if (!g_minigl_profile_on)
+        return;
+    if (capacity != 0U && vacancy == capacity)
+        ++g_mglp.feed_empty;
+    if (vacancy == 0U)
+        ++g_mglp.feed_full;
+}
+
+void minigl_profile_feed_retry(void)
+{
+    if (g_minigl_profile_on)
+        ++g_mglp.feed_retries;
+}
+
+void minigl_profile_feed_errors(uint32_t errors)
+{
+    if (!g_minigl_profile_on)
+        return;
+    if ((errors & RIX_DRV_FIFO_ISR_TSE) != 0U)
+        ++g_mglp.feed_tse;
+    if ((errors & RIX_DRV_FIFO_ISR_TPOE) != 0U)
+        ++g_mglp.feed_tpoe;
+}
+
+void minigl_profile_feed_dma_complete(void)
+{
+    if (g_minigl_profile_on)
+        ++g_mglp.feed_dma_complete;
+}
+
+void minigl_profile_feed_queued(uint32_t queued)
+{
+    if (g_minigl_profile_on && queued > g_mglp.queued_high_water)
+        g_mglp.queued_high_water = queued;
+}
+
+void minigl_profile_feed_deadline_wake(void)
+{
+    if (g_minigl_profile_on)
+        ++g_mglp.feed_deadline_wakeups;
+}
+
+void minigl_profile_feed_wait(MiniGLProfileFeedWait reason, uint64_t us)
+{
+    if (g_minigl_profile_on && reason < MGLP_FEED_WAIT_COUNT) {
+        ++g_mglp.feed_waits[reason];
+        g_mglp.feed_wait_us[reason] += us;
+    }
+}
+
 /* Tenths of a millisecond, divided over count events (0 = total). */
 static uint32_t mglp_tenth_ms(uint64_t ticks, uint32_t count)
 {
@@ -202,7 +305,7 @@ void minigl_profile_report(void)
         " idle=", " parse=", " geom=", " cpu=", " emit=", " fifo=", " stall=",
         " fence=", " tgt=", " tex=", " pres=", " sdr=", " scpy=", " sfli=", " op="
     };
-    static char line[768];
+    static char line[1024];
     const uint32_t *n = g_minigl_profile_counts;
     uint64_t print_start;
     uint32_t window;
@@ -292,6 +395,58 @@ void minigl_profile_report(void)
                           g_mglp.ticks[MGLP_IDLE], divisor);
     used = mglp_append_ms(line, used, sizeof(line), " | max=",
                           g_mglp.packet_max, 0U);
+    {
+        written = snprintf(line + used, sizeof(line) - used,
+                           " | feed svc=%lu deadline=%lu park=%lu swap=%lu empty=%lu full=%lu"
+                           " retry=%lu tse=%lu tpoe=%lu dma=%lu qhi=%lu dwake=%lu"
+                           " steps=%lu step-rd=%lu step-inv=%lu"
+                           " wait-ring=%lu/%lums wait-drain=%lu/%lums"
+                           " wait-target=%lu/%lums wait-tex=%lu/%lums",
+                           (unsigned long)g_mglp.feed_chunks[RIX_DRV_FEED_SOURCE_SVC],
+                           (unsigned long)g_mglp.feed_chunks[RIX_DRV_FEED_SOURCE_SCHEDULER],
+                           (unsigned long)g_mglp.feed_chunks[RIX_DRV_FEED_SOURCE_PARKED],
+                           (unsigned long)g_mglp.feed_chunks[RIX_DRV_FEED_SOURCE_SWAP],
+                           (unsigned long)g_mglp.feed_empty,
+                           (unsigned long)g_mglp.feed_full,
+                           (unsigned long)g_mglp.feed_retries,
+                           (unsigned long)g_mglp.feed_tse,
+                           (unsigned long)g_mglp.feed_tpoe,
+                           (unsigned long)g_mglp.feed_dma_complete,
+                           (unsigned long)g_mglp.queued_high_water,
+                           (unsigned long)g_mglp.feed_deadline_wakeups,
+                           (unsigned long)(n[MGLP_N_FEED_STEPS] / divisor),
+                           (unsigned long)(n[MGLP_N_FEED_DEVICE_READS] / divisor),
+                           (unsigned long)(n[MGLP_N_FEED_INVALIDATES] / divisor),
+                           (unsigned long)g_mglp.feed_waits[MGLP_FEED_WAIT_RING],
+                           (unsigned long)(g_mglp.feed_wait_us[MGLP_FEED_WAIT_RING] /
+                                           1000U / divisor),
+                           (unsigned long)g_mglp.feed_waits[MGLP_FEED_WAIT_DRAIN],
+                           (unsigned long)(g_mglp.feed_wait_us[MGLP_FEED_WAIT_DRAIN] /
+                                           1000U / divisor),
+                           (unsigned long)g_mglp.feed_waits[MGLP_FEED_WAIT_TARGET],
+                           (unsigned long)(g_mglp.feed_wait_us[MGLP_FEED_WAIT_TARGET] /
+                                           1000U / divisor),
+                           (unsigned long)g_mglp.feed_waits[MGLP_FEED_WAIT_TEXTURE],
+                           (unsigned long)(g_mglp.feed_wait_us[MGLP_FEED_WAIT_TEXTURE] /
+                                           1000U / divisor));
+        if (written > 0 && (size_t)written < sizeof(line) - used)
+            used += (size_t)written;
+        if (g_mglp.busy_valid) {
+            uint32_t busy_end = minigl_platform_csr_read(0, RIX_DRV_CSR_DBG_BUSY_CYCLES);
+            uint32_t busy_delta = minigl_profile_counter_delta(busy_end,
+                                                                g_mglp.busy_start);
+            uint64_t elapsed = g_mglp.mark - g_mglp.window_start;
+
+            written = elapsed != 0U ?
+                snprintf(line + used, sizeof(line) - used, " busy=%lu%%",
+                         (unsigned long)(busy_delta / elapsed)) :
+                snprintf(line + used, sizeof(line) - used, " busy=n/a");
+        } else {
+            written = snprintf(line + used, sizeof(line) - used, " busy=n/a");
+        }
+        if (written > 0 && (size_t)written < sizeof(line) - used)
+            used += (size_t)written;
+    }
     /* RasterIX side, per ring packet: AXI read/write bursts it issued, and
      * how often it was busy or stalled, how many reads it had in flight and
      * how much FIFO room was left whenever the next FIFO packet was ready. */
@@ -321,7 +476,7 @@ void minigl_profile_report(void)
             uint32_t reads_x10 = (uint32_t)((uint64_t)n[MGLP_N_HW_READS] * 10U / samples);
 
             written = snprintf(line + used, sizeof(line) - used,
-                               " busy=%lu%% stall=%lu%% rd=%lu.%lu vac=%lu n=%lu",
+                               " sbusy=%lu%% stall=%lu%% rd=%lu.%lu vac=%lu n=%lu",
                                (unsigned long)(n[MGLP_N_HW_BUSY] * 100U / samples),
                                (unsigned long)(n[MGLP_N_HW_STALL] * 100U / samples),
                                (unsigned long)(reads_x10 / 10U),

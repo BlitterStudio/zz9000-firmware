@@ -97,22 +97,27 @@ static unsigned count_occurrences(const char *source, const char *needle)
 int main(int argc, char **argv)
 {
 	char *mailbox_source;
+	char *audio_stream_source;
 	char *catalog_source;
 	char *mailbox_header;
 	unsigned png_flag_refs;
 	int ok = 1;
 
-	if (argc != 4) {
-		printf("usage: %s <sdk_mailbox.c> <sdk_mailbox.h> <sdk_service_catalog.h>\n", argv[0]);
+	if (argc != 5) {
+		printf("usage: %s <sdk_mailbox.c> <sdk_audio_stream.c> <sdk_mailbox.h> <sdk_service_catalog.h>\n",
+		       argv[0]);
 		return 2;
 	}
 
 	mailbox_source = read_file(argv[1]);
-	mailbox_header = read_file(argv[2]);
-	catalog_source = read_file(argv[3]);
-	if (!mailbox_source || !mailbox_header || !catalog_source) {
+	audio_stream_source = read_file(argv[2]);
+	mailbox_header = read_file(argv[3]);
+	catalog_source = read_file(argv[4]);
+	if (!mailbox_source || !audio_stream_source || !mailbox_header ||
+	    !catalog_source) {
 		printf("failed to read input sources\n");
 		free(mailbox_source);
+		free(audio_stream_source);
 		free(mailbox_header);
 		free(catalog_source);
 		return 2;
@@ -170,15 +175,15 @@ int main(int argc, char **argv)
 	                      "handle_audio_stream_feed");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "stream->backpressure");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(audio_stream_source, "sdk_audio_stream.c",
 	                      "bytes = (uint32_t)samples *");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(audio_stream_source, "sdk_audio_stream.c",
 	                      "(uint32_t)info.channels *");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(audio_stream_source, "sdk_audio_stream.c",
 	                      "consumed = (uint32_t)info.frame_bytes");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(audio_stream_source, "sdk_audio_stream.c",
 	                      "max_pcm_this_call");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(audio_stream_source, "sdk_audio_stream.c",
 	                      "stream->high_water_bytes");
 	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_AUDIO_MP3_STREAM");
@@ -219,6 +224,7 @@ int main(int argc, char **argv)
 	}
 
 	free(mailbox_source);
+	free(audio_stream_source);
 	free(mailbox_header);
 	free(catalog_source);
 	return ok ? 0 : 1;

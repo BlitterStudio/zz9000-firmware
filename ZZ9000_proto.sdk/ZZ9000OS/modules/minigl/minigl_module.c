@@ -5,6 +5,8 @@
 
 #include "minigl_transport.h"
 #include "minigl_platform.h"
+#include "minigl_raster.h"
+#include "minigl_profile.h"
 #include "mw_service.h"
 #include "zzapp_services.h"
 #include "zzm_minigl_host.h"
@@ -13,7 +15,6 @@
 #define ZZM_MINIGL_MODULE_QUOTA (4U * 1024U * 1024U)
 #define ZZM_MINIGL_TRANSPORT_QUOTA (4U * 1024U * 1024U)
 #define ZZM_MINIGL_CONTEXT_QUOTA (384U * 1024U * 1024U)
-#define ZZM_MINIGL_CAP_RASTERIX 1U
 #ifndef ZZM_MINIGL_BUILD_ID
 #define ZZM_MINIGL_BUILD_ID "unknown"
 #endif
@@ -61,15 +62,62 @@ static void minigl_doorbell(void *context)
 static int minigl_has_work(void *context)
 {
     (void)context;
-    return mw_service_has_work();
+    return mw_service_has_work() || minigl_raster_feed_pending();
 }
+
+extern void zzm_module_set_worker_context(int active);
+extern int zzm_module_api_active(void);
+static int g_wire_dispatch_deferred;
+
+int zzm_minigl_take_deferred_dispatch(void)
+{
+    if (!g_wire_dispatch_deferred)
+        return 0;
+    g_wire_dispatch_deferred = 0;
+    return 1;
+}
+
+void zzm_minigl_clear_deferred_dispatch(void)
+{
+    g_wire_dispatch_deferred = 0;
+}
+
 
 static int minigl_poll(void *context, uint32_t budget)
 {
+    int worked = 0;
+
     (void)context;
     if (budget == 0U)
         return 0;
-    return mw_service_poll();
+    zzm_module_set_worker_context(1);
+    if (zzm_module_api_active()) {
+        /* An ARM GL call is parked on this ring. Feed and retire so it
+         * can resume, but do not dispatch wire commands: they share this
+         * backend and would change it before the call returns. */
+        if (mw_service_has_work())
+            g_wire_dispatch_deferred = 1;
+        if (minigl_raster_work_outstanding() || minigl_raster_feed_pending()) {
+            int feed = minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_PARKED);
+
+            worked = feed > RIX_DRV_FEED_BLOCKED ||
+                     minigl_raster_work_outstanding() ||
+                     minigl_raster_feed_pending();
+        }
+    } else if (mw_service_has_work()) {
+        worked = mw_service_poll();
+    }
+    if (!worked && minigl_raster_feed_pending()) {
+        minigl_profile_feed_deadline_wake();
+        /* A full FIFO or a DMA still in flight is no progress: the worker
+         * may then give the core up instead of retrying at once.  An app
+         * parked inside a GL call waits on this ring, so keep feeding it. */
+        worked = minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER) >
+                     RIX_DRV_FEED_BLOCKED ||
+                 zzm_module_api_active();
+    }
+    zzm_module_set_worker_context(0);
+    return worked;
 }
 
 static int minigl_open_68k(void *context, const zzm_minigl_wire_open_t *request,
@@ -144,6 +192,10 @@ static int minigl_begin_reset(void *context)
     /* What the 68k last asked for and how long ago, before the reset tears
      * the context down: an Amiga-side crash leaves no other ARM trace. */
     mw_service_report_amiga_reset();
+    /* Retrying a stop that failed cannot succeed later: report it, and the
+     * firmware stops the engines and drops the module with core 1 halted. */
+    if (!mw_rix_abort_engines())
+        return ZZM_MINIGL_RESET_FAILED;
     minigl_release_app(module);
     minigl_release_transport(module);
     mw_service_reset();
@@ -165,13 +217,29 @@ static void minigl_abort_reset(void *context)
 static int minigl_begin_unload(void *context)
 {
     (void)context;
-    return mw_service_has_work() ? 0 : 1;
+    if (mw_service_has_work())
+        return 0;
+    return 1;
 }
 
 static void minigl_fini(void *context)
 {
     minigl_module_context_t *module = context;
 
+    if (minigl_raster_work_outstanding()) {
+        uint32_t bound = 100000U;
+        /* Unload waits for the buffers back: a PARKED step polls fences. */
+        while (minigl_raster_work_outstanding() && bound--) {
+            if (minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_PARKED) ==
+                RIX_DRV_FEED_ERROR)
+                break;
+        }
+        if (minigl_raster_work_outstanding()) {
+            (void)mw_rix_abort_engines();
+        } else {
+            (void)minigl_raster_drain();
+        }
+    }
     minigl_release_app(module);
     minigl_release_transport(module);
     if (module && module->transport && module->transport->remove_doorbell)
@@ -185,6 +253,7 @@ static void minigl_release_app(minigl_module_context_t *module)
 {
     if (!module || module->app_owner == 0U)
         return;
+    zzm_minigl_clear_deferred_dispatch();
     zzapp_gl_reclaim();
     if (module->reclaim && module->reclaim->close_owner)
         (void)module->reclaim->close_owner(module->app_owner);
@@ -239,7 +308,8 @@ static void minigl_app_unbind(void *context)
 static void minigl_app_reclaim(void *context, uint32_t generation)
 {
     (void)generation;
-    minigl_release_app(context);
+    if (mw_rix_abort_engines())
+        minigl_release_app(context);
 }
 
 static const zzm_minigl_ops_v1_t g_ops = {
@@ -250,7 +320,7 @@ static const zzm_minigl_ops_v1_t g_ops = {
     minigl_begin_reset, minigl_reset_poll, minigl_abort_reset,
     minigl_begin_unload, minigl_fini,
     minigl_app_bind, minigl_app_swap, minigl_app_unbind, minigl_app_reclaim,
-    minigl_app_bind_flags
+    minigl_app_bind_flags, ZZM_MINIGL_RESET_PROTOCOL_V2
 };
 
 static const zzm_minigl_worker_ops_t g_worker_ops = {
@@ -300,6 +370,7 @@ int zzm_module_init(const zzm_services_t *services)
                                  ZZM_SERVICE_RECLAIM_V3,
                                  sizeof(*reclaim)) ||
         !reclaim->create_owner || !reclaim->close_owner ||
+        !reclaim->quarantine_owner ||
         !minigl_table_compatible(app_host->version, app_host->size,
                                  ZZM_SERVICE_APP_GL_HOST_V3,
                                  sizeof(*app_host)) ||
@@ -308,7 +379,8 @@ int zzm_module_init(const zzm_services_t *services)
                                  sizeof(*palette)) ||
         !minigl_table_compatible(graphics->version, graphics->size,
                                  ZZM_SERVICE_GRAPHICS_HW_V3,
-                                 sizeof(*graphics)) || !graphics->caps ||
+                                 offsetof(zzm_graphics_hw_service_t, barrier) +
+                                 sizeof(graphics->barrier)) || !graphics->caps ||
         graphics->caps(&graphics_caps) <= 0)
         return -1;
 

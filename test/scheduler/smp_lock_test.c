@@ -19,6 +19,12 @@ uint32_t smp_local_irq_save(void) { int was = g_irq_disabled_depth; g_irq_disabl
 void     smp_local_irq_restore(uint32_t s) { g_irq_disabled_depth = (int)s; }
 void     smp_raw_spin_lock(volatile uint32_t *w) { pthread_mutex_lock(&g_raw); *w = 1u; }
 void     smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0u; pthread_mutex_unlock(&g_raw); }
+int smp_raw_spin_try_lock(volatile uint32_t *w) {
+    if (pthread_mutex_trylock(&g_raw) != 0)
+        return 0;
+    *w = 1u;
+    return 1;
+}
 
 static void test_recursion_balances_irq(void) {
     sdk_smp_lock_t l = SDK_SMP_LOCK_INIT;

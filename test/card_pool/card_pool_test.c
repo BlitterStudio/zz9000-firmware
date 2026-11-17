@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "card_pool.h"
+#include "rasterix_fence_guard.h"
 #include "memorymap.h"
 
 /* Single-threaded host build. smp_cpu_id is switchable so a test can leave
@@ -45,6 +46,8 @@ void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0u; }
 #define SDK_SURFACE(i) CARD_POOL_OWNER(CARD_POOL_CLASS_SDK_SURFACE, (i))
 #define CONSOLE(i)  CARD_POOL_OWNER(CARD_POOL_CLASS_CONSOLE, (i))
 #define MINIGL(i)   CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, (i))
+#define MINIGL_CONTEXT(i) CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL_CONTEXT, (i))
+#define APP(i)      CARD_POOL_OWNER(CARD_POOL_CLASS_APP, (i))
 
 static int failures = 0;
 static int checks = 0;
@@ -83,6 +86,21 @@ static void test_fills_ranges_in_order(void)
     CHECK(pool.class_used[CARD_POOL_CLASS_MEDIA] == 4 * PAGE);
     uint32_t d = card_pool_alloc(&pool, 1, MEDIA(1));
     CHECK(d == C_BASE + 2 * PAGE);
+}
+
+static void test_aligned_allocation_skips_unaligned_range(void)
+{
+    uint32_t addr;
+
+    card_pool_init(&pool);
+    CHECK(card_pool_add_range(&pool, A_BASE + PAGE,
+                              A_BASE + PAGE + MB(1), 0) == 0);
+    CHECK(card_pool_add_range(&pool, C_BASE, C_BASE + MB(2), 0) == 1);
+    card_pool_open_range(&pool, 0);
+    card_pool_open_range(&pool, 1);
+    addr = card_pool_alloc_aligned(&pool, MB(1), MB(1), MEDIA(1));
+    CHECK(addr == C_BASE);
+    CHECK((addr & (MB(1) - 1u)) == 0u);
 }
 
 static void test_block_ownership(void)
@@ -356,6 +374,72 @@ static void test_reset_relends_when_unused(void)
     card_pool_finish_amiga_reset(&pool, 0, 1);
     CHECK(card_pool_range_free_bytes(&pool, 1) == MB(1));
 }
+
+static void test_quarantine_blocks_every_release_path(void)
+{
+    uint32_t legacy;
+    uint32_t canonical;
+
+    card_like_pool();
+    card_pool_finish_amiga_reset(&pool, 1, 0);
+    legacy = card_pool_alloc(&pool, 3 * PAGE, MINIGL(7));
+    canonical = card_pool_alloc(&pool, PAGE, MINIGL_CONTEXT(7));
+    CHECK(legacy == A_BASE && canonical == B_BASE);
+    card_pool_quarantine_owner(&pool, MINIGL(7));
+    CHECK((pool.blocks[0].flags & CARD_POOL_BLOCK_QUARANTINED) != 0U &&
+          (pool.blocks[1].flags & CARD_POOL_BLOCK_QUARANTINED) != 0U);
+    CHECK(card_pool_free(&pool, legacy, MINIGL(7)) == 0);
+    CHECK(card_pool_release_owner(&pool, MINIGL_CONTEXT(7)) == 0U);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.block_count == 2U);
+    card_pool_take_back_lent(&pool);
+    CHECK(pool.block_count == 2U && !card_pool_has_lent(&pool));
+    CHECK(!card_pool_can_lend_to_amiga(&pool));
+}
+static void test_quarantine_minigl_excludes_app(void)
+{
+    uint32_t app;
+    uint32_t minigl;
+
+    two_ranges(MB(1), MB(1));
+    app = card_pool_alloc(&pool, PAGE, APP(1));
+    minigl = card_pool_alloc(&pool, PAGE, MINIGL(1));
+    CHECK(app != 0U && minigl != 0U);
+    card_pool_quarantine_minigl(&pool);
+    CHECK(card_pool_free(&pool, app, APP(1)) == 1);
+    CHECK(card_pool_free(&pool, minigl, MINIGL(1)) == 0);
+}
+static void test_synchronous_reset_reclaims_before_new_allocation(void)
+{
+    uint32_t minigl;
+    uint32_t app;
+    uint32_t fresh;
+
+    two_ranges(MB(1), MB(1));
+    minigl = card_pool_alloc(&pool, PAGE, MINIGL(2));
+    app = card_pool_alloc(&pool, PAGE, APP(2));
+    CHECK(minigl != 0U && app != 0U);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.block_count == 0U);
+    fresh = card_pool_alloc(&pool, PAGE, APP(3));
+    CHECK(fresh != 0U && card_pool_block_owned(&pool, fresh, PAGE, APP(3)));
+}
+
+static void test_unacknowledged_reset_quarantines_minigl_only(void)
+{
+    uint32_t minigl;
+    uint32_t app;
+
+    two_ranges(MB(1), MB(1));
+    minigl = card_pool_alloc(&pool, PAGE, MINIGL(3));
+    app = card_pool_alloc(&pool, PAGE, APP(4));
+    CHECK(minigl != 0U && app != 0U);
+    card_pool_quarantine_minigl(&pool);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(card_pool_block_owned(&pool, minigl, PAGE, MINIGL(3)));
+    CHECK(!card_pool_block_owned(&pool, app, PAGE, APP(4)));
+}
+
 static void test_lock_left_by_faulted_core(void)
 {
     card_like_pool();
@@ -458,9 +542,174 @@ static void test_random(void)
     CHECK(pool.ignored_frees == 0);
 }
 
+typedef struct {
+    uint32_t address;
+    uint32_t sequence;
+    uint32_t now;
+    uint32_t snapshots;
+    uint32_t reads;
+    uint32_t idle_reads;
+    uint32_t sleeps;
+    int complete_after;
+    int idle_after;
+    int snapshot_result;
+    int forgot;
+} fence_fixture_t;
+
+static int fence_snapshot(void *context, uint32_t *address, uint32_t *sequence)
+{
+    fence_fixture_t *f = context;
+    f->snapshots++;
+    if (f->snapshot_result != 0)
+        return f->snapshot_result;
+    *address = f->address;
+    *sequence = f->sequence;
+    return 1;
+}
+
+static uint16_t fence_read(void *context, uint32_t address)
+{
+    fence_fixture_t *f = context;
+    (void)address;
+    f->reads++;
+    return f->complete_after >= 0 && f->reads > (uint32_t)f->complete_after ?
+        (uint16_t)f->sequence : (uint16_t)(f->sequence - 1U);
+}
+static int fence_idle(void *context)
+{
+    fence_fixture_t *f = context;
+
+    f->idle_reads++;
+    return f->idle_after >= 0 && f->idle_reads > (uint32_t)f->idle_after;
+}
+
+
+static uint32_t fence_clock(void *context)
+{
+    return ((fence_fixture_t *)context)->now;
+}
+
+static void fence_sleep(void *context, uint32_t milliseconds)
+{
+    fence_fixture_t *f = context;
+    f->sleeps++;
+    f->now += milliseconds;
+}
+
+static void fence_forget(void *context)
+{
+    ((fence_fixture_t *)context)->forgot = 1;
+}
+
+static const rasterix_fence_guard_hooks_t fence_hooks = {
+    .snapshot = fence_snapshot,
+    .read_fence = fence_read,
+    .engine_idle = fence_idle,
+    .clock_ms = fence_clock,
+    .sleep_ms = fence_sleep,
+    .forget = fence_forget,
+};
+static void fence_guard(fence_fixture_t *fixture, int rasterix_active)
+{
+    rasterix_fence_guard_hooks_t hooks = fence_hooks;
+
+    hooks.context = fixture;
+    rasterix_fence_guard_pool(&pool, rasterix_active, &hooks, 100U);
+}
+
+
+static void test_fence_guard_completed_reset_reclaims_normally(void)
+{
+    fence_fixture_t f = { .address = 0x12340000U, .sequence = 7U,
+                          .complete_after = 2 };
+    uint32_t minigl;
+    uint32_t app;
+
+    two_ranges(MB(1), MB(1));
+    minigl = card_pool_alloc(&pool, PAGE, MINIGL(5));
+    app = card_pool_alloc(&pool, PAGE, APP(5));
+    fence_guard(&f, 1);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(f.forgot && f.sleeps == 2U);
+    CHECK(!card_pool_block_owned(&pool, minigl, PAGE, MINIGL(5)));
+    CHECK(!card_pool_block_owned(&pool, app, PAGE, APP(5)));
+}
+
+static void test_fence_guard_waits_for_idle_after_fence(void)
+{
+    fence_fixture_t f = { .address = 0x12340000U, .sequence = 11U,
+                          .complete_after = 0, .idle_after = 2 };
+
+    two_ranges(MB(1), MB(1));
+    CHECK(card_pool_alloc(&pool, PAGE, MINIGL(9)) != 0U);
+    fence_guard(&f, 1);
+    CHECK(f.forgot && f.reads == 3U && f.idle_reads == 3U && f.sleeps == 2U);
+}
+
+static void test_fence_guard_unknown_snapshot_quarantines(void)
+{
+    fence_fixture_t f = { .snapshot_result = -1 };
+    uint32_t minigl;
+
+    two_ranges(MB(1), MB(1));
+    minigl = card_pool_alloc(&pool, PAGE, MINIGL(10));
+    fence_guard(&f, 1);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(f.snapshots == 1U && f.sleeps == 0U && !f.forgot);
+    CHECK(card_pool_block_owned(&pool, minigl, PAGE, MINIGL(10)));
+}
+
+static void test_fence_guard_timeout_quarantines_minigl_only(void)
+{
+    fence_fixture_t f = { .address = 0x12340000U, .sequence = 8U,
+                          .complete_after = -1 };
+    uint32_t minigl;
+    uint32_t app;
+
+    two_ranges(MB(1), MB(1));
+    minigl = card_pool_alloc(&pool, PAGE, MINIGL(6));
+    app = card_pool_alloc(&pool, PAGE, APP(6));
+    fence_guard(&f, 1);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(f.sleeps == 100U && !f.forgot);
+    CHECK(card_pool_block_owned(&pool, minigl, PAGE, MINIGL(6)));
+    CHECK(!card_pool_block_owned(&pool, app, PAGE, APP(6)));
+}
+
+static void test_fence_guard_disabled_core_and_no_platform(void)
+{
+    fence_fixture_t f = { .address = 0x12340000U, .sequence = 9U,
+                          .complete_after = -1 };
+    uint32_t minigl;
+
+    two_ranges(MB(1), MB(1));
+    minigl = card_pool_alloc(&pool, PAGE, MINIGL(7));
+    fence_guard(&f, 1);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(card_pool_block_owned(&pool, minigl, PAGE, MINIGL(7)));
+
+    f.now = f.snapshots = f.reads = f.sleeps = 0U;
+    fence_guard(&f, 0);
+    CHECK(f.snapshots == 0U && f.reads == 0U && f.sleeps == 0U);
+}
+
+static void test_fence_guard_healthy_reset_keeps_fastram_gate_ready(void)
+{
+    fence_fixture_t f = { .address = 0x12340000U, .sequence = 10U,
+                          .complete_after = 0 };
+
+    card_like_pool();
+    CHECK(card_pool_alloc(&pool, PAGE, MINIGL(8)) == A_BASE);
+    fence_guard(&f, 1);
+    CHECK(f.sleeps == 0U && card_pool_can_lend_to_amiga(&pool));
+    card_pool_finish_amiga_reset(&pool, 1, card_pool_can_lend_to_amiga(&pool));
+    CHECK(!card_pool_has_lent(&pool));
+}
+
 int main(void)
 {
     test_fills_ranges_in_order();
+    test_aligned_allocation_skips_unaligned_range();
     test_block_ownership();
     test_range_owned_rejects_past_end();
     test_too_large_leaves_table();
@@ -475,7 +724,17 @@ int main(void)
     test_decode_classes_reclaimed_on_reset();
     test_reset_fast_ram_switches_on();
     test_reset_relends_when_unused();
+    test_quarantine_blocks_every_release_path();
     test_lock_left_by_faulted_core();
+    test_quarantine_minigl_excludes_app();
+    test_synchronous_reset_reclaims_before_new_allocation();
+    test_unacknowledged_reset_quarantines_minigl_only();
+    test_fence_guard_completed_reset_reclaims_normally();
+    test_fence_guard_timeout_quarantines_minigl_only();
+    test_fence_guard_waits_for_idle_after_fence();
+    test_fence_guard_unknown_snapshot_quarantines();
+    test_fence_guard_disabled_core_and_no_platform();
+    test_fence_guard_healthy_reset_keeps_fastram_gate_ready();
     test_full_table();
     test_card_setup();
     test_random();

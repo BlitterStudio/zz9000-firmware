@@ -20,6 +20,8 @@ extern "C" {
 
 
 #define MW_DIAG_UPLOADS 8U
+#define MW_RIX_COMMAND_BUFFERS 8U
+
 #define MW_DIAG_BUCKETS 6U
 
 typedef struct mw_diag_bucket {
@@ -99,14 +101,19 @@ struct mw_ctx {
 
     /* RasterIX storage is independent from CPU texture residency.  It belongs
      * to this context's card-pool owner and is absent in normal firmware. */
-    uint8_t  *rix_command_buffers[2];
+    uint8_t  *rix_command_buffers[MW_RIX_COMMAND_BUFFERS];
     uint8_t  *rix_white_texture;
     uint8_t  *rix_texture_pool;
-    uint32_t rix_command_buffer_addresses[2];
+    uint32_t rix_command_buffer_addresses[MW_RIX_COMMAND_BUFFERS];
     uint32_t rix_white_texture_address;
     uint32_t rix_texture_pool_address;
     uint32_t rix_texture_pool_bytes;
     uint8_t  rix_enabled;
+    uint8_t  rix_async;
+    uint8_t  rix_submit_mode;
+    /* RasterIX never finished this context's command lists: its memory is
+     * kept for good (see mw_rix_abort_engines). */
+    uint8_t  rix_memory_quarantined;
     /* A disabled RasterIX can retain unbounded DMA writes to its old target.
      * That allocation deliberately outlives this context. */
     uint8_t  rix_target_quarantined;
@@ -136,6 +143,7 @@ struct mw_ctx {
     uint64_t diag_last_log_us;
     uint32_t diag_framebuffer_readbacks;
     uint8_t diag_frame_ready[3];
+    struct mw_ctx *next_active;
 };
 
 /* zzapp_gl adds presentation timing and reads the physical RGB565 samples. */

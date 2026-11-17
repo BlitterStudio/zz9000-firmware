@@ -292,8 +292,12 @@ int main(void)
   fflush(stdout);
   status = zz9k_open(&ctx);
   if (status != ZZ9K_STATUS_OK) {
-    printf("zz9k-info: open failed: %s (%d)\n",
-           zz9k_status_name(status), status);
+    if (status == ZZ9K_STATUS_LIBRARY_TOO_OLD) {
+      puts("zz9k-info: zz9k.library too old");
+    } else {
+      printf("zz9k-info: open failed: %s (%d)\n",
+             zz9k_status_name(status), status);
+    }
     return 1;
   }
 

@@ -8,6 +8,7 @@
 #include "zzapp_proto.h"
 #include "zzm_format.h"
 #include "zzm_minigl_host.h"
+#include "zzapp_svc.h"
 
 static zzapp_gl g_gl;
 static zzm_minigl_ops_v1_t g_ops;
@@ -29,6 +30,36 @@ static uint32_t g_render_pixel;
 static uint32_t g_present_pixel;
 static int g_flips;
 static uint32_t g_bind_flags;
+static unsigned g_telemetry_resets;
+static unsigned g_telemetry_swaps;
+static unsigned g_telemetry_reports;
+
+void zzapp_svc_gl_telemetry_reset(uint32_t slot)
+{
+    assert(slot == 0U);
+    g_telemetry_resets++;
+}
+
+int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
+                                 zzapp_gl_telemetry_snapshot_t *snapshot)
+{
+    assert(slot == 0U);
+    assert(now_us == 0U);
+    assert(snapshot != NULL);
+    memset(snapshot, 0, sizeof(*snapshot));
+    g_telemetry_swaps++;
+    return 1;
+}
+
+void zzapp_svc_gl_telemetry_report(uint32_t slot,
+                                    const zzapp_gl_telemetry_snapshot_t *snapshot)
+{
+    assert(slot == 0U);
+    assert(snapshot != NULL);
+    assert(g_telemetry_reports < g_telemetry_swaps);
+    g_telemetry_reports++;
+}
+
 
 int zzm_loader_acquire(uint32_t module_id)
 {
@@ -146,6 +177,7 @@ static void reset_module(void)
     g_ops.app_unbind = mock_app_unbind;
     g_ops.app_reclaim = mock_app_reclaim;
     g_ops.app_bind_flags = mock_app_bind_flags;
+    g_ops.reset_protocol = ZZM_MINIGL_RESET_PROTOCOL_V2;
     g_available = 0;
     g_acquires = 0;
     g_releases = 0;
@@ -174,6 +206,9 @@ static void reset_module(void)
     g_present_pixel = 0;
     g_flips = 0;
     g_bind_flags = 0;
+    g_telemetry_resets = 0U;
+    g_telemetry_swaps = 0U;
+    g_telemetry_reports = 0U;
 }
 
 int main(void)
@@ -199,20 +234,38 @@ int main(void)
     assert(g_releases == 1);
     g_ops.version = ZZM_MINIGL_OPS_V1;
 
+
+    zzapp_kernel_set_current_thread(0);
     g_available = 1;
     gl = api->gl_bind(41u);
     assert(gl == &g_gl);
     assert(g_binds == 1);
     assert(g_surface_id == 41u);
+    assert(g_telemetry_resets == 1U);
     gl->Begin(0x42u);
     assert(g_render_pixel == 0xa55a0042u);
     api->gl_swap();
     assert(g_swaps == 1);
     assert(g_flips == 1);
     assert(g_present_pixel == 0xa55a0042u);
+    assert(g_telemetry_swaps == 1U);
+    assert(g_telemetry_reports == 1U);
+    zzapp_kernel_set_current_thread(1);
+    assert(zzapp_minigl_swap() == ZZ_EBUSY);
+    api->gl_swap();
+    assert(g_swaps == 1);
+    assert(g_flips == 1);
+    assert(g_telemetry_swaps == 1U);
+    assert(g_telemetry_reports == 1U);
+    zzapp_kernel_set_current_thread(1);
+    api->gl_unbind();
+    assert(g_unbinds == 0);
+    assert(g_releases == 1);
+    zzapp_kernel_set_current_thread(0);
     api->gl_unbind();
     assert(g_unbinds == 1);
     assert(g_releases == 2);
+    assert(g_telemetry_resets == 2U);
     gl = api->gl_bind_flags(42u, ZZ_GL_BIND_DIRECT_PRESENT);
     assert(gl == &g_gl);
     assert(g_bind_flags == ZZ_GL_BIND_DIRECT_PRESENT);
@@ -227,6 +280,7 @@ int main(void)
     assert(g_ops.open_68k(&g_context, NULL, &card) == ZZ_OK);
     assert(g_68k_open);
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, card + 4u, 0u, 0u, 0u, 0u, 0u);
+    zzapp_worker_hook();
     assert(g_reclaims == 1);
     assert(g_reclaim_generation != 0u);
     assert(g_68k_closes == 0);

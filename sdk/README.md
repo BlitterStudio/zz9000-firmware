@@ -96,8 +96,11 @@ The generated `build/package/amigaos3` tree contains:
 - AmigaGuide manuals in `Docs/` and source examples in `Examples/`
 - `MANIFEST.sha256`, containing a SHA-256 digest for every other packaged file
 
-Install the package with matching SDK-service firmware. After booting the
-firmware and installing the package, run:
+Install the package with matching SDK-service firmware. `zz9k.library` and
+`amissl.library` must also come from the same package release: older statically
+linked AmiSSL clients consume mailbox completions directly and cannot safely
+share that consumer with the library. After booting the firmware and installing
+the package, run:
 
 ```text
 zz9k-services --check-release

@@ -46,10 +46,11 @@ static void check_lifecycle(void)
 	EXPECT(step(1, 0, 0, 1, 1, 0) == AUDIO_STREAM_CLOSE_FREE, "free after release");
 	EXPECT(step(1, 0, 0, 0, 1, 0) == AUDIO_STREAM_CLOSE_FREE,
 	       "stranded release failed by the single-core fallback");
-	/* Release task failed on a core-1 fault before finishing: the
-	 * reclaim must drop the heap before core 0 touches the slot. */
-	EXPECT(step(1, 0, 0, 1, 1, 1) == AUDIO_STREAM_CLOSE_WAIT,
-	       "failed release waits for the reclaim");
+	/* A release task can be interrupted by its owner or a core-1 restart.
+	 * While the worker has returned and still owns the heap, retry the
+	 * deferred close instead of reserving the stream forever. */
+	EXPECT(step(1, 0, 0, 1, 1, 1) == AUDIO_STREAM_CLOSE_QUEUE,
+	       "interrupted release retries");
 	/* No heap was ever created (closed before the first feed decoded). */
 	EXPECT(step(0, 0, 0, 1, 1, 0) == AUDIO_STREAM_CLOSE_FREE, "nothing to release");
 }

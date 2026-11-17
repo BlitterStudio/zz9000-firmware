@@ -7,6 +7,29 @@
 /* A32 UDF #0. Unlike an unallocated opcode, this encoding is permanently
  * undefined by the architecture, so a stale module entry faults reliably. */
 #define ZZM_POISON_WORD 0xE7F000F0U
+/* Core-1 module loading is sliced to about 1 ms (333k global-timer ticks).
+ * COUNTS_PER_SECOND is CPU/2, so the 666 MHz CPU's global timer is 333 MHz. */
+#ifndef ZZM_LOAD_READ_HASH_CHUNK_BYTES
+#ifdef ZZM_V3_READ_HASH_CHUNK_BYTES
+#define ZZM_LOAD_READ_HASH_CHUNK_BYTES ZZM_V3_READ_HASH_CHUNK_BYTES
+#else
+#define ZZM_LOAD_READ_HASH_CHUNK_BYTES (12U * 1024U)
+#endif
+#endif
+#ifndef ZZM_LOAD_MEMORY_CHUNK_BYTES
+#ifdef ZZM_V3_MEMORY_CHUNK_BYTES
+#define ZZM_LOAD_MEMORY_CHUNK_BYTES ZZM_V3_MEMORY_CHUNK_BYTES
+#else
+#define ZZM_LOAD_MEMORY_CHUNK_BYTES (64U * 1024U)
+#endif
+#endif
+#ifndef ZZM_V3_READ_HASH_CHUNK_BYTES
+#define ZZM_V3_READ_HASH_CHUNK_BYTES ZZM_LOAD_READ_HASH_CHUNK_BYTES
+#endif
+#ifndef ZZM_V3_MEMORY_CHUNK_BYTES
+#define ZZM_V3_MEMORY_CHUNK_BYTES ZZM_LOAD_MEMORY_CHUNK_BYTES
+#endif
+
 
 
 enum zzm_state {
@@ -35,6 +58,12 @@ enum zzm_load_reason {
     ZZM_REASON_QUOTA = 8,
     ZZM_REASON_FAULT = 9,
 };
+enum zzm_load_result {
+    ZZM_LOAD_FAILED = 0,
+    ZZM_LOAD_READY = 1,
+    ZZM_LOAD_IN_PROGRESS = 2,
+};
+
 
 typedef void (*zzm_sha256_fn)(const uint8_t *data, uint32_t length,
                               uint8_t digest[ZZM_SHA256_SIZE]);
@@ -100,6 +129,21 @@ uint32_t zzm_loader_service_declared_count(uint32_t module_id);
 void zzm_loader_set_storage_idle(int (*storage_idle)(void));
 int zzm_loader_ensure_service(uint32_t service_id, uint32_t min_version);
 int zzm_loader_load_on_owner(uint32_t module_id);
+/* Core 0 reset path: cancel a resumable module load before core 1 drains it. */
+void zzm_loader_cancel_loading(uint32_t module_id);
 void zzm_loader_set_load_dispatch(int (*dispatch)(uint32_t module_id));
+#ifdef ZZM_LOADER_HOST_TEST
+enum zzm_loader_test_work {
+    ZZM_LOADER_TEST_WORK_NONE = 0,
+    ZZM_LOADER_TEST_WORK_READ_HASH,
+    ZZM_LOADER_TEST_WORK_BSS_ZERO,
+    ZZM_LOADER_TEST_WORK_DCACHE_FLUSH,
+    ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE,
+    ZZM_LOADER_TEST_WORK_POISON,
+};
+uint32_t zzm_loader_test_work_bytes(void);
+enum zzm_loader_test_work zzm_loader_test_work_kind(void);
+#endif
+
 
 #endif

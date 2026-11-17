@@ -17,6 +17,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#if !defined(_WIN32)
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#endif
+
 #define ZZ9K_FABRICLEASE_NO_MAIN 1
 #include "../tools/zz9k-fabriclease.c"
 
@@ -28,7 +34,18 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#if defined(MAP_ANONYMOUS)
+#define ZZ9K_MMAP_ANONYMOUS MAP_ANONYMOUS
+#elif defined(MAP_ANON)
+#define ZZ9K_MMAP_ANONYMOUS MAP_ANON
+#else
+#error "anonymous mmap is required for this host test"
 #endif
+#endif
+#if defined(ZZ9K_TEST_DISABLE_MAP_32BIT)
+#undef MAP_32BIT
+#endif
+
 
 /* Test seam exported (undeclared) by host/src/zz9k_host.c. */
 void zz9k_set_idle_hook_for_test(void (*hook)(void));
@@ -45,26 +62,76 @@ static int g_failures;
   } while (0)
 
 
-/* A board window at a fixed low address so the granted ring and
- * control mappings (board_addr + offset) are real, dereferenceable
- * memory: the sessions write their tone there and the mock firmware
- * reads it back through the same shared lines. */
-#define MOCK_BOARD_ADDR 0x20000000UL
+/* A board window below 4 GiB so the 32-bit board address plus an
+ * offset is real, dereferenceable memory.  MAP_FIXED can replace the
+ * process heap when a large window spans the program break, so use
+ * non-clobbering low-address requests instead. */
 #define MOCK_RING_ENTRIES 8U
 #define MOCK_GENERATION1 5U
 #define MOCK_GENERATION2 6U
 
+static uint32_t g_mock_board_addr;
+
+static int mock_window_is_low(const void *p, uint32_t size)
+{
+  return p != NULL &&
+         (uint64_t)(uintptr_t)p + (uint64_t)size <= UINT64_C(0x100000000);
+}
+
 static void *mock_window_alloc(uint32_t size)
 {
+  static const uintptr_t low_bases[] = {
+      UINT32_C(0x10000000), UINT32_C(0x18000000),
+      UINT32_C(0x28000000), UINT32_C(0x30000000)};
+  void *p;
+  size_t i;
+
 #if defined(_WIN32)
-  return VirtualAlloc((LPVOID)MOCK_BOARD_ADDR, (SIZE_T)size,
-                      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  for (i = 0U; i < sizeof(low_bases) / sizeof(low_bases[0]); i++) {
+    p = VirtualAlloc((LPVOID)low_bases[i], (SIZE_T)size,
+                     MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (mock_window_is_low(p, size)) {
+      g_mock_board_addr = (uint32_t)(uintptr_t)p;
+      return p;
+    }
+    if (p) {
+      VirtualFree(p, 0, MEM_RELEASE);
+    }
+  }
 #else
-  void *p = mmap((void *)MOCK_BOARD_ADDR, (size_t)size,
-                 PROT_READ | PROT_WRITE,
-                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-  return p == MAP_FAILED ? NULL : p;
+  {
+    int flags = MAP_PRIVATE | ZZ9K_MMAP_ANONYMOUS;
+
+#if defined(MAP_32BIT)
+    p = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE,
+             flags | MAP_32BIT, -1, 0);
+    if (p != MAP_FAILED) {
+      if (mock_window_is_low(p, size)) {
+        g_mock_board_addr = (uint32_t)(uintptr_t)p;
+        return p;
+      }
+      munmap(p, (size_t)size);
+    }
 #endif
+    for (i = 0U; i < sizeof(low_bases) / sizeof(low_bases[0]); i++) {
+#if defined(MAP_FIXED_NOREPLACE)
+      p = mmap((void *)low_bases[i], (size_t)size,
+               PROT_READ | PROT_WRITE, flags | MAP_FIXED_NOREPLACE, -1, 0);
+#else
+      p = mmap((void *)low_bases[i], (size_t)size,
+               PROT_READ | PROT_WRITE, flags, -1, 0);
+#endif
+      if (p != MAP_FAILED) {
+        if (mock_window_is_low(p, size)) {
+          g_mock_board_addr = (uint32_t)(uintptr_t)p;
+          return p;
+        }
+        munmap(p, (size_t)size);
+      }
+    }
+  }
+#endif
+  return NULL;
 }
 
 static void mock_window_free(void *p, uint32_t size)
@@ -159,7 +226,7 @@ static void mock_reset(uint32_t caps, uint16_t zorro_version,
   zz9k_put_be32(m->descriptor.completion_ring_entries, MOCK_RING_ENTRIES);
   zz9k_put_be32(m->descriptor.capability_bits, ZZ9K_CAP_MAILBOX | caps);
   g_mock.board.zorro_version = zorro_version;
-  g_mock.board.board_addr = MOCK_BOARD_ADDR;
+  g_mock.board.board_addr = g_mock_board_addr;
   g_mock.board.board_size = board_size;
   g_mock.board.product =
       zorro_version == 2U ? ZZ9K_PRODUCT_Z2 : ZZ9K_PRODUCT_Z3;
@@ -1351,6 +1418,10 @@ static int test_mismatched_rate_grants_release(void)
   ZZ9KAudioRingAcquireDesc desc;
   ZZ9KAudioRingSession session;
   int status = 0;
+  if (!mapping) {
+    return 1;
+  }
+
 
   mock_reset(ZZ9K_CAP_AUDIO_FABRIC, 3U, 0x08000000UL);
   mock_grant_slot(1U, MOCK_GENERATION1, 0x07fd0080UL,
@@ -1435,6 +1506,10 @@ static int test_rate_lease_session(void)
   struct MockSlot *s;
   uint8_t chunk[3528U];
   int status;
+  if (!mapping) {
+    return 1;
+  }
+
 
   mock_reset(ZZ9K_CAP_AUDIO_FABRIC, 3U, 0x08000000UL);
   mock_grant_slot(1U, MOCK_GENERATION1, 0x07fd0080UL,

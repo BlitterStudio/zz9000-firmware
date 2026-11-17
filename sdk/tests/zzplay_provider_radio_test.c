@@ -725,7 +725,7 @@ static void test_my_stations(ZZPlayHost *host)
   TestSinkData sink_data;
   ZZPlayItemSink sink;
   char err[128];
-  char my_id[16];
+  char my_id[ZZPLAY_PROVIDER_TEXT_MAX];
 
   ctx = p->open(host, err, sizeof(err));
   assert(ctx != NULL);

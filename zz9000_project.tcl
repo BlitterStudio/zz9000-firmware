@@ -69,7 +69,7 @@ proc print_help {} {
   puts "$script_file -tclargs \[--no-autoboot\]"
   puts "$script_file -tclargs \[--capture-c28\]"
   puts "$script_file -tclargs \[--rasterix\]"
-  puts "$script_file -tclargs \[--rasterix-tmu-count <1>\]"
+  puts "$script_file -tclargs \[--rasterix-tmu-count <1|2>\]"
   puts "$script_file -tclargs \[--rasterix-variant <ef>\]"
   puts "$script_file -tclargs \[--help\]\n"
   puts "Usage:"
@@ -85,7 +85,7 @@ proc print_help {} {
   puts "\[--no-autoboot\]        Build without advertising the Zorro autoboot ROM.\n"
   puts "\[--capture-c28\]        Opt-in A4000 C28 native capture clock candidate.\n"
   puts "\[--rasterix\]           Include the opt-in external-framebuffer RasterIX EF renderer.\n"
-  puts "\[--rasterix-tmu-count\] Select the RasterIX TMU count (only 1 is supported).\n"
+  puts "\[--rasterix-tmu-count\] Select the RasterIX TMU count (1 or 2).\n"
   puts "\[--rasterix-variant\] Select RasterIX EF (only ef is supported).\n"
   puts "\[--rasterix-framebuffer-size-lg\] Deprecated compatibility option; ignored by EF.\n"
   puts "\[--help\]               Print help information for this script"
@@ -123,8 +123,8 @@ if { $::argc > 0 } {
   }
 }
 
-if {$rasterix_tmu_count != 1} {
-  error "RasterIX EF supports exactly one TMU"
+if {$rasterix_tmu_count ni {1 2}} {
+  error "RasterIX TMU count must be 1 or 2"
 }
 if {$rasterix_variant ne "ef"} {
   error "RasterIX EF is the only supported RasterIX variant"
@@ -384,7 +384,7 @@ if { [get_files audio_clock.v] == "" } {
 
 # Proc to create BD zz9000_ps
 proc cr_bd_zz9000_ps { parentCell } {
-  global rasterix
+  global rasterix rasterix_tmu_count
 # The design that will be created by this Tcl proc contains the following
 # module references:
 # MNTZorro_v0_1_S00_AXI, audio_clock, video_formatter, zz9k_rasterix (opt-in)
@@ -746,6 +746,7 @@ proc create_hier_cell_video { parentCell nameHier } {
       catch {common::send_msg_id "BD_TCL-105" "ERROR" "Unable to add RasterIX IP <$block_cell_name>: $errmsg"}
       return 1
     }
+    set_property CONFIG.TMU_COUNT $rasterix_tmu_count $zz9k_rasterix_0
     # Xilinx AXI FIFO MM-S is the PS/PL330 command ingress.  It packetizes
     # TDFD writes only after TLF and drives RasterIX FrameStreamingCore ST0.
     # TDFD is on the AXI4 data interface (S_AXI_FULL, 0x83c80000) so the
@@ -762,7 +763,7 @@ proc create_hier_cell_video { parentCell nameHier } {
       CONFIG.C_USE_RX_DATA {0} \
       CONFIG.C_USE_TX_CTRL {0} \
       CONFIG.C_TX_FIFO_DEPTH {4096} \
-      CONFIG.C_TX_FIFO_PE_THRESHOLD {5} \
+      CONFIG.C_TX_FIFO_PE_THRESHOLD {1024} \
       CONFIG.C_TX_FIFO_PF_THRESHOLD {4091} \
       CONFIG.C_USE_TX_CUT_THROUGH {0}] $gpu_cmd_fifo
   }
@@ -1368,10 +1369,12 @@ proc create_hier_cell_video { parentCell nameHier } {
   # temperatures/voltages through the PS7 XADC (XAdcPs, 0xF8007100) and
   # neither ZZ9000OS nor the Amiga-side drivers reference 0x83C1xxxx.
 
-  # Create instance: xlconcat_0, and set properties
+  # Create instance: xlconcat_0, and set properties.  The RasterIX build
+  # adds gpu_cmd_fifo/interrupt on In3 (IRQ 64); every other build keeps
+  # the three-port concat of the non-RasterIX design.
   set xlconcat_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 xlconcat_0 ]
   set_property -dict [ list \
-   CONFIG.NUM_PORTS {3} \
+   CONFIG.NUM_PORTS [expr {$rasterix ? 4 : 3}] \
  ] $xlconcat_0
 
   # Create instance: xlslice_0, and set properties
@@ -1510,6 +1513,9 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net audio_clock_0_rx_sdata_out [get_bd_pins audio_clock_0/rx_sdata_out] [get_bd_pins i2s_receiver_0/sdata_0_in]
   connect_bd_net -net audio_formatter_0_irq_mm2s [get_bd_pins audio_formatter_0/irq_mm2s] [get_bd_pins xlconcat_0/In1]
   connect_bd_net -net audio_formatter_1_irq_s2mm [get_bd_pins audio_formatter_1/irq_s2mm] [get_bd_pins xlconcat_0/In2]
+  if { $rasterix } {
+    connect_bd_net -net gpu_cmd_fifo_interrupt [get_bd_pins gpu_cmd_fifo/interrupt] [get_bd_pins xlconcat_0/In3]
+  }
   connect_bd_net -net clk_1 [get_bd_ports VGA_PCLK] [get_bd_pins clk_wiz_0/clk_out1] [get_bd_pins video/VGA_PCLK]
   connect_bd_net -net clk_wiz_1_mclk_out [get_bd_pins audio_clock_0/mclk_out] [get_bd_pins audio_formatter_0/aud_mclk] [get_bd_pins i2s_receiver_0/aud_mclk] [get_bd_pins i2s_transmitter_0/aud_mclk]
   connect_bd_net -net i2s_transmitter_0_sdata_0_out [get_bd_ports I2SO_D0] [get_bd_pins i2s_transmitter_0/sdata_0_out]

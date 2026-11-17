@@ -12,6 +12,8 @@
 #define ZZM_MINIGL_WORKER_OPS_V1 0x00010000U
 #define ZZM_GRAPHICS_HW_V1 0x00010000U
 #define ZZM_MINIGL_POLL_BUDGET 1U
+#define ZZM_MINIGL_CAP_RASTERIX 1U
+#define ZZM_MINIGL_RESET_PROTOCOL_V2 2U
 
 enum zzm_minigl_image_flavour {
     ZZM_MINIGL_IMAGE_STANDARD = 0U,
@@ -60,9 +62,12 @@ typedef struct zzm_minigl_ops_v1 {
     int (*app_swap)(void *context);
     void (*app_unbind)(void *context);
     void (*app_reclaim)(void *context, uint32_t generation);
-    /* Appended so older MiniGL modules continue to provide unflagged binds. */
+    /* Appended reset contract. V2 distinguishes a failed abort from BUSY;
+     * firmware rejects a shorter table rather than treating legacy zero as
+     * an acknowledgement and reclaiming GPU-visible memory. */
     int (*app_bind_flags)(void *context, uint32_t surface_id, uint32_t flags,
                           const void **out_gl);
+    uint32_t reset_protocol;
 } zzm_minigl_ops_v1_t;
 /* The generic v3 register_ops() callback carries this envelope rather than a
  * bare function table, so the host can keep the module-owned context and
@@ -130,11 +135,24 @@ int zzm_minigl_transport_release(void);
 #if defined(MINIGL_HOST_TEST)
 void zzm_minigl_test_set_poll_hook(void (*hook)(void));
 #endif
-void zzm_minigl_service_tick(int in_api);
+/* Nonzero when the module's poll made progress; zero when it had nothing to
+ * do or its feed step was blocked (full FIFO, DMA in flight). */
+int zzm_minigl_service_tick(int in_api);
+/* Consumes the worker's deferred wire-dispatch request after an app GL call. */
+int zzm_minigl_take_deferred_dispatch(void);
 int zzm_minigl_begin_reset(void);
 int zzm_minigl_reset_poll(void);
+/* One core-1 RESET action: starts the reset or moves one in progress on.
+ * BUSY until the module has drained; FAILED when it could not stop. */
+int zzm_minigl_reset_step(void);
 void zzm_minigl_abort_reset(void);
 void zzm_minigl_on_core1_fault(void);
+/* Core 1's latest committed RasterIX fence is visible to core 0 for reset
+ * reclamation. A zero return means no RasterIX fence is currently published. */
+int zzm_minigl_rasterix_active(void);
+int zzm_minigl_rasterix_idle(void);
+int zzm_minigl_fence_snapshot(uint32_t *address, uint32_t *sequence);
+void zzm_minigl_forget_fence(void);
 
 /* Firmware writes this record once during boot.  Standard images never map or
  * access RasterIX CSR/FIFO addresses. */

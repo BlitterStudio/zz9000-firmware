@@ -43,6 +43,7 @@ struct mock_platform {
     uint8_t tex_pool[MINIGL_RIX_TEXTURE_POOL_BYTES];
     unsigned csr_reads;
     unsigned submissions;
+    unsigned cache_cleans;
     int complete_submissions;
 };
 static struct mock_platform s_mock;
@@ -180,9 +181,11 @@ static void mock_fifo_write(void *ctx, uint32_t offset, uint32_t value)
 
 static void mock_cache_noop(void *ctx, uintptr_t addr, size_t bytes)
 {
-    (void)ctx;
+    struct mock_platform *p = (struct mock_platform *)ctx;
+
     (void)addr;
     (void)bytes;
+    ++p->cache_cleans;
 }
 
 static void setup_mock_platform(struct mock_platform *p, MiniGLRixPlatform *out)
@@ -224,7 +227,7 @@ static void test_platform_probe_guard(void)
     assert(s_mock.csr_reads == 1U);
 
     setup_mock_platform(&s_mock, &platform);
-    s_mock.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE + 1U;
+    s_mock.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE + 0x00010000U;
     assert(!minigl_rix_backend_probe_platform(&platform));
     assert(s_mock.csr_reads == 2U);
 
@@ -274,6 +277,33 @@ static void test_fifo_depth_packet_boundaries(void)
                   7U * sizeof(*commands)) == 0);
     printf("PASS: test_fifo_depth_packet_boundaries\n");
 }
+/* The per-draw fallback evaluation must stay silent: on CPU-only builds it
+ * runs for every software draw and a log line there floods the UART. */
+static unsigned s_eval_log_lines;
+static void counting_log(const char *fmt, ...)
+{
+    (void)fmt;
+    ++s_eval_log_lines;
+}
+
+static void test_eval_fallback_is_silent(void)
+{
+    g_rix_test_log = counting_log;
+    s_eval_log_lines = 0U;
+    assert(minigl_rix_backend_eval_fallback(NULL) ==
+           ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT);
+    {
+        static MiniGLRixBackend disabled;
+
+        memset(&disabled, 0, sizeof(disabled));
+        assert(minigl_rix_backend_eval_fallback(&disabled) ==
+               ZZ9K_MGL_FALLBACK_BACKEND_DISABLED_OR_ABSENT);
+    }
+    assert(s_eval_log_lines == 0U);
+    g_rix_test_log = test_log_wrapper;
+    printf("PASS: test_eval_fallback_is_silent\n");
+}
+
 
 /* 1. Direct state mapper test */
 static void test_state_mapper_fallback_rules(void)
@@ -380,6 +410,7 @@ static void test_texture_env_modes(void)
 
     memset(texels, 0xff, sizeof(texels));
     assert(minigl_rix_backend_upload_texture(&backend, 1, 0, texels, 64, 64, 0));
+    assert(s_mock.cache_cleans != 0U);
     minigl_rix_backend_bind_texture(&backend, 0U, 1U);
     minigl_rix_backend_tex_params(&backend, 1, 0x2600U, 0x2600U, 0x2901U, 0x2901U);
 
@@ -1104,6 +1135,31 @@ static uint32_t submit_single_command(mw_ctx *c, uint32_t opcode,
     return mw_host_submit(c, packet, packet_bytes);
 }
 
+static void test_closing_nonowning_context_retires_its_target(void)
+{
+    MiniGLRixPlatform platform;
+    mw_ctx *wire;
+    mw_ctx *app;
+    const uint32_t *target;
+    uint8_t clear[24] = { 0 };
+
+    setup_mock_platform(&s_mock, &platform);
+    minigl_raster_set_rix_platform(&platform);
+    wire = mw_host_create(2U, 2U);
+    assert(wire != NULL);
+    app = mw_host_create(2U, 2U);
+    assert(app != NULL);
+    assert(submit_single_command(wire, MW_CLEAR, clear, sizeof(clear)) ==
+           MW_STATUS_OK);
+    target = minigl_raster_color_buffer();
+    assert(target == wire->color_buffers[wire->state.target.back]);
+    mw_host_destroy(wire);
+    assert(minigl_raster_color_buffer() != target);
+    mw_host_destroy(app);
+    minigl_raster_set_rix_platform(NULL);
+    printf("PASS: test_closing_nonowning_context_retires_its_target\n");
+}
+
 static void test_wire_cpu_handoffs(void)
 {
     MiniGLRixPlatform platform;
@@ -1494,6 +1550,7 @@ int main(void)
     g_rix_test_log = test_log_wrapper;
     printf("Starting Wire-v9 RasterIX Mapper Tests...\n");
     test_platform_probe_guard();
+    test_eval_fallback_is_silent();
     test_fifo_depth_packet_boundaries();
     test_state_mapper_fallback_rules();
     test_texture_env_modes();
@@ -1505,6 +1562,7 @@ int main(void)
     test_rasterix_rgb565_present_formats();
     test_second_context_keeps_first_frame();
     test_points_render_on_rasterix();
+    test_closing_nonowning_context_retires_its_target();
     test_triangles_sample_pixel_centres();
     test_backend_disable_cpu_rerender_present();
     test_wire_cpu_handoffs();

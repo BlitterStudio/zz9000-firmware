@@ -1,19 +1,42 @@
 {
     "schema_version":  1,
     "variants":  {
+                     "zorro3-aga":  {
+                                        "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga.bit",
+                                        "sha256":  "32d6c1b3369043defb01e8d8acc3c005d0615d314b2b3add7e4ed21469de90b4",
+                                        "source_revision":  "bcdd1995235ad57decefe3a32633e47ba88c8969",
+                                        "build_id":  "bcdd1995",
+                                        "placement_directive":  "Explore",
+                                        "pixel_slack_ns":  {
+                                                               "setup":  0.161,
+                                                               "hold":  0.007
+                                                           },
+                                        "overall_slack_ns":  {
+                                                                 "setup":  0.161,
+                                                                 "hold":  0.007
+                                                             },
+                                        "i2s_slack_ns":  {
+                                                             "setup":  1.099
+                                                         },
+                                        "sii9022_slack_ns":  {
+                                                                 "setup":  2.279,
+                                                                 "hold":  0.714
+                                                             },
+                                        "gate_passed":  true
+                                    },
                      "zorro3":  {
                                     "bitstream":  "bootimage_work/zz9000_ps_wrapper.bit",
-                                    "sha256":  "5ddb874d52117f00ffce4ed4391e9ca08ae01a7818a3ac1e425d0643d5340669",
-                                    "source_revision":  "3efb593301ef589d7e2304fc418fb445d37894c2",
-                                    "build_id":  "3efb5933",
-                                    "placement_directive":  "Explore",
+                                    "sha256":  "d999ee782ae7f90bd15704b38790fbaaa5d30299b88af98137e83815322521a2",
+                                    "source_revision":  "bcdd1995235ad57decefe3a32633e47ba88c8969",
+                                    "build_id":  "bcdd1995",
+                                    "placement_directive":  "Default",
                                     "pixel_slack_ns":  {
-                                                           "setup":  0.174,
-                                                           "hold":  0.008
+                                                           "setup":  0.3,
+                                                           "hold":  0.051
                                                        },
                                     "overall_slack_ns":  {
-                                                             "setup":  0.174,
-                                                             "hold":  0.008
+                                                             "setup":  0.17,
+                                                             "hold":  0.051
                                                          },
                                     "i2s_slack_ns":  {
                                                          "setup":  1.099
@@ -26,17 +49,17 @@
                                 },
                      "zorro2":  {
                                     "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit",
-                                    "sha256":  "458c10fe5af0b5faf13c68dfecbd869c200fe33c6d1ecbcad218e68ceae4399a",
-                                    "source_revision":  "3efb593301ef589d7e2304fc418fb445d37894c2",
-                                    "build_id":  "3efb5933",
+                                    "sha256":  "a3c218ad66ed7814a911985414bab32afa30c091d596dbf913e89b28a807072a",
+                                    "source_revision":  "bcdd1995235ad57decefe3a32633e47ba88c8969",
+                                    "build_id":  "bcdd1995",
                                     "placement_directive":  "Default",
                                     "pixel_slack_ns":  {
-                                                           "setup":  0.294,
-                                                           "hold":  0.023
+                                                           "setup":  0.227,
+                                                           "hold":  0.008
                                                        },
                                     "overall_slack_ns":  {
-                                                             "setup":  0.294,
-                                                             "hold":  0.023
+                                                             "setup":  0.227,
+                                                             "hold":  0.008
                                                          },
                                     "i2s_slack_ns":  {
                                                          "setup":  1.099
@@ -47,42 +70,19 @@
                                                          },
                                     "gate_passed":  true
                                 },
-                     "zorro3-aga":  {
-                                        "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga.bit",
-                                        "sha256":  "2fc1c8d2858a9b389a40698ea64fb7ce5ec2467895b32f23178a0c7a68dbf2cc",
-                                        "source_revision":  "3efb593301ef589d7e2304fc418fb445d37894c2",
-                                        "build_id":  "3efb5933",
-                                        "placement_directive":  "Default",
-                                        "pixel_slack_ns":  {
-                                                               "setup":  0.183,
-                                                               "hold":  0.012
-                                                           },
-                                        "overall_slack_ns":  {
-                                                                 "setup":  0.183,
-                                                                 "hold":  0.011
-                                                             },
-                                        "i2s_slack_ns":  {
-                                                             "setup":  1.099
-                                                         },
-                                        "sii9022_slack_ns":  {
-                                                                 "setup":  2.279,
-                                                                 "hold":  0.714
-                                                             },
-                                        "gate_passed":  true
-                                    },
                      "zorro2-2mb":  {
                                         "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit",
-                                        "sha256":  "3f9dbabe341ccad7d3cc0811856c06b5fa9f9256d68eb5a058ed028c338ced60",
-                                        "source_revision":  "3efb593301ef589d7e2304fc418fb445d37894c2",
-                                        "build_id":  "3efb5933",
+                                        "sha256":  "1f7bff6890488a6e0e3db649002f62f130992c7c9858d9b767e4b23d77cf589f",
+                                        "source_revision":  "bcdd1995235ad57decefe3a32633e47ba88c8969",
+                                        "build_id":  "bcdd1995",
                                         "placement_directive":  "Default",
                                         "pixel_slack_ns":  {
-                                                               "setup":  0.31,
-                                                               "hold":  0.009
+                                                               "setup":  0.271,
+                                                               "hold":  0.016
                                                            },
                                         "overall_slack_ns":  {
-                                                                 "setup":  0.31,
-                                                                 "hold":  0.009
+                                                                 "setup":  0.271,
+                                                                 "hold":  0.016
                                                              },
                                         "i2s_slack_ns":  {
                                                              "setup":  1.099
@@ -95,17 +95,17 @@
                                     },
                      "a500":  {
                                   "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-a500.bit",
-                                  "sha256":  "86ca04bfc56e75b92cb52f4f599b9ce83be095f72ccd773d452890ebd59d1226",
-                                  "source_revision":  "43c9639ad82a80b8c90699dfe8fa40e106776442",
-                                  "build_id":  "43c9639a",
+                                  "sha256":  "cbbb77bb0dc9e3bfafb7b6f2de95f8ecb61a17f04daa69a26c153fad46a4f628",
+                                  "source_revision":  "bcdd1995235ad57decefe3a32633e47ba88c8969",
+                                  "build_id":  "bcdd1995",
                                   "placement_directive":  "Default",
                                   "pixel_slack_ns":  {
-                                                         "setup":  0.11,
-                                                         "hold":  0.025
+                                                         "setup":  0.381,
+                                                         "hold":  0.023
                                                      },
                                   "overall_slack_ns":  {
-                                                           "setup":  0.11,
-                                                           "hold":  0.025
+                                                           "setup":  0.381,
+                                                           "hold":  0.02
                                                        },
                                   "i2s_slack_ns":  {
                                                        "setup":  1.099
@@ -118,17 +118,17 @@
                               },
                      "a500-2mb":  {
                                       "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-a500-2mb.bit",
-                                      "sha256":  "15fbc0f34b3c3280fb588f39d91d4371cb5d5d0c96c190501ab9685e7548cfab",
-                                      "source_revision":  "43c9639ad82a80b8c90699dfe8fa40e106776442",
-                                      "build_id":  "43c9639a",
+                                      "sha256":  "80343028bef97f79d9cdbe1fdeab8476c0a8c3768c2d4617e22ddb895c25d6bd",
+                                      "source_revision":  "bcdd1995235ad57decefe3a32633e47ba88c8969",
+                                      "build_id":  "bcdd1995",
                                       "placement_directive":  "Default",
                                       "pixel_slack_ns":  {
-                                                             "setup":  0.197,
-                                                             "hold":  0.016
+                                                             "setup":  0.272,
+                                                             "hold":  0.014
                                                          },
                                       "overall_slack_ns":  {
-                                                               "setup":  0.197,
-                                                               "hold":  0.015
+                                                               "setup":  0.272,
+                                                               "hold":  0.013
                                                            },
                                       "i2s_slack_ns":  {
                                                            "setup":  1.099
@@ -141,17 +141,17 @@
                                   },
                      "a500plus":  {
                                       "bitstream":  "bootimage_work/variants/zz9000_ps_wrapper-a500plus.bit",
-                                      "sha256":  "d8dbf78725bdcc9cf4c70c72e923a366470efc81df6656bfdaa6f30480e1255a",
-                                      "source_revision":  "43c9639ad82a80b8c90699dfe8fa40e106776442",
-                                      "build_id":  "43c9639a",
+                                      "sha256":  "35d213d1ec7e38427d7f44cd499d683985cea89c6c5b42f23368bf8487790d6b",
+                                      "source_revision":  "0538e87f75f37ef8e7c6750939c29867a1a23411",
+                                      "build_id":  "bcdd1995",
                                       "placement_directive":  "Default",
                                       "pixel_slack_ns":  {
-                                                             "setup":  0.11,
-                                                             "hold":  0.025
+                                                             "setup":  0.381,
+                                                             "hold":  0.023
                                                          },
                                       "overall_slack_ns":  {
-                                                               "setup":  0.11,
-                                                               "hold":  0.025
+                                                               "setup":  0.381,
+                                                               "hold":  0.02
                                                            },
                                       "i2s_slack_ns":  {
                                                            "setup":  1.099

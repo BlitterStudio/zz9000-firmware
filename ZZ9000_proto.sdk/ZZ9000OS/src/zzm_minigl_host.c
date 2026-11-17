@@ -5,6 +5,7 @@
 #include "memorymap.h"
 #include "sdk_aperture_layout.h"
 #include "rix_drv.h"
+#include "scheduler.h"
 
 #include <string.h>
 
@@ -15,6 +16,12 @@
 #include "xil_io.h"
 #include "xil_mmu.h"
 #include "l2_maint.h"
+#endif
+
+#if defined(MINIGL_HOST_TEST)
+#define ZZM_MINIGL_DSB() ((void)0)
+#else
+#define ZZM_MINIGL_DSB() __asm__ volatile("dsb sy" ::: "memory")
 #endif
 
 #define ZZM_RIX_CSR_BASE 0x83c60000U
@@ -70,6 +77,7 @@
 #define ZZM_MINIGL_DESCRIPTOR_WIRE_BYTES 84U
 #define ZZM_RIX_IDENTITY 0x52495831U
 #define ZZM_RIX_CSR_ABI_V2 0x00020000U
+#define ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT 32U
 
 static const zzm_minigl_ops_v1_t *g_ops;
 static const zzm_minigl_worker_ops_t *g_worker;
@@ -151,7 +159,7 @@ static void graphics_cache_invalidate(void *context, uintptr_t address, size_t b
 static void graphics_barrier(void *context)
 {
     (void)context;
-    __asm__ volatile("dsb sy" ::: "memory");
+    ZZM_MINIGL_DSB();
 }
 #endif
 
@@ -161,8 +169,10 @@ static void graphics_barrier(void *context)
 static uint8_t g_pl330_program[256] __attribute__((aligned(64)));
 static uint32_t g_dmac_base;
 static uint32_t g_pl330_expect;   /* SAR value that proves the launch finished */
+static int g_pl330_launch_pending;
+static int g_pl330_abort_phase;
+static uint32_t g_pl330_abort_observations;
 static uint32_t g_dmac_go_ns;
-
 /* An APB access to an unclocked or reset DMAC can stall the interconnect, so
  * the SLCR (always readable) is checked before DSR.  The secure view's DSR is
  * readable whatever the manager state; DNS selects the view and the DMAGO ns
@@ -231,6 +241,55 @@ static void pl330_report(const char *step)
            (unsigned long)g_pl330_owner);
 }
 
+static int graphics_pl330_abort_nonblocking(void *context)
+{
+    uint32_t state;
+    int debug_idle = 0;
+
+    (void)context;
+    if (!g_pl330_claimed || !g_caps.has_pl330)
+        return RIX_DRV_DMA_COMPLETE;
+    if (g_pl330_launch_pending) {
+        if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) != 0U) {
+            if (++g_pl330_abort_observations >=
+                ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT)
+                return RIX_DRV_DMA_ERROR;
+            return RIX_DRV_DMA_PENDING;
+        }
+        g_pl330_launch_pending = 0;
+        debug_idle = 1;
+    }
+    if (g_pl330_abort_phase == 0) {
+        if (!debug_idle &&
+            (Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) != 0U) {
+            if (++g_pl330_abort_observations >=
+                ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT)
+                return RIX_DRV_DMA_ERROR;
+            return RIX_DRV_DMA_PENDING;
+        }
+        Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
+                  (ZZM_RIX_PL330_DMAKILL << 16U) |
+                  (ZZM_RIX_DMAC_CHANNEL << 8U) | 1U);
+        Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST1, 0U);
+        Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGCMD, 0U);
+        graphics_barrier(0);
+        g_pl330_abort_phase = 1;
+        g_pl330_abort_observations = 0U;
+        return RIX_DRV_DMA_PENDING;
+    }
+    state = Xil_In32(g_dmac_base + ZZM_RIX_DMAC_CSR(ZZM_RIX_DMAC_CHANNEL)) & 15U;
+    if (state != ZZM_RIX_DMAC_STOPPED) {
+        if (++g_pl330_abort_observations >=
+            ZZM_RIX_PL330_ABORT_OBSERVATION_LIMIT)
+            return RIX_DRV_DMA_ERROR;
+        return RIX_DRV_DMA_PENDING;
+    }
+    g_pl330_expect = 0U;
+    g_pl330_abort_phase = 0;
+    g_pl330_abort_observations = 0U;
+    return RIX_DRV_DMA_COMPLETE;
+}
+
 static void graphics_pl330_abort(void *context)
 {
     (void)context;
@@ -244,20 +303,35 @@ static void graphics_pl330_abort(void *context)
         graphics_barrier(0);
     }
     g_pl330_claimed = 0;
+    /* A completed synchronous recovery starts the next feed from a fresh
+     * launch/abort handshake. */
+    g_pl330_expect = 0U;
+    g_pl330_launch_pending = 0;
+    g_pl330_abort_phase = 0;
+    g_pl330_abort_observations = 0U;
 }
 
 static int graphics_pl330_retire(void *context);
 
-static int graphics_pl330_start_async(void *context, uintptr_t source,
-                                      uint32_t words, uint32_t burst_words)
+static int graphics_pl330_start_async_impl(void *context, uintptr_t source,
+                                           uint32_t words, uint32_t burst_words,
+                                           int nonblocking)
 {
     uint8_t *program = g_pl330_program;
     uint32_t blocks = words / 16U, tail = words % 16U, attempt;
     unsigned offset = 0U, body, loop;
 
     (void)context;
+    if (nonblocking && g_pl330_launch_pending) {
+        if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) != 0U)
+            return RIX_DRV_DMA_PENDING;
+        g_pl330_launch_pending = 0;
+        return RIX_DRV_DMA_COMPLETE;
+    }
     if (!g_pl330_claimed || source == 0U || words == 0U ||
         words > ZZM_RIX_DMA_MAX_WORDS || burst_words != 16U) {
+        if (nonblocking)
+            return RIX_DRV_DMA_ERROR;
         pl330_report(!g_pl330_claimed ? "start: not claimed" : "start: bad request");
         return 0;
     }
@@ -297,16 +371,21 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
     program[offset++] = ZZM_RIX_PL330_DMAEND;
     if (offset > sizeof(g_pl330_program)) {
         pl330_report("start: program overflow");
-        return 0;
+        return nonblocking ? RIX_DRV_DMA_ERROR : 0;
     }
     Xil_DCacheFlushRange((INTPTR)program, (u32)sizeof(g_pl330_program));
     graphics_barrier(0);
-    for (attempt = 0U; attempt < 100000U; ++attempt)
-        if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
-            break;
-    if (attempt == 100000U) {
-        pl330_report("start: debug interface busy");
-        return 0;
+    if (nonblocking) {
+        if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) != 0U)
+            return RIX_DRV_DMA_PENDING;
+    } else {
+        for (attempt = 0U; attempt < 100000U; ++attempt)
+            if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
+                break;
+        if (attempt == 100000U) {
+            pl330_report("start: debug interface busy");
+            return 0;
+        }
     }
     Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
               ((ZZM_RIX_PL330_DMAGO | g_dmac_go_ns) << 16U) |
@@ -316,21 +395,33 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
     graphics_barrier(0);
     Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGCMD, 0U);
     graphics_barrier(0);
+    g_pl330_expect = (uint32_t)source + words * sizeof(uint32_t);
+    if (nonblocking) {
+        g_pl330_launch_pending = 1;
+        return RIX_DRV_DMA_PENDING;
+    }
     for (attempt = 0U; attempt < 100000U; ++attempt)
         if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_DBGSTATUS) & 1U) == 0U)
             break;
     if (attempt == 100000U)
         goto kill;
-    /* The debug instruction is accepted and the channel is running; the
-     * transfer is retired by the caller (graphics_pl330_retire) before the
-     * next launch, so the single program buffer is never rewritten while
-     * the channel still executes it. */
-    g_pl330_expect = (uint32_t)source + words * sizeof(uint32_t);
     return 1;
 kill:
     pl330_report("start: DMAGO not accepted");
     graphics_pl330_abort(0);
     return 0;
+}
+
+static int graphics_pl330_start_async(void *context, uintptr_t source,
+                                      uint32_t words, uint32_t burst_words)
+{
+    return graphics_pl330_start_async_impl(context, source, words, burst_words, 0);
+}
+
+static int graphics_pl330_start_nonblocking(void *context, uintptr_t source,
+                                            uint32_t words, uint32_t burst_words)
+{
+    return graphics_pl330_start_async_impl(context, source, words, burst_words, 1);
 }
 
 /* Proves the launched transfer completed: channel stopped with every word
@@ -362,6 +453,30 @@ static int graphics_pl330_retire(void *context)
     return 0;
 }
 
+/* A single nonblocking channel-state observation for the resumable FIFO
+ * feeder.  The stopped-state SAR check preserves the retire proof without
+ * waiting for a running channel. */
+static int graphics_pl330_complete(void *context)
+{
+    uint32_t state;
+
+    (void)context;
+    if (!g_pl330_claimed || g_pl330_expect == 0U)
+        return -1;
+    state = Xil_In32(g_dmac_base +
+                     ZZM_RIX_DMAC_CSR(ZZM_RIX_DMAC_CHANNEL)) & 15U;
+    if (state == ZZM_RIX_DMAC_STOPPED) {
+        if (Xil_In32(g_dmac_base + ZZM_RIX_DMAC_SAR(ZZM_RIX_DMAC_CHANNEL)) !=
+            g_pl330_expect)
+            return -1;
+        return 1;
+    }
+    if (state == ZZM_RIX_DMAC_FAULTING_COMPLETING ||
+        state == ZZM_RIX_DMAC_FAULTING)
+        return -1;
+    return 0;
+}
+
 static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
                                 uint32_t burst_words)
 {
@@ -380,6 +495,12 @@ static void graphics_pl330_abort(void *context)
     (void)context;
     g_pl330_claimed = 0;
 }
+
+static int graphics_pl330_abort_nonblocking(void *context)
+{
+    (void)context;
+    return RIX_DRV_DMA_ERROR;
+}
 static int graphics_pl330_start_async(void *context, uintptr_t source,
                                       uint32_t words, uint32_t burst_words)
 {
@@ -390,10 +511,26 @@ static int graphics_pl330_start_async(void *context, uintptr_t source,
     return 0;
 }
 
+static int graphics_pl330_start_nonblocking(void *context, uintptr_t source,
+                                            uint32_t words, uint32_t burst_words)
+{
+    (void)context;
+    (void)source;
+    (void)words;
+    (void)burst_words;
+    return -1;
+}
+
 static int graphics_pl330_retire(void *context)
 {
     (void)context;
     return 0;
+}
+
+static int graphics_pl330_complete(void *context)
+{
+    (void)context;
+    return -1;
 }
 
 static int graphics_pl330_start(void *context, uintptr_t source, uint32_t words,
@@ -535,11 +672,22 @@ static int graphics_v3_pl330_claim(uint32_t owner, uint32_t *channel_out)
      * module but resets none of this hardware, and the next session then
      * found the transport dead and fell back to CPU rendering until power
      * cycle.  Clear all of it before the new context's self-test. */
+    uint32_t attempt;
+
     Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST0,
               (ZZM_RIX_PL330_DMAKILL << 16U) |
               (ZZM_RIX_DMAC_CHANNEL << 8U) | 1U);
     Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGINST1, 0U);
     Xil_Out32(g_dmac_base + ZZM_RIX_DMAC_DBGCMD, 0U);
+    graphics_barrier(0);
+    for (attempt = 0U; attempt < 1000000U; ++attempt)
+        if ((Xil_In32(g_dmac_base + ZZM_RIX_DMAC_CSR(ZZM_RIX_DMAC_CHANNEL)) &
+             15U) == ZZM_RIX_DMAC_STOPPED)
+            break;
+    if (attempt == 1000000U) {
+        pl330_report("claim: channel did not stop");
+        return 0;
+    }
     g_pl330_expect = 0U;
     Xil_Out32(ZZM_RIX_FIFO_BASE + ZZM_RIX_FIFO_TDFR, ZZM_RIX_FIFO_RESET_KEY);
     Xil_Out32(ZZM_RIX_FIFO_BASE + ZZM_RIX_FIFO_ISR, 0xffffffffU);
@@ -575,6 +723,30 @@ static int graphics_v3_pl330_retire(uint32_t channel)
         return 0;
     return graphics_pl330_retire(0);
 }
+
+static int graphics_v3_pl330_complete(uint32_t channel)
+{
+    if (channel != ZZM_RIX_DMAC_CHANNEL)
+        return -1;
+    return graphics_pl330_complete(0);
+}
+
+static int graphics_v3_pl330_start_nonblocking(uint32_t channel,
+                                                uint32_t source_address,
+                                                uint32_t bytes)
+{
+    if (channel != ZZM_RIX_DMAC_CHANNEL || (bytes & 3U) != 0U)
+        return -1;
+    return graphics_pl330_start_nonblocking(0, source_address,
+                                            bytes / sizeof(uint32_t), 16U);
+}
+
+static int graphics_v3_pl330_abort_nonblocking(uint32_t channel)
+{
+    if (channel != ZZM_RIX_DMAC_CHANNEL)
+        return RIX_DRV_DMA_ERROR;
+    return graphics_pl330_abort_nonblocking(0);
+}
 static void graphics_v3_pl330_abort(uint32_t channel)
 {
     (void)channel;
@@ -593,6 +765,26 @@ static void graphics_v3_barrier(void)
     graphics_barrier(0);
 #endif
 }
+static void graphics_v3_publish_fence(uint32_t address, uint32_t sequence)
+{
+#if !defined(TASKQ_HOST_TEST) && !defined(MINIGL_HOST_TEST)
+    taskq_shared_t *sh = scheduler_shared();
+    uint32_t epoch;
+
+    if ((sh->minigl_rix_fence_epoch & 1U) == 0U)
+        ++sh->minigl_rix_fence_epoch;
+    ZZM_MINIGL_DSB();
+    sh->minigl_rix_fence_sequence = sequence;
+    sh->minigl_rix_fence_address = address;
+    ZZM_MINIGL_DSB();
+    epoch = sh->minigl_rix_fence_epoch + 1U;
+    sh->minigl_rix_fence_epoch = epoch == 0U ? 2U : epoch;
+#else
+    (void)address;
+    (void)sequence;
+#endif
+}
+
 
 static const zzm_graphics_hw_service_t graphics_hw_service = {
     ZZM_SERVICE_GRAPHICS_HW_V3, sizeof(graphics_hw_service),
@@ -601,7 +793,9 @@ static const zzm_graphics_hw_service_t graphics_hw_service = {
     graphics_v3_pl330_claim,
     graphics_v3_pl330_start, graphics_v3_pl330_start_async,
     graphics_v3_pl330_retire, graphics_v3_pl330_abort,
-    graphics_v3_pl330_release, graphics_v3_barrier
+    graphics_v3_pl330_release, graphics_v3_barrier,
+    graphics_v3_pl330_complete, graphics_v3_pl330_start_nonblocking,
+    graphics_v3_pl330_abort_nonblocking, graphics_v3_publish_fence
 };
 static int transport_publish_descriptor(uint32_t module_id,
                                         const void *descriptor,
@@ -620,7 +814,7 @@ static int transport_publish_descriptor(uint32_t module_id,
                                            SDK_MAILBOX_MINIGL_DESC_OFFSET);
     for (i = 0U; i < descriptor_bytes; ++i)
         slot[i] = source[i];
-    __asm__ volatile("dsb sy" ::: "memory");
+    ZZM_MINIGL_DSB();
     /*
      * These stores are non-cacheable, but the 68k reads through the ACP
      * (ARCACHE=0xF), which allocates PL310 lines and keeps hitting them.
@@ -656,7 +850,7 @@ static void transport_retract_descriptor(uint32_t module_id)
                                            SDK_MAILBOX_MINIGL_DESC_OFFSET);
     for (i = 0U; i < 256U; ++i)
         slot[i] = 0U;
-    __asm__ volatile("dsb sy" ::: "memory");
+    ZZM_MINIGL_DSB();
     l2_maint_l2_invalidate_range((intptr_t)(uintptr_t)slot, 256U);
 #else
     (void)module_id;
@@ -716,6 +910,9 @@ int zzm_minigl_register(const zzm_minigl_ops_v1_t *ops, void *context,
 {
     if (ops == 0 || worker_ops == 0 || ops->version != ZZM_MINIGL_OPS_V1 ||
         worker_ops->version != ZZM_MINIGL_WORKER_OPS_V1 ||
+        !table_has(ops->size, offsetof(zzm_minigl_ops_v1_t, reset_protocol) +
+                              sizeof(ops->reset_protocol)) ||
+        ops->reset_protocol != ZZM_MINIGL_RESET_PROTOCOL_V2 ||
         !table_has(ops->size, offsetof(zzm_minigl_ops_v1_t, app_reclaim) +
                               sizeof(ops->app_reclaim)) ||
         !table_has(worker_ops->size, offsetof(zzm_minigl_worker_ops_t, poll) +
@@ -820,27 +1017,37 @@ void zzm_minigl_test_set_poll_hook(void (*hook)(void))
 }
 #endif
 
-void zzm_minigl_service_tick(int in_api)
+int zzm_minigl_service_tick(int in_api)
 {
+    int worked;
+
     if (in_api || !g_worker || g_poll_active || !g_worker->has_work(g_context))
-        return;
+        return 0;
     g_poll_active = 1;
 #if defined(MINIGL_HOST_TEST)
     if (g_test_poll_hook)
         g_test_poll_hook();
 #endif
-    (void)g_worker->poll(g_context, ZZM_MINIGL_POLL_BUDGET);
+    worked = g_worker->poll(g_context, ZZM_MINIGL_POLL_BUDGET) != 0;
     g_poll_active = 0;
+    return worked;
 }
 
 int zzm_minigl_begin_reset(void)
 {
+    int result;
+
     if (g_reset_active)
         return ZZM_MINIGL_RESET_BUSY;
     if (!g_ops || !g_ops->begin_reset)
         return ZZM_MINIGL_RESET_QUIESCENT;
     g_reset_active = 1;
-    return g_ops->begin_reset(g_context);
+    result = g_ops->begin_reset(g_context);
+    /* Only a reset the module is still draining is continued by polls; a
+     * finished or failed one leaves the next request free to start. */
+    if (result != ZZM_MINIGL_RESET_BUSY)
+        g_reset_active = 0;
+    return result;
 }
 
 int zzm_minigl_reset_poll(void)
@@ -853,6 +1060,17 @@ int zzm_minigl_reset_poll(void)
     result = g_ops->reset_poll(g_context);
     if (result != ZZM_MINIGL_RESET_BUSY)
         g_reset_active = 0;
+    return result;
+}
+
+int zzm_minigl_reset_step(void)
+{
+    int result = zzm_minigl_begin_reset();
+
+    /* BUSY from begin is a reset in progress, this one or an earlier
+     * request's: only polling moves it on. */
+    if (result == ZZM_MINIGL_RESET_BUSY)
+        result = zzm_minigl_reset_poll();
     return result;
 }
 
@@ -869,10 +1087,10 @@ void zzm_minigl_abort_reset(void)
     if (g_ops != 0 && g_caps.has_rasterix_ef) {
         graphics_recovery_step(2U, "RasterIX control disable");
         Xil_Out32(ZZM_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
-        __asm__ volatile("dsb sy" ::: "memory");
+        ZZM_MINIGL_DSB();
         graphics_recovery_step(4U, "RasterIX FIFO reset");
         Xil_Out32(ZZM_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
-        __asm__ volatile("dsb sy" ::: "memory");
+        ZZM_MINIGL_DSB();
     }
 #endif
     zzm_minigl_on_core1_fault();
@@ -889,6 +1107,67 @@ void zzm_minigl_on_core1_fault(void)
     g_doorbell_installed = 0;
     g_module_capabilities = 0U;
     graphics_pl330_abort(0);
+}
+int zzm_minigl_rasterix_active(void)
+{
+    return (g_module_capabilities & ZZM_MINIGL_CAP_RASTERIX) != 0U;
+}
+int zzm_minigl_rasterix_idle(void)
+{
+#if !defined(TASKQ_HOST_TEST) && !defined(MINIGL_HOST_TEST)
+    return g_caps.has_rasterix_ef &&
+           (graphics_csr_read(0, RIX_DRV_CSR_STATUS) & RIX_DRV_STATUS_IDLE) != 0U;
+#else
+    return 0;
+#endif
+}
+
+
+int zzm_minigl_fence_snapshot(uint32_t *address, uint32_t *sequence)
+{
+#if !defined(TASKQ_HOST_TEST) && !defined(MINIGL_HOST_TEST)
+    taskq_shared_t *sh = scheduler_shared();
+    uint32_t begin;
+    uint32_t end;
+    uint32_t attempts;
+
+    if (!address || !sequence)
+        return 0;
+    for (attempts = 0U; attempts < 1024U; ++attempts) {
+        begin = sh->minigl_rix_fence_epoch;
+        ZZM_MINIGL_DSB();
+        if (begin & 1U)
+            continue;
+        *address = sh->minigl_rix_fence_address;
+        *sequence = sh->minigl_rix_fence_sequence;
+        ZZM_MINIGL_DSB();
+        end = sh->minigl_rix_fence_epoch;
+        if (begin == end && (end & 1U) == 0U)
+            return *address != 0U;
+    }
+    return -1;
+#else
+    (void)address;
+    (void)sequence;
+    return 0;
+#endif
+}
+
+void zzm_minigl_forget_fence(void)
+{
+#if !defined(TASKQ_HOST_TEST) && !defined(MINIGL_HOST_TEST)
+    taskq_shared_t *sh = scheduler_shared();
+    uint32_t epoch;
+
+    if ((sh->minigl_rix_fence_epoch & 1U) == 0U)
+        ++sh->minigl_rix_fence_epoch;
+    ZZM_MINIGL_DSB();
+    sh->minigl_rix_fence_sequence = 0U;
+    sh->minigl_rix_fence_address = 0U;
+    ZZM_MINIGL_DSB();
+    epoch = sh->minigl_rix_fence_epoch + 1U;
+    sh->minigl_rix_fence_epoch = epoch == 0U ? 2U : epoch;
+#endif
 }
 
 void zzm_minigl_boot_caps_init(uint32_t image_flavour)

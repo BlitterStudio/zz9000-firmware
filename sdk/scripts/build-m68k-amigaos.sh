@@ -23,7 +23,9 @@ CFLAGS="-fcommon -noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
 STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
 
-m68k-amigaos-gcc $CFLAGS -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o
+m68k-amigaos-gcc $CFLAGS -Iamiga/include -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o
+m68k-amigaos-gcc $CFLAGS -Iamiga/include -DZZ9K_HOST_LIBRARY_BUILD=1 \
+  -c host/src/zz9k_host.c -o build/m68k/zz9k_host_library.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_app_client.c -o build/m68k/zz9k_app_client.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
@@ -54,7 +56,7 @@ ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-xml.c tools/zzplay/zzplay-pr
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-browse.c tools/zzplay/zzplay-browse-model.c tools/zzplay/zzplay-browse-rows.c tools/zzplay/zzplay-browse-worker.c tools/zzplay/zzplay-browse-gather.c"
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
-  build/m68k/zz9k_app_client.o build/m68k/zz9k_host.o -o build/zz9k.library
+  build/m68k/zz9k_app_client.o build/m68k/zz9k_host_library.o -o build/zz9k.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   amiga/mpega/mpega_resident.c -o build/mpega.library
 

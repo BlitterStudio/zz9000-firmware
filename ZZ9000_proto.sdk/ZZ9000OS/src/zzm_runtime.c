@@ -141,6 +141,20 @@ static zzm_runtime_owner_t *find_runtime_owner(uint32_t owner)
     return 0;
 }
 
+void zzm_runtime_quarantine_owner(uint32_t owner)
+{
+    card_pool_quarantine_owner(&card_pool, owner);
+}
+
+void zzm_runtime_quarantine_module(uint32_t module_id)
+{
+    (void)module_id;
+    /* A cold core-1 restart has no proof for any MiniGL allocation. Scan on
+     * every restart: owners created after an earlier recovery are just as
+     * unsafe as the old ones. */
+    card_pool_quarantine_minigl(&card_pool);
+}
+
 static uint32_t minigl_used(void)
 {
     uint32_t i;
@@ -513,9 +527,12 @@ static uint32_t module_quota_used(uint32_t owner, uint32_t owner_class)
 
 static uint32_t module_close_owner(uint32_t owner)
 {
+    zzm_runtime_owner_t *record = find_runtime_owner(owner);
     uint32_t i;
     uint32_t released = 0U;
 
+    if (!record)
+        return 0U;
     for (i = 0U; i < ZZM_RUNTIME_MAX_OWNERS; ++i) {
         if (runtime_owners[i].parent_owner == owner)
             released += module_close_owner(runtime_owners[i].owner);
@@ -826,6 +843,13 @@ static int module_app_flip_idle(uint32_t generation)
            zzapp_display_flip_idle();
 }
 
+static int module_app_wait_flip(uint32_t generation)
+{
+    if (generation != zzapp_current_generation())
+        return -1;
+    return zzapp_display_wait_flip_idle();
+}
+
 static int module_profile_register(uint32_t module_id, const char *name,
                                    uint32_t *counter_out)
 {
@@ -973,7 +997,7 @@ static const zzm_cache_service_t cache_service = {
 static const zzm_reclaim_service_t reclaim_service = {
     ZZM_SERVICE_RECLAIM_V3, sizeof(reclaim_service), module_release_owner,
     module_create_owner, module_close_owner, module_close_owner,
-    module_owner_refcount
+    module_owner_refcount, zzm_runtime_quarantine_owner
 };
 static const zzm_host_window_service_t host_window_service = {
     ZZM_SERVICE_HOST_WINDOW_V3, sizeof(host_window_service),
@@ -987,7 +1011,8 @@ static const zzm_app_gl_host_service_t app_gl_host_service = {
     ZZM_SERVICE_APP_GL_HOST_V3, sizeof(app_gl_host_service), zzapp_api_enter,
     zzapp_api_leave, zzapp_display_bound, module_app_flip_bound,
     module_app_flip_idle, zzapp_current_generation, zzapp_display_layout,
-    zzapp_services_flags, zzapp_services_stop_requested, zzapp_host_yield_wait
+    zzapp_services_flags, zzapp_services_stop_requested, zzapp_host_yield_wait,
+    module_app_wait_flip
 };
 static const zzm_profile_service_t profile_service = {
     ZZM_SERVICE_PROFILE_V3, sizeof(profile_service), module_profile_register,

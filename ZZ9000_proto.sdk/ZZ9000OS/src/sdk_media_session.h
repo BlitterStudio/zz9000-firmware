@@ -92,6 +92,10 @@ int sdk_media_session_audio_uses_ring(uint32_t codec);
 uint16_t sdk_media_session_begin(
 	const struct SDKMediaSessionBegin *begin,
 	struct SDKMediaSessionMainResult *result);
+uint16_t sdk_media_session_begin_owned(
+	const struct SDKMediaSessionBegin *begin, uint16_t owner_id,
+	struct SDKMediaSessionMainResult *result);
+int sdk_media_session_release_client(uint16_t owner_id, uint32_t *close_session);
 uint16_t sdk_media_session_write(
 	const struct SDKMediaSessionWrite *write,
 	struct SDKMediaSessionMainResult *result);

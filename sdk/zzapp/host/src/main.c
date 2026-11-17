@@ -1,6 +1,6 @@
 /*
  * Host runner entry. Parses launcher options, installs a fully populated
- * API 0.2 table, and calls zz_main. argv[0] is the program name, as on the
+ * API 0.3 table, and calls zz_main. argv[0] is the program name, as on the
  * card. zz_exit does not return.
  *
  * SPDX-License-Identifier: MIT

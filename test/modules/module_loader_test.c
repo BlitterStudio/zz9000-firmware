@@ -1,11 +1,16 @@
+#include <sys/mman.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "sdk_crypto.h"
+#include "sdk_image_stream.h"
+#include "sdk_video_stream.h"
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
-#include "ff.h"
 #include "zzm_runtime.h"
-
+#include "ff.h"
 
 /* Single-threaded host backing for the loader's cross-core session lock. */
 int smp_cpu_id(void) { return 0; }
@@ -22,28 +27,68 @@ int smp_raw_spin_try_lock(volatile uint32_t *word)
 static unsigned loader_open_calls;
 static unsigned loader_close_calls;
 static FRESULT loader_open_result;
-static const uint8_t *loader_file_data;
-static uint32_t loader_file_size;
+struct loader_file {
+    const uint8_t *data;
+    uint32_t size;
+};
+static struct loader_file loader_files[8];
 static uint32_t loader_file_offset;
 static int loader_minigl_file_only;
+static uint32_t loader_read_limit = UINT32_MAX;
+static uint32_t loader_fail_offset = UINT32_MAX;
+
+static int loader_file_index(const char *path)
+{
+    uint32_t i;
+
+    for (i = 0U; i < zzm_slot_count; i++)
+        if (strstr(path, zzm_slots[i].name))
+            return (int)i;
+    return -1;
+}
+
+static void set_loader_module_file(uint32_t module_id, const uint8_t *data,
+                                   uint32_t size)
+{
+    uint32_t i;
+
+    for (i = 0U; i < zzm_slot_count; i++)
+        if (zzm_slots[i].id == module_id) {
+            loader_files[i].data = data;
+            loader_files[i].size = size;
+            return;
+        }
+}
 
 static void set_loader_file(const uint8_t *data, uint32_t size,
                             int minigl_file_only)
 {
-    loader_file_data = data;
-    loader_file_size = size;
+    uint32_t i;
+
+    for (i = 0U; i < zzm_slot_count; i++) {
+        loader_files[i].data = data;
+        loader_files[i].size = size;
+    }
     loader_minigl_file_only = minigl_file_only;
+    loader_read_limit = UINT32_MAX;
+    loader_fail_offset = UINT32_MAX;
 }
 
 FRESULT f_open(FIL *file, const char *path, unsigned char mode)
 {
+    int index;
+
     (void)mode;
     loader_open_calls++;
     if (loader_minigl_file_only && strstr(path, "/MINIGL.ZZM") == 0)
         return FR_NO_FILE;
     if (loader_open_result != FR_OK)
         return loader_open_result;
-    file->size = loader_file_size;
+    index = loader_file_index(path);
+    if (index < 0 || !loader_files[index].data)
+        return FR_NO_FILE;
+    file->id = (uint32_t)index;
+    file->size = loader_files[index].size;
     loader_file_offset = 0U;
     return FR_OK;
 }
@@ -58,12 +103,15 @@ FRESULT f_lseek(FIL *file, FSIZE_t offset)
 
 FRESULT f_read(FIL *file, void *buffer, UINT length, UINT *read)
 {
-    if (!loader_file_data || loader_file_offset > file->size ||
+    const struct loader_file *source = &loader_files[file->id];
+
+    if (!source->data || loader_file_offset > file->size ||
+        length > loader_read_limit || loader_file_offset >= loader_fail_offset ||
         length > file->size - loader_file_offset) {
         *read = 0U;
         return FR_NOT_READY;
     }
-    memcpy(buffer, loader_file_data + loader_file_offset, length);
+    memcpy(buffer, source->data + loader_file_offset, length);
     loader_file_offset += length;
     *read = length;
     return FR_OK;
@@ -76,6 +124,25 @@ FRESULT f_close(FIL *file)
     return FR_OK;
 }
 
+void sdk_sha256_init(sdk_sha256_context_t *ctx)
+{
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+void sdk_sha256_update(sdk_sha256_context_t *ctx, const uint8_t *data,
+                       uint32_t length)
+{
+    (void)ctx;
+    (void)data;
+    (void)length;
+}
+
+void sdk_sha256_final(sdk_sha256_context_t *ctx, uint8_t digest[32])
+{
+    memset(ctx, 0, sizeof(*ctx));
+    memset(digest, 0, 32U);
+}
+
 void sdk_sha256(const uint8_t *data, uint32_t length, uint8_t digest[32])
 {
     (void)data;
@@ -86,6 +153,20 @@ void sdk_sha256(const uint8_t *data, uint32_t length, uint8_t digest[32])
 const zzm_services_t *zzm_runtime_services(void)
 {
     return 0;
+}
+
+static const struct SDKVideoDecoderOps test_video_ops;
+
+const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
+                                                        uint32_t container)
+{
+    return codec == SDK_VIDEO_CODEC_MPEG2 &&
+           container == SDK_VIDEO_CONTAINER_MPEG_PS ? &test_video_ops : 0;
+}
+
+void overlay_video_session_closed(uint32_t session)
+{
+    (void)session;
 }
 
 static int failures;
@@ -207,6 +288,277 @@ static void check_kit_minigl(const char *path)
     free(contents);
 }
 
+static void test_legacy_module_load_is_sliced(void)
+{
+    const uint32_t image_size = 128U * 1024U;
+    const uint32_t file_size = ZZM_HEADER_SIZE + image_size;
+    uint8_t *file = calloc(1U, file_size);
+    zzm_header_t header = valid_header(image_size);
+    zzm_status_t status;
+    void *slot;
+
+    CHECK(file != NULL);
+    if (!file)
+        return;
+    slot = mmap((void *)(uintptr_t)header.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED) {
+        free(file);
+        return;
+    }
+    memcpy(file, &header, sizeof(header));
+    loader_open_calls = 0U;
+    loader_close_calls = 0U;
+    loader_open_result = FR_OK;
+    set_loader_file(file, file_size, 0);
+    loader_read_limit = 12U * 1024U;
+    zzm_loader_boot_load();
+    CHECK(zzm_loader_acquire(ZZM_MODULE_MPEG2) == ZZM_LOAD_IN_PROGRESS);
+    CHECK(zzm_loader_acquire(ZZM_MODULE_MPEG2) == ZZM_LOAD_IN_PROGRESS);
+    CHECK(zzm_loader_test_work_kind() == ZZM_LOADER_TEST_WORK_READ_HASH);
+    CHECK(zzm_loader_test_work_bytes() == 12U * 1024U);
+    CHECK(loader_file_offset == ZZM_HEADER_SIZE + 12U * 1024U);
+    zzm_loader_cancel_loading(ZZM_MODULE_MPEG2);
+    CHECK(zzm_loader_status_by_id(ZZM_MODULE_MPEG2, &status));
+    CHECK(status.state == ZZM_STATE_AVAILABLE);
+    CHECK(status.ref_count == 0U);
+    CHECK(munmap(slot, 2U << 20) == 0);
+    free(file);
+}
+
+static void check_v1_poison(const uint8_t *slot, uint32_t bytes)
+{
+    uint32_t offset;
+
+    for (offset = 0U; offset + sizeof(uint32_t) <= bytes;
+         offset += sizeof(uint32_t))
+        CHECK(*(const uint32_t *)(const void *)(slot + offset) ==
+              ZZM_POISON_WORD);
+    for (; offset < bytes; offset++)
+        CHECK(slot[offset] == 0xf0U);
+}
+
+static void check_zero(const uint8_t *bytes, uint32_t count)
+{
+    uint32_t offset;
+
+    for (offset = 0U; offset < count; offset++)
+        CHECK(bytes[offset] == 0U);
+}
+
+static void check_loader_work_bound(void)
+{
+    uint32_t bytes = zzm_loader_test_work_bytes();
+
+    switch (zzm_loader_test_work_kind()) {
+    case ZZM_LOADER_TEST_WORK_READ_HASH:
+        CHECK(bytes <= 12U * 1024U);
+        break;
+    case ZZM_LOADER_TEST_WORK_BSS_ZERO:
+    case ZZM_LOADER_TEST_WORK_DCACHE_FLUSH:
+    case ZZM_LOADER_TEST_WORK_ICACHE_INVALIDATE:
+    case ZZM_LOADER_TEST_WORK_POISON:
+        CHECK(bytes <= 64U * 1024U);
+        break;
+    default:
+        break;
+    }
+}
+
+static void test_legacy_module_load_lifecycle(void)
+{
+    const uint32_t image_size = 128U * 1024U;
+    const uint32_t bss_size = 128U * 1024U;
+    const uint32_t file_size = ZZM_HEADER_SIZE + image_size;
+    uint8_t *file = calloc(1U, file_size);
+    zzm_header_t header = valid_header(image_size);
+    zzm_status_t status;
+    void *slot;
+    int result = ZZM_LOAD_IN_PROGRESS;
+    unsigned passes = 0U;
+
+    CHECK(file != NULL);
+    if (!file)
+        return;
+    header.bss_size = bss_size;
+    slot = mmap((void *)(uintptr_t)header.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED) {
+        free(file);
+        return;
+    }
+    memset(slot, 0xa5, image_size + bss_size);
+    memcpy(file, &header, sizeof(header));
+    file[ZZM_HEADER_SIZE] = 0x31U; /* xor %eax, %eax */
+    file[ZZM_HEADER_SIZE + 1U] = 0xc0U;
+    file[ZZM_HEADER_SIZE + 2U] = 0xc3U; /* ret */
+    loader_open_result = FR_OK;
+    set_loader_file(file, file_size, 0);
+    zzm_loader_boot_load();
+    do {
+        result = zzm_loader_acquire(ZZM_MODULE_MPEG2);
+        check_loader_work_bound();
+        passes++;
+    } while (result == ZZM_LOAD_IN_PROGRESS && passes < 64U);
+    CHECK(result == ZZM_LOAD_READY);
+    CHECK(zzm_loader_status_by_id(ZZM_MODULE_MPEG2, &status));
+    CHECK(status.state == ZZM_STATE_LOADED);
+    CHECK(status.ref_count == 1U);
+    check_zero((const uint8_t *)slot + image_size, bss_size);
+    zzm_loader_release(ZZM_MODULE_MPEG2);
+    zzm_loader_poll(header.idle_unload_ms);
+    CHECK(zzm_loader_status_by_id(ZZM_MODULE_MPEG2, &status));
+    CHECK(status.state == ZZM_STATE_AVAILABLE);
+    check_v1_poison(slot, image_size + bss_size);
+    CHECK(munmap(slot, 2U << 20) == 0);
+    free(file);
+}
+
+static void test_legacy_module_failure_poisoning(void)
+{
+    const uint32_t image_size = 128U * 1024U;
+    const uint32_t bss_size = 64U;
+    const uint32_t file_size = ZZM_HEADER_SIZE + image_size;
+    uint8_t *file = calloc(1U, file_size);
+    zzm_header_t header = valid_header(image_size);
+    zzm_status_t status;
+    void *slot;
+    int result = ZZM_LOAD_IN_PROGRESS;
+    unsigned passes = 0U;
+
+    CHECK(file != NULL);
+    if (!file)
+        return;
+    header.bss_size = bss_size;
+    slot = mmap((void *)(uintptr_t)header.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED) {
+        free(file);
+        return;
+    }
+    memset(slot, 0xa5, image_size + bss_size);
+    memcpy(file, &header, sizeof(header));
+    loader_open_result = FR_OK;
+    set_loader_file(file, file_size, 0);
+    loader_fail_offset = ZZM_HEADER_SIZE + 24U * 1024U;
+    zzm_loader_boot_load();
+    do {
+        result = zzm_loader_acquire(ZZM_MODULE_MPEG2);
+        passes++;
+    } while (result == ZZM_LOAD_IN_PROGRESS && passes < 64U);
+    CHECK(result == ZZM_LOAD_FAILED);
+    CHECK(zzm_loader_status_by_id(ZZM_MODULE_MPEG2, &status));
+    CHECK(status.state == ZZM_STATE_LOAD_FAILED);
+    CHECK(status.reason == ZZM_REASON_FILE_READ);
+    check_v1_poison(slot, image_size + bss_size);
+    CHECK(munmap(slot, 2U << 20) == 0);
+    free(file);
+}
+
+static void test_webp_begin_requeues_for_loading_dependency(void)
+{
+    const uint32_t image_size = 16U;
+    uint8_t provider_file[ZZM_HEADER_SIZE + 16U] = { 0 };
+    uint8_t webp_file[ZZM_HEADER_SIZE + 16U] = { 0 };
+    zzm_header_t provider = valid_header(image_size);
+    zzm_header_t webp = valid_header(image_size);
+    struct SDKImageStreamBegin begin = {
+        .codec = SDK_IMAGE_CODEC_WEBP,
+        .output_mode = SDK_IMAGE_OUTPUT_TILE_BUFFER,
+        .output_format = SDK_SURFACE_FORMAT_BGRA8888,
+        .tile_handle = 1U,
+        .tile_stride = 4U,
+        .tile_rows = 1U,
+        .tile_address = (uintptr_t)provider_file,
+        .tile_length = 4U,
+        .core1_affine = 1U,
+    };
+    struct SDKImageStreamResult result;
+    void *slot;
+
+    provider.provided_count = 1U;
+    provider.provided[0].service_id = 0xfaceU;
+    provider.provided[0].min_version = 1U;
+    webp.module_id = ZZM_MODULE_WEBP;
+    webp.slot_load_address = zzm_slots[2].address;
+    webp.init_entry = webp.slot_load_address;
+    strcpy(webp.name, "WEBP");
+    webp.required_count = 1U;
+    webp.required[0] = provider.provided[0];
+    memcpy(provider_file, &provider, sizeof(provider));
+    memcpy(webp_file, &webp, sizeof(webp));
+    slot = mmap((void *)(uintptr_t)provider.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED)
+        return;
+    loader_open_result = FR_OK;
+    set_loader_file(0, 0U, 0);
+    set_loader_module_file(ZZM_MODULE_MPEG2, provider_file,
+                           sizeof(provider_file));
+    set_loader_module_file(ZZM_MODULE_WEBP, webp_file, sizeof(webp_file));
+    zzm_loader_boot_load();
+    CHECK(sdk_image_stream_begin(&begin, &result) == SDK_TASK_IN_PROGRESS);
+    CHECK(munmap(slot, 2U << 20) == 0);
+}
+
+static void test_v1_codec_begin_requeues_until_loaded(void)
+{
+    const uint32_t image_size = 128U * 1024U;
+    const uint32_t file_size = ZZM_HEADER_SIZE + image_size;
+    uint8_t *file = calloc(1U, file_size);
+    zzm_header_t header = valid_header(image_size);
+    struct SDKVideoStreamBegin begin = {
+        .codec = SDK_VIDEO_CODEC_MPEG2,
+        .container = SDK_VIDEO_CONTAINER_MPEG_PS,
+        .width = 16U,
+        .height = 16U,
+        .output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY,
+    };
+    struct SDKVideoStreamResult result;
+    uint16_t status;
+    void *slot;
+    unsigned passes = 0U;
+
+    CHECK(file != NULL);
+    if (!file)
+        return;
+    slot = mmap((void *)(uintptr_t)header.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED) {
+        free(file);
+        return;
+    }
+    memcpy(file, &header, sizeof(header));
+    file[ZZM_HEADER_SIZE] = 0x31U; /* xor %eax, %eax */
+    file[ZZM_HEADER_SIZE + 1U] = 0xc0U;
+    file[ZZM_HEADER_SIZE + 2U] = 0xc3U; /* ret */
+    loader_open_result = FR_OK;
+    set_loader_file(file, file_size, 0);
+    zzm_loader_boot_load();
+    sdk_video_stream_init();
+    status = sdk_video_stream_begin(&begin, &result);
+    CHECK(status == SDK_TASK_IN_PROGRESS);
+    do {
+        status = sdk_video_stream_begin(&begin, &result);
+        passes++;
+    } while (status == SDK_TASK_IN_PROGRESS && passes < 64U);
+    CHECK(status == SDK_STATUS_OK);
+    CHECK(result.session != 0U);
+    CHECK(sdk_video_stream_close(result.session, &result) == SDK_STATUS_OK);
+    CHECK(munmap(slot, 2U << 20) == 0);
+    free(file);
+}
+
 int main(int argc, char **argv)
 {
     uint8_t image[16] = { 1, 2, 3, 4 };
@@ -294,6 +646,11 @@ int main(int argc, char **argv)
     header = valid_header(sizeof(image));
     test_hash(image, sizeof(image), header.image_sha256);
     CHECK(zzm_verify_image(&header, image, ZZM_HEADER_SIZE + sizeof(image) - 1, test_hash) == ZZM_STATE_REJECTED_SLOT);
+    test_legacy_module_load_is_sliced();
+    test_legacy_module_load_lifecycle();
+    test_legacy_module_failure_poisoning();
+    test_webp_begin_requeues_for_loading_dependency();
+    test_v1_codec_begin_requeues_until_loaded();
     if (argc == 2)
         check_kit_minigl(argv[1]);
     loader_open_calls = 0U;

@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * PL310 r3p3 TRM, "Background operations" (3.3.11): no maintenance
+ * Zynq's PL310 r3p2 TRM, "Background operations" (3.3.11): no maintenance
  * register may be written while a way operation is in progress.  All firmware
  * L2 maintenance therefore goes through these functions.  Core 1 holds the
  * lock for at most L2_MAINT_CHUNK_BYTES; a waiting core 0 takes priority at
@@ -19,6 +19,8 @@
  */
 #define L2_MAINT_CHUNK_BYTES 4096U
 
+/* Clean a scanout range to DDR while retaining its L1 and L2 cache lines. */
+void l2_maint_dcache_clean_range(intptr_t address, uint32_t length);
 void l2_maint_dcache_flush_range(intptr_t address, uint32_t length);
 void l2_maint_dcache_invalidate_range(intptr_t address, uint32_t length);
 void l2_maint_dcache_flush(void);

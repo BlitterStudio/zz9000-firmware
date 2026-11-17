@@ -24,6 +24,8 @@
 /* Initialize (or reset) the allocator over [base, base+size). Drops all
  * existing allocations; called at boot and on Amiga reset. */
 void surface_allocator_init(uint32_t base, uint32_t size);
+/* Core 1 is halted. Free the lock if that core died holding it. */
+void surface_allocator_reset_lock(void);
 
 /* Reserve a known host-visible hardware/control range so no client allocator
  * may hand it out. The range must fit, not overlap a live block, and is

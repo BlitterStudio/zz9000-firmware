@@ -70,8 +70,20 @@ or a stack other than 0 or 64 KiB–1 MiB aligned to 8.
 - `hello.c`: writes one diagnostic line through `zz_log`.
 - `pixels.c`: opens a display surface and handles input.
 - `fault.c`: deliberately faults for lifecycle testing.
-- `zzmembench.c`: allocator benchmark.
-- `mgl_conformance.c`: MiniGL conformance client.
+- `isolate.c`: faults on forbidden stores, execution, or host heap access; its
+  `svc` mode verifies that a text pointer is rejected by a pointer-taking call.
+- `spin.c`: CPU-bound scheduler fairness probe; run it as `spin [name]`.
+- `memhog.c`: allocates and touches 1 MiB blocks until `malloc` fails, reports
+  each 16 MiB and low-memory events, holds the memory until Ctrl-C, then frees
+  every block and exits normally.
+- `svcbench.c`: times table calls in `zz_time_us` batches and reports
+  667 MHz timer-derived cycle estimates because PMU access is unavailable in
+  user mode.
+- `svcprobe.c`: with firmware built using `ZZAPP_SVC_PROBES=1`, times
+  individual SVC path boundaries with PMCCNTR.
+- `zzmembench.c`: memory bandwidth benchmark. It times sequential and
+  pointer-chase traffic with `zz_time_us`. PMU, SCTLR/ACTLR, and PL310/DDRC
+  registers are not available to apps.
 - `filter.c`: file-in/file-out Shell template. It maps an input through the
   ZZRun file proxy, computes SHA-256 with the card service, and writes the
   32-byte digest to its output path. Invoke it as `filter input output`.

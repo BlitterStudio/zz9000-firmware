@@ -378,6 +378,69 @@ static __inline int __ZZ9KCancelAsyncInline(ZZ9KAsyncRequest *async)
 }
 #define ZZ9KCancelAsync(async) __ZZ9KCancelAsyncInline((async))
 
+/* Static SDK clients keep their opened base in their context; these variants
+ * avoid routing an LVO through the process-global ZZ9KBase. */
+static __inline int ZZ9KCallAtBase(struct Library *base, ZZ9KRequest *request,
+                                   ZZ9KMailboxEntry *reply,
+                                   uint32_t timeout_ticks)
+{
+  register uint32_t zz9k_d0 __asm("d0") = timeout_ticks;
+  register struct Library *zz9k_a6 __asm("a6") = base;
+  register ZZ9KRequest *zz9k_a0 __asm("a0") = request;
+  register ZZ9KMailboxEntry *zz9k_a1 __asm("a1") = reply;
+  __asm volatile("jsr -48(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_a0), "+r"(zz9k_a1)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0_A1);
+  return (int)zz9k_d0;
+}
+
+static __inline int ZZ9KCallAsyncAtBase(struct Library *base,
+                                        ZZ9KAsyncRequest *async,
+                                        const ZZ9KRequest *request,
+                                        ZZ9KAsyncCallback callback,
+                                        void *user_data)
+{
+  register int zz9k_d0 __asm("d0");
+  register struct Library *zz9k_a6 __asm("a6") = base;
+  register ZZ9KAsyncRequest *zz9k_a0 __asm("a0") = async;
+  register const ZZ9KRequest *zz9k_a1 __asm("a1") = request;
+  register ZZ9KAsyncCallback zz9k_a2 __asm("a2") = callback;
+  register void *zz9k_a3 __asm("a3") = user_data;
+  __asm volatile("jsr -54(a6)"
+                 : "=r"(zz9k_d0), "+r"(zz9k_a0), "+r"(zz9k_a1)
+                 : "r"(zz9k_a6), "r"(zz9k_a2), "r"(zz9k_a3)
+                 : ZZ9K_INLINE_CLOBBERS_A0_A1);
+  return zz9k_d0;
+}
+
+static __inline int ZZ9KPollAtBase(struct Library *base,
+                                   uint32_t max_completions,
+                                   uint32_t *completed)
+{
+  register uint32_t zz9k_d0 __asm("d0") = max_completions;
+  register struct Library *zz9k_a6 __asm("a6") = base;
+  register uint32_t *zz9k_a0 __asm("a0") = completed;
+  __asm volatile("jsr -66(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0);
+  return (int)zz9k_d0;
+}
+
+static __inline int ZZ9KCancelAsyncAtBase(struct Library *base,
+                                          ZZ9KAsyncRequest *async)
+{
+  register int zz9k_d0 __asm("d0");
+  register struct Library *zz9k_a6 __asm("a6") = base;
+  register ZZ9KAsyncRequest *zz9k_a0 __asm("a0") = async;
+  __asm volatile("jsr -144(a6)"
+                 : "=r"(zz9k_d0), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0);
+  return zz9k_d0;
+}
+
 static __inline int __ZZ9KWaitAsyncInline(ZZ9KAsyncRequest *async,
                                           uint32_t timeout_polls,
                                           uint32_t *polls_run)

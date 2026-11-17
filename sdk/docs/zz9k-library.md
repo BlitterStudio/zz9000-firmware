@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 35 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 39 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -69,9 +69,33 @@ SDK v2 is paired with the new SDK-service firmware. The pre-service firmware is
 not a supported runtime for SDK v2 tools or `zz9k.library`, because the mailbox
 service registry did not exist before this release pair.
 
+### Mailbox consumer pairing
+
+The mailbox has one completion ring and no complete or sound detector for a
+second direct consumer: an older statically linked client that reads the
+ring itself can steal a completion and hang the library. Install
+`zz9k.library` and `amissl.library` from the same SDK release: the current
+`amissl.library` proxies its SDK work through `zz9k.library`.
+
+Revision 38 tags each request made through a library opener with a nonzero
+client id in reserved entry-flag bits. Older direct clients leave those bits
+clear and remain unowned. On an opener's final `CloseLibrary()`, the library
+sends `ZZ9K_OP_CLIENT_RELEASE` and resubmits it while the firmware answers
+`ZZ9K_STATUS_BUSY`, so the release tracks the client's worker activity --
+sessions, streams and buffers still finishing on the ARM side -- before that
+opener's owned resources are reclaimed.
+
+Revision 39 makes ARM-app `LOAD_END` waits progress-aware. Firmware that
+advertises `ZZ9K_APP_CAP_LOAD_PROGRESS` increments lifecycle offset `0x68`
+after every incremental loader step; each change resets the library's normal
+five-second inactivity deadline, so progressing loads may run longer than the
+30-second firmware lease window. A stalled load still times out after five
+seconds. Older firmware has no progress signal, so revision 39 retains a
+fixed 32-second lease-covering fallback for it.
+
 ## ARM app client
 
-Revision 35 adds an Amiga-side client for the API 0.2 ARM app runtime. Include
+Revision 35 adds an Amiga-side client for the ARM app runtime. Include
 `proto/zz9k.h` and require `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT`. The API is:
 
 ```c
@@ -90,21 +114,31 @@ void ZZ9KAppClose(ZZ9KAppHandle *handle);
 `ZZ9KAppStart` passes `argv` to the app unchanged. Put the program name in
 `argv[0]`, as ZZRun does, so the app sees a standard C argument vector.
 
-`Open` checks for Zorro III, app-runtime ABI major 0, an idle runtime, and an
-Amiga `mmu.library` mapping that can keep the shared window cache-inhibited for
-the handle lifetime. It returns `ZZ9K_STATUS_BUSY` while another client owns
-core 1. `LoadFile` streams the ELF through the runtime staging window;
-`LoadMemory` accepts at most 16 MiB. `Start` copies no more than 16 argv
-strings of 127 bytes each. `Status` returns the terminal fault/exit snapshot.
+`Open` checks for Zorro III, app-runtime ABI major 0, and an Amiga
+`mmu.library` mapping that can keep the shared window cache-inhibited for the
+handle lifetime. When the extended `QUERY` reply advertises
+`ZZ9K_APP_CAP_SLOTS`, the library can open up to `ZZ9K_APP_SLOT_COUNT` (four)
+handles. Each one claims its own window and generation, so a stale generation
+or terminal state affects only that handle; a new claim detaches a stale
+handle while leaving it safe to close. A claimed slot that does not begin
+loading expires after two seconds. If `Open` cannot finish setup after a
+successful claim, it cancels that claim. With firmware that lacks that cap,
+the library retains API 0.2 behaviour: one handle claims legacy slot 0 and a
+second `Open` returns `ZZ9K_STATUS_BUSY`. Legacy firmware assigns that
+handle's generation at `LOAD_BEGIN`, so `Open` also succeeds while the
+unloaded window reports generation zero. `LoadFile` streams the ELF through
+the handle's runtime staging window; `LoadMemory` accepts at most 16 MiB.
+`Start` copies no more than 16 argv strings of 127 bytes each. `Status`
+returns the fault/exit snapshot for its handle.
 
 `ZZ9KAppMessage` is exactly 32 opaque bytes. Send returns `ZZ9K_STATUS_BUSY`
 when the host-to-app ring is full; get returns it when the app-to-host ring is
-empty. The library's real Amiga VBlank interrupt server renews the runtime
-lease while the handle is open, independently of the caller's task. It signals
-`ZZ9KAppMessageSignal(handle)` for an app message, exit, or fault. When a
-`notify_port` was supplied, it posts one coalesced `ZZ9KAppEvent`: dequeue
-that event before draining messages with `ZZ9KAppGetMessage`, and drain the
-port before `Close`.
+empty. The library's real Amiga VBlank interrupt server renews every active
+handle's runtime lease independently of the caller's task and a concurrent
+load. It signals `ZZ9KAppMessageSignal(handle)` for an app message, exit, or
+fault. When a `notify_port` was supplied, it posts one coalesced
+`ZZ9KAppEvent`: dequeue that event before draining messages with
+`ZZ9KAppGetMessage`, and drain the port before `Close`.
 
 Always call `ZZ9KAppClose`: it stops only the generation loaded by that handle
 and releases the owner. Closing the owning task's final `zz9k.library`
@@ -341,7 +375,17 @@ Use high-level wrappers such as `ZZ9KQueryCaps()`, `ZZ9KPing()`,
 `ZZ9KCryptoHash()`, `ZZ9KCryptoHashBatch()`,
 `ZZ9KCryptoStream()`, `ZZ9KCryptoStreamBatch()`, `ZZ9KCryptoAead()`, and
 `ZZ9KCryptoAeadBatch()` for normal calls. The resident library serializes
-access to the shared mailbox context.
+short mailbox submissions and completion-ring drains, but never holds that
+lock while a synchronous caller waits.
+
+For an empty completion ring, synchronous calls poll its producer index for up
+to 250 microseconds. They then wait on their own completion signal, while a
+short DOS-tick timer returns them to the drain path when no dispatcher is
+running. Another task can drain the ring while a caller waits; it routes that
+caller's reply to its pending record and signals the owner. The caller's timeout
+remains a wall-clock DOS-tick budget. Firmware normally answers in about 6
+microseconds, so this avoids a tick-scale latency for short calls without making
+a slow call block another task's submission.
 
 ```c
 ZZ9KCaps caps;
@@ -355,6 +399,13 @@ For custom service calls, fill a `ZZ9KRequest` and call `ZZ9KCall()`.
 ### Raw host contexts and completion IRQs
 
 `zz9k_open(ZZ9KContext **ctx)` discovers and opens a board context. `zz9k_attach_mailbox(ZZ9KContext **ctx, const ZZ9KBoard *board, volatile ZZ9KMailboxDescriptor *mailbox, volatile uint16_t *doorbell, volatile uint16_t *irq_ack)` attaches a context to already-known transport addresses. Close either with `zz9k_close()`.
+
+The static library transport inside `zz9k_open()` requires revision
+`ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY` (36). Revisions 34 and 35 expose
+the same LVOs, but a synchronous convenience call such as `ZZ9KPing()`
+discards a nonmatching reply instead of forwarding it to the resident
+pending-request registry. A proxied asynchronous request can then remain
+pending indefinitely. An older resident returns `ZZ9K_STATUS_LIBRARY_TOO_OLD`.
 
 Raw contexts poll by default. `zz9k_arm_completion_irq(ctx)` makes `zz9k_call()` wait on the SDK completion interrupt when firmware advertises `ZZ9K_CAP_IRQ_COMPLETION`; it returns `ZZ9K_STATUS_UNSUPPORTED` on the host or without that capability. The arming task is the wake target, so one task must own every armed call. Use `zz9k_disarm_completion_irq()` to reverse it. An armed wait is bounded by a context offload budget set with `zz9k_set_offload_timeout_ms()`, or by `ENV:ZZ9K_SYNC_WAIT_TIMEOUT_MS` (default 5 seconds), read once per context. A slow call serializes the shared mailbox lock until it completes or times out.
 
@@ -1822,6 +1873,9 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 32 | `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION` | `ZZ9KImageAnimationFrameNext()`, Present, Retire, and Restart |
 | 33 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX` | `ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX` (`-348`); older firmware returns `ZZ9K_STATUS_UNSUPPORTED`, with no implicit MP3-only fallback |
 | 35 | `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT` | `ZZ9KAppOpen`, load/start/stop/status, 32-byte message rings, VBlank lease, and close |
+| 36 | `ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY` | Synchronous completion waits poll for up to 250 microseconds before their existing event or DOS-tick wait. A synchronous call also routes foreign completions to the resident pending-request registry; the static host client requires this revision. |
+| 37 | `ZZ9K_LIBRARY_MIN_REVISION_SYNC_CONCURRENT` | A synchronous caller holds the transport lock only to submit, drain, route, or cancel. Its pending record has an owner signal, so another drainer wakes it after routing its completion. |
+| 38 | `ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM` | Per-opener client ids and `ZZ9K_OP_CLIENT_RELEASE`; the final `CloseLibrary()` resubmits the release while the firmware answers `BUSY` and reclaims that opener's owned SDK resources after worker quiescence |
 
 ### Async submission and wait helpers
 

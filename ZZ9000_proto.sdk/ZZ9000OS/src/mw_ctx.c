@@ -386,8 +386,14 @@ static uint32_t mw_palette_get(uint32_t index)
 #define MW_CONTEXT_CARD_POOL 0
 #endif
 
+
+int mw_rix_abort_engines(void);
 static void mw_context_free(mw_ctx *c, void *memory, uint32_t *address);
 static mw_ctx *g_raster_texture_context;
+/* The context whose command buffers and targets the RasterIX backend uses. */
+static mw_ctx *g_rix_platform_ctx;
+static mw_ctx *g_active_contexts;
+static void mw_rix_quarantine(mw_ctx *c);
 static int mw_ctx_restore_textures(mw_ctx *c);
 #if defined(MINIGL_MODULE)
 static void mw_context_select_allocation_owner(const mw_ctx *c)
@@ -402,6 +408,50 @@ static void mw_context_select_allocation_owner(const mw_ctx *c)
 }
 #endif
 
+#if MW_CONTEXT_CARD_POOL || defined(MINIGL_MODULE)
+static uint32_t mw_rix_owner_for_address(void *context, uintptr_t address)
+{
+    mw_ctx *c;
+    unsigned int index;
+
+    (void)context;
+    for (c = g_active_contexts; c != NULL; c = c->next_active) {
+        for (index = 0U; index < MW_RIX_COMMAND_BUFFERS; ++index)
+            if (c->rix_command_buffer_addresses[index] == (uint32_t)address)
+                return c->card_pool_owner;
+        for (index = 0U; index < 3U; ++index)
+            if (c->color_buffer_addresses[index] == (uint32_t)address)
+                return c->card_pool_owner;
+        if (c->depth_buffer_address == (uint32_t)address)
+            return c->card_pool_owner;
+    }
+    return 0U;
+}
+
+static void mw_rix_quarantine_owner(void *context, uint32_t owner)
+{
+    mw_ctx *c;
+
+    (void)context;
+    for (c = g_active_contexts; c != NULL; c = c->next_active)
+        if (c->card_pool_owner == owner) {
+            mw_rix_quarantine(c);
+            return;
+        }
+}
+
+#endif
+
+static void mw_ctx_unlink_active(mw_ctx *c)
+{
+    mw_ctx **link;
+
+    for (link = &g_active_contexts; *link != NULL; link = &(*link)->next_active)
+        if (*link == c) {
+            *link = c->next_active;
+            return;
+        }
+}
 
 static void *mw_context_alloc(mw_ctx *c, uint32_t bytes, uint32_t *address)
 {
@@ -698,6 +748,13 @@ static void mw_rix_cache_invalidate(void *context, uintptr_t address, size_t byt
     minigl_platform_cache_invalidate(context, address, bytes);
 }
 
+static void mw_rix_publish_fence(void *context, uintptr_t address,
+                                 uint32_t sequence)
+{
+    (void)context;
+    minigl_platform_publish_fence((uint32_t)address, sequence);
+}
+
 static int mw_ctx_grow_rix_texture_pool(void *context, size_t minimum_bytes,
                                         uint8_t **memory, uintptr_t *address,
                                         size_t *bytes)
@@ -759,6 +816,8 @@ static void mw_ctx_release_rix(mw_ctx *c)
         c->rix_texture_pool_bytes = 0U;
     }
     c->rix_enabled = 0U;
+    if (g_rix_platform_ctx == c)
+        g_rix_platform_ctx = NULL;
 }
 
 static void mw_ctx_configure_rix(mw_ctx *c)
@@ -784,6 +843,7 @@ static void mw_ctx_configure_rix(mw_ctx *c)
      * unset so rix_drv uses the completed dma_stream path. */
     platform.dma_stream = mw_rix_dma_stream;
 #endif
+    platform.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
     /* This probe reads only the versioned CSR identity pair. No RIX address is
@@ -792,7 +852,7 @@ static void mw_ctx_configure_rix(mw_ctx *c)
         minigl_raster_set_rix_platform(NULL);
         return;
     }
-    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+    for (index = 0U; index < MINIGL_RIX_SYNC_COMMAND_BUFFERS; ++index) {
         c->rix_command_buffers[index] = (uint8_t *)mw_context_alloc(
             c, MINIGL_RIX_COMMAND_BYTES, &c->rix_command_buffer_addresses[index]);
         if (!c->rix_command_buffers[index])
@@ -814,6 +874,7 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.grow_texture_pool = mw_ctx_grow_rix_texture_pool;
     minigl_raster_set_rix_platform(&platform);
     c->rix_enabled = 1U;
+    g_rix_platform_ctx = c;
     return;
 
 unavailable:
@@ -868,6 +929,41 @@ static int mw_rix_dma_retire(void *context)
 {
     return minigl_platform_dma_retire(context);
 }
+static int mw_rix_dma_complete(void *context)
+{
+    return minigl_platform_dma_complete(context);
+}
+
+static int mw_rix_dma_start_nonblocking(void *context, uintptr_t source,
+                                        uint32_t words, uint32_t burst_words)
+{
+    return minigl_platform_dma_start_nonblocking(context, source, words, burst_words);
+}
+
+static int mw_rix_dma_ready(void *context)
+{
+    return minigl_platform_dma_ready(context);
+}
+
+static int mw_rix_dma_abort(void *context)
+{
+    return minigl_platform_dma_abort(context);
+}
+#if MINIGL_MODULE
+extern void zzm_module_yield_wait(void);
+static void mw_rix_yield_wait(void *context)
+{
+    (void)context;
+    zzm_module_yield_wait();
+}
+
+extern int zzm_module_can_park(void);
+static int mw_rix_can_park(void *context)
+{
+    (void)context;
+    return zzm_module_can_park();
+}
+#endif
 
 static void mw_rix_cache_clean(void *context, uintptr_t address, size_t bytes)
 {
@@ -878,6 +974,12 @@ static void mw_rix_cache_invalidate(void *context, uintptr_t address,
                                     size_t bytes)
 {
     minigl_platform_cache_invalidate(context, address, bytes);
+}
+static void mw_rix_publish_fence(void *context, uintptr_t address,
+                                 uint32_t sequence)
+{
+    (void)context;
+    minigl_platform_publish_fence((uint32_t)address, sequence);
 }
 
 static int mw_ctx_grow_rix_texture_pool(void *context, size_t minimum_bytes,
@@ -941,6 +1043,8 @@ static void mw_ctx_release_rix(mw_ctx *c)
         c->rix_texture_pool_bytes = 0U;
     }
     c->rix_enabled = 0U;
+    if (g_rix_platform_ctx == c)
+        g_rix_platform_ctx = NULL;
 }
 
 static void mw_ctx_configure_rix(mw_ctx *c)
@@ -950,6 +1054,13 @@ static void mw_ctx_configure_rix(mw_ctx *c)
 
     if (!minigl_platform_has_rasterix())
         return;
+    /* Rebinding resets RasterIX. Finish the previous context's recorded
+     * frame first so its target returns to CPU-readable RGBA, then retire
+     * every submission before backend owner/fence bookkeeping is replaced. */
+    if (g_rix_platform_ctx != NULL && g_rix_platform_ctx != c) {
+        if (!minigl_raster_finish() || !minigl_raster_retire_submitted())
+            (void)mw_rix_abort_engines();
+    }
     memset(&platform, 0, sizeof(platform));
     platform.context = c;
     platform.csr_read = mw_rix_csr_read;
@@ -961,13 +1072,36 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.dma_stream = mw_rix_dma_stream;
     platform.dma_start_async = mw_rix_dma_start_async;
     platform.dma_retire = mw_rix_dma_retire;
+    /* A reset or forced stop released the DMAC channel; claim it back here,
+     * where a failure only leaves this context on the FIFO-only path. */
+    (void)minigl_platform_dma_claim();
+    if (minigl_platform_dma_ready(NULL)) {
+        platform.dma_complete = mw_rix_dma_complete;
+        platform.dma_start_nonblocking = mw_rix_dma_start_nonblocking;
+        platform.dma_ready = mw_rix_dma_ready;
+        platform.dma_abort = mw_rix_dma_abort;
+    }
+#if MINIGL_MODULE
+    platform.can_park = mw_rix_can_park;
+    platform.yield_wait = mw_rix_yield_wait;
+#endif
+    platform.async_feed = c->rix_async != 0U;
+    platform.owner_generation = c->handle;
+    platform.command_buffer_count = platform.async_feed ? MINIGL_RIX_COMMAND_BUFFERS :
+                                    MINIGL_RIX_SYNC_COMMAND_BUFFERS;
+    platform.submit_mode = c->rix_submit_mode;
     platform.cache_clean = mw_rix_cache_clean;
     platform.cache_invalidate = mw_rix_cache_invalidate;
+    platform.publish_fence = mw_rix_publish_fence;
+#if MW_CONTEXT_CARD_POOL || defined(MINIGL_MODULE)
+    platform.owner_for_address = mw_rix_owner_for_address;
+    platform.quarantine_owner = mw_rix_quarantine_owner;
+#endif
     if (!minigl_rix_backend_probe_platform(&platform)) {
         minigl_raster_set_rix_platform(NULL);
         return;
     }
-    for (index = 0U; index < MINIGL_RIX_COMMAND_BUFFERS; ++index) {
+    for (index = 0U; index < platform.command_buffer_count; ++index) {
         c->rix_command_buffers[index] = (uint8_t *)mw_context_alloc(
             c, MINIGL_RIX_COMMAND_BYTES, &c->rix_command_buffer_addresses[index]);
         if (!c->rix_command_buffers[index])
@@ -986,6 +1120,7 @@ static void mw_ctx_configure_rix(mw_ctx *c)
     platform.grow_texture_pool = mw_ctx_grow_rix_texture_pool;
     minigl_raster_set_rix_platform(&platform);
     c->rix_enabled = 1U;
+    g_rix_platform_ctx = c;
     return;
 
 unavailable:
@@ -1005,8 +1140,58 @@ static void mw_ctx_configure_rix(mw_ctx *c)
 #endif
 
 
-void mw_rix_abort_engines(void)
+/* Wall-time bound for committed RasterIX lists to reach their fences during
+ * a forced stop.  A healthy engine finishes a 64 KiB list far sooner; past
+ * this the GPU is treated as wedged. */
+#define MW_RIX_ABORT_DRAIN_US 100000U
+#define MW_RIX_ABORT_DRAIN_STEPS 10000000U
+static uint32_t g_rix_quarantines;
+
+static int mw_rix_drain_committed(void)
 {
+    uint64_t started = minigl_platform_time_us();
+    uint32_t step;
+
+    for (step = 0U; step < MW_RIX_ABORT_DRAIN_STEPS; ++step) {
+        int result = minigl_raster_abort_feed();
+
+        if (result == RIX_DRV_FEED_DONE)
+            return 1;
+        if (result == RIX_DRV_FEED_ERROR ||
+            minigl_platform_time_us() - started >= MW_RIX_ABORT_DRAIN_US)
+            return 0;
+    }
+    return 0;
+}
+
+
+/* RasterIX may still read this context's command lists or write its targets:
+ * their card-pool blocks are permanently retained. */
+static void mw_rix_quarantine(mw_ctx *c)
+{
+    if (c == NULL || c->rix_memory_quarantined)
+        return;
+    c->rix_memory_quarantined = 1U;
+    ++g_rix_quarantines;
+#if defined(MINIGL_MODULE)
+    zzm_rt_quarantine_owner(c->card_pool_owner);
+#elif MW_CONTEXT_CARD_POOL
+    card_pool_quarantine_owner(&card_pool, c->card_pool_owner);
+#endif
+    minigl_platform_logf("[ZZM] RasterIX did not finish; quarantining owner %08lx\r\n",
+                         (unsigned long)c->card_pool_owner);
+}
+
+uint32_t mw_rix_quarantine_count(void)
+{
+    return g_rix_quarantines;
+}
+
+int mw_rix_abort_engines(void)
+{
+    int finished = mw_rix_drain_committed();
+    int stopped = 1;
+
 #if defined(MINIGL_RASTERIX) && defined(__arm__) && !defined(MINIGL_HOST_TEST) && !defined(MINIGL_MODULE)
 #if MINIGL_RIX_DMA
     /* One debug instruction. Do not poll: core 0 must not wait on the DMAC. */
@@ -1019,10 +1204,19 @@ void mw_rix_abort_engines(void)
     Xil_Out32(MINIGL_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
     Xil_Out32(MINIGL_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     __asm__ volatile("dsb sy" ::: "memory");
+    Xil_Out32(MINIGL_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, RIX_DRV_CONTROL_SOFT_RESET);
+    __asm__ volatile("dsb sy" ::: "memory");
 #elif defined(MINIGL_RASTERIX) && defined(MINIGL_MODULE)
-    minigl_platform_abort_graphics();
+    stopped = minigl_platform_abort_graphics();
 #endif
+    if (!finished) {
+        minigl_raster_quarantine_outstanding();
+        mw_rix_quarantine(g_rix_platform_ctx);
+    }
+    if (!stopped)
+        return 0;
     minigl_raster_abandon();
+    return 1;
 }
 
 static inline void mw_ctx_update_latest(mw_ctx *c)
@@ -1033,6 +1227,22 @@ static inline void mw_ctx_update_latest(mw_ctx *c)
 }
 
 static uint32_t mw_active_color_index(const mw_ctx *c);
+
+static int mw_ctx_owns_current_target(const mw_ctx *c)
+{
+    const uint32_t *target;
+    uint32_t index;
+
+    if (!c)
+        return 0;
+    target = minigl_raster_color_buffer();
+    for (index = 0U; index < 3U; ++index) {
+        if (target == c->color_buffers[index] ||
+            target == (const uint32_t *)(const void *)c->direct_color_buffers[index])
+            return 1;
+    }
+    return 0;
+}
 
 static int mw_ctx_bind_buffers(mw_ctx *c)
 {
@@ -1280,10 +1490,12 @@ mw_ctx *mw_host_create(uint32_t width, uint32_t height)
 {
     return mw_host_create_owned(width, height,
                                 CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL,
-                                                g_next_handle));
+                                                g_next_handle),
+                                minigl_raster_async_feed_enabled());
 }
 
-mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
+mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner,
+                             int rix_async)
 {
     mw_ctx *c;
     int i;
@@ -1299,6 +1511,9 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     if (!c)
         return NULL;
     c->card_pool_owner = owner;
+    c->rix_async = rix_async != 0;
+    c->rix_submit_mode = (!c->rix_async || minigl_platform_memfetch_enabled()) ?
+                         RIX_DRV_SUBMIT_MEMFETCH : RIX_DRV_SUBMIT_INLINE;
     c->card_pool_backed = MW_CONTEXT_CARD_POOL;
     c->width = width;
     c->height = height;
@@ -1343,6 +1558,8 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner)
     }
 
     c->handle = g_next_handle++;
+    c->next_active = g_active_contexts;
+    g_active_contexts = c;
     mw_ctx_configure_rix(c);
     minigl_raster_set_fail_stop_target_handler(mw_ctx_replace_rix_target, c);
     minigl_raster_set_cpu_fallback_target_handler(mw_ctx_cpu_fallback_target, c);
@@ -1395,13 +1612,29 @@ int mw_host_bind_direct_rgb565(mw_ctx *c, uint32_t front, uint32_t back,
 void mw_host_destroy(mw_ctx *c)
 {
     int i;
+    int platform_elsewhere;
 
     if (!c)
         return;
     if (g_raster_texture_context == c)
         g_raster_texture_context = NULL;
     mw_context_select_allocation_owner(c);
-    if (!minigl_raster_quiesce() && c->rix_enabled) {
+    /* The RasterIX platform and the target handlers belong to the context
+     * that registered them last: a 68k context closed after an ARM app
+     * bound must leave the app both, and only finishes the work it may have
+     * queued on the app's ring. */
+    platform_elsewhere = g_rix_platform_ctx != NULL && g_rix_platform_ctx != c;
+    if (platform_elsewhere && !minigl_raster_retire_submitted()) {
+        /* Backend retirement is independent of a currently bound target. A
+         * stopped engine cannot retain this context's freed memory; if it
+         * cannot be stopped, quarantine both owners instead. */
+        if (!mw_rix_abort_engines()) {
+            minigl_raster_quarantine_outstanding();
+            mw_rix_quarantine(c);
+            if (g_rix_platform_ctx != NULL)
+                mw_rix_quarantine(g_rix_platform_ctx);
+        }
+    } else if (!platform_elsewhere && !minigl_raster_quiesce() && c->rix_enabled) {
         MiniGLRasterRixDiagnostics rix;
 
         memset(&rix, 0, sizeof(rix));
@@ -1410,17 +1643,35 @@ void mw_host_destroy(mw_ctx *c)
                              (unsigned long)rix.completed_fence,
                              (unsigned long)rix.last_fence, (unsigned)rix.active,
                              (unsigned long)rix.status);
-        mw_rix_abort_engines();
+        (void)mw_rix_abort_engines();
         if (!minigl_raster_quiesce())
             minigl_platform_log("[ZZM] [destroy] forced abort did not quiesce");
     }
-    minigl_raster_set_fail_stop_target_handler(NULL, NULL);
-    minigl_raster_set_cpu_fallback_target_handler(NULL, NULL);
+    /* The current target can belong to a context other than the active
+     * RasterIX platform. Detach it before either context's buffers free. */
+    if (mw_ctx_owns_current_target(c))
+        minigl_raster_target_retire();
+    if (!platform_elsewhere) {
+        minigl_raster_set_fail_stop_target_handler(NULL, NULL);
+        minigl_raster_set_cpu_fallback_target_handler(NULL, NULL);
+    }
+    if (c->rix_memory_quarantined) {
+        /* The card pool holds every affected block permanently, so ordinary
+         * owner-close paths may discard this context bookkeeping. */
+        if (g_rix_platform_ctx == c) {
+            g_rix_platform_ctx = NULL;
+            minigl_raster_set_rix_platform(NULL);
+        }
+        mw_ctx_unlink_active(c);
+        free(c);
+        return;
+    }
     if (c->rix_target_quarantined) {
 #if MW_CONTEXT_CARD_POOL
         /* The disabled engine may still write any allocation owned by this
          * context.  The one permitted fail-stop leaves that whole owner
          * intact rather than risking a card-pool record being recycled. */
+        mw_ctx_unlink_active(c);
         free(c);
         return;
 #else
@@ -1457,6 +1708,7 @@ void mw_host_destroy(mw_ctx *c)
      * from an interrupted resize, before its handle can be reused. */
     (void)card_pool_release_owner(&card_pool, c->card_pool_owner);
 #endif
+    mw_ctx_unlink_active(c);
     free(c);
 }
 

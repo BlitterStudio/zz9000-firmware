@@ -542,18 +542,24 @@ uint16_t sdk_vorbis_decode(struct sdk_vorbis_state *st,
 	io->frames = 0U;
 	io->starved = 0;
 	io->complete = 0;
+	io->output_terminal = 0;
 	if (st->status != SDK_STATUS_OK)
 		return st->status;
 	if (st->pending_status != SDK_STATUS_OK || st->done) {
 		/* Nothing more is decoded; input is discarded. */
 		io->consumed = io->input_length;
 		io->complete = st->done;
+		io->output_terminal = 1;
 		if (st->pending_status != SDK_STATUS_OK && io->pcm_unread == 0U)
 			st->status = st->pending_status;
 		return st->status;
 	}
 	if (!io->pcm || io->pcm_capacity == 0U)
 		return SDK_STATUS_BAD_REQUEST;
+	/* Bound this pass to the measured ~3.5 ms of core-1 service regardless
+	 * of the caller's high-water budget; see sdk_audio_codec_io.h for the
+	 * 333 MHz global-timer basis. */
+	io->pcm_budget = sdk_audio_decode_pass_budget(io->pcm_budget);
 
 	/* libogg and Tremor do not check most allocations: an arena failure
 	 * longjmp()s back here and the whole arena is dropped below. */
@@ -573,6 +579,8 @@ uint16_t sdk_vorbis_decode(struct sdk_vorbis_state *st,
 	    st->pending_status != SDK_STATUS_OK &&
 	    io->produced == 0U && io->pcm_unread == 0U)
 		st->status = st->pending_status;
+	io->output_terminal = st->status != SDK_STATUS_OK ||
+		st->pending_status != SDK_STATUS_OK || st->done;
 	return st->status;
 }
 

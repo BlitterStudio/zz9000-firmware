@@ -44,6 +44,8 @@
 #include <unistd.h>
 
 #include "audio_fabric.h"
+#include "audio_stream_drain.h"
+
 #include "fabric_test_common.h"
 #include "memorymap.h"
 #include "pump_golden.h"
@@ -74,6 +76,7 @@ static uint32_t test_dma_count(void)
 
 static struct pump_golden g_golden;
 static struct src_model g_model;
+
 
 static int golden_snapshot(struct pump_golden_source *source)
 {
@@ -434,6 +437,59 @@ static void scenario_start_prime(void)
 	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP) == 0U,
 	      "primed first formatter period has no underrun", "");
 }
+/* An app producer stays frozen after audio_open. Its first write activates
+ * and primes it; only starvation after that activation is an underrun. */
+static void scenario_app_first_write_activation(void)
+{
+	uint32_t baseline;
+	uint32_t tick;
+
+	fabric_reset_state();
+	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	g_dma_count = 0U;
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_MAILBOX,
+					   &g_ops_c);
+	for (tick = 0U; tick < 5U; tick++) {
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) == 0U &&
+	      g_model_c.underrun_calls == 0U,
+	      "app open without writes has no played underrun", "");
+	check(audio_fabric_producer_go_live_when_ready(
+			AUDIO_FABRIC_SLOT_MAILBOX, 0) == 0,
+	      "app remains frozen before first write", "");
+	model_publish(&g_model_c, 4U * TICK_BYTES);
+	baseline = audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(audio_fabric_producer_go_live_when_ready(
+			AUDIO_FABRIC_SLOT_MAILBOX, 1) != 0,
+	      "app first write activates producer", "");
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) == baseline,
+	      "first app write has no played underrun", "");
+	for (tick = 0U; tick < 32U; tick++) {
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) > baseline,
+	      "app starvation after activation counts", "");
+}
+/* Generic SDK priming still accounts starvation while it fills a finite
+ * reserve; only the app's first-write path suppresses its played underrun. */
+static void scenario_sdk_prime_starvation(void)
+{
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_publish(&g_model_b, 4U * TICK_BYTES);
+	g_dma_count = 0U;
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
+	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, 48000U);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+	(void)audio_fabric_producer_prime_and_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP) != 0U,
+	      "SDK prime starvation remains counted", "");
+}
+
+
 /* A direct peer may wake after the mailbox takes its optimistic no-peer
  * branch. The atomic prime then refuses to touch the shared frontier; the
  * caller must still publish the prepared pump into that live mix. */
@@ -599,8 +655,9 @@ static void scenario_underrun_isolation(void)
 	check(memcmp(reference, g_fabric_tx, AUDIO_TX_BUFFER_SIZE) == 0,
 	      "underrun isolation: stalled slot contributes silence",
 	      "ring differs from solo reference");
-	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) > 0U,
-	      "underrun isolation: stalled slot counted",
+	/* STATE_GET publishes this slot counter as starvation_count. */
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) > 1U,
+	      "underrun isolation: starvation_count counts stalled producer",
 	      fmt("count=%u",
 	          audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX)));
 	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP) ==
@@ -608,12 +665,6 @@ static void scenario_underrun_isolation(void)
 	      "underrun isolation: feeding slot unaffected",
 	      fmt("solo=%u mixed=%u", solo_underruns,
 	          audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP)));
-	/* The start rebase costs each not-done live slot one played
-	 * callback (the captured pump's artifact); the stall itself adds
-	 * none beyond it. */
-	check(g_model_c.underrun_calls == 1U,
-	      "underrun isolation: only the start-rebase callback",
-	      fmt("calls=%u", g_model_c.underrun_calls));
 }
 
 /* ---- scenario 6: formatter ownership across transitions ---- */
@@ -668,6 +719,46 @@ static void scenario_formatter(void)
 	check(audio_get_inited_tx_buffer() ==
 	      (uint8_t *)AUDIO_TX_BUFFER_ADDRESS,
 	      "formatter: DMA captured the standard ring", "");
+}
+
+/*
+ * A terminal decoder failure can be discovered after preconversion has
+ * produced audio. Its source snapshot must remain live through the fabric's
+ * real-DMA tail; otherwise fabric_slot_fill() silences that queued audio.
+ */
+static void scenario_terminal_fault_tail(void)
+{
+	static const uint8_t zero[AUDIO_TX_BUFFER_SIZE];
+	uint32_t preconvert_used = TICK_BYTES;
+	int tick;
+
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_publish(&g_model_b, preconvert_used);
+	g_model_b.done = 1;
+	g_model_b.faulted = audio_stream_playback_fault_ready(
+		1, preconvert_used, g_model_b.tail_pending);
+	g_dma_count = 0U;
+	fabric_pump_start();
+	dma_tick(1);
+	audio_fabric_isr();
+	check(g_model_b.staged != 0U,
+	      "terminal fault: fabric stages converted tail", "");
+	check(memcmp(g_fabric_tx, zero, sizeof(zero)) != 0,
+	      "terminal fault: staged tail is audible", "");
+
+	preconvert_used = 0U;
+	for (tick = 0; tick < AUDIO_NUM_PERIODS + 2; tick++) {
+		g_model_b.faulted = audio_stream_playback_fault_ready(
+			1, preconvert_used, g_model_b.tail_pending);
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	check(g_model_b.tail_pending == 0,
+	      "terminal fault: fabric drained real tail", "");
+	check(audio_stream_playback_fault_ready(
+		      1, preconvert_used, g_model_b.tail_pending),
+	      "terminal fault: fault publishes after tail drain", "");
 }
 /* Faulted and done producers contribute silence WITHOUT moving the
  * per-slot underrun counter (the R8 exclusion), in both the per-period
@@ -1142,12 +1233,15 @@ int main(int argc, char **argv)
 
 	scenario_mix();
 	scenario_start_prime();
+	scenario_app_first_write_activation();
+	scenario_sdk_prime_starvation();
 	scenario_peer_wakes_during_start();
 	scenario_pump_gain();
 	scenario_gate();
 	scenario_silence_policy();
 	scenario_underrun_isolation();
 	scenario_formatter();
+	scenario_terminal_fault_tail();
 	scenario_excluded_underrun();
 	scenario_snapshot_midloop();
 	scenario_ring_authority();

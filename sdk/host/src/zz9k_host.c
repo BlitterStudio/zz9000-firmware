@@ -5,6 +5,11 @@
  */
 
 #include "zz9k/host.h"
+#if !defined(__amigaos__) && !defined(__amiga__) && !defined(__AMIGA__) && \
+    !defined(__VBCC__)
+#include "zz9k/library.h"
+#endif
+#include "zz9k/library_vectors.h"
 #include "zz9k/caps.h"
 #include "zz9k/reply.h"
 #include "zz9k/request.h"
@@ -18,9 +23,41 @@
 #define ZZ9K_HOST_AMIGA 0
 #endif
 
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+#include <proto/zz9k.h>
+#endif
+
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+typedef struct ZZ9KLibraryTransport {
+  int (*open)(void *user, ZZ9KBoard *board, void **base,
+              uint16_t *version, uint16_t *revision);
+  void (*close)(void *base);
+  int (*call)(void *base, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
+              uint32_t timeout_ticks);
+  int (*call_async)(void *base, ZZ9KAsyncRequest *async,
+                    const ZZ9KRequest *request,
+                    ZZ9KAsyncCallback callback, void *callback_user_data);
+  int (*poll)(void *base, uint32_t max_completions, uint32_t *completed);
+  int (*cancel)(void *base, ZZ9KAsyncRequest *async);
+  void *user;
+} ZZ9KLibraryTransport;
+#endif
+
+#if !ZZ9K_HOST_AMIGA
+static const ZZ9KLibraryTransport *zz9k_library_transport_for_test;
+
+void zz9k_set_library_transport_for_test(
+    const ZZ9KLibraryTransport *transport)
+{
+  zz9k_library_transport_for_test = transport;
+}
+#endif
+
 #if ZZ9K_HOST_AMIGA
-/* CACRF_ClearD lives in execbase.h, not types.h; the amissl
- * adtools build compiles this TU without it. */
+struct Library *ZZ9KBase;
+#endif
+
+#if ZZ9K_HOST_AMIGA
 #include <exec/types.h>
 #include <exec/execbase.h>
 #include <exec/memory.h>
@@ -88,6 +125,7 @@ void zz9k_audio_ring_cache_invalidate(const volatile void *address,
 }
 
 
+
 #define ZZ9K_SYNC_COOKIE_MASK 0x5aa55aa5UL
 #define ZZ9K_MAILBOX_SEMAPHORE_NAME "zz9000.sdk.mailbox"
 
@@ -96,6 +134,12 @@ typedef struct ZZ9KMailboxSemaphore {
   struct SignalSemaphore semaphore;
   char name[sizeof(ZZ9K_MAILBOX_SEMAPHORE_NAME)];
 } ZZ9KMailboxSemaphore;
+#endif
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+typedef struct ZZ9KStaticLibraryPending {
+  ZZ9KAsyncRequest async;
+  struct ZZ9KStaticLibraryPending *next;
+} ZZ9KStaticLibraryPending;
 #endif
 
 struct ZZ9KContext {
@@ -115,9 +159,18 @@ struct ZZ9KContext {
   uint32_t offload_timeout_ms;
   uint32_t sync_wait_timeout_ms;   /* armed-wait ENV bound, read once; 0 = unread */
   uint32_t wait_heartbeats;        /* coarse clock when timer.device is unusable */
+  uint16_t client_id;
   unsigned char irq_armed;
   unsigned char late_irq_expected; /* cancelled op still in flight */
   unsigned char aperture_layout_valid;
+  unsigned char library_transport;
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+  const ZZ9KLibraryTransport *library_transport_ops;
+  void *library_base;
+  ZZ9KStaticLibraryPending *library_pending;
+#endif
+  ZZ9KCompletionDispatcher completion_dispatcher;
+  void *completion_dispatcher_user_data;
 #if ZZ9K_HOST_AMIGA
   struct Interrupt irq;
   struct Task *irq_task;
@@ -129,6 +182,14 @@ struct ZZ9KContext {
   int timer_open;
 #endif
 };
+
+static int zz9k_library_version_supported(uint16_t version,
+                                          uint16_t revision)
+{
+  /* 36 routes foreign completions; 34 and 35 drop them. */
+  return version == ZZ9K_LIBRARY_VERSION &&
+         revision >= ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY;
+}
 
 static int zz9k_board_range_fits(uint32_t board_size,
                                  uint32_t board_offset, uint32_t length);
@@ -466,6 +527,21 @@ static void zz9k_idle_between_polls_backoff(uint32_t ticks)
 }
 
 #define ZZ9K_SYNC_WAIT_HEARTBEAT_MICROS 4000UL
+
+#define ZZ9K_DOS_TICK_MILLIS 20UL
+
+static uint32_t zz9k_library_timeout_ticks(const ZZ9KContext *ctx,
+                                            uint32_t fallback_ticks)
+{
+  uint32_t timeout_ms;
+
+  if (!ctx || ctx->offload_timeout_ms == 0U) {
+    return fallback_ticks;
+  }
+  timeout_ms = ctx->offload_timeout_ms;
+  return timeout_ms / ZZ9K_DOS_TICK_MILLIS +
+         (timeout_ms % ZZ9K_DOS_TICK_MILLIS != 0U);
+}
 #define ZZ9K_SYNC_WAIT_TIMEOUT_MS_DEFAULT 5000UL
 
 static int zz9k_parse_env_u32(const char *text, uint32_t *value)
@@ -639,6 +715,16 @@ static int zz9k_wait_block(ZZ9KContext *ctx)
 static int zz9k_consume_next_completion_locked(ZZ9KContext *ctx,
                                                ZZ9KMailboxEntry *reply);
 
+static int zz9k_dispatch_foreign_completion(ZZ9KContext *ctx,
+                                            const ZZ9KMailboxEntry *reply)
+{
+  if (ctx->completion_dispatcher) {
+    return ctx->completion_dispatcher(ctx->completion_dispatcher_user_data,
+                                      reply);
+  }
+  return ZZ9K_STATUS_OK;
+}
+
 /* Armed replacement for the busy-poll loop. Caller holds the mailbox lock and
  * has already enqueued request_id. Polls the ring, sleeping between polls. */
 static int zz9k_await_completion_locked(ZZ9KContext *ctx, uint32_t request_id,
@@ -657,7 +743,11 @@ static int zz9k_await_completion_locked(ZZ9KContext *ctx, uint32_t request_id,
           reply->user_cookie == sync_cookie) {
         return reply->status;
       }
-      continue;   /* foreign completion: drop and re-poll without blocking */
+      status = zz9k_dispatch_foreign_completion(ctx, reply);
+      if (status != ZZ9K_STATUS_OK) {
+        return status;
+      }
+      continue;
     }
     if (status != ZZ9K_STATUS_BUSY) {
       return status;   /* hard transport error */
@@ -691,6 +781,12 @@ static int zz9k_await_completion_locked(ZZ9KContext *ctx, uint32_t request_id,
              never coming. */
           ctx->late_irq_expected = 0;
           return ZZ9K_STATUS_CANCELLED;
+        }
+        if (status == ZZ9K_STATUS_OK) {
+          status = zz9k_dispatch_foreign_completion(ctx, reply);
+          if (status != ZZ9K_STATUS_OK) {
+            break;
+          }
         }
         if (status != ZZ9K_STATUS_BUSY && status != ZZ9K_STATUS_OK) {
           break; /* transport error: nothing more to drain, and nothing
@@ -745,9 +841,9 @@ static void zz9k_put_wire_be32(volatile uint8_t *p, uint32_t value)
 static void zz9k_copy_payload_to_wire(volatile uint8_t *dst,
                                       const uint8_t *src, uint32_t length)
 {
-  uint32_t i;
 
 #if ZZ9K_HOST_AMIGA
+  uint32_t i;
   for (i = 0; i + 1U < length; i += 2U) {
     *(volatile uint16_t *)(dst + i) =
         (uint16_t)(((uint16_t)src[i] << 8) | src[i + 1U]);
@@ -971,8 +1067,73 @@ int zz9k_find_board(ZZ9KBoard *board)
   return ZZ9K_STATUS_OK;
 #else
   return ZZ9K_STATUS_UNSUPPORTED;
+
 #endif
 }
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+static int zz9k_library_lvo_open(void *user, ZZ9KBoard *board, void **base,
+                                 uint16_t *version, uint16_t *revision)
+{
+  struct Library *library_base;
+  int status;
+
+  (void)user;
+  library_base = OpenLibrary((CONST_STRPTR)"zz9k.library", 0);
+  if (!library_base) {
+    return ZZ9K_STATUS_NOT_FOUND;
+  }
+  *base = library_base;
+  *version = library_base->lib_Version;
+  *revision = library_base->lib_Revision;
+  status = zz9k_find_board(board);
+  if (status != ZZ9K_STATUS_OK) {
+    CloseLibrary(library_base);
+    *base = 0;
+  }
+  return status;
+}
+
+static void zz9k_library_lvo_close(void *base)
+{
+  CloseLibrary((struct Library *)base);
+}
+
+static int zz9k_library_lvo_call(void *base, ZZ9KRequest *request,
+                                 ZZ9KMailboxEntry *reply,
+                                 uint32_t timeout_ticks)
+{
+  return ZZ9KCallAtBase((struct Library *)base, request, reply, timeout_ticks);
+}
+
+static int zz9k_library_lvo_call_async(
+    void *base, ZZ9KAsyncRequest *async, const ZZ9KRequest *request,
+    ZZ9KAsyncCallback callback, void *callback_user_data)
+{
+  return ZZ9KCallAsyncAtBase((struct Library *)base, async, request, callback,
+                             callback_user_data);
+}
+
+static int zz9k_library_lvo_poll(void *base, uint32_t max_completions,
+                                 uint32_t *completed)
+{
+  return ZZ9KPollAtBase((struct Library *)base, max_completions, completed);
+}
+
+static int zz9k_library_lvo_cancel(void *base, ZZ9KAsyncRequest *async)
+{
+  return ZZ9KCancelAsyncAtBase((struct Library *)base, async);
+}
+
+static const ZZ9KLibraryTransport zz9k_library_lvo_transport = {
+  zz9k_library_lvo_open,
+  zz9k_library_lvo_close,
+  zz9k_library_lvo_call,
+  zz9k_library_lvo_call_async,
+  zz9k_library_lvo_poll,
+  zz9k_library_lvo_cancel,
+  0
+};
+#endif
 
 int zz9k_open(ZZ9KContext **ctx)
 {
@@ -988,6 +1149,51 @@ int zz9k_open(ZZ9KContext **ctx)
   }
 
   *ctx = 0;
+
+#if ZZ9K_HOST_AMIGA && !defined(ZZ9K_HOST_LIBRARY_BUILD)
+  {
+    struct Library *library_base;
+    ZZ9KContext *new_ctx;
+
+    library_base = OpenLibrary((CONST_STRPTR)"zz9k.library", 0);
+    if (library_base) {
+      if (!zz9k_library_version_supported(library_base->lib_Version,
+                                          library_base->lib_Revision)) {
+        CloseLibrary(library_base);
+        return ZZ9K_STATUS_LIBRARY_TOO_OLD;
+      }
+      status = zz9k_find_board(&board);
+      if (status == ZZ9K_STATUS_OK) {
+        new_ctx = (ZZ9KContext *)zz9k_alloc_host(sizeof(*new_ctx));
+        if (new_ctx) {
+          ZZ9KCaps caps;
+
+          memset(new_ctx, 0, sizeof(*new_ctx));
+          new_ctx->board = board;
+          new_ctx->library_transport = 1U;
+          new_ctx->library_base = library_base;
+          new_ctx->library_transport_ops = &zz9k_library_lvo_transport;
+          status = zz9k_query_caps(new_ctx, &caps);
+          if (status == ZZ9K_STATUS_OK &&
+              (caps.capability_bits & ZZ9K_CAP_APERTURE_LAYOUT) != 0U &&
+              board.zorro_version == 2U) {
+            status = zz9k_query_aperture_layout(
+                new_ctx, &new_ctx->aperture_layout);
+          }
+          if (status == ZZ9K_STATUS_OK) {
+            *ctx = new_ctx;
+            return ZZ9K_STATUS_OK;
+          }
+          zz9k_close(new_ctx);
+          return status;
+        }
+        status = ZZ9K_STATUS_NO_MEMORY;
+      }
+      CloseLibrary(library_base);
+      return status;
+    }
+  }
+#endif
 
 #if ZZ9K_HOST_AMIGA
   status = zz9k_find_board(&board);
@@ -1021,6 +1227,39 @@ int zz9k_open(ZZ9KContext **ctx)
   }
   return status;
 #else
+  if (zz9k_library_transport_for_test) {
+    const ZZ9KLibraryTransport *transport = zz9k_library_transport_for_test;
+    ZZ9KContext *new_ctx;
+    ZZ9KBoard board;
+    void *library_base;
+    uint16_t version;
+    uint16_t revision;
+    int status;
+
+    memset(&board, 0, sizeof(board));
+    library_base = 0;
+    status = transport->open(transport->user, &board, &library_base, &version,
+                             &revision);
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    if (!zz9k_library_version_supported(version, revision)) {
+      transport->close(library_base);
+      return ZZ9K_STATUS_LIBRARY_TOO_OLD;
+    }
+    new_ctx = (ZZ9KContext *)zz9k_alloc_host(sizeof(*new_ctx));
+    if (!new_ctx) {
+      transport->close(library_base);
+      return ZZ9K_STATUS_NO_MEMORY;
+    }
+    memset(new_ctx, 0, sizeof(*new_ctx));
+    new_ctx->board = board;
+    new_ctx->library_transport = 1U;
+    new_ctx->library_transport_ops = transport;
+    new_ctx->library_base = library_base;
+    *ctx = new_ctx;
+    return ZZ9K_STATUS_OK;
+  }
   return ZZ9K_STATUS_UNSUPPORTED;
 #endif
 }
@@ -1138,6 +1377,25 @@ void zz9k_close(ZZ9KContext *ctx)
 #if ZZ9K_HOST_AMIGA
   zz9k_timer_close(ctx);
 #endif
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+  while (ctx->library_pending) {
+    ZZ9KStaticLibraryPending *pending = ctx->library_pending;
+    int status;
+
+    status = ctx->library_transport_ops->cancel(ctx->library_base,
+                                                &pending->async);
+    if (status != ZZ9K_STATUS_OK &&
+        !(status == ZZ9K_STATUS_BAD_REQUEST && pending->async.completed)) {
+      return;
+    }
+    ctx->library_pending = pending->next;
+    zz9k_free_host(pending);
+  }
+  if (ctx->library_transport && ctx->library_transport_ops &&
+      ctx->library_base) {
+    ctx->library_transport_ops->close(ctx->library_base);
+  }
+#endif
   zz9k_free_host(ctx);
 }
 
@@ -1148,9 +1406,35 @@ void zz9k_set_offload_timeout_ms(ZZ9KContext *ctx, uint32_t timeout_ms)
   }
 }
 
+void zz9k_set_completion_dispatcher(ZZ9KContext *ctx,
+                                    ZZ9KCompletionDispatcher dispatcher,
+                                    void *user_data)
+{
+  if (ctx) {
+    ctx->completion_dispatcher = dispatcher;
+    ctx->completion_dispatcher_user_data = user_data;
+  }
+}
+
+int zz9k_set_client_id(ZZ9KContext *ctx, uint16_t client_id)
+{
+  if (!ctx || client_id > (ZZ9K_ENTRY_CLIENT_ID_MASK >>
+                           ZZ9K_ENTRY_CLIENT_ID_SHIFT)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  ctx->client_id = client_id;
+  return ZZ9K_STATUS_OK;
+}
+
 int zz9k_completion_irq_supported(ZZ9KContext *ctx)
 {
-  return ctx && (ctx->capability_bits & ZZ9K_CAP_IRQ_COMPLETION) != 0U;
+  return ctx && !ctx->library_transport &&
+         (ctx->capability_bits & ZZ9K_CAP_IRQ_COMPLETION) != 0U;
+}
+
+int zz9k_uses_library_transport(const ZZ9KContext *ctx)
+{
+  return ctx && ctx->library_transport;
 }
 
 int zz9k_shared_heap_board_visible(const ZZ9KContext *ctx)
@@ -1184,7 +1468,7 @@ int zz9k_completion_irq_ack(ZZ9KContext *ctx)
   if (!ctx) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
-  if (!zz9k_completion_irq_supported(ctx)) {
+  if (ctx->library_transport || !zz9k_completion_irq_supported(ctx)) {
     return ZZ9K_STATUS_UNSUPPORTED;
   }
 
@@ -1205,7 +1489,8 @@ int zz9k_completion_irq_enable(ZZ9KContext *ctx, int enable)
   if (!ctx) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
-  if (!zz9k_completion_irq_supported(ctx) || !ctx->sdk_irq_control) {
+  if (ctx->library_transport || !zz9k_completion_irq_supported(ctx) ||
+      !ctx->sdk_irq_control) {
     return ZZ9K_STATUS_UNSUPPORTED;
   }
 
@@ -3434,6 +3719,7 @@ static int zz9k_enqueue_request_locked(ZZ9KContext *ctx, ZZ9KRequest *request,
     return ZZ9K_STATUS_BAD_REQUEST;
   }
 
+
   head = zz9k_get_be32(ctx->mailbox->request_head);
   tail = zz9k_get_be32(ctx->mailbox->request_tail);
   if (head >= ctx->request_ring_entries || tail >= ctx->request_ring_entries) {
@@ -3461,6 +3747,42 @@ static int zz9k_enqueue_request_locked(ZZ9KContext *ctx, ZZ9KRequest *request,
   return ZZ9K_STATUS_QUEUED;
 }
 
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+static void zz9k_library_pending_complete(ZZ9KAsyncRequest *async,
+                                          void *user_data)
+{
+  (void)async;
+  (void)user_data;
+}
+
+static int zz9k_library_take_completed(ZZ9KContext *ctx,
+                                       ZZ9KMailboxEntry *reply)
+{
+  ZZ9KStaticLibraryPending **link = &ctx->library_pending;
+
+  while (*link) {
+    ZZ9KStaticLibraryPending *pending = *link;
+    int status;
+
+    if (!pending->async.completed) {
+      link = &pending->next;
+      continue;
+    }
+    status = ctx->library_transport_ops->cancel(ctx->library_base,
+                                                &pending->async);
+    if (status != ZZ9K_STATUS_OK &&
+        !(status == ZZ9K_STATUS_BAD_REQUEST && pending->async.completed)) {
+      return status;
+    }
+    *reply = pending->async.reply;
+    *link = pending->next;
+    zz9k_free_host(pending);
+    return ZZ9K_STATUS_OK;
+  }
+  return ZZ9K_STATUS_BUSY;
+}
+#endif
+
 int zz9k_submit(ZZ9KContext *ctx, ZZ9KRequest *request, uint32_t *request_id)
 {
   int lock_status;
@@ -3469,6 +3791,35 @@ int zz9k_submit(ZZ9KContext *ctx, ZZ9KRequest *request, uint32_t *request_id)
   if (!ctx || !request || !request_id) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
+  if (ctx->library_transport) {
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+    ZZ9KStaticLibraryPending *pending =
+        (ZZ9KStaticLibraryPending *)zz9k_alloc_host(sizeof(*pending));
+
+    if (!pending) {
+      return ZZ9K_STATUS_NO_MEMORY;
+    }
+    memset(pending, 0, sizeof(*pending));
+    status = ctx->library_transport_ops->call_async(
+        ctx->library_base, &pending->async, request,
+        zz9k_library_pending_complete, ctx);
+    if (status != ZZ9K_STATUS_QUEUED) {
+      zz9k_free_host(pending);
+      return status;
+    }
+    pending->next = ctx->library_pending;
+    ctx->library_pending = pending;
+    *request_id = pending->async.request_id;
+    return status;
+#else
+    return ZZ9K_STATUS_UNSUPPORTED;
+#endif
+  }
+
+  request->entry.flags &= (uint16_t)~ZZ9K_ENTRY_CLIENT_ID_MASK;
+  request->entry.flags |= (uint16_t)(ctx->client_id <<
+                                     ZZ9K_ENTRY_CLIENT_ID_SHIFT);
+
   lock_status = zz9k_mailbox_lock(ctx);
   if (lock_status != ZZ9K_STATUS_OK) {
     return lock_status;
@@ -3535,6 +3886,7 @@ static int zz9k_consume_next_completion_locked(ZZ9KContext *ctx,
     return ZZ9K_STATUS_UNSUPPORTED;
   }
 
+
   head = zz9k_get_be32(ctx->mailbox->completion_head);
   tail = zz9k_get_be32(ctx->mailbox->completion_tail);
   if (head >= ctx->completion_ring_entries ||
@@ -3544,6 +3896,7 @@ static int zz9k_consume_next_completion_locked(ZZ9KContext *ctx,
   if (head == tail) {
     return ZZ9K_STATUS_BUSY;
   }
+
 
   zz9k_entry_from_wire(reply, &ctx->completion_ring[head]);
   next_head = zz9k_next_ring_index(head, ctx->completion_ring_entries);
@@ -3563,6 +3916,25 @@ int zz9k_poll(ZZ9KContext *ctx, ZZ9KMailboxEntry *reply)
   if (!ctx || !reply) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
+  if (ctx->library_transport) {
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+    uint32_t completed = 0U;
+
+    status = zz9k_library_take_completed(ctx, reply);
+    if (status == ZZ9K_STATUS_OK) {
+      return status;
+    }
+    status = ctx->library_transport_ops->poll(ctx->library_base, 1U,
+                                               &completed);
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    return zz9k_library_take_completed(ctx, reply);
+#else
+    return ZZ9K_STATUS_UNSUPPORTED;
+#endif
+  }
+
   lock_status = zz9k_mailbox_lock(ctx);
   if (lock_status != ZZ9K_STATUS_OK) {
     return lock_status;
@@ -3600,6 +3972,68 @@ int zz9k_poll_batch(ZZ9KContext *ctx, ZZ9KMailboxEntry *replies,
   return ZZ9K_STATUS_OK;
 }
 
+static void zz9k_crypto_track_submissions(
+    uint32_t request_ids[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT],
+    const uint32_t *submitted_ids, uint32_t count)
+{
+  uint32_t i;
+  uint32_t slot;
+
+  for (i = 0; i < count; i++) {
+    for (slot = 0; slot < ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT; slot++) {
+      if (request_ids[slot] == 0U) {
+        request_ids[slot] = submitted_ids[i];
+        break;
+      }
+    }
+  }
+}
+
+static int zz9k_poll_crypto_batch(
+    ZZ9KContext *ctx,
+    uint32_t request_ids[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT],
+    ZZ9KMailboxEntry *replies, uint32_t capacity, uint32_t *completed)
+{
+  ZZ9KMailboxEntry reply;
+  uint32_t done;
+  uint32_t slot;
+  int status;
+
+  if (!ctx || !replies || capacity == 0U || !completed) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  if (!ctx->completion_dispatcher) {
+    return zz9k_poll_batch(ctx, replies, capacity, completed);
+  }
+
+  *completed = 0;
+  done = 0;
+  while (done < capacity) {
+    status = zz9k_poll(ctx, &reply);
+    if (status == ZZ9K_STATUS_BUSY) {
+      return done == 0U ? ZZ9K_STATUS_BUSY : ZZ9K_STATUS_OK;
+    }
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    for (slot = 0; slot < ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT; slot++) {
+      if (request_ids[slot] == reply.request_id) {
+        request_ids[slot] = 0U;
+        replies[done++] = reply;
+        *completed = done;
+        break;
+      }
+    }
+    if (slot == ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT) {
+      status = zz9k_dispatch_foreign_completion(ctx, &reply);
+      if (status != ZZ9K_STATUS_OK) {
+        return status;
+      }
+    }
+  }
+  return ZZ9K_STATUS_OK;
+}
+
 int zz9k_crypto_hash_batch(ZZ9KContext *ctx,
                            const ZZ9KCryptoHashDesc *descs,
                            ZZ9KCryptoResult *results,
@@ -3609,6 +4043,8 @@ int zz9k_crypto_hash_batch(ZZ9KContext *ctx,
 {
   ZZ9KRequest requests[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
   ZZ9KMailboxEntry replies[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
+  uint32_t in_flight_ids[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
+  uint32_t submitted_ids[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
   uint32_t submitted_total;
   uint32_t completed_total;
   uint32_t in_flight;
@@ -3625,6 +4061,7 @@ int zz9k_crypto_hash_batch(ZZ9KContext *ctx,
   }
 
   memset(results, 0, sizeof(results[0]) * count);
+  memset(in_flight_ids, 0, sizeof(in_flight_ids));
   submitted_total = 0;
   completed_total = 0;
   in_flight = 0;
@@ -3651,9 +4088,11 @@ int zz9k_crypto_hash_batch(ZZ9KContext *ctx,
       }
 
       submitted_now = 0;
-      status = zz9k_submit_batch(ctx, requests, batch_capacity, 0,
+      status = zz9k_submit_batch(ctx, requests, batch_capacity, submitted_ids,
                                  &submitted_now);
       if (status == ZZ9K_STATUS_QUEUED && submitted_now != 0U) {
+        zz9k_crypto_track_submissions(in_flight_ids, submitted_ids,
+                                      submitted_now);
         submitted_total += submitted_now;
         in_flight += submitted_now;
         wait_ticks = 0;
@@ -3689,8 +4128,8 @@ int zz9k_crypto_hash_batch(ZZ9KContext *ctx,
       }
 
       just_completed = 0;
-      status = zz9k_poll_batch(ctx, replies, poll_capacity,
-                               &just_completed);
+      status = zz9k_poll_crypto_batch(ctx, in_flight_ids, replies,
+                                      poll_capacity, &just_completed);
       if (status == ZZ9K_STATUS_BUSY) {
         zz9k_idle_between_polls_backoff(wait_ticks);
         wait_ticks++;
@@ -3737,6 +4176,8 @@ int zz9k_crypto_stream_batch(ZZ9KContext *ctx,
 {
   ZZ9KRequest requests[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
   ZZ9KMailboxEntry replies[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
+  uint32_t in_flight_ids[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
+  uint32_t submitted_ids[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
   uint32_t submitted_total;
   uint32_t completed_total;
   uint32_t in_flight;
@@ -3753,6 +4194,7 @@ int zz9k_crypto_stream_batch(ZZ9KContext *ctx,
   }
 
   memset(results, 0, sizeof(results[0]) * count);
+  memset(in_flight_ids, 0, sizeof(in_flight_ids));
   submitted_total = 0;
   completed_total = 0;
   in_flight = 0;
@@ -3779,9 +4221,11 @@ int zz9k_crypto_stream_batch(ZZ9KContext *ctx,
       }
 
       submitted_now = 0;
-      status = zz9k_submit_batch(ctx, requests, batch_capacity, 0,
+      status = zz9k_submit_batch(ctx, requests, batch_capacity, submitted_ids,
                                  &submitted_now);
       if (status == ZZ9K_STATUS_QUEUED && submitted_now != 0U) {
+        zz9k_crypto_track_submissions(in_flight_ids, submitted_ids,
+                                      submitted_now);
         submitted_total += submitted_now;
         in_flight += submitted_now;
         wait_ticks = 0;
@@ -3817,8 +4261,8 @@ int zz9k_crypto_stream_batch(ZZ9KContext *ctx,
       }
 
       just_completed = 0;
-      status = zz9k_poll_batch(ctx, replies, poll_capacity,
-                               &just_completed);
+      status = zz9k_poll_crypto_batch(ctx, in_flight_ids, replies,
+                                      poll_capacity, &just_completed);
       if (status == ZZ9K_STATUS_BUSY) {
         zz9k_idle_between_polls_backoff(wait_ticks);
         wait_ticks++;
@@ -3865,6 +4309,8 @@ int zz9k_crypto_aead_batch(ZZ9KContext *ctx,
 {
   ZZ9KRequest requests[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
   ZZ9KMailboxEntry replies[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
+  uint32_t in_flight_ids[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
+  uint32_t submitted_ids[ZZ9K_CRYPTO_BATCH_MAX_IN_FLIGHT];
   uint32_t submitted_total;
   uint32_t completed_total;
   uint32_t in_flight;
@@ -3881,6 +4327,7 @@ int zz9k_crypto_aead_batch(ZZ9KContext *ctx,
   }
 
   memset(results, 0, sizeof(results[0]) * count);
+  memset(in_flight_ids, 0, sizeof(in_flight_ids));
   submitted_total = 0;
   completed_total = 0;
   in_flight = 0;
@@ -3907,9 +4354,11 @@ int zz9k_crypto_aead_batch(ZZ9KContext *ctx,
       }
 
       submitted_now = 0;
-      status = zz9k_submit_batch(ctx, requests, batch_capacity, 0,
+      status = zz9k_submit_batch(ctx, requests, batch_capacity, submitted_ids,
                                  &submitted_now);
       if (status == ZZ9K_STATUS_QUEUED && submitted_now != 0U) {
+        zz9k_crypto_track_submissions(in_flight_ids, submitted_ids,
+                                      submitted_now);
         submitted_total += submitted_now;
         in_flight += submitted_now;
         wait_ticks = 0;
@@ -3945,8 +4394,8 @@ int zz9k_crypto_aead_batch(ZZ9KContext *ctx,
       }
 
       just_completed = 0;
-      status = zz9k_poll_batch(ctx, replies, poll_capacity,
-                               &just_completed);
+      status = zz9k_poll_crypto_batch(ctx, in_flight_ids, replies,
+                                      poll_capacity, &just_completed);
       if (status == ZZ9K_STATUS_BUSY) {
         zz9k_idle_between_polls_backoff(wait_ticks);
         wait_ticks++;
@@ -3998,12 +4447,20 @@ int zz9k_call(ZZ9KContext *ctx, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
   if (!ctx || !request || !reply) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
+  if (ctx->library_transport) {
+#if !defined(ZZ9K_HOST_LIBRARY_BUILD)
+    return ctx->library_transport_ops->call(
+        ctx->library_base, request, reply,
+        zz9k_library_timeout_ticks(ctx, timeout_ticks));
+#else
+    return ZZ9K_STATUS_UNSUPPORTED;
+#endif
+  }
 
   lock_status = zz9k_mailbox_lock(ctx);
   if (lock_status != ZZ9K_STATUS_OK) {
     return lock_status;
   }
-
   if (request->entry.request_id == 0) {
     request->entry.request_id = zz9k_context_next_request_id(ctx);
   }
@@ -4036,13 +4493,12 @@ int zz9k_call(ZZ9KContext *ctx, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
   }
 #endif
 
-  zz9k_idle_between_polls_backoff(0);
   if (!use_wall_clock && timeout_ticks == 0U) {
     status = ZZ9K_STATUS_TIMEOUT;
     goto done;
   }
 
-  for (ticks = 0;; ticks++) {
+  for (ticks = 0;;) {
     status = zz9k_consume_next_completion_locked(ctx, reply);
     if (status == ZZ9K_STATUS_OK) {
       if (reply->request_id == request_id &&
@@ -4051,8 +4507,13 @@ int zz9k_call(ZZ9KContext *ctx, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
         status = reply->status;
         goto done;
       }
-      /* Stale/non-matching completion: discard and keep waiting for ours. */
-    } else if (status != ZZ9K_STATUS_BUSY) {
+      status = zz9k_dispatch_foreign_completion(ctx, reply);
+      if (status != ZZ9K_STATUS_OK) {
+        goto done;
+      }
+      continue;
+    }
+    if (status != ZZ9K_STATUS_BUSY) {
       goto done;
     }
 
@@ -4067,6 +4528,7 @@ int zz9k_call(ZZ9KContext *ctx, ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
       goto done;
     }
     zz9k_idle_between_polls_backoff(ticks + 1U);
+    ticks++;
   }
 
 done:

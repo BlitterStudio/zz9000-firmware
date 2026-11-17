@@ -13,6 +13,10 @@
 
 #include <stdint.h>
 
+#ifndef ZZAPP_PERF_COUNTERS
+#define ZZAPP_PERF_COUNTERS 1
+#endif
+
 #define TASKQ_CAPACITY         16u
 #define TASKQ_SHORT_MAX_BYTES  4096u
 #define TASKQ_RESULT_PAYLOAD   48u
@@ -109,15 +113,21 @@ typedef struct {
   uint32_t out_cap;
   uint32_t request_id;
   uint32_t user_cookie;
+#if ZZAPP_PERF_COUNTERS
+  uint32_t perf_enqueue_stamp;  /* set before TASK_QUEUED is published */
+#endif
   uint16_t result_status;       /* SDK_STATUS_* to post on completion */
   uint16_t result_len;          /* completion payload length */
   uint8_t  result_payload[TASKQ_RESULT_PAYLOAD];
   uint8_t  op_params[TASKQ_OP_PARAM_BYTES]; /* producer-filled input params */
+
 } taskq_desc_t;
 
 typedef struct {
   taskq_desc_t descs[TASKQ_CAPACITY];
-  uint32_t     enqueue_cursor;  /* single-producer hint (core 0 only) */
+  uint32_t     enqueue_cursor;      /* single-producer hint (core 0 only) */
+  uint32_t     claim_cursor;        /* core-1 task rotation */
+  uint32_t     short_claim_cursor;  /* core-0 short-task rotation */
 } taskq_t;
 
 typedef struct {                /* coherent control block at the queue region */
@@ -148,10 +158,30 @@ typedef struct {                /* coherent control block at the queue region */
   /* MiniGL dual-core coordination */
   volatile uint32_t minigl_doorbell;        /* core 0 sets 1 on doorbell; core 1 clears 0 */
   volatile uint32_t minigl_reset_request;   /* core 0 sets 1 on Amiga reset; core 1 clears 0 */
-  volatile uint32_t minigl_reset_ack;       /* core 1 sets 1 after reset executed */
+  volatile uint32_t minigl_reset_ack;       /* core 1 sets SCHED_MINIGL_RESET_ACK_* */
   volatile uint32_t minigl_in_flight;       /* core 1 sets 1 while executing MiniGL packet */
+  /* Core 0 closes admission before reset reclamation. Core 1 acknowledges
+   * only after its final submission check, so a selected-but-not-yet-running
+   * packet cannot appear after the fence snapshot. */
+  volatile uint32_t minigl_submission_admission;
+  volatile uint32_t minigl_submission_generation;
+  volatile uint32_t minigl_submission_ack;
   volatile uint32_t minigl_packets_on_core1;/* observability counter */
   volatile uint32_t minigl_packets_on_core0;/* observability counter (fallback) */
+  /* Seqlock protects the address/sequence pair sampled by core 0. */
+  volatile uint32_t minigl_rix_fence_epoch;
+  volatile uint32_t minigl_rix_fence_sequence;
+  volatile uint32_t minigl_rix_fence_address;
+  /* Core 0 raises the doorbell SGI only when this changes from zero to one. */
+  volatile uint32_t service_pending;
+#if ZZAPP_PERF_COUNTERS
+  /* Counts every core-0 work publication that may wake core 1. */
+  volatile uint32_t perf_work_publications;
+  /* Core 0 publishes the coalesced doorbell stamp before its release count;
+   * core 1 acquires that count before sampling the low 32-bit timestamp. */
+  volatile uint32_t perf_doorbell_stamp;
+  volatile uint32_t perf_sgi_count;
+#endif
 } taskq_shared_t;
 
 typedef struct {
@@ -160,8 +190,15 @@ typedef struct {
   int      core1_enabled;
 } taskq_watchdog_t;
 
+typedef void (*taskq_doorbell_send_fn)(void *context);
+typedef uint32_t (*taskq_doorbell_drain_fn)(void *context, uint32_t batch);
+typedef int (*taskq_doorbell_more_fn)(void *context);
+
 /* ---- queue lifecycle (portable) ---- */
 void taskq_init(taskq_t *q);
+/* Zero the coherent control block, including the doorbell word. The block
+ * lives in uninitialised DDR, so a leftover 2 strands the worker. */
+void taskq_shared_boot_init(taskq_shared_t *sh);
 int  taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                    uint32_t in_addr, uint32_t in_len,
                    uint32_t out_addr, uint32_t out_cap,
@@ -169,11 +206,25 @@ int  taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                    const void *op_params, uint32_t param_len);
 int  taskq_claim_any(taskq_t *q);
 int  taskq_claim_short(taskq_t *q);
+/* A bounded task slice finished without a client-visible result. */
+void taskq_requeue(taskq_t *q, int slot);
 void taskq_complete(taskq_t *q, int slot, uint16_t status,
                     const uint8_t *payload, uint16_t payload_len);
 void taskq_fail(taskq_t *q, int slot, uint16_t status);
+/* Core 1 is halted before this call. Every task it could no longer run is
+ * made harvestable so its client receives an error completion. */
+void taskq_abort_active(taskq_t *q, uint16_t status);
 int  taskq_harvest(taskq_t *q);
 void taskq_release(taskq_t *q, int slot);
+/* Coalesced producer-to-core-1 notification. The producer sends only when it
+ * changes pending from zero to one; the consumer clears only after rechecking
+ * its work source. */
+int taskq_doorbell_request(volatile uint32_t *pending,
+			   taskq_doorbell_send_fn send, void *context);
+uint32_t taskq_doorbell_drain(volatile uint32_t *pending,
+			      taskq_doorbell_drain_fn drain,
+			      taskq_doorbell_more_fn more, void *context,
+			      uint32_t batch);
 int  taskq_has_active(taskq_t *q);         /* any slot still QUEUED or CLAIMED */
 
 /* ---- dispatch policy (portable) ---- */
@@ -189,6 +240,38 @@ typedef enum {
 
 sched_worker_action_t sched_worker_decide(int reset_requested, int task_available,
                                           int minigl_work_available, int minigl_bound);
+/* Whether the worker may WFE after running `action`.  A MiniGL step that
+ * made no progress (a full FIFO or a DMA in flight, and no app parked in a
+ * GL call) is not retried at once; the next tick or SEV resumes it.  The
+ * caller still prefers a runnable app and keeps polling for registered
+ * app waits. */
+int sched_worker_may_wfe(sched_worker_action_t action, int minigl_progress,
+                         int task_active, int reset_requested, int doorbell,
+                         int minigl_registered);
+
+typedef void (*scheduler_core1_recovery_step_t)(void);
+/* Execute the halt fence before resetting locks that core 1 could hold. */
+void scheduler_core1_halt_before_recover(
+    scheduler_core1_recovery_step_t halt,
+    scheduler_core1_recovery_step_t recover);
+typedef void (*scheduler_core1_queue_reclaim_fn)(taskq_t *queue);
+typedef void (*scheduler_core1_module_quarantine_fn)(uint32_t module);
+/* Single-core fallback recovery, in the one order every halt path keeps:
+ * halt fence, locks, queue reclaim, audio contexts, module quarantine,
+ * liveness flag. The ARM glue (scheduler_arm.c) supplies the production
+ * steps; the host test drives this seam directly. */
+void scheduler_core1_fallback_recover_with(
+    scheduler_core1_recovery_step_t halt,
+    scheduler_core1_recovery_step_t recover,
+    scheduler_core1_queue_reclaim_fn reclaim_after_halt, taskq_t *queue,
+    scheduler_core1_recovery_step_t reclaim_audio,
+    scheduler_core1_module_quarantine_fn quarantine_module, uint32_t module,
+    volatile uint32_t *core1_started);
+
+/* minigl_reset_ack values.  FAILED: core 1 could not stop the module's
+ * engines; core 0 then stops them and drops the module with core 1 halted. */
+#define SCHED_MINIGL_RESET_ACK_DONE 1U
+#define SCHED_MINIGL_RESET_ACK_FAILED 2U
 
 /* Core 0's Amiga-reset decision for MiniGL. Core 0 must not free command
  * or present buffers while core 1 may still be streaming them. The caller
@@ -201,9 +284,47 @@ typedef enum {
   SCHED_MINIGL_RESET_ABORT      /* deadline or dead worker: stop engines, then free */
 } sched_minigl_reset_phase_t;
 
+/* `ack` is the raw minigl_reset_ack value. */
 sched_minigl_reset_phase_t sched_minigl_reset_phase(int core1_up, int posted,
-                                                    int acked, int elapsed_ms,
+                                                    uint32_t ack, int elapsed_ms,
                                                     int budget_ms);
+/* Core-0 reset quiesce holds its admission barrier for this long. */
+#define SCHED_QUIESCE_SPINS 15000U
+#define SCHED_QUIESCE_US 10U
+
+/* Applies the worker's final MiniGL admission gate to a selected action. */
+sched_worker_action_t scheduler_minigl_submission_action(
+    taskq_shared_t *shared, sched_worker_action_t action);
+/* True only after the worker has acknowledged closed admission and stopped
+ * every MiniGL submission and queued task. */
+int scheduler_minigl_quiesce_done(taskq_shared_t *shared);
+typedef int (*taskq_slot_gen_ok_fn)(int slot);
+typedef int (*taskq_slot_post_fn)(int slot, uint32_t request_id,
+                                  uint32_t user_cookie, uint16_t opcode,
+                                  uint16_t status, const uint8_t *payload,
+                                  uint16_t payload_len);
+typedef void (*taskq_slot_forget_fn)(int slot);
+typedef void (*scheduler_quiesce_step_fn)(void);
+/* Harvest every DONE/FAILED task and hand it to `post` (which reports each
+ * client completion): FAILED tasks carry `failed_status`, DONE tasks their
+ * own result. A slot whose generation check fails is dropped via `forget`
+ * so a stale request id never reaches the current mailbox. Stops early
+ * (task left harvested) when `post` reports the completion ring full; the
+ * next core-0 poll retries. `watchdog` may be NULL. */
+void scheduler_harvest_post_with(taskq_t *q, taskq_watchdog_t *watchdog,
+                                 uint16_t failed_status,
+                                 taskq_slot_gen_ok_fn gen_ok,
+                                 taskq_slot_post_fn post,
+                                 taskq_slot_forget_fn forget);
+/* Teardown after the quiesce wait: on timeout cold-restart core 1 (which
+ * marks its in-flight tasks FAILED), then post those failures to their
+ * clients BEFORE the queue is reinitialised -- afterwards the request ids
+ * are gone and the clients would wait out the mailbox timeout. Finally
+ * re-init the queue so no descriptor survives into the next lifetime. */
+void scheduler_quiesce_finish(taskq_shared_t *shared, int timed_out,
+                              scheduler_quiesce_step_fn cold_restart,
+                              scheduler_quiesce_step_fn post_completions);
+
 
 /* ---- fault watchdog (portable) ---- */
 void taskq_watchdog_init(taskq_watchdog_t *w, uint32_t threshold);
@@ -214,9 +335,49 @@ int  taskq_watchdog_core1_enabled(const taskq_watchdog_t *w);
 /* ---- coherency stress model (portable; Phase 0 harness uses these) ---- */
 uint32_t taskq_stress_fill(uint32_t seed, uint32_t index);
 int      taskq_stress_check(uint32_t seed, uint32_t index, uint32_t value);
+/* Returns zero after acknowledging that this worker will make no further
+ * MiniGL submissions for the current admission generation. */
+int scheduler_minigl_submission_admit(taskq_shared_t *shared);
 
 /* ---- atomic primitive seam ---- */
 int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired);
+#if ZZAPP_PERF_COUNTERS
+void scheduler_perf_work_published(taskq_shared_t *shared);
+#endif
+typedef void (*scheduler_core1_wake_fn)(taskq_shared_t *shared);
+void scheduler_core1_publish_work(taskq_shared_t *shared,
+				  scheduler_core1_wake_fn wake);
+#define SCHED_CORE1_CLEAN_WAIT_US 150000U
+#define SCHED_CORE1_CLEAN_POLL_US 10U
+
+typedef int (*scheduler_core1_available_fn)(void *context);
+typedef void (*scheduler_core1_clean_publish_fn)(void *context);
+typedef void (*scheduler_core1_clean_wait_fn)(void *context, uint32_t usecs);
+typedef void (*scheduler_core1_clean_cache_fn)(void *context);
+void scheduler_core1_service_clean_request_with(
+    taskq_shared_t *shared, scheduler_core1_clean_cache_fn clean_cache,
+    scheduler_core1_clean_publish_fn publish, void *context);
+int scheduler_core1_clean_dcache_wait(taskq_shared_t *shared,
+				      scheduler_core1_available_fn available,
+				      scheduler_core1_clean_publish_fn publish,
+				      scheduler_core1_clean_wait_fn wait,
+				      void *context, uint32_t spins);
+
+
+#if defined(TASKQ_HOST_TEST) && defined(SCHEDULER_PUBLISH_HOST_TEST)
+void scheduler_core1_publish(void);
+void scheduler_core1_publish_host_test_bind(taskq_shared_t *shared);
+uint32_t scheduler_core1_publish_host_test_doorbells(void);
+#endif
+#if defined(TASKQ_HOST_TEST) && defined(SCHEDULER_CLEAN_HOST_TEST)
+int scheduler_core1_clean_dcache(void);
+void scheduler_core1_service_clean_request(void);
+void scheduler_core1_clean_host_test_bind(taskq_shared_t *shared,
+					 uint32_t delay_us, int acknowledge);
+uint32_t scheduler_core1_clean_host_test_elapsed(void);
+#endif
+
+
 #ifdef TASKQ_HOST_TEST
 extern int taskq_test_force_cas_fail;  /* >0: force the next N CAS calls to fail */
 #endif
@@ -230,14 +391,21 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh);
 void scheduler_coherency_init_core0(void); /* core 0: mark region shareable */
 void scheduler_coherency_init_core1(void); /* core 1: full MMU/cache/SMP bring-up */
 taskq_shared_t *scheduler_shared(void);    /* the coherent control block */
+void scheduler_core1_enable_doorbell(void); /* core 1: install SGI 15 */
+uint32_t scheduler_core1_stack_high_water(uint32_t slot);
+void *scheduler_core1_app_stack_top(uint32_t slot);
 void scheduler_boot_init(void);            /* core 0: init queue + watchdog at boot */
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
-void scheduler_core1_wake(void);           /* core 0: publish async app work, then wake worker */
+void scheduler_core1_publish(void);        /* core 0: only work-publication entry */
+#if ZZAPP_PERF_COUNTERS
+uint32_t scheduler_perf_stamp(void);
+#endif
 void scheduler_confirm_core1_boot(void);   /* core 0: bounded wait for worker liveness at boot */
 void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
 void scheduler_core1_park_if_requested(void); /* core 1: clean L1 + park for a cold restart */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
 void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tasks + reset queue before a mailbox teardown */
+void scheduler_resume_minigl_submissions(void);
 /* Post the MiniGL reset and wake core 1. It runs after the current packet,
  * including an in-flight PL330 stream or present blit. */
 void scheduler_request_minigl_reset(void);
@@ -250,6 +418,8 @@ int  scheduler_core1_reclaim(void);
  * L1 D-cache. 0 on success or when core 1 is not running; nonzero means
  * the caller must cold-restart it. */
 int  scheduler_core1_clean_dcache(void);
+/* Core 1: acknowledge a pending clean only while no worker task is active. */
+void scheduler_core1_service_clean_request(void);
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)

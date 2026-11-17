@@ -28,6 +28,29 @@ struct sdk_audio_codec_io {
 	uint32_t frames;            /* codec units (frames/packets) decoded */
 	int starved;                /* blocked on an incomplete compressed unit */
 	int complete;               /* end of stream reached and validated */
+	/* The decoder cannot produce further PCM. A terminal status may remain
+	 * deferred until the caller drains already-published PCM. */
+	int output_terminal;
 };
 
+
+/*
+ * One decode call runs as a core-1 service task under the kernel system
+ * lock, so no app thread can run on core 1 for its whole duration. The
+ * client's high-water budget (up to the whole PCM ring) would hold the
+ * lock for the full refill -- a measured 7.1M XTime global-timer ticks,
+ * about 21.3 ms at COUNTS_PER_SECOND = CPU/2 = 333 MHz. A 24 KiB pass
+ * measured 1172743 XTime ticks, about 3.5 ms at that timer rate. Every decode
+ * path therefore caps one pass to 24 KiB of PCM; later passes (the playback
+ * pump's refill kick, the next FEED or READ) continue the stream. A pass
+ * still always makes progress: the first frame decodes even when larger than
+ * the cap, so a pass is bounded by the cap plus one frame.
+ */
+#define SDK_AUDIO_DECODE_PASS_PCM_BYTES (24U * 1024U)
+
+static inline uint32_t sdk_audio_decode_pass_budget(uint32_t pcm_budget)
+{
+	return pcm_budget > SDK_AUDIO_DECODE_PASS_PCM_BYTES ?
+	       SDK_AUDIO_DECODE_PASS_PCM_BYTES : pcm_budget;
+}
 #endif /* SDK_AUDIO_CODEC_IO_H */

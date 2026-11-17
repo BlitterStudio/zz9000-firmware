@@ -13,6 +13,21 @@ static unsigned ended;
 
 static uint32_t wire_loader_state;
 
+/*
+ * The app reaches its audio ring through a user-space alias of the services'
+ * backing block; on the card its address space maps one onto the other.  This
+ * test plays the app on a 64-bit host, where the alias is not a host pointer,
+ * so it follows that mapping to the block the services poll reads.
+ */
+static void *app_audio_host(const volatile void *user)
+{
+    uintptr_t offset = (uintptr_t)user - current_runtime()->audio_alias;
+
+    assert(current_runtime()->audio_block != NULL);
+    assert(offset < 8U + ZZAPP_AUDIO_FRAMES * 4U);
+    return (uint8_t *)current_runtime()->audio_block + offset;
+}
+
 static void drain_console_output(void)
 {
     uint32_t head = zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF);
@@ -116,7 +131,8 @@ int main(void)
     uint16_t completed_status;
     uint32_t request_id;
     uint32_t argc;
-
+    uint32_t generation;
+    uint32_t prior_generation;
     zzapp_services_test_reset();
     memset(launcher_window, 0, sizeof(launcher_window));
     zzapp_services_test_set_window(launcher_window, sizeof(launcher_window));
@@ -135,9 +151,18 @@ int main(void)
     zzapp_put_be32(launcher_window + ZZAPP_AUDIO_OFF +
                    ZZAPP_AUDIO_ROUTE_OFF, ZZAPP_AUDIO_ROUTE_AHI);
 
+    status = dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, 0U, reply, &reply_len);
+    assert(status == SDK_STATUS_OK);
+    prior_generation = zzapp_get_be32(launcher_window +
+                                      ZZAPP_LIFE_GENERATION_OFF);
+    assert(prior_generation != 0U);
+
     status = dispatch_deferred(ZZAPP_OP_LOAD_BEGIN, 0, 0U, 1U, reply,
                                &reply_len);
     assert(status == SDK_STATUS_OK);
+    generation = zzapp_get_be32(launcher_window + ZZAPP_LIFE_GENERATION_OFF);
+    assert(generation != 0U);
+    assert(generation != prior_generation);
     assert(begun == 1U);
     assert(zzapp_services_state() == ZZAPP_ST_LOADING);
     assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF) == 0u);
@@ -184,7 +209,7 @@ int main(void)
     zzapp_services_poll();
     assert(zzapp_services_take_start(&argc));
     assert(argc == 0U);
-    zzapp_services_start_entered(ZZ_OK);
+    assert(zzapp_services_start_entered(zzapp_services_generation()) == ZZ_OK);
     assert(zzapp_mailbox_harvest(&request_id, 0, 0, &completed_status,
                                  reply, &reply_len));
     assert(request_id == 5U);
@@ -253,13 +278,17 @@ int main(void)
     }
     {
         zzapp_audio app_audio;
+        int16_t *samples;
+        volatile uint32_t *write_frame;
         uint32_t frame;
 
         zzapp_services_or_flags(ZZAPP_F_LAUNCHER_AUDIO_AHI);
         assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == ZZ_OK);
+        samples = app_audio_host(app_audio.samples);
+        write_frame = app_audio_host(app_audio.write_frame);
         for (frame = 0u; frame < 4u; frame++)
-            app_audio.samples[frame * 2u] = (int16_t)frame;
-        *app_audio.write_frame = 4u;
+            samples[frame * 2u] = (int16_t)frame;
+        *write_frame = 4u;
         zzapp_services_poll();
         assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                               ZZAPP_AUDIO_HEAD_OFF) == 16u);
@@ -269,7 +298,7 @@ int main(void)
         zzapp_put_be32(launcher_window + ZZAPP_AUDIO_OFF +
                        ZZAPP_AUDIO_TAIL_OFF, 16u);
         zzapp_services_poll();
-        assert(*app_audio.read_frame == 4u);
+        assert(*(volatile uint32_t *)app_audio_host(app_audio.read_frame) == 4u);
         assert(zzapp_svc_audio_close() == ZZ_OK);
         assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                               ZZAPP_AUDIO_ROUTE_OFF) == ZZAPP_AUDIO_ROUTE_CARD);
@@ -291,12 +320,13 @@ int main(void)
             assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == ZZ_OK);
             assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                                   ZZAPP_AUDIO_EPOCH_OFF) != epoch);
-            *app_audio.write_frame = 4u;
+            write_frame = app_audio_host(app_audio.write_frame);
+            *write_frame = 4u;
             zzapp_services_poll();
             head = zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                                   ZZAPP_AUDIO_HEAD_OFF);
             assert(head == 16u);
-            *app_audio.write_frame = 8u;
+            *write_frame = 8u;
             zzapp_services_test_set_audio_request(AUDIO_REQUEST_CLOSE);
             zzapp_services_poll();
             assert(zzapp_services_test_audio_request() ==
@@ -328,7 +358,10 @@ int main(void)
         assert(status == SDK_STATUS_OK);
         assert(zzapp_services_state() == ZZAPP_ST_LOADING);
         assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_STOP_OFF) == 0u);
-        zzapp_put_be32(stop + ZZAPP_STOP_GENERATION, 7u);
+        generation = zzapp_get_be32(launcher_window +
+                                    ZZAPP_LIFE_GENERATION_OFF);
+        assert(generation != 7U);
+        zzapp_put_be32(stop + ZZAPP_STOP_GENERATION, generation);
         status = dispatch(ZZAPP_OP_STOP, stop, ZZAPP_STOP_REQ_BYTES, 11u,
                           reply, &reply_len);
         assert(status == SDK_STATUS_OK);

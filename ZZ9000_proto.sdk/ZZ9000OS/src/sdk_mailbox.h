@@ -36,6 +36,9 @@
 #define SDK_STATUS_MODULE_MISSING      11U
 #define SDK_STATUS_MODULE_MISMATCH     12U
 #define SDK_STATUS_INTERNAL_ERROR      0xffffU
+/* Worker-private result: scheduler requeues the claimed descriptor and never
+ * exposes this value to a mailbox client. */
+#define SDK_TASK_IN_PROGRESS           0xfffeU
 
 #define SDK_CAP_MAILBOX                (1U << 0)
 #define SDK_CAP_IRQ_COMPLETION         (1U << 1)
@@ -206,6 +209,15 @@
 #define SDK_OP_PING                    0x0002U
 #define SDK_OP_QUERY_SERVICE           0x0004U
 #define SDK_OP_QUERY_APERTURE_LAYOUT   0x0005U
+
+/* A nonzero client id uses the otherwise-reserved high eleven entry-flag
+ * bits. Requests without one are legacy unowned requests. */
+#define SDK_ENTRY_CLIENT_ID_SHIFT       5U
+#define SDK_ENTRY_CLIENT_ID_MASK        0xffe0U
+#define SDK_ENTRY_CLIENT_ID_MAX \
+	(SDK_ENTRY_CLIENT_ID_MASK >> SDK_ENTRY_CLIENT_ID_SHIFT)
+
+#define SDK_OP_CLIENT_RELEASE           0x0006U
 #define SDK_OP_CONSOLE_ENCODE          0x8200U
 
 #define SDK_OP_ALLOC_SHARED            0x0100U
@@ -396,6 +408,8 @@ struct SDKModuleStatusPayload {
 #define SDK_OP_APP_STOP                0x0c06U
 #define SDK_OP_APP_STATUS              0x0c07U
 #define SDK_OP_APP_DISPLAY_BIND        0x0c08U
+#define SDK_OP_APP_LIST                0x0c09U
+#define SDK_OP_APP_RELEASE             0x0c0aU
 
 struct SDKMediaSessionBeginPayload {
 	uint8_t video_codec[4];
@@ -1326,6 +1340,15 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_DECOMPRESS_RESULT_NEED_INPUT      (1U << 2)
 
 void sdk_mailbox_init(void);
+/* Close MiniGL acquires before reset quiesces core 1; non-blocking. */
+void sdk_mailbox_begin_amiga_reset(void);
+void sdk_mailbox_finish_amiga_reset(void);
+int sdk_mailbox_minigl_acquire_cancelled(void);
+int sdk_mailbox_minigl_release_on_owner(void);
+void sdk_mailbox_minigl_reset_release_all(void);
+/* Core-1 completion of a deferred MiniGL acquire. */
+uint16_t sdk_mailbox_minigl_acquire_on_owner(uint8_t *result_payload,
+                                             uint32_t *result_len);
 /* Map the Zorro II mailbox page non-cacheable. Boot only, after
  * sdk_aperture_runtime_init() and before core 1 or interrupts start:
  * splitting the section is break-before-make (mmu_page.h). */
@@ -1387,15 +1410,20 @@ uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
 uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
                                       uint8_t *result_payload,
                                       uint32_t *result_len);
+/* Core-1 restart drops resumable JPEG task contexts after their tracked heap
+ * allocations have been reclaimed. */
+void sdk_mailbox_reset_jpeg_tasks(void);
 
 /*
  * Post a deferred completion for a task the core-1 scheduler finished (see
  * scheduler_core0_poll). Returns 1 if posted, 0 if the completion ring is full
- * (retry) or the mailbox is inactive. Runs only on core 0's main loop.
+ * (retry) or the mailbox is inactive. `slot` releases the descriptor's
+ * mailbox-side lifetime pins only after the completion is committed.
  */
-int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
-                              uint16_t opcode, uint16_t status,
-                              const uint8_t *payload, uint16_t payload_len);
+int sdk_mailbox_post_deferred(int slot, uint32_t request_id,
+                              uint32_t user_cookie, uint16_t opcode,
+                              uint16_t status, const uint8_t *payload,
+                              uint16_t payload_len);
 
 /*
  * True while a harvested task's slot still belongs to the current mailbox
@@ -1404,5 +1432,9 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
  * under never posts a stale request_id/user_cookie into the new completion ring.
  */
 int sdk_mailbox_task_gen_ok(int slot);
+
+/* Drops the mailbox-side lifetime pins of a stale task before its descriptor
+ * is released without a completion. */
+void sdk_mailbox_task_forget(int slot);
 
 #endif /* SDK_MAILBOX_H */

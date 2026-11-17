@@ -57,6 +57,9 @@ enum card_pool_class {
     CARD_POOL_CLASS_MINIGL_RIX = 13,
     /* Firmware-owned back buffers for a trusted app's single-buffer bind. */
     CARD_POOL_CLASS_APP_DISPLAY = 14,
+    /* 1 MiB-aligned extents the app frame allocator carves into frames.
+     * Commit admission in zzapp_mem bounds them, not a class limit. */
+    CARD_POOL_CLASS_APP_FRAMES = 15,
     CARD_POOL_CLASS_COUNT
 };
 
@@ -74,6 +77,7 @@ enum card_pool_class {
 #define CARD_POOL_LIMIT_IMAGE       (72u << 20)
 #define CARD_POOL_LIMIT_APP         (96u << 20)
 #define CARD_POOL_LIMIT_APP_DISPLAY (32u << 20)
+#define CARD_POOL_LIMIT_APP_FRAMES  UINT32_MAX
 #define CARD_POOL_LIMIT_MINIGL_MODULE    (4u << 20)
 #define CARD_POOL_LIMIT_MINIGL_TRANSPORT (4u << 20)
 #define CARD_POOL_LIMIT_MINIGL_CONTEXT   MINIGL_CARD_POOL_LIMIT_BYTES
@@ -96,6 +100,7 @@ typedef struct {
     uint32_t addr;
     uint32_t size;
     uint32_t owner;
+    uint8_t flags;
 } card_pool_block_t;
 
 typedef struct {
@@ -110,6 +115,8 @@ typedef struct {
     /* Frees naming an unknown address or another owner. */
     uint32_t ignored_frees;
 } card_pool_t;
+
+#define CARD_POOL_BLOCK_QUARANTINED 0x01u
 
 /* One contiguous card pool: a permanent prefix plus a revocable Fast-RAM
  * tail. The tail stays closed while Fast RAM is advertised. */
@@ -129,14 +136,18 @@ void card_pool_init(card_pool_t *pool);
 int card_pool_add_range(card_pool_t *pool, uint32_t base, uint32_t end,
                         int revocable);
 void card_pool_open_range(card_pool_t *pool, uint32_t range);
-/* Drop every block in the range and close it. Their owners' later frees
- * are ignored. Returns the bytes dropped. */
+/* Drop every non-quarantined block in the range and close it. Their owners'
+ * later frees are ignored. Returns the bytes dropped. */
 uint32_t card_pool_revoke_range(card_pool_t *pool, uint32_t range);
 
 /* `size` bytes rounded up to whole pages, page aligned. Returns the card
  * address, or 0 for a zero size, an invalid owner class, a class over its
  * limit, no gap large enough, or a full block table. */
 uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner);
+/* Like card_pool_alloc(), but starts the block at an `alignment` boundary.
+ * The alignment must be a power of two and at least one pool page. */
+uint32_t card_pool_alloc_aligned(card_pool_t *pool, uint32_t size,
+                                 uint32_t alignment, uint32_t owner);
 /* Whether `owner` owns the live block starting at `addr` and that block
  * covers `length`. */
 int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
@@ -144,30 +155,47 @@ int card_pool_block_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
 /* Whether `owner` owns a live block containing `[addr, addr + length)`. */
 int card_pool_range_owned(card_pool_t *pool, uint32_t addr, uint32_t length,
                           uint32_t owner);
-/* Frees the block starting at `addr` when `owner` owns it and returns 1.
- * Otherwise nothing changes, the free is counted in ignored_frees, and it
- * returns 0. A zero address is a no-op returning 0. */
+/* Frees the block starting at `addr` when `owner` owns it and the block is
+ * not quarantined, and returns 1. Otherwise nothing changes, the free is
+ * counted in ignored_frees, and it returns 0. A zero address is a no-op
+ * returning 0. */
 int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner);
-/* Free every block of one owner. Returns the bytes freed. */
+/* Free every non-quarantined block of one owner. Returns the bytes freed. */
 uint32_t card_pool_release_owner(card_pool_t *pool, uint32_t owner);
+/* Permanently retain every live block of `owner`. Legacy MiniGL (class 7)
+ * and module MiniGL context (class 11) owners with the same instance name
+ * the same context. */
+void card_pool_quarantine_owner(card_pool_t *pool, uint32_t owner);
+/* Permanently retain every live MiniGL block. Used only while core 1 is
+ * halted after a cold restart. */
+void card_pool_quarantine_minigl(card_pool_t *pool);
+/* Whether the revocable Fast-RAM window contains quarantined memory and
+ * therefore cannot be handed to the Amiga. */
+int card_pool_can_lend_to_amiga(const card_pool_t *pool);
 
 /* Whether a revocable range is lent out. Reads no lock: only core 0 opens
  * and closes ranges, so its own answer cannot change underneath it. */
 int card_pool_has_lent(const card_pool_t *pool);
-/* Amiga reset, before the fast-RAM gate can reopen: revoke every lent
- * range. The caller must first stop core 1 (which also frees a pool lock a
- * faulted core 1 still holds) and afterwards write back the ARM cache
- * lines for that memory. Takes no lock when nothing is lent. */
+/* Amiga reset, before the fast-RAM gate can reopen: revoke every lent range's
+ * non-quarantined blocks. Quarantined blocks remain reserved; callers must
+ * keep the gate closed while card_pool_can_lend_to_amiga() is false. The
+ * caller must first stop core 1 (which also frees a pool lock a faulted core
+ * 1 still holds) and afterwards write back the ARM cache lines for that
+ * memory. Takes no lock when nothing is lent. */
 void card_pool_take_back_lent(card_pool_t *pool);
-/* Amiga reset, after the module resets: release every owner except the
- * FIRMWARE class, then lend the revocable tail when the Amiga cannot use it
- * -- a Zorro II board has no fast-RAM window, and Zorro III lends the tail
- * while Fast RAM is withheld. */
+/* Amiga reset, after core 0 has observed RasterIX completion or quarantined
+ * its MiniGL blocks: release every non-quarantined owner except FIRMWARE,
+ * then lend the revocable tail when the Amiga cannot use it -- a Zorro II
+ * board has no Fast-RAM window, and Zorro III lends it while Fast RAM is
+ * withheld. */
 void card_pool_finish_amiga_reset(card_pool_t *pool, int is_zorro3,
                                   int fastram_advertised);
 
 /* Free bytes in one interval; 0 while it is closed. */
 uint32_t card_pool_range_free_bytes(card_pool_t *pool, uint32_t range);
+/* Free bytes available to `owner`, excluding closed and incompatible
+ * revocable ranges. */
+uint32_t card_pool_available_bytes(card_pool_t *pool, uint32_t owner);
 
 /* Force the pool lock free. Only for core-1 fault recovery, while core 1
  * is halted and cannot be inside the pool. */

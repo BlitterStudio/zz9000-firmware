@@ -11,6 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "audio_pump_preconvert.h"
+#include "audio_stream_drain.h"
+
+#include "sdk_audio_codec_io.h"
 #include "sdk_audio_flac.h"
 #include "sdk_decode_reclaim.h"
 #include "sdk_mailbox.h"
@@ -41,6 +45,9 @@ struct sim {
 };
 
 static struct sim g_sim;
+static uint8_t g_space_convert[
+	32U * AUDIO_PUMP_PRECONVERT_PERIOD_BYTES];
+
 
 static uint16_t sim_decode(struct sim *s, int drain)
 {
@@ -326,6 +333,109 @@ static void test_corruption(void)
 	}
 }
 
+/*
+ * A refill can stop only because the next FLAC frame does not fit in the PCM
+ * ring. Playback then frees a 20-ms source period without changing compressed
+ * input or decoder flags; that consumer cursor movement must re-arm refill.
+ */
+static void test_refill_after_space_recovery(void)
+{
+	const struct flac_fixture *fx = fixture("stereo16");
+	struct sdk_flac_state state;
+	struct audio_stream_refill_checkpoint checkpoint =
+		{ 0U, 0U, 0U, 0U, 0 };
+	struct audio_pump_preconvert convert;
+	struct audio_pump_preconvert_source source;
+	struct sdk_audio_codec_io io;
+	uint32_t input_offset = 0U;
+	uint32_t pcm_written = 0U;
+	uint32_t pcm_consumed = 0U;
+	uint64_t converted_consumed;
+	uint16_t status;
+
+	host_runtime_reset();
+	memset(g_sim.pcm, 0, 8192U);
+	sdk_flac_init(&state, SDK_AUDIO_SAMPLE_FORMAT_S16BE);
+	memset(&io, 0, sizeof(io));
+	io.input = fx->flac;
+	io.input_length = fx->flac_len;
+	io.eof = 1;
+	io.pcm = g_sim.pcm;
+	io.pcm_capacity = 8192U;
+	io.pcm_free = 8192U;
+	io.pcm_budget = 8192U;
+	status = sdk_flac_decode(&state, &io);
+	input_offset += io.consumed;
+	pcm_written += io.produced;
+	CHECK(status == SDK_STATUS_OK && io.produced == 4608U,
+	      "space recovery setup produced %u status %u",
+	      io.produced, status);
+
+	memset(&io, 0, sizeof(io));
+	io.input = fx->flac + input_offset;
+	io.input_length = fx->flac_len - input_offset;
+	io.eof = 1;
+	io.pcm = g_sim.pcm;
+	io.pcm_capacity = 8192U;
+	io.pcm_write = pcm_written % 8192U;
+	io.pcm_free = 8192U - (pcm_written - pcm_consumed);
+	io.pcm_budget = 8192U;
+	io.pcm_unread = pcm_written - pcm_consumed;
+	status = sdk_flac_decode(&state, &io);
+	input_offset += io.consumed;
+	pcm_written += io.produced;
+	CHECK(status == SDK_STATUS_OK && io.produced == 0U,
+	      "full-ring refill unexpectedly produced %u status %u",
+	      io.produced, status);
+	audio_stream_refill_checkpoint_note(&checkpoint,
+		fx->flac_len - input_offset, pcm_written, pcm_consumed, 0U, 0);
+	CHECK(!audio_stream_refill_may_run(
+		      fx->flac_len - input_offset, 0, 0, 0, 0,
+		      pcm_written - pcm_consumed, 6144U, pcm_written,
+		      pcm_consumed, 0U, &checkpoint),
+	      "unchanged stalled refill was not suppressed");
+
+	audio_pump_preconvert_reset(
+		&convert, g_space_convert, sizeof(g_space_convert));
+	memset(&source, 0, sizeof(source));
+	source.ring = g_sim.pcm;
+	source.capacity = 8192U;
+	source.produced = pcm_written;
+	source.consumed = pcm_consumed;
+	source.sample_rate = state.sample_rate;
+	source.channels = state.channels;
+	source.sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16BE;
+	converted_consumed = pcm_consumed;
+	CHECK(audio_pump_preconvert_fill(
+		      &convert, &source, &converted_consumed) == 1,
+	      "preconverter did not consume a source period");
+	pcm_consumed = (uint32_t)converted_consumed;
+	CHECK(pcm_consumed == 3528U,
+	      "preconverter consumed %u, expected 3528", pcm_consumed);
+	CHECK(audio_stream_refill_may_run(
+		      fx->flac_len - input_offset, 0, 0, 0, 0,
+		      pcm_written - pcm_consumed, 6144U, pcm_written,
+		      pcm_consumed, 0U, &checkpoint),
+	      "consumer progress did not re-arm stalled refill");
+
+	memset(&io, 0, sizeof(io));
+	io.input = fx->flac + input_offset;
+	io.input_length = fx->flac_len - input_offset;
+	io.eof = 1;
+	io.pcm = g_sim.pcm;
+	io.pcm_capacity = 8192U;
+	io.pcm_write = pcm_written % 8192U;
+	io.pcm_free = 8192U - (pcm_written - pcm_consumed);
+	io.pcm_budget = 8192U;
+	io.pcm_unread = pcm_written - pcm_consumed;
+	status = sdk_flac_decode(&state, &io);
+	CHECK(status == SDK_STATUS_OK && io.produced == 4608U,
+	      "space-recovered refill produced %u status %u",
+	      io.produced, status);
+	sdk_flac_release(&state);
+	check_clean("space recovery");
+}
+
 static void test_drain_and_budget(void)
 {
 	const struct flac_fixture *fx = fixture("stereo16");
@@ -371,6 +481,90 @@ static void test_drain_and_budget(void)
 	      memcmp(s->out, g_expect, want) == 0, "resume after starvation");
 	sdk_flac_release(&s->st);
 	check_clean("budget");
+}
+
+/* A tiny six-frame silence stream (flac -8 --padding=0 over 24576 zero
+ * samples, 96 KiB of PCM -- more than one bounded decode pass can emit)
+ * so the pass cap is observable without a large fixture. */
+#define SIL_FRAMES     6U
+#define SIL_BLOCKSIZE  4096U
+#define SIL_FRAME_PCM  (SIL_BLOCKSIZE * 2U * 2U)
+#define SIL_PCM_BYTES  (SIL_FRAMES * SIL_FRAME_PCM)
+#define EXPECTED_PASS_PCM_CAP (24U * 1024U)
+
+
+static const uint8_t g_silence_flac[] = {
+	0x66U, 0x4cU, 0x61U, 0x43U, 0x00U, 0x00U, 0x00U, 0x22U, 0x10U, 0x00U, 0x10U, 0x00U,
+	0x00U, 0x00U, 0x0eU, 0x00U, 0x00U, 0x0eU, 0x0aU, 0xc4U, 0x42U, 0xf0U, 0x00U, 0x00U,
+	0x60U, 0x00U, 0x0aU, 0x91U, 0x56U, 0xc4U, 0xe3U, 0xc4U, 0x8eU, 0xf8U, 0x27U, 0x98U,
+	0x06U, 0x39U, 0xc4U, 0xd1U, 0xe2U, 0x63U, 0x03U, 0x00U, 0x00U, 0x12U, 0x00U, 0x00U,
+	0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+	0x00U, 0x00U, 0x10U, 0x00U, 0x84U, 0x00U, 0x00U, 0x28U, 0x20U, 0x00U, 0x00U, 0x00U,
+	0x72U, 0x65U, 0x66U, 0x65U, 0x72U, 0x65U, 0x6eU, 0x63U, 0x65U, 0x20U, 0x6cU, 0x69U,
+	0x62U, 0x46U, 0x4cU, 0x41U, 0x43U, 0x20U, 0x31U, 0x2eU, 0x34U, 0x2eU, 0x32U, 0x20U,
+	0x32U, 0x30U, 0x32U, 0x32U, 0x31U, 0x30U, 0x32U, 0x32U, 0x00U, 0x00U, 0x00U, 0x00U,
+	0xffU, 0xf8U, 0xc9U, 0x18U, 0x00U, 0xc2U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+	0xb8U, 0xeeU, 0xffU, 0xf8U, 0xc9U, 0x18U, 0x01U, 0xc5U, 0x00U, 0x00U, 0x00U, 0x00U,
+	0x00U, 0x00U, 0x2fU, 0x9bU, 0xffU, 0xf8U, 0xc9U, 0x18U, 0x02U, 0xccU, 0x00U, 0x00U,
+	0x00U, 0x00U, 0x00U, 0x00U, 0x16U, 0x01U, 0xffU, 0xf8U, 0xc9U, 0x18U, 0x03U, 0xcbU,
+	0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x81U, 0x74U, 0xffU, 0xf8U, 0xc9U, 0x18U,
+	0x04U, 0xdeU, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x65U, 0x35U, 0xffU, 0xf8U,
+	0xc9U, 0x18U, 0x05U, 0xd9U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0xf2U, 0x40U,
+};
+
+#define G_SILENCE_LEN ((uint32_t)sizeof(g_silence_flac))
+
+
+/* One decode pass must be bounded by the service-time PCM cap even when
+ * the caller hands it the whole stream with a full-ring budget, and the
+ * remaining frames must decode on later passes to the same output. */
+static void test_pass_cap(void)
+{
+	struct sim *s = &g_sim;
+	uint32_t len = G_SILENCE_LEN;
+	uint32_t calls = 0U;
+	uint32_t i;
+	uint16_t st;
+
+	host_runtime_reset();
+	memset(s, 0, sizeof(*s));
+	s->in_cap = MAX_IN_CAP;
+	s->pcm_cap = SIL_PCM_BYTES;
+	s->pcm_budget = SIL_PCM_BYTES;
+	sdk_flac_init(&s->st, SDK_AUDIO_SAMPLE_FORMAT_S16BE);
+	memcpy(s->in, g_silence_flac, len);
+	s->len = len;
+	s->eof = 1;
+	CHECK(sdk_audio_decode_pass_budget(SIL_PCM_BYTES) == EXPECTED_PASS_PCM_CAP,
+	      "pass cap budget: %u", sdk_audio_decode_pass_budget(SIL_PCM_BYTES));
+	st = sim_decode(s, 0);
+	CHECK(st == SDK_STATUS_OK && !s->complete && s->starved == 0 &&
+	      s->frames == 1U && s->out_len == SIL_FRAME_PCM,
+	      "pass cap first pass: %u frames %u bytes st %u (want 1/%u)",
+	      s->frames, s->out_len, st, SIL_FRAME_PCM);
+	while (!s->complete && calls++ < 1000U) {
+		uint32_t before = s->out_len;
+		uint32_t chunk;
+
+		st = sim_decode(s, 0);
+		chunk = s->out_len - before;
+		CHECK(st == SDK_STATUS_OK, "pass cap loop: st %u", st);
+		CHECK(chunk <= EXPECTED_PASS_PCM_CAP + SIL_FRAME_PCM,
+		      "pass cap loop: pass decoded %u bytes", chunk);
+		if (st != SDK_STATUS_OK)
+			break;
+	}
+	CHECK(s->complete && s->out_len == SIL_PCM_BYTES &&
+	      calls >= SIL_FRAMES - 2U && calls <= SIL_FRAMES,
+	      "pass cap finish: %u bytes in %u calls", s->out_len, calls);
+	for (i = 0U; i < s->out_len; i++) {
+		if (s->out[i] != 0U) {
+			CHECK(0, "pass cap: nonzero PCM at %u", i);
+			break;
+		}
+	}
+	sdk_flac_release(&s->st);
+	check_clean("pass cap");
 }
 
 static void test_allocation_failures(void)
@@ -478,7 +672,9 @@ int main(void)
 	test_fixtures_exact();
 	test_rejections();
 	test_corruption();
+	test_refill_after_space_recovery();
 	test_drain_and_budget();
+	test_pass_cap();
 	test_allocation_failures();
 	test_restart_reclaim();
 	test_s16le();

@@ -2,16 +2,37 @@ CC ?= cc
 CFLAGS ?= -O2 -g -Wall -Wextra -ffunction-sections -fdata-sections
 SRC := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 LOADER_TARGET := build/module_loader_test
+MAILBOX_TARGET := build/mailbox_image_begin_test
 PACKER_TARGET := build/zzm_pack
 PACKER_TEST_TARGET := build/zzm_pack_test
 
+IMAGE_TEST_CPPFLAGS :=
+ifneq ($(wildcard $(SRC)/../build/deps/libjpeg-turbo/3.1.4.1/src/src/jpeglib.h),)
+IMAGE_TEST_CPPFLAGS += -I$(SRC)/../build/deps/libjpeg-turbo/3.1.4.1/src/src
+endif
+ifneq ($(wildcard $(SRC)/../build/deps/libjpeg-turbo/3.1.4.1/build-simd/jconfig.h),)
+IMAGE_TEST_CPPFLAGS += -I$(SRC)/../build/deps/libjpeg-turbo/3.1.4.1/build-simd
+endif
+ifneq ($(wildcard $(SRC)/../build/deps/libpng/1.6.58/src/png.h),)
+IMAGE_TEST_CPPFLAGS += -I$(SRC)/../build/deps/libpng/1.6.58/src
+endif
+ifneq ($(wildcard $(SRC)/../build/deps/libpng/1.6.58/build-neon/pnglibconf.h),)
+IMAGE_TEST_CPPFLAGS += -I$(SRC)/../build/deps/libpng/1.6.58/build-neon
+endif
+
 .PHONY: test clean
-test: $(LOADER_TARGET) $(PACKER_TARGET) $(PACKER_TEST_TARGET)
+test: $(LOADER_TARGET) $(MAILBOX_TARGET) $(PACKER_TARGET) $(PACKER_TEST_TARGET)
 	$(LOADER_TARGET)
+	$(MAILBOX_TARGET)
 	$(PACKER_TEST_TARGET) ./$(PACKER_TARGET)
-$(LOADER_TARGET): module_loader_test.c $(SRC)/zzm_loader.c $(SRC)/zzm_manifest.c $(SRC)/sdk_smp_lock.c
+$(LOADER_TARGET): module_loader_test.c $(SRC)/zzm_loader.c $(SRC)/zzm_manifest.c $(SRC)/zzm_registry.c $(SRC)/sdk_video_stream.c $(SRC)/sdk_image_stream.c $(SRC)/sdk_smp_lock.c
 	@mkdir -p build
-	$(CC) $(CFLAGS) -Wl,--gc-sections -Imock -I$(SRC) -o $@ $^
+	$(CC) $(CFLAGS) -Wno-clobbered $(IMAGE_TEST_CPPFLAGS) -DZZM_LOADER_HOST_TEST -DSDK_VIDEO_HOST_TEST -DSDK_IMAGE_HOST_TEST -Wl,--gc-sections -Wl,--unresolved-symbols=ignore-all -I$(SRC) -idirafter mock -o $@ $^
+$(MAILBOX_TARGET): mailbox_image_begin_test.c $(SRC)/sdk_mailbox.c $(SRC)/scheduler.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -static -DTASKQ_HOST_TEST -DSDK_MAILBOX_HOST_TEST \
+		-include mock/mailbox_test_decls.h -Wl,--gc-sections \
+		-Wl,--unresolved-symbols=ignore-all -Imock -I$(SRC) -o $@ $^
 $(PACKER_TARGET): ../../util/zzm_pack.c $(SRC)/zzm_manifest.c
 	@mkdir -p build
 	$(CC) $(CFLAGS) -Werror -I$(SRC) -o $@ $^

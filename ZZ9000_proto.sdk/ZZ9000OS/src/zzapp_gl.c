@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "zzapp_gl_contract.h"
 
 #if defined(__has_include)
 #  if __has_include("zzapp.h")
@@ -25,6 +26,7 @@
 #include "mw_ctx.h"
 #include "mw_types.h"
 #include "amiberry_types.h"
+#include "zzm_minigl_host.h"
 
 #ifndef ZZ_OK
 #define ZZ_OK 0
@@ -46,6 +48,12 @@
 #endif
 #ifndef ZZ_GL_BIND_SYNC_PRESENT
 #define ZZ_GL_BIND_SYNC_PRESENT 2u
+#endif
+#ifndef ZZ_GL_BIND_SYNC_RIX_FEED
+#define ZZ_GL_BIND_SYNC_RIX_FEED 4u
+#endif
+#ifndef ZZ_GL_BIND_INLINE_RIX_FEED
+#define ZZ_GL_BIND_INLINE_RIX_FEED 8u
 #endif
 #ifndef ZZAPP_F_MAILBOX
 #define ZZAPP_F_MAILBOX (1u << 15)
@@ -224,19 +232,48 @@ int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
     if (!host || !host->api_enter || !host->api_leave ||
         !host->bound_display || !host->flip_bound || !host->flip_idle ||
         !host->generation || !host->display_layout || !host->display_flags ||
-        !host->stop_requested || !host->yield_wait)
+        !host->stop_requested || !host->yield_wait || !host->wait_flip)
         return ZZ_EINVAL;
     g_module_app_host = host;
     return ZZ_OK;
 }
 
+static int g_module_in_api;
+static int g_module_in_worker;
+
+void zzm_module_set_worker_context(int active)
+{
+    g_module_in_worker = active != 0;
+}
+
+int zzm_module_can_park(void)
+{
+    return g_module_in_api > 0 && !g_module_in_worker;
+}
+
+/* An app thread is inside a GL call, possibly parked on the ring. */
+int zzm_module_api_active(void)
+{
+    return g_module_in_api > 0;
+}
+
 void zzm_module_api_enter(void)
 {
+    g_module_in_api++;
     g_module_app_host->api_enter();
 }
 
 void zzm_module_api_leave(void)
 {
+    if (g_module_in_api > 0)
+        g_module_in_api--;
+    /* The module no longer owns backend state after its outermost API call.
+     * Park through the host while its API lock is still held, so the
+     * scheduler executes the deferred wire pass before this call returns. */
+    if (minigl_raster_feed_pending())
+        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SVC);
+    if (g_module_in_api == 0 && zzm_minigl_take_deferred_dispatch())
+        g_module_app_host->yield_wait();
     g_module_app_host->api_leave();
 }
 
@@ -261,6 +298,11 @@ int zzm_module_display_flip_bound(void)
 int zzm_module_display_flip_idle(void)
 {
     return g_module_app_host->flip_idle(g_module_app_host->generation());
+}
+
+int zzm_module_display_wait_flip_idle(void)
+{
+    return g_module_app_host->wait_flip(g_module_app_host->generation());
 }
 
 int zzm_module_svc_display_flip(uint32_t surface_id)
@@ -289,6 +331,8 @@ uint32_t zzm_module_current_generation(void)
     return g_module_app_host->generation();
 }
 #else
+__attribute__((weak)) int zzm_module_can_park(void) { return 0; }
+__attribute__((weak)) void zzm_module_set_worker_context(int active) { (void)active; }
 __attribute__((weak)) void zzapp_api_enter(void) {}
 __attribute__((weak)) void zzapp_api_leave(void) {}
 
@@ -320,6 +364,11 @@ __attribute__((weak)) int zzapp_svc_display_flip(uint32_t surface_id)
 __attribute__((weak)) int zzapp_display_flip_idle(void)
 {
     return 0;
+}
+
+__attribute__((weak)) int zzapp_display_wait_flip_idle(void)
+{
+    return ZZ_ENOSYS;
 }
 
 __attribute__((weak)) int zzapp_svc_display_flip_async(uint32_t surface_id)
@@ -359,6 +408,7 @@ __attribute__((weak)) uint32_t zzapp_current_generation(void)
 #define zzapp_display_layout zzm_module_display_layout
 #define zzapp_display_flip_bound zzm_module_display_flip_bound
 #define zzapp_display_flip_idle zzm_module_display_flip_idle
+#define zzapp_display_wait_flip_idle zzm_module_display_wait_flip_idle
 #define zzapp_svc_display_flip zzm_module_svc_display_flip
 #define zzapp_services_flags zzm_module_display_flags
 #define zzapp_services_stop_requested zzm_module_stop_requested
@@ -608,10 +658,14 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
 {
     uint32_t w, h, pitch, format, front, back;
     mw_ctx *mw;
+    const char *present_mode;
 
     if (out)
         *out = 0;
-    if (!surface_id || (flags & ~(ZZ_GL_BIND_DIRECT_PRESENT | ZZ_GL_BIND_SYNC_PRESENT)) != 0U)
+    if (!surface_id ||
+        (flags & ~(ZZ_GL_BIND_DIRECT_PRESENT | ZZ_GL_BIND_SYNC_PRESENT |
+                   ZZ_GL_BIND_SYNC_RIX_FEED |
+                   ZZ_GL_BIND_INLINE_RIX_FEED)) != 0U)
         return ZZ_EINVAL;
     if (g_bound)
         return ZZ_EBUSY;
@@ -623,23 +677,54 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         return ZZ_EINVAL;
     g_bound_layout = 0U;
     (void)zzapp_display_layout(&g_bound_layout);
-    g_zero_copy = (flags & ZZ_GL_BIND_DIRECT_PRESENT) != 0U &&
-                  (zzapp_services_flags() & ZZAPP_F_MAILBOX) == 0U &&
-                  format == ZZ_FMT_RGB565 &&
-                  g_bound_layout == ZZ_LAYOUT_RGB565_LE && pitch == w * 2U &&
-                  front != 0U && back != 0U &&
-                  (front & 2047U) == 0U && (back & 2047U) == 0U;
-    if (!amiberry_inproc_open(w, h))
+    g_zero_copy = 0U;
+    if ((flags & ZZ_GL_BIND_DIRECT_PRESENT) == 0U)
+        present_mode = "copy (direct not requested)";
+    else if ((zzapp_services_flags() & ZZAPP_F_MAILBOX) != 0U)
+        present_mode = "copy (mailbox display)";
+    else if (format != ZZ_FMT_RGB565)
+        present_mode = "copy (not RGB565)";
+    else if (g_bound_layout != ZZ_LAYOUT_RGB565_LE)
+        present_mode = "copy (RGB565 layout)";
+    else if (pitch != w * 2U)
+        present_mode = "copy (padded pitch)";
+    else if (front == 0U || back == 0U)
+        present_mode = "copy (missing buffers)";
+    else if ((front & 2047U) != 0U || (back & 2047U) != 0U)
+        present_mode = "copy (unaligned buffers)";
+    else {
+        g_zero_copy = 1U;
+        present_mode = "direct";
+    }
+    minigl_raster_set_async_feed((flags & ZZ_GL_BIND_SYNC_RIX_FEED) == 0U);
+    minigl_platform_set_memfetch_enabled(
+        (flags & ZZ_GL_BIND_INLINE_RIX_FEED) == 0U);
+    if (!amiberry_inproc_open(w, h)) {
+        minigl_raster_set_async_feed(0);
+        minigl_platform_set_memfetch_enabled(1);
         return ZZ_ENOMEM;
+    }
     mw = amiberry_transport_inproc_ctx();
     if (g_zero_copy && (!mw || !mw_host_bind_direct_rgb565(mw, front, back,
-                                                            w * h * 2U)))
+                                                            w * h * 2U))) {
         g_zero_copy = 0U;
+        present_mode = "copy (direct buffer bind)";
+    }
     if (!zzapp_gl_configure_targets(w, h, g_zero_copy ? 2U : 3U)) {
         amiberry_inproc_close();
         g_zero_copy = 0U;
+        minigl_raster_set_async_feed(0);
+        minigl_platform_set_memfetch_enabled(1);
         return ZZ_ENOMEM;
     }
+    /* The module's stdout is not wired to the UART; the module log is. */
+    minigl_platform_logf("[app] present: %s", present_mode);
+    if ((flags & ZZ_GL_BIND_SYNC_RIX_FEED) != 0U)
+        minigl_platform_logf("[app] gl feed: sync");
+    else
+        minigl_platform_logf("[app] gl feed: async %s",
+                             (flags & ZZ_GL_BIND_INLINE_RIX_FEED) != 0U ?
+                             "inline" : "memfetch");
     fill_table();
     g_bound = 1;
     g_surface_id = surface_id;
@@ -666,11 +751,16 @@ void zzapp_gl_unbind(void)
     g_sync_present = 0U;
     g_bound_layout = 0U;
     g_bound = 0;
+    minigl_raster_set_async_feed(0);
+    minigl_platform_set_memfetch_enabled(1);
     minigl_profile_set_enabled(0);
 }
 
 void zzapp_gl_reclaim(void)
 {
+    /* Forced app reclamation discards a parked GL stack without its normal
+     * API epilogue, so no stale call may keep worker dispatch deferred. */
+    g_module_in_api = 0;
     zzapp_gl_unbind();
 }
 
@@ -798,10 +888,11 @@ static void zzapp_gl_present_layout_mismatch(const mw_ctx *mw, uint32_t source,
     if (now - window_us < 1000000ULL)
         return;
     window_us = now;
-    printf("[ZZM] [present] b=%lu sub=%lu flag=%u->%u reason=copy n=%lu\r\n",
-           (unsigned long)source, (unsigned long)mw->present_submit_frame[source],
-           (unsigned)mw->present_submit_rgb565[source], (unsigned)current,
-           (unsigned long)count);
+    minigl_platform_logf("[present] b=%lu sub=%lu flag=%u->%u reason=copy n=%lu",
+                         (unsigned long)source,
+                         (unsigned long)mw->present_submit_frame[source],
+                         (unsigned)mw->present_submit_rgb565[source],
+                         (unsigned)current, (unsigned long)count);
     count = 0U;
 #else
     (void)mw;
@@ -917,17 +1008,12 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     return 1;
 }
 
+/* The host flip wait registers with the core-1 service pass, which wakes
+ * this thread as soon as the scanout acknowledgement lands, and reports a
+ * flip that takes unusually long. */
 static int zzapp_gl_wait_flip_idle(void)
 {
-    uint32_t generation = zzapp_current_generation();
-
-    while (!zzapp_display_flip_idle()) {
-        if (zzapp_services_stop_requested() ||
-            zzapp_current_generation() != generation)
-            return 0;
-        zzapp_host_yield_wait();
-    }
-    return 1;
+    return zzapp_display_wait_flip_idle() == ZZ_OK;
 }
 
 
@@ -969,6 +1055,7 @@ void zzapp_gl_swap(void)
     struct AmiberryContext *guest;
     uint32_t outgoing;
     uint64_t target_started;
+
     zzapp_api_enter();
     if (!g_bound)
         goto done;
@@ -1001,6 +1088,9 @@ void zzapp_gl_swap(void)
     mw->present_queued[outgoing] = 1U;
     mw->present_submit_rgb565[outgoing] = mw->color_rgb565[outgoing];
     mw->present_submit_frame[outgoing] = ++g_present_frame;
+    /* Push the frame just sealed now rather than at the worker's next turn. */
+    if (minigl_raster_feed_pending())
+        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SWAP);
     if (g_zero_copy) {
         int ok;
         uint64_t started;

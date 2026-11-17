@@ -87,6 +87,7 @@ static void prepare_completion(struct TestMailbox *mailbox, uint32_t request_id,
   prepare_completion_at(mailbox, 0, request_id, opcode, status, payload_len);
 }
 
+
 static void complete_query_caps_from_idle_hook(void)
 {
   uint32_t request_id;
@@ -2854,6 +2855,7 @@ static int test_audio_stream_gain_roundtrip_result(void)
   zz9k_close(ctx);
   return 0;
 }
+
 static int test_sync_call_yields_bus_before_polling_completion(void)
 {
   struct TestMailbox mailbox;
@@ -3261,6 +3263,7 @@ int main(void)
   if (result) return 370 + result;
   result = test_audio_stream_gain_roundtrip_result();
   if (result) return 375 + result;
+
 
   result = test_sync_call_yields_bus_before_polling_completion();
   if (result) return 345 + result;

@@ -400,6 +400,10 @@ void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes,
     g_texture_pool_grow_context = grow_context;
 }
 
+/* Set when the engines were stopped from outside; applies to the backend
+ * state of that moment only. */
+static int g_rix_abandoned;
+
 void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
 {
     if (platform == NULL) {
@@ -418,6 +422,10 @@ void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
     }
     g_rix_platform = *platform;
     g_rix_platform_set = 1;
+    /* A new platform is a new backend: an earlier abandon must not let its
+     * teardown skip waiting for work submitted from now on. */
+    g_rix_abandoned = 0;
+    minigl_rix_backend_reinit(&g_rix, &g_rix_platform);
 }
 
 static int rix_target_is_rgb565(void)
@@ -639,6 +647,56 @@ int minigl_raster_drain(void)
     return minigl_rix_backend_drain(&g_rix);
 }
 
+int minigl_raster_retire_submitted(void)
+{
+    return minigl_rix_backend_drain(&g_rix);
+}
+static int g_async_feed;
+
+void minigl_raster_set_async_feed(int enabled)
+{
+    g_async_feed = enabled != 0;
+}
+
+int minigl_raster_async_feed_enabled(void)
+{
+    return g_async_feed;
+}
+
+int minigl_raster_feed_pending(void)
+{
+    return minigl_rix_backend_feed_pending(&g_rix);
+}
+
+int minigl_raster_work_outstanding(void)
+{
+    return minigl_rix_backend_work_outstanding(&g_rix);
+}
+
+int minigl_raster_service_wait_blocks(void)
+{
+    return minigl_rix_backend_service_wait_blocks(&g_rix);
+}
+
+int minigl_raster_try_feed(uint32_t source)
+{
+    return minigl_rix_backend_try_feed(&g_rix, source);
+}
+int minigl_raster_abort_feed(void)
+{
+    return minigl_rix_backend_abort_feed(&g_rix);
+}
+int minigl_raster_engine_idle(void)
+{
+    return minigl_rix_backend_engine_idle(&g_rix);
+}
+void minigl_raster_quarantine_outstanding(void)
+{
+    minigl_rix_backend_quarantine_outstanding(&g_rix);
+}
+
+
+
 /* GL leaves a back buffer's contents undefined after a swap, but its byte
  * layout remains per target.  Keep that layout so a CPU fallback does not
  * expand initial RGBA bytes as RGB565. */
@@ -662,6 +720,9 @@ void minigl_raster_target_retire(void)
 {
     g_rix_surface = NULL;
     g_rix_surface_rgb565 = 0;
+    g_rix_depth_z16 = 0;
+    g_buffers.color = NULL;
+    g_buffers.depth = NULL;
 }
 
 /* Convert one colour buffer that is not the active raster target: the same
@@ -683,8 +744,6 @@ int minigl_raster_finish(void)
     }
     return 1;
 }
-
-static int g_rix_abandoned;
 
 void minigl_raster_abandon(void)
 {
@@ -2996,7 +3055,8 @@ void minigl_raster_init(void)
         g_error |= RASTER_ERR_MEMORY;
         return;
     }
-    minigl_rix_backend_init(&g_rix, g_rix_platform_set ? &g_rix_platform : NULL);
+    minigl_rix_backend_reinit(&g_rix,
+                              g_rix_platform_set ? &g_rix_platform : NULL);
     memset(&g_rix_diagnostics, 0, sizeof(g_rix_diagnostics));
     g_rix_depth_z16 = 0;
     g_rix_cpu_fallbacks = 0U;
@@ -3553,6 +3613,14 @@ int minigl_raster_test_level_pixel(uint32_t id, uint16_t level,
     *pixel = ((const uint32_t *)(const void *)(g_buffers.texture_pool + image->offset))
                  [(size_t)y * image->width + x];
     return 1;
+}
+void minigl_raster_test_retire_fences(void)
+{
+    minigl_rix_backend_test_retire_fences(&g_rix);
+}
+uint8_t minigl_raster_test_command_buffer_count(void)
+{
+    return minigl_rix_backend_test_command_buffer_count(&g_rix);
 }
 #endif
 

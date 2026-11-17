@@ -53,6 +53,11 @@ uint16_t sdk_decompress_stream_begin(
 	const uint8_t *src, uint32_t src_length,
 	uint32_t output_limit,
 	struct SDKDecompressStreamResult *result);
+uint16_t sdk_decompress_stream_begin_owned(
+	uint32_t algorithm, uint32_t flags,
+	const uint8_t *src, uint32_t src_length, uint32_t output_limit,
+	uint16_t owner_id, struct SDKDecompressStreamResult *result);
+int sdk_decompress_stream_release_client(uint16_t owner_id);
 uint16_t sdk_decompress_stream_feed(
 	uint32_t session,
 	const uint8_t *src, uint32_t src_length,
@@ -65,20 +70,37 @@ uint16_t sdk_decompress_stream_read(
 uint16_t sdk_decompress_stream_close(uint32_t session);
 
 /*
- * Reclaim card-pool-owned decode working sets after a core-1 cold reset.
- * The pool owner can be dropped without touching newlib metadata. Returns
- * nonzero when one or more blocks were reclaimed. A cold restart releases
- * both the shared decode owner and the app-runtime owner. An ordinary app
- * force-stop must call sdk_compression_reclaim_app_decode() instead.
+ * MEDIA instances are partitioned: 1 through 0xff are SDK video-session
+ * owners; 0x100 through 0x7fffff are app decoder owners; 0x800000 through
+ * 0xffffff are ZZM resident-module owners.  The shared core-1 decode heap
+ * uses 0xfffffe in the module-reserved range and is reclaimed only on a
+ * core-1 reset.  MEDIA_INPUT has its own card-pool class, so mailbox media
+ * buffers are outside this map.
  */
-unsigned sdk_compression_reclaim_core1_decode(void);
-unsigned sdk_compression_reclaim_app_decode(void);
+#define SDK_MEDIA_VIDEO_INSTANCE_LIMIT 0x00000100U
+#define SDK_MEDIA_APP_INSTANCE_BASE SDK_MEDIA_VIDEO_INSTANCE_LIMIT
+#define SDK_MEDIA_APP_INSTANCE_LIMIT 0x00800000U
+#define SDK_MEDIA_SHARED_INSTANCE   0x00FFFFFCU
 
-/* Shared core-1 decode heap. Distinct from the app-runtime owner so an app
- * force-stop cannot free an SDK client's live FLAC/Vorbis working set.
- * Class 2 is CARD_POOL_CLASS_MEDIA; sdk_compression.c asserts the match. */
+static inline uint32_t sdk_compression_app_owner_bits(uint32_t slot,
+						      uint32_t generation)
+{
+	uint32_t span = (SDK_MEDIA_APP_INSTANCE_LIMIT -
+			 SDK_MEDIA_APP_INSTANCE_BASE) >> 2;
+	uint32_t instance = SDK_MEDIA_APP_INSTANCE_BASE +
+		((generation % span) << 2) + (slot & 3U);
+
+	return ((uint32_t)2u << 24) | instance;
+}
+
+unsigned sdk_compression_reclaim_core1_decode(void);
+unsigned sdk_compression_reclaim_app_decode(uint32_t owner);
+uint32_t sdk_compression_app_decode_owner(uint32_t slot,
+                                          uint32_t generation);
+
+/* Shared core-1 decode heap. Class 2 is CARD_POOL_CLASS_MEDIA;
+ * sdk_compression.c asserts the match. */
 #define SDK_DECODE_POOL_OWNER (((uint32_t)2u << 24) | 0x00fffffeu)
-#define SDK_APP_DECODE_POOL_OWNER (((uint32_t)2u << 24) | 0x00fffffdU)
 
 /* Decode backend allocations use the reset-reclaimable MEDIA card-pool
  * owner. The historical name is retained for codec callback compatibility. */

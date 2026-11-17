@@ -1,6 +1,8 @@
 /*
- * newlib glue for the app heap. The heap is [image_end, stack_base), which
- * the runtime reports through heap_range. This is not the firmware _sbrk.
+ * newlib glue for the app heap. The heap starts as the range the runtime
+ * reports through heap_range. On API 0.3 firmware it then grows and shrinks
+ * at its end in whole MiB through heap_grow/heap_shrink; older firmware
+ * keeps the fixed range. This is not the firmware _sbrk.
  *
  * File descriptors 0, 1, and 2 are the launcher console. They are separate
  * from zz_log: writes use a lossless backpressured ring and reads return zero
@@ -41,6 +43,42 @@ static int heap_init(void)
     return 1;
 }
 
+#define HEAP_STEP (1u << 20)
+
+static int heap_dynamic(void)
+{
+    return ZZ_API_COVERS(zzapp_api_ptr, heap_shrink) &&
+           zzapp_api_ptr->heap_grow && zzapp_api_ptr->heap_shrink;
+}
+
+/* Commit at least `need` more bytes at the heap end. */
+static int heap_extend(uint32_t need)
+{
+    uint32_t bytes = (need + HEAP_STEP - 1u) & ~(HEAP_STEP - 1u);
+    void *old_break = 0;
+
+    if (bytes < need || !heap_dynamic() ||
+        zzapp_api_ptr->heap_grow(bytes, &old_break) != ZZ_OK ||
+        (uint8_t *)old_break != heap_end)
+        return 0;
+    heap_end += bytes;
+    return 1;
+}
+
+/* Return whole MiB above the break, keeping one MiB of slack. */
+static void heap_trim(void)
+{
+    uint32_t spare = (uint32_t)(heap_end - heap_brk);
+    uint32_t bytes;
+    void *new_break = 0;
+
+    if (!heap_dynamic() || spare < 2u * HEAP_STEP)
+        return;
+    bytes = (spare - HEAP_STEP) & ~(HEAP_STEP - 1u);
+    if (zzapp_api_ptr->heap_shrink(bytes, &new_break) == ZZ_OK)
+        heap_end = new_break;
+}
+
 void *zzapp_sbrk(int increment)
 {
     uint8_t *previous;
@@ -53,7 +91,8 @@ void *zzapp_sbrk(int increment)
     previous = heap_brk;
     if (increment >= 0) {
         step = (uint32_t)increment;
-        if (step > (uint32_t)(heap_end - heap_brk)) {
+        if (step > (uint32_t)(heap_end - heap_brk) &&
+            !heap_extend(step - (uint32_t)(heap_end - heap_brk))) {
             errno = ENOMEM;
             return (void *)-1;
         }
@@ -65,6 +104,8 @@ void *zzapp_sbrk(int increment)
         }
     }
     heap_brk = previous + increment;
+    if (increment < 0)
+        heap_trim();
     return previous;
 }
 

@@ -5,8 +5,18 @@
  */
 #include "scheduler.h"
 #include <stdio.h>
+#include <string.h>
 
 static int failures;
+
+#if ZZAPP_PERF_COUNTERS
+static uint32_t enqueue_stamp;
+
+uint32_t taskq_perf_enqueue_stamp(void)
+{
+  return enqueue_stamp;
+}
+#endif
 
 static void expect_u32(const char *n, uint32_t a, uint32_t e)
 {
@@ -50,11 +60,93 @@ static void test_init_marks_all_free(void)
   expect_u32("init_cursor", q.enqueue_cursor, 0u);
 }
 
+static void test_boot_init_clears_dirty_doorbell(void)
+{
+  taskq_shared_t sh;
+  uint32_t i;
+
+  memset(&sh, 0xa5, sizeof(sh));
+  sh.service_pending = 2U;
+#if ZZAPP_PERF_COUNTERS
+  sh.perf_work_publications = 4U;
+  sh.perf_doorbell_stamp = 0xdeadbeefU;
+  sh.perf_sgi_count = 9U;
+#endif
+  taskq_shared_boot_init(&sh);
+  expect_u32("boot_pending", sh.service_pending, 0U);
+  expect_u32("boot_doorbell", sh.minigl_doorbell, 0U);
+  expect_u32("boot_park", sh.core1_park_request, 0U);
+  expect_int("boot_slot", sh.core1_current_slot, -1);
+#if ZZAPP_PERF_COUNTERS
+  expect_u32("boot_perf_work", sh.perf_work_publications, 0U);
+  expect_u32("boot_perf_stamp", sh.perf_doorbell_stamp, 0U);
+  expect_u32("boot_perf_sgi", sh.perf_sgi_count, 0U);
+#endif
+  for (i = 0; i < TASKQ_CAPACITY; i++)
+    expect_u32("boot_free", sh.queue.descs[i].state, TASK_FREE);
+}
+#if ZZAPP_PERF_COUNTERS
+static void test_mixed_publications_coalesce_doorbells(void)
+{
+  taskq_shared_t sh;
+  uint32_t doorbells;
+
+  taskq_shared_boot_init(&sh);
+  scheduler_core1_publish_host_test_bind(&sh);
+  scheduler_core1_publish(); /* SDK task enqueue */
+  scheduler_core1_publish(); /* deferred launcher operation */
+  scheduler_core1_publish(); /* audio refill */
+  scheduler_core1_publish(); /* quiesce request */
+  doorbells = scheduler_core1_publish_host_test_doorbells();
+  expect_u32("mixed_work_publications", sh.perf_work_publications, 4U);
+  expect_int("mixed_doorbell_ratio_below_one",
+             doorbells < sh.perf_work_publications, 1);
+}
+#endif
+static void test_cache_clean_handshake(void)
+{
+  taskq_shared_t sh;
+  unsigned cold_restarts = 0U;
+
+  taskq_shared_boot_init(&sh);
+  sh.core1_alive = 1U;
+  sh.core1_current_slot = -1;
+  scheduler_core1_clean_host_test_bind(&sh, 60000U, 1);
+  expect_int("clean_after_60ms", scheduler_core1_clean_dcache(), 0);
+  expect_u32("clean_elapsed_over_20ms",
+             scheduler_core1_clean_host_test_elapsed(), 60000U);
+  expect_u32("clean_done_after_delay", sh.core1_clean_done, 1U);
+
+  taskq_shared_boot_init(&sh);
+  sh.core1_alive = 1U;
+  sh.core1_clean_request = 1U;
+  sh.core1_current_slot = 0;
+  scheduler_core1_clean_host_test_bind(&sh, 0U, 1);
+  scheduler_core1_service_clean_request();
+  expect_u32("clean_waits_for_task", sh.core1_clean_done, 0U);
+  sh.core1_current_slot = -1;
+  scheduler_core1_service_clean_request();
+  expect_u32("clean_after_task", sh.core1_clean_done, 1U);
+
+  taskq_shared_boot_init(&sh);
+  sh.core1_alive = 1U;
+  sh.core1_current_slot = -1;
+  scheduler_core1_clean_host_test_bind(&sh, 0U, 0);
+  if (scheduler_core1_clean_dcache() != 0)
+    cold_restarts++;
+  expect_u32("clean_timeout_cold_restart", cold_restarts, 1U);
+}
+
+
+
 static void test_enqueue_fills_and_queues(void)
 {
   taskq_t q;
   int s;
   taskq_init(&q);
+#if ZZAPP_PERF_COUNTERS
+  enqueue_stamp = 0x12345678u;
+#endif
   s = taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT,
                     0x100u, 32u, 0x200u, 64u, 0xAAu, 0xBBu, NULL, 0u);
   expect_int("enq_slot0", s, 0);
@@ -62,6 +154,10 @@ static void test_enqueue_fills_and_queues(void)
   expect_u32("enq_opcode", q.descs[0].opcode, TASKQ_OP_CRYPTO_KX);
   expect_u32("enq_in_addr", q.descs[0].in_addr, 0x100u);
   expect_u32("enq_cookie", q.descs[0].user_cookie, 0xBBu);
+#if ZZAPP_PERF_COUNTERS
+  expect_u32("enq_stamp_before_publish", q.descs[0].perf_enqueue_stamp,
+             0x12345678u);
+#endif
   expect_u32("enq_cursor", q.enqueue_cursor, 1u);
 }
 
@@ -167,6 +263,29 @@ static void test_long_codec_tasks_interleave_after_completion(void)
   expect_int("codec_interleave_video_next", video_slot, 1);
 }
 
+static void test_requeued_slice_yields_to_next_task(void)
+{
+  taskq_t q;
+  int jpeg_slot;
+  int crypto_slot;
+  int audio_slot;
+
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_DECODE_JPEG, TASK_LONG,
+                      0, 0, 0, 0, 1, 1, NULL, 0u);
+  (void)taskq_enqueue(&q, TASKQ_OP_AUDIO_STREAM_FEED, TASK_LONG,
+                      0, 0, 0, 0, 2, 2, NULL, 0u);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT,
+                      0, 0, 0, 0, 3, 3, NULL, 0u);
+  jpeg_slot = taskq_claim_any(&q);
+  expect_int("slice_claims_jpeg", jpeg_slot, 0);
+  crypto_slot = taskq_claim_short(&q);
+  expect_int("slice_core0_claims_crypto", crypto_slot, 2);
+  taskq_requeue(&q, jpeg_slot);
+  audio_slot = taskq_claim_any(&q);
+  expect_int("slice_yields_to_audio", audio_slot, 1);
+}
+
 static void test_claim_advances_past_lost_cas(void)
 {
   taskq_t q;
@@ -227,6 +346,36 @@ static void test_fail_sets_failed(void)
   taskq_fail(&q, 0, 5 /*err*/);
   expect_u32("fail_state", q.descs[0].state, TASK_FAILED);
   expect_u32("fail_status", q.descs[0].result_status, 5u);
+}
+
+static void test_worker_interrupt_fails_deferred_audio(void)
+{
+  taskq_t q;
+  int slot;
+
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_AUDIO_STREAM_FEED, TASK_LONG,
+                      0, 4096u, 0, 0, 71u, 19u, NULL, 0u);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_HASH, TASK_LONG,
+                      0, 8192u, 0, 0, 72u, 20u, NULL, 0u);
+  expect_int("interrupt_claims_audio", taskq_claim_any(&q), 0);
+
+  taskq_abort_active(&q, 0x55u);
+  expect_u32("interrupt_audio_failed", q.descs[0].state, TASK_FAILED);
+  expect_u32("interrupt_audio_status", q.descs[0].result_status, 0x55u);
+  expect_u32("interrupt_queued_failed", q.descs[1].state, TASK_FAILED);
+  expect_u32("interrupt_queued_status", q.descs[1].result_status, 0x55u);
+
+  slot = taskq_harvest(&q);
+  expect_int("interrupt_harvest_audio", slot, 0);
+  taskq_release(&q, slot);
+  slot = taskq_harvest(&q);
+  expect_int("interrupt_harvest_queued", slot, 1);
+  taskq_release(&q, slot);
+  expect_int("interrupt_slot_reusable",
+             taskq_enqueue(&q, TASKQ_OP_AUDIO_STREAM_FEED, TASK_LONG,
+                           0, 4096u, 0, 0, 73u, 21u, NULL, 0u) >= 0,
+             1);
 }
 
 static void test_harvest_finds_done_then_release(void)
@@ -323,6 +472,30 @@ static void test_should_drain_gates(void)
   expect_int("drain_no_core1", taskq_should_drain(0, 0, 0), 0);
 }
 
+static int recovery_step;
+static int recovery_calls;
+
+static void halt_core1(void)
+{
+  recovery_step = 1;
+}
+
+static void reset_core1_locks(void)
+{
+  expect_int("fallback_halts_before_lock_reset", recovery_step, 1);
+  recovery_calls++;
+  recovery_step = 2;
+}
+
+static void test_fallback_halts_before_lock_recovery(void)
+{
+  recovery_step = 0;
+  recovery_calls = 0;
+  scheduler_core1_halt_before_recover(halt_core1, reset_core1_locks);
+  expect_int("fallback_recovery_runs", recovery_step, 2);
+  expect_int("fallback_recovers_once", recovery_calls, 1);
+}
+
 static void test_watchdog_trips_at_threshold(void)
 {
   taskq_watchdog_t w;
@@ -370,6 +543,63 @@ static void test_sched_worker_decide_priorities(void)
   expect_int("decide_wfe_unbound", sched_worker_decide(0, 0, 0, 0), SCHED_WORKER_ACTION_WFE);
 }
 
+static void test_reset_admission_blocks_selected_submission(void)
+{
+  taskq_shared_t shared = { 0 };
+
+  shared.minigl_submission_admission = 1U;
+  expect_int("admission_initial",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_MINIGL),
+             SCHED_WORKER_ACTION_MINIGL);
+  /* The worker selected a packet. Core 0 closes admission before the worker
+   * marks it in-flight, so the production action gate must suppress it. */
+  shared.minigl_submission_admission = 0U;
+  shared.minigl_submission_generation = 7U;
+  expect_int("admission_blocks_selected_submission",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_MINIGL),
+             SCHED_WORKER_ACTION_WFE);
+  expect_u32("admission_acknowledges_generation",
+             shared.minigl_submission_ack, 7U);
+}
+
+static void test_reset_admission_acks_after_reset_step(void)
+{
+  taskq_shared_t shared = { 0 };
+
+  shared.minigl_submission_admission = 0U;
+  shared.minigl_submission_generation = 9U;
+  /* The worker selected MiniGL just before it observed the reset request.
+   * A reset step can abort a feed after accepting its RasterIX envelope, so
+   * this stale selection must not acknowledge the quiesce guard. */
+  shared.minigl_reset_request = 1U;
+  expect_int("reset_admission_blocks_stale_submission",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_MINIGL),
+             SCHED_WORKER_ACTION_WFE);
+  expect_u32("reset_admission_waits_for_reset_step",
+             shared.minigl_submission_ack, 0U);
+  expect_int("reset_admission_keeps_guard_closed",
+             scheduler_minigl_quiesce_done(&shared), 0);
+
+  expect_int("reset_admission_runs_reset",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_RESET),
+             SCHED_WORKER_ACTION_RESET);
+  /* zzm_minigl_reset_step completed and cleared the request. The next
+   * selection acknowledges closed admission and cannot submit MiniGL work. */
+  shared.minigl_reset_request = 0U;
+  expect_int("reset_admission_blocks_post_reset_submission",
+             scheduler_minigl_submission_action(&shared,
+                                                SCHED_WORKER_ACTION_MINIGL),
+             SCHED_WORKER_ACTION_WFE);
+  expect_u32("reset_admission_acknowledges_after_reset",
+             shared.minigl_submission_ack, 9U);
+  expect_int("reset_admission_allows_guard_after_reset",
+             scheduler_minigl_quiesce_done(&shared), 1);
+}
+
 static void test_minigl_reset_handshake_flow(void)
 {
   taskq_shared_t sh;
@@ -410,8 +640,13 @@ static void test_minigl_reset_phase_keeps_inflight_buffers(void)
   expect_int("phase_wait_late", sched_minigl_reset_phase(1, 1, 0, 49, 50),
              SCHED_MINIGL_RESET_WAIT);
   /* Ack means core 1 already freed. A second free would be a double release. */
-  expect_int("phase_acked", sched_minigl_reset_phase(1, 1, 1, 10, 50),
+  expect_int("phase_acked", sched_minigl_reset_phase(1, 1, SCHED_MINIGL_RESET_ACK_DONE, 10, 50),
              SCHED_MINIGL_RESET_ACKED);
+  /* Core 1 could not stop the engines and said so: core 0 aborts at once,
+   * before the deadline, rather than treating the module as freed. */
+  expect_int("phase_failed_ack_aborts",
+             sched_minigl_reset_phase(1, 1, SCHED_MINIGL_RESET_ACK_FAILED, 0, 50),
+             SCHED_MINIGL_RESET_ABORT);
   /* Deadline or a dead worker: stop the engines, then the caller may free. */
   expect_int("phase_abort_deadline", sched_minigl_reset_phase(1, 1, 0, 50, 50),
              SCHED_MINIGL_RESET_ABORT);
@@ -423,6 +658,133 @@ static void test_minigl_reset_phase_keeps_inflight_buffers(void)
   expect_int("phase_idle", sched_minigl_reset_phase(1, 0, 0, 0, 50),
              SCHED_MINIGL_RESET_IDLE);
 }
+static void test_minigl_reset_quiesce_allows_120ms_drain(void)
+{
+  taskq_shared_t shared = { 0 };
+  uint32_t spins;
+  int cold_restarted = 0;
+  int quarantined = 0;
+
+  shared.minigl_submission_generation = 1U;
+  shared.minigl_in_flight = 1U;
+  for (spins = 0U; spins < SCHED_QUIESCE_SPINS; ++spins) {
+    if (spins == 12000U) {
+      shared.minigl_submission_ack = shared.minigl_submission_generation;
+      shared.minigl_in_flight = 0U;
+    }
+    if (scheduler_minigl_quiesce_done(&shared))
+      break;
+  }
+  if (!scheduler_minigl_quiesce_done(&shared)) {
+    cold_restarted = 1;
+    quarantined = 1;
+  }
+  expect_int("120ms_minigl_drain_completes", scheduler_minigl_quiesce_done(&shared), 1);
+  expect_int("120ms_minigl_drain_no_cold_restart", cold_restarted, 0);
+  expect_int("120ms_minigl_drain_no_quarantine", quarantined, 0);
+}
+
+
+static void test_worker_idles_only_on_a_stalled_minigl_step(void)
+{
+  /* A feed step blocked on a full FIFO or a DMA in flight is not retried
+   * at once. */
+  expect_int("wfe_stalled_feed",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 0, 0, 0, 0, 1), 1);
+  expect_int("no_wfe_after_progress",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 1, 0, 0, 0, 1), 0);
+  /* Other work pending wins over the stall. */
+  expect_int("no_wfe_task_queued",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 0, 1, 0, 0, 1), 0);
+  expect_int("no_wfe_reset_requested",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 0, 0, 1, 0, 1), 0);
+  expect_int("no_wfe_doorbell",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_MINIGL, 0, 0, 0, 1, 1), 0);
+  /* A bound worker with nothing to do keeps polling the 68k ring. */
+  expect_int("no_wfe_bound_idle",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_POLL_IDLE, 0, 0, 0, 0, 1), 0);
+  expect_int("wfe_unbound_idle",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_WFE, 0, 0, 0, 0, 0), 1);
+  expect_int("no_wfe_after_reset_step",
+             sched_worker_may_wfe(SCHED_WORKER_ACTION_RESET, 0, 0, 0, 0, 1), 0);
+}
+
+typedef struct {
+  uint32_t queued;
+  uint32_t sends;
+  uint32_t rechecks;
+  int inject_after_drain;
+} doorbell_test_t;
+
+static void doorbell_send(void *context)
+{
+  ((doorbell_test_t *)context)->sends++;
+}
+
+static uint32_t doorbell_drain(void *context, uint32_t batch)
+{
+  doorbell_test_t *test = context;
+  uint32_t drained = test->queued < batch ? test->queued : batch;
+
+  test->queued -= drained;
+  return drained;
+}
+
+static int doorbell_more(void *context)
+{
+  doorbell_test_t *test = context;
+
+  if (test->inject_after_drain && test->rechecks++ == 0U)
+    test->queued++;
+  return test->queued != 0U;
+}
+
+static uint32_t doorbell_drain_all(volatile uint32_t *pending,
+                                   doorbell_test_t *test)
+{
+  uint32_t total = 0;
+
+  while (*pending)
+    total += taskq_doorbell_drain(pending, doorbell_drain, doorbell_more,
+                                  test, 16U);
+  return total;
+}
+
+static void test_doorbell_coalesces_and_drains(void)
+{
+  volatile uint32_t pending = 0;
+  doorbell_test_t test = { 1000U, 0U, 0U, 0 };
+
+  expect_int("doorbell_first", taskq_doorbell_request(&pending, doorbell_send, &test), 1);
+  expect_int("doorbell_repeat", taskq_doorbell_request(&pending, doorbell_send, &test), 0);
+  expect_u32("doorbell_one_sgi", test.sends, 1U);
+  expect_u32("doorbell_all_drained", doorbell_drain_all(&pending, &test),
+             1000U);
+  expect_u32("doorbell_cleared", pending, 0U);
+}
+
+static void test_doorbell_clears_after_exact_final_batch(void)
+{
+  volatile uint32_t pending = 1;
+  doorbell_test_t test = { 8U, 0U, 0U, 0 };
+
+  expect_u32("doorbell_exact_drained",
+             taskq_doorbell_drain(&pending, doorbell_drain, doorbell_more,
+                                  &test, 8U), 8U);
+  expect_u32("doorbell_exact_empty", test.queued, 0U);
+  expect_u32("doorbell_exact_clear", pending, 0U);
+}
+
+static void test_doorbell_rechecks_before_clear(void)
+{
+  volatile uint32_t pending = 1;
+  doorbell_test_t test = { 2U, 0U, 0U, 1 };
+
+  expect_u32("doorbell_race_drained", doorbell_drain_all(&pending, &test),
+             3U);
+  expect_u32("doorbell_race_empty", test.queued, 0U);
+  expect_u32("doorbell_race_clear", pending, 0U);
+}
 
 int main(void)
 {
@@ -430,6 +792,11 @@ int main(void)
   test_stress_fill_varies_by_index();
   test_stress_check_matches_fill();
   test_init_marks_all_free();
+  test_boot_init_clears_dirty_doorbell();
+#if ZZAPP_PERF_COUNTERS
+  test_mixed_publications_coalesce_doorbells();
+#endif
+  test_cache_clean_handshake();
   test_enqueue_fills_and_queues();
   test_enqueue_full_returns_minus1();
   test_enqueue_copies_op_params();
@@ -438,11 +805,13 @@ int main(void)
   test_claim_any_returns_queued_and_marks_claimed();
   test_two_claims_never_collide();
   test_long_codec_tasks_interleave_after_completion();
+  test_requeued_slice_yields_to_next_task();
   test_claim_advances_past_lost_cas();
   test_claim_short_skips_long();
   test_complete_sets_done_and_payload();
   test_complete_clamps_payload();
   test_fail_sets_failed();
+  test_worker_interrupt_fails_deferred_audio();
   test_harvest_finds_done_then_release();
   test_has_active_tracks_queued_and_claimed();
   test_has_active_ignores_failed();
@@ -451,11 +820,19 @@ int main(void)
   test_class_unknown_is_long();
   test_class_video_sessions_are_core1_long();
   test_should_drain_gates();
+  test_fallback_halts_before_lock_recovery();
   test_watchdog_trips_at_threshold();
   test_watchdog_success_resets_counter();
   test_sched_worker_decide_priorities();
+  test_reset_admission_blocks_selected_submission();
+  test_reset_admission_acks_after_reset_step();
   test_minigl_reset_handshake_flow();
   test_minigl_reset_phase_keeps_inflight_buffers();
+  test_minigl_reset_quiesce_allows_120ms_drain();
+  test_worker_idles_only_on_a_stalled_minigl_step();
+  test_doorbell_coalesces_and_drains();
+  test_doorbell_clears_after_exact_final_batch();
+  test_doorbell_rechecks_before_clear();
 
   if (failures) {
     printf("scheduler_test: %d failure(s)\n", failures);

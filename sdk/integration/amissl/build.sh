@@ -30,7 +30,7 @@ case "$AMISSL_MAJOR" in
   5|6) ;;
   *) echo "!! AMISSL_MAJOR must be 5 or 6, not '$AMISSL_MAJOR'" >&2; exit 1 ;;
 esac
-AMISSL_REF=$(cat "$HERE/AMISSL_REF.v$AMISSL_MAJOR")
+AMISSL_REF=$(tr -d '\r\n' < "$HERE/AMISSL_REF.v$AMISSL_MAJOR")
 AMISSL_REPO=${AMISSL_REPO:-https://github.com/jens-maus/amissl.git}
 OS=${OS:-os3-68020}
 WORK=${WORK:-$HERE/work}

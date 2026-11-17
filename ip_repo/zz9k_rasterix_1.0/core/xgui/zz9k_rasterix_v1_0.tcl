@@ -5,7 +5,7 @@ proc init_gui { IPINST } {
   set Page_0 [ipgui::add_page $IPINST -name "Page 0"]
   ipgui::add_param $IPINST -name "C_S_AXI_ADDR_WIDTH" -parent ${Page_0}
   ipgui::add_param $IPINST -name "C_S_AXI_DATA_WIDTH" -parent ${Page_0}
-
+  ipgui::add_param $IPINST -name "TMU_COUNT" -parent ${Page_0}
 
 }
 
@@ -26,6 +26,14 @@ proc validate_PARAM_VALUE.C_S_AXI_DATA_WIDTH { PARAM_VALUE.C_S_AXI_DATA_WIDTH } 
 	# Procedure called to validate C_S_AXI_DATA_WIDTH
 	return true
 }
+proc update_PARAM_VALUE.TMU_COUNT { PARAM_VALUE.TMU_COUNT } {
+}
+
+proc validate_PARAM_VALUE.TMU_COUNT { PARAM_VALUE.TMU_COUNT } {
+    set value [get_property value ${PARAM_VALUE.TMU_COUNT}]
+    return [expr {$value == 1 || $value == 2}]
+}
+
 
 
 proc update_MODELPARAM_VALUE.C_S_AXI_ADDR_WIDTH { MODELPARAM_VALUE.C_S_AXI_ADDR_WIDTH PARAM_VALUE.C_S_AXI_ADDR_WIDTH } {
@@ -36,5 +44,9 @@ proc update_MODELPARAM_VALUE.C_S_AXI_ADDR_WIDTH { MODELPARAM_VALUE.C_S_AXI_ADDR_
 proc update_MODELPARAM_VALUE.C_S_AXI_DATA_WIDTH { MODELPARAM_VALUE.C_S_AXI_DATA_WIDTH PARAM_VALUE.C_S_AXI_DATA_WIDTH } {
 	# Procedure called to set VHDL generic/Verilog parameter value(s) based on TCL parameter value
 	set_property value [get_property value ${PARAM_VALUE.C_S_AXI_DATA_WIDTH}] ${MODELPARAM_VALUE.C_S_AXI_DATA_WIDTH}
+}
+
+proc update_MODELPARAM_VALUE.TMU_COUNT { MODELPARAM_VALUE.TMU_COUNT PARAM_VALUE.TMU_COUNT } {
+    set_property value [get_property value ${PARAM_VALUE.TMU_COUNT}] ${MODELPARAM_VALUE.TMU_COUNT}
 }
 

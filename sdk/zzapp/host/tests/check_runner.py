@@ -212,6 +212,36 @@ def check_constop(exe):
         proc.kill()
         proc.wait()
 
+def check_pixelsstop(exe):
+    if os.name != "posix":
+        return
+    import signal
+    import time
+
+    merged = os.environ.copy()
+    merged["SDL_VIDEODRIVER"] = "dummy"
+    merged["SDL_AUDIODRIVER"] = "dummy"
+    proc = subprocess.Popen(
+        [exe, "--headless"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=merged,
+    )
+    try:
+        time.sleep(0.5)  # let pixels block in zz_display_flip
+        proc.send_signal(signal.SIGTERM)
+        try:
+            rc = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise SystemExit("display flip not interrupted by SIGTERM")
+        if rc != 0:
+            raise SystemExit(f"expected clean exit 0, got {rc}")
+    finally:
+        proc.stdin.close()
+        proc.kill()
+        proc.wait()
+
 
 def check_pixels(exe):
     want = checkerboard()
@@ -315,6 +345,7 @@ CHECKS = {
     "conshort": check_conshort,
     "mailbox": check_mailbox,
     "constop": check_constop,
+    "pixelsstop": check_pixelsstop,
 }
 
 

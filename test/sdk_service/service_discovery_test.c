@@ -6,7 +6,8 @@
 #include <string.h>
 
 #include "sdk_service_catalog.h"
-
+#include "sdk_mailbox.h"
+#include "zzapp_proto.h"
 struct ExpectedService {
 	uint32_t id;
 	uint32_t opcode_count;
@@ -23,7 +24,7 @@ static const struct ExpectedService expected[] = {
 	{ 0x0800U, 5U, "crypto" },
 	{ 0x0900U, 4U, "diag" },
 	{ 0x0b00U, 14U, "video" },
-	{ 0x0c00U, 9U, "app" },
+	{ 0x0c00U, 11U, "app" },
 	{ 0x8200U, 1U, "console" }
 };
 
@@ -72,3 +73,10 @@ int main(void)
 	puts("service discovery: all descriptors passed");
 	return 0;
 }
+
+/* The mailbox router forwards the whole app opcode range through
+ * handle_app_op; both opcode spellings must stay the same number or the
+ * firmware's compile-time drift check fails and RELEASE is dropped. */
+typedef char app_release_opcode_matches[
+	(SDK_OP_APP_RELEASE == ZZAPP_OP_RELEASE &&
+	 SDK_OP_APP_LIST == ZZAPP_OP_LIST) ? 1 : -1];
