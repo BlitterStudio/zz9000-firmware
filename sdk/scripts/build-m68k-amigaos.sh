@@ -5,7 +5,7 @@ set -e
 
 # GCC 16. The tag follows release candidates, so the digest pins the
 # compiler; card runs of it happen before releases.
-IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:838e59960089fa9cd0e77464dd60cd72212b64852a720ca00102fdd7ce6e0a4e}"
+IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:b013431b0b1fe6b08eb21a9a3e041c5f6a3e2ea505214e7166186918d6b89d06}"
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 # Run as root inside the container: the toolchain NDK headers under
