@@ -232,11 +232,10 @@ uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
 
 /* Loader service spans use XTime global-timer ticks. COUNTS_PER_SECOND is the
  * CPU clock divided by two, so the 666 MHz CPU's timer runs at about 333 MHz.
- * On swquake, extracting 1517 relocations (24272 bytes of records) was the
- * longest launcher step at 847767 ticks, about 2.5 ms and roughly 559 ticks
- * per entry. At that rate the 512-entry extraction slice is estimated at
- * about 0.86 ms and applying 256 relocations at about 0.43 ms (estimates,
- * not measurements). Zero is limited to
+ * Loading swquake on the card, the longest pass of each kind was: zero
+ * 138667 ticks (0.42 ms), copy 59571 (0.18 ms), map 159258 (0.48 ms),
+ * relocation extraction 295814 (0.89 ms), relocation application 110622
+ * (0.33 ms). Zero is limited to
  * 32 KiB, map to 96 KiB, and copy to 48 KiB per pass. A pass never splits
  * inside a 4 KiB page: every byte bound is a multiple of the page size, so
  * frame-boundary splitting and image mapping still line up below the 1 MiB

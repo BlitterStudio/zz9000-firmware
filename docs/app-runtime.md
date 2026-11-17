@@ -36,13 +36,12 @@ A system-service pass runs to completion, and no app runs on core 1 meanwhile.
 A CPU-bound app therefore gets about one service turn per 5 ms timer quantum;
 there is no universal 1 ms guarantee. The app loader zeroes at most 32 KiB,
 maps at most 96 KiB, copies at most 48 KiB, extracts at most 512 relocation
-entries, or applies at most 256 per pass. On swquake, extracting 1517
-relocations (24272 bytes of records) measured 847767 XTime ticks, about 2.5 ms
-at 333 MHz and roughly 559 ticks per entry. At that rate the 512-entry
-extraction slice is estimated at about 0.86 ms, and applying 256 entries at
-about 0.43 ms (estimated, not measured). The 32 KiB zero slice
-targets about 0.8 ms at its observed effective rate. The progressive-JPEG
-coefficient step remains bounded to about 1 ms.
+entries, or applies at most 256 per pass. Loading swquake on the card, the
+longest pass of each kind measured, in XTime ticks at 333 MHz: zero 138667
+(0.42 ms), copy 59571 (0.18 ms), map 159258 (0.48 ms), relocation
+extraction 295814 (0.89 ms), relocation application 110622 (0.33 ms),
+allocation 13392 (0.04 ms), other worker work 227020 (0.68 ms). The
+progressive-JPEG coefficient step is bounded to about 1 ms.
 An on-demand v3 module load reads and hashes at most 12 KiB, then zeroes,
 flushes, invalidates, or failure-poisons at most 64 KiB. A FLAC, Vorbis, or
 MP3 decode pass produces at most 24 KiB of PCM plus one frame. A measured
