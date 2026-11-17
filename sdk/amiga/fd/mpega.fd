@@ -1,3 +1,5 @@
+* Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+* SPDX-License-Identifier: MIT
 ** ZZ9000-backed mpega.library compatibility FD, original-name alias.
 ##base _MPEGABase
 ##bias 30

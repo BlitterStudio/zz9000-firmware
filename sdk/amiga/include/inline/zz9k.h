@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
+ */
 /* GCC inline callers for zz9k.library ARM app-client vectors. */
 #ifndef INLINE_ZZ9K_H
 #define INLINE_ZZ9K_H

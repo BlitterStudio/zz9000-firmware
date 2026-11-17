@@ -1,7 +1,8 @@
 /*
  * Native-testable core for the AmigaOS zz9k.library facade.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef ZZ9K_LIBRARY_H

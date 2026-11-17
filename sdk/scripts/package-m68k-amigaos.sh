@@ -200,6 +200,7 @@ copy_one "amiga/fd/zz9k_lib.fd" "Developer/FD/zz9k_lib.fd"
 copy_one "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
 copy_one "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 copy_one "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
+copy_one "LICENSES/MIT.txt" "Developer/LICENSE-MIT.txt"
 
 for spec in $GUIDE_SPECS; do
   make_guide "$spec"

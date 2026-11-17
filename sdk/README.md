@@ -177,5 +177,18 @@ SDK v2, including the firmware-integrated service ABI, `zz9k.library`,
 AmigaOS tools, public headers, documentation, examples, and packaging work in
 this fork, is copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio.
 
-Unless a file has its own notice or a third-party license, it is distributed
-under [GPL-3.0-or-later](https://spdx.org/licenses/GPL-3.0-or-later.html).
+The client side is MIT ([LICENSES/MIT.txt](LICENSES/MIT.txt)): the fd files,
+the headers under `amiga/include/`, `include/zz9k/` (except `module.h` and
+`service_registry.h`) and `host/include/zz9k/`, the Amiga examples, and the
+ARM app library, headers, startup code, linker script, build helpers and
+templates in `zzapp/` (not the `zzapp-check` tool). A program under any licence
+can compile these in to call `zz9k.library` or to build an ARM app, and may call
+`zz9k.library` and `mpega.library` through them under an additional permission
+described in [LICENSING.md](../LICENSING.md).
+
+Unless a file has its own notice or a third-party license, the rest is
+distributed under
+[GPL-3.0-or-later](https://spdx.org/licenses/GPL-3.0-or-later.html). That
+includes `zz9k.library` itself and the `zz9k_host.o` implementation. See
+[LICENSING.md](../LICENSING.md) for how the firmware licence applies to
+programs that use the card.

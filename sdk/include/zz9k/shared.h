@@ -1,7 +1,8 @@
 /*
  * Header-only helpers for CPU-visible ZZ9000 shared buffers.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef ZZ9K_SHARED_H

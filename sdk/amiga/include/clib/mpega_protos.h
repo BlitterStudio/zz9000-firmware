@@ -1,7 +1,8 @@
 /*
  * C prototypes for mpega.library compatibility calls.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef CLIB_MPEGA_PROTOS_H

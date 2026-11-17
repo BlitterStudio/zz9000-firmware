@@ -1,7 +1,8 @@
 /*
  * ZZ9000 ARM app-runtime client wire helpers.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 #ifndef ZZ9K_APP_H
 #define ZZ9K_APP_H

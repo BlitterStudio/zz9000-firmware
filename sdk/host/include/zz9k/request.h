@@ -1,7 +1,8 @@
 /*
  * Header-only typed request builders for SDK mailbox calls.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef ZZ9K_REQUEST_H

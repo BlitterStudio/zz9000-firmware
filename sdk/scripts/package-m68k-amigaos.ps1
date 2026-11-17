@@ -173,6 +173,7 @@ Copy-One "amiga/fd/zz9k_lib.fd" "Developer/FD/zz9k_lib.fd"
 Copy-One "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
+Copy-One "LICENSES/MIT.txt" "Developer/LICENSE-MIT.txt"
 
 $GuideSpecs = @(
   "README.md:ZZ9000-SDK",

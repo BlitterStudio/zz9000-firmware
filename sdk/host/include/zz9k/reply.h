@@ -1,7 +1,8 @@
 /*
  * Header-only typed reply decoders for SDK mailbox completions.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef ZZ9K_REPLY_H
