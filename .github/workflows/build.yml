@@ -107,10 +107,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Install host-test multilib support
+      - name: Install host-test build tools and image codec headers
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends gcc-multilib
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential gcc-multilib libjpeg-dev libpng-dev
       # Pinned third-party source archives (checked by SHA-256 in the
       # build_*.sh scripts). gitlab.xiph.org and downloads.xiph.org go down
       # for hours at a time; restoring the archives keeps CI off them.

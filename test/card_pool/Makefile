@@ -7,9 +7,9 @@ TARGET := $(BUILD_DIR)/card_pool_test
 
 CPPFLAGS += -DSMP_LOCK_HOST_TEST -I$(SRC_DIR)
 
-SOURCES := card_pool_test.c $(SRC_DIR)/card_pool.c $(SRC_DIR)/minigl_fence_guard.c \
+SOURCES := card_pool_test.c $(SRC_DIR)/card_pool.c $(SRC_DIR)/rasterix_fence_guard.c \
 	$(SRC_DIR)/sdk_smp_lock.c
-DEPS := $(SRC_DIR)/card_pool.h $(SRC_DIR)/minigl_fence_guard.h \
+DEPS := $(SRC_DIR)/card_pool.h $(SRC_DIR)/rasterix_fence_guard.h \
 	$(SRC_DIR)/memorymap.h $(SRC_DIR)/sdk_smp_lock.h
 
 .PHONY: test clean

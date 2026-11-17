@@ -1,5 +1,5 @@
-#ifndef MINIGL_FENCE_GUARD_H
-#define MINIGL_FENCE_GUARD_H
+#ifndef RASTERIX_FENCE_GUARD_H
+#define RASTERIX_FENCE_GUARD_H
 
 #include <stdint.h>
 
@@ -13,12 +13,12 @@ typedef struct {
     uint32_t (*clock_ms)(void *context);
     void (*sleep_ms)(void *context, uint32_t milliseconds);
     void (*forget)(void *context);
-} minigl_fence_guard_hooks_t;
+} rasterix_fence_guard_hooks_t;
 
 /* Poll a published RasterIX fence for at most wait_ms. A timed-out fetch keeps
- * every MiniGL block quarantined before the caller reclaims the pool. */
-void minigl_fence_guard_pool(card_pool_t *pool, int rasterix_active,
-                             const minigl_fence_guard_hooks_t *hooks,
-                             uint32_t wait_ms);
+ * every RasterIX-owned block quarantined before the caller reclaims the pool. */
+void rasterix_fence_guard_pool(card_pool_t *pool, int rasterix_active,
+                               const rasterix_fence_guard_hooks_t *hooks,
+                               uint32_t wait_ms);
 
 #endif

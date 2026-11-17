@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "card_pool.h"
-#include "minigl_fence_guard.h"
+#include "rasterix_fence_guard.h"
 #include "memorymap.h"
 
 /* Single-threaded host build. smp_cpu_id is switchable so a test can leave
@@ -601,7 +601,7 @@ static void fence_forget(void *context)
     ((fence_fixture_t *)context)->forgot = 1;
 }
 
-static const minigl_fence_guard_hooks_t fence_hooks = {
+static const rasterix_fence_guard_hooks_t fence_hooks = {
     .snapshot = fence_snapshot,
     .read_fence = fence_read,
     .engine_idle = fence_idle,
@@ -611,10 +611,10 @@ static const minigl_fence_guard_hooks_t fence_hooks = {
 };
 static void fence_guard(fence_fixture_t *fixture, int rasterix_active)
 {
-    minigl_fence_guard_hooks_t hooks = fence_hooks;
+    rasterix_fence_guard_hooks_t hooks = fence_hooks;
 
     hooks.context = fixture;
-    minigl_fence_guard_pool(&pool, rasterix_active, &hooks, 100U);
+    rasterix_fence_guard_pool(&pool, rasterix_active, &hooks, 100U);
 }
 
 

@@ -1,8 +1,8 @@
-#include "minigl_fence_guard.h"
+#include "rasterix_fence_guard.h"
 
-void minigl_fence_guard_pool(card_pool_t *pool, int rasterix_active,
-                             const minigl_fence_guard_hooks_t *hooks,
-                             uint32_t wait_ms)
+void rasterix_fence_guard_pool(card_pool_t *pool, int rasterix_active,
+                               const rasterix_fence_guard_hooks_t *hooks,
+                               uint32_t wait_ms)
 {
     uint32_t address;
     uint32_t sequence;

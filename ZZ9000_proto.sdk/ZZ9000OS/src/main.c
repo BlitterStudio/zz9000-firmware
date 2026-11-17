@@ -79,7 +79,7 @@ void Xil_AssertNonVoid() {}
 #include "zzapp_as.h"
 #include "zzapp_services.h"
 #include "card_pool.h"
-#include "minigl_fence_guard.h"
+#include "rasterix_fence_guard.h"
 #include "overlay.h"
 #include "zzm_minigl_host.h"
 #include "mw_service.h"
@@ -733,27 +733,27 @@ static void finish_amiga_reset_pool(void)
 	print_memory_line();
 }
 
-static int minigl_fence_snapshot(void *context, uint32_t *address,
+static int rasterix_fence_snapshot(void *context, uint32_t *address,
 	uint32_t *sequence)
 {
 	(void)context;
 	return zzm_minigl_fence_snapshot(address, sequence);
 }
 
-static uint16_t minigl_fence_read(void *context, uint32_t address)
+static uint16_t rasterix_fence_read(void *context, uint32_t address)
 {
 	(void)context;
 	Xil_DCacheInvalidateRange((INTPTR)address, sizeof(uint16_t));
 	return *(volatile uint16_t *)(uintptr_t)address;
 }
 
-static int minigl_fence_engine_idle(void *context)
+static int rasterix_fence_engine_idle(void *context)
 {
 	(void)context;
 	return zzm_minigl_rasterix_idle();
 }
 
-static uint32_t minigl_fence_clock_ms(void *context)
+static uint32_t rasterix_fence_clock_ms(void *context)
 {
 	XTime now;
 
@@ -762,30 +762,30 @@ static uint32_t minigl_fence_clock_ms(void *context)
 	return (uint32_t)((uint64_t)now / (COUNTS_PER_SECOND / 1000U));
 }
 
-static void minigl_fence_sleep(void *context, uint32_t milliseconds)
+static void rasterix_fence_sleep(void *context, uint32_t milliseconds)
 {
 	(void)context;
 	usleep(milliseconds * 1000U);
 }
 
-static void minigl_fence_forget(void *context)
+static void rasterix_fence_forget(void *context)
 {
 	(void)context;
 	zzm_minigl_forget_fence();
 }
 
-static void protect_minigl_card_pool(void)
+static void protect_rasterix_card_pool(void)
 {
-	static const minigl_fence_guard_hooks_t hooks = {
-		.snapshot = minigl_fence_snapshot,
-		.read_fence = minigl_fence_read,
-		.engine_idle = minigl_fence_engine_idle,
-		.clock_ms = minigl_fence_clock_ms,
-		.sleep_ms = minigl_fence_sleep,
-		.forget = minigl_fence_forget,
+	static const rasterix_fence_guard_hooks_t hooks = {
+		.snapshot = rasterix_fence_snapshot,
+		.read_fence = rasterix_fence_read,
+		.engine_idle = rasterix_fence_engine_idle,
+		.clock_ms = rasterix_fence_clock_ms,
+		.sleep_ms = rasterix_fence_sleep,
+		.forget = rasterix_fence_forget,
 	};
 
-	minigl_fence_guard_pool(&card_pool, zzm_minigl_rasterix_active(), &hooks,
+	rasterix_fence_guard_pool(&card_pool, zzm_minigl_rasterix_active(), &hooks,
 		MINIGL_FENCE_WAIT_MS);
 }
 
@@ -943,7 +943,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * The direct poll below then covers a RasterIX fetch that outlives the
 	 * worker, including the cold-restart safety path in the quiesce. */
 	scheduler_quiesce_for_reset();
-	protect_minigl_card_pool();
+	protect_rasterix_card_pool();
 	/* Card pool range B is the fast-RAM window, lent to the ARM while fast
 	 * RAM is not advertised. Take it back before the gate can reopen.
 	 * Core 1 goes first: the quiesce stops any task still writing a block

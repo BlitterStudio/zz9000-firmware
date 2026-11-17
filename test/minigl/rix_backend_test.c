@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "card_pool.h"
-#include "minigl_fence_guard.h"
+#include "rasterix_fence_guard.h"
 #include "minigl_rix_backend.h"
 #include "rix_texture.h"
 extern void (*g_rix_test_log)(const char *fmt, ...);
@@ -349,7 +349,7 @@ static void guard_sleep(void *context, uint32_t milliseconds)
     ++model->guard_sleeps;
 }
 
-static const minigl_fence_guard_hooks_t guard_hooks = {
+static const rasterix_fence_guard_hooks_t guard_hooks = {
     .snapshot = guard_snapshot,
     .read_fence = guard_read,
     .engine_idle = guard_idle,
@@ -1344,7 +1344,7 @@ static void test_self_test_retirement_clears_published_fence(void)
     MiniGLRixBackend backend;
     ZZ9KMiniGLPacketSetState state = state16();
     card_pool_t pool;
-    minigl_fence_guard_hooks_t hooks = guard_hooks;
+    rasterix_fence_guard_hooks_t hooks = guard_hooks;
     uint32_t allocation;
 
     hooks.context = &model;
@@ -1379,7 +1379,7 @@ static void test_self_test_retirement_clears_published_fence(void)
     allocation = card_pool_alloc(&pool, CARD_POOL_PAGE_BYTES,
                                  CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 1U));
     assert(allocation != 0U);
-    minigl_fence_guard_pool(&pool, 1, &hooks, 100U);
+    rasterix_fence_guard_pool(&pool, 1, &hooks, 100U);
     assert(model.guard_sleeps == 0U);
     assert(card_pool_free(&pool, allocation,
                           CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 1U)) == 1);
@@ -1820,7 +1820,7 @@ static void test_queued_work_does_not_keep_a_retired_fence_published(void)
     MiniGLRixBackend backend;
     ZZ9KMiniGLPacketSetState state = state16();
     card_pool_t pool;
-    minigl_fence_guard_hooks_t hooks = guard_hooks;
+    rasterix_fence_guard_hooks_t hooks = guard_hooks;
     uint32_t allocation;
     uint8_t queued;
     uint8_t retired;
@@ -1869,7 +1869,7 @@ static void test_queued_work_does_not_keep_a_retired_fence_published(void)
     allocation = card_pool_alloc(&pool, CARD_POOL_PAGE_BYTES,
                                  CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, 2U));
     assert(allocation != 0U);
-    minigl_fence_guard_pool(&pool, 1, &hooks, 100U);
+    rasterix_fence_guard_pool(&pool, 1, &hooks, 100U);
     assert(model.quarantined_mask == 0U);
     assert(model.guard_sleeps == 0U);
     assert(card_pool_free(&pool, allocation,
