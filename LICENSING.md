@@ -36,7 +36,9 @@ links GPL code stays bound by the GPL. That includes the library sources,
 ## MIT files
 
 These files are under the MIT licence ([sdk/LICENSES/MIT.txt](sdk/LICENSES/MIT.txt)),
-so a program under any licence can compile them in:
+so a program under any licence can compile them in. The SDK package ships the
+MIT text as `Developer/LICENSE-MIT.txt`, the GPL text as
+`Developer/LICENSE-GPL-3.0.txt`, and this file as `Docs/LICENSING.guide`.
 
 - `sdk/amiga/fd/`: the fd files for `zz9k.library` and `mpega.library`.
 - `sdk/amiga/include/`: the `clib`, `proto`, `inline`, `pragmas`, `libraries`,

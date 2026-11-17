@@ -92,7 +92,8 @@ docs/zz9k-zorro2-services.md:zz9k-zorro2-services \
 docs/zz9k-picture-datatype.md:zz9k-picture-datatype \
 docs/zz9k-sound-datatype.md:zz9k-sound-datatype \
 docs/zzplay.md:ZZPlay \
-docs/zz9k-amissl-provider.md:zz9k-amissl-provider"
+docs/zz9k-amissl-provider.md:zz9k-amissl-provider \
+../LICENSING.md:LICENSING"
 GUIDE_SIBLINGS=""
 for spec in $GUIDE_SPECS; do
   GUIDE_SIBLINGS="$GUIDE_SIBLINGS --sibling ${spec##*:}.guide"
@@ -201,6 +202,7 @@ copy_one "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
 copy_one "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 copy_one "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
 copy_one "LICENSES/MIT.txt" "Developer/LICENSE-MIT.txt"
+copy_one "../LICENSE" "Developer/LICENSE-GPL-3.0.txt"
 
 for spec in $GUIDE_SPECS; do
   make_guide "$spec"
