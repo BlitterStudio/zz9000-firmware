@@ -200,6 +200,26 @@ void zzapp_kernel_perf_service_begin(zzapp_kernel_t *kernel,
 		kernel->perf.service_start[service] = stamp;
 }
 
+static zzapp_perf_launcher_step_t kernel_perf_launcher_step(uint32_t detail)
+{
+	switch (detail) {
+	case 0x101U:
+		return ZZAPP_PERF_LAUNCHER_ZERO;
+	case 0x102U:
+		return ZZAPP_PERF_LAUNCHER_COPY;
+	case 0x103U:
+		return ZZAPP_PERF_LAUNCHER_MAP;
+	case 0x104U:
+		return ZZAPP_PERF_LAUNCHER_RELOC;
+	case 0x105U:
+		return ZZAPP_PERF_LAUNCHER_APPLY;
+	case 0x106U:
+		return ZZAPP_PERF_LAUNCHER_ALLOC;
+	default:
+		return ZZAPP_PERF_LAUNCHER_OTHER;
+	}
+}
+
 void zzapp_kernel_perf_service_end_detail(zzapp_kernel_t *kernel,
 					   zzapp_perf_service_t service,
 					   uint32_t stamp, uint32_t detail,
@@ -218,6 +238,13 @@ void zzapp_kernel_perf_service_end_detail(zzapp_kernel_t *kernel,
 	if (elapsed > old_max) {
 		kernel->perf.total.service_max_detail[service] = detail;
 		kernel->perf.total.service_max_bytes[service] = bytes;
+	}
+	if (service == ZZAPP_PERF_SERVICE_LAUNCHER) {
+		zzapp_perf_launcher_step_t step =
+			kernel_perf_launcher_step(detail);
+
+		if (elapsed > kernel->perf.total.launcher_step_max[step])
+			kernel->perf.total.launcher_step_max[step] = elapsed;
 	}
 }
 
@@ -303,9 +330,13 @@ static const char *launcher_detail_name(uint32_t detail)
 		return "loader-map";
 	case 0x104U:
 		return "loader-reloc";
+	case 0x105U:
+		return "loader-apply";
+	case 0x106U:
+		return "loader-alloc";
 	default:
 		return "worker";
-	}
+}
 }
 
 int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
@@ -394,6 +425,25 @@ int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
 					   ZZAPP_PERF_SERVICE_LAUNCHER]),
 				   (unsigned long)snapshot.service_max_bytes[
 					   ZZAPP_PERF_SERVICE_LAUNCHER]);
+	if (offset > 0 && (size_t)offset < sizeof(kernel->perf.report_text))
+		offset += snprintf(kernel->perf.report_text + offset,
+				   sizeof(kernel->perf.report_text) - (size_t)offset,
+				   " launcher_steps=zero:%lu/copy:%lu/map:%lu/"
+				   "reloc:%lu/apply:%lu/alloc:%lu/other:%lu",
+				   (unsigned long)snapshot.launcher_step_max[
+					   ZZAPP_PERF_LAUNCHER_ZERO],
+				   (unsigned long)snapshot.launcher_step_max[
+					   ZZAPP_PERF_LAUNCHER_COPY],
+				   (unsigned long)snapshot.launcher_step_max[
+					   ZZAPP_PERF_LAUNCHER_MAP],
+				   (unsigned long)snapshot.launcher_step_max[
+					   ZZAPP_PERF_LAUNCHER_RELOC],
+				   (unsigned long)snapshot.launcher_step_max[
+					   ZZAPP_PERF_LAUNCHER_APPLY],
+				   (unsigned long)snapshot.launcher_step_max[
+					   ZZAPP_PERF_LAUNCHER_ALLOC],
+				   (unsigned long)snapshot.launcher_step_max[
+					   ZZAPP_PERF_LAUNCHER_OTHER]);
 	if (offset > 0 && (size_t)offset < sizeof(kernel->perf.report_text) - 2U)
 		strcat(kernel->perf.report_text, "\r\n");
 	kernel->perf.report_ready = 1U;

@@ -232,14 +232,15 @@ uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
 
 /* Loader service spans use XTime global-timer ticks. COUNTS_PER_SECOND is the
  * CPU clock divided by two, so the 666 MHz CPU's timer runs at about 333 MHz.
- * A zero-attributed 96 KiB pass measured 848570 ticks (about 2.5 ms); that
- * span also covers first-pass frame allocation before the memset. The 32 KiB
- * zero slice targets about 0.8 ms at the measured effective rate. The
- * existing 96 KiB map, 48 KiB copy, 2048-relocation extraction, and
- * 256-relocation apply bounds remain; zero was the longest measured step.
- * A pass never splits inside a 4 KiB page: every byte bound is a multiple of
- * the page size, so frame-boundary splitting and image mapping still line up
- * below the 1 MiB frame size. */
+ * On swquake, extracting 1517 relocations (24272 bytes of records) was the
+ * longest launcher step at 847767 ticks, about 2.5 ms and roughly 559 ticks
+ * per entry. At that rate the 512-entry extraction slice is estimated at
+ * about 0.86 ms and applying 256 relocations at about 0.43 ms (estimates,
+ * not measurements). Zero is limited to
+ * 32 KiB, map to 96 KiB, and copy to 48 KiB per pass. A pass never splits
+ * inside a 4 KiB page: every byte bound is a multiple of the page size, so
+ * frame-boundary splitting and image mapping still line up below the 1 MiB
+ * frame size. */
 #ifndef ZZAPP_LOADER_ZERO_CHUNK_BYTES
 #define ZZAPP_LOADER_ZERO_CHUNK_BYTES (32u * 1024u)
 #endif
@@ -249,7 +250,7 @@ uint32_t zzapp_loader_page_flags(const uint32_t (*segs)[3], uint32_t nseg,
 #ifndef ZZAPP_LOADER_MAP_CHUNK_BYTES
 #define ZZAPP_LOADER_MAP_CHUNK_BYTES (96u * 1024u)
 #endif
-#define ZZAPP_LOADER_RELOC_CHUNK_ENTRIES 2048U
+#define ZZAPP_LOADER_RELOC_CHUNK_ENTRIES 512U
 #define ZZAPP_LOADER_RELOC_APPLY_CHUNK_ENTRIES 256U
 /* Cortex-A9 L1 line: relocations within this distance share a flush. */
 #define ZZAPP_LOADER_CACHE_LINE_BYTES 32u
@@ -263,10 +264,12 @@ enum loader_map_phase {
 };
 
 /* Loader pass kinds, recorded for the core-1 launcher perf attribution. */
-#define ZZAPP_LOADER_WORK_ZERO  1u
-#define ZZAPP_LOADER_WORK_COPY  2u
-#define ZZAPP_LOADER_WORK_MAP   3u
-#define ZZAPP_LOADER_WORK_RELOC 4u
+#define ZZAPP_LOADER_WORK_ZERO   1u
+#define ZZAPP_LOADER_WORK_COPY   2u
+#define ZZAPP_LOADER_WORK_MAP    3u
+#define ZZAPP_LOADER_WORK_RELOC  4u
+#define ZZAPP_LOADER_WORK_APPLY  5u
+#define ZZAPP_LOADER_WORK_ALLOC  6u
 
 #if ZZAPP_PERF_COUNTERS || defined(ZZAPP_HOST_TEST)
 static uint32_t worker_work_bytes;
@@ -509,6 +512,8 @@ static int map_loaded_image(const struct load_image *img)
         g_map_phase = LOADER_MAP_ZERO;
         /* Frame allocation can scale with the image commit. Keep it out of
          * the first bounded zero slice and give it its own service pass. */
+        loader_note_work(total_frames * ZZAPP_MEM_FRAME_BYTES,
+                         ZZAPP_LOADER_WORK_ALLOC);
         return ZZAPP_LOADER_IN_PROGRESS;
     }
     if (g_map_phase == LOADER_MAP_ZERO) {
@@ -1465,7 +1470,7 @@ static int apply_loaded_relocations(void)
         Xil_L1DCacheFlushRange((INTPTR)span_lo, (uint32_t)(span_hi - span_lo));
 #endif
     loader_note_relocs(applied);
-    loader_note_work(applied * 16U, ZZAPP_LOADER_WORK_RELOC);
+    loader_note_work(applied * 16U, ZZAPP_LOADER_WORK_APPLY);
     return g_reloc_apply == g_relocs_bytes ? ZZ_OK :
         ZZAPP_LOADER_IN_PROGRESS;
 }

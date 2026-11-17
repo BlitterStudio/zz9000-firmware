@@ -150,13 +150,15 @@ static void crossing_entry(const void *api_ptr, int argc, char **argv)
 #define LOADER_ZERO_CHUNK_BYTES (32U * 1024U)
 #define LOADER_COPY_CHUNK_BYTES (48U * 1024U)
 #define LOADER_MAP_CHUNK_BYTES (96U * 1024U)
-#define LOADER_RELOC_PREPARE_ENTRIES 2048U
+#define LOADER_RELOC_PREPARE_ENTRIES 512U
 #define LOADER_RELOC_APPLY_ENTRIES 256U
 /* Mirror of the loader's pass kinds (zzapp_loader.c). */
 #define TEST_WORK_KIND_ZERO  1U
 #define TEST_WORK_KIND_COPY  2U
 #define TEST_WORK_KIND_MAP   3U
 #define TEST_WORK_KIND_RELOC 4U
+#define TEST_WORK_KIND_APPLY 5U
+#define TEST_WORK_KIND_ALLOC 6U
 #define SHOFF 0x180u
 
 static void put16(uint8_t *p, uint16_t v)
@@ -263,6 +265,11 @@ static void assert_pass_work_bounded(void)
         break;
     case TEST_WORK_KIND_RELOC:
         assert(work <= LOADER_RELOC_PREPARE_ENTRIES * 16U);
+        break;
+    case TEST_WORK_KIND_APPLY:
+        assert(work <= LOADER_RELOC_APPLY_ENTRIES * 16U);
+        break;
+    case TEST_WORK_KIND_ALLOC:
         break;
     default:
         assert(0);
@@ -526,6 +533,7 @@ static void test_relocation_allocation_and_zero_use_separate_passes(void)
     const uint32_t bytes = RELA_OFF + relocation_count * 12U + 40U;
     uint8_t *image = malloc(bytes);
     uint32_t offset;
+    uint32_t pass;
     int rc;
 
     assert(image != NULL);
@@ -541,16 +549,22 @@ static void test_relocation_allocation_and_zero_use_separate_passes(void)
         offset += chunk;
     }
 
-    rc = zzapp_loader_end();
-    assert(rc == ZZAPP_LOADER_IN_PROGRESS);
-    assert(zzapp_test_loader_work_last_kind() == TEST_WORK_KIND_RELOC);
-    assert(zzapp_test_loader_work_last_bytes() == relocation_count * 16U);
-    assert(zzapp_test_loader_zero_last_bytes() == 0U);
+    for (pass = 0U; pass < 3U; pass++) {
+        uint32_t entries = pass < 2U ? LOADER_RELOC_PREPARE_ENTRIES :
+                           relocation_count -
+                               2U * LOADER_RELOC_PREPARE_ENTRIES;
+
+        rc = zzapp_loader_end();
+        assert(rc == ZZAPP_LOADER_IN_PROGRESS);
+        assert(zzapp_test_loader_work_last_kind() == TEST_WORK_KIND_RELOC);
+        assert(zzapp_test_loader_work_last_bytes() == entries * 16U);
+        assert(zzapp_test_loader_zero_last_bytes() == 0U);
+    }
 
     rc = zzapp_loader_end();
     assert(rc == ZZAPP_LOADER_IN_PROGRESS);
-    assert(zzapp_test_loader_work_last_kind() == 0U);
-    assert(zzapp_test_loader_work_last_bytes() == 0U);
+    assert(zzapp_test_loader_work_last_kind() == TEST_WORK_KIND_ALLOC);
+    assert(zzapp_test_loader_work_last_bytes() != 0U);
     assert(zzapp_test_loader_zero_last_bytes() == 0U);
 
     rc = zzapp_loader_end();

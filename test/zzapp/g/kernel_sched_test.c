@@ -975,6 +975,42 @@ static void test_performance_counters(void)
 	zzapp_kernel_perf_service_end_detail(&kernel,
 					     ZZAPP_PERF_SERVICE_LAUNCHER,
 					     700u, 0x103u, 192u * 1024u);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_LAUNCHER,
+					710u);
+	zzapp_kernel_perf_service_end_detail(&kernel,
+					     ZZAPP_PERF_SERVICE_LAUNCHER,
+					     810u, 0x101u, 32u * 1024u);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_LAUNCHER,
+					820u);
+	zzapp_kernel_perf_service_end_detail(&kernel,
+					     ZZAPP_PERF_SERVICE_LAUNCHER,
+					     930u, 0x102u, 48u * 1024u);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_LAUNCHER,
+					940u);
+	zzapp_kernel_perf_service_end_detail(&kernel,
+					     ZZAPP_PERF_SERVICE_LAUNCHER,
+					     1060u, 0x104u, 512u * 16u);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_LAUNCHER,
+					1070u);
+	zzapp_kernel_perf_service_end_detail(&kernel,
+					     ZZAPP_PERF_SERVICE_LAUNCHER,
+					     1200u, 0x105u, 256u * 16u);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_LAUNCHER,
+					1210u);
+	zzapp_kernel_perf_service_end_detail(&kernel,
+					     ZZAPP_PERF_SERVICE_LAUNCHER,
+					     1350u, 0x106u, 4u << 20);
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_LAUNCHER,
+					1360u);
+	zzapp_kernel_perf_service_end_detail(&kernel,
+					     ZZAPP_PERF_SERVICE_LAUNCHER,
+					     1510u, 1u, 0u);
+	/* A smaller later sample must not overwrite the per-kind maximum. */
+	zzapp_kernel_perf_service_begin(&kernel, ZZAPP_PERF_SERVICE_LAUNCHER,
+					1520u);
+	zzapp_kernel_perf_service_end_detail(&kernel,
+					     ZZAPP_PERF_SERVICE_LAUNCHER,
+					     1570u, 0x101u, 16u * 1024u);
 	zzapp_kernel_perf_snapshot(&kernel, 1u, &snapshot);
 	CHECK(snapshot.switch_cycles.samples == 2u);
 	CHECK(snapshot.switch_cycles.max == 80u);
@@ -987,6 +1023,13 @@ static void test_performance_counters(void)
 	CHECK(snapshot.service_max_detail[ZZAPP_PERF_SERVICE_LAUNCHER] == 0x103u);
 	CHECK(snapshot.service_max_bytes[ZZAPP_PERF_SERVICE_LAUNCHER] ==
 	      (192u * 1024u));
+	CHECK(snapshot.launcher_step_max[ZZAPP_PERF_LAUNCHER_ZERO] == 100u);
+	CHECK(snapshot.launcher_step_max[ZZAPP_PERF_LAUNCHER_COPY] == 110u);
+	CHECK(snapshot.launcher_step_max[ZZAPP_PERF_LAUNCHER_MAP] == 200u);
+	CHECK(snapshot.launcher_step_max[ZZAPP_PERF_LAUNCHER_RELOC] == 120u);
+	CHECK(snapshot.launcher_step_max[ZZAPP_PERF_LAUNCHER_APPLY] == 130u);
+	CHECK(snapshot.launcher_step_max[ZZAPP_PERF_LAUNCHER_ALLOC] == 140u);
+	CHECK(snapshot.launcher_step_max[ZZAPP_PERF_LAUNCHER_OTHER] == 150u);
 	CHECK(snapshot.sgis == 2u);
 	CHECK(snapshot.work_publications == 4u);
 	CHECK(snapshot.audio_low_water == 3u);
@@ -1002,6 +1045,9 @@ static void test_performance_counters(void)
 	CHECK(strstr(kernel.perf.report_text,
 		     "sdk_max_op=0x1234 launcher_max_step=loader-map:196608") !=
 	      NULL);
+	CHECK(strstr(kernel.perf.report_text,
+		     "launcher_steps=zero:100/copy:110/map:200/reloc:120/"
+		     "apply:130/alloc:140/other:150") != NULL);
 	zzapp_kernel_perf_print_reports(&kernel);
 	CHECK(kernel.perf.report_pending == 0U);
 	zzapp_kernel_perf_request_report(&kernel, 1u, 0);

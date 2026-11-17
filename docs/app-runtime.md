@@ -35,13 +35,14 @@ slot's `LOAD_BEGIN`, `LOAD_CHUNK`, or `START`.
 A system-service pass runs to completion, and no app runs on core 1 meanwhile.
 A CPU-bound app therefore gets about one service turn per 5 ms timer quantum;
 there is no universal 1 ms guarantee. The app loader zeroes at most 32 KiB,
-maps at most 96 KiB, copies at most 48 KiB, extracts at most 2048 relocation
-entries, or applies at most 256 per pass. A zero-attributed 96 KiB launcher
-span measured 848570 XTime ticks, about 2.5 ms at 333 MHz, before the zero
-slice was reduced; the span also includes first-pass frame allocation before
-the `memset`. The 32 KiB zero slice targets about 0.8 ms at the observed
-effective rate. The progressive-JPEG coefficient step remains bounded to
-about 1 ms.
+maps at most 96 KiB, copies at most 48 KiB, extracts at most 512 relocation
+entries, or applies at most 256 per pass. On swquake, extracting 1517
+relocations (24272 bytes of records) measured 847767 XTime ticks, about 2.5 ms
+at 333 MHz and roughly 559 ticks per entry. At that rate the 512-entry
+extraction slice is estimated at about 0.86 ms, and applying 256 entries at
+about 0.43 ms (estimated, not measured). The 32 KiB zero slice
+targets about 0.8 ms at its observed effective rate. The progressive-JPEG
+coefficient step remains bounded to about 1 ms.
 An on-demand v3 module load reads and hashes at most 12 KiB, then zeroes,
 flushes, invalidates, or failure-poisons at most 64 KiB. A FLAC, Vorbis, or
 MP3 decode pass produces at most 24 KiB of PCM plus one frame. A measured
@@ -116,6 +117,10 @@ a value below one shows doorbell coalescing. `sdk_span`, `minigl_span`,
 `launcher_span`, `audio_span`, and `svc_span` are the 99th-percentile/maximum
 non-preemptible spans for SDK tasks, MiniGL, launcher deferred work, audio
 pumping, and sampled API-lock-held SVC work.
+`launcher_steps=zero:N/copy:N/map:N/reloc:N/apply:N/alloc:N/other:N`
+reports the exact longest tick span observed for each launcher-step kind.
+Each field is written only when that kind sets a new maximum; the entire
+attribution is compiled out with `ZZAPP_PERF_COUNTERS=0`.
 `audio` is `low_water/starved/underruns`: low-water crossings on both AHI and
 card-fabric routes, retryable fabric fill failures, and played underruns.
 The zero-underrun gate uses only the final `underruns` value. `tlb` is

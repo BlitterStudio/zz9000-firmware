@@ -37,6 +37,17 @@ typedef enum {
 	ZZAPP_PERF_SERVICE_COUNT
 } zzapp_perf_service_t;
 
+typedef enum {
+	ZZAPP_PERF_LAUNCHER_ZERO,
+	ZZAPP_PERF_LAUNCHER_COPY,
+	ZZAPP_PERF_LAUNCHER_MAP,
+	ZZAPP_PERF_LAUNCHER_RELOC,
+	ZZAPP_PERF_LAUNCHER_APPLY,
+	ZZAPP_PERF_LAUNCHER_ALLOC,
+	ZZAPP_PERF_LAUNCHER_OTHER,
+	ZZAPP_PERF_LAUNCHER_STEP_COUNT
+} zzapp_perf_launcher_step_t;
+
 typedef struct {
 	uint32_t samples;
 	uint32_t max;
@@ -50,6 +61,7 @@ typedef struct {
 	zzapp_kernel_perf_metric_t service[ZZAPP_PERF_SERVICE_COUNT];
 	uint32_t service_max_detail[ZZAPP_PERF_SERVICE_COUNT];
 	uint32_t service_max_bytes[ZZAPP_PERF_SERVICE_COUNT];
+	uint32_t launcher_step_max[ZZAPP_PERF_LAUNCHER_STEP_COUNT];
 	uint32_t sgis;
 	uint32_t work_publications;
 	uint32_t audio_low_water;
@@ -74,7 +86,7 @@ typedef struct {
 	uint32_t tlb_slot;
 	uint64_t tlb_sample_until_ms;
 	uint32_t tlb_stamps_valid;
-	char report_text[512];
+	char report_text[640];
 	uint32_t audio_low_water[ZZAPP_KERNEL_APP_SLOTS];
 	uint32_t audio_starved[ZZAPP_KERNEL_APP_SLOTS];
 	uint32_t audio_underruns[ZZAPP_KERNEL_APP_SLOTS];
