@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#if !defined(_WIN32)
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#endif
+
 #include "zz9k-webp-view.h"
 #include "zz9k-picture-viewer.h"
 #include "zz9k/abi.h"
@@ -19,6 +25,13 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#if defined(MAP_ANONYMOUS)
+#define ZZ9K_MMAP_ANONYMOUS MAP_ANONYMOUS
+#elif defined(MAP_ANON)
+#define ZZ9K_MMAP_ANONYMOUS MAP_ANON
+#else
+#error "anonymous mmap is required for this host test"
+#endif
 #endif
 
 #define MOCK_BOARD_ADDR 0x20000000UL
@@ -137,10 +150,10 @@ static void *mock_window_alloc(uint32_t size)
 #else
   void *p = mmap((void *)MOCK_BOARD_ADDR, (size_t)size,
                  PROT_READ | PROT_WRITE,
-                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+                 MAP_PRIVATE | ZZ9K_MMAP_ANONYMOUS | MAP_FIXED, -1, 0);
   if (p == MAP_FAILED) {
     p = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+             MAP_PRIVATE | ZZ9K_MMAP_ANONYMOUS, -1, 0);
   }
   return p == MAP_FAILED ? NULL : p;
 #endif
