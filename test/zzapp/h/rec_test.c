@@ -636,6 +636,61 @@ static void test_halted_free_replays_from_each_store(void)
 
 static int release_record(uint32_t handle);
 
+/* Quarantine: the handle changes under a record that stays where it is. */
+static void test_revoke_handle(void)
+{
+    uint32_t old, h2, h3, i, gen;
+    zzapp_rec_t *rec;
+    zzapp_rec_stats_t before, after;
+
+    setup_arena(8U);
+    CHECK(zzapp_rec_revoke_handle(NULL) == 0U);
+    rec = admit(0U, &old);
+    CHECK(rec != NULL);
+    CHECK(zzapp_rec_set_state(rec, ZZAPP_REC_LIVE) == 0);
+    zzapp_rec_stats(&before);
+
+    h2 = zzapp_rec_revoke_handle(rec);
+    CHECK(h2 != 0U && h2 != old);
+    CHECK(aar_handle_index(h2) == aar_handle_index(old));
+    CHECK(aar_handle_generation(h2) == aar_handle_next_gen(aar_handle_generation(old)));
+    CHECK(zzapp_rec_by_handle(old) == NULL);          /* the client's handle is stale */
+    CHECK(zzapp_rec_by_handle(h2) == rec);
+    CHECK(rec->hdr.handle == h2 && zzapp_rec_handle(rec->hdr.pid) == h2);
+    CHECK(zzapp_rec_state(rec->hdr.pid) == ZZAPP_REC_LIVE);
+    zzapp_rec_stats(&after);
+    CHECK(after.free == before.free);                   /* nothing was freed */
+    CHECK(zzapp_rec_free(old) == -1);                   /* the old life's handle */
+
+    /* Twice: two generations, only the last is live. */
+    h3 = zzapp_rec_revoke_handle(rec);
+    CHECK(h3 != 0U && h3 != h2 && h3 != old);
+    CHECK(zzapp_rec_by_handle(h2) == NULL && zzapp_rec_by_handle(h3) == rec);
+    CHECK(zzapp_rec_by_handle(old) == NULL);
+
+    /* Freeing with the new handle bumps the generation again. */
+    CHECK(zzapp_rec_free(h3) == 0);
+    CHECK(zzapp_rec_by_handle(h3) == NULL && zzapp_rec_by_handle(h2) == NULL);
+    CHECK(zzapp_rec_free(h3) == 0);                     /* a replay */
+    CHECK(zzapp_rec_revoke_handle(rec) == 0U);          /* FREE: nothing to revoke */
+    zzapp_rec_stats(&after);
+    CHECK(after.free == before.free + 1U);
+
+    /* The generation wraps past 0xffff to 1 and is never 0. */
+    rec = admit(0U, &h2);
+    CHECK(rec != NULL);
+    gen = aar_handle_generation(h2);
+    for (i = 0U; i < 70000U; i++) {
+        uint32_t h = zzapp_rec_revoke_handle(rec);
+
+        CHECK(h != 0U && aar_handle_generation(h) != 0U);
+        CHECK(aar_handle_generation(h) == aar_handle_next_gen(gen));
+        gen = aar_handle_generation(h);
+        h3 = h;
+    }
+    CHECK(zzapp_rec_by_handle(h3) == rec && zzapp_rec_free(h3) == 0);
+}
+
 /* Admission hands out a cleared record: nothing of the previous life of the
  * index survives, but the per-index constants do. */
 static void test_admit_clears_the_record(void)
@@ -1113,6 +1168,7 @@ int main(void)
     test_window_is_not_pid();
     test_generation_wrap_and_never_zero();
     test_stale_lookups();
+    test_revoke_handle();
     test_halted_free_replays_from_each_store();
     test_admit_clears_the_record();
     test_state_transitions();

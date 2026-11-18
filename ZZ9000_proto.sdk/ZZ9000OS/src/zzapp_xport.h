@@ -181,12 +181,17 @@ int zzapp_xport_flag_test(const zzapp_rec_t *rec, uint32_t flags);
 
 /* ---- Blocks and shared accounting ---------------------------------------- */
 
-/* The limit, in bytes, that the blocks of a claim may reach (read from
- * AAR_CB_SHARED_MIB at LOAD_BEGIN); 0: not checked. The pair is allocated
- * before any limit exists and is counted but never refused. */
+/* The limit, in bytes, that the shared memory of a claim may reach (read from
+ * AAR_CB_SHARED_MIB at LOAD_BEGIN); 0: not checked. It counts the runtime's
+ * blocks and the app's own shared allocations (rec->visible.used). The pair is
+ * allocated before any limit exists and is counted but never refused. */
 void zzapp_xport_set_shared_limit(zzapp_rec_t *rec, uint32_t bytes);
-/* Bytes of every block the record owns, as published in AAR_CB_SHARED_USED. */
+/* Bytes of the runtime's blocks (the pair, service, data, audio and load). */
 uint32_t zzapp_xport_shared_used(const zzapp_rec_t *rec);
+/* Publish AAR_CB_SHARED_USED: the runtime's blocks plus rec->visible.used, the
+ * app's own aar_shared_alloc blocks. The transport calls it after each of its
+ * allocations and frees; zzapp_host.c calls it after each app alloc or free. */
+void zzapp_xport_publish_shared(zzapp_rec_t *rec);
 
 /*
  * Allocate the block of `kind` (not the pair) of `bytes` rounded up to the

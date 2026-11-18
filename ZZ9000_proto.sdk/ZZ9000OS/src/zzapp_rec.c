@@ -434,6 +434,26 @@ int zzapp_rec_free(uint32_t handle)
 	return 0;
 }
 
+uint32_t zzapp_rec_revoke_handle(zzapp_rec_t *rec)
+{
+	uint32_t index;
+	uint32_t generation;
+
+	if (!ready || !rec)
+		return 0U;
+	index = rec->hdr.pid;
+	if (index >= layout.apps || rec != record_at(index) ||
+	    tab.state[index] == ZZAPP_REC_FREE)
+		return 0U;
+	generation = aar_handle_next_gen(tab.gen[index]);
+	/* The generation first: from here no handle the client holds can match.
+	 * A halt before the record's own handle follows leaves a record that
+	 * zzapp_rec_free() still frees from its old handle. */
+	__atomic_store_n(&tab.gen[index], (uint16_t)generation, __ATOMIC_RELEASE);
+	rec->hdr.handle = aar_handle_make(index, generation);
+	return rec->hdr.handle;
+}
+
 uint32_t zzapp_rec_reconcile_halted(void)
 {
 	static uint16_t order[ZZAPP_REC_MAX_APPS];

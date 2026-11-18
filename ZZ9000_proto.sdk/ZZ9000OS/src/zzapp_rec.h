@@ -251,7 +251,7 @@ typedef struct {
  *   decode            image sessions inline, audio session pointer
  *                     (zzapp_api.c)
  */
-#define ZZAPP_REC_SERVICES_BYTES 512U
+#define ZZAPP_REC_SERVICES_BYTES 1024U
 #define ZZAPP_REC_LOADER_BYTES   384U
 #define ZZAPP_REC_SVC_BYTES      1152U
 #define ZZAPP_REC_DECODE_BYTES   64U
@@ -514,6 +514,15 @@ void zzapp_rec_retire_tables(zzapp_rec_t *rec);
  * another life.
  */
 int zzapp_rec_free(uint32_t handle);
+/*
+ * Quarantine (design 3.10): advance the generation of an admitted record to
+ * the next one, so no handle the client holds names it, and make that the
+ * record's handle. Returns the new handle, or 0 for a NULL or FREE record. The
+ * record keeps its state and every block; zzapp_rec_free() with the new handle
+ * ends it (and bumps the generation again). Calling it twice yields two
+ * different handles; only the last one is live. Same locking as free.
+ */
+uint32_t zzapp_rec_revoke_handle(zzapp_rec_t *rec);
 /*
  * Core 1 is halted (recovery, or core 0 retiring everything). Rebuild the
  * FIFO queue and every count from the state bytes, and the table pool from
