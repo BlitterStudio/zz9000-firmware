@@ -6,7 +6,8 @@
 #include <string.h>
 #include <sys/mman.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
+#include "aar/ext_zz9000.h"
 #include "zzapp_runtime.h"
 #include "zzapp_svc.h"
 #include "xil_cache.h"
@@ -56,8 +57,8 @@ static void setup(zzapp_as_t *as)
     CHECK(zzapp_as_alias_map(as, 0x02000000U, 4096U, 1, &user_va) == 0);
 }
 static zzapp_proc_t proc;
-static zzapp_api api;
-static zzapp_gl gl;
+static aar_api api;
+static aar_gl gl;
 static uint8_t *user_page;
 static uint8_t *heap_page;
 static unsigned vertex_pointer_calls;
@@ -104,10 +105,10 @@ zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
 {
     return slot == 0U ? &proc : NULL;
 }
-const zzapp_api *zzapp_api_table(void) { return &api; }
+const aar_api *zzapp_api_table(void) { return &api; }
 uint32_t zzapp_services_current_slot(void) { return 0U; }
 
-static const zzapp_gl *mock_gl_bind(uint32_t surface_id)
+static const aar_gl *mock_gl_bind(uint32_t surface_id)
 {
     return surface_id ? &gl : NULL;
 }
@@ -208,7 +209,7 @@ static int reference_array_accepts(const zzapp_as_t *as,
     step = array->stride ? (uint32_t)array->stride : element_bytes;
     address = (uint64_t)array->pointer + (uint64_t)index * step;
     return address <= UINT32_MAX &&
-           zzapp_svc_check_user(as, (uint32_t)address, element_bytes, 0) == ZZ_OK;
+           zzapp_svc_check_user(as, (uint32_t)address, element_bytes, 0) == AAR_OK;
 }
 static int reference_draw_accepts(const zzapp_as_t *as,
                                   const reference_array_t arrays[3],
@@ -286,22 +287,22 @@ static int32_t mock_build_mipmaps(uint32_t target, int32_t internal_format,
     ++build_mipmaps_calls;
     return 0;
 }
-static int mock_file_list_next(int list, zzapp_dirent *entry)
+static int mock_file_list_next(int list, aar_dirent *entry)
 {
     (void)list;
     ++file_list_next_calls;
     if (file_list_next_calls == 1U) {
         memset(entry, 0x31, sizeof(*entry));
-        return ZZ_OK;
+        return AAR_OK;
     }
-    return ZZ_EINVAL;
+    return AAR_E_INVAL;
 }
-static int mock_heap_shrink(uint32_t bytes, void **new_break)
+static int mock_heap_shrink(uint64_t bytes, void **new_break)
 {
     (void)bytes;
     (void)new_break;
     ++heap_shrink_calls;
-    return ZZ_OK;
+    return AAR_OK;
 }
 static uint32_t mock_get_error(void)
 {
@@ -333,23 +334,40 @@ static int mock_msg_poll(void *message)
     ++msg_poll_calls;
     return 1;
 }
-static int mock_file_seek(int fd, int64_t offset, int whence, int64_t *out)
+/*
+ * Handlers that take a 64-bit value are written as the dispatcher calls them:
+ * twelve uint32_t words, exactly what an A32 callee finds in r0-r3 and on the
+ * stack, a uint64_t in an even register pair or an 8-aligned stack pair. On
+ * this 64-bit host those words are not the C signature's, so the mock takes
+ * the words and is entered through a cast. Pointers it receives are the
+ * dispatcher's 32-bit-truncated kernel copies and must never be dereferenced.
+ */
+static int64_t file_seek_offset_seen;
+static int file_seek_whence_seen;
+static int mock_file_seek_words(uint32_t w0, uint32_t w1, uint32_t lo,
+                                uint32_t hi, uint32_t whence, uint32_t w5,
+                                uint32_t w6, uint32_t w7, uint32_t w8,
+                                uint32_t w9, uint32_t w10, uint32_t w11)
 {
-    (void)fd;
-    (void)offset;
-    (void)whence;
+    (void)w0; (void)w1; (void)w5; (void)w6; (void)w7;
+    (void)w8; (void)w9; (void)w10; (void)w11;
+    file_seek_offset_seen = (int64_t)(((uint64_t)hi << 32) | lo);
+    file_seek_whence_seen = (int)whence;
     ++file_seek_calls;
-    if (out)
-        *out = 0;
-    return ZZ_OK;
+    return AAR_OK;
 }
-static void mock_heap_range(void **base, uint32_t *bytes)
+static void mock_heap_range(void **base, uint64_t *bytes)
 {
     ++heap_range_calls;
     if (base)
         *base = NULL;
     if (bytes)
         *bytes = 0U;
+}
+
+static void mock_exit(int code)
+{
+    (void)code;
 }
 
 static int mock_should_stop(void)
@@ -364,16 +382,84 @@ static uint64_t mock_time_us(void)
     return UINT64_C(0x1122334455667788);
 }
 
+static aar_ext_zz9000 runtime_ext;
+static uint32_t ext_bind_flags_seen;
+static unsigned sha256_calls;
+static uint64_t sha256_bytes_seen;
+static unsigned decompress_calls;
+static uint32_t decompress_algorithm_seen;
+static uint32_t decompress_flags_seen;
+static uint64_t decompress_src_bytes_seen;
+static uint64_t decompress_dst_bytes_seen;
+static const void *decompress_src_seen;
+static void *decompress_dst_seen;
+static unsigned info_calls;
+
+static const aar_gl *mock_ext_bind_flags(uint32_t surface_id, uint32_t flags)
+{
+    ext_bind_flags_seen = flags;
+    return surface_id ? &gl : NULL;
+}
+
+static const void *mock_ext(uint32_t platform_id, uint32_t ext_id)
+{
+    if (platform_id != AAR_PLATFORM_ZZ9000 || ext_id != AAR_EXT_ZZ9000_MAIN)
+        return NULL;
+    return &runtime_ext;
+}
+
+static int mock_sha256_words(uint32_t w0, uint32_t w1, uint32_t lo,
+                             uint32_t hi, uint32_t w4, uint32_t w5,
+                             uint32_t w6, uint32_t w7, uint32_t w8,
+                             uint32_t w9, uint32_t w10, uint32_t w11)
+{
+    (void)w0; (void)w1; (void)w4; (void)w5; (void)w6;
+    (void)w7; (void)w8; (void)w9; (void)w10; (void)w11;
+    ++sha256_calls;
+    sha256_bytes_seen = ((uint64_t)hi << 32) | lo;
+    return AAR_OK;
+}
+
+static int mock_decompress_words(uint32_t algorithm, uint32_t flags,
+                                 uint32_t src, uint32_t w3, uint32_t src_lo,
+                                 uint32_t src_hi, uint32_t dst, uint32_t w7,
+                                 uint32_t dst_lo, uint32_t dst_hi,
+                                 uint32_t w10, uint32_t w11)
+{
+    (void)w3; (void)w7; (void)w10; (void)w11;
+    ++decompress_calls;
+    decompress_algorithm_seen = algorithm;
+    decompress_flags_seen = flags;
+    decompress_src_seen = (const void *)(uintptr_t)src;
+    decompress_src_bytes_seen = ((uint64_t)src_hi << 32) | src_lo;
+    decompress_dst_seen = (void *)(uintptr_t)dst;
+    decompress_dst_bytes_seen = ((uint64_t)dst_hi << 32) | dst_lo;
+    return AAR_OK;
+}
+
+static int mock_info(aar_info *out)
+{
+    (void)out;
+    ++info_calls;
+    return AAR_OK;
+}
+
+static const zzapp_svc_descriptor_t *api_descriptor(size_t field)
+{
+    return zzapp_svc_api_descriptor((uint32_t)((field - offsetof(aar_api, exit)) /
+                                               sizeof(void *)));
+}
+
 static uint32_t gl_slot(size_t field)
 {
-    return (uint32_t)((field - offsetof(zzapp_gl, Begin)) / sizeof(void *));
+    return (uint32_t)((field - offsetof(aar_gl, Begin)) / sizeof(void *));
 }
 static uint32_t api_slot(size_t field)
 {
-    return (uint32_t)((field - offsetof(zzapp_api, exit)) / sizeof(void *));
+    return (uint32_t)((field - offsetof(aar_api, exit)) / sizeof(void *));
 }
-static void dispatch(uint32_t number, zzapp_svc_frame_t *frame,
-                     const uint32_t args[9])
+static void dispatch_words(uint32_t number, zzapp_svc_frame_t *frame,
+                           const uint32_t *args, uint32_t words)
 {
     uint32_t i;
 
@@ -381,12 +467,17 @@ static void dispatch(uint32_t number, zzapp_svc_frame_t *frame,
     *(uint32_t *)(void *)user_page = 0xef000000U;
     frame->exception_lr = user_va + 4U;
     frame->r[12] = number;
-    for (i = 0U; i < 4U; ++i)
+    for (i = 0U; i < 4U && i < words; ++i)
         frame->r[i] = args[i];
     frame->user_sp = user_va + 0x800U;
-    for (; i < 9U; ++i)
+    for (; i < words; ++i)
         *(uint32_t *)(void *)(user_page + 0x800U + (i - 4U) * 4U) = args[i];
     zzapp_svc_dispatch(frame);
+}
+static void dispatch(uint32_t number, zzapp_svc_frame_t *frame,
+                     const uint32_t args[9])
+{
+    dispatch_words(number, frame, args, 9U);
 }
 static void setup_dispatch(void)
 {
@@ -409,11 +500,28 @@ static void setup_dispatch(void)
     api.size = sizeof(api);
     api.gl_bind = mock_gl_bind;
     gl.size = sizeof(gl);
-    api.file_seek = mock_file_seek;
+    api.file_seek = (int (*)(int, int64_t, int, int64_t *))(void *)
+                    mock_file_seek_words;
     api.should_stop = mock_should_stop;
     api.time_us = mock_time_us;
     api.heap_range = mock_heap_range;
     api.msg_poll = mock_msg_poll;
+    api.sha256 = (int (*)(const void *, uint64_t, uint8_t *))(void *)
+                 mock_sha256_words;
+    api.decompress = (int (*)(uint32_t, uint32_t, const void *, uint64_t,
+                              void *, uint64_t, aar_service_result *))(void *)
+                     mock_decompress_words;
+    api.info = mock_info;
+    api.ext = mock_ext;
+    memset(&runtime_ext, 0, sizeof(runtime_ext));
+    runtime_ext.size = sizeof(runtime_ext);
+    runtime_ext.gl_bind_flags = mock_ext_bind_flags;
+    runtime_ext.build_id = "fw-build-0123";
+    runtime_ext.gl_build_id = "must-not-reach-the-app";
+    ext_bind_flags_seen = 0U;
+    sha256_calls = 0U;
+    decompress_calls = 0U;
+    info_calls = 0U;
     gl.Begin = mock_begin;
     gl.End = mock_end;
     gl.GetIntegerv = mock_get_integerv;
@@ -478,65 +586,84 @@ static void teardown_dispatch(void)
 
 static void test_table_copy_uses_only_veneers(void)
 {
-    zzapp_api direct;
-    zzapp_api app;
+    aar_api direct;
+    aar_api app;
+    uintptr_t *source;
     uintptr_t *entries;
     uint32_t i;
 
     memset(&direct, 0, sizeof(direct));
     direct.size = sizeof(direct);
-    direct.version = ZZAPP_API_VERSION;
-    direct.file_read = (void *)(uintptr_t)0x12345678U;
-    direct.time_us = (void *)(uintptr_t)0x12345678U;
-    direct.build_id = "build";
-    CHECK(zzapp_svc_copy_api(&app, &direct) == ZZ_OK);
+    direct.version = AAR_API_VERSION;
+    direct.groups = AAR_GROUPS_DEFINED;
+    direct.platform_id = AAR_PLATFORM_ZZ9000;
+    source = (uintptr_t *)(void *)((uint8_t *)&direct + offsetof(aar_api, exit));
+    for (i = 0; i < zzapp_svc_api_count(); ++i)
+        source[i] = 0x12345678U;
+    /* audio_stats is optional: a NULL slot stays NULL for the app. */
+    direct.audio_stats = NULL;
+    CHECK(zzapp_svc_copy_api(&app, &direct) == AAR_OK);
     CHECK(app.size == direct.size);
     CHECK(app.version == direct.version);
-    CHECK(app.build_id != direct.build_id);
-    entries = (uintptr_t *)(void *)((uint8_t *)&app + offsetof(zzapp_api, exit));
-    for (i = 0; i < zzapp_svc_api_count(); ++i)
-        if (i != (offsetof(zzapp_api, build_id) -
-                  offsetof(zzapp_api, exit)) / sizeof(void *))
+    CHECK(app.groups == direct.groups);
+    CHECK(app.platform_id == direct.platform_id);
+    entries = (uintptr_t *)(void *)((uint8_t *)&app + offsetof(aar_api, exit));
+    for (i = 0; i < zzapp_svc_api_count(); ++i) {
+        if (i == api_slot(offsetof(aar_api, audio_stats))) {
+            CHECK(entries[i] == 0U);
+        } else {
             CHECK(zzapp_svc_is_veneer(entries[i]));
+            CHECK(entries[i] == zzapp_svc_api_veneer(i));
+        }
+    }
+
+    /* A table that ends before the slots a later minor appended: the app
+     * gates on `size`, and the slots it must not call still hold veneers. */
+    direct.size = (uint32_t)offsetof(aar_api, ext);
+    CHECK(zzapp_svc_copy_api(&app, &direct) == AAR_OK);
+    CHECK(app.size == offsetof(aar_api, ext));
+    for (i = 0; i < zzapp_svc_api_count(); ++i)
+        CHECK(zzapp_svc_is_veneer(entries[i]) ||
+              entries[i] == 0U);
+    CHECK(zzapp_svc_copy_api(&app, NULL) == AAR_E_INVAL);
+    direct.size = (uint32_t)(sizeof(direct) + 8U);
+    CHECK(zzapp_svc_copy_api(&app, &direct) == AAR_E_INVAL);
 }
 
 static void test_gl_table_copy_uses_only_veneers(void)
 {
-    zzapp_gl direct;
-    zzapp_gl app;
+    aar_gl direct;
+    aar_gl app;
     uintptr_t *entries;
     uint32_t i;
 
     memset(&direct, 0, sizeof(direct));
     direct.size = sizeof(direct);
+    direct.version = AAR_GL_VERSION_ARRAYS;
     direct.Begin = (void *)(uintptr_t)0x12345678U;
-    direct.build_id = "gl-build";
-    CHECK(zzapp_svc_copy_gl(&app, &direct) == ZZ_OK);
+    CHECK(zzapp_svc_copy_gl(&app, &direct) == AAR_OK);
     CHECK(app.size == direct.size);
-    CHECK(app.build_id != direct.build_id);
-    entries = (uintptr_t *)(void *)((uint8_t *)&app + offsetof(zzapp_gl, Begin));
+    CHECK(app.version == AAR_GL_VERSION_ARRAYS);
+    entries = (uintptr_t *)(void *)((uint8_t *)&app + offsetof(aar_gl, Begin));
     for (i = 0; i < zzapp_svc_gl_count(); ++i)
-        if (i != (offsetof(zzapp_gl, build_id) -
-                  offsetof(zzapp_gl, Begin)) / sizeof(void *))
-            CHECK(zzapp_svc_is_veneer(entries[i]));
+        CHECK(zzapp_svc_is_veneer(entries[i]));
 }
 
 static void test_descriptors_cover_callable_slots(void)
 {
     uint32_t i;
-    uint32_t api_build = (uint32_t)((offsetof(zzapp_api, build_id) -
-                                     offsetof(zzapp_api, exit)) /
-                                    sizeof(void *));
-    uint32_t gl_build = (uint32_t)((offsetof(zzapp_gl, build_id) -
-                                    offsetof(zzapp_gl, Begin)) /
-                                   sizeof(void *));
 
+    CHECK(zzapp_svc_api_count() == AAR_API_SLOT_COUNT);
     for (i = 0U; i < zzapp_svc_api_count(); ++i)
-        if (i != api_build)
-            CHECK(zzapp_svc_api_descriptor(i) != NULL);
+        CHECK(zzapp_svc_api_descriptor(i) != NULL);
     for (i = 0U; i < zzapp_svc_gl_count(); ++i)
-        if (i != gl_build)
-            CHECK(zzapp_svc_gl_descriptor(i) != NULL);
+        CHECK(zzapp_svc_gl_descriptor(i) != NULL);
+    /* One veneer past the table: aar_ext_zz9000.gl_bind_flags. */
+    CHECK(ZZAPP_SVC_EXT_GL_BIND_FLAGS == zzapp_svc_api_count());
+    CHECK(zzapp_svc_api_descriptor(ZZAPP_SVC_EXT_GL_BIND_FLAGS) != NULL);
+    CHECK(zzapp_svc_is_veneer(zzapp_svc_api_veneer(ZZAPP_SVC_EXT_GL_BIND_FLAGS)));
+    CHECK(zzapp_svc_api_descriptor(ZZAPP_SVC_EXT_GL_BIND_FLAGS + 1U) == NULL);
+    CHECK(zzapp_svc_api_veneer(ZZAPP_SVC_EXT_GL_BIND_FLAGS + 1U) == 0U);
 }
 
 
@@ -545,48 +672,94 @@ static void test_descriptor_shapes(void)
     const zzapp_svc_descriptor_t *api;
     const zzapp_svc_descriptor_t *gl;
 
-    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, file_open) -
-                                               offsetof(zzapp_api, exit)) /
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(aar_api, file_open) -
+                                               offsetof(aar_api, exit)) /
                                               sizeof(void *)));
     CHECK(api->arguments == 2U);
     CHECK(api->pointers[0].direction == ZZAPP_SVC_POINTER_IN);
     CHECK(api->pointers[0].length == ZZAPP_SVC_LENGTH_STRING);
-    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, display_open) -
-                                               offsetof(zzapp_api, exit)) /
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(aar_api, display_open) -
+                                               offsetof(aar_api, exit)) /
                                               sizeof(void *)));
     CHECK(api->arguments == 5U);
     CHECK(api->pointers[0].direction == ZZAPP_SVC_POINTER_OUT);
-    CHECK(api->pointers[0].element_bytes == sizeof(zzapp_surface));
-    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, input_poll) -
-                                               offsetof(zzapp_api, exit)) /
+    CHECK(api->pointers[0].element_bytes == sizeof(aar_surface));
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(aar_api, event_poll) -
+                                               offsetof(aar_api, exit)) /
                                               sizeof(void *)));
     CHECK(api->pointers[0].length == ZZAPP_SVC_LENGTH_COUNT);
-    CHECK(api->pointers[0].element_bytes == sizeof(zzapp_event));
-    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, time_us) -
-                                               offsetof(zzapp_api, exit)) /
+    CHECK(api->pointers[0].element_bytes == sizeof(aar_event));
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(aar_api, time_us) -
+                                               offsetof(aar_api, exit)) /
                                               sizeof(void *)));
     CHECK(api->result == ZZAPP_SVC_RETURN_U64);
-    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, yield) -
-                                               offsetof(zzapp_api, exit)) /
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(aar_api, yield) -
+                                               offsetof(aar_api, exit)) /
                                               sizeof(void *)));
     CHECK(api->result == ZZAPP_SVC_RETURN_VOID);
-    gl = zzapp_svc_gl_descriptor((uint32_t)((offsetof(zzapp_gl, Vertex2f) -
-                                             offsetof(zzapp_gl, Begin)) /
+    gl = zzapp_svc_gl_descriptor((uint32_t)((offsetof(aar_gl, Vertex2f) -
+                                             offsetof(aar_gl, Begin)) /
                                             sizeof(void *)));
     CHECK(gl->arguments == 0U);
     CHECK(gl->vfp_words == 2U);
-    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, should_stop) -
-                                               offsetof(zzapp_api, exit)) /
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(aar_api, should_stop) -
+                                               offsetof(aar_api, exit)) /
                                               sizeof(void *)));
     CHECK(api->flags == ZZAPP_SVC_FAST_NO_LOCK);
-    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, time_us) -
-                                               offsetof(zzapp_api, exit)) /
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(aar_api, time_us) -
+                                               offsetof(aar_api, exit)) /
                                               sizeof(void *)));
     CHECK(api->flags == ZZAPP_SVC_FAST_NO_LOCK);
-    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(zzapp_api, mem_info) -
-                                               offsetof(zzapp_api, exit)) /
+    api = zzapp_svc_api_descriptor((uint32_t)((offsetof(aar_api, heap_info) -
+                                               offsetof(aar_api, exit)) /
                                               sizeof(void *)));
     CHECK(api->flags == 0U);
+    /* A uint64_t takes an even register pair or an 8-aligned stack pair, so
+     * a call with one after an odd number of words carries a padding word. */
+    api = api_descriptor(offsetof(aar_api, heap_grow));
+    CHECK(api->arguments == 3U);
+    CHECK(api->pointers[0].argument == 2U);
+    api = api_descriptor(offsetof(aar_api, shared_alloc));
+    CHECK(api->arguments == 5U);
+    CHECK(api->pointers[0].argument == 4U);
+    CHECK(api->pointers[0].direction == ZZAPP_SVC_POINTER_OUT);
+    CHECK(api->pointers[0].element_bytes == sizeof(aar_shared));
+    api = api_descriptor(offsetof(aar_api, publish));
+    CHECK(api->arguments == 4U);
+    api = api_descriptor(offsetof(aar_api, file_seek));
+    CHECK(api->arguments == 6U);
+    CHECK(api->pointers[0].argument == 5U);
+    CHECK(api->pointers[0].element_bytes == sizeof(int64_t));
+    api = api_descriptor(offsetof(aar_api, sha256));
+    CHECK(api->arguments == 5U);
+    CHECK(api->pointers[0].argument == 0U);
+    CHECK(api->pointers[0].length == ZZAPP_SVC_LENGTH_ARGUMENT64);
+    CHECK(api->pointers[0].length_argument == 2U);
+    CHECK(api->pointers[1].argument == 4U);
+    CHECK(api->pointers[1].element_bytes == AAR_SHA256_BYTES);
+    api = api_descriptor(offsetof(aar_api, decompress));
+    CHECK(api->arguments == 11U);
+    CHECK(api->pointers[0].argument == 2U);
+    CHECK(api->pointers[0].length == ZZAPP_SVC_LENGTH_ARGUMENT64);
+    CHECK(api->pointers[0].length_argument == 4U);
+    CHECK(api->pointers[1].argument == 6U);
+    CHECK(api->pointers[1].direction == ZZAPP_SVC_POINTER_OUT);
+    CHECK(api->pointers[1].length == ZZAPP_SVC_LENGTH_ARGUMENT64);
+    CHECK(api->pointers[1].length_argument == 8U);
+    CHECK(api->pointers[2].argument == 10U);
+    CHECK(api->pointers[2].element_bytes == sizeof(aar_service_result));
+    api = api_descriptor(offsetof(aar_api, info));
+    CHECK(api->pointers[0].length == ZZAPP_SVC_LENGTH_SIZE_FIELD);
+    CHECK(api->pointers[0].element_bytes == sizeof(aar_info));
+    api = api_descriptor(offsetof(aar_api, audio_stats));
+    CHECK(api->pointers[0].length == ZZAPP_SVC_LENGTH_SIZE_FIELD);
+    CHECK(api->pointers[0].element_bytes == sizeof(aar_audio_stats));
+    api = api_descriptor(offsetof(aar_api, ext));
+    CHECK(api->arguments == 2U);
+    CHECK(api->result == ZZAPP_SVC_RETURN_POINTER);
+    api = zzapp_svc_api_descriptor(ZZAPP_SVC_EXT_GL_BIND_FLAGS);
+    CHECK(api->arguments == 2U);
+    CHECK(api->result == ZZAPP_SVC_RETURN_POINTER);
 }
 
 static void test_pointer_checks(void)
@@ -599,13 +772,13 @@ static void test_pointer_checks(void)
     CHECK(l2 != NULL);
     CHECK((l2[0] & (3U << 4)) == (3U << 4));
     CHECK((l2[1] & (3U << 4)) == (2U << 4));
-    CHECK(zzapp_svc_check_user(&as, WINDOW, 4096U, 1) == ZZ_OK);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 4095U, 2U, 1) == ZZ_EFAULT);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x1000U, 4U, 1) == ZZ_EFAULT);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x1000U, 4U, 0) == ZZ_OK);
-    CHECK(zzapp_svc_check_user(&as, user_va, 4U, 1) == ZZ_OK);
-    CHECK(zzapp_svc_check_user(&as, 0x02000000U, 4U, 1) == ZZ_EFAULT);
-    CHECK(zzapp_svc_check_user(&as, 0xfffffff0U, 32U, 0) == ZZ_EFAULT);
+    CHECK(zzapp_svc_check_user(&as, WINDOW, 4096U, 1) == AAR_OK);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 4095U, 2U, 1) == AAR_E_FAULT);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x1000U, 4U, 1) == AAR_E_FAULT);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x1000U, 4U, 0) == AAR_OK);
+    CHECK(zzapp_svc_check_user(&as, user_va, 4U, 1) == AAR_OK);
+    CHECK(zzapp_svc_check_user(&as, 0x02000000U, 4U, 1) == AAR_E_FAULT);
+    CHECK(zzapp_svc_check_user(&as, 0xfffffff0U, 32U, 0) == AAR_E_FAULT);
     zzapp_as_destroy(&as);
 }
 
@@ -622,12 +795,12 @@ static void test_large_and_section_pointer_checks(void)
     CHECK(l2 != NULL);
     CHECK((l2[0x10U] & 3U) == 1U);
     CHECK(zzapp_as_map_frames(&as, WINDOW + 0x00100000U, &frame, 1U) == 0);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00012345U, 4U, 0) == ZZ_OK);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00012345U, 4U, 1) == ZZ_EFAULT);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00101234U, 4U, 1) == ZZ_OK);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00011ff0U, 32U, 0) == ZZ_OK);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00011ff0U, 32U, 1) == ZZ_EFAULT);
-    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00080000U, 4U, 0) == ZZ_EFAULT);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00012345U, 4U, 0) == AAR_OK);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00012345U, 4U, 1) == AAR_E_FAULT);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00101234U, 4U, 1) == AAR_OK);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00011ff0U, 32U, 0) == AAR_OK);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00011ff0U, 32U, 1) == AAR_E_FAULT);
+    CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00080000U, 4U, 0) == AAR_E_FAULT);
     zzapp_as_destroy(&as);
 }
 
@@ -646,55 +819,55 @@ static void test_gl_deferred_pointer_checks(void)
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
     CHECK(frame.r[0] != 0U);
 #if ZZAPP_PERF_COUNTERS
     CHECK(zzapp_svc_gl_telemetry_swap(0U, 0U, NULL) == 0);
 #endif
 
     CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 4096U, 1,
-                             &extra_va) == ZZ_OK);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+                             &extra_va) == AAR_OK);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, VertexPointer)),
              &frame, (uint32_t[9]){ 3U, 0x1406U, 0U, user_va + 0x100U });
     CHECK(vertex_pointer_calls == 1U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, EnableClientState)),
              &frame, (uint32_t[9]){ 0x8074U });
-    CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 4096U) == ZZ_OK);
+    CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 4096U) == AAR_OK);
     args[0] = 4U;
     args[1] = 0U;
     args[2] = 1024U;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawArrays)),
              &frame, args);
     CHECK(draw_arrays_calls == 0U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0501U);
     CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 12288U, 1,
-                             &extra_va) == ZZ_OK);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawArrays)),
+                             &extra_va) == AAR_OK);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawArrays)),
              &frame, args);
     CHECK(draw_arrays_calls == 1U);
-    CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 12288U) == ZZ_OK);
+    CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 12288U) == AAR_OK);
     *(uint16_t *)(void *)(user_page + 0x700U) = 1024U;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawElements)),
              &frame, (uint32_t[9]){ 4U, 1U, 0x1403U, user_va + 0x700U });
     CHECK(draw_elements_calls == 0U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
 
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, TexImage2D)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, TexImage2D)),
              &frame, (uint32_t[9]){ 0x0de1U, 0U, 4U, 32U, 32U, 0U,
                                     0x1908U, 0x1401U, extra_va });
     CHECK(texture_upload_calls == 0U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ReadPixels)),
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, ReadPixels)),
              &frame, (uint32_t[9]){ 0U, 0U, 1U, 1U, 0x1908U, 0x1401U,
                                     WINDOW + 0x1000U });
     CHECK(read_pixels_calls == 0U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
     dispatch(ZZAPP_SVC_GL_FIRST + zzapp_svc_gl_count(), &frame,
              (uint32_t[9]){ 0U });
-    CHECK(frame.r[0] == (uint32_t)ZZ_ENOSYS);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
 #if ZZAPP_PERF_COUNTERS
     CHECK(zzapp_svc_gl_telemetry_swap(0U, 999999U, &snapshot) == 0);
     CHECK(snapshot.descriptor_failures == 1U);
@@ -718,24 +891,24 @@ static void test_gl_span_validation(void)
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
     CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 0x20000U, 1,
-                             &extra_va) == ZZ_OK);
+                             &extra_va) == AAR_OK);
     index_pages = mmap((void *)(uintptr_t)(user_va + 0x2000U), 0x3000U,
                        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS |
                        MAP_FIXED, -1, 0);
     CHECK(index_pages != MAP_FAILED);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, VertexPointer)),
              &frame, (uint32_t[9]){ 3U, 0x1406U, 12U, extra_va });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ColorPointer)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, ColorPointer)),
              &frame, (uint32_t[9]){ 4U, 0x1406U, 16U, extra_va + 0x8000U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, TexCoordPointer)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, TexCoordPointer)),
              &frame, (uint32_t[9]){ 2U, 0x1406U, 8U, extra_va + 0x10000U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, EnableClientState)),
              &frame, (uint32_t[9]){ 0x8074U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, EnableClientState)),
              &frame, (uint32_t[9]){ 0x8076U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, EnableClientState)),
              &frame, (uint32_t[9]){ 0x8078U });
     for (i = 0U; i < 6144U; ++i)
         ((uint16_t *)(void *)(user_page + 0x700U))[i] = (uint16_t)(i & 1023U);
@@ -743,7 +916,7 @@ static void test_gl_span_validation(void)
     zzapp_svc_gl_telemetry_reset(0U);
     CHECK(zzapp_svc_gl_telemetry_swap(0U, 0U, NULL) == 0);
 #endif
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawElements)),
              &frame, (uint32_t[9]){ 4U, 6144U, 0x1403U, user_va + 0x700U });
     CHECK(draw_elements_calls == 1U);
 #if ZZAPP_PERF_COUNTERS
@@ -753,7 +926,7 @@ static void test_gl_span_validation(void)
 #endif
     if (index_pages != MAP_FAILED)
         munmap(index_pages, 0x3000U);
-    CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 0x20000U) == ZZ_OK);
+    CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 0x20000U) == AAR_OK);
     teardown_dispatch();
 }
 static void test_gl_span_fallback_reference(void)
@@ -772,24 +945,24 @@ static void test_gl_span_fallback_reference(void)
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
-    CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 4096U, 1, &gap_va) == ZZ_OK);
-    CHECK(zzapp_as_alias_map(&proc.as, 0x02002000U, 4096U, 1, &target_va) == ZZ_OK);
-    CHECK(zzapp_as_alias_unmap(&proc.as, gap_va, 4096U) == ZZ_OK);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 4096U, 1, &gap_va) == AAR_OK);
+    CHECK(zzapp_as_alias_map(&proc.as, 0x02002000U, 4096U, 1, &target_va) == AAR_OK);
+    CHECK(zzapp_as_alias_unmap(&proc.as, gap_va, 4096U) == AAR_OK);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, VertexPointer)),
              &frame, (uint32_t[9]){ 3U, 0x1406U, 8192U, user_va });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, EnableClientState)),
              &frame, (uint32_t[9]){ 0x8074U });
     ((uint16_t *)(void *)(user_page + 0x700U))[0] = 0U;
     ((uint16_t *)(void *)(user_page + 0x700U))[1] = 1U;
     before = draw_elements_calls;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawElements)),
              &frame, (uint32_t[9]){ 4U, 2U, 0x1403U, user_va + 0x700U });
     CHECK(draw_elements_calls == before + 1U);
     ((uint8_t *)(void *)(user_page + 0x700U))[0] = 0U;
     ((uint8_t *)(void *)(user_page + 0x700U))[1] = 1U;
     before = draw_elements_calls;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawElements)),
              &frame, (uint32_t[9]){ 4U, 2U, 0x1401U, user_va + 0x700U });
     CHECK(draw_elements_calls == before + 1U);
     for (iteration = 0U; iteration < 32U; ++iteration) {
@@ -809,26 +982,26 @@ static void test_gl_span_fallback_reference(void)
             arrays[array].stride = (int32_t)strides[(seed >> 5) % 4U];
             arrays[array].enabled = (uint8_t)((seed >> 7) & 1U);
         }
-        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, VertexPointer)),
                  &frame, (uint32_t[9]){ (uint32_t)arrays[0].size, arrays[0].type,
                                          (uint32_t)arrays[0].stride, arrays[0].pointer });
-        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ColorPointer)),
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, ColorPointer)),
                  &frame, (uint32_t[9]){ (uint32_t)arrays[1].size, arrays[1].type,
                                          (uint32_t)arrays[1].stride, arrays[1].pointer });
-        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, TexCoordPointer)),
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, TexCoordPointer)),
                  &frame, (uint32_t[9]){ (uint32_t)arrays[2].size, arrays[2].type,
                                          (uint32_t)arrays[2].stride, arrays[2].pointer });
-        CHECK(frame.r[0] != (uint32_t)ZZ_ENOSYS);
+        CHECK(frame.r[0] != (uint32_t)AAR_E_NOSYS);
 
         for (array = 0U; array < 3U; ++array) {
             uint32_t state = array == 0U ? 0x8074U :
                              array == 1U ? 0x8076U : 0x8078U;
             uint32_t number = arrays[array].enabled ?
-                gl_slot(offsetof(zzapp_gl, EnableClientState)) :
-                gl_slot(offsetof(zzapp_gl, DisableClientState));
+                gl_slot(offsetof(aar_gl, EnableClientState)) :
+                gl_slot(offsetof(aar_gl, DisableClientState));
 
             dispatch(ZZAPP_SVC_GL_FIRST + number, &frame, (uint32_t[9]){ state });
-            CHECK(frame.r[0] != (uint32_t)ZZ_ENOSYS);
+            CHECK(frame.r[0] != (uint32_t)AAR_E_NOSYS);
         }
         if (iteration == 0U)
             values[0] = UINT32_MAX;
@@ -840,18 +1013,18 @@ static void test_gl_span_fallback_reference(void)
         ((uint32_t *)(void *)(user_page + 0x600U))[3] = values[3];
         expected = reference_draw_accepts(&proc.as, arrays, values, 4U);
         before = draw_elements_calls;
-        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawElements)),
                  &frame, (uint32_t[9]){ 4U, 4U, 0x1405U, user_va + 0x600U });
         CHECK((draw_elements_calls != before) == expected);
     }
-    CHECK(zzapp_as_alias_unmap(&proc.as, target_va, 4096U) == ZZ_OK);
+    CHECK(zzapp_as_alias_unmap(&proc.as, target_va, 4096U) == AAR_OK);
     teardown_dispatch();
 }
 
 static void test_gl_lock_calls_stay_kernel_side(void)
 {
     zzapp_svc_frame_t frame;
-    const zzapp_gl *table;
+    const aar_gl *table;
     unsigned before;
 
     setup_dispatch();
@@ -859,104 +1032,104 @@ static void test_gl_lock_calls_stay_kernel_side(void)
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
     table = zzapp_svc_gl_for_slot(0U);
     CHECK(table != NULL);
     CHECK(zzapp_svc_is_veneer((uintptr_t)table->LockArrays));
     CHECK(zzapp_svc_is_veneer((uintptr_t)table->UnlockArrays));
 
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, UnlockArrays)),
              &frame, (uint32_t[9]){ 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0502U);
 
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, VertexPointer)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, VertexPointer)),
              &frame, (uint32_t[9]){ 3U, 0x1406U, 12U, user_va + 0x100U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, EnableClientState)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, EnableClientState)),
              &frame, (uint32_t[9]){ 0x8074U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, LockArrays)),
              &frame, (uint32_t[9]){ 0U, 1U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0502U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, UnlockArrays)),
              &frame, (uint32_t[9]){ 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0502U);
 
     mock_vertex_array_enabled = 1U;
     mock_array_transformations_enabled = 0U;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, LockArrays)),
              &frame, (uint32_t[9]){ 0U, 1U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0502U);
 
     mock_array_transformations_enabled = 1U;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, LockArrays)),
              &frame, (uint32_t[9]){ 0U, 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, UnlockArrays)),
              &frame, (uint32_t[9]){ 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0U);
 
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, LockArrays)),
              &frame, (uint32_t[9]){ UINT32_MAX, 1U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0501U);
 
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, LockArrays)),
              &frame, (uint32_t[9]){ 0U, INT32_MAX });
     CHECK(lock_arrays_calls == 0U);
     ((uint16_t *)(void *)(user_page + 0x700U))[0] = 0U;
     before = draw_elements_calls;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawElements)),
              &frame, (uint32_t[9]){ 4U, 1U, 0x1403U, user_va + 0x700U });
     CHECK(draw_elements_calls == before + 1U);
     ((uint16_t *)(void *)(user_page + 0x700U))[0] = 1024U;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, DrawElements)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawElements)),
              &frame, (uint32_t[9]){ 4U, 1U, 0x1403U, user_va + 0x700U });
     CHECK(draw_elements_calls == before + 1U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0501U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, UnlockArrays)),
              &frame, (uint32_t[9]){ 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0U);
 
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin)),
              &frame, (uint32_t[9]){ UINT32_MAX });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0500U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, LockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, LockArrays)),
              &frame, (uint32_t[9]){ 0U, 1U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, End)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, End)),
              &frame, (uint32_t[9]){ 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0502U);
 
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin)),
              &frame, (uint32_t[9]){ UINT32_MAX });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0500U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, UnlockArrays)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, UnlockArrays)),
              &frame, (uint32_t[9]){ 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, End)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, End)),
              &frame, (uint32_t[9]){ 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetError)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
              &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 0x0502U);
 
@@ -977,17 +1150,17 @@ static void test_copy_out_and_pixel_argument_positions(void)
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
     CHECK(frame.r[0] != 0U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, TexSubImage2D)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, TexSubImage2D)),
              &frame, (uint32_t[9]){ 0x0de1U, 0U, 0U, 0U, 1U, 1U,
                                     0x1908U, 0x1401U, user_va + 0x100U });
     CHECK(texture_sub_upload_calls == 1U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ReadPixels)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, ReadPixels)),
              &frame, (uint32_t[9]){ 0U, 0U, 1U, 1U, 0x1908U, 0x1401U,
                                     user_va + 0x200U });
     CHECK(read_pixels_calls == 1U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Build2DMipmaps)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Build2DMipmaps)),
              &frame, (uint32_t[9]){ 0x0de1U, 4U, 1U, 1U, 0x1908U, 0x1401U,
                                     user_va + 0x240U });
     CHECK(build_mipmaps_calls == 1U);
@@ -996,9 +1169,9 @@ static void test_copy_out_and_pixel_argument_positions(void)
     proc.heap_base = 0U;
     proc.heap_break = 1U << 20;
     proc.heap_frame_count = 1U;
-    dispatch(api_slot(offsetof(zzapp_api, heap_shrink)), &frame,
-             (uint32_t[9]){ 1U << 20, WINDOW + 0x100U });
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    dispatch(api_slot(offsetof(aar_api, heap_shrink)), &frame,
+             (uint32_t[9]){ 1U << 20, 0U, WINDOW + 0x100U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
     CHECK(heap_shrink_calls == 0U);
     teardown_dispatch();
 }
@@ -1012,43 +1185,43 @@ static void test_extended_pointer_checks(void)
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
     CHECK(frame.r[0] != 0U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetIntegerv)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetIntegerv)),
              &frame, (uint32_t[9]){ 0x0ba2U, user_va + 0xffcU });
     CHECK(getter_calls == 0U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, PixelStorei)),
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, PixelStorei)),
              &frame, (uint32_t[9]){ 0x0d04U, 1024U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ReadPixels)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, ReadPixels)),
              &frame, (uint32_t[9]){ 0U, 0U, 1U, 1U, 0x1908U, 0x1401U,
                                     user_va + 0xffcU });
     CHECK(read_pixels_calls == 0U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
     message = user_page + 0x600U;
     memset(message, 0xa5, 32U);
-    dispatch(api_slot(offsetof(zzapp_api, msg_poll)), &frame,
+    dispatch(api_slot(offsetof(aar_api, msg_poll)), &frame,
              (uint32_t[9]){ user_va + 0x600U });
     CHECK(frame.r[0] == 1U);
     CHECK(msg_poll_calls == 1U);
     CHECK(message[0] == 0U);
-    dispatch(api_slot(offsetof(zzapp_api, heap_range)), &frame,
+    dispatch(api_slot(offsetof(aar_api, heap_range)), &frame,
              (uint32_t[9]){ 0U, 0U });
     CHECK(heap_range_calls == 1U);
-    dispatch(api_slot(offsetof(zzapp_api, file_seek)), &frame,
+    dispatch(api_slot(offsetof(aar_api, file_seek)), &frame,
              (uint32_t[9]){ 1U, 0U, 0U, 0U, 0U, 0U });
     CHECK(file_seek_calls == 1U);
     proc.generation = 1U;
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin)),
              &frame, (uint32_t[9]){ 4U });
     CHECK(gl_begin_calls == 0U);
     proc.generation = 0U;
     zzapp_svc_gl_release(0U, 0U);
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin)),
              &frame, (uint32_t[9]){ 4U });
     CHECK(gl_begin_calls == 0U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_ENOSYS);
-    CHECK(frame.r[0] == (uint32_t)ZZ_ENOSYS);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
     teardown_dispatch();
 }
 static void test_svc_uses_core_aware_slot_resolver(void)
@@ -1061,9 +1234,9 @@ static void test_svc_uses_core_aware_slot_resolver(void)
         return;
     }
     svc_test_current_thread = 1;
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame,
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame,
              (uint32_t[9]){ 1U });
-    CHECK(frame.r[0] != (uint32_t)ZZ_EFAULT);
+    CHECK(frame.r[0] != (uint32_t)AAR_E_FAULT);
     svc_test_current_thread = 0;
     teardown_dispatch();
 }
@@ -1080,14 +1253,14 @@ static void test_gl_getters_copy_full_outputs(void)
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
     for (i = 0U; i < sizeof(vector_pnames) / sizeof(vector_pnames[0]); ++i) {
-        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetIntegerv)),
+        dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetIntegerv)),
                  &frame, (uint32_t[9]){ vector_pnames[i], user_va + 0xffcU });
         CHECK(getter_calls == 0U);
-        CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+        CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
     }
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, GetIntegerv)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetIntegerv)),
              &frame, (uint32_t[9]){ vector_pnames[0], user_va + 0x500U });
     CHECK(getter_calls == 1U);
     CHECK(getter_pointer != (uintptr_t)(user_va + 0x500U));
@@ -1102,28 +1275,28 @@ static void test_rejected_pixel_store_does_not_change_validation(void)
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, PixelStorei)),
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, PixelStorei)),
              &frame, (uint32_t[9]){ 0x0d04U, 1024U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin)),
              &frame, (uint32_t[9]){ 4U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, PixelStorei)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, PixelStorei)),
              &frame, (uint32_t[9]){ 0x0d04U, 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, End)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, End)),
              &frame, (uint32_t[9]){ 0U });
-    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, ReadPixels)),
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, ReadPixels)),
              &frame, (uint32_t[9]){ 0U, 0U, 1U, 1U, 0x1908U, 0x1401U,
                                     user_va + 0xffcU });
     CHECK(gl_begin_calls == 1U);
     CHECK(gl_end_calls == 1U);
     CHECK(read_pixels_calls == 0U);
-    CHECK(frame.r[0] == (uint32_t)ZZ_EFAULT);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
     teardown_dispatch();
 }
 static void test_svc_number_comes_from_r12(void)
 {
     zzapp_svc_frame_t frame;
-    uint32_t time = api_slot(offsetof(zzapp_api, time_us));
+    uint32_t time = api_slot(offsetof(aar_api, time_us));
 
     setup_dispatch();
     if (!user_page) {
@@ -1133,7 +1306,7 @@ static void test_svc_number_comes_from_r12(void)
     *(uint32_t *)(void *)user_page = 0xef000000U | time;
     dispatch(UINT32_MAX, &frame,
              (uint32_t[9]){ 0U });
-    CHECK(frame.r[0] == (uint32_t)ZZ_ENOSYS);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
     CHECK(time_us_calls == 0U);
     dispatch(time, &frame, (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == UINT32_C(0x55667788));
@@ -1158,12 +1331,12 @@ static void test_fast_no_lock_calls(void)
         return;
     }
     svc_test_current_thread = 1;
-    dispatch(api_slot(offsetof(zzapp_api, should_stop)), &frame,
+    dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
              (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 1U);
     CHECK(should_stop_calls == 1U);
     CHECK(zzapp_svc_last_number[1] ==
-          api_slot(offsetof(zzapp_api, should_stop)));
+          api_slot(offsetof(aar_api, should_stop)));
     svc_test_current_thread = 0;
     teardown_dispatch();
 }
@@ -1207,7 +1380,7 @@ static void test_svc_probe_shallow_exits_clear_counter_tail(void)
     svc_counter_now = 0U;
     for (call = 1U; call <= 64U; ++call) {
         zzapp_svc_entry_stamp[0] = svc_counter_now;
-        dispatch(api_slot(offsetof(zzapp_api, should_stop)), &frame,
+        dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
                  (uint32_t[9]){ 0U });
     }
     dispatch(SVC_PROBE_P2, &frame, (uint32_t[9]){ 99U });
@@ -1221,7 +1394,7 @@ static void test_svc_probe_shallow_exits_clear_counter_tail(void)
     svc_counter_now = 0U;
     for (call = 1U; call <= 64U; ++call) {
         zzapp_svc_entry_stamp[0] = svc_counter_now;
-        dispatch(api_slot(offsetof(zzapp_api, should_stop)), &frame,
+        dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
                  (uint32_t[9]){ 0U });
     }
     dispatch(SVC_PROBE_P3, &frame, (uint32_t[9]){ 0U });
@@ -1251,7 +1424,7 @@ static void test_sampled_counter_averages(void)
     svc_counter_now = 0U;
     for (call = 1U; call <= 128U; ++call) {
         zzapp_svc_entry_stamp[0] = svc_counter_now;
-        dispatch(api_slot(offsetof(zzapp_api, should_stop)), &frame,
+        dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
                  (uint32_t[9]){ 0U });
         if (call == 64U) {
             svc_counter_now += 10U;
@@ -1277,14 +1450,14 @@ static void test_svc_float_frame_arguments(void)
 {
     zzapp_svc_frame_t frame;
     uint32_t number = ZZAPP_SVC_GL_FIRST +
-        gl_slot(offsetof(zzapp_gl, Vertex2f));
+        gl_slot(offsetof(aar_gl, Vertex2f));
 
     setup_dispatch();
     if (!user_page) {
         teardown_dispatch();
         return;
     }
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame,
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame,
              (uint32_t[9]){ 1U });
     memset(&frame, 0, sizeof(frame));
     frame.r[12] = number;
@@ -1298,7 +1471,8 @@ static void test_svc_float_frame_arguments(void)
 
 static void test_slot_aliases(void)
 {
-    const zzapp_api *table;
+    const aar_api *table;
+    const aar_ext_zz9000 *ext;
     zzapp_svc_frame_t frame;
 
     setup_dispatch();
@@ -1306,16 +1480,272 @@ static void test_slot_aliases(void)
         teardown_dispatch();
         return;
     }
-    CHECK(zzapp_svc_set_veneer_alias(0U, 0xd0000000U) == ZZ_OK);
-    CHECK(zzapp_svc_set_table_aliases(0U, 0xd0001000U, 0xd0002000U) == ZZ_OK);
+    CHECK(zzapp_svc_set_veneer_alias(0U, 0xd0000000U) == AAR_OK);
+    CHECK(zzapp_svc_set_table_aliases(0U, 0xd0001000U, 0xd0002000U) == AAR_OK);
+    api.exit = mock_exit;
     table = zzapp_svc_api_for_slot(0U, &api);
     CHECK(table != NULL);
     CHECK((uintptr_t)table->exit == 0xd0000000U);
-    CHECK((uintptr_t)table->build_id == 0xd0001000U +
-          offsetof(struct { zzapp_api table; char build_id[128]; }, build_id));
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame,
+    ext = zzapp_svc_ext_for_slot(0U);
+    CHECK(ext != NULL);
+    /* The veneer that follows the last table slot, in the aliased page. */
+    CHECK((uintptr_t)ext->gl_bind_flags ==
+          0xd0000000U + ZZAPP_SVC_EXT_GL_BIND_FLAGS * 12U);
+    CHECK((uintptr_t)ext->build_id == 0xd0001000U +
+          offsetof(struct { aar_api table; aar_ext_zz9000 ext;
+                            char build_id[128]; }, build_id));
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame,
              (uint32_t[9]){ 1U });
     CHECK(frame.r[0] == 0xd0002000U);
+    /* aar_ext hands back the aliased ext table. */
+    dispatch(api_slot(offsetof(aar_api, ext)), &frame,
+             (uint32_t[9]){ AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_MAIN });
+    CHECK(frame.r[0] == 0xd0001000U +
+          offsetof(struct { aar_api table; aar_ext_zz9000 ext;
+                            char build_id[128]; }, ext));
+    teardown_dispatch();
+}
+
+static void test_ext_table_for_the_app(void)
+{
+    const aar_ext_zz9000 *ext;
+    aar_api bare;
+
+    setup_dispatch();
+    CHECK(zzapp_svc_api_for_slot(0U, &api) != NULL);
+    ext = zzapp_svc_ext_for_slot(0U);
+    CHECK(ext != NULL);
+    CHECK(ext->size == sizeof(*ext));
+    CHECK(ext->reserved == 0U);
+    CHECK(AAR_EXT_ZZ9000_COVERS(ext, gl_build_id));
+    CHECK((uintptr_t)ext->gl_bind_flags ==
+          zzapp_svc_api_veneer(ZZAPP_SVC_EXT_GL_BIND_FLAGS));
+    CHECK(ext->build_id != NULL && strcmp(ext->build_id, "fw-build-0123") == 0);
+    /* The app reads its own copy, never firmware memory. */
+    CHECK(ext->build_id != runtime_ext.build_id);
+    /* The resident firmware does not know the GL module's revision. */
+    CHECK(ext->gl_build_id == NULL);
+
+    /* A runtime whose ext table has no GL bind keeps the slot empty. */
+    runtime_ext.gl_bind_flags = NULL;
+    CHECK(zzapp_svc_api_for_slot(0U, &api) != NULL);
+    ext = zzapp_svc_ext_for_slot(0U);
+    CHECK(ext != NULL && ext->gl_bind_flags == NULL);
+
+    /* A runtime without ext gives the app no table at all. */
+    bare = api;
+    bare.ext = NULL;
+    CHECK(zzapp_svc_api_for_slot(0U, &bare) != NULL);
+    CHECK(zzapp_svc_ext_for_slot(0U) == NULL);
+    teardown_dispatch();
+}
+
+static void test_ext_call_and_gl_bind_flags(void)
+{
+    zzapp_svc_frame_t frame;
+    const aar_ext_zz9000 *ext;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    CHECK(zzapp_svc_api_for_slot(0U, &api) != NULL);
+    ext = zzapp_svc_ext_for_slot(0U);
+    dispatch(api_slot(offsetof(aar_api, ext)), &frame,
+             (uint32_t[9]){ AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_MAIN });
+    CHECK(frame.r[0] == (uint32_t)(uintptr_t)ext);
+    dispatch(api_slot(offsetof(aar_api, ext)), &frame,
+             (uint32_t[9]){ AAR_PLATFORM_NONE, AAR_EXT_ZZ9000_MAIN });
+    CHECK(frame.r[0] == 0U);
+    dispatch(api_slot(offsetof(aar_api, ext)), &frame,
+             (uint32_t[9]){ AAR_PLATFORM_ZZ9000, 2U });
+    CHECK(frame.r[0] == 0U);
+
+    /* gl_bind_flags is the veneer after the table slots; it binds like
+     * gl_bind and the runtime sees the flags. */
+    dispatch(ZZAPP_SVC_EXT_GL_BIND_FLAGS, &frame,
+             (uint32_t[9]){ 1U, AAR_ZZ9000_GL_BIND_DIRECT_PRESENT |
+                                AAR_ZZ9000_GL_BIND_SYNC_PRESENT });
+    CHECK(frame.r[0] == (uint32_t)(uintptr_t)zzapp_svc_gl_for_slot(0U));
+    CHECK(ext_bind_flags_seen == 3U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin)), &frame,
+             (uint32_t[9]){ 4U });
+    CHECK(gl_begin_calls == 1U);
+
+    /* A surface the runtime refuses leaves nothing bound. */
+    dispatch(ZZAPP_SVC_EXT_GL_BIND_FLAGS, &frame, (uint32_t[9]){ 0U, 0U });
+    CHECK(frame.r[0] == 0U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin)), &frame,
+             (uint32_t[9]){ 4U });
+    CHECK(gl_begin_calls == 1U);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
+
+    /* No ext slot in the runtime's table: the calls are not implemented. */
+    api.ext = NULL;
+    dispatch(api_slot(offsetof(aar_api, ext)), &frame,
+             (uint32_t[9]){ AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_MAIN });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
+    dispatch(ZZAPP_SVC_EXT_GL_BIND_FLAGS, &frame, (uint32_t[9]){ 1U, 0U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
+    teardown_dispatch();
+}
+
+static void test_service_lengths_are_word_pairs(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t words[12];
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    /* sha256(data, bytes, digest): data in r0, padding in r1, bytes in
+     * r2:r3, digest the first stack word. */
+    memset(words, 0, sizeof(words));
+    words[0] = user_va + 0x100U;
+    words[1] = 0xdeadbeefU;
+    words[2] = 64U;
+    words[4] = user_va + 0x200U;
+    memset(user_page + 0x200U, 0xcc, 40U);
+    dispatch_words(api_slot(offsetof(aar_api, sha256)), &frame, words, 5U);
+    CHECK(frame.r[0] == (uint32_t)AAR_OK);
+    CHECK(sha256_calls == 1U && sha256_bytes_seen == 64U);
+    /* The digest extent is exactly AAR_SHA256_BYTES: 32 bytes copied back,
+     * the rest of the caller's memory untouched. */
+    CHECK(user_page[0x200U] == 0U && user_page[0x21fU] == 0U);
+    CHECK(user_page[0x220U] == 0xccU);
+
+    /* A length above 32 bits is not forwarded and is not a fault. */
+    words[3] = 1U;
+    dispatch_words(api_slot(offsetof(aar_api, sha256)), &frame, words, 5U);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_INVAL);
+    CHECK(sha256_calls == 1U);
+
+    /* A 32-bit length no address space holds is a bad pointer. */
+    words[2] = 0xfffff000U;
+    words[3] = 0U;
+    dispatch_words(api_slot(offsetof(aar_api, sha256)), &frame, words, 5U);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    CHECK(sha256_calls == 1U);
+
+    /* decompress takes eleven words: algorithm, flags, src, a padding word,
+     * src_bytes (stack words 0 and 1), dst, a padding word, dst_bytes
+     * (stack words 4 and 5) and out. */
+    memset(words, 0, sizeof(words));
+    words[0] = AAR_COMPRESS_ZLIB;
+    words[1] = 0x55U;
+    words[2] = user_va + 0x100U;
+    words[3] = 0xdeadbeefU;
+    words[4] = 16U;
+    words[6] = user_va + 0x200U;
+    words[7] = 0xdeadbeefU;
+    words[8] = 32U;
+    words[10] = user_va + 0x300U;
+    memset(user_page + 0x200U, 0xcc, 48U);
+    memset(user_page + 0x300U, 0xcc, 32U);
+    dispatch_words(api_slot(offsetof(aar_api, decompress)), &frame, words, 11U);
+    CHECK(frame.r[0] == (uint32_t)AAR_OK);
+    CHECK(decompress_calls == 1U);
+    CHECK(decompress_algorithm_seen == AAR_COMPRESS_ZLIB);
+    CHECK(decompress_flags_seen == 0x55U);
+    CHECK(decompress_src_bytes_seen == 16U);
+    CHECK(decompress_dst_bytes_seen == 32U);
+    CHECK(decompress_src_seen == (const void *)(uintptr_t)(user_va + 0x100U));
+    CHECK(decompress_dst_seen == (void *)(uintptr_t)(user_va + 0x200U));
+    /* The destination is written by the handler in place, never copied; the
+     * small result structure is copied out at its exact size. */
+    CHECK(user_page[0x200U] == 0xccU);
+    CHECK(user_page[0x317U] == 0U && user_page[0x318U] == 0xccU);
+
+    /* Either buffer length above 32 bits: AAR_E_INVAL, call not made. */
+    words[5] = 1U;
+    dispatch_words(api_slot(offsetof(aar_api, decompress)), &frame, words, 11U);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_INVAL);
+    words[5] = 0U;
+    words[9] = 1U;
+    dispatch_words(api_slot(offsetof(aar_api, decompress)), &frame, words, 11U);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_INVAL);
+    CHECK(decompress_calls == 1U);
+    /* The destination must be writable for its whole length. */
+    words[9] = 0U;
+    words[8] = 0x10000U;
+    dispatch_words(api_slot(offsetof(aar_api, decompress)), &frame, words, 11U);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    CHECK(decompress_calls == 1U);
+    teardown_dispatch();
+}
+
+static void test_file_seek_offset_is_an_aligned_word_pair(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t words[6] = { 3U, 0xdeadbeefU, 0x10U, 2U, AAR_SEEK_END,
+                          0U };
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    memset(user_page + 0x400U, 0xcc, 16U);
+    words[5] = user_va + 0x400U;
+    dispatch_words(api_slot(offsetof(aar_api, file_seek)), &frame, words, 6U);
+    CHECK(frame.r[0] == (uint32_t)AAR_OK);
+    CHECK(file_seek_offset_seen == INT64_C(0x200000010));
+    CHECK(file_seek_whence_seen == AAR_SEEK_END);
+    /* out_pos is 8 bytes; the 8 after it are the caller's. */
+    CHECK(user_page[0x407U] == 0U && user_page[0x408U] == 0xccU);
+
+    words[2] = 0xfffffff0U;
+    words[3] = 0xffffffffU;
+    words[4] = AAR_SEEK_CUR;
+    words[5] = 0U;
+    dispatch_words(api_slot(offsetof(aar_api, file_seek)), &frame, words, 6U);
+    CHECK(file_seek_offset_seen == -16);
+    CHECK(file_seek_whence_seen == AAR_SEEK_CUR);
+    teardown_dispatch();
+}
+
+static void test_size_first_info_extent(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t size;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    /* The caller's size is the extent: a smaller one copies less, a larger
+     * one is zero-filled past what the runtime knows. */
+    size = 64U;
+    memset(user_page + 0x400U, 0xcc, 160U);
+    memcpy(user_page + 0x400U, &size, sizeof(size));
+    dispatch(api_slot(offsetof(aar_api, info)), &frame,
+             (uint32_t[9]){ user_va + 0x400U });
+    CHECK(frame.r[0] == (uint32_t)AAR_OK);
+    CHECK(info_calls == 1U);
+    CHECK(user_page[0x43fU] == 0xccU && user_page[0x440U] == 0xccU);
+
+    size = 100U;
+    memset(user_page + 0x400U, 0xcc, 160U);
+    memcpy(user_page + 0x400U, &size, sizeof(size));
+    dispatch(api_slot(offsetof(aar_api, info)), &frame,
+             (uint32_t[9]){ user_va + 0x400U });
+    CHECK(frame.r[0] == (uint32_t)AAR_OK);
+    CHECK(user_page[0x400U + sizeof(aar_info) - 1U] == 0xccU);
+    CHECK(user_page[0x400U + sizeof(aar_info)] == 0U &&
+          user_page[0x400U + 99U] == 0U);
+    CHECK(user_page[0x400U + 100U] == 0xccU);
+
+    /* A size that runs off the mapped page is a bad pointer. */
+    size = 0x1000U;
+    memcpy(user_page + 0x400U, &size, sizeof(size));
+    dispatch(api_slot(offsetof(aar_api, info)), &frame,
+             (uint32_t[9]){ user_va + 0x400U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    CHECK(info_calls == 2U);
     teardown_dispatch();
 }
 
@@ -1324,9 +1754,9 @@ static void test_gl_telemetry_snapshot_and_rate_limit(void)
 {
     zzapp_svc_frame_t frame;
     zzapp_gl_telemetry_snapshot_t snapshot;
-    uint32_t begin = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Begin));
-    uint32_t end = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, End));
-    uint32_t vertex = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(zzapp_gl, Vertex2f));
+    uint32_t begin = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin));
+    uint32_t end = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, End));
+    uint32_t vertex = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Vertex2f));
     uint32_t i;
 
     setup_dispatch();
@@ -1335,7 +1765,7 @@ static void test_gl_telemetry_snapshot_and_rate_limit(void)
         return;
     }
     zzapp_svc_gl_telemetry_reset(0U);
-    dispatch(api_slot(offsetof(zzapp_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
     for (i = 0U; i < 63U; ++i)
         dispatch(begin, &frame, (uint32_t[9]){ 4U });
     CHECK(zzapp_svc_gl_telemetry_swap(0U, 0U, &snapshot) == 0);
@@ -1355,11 +1785,11 @@ static void test_gl_telemetry_snapshot_and_rate_limit(void)
     CHECK(snapshot.max_gl_calls == 11U);
     CHECK(snapshot.average_descriptor_cycles != 0U);
     CHECK(snapshot.average_frontend_cycles != 0U);
-    CHECK(snapshot.top_slots[0] == gl_slot(offsetof(zzapp_gl, Begin)));
+    CHECK(snapshot.top_slots[0] == gl_slot(offsetof(aar_gl, Begin)));
     CHECK(snapshot.top_counts[0] == 5U);
-    CHECK(snapshot.top_slots[1] == gl_slot(offsetof(zzapp_gl, End)));
+    CHECK(snapshot.top_slots[1] == gl_slot(offsetof(aar_gl, End)));
     CHECK(snapshot.top_counts[1] == 3U);
-    CHECK(snapshot.top_slots[2] == gl_slot(offsetof(zzapp_gl, Vertex2f)));
+    CHECK(snapshot.top_slots[2] == gl_slot(offsetof(aar_gl, Vertex2f)));
     CHECK(snapshot.top_counts[2] == 3U);
     CHECK(snapshot.top_counts[3] == 0U);
     CHECK(snapshot.top_slots[3] != UINT32_MAX);
@@ -1410,6 +1840,12 @@ int main(void)
 #if ZZAPP_PERF_COUNTERS
     test_gl_telemetry_snapshot_and_rate_limit();
 #endif
+    test_ext_table_for_the_app();
+    test_ext_call_and_gl_bind_flags();
+    test_service_lengths_are_word_pairs();
+    test_file_seek_offset_is_an_aligned_word_pair();
+    test_size_first_info_extent();
+    /* Last: it installs slot aliases that stay for the rest of the process. */
     test_slot_aliases();
     printf("svc_test: %u checks, %d failures\n", checks, failures);
     return failures != 0;

@@ -183,7 +183,7 @@ The table is the sole firmware-to-MiniGL call surface.
 | `has_work()` / `poll(budget)` | core-1 scheduler | polls at most the declared bounded work and returns; no sleep or blocking storage operation |
 | `open_68k()` / `close_68k(handle)` | accepted wire create / destroy | acquires/releases one strong context reference |
 | `transport_acquire()` / `transport_release()` | firmware's pre-discovery MiniGL mailbox operation | starts or detaches the guest transport lease; acquire returns only after `MGTD` is published |
-| `app_bind(surface, out_gl)` / `app_swap()` / `app_unbind()` / `app_reclaim(generation)` | `zzapp` runtime | exports the existing named `zzapp_gl` table and holds one app-context reference |
+| `app_bind(surface, out_gl)` / `app_swap()` / `app_unbind()` / `app_reclaim(generation)` | `zzapp` runtime | exports the existing named `aar_gl` table and holds one app-context reference |
 | `begin_reset()` / `reset_poll()` / `abort_reset()` | Amiga-reset coordinator | stops admission, drains or abandons hardware, retracts descriptor, and reports quiescence; reports FAILED, never BUSY, when it cannot stop the engines |
 | `begin_unload()` / `fini()` | module loader on core 1 | unregisters worker/doorbell after quiescence, then releases resident state |
 
@@ -292,25 +292,32 @@ Firmware retains only infrastructure:
 
 The in-process architecture does not change: it opens one front-end context,
 uses `MiniGLTransport`, and submits synchronously through `mw_host_*`; it does
-not create a Zorro window for an ARM app [docs/app-runtime.md:596-610].
+not create a Zorro window for an ARM app.
 
 `zzapp_api.c` stops defining weak MiniGL implementations. Its GL entries
 perform an ABI-v3 registry lookup and `zzm_loader_acquire(MINIGL)` on first
 bind; after a successful module `app_bind`, it returns the module's
-size-prefixed `zzapp_gl` table. The reference lasts through `gl_unbind`, app
-stop, app fault, and Amiga reset. The public pointer-returning `gl_bind`
-returns `NULL` when the module is missing, rejected, incompatible, or faulted;
-the internal bind helper reports `ZZ_ENOSYS`. This preserves the public app
-table's optional-call contract [docs/app-runtime.md:404-405,
-ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_api.c:39-42,88-99]. There is no
-in-firmware GL fallback.
+size-prefixed `aar_gl` table (`aar/gl.h`). The reference lasts through
+`gl_unbind`, app stop, app fault, and Amiga reset. The public
+pointer-returning `gl_bind` returns `NULL` when the module is missing,
+rejected, incompatible, or faulted; the internal bind helper reports
+`AAR_E_NOSYS`. This preserves the optional-call contract of the `aar_api`
+table: the app sees `NULL` and decides for itself, and `gl_bind_flags` in the
+ZZ9000 extension table behaves the same way. There is no in-firmware GL
+fallback.
+
+The module's source revision is not visible to the resident firmware, so
+`aar_ext_zz9000.gl_build_id` is always `NULL` (`build_id` is the firmware's own
+build string). The module prints its revision on the UART when it loads:
+`[ZZM] MINIGL loaded v1 build <id>`. A tool that needs the module revision
+reads that line.
 
 The `app_gl_host` table is essential because an app calls function pointers in
 the returned GL table directly. Each wrapper brackets the front-end call with
 `api_enter/leave`, so the runtime's `in_api` guard remains true; `app_swap`
 gets the bound surface, performs the present copy, and invokes the
 generation-qualified display flip. Those are the moved `zzapp_gl.c` behaviors
-[ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_gl.c:180-218,489-529], not optional weak
+(`zzapp_gl_bind`, `zzapp_gl_unbind`, and the present copy), not optional weak
 hooks in the module.
 
 ### 68k acquisition and lifetime
@@ -450,7 +457,7 @@ module loads it and publishes CPU capability. A module requiring RasterIX EF on
 a standard image, a mismatched CSR ABI, bad hash, wrong module ABI, or wrong
 wire/descriptor major remains unavailable. Firmware MUST publish neither `MGL9`
 capability nor `MGTD` in that case; public app `gl_bind` returns `NULL` (its
-internal bind status is `ZZ_ENOSYS`); 68k keeps its existing unavailable
+internal bind status is `AAR_E_NOSYS`); 68k keeps its existing unavailable
 result. It MUST NOT silently load a module with a different wire major or touch
 a RasterIX CSR on a standard image.
 
@@ -498,7 +505,7 @@ reproduce the baseline before it replaces that kit.
    4 MiB high-image gate; the updated 68k library acquires, validates, uses,
    releases, and reacquires v9; the real app GL test draws and presents through
    the module; public `gl_bind` returns `NULL` and internal bind reports
-   `ZZ_ENOSYS` when absent/mismatched; and CPU/RasterIX profiling matches the
+   `AAR_E_NOSYS` when absent/mismatched; and CPU/RasterIX profiling matches the
    baseline.
 5. **Qualify lifetime and recovery on hardware.** Exercise transport guard,
    packet validation, e2e clients, app and 68k concurrent contexts, context
@@ -525,7 +532,7 @@ no slice edits another slice's ABI headers without an agreed v3 header change.
 | C: scheduler/reset/hardware host | `scheduler_arm.*`, core-1 registration, `main.c` reset coordinator, boot capability record, PL330/RasterIX wrapper, pre-discovery mailbox route | worker registration, acquire/release dispatch, reset/unload barrier, opaque hardware table | core-1-only poll; no core-0 parser; fault/reset, timeout stop barrier, AFI3/CSR gating, and lease tests |
 | D: MiniGL module backend | new module target; moving `mw_*`, `minigl_*`, `rix_*`; module-specific tests | `zzm_minigl_ops_v1`, v3 service consumption, wire transport | `test/minigl`, `test/minigl_v9`, CPU/RasterIX profile equivalence, slot gate |
 | E: front end/module build | private library repo: ten listed front-end sources, platform glue, GLU-header closure fix or licence grant, module make/release manifest | GPL-mode front-end objects and reproducible `MINIGL.ZZM` build pinned to firmware SDK | REUSE, 68k suite unchanged, host in-process test, verified GPL source closure, and source-manifest artifact |
-| F: app-runtime integration | `zzapp_api.*`, `zzapp_host.*`, SDK GL wrappers, `test/zzapp` | registry-based bind/unbind/swap/reclaim, `NULL` public absent path and internal `ZZ_ENOSYS` | app GL/present, fault/reset, direct-table guard, and concurrent 68k-context test |
+| F: app-runtime integration | `zzapp_api.*`, `zzapp_host.*`, SDK GL wrappers, `test/zzapp` | registry-based bind/unbind/swap/reclaim, `NULL` public absent path and internal `AAR_E_NOSYS` | app GL/present, fault/reset, direct-table guard, and concurrent 68k-context test |
 | G: packaging/CI | firmware and library CI, installer/SD scripts, kit manifest | matched module and source package; firmware no-private-source build | fresh-kit standard/EF mismatch matrix and high-image size gate |
 
 Slices A, B, and C share only the versioned SDK headers. D may start against
@@ -554,7 +561,7 @@ The real risks are bounded and should be decided before implementation:
    firmware, while RasterIX is opt-in and selected solely from the firmware
    image capability/CSR ABI record.
 5. **Public compatibility:** confirm that no module means public app
-   `gl_bind == NULL` (internal bind `ZZ_ENOSYS`) and existing 68k unavailable
+   `gl_bind == NULL` (internal bind `AAR_E_NOSYS`) and existing 68k unavailable
    behavior, not a resident fallback or a second GL implementation.
 6. **GL source closure:** confirm the chosen remedy for the current
    PolyForm-only `amiberry_glu_quad.h` dependency: an ARM conditional that
@@ -582,7 +589,7 @@ boot configuration, and reset coordination are fixed by this design.
 5. One module for both images: CPU rendering on standard firmware, RasterIX
    only when the image capability record reports the EF RasterIX CSR ABI.
 6. Missing or mismatched module: public app `gl_bind` returns `NULL` (internal
-   `ZZ_ENOSYS`) and 68k clients get the existing unavailable result. No
+   `AAR_E_NOSYS`) and 68k clients get the existing unavailable result. No
    resident fallback.
 7. ARM and host builds compile out the quadric include in `amiberry_glu.c`
    (stubs already exist), so the module's GPL source set does not depend on

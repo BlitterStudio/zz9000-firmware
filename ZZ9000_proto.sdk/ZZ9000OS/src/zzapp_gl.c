@@ -10,12 +10,9 @@
 #include <string.h>
 #include "zzapp_gl_contract.h"
 
-#if defined(__has_include)
-#  if __has_include("zzapp.h")
-#    include "zzapp.h"
-#    define ZZAPP_GL_HAVE_HEADER 1
-#  endif
-#endif
+#include "aar/app.h"
+#include "aar/ext_zz9000.h"
+#include "aar/gl.h"
 
 #include "memorymap.h"
 #include "minigl_present.h"
@@ -28,118 +25,12 @@
 #include "amiberry_types.h"
 #include "zzm_minigl_host.h"
 
-#ifndef ZZ_OK
-#define ZZ_OK 0
-#define ZZ_EINVAL (-2)
-#define ZZ_ENOMEM (-3)
-#define ZZ_EBUSY (-4)
-#define ZZ_ENOSYS (-7)
-#endif
-
-#ifndef ZZ_FMT_RGB565
-#define ZZ_FMT_RGB565 1u
-#define ZZ_FMT_BGRA8888 2u
-#endif
-#ifndef ZZ_LAYOUT_RGB565_LE
-#define ZZ_LAYOUT_RGB565_LE 2u
-#endif
-#ifndef ZZ_GL_BIND_DIRECT_PRESENT
-#define ZZ_GL_BIND_DIRECT_PRESENT 1u
-#endif
-#ifndef ZZ_GL_BIND_SYNC_PRESENT
-#define ZZ_GL_BIND_SYNC_PRESENT 2u
-#endif
-#ifndef ZZ_GL_BIND_SYNC_RIX_FEED
-#define ZZ_GL_BIND_SYNC_RIX_FEED 4u
-#endif
-#ifndef ZZ_GL_BIND_INLINE_RIX_FEED
-#define ZZ_GL_BIND_INLINE_RIX_FEED 8u
-#endif
 #ifndef ZZAPP_F_MAILBOX
 #define ZZAPP_F_MAILBOX (1u << 15)
 #endif
 
 
 
-#ifndef ZZAPP_GL_HAVE_HEADER
-/* Matches include/zzapp.h in BlitterStudio/aar (app/libzzapp 80c39ab). */
-typedef struct zzapp_gl {
-    uint32_t size;
-    void (*Begin)(uint32_t mode);
-    void (*End)(void);
-    void (*Vertex2f)(float x, float y);
-    void (*Vertex3f)(float x, float y, float z);
-    void (*Vertex3fv)(const float *v);
-    void (*TexCoord2f)(float s, float t);
-    void (*TexCoord2fv)(const float *v);
-    void (*Color3f)(float r, float g, float b);
-    void (*Color3fv)(const float *v);
-    void (*Color3ubv)(const uint8_t *v);
-    void (*Color4f)(float r, float g, float b, float a);
-    void (*Color4fv)(const float *v);
-    void (*Color4ub)(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
-    void (*Color4ubv)(const uint8_t *v);
-    void (*Enable)(uint32_t cap);
-    void (*Disable)(uint32_t cap);
-    uint8_t (*IsEnabled)(uint32_t cap);
-    void (*AlphaFunc)(uint32_t func, float ref);
-    void (*BlendFunc)(uint32_t sfactor, uint32_t dfactor);
-    void (*DepthFunc)(uint32_t func);
-    void (*DepthMask)(uint8_t flag);
-    void (*DepthRange)(double n, double f);
-    void (*CullFace)(uint32_t mode);
-    void (*FrontFace)(uint32_t mode);
-    void (*ShadeModel)(uint32_t mode);
-    void (*PolygonMode)(uint32_t face, uint32_t mode);
-    void (*Clear)(uint32_t mask);
-    void (*ClearColor)(float r, float g, float b, float a);
-    void (*Viewport)(int32_t x, int32_t y, int32_t width, int32_t height);
-    void (*Scissor)(int32_t x, int32_t y, int32_t width, int32_t height);
-    void (*MatrixMode)(uint32_t mode);
-    void (*LoadIdentity)(void);
-    void (*LoadMatrixf)(const float *m);
-    void (*PushMatrix)(void);
-    void (*PopMatrix)(void);
-    void (*Rotatef)(float angle, float x, float y, float z);
-    void (*Translatef)(float x, float y, float z);
-    void (*Scalef)(float x, float y, float z);
-    void (*Ortho)(double left, double right, double bottom, double top, double zNear, double zFar);
-    void (*Frustum)(double left, double right, double bottom, double top, double zNear, double zFar);
-    void (*TexImage2D)(uint32_t target, int32_t level, int32_t internalformat, int32_t width, int32_t height, int32_t border, uint32_t format, uint32_t type, const void *pixels);
-    void (*TexSubImage2D)(uint32_t target, int32_t level, int32_t xoffset, int32_t yoffset, int32_t width, int32_t height, uint32_t format, uint32_t type, const void *pixels);
-    void (*TexParameteri)(uint32_t target, uint32_t pname, int32_t param);
-    void (*TexParameterf)(uint32_t target, uint32_t pname, float param);
-    void (*TexEnvi)(uint32_t target, uint32_t pname, int32_t param);
-    void (*TexEnvf)(uint32_t target, uint32_t pname, float param);
-    void (*GenTextures)(int32_t n, uint32_t *textures);
-    void (*DeleteTextures)(int32_t n, const uint32_t *textures);
-    void (*BindTexture)(uint32_t target, uint32_t texture);
-    void (*Finish)(void);
-    void (*Flush)(void);
-    void (*DrawBuffer)(uint32_t mode);
-    void (*ReadBuffer)(uint32_t mode);
-    void (*ReadPixels)(int32_t x, int32_t y, int32_t width, int32_t height, uint32_t format, uint32_t type, void *pixels);
-    const uint8_t *(*GetString)(uint32_t name);
-    void (*GetIntegerv)(uint32_t pname, int32_t *params);
-    void (*GetFloatv)(uint32_t pname, float *params);
-    uint32_t (*GetError)(void);
-    void (*Hint)(uint32_t target, uint32_t mode);
-    void (*PixelStorei)(uint32_t pname, int32_t param);
-    void (*Perspective)(double fovy, double aspect, double zNear, double zFar);
-    int32_t (*Build2DMipmaps)(uint32_t target, int32_t internalFormat, int32_t width, int32_t height, uint32_t format, uint32_t type, const void *data);
-    void (*VertexPointer)(int32_t size, uint32_t type, int32_t stride, const void *pointer);
-    void (*TexCoordPointer)(int32_t size, uint32_t type, int32_t stride, const void *pointer);
-    void (*ColorPointer)(int32_t size, uint32_t type, int32_t stride, const void *pointer);
-    void (*EnableClientState)(uint32_t cap);
-    void (*DisableClientState)(uint32_t cap);
-    void (*ClientActiveTextureARB)(uint32_t texture);
-    void (*DrawArrays)(uint32_t mode, int32_t first, int32_t count);
-    void (*DrawElements)(uint32_t mode, int32_t count, uint32_t type, const void *indices);
-    void (*LockArrays)(uint32_t first, int32_t count);
-    void (*UnlockArrays)(void);
-    const char *build_id;
-} zzapp_gl;
-#endif
 #include "minigl_platform.h"
 
 
@@ -233,9 +124,9 @@ int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
         !host->bound_display || !host->flip_bound || !host->flip_idle ||
         !host->generation || !host->display_layout || !host->display_flags ||
         !host->stop_requested || !host->yield_wait || !host->wait_flip)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     g_module_app_host = host;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 static int g_module_in_api;
@@ -341,18 +232,18 @@ int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
                          uint32_t *format, uint32_t *card_front, uint32_t *card_back)
 {
     (void)w; (void)h; (void)pitch; (void)format; (void)card_front; (void)card_back;
-    return ZZ_ENOSYS;
+    return AAR_E_NOSYS;
 }
 __attribute__((weak)) int zzapp_display_layout(uint32_t *layout)
 {
     (void)layout;
-    return ZZ_ENOSYS;
+    return AAR_E_NOSYS;
 }
 
 
 __attribute__((weak)) int zzapp_display_flip_bound(void)
 {
-    return ZZ_ENOSYS;
+    return AAR_E_NOSYS;
 }
 
 __attribute__((weak)) int zzapp_svc_display_flip(uint32_t surface_id)
@@ -368,13 +259,13 @@ __attribute__((weak)) int zzapp_display_flip_idle(void)
 
 __attribute__((weak)) int zzapp_display_wait_flip_idle(void)
 {
-    return ZZ_ENOSYS;
+    return AAR_E_NOSYS;
 }
 
 __attribute__((weak)) int zzapp_svc_display_flip_async(uint32_t surface_id)
 {
     (void)surface_id;
-    return ZZ_ENOSYS;
+    return AAR_E_NOSYS;
 }
 
 __attribute__((weak)) uint32_t zzapp_services_flags(void)
@@ -428,7 +319,7 @@ void zzapp_gl_test_set_p96(uint8_t *pixels, uint32_t bytes)
 
 static int g_bound;
 static uint32_t g_surface_id;
-static zzapp_gl g_table;
+static aar_gl g_table;
 /* The copy path queues two RasterIX frames.  Direct P96 rendering uses the
  * same two physical buffers but waits for every flip acknowledgement before
  * the next target can become writable. */
@@ -551,15 +442,12 @@ static void w_DrawElements(uint32_t mode, int32_t count, uint32_t type, const vo
 static void w_LockArrays(uint32_t first, int32_t count) { ENTER(); GLLockArrays(CTX, first, count); LEAVE(); }
 static void w_UnlockArrays(void) { ENTER(); GLUnlockArrays(CTX); LEAVE(); }
 
-#ifndef ZZM_MINIGL_BUILD_ID
-#define ZZM_MINIGL_BUILD_ID "unknown"
-#endif
-
 
 static void fill_table(void)
 {
     memset(&g_table, 0, sizeof(g_table));
     g_table.size = (uint32_t)sizeof(g_table);
+    g_table.version = AAR_GL_VERSION_ARRAYS;
     g_table.Begin = w_Begin;
     g_table.End = w_End;
     g_table.Vertex2f = w_Vertex2f;
@@ -632,7 +520,6 @@ static void fill_table(void)
     g_table.DrawElements = w_DrawElements;
     g_table.LockArrays = w_LockArrays;
     g_table.UnlockArrays = w_UnlockArrays;
-    g_table.build_id = ZZM_MINIGL_BUILD_ID;
 }
 
 static int zzapp_gl_configure_targets(uint32_t width, uint32_t height,
@@ -654,7 +541,7 @@ static int zzapp_gl_configure_targets(uint32_t width, uint32_t height,
 
 
 int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
-                  const struct zzapp_gl **out)
+                  const struct aar_gl **out)
 {
     uint32_t w, h, pitch, format, front, back;
     mw_ctx *mw;
@@ -663,28 +550,28 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
     if (out)
         *out = 0;
     if (!surface_id ||
-        (flags & ~(ZZ_GL_BIND_DIRECT_PRESENT | ZZ_GL_BIND_SYNC_PRESENT |
-                   ZZ_GL_BIND_SYNC_RIX_FEED |
-                   ZZ_GL_BIND_INLINE_RIX_FEED)) != 0U)
-        return ZZ_EINVAL;
+        (flags & ~(AAR_ZZ9000_GL_BIND_DIRECT_PRESENT | AAR_ZZ9000_GL_BIND_SYNC_PRESENT |
+                   AAR_ZZ9000_GL_BIND_SYNC_RIX_FEED |
+                   AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED)) != 0U)
+        return AAR_E_INVAL;
     if (g_bound)
-        return ZZ_EBUSY;
-    if (zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != ZZ_OK)
-        return ZZ_EINVAL;
+        return AAR_E_BUSY;
+    if (zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != AAR_OK)
+        return AAR_E_INVAL;
     if (!w || !h || w > MW_MAX_DIMENSION || h > MW_MAX_DIMENSION || !pitch)
-        return ZZ_EINVAL;
-    if (format != ZZ_FMT_RGB565 && format != ZZ_FMT_BGRA8888)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
+    if (format != AAR_FMT_RGB565 && format != AAR_FMT_BGRA8888)
+        return AAR_E_INVAL;
     g_bound_layout = 0U;
     (void)zzapp_display_layout(&g_bound_layout);
     g_zero_copy = 0U;
-    if ((flags & ZZ_GL_BIND_DIRECT_PRESENT) == 0U)
+    if ((flags & AAR_ZZ9000_GL_BIND_DIRECT_PRESENT) == 0U)
         present_mode = "copy (direct not requested)";
     else if ((zzapp_services_flags() & ZZAPP_F_MAILBOX) != 0U)
         present_mode = "copy (mailbox display)";
-    else if (format != ZZ_FMT_RGB565)
+    else if (format != AAR_FMT_RGB565)
         present_mode = "copy (not RGB565)";
-    else if (g_bound_layout != ZZ_LAYOUT_RGB565_LE)
+    else if (g_bound_layout != AAR_LAYOUT_RGB565_LE)
         present_mode = "copy (RGB565 layout)";
     else if (pitch != w * 2U)
         present_mode = "copy (padded pitch)";
@@ -696,13 +583,13 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         g_zero_copy = 1U;
         present_mode = "direct";
     }
-    minigl_raster_set_async_feed((flags & ZZ_GL_BIND_SYNC_RIX_FEED) == 0U);
+    minigl_raster_set_async_feed((flags & AAR_ZZ9000_GL_BIND_SYNC_RIX_FEED) == 0U);
     minigl_platform_set_memfetch_enabled(
-        (flags & ZZ_GL_BIND_INLINE_RIX_FEED) == 0U);
+        (flags & AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED) == 0U);
     if (!amiberry_inproc_open(w, h)) {
         minigl_raster_set_async_feed(0);
         minigl_platform_set_memfetch_enabled(1);
-        return ZZ_ENOMEM;
+        return AAR_E_NOMEM;
     }
     mw = amiberry_transport_inproc_ctx();
     if (g_zero_copy && (!mw || !mw_host_bind_direct_rgb565(mw, front, back,
@@ -715,21 +602,21 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         g_zero_copy = 0U;
         minigl_raster_set_async_feed(0);
         minigl_platform_set_memfetch_enabled(1);
-        return ZZ_ENOMEM;
+        return AAR_E_NOMEM;
     }
     /* The module's stdout is not wired to the UART; the module log is. */
     minigl_platform_logf("[app] present: %s", present_mode);
-    if ((flags & ZZ_GL_BIND_SYNC_RIX_FEED) != 0U)
+    if ((flags & AAR_ZZ9000_GL_BIND_SYNC_RIX_FEED) != 0U)
         minigl_platform_logf("[app] gl feed: sync");
     else
         minigl_platform_logf("[app] gl feed: async %s",
-                             (flags & ZZ_GL_BIND_INLINE_RIX_FEED) != 0U ?
+                             (flags & AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED) != 0U ?
                              "inline" : "memfetch");
     fill_table();
     g_bound = 1;
     g_surface_id = surface_id;
     g_present_count = 0U;
-    g_sync_present = (flags & ZZ_GL_BIND_SYNC_PRESENT) != 0U;
+    g_sync_present = (flags & AAR_ZZ9000_GL_BIND_SYNC_PRESENT) != 0U;
     g_present_frame = 0U;
     /* One [MGLP] UART line per 5 s of GL work: where an ARM app's frame
      * time goes (app vs MiniGL stages, hardware vs CPU draws, fallback
@@ -737,7 +624,7 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
     minigl_profile_set_enabled(1);
     if (out)
         *out = &g_table;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 void zzapp_gl_unbind(void)
@@ -766,13 +653,13 @@ void zzapp_gl_reclaim(void)
 
 static uint32_t dest_format(uint32_t format, uint32_t layout)
 {
-    if (format == ZZ_FMT_RGB565) {
+    if (format == AAR_FMT_RGB565) {
         /* P96 defaults to high-byte-first; the bound layout decides. */
-        if (layout == ZZ_LAYOUT_RGB565_LE)
+        if (layout == AAR_LAYOUT_RGB565_LE)
             return ZZ9K_MGL_PIXFMT_RGB565_LE;
         return ZZ9K_MGL_PIXFMT_RGB565_BE;
     }
-    if (layout == ZZ_LAYOUT_RGBA8888)
+    if (layout == AAR_LAYOUT_RGBA8888)
         return ZZ9K_MGL_PIXFMT_RGBA32;
     return ZZ9K_MGL_PIXFMT_BGRA32;
 }
@@ -847,11 +734,11 @@ static int copy_bound(const uint32_t *src, int rgb565,
     if (!vram || vram_len < pitch)
         return 0;
 
-    if (format == ZZ_FMT_RGB565 &&
-        (g_bound_layout == ZZ_LAYOUT_BGR565_BE ||
-         g_bound_layout == ZZ_LAYOUT_BGR565_LE)) {
+    if (format == AAR_FMT_RGB565 &&
+        (g_bound_layout == AAR_LAYOUT_BGR565_BE ||
+         g_bound_layout == AAR_LAYOUT_BGR565_LE)) {
         return copy_bgr565(src, rgb565, w, h, pitch, vram, vram_len,
-                           g_bound_layout == ZZ_LAYOUT_BGR565_LE);
+                           g_bound_layout == AAR_LAYOUT_BGR565_LE);
     }
     /* present_copy addresses vram + dest_offset - MNT_FB_BASE. With
      * dest_offset == MNT_FB_BASE the write starts at vram, which is the
@@ -941,7 +828,7 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     if (g_present_count == 0U || !minigl_raster_present_ready() ||
         !zzapp_display_flip_idle())
         return 0;
-    if (zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != ZZ_OK ||
+    if (zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != AAR_OK ||
         !w || !h || !pitch || h > UINT32_MAX / pitch)
         return 0;
     source = g_present_queue[0];
@@ -992,7 +879,7 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     copy_us = (uint32_t)(minigl_platform_time_us() - started);
     started = minigl_platform_time_us();
     minigl_profile_push(MGLP_SWAP_FLIP);
-    if (zzapp_gl_queue_flip(g_surface_id) != ZZ_OK) {
+    if (zzapp_gl_queue_flip(g_surface_id) != AAR_OK) {
         minigl_profile_pop();
         return 0;
     }
@@ -1013,7 +900,7 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
  * flip that takes unusually long. */
 static int zzapp_gl_wait_flip_idle(void)
 {
-    return zzapp_display_wait_flip_idle() == ZZ_OK;
+    return zzapp_display_wait_flip_idle() == AAR_OK;
 }
 
 

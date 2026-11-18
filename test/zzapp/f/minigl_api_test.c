@@ -3,14 +3,15 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
+#include "aar/ext_zz9000.h"
 #include "zzapp_runtime.h"
 #include "zzapp_proto.h"
 #include "zzm_format.h"
 #include "zzm_minigl_host.h"
 #include "zzapp_svc.h"
 
-static zzapp_gl g_gl;
+static aar_gl g_gl;
 static zzm_minigl_ops_v1_t g_ops;
 static zzm_minigl_worker_ops_t g_worker;
 static zzm_minigl_registration_v1_t g_registration;
@@ -97,7 +98,7 @@ static int mock_app_bind(void *context, uint32_t surface_id, const void **out_gl
     g_binds++;
     g_surface_id = surface_id;
     *out_gl = &g_gl;
-    return ZZ_OK;
+    return AAR_OK;
 }
 static int mock_app_bind_flags(void *context, uint32_t surface_id,
                                uint32_t flags, const void **out_gl)
@@ -114,7 +115,7 @@ static int mock_app_swap(void *context)
     g_present_pixel = g_render_pixel;
     g_flips++;
     g_swaps++;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 static void mock_app_unbind(void *context)
@@ -145,7 +146,7 @@ static int mock_open_68k(void *context, const zzm_minigl_wire_open_t *request,
     (void)request;
     g_68k_open = 1;
     *handle = 1u;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 static int mock_has_work(void *context)
@@ -213,15 +214,16 @@ static void reset_module(void)
 
 int main(void)
 {
-    const zzapp_api *api;
-    const zzapp_gl *gl;
+    const aar_api *api;
+    const aar_gl *gl;
+    const aar_ext_zz9000 *ext;
     uint32_t card;
 
     zzapp_boot_init();
     reset_module();
     api = zzapp_api_table();
 
-    assert(zzapp_minigl_bind(7u, &gl) == ZZ_ENOSYS);
+    assert(zzapp_minigl_bind(7u, &gl) == AAR_E_NOSYS);
     assert(gl == NULL);
     assert(api->gl_bind(7u) == NULL);
     assert(g_acquires == 2);
@@ -251,7 +253,7 @@ int main(void)
     assert(g_telemetry_swaps == 1U);
     assert(g_telemetry_reports == 1U);
     zzapp_kernel_set_current_thread(1);
-    assert(zzapp_minigl_swap() == ZZ_EBUSY);
+    assert(zzapp_minigl_swap() == AAR_E_BUSY);
     api->gl_swap();
     assert(g_swaps == 1);
     assert(g_flips == 1);
@@ -266,18 +268,21 @@ int main(void)
     assert(g_unbinds == 1);
     assert(g_releases == 2);
     assert(g_telemetry_resets == 2U);
-    gl = api->gl_bind_flags(42u, ZZ_GL_BIND_DIRECT_PRESENT);
+    ext = (const aar_ext_zz9000 *)api->ext(AAR_PLATFORM_ZZ9000,
+                                           AAR_EXT_ZZ9000_MAIN);
+    assert(ext != NULL && AAR_EXT_ZZ9000_COVERS(ext, gl_bind_flags));
+    gl = ext->gl_bind_flags(42u, AAR_ZZ9000_GL_BIND_DIRECT_PRESENT);
     assert(gl == &g_gl);
-    assert(g_bind_flags == ZZ_GL_BIND_DIRECT_PRESENT);
+    assert(g_bind_flags == AAR_ZZ9000_GL_BIND_DIRECT_PRESENT);
     api->gl_unbind();
 
     card = 0;
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     card = zzapp_test_arena_card();
     assert(card != 0u);
     zzapp_test_mark_running();
     assert(api->gl_bind(99u) == &g_gl);
-    assert(g_ops.open_68k(&g_context, NULL, &card) == ZZ_OK);
+    assert(g_ops.open_68k(&g_context, NULL, &card) == AAR_OK);
     assert(g_68k_open);
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, card + 4u, 0u, 0u, 0u, 0u, 0u);
     zzapp_worker_hook();

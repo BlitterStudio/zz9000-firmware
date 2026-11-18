@@ -3,10 +3,18 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
 #include "zzapp_runtime.h"
 
-int zzapp_host_mem_info(zzapp_mem_info *out);
+static uint64_t shared_used_now(const aar_api *api)
+{
+    aar_info info;
+
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    assert(api->info(&info) == AAR_OK);
+    return info.shared_used;
+}
 
 static const uint8_t file_data[] = "mapped";
 static int oversize_fixture;
@@ -14,26 +22,26 @@ static int stop_during_read;
 
 int zzapp_svc_should_stop(void) { return stop_during_read; }
 
-int zzapp_svc_file_stat(const char *path, zzapp_stat *out)
+int zzapp_svc_file_stat(const char *path, aar_stat *out)
 {
     if (!path || !out)
-        return ZZ_ENOENT;
+        return AAR_E_NOENT;
     if (strcmp(path, "RAM:oversize") == 0 && oversize_fixture) {
         out->size = (16u << 20) + 1u;
         out->mode = 1u;
-        return ZZ_OK;
+        return AAR_OK;
     }
     if (strcmp(path, "RAM:fixture") != 0)
-        return ZZ_ENOENT;
+        return AAR_E_NOENT;
     out->size = sizeof(file_data) - 1u;
     out->mode = 1u;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 int zzapp_svc_file_open(const char *path, uint32_t flags)
 {
     return path && strcmp(path, "RAM:fixture") == 0 &&
-           flags == ZZ_FILE_READ ? 1 : ZZ_ENOENT;
+           flags == AAR_FILE_READ ? 1 : AAR_E_NOENT;
 }
 
 int zzapp_svc_file_read(int fd, void *dst, uint32_t bytes, uint32_t *done)
@@ -42,45 +50,42 @@ int zzapp_svc_file_read(int fd, void *dst, uint32_t bytes, uint32_t *done)
     if (stop_during_read) {
         zzapp_host_tick_at(1u);
         zzapp_host_tick_at(1u + ZZAPP_STOP_GRACE_US);
-        return ZZ_EFAULT;
+        return AAR_E_FAULT;
     }
     memcpy(dst, file_data, sizeof(file_data) - 1u);
     *done = sizeof(file_data) - 1u;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 int zzapp_svc_file_close(int fd)
 {
     assert(fd == 1);
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 int main(void)
 {
-    const zzapp_api *api;
-    zzapp_mem_info mem;
+    const aar_api *api;
     const void *mapped;
-    uint32_t bytes;
+    uint64_t bytes;
 
     zzapp_boot_init();
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     api = zzapp_api_table();
-    assert(api->map_file("RAM:fixture", &mapped, &bytes) == ZZ_OK);
+    assert(api->map_file("RAM:fixture", &mapped, &bytes) == AAR_OK);
     assert(bytes == sizeof(file_data) - 1u);
-    assert(api->mem_info(&mem) == ZZ_OK);
     /* App-visible host memory is backed by whole pages, so no page is
      * shared between owners; usage counts that backing. */
-    assert(mem.host_visible_used == ((bytes + 4095u) & ~4095u));
+    assert(shared_used_now(api) == ((bytes + 4095u) & ~4095u));
     api->unmap_file(mapped);
-    assert(api->mem_info(&mem) == ZZ_OK);
-    assert(mem.host_visible_used == 0u);
-    assert(api->map_file("RAM:fixture", &mapped, &bytes) == ZZ_OK);
+    assert(shared_used_now(api) == 0u);
+    assert(api->map_file("RAM:fixture", &mapped, &bytes) == AAR_OK);
     api->unmap_file(mapped);
-    assert(api->mem_info(&mem) == ZZ_OK && mem.host_visible_used == 0u);
+    assert(shared_used_now(api) == 0u);
     oversize_fixture = 1;
     mapped = (const void *)(uintptr_t)1u;
     bytes = 1u;
-    assert(api->map_file("RAM:oversize", &mapped, &bytes) == ZZ_ENOSPC);
+    assert(api->map_file("RAM:oversize", &mapped, &bytes) == AAR_E_NOSPC);
     assert(mapped == NULL && bytes == 0u);
     oversize_fixture = 0;
 
@@ -88,9 +93,9 @@ int main(void)
     stop_during_read = 1;
     mapped = (const void *)(uintptr_t)1u;
     bytes = 1u;
-    assert(api->map_file("RAM:fixture", &mapped, &bytes) == ZZ_EFAULT);
+    assert(api->map_file("RAM:fixture", &mapped, &bytes) == AAR_E_FAULT);
     assert(mapped == NULL && bytes == 0u);
-    assert(zzapp_host_mem_info(&mem) == ZZ_OK && mem.host_visible_used == 0u);
+    assert(shared_used_now(api) == 0u);
     stop_during_read = 0;
     zzapp_loader_release();
     return 0;

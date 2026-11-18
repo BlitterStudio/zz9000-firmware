@@ -8,7 +8,8 @@
 
 #include <stdint.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
+#include "aar/ext_zz9000.h"
 #include "zzapp_as.h"
 #include "zzapp_kernel.h"
 
@@ -46,7 +47,15 @@ typedef enum {
     ZZAPP_SVC_LENGTH_STRING,
     ZZAPP_SVC_LENGTH_GL_PIXELS,
     ZZAPP_SVC_LENGTH_GL_INDICES,
-    ZZAPP_SVC_LENGTH_GL_GET
+    ZZAPP_SVC_LENGTH_GL_GET,
+    /* A uint64_t byte count in two consecutive words, low word first (the
+     * AAPCS register pair or an 8-aligned stack pair). A high word that is
+     * not zero is AAR_E_INVAL: the firmware handles no such length. */
+    ZZAPP_SVC_LENGTH_ARGUMENT64,
+    /* The pointer names a structure whose first uint32_t is its size, as
+     * aar_info does. The checked and copied extent is that size clamped to
+     * element_bytes; the rest of the caller's size is zero-filled. */
+    ZZAPP_SVC_LENGTH_SIZE_FIELD
 } zzapp_svc_length_t;
 
 typedef struct {
@@ -78,6 +87,9 @@ typedef struct {
 } zzapp_svc_descriptor_t;
 
 #define ZZAPP_SVC_GL_FIRST 128U
+/* Veneer number of aar_ext_zz9000.gl_bind_flags: the first number after the
+ * aar_api slots. */
+#define ZZAPP_SVC_EXT_GL_BIND_FLAGS AAR_API_SLOT_COUNT
 const zzapp_svc_descriptor_t *zzapp_svc_api_descriptor(uint32_t slot);
 const zzapp_svc_descriptor_t *zzapp_svc_gl_descriptor(uint32_t slot);
 
@@ -89,11 +101,14 @@ int zzapp_svc_set_veneer_alias(uint32_t slot, uintptr_t address);
 int zzapp_svc_set_table_aliases(uint32_t slot, uintptr_t api_address,
                                 uintptr_t gl_address);
 int zzapp_svc_is_veneer(uintptr_t address);
-int zzapp_svc_copy_api(zzapp_api *destination, const zzapp_api *source);
-const zzapp_api *zzapp_svc_api_for_slot(uint32_t slot,
-                                        const zzapp_api *source);
-zzapp_gl *zzapp_svc_gl_for_slot(uint32_t slot);
-int zzapp_svc_copy_gl(zzapp_gl *destination, const zzapp_gl *source);
+int zzapp_svc_copy_api(aar_api *destination, const aar_api *source);
+const aar_api *zzapp_svc_api_for_slot(uint32_t slot,
+                                        const aar_api *source);
+aar_gl *zzapp_svc_gl_for_slot(uint32_t slot);
+int zzapp_svc_copy_gl(aar_gl *destination, const aar_gl *source);
+/* The slot's aar_ext_zz9000 as the app sees it (valid after
+ * zzapp_svc_api_for_slot), or NULL when the runtime has none. */
+const aar_ext_zz9000 *zzapp_svc_ext_for_slot(uint32_t slot);
 void zzapp_svc_gl_release(uint32_t slot, uint32_t generation);
 
 /* A zero-length range is valid; all nonempty ranges must be fully mapped for

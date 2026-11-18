@@ -14,8 +14,8 @@ published interfaces are:
 
 - the documented mailbox and register interface, for Amiga programs and drivers
   that talk to the firmware directly;
-- the app API table, for ARM apps that link only `libzzapp`. GL reached through
-  `zz_gl_bind` is part of that table.
+- the app API table, for ARM apps that link only `libaar`. GL reached through
+  `aar_gl_bind` is part of that table.
 
 ## Programs that call zz9k.library or mpega.library
 

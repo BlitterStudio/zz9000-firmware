@@ -1,6 +1,6 @@
 /*
  * Host stand-in for the ZZRun rings window. Offsets match section 4.
- * Integers on the window are big-endian. zzapp_event in memory here is native;
+ * Integers on the window are big-endian. aar_event in memory here is native;
  * the push/pop helpers convert.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -10,7 +10,7 @@
 
 #include <stdint.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
 
 #ifndef ZZAPP_WINDOW_BYTES
 #define ZZAPP_WINDOW_BYTES     0x00094000u
@@ -106,9 +106,9 @@ int zzapp_log_write(uint8_t *window, const char *msg, uint32_t len);
 int zzapp_log_read(uint8_t *window, char *buf, uint32_t cap);
 
 /* 0 pushed, -1 dropped (input_drops incremented). Event is native. */
-int zzapp_input_push(uint8_t *window, const zzapp_event *ev);
+int zzapp_input_push(uint8_t *window, const aar_event *ev);
 /* 1 popped, 0 empty. */
-int zzapp_input_pop(uint8_t *window, zzapp_event *out);
+int zzapp_input_pop(uint8_t *window, aar_event *out);
 
 /* Seqlock. load returns 0 on a stable even seq, -1 if it stays torn. */
 void zzapp_file_store(uint8_t *window, const struct zzapp_file_wire *in);

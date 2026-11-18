@@ -9,11 +9,11 @@ BUILD := build
 include ../../sdk/aar.mk
 SDK := $(AAR_DIR)
 FW := ../../ZZ9000_proto.sdk/ZZ9000OS/src
-HOST_CPPFLAGS := -DZZAPP_HOST_TEST -I$(SDK)/include -I. -I$(FW)
+HOST_CPPFLAGS := -DZZAPP_HOST_TEST -I$(SDK)/include -I$(SDK)/libaar/src -I. -I$(FW)
 HOST_CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror
 ZZAPP_HARNESS_CFLAGS := $(HOST_CPPFLAGS) $(HOST_CFLAGS)
 ZZAPP_HARNESS_OBJS := $(BUILD)/mock_window.o $(BUILD)/mock_api.o $(BUILD)/host_loader.o \
-	$(BUILD)/zzapp.o $(BUILD)/gl_wrap.o $(BUILD)/syscalls.o
+	$(BUILD)/aar.o $(BUILD)/gl.o $(BUILD)/syscalls.o
 
 # Hook for test owners. They may append custom binaries/rules here.
 -include $(wildcard [a-g]/tests.mk)
@@ -51,14 +51,18 @@ $(BUILD)/mock_api.o: mock_api.c mock_api.h mock_window.h | $(BUILD)
 $(BUILD)/host_loader.o: host_loader.c host_loader.h | $(BUILD)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
 
-$(BUILD)/zzapp.o: $(SDK)/src/zzapp.c $(SDK)/src/zzapp_internal.h | $(BUILD)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -I$(SDK)/src -c -o $@ $<
-
-$(BUILD)/gl_wrap.o: $(SDK)/src/gl_wrap.c $(SDK)/src/zzapp_internal.h | $(BUILD)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -I$(SDK)/src -c -o $@ $<
-
-$(BUILD)/syscalls.o: $(SDK)/src/syscalls.c | $(BUILD)
+$(BUILD)/aar.o: $(SDK)/libaar/src/aar.c $(SDK)/libaar/src/aar_internal.h | $(BUILD)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
+
+$(BUILD)/gl.o: $(SDK)/libaar/src/gl.c $(SDK)/libaar/src/aar_internal.h | $(BUILD)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
+
+# libaar's newlib glue defines _sbrk, _exit, _open and the other syscall stubs.
+# On a glibc host those names are the C library's own, so the wrapper renames
+# them to aar_host_* before it includes the glue. The firmware include
+# directory is left out: its linux/errno.h shim hides glibc's errno constants.
+$(BUILD)/syscalls.o: host_syscalls.c $(SDK)/libaar/src/syscalls.c | $(BUILD)
+	$(CC) -DZZAPP_HOST_TEST -I$(SDK)/include -I$(SDK)/libaar/src $(HOST_CFLAGS) -c -o $@ $<
 
 $(BUILD)/%: %.c $(ZZAPP_HARNESS_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)

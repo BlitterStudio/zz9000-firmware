@@ -14,8 +14,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The QUERY reply's ABI words report the AAR API this firmware implements
+ * (AAR_API_MAJOR, AAR_API_MINOR in aar/app.h). */
 #define ZZAPP_ABI_MAJOR            0u
-#define ZZAPP_ABI_MINOR            4u
+#define ZZAPP_ABI_MINOR            5u
 
 #define ZZAPP_OP_QUERY             0x0c00u
 #define ZZAPP_OP_ALLOC_WINDOW      0x0c01u
@@ -373,9 +375,15 @@
 #define ZZAPP_FILE_OP_LIST_NEXT    8u
 #define ZZAPP_FILE_OP_LIST_CLOSE   9u
 
+/* Open flags travel unchanged from the app as AAR_FILE_* values. CREATE
+ * creates a missing file and keeps an existing one, TRUNCATE empties an
+ * existing file, EXCL with CREATE fails when the file exists. The firmware
+ * refuses invalid combinations before they reach the launcher. */
 #define ZZAPP_FILE_READ            1u
 #define ZZAPP_FILE_WRITE           2u
 #define ZZAPP_FILE_CREATE          4u
+#define ZZAPP_FILE_TRUNCATE        8u
+#define ZZAPP_FILE_EXCL            16u
 #define ZZAPP_SEEK_SET             0
 #define ZZAPP_SEEK_CUR             1
 #define ZZAPP_SEEK_END             2

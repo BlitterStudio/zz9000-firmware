@@ -41,8 +41,8 @@ static void bind_triple(uint32_t front, uint32_t back, uint32_t spare)
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
 		       ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK);
 	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
-						ZZ_FMT_RGB565, front, back,
-						ZZ_LAYOUT_RGB565_LE, spare);
+						AAR_FMT_RGB565, front, back,
+						AAR_LAYOUT_RGB565_LE, spare);
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload,
 				   sizeof(payload), reply, &reply_len, 1, 1U,
 				   0U) != SDK_STATUS_OK)
@@ -57,7 +57,7 @@ static void ack_pending_flip(uint32_t gen)
 static void test_steady_flip_flushes_surface_only(void)
 {
 	const unsigned long bytes = 640U * 200U;
-	zzapp_surface surface;
+	aar_surface surface;
 	unsigned grants_before;
 	unsigned ungrants_before;
 	unsigned flushes_before;
@@ -74,7 +74,7 @@ static void test_steady_flip_flushes_surface_only(void)
 		unsigned base;
 
 		ack_pending_flip(current_runtime()->display_flip_gen);
-		if (zzapp_svc_display_flip_async(surface.id) != ZZ_OK) {
+		if (zzapp_svc_display_flip_async(surface.id) != AAR_OK) {
 			fail("steady flip");
 			return;
 		}
@@ -105,7 +105,7 @@ static void test_steady_flip_flushes_surface_only(void)
 				(unsigned long)presented, bytes);
 			fail("flip flush range");
 		}
-		if (zzapp_svc_display_refresh(&surface) != ZZ_OK)
+		if (zzapp_svc_display_refresh(&surface) != AAR_OK)
 			fail("steady refresh");
 	}
 }
@@ -118,7 +118,7 @@ static void test_idle_wait_completes_without_round_trip(void)
 	/* The steady-state present loop's flipwait: the previous flip is
 	 * already acknowledged, so the wait must complete from the poll
 	 * without parking the app behind a scheduler round trip. */
-	if (zzapp_display_wait_flip_idle() != ZZ_OK)
+	if (zzapp_display_wait_flip_idle() != AAR_OK)
 		fail("idle flip wait result");
 	if (g_yields != 0U)
 		fail("idle flip wait parked the app");

@@ -5,6 +5,8 @@
 
 #include "host_card_pool.h"
 #include "zzapp_runtime.h"
+#include "aar_note_image.h"
+#include "aar_internal.h"
 
 #include <assert.h>
 #include <setjmp.h>
@@ -13,7 +15,7 @@
 #define IMAGE_BYTES 0x200u
 #define PHOFF 52u
 #define LOAD_OFF 0x100u
-#define NOTE_OFF 0x0a0u
+#define NOTE_OFF TEST_NOTE_OFF
 #define RELA_OFF 0x0d0u
 #define SHOFF 0x180u
 
@@ -261,7 +263,6 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
 void zzapp_host_tick_at(uint64_t now);
 void zzapp_test_set_time_hook(uint64_t (*hook)(void));
 void zzapp_test_request_reset(uint32_t slot);
-void zzapp_crt0_bind(const zzapp_api *api);
 int spin_template_main(int argc, char **argv);
 
 static void put16(uint8_t *p, uint16_t value)
@@ -309,17 +310,11 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     ph += 32;
     put32(ph + 0, 4);
     put32(ph + 4, NOTE_OFF);
-    put32(ph + 16, 44);
+    put32(ph + 16, TEST_NOTE_BYTES);
 
     note = image + NOTE_OFF;
-    put32(note + 0, 6);
-    put32(note + 4, 24);
-    put32(note + 8, ZZAPP_NOTE_TYPE);
-    memcpy(note + 12, "ZZAPP", 6);
-    put32(note + 20, ZZAPP_NOTE_MAGIC);
-    put32(note + 28, 3);
-    put32(note + 36, ZZAPP_NOTE_FLAG_DYNAMIC_HEAP);
-    put32(note + 40, TEST_HEAP_FRAMES);
+    test_note_init(note);
+    test_note_set(note, TEST_NOTE_W_MIN_HEAP_MIB, TEST_HEAP_FRAMES);
     put32(image + RELA_OFF + 0, LOAD_OFF);
     put32(image + RELA_OFF + 4, 23);
     put32(image + RELA_OFF + 8, LOAD_OFF);
@@ -389,7 +384,7 @@ static void load_begin_and_chunk_heap(uint32_t slot, uint32_t generation,
     uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 
     make_image(image);
-    put32(image + NOTE_OFF + 40U, heap_frames);
+    test_note_set(image + NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, heap_frames);
     request_for_slot(request, slot, generation);
     zzapp_put_be32(request + ZZAPP_LOAD_HOST_VISIBLE_MIB, load_host_mib);
     assert(run_request(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
@@ -489,12 +484,12 @@ static uint64_t service_time(void)
 
 static void app_entry(const void *api, int argc, char **argv)
 {
-    const zzapp_api *table = (const zzapp_api *)api;
+    const aar_api *table = (const aar_api *)api;
 
     (void)argc;
     (void)argv;
     if (run_spin_template) {
-        zzapp_crt0_bind(table);
+        aar_crt0_bind(table);
         zzapp_test_set_time_hook(spin_time);
         assert(spin_template_main(0, NULL) == 0);
         zzapp_test_set_time_hook(NULL);
@@ -502,9 +497,14 @@ static void app_entry(const void *api, int argc, char **argv)
     }
     if (zzapp_services_current_slot() == 1U)
         slot1_starts++;
-    if (app_host_alloc_mib)
-        assert(table->alloc(app_host_alloc_mib << 20, 4096u,
-                            ZZ_ALLOC_HOST_VISIBLE) != NULL);
+    if (app_host_alloc_mib) {
+        aar_shared shared;
+
+        memset(&shared, 0, sizeof(shared));
+        assert(table->shared_alloc((uint64_t)app_host_alloc_mib << 20, 4096u,
+                                   0u, &shared) == AAR_OK);
+        assert(shared.ptr != NULL);
+    }
     if (entry_exit_code >= 0) {
         table->exit(entry_exit_code);
         /* The exit must come out of zzapp_host_exit itself: run_app also
@@ -685,13 +685,13 @@ static void test_exit_does_not_follow_incremental_load_selection(void)
     assert(state == ZZAPP_ST_LOADING);
     assert(reason == ZZAPP_END_NONE);
     zzapp_services_select_slot(1U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 
     generation[0] = claim_slot(0U);
     load_begin_and_chunk(0U, generation[0]);
     finish_load(0U, generation[0]);
     zzapp_services_select_slot(0U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void test_reset_reason_does_not_survive_a_new_load(void)
@@ -810,7 +810,7 @@ static void reload_slot0(void)
     load_begin_and_chunk(0U, generation);
     finish_load(0U, generation);
     zzapp_services_select_slot(0U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void test_force_stop_preserves_incremental_slot1(void)
@@ -834,7 +834,7 @@ static void test_force_stop_preserves_incremental_slot1(void)
     zzapp_services_select_slot(0U);
     assert(zzapp_test_arena_card() == 0U);
     zzapp_services_select_slot(1U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
     zzapp_host_tick_at(10000000U);
     zzapp_worker_hook();
     reload_slot0();
@@ -858,7 +858,7 @@ static void test_slot_reset_preserves_incremental_slot1(void)
     assert(state == ZZAPP_ST_LOADING);
     assert(reason == ZZAPP_END_NONE);
     zzapp_services_select_slot(1U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
     zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
     reload_slot0();
 }
@@ -899,9 +899,9 @@ static void test_short_slot_request_bypasses_long_load(void)
     assert(pass < 4U);
 
     zzapp_services_select_slot(0U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
     zzapp_services_select_slot(1U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void test_concurrent_loads_each_advance(void)
@@ -925,9 +925,9 @@ static void test_concurrent_loads_each_advance(void)
     assert(progress[1] != 0U);
 
     zzapp_services_select_slot(0U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
     zzapp_services_select_slot(1U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void test_advancing_load_renews_lease(void)
@@ -954,7 +954,7 @@ static void test_advancing_load_renews_lease(void)
                           ZZAPP_LIFE_PROGRESS_LO_OFF) >= 5U);
 
     zzapp_services_select_slot(0U);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
     zzapp_services_test_set_time(NULL);
 }
 
@@ -1009,7 +1009,7 @@ static void test_load_after_refused_hostmem_and_big_app(void)
         load_begin_and_chunk(0U, generation);
         finish_load(0U, generation);
         zzapp_services_select_slot(0U);
-        assert(zzapp_loader_abort() == ZZ_OK);
+        assert(zzapp_loader_abort() == AAR_OK);
     }
 }
 
@@ -1034,7 +1034,7 @@ static void load_and_abort(uint32_t slot)
     load_begin_and_chunk(slot, generation);
     finish_load(slot, generation);
     zzapp_services_select_slot(slot);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 /* Card kit 70: an app that exited normally holding a large host-visible

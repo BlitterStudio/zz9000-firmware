@@ -63,7 +63,7 @@ int zzapp_loader_begin(void)
 {
     begun++;
     zzapp_services_on_launch();
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 int zzapp_loader_chunk(uint32_t file_off, const void *src, uint32_t len)
@@ -72,20 +72,20 @@ int zzapp_loader_chunk(uint32_t file_off, const void *src, uint32_t len)
     assert(len == 5U);
     assert(memcmp(src, "hello", 5U) == 0);
     chunks++;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 int zzapp_loader_end(void)
 {
     ended++;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr_out)
 {
     (void)bytes;
     (void)addr_out;
-    return ZZ_ENOMEM;
+    return AAR_E_NOMEM;
 }
 
 void zzapp_loader_free_back(uint32_t addr)
@@ -209,7 +209,7 @@ int main(void)
     zzapp_services_poll();
     assert(zzapp_services_take_start(&argc));
     assert(argc == 0U);
-    assert(zzapp_services_start_entered(zzapp_services_generation()) == ZZ_OK);
+    assert(zzapp_services_start_entered(zzapp_services_generation()) == AAR_OK);
     assert(zzapp_mailbox_harvest(&request_id, 0, 0, &completed_status,
                                  reply, &reply_len));
     assert(request_id == 5U);
@@ -235,7 +235,7 @@ int main(void)
                         ZZAPP_CONSOLE_OUT_CAP);
         zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_OUT_OFF + 4U, 0U);
         zzapp_services_test_set_yield(drain_console_output);
-        assert(zzapp_svc_console_write("!", 1U, &n) == ZZ_OK);
+        assert(zzapp_svc_console_write("!", 1U, &n) == AAR_OK);
         assert(n == 1U);
         assert(launcher_window[ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] == '!');
 
@@ -243,12 +243,12 @@ int main(void)
                input, sizeof(input));
         zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF, sizeof(input));
         zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF + 4U, 0U);
-        assert(zzapp_svc_console_read(output, sizeof(output), &n) == ZZ_OK);
+        assert(zzapp_svc_console_read(output, sizeof(output), &n) == AAR_OK);
         assert(n == sizeof(output));
         assert(memcmp(input, output, sizeof(input)) == 0);
         zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF +
                        ZZAPP_CONSOLE_EOF_OFF, 1U);
-        assert(zzapp_svc_console_read(output, sizeof(output), &n) == ZZ_OK);
+        assert(zzapp_svc_console_read(output, sizeof(output), &n) == AAR_OK);
         assert(n == 0U);
 
         /* A read on an empty ring tells the launcher it wants input, and
@@ -258,7 +258,7 @@ int main(void)
         zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF, 0U);
         zzapp_put_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF + 4U, 0U);
         zzapp_services_test_set_yield(answer_wanted_input);
-        assert(zzapp_svc_console_read(output, sizeof(output), &n) == ZZ_OK);
+        assert(zzapp_svc_console_read(output, sizeof(output), &n) == AAR_OK);
         assert(n == 1U && output[0] == 'x');
         assert(wanted_seen == 1U);
         assert(zzapp_get_be32(launcher_window + ZZAPP_CONSOLE_IN_OFF +
@@ -267,7 +267,7 @@ int main(void)
 
         for (i = 0U; i < sizeof(message); i++)
             message[i] = (uint8_t)i;
-        assert(zzapp_svc_msg_send(message) == ZZ_OK);
+        assert(zzapp_svc_msg_send(message) == AAR_OK);
         assert(zzapp_get_be32(launcher_window + ZZAPP_MSG_A2H_OFF) == 1U);
         memcpy(launcher_window + ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_HDR, message,
                sizeof(message));
@@ -277,13 +277,13 @@ int main(void)
         assert(zzapp_svc_msg_poll(reply_message) == 0);
     }
     {
-        zzapp_audio app_audio;
+        aar_audio app_audio;
         int16_t *samples;
         volatile uint32_t *write_frame;
         uint32_t frame;
 
         zzapp_services_or_flags(ZZAPP_F_LAUNCHER_AUDIO_AHI);
-        assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == ZZ_OK);
+        assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == AAR_OK);
         samples = app_audio_host(app_audio.samples);
         write_frame = app_audio_host(app_audio.write_frame);
         for (frame = 0u; frame < 4u; frame++)
@@ -299,7 +299,7 @@ int main(void)
                        ZZAPP_AUDIO_TAIL_OFF, 16u);
         zzapp_services_poll();
         assert(*(volatile uint32_t *)app_audio_host(app_audio.read_frame) == 4u);
-        assert(zzapp_svc_audio_close() == ZZ_OK);
+        assert(zzapp_svc_audio_close() == AAR_OK);
         assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                               ZZAPP_AUDIO_ROUTE_OFF) == ZZAPP_AUDIO_ROUTE_CARD);
         assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
@@ -309,15 +309,15 @@ int main(void)
         /* ZZRun treats 0 as "header not published yet". */
         assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                               ZZAPP_AUDIO_EPOCH_OFF) == 0u);
-        assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == ZZ_OK);
+        assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == AAR_OK);
         {
             uint32_t epoch = zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                                             ZZAPP_AUDIO_EPOCH_OFF);
             uint32_t head;
 
             assert(epoch != 0u);
-            assert(zzapp_svc_audio_close() == ZZ_OK);
-            assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == ZZ_OK);
+            assert(zzapp_svc_audio_close() == AAR_OK);
+            assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == AAR_OK);
             assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                                   ZZAPP_AUDIO_EPOCH_OFF) != epoch);
             write_frame = app_audio_host(app_audio.write_frame);
@@ -339,7 +339,7 @@ int main(void)
             assert(zzapp_get_be32(launcher_window + ZZAPP_AUDIO_OFF +
                                   ZZAPP_AUDIO_HEAD_OFF) == head);
             zzapp_services_test_set_audio_request(AUDIO_REQUEST_NONE);
-            assert(zzapp_svc_audio_close() == ZZ_OK);
+            assert(zzapp_svc_audio_close() == AAR_OK);
         }
     }
     {

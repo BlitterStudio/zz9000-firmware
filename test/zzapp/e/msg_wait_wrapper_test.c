@@ -1,11 +1,11 @@
 /*
- * zz_msg_wait is the first appended slot of API 0.4. libzzapp reads it only
- * when the table covers it, so an app built against 0.4 still runs on 0.3
- * firmware and sees ZZ_ENOSYS.
+ * aar_msg_wait is the last core slot of the AAR table. libaar reads a slot
+ * only when the table's size covers it, so a table cut short before it gives
+ * the app AAR_E_NOSYS, and so does a covered slot that is NULL.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
-#include "zzapp.h"
+#include "aar/app.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -18,7 +18,7 @@ static int mock_wait(uint32_t timeout_us)
 {
     seen_timeout = timeout_us;
     calls++;
-    return ZZ_ETIMEDOUT;
+    return AAR_E_TIMEDOUT;
 }
 
 #define CHECK(x) do { \
@@ -30,34 +30,34 @@ static int mock_wait(uint32_t timeout_us)
 
 int main(void)
 {
-    static zzapp_api table;
+    static aar_api table;
 
-    CHECK(ZZAPP_API_MINOR == 4u);
-    CHECK(ZZAPP_API_VERSION == 4u);
+    CHECK(AAR_API_MINOR == 5u);
+    CHECK(AAR_API_VERSION == 5u);
 
-    zzapp_api_ptr = NULL;
-    CHECK(zz_msg_wait(10u) == ZZ_ENOSYS);
+    aar_api_ptr = NULL;
+    CHECK(aar_msg_wait(10u) == AAR_E_NOSYS);
 
-    /* A 0.3 table ends after heap_info; the slot is not covered. */
+    /* A table that ends before msg_wait does not cover the slot. */
     memset(&table, 0, sizeof table);
-    table.size = (uint32_t)offsetof(zzapp_api, msg_wait);
-    table.version = 3u;
+    table.size = (uint32_t)offsetof(aar_api, msg_wait);
+    table.version = AAR_API_VERSION;
     table.msg_wait = mock_wait;
-    zzapp_api_ptr = &table;
-    CHECK(!ZZ_API_COVERS(&table, msg_wait));
-    CHECK(zz_msg_wait(10u) == ZZ_ENOSYS);
+    aar_api_ptr = &table;
+    CHECK(!AAR_API_COVERS(&table, msg_wait));
+    CHECK(aar_msg_wait(10u) == AAR_E_NOSYS);
     CHECK(calls == 0);
 
-    /* A 0.4 table covers it and the timeout reaches the firmware. */
+    /* A table that covers it passes the timeout to the firmware. */
     table.size = (uint32_t)sizeof table;
-    table.version = ZZAPP_API_VERSION;
-    CHECK(ZZ_API_COVERS(&table, msg_wait));
-    CHECK(zz_msg_wait(123456u) == ZZ_ETIMEDOUT);
+    table.version = AAR_API_VERSION;
+    CHECK(AAR_API_COVERS(&table, msg_wait));
+    CHECK(aar_msg_wait(123456u) == AAR_E_TIMEDOUT);
     CHECK(calls == 1 && seen_timeout == 123456u);
 
-    /* A covered NULL slot is still ZZ_ENOSYS. */
+    /* A covered NULL slot is still AAR_E_NOSYS. */
     table.msg_wait = NULL;
-    CHECK(zz_msg_wait(10u) == ZZ_ENOSYS);
+    CHECK(aar_msg_wait(10u) == AAR_E_NOSYS);
     printf("msg_wait_wrapper_test: ok\n");
     return 0;
 }

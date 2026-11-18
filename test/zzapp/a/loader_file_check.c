@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
 #include "zzapp_runtime.h"
 
 #ifndef ZZAPP_PROBE_ELF
@@ -31,18 +31,18 @@ int main(void)
     assert(fclose(file) == 0);
 
     zzapp_boot_init();
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     for (offset = 0u; offset < (uint32_t)size;) {
         uint32_t chunk = (uint32_t)size - offset;
         if (chunk > 65536u)
             chunk = 65536u;
-        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == AAR_OK);
         offset += chunk;
     }
     do {
         result = zzapp_loader_end();
     } while (result == ZZAPP_LOADER_IN_PROGRESS);
-    assert(result == ZZ_OK);
+    assert(result == AAR_OK);
     zzapp_loader_release();
     free(image);
     return 0;

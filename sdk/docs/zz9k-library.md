@@ -136,7 +136,7 @@ window and generation, so a stale generation or terminal state affects only
 that handle; a new claim detaches a stale handle while leaving it safe to
 close. A claimed slot that does not begin loading expires after two seconds.
 If `Open` cannot finish setup after a successful claim, it cancels that claim.
-With firmware that lacks that cap, the library retains API 0.2 behaviour: one
+With firmware that lacks that cap, the library retains the single-slot behaviour: one
 handle claims legacy slot 0 and a second `Open` returns `ZZ9K_STATUS_BUSY`.
 Legacy firmware assigns that handle's generation at `LOAD_BEGIN`, so `Open`
 also succeeds while the unloaded window reports generation zero. `LoadFile`
