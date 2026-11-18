@@ -345,6 +345,28 @@ static uint32_t service_queue(Queue *q, uint32_t budget)
   return taken;
 }
 
+/* Submits a request and polls for its completion without sleeping.
+ * zz9k_call waits for the completion signal between polls, which adds up to
+ * a frame to every round trip; the doorbell timing must not include that.
+ * Returns the reply's status, or a transport error. */
+static int call_polled(ZZ9KRequest *request, ZZ9KMailboxEntry *reply)
+{
+  uint64_t limit = now_ticks() + us_to_ticks(2000000U);
+  uint32_t request_id = 0U;
+  int status;
+
+  status = zz9k_submit(ctx, request, &request_id);
+  if (status != ZZ9K_STATUS_QUEUED) return status;
+  for (;;) {
+    memset(reply, 0, sizeof(*reply));
+    status = zz9k_poll(ctx, reply);
+    if (status == ZZ9K_STATUS_OK && reply->request_id == request_id)
+      return reply->status;
+    if (status != ZZ9K_STATUS_OK && status != ZZ9K_STATUS_BUSY) return status;
+    if (now_ticks() > limit) return ZZ9K_STATUS_TIMEOUT;
+  }
+}
+
 /* One mailbox command: request words in, reply words out. t_start and t_end
  * (optional) take the clock around the call itself. Returns a ZZ9K_STATUS
  * code. */
@@ -360,9 +382,8 @@ static int qp_cmd(const uint32_t *words, uint32_t count, uint32_t *out,
   request.entry.payload_len = (uint16_t)(count * 4U);
   for (i = 0U; i < count; i++)
     zz9k_put_be32(&request.entry.payload.inline_data[i * 4U], words[i]);
-  memset(&reply, 0, sizeof(reply));
   if (t_start) *t_start = now_ticks();
-  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  status = call_polled(&request, &reply);
   if (t_end) *t_end = now_ticks();
   if (status != ZZ9K_STATUS_OK) return status;
   status = zz9k_reply_require(&reply, ZZ9K_OP_DIAG_QPROBE, out_words * 4U);
@@ -432,6 +453,11 @@ static int attach_queue(Queue *q, uint32_t index, uint32_t owner)
   status = qp_cmd(cmd, 4U, out, ZZ9K_QP_ATTACH_WORDS, 0, 0);
   if (status != ZZ9K_STATUS_OK) {
     cmd_failed("ATTACH", status);
+    printf("zz9k-qprobe: queue %lu owner %lu: handle %08lx at %08lx, %lu bytes"
+           "; MEM_FILL on it: %d\n", (unsigned long)index,
+           (unsigned long)owner, (unsigned long)q->buf.handle,
+           (unsigned long)(uintptr_t)q->pair, (unsigned long)q->buf.length,
+           zz9k_mem_fill(ctx, q->buf.handle, 0U, 64U, 0U));
     release_queue(q, 0);
     return -1;
   }
@@ -892,17 +918,23 @@ static int run_doorbell(const uint32_t *counts, uint32_t ncounts,
   /* The mailbox alone: what a KICK costs before any queue work. */
   zz9k_qr_stats_init(&base);
   for (i = 0U; i < iterations && !tally.call_failures && !broken(); i++) {
-    uint8_t reply[4];
-    uint32_t reply_len = sizeof(reply);
-    uint64_t t0 = now_ticks();
-    int status = zz9k_ping(ctx, payload, sizeof(payload), reply, &reply_len);
-    uint64_t t1 = now_ticks();
+    ZZ9KRequest request;
+    ZZ9KMailboxEntry reply;
+    uint64_t t0;
+    uint64_t t1;
+    int status;
 
+    memset(&request, 0, sizeof(request));
+    (void)zz9k_request_ping(&request, payload, sizeof(payload));
+    t0 = now_ticks();
+    status = call_polled(&request, &reply);
+    t1 = now_ticks();
     if (status != ZZ9K_STATUS_OK) {
       cmd_failed("baseline ping", status);
       tally.call_failures++;
-    } else if (reply_len != sizeof(payload) ||
-               memcmp(reply, payload, sizeof(payload)) != 0) {
+    } else if (reply.payload_len != sizeof(payload) ||
+               memcmp(reply.payload.inline_data, payload,
+                      sizeof(payload)) != 0) {
       puts("zz9k-qprobe: baseline ping echo mismatch");
       tally.call_failures++;
     } else {
