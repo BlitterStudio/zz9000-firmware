@@ -489,6 +489,7 @@
 #if (SDK_HOST_WINDOW_Z3_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE
 #error "Z3 host window lies outside the Zorro III main board aperture"
 #endif
+
 // MiniGL wire-v9 transport window (2.9.0 layout). One dynamic allocation
 // from the host-visible heap -- there is deliberately NO fixed low-DDR
 // MiniGL carve-out. minigl_transport.c requests the window between the
