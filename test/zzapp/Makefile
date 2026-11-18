@@ -12,7 +12,7 @@ FW := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 HOST_CPPFLAGS := -DZZAPP_HOST_TEST -I$(SDK)/include -I$(SDK)/libaar/src -I. -I$(FW)
 HOST_CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror
 ZZAPP_HARNESS_CFLAGS := $(HOST_CPPFLAGS) $(HOST_CFLAGS)
-ZZAPP_HARNESS_OBJS := $(BUILD)/mock_window.o $(BUILD)/mock_api.o $(BUILD)/host_loader.o \
+ZZAPP_HARNESS_OBJS := $(BUILD)/mock_client.o $(BUILD)/mock_api.o $(BUILD)/host_loader.o \
 	$(BUILD)/aar.o $(BUILD)/gl.o $(BUILD)/syscalls.o
 
 # Hook for test owners. They may append custom binaries/rules here.
@@ -32,7 +32,7 @@ test: $(ALL_TESTS)
 # Library CI links this host-only runtime archive with the pinned module and
 # front-end objects, then supplies registry fakes from its test driver.
 MODULE_HARNESS := $(BUILD)/libzzapp_module_harness.a
-MODULE_HARNESS_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
+MODULE_HARNESS_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_xport.o \
 	$(BUILD)/a/zzapp_api.o $(BUILD)/a/host_decode_stubs.o
 
 module-harness: $(MODULE_HARNESS)
@@ -43,10 +43,14 @@ $(MODULE_HARNESS): $(MODULE_HARNESS_OBJS) | $(BUILD)
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/mock_window.o: mock_window.c mock_window.h | $(BUILD)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
+# The client model sees the firmware only through headers (zzapp_xport.h and
+# what it includes), so it takes the record layer's host flags.
+$(BUILD)/mock_client.o: mock_client.c mock_client.h $(FW)/zzapp_xport.h \
+	$(FW)/zzapp_proto.h | $(BUILD)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DMMU_PAGE_HOST_TEST -DSMP_LOCK_HOST_TEST \
+		-I../card_pool -I../mmu/mock -c -o $@ $<
 
-$(BUILD)/mock_api.o: mock_api.c mock_api.h mock_window.h | $(BUILD)
+$(BUILD)/mock_api.o: mock_api.c mock_api.h | $(BUILD)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -c -o $@ $<
 
 $(BUILD)/host_loader.o: host_loader.c host_loader.h | $(BUILD)
