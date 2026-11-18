@@ -84,9 +84,10 @@ mark, it appends one low-memory record to every live slot's launcher log ring;
 another record is written only after free memory rises above the high-water
 mark and falls again. A launcher may cap its own app.
 `ZZ_ALLOC_HOST_VISIBLE` remains a separately accounted shared card allocation,
-up to 16 MiB per app by default (the launcher can change the cap at load), for
-Amiga-visible buffers rather than private working
-memory.
+up to 16 MiB per app by default, for Amiga-visible buffers rather than private
+working memory. The launcher can change that cap at load (`HOSTMEM` in ZZRun,
+`ZZ9KAppSetLimits` in the library); it is a cap, not a reservation, so an
+allocation can still fail below it while the card's shared heap is busy.
 
 ## Sharing pixels with AmigaOS
 
@@ -246,8 +247,9 @@ An app can leave newlib out. Build it with `ZZAPP_FREESTANDING=1` in the make
 include, with `FREESTANDING` on `zzapp_add_executable`, or configure CMake
 with `-DZZAPP_FREESTANDING=ON` to make every target freestanding. The image
 links `crt0`, the app, `libzzapp` and `libgcc`. The PIC sysroot is not needed
-for make or for the CMake option; a single `FREESTANDING` target in a CMake
-project still needs it for the targets next to it. The macro
+for make or for `-DZZAPP_FREESTANDING=ON`. Without that option the CMake
+toolchain file still requires `ZZAPP_PIC_SYSROOT`, so a project that mixes a
+`FREESTANDING` target with normal targets sets it for the normal ones. The macro
 `ZZAPP_FREESTANDING` is defined for the app's sources, so one file can build
 in both modes. The normal mode is unchanged.
 
@@ -301,20 +303,24 @@ differences from the card are in `sdk/zzapp/host/README.md`.
 
 ## Running with ZZRun
 
-ZZRun is a Shell command and a Workbench tool. On firmware with slot support,
-each instance claims its own slot; an unchanged API 0.2 launcher still uses
-slot 0. Zorro III only. It needs `zz9k.library` and, for a display, Picasso96.
+ZZRun is a Shell command and a Workbench tool. Each instance claims its own
+slot, so up to four apps run at once. It needs firmware that advertises the
+slots capability; the slot-0 request forms stay in the firmware for an
+unchanged API 0.2 launcher. Zorro III only. It needs `zz9k.library` and, for
+a display, Picasso96.
 
 Shell:
 
 ```text
 Stack 32768
-ZZRun RAM:app.elf [AUDIO=AHI] [args]
+ZZRun RAM:app.elf [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [AUDIO=AHI] [args]
 ```
 
 `argv[0]` is the ELF file name. Further tokens are the app's arguments, at
 most 15 of them. `AUDIO=AHI` before those arguments selects AHI. The default
-route is the card audio fabric.
+route is the card audio fabric. `MAXMEM` caps the app's private memory and
+`HOSTMEM` sets its host-visible limit (16 MiB by default); the ZZRun manual
+describes both.
 
 Workbench: the project icon's default tool is ZZRun (`DEFAULT_TOOL=ZZRun`).
 Dragging an ELF onto the ZZRun icon overrides ToolType `APP`.
@@ -327,6 +333,8 @@ Dragging an ELF onto the ZZRun icon overrides ToolType `APP`.
 | `MODE` | Optional Picasso96 DisplayID, decimal, `$` hex, or `0x` hex. The app still chooses width, height, and format |
 | `ARGS` | Space-separated arguments. Quoting is not parsed |
 | `AUDIO=AHI` | PCM to AHI instead of the card fabric |
+| `MAXMEM` | Private memory cap in MiB |
+| `HOSTMEM` | Host-visible memory limit in MiB, 1 to 4095; the card grants at most 62 MiB |
 | `JOYPORT0=1` | Also read joystick port 0. Port 1 is read while the display window is active |
 
 ZZRun reads `JOYxDAT` and the CIA-A fire bits. It does not drive the port
@@ -342,20 +350,29 @@ and recovery intervals.
 
 ## zz9k.library client
 
-`zz9k.library` version 2, revision 39 exposes the same runtime without
+`zz9k.library` version 2, revision 40 exposes the same runtime without
 ZZRun. The ARM-app client first appeared in revision 35; programs that use it
 require at least `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT`. Include
 `proto/zz9k.h`. The calls are `ZZ9KAppOpen`, `ZZ9KAppLoadFile`,
 `ZZ9KAppLoadMemory`, `ZZ9KAppStart`, `ZZ9KAppStop`, `ZZ9KAppStatus`,
-`ZZ9KAppSendMessage`, `ZZ9KAppGetMessage`, `ZZ9KAppMessageSignal`, and
-`ZZ9KAppClose`.
+`ZZ9KAppSendMessage`, `ZZ9KAppGetMessage`, `ZZ9KAppMessageSignal`,
+`ZZ9KAppClose`, and, from revision 40, `ZZ9KAppSetLimits`.
 
 `ZZ9KAppOpen` creates a handle owned by the calling task. Do not use or close
 that handle from another task. New firmware gives a handle its claimed slot
-and generation; operations affect only that pair. An unchanged library uses
-the legacy slot-0 request shape. `ZZ9KAppLoadMemory` accepts at most 16 MiB.
-The library's VBlank server renews each open handle's lease. A task that dies
-holding a handle is reclaimed by lease expiry or Amiga reset.
+and generation; operations affect only that pair. On firmware without slots
+the library uses the legacy slot-0 request shape. `ZZ9KAppLoadMemory` accepts
+at most 16 MiB. The library's VBlank server renews each open handle's lease.
+From revision 40 a task that dies holding a handle loses its slot within about
+a second, because the library notices the task is gone; before that, lease
+expiry or Amiga reset reclaimed it. A shell command that ends without
+`ZZ9KAppClose` keeps its slot until the shell process ends, and a task that
+renames itself after `ZZ9KAppOpen` loses it. Details are in
+[zz9k-library.md](zz9k-library.md#arm-app-client).
+
+`ZZ9KAppSetLimits(handle, max_mib, host_visible_mib)` sets the launcher memory
+cap and the app's host-visible limit before the load, as ZZRun's `MAXMEM` and
+`HOSTMEM` do. Zero keeps the defaults: no launcher cap and 16 MiB host-visible.
 
 `ZZ9KAppStart` passes `argv` unchanged. Put the program name in `argv[0]`
 if the app expects the ZZRun convention. Messages are 32 opaque bytes.
@@ -462,12 +479,14 @@ are not a second core.
 
 A lockstep simulation or a replay needs the same floating-point results on
 every run. This section states what the card does and which compiler flags
-keep an app inside it. The code generation claims are checked by
-`sdk/zzapp/tests/fp_codegen_test.py` (part of `make -C sdk/zzapp check`) with
-arm-none-eabi-gcc 15.3.1. The entry value and the denormal behaviour can be
-checked on the card with `sdk/zzapp/templates/fpenv.c`.
+keep an app inside it. `sdk/zzapp/tests/fp_codegen_test.py` (part of
+`make -C sdk/zzapp check`, arm-none-eabi-gcc 15.3.1) checks the code
+generation claims, except two that come from the GCC documentation: that
+`__FLT_EVAL_METHOD__` is 0 and that fast-math reassociates reductions. The
+entry value and the denormal behaviour can be checked on the card with
+`sdk/zzapp/templates/fpenv.c`.
 
-Entry state. The kernel clears a new thread's whole context
+Entry state. The kernel clears a new thread's context
 (`zzapp_kernel_prepare_app` in `zzapp_kernel.c`, user mode CPSR `0x10`), and
 the first dispatch loads FPSCR and D0 to D31 from it. FPSCR is therefore 0
 when `zz_main` starts: round to nearest, flush-to-zero off, default NaN off,

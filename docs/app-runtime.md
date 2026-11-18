@@ -236,6 +236,10 @@ two seconds. A launcher that sets lifecycle flag bit 18
 Amiga task does not lose its app; it still renews only from its own main
 loop, so a launcher that has died is still detected.
 
+The client side of that lease is in `zz9k.library`: from revision 40 its
+service task releases the slot of an owner task that is gone, see
+[zz9k-library.md](../sdk/docs/zz9k-library.md#arm-app-client).
+
 An expired load becomes `STOPPING` with terminal reason `QUARANTINED` (9).
 Core 1 aborts the loader and frees the app memory, but its card window remains
 reserved: a late `Read` from the old Amiga process must never write into a
@@ -261,16 +265,18 @@ byte 4 (`ZZAPP_LOAD_HOST_VISIBLE_MIB`); firmware that advertises
 `ZZAPP_CAP_HOST_LIMIT` reads it. Zero, and every request form that has no such
 word, keeps the default of 16 MiB. A nonzero value replaces the default for
 that app, so it can raise the limit or lower it, and `zz_mem_info` reports the
-value in force as `host_visible_limit`. The limit is a cap, not a
+value in force as `host_visible_limit`. A value above 4095 in either limit
+word returns `BAD_REQUEST`. The limit is a cap, not a
 reservation: nothing is set aside when the load begins, and an allocation can
 still fail below the cap when the shared host-visible heap, which also serves
 P96 surfaces and SDK buffers, or the app's alias range is full. Only a request
 that could never be satisfied is refused. `LOAD_BEGIN` then returns
 `SDK_STATUS_NO_MEMORY` (6) at once and leaves the claim as it was. That
 ceiling is the smaller of the surface heap and one app's alias window of 62
-MiB, so one block of 34 MiB maps as a single alias and a request of up to 62
-MiB is accepted. The limit lasts until the slot is claimed again. Both limits
-(the memory cap at byte 0 and this one) take effect only when the request is
+MiB; the heap on the card is larger, so the window sets it, and a request of
+up to 62 MiB is accepted. The limit lasts until the slot is claimed again.
+Both limits (the memory cap at byte 0 and this one) take effect only when the
+request is
 admitted to the slot's queue and the slot is idle or claimed; a `LOAD_BEGIN`
 answered `BUSY`, or sent after the load has begun, changes neither.
 
@@ -327,6 +333,8 @@ core 1 cannot acknowledge waits up to four seconds, and then the recovery is
 a cold restart of core 1: it also aborts the SDK requests queued for it and
 resets the shared graphics, audio and module state, not only the app slots.
 It is the price of not cleaning up beside a worker that may still be running.
+Core 0 prints `[app] reset: core 1 did not acknowledge slot N within 1 s` for
+each slot that missed.
 
 A core-1 restart treats a slot that owes a cleanup like a running app and
 tears it down with the reason `CORE_RESTART`, replaying teardown steps that
@@ -348,8 +356,14 @@ claims again has moved on and goes straight from claim to `LOAD_BEGIN`. The
 fault snapshot in the life block stays readable, and a teardown that is
 still finishing does not set the latch again.
 
-Every rejected app operation prints a `[app] reject op` line on the console,
-at most four a second; the next line reports how many were held back.
+A rejected app request that carries a reason prints a `[app] reject op
+0x<opcode>` line on the console. That covers a deferred `LOAD_BEGIN`,
+`LOAD_CHUNK`, `LOAD_END` or `START` the loader refuses, a `DISPLAY_BIND` with
+bad fields, a limit above 4095 MiB, a host-visible limit the card cannot
+grant, and a deferred request with request id zero. Every such rejection
+prints, but at most four lines a second; the next line printed is
+`[app] N rejected ops held back`. A request that fails the slot or generation
+check prints nothing.
 
 `LIST` (`0x0c09`) is extended-only. The selector names the slot and ignores
 its generation. Its 48-byte reply has state, generation, committed bytes,
@@ -370,7 +384,7 @@ Firmware advertising `ZZAPP_CAP_LOAD_PROGRESS` increments the big-endian
 step. `LOAD_BEGIN` resets it to zero. The word wraps modulo $2^{32}$ and only
 denotes loader progress while the slot is `LOADING`; once the app runs, the
 existing runtime progress timestamp again owns offsets `0x68` and `0x6C`.
-Revision 39 of `zz9k.library` resets its normal five-second inactivity
+`zz9k.library` revision 39 and later resets its normal five-second inactivity
 deadline whenever this word changes. With older firmware, which does not
 advertise the bit, it retains the fixed 32-second load-lease fallback.
 

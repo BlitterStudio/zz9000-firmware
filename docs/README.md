@@ -31,11 +31,11 @@ and programs that use the card.
 
 | Document | Contents |
 | --- | --- |
-| [zzapp-developer-guide.md](../sdk/docs/zzapp-developer-guide.md) | Building, running, memory, scheduling, and porting apps. |
+| [zzapp-developer-guide.md](../sdk/docs/zzapp-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
 | [zzapp-api.md](../sdk/docs/zzapp-api.md) | Every `zz_*` call and `ZZ_*` constant. |
-| [app-runtime.md](app-runtime.md) | The firmware and launcher contract: slots, address spaces, lifecycle, and the SVC interface. |
+| [app-runtime.md](app-runtime.md) | The firmware and launcher contract: slots, limits, address spaces, lifecycle, exit and reset teardown, and the SVC interface. |
 | [sdk/zzapp/host/README.md](../sdk/zzapp/host/README.md) | Running apps on a PC with the SDL host runner. |
-| [sdk/zzapp/templates/README.md](../sdk/zzapp/templates/README.md) | The app templates. |
+| [sdk/zzapp/templates/README.md](../sdk/zzapp/templates/README.md) | The app templates, including the freestanding, FPU probe, and ring conformance apps. |
 
 ## Work on the firmware
 

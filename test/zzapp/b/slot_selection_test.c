@@ -550,8 +550,8 @@ static int interrupt_teardown(void)
     kernel->slice_started_ms = kernel_ms;
     kernel->slice_valid = 1U;
     kernel->idle = 0U;
-    /* The tick only marks service due; a teardown that ran for the whole
-     * service budget is then preempted for the runnable app. */
+    /* The tick only marks service due; a teardown that ran for the service
+     * budget is then preempted for the runnable app. */
     kernel_ms += ZZAPP_KERNEL_SERVICE_LIMIT_MS + 1U;
     zzapp_kernel_service_due(kernel);
     next = zzapp_kernel_switch_frame(kernel, &frame,
@@ -1385,7 +1385,7 @@ void zzapp_recover_external_locks(void)
 }
 
 /* Core 1 does not run at all while core 0 waits for the acknowledgement of
- * an Amiga reset, as if its worker were delayed beyond the whole wait. Core 0
+ * an Amiga reset, as if its worker were delayed past the wait. Core 0
  * must then halt it and recover every slot itself, not clean up beside a
  * worker that may still run. The allocator is reset and its addresses reused
  * after that, and only then does the delayed worker run: it has nothing left

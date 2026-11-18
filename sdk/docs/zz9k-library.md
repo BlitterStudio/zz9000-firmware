@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 39 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 40 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -164,10 +164,10 @@ Revision 40 also releases a handle whose owning task is gone without `Close`.
 About once a second (50 vertical blanks) the library's service task checks
 each claimed handle's owner against Exec's task lists, with interrupts
 disabled for the walk: the running task, `TaskReady`, and `TaskWait`. The
-interrupt server only counts vertical blanks. A handle whose owner is gone
-stops receiving lease renewals at once, so the firmware lease no longer
-outlives the task, and the service task then stops the generation, frees the
-slot, and answers a late call on the stale pointer with
+interrupt server only counts vertical blanks. A handle whose owner is gone is
+marked dead at that check and stops receiving lease renewals from then on. The
+service task then stops the generation, frees the slot, and answers a late
+call on the stale pointer with
 `ZZ9K_STATUS_BAD_HANDLE`. It frees the handle record unless the handle has an
 event posted to its notify port: that message lives in the record, and the
 port can outlive the owner, so such a record is kept until the library's last
@@ -186,12 +186,15 @@ Exec can give a dead task's address to a new task, so an address alone does
 not identify the owner. The library records the owner's name pointer, node
 type, and CLI task number at `Open`, and an owner counts as present only while
 the task at that address still has all three and still holds the signal bit
-the library allocated from it. A task that changes its own name after `Open`
-therefore counts as gone. A new task that matches every field is taken for
+the library allocated from it. A task that points its node name at another
+string after `Open` therefore counts as gone, and within about a second its
+app is stopped and its handle answers `ZZ9K_STATUS_BAD_HANDLE`, although the
+task is still running. A new task that matches every field is taken for
 the owner and keeps the slot, as it did before revision 40. A foreground
 shell command that ends without `Close` leaves its shell process alive, so
-this check does not see it: the owner exists, and only the lease and
-`CloseLibrary()` apply.
+this check does not see it: the owner exists, and the library goes on renewing
+the handle's lease while it stays open. The slot is then held until the shell
+process ends, `ZZ9KAppClose` is called by that task, or the Amiga resets.
 
 ```c
 int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib,
@@ -199,17 +202,22 @@ int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib,
 ```
 
 `ZZ9KAppSetLimits` sets the limits the next `LoadFile` or `LoadMemory` sends
-with `LOAD_BEGIN`; it returns `ZZ9K_STATUS_BUSY` once a load has begun on the
-handle. Require `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS`. Both
-values are in MiB, at most 4095, and zero keeps the firmware default. `max_mib`
-caps the app's private memory. `host_visible_mib` is the app's host-visible
-limit, 16 MiB by default. It is a cap, not a reservation, so allocations can
-still fail below it while the card's shared heap is busy. A legacy (non-slot)
-runtime cannot carry a nonzero value, and the call returns
-`ZZ9K_STATUS_UNSUPPORTED`. A host-visible request larger than the card can
-ever grant makes the load fail with `ZZ9K_STATUS_NO_MEMORY`. The firmware
-side is described in `docs/app-runtime.md`, and firmware that advertises
-`ZZ9K_APP_CAP_HOST_LIMIT` honours the host-visible value.
+with `LOAD_BEGIN`; call it from the owning task between `Open` and the load.
+It returns `ZZ9K_STATUS_BUSY` once a load has begun on the handle and when
+another task calls it, `ZZ9K_STATUS_BAD_HANDLE` for a handle that is not live
+or no longer holds its slot, and `ZZ9K_STATUS_BAD_REQUEST` for a value above
+4095. Require
+`ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS`. Both values are in MiB, and zero
+keeps the firmware default. `max_mib` caps the app's private memory.
+`host_visible_mib` is the app's host-visible limit, 16 MiB by default. It is a
+cap, not a reservation, so allocations can still fail below it while the
+card's shared heap is busy. A legacy (non-slot) runtime cannot carry a nonzero
+value, and the call returns `ZZ9K_STATUS_UNSUPPORTED`. A host-visible request
+larger than the card can ever grant makes the load fail with
+`ZZ9K_STATUS_NO_MEMORY`. The library does not check the capability: firmware
+that does not advertise `ZZ9K_APP_CAP_HOST_LIMIT` ignores the host-visible
+word and applies 16 MiB, so query the cap before relying on it. The firmware
+side is described in `docs/app-runtime.md`.
 
 `zz9k-app-echo-test <path-to-echo.elf> [count]` is the hardware smoke client.
 

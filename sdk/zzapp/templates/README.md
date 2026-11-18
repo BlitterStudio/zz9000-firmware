@@ -4,8 +4,9 @@ Templates are MIT-licensed `zz_main` programs. Each one calls `ZZAPP_NOTE()`
 from `zzapp_note.h`, so the image carries the `.zzapp` note without a separate
 assembler file. Do not include `zzapp_proto.h`. The public API is `zzapp.h`.
 
-Apps link against PIC newlib from `build_pic_newlib.sh`. Stock newlib is not
-PIC and fails `zzapp-check`. Set `ZZAPP_PIC_SYSROOT` to that sysroot and
+Apps link against PIC newlib from `build_pic_newlib.sh`, except freestanding
+apps (see "Freestanding" below). Stock newlib is not PIC and fails
+`zzapp-check`. Set `ZZAPP_PIC_SYSROOT` to that sysroot and
 `ZZAPP_SDK` to this `sdk/zzapp` directory (or `/opt/zzapp-sdk` in the image).
 
 ## Make
