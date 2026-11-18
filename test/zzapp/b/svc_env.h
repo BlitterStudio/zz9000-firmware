@@ -18,7 +18,9 @@
 #include "host_card_pool.h"
 #include "memorymap.h"
 #include "xil_cache.h"
+#include "mock_client.h"
 #include "zzapp_rec.h"
+#include "zzapp_xport.h"
 
 struct xil_cache_mock_state g_xil_cache_mock;
 int smp_cpu_id(void) { return 0; }
@@ -86,6 +88,13 @@ static void svc_env_init(uint32_t apps, uint32_t l2_total,
 	for (i = 0U; i < 4096U; i++)
 		svc_env_bsp[i] = (i << 20) | SVC_ENV_DDR_WB;
 	zzapp_as_init(svc_env_bsp);
+	/* The host-visible heap the pair and the service buffers come from. */
+	mock_heap_reset();
+	{
+		zzapp_xport_env_t env = mock_heap_env();
+
+		zzapp_xport_init(&env);
+	}
 	if (out)
 		*out = lay;
 }

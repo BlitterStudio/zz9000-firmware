@@ -215,7 +215,7 @@ static void setup(void)
         uint32_t handle;
         zzapp_rec_t *rec;
 
-        CHECK(zzapp_rec_admit(ZZAPP_REC_NO_WINDOW, &handle, &rec) == 0);
+        CHECK(zzapp_rec_admit(&handle, &rec) == 0);
         CHECK(rec != NULL && rec->hdr.pid == pid);
     }
 }

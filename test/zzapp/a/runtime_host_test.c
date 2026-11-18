@@ -5,6 +5,7 @@
 #include "aar/app.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
+#include "zzapp_xport.h"
 void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t owner,
                         uint32_t generation);
 void zzapp_loader_unbound(void);
@@ -788,7 +789,7 @@ int main(void)
     memset(&info, 0, sizeof(info));
     info.size = sizeof(info);
     assert(zzapp_host_info(&info) == AAR_OK);
-    assert(info.shared_used == 4096u);
+    assert(info.shared_used == 4096u + ZZAPP_XPORT_PAIR_ALLOC);
     assert(info.shared_limit >= info.shared_used);
     assert(zzapp_fault_is_app(card + 4u, 0u, ZZAPP_KERNEL_APP_CPSR));
     assert(!zzapp_fault_wants_restart(card + 4u, 0u, ZZAPP_KERNEL_APP_CPSR));

@@ -19,7 +19,6 @@
 
 #define SECOND_US 1000000ull
 
-static uint8_t window[ZZAPP_WINDOW_BYTES];
 static uint64_t clock_us;
 static unsigned clock_reads;
 static unsigned ticks_while_parked;
@@ -50,8 +49,7 @@ static void start_running_app(void)
 {
     zzapp_boot_init();
     zzapp_services_test_reset();
-    memset(window, 0, sizeof(window));
-    zzapp_services_test_set_window(window, sizeof(window));
+    assert(zzapp_test_admit() == 0U);
     zzapp_test_set_xtime(0);
     assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
     zzapp_test_mark_running();

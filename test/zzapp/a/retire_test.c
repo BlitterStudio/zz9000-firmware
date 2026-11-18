@@ -45,13 +45,11 @@ struct xil_cache_mock_state g_xil_cache_mock;
 /* ---- A services layer reduced to what the host calls. ------------------- */
 
 static uint32_t selected;
-static uint8_t service_window[ZZAPP_WINDOW_BYTES];
 static uint32_t last_refusal;
 static unsigned on_reset_calls;
 
 uint32_t zzapp_services_current_pid(void) { return selected; }
 void zzapp_services_select_pid(uint32_t pid) { selected = pid; }
-uint8_t *zzapp_services_window(void) { return service_window; }
 int zzapp_services_take_start(uint32_t *argc)
 {
     (void)argc;
@@ -739,7 +737,7 @@ static void test_boot_without_arena_leaves_a_usable_kernel(void)
     /* And again: the worker takes it on every pass. */
     assert(zzapp_kernel_system_lock(kernel) == 0);
     assert(zzapp_kernel_system_unlock(kernel) == 0);
-    assert(zzapp_rec_admit(0U, &handle, &rec) == AAR_REASON_MEMORY);
+    assert(zzapp_rec_admit(&handle, &rec) == AAR_REASON_MEMORY);
 }
 
 int main(void)
