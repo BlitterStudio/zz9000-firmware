@@ -10,9 +10,12 @@
 
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 40
-#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.40 (17.11.2026)"
-#define ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT 35
+#define ZZ9K_LIBRARY_REVISION 41
+#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.41 (18.11.2026)"
+/* Revision 41 removes the ZZ9KApp* calls (LVOs -354 to -414). The ARM app
+ * runtime is reached through the static client transport module
+ * (aar_xport_zz9000) instead; the vector table ends at ZZ9KAudioStreamBeginEx
+ * (-348). */
 /* Static clients proxy async completions through the resident library.
  * Revision 36 routes a foreign completion seen during a synchronous call
  * into the pending-request registry. Revisions 34 and 35 drop it, so a
@@ -24,14 +27,6 @@
 /* Revision 38 tags each resident opener's resource allocations and releases
  * them after that opener's final CloseLibrary(). */
 #define ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM 38
-/* Revision 39 lets app LOAD_END wait through the firmware's load lease. */
-#define ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE 39
-/* Revision 40 releases the app slot of an owner task that is gone without
- * ZZ9KAppClose, and adds ZZ9KAppSetLimits (the launcher cap and the
- * host-visible limit carried by LOAD_BEGIN). Gate the call on the second
- * name; the first needs no client change. */
-#define ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP 40
-#define ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS 40
 #define ZZ9K_LIBRARY_MIN_REVISION_CALL_ASYNC_BATCH_MSG 1
 #define ZZ9K_LIBRARY_MIN_REVISION_CANCEL_ASYNC 2
 #define ZZ9K_LIBRARY_MIN_REVISION_WAIT_ASYNC 3
@@ -127,19 +122,6 @@
 #define ZZ9K_LVO_IMAGE_ANIMATION_FRAME_RETIRE (-336)
 #define ZZ9K_LVO_IMAGE_ANIMATION_RESTART (-342)
 #define ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX (-348)
-
-#define ZZ9K_LVO_APP_OPEN (-354)
-#define ZZ9K_LVO_APP_LOAD_FILE (-360)
-#define ZZ9K_LVO_APP_LOAD_MEMORY (-366)
-#define ZZ9K_LVO_APP_START (-372)
-#define ZZ9K_LVO_APP_STOP (-378)
-#define ZZ9K_LVO_APP_STATUS (-384)
-#define ZZ9K_LVO_APP_SEND_MESSAGE (-390)
-#define ZZ9K_LVO_APP_GET_MESSAGE (-396)
-#define ZZ9K_LVO_APP_MESSAGE_SIGNAL (-402)
-#define ZZ9K_LVO_APP_CLOSE (-408)
-#define ZZ9K_LVO_APP_SET_LIMITS (-414)
-
-#define ZZ9K_LVO_FUNCTION_COUNT 65
+#define ZZ9K_LVO_FUNCTION_COUNT 54
 
 #endif /* ZZ9K_LIBRARY_VECTORS_H */

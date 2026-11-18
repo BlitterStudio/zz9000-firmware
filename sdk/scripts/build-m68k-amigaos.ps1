@@ -3,12 +3,27 @@
 
 param(
   # Same pinned GCC 16 image as build-m68k-amigaos.sh.
-  [string]$Image = "amigadev/crosstools:m68k-amigaos@sha256:c0e453fde28fd9c52461f4f9a926c4481548dcfcaca94b0740d8cce4561f2e1e"
+  [string]$Image = "amigadev/crosstools:m68k-amigaos@sha256:c0e453fde28fd9c52461f4f9a926c4481548dcfcaca94b0740d8cce4561f2e1e",
+  # The aar checkout the module's headers come from; default sdk/aar.
+  [string]$AarDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+# The client transport module (amiga/src/aar_xport_zz9000.c) includes the aar
+# headers, pinned in sdk/AAR_REF, and the private wire zzapp_proto.h of the
+# firmware tree. The pinned aar checkout comes from scripts/fetch-aar.sh (run
+# it from a POSIX shell, or pass -AarDir <your checkout>); the wire header is
+# staged under build/.
+if (-not $AarDir) { $AarDir = Join-Path $RepoRoot "aar" }
+if (-not (Test-Path (Join-Path $AarDir "include/aar/transport.h"))) {
+  throw "aar checkout not found at $AarDir: run sh scripts/fetch-aar.sh or pass -AarDir"
+}
+$FirmwareProto = Join-Path $RepoRoot "..\ZZ9000_proto.sdk\ZZ9000OS\src\zzapp_proto.h"
+New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "build\stage") | Out-Null
+Copy-Item -LiteralPath $FirmwareProto -Destination (Join-Path $RepoRoot "build\stage\zzapp_proto.h") -Force
 
 $BuildScript = @'
 set -e
@@ -16,12 +31,13 @@ mkdir -p build/m68k build/dtcode build/providers
 CFLAGS="-fcommon -noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
 STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
+XPORTFLAGS="-Iamiga/src -Ibuild/stage -I/aar/include"
 
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -DZZ9K_HOST_LIBRARY_BUILD=1 \
   -c host/src/zz9k_host.c -o build/m68k/zz9k_host_library.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
-m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_app_client.c -o build/m68k/zz9k_app_client.o
+m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS -c amiga/src/aar_xport_zz9000.c -o build/m68k/aar_xport_zz9000.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-fb-common.c -o build/m68k/zz9k-fb-common.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-image-window.c -o build/m68k/zz9k-image-window.o
@@ -50,13 +66,15 @@ ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-xml.c tools/zzplay/zzplay-pr
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-browse.c tools/zzplay/zzplay-browse-model.c tools/zzplay/zzplay-browse-rows.c tools/zzplay/zzplay-browse-worker.c tools/zzplay/zzplay-browse-gather.c"
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Werror -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
-  build/m68k/zz9k_app_client.o build/m68k/zz9k_host_library.o -o build/zz9k.library
+  build/m68k/zz9k_host_library.o -o build/zz9k.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   amiga/mpega/mpega_resident.c -o build/mpega.library
 
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libtest.c -o build/zz9k-libtest
-m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
-m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-ringtest.c -o build/zz9k-app-ringtest
+m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS build/m68k/aar_xport_zz9000.o \
+  tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
+m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS build/m68k/aar_xport_zz9000.o \
+  tools/zz9k-app-ringtest.c -o build/zz9k-app-ringtest
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libasync.c -o build/zz9k-libasync
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libbatch.c -o build/zz9k-libbatch
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libcancel.c -o build/zz9k-libcancel
@@ -152,7 +170,7 @@ $BuildScript = $BuildScript -replace "`r", "`n"
   [System.Text.Encoding]::ASCII)
 
 try {
-  docker run --rm -v "${RepoRoot}:/work" -w /work $Image sh /work/build/zz9k-build-m68k.sh
+  docker run --rm -v "${RepoRoot}:/work" -v "${AarDir}:/aar:ro" -w /work $Image sh /work/build/zz9k-build-m68k.sh
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
   }
