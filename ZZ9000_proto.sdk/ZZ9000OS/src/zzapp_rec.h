@@ -513,6 +513,15 @@ void zzapp_rec_retire_tables(zzapp_rec_t *rec);
  */
 int zzapp_rec_free(uint32_t handle);
 /*
+ * Quarantine (design 3.10): advance the generation of an admitted record to
+ * the next one, so no handle the client holds names it, and make that the
+ * record's handle. Returns the new handle, or 0 for a NULL or FREE record. The
+ * record keeps its state and every block; zzapp_rec_free() with the new handle
+ * ends it (and bumps the generation again). Calling it twice yields two
+ * different handles; only the last one is live. Same locking as free.
+ */
+uint32_t zzapp_rec_revoke_handle(zzapp_rec_t *rec);
+/*
  * Core 1 is halted (recovery, or core 0 retiring everything). Rebuild the
  * FIFO queue and every count from the state bytes, and the table pool from
  * its ownership marks. A FREE index missing from the queue is appended in
