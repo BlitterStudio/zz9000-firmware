@@ -13,7 +13,7 @@
  *
  * Interface assumed of zzapp_services.c in the standalone test build:
  *   zzapp_service_runtime: defer (.state, .opcode, .cancelled), audio_*,
- *   display_*, wait_kind/wait_value/wait_deadline; DEFER_*; run_deferred();
+ *   display_*, wait_kind/wait_value/wait_deadline; DEFER_*; run_deferred(service_rec());
  *   service_rec(), service_pid(), service_proc(), current_runtime(),
  *   runtime_of(rec); audio_detach(); the service_test_* hooks.
  */
@@ -88,7 +88,7 @@ static void svc_bind(unsigned n, zzapp_rec_t *rec)
 
 /* App `n` the way the old implicit window record was: a record in the IDLE
  * state with its pair and an address space, selected for the services. */
-static zzapp_rec_t *svc_app_new(unsigned n)
+static zzapp_rec_t __attribute__((unused)) *svc_app_new(unsigned n)
 {
 	zzapp_rec_t *rec = NULL;
 	uint32_t handle = 0U;
@@ -107,7 +107,7 @@ static zzapp_rec_t *svc_app_new(unsigned n)
 }
 
 /* App `n` from a CLAIM through the mailbox (CLAIMED, no address space). */
-static zzapp_rec_t *svc_app_claim(unsigned n)
+static zzapp_rec_t __attribute__((unused)) *svc_app_claim(unsigned n)
 {
 	zzapp_rec_t *rec;
 	mock_client probe;
@@ -163,7 +163,7 @@ static uint16_t __attribute__((unused)) svc_load_begin(unsigned n, uint32_t caps
 	}
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(g_app[n].pid);
-	run_deferred();
+	run_deferred(service_rec());
 	service_test_loader_begin_hook = saved;
 	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, reply ? reply : scratch,
 				   &len)) {

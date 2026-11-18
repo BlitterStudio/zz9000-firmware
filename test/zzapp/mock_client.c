@@ -344,7 +344,7 @@ uint16_t mock_client_list(mock_client *c, uint32_t cursor, uint8_t reply[48])
     uint16_t rlen = 0u;
 
     zzapp_build_list_request(req, cursor);
-    return mock_client_call(c, ZZAPP_OP_LIST, req, ZZAPP_MAILBOX_PAYLOAD_BYTES,
+    return mock_client_call(c, ZZAPP_OP_LIST, req, 4U,
                             reply, &rlen);
 }
 

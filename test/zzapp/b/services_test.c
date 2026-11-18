@@ -124,7 +124,7 @@ static void load_begin_run(unsigned n, uint32_t caps, uint8_t reply[48],
 		fail("load begin queued");
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(n));
-	run_deferred();
+	run_deferred(service_rec());
 }
 
 static void harvest_ack(void)
@@ -1070,7 +1070,7 @@ static void test_chunk_reads_the_load_buffer(void)
 				NULL, NULL) == SDK_STATUS_QUEUED, "chunk queued");
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(0U));
-	run_deferred();
+	run_deferred(service_rec());
 	service_test_loader_chunk_hook = NULL;
 	EXPECT(g_chunk_ok && memcmp(g_chunk_data, "hello", 5U) == 0, "chunk bytes from the load buffer");
 	zzapp_mailbox_harvest_ack();
@@ -1195,7 +1195,7 @@ static void test_stop_cancels_completing_load(void)
 	g_abort_base = service_test_loader_abort_count;
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(0U));
-	run_deferred();
+	run_deferred(service_rec());
 	service_test_deferred_completing_hook = NULL;
 	service_test_loader_begin_hook = NULL;
 	EXPECT(g_stop_status == SDK_STATUS_OK, "stop did not take completing load");
@@ -1351,7 +1351,7 @@ static void test_loading_chunk_renews_deadline(void)
 	       "queue slow loading chunk");
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(0U));
-	run_deferred();
+	run_deferred(service_rec());
 	service_test_loader_chunk_hook = NULL;
 	harvest_ack();
 	g_now += ZZAPP_LOAD_LEASE_US - 1U;
@@ -1395,7 +1395,7 @@ static void test_claim_expiry_cancels_running_load(void)
 	service_test_loader_begin_hook = loader_begin_succeeds;
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(0U));
-	run_deferred();
+	run_deferred(service_rec());
 	service_test_deferred_completion_hook = NULL;
 	service_test_loader_begin_hook = NULL;
 	EXPECT(CBSTATE(0) == AAR_STATE_STOPPING &&
@@ -1429,7 +1429,7 @@ static void test_preload_cancellation_keeps_the_loader_consistent(void)
 	service_test_loader_set_generation_hook = expire_running_load;
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(0U));
-	run_deferred();
+	run_deferred(service_rec());
 	service_test_loader_set_generation_hook = NULL;
 	EXPECT(CBSTATE(0) == AAR_STATE_STOPPING &&
 	       __atomic_load_n(&DEF(0).state, __ATOMIC_ACQUIRE) == DEFER_IDLE &&
@@ -1458,7 +1458,7 @@ static void test_harvest_racing_completion_reads_reply(void)
 	service_test_deferred_reply_hook = harvest_between_reply_and_done;
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(0U));
-	run_deferred();
+	run_deferred(service_rec());
 	service_test_deferred_reply_hook = NULL;
 	EXPECT(g_race_result == 0U, "harvest posted completion before DONE");
 	EXPECT(zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL, NULL) &&
