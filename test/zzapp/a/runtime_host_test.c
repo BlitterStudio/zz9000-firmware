@@ -1,14 +1,12 @@
 #include <assert.h>
 #include <stdint.h>
+#include <string.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
-void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
-int zzapp_host_address(const void *p, uint32_t *host_offset);
-int zzapp_host_mem_info(zzapp_mem_info *out);
-void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t bytes,
-                        uint32_t owner, uint32_t generation);
+void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t owner,
+                        uint32_t generation);
 void zzapp_loader_unbound(void);
 void zzapp_test_set_time_hook(uint64_t (*hook)(void));
 void zzapp_kernel_switch_address_space(uint32_t slot);
@@ -347,9 +345,8 @@ static void test_yield_and_tick_scheduling(void)
 int main(void)
 {
     uint32_t card;
-    uint32_t host_offset;
-    void *host_visible;
-    zzapp_mem_info mem;
+    aar_shared shared;
+    aar_info info;
 
     zzapp_boot_init();
     /*
@@ -559,8 +556,7 @@ int main(void)
     zzapp_api_enter();
     zzapp_host_sleep(1000U);
     zzapp_loader_unbound();
-    zzapp_loader_bound(0x04000000U, replacement_mem, sizeof(replacement_mem),
-                       1U, 2U);
+    zzapp_loader_bound(0x04000000U, replacement_mem, 1U, 2U);
     assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
     zzapp_test_mark_running();
     zzapp_host_tick_at(ZZAPP_APP_STALL_US);
@@ -767,17 +763,19 @@ int main(void)
     assert(zzapp_test_cold_restarts() == 0);
 
     zzapp_boot_init();
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     card = zzapp_test_arena_card();
     assert(card != 0u);
     zzapp_test_mark_running();
-    host_visible = zzapp_host_alloc(4096u, 256u, ZZ_ALLOC_HOST_VISIBLE);
-    assert(host_visible != NULL);
-    assert(zzapp_host_address(host_visible, &host_offset) == ZZ_OK);
-    assert(host_offset != 0u);
-    assert(zzapp_host_mem_info(&mem) == ZZ_OK);
-    assert(mem.host_visible_used == 4096u);
-    assert(mem.host_visible_limit >= mem.host_visible_used);
+    memset(&shared, 0, sizeof(shared));
+    assert(zzapp_host_shared_alloc(4096u, 256u, 0u, &shared) == AAR_OK);
+    assert(shared.ptr != NULL && shared.haddr != 0u);
+    assert(shared.bytes == 4096u && (shared.flags & AAR_SHAREDF_COHERENT) != 0u);
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    assert(zzapp_host_info(&info) == AAR_OK);
+    assert(info.shared_used == 4096u);
+    assert(info.shared_limit >= info.shared_used);
     assert(zzapp_fault_is_app(card + 4u, 0u, ZZAPP_KERNEL_APP_CPSR));
     assert(!zzapp_fault_wants_restart(card + 4u, 0u, ZZAPP_KERNEL_APP_CPSR));
     /* SYS and SVC faults inside an API body are privileged, even while
@@ -793,6 +791,6 @@ int main(void)
     zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
     assert(zzapp_test_cold_restarts() == 0);
-    assert(zzapp_host_address(host_visible, &host_offset) == ZZ_EINVAL);
+    assert(zzapp_host_shared_range(shared.ptr, 1u) == AAR_E_INVAL);
     return 0;
 }

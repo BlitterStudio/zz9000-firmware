@@ -12,11 +12,11 @@
 
 #include <stdint.h>
 
-struct zzapp_event;
-struct zzapp_stat;
-struct zzapp_dirent;
-struct zzapp_surface;
-struct zzapp_audio;
+struct aar_event;
+struct aar_stat;
+struct aar_dirent;
+struct aar_surface;
+struct aar_audio;
 
 /* SDK status numbers. Match sdk_mailbox.h; guarded so either include order works. */
 #ifndef SDK_STATUS_OK
@@ -88,33 +88,33 @@ int zzapp_svc_file_close(int fd);
 int zzapp_svc_file_read(int fd, void *buf, uint32_t len, uint32_t *out_n);
 int zzapp_svc_file_write(int fd, const void *buf, uint32_t len, uint32_t *out_n);
 int zzapp_svc_file_seek(int fd, int64_t off, int whence, int64_t *out_pos);
-int zzapp_svc_file_stat(const char *path, struct zzapp_stat *out);
+int zzapp_svc_file_stat(const char *path, struct aar_stat *out);
 int zzapp_svc_file_list_open(const char *path);
-int zzapp_svc_file_list_next(int list, struct zzapp_dirent *out);
+int zzapp_svc_file_list_next(int list, struct aar_dirent *out);
 int zzapp_svc_file_list_close(int list);
 int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
-			   uint32_t flags, struct zzapp_surface *out);
+			   uint32_t flags, struct aar_surface *out);
 int zzapp_svc_display_flip(uint32_t surface_id);
 /* Queue a completed P96 buffer without waiting for ZZRun's acknowledgement. */
 int zzapp_svc_display_flip_async(uint32_t surface_id);
-int zzapp_svc_display_refresh(struct zzapp_surface *out);
+int zzapp_svc_display_refresh(struct aar_surface *out);
 int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
                                   uint32_t count, const uint32_t *rgb);
 int zzapp_display_flip_idle(void);
 /* Blocks the app thread until the last queued flip is acknowledged, as a
- * registered wait the core-1 service pass wakes.  ZZ_OK once idle. */
+ * registered wait the core-1 service pass wakes.  AAR_OK once idle. */
 int zzapp_display_wait_flip_idle(void);
-uint32_t zzapp_svc_display_mailbox_replaced(void);
+uint32_t zzapp_svc_display_latest_dropped(void);
 int zzapp_svc_display_vsync(void);
-int zzapp_svc_input_poll(struct zzapp_event *out, uint32_t max, uint32_t *out_n);
-int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, struct zzapp_audio *out);
+int zzapp_svc_event_poll(struct aar_event *out, uint32_t max, uint32_t *out_n);
+int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, struct aar_audio *out);
 int zzapp_svc_audio_close(void);
 int zzapp_svc_console_write(const void *buf, uint32_t len, uint32_t *out_n);
 int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n);
 int zzapp_svc_msg_send(const void *msg);
 int zzapp_svc_msg_poll(void *msg);
-/* Parks until the host-to-app ring holds a message (ZZ_OK), the timeout in
- * microseconds passes (ZZ_ETIMEDOUT), or the app is stopped (ZZ_EIO). Zero
+/* Parks until the host-to-app ring holds a message (AAR_OK), the timeout in
+ * microseconds passes (AAR_E_TIMEDOUT), or the app is stopped (AAR_E_IO). Zero
  * only tests the ring. The message stays queued for zzapp_svc_msg_poll. */
 int zzapp_svc_msg_wait(uint32_t timeout_us);
 
@@ -145,7 +145,7 @@ int zzapp_mailbox_harvest(uint32_t *request_id, uint32_t *user_cookie,
 			  uint8_t *payload, uint16_t *payload_len);
 void zzapp_mailbox_harvest_ack(void);
 
-/* Slice A provides these strong. Weak stubs here return ZZ_ENOSYS / no-op. */
+/* Slice A provides these strong. Weak stubs here return AAR_E_NOSYS / no-op. */
 int zzapp_loader_begin(void);
 int zzapp_loader_chunk(uint32_t file_off, const void *src, uint32_t len);
 int zzapp_loader_end(void);

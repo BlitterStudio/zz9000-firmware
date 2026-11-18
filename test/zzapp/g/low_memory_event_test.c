@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
 #include "card_pool.h"
 #include "host_card_pool.h"
 #include "zzapp_mem.h"
@@ -56,14 +56,14 @@ static void claim_slot_zero(void)
 
 static void expect_low_memory_event(uint32_t slot, uint32_t crossings)
 {
-    zzapp_event event[2];
+    aar_event event[2];
     uint32_t count;
 
     zzapp_services_select_slot(slot);
-    assert(zzapp_svc_input_poll(event, 2u, &count) == ZZ_OK);
+    assert(zzapp_svc_event_poll(event, 2u, &count) == AAR_OK);
     assert(count == 1u);
-    assert(event[0].type == ZZAPP_EV_LOW_MEMORY);
-    assert(zzapp_svc_input_poll(event, 2u, &count) == ZZ_OK);
+    assert(event[0].type == AAR_EV_LOW_MEMORY);
+    assert(zzapp_svc_event_poll(event, 2u, &count) == AAR_OK);
     assert(count == 0u);
     assert(zzapp_get_be32(windows[slot] + ZZAPP_LIFE_OFF +
                           ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF) == crossings);
@@ -72,11 +72,11 @@ static void expect_low_memory_event(uint32_t slot, uint32_t crossings)
 
 static void expect_no_low_memory_event(uint32_t slot, uint32_t crossings)
 {
-    zzapp_event event;
+    aar_event event;
     uint32_t count;
 
     zzapp_services_select_slot(slot);
-    assert(zzapp_svc_input_poll(&event, 1u, &count) == ZZ_OK);
+    assert(zzapp_svc_event_poll(&event, 1u, &count) == AAR_OK);
     assert(count == 0u);
     assert(zzapp_get_be32(windows[slot] + ZZAPP_LIFE_OFF +
                           ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF) == crossings);

@@ -22,8 +22,8 @@ Research GmbH. SDK issues and fork-specific discussion belong here.
 | `scripts/` | m68k build, package, descriptor-generation, and icon-generation scripts |
 | `tests/` | Host-side tests and test fixtures |
 
-ARM apps on core 1 use [the developer guide](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-developer-guide.md)
-and [the API reference](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-api.md), which live in BlitterStudio/aar. The Amiga package includes
+ARM apps on core 1 use [the developer guide](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md)
+and [the API reference](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md), which live in BlitterStudio/aar. The Amiga package includes
 `zz9k-app-echo-test`, which loads an `echo.elf` built from the ARM app
 template and verifies its 32-byte message round trip, and
 `zz9k-app-ringtest`, which floods the message ring from `ringflood.elf` and

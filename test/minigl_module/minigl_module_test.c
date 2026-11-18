@@ -19,7 +19,8 @@
 #include "zzm_minigl_host.h"
 #include "zzm_runtime.h"
 #include "ff.h"
-#include "zzapp.h"
+#include "aar/app.h"
+#include "aar/ext_zz9000.h"
 #include "mw_ctx.h"
 #include "minigl_platform.h"
 #include "rix_drv.h"
@@ -984,7 +985,7 @@ int main(void)
     /* Queued ARM presentation needs two retained frames plus one draw target. */
     assert(amiberry_transport_inproc_ctx()->state.target.buffer_count == 3U);
     {
-        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        const aar_gl *draw = (const aar_gl *)gl;
         uint32_t textures[3];
         uint8_t *pixels = calloc(1U, 64U << 20);
 
@@ -1110,7 +1111,7 @@ int main(void)
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
         assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
-        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        const aar_gl *draw = (const aar_gl *)gl;
         volatile ZZ9KMiniGLControlBlockV9 *ctrl;
         uint32_t init_consumer;
         uint32_t slot_idx;
@@ -1168,7 +1169,7 @@ int main(void)
          * through bounded feed steps instead of failing into a GL error. */
         extern int zzm_module_can_park(void);
         extern void zzm_module_set_worker_context(int active);
-        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        const aar_gl *draw = (const aar_gl *)gl;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
         unsigned long fed_bytes;
 
@@ -1178,9 +1179,9 @@ int main(void)
         ops->app_reclaim(context, 1U);
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
-        assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_INLINE_RIX_FEED,
+        assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED,
                                    &gl) == 0 && gl != NULL);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
         assert(minigl_raster_hardware_available());
         assert(minigl_raster_drain());
         g_test_rix_full_reads = TEST_FIFO_FULL_READS;
@@ -1232,16 +1233,16 @@ int main(void)
         /* The app's GL calls feed its own ring: a call made while a sealed
          * frame waits pushes it on, and a call with nothing queued touches
          * no RasterIX or DMA register. */
-        const zzapp_gl *draw;
+        const aar_gl *draw;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
 
         ops->app_unbind(context);
         ops->app_reclaim(context, 1U);
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
-        assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_INLINE_RIX_FEED,
+        assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED,
                                    &gl) == 0 && gl != NULL);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
         assert(minigl_raster_drain());
         g_test_rix_full_reads = TEST_FIFO_FULL_READS;
         draw->VertexPointer(2, 0x1406U, 8, quad);
@@ -1268,7 +1269,7 @@ int main(void)
          * app parked in a GL call it keeps feeding. */
         extern void zzm_module_api_enter(void);
         extern void zzm_module_api_leave(void);
-        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        const aar_gl *draw = (const aar_gl *)gl;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
 
         g_test_rix_full_reads = TEST_FIFO_FULL_READS;
@@ -1292,7 +1293,7 @@ int main(void)
          * the ring the call is waiting on. */
         extern void zzm_module_api_enter(void);
         extern void zzm_module_api_leave(void);
-        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        const aar_gl *draw = (const aar_gl *)gl;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
         ZZ9KMiniGLTransportDescriptor desc;
         volatile ZZ9KMiniGLControlBlockV9 *ctrl;
@@ -1386,7 +1387,7 @@ int main(void)
         /* MW_PRESENT rotates from A's submitted target to a fresh target.
          * B must retire A's fence before replacing backend owner state, for
          * both the async app ring and a synchronous wire context. */
-        const zzapp_gl *draw;
+        const aar_gl *draw;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f,
                           0.5f, 0.5f, -0.5f, 0.5f };
         uint32_t handle_a = 0U;
@@ -1398,7 +1399,7 @@ int main(void)
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
         assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
         draw->VertexPointer(2, 0x1406U, 8, quad);
         draw->EnableClientState(0x8074U);
         draw->DrawArrays(0x0005U, 0, 4);
@@ -1520,7 +1521,7 @@ int main(void)
         /* A DDR list the GPU is still fetching must complete before the
          * forced abort resets the renderer, even though STATUS looks idle
          * between bursts and then turns busy again. */
-        const zzapp_gl *draw;
+        const aar_gl *draw;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
         unsigned step;
 
@@ -1529,7 +1530,7 @@ int main(void)
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
         assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
         assert(minigl_raster_hardware_available());
         g_fetch_hold = 1;
         g_fetch_release_us = ~(uint64_t)0;
@@ -1554,14 +1555,14 @@ int main(void)
         ops->app_reclaim(context, 1U);
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
-        assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_INLINE_RIX_FEED,
+        assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED,
                                    &gl) == 0 && gl != NULL);
     }
     {
         /* Finding 3: the real unload path (ops->fini) drains pending feed
          * work before the app context teardown force-aborts the engines,
          * and leaves the module reusable. */
-        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        const aar_gl *draw = (const aar_gl *)gl;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
 
         assert(minigl_raster_drain());
@@ -1619,16 +1620,16 @@ int main(void)
     }
     {
         /* P2: an old-table platform gives an async feed over MMIO, with no backend disable. */
-        const zzapp_gl *draw;
+        const aar_gl *draw;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
         ops->app_unbind(context);
         ops->app_reclaim(context, 1U);
 
         assert(minigl_platform_set_graphics(&old_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
-        assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_INLINE_RIX_FEED,
+        assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED,
                                    &gl) == 0 && gl != NULL);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
 
         draw->VertexPointer(2, 0x1406U, 8, quad);
         draw->EnableClientState(0x8074U);
@@ -1658,7 +1659,7 @@ int main(void)
     display_back = 0x08100000U;
     display_layout = 2U;
     display_flags = 1U << 15;
-    assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_DIRECT_PRESENT, &gl) == 0);
+    assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_DIRECT_PRESENT, &gl) == 0);
     assert(amiberry_transport_inproc_ctx()->state.target.buffer_count == 3U);
     assert(ops->app_swap(context) == 0);
     assert(ops->app_swap(context) == 0);
@@ -1670,19 +1671,19 @@ int main(void)
     assert(amiberry_transport_inproc_ctx()->rix_submit_mode ==
            RIX_DRV_SUBMIT_MEMFETCH);
     ops->app_unbind(context);
-    assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_INLINE_RIX_FEED,
+    assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED,
                                &gl) == 0);
     assert(amiberry_transport_inproc_ctx()->rix_async != 0U);
     assert(amiberry_transport_inproc_ctx()->rix_submit_mode ==
            RIX_DRV_SUBMIT_INLINE);
     ops->app_unbind(context);
-    assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_SYNC_RIX_FEED,
+    assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_SYNC_RIX_FEED,
                                &gl) == 0);
     assert(amiberry_transport_inproc_ctx()->rix_async == 0U);
     assert(amiberry_transport_inproc_ctx()->rix_submit_mode ==
            RIX_DRV_SUBMIT_MEMFETCH);
     ops->app_unbind(context);
-    assert(ops->app_bind_flags(context, 1U, 16U, &gl) == ZZ_EINVAL);
+    assert(ops->app_bind_flags(context, 1U, 16U, &gl) == AAR_E_INVAL);
 
     /*
      * copy_bound must honour the bound layout byte for byte (it used to
@@ -1758,7 +1759,7 @@ int main(void)
     display_pitch = 8U;
     assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0);
     {
-        const zzapp_gl *draw = (const zzapp_gl *)gl;
+        const aar_gl *draw = (const aar_gl *)gl;
         mw_ctx *mw;
 
         draw->ClearColor(1.0f, 0.0f, 0.0f, 1.0f);
@@ -1791,7 +1792,7 @@ int main(void)
     hold_flip = 1;
     flip_idle = 1;
     flip_waits = 0U;
-    assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_SYNC_PRESENT, &gl) == 0);
+    assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_SYNC_PRESENT, &gl) == 0);
     assert(ops->app_swap(context) == 0);
     /* The held flip is waited for in the host's registered flip wait. */
     assert(flip_waits != 0U);
@@ -1823,7 +1824,7 @@ int main(void)
          * after the stop (the card's failure): the reset still completes
          * at once, Kickstart's second reset request completes too, and the
          * next bind claims the channel back. */
-        const zzapp_gl *draw;
+        const aar_gl *draw;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
         int result = ZZM_MINIGL_RESET_BUSY;
         unsigned steps;
@@ -1832,9 +1833,9 @@ int main(void)
 
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
-        assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_INLINE_RIX_FEED,
+        assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED,
                                    &gl) == 0 && gl != NULL);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
         draw->VertexPointer(2, 0x1406U, 8, quad);
         draw->EnableClientState(0x8074U);
         draw->DrawArrays(0x0005U, 0, 4);
@@ -1854,10 +1855,10 @@ int main(void)
 
         g_test_rix_claim_fails = 0;
         claims = g_test_rix_claims;
-        assert(ops->app_bind_flags(context, 1U, ZZ_GL_BIND_INLINE_RIX_FEED,
+        assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_INLINE_RIX_FEED,
                                    &gl) == 0 && gl != NULL);
         assert(g_test_rix_claims > claims);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
         fed_bytes = g_test_rix_tlf_bytes;
         draw->VertexPointer(2, 0x1406U, 8, quad);
         draw->EnableClientState(0x8074U);
@@ -1961,7 +1962,7 @@ int main(void)
          * resets it but must not hand back any memory RasterIX may still
          * read or write: the command buffers and render targets stay in
          * live card-pool blocks. */
-        const zzapp_gl *draw;
+        const aar_gl *draw;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
         uint32_t *kept = quarantined_kept;
         unsigned *kept_count = &quarantined_kept_count;
@@ -1972,7 +1973,7 @@ int main(void)
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
         assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
         assert(minigl_raster_hardware_available());
         g_fetch_hold = 1;
         g_fetch_wedged = 1;
@@ -2010,7 +2011,7 @@ int main(void)
          * Past the wait deadline the backend is disabled and the packet
          * is processed. */
         extern void (*g_rix_test_log)(const char *fmt, ...);
-        const zzapp_gl *draw;
+        const aar_gl *draw;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
         ZZ9KMiniGLTransportDescriptor desc;
         volatile ZZ9KMiniGLControlBlockV9 *ctrl;
@@ -2023,7 +2024,7 @@ int main(void)
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
         assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
-        draw = (const zzapp_gl *)gl;
+        draw = (const aar_gl *)gl;
         assert(minigl_raster_drain());
         g_fetch_hold = 1;
         g_fetch_wedged = 1;

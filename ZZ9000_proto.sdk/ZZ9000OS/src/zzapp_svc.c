@@ -22,13 +22,21 @@
 #define VENEER_BYTES 12U
 #define VENEER_PAGE_BYTES 4096U
 #define STRING_BYTES 512U
-#define COPY_BYTES sizeof(zzapp_dirent)
-#define API_FIRST offsetof(zzapp_api, exit)
-#define GL_FIRST offsetof(zzapp_gl, Begin)
-#define API_SLOT(field) ((uint32_t)((offsetof(zzapp_api, field) - API_FIRST) / sizeof(void *)))
-#define GL_SLOT(field) ((uint32_t)((offsetof(zzapp_gl, field) - GL_FIRST) / sizeof(void *)))
-#define API_COUNT ((uint32_t)((sizeof(zzapp_api) - API_FIRST) / sizeof(void *)))
-#define GL_COUNT ((uint32_t)((sizeof(zzapp_gl) - GL_FIRST) / sizeof(void *)))
+#define COPY_BYTES sizeof(aar_dirent)
+#define API_FIRST offsetof(aar_api, exit)
+#define GL_FIRST offsetof(aar_gl, Begin)
+#define API_SLOT(field) ((uint32_t)((offsetof(aar_api, field) - API_FIRST) / sizeof(void *)))
+#define GL_SLOT(field) ((uint32_t)((offsetof(aar_gl, field) - GL_FIRST) / sizeof(void *)))
+#define API_COUNT ((uint32_t)((sizeof(aar_api) - API_FIRST) / sizeof(void *)))
+#define GL_COUNT ((uint32_t)((sizeof(aar_gl) - GL_FIRST) / sizeof(void *)))
+/* One more veneer than the table has slots: aar_ext_zz9000.gl_bind_flags. */
+#define API_VENEERS (API_COUNT + 1U)
+_Static_assert(API_COUNT == AAR_API_SLOT_COUNT, "aar_api slot count");
+_Static_assert(GL_COUNT == AAR_GL_SLOT_COUNT, "aar_gl slot count");
+_Static_assert(ZZAPP_SVC_EXT_GL_BIND_FLAGS == API_COUNT, "ext veneer number");
+_Static_assert(API_VENEERS <= ZZAPP_SVC_GL_FIRST, "api veneers below gl");
+/* Words a call can occupy: AAPCS argument registers and stack words. */
+#define SVC_MAX_WORDS 12U
 #define GL_INVALID_VALUE 0x0501U
 #define GL_INVALID_OPERATION 0x0502U
 #define GL_BYTE 0x1400U
@@ -63,20 +71,22 @@ extern uint8_t zzapp_svc_veneer_page[];
 __attribute__((weak)) int zzapp_kernel_current_thread(void) { return -1; }
 __attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
 { (void)slot; return NULL; }
-__attribute__((weak)) const zzapp_api *zzapp_api_table(void) { return NULL; }
+__attribute__((weak)) const aar_api *zzapp_api_table(void) { return NULL; }
 #endif
 
 struct user_api_table {
-    zzapp_api table;
+    aar_api table;
+    aar_ext_zz9000 ext;
     char build_id[128];
 } __attribute__((aligned(VENEER_PAGE_BYTES)));
 struct user_gl_table {
-    zzapp_gl table;
-    char build_id[128];
+    aar_gl table;
+    /* glGetString results: a NUL-terminated copy the app can read. */
+    char string[128];
 } __attribute__((aligned(VENEER_PAGE_BYTES)));
 static struct user_api_table user_api[ZZAPP_AS_SLOT_COUNT];
 static struct user_gl_table user_gl[ZZAPP_AS_SLOT_COUNT];
-static const zzapp_gl *direct_gl[ZZAPP_AS_SLOT_COUNT];
+static const aar_gl *direct_gl[ZZAPP_AS_SLOT_COUNT];
 static uintptr_t veneer_alias[ZZAPP_AS_SLOT_COUNT];
 static uintptr_t api_alias[ZZAPP_AS_SLOT_COUNT];
 
@@ -702,64 +712,100 @@ static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 #define OUT_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
 #define OUT_GL_GET(a) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_GET, 0U, 4U, 1U)
 #define IN_INDICES(a, n) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_INDICES, n, 1U, 0U)
+/* Pointers a NULL value of which the API defines as AAR_E_INVAL (or as a
+ * valid "none"): dispatch skips them, the handler decides. */
+#define OPT(a, d, l, n, e, c) { a, d, l, n, e, c, 1U, 0U, 0U }
+#define IN_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_FIXED, 0U, n, 1U)
+#define IO_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_INOUT, ZZAPP_SVC_LENGTH_FIXED, 0U, n, 1U)
+#define IO_SIZED(a, n) OPT(a, ZZAPP_SVC_POINTER_INOUT, ZZAPP_SVC_LENGTH_SIZE_FIELD, 0U, n, 1U)
+#define IN_ARG_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_ARGUMENT, n, 1U, 0U)
+#define OUT_ARG_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_ARGUMENT, n, 1U, 0U)
+#define IN_ARG64_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_ARGUMENT64, n, 1U, 0U)
+#define OUT_ARG64_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_ARGUMENT64, n, 1U, 0U)
+#define IN_COUNT_OPT(a, n, e) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
+#define OUT_COUNT_OPT(a, n, e) OPT(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
+#define IN_STRING_OPT(a) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, 1U, 1U)
+#define OUT_PTR(a) OUT_OPTIONAL(a, sizeof(void *), 1U)
+#define OUT_U32(a) OUT_OPTIONAL(a, 4U, 1U)
+#define OUT_U64(a) OUT_OPTIONAL(a, 8U, 1U)
 
-/* The descriptors are the ABI audit: argument words include 64-bit values and
- * stack words, and every user pointer has its direction and extent. */
-static const zzapp_svc_descriptor_t api_descriptors[API_COUNT] = {
+/* The descriptors are the ABI audit of aar_api. `arguments` counts AAPCS
+ * words: a uint64_t or int64_t takes an even register pair or an 8-aligned
+ * stack pair, so a call that has one after an odd number of words carries a
+ * padding word (file_seek: fd, pad, offset lo and hi, whence, out_pos).
+ * Every user pointer has its direction and extent; a pointer whose NULL
+ * the API defines is optional here and refused by the handler. */
+static const zzapp_svc_descriptor_t api_descriptors[API_VENEERS] = {
+    /* core: lifecycle and time */
     [API_SLOT(exit)] = D(1, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [API_SLOT(yield)] = D(0, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [API_SLOT(should_stop)] = DL(0, ZZAPP_SVC_RETURN_INT, N, N, N),
     [API_SLOT(time_us)] = DL(0, ZZAPP_SVC_RETURN_U64, N, N, N),
     [API_SLOT(sleep_us)] = D(1, ZZAPP_SVC_RETURN_VOID, N, N, N),
-    [API_SLOT(alloc)] = D(3, ZZAPP_SVC_RETURN_POINTER, N, N, N),
-    [API_SLOT(free)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 1U, 0U), N, N),
-    [API_SLOT(heap_range)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_OPTIONAL(0, 4U, 1U), OUT_OPTIONAL(1, 4U, 1U), N),
+    [API_SLOT(info)] = D(1, ZZAPP_SVC_RETURN_INT, IO_SIZED(0, sizeof(aar_info)), N, N),
+    /* core: private heap */
+    [API_SLOT(heap_range)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_PTR(0), OUT_U64(1), N),
+    [API_SLOT(heap_grow)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_PTR(2), N, N),
+    [API_SLOT(heap_shrink)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_PTR(2), N, N),
+    [API_SLOT(heap_info)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(0, sizeof(aar_heap_info), 1U), N, N),
+    /* core: shared buffers and visibility. The pointers of shared_free,
+     * publish and acquire are identities looked up in the app's blocks. */
+    [API_SLOT(shared_alloc)] = D(5, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(4, sizeof(aar_shared), 1U), N, N),
+    [API_SLOT(shared_free)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(publish)] = D(4, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(acquire)] = D(4, ZZAPP_SVC_RETURN_INT, N, N, N),
+    /* core: log, files, console */
     [API_SLOT(log)] = D(2, ZZAPP_SVC_RETURN_VOID, IN_ARG(0, 1), N, N),
-    [API_SLOT(file_open)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING(0), N, N),
+    [API_SLOT(file_open)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), N, N),
     [API_SLOT(file_close)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(file_read)] = D(4, ZZAPP_SVC_RETURN_INT, OUT_ARG(1, 2), OUT_FIXED(3, 4U, 1U), N),
-    [API_SLOT(file_write)] = D(4, ZZAPP_SVC_RETURN_INT, IN_ARG(1, 2), OUT_FIXED(3, 4U, 1U), N),
-    [API_SLOT(file_seek)] = D(6, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(5, 8U, 1U), N, N),
-    [API_SLOT(file_stat)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING(0), OUT_FIXED(1, sizeof(zzapp_stat), 1U), N),
-    [API_SLOT(file_list_open)] = D(1, ZZAPP_SVC_RETURN_INT, IN_STRING(0), N, N),
-    [API_SLOT(file_list_next)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, sizeof(zzapp_dirent), 1U), N, N),
+    [API_SLOT(file_read)] = D(4, ZZAPP_SVC_RETURN_INT, OUT_ARG(1, 2), OUT_U32(3), N),
+    [API_SLOT(file_write)] = D(4, ZZAPP_SVC_RETURN_INT, IN_ARG(1, 2), OUT_U32(3), N),
+    [API_SLOT(file_seek)] = D(6, ZZAPP_SVC_RETURN_INT, OUT_U64(5), N, N),
+    [API_SLOT(file_stat)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), OUT_OPTIONAL(1, sizeof(aar_stat), 1U), N),
+    [API_SLOT(file_list_open)] = D(1, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), N, N),
+    [API_SLOT(file_list_next)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(1, sizeof(aar_dirent), 1U), N, N),
     [API_SLOT(file_list_close)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(display_open)] = D(5, ZZAPP_SVC_RETURN_INT, OUT_FIXED(4, sizeof(zzapp_surface), 1U), N, N),
+    [API_SLOT(console_write)] = D(3, ZZAPP_SVC_RETURN_INT, IN_ARG(0, 1), OUT_U32(2), N),
+    [API_SLOT(console_read)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_ARG(0, 1), OUT_U32(2), N),
+    /* core: events and messages */
+    [API_SLOT(event_poll)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_COUNT_OPT(0, 1, sizeof(aar_event)), OUT_U32(2), N),
+    [API_SLOT(msg_send)] = D(1, ZZAPP_SVC_RETURN_INT, IN_OPT(0, AAR_MSG_BYTES), N, N),
+    [API_SLOT(msg_poll)] = DP(1, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(0, AAR_MSG_BYTES, 1U), N, N),
+    [API_SLOT(msg_wait)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
+    /* optional */
+    [API_SLOT(ext)] = D(2, ZZAPP_SVC_RETURN_POINTER, N, N, N),
+    [API_SLOT(map_file)] = D(3, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), OUT_PTR(1), OUT_U64(2)),
+    [API_SLOT(unmap_file)] = D(1, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    /* display */
+    [API_SLOT(display_open)] = D(5, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(4, sizeof(aar_surface), 1U), N, N),
     [API_SLOT(display_flip)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(display_flip_async)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(display_flip_idle)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(display_refresh)] = D(1, ZZAPP_SVC_RETURN_INT, IO_OPT(0, sizeof(aar_surface)), N, N),
     [API_SLOT(display_vsync)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(display_set_palette)] = D(4, ZZAPP_SVC_RETURN_INT, IN_COUNT_OPT(3, 2, 4U), N, N),
     [API_SLOT(display_close)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(input_poll)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_COUNT(0, 1, sizeof(zzapp_event)), OUT_FIXED(2, 4U, 1U), N),
-    [API_SLOT(audio_open)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_FIXED(2, sizeof(zzapp_audio), 1U), N, N),
+    [API_SLOT(display_latest_dropped)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
+    /* audio */
+    [API_SLOT(audio_open)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(2, sizeof(aar_audio), 1U), N, N),
     [API_SLOT(audio_close)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(audio_stats)] = D(1, ZZAPP_SVC_RETURN_INT, IO_SIZED(0, sizeof(aar_audio_stats)), N, N),
+    /* GL */
     [API_SLOT(gl_bind)] = D(1, ZZAPP_SVC_RETURN_POINTER, N, N, N),
     [API_SLOT(gl_swap)] = D(0, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [API_SLOT(gl_unbind)] = D(0, ZZAPP_SVC_RETURN_VOID, N, N, N),
-    [API_SLOT(display_flip_async)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(display_flip_idle)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(display_refresh)] = D(1, ZZAPP_SVC_RETURN_INT, IO_FIXED(0, sizeof(zzapp_surface), 1U), N, N),
-    [API_SLOT(gl_bind_flags)] = D(2, ZZAPP_SVC_RETURN_POINTER, N, N, N),
-    [API_SLOT(display_set_palette)] = D(4, ZZAPP_SVC_RETURN_INT, IN_COUNT(3, 2, 4U), N, N),
-    [API_SLOT(display_mailbox_replaced)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(host_address)] = D(2, ZZAPP_SVC_RETURN_INT, IN_FIXED(0, 1U, 0U), OUT_FIXED(1, 4U, 1U), N),
-    [API_SLOT(mem_info)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, sizeof(zzapp_mem_info), 1U), N, N),
-    [API_SLOT(map_file)] = D(3, ZZAPP_SVC_RETURN_INT, IN_STRING(0), OUT_FIXED(1, 4U, 1U), OUT_FIXED(2, 4U, 1U)),
-    [API_SLOT(unmap_file)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 1U, 0U), N, N),
-    [API_SLOT(sha256)] = D(3, ZZAPP_SVC_RETURN_INT, IN_ARG(0, 1), OUT_FIXED(2, 32U, 1U), N),
-    [API_SLOT(decompress)] = D(7, ZZAPP_SVC_RETURN_INT, IN_ARG(2, 3), OUT_ARG(4, 5), OUT_FIXED(6, sizeof(zzapp_service_result), 1U)),
-    [API_SLOT(image_open)] = D(3, ZZAPP_SVC_RETURN_INT, IN_FIXED(0, sizeof(zzapp_image_open), 1U), OUT_FIXED(1, 4U, 1U), OUT_FIXED(2, sizeof(zzapp_image_result), 1U)),
-    [API_SLOT(image_decode)] = D(5, ZZAPP_SVC_RETURN_INT, IN_ARG(1, 2), OUT_FIXED(4, sizeof(zzapp_image_result), 1U), N),
+    /* services: whole-buffer byte counts are uint64_t, so every buffer
+     * whose length is one takes its length from a word pair */
+    [API_SLOT(sha256)] = D(5, ZZAPP_SVC_RETURN_INT, IN_ARG64_OPT(0, 2), OUT_OPTIONAL(4, AAR_SHA256_BYTES, 1U), N),
+    [API_SLOT(decompress)] = D(11, ZZAPP_SVC_RETURN_INT, IN_ARG64_OPT(2, 4), OUT_ARG64_OPT(6, 8), OUT_OPTIONAL(10, sizeof(aar_service_result), 1U)),
+    [API_SLOT(image_open)] = D(3, ZZAPP_SVC_RETURN_INT, IN_OPT(0, sizeof(aar_image_params)), OUT_U32(1), OUT_OPTIONAL(2, sizeof(aar_image_result), 1U)),
+    [API_SLOT(image_decode)] = D(5, ZZAPP_SVC_RETURN_INT, IN_ARG_OPT(1, 2), OUT_OPTIONAL(4, sizeof(aar_image_result), 1U), N),
     [API_SLOT(image_close)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(audio_decode_open)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, 4U, 1U), N, N),
-    [API_SLOT(audio_decode)] = D(7, ZZAPP_SVC_RETURN_INT, IN_ARG(1, 2), OUT_COUNT(4, 5, 4U), OUT_FIXED(6, sizeof(zzapp_audio_decode_result), 1U)),
+    [API_SLOT(audio_decode_open)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_U32(1), N, N),
+    [API_SLOT(audio_decode)] = D(7, ZZAPP_SVC_RETURN_INT, IN_ARG_OPT(1, 2), OUT_COUNT_OPT(4, 5, 4U), OUT_OPTIONAL(6, sizeof(aar_audio_decode_result), 1U)),
     [API_SLOT(audio_decode_close)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
-    [API_SLOT(console_write)] = D(3, ZZAPP_SVC_RETURN_INT, IN_ARG(0, 1), OUT_FIXED(2, 4U, 1U), N),
-    [API_SLOT(console_read)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_ARG(0, 1), OUT_FIXED(2, 4U, 1U), N),
-    [API_SLOT(msg_send)] = D(1, ZZAPP_SVC_RETURN_INT, IN_FIXED(0, 32U, 1U), N, N),
-    [API_SLOT(msg_poll)] = DP(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, 32U, 1U), N, N),
-    [API_SLOT(heap_grow)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, 4U, 1U), N, N),
-    [API_SLOT(heap_shrink)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_FIXED(1, 4U, 1U), N, N),
-    [API_SLOT(heap_info)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_FIXED(0, sizeof(zzapp_heap_info), 1U), N, N),
-    [API_SLOT(msg_wait)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N)
+    /* aar_ext_zz9000.gl_bind_flags: not a table slot, the next veneer */
+    [ZZAPP_SVC_EXT_GL_BIND_FLAGS] = D(2, ZZAPP_SVC_RETURN_POINTER, N, N, N)
 };
 
 #define G0(f, r) [GL_SLOT(f)] = D(0, r, N, N, N)
@@ -825,30 +871,30 @@ static const zzapp_svc_descriptor_t gl_descriptors[GL_COUNT] = {
 uint32_t zzapp_svc_api_count(void) { return API_COUNT; }
 uint32_t zzapp_svc_gl_count(void) { return GL_COUNT; }
 const zzapp_svc_descriptor_t *zzapp_svc_api_descriptor(uint32_t slot)
-{ return slot < API_COUNT && slot != API_SLOT(build_id) ? &api_descriptors[slot] : NULL; }
+{ return slot < API_VENEERS ? &api_descriptors[slot] : NULL; }
 const zzapp_svc_descriptor_t *zzapp_svc_gl_descriptor(uint32_t slot)
-{ return slot < GL_COUNT && slot != GL_SLOT(build_id) ? &gl_descriptors[slot] : NULL; }
+{ return slot < GL_COUNT ? &gl_descriptors[slot] : NULL; }
 
 uintptr_t zzapp_svc_api_veneer(uint32_t slot)
-{ return slot < API_COUNT ? (uintptr_t)VENEER_PAGE + slot * VENEER_BYTES : 0U; }
+{ return slot < API_VENEERS ? (uintptr_t)VENEER_PAGE + slot * VENEER_BYTES : 0U; }
 uintptr_t zzapp_svc_gl_veneer(uint32_t slot)
 { return slot < GL_COUNT ? (uintptr_t)VENEER_PAGE + (ZZAPP_SVC_GL_FIRST + slot) * VENEER_BYTES : 0U; }
 int zzapp_svc_set_veneer_alias(uint32_t slot, uintptr_t address)
 {
     if (slot >= ZZAPP_AS_SLOT_COUNT || !address ||
         address & (VENEER_PAGE_BYTES - 1U))
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     veneer_alias[slot] = address;
-    return ZZ_OK;
+    return AAR_OK;
 }
 int zzapp_svc_set_table_aliases(uint32_t slot, uintptr_t api_address,
                                 uintptr_t gl_address)
 {
     if (slot >= ZZAPP_AS_SLOT_COUNT || !api_address || !gl_address)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     api_alias[slot] = api_address;
     gl_alias[slot] = gl_address;
-    return ZZ_OK;
+    return AAR_OK;
 }
 int zzapp_svc_is_veneer(uintptr_t address)
 {
@@ -866,21 +912,75 @@ static void copy_build_id(char *destination, const char *source)
     destination[i] = '\0';
 }
 
-int zzapp_svc_copy_api(zzapp_api *destination, const zzapp_api *source)
+/* A veneer, or NULL where the runtime's table has a NULL slot: the app
+ * reads NULL as "not implemented" (audio_stats). Slots the source table's
+ * size does not cover get a veneer; the app gates on `size`. */
+static uintptr_t table_entry(const aar_api *source, uint32_t slot, uintptr_t veneer)
+{
+    uint64_t end = (uint64_t)API_FIRST + ((uint64_t)slot + 1U) * sizeof(void *);
+
+    if (end <= source->size &&
+        *(const uintptr_t *)(const void *)((const uint8_t *)source + API_FIRST +
+                                           slot * sizeof(void *)) == 0U)
+        return 0U;
+    return veneer;
+}
+
+int zzapp_svc_copy_api(aar_api *destination, const aar_api *source)
 {
     uintptr_t *entries;
     uint32_t i;
     if (!destination || !source || source->size > sizeof(*destination) || source->size < API_FIRST)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     memcpy(destination, source, source->size);
     entries = (uintptr_t *)(void *)((uint8_t *)destination + API_FIRST);
     for (i = 0U; i < API_COUNT; ++i)
-        if (i != API_SLOT(build_id)) entries[i] = zzapp_svc_api_veneer(i);
-    copy_build_id(user_api[0].build_id, source->build_id);
-    destination->build_id = user_api[0].build_id;
-    return ZZ_OK;
+        entries[i] = table_entry(source, i, zzapp_svc_api_veneer(i));
+    return AAR_OK;
 }
-const zzapp_api *zzapp_svc_api_for_slot(uint32_t slot, const zzapp_api *source)
+
+/* Where the app sees field `offset` of its slot's table page. */
+static uintptr_t user_table_address(uint32_t slot, const void *kernel_address,
+                                    size_t offset)
+{
+    return api_alias[slot] ? api_alias[slot] + offset :
+           (uintptr_t)kernel_address;
+}
+
+static uintptr_t user_veneer(uint32_t slot, uint32_t number)
+{
+    return (veneer_alias[slot] ? veneer_alias[slot] : (uintptr_t)VENEER_PAGE) +
+           number * VENEER_BYTES;
+}
+
+/* The slot's aar_ext_zz9000 for the app: the runtime's own table with
+ * gl_bind_flags a veneer and build_id copied into the app's read-only page.
+ * gl_build_id stays NULL: the resident firmware does not know the GL module's
+ * source revision (the module prints it on the UART when it loads). */
+static void fill_user_ext(uint32_t slot, struct user_api_table *table,
+                          const aar_api *source)
+{
+    const aar_ext_zz9000 *runtime = NULL;
+
+    memset(&table->ext, 0, sizeof(table->ext));
+    table->build_id[0] = '\0';
+    if (AAR_API_COVERS(source, ext) && source->ext)
+        runtime = (const aar_ext_zz9000 *)source->ext(AAR_PLATFORM_ZZ9000,
+                                                       AAR_EXT_ZZ9000_MAIN);
+    if (!runtime)
+        return;
+    table->ext.size = (uint32_t)sizeof(table->ext);
+    if (AAR_EXT_ZZ9000_COVERS(runtime, gl_bind_flags) && runtime->gl_bind_flags)
+        table->ext.gl_bind_flags = (const aar_gl *(*)(uint32_t, uint32_t))
+            user_veneer(slot, ZZAPP_SVC_EXT_GL_BIND_FLAGS);
+    if (AAR_EXT_ZZ9000_COVERS(runtime, build_id) && runtime->build_id) {
+        copy_build_id(table->build_id, runtime->build_id);
+        table->ext.build_id = (const char *)user_table_address(slot,
+            table->build_id, offsetof(struct user_api_table, build_id));
+    }
+}
+
+const aar_api *zzapp_svc_api_for_slot(uint32_t slot, const aar_api *source)
 {
     struct user_api_table *table;
     uintptr_t *entries;
@@ -891,46 +991,52 @@ const zzapp_api *zzapp_svc_api_for_slot(uint32_t slot, const zzapp_api *source)
     memcpy(&table->table, source, source->size);
     entries = (uintptr_t *)(void *)((uint8_t *)&table->table + API_FIRST);
     for (i = 0U; i < API_COUNT; ++i)
-        if (i != API_SLOT(build_id))
-            entries[i] = (veneer_alias[slot] ? veneer_alias[slot] :
-                          (uintptr_t)VENEER_PAGE) + i * VENEER_BYTES;
-    copy_build_id(table->build_id, source->build_id);
-    table->table.build_id = (const char *)(uintptr_t)(api_alias[slot] ?
-        api_alias[slot] + offsetof(struct user_api_table, build_id) :
-        (uintptr_t)table->build_id);
+        entries[i] = table_entry(source, i, user_veneer(slot, i));
+    fill_user_ext(slot, table, source);
     return &table->table;
 }
-zzapp_gl *zzapp_svc_gl_for_slot(uint32_t slot)
+
+/* What the `ext` call hands the app: its slot's table, or NULL. */
+const aar_ext_zz9000 *zzapp_svc_ext_for_slot(uint32_t slot)
+{
+    return slot < ZZAPP_AS_SLOT_COUNT && user_api[slot].ext.size ?
+           &user_api[slot].ext : NULL;
+}
+
+static uintptr_t ext_user_address(uint32_t slot)
+{
+    return user_table_address(slot, &user_api[slot].ext,
+                              offsetof(struct user_api_table, ext));
+}
+aar_gl *zzapp_svc_gl_for_slot(uint32_t slot)
 { return slot < ZZAPP_AS_SLOT_COUNT ? &user_gl[slot].table : NULL; }
-int zzapp_svc_copy_gl(zzapp_gl *destination, const zzapp_gl *source)
+int zzapp_svc_copy_gl(aar_gl *destination, const aar_gl *source)
 {
     uintptr_t *entries;
     uint32_t i;
     if (!destination || !source || source->size > sizeof(*destination) || source->size < GL_FIRST)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     memcpy(destination, source, source->size);
     entries = (uintptr_t *)(void *)((uint8_t *)destination + GL_FIRST);
     for (i = 0U; i < GL_COUNT; ++i)
-        if (i != GL_SLOT(build_id)) entries[i] = zzapp_svc_gl_veneer(i);
-    destination->build_id = NULL;
-    return ZZ_OK;
+        entries[i] = zzapp_svc_gl_veneer(i);
+    return AAR_OK;
 }
-static int zzapp_svc_copy_gl_for_slot(uint32_t slot, zzapp_gl *destination,
-                                      const zzapp_gl *source)
+static int zzapp_svc_copy_gl_for_slot(uint32_t slot, aar_gl *destination,
+                                      const aar_gl *source)
 {
     uintptr_t *entries;
     uint32_t i;
 
-    if (zzapp_svc_copy_gl(destination, source) != ZZ_OK)
-        return ZZ_EINVAL;
+    if (zzapp_svc_copy_gl(destination, source) != AAR_OK)
+        return AAR_E_INVAL;
     if (!veneer_alias[slot])
-        return ZZ_OK;
+        return AAR_OK;
     entries = (uintptr_t *)(void *)((uint8_t *)destination + GL_FIRST);
     for (i = 0U; i < GL_COUNT; ++i)
-        if (i != GL_SLOT(build_id))
-            entries[i] = veneer_alias[slot] +
-                         (ZZAPP_SVC_GL_FIRST + i) * VENEER_BYTES;
-    return ZZ_OK;
+        entries[i] = veneer_alias[slot] +
+                     (ZZAPP_SVC_GL_FIRST + i) * VENEER_BYTES;
+    return AAR_OK;
 }
 
 static int section_allows(uint32_t descriptor, int write)
@@ -950,19 +1056,19 @@ int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address, uint32_t bytes,
 {
     uint64_t end;
     uint64_t page;
-    if (!as || !as->active) return ZZ_EFAULT;
-    if (!bytes) return ZZ_OK;
+    if (!as || !as->active) return AAR_E_FAULT;
+    if (!bytes) return AAR_OK;
     end = (uint64_t)address + bytes;
-    if (end > UINT32_MAX + 1ULL) return ZZ_EFAULT;
+    if (end > UINT32_MAX + 1ULL) return AAR_E_FAULT;
     for (page = address & ~(uint64_t)(PAGE_BYTES - 1U); page < end; page += PAGE_BYTES) {
         uint32_t address_page = (uint32_t)page;
         uint32_t descriptor = as->l1[address_page >> 20];
         if ((descriptor & L1_TYPE_MASK) == L1_TABLE) {
             const uint32_t *l2 = zzapp_as_l2_for(as, address_page);
-            if (!l2 || !page_allows(l2[(address_page >> 12) & 0xffU], write)) return ZZ_EFAULT;
-        } else if (!section_allows(descriptor, write)) return ZZ_EFAULT;
+            if (!l2 || !page_allows(l2[(address_page >> 12) & 0xffU], write)) return AAR_E_FAULT;
+        } else if (!section_allows(descriptor, write)) return AAR_E_FAULT;
     }
-    return ZZ_OK;
+    return AAR_OK;
 }
 static uint32_t gl_type_bytes(uint32_t type)
 {
@@ -999,7 +1105,7 @@ static gl_client_array_t *gl_client_array(gl_client_state_t *state,
     return NULL;
 }
 static void gl_record_client_call(uint32_t slot, uint32_t number,
-                                  const uint32_t args[9])
+                                  const uint32_t args[SVC_MAX_WORDS])
 {
     gl_client_state_t *state;
     gl_client_array_t *array;
@@ -1092,7 +1198,7 @@ static int gl_validate_array_element(const zzapp_as_t *as,
     address = (uint64_t)array->pointer +
               (uint64_t)index * (uint32_t)(stride ? stride : (int32_t)element_bytes);
     return address <= UINT32_MAX &&
-           zzapp_svc_check_user(as, (uint32_t)address, element_bytes, 0) == ZZ_OK;
+           zzapp_svc_check_user(as, (uint32_t)address, element_bytes, 0) == AAR_OK;
 }
 static int gl_validate_array_index(const zzapp_as_t *as,
                                    const gl_client_state_t *state,
@@ -1137,7 +1243,7 @@ static int gl_validate_array_span(uint32_t slot, const zzapp_as_t *as,
         return 0;
     gl_telemetry_array_span(slot);
     return zzapp_svc_check_user(as, (uint32_t)lo, (uint32_t)(hi - lo), 0) ==
-           ZZ_OK;
+           AAR_OK;
 }
 static int gl_validate_spans(uint32_t slot, const zzapp_as_t *as,
                              gl_client_state_t *state, uint32_t min,
@@ -1168,7 +1274,7 @@ static uint32_t gl_index_at(const uint8_t *indices, uint32_t index,
     return value;
 }
 static int gl_validate_draw(const zzapp_as_t *as, uint32_t slot,
-                            uint32_t number, const uint32_t args[9])
+                            uint32_t number, const uint32_t args[SVC_MAX_WORDS])
 {
     gl_client_state_t *state;
     int32_t count;
@@ -1234,21 +1340,21 @@ static int gl_validate_draw(const zzapp_as_t *as, uint32_t slot,
 static int stack_word(const zzapp_as_t *as, uint32_t stack, uint32_t index, uint32_t *value)
 {
     uint32_t address = stack + index * 4U;
-    if (!value || address < stack || zzapp_svc_check_user(as, address, 4U, 0) != ZZ_OK) return ZZ_EFAULT;
+    if (!value || address < stack || zzapp_svc_check_user(as, address, 4U, 0) != AAR_OK) return AAR_E_FAULT;
     *value = *(const uint32_t *)(uintptr_t)address;
-    return ZZ_OK;
+    return AAR_OK;
 }
 static int frame_arguments(const zzapp_as_t *as, const zzapp_svc_frame_t *frame,
-                           uint32_t words, uint32_t args[9])
+                           uint32_t words, uint32_t args[SVC_MAX_WORDS])
 {
     uint32_t i;
-    if (words > 9U) return ZZ_EFAULT;
+    if (words > SVC_MAX_WORDS) return AAR_E_FAULT;
     for (i = 0U; i < words && i < 4U; ++i) args[i] = frame->r[i];
     for (; i < words; ++i)
-        if (stack_word(as, frame->user_sp, i - 4U, &args[i]) != ZZ_OK) return ZZ_EFAULT;
-    return ZZ_OK;
+        if (stack_word(as, frame->user_sp, i - 4U, &args[i]) != AAR_OK) return AAR_E_FAULT;
+    return AAR_OK;
 }
-static int gl_pixel_bytes(uint32_t slot, const uint32_t args[9],
+static int gl_pixel_bytes(uint32_t slot, const uint32_t args[SVC_MAX_WORDS],
                           const zzapp_svc_pointer_t *pointer,
                           uint32_t *bytes)
 {
@@ -1266,17 +1372,17 @@ static int gl_pixel_bytes(uint32_t slot, const uint32_t args[9],
     int32_t height = (int32_t)args[first + 1U];
 
     if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return ZZ_EFAULT;
+        return AAR_E_FAULT;
     if (width <= 0 || height <= 0) {
         *bytes = 0U;
-        return ZZ_OK;
+        return AAR_OK;
     }
     switch (format) {
     case 0x1903U: case 0x1906U: case 0x1909U: components = 1U; break;
     case 0x190aU: components = 2U; break;
     case 0x1907U: case 0x80e0U: components = 3U; break;
     case 0x1908U: case 0x80e1U: components = 4U; break;
-    default: return ZZ_EFAULT;
+    default: return AAR_E_FAULT;
     }
     switch (type) {
     case 0x1400U: case 0x1401U: element = 1U; break;
@@ -1284,7 +1390,7 @@ static int gl_pixel_bytes(uint32_t slot, const uint32_t args[9],
     case 0x1404U: case 0x1405U: case 0x1406U: element = 4U; break;
     case 0x8033U: case 0x8363U: components = 1U; element = 2U; break;
     case 0x8034U: case 0x8035U: case 0x8367U: components = 1U; element = 4U; break;
-    default: return ZZ_EFAULT;
+    default: return AAR_E_FAULT;
     }
     store = pointer->direction == ZZAPP_SVC_POINTER_IN ?
         &gl_client[slot].unpack : &gl_client[slot].pack;
@@ -1297,11 +1403,11 @@ static int gl_pixel_bytes(uint32_t slot, const uint32_t args[9],
              (uint64_t)store->skip_pixels * pixel_bytes +
              ((uint64_t)(uint32_t)height - 1U) * row_bytes +
              (uint64_t)(uint32_t)width * pixel_bytes;
-    if (length > UINT32_MAX) return ZZ_EFAULT;
+    if (length > UINT32_MAX) return AAR_E_FAULT;
     *bytes = (uint32_t)length;
-    return ZZ_OK;
+    return AAR_OK;
 }
-static int gl_indices_bytes(const uint32_t args[9], uint32_t first,
+static int gl_indices_bytes(const uint32_t args[SVC_MAX_WORDS], uint32_t first,
                             uint32_t *bytes)
 {
     uint32_t element;
@@ -1310,31 +1416,38 @@ static int gl_indices_bytes(const uint32_t args[9], uint32_t first,
 
     if (count <= 0) {
         *bytes = 0U;
-        return ZZ_OK;
+        return AAR_OK;
     }
     switch (args[first + 1U]) {
     case 0x1401U: element = 1U; break;
     case 0x1403U: element = 2U; break;
     case 0x1405U: element = 4U; break;
-    default: return ZZ_EFAULT;
+    default: return AAR_E_FAULT;
     }
     length = (uint64_t)(uint32_t)count * element;
-    if (length > UINT32_MAX) return ZZ_EFAULT;
+    if (length > UINT32_MAX) return AAR_E_FAULT;
     *bytes = (uint32_t)length;
-    return ZZ_OK;
+    return AAR_OK;
 }
-static int gl_get_bytes(const uint32_t args[9], uint32_t *bytes)
+static int gl_get_bytes(const uint32_t args[SVC_MAX_WORDS], uint32_t *bytes)
 {
     *bytes = zzapp_gl_get_values(args[0]) * sizeof(uint32_t);
-    return ZZ_OK;
+    return AAR_OK;
 }
+/* Extent in bytes of one pointer argument. AAR_E_FAULT for a length no
+ * address space holds, AAR_E_INVAL for a 64-bit service length the
+ * firmware does not handle. */
 static int pointer_bytes(uint32_t slot, const zzapp_svc_pointer_t *pointer,
-                         const uint32_t args[9], uint32_t *bytes)
+                         const uint32_t args[SVC_MAX_WORDS], uint32_t *bytes)
 {
     uint64_t length;
 
     if (pointer->length == ZZAPP_SVC_LENGTH_FIXED) length = pointer->element_bytes;
     else if (pointer->length == ZZAPP_SVC_LENGTH_ARGUMENT) length = args[pointer->length_argument];
+    else if (pointer->length == ZZAPP_SVC_LENGTH_ARGUMENT64) {
+        if (args[pointer->length_argument + 1U] != 0U) return AAR_E_INVAL;
+        length = args[pointer->length_argument];
+    }
     else if (pointer->length == ZZAPP_SVC_LENGTH_COUNT)
         length = (uint64_t)args[pointer->length_argument] * pointer->element_bytes;
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_PIXELS)
@@ -1343,101 +1456,133 @@ static int pointer_bytes(uint32_t slot, const zzapp_svc_pointer_t *pointer,
         return gl_indices_bytes(args, pointer->length_argument, bytes);
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_GET)
         return gl_get_bytes(args, bytes);
-    else return ZZ_OK;
-    if (length > UINT32_MAX) return ZZ_EFAULT;
+    else return AAR_OK;
+    if (length > UINT32_MAX) return AAR_E_FAULT;
     *bytes = (uint32_t)length;
-    return ZZ_OK;
+    return AAR_OK;
 }
 static int copy_string(const zzapp_as_t *as, uint32_t address, char destination[STRING_BYTES])
 {
     uint32_t i;
-    if (!address) return ZZ_EFAULT;
+    if (!address) return AAR_E_FAULT;
     for (i = 0U; i < STRING_BYTES; ++i) {
-        if (zzapp_svc_check_user(as, address + i, 1U, 0) != ZZ_OK) return ZZ_EFAULT;
+        if (zzapp_svc_check_user(as, address + i, 1U, 0) != AAR_OK) return AAR_E_FAULT;
         destination[i] = *(const char *)(uintptr_t)(address + i);
-        if (!destination[i]) return ZZ_OK;
+        if (!destination[i]) return AAR_OK;
     }
-    return ZZ_EFAULT;
+    return AAR_E_FAULT;
 }
 typedef uint32_t (*word_call_t)(uint32_t, uint32_t, uint32_t, uint32_t,
-                                uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
-static uint32_t call_words(uintptr_t address, const uint32_t args[9])
+                                uint32_t, uint32_t, uint32_t, uint32_t,
+                                uint32_t, uint32_t, uint32_t, uint32_t);
+/* The handler sees the words as AAPCS delivers them: r0-r3, then the rest
+ * on the stack in order, a 64-bit value in an even register pair or at an
+ * 8-aligned stack offset. */
+static uint32_t call_words(uintptr_t address, const uint32_t args[SVC_MAX_WORDS])
 {
     word_call_t call = (word_call_t)address;
-    return call(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
+    return call(args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                args[7], args[8], args[9], args[10], args[11]);
 }
 static int entry_at(const void *table, uint32_t size, uint32_t first, uint32_t slot,
                     uintptr_t *entry)
 {
     uint64_t end = (uint64_t)first + ((uint64_t)slot + 1U) * sizeof(void *);
-    if (!table || end > size) return ZZ_ENOSYS;
+    if (!table || end > size) return AAR_E_NOSYS;
     *entry = *(const uintptr_t *)(const void *)((const uint8_t *)table + first + slot * sizeof(void *));
-    return *entry ? ZZ_OK : ZZ_ENOSYS;
+    return *entry ? AAR_OK : AAR_E_NOSYS;
 }
 
+/* Checks every pointer of the call and swaps the copied ones for kernel
+ * buffers. lengths[i] is the extent validated and copied for pointer i and
+ * tails[i] the bytes past it that a size-first structure is zero-filled
+ * with. Returns AAR_OK, AAR_E_FAULT or AAR_E_INVAL. */
 static int prepare_pointers(uint32_t slot, const zzapp_as_t *as,
                             const zzapp_svc_descriptor_t *descriptor,
-                            uint32_t args[9], uint8_t copies[3][COPY_BYTES],
-                            char strings[3][STRING_BYTES], uint32_t originals[3])
+                            uint32_t args[SVC_MAX_WORDS], uint8_t copies[3][COPY_BYTES],
+                            char strings[3][STRING_BYTES], uint32_t originals[3],
+                            uint32_t lengths[3], uint32_t tails[3])
 {
     uint32_t i;
     for (i = 0U; i < 3U; ++i) {
         const zzapp_svc_pointer_t *pointer = &descriptor->pointers[i];
         uint32_t bytes = 0U;
+        uint32_t tail = 0U;
+        uint32_t address;
         int write;
+        int rc;
+        lengths[i] = 0U;
+        tails[i] = 0U;
         if (!pointer->element_bytes) continue;
         originals[i] = args[pointer->argument];
         if (pointer->optional && !originals[i])
             continue;
+        address = args[pointer->argument];
         write = pointer->direction != ZZAPP_SVC_POINTER_IN;
         if (pointer->length == ZZAPP_SVC_LENGTH_STRING) {
-            if (copy_string(as, args[pointer->argument], strings[i]) != ZZ_OK) return ZZ_EFAULT;
+            if (copy_string(as, address, strings[i]) != AAR_OK) return AAR_E_FAULT;
             args[pointer->argument] = (uint32_t)(uintptr_t)strings[i];
             continue;
         }
-        if (pointer_bytes(slot, pointer, args, &bytes) != ZZ_OK ||
-            (!args[pointer->argument] && bytes) ||
-            zzapp_svc_check_user(as, args[pointer->argument], bytes, write) != ZZ_OK) return ZZ_EFAULT;
+        if (pointer->length == ZZAPP_SVC_LENGTH_SIZE_FIELD) {
+            uint32_t size;
+            if (zzapp_svc_check_user(as, address, 4U, 0) != AAR_OK) return AAR_E_FAULT;
+            memcpy(&size, (const void *)(uintptr_t)address, sizeof(size));
+            if (zzapp_svc_check_user(as, address, size, write) != AAR_OK) return AAR_E_FAULT;
+            bytes = size < pointer->element_bytes ? size : pointer->element_bytes;
+            tail = size - bytes;
+        } else {
+            rc = pointer_bytes(slot, pointer, args, &bytes);
+            if (rc != AAR_OK) return rc;
+            if ((!address && bytes) ||
+                zzapp_svc_check_user(as, address, bytes, write) != AAR_OK) return AAR_E_FAULT;
+        }
         if (pointer->copy) {
-            if (bytes > COPY_BYTES) return ZZ_EFAULT;
-            memset(copies[i], 0, bytes);
+            if (bytes > COPY_BYTES) return AAR_E_FAULT;
+            memset(copies[i], 0, COPY_BYTES);
             if (pointer->direction != ZZAPP_SVC_POINTER_OUT)
-                memcpy(copies[i], (const void *)(uintptr_t)args[pointer->argument], bytes);
+                memcpy(copies[i], (const void *)(uintptr_t)address, bytes);
             args[pointer->argument] = (uint32_t)(uintptr_t)copies[i];
         }
+        lengths[i] = bytes;
+        tails[i] = tail;
     }
-    return ZZ_OK;
+    return AAR_OK;
 }
-static void finish_pointers(uint32_t slot, const zzapp_svc_descriptor_t *descriptor,
-                            const uint32_t args[9],
+static void finish_pointers(const zzapp_svc_descriptor_t *descriptor,
                             uint8_t copies[3][COPY_BYTES],
-                            const uint32_t originals[3], uint32_t result)
+                            const uint32_t originals[3],
+                            const uint32_t lengths[3], const uint32_t tails[3],
+                            uint32_t result)
 {
     uint32_t i;
 
-    if (descriptor->result == ZZAPP_SVC_RETURN_INT && result != (uint32_t)ZZ_OK &&
+    if (descriptor->result == ZZAPP_SVC_RETURN_INT && result != (uint32_t)AAR_OK &&
         (!descriptor->copy_out_on_positive || (int32_t)result <= 0))
         return;
     for (i = 0U; i < 3U; ++i) {
         const zzapp_svc_pointer_t *pointer = &descriptor->pointers[i];
-        uint32_t bytes = 0U;
         if (!pointer->element_bytes || !pointer->copy ||
             (pointer->optional && !originals[i]) ||
-            pointer->direction == ZZAPP_SVC_POINTER_IN ||
-            pointer_bytes(slot, pointer, args, &bytes) != ZZ_OK) continue;
-        memcpy((void *)(uintptr_t)originals[i], copies[i], bytes);
+            pointer->direction == ZZAPP_SVC_POINTER_IN) continue;
+        memcpy((void *)(uintptr_t)originals[i], copies[i], lengths[i]);
+        if (tails[i])
+            memset((uint8_t *)(uintptr_t)originals[i] + lengths[i], 0, tails[i]);
     }
 }
 
+/* heap_shrink's out pointer must not name memory the call gives back: its
+ * store would land in a frame that is gone. */
 static int heap_shrink_out_overlaps(const zzapp_proc_t *proc,
-                                    const uint32_t args[9],
+                                    const uint32_t args[SVC_MAX_WORDS],
                                     const uint32_t originals[3])
 {
     uint64_t start;
     uint64_t end;
     uint64_t out;
 
-    if (!proc || args[0] == 0U || proc->heap_break < proc->heap_base ||
+    if (!proc || args[1] != 0U || args[0] == 0U ||
+        proc->heap_break < proc->heap_base ||
         args[0] > proc->heap_break - proc->heap_base)
         return 0;
     start = (uint64_t)ZZAPP_AS_WINDOW_BASE + proc->heap_break - args[0];
@@ -1452,8 +1597,8 @@ static float float_argument(const zzapp_svc_frame_t *frame, uint32_t index)
 { float value; uint32_t word = float_word(frame, index); memcpy(&value, &word, sizeof(value)); return value; }
 static double double_argument(const zzapp_svc_frame_t *frame, uint32_t index)
 { double value; uint32_t words[2] = { float_word(frame, index * 2U), float_word(frame, index * 2U + 1U) }; memcpy(&value, words, sizeof(value)); return value; }
-static int call_gl_float(const zzapp_gl *gl, uint32_t slot, const zzapp_svc_frame_t *frame,
-                         const uint32_t args[9], uint32_t *result)
+static int call_gl_float(const aar_gl *gl, uint32_t slot, const zzapp_svc_frame_t *frame,
+                         const uint32_t args[SVC_MAX_WORDS], uint32_t *result)
 {
     float a = float_argument(frame, 0U), b = float_argument(frame, 1U);
     float c = float_argument(frame, 2U), d = float_argument(frame, 3U);
@@ -1478,65 +1623,81 @@ static int call_gl_float(const zzapp_gl *gl, uint32_t slot, const zzapp_svc_fram
     return 1;
 }
 
-static int dispatch_bind(const zzapp_api *api, uint32_t slot,
-                         const uint32_t args[9], int flags, uint32_t *result)
+/* Hands the app the GL table the module returned, copied into its slot with
+ * a veneer for every entry. */
+static int dispatch_bind(uint32_t slot, const aar_gl *gl, uint32_t *result)
 {
-    const zzapp_gl *gl = flags ? api->gl_bind_flags(args[0], args[1]) :
-                                 api->gl_bind(args[0]);
     zzapp_proc_t *proc = zzapp_proc_slot(slot);
 
     if (!gl || !proc || slot >= ZZAPP_AS_SLOT_COUNT ||
-        zzapp_svc_copy_gl_for_slot(slot, &user_gl[slot].table, gl) != ZZ_OK) {
+        zzapp_svc_copy_gl_for_slot(slot, &user_gl[slot].table, gl) != AAR_OK) {
         if (slot < ZZAPP_AS_SLOT_COUNT) {
             direct_gl[slot] = NULL;
             gl_client_reset(slot);
         }
         *result = 0U;
-        return ZZ_OK;
+        return AAR_OK;
     }
     gl_client_reset(slot);
     gl_client[slot].generation = proc->generation;
     direct_gl[slot] = gl;
-    copy_build_id(user_gl[slot].build_id, gl->build_id);
-    user_gl[slot].table.build_id = (const char *)(uintptr_t)(gl_alias[slot] ?
-        gl_alias[slot] + offsetof(struct user_gl_table, build_id) :
-        (uintptr_t)user_gl[slot].build_id);
     *result = (uint32_t)(gl_alias[slot] ? gl_alias[slot] :
                          (uintptr_t)&user_gl[slot].table);
-    return ZZ_OK;
+    return AAR_OK;
 }
-static int dispatch_api(const zzapp_api *api, uint32_t slot, zzapp_svc_frame_t *frame,
+static int dispatch_api(const aar_api *api, uint32_t slot, zzapp_svc_frame_t *frame,
                         const zzapp_svc_descriptor_t *descriptor, uint32_t number,
-                        uint32_t args[9], uint32_t *result)
+                        uint32_t args[SVC_MAX_WORDS], uint32_t *result)
 {
     (void)descriptor;
     uintptr_t entry;
-    if (number == API_SLOT(gl_bind)) return dispatch_bind(api, slot, args, 0, result);
-    if (number == API_SLOT(gl_bind_flags)) return dispatch_bind(api, slot, args, 1, result);
+    if (number == API_SLOT(gl_bind)) {
+        if (!AAR_API_COVERS(api, gl_bind) || !api->gl_bind) return AAR_E_NOSYS;
+        return dispatch_bind(slot, api->gl_bind(args[0]), result);
+    }
+    if (number == API_SLOT(ext) || number == ZZAPP_SVC_EXT_GL_BIND_FLAGS) {
+        const aar_ext_zz9000 *runtime;
+
+        if (!AAR_API_COVERS(api, ext) || !api->ext) return AAR_E_NOSYS;
+        runtime = (const aar_ext_zz9000 *)api->ext(AAR_PLATFORM_ZZ9000,
+                                                    AAR_EXT_ZZ9000_MAIN);
+        if (number == API_SLOT(ext)) {
+            /* The runtime's ext decides which (platform, id) pairs exist;
+             * the app gets its own slot's copy of the table. */
+            const aar_ext_zz9000 *asked = (const aar_ext_zz9000 *)api->ext(args[0], args[1]);
+
+            *result = asked && zzapp_svc_ext_for_slot(slot) ?
+                      (uint32_t)ext_user_address(slot) : 0U;
+            return AAR_OK;
+        }
+        if (!AAR_EXT_ZZ9000_COVERS(runtime, gl_bind_flags) || !runtime->gl_bind_flags)
+            return AAR_E_NOSYS;
+        return dispatch_bind(slot, runtime->gl_bind_flags(args[0], args[1]), result);
+    }
     if (number == API_SLOT(time_us)) {
         uint64_t value = api->time_us();
 
         *result = (uint32_t)value;
         frame->r[1] = (uint32_t)(value >> 32);
-        return ZZ_OK;
+        return AAR_OK;
     }
-    if (entry_at(api, api->size, API_FIRST, number, &entry) != ZZ_OK)
-        return ZZ_ENOSYS;
+    if (entry_at(api, api->size, API_FIRST, number, &entry) != AAR_OK)
+        return AAR_E_NOSYS;
     *result = call_words(entry, args);
     if (number == API_SLOT(gl_unbind) && slot < ZZAPP_AS_SLOT_COUNT)
         zzapp_svc_gl_release(slot, gl_client[slot].generation);
-    return ZZ_OK;
+    return AAR_OK;
 }
 static int dispatch_gl(uint32_t slot, const zzapp_svc_frame_t *frame,
-                       uint32_t number, const uint32_t args[9], uint32_t *result)
+                       uint32_t number, const uint32_t args[SVC_MAX_WORDS], uint32_t *result)
 {
     zzapp_proc_t *proc = zzapp_proc_slot(slot);
-    const zzapp_gl *gl = slot < ZZAPP_AS_SLOT_COUNT ? direct_gl[slot] : NULL;
+    const aar_gl *gl = slot < ZZAPP_AS_SLOT_COUNT ? direct_gl[slot] : NULL;
     uintptr_t entry;
-    int status = ZZ_OK;
+    int status = AAR_OK;
 
     if (!gl || !proc || gl_client[slot].generation != proc->generation) {
-        status = ZZ_ENOSYS;
+        status = AAR_E_NOSYS;
         goto done;
     }
     if (number == GL_SLOT(GetError) && gl_client[slot].error) {
@@ -1547,7 +1708,7 @@ static int dispatch_gl(uint32_t slot, const zzapp_svc_frame_t *frame,
     if (number == GL_SLOT(LockArrays) || number == GL_SLOT(UnlockArrays)) {
         gl_client_state_t *state = &gl_client[slot];
         int has_is_enabled = gl->size >=
-            offsetof(zzapp_gl, IsEnabled) + sizeof(gl->IsEnabled) &&
+            offsetof(aar_gl, IsEnabled) + sizeof(gl->IsEnabled) &&
             gl->IsEnabled;
 
         if (state->in_begin) {
@@ -1585,16 +1746,16 @@ static int dispatch_gl(uint32_t slot, const zzapp_svc_frame_t *frame,
             *result = 0U;
             goto done;
         }
-        copy_build_id(user_gl[slot].build_id, (const char *)string);
+        copy_build_id(user_gl[slot].string, (const char *)string);
         *result = (uint32_t)(gl_alias[slot] ?
-            gl_alias[slot] + offsetof(struct user_gl_table, build_id) :
-            (uintptr_t)user_gl[slot].build_id);
+            gl_alias[slot] + offsetof(struct user_gl_table, string) :
+            (uintptr_t)user_gl[slot].string);
         goto done;
     }
     if (call_gl_float(gl, number, frame, args, result))
         goto done;
-    if (entry_at(gl, gl->size, GL_FIRST, number, &entry) != ZZ_OK) {
-        status = ZZ_ENOSYS;
+    if (entry_at(gl, gl->size, GL_FIRST, number, &entry) != AAR_OK) {
+        status = AAR_E_NOSYS;
         goto done;
     }
     *result = call_words(entry, args);
@@ -1608,16 +1769,18 @@ done:
  * the stop report on the UART. */
 volatile uint32_t zzapp_svc_last_number[ZZAPP_AS_SLOT_COUNT];
 
-static void zzapp_svc_dispatch_slow(const zzapp_api *api, zzapp_proc_t *proc,
+static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
                                     uint32_t slot, uint32_t number,
                                     zzapp_svc_frame_t *frame)
 {
     const zzapp_svc_descriptor_t *descriptor;
     uint32_t result = 0U;
-    uint32_t args[9] = { 0U };
+    uint32_t args[SVC_MAX_WORDS] = { 0U };
     uint8_t copies[3][COPY_BYTES];
     char strings[3][STRING_BYTES];
     uint32_t originals[3] = { 0U };
+    uint32_t lengths[3] = { 0U };
+    uint32_t tails[3] = { 0U };
     int gl;
     int status;
 
@@ -1632,20 +1795,22 @@ static void zzapp_svc_dispatch_slow(const zzapp_api *api, zzapp_proc_t *proc,
             gl_telemetry_descriptor_failure(slot);
             gl_telemetry_descriptor_end(slot);
         }
-        frame->r[0] = (uint32_t)ZZ_ENOSYS;
+        frame->r[0] = (uint32_t)AAR_E_NOSYS;
         return;
     }
     if (gl)
         counters_handler_start(slot);
-    if (frame_arguments(&proc->as, frame, descriptor->arguments, args) != ZZ_OK ||
-        prepare_pointers(slot, &proc->as, descriptor, args, copies, strings,
-                         originals) != ZZ_OK) {
+    status = frame_arguments(&proc->as, frame, descriptor->arguments, args);
+    if (status == AAR_OK)
+        status = prepare_pointers(slot, &proc->as, descriptor, args, copies,
+                                  strings, originals, lengths, tails);
+    if (status != AAR_OK) {
         if (gl) {
             gl_telemetry_pointer_failure(slot);
             gl_telemetry_descriptor_end(slot);
             counters_handler_end(slot);
         }
-        frame->r[0] = (uint32_t)ZZ_EFAULT;
+        frame->r[0] = (uint32_t)status;
         return;
     }
     if (gl && (number == GL_SLOT(DrawArrays) ||
@@ -1656,21 +1821,21 @@ static void zzapp_svc_dispatch_slow(const zzapp_api *api, zzapp_proc_t *proc,
         gl_telemetry_pointer_failure(slot);
         gl_telemetry_descriptor_end(slot);
         counters_handler_end(slot);
-        frame->r[0] = (uint32_t)ZZ_EFAULT;
+        frame->r[0] = (uint32_t)AAR_E_FAULT;
         return;
     }
     if (!gl && number == API_SLOT(heap_shrink) &&
         heap_shrink_out_overlaps(proc, args, originals)) {
-        frame->r[0] = (uint32_t)ZZ_EFAULT;
+        frame->r[0] = (uint32_t)AAR_E_FAULT;
         return;
     }
-    if (!gl && number == API_SLOT(image_open)) {
-        const zzapp_image_open *open =
-            (const zzapp_image_open *)(const void *)copies[0];
+    if (!gl && number == API_SLOT(image_open) && originals[0]) {
+        const aar_image_params *open =
+            (const aar_image_params *)(const void *)copies[0];
 
         if (zzapp_svc_check_user(&proc->as, (uint32_t)(uintptr_t)open->tile,
-                                 open->tile_bytes, 1) != ZZ_OK) {
-            frame->r[0] = (uint32_t)ZZ_EFAULT;
+                                 open->tile_bytes, 1) != AAR_OK) {
+            frame->r[0] = (uint32_t)AAR_E_FAULT;
             return;
         }
     }
@@ -1683,35 +1848,35 @@ static void zzapp_svc_dispatch_slow(const zzapp_api *api, zzapp_proc_t *proc,
                   dispatch_api(api, slot, frame, descriptor, number, args,
                                &result);
     counters_handler_end(slot);
-    if (status != ZZ_OK) {
-        frame->r[0] = (uint32_t)(status == ZZ_EFAULT ? ZZ_EFAULT : ZZ_ENOSYS);
+    if (status != AAR_OK) {
+        frame->r[0] = (uint32_t)(status == AAR_E_FAULT ? AAR_E_FAULT : AAR_E_NOSYS);
         return;
     }
-    finish_pointers(slot, descriptor, args, copies, originals, result);
+    finish_pointers(descriptor, copies, originals, lengths, tails, result);
     if (descriptor->result != ZZAPP_SVC_RETURN_VOID)
         frame->r[0] = result;
 }
 
-static int dispatch_fast_no_lock(const zzapp_api *api, uint32_t number,
+static int dispatch_fast_no_lock(const aar_api *api, uint32_t number,
                                  zzapp_svc_frame_t *frame)
 {
     if (number == API_SLOT(should_stop)) {
         if (!api->should_stop)
-            return ZZ_ENOSYS;
+            return AAR_E_NOSYS;
         frame->r[0] = (uint32_t)api->should_stop();
-        return ZZ_OK;
+        return AAR_OK;
     }
     if (number == API_SLOT(time_us)) {
         uint64_t value;
 
         if (!api->time_us)
-            return ZZ_ENOSYS;
+            return AAR_E_NOSYS;
         value = api->time_us();
         frame->r[0] = (uint32_t)value;
         frame->r[1] = (uint32_t)(value >> 32);
-        return ZZ_OK;
+        return AAR_OK;
     }
-    return ZZ_ENOSYS;
+    return AAR_E_NOSYS;
 }
 
 #if ZZAPP_SVC_PROBES && ZZAPP_PERF_COUNTERS
@@ -1731,7 +1896,7 @@ static void probe_invalidate_counter_tail(void)
 #if !ZZAPP_SVC_PROBES
 void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
 {
-    const zzapp_api *api;
+    const aar_api *api;
     zzapp_proc_t *proc;
     const zzapp_svc_descriptor_t *descriptor;
     uint32_t number;
@@ -1753,15 +1918,15 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
             counters_dispatch(slot, 0);
             api = zzapp_api_table();
             if (!api) {
-                frame->r[0] = (uint32_t)ZZ_EFAULT;
+                frame->r[0] = (uint32_t)AAR_E_FAULT;
                 return;
             }
             zzapp_svc_last_number[slot] = number;
             counters_handler_start(slot);
             status = dispatch_fast_no_lock(api, number, frame);
             counters_handler_end(slot);
-            if (status != ZZ_OK)
-                frame->r[0] = (uint32_t)ZZ_ENOSYS;
+            if (status != AAR_OK)
+                frame->r[0] = (uint32_t)AAR_E_NOSYS;
             return;
         }
     }
@@ -1772,7 +1937,7 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
     api = zzapp_api_table();
     proc = zzapp_proc_slot(slot);
     if (!proc || !api) {
-        frame->r[0] = (uint32_t)ZZ_EFAULT;
+        frame->r[0] = (uint32_t)AAR_E_FAULT;
         return;
     }
     zzapp_svc_last_number[slot] = number;
@@ -1781,7 +1946,7 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
 #else
 void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
 {
-    const zzapp_api *api;
+    const aar_api *api;
     const zzapp_svc_descriptor_t *descriptor;
     uint32_t number;
     uint32_t slot;
@@ -1816,7 +1981,7 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
         api = zzapp_api_table();
         proc = zzapp_proc_slot(slot);
         if (!proc || !api) {
-            frame->r[0] = (uint32_t)ZZ_EFAULT;
+            frame->r[0] = (uint32_t)AAR_E_FAULT;
             return;
         }
         zzapp_svc_last_number[slot] = number;
@@ -1831,18 +1996,18 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
     counters_dispatch(slot, 0);
     api = zzapp_api_table();
     if (!api) {
-        frame->r[0] = (uint32_t)ZZ_EFAULT;
+        frame->r[0] = (uint32_t)AAR_E_FAULT;
         return;
     }
     zzapp_svc_last_number[slot] = number;
     counters_handler_start(slot);
     if (number == ZZAPP_SVC_PROBE_P4) {
         frame->r[0] = 0U;
-        status = ZZ_OK;
+        status = AAR_OK;
     } else
         status = dispatch_fast_no_lock(api, number, frame);
     counters_handler_end(slot);
-    if (status != ZZ_OK)
-        frame->r[0] = (uint32_t)ZZ_ENOSYS;
+    if (status != AAR_OK)
+        frame->r[0] = (uint32_t)AAR_E_NOSYS;
 }
 #endif

@@ -14,18 +14,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
 #include "zzapp_proto.h"
 
 void zzapp_boot_init(void);
 void zzapp_worker_hook(void);
 int zzapp_loader_abort(void);
-void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
-void zzapp_host_free(void *p);
-int zzapp_host_mem_info(zzapp_mem_info *out);
 void zzapp_test_set_host_visible_heap(uint32_t bytes);
-/* syscalls.o is linked for zzapp_sbrk; it reads this table pointer. */
-const zzapp_api *zzapp_api_ptr;
 
 #define MIB (1024U * 1024U)
 
@@ -85,18 +80,30 @@ static uint16_t load_begin(const uint8_t *request, uint16_t request_bytes)
     return SDK_STATUS_IO_ERROR;
 }
 
-static uint32_t host_limit(void)
+static uint64_t shared_used(void)
 {
-    zzapp_mem_info info;
+    aar_info info;
 
-    assert(zzapp_host_mem_info(&info) == ZZ_OK);
-    return info.host_visible_limit;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    assert(zzapp_host_info(&info) == AAR_OK);
+    return info.shared_used;
+}
+
+static uint64_t host_limit(void)
+{
+    aar_info info;
+
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    assert(zzapp_host_info(&info) == AAR_OK);
+    return info.shared_limit;
 }
 
 static void finish(void)
 {
     zzapp_host_revoke_visible();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void begin_with(uint32_t host_mib, uint32_t expected_status)
@@ -118,12 +125,11 @@ static void test_default_is_16_mib_without_a_request(void)
     /* Extended request with the word left at zero. */
     begin_with(0U, SDK_STATUS_OK);
     assert(host_limit() == 16U * MIB);
-    block = zzapp_host_alloc(16U * MIB, 4096U, ZZ_ALLOC_HOST_VISIBLE);
+    block = zzapp_host_alloc(16U * MIB, 4096U);
     assert(block != NULL);
-    assert(zzapp_host_alloc(4096U, 4096U, ZZ_ALLOC_HOST_VISIBLE) == NULL);
-    zzapp_host_free(block);
-    assert(zzapp_host_alloc(16U * MIB + 4096U, 4096U,
-                            ZZ_ALLOC_HOST_VISIBLE) == NULL);
+    assert(zzapp_host_alloc(4096U, 4096U) == NULL);
+    assert(zzapp_host_free(block) == AAR_OK);
+    assert(zzapp_host_alloc(16U * MIB + 4096U, 4096U) == NULL);
     finish();
 
     /* The memory cap alone, as launchers sent before this request existed. */
@@ -145,21 +151,19 @@ static void test_default_is_16_mib_without_a_request(void)
 static void test_request_raises_the_limit(void)
 {
     void *block;
-    zzapp_mem_info info;
 
     begin_with(40U, SDK_STATUS_OK);
     assert(host_limit() == 40U * MIB);
     assert(zzapp_services_memory_limit() == 0U);
     /* One block of 34 MiB, larger than the old whole-app limit. */
-    block = zzapp_host_alloc(34U * MIB, 4096U, ZZ_ALLOC_HOST_VISIBLE);
+    block = zzapp_host_alloc(34U * MIB, 4096U);
     assert(block != NULL);
-    assert(zzapp_host_mem_info(&info) == ZZ_OK);
-    assert(info.host_visible_used == 34U * MIB);
-    assert(info.host_visible_limit == 40U * MIB);
+    assert(shared_used() == 34U * MIB);
+    assert(host_limit() == 40U * MIB);
     /* The cap counts every block of the app. */
-    assert(zzapp_host_alloc(7U * MIB, 4096U, ZZ_ALLOC_HOST_VISIBLE) == NULL);
-    assert(zzapp_host_alloc(6U * MIB, 4096U, ZZ_ALLOC_HOST_VISIBLE) != NULL);
-    zzapp_host_free(block);
+    assert(zzapp_host_alloc(7U * MIB, 4096U) == NULL);
+    assert(zzapp_host_alloc(6U * MIB, 4096U) != NULL);
+    assert(zzapp_host_free(block) == AAR_OK);
     finish();
 }
 
@@ -167,8 +171,8 @@ static void test_request_can_lower_the_limit(void)
 {
     begin_with(4U, SDK_STATUS_OK);
     assert(host_limit() == 4U * MIB);
-    assert(zzapp_host_alloc(5U * MIB, 4096U, ZZ_ALLOC_HOST_VISIBLE) == NULL);
-    assert(zzapp_host_alloc(4U * MIB, 4096U, ZZ_ALLOC_HOST_VISIBLE) != NULL);
+    assert(zzapp_host_alloc(5U * MIB, 4096U) == NULL);
+    assert(zzapp_host_alloc(4U * MIB, 4096U) != NULL);
     finish();
 }
 

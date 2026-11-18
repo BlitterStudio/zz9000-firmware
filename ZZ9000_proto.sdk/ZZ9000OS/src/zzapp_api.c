@@ -1,5 +1,6 @@
 /*
- * Trusted app API table. File/display/input/audio bodies are Slice B seams.
+ * Trusted app API table (aar_api, API 0.5). File/display/event/audio bodies
+ * are the zzapp_svc_* services; this file adapts them to the table.
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -9,7 +10,7 @@
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
 #endif
-#include "zzapp.h"
+#include "aar/app.h"
 #include "zzapp_runtime.h"
 #include "zzapp_svc.h"
 #include "zzm_format.h"
@@ -44,10 +45,7 @@ void __attribute__((weak)) zzapp_svc_gl_telemetry_report(
 #endif
 
 
-extern int zzapp_host_address(const void *p, uint32_t *host_offset);
-extern int zzapp_host_mem_info(zzapp_mem_info *out);
-extern void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
-extern int zzapp_host_faulted(void);
+
 
 
 #ifndef ZZ9000_BUILD_GIT
@@ -68,7 +66,7 @@ WEAK uint8_t *zzapp_services_window(void) { return NULL; }
 WEAK int zzapp_services_start_entered(uint32_t generation)
 {
     (void)generation;
-    return ZZ_OK;
+    return AAR_OK;
 }
 WEAK void zzapp_services_loader_aborted(void) {}
 WEAK void zzapp_services_on_reset(void) {}
@@ -77,27 +75,27 @@ WEAK void zzapp_services_cancel_start(int status) { (void)status; }
 WEAK void zzapp_services_on_launch(void) {}
 WEAK void zzapp_svc_log(const char *msg, uint32_t len) { (void)msg; (void)len; }
 WEAK int zzapp_svc_should_stop(void) { return 0; }
-WEAK int zzapp_svc_file_open(const char *p, uint32_t f) { (void)p; (void)f; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_file_close(int fd) { (void)fd; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_file_read(int fd, void *p, uint32_t n, uint32_t *o) { (void)fd; (void)p; (void)n; if (o) *o = 0; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_file_write(int fd, const void *p, uint32_t n, uint32_t *o) { (void)fd; (void)p; (void)n; if (o) *o = 0; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_file_seek(int fd, int64_t o, int w, int64_t *out) { (void)fd; (void)o; (void)w; if (out) *out = 0; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_file_stat(const char *p, zzapp_stat *o) { (void)p; (void)o; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_file_list_open(const char *p) { (void)p; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_file_list_next(int l, zzapp_dirent *o) { (void)l; (void)o; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_file_list_close(int l) { (void)l; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,zzapp_surface *o) { (void)w;(void)h;(void)f;(void)fl;(void)o; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_display_flip(uint32_t id) { (void)id; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_display_flip_async(uint32_t id) { (void)id; return ZZ_ENOSYS; }
+WEAK int zzapp_svc_file_open(const char *p, uint32_t f) { (void)p; (void)f; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_close(int fd) { (void)fd; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_read(int fd, void *p, uint32_t n, uint32_t *o) { (void)fd; (void)p; (void)n; if (o) *o = 0; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_write(int fd, const void *p, uint32_t n, uint32_t *o) { (void)fd; (void)p; (void)n; if (o) *o = 0; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_seek(int fd, int64_t o, int w, int64_t *out) { (void)fd; (void)o; (void)w; if (out) *out = 0; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_stat(const char *p, aar_stat *o) { (void)p; (void)o; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_list_open(const char *p) { (void)p; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_list_next(int l, aar_dirent *o) { (void)l; (void)o; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_list_close(int l) { (void)l; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,aar_surface *o) { (void)w;(void)h;(void)f;(void)fl;(void)o; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_flip(uint32_t id) { (void)id; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_flip_async(uint32_t id) { (void)id; return AAR_E_NOSYS; }
 WEAK int zzapp_display_flip_idle(void) { return 0; }
-WEAK int zzapp_svc_display_refresh(zzapp_surface *o) { (void)o; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_display_set_palette(uint32_t id,uint32_t first,uint32_t count,const uint32_t *rgb) { (void)id;(void)first;(void)count;(void)rgb; return ZZ_ENOSYS; }
-WEAK uint32_t zzapp_svc_display_mailbox_replaced(void) { return 0U; }
-WEAK int zzapp_svc_display_vsync(void) { return ZZ_ENOSYS; }
-WEAK int zzapp_svc_display_close(uint32_t id) { (void)id; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_input_poll(zzapp_event *o,uint32_t n,uint32_t *out) { (void)o;(void)n; if(out)*out=0; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_audio_open(uint32_t r,uint32_t c,zzapp_audio *o) { (void)r;(void)c;(void)o; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_audio_close(void) { return ZZ_ENOSYS; }
+WEAK int zzapp_svc_display_refresh(aar_surface *o) { (void)o; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_set_palette(uint32_t id,uint32_t first,uint32_t count,const uint32_t *rgb) { (void)id;(void)first;(void)count;(void)rgb; return AAR_E_NOSYS; }
+WEAK uint32_t zzapp_svc_display_latest_dropped(void) { return 0U; }
+WEAK int zzapp_svc_display_vsync(void) { return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_close(uint32_t id) { (void)id; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_event_poll(aar_event *o,uint32_t n,uint32_t *out) { (void)o;(void)n; if(out)*out=0; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_audio_open(uint32_t r,uint32_t c,aar_audio *o) { (void)r;(void)c;(void)o; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_audio_close(void) { return AAR_E_NOSYS; }
 WEAK void zzapp_svc_gl_release(uint32_t slot, uint32_t generation)
 { (void)slot; (void)generation; }
 
@@ -180,13 +178,13 @@ WEAK void sdk_vorbis_release(struct sdk_vorbis_state *state) { (void)state; }
 WEAK void sdk_vorbis_forget(struct sdk_vorbis_state *state) { (void)state; }
 WEAK int zzapp_svc_check_user(const zzapp_as_t *as, uint32_t address,
                                uint32_t bytes, int write)
-{ (void)as; (void)address; (void)bytes; (void)write; return ZZ_OK; }
+{ (void)as; (void)address; (void)bytes; (void)write; return AAR_OK; }
 #endif
-WEAK int zzapp_svc_console_write(const void *p,uint32_t n,uint32_t *o) { (void)p;(void)n;if(o)*o=0;return ZZ_ENOSYS; }
-WEAK int zzapp_svc_console_read(void *p,uint32_t n,uint32_t *o) { (void)p;(void)n;if(o)*o=0;return ZZ_ENOSYS; }
-WEAK int zzapp_svc_msg_send(const void *p) { (void)p; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_msg_poll(void *p) { (void)p; return ZZ_ENOSYS; }
-WEAK int zzapp_svc_msg_wait(uint32_t timeout_us) { (void)timeout_us; return ZZ_ENOSYS; }
+WEAK int zzapp_svc_console_write(const void *p,uint32_t n,uint32_t *o) { (void)p;(void)n;if(o)*o=0;return AAR_E_NOSYS; }
+WEAK int zzapp_svc_console_read(void *p,uint32_t n,uint32_t *o) { (void)p;(void)n;if(o)*o=0;return AAR_E_NOSYS; }
+WEAK int zzapp_svc_msg_send(const void *p) { (void)p; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_msg_poll(void *p) { (void)p; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_msg_wait(uint32_t timeout_us) { (void)timeout_us; return AAR_E_NOSYS; }
 struct zzapp_minigl_binding {
     const zzm_minigl_ops_v1_t *ops;
     void *context;
@@ -218,7 +216,7 @@ static int minigl_registration_ready(const zzm_minigl_registration_v1_t *registr
 }
 
 int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
-                            const zzapp_gl **out)
+                            const aar_gl **out)
 {
     const zzm_minigl_registration_v1_t *registration;
     const zzm_minigl_ops_v1_t *ops;
@@ -231,15 +229,15 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
     if (out)
         *out = NULL;
     if (!surface_id)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     if (g_minigl.ops ||
         zzapp_kernel_gl_bind(zzapp_runtime_kernel(), owner, generation) != 0)
-        return ZZ_EBUSY;
+        return AAR_E_BUSY;
 #ifdef ZZAPP_HOST_TEST
     if (!zzm_loader_acquire || !zzm_loader_release || !zzm_registry_ops ||
         !zzm_minigl_ops) {
         zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
-        return ZZ_ENOSYS;
+        return AAR_E_NOSYS;
     }
 #endif
     for (;;) {
@@ -250,7 +248,7 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
     }
     if (status != ZZM_LOAD_READY) {
         zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
-        return ZZ_ENOSYS;
+        return AAR_E_NOSYS;
     }
     registration = (const zzm_minigl_registration_v1_t *)zzm_registry_ops(
         ZZM_MODULE_MINIGL,
@@ -269,7 +267,7 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
         goto unavailable;
     status = flags != 0U ? ops->app_bind_flags(context, surface_id, flags, &module_gl) :
                             ops->app_bind(context, surface_id, &module_gl);
-    if (status != ZZ_OK)
+    if (status != AAR_OK)
         goto failed;
     if (!module_gl)
         goto unavailable;
@@ -281,8 +279,8 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
     zzapp_svc_gl_telemetry_reset(owner);
 #endif
     if (out)
-        *out = (const zzapp_gl *)module_gl;
-    return ZZ_OK;
+        *out = (const aar_gl *)module_gl;
+    return AAR_OK;
 
 failed:
     zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
@@ -292,10 +290,10 @@ failed:
 unavailable:
     zzapp_kernel_gl_unbind(zzapp_runtime_kernel(), owner, generation);
     zzm_loader_release(ZZM_MODULE_MINIGL);
-    return ZZ_ENOSYS;
+    return AAR_E_NOSYS;
 }
 
-int zzapp_minigl_bind(uint32_t surface_id, const zzapp_gl **out)
+int zzapp_minigl_bind(uint32_t surface_id, const aar_gl **out)
 {
     return zzapp_minigl_bind_flags(surface_id, 0U, out);
 }
@@ -306,9 +304,9 @@ int zzapp_minigl_swap(void)
     uint32_t generation = zzapp_current_generation();
 
     if (!minigl_binding_matches(owner, generation))
-        return ZZ_EBUSY;
+        return AAR_E_BUSY;
     (void)g_minigl.ops->app_swap(g_minigl.context);
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 static int minigl_binding_matches(uint32_t owner, uint32_t generation)
@@ -386,44 +384,71 @@ static void api_sleep(uint32_t us)
     zzapp_host_sleep(us);
     zzapp_api_leave();
 }
-/* Firmware allocation is bounded by the app heap. The app's _sbrk uses this
- * same entry, avoiding a second bump pointer in the arena. */
-static void *api_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
+static void api_heap_range(void **base, uint64_t *bytes)
 {
-    extern void *zzapp_host_alloc(uint32_t,uint32_t,uint32_t);
-    return zzapp_host_alloc(bytes, align, flags);
-}
-static void api_free(void *p) { extern void zzapp_host_free(void *); zzapp_host_free(p); }
-static void api_heap(void **b, uint32_t *n) { extern void zzapp_host_heap(void **,uint32_t *); zzapp_host_heap(b,n); }
+    uint32_t n = 0U;
 
-static int api_heap_grow(uint32_t bytes, void **old_break)
+    zzapp_host_heap(base, &n);
+    if (bytes)
+        *bytes = n;
+}
+
+/* A whole number of granules, never zero; a count beyond the 32-bit address
+ * space cannot be satisfied (grow) or exceeds the heap (shrink). The break
+ * pointer is optional: the app may not care where the heap ended. */
+static int api_heap_grow(uint64_t bytes, void **old_break)
 {
     int rc;
 
+    if (bytes == 0U || (bytes % ZZAPP_MEM_FRAME_BYTES) != 0U)
+        return AAR_E_INVAL;
+    if (bytes > UINT32_MAX)
+        return AAR_E_NOMEM;
     zzapp_api_enter();
-    rc = zzapp_proc_heap_grow(bytes, old_break);
+    rc = zzapp_proc_heap_grow((uint32_t)bytes, old_break);
     zzapp_api_leave();
     return rc;
 }
 
-static int api_heap_shrink(uint32_t bytes, void **new_break)
+static int api_heap_shrink(uint64_t bytes, void **new_break)
 {
     int rc;
 
+    if (bytes == 0U || (bytes % ZZAPP_MEM_FRAME_BYTES) != 0U ||
+        bytes > UINT32_MAX)
+        return AAR_E_INVAL;
     zzapp_api_enter();
-    rc = zzapp_proc_heap_shrink(bytes, new_break);
+    rc = zzapp_proc_heap_shrink((uint32_t)bytes, new_break);
     zzapp_api_leave();
     return rc;
 }
 
-static int api_heap_info(zzapp_heap_info *out)
+static int api_heap_info(aar_heap_info *out)
 {
+    uint32_t committed;
+    uint32_t limit;
+    uint32_t pool_free;
     int rc;
 
     if (!out)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     zzapp_api_enter();
-    rc = zzapp_proc_heap_info(&out->committed, &out->limit, &out->pool_free);
+    rc = zzapp_proc_heap_info(&committed, &limit, &pool_free);
+    zzapp_api_leave();
+    if (rc == AAR_OK) {
+        out->committed = committed;
+        out->limit = limit;
+        out->pool_free = pool_free;
+    }
+    return rc;
+}
+
+static int api_info(aar_info *out)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_host_info(out);
     zzapp_api_leave();
     return rc;
 }
@@ -432,80 +457,108 @@ static int api_heap_info(zzapp_heap_info *out)
 static int sdk_to_zz(uint16_t status)
 {
     switch (status) {
-    case SDK_STATUS_OK: return ZZ_OK;
-    case SDK_STATUS_NO_MEMORY: return ZZ_ENOMEM;
-    case SDK_STATUS_UNSUPPORTED: return ZZ_ENOSYS;
-    case SDK_STATUS_BAD_REQUEST: return ZZ_EINVAL;
-    case SDK_STATUS_NOT_FOUND: return ZZ_ENOENT;
-    case SDK_STATUS_BUSY: return ZZ_EBUSY;
-    default: return ZZ_EIO;
+    case SDK_STATUS_OK: return AAR_OK;
+    case SDK_STATUS_NO_MEMORY: return AAR_E_NOMEM;
+    case SDK_STATUS_UNSUPPORTED: return AAR_E_NOSYS;
+    case SDK_STATUS_BAD_REQUEST: return AAR_E_INVAL;
+    case SDK_STATUS_NOT_FOUND: return AAR_E_NOENT;
+    case SDK_STATUS_BUSY: return AAR_E_BUSY;
+    default: return AAR_E_IO;
     }
 }
 
-static int api_host_address(const void *p, uint32_t *host_offset)
+static int api_shared_alloc(uint64_t bytes, uint32_t align, uint32_t flags,
+                            aar_shared *out)
 {
     int rc;
 
     zzapp_api_enter();
-    rc = zzapp_host_address(p, host_offset);
+    rc = zzapp_host_shared_alloc(bytes, align, flags, out);
     zzapp_api_leave();
     return rc;
 }
 
-static int api_mem_info(zzapp_mem_info *out)
+static int api_shared_free(void *p)
 {
     int rc;
 
     zzapp_api_enter();
-    rc = zzapp_host_mem_info(out);
+    rc = zzapp_host_free(p);
     zzapp_api_leave();
     return rc;
 }
 
-static int api_map_file(const char *path, const void **data, uint32_t *bytes)
+/* The ZZ9000's shared memory is coherent with the ARM caches (the Zorro
+ * master goes through the ACP), so publish and acquire only order the
+ * bus: a store barrier before the message that announces the data, a load
+ * barrier before reading what the host wrote. */
+static int api_publish(const void *p, uint64_t bytes)
 {
-    zzapp_stat st;
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_host_shared_range(p, bytes);
+    if (rc == AAR_OK)
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_acquire(const void *p, uint64_t bytes)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_host_shared_range(p, bytes);
+    if (rc == AAR_OK)
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_map_file(const char *path, const void **data, uint64_t *bytes)
+{
+    aar_stat st;
     uint8_t *dst;
     uint32_t done = 0;
     int fd;
     int rc;
 
     if (!path || !data || !bytes)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     *data = NULL;
     *bytes = 0;
     zzapp_api_enter();
     rc = zzapp_svc_file_stat(path, &st);
     if (zzapp_host_faulted()) {
-        rc = ZZ_EFAULT;
+        rc = AAR_E_FAULT;
         goto out;
     }
-    if (rc != ZZ_OK)
+    if (rc != AAR_OK)
         goto out;
     if (st.size > (16u << 20) || st.size > UINT32_MAX) {
-        rc = ZZ_ENOSPC;
+        rc = AAR_E_NOSPC;
         goto out;
     }
-    dst = (uint8_t *)zzapp_host_alloc((uint32_t)st.size, 8u,
-                                      ZZ_ALLOC_HOST_VISIBLE);
+    dst = (uint8_t *)zzapp_host_alloc((uint32_t)st.size, 8u);
     if (!dst) {
-        rc = ZZ_ENOMEM;
+        rc = AAR_E_NOMEM;
         goto out;
     }
     if (zzapp_host_faulted()) {
-        rc = ZZ_EFAULT;
+        rc = AAR_E_FAULT;
         goto free_dst;
     }
-    fd = zzapp_svc_file_open(path, ZZ_FILE_READ);
+    fd = zzapp_svc_file_open(path, AAR_FILE_READ);
     if (zzapp_host_faulted()) {
-        rc = ZZ_EFAULT;
+        rc = AAR_E_FAULT;
         goto free_dst;
     }
     if (fd < 0) {
         rc = fd;
         goto free_dst;
     }
-    rc = ZZ_OK;
+    rc = AAR_OK;
     while (done < (uint32_t)st.size) {
         uint32_t got = 0;
         uint32_t want = (uint32_t)st.size - done;
@@ -514,25 +567,25 @@ static int api_map_file(const char *path, const void **data, uint32_t *bytes)
             want = 65536u;
         rc = zzapp_svc_file_read(fd, dst + done, want, &got);
         if (zzapp_host_faulted()) {
-            rc = ZZ_EFAULT;
+            rc = AAR_E_FAULT;
             break;
         }
-        if (rc != ZZ_OK || got == 0u) {
-            if (rc == ZZ_OK)
-                rc = ZZ_EIO;
+        if (rc != AAR_OK || got == 0u) {
+            if (rc == AAR_OK)
+                rc = AAR_E_IO;
             break;
         }
         done += got;
     }
     (void)zzapp_svc_file_close(fd);
-    if (rc != ZZ_OK)
+    if (rc != AAR_OK)
         goto free_dst;
     *data = dst;
     *bytes = done;
     goto out;
 
 free_dst:
-    api_free(dst);
+    (void)zzapp_host_free(dst);
 out:
     zzapp_api_leave();
     return rc;
@@ -543,37 +596,40 @@ static void api_unmap_file(const void *data)
     if (!data)
         return;
     zzapp_api_enter();
-    api_free((void *)data);
+    (void)zzapp_host_free((void *)data);
     zzapp_api_leave();
 }
 
-static int api_sha256(const void *data, uint32_t bytes, uint8_t digest[32])
+/* The firmware's services take 32-bit byte counts: a whole-buffer length
+ * above that is AAR_E_INVAL. */
+static int api_sha256(const void *data, uint64_t bytes, uint8_t digest[32])
 {
-    if (!data || !digest)
-        return ZZ_EINVAL;
+    if (!data || !digest || bytes > UINT32_MAX)
+        return AAR_E_INVAL;
     zzapp_api_enter();
-    sdk_sha256(data, bytes, digest);
+    sdk_sha256(data, (uint32_t)bytes, digest);
     zzapp_api_leave();
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 static int api_decompress(uint32_t algorithm, uint32_t flags, const void *src,
-                          uint32_t src_bytes, void *dst, uint32_t dst_bytes,
-                          zzapp_service_result *out)
+                          uint64_t src_bytes, void *dst, uint64_t dst_bytes,
+                          aar_service_result *out)
 {
     struct SDKDecompressResult result;
     int rc;
 
-    if (!src || !dst || !out)
-        return ZZ_EINVAL;
+    if (!src || !dst || !out || src_bytes > UINT32_MAX || dst_bytes > UINT32_MAX)
+        return AAR_E_INVAL;
     zzapp_api_enter();
     /* Scratch under the app owner: a force-stop mid-call skips inflateEnd
      * / LZMA cleanup, and zzapp_api_poison_resources reclaims exactly this
      * owner instead of leaking into the shared decode pool. */
     rc = sdk_to_zz(sdk_decompress_buffer_owned(algorithm, flags, src,
-                                               src_bytes, dst, dst_bytes,
+                                               (uint32_t)src_bytes, dst,
+                                               (uint32_t)dst_bytes,
                                                &result, app_decode_owner()));
-    if (rc == ZZ_OK) {
+    if (rc == AAR_OK) {
         out->bytes_consumed = result.bytes_consumed;
         out->bytes_written = result.bytes_written;
         out->flags = result.flags;
@@ -619,7 +675,7 @@ static struct zzapp_audio_session
 static uint32_t g_next_audio_session[ZZAPP_AS_SLOT_COUNT];
 
 static void image_result(const struct SDKImageStreamResult *result,
-                         zzapp_image_result *out)
+                         aar_image_result *out)
 {
     out->image_width = result->image_width;
     out->image_height = result->image_height;
@@ -628,8 +684,8 @@ static void image_result(const struct SDKImageStreamResult *result,
     out->flags = result->flags;
 }
 
-static int api_image_open(const zzapp_image_open *open, uint32_t *session,
-                          zzapp_image_result *out)
+static int api_image_open(const aar_image_params *open, uint32_t *session,
+                          aar_image_result *out)
 {
     struct SDKImageStreamBegin begin;
     struct SDKImageStreamResult result;
@@ -640,13 +696,13 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
 
     if (!open || !session || !out || !open->tile || !open->stride ||
         !open->rows || !open->tile_bytes ||
-        open->output_format != ZZ_FMT_BGRA8888)
-        return ZZ_EINVAL;
+        open->output_format != AAR_FMT_BGRA8888)
+        return AAR_E_INVAL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
                 g_image_sessions[owner][i].id; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS ||
         zzapp_kernel_session_open(zzapp_runtime_kernel(), owner, 0) != 0)
-        return ZZ_ENOMEM;
+        return AAR_E_NOMEM;
     memset(&begin, 0, sizeof(begin));
     begin.codec = open->codec;
     begin.output_mode = SDK_IMAGE_OUTPUT_TILE_BUFFER;
@@ -672,7 +728,7 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
     if (status == SDK_TASK_IN_PROGRESS)
         status = SDK_STATUS_BUSY;
     rc = sdk_to_zz(status);
-    if (rc == ZZ_OK) {
+    if (rc == AAR_OK) {
         g_image_sessions[owner][i].id = result.session;
         g_image_sessions[owner][i].tile_address = (uint32_t)(uintptr_t)open->tile;
         g_image_sessions[owner][i].tile_bytes = open->tile_bytes;
@@ -681,7 +737,7 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
         zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 0);
     zzapp_host_commit_end();
     zzapp_api_leave();
-    if (rc == ZZ_OK) {
+    if (rc == AAR_OK) {
         *session = result.session;
         image_result(&result, out);
     }
@@ -689,7 +745,7 @@ static int api_image_open(const zzapp_image_open *open, uint32_t *session,
 }
 
 static int api_image_decode(uint32_t session, const void *src, uint32_t bytes,
-                            uint32_t flags, zzapp_image_result *out)
+                            uint32_t flags, aar_image_result *out)
 {
     struct SDKImageStreamFeed feed;
     struct SDKImageStreamResult result;
@@ -698,15 +754,15 @@ static int api_image_decode(uint32_t session, const void *src, uint32_t bytes,
     int rc;
 
     if (!src || !out)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
                 g_image_sessions[owner][i].id != session; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     if (zzapp_svc_check_user(&zzapp_proc_slot(owner)->as,
                              g_image_sessions[owner][i].tile_address,
-                             g_image_sessions[owner][i].tile_bytes, 1) != ZZ_OK)
-        return ZZ_EFAULT;
+                             g_image_sessions[owner][i].tile_bytes, 1) != AAR_OK)
+        return AAR_E_FAULT;
     memset(&feed, 0, sizeof(feed));
     feed.session = session;
     feed.src_length = bytes;
@@ -714,7 +770,7 @@ static int api_image_decode(uint32_t session, const void *src, uint32_t bytes,
     zzapp_api_enter();
     rc = sdk_to_zz(sdk_image_stream_feed(&feed, src, &result));
     zzapp_api_leave();
-    if (rc == ZZ_OK)
+    if (rc == AAR_OK)
         image_result(&result, out);
     return rc;
 }
@@ -728,11 +784,11 @@ static int api_image_close(uint32_t session)
     for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
                 g_image_sessions[owner][i].id != session; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     zzapp_api_enter();
     rc = sdk_to_zz(sdk_image_stream_close(session));
     zzapp_api_leave();
-    if (rc == ZZ_OK) {
+    if (rc == AAR_OK) {
         memset(&g_image_sessions[owner][i], 0,
                sizeof(g_image_sessions[owner][i]));
         zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 0);
@@ -755,9 +811,9 @@ static struct zzapp_audio_session *audio_session_find(uint32_t session)
 
 static void audio_session_release(struct zzapp_audio_session *session)
 {
-    if (session->codec == ZZ_AUDIO_FLAC)
+    if (session->codec == AAR_AUDIO_FLAC)
         sdk_flac_release(&session->state.flac);
-    else if (session->codec == ZZ_AUDIO_VORBIS)
+    else if (session->codec == AAR_AUDIO_VORBIS)
         sdk_vorbis_release(&session->state.vorbis);
     memset(session, 0, sizeof(*session));
 }
@@ -768,9 +824,9 @@ static int api_audio_open_decode(uint32_t codec, uint32_t *session)
     uint32_t owner = api_slot();
     uint32_t i;
 
-    if (!session || (codec != ZZ_AUDIO_MP3 && codec != ZZ_AUDIO_FLAC &&
-                     codec != ZZ_AUDIO_VORBIS))
-        return ZZ_EINVAL;
+    if (!session || (codec != AAR_AUDIO_MP3 && codec != AAR_AUDIO_FLAC &&
+                     codec != AAR_AUDIO_VORBIS))
+        return AAR_E_INVAL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
         if (g_audio_sessions[owner][i].id == 0u) {
             slot = &g_audio_sessions[owner][i];
@@ -778,15 +834,15 @@ static int api_audio_open_decode(uint32_t codec, uint32_t *session)
         }
     if (!slot ||
         zzapp_kernel_session_open(zzapp_runtime_kernel(), owner, 1) != 0)
-        return ZZ_ENOMEM;
+        return AAR_E_NOMEM;
     memset(slot, 0, sizeof(*slot));
     slot->id = 0x80000000u | ++g_next_audio_session[owner];
     if (g_next_audio_session[owner] == 0u)
         g_next_audio_session[owner] = 1u;
     slot->codec = codec;
-    if (codec == ZZ_AUDIO_MP3)
+    if (codec == AAR_AUDIO_MP3)
         mp3dec_init(&slot->state.mp3);
-    else if (codec == ZZ_AUDIO_FLAC) {
+    else if (codec == AAR_AUDIO_FLAC) {
         sdk_flac_init(&slot->state.flac, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
         slot->state.flac.pool_owner = app_decode_owner();
     } else {
@@ -795,13 +851,13 @@ static int api_audio_open_decode(uint32_t codec, uint32_t *session)
     }
     zzapp_proc_slot(owner)->audio_sessions++;
     *session = slot->id;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 static int api_audio_decode_app(uint32_t session, const void *src,
                                 uint32_t src_bytes, uint32_t flags,
                                 int16_t *pcm, uint32_t pcm_frames,
-                                zzapp_audio_decode_result *out)
+                                aar_audio_decode_result *out)
 {
     struct zzapp_audio_session *slot;
     struct sdk_audio_codec_io io;
@@ -812,36 +868,36 @@ static int api_audio_decode_app(uint32_t session, const void *src,
     int rc;
 
     if ((!src && src_bytes) || !pcm || !pcm_frames || !out ||
-        (flags & ~(ZZ_AUDIO_DECODE_EOF | ZZ_AUDIO_DECODE_DRAIN)) != 0u)
-        return ZZ_EINVAL;
+        (flags & ~(AAR_AUDIO_DECODE_EOF | AAR_AUDIO_DECODE_DRAIN)) != 0u)
+        return AAR_E_INVAL;
     slot = audio_session_find(session);
     if (!slot)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     memset(out, 0, sizeof(*out));
     zzapp_api_enter();
-    if (slot->codec == ZZ_AUDIO_MP3) {
+    if (slot->codec == AAR_AUDIO_MP3) {
         if (!src || !src_bytes || flags != 0u) {
-            rc = ZZ_EINVAL;
+            rc = AAR_E_INVAL;
         } else if (pcm_frames < MINIMP3_MAX_SAMPLES_PER_FRAME / 2u ||
                    src_bytes > INT32_MAX) {
-            rc = ZZ_ENOSPC;
+            rc = AAR_E_NOSPC;
         } else {
             memset(&info, 0, sizeof(info));
             samples = mp3dec_decode_frame(&slot->state.mp3, src,
                                           (int)src_bytes, pcm, &info);
             if (samples < 0 || info.frame_bytes <= 0 ||
                 (uint32_t)info.frame_bytes > src_bytes) {
-                rc = ZZ_EIO;
+                rc = AAR_E_IO;
             } else {
                 channels = (uint32_t)info.channels;
                 if (!channels || (uint32_t)samples > pcm_frames) {
-                    rc = ZZ_ENOSPC;
+                    rc = AAR_E_NOSPC;
                 } else {
                     out->bytes_consumed = (uint32_t)info.frame_bytes;
                     out->frames_written = (uint32_t)samples;
                     out->rate = (uint32_t)info.hz;
                     out->channels = channels;
-                    rc = ZZ_OK;
+                    rc = AAR_OK;
                 }
             }
         }
@@ -849,26 +905,26 @@ static int api_audio_decode_app(uint32_t session, const void *src,
         memset(&io, 0, sizeof(io));
         io.input = src;
         io.input_length = src_bytes;
-        io.eof = (flags & ZZ_AUDIO_DECODE_EOF) != 0u;
-        io.drain = (flags & ZZ_AUDIO_DECODE_DRAIN) != 0u;
+        io.eof = (flags & AAR_AUDIO_DECODE_EOF) != 0u;
+        io.drain = (flags & AAR_AUDIO_DECODE_DRAIN) != 0u;
         io.pcm = (uint8_t *)pcm;
         if (pcm_frames > UINT32_MAX / 4u) {
-            rc = ZZ_ENOSPC;
+            rc = AAR_E_NOSPC;
         } else {
             io.pcm_capacity = pcm_frames * 4u;
             io.pcm_free = io.pcm_capacity;
             io.pcm_budget = io.pcm_capacity;
-            status = slot->codec == ZZ_AUDIO_FLAC ?
+            status = slot->codec == AAR_AUDIO_FLAC ?
                 sdk_flac_decode(&slot->state.flac, &io) :
                 sdk_vorbis_decode(&slot->state.vorbis, &io);
             rc = sdk_to_zz(status);
-            channels = slot->codec == ZZ_AUDIO_FLAC ?
+            channels = slot->codec == AAR_AUDIO_FLAC ?
                 slot->state.flac.channels : slot->state.vorbis.channels;
-            if (rc == ZZ_OK) {
+            if (rc == AAR_OK) {
                 out->bytes_consumed = io.consumed;
                 out->frames_written = channels ?
                     io.produced / (channels * 2u) : 0u;
-                out->rate = slot->codec == ZZ_AUDIO_FLAC ?
+                out->rate = slot->codec == AAR_AUDIO_FLAC ?
                     slot->state.flac.sample_rate :
                     slot->state.vorbis.sample_rate;
                 out->channels = channels;
@@ -885,14 +941,14 @@ static int api_audio_close_decode(uint32_t session)
     struct zzapp_audio_session *slot = audio_session_find(session);
 
     if (!slot)
-        return ZZ_EINVAL;
+        return AAR_E_INVAL;
     zzapp_api_enter();
     audio_session_release(slot);
     zzapp_api_leave();
     zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 1);
     if (zzapp_proc_slot(owner)->audio_sessions)
         zzapp_proc_slot(owner)->audio_sessions--;
-    return ZZ_OK;
+    return AAR_OK;
 }
 
 void zzapp_api_reclaim_resources(void)
@@ -931,9 +987,9 @@ void zzapp_api_poison_resources(void)
         }
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
         if (audio_sessions[i].id) {
-            if (audio_sessions[i].codec == ZZ_AUDIO_FLAC)
+            if (audio_sessions[i].codec == AAR_AUDIO_FLAC)
                 sdk_flac_forget(&audio_sessions[i].state.flac);
-            else if (audio_sessions[i].codec == ZZ_AUDIO_VORBIS)
+            else if (audio_sessions[i].codec == AAR_AUDIO_VORBIS)
                 sdk_vorbis_forget(&audio_sessions[i].state.vorbis);
             memset(&audio_sessions[i], 0, sizeof(audio_sessions[i]));
             zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 1);
@@ -950,9 +1006,9 @@ WRAP1(api_list_close,int,zzapp_svc_file_list_close(a))
 WRAP1(api_display_flip,uint32_t,zzapp_svc_display_flip(a))
 WRAP1(api_display_flip_async,uint32_t,zzapp_svc_display_flip_async(a))
 WRAP0(api_display_flip_idle,zzapp_display_flip_idle())
-static int api_display_refresh(zzapp_surface *o) { zzapp_api_enter(); int r=zzapp_svc_display_refresh(o); zzapp_api_leave(); return r; }
+static int api_display_refresh(aar_surface *o) { zzapp_api_enter(); int r=zzapp_svc_display_refresh(o); zzapp_api_leave(); return r; }
 static int api_display_set_palette(uint32_t id,uint32_t first,uint32_t count,const uint32_t *rgb){zzapp_api_enter();int r=zzapp_svc_display_set_palette(id,first,count,rgb);zzapp_api_leave();return r;}
-static uint32_t api_display_mailbox_replaced(void){zzapp_api_enter();uint32_t r=zzapp_svc_display_mailbox_replaced();zzapp_api_leave();return r;}
+static uint32_t api_display_latest_dropped(void){zzapp_api_enter();uint32_t r=zzapp_svc_display_latest_dropped();zzapp_api_leave();return r;}
 WRAP0(api_vsync,zzapp_svc_display_vsync())
 WRAP1(api_display_close,uint32_t,zzapp_svc_display_close(a))
 WRAP0(api_audio_close,zzapp_svc_audio_close())
@@ -960,18 +1016,18 @@ static int api_file_open(const char *p,uint32_t f){zzapp_api_enter();int r=zzapp
 static int api_file_read(int f,void*p,uint32_t n,uint32_t*o){zzapp_api_enter();int r=zzapp_svc_file_read(f,p,n,o);zzapp_api_leave();return r;}
 static int api_file_write(int f,const void*p,uint32_t n,uint32_t*o){zzapp_api_enter();int r=zzapp_svc_file_write(f,p,n,o);zzapp_api_leave();return r;}
 static int api_file_seek(int f,int64_t o,int w,int64_t*out){zzapp_api_enter();int r=zzapp_svc_file_seek(f,o,w,out);zzapp_api_leave();return r;}
-static int api_file_stat(const char*p,zzapp_stat*out){zzapp_api_enter();int r=zzapp_svc_file_stat(p,out);zzapp_api_leave();return r;}
-static int api_list_next(int l,zzapp_dirent*out){zzapp_api_enter();int r=zzapp_svc_file_list_next(l,out);zzapp_api_leave();return r;}
-static int api_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,zzapp_surface*out){zzapp_api_enter();int r=zzapp_svc_display_open(w,h,f,fl,out);zzapp_api_leave();return r;}
-static int api_input(zzapp_event*out,uint32_t n,uint32_t*got){zzapp_api_enter();int r=zzapp_svc_input_poll(out,n,got);zzapp_api_leave();return r;}
-static int api_audio_open(uint32_t r,uint32_t c,zzapp_audio*out){zzapp_api_enter();int x=zzapp_svc_audio_open(r,c,out);zzapp_api_leave();return x;}
+static int api_file_stat(const char*p,aar_stat*out){zzapp_api_enter();int r=zzapp_svc_file_stat(p,out);zzapp_api_leave();return r;}
+static int api_list_next(int l,aar_dirent*out){zzapp_api_enter();int r=zzapp_svc_file_list_next(l,out);zzapp_api_leave();return r;}
+static int api_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,aar_surface*out){zzapp_api_enter();int r=zzapp_svc_display_open(w,h,f,fl,out);zzapp_api_leave();return r;}
+static int api_event_poll(aar_event*out,uint32_t n,uint32_t*got){zzapp_api_enter();int r=zzapp_svc_event_poll(out,n,got);zzapp_api_leave();return r;}
+static int api_audio_open(uint32_t r,uint32_t c,aar_audio*out){zzapp_api_enter();int x=zzapp_svc_audio_open(r,c,out);zzapp_api_leave();return x;}
 static int api_console_write(const void *p,uint32_t n,uint32_t *out){zzapp_api_enter();int r=zzapp_svc_console_write(p,n,out);zzapp_api_leave();return r;}
 static int api_console_read(void *p,uint32_t n,uint32_t *out){zzapp_api_enter();int r=zzapp_svc_console_read(p,n,out);zzapp_api_leave();return r;}
 static int api_msg_send(const void *p){zzapp_api_enter();int r=zzapp_svc_msg_send(p);zzapp_api_leave();return r;}
 static int api_msg_poll(void *p){zzapp_api_enter();int r=zzapp_svc_msg_poll(p);zzapp_api_leave();return r;}
 static int api_msg_wait(uint32_t timeout_us){zzapp_api_enter();int r=zzapp_svc_msg_wait(timeout_us);zzapp_api_leave();return r;}
-static const zzapp_gl *api_gl_bind(uint32_t id){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
-static const zzapp_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const zzapp_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind_flags(id,flags,&out)!=ZZ_OK)out=NULL;zzapp_api_leave();return out;}
+static const aar_gl *api_gl_bind(uint32_t id){const aar_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=AAR_OK)out=NULL;zzapp_api_leave();return out;}
+static const aar_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const aar_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind_flags(id,flags,&out)!=AAR_OK)out=NULL;zzapp_api_leave();return out;}
 #if ZZAPP_PERF_COUNTERS
 static void api_gl_swap(void)
 {
@@ -983,7 +1039,7 @@ static void api_gl_swap(void)
     if (minigl_binding_matches(slot, zzapp_current_generation())) {
         report = zzapp_svc_gl_telemetry_swap(slot, zzapp_host_time_us(),
                                              &snapshot);
-        if (zzapp_minigl_swap() != ZZ_OK)
+        if (zzapp_minigl_swap() != AAR_OK)
             report = 0;
     }
     zzapp_api_leave();
@@ -1000,32 +1056,73 @@ static void api_gl_swap(void)
 #endif
 static void api_gl_unbind(void){zzapp_api_enter();zzapp_minigl_unbind();zzapp_api_leave();}
 
-static const zzapp_api g_api = {
-    .size=sizeof(g_api), .version=ZZAPP_API_VERSION,
-    .exit=api_exit,.yield=api_yield,.should_stop=api_stop,.time_us=api_time,.sleep_us=api_sleep,
-    .alloc=api_alloc,.free=api_free,.heap_range=api_heap,.log=zzapp_svc_log,
-    .file_open=api_file_open,.file_close=api_file_close,.file_read=api_file_read,.file_write=api_file_write,.file_seek=api_file_seek,.file_stat=api_file_stat,.file_list_open=api_list_open,.file_list_next=api_list_next,.file_list_close=api_list_close,
-    .display_open=api_display_open,.display_flip=api_display_flip,.display_vsync=api_vsync,.display_close=api_display_close,.input_poll=api_input,.audio_open=api_audio_open,.audio_close=api_audio_close,
-    .gl_bind=api_gl_bind,.gl_swap=api_gl_swap,.gl_unbind=api_gl_unbind,
-    .display_flip_async=api_display_flip_async,.display_flip_idle=api_display_flip_idle,
-    .display_refresh=api_display_refresh,.gl_bind_flags=api_gl_bind_flags,
-    .display_set_palette=api_display_set_palette,
-    .display_mailbox_replaced=api_display_mailbox_replaced,
-    .build_id=ZZ9000_BUILD_GIT,
-    /* API 0.2 core: shared memory, card services and file maps. */
-    .host_address=api_host_address,.mem_info=api_mem_info,
-    .map_file=api_map_file,.unmap_file=api_unmap_file,
-    .sha256=api_sha256,.decompress=api_decompress,
-    .image_open=api_image_open,.image_decode=api_image_decode,.image_close=api_image_close,
-    .audio_decode_open=api_audio_open_decode,.audio_decode=api_audio_decode_app,
-    .audio_decode_close=api_audio_close_decode,
-    /* API 0.2 host: console and fixed-size message rings. */
-    .console_write=api_console_write,.console_read=api_console_read,
-    .msg_send=api_msg_send,.msg_poll=api_msg_poll,
-    /* API 0.3: the private heap grows and shrinks in frames. */
-    .heap_grow=api_heap_grow,.heap_shrink=api_heap_shrink,
-    .heap_info=api_heap_info,
-    /* API 0.4: park until a host-to-app message is ready. */
-    .msg_wait=api_msg_wait
+/* The ZZ9000 extension table (aar/ext_zz9000.h). The app gets its own copy
+ * from zzapp_svc_api_for_slot: gl_bind_flags is a veneer there, and the
+ * strings live in the app's read-only table page. */
+static const aar_ext_zz9000 g_ext = {
+    .size = sizeof(g_ext),
+    .gl_bind_flags = api_gl_bind_flags,
+    .build_id = ZZ9000_BUILD_GIT,
 };
-const zzapp_api *zzapp_api_table(void) { return &g_api; }
+
+static const void *api_ext(uint32_t platform_id, uint32_t ext_id)
+{
+    if (platform_id != AAR_PLATFORM_ZZ9000 || ext_id != AAR_EXT_ZZ9000_MAIN)
+        return NULL;
+    return &g_ext;
+}
+
+/* Slot order is aar_api's. audio_stats is NULL (the runtime keeps no
+ * underrun count): the standard allows it, and the app then sees a NULL
+ * slot. `groups` follows the runtime's group mask. */
+static aar_api g_api = {
+    .size = sizeof(g_api), .version = AAR_API_VERSION,
+    .platform_id = AAR_PLATFORM_ZZ9000,
+    /* core */
+    .exit = api_exit, .yield = api_yield, .should_stop = api_stop,
+    .time_us = api_time, .sleep_us = api_sleep, .info = api_info,
+    .heap_range = api_heap_range, .heap_grow = api_heap_grow,
+    .heap_shrink = api_heap_shrink, .heap_info = api_heap_info,
+    .shared_alloc = api_shared_alloc, .shared_free = api_shared_free,
+    .publish = api_publish, .acquire = api_acquire,
+    .log = zzapp_svc_log,
+    .file_open = api_file_open, .file_close = api_file_close,
+    .file_read = api_file_read, .file_write = api_file_write,
+    .file_seek = api_file_seek, .file_stat = api_file_stat,
+    .file_list_open = api_list_open, .file_list_next = api_list_next,
+    .file_list_close = api_list_close,
+    .console_write = api_console_write, .console_read = api_console_read,
+    .event_poll = api_event_poll,
+    .msg_send = api_msg_send, .msg_poll = api_msg_poll,
+    .msg_wait = api_msg_wait,
+    /* optional */
+    .ext = api_ext, .map_file = api_map_file, .unmap_file = api_unmap_file,
+    /* display */
+    .display_open = api_display_open, .display_flip = api_display_flip,
+    .display_flip_async = api_display_flip_async,
+    .display_flip_idle = api_display_flip_idle,
+    .display_refresh = api_display_refresh, .display_vsync = api_vsync,
+    .display_set_palette = api_display_set_palette,
+    .display_close = api_display_close,
+    .display_latest_dropped = api_display_latest_dropped,
+    /* audio */
+    .audio_open = api_audio_open, .audio_close = api_audio_close,
+    /* GL */
+    .gl_bind = api_gl_bind, .gl_swap = api_gl_swap, .gl_unbind = api_gl_unbind,
+    /* services */
+    .sha256 = api_sha256, .decompress = api_decompress,
+    .image_open = api_image_open, .image_decode = api_image_decode,
+    .image_close = api_image_close,
+    .audio_decode_open = api_audio_open_decode,
+    .audio_decode = api_audio_decode_app,
+    .audio_decode_close = api_audio_close_decode
+};
+
+const aar_api *zzapp_api_table(void)
+{
+    uint32_t groups = zzapp_runtime_groups();
+
+    if (g_api.groups != groups)
+        g_api.groups = groups;
+    return &g_api;
+}

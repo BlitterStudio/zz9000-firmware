@@ -1,11 +1,13 @@
 # ZZ9000 app runtime
 
-This is the firmware and launcher contract for the API 0.4 app kernel. The
-public app interface is [zzapp-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-api.md); application
+This is the firmware and launcher contract for the app kernel, which
+implements AAR API 0.5 (BlitterStudio/aar, pinned by `sdk/AAR_REF`). The public
+app interface is [aar-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md); application
 build and usage guidance is in
-[zzapp-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-developer-guide.md). The shared
+[aar-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md). The shared
 wire definitions in `ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_proto.h` are the
-source of truth for byte offsets and constants.
+source of truth for byte offsets and constants. [App interface](#app-interface)
+below lists what this firmware does where the standard leaves a choice.
 
 ## Kernel architecture
 
@@ -62,23 +64,23 @@ RSA-2048 operation holds core 1 for about 5 to 25 ms, so a handshake stalls
 running apps for that long.
 
 An API body remains unpreemptible while it owns the API lock. Its internal
-explicit `zz_yield` safe point releases that lock, lets one due system-service
+explicit `aar_yield` safe point releases that lock, lets one due system-service
 pass run, then reacquires the lock before returning to the body. A standalone
-`zz_yield` rotates to another runnable app and runs a system-service pass only
+`aar_yield` rotates to another runnable app and runs a system-service pass only
 when service work is due. This bounds audio-service delay at cooperative yield
 points to the current API segment plus one scheduler handoff; a body that does
 not yield remains subject to the API watchdog rather than a scheduler preemption.
 
 File and directory operations, console read and backpressure, display open and
-flip, non-host audio open and close, `zz_msg_wait`, and sleep park the caller
-at the SVC handoff. `zz_gl_swap` parks through its flip. Completion wakes the
+flip, non-host audio open and close, `aar_msg_wait`, and sleep park the caller
+at the SVC handoff. `aar_gl_swap` parks through its flip. Completion wakes the
 slot READY; file and directory waits wake TIMEOUT after 30 seconds and return
-`ZZ_ETIMEDOUT`. Stop wakes a parked waiter (an EVENT waiter wakes READY and
-then sees the stop); waiting service calls return `ZZ_EIO`. `zz_input_poll`
-and `zz_display_vsync` do not park; the
+`AAR_E_TIMEDOUT`. Stop wakes a parked waiter (an EVENT waiter wakes READY and
+then sees the stop); waiting service calls return `AAR_E_IO`. `aar_event_poll`
+and `aar_display_vsync` do not park; the
 latter only yields once.
 
-`zz_msg_wait` parks as an `EVENT` wait with the caller's timeout as its
+`aar_msg_wait` parks as an `EVENT` wait with the caller's timeout as its
 deadline. The Amiga writes the host-to-app ring in the launcher window and
 rings no doorbell, so the wait is a level test. The service pass reads the
 ring head and tail for every parked `EVENT` waiter and wakes it when they
@@ -166,19 +168,22 @@ for the launcher window, or maintains its caches itself. The Zorro
 master's second port, `m01_axi`, goes to HP1 but only writes video-capture
 frames; it carries no Zorro access to the host-visible heap.
 
-The app-facing API and GL tables retain their layout and `size` semantics, but
-their entries point to user-RX `svc; bx lr` veneers. On a user veneer call,
+The app-facing `aar_api`, `aar_gl` and `aar_ext_zz9000` tables keep the layouts
+and `size` semantics of `aar/app.h`, `aar/gl.h` and `aar/ext_zz9000.h`, but
+their entries, including `gl_bind_flags` in the extension table, point to
+user-RX `svc; bx lr` veneers. The extension table's strings live in the app's
+read-only table page. On a user veneer call,
 the vector copies the exception frame to that slot's kernel stack, switches to
 SYS mode, and enables IRQs before invoking the handler. Every SVC handler
 checks user pointers against the caller's mappings and permissions before
 touching them. Invalid, overflowed, read-only-for-output, device, and
-other-slot pointers return `ZZ_EFAULT`. Firmware code never becomes a
+other-slot pointers return `AAR_E_FAULT`. Firmware code never becomes a
 user-call target.
 
 GL client-array state is per slot. `DrawArrays` validates every enabled vertex,
 colour, and client texture-coordinate element in its requested range.
 `DrawElements` also validates its index buffer and every indexed element before
-MiniGL is called. An unmapped or changed range returns `ZZ_EFAULT` and records
+MiniGL is called. An unmapped or changed range returns `AAR_E_FAULT` and records
 `GL_INVALID_VALUE` for `glGetError`.
 
 ### Frames, commit, and teardown
@@ -186,10 +191,9 @@ MiniGL is called. An unmapped or changed range returns `ZZ_EFAULT` and records
 Private memory is allocated as zeroed 1 MiB frames from aligned 8 MiB
 card-pool extents. Admission is atomic: aggregate commit plus the request
 must fit in pool free memory after the system reserve and any per-app launcher
-limit. API 0.1 and 0.2 images retain their 96 MiB load-time commit. API 0.3
-images commit image, stack, and their requested minimum heap; `heap_grow` and
-`heap_shrink` add or return whole frames while keeping the heap VA range
-fixed.
+limit. An app commits its image, its stack, and the `min_heap_mib` its note
+asks for; there is no fixed load-time arena. `heap_grow` and `heap_shrink` add
+or return whole frames while keeping the heap VA range fixed.
 
 All terminal paths call the same generation-guarded teardown: stop new calls,
 wake and cancel waits, quiesce work and DMA holding app pointers, hand off or
@@ -206,6 +210,77 @@ every app. Per-slot 30-second stall and 10-second stuck-call watchdogs stop
 only their slot. A separate core-0 backstop cold-restarts core 1 after two
 seconds without both progress and timer ticks; that ends every non-idle slot
 with the restart reason.
+
+## App interface
+
+The firmware implements the AAR 0.5 app table (`aar_api`, `aar/app.h`), the GL
+table (`aar_gl`, `aar/gl.h`) and the ZZ9000 extension table
+(`aar_ext_zz9000`, `aar/ext_zz9000.h`) on the four slots and the launcher
+window wire described below. Calls are `aar_*`, constants `AAR_*`, status
+codes `AAR_E_*`. The `zz_*`, `ZZ_*` and `zzapp_*` names of the 0.4 header are
+gone with no compatibility layer; `docs/zzapp-to-aar.md` in the aar repository
+maps them. The firmware's hardware names (`ZZ_*` audio, Ethernet, RasterIX and
+MiniGL registers) are unchanged. `QUERY` reports 0.5 in its ABI major and
+minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
+
+**Groups.** `aar_api.groups` and `aar_info.groups` report the same mask:
+`AAR_GROUP_INPUT` and `AAR_GROUP_SERVICES` always, and `AAR_GROUP_DISPLAY`,
+`AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the launcher capability word has the
+matching bit. `audio_stats` is `NULL`: the runtime keeps no underrun count.
+
+**Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
+40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment or,
+when no segment holds one, in a note section. The loader checks, in the
+descriptor's order: magic `0x4E524141` and version 1 (`AAR_E_INVAL`); profile
+A32 (`AAR_E_PROFILE`); `api_major` 0 and `api_minor` at most 5
+(`AAR_E_INVAL`); `stack_bytes` 0 for the default 1 MiB, else 64 KiB to 1 MiB
+and a multiple of 16 (`AAR_E_INVAL`); the reserved word 0; every
+`groups_required` bit present in the runtime mask (`AAR_E_NOGROUP`); and
+`min_heap_mib` within the 512 MiB private window (`AAR_E_NOMEM`). No note, a
+second AAR note, or a descriptor of the wrong size is `AAR_E_INVAL`. The load
+status the launcher sees maps `AAR_E_INVAL` and `AAR_E_PROFILE` to
+`BAD_REQUEST`, `AAR_E_NOGROUP` to `UNSUPPORTED`, and `AAR_E_NOMEM` to
+`NO_MEMORY`; a profile or group refusal prints its reason in the `[app] reject
+op` line. The groups a note names (required and optional) set the display,
+audio and GL bits of the lifecycle flags that the launcher reads. An image
+without a v1 note, including one that carries a 0.4 note, does not load.
+
+**Events.** `aar_event_poll` always delivers `AAR_EV_STOP` and
+`AAR_EV_LOW_MEMORY`, and delivers the launcher's key, mouse, joystick and
+break events only when the runtime has `AAR_GROUP_INPUT`. One stop request
+yields one stop event: the firmware queues it itself, and the launcher's own
+stop event for the same request counts as that delivery, so the second is
+dropped. The low-memory event carries no fields other than its type.
+
+**Files.** The open flags travel unchanged from the app to the launcher
+window (`zzapp_file_wire.flags` at `FILE_OFF+12`): `AAR_FILE_READ` 1, `WRITE` 2,
+`CREATE` 4 (create if missing, keep an existing file), `TRUNCATE` 8, `EXCL` 16
+(with `CREATE`, fail when the file exists). The firmware refuses an invalid
+combination with `AAR_E_INVAL` before it reaches the launcher: an unknown bit,
+neither `READ` nor `WRITE`, `CREATE` or `TRUNCATE` without `WRITE`, or `EXCL`
+without `CREATE`. Create-or-replace is `CREATE | TRUNCATE`.
+
+**Shared buffers.** `aar_shared_alloc` takes flags 0 and returns a block from
+the host-visible heap, rounded to the 4096-byte granule, with at most 64 live
+blocks per app and the `shared_limit` described under `LOAD_BEGIN`. The
+result's `haddr` is the board-relative Zorro III offset of the block (the card
+address minus the board's window base), `ptr` is the app mapping, and `flags`
+always has `AAR_SHAREDF_COHERENT`. `aar_publish` and `aar_acquire` check that
+the range lies inside one live block and add a memory barrier only, because
+the Zorro master reaches the heap through the ACP. A byte count whose high
+word is not zero is `AAR_E_INVAL`. `aar_get_info` reports `msg_capacity` 64
+(the ring holds 64 messages), a 4096-byte `shared_granule`, `heap_granule` 1
+MiB, `stall_limit_ms` 30000, `stop_grace_ms` 500, `sleep_granule_us` 5000,
+`max_files` 16, and the flags `AAR_INFOF_ISOLATED` and
+`AAR_INFOF_SHARED_COHERENT`.
+
+**Extension table.** `aar_ext(AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_MAIN)`
+returns the app's own copy of `aar_ext_zz9000`: `gl_bind_flags` (a veneer),
+`build_id` (the firmware build string) and `gl_build_id`. `gl_build_id` is
+always `NULL`, because the resident firmware has no source for the GL module's
+revision; the module prints it on the UART when it loads (`[ZZM] MINIGL loaded
+v1 build <id>`, see [minigl-module.md](minigl-module.md)). Any other platform
+or extension id returns `NULL`.
 
 ## Slot protocol
 
@@ -255,7 +330,7 @@ teardown and only for a quarantined slot. Card reset clears all quarantine.
 Extended `LOAD_BEGIN` carries the launcher memory limit in MiB at byte 0;
 zero means no limit beyond the pool. `LOAD_CHUNK`, `LOAD_END`, `START`,
 `STATUS`, and `DISPLAY_BIND` retain their old fields and append the selector.
-For API 0.3 images, the limit applies to the initial image, stack, and
+The limit applies to the initial image, stack, and
 minimum heap commit as well as later heap growth. `DISPLAY_BIND` always
 carries the spare-buffer field at byte 28; zero means none. A second bind while
 a surface is already bound returns `BUSY` and leaves the existing mappings alone.
@@ -264,8 +339,8 @@ Extended `LOAD_BEGIN` also carries the app's host-visible limit in MiB at
 byte 4 (`ZZAPP_LOAD_HOST_VISIBLE_MIB`); firmware that advertises
 `ZZAPP_CAP_HOST_LIMIT` reads it. Zero, and every request form that has no such
 word, keeps the default of 16 MiB. A nonzero value replaces the default for
-that app, so it can raise the limit or lower it, and `zz_mem_info` reports the
-value in force as `host_visible_limit`. A value above 4095 in either limit
+that app, so it can raise the limit or lower it, and `aar_get_info` reports the
+value in force as `shared_limit`. A value above 4095 in either limit
 word returns `BAD_REQUEST`. The limit is a cap, not a
 reservation: nothing is set aside when the load begins, and an allocation can
 still fail below the cap when the shared host-visible heap, which also serves
@@ -371,7 +446,7 @@ limit, app CPU milliseconds, and kernel service milliseconds at bytes 0
 through 23. CPU time starts at zero when a generation is claimed. STATUS CPU
 time is user execution plus SVC execution; it excludes idle and recovery
 intervals. Byte 24 is the block reason: `NONE` (0), `FILE` (1), `CONSOLE` (2),
-`EVENT` (3, `zz_msg_wait`), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6).
+`EVENT` (3, `aar_msg_wait`), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6).
 Byte 25 is the terminal reason. Bytes 26-27 hold the overload flag, and bytes
 28-47 are the app name. Terminal reasons are `NONE` (0), `EXIT` (1),
 `FORCED` (2), `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
@@ -404,16 +479,17 @@ semantics: zeroed when a slot generation is claimed; increments once per
 free-pool low-water crossing while that slot is running; wraps modulo 2^32
 ```
 
-The same crossing queues one `ZZ_EV_LOW_MEMORY` event for the app; no
+The same crossing queues one `AAR_EV_LOW_MEMORY` event for the app; no
 additional crossing is counted or queued until the allocator has re-armed
 above its high-water mark.
 
 ### Legacy slot 0
 
 A request whose payload is not 48 bytes is legacy. It addresses slot 0 only,
-uses the API 0.2 request and reply shapes byte-for-byte, and has no selector.
+uses the original single-slot request and reply shapes byte-for-byte, and has
+no selector.
 Legacy `QUERY` reports slot 0 state; legacy `ALLOC_WINDOW` claims slot 0 only.
-Therefore an unchanged API 0.2 ZZRun or `zz9k.library` client continues to
+Therefore an unchanged single-slot ZZRun or `zz9k.library` client continues to
 run one app without learning about the other slots. A client without
 `ZZAPP_CAP_SLOTS` uses these legacy forms against older firmware.
 

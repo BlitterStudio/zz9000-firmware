@@ -206,7 +206,7 @@ int main(void)
     assert(zzapp_get_be32(mailbox.request_ring[1].payload +
                           ZZAPP_CHUNK_STAGING) == ZZAPP_STAGING_OFF);
 
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
     ZZ9KClose(&library);
     return 0;
 }

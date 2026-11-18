@@ -79,3 +79,7 @@ $(BUILD)/a/loader_file_check: a/loader_file_check.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PROBE_ELF=\"$(ZZAPP_PROBE_ELF)\" -o $@ $< $(A_RUNTIME_OBJS)
 endif
+
+$(BUILD)/a/aar_api_test: a/aar_api_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)

@@ -20,13 +20,13 @@ $(BUILD)/b/deferred_mailbox_test: b/deferred_mailbox_test.c $(B_DEFERRED_OBJS) $
 	@mkdir -p $(dir $@)
 	$(CC) $(B_SDK_CPPFLAGS) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -pthread -o $@ $< $(B_DEFERRED_OBJS) $(A_RUNTIME_OBJS)
 
-$(BUILD)/b/reset_lifecycle_test: b/reset_lifecycle_test.c $(A_RUNTIME_OBJS) $(BUILD)/syscalls.o | $(BUILD)
+$(BUILD)/b/reset_lifecycle_test: b/reset_lifecycle_test.c $(A_RUNTIME_OBJS) $(BUILD)/aar.o $(BUILD)/syscalls.o | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/syscalls.o
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/aar.o $(BUILD)/syscalls.o
 
-$(BUILD)/b/host_visible_limit_test: b/host_visible_limit_test.c $(A_RUNTIME_OBJS) $(BUILD)/syscalls.o | $(BUILD)
+$(BUILD)/b/host_visible_limit_test: b/host_visible_limit_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/syscalls.o
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -o $@ $< $(A_RUNTIME_OBJS)
 
 $(BUILD)/b/teardown_test: b/teardown_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
@@ -44,14 +44,18 @@ $(BUILD)/b/loader_zero_test: $(LOADER_ZERO_TEST_SOURCES) $(FW)/zzapp_mem.h \
 
 $(BUILD)/b/spin_template.o: $(SDK)/templates/spin.c | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(ZZAPP_HARNESS_CFLAGS) -Dzz_main=spin_template_main -c -o $@ $<
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -Daar_main=spin_template_main -c -o $@ $<
 $(BUILD)/b/slot_selection_test: b/slot_selection_test.c \
-	$(BUILD)/b/spin_template.o $(BUILD)/zzapp.o \
+	$(BUILD)/b/spin_template.o $(BUILD)/aar.o \
 	$(LOADER_INCREMENTAL_HOST_OBJS) $(LOADER_INCREMENTAL_HOST_SOURCES) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -I../card_pool \
 		-DZZAPP_HOST_DEFERRED_TEST -Wl,--wrap=zzapp_loader_release \
 		-Wl,--wrap=zzapp_kernel_stop_app \
 		-o $@ $< $(BUILD)/b/spin_template.o \
-		$(BUILD)/zzapp.o $(LOADER_INCREMENTAL_HOST_OBJS) \
+		$(BUILD)/aar.o $(LOADER_INCREMENTAL_HOST_OBJS) \
 		$(LOADER_INCREMENTAL_HOST_SOURCES)
+
+$(BUILD)/b/load_end_status_test: b/load_end_status_test.c $(A_RUNTIME_OBJS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_HOST_DEFERRED_TEST -o $@ $< $(A_RUNTIME_OBJS)

@@ -20,11 +20,11 @@
 #endif
 
 
-struct zzapp_gl;
+struct aar_gl;
 
 int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host);
 int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
-                  const struct zzapp_gl **out);
+                  const struct aar_gl **out);
 void zzapp_gl_swap(void);
 void zzapp_gl_unbind(void);
 void zzapp_gl_reclaim(void);
@@ -265,7 +265,7 @@ static void minigl_release_app(minigl_module_context_t *module)
 static int minigl_app_bind_flags(void *context, uint32_t surface_id,
                                  uint32_t flags, const void **out_gl)
 {
-    const struct zzapp_gl *gl = 0;
+    const struct aar_gl *gl = 0;
     minigl_module_context_t *module = context;
     int status;
 

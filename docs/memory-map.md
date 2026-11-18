@@ -137,7 +137,7 @@ descriptor/backlog storage uses its required strongly ordered mapping.
 
 Zorro III accesses use the Zynq ACP, which is coherent with the ARM caches
 for shareable write-back memory. That is why ordinary host-visible
-allocations, including `ZZ_ALLOC_HOST_VISIBLE` blocks, need no ARM cache
+allocations, including `aar_shared_alloc` blocks, need no ARM cache
 maintenance for the 68k. The 68k's own caches are not covered; see
 [app-runtime.md](app-runtime.md).
 

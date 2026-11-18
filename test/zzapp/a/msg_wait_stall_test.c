@@ -1,5 +1,5 @@
 /*
- * An app parked in zz_msg_wait is inside an API call that waits on the
+ * An app parked in aar_msg_wait is inside an API call that waits on the
  * launcher, so the 30 s stall and 10 s stuck-call watchdogs leave it alone.
  * The same silence without a call stops the slot, so the tick below is able
  * to detect a stall.
@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
@@ -67,7 +67,7 @@ int main(void)
     zzapp_host_tick_at(31u * SECOND_US);
     assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
 
-    /* Parked in zz_msg_wait for 31 s of a 40 s timeout. */
+    /* Parked in aar_msg_wait for 31 s of a 40 s timeout. */
     start_running_app();
     clock_us = 0u;
     clock_reads = 0u;
@@ -77,7 +77,7 @@ int main(void)
     printf("msg_wait rc=%d ticks_while_parked=%u registered=%d stalled=%d\n",
            rc, ticks_while_parked, wait_registered_at_tick,
            stalled_while_parked);
-    assert(rc == ZZ_ETIMEDOUT);
+    assert(rc == AAR_E_TIMEDOUT);
     assert(ticks_while_parked == 1u);
     assert(wait_registered_at_tick == 1);
     assert(!stalled_while_parked);

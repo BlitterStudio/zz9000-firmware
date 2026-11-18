@@ -1,5 +1,5 @@
 /*
- * zz_msg_wait: park until the Amiga queues a host-to-app message. The Amiga
+ * aar_msg_wait: park until the Amiga queues a host-to-app message. The Amiga
  * writes the ring in the launcher window with no doorbell, so the wait is a
  * level test the core-1 service pass repeats; a message that lands between
  * the ring check and the park is seen by that pass.
@@ -84,7 +84,7 @@ static void test_ready_message_returns_at_once(void)
 
 	reset();
 	host_push(0x5a);
-	CHECK(zzapp_svc_msg_wait(1000000U) == ZZ_OK);
+	CHECK(zzapp_svc_msg_wait(1000000U) == AAR_OK);
 	CHECK(yields == 0U);
 	CHECK(!zzapp_services_wait_registered(0U));
 	/* The wait only reports readiness; the message is still queued. */
@@ -122,7 +122,7 @@ static void test_message_that_arrives_later_wakes(void)
 
 	reset();
 	on_yield = arrive_later;
-	CHECK(zzapp_svc_msg_wait(5000000U) == ZZ_OK);
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
 	CHECK(yields == 2U);
 	CHECK(!zzapp_services_wait_registered(0U));
 	CHECK(zzapp_svc_msg_poll(msg) == 1);
@@ -142,7 +142,7 @@ static void test_message_between_check_and_park_is_not_missed(void)
 {
 	reset();
 	on_yield = arrive_between_check_and_park;
-	CHECK(zzapp_svc_msg_wait(5000000U) == ZZ_OK);
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
 	CHECK(yields == 1U);
 
 	/* A service pass that sees the ring ready wakes a parked waiter even
@@ -173,13 +173,13 @@ static void test_timeout(void)
 {
 	reset();
 	/* Zero only tests the ring. */
-	CHECK(zzapp_svc_msg_wait(0U) == ZZ_ETIMEDOUT);
+	CHECK(zzapp_svc_msg_wait(0U) == AAR_E_TIMEDOUT);
 	CHECK(yields == 0U);
 	CHECK(!zzapp_services_wait_registered(0U));
 
 	reset();
 	on_yield = run_to_deadline;
-	CHECK(zzapp_svc_msg_wait(250000U) == ZZ_ETIMEDOUT);
+	CHECK(zzapp_svc_msg_wait(250000U) == AAR_E_TIMEDOUT);
 	CHECK(yields == 1U);
 	CHECK(!zzapp_services_wait_registered(0U));
 	CHECK(runtime[0].wait_deadline == 0U);
@@ -245,12 +245,12 @@ static void test_message_during_timeout_is_not_lost(void)
 
 	reset();
 	on_yield = message_at_deadline;
-	CHECK(zzapp_svc_msg_wait(250000U) == ZZ_OK);
+	CHECK(zzapp_svc_msg_wait(250000U) == AAR_OK);
 	CHECK(zzapp_svc_msg_poll(msg) == 1 && msg[0] == 0x66);
 
 	reset();
 	on_yield = message_after_timeout_wake;
-	CHECK(zzapp_svc_msg_wait(250000U) == ZZ_OK);
+	CHECK(zzapp_svc_msg_wait(250000U) == AAR_OK);
 	CHECK(zzapp_svc_msg_poll(msg) == 1 && msg[0] == 0x77);
 	CHECK(!zzapp_services_wait_registered(0U));
 }
@@ -261,7 +261,7 @@ static void test_stop_cancels_the_wait(void)
 	slots[0].state = ZZAPP_ST_RUNNING;
 	stop_with_message = 0;
 	on_yield = stop_while_parked;
-	CHECK(zzapp_svc_msg_wait(5000000U) == ZZ_EIO);
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
 	CHECK(yields == 1U);
 	CHECK(!zzapp_services_wait_registered(0U));
 
@@ -270,24 +270,24 @@ static void test_stop_cancels_the_wait(void)
 	slots[0].state = ZZAPP_ST_RUNNING;
 	stop_with_message = 1;
 	on_yield = stop_while_parked;
-	CHECK(zzapp_svc_msg_wait(5000000U) == ZZ_OK);
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
 
 	/* Already stopping: no park at all. */
 	reset();
 	zzapp_put_be32(window + ZZAPP_LIFE_STOP_OFF, 1U);
-	CHECK(zzapp_svc_msg_wait(5000000U) == ZZ_EIO);
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
 	CHECK(yields == 0U);
 
 	/* A queued message still wins over a stop, so none is dropped. */
 	host_push(0x44);
-	CHECK(zzapp_svc_msg_wait(5000000U) == ZZ_OK);
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
 }
 
 static void test_ring_corruption_is_an_error(void)
 {
 	reset();
 	zzapp_put_be32(window + ZZAPP_MSG_H2A_OFF, ZZAPP_MSG_CAP + 5U);
-	CHECK(zzapp_svc_msg_wait(5000000U) == ZZ_EIO);
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
 	CHECK(yields == 0U);
 	CHECK(!zzapp_services_wait_registered(0U));
 }

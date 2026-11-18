@@ -3,8 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include "zzapp.h"
+#include "aar/app.h"
 #include "zzapp_runtime.h"
+#include "aar_note_image.h"
 #include "host_card_pool.h"
 #include "xil_cache.h"
 #include "zzapp_as.h"
@@ -40,7 +41,7 @@ static int dynamic_started;
 static uint32_t start_argc;
 static int argv_started;
 static uint32_t launcher_memory_limit;
-static int start_entered_result = ZZ_OK;
+static int start_entered_result = AAR_OK;
 static uint32_t start_entered_generation;
 
 int zzapp_services_start_entered(uint32_t generation)
@@ -99,7 +100,7 @@ static void rejected_entry(const void *api_ptr, int argc, char **argv)
 
 static void dynamic_entry(const void *api_ptr, int argc, char **argv)
 {
-    const zzapp_api *api = api_ptr;
+    const aar_api *api = api_ptr;
     void *base;
     void *old_break;
     uint32_t bytes;
@@ -110,9 +111,9 @@ static void dynamic_entry(const void *api_ptr, int argc, char **argv)
     zzapp_host_heap(&base, &bytes);
     assert(base > (void *)argv[0]);
     assert(bytes != 0u);
-    assert(api->heap_grow(1u << 20, &old_break) == ZZ_OK);
+    assert(api->heap_grow(1u << 20, &old_break) == AAR_OK);
     assert(old_break != NULL);
-    assert(api->heap_shrink(1u << 20, NULL) == ZZ_OK);
+    assert(api->heap_shrink(1u << 20, NULL) == AAR_OK);
     dynamic_started = 1;
 }
 
@@ -144,7 +145,7 @@ static void crossing_entry(const void *api_ptr, int argc, char **argv)
 #define IMAGE_BYTES 0x200u
 #define PHOFF 52u
 #define LOAD_OFF 0x100u
-#define NOTE_OFF 0x0a0u
+#define NOTE_OFF TEST_NOTE_OFF
 #define RELA_OFF 0x0d0u
 #define LOADER_UPLOAD_CHUNK_BYTES (64U * 1024U)
 #define LOADER_ZERO_CHUNK_BYTES (32U * 1024U)
@@ -220,14 +221,10 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     ph += 32;
     put32(ph + 0, 4);                     /* PT_NOTE */
     put32(ph + 4, NOTE_OFF);
-    put32(ph + 16, 44);
+    put32(ph + 16, TEST_NOTE_BYTES);
 
     note = image + NOTE_OFF;
-    put32(note + 0, 6);
-    put32(note + 4, 24);
-    put32(note + 8, ZZAPP_NOTE_TYPE);
-    memcpy(note + 12, "ZZAPP", 6);
-    put32(note + 20, ZZAPP_NOTE_MAGIC);
+    test_note_init(note);
 
     put32(image + RELA_OFF + 0, LOAD_OFF);
     put32(image + RELA_OFF + 4, 23);      /* R_ARM_RELATIVE, symbol zero */
@@ -281,15 +278,15 @@ static int load_end(uint8_t image[IMAGE_BYTES])
     int rc;
     uint32_t passes = 0U;
 
-    assert(zzapp_loader_begin() == ZZ_OK);
-    assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
+    assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == AAR_OK);
     do {
         rc = zzapp_loader_end();
         if (rc == ZZAPP_LOADER_IN_PROGRESS)
             assert_pass_work_bounded();
         passes++;
     } while (rc == ZZAPP_LOADER_IN_PROGRESS);
-    if (rc == ZZ_OK)
+    if (rc == AAR_OK)
         assert(successful_loads++ != 0U || passes > 1U);
     return rc;
 }
@@ -311,19 +308,18 @@ static void test_large_load_is_bounded_and_exact(void)
     make_image(image);
     put32(image + PHOFF + 16U, filesz);
     put32(image + PHOFF + 20U, memsz);
-    put32(image + NOTE_OFF + 28U, 3U);
-    put32(image + NOTE_OFF + 40U, 1U);
+    test_note_set(image + NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, 1U);
     put32(image + SHOFF + 4U, 0U);
     for (offset = 0U; offset < filesz; offset++)
         image[LOAD_OFF + offset] = (uint8_t)(offset * 29U + 17U);
 
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     for (offset = 0U; offset < image_bytes;) {
         uint32_t chunk = image_bytes - offset;
 
         if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
             chunk = LOADER_UPLOAD_CHUNK_BYTES;
-        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == AAR_OK);
         offset += chunk;
     }
     do {
@@ -337,7 +333,7 @@ static void test_large_load_is_bounded_and_exact(void)
         }
         passes++;
     } while (rc == ZZAPP_LOADER_IN_PROGRESS);
-    assert(rc == ZZ_OK);
+    assert(rc == AAR_OK);
     /* The per-pass budget splits this 2 MiB image with 1 MiB of .bss
      * across many passes of every phase. */
     assert(passes > 30U);
@@ -384,16 +380,15 @@ static void test_uniform_megabyte_segments_map_as_sections(void)
     put32(load + 24U, 6U);
     put32(image + SHOFF + 4U, 0U);
     note = image + NOTE_OFF;
-    put32(note + 28U, 3U);
-    put32(note + 40U, 1U);
+    test_note_set(note, TEST_NOTE_W_MIN_HEAP_MIB, 1U);
 
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     for (offset = 0U; offset < image_bytes;) {
         uint32_t count = image_bytes - offset;
 
         if (count > LOADER_UPLOAD_CHUNK_BYTES)
             count = LOADER_UPLOAD_CHUNK_BYTES;
-        assert(zzapp_loader_chunk(offset, image + offset, count) == ZZ_OK);
+        assert(zzapp_loader_chunk(offset, image + offset, count) == AAR_OK);
         offset += count;
     }
     do {
@@ -401,7 +396,7 @@ static void test_uniform_megabyte_segments_map_as_sections(void)
         if (rc == ZZAPP_LOADER_IN_PROGRESS)
             assert_pass_work_bounded();
     } while (rc == ZZAPP_LOADER_IN_PROGRESS);
-    assert(rc == ZZ_OK);
+    assert(rc == AAR_OK);
     proc = zzapp_proc_slot(0U);
     l1 = zzapp_as_l1(&proc->as);
     assert((l1[ZZAPP_AS_WINDOW_BASE >> 20] & 3U) == 2U);
@@ -450,17 +445,16 @@ static void test_page_mapped_flush_work_is_bounded(void)
     put32(image + PHOFF + 48U, 0U);
     put32(image + PHOFF + 52U, segment_bytes);
     put32(image + PHOFF + 56U, 6U);
-    put32(image + NOTE_OFF + 28U, 3U);
     for (offset = 0U; offset < segment_bytes; offset++)
         image[LOAD_OFF + offset] = (uint8_t)(offset * 29U + 17U);
 
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     for (offset = 0U; offset < image_bytes;) {
         uint32_t count = image_bytes - offset;
 
         if (count > LOADER_UPLOAD_CHUNK_BYTES)
             count = LOADER_UPLOAD_CHUNK_BYTES;
-        assert(zzapp_loader_chunk(offset, image + offset, count) == ZZ_OK);
+        assert(zzapp_loader_chunk(offset, image + offset, count) == AAR_OK);
         offset += count;
     }
     seen_flushes = zzapp_test_loader_flush_count();
@@ -487,7 +481,7 @@ static void test_page_mapped_flush_work_is_bounded(void)
         }
         seen_flushes = flushes;
     } while (rc == ZZAPP_LOADER_IN_PROGRESS);
-    assert(rc == ZZ_OK);
+    assert(rc == AAR_OK);
     assert(seen_flushes != 0U);
     assert(zzapp_test_loader_flush_dropped() == 0U);
     l1 = zzapp_as_l1(&zzapp_proc_slot(0U)->as);
@@ -512,7 +506,6 @@ static void make_relocation_stress_image(uint8_t *image, uint32_t bytes,
     put32(image + 32U, shoff);
     put32(image + PHOFF + 16U, bytes - LOAD_OFF);
     put32(image + PHOFF + 20U, 3U << 20);
-    put32(image + NOTE_OFF + 28U, 3U);
     for (i = 0U; i < relocation_count; i++) {
         uint8_t *rel = image + RELA_OFF + i * 12U;
 
@@ -539,13 +532,13 @@ static void test_relocation_allocation_and_zero_use_separate_passes(void)
     assert(image != NULL);
     zzapp_boot_init();
     make_relocation_stress_image(image, bytes, relocation_count);
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     for (offset = 0U; offset < bytes;) {
         uint32_t chunk = bytes - offset;
 
         if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
             chunk = LOADER_UPLOAD_CHUNK_BYTES;
-        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == AAR_OK);
         offset += chunk;
     }
 
@@ -572,7 +565,7 @@ static void test_relocation_allocation_and_zero_use_separate_passes(void)
     assert(zzapp_test_loader_work_last_kind() == TEST_WORK_KIND_ZERO);
     assert(zzapp_test_loader_zero_last_bytes() == LOADER_ZERO_CHUNK_BYTES);
 
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
     free(image);
 }
 
@@ -592,20 +585,20 @@ static void test_abort_releases_each_loader_slice(void)
 
         zzapp_boot_init();
         make_relocation_stress_image(image, bytes, relocation_count);
-        assert(zzapp_loader_begin() == ZZ_OK);
+        assert(zzapp_loader_begin() == AAR_OK);
         for (offset = 0U; offset < bytes;) {
             uint32_t chunk = bytes - offset;
 
             if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
                 chunk = LOADER_UPLOAD_CHUNK_BYTES;
-            assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+            assert(zzapp_loader_chunk(offset, image + offset, chunk) == AAR_OK);
             offset += chunk;
         }
         do {
             rc = zzapp_loader_end();
             if (rc == ZZAPP_LOADER_IN_PROGRESS &&
                 in_progress++ == abort_after) {
-                assert(zzapp_loader_abort() == ZZ_OK);
+                assert(zzapp_loader_abort() == AAR_OK);
                 assert(zzapp_test_arena_mem() == NULL);
                 assert(zzapp_proc_slot(0)->memory.committed == 0U);
                 aborted++;
@@ -616,7 +609,7 @@ static void test_abort_releases_each_loader_slice(void)
     }
     /* Covers relocation extraction, frame zero/copy/map/cache and relocation
      * application slices; every interrupted load must release its arena. */
-    assert(rc == ZZ_OK);
+    assert(rc == AAR_OK);
     zzapp_loader_release();
     free(image);
 }
@@ -638,13 +631,13 @@ static void test_relocation_validation_is_sliced(void)
     zzapp_boot_init();
     make_relocation_stress_image(image, bytes, relocation_count);
     put32(image + RELA_OFF + (relocation_count - 1U) * 12U + 4U, 22U);
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     for (offset = 0U; offset < bytes;) {
         uint32_t chunk = bytes - offset;
 
         if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
             chunk = LOADER_UPLOAD_CHUNK_BYTES;
-        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == AAR_OK);
         offset += chunk;
     }
     do {
@@ -652,7 +645,7 @@ static void test_relocation_validation_is_sliced(void)
         if (rc == ZZAPP_LOADER_IN_PROGRESS)
             in_progress++;
     } while (rc == ZZAPP_LOADER_IN_PROGRESS);
-    assert(rc == ZZ_EINVAL);
+    assert(rc == AAR_E_INVAL);
     assert(in_progress >= 2U);
     assert(zzapp_test_arena_mem() == NULL);
     assert(zzapp_loader_state() == ZZAPP_ST_IDLE);
@@ -681,7 +674,6 @@ static void make_span_relocation_image(uint8_t *image, uint32_t bytes)
     put32(image + 32U, shoff);
     put32(image + PHOFF + 16U, bytes - LOAD_OFF);
     put32(image + PHOFF + 20U, 3U << 20);
-    put32(image + NOTE_OFF + 28U, 3U);
     for (i = 0U; i < SPAN_RELOC_COUNT; i++) {
         uint8_t *rel = image + RELA_OFF + i * 12U;
         uint32_t off = span_reloc_offset(i);
@@ -714,13 +706,13 @@ static void test_relocation_passes_are_bounded_and_flushed(void)
     assert(image != NULL);
     zzapp_boot_init();
     make_span_relocation_image(image, bytes);
-    assert(zzapp_loader_begin() == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
     for (offset = 0U; offset < bytes;) {
         uint32_t chunk = bytes - offset;
 
         if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
             chunk = LOADER_UPLOAD_CHUNK_BYTES;
-        assert(zzapp_loader_chunk(offset, image + offset, chunk) == ZZ_OK);
+        assert(zzapp_loader_chunk(offset, image + offset, chunk) == AAR_OK);
         offset += chunk;
     }
     while (rc == ZZAPP_LOADER_IN_PROGRESS) {
@@ -761,7 +753,7 @@ static void test_relocation_passes_are_bounded_and_flushed(void)
         }
         seen_flushes = flushes;
     }
-    assert(rc == ZZ_OK);
+    assert(rc == AAR_OK);
     assert(applied_total == SPAN_RELOC_COUNT);
     assert(zzapp_test_loader_flush_dropped() == 0U);
     assert(max_entries > 1U);
@@ -783,14 +775,158 @@ static void test_relocation_passes_are_bounded_and_flushed(void)
     free(image);
 }
 
+/* One descriptor word changed in an otherwise valid image. */
+static void expect_note_word(uint32_t word, uint32_t value, int expected)
+{
+    uint8_t image[IMAGE_BYTES];
+
+    zzapp_boot_init();
+    make_image(image);
+    test_note_set(image + NOTE_OFF, word, value);
+    if (load_end(image) != expected) {
+        printf("note word %u = 0x%x: wanted %d\n", word, value, expected);
+        assert(0 && "note word result");
+    }
+    if (expected == AAR_OK)
+        zzapp_loader_release();
+    else
+        assert(zzapp_loader_state() == ZZAPP_ST_IDLE);
+}
+
+/* Spec 2.3, note version 1: what the loader accepts, and the code of every
+ * refusal. */
+static void test_note_v1_load_rules(void)
+{
+    static const struct {
+        uint32_t word;
+        uint32_t value;
+        int expected;
+    } cases[] = {
+        { TEST_NOTE_W_MAGIC, 0x4E524142u, AAR_E_INVAL },
+        { TEST_NOTE_W_VERSION, 0u, AAR_E_INVAL },
+        { TEST_NOTE_W_VERSION, 2u, AAR_E_INVAL },
+        { TEST_NOTE_W_PROFILE, AAR_PROFILE_A64, AAR_E_PROFILE },
+        { TEST_NOTE_W_PROFILE, 0u, AAR_E_PROFILE },
+        { TEST_NOTE_W_API_MAJOR, AAR_API_MAJOR + 1u, AAR_E_INVAL },
+        { TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1u, AAR_E_INVAL },
+        { TEST_NOTE_W_API_MINOR, 0u, AAR_OK },
+        { TEST_NOTE_W_STACK_BYTES, 16u, AAR_E_INVAL },
+        { TEST_NOTE_W_STACK_BYTES, ZZAPP_STACK_MIN - 16u, AAR_E_INVAL },
+        { TEST_NOTE_W_STACK_BYTES, ZZAPP_STACK_MIN + 8u, AAR_E_INVAL },
+        { TEST_NOTE_W_STACK_BYTES, ZZAPP_STACK_MAX + 16u, AAR_E_INVAL },
+        { TEST_NOTE_W_STACK_BYTES, ZZAPP_STACK_MIN, AAR_OK },
+        { TEST_NOTE_W_STACK_BYTES, ZZAPP_STACK_MAX, AAR_OK },
+        { TEST_NOTE_W_MIN_HEAP_MIB, 600u, AAR_E_NOMEM },
+        { TEST_NOTE_W_RESERVED, 1u, AAR_E_INVAL },
+        { TEST_NOTE_W_GROUPS_REQUIRED, 0x80000000u, AAR_E_NOGROUP },
+        { TEST_NOTE_W_GROUPS_REQUIRED, AAR_GROUPS_DEFINED, AAR_OK },
+        { TEST_NOTE_W_GROUPS_OPTIONAL, 0x80000000u, AAR_OK },
+    };
+    uint8_t image[IMAGE_BYTES];
+    zzapp_proc_t *proc;
+    uint8_t *note;
+    unsigned i;
+
+    /* AAR_NOTE(0, 0, 0, 0): the default stack, no private heap, no groups. */
+    zzapp_boot_init();
+    make_image(image);
+    assert(load_end(image) == AAR_OK);
+    proc = zzapp_proc_slot(0U);
+    assert(proc->stack_bytes == ZZAPP_STACK_DEFAULT);
+    assert(proc->heap_frame_count == 0U);
+    assert(proc->memory.committed == (2u << 20));
+    assert(zzapp_get_be32(service_window + ZZAPP_LIFE_FLAGS_OFF) == 0U);
+    zzapp_loader_release();
+
+    /* An explicit stack, a committed heap and groups. */
+    zzapp_boot_init();
+    make_image(image);
+    note = image + NOTE_OFF;
+    test_note_set(note, TEST_NOTE_W_STACK_BYTES, ZZAPP_STACK_MIN);
+    test_note_set(note, TEST_NOTE_W_MIN_HEAP_MIB, 2u);
+    test_note_set(note, TEST_NOTE_W_GROUPS_REQUIRED,
+                  AAR_GROUP_DISPLAY | AAR_GROUP_INPUT);
+    test_note_set(note, TEST_NOTE_W_GROUPS_OPTIONAL, AAR_GROUP_AUDIO);
+    assert(load_end(image) == AAR_OK);
+    proc = zzapp_proc_slot(0U);
+    assert(proc->stack_bytes == ZZAPP_STACK_MIN);
+    assert(proc->heap_frame_count == 2u);
+    /* image frame, one stack frame (rounded up), two heap frames */
+    assert(proc->memory.committed == (4u << 20));
+    assert(zzapp_get_be32(service_window + ZZAPP_LIFE_FLAGS_OFF) ==
+           (ZZAPP_F_DISPLAY | ZZAPP_F_AUDIO));
+    zzapp_loader_release();
+
+    for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++)
+        expect_note_word(cases[i].word, cases[i].value, cases[i].expected);
+
+    /* A group the runtime does not offer: required is a refusal, optional a
+     * hint. */
+    zzapp_test_set_groups(AAR_GROUP_INPUT | AAR_GROUP_SERVICES, 1);
+    expect_note_word(TEST_NOTE_W_GROUPS_REQUIRED, AAR_GROUP_DISPLAY,
+                     AAR_E_NOGROUP);
+    expect_note_word(TEST_NOTE_W_GROUPS_REQUIRED,
+                     AAR_GROUP_AUDIO | AAR_GROUP_GL, AAR_E_NOGROUP);
+    expect_note_word(TEST_NOTE_W_GROUPS_REQUIRED,
+                     AAR_GROUP_INPUT | AAR_GROUP_DISPLAY, AAR_E_NOGROUP);
+    expect_note_word(TEST_NOTE_W_GROUPS_REQUIRED, AAR_GROUP_INPUT, AAR_OK);
+    expect_note_word(TEST_NOTE_W_GROUPS_OPTIONAL, AAR_GROUP_DISPLAY, AAR_OK);
+    zzapp_test_set_groups(0u, 0);
+
+    /* Exactly one AAR note. None: refused, whatever other notes say. */
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + PHOFF + 32U, 0U);                   /* PT_NOTE -> PT_NULL */
+    assert(load_end(image) == AAR_E_INVAL);
+    zzapp_boot_init();
+    make_image(image);
+    memcpy(image + NOTE_OFF + 12, "XYZ", 4);          /* not owner "AAR" */
+    assert(load_end(image) == AAR_E_INVAL);
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + NOTE_OFF + 8, AAR_NOTE_TYPE + 1u);  /* not n_type 1 */
+    assert(load_end(image) == AAR_E_INVAL);
+    /* The old ZZAPP note, whatever it carries, is not an AAR note. */
+    zzapp_boot_init();
+    make_image(image);
+    memset(image + NOTE_OFF, 0, TEST_NOTE_BYTES);
+    put32(image + NOTE_OFF + 0, 6U);
+    put32(image + NOTE_OFF + 4, 24U);
+    put32(image + NOTE_OFF + 8, 1U);
+    memcpy(image + NOTE_OFF + 12, "ZZAPP", 6);
+    put32(image + NOTE_OFF + 20, 0x5a5a4150u);
+    put32(image + PHOFF + 36U, 44U);
+    assert(load_end(image) == AAR_E_INVAL);
+    /* A descriptor that is not 40 bytes. */
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + NOTE_OFF + 4, AAR_NOTE_DESC_BYTES - 4u);
+    assert(load_end(image) == AAR_E_INVAL);
+    /* Two AAR notes (the same note named by two PT_NOTE segments). */
+    zzapp_boot_init();
+    make_image(image);
+    memcpy(image + PHOFF + 64U, image + PHOFF + 32U, 32U);
+    put16(image + 44U, 3U);
+    assert(load_end(image) == AAR_E_INVAL);
+    /* A note in a section is found when no segment carries one. */
+    zzapp_boot_init();
+    make_image(image);
+    put32(image + PHOFF + 32U, 0U);
+    put32(image + SHOFF + 4U, 7U);                    /* SHT_NOTE */
+    put32(image + SHOFF + 16U, NOTE_OFF);
+    put32(image + SHOFF + 20U, TEST_NOTE_BYTES);
+    put32(image + SHOFF + 36U, 0U);
+    assert(load_end(image) == AAR_OK);
+    zzapp_loader_release();
+}
+
 
 int main(void)
 {
     uint8_t image[IMAGE_BYTES];
     uint32_t card;
-    uint32_t i;
-    const zzapp_api *api;
-    zzapp_heap_info mem;
+    const aar_api *api;
+    aar_heap_info mem;
     uint32_t bsp[4096] = { 0U };
     host_card_pool_reset(256U << 20);
     zzapp_as_init(bsp);
@@ -798,15 +934,12 @@ int main(void)
     assert(sizeof(zzapp_proc_slot(0)->image_frames) /
            sizeof(zzapp_proc_slot(0)->image_frames[0]) == ZZAPP_MEM_MAX_FRAMES);
     make_image(image);
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     /* This host build uses the production address-space implementation. */
     card = zzapp_test_arena_card();
     assert(card == 0xc0000000u);
     assert(get32(app_memory(0U, LOAD_OFF)) == card + LOAD_OFF);
-    for (i = 0U; i < (1U << 20); i++)
-        assert(((uint8_t *)(uintptr_t)zzapp_proc_slot(0)->heap_frames[3])[i] ==
-               0U);
-    assert(zzapp_proc_slot(0)->memory.committed == ZZAPP_ARENA_BYTES);
+    assert(zzapp_proc_slot(0)->memory.committed == (2u << 20));
     zzapp_loader_release();
     zzapp_boot_init();
     test_uniform_megabyte_segments_map_as_sections();
@@ -818,10 +951,11 @@ int main(void)
     test_relocation_validation_is_sliced();
     test_relocation_allocation_and_zero_use_separate_passes();
     test_relocation_passes_are_bounded_and_flushed();
+    test_note_v1_load_rules();
     zzapp_boot_init();
     make_image(image);
-    assert(zzapp_loader_begin() == ZZ_OK);
-    assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
+    assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == AAR_OK);
     while (zzapp_loader_end() == ZZAPP_LOADER_IN_PROGRESS)
         ;
     assert(zzapp_loader_state() == ZZAPP_ST_LOADING);
@@ -832,10 +966,10 @@ int main(void)
     /* Every suspension point aborts cleanly, including the first. */
     zzapp_boot_init();
     make_image(image);
-    assert(zzapp_loader_begin() == ZZ_OK);
-    assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == ZZ_OK);
+    assert(zzapp_loader_begin() == AAR_OK);
+    assert(zzapp_loader_chunk(0, image, IMAGE_BYTES) == AAR_OK);
     assert(zzapp_loader_end() == ZZAPP_LOADER_IN_PROGRESS);
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
     assert(zzapp_test_arena_mem() == NULL);
     assert(zzapp_proc_slot(0)->memory.committed == 0U);
 
@@ -848,7 +982,7 @@ int main(void)
     put32(image + SHOFF + 20, 8u);
     put32(image + SHOFF + 36, 8u);
     put32(image + LOAD_OFF, LOAD_OFF);
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     card = zzapp_test_arena_card();
     assert(get32(app_memory(0U, LOAD_OFF)) == card + LOAD_OFF);
     zzapp_loader_release();
@@ -864,7 +998,7 @@ int main(void)
     put32(image + SHOFF + 20, 8u);
     put32(image + SHOFF + 36, 8u);
     put32(image + LOAD_OFF, LOAD_OFF + 0x20u);
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     card = zzapp_test_arena_card();
     assert(get32(app_memory(0U, LOAD_OFF + 0x20u)) ==
            card + LOAD_OFF + 0x20u);
@@ -874,51 +1008,50 @@ int main(void)
     put32(image + SHOFF + 4, 9u);          /* SHT_REL */
     put32(image + SHOFF + 20, 8u);
     put32(image + SHOFF + 36, 4u);         /* malformed entry size */
-    assert(load_end(image) == ZZ_EINVAL);
+    assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);
     put32(image + SHOFF + 4, 9u);          /* SHT_REL */
     put32(image + SHOFF + 20, 8u);
     put32(image + SHOFF + 36, 8u);
     put32(image + RELA_OFF + 4, 2u);       /* unsupported relocation type */
-    assert(load_end(image) == ZZ_EINVAL);
+    assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);
     put32(image + RELA_OFF + 4, 0x100u | 23u); /* nonzero symbol index */
-    assert(load_end(image) == ZZ_EINVAL);
+    assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);
     put32(image + 24, 0u);
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     assert(zzapp_loader_have_image());
     zzapp_loader_release();
 
     zzapp_boot_init(); make_image(image);
     put32(image + RELA_OFF + 4, 2);
-    assert(load_end(image) == ZZ_EINVAL);
+    assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);
     put32(image + PHOFF + 24, 3);
-    assert(load_end(image) == ZZ_EINVAL);
+    assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);
-    put32(image + NOTE_OFF + 24, 2);
-    assert(load_end(image) == ZZ_EINVAL);
+    test_note_set(image + NOTE_OFF, TEST_NOTE_W_API_MAJOR, 2u);
+    assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);
-    put32(image + NOTE_OFF + 28u, 3u);
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     assert(zzapp_proc_slot(0)->memory.committed == (2u << 20));
     zzapp_proc_slot(0)->heap_base = 0x00100000u;
     zzapp_proc_slot(0)->heap_start = 0x00100000u;
     zzapp_proc_slot(0)->heap_break = 0x00100000u;
     zzapp_proc_slot(0)->heap_limit = 0x01000000u;
     api = zzapp_api_table();
-    assert(api->heap_grow(3u << 20, NULL) == ZZ_OK);
+    assert(api->heap_grow(3u << 20, NULL) == AAR_OK);
     assert(zzapp_proc_slot(0)->heap_break == 0x00400000u);
-    assert(api->heap_info(&mem) == ZZ_OK);
+    assert(api->heap_info(&mem) == AAR_OK);
     assert(mem.committed == (5u << 20));
-    assert(api->heap_shrink(2u << 20, NULL) == ZZ_OK);
+    assert(api->heap_shrink(2u << 20, NULL) == AAR_OK);
     assert(zzapp_proc_slot(0)->heap_break == 0x00200000u);
     zzapp_proc_slot(0)->heap_base = 0u;
     zzapp_proc_slot(0)->heap_start = 0u;
@@ -927,8 +1060,8 @@ int main(void)
     zzapp_proc_slot(0)->memory.committed = 0u;
     zzapp_proc_slot(0)->memory.limit = 16u << 20;
     for (card = 0; card < 16u; card++)
-        assert(api->heap_grow(1u << 20, NULL) == ZZ_OK);
-    assert(api->heap_grow(1u << 20, NULL) == ZZ_ENOMEM);
+        assert(api->heap_grow(1u << 20, NULL) == AAR_OK);
+    assert(api->heap_grow(1u << 20, NULL) == AAR_E_NOMEM);
     assert(zzapp_proc_slot(0)->heap_break == (16u << 20));
     zzapp_loader_release();
     /*
@@ -937,10 +1070,10 @@ int main(void)
      */
     zzapp_boot_init();
     make_image(image);
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     start_argc = 0U;
     rejected_started = 0;
-    start_entered_result = ZZ_EIO;
+    start_entered_result = AAR_E_IO;
     zzapp_test_set_entry(rejected_entry);
     start_pending = 1;
     zzapp_worker_hook();
@@ -949,11 +1082,11 @@ int main(void)
      * reopens for the next claim instead of wedging in STOPPING. */
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     assert(start_entered_generation == zzapp_current_generation());
-    start_entered_result = ZZ_OK;
+    start_entered_result = AAR_OK;
 
     zzapp_boot_init();
     make_image(image);
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
                    ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
     memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF, "argv-test", 10u);
@@ -966,14 +1099,13 @@ int main(void)
 
     make_image(image);
     put32(image + PHOFF + 20u, (1u << 20) - LOAD_OFF);
-    put32(image + NOTE_OFF + 28u, 3u);
-    put32(image + NOTE_OFF + 40u, 1u);
+    test_note_set(image + NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, 1u);
     zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
                    ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
     memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
            "dynamic-argv", 13u);
     start_argc = 1u;
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     zzapp_test_set_entry(dynamic_entry);
     start_pending = 1;
     dynamic_started = 0;
@@ -982,8 +1114,7 @@ int main(void)
 
     zzapp_boot_init(); make_image(image);
     launcher_memory_limit = 16u << 20;
-    put32(image + NOTE_OFF + 28u, 3u);
-    assert(load_end(image) == ZZ_OK);
+    assert(load_end(image) == AAR_OK);
     assert(zzapp_proc_slot(0)->memory.limit == launcher_memory_limit);
     zzapp_proc_slot(0)->heap_base = 0u;
     zzapp_proc_slot(0)->heap_start = 0u;
@@ -991,15 +1122,14 @@ int main(void)
     zzapp_proc_slot(0)->heap_limit = 32u << 20;
     api = zzapp_api_table();
     for (card = 0; card < 14u; card++)
-        assert(api->heap_grow(1u << 20, NULL) == ZZ_OK);
-    assert(api->heap_grow(1u << 20, NULL) == ZZ_ENOMEM);
+        assert(api->heap_grow(1u << 20, NULL) == AAR_OK);
+    assert(api->heap_grow(1u << 20, NULL) == AAR_E_NOMEM);
     zzapp_loader_release();
     launcher_memory_limit = 0u;
 
     zzapp_boot_init(); make_image(image);
-    put32(image + NOTE_OFF + 28u, 3u);
-    put32(image + NOTE_OFF + 40u, 600u);
-    assert(load_end(image) == ZZ_ENOMEM);
+    test_note_set(image + NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, 600u);
+    assert(load_end(image) == AAR_E_NOMEM);
     assert(zzapp_loader_state() == ZZAPP_ST_IDLE);
 
     /* API 0.3 image ending on a frame with no reserved heap must still
@@ -1007,9 +1137,8 @@ int main(void)
     zzapp_boot_init();
     make_image(image);
     put32(image + PHOFF + 20u, (1u << 20) - LOAD_OFF);
-    put32(image + NOTE_OFF + 28u, 3u);
-    put32(image + NOTE_OFF + 40u, 0u);
-    assert(load_end(image) == ZZ_OK);
+    test_note_set(image + NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, 0u);
+    assert(load_end(image) == AAR_OK);
     assert(zzapp_proc_slot(0)->heap_frame_count == 0u);
     boundary_started = 0;
     start_argc = 0u;
@@ -1025,9 +1154,8 @@ int main(void)
     zzapp_boot_init();
     make_image(image);
     put32(image + PHOFF + 20u, 0xFFFE0u - LOAD_OFF);
-    put32(image + NOTE_OFF + 28u, 3u);
-    put32(image + NOTE_OFF + 40u, 1u);
-    assert(load_end(image) == ZZ_OK);
+    test_note_set(image + NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, 1u);
+    assert(load_end(image) == AAR_OK);
     zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
                    ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
     memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF,

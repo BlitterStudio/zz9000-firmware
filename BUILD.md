@@ -53,7 +53,7 @@ Runtime. `sdk/AAR_REF` pins the commit. `build_firmware.sh` runs
 `sh sdk/scripts/fetch-aar.sh`, which clones the repository into `sdk/aar/`
 (gitignored) or moves an existing checkout to that commit, and it refuses to
 touch a checkout with local changes. Run the script yourself before
-`make -C test/zzapp test`, `make -C test/zzapp/compat test`, or any direct
+`make -C test/zzapp test` or any direct
 `make -C ZZ9000_proto.sdk/ZZ9000OS`. `AAR_REPO` overrides the repository URL
 and may be a local path.
 
@@ -66,7 +66,14 @@ AAR_DIR=$HOME/src/aar make -C test/zzapp test
 ```
 
 Without a checkout, the makefiles stop with an error that names the missing
-`include/zzapp.h`.
+`include/aar/app.h`.
+
+The firmware implements AAR API 0.5 (`AAR_API_MAJOR` and `AAR_API_MINOR` in
+that header, reported by the launcher `QUERY`). `sdk/AAR_REF` must therefore
+name a commit whose header is API 0.5; the hardware-facing `ZZ_*` names in the
+firmware are separate and do not follow it. See
+[docs/app-runtime.md](docs/app-runtime.md#app-interface) for the choices the
+firmware makes where the standard leaves room.
 
 To remove the firmware build tree before rebuilding, run:
 
@@ -311,6 +318,7 @@ Run the host checks for the area you changed before building the BOOT image.
 | FLAC decoder | `make -C test/flac test` |
 | Ogg Vorbis decoder | `make -C test/vorbis test` |
 | ARM app runtime | `make -C test/zzapp test` (needs the AAR checkout, see above) |
+| MiniGL module and app GL glue | `make -C test/minigl_module test MINIGL_LIB_DIR=<amiberry-minigl-library checkout>` (also needs the AAR checkout) |
 
 The image, FLAC, and Vorbis suites also provide a `sanitize` target:
 

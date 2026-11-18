@@ -54,3 +54,9 @@ ZZAPP_TESTS += $(BUILD)/g/svc_probes_counters_test
 $(BUILD)/g/svc_probes_counters_test: $(SVC_TEST_SOURCES) $(SVC_TEST_DEPS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DZZAPP_PERF_COUNTERS=1 -DZZAPP_SVC_COUNTERS_TEST -DZZAPP_SVC_PROBES=1 -DMMU_PAGE_HOST_TEST -I../mmu/mock -o $@ $(SVC_TEST_SOURCES)
+
+$(BUILD)/g/aar_events_test: g/aar_events_test.c $(A_RUNTIME_OBJS) \
+	$(BUILD)/a/zzapp_services.o | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) \
+		$(BUILD)/a/zzapp_services.o

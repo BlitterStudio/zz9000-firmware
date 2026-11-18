@@ -74,5 +74,5 @@ else
   fi
 fi
 
-[ -f "$DEST/include/zzapp.h" ] || die "$DEST has no include/zzapp.h at $SHORT"
+[ -f "$DEST/include/aar/app.h" ] || die "$DEST has no include/aar/app.h at $SHORT"
 echo "aar $SHORT ok"

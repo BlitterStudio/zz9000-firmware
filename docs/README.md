@@ -31,10 +31,11 @@ and programs that use the card.
 
 | Document | Contents |
 | --- | --- |
-| [zzapp-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
-| [zzapp-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-api.md) | Every `zz_*` call and `ZZ_*` constant. |
-| [app-runtime.md](app-runtime.md) | The firmware and launcher contract: slots, limits, address spaces, lifecycle, exit and reset teardown, and the SVC interface. |
-| [host/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/host/README.md) | Running apps on a PC with the SDL host runner. |
+| [aar-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
+| [aar-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md) | Every `aar_*` call and `AAR_*` constant, with the ZZ9000 notes and extension table. |
+| [zzapp-to-aar.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-to-aar.md) | Maps the 0.4 `zz_*` and `ZZ_*` names to AAR 0.5. |
+| [app-runtime.md](app-runtime.md) | The firmware and launcher contract: the AAR 0.5 interface choices, slots, limits, address spaces, lifecycle, exit and reset teardown, and the SVC interface. |
+| [host-runner/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/host-runner/README.md) | Running apps on a PC with the host runner. |
 | [templates/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/templates/README.md) | The app templates, including the freestanding, FPU probe, and ring conformance apps. |
 
 ## Work on the firmware

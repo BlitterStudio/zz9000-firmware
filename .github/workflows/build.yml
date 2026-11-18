@@ -522,14 +522,3 @@ jobs:
             tar -C /source --exclude=.context -cf - . | tar -C /work -xf -
             make -C /work/test/image test
           '
-
-  zzapp-loader-compat:
-    name: ZZApp API 0.1 and 0.2 loader compatibility
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Fetch AAR
-        run: sh sdk/scripts/fetch-aar.sh
-      - name: API 0.1 and 0.2 ELFs still load
-        run: make -C test/zzapp/compat test

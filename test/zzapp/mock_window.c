@@ -56,7 +56,7 @@ int zzapp_log_read(uint8_t *w, char *buf, uint32_t cap)
     zzapp_be_set_u32(w + ZZAPP_LOG_OFF + 4, tail + rec); return (int)len;
 }
 
-int zzapp_input_push(uint8_t *w, const zzapp_event *e)
+int zzapp_input_push(uint8_t *w, const aar_event *e)
 {
     uint32_t head = zzapp_be_u32(w + ZZAPP_INPUT_OFF), tail = zzapp_be_u32(w + ZZAPP_INPUT_OFF + 4), at;
     uint8_t *p;
@@ -65,7 +65,7 @@ int zzapp_input_push(uint8_t *w, const zzapp_event *e)
     zzapp_be_set_u16(p, e->type); zzapp_be_set_u16(p + 2, e->code); zzapp_be_set_u16(p + 4, (uint16_t)e->dx); zzapp_be_set_u16(p + 6, (uint16_t)e->dy); zzapp_be_set_u16(p + 8, e->buttons); zzapp_be_set_u16(p + 10, e->reserved); zzapp_be_set_u32(p + 12, e->time_ms);
     zzapp_be_set_u32(w + ZZAPP_INPUT_OFF, head + 1u); return 0;
 }
-int zzapp_input_pop(uint8_t *w, zzapp_event *e)
+int zzapp_input_pop(uint8_t *w, aar_event *e)
 {
     uint32_t head = zzapp_be_u32(w + ZZAPP_INPUT_OFF), tail = zzapp_be_u32(w + ZZAPP_INPUT_OFF + 4), at; uint8_t *p;
     if (tail == head) return 0;

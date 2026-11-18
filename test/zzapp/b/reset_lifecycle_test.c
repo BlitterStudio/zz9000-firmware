@@ -7,8 +7,10 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "zzapp.h"
+#include "aar/app.h"
 #include "zzapp_proto.h"
+#include "aar_note_image.h"
+#include "aar_internal.h"
 
 void zzapp_boot_init(void);
 void zzapp_worker_hook(void);
@@ -22,9 +24,7 @@ void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
                           uint32_t lr, uint32_t far, uint32_t fsr,
                           uint32_t cpsr);
 int zzapp_loader_abort(void);
-void *zzapp_host_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
-void *zzapp_sbrk(int increment);
-int zzapp_host_mem_info(zzapp_mem_info *out);
+void *aar_host_sbrk(ptrdiff_t increment);
 uint8_t *zzapp_test_stack_canary(void);
 uint32_t zzapp_test_fault_code(void);
 void zzapp_test_set_service_hook(void (*fn)(void));
@@ -32,13 +32,11 @@ void zzapp_test_set_fail_start(int fail);
 void zzapp_test_set_start_race_hook(void (*fn)(void));
 void zzapp_test_set_admission_hook(void (*fn)(void));
 static void start_and_exit(void);
-/* syscalls.o is linked for zzapp_sbrk; it reads this table pointer. */
-const zzapp_api *zzapp_api_ptr;
 
 #define IMAGE_BYTES 0x200u
 #define PHOFF 52u
 #define LOAD_OFF 0x100u
-#define NOTE_OFF 0x0a0u
+#define NOTE_OFF TEST_NOTE_OFF
 #define RELA_OFF 0x0d0u
 #define SHOFF 0x180u
 
@@ -49,7 +47,7 @@ static int reset_running;
 static int damage_canary;
 static int direct_stop_running;
 static unsigned direct_stop_seen;
-static const zzapp_api *app_api;
+static const aar_api *app_api;
 static int start_stop_written;
 static int lease_exit_running;
 static int launcher_stop_exit_running;
@@ -99,14 +97,10 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     ph += 32;
     put32(ph + 0, 4);                     /* PT_NOTE */
     put32(ph + 4, NOTE_OFF);
-    put32(ph + 16, 44);
+    put32(ph + 16, TEST_NOTE_BYTES);
 
     note = image + NOTE_OFF;
-    put32(note + 0, 6);
-    put32(note + 4, 24);
-    put32(note + 8, ZZAPP_NOTE_TYPE);
-    memcpy(note + 12, "ZZAPP", 6);
-    put32(note + 20, ZZAPP_NOTE_MAGIC);
+    test_note_init(note);
 
     put32(image + RELA_OFF + 0, LOAD_OFF);
     put32(image + RELA_OFF + 4, 23);      /* R_ARM_RELATIVE, symbol zero */
@@ -129,24 +123,23 @@ static void write_start_stop_word(void)
 
 static void app_entry(const void *api, int argc, char **argv)
 {
-    const zzapp_api *table = (const zzapp_api *)api;
+    const aar_api *table = (const aar_api *)api;
     void *brk;
     void *heap_base = NULL;
-    uint32_t heap_bytes = 0u;
+    uint64_t heap_bytes = 0u;
 
     (void)argc;
     (void)argv;
     app_runs++;
-    /* The arena heap is newlib's alone: the table allocates host-visible
-     * memory only, so it can never hand out bytes malloc already owns. */
-    zzapp_api_ptr = table;
+    /* The private heap is newlib's alone: the table has no allocator for
+     * it, so nothing can hand out bytes malloc already owns. */
+    aar_crt0_bind(table);
     app_api = table;
-    assert(table->alloc(64u, 8u, 0u) == NULL);
     table->heap_range(&heap_base, &heap_bytes);
-    /* zzapp_sbrk keeps its span in app BSS, which a real launch starts
+    /* aar_host_sbrk keeps its span in static data, which a real launch starts
      * fresh; in this harness it survives relaunches, so check it once. */
     if (app_runs == 1) {
-        brk = zzapp_sbrk(64);
+        brk = aar_host_sbrk(64);
         assert(brk == heap_base && heap_bytes >= 64u);
     }
     if (lease_exit_running) {
@@ -187,13 +180,16 @@ static void app_entry(const void *api, int argc, char **argv)
         return;
     }
     if (reset_running) {
-        zzapp_mem_info mem;
-        void *host_visible;
+        aar_shared shared;
+        aar_info info;
 
-        host_visible = zzapp_host_alloc(4096u, 256u, ZZ_ALLOC_HOST_VISIBLE);
-        assert(host_visible != NULL);
-        assert(zzapp_host_mem_info(&mem) == ZZ_OK);
-        assert(mem.host_visible_used == 4096u);
+        memset(&shared, 0, sizeof(shared));
+        assert(table->shared_alloc(4096u, 256u, 0u, &shared) == AAR_OK);
+        assert(shared.ptr != NULL);
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        assert(table->info(&info) == AAR_OK);
+        assert(info.shared_used == 4096u);
         zzapp_on_amiga_reset();
         zzapp_host_yield();
     }
@@ -319,7 +315,7 @@ static void release_expired_load_quarantine(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     assert(current_generation != stale_generation);
     begin_load();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void reset_expired_load_quarantine(void)
@@ -334,7 +330,7 @@ static void reset_expired_load_quarantine(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     bind_window();
     begin_load();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void explicitly_release_expired_load_quarantine(void)
@@ -354,7 +350,7 @@ static void explicitly_release_expired_load_quarantine(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     assert(current_generation != stale_generation);
     begin_load();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void cancel_deferred_load_before_loader_begin(void)
@@ -404,7 +400,7 @@ static void cancel_deferred_load_before_loader_begin(void)
            SDK_STATUS_OK);
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     begin_load();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 static uint8_t race_request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 
@@ -470,7 +466,7 @@ static void start_racing_expiry_with_release_intent(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     assert(zzapp_services_state() == ZZAPP_ST_IDLE);
     begin_load();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static uint32_t admitted_generation;
@@ -602,7 +598,7 @@ static void reset_keeps_running_record_stopping(void)
     assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
                           ZZAPP_LIFE_STATE_OFF) == ZZAPP_ST_CLAIMED);
     begin_load();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 /* Core 0 cancels the running START the way STOP cancels a claim: no
@@ -663,7 +659,7 @@ static void claim_survives_start_teardown(void (*race)(void), int fail_start)
     /* The new owner can load: core 1 left the host IDLE. */
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     begin_load();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 }
 
 static void start_failure_releases_host_state(void)
@@ -797,7 +793,7 @@ int main(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     bind_window();
     begin_load();
-    assert(zzapp_loader_abort() == ZZ_OK);
+    assert(zzapp_loader_abort() == AAR_OK);
 
     /* Input and log cursors are per launch, never inherited by the next app. */
     zzapp_put_be32(launcher_window + ZZAPP_INPUT_OFF, 7u);
@@ -832,10 +828,12 @@ int main(void)
     load_hello();
     start_and_exit();
     {
-        zzapp_mem_info mem;
+        aar_info info;
 
-        assert(zzapp_host_mem_info(&mem) == ZZ_OK);
-        assert(mem.host_visible_used == 0u);
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        assert(zzapp_host_info(&info) == AAR_OK);
+        assert(info.shared_used == 0u);
     }
     reset_running = 0;
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
