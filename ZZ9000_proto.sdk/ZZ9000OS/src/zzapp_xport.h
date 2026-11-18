@@ -192,6 +192,10 @@ uint32_t zzapp_xport_shared_used(const zzapp_rec_t *rec);
  * app's own aar_shared_alloc blocks. The transport calls it after each of its
  * allocations and frees; zzapp_host.c calls it after each app alloc or free. */
 void zzapp_xport_publish_shared(zzapp_rec_t *rec);
+/* Publish AAR_CB_PRIVATE_COMMITTED from rec->proc.memory.committed. The host
+ * calls it wherever the committed private memory changes: the load commit, a
+ * heap grow or shrink, and the release at the end of the app. */
+void zzapp_xport_publish_private(zzapp_rec_t *rec);
 
 /*
  * Allocate the block of `kind` (not the pair) of `bytes` rounded up to the

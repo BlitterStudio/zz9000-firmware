@@ -264,6 +264,8 @@ static void test_load_after_a_refused_claim_was_cancelled(void)
     /* The stop of a claim that never loaded ends it through retire; the
      * shell is the client's to release. */
     assert(RT_STATE(0U) == AAR_STATE_IDLE);
+    /* A STOP the client asked for ends the claim FORCED, not NONE. */
+    assert(RT_REASON(0U) == AAR_END_FORCED);
     assert(rt_simple(0U, ZZAPP_OP_RELEASE) == SDK_STATUS_OK);
     rt_settle(4U);
     rt_assert_back(g_start);
@@ -274,6 +276,31 @@ static void test_load_after_a_refused_claim_was_cancelled(void)
         assert(host_limit() == (pass == 1U ? 8U : 16U) * MIB);
         finish();
     }
+}
+
+/* AAR_CB_PRIVATE_COMMITTED follows the record's committed private bytes: the
+ * loaded image, a heap grow and a heap shrink. */
+static void test_private_committed_is_published(void)
+{
+    zzapp_rec_t *rec;
+    void *old_break;
+    uint32_t loaded;
+
+    claimed();
+    assert(rt_load(0U, 1U) == SDK_STATUS_OK);
+    zzapp_services_test_set_core(1);
+    zzapp_services_select_pid(rt_pid[0]);
+    rec = rt_rec(0U);
+    loaded = rec->proc.memory.committed;
+    assert(loaded != 0U);
+    assert(zzapp_xport_cb_get64(rec, AAR_CB_PRIVATE_COMMITTED_HI) == loaded);
+    assert(zzapp_proc_heap_grow(MIB, &old_break) == AAR_OK);
+    assert(rec->proc.memory.committed == loaded + MIB);
+    assert(zzapp_xport_cb_get64(rec, AAR_CB_PRIVATE_COMMITTED_HI) ==
+           loaded + MIB);
+    assert(zzapp_proc_heap_shrink(MIB, &old_break) == AAR_OK);
+    assert(zzapp_xport_cb_get64(rec, AAR_CB_PRIVATE_COMMITTED_HI) == loaded);
+    finish();
 }
 
 int main(int argc, char **argv)
@@ -290,6 +317,7 @@ int main(int argc, char **argv)
         { "reclaim", test_limit_does_not_outlive_the_claim },
         { "rejected", test_rejected_load_begin_keeps_the_first_limits },
         { "cancel", test_load_after_a_refused_claim_was_cancelled },
+        { "private", test_private_committed_is_published },
     };
     unsigned i;
 

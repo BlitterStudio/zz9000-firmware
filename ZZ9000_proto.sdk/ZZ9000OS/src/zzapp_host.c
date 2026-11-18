@@ -357,6 +357,7 @@ int zzapp_proc_heap_grow(uint32_t bytes, void **old_break)
 #ifdef ZZAPP_HOST_TEST
     proc->memory.committed += bytes;
 #endif
+    zzapp_xport_publish_private(rec_must(slot));
     return AAR_OK;
 }
 
@@ -376,6 +377,7 @@ int zzapp_proc_heap_shrink(uint32_t bytes, void **new_break)
 #ifdef ZZAPP_HOST_TEST
     proc->memory.committed -= bytes;
 #endif
+    zzapp_xport_publish_private(rec_must(slot));
     if (new_break)
 #ifdef ZZAPP_HOST_TEST
         *new_break = host_slot(slot)->mem + proc->heap_break;
@@ -820,6 +822,7 @@ void zzapp_loader_unbound(void)
     host->faulted = faulted;
     host->exit_state = exit_state;
     memset(&rec->proc, 0, sizeof(rec->proc));
+    zzapp_xport_publish_private(rec);
     rec->coh.owner = 0;
 }
 
@@ -896,6 +899,7 @@ int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
 #endif
     proc->memory.committed = commit;
     proc->memory.limit = limit;
+    zzapp_xport_publish_private(rec_must(slot));
     cb_put(AAR_CB_FLAGS, note_flags & (AAR_CBF_DISPLAY | AAR_CBF_AUDIO |
                                         AAR_CBF_GL));
     return AAR_OK;
@@ -2090,11 +2094,14 @@ static void start_failed(uint32_t slot, int status)
 }
 
 /* A stop request found the record still loading: nothing runs, so the claim
- * ends here. */
+ * ends here. The client's stop is an administrative one and ends it FORCED,
+ * unless the claim already carries a reason (a lease that ran out). */
 static void abort_loading_stop(void)
 {
     uint32_t slot = current_slot();
 
+    if (rec_must(slot)->claim.terminal_reason == ZZAPP_END_NONE)
+        zzapp_services_set_terminal(ZZAPP_END_FORCED);
     zzapp_services_cancel_start(AAR_E_IO);
     (void)zzapp_rec_retire(slot);
 }

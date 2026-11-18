@@ -1547,8 +1547,10 @@ void zzapp_services_on_app_end(void)
 
 /*
  * Amiga reset, once, after the host retired every record and before the
- * allocator is reset: every shell is released and gives its buffers back,
- * quarantines are dropped. A shell whose audio detach is still owed to core
+ * allocator is reset: every shell is released and gives its buffers back.
+ * The quarantine flag of a quarantined shell stays until its release, so the
+ * release returns the app's own host-visible blocks as well. A shell whose
+ * audio detach is still owed to core
  * 0 stays until core 0 finishes it, and one whose deferred op core 1 still
  * completes until that is done; both go as soon as they can, because the
  * release is requested. Handles stay stale: freeing a record bumps its

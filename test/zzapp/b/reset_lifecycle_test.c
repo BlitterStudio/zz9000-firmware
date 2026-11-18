@@ -557,6 +557,8 @@ static void test_stop_before_start_cancels_the_launch(void)
     /* The claim ended without the app ever running: nothing of it is left
      * but the shell, which reads IDLE. */
     assert(RT_STATE(0U) == AAR_STATE_IDLE);
+    /* A STOP the client asked for ends the claim FORCED, not NONE. */
+    assert(RT_REASON(0U) == AAR_END_FORCED);
     release_all(0U, SDK_STATUS_OK);
     rt_assert_back(g_start);
     rt_claim(0U);

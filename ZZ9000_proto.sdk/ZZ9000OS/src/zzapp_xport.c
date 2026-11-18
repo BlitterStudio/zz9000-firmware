@@ -92,6 +92,17 @@ void zzapp_xport_publish_shared(zzapp_rec_t *rec)
 	zzapp_xport_cb_put64(rec, AAR_CB_SHARED_USED_HI, used);
 }
 
+/* AAR_CB_PRIVATE_COMMITTED is the private memory the record holds
+ * (rec->proc.memory.committed). It is published wherever that changes: the
+ * load commit, a heap grow or shrink, and the release at the end. */
+void zzapp_xport_publish_private(zzapp_rec_t *rec)
+{
+	if (!rec)
+		return;
+	zzapp_xport_cb_put64(rec, AAR_CB_PRIVATE_COMMITTED_HI,
+			     rec->proc.memory.committed);
+}
+
 /* ---- Flags, doorbell ----------------------------------------------------- */
 
 void zzapp_xport_flag_set(zzapp_rec_t *rec, uint32_t flags)

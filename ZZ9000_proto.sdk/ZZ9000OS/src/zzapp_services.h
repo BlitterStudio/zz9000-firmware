@@ -33,9 +33,11 @@ struct zzapp_rec;
 #endif
 
 /* Amiga reset, once, after the host retired every record and before the
- * allocator is reset: every held shell is released and gives its buffers back,
- * quarantines are dropped (a shell with an audio detach still owed to core 0,
- * or an unharvested reply, goes as soon as that is done). */
+ * allocator is reset: every held shell is released and gives its buffers back
+ * (a shell with an audio detach still owed to core 0, or an unharvested reply,
+ * goes as soon as that is done). The quarantine flag stays on a quarantined
+ * shell until its release, so the release returns the app's own host-visible
+ * blocks along with the transport blocks. */
 void zzapp_services_on_reset(void);
 /* Retire stage 3: display grants, audio post-teardown, files, waits and
  * requests in flight of the selected record. The state moves to STOPPING;

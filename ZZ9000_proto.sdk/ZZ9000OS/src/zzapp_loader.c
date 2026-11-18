@@ -21,6 +21,7 @@
 #include "zzapp_state.h"
 #include "zzapp_runtime.h"
 #include "zzapp_rec.h"
+#include "zzapp_xport.h"
 
 #define EM_ARM                 40u
 #define ET_DYN                 3u
@@ -565,6 +566,7 @@ static int map_loaded_image(const struct load_image *img)
         proc->image_frame_count = image_frames;
         proc->heap_frame_count = heap_frames;
         proc->stack_frame_count = stack_frames;
+        zzapp_xport_publish_private(loader_rec_or_null());
         g_zero_frames = total_frames;
         g_zeroed_frames = 0U;
         g_zero_offset = 0U;

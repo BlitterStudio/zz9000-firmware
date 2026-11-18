@@ -677,15 +677,23 @@ the client releases the claim.
   `RELEASE(handle)` frees the blocks and the record, with a new handle
   generation: the pointers are detached first, then the blocks are returned,
   so a replayed teardown frees nothing twice.
-- Lease loss and an expired load quarantine the claim. The same retire runs,
-  but the app's own host-visible blocks are not returned either, and the
-  record's handle is revoked: its generation advances to a value the old
-  client does not know, and the shell stays under that new handle. The old
-  client's next request names the old handle, fails the lookup, and the stale
-  path releases the shell. `LIST` returns the current handle of a quarantined
-  shell, so an administrative `RELEASE` works. Terminal reason `QUARANTINED`
-  (9). Quarantine never ages out; it holds one record and up to 400 KiB until
-  the client's next stale request, `RELEASE` or card reset.
+  A client `STOP` of a claim that never ran (claimed, loading or loaded but
+  not started) ends it the same way, with the reason `FORCED`.
+- Lease loss and an expired load quarantine the claim. A running app whose
+  lease expires is stopped and ends with the reason `LEASE`; a claim whose
+  load was running ends with `QUARANTINED`, and one with nothing loaded ends
+  with `LEASE`. The same retire runs, but the app's own host-visible blocks
+  are held, not returned, because the lost client may
+  still write through its mapping of them. The record's handle is revoked: its
+  generation advances to a value the old client does not know, and the shell
+  stays under that new handle. The old client's next request names the old
+  handle, fails the lookup, and the stale path releases the shell. `LIST`
+  returns the current handle of a quarantined shell, so an administrative
+  `RELEASE` works. The quarantine flag stays on the shell until it is
+  released, and the release returns the held blocks with it. Quarantine never
+  ages out; it holds one record and up to 400 KiB until the client's next
+  stale request, `RELEASE` or an Amiga reset, which releases every held shell
+  (see below).
 - `RELEASE` on a `LIVE` record latches a stop with reason `FORCED` and sets
   `release_requested`; the retire that core 1 runs completes the release when
   it reaches its last stage. On a `RECLAIMED` record core 0 frees under the
@@ -730,10 +738,11 @@ An Amiga reset is posted to every live record and core 0 waits for core 1's
 acknowledgement of each before it resets the surface allocator. Core 1's reset
 path tears down a running app, a loading record or an exit still owed, so the
 allocator is not reset under a cleanup that still frees blocks from the old
-run. Afterwards the held shells (`RECLAIMED` records, quarantined ones
-included) are released once: their host-visible blocks and their transport
-blocks go back to the allocator, which is reset next, the quarantine flags are
-dropped and the records are freed. Core 1 detaches a block's pointer in the
+run. Afterwards every held shell (`RECLAIMED` records, quarantined ones
+included) is released once. The quarantine flag stays on a quarantined shell
+until that release, so the release returns the app's own host-visible blocks
+along with the transport blocks to the allocator, which is reset next; the
+records are then freed. Core 1 detaches a block's pointer in the
 record before the free, then core 0 resets the allocator, which drops every
 remaining block; no `surface_allocator_free` is issued for a block the reset
 already dropped. Handles and generations survive the reset: a handle from
