@@ -108,8 +108,8 @@ static void test_sizing(void)
     CHECK(lay.tables_off == up(lay.as_bytes, 4096U));
     CHECK(lay.stack_off == lay.tables_off + 231U * 8192U);
     CHECK(lay.record_off == lay.stack_off + 231U * 32768U);
-    CHECK(lay.bytes == up(lay.record_off + 231U * 12288U, 1U << 20));
-    CHECK(lay.bytes == (20U << 20));
+    CHECK(lay.bytes == up(lay.record_off + 231U * 16384U, 1U << 20));
+    CHECK(lay.bytes == (21U << 20));
     CHECK(lay.bytes % ZZAPP_REC_ARENA_ALIGN == 0U);
     /* About 3.4 percent of the permanent range. */
     CHECK(lay.bytes * 100U / permanent <= 4U);
@@ -140,7 +140,7 @@ static void test_sizing(void)
     CHECK(lay.l2_total == 16U + 1024U * 16U + 160U);
     CHECK(lay.l2_total < 0xfffeU);
     CHECK(lay.bytes == up(up(16384U * 1025U + lay.l2_total * 1030U, 4096U) +
-                          1024U * (8192U + 32768U + 12288U), 1U << 20));
+                          1024U * (8192U + 32768U + 16384U), 1U << 20));
 
     /* Shared tables follow the host heap: 2 a MiB, rounded up to 32. */
     zzapp_rec_layout_for(8U, 0U, &lay);
@@ -158,7 +158,7 @@ static void test_sizing(void)
     CHECK(offsetof(zzapp_rec_t, thread) == 0U);
     CHECK(sizeof(zzapp_rec_t) <= ZZAPP_REC_RECORD_BYTES);
     printf("record %zu of %u bytes, arena %u bytes for %u records\n",
-           sizeof(zzapp_rec_t), ZZAPP_REC_RECORD_BYTES, 20U << 20, 231U);
+           sizeof(zzapp_rec_t), ZZAPP_REC_RECORD_BYTES, 21U << 20, 231U);
 }
 
 /* ---- The APP_ARENA class ------------------------------------------------ */

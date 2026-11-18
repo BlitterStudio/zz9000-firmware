@@ -267,7 +267,10 @@ void *zzapp_rec_tables(uint32_t pid)
 		area_tables + (size_t)pid * ZZAPP_REC_TABLES_BYTES : NULL;
 }
 
-uint32_t zzapp_rec_admit(uint32_t window, uint32_t *handle, zzapp_rec_t **rec)
+/* The header's argument-count macro would rewrite the definition. */
+#undef zzapp_rec_admit
+
+uint32_t zzapp_rec_admit(uint32_t *handle, zzapp_rec_t **rec)
 {
 	zzapp_rec_hdr_t *hdr;
 	zzapp_rec_t *r;
@@ -304,12 +307,26 @@ uint32_t zzapp_rec_admit(uint32_t window, uint32_t *handle, zzapp_rec_t **rec)
 	hdr->handle = aar_handle_make(index, tab.gen[index]);
 	hdr->owner_serial = tab.owner_serial;
 	hdr->serial_prev = serial;
-	hdr->window = (uint16_t)window;
 	hdr->retire_stage = ZZAPP_RETIRE_NONE;
 	__atomic_store_n(&tab.state[index], (uint8_t)ZZAPP_REC_CLAIMED,
 			 __ATOMIC_RELEASE);
 	if (handle)
 		*handle = hdr->handle;
+	if (rec)
+		*rec = r;
+	return 0U;
+}
+
+/* SHIM: see zzapp_rec.h. */
+uint32_t zzapp_rec_admit_window(uint32_t window, uint32_t *handle,
+				zzapp_rec_t **rec)
+{
+	zzapp_rec_t *r;
+	uint32_t reason = zzapp_rec_admit(handle, &r);
+
+	if (reason != 0U)
+		return reason;
+	r->hdr.window = (uint16_t)window;
 	if (rec)
 		*rec = r;
 	return 0U;
