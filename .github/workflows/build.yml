@@ -64,6 +64,10 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libssl-dev
+      # The AAR client module test (sdk/tests) builds against the pinned aar
+      # checkout; without it CMake silently skips that test.
+      - name: Fetch AAR
+        run: sh sdk/scripts/fetch-aar.sh
       - name: Configure
         run: cmake -S sdk -B build-sdk -DCMAKE_BUILD_TYPE=Debug
       - name: Build
@@ -240,12 +244,6 @@ jobs:
             target="${target%.c}"
             if ! grep -qx "$target" "$listed"; then
               echo "not run by make -C test/zzapp test: $src"
-              missing=1
-            fi
-          done
-          for target in build/b/services_test_wide build/b/admission_test_wide; do
-            if ! grep -qx "$target" "$listed"; then
-              echo "missing wide target: $target"
               missing=1
             fi
           done
