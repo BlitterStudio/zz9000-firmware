@@ -10,8 +10,20 @@
 #include "aar/app.h"
 #include "zzapp_svc.h"
 #include "zzapp_runtime.h"
+#include "zzapp_rec.h"
 void zzapp_api_reclaim_resources(void);
 void zzapp_api_poison_resources(void);
+
+/* A fresh arena with four admitted records: services admits at claim. */
+static void boot_with_records(void)
+{
+    uint32_t pid;
+
+    (zzapp_boot_init)();
+    for (pid = 0U; pid < 4U; pid++)
+        assert(zzapp_test_admit() == pid);
+}
+#define zzapp_boot_init() boot_with_records()
 
 static uint64_t shared_used_now(const aar_api *api)
 {
@@ -51,7 +63,7 @@ static uint32_t flac_pool_owner[2];
 static uint32_t flac_pool_owner_count;
 static int tile_writable = 1;
 static uint32_t selected_service_slot;
-uint32_t zzapp_services_current_slot(void)
+uint32_t zzapp_services_current_pid(void)
 {
     return selected_service_slot;
 }
@@ -241,9 +253,9 @@ unsigned sdk_compression_reclaim_app_decode(uint32_t owner)
     app_decode_reclaim_calls++;
     return 1u;
 }
-uint32_t sdk_compression_app_decode_owner(uint32_t slot, uint32_t generation)
+uint32_t sdk_compression_app_decode_owner(uint32_t pid)
 {
-    return 0x02000000u | (generation << 2) | slot;
+    return 0x02000000u | pid;
 }
 
 static uint32_t decompress_owner_seen;
@@ -332,7 +344,7 @@ int main(void)
     assert(api->image_open(&image, &image_session, &image_result) == AAR_E_INVAL);
     assert(api->image_open(&image, &image_session, &image_result) == AAR_E_INVAL);
     assert(api->image_open(&image, &image_session, &image_result) == AAR_E_INVAL);
-    assert(zzapp_runtime_kernel()->resources[0].image_sessions == 0u);
+    assert(zzapp_rec_by_pid(0U)->kernel.resources.image_sessions == 0u);
     image.output_format = AAR_FMT_BGRA8888;
     assert(api->image_open(&image, &image_session, &image_result) == AAR_OK);
     tile_writable = 0;
@@ -351,10 +363,10 @@ int main(void)
     assert(api->audio_decode_open(AAR_AUDIO_FLAC, &slot_audio_session) == AAR_OK);
     zzapp_api_reclaim_resources();
     assert(audio_release_calls == 1u);
-    assert(zzapp_runtime_kernel()->resources[1].audio_sessions == 0u);
+    assert(zzapp_rec_by_pid(1U)->kernel.resources.audio_sessions == 0u);
     assert(api->audio_decode_open(AAR_AUDIO_FLAC, &slot_audio_session) == AAR_OK);
     zzapp_api_poison_resources();
-    assert(zzapp_runtime_kernel()->resources[1].audio_sessions == 0u);
+    assert(zzapp_rec_by_pid(1U)->kernel.resources.audio_sessions == 0u);
     audio_release_calls = 0u;
     selected_service_slot = 0U;
     zzapp_kernel_set_current_thread(-1);

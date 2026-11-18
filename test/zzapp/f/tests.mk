@@ -1,5 +1,4 @@
-F_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
-	$(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o
+F_RUNTIME_OBJS := $(A_RUNTIME_OBJS)
 ZZAPP_TESTS += $(BUILD)/f/minigl_api_test
 
 $(BUILD)/f/minigl_api_test: f/minigl_api_test.c $(FW)/zzm_minigl_host.c \

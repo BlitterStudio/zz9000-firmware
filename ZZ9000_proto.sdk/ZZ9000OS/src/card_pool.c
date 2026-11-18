@@ -44,6 +44,8 @@ void card_pool_init(card_pool_t *pool)
         CARD_POOL_LIMIT_APP_DISPLAY;
     pool->class_limit[CARD_POOL_CLASS_APP_FRAMES] =
         CARD_POOL_LIMIT_APP_FRAMES;
+    pool->class_limit[CARD_POOL_CLASS_APP_ARENA] =
+        CARD_POOL_LIMIT_APP_ARENA;
     pool->class_limit[CARD_POOL_CLASS_MINIGL_MODULE] =
         CARD_POOL_LIMIT_MINIGL_MODULE;
     pool->class_limit[CARD_POOL_CLASS_MINIGL_TRANSPORT] =
@@ -174,11 +176,18 @@ static uint32_t find_gap(const card_pool_t *pool, const card_pool_range_t *r,
     return 0;
 }
 
+/* Classes that live in the permanent range only: never in the revocable
+ * Fast-RAM tail, and kept across an Amiga reset. */
+static int permanent_class(uint32_t cls)
+{
+    return cls == CARD_POOL_CLASS_FIRMWARE || cls == CARD_POOL_CLASS_APP_ARENA;
+}
+
 static int range_allows(const card_pool_range_t *range, uint32_t cls)
 {
     return range->open &&
            !(range->revocable &&
-             (cls == CARD_POOL_CLASS_FIRMWARE || cls == CARD_POOL_CLASS_APP ||
+             (permanent_class(cls) || cls == CARD_POOL_CLASS_APP ||
               cls == CARD_POOL_CLASS_APP_FRAMES));
 }
 
@@ -294,11 +303,12 @@ int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner)
     return freed;
 }
 
-/* Free every non-quarantined block owned by `key`, or with `except_class`
- * set, every non-quarantined block whose class is not `key`. One compaction
- * pass keeps the table sorted. */
-static uint32_t release_where(card_pool_t *pool, uint32_t key,
-                              int except_class)
+/* Free every non-quarantined block owned by `owner`, or with
+ * `all_but_permanent` set, every non-quarantined block whose class is not a
+ * permanent one (FIRMWARE, APP_ARENA). One compaction pass keeps the table
+ * sorted. */
+static uint32_t release_where(card_pool_t *pool, uint32_t owner,
+                              int all_but_permanent)
 {
     uint32_t freed = 0, kept = 0;
     sdk_smp_lock_acquire(&pool->lock);
@@ -306,7 +316,7 @@ static uint32_t release_where(card_pool_t *pool, uint32_t key,
         card_pool_block_t b = pool->blocks[i];
         uint32_t cls = CARD_POOL_OWNER_CLASS(b.owner);
 
-        if ((except_class ? cls != key : b.owner == key) &&
+        if ((all_but_permanent ? !permanent_class(cls) : b.owner == owner) &&
             !(b.flags & CARD_POOL_BLOCK_QUARANTINED)) {
             pool->class_used[cls] -= b.size;
             freed += b.size;
@@ -421,7 +431,7 @@ void card_pool_take_back_lent(card_pool_t *pool)
 void card_pool_finish_amiga_reset(card_pool_t *pool, int is_zorro3,
                                   int fastram_advertised)
 {
-    release_where(pool, CARD_POOL_CLASS_FIRMWARE, 1);
+    release_where(pool, 0, 1);
     if (is_zorro3 && fastram_advertised)
         return;
     for (uint32_t r = 0; r < pool->range_count; r++) {

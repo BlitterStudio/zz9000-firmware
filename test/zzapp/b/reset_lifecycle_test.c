@@ -2,6 +2,7 @@
 #define ZZAPP_HOST_DEFERRED_TEST
 #endif
 #include "zzapp_services.c"
+#include "svc_views.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -244,6 +245,18 @@ static uint8_t terminal_reason(void)
     assert(reply_bytes == ZZAPP_LIST_REPLY_BYTES);
     return reply[ZZAPP_LIST_REASONS + 1U];
 }
+/* A faulted app's record is retired at the fault, so the host no longer holds
+ * a FAULTED state of its own. What a launcher reads is unchanged: the fault
+ * words stay in the window's life block (the last-end summary) until the next
+ * launch clears them, and the window itself reads IDLE. */
+static void assert_fault_latched(void)
+{
+    assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
+                          ZZAPP_LIFE_FAULT_OFF) != ZZAPP_FAULT_NONE);
+    assert(WSTATE(0) == ZZAPP_ST_IDLE);
+    assert(window_rec(&windows[0]) == NULL);
+}
+
 
 static void bind_window(void)
 {
@@ -251,8 +264,15 @@ static void bind_window(void)
     zzapp_services_test_set_window(launcher_window, sizeof(launcher_window));
 }
 
+static uint16_t claim_slot0_from_core0(void);
+
+/* A launch is a claim, then LOAD_BEGIN. A window that was just given to the
+ * test holds an implicit record (bind_window); one whose record was retired
+ * (the app ended) has none, and the launcher claims it again. */
 static void begin_load(void)
 {
+    if (!window_rec(&windows[0]))
+        assert(claim_slot0_from_core0() == SDK_STATUS_OK);
     assert(dispatch(ZZAPP_OP_LOAD_BEGIN, NULL, 0) == SDK_STATUS_OK);
     assert(zzapp_runtime_state() == ZZAPP_ST_LOADING);
 }
@@ -287,7 +307,10 @@ static void expire_loading_claim(uint32_t *stale_generation,
     assert(zzapp_services_state() == ZZAPP_ST_STOPPING);
     assert(zzapp_runtime_state() == ZZAPP_ST_LOADING);
     zzapp_worker_hook();
-    assert(zzapp_runtime_state() == ZZAPP_ST_STOPPING);
+    /* The reclaim returned the record's resources (host view IDLE); the
+     * window still reads STOPPING to the launcher until it is released. */
+    assert(zzapp_services_state() == ZZAPP_ST_STOPPING);
+    assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     *current_generation = zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
                                           ZZAPP_LIFE_GENERATION_OFF);
 }
@@ -375,14 +398,14 @@ static void cancel_deferred_load_before_loader_begin(void)
     assert(zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request,
                                   sizeof(request), reply, &reply_bytes, 1,
                                   ++request_id, 0) == SDK_STATUS_QUEUED);
-    assert(deferred[0].state == DEFER_POSTED);
+    assert(DEF(0).state == DEFER_POSTED);
     /*
      * This is the production poll boundary after it selects this request
      * but before run_deferred can enter zzapp_loader_begin().  Core 0
      * expires the claim here, so the loader never sees an arena and
      * zzapp_loader_abort() reports EBUSY from host IDLE.
      */
-    deferred[0].state = DEFER_RUNNING;
+    DEF(0).state = DEFER_RUNNING;
     zzapp_services_expire_claims(ZZAPP_CLAIM_LEASE_US);
     assert(zzapp_services_state() == ZZAPP_ST_STOPPING);
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
@@ -494,6 +517,18 @@ static void assert_window_payload_zero(void)
     for (offset = ZZAPP_LIFE_BYTES; offset < ZZAPP_WINDOW_BYTES; offset++)
         assert(launcher_window[offset] == 0U);
 }
+/* An app end as the host runs it: services ends the app's resources, then the
+ * record is retired, which frees it and unbinds the window (the window keeps
+ * its mapping). Ending alone leaves the record bound and STOPPING. */
+static void end_app_and_retire(void)
+{
+    zzapp_rec_t *rec = window_rec(&windows[0]);
+
+    assert(rec != NULL);
+    zzapp_services_on_app_end();
+    assert(zzapp_rec_retire(rec->hdr.pid) == 1);
+}
+
 
 static void window_claim_initialization_lifecycle(void)
 {
@@ -509,7 +544,7 @@ static void window_claim_initialization_lifecycle(void)
     /* A normal app end retains the mapped window. A later claim therefore
      * does not pay the whole-window initialization cost again. */
     launcher_window[ZZAPP_STAGING_OFF] = 0x5aU;
-    zzapp_services_on_app_end();
+    end_app_and_retire();
     assert(claim_slot0_from_core0() == SDK_STATUS_OK);
     assert(launcher_window[ZZAPP_STAGING_OFF] == 0x5aU);
 
@@ -536,7 +571,7 @@ static void claim_when_admissible(void)
     if (status == SDK_STATUS_BUSY)
         return;
     assert(status == SDK_STATUS_OK);
-    admitted_generation = slots[0].generation;
+    admitted_generation = WGEN(0);
     zzapp_test_set_admission_hook(NULL);
 }
 
@@ -579,22 +614,22 @@ static void reset_keeps_running_record_stopping(void)
                                   sizeof(request), reply, &reply_bytes, 1,
                                   ++request_id, 0) == SDK_STATUS_QUEUED);
     /* The poll boundary: core 1 owns the record, run_deferred not yet in. */
-    deferred[0].state = DEFER_RUNNING;
+    DEF(0).state = DEFER_RUNNING;
     zzapp_on_amiga_reset();
     zzapp_worker_hook();
     bind_window();
-    assert(deferred[0].state == DEFER_RUNNING && deferred[0].cancelled);
+    assert(DEF(0).state == DEFER_RUNNING && DEF(0).cancelled);
     assert(list_state() == ZZAPP_ST_STOPPING);
     assert(claim_slot0_from_core0() == SDK_STATUS_BUSY);
     zzapp_services_select_slot(0U);
     run_deferred();
-    assert(deferred[0].state == DEFER_IDLE);
+    assert(DEF(0).state == DEFER_IDLE);
     assert(list_state() == ZZAPP_ST_IDLE);
     assert(claim_slot0_from_core0() == SDK_STATUS_OK);
-    generation = slots[0].generation;
+    generation = WGEN(0);
     zzapp_worker_hook();
     assert(list_state() == ZZAPP_ST_CLAIMED);
-    assert(slots[0].generation == generation);
+    assert(WGEN(0) == generation);
     assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
                           ZZAPP_LIFE_STATE_OFF) == ZZAPP_ST_CLAIMED);
     begin_load();
@@ -609,7 +644,8 @@ static void cancel_start_without_quarantine(void)
     race_hook_fired = 1;
     slot_state_lock_acquire();
     assert(stop_current_deferred() == 0);
-    begin_claim_cancellation(&slots[0], ZZAPP_END_FORCED);
+    begin_claim_cancellation(&windows[0], window_rec(&windows[0]),
+                             ZZAPP_END_FORCED);
     slot_state_lock_release();
 }
 
@@ -650,8 +686,8 @@ static void claim_survives_start_teardown(void (*race)(void), int fail_start)
     zzapp_test_set_admission_hook(NULL);
     assert(race_hook_fired == 1);
     assert(admitted_generation != 0U && admitted_generation != stale_generation);
-    assert(slots[0].state == ZZAPP_ST_CLAIMED);
-    assert(slots[0].generation == admitted_generation);
+    assert(WSTATE(0) == ZZAPP_ST_CLAIMED);
+    assert(WGEN(0) == admitted_generation);
     assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
                           ZZAPP_LIFE_STATE_OFF) == ZZAPP_ST_CLAIMED);
     assert(zzapp_get_be32(launcher_window + ZZAPP_LIFE_OFF +
@@ -732,7 +768,7 @@ int main(void)
     }
     direct_stop_running = 0;
     assert(direct_stop_seen == 1U);
-    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    assert_fault_latched();
 
     /* APP_STOP before launch is latched by its firmware handler; real START
      * processing cancels the pending launch.  The next launch clears it. */
@@ -779,7 +815,7 @@ int main(void)
         assert(app_runs == before);
         assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     }
-    zzapp_loader_release();
+    /* The failed START retired the record; nothing is left to release. */
     zzapp_boot_init();
     zzapp_services_test_reset();
     bind_window();
@@ -793,7 +829,15 @@ int main(void)
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     bind_window();
     begin_load();
-    assert(zzapp_loader_abort() == AAR_OK);
+    /* The launch ends here, as the host's abort paths end it: the loader
+     * arena goes, then the record. The next launch claims again. */
+    {
+        zzapp_rec_t *rec = window_rec(&windows[0]);
+
+        assert(rec != NULL);
+        assert(zzapp_loader_abort() == AAR_OK);
+        assert(zzapp_rec_retire(rec->hdr.pid) == 1);
+    }
 
     /* Input and log cursors are per launch, never inherited by the next app. */
     zzapp_put_be32(launcher_window + ZZAPP_INPUT_OFF, 7u);
@@ -826,14 +870,15 @@ int main(void)
     /* A running app sees reset as an immediate forced stop, then can relaunch. */
     reset_running = 1;
     load_hello();
-    start_and_exit();
     {
-        aar_info info;
+        uint32_t pid = window_rec(&windows[0])->hdr.pid;
 
-        memset(&info, 0, sizeof(info));
-        info.size = sizeof(info);
-        assert(zzapp_host_info(&info) == AAR_OK);
-        assert(info.shared_used == 0u);
+        start_and_exit();
+        /* The app held 4 KiB of host-visible memory when reset hit; its
+         * record is retired and the bytes are gone with it (records are
+         * type stable, so the freed one is still readable). */
+        assert(zzapp_rec_state(pid) == ZZAPP_REC_FREE);
+        assert(zzapp_rec_by_pid(pid)->visible.used == 0u);
     }
     reset_running = 0;
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
@@ -852,7 +897,7 @@ int main(void)
                SDK_STATUS_OK);
     }
     damage_canary = 0;
-    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    assert_fault_latched();
     assert(terminal_reason() == ZZAPP_END_USER_FAULT);
     assert(status() == SDK_STATUS_OK);
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
@@ -861,11 +906,14 @@ int main(void)
     load_hello();
     start_and_exit();
     assert(app_runs == 9u);
-    /* A fault is reported once, then STATUS acknowledges it for a new launch. */
+    /* A fault is reported once, then STATUS acknowledges it for a new launch.
+     * The app that just ended has no record any more: this one is given
+     * the window afresh. */
+    bind_window();
     zzapp_test_mark_running();
     zzapp_take_app_fault(ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
     zzapp_worker_hook();
-    assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
+    assert_fault_latched();
     assert(terminal_reason() == ZZAPP_END_USER_FAULT);
     assert(status() == SDK_STATUS_OK);
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);

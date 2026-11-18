@@ -148,6 +148,7 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "scheduler_core1_minigl_init.h"
 #include "zzapp_as.h"
 #include "zzapp_kernel.h"
+#include "zzapp_rec.h"
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
 #include "zzm_runtime.h"
@@ -159,10 +160,8 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #define SCHED_CORE1_DOORBELL_SGI 15U
 #define SCHED_CORE1_DOORBELL_CPU 2U
 
-/* The system thread keeps the established 1 MiB core-1 stack. */
-static uint8_t scheduler_app_stacks[ZZAPP_KERNEL_APP_SLOTS]
-                                   [ZZAPP_KERNEL_STACK_BYTES]
-  __attribute__((aligned(8)));
+/* The system thread keeps the established 1 MiB core-1 stack. The app
+ * stacks are in the record arena, one per record. */
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
 
@@ -243,6 +242,11 @@ void zzapp_recover_external_locks(void)
   sdk_image_stream_reset_locks();
   zzm_loader_reset_session_lock();
   zzapp_as_reset_lock();
+  /* Core 1 is halted: no ASID is live any more, and the handle table and
+   * table pool are rebuilt from their state marks before records are
+   * retired. */
+  zzapp_as_reset_asids();
+  (void)zzapp_rec_reconcile_halted();
   zzapp_mem_reset_live_lock();
   zzapp_mem_reconcile_halted();
   surface_allocator_reset_lock();
@@ -258,12 +262,8 @@ void scheduler_boot_init(void)
   taskq_shared_boot_init(sh);
   zzapp_kernel_stack_paint((uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
                            SDK_CORE1_SYSTEM_STACK_SIZE);
-  {
-    uint32_t slot;
-    for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
-      zzapp_kernel_stack_paint(scheduler_app_stacks[slot],
-                               sizeof(scheduler_app_stacks[slot]));
-  }
+  /* The app stacks live in the record arena and are painted when an app
+   * starts (zzapp_kernel_prepare_app). */
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   zzapp_boot_init();
   g_core1_started = 0;
@@ -351,21 +351,22 @@ void scheduler_core1_enable_doorbell(void)
   XScuGic_Enable(intc, SCHED_CORE1_DOORBELL_SGI);
 }
 
-uint32_t scheduler_core1_stack_high_water(uint32_t slot)
+uint32_t scheduler_core1_stack_high_water(uint32_t pid)
 {
-  if (slot >= ZZAPP_KERNEL_APP_SLOTS)
+  const zzapp_kernel_t *kernel = zzapp_runtime_kernel();
+
+  if (pid >= zzapp_kernel_capacity(kernel))
     return zzapp_kernel_stack_used(
         (const uint8_t *)(uintptr_t)SDK_CORE1_SYSTEM_STACK_BASE,
         SDK_CORE1_SYSTEM_STACK_SIZE);
-  return zzapp_kernel_stack_used(scheduler_app_stacks[slot],
-                                 sizeof(scheduler_app_stacks[slot]));
+  return zzapp_kernel_stack_high_water(kernel, pid);
 }
 
-void *scheduler_core1_app_stack_top(uint32_t slot)
+void *scheduler_core1_app_stack_top(uint32_t pid)
 {
-  if (slot >= ZZAPP_KERNEL_APP_SLOTS)
-    return NULL;
-  return scheduler_app_stacks[slot] + sizeof(scheduler_app_stacks[slot]);
+  const zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+  return rec ? (void *)(uintptr_t)rec->hdr.kstack_top : NULL;
 }
 
 /* Bounded wait for core 1's worker to come up, ~100 ms total. */
@@ -834,10 +835,13 @@ void scheduler_core1_worker(void)
      * no interrupt, so idling in WFE would add up to one 5 ms tick to every
      * request; keep polling while any wait is registered. */
     if (should_wfe) {
-      uint32_t slot;
+      zzapp_kernel_t *kernel = zzapp_runtime_kernel();
+      uint32_t index;
 
-      for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
-        if (zzapp_services_wait_registered(slot)) {
+      /* A parked app is not STOPPED, so the run list covers every app that
+       * can have a wait registered. */
+      for (index = 0U; index < zzapp_kernel_run_count(kernel); index++) {
+        if (zzapp_services_wait_registered(zzapp_kernel_run_pid(kernel, index))) {
           should_wfe = 0;
           break;
         }
@@ -983,17 +987,20 @@ int scheduler_core1_clean_dcache(void)
  * shared and already visible to core 0), so it cannot race core 0's own cache
  * maintenance.
  */
+static void scheduler_park_clean_cache(void *unused)
+{
+  (void)unused;
+  Xil_L1DCacheFlush();
+  dsb();
+}
+
 void scheduler_core1_park_if_requested(void)
 {
   taskq_shared_t *sh = scheduler_shared();
 
-  if (!sh->core1_park_request)
+  if (!scheduler_core1_service_park_request_with(
+          sh, scheduler_park_clean_cache, scheduler_clean_publish, NULL))
     return;
-  Xil_L1DCacheFlush();
-  dsb();
-  sh->core1_parked = 1;
-  dsb();
-  __asm__ __volatile__("sev" ::: "memory");
   for (;;)
     __asm__ __volatile__("wfe" ::: "memory");
 }

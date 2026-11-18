@@ -144,7 +144,7 @@ static int register_proc_locked(zzapp_mem_t *memory, zzapp_mem_proc_t *proc)
         if (memory->procs[i] == proc)
             return 0;
     }
-    if (count == ZZAPP_MEM_MAX_PROCS)
+    if (count == ZZAPP_MEM_REGISTRY_PROCS)
         return -1;
     memory->procs[count] = proc;
     FRAME_STORE(memory, proc, ZZAPP_MEM_TEST_AFTER_PROC_POINTER);

@@ -54,7 +54,18 @@
 /* Extended LOAD_BEGIN carries a per-app host-visible limit in MiB at
  * ZZAPP_LOAD_HOST_VISIBLE_MIB. */
 #define ZZAPP_CAP_HOST_LIMIT       (1u << 8)
+/*
+ * Launcher windows: the number of slots the wire addresses. It is a platform
+ * ceiling on launcher windows (one fixed card range each), not a limit on the
+ * number of apps: the firmware keeps apps in process records sized from
+ * memory, and a refused claim says why (AAR_REASON_LIMIT when every window is
+ * in use). Clients still use this value until the wire names handles. Host
+ * tests may lift it with -DZZAPP_SLOT_COUNT=64u; the firmware asserts it
+ * against the carved window ranges.
+ */
+#ifndef ZZAPP_SLOT_COUNT
 #define ZZAPP_SLOT_COUNT           4u
+#endif
 
 /* Extended-request ownership mismatch. Matches SDK_STATUS_BAD_HANDLE. */
 #define ZZAPP_ERR_STALE            5u
@@ -126,17 +137,32 @@
 #define ZZAPP_SEL_SLOT             40u
 #define ZZAPP_SEL_GENERATION       44u
 
-/* Extended QUERY reply: the legacy 16 bytes, then slot and commit counts. */
+/* Extended QUERY reply: the legacy 16 bytes, then slot and commit counts,
+ * then the record, table and host-heap counts. The second group is additive:
+ * clients that decode 32 bytes still work. COMMIT_FREE is the bytes still
+ * admissible for app commits and COMMIT_TOTAL that plus what is committed.
+ * TABLES_FREE counts L2 tables a new admission can still reserve and
+ * TABLES_TOTAL the pool less the kernel template. Together with the free
+ * windows they are the counts a claim, load and release cycle returns to. */
 #define ZZAPP_QUERY_SLOTS          16u
 #define ZZAPP_QUERY_FREE_SLOTS     20u
 #define ZZAPP_QUERY_COMMIT_FREE    24u
 #define ZZAPP_QUERY_COMMIT_TOTAL   28u
-#define ZZAPP_QUERY_EXT_REPLY_BYTES 32u
+#define ZZAPP_QUERY_RECORDS_FREE   32u
+#define ZZAPP_QUERY_TABLES_FREE    36u
+#define ZZAPP_QUERY_TABLES_TOTAL   40u
+#define ZZAPP_QUERY_HOSTHEAP_FREE  44u
+#define ZZAPP_QUERY_EXT_REPLY_BYTES 48u
 
 /* Extended ALLOC_WINDOW reply: the legacy 12 bytes, then the claim. */
 #define ZZAPP_ALLOC_SLOT           12u
 #define ZZAPP_ALLOC_GENERATION     16u
 #define ZZAPP_ALLOC_EXT_REPLY_BYTES 20u
+/* Refusal of an extended ALLOC_WINDOW: the status is the one the old firmware
+ * gave (BUSY for a platform limit, NO_MEMORY for the rest) and the reply, which
+ * used to be empty, carries the reason. Additive. */
+#define ZZAPP_ALLOC_REASON         0u
+#define ZZAPP_ALLOC_REFUSAL_REPLY_BYTES 4u
 
 /* Extended LOAD_BEGIN: launcher memory cap in MiB, 0 for none. */
 #define ZZAPP_LOAD_MEM_LIMIT_MIB   0u
@@ -308,6 +334,10 @@
 #define ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF 0xA0u
 #define ZZAPP_LIFE_TERMINAL_OFF     0xA4u
 #define ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF 0xA8u
+/* Reason of the last resource refusal of this claim (AAR_REASON_*): set
+ * before a failing LOAD_BEGIN or LOAD_END completes, cleared at claim. 0 when
+ * none. Additive: older launchers never read it. */
+#define ZZAPP_LIFE_REFUSAL_OFF     0xACu
 
 /* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
  * 5 stopping, 6 faulted. */

@@ -11,6 +11,7 @@
 #define ZZAPP_SERVICES_STANDALONE_TEST
 #include "zzapp_services.c"
 
+#include "svc_env.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -45,9 +46,9 @@ static int loader_chunk_succeeds(uint32_t file_off, const void *src,
 
 static int start_posted_deferred(void)
 {
-	if (deferred[0].state != DEFER_POSTED)
+	if (DEF(0).state != DEFER_POSTED)
 		return 0;
-	deferred[0].state = DEFER_RUNNING;
+	DEF(0).state = DEFER_RUNNING;
 	return 1;
 }
 static int harvest_reply_hook_result;
@@ -278,8 +279,8 @@ static void test_display_refresh_rotation_and_layout(void)
 	memset(&surface, 0, sizeof(surface));
 	surface.id = 1U;
 	if (zzapp_svc_display_refresh(&surface) != AAR_OK ||
-	    surface.front != (void *)(uintptr_t)front ||
-	    surface.back != (void *)(uintptr_t)back ||
+	    PHYS(surface.front) != front ||
+	    PHYS(surface.back) != back ||
 	    surface.layout != AAR_LAYOUT_RGB565_LE)
 		fail("display initial surface");
 	/* The generation counter is core-1-private state: raise it through
@@ -300,8 +301,8 @@ static void test_display_refresh_rotation_and_layout(void)
 		fail("display pending refresh");
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_ACK_OFF, 1U);
 	if (zzapp_svc_display_refresh(&surface) != AAR_OK ||
-	    surface.front != (void *)(uintptr_t)back ||
-	    surface.back != (void *)(uintptr_t)front ||
+	    PHYS(surface.front) != back ||
+	    PHYS(surface.back) != front ||
 	    surface.layout != AAR_LAYOUT_RGB565_LE)
 		fail("display refreshed rotation");
 }
@@ -346,8 +347,8 @@ static void test_display_scanout_ack(void)
 			   ZZAPP_LIFE_FLIP_ACK_OFF) != 1U)
 		fail("display scanout-ack vblank");
 	if (zzapp_svc_display_refresh(&surface) != AAR_OK ||
-	    surface.front != (void *)(uintptr_t)back ||
-	    surface.back != (void *)(uintptr_t)spare)
+	    PHYS(surface.front) != back ||
+	    PHYS(surface.back) != spare)
 		fail("display scanout-ack recycle");
 }
 
@@ -364,7 +365,7 @@ static uint64_t flip_time(void)
  * registered wait, first at the 50 ms diagnostic deadline and then at ack. */
 static void flip_yield(void)
 {
-	if (!zzapp_services_wait_registered(service_slot()))
+	if (!zzapp_services_wait_registered(service_pid()))
 		g_flip_unregistered_yields++;
 	g_flip_yields++;
 	if (current_runtime()->wait_deadline != 0U) {
@@ -412,7 +413,7 @@ static void test_display_wait_flip_idle(void)
 		fail("flip wait result");
 	if (g_flip_yields != 2U || g_flip_unregistered_yields != 0U)
 		fail("flip wait registers with the service pass");
-	if (zzapp_services_wait_registered(service_slot()))
+	if (zzapp_services_wait_registered(service_pid()))
 		fail("flip wait ended");
 	if (flip_wait_reports != 1U)
 		fail("slow flip reported once");
@@ -483,11 +484,11 @@ static void test_display_mailbox(void)
 	surface.id = 1U;
 	if (zzapp_svc_display_flip_async(surface.id) != AAR_OK ||
 	    zzapp_svc_display_refresh(&surface) != AAR_OK ||
-	    surface.back != (void *)(uintptr_t)spare)
+	    PHYS(surface.back) != spare)
 		fail("display mailbox first queue");
 	if (zzapp_svc_display_flip_async(surface.id) != AAR_OK ||
 	    zzapp_svc_display_refresh(&surface) != AAR_OK ||
-	    surface.back != (void *)(uintptr_t)back ||
+	    PHYS(surface.back) != back ||
 	    zzapp_svc_display_latest_dropped() != 1U)
 		fail("display mailbox replace");
 	if (!zzapp_services_display_mailbox_begin(front, &scanout) ||
@@ -495,8 +496,8 @@ static void test_display_mailbox(void)
 		fail("display mailbox select latest");
 	zzapp_services_display_mailbox_end(1);
 	if (zzapp_svc_display_refresh(&surface) != AAR_OK ||
-	    surface.front != (void *)(uintptr_t)spare ||
-	    surface.back != (void *)(uintptr_t)back ||
+	    PHYS(surface.front) != spare ||
+	    PHYS(surface.back) != back ||
 	    zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
 			   ZZAPP_LIFE_CARD_SPARE_OFF) != front)
 		fail("display mailbox latch reuse");
@@ -505,7 +506,7 @@ static void test_display_mailbox(void)
 	if (zzapp_services_display_mailbox_begin(0x00300000U, &scanout))
 		fail("display mailbox hidden screen");
 	if (zzapp_svc_display_refresh(&surface) != AAR_OK ||
-	    surface.back != (void *)(uintptr_t)front)
+	    PHYS(surface.back) != front)
 		fail("display mailbox hidden ownership");
 	display_mailbox_lock_acquire();
 	zzapp_services_reset_core1_lock();
@@ -527,29 +528,29 @@ static void test_display_mailbox(void)
 }
 static void test_display_mailbox_uses_scanout_owner(void)
 {
-	uint8_t windows[2][ZZAPP_WINDOW_BYTES];
+	uint8_t win_mem[2][ZZAPP_WINDOW_BYTES];
 	uint32_t scanout;
 
 	zzapp_services_test_reset();
-	memset(windows, 0, sizeof(windows));
-	zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
-	zzapp_services_test_set_window_slot(1U, windows[1], sizeof(windows[1]));
-	runtime[1].display_mailbox_active = 1;
-	runtime[1].display_mailbox_shown = 0x00200000U;
-	runtime[1].display_mailbox_pending = 0x00210000U;
-	runtime[1].display_mailbox_buffers[0] = 0x00200000U;
-	runtime[1].display_mailbox_buffers[1] = 0x00210000U;
-	runtime[1].display_mailbox_buffers[2] = 0x00220000U;
-	runtime[1].display_mailbox_bytes = 0x10000U;
+	memset(win_mem, 0, sizeof(win_mem));
+	zzapp_services_test_set_window_slot(0U, win_mem[0], sizeof(win_mem[0]));
+	zzapp_services_test_set_window_slot(1U, win_mem[1], sizeof(win_mem[1]));
+	RT(1).display_mailbox_active = 1;
+	RT(1).display_mailbox_shown = 0x00200000U;
+	RT(1).display_mailbox_pending = 0x00210000U;
+	RT(1).display_mailbox_buffers[0] = 0x00200000U;
+	RT(1).display_mailbox_buffers[1] = 0x00210000U;
+	RT(1).display_mailbox_buffers[2] = 0x00220000U;
+	RT(1).display_mailbox_bytes = 0x10000U;
 	zzapp_services_test_set_core(0);
 	zzapp_services_select_slot(0U);
 	if (!zzapp_services_display_mailbox_begin(0x00200000U, &scanout) ||
 	    scanout != 0x00210000U)
 		fail("display mailbox scanout owner");
 	zzapp_services_display_mailbox_end(1);
-	if (runtime[1].display_mailbox_shown != 0x00210000U ||
-	    runtime[1].display_mailbox_pending != 0U ||
-	    zzapp_get_be32(windows[1] + ZZAPP_LIFE_CARD_FRONT_OFF) !=
+	if (RT(1).display_mailbox_shown != 0x00210000U ||
+	    RT(1).display_mailbox_pending != 0U ||
+	    zzapp_get_be32(win_mem[1] + ZZAPP_LIFE_CARD_FRONT_OFF) !=
 		0x00210000U)
 		fail("display mailbox owner completion");
 	zzapp_services_test_set_core(1);
@@ -631,6 +632,7 @@ static void test_audio_teardown_handoff(void)
 	int rc;
 
 	zzapp_services_test_reset();
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
 	rc = zzapp_svc_audio_open(22050U, 2U, &audio);
 	if (rc != AAR_OK)
 		fail("audio open before end");
@@ -661,6 +663,7 @@ static void test_reset_preserves_audio_teardown(void)
 	aar_audio audio;
 
 	zzapp_services_test_reset();
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
 	if (zzapp_svc_audio_open(22050U, 2U, &audio) != AAR_OK)
 		fail("audio open before reset");
 	zzapp_services_on_reset();
@@ -698,7 +701,7 @@ static uint8_t g_slot_windows[2][ZZAPP_WINDOW_BYTES];
 
 static void slot_launcher(void)
 {
-	uint8_t *slot_window = slots[service_slot()].window;
+	uint8_t *slot_window = service_win()->window;
 	uint32_t seq;
 
 	if (!slot_window)
@@ -749,7 +752,7 @@ static void test_per_slot_file_and_audio_state(void)
 		fail("first slot audio open");
 	zzapp_services_select_slot(1U);
 	if (zzapp_svc_audio_open(22050U, 2U, &second) != AAR_OK ||
-	    first.samples == second.samples)
+	    RT(0).audio_block == RT(1).audio_block)
 		fail("per-slot audio state");
 	zzapp_services_select_slot(0U);
 	if (zzapp_svc_audio_close() != AAR_OK)
@@ -781,7 +784,7 @@ static void test_app_window_ignores_mailbox_selection(void)
 				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
 		fail("slot one mailbox selection");
 	zzapp_services_test_set_core(1);
-	service_test_current_thread = 2;
+	service_test_current_thread = (int)PID_OF(2U);
 	if (zzapp_services_window() != g_slot_windows[1])
 		fail("app window ignores mailbox selection");
 	service_test_current_thread = -1;
@@ -789,26 +792,24 @@ static void test_app_window_ignores_mailbox_selection(void)
 
 static void test_core1_wakes_ready_waiter(void)
 {
-	zzapp_kernel_t *kernel;
 
 	zzapp_services_test_reset();
 	memset(g_slot_windows, 0, sizeof(g_slot_windows));
 	zzapp_services_test_set_window_slot(2U, g_slot_windows[1],
 					     sizeof(g_slot_windows[1]));
-	runtime[2].wait_kind = ZZAPP_WAIT_CONSOLE_READ;
-	runtime[2].wait_value = 0U;
+	RT(2).wait_kind = ZZAPP_WAIT_CONSOLE_READ;
+	RT(2).wait_value = 0U;
 	zzapp_put_be32(g_slot_windows[1] + ZZAPP_CONSOLE_IN_OFF, 1U);
-	kernel = zzapp_runtime_kernel();
-	kernel->threads[2].state = ZZAPP_THREAD_BLOCKED;
+	TH(2).state = ZZAPP_THREAD_BLOCKED;
 	zzapp_services_test_set_core(0);
 	zzapp_services_core0_poll();
-	if (kernel->threads[2].state != ZZAPP_THREAD_BLOCKED)
+	if (TH(2).state != ZZAPP_THREAD_BLOCKED)
 		fail("core zero woke waiter");
 	if (service_test_wake_count != 0U)
 		fail("core zero called wake");
 	zzapp_services_test_set_core(1);
 	zzapp_services_poll();
-	if (kernel->threads[2].state != ZZAPP_THREAD_RUNNABLE)
+	if (TH(2).state != ZZAPP_THREAD_RUNNABLE)
 		fail("core one did not wake waiter");
 	if (service_test_wake_count != 1U)
 		fail("core one wake count");
@@ -832,13 +833,13 @@ static void test_deferred_waits_for_system_thread(void)
 				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_QUEUED)
 		fail("deferred request queued");
 	zzapp_services_test_set_core(1);
-	service_test_current_thread = 0;
+	service_test_current_thread = (int)PID_OF(0U);
 	zzapp_services_poll();
-	if (__atomic_load_n(&deferred[1].state, __ATOMIC_ACQUIRE) != DEFER_POSTED)
+	if (__atomic_load_n(&DEF(1).state, __ATOMIC_ACQUIRE) != DEFER_POSTED)
 		fail("app thread ran deferred request");
 	service_test_current_thread = -1;
 	zzapp_services_poll();
-	if (__atomic_load_n(&deferred[1].state, __ATOMIC_ACQUIRE) != DEFER_DONE)
+	if (__atomic_load_n(&DEF(1).state, __ATOMIC_ACQUIRE) != DEFER_DONE)
 		fail("system thread did not run deferred request");
 }
 static void test_load_uses_claim_generation(void)
@@ -949,26 +950,29 @@ static void test_returned_buffers_are_user_granted(void)
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
 				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
 		fail("surface bind for grant");
-	if (service_test_grant_count != 2U)
+	/* The address space is real: each grant is an alias extent of the
+	 * app's space, and a revoke removes exactly it. */
+	if (service_proc()->as.alias_count != 2U)
 		fail("surface buffers were not granted");
-	grants = service_test_grant_count;
+	grants = service_proc()->as.alias_count;
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
 				   reply, &reply_len, 1, 2U, 0U) != SDK_STATUS_BUSY)
 		fail("second surface bind was accepted");
-	if (service_test_grant_count != 2U)
+	if (service_proc()->as.alias_count != 2U)
 		fail("second surface bind created aliases");
 	if (zzapp_svc_display_close(1U) != AAR_OK)
 		fail("surface close for revoke");
-	if (service_test_ungrant_count != 2U)
+	if (service_proc()->as.alias_count != 0U)
 		fail("surface close left a display alias");
-	revokes = service_test_ungrant_count;
+	revokes = service_proc()->as.alias_count;
 	if (zzapp_svc_audio_open(22050U, 2U, &audio) != AAR_OK)
 		fail("audio open for grant");
-	if (service_test_grant_count != grants + 1U)
+	if (service_proc()->as.alias_count != revokes + 1U)
 		fail("audio buffer was not granted");
+	(void)grants;
 	if (zzapp_svc_audio_close() != AAR_OK)
 		fail("audio close for revoke");
-	if (service_test_ungrant_count != revokes + 1U)
+	if (service_proc()->as.alias_count != revokes)
 		fail("audio buffer was not revoked");
 }
 static void test_failed_starts_release_admission(void)
@@ -989,6 +993,7 @@ static void test_failed_starts_release_admission(void)
 					   1, slot + 1U, 0U) != SDK_STATUS_OK)
 			fail("claim before failed start");
 		zzapp_services_on_app_end();
+		(void)zzapp_rec_retire(zzapp_services_current_pid());
 	}
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
 				   sizeof(request), reply, &reply_len,
@@ -1002,8 +1007,8 @@ static void expire_running_load(void)
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	uint16_t reply_len;
 
-	expiry_deferred_generation = deferred[0].generation;
-	expiry_slot_generation = slots[0].generation;
+	expiry_deferred_generation = DEF(0).generation;
+	expiry_slot_generation = WGEN(0);
 	zzapp_services_expire_claims(ZZAPP_LOAD_LEASE_US);
 	expiry_claim_status = zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW,
 						     request, 0U, reply,
@@ -1021,12 +1026,12 @@ static void stop_completing_load(void)
 	uint16_t reply_len;
 
 	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
-	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, slots[0].generation);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, WGEN(0));
 	stop_completing_status = zzapp_mailbox_dispatch(ZZAPP_OP_STOP, request,
 							sizeof(request), reply,
 							&reply_len, 1, 3U, 0U);
 	zzapp_services_core0_poll();
-	stop_completing_slot_state = slots[0].state;
+	stop_completing_slot_state = WSTATE(0);
 	memset(request, 0, sizeof(request));
 	stop_completing_claim_status = zzapp_mailbox_dispatch(
 		ZZAPP_OP_ALLOC_WINDOW, request, 0U, reply, &reply_len, 1, 4U, 0U);
@@ -1065,8 +1070,8 @@ static void test_stop_cancels_completing_load(void)
 		fail("audio poll released completing load");
 	if (stop_completing_claim_status != SDK_STATUS_BUSY)
 		fail("replacement claim raced completing cancellation");
-	if (slots[0].state != ZZAPP_ST_IDLE ||
-	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
+	if (WSTATE(0) != ZZAPP_ST_IDLE ||
+	    __atomic_load_n(&DEF(0).state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
 	    service_test_loader_abort_count != 1U)
 		fail("completing stop was published after cancellation");
 	memset(request, 0, sizeof(request));
@@ -1104,8 +1109,8 @@ static void test_claim_expiry_cancels_running_load(void)
 	service_test_deferred_completion_hook = expire_running_load;
 	run_deferred();
 	service_test_deferred_completion_hook = NULL;
-	if (slots[0].state != ZZAPP_ST_STOPPING ||
-	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
+	if (WSTATE(0) != ZZAPP_ST_STOPPING ||
+	    __atomic_load_n(&DEF(0).state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
 	    service_test_loader_abort_count != 1U)
 		fail("expired running load was not quarantined");
 	if (expiry_claim_status != SDK_STATUS_BUSY)
@@ -1124,8 +1129,8 @@ static void test_claim_expiry_cancels_running_load(void)
 	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, generation);
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
 				   reply, &reply_len, 1, 5U, 0U) != SDK_STATUS_QUEUED ||
-	    slots[0].state != ZZAPP_ST_CLAIMED ||
-	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_POSTED)
+	    WSTATE(0) != ZZAPP_ST_CLAIMED ||
+	    __atomic_load_n(&DEF(0).state, __ATOMIC_ACQUIRE) != DEFER_POSTED)
 		fail("replacement load was affected by expiry");
 	zzapp_services_test_set_time(NULL);
 }
@@ -1160,7 +1165,7 @@ static void start_loading(uint8_t *request, uint8_t *reply, uint16_t *reply_len,
 			fail("finish loading deadline");
 		zzapp_mailbox_harvest_ack();
 	}
-	if (slots[0].state != ZZAPP_ST_LOADING)
+	if (WSTATE(0) != ZZAPP_ST_LOADING)
 		fail("enter loading deadline");
 }
 
@@ -1173,7 +1178,7 @@ static void test_abandoned_loading_is_quarantined(void)
 	start_loading(request, reply, &reply_len, 1, 0);
 	loading_now = ZZAPP_LOAD_LEASE_US;
 	zzapp_services_expire_claims(loading_now);
-	if (slots[0].state != ZZAPP_ST_STOPPING ||
+	if (WSTATE(0) != ZZAPP_ST_STOPPING ||
 	    service_test_loader_abort_count != 0U)
 		fail("expired load was not quarantined");
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply,
@@ -1191,8 +1196,11 @@ static void test_abandoned_loading_is_quarantined(void)
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
 				   &reply_len, 1, 5U, 0U) != SDK_STATUS_BUSY)
 		fail("stale contact released a live quarantined window");
+	/* The cancelled loader finishes: the host's abort and retire reclaim the
+	 * quarantined claim and stale contact releases it. */
 	(void)zzapp_loader_abort();
-	if (slots[0].quarantined || service_test_loader_abort_count != 1U)
+	(void)zzapp_rec_retire(zzapp_services_current_pid());
+	if (windows[0].quarantined || service_test_loader_abort_count != 1U)
 		fail("stale contact did not release after loader teardown");
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
 				   ZZAPP_MAILBOX_PAYLOAD_BYTES, reply, &reply_len,
@@ -1212,8 +1220,9 @@ static void test_explicit_quarantine_release_and_reset(void)
 	loading_now = ZZAPP_LOAD_LEASE_US;
 	zzapp_services_expire_claims(loading_now);
 	(void)zzapp_loader_abort();
+	(void)zzapp_rec_retire(zzapp_services_current_pid());
 	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
-	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, slots[0].generation);
+	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, WGEN(0));
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_RELEASE, request, sizeof(request),
 				   reply, &reply_len, 1, 4U, 0U) != SDK_STATUS_OK)
 		fail("explicit release did not free quarantine");
@@ -1228,8 +1237,9 @@ static void test_explicit_quarantine_release_and_reset(void)
 	loading_now = ZZAPP_LOAD_LEASE_US;
 	zzapp_services_expire_claims(loading_now);
 	(void)zzapp_loader_abort();
+	(void)zzapp_rec_retire(zzapp_services_current_pid());
 	zzapp_services_on_reset();
-	if (slots[0].quarantined || slots[0].state != ZZAPP_ST_IDLE)
+	if (windows[0].quarantined || WSTATE(0) != ZZAPP_ST_IDLE)
 		fail("reset did not clear quarantine");
 	zzapp_services_test_set_time(NULL);
 }
@@ -1250,6 +1260,7 @@ static void test_loading_chunk_renews_deadline(void)
 	    !start_posted_deferred())
 		fail("queue slow loading chunk");
 	zzapp_services_test_set_core(1);
+	zzapp_services_select_slot(0U);
 	run_deferred();
 	service_test_loader_chunk_hook = NULL;
 	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, NULL, NULL, NULL))
@@ -1257,12 +1268,12 @@ static void test_loading_chunk_renews_deadline(void)
 	zzapp_mailbox_harvest_ack();
 	loading_now += ZZAPP_LOAD_LEASE_US - 1U;
 	zzapp_services_expire_claims(loading_now);
-	if (slots[0].state != ZZAPP_ST_LOADING ||
+	if (WSTATE(0) != ZZAPP_ST_LOADING ||
 	    service_test_loader_abort_count != 0U)
 		fail("slow loading chunk did not renew deadline");
 	loading_now++;
 	zzapp_services_expire_claims(loading_now);
-	if (slots[0].state != ZZAPP_ST_STOPPING ||
+	if (WSTATE(0) != ZZAPP_ST_STOPPING ||
 	    service_test_loader_abort_count != 0U)
 		fail("renewed loading deadline was not quarantined");
 	zzapp_services_test_set_time(NULL);
@@ -1278,15 +1289,15 @@ static void test_loading_heartbeat_renews_deadline(void)
 	loading_now = ZZAPP_LOAD_LEASE_US;
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
 	zzapp_services_expire_claims(loading_now);
-	if (slots[0].state != ZZAPP_ST_LOADING)
+	if (WSTATE(0) != ZZAPP_ST_LOADING)
 		fail("launcher heartbeat did not renew loading deadline");
 	loading_now += ZZAPP_LOAD_LEASE_US - 1U;
 	zzapp_services_expire_claims(loading_now);
-	if (slots[0].state != ZZAPP_ST_LOADING)
+	if (WSTATE(0) != ZZAPP_ST_LOADING)
 		fail("active slow load was reclaimed");
 	loading_now++;
 	zzapp_services_expire_claims(loading_now);
-	if (slots[0].state != ZZAPP_ST_STOPPING)
+	if (WSTATE(0) != ZZAPP_ST_STOPPING)
 		fail("heartbeat-renewed loading deadline did not expire");
 	zzapp_services_test_set_time(NULL);
 }
@@ -1308,11 +1319,11 @@ static void test_claim_heartbeat_renews_deadline(void)
 	loading_now = ZZAPP_CLAIM_LEASE_US;
 	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
 	zzapp_services_expire_claims(loading_now);
-	if (slots[0].state != ZZAPP_ST_CLAIMED)
+	if (WSTATE(0) != ZZAPP_ST_CLAIMED)
 		fail("launcher heartbeat did not renew claimed slot");
 	loading_now += ZZAPP_CLAIM_LEASE_US;
 	zzapp_services_expire_claims(loading_now);
-	if (slots[0].state != ZZAPP_ST_IDLE)
+	if (WSTATE(0) != ZZAPP_ST_IDLE)
 		fail("renewed claimed slot did not expire");
 	zzapp_services_test_set_time(NULL);
 }
@@ -1349,12 +1360,12 @@ static void test_preload_cancellation_releases_deferred_record(void)
 	    expiry_deferred_generation != expiry_slot_generation ||
 	    service_loader_generation != load_generation)
 		fail("cancelled load did not keep its bumped generation");
-	if (slots[0].state != ZZAPP_ST_STOPPING ||
-	    __atomic_load_n(&deferred[0].state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
+	if (WSTATE(0) != ZZAPP_ST_STOPPING ||
+	    __atomic_load_n(&DEF(0).state, __ATOMIC_ACQUIRE) != DEFER_IDLE ||
 	    service_test_loader_abort_count != 1U ||
-	    slots[0].generation == 0U ||
+	    WGEN(0) == 0U ||
 	    zzapp_get_be32(g_window + ZZAPP_LIFE_GENERATION_OFF) !=
-		    slots[0].generation)
+		    WGEN(0))
 		fail("pre-load cancellation did not quarantine lifecycle state");
 	zzapp_services_test_set_time(NULL);
 }
@@ -1403,7 +1414,6 @@ static void test_new_generation_does_not_inherit_wait(void)
 	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	uint16_t reply_len;
-	zzapp_kernel_t *kernel;
 
 	zzapp_services_test_reset();
 	memset(g_window, 0, sizeof(g_window));
@@ -1417,17 +1427,17 @@ static void test_new_generation_does_not_inherit_wait(void)
 	current_runtime()->wait_value = 0U;
 	current_runtime()->wait_deadline = 1U;
 	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(zzapp_services_current_pid());
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
 				   sizeof(request), reply, &reply_len,
 				   1, 2U, 0U) != SDK_STATUS_OK)
 		fail("claim after parked teardown");
-	kernel = zzapp_runtime_kernel();
-	kernel->threads[0].state = ZZAPP_THREAD_SLEEPING;
+	TH(0).state = ZZAPP_THREAD_SLEEPING;
 	zzapp_services_test_set_time(replacement_wait_time);
 	zzapp_services_test_set_core(1);
 	zzapp_services_poll();
 	zzapp_services_test_set_time(NULL);
-	if (kernel->threads[0].state != ZZAPP_THREAD_SLEEPING)
+	if (TH(0).state != ZZAPP_THREAD_SLEEPING)
 		fail("old file wait woke replacement sleep");
 }
 
@@ -1444,10 +1454,10 @@ static void test_deferred_slots_queue_independently(void)
 					     sizeof(g_slot_windows[0]));
 	zzapp_services_test_set_window_slot(1U, g_slot_windows[1],
 					     sizeof(g_slot_windows[1]));
-	slots[0].generation = 1U;
-	slots[1].generation = 1U;
-	slots[0].state = ZZAPP_ST_CLAIMED;
-	slots[1].state = ZZAPP_ST_CLAIMED;
+	WGEN(0) = 1U;
+	WGEN(1) = 1U;
+	test_force_state(0U, ZZAPP_ST_CLAIMED);
+	test_force_state(1U, ZZAPP_ST_CLAIMED);
 	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
 	zzapp_put_be32(request + ZZAPP_SEL_GENERATION, 1U);
 	zzapp_services_test_set_core(0);
@@ -1528,7 +1538,7 @@ static void test_stop_cancels_queued_claim_load(void)
 	zzapp_services_poll();
 	if (service_loader_generation != 0U)
 		fail("stale claimed load reached loader");
-	if (slots[0].state != ZZAPP_ST_CLAIMED)
+	if (WSTATE(0) != ZZAPP_ST_CLAIMED)
 		fail("stale claimed load changed replacement state");
 }
 
@@ -1541,8 +1551,8 @@ static void test_list_name_uses_start_argv(void)
 	zzapp_services_test_reset();
 	memset(g_window, 0, sizeof(g_window));
 	zzapp_services_test_set_window(g_window, sizeof(g_window));
-	slots[0].generation = 1U;
-	slots[0].state = ZZAPP_ST_LOADING;
+	WGEN(0) = 1U;
+	test_force_state(0U, ZZAPP_ST_LOADING);
 	zzapp_services_set_state(ZZAPP_ST_LOADING);
 	zzapp_put_be32(g_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_ARGC_OFF, 1U);
 	zzapp_put_be32(g_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
@@ -1561,7 +1571,7 @@ static void test_list_name_uses_start_argv(void)
 	zzapp_services_poll();
 	if (!zzapp_services_take_start(NULL))
 		fail("start pending for list name");
-	if (zzapp_services_start_entered(slots[0].generation) != AAR_OK)
+	if (zzapp_services_start_entered(WGEN(0)) != AAR_OK)
 		fail("start completion for list name");
 	zzapp_services_test_set_core(0);
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply,
@@ -1626,6 +1636,7 @@ static void test_audio_handoff_blocks_reclaim(void)
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	uint16_t reply_len = 0U;
 	void *block;
+	zzapp_rec_t *r0;
 	uint32_t handed;
 	uint32_t slot;
 
@@ -1639,14 +1650,17 @@ static void test_audio_handoff_blocks_reclaim(void)
 					   sizeof(request), reply, &reply_len,
 					   1, slot + 1U, 0U) != SDK_STATUS_OK)
 			fail("claim before audio handoff");
+		give_space(slot);
 	}
 	zzapp_services_select_slot(0U);
 	if (zzapp_svc_audio_open(22050U, 2U, &audio) != AAR_OK)
 		fail("audio open before blocked reclaim");
 	block = current_runtime()->audio_block;
+	r0 = service_rec();
 	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(zzapp_services_current_pid());
 	handed = zzapp_services_test_audio_request();
-	if (slots[0].state == ZZAPP_ST_IDLE)
+	if (WSTATE(0) == ZZAPP_ST_IDLE)
 		fail("slot idle before audio handoff finished");
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
 				   reply, &reply_len, 1, 8U, 0U) == SDK_STATUS_OK)
@@ -1665,9 +1679,9 @@ static void test_audio_handoff_blocks_reclaim(void)
 	zzapp_services_test_set_core(0);
 	zzapp_services_core0_poll();
 	zzapp_services_select_slot(0U);
-	if (slots[0].state != ZZAPP_ST_IDLE ||
-	    zzapp_services_test_audio_detach_count() != 1U ||
-	    zzapp_services_test_audio_request() != AUDIO_REQUEST_NONE)
+	if (WSTATE(0) != ZZAPP_ST_IDLE ||
+	    runtime_of(r0)->audio_detach_count != 1U ||
+	    runtime_of(r0)->audio_request != AUDIO_REQUEST_NONE)
 		fail("slot stayed busy after audio handoff");
 	memset(request, 0, sizeof(request));
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
@@ -1681,6 +1695,7 @@ static void test_cancelled_pending_open_releases_slot(void)
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	uint16_t reply_len = 0U;
 	uint32_t slot;
+	zzapp_rec_t *r0;
 
 	zzapp_services_test_reset();
 	memset(g_window, 0, sizeof(g_window));
@@ -1694,15 +1709,17 @@ static void test_cancelled_pending_open_releases_slot(void)
 			fail("claim before cancelled open");
 	}
 	zzapp_services_select_slot(0U);
+	r0 = service_rec();
 	zzapp_services_test_set_audio_request(AUDIO_REQUEST_OPEN);
 	zzapp_services_on_app_end();
-	if (slots[0].state == ZZAPP_ST_IDLE)
+	(void)zzapp_rec_retire(zzapp_services_current_pid());
+	if (WSTATE(0) == ZZAPP_ST_IDLE)
 		fail("slot idle while open was still pending teardown");
 	zzapp_services_core0_poll();
 	zzapp_services_select_slot(0U);
-	if (current_runtime()->audio_teardown != 0U ||
-	    current_runtime()->audio_request != AUDIO_REQUEST_NONE ||
-	    slots[0].state != ZZAPP_ST_IDLE)
+	if (runtime_of(r0)->audio_teardown != 0U ||
+	    runtime_of(r0)->audio_request != AUDIO_REQUEST_NONE ||
+	    WSTATE(0) != ZZAPP_ST_IDLE)
 		fail("cancelled open left slot unreleased");
 	memset(request, 0, sizeof(request));
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
@@ -1718,6 +1735,9 @@ static void test_reclaim_halted_audio_reclaims_every_slot(void)
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 	uint16_t reply_len = 0U;
 	uint32_t slot;
+	zzapp_rec_t *rec0;
+	zzapp_rec_t *rec1;
+	uint32_t pid0;
 
 	zzapp_services_test_reset();
 	memset(g_window, 0, sizeof(g_window));
@@ -1729,33 +1749,39 @@ static void test_reclaim_halted_audio_reclaims_every_slot(void)
 					   sizeof(request), reply, &reply_len,
 					   1, slot + 1U, 0U) != SDK_STATUS_OK)
 			fail("claim before multi-producer open");
+		give_space(slot);
 	}
 	zzapp_services_select_slot(0U);
+	rec0 = service_rec();
+	pid0 = zzapp_services_current_pid();
 	if (zzapp_svc_audio_open(22050U, 2U, &audio[0]) != AAR_OK)
 		fail("producer 0 open");
 	zzapp_services_select_slot(1U);
+	rec1 = service_rec();
 	if (zzapp_svc_audio_open(22050U, 2U, &audio[1]) != AAR_OK)
 		fail("producer 1 open");
 	zzapp_services_select_slot(0U);
 	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(zzapp_services_current_pid());
 	zzapp_services_select_slot(1U);
 	zzapp_services_on_app_end();
-	if (slots[0].state == ZZAPP_ST_IDLE || slots[1].state == ZZAPP_ST_IDLE)
+	(void)zzapp_rec_retire(zzapp_services_current_pid());
+	if (WSTATE(0) == ZZAPP_ST_IDLE || WSTATE(1) == ZZAPP_ST_IDLE)
 		fail("producer idle before halted reclaim");
 	/* Core 1 is halted: no services_poll() runs to quiesce CLOSE.
 	 * Select slot 0 and invoke reclaim once: both slots must be freed
 	 * and slot 0 must remain selected. */
 	zzapp_services_select_slot(0U);
 	zzapp_services_reclaim_halted_audio();
-	if (zzapp_services_current_slot() != 0U)
+	if (zzapp_services_current_pid() != pid0)
 		fail("halted reclaim did not preserve slot selection");
-	if (slots[0].state != ZZAPP_ST_IDLE || slots[1].state != ZZAPP_ST_IDLE)
+	if (WSTATE(0) != ZZAPP_ST_IDLE || WSTATE(1) != ZZAPP_ST_IDLE)
 		fail("halted reclaim left a producer slot unreleased");
-	if (runtime_for_slot(0U)->audio_block != NULL ||
-	    runtime_for_slot(1U)->audio_block != NULL)
+	if (runtime_of(rec0)->audio_block != NULL ||
+	    runtime_of(rec1)->audio_block != NULL)
 		fail("halted reclaim left an audio block allocated");
-	if (runtime_for_slot(0U)->audio_detach_count != 1U ||
-	    runtime_for_slot(1U)->audio_detach_count != 1U)
+	if (runtime_of(rec0)->audio_detach_count != 1U ||
+	    runtime_of(rec1)->audio_detach_count != 1U)
 		fail("halted reclaim did not detach both producers");
 	memset(request, 0, sizeof(request));
 	if (zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
@@ -1775,7 +1801,7 @@ static uint64_t frozen_file_time(void)
 
 static void scheduler_file_timeout(void)
 {
-	zzapp_runtime_kernel()->threads[service_slot()].wake_reason =
+	service_rec()->thread.wake_reason =
 		ZZAPP_WAKE_TIMEOUT;
 }
 
@@ -1823,7 +1849,7 @@ static void test_console_eof_ends_wait(void)
 	zzapp_services_test_set_yield(console_eof_yield);
 	if (zzapp_svc_console_read(buf, sizeof(buf), &n) != AAR_OK || n != 0U)
 		fail("console eof read");
-	if (zzapp_services_wait_registered(0U))
+	if (zzapp_services_wait_registered(PID_OF(0U)))
 		fail("console eof left the wait registered");
 }
 
@@ -1844,12 +1870,14 @@ static int loader_end_in_passes(void)
 static void queue_loading_end(void)
 {
 	zzapp_services_test_reset();
-	slots[0].state = ZZAPP_ST_LOADING;
-	slots[0].generation = 1U;
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	test_force_state(0U, ZZAPP_ST_LOADING);
+	WGEN(0) = 1U;
 	service_loader_state = ZZAPP_ST_LOADING;
-	deferred[0].state = DEFER_POSTED;
-	deferred[0].opcode = ZZAPP_OP_LOAD_END;
-	deferred[0].generation = 1U;
+	DEF(0).state = DEFER_POSTED;
+	DEF(0).opcode = ZZAPP_OP_LOAD_END;
+	DEF(0).generation = 1U;
 	loader_end_passes = 0U;
 	service_test_loader_end_hook = loader_end_in_passes;
 }
@@ -1863,21 +1891,21 @@ static void test_load_end_resumes_and_cancels(void)
 	for (pass = 0U; pass < loader_end_complete_after; pass++) {
 		zzapp_services_poll();
 		if (pass + 1U < loader_end_complete_after &&
-		    deferred[0].state != DEFER_RUNNING)
+		    DEF(0).state != DEFER_RUNNING)
 			fail("load end did not remain running between zero batches");
 	}
 	if (loader_end_passes != loader_end_complete_after ||
-	    deferred[0].state != DEFER_DONE)
+	    DEF(0).state != DEFER_DONE)
 		fail("load end did not finish after bounded zero batches");
 
 	queue_loading_end();
 	loader_end_complete_after = UINT32_MAX;
 	zzapp_services_poll();
-	if (deferred[0].state != DEFER_RUNNING || loader_end_passes != 1U)
+	if (DEF(0).state != DEFER_RUNNING || loader_end_passes != 1U)
 		fail("load end did not begin bounded zero batch");
-	deferred[0].cancelled = 1U;
+	DEF(0).cancelled = 1U;
 	zzapp_services_poll();
-	if (deferred[0].state != DEFER_IDLE ||
+	if (DEF(0).state != DEFER_IDLE ||
 	    service_test_loader_abort_count != 1U)
 		fail("cancelled load end did not abort");
 }
@@ -1977,9 +2005,108 @@ static void test_file_open_flags(void)
 	    invalid != 64U - 13U + (uint32_t)(sizeof(unknown) / sizeof(unknown[0])))
 		fail("count of valid flag combinations");
 }
+/* The other core retires the record a pass just looked up: the retirement
+ * needs g_slot_state_lock, so a pass that holds it at the lookup gap makes
+ * the retirement wait, and one that does not lets it free the record under
+ * the pass. */
+static uint32_t g_lookup_win;
+static unsigned g_lookup_blocked;
+static unsigned g_lookup_retired;
+
+static void retire_at_lookup(uint32_t win)
+{
+	zzapp_rec_t *rec;
+
+	if (win != g_lookup_win)
+		return;
+	if (__atomic_test_and_set(&g_slot_state_test_lock, __ATOMIC_ACQUIRE)) {
+		g_lookup_blocked++;
+		return;
+	}
+	__atomic_clear(&g_slot_state_test_lock, __ATOMIC_RELEASE);
+	rec = window_rec(&windows[win]);
+	if (!rec)
+		return;
+	g_lookup_retired++;
+	(void)zzapp_rec_retire(rec->hdr.pid);
+}
+
+static void arm_lookup_race(uint32_t win)
+{
+	g_lookup_win = win;
+	g_lookup_blocked = 0U;
+	g_lookup_retired = 0U;
+	service_test_lookup_hook = retire_at_lookup;
+}
+
+/* The retirement a pass held off goes through once the pass is over. */
+static void expect_held_off(const char *what, uint32_t win)
+{
+	zzapp_rec_t *rec = window_rec(&windows[win]);
+
+	service_test_lookup_hook = NULL;
+	if (g_lookup_blocked != 1U || g_lookup_retired != 0U || !rec) {
+		fail(what);
+		return;
+	}
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	if (window_rec(&windows[win]))
+		fail("retirement after the held-off pass");
+}
+
+static void test_vblank_pass_holds_record_lifetime(void)
+{
+	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	uint32_t front = 0x00200000U;
+	uint32_t back = 0x00210000U;
+	uint32_t spare = 0x00220000U;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_LAUNCHER_SCANOUT_ACK);
+	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
+						AAR_FMT_RGB565, front, back,
+						AAR_LAYOUT_RGB565_LE, spare);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK ||
+	    zzapp_svc_display_flip_async(1U) != AAR_OK)
+		fail("vblank lifetime display setup");
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_SUBMIT_OFF, 1U);
+	arm_lookup_race(0U);
+	zzapp_services_display_vblank(back);
+	if (zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_FLIP_ACK_OFF) != 1U)
+		fail("vblank pass lost its window to the retirement");
+	expect_held_off("vblank pass left its record unprotected", 0U);
+}
+
+static void test_audio_polls_hold_record_lifetime(void)
+{
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(1);
+	arm_lookup_race(0U);
+	zzapp_services_poll();
+	expect_held_off("core 1 audio poll left its record unprotected", 0U);
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	arm_lookup_race(0U);
+	zzapp_services_core0_poll();
+	expect_held_off("core 0 audio poll left its record unprotected", 0U);
+}
+
 
 int main(void)
 {
+	svc_env_init(ZZAPP_SLOT_COUNT < 8U ? 8U : ZZAPP_SLOT_COUNT + 4U, 0U, NULL);
 	test_payload_sizes();
 	test_z2_query();
 	test_chunked_read();
@@ -2026,6 +2153,8 @@ int main(void)
 	test_scheduler_file_timeout_cancels_seqlock();
 	test_console_eof_ends_wait();
 	test_file_open_flags();
+	test_vblank_pass_holds_record_lifetime();
+	test_audio_polls_hold_record_lifetime();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;

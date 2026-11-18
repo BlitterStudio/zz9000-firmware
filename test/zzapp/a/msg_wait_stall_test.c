@@ -15,6 +15,7 @@
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
+#include "zzapp_rec.h"
 
 #define SECOND_US 1000000ull
 
@@ -35,7 +36,7 @@ static uint64_t wait_clock(void)
         zzapp_host_tick_at(clock_us);
         ticks_while_parked++;
         wait_registered_at_tick = zzapp_services_wait_registered(0U);
-        if (zzapp_runtime_kernel()->threads[0].state ==
+        if (zzapp_rec_by_pid(0U)->thread.state ==
             ZZAPP_THREAD_STOPPED || zzapp_runtime_state() != ZZAPP_ST_RUNNING)
             stalled_while_parked = 1;
     } else if (clock_reads >= 4u) {
@@ -65,7 +66,7 @@ int main(void)
     start_running_app();
     zzapp_kernel_set_current_thread(-1);
     zzapp_host_tick_at(31u * SECOND_US);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+    assert(zzapp_rec_by_pid(0U)->thread.state == ZZAPP_THREAD_STOPPED);
 
     /* Parked in aar_msg_wait for 31 s of a 40 s timeout. */
     start_running_app();

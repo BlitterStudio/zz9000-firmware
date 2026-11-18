@@ -34,7 +34,7 @@ and programs that use the card.
 | [aar-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
 | [aar-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md) | Every `aar_*` call and `AAR_*` constant, with the ZZ9000 notes and extension table. |
 | [zzapp-to-aar.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-to-aar.md) | Maps the 0.4 `zz_*` and `ZZ_*` names to AAR 0.5. |
-| [app-runtime.md](app-runtime.md) | The firmware and launcher contract: the AAR 0.5 interface choices, slots, limits, address spaces, lifecycle, exit and reset teardown, and the SVC interface. |
+| [app-runtime.md](app-runtime.md) | The firmware and launcher contract: the AAR 0.5 interface choices, process records and handles, the record arena, admission and its refusal reasons, launcher windows and limits, address spaces and ASIDs, lifecycle, retire, exit and reset teardown, and the SVC interface. |
 | [host-runner/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/host-runner/README.md) | Running apps on a PC with the host runner. |
 | [templates/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/templates/README.md) | The app templates, including the freestanding, FPU probe, and ring conformance apps. |
 
@@ -42,7 +42,7 @@ and programs that use the card.
 
 | Document | Contents |
 | --- | --- |
-| [memory-map.md](memory-map.md) | DDR reservations, the linker image, and the card pool. |
+| [memory-map.md](memory-map.md) | DDR reservations, the linker image, the record arena and the card pool. |
 | [modules.md](modules.md) | Module runtime v2: verified, on-demand `.ZZM` modules. |
 | [audio-fabric.md](audio-fabric.md) | Mixing SDK playback and direct-ring audio into the TX ring. |
 | [audio-conversion.md](audio-conversion.md) | PCM rate conversion to and from the 48 kHz period. |

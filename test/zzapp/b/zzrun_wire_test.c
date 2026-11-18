@@ -1,6 +1,7 @@
 /* Exercises the shared ZZRun request encoders against the real app dispatcher. */
 #define ZZAPP_SERVICES_TEST_LOADER_STUBS
 #include "zzapp_services.c"
+#include "svc_env.h"
 
 #include <assert.h>
 #include <string.h>
@@ -58,6 +59,11 @@ uint32_t zzapp_runtime_state(void)
 void zzapp_loader_set_state(uint32_t state)
 {
     wire_loader_state = state;
+}
+
+int zzapp_loader_set_generation(uint32_t generation)
+{
+    return generation != 0U ? AAR_OK : AAR_E_INVAL;
 }
 int zzapp_loader_begin(void)
 {
@@ -124,6 +130,7 @@ static uint16_t dispatch_deferred(uint16_t opcode, const uint8_t *request,
 
 int main(void)
 {
+    svc_env_init(8U, 0U, NULL);
     uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
     uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
     uint16_t reply_len = 0U;
@@ -282,6 +289,7 @@ int main(void)
         volatile uint32_t *write_frame;
         uint32_t frame;
 
+        give_space(0U);
         zzapp_services_or_flags(ZZAPP_F_LAUNCHER_AUDIO_AHI);
         assert(zzapp_svc_audio_open(22050u, 2u, &app_audio) == AAR_OK);
         samples = app_audio_host(app_audio.samples);

@@ -2,6 +2,7 @@
 #define ZZAPP_HOST_DEFERRED_TEST
 #endif
 #include "zzapp_services.c"
+#include "svc_views.h"
 
 #include "host_card_pool.h"
 #include "zzapp_runtime.h"
@@ -56,7 +57,7 @@ _Static_assert((uint64_t)TEST_LOAD_END_PASS_LIMIT * 1000U <
                "synthetic LOAD_END must finish inside the load lease");
 
 
-static uint8_t windows[2][ZZAPP_WINDOW_BYTES];
+static uint8_t win_mem[2][ZZAPP_WINDOW_BYTES];
 
 int smp_cpu_id(void) { return 0; }
 void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1U; }
@@ -364,6 +365,10 @@ static uint16_t run_request(uint16_t opcode, const uint8_t *request,
     return SDK_STATUS_IO_ERROR;
 }
 
+/* The record each window's latest claim was given. A record keeps its bytes
+ * after it is freed, so a case can still read what its teardown left. */
+static uint32_t claimed_pid[ZZAPP_SLOT_COUNT];
+
 static uint32_t claim_slot(uint32_t slot)
 {
     uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
@@ -374,7 +379,24 @@ static uint32_t claim_slot(uint32_t slot)
     assert(zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
                                   sizeof(request), reply, &reply_bytes,
                                   1, ++request_id, 0U) == SDK_STATUS_OK);
+    assert(zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) == slot);
+    claimed_pid[slot] = PID_OF(slot);
     return zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
+}
+
+/* The app of `slot` ends before it ran: its loader arena is dropped, then
+ * the record is retired, the one path that frees the record and unbinds the
+ * window for the next claim. (The loader state reading IDLE no longer frees
+ * a claim.) */
+static void end_load_and_retire(uint32_t slot)
+{
+    zzapp_rec_t *rec;
+
+    zzapp_services_select_slot(slot);
+    rec = service_rec();
+    assert(rec != NULL);
+    assert(zzapp_loader_abort() == AAR_OK);
+    assert(zzapp_rec_retire(rec->hdr.pid) == 1);
 }
 
 static void load_begin_and_chunk_heap(uint32_t slot, uint32_t generation,
@@ -389,9 +411,9 @@ static void load_begin_and_chunk_heap(uint32_t slot, uint32_t generation,
     zzapp_put_be32(request + ZZAPP_LOAD_HOST_VISIBLE_MIB, load_host_mib);
     assert(run_request(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
            SDK_STATUS_OK);
-    assert(zzapp_get_be32(windows[slot] + ZZAPP_LIFE_GENERATION_OFF) ==
+    assert(zzapp_get_be32(win_mem[slot] + ZZAPP_LIFE_GENERATION_OFF) ==
            generation);
-    memcpy(windows[slot] + ZZAPP_STAGING_OFF, image, sizeof(image));
+    memcpy(win_mem[slot] + ZZAPP_STAGING_OFF, image, sizeof(image));
     request_for_slot(request, slot, generation);
     zzapp_put_be32(request + ZZAPP_CHUNK_FILE_OFF, 0U);
     zzapp_put_be32(request + ZZAPP_CHUNK_LENGTH, sizeof(image));
@@ -495,7 +517,7 @@ static void app_entry(const void *api, int argc, char **argv)
         zzapp_test_set_time_hook(NULL);
         return;
     }
-    if (zzapp_services_current_slot() == 1U)
+    if (zzapp_rec_by_pid(zzapp_services_current_pid())->hdr.window == 1U)
         slot1_starts++;
     if (app_host_alloc_mib) {
         aar_shared shared;
@@ -510,7 +532,7 @@ static void app_entry(const void *api, int argc, char **argv)
         /* The exit must come out of zzapp_host_exit itself: run_app also
          * ends an entry that merely returns, which would hide an exit that
          * records nothing. */
-        assert(zzapp_test_exit_state(zzapp_services_current_slot()) != 0U);
+        assert(zzapp_test_exit_state(service_pid()) != 0U);
         if (entry_restart_after_exit)
             zzapp_on_core1_restart();
         if (entry_reset_after_exit) {
@@ -527,7 +549,7 @@ static void app_entry(const void *api, int argc, char **argv)
         uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
         uint16_t reply_bytes = 0U;
 
-        request_for_slot(request, zzapp_services_current_slot(), stop_generation);
+        request_for_slot(request, test_current_window(), stop_generation);
         assert(zzapp_mailbox_dispatch(ZZAPP_OP_STOP, request, sizeof(request),
                                       reply, &reply_bytes, 1, ++request_id,
                                       0U) == SDK_STATUS_OK);
@@ -566,14 +588,13 @@ static int interrupt_teardown(void)
     return zzapp_kernel_current_thread() == interrupted;
 }
 
-void __real_zzapp_loader_release(void);
 
 static int interrupt_teardown(void);
 
 /* The tick that lands right at the exit's stop of the thread. */
 static void tick_at_stop(void)
 {
-    state_at_tick = (int)zzapp_runtime_kernel()->threads[0].state;
+    state_at_tick = (int)zzapp_rec_by_pid(0)->thread.state;
     if (!interrupt_teardown())
         longjmp(stranded_env, 1);
 }
@@ -592,8 +613,8 @@ void __wrap_zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot)
         request_irq(tick_at_stop);
 }
 
-void __real_zzapp_loader_release(void);
-void __wrap_zzapp_loader_release(void)
+void __real_zzapp_loader_retire_resources(void);
+void __wrap_zzapp_loader_retire_resources(void)
 {
     if (in_reset_call)
         teardown_in_reset_call = 1;
@@ -605,14 +626,14 @@ void __wrap_zzapp_loader_release(void)
             return;
         }
     }
-    __real_zzapp_loader_release();
+    __real_zzapp_loader_retire_resources();
 }
 static void setup(void)
 {
     uint32_t slot;
 
     card_model_reset();
-    memset(windows, 0, sizeof(windows));
+    memset(win_mem, 0, sizeof(win_mem));
     request_id = 0U;
     load_host_mib = 0U;
     app_host_alloc_mib = 0U;
@@ -640,9 +661,9 @@ static void setup(void)
     zzapp_boot_init();
     zzapp_services_test_reset();
     for (slot = 0U; slot < 2U; slot++) {
-        zzapp_services_test_set_window_slot(slot, windows[slot],
-                                            sizeof(windows[slot]));
-        zzapp_services_test_set_window_pool(slot, windows[slot]);
+        zzapp_services_test_set_window_slot(slot, win_mem[slot],
+                                            sizeof(win_mem[slot]));
+        zzapp_services_test_set_window_pool(slot, win_mem[slot]);
     }
     zzapp_test_set_entry(app_entry);
 }
@@ -678,7 +699,7 @@ static void test_exit_does_not_follow_incremental_load_selection(void)
     list_slot(0U, &state, &reason);
     assert(state == ZZAPP_ST_IDLE);
     assert(reason == ZZAPP_END_EXIT);
-    assert(zzapp_services_current_slot() == 1U);
+    assert(test_current_window() == 1U);
 
     complete_load_end();
     list_slot(1U, &state, &reason);
@@ -703,7 +724,7 @@ static void test_reset_reason_does_not_survive_a_new_load(void)
     setup();
     zzapp_on_amiga_reset();
     zzapp_worker_hook();
-    zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
+    zzapp_services_test_set_window_slot(0U, win_mem[0], sizeof(win_mem[0]));
     generation = claim_slot(0U);
     load_begin_and_chunk(0U, generation);
     finish_load(0U, generation);
@@ -848,7 +869,7 @@ static void test_slot_reset_preserves_incremental_slot1(void)
 
     setup();
     prepare_running_slot0_with_incremental_slot1(generation);
-    zzapp_test_request_reset(0U);
+    zzapp_test_request_reset(claimed_pid[0]);
     zzapp_worker_hook();
     list_slot(0U, &state, &reason);
     assert(state == ZZAPP_ST_IDLE);
@@ -859,7 +880,7 @@ static void test_slot_reset_preserves_incremental_slot1(void)
     assert(reason == ZZAPP_END_NONE);
     zzapp_services_select_slot(1U);
     assert(zzapp_loader_abort() == AAR_OK);
-    zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
+    zzapp_services_test_set_window_slot(0U, win_mem[0], sizeof(win_mem[0]));
     reload_slot0();
 }
 
@@ -917,9 +938,9 @@ static void test_concurrent_loads_each_advance(void)
     start_load_end(0U, generation[0]);
     start_load_end(1U, generation[1]);
 
-    progress[0] = zzapp_get_be32(windows[0] + ZZAPP_LIFE_OFF +
+    progress[0] = zzapp_get_be32(win_mem[0] + ZZAPP_LIFE_OFF +
                                  ZZAPP_LIFE_PROGRESS_LO_OFF);
-    progress[1] = zzapp_get_be32(windows[1] + ZZAPP_LIFE_OFF +
+    progress[1] = zzapp_get_be32(win_mem[1] + ZZAPP_LIFE_OFF +
                                  ZZAPP_LIFE_PROGRESS_LO_OFF);
     assert(progress[0] != 0U);
     assert(progress[1] != 0U);
@@ -950,7 +971,7 @@ static void test_advancing_load_renews_lease(void)
     list_slot(0U, &state, &reason);
     assert(state == ZZAPP_ST_LOADING);
     assert(reason == ZZAPP_END_NONE);
-    assert(zzapp_get_be32(windows[0] + ZZAPP_LIFE_OFF +
+    assert(zzapp_get_be32(win_mem[0] + ZZAPP_LIFE_OFF +
                           ZZAPP_LIFE_PROGRESS_LO_OFF) >= 5U);
 
     zzapp_services_select_slot(0U);
@@ -1008,8 +1029,7 @@ static void test_load_after_refused_hostmem_and_big_app(void)
         generation = claim_slot(0U);
         load_begin_and_chunk(0U, generation);
         finish_load(0U, generation);
-        zzapp_services_select_slot(0U);
-        assert(zzapp_loader_abort() == AAR_OK);
+        end_load_and_retire(0U);
     }
 }
 
@@ -1033,8 +1053,7 @@ static void load_and_abort(uint32_t slot)
 
     load_begin_and_chunk(slot, generation);
     finish_load(slot, generation);
-    zzapp_services_select_slot(slot);
-    assert(zzapp_loader_abort() == AAR_OK);
+    end_load_and_retire(slot);
 }
 
 /* Card kit 70: an app that exited normally holding a large host-visible
@@ -1065,7 +1084,7 @@ static void test_exit_teardown_survives_a_scheduler_interrupt(void)
     assert(reason == ZZAPP_END_EXIT);
     zzapp_services_select_slot(0U);
     assert(zzapp_test_arena_card() == 0U);
-    assert(zzapp_get_be32(windows[0] + ZZAPP_LIFE_OFF +
+    assert(zzapp_get_be32(win_mem[0] + ZZAPP_LIFE_OFF +
                           ZZAPP_LIFE_EXIT_OFF) == 7U);
 
     entry_exit_code = -1;
@@ -1086,7 +1105,7 @@ static void test_exit_state_does_not_outlive_its_generation(void)
         list_slot(0U, &state, &reason);
         assert(state == ZZAPP_ST_IDLE);
         assert(reason == ZZAPP_END_EXIT);
-        assert(zzapp_get_be32(windows[0] + ZZAPP_LIFE_OFF +
+        assert(zzapp_get_be32(win_mem[0] + ZZAPP_LIFE_OFF +
                               ZZAPP_LIFE_EXIT_OFF) == (uint32_t)code);
         zzapp_services_select_slot(0U);
         assert(zzapp_test_arena_card() == 0U);
@@ -1168,7 +1187,7 @@ static void exit_with_interrupt_at_stop(int mode)
     assert(reason == ZZAPP_END_EXIT);
     zzapp_services_select_slot(0U);
     assert(zzapp_test_arena_card() == 0U);
-    assert(zzapp_test_exit_state(0U) == 0U);
+    assert(zzapp_test_exit_state(claimed_pid[0]) == 0U);
     assert(state_at_tick == (int)ZZAPP_THREAD_STOPPED);
     entry_exit_code = -1;
     load_and_abort(0U);
@@ -1200,7 +1219,7 @@ static void test_amiga_reset_waits_for_a_deferred_exit(void)
     start_without_waiting(0U, generation);
 
     assert(teardown_in_reset_call);
-    assert(zzapp_test_exit_state(0U) == 0U);
+    assert(zzapp_test_exit_state(claimed_pid[0]) == 0U);
     zzapp_services_select_slot(0U);
     assert(zzapp_test_arena_card() == 0U);
     list_slot(0U, &state, &reason);
@@ -1225,7 +1244,7 @@ static void test_core1_restart_during_a_deferred_exit(void)
     generation = load_ready_slot(0U);
     start_without_waiting(0U, generation);
 
-    assert(zzapp_test_exit_state(0U) == 0U);
+    assert(zzapp_test_exit_state(claimed_pid[0]) == 0U);
     zzapp_services_select_slot(0U);
     assert(zzapp_test_arena_card() == 0U);
     list_slot(0U, &state, &reason);
@@ -1274,7 +1293,7 @@ static void test_restart_replay_does_not_free_a_reused_block(void)
         start_without_waiting(0U, generation);
         assert(0 && "the teardown ran past the block free");
     }
-    assert(zzapp_test_exit_state(0U) != 0U);
+    assert(zzapp_test_exit_state(claimed_pid[0]) != 0U);
     assert(card_last_freed != 0U);
     assert(zzapp_test_card_alloc_at(card_last_freed, 0x100000U, &serial) ==
            card_last_freed);
@@ -1398,7 +1417,7 @@ static void reset_timeout_then_reuse(int claimed)
     unsigned pass;
 
     setup();
-    core1_delay = 1000U;
+    core1_delay = UINT32_MAX;
     core1_ran = 0;
     core1_halted = 0;
     window_frees = 0U;
@@ -1461,9 +1480,9 @@ static void test_posted_load_begin_is_cancelled_by_halted_recovery(void)
     assert(zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request,
                                   sizeof(request), reply, &reply_bytes, 1,
                                   ++request_id, 0U) == SDK_STATUS_QUEUED);
-    slots[0].state = ZZAPP_ST_IDLE;
+    test_force_state(0U, ZZAPP_ST_IDLE);
 
-    core1_delay = 1000U;
+    core1_delay = UINT32_MAX;
     core1_ran = 0;
     core1_halted = 0;
     zzapp_on_amiga_reset();
@@ -1494,7 +1513,7 @@ static void test_halted_recovery_retires_the_window_of_a_stopping_slot(void)
     zzapp_test_mark_running();
     zzapp_services_test_set_audio_request(AUDIO_REQUEST_CLOSE);
 
-    core1_delay = 1000U;
+    core1_delay = UINT32_MAX;
     core1_ran = 0;
     core1_halted = 0;
     window_frees = 0U;
@@ -1505,7 +1524,7 @@ static void test_halted_recovery_retires_the_window_of_a_stopping_slot(void)
     assert(window_frees == 2U);
     /* The audio close is still owed to core 0: the slot was STOPPING when it
      * was stopped, not IDLE. */
-    assert(runtime[0].audio_teardown);
+    assert(RT(0).audio_teardown);
 
     card_model_init();
     assert(zzapp_test_card_alloc_at(ZZAPP_WINDOW_Z3_SLOT_ADDRESS(0U),

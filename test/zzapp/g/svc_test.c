@@ -8,6 +8,8 @@
 
 #include "aar/app.h"
 #include "aar/ext_zz9000.h"
+#include "zzapp_kernel.h"
+#include "zzapp_rec.h"
 #include "zzapp_runtime.h"
 #include "zzapp_svc.h"
 #include "xil_cache.h"
@@ -43,13 +45,36 @@ static unsigned checks;
 } while (0)
 
 static uint32_t user_va;
+
+/*
+ * The records the SVC layer keeps its state in: eight of them in a static
+ * arena below 4 GiB (table addresses go into 32-bit descriptors), with the
+ * scheduler attached so that zzapp_svc_counter_block follows the thread.
+ */
+#define SVC_TEST_ARENA_BYTES (2U << 20)
+static uint8_t arena_mem[SVC_TEST_ARENA_BYTES] __attribute__((aligned(1U << 20)));
+static zzapp_kernel_t kernel;
+
+static void setup_records(void)
+{
+    zzapp_rec_layout_t layout;
+
+    zzapp_rec_layout_for(8U, 4U << 20, &layout);
+    CHECK(layout.bytes <= SVC_TEST_ARENA_BYTES);
+    CHECK(zzapp_rec_arena_init(arena_mem, &layout) == 0);
+    CHECK(zzapp_kernel_init(&kernel, zzapp_rec_by_pid(0U),
+                            ZZAPP_REC_RECORD_BYTES, zzapp_rec_capacity()) == 0);
+    zzapp_kernel_set_current_thread(0);
+}
+
 static void setup(zzapp_as_t *as)
 {
+    setup_records();
     memset(bsp, 0, sizeof(bsp));
     bsp[0] = SECTION;
     bsp[0x20U] = SECTION;
     zzapp_as_init(bsp);
-    CHECK(zzapp_as_create(as, 0U, 1U) == 0);
+    CHECK(zzapp_as_create(as, 0U) == 0);
     CHECK(zzapp_as_map_image(as, WINDOW, 0x01000000U, 4096U,
                              ZZAPP_AS_IMAGE_RW) == 0);
     CHECK(zzapp_as_map_image(as, WINDOW + 0x1000U, 0x01001000U, 4096U,
@@ -77,7 +102,6 @@ static unsigned file_seek_calls;
 static unsigned heap_range_calls;
 static unsigned file_list_next_calls;
 static unsigned heap_shrink_calls;
-static int svc_test_current_thread;
 static unsigned should_stop_calls;
 static unsigned time_us_calls;
 static uint32_t vertex2f_words[2];
@@ -95,18 +119,30 @@ uint32_t zzapp_svc_test_pmccntr(void)
     return svc_counter_now;
 }
 
-void zzapp_svc_counters_test_eret(uint32_t slot, uint32_t stamp);
-void zzapp_svc_counters_test_snapshot(uint32_t slot, uint32_t *total_calls,
+void zzapp_svc_counters_test_eret(uint32_t pid, uint32_t stamp);
+void zzapp_svc_counters_test_snapshot(uint32_t pid, uint32_t *total_calls,
                                       uint32_t samples[4], uint32_t averages[4]);
 #endif
 
-int zzapp_kernel_current_thread(void) { return svc_test_current_thread; }
-zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
+/* The counters live in the record: the vector stores through the pointer the
+ * scheduler published for the running thread. */
+#if ZZAPP_PERF_COUNTERS
+static void asm_entry_stamp(uint32_t stamp)
 {
-    return slot == 0U ? &proc : NULL;
+    *(volatile uint32_t *)zzapp_svc_counter_block = stamp;
+}
+#endif
+
+static zzapp_proc_t extra_procs[8];
+zzapp_proc_t *zzapp_proc_slot(uint32_t pid)
+{
+    if (pid == 0U)
+        return &proc;
+    return pid < 8U ? &extra_procs[pid] : NULL;
 }
 const aar_api *zzapp_api_table(void) { return &api; }
-uint32_t zzapp_services_current_slot(void) { return 0U; }
+static uint32_t services_pid;
+uint32_t zzapp_services_current_pid(void) { return services_pid; }
 
 static const aar_gl *mock_gl_bind(uint32_t surface_id)
 {
@@ -1233,11 +1269,11 @@ static void test_svc_uses_core_aware_slot_resolver(void)
         teardown_dispatch();
         return;
     }
-    svc_test_current_thread = 1;
+    zzapp_kernel_set_current_thread(1);
     dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame,
              (uint32_t[9]){ 1U });
     CHECK(frame.r[0] != (uint32_t)AAR_E_FAULT);
-    svc_test_current_thread = 0;
+    zzapp_kernel_set_current_thread(0);
     teardown_dispatch();
 }
 static void test_gl_getters_copy_full_outputs(void)
@@ -1330,14 +1366,14 @@ static void test_fast_no_lock_calls(void)
         teardown_dispatch();
         return;
     }
-    svc_test_current_thread = 1;
+    zzapp_kernel_set_current_thread(1);
     dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
              (uint32_t[9]){ 0U });
     CHECK(frame.r[0] == 1U);
     CHECK(should_stop_calls == 1U);
-    CHECK(zzapp_svc_last_number[1] ==
+    CHECK(zzapp_svc_last_number_for(1U) ==
           api_slot(offsetof(aar_api, should_stop)));
-    svc_test_current_thread = 0;
+    zzapp_kernel_set_current_thread(0);
     teardown_dispatch();
 }
 #if ZZAPP_SVC_PROBES
@@ -1379,7 +1415,7 @@ static void test_svc_probe_shallow_exits_clear_counter_tail(void)
     zzapp_svc_counters_reset(0U);
     svc_counter_now = 0U;
     for (call = 1U; call <= 64U; ++call) {
-        zzapp_svc_entry_stamp[0] = svc_counter_now;
+        asm_entry_stamp(svc_counter_now);
         dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
                  (uint32_t[9]){ 0U });
     }
@@ -1393,7 +1429,7 @@ static void test_svc_probe_shallow_exits_clear_counter_tail(void)
     zzapp_svc_counters_reset(0U);
     svc_counter_now = 0U;
     for (call = 1U; call <= 64U; ++call) {
-        zzapp_svc_entry_stamp[0] = svc_counter_now;
+        asm_entry_stamp(svc_counter_now);
         dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
                  (uint32_t[9]){ 0U });
     }
@@ -1423,7 +1459,7 @@ static void test_sampled_counter_averages(void)
     zzapp_svc_counters_reset(0U);
     svc_counter_now = 0U;
     for (call = 1U; call <= 128U; ++call) {
-        zzapp_svc_entry_stamp[0] = svc_counter_now;
+        asm_entry_stamp(svc_counter_now);
         dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
                  (uint32_t[9]){ 0U });
         if (call == 64U) {
@@ -1808,6 +1844,148 @@ static void test_gl_telemetry_snapshot_and_rate_limit(void)
 }
 #endif
 
+#define SVC_RECORDS 8U
+
+/* The state the SVC layer keeps per app lives in the app's record: its two
+ * table pages, its veneer and table aliases, its GL client and telemetry,
+ * its counters and its last SVC number. Eight records, none shared. */
+static void test_user_tables_and_state_are_per_record(void)
+{
+    zzapp_svc_frame_t frame;
+    const aar_api *tables[SVC_RECORDS];
+    uint8_t before[sizeof(aar_api)];
+    uint32_t file_seek_slot = api_slot(offsetof(aar_api, file_seek));
+    uint32_t pid;
+    uint32_t other;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    CHECK(zzapp_rec_capacity() == SVC_RECORDS);
+    for (pid = 0U; pid < SVC_RECORDS; ++pid) {
+        CHECK(zzapp_svc_set_veneer_alias(pid, 0xd0000000U + pid * 0x10000U) ==
+              AAR_OK);
+        CHECK(zzapp_svc_set_table_aliases(pid, 0xd8000000U + pid * 0x10000U,
+                                          0xd8001000U + pid * 0x10000U) == AAR_OK);
+        tables[pid] = zzapp_svc_api_for_slot(pid, &api);
+        CHECK(tables[pid] == (const aar_api *)zzapp_rec_tables(pid));
+        CHECK(((uintptr_t)tables[pid] & 0xfffU) == 0U);
+        CHECK((void *)zzapp_svc_gl_for_slot(pid) ==
+              (void *)((uint8_t *)zzapp_rec_tables(pid) +
+                       ZZAPP_REC_GL_PAGE_OFFSET));
+    }
+    /* Distinct pages: two per record, so at least 8 KiB apart. */
+    for (pid = 0U; pid < SVC_RECORDS; ++pid)
+        for (other = pid + 1U; other < SVC_RECORDS; ++other) {
+            uintptr_t gap = (uintptr_t)tables[other] > (uintptr_t)tables[pid] ?
+                (uintptr_t)tables[other] - (uintptr_t)tables[pid] :
+                (uintptr_t)tables[pid] - (uintptr_t)tables[other];
+
+            CHECK(gap >= 0x2000U);
+        }
+    /* Each table carries its own record's veneer base and build id. */
+    for (pid = 0U; pid < SVC_RECORDS; ++pid) {
+        const uintptr_t *entries = (const uintptr_t *)(const void *)
+            ((const uint8_t *)tables[pid] + offsetof(aar_api, exit));
+        const aar_ext_zz9000 *ext = zzapp_svc_ext_for_slot(pid);
+
+        CHECK(entries[file_seek_slot] ==
+              0xd0000000U + pid * 0x10000U + file_seek_slot * 12U);
+        CHECK(ext != NULL);
+        if (ext)
+            CHECK((uintptr_t)ext->build_id >= 0xd8000000U + pid * 0x10000U &&
+                  (uintptr_t)ext->build_id < 0xd8001000U + pid * 0x10000U);
+    }
+    /* Filling one record's page touches no other. */
+    memcpy(before, tables[5], sizeof(before));
+    CHECK(zzapp_svc_set_veneer_alias(3U, 0xe0000000U) == AAR_OK);
+    CHECK(zzapp_svc_api_for_slot(3U, &api) == tables[3]);
+    CHECK(memcmp(before, tables[5], sizeof(before)) == 0);
+    CHECK(((const uintptr_t *)(const void *)((const uint8_t *)tables[3] +
+           offsetof(aar_api, exit)))[file_seek_slot] ==
+          0xe0000000U + file_seek_slot * 12U);
+    CHECK(((const uintptr_t *)(const void *)((const uint8_t *)tables[4] +
+           offsetof(aar_api, exit)))[file_seek_slot] ==
+          0xd0000000U + 4U * 0x10000U + file_seek_slot * 12U);
+
+    /* A pid outside the record table fails; it does not fall back to 0. */
+    CHECK(zzapp_svc_api_for_slot(SVC_RECORDS, &api) == NULL);
+    CHECK(zzapp_svc_api_for_slot(ZZAPP_PID_NONE, &api) == NULL);
+    CHECK(zzapp_svc_gl_for_slot(SVC_RECORDS) == NULL);
+    CHECK(zzapp_svc_ext_for_slot(SVC_RECORDS) == NULL);
+    CHECK(zzapp_svc_set_veneer_alias(SVC_RECORDS, 0xd0000000U) == AAR_E_INVAL);
+    CHECK(zzapp_svc_set_table_aliases(SVC_RECORDS, 0xd0001000U, 0xd0002000U) ==
+          AAR_E_INVAL);
+    CHECK(zzapp_svc_last_number_for(SVC_RECORDS) == 0U);
+
+    /* Last SVC numbers are per record: fast calls count for the thread. */
+    zzapp_kernel_set_current_thread(5);
+    dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
+             (uint32_t[9]){ 0U });
+    CHECK(zzapp_svc_last_number_for(5U) == api_slot(offsetof(aar_api, should_stop)));
+    CHECK(zzapp_svc_last_number_for(0U) == 0U);
+    CHECK(zzapp_svc_last_number_for(4U) == 0U);
+    /* A call with no thread and no services record is refused, not
+     * charged to record 0. */
+    zzapp_kernel_set_current_thread(-1);
+    services_pid = ZZAPP_PID_NONE;
+    dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
+             (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    CHECK(zzapp_svc_last_number_for(0U) == 0U);
+    services_pid = 0U;
+
+#if ZZAPP_PERF_COUNTERS
+    {
+        uint32_t total = 0U;
+        uint32_t samples[4];
+        uint32_t averages[4];
+        zzapp_gl_telemetry_snapshot_t snap3;
+        zzapp_gl_telemetry_snapshot_t snap5;
+        uint32_t begin = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin));
+
+        /* Counters: the vector's entry stamp goes through the published
+         * pointer, the C side reads it from the same record. */
+        zzapp_svc_counters_reset(5U);
+        zzapp_kernel_set_current_thread(5);
+        svc_counter_now = 0U;
+        asm_entry_stamp(0U);
+        dispatch(api_slot(offsetof(aar_api, should_stop)), &frame,
+                 (uint32_t[9]){ 0U });
+        zzapp_svc_counters_test_snapshot(5U, &total, samples, averages);
+        CHECK(total == 1U);
+        zzapp_svc_counters_test_snapshot(0U, &total, samples, averages);
+        CHECK(total == 0U);
+        zzapp_svc_counters_test_snapshot(4U, &total, samples, averages);
+        CHECK(total == 0U);
+
+        /* GL: bind under record 3, count two calls; record 5 saw none. */
+        zzapp_kernel_set_current_thread(-1);
+        services_pid = 3U;
+        zzapp_svc_gl_telemetry_reset(3U);
+        zzapp_svc_gl_telemetry_reset(5U);
+        dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+        CHECK(frame.r[0] == 0xd8001000U + 3U * 0x10000U);
+        CHECK(zzapp_svc_gl_telemetry_swap(3U, 0U, &snap3) == 0);
+        CHECK(zzapp_svc_gl_telemetry_swap(5U, 0U, &snap5) == 0);
+        dispatch(begin, &frame, (uint32_t[9]){ 4U });
+        dispatch(begin, &frame, (uint32_t[9]){ 4U });
+        CHECK(zzapp_svc_gl_telemetry_swap(3U, 1U, &snap3) == 0);
+        CHECK(zzapp_svc_gl_telemetry_swap(5U, 1U, &snap5) == 0);
+        CHECK(snap3.gl_calls == 2U);
+        CHECK(snap5.gl_calls == 0U);
+        /* Only record 3 has a GL table; record 5 never bound. */
+        CHECK(zzapp_svc_gl_for_slot(3U)->size != 0U);
+        CHECK(zzapp_svc_gl_for_slot(5U)->size == 0U);
+        services_pid = 0U;
+    }
+#endif
+    zzapp_kernel_set_current_thread(0);
+    teardown_dispatch();
+}
+
 int main(void)
 {
     test_table_copy_uses_only_veneers();
@@ -1841,6 +2019,7 @@ int main(void)
     test_gl_telemetry_snapshot_and_rate_limit();
 #endif
     test_ext_table_for_the_app();
+    test_user_tables_and_state_are_per_record();
     test_ext_call_and_gl_bind_flags();
     test_service_lengths_are_word_pairs();
     test_file_seek_offset_is_an_aligned_word_pair();

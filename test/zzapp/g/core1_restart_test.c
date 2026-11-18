@@ -4,7 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "zzapp_rec.h"
 #include "zzapp_runtime.h"
+
+/* More live records than the old fixed four: core 1 dies with all of them
+ * running and every one is torn down on core 0. */
+#define LIVE_RECORDS 8U
 
 static uint32_t selected_slot;
 static int retired_before_release;
@@ -18,33 +23,38 @@ void zzapp_recover_external_locks(void)
     heap_orphaned = 0;
 }
 
-uint32_t zzapp_services_current_slot(void)
+uint32_t zzapp_services_current_pid(void)
 {
     return selected_slot;
 }
 
-void zzapp_services_select_slot(uint32_t slot)
+void zzapp_services_select_pid(uint32_t pid)
 {
-    selected_slot = slot;
+    selected_slot = pid;
 }
 
-void __real_zzapp_loader_release(void);
+void __real_zzapp_loader_retire_resources(void);
 
-void __wrap_zzapp_loader_release(void)
+/* The first resource a retire returns: by then no context of any record may
+ * be left to run, or a mapping would be released under a live thread. Every
+ * retire is checked, not just one of them. */
+void __wrap_zzapp_loader_retire_resources(void)
 {
     zzapp_kernel_t *kernel = zzapp_runtime_kernel();
-    uint32_t slot;
+    uint32_t pid;
     int retired = 1;
 
     release_calls++;
-    for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
-        if (kernel->threads[slot].state != ZZAPP_THREAD_STOPPED ||
-            kernel->threads[slot].context.frame.exception_lr != 0U)
+    for (pid = 0U; pid < zzapp_rec_capacity(); pid++) {
+        zzapp_thread_t *thread = zzapp_kernel_thread(kernel, pid);
+
+        if (thread->state != ZZAPP_THREAD_STOPPED ||
+            thread->context.frame.exception_lr != 0U)
             retired = 0;
     }
     if (retired && zzapp_kernel_current_thread() < 0)
-        retired_before_release = 1;
-    __real_zzapp_loader_release();
+        retired_before_release++;
+    __real_zzapp_loader_retire_resources();
 }
 
 void __real_zzapp_minigl_reclaim(uint32_t generation);
@@ -57,6 +67,15 @@ void __wrap_zzapp_minigl_reclaim(uint32_t generation)
         return;
     }
     __real_zzapp_minigl_reclaim(generation);
+}
+
+static void boot_with_records(uint32_t count)
+{
+    uint32_t pid;
+
+    zzapp_boot_init();
+    for (pid = 0U; pid < count; pid++)
+        assert(zzapp_test_admit() == pid);
 }
 
 static void mark_stale(uint32_t slot)
@@ -73,33 +92,44 @@ static void mark_stale(uint32_t slot)
 int main(void)
 {
     zzapp_kernel_t *kernel;
+    zzapp_rec_stats_t stats;
     uint32_t slot;
 
-    zzapp_boot_init();
+    boot_with_records(LIVE_RECORDS);
     zzapp_test_set_xtime(0);
-    for (slot = 0U; slot < 3U; slot++)
+    for (slot = 0U; slot < LIVE_RECORDS; slot++)
         mark_stale(slot);
+    zzapp_rec_stats(&stats);
+    assert(stats.live == LIVE_RECORDS);
     kernel = zzapp_runtime_kernel();
     zzapp_kernel_set_current_thread(1);
     zzapp_test_set_xtime(ZZAPP_WATCHDOG_US + 1U);
     zzapp_core0_poll();
 
     assert(zzapp_test_cold_restarts() == 1);
-    assert(retired_before_release);
-    assert(release_calls == 3);
+    assert(release_calls == (int)LIVE_RECORDS);
+    assert(retired_before_release == release_calls);
     assert(zzapp_kernel_current_thread() < 0);
-    for (slot = 0U; slot < 3U; slot++) {
+    for (slot = 0U; slot < LIVE_RECORDS; slot++) {
+        zzapp_thread_t *thread = zzapp_kernel_thread(kernel, slot);
+
         selected_slot = slot;
+        /* The fault is what the launcher reads; the record itself is gone. */
         assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
-        assert(kernel->threads[slot].state == ZZAPP_THREAD_STOPPED);
-        assert(kernel->threads[slot].context.frame.exception_lr == 0U);
+        assert(zzapp_rec_state(slot) == ZZAPP_REC_FREE);
+        assert(thread->state == ZZAPP_THREAD_STOPPED);
+        assert(thread->context.frame.exception_lr == 0U);
     }
+    /* Every record is back: nothing live, the whole queue free again. */
+    zzapp_rec_stats(&stats);
+    assert(stats.live == 0U && stats.claimed == 0U && stats.retiring == 0U);
+    assert(stats.free == stats.capacity);
     zzapp_core0_poll();
     assert(zzapp_test_cold_restarts() == 1);
 
     /* The single-core fallback calls this helper. An orphaned module heap
      * lock must be free before GL teardown tries to acquire it. */
-    zzapp_boot_init();
+    boot_with_records(1U);
     zzapp_test_set_xtime(0);
     mark_stale(0);
     heap_orphaned = 1;

@@ -60,6 +60,12 @@ enum card_pool_class {
     /* 1 MiB-aligned extents the app frame allocator carves into frames.
      * Commit admission in zzapp_mem bounds them, not a class limit. */
     CARD_POOL_CLASS_APP_FRAMES = 15,
+    /* The boot-time record arena (zzapp_rec): per-record L1 tables, core-1
+     * stacks, records, user table pages, and the L2 table pool. Permanent
+     * like FIRMWARE: never in the revocable tail, kept across Amiga reset,
+     * never freed. The arena size is set by memory (zzapp_rec_layout_for),
+     * not by a class limit. */
+    CARD_POOL_CLASS_APP_ARENA = 16,
     CARD_POOL_CLASS_COUNT
 };
 
@@ -78,6 +84,7 @@ enum card_pool_class {
 #define CARD_POOL_LIMIT_APP         (96u << 20)
 #define CARD_POOL_LIMIT_APP_DISPLAY (32u << 20)
 #define CARD_POOL_LIMIT_APP_FRAMES  UINT32_MAX
+#define CARD_POOL_LIMIT_APP_ARENA   UINT32_MAX
 #define CARD_POOL_LIMIT_MINIGL_MODULE    (4u << 20)
 #define CARD_POOL_LIMIT_MINIGL_TRANSPORT (4u << 20)
 #define CARD_POOL_LIMIT_MINIGL_CONTEXT   MINIGL_CARD_POOL_LIMIT_BYTES
@@ -184,7 +191,8 @@ int card_pool_has_lent(const card_pool_t *pool);
  * memory. Takes no lock when nothing is lent. */
 void card_pool_take_back_lent(card_pool_t *pool);
 /* Amiga reset, after core 0 has observed RasterIX completion or quarantined
- * its MiniGL blocks: release every non-quarantined owner except FIRMWARE,
+ * its MiniGL blocks: release every non-quarantined owner except the permanent
+ * classes FIRMWARE and APP_ARENA,
  * then lend the revocable tail when the Amiga cannot use it -- a Zorro II
  * board has no Fast-RAM window, and Zorro III lends it while Fast RAM is
  * withheld. */

@@ -9,6 +9,7 @@
  */
 #define ZZAPP_SERVICES_STANDALONE_TEST
 #include "zzapp_services.c"
+#include "svc_env.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -58,15 +59,13 @@ static void test_steady_flip_flushes_surface_only(void)
 {
 	const unsigned long bytes = 640U * 200U;
 	aar_surface surface;
-	unsigned grants_before;
-	unsigned ungrants_before;
+	unsigned aliases_before;
 	unsigned flushes_before;
 	unsigned flip;
 
 	memset(&surface, 0, sizeof(surface));
 	surface.id = 1U;
-	grants_before = service_test_grant_count;
-	ungrants_before = service_test_ungrant_count;
+	aliases_before = service_proc()->as.alias_count;
 	flushes_before = zzapp_test_present_flush_count;
 
 	for (flip = 0U; flip < 3U; flip++) {
@@ -81,8 +80,7 @@ static void test_steady_flip_flushes_surface_only(void)
 		presented = current_runtime()->display_present;
 		/* No remap and no grant churn across a steady-state flip:
 		 * the surface stays mapped from bind to close. */
-		if (service_test_grant_count != grants_before ||
-		    service_test_ungrant_count != ungrants_before) {
+		if (service_proc()->as.alias_count != aliases_before) {
 			fail("flip remapped the surface alias");
 			return;
 		}
@@ -127,6 +125,7 @@ static void test_idle_wait_completes_without_round_trip(void)
 
 int main(void)
 {
+	svc_env_init(8U, 0U, NULL);
 	zzapp_services_test_reset();
 	memset(g_window, 0, sizeof(g_window));
 	zzapp_services_test_set_window(g_window, sizeof(g_window));

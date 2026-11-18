@@ -362,6 +362,12 @@ int scheduler_core1_clean_dcache_wait(taskq_shared_t *shared,
 				      scheduler_core1_clean_publish_fn publish,
 				      scheduler_core1_clean_wait_fn wait,
 				      void *context, uint32_t spins);
+/* Core 1's last record/heap writes precede this handshake. clean_cache must
+ * complete a local L1 writeback (including DSB) before returning. On success
+ * the caller must park without touching record or heap state again. */
+int scheduler_core1_service_park_request_with(
+    taskq_shared_t *shared, scheduler_core1_clean_cache_fn clean_cache,
+    scheduler_core1_clean_publish_fn publish, void *context);
 
 
 #if defined(TASKQ_HOST_TEST) && defined(SCHEDULER_PUBLISH_HOST_TEST)

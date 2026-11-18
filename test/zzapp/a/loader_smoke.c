@@ -7,6 +7,7 @@
 int main(void)
 {
     zzapp_boot_init();
+    assert(zzapp_test_admit() == 0U);
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     assert(zzapp_loader_begin() == 0);
     assert(zzapp_runtime_state() == ZZAPP_ST_LOADING);

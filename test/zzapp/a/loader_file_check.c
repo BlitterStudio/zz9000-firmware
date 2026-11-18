@@ -31,6 +31,7 @@ int main(void)
     assert(fclose(file) == 0);
 
     zzapp_boot_init();
+    assert(zzapp_test_admit() == 0U);
     assert(zzapp_loader_begin() == AAR_OK);
     for (offset = 0u; offset < (uint32_t)size;) {
         uint32_t chunk = (uint32_t)size - offset;

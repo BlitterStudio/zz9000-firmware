@@ -23,7 +23,9 @@
 #define ZZAPP_MEM_MAX_EXTENTS \
     (ZZAPP_MEM_MAX_FRAMES / ZZAPP_MEM_FRAMES_PER_EXTENT)
 
-#define ZZAPP_MEM_MAX_PROCS 4u
+/* Procs the ledger can track at once: one per process record, so the bound is
+ * the handle table's (zzapp_rec.h ZZAPP_REC_MAX_APPS). */
+#define ZZAPP_MEM_REGISTRY_PROCS 1024u
 
 typedef struct {
     uint32_t base;
@@ -48,7 +50,7 @@ typedef struct {
     uint8_t low_armed;
     zzapp_mem_low_callback_t low_callback;
     void *low_context;
-    zzapp_mem_proc_t *procs[ZZAPP_MEM_MAX_PROCS];
+    zzapp_mem_proc_t *procs[ZZAPP_MEM_REGISTRY_PROCS];
     zzapp_mem_extent_t extents[ZZAPP_MEM_MAX_EXTENTS];
 } zzapp_mem_t;
 

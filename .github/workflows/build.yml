@@ -227,6 +227,29 @@ jobs:
             ZZ9000_proto.sdk/ZZ9000OS/src/sdk_service_catalog.h
       - name: SDK service discovery descriptors
         run: make -C test/sdk_service test
+      - name: ZZApp host harness covers every test source
+        run: |
+          set -eu
+          listed=$(mktemp)
+          make -C test/zzapp -pn -q test 2>/dev/null |
+            sed -n 's/^ALL_TESTS := //p' | tr ' ' '\n' > "$listed" || true
+          test -s "$listed"
+          missing=0
+          for src in test/zzapp/*/*_test.c; do
+            target="build/${src#test/zzapp/}"
+            target="${target%.c}"
+            if ! grep -qx "$target" "$listed"; then
+              echo "not run by make -C test/zzapp test: $src"
+              missing=1
+            fi
+          done
+          for target in build/b/services_test_wide build/b/admission_test_wide; do
+            if ! grep -qx "$target" "$listed"; then
+              echo "missing wide target: $target"
+              missing=1
+            fi
+          done
+          exit "$missing"
       - name: ZZApp host harness
         run: make -C test/zzapp test
 

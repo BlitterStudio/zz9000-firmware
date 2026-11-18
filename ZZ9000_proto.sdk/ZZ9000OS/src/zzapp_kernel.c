@@ -3,10 +3,12 @@
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
+#include <stddef.h>
 #include <string.h>
 
 #include "sdk_smp_lock.h"
 #include "zzapp_kernel.h"
+#include "zzapp_rec.h"
 
 #if ZZAPP_PERF_COUNTERS
 #include <stdio.h>
@@ -30,9 +32,94 @@ uint64_t __attribute__((weak)) zzapp_kernel_now_ms(void)
 
 static volatile int current_thread = -1;
 volatile uintptr_t zzapp_kernel_svc_stack_top;
+
+/* The record area as the scheduler was given it. Kept apart from the kernel
+ * struct for the one function without a kernel argument,
+ * zzapp_kernel_set_current_thread(). */
+static uint8_t *pub_threads;
+static uint32_t pub_stride;
+static uint32_t pub_capacity;
+
+/* The thread is the first member of the record, so a thread pointer is a
+ * record pointer. */
+_Static_assert(offsetof(zzapp_rec_t, thread) == 0, "thread is the record base");
+_Static_assert(ZZAPP_KERNEL_MAX_APPS == ZZAPP_REC_MAX_APPS,
+	       "scheduler and handle table bounds agree");
 #if ZZAPP_PERF_COUNTERS
-/* The SVC vector reads this directly to index its per-app PMU stamps. */
-volatile uint32_t zzapp_svc_counter_slot;
+_Static_assert(ZZAPP_REC_SVC_BYTES >= ZZAPP_SVC_COUNTER_BLOCK_BYTES,
+	       "the svc part holds the counter block at its head");
+#endif
+
+/* The thread of a pid the caller has already checked against the capacity. */
+static zzapp_thread_t *thread_at(const zzapp_kernel_t *kernel, uint32_t pid)
+{
+	return (zzapp_thread_t *)(void *)(kernel->threads +
+					  (size_t)pid * kernel->stride);
+}
+
+static zzapp_thread_t *kernel_thread(const zzapp_kernel_t *kernel, uint32_t pid)
+{
+	if (!kernel || !kernel->threads || pid >= kernel->capacity)
+		return NULL;
+	return thread_at(kernel, pid);
+}
+
+static zzapp_rec_kernel_t *kernel_words(const zzapp_kernel_t *kernel,
+					uint32_t pid)
+{
+	zzapp_rec_t *rec = (zzapp_rec_t *)(void *)kernel_thread(kernel, pid);
+
+	return rec ? &rec->kernel : NULL;
+}
+
+/* The run list holds the pids whose thread is not STOPPED, ascending, so a
+ * scan visits them in pid order whatever the capacity. It changes only when
+ * a thread starts or stops, never from the timer IRQ, but the IRQ walks it:
+ * mask local IRQs around every change. */
+static void run_add(zzapp_kernel_t *kernel, uint32_t pid)
+{
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+	uint32_t irq_state = smp_local_irq_save();
+
+	if (!thread->in_run) {
+		uint32_t at = kernel->run_count;
+
+		while (at > 0U && kernel->run[at - 1U] > pid) {
+			kernel->run[at] = kernel->run[at - 1U];
+			at--;
+		}
+		kernel->run[at] = (uint16_t)pid;
+		kernel->run_count++;
+		thread->in_run = 1U;
+	}
+	smp_local_irq_restore(irq_state);
+}
+
+static void run_remove(zzapp_kernel_t *kernel, uint32_t pid)
+{
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+	uint32_t irq_state = smp_local_irq_save();
+
+	if (thread->in_run) {
+		uint32_t at = 0U;
+
+		while (at < kernel->run_count && kernel->run[at] != pid)
+			at++;
+		for (; at + 1U < kernel->run_count; at++)
+			kernel->run[at] = kernel->run[at + 1U];
+		if (kernel->run_count)
+			kernel->run_count--;
+		thread->in_run = 0U;
+	}
+	smp_local_irq_restore(irq_state);
+}
+
+#if ZZAPP_PERF_COUNTERS
+/* The SVC vector counts through this pointer (see zzapp_kernel.h). */
+void *volatile zzapp_svc_counter_block;
+/* What it points at while no app thread runs. */
+static uint32_t idle_counter_block[ZZAPP_SVC_COUNTER_BLOCK_BYTES / 4U]
+	__attribute__((aligned(8)));
 volatile uint32_t zzapp_kernel_switch_entry_stamp;
 volatile uint32_t zzapp_kernel_switch_exit_stamp;
 volatile uint32_t zzapp_kernel_switch_complete;
@@ -88,10 +175,10 @@ uint32_t zzapp_kernel_perf_test_percentile(
  * switch - cost measurable frame time on every one of the ~268k switches of
  * a swquake run, so between windows the PMU is not touched at all.
  *
- * Inside a window there is one sample per switch, taken where the slot is
- * undispatched: both counters are read with one selection change each, and
- * the delta from the previous sample is charged to the slot that held the
- * core in between.  Kernel gaps between two samples of the same app are
+ * Inside a window there is one sample per switch, taken where the record's
+ * thread is undispatched: both counters are read with one selection change
+ * each, and the delta from the previous sample is charged to the record that
+ * held the core in between.  Kernel gaps between two samples of the same app are
  * charged to that app instead of being dropped; the alternative - sampling
  * at both edges - doubles the PMU traffic.
  */
@@ -100,9 +187,10 @@ static int kernel_perf_tlb_sampling(const zzapp_kernel_t *kernel)
 	return kernel->now < kernel->perf.tlb_sample_until_ms;
 }
 
-static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
+static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int pid)
 {
 	zzapp_kernel_perf_t *perf;
+	zzapp_rec_kernel_t *words;
 	uint32_t instruction;
 	uint32_t data;
 	uint32_t irq_state;
@@ -111,17 +199,17 @@ static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
 		return;
 	irq_state = smp_local_irq_save();
 	perf = &kernel->perf;
-	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS) {
+	if (pid < 0 || (uint32_t)pid >= kernel->capacity) {
 		if (!kernel_perf_tlb_sampling(kernel)) {
-			perf->tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
+			perf->tlb_pid = ZZAPP_PID_NONE;
 			perf->tlb_stamps_valid = 0U;
 		}
 		smp_local_irq_restore(irq_state);
 		return;
 	}
-	if (perf->tlb_slot != (uint32_t)slot ||
+	if (perf->tlb_pid != (uint32_t)pid ||
 	    !kernel_perf_tlb_sampling(kernel)) {
-		perf->tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
+		perf->tlb_pid = ZZAPP_PID_NONE;
 		perf->tlb_stamps_valid = 0U;
 		smp_local_irq_restore(irq_state);
 		return;
@@ -137,10 +225,11 @@ static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
 	__asm__ __volatile__("isb" ::: "memory");
 	__asm__ __volatile__("mrc p15, 0, %0, c9, c13, 2" : "=r"(data));
 #endif
+	words = kernel_words(kernel, (uint32_t)pid);
 	if (perf->tlb_stamps_valid) {
-		perf->tlb_instruction_refills[slot] += instruction -
+		words->tlb_instruction_refills += instruction -
 			perf->tlb_instruction_stamp;
-		perf->tlb_data_refills[slot] += data - perf->tlb_data_stamp;
+		words->tlb_data_refills += data - perf->tlb_data_stamp;
 		perf->total.tlb_instruction_refills += instruction -
 			perf->tlb_instruction_stamp;
 		perf->total.tlb_data_refills += data - perf->tlb_data_stamp;
@@ -148,17 +237,17 @@ static void kernel_perf_tlb_leave(zzapp_kernel_t *kernel, int slot)
 	perf->tlb_instruction_stamp = instruction;
 	perf->tlb_data_stamp = data;
 	perf->tlb_stamps_valid = 1U;
-	perf->tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
+	perf->tlb_pid = ZZAPP_PID_NONE;
 	smp_local_irq_restore(irq_state);
 }
 
-static void kernel_perf_tlb_enter(zzapp_kernel_t *kernel, int slot)
+static void kernel_perf_tlb_enter(zzapp_kernel_t *kernel, int pid)
 {
-	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS)
+	if (pid < 0 || (uint32_t)pid >= kernel->capacity)
 		return;
 	/* No PMU access here: the next leave folds the interval into this
-	 * slot from the previous sample, so entering is two plain stores. */
-	kernel->perf.tlb_slot = (uint32_t)slot;
+	 * record from the previous sample, so entering is two plain stores. */
+	kernel->perf.tlb_pid = (uint32_t)pid;
 }
 
 static void kernel_perf_tlb_window_open(zzapp_kernel_t *kernel)
@@ -263,36 +352,39 @@ void zzapp_kernel_perf_service_end(zzapp_kernel_t *kernel,
 	zzapp_kernel_perf_service_end_detail(kernel, service, stamp, 0U, 0U);
 }
 
-void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel, uint32_t pid,
 			      uint32_t low_water, uint32_t starved,
 			      uint32_t underruns)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+	if (!words)
 		return;
-	kernel->perf.audio_low_water[slot] += low_water;
-	kernel->perf.audio_starved[slot] += starved;
-	kernel->perf.audio_underruns[slot] += underruns;
+	words->audio_low_water += low_water;
+	words->audio_starved += starved;
+	words->audio_underruns += underruns;
 }
 
-void zzapp_kernel_perf_snapshot(const zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_perf_snapshot(const zzapp_kernel_t *kernel, uint32_t pid,
 				 zzapp_kernel_perf_snapshot_t *snapshot)
 {
-	if (!kernel || !snapshot || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	const zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+	if (!words || !snapshot)
 		return;
 	*snapshot = kernel->perf.total;
-	snapshot->audio_low_water = kernel->perf.audio_low_water[slot];
-	snapshot->audio_starved = kernel->perf.audio_starved[slot];
-	snapshot->audio_underruns = kernel->perf.audio_underruns[slot];
-	snapshot->tlb_instruction_refills =
-		kernel->perf.tlb_instruction_refills[slot];
-	snapshot->tlb_data_refills = kernel->perf.tlb_data_refills[slot];
+	snapshot->audio_low_water = words->audio_low_water;
+	snapshot->audio_starved = words->audio_starved;
+	snapshot->audio_underruns = words->audio_underruns;
+	snapshot->tlb_instruction_refills = words->tlb_instruction_refills;
+	snapshot->tlb_data_refills = words->tlb_data_refills;
 }
 
-void zzapp_kernel_perf_finish_slot(zzapp_kernel_t *kernel, uint32_t slot)
+void zzapp_kernel_perf_finish_slot(zzapp_kernel_t *kernel, uint32_t pid)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!kernel_thread(kernel, pid))
 		return;
-	kernel_perf_tlb_leave(kernel, (int)slot);
+	kernel_perf_tlb_leave(kernel, (int)pid);
 }
 
 void zzapp_kernel_perf_switch_finished(zzapp_kernel_t *kernel)
@@ -309,22 +401,26 @@ void zzapp_kernel_perf_switch_finished(zzapp_kernel_t *kernel)
 	smp_local_irq_restore(irq_state);
 }
 
-void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t pid,
 				       int force)
 {
-	uint32_t bit;
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!words)
 		return;
 	if (!force && kernel->perf.report_count &&
 	    (uint32_t)kernel->now - kernel->perf.last_report_ms < 10000U)
 		return;
 	if (!kernel->perf.report_pending)
 		kernel_perf_tlb_window_open(kernel);
-	bit = 1U << slot;
-	kernel->perf.report_pending |= bit;
-	if (force)
-		kernel->perf.report_force |= bit;
+	if (!words->perf_report_pending) {
+		words->perf_report_pending = 1U;
+		kernel->perf.report_pending++;
+	}
+	if (force && !words->perf_report_force) {
+		words->perf_report_force = 1U;
+		kernel->perf.report_force++;
+	}
 }
 
 static const char *launcher_detail_name(uint32_t detail)
@@ -353,34 +449,58 @@ int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
 		"sdk_span", "minigl_span", "launcher_span", "audio_span",
 		"svc_span"
 	};
-	uint32_t pending;
-	uint32_t force;
-	uint32_t slot;
+	uint32_t pid;
+	uint32_t forced;
+	uint32_t i;
 	uint32_t service;
+	zzapp_rec_kernel_t *words;
 	zzapp_kernel_perf_snapshot_t snapshot = { 0 };
 	int offset;
 
 	if (!kernel || kernel->perf.report_ready)
 		return 0;
-	pending = kernel->perf.report_pending;
-	force = kernel->perf.report_force;
-	if (!pending)
+	if (!kernel->perf.report_pending)
 		return 0;
-	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
-		if (force & (1U << slot))
-			break;
-	if (slot == ZZAPP_KERNEL_APP_SLOTS) {
+	pid = ZZAPP_PID_NONE;
+	/* A forced request is made as an app stops, so its record is already
+	 * off the run list: look at every record, but only while a report is
+	 * pending at all. */
+	if (kernel->perf.report_force) {
+		for (i = 0U; i < kernel->capacity; i++)
+			if (kernel_words(kernel, i)->perf_report_force) {
+				pid = i;
+				break;
+			}
+		if (pid == ZZAPP_PID_NONE)
+			kernel->perf.report_force = 0U;
+	}
+	if (pid == ZZAPP_PID_NONE) {
 		if (kernel->perf.report_count &&
 		    (uint32_t)kernel->now - kernel->perf.last_report_ms < 10000U)
 			return 0;
-		for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
-			if (pending & (1U << slot))
+		for (i = 0U; i < kernel->capacity; i++)
+			if (kernel_words(kernel, i)->perf_report_pending) {
+				pid = i;
 				break;
+			}
 	}
-	zzapp_kernel_perf_snapshot(kernel, slot, &snapshot);
-	kernel->perf.report_pending &= ~(1U << slot);
-	kernel->perf.report_force &= ~(1U << slot);
-	if ((force & (1U << slot)) == 0U)
+	if (pid == ZZAPP_PID_NONE) {
+		/* The count outlived the record it counted (cleared at its next
+		 * admission). Nothing to report. */
+		kernel->perf.report_pending = 0U;
+		return 0;
+	}
+	words = kernel_words(kernel, pid);
+	forced = words->perf_report_force;
+	zzapp_kernel_perf_snapshot(kernel, pid, &snapshot);
+	words->perf_report_pending = 0U;
+	if (kernel->perf.report_pending)
+		kernel->perf.report_pending--;
+	if (forced) {
+		words->perf_report_force = 0U;
+		if (kernel->perf.report_force)
+			kernel->perf.report_force--;
+	} else
 		kernel->perf.last_report_ms = (uint32_t)kernel->now;
 	kernel->perf.report_count++;
 	/* tlb below is window-sampled: the PMU counters are read only in
@@ -391,7 +511,7 @@ int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel)
 			  "[app] perf slot=%lu forced=%u switch=%lu/%lu/%lu "
 			  "sgi=%lu/%lu/%lu sdk=%lu/%lu/%lu sgi_burst=%lu/%lu "
 			  "audio=%lu/%lu/%lu tlb=%lu/%lu",
-			  (unsigned long)slot, (force & (1U << slot)) != 0U,
+			  (unsigned long)pid, forced != 0U,
 			  (unsigned long)kernel_perf_percentile(
 				  &snapshot.switch_cycles, 50U),
 			  (unsigned long)kernel_perf_percentile(
@@ -466,33 +586,26 @@ void zzapp_kernel_perf_print_reports(zzapp_kernel_t *kernel)
 	kernel->perf.report_ready = 0U;
 }
 #endif
-void *scheduler_core1_app_stack_top(uint32_t slot) __attribute__((weak));
-void *scheduler_core1_app_stack_top(uint32_t slot)
-{
-	(void)slot;
-	return NULL;
-}
 void __attribute__((weak)) scheduler_core1_service_from_app(void)
 {
 }
 
-void __attribute__((weak)) zzapp_kernel_switch_address_space(uint32_t slot)
+void __attribute__((weak)) zzapp_kernel_switch_address_space(uint32_t pid)
 {
-	(void)slot;
+	(void)pid;
 }
 void __attribute__((weak)) zzapp_kernel_switch_kernel_address_space(void)
 {
 }
 
 
-#define NO_ACTIVE (ZZAPP_KERNEL_APP_SLOTS + 1U)
-
 static int app_runnable(const zzapp_kernel_t *kernel)
 {
-	uint32_t slot;
+	uint32_t i;
 
-	for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++)
-		if (kernel->threads[slot].state == ZZAPP_THREAD_RUNNABLE)
+	for (i = 0U; i < kernel->run_count; i++)
+		if (kernel_thread(kernel, kernel->run[i])->state ==
+		    ZZAPP_THREAD_RUNNABLE)
 			return 1;
 	return 0;
 }
@@ -503,81 +616,182 @@ int zzapp_kernel_apps_runnable(const zzapp_kernel_t *kernel)
 
 
 static void handoff_api_lock(zzapp_kernel_t *kernel);
-static void register_api_waiter(zzapp_kernel_t *kernel, uint32_t slot);
+static void register_api_waiter(zzapp_kernel_t *kernel, uint32_t pid);
 
+/* Wake the earliest due sleeper, then the next, until none is due. Ties on
+ * the deadline go to the one that went to sleep first. */
 static void wake_due(zzapp_kernel_t *kernel)
 {
 	for (;;) {
-		uint32_t slot;
-		uint32_t found = ZZAPP_KERNEL_APP_SLOTS;
+		uint32_t i;
+		uint32_t found = ZZAPP_PID_NONE;
 		uint64_t deadline = UINT64_MAX;
 
-		for (slot = 0; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
-			const zzapp_thread_t *thread = &kernel->threads[slot];
+		for (i = 0U; i < kernel->run_count; i++) {
+			uint32_t pid = kernel->run[i];
+			const zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
 			if (thread->state == ZZAPP_THREAD_SLEEPING &&
 			    thread->sleep_deadline <= kernel->now &&
 			    (thread->sleep_deadline < deadline ||
 			     (thread->sleep_deadline == deadline &&
-			      (found == ZZAPP_KERNEL_APP_SLOTS ||
+			      (found == ZZAPP_PID_NONE ||
 			       thread->wake_sequence <
-			       kernel->threads[found].wake_sequence)))) {
-				found = slot;
+			       kernel_thread(kernel, found)->wake_sequence)))) {
+				found = pid;
 				deadline = thread->sleep_deadline;
 			}
 		}
-		if (found == ZZAPP_KERNEL_APP_SLOTS)
+		if (found == ZZAPP_PID_NONE)
 			return;
 		(void)zzapp_kernel_wake(kernel, found, ZZAPP_WAKE_TIMEOUT);
 	}
 }
 
-void zzapp_kernel_init(zzapp_kernel_t *kernel)
+/* The state of a scheduler over `capacity` records at `threads` (or over none,
+ * for the system thread alone). Nothing is zero-valued by accident: the API
+ * lock reads "free" and not "owned by record 0". */
+static void kernel_attach(zzapp_kernel_t *kernel, void *threads,
+			  uint32_t stride, uint32_t capacity)
 {
-	if (!kernel)
-		return;
+	uint32_t pid;
+
 	memset(kernel, 0, sizeof(*kernel));
-	kernel->active = NO_ACTIVE;
+	kernel->threads = threads;
+	kernel->stride = stride;
+	kernel->capacity = capacity;
+	kernel->active = ZZAPP_PID_NONE;
 	kernel->api_lock_owner = -1;
-	kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+	kernel->api_handoff = ZZAPP_PID_NONE;
 	kernel->gl_owner = -1;
+#if ZZAPP_PERF_COUNTERS
+	kernel->perf.tlb_pid = ZZAPP_PID_NONE;
+#endif
+	/* The records outlive the scheduler: start every thread STOPPED with no
+	 * stale kernel words. The contexts are rebuilt by prepare_app. */
+	for (pid = 0U; pid < capacity; pid++) {
+		memset(kernel_thread(kernel, pid), 0,
+		       offsetof(zzapp_thread_t, context));
+		memset(kernel_words(kernel, pid), 0, sizeof(zzapp_rec_kernel_t));
+	}
+	pub_threads = kernel->threads;
+	pub_stride = stride;
+	pub_capacity = capacity;
+#if ZZAPP_PERF_COUNTERS
+	zzapp_svc_counter_block = idle_counter_block;
+#endif
 }
 
-void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t slot)
+int zzapp_kernel_init(zzapp_kernel_t *kernel, void *threads, uint32_t stride,
+		      uint32_t capacity)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
-		return;
-	kernel->threads[slot].user_ticks = 0U;
-	kernel->threads[slot].svc_ticks = 0U;
-}
-
-
-int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t slot)
-{
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!kernel || !threads || capacity == 0U ||
+	    capacity > ZZAPP_KERNEL_MAX_APPS || stride < sizeof(zzapp_rec_t) ||
+	    ((uintptr_t)threads & 7U) != 0U)
 		return -1;
-	kernel->threads[slot].state = ZZAPP_THREAD_RUNNABLE;
-	kernel->threads[slot].wake_reason = ZZAPP_WAKE_READY;
-	kernel->threads[slot].quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
+	kernel_attach(kernel, threads, stride, capacity);
 	return 0;
 }
-int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
+
+void zzapp_kernel_init_system_only(zzapp_kernel_t *kernel)
+{
+	if (kernel)
+		kernel_attach(kernel, NULL, 0U, 0U);
+}
+
+zzapp_thread_t *zzapp_kernel_thread(const zzapp_kernel_t *kernel, uint32_t pid)
+{
+	return kernel_thread(kernel, pid);
+}
+
+uint32_t zzapp_kernel_capacity(const zzapp_kernel_t *kernel)
+{
+	return kernel ? kernel->capacity : 0U;
+}
+
+uint32_t zzapp_kernel_run_count(const zzapp_kernel_t *kernel)
+{
+	return kernel ? kernel->run_count : 0U;
+}
+
+uint32_t zzapp_kernel_run_pid(const zzapp_kernel_t *kernel, uint32_t index)
+{
+	return kernel && index < kernel->run_count ? kernel->run[index] :
+						     ZZAPP_PID_NONE;
+}
+
+uint32_t zzapp_kernel_stack_high_water(const zzapp_kernel_t *kernel,
+				       uint32_t pid)
+{
+	const zzapp_thread_t *thread = kernel_thread(kernel, pid);
+	const zzapp_rec_t *rec = (const zzapp_rec_t *)thread;
+
+	if (!thread || rec->hdr.kstack_top <= rec->hdr.kstack_base)
+		return 0U;
+	return zzapp_kernel_stack_used(
+		(const uint8_t *)(uintptr_t)rec->hdr.kstack_base,
+		rec->hdr.kstack_top - rec->hdr.kstack_base);
+}
+
+void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t pid)
+{
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+	if (!thread)
+		return;
+	thread->user_ticks = 0U;
+	thread->svc_ticks = 0U;
+}
+
+
+int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t pid)
+{
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+	if (!thread)
+		return -1;
+	run_add(kernel, pid);
+	thread->state = ZZAPP_THREAD_RUNNABLE;
+	thread->wake_reason = ZZAPP_WAKE_READY;
+	thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
+	return 0;
+}
+int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t pid,
 			      uint32_t entry, uint32_t api, uint32_t argc,
 			      uint32_t argv, uint32_t stack_top)
 {
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
 	zzapp_thread_context_t *context;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS || !entry || !stack_top)
+	if (!thread || !entry || !stack_top)
 		return -1;
 #if ZZAPP_PERF_COUNTERS
-	kernel->perf.audio_low_water[slot] = 0U;
-	kernel->perf.audio_starved[slot] = 0U;
-	kernel->perf.audio_underruns[slot] = 0U;
-	kernel->perf.tlb_instruction_refills[slot] = 0U;
-	kernel->perf.tlb_data_refills[slot] = 0U;
-	if (kernel->perf.tlb_slot == slot)
-		kernel->perf.tlb_slot = ZZAPP_KERNEL_APP_SLOTS;
+	{
+		zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+		words->audio_low_water = 0U;
+		words->audio_starved = 0U;
+		words->audio_underruns = 0U;
+		words->tlb_instruction_refills = 0U;
+		words->tlb_data_refills = 0U;
+	}
+	if (kernel->perf.tlb_pid == pid)
+		kernel->perf.tlb_pid = ZZAPP_PID_NONE;
 #endif
-	context = &kernel->threads[slot].context;
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_KERNEL_PAINT_STACK)
+	/* The record's stack is painted here, at START, so its high water mark
+	 * counts this run only. The host build leaves it alone: its record
+	 * addresses are 64-bit and do not fit the header fields. */
+	{
+		const zzapp_rec_t *rec = (const zzapp_rec_t *)thread;
+
+		if (rec->hdr.kstack_top > rec->hdr.kstack_base)
+			zzapp_kernel_stack_paint(
+				(uint8_t *)(uintptr_t)rec->hdr.kstack_base,
+				rec->hdr.kstack_top - rec->hdr.kstack_base);
+	}
+#endif
+	context = &thread->context;
 	memset(context, 0, sizeof(*context));
 	context->frame.user_sp = stack_top;
 	context->frame.spsr = ZZAPP_KERNEL_APP_CPSR;
@@ -589,14 +803,20 @@ int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
 }
 
 
-void zzapp_kernel_set_current_thread(int slot)
+void zzapp_kernel_set_current_thread(int pid)
 {
-	current_thread = slot;
+	int app = pid >= 0 && (uint32_t)pid < pub_capacity;
+
+	current_thread = pid;
 #if ZZAPP_PERF_COUNTERS
-	zzapp_svc_counter_slot =
-		slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS ? (uint32_t)slot : 0U;
+	/* The SVC vector counts into whatever this points at; it must never be
+	 * NULL, so a non-app thread gets the scratch block. */
+	zzapp_svc_counter_block = app ?
+		(void *)(pub_threads + (size_t)pid * pub_stride +
+			 offsetof(zzapp_rec_t, svc)) :
+		(void *)idle_counter_block;
 #endif
-	if (slot < 0 || slot >= (int)ZZAPP_KERNEL_APP_SLOTS)
+	if (!app)
 		zzapp_kernel_svc_stack_top = 0U;
 }
 
@@ -605,14 +825,17 @@ int zzapp_kernel_current_thread(void)
 	return current_thread;
 }
 
-int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t slot)
+int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t pid)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+	if (!thread)
 		return -1;
-	kernel->threads[slot].state = ZZAPP_THREAD_BLOCKED;
-	kernel->threads[slot].quantum_left = 0;
-	if (kernel->active == slot)
-		kernel->active = NO_ACTIVE;
+	run_add(kernel, pid);
+	thread->state = ZZAPP_THREAD_BLOCKED;
+	thread->quantum_left = 0;
+	if (kernel->active == pid)
+		kernel->active = ZZAPP_PID_NONE;
 	return 0;
 }
 
@@ -630,14 +853,14 @@ static void kernel_wake_event(void)
 #endif
 }
 
-int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t pid,
 		zzapp_wake_reason_t reason)
 {
-	zzapp_thread_t *thread;
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!thread)
 		return -1;
-	thread = &kernel->threads[slot];
 	if (thread->state != ZZAPP_THREAD_BLOCKED &&
 	    thread->state != ZZAPP_THREAD_SLEEPING)
 		return -1;
@@ -645,30 +868,34 @@ int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
 	thread->wake_reason = reason;
 	thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
 	thread->wake_sequence = ++kernel->wake_serial;
-	if (kernel->api_resume_waiting[slot]) {
-		kernel->api_resume_waiting[slot] = 0U;
-		register_api_waiter(kernel, slot);
+	if (words->api_resume_waiting) {
+		words->api_resume_waiting = 0U;
+		register_api_waiter(kernel, pid);
 		if (kernel->api_lock_owner == -1 &&
-		    kernel->api_handoff >= ZZAPP_KERNEL_APP_SLOTS)
+		    kernel->api_handoff == ZZAPP_PID_NONE)
 			handoff_api_lock(kernel);
 	}
-	if (kernel->wake_log_count < ZZAPP_KERNEL_APP_SLOTS)
-		kernel->wake_log[kernel->wake_log_count++] = (uint8_t)slot;
+	kernel->wake_log[kernel->wake_log_count % ZZAPP_KERNEL_WAKE_LOG] =
+		(uint16_t)pid;
+	kernel->wake_log_count++;
 	kernel_wake_event();
 	return 0;
 }
 
-int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t pid,
 		uint64_t deadline)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+	if (!thread)
 		return -1;
-	kernel->threads[slot].state = ZZAPP_THREAD_SLEEPING;
-	kernel->threads[slot].sleep_deadline = deadline;
-	kernel->threads[slot].wake_sequence = ++kernel->wake_serial;
-	kernel->threads[slot].quantum_left = 0;
-	if (kernel->active == slot)
-		kernel->active = NO_ACTIVE;
+	run_add(kernel, pid);
+	thread->state = ZZAPP_THREAD_SLEEPING;
+	thread->sleep_deadline = deadline;
+	thread->wake_sequence = ++kernel->wake_serial;
+	thread->quantum_left = 0;
+	if (kernel->active == pid)
+		kernel->active = ZZAPP_PID_NONE;
 	return 0;
 }
 
@@ -688,20 +915,21 @@ void zzapp_kernel_service_due(zzapp_kernel_t *kernel)
 
 void zzapp_kernel_yield(zzapp_kernel_t *kernel)
 {
-	uint32_t slot;
+	uint32_t i;
 	int current;
 
 	if (!kernel)
 		return;
 	current = zzapp_kernel_current_thread();
-	if (current < 0 || current >= (int)ZZAPP_KERNEL_APP_SLOTS)
+	if (current < 0 || (uint32_t)current >= kernel->capacity)
 		return;
-	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
-		if (slot != (uint32_t)current &&
-		    kernel->threads[slot].state == ZZAPP_THREAD_RUNNABLE) {
-			kernel->rr_next = ((uint32_t)current + 1U) %
-				ZZAPP_KERNEL_APP_SLOTS;
-			kernel->threads[current].yield_pending = 1U;
+	for (i = 0U; i < kernel->run_count; i++) {
+		uint32_t pid = kernel->run[i];
+
+		if (pid != (uint32_t)current &&
+		    kernel_thread(kernel, pid)->state == ZZAPP_THREAD_RUNNABLE) {
+			kernel->rr_next = (uint32_t)current + 1U;
+			kernel_thread(kernel, (uint32_t)current)->yield_pending = 1U;
 			return;
 		}
 	}
@@ -795,35 +1023,44 @@ void zzapp_kernel_idle_end(zzapp_kernel_t *kernel)
 	smp_local_irq_restore(irq_state);
 }
 
+/* Round robin over the run list: the first runnable pid at or above rr_next,
+ * wrapping to the lowest. */
 static int choose_app(zzapp_kernel_t *kernel)
 {
-	uint32_t offset;
+	uint32_t count = kernel->run_count;
+	uint32_t start;
+	uint32_t i;
 
-	if (kernel->active < ZZAPP_KERNEL_APP_SLOTS &&
-	    kernel->threads[kernel->active].state == ZZAPP_THREAD_RUNNABLE &&
-	    kernel->threads[kernel->active].quantum_left != 0U)
+	if (kernel->active < kernel->capacity &&
+	    kernel_thread(kernel, kernel->active)->state == ZZAPP_THREAD_RUNNABLE &&
+	    kernel_thread(kernel, kernel->active)->quantum_left != 0U)
 		return (int)kernel->active;
-	for (offset = 0; offset < ZZAPP_KERNEL_APP_SLOTS; offset++) {
-		uint32_t slot = (kernel->rr_next + offset) % ZZAPP_KERNEL_APP_SLOTS;
-		if (kernel->threads[slot].state == ZZAPP_THREAD_RUNNABLE) {
-			kernel->active = slot;
-			kernel->rr_next = (slot + 1U) % ZZAPP_KERNEL_APP_SLOTS;
-			if (kernel->threads[slot].quantum_left == 0U)
-				kernel->threads[slot].quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
-			return (int)slot;
+	for (start = 0U; start < count && kernel->run[start] < kernel->rr_next;
+	     start++)
+		;
+	for (i = 0U; i < count; i++) {
+		uint32_t pid = kernel->run[(start + i) % count];
+		zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+		if (thread->state == ZZAPP_THREAD_RUNNABLE) {
+			kernel->active = pid;
+			kernel->rr_next = pid + 1U;
+			if (thread->quantum_left == 0U)
+				thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
+			return (int)pid;
 		}
 	}
-	kernel->active = NO_ACTIVE;
+	kernel->active = ZZAPP_PID_NONE;
 	return ZZAPP_KERNEL_IDLE;
 }
 
-/* Charge `slot` for a slice of up to `elapsed_ms`; an exhausted quantum
+/* Charge `pid` for a slice of up to `elapsed_ms`; an exhausted quantum
  * lets the next pick rotate to another runnable app. Privileged time is
  * the API body, recorded separately from user mode. */
-static void charge_slice(zzapp_kernel_t *kernel, uint32_t slot,
+static void charge_slice(zzapp_kernel_t *kernel, uint32_t pid,
 			 uint32_t elapsed_ms, int privileged)
 {
-	zzapp_thread_t *thread = &kernel->threads[slot];
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
 
 	/* Accumulate the full elapsed interval that ran. An app that
 	 * blocked or went to sleep had its quantum zeroed before the
@@ -841,7 +1078,7 @@ static void charge_slice(zzapp_kernel_t *kernel, uint32_t slot,
 		thread->quantum_left -= elapsed_ms;
 
 	if (thread->quantum_left == 0U)
-		kernel->active = NO_ACTIVE;
+		kernel->active = ZZAPP_PID_NONE;
 }
 
 int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
@@ -858,19 +1095,20 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	}
 	runnable = app_runnable(kernel);
 	if (kernel->api_lock_owner == -1 &&
-	    kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS &&
+	    kernel->api_handoff != ZZAPP_PID_NONE &&
 	    !kernel->api_handoff_service_deferred) {
 		pick = (int)kernel->api_handoff;
-		if (kernel->threads[pick].state == ZZAPP_THREAD_RUNNABLE)
+		if (kernel_thread(kernel, kernel->api_handoff)->state ==
+		    ZZAPP_THREAD_RUNNABLE)
 			goto charge_app;
-		kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+		kernel->api_handoff = ZZAPP_PID_NONE;
 		kernel->api_handoff_service_deferred = 0U;
 	}
 	if (kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER) {
-		uint32_t slot;
+		uint32_t i;
 
-		for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
-			if (!kernel->api_waiting[slot])
+		for (i = 0U; i < kernel->run_count; i++) {
+			if (!kernel_words(kernel, kernel->run[i])->api_waiting)
 				continue;
 			if (!runnable || kernel->service_in_window + elapsed_ms <=
 			    ZZAPP_KERNEL_SERVICE_LIMIT_MS) {
@@ -882,8 +1120,8 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 			break;
 		}
 	} else if (kernel->api_lock_owner >= 0 &&
-		   kernel->api_lock_owner < (int)ZZAPP_KERNEL_APP_SLOTS &&
-		   kernel->threads[kernel->api_lock_owner].state ==
+		   (uint32_t)kernel->api_lock_owner < kernel->capacity &&
+		   kernel_thread(kernel, (uint32_t)kernel->api_lock_owner)->state ==
 		   ZZAPP_THREAD_RUNNABLE) {
 		pick = kernel->api_lock_owner;
 		goto charge_app;
@@ -899,11 +1137,12 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	if (kernel->service_due && runnable)
 		kernel->overload_count++;
 	if (kernel->api_lock_owner == -1 &&
-	    kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS) {
+	    kernel->api_handoff != ZZAPP_PID_NONE) {
 		pick = (int)kernel->api_handoff;
-		if (kernel->threads[pick].state == ZZAPP_THREAD_RUNNABLE)
+		if (kernel_thread(kernel, kernel->api_handoff)->state ==
+		    ZZAPP_THREAD_RUNNABLE)
 			goto charge_app;
-		kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+		kernel->api_handoff = ZZAPP_PID_NONE;
 		kernel->api_handoff_service_deferred = 0U;
 	}
 	pick = choose_app(kernel);
@@ -924,23 +1163,25 @@ int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
 	else if (source == ZZAPP_KERNEL_DISPATCH_VOLUNTARY) {
 		int current = zzapp_kernel_current_thread();
 
-		if (current >= 0 && current < (int)ZZAPP_KERNEL_APP_SLOTS)
-			kernel->threads[current].yield_pending = 0U;
-		if (kernel->active < ZZAPP_KERNEL_APP_SLOTS) {
-			kernel->threads[kernel->active].quantum_left = 0U;
-			kernel->active = NO_ACTIVE;
+		if (current >= 0 && (uint32_t)current < kernel->capacity)
+			kernel_thread(kernel, (uint32_t)current)->yield_pending = 0U;
+		if (kernel->active < kernel->capacity) {
+			kernel_thread(kernel, kernel->active)->quantum_left = 0U;
+			kernel->active = ZZAPP_PID_NONE;
 		}
 	}
 	return zzapp_kernel_schedule(kernel, elapsed_ms);
 }
 
-int zzapp_kernel_wait_status(const zzapp_kernel_t *kernel, uint32_t slot)
+int zzapp_kernel_wait_status(const zzapp_kernel_t *kernel, uint32_t pid)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	const zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+	if (!thread)
 		return ZZAPP_KERNEL_WAIT_CANCELLED;
-	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_TIMEOUT)
+	if (thread->wake_reason == ZZAPP_WAKE_TIMEOUT)
 		return ZZAPP_KERNEL_WAIT_TIMEOUT;
-	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_CANCELLED)
+	if (thread->wake_reason == ZZAPP_WAKE_CANCELLED)
 		return ZZAPP_KERNEL_WAIT_CANCELLED;
 	return 0;
 }
@@ -965,17 +1206,19 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 					      zzapp_kernel_dispatch_t source,
 					      uint32_t return_adjust)
 {
-	int slot;
+	int cur;
 	int pick;
+	int app;
 
 	if (!kernel || !frame)
 		return frame;
 #if ZZAPP_PERF_COUNTERS
 	zzapp_kernel_perf_switch_finished(kernel);
 #endif
-	slot = zzapp_kernel_current_thread();
+	cur = zzapp_kernel_current_thread();
+	app = cur >= 0 && (uint32_t)cur < kernel->capacity;
 #if ZZAPP_PERF_COUNTERS
-	kernel_perf_tlb_leave(kernel, slot);
+	kernel_perf_tlb_leave(kernel, cur);
 #endif
 	/* The interval since this context was dispatched, not a fixed quantum
 	 * and not zero on a voluntary handoff. */
@@ -995,7 +1238,7 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 		kernel->idle = 0U;
 		if (was_idle)
 			kernel->idle_ticks += elapsed;
-		if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS && frame)
+		if (app && frame)
 			privileged = (frame->spsr & 0x1fU) != ZZAPP_KERNEL_APP_CPSR;
 		zzapp_kernel_advance(kernel, elapsed);
 		if (kernel->now - kernel->window_start >
@@ -1004,8 +1247,8 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 			kernel->service_in_window = 0;
 		}
 		if (elapsed != 0U && !was_idle) {
-			if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS)
-				charge_slice(kernel, (uint32_t)slot, elapsed,
+			if (app)
+				charge_slice(kernel, (uint32_t)cur, elapsed,
 					     privileged);
 			else {
 				kernel->service_ticks += elapsed;
@@ -1013,8 +1256,9 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 			}
 		}
 	}
-	if (slot >= 0 && slot < (int)ZZAPP_KERNEL_APP_SLOTS) {
-		context_save(&kernel->threads[slot].context, frame, return_adjust);
+	if (app) {
+		context_save(&thread_at(kernel, (uint32_t)cur)->context, frame,
+			     return_adjust);
 		pick = zzapp_kernel_dispatch(kernel, source, 0U);
 	} else {
 		context_save(&kernel->system_context, frame, return_adjust);
@@ -1030,62 +1274,70 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 	if (pick < 0)
 		return frame;
 	zzapp_kernel_set_current_thread(pick);
+	/* The SVC vector builds its compact frames at the top of this stack. */
 	zzapp_kernel_svc_stack_top =
-		(uintptr_t)scheduler_core1_app_stack_top((uint32_t)pick);
+		(uintptr_t)((const zzapp_rec_t *)thread_at(kernel,
+			(uint32_t)pick))->hdr.kstack_top;
 	zzapp_kernel_switch_address_space((uint32_t)pick);
 #if ZZAPP_PERF_COUNTERS
 	kernel_perf_tlb_enter(kernel, pick);
 	zzapp_kernel_perf_request_report(kernel, (uint32_t)pick, 0);
 #endif
-	return context_restore(&kernel->threads[pick].context, frame, return_adjust);
+	return context_restore(&thread_at(kernel, (uint32_t)pick)->context,
+			       frame, return_adjust);
 }
 
 
 
-void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t pid,
 		uint32_t elapsed_ms)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS ||
-	    kernel->threads[slot].state == ZZAPP_THREAD_BLOCKED)
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+	if (!thread || thread->state == ZZAPP_THREAD_BLOCKED)
 		return;
-	kernel->threads[slot].svc_ticks += elapsed_ms;
+	thread->svc_ticks += elapsed_ms;
 }
 
 static void wake_api_waiters(zzapp_kernel_t *kernel)
 {
-	uint32_t slot;
+	uint32_t i;
 
-	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
-		if (!kernel->api_waiting[slot] &&
-		    !kernel->api_resume_waiting[slot])
+	for (i = 0U; i < kernel->run_count; i++) {
+		uint32_t pid = kernel->run[i];
+		zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+		if (!words->api_waiting && !words->api_resume_waiting)
 			continue;
-		kernel->api_waiting[slot] = 0U;
-		kernel->api_resume_waiting[slot] = 0U;
-		kernel->api_wait_sequence[slot] = 0U;
-		(void)zzapp_kernel_wake(kernel, slot, ZZAPP_WAKE_READY);
+		words->api_waiting = 0U;
+		words->api_resume_waiting = 0U;
+		words->api_wait_sequence = 0U;
+		(void)zzapp_kernel_wake(kernel, pid, ZZAPP_WAKE_READY);
 	}
-
 }
 
 static void handoff_api_lock(zzapp_kernel_t *kernel)
 {
-	uint32_t slot;
-	uint32_t next = ZZAPP_KERNEL_APP_SLOTS;
+	uint32_t i;
+	uint32_t next = ZZAPP_PID_NONE;
 
-	kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
-	for (slot = 0U; slot < ZZAPP_KERNEL_APP_SLOTS; slot++) {
-		if (!kernel->api_waiting[slot] ||
-		    kernel->threads[slot].state == ZZAPP_THREAD_STOPPED)
+	kernel->api_handoff = ZZAPP_PID_NONE;
+	for (i = 0U; i < kernel->run_count; i++) {
+		uint32_t pid = kernel->run[i];
+		zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+		if (!words->api_waiting ||
+		    kernel_thread(kernel, pid)->state == ZZAPP_THREAD_STOPPED)
 			continue;
-		if (next == ZZAPP_KERNEL_APP_SLOTS ||
-		    (int32_t)(kernel->api_wait_sequence[slot] -
-			      kernel->api_wait_sequence[next]) < 0)
-			next = slot;
+		if (next == ZZAPP_PID_NONE ||
+		    (int32_t)(words->api_wait_sequence -
+			      kernel_words(kernel, next)->api_wait_sequence) < 0)
+			next = pid;
 	}
-	if (next == ZZAPP_KERNEL_APP_SLOTS)
+	if (next == ZZAPP_PID_NONE)
 		return;
-	kernel->api_waiting[next] = 0U;
-	kernel->api_wait_sequence[next] = 0U;
+	kernel_words(kernel, next)->api_waiting = 0U;
+	kernel_words(kernel, next)->api_wait_sequence = 0U;
 	kernel->api_handoff = next;
 	(void)zzapp_kernel_wake(kernel, next, ZZAPP_WAKE_READY);
 }
@@ -1098,7 +1350,7 @@ static void release_api_lock(zzapp_kernel_t *kernel)
 	kernel->api_lock_depth = 0U;
 	/* Preserve a selected waiter while its deferred service pass runs. */
 	if (owner == ZZAPP_KERNEL_SYSTEM_OWNER &&
-	    kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS) {
+	    kernel->api_handoff != ZZAPP_PID_NONE) {
 		kernel->api_handoff_service_deferred = 0U;
 		return;
 	}
@@ -1107,7 +1359,7 @@ static void release_api_lock(zzapp_kernel_t *kernel)
 	/* A service request that arrived during one API body runs before this
 	 * reservation, unless its service-window budget is exhausted. */
 	if (owner >= 0 && kernel->service_due &&
-	    kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS)
+	    kernel->api_handoff != ZZAPP_PID_NONE)
 		kernel->api_handoff_service_deferred = 1U;
 }
 
@@ -1117,7 +1369,7 @@ void zzapp_kernel_reset_lock(zzapp_kernel_t *kernel)
 		return;
 	kernel->api_lock_owner = -1;
 	kernel->api_lock_depth = 0U;
-	kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+	kernel->api_handoff = ZZAPP_PID_NONE;
 	kernel->api_handoff_service_deferred = 0U;
 	wake_api_waiters(kernel);
 }
@@ -1131,7 +1383,7 @@ int zzapp_kernel_system_lock(zzapp_kernel_t *kernel)
 		return 0;
 	}
 	if (kernel->api_lock_owner >= 0 ||
-	    (kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS &&
+	    (kernel->api_handoff != ZZAPP_PID_NONE &&
 	     !kernel->api_handoff_service_deferred))
 		return -1;
 	kernel->api_lock_owner = ZZAPP_KERNEL_SYSTEM_OWNER;
@@ -1156,14 +1408,14 @@ int zzapp_kernel_system_unlock(zzapp_kernel_t *kernel)
 	return 0;
 }
 
-int zzapp_kernel_api_fault_release(zzapp_kernel_t *kernel, uint32_t slot)
+int zzapp_kernel_api_fault_release(zzapp_kernel_t *kernel, uint32_t pid)
 {
 	uint32_t irq_state;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!kernel_thread(kernel, pid))
 		return -1;
 	irq_state = smp_local_irq_save();
-	if (kernel->api_lock_owner != (int)slot) {
+	if (kernel->api_lock_owner != (int)pid) {
 		smp_local_irq_restore(irq_state);
 		return -1;
 	}
@@ -1172,41 +1424,43 @@ int zzapp_kernel_api_fault_release(zzapp_kernel_t *kernel, uint32_t slot)
 	return 0;
 }
 
-int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot)
+int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t pid)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+	if (!words)
 		return -1;
-	if (kernel->api_lock_owner == (int)slot) {
+	if (kernel->api_lock_owner == (int)pid) {
 		kernel->api_lock_depth++;
 		return 0;
 	}
 	if (kernel->api_lock_owner >= 0 ||
 	    kernel->api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER ||
-	    (kernel->api_handoff < ZZAPP_KERNEL_APP_SLOTS &&
-	     kernel->api_handoff != slot)) {
-		if (!kernel->api_waiting[slot]) {
-			kernel->api_waiting[slot] = 1U;
-			kernel->api_wait_sequence[slot] = ++kernel->api_wait_serial;
+	    (kernel->api_handoff != ZZAPP_PID_NONE &&
+	     kernel->api_handoff != pid)) {
+		if (!words->api_waiting) {
+			words->api_waiting = 1U;
+			words->api_wait_sequence = ++kernel->api_wait_serial;
 		}
 		return -1;
 	}
-	kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+	kernel->api_handoff = ZZAPP_PID_NONE;
 	kernel->api_handoff_service_deferred = 0U;
-	kernel->api_waiting[slot] = 0U;
-	kernel->api_wait_sequence[slot] = 0U;
-	kernel->api_lock_owner = (int)slot;
+	words->api_waiting = 0U;
+	words->api_wait_sequence = 0U;
+	kernel->api_lock_owner = (int)pid;
 	kernel->api_lock_depth = 1U;
 	return 0;
 }
 
-int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot)
+int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t pid)
 {
 	uint32_t irq_state;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!kernel_thread(kernel, pid))
 		return -1;
 	irq_state = smp_local_irq_save();
-	if (kernel->api_lock_owner != (int)slot) {
+	if (kernel->api_lock_owner != (int)pid) {
 		smp_local_irq_restore(irq_state);
 		return -1;
 	}
@@ -1219,44 +1473,46 @@ int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot)
 /* An API wait releases the lock before parking.  Reserve the next handoff
  * only after its event wakes it, so the service thread cannot overtake the
  * suspended API body or spuriously complete an unready wait. */
-static void register_api_waiter(zzapp_kernel_t *kernel, uint32_t slot)
+static void register_api_waiter(zzapp_kernel_t *kernel, uint32_t pid)
 {
-	if (!kernel->api_waiting[slot]) {
-		kernel->api_waiting[slot] = 1U;
-		kernel->api_wait_sequence[slot] = ++kernel->api_wait_serial;
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+	if (!words->api_waiting) {
+		words->api_waiting = 1U;
+		words->api_wait_sequence = ++kernel->api_wait_serial;
 	}
 }
 
-int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot)
+int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t pid)
 {
 	uint32_t irq_state;
 	int rc;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!kernel_thread(kernel, pid))
 		return -1;
 	irq_state = smp_local_irq_save();
-	if (kernel->api_lock_owner == (int)slot)
+	if (kernel->api_lock_owner == (int)pid)
 		release_api_lock(kernel);
-	rc = zzapp_kernel_block(kernel, slot);
+	rc = zzapp_kernel_block(kernel, pid);
 	if (rc == 0)
-		kernel->api_resume_waiting[slot] = 1U;
+		kernel_words(kernel, pid)->api_resume_waiting = 1U;
 	smp_local_irq_restore(irq_state);
 	return rc;
 }
 
-int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t slot, uint64_t sleep_ms)
+int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_ms)
 {
 	uint32_t irq_state;
 	uint64_t deadline;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!kernel_thread(kernel, pid))
 		return -1;
 	irq_state = smp_local_irq_save();
-	if (kernel->api_lock_owner == (int)slot)
+	if (kernel->api_lock_owner == (int)pid)
 		release_api_lock(kernel);
 	deadline = zzapp_kernel_now(kernel) + sleep_ms;
-	if (zzapp_kernel_sleep(kernel, slot, deadline) == 0)
-		kernel->api_resume_waiting[slot] = 1U;
+	if (zzapp_kernel_sleep(kernel, pid, deadline) == 0)
+		kernel_words(kernel, pid)->api_resume_waiting = 1U;
 	smp_local_irq_restore(irq_state);
 	return 0;
 }
@@ -1270,26 +1526,27 @@ static int surface_overlaps(uint32_t base_a, uint32_t bytes_a,
 	return end_a > base_b && end_b > base_a;
 }
 
-int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t pid,
 			      uint32_t generation, uint32_t base, uint32_t bytes)
 {
 	zzapp_kernel_resources_t *resource;
 	uint32_t i;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS || !base || !bytes ||
+	if (!kernel_thread(kernel, pid) || !base || !bytes ||
 	    (base & (ZZAPP_KERNEL_PAGE_BYTES - 1U)) != 0U ||
 	    (bytes & (ZZAPP_KERNEL_PAGE_BYTES - 1U)) != 0U ||
 	    base + bytes < base)
 		return -1;
-	resource = &kernel->resources[slot];
+	resource = &kernel_words(kernel, pid)->resources;
 	if (resource->surface_bytes != 0U)
 		return resource->surface_base == base &&
 		       resource->surface_bytes == bytes &&
 		       resource->surface_generation == generation ? 0 : -1;
-	for (i = 0; i < ZZAPP_KERNEL_APP_SLOTS; i++) {
-		const zzapp_kernel_resources_t *other = &kernel->resources[i];
+	for (i = 0U; i < kernel->capacity; i++) {
+		const zzapp_kernel_resources_t *other =
+			&kernel_words(kernel, i)->resources;
 
-		if (i != slot && other->surface_bytes != 0U &&
+		if (i != pid && other->surface_bytes != 0U &&
 		    surface_overlaps(base, bytes, other->surface_base,
 				     other->surface_bytes))
 			return -1;
@@ -1299,24 +1556,27 @@ int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
 	resource->surface_generation = generation;
 	return 0;
 }
-void zzapp_kernel_surface_unbind(zzapp_kernel_t *kernel, uint32_t slot)
+void zzapp_kernel_surface_unbind(zzapp_kernel_t *kernel, uint32_t pid)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+	if (!words)
 		return;
-	kernel->resources[slot].surface_base = 0U;
-	kernel->resources[slot].surface_bytes = 0U;
-	kernel->resources[slot].surface_generation = 0U;
+	words->resources.surface_base = 0U;
+	words->resources.surface_bytes = 0U;
+	words->resources.surface_generation = 0U;
 }
 
 
-int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t pid,
 			    int direct_card_route)
 {
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
 	zzapp_kernel_resources_t *resource;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!words)
 		return -1;
-	resource = &kernel->resources[slot];
+	resource = &words->resources;
 	if (resource->direct_audio)
 		return -1;
 	if (direct_card_route && kernel->direct_audio_count >= 2U)
@@ -1327,93 +1587,103 @@ int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t slot,
 	return 0;
 }
 
-void zzapp_kernel_audio_close(zzapp_kernel_t *kernel, uint32_t slot)
+void zzapp_kernel_audio_close(zzapp_kernel_t *kernel, uint32_t pid)
 {
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
 	zzapp_kernel_resources_t *resource;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!words)
 		return;
-	resource = &kernel->resources[slot];
+	resource = &words->resources;
 	if (resource->direct_audio == 1U && kernel->direct_audio_count != 0U)
 		kernel->direct_audio_count--;
 	resource->direct_audio = 0U;
 }
 
-int zzapp_kernel_gl_bind(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_gl_bind(zzapp_kernel_t *kernel, uint32_t pid,
 			 uint32_t generation)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+	if (!words)
 		return -1;
 	if (kernel->gl_owner >= 0)
-		return kernel->gl_owner == (int)slot &&
+		return kernel->gl_owner == (int)pid &&
 		       kernel->gl_generation == generation ? 0 : -1;
-	kernel->gl_owner = (int)slot;
+	kernel->gl_owner = (int)pid;
 	kernel->gl_generation = generation;
-	kernel->resources[slot].gl_generation = generation;
+	words->resources.gl_generation = generation;
 	return 0;
 }
 
-void zzapp_kernel_gl_unbind(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_gl_unbind(zzapp_kernel_t *kernel, uint32_t pid,
 			    uint32_t generation)
 {
-	if (kernel && kernel->gl_owner == (int)slot &&
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+	if (words && kernel->gl_owner == (int)pid &&
 	    kernel->gl_generation == generation) {
 		kernel->gl_owner = -1;
 		kernel->gl_generation = 0U;
-		kernel->resources[slot].gl_generation = 0U;
+		words->resources.gl_generation = 0U;
 	}
 }
 
-int zzapp_kernel_session_open(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_session_open(zzapp_kernel_t *kernel, uint32_t pid,
 			      int audio_session)
 {
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
 	uint32_t *sessions;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!words)
 		return -1;
-	sessions = audio_session ? &kernel->resources[slot].audio_sessions :
-				   &kernel->resources[slot].image_sessions;
+	sessions = audio_session ? &words->resources.audio_sessions :
+				   &words->resources.image_sessions;
 	if (*sessions >= ZZAPP_KERNEL_SESSION_LIMIT)
 		return -1;
 	(*sessions)++;
 	return 0;
 }
 
-void zzapp_kernel_session_close(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_session_close(zzapp_kernel_t *kernel, uint32_t pid,
 			       int audio_session)
 {
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
 	uint32_t *sessions;
 
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	if (!words)
 		return;
-	sessions = audio_session ? &kernel->resources[slot].audio_sessions :
-				   &kernel->resources[slot].image_sessions;
+	sessions = audio_session ? &words->resources.audio_sessions :
+				   &words->resources.image_sessions;
 	if (*sessions != 0U)
 		(*sessions)--;
 }
 
-void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot)
+void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t pid)
 {
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+	zzapp_rec_kernel_t *words = kernel_words(kernel, pid);
+
+	if (!thread)
 		return;
-	zzapp_kernel_audio_close(kernel, slot);
-	zzapp_kernel_gl_unbind(kernel, slot,
-			      kernel->resources[slot].gl_generation);
-	memset(&kernel->resources[slot], 0, sizeof(kernel->resources[slot]));
-	kernel->threads[slot].wake_reason = ZZAPP_WAKE_CANCELLED;
-	kernel->threads[slot].state = ZZAPP_THREAD_STOPPED;
-	kernel->threads[slot].quantum_left = 0U;
-	if (kernel->active == slot)
-		kernel->active = NO_ACTIVE;
-	if (kernel->api_lock_owner == (int)slot)
+	zzapp_kernel_audio_close(kernel, pid);
+	zzapp_kernel_gl_unbind(kernel, pid, words->resources.gl_generation);
+	memset(&words->resources, 0, sizeof(words->resources));
+	thread->wake_reason = ZZAPP_WAKE_CANCELLED;
+	thread->state = ZZAPP_THREAD_STOPPED;
+	thread->quantum_left = 0U;
+	run_remove(kernel, pid);
+	if (kernel->active == pid)
+		kernel->active = ZZAPP_PID_NONE;
+	if (kernel->api_lock_owner == (int)pid)
 		release_api_lock(kernel);
-	else if (kernel->api_handoff == slot) {
-		kernel->api_handoff = ZZAPP_KERNEL_APP_SLOTS;
+	else if (kernel->api_handoff == pid) {
+		kernel->api_handoff = ZZAPP_PID_NONE;
 		handoff_api_lock(kernel);
 	}
-	kernel->api_waiting[slot] = 0U;
-	kernel->api_resume_waiting[slot] = 0U;
-	kernel->api_wait_sequence[slot] = 0U;
+	words->api_waiting = 0U;
+	words->api_resume_waiting = 0U;
+	words->api_wait_sequence = 0U;
 }
 
 void zzapp_kernel_stack_paint(uint8_t *stack, uint32_t bytes)

@@ -366,27 +366,23 @@ static void test_app_decoder_owners_survive_minigl_unload(void)
     uint32_t module_owner;
     uint32_t app_block;
     uint32_t module_block;
-    uint32_t slot;
-    uint32_t generation;
-    uint32_t span = (SDK_MEDIA_APP_INSTANCE_LIMIT -
-                     SDK_MEDIA_APP_INSTANCE_BASE) >> 2;
+    uint32_t serial;
     int namespace_ok = 1;
 
     reset_resources();
-    for (generation = 0U; generation < span; ++generation) {
-        for (slot = 0U; slot < 4U; ++slot) {
-            app_owner = sdk_compression_app_owner_bits(slot, generation);
-            if (CARD_POOL_OWNER_CLASS(app_owner) != CARD_POOL_CLASS_MEDIA ||
-                (app_owner & ZZM_MODULE_OWNER_TAG) != 0U ||
-                (app_owner & 0x00ffffffU) < SDK_MEDIA_APP_INSTANCE_BASE ||
-                (app_owner & 0x00ffffffU) >= SDK_MEDIA_APP_INSTANCE_LIMIT ||
-                app_owner == SDK_DECODE_POOL_OWNER)
-                namespace_ok = 0;
-        }
+    /* Every admission serial, 1 to 0xffffff, maps into the app range. */
+    for (serial = 1U; serial <= 0x00ffffffU; ++serial) {
+        app_owner = sdk_compression_app_owner_bits(serial);
+        if (CARD_POOL_OWNER_CLASS(app_owner) != CARD_POOL_CLASS_MEDIA ||
+            (app_owner & ZZM_MODULE_OWNER_TAG) != 0U ||
+            (app_owner & 0x00ffffffU) < SDK_MEDIA_APP_INSTANCE_BASE ||
+            (app_owner & 0x00ffffffU) >= SDK_MEDIA_APP_INSTANCE_LIMIT ||
+            app_owner == SDK_DECODE_POOL_OWNER)
+            namespace_ok = 0;
     }
     CHECK(namespace_ok);
 
-    app_owner = sdk_compression_app_owner_bits(0U, 1U);
+    app_owner = sdk_compression_app_owner_bits(1U);
     module_owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA,
                                    ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL));
     app_block = card_pool_alloc(&card_pool, CARD_POOL_PAGE_BYTES, app_owner);

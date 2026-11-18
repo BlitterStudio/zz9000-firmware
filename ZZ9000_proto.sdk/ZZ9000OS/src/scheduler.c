@@ -201,6 +201,19 @@ int scheduler_core1_clean_dcache_wait(taskq_shared_t *shared,
 	publish(context);
 	return -1;
 }
+int scheduler_core1_service_park_request_with(
+    taskq_shared_t *shared, scheduler_core1_clean_cache_fn clean_cache,
+    scheduler_core1_clean_publish_fn publish, void *context)
+{
+	if (!shared || !clean_cache || !publish ||
+	    !__atomic_load_n(&shared->core1_park_request, __ATOMIC_ACQUIRE))
+		return 0;
+	clean_cache(context);
+	__atomic_store_n(&shared->core1_parked, 1U, __ATOMIC_RELEASE);
+	publish(context);
+	return 1;
+}
+
 
 
 
