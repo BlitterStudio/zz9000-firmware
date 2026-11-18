@@ -400,16 +400,17 @@ struct SDKModuleStatusPayload {
 #define SDK_OP_MEDIA_SESSION_CLOSE     0x0b0dU
 
 #define SDK_OP_APP_QUERY               0x0c00U
-#define SDK_OP_APP_ALLOC_WINDOW        0x0c01U
+#define SDK_OP_APP_CLAIM               0x0c01U
 #define SDK_OP_APP_LOAD_BEGIN          0x0c02U
 #define SDK_OP_APP_LOAD_CHUNK          0x0c03U
 #define SDK_OP_APP_LOAD_END            0x0c04U
 #define SDK_OP_APP_START               0x0c05U
 #define SDK_OP_APP_STOP                0x0c06U
-#define SDK_OP_APP_STATUS              0x0c07U
-#define SDK_OP_APP_DISPLAY_BIND        0x0c08U
+/* 0x0c07 and 0x0c08 are retired (the client reads the control block and
+ * binds the display by completing AAR_OP_DISPLAY_OPEN). */
 #define SDK_OP_APP_LIST                0x0c09U
 #define SDK_OP_APP_RELEASE             0x0c0aU
+#define SDK_OP_APP_KICK                0x0c0bU
 
 struct SDKMediaSessionBeginPayload {
 	uint8_t video_codec[4];

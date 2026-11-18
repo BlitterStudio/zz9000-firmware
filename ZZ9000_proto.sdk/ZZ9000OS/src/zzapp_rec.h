@@ -159,7 +159,9 @@ typedef struct {
 	uint32_t load_step;
 	uint32_t refusal_reason;
 	uint32_t terminal_reason;
-	uint32_t reserved[8];
+	/* ZZAPP_CLIENT_* the client announced in LOAD_BEGIN; 0 before it. */
+	uint32_t client_caps;
+	uint32_t reserved[7];
 } zzapp_rec_claim_t;
 
 /* Host state of one app (was struct zzapp_host_slot in zzapp_host.c). */

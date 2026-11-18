@@ -17,9 +17,12 @@
 /* P96 alloc ABI guarantees 256-byte aligned surfaces. */
 #define SURFACE_ALLOCATOR_ALIGNMENT 256u
 
-/* P96 allocates a bitmap per Workbench window/icon backing store, so
- * size the table for hundreds of concurrent bitmaps. 8 bytes per entry. */
-#define SURFACE_ALLOCATOR_MAX_BLOCKS 1024u
+/* P96 allocates a bitmap per Workbench window/icon backing store, and every
+ * app claim holds up to five blocks (its transport pair, service, data,
+ * audio ring and load buffers) besides its own shared buffers, so size the
+ * table for hundreds of apps and bitmaps together. 8 bytes per entry (32 KiB
+ * of BSS). */
+#define SURFACE_ALLOCATOR_MAX_BLOCKS 4096u
 
 /* Initialize (or reset) the allocator over [base, base+size). Drops all
  * existing allocations; called at boot and on Amiga reset. */
