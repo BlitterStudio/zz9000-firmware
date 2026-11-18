@@ -975,6 +975,31 @@ int zzapp_loader_set_generation(uint32_t generation)
     return AAR_OK;
 }
 
+/* Another record's staging block is still held (its LOAD_END has not copied
+ * the image out). Staging is 16 MiB of class APP each, so a few loads that
+ * start together can use the whole class limit between them although the
+ * card has memory to spare. */
+static int staging_held_by_others(void)
+{
+    uint32_t self = loader_pid();
+    uint32_t pid;
+
+    for (pid = 0U; pid < zzapp_rec_capacity(); pid++) {
+        zzapp_rec_t *rec;
+        const struct loader_slot *other;
+
+        if (pid == self || zzapp_rec_state(pid) == ZZAPP_REC_FREE)
+            continue;
+        rec = zzapp_rec_by_pid(pid);
+        if (!rec)
+            continue;
+        other = (const struct loader_slot *)(const void *)rec->loader.bytes;
+        if (other->mem && other->bytes != 0U)
+            return 1;
+    }
+    return 0;
+}
+
 int zzapp_loader_begin(void)
 {
     uint32_t gen;
@@ -1000,6 +1025,10 @@ int zzapp_loader_begin(void)
     addr = pool_alloc(ZZAPP_FILE_MAX, owner);
 #endif
     if (!addr) {
+        /* Short only because other claims hold staging: not a refusal. The
+         * claim stays as it is and the client asks again (BUSY). */
+        if (staging_held_by_others())
+            return AAR_E_BUSY;
         zzapp_services_note_refusal(AAR_REASON_MEMORY);
         zzapp_loader_set_state(ZZAPP_ST_IDLE);
         return AAR_E_NOMEM;

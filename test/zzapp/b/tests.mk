@@ -62,7 +62,8 @@ $(foreach t,$(B_STANDALONE_TESTS),$(eval $(call B_STANDALONE_RULE,$(t))))
 # execution of ARM user code substituted. There are no launcher windows: the
 # claims are bounded by the record arena alone.
 B_RT_TESTS := many_apps_test load_end_status_test host_visible_limit_test \
-	teardown_test reset_lifecycle_test exit_reset_test lost_client_test
+	teardown_test reset_lifecycle_test exit_reset_test lost_client_test \
+	concurrent_load_test
 B_RT_DEPS := b/rt_env.h mock_client.h aar_note_image.h \
 	$(FW)/zzapp_services.c $(FW)/zzapp_services.h
 # Per suite: B_RTX_<name> extra link inputs, B_RTF_<name> extra flags.

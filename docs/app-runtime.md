@@ -623,8 +623,12 @@ the claim.
 `LOAD_BEGIN` then allocates the load buffer and the deferred reply (16 bytes)
 names it: the buffer token at 0, its size at 4 (72 KiB), the largest
 `LOAD_CHUNK` at 8 (64 KiB) and the offset of the argv area at 12 (64 KiB). It
-also takes a 16 MiB staging block of class `APP` (`ZZAPP_FILE_MAX`); if the
-pool cannot give it the claim ends with reason `MEMORY`. `LOAD_CHUNK` places
+also takes a 16 MiB staging block of class `APP` (`ZZAPP_FILE_MAX`). The class
+is capped at 96 MiB, so six loads that have not reached `LOAD_END` use it all.
+When the pool cannot give the block and another claim still holds its staging,
+`LOAD_BEGIN` answers `SDK_STATUS_BUSY` and the claim stays `CLAIMED`: the
+client asks again once a load has finished. When no other claim holds staging
+the claim ends with reason `MEMORY`. `LOAD_CHUNK` places
 `length` bytes from offset 0 of the load buffer at `file_off` of the image;
 nothing is invalidated, because the buffer is cacheable memory. `LOAD_END`
 commits the image on its first step, all or nothing and before any zeroing
