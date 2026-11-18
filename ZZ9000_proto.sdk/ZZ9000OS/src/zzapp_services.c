@@ -21,6 +21,7 @@
 #include "zzapp_runtime.h"
 #include "zzapp_rec.h"
 #include "zzapp_xport.h"
+#include "memorymap.h"
 void zzapp_host_yield_wait(void);
 void __attribute__((weak)) zzapp_host_latch_stop(uint32_t slot)
 {
@@ -79,7 +80,6 @@ __attribute__((weak)) int scheduler_core1_available(void) { return 1; }
 #include <stdio.h>
 #include "audio_fabric.h"
 #include "audio_fabric_internal.h"
-#include "memorymap.h"
 #include "l2_maint.h"
 #include "scheduler.h"
 #include "sdk_aperture_layout.h"
@@ -372,6 +372,19 @@ static uint32_t deferred_poll_cursor;
 static struct zzapp_service_runtime *display_mailbox_state;
 static uint32_t display_mailbox_pid = ZZAPP_PID_NONE;
 static int slot_busy_test[4];
+/* Opt-in experiment state. Measurements are written under the lifecycle
+ * lock; flags change only while there are no held claims. */
+static struct {
+	uint32_t flags;
+	uint32_t lock_calls;
+	uint64_t lock_us;
+	uint32_t lock_max_us;
+	uint32_t ring_address;
+	uint32_t ring_bytes;
+} app_perf;
+
+static unsigned service_context(void);
+static uint64_t now_us(void);
 #ifndef ZZAPP_HOST_TEST
 static sdk_smp_lock_t g_slot_state_lock = SDK_SMP_LOCK_INIT;
 #else
@@ -382,12 +395,27 @@ static void (*yield_hook)(void);
 static uint64_t (*time_hook)(void);
 static void slot_state_lock_acquire(void)
 {
+	uint64_t started = 0U;
+	int timed = (__atomic_load_n(&app_perf.flags, __ATOMIC_RELAXED) &
+		     ZZ9K_APP_PERF_LOCK_TIMING) != 0U && service_context() == 1U;
+
+	if (timed)
+		started = now_us();
 #ifdef ZZAPP_HOST_TEST
 	while (__atomic_test_and_set(&g_slot_state_test_lock, __ATOMIC_ACQUIRE))
 		;
 #else
 	sdk_smp_lock_acquire(&g_slot_state_lock);
 #endif
+	if (timed && (app_perf.flags & ZZ9K_APP_PERF_LOCK_TIMING)) {
+		uint64_t elapsed = now_us() - started;
+
+		app_perf.lock_calls++;
+		app_perf.lock_us += elapsed;
+		if (elapsed > app_perf.lock_max_us)
+			app_perf.lock_max_us = elapsed > UINT32_MAX ?
+				UINT32_MAX : (uint32_t)elapsed;
+	}
 }
 
 static void slot_state_lock_release(void)
@@ -399,7 +427,6 @@ static void slot_state_lock_release(void)
 #endif
 }
 
-static unsigned service_context(void);
 static int audio_handoff_pending(const struct zzapp_service_runtime *state);
 static void finish_shell_release(zzapp_rec_t *rec);
 static int discard_deferred(zzapp_rec_t *rec);
@@ -451,6 +478,60 @@ static zzapp_rec_t *service_rec(void)
 	if (pid == ZZAPP_PID_NONE || zzapp_rec_state(pid) == ZZAPP_REC_FREE)
 		return NULL;
 	return zzapp_rec_by_pid(pid);
+}
+
+uint16_t zzapp_services_perf_diag(const uint8_t *req, uint16_t req_len,
+				  uint8_t *reply, uint16_t *reply_len)
+{
+	uint32_t action;
+	uint32_t flags;
+	uint32_t held = 0U;
+	uint32_t pid;
+
+	if (!reply_len)
+		return SDK_STATUS_BAD_REQUEST;
+	*reply_len = 0U;
+	if (!req || !reply || req_len != ZZ9K_APP_PERF_REQUEST_BYTES ||
+	    zzapp_get_be32(req) != ZZ9K_APP_PERF_TAG)
+		return SDK_STATUS_BAD_REQUEST;
+	action = zzapp_get_be32(req + 4U);
+	flags = zzapp_get_be32(req + 8U);
+	if (action > ZZ9K_APP_PERF_RESET || (flags & ~ZZ9K_APP_PERF_FLAGS) ||
+	    (action != ZZ9K_APP_PERF_SET && flags != 0U))
+		return SDK_STATUS_BAD_REQUEST;
+	slot_state_lock_acquire();
+	for (pid = 0U; pid < zzapp_rec_capacity(); pid++)
+		held += zzapp_rec_state(pid) != ZZAPP_REC_FREE;
+	if (action == ZZ9K_APP_PERF_SET && held != 0U) {
+		slot_state_lock_release();
+		return SDK_STATUS_BUSY;
+	}
+	if (action == ZZ9K_APP_PERF_SET)
+		__atomic_store_n(&app_perf.flags, flags, __ATOMIC_RELAXED);
+	if (action != ZZ9K_APP_PERF_QUERY) {
+		app_perf.lock_calls = 0U;
+		app_perf.lock_us = 0U;
+		app_perf.lock_max_us = 0U;
+		app_perf.ring_address = 0U;
+		app_perf.ring_bytes = 0U;
+	}
+	memset(reply, 0, ZZ9K_APP_PERF_REPLY_BYTES);
+	zzapp_put_be32(reply, ZZ9K_APP_PERF_TAG);
+	zzapp_put_be32(reply + 4U, ZZ9K_APP_PERF_VERSION);
+	zzapp_put_be32(reply + ZZ9K_APP_PERF_R_FLAGS, app_perf.flags);
+	zzapp_put_be32(reply + ZZ9K_APP_PERF_R_LOCK_CALLS, app_perf.lock_calls);
+	zzapp_put_be32(reply + ZZ9K_APP_PERF_R_LOCK_US_HI,
+		       (uint32_t)(app_perf.lock_us >> 32));
+	zzapp_put_be32(reply + ZZ9K_APP_PERF_R_LOCK_US_LO,
+		       (uint32_t)app_perf.lock_us);
+	zzapp_put_be32(reply + ZZ9K_APP_PERF_R_LOCK_MAX_US,
+		       app_perf.lock_max_us);
+	zzapp_put_be32(reply + ZZ9K_APP_PERF_R_RING, app_perf.ring_address);
+	zzapp_put_be32(reply + ZZ9K_APP_PERF_R_RING_BYTES, app_perf.ring_bytes);
+	zzapp_put_be32(reply + ZZ9K_APP_PERF_R_CLAIMS, held);
+	*reply_len = ZZ9K_APP_PERF_REPLY_BYTES;
+	slot_state_lock_release();
+	return SDK_STATUS_OK;
 }
 
 static zzapp_proc_t *service_proc(void)
@@ -3670,9 +3751,14 @@ static int audio_attach(void)
 	    !audio_fabric_conversion_admissible(ZZAPP_AUDIO_RATE))
 		return AAR_E_BUSY;
 #endif
-	rc = zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO,
-				     ZZAPP_XPORT_AUDIO_BYTES(ZZAPP_AUDIO_FRAMES),
-				     &ring);
+	if (app_perf.flags & ZZ9K_APP_PERF_AUDIO_NC)
+		rc = zzapp_xport_block_alloc_range(rec, ZZAPP_XPORT_BLOCK_AUDIO,
+			ZZAPP_XPORT_AUDIO_BYTES(ZZAPP_AUDIO_FRAMES),
+			SDK_MAILBOX_Z3_RESERVE_END,
+			SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS, &ring);
+	else
+		rc = zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO,
+			ZZAPP_XPORT_AUDIO_BYTES(ZZAPP_AUDIO_FRAMES), &ring);
 	if (rc != AAR_OK)
 		return AAR_E_NOMEM;
 	if (grant_user_buffer(ring.token + zzapp_xport_env()->token_adjust,
@@ -3718,6 +3804,8 @@ static int audio_attach(void)
 		audio_fabric_producer_rate_set(slot, ZZAPP_AUDIO_RATE);
 	}
 #endif
+	app_perf.ring_address = ring.token + zzapp_xport_env()->token_adjust;
+	app_perf.ring_bytes = ring.bytes;
 	return AAR_OK;
 }
 

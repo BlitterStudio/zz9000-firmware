@@ -205,6 +205,12 @@ void zzapp_xport_publish_private(zzapp_rec_t *rec);
  */
 int zzapp_xport_block_alloc(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
 			    uint32_t bytes, zzapp_xport_buf_t *out);
+/* Same accounting and lifetime, but an explicit physical placement interval.
+ * Used by the audio placement diagnostic; no mapping attributes are changed. */
+int zzapp_xport_block_alloc_range(zzapp_rec_t *rec,
+				  zzapp_xport_block_kind_t kind,
+				  uint32_t bytes, uint32_t lo, uint32_t hi,
+				  zzapp_xport_buf_t *out);
 /* Return the block of `kind` (not the pair). AAR_OK also when absent. */
 int zzapp_xport_block_free(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind);
 /* 1 and *out filled when the block exists, else 0. */

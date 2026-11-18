@@ -822,3 +822,79 @@ and every live app table through the normal break-before-make path. Each
 affected section, large page, or small page receives the required cache,
 per-address TLB, and branch-predictor maintenance; core 0's unrelated
 translations remain valid.
+
+## Transport performance experiments
+
+`zz9k-info --app-perf query` reads the optional `DIAG_SCHED` app-performance
+diagnostic. An empty `DIAG_SCHED` request still returns the 24-byte scheduler
+version-2 reply. The tagged request and reply layout is in
+[`zz9k/app_perf.h`](../sdk/include/zz9k/app_perf.h). Unknown tags, lengths,
+actions and flag combinations return `BAD_REQUEST`. Older firmware can return
+its ordinary scheduler reply; the tool reports that as unsupported.
+
+The default mode is cacheable audio with lock timing off. The commands below
+change the mode without rebuilding or rebooting the card:
+
+```text
+zz9k-info --app-perf default
+zz9k-info --app-perf audio-nc
+zz9k-info --app-perf lock
+zz9k-info --app-perf audio-nc-lock
+```
+
+Mode changes require every app claim to have been released, including loading
+claims and retained or quarantined shells. The check and mode change hold the
+claim/release lifecycle lock. `BUSY` leaves the mode and measurements unchanged.
+A successful mode change clears the measurements. Modes survive app exit and
+an Amiga reset; a firmware restart restores defaults.
+
+`audio-nc` changes only the audio block allocation interval to
+`[0x08110000, 0x081c0000)`, the old audio-ring interval within the Normal
+non-cacheable mailbox section. The allocator still owns the pages, shared
+accounting and transport teardown still apply, and the app alias inherits the
+physical mapping's attributes. There is no MMU attribute rewrite and no
+cacheable fallback if that interval is full. Other users, including MiniGL,
+can allocate from the same interval. Default audio stays in the cacheable
+host-visible heap below `0x08100000`. The reply reports the last successful
+audio-open ARM address and allocation size since reset or mode selection;
+these fields do not grant access to a live ring.
+
+`lock` enables timing of core 1's lifecycle-lock acquisitions. `calls` is a
+32-bit wrapping count, `acquire_us` a 64-bit sum of elapsed microseconds, and
+`max_us` the largest elapsed acquisition, saturated at `UINT32_MAX`. Acquisition
+time includes the lock's IRQ-save and ownership work, any contention and
+interrupts or preemption between clock reads. It is an upper bound on lock
+waiting, not a count of spin cycles. Core 0's queries do not enter the
+measurements. The timing reads are skipped when timing is off; timing mode
+itself perturbs execution and should not be used to judge the frame-rate gate.
+No lease, deferred-op, audio-period or doorbell polling cadence changes.
+
+`zz9k-info --app-perf reset` clears measurements and the last-ring fields
+without changing the mode. It works while apps run. `query` returns a coherent
+snapshot without resetting it, also while apps run. If a core-1 acquisition
+straddles a reset, its elapsed time belongs to the epoch in which it completes.
+
+For a same-session `swquake.elf +timedemo demo1` comparison:
+
+1. Release all app claims, select `default`, and record the `query` output.
+   Run the identical binary with the existing LATEST/platform-audio launch
+   options three times. Query after each run to record the actual ring.
+2. Release the claims, select `audio-nc`, and repeat those three runs without
+   changing any other option. Repeat the default series to check drift.
+3. Repeat both placement series with `-nosound`. This is a negative control:
+   placement should have no effect when no audio ring is opened. A sound versus
+   `-nosound` difference on new firmware alone does not measure the sound-path
+   regression; the old firmware's matching `-nosound` result is also needed.
+4. Separately select `lock` with no claims held. Start the app, reset immediately
+   before a timedemo and query immediately after it. Subtract counter snapshots
+   if a reset cannot bracket the run, and divide the elapsed microseconds by
+   the demo's frame count. Repeat with `-nosound` and the same timing mode.
+   Allow for the extra frames between the commands and the demo boundary.
+   Compare the measured upper bound with the frame-time gap before attributing
+   that gap to lock contention.
+5. Release every claim and run `zz9k-info --app-perf default` to restore
+   cacheable audio and disable timing. Confirm `flags=0` with `query`.
+
+The transport regression is not qualified by these diagnostics alone. The card
+gate remains the same-session old/new timedemo result within 1 fps or 2 percent.
+
