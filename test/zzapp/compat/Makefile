@@ -5,7 +5,8 @@
 CC ?= cc
 ROOT := ../../..
 FW := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/src
-SDK := $(ROOT)/sdk/zzapp
+include $(ROOT)/sdk/aar.mk
+SDK := $(AAR_DIR)
 CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror -DZZAPP_HOST_TEST \
 	-I$(SDK)/include -I.. -I$(FW)
 

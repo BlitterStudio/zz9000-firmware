@@ -6,7 +6,8 @@
 
 CC ?= cc
 BUILD := build
-SDK := ../../sdk/zzapp
+include ../../sdk/aar.mk
+SDK := $(AAR_DIR)
 FW := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 HOST_CPPFLAGS := -DZZAPP_HOST_TEST -I$(SDK)/include -I. -I$(FW)
 HOST_CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror

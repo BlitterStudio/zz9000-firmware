@@ -76,6 +76,11 @@ echo "[firmware] toolchain: $(arm-none-eabi-gcc --version | head -1)"
 echo "[firmware] host cc:   $(${CC_FOR_BUILD:-cc} --version 2>/dev/null | head -1 || printf '%s' "${CC_FOR_BUILD:-cc}")"
 
 if [ "${#MAKE_ARGS[@]}" -eq 0 ] || [ "${MAKE_ARGS[0]}" != "clean" ] || [ "${#MAKE_ARGS[@]}" -gt 1 ]; then
+    # The ARM app SDK comes from BlitterStudio/aar at the commit in sdk/AAR_REF.
+    # Set AAR_DIR to build against your own aar checkout instead.
+    if [ -z "${AAR_DIR:-}" ]; then
+        sh sdk/scripts/fetch-aar.sh
+    fi
     bash ./build_libjpeg_turbo.sh
     bash ./build_libpng.sh
     bash ./build_lzma_sdk.sh

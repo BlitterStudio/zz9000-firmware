@@ -47,6 +47,27 @@ libvpx, and libopus before invoking `make -C ZZ9000_proto.sdk/ZZ9000OS`.
 Their sources and outputs are cached below
 `ZZ9000_proto.sdk/ZZ9000OS/build/deps/`.
 
+The ARM app SDK that the firmware and `test/zzapp` build against lives in
+[BlitterStudio/aar](https://github.com/BlitterStudio/aar), the Amiga ARM
+Runtime. `sdk/AAR_REF` pins the commit. `build_firmware.sh` runs
+`sh sdk/scripts/fetch-aar.sh`, which clones the repository into `sdk/aar/`
+(gitignored) or moves an existing checkout to that commit, and it refuses to
+touch a checkout with local changes. Run the script yourself before
+`make -C test/zzapp test`, `make -C test/zzapp/compat test`, or any direct
+`make -C ZZ9000_proto.sdk/ZZ9000OS`. `AAR_REPO` overrides the repository URL
+and may be a local path.
+
+To build against your own aar checkout, set `AAR_DIR` to it. Make and
+`build_firmware.sh` then skip the fetch:
+
+```bash
+AAR_DIR=$HOME/src/aar ./build_firmware.sh
+AAR_DIR=$HOME/src/aar make -C test/zzapp test
+```
+
+Without a checkout, the makefiles stop with an error that names the missing
+`include/zzapp.h`.
+
 To remove the firmware build tree before rebuilding, run:
 
 ```bash
@@ -289,7 +310,7 @@ Run the host checks for the area you changed before building the BOOT image.
 | JPEG, PNG, or WebP decoder | `make -C test/image test` |
 | FLAC decoder | `make -C test/flac test` |
 | Ogg Vorbis decoder | `make -C test/vorbis test` |
-| ARM app runtime | `make -C test/zzapp test` |
+| ARM app runtime | `make -C test/zzapp test` (needs the AAR checkout, see above) |
 
 The image, FLAC, and Vorbis suites also provide a `sanitize` target:
 

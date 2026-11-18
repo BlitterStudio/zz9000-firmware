@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <assert.h>
 
-#include "../../../sdk/zzapp/templates/mgl_conformance_matrix.h"
+#include "mgl_conformance_matrix.h"
 
 static void expect(mgl_probe_rgba actual, unsigned r, unsigned g, unsigned b,
                    unsigned a)

@@ -20,6 +20,8 @@
 *.cmake        text eol=lf
 CMakeLists.txt text eol=lf
 *.pin          text eol=lf
+AAR_REF        text eol=lf
+aar.mk         text eol=lf
 Dockerfile     text eol=lf
 *.ld           text eol=lf
 *.bif          text eol=lf

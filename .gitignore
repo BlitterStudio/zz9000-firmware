@@ -54,3 +54,5 @@ docs/plans
 # Python host-test bytecode
 __pycache__/
 *.pyc
+
+sdk/aar/

@@ -8,7 +8,9 @@ SPDX-License-Identifier: MIT
 `hello.elf`, `console.elf`, `pixels.elf`, `fault.elf`, `tone.elf`,
 `filter.elf`, and `echo.elf` are the API 0.2 templates
 `sdk/zzapp/templates/{hello,console,pixels,fault,tone,filter,echo}.c` as they
-stood at firmware commit `94037ca6`.
+stood at firmware commit `94037ca6`. The SDK has since moved to
+[BlitterStudio/aar](https://github.com/BlitterStudio/aar); the path above and
+the command below belong to the firmware tree at that commit.
 
 They were exported with `git archive 94037ca6` and built from that exported
 tree with the `zz9000-app-sdk:ci` image:

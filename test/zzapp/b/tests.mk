@@ -42,7 +42,7 @@ $(BUILD)/b/loader_zero_test: $(LOADER_ZERO_TEST_SOURCES) $(FW)/zzapp_mem.h \
 		$(LOADER_ZERO_TEST_SOURCES)
 
 
-$(BUILD)/b/spin_template.o: ../../sdk/zzapp/templates/spin.c | $(BUILD)
+$(BUILD)/b/spin_template.o: $(SDK)/templates/spin.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -Dzz_main=spin_template_main -c -o $@ $<
 $(BUILD)/b/slot_selection_test: b/slot_selection_test.c \

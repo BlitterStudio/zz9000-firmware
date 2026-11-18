@@ -8,7 +8,9 @@ SPDX-License-Identifier: MIT
 `hello.elf`, `pixels.elf`, and `fault.elf` are the API 0.1 templates
 `sdk/zzapp/templates/{hello,pixels,fault}.c` as they stood at firmware
 commit `4b4e3198` (`Keep the opt-in loader file check out of test
-auto-discovery`), before the API 0.2 merge.
+auto-discovery`), before the API 0.2 merge. The SDK has since moved to
+[BlitterStudio/aar](https://github.com/BlitterStudio/aar); the path above is
+the firmware tree at that commit.
 
 They were linked with Arm GNU Toolchain 13.2.rel1 (13.2.1 20231009) and
 PIC newlib 4.3.0.20230120, then rewritten by that commit's `rela_dyn.py`.

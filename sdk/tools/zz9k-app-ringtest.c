@@ -1,6 +1,6 @@
 /*
  * Message ring conformance test for the ARM app runtime. It loads
- * ringflood.elf (sdk/zzapp/templates) and runs three phases: idle, where
+ * ringflood.elf (templates/ in BlitterStudio/aar) and runs three phases: idle, where
  * the app only answers pings; flood, for the given number of seconds, where
  * the app keeps the app-to-host ring full; and idle again. Every message is
  * checked: sequence gaps, wrong bytes, ordering. A counter word that the app

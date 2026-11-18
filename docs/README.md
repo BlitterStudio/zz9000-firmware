@@ -31,11 +31,11 @@ and programs that use the card.
 
 | Document | Contents |
 | --- | --- |
-| [zzapp-developer-guide.md](../sdk/docs/zzapp-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
-| [zzapp-api.md](../sdk/docs/zzapp-api.md) | Every `zz_*` call and `ZZ_*` constant. |
+| [zzapp-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
+| [zzapp-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-api.md) | Every `zz_*` call and `ZZ_*` constant. |
 | [app-runtime.md](app-runtime.md) | The firmware and launcher contract: slots, limits, address spaces, lifecycle, exit and reset teardown, and the SVC interface. |
-| [sdk/zzapp/host/README.md](../sdk/zzapp/host/README.md) | Running apps on a PC with the SDL host runner. |
-| [sdk/zzapp/templates/README.md](../sdk/zzapp/templates/README.md) | The app templates, including the freestanding, FPU probe, and ring conformance apps. |
+| [host/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/host/README.md) | Running apps on a PC with the SDL host runner. |
+| [templates/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/templates/README.md) | The app templates, including the freestanding, FPU probe, and ring conformance apps. |
 
 ## Work on the firmware
 

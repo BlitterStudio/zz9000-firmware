@@ -18,12 +18,12 @@ Research GmbH. SDK issues and fork-specific discussion belong here.
 | `amiga/` | `zz9k.library`, `mpega.library`, DataTypes, AmiSSL provider code, Amiga headers, and icons |
 | `tools/` | AmigaOS command-line tools, including the ARM-app client smoke tool, and ZZPlay sources |
 | `examples/` | AmigaOS library, JPEG streaming, typed decode, and crypto examples |
-| `docs/` | SDK reference, including the ARM app guide and API reference |
+| `docs/` | SDK reference |
 | `scripts/` | m68k build, package, descriptor-generation, and icon-generation scripts |
 | `tests/` | Host-side tests and test fixtures |
 
-ARM apps on core 1 use [the developer guide](docs/zzapp-developer-guide.md)
-and [the API reference](docs/zzapp-api.md). The Amiga package includes
+ARM apps on core 1 use [the developer guide](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-developer-guide.md)
+and [the API reference](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-api.md), which live in BlitterStudio/aar. The Amiga package includes
 `zz9k-app-echo-test`, which loads an `echo.elf` built from the ARM app
 template and verifies its 32-byte message round trip, and
 `zz9k-app-ringtest`, which floods the message ring from `ringflood.elf` and
@@ -186,12 +186,12 @@ this fork, is copyright (C) 2024-2026 Dimitris Panokostas / BlitterStudio.
 
 The client side is MIT ([LICENSES/MIT.txt](LICENSES/MIT.txt)): the fd files,
 the headers under `amiga/include/`, `include/zz9k/` (except `module.h` and
-`service_registry.h`) and `host/include/zz9k/`, the Amiga examples, and the
-ARM app library, headers, startup code, linker script, build helpers and
-templates in `zzapp/` (not the `zzapp-check` tool). A program under any licence
-can compile these in to call `zz9k.library` or to build an ARM app, and may call
-`zz9k.library` and `mpega.library` through them under an additional permission
-described in [LICENSING.md](../LICENSING.md).
+`service_registry.h`) and `host/include/zz9k/`, and the Amiga examples. A
+program under any licence can compile these in to call `zz9k.library`, and may
+call `zz9k.library` and `mpega.library` through them under an additional
+permission described in [LICENSING.md](../LICENSING.md). The ARM app library,
+headers, startup code, linker script, build helpers and templates are MIT too
+and live in [BlitterStudio/aar](https://github.com/BlitterStudio/aar).
 
 Unless a file has its own notice or a third-party license, the rest is
 distributed under
