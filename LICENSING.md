@@ -50,13 +50,13 @@ MIT text as `Developer/LICENSE-MIT.txt`, the GPL text as
 - `sdk/host/include/zz9k/`: `host.h`, `request.h`, and `reply.h`. The
   `zz9k_host.o` implementation behind `host.h` stays GPL.
 - `sdk/examples/amiga-*`: the Amiga example programs.
-- `sdk/zzapp/`: the ARM app side, which was already MIT: `libzzapp` (`src/`),
-  `include/zzapp.h` and `include/zzapp_note.h`, `crt0.S`, `zzapp.ld`, the build
-  helpers (`Makefile`, `mk/`, `cmake/`, `docker/`, `build_pic_newlib.sh`), the
-  template sources, and the host runner sources. The `tools/zzapp-check`
-  checker stays GPL; running it on an app does not affect the app's licence.
 
 Each of these source files carries `SPDX-License-Identifier: MIT`.
+
+The ARM app SDK is not in this repository any more. It lives in
+[BlitterStudio/aar](https://github.com/BlitterStudio/aar), where every file is
+MIT, and this repository pins the commit it builds against in `sdk/AAR_REF`.
+The fetched copy in `sdk/aar/` is not part of this repository.
 
 ## Everything else
 

@@ -1,9 +1,9 @@
 # ZZ9000 app runtime
 
 This is the firmware and launcher contract for the API 0.4 app kernel. The
-public app interface is [zzapp-api.md](../sdk/docs/zzapp-api.md); application
+public app interface is [zzapp-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-api.md); application
 build and usage guidance is in
-[zzapp-developer-guide.md](../sdk/docs/zzapp-developer-guide.md). The shared
+[zzapp-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/zzapp-developer-guide.md). The shared
 wire definitions in `ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_proto.h` are the
 source of truth for byte offsets and constants.
 

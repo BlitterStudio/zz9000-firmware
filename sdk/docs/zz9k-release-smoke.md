@@ -234,7 +234,7 @@ default shared heap are Zorro III diagnostics.
 
 12. Check the ARM app runtime on Zorro III. Install `ZZRun` from the matched
     driver package and build `hello.elf`, `echo.elf` and `ringflood.elf` from
-    `sdk/zzapp/templates/` with the ARM app SDK.
+    `templates/` in [BlitterStudio/aar](https://github.com/BlitterStudio/aar).
 
     ```text
     Stack 32768
