@@ -62,9 +62,9 @@ int main(void)
     assert(kernel != NULL);
     assert(zzapp_kernel_prepare_app(kernel, 0u, 0x8000u, 0x9000u, 0u, 0u,
                                     0xc0100000u) == 0);
+    assert(zzapp_kernel_start_app(kernel, 0u) == 0);
     zzapp_kernel_set_current_thread(0);
-    kernel->threads[0].state = ZZAPP_THREAD_RUNNABLE;
-    quantum = kernel->threads[0].quantum_left = 7u;
+    quantum = zzapp_kernel_thread(kernel, 0u)->quantum_left = 7u;
 
     memset(&frame, 0x5a, sizeof(frame));
     frame.r[0] = 42u;
@@ -72,18 +72,18 @@ int main(void)
     assert(zzapp_kernel_svc_return(&frame) == &frame);
     assert(memcmp(&frame, &saved, sizeof(frame)) == 0);
     assert(zzapp_kernel_current_thread() == 0);
-    assert(kernel->threads[0].quantum_left == quantum);
+    assert(zzapp_kernel_thread(kernel, 0u)->quantum_left == quantum);
 
     /* On the card the system thread has always parked a context by now. */
     memset(&kernel->system_context, 0, sizeof(kernel->system_context));
     kernel->system_context.frame.r[0] = 99u;
     kernel->system_context_valid = 1u;
-    kernel->threads[0].state = ZZAPP_THREAD_BLOCKED;
+    zzapp_kernel_thread(kernel, 0u)->state = ZZAPP_THREAD_BLOCKED;
     restored = zzapp_kernel_svc_return(&frame);
     assert(restored == &frame);
     assert(restored->r[0] == 99u);
     /* The blocked app's registers were saved for its later resume. */
-    assert(kernel->threads[0].context.frame.r[0] == 42u);
+    assert(zzapp_kernel_thread(kernel, 0u)->context.frame.r[0] == 42u);
     test_banked_exception_stacks_keep_app_context();
 
     printf("svc_return_test: ok\n");

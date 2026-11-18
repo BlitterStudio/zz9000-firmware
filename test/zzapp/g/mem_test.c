@@ -371,6 +371,56 @@ static void test_orphaned_allocator_lock_does_not_deadlock_release(void)
     CHECK(proc_a.frame_count == 0U);
 }
 
+/* One proc per process record: the ledger tracks every record's proc, not a
+ * fixed few. 64 procs share the extents (8 frames each), a halted core left
+ * each with a duplicated frame record, and the extent bits and the committed
+ * sum stale: the rebuild must come out exact. */
+static zzapp_mem_proc_t many[64];
+
+static void test_sixty_four_procs_reconcile_with_shared_extents(void)
+{
+    uint32_t frame;
+    uint32_t i;
+    uint32_t used = 0U;
+    uint32_t pool_free;
+
+    reset_memory();
+    pool_free = card_pool_range_free_bytes(&card_pool, 0);
+    for (i = 0U; i < 64U; i++) {
+        zzapp_mem_proc_init(&many[i], MB(2));
+        CHECK(zzapp_mem_alloc(&memory, &many[i], 1, &frame) == 0);
+    }
+    CHECK(memory.proc_count == 64U);
+    CHECK(memory.committed == MB(64));
+    CHECK(memory.extent_count == 8U);
+    for (i = 0U; i < 64U; i++) {
+        many[i].frames[1] = many[i].frames[0];
+        many[i].frame_count = 2U;
+        many[i].committed = MB(2);
+    }
+    memory.committed = MB(999);
+    for (i = 0U; i < memory.extent_count; i++)
+        memory.extents[i].used_frames = 0xffU;
+    card_pool_reset_lock(&card_pool);
+    zzapp_mem_reset_live_lock();
+    zzapp_mem_reconcile_halted();
+    CHECK(memory.proc_count == 64U);
+    CHECK(memory.committed == MB(64));
+    CHECK(memory.extent_count == 8U);
+    for (i = 0U; i < memory.extent_count; i++)
+        used += (uint32_t)__builtin_popcount(memory.extents[i].used_frames);
+    CHECK(used == 64U);
+    for (i = 0U; i < 64U; i++) {
+        CHECK(many[i].frame_count == 1U);
+        CHECK(many[i].committed == MB(1));
+    }
+    for (i = 0U; i < 64U; i++)
+        CHECK(zzapp_mem_release_proc(&memory, &many[i]) == MB(1));
+    CHECK(memory.proc_count == 0U);
+    CHECK(memory.committed == 0U);
+    CHECK(card_pool_range_free_bytes(&card_pool, 0) == pool_free);
+}
+
 int main(void)
 {
     test_frames_and_empty_extent_return();
@@ -389,6 +439,7 @@ int main(void)
     test_compacted_frame_records_reconcile_once();
     test_compacted_extent_registry_reconciles_once();
     test_last_frame_count_reconciles_commitment();
+    test_sixty_four_procs_reconcile_with_shared_extents();
     printf("zzapp_mem: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

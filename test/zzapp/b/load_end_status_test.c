@@ -30,7 +30,7 @@
 /* Not a descriptor word: the note is left as make_image wrote it. */
 #define NO_WORD (TEST_NOTE_W_RESERVED + 1u)
 
-static uint8_t windows[ZZAPP_SLOT_COUNT][ZZAPP_WINDOW_BYTES];
+static uint8_t win_mem[ZZAPP_SLOT_COUNT][ZZAPP_WINDOW_BYTES];
 static uint32_t request_id;
 
 static void put16(uint8_t *p, uint16_t value)
@@ -158,14 +158,15 @@ static void fresh_runtime(void)
 {
     uint32_t slot;
 
-    zzapp_loader_release();
-    memset(windows, 0, sizeof(windows));
+    /* boot_init lays the record arena out again, so nothing of the previous
+     * case is left to release (there is no arena before the first one). */
+    memset(win_mem, 0, sizeof(win_mem));
     request_id = 0U;
     zzapp_boot_init();
     zzapp_services_test_reset();
     for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++)
-        zzapp_services_test_set_window_slot(slot, windows[slot],
-                                            sizeof(windows[slot]));
+        zzapp_services_test_set_window_slot(slot, win_mem[slot],
+                                            sizeof(win_mem[slot]));
     zzapp_test_set_groups(0U, 0);
 }
 
@@ -179,7 +180,7 @@ static uint16_t load_status(const uint8_t image[IMAGE_BYTES])
     assert(dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
            SDK_STATUS_OK);
     assert(slot_state(0U) == ZZAPP_ST_LOADING);
-    memcpy(windows[0] + ZZAPP_STAGING_OFF, image, IMAGE_BYTES);
+    memcpy(win_mem[0] + ZZAPP_STAGING_OFF, image, IMAGE_BYTES);
     extended_request(request, 0U, generation);
     zzapp_put_be32(request + ZZAPP_CHUNK_FILE_OFF, 0U);
     zzapp_put_be32(request + ZZAPP_CHUNK_LENGTH, IMAGE_BYTES);

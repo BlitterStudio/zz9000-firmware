@@ -97,19 +97,26 @@ uint32_t zzapp_svc_api_count(void);
 uint32_t zzapp_svc_gl_count(void);
 uintptr_t zzapp_svc_api_veneer(uint32_t slot);
 uintptr_t zzapp_svc_gl_veneer(uint32_t slot);
-int zzapp_svc_set_veneer_alias(uint32_t slot, uintptr_t address);
-int zzapp_svc_set_table_aliases(uint32_t slot, uintptr_t api_address,
+/*
+ * Per-app state below is kept in the app's process record (its tables area
+ * and svc part). Every `pid` is a record index; a pid outside the record
+ * table fails: AAR_E_INVAL, NULL, or no effect.
+ */
+int zzapp_svc_set_veneer_alias(uint32_t pid, uintptr_t address);
+int zzapp_svc_set_table_aliases(uint32_t pid, uintptr_t api_address,
                                 uintptr_t gl_address);
 int zzapp_svc_is_veneer(uintptr_t address);
 int zzapp_svc_copy_api(aar_api *destination, const aar_api *source);
-const aar_api *zzapp_svc_api_for_slot(uint32_t slot,
+/* Fill the API table page of record `pid` and return it. */
+const aar_api *zzapp_svc_api_for_slot(uint32_t pid,
                                         const aar_api *source);
-aar_gl *zzapp_svc_gl_for_slot(uint32_t slot);
+/* The GL table page of record `pid`. */
+aar_gl *zzapp_svc_gl_for_slot(uint32_t pid);
 int zzapp_svc_copy_gl(aar_gl *destination, const aar_gl *source);
-/* The slot's aar_ext_zz9000 as the app sees it (valid after
+/* The record's aar_ext_zz9000 as the app sees it (valid after
  * zzapp_svc_api_for_slot), or NULL when the runtime has none. */
-const aar_ext_zz9000 *zzapp_svc_ext_for_slot(uint32_t slot);
-void zzapp_svc_gl_release(uint32_t slot, uint32_t generation);
+const aar_ext_zz9000 *zzapp_svc_ext_for_slot(uint32_t pid);
+void zzapp_svc_gl_release(uint32_t pid, uint32_t generation);
 
 /* A zero-length range is valid; all nonempty ranges must be fully mapped for
  * the requested user access. */
@@ -161,45 +168,45 @@ typedef struct {
 } zzapp_gl_telemetry_snapshot_t;
 
 #if ZZAPP_PERF_COUNTERS
-void zzapp_svc_gl_telemetry_reset(uint32_t slot);
-int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
+void zzapp_svc_gl_telemetry_reset(uint32_t pid);
+int zzapp_svc_gl_telemetry_swap(uint32_t pid, uint64_t now_us,
                                  zzapp_gl_telemetry_snapshot_t *snapshot);
-void zzapp_svc_gl_telemetry_report(uint32_t slot,
+void zzapp_svc_gl_telemetry_report(uint32_t pid,
                                     const zzapp_gl_telemetry_snapshot_t *snapshot);
-void zzapp_svc_gl_telemetry_lock_begin(uint32_t slot);
-void zzapp_svc_gl_telemetry_lock_end(uint32_t slot, int contended);
+void zzapp_svc_gl_telemetry_lock_begin(uint32_t pid);
+void zzapp_svc_gl_telemetry_lock_end(uint32_t pid, int contended);
 
-/* Reset and print the core-1 PMU breakdown for one app lifecycle. */
-void zzapp_svc_counters_reset(uint32_t slot);
-void zzapp_svc_counters_report(uint32_t slot);
-int zzapp_svc_counters_sampled(uint32_t slot);
-/* Assembly-side PMCCNTR stamp for the entry stage. */
-extern volatile uint32_t zzapp_svc_entry_stamp[];
-extern volatile uint32_t zzapp_svc_counter_slot;
+/* Reset and print the core-1 PMU breakdown for one app lifecycle. The
+ * counters themselves live in the record; the SVC vector reaches them
+ * through zzapp_svc_counter_block (zzapp_kernel.h). */
+void zzapp_svc_counters_reset(uint32_t pid);
+void zzapp_svc_counters_report(uint32_t pid);
+int zzapp_svc_counters_sampled(uint32_t pid);
 #else
-static inline void zzapp_svc_gl_telemetry_reset(uint32_t slot)
-{ (void)slot; }
+static inline void zzapp_svc_gl_telemetry_reset(uint32_t pid)
+{ (void)pid; }
 static inline int zzapp_svc_gl_telemetry_swap(
-    uint32_t slot, uint64_t now_us, zzapp_gl_telemetry_snapshot_t *snapshot)
-{ (void)slot; (void)now_us; (void)snapshot; return 0; }
+    uint32_t pid, uint64_t now_us, zzapp_gl_telemetry_snapshot_t *snapshot)
+{ (void)pid; (void)now_us; (void)snapshot; return 0; }
 static inline void zzapp_svc_gl_telemetry_report(
-    uint32_t slot, const zzapp_gl_telemetry_snapshot_t *snapshot)
-{ (void)slot; (void)snapshot; }
-static inline void zzapp_svc_gl_telemetry_lock_begin(uint32_t slot)
-{ (void)slot; }
-static inline void zzapp_svc_gl_telemetry_lock_end(uint32_t slot, int contended)
-{ (void)slot; (void)contended; }
-static inline void zzapp_svc_counters_reset(uint32_t slot)
-{ (void)slot; }
-static inline void zzapp_svc_counters_report(uint32_t slot)
-{ (void)slot; }
-static inline int zzapp_svc_counters_sampled(uint32_t slot)
-{ (void)slot; return 0; }
+    uint32_t pid, const zzapp_gl_telemetry_snapshot_t *snapshot)
+{ (void)pid; (void)snapshot; }
+static inline void zzapp_svc_gl_telemetry_lock_begin(uint32_t pid)
+{ (void)pid; }
+static inline void zzapp_svc_gl_telemetry_lock_end(uint32_t pid, int contended)
+{ (void)pid; (void)contended; }
+static inline void zzapp_svc_counters_reset(uint32_t pid)
+{ (void)pid; }
+static inline void zzapp_svc_counters_report(uint32_t pid)
+{ (void)pid; }
+static inline int zzapp_svc_counters_sampled(uint32_t pid)
+{ (void)pid; return 0; }
 #endif
 
 /* Called by the SVC vector after it has saved the user-call state. */
 void zzapp_svc_dispatch(zzapp_svc_frame_t *frame);
-/* Veneer number of each slot's latest SVC, for diagnostics. */
-extern volatile uint32_t zzapp_svc_last_number[];
+/* Veneer number of the latest SVC of record `pid` (GL calls are 128 and
+ * up), for the stop report; 0 for a pid outside the table. */
+uint32_t zzapp_svc_last_number_for(uint32_t pid);
 
 #endif

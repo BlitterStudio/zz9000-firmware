@@ -15,6 +15,9 @@
 #include "zzapp_services.h"
 
 #define SLOT 0u
+/* Record the claimed window runs on: not its window number once records were
+ * used before. */
+static uint32_t g_pid;
 #define MAX_EVENTS 16u
 
 #define NO_INPUT_GROUPS (AAR_GROUP_DISPLAY | AAR_GROUP_AUDIO | \
@@ -40,10 +43,11 @@ static void setup(uint32_t groups)
                                   sizeof(request), reply, &reply_len, 1, 1U,
                                   0U) == SDK_STATUS_OK);
     assert(zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) == SLOT);
-    zzapp_services_select_slot(SLOT);
+    zzapp_services_test_select_window(SLOT);
+    g_pid = zzapp_services_current_pid();
     zzapp_test_mark_running();
-    zzapp_host_clear_stop_requested(SLOT);
-    zzapp_host_reset_low_memory(SLOT);
+    zzapp_host_clear_stop_requested(g_pid);
+    zzapp_host_reset_low_memory(g_pid);
 }
 
 /* The launcher posts one event into the slot's input ring. */
@@ -130,7 +134,7 @@ static void test_lifecycle_without_input_group(uint32_t groups)
     expect_empty();
     assert(ring_tail() == 0u && ring_head() == 3u);
 
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     low_memory_crossing();
     assert(poll_n(ev, MAX_EVENTS) == 2u);
     expect_lifecycle(&ev[0], AAR_EV_STOP);
@@ -150,7 +154,7 @@ static void test_input_with_input_group(void)
     ring_push(AAR_EV_MOUSE, 0u, 3, -2, 5u, 101u);
     ring_push(AAR_EV_JOY, 0u, -1, 1, 1u, 102u);
     ring_push(AAR_EV_BREAK, AAR_BREAK_CTRL_D, 0, 0, 0u, 103u);
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     low_memory_crossing();
 
     assert(poll_n(ev, MAX_EVENTS) == 6u);
@@ -178,7 +182,7 @@ static void test_duplicate_stop_dropped(void)
     ring_push(AAR_EV_KEY_DOWN, 1u, 0, 0, 0u, 1u);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 2u);
     ring_push(AAR_EV_KEY_UP, 1u, 0, 0, 0u, 3u);
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     assert(poll_n(ev, MAX_EVENTS) == 3u);
     assert(count_type(ev, 3u, AAR_EV_STOP) == 1u);
     assert(ev[0].type == AAR_EV_STOP);
@@ -195,14 +199,14 @@ static void test_duplicate_stop_dropped(void)
     assert(poll_n(ev, MAX_EVENTS) == 3u);
     assert(ev[0].type == AAR_EV_KEY_DOWN && ev[1].type == AAR_EV_STOP &&
            ev[2].type == AAR_EV_KEY_UP);
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     expect_empty();
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     expect_empty();
 
     /* The launcher's event arrives after the firmware's was delivered. */
     setup(ALL_GROUPS);
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     assert(poll_n(ev, MAX_EVENTS) == 1u);
     expect_lifecycle(&ev[0], AAR_EV_STOP);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 9u);
@@ -217,7 +221,7 @@ static void test_duplicate_stop_dropped(void)
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 2u);
     assert(poll_n(ev, MAX_EVENTS) == 1u);
     assert(ev[0].type == AAR_EV_STOP);
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     expect_empty();
 
     /* Without the input group the launcher's event is never read, so the
@@ -225,7 +229,7 @@ static void test_duplicate_stop_dropped(void)
     setup(NO_INPUT_GROUPS);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 1u);
     expect_empty();
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     assert(poll_n(ev, MAX_EVENTS) == 1u);
     expect_lifecycle(&ev[0], AAR_EV_STOP);
     expect_empty();
@@ -262,7 +266,7 @@ static void test_short_buffer(void)
     uint32_t n = 0xdeadbeefu;
 
     setup(ALL_GROUPS);
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     low_memory_crossing();
     ring_push(AAR_EV_KEY_DOWN, 7u, 0, 0, 0u, 1u);
 
@@ -284,7 +288,7 @@ static void test_bad_arguments(void)
     uint32_t n = 7u;
 
     setup(ALL_GROUPS);
-    zzapp_host_latch_stop(SLOT);
+    zzapp_host_latch_stop(g_pid);
     assert(zzapp_svc_event_poll(&ev, 1u, NULL) == AAR_E_INVAL);
     assert(zzapp_svc_event_poll(NULL, 1u, &n) == AAR_E_INVAL && n == 0u);
     /* The refused calls consumed nothing. */

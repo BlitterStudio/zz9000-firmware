@@ -77,6 +77,8 @@ void Xil_AssertNonVoid() {}
 #include "surface_allocator.h"
 #include "mmu_page.h"
 #include "zzapp_as.h"
+#include "zzapp_proto.h"
+#include "zzapp_rec.h"
 #include "zzapp_services.h"
 #include "card_pool.h"
 #include "rasterix_fence_guard.h"
@@ -599,6 +601,11 @@ static int reserve_host_control_ranges(void)
 	return 1 Z3_HOST_CONTROL_RANGES(RESERVE_HOST_CONTROL_RANGE);
 #undef RESERVE_HOST_CONTROL_RANGE
 }
+
+/* The wire window count is a platform ceiling: every window has a carved,
+ * non-cacheable range below. It is unrelated to how many apps can run. */
+_Static_assert(ZZAPP_SLOT_COUNT <= ZZAPP_WINDOW_Z3_SLOTS,
+	       "every launcher window needs a carved Z3 range");
 
 /* App windows are allocated on demand, but every page any slot can use must
  * be non-cacheable before core 1 and interrupts can observe the mapping.
@@ -1333,6 +1340,25 @@ int main() {
 	 * so the first app's text protection only rewrites page entries. */
 	extern char __firmware_text_start[];
 	extern char __firmware_text_end[];
+	/* One block of the card pool holds every app L1 table, core-1 stack,
+	 * process record and the L2 table pool, sized by memory. It must exist
+	 * before the address-space layer, and nothing has taken an app extent
+	 * yet, so it lands below them. */
+	if (zzapp_rec_arena_carve(&card_pool,
+				  CARD_POOL_PERMANENT_END -
+				  CARD_POOL_PERMANENT_ADDRESS,
+				  ZZAPP_MEM_SYSTEM_RESERVE_BYTES,
+				  HOST_VISIBLE_HEAP_SIZE) == 0) {
+		const zzapp_rec_layout_t *arena = zzapp_rec_layout();
+
+		printf("[zzapp] record arena %u KiB at 0x%08x: %u records, "
+		       "%u L2 tables (%u shared)\r\n",
+		       (unsigned)(arena->bytes >> 10),
+		       (unsigned)zzapp_rec_arena_base(), (unsigned)arena->apps,
+		       (unsigned)arena->l2_total, (unsigned)arena->l2_shared);
+	} else {
+		printf("[zzapp] record arena: no memory, apps unavailable\r\n");
+	}
 	zzapp_as_set_firmware_text((uint32_t)(uintptr_t)__firmware_text_start,
 				   (uint32_t)(uintptr_t)__firmware_text_end);
 	zzapp_as_init(&MMUTable);

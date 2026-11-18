@@ -31,7 +31,7 @@ static zzapp_mem_proc_t proc;
 
 static void mark_running(uint32_t slot)
 {
-    zzapp_services_select_slot(slot);
+    zzapp_services_test_select_window(slot);
     zzapp_test_mark_running();
 }
 
@@ -43,7 +43,7 @@ static uint16_t dispatch(uint16_t opcode, const uint8_t *request,
                                   reply_len, 1, 1U, 0U);
 }
 
-static void claim_slot_zero(void)
+static void claim_window(uint32_t expected)
 {
     uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
     uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
@@ -51,7 +51,7 @@ static void claim_slot_zero(void)
 
     assert(dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request), reply,
                     &reply_len) == SDK_STATUS_OK);
-    assert(zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) == 0U);
+    assert(zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) == expected);
 }
 
 static void expect_low_memory_event(uint32_t slot, uint32_t crossings)
@@ -59,7 +59,7 @@ static void expect_low_memory_event(uint32_t slot, uint32_t crossings)
     aar_event event[2];
     uint32_t count;
 
-    zzapp_services_select_slot(slot);
+    zzapp_services_test_select_window(slot);
     assert(zzapp_svc_event_poll(event, 2u, &count) == AAR_OK);
     assert(count == 1u);
     assert(event[0].type == AAR_EV_LOW_MEMORY);
@@ -75,7 +75,7 @@ static void expect_no_low_memory_event(uint32_t slot, uint32_t crossings)
     aar_event event;
     uint32_t count;
 
-    zzapp_services_select_slot(slot);
+    zzapp_services_test_select_window(slot);
     assert(zzapp_svc_event_poll(&event, 1u, &count) == AAR_OK);
     assert(count == 0u);
     assert(zzapp_get_be32(windows[slot] + ZZAPP_LIFE_OFF +
@@ -90,7 +90,10 @@ int main(void)
     zzapp_services_test_reset();
     for (i = 0u; i < ZZAPP_SLOT_COUNT; i++)
         zzapp_services_test_set_window_slot(i, windows[i], sizeof(windows[i]));
-    claim_slot_zero();
+    /* Windows 0 and 2 run; window 1 is only claimed, so it gets no event. */
+    claim_window(0U);
+    claim_window(1U);
+    claim_window(2U);
     mark_running(0u);
     mark_running(2u);
     host_card_pool_reset(MB(256));
@@ -99,9 +102,10 @@ int main(void)
     zzapp_host_register_low_memory_callback(&memory);
 
     assert(zzapp_mem_alloc(&memory, &proc, 97u, frames) == 0);
-    zzapp_services_select_slot(0u);
+    zzapp_services_test_select_window(0u);
     zzapp_services_on_app_end();
-    claim_slot_zero();
+    (void)zzapp_rec_retire(zzapp_services_current_pid());
+    claim_window(0U);
     expect_no_low_memory_event(0u, 0u);
     expect_low_memory_event(2u, 1u);
     mark_running(0u);

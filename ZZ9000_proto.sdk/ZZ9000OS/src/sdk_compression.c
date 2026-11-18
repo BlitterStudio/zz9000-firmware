@@ -12,6 +12,7 @@
 #include "sdk_smp_lock.h"
 #include "sdk_decode_reclaim.h"
 #include "card_pool.h"
+#include "zzapp_rec.h"
 #include "Lzma2Dec.h"
 #include "LzmaDec.h"
 #include "zlib.h"
@@ -68,16 +69,17 @@ static uint32_t next_decompress_stream_id = 1U;
 typedef char decode_owner_is_media[
 	SDK_DECODE_POOL_OWNER ==
 	CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffeu) ? 1 : -1];
-static uint32_t app_decode_owners[4];
 
 /* App owners live at or above SDK_MEDIA_APP_INSTANCE_BASE. Video session
- * pool owners stay below that line, including session 4. */
-uint32_t sdk_compression_app_decode_owner(uint32_t slot, uint32_t generation)
+ * pool owners stay below that line, including session 4. An app's owner is
+ * derived from the admission serial of its record (zzapp_rec.h), so it is
+ * the same for the whole life of the record and unique among live ones. */
+uint32_t sdk_compression_app_decode_owner(uint32_t pid)
 {
-	uint32_t owner = sdk_compression_app_owner_bits(slot, generation);
+	const zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
 
-	app_decode_owners[slot & 3U] = owner;
-	return owner;
+	return rec && rec->hdr.owner_serial ?
+		sdk_compression_app_owner_bits(rec->hdr.owner_serial) : 0U;
 }
 
 /* Scratch for the codec allocators below. Every public entry sets it
@@ -210,24 +212,26 @@ static void zlib_decode_free(voidpf opaque, voidpf address)
  */
 unsigned sdk_compression_reclaim_app_decode(uint32_t owner)
 {
-	uint32_t slot;
-
-	for (slot = 0U; slot < 4U; ++slot)
-		if (app_decode_owners[slot] == owner)
-			app_decode_owners[slot] = 0U;
 	return card_pool_release_owner(&card_pool, owner) != 0U;
 }
 
 unsigned sdk_compression_reclaim_core1_decode(void)
 {
 	unsigned reclaimed;
-	uint32_t slot;
+	uint32_t pid;
 
 	reclaimed = card_pool_release_owner(&card_pool, DECODE_POOL_OWNER) != 0U;
-	for (slot = 0U; slot < 4U; ++slot)
-		if (app_decode_owners[slot])
+	/* Core 1 was reset: every record that is not FREE may hold decode
+	 * blocks under its owner. Its owner comes from its admission serial,
+	 * so nothing besides the record has to remember it. */
+	for (pid = 0U; pid < zzapp_rec_capacity(); ++pid) {
+		const zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+		if (zzapp_rec_state(pid) != ZZAPP_REC_FREE && rec->hdr.owner_serial)
 			reclaimed += sdk_compression_reclaim_app_decode(
-				app_decode_owners[slot]);
+				sdk_compression_app_owner_bits(
+					rec->hdr.owner_serial));
+	}
 	sdk_decode_invalidate_table();
 	reclaimed += sdk_decode_reclaim(free);
 	sdk_decode_flush_table();

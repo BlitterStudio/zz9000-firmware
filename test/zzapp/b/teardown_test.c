@@ -2,6 +2,7 @@
 #define ZZAPP_HOST_DEFERRED_TEST
 #endif
 #include "zzapp_services.c"
+#include "svc_views.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -37,9 +38,12 @@ enum teardown_path {
     TEARDOWN_DIRECT_STOP_PARKED,
 };
 
-static uint8_t windows[ZZAPP_SLOT_COUNT][ZZAPP_WINDOW_BYTES];
+static uint8_t win_mem[ZZAPP_SLOT_COUNT][ZZAPP_WINDOW_BYTES];
 static uint32_t request_id;
 static enum teardown_path path;
+/* The record each window's latest claim was given: a record index is not the
+ * window number once records were used before. */
+static uint32_t win_pid[ZZAPP_SLOT_COUNT];
 static uint32_t live_slot1_commit;
 static uint32_t live_slot2_commit;
 
@@ -146,6 +150,8 @@ static uint32_t claim_slot(void)
                                   sizeof(request), reply, &reply_bytes,
                                   1, 0U, 0U) == SDK_STATUS_OK);
     assert(reply_bytes == ZZAPP_ALLOC_EXT_REPLY_BYTES);
+    win_pid[zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT)] =
+        PID_OF(zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT));
     return zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
 }
 
@@ -158,7 +164,7 @@ static void load_slot(uint32_t slot, uint32_t generation)
     extended_request(request, slot, generation);
     assert(dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
            SDK_STATUS_OK);
-    memcpy(windows[slot] + ZZAPP_STAGING_OFF, image, sizeof(image));
+    memcpy(win_mem[slot] + ZZAPP_STAGING_OFF, image, sizeof(image));
     extended_request(request, slot, generation);
     zzapp_put_be32(request + ZZAPP_CHUNK_FILE_OFF, 0U);
     zzapp_put_be32(request + ZZAPP_CHUNK_LENGTH, sizeof(image));
@@ -207,7 +213,7 @@ static void request_stop(void)
 static void running_slot2(uint32_t generation)
 {
     select_test_slot(2U);
-    assert(zzapp_proc_slot(2U)->memory.committed == DEFAULT_COMMIT);
+    assert(zzapp_proc_slot(win_pid[2])->memory.committed == DEFAULT_COMMIT);
     zzapp_services_set_state(ZZAPP_ST_RUNNING);
     zzapp_test_mark_running();
     assert(zzapp_current_generation() == generation);
@@ -234,8 +240,8 @@ static void app_entry(const void *api, int argc, char **argv)
                    ZZAPP_F_DISPLAY | ZZAPP_F_VSYNC);
     zzapp_put_be32(window + ZZAPP_LIFE_CARD_FRONT_OFF, 0x00200000U);
     zzapp_put_be32(window + ZZAPP_LIFE_CARD_BACK_OFF, 0x00220000U);
-    live_slot1_commit = zzapp_proc_slot(1U)->memory.committed;
-    live_slot2_commit = zzapp_proc_slot(2U)->memory.committed;
+    live_slot1_commit = zzapp_proc_slot(win_pid[1])->memory.committed;
+    live_slot2_commit = zzapp_proc_slot(win_pid[2])->memory.committed;
     assert(live_slot1_commit == MB(3));
     assert(live_slot2_commit == DEFAULT_COMMIT);
 
@@ -265,11 +271,11 @@ static void app_entry(const void *api, int argc, char **argv)
         zzapp_kernel_set_current_thread(-1);
         life = zzapp_services_window();
         assert(life != NULL);
-        zzapp_put_be32(windows[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
+        zzapp_put_be32(win_mem[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
         zzapp_host_tick_at(ZZAPP_LEASE_US - 1U);
         zzapp_core0_poll();
         assert(zzapp_get_be32(life + ZZAPP_LIFE_STOP_OFF) == 0U);
-        zzapp_put_be32(windows[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 2U);
+        zzapp_put_be32(win_mem[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 2U);
         zzapp_host_tick_at(ZZAPP_LEASE_US);
         zzapp_core0_poll();
         assert(zzapp_get_be32(life + ZZAPP_LIFE_STOP_OFF) == 1U);
@@ -287,11 +293,11 @@ static void app_entry(const void *api, int argc, char **argv)
         zzapp_put_be32(life + ZZAPP_LIFE_FLAGS_OFF,
                        zzapp_get_be32(life + ZZAPP_LIFE_FLAGS_OFF) |
                        ZZAPP_F_LAUNCHER_HEARTBEAT);
-        zzapp_put_be32(windows[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
+        zzapp_put_be32(win_mem[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 1U);
         zzapp_host_tick_at(ZZAPP_LAUNCHER_LEASE_US - 1U);
         zzapp_core0_poll();
         assert(zzapp_get_be32(life + ZZAPP_LIFE_STOP_OFF) == 0U);
-        zzapp_put_be32(windows[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 2U);
+        zzapp_put_be32(win_mem[2] + ZZAPP_LIFE_HEARTBEAT_OFF, 2U);
         zzapp_host_tick_at(ZZAPP_LAUNCHER_LEASE_US);
         zzapp_core0_poll();
         assert(zzapp_get_be32(life + ZZAPP_LIFE_STOP_OFF) == 1U);
@@ -311,23 +317,22 @@ static void app_entry(const void *api, int argc, char **argv)
     case TEARDOWN_DIRECT_STOP_PARKED:
         /* The system thread is active while slot 1 waits.  ZZRun writes
          * slot 1's lifecycle word directly, without APP_STOP. */
-        assert(zzapp_kernel_block(zzapp_runtime_kernel(), 1U) == 0);
+        assert(zzapp_kernel_block(zzapp_runtime_kernel(), win_pid[1]) == 0);
         zzapp_kernel_set_current_thread(-1);
         select_test_slot(2U);
-        zzapp_put_be32(windows[1] + ZZAPP_LIFE_OFF + ZZAPP_LIFE_STOP_OFF, 1U);
+        zzapp_put_be32(win_mem[1] + ZZAPP_LIFE_OFF + ZZAPP_LIFE_STOP_OFF, 1U);
         zzapp_host_tick_at(ZZAPP_TICK_US);
         zzapp_worker_hook();
-        assert(zzapp_runtime_kernel()->threads[1].state == ZZAPP_THREAD_BLOCKED);
+        assert(zzapp_rec_by_pid(win_pid[1])->thread.state == ZZAPP_THREAD_BLOCKED);
         zzapp_host_tick_at(ZZAPP_TICK_US + ZZAPP_STOP_GRACE_US);
         zzapp_worker_hook();
-        assert(zzapp_runtime_kernel()->threads[1].state == ZZAPP_THREAD_STOPPED);
+        assert(zzapp_rec_by_pid(win_pid[1])->thread.state == ZZAPP_THREAD_STOPPED);
         break;
     }
 }
 
 static void assert_slot1_reclaimed(uint8_t expected_reason)
 {
-    aar_info info;
     uint32_t state;
     uint32_t committed;
     uint8_t reason;
@@ -338,14 +343,11 @@ static void assert_slot1_reclaimed(uint8_t expected_reason)
     assert(state == ZZAPP_ST_IDLE);
     assert(reason == expected_reason);
     assert(committed == 0U);
-    assert(zzapp_proc_slot(1U)->memory.committed == 0U);
-    assert(zzapp_proc_slot(1U)->memory.frame_count == 0U);
-    assert(zzapp_proc_slot(1U)->as.active == 0U);
-    assert(zzapp_proc_slot(1U)->as.l1 == NULL);
-    memset(&info, 0, sizeof(info));
-    info.size = sizeof(info);
-    assert(zzapp_host_info(&info) == AAR_OK);
-    assert(info.shared_used == 0U);
+    assert(zzapp_proc_slot(win_pid[1])->memory.committed == 0U);
+    assert(zzapp_proc_slot(win_pid[1])->memory.frame_count == 0U);
+    assert(zzapp_proc_slot(win_pid[1])->as.active == 0U);
+    assert(zzapp_proc_slot(win_pid[1])->as.l1 == NULL);
+    assert(zzapp_rec_by_pid(win_pid[1])->visible.used == 0U);
     window = zzapp_services_window();
     if (expected_reason == ZZAPP_END_AMIGA_RESET) {
         assert(window == NULL);
@@ -371,7 +373,7 @@ static void assert_slot2_unchanged(void)
     assert(state == ZZAPP_ST_RUNNING);
     assert(reason == ZZAPP_END_NONE);
     assert(committed == live_slot2_commit);
-    assert(zzapp_proc_slot(2U)->memory.committed == live_slot2_commit);
+    assert(zzapp_proc_slot(win_pid[2])->memory.committed == live_slot2_commit);
     window = zzapp_services_window();
     assert(window != NULL);
     assert(zzapp_get_be32(window + ZZAPP_LIFE_STOP_OFF) == 0U);
@@ -400,7 +402,7 @@ static void run_case(enum teardown_path value)
     uint32_t generation[3];
     uint32_t slot;
 
-    memset(windows, 0, sizeof(windows));
+    memset(win_mem, 0, sizeof(win_mem));
     request_id = 0U;
     live_slot1_commit = 0U;
     live_slot2_commit = 0U;
@@ -408,8 +410,8 @@ static void run_case(enum teardown_path value)
     zzapp_boot_init();
     zzapp_services_test_reset();
     for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++)
-        zzapp_services_test_set_window_slot(slot, windows[slot],
-                                            sizeof(windows[slot]));
+        zzapp_services_test_set_window_slot(slot, win_mem[slot],
+                                            sizeof(win_mem[slot]));
     zzapp_test_set_xtime(0U);
     zzapp_test_set_entry(app_entry);
 
@@ -475,11 +477,11 @@ static void test_abort_republishes_service_state(void)
     uint32_t committed;
     uint8_t reason;
 
-    memset(windows, 0, sizeof(windows));
+    memset(win_mem, 0, sizeof(win_mem));
     request_id = 0U;
     zzapp_boot_init();
     zzapp_services_test_reset();
-    zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
+    zzapp_services_test_set_window_slot(0U, win_mem[0], sizeof(win_mem[0]));
     generation = claim_slot();
     extended_request(request, 0U, generation);
     assert(dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
@@ -488,9 +490,14 @@ static void test_abort_republishes_service_state(void)
     list_slot(0U, &state, &committed, &reason);
     assert(state == ZZAPP_ST_LOADING);
     assert(zzapp_loader_abort() == AAR_OK);
+    /* The loader's own state republishes at once; the claim itself ends only
+     * when its record is retired (the window reads as before until then). */
+    assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
+    list_slot(0U, &state, &committed, &reason);
+    assert(state == ZZAPP_ST_LOADING);
+    assert(zzapp_rec_retire(win_pid[0]) == 1);
     list_slot(0U, &state, &committed, &reason);
     assert(state == ZZAPP_ST_IDLE);
-    assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     extended_request(request, 0U, 0U);
     assert(zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request, sizeof(request),
                                   reply, &reply_bytes, 1, 9U, 0U) ==
@@ -509,12 +516,12 @@ static void test_stopped_load_aborts_when_another_slot_is_selected(void)
     uint8_t reason;
     uint16_t status;
 
-    memset(windows, 0, sizeof(windows));
+    memset(win_mem, 0, sizeof(win_mem));
     request_id = 0U;
     zzapp_boot_init();
     zzapp_services_test_reset();
-    zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
-    zzapp_services_test_set_window_slot(1U, windows[1], sizeof(windows[1]));
+    zzapp_services_test_set_window_slot(0U, win_mem[0], sizeof(win_mem[0]));
+    zzapp_services_test_set_window_slot(1U, win_mem[1], sizeof(win_mem[1]));
     generation[0] = claim_slot();
     generation[1] = claim_slot();
     extended_request(request, 0U, generation[0]);
@@ -524,7 +531,7 @@ static void test_stopped_load_aborts_when_another_slot_is_selected(void)
     status = zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request),
                                     reply, &reply_bytes, 1, 20U, 0U);
     assert(status == SDK_STATUS_QUEUED);
-    zzapp_put_be32(windows[0] + ZZAPP_LIFE_OFF + ZZAPP_LIFE_STOP_OFF, 1U);
+    zzapp_put_be32(win_mem[0] + ZZAPP_LIFE_OFF + ZZAPP_LIFE_STOP_OFF, 1U);
     zzapp_host_latch_stop(0U);
     zzapp_worker_hook();
     select_test_slot(0U);
@@ -549,22 +556,24 @@ static uint32_t list_cpu(uint32_t slot)
 
 static void test_list_cpu_starts_at_new_generation(void)
 {
-    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
     uint32_t generation;
 
-    memset(windows, 0, sizeof(windows));
+    memset(win_mem, 0, sizeof(win_mem));
     request_id = 0U;
     zzapp_boot_init();
     zzapp_services_test_reset();
-    zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
+    zzapp_services_test_set_window_slot(0U, win_mem[0], sizeof(win_mem[0]));
     zzapp_test_set_entry(NULL);
     generation = claim_slot();
     load_slot(0U, generation);
-    extended_request(request, 0U, generation);
-    assert(dispatch(ZZAPP_OP_START, request, sizeof(request)) == SDK_STATUS_OK);
-    zzapp_runtime_kernel()->threads[0].user_ticks = 17U;
-    zzapp_runtime_kernel()->threads[0].svc_ticks = 23U;
+    /* A record that ran is retired and its window reads 0 CPU; the ticks of
+     * a live record are what LIST shows. */
+    zzapp_rec_by_pid(win_pid[0])->thread.user_ticks = 17U;
+    zzapp_rec_by_pid(win_pid[0])->thread.svc_ticks = 23U;
     assert(list_cpu(0U) == 40U);
+    assert(zzapp_rec_retire(win_pid[0]) == 1);
+    assert(list_cpu(0U) == 0U);
+    /* The next claim is a new record: its CPU time starts at zero. */
     generation = claim_slot();
     assert(list_cpu(0U) == 0U);
     load_slot(0U, generation);
@@ -580,12 +589,12 @@ static void test_core_restart_aborts_unstarted_load(void)
     uint8_t reason;
     uint32_t card;
 
-    memset(windows, 0, sizeof(windows));
+    memset(win_mem, 0, sizeof(win_mem));
     request_id = 0U;
     zzapp_boot_init();
     zzapp_services_test_reset();
-    zzapp_services_test_set_window_slot(0U, windows[0], sizeof(windows[0]));
-    zzapp_services_test_set_window_slot(1U, windows[1], sizeof(windows[1]));
+    zzapp_services_test_set_window_slot(0U, win_mem[0], sizeof(win_mem[0]));
+    zzapp_services_test_set_window_slot(1U, win_mem[1], sizeof(win_mem[1]));
     generation[0] = claim_slot();
     generation[1] = claim_slot();
     extended_request(request, 0U, generation[0]);
@@ -604,6 +613,9 @@ static void test_core_restart_aborts_unstarted_load(void)
     assert(reason == ZZAPP_END_CORE_RESTART);
     assert(committed == 0U);
     assert(zzapp_test_arena_card() == 0U);
+    /* The restart retired the claim with its record; the window is claimed
+     * again for the next load. */
+    generation[0] = claim_slot();
     extended_request(request, 0U, generation[0]);
     assert(dispatch(ZZAPP_OP_LOAD_BEGIN, request, sizeof(request)) ==
            SDK_STATUS_OK);

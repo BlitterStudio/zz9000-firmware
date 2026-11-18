@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #endif
 #include "aar/app.h"
+#include "zzapp_rec.h"
 #include "zzapp_runtime.h"
 #include "zzapp_svc.h"
 #include "zzm_format.h"
@@ -28,20 +29,20 @@
 #include "sdk_crypto.h"
 #include "sdk_image_stream.h"
 #if defined(ZZAPP_HOST_TEST) && ZZAPP_PERF_COUNTERS
-void __attribute__((weak)) zzapp_svc_gl_telemetry_reset(uint32_t slot)
-{ (void)slot; }
+void __attribute__((weak)) zzapp_svc_gl_telemetry_reset(uint32_t pid)
+{ (void)pid; }
 int __attribute__((weak)) zzapp_svc_gl_telemetry_swap(
-    uint32_t slot, uint64_t now_us, zzapp_gl_telemetry_snapshot_t *snapshot)
+    uint32_t pid, uint64_t now_us, zzapp_gl_telemetry_snapshot_t *snapshot)
 {
-    (void)slot;
+    (void)pid;
     (void)now_us;
     if (snapshot)
         memset(snapshot, 0, sizeof(*snapshot));
     return 0;
 }
 void __attribute__((weak)) zzapp_svc_gl_telemetry_report(
-    uint32_t slot, const zzapp_gl_telemetry_snapshot_t *snapshot)
-{ (void)slot; (void)snapshot; }
+    uint32_t pid, const zzapp_gl_telemetry_snapshot_t *snapshot)
+{ (void)pid; (void)snapshot; }
 #endif
 
 
@@ -68,7 +69,6 @@ WEAK int zzapp_services_start_entered(uint32_t generation)
     (void)generation;
     return AAR_OK;
 }
-WEAK void zzapp_services_loader_aborted(void) {}
 WEAK void zzapp_services_on_reset(void) {}
 WEAK void zzapp_services_on_app_end(void) {}
 WEAK void zzapp_services_cancel_start(int status) { (void)status; }
@@ -96,8 +96,8 @@ WEAK int zzapp_svc_display_close(uint32_t id) { (void)id; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_event_poll(aar_event *o,uint32_t n,uint32_t *out) { (void)o;(void)n; if(out)*out=0; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_audio_open(uint32_t r,uint32_t c,aar_audio *o) { (void)r;(void)c;(void)o; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_audio_close(void) { return AAR_E_NOSYS; }
-WEAK void zzapp_svc_gl_release(uint32_t slot, uint32_t generation)
-{ (void)slot; (void)generation; }
+WEAK void zzapp_svc_gl_release(uint32_t pid, uint32_t generation)
+{ (void)pid; (void)generation; }
 
 #ifdef ZZAPP_HOST_TEST
 WEAK void sdk_sha256(const uint8_t *data, uint32_t length,
@@ -146,9 +146,6 @@ WEAK uint16_t sdk_decompress_buffer_owned(uint32_t algorithm, uint32_t flags,
 WEAK unsigned sdk_compression_reclaim_core1_decode(void) { return 0; }
 WEAK unsigned sdk_compression_reclaim_app_decode(uint32_t owner)
 { (void)owner; return 0; }
-WEAK uint32_t sdk_compression_app_decode_owner(uint32_t slot,
-                                                uint32_t generation)
-{ return sdk_compression_app_owner_bits(slot, generation); }
 WEAK uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *b,
                                      struct SDKImageStreamResult *r)
 { (void)b; (void)r; return SDK_STATUS_UNSUPPORTED; }
@@ -193,7 +190,7 @@ struct zzapp_minigl_binding {
 };
 
 static struct zzapp_minigl_binding g_minigl;
-static uint32_t api_slot(void);
+static uint32_t api_pid(void);
 static int minigl_binding_matches(uint32_t owner, uint32_t generation);
 static uint32_t app_decode_owner(void);
 
@@ -221,7 +218,7 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
     const zzm_minigl_registration_v1_t *registration;
     const zzm_minigl_ops_v1_t *ops;
     const void *module_gl = NULL;
-    uint32_t owner = api_slot();
+    uint32_t owner = api_pid();
     uint32_t generation = zzapp_current_generation();
     int status;
     void *context = NULL;
@@ -300,7 +297,7 @@ int zzapp_minigl_bind(uint32_t surface_id, const aar_gl **out)
 
 int zzapp_minigl_swap(void)
 {
-    uint32_t owner = api_slot();
+    uint32_t owner = api_pid();
     uint32_t generation = zzapp_current_generation();
 
     if (!minigl_binding_matches(owner, generation))
@@ -334,7 +331,7 @@ static void minigl_drop(void)
 
 void zzapp_minigl_unbind(void)
 {
-    uint32_t owner = api_slot();
+    uint32_t owner = api_pid();
     uint32_t generation = zzapp_current_generation();
 
     if (!minigl_binding_matches(owner, generation))
@@ -345,7 +342,7 @@ void zzapp_minigl_unbind(void)
 
 void zzapp_minigl_reclaim(uint32_t generation)
 {
-    uint32_t owner = api_slot();
+    uint32_t owner = api_pid();
 
     if (!minigl_binding_matches(owner, generation))
         return;
@@ -640,15 +637,15 @@ static int api_decompress(uint32_t algorithm, uint32_t flags, const void *src,
 
 #define ZZAPP_DECODE_SESSIONS 4u
 
-static uint32_t api_slot(void)
+/* The record the call runs for. */
+static uint32_t api_pid(void)
 {
-    return zzapp_services_current_slot();
+    return zzapp_services_current_pid();
 }
 
 static uint32_t app_decode_owner(void)
 {
-    return sdk_compression_app_decode_owner(api_slot(),
-                                            zzapp_current_generation());
+    return sdk_compression_app_decode_owner(api_pid());
 }
 
 struct zzapp_image_session {
@@ -656,9 +653,6 @@ struct zzapp_image_session {
     uint32_t tile_address;
     uint32_t tile_bytes;
 };
-
-static struct zzapp_image_session
-    g_image_sessions[ZZAPP_AS_SLOT_COUNT][ZZAPP_DECODE_SESSIONS];
 
 struct zzapp_audio_session {
     uint32_t id;
@@ -670,9 +664,30 @@ struct zzapp_audio_session {
     } state;
 };
 
-static struct zzapp_audio_session
-    g_audio_sessions[ZZAPP_AS_SLOT_COUNT][ZZAPP_DECODE_SESSIONS];
-static uint32_t g_next_audio_session[ZZAPP_AS_SLOT_COUNT];
+/* An app's audio decoders. The block is large, so it exists only while a
+ * session is open: allocated on the first open under the app's decode owner,
+ * returned with the last close or at retire. */
+struct zzapp_audio_sessions {
+    struct zzapp_audio_session session[ZZAPP_DECODE_SESSIONS];
+};
+
+/* What this file keeps per app, overlaid on the decode part of its process
+ * record. */
+struct zzapp_decode_state {
+    struct zzapp_image_session image[ZZAPP_DECODE_SESSIONS];
+    struct zzapp_audio_sessions *audio;
+    uint32_t next_audio_session;
+};
+_Static_assert(sizeof(struct zzapp_decode_state) <= ZZAPP_REC_DECODE_BYTES,
+               "decode state fits the record's decode part");
+
+/* NULL for a pid outside the record table. */
+static struct zzapp_decode_state *decode_state(uint32_t pid)
+{
+    zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+    return rec ? (struct zzapp_decode_state *)(void *)rec->decode.bytes : NULL;
+}
 
 static void image_result(const struct SDKImageStreamResult *result,
                          aar_image_result *out)
@@ -690,7 +705,8 @@ static int api_image_open(const aar_image_params *open, uint32_t *session,
     struct SDKImageStreamBegin begin;
     struct SDKImageStreamResult result;
     uint16_t status;
-    uint32_t owner = api_slot();
+    uint32_t pid = api_pid();
+    struct zzapp_decode_state *ds = decode_state(pid);
     uint32_t i;
     int rc;
 
@@ -698,10 +714,11 @@ static int api_image_open(const aar_image_params *open, uint32_t *session,
         !open->rows || !open->tile_bytes ||
         open->output_format != AAR_FMT_BGRA8888)
         return AAR_E_INVAL;
-    for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
-                g_image_sessions[owner][i].id; ++i) {}
+    if (!ds)
+        return AAR_E_FAULT;
+    for (i = 0; i < ZZAPP_DECODE_SESSIONS && ds->image[i].id; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS ||
-        zzapp_kernel_session_open(zzapp_runtime_kernel(), owner, 0) != 0)
+        zzapp_kernel_session_open(zzapp_runtime_kernel(), pid, 0) != 0)
         return AAR_E_NOMEM;
     memset(&begin, 0, sizeof(begin));
     begin.codec = open->codec;
@@ -729,12 +746,12 @@ static int api_image_open(const aar_image_params *open, uint32_t *session,
         status = SDK_STATUS_BUSY;
     rc = sdk_to_zz(status);
     if (rc == AAR_OK) {
-        g_image_sessions[owner][i].id = result.session;
-        g_image_sessions[owner][i].tile_address = (uint32_t)(uintptr_t)open->tile;
-        g_image_sessions[owner][i].tile_bytes = open->tile_bytes;
-        zzapp_proc_slot(owner)->image_sessions++;
+        ds->image[i].id = result.session;
+        ds->image[i].tile_address = (uint32_t)(uintptr_t)open->tile;
+        ds->image[i].tile_bytes = open->tile_bytes;
+        zzapp_proc_slot(pid)->image_sessions++;
     } else
-        zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 0);
+        zzapp_kernel_session_close(zzapp_runtime_kernel(), pid, 0);
     zzapp_host_commit_end();
     zzapp_api_leave();
     if (rc == AAR_OK) {
@@ -749,19 +766,21 @@ static int api_image_decode(uint32_t session, const void *src, uint32_t bytes,
 {
     struct SDKImageStreamFeed feed;
     struct SDKImageStreamResult result;
-    uint32_t owner = api_slot();
+    uint32_t pid = api_pid();
+    struct zzapp_decode_state *ds = decode_state(pid);
     uint32_t i;
     int rc;
 
     if (!src || !out)
         return AAR_E_INVAL;
-    for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
-                g_image_sessions[owner][i].id != session; ++i) {}
+    if (!ds)
+        return AAR_E_FAULT;
+    for (i = 0; i < ZZAPP_DECODE_SESSIONS && ds->image[i].id != session; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS)
         return AAR_E_INVAL;
-    if (zzapp_svc_check_user(&zzapp_proc_slot(owner)->as,
-                             g_image_sessions[owner][i].tile_address,
-                             g_image_sessions[owner][i].tile_bytes, 1) != AAR_OK)
+    if (zzapp_svc_check_user(&zzapp_proc_slot(pid)->as,
+                             ds->image[i].tile_address,
+                             ds->image[i].tile_bytes, 1) != AAR_OK)
         return AAR_E_FAULT;
     memset(&feed, 0, sizeof(feed));
     feed.session = session;
@@ -777,35 +796,38 @@ static int api_image_decode(uint32_t session, const void *src, uint32_t bytes,
 
 static int api_image_close(uint32_t session)
 {
-    uint32_t owner = api_slot();
+    uint32_t pid = api_pid();
+    struct zzapp_decode_state *ds = decode_state(pid);
     uint32_t i;
     int rc;
 
-    for (i = 0; i < ZZAPP_DECODE_SESSIONS &&
-                g_image_sessions[owner][i].id != session; ++i) {}
+    if (!ds)
+        return AAR_E_FAULT;
+    for (i = 0; i < ZZAPP_DECODE_SESSIONS && ds->image[i].id != session; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS)
         return AAR_E_INVAL;
     zzapp_api_enter();
     rc = sdk_to_zz(sdk_image_stream_close(session));
     zzapp_api_leave();
     if (rc == AAR_OK) {
-        memset(&g_image_sessions[owner][i], 0,
-               sizeof(g_image_sessions[owner][i]));
-        zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 0);
-        if (zzapp_proc_slot(owner)->image_sessions)
-            zzapp_proc_slot(owner)->image_sessions--;
+        memset(&ds->image[i], 0, sizeof(ds->image[i]));
+        zzapp_kernel_session_close(zzapp_runtime_kernel(), pid, 0);
+        if (zzapp_proc_slot(pid)->image_sessions)
+            zzapp_proc_slot(pid)->image_sessions--;
     }
     return rc;
 }
 
 static struct zzapp_audio_session *audio_session_find(uint32_t session)
 {
-    struct zzapp_audio_session *sessions = g_audio_sessions[api_slot()];
+    struct zzapp_decode_state *ds = decode_state(api_pid());
     uint32_t i;
 
+    if (!ds || !ds->audio)
+        return NULL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (sessions[i].id == session)
-            return &sessions[i];
+        if (ds->audio->session[i].id == session)
+            return &ds->audio->session[i];
     return NULL;
 }
 
@@ -818,27 +840,57 @@ static void audio_session_release(struct zzapp_audio_session *session)
     memset(session, 0, sizeof(*session));
 }
 
+/* Give the audio block back once no session uses it. The pointer is cleared
+ * before the block is freed. */
+static void audio_block_release_if_idle(struct zzapp_decode_state *ds)
+{
+    struct zzapp_audio_sessions *block = ds->audio;
+    uint32_t i;
+
+    if (!block)
+        return;
+    for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
+        if (block->session[i].id)
+            return;
+    ds->audio = NULL;
+    sdk_decode_heap_free(block);
+}
+
 static int api_audio_open_decode(uint32_t codec, uint32_t *session)
 {
     struct zzapp_audio_session *slot = NULL;
-    uint32_t owner = api_slot();
+    uint32_t pid = api_pid();
+    struct zzapp_decode_state *ds = decode_state(pid);
     uint32_t i;
 
     if (!session || (codec != AAR_AUDIO_MP3 && codec != AAR_AUDIO_FLAC &&
                      codec != AAR_AUDIO_VORBIS))
         return AAR_E_INVAL;
+    if (!ds)
+        return AAR_E_FAULT;
+    if (!ds->audio) {
+        /* The decoders are large (a few KiB each), and most apps open
+         * none: the block exists only while a session is open. */
+        ds->audio = sdk_decode_heap_alloc_owned(sizeof(*ds->audio),
+                                                app_decode_owner());
+        if (!ds->audio)
+            return AAR_E_NOMEM;
+        memset(ds->audio, 0, sizeof(*ds->audio));
+    }
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (g_audio_sessions[owner][i].id == 0u) {
-            slot = &g_audio_sessions[owner][i];
+        if (ds->audio->session[i].id == 0u) {
+            slot = &ds->audio->session[i];
             break;
         }
     if (!slot ||
-        zzapp_kernel_session_open(zzapp_runtime_kernel(), owner, 1) != 0)
+        zzapp_kernel_session_open(zzapp_runtime_kernel(), pid, 1) != 0) {
+        audio_block_release_if_idle(ds);
         return AAR_E_NOMEM;
+    }
     memset(slot, 0, sizeof(*slot));
-    slot->id = 0x80000000u | ++g_next_audio_session[owner];
-    if (g_next_audio_session[owner] == 0u)
-        g_next_audio_session[owner] = 1u;
+    slot->id = 0x80000000u | ++ds->next_audio_session;
+    if (ds->next_audio_session == 0u)
+        ds->next_audio_session = 1u;
     slot->codec = codec;
     if (codec == AAR_AUDIO_MP3)
         mp3dec_init(&slot->state.mp3);
@@ -849,7 +901,7 @@ static int api_audio_open_decode(uint32_t codec, uint32_t *session)
         sdk_vorbis_init(&slot->state.vorbis, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
         slot->state.vorbis.heap.pool_owner = app_decode_owner();
     }
-    zzapp_proc_slot(owner)->audio_sessions++;
+    zzapp_proc_slot(pid)->audio_sessions++;
     *session = slot->id;
     return AAR_OK;
 }
@@ -937,65 +989,81 @@ static int api_audio_decode_app(uint32_t session, const void *src,
 
 static int api_audio_close_decode(uint32_t session)
 {
-    uint32_t owner = api_slot();
+    uint32_t pid = api_pid();
+    struct zzapp_decode_state *ds = decode_state(pid);
     struct zzapp_audio_session *slot = audio_session_find(session);
 
-    if (!slot)
+    if (!ds || !slot)
         return AAR_E_INVAL;
     zzapp_api_enter();
     audio_session_release(slot);
     zzapp_api_leave();
-    zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 1);
-    if (zzapp_proc_slot(owner)->audio_sessions)
-        zzapp_proc_slot(owner)->audio_sessions--;
+    zzapp_kernel_session_close(zzapp_runtime_kernel(), pid, 1);
+    if (zzapp_proc_slot(pid)->audio_sessions)
+        zzapp_proc_slot(pid)->audio_sessions--;
+    audio_block_release_if_idle(ds);
     return AAR_OK;
 }
 
 void zzapp_api_reclaim_resources(void)
 {
-    uint32_t owner = api_slot();
-    struct zzapp_audio_session *audio_sessions = g_audio_sessions[owner];
-    struct zzapp_image_session *image_sessions = g_image_sessions[owner];
+    uint32_t pid = api_pid();
+    struct zzapp_decode_state *ds = decode_state(pid);
     uint32_t i;
 
+    if (!ds)
+        return;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (image_sessions[i].id) {
-            (void)sdk_image_stream_close(image_sessions[i].id);
-            memset(&image_sessions[i], 0, sizeof(image_sessions[i]));
+        if (ds->image[i].id) {
+            (void)sdk_image_stream_close(ds->image[i].id);
+            memset(&ds->image[i], 0, sizeof(ds->image[i]));
         }
+    if (!ds->audio)
+        return;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (audio_sessions[i].id) {
-            audio_session_release(&audio_sessions[i]);
-            zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 1);
-            if (zzapp_proc_slot(owner)->audio_sessions)
-                zzapp_proc_slot(owner)->audio_sessions--;
+        if (ds->audio->session[i].id) {
+            audio_session_release(&ds->audio->session[i]);
+            zzapp_kernel_session_close(zzapp_runtime_kernel(), pid, 1);
+            if (zzapp_proc_slot(pid)->audio_sessions)
+                zzapp_proc_slot(pid)->audio_sessions--;
         }
+    audio_block_release_if_idle(ds);
 }
 
 void zzapp_api_poison_resources(void)
 {
-    uint32_t owner = api_slot();
-    struct zzapp_audio_session *audio_sessions = g_audio_sessions[owner];
-    struct zzapp_image_session *image_sessions = g_image_sessions[owner];
+    uint32_t pid = api_pid();
+    struct zzapp_decode_state *ds = decode_state(pid);
     uint32_t i;
 
+    if (!ds)
+        return;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (image_sessions[i].id) {
-            sdk_image_stream_poison_session(image_sessions[i].id);
-            (void)sdk_image_stream_release_poisoned(image_sessions[i].id);
-            memset(&image_sessions[i], 0, sizeof(image_sessions[i]));
+        if (ds->image[i].id) {
+            sdk_image_stream_poison_session(ds->image[i].id);
+            (void)sdk_image_stream_release_poisoned(ds->image[i].id);
+            memset(&ds->image[i], 0, sizeof(ds->image[i]));
         }
-    for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
-        if (audio_sessions[i].id) {
-            if (audio_sessions[i].codec == AAR_AUDIO_FLAC)
-                sdk_flac_forget(&audio_sessions[i].state.flac);
-            else if (audio_sessions[i].codec == AAR_AUDIO_VORBIS)
-                sdk_vorbis_forget(&audio_sessions[i].state.vorbis);
-            memset(&audio_sessions[i], 0, sizeof(audio_sessions[i]));
-            zzapp_kernel_session_close(zzapp_runtime_kernel(), owner, 1);
-            if (zzapp_proc_slot(owner)->audio_sessions)
-                zzapp_proc_slot(owner)->audio_sessions--;
-        }
+    if (ds->audio) {
+        struct zzapp_audio_sessions *block = ds->audio;
+
+        /* The decoders are forgotten, not released: core 1 may be dead
+         * inside them. The block itself is a card-pool block under the
+         * app's decode owner, which the reclaim below returns. Detach it
+         * first. */
+        ds->audio = NULL;
+        for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
+            if (block->session[i].id) {
+                if (block->session[i].codec == AAR_AUDIO_FLAC)
+                    sdk_flac_forget(&block->session[i].state.flac);
+                else if (block->session[i].codec == AAR_AUDIO_VORBIS)
+                    sdk_vorbis_forget(&block->session[i].state.vorbis);
+                memset(&block->session[i], 0, sizeof(block->session[i]));
+                zzapp_kernel_session_close(zzapp_runtime_kernel(), pid, 1);
+                if (zzapp_proc_slot(pid)->audio_sessions)
+                    zzapp_proc_slot(pid)->audio_sessions--;
+            }
+    }
     sdk_compression_reclaim_app_decode(app_decode_owner());
 }
 #define WRAP0(name, call) static int name(void) { zzapp_api_enter(); int r=(call); zzapp_api_leave(); return r; }
@@ -1032,7 +1100,7 @@ static const aar_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const aar_gl*
 static void api_gl_swap(void)
 {
     zzapp_gl_telemetry_snapshot_t snapshot;
-    uint32_t slot = api_slot();
+    uint32_t slot = api_pid();
     int report = 0;
 
     zzapp_api_enter();

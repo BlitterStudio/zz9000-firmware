@@ -572,9 +572,7 @@ static int test_app_owner_does_not_reclaim_video_session(void)
 	uint32_t video_owner;
 	uint32_t video_block;
 	uint32_t app_block;
-	uint32_t generation;
-	uint32_t slot;
-	uint32_t span;
+	uint32_t serial;
 	uint32_t i;
 
 	card_pool_init(&card_pool);
@@ -592,17 +590,14 @@ static int test_app_owner_does_not_reclaim_video_session(void)
 	if (session != 4U)
 		return 52;
 	video_owner = created_pool_owner;
-	span = (SDK_MEDIA_APP_INSTANCE_LIMIT -
-		SDK_MEDIA_APP_INSTANCE_BASE) >> 2;
-	for (generation = 0U; generation < span; ++generation) {
-		for (slot = 0U; slot < 4U; ++slot) {
-			app_owner = sdk_compression_app_owner_bits(slot, generation);
-			if (app_owner == video_owner ||
-			    CARD_POOL_OWNER_CLASS(app_owner) != CARD_POOL_CLASS_MEDIA)
-				return 53;
-		}
+	/* Every admission serial, 1 to 0xffffff, maps into the app range. */
+	for (serial = 1U; serial <= 0x00ffffffU; ++serial) {
+		app_owner = sdk_compression_app_owner_bits(serial);
+		if (app_owner == video_owner ||
+		    CARD_POOL_OWNER_CLASS(app_owner) != CARD_POOL_CLASS_MEDIA)
+			return 53;
 	}
-	app_owner = sdk_compression_app_owner_bits(0U, 1U);
+	app_owner = sdk_compression_app_owner_bits(1U);
 	video_block = card_pool_alloc(&card_pool, 0x10000U, video_owner);
 	app_block = card_pool_alloc(&card_pool, 0x10000U, app_owner);
 	if (!video_block || !app_block)

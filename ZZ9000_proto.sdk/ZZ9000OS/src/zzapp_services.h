@@ -17,6 +17,7 @@ struct aar_stat;
 struct aar_dirent;
 struct aar_surface;
 struct aar_audio;
+struct zzapp_rec;
 
 /* SDK status numbers. Match sdk_mailbox.h; guarded so either include order works. */
 #ifndef SDK_STATUS_OK
@@ -32,13 +33,14 @@ struct aar_audio;
 #define SDK_STATUS_NOT_FOUND       10u
 #endif
 
-/* Amiga reset: forget the window and free its block before the host heap is
- * reset, and detach audio. */
+/* Amiga reset, once, after the host retired every record and before the
+ * allocator is reset: every window is forgotten and gives its memory back,
+ * quarantines are dropped, a held record shell is released (one with an audio
+ * detach still owed to core 0 stays until core 0 finishes it). */
 void zzapp_services_on_reset(void);
-/* Amiga reset, before the allocator is reset: an idle slot gives its window
- * back too. */
-void zzapp_services_retire_idle_window(void);
-/* App lifetime cleanup retains the launch window so status remains readable. */
+/* Retire stage 3: display grants, audio post-teardown, files and waits of the
+ * selected record. The state moves to STOPPING; IDLE comes from
+ * zzapp_services_retire_wire(). */
 void zzapp_services_on_app_end(void);
 void zzapp_services_cancel_start(int status);
 void zzapp_services_on_launch(void);
@@ -52,9 +54,14 @@ void zzapp_services_set_window_mapping_available(int available);
 uint8_t *zzapp_services_window(void);
 uint32_t zzapp_services_generation(void);
 uint32_t zzapp_services_state(void);
-uint32_t zzapp_services_current_slot(void);
+/* The record services act for: the running app's own on core 1, else the one
+ * selected by zzapp_services_select_pid(); ZZAPP_PID_NONE when there is none. */
+uint32_t zzapp_services_current_pid(void);
+/* Select the record (and its window) as this core's context. A pid that is
+ * out of range or FREE clears the record context. */
+void zzapp_services_select_pid(uint32_t pid);
 int zzapp_services_stop_requested(void);
-int zzapp_services_wait_registered(uint32_t slot);
+int zzapp_services_wait_registered(uint32_t pid);
 void zzapp_services_set_state(uint32_t state);
 void zzapp_services_set_generation(uint32_t generation);
 uint32_t zzapp_services_memory_limit(void);
@@ -75,11 +82,16 @@ void zzapp_services_expire_claims(uint64_t now_us);
  * before publishing RUNNING or branching into the app. */
 int zzapp_services_take_start(uint32_t *argc);
 int zzapp_services_start_entered(uint32_t generation);
-/* Core 1 teardown: publish IDLE only while the slot still belongs to the
- * generation it started with, then acknowledge the loader abort last (a
- * quarantine with recorded release intent is released there). */
-void zzapp_services_set_idle_for(uint32_t generation);
-void zzapp_services_loader_aborted(void);
+/* Retire steps 6 and 7 (the host's zzapp_rec_retire calls it last): copy the
+ * terminal reason and name into the window's last-end summary, publish IDLE,
+ * detach the record from its window and free it. 1: freed, the record must
+ * not be touched again. 0: the shell is held (quarantined window, audio
+ * handoff pending) and services frees it later from core 0. Replay safe: a
+ * record that is already free reports 1. */
+int zzapp_services_retire_wire(struct zzapp_rec *rec);
+/* A resource refusal of the selected record during load (AAR_REASON_*),
+ * published in the lifecycle block before the failing op completes. */
+void zzapp_services_note_refusal(uint32_t reason);
 
 void zzapp_svc_log(const char *msg, uint32_t len);
 int zzapp_svc_should_stop(void);
@@ -158,6 +170,7 @@ uint64_t zzapp_host_time_us(void);
 #ifdef ZZAPP_HOST_TEST
 void zzapp_services_test_reset(void);
 void zzapp_services_test_set_core(int core);
+void zzapp_services_test_select_window(uint32_t win);
 void zzapp_services_test_set_window(void *window, uint32_t bytes);
 void zzapp_services_test_set_window_slot(uint32_t slot, void *window,
 					 uint32_t bytes);

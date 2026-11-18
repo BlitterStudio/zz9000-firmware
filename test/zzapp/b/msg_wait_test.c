@@ -8,6 +8,7 @@
  */
 #define ZZAPP_SERVICES_STANDALONE_TEST
 #include "zzapp_services.c"
+#include "svc_env.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -86,7 +87,7 @@ static void test_ready_message_returns_at_once(void)
 	host_push(0x5a);
 	CHECK(zzapp_svc_msg_wait(1000000U) == AAR_OK);
 	CHECK(yields == 0U);
-	CHECK(!zzapp_services_wait_registered(0U));
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
 	/* The wait only reports readiness; the message is still queued. */
 	CHECK(zzapp_svc_msg_poll(msg) == 1);
 	CHECK(msg[0] == 0x5a && msg[31] == 0x5a);
@@ -96,24 +97,24 @@ static void test_ready_message_returns_at_once(void)
 static void arrive_later(unsigned n)
 {
 	/* Parked: registered as an EVENT wait with the deadline recorded. */
-	CHECK(zzapp_services_wait_registered(0U));
-	CHECK(runtime[0].wait_kind == ZZAPP_WAIT_EVENT);
-	CHECK(runtime[0].wait_deadline == 1000U + 5000000U);
-	service_test_kernel.threads[0].state = ZZAPP_THREAD_BLOCKED;
+	CHECK(zzapp_services_wait_registered(PID_OF(0U)));
+	CHECK(RT(0).wait_kind == ZZAPP_WAIT_EVENT);
+	CHECK(RT(0).wait_deadline == 1000U + 5000000U);
+	TH(0).state = ZZAPP_THREAD_BLOCKED;
 	CHECK(list_block_reason() == ZZAPP_BLOCK_EVENT);
 	if (n == 1U) {
 		/* Nothing queued: the service pass leaves the app parked. */
 		service_test_wake_count = 0U;
 		zzapp_services_poll();
 		CHECK(service_test_wake_count == 0U);
-		CHECK(service_test_kernel.threads[0].state ==
+		CHECK(TH(0).state ==
 		      ZZAPP_THREAD_BLOCKED);
 		return;
 	}
 	host_push(0x11);
 	zzapp_services_poll();
 	CHECK(service_test_wake_count == 1U);
-	CHECK(service_test_kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
+	CHECK(TH(0).state == ZZAPP_THREAD_RUNNABLE);
 }
 
 static void test_message_that_arrives_later_wakes(void)
@@ -124,7 +125,7 @@ static void test_message_that_arrives_later_wakes(void)
 	on_yield = arrive_later;
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
 	CHECK(yields == 2U);
-	CHECK(!zzapp_services_wait_registered(0U));
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
 	CHECK(zzapp_svc_msg_poll(msg) == 1);
 	CHECK(msg[5] == 0x11);
 }
@@ -148,25 +149,25 @@ static void test_message_between_check_and_park_is_not_missed(void)
 	/* A service pass that sees the ring ready wakes a parked waiter even
 	 * though the message arrived before the pass ever saw the wait empty. */
 	reset();
-	runtime[0].wait_kind = ZZAPP_WAIT_EVENT;
-	runtime[0].wait_deadline = 1000U + 5000000U;
-	service_test_kernel.threads[0].state = ZZAPP_THREAD_BLOCKED;
+	RT(0).wait_kind = ZZAPP_WAIT_EVENT;
+	RT(0).wait_deadline = 1000U + 5000000U;
+	TH(0).state = ZZAPP_THREAD_BLOCKED;
 	host_push(0x33);
 	service_test_wake_count = 0U;
 	zzapp_services_poll();
 	CHECK(service_test_wake_count == 1U);
-	CHECK(service_test_kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
+	CHECK(TH(0).state == ZZAPP_THREAD_RUNNABLE);
 }
 
 static void run_to_deadline(unsigned n)
 {
 	(void)n;
-	CHECK(runtime[0].wait_kind == ZZAPP_WAIT_EVENT);
-	service_test_kernel.threads[0].state = ZZAPP_THREAD_BLOCKED;
+	CHECK(RT(0).wait_kind == ZZAPP_WAIT_EVENT);
+	TH(0).state = ZZAPP_THREAD_BLOCKED;
 	/* Time passes with nothing queued; the pass wakes the waiter TIMEOUT. */
-	now_value = runtime[0].wait_deadline;
+	now_value = RT(0).wait_deadline;
 	zzapp_services_poll();
-	CHECK(service_test_kernel.threads[0].wake_reason == ZZAPP_WAKE_TIMEOUT);
+	CHECK(TH(0).wake_reason == ZZAPP_WAKE_TIMEOUT);
 }
 
 static void test_timeout(void)
@@ -175,14 +176,14 @@ static void test_timeout(void)
 	/* Zero only tests the ring. */
 	CHECK(zzapp_svc_msg_wait(0U) == AAR_E_TIMEDOUT);
 	CHECK(yields == 0U);
-	CHECK(!zzapp_services_wait_registered(0U));
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
 
 	reset();
 	on_yield = run_to_deadline;
 	CHECK(zzapp_svc_msg_wait(250000U) == AAR_E_TIMEDOUT);
 	CHECK(yields == 1U);
-	CHECK(!zzapp_services_wait_registered(0U));
-	CHECK(runtime[0].wait_deadline == 0U);
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
+	CHECK(RT(0).wait_deadline == 0U);
 }
 
 /* The Amiga's APP_STOP, as the mailbox dispatches it. It only latches the
@@ -201,8 +202,8 @@ static int stop_with_message;
 static void stop_while_parked(unsigned n)
 {
 	(void)n;
-	CHECK(runtime[0].wait_kind == ZZAPP_WAIT_EVENT);
-	service_test_kernel.threads[0].state = ZZAPP_THREAD_BLOCKED;
+	CHECK(RT(0).wait_kind == ZZAPP_WAIT_EVENT);
+	TH(0).state = ZZAPP_THREAD_BLOCKED;
 	/* No stop yet: the pass leaves the app parked. */
 	service_test_wake_count = 0U;
 	zzapp_services_poll();
@@ -212,7 +213,7 @@ static void stop_while_parked(unsigned n)
 	send_app_stop();
 	zzapp_services_poll();
 	CHECK(service_test_wake_count == 1U);
-	CHECK(service_test_kernel.threads[0].state == ZZAPP_THREAD_RUNNABLE);
+	CHECK(TH(0).state == ZZAPP_THREAD_RUNNABLE);
 }
 
 /* The message lands in the same pass that sees the deadline. The pass picks
@@ -220,11 +221,11 @@ static void stop_while_parked(unsigned n)
 static void message_at_deadline(unsigned n)
 {
 	(void)n;
-	service_test_kernel.threads[0].state = ZZAPP_THREAD_BLOCKED;
-	now_value = runtime[0].wait_deadline;
+	TH(0).state = ZZAPP_THREAD_BLOCKED;
+	now_value = RT(0).wait_deadline;
 	host_push(0x66);
 	zzapp_services_poll();
-	CHECK(service_test_kernel.threads[0].wake_reason == ZZAPP_WAKE_READY);
+	CHECK(TH(0).wake_reason == ZZAPP_WAKE_READY);
 }
 
 /* The pass saw the deadline first and woke the app TIMEOUT; the message
@@ -232,10 +233,10 @@ static void message_at_deadline(unsigned n)
 static void message_after_timeout_wake(unsigned n)
 {
 	(void)n;
-	service_test_kernel.threads[0].state = ZZAPP_THREAD_BLOCKED;
-	now_value = runtime[0].wait_deadline;
+	TH(0).state = ZZAPP_THREAD_BLOCKED;
+	now_value = RT(0).wait_deadline;
 	zzapp_services_poll();
-	CHECK(service_test_kernel.threads[0].wake_reason == ZZAPP_WAKE_TIMEOUT);
+	CHECK(TH(0).wake_reason == ZZAPP_WAKE_TIMEOUT);
 	host_push(0x77);
 }
 
@@ -252,22 +253,22 @@ static void test_message_during_timeout_is_not_lost(void)
 	on_yield = message_after_timeout_wake;
 	CHECK(zzapp_svc_msg_wait(250000U) == AAR_OK);
 	CHECK(zzapp_svc_msg_poll(msg) == 1 && msg[0] == 0x77);
-	CHECK(!zzapp_services_wait_registered(0U));
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
 }
 
 static void test_stop_cancels_the_wait(void)
 {
 	reset();
-	slots[0].state = ZZAPP_ST_RUNNING;
+	test_force_state(0U, ZZAPP_ST_RUNNING);
 	stop_with_message = 0;
 	on_yield = stop_while_parked;
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
 	CHECK(yields == 1U);
-	CHECK(!zzapp_services_wait_registered(0U));
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
 
 	/* A message queued with the stop is still returned. */
 	reset();
-	slots[0].state = ZZAPP_ST_RUNNING;
+	test_force_state(0U, ZZAPP_ST_RUNNING);
 	stop_with_message = 1;
 	on_yield = stop_while_parked;
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
@@ -289,11 +290,12 @@ static void test_ring_corruption_is_an_error(void)
 	zzapp_put_be32(window + ZZAPP_MSG_H2A_OFF, ZZAPP_MSG_CAP + 5U);
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
 	CHECK(yields == 0U);
-	CHECK(!zzapp_services_wait_registered(0U));
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
 }
 
 int main(void)
 {
+	svc_env_init(8U, 0U, NULL);
 	test_ready_message_returns_at_once();
 	test_message_that_arrives_later_wakes();
 	test_message_between_check_and_park_is_not_missed();

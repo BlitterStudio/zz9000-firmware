@@ -1,12 +1,16 @@
 /*
- * PIE ELF loader for up to four user-mode ARM apps.
+ * PIE ELF loader for the trusted ARM apps, one loader state per process
+ * record.
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Relocations are SHT_REL or SHT_RELA, R_ARM_RELATIVE only. SHT_REL takes its
- * addend from the relocation target; SHT_RELA provides it in the entry. The
- * relocated word is addend + load_bias.
+ * Relocations come from PT_DYNAMIC, so an image without section headers
+ * loads: DT_REL/DT_RELSZ/DT_RELENT (8-byte entries, the addend is the word at
+ * the target) and DT_RELA/DT_RELASZ/DT_RELAENT (12-byte entries, the addend is
+ * in the entry), R_ARM_RELATIVE only. The relocated word is addend +
+ * load_bias. DT_NEEDED, a PLT relocation table and any other relocation type
+ * are refused.
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -15,6 +19,7 @@
 #include "aar/app.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
+#include "zzapp_rec.h"
 
 #define EM_ARM                 40u
 #define ET_DYN                 3u
@@ -25,15 +30,24 @@
 #define PF_X                   1u
 #define PF_W                   2u
 #define PF_R                   4u
-#define SHT_RELA               4u
 #define SHT_NOTE               7u
-#define SHT_REL                9u
-#define SHF_ALLOC              2u
 #define R_ARM_RELATIVE         23u
 #define EF_ARM_ABI_FLOAT_HARD  0x400u
-#define DT_NEEDED              1
 #define DT_NULL                0
+#define DT_NEEDED              1
+#define DT_PLTRELSZ            2
+#define DT_RELA                7
+#define DT_RELASZ              8
+#define DT_RELAENT             9
+#define DT_JMPREL              23
 #define DT_REL                 17
+#define DT_RELSZ               18
+#define DT_RELENT              19
+#define LOADER_REL_BYTES       8u
+#define LOADER_RELA_BYTES      12u
+/* Kind of a saved relocation, stored with it. */
+#define LOADER_RELOC_REL       1u
+#define LOADER_RELOC_RELA      2u
 #define ELF_NOTE_ALIGN         4u
 #define ZZAPP_MAX_PHDR         32u
 #define ZZAPP_MAX_SHDR         64u
@@ -54,6 +68,11 @@ struct load_image {
     uint32_t min_heap_bytes;
     uint32_t image_end;
     uint32_t nseg;
+    /* Relocation tables found in PT_DYNAMIC, as file offsets (0 bytes: none). */
+    uint32_t rel_off;
+    uint32_t rel_bytes;
+    uint32_t rela_off;
+    uint32_t rela_bytes;
     struct load_seg seg[ZZAPP_MAX_LOAD];
 };
 
@@ -79,10 +98,10 @@ static int image_commit_fits_limit(const struct load_image *img)
 void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t owner,
                         uint32_t generation);
 void zzapp_loader_unbound(void);
+void zzapp_loader_unbound_resources(void);
 uint32_t zzapp_loader_generation(void);
 uint32_t zzapp_loader_state(void);
 void zzapp_loader_set_state(uint32_t state);
-void zzapp_services_set_state(uint32_t state);
 int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
                            uint32_t stack_bytes, uint32_t note_flags,
                            uint32_t min_heap_bytes);
@@ -116,7 +135,75 @@ struct loader_slot {
     uint16_t reloc_section;
     uint8_t reloc_prepare_started;
     int image_prepared;
+};
+
+/* The loader's state is the record's loader part: one per process record,
+ * type stable. A bad index stops the caller (never "slot 0"). */
+_Static_assert(sizeof(struct loader_slot) <= ZZAPP_REC_LOADER_BYTES,
+               "loader state exceeds its block of the process record");
+_Static_assert(_Alignof(struct loader_slot) <= 8u,
+               "loader state alignment");
+
+static void loader_hard_fail(void)
+{
 #ifdef ZZAPP_HOST_TEST
+    abort();
+#else
+    __builtin_trap();
+#endif
+}
+
+static uint32_t loader_pid(void)
+{
+    return zzapp_services_current_pid();
+}
+
+static zzapp_rec_t *loader_rec_or_null(void)
+{
+    return zzapp_rec_by_pid(loader_pid());
+}
+
+static struct loader_slot *loader_part(void)
+{
+    zzapp_rec_t *rec = loader_rec_or_null();
+
+    if (!rec)
+        loader_hard_fail();
+    return (struct loader_slot *)(void *)rec->loader.bytes;
+}
+
+#define g_card       (loader_part()->card)
+#define g_mem        (loader_part()->mem)
+#define g_bytes      (loader_part()->bytes)
+#define g_owner      (loader_part()->owner)
+#define g_file_end   (loader_part()->file_end)
+#define g_back       (loader_part()->back)
+#define g_zero_frames (loader_part()->zero_frames)
+#define g_zeroed_frames (loader_part()->zeroed_frames)
+#define g_image      (loader_part()->image)
+#define g_relocs     (loader_part()->relocs)
+#define g_relocs_bytes (loader_part()->relocs_bytes)
+#define g_reloc_entry (loader_part()->reloc_entry)
+#define g_reloc_written (loader_part()->reloc_written)
+#define g_reloc_apply (loader_part()->reloc_apply)
+#define g_reloc_section (loader_part()->reloc_section)
+#define g_reloc_prepare_started (loader_part()->reloc_prepare_started)
+#define g_image_prepared (loader_part()->image_prepared)
+#define g_back_owner (loader_part()->back_owner)
+#define g_generation (loader_part()->generation)
+#define g_ready      (loader_part()->ready)
+#define g_zero_offset (loader_part()->zero_offset)
+#define g_map_segment (loader_part()->map_segment)
+#define g_map_offset (loader_part()->map_offset)
+#define g_map_page (loader_part()->map_page)
+#define g_map_flush_end (loader_part()->map_flush_end)
+#define g_map_tail (loader_part()->map_tail)
+#define g_map_phase (loader_part()->map_phase)
+#ifdef ZZAPP_HOST_TEST
+/* Host harness only: the flat window that stands in for the app's private
+ * memory, and the counters tests read. They are kept per record index, apart
+ * from the record, which holds the production fields only. */
+struct loader_host {
     uint8_t *host_mem;
     uint8_t *host_back;
     uint8_t *host_file;
@@ -124,62 +211,42 @@ struct loader_slot {
     uint32_t host_work_last_bytes;
     uint32_t host_reloc_last_entries;
     uint32_t host_work_last_kind;
-#endif
-
 };
-uint32_t zzapp_services_current_slot(void) __attribute__((weak));
+static struct loader_host g_loader_host[ZZAPP_REC_MAX_APPS];
 
-static struct loader_slot g_loader[ZZAPP_AS_SLOT_COUNT];
-
-static uint32_t loader_slot(void)
+static struct loader_host *loader_host_part(void)
 {
-    uint32_t slot = zzapp_services_current_slot ? zzapp_services_current_slot() : 0U;
+    uint32_t pid = loader_pid();
 
-    return slot < ZZAPP_AS_SLOT_COUNT ? slot : 0U;
+    if (pid >= ZZAPP_REC_MAX_APPS || !zzapp_rec_by_pid(pid))
+        loader_hard_fail();
+    return &g_loader_host[pid];
 }
-
-#define g_card       (g_loader[loader_slot()].card)
-#define g_mem        (g_loader[loader_slot()].mem)
-#define g_bytes      (g_loader[loader_slot()].bytes)
-#define g_owner      (g_loader[loader_slot()].owner)
-#define g_file_end   (g_loader[loader_slot()].file_end)
-#define g_back       (g_loader[loader_slot()].back)
-#define g_zero_frames (g_loader[loader_slot()].zero_frames)
-#define g_zeroed_frames (g_loader[loader_slot()].zeroed_frames)
-#define g_image      (g_loader[loader_slot()].image)
-#define g_relocs     (g_loader[loader_slot()].relocs)
-#define g_relocs_bytes (g_loader[loader_slot()].relocs_bytes)
-#define g_reloc_entry (g_loader[loader_slot()].reloc_entry)
-#define g_reloc_written (g_loader[loader_slot()].reloc_written)
-#define g_reloc_apply (g_loader[loader_slot()].reloc_apply)
-#define g_reloc_section (g_loader[loader_slot()].reloc_section)
-#define g_reloc_prepare_started (g_loader[loader_slot()].reloc_prepare_started)
-#define g_image_prepared (g_loader[loader_slot()].image_prepared)
-#define g_back_owner (g_loader[loader_slot()].back_owner)
-#define g_generation (g_loader[loader_slot()].generation)
-#define g_ready      (g_loader[loader_slot()].ready)
-#define g_zero_offset (g_loader[loader_slot()].zero_offset)
-#define g_map_segment (g_loader[loader_slot()].map_segment)
-#define g_map_offset (g_loader[loader_slot()].map_offset)
-#define g_map_page (g_loader[loader_slot()].map_page)
-#define g_map_flush_end (g_loader[loader_slot()].map_flush_end)
-#define g_map_tail (g_loader[loader_slot()].map_tail)
-#define g_map_phase (g_loader[loader_slot()].map_phase)
-#ifdef ZZAPP_HOST_TEST
-#define g_host_mem   (g_loader[loader_slot()].host_mem)
-#define g_host_back  (g_loader[loader_slot()].host_back)
+#define g_host_mem   (loader_host_part()->host_mem)
+#define g_host_back  (loader_host_part()->host_back)
 #define HOST_CARD 0xc0000000u
-#define g_host_file  (g_loader[loader_slot()].host_file)
-#define g_host_zero_last_bytes \
-    (g_loader[loader_slot()].host_zero_last_bytes)
-#define g_host_work_last_bytes \
-    (g_loader[loader_slot()].host_work_last_bytes)
+#define g_host_file  (loader_host_part()->host_file)
+#define g_host_zero_last_bytes (loader_host_part()->host_zero_last_bytes)
+#define g_host_work_last_bytes (loader_host_part()->host_work_last_bytes)
 #define g_host_reloc_last_entries \
-    (g_loader[loader_slot()].host_reloc_last_entries)
-#define g_host_work_last_kind (g_loader[loader_slot()].host_work_last_kind)
+    (loader_host_part()->host_reloc_last_entries)
+#define g_host_work_last_kind (loader_host_part()->host_work_last_kind)
 #endif
-#define CARD_POOL_OWNER_SLOT_SHIFT 22u
-#define CARD_POOL_OWNER_GENERATION_MASK ((1u << CARD_POOL_OWNER_SLOT_SHIFT) - 1u)
+
+#ifdef ZZAPP_HOST_TEST
+/* A new boot of the harness: forget every window left from earlier cases. */
+static void loader_host_reset(void)
+{
+    uint32_t i;
+
+    for (i = 0U; i < ZZAPP_REC_MAX_APPS; i++) {
+        free(g_loader_host[i].host_mem);
+        free(g_loader_host[i].host_back);
+        free(g_loader_host[i].host_file);
+    }
+    memset(g_loader_host, 0, sizeof(g_loader_host));
+}
+#endif
 
 static uint32_t rd32(const uint8_t *p)
 {
@@ -361,6 +428,9 @@ static int g_app_memory_ready;
 
 void zzapp_loader_memory_init(void)
 {
+#ifdef ZZAPP_HOST_TEST
+    loader_host_reset();
+#endif
     if (!g_app_memory_ready &&
         zzapp_mem_init(&g_app_memory, &card_pool) == 0) {
         zzapp_host_register_low_memory_callback(&g_app_memory);
@@ -368,43 +438,36 @@ void zzapp_loader_memory_init(void)
     }
 }
 
-#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
-static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
-{
-    (void)owner;
-    if (bytes == ZZAPP_HOST_WINDOW_BYTES) {
-        g_host_mem = (uint8_t *)malloc(bytes);
-        return g_host_mem ? HOST_CARD : 0U;
-    }
-    g_host_back = (uint8_t *)malloc(bytes);
-    return g_host_back ? HOST_CARD - 0x01000000U : 0U;
-}
-#else
+/* Card pool blocks of this record's owner. The host harness backs the pool
+ * with real memory, so staging in the incremental build is a real 16 MiB
+ * class APP block, as on the card. */
 static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
 {
     uint32_t addr;
+#ifndef ZZAPP_HOST_TEST
     uint32_t end;
+#endif
 
     addr = card_pool_alloc(&card_pool, bytes, owner);
     if (!addr)
         return 0;
+#ifndef ZZAPP_HOST_TEST
     end = addr + bytes;
     if (end < addr || addr < CARD_POOL_PERMANENT_ADDRESS ||
         end > CARD_POOL_PERMANENT_END) {
         card_pool_free(&card_pool, addr, owner);
         return 0;
     }
+#endif
     return addr;
 }
-#endif
 #if defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST) && \
     !defined(ZZAPP_LOADER_REAL_AS_HOST_TEST)
 static uint32_t g_host_mapping_calls;
-static int host_as_create(zzapp_as_t *as, uint32_t slot, uint32_t generation)
+static int host_as_create(zzapp_as_t *as, uint32_t pid)
 {
     (void)as;
-    (void)slot;
-    (void)generation;
+    (void)pid;
     g_host_mapping_calls++;
     return 0;
 }
@@ -458,12 +521,13 @@ static int loader_section_has_flags(const uint32_t (*segs)[3], uint32_t nseg,
 
 static int map_loaded_image(const struct load_image *img)
 {
-    zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
+    zzapp_proc_t *proc = zzapp_proc_slot(loader_pid());
     uint32_t image_frames;
     uint32_t stack_frames;
     uint32_t heap_frames;
     uint32_t total_frames;
     uint32_t proc_limit;
+    uint32_t refusal = 0U;
 
 #if ZZAPP_PERF_COUNTERS || defined(ZZAPP_HOST_TEST)
     zzapp_loader_work_begin_pass();
@@ -493,7 +557,10 @@ static int map_loaded_image(const struct load_image *img)
                                       heap_frames, proc->heap_frames)) ||
             zzapp_mem_alloc_unzeroed(&g_app_memory, &proc->memory,
                                      stack_frames, proc->stack_frames))
+        {
+            refusal = AAR_REASON_MEMORY;
             goto failed;
+        }
         proc->image_frame_count = image_frames;
         proc->heap_frame_count = heap_frames;
         proc->stack_frame_count = stack_frames;
@@ -536,7 +603,7 @@ static int map_loaded_image(const struct load_image *img)
         return ZZAPP_LOADER_IN_PROGRESS;
     }
     if (g_map_phase == LOADER_MAP_SETUP) {
-        if (zzapp_as_create(&proc->as, loader_slot(), proc->generation))
+        if (zzapp_as_create(&proc->as, loader_pid()))
             goto failed;
         proc->heap_base = image_frames * ZZAPP_MEM_FRAME_BYTES;
         proc->stack_base = ZZAPP_MEM_PRIVATE_WINDOW_BYTES - stack_frames *
@@ -716,6 +783,9 @@ static int map_loaded_image(const struct load_image *img)
     goto failed;
 
 failed:
+    /* A refused frame allocation is MEMORY; every other failure here is the
+     * address space (L2 tables out of the record's reserve) or the image. */
+    zzapp_services_note_refusal(refusal ? refusal : AAR_REASON_TABLES);
     zzapp_as_destroy(&proc->as);
     (void)zzapp_mem_release_proc(&g_app_memory, &proc->memory);
     return AAR_E_NOMEM;
@@ -730,7 +800,7 @@ static uint8_t *image_frame_ptr(zzapp_proc_t *proc, uint32_t offset)
 
 int zzapp_loader_heap_grow(uint32_t bytes)
 {
-    zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
+    zzapp_proc_t *proc = zzapp_proc_slot(loader_pid());
     uint32_t frames = bytes / ZZAPP_MEM_FRAME_BYTES;
     uint32_t first;
 
@@ -754,7 +824,7 @@ int zzapp_loader_heap_grow(uint32_t bytes)
 
 int zzapp_loader_heap_shrink(uint32_t bytes)
 {
-    zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
+    zzapp_proc_t *proc = zzapp_proc_slot(loader_pid());
     uint32_t frames = bytes / ZZAPP_MEM_FRAME_BYTES;
     uint32_t first;
     uint32_t i;
@@ -779,7 +849,6 @@ uint32_t zzapp_loader_pool_free(void)
 #else
 static uint32_t pool_alloc(uint32_t bytes, uint32_t owner)
 {
-    (void)owner;
     if (owner == g_owner && g_host_mem)
         return 0;
     if (bytes == ZZAPP_HOST_WINDOW_BYTES) {
@@ -794,9 +863,10 @@ static void cache_image(const struct load_image *img)
 {
     (void)img;
 }
-#define CARD_POOL_CLASS_APP 8
-#define CARD_POOL_CLASS_APP_DISPLAY 14
-void zzapp_loader_memory_init(void) {}
+void zzapp_loader_memory_init(void)
+{
+    loader_host_reset();
+}
 #endif
 static void free_relocs(void)
 {
@@ -813,31 +883,23 @@ static void free_relocs(void)
 }
 
 
-static void drop_arena(void)
+/*
+ * Retire stage 3, loader half: the host-visible blocks and the API layer's
+ * resources (zzapp_loader_unbound_resources), then the card pool blocks the
+ * record owns (the staging block while it is still held, and the back
+ * buffer), the relocation table, and the host harness windows. Idempotent:
+ * a replay after a core-1 restart finds the blocks gone and frees nothing.
+ */
+void zzapp_loader_retire_resources(void)
 {
-    zzapp_host_revoke_visible();
-#ifndef ZZAPP_HOST_TEST
-    zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
-
-    if (proc) {
-        zzapp_as_destroy(&proc->as);
-        (void)zzapp_mem_release_proc(&g_app_memory, &proc->memory);
-    }
+    zzapp_loader_unbound_resources();
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
     if (g_card)
         card_pool_release_owner(&card_pool, g_owner);
     if (g_back)
         card_pool_free(&card_pool, g_back, g_back_owner);
-#else
-#ifdef ZZAPP_LOADER_INCREMENTAL_HOST_TEST
-    {
-        zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
-
-        if (proc) {
-            zzapp_as_destroy(&proc->as);
-            (void)zzapp_mem_release_proc(&g_app_memory, &proc->memory);
-        }
-    }
 #endif
+#ifdef ZZAPP_HOST_TEST
     free(g_host_mem);
     free(g_host_back);
     free(g_host_file);
@@ -849,13 +911,30 @@ static void drop_arena(void)
     g_host_reloc_last_entries = 0U;
     g_host_work_last_kind = 0U;
 #endif
-    g_card = 0;
+    g_back = 0;
+    g_back_owner = 0;
     g_mem = NULL;
     g_bytes = 0;
+    free_relocs();
+}
+
+/*
+ * Retire stage 5, loader half: the frames go back to the ledger (the address
+ * space that mapped them is gone by now), and the loader, host and process
+ * state of the record are cleared.
+ */
+void zzapp_loader_retire_commit(void)
+{
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
+    zzapp_proc_t *proc = zzapp_proc_slot(loader_pid());
+
+    if (proc)
+        (void)zzapp_mem_release_proc(&g_app_memory, &proc->memory);
+#endif
+    g_card = 0;
     g_owner = 0;
     g_generation = 0;
     g_file_end = 0;
-    free_relocs();
     g_image_prepared = 0;
     g_zero_frames = 0U;
     g_zeroed_frames = 0U;
@@ -865,10 +944,24 @@ static void drop_arena(void)
     g_map_page = 0U;
     g_map_tail = 0U;
     g_map_phase = LOADER_MAP_ZERO;
-    g_back = 0;
-    g_back_owner = 0;
     g_ready = 0;
     zzapp_loader_unbound();
+}
+
+/* Everything the loader holds for the selected record goes back, and the
+ * claim goes on: the record, its L2 reserve and its handle stay. */
+static void drop_arena(void)
+{
+    zzapp_loader_retire_resources();
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
+    {
+        zzapp_proc_t *proc = zzapp_proc_slot(loader_pid());
+
+        if (proc)
+            zzapp_as_destroy(&proc->as);
+    }
+#endif
+    zzapp_loader_retire_commit();
 }
 
 int zzapp_loader_set_generation(uint32_t generation)
@@ -890,17 +983,21 @@ int zzapp_loader_begin(void)
     gen = g_generation ? g_generation : zzapp_loader_generation() + 1u;
     if (gen == 0u)
         gen = 1u;
-    owner = ((uint32_t)CARD_POOL_CLASS_APP << 24) |
-            (loader_slot() << CARD_POOL_OWNER_SLOT_SHIFT) |
-            (gen & CARD_POOL_OWNER_GENERATION_MASK);
-#ifdef ZZAPP_HOST_TEST
+    owner = CARD_POOL_OWNER(CARD_POOL_CLASS_APP,
+                            zzapp_rec_by_pid(loader_pid()) ?
+                            zzapp_rec_by_pid(loader_pid())->hdr.owner_serial :
+                            0U);
+#if defined(ZZAPP_HOST_TEST) && !defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
     addr = pool_alloc(ZZAPP_HOST_WINDOW_BYTES, owner);
 #else
     if (!g_app_memory_ready)
         return AAR_E_NOMEM;
+    /* The staging block of the uploaded file: 16 MiB of class APP until
+     * LOAD_END has copied the image into its frames. */
     addr = pool_alloc(ZZAPP_FILE_MAX, owner);
 #endif
     if (!addr) {
+        zzapp_services_note_refusal(AAR_REASON_MEMORY);
         zzapp_loader_set_state(ZZAPP_ST_IDLE);
         return AAR_E_NOMEM;
     }
@@ -915,16 +1012,33 @@ int zzapp_loader_begin(void)
     g_host_flush_dropped = 0U;
     g_host_reloc_last_entries = 0U;
 #endif
-#ifdef ZZAPP_HOST_TEST
+#if defined(ZZAPP_HOST_TEST) && !defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
     g_card = addr;
     g_bytes = ZZAPP_HOST_WINDOW_BYTES;
     g_mem = g_host_mem;
     zzapp_loader_bound(g_card, g_mem, owner, gen);
+#elif defined(ZZAPP_HOST_TEST)
+    /* The flat window the host-run app executes in is not the staging block;
+     * it stays until the arena is dropped. */
+    g_host_mem = (uint8_t *)malloc(ZZAPP_HOST_WINDOW_BYTES);
+    if (!g_host_mem) {
+        card_pool_free(&card_pool, addr, owner);
+        zzapp_services_note_refusal(AAR_REASON_MEMORY);
+        zzapp_loader_set_state(ZZAPP_ST_IDLE);
+        return AAR_E_NOMEM;
+    }
+    g_card = HOST_CARD;
+    g_bytes = ZZAPP_FILE_MAX;
+    g_mem = (uint8_t *)(uintptr_t)addr;
+    zzapp_loader_bound(g_card, g_host_mem, owner, gen);
 #else
     g_card = ZZAPP_AS_WINDOW_BASE;
     g_bytes = ZZAPP_FILE_MAX;
     g_mem = (uint8_t *)(uintptr_t)addr;
-    zzapp_loader_bound(g_card, g_mem, owner, gen);
+    /* On the card the host block's `mem` is only a flag that an arena is
+     * bound: the app's memory is its frames, behind the window. */
+    zzapp_loader_bound(g_card, (uint8_t *)(uintptr_t)ZZAPP_AS_WINDOW_BASE,
+                       owner, gen);
 #endif
     zzapp_services_on_launch();
     {
@@ -1113,19 +1227,92 @@ static int find_note(struct load_image *img, const uint8_t *eh, uint16_t phnum,
     return found == 1u ? AAR_OK : AAR_E_INVAL;
 }
 
-static int dynamic_clean(uint32_t off, uint32_t filesz)
+static int vaddr_to_file(const struct load_image *img, uint32_t vaddr,
+                         uint32_t bytes, uint32_t *off)
 {
+    uint32_t i;
+
+    for (i = 0; i < img->nseg; i++) {
+        const struct load_seg *seg = &img->seg[i];
+
+        if (vaddr >= seg->vaddr &&
+            range_ok(vaddr - seg->vaddr, bytes, seg->filesz)) {
+            *off = seg->off + (vaddr - seg->vaddr);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* PT_DYNAMIC: refuses DT_NEEDED and a PLT relocation table, and finds the
+ * REL and RELA tables, whose DT values are virtual addresses inside a PT_LOAD
+ * (needs the segments, so after they were read). A table that is named
+ * without a size, a size that is not a whole number of entries, an entry
+ * size other than the one the format fixes, or a table outside the file
+ * bytes of every segment is refused. */
+static int parse_dynamic(struct load_image *img, uint32_t off, uint32_t filesz)
+{
+    uint32_t rel = 0U, relsz = 0U, relent = 0U;
+    uint32_t rela = 0U, relasz = 0U, relaent = 0U;
+    uint32_t have_rel = 0U, have_rela = 0U;
     uint32_t i;
 
     if (!range_ok(off, filesz, g_file_end) || (filesz & 7u) != 0u)
         return AAR_E_INVAL;
     for (i = 0; i + 8u <= filesz; i += 8u) {
         int32_t tag = (int32_t)rd32(g_mem + off + i);
+        uint32_t value = rd32(g_mem + off + i + 4u);
 
         if (tag == DT_NULL)
-            return AAR_OK;
-        if (tag == DT_NEEDED)
+            break;
+        switch (tag) {
+        case DT_NEEDED:
             return AAR_E_INVAL;
+        case DT_PLTRELSZ:
+            if (value != 0U)
+                return AAR_E_INVAL;
+            break;
+        case DT_REL:
+            rel = value;
+            have_rel = 1U;
+            break;
+        case DT_RELSZ:
+            relsz = value;
+            break;
+        case DT_RELENT:
+            relent = value;
+            break;
+        case DT_RELA:
+            rela = value;
+            have_rela = 1U;
+            break;
+        case DT_RELASZ:
+            relasz = value;
+            break;
+        case DT_RELAENT:
+            relaent = value;
+            break;
+        default:
+            break;
+        }
+    }
+    if (relent != 0U && relent != LOADER_REL_BYTES)
+        return AAR_E_INVAL;
+    if (relaent != 0U && relaent != LOADER_RELA_BYTES)
+        return AAR_E_INVAL;
+    if (relsz != 0U) {
+        if (!have_rel || relent != LOADER_REL_BYTES ||
+            (relsz % LOADER_REL_BYTES) != 0U ||
+            !vaddr_to_file(img, rel, relsz, &img->rel_off))
+            return AAR_E_INVAL;
+        img->rel_bytes = relsz;
+    }
+    if (relasz != 0U) {
+        if (!have_rela || relaent != LOADER_RELA_BYTES ||
+            (relasz % LOADER_RELA_BYTES) != 0U ||
+            !vaddr_to_file(img, rela, relasz, &img->rela_off))
+            return AAR_E_INVAL;
+        img->rela_bytes = relasz;
     }
     return AAR_OK;
 }
@@ -1145,6 +1332,9 @@ static int parse_elf(struct load_image *img)
     uint32_t memsz_sum = 0;
     uint32_t image_limit;
     uint16_t i;
+    uint32_t dyn_off = 0U;
+    uint32_t dyn_size = 0U;
+    int have_dyn = 0;
     int rc;
 
     memset(img, 0, sizeof(*img));
@@ -1167,7 +1357,8 @@ static int parse_elf(struct load_image *img)
     shnum = rd16(eh + 48u);
     if (phentsize < 32u || phnum == 0u || phnum > ZZAPP_MAX_PHDR)
         return AAR_E_INVAL;
-    if (shentsize < 40u || shnum > ZZAPP_MAX_SHDR)
+    /* An image without section headers has e_shnum 0 and any e_shentsize. */
+    if (shnum && (shentsize < 40u || shnum > ZZAPP_MAX_SHDR))
         return AAR_E_INVAL;
     if (!range_ok(phoff, (uint32_t)phnum * phentsize, g_file_end))
         return AAR_E_INVAL;
@@ -1192,9 +1383,11 @@ static int parse_elf(struct load_image *img)
         if (type == PT_INTERP)
             return AAR_E_INVAL;
         if (type == PT_DYNAMIC) {
-            rc = dynamic_clean(off, filesz);
-            if (rc != AAR_OK)
-                return rc;
+            if (have_dyn)
+                return AAR_E_INVAL;
+            have_dyn = 1;
+            dyn_off = off;
+            dyn_size = filesz;
         }
         if (type != PT_LOAD)
             continue;
@@ -1248,6 +1441,11 @@ static int parse_elf(struct load_image *img)
             if (a < be && b < ae)
                 return AAR_E_INVAL;
         }
+    }
+    if (have_dyn) {
+        rc = parse_dynamic(img, dyn_off, dyn_size);
+        if (rc != AAR_OK)
+            return rc;
     }
     img->entry = rd32(eh + 24u);
     if (img->entry >= ZZAPP_MEM_PRIVATE_WINDOW_BYTES - img->stack_bytes)
@@ -1319,48 +1517,24 @@ static int place_segments(const struct load_image *img)
 
 static int prepare_loaded_image(void)
 {
-    uint16_t shnum;
-    uint16_t shentsize;
-    uint32_t shoff;
     uint32_t copied = 0U;
 
     if (!g_reloc_prepare_started) {
-        uint32_t saved_n = 0U;
-        uint16_t i;
+        uint32_t entries;
+        uint32_t saved_n;
         int rc = parse_elf(&g_image);
 
         if (rc != AAR_OK)
             return rc;
-        if (!image_commit_fits_limit(&g_image))
+        if (!image_commit_fits_limit(&g_image)) {
+            zzapp_services_note_refusal(AAR_REASON_MEMORY);
             return AAR_E_NOMEM;
-        shoff = rd32(g_mem + 32u);
-        shentsize = rd16(g_mem + 46u);
-        shnum = rd16(g_mem + 48u);
-        for (i = 0U; i < shnum; i++) {
-            const uint8_t *sh = g_mem + shoff + (uint32_t)i * shentsize;
-            uint32_t type = rd32(sh + 4u);
-            uint32_t flags = rd32(sh + 8u);
-            uint32_t addr = rd32(sh + 12u);
-            uint32_t off = rd32(sh + 16u);
-            uint32_t size = rd32(sh + 20u);
-            uint32_t entsize = rd32(sh + 36u);
-            uint32_t entries;
-
-            if (type != SHT_RELA && type != SHT_REL)
-                continue;
-            if (((flags & SHF_ALLOC) && size &&
-                 !range_ok(addr, size, ZZAPP_MEM_PRIVATE_WINDOW_BYTES)) ||
-                (type == SHT_RELA &&
-                 (entsize != 12u || (size % 12u) != 0u)) ||
-                (type == SHT_REL &&
-                 (entsize != 8u || (size % 8u) != 0u)) ||
-                !range_ok(off, size, g_file_end))
-                return AAR_E_INVAL;
-            entries = size / (type == SHT_RELA ? 12u : 8u);
-            if (entries > (UINT32_MAX - saved_n) / 16u)
-                return AAR_E_NOMEM;
-            saved_n += entries * 16u;
         }
+        entries = g_image.rel_bytes / LOADER_REL_BYTES +
+                  g_image.rela_bytes / LOADER_RELA_BYTES;
+        if (entries > UINT32_MAX / 16u)
+            return AAR_E_NOMEM;
+        saved_n = entries * 16u;
         g_relocs = saved_n ? (uint8_t *)malloc(saved_n) : NULL;
         if (saved_n && !g_relocs)
             return AAR_E_NOMEM;
@@ -1368,29 +1542,22 @@ static int prepare_loaded_image(void)
         g_reloc_prepare_started = 1U;
     }
 
-    shoff = rd32(g_mem + 32u);
-    shentsize = rd16(g_mem + 46u);
-    shnum = rd16(g_mem + 48u);
-    while (g_reloc_section < shnum &&
+    /* Table 0 is DT_REL, table 1 is DT_RELA; g_reloc_section counts them. */
+    while (g_reloc_section < 2u &&
            copied < ZZAPP_LOADER_RELOC_CHUNK_ENTRIES) {
-        const uint8_t *sh = g_mem + shoff +
-            (uint32_t)g_reloc_section * shentsize;
-        uint32_t type = rd32(sh + 4u);
-        uint32_t size = rd32(sh + 20u);
-        uint32_t stride;
-        uint32_t entries;
+        uint32_t kind = g_reloc_section == 0u ? LOADER_RELOC_REL :
+                                                LOADER_RELOC_RELA;
+        uint32_t stride = kind == LOADER_RELOC_REL ? LOADER_REL_BYTES :
+                                                     LOADER_RELA_BYTES;
+        uint32_t table = kind == LOADER_RELOC_REL ? g_image.rel_off :
+                                                    g_image.rela_off;
+        uint32_t entries = (kind == LOADER_RELOC_REL ? g_image.rel_bytes :
+                                                       g_image.rela_bytes) /
+                           stride;
 
-        if (type != SHT_RELA && type != SHT_REL) {
-            g_reloc_section++;
-            g_reloc_entry = 0U;
-            continue;
-        }
-        stride = type == SHT_RELA ? 12u : 8u;
-        entries = size / stride;
         while (g_reloc_entry < entries &&
                copied < ZZAPP_LOADER_RELOC_CHUNK_ENTRIES) {
-            const uint8_t *rel = g_mem + rd32(sh + 16u) +
-                g_reloc_entry * stride;
+            const uint8_t *rel = g_mem + table + g_reloc_entry * stride;
             uint32_t roff = rd32(rel);
             uint32_t info = rd32(rel + 4u);
 
@@ -1399,8 +1566,8 @@ static int prepare_loaded_image(void)
                 !range_ok(roff, 4u, ZZAPP_MEM_PRIVATE_WINDOW_BYTES))
                 return AAR_E_INVAL;
             memcpy(g_relocs + g_reloc_written, rel, 8u);
-            memcpy(g_relocs + g_reloc_written + 8u, &type, 4u);
-            if (type == SHT_RELA)
+            memcpy(g_relocs + g_reloc_written + 8u, &kind, 4u);
+            if (kind == LOADER_RELOC_RELA)
                 memcpy(g_relocs + g_reloc_written + 12u, rel + 8u, 4u);
             else
                 memset(g_relocs + g_reloc_written + 12u, 0, 4u);
@@ -1414,7 +1581,7 @@ static int prepare_loaded_image(void)
         }
     }
     loader_note_work(copied * 16U, ZZAPP_LOADER_WORK_RELOC);
-    if (g_reloc_section != shnum)
+    if (g_reloc_section != 2u)
         return ZZAPP_LOADER_IN_PROGRESS;
     g_image_prepared = 1;
     /* Do not combine the final extraction slice with allocation or zeroing. */
@@ -1435,20 +1602,21 @@ static int apply_loaded_relocations(void)
         uint32_t roff = rd32(g_relocs + at);
         uint32_t type = rd32(g_relocs + at + 8u);
 #if defined(ZZAPP_HOST_TEST) && !defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
-        uint32_t addend = type == SHT_REL ? rd32(g_mem + roff) :
+        uint32_t addend = type == LOADER_RELOC_REL ? rd32(g_mem + roff) :
                                              rd32(g_relocs + at + 12u);
         uint32_t place = addend + g_card;
 
         memcpy(g_mem + roff, &place, sizeof(place));
 #else
-        zzapp_proc_t *proc = zzapp_proc_slot(loader_slot());
+        zzapp_proc_t *proc = zzapp_proc_slot(loader_pid());
         uint8_t *target = proc ? image_frame_ptr(proc, roff) : NULL;
         uint32_t addend;
         uint32_t place;
 
         if (!target)
             return AAR_E_INVAL;
-        addend = type == SHT_REL ? rd32(target) : rd32(g_relocs + at + 12u);
+        addend = type == LOADER_RELOC_REL ? rd32(target) :
+                                            rd32(g_relocs + at + 12u);
         place = addend + g_card;
         memcpy(target, &place, sizeof(place));
         /* One flush per contiguous span replaces one flush per word.
@@ -1482,6 +1650,25 @@ static int apply_loaded_relocations(void)
     loader_note_work(applied * 16U, ZZAPP_LOADER_WORK_APPLY);
     return g_reloc_apply == g_relocs_bytes ? AAR_OK :
         ZZAPP_LOADER_IN_PROGRESS;
+}
+
+/*
+ * LOAD_END is done: the image sits in the record's frames and nothing reads
+ * the uploaded file again, so the 16 MiB staging block goes back to the pool
+ * (design 3.2). Without this a live app would hold 16 MiB of class APP for
+ * its whole life and the class limit would cap the number of apps. The host
+ * harness's flat window is the app's memory there, not staging, and stays.
+ */
+static void release_staging(void)
+{
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
+    if (g_mem) {
+        card_pool_free(&card_pool, (uint32_t)(uintptr_t)g_mem, g_owner);
+        g_mem = NULL;
+        g_bytes = 0;
+        g_file_end = 0;
+    }
+#endif
 }
 
 int zzapp_loader_end(void)
@@ -1525,9 +1712,12 @@ int zzapp_loader_end(void)
     rc = zzapp_loader_set_image(g_image.entry, g_image.image_end,
                                 g_image.stack_bytes, g_image.note_flags,
                                 g_image.min_heap_bytes);
-    if (rc != AAR_OK)
+    if (rc != AAR_OK) {
+        zzapp_services_note_refusal(AAR_REASON_MEMORY);
         goto failed;
+    }
     g_ready = 1;
+    release_staging();
     return AAR_OK;
 
 failed:
@@ -1536,6 +1726,8 @@ failed:
     return rc;
 }
 
+/* The claim goes on: the resources go back and the host state is idle (the
+ * window's IDLE is published by the retire that ends the claim). */
 int zzapp_loader_abort(void)
 {
     uint32_t state = zzapp_loader_state();
@@ -1543,7 +1735,7 @@ int zzapp_loader_abort(void)
     if (state != ZZAPP_ST_LOADING && state != ZZAPP_ST_STARTING)
         return AAR_E_BUSY;
     drop_arena();
-    zzapp_services_set_state(ZZAPP_ST_IDLE);
+    zzapp_loader_set_state(ZZAPP_ST_IDLE);
     return AAR_OK;
 }
 
@@ -1559,8 +1751,7 @@ int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr_out)
         return AAR_E_INVAL;
     /* A firmware-owned display allocation cannot consume the app arena's
      * class budget, which is already fully reserved by the live arena. */
-    g_back_owner = ((uint32_t)CARD_POOL_CLASS_APP_DISPLAY << 24) |
-                   (g_owner & 0x00FFFFFFu);
+    g_back_owner = CARD_POOL_OWNER(CARD_POOL_CLASS_APP_DISPLAY, g_owner);
     addr = pool_alloc(bytes, g_back_owner);
     if (!addr) {
         g_back_owner = 0;
@@ -1575,7 +1766,7 @@ void zzapp_loader_free_back(uint32_t addr)
 {
     if (!addr || addr != g_back)
         return;
-#ifndef ZZAPP_HOST_TEST
+#if !defined(ZZAPP_HOST_TEST) || defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
     card_pool_free(&card_pool, g_back, g_back_owner);
 #else
     free(g_host_back);
@@ -1586,17 +1777,17 @@ void zzapp_loader_free_back(uint32_t addr)
 
 uint32_t zzapp_loader_card(void)
 {
-    return g_card;
+    return loader_rec_or_null() ? g_card : 0U;
 }
 
 uint8_t *zzapp_loader_mem(void)
 {
-    return g_mem;
+    return loader_rec_or_null() ? g_mem : NULL;
 }
 
 int zzapp_loader_ready(void)
 {
-    return g_ready;
+    return loader_rec_or_null() ? g_ready : 0;
 }
 
 void zzapp_loader_release(void)
@@ -1607,20 +1798,20 @@ void zzapp_loader_release(void)
 #ifdef ZZAPP_HOST_TEST
 uint32_t zzapp_test_arena_card(void)
 {
-    return g_card;
+    return loader_rec_or_null() ? g_card : 0U;
 }
 
 uint8_t *zzapp_test_arena_mem(void)
 {
-    return g_mem;
+    return loader_rec_or_null() ? g_mem : NULL;
 }
 uint32_t zzapp_test_loader_zero_last_bytes(void)
 {
-    return g_host_zero_last_bytes;
+    return loader_rec_or_null() ? g_host_zero_last_bytes : 0U;
 }
 uint32_t zzapp_test_loader_work_last_bytes(void)
 {
-    return g_host_work_last_bytes;
+    return loader_rec_or_null() ? g_host_work_last_bytes : 0U;
 }
 
 #if defined(ZZAPP_HOST_TEST) && defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST)
@@ -1646,7 +1837,7 @@ uint32_t zzapp_test_loader_flush_dropped(void)
 
 uint32_t zzapp_test_loader_reloc_entries_last(void)
 {
-    return g_host_reloc_last_entries;
+    return loader_rec_or_null() ? g_host_reloc_last_entries : 0U;
 }
 #endif
 #if defined(ZZAPP_LOADER_INCREMENTAL_HOST_TEST) && \
@@ -1664,6 +1855,6 @@ uint32_t zzapp_test_loader_mapping_calls(void)
 
 uint32_t zzapp_test_loader_work_last_kind(void)
 {
-    return g_host_work_last_kind;
+    return loader_rec_or_null() ? g_host_work_last_kind : 0U;
 }
 #endif

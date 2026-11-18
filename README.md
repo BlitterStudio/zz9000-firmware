@@ -65,9 +65,11 @@ Install its matching bitstream and drivers as one update; do not pair the
 
 The [documentation index](docs/README.md) lists every document by task:
 setting up the card, writing Amiga programs that use card services, writing
-ARM apps, and working on the firmware. The core-1 app kernel runs up to four
-user-mode apps in private address spaces; its slot protocol, memory limits,
-lifecycle, and SVC interface are in the
+ARM apps, and working on the firmware. The core-1 app kernel runs user-mode
+apps as process records, each in a private address space, with the record count
+chosen from card memory at boot (four launcher windows remain the ceiling until
+the transport swap). Its slot protocol, memory limits, lifecycle, and SVC
+interface are in the
 [app runtime contract](docs/app-runtime.md).
 
 ## Build and contribute

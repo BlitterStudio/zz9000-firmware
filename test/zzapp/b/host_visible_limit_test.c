@@ -100,10 +100,18 @@ static uint64_t host_limit(void)
     return info.shared_limit;
 }
 
+/* The app ends: its loader arena is dropped, then the record is retired, the
+ * one path that returns the record and unbinds the window. (A claim used to
+ * be free again as soon as the loader state read IDLE; a bound record is now
+ * released by retire only, as in the host's abort paths.) */
 static void finish(void)
 {
+    zzapp_rec_t *rec = window_rec(&windows[0]);
+
     zzapp_host_revoke_visible();
     assert(zzapp_loader_abort() == AAR_OK);
+    assert(rec != NULL);
+    assert(zzapp_rec_retire(rec->hdr.pid) == 1);
 }
 
 static void begin_with(uint32_t host_mib, uint32_t expected_status)

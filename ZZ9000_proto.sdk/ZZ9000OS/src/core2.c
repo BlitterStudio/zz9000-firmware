@@ -303,8 +303,11 @@ static void record_fault(uint32_t code, const char *name)
  * be snooped, so its dirty lines would be lost: the reclaim below would then
  * free() decoder blocks against stale heap metadata (a FLAC/Vorbis stream at
  * an Amiga warm reset took core 0 down with a data abort exactly so). A core
- * stuck mid-task never answers; the bounded wait then falls back to the old
- * unconditional reset.
+ * stuck mid-task never answers; the bounded wait then resets it anyway.
+ * Its last dirty L1 updates can be lost in that best-effort path, including
+ * detach pointers. Staged retirement and reconciliation do not guarantee
+ * recovery from arbitrarily lost stores. Do not run teardown before the
+ * reset: a worker that missed the park may still be writing shared state.
  */
 #define CORE1_PARK_SPINS 1000U   /* x 10 us */
 /* CPU1 CoreSight debug block (Zynq TRM memory map), program counter sampling
@@ -319,12 +322,13 @@ static void core1_park_for_reset(void)
 	if (!sh->core1_alive)
 		return;
 	sh->core1_parked = 0U;
-	sh->core1_park_request = 1U;
+	__atomic_store_n(&sh->core1_park_request, 1U, __ATOMIC_RELEASE);
 	dsb();
 	__asm__ __volatile__("sev" ::: "memory");
-	for (spins = 0U; spins < CORE1_PARK_SPINS && !sh->core1_parked; spins++)
+	for (spins = 0U; spins < CORE1_PARK_SPINS &&
+	     !__atomic_load_n(&sh->core1_parked, __ATOMIC_ACQUIRE); spins++)
 		usleep(10);
-	if (!sh->core1_parked) {
+	if (!__atomic_load_n(&sh->core1_parked, __ATOMIC_ACQUIRE)) {
 		uint32_t pc[4];
 		unsigned i;
 

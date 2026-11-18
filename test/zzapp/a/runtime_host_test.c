@@ -9,7 +9,21 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t owner,
                         uint32_t generation);
 void zzapp_loader_unbound(void);
 void zzapp_test_set_time_hook(uint64_t (*hook)(void));
-void zzapp_kernel_switch_address_space(uint32_t slot);
+void zzapp_kernel_switch_address_space(uint32_t pid);
+
+/* Every scenario starts from a fresh arena with four admitted records, which
+ * services does at claim: record k is pid k, and the worker walks them. */
+static void boot_with_records(void)
+{
+    uint32_t pid;
+
+    (zzapp_boot_init)();
+    for (pid = 0U; pid < 4U; pid++)
+        assert(zzapp_test_admit() == pid);
+    zzapp_services_select_pid(0U);
+}
+#define zzapp_boot_init() boot_with_records()
+#define THREAD(pid) (*zzapp_kernel_thread(zzapp_runtime_kernel(), (pid)))
 static uint32_t selected_slot;
 static int api_wait_hook_called;
 static int api_yield_service_calls;
@@ -67,7 +81,7 @@ void zzapp_services_poll(void)
     service_poll_depth--;
 }
 
-uint32_t zzapp_services_current_slot(void)
+uint32_t zzapp_services_current_pid(void)
 {
     int slot = zzapp_kernel_current_thread();
 
@@ -76,9 +90,9 @@ uint32_t zzapp_services_current_slot(void)
     return selected_slot;
 }
 
-void zzapp_services_select_slot(uint32_t slot)
+void zzapp_services_select_pid(uint32_t pid)
 {
-    selected_slot = slot;
+    selected_slot = pid;
 }
 
 void zzapp_test_api_wait_hook(void)
@@ -289,7 +303,7 @@ static void test_yield_and_tick_scheduling(void)
     zzapp_kernel_advance(zzapp_runtime_kernel(), 5U);
     assert(kernel_wake_events == 1U);
     run_system_pass_if_due();
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    assert(THREAD(0).state == ZZAPP_THREAD_RUNNABLE);
 
     zzapp_boot_init();
     selected_slot = 0U;
@@ -419,10 +433,10 @@ int main(void)
     zzapp_test_request_reset(0U);
     zzapp_host_tick_at(ZZAPP_STOP_GRACE_US);
     zzapp_worker_hook();
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    assert(THREAD(0).state == ZZAPP_THREAD_RUNNABLE);
     zzapp_host_commit_end();
     zzapp_worker_hook();
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+    assert(THREAD(0).state == ZZAPP_THREAD_STOPPED);
     zzapp_kernel_set_current_thread(-1);
 
 
@@ -450,7 +464,7 @@ int main(void)
     assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
     zzapp_kernel_set_current_thread(0);
     zzapp_api_enter();
-    zzapp_runtime_kernel()->threads[0].quantum_left = 0U;
+    THREAD(0).quantum_left = 0U;
     zzapp_host_yield();
     assert(api_yield_service_calls == 1);
     assert(zzapp_runtime_kernel()->api_lock_owner == 0);
@@ -492,7 +506,7 @@ int main(void)
     zzapp_test_set_time_hook(NULL);
     api_yield_post_resume_irq_tick = 0U;
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    assert(THREAD(0).state == ZZAPP_THREAD_RUNNABLE);
     zzapp_api_leave();
     zzapp_kernel_set_current_thread(-1);
 
@@ -514,7 +528,7 @@ int main(void)
     zzapp_api_leave();
     zzapp_host_tick_at(ZZAPP_APP_STALL_US + 2U * ZZAPP_TICK_US);
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    assert(THREAD(0).state == ZZAPP_THREAD_RUNNABLE);
     zzapp_kernel_set_current_thread(-1);
 
     /*
@@ -539,7 +553,7 @@ int main(void)
     zzapp_api_enter();
     api_wait_wake_tick = 0U;
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
-    assert(zzapp_runtime_kernel()->threads[1].state == ZZAPP_THREAD_RUNNABLE);
+    assert(THREAD(1).state == ZZAPP_THREAD_RUNNABLE);
     zzapp_api_leave();
     zzapp_kernel_set_current_thread(-1);
 
@@ -560,7 +574,7 @@ int main(void)
     assert(zzapp_kernel_start_app(zzapp_runtime_kernel(), 0U) == 0);
     zzapp_test_mark_running();
     zzapp_host_tick_at(ZZAPP_APP_STALL_US);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+    assert(THREAD(0).state == ZZAPP_THREAD_STOPPED);
     zzapp_kernel_set_current_thread(-1);
 
     /*
@@ -580,7 +594,7 @@ int main(void)
     zzapp_api_enter();
     zzapp_host_tick_at(ZZAPP_API_STUCK_US + 2U);
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    assert(THREAD(0).state == ZZAPP_THREAD_RUNNABLE);
     zzapp_api_leave();
     zzapp_kernel_set_current_thread(-1);
 
@@ -633,8 +647,8 @@ int main(void)
     zzapp_kernel_set_current_thread(0);
     zzapp_api_enter();
     zzapp_host_yield_wait();
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_SLEEPING);
-    assert(zzapp_runtime_kernel()->threads[0].sleep_deadline == 1U);
+    assert(THREAD(0).state == ZZAPP_THREAD_SLEEPING);
+    assert(THREAD(0).sleep_deadline == 1U);
 
     /* An app that executes for 4 ms before calling sleep_us(2000) must sleep
      * for ~2 ms, not return at once due to stale scheduler time. */
@@ -646,12 +660,12 @@ int main(void)
     zzapp_api_enter();
     zzapp_test_set_xtime(4000u);
     zzapp_host_sleep(2000u);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_SLEEPING);
-    assert(zzapp_runtime_kernel()->threads[0].sleep_deadline == 6U);
+    assert(THREAD(0).state == ZZAPP_THREAD_SLEEPING);
+    assert(THREAD(0).sleep_deadline == 6U);
     zzapp_kernel_advance(zzapp_runtime_kernel(), 5U);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_SLEEPING);
+    assert(THREAD(0).state == ZZAPP_THREAD_SLEEPING);
     zzapp_kernel_advance(zzapp_runtime_kernel(), 1U);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
+    assert(THREAD(0).state == ZZAPP_THREAD_RUNNABLE);
     zzapp_api_leave();
     zzapp_kernel_set_current_thread(-1);
 
@@ -662,7 +676,7 @@ int main(void)
     zzapp_kernel_set_current_thread(0);
     zzapp_api_enter();
     zzapp_host_yield_wait();
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_BLOCKED);
+    assert(THREAD(0).state == ZZAPP_THREAD_BLOCKED);
     zzapp_host_tick_at(ZZAPP_API_STUCK_US);
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
     zzapp_kernel_set_current_thread(-1);
@@ -688,7 +702,7 @@ int main(void)
         assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
         assert(zzapp_test_service_calls() == service_calls);
         zzapp_host_tick_at(ZZAPP_APP_STALL_US);
-        assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+        assert(THREAD(0).state == ZZAPP_THREAD_STOPPED);
         assert(zzapp_test_service_calls() == service_calls);
         zzapp_worker_hook();
         assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
@@ -700,7 +714,7 @@ int main(void)
     zzapp_api_enter();
     zzapp_host_tick_at(ZZAPP_API_STUCK_US);
     assert(zzapp_runtime_state() == ZZAPP_ST_RUNNING);
-    assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_STOPPED);
+    assert(THREAD(0).state == ZZAPP_THREAD_STOPPED);
     zzapp_worker_hook();
     assert(zzapp_runtime_state() == ZZAPP_ST_FAULTED);
 

@@ -13,6 +13,7 @@
 #include "aar/app.h"
 #include "aar/ext_zz9000.h"
 #include "memorymap.h"
+#include "zzapp_rec.h"
 #include "zzapp_runtime.h"
 
 /* A shared block's token is its card address minus ADDR_ADJ: the ARM address
@@ -72,10 +73,18 @@ static uint64_t shared_used(void)
     return info.shared_used;
 }
 
+/* Every case starts on a fresh record arena with one admitted record (the
+ * app under test). The previous case's record is released first, once there
+ * is one. */
 static void reset(void)
 {
-    zzapp_loader_release();
+    static int booted;
+
+    if (booted)
+        zzapp_loader_release();
+    booted = 1;
     zzapp_boot_init();
+    assert(zzapp_test_admit() != ZZAPP_PID_NONE);
     assert(zzapp_loader_begin() == AAR_OK);
     api = zzapp_api_table();
     zzapp_test_set_groups(0u, 0);

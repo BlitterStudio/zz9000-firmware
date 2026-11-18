@@ -11,6 +11,16 @@
 #include "zzm_minigl_host.h"
 #include "zzapp_svc.h"
 
+/* A fresh arena with two admitted records (services admits at claim): pid 0
+ * is the app under test, pid 1 the other app the arbiter must refuse. */
+static void boot_with_records(void)
+{
+    (zzapp_boot_init)();
+    assert(zzapp_test_admit() == 0U);
+    assert(zzapp_test_admit() == 1U);
+}
+#define zzapp_boot_init() boot_with_records()
+
 static aar_gl g_gl;
 static zzm_minigl_ops_v1_t g_ops;
 static zzm_minigl_worker_ops_t g_worker;
@@ -35,16 +45,16 @@ static unsigned g_telemetry_resets;
 static unsigned g_telemetry_swaps;
 static unsigned g_telemetry_reports;
 
-void zzapp_svc_gl_telemetry_reset(uint32_t slot)
+void zzapp_svc_gl_telemetry_reset(uint32_t pid)
 {
-    assert(slot == 0U);
+    assert(pid == 0U);
     g_telemetry_resets++;
 }
 
-int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
+int zzapp_svc_gl_telemetry_swap(uint32_t pid, uint64_t now_us,
                                  zzapp_gl_telemetry_snapshot_t *snapshot)
 {
-    assert(slot == 0U);
+    assert(pid == 0U);
     assert(now_us == 0U);
     assert(snapshot != NULL);
     memset(snapshot, 0, sizeof(*snapshot));
@@ -52,10 +62,10 @@ int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
     return 1;
 }
 
-void zzapp_svc_gl_telemetry_report(uint32_t slot,
+void zzapp_svc_gl_telemetry_report(uint32_t pid,
                                     const zzapp_gl_telemetry_snapshot_t *snapshot)
 {
-    assert(slot == 0U);
+    assert(pid == 0U);
     assert(snapshot != NULL);
     assert(g_telemetry_reports < g_telemetry_swaps);
     g_telemetry_reports++;

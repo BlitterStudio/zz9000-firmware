@@ -14,6 +14,7 @@
 #include "aar/app.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
+#include "zzapp_rec.h"
 void zzapp_host_yield_wait(void);
 void __attribute__((weak)) zzapp_status_observed(void) {}
 void __attribute__((weak)) zzapp_host_latch_stop(uint32_t slot)
@@ -43,11 +44,13 @@ extern void zzapp_host_reset_low_memory(uint32_t slot)
 	__attribute__((weak));
 extern void zzapp_host_claimed(uint32_t slot)
 	__attribute__((weak));
-extern void zzapp_host_quarantine_released(uint32_t slot)
-	__attribute__((weak));
+
+extern uint32_t zzapp_loader_pool_free(void) __attribute__((weak));
+int zzapp_rec_retire(uint32_t pid);
 #include "aar/app.h"
 #ifdef ZZAPP_HOST_TEST
 #include <stdlib.h>
+#include <sys/mman.h>
 /* Host recorder for the present-path flush: production code decides what
  * to clean; suites assert the presented card range and that the size is
  * the surface, never more. */
@@ -81,6 +84,8 @@ __attribute__((weak)) int scheduler_core1_available(void) { return 1; }
 #ifndef ZZAPP_HOST_TEST
 typedef char zzapp_window_size_matches_memorymap[
 	(ZZAPP_WINDOW_BYTES == ZZAPP_WINDOW_Z3_SIZE) ? 1 : -1];
+_Static_assert(ZZAPP_SLOT_COUNT <= ZZAPP_WINDOW_Z3_SLOTS,
+	       "more launcher windows than carved Z3 window ranges");
 #endif
 #endif
 
@@ -98,6 +103,30 @@ typedef char zzapp_window_size_matches_memorymap[
 #define ZZAPP_LOG_UART_HZ     8u
 #define ZZAPP_AUDIO_FRAMES    8192u
 #define ZZAPP_AUDIO_RATE      22050u
+
+#ifdef ZZAPP_HOST_TEST
+/* The audio ring of a host run. Its address is granted to the app as a
+ * 32-bit value, so it must sit below 4 GiB. malloc serves a block from the
+ * mmap region when the heap cannot grow in place, and with ASLR that region
+ * is above 4 GiB: the truncated address then failed the grant on a few runs
+ * in a thousand. Map the ring explicitly into the low 2 GiB instead. */
+#define AUDIO_HOST_RING_BYTES \
+	((8U + ZZAPP_AUDIO_FRAMES * 4U + 4095U) & ~4095U)
+
+static void *audio_host_ring_alloc(void)
+{
+	void *ring = mmap(NULL, AUDIO_HOST_RING_BYTES, PROT_READ | PROT_WRITE,
+			  MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+
+	return ring == MAP_FAILED ? NULL : ring;
+}
+
+static void audio_host_ring_free(void *ring)
+{
+	if (ring)
+		(void)munmap(ring, AUDIO_HOST_RING_BYTES);
+}
+#endif
 #define ZZAPP_P96_LO          0x00200000u
 #define ZZAPP_P96_HI          0x033F0000u
 #define ZZAPP_HEAP_LO         0x033F0000u
@@ -133,27 +162,8 @@ enum zzapp_wait_kind {
 	ZZAPP_WAIT_EVENT
 };
 
-struct zzapp_service_slot {
-	uint8_t *window;
-	uint32_t window_bytes;
-	uint32_t generation;
-	uint32_t state;
-	uint32_t memory_limit;
-	uint32_t host_visible_limit;
-	uint32_t terminal_reason;
-	uint64_t claim_started;
-	uint64_t load_progress;
-	uint32_t load_step;
-	uint32_t launcher_heartbeat;
-	int quarantined;
-	int quarantine_reclaimed;
-	int quarantine_release_requested;
-	uint8_t name[ZZAPP_LIST_NAME_BYTES];
-	int window_uncached;
-	int legacy_claim;
-};
-
-static void release_quarantine_locked(struct zzapp_service_slot *entry);
+struct zzapp_window;
+static void release_quarantine_locked(struct zzapp_window *w, zzapp_rec_t *rec);
 
 struct zzapp_service_runtime {
 	uint32_t file_seq;
@@ -214,6 +224,7 @@ struct zzapp_service_runtime {
 	uint32_t audio_stream_epoch;
 	int audio_ahi_route;
 	uint32_t audio_host_tail_seen;
+	uint8_t name[ZZAPP_LIST_NAME_BYTES];
 #if ZZAPP_PERF_COUNTERS
 	uint8_t audio_low_water_latched;
 #endif
@@ -240,13 +251,52 @@ struct zzapp_deferred {
 	volatile uint32_t start_pending;
 	uint32_t start_argc;
 };
+_Static_assert(sizeof(struct zzapp_service_runtime) <= ZZAPP_REC_SERVICES_BYTES,
+	       "service runtime does not fit its record block");
 
-static struct zzapp_service_slot slots[ZZAPP_SLOT_COUNT];
-static struct zzapp_service_runtime runtime[ZZAPP_SLOT_COUNT];
-static struct zzapp_deferred deferred[ZZAPP_SLOT_COUNT];
-static uint32_t selected_slot[2];
-static uint32_t deferred_harvest_slot = ZZAPP_SLOT_COUNT;
-static uint32_t deferred_poll_next_slot;
+/*
+ * One launcher window: a wire-layer object. There are ZZAPP_SLOT_COUNT of
+ * them, named by slot on the wire, and a claim binds one to a process record
+ * through `handle`. The record holds everything that belongs to the app; the
+ * window keeps what belongs to the request channel: the mapping, the wire
+ * generation (+1 per claim, never reset), the claim lease, the deferred
+ * mailbox op, and the summary of the last claim for LIST on an idle window.
+ */
+struct zzapp_window {
+	uint8_t *window;
+	uint32_t window_bytes;
+	int window_uncached;
+	/* Bound record, 0 while unbound. Detached before the record is freed. */
+	uint32_t handle;
+	uint32_t claim_generation;
+	int legacy_claim;
+	/* Last end, kept past the record. */
+	uint32_t last_terminal;
+	uint8_t last_name[ZZAPP_LIST_NAME_BYTES];
+	/* Carried across claims so the launcher sees one continuous sequence. */
+	uint32_t file_seq;
+	uint32_t audio_stream_epoch;
+	uint64_t claim_started;
+	uint64_t load_progress;
+	uint32_t launcher_heartbeat;
+	int quarantined;
+	int quarantine_reclaimed;
+	int quarantine_release_requested;
+	struct zzapp_deferred defer;
+#ifdef ZZAPP_HOST_TEST
+	uint8_t *test_backing;
+	int test_range_held;
+	uint32_t test_serial;
+	int test_implicit;
+#endif
+};
+
+static struct zzapp_window windows[ZZAPP_SLOT_COUNT];
+static uint32_t ctx_win[2];
+static uint32_t ctx_pid[2] = { ZZAPP_PID_NONE, ZZAPP_PID_NONE };
+static uint32_t deferred_harvest_window = ZZAPP_SLOT_COUNT;
+static uint32_t deferred_poll_next_window;
+static struct zzapp_service_runtime *display_mailbox_state;
 static int window_mapping_available;
 static uint32_t load_diag_seen;
 static int slot_busy_test[4];
@@ -279,29 +329,116 @@ static void slot_state_lock_release(void)
 }
 
 static unsigned service_context(void);
+static int audio_handoff_pending(const struct zzapp_service_runtime *state);
 
-static uint32_t service_slot(void)
+/* The per-core selected context: a window and the record bound to it. */
+struct svc_ctx {
+	uint32_t win;
+	uint32_t pid;
+};
+
+static struct svc_ctx ctx_save(void)
 {
-	int slot = zzapp_kernel_current_thread();
+	struct svc_ctx saved = { ctx_win[service_context()],
+				 ctx_pid[service_context()] };
 
-	if (service_context() == 1U && slot >= 0 &&
-	    slot < (int)ZZAPP_AS_SLOT_COUNT)
-		return (uint32_t)slot;
-	return selected_slot[service_context()];
+	return saved;
 }
 
-static struct zzapp_service_runtime *runtime_for_slot(uint32_t slot)
+static void ctx_restore(struct svc_ctx saved)
 {
-	return slot < ZZAPP_SLOT_COUNT ? &runtime[slot] : NULL;
+	ctx_win[service_context()] = saved.win;
+	ctx_pid[service_context()] = saved.pid;
+}
+
+static struct zzapp_service_runtime *runtime_of(zzapp_rec_t *rec)
+{
+	return (struct zzapp_service_runtime *)(void *)rec->services.bytes;
+}
+
+/* The record the services act for: the running app's own on core 1, else the
+ * selected one. ZZAPP_PID_NONE when the context has no record. */
+static uint32_t service_pid(void)
+{
+	int thread = zzapp_kernel_current_thread();
+
+	if (service_context() == 1U && thread >= 0)
+		return (uint32_t)thread;
+	return ctx_pid[service_context()];
+}
+
+static zzapp_rec_t *service_rec(void)
+{
+	uint32_t pid = service_pid();
+
+	if (pid == ZZAPP_PID_NONE || zzapp_rec_state(pid) == ZZAPP_REC_FREE)
+		return NULL;
+	return zzapp_rec_by_pid(pid);
+}
+
+static zzapp_proc_t *service_proc(void)
+{
+	zzapp_rec_t *rec = service_rec();
+
+	return rec ? &rec->proc : NULL;
 }
 
 static struct zzapp_service_runtime *current_runtime(void)
 {
-	return runtime_for_slot(service_slot());
+	zzapp_rec_t *rec = service_rec();
+
+	return rec ? runtime_of(rec) : NULL;
 }
+
+static struct zzapp_window *service_win(void)
+{
+	zzapp_rec_t *rec = service_rec();
+
+	if (rec && rec->hdr.window < ZZAPP_SLOT_COUNT)
+		return &windows[rec->hdr.window];
+	return &windows[ctx_win[service_context()]];
+}
+
+static uint32_t window_index(const struct zzapp_window *w)
+{
+	return (uint32_t)(w - windows);
+}
+
+/* The record bound to a window, NULL while it is unbound. */
+static zzapp_rec_t *window_rec(const struct zzapp_window *w)
+{
+	return zzapp_rec_by_handle(w->handle);
+}
+
+/* What QUERY, STATUS and LIST report: STOPPING for a quarantined window and
+ * while core 1 still completes a cancelled op for it (the window is not
+ * claimable until then), else the state of the record bound to it, else
+ * IDLE. */
+static uint32_t window_state(const struct zzapp_window *w)
+{
+	zzapp_rec_t *rec;
+
+	if (w->quarantined)
+		return ZZAPP_ST_STOPPING;
+	if (__atomic_load_n(&w->defer.cancelled, __ATOMIC_ACQUIRE) != 0U &&
+	    __atomic_load_n(&w->defer.state, __ATOMIC_ACQUIRE) == DEFER_RUNNING)
+		return ZZAPP_ST_STOPPING;
+	rec = window_rec(w);
+	return rec ? rec->claim.state : ZZAPP_ST_IDLE;
+}
+
+/* A window a claim may take: unbound, not quarantined, no op in flight. */
+static int window_free(const struct zzapp_window *w)
+{
+	return w->handle == 0U && !w->quarantined &&
+	       __atomic_load_n(&w->defer.state, __ATOMIC_ACQUIRE) == DEFER_IDLE;
+}
+
+static void select_window(uint32_t win);
+
 static int wait_status(void)
 {
-	int status = zzapp_kernel_wait_status(zzapp_runtime_kernel(), service_slot());
+	int status = zzapp_kernel_wait_status(zzapp_runtime_kernel(), service_pid());
 
 	if (status == ZZAPP_KERNEL_WAIT_TIMEOUT)
 		return AAR_E_TIMEDOUT;
@@ -329,17 +466,135 @@ static void wait_end(void)
 	state->wait_deadline = 0U;
 }
 
-int zzapp_services_wait_registered(uint32_t slot)
+int zzapp_services_wait_registered(uint32_t pid)
 {
-	struct zzapp_service_runtime *state = runtime_for_slot(slot);
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
 
-	return state && state->wait_kind != ZZAPP_WAIT_NONE;
+	return rec && zzapp_rec_state(pid) != ZZAPP_REC_FREE &&
+	       runtime_of(rec)->wait_kind != ZZAPP_WAIT_NONE;
 }
 
 
+
+#ifdef ZZAPP_SERVICES_STANDALONE_TEST
+static unsigned service_test_wake_count;
+#endif
+static uint32_t service_stub_direct_audio;
+
+/*
+ * Kernel hooks. Weak, so the kernel overrides them; a build that links only
+ * the services gets these. The thread and the per-record kernel words are
+ * the record's own (rec->thread, rec->kernel), so they need no kernel table.
+ */
+__attribute__((weak)) void zzapp_kernel_reset_cpu_ticks(
+	zzapp_kernel_t *kernel, uint32_t pid)
+{
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+	(void)kernel;
+	if (!rec)
+		return;
+	rec->thread.user_ticks = 0U;
+	rec->thread.svc_ticks = 0U;
+}
+
+#if ZZAPP_PERF_COUNTERS
+__attribute__((weak)) void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel,
+						     uint32_t pid,
+						     uint32_t low_water,
+						     uint32_t starved,
+						     uint32_t underruns)
+{
+	(void)kernel;
+	(void)pid;
+	(void)low_water;
+	(void)starved;
+	(void)underruns;
+}
+#endif
+
+__attribute__((weak)) int zzapp_kernel_audio_open(zzapp_kernel_t *kernel,
+						    uint32_t pid, int direct)
+{
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+	(void)kernel;
+	if (!rec || (direct && service_stub_direct_audio >= 2U))
+		return -1;
+	if (rec->kernel.resources.direct_audio)
+		return -1;
+	rec->kernel.resources.direct_audio = direct ? 1U : 2U;
+	if (direct)
+		service_stub_direct_audio++;
+	return 0;
+}
+
+__attribute__((weak)) void zzapp_kernel_audio_close(zzapp_kernel_t *kernel,
+						      uint32_t pid)
+{
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+	(void)kernel;
+	if (!rec)
+		return;
+	if (rec->kernel.resources.direct_audio == 1U &&
+	    service_stub_direct_audio != 0U)
+		service_stub_direct_audio--;
+	rec->kernel.resources.direct_audio = 0U;
+}
+
+__attribute__((weak)) int zzapp_kernel_wait_status(
+	const zzapp_kernel_t *kernel, uint32_t pid)
+{
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+	(void)kernel;
+	if (!rec)
+		return ZZAPP_KERNEL_WAIT_CANCELLED;
+	if (rec->thread.wake_reason == ZZAPP_WAKE_TIMEOUT)
+		return ZZAPP_KERNEL_WAIT_TIMEOUT;
+	if (rec->thread.wake_reason == ZZAPP_WAKE_CANCELLED)
+		return ZZAPP_KERNEL_WAIT_CANCELLED;
+	return 0;
+}
+
+__attribute__((weak)) int zzapp_kernel_wake(zzapp_kernel_t *kernel,
+					      uint32_t pid,
+					      zzapp_wake_reason_t reason)
+{
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+	(void)kernel;
+	if (!rec)
+		return -1;
+#ifdef ZZAPP_SERVICES_STANDALONE_TEST
+	service_test_wake_count++;
+#endif
+	rec->thread.state = ZZAPP_THREAD_RUNNABLE;
+	rec->thread.wake_reason = reason;
+	return 0;
+}
+
+__attribute__((weak)) int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel,
+						      uint32_t pid,
+						      uint32_t generation,
+						      uint32_t base,
+						      uint32_t bytes)
+{
+	(void)kernel;
+	(void)pid;
+	(void)generation;
+	return base != 0U && bytes != 0U ? 0 : -1;
+}
+__attribute__((weak)) void zzapp_kernel_surface_unbind(
+	zzapp_kernel_t *kernel, uint32_t pid)
+{
+	(void)kernel;
+	(void)pid;
+}
+
 #ifndef ZZAPP_SERVICES_STANDALONE_TEST
 static zzapp_kernel_t service_fallback_kernel;
-static zzapp_proc_t service_fallback_proc[ZZAPP_AS_SLOT_COUNT];
 
 __attribute__((weak)) int zzapp_kernel_current_thread(void)
 {
@@ -350,123 +605,6 @@ __attribute__((weak)) zzapp_kernel_t *zzapp_runtime_kernel(void)
 {
 	return &service_fallback_kernel;
 }
-
-#if ZZAPP_PERF_COUNTERS
-__attribute__((weak)) void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel,
-						     uint32_t slot,
-						     uint32_t low_water,
-						     uint32_t starved,
-						     uint32_t underruns)
-{
-	(void)kernel;
-	(void)slot;
-	(void)low_water;
-	(void)starved;
-	(void)underruns;
-}
-#endif
-
-__attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
-{
-	return slot < ZZAPP_AS_SLOT_COUNT ? &service_fallback_proc[slot] : NULL;
-}
-
-__attribute__((weak)) int zzapp_kernel_audio_open(zzapp_kernel_t *kernel,
-						    uint32_t slot, int direct)
-{
-	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT ||
-	    (direct && kernel->direct_audio_count >= 2U))
-		return -1;
-	if (kernel->resources[slot].direct_audio)
-		return -1;
-	kernel->resources[slot].direct_audio = direct ? 1U : 2U;
-	if (direct)
-		kernel->direct_audio_count++;
-	return 0;
-}
-
-__attribute__((weak)) void zzapp_kernel_audio_close(zzapp_kernel_t *kernel,
-						      uint32_t slot)
-{
-	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
-		return;
-	if (kernel->resources[slot].direct_audio == 1U &&
-	    kernel->direct_audio_count != 0U)
-		kernel->direct_audio_count--;
-	kernel->resources[slot].direct_audio = 0U;
-}
-__attribute__((weak)) int zzapp_kernel_wait_status(
-	const zzapp_kernel_t *kernel, uint32_t slot)
-{
-	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
-		return ZZAPP_KERNEL_WAIT_CANCELLED;
-	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_TIMEOUT)
-		return ZZAPP_KERNEL_WAIT_TIMEOUT;
-	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_CANCELLED)
-		return ZZAPP_KERNEL_WAIT_CANCELLED;
-	return 0;
-}
-
-__attribute__((weak)) int zzapp_kernel_wake(zzapp_kernel_t *kernel,
-					      uint32_t slot,
-					      zzapp_wake_reason_t reason)
-{
-	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
-		return -1;
-	kernel->threads[slot].state = ZZAPP_THREAD_RUNNABLE;
-	kernel->threads[slot].wake_reason = reason;
-	return 0;
-}
-
-__attribute__((weak)) int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel,
-						      uint32_t slot,
-						      uint32_t generation,
-						      uint32_t base,
-						      uint32_t bytes)
-{
-	(void)kernel;
-	(void)slot;
-	(void)generation;
-	return base != 0U && bytes != 0U ? 0 : -1;
-}
-__attribute__((weak)) void zzapp_kernel_surface_unbind(
-	zzapp_kernel_t *kernel, uint32_t slot)
-{
-	(void)kernel;
-	(void)slot;
-}
-#ifdef ZZAPP_HOST_TEST
-
-__attribute__((weak)) int zzapp_as_alias_map(zzapp_as_t *as, uint32_t phys,
-					      uint32_t bytes, int writable,
-					      uint32_t *va)
-{
-	(void)as;
-	(void)bytes;
-	(void)writable;
-	if (!va)
-		return -1;
-	*va = phys;
-	return 0;
-}
-
-__attribute__((weak)) int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va,
-						uint32_t bytes)
-{
-	(void)as;
-	(void)va;
-	(void)bytes;
-	return 0;
-}
-
-__attribute__((weak)) int zzapp_loader_set_generation(uint32_t generation)
-{
-	return generation != 0U ? AAR_OK : AAR_E_INVAL;
-}
-#endif
-
-
-
 #endif
 #ifdef ZZAPP_HOST_TEST
 static int defer_test_core = 1;
@@ -531,14 +669,19 @@ static int display_mailbox_owns_state(
 
 void zzapp_services_reset_core1_lock(void)
 {
-	uint32_t slot;
+	uint32_t pid;
 
-	/* Core 1 can hold any slot's mailbox lock, not only the selected one. */
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+	/* Core 1 can hold any record's mailbox lock, not only the selected one. */
+	for (pid = 0U; pid < zzapp_rec_capacity(); pid++) {
+		zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+		if (!rec)
+			continue;
 #ifndef ZZAPP_HOST_TEST
-		sdk_smp_lock_reset(&runtime[slot].display_mailbox_lock);
+		sdk_smp_lock_reset(&runtime_of(rec)->display_mailbox_lock);
 #else
-		__atomic_clear(&runtime[slot].display_mailbox_lock, __ATOMIC_RELEASE);
+		__atomic_clear(&runtime_of(rec)->display_mailbox_lock,
+			       __ATOMIC_RELEASE);
 #endif
 	}
 #ifndef ZZAPP_HOST_TEST
@@ -562,14 +705,9 @@ static void display_mailbox_disable(void)
 	display_mailbox_lock_release();
 }
 
-static struct zzapp_deferred *defer_for_slot(uint32_t slot)
-{
-	return slot < ZZAPP_SLOT_COUNT ? &deferred[slot] : NULL;
-}
-
 static struct zzapp_deferred *current_deferred(void)
 {
-	return defer_for_slot(service_slot());
+	return &service_win()->defer;
 }
 
 static uint32_t defer_load(void)
@@ -586,7 +724,8 @@ static int defer_cancelled(const struct zzapp_deferred *defer)
  * for the RUNNING record; a negative return preserves a completed load. */
 static int stop_current_deferred(void)
 {
-	struct zzapp_deferred *defer = current_deferred();
+	struct zzapp_window *w = service_win();
+	struct zzapp_deferred *defer = &w->defer;
 
 	if (defer->state == DEFER_RUNNING) {
 		defer->cancelled = 1U;
@@ -596,19 +735,9 @@ static int stop_current_deferred(void)
 		return -1;
 	if (defer->state != DEFER_IDLE) {
 		defer->state = DEFER_IDLE;
-		if (deferred_harvest_slot == service_slot())
-			deferred_harvest_slot = ZZAPP_SLOT_COUNT;
+		if (deferred_harvest_window == window_index(w))
+			deferred_harvest_window = ZZAPP_SLOT_COUNT;
 	}
-	return 1;
-}
-
-static int cancel_running_current_deferred(void)
-{
-	struct zzapp_deferred *defer = current_deferred();
-
-	if (defer->state != DEFER_RUNNING)
-		return 0;
-	defer->cancelled = 1U;
 	return 1;
 }
 
@@ -630,26 +759,115 @@ static unsigned service_context(void)
 }
 
 
-static void select_slot(uint32_t slot)
+static void select_window(uint32_t win)
 {
-	if (slot >= ZZAPP_SLOT_COUNT)
-		slot = 0U;
-	selected_slot[service_context()] = slot;
+	zzapp_rec_t *rec;
+	unsigned core = service_context();
+
+	if (win >= ZZAPP_SLOT_COUNT)
+		return;
+	ctx_win[core] = win;
+	rec = window_rec(&windows[win]);
+	ctx_pid[core] = rec ? rec->hdr.pid : ZZAPP_PID_NONE;
 }
 
+/* Selects the record `pid` (and its window) as this core's context. A pid
+ * outside the table or a FREE record clears the record context. */
+void zzapp_services_select_pid(uint32_t pid)
+{
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+	unsigned core = service_context();
+
+	if (!rec || zzapp_rec_state(pid) == ZZAPP_REC_FREE) {
+		ctx_pid[core] = ZZAPP_PID_NONE;
+		return;
+	}
+	ctx_pid[core] = pid;
+	if (rec->hdr.window < ZZAPP_SLOT_COUNT)
+		ctx_win[core] = rec->hdr.window;
+}
+
+uint32_t zzapp_services_current_pid(void)
+{
+	return service_pid();
+}
+
+static int whave(const struct zzapp_window *w)
+{
+	return w->window != NULL && w->window_bytes >= ZZAPP_WINDOW_BYTES;
+}
+
+static void wflush(const struct zzapp_window *w, uint32_t off, uint32_t len)
+{
+#ifndef ZZAPP_HOST_TEST
+	if (!w->window_uncached && whave(w) && len != 0U)
+		Xil_DCacheFlushRange((INTPTR)(w->window + off), len);
+#else
+	(void)w;
+	(void)off;
+	(void)len;
+#endif
+}
+
+static void winval(const struct zzapp_window *w, uint32_t off, uint32_t len)
+{
+#ifndef ZZAPP_HOST_TEST
+	if (!w->window_uncached && whave(w) && len != 0U)
+		Xil_DCacheInvalidateRange((INTPTR)(w->window + off), len);
+#else
+	(void)w;
+	(void)off;
+	(void)len;
+#endif
+}
+
+static void wput32(const struct zzapp_window *w, uint32_t off, uint32_t value)
+{
+	zzapp_put_be32(w->window + off, value);
+	wflush(w, off, 4U);
+}
+
+static uint32_t wget32(const struct zzapp_window *w, uint32_t off)
+{
+	volatile const uint32_t *word = (volatile const uint32_t *)(w->window + off);
+	uint32_t value;
+
+	winval(w, off, 4U);
+	value = __builtin_bswap32(*word);
+	barrier();
+	return value;
+}
+
+/* Lifecycle block words of one window; a window without memory is skipped. */
+static void lput(const struct zzapp_window *w, uint32_t off, uint32_t value)
+{
+	if (!whave(w))
+		return;
+	wput32(w, ZZAPP_LIFE_OFF + off, value);
+}
+
+static uint32_t lget(const struct zzapp_window *w, uint32_t off)
+{
+	if (!whave(w))
+		return 0U;
+	return wget32(w, ZZAPP_LIFE_OFF + off);
+}
+
+/* The selected context: the window of the running app on core 1, or the one
+ * a mailbox request or a service loop selected. */
 static uint8_t *current_window(void)
 {
-	return slots[service_slot()].window;
+	return service_win()->window;
 }
 
-static uint32_t current_window_bytes(void)
+static uint32_t __attribute__((unused)) current_window_bytes(void)
 {
-	return slots[service_slot()].window_bytes;
+	return service_win()->window_bytes;
 }
 
 static int __attribute__((unused)) current_window_uncached(void)
 {
-	return slots[service_slot()].window_uncached;
+	return service_win()->window_uncached;
 }
 
 static int select_request_slot(const uint8_t *req, uint16_t req_len,
@@ -665,93 +883,57 @@ static int select_request_slot(const uint8_t *req, uint16_t req_len,
 			return SDK_STATUS_BAD_HANDLE;
 		if (check_generation &&
 		    zzapp_get_be32(req + ZZAPP_SEL_GENERATION) !=
-		    slots[slot].generation)
+		    windows[slot].claim_generation)
 			return SDK_STATUS_BAD_HANDLE;
 	}
-	select_slot(slot);
+	select_window(slot);
 	return SDK_STATUS_OK;
 }
 
 static int have_window(void)
 {
-	return current_window() != NULL &&
-	       current_window_bytes() >= ZZAPP_WINDOW_BYTES;
+	return whave(service_win());
 }
 
 static void win_flush(uint32_t off, uint32_t len)
 {
-#ifndef ZZAPP_HOST_TEST
-	if (!current_window_uncached() && have_window() && len != 0U)
-		Xil_DCacheFlushRange((INTPTR)(current_window() + off), len);
-#else
-	(void)off;
-	(void)len;
-#endif
+	wflush(service_win(), off, len);
 }
 
 static void win_inval(uint32_t off, uint32_t len)
 {
-#ifndef ZZAPP_HOST_TEST
-	if (!current_window_uncached() && have_window() && len != 0U)
-		Xil_DCacheInvalidateRange((INTPTR)(current_window() + off), len);
-#else
-	(void)off;
-	(void)len;
-#endif
+	winval(service_win(), off, len);
 }
 
 static void win_put32(uint32_t off, uint32_t value)
 {
-	zzapp_put_be32(current_window() + off, value);
-	win_flush(off, 4U);
+	wput32(service_win(), off, value);
 }
 
 static uint32_t win_get32(uint32_t off)
 {
-	volatile const uint32_t *word =
-		(volatile const uint32_t *)(current_window() + off);
-	uint32_t value;
-
-	win_inval(off, 4U);
-	value = __builtin_bswap32(*word);
-	barrier();
-	return value;
+	return wget32(service_win(), off);
 }
 
 static void life_put(uint32_t off, uint32_t value)
 {
-	if (!have_window())
-		return;
-	win_put32(ZZAPP_LIFE_OFF + off, value);
+	lput(service_win(), off, value);
 }
-static void life_put_slot(uint32_t slot, uint32_t off, uint32_t value)
+
+void zzapp_services_set_low_memory_crossings(uint32_t pid, uint32_t crossings)
 {
-	struct zzapp_service_slot *entry;
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
 
-	if (slot >= ZZAPP_SLOT_COUNT)
+	if (!rec || zzapp_rec_state(pid) == ZZAPP_REC_FREE ||
+	    rec->hdr.window >= ZZAPP_SLOT_COUNT)
 		return;
-	entry = &slots[slot];
-	if (!entry->window || entry->window_bytes < ZZAPP_WINDOW_BYTES)
-		return;
-	zzapp_put_be32(entry->window + ZZAPP_LIFE_OFF + off, value);
-#ifndef ZZAPP_HOST_TEST
-	if (!entry->window_uncached)
-		Xil_DCacheFlushRange((INTPTR)(entry->window + ZZAPP_LIFE_OFF + off),
-				     4U);
-#endif
+	lput(&windows[rec->hdr.window], ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF,
+	     crossings);
 }
-
-void zzapp_services_set_low_memory_crossings(uint32_t slot, uint32_t crossings)
-{
-	life_put_slot(slot, ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, crossings);
-}
-
 
 static uint32_t life_get(uint32_t off)
 {
-	if (!have_window())
-		return 0U;
-	return win_get32(ZZAPP_LIFE_OFF + off);
+	return lget(service_win(), off);
 }
 
 #ifndef ZZAPP_HOST_TEST
@@ -881,13 +1063,11 @@ static void report_rejected_app_op(uint16_t opcode, const char *reason)
 
 static uint32_t service_loader_state;
 static zzapp_kernel_t service_test_kernel;
-static zzapp_proc_t service_test_proc[ZZAPP_AS_SLOT_COUNT];
 static int service_test_current_thread = -1;
-static unsigned service_test_wake_count;
 static uint32_t service_loader_generation;
-static uint32_t service_test_grant_count;
-static uint32_t service_test_ungrant_count;
 static void (*service_test_loader_begin_hook)(void);
+/* What the stub loader's begin returns once its hook ran. */
+static int service_test_loader_begin_rc = AAR_OK;
 static void (*service_test_loader_set_generation_hook)(void);
 static int (*service_test_loader_chunk_hook)(uint32_t file_off,
 					      const void *src, uint32_t len);
@@ -897,63 +1077,10 @@ static void (*service_test_deferred_completing_hook)(void);
 static void (*service_test_deferred_reply_hook)(void);
 static unsigned service_test_loader_abort_count;
 
-__attribute__((weak)) int zzapp_as_alias_map(zzapp_as_t *as, uint32_t phys,
-					      uint32_t bytes, int writable,
-					      uint32_t *va)
-{
-	(void)as;
-	(void)bytes;
-	(void)writable;
-	if (!va)
-		return -1;
-	*va = phys;
-	service_test_grant_count++;
-	return 0;
-}
-
-__attribute__((weak)) int zzapp_as_alias_unmap(zzapp_as_t *as, uint32_t va,
-						uint32_t bytes)
-{
-	(void)as;
-	(void)va;
-	(void)bytes;
-	service_test_ungrant_count++;
-	return 0;
-}
-
 
 __attribute__((weak)) zzapp_kernel_t *zzapp_runtime_kernel(void)
 {
 	return &service_test_kernel;
-}
-
-__attribute__((weak)) void zzapp_kernel_reset_cpu_ticks(
-	zzapp_kernel_t *kernel, uint32_t slot)
-{
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
-		return;
-	kernel->threads[slot].user_ticks = 0U;
-	kernel->threads[slot].svc_ticks = 0U;
-}
-
-#if ZZAPP_PERF_COUNTERS
-__attribute__((weak)) void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel,
-						     uint32_t slot,
-						     uint32_t low_water,
-						     uint32_t starved,
-						     uint32_t underruns)
-{
-	(void)kernel;
-	(void)slot;
-	(void)low_water;
-	(void)starved;
-	(void)underruns;
-}
-#endif
-
-__attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
-{
-	return slot < ZZAPP_AS_SLOT_COUNT ? &service_test_proc[slot] : NULL;
 }
 
 __attribute__((weak)) int zzapp_kernel_current_thread(void)
@@ -961,71 +1088,6 @@ __attribute__((weak)) int zzapp_kernel_current_thread(void)
 	return service_test_current_thread;
 }
 
-__attribute__((weak)) int zzapp_kernel_audio_open(zzapp_kernel_t *kernel,
-						    uint32_t slot, int direct)
-{
-	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT ||
-	    (direct && kernel->direct_audio_count >= 2U))
-		return -1;
-	if (kernel->resources[slot].direct_audio)
-		return -1;
-	kernel->resources[slot].direct_audio = direct ? 1U : 2U;
-	if (direct)
-		kernel->direct_audio_count++;
-	return 0;
-}
-
-__attribute__((weak)) void zzapp_kernel_audio_close(zzapp_kernel_t *kernel,
-						      uint32_t slot)
-{
-	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
-		return;
-	if (kernel->resources[slot].direct_audio == 1U &&
-	    kernel->direct_audio_count != 0U)
-		kernel->direct_audio_count--;
-	kernel->resources[slot].direct_audio = 0U;
-}
-__attribute__((weak)) int zzapp_kernel_wait_status(
-	const zzapp_kernel_t *kernel, uint32_t slot)
-{
-	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
-		return ZZAPP_KERNEL_WAIT_CANCELLED;
-	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_TIMEOUT)
-		return ZZAPP_KERNEL_WAIT_TIMEOUT;
-	if (kernel->threads[slot].wake_reason == ZZAPP_WAKE_CANCELLED)
-		return ZZAPP_KERNEL_WAIT_CANCELLED;
-	return 0;
-}
-
-__attribute__((weak)) int zzapp_kernel_wake(zzapp_kernel_t *kernel,
-					      uint32_t slot,
-					      zzapp_wake_reason_t reason)
-{
-	if (!kernel || slot >= ZZAPP_AS_SLOT_COUNT)
-		return -1;
-	service_test_wake_count++;
-	kernel->threads[slot].state = ZZAPP_THREAD_RUNNABLE;
-	kernel->threads[slot].wake_reason = reason;
-	return 0;
-}
-
-__attribute__((weak)) int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel,
-						      uint32_t slot,
-						      uint32_t generation,
-						      uint32_t base,
-						      uint32_t bytes)
-{
-	(void)kernel;
-	(void)slot;
-	(void)generation;
-	return base != 0U && bytes != 0U ? 0 : -1;
-}
-__attribute__((weak)) void zzapp_kernel_surface_unbind(
-	zzapp_kernel_t *kernel, uint32_t slot)
-{
-	(void)kernel;
-	(void)slot;
-}
 
 
 
@@ -1056,7 +1118,7 @@ __attribute__((weak)) int zzapp_loader_begin(void)
 {
 	if (service_test_loader_begin_hook) {
 		service_test_loader_begin_hook();
-		return AAR_OK;
+		return service_test_loader_begin_rc;
 	}
 	return AAR_E_NOSYS;
 }
@@ -1078,8 +1140,6 @@ __attribute__((weak)) int zzapp_loader_end(void)
 __attribute__((weak)) int zzapp_loader_abort(void)
 {
 	service_test_loader_abort_count++;
-	zzapp_services_set_state(ZZAPP_ST_IDLE);
-	zzapp_services_loader_aborted();
 	return AAR_OK;
 }
 
@@ -1096,23 +1156,12 @@ __attribute__((weak)) void zzapp_loader_free_back(uint32_t addr)
 }
 #endif
 
-#ifdef ZZAPP_SERVICES_TEST_LOADER_STUBS
-__attribute__((weak)) void zzapp_kernel_reset_cpu_ticks(
-	zzapp_kernel_t *kernel, uint32_t slot)
-{
-	if (!kernel || slot >= ZZAPP_KERNEL_APP_SLOTS)
-		return;
-	kernel->threads[slot].user_ticks = 0U;
-	kernel->threads[slot].svc_ticks = 0U;
-}
-#endif
 #if defined(ZZAPP_HOST_TEST) && !defined(ZZAPP_SERVICES_STANDALONE_TEST)
 __attribute__((weak)) int zzapp_loader_abort(void)
 {
 	return AAR_E_NOSYS;
 }
 #endif
-
 
 __attribute__((weak)) void zzapp_host_yield(void)
 {
@@ -1141,27 +1190,12 @@ void zzapp_services_set_window_mapping_available(int available)
 uint32_t zzapp_services_generation(void)
 {
 	return have_window() ? life_get(ZZAPP_LIFE_GENERATION_OFF) :
-	       slots[service_slot()].generation;
-}
-
-uint32_t zzapp_services_current_slot(void)
-{
-	return service_slot();
-}
-
-void zzapp_services_select_slot(uint32_t slot)
-{
-	select_slot(slot);
+	       service_win()->claim_generation;
 }
 
 uint32_t zzapp_services_state(void)
 {
-	uint32_t slot = service_slot();
-
-	if (slot == 0U && slots[0].state != ZZAPP_ST_CLAIMED &&
-	    slots[0].state != ZZAPP_ST_STOPPING)
-		return zzapp_runtime_state();
-	return slots[slot].state;
+	return window_state(service_win());
 }
 
 int zzapp_services_stop_requested(void)
@@ -1171,7 +1205,10 @@ int zzapp_services_stop_requested(void)
 
 static void set_state_locked(uint32_t state)
 {
-	slots[service_slot()].state = state;
+	zzapp_rec_t *rec = service_rec();
+
+	if (rec)
+		rec->claim.state = state;
 	zzapp_loader_set_state(state);
 	life_put(ZZAPP_LIFE_STATE_OFF, state);
 }
@@ -1179,10 +1216,14 @@ static void set_state_locked(uint32_t state)
 /* Caller holds g_slot_state_lock. */
 static void apply_state_locked(uint32_t state)
 {
-	struct zzapp_deferred *defer = current_deferred();
+	struct zzapp_window *w = service_win();
+	struct zzapp_deferred *defer = &w->defer;
 
-	if (state == ZZAPP_ST_IDLE && slots[service_slot()].quarantined) {
-		slots[service_slot()].state = ZZAPP_ST_STOPPING;
+	if (state == ZZAPP_ST_IDLE && w->quarantined) {
+		zzapp_rec_t *rec = service_rec();
+
+		if (rec)
+			rec->claim.state = ZZAPP_ST_STOPPING;
 		life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
 	} else if (state == ZZAPP_ST_IDLE && defer->cancelled &&
 		   defer->state == DEFER_RUNNING) {
@@ -1196,6 +1237,8 @@ static void apply_state_locked(uint32_t state)
 	}
 }
 
+/* Publishes the state of the selected record. IDLE of a claimed record is
+ * published by zzapp_services_retire_wire(), which also frees the record. */
 void zzapp_services_set_state(uint32_t state)
 {
 	slot_state_lock_acquire();
@@ -1203,28 +1246,20 @@ void zzapp_services_set_state(uint32_t state)
 	slot_state_lock_release();
 }
 
-/*
- * Core 1's teardown publication for the claim it started with.  A moved
- * generation means that claim was already completed and the slot may have
- * been claimed again from core 0, so the newer owner's state stays put.
- */
-void zzapp_services_set_idle_for(uint32_t generation)
-{
-	slot_state_lock_acquire();
-	if (slots[service_slot()].generation == generation)
-		apply_state_locked(ZZAPP_ST_IDLE);
-	slot_state_lock_release();
-}
-
-
 uint32_t zzapp_services_memory_limit(void)
 {
-	return slots[service_slot()].memory_limit;
+	zzapp_rec_t *rec = service_rec();
+
+	return rec ? rec->claim.memory_limit : 0U;
 }
 
-uint32_t zzapp_services_host_visible_limit(uint32_t slot)
+uint32_t zzapp_services_host_visible_limit(uint32_t pid)
 {
-	return slot < ZZAPP_SLOT_COUNT ? slots[slot].host_visible_limit : 0U;
+	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+	if (!rec || zzapp_rec_state(pid) == ZZAPP_REC_FREE)
+		return 0U;
+	return rec->claim.host_visible_limit;
 }
 
 void zzapp_services_set_fault(uint32_t code, uint32_t pc, uint32_t sp,
@@ -1243,10 +1278,11 @@ void zzapp_services_set_fault(uint32_t code, uint32_t pc, uint32_t sp,
 void zzapp_services_set_generation(uint32_t generation)
 {
 	slot_state_lock_acquire();
-	slots[service_slot()].generation = generation;
+	service_win()->claim_generation = generation;
 	life_put(ZZAPP_LIFE_GENERATION_OFF, generation);
 	slot_state_lock_release();
 }
+
 void zzapp_services_set_exit(int32_t code)
 {
 	life_put(ZZAPP_LIFE_EXIT_OFF, (uint32_t)code);
@@ -1273,104 +1309,201 @@ uint32_t zzapp_services_flags(void)
 	return life_get(ZZAPP_LIFE_FLAGS_OFF);
 }
 
+/* Terminal status survives record release for APP_LIST (retire_wire copies
+ * it into the window's last-end summary). */
 void zzapp_services_set_terminal(uint32_t reason)
 {
-	slots[service_slot()].terminal_reason = reason;
+	zzapp_rec_t *rec = service_rec();
+
+	if (rec)
+		rec->claim.terminal_reason = reason;
 	life_put(ZZAPP_LIFE_TERMINAL_OFF, reason);
 }
 
-static void begin_claim_cancellation(struct zzapp_service_slot *entry,
+/* A resource refusal during load. The reason reaches the lifecycle block
+ * before the failing op completes. */
+void zzapp_services_note_refusal(uint32_t reason)
+{
+	zzapp_rec_t *rec = service_rec();
+
+	if (rec)
+		rec->claim.refusal_reason = reason;
+	life_put(ZZAPP_LIFE_REFUSAL_OFF, reason);
+}
+
+static void begin_claim_cancellation(struct zzapp_window *w, zzapp_rec_t *rec,
 				     uint32_t reason)
 {
-	entry->generation++;
-	if (entry->generation == 0U)
-		entry->generation = 1U;
-	life_put(ZZAPP_LIFE_GENERATION_OFF, entry->generation);
-	entry->memory_limit = 0U;
-	entry->host_visible_limit = 0U;
-	entry->load_progress = 0U;
-	entry->state = ZZAPP_ST_STOPPING;
-	entry->terminal_reason = reason;
-	life_put(ZZAPP_LIFE_STOP_OFF, 1U);
-	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
-	life_put(ZZAPP_LIFE_TERMINAL_OFF, reason);
+	w->claim_generation++;
+	if (w->claim_generation == 0U)
+		w->claim_generation = 1U;
+	lput(w, ZZAPP_LIFE_GENERATION_OFF, w->claim_generation);
+	rec->claim.memory_limit = 0U;
+	rec->claim.host_visible_limit = 0U;
+	w->load_progress = 0U;
+	rec->claim.state = ZZAPP_ST_STOPPING;
+	rec->claim.terminal_reason = reason;
+	lput(w, ZZAPP_LIFE_STOP_OFF, 1U);
+	lput(w, ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
+	lput(w, ZZAPP_LIFE_TERMINAL_OFF, reason);
 }
 
-static void publish_claim_idle(struct zzapp_service_slot *entry)
+/*
+ * Retire steps 6 and 7 for a record whose resources are already returned:
+ * keep the last-end summary in the window, publish IDLE, detach the window,
+ * then free the record (handle generation bumped). Caller holds
+ * g_slot_state_lock. Detach comes before free, so a core 0 lookup by window
+ * never reaches a freed record.
+ */
+static void release_shell_locked(struct zzapp_window *w, zzapp_rec_t *rec)
 {
-	if (entry->quarantined) {
-		entry->state = ZZAPP_ST_STOPPING;
-		life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
-		return;
+	struct zzapp_service_runtime *state = runtime_of(rec);
+	uint32_t handle = rec->hdr.handle;
+
+	w->last_terminal = rec->claim.terminal_reason;
+	memcpy(w->last_name, state->name, sizeof(w->last_name));
+	w->file_seq = state->file_seq;
+	w->audio_stream_epoch = state->audio_stream_epoch;
+	w->quarantined = 0;
+	w->quarantine_reclaimed = 0;
+	w->quarantine_release_requested = 0;
+	w->claim_started = 0U;
+	w->load_progress = 0U;
+	lput(w, ZZAPP_LIFE_STOP_OFF, 0U);
+	lput(w, ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
+	w->handle = 0U;
+	(void)zzapp_rec_free(handle);
+}
+
+/*
+ * Retire stages 6 and 7, called last by the host's retire. 1: the record was
+ * freed. 0: the shell is held and services frees it later: a quarantined
+ * window keeps it until the launcher releases the claim, and a pending audio
+ * handoff until core 0 has detached the stream. Replays are safe: a record
+ * that is already free reports 1.
+ */
+int zzapp_services_retire_wire(struct zzapp_rec *rec)
+{
+	struct zzapp_window *w;
+	uint32_t handle;
+	int freed = 0;
+
+	if (!rec)
+		return 1;
+	slot_state_lock_acquire();
+	handle = rec->hdr.handle;
+	if (handle == 0U) {
+		slot_state_lock_release();
+		return 1;
 	}
-	entry->state = ZZAPP_ST_IDLE;
-	life_put(ZZAPP_LIFE_STOP_OFF, 0U);
-	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
+	if (rec->hdr.window >= ZZAPP_SLOT_COUNT ||
+	    windows[rec->hdr.window].handle != handle) {
+		/* Detached by a retire that halted before the free. */
+		(void)zzapp_rec_free(handle);
+		slot_state_lock_release();
+		return 1;
+	}
+	w = &windows[rec->hdr.window];
+	if (w->quarantined) {
+		if (!w->quarantine_reclaimed) {
+			w->quarantine_reclaimed = 1;
+			(void)zzapp_rec_set_state(rec, ZZAPP_REC_RECLAIMED);
+			rec->claim.state = ZZAPP_ST_STOPPING;
+			rec->claim.terminal_reason = ZZAPP_END_QUARANTINED;
+			lput(w, ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
+			lput(w, ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_QUARANTINED);
+		}
+		if (w->quarantine_release_requested) {
+			release_quarantine_locked(w, rec);
+			freed = 1;
+		}
+	} else if (audio_handoff_pending(runtime_of(rec))) {
+		(void)zzapp_rec_set_state(rec, ZZAPP_REC_RECLAIMED);
+		rec->claim.state = ZZAPP_ST_STOPPING;
+		lput(w, ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
+	} else {
+		release_shell_locked(w, rec);
+		freed = 1;
+	}
+	slot_state_lock_release();
+	return freed;
 }
 
-/* Caller holds g_slot_state_lock. */
-static int expire_current_deferred(void)
+/* Caller holds g_slot_state_lock. Core 1 keeps a RUNNING record and
+ * completes its cancellation (nonzero return); a queued one is dropped. */
+static int expire_deferred(struct zzapp_window *w)
 {
-	struct zzapp_deferred *defer = current_deferred();
+	struct zzapp_deferred *defer = &w->defer;
 
-	if (defer->state == DEFER_RUNNING)
-		return cancel_running_current_deferred();
+	if (defer->state == DEFER_RUNNING) {
+		defer->cancelled = 1U;
+		return 1;
+	}
 	if (defer->state == DEFER_DONE)
 		return -1;
 	if (defer->state != DEFER_IDLE) {
 		defer->state = DEFER_IDLE;
-		if (deferred_harvest_slot == service_slot())
-			deferred_harvest_slot = ZZAPP_SLOT_COUNT;
+		if (deferred_harvest_window == window_index(w))
+			deferred_harvest_window = ZZAPP_SLOT_COUNT;
 	}
 	return 0;
 }
 
-/* Caller holds g_slot_state_lock.  Core 1 keeps a RUNNING record and
+/* Caller holds g_slot_state_lock. Core 1 keeps a RUNNING record and
  * completes its cancellation (nonzero return); a queued or finished one is
  * dropped. */
-static int discard_current_deferred(void)
+static int discard_deferred(struct zzapp_window *w)
 {
-	int running = expire_current_deferred();
+	int running = expire_deferred(w);
 
 	if (running < 0) {
-		current_deferred()->state = DEFER_IDLE;
-		if (deferred_harvest_slot == service_slot())
-			deferred_harvest_slot = ZZAPP_SLOT_COUNT;
+		w->defer.state = DEFER_IDLE;
+		if (deferred_harvest_window == window_index(w))
+			deferred_harvest_window = ZZAPP_SLOT_COUNT;
 	}
 	return running > 0;
 }
 
-static void renew_launcher_lease(struct zzapp_service_slot *entry, uint64_t now)
+static void renew_launcher_lease(struct zzapp_window *w, uint64_t now)
 {
 	uint32_t heartbeat = life_get(ZZAPP_LIFE_HEARTBEAT_OFF);
 
-	if (heartbeat == entry->launcher_heartbeat)
+	if (heartbeat == w->launcher_heartbeat)
 		return;
-	entry->launcher_heartbeat = heartbeat;
-	entry->claim_started = now;
-	entry->load_progress = now;
+	w->launcher_heartbeat = heartbeat;
+	w->claim_started = now;
+	w->load_progress = now;
 }
 
 void zzapp_services_expire_claims(uint64_t now)
 {
-	uint32_t saved = selected_slot[service_context()];
-	uint32_t slot;
+	struct svc_ctx saved = ctx_save();
+	uint32_t win;
 
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		struct zzapp_service_slot *entry = &slots[slot];
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		struct zzapp_window *w = &windows[win];
+		zzapp_rec_t *rec;
+		uint32_t retire_pid = ZZAPP_PID_NONE;
 		uint64_t deadline;
+		uint32_t state;
 		int loading;
 
-		select_slot(slot);
+		select_window(win);
 		slot_state_lock_acquire();
-		if (entry->state == ZZAPP_ST_CLAIMED) {
-			renew_launcher_lease(entry, now);
-			deadline = entry->claim_started + ZZAPP_CLAIM_LEASE_US;
-			loading = current_deferred()->opcode == ZZAPP_OP_LOAD_BEGIN &&
-				  current_deferred()->state == DEFER_RUNNING;
-		} else if (entry->state == ZZAPP_ST_LOADING) {
-			renew_launcher_lease(entry, now);
-			deadline = entry->load_progress + ZZAPP_LOAD_LEASE_US;
+		rec = window_rec(w);
+		state = window_state(w);
+		if (!rec) {
+			slot_state_lock_release();
+			continue;
+		}
+		if (state == ZZAPP_ST_CLAIMED) {
+			renew_launcher_lease(w, now);
+			deadline = w->claim_started + ZZAPP_CLAIM_LEASE_US;
+			loading = w->defer.opcode == ZZAPP_OP_LOAD_BEGIN &&
+				  w->defer.state == DEFER_RUNNING;
+		} else if (state == ZZAPP_ST_LOADING) {
+			renew_launcher_lease(w, now);
+			deadline = w->load_progress + ZZAPP_LOAD_LEASE_US;
 			loading = 1;
 		} else {
 			slot_state_lock_release();
@@ -1380,29 +1513,33 @@ void zzapp_services_expire_claims(uint64_t now)
 			slot_state_lock_release();
 			continue;
 		}
-		discard_current_deferred();
+		if (discard_deferred(w))
+			loading = 1;
 		if (loading) {
-			entry->quarantined = 1;
-			entry->quarantine_reclaimed = 0;
-			entry->quarantine_release_requested = 0;
-			begin_claim_cancellation(entry, ZZAPP_END_LEASE);
-			entry->terminal_reason = ZZAPP_END_QUARANTINED;
-			life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_QUARANTINED);
+			w->quarantined = 1;
+			w->quarantine_reclaimed = 0;
+			w->quarantine_release_requested = 0;
+			begin_claim_cancellation(w, rec, ZZAPP_END_LEASE);
+			rec->claim.terminal_reason = ZZAPP_END_QUARANTINED;
+			lput(w, ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_QUARANTINED);
 		} else {
-			begin_claim_cancellation(entry, ZZAPP_END_LEASE);
-			memset(current_runtime(), 0, sizeof(*current_runtime()));
-			publish_claim_idle(entry);
+			begin_claim_cancellation(w, rec, ZZAPP_END_LEASE);
+			retire_pid = rec->hdr.pid;
 		}
 		slot_state_lock_release();
+		/* Nothing was loaded and core 1 has no stake: the claim ends
+		 * through the one retire path. */
+		if (retire_pid != ZZAPP_PID_NONE)
+			(void)zzapp_rec_retire(retire_pid);
 	}
-	select_slot(saved);
+	ctx_restore(saved);
 }
 
 static int grant_user_buffer(uint32_t address, uint32_t bytes,
 			     uint32_t *grant_base, uint32_t *grant_bytes,
 			     uint32_t *user_address)
 {
-	zzapp_proc_t *proc = zzapp_proc_slot(service_slot());
+	zzapp_proc_t *proc = service_proc();
 	uint32_t base;
 	uint32_t alias;
 	uint64_t end;
@@ -1424,7 +1561,7 @@ static int grant_user_buffer(uint32_t address, uint32_t bytes,
 static void revoke_surface_grants(void)
 {
 	struct zzapp_service_runtime *state = current_runtime();
-	zzapp_proc_t *proc = zzapp_proc_slot(service_slot());
+	zzapp_proc_t *proc = service_proc();
 	uint32_t i;
 
 	for (i = 0U; i < 3U; i++) {
@@ -1472,22 +1609,21 @@ static void release_unbound_back(uint32_t back)
 
 
 #ifdef ZZAPP_HOST_TEST
-/* Stands in for the surface allocator's fixed window range of each slot: the
- * backing array the test injected, and whether its range is still allocated.
- * A test that installs an allocator model (zzapp_test_card_alloc_at and
- * _free) gets ownership by address and serial instead of the flag. */
-static uint8_t *test_window_backing[ZZAPP_SLOT_COUNT];
-static int test_window_range_held[ZZAPP_SLOT_COUNT];
-static uint32_t test_window_serial[ZZAPP_SLOT_COUNT];
+/* Window memory of the host build: the backing array a test injected, and
+ * whether the range is still held, live in the window itself. A test that
+ * installs an allocator model (zzapp_test_card_alloc_at and _free) gets
+ * ownership by address and serial instead of the flag. */
 extern uint32_t zzapp_test_card_alloc_at(uint32_t addr, uint32_t bytes,
 					 uint32_t *serial) __attribute__((weak));
 extern void zzapp_test_card_free(uint32_t card, uint32_t serial)
 	__attribute__((weak));
+/* Optional model of the free host-heap bytes QUERY reports. */
+extern uint32_t zzapp_test_hostheap_free(void) __attribute__((weak));
 #endif
 
-/* The slot's window is a block of the surface allocator, at a fixed range.
+/* The window is a block of the surface allocator, at a fixed range.
  * Forgetting it without freeing the block leaves that range occupied, and
- * the slot's next claim asks the allocator for the same range again. */
+ * the window's next claim asks the allocator for the same range again. */
 static void release_window_range(uint32_t slot, uint8_t *base,
 				 uint32_t serial)
 {
@@ -1497,7 +1633,7 @@ static void release_window_range(uint32_t slot, uint8_t *base,
 	if (zzapp_test_card_free)
 		zzapp_test_card_free(ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot), serial);
 	else
-		test_window_range_held[slot] = 0;
+		windows[slot].test_range_held = 0;
 #else
 	(void)slot;
 	(void)serial;
@@ -1505,67 +1641,48 @@ static void release_window_range(uint32_t slot, uint8_t *base,
 #endif
 }
 
-static void forget_window(void)
+static void forget_window(struct zzapp_window *w)
 {
-	uint32_t slot = service_slot();
-	struct zzapp_service_runtime *state = current_runtime();
-	struct zzapp_service_runtime saved = *state;
-
-	uint8_t *base = slots[slot].window;
+	uint8_t *base = w->window;
 #ifdef ZZAPP_HOST_TEST
-	uint32_t serial = test_window_serial[slot];
+	uint32_t serial = w->test_serial;
 #else
 	uint32_t serial = 0U;
 #endif
 
-	/* The window is detached from the slot before its block is freed. A
-	 * core 1 restart can replay this teardown, and the allocator frees by
-	 * address: a pointer that outlived its free would take the block of
-	 * whoever was given the address meanwhile. A halt in between leaks the
-	 * block until the allocator is reset. */
-	slots[slot].window = NULL;
-	release_window_range(slot, base, serial);
-	slots[slot].window_bytes = 0U;
-	slots[slot].window_uncached = 0;
-	memset(state, 0, sizeof(*state));
-	if (!saved.audio_open && !saved.audio_block &&
-	    saved.audio_request != AUDIO_REQUEST_CLOSE &&
-	    saved.audio_request != AUDIO_REQUEST_CLOSE_QUIESCED)
-		return;
-	state->audio_open = saved.audio_open;
-	state->audio_slot = saved.audio_slot;
-	state->audio_read_frame = saved.audio_read_frame;
-	state->audio_write_frame = saved.audio_write_frame;
-	state->audio_samples = saved.audio_samples;
-	state->audio_staged = saved.audio_staged;
-	state->audio_ahi_staged_frame = saved.audio_ahi_staged_frame;
-	state->audio_first_write_seen = saved.audio_first_write_seen;
-	state->audio_block = saved.audio_block;
-	state->audio_grant_base = saved.audio_grant_base;
-	state->audio_grant_bytes = saved.audio_grant_bytes;
-	state->audio_alias = saved.audio_alias;
-	state->audio_request = saved.audio_request;
-	state->audio_result = saved.audio_result;
-	state->audio_teardown = saved.audio_teardown;
-	state->audio_stream_epoch = saved.audio_stream_epoch;
-	state->audio_ahi_route = saved.audio_ahi_route;
-	state->audio_host_tail_seen = saved.audio_host_tail_seen;
-#ifdef ZZAPP_HOST_TEST
-	state->audio_detach_count = saved.audio_detach_count;
-#endif
-}
-
-/* Amiga reset: a slot that is idle still holds its window. The allocator is
- * reset right after, so the block is given back and the pointer dropped now;
- * claims allocate a new window. */
-void zzapp_services_retire_idle_window(void)
-{
-	if (slots[service_slot()].state == ZZAPP_ST_IDLE && have_window())
-		forget_window();
+	/* The window is detached before its block is freed. A core 1 restart
+	 * can replay this teardown, and the allocator frees by address: a
+	 * pointer that outlived its free would take the block of whoever was
+	 * given the address meanwhile. A halt in between leaks the block until
+	 * the allocator is reset. */
+	w->window = NULL;
+	release_window_range(window_index(w), base, serial);
+	w->window_bytes = 0U;
+	w->window_uncached = 0;
 }
 
 static void audio_detach(void);
 static void audio_post_teardown(void);
+
+#ifdef ZZAPP_HOST_TEST
+/* A window a test gave an implicit record is claimable like an idle one: the
+ * claim drops the implicit record first. Not reachable on the card. */
+static void test_drop_implicit(struct zzapp_window *w)
+{
+	zzapp_rec_t *rec = w->test_implicit ? window_rec(w) : NULL;
+
+	w->test_implicit = 0;
+	if (!rec)
+		return;
+	select_window(window_index(w));
+	audio_detach();
+	zzapp_rec_retire_tables(rec);
+	slot_state_lock_acquire();
+	(void)zzapp_rec_free(w->handle);
+	w->handle = 0U;
+	slot_state_lock_release();
+}
+#endif
 
 void zzapp_services_on_launch(void)
 {
@@ -1592,13 +1709,19 @@ void zzapp_services_on_launch(void)
 #endif
 }
 
+/* Retire stage 3 for the services' share of an app: display grants and
+ * surface lease, the audio handoff, files, waits. The state moves to
+ * STOPPING; IDLE is published only by retire_wire. */
 void zzapp_services_on_app_end(void)
 {
 	struct zzapp_service_runtime *state = current_runtime();
+	zzapp_rec_t *rec = service_rec();
 
+	if (!state)
+		return;
 	audio_post_teardown();
 	revoke_surface_grants();
-	zzapp_kernel_surface_unbind(zzapp_runtime_kernel(), service_slot());
+	zzapp_kernel_surface_unbind(zzapp_runtime_kernel(), service_pid());
 	if (state->display_back_owned)
 		zzapp_loader_free_back(life_get(ZZAPP_LIFE_CARD_BACK_OFF));
 	state->display_bound = 0;
@@ -1618,55 +1741,57 @@ void zzapp_services_on_app_end(void)
 	life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0U);
 	life_put(ZZAPP_LIFE_MAILBOX_REPLACED_OFF, 0U);
 	slot_state_lock_acquire();
-	if (slots[service_slot()].quarantined || state->audio_teardown ||
-	    state->audio_request == AUDIO_REQUEST_CLOSE ||
-	    state->audio_request == AUDIO_REQUEST_CLOSE_QUIESCED) {
-		slots[service_slot()].state = ZZAPP_ST_STOPPING;
-		life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
-	} else {
-		slots[service_slot()].state = ZZAPP_ST_IDLE;
-	}
+	rec->claim.state = ZZAPP_ST_STOPPING;
+	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
 	slot_state_lock_release();
 }
 
+/*
+ * Amiga reset, once, after the host retired every record: every window is
+ * forgotten and gives its memory back, quarantines are dropped, and a record
+ * shell that was held is released. A shell whose audio detach is still owed
+ * to core 0 stays until core 0 finishes it.
+ */
 void zzapp_services_on_reset(void)
 {
-	zzapp_services_on_app_end();
+	struct svc_ctx saved = ctx_save();
+	uint32_t win;
+
 #ifndef ZZAPP_HOST_TEST
-	printf("[app] reset: window forgotten\r\n");
+	printf("[app] reset: windows forgotten\r\n");
 #endif
-	forget_window();
-	slot_state_lock_acquire();
-	slots[service_slot()].quarantined = 0;
-	slots[service_slot()].quarantine_reclaimed = 0;
-	slots[service_slot()].quarantine_release_requested = 0;
-	if (discard_current_deferred()) {
-		/* Core 1 still owns the cancelled record; completing it is the
-		 * admission point, so the slot reads STOPPING until then. */
-		slots[service_slot()].state = ZZAPP_ST_STOPPING;
-		life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_STOPPING);
-	} else {
-		publish_claim_idle(&slots[service_slot()]);
-	}
-	current_deferred()->start_pending = 0U;
-	slot_state_lock_release();
-	zzapp_services_on_launch();
-}
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		struct zzapp_window *w = &windows[win];
+		zzapp_rec_t *rec;
 
-void zzapp_services_loader_aborted(void)
-{
-	struct zzapp_service_slot *entry = &slots[service_slot()];
+		select_window(win);
+		rec = window_rec(w);
+		if (rec && zzapp_rec_state(rec->hdr.pid) != ZZAPP_REC_RECLAIMED) {
+			uint32_t pid = rec->hdr.pid;
 
-	slot_state_lock_acquire();
-	if (entry->quarantined) {
-		memset(current_runtime(), 0, sizeof(*current_runtime()));
-		entry->quarantine_reclaimed = 1;
-		set_state_locked(ZZAPP_ST_STOPPING);
-		life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_QUARANTINED);
-		if (entry->quarantine_release_requested)
-			release_quarantine_locked(entry);
+			zzapp_services_on_app_end();
+			(void)zzapp_rec_retire(pid);
+		}
+		forget_window(w);
+		slot_state_lock_acquire();
+		w->quarantined = 0;
+		w->quarantine_reclaimed = 0;
+		w->quarantine_release_requested = 0;
+		rec = window_rec(w);
+		if (discard_deferred(w)) {
+			/* Core 1 still owns the cancelled record; completing it
+			 * is the admission point, so the window reads STOPPING
+			 * until then. */
+			if (rec)
+				rec->claim.state = ZZAPP_ST_STOPPING;
+		} else if (rec && !audio_handoff_pending(runtime_of(rec))) {
+			release_shell_locked(w, rec);
+		}
+		w->defer.start_pending = 0U;
+		slot_state_lock_release();
 	}
-	slot_state_lock_release();
+	load_diag_seen = 0U;
+	ctx_restore(saved);
 }
 
 static int fd_index(int fd)
@@ -1719,6 +1844,7 @@ static uint16_t zz_to_sdk(int zz)
 	case AAR_E_NOGROUP:
 		return SDK_STATUS_UNSUPPORTED;
 	case AAR_E_NOMEM:
+	case AAR_E_NORESOURCE:
 		return SDK_STATUS_NO_MEMORY;
 	case AAR_E_BUSY:
 		return SDK_STATUS_BUSY;
@@ -2212,7 +2338,7 @@ int zzapp_svc_should_stop(void)
  * queues one AAR_EV_STOP whether or not the launcher also posts one. */
 int zzapp_svc_event_poll(aar_event *out, uint32_t max, uint32_t *out_n)
 {
-	uint32_t slot = service_slot();
+	uint32_t slot = service_pid();
 	uint32_t head;
 	uint32_t tail;
 	uint32_t n = 0U;
@@ -2613,13 +2739,17 @@ int zzapp_display_flip_idle(void)
 int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 					 uint32_t *scanout)
 {
-	uint32_t slot;
+	uint32_t win;
 
 	if (!scanout)
 		return 0;
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		struct zzapp_service_runtime *state = &runtime[slot];
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		zzapp_rec_t *rec = window_rec(&windows[win]);
+		struct zzapp_service_runtime *state;
 
+		if (!rec)
+			continue;
+		state = runtime_of(rec);
 		if (!__atomic_load_n(&state->display_mailbox_active,
 				     __ATOMIC_ACQUIRE) ||
 		    !display_mailbox_owns_state(state, normal_scanout))
@@ -2634,7 +2764,8 @@ int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 			state->display_mailbox_pending : state->display_mailbox_shown;
 		state->display_mailbox_latch_pending =
 			state->display_mailbox_pending != 0U;
-		display_mailbox_slot = (int)slot;
+		display_mailbox_slot = (int)win;
+		display_mailbox_state = state;
 		return 1;
 	}
 	return 0;
@@ -2642,14 +2773,13 @@ int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 
 void zzapp_services_display_mailbox_end(int latched)
 {
-	uint32_t slot;
-	struct zzapp_service_runtime *state;
+	struct zzapp_service_runtime *state = display_mailbox_state;
+	struct zzapp_window *w;
 
-	if (display_mailbox_slot < 0 ||
+	if (display_mailbox_slot < 0 || !state ||
 	    display_mailbox_slot >= (int)ZZAPP_SLOT_COUNT)
 		return;
-	slot = (uint32_t)display_mailbox_slot;
-	state = &runtime[slot];
+	w = &windows[display_mailbox_slot];
 	if (latched && state->display_mailbox_latch_pending) {
 		uint32_t old_shown = state->display_mailbox_shown;
 
@@ -2657,13 +2787,12 @@ void zzapp_services_display_mailbox_end(int latched)
 		state->display_mailbox_pending = 0U;
 		state->display_front = state->display_mailbox_shown;
 		state->display_spare = old_shown;
-		life_put_slot(slot, ZZAPP_LIFE_CARD_FRONT_OFF,
-			      state->display_front);
-		life_put_slot(slot, ZZAPP_LIFE_CARD_SPARE_OFF,
-			      state->display_spare);
+		lput(w, ZZAPP_LIFE_CARD_FRONT_OFF, state->display_front);
+		lput(w, ZZAPP_LIFE_CARD_SPARE_OFF, state->display_spare);
 	}
 	state->display_mailbox_latch_pending = 0;
 	display_mailbox_slot = -1;
+	display_mailbox_state = NULL;
 	display_mailbox_lock_release_for(state);
 }
 
@@ -2676,14 +2805,16 @@ uint32_t zzapp_svc_display_latest_dropped(void)
 
 void zzapp_services_display_vblank(uint32_t scanout_address)
 {
-	uint32_t slot;
-	uint32_t selected = selected_slot[service_context()];
+	uint32_t win;
+	struct svc_ctx saved = ctx_save();
 
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
 		uint32_t flags;
 		uint32_t gen;
 
-		select_slot(slot);
+		if (!window_rec(&windows[win]))
+			continue;
+		select_window(win);
 		if (!current_runtime()->display_bound || display_mailbox_enabled())
 			continue;
 		flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
@@ -2697,7 +2828,7 @@ void zzapp_services_display_vblank(uint32_t scanout_address)
 			continue;
 		life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
 	}
-	select_slot(selected);
+	ctx_restore(saved);
 }
 
 int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
@@ -3112,7 +3243,7 @@ int zzapp_svc_display_close(uint32_t surface_id)
 	if (!current_runtime()->display_bound || surface_id != current_runtime()->display_id)
 		return AAR_E_INVAL;
 	revoke_surface_grants();
-	zzapp_kernel_surface_unbind(zzapp_runtime_kernel(), service_slot());
+	zzapp_kernel_surface_unbind(zzapp_runtime_kernel(), service_pid());
 	drop_owned_back();
 	current_runtime()->display_bound = 0;
 	display_mailbox_disable();
@@ -3158,13 +3289,23 @@ static uint64_t audio_produced_frames(uint32_t write_frame, uint64_t staged_byte
 }
 
 #ifndef ZZAPP_HOST_TEST
+static uint32_t runtime_pid(const struct zzapp_service_runtime *state)
+{
+	return ((const zzapp_rec_t *)(const void *)((const char *)state -
+		offsetof(zzapp_rec_t, services)))->hdr.pid;
+}
+
 static struct zzapp_service_runtime *audio_runtime(uint32_t producer_slot)
 {
-	uint32_t slot;
+	uint32_t win;
 
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		struct zzapp_service_runtime *state = &runtime[slot];
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		zzapp_rec_t *rec = window_rec(&windows[win]);
+		struct zzapp_service_runtime *state;
 
+		if (!rec)
+			continue;
+		state = runtime_of(rec);
 		if (state->audio_open && !state->audio_ahi_route &&
 		    state->audio_slot == producer_slot)
 			return state;
@@ -3195,7 +3336,7 @@ static int app_audio_snapshot_for(uint32_t producer_slot,
 	if (source->produced_bytes - source->staged_bytes <= source->capacity / 4U) {
 		if (!state->audio_low_water_latched) {
 			zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
-						(uint32_t)(state - runtime), 1U, 0U,
+						runtime_pid(state), 1U, 0U,
 						0U);
 			state->audio_low_water_latched = 1U;
 		}
@@ -3268,7 +3409,7 @@ void audio_fabric_starvation_event(uint32_t producer_slot)
 
 	if (state)
 		zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
-					(uint32_t)(state - runtime), 0U, 1U, 0U);
+					runtime_pid(state), 0U, 1U, 0U);
 }
 #endif
 
@@ -3279,7 +3420,7 @@ static void app_audio_underrun_for(uint32_t producer_slot)
 
 	if (state)
 		zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
-					(uint32_t)(state - runtime), 0U, 0U, 1U);
+					runtime_pid(state), 0U, 0U, 1U);
 #else
 	(void)producer_slot;
 #endif
@@ -3367,7 +3508,7 @@ static void audio_pump_ahi_window(void)
 #if ZZAPP_PERF_COUNTERS
 	if (available <= ZZAPP_AUDIO_CAP / 4U) {
 		if (!current_runtime()->audio_low_water_latched) {
-			zzapp_kernel_perf_audio(zzapp_runtime_kernel(), service_slot(),
+			zzapp_kernel_perf_audio(zzapp_runtime_kernel(), service_pid(),
 						1U, 0U, 0U);
 			current_runtime()->audio_low_water_latched = 1U;
 		}
@@ -3404,7 +3545,7 @@ static void audio_pump_ahi_window(void)
 static void revoke_audio_grant(void)
 {
 	struct zzapp_service_runtime *state = current_runtime();
-	zzapp_proc_t *proc = zzapp_proc_slot(service_slot());
+	zzapp_proc_t *proc = service_proc();
 
 	if (proc && state->audio_grant_bytes != 0U)
 		(void)zzapp_as_alias_unmap(&proc->as, state->audio_grant_base,
@@ -3447,7 +3588,7 @@ static void audio_detach(void)
 	}
 #endif
 #ifdef ZZAPP_HOST_TEST
-	free(current_runtime()->audio_block);
+	audio_host_ring_free(current_runtime()->audio_block);
 #endif
 	current_runtime()->audio_block = NULL;
 	current_runtime()->audio_samples = NULL;
@@ -3461,8 +3602,8 @@ static void audio_detach(void)
 #if ZZAPP_PERF_COUNTERS
 	current_runtime()->audio_low_water_latched = 0U;
 #endif
-	zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_slot());
-	zzapp_proc_slot(service_slot())->audio_direct = 0U;
+	zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_pid());
+	service_proc()->audio_direct = 0U;
 	if (have_window()) {
 		memset(current_window() + ZZAPP_AUDIO_OFF, 0, ZZAPP_AUDIO_HDR);
 		win_flush(ZZAPP_AUDIO_OFF, ZZAPP_AUDIO_HDR);
@@ -3491,7 +3632,7 @@ static int audio_attach(void)
 			return AAR_E_BUSY;
 	}
 #ifdef ZZAPP_HOST_TEST
-	current_runtime()->audio_block = aligned_alloc(4096U, alloc_bytes);
+	current_runtime()->audio_block = audio_host_ring_alloc();
 	if (!current_runtime()->audio_block)
 		return AAR_E_NOMEM;
 	memset(current_runtime()->audio_block, 0, alloc_bytes);
@@ -3510,7 +3651,7 @@ static int audio_attach(void)
 			      &current_runtime()->audio_grant_bytes,
 			      &current_runtime()->audio_alias) != AAR_OK) {
 #ifdef ZZAPP_HOST_TEST
-		free(current_runtime()->audio_block);
+		audio_host_ring_free(current_runtime()->audio_block);
 #else
 		surface_allocator_free((uint32_t)(uintptr_t)current_runtime()->audio_block);
 #endif
@@ -3602,7 +3743,7 @@ int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, aar_audio *out)
 		return AAR_E_BUSY;
 	direct_card_route = (life_get(ZZAPP_LIFE_FLAGS_OFF) &
 			     ZZAPP_F_LAUNCHER_AUDIO_AHI) == 0U;
-	if (zzapp_kernel_audio_open(zzapp_runtime_kernel(), service_slot(),
+	if (zzapp_kernel_audio_open(zzapp_runtime_kernel(), service_pid(),
 				    direct_card_route) != 0)
 		return AAR_E_BUSY;
 #ifdef ZZAPP_HOST_TEST
@@ -3623,10 +3764,10 @@ int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, aar_audio *out)
 	rc = current_runtime()->audio_result;
 #endif
 	if (rc != AAR_OK) {
-		zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_slot());
+		zzapp_kernel_audio_close(zzapp_runtime_kernel(), service_pid());
 		return rc;
 	}
-	zzapp_proc_slot(service_slot())->audio_direct = direct_card_route ? 1U : 0U;
+	service_proc()->audio_direct = direct_card_route ? 1U : 0U;
 	audio_fill(out);
 	return AAR_OK;
 }
@@ -3683,13 +3824,19 @@ static int audio_handoff_pending(const struct zzapp_service_runtime *state)
 	       state->audio_request == AUDIO_REQUEST_CLOSE_QUIESCED;
 }
 
+/* A shell held for an audio handoff is released once core 0 has finished the
+ * detach: its resources were returned by retire. */
 static void finish_audio_slot_release(void)
 {
+	struct zzapp_window *w = service_win();
+	zzapp_rec_t *rec;
+
 	slot_state_lock_acquire();
-	if (slots[service_slot()].state == ZZAPP_ST_STOPPING &&
-	    defer_load() == DEFER_IDLE &&
-	    !audio_handoff_pending(current_runtime()))
-		publish_claim_idle(&slots[service_slot()]);
+	rec = window_rec(w);
+	if (rec && zzapp_rec_state(rec->hdr.pid) == ZZAPP_REC_RECLAIMED &&
+	    !w->quarantined && w->defer.state == DEFER_IDLE &&
+	    !audio_handoff_pending(runtime_of(rec)))
+		release_shell_locked(w, rec);
 	slot_state_lock_release();
 }
 
@@ -3719,14 +3866,16 @@ static void reclaim_halted_audio_slot(void)
 
 void zzapp_services_reclaim_halted_audio(void)
 {
-	uint32_t slot;
-	uint32_t selected = selected_slot[service_context()];
+	struct svc_ctx saved = ctx_save();
+	uint32_t win;
 
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		select_slot(slot);
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		if (!window_rec(&windows[win]))
+			continue;
+		select_window(win);
 		reclaim_halted_audio_slot();
 	}
-	select_slot(selected);
+	ctx_restore(saved);
 }
 
 /* The Amiga rings no doorbell, so a parked EVENT waiter is a level test of
@@ -3742,26 +3891,32 @@ static int event_wait_ready(void)
 
 static void wake_ready_waits(void)
 {
-	uint32_t slot;
-	uint32_t selected = selected_slot[service_context()];
+	uint32_t win;
+	struct svc_ctx saved = ctx_save();
 
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		struct zzapp_service_runtime *state = runtime_for_slot(slot);
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		zzapp_rec_t *rec = window_rec(&windows[win]);
+		struct zzapp_service_runtime *state;
+		uint32_t pid;
 		int ready = 0;
 
-		select_slot(slot);
+		if (!rec)
+			continue;
+		state = runtime_of(rec);
+		pid = rec->hdr.pid;
+		select_window(win);
 		if (state->wait_kind == ZZAPP_WAIT_NONE)
 			continue;
 		/* An arrived message or a stop beats the deadline: the waiter
 		 * reports a message that landed while it was timing out. */
 		if (state->wait_kind == ZZAPP_WAIT_EVENT &&
 		    event_wait_ready()) {
-			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), slot,
+			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), pid,
 						 ZZAPP_WAKE_READY);
 			continue;
 		}
 		if (state->wait_deadline != 0U && now_us() >= state->wait_deadline) {
-			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), slot,
+			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), pid,
 						 ZZAPP_WAKE_TIMEOUT);
 			continue;
 		}
@@ -3796,10 +3951,10 @@ static void wake_ready_waits(void)
 			break;
 		}
 		if (ready)
-			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), slot,
+			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), pid,
 						 ZZAPP_WAKE_READY);
 	}
-	select_slot(selected);
+	ctx_restore(saved);
 }
 
 static void audio_core0_poll_slot(void)
@@ -3847,39 +4002,45 @@ static void audio_core0_poll_slot(void)
 
 void zzapp_services_core0_poll(void)
 {
-	uint32_t slot;
-	uint32_t selected = selected_slot[service_context()];
+	struct svc_ctx saved = ctx_save();
+	uint32_t win;
 
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		select_slot(slot);
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		if (!window_rec(&windows[win]))
+			continue;
+		select_window(win);
 		audio_core0_poll_slot();
 	}
-	select_slot(selected);
+	ctx_restore(saved);
 }
 
-static void init_window(uint8_t *base, uint32_t bytes, int uncached)
+static void init_window(struct zzapp_window *w, uint8_t *base, uint32_t bytes,
+			int uncached)
 {
-	uint32_t slot = service_slot();
-
-	slots[slot].window = base;
-	slots[slot].window_bytes = bytes;
-	slots[slot].window_uncached = uncached;
-	current_runtime()->file_seq = 0U;
-	memset(current_window(), 0, ZZAPP_WINDOW_BYTES);
-	win_flush(0U, ZZAPP_WINDOW_BYTES);
-	life_put(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
-	life_put(ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
-	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
+	w->window = base;
+	w->window_bytes = bytes;
+	w->window_uncached = uncached;
+	w->file_seq = 0U;
+	w->audio_stream_epoch = 0U;
+	memset(base, 0, ZZAPP_WINDOW_BYTES);
+	wflush(w, 0U, ZZAPP_WINDOW_BYTES);
+	lput(w, ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
+	lput(w, ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
+	lput(w, ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
 }
 
-static int alloc_window(uint32_t slot, uint32_t *arm_addr, uint32_t *host_off)
+/* Claim step 5, window memory. A window that already holds its range from
+ * an earlier claim keeps it. */
+static int alloc_window(struct zzapp_window *w, uint32_t *arm_addr,
+			uint32_t *host_off)
 {
-	select_slot(slot);
 #ifdef ZZAPP_HOST_TEST
-	if (!have_window()) {
+	uint32_t slot = window_index(w);
+
+	if (!whave(w)) {
 		uint32_t serial = 0U;
 
-		if (!test_window_backing[slot])
+		if (!w->test_backing)
 			return AAR_E_NOMEM;
 		if (zzapp_test_card_alloc_at) {
 			if (!zzapp_test_card_alloc_at(
@@ -3887,34 +4048,32 @@ static int alloc_window(uint32_t slot, uint32_t *arm_addr, uint32_t *host_off)
 				    ZZAPP_WINDOW_BYTES, &serial))
 				return AAR_E_NOMEM;
 		} else {
-			if (test_window_range_held[slot])
+			if (w->test_range_held)
 				return AAR_E_NOMEM;
-			test_window_range_held[slot] = 1;
+			w->test_range_held = 1;
 		}
-		test_window_serial[slot] = serial;
-		init_window(test_window_backing[slot], ZZAPP_WINDOW_BYTES, 1);
+		w->test_serial = serial;
+		init_window(w, w->test_backing, ZZAPP_WINDOW_BYTES, 1);
 	}
-	*arm_addr = (uint32_t)(uintptr_t)current_window();
+	*arm_addr = (uint32_t)(uintptr_t)w->window;
 	*host_off = *arm_addr;
 	return AAR_OK;
 #else
 	uint32_t addr;
 
-	if (have_window()) {
-		*arm_addr = (uint32_t)(uintptr_t)current_window();
+	if (whave(w)) {
+		*arm_addr = (uint32_t)(uintptr_t)w->window;
 		*host_off = *arm_addr - ADDR_ADJ;
 		return AAR_OK;
 	}
-	if (!window_mapping_available)
-		return AAR_E_NOMEM;
-	/* Each slot owns a fixed range that main.c mapped non-cacheable; the
+	/* Each window owns a fixed range that main.c mapped non-cacheable; the
 	 * allocator keeps other host-visible users out of it. */
-	addr = ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot);
+	addr = ZZAPP_WINDOW_Z3_SLOT_ADDRESS(window_index(w));
 	addr = surface_allocator_alloc_range(ZZAPP_WINDOW_BYTES, 4096U, addr,
 					     addr + ZZAPP_WINDOW_Z3_SIZE);
 	if (addr == 0U)
 		return AAR_E_NOMEM;
-	init_window((uint8_t *)(uintptr_t)addr, ZZAPP_WINDOW_BYTES, 1);
+	init_window(w, (uint8_t *)(uintptr_t)addr, ZZAPP_WINDOW_BYTES, 1);
 	*arm_addr = addr;
 	*host_off = addr - ADDR_ADJ;
 	return AAR_OK;
@@ -4000,7 +4159,7 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 		lease_bytes = ((uint32_t)lease_end - lease_base +
 			       ZZAPP_KERNEL_PAGE_BYTES - 1U) &
 			~(ZZAPP_KERNEL_PAGE_BYTES - 1U);
-		if (zzapp_kernel_surface_bind(zzapp_runtime_kernel(), service_slot(),
+		if (zzapp_kernel_surface_bind(zzapp_runtime_kernel(), service_pid(),
 					      zzapp_services_generation(), lease_base,
 					      lease_bytes) != 0) {
 			revoke_surface_grants();
@@ -4067,13 +4226,16 @@ static int bind_surface(const uint8_t *req, uint16_t req_len)
 
 static void capture_start_name(uint32_t argc)
 {
-	uint8_t *name = slots[service_slot()].name;
+	zzapp_rec_t *rec = service_rec();
+	uint8_t *name = rec ? runtime_of(rec)->name : NULL;
 	uint32_t off;
 	uint32_t end;
 	uint32_t start;
 	uint32_t i;
 	uint32_t length;
 
+	if (!name)
+		return;
 	memset(name, 0, ZZAPP_LIST_NAME_BYTES);
 	if (argc == 0U || !have_window())
 		return;
@@ -4097,16 +4259,18 @@ static void capture_start_name(uint32_t argc)
 
 static void audio_core1_poll_all(void)
 {
-	uint32_t slot;
-	uint32_t selected = selected_slot[service_context()];
+	uint32_t win;
+	struct svc_ctx saved = ctx_save();
 
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
 	zzapp_kernel_perf_service_begin(zzapp_runtime_kernel(),
 					ZZAPP_PERF_SERVICE_AUDIO,
 					scheduler_perf_stamp());
 #endif
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		select_slot(slot);
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		if (!window_rec(&windows[win]))
+			continue;
+		select_window(win);
 		if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE) {
 			barrier();
 			current_runtime()->audio_request =
@@ -4131,38 +4295,47 @@ static void audio_core1_poll_all(void)
 				      ZZAPP_PERF_SERVICE_AUDIO,
 				      scheduler_perf_stamp());
 #endif
-	select_slot(selected);
+	ctx_restore(saved);
 }
 
+static struct zzapp_window *window_of_defer(struct zzapp_deferred *defer)
+{
+	return (struct zzapp_window *)(void *)((char *)defer -
+		offsetof(struct zzapp_window, defer));
+}
+
+/*
+ * Core 1 finishes a cancelled op. LOAD_BEGIN can be cancelled after core 1
+ * takes its deferred record but before the loader owns an arena; its abort
+ * then returns EBUSY. Either way the loader drops what it holds and the
+ * claim ends through the retire path, which returns the record and tables
+ * (or holds the shell for a quarantine or a pending audio handoff). The
+ * record is never touched after retire returns: its index may already be
+ * another claim's.
+ */
 static void complete_cancelled_deferred(struct zzapp_deferred *defer)
 {
+	struct zzapp_window *w = window_of_defer(defer);
+	zzapp_rec_t *rec;
+	uint32_t pid = ZZAPP_PID_NONE;
 	int release;
 
 	slot_state_lock_acquire();
 	release = defer->cancelled && defer->state == DEFER_RUNNING;
+	rec = window_rec(w);
+	if (release && rec)
+		pid = rec->hdr.pid;
 	slot_state_lock_release();
 	if (!release)
 		return;
-	/*
-	 * LOAD_BEGIN can be cancelled after core 1 takes its deferred record but
-	 * before the loader owns an arena; its abort then returns EBUSY. Either
-	 * way this worker has finished the only teardown the slot needs, so mark
-	 * it reclaimed. The release acknowledgement happens once, as the last
-	 * state write of run_app/start_failed, never here: acknowledging inline
-	 * could publish IDLE and open admission mid-teardown.
-	 */
-	slot_state_lock_acquire();
-	if (slots[service_slot()].quarantined) {
-		memset(current_runtime(), 0, sizeof(*current_runtime()));
-		slots[service_slot()].quarantine_reclaimed = 1;
+	if (pid != ZZAPP_PID_NONE) {
+		select_window(window_index(w));
+		(void)zzapp_loader_abort();
+		(void)zzapp_rec_retire(pid);
 	}
-	slot_state_lock_release();
-	(void)zzapp_loader_abort();
 	slot_state_lock_acquire();
 	if (defer->cancelled && defer->state == DEFER_RUNNING) {
 		defer->start_pending = 0U;
-		memset(current_runtime(), 0, sizeof(*current_runtime()));
-		publish_claim_idle(&slots[service_slot()]);
 		defer->state = DEFER_IDLE;
 	}
 	slot_state_lock_release();
@@ -4184,13 +4357,15 @@ static void discard_deferred_run(struct zzapp_deferred *defer)
 static int finish_deferred(struct zzapp_deferred *defer, int rc,
 			   uint32_t publish_state)
 {
+	struct zzapp_window *w = window_of_defer(defer);
+
 #ifdef ZZAPP_SERVICES_STANDALONE_TEST
 	if (service_test_deferred_completing_hook)
 		service_test_deferred_completing_hook();
 #endif
 	slot_state_lock_acquire();
 	if (defer->cancelled ||
-	    defer->generation != slots[service_slot()].generation ||
+	    defer->generation != w->claim_generation ||
 	    defer->state != DEFER_RUNNING) {
 		slot_state_lock_release();
 		complete_cancelled_deferred(defer);
@@ -4199,7 +4374,7 @@ static int finish_deferred(struct zzapp_deferred *defer, int rc,
 	defer->status = zz_to_sdk(rc);
 	defer->reply_len = 0U;
 	if (publish_state == ZZAPP_ST_LOADING)
-		slots[service_slot()].load_progress = now_us();
+		w->load_progress = now_us();
 	if (publish_state != UINT32_MAX)
 		set_state_locked(publish_state);
 #ifdef ZZAPP_SERVICES_STANDALONE_TEST
@@ -4208,7 +4383,7 @@ static int finish_deferred(struct zzapp_deferred *defer, int rc,
 		service_test_deferred_reply_hook();
 		slot_state_lock_acquire();
 		if (defer->cancelled ||
-		    defer->generation != slots[service_slot()].generation ||
+		    defer->generation != w->claim_generation ||
 		    defer->state != DEFER_RUNNING) {
 			slot_state_lock_release();
 			complete_cancelled_deferred(defer);
@@ -4223,21 +4398,29 @@ static int finish_deferred(struct zzapp_deferred *defer, int rc,
 
 static void run_deferred(void)
 {
-	struct zzapp_deferred *defer = current_deferred();
+	struct zzapp_window *w = service_win();
+	struct zzapp_deferred *defer = &w->defer;
+	zzapp_rec_t *rec = service_rec();
 	int rc = AAR_E_INVAL;
 	const char *reject_reason = NULL;
 	const uint8_t *req = defer->req;
 	uint16_t len = defer->req_len;
 	uint32_t publish_state = UINT32_MAX;
+	int end_claim = 0;
 
 	if (defer_load() != DEFER_RUNNING) {
 		complete_cancelled_deferred(defer);
 		return;
 	}
 	defer->reply_len = 0U;
-	if (defer_cancelled(defer) ||
-	    defer->generation != slots[service_slot()].generation) {
+	if (defer_cancelled(defer) || defer->generation != w->claim_generation) {
 		discard_deferred_run(defer);
+		return;
+	}
+	if (!rec) {
+		/* The record was retired between the post and the run (a STOP
+		 * before launch aborts it): the launcher still gets an answer. */
+		(void)finish_deferred(defer, AAR_E_IO, UINT32_MAX);
 		return;
 	}
 	switch (defer->opcode) {
@@ -4247,13 +4430,12 @@ static void run_deferred(void)
 			rc = AAR_E_BUSY;
 			break;
 		}
-		if (slots[service_slot()].legacy_claim ||
-		    slots[service_slot()].generation == 0U) {
-			uint32_t generation = slots[service_slot()].generation + 1U;
+		if (w->legacy_claim || w->claim_generation == 0U) {
+			uint32_t generation = w->claim_generation + 1U;
 
 			if (generation == 0U)
 				generation = 1U;
-			slots[service_slot()].generation = generation;
+			w->claim_generation = generation;
 			defer->generation = generation;
 			life_put(ZZAPP_LIFE_GENERATION_OFF, generation);
 		}
@@ -4261,7 +4443,7 @@ static void run_deferred(void)
 			discard_deferred_run(defer);
 			return;
 		}
-		rc = zzapp_loader_set_generation(slots[service_slot()].generation);
+		rc = zzapp_loader_set_generation(w->claim_generation);
 		if (rc != AAR_OK) {
 			if (rc == AAR_E_INVAL)
 				reject_reason = "loader arena remains bound";
@@ -4271,9 +4453,13 @@ static void run_deferred(void)
 		if (rc == AAR_OK)
 			publish_state = ZZAPP_ST_LOADING;
 		if (rc == AAR_OK) {
-			slots[service_slot()].load_step = 0U;
+			rec->claim.load_step = 0U;
 			life_put(ZZAPP_LIFE_PROGRESS_LO_OFF, 0U);
 			life_put(ZZAPP_LIFE_PROGRESS_HI_OFF, 0U);
+		} else if (rc == AAR_E_NOMEM || rc == AAR_E_NORESOURCE) {
+			/* The staging block could not be had: the claim
+			 * ends and its record and tables go back. */
+			end_claim = 1;
 		}
 		break;
 	case ZZAPP_OP_LOAD_CHUNK: {
@@ -4309,9 +4495,9 @@ static void run_deferred(void)
 		if (rc == AAR_OK) {
 			slot_state_lock_acquire();
 			if (!defer_cancelled(defer) &&
-			    defer->generation == slots[service_slot()].generation &&
-			    slots[service_slot()].state == ZZAPP_ST_LOADING)
-				slots[service_slot()].load_progress = now_us();
+			    defer->generation == w->claim_generation &&
+			    window_state(w) == ZZAPP_ST_LOADING)
+				w->load_progress = now_us();
 			slot_state_lock_release();
 		}
 		if (rc == AAR_E_INVAL)
@@ -4329,8 +4515,8 @@ static void run_deferred(void)
 			uint32_t step;
 
 			slot_state_lock_acquire();
-			slots[service_slot()].load_progress = now_us();
-			step = ++slots[service_slot()].load_step;
+			w->load_progress = now_us();
+			step = ++rec->claim.load_step;
 			slot_state_lock_release();
 			life_put(ZZAPP_LIFE_PROGRESS_LO_OFF, step);
 			life_put(ZZAPP_LIFE_PROGRESS_HI_OFF, 0U);
@@ -4340,8 +4526,10 @@ static void run_deferred(void)
 			reject_reason = "note profile is not A32";
 		else if (rc == AAR_E_NOGROUP)
 			reject_reason = "note requires a group this runtime lacks";
+		/* A failed LOAD_END ends the claim: the loader dropped its
+		 * frames and staging, and the record goes through retire. */
 		if (rc != AAR_OK)
-			publish_state = ZZAPP_ST_IDLE;
+			end_claim = 1;
 		break;
 	case ZZAPP_OP_START:
 		if (zzapp_services_state() != ZZAPP_ST_LOADING &&
@@ -4379,6 +4567,13 @@ static void run_deferred(void)
 	if (service_test_deferred_completion_hook)
 		service_test_deferred_completion_hook();
 #endif
+	if (end_claim) {
+		/* The reason is in the lifecycle block before the op completes. */
+		if (rec->claim.refusal_reason == AAR_REASON_NONE &&
+		    (rc == AAR_E_NOMEM || rc == AAR_E_NORESOURCE))
+			zzapp_services_note_refusal(AAR_REASON_MEMORY);
+		(void)zzapp_rec_retire(rec->hdr.pid);
+	}
 	if (finish_deferred(defer, rc, publish_state) && rc == AAR_OK &&
 	    defer->opcode == ZZAPP_OP_LOAD_BEGIN)
 		report_load_snapshot("load begin", defer->opcode, NULL);
@@ -4387,7 +4582,7 @@ static void run_deferred(void)
 void zzapp_services_poll(void)
 {
 	uint32_t checked;
-	uint32_t selected = selected_slot[service_context()];
+	struct svc_ctx saved = ctx_save();
 
 	if (!defer_on_core1()) {
 #ifndef ZZAPP_HOST_TEST
@@ -4400,24 +4595,25 @@ void zzapp_services_poll(void)
 	}
 	if (zzapp_kernel_current_thread() < 0) {
 		for (checked = 0U; checked < ZZAPP_SLOT_COUNT; checked++) {
-			uint32_t slot =
-				(deferred_poll_next_slot + checked) % ZZAPP_SLOT_COUNT;
+			uint32_t win =
+				(deferred_poll_next_window + checked) % ZZAPP_SLOT_COUNT;
+			struct zzapp_deferred *defer = &windows[win].defer;
 
-			select_slot(slot);
+			select_window(win);
 			slot_state_lock_acquire();
-			if (current_deferred()->state == DEFER_POSTED ||
-			    (current_deferred()->state == DEFER_RUNNING &&
-			     current_deferred()->opcode == ZZAPP_OP_LOAD_END)) {
-				current_deferred()->state = DEFER_RUNNING;
-				deferred_poll_next_slot =
-					(slot + 1U) % ZZAPP_SLOT_COUNT;
+			if (defer->state == DEFER_POSTED ||
+			    (defer->state == DEFER_RUNNING &&
+			     defer->opcode == ZZAPP_OP_LOAD_END)) {
+				defer->state = DEFER_RUNNING;
+				deferred_poll_next_window =
+					(win + 1U) % ZZAPP_SLOT_COUNT;
 				slot_state_lock_release();
 				run_deferred();
 				break;
 			}
 			slot_state_lock_release();
 		}
-		select_slot(selected);
+		ctx_restore(saved);
 	}
 	wake_ready_waits();
 	audio_core1_poll_all();
@@ -4437,11 +4633,12 @@ int zzapp_services_take_start(uint32_t *argc)
 
 int zzapp_services_start_entered(uint32_t generation)
 {
-	struct zzapp_deferred *defer = current_deferred();
+	struct zzapp_window *w = service_win();
+	struct zzapp_deferred *defer = &w->defer;
 
 	slot_state_lock_acquire();
 	if (defer->cancelled || defer->generation != generation ||
-	    slots[service_slot()].generation != generation ||
+	    w->claim_generation != generation ||
 	    defer->state != DEFER_RUNNING || defer->opcode != ZZAPP_OP_START) {
 		slot_state_lock_release();
 		complete_cancelled_deferred(defer);
@@ -4457,7 +4654,9 @@ int zzapp_services_start_entered(uint32_t generation)
 
 void zzapp_services_cancel_start(int status)
 {
-	struct zzapp_deferred *defer = current_deferred();
+	struct zzapp_window *w = service_win();
+	struct zzapp_deferred *defer = &w->defer;
+	zzapp_rec_t *rec = service_rec();
 
 	slot_state_lock_acquire();
 	defer->start_pending = 0U;
@@ -4465,10 +4664,10 @@ void zzapp_services_cancel_start(int status)
 		defer->status = zz_to_sdk(status);
 		defer->reply_len = 0U;
 		__atomic_store_n(&defer->state, DEFER_DONE, __ATOMIC_RELEASE);
-		/* Admission stays closed: the host STARTING teardown reopens it
-		 * once the loader arena is gone. */
-		if (!slots[service_slot()].quarantined)
-			slots[service_slot()].state = ZZAPP_ST_STOPPING;
+		/* Admission stays closed until the host's retire releases the
+		 * record. */
+		if (rec && !w->quarantined)
+			rec->claim.state = ZZAPP_ST_STOPPING;
 	}
 	slot_state_lock_release();
 }
@@ -4476,10 +4675,13 @@ void zzapp_services_cancel_start(int status)
 static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 			  uint32_t request_id, uint32_t user_cookie)
 {
-	struct zzapp_deferred *defer = current_deferred();
+	struct zzapp_window *w = service_win();
+	struct zzapp_deferred *defer = &w->defer;
+	zzapp_rec_t *rec;
 
 	slot_state_lock_acquire();
-	if (defer->state != DEFER_IDLE) {
+	rec = window_rec(w);
+	if (!rec || defer->state != DEFER_IDLE) {
 		slot_state_lock_release();
 		return 0;
 	}
@@ -4494,19 +4696,19 @@ static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 	defer->req_len = req_len;
 	defer->request_id = request_id;
 	defer->cookie = user_cookie;
-	defer->generation = slots[service_slot()].generation;
+	defer->generation = w->claim_generation;
 	defer->reply_len = 0U;
 	/* The limits belong to the request that was admitted: a LOAD_BEGIN
 	 * refused above, or one the slot is no longer in a state to start,
 	 * leaves the first load's limits alone. */
 	if (opcode == ZZAPP_OP_LOAD_BEGIN &&
 	    req_len == ZZAPP_MAILBOX_PAYLOAD_BYTES && req &&
-	    (slots[service_slot()].state == ZZAPP_ST_IDLE ||
-	     slots[service_slot()].state == ZZAPP_ST_CLAIMED)) {
-		slots[service_slot()].memory_limit =
+	    (window_state(w) == ZZAPP_ST_IDLE ||
+	     window_state(w) == ZZAPP_ST_CLAIMED)) {
+		rec->claim.memory_limit =
 			zzapp_get_be32(req + ZZAPP_LOAD_MEM_LIMIT_MIB) *
 			1024U * 1024U;
-		slots[service_slot()].host_visible_limit =
+		rec->claim.host_visible_limit =
 			zzapp_get_be32(req + ZZAPP_LOAD_HOST_VISIBLE_MIB) *
 			1024U * 1024U;
 	}
@@ -4518,125 +4720,219 @@ static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 	return 1;
 }
 
+/* Bytes committed by every app that holds a window. */
 static uint32_t committed_bytes(void)
 {
-	uint32_t slot;
+	uint32_t win;
 	uint32_t total = 0U;
 
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		zzapp_proc_t *proc = zzapp_proc_slot(slot);
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		zzapp_rec_t *rec = window_rec(&windows[win]);
 
-		if (proc)
-			total += proc->memory.committed;
+		if (rec)
+			total += rec->proc.memory.committed;
 	}
 	return total;
+}
+
+/* Free bytes of the host-visible heap, the pool window memory comes from. */
+static uint32_t hostheap_free_bytes(void)
+{
+#ifdef ZZAPP_HOST_TEST
+	uint32_t win;
+	uint32_t total = 0U;
+
+	if (zzapp_test_hostheap_free)
+		return zzapp_test_hostheap_free();
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		if (!windows[win].test_range_held)
+			total += ZZAPP_WINDOW_BYTES;
+	}
+	return total;
+#else
+	uint32_t free_total = 0U;
+	uint32_t largest = 0U;
+
+	surface_allocator_free_stats(&free_total, &largest);
+	return free_total;
+#endif
 }
 
 static void put_query(uint8_t *reply, uint16_t *reply_len, uint32_t caps,
 		      int extended)
 {
-	uint32_t slot;
+	uint32_t win;
 	uint32_t free_slots = 0U;
 	uint32_t committed = committed_bytes();
+	uint32_t commit_free;
+	zzapp_rec_stats_t records;
+	zzapp_as_stats_t tables;
 
 	memset(reply, 0, extended ? ZZAPP_QUERY_EXT_REPLY_BYTES :
 	       ZZAPP_QUERY_REPLY_BYTES);
 	zzapp_put_be32(reply + ZZAPP_QUERY_ABI_MAJOR, ZZAPP_ABI_MAJOR);
 	zzapp_put_be32(reply + ZZAPP_QUERY_ABI_MINOR, ZZAPP_ABI_MINOR);
-	zzapp_put_be32(reply + ZZAPP_QUERY_STATE, slots[0].state);
+	zzapp_put_be32(reply + ZZAPP_QUERY_STATE, window_state(&windows[0]));
 	zzapp_put_be32(reply + ZZAPP_QUERY_CAPS, caps);
 	if (!extended) {
 		*reply_len = ZZAPP_QUERY_REPLY_BYTES;
 		return;
 	}
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		if (slots[slot].state == ZZAPP_ST_IDLE &&
-		    __atomic_load_n(&deferred[slot].state, __ATOMIC_ACQUIRE) ==
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		if (window_state(&windows[win]) == ZZAPP_ST_IDLE &&
+		    __atomic_load_n(&windows[win].defer.state, __ATOMIC_ACQUIRE) ==
 			    DEFER_IDLE)
 			free_slots++;
 	}
+	commit_free = zzapp_loader_pool_free ? zzapp_loader_pool_free() : 0U;
+	zzapp_rec_stats(&records);
+	zzapp_as_stats(&tables);
 	zzapp_put_be32(reply + ZZAPP_QUERY_SLOTS, ZZAPP_SLOT_COUNT);
 	zzapp_put_be32(reply + ZZAPP_QUERY_FREE_SLOTS, free_slots);
-	zzapp_put_be32(reply + ZZAPP_QUERY_COMMIT_FREE, 0U);
-	zzapp_put_be32(reply + ZZAPP_QUERY_COMMIT_TOTAL, committed);
+	zzapp_put_be32(reply + ZZAPP_QUERY_COMMIT_FREE, commit_free);
+	zzapp_put_be32(reply + ZZAPP_QUERY_COMMIT_TOTAL, commit_free + committed);
+	zzapp_put_be32(reply + ZZAPP_QUERY_RECORDS_FREE, records.free);
+	/* Tables a new admission can still reserve, and the pool less the
+	 * kernel template. */
+	zzapp_put_be32(reply + ZZAPP_QUERY_TABLES_FREE,
+		       tables.l2_total - tables.l2_template - tables.l2_reserved);
+	zzapp_put_be32(reply + ZZAPP_QUERY_TABLES_TOTAL,
+		       tables.l2_total - tables.l2_template);
+	zzapp_put_be32(reply + ZZAPP_QUERY_HOSTHEAP_FREE, hostheap_free_bytes());
 	*reply_len = ZZAPP_QUERY_EXT_REPLY_BYTES;
 }
 
-static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host,
-			int legacy_claim)
+/*
+ * Claim admission. Steps in order, each undone by the ones after it on a
+ * refusal, and nothing published until the last: platform and window (LIMIT),
+ * handle plus record slot (MEMORY), L2 reserve (TABLES), window memory
+ * (HOSTHEAP). Returns AAR_REASON_NONE or the reason. `extended` picks any
+ * free window; a legacy claim addresses window 0 only.
+ */
+static uint32_t claim_window(int extended, uint32_t *win_out, uint32_t *arm,
+			     uint32_t *host)
 {
+	struct zzapp_window *w = NULL;
+	zzapp_rec_t *rec = NULL;
+	uint32_t handle = 0U;
 	uint32_t generation;
+	uint32_t reason;
+	uint32_t win;
+	uint32_t pid;
 	int rc;
 
-	if (slots[slot].state != ZZAPP_ST_IDLE || slots[slot].quarantined ||
-	    __atomic_load_n(&deferred[slot].state, __ATOMIC_ACQUIRE) !=
-		    DEFER_IDLE ||
-	    audio_handoff_pending(runtime_for_slot(slot)))
-		return AAR_E_BUSY;
-	rc = alloc_window(slot, arm, host);
-	if (rc != AAR_OK)
-		return rc;
-	wait_end();
+#ifndef ZZAPP_HOST_TEST
+	if (!window_mapping_available)
+		return AAR_REASON_LIMIT;
+#else
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++)
+		test_drop_implicit(&windows[win]);
+#endif
 	slot_state_lock_acquire();
-	generation = slots[slot].generation + 1U;
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		if (window_free(&windows[win])) {
+			w = &windows[win];
+			break;
+		}
+		if (!extended)
+			break;
+	}
+	if (!w) {
+		slot_state_lock_release();
+		return AAR_REASON_LIMIT;
+	}
+	reason = zzapp_rec_admit(win, &handle, &rec);
+	if (reason != AAR_REASON_NONE) {
+		slot_state_lock_release();
+		return reason;
+	}
+	/* Bound now, so a concurrent claimer skips this window. */
+	w->handle = handle;
+	slot_state_lock_release();
+	pid = rec->hdr.pid;
+	select_window(win);
+	rc = alloc_window(w, arm, host);
+	if (rc != AAR_OK) {
+		slot_state_lock_acquire();
+		w->handle = 0U;
+		(void)zzapp_rec_unadmit(handle);
+		slot_state_lock_release();
+		select_window(win);
+		return AAR_REASON_HOSTHEAP;
+	}
+	slot_state_lock_acquire();
+	generation = w->claim_generation + 1U;
 	if (generation == 0U)
 		generation = 1U;
-	zzapp_kernel_reset_cpu_ticks(zzapp_runtime_kernel(), slot);
-	slots[slot].generation = generation;
-	slots[slot].legacy_claim = legacy_claim;
-	slots[slot].memory_limit = 0U;
-	slots[slot].host_visible_limit = 0U;
-	slots[slot].terminal_reason = ZZAPP_END_NONE;
+	zzapp_kernel_reset_cpu_ticks(zzapp_runtime_kernel(), pid);
+	w->claim_generation = generation;
+	w->legacy_claim = !extended;
+	rec->claim.state = ZZAPP_ST_CLAIMED;
+	rec->claim.memory_limit = 0U;
+	rec->claim.host_visible_limit = 0U;
+	rec->claim.terminal_reason = ZZAPP_END_NONE;
+	rec->claim.refusal_reason = AAR_REASON_NONE;
+	runtime_of(rec)->file_seq = w->file_seq;
+	runtime_of(rec)->audio_stream_epoch = w->audio_stream_epoch;
 	if (zzapp_host_claimed)
-		zzapp_host_claimed(slot);
-	memset(slots[slot].name, 0, sizeof(slots[slot].name));
-	slots[slot].claim_started = now_us();
-	slots[slot].load_progress = 0U;
-	slots[slot].quarantined = 0;
-	slots[slot].quarantine_reclaimed = 0;
-	slots[slot].quarantine_release_requested = 0;
-	slots[slot].launcher_heartbeat = life_get(ZZAPP_LIFE_HEARTBEAT_OFF);
-	slots[slot].state = ZZAPP_ST_CLAIMED;
+		zzapp_host_claimed(pid);
+	w->claim_started = now_us();
+	w->load_progress = 0U;
+	w->quarantined = 0;
+	w->quarantine_reclaimed = 0;
+	w->quarantine_release_requested = 0;
+	w->launcher_heartbeat = life_get(ZZAPP_LIFE_HEARTBEAT_OFF);
 	life_put(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
 	life_put(ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
 	life_put(ZZAPP_LIFE_GENERATION_OFF, generation);
 	life_put(ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, 0U);
+	life_put(ZZAPP_LIFE_REFUSAL_OFF, AAR_REASON_NONE);
 	if (zzapp_host_reset_low_memory)
-		zzapp_host_reset_low_memory(slot);
+		zzapp_host_reset_low_memory(pid);
 	life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_NONE);
 	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_CLAIMED);
+	(void)zzapp_rec_set_state(rec, ZZAPP_REC_LIVE);
 	slot_state_lock_release();
-	return AAR_OK;
+	*win_out = win;
+	return AAR_REASON_NONE;
 }
 
-static void put_list(uint8_t *reply, uint16_t *reply_len, uint32_t slot)
+static void put_list(uint8_t *reply, uint16_t *reply_len, uint32_t win)
 {
-	zzapp_proc_t *proc = zzapp_proc_slot(slot);
+	struct zzapp_window *w = &windows[win];
+	zzapp_rec_t *rec = window_rec(w);
 	zzapp_kernel_t *kernel = zzapp_runtime_kernel();
 	uint64_t cpu = 0U;
 	uint64_t service = 0U;
 	uint8_t block = ZZAPP_BLOCK_NONE;
+	uint32_t committed = 0U;
+	uint32_t limit = 0U;
+	uint32_t terminal = w->last_terminal;
+	const uint8_t *name = w->last_name;
 
-	if (kernel) {
-		cpu = kernel->threads[slot].user_ticks +
-		      kernel->threads[slot].svc_ticks;
-		service = kernel->service_ticks;
+	if (rec) {
+		cpu = rec->thread.user_ticks + rec->thread.svc_ticks;
+		committed = rec->proc.memory.committed;
+		limit = rec->claim.memory_limit;
+		terminal = rec->claim.terminal_reason;
+		name = runtime_of(rec)->name;
 	}
+	if (kernel)
+		service = kernel->service_ticks;
 	memset(reply, 0, ZZAPP_LIST_REPLY_BYTES);
-	zzapp_put_be32(reply + ZZAPP_LIST_STATE, slots[slot].state);
-	zzapp_put_be32(reply + ZZAPP_LIST_GENERATION, slots[slot].generation);
-	if (proc)
-		zzapp_put_be32(reply + ZZAPP_LIST_COMMITTED, proc->memory.committed);
-	zzapp_put_be32(reply + ZZAPP_LIST_LIMIT, slots[slot].memory_limit);
+	zzapp_put_be32(reply + ZZAPP_LIST_STATE, window_state(w));
+	zzapp_put_be32(reply + ZZAPP_LIST_GENERATION, w->claim_generation);
+	zzapp_put_be32(reply + ZZAPP_LIST_COMMITTED, committed);
+	zzapp_put_be32(reply + ZZAPP_LIST_LIMIT, limit);
 	zzapp_put_be32(reply + ZZAPP_LIST_CPU_MS,
 		       cpu > UINT32_MAX ? UINT32_MAX : (uint32_t)cpu);
 	zzapp_put_be32(reply + ZZAPP_LIST_SERVICE_MS,
 		       service > UINT32_MAX ? UINT32_MAX : (uint32_t)service);
-	reply[ZZAPP_LIST_REASONS + 1U] = (uint8_t)slots[slot].terminal_reason;
-	if (kernel && kernel->threads[slot].state == ZZAPP_THREAD_SLEEPING) {
+	reply[ZZAPP_LIST_REASONS + 1U] = (uint8_t)terminal;
+	if (rec && rec->thread.state == ZZAPP_THREAD_SLEEPING) {
 		block = ZZAPP_BLOCK_SLEEP;
-	} else if (kernel && kernel->threads[slot].state == ZZAPP_THREAD_BLOCKED) {
-		switch (runtime_for_slot(slot)->wait_kind) {
+	} else if (rec && rec->thread.state == ZZAPP_THREAD_BLOCKED) {
+		switch (runtime_of(rec)->wait_kind) {
 		case ZZAPP_WAIT_FILE:
 			block = ZZAPP_BLOCK_FILE;
 			break;
@@ -4659,33 +4955,22 @@ static void put_list(uint8_t *reply, uint16_t *reply_len, uint32_t slot)
 		}
 	}
 	reply[ZZAPP_LIST_REASONS] = block;
-	memcpy(reply + ZZAPP_LIST_NAME, slots[slot].name,
-	       sizeof(slots[slot].name));
+	memcpy(reply + ZZAPP_LIST_NAME, name, ZZAPP_LIST_NAME_BYTES);
 	if (kernel && kernel->overload_count != 0U)
 		zzapp_put_be16(reply + ZZAPP_LIST_REASONS + 2U,
 			       ZZAPP_LIST_FLAG_OVERLOAD);
 	*reply_len = ZZAPP_LIST_REPLY_BYTES;
 }
 
-static void release_quarantine_locked(struct zzapp_service_slot *entry)
+/* Caller holds g_slot_state_lock. The quarantined claim's resources were
+ * returned when it was reclaimed; its record shell and handle go now. */
+static void release_quarantine_locked(struct zzapp_window *w, zzapp_rec_t *rec)
 {
-	/*
-	 * Host admission remains STOPPING until this point. Publish its IDLE
-	 * transition before dropping the service-side quarantine, so a claim
-	 * can never observe an idle service slot with a live loader host.
-	 */
-	if (zzapp_host_quarantine_released)
-		zzapp_host_quarantine_released(service_slot());
-	entry->quarantined = 0;
-	entry->quarantine_reclaimed = 0;
-	entry->quarantine_release_requested = 0;
-	entry->claim_started = 0U;
-	entry->load_progress = 0U;
-	entry->memory_limit = 0U;
-	entry->host_visible_limit = 0U;
-	entry->state = ZZAPP_ST_IDLE;
-	life_put(ZZAPP_LIFE_STOP_OFF, 0U);
-	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
+	w->quarantined = 0;
+	w->quarantine_reclaimed = 0;
+	w->quarantine_release_requested = 0;
+	if (rec)
+		release_shell_locked(w, rec);
 }
 
 static int is_load_contact(uint16_t opcode)
@@ -4699,6 +4984,7 @@ static int release_stale_quarantine(uint16_t opcode, const uint8_t *req,
 				    int extended)
 {
 	uint32_t slot = 0U;
+	struct zzapp_window *w;
 
 	if (!is_load_contact(opcode))
 		return 0;
@@ -4709,22 +4995,23 @@ static int release_stale_quarantine(uint16_t opcode, const uint8_t *req,
 		if (slot >= ZZAPP_SLOT_COUNT)
 			return 0;
 		if (zzapp_get_be32(req + ZZAPP_SEL_GENERATION) ==
-		    slots[slot].generation)
+		    windows[slot].claim_generation)
 			return 0;
 	}
+	w = &windows[slot];
 	slot_state_lock_acquire();
-	if (!slots[slot].quarantined) {
+	if (!w->quarantined) {
 		slot_state_lock_release();
 		return 0;
 	}
-	if (!slots[slot].quarantine_reclaimed)
-		slots[slot].quarantine_release_requested = 1;
-	if (!slots[slot].quarantine_reclaimed) {
+	if (!w->quarantine_reclaimed)
+		w->quarantine_release_requested = 1;
+	if (!w->quarantine_reclaimed) {
 		slot_state_lock_release();
 		return 1;
 	}
-	select_slot(slot);
-	release_quarantine_locked(&slots[slot]);
+	select_window(slot);
+	release_quarantine_locked(w, window_rec(w));
 	slot_state_lock_release();
 	return 1;
 }
@@ -4749,7 +5036,6 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		return SDK_STATUS_UNSUPPORTED;
 	}
 	if (opcode == ZZAPP_OP_QUERY) {
-		select_slot(0U);
 		put_query(reply, reply_len,
 			  ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO |
 			  ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8 | ZZAPP_CAP_SLOTS |
@@ -4762,29 +5048,26 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 	if (opcode == ZZAPP_OP_ALLOC_WINDOW) {
 		uint32_t arm = 0U;
 		uint32_t host = 0U;
-		uint32_t slot = 0U;
+		uint32_t win = 0U;
+		uint32_t reason = claim_window(extended, &win, &arm, &host);
 
-		if (extended) {
-			for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-				if (slots[slot].state == ZZAPP_ST_IDLE &&
-				    !slots[slot].quarantined &&
-				    __atomic_load_n(&deferred[slot].state,
-						    __ATOMIC_ACQUIRE) == DEFER_IDLE)
-					break;
+		if (reason != AAR_REASON_NONE) {
+			/* Status codes stay what they were; the reason is
+			 * additive and only extended clients are given it. */
+			if (extended) {
+				zzapp_put_be32(reply + ZZAPP_ALLOC_REASON, reason);
+				*reply_len = ZZAPP_ALLOC_REFUSAL_REPLY_BYTES;
 			}
-			if (slot == ZZAPP_SLOT_COUNT)
-				return SDK_STATUS_BUSY;
+			return reason == AAR_REASON_LIMIT ? SDK_STATUS_BUSY :
+							    SDK_STATUS_NO_MEMORY;
 		}
-		rc = claim_window(slot, &arm, &host, !extended);
-		if (rc != AAR_OK)
-			return zz_to_sdk(rc);
 		zzapp_put_be32(reply + ZZAPP_ALLOC_ARM_ADDRESS, arm);
 		zzapp_put_be32(reply + ZZAPP_ALLOC_SIZE, ZZAPP_WINDOW_BYTES);
 		zzapp_put_be32(reply + ZZAPP_ALLOC_HOST_OFFSET, host);
 		if (extended) {
-			zzapp_put_be32(reply + ZZAPP_ALLOC_SLOT, slot);
+			zzapp_put_be32(reply + ZZAPP_ALLOC_SLOT, win);
 			zzapp_put_be32(reply + ZZAPP_ALLOC_GENERATION,
-				       slots[slot].generation);
+				       windows[win].claim_generation);
 			*reply_len = ZZAPP_ALLOC_EXT_REPLY_BYTES;
 		} else {
 			*reply_len = ZZAPP_ALLOC_REPLY_BYTES;
@@ -4805,22 +5088,22 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 	rc = select_request_slot(req, req_len, extended);
 	if (opcode == ZZAPP_OP_RELEASE) {
 		uint32_t slot;
+		struct zzapp_window *w;
 
 		if (!extended || !req)
 			return SDK_STATUS_BAD_REQUEST;
 		slot = zzapp_get_be32(req + ZZAPP_SEL_SLOT);
 		if (slot >= ZZAPP_SLOT_COUNT)
 			return SDK_STATUS_BAD_HANDLE;
+		w = &windows[slot];
 		slot_state_lock_acquire();
-		if (!slots[slot].quarantined ||
-		    !slots[slot].quarantine_reclaimed ||
+		if (!w->quarantined || !w->quarantine_reclaimed ||
 		    zzapp_get_be32(req + ZZAPP_SEL_GENERATION) !=
-			    slots[slot].generation) {
+			    w->claim_generation) {
 			slot_state_lock_release();
 			return SDK_STATUS_BUSY;
 		}
-		select_slot(slot);
-		release_quarantine_locked(&slots[slot]);
+		release_quarantine_locked(w, window_rec(w));
 		slot_state_lock_release();
 		return SDK_STATUS_OK;
 	}
@@ -4830,7 +5113,11 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 	if (rc != SDK_STATUS_OK)
 		return (uint16_t)rc;
 	switch (opcode) {
-	case ZZAPP_OP_STOP:
+	case ZZAPP_OP_STOP: {
+		struct zzapp_window *w = service_win();
+		zzapp_rec_t *rec;
+		uint32_t pid;
+
 		if (!extended && req_len >= ZZAPP_STOP_REQ_BYTES) {
 			uint32_t expected;
 
@@ -4841,30 +5128,35 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 				return SDK_STATUS_BAD_HANDLE;
 		}
 		slot_state_lock_acquire();
-		if (slots[service_slot()].state == ZZAPP_ST_CLAIMED) {
+		rec = window_rec(w);
+		if (rec && window_state(w) == ZZAPP_ST_CLAIMED) {
 			int release_now = stop_current_deferred();
 
 			if (release_now == 0) {
-				begin_claim_cancellation(&slots[service_slot()],
-							 ZZAPP_END_FORCED);
+				begin_claim_cancellation(w, rec, ZZAPP_END_FORCED);
 				slot_state_lock_release();
 				return SDK_STATUS_OK;
 			}
 			if (release_now > 0) {
-				memset(current_runtime(), 0, sizeof(*current_runtime()));
-				slots[service_slot()].memory_limit = 0U;
-				slots[service_slot()].host_visible_limit = 0U;
-				slots[service_slot()].terminal_reason = ZZAPP_END_FORCED;
-				publish_claim_idle(&slots[service_slot()]);
+				/* Nothing was loaded and core 1 has no stake:
+				 * the claim ends here through the one retire
+				 * path, which returns the record and tables. */
+				pid = rec->hdr.pid;
+				rec->claim.memory_limit = 0U;
+				rec->claim.host_visible_limit = 0U;
+				rec->claim.terminal_reason = ZZAPP_END_FORCED;
 				life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_FORCED);
 				slot_state_lock_release();
+				(void)zzapp_rec_retire(pid);
 				return SDK_STATUS_OK;
 			}
 		}
-		zzapp_host_latch_stop(service_slot());
+		if (rec)
+			zzapp_host_latch_stop(rec->hdr.pid);
 		life_put(ZZAPP_LIFE_STOP_OFF, 1U);
 		slot_state_lock_release();
 		return SDK_STATUS_OK;
+	}
 	case ZZAPP_OP_STATUS:
 		zzapp_put_be32(reply + ZZAPP_STATUS_STATE, zzapp_services_state());
 		zzapp_put_be32(reply + ZZAPP_STATUS_GENERATION,
@@ -4884,6 +5176,8 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		zzapp_status_observed();
 		return SDK_STATUS_OK;
 	case ZZAPP_OP_DISPLAY_BIND:
+		if (!service_rec())
+			return SDK_STATUS_BAD_HANDLE;
 		rc = bind_surface(req, req_len);
 		if (zz_to_sdk(rc) == SDK_STATUS_BAD_REQUEST)
 			report_rejected_app_op(opcode, "display bind fields rejected");
@@ -4921,6 +5215,10 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 		}
 		if (!scheduler_core1_available())
 			return SDK_STATUS_UNSUPPORTED;
+		/* An op needs a record to work on; an unclaimed window has
+		 * none. */
+		if (!service_rec())
+			return SDK_STATUS_BAD_HANDLE;
 		if (!queue_deferred(opcode, req, req_len, request_id, user_cookie))
 			return SDK_STATUS_BUSY;
 		return SDK_STATUS_QUEUED;
@@ -4934,22 +5232,22 @@ int zzapp_mailbox_harvest(uint32_t *request_id, uint32_t *user_cookie,
 			  uint8_t *payload, uint16_t *payload_len)
 {
 	struct zzapp_deferred *defer;
-	uint32_t slot;
+	uint32_t win;
 
 	slot_state_lock_acquire();
-	if (deferred_harvest_slot == ZZAPP_SLOT_COUNT) {
-		for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-			if (__atomic_load_n(&deferred[slot].state, __ATOMIC_ACQUIRE) ==
-			    DEFER_DONE)
+	if (deferred_harvest_window == ZZAPP_SLOT_COUNT) {
+		for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+			if (__atomic_load_n(&windows[win].defer.state,
+					    __ATOMIC_ACQUIRE) == DEFER_DONE)
 				break;
 		}
-		if (slot == ZZAPP_SLOT_COUNT) {
+		if (win == ZZAPP_SLOT_COUNT) {
 			slot_state_lock_release();
 			return 0;
 		}
-		deferred_harvest_slot = slot;
+		deferred_harvest_window = win;
 	}
-	defer = &deferred[deferred_harvest_slot];
+	defer = &windows[deferred_harvest_window].defer;
 	if (request_id)
 		*request_id = defer->request_id;
 	if (user_cookie)
@@ -4969,44 +5267,52 @@ int zzapp_mailbox_harvest(uint32_t *request_id, uint32_t *user_cookie,
 void zzapp_mailbox_harvest_ack(void)
 {
 	slot_state_lock_acquire();
-	if (deferred_harvest_slot != ZZAPP_SLOT_COUNT &&
-	    deferred[deferred_harvest_slot].state == DEFER_DONE)
-		deferred[deferred_harvest_slot].state = DEFER_IDLE;
-	deferred_harvest_slot = ZZAPP_SLOT_COUNT;
+	if (deferred_harvest_window != ZZAPP_SLOT_COUNT &&
+	    windows[deferred_harvest_window].defer.state == DEFER_DONE)
+		windows[deferred_harvest_window].defer.state = DEFER_IDLE;
+	deferred_harvest_window = ZZAPP_SLOT_COUNT;
 	slot_state_lock_release();
 }
 
 #ifdef ZZAPP_HOST_TEST
+/* Hard reset between sub-tests: every record bound to a window is released
+ * through the table layer (tables back, handle freed), then the window layer
+ * is zeroed. Records a test admitted itself are the test's to free. */
 void zzapp_services_test_reset(void)
 {
-	uint32_t slot;
+	uint32_t win;
 
-	for (slot = 0U; slot < ZZAPP_SLOT_COUNT; slot++) {
-		select_slot(slot);
+	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
+		struct zzapp_window *w = &windows[win];
+		zzapp_rec_t *rec = window_rec(w);
+
+		if (!rec)
+			continue;
+		select_window(win);
 		audio_detach();
+		zzapp_rec_retire_tables(rec);
+		(void)zzapp_rec_free(w->handle);
 	}
-	memset(runtime, 0, sizeof(runtime));
-	memset(test_window_backing, 0, sizeof(test_window_backing));
-	memset(test_window_range_held, 0, sizeof(test_window_range_held));
-	memset(test_window_serial, 0, sizeof(test_window_serial));
-	memset(slots, 0, sizeof(slots));
-	memset(deferred, 0, sizeof(deferred));
-	selected_slot[0] = 0U;
-	selected_slot[1] = 0U;
-	deferred_harvest_slot = ZZAPP_SLOT_COUNT;
-	deferred_poll_next_slot = 0U;
+	memset(windows, 0, sizeof(windows));
+	ctx_win[0] = 0U;
+	ctx_win[1] = 0U;
+	ctx_pid[0] = ZZAPP_PID_NONE;
+	ctx_pid[1] = ZZAPP_PID_NONE;
+	deferred_harvest_window = ZZAPP_SLOT_COUNT;
+	deferred_poll_next_window = 0U;
 	display_mailbox_slot = -1;
+	display_mailbox_state = NULL;
 	defer_test_core = 1;
 	yield_hook = NULL;
 	time_hook = NULL;
 #ifdef ZZAPP_SERVICES_STANDALONE_TEST
 	service_test_current_thread = -1;
 	service_test_wake_count = 0U;
+	service_stub_direct_audio = 0U;
 	service_loader_generation = 0U;
 	service_test_loader_set_generation_hook = NULL;
-	service_test_grant_count = 0U;
-	service_test_ungrant_count = 0U;
 	service_test_loader_begin_hook = NULL;
+	service_test_loader_begin_rc = AAR_OK;
 	service_test_loader_chunk_hook = NULL;
 	service_test_loader_end_hook = NULL;
 	service_test_deferred_completion_hook = NULL;
@@ -5015,7 +5321,6 @@ void zzapp_services_test_reset(void)
 	service_test_loader_abort_count = 0U;
 #endif
 	memset(slot_busy_test, 0, sizeof(slot_busy_test));
-	zzapp_services_on_launch();
 }
 
 void zzapp_services_test_set_core(int core)
@@ -5023,27 +5328,51 @@ void zzapp_services_test_set_core(int core)
 	defer_test_core = core;
 }
 
+void zzapp_services_test_select_window(uint32_t win)
+{
+	select_window(win);
+}
+
 void zzapp_services_test_set_window(void *base, uint32_t bytes)
 {
 	zzapp_services_test_set_window_slot(0U, base, bytes);
 }
 
+/* Installs a window mapping and, when the window has no record, an implicit
+ * one in the IDLE claim state, so service calls on an unclaimed window have
+ * somewhere to keep their per-app state. A claim of the same window drops the
+ * implicit record first. */
 void zzapp_services_test_set_window_slot(uint32_t slot, void *base, uint32_t bytes)
 {
+	struct zzapp_window *w;
+
 	if (slot >= ZZAPP_SLOT_COUNT)
 		return;
-	select_slot(slot);
+	w = &windows[slot];
 	if (base && bytes >= ZZAPP_WINDOW_BYTES) {
 		uint32_t serial = 0U;
 
+		if (!w->handle) {
+			zzapp_rec_t *rec = NULL;
+			uint32_t handle = 0U;
+
+			if (zzapp_rec_admit(slot, &handle, &rec) != 0U)
+				return;
+			w->handle = handle;
+			w->test_implicit = 1;
+			(void)zzapp_as_create(&rec->proc.as, rec->hdr.pid);
+			rec->claim.state = ZZAPP_ST_IDLE;
+			(void)zzapp_rec_set_state(rec, ZZAPP_REC_LIVE);
+		}
 		if (zzapp_test_card_alloc_at)
 			(void)zzapp_test_card_alloc_at(
 				ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot),
 				ZZAPP_WINDOW_BYTES, &serial);
-		test_window_serial[slot] = serial;
-		test_window_range_held[slot] = 1;
-		init_window((uint8_t *)base, bytes, 1);
+		w->test_serial = serial;
+		w->test_range_held = 1;
+		init_window(w, (uint8_t *)base, bytes, 1);
 	}
+	select_window(slot);
 }
 
 /* Lets a claim allocate this slot's window again once a reset has released
@@ -5052,7 +5381,7 @@ void zzapp_services_test_set_window_slot(uint32_t slot, void *base, uint32_t byt
 void zzapp_services_test_set_window_pool(uint32_t slot, void *base)
 {
 	if (slot < ZZAPP_SLOT_COUNT)
-		test_window_backing[slot] = (uint8_t *)base;
+		windows[slot].test_backing = (uint8_t *)base;
 }
 
 void zzapp_services_test_set_yield(void (*fn)(void))
@@ -5071,18 +5400,26 @@ void zzapp_services_test_set_slot_busy(uint32_t slot, int busy)
 		slot_busy_test[slot] = busy ? 1 : 0;
 }
 
+/* The services part of the selected record, still readable after the record
+ * was released: records are type stable, a freed one keeps its bytes until
+ * the index is admitted again. */
+static struct zzapp_service_runtime *test_runtime(void)
+{
+	return runtime_of(zzapp_rec_by_pid(service_pid()));
+}
+
 void zzapp_services_test_set_audio_request(uint32_t request)
 {
-	current_runtime()->audio_request = request;
+	test_runtime()->audio_request = request;
 }
 
 uint32_t zzapp_services_test_audio_request(void)
 {
-	return current_runtime()->audio_request;
+	return test_runtime()->audio_request;
 }
 
 uint32_t zzapp_services_test_audio_detach_count(void)
 {
-	return current_runtime()->audio_detach_count;
+	return test_runtime()->audio_detach_count;
 }
 #endif

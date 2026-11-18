@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "zzapp_gl_contract.h"
+#include "zzapp_rec.h"
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
 #include "zzapp_svc.h"
@@ -69,8 +70,8 @@ extern uint8_t zzapp_svc_veneer_page[];
 
 #ifdef ZZAPP_HOST_TEST
 __attribute__((weak)) int zzapp_kernel_current_thread(void) { return -1; }
-__attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t slot)
-{ (void)slot; return NULL; }
+__attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t pid)
+{ (void)pid; return NULL; }
 __attribute__((weak)) const aar_api *zzapp_api_table(void) { return NULL; }
 #endif
 
@@ -84,11 +85,6 @@ struct user_gl_table {
     /* glGetString results: a NUL-terminated copy the app can read. */
     char string[128];
 } __attribute__((aligned(VENEER_PAGE_BYTES)));
-static struct user_api_table user_api[ZZAPP_AS_SLOT_COUNT];
-static struct user_gl_table user_gl[ZZAPP_AS_SLOT_COUNT];
-static const aar_gl *direct_gl[ZZAPP_AS_SLOT_COUNT];
-static uintptr_t veneer_alias[ZZAPP_AS_SLOT_COUNT];
-static uintptr_t api_alias[ZZAPP_AS_SLOT_COUNT];
 
 typedef struct {
     uint64_t sum;
@@ -121,183 +117,29 @@ _Static_assert(sizeof(zzapp_svc_counters_t) == 88U, "svc counters layout");
 
 
 #if ZZAPP_PERF_COUNTERS
-volatile uint32_t zzapp_svc_entry_stamp[ZZAPP_AS_SLOT_COUNT];
-/* The vector folds the final stage into the selected class without a C call. */
-zzapp_svc_counters_t zzapp_svc_counters[ZZAPP_AS_SLOT_COUNT][2];
-volatile uint8_t zzapp_svc_counter_class[ZZAPP_AS_SLOT_COUNT];
-static inline uint32_t pmccntr(void)
-{
-#ifdef ZZAPP_SVC_COUNTERS_TEST
-    extern uint32_t zzapp_svc_test_pmccntr(void);
+/*
+ * What the SVC vector counts into: the head of the record's svc part.
+ * zzapp_svc_counter_block (zzapp_kernel.h) points here for the running app.
+ * The assembly reads entry_stamp at offset 0, counter_class at 4 and the
+ * two counter sets (api, gl) from offset 8, 88 bytes each.
+ */
+typedef struct {
+    volatile uint32_t entry_stamp;
+    volatile uint32_t counter_class;
+    zzapp_svc_counters_t counters[2];
+} zzapp_svc_counter_block_t;
+_Static_assert(offsetof(zzapp_svc_counter_block_t, counter_class) == 4U,
+               "svc block class offset");
+_Static_assert(offsetof(zzapp_svc_counter_block_t, counters) == 8U,
+               "svc block counters offset");
+_Static_assert(sizeof(zzapp_svc_counter_block_t) ==
+               ZZAPP_SVC_COUNTER_BLOCK_BYTES, "svc block size");
 
-    return zzapp_svc_test_pmccntr();
-#else
-    uint32_t cycles;
-
-    __asm__ __volatile__("mrc p15, 0, %0, c9, c13, 0" : "=r"(cycles));
-    return cycles;
-#endif
-}
-
-static inline void counter_record(zzapp_svc_cost_t *cost, uint32_t cycles)
-{
-    cost->sum += cycles;
-    if (cycles > cost->max)
-        cost->max = cycles;
-}
-
-static inline void counter_add(zzapp_svc_cost_t *cost, uint32_t cycles)
-{
-    cost->calls++;
-    counter_record(cost, cycles);
-}
-
-static inline void counters_dispatch(uint32_t slot, int gl)
-{
-    zzapp_svc_counters_t *counters = &zzapp_svc_counters[slot][gl != 0];
-    uint32_t stamp;
-
-    zzapp_svc_counter_class[slot] = gl != 0;
-    counters->total_calls++;
-    counters->handler_started = 0U;
-    if ((counters->total_calls & 63U) != 0U)
-        return;
-    stamp = pmccntr();
-    counter_add(&counters->entry_to_dispatch,
-                stamp - zzapp_svc_entry_stamp[slot]);
-    counters->dispatch_stamp = stamp;
-}
-
-int zzapp_svc_counters_sampled(uint32_t slot)
-{
-	zzapp_svc_counters_t *counters;
-
-	if (slot >= ZZAPP_AS_SLOT_COUNT)
-		return 0;
-	counters = &zzapp_svc_counters[slot][zzapp_svc_counter_class[slot]];
-	return (counters->total_calls & 63U) == 0U;
-}
-
-static inline void counters_handler_start(uint32_t slot)
-{
-    zzapp_svc_counters_t *counters =
-        &zzapp_svc_counters[slot][zzapp_svc_counter_class[slot]];
-    uint32_t stamp;
-
-    if ((counters->total_calls & 63U) != 0U)
-        return;
-    stamp = pmccntr();
-    counter_add(&counters->dispatch_to_handler,
-                stamp - counters->dispatch_stamp);
-    counters->handler_stamp = stamp;
-    counters->handler_started = 1U;
-}
-static inline void counters_handler_end(uint32_t slot)
-{
-    zzapp_svc_counters_t *counters =
-        &zzapp_svc_counters[slot][zzapp_svc_counter_class[slot]];
-    uint32_t stamp;
-
-    if ((counters->total_calls & 63U) != 0U)
-        return;
-    stamp = pmccntr();
-    counter_add(&counters->handler, stamp - counters->handler_stamp);
-    counters->handler_done_stamp = stamp;
-}
-
-void zzapp_svc_counters_reset(uint32_t slot)
-{
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return;
-    memset(zzapp_svc_counters[slot], 0, sizeof(zzapp_svc_counters[slot]));
-    zzapp_svc_counter_class[slot] = 0U;
-    zzapp_svc_gl_telemetry_reset(slot);
-}
-
-
-static uint32_t counter_average(const zzapp_svc_cost_t *cost, uint32_t samples)
-{
-    return samples ? (uint32_t)(cost->sum / samples) : 0U;
-}
-
-void zzapp_svc_counters_report(uint32_t slot)
-{
-    uint32_t kind;
-
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return;
-    for (kind = 0U; kind < 2U; ++kind) {
-        zzapp_svc_counters_t *counters = &zzapp_svc_counters[slot][kind];
-
-        if (counters->reported || !counters->total_calls)
-            continue;
-        counters->reported = 1U;
-        printf("[app] svc slot=%lu kind=%s calls=%lu samples=%lu/%lu/%lu/%lu "
-               "e2d=%lu/%lu d2h=%lu/%lu h=%lu/%lu h2e=%lu/%lu\r\n",
-               (unsigned long)slot, kind ? "gl" : "api",
-               (unsigned long)counters->total_calls,
-               (unsigned long)counters->entry_to_dispatch.calls,
-               (unsigned long)counters->dispatch_to_handler.calls,
-               (unsigned long)counters->handler.calls,
-               (unsigned long)counters->handler_to_eret.calls,
-               (unsigned long)counter_average(&counters->entry_to_dispatch,
-                                              counters->entry_to_dispatch.calls),
-               (unsigned long)counters->entry_to_dispatch.max,
-               (unsigned long)counter_average(&counters->dispatch_to_handler,
-                                              counters->dispatch_to_handler.calls),
-               (unsigned long)counters->dispatch_to_handler.max,
-               (unsigned long)counter_average(&counters->handler,
-                                              counters->handler.calls),
-               (unsigned long)counters->handler.max,
-               (unsigned long)counter_average(&counters->handler_to_eret,
-                                              counters->handler_to_eret.calls),
-               (unsigned long)counters->handler_to_eret.max);
-    }
-}
-#ifdef ZZAPP_SVC_COUNTERS_TEST
-void zzapp_svc_counters_test_eret(uint32_t slot, uint32_t stamp)
-{
-    zzapp_svc_counters_t *counters;
-
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return;
-    counters = &zzapp_svc_counters[slot][zzapp_svc_counter_class[slot]];
-    if (counters->handler_started)
-        counter_add(&counters->handler_to_eret,
-                    stamp - counters->handler_done_stamp);
-}
-
-void zzapp_svc_counters_test_snapshot(uint32_t slot, uint32_t *total_calls,
-                                      uint32_t samples[4], uint32_t averages[4])
-{
-    zzapp_svc_counters_t *counters;
-    zzapp_svc_cost_t *costs;
-    uint32_t i;
-
-    if (slot >= ZZAPP_AS_SLOT_COUNT || !total_calls || !samples || !averages)
-        return;
-    counters = &zzapp_svc_counters[slot][0];
-    costs = &counters->entry_to_dispatch;
-    *total_calls = counters->total_calls;
-    for (i = 0U; i < 4U; ++i) {
-        samples[i] = costs[i].calls;
-        averages[i] = counter_average(&costs[i], costs[i].calls);
-    }
-}
-#endif
-
-#else
-static inline void counters_dispatch(uint32_t slot, int gl)
-{ (void)slot; (void)gl; }
-static inline void counters_handler_start(uint32_t slot)
-{ (void)slot; }
-static inline void counters_handler_end(uint32_t slot)
-{ (void)slot; }
-#endif
-#if ZZAPP_PERF_COUNTERS
 typedef struct {
     uint32_t gl_calls;
-    uint32_t opcodes[GL_COUNT];
+    /* Calls per opcode within one frame; saturates, a frame never makes
+     * 65535 calls of one opcode in practice. */
+    uint16_t opcodes[GL_COUNT];
     uint32_t lock_acquisitions;
     uint32_t lock_contention;
     uint32_t descriptor_failures;
@@ -341,8 +183,276 @@ typedef struct {
     uint32_t sample_sequence;
     uint8_t swap_started;
 } zzapp_gl_telemetry_t;
+#endif
 
-static zzapp_gl_telemetry_t gl_telemetry[ZZAPP_AS_SLOT_COUNT];
+typedef struct {
+    uint32_t alignment;
+    uint32_t row_length;
+    uint32_t skip_rows;
+    uint32_t skip_pixels;
+} gl_pixel_store_t;
+typedef struct {
+    uint32_t pointer;
+    int32_t size;
+    uint32_t type;
+    int32_t stride;
+    uint8_t enabled;
+} gl_client_array_t;
+typedef struct {
+    gl_client_array_t vertex;
+    gl_client_array_t color;
+    gl_client_array_t texcoord[GL_TEXTURE_UNITS];
+    gl_pixel_store_t pack;
+    gl_pixel_store_t unpack;
+    uint32_t generation;
+    uint32_t active_texture;
+    uint32_t error;
+    uint8_t in_begin;
+    uint8_t lock_held;
+} gl_client_state_t;
+
+/*
+ * Everything this file keeps per app, overlaid on the svc part of its
+ * process record (zzapp_rec_t.svc). The counter block is first because the
+ * SVC vector finds it through the record, not through this file.
+ */
+typedef struct {
+#if ZZAPP_PERF_COUNTERS
+    zzapp_svc_counter_block_t block;
+#endif
+    /* Veneer number of the app's latest SVC, for the stop report. */
+    uint32_t last_number;
+    /* Where the app sees the veneer page and its two table pages; 0 until
+     * the host maps them. User virtual addresses are 32 bits. */
+    uint32_t veneer_alias;
+    uint32_t api_alias;
+    uint32_t gl_alias;
+    const aar_gl *direct_gl;
+    gl_client_state_t gl_client;
+#if ZZAPP_PERF_COUNTERS
+    zzapp_gl_telemetry_t telemetry;
+#endif
+} svc_state_t;
+_Static_assert(sizeof(svc_state_t) <= ZZAPP_REC_SVC_BYTES,
+               "svc state fits the record's svc part");
+_Static_assert(_Alignof(svc_state_t) <= 8U, "svc part alignment");
+_Static_assert(sizeof(struct user_api_table) <= ZZAPP_REC_GL_PAGE_OFFSET,
+               "api table is one page");
+_Static_assert(sizeof(struct user_gl_table) <= ZZAPP_REC_GL_PAGE_OFFSET,
+               "gl table is one page");
+#if ZZAPP_PERF_COUNTERS
+_Static_assert(offsetof(svc_state_t, block) == 0U,
+               "the counter block heads the svc part");
+#endif
+
+/* NULL for a pid outside the record table. */
+static svc_state_t *svc_state(uint32_t pid)
+{
+    zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+    return rec ? (svc_state_t *)(void *)rec->svc.bytes : NULL;
+}
+
+/* The app's two table pages sit in the record's 8 KiB tables area. */
+static struct user_api_table *user_api_of(uint32_t pid)
+{
+    uint8_t *tables = zzapp_rec_tables(pid);
+
+    return tables ? (struct user_api_table *)(void *)
+        (tables + ZZAPP_REC_API_PAGE_OFFSET) : NULL;
+}
+static struct user_gl_table *user_gl_of(uint32_t pid)
+{
+    uint8_t *tables = zzapp_rec_tables(pid);
+
+    return tables ? (struct user_gl_table *)(void *)
+        (tables + ZZAPP_REC_GL_PAGE_OFFSET) : NULL;
+}
+
+uint32_t zzapp_svc_last_number_for(uint32_t pid)
+{
+    const svc_state_t *st = svc_state(pid);
+
+    return st ? st->last_number : 0U;
+}
+
+#if ZZAPP_PERF_COUNTERS
+static inline uint32_t pmccntr(void)
+{
+#ifdef ZZAPP_SVC_COUNTERS_TEST
+    extern uint32_t zzapp_svc_test_pmccntr(void);
+
+    return zzapp_svc_test_pmccntr();
+#else
+    uint32_t cycles;
+
+    __asm__ __volatile__("mrc p15, 0, %0, c9, c13, 0" : "=r"(cycles));
+    return cycles;
+#endif
+}
+
+static inline void counter_record(zzapp_svc_cost_t *cost, uint32_t cycles)
+{
+    cost->sum += cycles;
+    if (cycles > cost->max)
+        cost->max = cycles;
+}
+
+static inline void counter_add(zzapp_svc_cost_t *cost, uint32_t cycles)
+{
+    cost->calls++;
+    counter_record(cost, cycles);
+}
+
+static inline zzapp_svc_counters_t *counters_selected(svc_state_t *st)
+{
+    return &st->block.counters[st->block.counter_class != 0U];
+}
+
+static inline void counters_dispatch(svc_state_t *st, int gl)
+{
+    zzapp_svc_counters_t *counters = &st->block.counters[gl != 0];
+    uint32_t stamp;
+
+    st->block.counter_class = gl != 0;
+    counters->total_calls++;
+    counters->handler_started = 0U;
+    if ((counters->total_calls & 63U) != 0U)
+        return;
+    stamp = pmccntr();
+    counter_add(&counters->entry_to_dispatch, stamp - st->block.entry_stamp);
+    counters->dispatch_stamp = stamp;
+}
+
+int zzapp_svc_counters_sampled(uint32_t pid)
+{
+    svc_state_t *st = svc_state(pid);
+
+    if (!st)
+        return 0;
+    return (counters_selected(st)->total_calls & 63U) == 0U;
+}
+
+static inline void counters_handler_start(svc_state_t *st)
+{
+    zzapp_svc_counters_t *counters = counters_selected(st);
+    uint32_t stamp;
+
+    if ((counters->total_calls & 63U) != 0U)
+        return;
+    stamp = pmccntr();
+    counter_add(&counters->dispatch_to_handler,
+                stamp - counters->dispatch_stamp);
+    counters->handler_stamp = stamp;
+    counters->handler_started = 1U;
+}
+static inline void counters_handler_end(svc_state_t *st)
+{
+    zzapp_svc_counters_t *counters = counters_selected(st);
+    uint32_t stamp;
+
+    if ((counters->total_calls & 63U) != 0U)
+        return;
+    stamp = pmccntr();
+    counter_add(&counters->handler, stamp - counters->handler_stamp);
+    counters->handler_done_stamp = stamp;
+}
+
+void zzapp_svc_counters_reset(uint32_t pid)
+{
+    svc_state_t *st = svc_state(pid);
+
+    if (!st)
+        return;
+    memset(st->block.counters, 0, sizeof(st->block.counters));
+    st->block.counter_class = 0U;
+    zzapp_svc_gl_telemetry_reset(pid);
+}
+
+
+static uint32_t counter_average(const zzapp_svc_cost_t *cost, uint32_t samples)
+{
+    return samples ? (uint32_t)(cost->sum / samples) : 0U;
+}
+
+void zzapp_svc_counters_report(uint32_t pid)
+{
+    svc_state_t *st = svc_state(pid);
+    uint32_t kind;
+
+    if (!st)
+        return;
+    for (kind = 0U; kind < 2U; ++kind) {
+        zzapp_svc_counters_t *counters = &st->block.counters[kind];
+
+        if (counters->reported || !counters->total_calls)
+            continue;
+        counters->reported = 1U;
+        printf("[app] svc slot=%lu kind=%s calls=%lu samples=%lu/%lu/%lu/%lu "
+               "e2d=%lu/%lu d2h=%lu/%lu h=%lu/%lu h2e=%lu/%lu\r\n",
+               (unsigned long)pid, kind ? "gl" : "api",
+               (unsigned long)counters->total_calls,
+               (unsigned long)counters->entry_to_dispatch.calls,
+               (unsigned long)counters->dispatch_to_handler.calls,
+               (unsigned long)counters->handler.calls,
+               (unsigned long)counters->handler_to_eret.calls,
+               (unsigned long)counter_average(&counters->entry_to_dispatch,
+                                              counters->entry_to_dispatch.calls),
+               (unsigned long)counters->entry_to_dispatch.max,
+               (unsigned long)counter_average(&counters->dispatch_to_handler,
+                                              counters->dispatch_to_handler.calls),
+               (unsigned long)counters->dispatch_to_handler.max,
+               (unsigned long)counter_average(&counters->handler,
+                                              counters->handler.calls),
+               (unsigned long)counters->handler.max,
+               (unsigned long)counter_average(&counters->handler_to_eret,
+                                              counters->handler_to_eret.calls),
+               (unsigned long)counters->handler_to_eret.max);
+    }
+}
+#ifdef ZZAPP_SVC_COUNTERS_TEST
+void zzapp_svc_counters_test_eret(uint32_t pid, uint32_t stamp)
+{
+    svc_state_t *st = svc_state(pid);
+    zzapp_svc_counters_t *counters;
+
+    if (!st)
+        return;
+    counters = counters_selected(st);
+    if (counters->handler_started)
+        counter_add(&counters->handler_to_eret,
+                    stamp - counters->handler_done_stamp);
+}
+
+void zzapp_svc_counters_test_snapshot(uint32_t pid, uint32_t *total_calls,
+                                      uint32_t samples[4], uint32_t averages[4])
+{
+    svc_state_t *st = svc_state(pid);
+    zzapp_svc_counters_t *counters;
+    zzapp_svc_cost_t *costs;
+    uint32_t i;
+
+    if (!st || !total_calls || !samples || !averages)
+        return;
+    counters = &st->block.counters[0];
+    costs = &counters->entry_to_dispatch;
+    *total_calls = counters->total_calls;
+    for (i = 0U; i < 4U; ++i) {
+        samples[i] = costs[i].calls;
+        averages[i] = counter_average(&costs[i], costs[i].calls);
+    }
+}
+#endif
+
+#else
+static inline void counters_dispatch(svc_state_t *st, int gl)
+{ (void)st; (void)gl; }
+static inline void counters_handler_start(svc_state_t *st)
+{ (void)st; }
+static inline void counters_handler_end(svc_state_t *st)
+{ (void)st; }
+#endif
+#if ZZAPP_PERF_COUNTERS
 
 static void gl_cost_add(zzapp_svc_cost_t *to, const zzapp_svc_cost_t *from)
 {
@@ -352,66 +462,60 @@ static void gl_cost_add(zzapp_svc_cost_t *to, const zzapp_svc_cost_t *from)
         to->max = from->max;
 }
 
-static void gl_telemetry_frame_begin(uint32_t slot, uint32_t number)
+static void gl_telemetry_frame_begin(svc_state_t *st, uint32_t number)
 {
-    zzapp_gl_telemetry_t *telemetry = &gl_telemetry[slot];
+    zzapp_gl_telemetry_t *telemetry = &st->telemetry;
     zzapp_gl_frame_telemetry_t *frame = &telemetry->frame;
 
     frame->gl_calls++;
-    if (number < GL_COUNT)
+    if (number < GL_COUNT && frame->opcodes[number] != UINT16_MAX)
         frame->opcodes[number]++;
     frame->sampled = (++telemetry->sample_sequence & 63U) == 0U;
     if (frame->sampled)
         frame->descriptor_stamp = pmccntr();
 }
 
-static void gl_telemetry_descriptor_end(uint32_t slot)
+static void gl_telemetry_descriptor_end(svc_state_t *st)
 {
-    zzapp_gl_frame_telemetry_t *frame = &gl_telemetry[slot].frame;
+    zzapp_gl_frame_telemetry_t *frame = &st->telemetry.frame;
 
     if (frame->sampled)
         counter_add(&frame->descriptor, pmccntr() - frame->descriptor_stamp);
 }
 
-static void gl_telemetry_descriptor_failure(uint32_t slot)
+static void gl_telemetry_descriptor_failure(svc_state_t *st)
 {
-    gl_telemetry[slot].frame.descriptor_failures++;
+    st->telemetry.frame.descriptor_failures++;
 }
 
-static void gl_telemetry_pointer_failure(uint32_t slot)
+static void gl_telemetry_pointer_failure(svc_state_t *st)
 {
-    gl_telemetry[slot].frame.pointer_failures++;
+    st->telemetry.frame.pointer_failures++;
 }
 
-static void gl_telemetry_array_span(uint32_t slot)
+static void gl_telemetry_array_span(svc_state_t *st)
 {
-    gl_telemetry[slot].frame.array_span_checks++;
+    st->telemetry.frame.array_span_checks++;
 }
-static void gl_telemetry_array_fallback(uint32_t slot)
+static void gl_telemetry_array_fallback(svc_state_t *st)
 {
-    gl_telemetry[slot].frame.array_span_fallbacks++;
+    st->telemetry.frame.array_span_fallbacks++;
 }
 
-static inline void gl_telemetry_frontend_begin(uint32_t slot)
+static inline void gl_telemetry_frontend_begin(svc_state_t *st)
 {
-    zzapp_gl_frame_telemetry_t *frame;
+    zzapp_gl_frame_telemetry_t *frame = &st->telemetry.frame;
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return;
-    frame = &gl_telemetry[slot].frame;
     frame->frontend_active = 1U;
     frame->lock_cycles = 0U;
     if (frame->sampled)
         frame->frontend_stamp = pmccntr();
 }
 
-static inline void gl_telemetry_frontend_end(uint32_t slot)
+static inline void gl_telemetry_frontend_end(svc_state_t *st)
 {
-    zzapp_gl_frame_telemetry_t *frame;
+    zzapp_gl_frame_telemetry_t *frame = &st->telemetry.frame;
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return;
-    frame = &gl_telemetry[slot].frame;
     if (frame->sampled && frame->frontend_active) {
         uint32_t cycles = pmccntr() - frame->frontend_stamp;
 
@@ -420,24 +524,26 @@ static inline void gl_telemetry_frontend_end(uint32_t slot)
     frame->frontend_active = 0U;
 }
 
-void zzapp_svc_gl_telemetry_lock_begin(uint32_t slot)
+void zzapp_svc_gl_telemetry_lock_begin(uint32_t pid)
 {
+    svc_state_t *st = svc_state(pid);
     zzapp_gl_frame_telemetry_t *frame;
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
+    if (!st)
         return;
-    frame = &gl_telemetry[slot].frame;
+    frame = &st->telemetry.frame;
     if (frame->frontend_active && frame->sampled)
         frame->lock_stamp = pmccntr();
 }
 
-void zzapp_svc_gl_telemetry_lock_end(uint32_t slot, int contended)
+void zzapp_svc_gl_telemetry_lock_end(uint32_t pid, int contended)
 {
+    svc_state_t *st = svc_state(pid);
     zzapp_gl_frame_telemetry_t *frame;
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
+    if (!st)
         return;
-    frame = &gl_telemetry[slot].frame;
+    frame = &st->telemetry.frame;
     if (!frame->frontend_active)
         return;
     frame->lock_acquisitions++;
@@ -539,18 +645,20 @@ static void gl_telemetry_frame_reset(zzapp_gl_frame_telemetry_t *frame,
     boundary->total_calls = sample_sequence;
 }
 
-void zzapp_svc_gl_telemetry_reset(uint32_t slot)
+void zzapp_svc_gl_telemetry_reset(uint32_t pid)
 {
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
+    svc_state_t *st = svc_state(pid);
+
+    if (!st)
         return;
-    memset(&gl_telemetry[slot], 0, sizeof(gl_telemetry[slot]));
-    memset(&zzapp_svc_counters[slot][1], 0,
-           sizeof(zzapp_svc_counters[slot][1]));
+    memset(&st->telemetry, 0, sizeof(st->telemetry));
+    memset(&st->block.counters[1], 0, sizeof(st->block.counters[1]));
 }
 
-int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
+int zzapp_svc_gl_telemetry_swap(uint32_t pid, uint64_t now_us,
                                  zzapp_gl_telemetry_snapshot_t *snapshot)
 {
+    svc_state_t *st = svc_state(pid);
     zzapp_gl_telemetry_t *telemetry;
     zzapp_gl_frame_telemetry_t *frame;
     zzapp_gl_report_telemetry_t *report;
@@ -559,12 +667,12 @@ int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
     zzapp_gl_telemetry_snapshot_t *out = snapshot ? snapshot : &local;
     uint32_t i;
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
+    if (!st)
         return 0;
-    telemetry = &gl_telemetry[slot];
+    telemetry = &st->telemetry;
     frame = &telemetry->frame;
     report = &telemetry->pending;
-    boundary = &zzapp_svc_counters[slot][1];
+    boundary = &st->block.counters[1];
     if (!telemetry->swap_started) {
         telemetry->last_swap_us = now_us;
         telemetry->last_report_us = now_us;
@@ -607,7 +715,7 @@ int zzapp_svc_gl_telemetry_swap(uint32_t slot, uint64_t now_us,
     return 1;
 }
 
-void zzapp_svc_gl_telemetry_report(uint32_t slot,
+void zzapp_svc_gl_telemetry_report(uint32_t pid,
                                     const zzapp_gl_telemetry_snapshot_t *snapshot)
 {
 #ifndef ZZAPP_HOST_TEST
@@ -616,7 +724,7 @@ void zzapp_svc_gl_telemetry_report(uint32_t slot,
     printf("[app] gl slot=%lu frames=%lu calls=%lu/%lu top=%lu:%lu,%lu:%lu,"
            "%lu:%lu,%lu:%lu,%lu:%lu,%lu:%lu,%lu:%lu,%lu:%lu lock=%lu/%lu "
            "fail=%lu/%lu span=%lu/%lu avg=%lu/%lu/%lu/%lu share=%lu/%lu/%lu%%\r\n",
-           (unsigned long)slot, (unsigned long)snapshot->frames,
+           (unsigned long)pid, (unsigned long)snapshot->frames,
            (unsigned long)snapshot->gl_calls_per_frame,
            (unsigned long)snapshot->max_gl_calls,
            (unsigned long)snapshot->top_slots[0], (unsigned long)snapshot->top_counts[0],
@@ -641,55 +749,28 @@ void zzapp_svc_gl_telemetry_report(uint32_t slot,
            (unsigned long)snapshot->descriptor_share_percent,
            (unsigned long)snapshot->lock_share_percent);
 #else
-    (void)slot;
+    (void)pid;
     (void)snapshot;
 #endif
 }
 #else
-static inline void gl_telemetry_frame_begin(uint32_t slot, uint32_t number)
-{ (void)slot; (void)number; }
-static inline void gl_telemetry_descriptor_end(uint32_t slot)
-{ (void)slot; }
-static inline void gl_telemetry_descriptor_failure(uint32_t slot)
-{ (void)slot; }
-static inline void gl_telemetry_pointer_failure(uint32_t slot)
-{ (void)slot; }
-static inline void gl_telemetry_array_span(uint32_t slot)
-{ (void)slot; }
-static inline void gl_telemetry_array_fallback(uint32_t slot)
-{ (void)slot; }
-static inline void gl_telemetry_frontend_begin(uint32_t slot)
-{ (void)slot; }
-static inline void gl_telemetry_frontend_end(uint32_t slot)
-{ (void)slot; }
+static inline void gl_telemetry_frame_begin(svc_state_t *st, uint32_t number)
+{ (void)st; (void)number; }
+static inline void gl_telemetry_descriptor_end(svc_state_t *st)
+{ (void)st; }
+static inline void gl_telemetry_descriptor_failure(svc_state_t *st)
+{ (void)st; }
+static inline void gl_telemetry_pointer_failure(svc_state_t *st)
+{ (void)st; }
+static inline void gl_telemetry_array_span(svc_state_t *st)
+{ (void)st; }
+static inline void gl_telemetry_array_fallback(svc_state_t *st)
+{ (void)st; }
+static inline void gl_telemetry_frontend_begin(svc_state_t *st)
+{ (void)st; }
+static inline void gl_telemetry_frontend_end(svc_state_t *st)
+{ (void)st; }
 #endif
-static uintptr_t gl_alias[ZZAPP_AS_SLOT_COUNT];
-typedef struct {
-    uint32_t alignment;
-    uint32_t row_length;
-    uint32_t skip_rows;
-    uint32_t skip_pixels;
-} gl_pixel_store_t;
-typedef struct {
-    uint32_t pointer;
-    int32_t size;
-    uint32_t type;
-    int32_t stride;
-    uint8_t enabled;
-} gl_client_array_t;
-typedef struct {
-    gl_client_array_t vertex;
-    gl_client_array_t color;
-    gl_client_array_t texcoord[GL_TEXTURE_UNITS];
-    gl_pixel_store_t pack;
-    gl_pixel_store_t unpack;
-    uint32_t generation;
-    uint32_t active_texture;
-    uint32_t error;
-    uint8_t in_begin;
-    uint8_t lock_held;
-} gl_client_state_t;
-static gl_client_state_t gl_client[ZZAPP_AS_SLOT_COUNT];
 
 
 #define P(a, d, l, n, e, c) { a, d, l, n, e, c, 0U, 0U, 0U }
@@ -879,21 +960,26 @@ uintptr_t zzapp_svc_api_veneer(uint32_t slot)
 { return slot < API_VENEERS ? (uintptr_t)VENEER_PAGE + slot * VENEER_BYTES : 0U; }
 uintptr_t zzapp_svc_gl_veneer(uint32_t slot)
 { return slot < GL_COUNT ? (uintptr_t)VENEER_PAGE + (ZZAPP_SVC_GL_FIRST + slot) * VENEER_BYTES : 0U; }
-int zzapp_svc_set_veneer_alias(uint32_t slot, uintptr_t address)
+int zzapp_svc_set_veneer_alias(uint32_t pid, uintptr_t address)
 {
-    if (slot >= ZZAPP_AS_SLOT_COUNT || !address ||
+    svc_state_t *st = svc_state(pid);
+
+    if (!st || !address || (uint64_t)address > UINT32_MAX ||
         address & (VENEER_PAGE_BYTES - 1U))
         return AAR_E_INVAL;
-    veneer_alias[slot] = address;
+    st->veneer_alias = (uint32_t)address;
     return AAR_OK;
 }
-int zzapp_svc_set_table_aliases(uint32_t slot, uintptr_t api_address,
+int zzapp_svc_set_table_aliases(uint32_t pid, uintptr_t api_address,
                                 uintptr_t gl_address)
 {
-    if (slot >= ZZAPP_AS_SLOT_COUNT || !api_address || !gl_address)
+    svc_state_t *st = svc_state(pid);
+
+    if (!st || !api_address || !gl_address ||
+        (uint64_t)api_address > UINT32_MAX || (uint64_t)gl_address > UINT32_MAX)
         return AAR_E_INVAL;
-    api_alias[slot] = api_address;
-    gl_alias[slot] = gl_address;
+    st->api_alias = (uint32_t)api_address;
+    st->gl_alias = (uint32_t)gl_address;
     return AAR_OK;
 }
 int zzapp_svc_is_veneer(uintptr_t address)
@@ -939,25 +1025,26 @@ int zzapp_svc_copy_api(aar_api *destination, const aar_api *source)
     return AAR_OK;
 }
 
-/* Where the app sees field `offset` of its slot's table page. */
-static uintptr_t user_table_address(uint32_t slot, const void *kernel_address,
-                                    size_t offset)
+/* Where the app sees field `offset` of its table page. */
+static uintptr_t user_table_address(const svc_state_t *st,
+                                    const void *kernel_address, size_t offset)
 {
-    return api_alias[slot] ? api_alias[slot] + offset :
+    return st->api_alias ? (uintptr_t)st->api_alias + offset :
            (uintptr_t)kernel_address;
 }
 
-static uintptr_t user_veneer(uint32_t slot, uint32_t number)
+static uintptr_t user_veneer(const svc_state_t *st, uint32_t number)
 {
-    return (veneer_alias[slot] ? veneer_alias[slot] : (uintptr_t)VENEER_PAGE) +
+    return (st->veneer_alias ? (uintptr_t)st->veneer_alias :
+                               (uintptr_t)VENEER_PAGE) +
            number * VENEER_BYTES;
 }
 
-/* The slot's aar_ext_zz9000 for the app: the runtime's own table with
+/* The app's aar_ext_zz9000: the runtime's own table with
  * gl_bind_flags a veneer and build_id copied into the app's read-only page.
  * gl_build_id stays NULL: the resident firmware does not know the GL module's
  * source revision (the module prints it on the UART when it loads). */
-static void fill_user_ext(uint32_t slot, struct user_api_table *table,
+static void fill_user_ext(const svc_state_t *st, struct user_api_table *table,
                           const aar_api *source)
 {
     const aar_ext_zz9000 *runtime = NULL;
@@ -972,44 +1059,56 @@ static void fill_user_ext(uint32_t slot, struct user_api_table *table,
     table->ext.size = (uint32_t)sizeof(table->ext);
     if (AAR_EXT_ZZ9000_COVERS(runtime, gl_bind_flags) && runtime->gl_bind_flags)
         table->ext.gl_bind_flags = (const aar_gl *(*)(uint32_t, uint32_t))
-            user_veneer(slot, ZZAPP_SVC_EXT_GL_BIND_FLAGS);
+            user_veneer(st, ZZAPP_SVC_EXT_GL_BIND_FLAGS);
     if (AAR_EXT_ZZ9000_COVERS(runtime, build_id) && runtime->build_id) {
         copy_build_id(table->build_id, runtime->build_id);
-        table->ext.build_id = (const char *)user_table_address(slot,
+        table->ext.build_id = (const char *)user_table_address(st,
             table->build_id, offsetof(struct user_api_table, build_id));
     }
 }
 
-const aar_api *zzapp_svc_api_for_slot(uint32_t slot, const aar_api *source)
+/* Both table pages are the app's read-only view of its record's tables area,
+ * and the area is reused from one app to the next: start from zero, so no
+ * byte of the previous app's tables outlives its table size. */
+const aar_api *zzapp_svc_api_for_slot(uint32_t pid, const aar_api *source)
 {
-    struct user_api_table *table;
+    svc_state_t *st = svc_state(pid);
+    struct user_api_table *table = user_api_of(pid);
+    struct user_gl_table *gl_table = user_gl_of(pid);
     uintptr_t *entries;
     uint32_t i;
-    if (slot >= ZZAPP_AS_SLOT_COUNT || !source || source->size > sizeof(*source) || source->size < API_FIRST)
+    if (!st || !table || !gl_table || !source || source->size > sizeof(*source) || source->size < API_FIRST)
         return NULL;
-    table = &user_api[slot];
+    memset(table, 0, sizeof(*table));
+    memset(gl_table, 0, sizeof(*gl_table));
     memcpy(&table->table, source, source->size);
     entries = (uintptr_t *)(void *)((uint8_t *)&table->table + API_FIRST);
     for (i = 0U; i < API_COUNT; ++i)
-        entries[i] = table_entry(source, i, user_veneer(slot, i));
-    fill_user_ext(slot, table, source);
+        entries[i] = table_entry(source, i, user_veneer(st, i));
+    fill_user_ext(st, table, source);
     return &table->table;
 }
 
-/* What the `ext` call hands the app: its slot's table, or NULL. */
-const aar_ext_zz9000 *zzapp_svc_ext_for_slot(uint32_t slot)
+/* What the `ext` call hands the app: its table, or NULL. */
+const aar_ext_zz9000 *zzapp_svc_ext_for_slot(uint32_t pid)
 {
-    return slot < ZZAPP_AS_SLOT_COUNT && user_api[slot].ext.size ?
-           &user_api[slot].ext : NULL;
+    struct user_api_table *table = user_api_of(pid);
+
+    return table && table->ext.size ? &table->ext : NULL;
 }
 
-static uintptr_t ext_user_address(uint32_t slot)
+static uintptr_t ext_user_address(const svc_state_t *st,
+                                  const struct user_api_table *table)
 {
-    return user_table_address(slot, &user_api[slot].ext,
+    return user_table_address(st, &table->ext,
                               offsetof(struct user_api_table, ext));
 }
-aar_gl *zzapp_svc_gl_for_slot(uint32_t slot)
-{ return slot < ZZAPP_AS_SLOT_COUNT ? &user_gl[slot].table : NULL; }
+aar_gl *zzapp_svc_gl_for_slot(uint32_t pid)
+{
+    struct user_gl_table *table = user_gl_of(pid);
+
+    return table ? &table->table : NULL;
+}
 int zzapp_svc_copy_gl(aar_gl *destination, const aar_gl *source)
 {
     uintptr_t *entries;
@@ -1022,7 +1121,7 @@ int zzapp_svc_copy_gl(aar_gl *destination, const aar_gl *source)
         entries[i] = zzapp_svc_gl_veneer(i);
     return AAR_OK;
 }
-static int zzapp_svc_copy_gl_for_slot(uint32_t slot, aar_gl *destination,
+static int zzapp_svc_copy_gl_for_slot(const svc_state_t *st, aar_gl *destination,
                                       const aar_gl *source)
 {
     uintptr_t *entries;
@@ -1030,11 +1129,11 @@ static int zzapp_svc_copy_gl_for_slot(uint32_t slot, aar_gl *destination,
 
     if (zzapp_svc_copy_gl(destination, source) != AAR_OK)
         return AAR_E_INVAL;
-    if (!veneer_alias[slot])
+    if (!st->veneer_alias)
         return AAR_OK;
     entries = (uintptr_t *)(void *)((uint8_t *)destination + GL_FIRST);
     for (i = 0U; i < GL_COUNT; ++i)
-        entries[i] = veneer_alias[slot] +
+        entries[i] = (uintptr_t)st->veneer_alias +
                      (ZZAPP_SVC_GL_FIRST + i) * VENEER_BYTES;
     return AAR_OK;
 }
@@ -1080,20 +1179,25 @@ static uint32_t gl_type_bytes(uint32_t type)
     default: return 0U;
     }
 }
-static void gl_client_reset(uint32_t slot)
+static void gl_client_reset(svc_state_t *st)
 {
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return;
-    memset(&gl_client[slot], 0, sizeof(gl_client[slot]));
-    gl_client[slot].pack.alignment = 4U;
-    gl_client[slot].unpack.alignment = 4U;
+    memset(&st->gl_client, 0, sizeof(st->gl_client));
+    st->gl_client.pack.alignment = 4U;
+    st->gl_client.unpack.alignment = 4U;
 }
-void zzapp_svc_gl_release(uint32_t slot, uint32_t generation)
+static void gl_release(svc_state_t *st, uint32_t generation)
 {
-    if (slot < ZZAPP_AS_SLOT_COUNT && gl_client[slot].generation == generation) {
-        direct_gl[slot] = NULL;
-        gl_client_reset(slot);
+    if (st->gl_client.generation == generation) {
+        st->direct_gl = NULL;
+        gl_client_reset(st);
     }
+}
+void zzapp_svc_gl_release(uint32_t pid, uint32_t generation)
+{
+    svc_state_t *st = svc_state(pid);
+
+    if (st)
+        gl_release(st, generation);
 }
 static gl_client_array_t *gl_client_array(gl_client_state_t *state,
                                           uint32_t number)
@@ -1104,14 +1208,12 @@ static gl_client_array_t *gl_client_array(gl_client_state_t *state,
         return &state->texcoord[state->active_texture];
     return NULL;
 }
-static void gl_record_client_call(uint32_t slot, uint32_t number,
+static void gl_record_client_call(svc_state_t *st, uint32_t number,
                                   const uint32_t args[SVC_MAX_WORDS])
 {
-    gl_client_state_t *state;
+    gl_client_state_t *state = &st->gl_client;
     gl_client_array_t *array;
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT) return;
-    state = &gl_client[slot];
     if (number == GL_SLOT(Begin)) {
         if (!state->in_begin)
             state->in_begin = 1U;
@@ -1214,7 +1316,7 @@ static int gl_validate_array_index(const zzapp_as_t *as,
             return 0;
     return 1;
 }
-static int gl_validate_array_span(uint32_t slot, const zzapp_as_t *as,
+static int gl_validate_array_span(svc_state_t *st, const zzapp_as_t *as,
                                   const gl_client_array_t *array,
                                   uint32_t min, uint32_t max,
                                   uint32_t element_count)
@@ -1241,24 +1343,24 @@ static int gl_validate_array_span(uint32_t slot, const zzapp_as_t *as,
     pages = ((hi - 1U) >> 12) - (lo >> 12) + 1U;
     if (pages > element_count || hi - lo > UINT32_MAX)
         return 0;
-    gl_telemetry_array_span(slot);
+    gl_telemetry_array_span(st);
     return zzapp_svc_check_user(as, (uint32_t)lo, (uint32_t)(hi - lo), 0) ==
            AAR_OK;
 }
-static int gl_validate_spans(uint32_t slot, const zzapp_as_t *as,
+static int gl_validate_spans(svc_state_t *st, const zzapp_as_t *as,
                              gl_client_state_t *state, uint32_t min,
                              uint32_t max, uint32_t element_count)
 {
     uint32_t texture;
 
-    if (!gl_validate_array_span(slot, as, &state->vertex, min, max,
+    if (!gl_validate_array_span(st, as, &state->vertex, min, max,
                                 element_count))
         return 0;
-    if (!gl_validate_array_span(slot, as, &state->color, min, max,
+    if (!gl_validate_array_span(st, as, &state->color, min, max,
                                 element_count))
         return 0;
     for (texture = 0U; texture < GL_TEXTURE_UNITS; ++texture)
-        if (!gl_validate_array_span(slot, as, &state->texcoord[texture],
+        if (!gl_validate_array_span(st, as, &state->texcoord[texture],
                                     min, max, element_count))
             return 0;
     return 1;
@@ -1273,10 +1375,10 @@ static uint32_t gl_index_at(const uint8_t *indices, uint32_t index,
     memcpy(&value, indices + index * index_bytes, index_bytes);
     return value;
 }
-static int gl_validate_draw(const zzapp_as_t *as, uint32_t slot,
+static int gl_validate_draw(const zzapp_as_t *as, svc_state_t *st,
                             uint32_t number, const uint32_t args[SVC_MAX_WORDS])
 {
-    gl_client_state_t *state;
+    gl_client_state_t *state = &st->gl_client;
     int32_t count;
     uint32_t min;
     uint32_t max;
@@ -1286,8 +1388,6 @@ static int gl_validate_draw(const zzapp_as_t *as, uint32_t slot,
     uint32_t index_bytes = 0U;
     const uint8_t *indices = NULL;
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT) return 0;
-    state = &gl_client[slot];
     count = (int32_t)(number == GL_SLOT(DrawArrays) ? args[2] : args[1]);
     if (count <= 0) return 1;
     if (number == GL_SLOT(DrawArrays)) {
@@ -1316,13 +1416,13 @@ static int gl_validate_draw(const zzapp_as_t *as, uint32_t slot,
             if (index > max) max = index;
         }
     }
-    span_status = gl_validate_spans(slot, as, state, min, max,
+    span_status = gl_validate_spans(st, as, state, min, max,
                                     (uint32_t)count);
     if (span_status == 1)
         return 1;
     if (span_status < 0)
         return 0;
-    gl_telemetry_array_fallback(slot);
+    gl_telemetry_array_fallback(st);
     if (number == GL_SLOT(DrawArrays)) {
         for (i = 0U; i < (uint32_t)count; ++i)
             if (!gl_validate_array_index(as, state, min + i))
@@ -1354,7 +1454,7 @@ static int frame_arguments(const zzapp_as_t *as, const zzapp_svc_frame_t *frame,
         if (stack_word(as, frame->user_sp, i - 4U, &args[i]) != AAR_OK) return AAR_E_FAULT;
     return AAR_OK;
 }
-static int gl_pixel_bytes(uint32_t slot, const uint32_t args[SVC_MAX_WORDS],
+static int gl_pixel_bytes(const svc_state_t *st, const uint32_t args[SVC_MAX_WORDS],
                           const zzapp_svc_pointer_t *pointer,
                           uint32_t *bytes)
 {
@@ -1371,8 +1471,6 @@ static int gl_pixel_bytes(uint32_t slot, const uint32_t args[SVC_MAX_WORDS],
     int32_t width = (int32_t)args[first];
     int32_t height = (int32_t)args[first + 1U];
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        return AAR_E_FAULT;
     if (width <= 0 || height <= 0) {
         *bytes = 0U;
         return AAR_OK;
@@ -1393,7 +1491,7 @@ static int gl_pixel_bytes(uint32_t slot, const uint32_t args[SVC_MAX_WORDS],
     default: return AAR_E_FAULT;
     }
     store = pointer->direction == ZZAPP_SVC_POINTER_IN ?
-        &gl_client[slot].unpack : &gl_client[slot].pack;
+        &st->gl_client.unpack : &st->gl_client.pack;
     pixel_bytes = (uint64_t)components * element;
     source_width = store->row_length ? store->row_length : (uint32_t)width;
     row_bytes = source_width * pixel_bytes;
@@ -1437,7 +1535,7 @@ static int gl_get_bytes(const uint32_t args[SVC_MAX_WORDS], uint32_t *bytes)
 /* Extent in bytes of one pointer argument. AAR_E_FAULT for a length no
  * address space holds, AAR_E_INVAL for a 64-bit service length the
  * firmware does not handle. */
-static int pointer_bytes(uint32_t slot, const zzapp_svc_pointer_t *pointer,
+static int pointer_bytes(const svc_state_t *st, const zzapp_svc_pointer_t *pointer,
                          const uint32_t args[SVC_MAX_WORDS], uint32_t *bytes)
 {
     uint64_t length;
@@ -1451,7 +1549,7 @@ static int pointer_bytes(uint32_t slot, const zzapp_svc_pointer_t *pointer,
     else if (pointer->length == ZZAPP_SVC_LENGTH_COUNT)
         length = (uint64_t)args[pointer->length_argument] * pointer->element_bytes;
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_PIXELS)
-        return gl_pixel_bytes(slot, args, pointer, bytes);
+        return gl_pixel_bytes(st, args, pointer, bytes);
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_INDICES)
         return gl_indices_bytes(args, pointer->length_argument, bytes);
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_GET)
@@ -1497,7 +1595,7 @@ static int entry_at(const void *table, uint32_t size, uint32_t first, uint32_t s
  * buffers. lengths[i] is the extent validated and copied for pointer i and
  * tails[i] the bytes past it that a size-first structure is zero-filled
  * with. Returns AAR_OK, AAR_E_FAULT or AAR_E_INVAL. */
-static int prepare_pointers(uint32_t slot, const zzapp_as_t *as,
+static int prepare_pointers(const svc_state_t *st, const zzapp_as_t *as,
                             const zzapp_svc_descriptor_t *descriptor,
                             uint32_t args[SVC_MAX_WORDS], uint8_t copies[3][COPY_BYTES],
                             char strings[3][STRING_BYTES], uint32_t originals[3],
@@ -1532,7 +1630,7 @@ static int prepare_pointers(uint32_t slot, const zzapp_as_t *as,
             bytes = size < pointer->element_bytes ? size : pointer->element_bytes;
             tail = size - bytes;
         } else {
-            rc = pointer_bytes(slot, pointer, args, &bytes);
+            rc = pointer_bytes(st, pointer, args, &bytes);
             if (rc != AAR_OK) return rc;
             if ((!address && bytes) ||
                 zzapp_svc_check_user(as, address, bytes, write) != AAR_OK) return AAR_E_FAULT;
@@ -1623,29 +1721,30 @@ static int call_gl_float(const aar_gl *gl, uint32_t slot, const zzapp_svc_frame_
     return 1;
 }
 
-/* Hands the app the GL table the module returned, copied into its slot with
+/* Hands the app the GL table the module returned, copied into its page with
  * a veneer for every entry. */
-static int dispatch_bind(uint32_t slot, const aar_gl *gl, uint32_t *result)
+static int dispatch_bind(svc_state_t *st, uint32_t pid, const aar_gl *gl,
+                         uint32_t *result)
 {
-    zzapp_proc_t *proc = zzapp_proc_slot(slot);
+    zzapp_proc_t *proc = zzapp_proc_slot(pid);
+    struct user_gl_table *table = user_gl_of(pid);
 
-    if (!gl || !proc || slot >= ZZAPP_AS_SLOT_COUNT ||
-        zzapp_svc_copy_gl_for_slot(slot, &user_gl[slot].table, gl) != AAR_OK) {
-        if (slot < ZZAPP_AS_SLOT_COUNT) {
-            direct_gl[slot] = NULL;
-            gl_client_reset(slot);
-        }
+    if (!gl || !proc || !table ||
+        zzapp_svc_copy_gl_for_slot(st, &table->table, gl) != AAR_OK) {
+        st->direct_gl = NULL;
+        gl_client_reset(st);
         *result = 0U;
         return AAR_OK;
     }
-    gl_client_reset(slot);
-    gl_client[slot].generation = proc->generation;
-    direct_gl[slot] = gl;
-    *result = (uint32_t)(gl_alias[slot] ? gl_alias[slot] :
-                         (uintptr_t)&user_gl[slot].table);
+    gl_client_reset(st);
+    st->gl_client.generation = proc->generation;
+    st->direct_gl = gl;
+    *result = (uint32_t)(st->gl_alias ? (uintptr_t)st->gl_alias :
+                         (uintptr_t)&table->table);
     return AAR_OK;
 }
-static int dispatch_api(const aar_api *api, uint32_t slot, zzapp_svc_frame_t *frame,
+static int dispatch_api(const aar_api *api, svc_state_t *st, uint32_t pid,
+                        zzapp_svc_frame_t *frame,
                         const zzapp_svc_descriptor_t *descriptor, uint32_t number,
                         uint32_t args[SVC_MAX_WORDS], uint32_t *result)
 {
@@ -1653,7 +1752,7 @@ static int dispatch_api(const aar_api *api, uint32_t slot, zzapp_svc_frame_t *fr
     uintptr_t entry;
     if (number == API_SLOT(gl_bind)) {
         if (!AAR_API_COVERS(api, gl_bind) || !api->gl_bind) return AAR_E_NOSYS;
-        return dispatch_bind(slot, api->gl_bind(args[0]), result);
+        return dispatch_bind(st, pid, api->gl_bind(args[0]), result);
     }
     if (number == API_SLOT(ext) || number == ZZAPP_SVC_EXT_GL_BIND_FLAGS) {
         const aar_ext_zz9000 *runtime;
@@ -1663,16 +1762,17 @@ static int dispatch_api(const aar_api *api, uint32_t slot, zzapp_svc_frame_t *fr
                                                     AAR_EXT_ZZ9000_MAIN);
         if (number == API_SLOT(ext)) {
             /* The runtime's ext decides which (platform, id) pairs exist;
-             * the app gets its own slot's copy of the table. */
+             * the app gets its own copy of the table. */
             const aar_ext_zz9000 *asked = (const aar_ext_zz9000 *)api->ext(args[0], args[1]);
+            const struct user_api_table *table = user_api_of(pid);
 
-            *result = asked && zzapp_svc_ext_for_slot(slot) ?
-                      (uint32_t)ext_user_address(slot) : 0U;
+            *result = asked && table && table->ext.size ?
+                      (uint32_t)ext_user_address(st, table) : 0U;
             return AAR_OK;
         }
         if (!AAR_EXT_ZZ9000_COVERS(runtime, gl_bind_flags) || !runtime->gl_bind_flags)
             return AAR_E_NOSYS;
-        return dispatch_bind(slot, runtime->gl_bind_flags(args[0], args[1]), result);
+        return dispatch_bind(st, pid, runtime->gl_bind_flags(args[0], args[1]), result);
     }
     if (number == API_SLOT(time_us)) {
         uint64_t value = api->time_us();
@@ -1684,29 +1784,30 @@ static int dispatch_api(const aar_api *api, uint32_t slot, zzapp_svc_frame_t *fr
     if (entry_at(api, api->size, API_FIRST, number, &entry) != AAR_OK)
         return AAR_E_NOSYS;
     *result = call_words(entry, args);
-    if (number == API_SLOT(gl_unbind) && slot < ZZAPP_AS_SLOT_COUNT)
-        zzapp_svc_gl_release(slot, gl_client[slot].generation);
+    if (number == API_SLOT(gl_unbind))
+        gl_release(st, st->gl_client.generation);
     return AAR_OK;
 }
-static int dispatch_gl(uint32_t slot, const zzapp_svc_frame_t *frame,
+static int dispatch_gl(svc_state_t *st, uint32_t pid, const zzapp_svc_frame_t *frame,
                        uint32_t number, const uint32_t args[SVC_MAX_WORDS], uint32_t *result)
 {
-    zzapp_proc_t *proc = zzapp_proc_slot(slot);
-    const aar_gl *gl = slot < ZZAPP_AS_SLOT_COUNT ? direct_gl[slot] : NULL;
+    zzapp_proc_t *proc = zzapp_proc_slot(pid);
+    struct user_gl_table *table = user_gl_of(pid);
+    const aar_gl *gl = st->direct_gl;
     uintptr_t entry;
     int status = AAR_OK;
 
-    if (!gl || !proc || gl_client[slot].generation != proc->generation) {
+    if (!gl || !proc || !table || st->gl_client.generation != proc->generation) {
         status = AAR_E_NOSYS;
         goto done;
     }
-    if (number == GL_SLOT(GetError) && gl_client[slot].error) {
-        *result = gl_client[slot].error;
-        gl_client[slot].error = 0U;
+    if (number == GL_SLOT(GetError) && st->gl_client.error) {
+        *result = st->gl_client.error;
+        st->gl_client.error = 0U;
         goto done;
     }
     if (number == GL_SLOT(LockArrays) || number == GL_SLOT(UnlockArrays)) {
-        gl_client_state_t *state = &gl_client[slot];
+        gl_client_state_t *state = &st->gl_client;
         int has_is_enabled = gl->size >=
             offsetof(aar_gl, IsEnabled) + sizeof(gl->IsEnabled) &&
             gl->IsEnabled;
@@ -1746,10 +1847,10 @@ static int dispatch_gl(uint32_t slot, const zzapp_svc_frame_t *frame,
             *result = 0U;
             goto done;
         }
-        copy_build_id(user_gl[slot].string, (const char *)string);
-        *result = (uint32_t)(gl_alias[slot] ?
-            gl_alias[slot] + offsetof(struct user_gl_table, string) :
-            (uintptr_t)user_gl[slot].string);
+        copy_build_id(table->string, (const char *)string);
+        *result = (uint32_t)(st->gl_alias ?
+            (uintptr_t)st->gl_alias + offsetof(struct user_gl_table, string) :
+            (uintptr_t)table->string);
         goto done;
     }
     if (call_gl_float(gl, number, frame, args, result))
@@ -1759,19 +1860,15 @@ static int dispatch_gl(uint32_t slot, const zzapp_svc_frame_t *frame,
         goto done;
     }
     *result = call_words(entry, args);
-    gl_record_client_call(slot, number, args);
+    gl_record_client_call(st, number, args);
 done:
-    gl_telemetry_frontend_end(slot);
+    gl_telemetry_frontend_end(st);
     return status;
 }
 
-/* Veneer number of each slot's latest SVC (GL calls are 128 and up), for
- * the stop report on the UART. */
-volatile uint32_t zzapp_svc_last_number[ZZAPP_AS_SLOT_COUNT];
-
 static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
-                                    uint32_t slot, uint32_t number,
-                                    zzapp_svc_frame_t *frame)
+                                    svc_state_t *st, uint32_t pid,
+                                    uint32_t number, zzapp_svc_frame_t *frame)
 {
     const zzapp_svc_descriptor_t *descriptor;
     uint32_t result = 0U;
@@ -1787,40 +1884,40 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
     gl = number >= ZZAPP_SVC_GL_FIRST;
     number -= gl ? ZZAPP_SVC_GL_FIRST : 0U;
     if (gl)
-        gl_telemetry_frame_begin(slot, number);
+        gl_telemetry_frame_begin(st, number);
     descriptor = gl ? zzapp_svc_gl_descriptor(number) :
                       zzapp_svc_api_descriptor(number);
     if (!descriptor) {
         if (gl) {
-            gl_telemetry_descriptor_failure(slot);
-            gl_telemetry_descriptor_end(slot);
+            gl_telemetry_descriptor_failure(st);
+            gl_telemetry_descriptor_end(st);
         }
         frame->r[0] = (uint32_t)AAR_E_NOSYS;
         return;
     }
     if (gl)
-        counters_handler_start(slot);
+        counters_handler_start(st);
     status = frame_arguments(&proc->as, frame, descriptor->arguments, args);
     if (status == AAR_OK)
-        status = prepare_pointers(slot, &proc->as, descriptor, args, copies,
+        status = prepare_pointers(st, &proc->as, descriptor, args, copies,
                                   strings, originals, lengths, tails);
     if (status != AAR_OK) {
         if (gl) {
-            gl_telemetry_pointer_failure(slot);
-            gl_telemetry_descriptor_end(slot);
-            counters_handler_end(slot);
+            gl_telemetry_pointer_failure(st);
+            gl_telemetry_descriptor_end(st);
+            counters_handler_end(st);
         }
         frame->r[0] = (uint32_t)status;
         return;
     }
     if (gl && (number == GL_SLOT(DrawArrays) ||
                number == GL_SLOT(DrawElements)) &&
-        !gl_validate_draw(&proc->as, slot, number, args)) {
-        if (!gl_client[slot].error)
-            gl_client[slot].error = GL_INVALID_VALUE;
-        gl_telemetry_pointer_failure(slot);
-        gl_telemetry_descriptor_end(slot);
-        counters_handler_end(slot);
+        !gl_validate_draw(&proc->as, st, number, args)) {
+        if (!st->gl_client.error)
+            st->gl_client.error = GL_INVALID_VALUE;
+        gl_telemetry_pointer_failure(st);
+        gl_telemetry_descriptor_end(st);
+        counters_handler_end(st);
         frame->r[0] = (uint32_t)AAR_E_FAULT;
         return;
     }
@@ -1840,14 +1937,14 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
         }
     }
     if (gl) {
-        gl_telemetry_descriptor_end(slot);
-        gl_telemetry_frontend_begin(slot);
+        gl_telemetry_descriptor_end(st);
+        gl_telemetry_frontend_begin(st);
     } else
-        counters_handler_start(slot);
-    status = gl ? dispatch_gl(slot, frame, number, args, &result) :
-                  dispatch_api(api, slot, frame, descriptor, number, args,
+        counters_handler_start(st);
+    status = gl ? dispatch_gl(st, pid, frame, number, args, &result) :
+                  dispatch_api(api, st, pid, frame, descriptor, number, args,
                                &result);
-    counters_handler_end(slot);
+    counters_handler_end(st);
     if (status != AAR_OK) {
         frame->r[0] = (uint32_t)(status == AAR_E_FAULT ? AAR_E_FAULT : AAR_E_NOSYS);
         return;
@@ -1879,17 +1976,23 @@ static int dispatch_fast_no_lock(const aar_api *api, uint32_t number,
     return AAR_E_NOSYS;
 }
 
+/* The record a call from the running thread belongs to: the scheduled
+ * thread's, else the one the services layer is serving. ZZAPP_PID_NONE when
+ * there is neither; the caller then fails the call. */
+static uint32_t svc_caller(void)
+{
+    int thread = zzapp_kernel_current_thread();
+
+    return thread >= 0 ? (uint32_t)thread : zzapp_services_current_pid();
+}
+
 #if ZZAPP_SVC_PROBES && ZZAPP_PERF_COUNTERS
 static void probe_invalidate_counter_tail(void)
 {
-    int thread = zzapp_kernel_current_thread();
-    uint32_t slot = thread >= 0 && thread < (int)ZZAPP_AS_SLOT_COUNT ?
-                    (uint32_t)thread : zzapp_services_current_slot();
+    svc_state_t *st = svc_state(svc_caller());
 
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        slot = 0U;
-    zzapp_svc_counters[slot][zzapp_svc_counter_class[slot]].handler_started =
-        0U;
+    if (st)
+        counters_selected(st)->handler_started = 0U;
 }
 #endif
 
@@ -1899,10 +2002,10 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
     const aar_api *api;
     zzapp_proc_t *proc;
     const zzapp_svc_descriptor_t *descriptor;
+    svc_state_t *st;
     uint32_t number;
-    uint32_t slot;
+    uint32_t pid;
     int status;
-    int thread;
 
     if (!frame)
         return;
@@ -1910,48 +2013,51 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
     if (number < API_COUNT) {
         descriptor = &api_descriptors[number];
         if (descriptor->flags & ZZAPP_SVC_FAST_NO_LOCK) {
-            thread = zzapp_kernel_current_thread();
-            slot = thread >= 0 && thread < (int)ZZAPP_AS_SLOT_COUNT ?
-                   (uint32_t)thread : zzapp_services_current_slot();
-            if (slot >= ZZAPP_AS_SLOT_COUNT)
-                slot = 0U;
-            counters_dispatch(slot, 0);
+            st = svc_state(svc_caller());
+            if (!st) {
+                frame->r[0] = (uint32_t)AAR_E_FAULT;
+                return;
+            }
+            counters_dispatch(st, 0);
             api = zzapp_api_table();
             if (!api) {
                 frame->r[0] = (uint32_t)AAR_E_FAULT;
                 return;
             }
-            zzapp_svc_last_number[slot] = number;
-            counters_handler_start(slot);
+            st->last_number = number;
+            counters_handler_start(st);
             status = dispatch_fast_no_lock(api, number, frame);
-            counters_handler_end(slot);
+            counters_handler_end(st);
             if (status != AAR_OK)
                 frame->r[0] = (uint32_t)AAR_E_NOSYS;
             return;
         }
     }
-    slot = zzapp_services_current_slot();
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        slot = 0U;
-    counters_dispatch(slot, number >= ZZAPP_SVC_GL_FIRST);
+    pid = zzapp_services_current_pid();
+    st = svc_state(pid);
+    if (!st) {
+        frame->r[0] = (uint32_t)AAR_E_FAULT;
+        return;
+    }
+    counters_dispatch(st, number >= ZZAPP_SVC_GL_FIRST);
     api = zzapp_api_table();
-    proc = zzapp_proc_slot(slot);
+    proc = zzapp_proc_slot(pid);
     if (!proc || !api) {
         frame->r[0] = (uint32_t)AAR_E_FAULT;
         return;
     }
-    zzapp_svc_last_number[slot] = number;
-    zzapp_svc_dispatch_slow(api, proc, slot, number, frame);
+    st->last_number = number;
+    zzapp_svc_dispatch_slow(api, proc, st, pid, number, frame);
 }
 #else
 void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
 {
     const aar_api *api;
     const zzapp_svc_descriptor_t *descriptor;
+    svc_state_t *st;
     uint32_t number;
-    uint32_t slot;
+    uint32_t pid;
     int status;
-    int thread;
     int fast = 0;
 
     if (!frame)
@@ -1974,39 +2080,42 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
     if (!fast) {
         zzapp_proc_t *proc;
 
-        slot = zzapp_services_current_slot();
-        if (slot >= ZZAPP_AS_SLOT_COUNT)
-            slot = 0U;
-        counters_dispatch(slot, number >= ZZAPP_SVC_GL_FIRST);
+        pid = zzapp_services_current_pid();
+        st = svc_state(pid);
+        if (!st) {
+            frame->r[0] = (uint32_t)AAR_E_FAULT;
+            return;
+        }
+        counters_dispatch(st, number >= ZZAPP_SVC_GL_FIRST);
         api = zzapp_api_table();
-        proc = zzapp_proc_slot(slot);
+        proc = zzapp_proc_slot(pid);
         if (!proc || !api) {
             frame->r[0] = (uint32_t)AAR_E_FAULT;
             return;
         }
-        zzapp_svc_last_number[slot] = number;
-        zzapp_svc_dispatch_slow(api, proc, slot, number, frame);
+        st->last_number = number;
+        zzapp_svc_dispatch_slow(api, proc, st, pid, number, frame);
         return;
     }
-    thread = zzapp_kernel_current_thread();
-    slot = thread >= 0 && thread < (int)ZZAPP_AS_SLOT_COUNT ?
-           (uint32_t)thread : zzapp_services_current_slot();
-    if (slot >= ZZAPP_AS_SLOT_COUNT)
-        slot = 0U;
-    counters_dispatch(slot, 0);
+    st = svc_state(svc_caller());
+    if (!st) {
+        frame->r[0] = (uint32_t)AAR_E_FAULT;
+        return;
+    }
+    counters_dispatch(st, 0);
     api = zzapp_api_table();
     if (!api) {
         frame->r[0] = (uint32_t)AAR_E_FAULT;
         return;
     }
-    zzapp_svc_last_number[slot] = number;
-    counters_handler_start(slot);
+    st->last_number = number;
+    counters_handler_start(st);
     if (number == ZZAPP_SVC_PROBE_P4) {
         frame->r[0] = 0U;
         status = AAR_OK;
     } else
         status = dispatch_fast_no_lock(api, number, frame);
-    counters_handler_end(slot);
+    counters_handler_end(st);
     if (status != AAR_OK)
         frame->r[0] = (uint32_t)AAR_E_NOSYS;
 }

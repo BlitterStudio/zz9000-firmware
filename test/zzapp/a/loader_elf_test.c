@@ -9,6 +9,15 @@
 #include "host_card_pool.h"
 #include "xil_cache.h"
 #include "zzapp_as.h"
+
+/* Every scenario starts from a fresh arena with record 0 admitted, as the
+ * services layer does at claim. */
+static void boot_with_record(void)
+{
+    (zzapp_boot_init)();
+    assert(zzapp_test_admit() == 0U);
+}
+#define zzapp_boot_init() boot_with_record()
 int zzapp_loader_have_image(void);
 uint32_t zzapp_test_loader_flush_count(void);
 int zzapp_test_loader_flush_range(uint32_t index, uintptr_t *addr,
@@ -31,7 +40,7 @@ void smp_local_irq_restore(uint32_t state) { (void)state; }
 struct xil_cache_mock_state g_xil_cache_mock;
 void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0U; }
 
-uint32_t zzapp_services_current_slot(void)
+uint32_t zzapp_services_current_pid(void)
 {
     return selected_slot;
 }
@@ -194,7 +203,7 @@ static void make_image(uint8_t image[IMAGE_BYTES])
 {
     uint8_t *ph;
     uint8_t *note;
-    uint8_t *sh;
+
 
     memset(image, 0, IMAGE_BYTES);
     image[0] = 0x7f; image[1] = 'E'; image[2] = 'L'; image[3] = 'F';
@@ -226,14 +235,66 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     note = image + NOTE_OFF;
     test_note_init(note);
 
+    put32(image + 48, 0);                 /* no section headers */
+}
+
+/*
+ * Relocations come from PT_DYNAMIC. The first PT_LOAD maps the file from
+ * offset 0 (so a table in the header area has a virtual address), the
+ * dynamic section sits at `dyn_off` and names a REL or RELA table at
+ * `table_va`, the third program header.
+ */
+#define DYN_OFF 0x0e0u
+#define DT_BYTES 32u
+
+static void load0_from_file_start(uint8_t *image, uint32_t filesz,
+                                  uint32_t memsz)
+{
+    uint8_t *ph = image + PHOFF;
+
+    put32(ph + 4, 0);
+    put32(ph + 8, 0);
+    put32(ph + 16, filesz);
+    put32(ph + 20, memsz);
+}
+
+static void add_dynamic(uint8_t *image, uint32_t dyn_off, uint32_t table_va,
+                        uint32_t table_bytes, int use_rela)
+{
+    uint8_t *dyn = image + dyn_off;
+    uint8_t *ph = image + PHOFF + 64U;
+
+    memset(dyn, 0, DT_BYTES);
+    put32(dyn + 0, use_rela ? 7u : 17u);      /* DT_RELA / DT_REL */
+    put32(dyn + 4, table_va);
+    put32(dyn + 8, use_rela ? 8u : 18u);      /* DT_RELASZ / DT_RELSZ */
+    put32(dyn + 12, table_bytes);
+    put32(dyn + 16, use_rela ? 9u : 19u);     /* DT_RELAENT / DT_RELENT */
+    put32(dyn + 20, use_rela ? 12u : 8u);
+    put16(image + 44, 3);
+    put32(ph + 0, 2);                     /* PT_DYNAMIC */
+    put32(ph + 4, dyn_off);
+    put32(ph + 8, dyn_off);
+    put32(ph + 16, DT_BYTES);
+    put32(ph + 20, DT_BYTES);
+    put32(ph + 24, 4);                    /* PF_R */
+}
+
+/* One relocation of the word at LOAD_OFF, by RELA (addend in the entry) or
+ * by REL (addend is the target word). */
+static void make_reloc_image(uint8_t image[IMAGE_BYTES], int use_rela)
+{
+    make_image(image);
+    load0_from_file_start(image, LOAD_OFF + 4U, LOAD_OFF + 8U);
     put32(image + RELA_OFF + 0, LOAD_OFF);
     put32(image + RELA_OFF + 4, 23);      /* R_ARM_RELATIVE, symbol zero */
-    put32(image + RELA_OFF + 8, LOAD_OFF);
-    sh = image + SHOFF;
-    put32(sh + 4, 4);                     /* SHT_RELA */
-    put32(sh + 16, RELA_OFF);
-    put32(sh + 20, 12);
-    put32(sh + 36, 12);
+    if (use_rela) {
+        put32(image + RELA_OFF + 8, LOAD_OFF);
+        add_dynamic(image, DYN_OFF, RELA_OFF, 12U, 1);
+    } else {
+        put32(image + LOAD_OFF, LOAD_OFF);
+        add_dynamic(image, DYN_OFF, RELA_OFF, 8U, 0);
+    }
 }
 static uint32_t successful_loads;
 
@@ -495,17 +556,14 @@ static void test_page_mapped_flush_work_is_bounded(void)
 static void make_relocation_stress_image(uint8_t *image, uint32_t bytes,
                                          uint32_t relocation_count)
 {
-    uint32_t shoff = RELA_OFF + relocation_count * 12U;
+    uint32_t dyn_off = RELA_OFF + relocation_count * 12U;
     uint32_t i;
-    uint8_t *sh;
 
-    assert(bytes >= shoff + 40U);
+    assert(bytes >= dyn_off + 40U);
     make_image(image);
     memset(image + RELA_OFF, 0, relocation_count * 12U);
-    memset(image + shoff, 0, 40U);
-    put32(image + 32U, shoff);
-    put32(image + PHOFF + 16U, bytes - LOAD_OFF);
-    put32(image + PHOFF + 20U, 3U << 20);
+    memset(image + dyn_off, 0, 40U);
+    load0_from_file_start(image, bytes, 3U << 20);
     for (i = 0U; i < relocation_count; i++) {
         uint8_t *rel = image + RELA_OFF + i * 12U;
 
@@ -513,11 +571,7 @@ static void make_relocation_stress_image(uint8_t *image, uint32_t bytes,
         put32(rel + 4U, 23U);
         put32(rel + 8U, LOAD_OFF);
     }
-    sh = image + shoff;
-    put32(sh + 4U, 4U);
-    put32(sh + 16U, RELA_OFF);
-    put32(sh + 20U, relocation_count * 12U);
-    put32(sh + 36U, 12U);
+    add_dynamic(image, dyn_off, RELA_OFF, relocation_count * 12U, 1);
 }
 
 static void test_relocation_allocation_and_zero_use_separate_passes(void)
@@ -665,15 +719,12 @@ static uint32_t span_reloc_offset(uint32_t i)
 
 static void make_span_relocation_image(uint8_t *image, uint32_t bytes)
 {
-    uint32_t shoff = RELA_OFF + SPAN_RELOC_COUNT * 12U;
+    uint32_t dyn_off = RELA_OFF + SPAN_RELOC_COUNT * 12U;
     uint32_t i;
-    uint8_t *sh;
 
-    assert(bytes >= shoff + 40U);
+    assert(bytes >= dyn_off + 40U);
     make_image(image);
-    put32(image + 32U, shoff);
-    put32(image + PHOFF + 16U, bytes - LOAD_OFF);
-    put32(image + PHOFF + 20U, 3U << 20);
+    load0_from_file_start(image, bytes, 3U << 20);
     for (i = 0U; i < SPAN_RELOC_COUNT; i++) {
         uint8_t *rel = image + RELA_OFF + i * 12U;
         uint32_t off = span_reloc_offset(i);
@@ -682,11 +733,7 @@ static void make_span_relocation_image(uint8_t *image, uint32_t bytes)
         put32(rel + 4U, 23U);
         put32(rel + 8U, off);
     }
-    sh = image + shoff;
-    put32(sh + 4, 4);
-    put32(sh + 16, RELA_OFF);
-    put32(sh + 20, SPAN_RELOC_COUNT * 12U);
-    put32(sh + 36, 12);
+    add_dynamic(image, dyn_off, RELA_OFF, SPAN_RELOC_COUNT * 12U, 1);
 }
 
 static void test_relocation_passes_are_bounded_and_flushed(void)
@@ -913,6 +960,7 @@ static void test_note_v1_load_rules(void)
     make_image(image);
     put32(image + PHOFF + 32U, 0U);
     put32(image + SHOFF + 4U, 7U);                    /* SHT_NOTE */
+    put16(image + 48U, 1U);                           /* one section header */
     put32(image + SHOFF + 16U, NOTE_OFF);
     put32(image + SHOFF + 20U, TEST_NOTE_BYTES);
     put32(image + SHOFF + 36U, 0U);
@@ -927,13 +975,11 @@ int main(void)
     uint32_t card;
     const aar_api *api;
     aar_heap_info mem;
-    uint32_t bsp[4096] = { 0U };
     host_card_pool_reset(256U << 20);
-    zzapp_as_init(bsp);
     zzapp_boot_init();
     assert(sizeof(zzapp_proc_slot(0)->image_frames) /
            sizeof(zzapp_proc_slot(0)->image_frames[0]) == ZZAPP_MEM_MAX_FRAMES);
-    make_image(image);
+    make_reloc_image(image, 1);
     assert(load_end(image) == AAR_OK);
     /* This host build uses the production address-space implementation. */
     card = zzapp_test_arena_card();
@@ -973,30 +1019,24 @@ int main(void)
     assert(zzapp_test_arena_mem() == NULL);
     assert(zzapp_proc_slot(0)->memory.committed == 0U);
 
-    /* Stock GNU ld emits SHT_REL: its addend is the target word, not a
-     * third relocation-field as in RELA. */
+    /* Stock GNU ld emits DT_REL: its addend is the target word, not a third
+     * relocation field as in RELA. */
     zzapp_boot_init();
-    make_image(image);
-    put32(image + RELA_OFF + 8, 0u);
-    put32(image + SHOFF + 4, 9u);          /* SHT_REL */
-    put32(image + SHOFF + 20, 8u);
-    put32(image + SHOFF + 36, 8u);
-    put32(image + LOAD_OFF, LOAD_OFF);
+    make_reloc_image(image, 0);
     assert(load_end(image) == AAR_OK);
     card = zzapp_test_arena_card();
     assert(get32(app_memory(0U, LOAD_OFF)) == card + LOAD_OFF);
     zzapp_loader_release();
     /* REL's implicit addend is read from its virtual target after PT_LOAD
-     * placement, not from the source-file offset. */
+     * placement, not from the source-file offset: the segment sits 0x20 above
+     * its file offsets, so the table, the dynamic section and the target all
+     * move with it. */
     zzapp_boot_init();
-    make_image(image);
+    make_reloc_image(image, 0);
     put32(image + 24, LOAD_OFF + 0x20u);
-    put32(image + PHOFF + 8, LOAD_OFF + 0x20u);
+    put32(image + PHOFF + 8, 0x20u);
     put32(image + RELA_OFF, LOAD_OFF + 0x20u);
-    put32(image + RELA_OFF + 8, 0u);
-    put32(image + SHOFF + 4, 9u);          /* SHT_REL */
-    put32(image + SHOFF + 20, 8u);
-    put32(image + SHOFF + 36, 8u);
+    put32(image + DYN_OFF + 4, RELA_OFF + 0x20u);
     put32(image + LOAD_OFF, LOAD_OFF + 0x20u);
     assert(load_end(image) == AAR_OK);
     card = zzapp_test_arena_card();
@@ -1004,20 +1044,15 @@ int main(void)
            card + LOAD_OFF + 0x20u);
     zzapp_loader_release();
 
-    zzapp_boot_init(); make_image(image);
-    put32(image + SHOFF + 4, 9u);          /* SHT_REL */
-    put32(image + SHOFF + 20, 8u);
-    put32(image + SHOFF + 36, 4u);         /* malformed entry size */
+    zzapp_boot_init(); make_reloc_image(image, 0);
+    put32(image + DYN_OFF + 20, 4u);       /* malformed entry size */
     assert(load_end(image) == AAR_E_INVAL);
 
-    zzapp_boot_init(); make_image(image);
-    put32(image + SHOFF + 4, 9u);          /* SHT_REL */
-    put32(image + SHOFF + 20, 8u);
-    put32(image + SHOFF + 36, 8u);
+    zzapp_boot_init(); make_reloc_image(image, 0);
     put32(image + RELA_OFF + 4, 2u);       /* unsupported relocation type */
     assert(load_end(image) == AAR_E_INVAL);
 
-    zzapp_boot_init(); make_image(image);
+    zzapp_boot_init(); make_reloc_image(image, 1);
     put32(image + RELA_OFF + 4, 0x100u | 23u); /* nonzero symbol index */
     assert(load_end(image) == AAR_E_INVAL);
 
@@ -1027,7 +1062,7 @@ int main(void)
     assert(zzapp_loader_have_image());
     zzapp_loader_release();
 
-    zzapp_boot_init(); make_image(image);
+    zzapp_boot_init(); make_reloc_image(image, 1);
     put32(image + RELA_OFF + 4, 2);
     assert(load_end(image) == AAR_E_INVAL);
 
@@ -1096,6 +1131,10 @@ int main(void)
     start_pending = 1;
     zzapp_worker_hook();
     assert(argv_started);
+
+    /* The record of the first app was retired at its exit: the next app
+     * claims a new one. */
+    zzapp_boot_init();
 
     make_image(image);
     put32(image + PHOFF + 20u, (1u << 20) - LOAD_OFF);

@@ -82,21 +82,27 @@ uint16_t sdk_decompress_stream_close(uint32_t session);
 #define SDK_MEDIA_APP_INSTANCE_LIMIT 0x00800000U
 #define SDK_MEDIA_SHARED_INSTANCE   0x00FFFFFCU
 
-static inline uint32_t sdk_compression_app_owner_bits(uint32_t slot,
-						      uint32_t generation)
+/*
+ * The MEDIA owner of an app's decoders, from the 24-bit admission serial of
+ * its process record (never 0, never reused between resets). Consecutive
+ * serials give distinct owners, all inside the app range above, so it is
+ * never a video-session, module or shared-heap owner. Two serials share an
+ * owner only if they differ by a multiple of the 0x7fff00 app instances, which
+ * needs a record that lived through that many admissions.
+ */
+static inline uint32_t sdk_compression_app_owner_bits(uint32_t serial)
 {
-	uint32_t span = (SDK_MEDIA_APP_INSTANCE_LIMIT -
-			 SDK_MEDIA_APP_INSTANCE_BASE) >> 2;
-	uint32_t instance = SDK_MEDIA_APP_INSTANCE_BASE +
-		((generation % span) << 2) + (slot & 3U);
+	uint32_t span = SDK_MEDIA_APP_INSTANCE_LIMIT -
+			SDK_MEDIA_APP_INSTANCE_BASE;
 
-	return ((uint32_t)2u << 24) | instance;
+	return ((uint32_t)2u << 24) |
+	       (SDK_MEDIA_APP_INSTANCE_BASE + serial % span);
 }
 
 unsigned sdk_compression_reclaim_core1_decode(void);
 unsigned sdk_compression_reclaim_app_decode(uint32_t owner);
-uint32_t sdk_compression_app_decode_owner(uint32_t slot,
-                                          uint32_t generation);
+/* The owner of record `pid`'s decoders, 0 for a pid with no live record. */
+uint32_t sdk_compression_app_decode_owner(uint32_t pid);
 
 /* Shared core-1 decode heap. Class 2 is CARD_POOL_CLASS_MEDIA;
  * sdk_compression.c asserts the match. */

@@ -185,12 +185,13 @@ core1_vector_svc:
 #endif
 #if ZZAPP_PERF_COUNTERS
 	/* PMCCNTR stamp after the mode and stack checks, before the compact
-	 * frame work. The scheduler publishes this slot before user return. */
+	 * frame work. zzapp_svc_counter_block is published with the current
+	 * thread and points at its record's counter block: entry stamp at
+	 * offset 0, class at 4, the two counter sets from 8, 88 bytes each. */
 	mrc p15, 0, r2, c9, c13, 0
-	ldr r1, =zzapp_svc_counter_slot
+	ldr r1, =zzapp_svc_counter_block
 	ldr r1, [r1]
-	ldr r3, =zzapp_svc_entry_stamp
-	str r2, [r3, r1, lsl #2]
+	str r2, [r1]
 #endif
 	sub r0, r0, #SVC_FRAME_BYTES
 	/* Store the user-bank stack and link directly in the compact frame. */
@@ -235,15 +236,10 @@ core1_vector_svc:
 	mov r1, #0
 	str r1, [sp, #76]
 #if ZZAPP_PERF_COUNTERS
-	ldr r2, =zzapp_svc_counter_slot
+	ldr r2, =zzapp_svc_counter_block
 	ldr r2, [r2]
-	ldr r3, =zzapp_svc_counter_class
-	ldrb r1, [r3, r2]
-	add r3, r2, r2, lsl #1
-	add r3, r3, r2, lsl #3
-	lsl r3, r3, #4
-	ldr r12, =zzapp_svc_counters
-	add r12, r12, r3
+	ldrb r1, [r2, #4]
+	add r12, r2, #8
 	cmp r1, #0
 	addne r12, r12, #88
 	mov r1, #0
@@ -261,15 +257,10 @@ core1_vector_svc:
 #if ZZAPP_PERF_COUNTERS
 	/* Fold the final PMU stage into its counter.  This preserves the return
 	 * decision in r0 and avoids a C helper and an aligned call frame. */
-	ldr r2, =zzapp_svc_counter_slot
+	ldr r2, =zzapp_svc_counter_block
 	ldr r2, [r2]
-	ldr r3, =zzapp_svc_counter_class
-	ldrb r1, [r3, r2]
-	add r3, r2, r2, lsl #1
-	add r3, r3, r2, lsl #3
-	lsl r3, r3, #4
-	ldr r12, =zzapp_svc_counters
-	add r12, r12, r3
+	ldrb r1, [r2, #4]
+	add r12, r2, #8
 	cmp r1, #0
 	addne r12, r12, #88
 	ldrb r3, [r12, #76]

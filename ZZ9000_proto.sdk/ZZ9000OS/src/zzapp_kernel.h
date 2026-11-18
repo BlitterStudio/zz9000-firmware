@@ -12,7 +12,15 @@
 #define ZZAPP_PERF_COUNTERS 1
 #endif
 
-#define ZZAPP_KERNEL_APP_SLOTS 4U
+/* The most records the scheduler can address: handles carry a 16-bit index
+ * and the table is bounded at 1024 (zzapp_rec.h). The capacity in use is
+ * the one zzapp_kernel_init() was given. */
+#define ZZAPP_KERNEL_MAX_APPS 1024U
+/* "No process": active thread, API handoff and TLB sampling sentinel. The
+ * same value as in zzapp_rec.h, so it can never collide with a real pid. */
+#define ZZAPP_PID_NONE 0xffffffffU
+/* Entries of the wake log ring; independent of the record count. */
+#define ZZAPP_KERNEL_WAKE_LOG 16U
 #define ZZAPP_KERNEL_QUANTUM_MS 5U
 #define ZZAPP_KERNEL_SERVICE_WINDOW_MS 100U
 #define ZZAPP_KERNEL_SERVICE_LIMIT_MS 95U
@@ -77,21 +85,19 @@ typedef struct {
 	uint32_t sgi_stamp;
 	uint32_t last_report_ms;
 	uint32_t report_count;
+	/* Records with a report request pending, and how many of those are
+	 * forced. The flags themselves live in the records. */
 	uint32_t report_pending;
 	uint32_t report_force;
 	uint32_t report_ready;
 	uint32_t sgi_pending;
 	uint32_t tlb_instruction_stamp;
 	uint32_t tlb_data_stamp;
-	uint32_t tlb_slot;
+	/* The record whose TLB refills are being sampled, or ZZAPP_PID_NONE. */
+	uint32_t tlb_pid;
 	uint64_t tlb_sample_until_ms;
 	uint32_t tlb_stamps_valid;
 	char report_text[640];
-	uint32_t audio_low_water[ZZAPP_KERNEL_APP_SLOTS];
-	uint32_t audio_starved[ZZAPP_KERNEL_APP_SLOTS];
-	uint32_t audio_underruns[ZZAPP_KERNEL_APP_SLOTS];
-	uint32_t tlb_instruction_refills[ZZAPP_KERNEL_APP_SLOTS];
-	uint32_t tlb_data_refills[ZZAPP_KERNEL_APP_SLOTS];
 } zzapp_kernel_perf_t;
 #endif
 
@@ -144,17 +150,15 @@ typedef enum {
 
 typedef enum {
 	ZZAPP_KERNEL_IDLE = -2,
-	ZZAPP_KERNEL_SYSTEM = -1,
-	ZZAPP_KERNEL_APP0 = 0,
-	ZZAPP_KERNEL_APP1,
-	ZZAPP_KERNEL_APP2,
-	ZZAPP_KERNEL_APP3
+	ZZAPP_KERNEL_SYSTEM = -1
 } zzapp_kernel_pick_t;
 
 typedef struct {
 	zzapp_thread_state_t state;
 	zzapp_wake_reason_t wake_reason;
 	uint8_t yield_pending;
+	/* 1 while the pid is on the kernel's run list (not STOPPED). */
+	uint8_t in_run;
 	uint32_t quantum_left;
 	uint64_t user_ticks;
 	uint64_t svc_ticks;
@@ -174,13 +178,28 @@ typedef struct {
 	uint32_t audio_sessions;
 } zzapp_kernel_resources_t;
 
+/*
+ * The scheduler. Threads are not owned by it: they are the first member of
+ * the process records, so `threads` is the record area and `stride` the
+ * distance between records. Per-record kernel words (resources, API wait
+ * state, perf counters) sit in the same record at offsetof(zzapp_rec_t,
+ * kernel). Nothing here is sized by the record count except `run`.
+ */
 typedef struct {
-	zzapp_thread_t threads[ZZAPP_KERNEL_APP_SLOTS];
+	uint8_t *threads;
+	uint32_t stride;
+	uint32_t capacity;
+	/* Dense list of the pids whose thread is not STOPPED, ascending. Every
+	 * scan walks it, not the capacity. Changes only at start and stop,
+	 * with local IRQs masked. */
+	uint32_t run_count;
+	uint16_t run[ZZAPP_KERNEL_MAX_APPS];
 	zzapp_thread_context_t system_context;
 	uint32_t system_context_valid;
 	uint64_t now;
 	uint64_t service_ticks;
 	uint32_t overload_count;
+	/* The next pick starts at the first runnable pid >= rr_next. */
 	uint32_t rr_next;
 	uint32_t active;
 	uint32_t service_due;
@@ -191,34 +210,50 @@ typedef struct {
 	uint32_t idle;
 	uint64_t idle_ticks;
 	uint32_t wake_serial;
-	uint8_t wake_log[ZZAPP_KERNEL_APP_SLOTS];
+	/* Ring of the latest wakes; wake_log_count counts all of them. */
+	uint16_t wake_log[ZZAPP_KERNEL_WAKE_LOG];
 	uint32_t wake_log_count;
 	int api_lock_owner;
 	uint32_t api_lock_depth;
 	uint32_t api_handoff;
 	uint32_t api_handoff_service_deferred;
 	uint32_t api_wait_serial;
-	uint32_t api_wait_sequence[ZZAPP_KERNEL_APP_SLOTS];
-	uint8_t api_waiting[ZZAPP_KERNEL_APP_SLOTS];
-	uint8_t api_resume_waiting[ZZAPP_KERNEL_APP_SLOTS];
 	int gl_owner;
 	uint32_t gl_generation;
 	uint32_t direct_audio_count;
-	zzapp_kernel_resources_t resources[ZZAPP_KERNEL_APP_SLOTS];
 #if ZZAPP_PERF_COUNTERS
 	zzapp_kernel_perf_t perf;
 #endif
 } zzapp_kernel_t;
 
-void zzapp_kernel_init(zzapp_kernel_t *kernel);
-void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t slot);
-int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t slot);
-int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t slot,
+/*
+ * Attach the scheduler to a record area: `threads` is the first record,
+ * `stride` the bytes between records (at least sizeof(zzapp_rec_t)), at most
+ * ZZAPP_KERNEL_MAX_APPS of them. Every thread starts STOPPED and every
+ * per-record kernel word is cleared. 0, or -1 for a bad area.
+ */
+int zzapp_kernel_init(zzapp_kernel_t *kernel, void *threads, uint32_t stride,
+		      uint32_t capacity);
+/* The thread of record `pid`, or NULL outside the capacity. */
+zzapp_thread_t *zzapp_kernel_thread(const zzapp_kernel_t *kernel, uint32_t pid);
+uint32_t zzapp_kernel_capacity(const zzapp_kernel_t *kernel);
+/* The run list: pids whose thread is not STOPPED, ascending. */
+uint32_t zzapp_kernel_run_count(const zzapp_kernel_t *kernel);
+uint32_t zzapp_kernel_run_pid(const zzapp_kernel_t *kernel, uint32_t index);
+/* Bytes of the record's kernel stack that were touched since it was last
+ * painted (prepare_app paints it), 0 outside the capacity. */
+uint32_t zzapp_kernel_stack_high_water(const zzapp_kernel_t *kernel,
+				       uint32_t pid);
+
+void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t pid);
+int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t pid);
+/* Builds the first context of `pid` and paints its kernel stack. */
+int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t pid,
 			      uint32_t entry, uint32_t api, uint32_t argc,
 			      uint32_t argv, uint32_t stack_top);
 int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
 			 zzapp_kernel_dispatch_t source, uint32_t elapsed_ms);
-int zzapp_kernel_wait_status(const zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_wait_status(const zzapp_kernel_t *kernel, uint32_t pid);
 int zzapp_kernel_apps_runnable(const zzapp_kernel_t *kernel);
 zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 					      zzapp_arm_frame_t *frame,
@@ -227,12 +262,12 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 /* Runtime glue in zzapp_host.c, called by the SVC vector after an API
  * call: returns the selected return frame. */
 zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame);
-int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t pid);
 /* Atomically release API lock, snapshot now, and enter SLEEPING under IRQ mask. */
-int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t slot, uint64_t sleep_ms);
-int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_ms);
+int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t pid,
 		zzapp_wake_reason_t reason);
-int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t pid,
 		uint64_t deadline);
 void zzapp_kernel_advance(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 void zzapp_kernel_service_due(zzapp_kernel_t *kernel);
@@ -261,13 +296,15 @@ void zzapp_kernel_perf_service_end_detail(zzapp_kernel_t *kernel,
 					   zzapp_perf_service_t service,
 					   uint32_t stamp, uint32_t detail,
 					   uint32_t bytes);
-void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_perf_audio(zzapp_kernel_t *kernel, uint32_t pid,
 			      uint32_t low_water, uint32_t starved,
 			      uint32_t underruns);
-void zzapp_kernel_perf_finish_slot(zzapp_kernel_t *kernel, uint32_t slot);
-void zzapp_kernel_perf_snapshot(const zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_perf_finish_slot(zzapp_kernel_t *kernel, uint32_t pid);
+void zzapp_kernel_perf_snapshot(const zzapp_kernel_t *kernel, uint32_t pid,
 				 zzapp_kernel_perf_snapshot_t *snapshot);
-void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t slot,
+/* Ask for a report of `pid`: a per-record flag, not a mask bit, so it works
+ * for every pid. */
+void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t pid,
 				       int force);
 int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel);
 void zzapp_kernel_perf_print_reports(zzapp_kernel_t *kernel);
@@ -276,6 +313,15 @@ extern volatile uint32_t zzapp_kernel_switch_entry_stamp;
 extern volatile uint32_t zzapp_kernel_switch_exit_stamp;
 extern volatile uint32_t zzapp_kernel_switch_complete;
 extern volatile uint32_t zzapp_kernel_switch_completed_entry_stamp;
+/*
+ * The SVC vector reads this pointer, not a slot index, to find the counters
+ * of the running app. It always points at a block of
+ * ZZAPP_SVC_COUNTER_BLOCK_BYTES: the current thread's block in its record
+ * (offset 0 of the record's svc part), or a scratch block when no app runs.
+ * zzapp_kernel_set_current_thread() publishes it.
+ */
+#define ZZAPP_SVC_COUNTER_BLOCK_BYTES 184U
+extern void *volatile zzapp_svc_counter_block;
 #ifdef ZZAPP_HOST_TEST
 uint32_t zzapp_kernel_perf_test_percentile(
 	const zzapp_kernel_perf_metric_t *metric, uint32_t percentile);
@@ -283,39 +329,41 @@ uint32_t zzapp_kernel_perf_test_percentile(
 #endif
 
 
-int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t slot);
-int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t slot);
-int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t pid);
+int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t pid);
+int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t pid);
 int zzapp_kernel_system_lock(zzapp_kernel_t *kernel);
 int zzapp_kernel_system_unlock(zzapp_kernel_t *kernel);
-int zzapp_kernel_api_fault_release(zzapp_kernel_t *kernel, uint32_t slot);
+int zzapp_kernel_api_fault_release(zzapp_kernel_t *kernel, uint32_t pid);
 /* Core 0 calls this only while core 1 is held in reset. */
 void zzapp_kernel_reset_lock(zzapp_kernel_t *kernel);
-int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel, uint32_t pid,
 			      uint32_t generation, uint32_t base, uint32_t bytes);
-void zzapp_kernel_surface_unbind(zzapp_kernel_t *kernel, uint32_t slot);
-int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_surface_unbind(zzapp_kernel_t *kernel, uint32_t pid);
+int zzapp_kernel_audio_open(zzapp_kernel_t *kernel, uint32_t pid,
 			    int direct_card_route);
-void zzapp_kernel_audio_close(zzapp_kernel_t *kernel, uint32_t slot);
-int zzapp_kernel_gl_bind(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_audio_close(zzapp_kernel_t *kernel, uint32_t pid);
+int zzapp_kernel_gl_bind(zzapp_kernel_t *kernel, uint32_t pid,
 			 uint32_t generation);
-void zzapp_kernel_gl_unbind(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_gl_unbind(zzapp_kernel_t *kernel, uint32_t pid,
 			    uint32_t generation);
-int zzapp_kernel_session_open(zzapp_kernel_t *kernel, uint32_t slot,
+int zzapp_kernel_session_open(zzapp_kernel_t *kernel, uint32_t pid,
 			      int audio_session);
-void zzapp_kernel_session_close(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_session_close(zzapp_kernel_t *kernel, uint32_t pid,
 			       int audio_session);
-void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t slot);
+/* Takes the pid off the run list and marks the thread STOPPED. */
+void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t pid);
 
 /* The exception path identifies an app by its scheduled thread, not by the
- * faulting PC. */
-void zzapp_kernel_set_current_thread(int slot);
+ * faulting PC. `pid` is a record index; -1 (system) and -2 (idle) are the
+ * only negative values. */
+void zzapp_kernel_set_current_thread(int pid);
 /* Published by the scheduler before an app returns to user mode; the SVC
  * vector reads it directly instead of calling back into C on entry. */
 extern volatile uintptr_t zzapp_kernel_svc_stack_top;
 int zzapp_kernel_current_thread(void);
 int zzapp_kernel_svc_can_return(void);
-void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t slot,
+void zzapp_kernel_charge_svc(zzapp_kernel_t *kernel, uint32_t pid,
 		uint32_t elapsed_ms);
 void zzapp_kernel_stack_paint(uint8_t *stack, uint32_t bytes);
 uint32_t zzapp_kernel_stack_used(const uint8_t *stack, uint32_t bytes);

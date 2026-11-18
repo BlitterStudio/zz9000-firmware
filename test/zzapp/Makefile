@@ -16,12 +16,13 @@ ZZAPP_HARNESS_OBJS := $(BUILD)/mock_window.o $(BUILD)/mock_api.o $(BUILD)/host_l
 	$(BUILD)/aar.o $(BUILD)/gl.o $(BUILD)/syscalls.o
 
 # Hook for test owners. They may append custom binaries/rules here.
--include $(wildcard [a-g]/tests.mk)
+-include $(wildcard [a-h]/tests.mk)
 
-AUTO_TEST_SOURCES := $(wildcard [a-g]/*_test.c)
+AUTO_TEST_SOURCES := $(wildcard [a-h]/*_test.c)
 AUTO_TESTS := $(patsubst %.c,$(BUILD)/%,$(AUTO_TEST_SOURCES))
 ZZAPP_TESTS ?=
-ALL_TESTS := $(AUTO_TESTS) $(ZZAPP_TESTS)
+# Suites a slice lists again in its tests.mk are still run once.
+ALL_TESTS := $(sort $(AUTO_TESTS) $(ZZAPP_TESTS))
 
 .PHONY: test clean module-harness
 
@@ -32,7 +33,7 @@ test: $(ALL_TESTS)
 # front-end objects, then supplies registry fakes from its test driver.
 MODULE_HARNESS := $(BUILD)/libzzapp_module_harness.a
 MODULE_HARNESS_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
-	$(BUILD)/a/zzapp_api.o
+	$(BUILD)/a/zzapp_api.o $(BUILD)/a/host_decode_stubs.o
 
 module-harness: $(MODULE_HARNESS)
 
