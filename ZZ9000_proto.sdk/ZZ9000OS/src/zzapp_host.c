@@ -2807,10 +2807,15 @@ static void host_arena_init(void)
     }
     base = ((uintptr_t)mapping + ZZAPP_REC_L1_BYTES - 1U) &
            ~(uintptr_t)(ZZAPP_REC_L1_BYTES - 1U);
-    zzapp_rec_layout_for(g_test_arena_apps, 78u << 20, &lay);
-    memset((void *)base, 0, lay.bytes);
-    if (zzapp_rec_arena_init((void *)base, &lay) != 0)
-        abort();
+    if (g_test_arena_apps == 0U) {
+        /* The boot-time carve found no memory (main.c): no arena. */
+        (void)zzapp_rec_arena_init(NULL, &lay);
+    } else {
+        zzapp_rec_layout_for(g_test_arena_apps, 78u << 20, &lay);
+        memset((void *)base, 0, lay.bytes);
+        if (zzapp_rec_arena_init((void *)base, &lay) != 0)
+            abort();
+    }
     /* The kernel template of the address spaces, from the DDR table above. */
     for (uint32_t i = 0; i < ZZAPP_HOST_BSP_DDR_SECTIONS; i++)
         g_test_bsp[i] = (i << 20) | ZZAPP_HOST_BSP_DDR_SECTION;
@@ -2820,7 +2825,7 @@ static void host_arena_init(void)
 
 void zzapp_test_set_arena_apps(uint32_t apps)
 {
-    if (apps < ZZAPP_REC_MIN_APPS)
+    if (apps != 0U && apps < ZZAPP_REC_MIN_APPS)
         apps = ZZAPP_REC_MIN_APPS;
     if (apps > ZZAPP_HOST_ARENA_APPS)
         apps = ZZAPP_HOST_ARENA_APPS;
@@ -2845,8 +2850,13 @@ void zzapp_boot_init(void)
 #ifdef ZZAPP_HOST_TEST
     host_arena_init();
 #endif
-    (void)zzapp_kernel_init(&g_kernel, zzapp_rec_by_pid(0),
-                            ZZAPP_REC_RECORD_BYTES, zzapp_rec_capacity());
+    /* Without a record arena (the boot carve found no memory, apps are
+     * unavailable) the kernel still needs a valid state: the shared worker
+     * takes the system lock at start, and a zeroed static kernel reads as
+     * record 0 owning it. */
+    if (zzapp_kernel_init(&g_kernel, zzapp_rec_by_pid(0),
+                          ZZAPP_REC_RECORD_BYTES, zzapp_rec_capacity()) != 0)
+        zzapp_kernel_init_system_only(&g_kernel);
     zzapp_as_set_table_fault_hook(table_fault_hook);
     zzapp_loader_memory_init();
     g_cold_restarts = 0;

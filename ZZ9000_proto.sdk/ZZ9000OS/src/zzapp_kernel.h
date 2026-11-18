@@ -234,6 +234,13 @@ typedef struct {
  */
 int zzapp_kernel_init(zzapp_kernel_t *kernel, void *threads, uint32_t stride,
 		      uint32_t capacity);
+/*
+ * A scheduler with no process records, for a card that booted without a
+ * record arena: capacity 0, no thread to run, but the system thread's kernel
+ * lock and service passes work, so the shared worker (SDK, media, MiniGL)
+ * still runs. Every record lookup answers NULL.
+ */
+void zzapp_kernel_init_system_only(zzapp_kernel_t *kernel);
 /* The thread of record `pid`, or NULL outside the capacity. */
 zzapp_thread_t *zzapp_kernel_thread(const zzapp_kernel_t *kernel, uint32_t pid);
 uint32_t zzapp_kernel_capacity(const zzapp_kernel_t *kernel);

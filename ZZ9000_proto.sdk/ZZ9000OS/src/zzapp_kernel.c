@@ -648,15 +648,14 @@ static void wake_due(zzapp_kernel_t *kernel)
 	}
 }
 
-int zzapp_kernel_init(zzapp_kernel_t *kernel, void *threads, uint32_t stride,
-		      uint32_t capacity)
+/* The state of a scheduler over `capacity` records at `threads` (or over none,
+ * for the system thread alone). Nothing is zero-valued by accident: the API
+ * lock reads "free" and not "owned by record 0". */
+static void kernel_attach(zzapp_kernel_t *kernel, void *threads,
+			  uint32_t stride, uint32_t capacity)
 {
 	uint32_t pid;
 
-	if (!kernel || !threads || capacity == 0U ||
-	    capacity > ZZAPP_KERNEL_MAX_APPS || stride < sizeof(zzapp_rec_t) ||
-	    ((uintptr_t)threads & 7U) != 0U)
-		return -1;
 	memset(kernel, 0, sizeof(*kernel));
 	kernel->threads = threads;
 	kernel->stride = stride;
@@ -681,7 +680,23 @@ int zzapp_kernel_init(zzapp_kernel_t *kernel, void *threads, uint32_t stride,
 #if ZZAPP_PERF_COUNTERS
 	zzapp_svc_counter_block = idle_counter_block;
 #endif
+}
+
+int zzapp_kernel_init(zzapp_kernel_t *kernel, void *threads, uint32_t stride,
+		      uint32_t capacity)
+{
+	if (!kernel || !threads || capacity == 0U ||
+	    capacity > ZZAPP_KERNEL_MAX_APPS || stride < sizeof(zzapp_rec_t) ||
+	    ((uintptr_t)threads & 7U) != 0U)
+		return -1;
+	kernel_attach(kernel, threads, stride, capacity);
 	return 0;
+}
+
+void zzapp_kernel_init_system_only(zzapp_kernel_t *kernel)
+{
+	if (kernel)
+		kernel_attach(kernel, NULL, 0U, 0U);
 }
 
 zzapp_thread_t *zzapp_kernel_thread(const zzapp_kernel_t *kernel, uint32_t pid)

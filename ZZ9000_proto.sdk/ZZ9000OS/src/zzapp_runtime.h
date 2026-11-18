@@ -338,7 +338,8 @@ void zzapp_test_set_wait_registered(uint32_t pid, int registered);
  * services layer does this at claim; harness tests without services call
  * it. Returns the pid, or ZZAPP_PID_NONE when the arena is full. */
 uint32_t zzapp_test_admit(void);
-/* Capacity of the next zzapp_boot_init() arena, MIN_APPS..ZZAPP_HOST_ARENA_APPS. */
+/* Capacity of the next zzapp_boot_init() arena, MIN_APPS..ZZAPP_HOST_ARENA_APPS;
+ * 0 boots without an arena, as a card whose boot carve found no memory. */
 void zzapp_test_set_arena_apps(uint32_t apps);
 /* Stop zzapp_rec_retire() after the stage with this number
  * (zzapp_retire_stage_t: 1 DETACHED .. 4 COMMIT), as a core-1 halt would; 0

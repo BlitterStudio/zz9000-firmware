@@ -88,7 +88,10 @@ The arena is sized by memory (`zzapp_rec.c:55-91`):
   of 32. A table is 1 KiB plus 6 bytes of bookkeeping (`zzapp_as.h:37-54`).
 - The total is rounded up to 1 MiB. If the block does not fit, the carve
   retries with half the records down to 8; if even 8 do not fit, no app can
-  run and the boot log says `record arena: no memory, apps unavailable`.
+  run and the boot log says `record arena: no memory, apps unavailable`. The
+  scheduler then starts with no records (`zzapp_kernel_init_system_only`): the
+  system thread still takes the kernel lock, so the shared core-1 worker keeps
+  serving the SDK, media and MiniGL, and every admission is refused `MEMORY`.
 
 This board: the permanent prefix of the card pool is `0x0B000000` to
 `0x2FE00000`, 590 MiB. That gives 231 records, 3872 L2 tables (16 template,

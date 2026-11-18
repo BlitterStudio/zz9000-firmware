@@ -1288,6 +1288,31 @@ static void test_init_rejects_bad_areas(void)
 	CHECK(kernel.api_handoff == ZZAPP_PID_NONE);
 }
 
+/* A card that booted without a record arena has no records, but the system
+ * thread still takes the kernel lock. A zeroed kernel (the static before any
+ * init) cannot: zero reads as record 0 owning the API lock. */
+static void test_system_only_kernel(void)
+{
+	zzapp_kernel_t kernel;
+
+	memset(&kernel, 0, sizeof(kernel));
+	CHECK(zzapp_kernel_system_lock(&kernel) == -1);
+	zzapp_kernel_init_system_only(&kernel);
+	CHECK(zzapp_kernel_capacity(&kernel) == 0u);
+	CHECK(zzapp_kernel_thread(&kernel, 0u) == NULL);
+	CHECK(zzapp_kernel_run_count(&kernel) == 0u);
+	CHECK(kernel.active == ZZAPP_PID_NONE && kernel.api_lock_owner == -1);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	CHECK(kernel.api_lock_owner == -1);
+	zzapp_kernel_service_due(&kernel);
+	CHECK(zzapp_kernel_start_app(&kernel, 0u) == -1);
+	CHECK(zzapp_kernel_api_lock(&kernel, 0u) == -1);
+	zzapp_kernel_init_system_only(NULL);
+}
+
 /* The records outlive a scheduler restart: a thread left RUNNABLE by the
  * previous run must not stay on a run list that no longer knows it. */
 static void test_init_clears_threads_left_by_a_previous_run(void)
@@ -1778,6 +1803,7 @@ int main(void)
     test_system_lock_inheritance_is_throttled();
     test_wake_hands_back_to_runnable_app();
     test_init_rejects_bad_areas();
+    test_system_only_kernel();
     test_init_clears_threads_left_by_a_previous_run();
     test_run_list_follows_start_and_stop();
     test_64_threads_round_robin_through_run_list();

@@ -714,6 +714,34 @@ static void test_reset_with_live_records(uint32_t count)
     }
 }
 
+/* ---- Boot without a record arena ---------------------------------------- */
+
+/* The boot carve found no memory: apps are unavailable, yet core 1's shared
+ * worker takes the system lock before anything else. The kernel is a static
+ * nothing initialised before, so all zero, and zero reads as record 0 owning
+ * the API lock. */
+static void test_boot_without_arena_leaves_a_usable_kernel(void)
+{
+    zzapp_kernel_t *kernel = zzapp_runtime_kernel();
+    uint32_t handle = 0U;
+    zzapp_rec_t *rec = NULL;
+
+    host_card_pool_reset(256U << 20);
+    memset(kernel, 0, sizeof(*kernel));
+    zzapp_test_set_arena_apps(0U);
+    zzapp_boot_init();
+    zzapp_test_set_arena_apps(64U);
+    assert(zzapp_rec_capacity() == 0U);
+    assert(zzapp_kernel_capacity(kernel) == 0U);
+    assert(zzapp_kernel_thread(kernel, 0U) == NULL);
+    assert(zzapp_kernel_system_lock(kernel) == 0);
+    assert(zzapp_kernel_system_unlock(kernel) == 0);
+    /* And again: the worker takes it on every pass. */
+    assert(zzapp_kernel_system_lock(kernel) == 0);
+    assert(zzapp_kernel_system_unlock(kernel) == 0);
+    assert(zzapp_rec_admit(0U, &handle, &rec) == AAR_REASON_MEMORY);
+}
+
 int main(void)
 {
     test_staging_released_at_load_end();
@@ -721,6 +749,7 @@ int main(void)
     test_load_can_be_retried_on_the_same_claim();
     test_retire_replay_after_every_stage();
     test_bad_record_index_is_a_hard_failure();
+    test_boot_without_arena_leaves_a_usable_kernel();
     test_core_heartbeat_is_not_in_record_zero();
     test_reset_deadline_is_shared();
     test_reset_with_live_records(0U);
