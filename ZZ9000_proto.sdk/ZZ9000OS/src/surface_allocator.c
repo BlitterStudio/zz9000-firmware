@@ -119,11 +119,15 @@ uint32_t surface_allocator_alloc_aligned(uint32_t size, uint32_t alignment) {
         return 0;
     }
 
-    /* First fit: try the gap before each block, then the tail gap. */
+    /* First fit: try the gap before each block, then the tail gap. Rounding
+     * the end of one block up to `alignment` can pass the start of the next
+     * one; that gap does not exist, and the unsigned difference must not
+     * read as a huge one. */
     candidate = sa_align_up(sa_base, alignment);
     insert_at = sa_count;
     for (uint32_t i = 0; i < sa_count; i++) {
-        if (sa_blocks[i].addr - candidate >= rounded) {
+        if (sa_blocks[i].addr >= candidate &&
+            sa_blocks[i].addr - candidate >= rounded) {
             insert_at = i;
             break;
         }

@@ -359,6 +359,42 @@ static void test_range_inserts_before_higher_block(void)
     CHECK(surface_allocator_owns(b, 0x100u));
 }
 
+/* Rounding a block's end up to a large alignment can pass the start of the
+ * next block. That must not count as a gap: the new block has to go after
+ * the next block, keep the table sorted and overlap nothing. On the card an
+ * SDK buffer allocated with 4 KiB alignment next to small console-encoder
+ * blocks was lost this way: a later lookup by address no longer found it. */
+static void test_aligned_alloc_skips_gap_past_next_block(void)
+{
+    uint32_t a;
+    uint32_t b;
+    uint32_t c;
+    uint32_t d;
+    uint32_t free_total;
+    uint32_t largest_free;
+
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    a = surface_allocator_alloc(ALIGN);
+    b = surface_allocator_alloc(ALIGN);
+    c = surface_allocator_alloc(ALIGN);
+    CHECK(a == HEAP_BASE && b == HEAP_BASE + ALIGN &&
+          c == HEAP_BASE + 2u * ALIGN);
+    CHECK(surface_allocator_free(b) == 0);
+
+    d = surface_allocator_alloc_aligned(4096u, 4096u);
+    CHECK(d == HEAP_BASE + 4096u);
+    CHECK(surface_allocator_owns(a, ALIGN));
+    CHECK(surface_allocator_owns(c, ALIGN));
+    CHECK(surface_allocator_owns(d, 4096u));
+    surface_allocator_free_stats(&free_total, &largest_free);
+    CHECK(free_total == HEAP_SIZE - 2u * ALIGN - 4096u);
+    CHECK(largest_free <= HEAP_SIZE);
+    CHECK(surface_allocator_free(c) == 0);
+    CHECK(surface_allocator_free(d) == 0);
+    CHECK(surface_allocator_free(a) == 0);
+    CHECK(surface_allocator_used_bytes() == 0u);
+}
+
 /* ---------------------------------------------------------------------- */
 
 int main(void) {
@@ -376,6 +412,7 @@ int main(void) {
     test_p96_sdk_interleaving();
     test_z3_host_window_reservation();
     test_range_inserts_before_higher_block();
+    test_aligned_alloc_skips_gap_past_next_block();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
