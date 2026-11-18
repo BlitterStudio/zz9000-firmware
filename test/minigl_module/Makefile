@@ -4,6 +4,7 @@ CFLAGS ?= -std=c11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-secti
 	-Wno-overflow -Wno-type-limits
 LDFLAGS ?= -Wl,--gc-sections
 ROOT := ../..
+include $(ROOT)/sdk/aar.mk
 FIRMWARE := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS
 SRC := $(FIRMWARE)/src
 ifndef MINIGL_LIB_DIR
@@ -18,7 +19,7 @@ PACKED_MODULE := $(BUILD)/MINIGL.ZZM
 
 CPPFLAGS := -D_GNU_SOURCE -DMINIGL_MODULE -DMINIGL_HOST_TEST -DMINIGL_RASTERIX \
 	-DTASKQ_HOST_TEST -DMGL_PLATFORM_ZZARM -DZZM_LOADER_HOST_TEST \
-	-I$(SRC) -I$(ROOT)/sdk/zzapp/include -I../card_pool \
+	-I$(SRC) -I$(AAR_DIR)/include -I../card_pool \
 	-I../zzm_resources/mock -I../modules/mock -I$(LIB)/include \
 	-I$(LIB)/src -I$(LIB)/vendor/minigl-framework/include
 

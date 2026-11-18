@@ -62,7 +62,7 @@
 
 
 #ifndef ZZAPP_GL_HAVE_HEADER
-/* Matches sdk/zzapp/include/zzapp.h (app/libzzapp 80c39ab). */
+/* Matches include/zzapp.h in BlitterStudio/aar (app/libzzapp 80c39ab). */
 typedef struct zzapp_gl {
     uint32_t size;
     void (*Begin)(uint32_t mode);

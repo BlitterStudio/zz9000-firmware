@@ -1,6 +1,6 @@
 /*
  * Pure logic of zz9k-app-ringtest: the message layout shared with
- * sdk/zzapp/templates/ringflood.c, the integrity and latency accounting, and
+ * templates/ringflood.c in BlitterStudio/aar, the integrity and latency accounting, and
  * the verdict. No AmigaOS calls, so a host test can drive it.
  *
  * Messages are 32 bytes, eight little-endian 32-bit words:

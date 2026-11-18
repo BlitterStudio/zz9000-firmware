@@ -21,6 +21,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
   wget xz-utils make cmake perl ca-certificates python3 g++ libssl-dev flex bison git p7zip-full
+# sdk/aar is fetched by build_firmware.sh and may be owned by the host user.
+git config --global --add safe.directory '*'
 
 ARM_TOOLCHAIN_VERSION=15.3.rel2
 ARM_TOOLCHAIN_SHA256=463df9665c246fa13bab2102115bbf83440661b6eb70b44f3dfd4712ca30037a

@@ -92,7 +92,9 @@ LIBOPUS_LIB ?= $(LIBOPUS_DIR)/arm/libopusdec.a
 LIBOPUS_INCLUDE_DIR ?= $(LIBOPUS_DIR)/arm/include
 
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
-INCLUDES += -I../../sdk/zzapp/include
+# The ARM app SDK headers come from AAR, fetched by sdk/scripts/fetch-aar.sh.
+include ../../sdk/aar.mk
+INCLUDES += -I$(AAR_DIR)/include
 INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
 INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)

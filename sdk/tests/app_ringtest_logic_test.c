@@ -147,7 +147,7 @@ static void full_run(ZZ9KRingTest *t, uint32_t count)
   full_run_ex(t, count, count, 9U);
 }
 
-/* The same four vectors sdk/zzapp/host/tests/check_runner.py checks against
+/* The same four vectors host/tests/check_runner.py in BlitterStudio/aar checks against
  * the ARM app's output. */
 static int test_pattern_known_answers(void)
 {
