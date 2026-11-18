@@ -850,6 +850,93 @@ static void test_load_after_a_refused_limit_and_a_big_app(void)
     }
 }
 
+/* Final console writes can sit behind an outstanding write, a ring wrap or a
+ * full SQ when the app exits. IDLE lets the launcher release the claim, so
+ * it must not become visible until the client has completed those writes. */
+static int console_exit_code;
+static int console_fill_sq;
+static const char console_prefix[] = "PASS cleanup\n";
+static const char console_summary[] = "filehash: final summary\n";
+
+static void entry_with_console_tail(const aar_api *api)
+{
+    uint32_t n;
+
+    if (console_fill_sq) {
+        uint8_t msg[AAR_MSG_BYTES] = { 0 };
+        while (zzapp_svc_msg_send(msg) == AAR_OK)
+            ;
+    }
+    assert(zzapp_svc_console_write(console_prefix, sizeof(console_prefix) - 1U,
+                                    &n) == AAR_OK);
+    assert(n == sizeof(console_prefix) - 1U);
+    assert(zzapp_svc_console_write(console_summary, sizeof(console_summary) - 1U,
+                                    &n) == AAR_OK);
+    assert(n == sizeof(console_summary) - 1U);
+    if (console_exit_code >= 0)
+        api->exit(console_exit_code);
+}
+
+static void test_exit_waits_for_the_final_console_output(void)
+{
+    unsigned mode;
+
+    for (mode = 0U; mode < 3U; mode++) {
+        zzapp_rec_t *rec;
+        unsigned pass;
+
+        setup();
+        load_ready(0U);
+        rec = rt_rec(0U);
+        console_exit_code = mode == 0U ? -1 : 10;
+        console_fill_sq = mode == 2U;
+        rt_entry = entry_with_console_tail;
+        rt_cl[0].frozen = 1;
+        if (mode == 1U) {
+            /* A partial client write and the ring wrap both need reposts. */
+            runtime_of(rec)->console_head = ZZAPP_XPORT_CONSOLE_OUT_BYTES - 4U;
+            runtime_of(rec)->console_tail = ZZAPP_XPORT_CONSOLE_OUT_BYTES - 4U;
+            rt_cl[0].console_out_chunk_cap = 3U;
+        }
+        assert(rt_start(0U) == SDK_STATUS_OK);
+        rt_settle(4U);
+        assert(zzapp_rec_state(rt_pid[0]) == ZZAPP_REC_RECLAIMED);
+        assert(RT_STATE(0U) == AAR_STATE_STOPPING);
+        assert(rt_cl[0].console_out_len == 0U);
+        /* Retirement did not keep the app's frames while waiting for the
+         * client. Only its transport shell and console bytes remain. */
+        assert(rt_counts().commit_free == g_start.commit_free);
+        rt_cl[0].frozen = 0;
+        for (pass = 0U; pass < 64U && RT_STATE(0U) != AAR_STATE_IDLE; pass++)
+            rt_settle(1U);
+        assert(RT_STATE(0U) == AAR_STATE_IDLE);
+        assert(RT_REASON(0U) == AAR_END_EXIT);
+        assert(RT_EXIT(0U) == (mode == 0U ? 0U : 10U));
+        assert(rt_cl[0].console_out_len ==
+               sizeof(console_prefix) + sizeof(console_summary) - 2U);
+        assert(memcmp(rt_cl[0].console_out, console_prefix,
+                       sizeof(console_prefix) - 1U) == 0);
+        assert(memcmp(rt_cl[0].console_out + sizeof(console_prefix) - 1U,
+                       console_summary, sizeof(console_summary) - 1U) == 0);
+        cleanup();
+    }
+}
+
+/* RELEASE must still be able to discard pending output if a client no longer
+ * wants it. Waiting for that client's completion would strand the shell. */
+static void test_release_discards_an_exited_apps_pending_console(void)
+{
+    setup();
+    load_ready(0U);
+    console_exit_code = -1;
+    console_fill_sq = 0;
+    rt_entry = entry_with_console_tail;
+    rt_cl[0].frozen = 1;
+    assert(rt_start(0U) == SDK_STATUS_OK);
+    rt_settle(4U);
+    cleanup();
+}
+
 /* ---- The exit's teardown ------------------------------------------------------ */
 
 static void start_exiting_app(uint32_t n, int exit_code)
@@ -1397,6 +1484,8 @@ int main(void)
     test_stop_grace_allows_a_cooperative_exit();
     test_spin_template_stops_within_the_grace();
     test_load_after_a_refused_limit_and_a_big_app();
+    test_exit_waits_for_the_final_console_output();
+    test_release_discards_an_exited_apps_pending_console();
     test_exit_teardown_survives_a_scheduler_interrupt();
     test_exit_survives_an_interrupt_after_the_thread_stopped();
     test_teardown_does_not_start_before_the_thread_stopped();

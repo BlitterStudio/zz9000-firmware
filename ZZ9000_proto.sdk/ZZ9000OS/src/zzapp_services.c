@@ -401,6 +401,7 @@ static void slot_state_lock_release(void)
 
 static unsigned service_context(void);
 static int audio_handoff_pending(const struct zzapp_service_runtime *state);
+static int console_pending(zzapp_rec_t *rec);
 static void finish_shell_release(zzapp_rec_t *rec);
 static int discard_deferred(zzapp_rec_t *rec);
 static void cbf_or_current(uint32_t bits);
@@ -1224,10 +1225,10 @@ static void release_shell_locked(zzapp_rec_t *rec)
 }
 
 /*
- * Caller holds g_slot_state_lock. A shell that is reclaimed and quiet: no
- * audio handoff owed to core 0, no deferred reply the client has not taken.
- * If its release was requested it goes now. Otherwise, once the handoff that
- * held it ended, it reads IDLE.
+ * Caller holds g_slot_state_lock. A reclaimed shell keeps STOPPING until its
+ * audio handoff, deferred reply and ordinary-exit console output have finished.
+ * RELEASE discards pending console output; it need not wait for the client
+ * that is giving the claim back.
  */
 static void finish_shell_release(zzapp_rec_t *rec)
 {
@@ -1241,6 +1242,8 @@ static void finish_shell_release(zzapp_rec_t *rec)
 		release_shell_locked(rec);
 		return;
 	}
+	if (rec->claim.terminal_reason == ZZAPP_END_EXIT && console_pending(rec))
+		return;
 	if (rec->claim.state != ZZAPP_ST_IDLE) {
 		rec->claim.state = ZZAPP_ST_IDLE;
 		cb_publish_state(rec, ZZAPP_ST_IDLE);
@@ -1252,9 +1255,10 @@ static void finish_shell_release(zzapp_rec_t *rec)
  * RECLAIMED and keeps its handle, its control block, its queues and its
  * buffers: the client drains the messages and reads the final status after
  * the app ended, and a client that lost its lease may still write through
- * its mapping. The state reads IDLE with the end reason (STOPPING while an
- * audio handoff is still owed to core 0). When the claim's release was
- * requested and nothing is owed, the shell is freed here: 1. Otherwise 0:
+ * its mapping. The state reads IDLE with the end reason once ordinary-exit
+ * console output and any audio handoff to core 0 have finished.
+ * When the claim's release was requested and nothing is owed, the shell is
+ * freed here: 1. Otherwise 0:
  * RELEASE, a stale request of a quarantined claim, or reset frees it later.
  * Replays are safe: a record that is already free reports 1.
  */
@@ -1276,7 +1280,8 @@ int zzapp_services_retire_wire(struct zzapp_rec *rec)
 	if (zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_QUARANTINED))
 		quarantine_locked(rec);
 	(void)zzapp_rec_set_state(rec, ZZAPP_REC_RECLAIMED);
-	if (audio_handoff_pending(runtime_of(rec))) {
+	if (audio_handoff_pending(runtime_of(rec)) ||
+	    (rec->claim.terminal_reason == ZZAPP_END_EXIT && console_pending(rec))) {
 		rec->claim.state = ZZAPP_ST_STOPPING;
 		cb_publish_state(rec, ZZAPP_ST_STOPPING);
 	} else {
@@ -3969,7 +3974,6 @@ void zzapp_services_reclaim_halted_audio(void)
  * core 0 never frees the blocks of a record while it is looked at; the wake
  * itself is outside it.
  */
-static int console_pending(zzapp_rec_t *rec);
 static int flip_service_locked(zzapp_rec_t *rec);
 static void console_service(zzapp_rec_t *rec);
 
@@ -4069,6 +4073,9 @@ static void service_pass(void)
 		wake = service_one_locked(rec);
 		if (!service_wanted(rec))
 			set_del(&set_svc, pid);
+		/* IDLE is the launcher's permission to release the shell. A
+		 * final console completion may have drained it in this pass. */
+		finish_shell_release(rec);
 		slot_state_lock_release();
 		if (wake != 0)
 			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), pid,

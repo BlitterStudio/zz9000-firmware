@@ -346,15 +346,21 @@ record, so a restarted core 1 resumes after it (`zzapp_host.c`,
 `zzapp_rec.h`): detach the thread from the scheduler, return the
 host-visible blocks, grants, staging, and back buffer, destroy the address
 space (alias extents, L2 tables, L1, ASID) and return the L2 reserve, return
-the frames to the commit ledger, and finally publish `IDLE` with the end
-reason in the control block. The record then becomes `RECLAIMED` and keeps its
+the frames to the commit ledger, and finally publish the end reason in the
+control block. The record then becomes `RECLAIMED` and keeps its
 shell, its handle and its transport blocks until the client releases the
 claim (`RELEASE`), which frees the record with a new handle generation. It
 runs on core 1, or on core 0 while core 1 is halted. The end reason is the
 firmware-latched one, or `EXIT` when none was latched. A claim remains
 `STOPPING` until audio teardown is acknowledged and any running deferred load
-cancellation completes. `LIST` and the control block retain the reason after
-the app ended. The reasons are none, normal exit, forced stop, user fault,
+cancellation completes. An ordinary exit also keeps `STOPPING` until the
+client has completed all console output, including bytes still waiting in
+the firmware's coalescing ring. The app's frames and tables have already
+been returned. Only then does the state read `IDLE`, so a launcher that sees
+it can release the claim without losing final output. An explicit `RELEASE`
+can discard pending output without waiting for the client. `LIST` and the
+control block retain the reason after the app ended. The reasons are none,
+normal exit, forced stop, user fault,
 stall watchdog, stuck API call, lease loss, Amiga reset, core-1 restart and
 quarantined.
 
@@ -676,8 +682,9 @@ the client releases the claim.
 
 - A normal end (exit, fault, forced stop) retires the record through the
   single retire path. The record becomes `RECLAIMED` (resources returned, shell
-  and handle held) with `AAR_CB_STATE` reading `IDLE`, the end reason and the
-  exit code set, and it holds the pair and every transport block.
+  and handle held) with the end reason and exit code set. `AAR_CB_STATE` reads
+  `STOPPING` while teardown or ordinary-exit console output is pending, then
+  `IDLE`; the pair and every transport block stay until `RELEASE`.
   `RELEASE(handle)` frees the blocks and the record, with a new handle
   generation: the pointers are detached first, then the blocks are returned,
   so a replayed teardown frees nothing twice.
