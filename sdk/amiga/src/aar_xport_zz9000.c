@@ -1076,6 +1076,7 @@ const aar_xport_stats *aar_xport_stats_get(const aar_xport *x)
 #include <proto/exec.h>
 #include <proto/expansion.h>
 #include <proto/zz9k.h>
+#include "zz9k/request.h"
 
 #define XPORT_LONG_OP_MS      120000UL
 #define XPORT_MIN_REVISION    36
@@ -1220,8 +1221,7 @@ static uint32_t amiga_now_ms(aar_xport_amiga *a)
 static void request_fill(ZZ9KRequest *request, uint16_t opcode,
 			 const uint8_t *payload, uint32_t len)
 {
-	memset(request, 0, sizeof(*request));
-	request->entry.opcode = opcode;
+	zz9k_request_init(request, opcode);
 	request->entry.payload_len = (uint16_t)len;
 	if (payload && len)
 		memcpy(request->entry.payload.inline_data, payload, len);
