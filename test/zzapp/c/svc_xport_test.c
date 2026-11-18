@@ -234,6 +234,8 @@ static struct {
 	uint32_t console_in_len, console_in_pos;
 	uint32_t flip_flags;		/* completion flags of a flip */
 	uint32_t pending_vblank;	/* scanout address the next yield shows */
+	uint32_t flip_front;		/* the page a flip completion says is shown */
+	int no_vblank;			/* the blank never shows a submitted flip */
 	uint32_t open_front, open_back, open_spare, open_pitch, open_layout;
 	uint32_t ring_delta;		/* added to the ring token an audio open echoes */
 	uint32_t clock_step;		/* microseconds per yield */
@@ -382,7 +384,8 @@ static void client_handle(client_t *c, const aar_request *r)
 		break;
 	case AAR_OP_DISPLAY_FLIP:
 		d.flags = (uint16_t)cl.flip_flags;
-		if ((cl.flip_flags & ZZAPP_FLIPF_SUBMITTED) != 0U)
+		d.out[AAR_R_DISPLAY_FLIP_FRONT] = cl.flip_front;
+		if ((cl.flip_flags & ZZAPP_FLIPF_SUBMITTED) != 0U && !cl.no_vblank)
 			cl.pending_vblank = 1U;	/* resolved by the yield hook */
 		break;
 	case AAR_OP_DISPLAY_PALETTE:
@@ -1540,6 +1543,71 @@ static void test_display_pan(void)
 	CHECK(heap.live == 0U);
 }
 
+/* The client names the page it shows; the vblank acknowledges at that address.
+ * A submitted flip whose blank never comes is complete after 100 ms in the
+ * firmware, and a front the client names that is not one of its pages is
+ * ignored (the presented page stays the address). */
+static void test_display_flip_front_and_timeout(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	struct zzapp_service_runtime *st;
+	uint64_t t0;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_SCANOUT_ACK;
+	st = runtime_of(rec);
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	cl.flip_flags = ZZAPP_FLIPF_SUBMITTED;
+	cl.flip_front = 0x00400000U;	/* the client shows the old front page */
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	CHECK(st->display_flip_address == 0x00400000U);
+	CHECK(st->display_flip_ack == 1U);
+
+	/* An address that is none of the pages is ignored. */
+	cl.flip_front = 0x00999000U;
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	CHECK(st->display_flip_address != 0x00999000U);
+
+	/* No blank ever comes: the flip completes by the firmware's timeout, not
+	 * before it. */
+	cl.no_vblank = 1;
+	cl.clock_step = 30000U;
+	t0 = fake_now;
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	CHECK(fake_now - t0 >= FLIP_ACK_TIMEOUT_US);
+	CHECK(fake_now - t0 < FLIP_ACK_TIMEOUT_US + 2U * cl.clock_step + 1U);
+	CHECK(st->display_flip_ack == st->display_flip_gen);
+	CHECK(st->display_flip_gen == 3U);
+	/* The pass does it for a parked waiter too. */
+	cl.ignore = 1;
+	cl.clock_step = 1000U;
+	CHECK(zzapp_svc_display_flip_async(1U) == AAR_OK);
+	cl.ignore = 0;
+	client_service(&c);
+	CHECK(zzapp_display_flip_idle() == 0);
+	fake_now += FLIP_ACK_TIMEOUT_US;
+	st->wait_kind = ZZAPP_WAIT_FLIP;
+	st->wait_value = st->display_flip_gen;
+	slot_state_lock_acquire();
+	set_add(&set_svc, rec->hdr.pid);
+	slot_state_lock_release();
+	service_test_wake_count = 0U;
+	zzapp_services_poll();
+	CHECK(service_test_wake_count == 1U);
+	CHECK(zzapp_display_flip_idle() == 1);
+	st->wait_kind = ZZAPP_WAIT_NONE;
+	zzapp_services_on_app_end();
+	zzapp_services_poll();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	CHECK(heap.live == 0U);
+}
+
 /* The handshake with the vblank ISR: the completion publishes the submit, the
  * ISR acknowledges at the flip address, and not at another. */
 static void test_display_vblank(void)
@@ -1845,6 +1913,28 @@ static void test_lease_and_quarantine(void)
 	CHECK(zzapp_rec_retire(pid) == 1);	/* the retire frees it: release was asked */
 	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_FREE && heap.live == 0U);
 
+	/* A running app whose lease ran out (the host ends it with the LEASE end
+	 * reason): the shell is kept, quarantined, under a revoked handle; the end
+	 * reason is what the client reads; the old handle's next request releases
+	 * it and returns the app's own host-visible blocks. */
+	reset_all();
+	rec = claim(&c, &handle);
+	pid = rec->hdr.pid;
+	rec->claim.state = ZZAPP_ST_RUNNING;
+	zzapp_services_set_terminal(ZZAPP_END_LEASE);
+	zzapp_services_on_app_end();
+	CHECK(zzapp_rec_retire(pid) == 0);
+	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_RECLAIMED);
+	CHECK(zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_QUARANTINED));
+	CHECK(zzapp_rec_by_handle(handle) == NULL && rec->hdr.handle != handle);
+	CHECK(word(&c, AAR_CB_END_REASON) == ZZAPP_END_LEASE);
+	CHECK(word(&c, AAR_CB_STATE) == AAR_STATE_IDLE);
+	CHECK(heap.live == 1U && revoke_visible_calls == 0U);
+	CHECK(mbox(ZZAPP_OP_KICK, handle, ZZAPP_KICK_CQ_POSTED, 0U, NULL, NULL) ==
+	      SDK_STATUS_BAD_HANDLE);
+	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_FREE && heap.live == 0U);
+	CHECK(revoke_visible_calls == 1U);
+
 	/* Two claims: the quarantine of one leaves the other alone. */
 	reset_all();
 	rec = claim(&c, &handle);
@@ -1960,6 +2050,7 @@ int main(void)
 	test_pass_wakes();
 	test_display_pan();
 	test_display_vblank();
+	test_display_flip_front_and_timeout();
 	test_display_latest();
 	test_display_bad_tokens();
 	test_audio_card();

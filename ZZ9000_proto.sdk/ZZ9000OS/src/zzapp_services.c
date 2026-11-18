@@ -254,6 +254,7 @@ struct zzapp_service_runtime {
 	volatile uint32_t display_flip_ack;
 	volatile uint32_t display_flip_submit;
 	volatile uint32_t display_flip_address;
+	uint64_t display_flip_submit_us;
 	uint32_t display_ack_seen;
 	uint32_t display_queued;
 	uint32_t display_scanout_ack;
@@ -363,10 +364,12 @@ static void set_del(struct pid_set *set, uint32_t pid)
 	set->count--;
 }
 
+#ifdef ZZAPP_HOST_TEST
 static void set_clear(struct pid_set *set)
 {
 	memset(set, 0, sizeof(*set));
 }
+#endif
 
 static uint32_t ctx_pid[2] = { ZZAPP_PID_NONE, ZZAPP_PID_NONE };
 static uint32_t deferred_harvest_pid = ZZAPP_PID_NONE;
@@ -2530,29 +2533,62 @@ static void display_reap_flip(void)
 	}
 }
 
+static uint32_t token_address(uint32_t token);
+
+/* A submitted flip whose scanout acknowledgement does not come (the address
+ * the client says it shows never reaches scanout) is complete after this
+ * long: the app is never held by it. It replaces the client's own fallback. */
+#define FLIP_ACK_TIMEOUT_US 100000U
+
+/* Caller holds g_slot_state_lock. */
+static void flip_expire_locked(struct zzapp_service_runtime *state)
+{
+	uint32_t gen = state->display_flip_gen;
+
+	if (gen != 0U &&
+	    __atomic_load_n(&state->display_flip_submit, __ATOMIC_ACQUIRE) == gen &&
+	    __atomic_load_n(&state->display_flip_ack, __ATOMIC_ACQUIRE) != gen &&
+	    now_us() - state->display_flip_submit_us >= FLIP_ACK_TIMEOUT_US)
+		__atomic_store_n(&state->display_flip_ack, gen, __ATOMIC_RELEASE);
+}
+
 /*
  * The flip request's completion, when it is in. Caller holds
  * g_slot_state_lock: core 0's vblank ISR reads the words this writes. A
  * client that submitted the pan or buffer change and relies on the card's
- * vertical blank says so (ZZAPP_FLIPF_SUBMITTED): the ISR acknowledges when
- * the scanout reaches the flip address. Without it the flip is complete now.
+ * vertical blank says so (ZZAPP_FLIPF_SUBMITTED) and names the page it now
+ * shows (AAR_R_DISPLAY_FLIP_FRONT): the ISR acknowledges when the scanout
+ * reaches that address, or the timeout does. Without SUBMITTED the flip is
+ * complete now.
  */
 static int flip_apply_locked(zzapp_rec_t *rec)
 {
 	struct zzapp_service_runtime *state = runtime_of(rec);
 	aar_completion c;
 
+	flip_expire_locked(state);
 	if (zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_FLIP) !=
 		    ZZAPP_XPORT_REQ_DONE ||
 	    zzapp_xport_take_completion(rec, ZZAPP_XPORT_REQ_FLIP, &c) != 1)
 		return 0;
 	if (c.result == AAR_OK && (c.flags & ZZAPP_FLIPF_SUBMITTED) != 0U &&
-	    state->display_scanout_ack)
+	    state->display_scanout_ack) {
+		uint32_t shown = token_address(c.out[AAR_R_DISPLAY_FLIP_FRONT]);
+		uint32_t i;
+
+		for (i = 0U; shown != 0U && i < 3U; i++) {
+			if (state->display_alias_phys[i] == shown) {
+				state->display_flip_address = shown;
+				break;
+			}
+		}
+		state->display_flip_submit_us = now_us();
 		__atomic_store_n(&state->display_flip_submit,
 				 state->display_flip_gen, __ATOMIC_RELEASE);
-	else
+	} else {
 		__atomic_store_n(&state->display_flip_ack,
 				 state->display_flip_gen, __ATOMIC_RELEASE);
+	}
 	return 1;
 }
 
