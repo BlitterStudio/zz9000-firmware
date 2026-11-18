@@ -2103,10 +2103,13 @@ int zzapp_svc_file_list_close(int list)
 	return rc;
 }
 
+/* A record dropped by the services' rate limit counts with the ones the
+ * transport drops (no free slot, SQ full): one counter, which is also what
+ * AAR_CB_LOG_DROPPED reads. */
 static void log_drop(zzapp_rec_t *rec)
 {
-	zzapp_xport_cb_put(rec, AAR_CB_LOG_DROPPED,
-			   zzapp_xport_cb_get(rec, AAR_CB_LOG_DROPPED) + 1U);
+	rec->xport.stats.log_dropped++;
+	zzapp_xport_cb_put(rec, AAR_CB_LOG_DROPPED, rec->xport.stats.log_dropped);
 }
 
 void zzapp_svc_log(const char *msg, uint32_t len)
