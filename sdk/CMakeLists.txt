@@ -1107,6 +1107,7 @@ if(EXISTS "${AAR_DIR}/include/aar/transport.h" AND EXISTS "${ZZ_FW_SRC}/zzapp_xp
       ${ZZ_FW_SRC}
       ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src
       ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools
       ${ZZ_FW_TEST}/card_pool
       ${ZZ_FW_TEST}/mmu/mock
   )

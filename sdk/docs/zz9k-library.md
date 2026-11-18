@@ -162,7 +162,12 @@ Points that matter to a caller:
 - **Messages** are 32 bytes. Sending is credited: at most `AAR_MSG_CAPACITY`
   (63) messages may be unconsumed by the app (`AAR_CB_MSG_CONSUMED`), else
   `AAR_E_BUSY`. A message the app sends is held in the module's inbox of 64
-  until read; a flood nobody reads is lost beyond that and counted.
+  until read. When that inbox is full, the next message stays at the SQ head
+  and the app sees `AAR_E_BUSY` once the queue fills. Nothing is dropped.
+  The caller must drain messages with `aar_xport_get_message()` as well as
+  serve requests: a request behind a held message cannot pass it and resumes
+  only after the caller takes messages. `aar_xport_sq_blocked()` reports that
+  condition; `stats.sq_blocked` counts pump passes held at a full inbox.
 - **Events.** `aar_xport_post_event()` coalesces mouse motion (sums `dx` and
   `dy` while the button state is the same) and drops the newest event when
   the completion queue is full, counting it in `AAR_CB_EVENTS_DROPPED`.
@@ -173,6 +178,11 @@ Points that matter to a caller:
 - **Status** (`aar_xport_status_get()`) is read from the control block: state,
   end reason, exit code, fault record, load progress, accounting. It stays
   readable after the app ended, until the claim is released.
+- **Audio.** `aar_xport_audio_read()` takes frames, not samples or bytes.
+  The audio ring's indices are little-endian aligned 32-bit words. Each is
+  read or written with one long access so the app cannot see a partial carry
+  while the client advances its read index. Indices wrap modulo 2^32; the
+  sample slot wraps at the ring's frame capacity.
 
 `zz9k-app-echo-test <path-to-echo.elf> [count]` is the hardware smoke client.
 

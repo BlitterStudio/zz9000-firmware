@@ -30,18 +30,33 @@ static void put32(uint8_t *p, uint32_t v)
 	p[3] = (uint8_t)v;
 }
 
+/*
+ * The audio ring's index words are little-endian and the app (ARM) reads or
+ * writes each one with a single 32-bit access while the 68k writes or reads
+ * the other. The 68k therefore accesses them as one aligned long too: four
+ * byte accesses would show the app a half-written read_frame (0x00ff to
+ * 0x0100 passes through 0x0000) and would show this side a half-written
+ * write_frame, either of which looks like a ring that is overfull or read
+ * past the writer. The offsets are multiples of 4 and the ring is mapped
+ * 8 KiB aligned.
+ */
+static uint32_t swap32(uint32_t v)
+{
+	return (v << 24) | ((v & 0x0000ff00u) << 8) |
+	       ((v >> 8) & 0x0000ff00u) | (v >> 24);
+}
+
 static uint32_t le32(const volatile uint8_t *p)
 {
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+	uint32_t v = *(const volatile uint32_t *)(const volatile void *)p;
+
+	return AAR_NATIVE_BIG_ENDIAN ? swap32(v) : v;
 }
 
 static void put_le32(volatile uint8_t *p, uint32_t v)
 {
-	p[0] = (uint8_t)v;
-	p[1] = (uint8_t)(v >> 8);
-	p[2] = (uint8_t)(v >> 16);
-	p[3] = (uint8_t)(v >> 24);
+	*(volatile uint32_t *)(volatile void *)p =
+		AAR_NATIVE_BIG_ENDIAN ? swap32(v) : v;
 }
 
 static uint32_t round_step(uint32_t bytes)
@@ -109,6 +124,7 @@ static void detach(aar_xport *x)
 	x->map_next = 0u;
 	x->mouse_pending = 0u;
 	x->kick_pending = 0u;
+	x->sq_blocked = 0u;
 }
 
 static int xport_tick(void *user)
@@ -784,6 +800,11 @@ uint32_t aar_xport_message_count(const aar_xport *x)
 	return x ? x->inbox_tail - x->inbox_head : 0u;
 }
 
+int aar_xport_sq_blocked(const aar_xport *x)
+{
+	return x ? x->sq_blocked : 0;
+}
+
 void aar_xport_set_log_sink(aar_xport *x,
 			    void (*sink)(void *user, const void *data,
 					 uint32_t len),
@@ -831,11 +852,17 @@ static void take_log(aar_xport *x, const aar_request *r)
 /*
  * Moves messages and logs off the front of the SQ. With `req` it stops at the
  * first request and returns it (1); without, it stops there and leaves it.
- * 0 when the SQ is empty or the next entry is a request that stays, AAR_E_IO
- * on corrupt indices.
+ * 0 when the SQ is empty, the next entry is a request that stays, or the next
+ * entry is a message the full inbox cannot take. That message is not popped:
+ * it stays at the SQ head, so the app, which reads the head index, sees the
+ * queue fill and gets AAR_E_BUSY from its own post instead of losing messages.
+ * Everything behind it, requests included, waits until the owner takes a
+ * message (aar_xport_get_message); x->sq_blocked says so. AAR_E_IO on corrupt
+ * indices.
  */
 static int sq_pump(aar_xport *x, aar_xport_req *req)
 {
+	x->sq_blocked = 0u;
 	for (;;) {
 		const volatile uint8_t *slot;
 		aar_request r;
@@ -846,15 +873,15 @@ static int sq_pump(aar_xport *x, aar_xport_req *req)
 			return rc;
 		op = aar_get_be16(slot + AAR_ENTRY_OP);
 		if (op == AAR_OP_MSG) {
-			if (x->inbox_tail - x->inbox_head < AAR_XPORT_INBOX) {
-				aar_entry_get_msg(slot,
-					x->inbox[x->inbox_tail %
-						 AAR_XPORT_INBOX]);
-				x->inbox_tail++;
-				x->stats.msgs_taken++;
-			} else {
-				x->stats.msgs_overflow++;
+			if (x->inbox_tail - x->inbox_head >= AAR_XPORT_INBOX) {
+				x->sq_blocked = 1u;
+				x->stats.sq_blocked++;
+				return 0;
 			}
+			aar_entry_get_msg(slot,
+				x->inbox[x->inbox_tail % AAR_XPORT_INBOX]);
+			x->inbox_tail++;
+			x->stats.msgs_taken++;
 			sq_pop(x);
 			continue;
 		}
