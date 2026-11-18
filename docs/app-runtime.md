@@ -1,6 +1,6 @@
 # ZZ9000 app runtime
 
-This is the firmware and launcher contract for the app kernel, which
+This is the firmware and client contract for the app kernel, which
 implements AAR API 0.5 (BlitterStudio/aar, pinned by `sdk/AAR_REF`). The public
 app interface is [aar-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md); application
 build and usage guidance is in
@@ -15,8 +15,8 @@ Core 1 runs a small kernel. It has one highest-priority system thread and one
 app thread per running app. The number of apps is not a constant: it is the
 record capacity chosen at boot from card memory (231 on this board, see
 [Record arena](#record-arena)). An app process is a record that owns its
-address space, memory commit, resource ledger, launcher window binding, and
-handle. Its thread owns the saved user context, kernel stack, scheduler state,
+address space, memory commit, resource ledger, transport pair, and handle.
+Its thread owns the saved user context, kernel stack, scheduler state,
 and CPU accounting. There is one app thread per process today.
 
 An exception frame is the saved context. It includes the interrupted user
@@ -47,20 +47,22 @@ reused as late as possible (`zzapp_rec.c:297-323`). The table holds at least 8
 and at most 1024 records (`ZZAPP_REC_MIN_APPS`, `ZZAPP_REC_MAX_APPS`,
 `zzapp_rec.h:42-43`).
 
-A record is one 12 KiB slot (`ZZAPP_REC_RECORD_BYTES`) holding the kernel
+A record is one 16 KiB slot (`ZZAPP_REC_RECORD_BYTES`) holding the kernel
 thread, the words core 0 polls, the per-app scheduler words, the claim
-words (limits, load progress, terminal and refusal reasons), the process
-memory ledger and its address space, the host state, the 64-entry
-host-visible block table, and the services, loader, SVC, and decode state
-(`zzapp_rec.h:274-295`). Its states are `CLAIMED`, `LIVE`, `RETIRING`,
-`RECLAIMED` (resources returned, shell held for a quarantined window), and
-`FREE`; they only move forward until the free (`zzapp_rec.h:62-72`).
+words (limits, load progress, terminal and refusal reasons, the client
+capability word), the process memory ledger and its address space, the host
+state, the 64-entry host-visible block table, the services, loader, SVC, and
+decode state, and the transport part: the blocks of the claim, the two queue
+views, the request table, the message inbox, the event ring, the doorbell
+word, and the counters (`zzapp_rec.h`). Its states are `CLAIMED`, `LIVE`,
+`RETIRING`, `RECLAIMED` (resources returned, shell and transport held until
+the client releases the claim), and `FREE`; they only move forward until the
+free (`zzapp_rec.h`).
 
-The launcher wire has not changed: a request names a slot and a 32-bit
-generation. The wire slot names a launcher window, a wire-layer object that is
-bound to a record while a claim is live (`zzapp_services.c:233-269`,
-`zzapp_services.c:4868-4897`). Handles are internal until the transport swap
-(slice 6) lets requests name them.
+Every mailbox request except `QUERY`, `CLAIM` and `LIST` names its record by
+handle at byte 40 of the payload, and the lookup (`zzapp_rec_by_handle`)
+fails for a stale one. The wire has no slot and no window; see
+[Transport and claim protocol](#transport-and-claim-protocol).
 
 ### Record arena
 
@@ -80,8 +82,8 @@ The arena is sized by memory (`zzapp_rec.c:55-91`):
 - Records: `(permanent card-pool bytes - 128 MiB system reserve) / 2 MiB`,
   bounded to 8 at the least and 1024 at the most. 2 MiB is the commit floor of
   one app, an image frame plus a stack frame.
-- Per record: a 16 KiB L1 table, a 32 KiB core-1 stack, the 12 KiB record,
-  and 8 KiB of user table pages (`zzapp_rec.h:52-57`), 68 KiB in all, plus the
+- Per record: a 16 KiB L1 table, a 32 KiB core-1 stack, the 16 KiB record,
+  and 8 KiB of user table pages (`zzapp_rec.h`), 72 KiB in all, plus the
   16 L2 tables it is guaranteed.
 - L2 pool: 16 tables for the kernel template, 16 per record, and a shared
   remainder of 2 tables per MiB of host-visible heap, rounded up to a multiple
@@ -114,11 +116,11 @@ The core-1 private timer gives apps a 5 ms quantum. The scheduler first runs
 due system work: SDK tasks, MiniGL service, launcher work, and audio feeding.
 It then selects runnable app threads round-robin. In an overload window,
 service work is limited so runnable apps retain a 5% floor.
-Deferred launcher operations are selected round-robin across launcher windows.
-Each service pass advances at most one window by one bounded step, preserving
-per-window request order without letting a long `LOAD_END` starve another
-window's `LOAD_BEGIN`, `LOAD_CHUNK`, or `START`
-(`zzapp_services.c:4621-4633`). The scheduler walks a dense run list of the
+Deferred client operations (`LOAD_BEGIN`, `LOAD_CHUNK`, `LOAD_END`, `START`)
+are selected round-robin across records. Each service pass advances at most
+one record by one bounded step, preserving per-record request order without
+letting a long `LOAD_END` starve another record's `LOAD_BEGIN`, `LOAD_CHUNK`,
+or `START`. The scheduler walks a dense run list of the
 records whose thread is not stopped, not the record capacity
 (`zzapp_kernel.h:186-196`).
 
@@ -160,23 +162,41 @@ points to the current API segment plus one scheduler handoff; a body that does
 not yield remains subject to the API watchdog rather than a scheduler preemption.
 
 File and directory operations, console read and backpressure, display open and
-flip, non-host audio open and close, `aar_msg_wait`, and sleep park the caller
-at the SVC handoff. `aar_gl_swap` parks through its flip. Completion wakes the
-slot READY; file and directory waits wake TIMEOUT after 30 seconds and return
-`AAR_E_TIMEDOUT`. Stop wakes a parked waiter (an EVENT waiter wakes READY and
-then sees the stop); waiting service calls return `AAR_E_IO`. `aar_event_poll`
-and `aar_display_vsync` do not park; the
+flip, palette, non-host audio open and close, `aar_msg_wait`, and sleep park
+the caller at the SVC handoff. `aar_gl_swap` parks through its flip.
+Completion wakes the record READY; file and directory waits wake TIMEOUT after
+30 seconds and return `AAR_E_TIMEDOUT`. Stop wakes a parked waiter (an EVENT
+waiter wakes READY and then sees the stop); waiting service calls return
+`AAR_E_IO`. `aar_event_poll` and `aar_display_vsync` do not park; the
 latter only yields once.
 
+A service the app asks of its client is a request on the SQ. A record has
+three request table entries: a blocking one (file, list, console read,
+display open, palette, audio open and close), the flip, and the console
+output stream. Request ids come from a per-record counter, never zero and
+never reused for the life of the record, so a late completion of a request
+that timed out matches nothing and is dropped and counted. A request that
+finds the SQ full parks the app until the client has made room; requests
+never fail on a full SQ, messages do (`AAR_E_BUSY`), and log records are
+dropped and counted in `AAR_CB_LOG_DROPPED`. The wait tests the request table
+entry after a pump of the CQ, which consumes completions, events and messages
+in order, so a completion is never stuck behind a message: the client posts a
+message only while it holds a credit (`posted - AAR_CB_MSG_CONSUMED` below the
+63-message capacity), and the firmware advances `AAR_CB_MSG_CONSUMED` when the
+app takes a message out of its inbox.
+
 `aar_msg_wait` parks as an `EVENT` wait with the caller's timeout as its
-deadline. The Amiga writes the host-to-app ring in the launcher window and
-rings no doorbell, so the wait is a level test. The service pass reads the
-ring head and tail for every parked `EVENT` waiter and wakes it when they
-differ. The waiter reads the ring again after every resume and before it
-parks, so a message that lands in that gap is found by the next service pass.
-A queued message ends the wait before a pending stop does. Like every
-declared wait it keeps the slot out of the 30-second stall and 10-second
-stuck-call watchdogs.
+deadline. The client posts the message on the CQ and may ring `KICK`, but
+the firmware also polls, so the wait is a level test: the service pass pumps
+the CQ of every claim with a parked `EVENT` waiter and wakes it when the
+inbox is not empty. The waiter reads the inbox again after every resume and
+before it parks, so a message that lands in that gap is found by the next
+service pass. A queued message ends the wait before a pending stop does. Like
+every declared wait it keeps the record out of the 30-second stall and
+10-second stuck-call watchdogs. Input events go into a 64-entry event ring of
+the record when the pump runs; the ring drops the newest event and counts it
+when full, and the client counts events it could not post in
+`AAR_CB_EVENTS_DROPPED`. The runtime keeps at least 64 events.
 
 Core 0 does not wait for core 1. It publishes work and raises doorbell SGI 15
 only when `service_pending` changes from zero to one. Core 1 drains a bounded
@@ -243,8 +263,8 @@ from a privileged kernel template when the address space is created
 (`zzapp_as_pool_l1`, `zzapp_as_create`, `zzapp_as.h:112-141`). The private
 virtual window is `0xC0000000`–`0xDFFFFFFF`. Image, heap, and stack are mapped
 there as non-global sections, 64 KiB large pages, or 4 KiB small pages as
-appropriate. The app sees only its private pages plus grants for its launcher
-window, host-visible blocks, and owned display surfaces. The rest of DDR,
+appropriate. The app sees only its private pages plus grants for its
+host-visible blocks and owned display surfaces. The rest of DDR,
 firmware, devices, and other apps remain privileged-only.
 
 **L2 tables.** One pool of L2 tables serves every address space and the kernel
@@ -282,7 +302,7 @@ through the Zynq ACP (`m00_axi` of the Zorro master, ARCACHE `0xF` for reads
 and AWCACHE `0x3` for writes). The ACP snoops the ARM L1 caches, so neither
 side needs ARM cache maintenance. The 68k's own caches are outside the ACP:
 a 68k client reads through a cache-inhibited mapping, as `zz9k.library` does
-for the launcher window, or maintains its caches itself. The Zorro
+for the transport buffers, or maintains its caches itself. The Zorro
 master's second port, `m01_axi`, goes to HP1 but only writes video-capture
 frames; it carries no Zorro access to the host-visible heap.
 
@@ -308,7 +328,7 @@ MiniGL is called. An unmapped or changed range returns `AAR_E_FAULT` and records
 
 Private memory is allocated as zeroed 1 MiB frames from aligned 8 MiB
 card-pool extents. Admission is atomic: aggregate commit plus the request
-must fit in pool free memory after the system reserve and any per-app launcher
+must fit in pool free memory after the system reserve and any per-app client
 limit. An app commits its image, its stack, and the `min_heap_mib` its note
 asks for; there is no fixed per-app memory block. `heap_grow` and
 `heap_shrink` add or return whole frames while keeping the heap VA range
@@ -322,27 +342,27 @@ running app first latch the end reason and run the end-of-app services: stop
 new calls, wake and cancel waits, quiesce work and DMA holding app pointers,
 hand off or unbind display, detach audio, release GL and decoder sessions.
 The retire then runs in stages and records the last completed one in the
-record, so a restarted core 1 resumes after it (`zzapp_host.c:1261-1325`,
-`zzapp_rec.h:74-90`): detach the thread from the scheduler, return the
+record, so a restarted core 1 resumes after it (`zzapp_host.c`,
+`zzapp_rec.h`): detach the thread from the scheduler, return the
 host-visible blocks, grants, staging, and back buffer, destroy the address
 space (alias extents, L2 tables, L1, ASID) and return the L2 reserve, return
-the frames to the commit ledger, and finally detach the window and free the
-record with a new handle generation. It runs on core 1, or on core 0 while
-core 1 is halted. The end reason is the firmware-latched one, or `EXIT` when
-none was latched. A window remains `STOPPING` until audio teardown is
-acknowledged and any running deferred load cancellation completes; only then
-can it become reusable. `LIST` retains the reason after the window returns to
-idle. The reasons are none, normal exit, forced stop, user fault, stall
-watchdog, stuck API call, lease loss, Amiga reset, and core-1 restart.
+the frames to the commit ledger, and finally publish `IDLE` with the end
+reason in the control block. The record then becomes `RECLAIMED` and keeps its
+shell, its handle and its transport blocks until the client releases the
+claim (`RELEASE`), which frees the record with a new handle generation. It
+runs on core 1, or on core 0 while core 1 is halted. The end reason is the
+firmware-latched one, or `EXIT` when none was latched. A claim remains
+`STOPPING` until audio teardown is acknowledged and any running deferred load
+cancellation completes. `LIST` and the control block retain the reason after
+the app ended. The reasons are none, normal exit, forced stop, user fault,
+stall watchdog, stuck API call, lease loss, Amiga reset, core-1 restart and
+quarantined.
 
-A fault retires the app at once. The record is freed in the same pass that
-stops the thread, so the window reads `IDLE` and the next claim can start;
-there is no `FAULTED` latch to wait out. The fault words (fault code, `pc`,
-`sp`, `lr`, `far`, `fsr`, `cpsr`) and the terminal reason `USER_FAULT` stay in
-the window's lifecycle block, and `STATUS` and `LIST` keep returning them,
-until the next `LOAD_BEGIN` of that window clears them
-(`zzapp_host.c:1069-1143`, `zzapp_loader.c:1052`,
-`test/zzapp/b/reset_lifecycle_test.c:246-256`).
+A fault retires the app at once. The state reads `IDLE` once the retire is
+done, with the end reason `USER_FAULT`; there is no `FAULTED` latch to wait
+out. The fault record (class, syndrome, `pstate`, `pc`, `sp`, `lr` and the
+fault address) stays in the control block, and `LIST` keeps returning the end
+reason, until the client releases the claim.
 
 Only user-mode faults stop a single app. A fault in firmware code restarts
 core 1 and ends every app. Per-app 30-second stall and 10-second stuck-call
@@ -354,8 +374,8 @@ live record with the restart reason.
 
 The firmware implements the AAR 0.5 app table (`aar_api`, `aar/app.h`), the GL
 table (`aar_gl`, `aar/gl.h`) and the ZZ9000 extension table
-(`aar_ext_zz9000`, `aar/ext_zz9000.h`) on the process records and the launcher
-window wire described below. Calls are `aar_*`, constants `AAR_*`, status
+(`aar_ext_zz9000`, `aar/ext_zz9000.h`) on the process records and the
+transport described below. Calls are `aar_*`, constants `AAR_*`, status
 codes `AAR_E_*`. The `zz_*`, `ZZ_*` and `zzapp_*` names of the 0.4 header are
 gone with no compatibility layer; `docs/zzapp-to-aar.md` in the aar repository
 maps them. The firmware's hardware names (`ZZ_*` audio, Ethernet, RasterIX and
@@ -364,7 +384,7 @@ minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
 
 **Groups.** `aar_api.groups` and `aar_info.groups` report the same mask:
 `AAR_GROUP_INPUT` and `AAR_GROUP_SERVICES` always, and `AAR_GROUP_DISPLAY`,
-`AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the launcher capability word has the
+`AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the client capability word has the
 matching bit. `audio_stats` is `NULL`: the runtime keeps no underrun count.
 
 **Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
@@ -377,27 +397,30 @@ and a multiple of 16 (`AAR_E_INVAL`); the reserved word 0; every
 `groups_required` bit present in the runtime mask (`AAR_E_NOGROUP`); and
 `min_heap_mib` within the 512 MiB private window (`AAR_E_NOMEM`). No note, a
 second AAR note, or a descriptor of the wrong size is `AAR_E_INVAL`. The load
-status the launcher sees maps `AAR_E_INVAL` and `AAR_E_PROFILE` to
+status the client sees maps `AAR_E_INVAL` and `AAR_E_PROFILE` to
 `BAD_REQUEST`, `AAR_E_NOGROUP` to `UNSUPPORTED`, and `AAR_E_NOMEM` to
 `NO_MEMORY`; a profile or group refusal prints its reason in the `[app] reject
 op` line. The groups a note names (required and optional) set the display,
-audio and GL bits of the lifecycle flags that the launcher reads. An image
+audio and GL bits of `AAR_CB_FLAGS`, which the client reads. An image
 without a v1 note, including one that carries a 0.4 note, does not load.
 
 **Events.** `aar_event_poll` always delivers `AAR_EV_STOP` and
-`AAR_EV_LOW_MEMORY`, and delivers the launcher's key, mouse, joystick and
+`AAR_EV_LOW_MEMORY`, and delivers the client's key, mouse, joystick and
 break events only when the runtime has `AAR_GROUP_INPUT`. One stop request
-yields one stop event: the firmware queues it itself, and the launcher's own
+yields one stop event: the firmware queues it itself, and the client's own
 stop event for the same request counts as that delivery, so the second is
 dropped. The low-memory event carries no fields other than its type.
 
-**Files.** The open flags travel unchanged from the app to the launcher
-window (`zzapp_file_wire.flags` at `FILE_OFF+12`): `AAR_FILE_READ` 1, `WRITE` 2,
+**Files.** The open flags travel unchanged from the app to the client, in
+the request's `AAR_A_FILE_OPEN_FLAGS` argument: `AAR_FILE_READ` 1, `WRITE` 2,
 `CREATE` 4 (create if missing, keep an existing file), `TRUNCATE` 8, `EXCL` 16
 (with `CREATE`, fail when the file exists). The firmware refuses an invalid
-combination with `AAR_E_INVAL` before it reaches the launcher: an unknown bit,
+combination with `AAR_E_INVAL` before it reaches the client: an unknown bit,
 neither `READ` nor `WRITE`, `CREATE` or `TRUNCATE` without `WRITE`, or `EXCL`
-without `CREATE`. Create-or-replace is `CREATE | TRUNCATE`.
+without `CREATE`. Create-or-replace is `CREATE | TRUNCATE`. Paths and names
+travel as NUL-terminated bytes in the scratch area of the service block.
+Reads and writes move through the data block, one request per chunk of at
+most 256 KiB.
 
 **Shared buffers.** `aar_shared_alloc` takes flags 0 and returns a block from
 the host-visible heap, rounded to the 4096-byte granule, with at most 64 live
@@ -407,8 +430,8 @@ address minus the board's window base), `ptr` is the app mapping, and `flags`
 always has `AAR_SHAREDF_COHERENT`. `aar_publish` and `aar_acquire` check that
 the range lies inside one live block and add a memory barrier only, because
 the Zorro master reaches the heap through the ACP. A byte count whose high
-word is not zero is `AAR_E_INVAL`. `aar_get_info` reports `msg_capacity` 64
-(the ring holds 64 messages), a 4096-byte `shared_granule`, `heap_granule` 1
+word is not zero is `AAR_E_INVAL`. `aar_get_info` reports `msg_capacity` 63
+(the inbox holds 63 messages), a 4096-byte `shared_granule`, `heap_granule` 1
 MiB, `stall_limit_ms` 30000, `stop_grace_ms` 500, `sleep_granule_us` 5000,
 `max_files` 16, and the flags `AAR_INFOF_ISOLATED` and
 `AAR_INFOF_SHARED_COHERENT`.
@@ -421,349 +444,360 @@ revision; the module prints it on the UART when it loads (`[ZZM] MINIGL loaded
 v1 build <id>`, see [minigl-module.md](minigl-module.md)). Any other platform
 or extension id returns `NULL`.
 
-## Slot protocol
+## Transport and claim protocol
 
-The app service is `0x0c00`; its catalog version is `0x00030000`. Integers
-in mailbox payloads and windows are big-endian. `ZZAPP_CAP_SLOTS` advertises
-the extended request forms; the slot on the wire names a launcher window, and
-`QUERY` reports the window count, 4 (`ZZAPP_SLOT_COUNT`). The count is a
-platform ceiling on windows, not on apps (see
-[Launcher windows](#launcher-windows)). `ZZAPP_CAP_LOW_MEMORY`,
-`ZZAPP_CAP_LOAD_PROGRESS`, and `ZZAPP_CAP_HOST_LIMIT` are
-append-only bits in the extended `QUERY` capability word; a client with
-`ZZAPP_CAP_SLOTS` uses the extended request form for all operations after
-allocation and carries the returned slot and generation.
+The app service is `0x0c00`; its catalog version is `0x00040000`. A client
+reaches an app through one claim. A claim is one process record and one
+transport pair in host-visible memory: a control block and two rings, the
+submission queue (SQ, app to client) and the completion queue (CQ, client to
+app), defined by `aar/transport.h` in the aar repository and described in its
+`docs/transport.md`. The mailbox carries only the private wire of
+`zzapp_proto.h`: claim, load, start, stop, list, release and the doorbell.
+Everything an app asks of its client (files, console, log, display, audio,
+messages) and everything the client sends (input events, messages, replies)
+travels in the rings. There is no launcher window, no slot and no fixed
+address range.
 
-An extended request is exactly 48 payload bytes. The selector is at byte 40
-(`slot`) and byte 44 (`generation`). Existing fields retain their old offsets;
-unused bytes are zero. A selector with an out-of-range slot or a generation
-that no longer owns the slot fails with the stale ownership error and changes
-nothing.
+Integers in mailbox payloads are big-endian. A request is 48 payload bytes
+except `QUERY`, `CLAIM` and `LIST`, which take no handle. Every other
+operation names its claim by handle at byte 40 (bytes 44 to 47 are reserved
+and zero). A handle that is not the live one of a record that owns a pair
+(handle 0, generation 0, an index out of range, a free record, a generation
+that moved on) gets `ZZAPP_ERR_STALE` (5, `SDK_STATUS_BAD_HANDLE`) and
+changes nothing.
 
-Extended `ALLOC_WINDOW` atomically claims the lowest free window, in the
-admission order described under [Admission](#admission-and-refusal-reasons),
-and returns the old 12-byte window reply followed by slot and generation at
-bytes 12 and 16. A refusal returns a 4-byte reason instead.
-A `CLAIMED` or `LOADING` slot has a 30-second lease. `LOAD_BEGIN`, every
-completed `LOAD_CHUNK`, and each changed launcher heartbeat renew it. This
-permits slow Zorro transfers and long asynchronous file reads while reclaiming
-a launcher that has disappeared before or during a load.
+| Operation | Code | Notes |
+| --- | --- | --- |
+| `QUERY` | `0x0c00` | No handle. 48-byte reply, below. |
+| `CLAIM` | `0x0c01` | No handle. Admits an app and returns the handle and the control block. |
+| `LOAD_BEGIN` | `0x0c02` | Reads the limits from the control block; request word 0 is the client capability word. Deferred. |
+| `LOAD_CHUNK` | `0x0c03` | File offset at 0, length at 4; the bytes are at the start of the load buffer. Deferred. |
+| `LOAD_END` | `0x0c04` | Deferred; incremental steps advance `AAR_CB_PROGRESS`. |
+| `START` | `0x0c05` | `argc` at 0; the argv table and strings are in the load buffer. Deferred. |
+| `STOP` | `0x0c06` | An unconditional stop of the named claim. |
+| `LIST` | `0x0c09` | Cursor at 0, no handle. The next live claim at or after the cursor index. |
+| `RELEASE` | `0x0c0a` | Ends the claim and returns the pair and every buffer. |
+| `KICK` | `0x0c0b` | The doorbell, flags at 0. A hint only. |
 
-Once the app runs, the launcher must change the slot heartbeat at least every
-two seconds. A launcher that sets lifecycle flag bit 18
-(`ZZAPP_F_LAUNCHER_HEARTBEAT`) gets ten seconds instead, so a briefly starved
-Amiga task does not lose its app; it still renews only from its own main
-loop, so a launcher that has died is still detected.
+`0x0c07` (`STATUS`) and `0x0c08` (`DISPLAY_BIND`) are retired: the client reads
+the control block, and the display is bound when the client completes
+`AAR_OP_DISPLAY_OPEN`. A request with an opcode in `0x0c00` to `0x0c1f` that
+the table does not list is unsupported.
 
-The client side of that lease is in `zz9k.library`: from revision 40 its
-service task releases the slot of an owner task that is gone, see
-[zz9k-library.md](../sdk/docs/zz9k-library.md#arm-app-client).
+`QUERY` (no handle) fills 48 bytes: the ABI major and minor words (0 and 5),
+the state at 8, the capability word at 12 (`Z3`, `DISPLAY`, `AUDIO`, `GL`,
+`CLUT8`), `HOSTHEAP_LARGEST` at 16 (the largest free block of the
+host-visible heap), `QUEUE_DEPTH` at 20 (the depth of a new claim's queues,
+64), `COMMIT_FREE` at 24 and `COMMIT_TOTAL` at 28 (the bytes still admissible
+for app commits after the system reserve, and that plus the committed bytes),
+`RECORDS_FREE` at 32, `TABLES_FREE` at 36 (L2 tables a new admission can
+still reserve), `TABLES_TOTAL` at 40 (the pool less the kernel template) and
+`HOSTHEAP_FREE` at 44. After a claim, load and release cycle every count
+returns to its starting value, `HOSTHEAP_FREE` included.
 
-An expired load becomes `STOPPING` with terminal reason `QUARANTINED` (9).
-Core 1 retires the app's resources (frames, tables, ASID, host-visible blocks,
-staging), but its card window remains
-reserved: a late `Read` from the old Amiga process must never write into a
-replacement launcher's window. The record shell and its handle stay allocated
-until the window is released, so a quarantined window holds one record
-(`zzapp_services.c:1402-1452`). No allocator can choose a quarantined slot.
-The old launcher releases that reservation by making its next stale load
-request, which returns the stale-ownership error. A stale request arriving
-while core 1 is still tearing down records that release intent and still
-receives the terminal error; the window is released as soon as teardown
-finishes. If it will never return, the user may send extended `RELEASE`
-(`0x0c0a`) with the slot and current generation; it succeeds only after loader
-teardown and only for a quarantined slot. Card reset clears all quarantine.
+### Claim and admission
 
-Extended `LOAD_BEGIN` carries the launcher memory limit in MiB at byte 0;
-zero means no limit beyond the pool. `LOAD_CHUNK`, `LOAD_END`, `START`,
-`STATUS`, and `DISPLAY_BIND` retain their old fields and append the selector.
-The limit applies to the initial image, stack, and
-minimum heap commit as well as later heap growth. `DISPLAY_BIND` always
-carries the spare-buffer field at byte 28; zero means none. A second bind while
-a surface is already bound returns `BUSY` and leaves the existing mappings alone.
+`CLAIM` reserves, in this order, and undoes each step in reverse on a later
+refusal. Nothing is published until the last step, so a refused claim leaves
+the handle queue, the handle generations, the L2 reserve and free counts, the
+host-visible heap and the committed bytes as they were (`zzapp_rec_admit`,
+`zzapp_xport_admit`, `zzapp_rec_unadmit`):
 
-Extended `LOAD_BEGIN` also carries the app's host-visible limit in MiB at
-byte 4 (`ZZAPP_LOAD_HOST_VISIBLE_MIB`); firmware that advertises
-`ZZAPP_CAP_HOST_LIMIT` reads it. Zero, and every request form that has no such
-word, keeps the default of 16 MiB. A nonzero value replaces the default for
-that app, so it can raise the limit or lower it, and `aar_get_info` reports the
-value in force as `shared_limit`. A value above 4095 in either limit
-word returns `BAD_REQUEST`. The limit is a cap, not a
-reservation: nothing is set aside when the load begins, and an allocation can
-still fail below the cap when the shared host-visible heap, which also serves
-P96 surfaces and SDK buffers, or the app's alias range is full. Only a request
-that could never be satisfied is refused. `LOAD_BEGIN` then returns
-`SDK_STATUS_NO_MEMORY` (6) at once and leaves the claim as it was. That
-ceiling is the smaller of the surface heap and one app's alias window of 62
-MiB; the heap on the card is larger, so the window sets it, and a request of
-up to 62 MiB is accepted. The limit lasts until the slot is claimed again.
-Both limits (the memory cap at byte 0 and this one) take effect only when the
-request is
-admitted to the slot's queue and the slot is idle or claimed; a `LOAD_BEGIN`
-answered `BUSY`, or sent after the load has begun, changes neither.
+1. Record and handle (`zzapp_rec_admit`): the oldest free record index, with
+   its stack, L1 table and table pages. Refusal reason `MEMORY` when no
+   record is free.
+2. L2 reserve of 16 tables (`zzapp_as_reserve_l2`). Refusal reason `TABLES`
+   when the reserved tables plus 16 would exceed the pool less the kernel
+   template, or when fewer than 16 tables are free and not already promised
+   to the unused part of another record's reserve. `TABLES_FREE` in `QUERY` is
+   that count.
+3. The pair (`zzapp_xport_admit`): one 16 KiB block of the host-visible heap,
+   8 KiB aligned, placed in the cacheable part of the heap (below the SDK
+   mailbox section at `0x08100000`) so a pair never lands in a page the
+   firmware maps non-cacheable. 12 KiB are used: the 4 KiB control block, then
+   the SQ and CQ at depth 64. The extra 4 KiB is allocator slack that is never
+   touched. Refusal reason `HOSTHEAP` when no such block fits. The control
+   block is written with its magic last, `AAR_CB_STATE` reads `CLAIMED`, and a
+   barrier follows.
+4. Publish: the record becomes `LIVE` and the claim lease starts.
 
-A normal exit does not tear the slot down on the app's own thread. The exit
-call only records the exit and stops the app's thread, and does both in one
-step with local interrupts masked: a tick between the two would either strand
-the stopped thread with the exit unrecorded, or let the system thread start
-the teardown while the app still runs. The thread then hands the CPU on. The
-system thread runs the teardown (end-of-app services, GL reclaim, publishing
-`IDLE`, then the record retire that returns the loader state and every other
-resource), the same place faults, forced stops and watchdog stops are torn
-down. That matters because a stopped app thread is never scheduled again, and
-the retire unmaps every host-visible block, which holds the address-space lock
-for longer than a scheduler tick when a block is tens of MiB. The tick is taken
-as soon as the lock is released, before the loader state is marked unbound. On
-the app's own thread that left the slot idle with its loader state still bound,
-and every later `LOAD_BEGIN` answered bad request until the card reset. The
-system thread is resumed after the tick, and other apps keep running while a
-long teardown is in progress.
+The `CLAIM` reply is the handle at 0, the token of the control block at 4 (a
+board offset: the card address less `ADDR_ADJ`, the same form as an
+`aar_shared` `haddr`) and the contract size of the block at 8
+(`AAR_PAIR_BYTES`, 0x3000). The client reads depth, ring offsets and ring
+tokens from the control block descriptors. A refused `CLAIM` replies with the
+4-byte `AAR_REASON_*` word alone: `MEMORY` 1, `TABLES` 2, `HOSTHEAP` 3. The
+status is `SDK_STATUS_NO_MEMORY` (6) for all three. A Zorro II board refuses
+every claim as unsupported.
+
+The pair and every buffer the runtime allocates later (the transport blocks)
+are multiples of 8 KiB, 8 KiB aligned, and live until `RELEASE`, not until the
+app ends. That is what lets the client drain messages and read the final
+status after the app exited, and what keeps a late client write harmless:
+a client that lost its lease may still write through its mapping, so the
+memory is not reused until the old client is known to be gone. The blocks of
+a claim are:
+
+| Block | Size | Allocated | Freed |
+| --- | --- | --- | --- |
+| pair | 16 KiB | `CLAIM` | `RELEASE` |
+| service | 48 KiB: 4 KiB scratch, 4 KiB console input, 8 KiB log, 32 KiB console output ring | first path, name, palette, console or log use | `RELEASE` |
+| data | 8 KiB steps up to 256 KiB | first file read or write | `RELEASE` |
+| audio ring | `0x80 + frames * 4` bytes, rounded to 8 KiB | `AAR_OP_AUDIO_OPEN` (AHI route) | audio close, exit |
+| load buffer | 72 KiB: 64 KiB staging, 2 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
+
+A spin app with no services costs 16 KiB. A console app costs 64 KiB. A game
+that reads files costs up to 320 KiB plus its audio ring. A claim holds at
+most five blocks of the surface allocator on top of the app's own 64
+(`SURFACE_ALLOCATOR_MAX_BLOCKS` is 4096, 32 KiB of BSS, shared with every P96
+bitmap and SDK buffer).
+
+All of these blocks count against the app's shared limit: `AAR_CB_SHARED_USED`
+is the sum of the transport blocks and the app's own `aar_shared_alloc` blocks
+(`zzapp_xport_publish_shared`), and an allocation is refused when the total
+would pass the limit. The pair itself is exempt from the check, because it is
+allocated before the client has written a limit.
+
+### The control block and the doorbell
+
+The control block replaces the old life block word for word:
+
+- The platform writes the lifecycle line (`AAR_CB_STATE`, `AAR_CB_END_REASON`,
+  `AAR_CB_EXIT_CODE`, `AAR_CB_FLAGS`, `AAR_CB_PROGRESS`,
+  `AAR_CB_LEASE_PERIOD_MS`, `AAR_CB_MSG_CONSUMED`), the fault record
+  (`AAR_CB_FAULT_*`: class, syndrome, `pstate`, `pc`, `sp`, `lr` and address),
+  the accounting words and the queue indices it owns. The fault record is
+  written first, then a barrier, then the end reason and the state, so a
+  client that sees the state sees the record. The words are written under the
+  services slot-state lock, so both cores may write them.
+- The client writes the three limit words (`AAR_CB_PRIVATE_MIB`,
+  `AAR_CB_SHARED_MIB`, `AAR_CB_WEIGHT`) before `LOAD_BEGIN`, the stop request
+  (`AAR_CB_STOP_REQUEST`), the lease counter (`AAR_CB_LEASE_COUNTER`) and the
+  drop counters. The firmware reads them with a load and a barrier and never
+  writes them: a lease loss latches the record's own stop and leaves the
+  client's stop word alone.
+- A fault is the `AAR_FAULT_*` class of the runtime's fault code: data abort
+  (alignment aborts as `ALIGN`), prefetch abort as `FETCH`, undefined
+  instruction as `ILLEGAL`, anything else (watchdog, forced stop, core
+  restart) as `OTHER`. `AAR_CB_FLAGS` carries `AAR_CBF_DISPLAY`, `AUDIO` and
+  `GL` from the groups of the app's note, and `CONSOLE` once the console was
+  used.
+
+Display state that the old window shared (`FLIP_GEN`, `FLIP_ACK`, the surface
+words, the palette generation) is private to the firmware. Client capabilities
+that have no control block word (`ZZAPP_CLIENT_LEASE_EXTENDED`, `_AUDIO_AHI`,
+`_CLUT8`, `_SCANOUT_ACK`, `_LATEST`) travel in word 0 of `LOAD_BEGIN` and are
+kept in the claim words of the record.
+
+Core 1, under the API lock, is the only agent that produces on the SQ and
+consumes from the CQ, so each ring has one producer and one consumer at any
+time. Core 0 never touches a ring while core 1 runs; with core 1 halted it
+touches only the control block words and block lifetime. Barriers are the ARM
+`dmb ish` at the places `transport.h` names: after an index is read, and before
+one is written. There is no cache maintenance on the ARM side, because the
+pair is normal cacheable memory that the Zorro master reaches through the ACP.
+
+`KICK` (`0x0c0b`) is the client's doorbell. The flags are `CQ_POSTED` (1) and
+`SQ_SPACE` (2). Core 0 looks the handle up, ORs the flags into the claim's
+kick word and raises the core-1 doorbell (`scheduler_core1_publish`, SGI 15
+only when `service_pending` goes from zero to one). Core 1's service pass pumps
+a claim that has a parked wait or a kick bit. A lost kick costs latency, not
+data, because the pass also polls parked claims and the queue indices are
+authoritative. The firmware never rings the client: the client polls
+`AAR_CB_SQ_TAIL`.
+
+### Load, start and stop
+
+`LOAD_BEGIN` reads `AAR_CB_PRIVATE_MIB`, `AAR_CB_SHARED_MIB` and
+`AAR_CB_WEIGHT` from the control block. A value above 4095 returns
+`BAD_REQUEST`; a shared limit the card cannot grant (the smaller of the
+surface heap and one app's alias window of 62 MiB) returns
+`SDK_STATUS_NO_MEMORY` at once and leaves the claim as it was. Zero selects
+the pool for the private limit and 16 MiB for the shared one
+(`ZZAPP_HOST_VISIBLE_DEFAULT_BYTES`). The limits cap the image, stack and
+minimum heap commit as well as later growth, and a shared cap is not a
+reservation: nothing is set aside, and an allocation can still fail below the
+cap when the shared heap or the app's alias range is full. The limits last for
+the claim.
+
+`LOAD_BEGIN` then allocates the load buffer and the deferred reply (16 bytes)
+names it: the buffer token at 0, its size at 4 (72 KiB), the largest
+`LOAD_CHUNK` at 8 (64 KiB) and the offset of the argv area at 12 (64 KiB). It
+also takes a 16 MiB staging block of class `APP` (`ZZAPP_FILE_MAX`); if the
+pool cannot give it the claim ends with reason `MEMORY`. `LOAD_CHUNK` places
+`length` bytes from offset 0 of the load buffer at `file_off` of the image;
+nothing is invalidated, because the buffer is cacheable memory. `LOAD_END`
+commits the image on its first step, all or nothing and before any zeroing
+(whether the pool or the client's private limit refuses it, the reason is
+`MEMORY`), and releases the staging block when it completes. Mapping the image
+takes tables from the record's reserve; an image that needs more than 16
+gives `TABLES`. A failed `LOAD_END` ends the claim: the frames, tables and
+staging go back and the state reads `IDLE`, with the reason in the reply (a
+4-byte `AAR_REASON_*`).
+
+`START` carries only `argc`. The argv area of the load buffer holds a `u32`
+argc, 16 offsets from the start of the load buffer, then the strings, each at
+most 128 bytes including the NUL. The firmware copies the strings into the
+app's heap and builds its `argv` there, then frees the load buffer. `STOP`
+latches a stop with reason `FORCED` on the claim; the app sees `AAR_EV_STOP`.
+
+A rejected request that carries a reason prints a `[app] reject op
+0x<opcode>` line on the console, for a deferred `LOAD_BEGIN`, `LOAD_CHUNK`,
+`LOAD_END` or `START` the loader refuses, a limit above 4095 MiB, a limit the
+card cannot grant, and a deferred request with request id zero. At most four
+lines a second print; the next line printed is `[app] N rejected ops held
+back`. A request that fails the handle check prints nothing.
+
+### Leases
+
+A `CLAIMED` or `LOADING` claim has a 30-second lease. `LOAD_BEGIN`, every
+completed `LOAD_CHUNK`, each incomplete `LOAD_END` step (it advances
+`AAR_CB_PROGRESS`) and each change of the lease counter renew it. This permits
+slow Zorro transfers and long asynchronous file reads while reclaiming a
+client that has disappeared before or during a load. The client resets its
+own inactivity deadline whenever `AAR_CB_PROGRESS` changes.
+
+Once the app runs, the client must change `AAR_CB_LEASE_COUNTER` at least every
+two seconds. A client that announced `ZZAPP_CLIENT_LEASE_EXTENDED` gets ten
+seconds, so a briefly starved Amiga task does not lose its app; it still
+renews only from its own main loop, so a client that has died is still
+detected. The firmware writes the period in force to `AAR_CB_LEASE_PERIOD_MS`
+at the claim and when the app starts. Core 0 compares the counter with the
+last value it saw on every poll, for each live record.
+
+### Release, quarantine and dead clients
+
+The control block, the rings and the buffers outlive the app and live until
+the client releases the claim.
+
+- A normal end (exit, fault, forced stop) retires the record through the
+  single retire path. The record becomes `RECLAIMED` (resources returned, shell
+  and handle held) with `AAR_CB_STATE` reading `IDLE`, the end reason and the
+  exit code set, and it holds the pair and every transport block.
+  `RELEASE(handle)` frees the blocks and the record, with a new handle
+  generation: the pointers are detached first, then the blocks are returned,
+  so a replayed teardown frees nothing twice.
+- Lease loss and an expired load quarantine the claim. The same retire runs,
+  but the app's own host-visible blocks are not returned either, and the
+  record's handle is revoked: its generation advances to a value the old
+  client does not know, and the shell stays under that new handle. The old
+  client's next request names the old handle, fails the lookup, and the stale
+  path releases the shell. `LIST` returns the current handle of a quarantined
+  shell, so an administrative `RELEASE` works. Terminal reason `QUARANTINED`
+  (9). Quarantine never ages out; it holds one record and up to 400 KiB until
+  the client's next stale request, `RELEASE` or card reset.
+- `RELEASE` on a `LIVE` record latches a stop with reason `FORCED` and sets
+  `release_requested`; the retire that core 1 runs completes the release when
+  it reaches its last stage. On a `RECLAIMED` record core 0 frees under the
+  slot-state lock, after checking the retire stage. On a `CLAIMED` or `LOADING`
+  record the record retires first, then it is freed. The reply is the status:
+  `OK` for a valid handle whatever the state, `ZZAPP_ERR_STALE` otherwise.
+
+`LIST` takes a cursor (a record index) and returns the next live claim at or
+after it. The 48-byte reply has the state at 0, the handle at 4, committed
+bytes at 8, the record index at 12 (so a client passes `index + 1` to go on),
+app CPU milliseconds at 16 and kernel service milliseconds at 20, the block
+reason (byte 24), the end reason (byte 25) and the overload flag (bytes 26 and
+27), and the app name at 28 (20 bytes). Handle 0 means there is no further
+claim. CPU time starts at zero when a claim is admitted. The block reason is
+`NONE` (0), `FILE` (1), `CONSOLE` (2), `EVENT` (3, `aar_msg_wait`), `SLEEP`
+(4), `VSYNC` (5) or `AUDIO` (6). The end reasons are `NONE` (0), `EXIT` (1),
+`FORCED` (2), `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
+`AMIGA_RESET` (7), `CORE_RESTART` (8) and `QUARANTINED` (9).
+
+### Teardown, reset and restart
+
+A normal exit does not tear the record down on the app's own thread. The exit
+call only records the exit and stops the app's thread, in one step with local
+interrupts masked: a tick between the two would either strand the stopped
+thread with the exit unrecorded, or let the system thread start the teardown
+while the app still runs. The thread then hands the CPU on. The system thread
+runs the teardown (end-of-app services, GL reclaim, publishing the end state,
+then the record retire), the same place faults, forced stops and watchdog
+stops are torn down. That matters because a stopped app thread is never
+scheduled again, and the retire unmaps every host-visible block, which holds
+the address-space lock for longer than a scheduler tick when a block is tens
+of MiB.
 
 From the exit call until the teardown has finished, the exit counts as owed
-state of the slot, separate from the app being running. Core 1 records the
-exit first and then publishes `running = 0` with release semantics; core 0
-loads `running` with acquire semantics before it reads the exit state, so
-whoever sees the app stopped also sees the cleanup it owes. That ordering is
-by construction; the host tests cannot show it.
+state of the record, separate from the app being run. Core 1 records the exit
+first and then publishes `running = 0` with release semantics; core 0 loads
+`running` with acquire semantics before it reads the exit state, so whoever
+sees the app stopped also sees the cleanup it owes. That ordering is by
+construction; the host tests cannot show it.
 
 An Amiga reset is posted to every live record and core 0 waits for core 1's
-acknowledgement of each before it goes on to reset the surface allocator.
-Core 1's reset path does the work for every slot: it tears down a running
-app, a loading slot or an exit still owed, so the allocator is not reset
-under a cleanup that still frees blocks from the old run, and it releases
-the slot's window, idle slots included, freeing the block and dropping the
-pointer. The window is therefore given back by one core, never by both at
-once. Core 0 touches it only when there is no core 1 at all, or when core 1
-is halted. If a record has not acknowledged by the shared deadline, core 1
-may only be slow, and a slow worker would run its reset later, after the
-allocator was reset and its addresses reused. Core 0 then does not clean up
-beside it: it halts core 1 and recovers every slot while it is held. A slot
-with a pending reset ends with the reason `AMIGA_RESET`, and the reset
-itself is completed by the routine core 1's worker would have run, not by a
-part of it: the window is retired whatever state the slot is in (an app
-whose audio close is still owed is `STOPPING` when it is stopped, not idle),
-deferred work queued for the slot, such as a posted `LOAD_BEGIN`, is
-cancelled, the guard of a commit the halted core could not finish is
-dropped, and the request is acknowledged. Core 1 is then released with
-nothing left to do: the restarted worker finds no reset request, no window,
-no deferred work and no running app, so it can run before the allocator is
-reset without allocating or freeing anything. The next claim allocates a
-window again at the slot's fixed range. A slot that kept its pointer would
-free, at a later reset, whatever new owner holds that address.
+acknowledgement of each before it resets the surface allocator. Core 1's reset
+path tears down a running app, a loading record or an exit still owed, so the
+allocator is not reset under a cleanup that still frees blocks from the old
+run. Afterwards the held shells (`RECLAIMED` records, quarantined ones
+included) are released once: their host-visible blocks and their transport
+blocks go back to the allocator, which is reset next, the quarantine flags are
+dropped and the records are freed. Core 1 detaches a block's pointer in the
+record before the free, then core 0 resets the allocator, which drops every
+remaining block; no `surface_allocator_free` is issued for a block the reset
+already dropped. Handles and generations survive the reset: a handle from
+before it stays stale, and the arena survives because its class is permanent.
 
-The timeout has a cost. All live records share one deadline of one second plus
-20 ms per live record, capped at four seconds (`zzapp_reset_deadline_us`,
-`zzapp_host.c:2604-2622`), so a reset that core 1 cannot acknowledge waits at
-most four seconds, and then the recovery is a cold restart of core 1: it also
-aborts the SDK requests queued for it and resets the shared graphics, audio and
-module state, not only the app slots. It is the price of not cleaning up beside
-a worker that may still be running. Core 0 prints `[app] reset: core 1 did not
-acknowledge pid N within M ms` for the first record that missed.
+If a record has not acknowledged by the shared deadline, core 1 may only be
+slow, and a slow worker would run its reset later, after the allocator was
+reset and its addresses reused. Core 0 then does not clean up beside it: it
+halts core 1 and recovers every record while it is held, through the retire
+path the worker would have run. Every step is idempotent, "free the pair"
+included (a NULL pointer means done), so a core-1 restart replays what it
+interrupted. All live records share one deadline of one second plus 20 ms per
+live record, capped at four seconds (`zzapp_reset_deadline_us`); a reset that
+core 1 cannot acknowledge waits at most four seconds, and then the recovery is
+a cold restart of core 1: it also aborts the SDK requests queued for it and
+resets the shared graphics, audio and module state. Core 0 prints `[app]
+reset: core 1 did not acknowledge pid N within M ms` for the first record that
+missed.
 
-A core-1 restart treats a slot that owes a cleanup like a running app and
-tears it down with the reason `CORE_RESTART`, replaying teardown steps that
-may have run already. The allocator frees by address and cannot tell owners
-apart, so every resource it holds is detached from its owner's record before
-it is freed: host-visible blocks, slot windows and the audio ring. A halt
-between the two leaks the block until the allocator is reset, instead of
-freeing the block of whoever was given the address meanwhile. Loader staging
-and app memory are freed through the card pool, which checks the owner. A
-restart that finds a slot that is claimed or loading releases its resources,
-publishes the host state as idle before it reopens the slot, and frees the
-slot's window block together with the window, so the next claim can allocate
-it again at the same fixed range.
+A core-1 restart treats a record that owes a cleanup like a running app and
+tears it down with the reason `CORE_RESTART`. The allocator frees by address
+and cannot tell owners apart, so every resource it holds (host-visible blocks,
+transport blocks, the audio ring) is detached from its owner's record before
+it is freed. A halt between the two leaks the block until the allocator is
+reset, instead of freeing the block of whoever was given the address
+meanwhile. Loader staging and app memory are freed through the card pool,
+which checks the owner.
 
 Before asserting core 1's reset, core 0 asks it to park. A responsive worker
-finishes its record and heap writes, cleans its own L1 data cache, completes
-a DSB, and release-publishes the park acknowledgement. Core 0 acquires that
+finishes its record and heap writes, cleans its own L1 data cache, completes a
+DSB, and release-publishes the park acknowledgement. Core 0 acquires that
 acknowledgement before resetting it. The worker then stays parked without
 touching record or heap state. The shared L2 survives the reset, and core 1
 invalidates its local caches before rejoining coherency.
 
 A wedged worker may miss the bounded park wait. That reset remains best
-effort, as before the record cutover: dirty L1 updates can be lost when reset
-removes the core from SCU snooping. Idempotent retire stages, handle checks
-and allocator reconciliation repair interrupted operations whose published
-state survived; they cannot recover arbitrary lost stores. In particular, a
-lost pointer detach can expose a block that was already freed. Recovery
-skips a host-visible block when its address and size no longer match a live
-surface allocation, but same-size address reuse can still refer to another
-owner. This path does not guarantee recovery from that case.
+effort: dirty L1 updates can be lost when reset removes the core from SCU
+snooping. Idempotent retire stages, handle checks and allocator reconciliation
+repair interrupted operations whose published state survived; they cannot
+recover arbitrary lost stores. In particular, a lost pointer detach can expose
+a block that was already freed. Recovery skips a host-visible block when its
+address and size no longer match a live surface allocation, but same-size
+address reuse can still refer to another owner.
 
-A reset or restart ends the records but does not touch the record arena, the
-handle table, or the handle generations: a handle from before the reset
-stays stale, and the arena survives because its class is permanent.
+A record is freed only under the slot-state lock, after its transport is
+detached, and its bytes stay readable once it is free. A pass on either core
+that walks the records (core 0's vblank scanout acknowledgement and audio
+fabric callbacks, core 0's audio poll, core 1's audio poll) therefore uses a
+record in the same lock section that found it: an app that exits or is stopped
+on the other core cannot free the record between the lookup and the use. A pass
+that copies a ring or allocates drops the lock after reading what it needs,
+which is safe because an open audio ring or a pending audio request holds the
+shell until the handoff ends, and the display mailbox is disabled under its
+own lock before the free.
 
-A record is freed only under the slot-state lock, after its window is detached,
-and its bytes stay readable once it is free. A pass on either core that walks
-the windows (core 0's vblank scanout acknowledgement and audio fabric
-callbacks, core 0's audio poll, core 1's audio poll) therefore uses a record in
-the same lock section that found it: an app that exits or is stopped on the
-other core cannot free the record between the lookup and the use. A pass that
-copies a ring or allocates drops the lock after reading what it needs, which is
-safe because an open audio ring or a pending audio request holds the shell until
-the handoff ends, and the display mailbox is disabled under its own lock before
-the free.
+A core-1 restart retires a faulted app the same way. The fault record in the
+control block stays readable until `RELEASE`, and a teardown that is still
+finishing does not set it again.
 
-A core-1 restart retires a faulted app the same way. The fault snapshot in the
-life block stays readable, and a teardown that is still finishing does not set
-it again. A successful claim of the window therefore goes straight to
-`LOAD_BEGIN`: nothing refuses it for an earlier fault.
+### Low-memory events
 
-A rejected app request that carries a reason prints a `[app] reject op
-0x<opcode>` line on the console. That covers a deferred `LOAD_BEGIN`,
-`LOAD_CHUNK`, `LOAD_END` or `START` the loader refuses, a `DISPLAY_BIND` with
-bad fields, a limit above 4095 MiB, a host-visible limit the card cannot
-grant, and a deferred request with request id zero. Every such rejection
-prints, but at most four lines a second; the next line printed is
-`[app] N rejected ops held back`. A request that fails the slot or generation
-check prints nothing.
-
-`LIST` (`0x0c09`) is extended-only. The selector names the slot and ignores
-its generation. Its 48-byte reply has state, generation, committed bytes,
-limit, app CPU milliseconds, and kernel service milliseconds at bytes 0
-through 23. CPU time starts at zero when a generation is claimed. STATUS CPU
-time is user execution plus SVC execution; it excludes idle and recovery
-intervals. Byte 24 is the block reason: `NONE` (0), `FILE` (1), `CONSOLE` (2),
-`EVENT` (3, `aar_msg_wait`), `SLEEP` (4), `VSYNC` (5), or `AUDIO` (6).
-Byte 25 is the terminal reason. Bytes 26-27 hold the overload flag, and bytes
-28-47 are the app name. Terminal reasons are `NONE` (0), `EXIT` (1),
-`FORCED` (2), `USER_FAULT` (3), `STALL` (4), `STUCK_CALL` (5), `LEASE` (6),
-`AMIGA_RESET` (7), `CORE_RESTART` (8), and `QUARANTINED` (9).
-
-### Incremental-load progress
-
-Firmware advertising `ZZAPP_CAP_LOAD_PROGRESS` increments the big-endian
-32-bit word at lifecycle offset `0x68` after every incomplete `LOAD_END`
-step. `LOAD_BEGIN` resets it to zero. The word wraps modulo $2^{32}$ and only
-denotes loader progress while the slot is `LOADING`; once the app runs, the
-existing runtime progress timestamp again owns offsets `0x68` and `0x6C`.
-`zz9k.library` revision 39 and later resets its normal five-second inactivity
-deadline whenever this word changes. With older firmware, which does not
-advertise the bit, it retains the fixed 32-second load-lease fallback.
-
-### Low-memory crossings
-
-Version 2's lifecycle block reserves the unused bytes after `terminal_reason`
-at `0xA4`; `0xA8` is its first append-only word. Existing version-2 launchers
-continue their exact-version check and ignore that unadvertised word. A launcher
-that needs the counter first sends extended `QUERY` and requires its capability
-bit.
-
-```text
-capability bit: ZZAPP_CAP_LOW_MEMORY = 0x00000040
-launcher caps: extended QUERY reply, big-endian u32 at byte 12
-counter: lifecycle window offset 0xA8, big-endian u32
-semantics: zeroed when a slot generation is claimed; increments once per
-free-pool low-water crossing while that slot is running; wraps modulo 2^32
-```
-
-The same crossing queues one `AAR_EV_LOW_MEMORY` event for the app; no
-additional crossing is counted or queued until the allocator has re-armed
-above its high-water mark.
-
-### Legacy slot 0
-
-A request whose payload is not 48 bytes is legacy. It addresses slot 0 only,
-uses the original single-slot request and reply shapes byte-for-byte, and has
-no selector.
-Legacy `QUERY` reports slot 0 state; legacy `ALLOC_WINDOW` claims slot 0 only.
-Therefore an unchanged single-slot ZZRun or `zz9k.library` client continues to
-run one app without learning about the other slots. A client without
-`ZZAPP_CAP_SLOTS` uses these legacy forms against older firmware.
-
-### Admission and refusal reasons
-
-An extended `ALLOC_WINDOW` reserves, in this order, and undoes each step in
-reverse on a later refusal. Nothing is published to the launcher until the
-last step, so a refused claim leaves the handle queue, the handle
-generations, the L2 reserve and free counts, the window memory, and the
-committed bytes as they were (`claim_window`, `zzapp_services.c:4832-4921`;
-`zzapp_rec_unadmit`, `zzapp_rec.c:325-351`):
-
-1. Platform and window. Zorro III with the window ranges mapped, then a free
-   window: unbound, not quarantined, no deferred operation pending. Refusal
-   reason `LIMIT`.
-2. Record and handle (`zzapp_rec_admit`): the oldest free record index, with
-   its stack, L1 table, and table pages. Refusal reason `MEMORY` when no
-   record is free.
-3. L2 reserve of 16 tables (`zzapp_as_reserve_l2`). Refusal reason `TABLES`
-   when the reserved tables plus 16 would exceed the pool less the kernel
-   template, or when fewer than 16 tables are free and not already promised
-   to the unused part of another record's reserve. A record that allocated
-   beyond its own reserve has taken tables out of that count, so a reserve is
-   never promised tables that are gone (`zzapp_as.c:919-945`). `TABLES_FREE`
-   in `QUERY` is that count.
-4. Window memory. The first claim of a window takes its fixed range from the
-   host-visible heap; a window kept from an earlier claim skips this step.
-   Refusal reason `HOSTHEAP` when the range is held by another client or the
-   heap cannot give it.
-5. Publish: the wire generation is bumped, the lifecycle block and the claim
-   lease are set, and the record becomes `LIVE`.
-
-Loading continues the same order. `LOAD_BEGIN` takes a 16 MiB staging block of
-class `APP` (`ZZAPP_FILE_MAX`); if the pool cannot give it the claim ends with
-reason `MEMORY` (`zzapp_loader.c:995-1002`, `zzapp_services.c:4483-4487`). The
-first `LOAD_END` step takes the commit, whether the pool or the launcher's
-memory limit refuses it: reason `MEMORY` (`zzapp_loader.c:535-575`). Mapping
-the image takes tables from the record's reserve; if the image needs more than
-16, the reason is `TABLES` (`zzapp_loader.c:786-788`). A failed `LOAD_END`
-ends the claim: the frames, tables, and staging go back and the window reads
-`IDLE`. The staging block is released at the end of a successful `LOAD_END`,
-not kept for the life of the app (`zzapp_loader.c:1657-1720`), so a running
-app holds none of the 96 MiB class `APP` cap; only loads in progress do, up to
-six at once.
-
-What the launcher sees:
-
-- The status of the `ALLOC_WINDOW` reply. `LIMIT` is `SDK_STATUS_BUSY`;
-  `MEMORY`, `TABLES`, and `HOSTHEAP` are `SDK_STATUS_NO_MEMORY` (6). The
-  statuses are what they were before records
-  (`zzapp_services.c:5077-5086`). A load refusal keeps the load statuses
-  described under [App interface](#app-interface).
-- On a refused extended `ALLOC_WINDOW` the reply is 4 bytes: a big-endian
-  `AAR_REASON_*` at `ZZAPP_ALLOC_REASON` (0): `MEMORY` 1, `TABLES` 2,
-  `HOSTHEAP` 3, `LIMIT` 4 (`aar/app.h`, `zzapp_proto.h:160-165`). A legacy
-  request gets the status only.
-- The lifecycle word at `ZZAPP_LIFE_REFUSAL_OFF` (`0xAC`) holds the reason of
-  the last resource refusal of the claim, set before the failing operation
-  completes and cleared at claim. It is where a `LOAD_BEGIN` or `LOAD_END`
-  refusal is visible (`zzapp_proto.h:337-340`,
-  `zzapp_services.c:1352-1356,4913`). Older launchers never read it.
-- The extended `QUERY` reply is 48 bytes (the legacy one stays 16). After the
-  existing `SLOTS` (16), `FREE_SLOTS` (20), `COMMIT_FREE` (24), and
-  `COMMIT_TOTAL` (28) words it carries `RECORDS_FREE` (32, free records),
-  `TABLES_FREE` (36, L2 tables a new admission can still reserve),
-  `TABLES_TOTAL` (40, the pool less the kernel template), and
-  `HOSTHEAP_FREE` (44, free bytes of the host-visible heap)
-  (`zzapp_proto.h:140-155`, `zzapp_services.c:4786-4827`). `COMMIT_FREE` and
-  `COMMIT_TOTAL` are real: the bytes still admissible for app commits after
-  the system reserve, and that plus the committed bytes. A client that decodes
-  32 bytes keeps working. After a claim, load, and release cycle the free
-  counts return to their starting values.
-
-A launcher that only reads the status codes behaves as before; one that
-wants the reason reads the 4-byte reply or the `0xAC` word.
-
-### Launcher windows
-
-Each launcher window is `ZZAPP_WINDOW_BYTES` (592 KiB) with the
-unchanged layout. The fixed ranges are slot 0
-`0x0805C000`–`0x080F0000`, slot 1 `0x07FC8000`–`0x0805C000`, slot 2
-`0x07F34000`–`0x07FC8000`, and slot 3
-`0x07EA0000`–`0x07F34000`. Slot 0 is the legacy range and ends at the fixed
-Z3 host window. Each range is mapped non-cacheable before core 1 runs; its
-window is allocated when the launcher claims that slot.
-
-These four windows are the one remaining ceiling on concurrent apps. The
-record capacity, the table pool, and the commit ledger allow far more apps,
-but every claim needs a window, so a fifth claim is refused with reason
-`LIMIT` while the other counts stay free. The ceiling lasts until the
-transport swap (slice 6), when requests name handles and the fixed windows
-go away. The value is `ZZAPP_SLOT_COUNT` in `zzapp_proto.h`, asserted against
-the carved ranges in the firmware (`zzapp_proto.h:60-67`,
-`zzapp_services.c:86`); host tests lift it with
-`-DZZAPP_SLOT_COUNT=64u`.
+A free-pool low-water crossing queues one `AAR_EV_LOW_MEMORY` event for each
+running app; no additional crossing is queued until the allocator has re-armed
+above its high-water mark. There is no crossing counter in the control block.
 
 ## Translation attribute changes
 

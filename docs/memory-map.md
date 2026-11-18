@@ -45,7 +45,7 @@ prefix, class `CARD_POOL_CLASS_APP_ARENA`, holds it in parallel areas indexed
 by process-record index: the kernel template L1 table and one 16 KiB L1 table
 per record (16 KiB aligned), the shared pool of 1 KiB L2 tables, 8 KiB of user
 API and GL table pages per record, a 32 KiB core-1 stack per record, and a
-12 KiB record per record (`zzapp_rec.c:71-91`). It is taken at boot after
+16 KiB record per record (`zzapp_rec.c:71-91`). It is taken at boot after
 `card_pool_setup_card()` and before `zzapp_as_init()` (`main.c:1343-1361`),
 when no app extent exists yet. Its class is permanent: never in the
 revocable Fast-RAM tail, kept across an Amiga reset, never freed, and without
@@ -75,20 +75,21 @@ Each app maps its private image, heap, and stack at
 `0xC0000000`–`0xDFFFFFFF`. This 512 MiB virtual range is non-global and
 private to the record's ASID; it is not an identity mapping. The low identity
 map is privileged-only except for user grants to that app's host-visible
-blocks, display surfaces, and launcher window.
+blocks and display surfaces.
 
-The four 592 KiB launcher windows use fixed ranges in the host-visible heap:
-slot 0 `0x0805C000`–`0x080F0000`, slot 1
-`0x07FC8000`–`0x0805C000`, slot 2
-`0x07F34000`–`0x07FC8000`, and slot 3
-`0x07EA0000`–`0x07F34000`. Slot 0 is the legacy range and ends at the fixed
-Z3 host window. Firmware maps all four ranges non-cacheable before core 1
-runs and allocates a slot's window from its range when a launcher claims it.
-Legacy app-service requests continue to use slot 0's window and do not expose
-the other three windows. These windows are a wire-layer ceiling on concurrent
-apps (`ZZAPP_SLOT_COUNT`, `ZZAPP_WINDOW_Z3_SLOTS`), not part of the record
-arena; the record capacity above is not limited by them. They go away with the
-transport swap (slice 6).
+App transport memory is not a fixed range. Each claim takes one 16 KiB, 8 KiB
+aligned pair block (control block, submission and completion queues) from the
+host-visible heap at `CLAIM`, and later up to four more blocks (service, data,
+audio ring, load buffer), each a multiple of 8 KiB and 8 KiB aligned. They
+are placed in the cacheable part of the heap, below the SDK mailbox section at
+`0x08100000`, so no transport block lands in a page the firmware maps
+non-cacheable, and they live until the client releases the claim (see
+[app-runtime.md](app-runtime.md#transport-and-claim-protocol)). The former
+four fixed 592 KiB launcher windows (`0x07EA0000`–`0x080F0000`) and the
+boot loop that mapped them non-cacheable are gone: only the Z2 mailbox page
+is still split into non-cacheable pages (`mmu_page.c`, one page table). Every
+block counts one entry of the surface allocator's 4096-entry block table
+(`SURFACE_ALLOCATOR_MAX_BLOCKS`).
 
 
 ### Zorro III SDK host window
