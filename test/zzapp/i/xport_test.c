@@ -387,11 +387,16 @@ static void test_service_and_blocks(void)
     CHECK(a.off == ZZAPP_XPORT_LOG_OFF && a.bytes == ZZAPP_XPORT_LOG_BYTES);
     CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_SCRATCH, &b) == AAR_OK);
     CHECK(heap.allocs == 2U);
-    CHECK(b.off == 0U && b.bytes == 0x1000U && b.token == a.token);
+    CHECK(b.off == 0U && b.bytes == 0x0400U && b.token == a.token);
     CHECK(map_token(b.token) == b.ptr);
     CHECK((uint8_t *)a.ptr - (uint8_t *)b.ptr == (ptrdiff_t)ZZAPP_XPORT_LOG_OFF);
     CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_CONSOLE_IN, &b) == AAR_OK &&
           b.off == 0x1000U && b.bytes == 0x1000U);
+    /* The palette area: shadow, then the stage, clear of every other area. */
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_PALETTE, &b) == AAR_OK &&
+          b.off == 0x0400U && b.bytes == 0x0800U &&
+          b.off + b.bytes <= ZZAPP_XPORT_CONSOLE_IN_OFF &&
+          ZZAPP_XPORT_PALETTE_STAGE + ZZAPP_XPORT_PALETTE_ENTRIES * 4U <= b.bytes);
     CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_CONSOLE_OUT, &b) == AAR_OK &&
           b.off == 0x4000U && b.bytes == 0x8000U);
     CHECK(b.off + b.bytes == ZZAPP_XPORT_SERVICE_BYTES);
@@ -646,7 +651,7 @@ static void test_three_entries_are_independent(void)
                                        &id[k]) == AAR_OK);
     }
     CHECK(id[0] == 1U && id[1] == 2U && id[2] == 3U);
-    CHECK(zzapp_xport_post_request(rec, (zzapp_xport_req_kind_t)3, &rq[0], 0U, NULL) ==
+    CHECK(zzapp_xport_post_request(rec, (zzapp_xport_req_kind_t)ZZAPP_XPORT_REQ_COUNT, &rq[0], 0U, NULL) ==
           AAR_E_INVAL);
     for (k = 0; k < 3; k++) {
         CHECK(aar_queue_peek(&c.sq, hook_acquire, &slot) == 1);

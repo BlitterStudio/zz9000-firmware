@@ -1528,6 +1528,8 @@ static void test_display_pan(void)
 	cl.open_layout = AAR_LAYOUT_CLUT8;
 	CHECK(zzapp_svc_display_open(320U, 200U, AAR_FMT_CLUT8, 0U, &s) == AAR_OK);
 	CHECK(zzapp_svc_display_set_palette(1U, 252U, 4U, pal) == AAR_OK);
+	/* The call does not wait: the client takes the request when it serves. */
+	client_service(&c);
 	CHECK(cl.palette[252] == 0x00112233U && cl.palette[253] == 0x00445566U);
 	CHECK(cl.last[AAR_OP_DISPLAY_PALETTE].arg[AAR_A_DISPLAY_PALETTE_FIRST] == 252U &&
 	      cl.last[AAR_OP_DISPLAY_PALETTE].arg[AAR_A_DISPLAY_PALETTE_COUNT] == 4U);

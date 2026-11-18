@@ -57,15 +57,16 @@
 #define ZZAPP_XPORT_SERVICE_BYTES  0xC000u /* 48 KiB */
 
 typedef enum {
-	ZZAPP_XPORT_AREA_SCRATCH = 0,  /* paths, names, palette words */
+	ZZAPP_XPORT_AREA_SCRATCH = 0,  /* paths and names */
 	ZZAPP_XPORT_AREA_CONSOLE_IN,   /* room of an AAR_OP_CONSOLE_READ */
 	ZZAPP_XPORT_AREA_LOG,          /* ZZAPP_XPORT_LOG_SLOTS records */
 	ZZAPP_XPORT_AREA_CONSOLE_OUT,  /* firmware-private ring, spans go out */
+	ZZAPP_XPORT_AREA_PALETTE,      /* latest colours and the request's copy */
 	ZZAPP_XPORT_AREA_COUNT
 } zzapp_xport_area_t;
 
 #define ZZAPP_XPORT_SCRATCH_OFF      0x0000u
-#define ZZAPP_XPORT_SCRATCH_BYTES    0x1000u
+#define ZZAPP_XPORT_SCRATCH_BYTES    0x0400u
 #define ZZAPP_XPORT_CONSOLE_IN_OFF   0x1000u
 #define ZZAPP_XPORT_CONSOLE_IN_BYTES 0x1000u
 #define ZZAPP_XPORT_LOG_OFF          0x2000u
@@ -73,6 +74,13 @@ typedef enum {
 #define ZZAPP_XPORT_LOG_BYTES        (ZZAPP_XPORT_LOG_SLOTS * ZZAPP_XPORT_LOG_SLOT_BYTES)
 #define ZZAPP_XPORT_CONSOLE_OUT_OFF  0x4000u
 #define ZZAPP_XPORT_CONSOLE_OUT_BYTES 0x8000u
+/* Palette area: the shadow holds the latest colour of each of the 256 entries
+ * (big-endian 0x00RRGGBB words); the stage is the copy a request in flight
+ * names, written only while no palette request is outstanding. */
+#define ZZAPP_XPORT_PALETTE_OFF      0x0400u
+#define ZZAPP_XPORT_PALETTE_BYTES    0x0800u
+#define ZZAPP_XPORT_PALETTE_ENTRIES  256u
+#define ZZAPP_XPORT_PALETTE_STAGE    0x0400u
 
 /* The data block of file reads and writes grows in steps to this size. */
 #define ZZAPP_XPORT_DATA_MAX       0x00040000u /* 256 KiB */

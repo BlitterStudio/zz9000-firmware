@@ -306,6 +306,10 @@ struct zzapp_service_runtime {
 	uint32_t lease_seen;
 	/* 1 once the quarantine revoked the handle. */
 	uint32_t handle_revoked;
+	/* Palette entries written since the last palette request went out
+	 * (bit n: entry n); the colours themselves are in the shadow of the
+	 * service block's palette area. */
+	uint32_t palette_dirty[ZZAPP_XPORT_PALETTE_ENTRIES / 32U];
 #ifdef ZZAPP_HOST_TEST
 	uint32_t audio_detach_count;
 #endif
@@ -1619,6 +1623,7 @@ void zzapp_services_on_app_end(void)
 	 * still arrives is dropped by id. */
 	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
 	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_FLIP);
+	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_PALETTE);
 	wait_end();
 	memset(state->file_open, 0, sizeof(state->file_open));
 	memset(state->list_open, 0, sizeof(state->list_open));
@@ -3273,14 +3278,95 @@ static int display_mailbox_flip(uint32_t back)
 	return AAR_OK;
 }
 
+/*
+ * Palette updates do not block (aar_display_set_palette). A call writes the
+ * colours into the shadow of the service block and marks the entries dirty;
+ * at most one AAR_OP_DISPLAY_PALETTE request is outstanding, and it names the
+ * stage, a copy that is written only while no request is outstanding. The
+ * next run of dirty entries goes out when the client has answered, so updates
+ * made meanwhile collapse to the latest colours. Runs from the setter and
+ * from the pass for a record with a request in flight or entries waiting.
+ */
+static int palette_pending(zzapp_rec_t *rec)
+{
+	const struct zzapp_service_runtime *state = runtime_of(rec);
+	unsigned i;
+
+	if (zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_PALETTE) !=
+	    ZZAPP_XPORT_REQ_FREE)
+		return 1;
+	for (i = 0U; i < ZZAPP_XPORT_PALETTE_ENTRIES / 32U; i++)
+		if (state->palette_dirty[i] != 0U)
+			return 1;
+	return 0;
+}
+
+static void palette_service(zzapp_rec_t *rec)
+{
+	struct zzapp_service_runtime *state = runtime_of(rec);
+	zzapp_xport_buf_t area;
+	aar_request req;
+	uint32_t first;
+	uint32_t count;
+	uint32_t id;
+
+	if (!zzapp_xport_live(rec))
+		return;
+	if (zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_PALETTE) ==
+	    ZZAPP_XPORT_REQ_POSTED)
+		(void)zzapp_xport_pump(rec);
+	if (zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_PALETTE) ==
+	    ZZAPP_XPORT_REQ_DONE)
+		/* Whatever the client answered, a colour update is not worth
+		 * a stuck app. */
+		(void)zzapp_xport_take_completion(rec, ZZAPP_XPORT_REQ_PALETTE,
+						  NULL);
+	if (zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_PALETTE) !=
+		    ZZAPP_XPORT_REQ_FREE ||
+	    !state->display_bound)
+		return;
+	/* The lowest run of dirty entries. */
+	for (first = 0U; first < ZZAPP_XPORT_PALETTE_ENTRIES; first++)
+		if ((state->palette_dirty[first / 32U] >> (first % 32U)) & 1U)
+			break;
+	if (first == ZZAPP_XPORT_PALETTE_ENTRIES)
+		return;
+	for (count = 1U; first + count < ZZAPP_XPORT_PALETTE_ENTRIES; count++) {
+		uint32_t n = first + count;
+
+		if (((state->palette_dirty[n / 32U] >> (n % 32U)) & 1U) == 0U)
+			break;
+	}
+	if (zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_PALETTE, &area) !=
+	    AAR_OK)
+		return;
+	memcpy((uint8_t *)area.ptr + ZZAPP_XPORT_PALETTE_STAGE,
+	       (uint8_t *)area.ptr + first * sizeof(uint32_t),
+	       count * sizeof(uint32_t));
+	memset(&req, 0, sizeof(req));
+	req.op = AAR_OP_DISPLAY_PALETTE;
+	req.arg[AAR_A_DISPLAY_ID] = state->display_client_id;
+	req.arg[AAR_A_DISPLAY_PALETTE_FIRST] = first;
+	req.arg[AAR_A_DISPLAY_PALETTE_COUNT] = count;
+	req.buf = area.token;
+	req.buf_off = area.off + ZZAPP_XPORT_PALETTE_STAGE;
+	req.buf_len = count * sizeof(uint32_t);
+	/* A full SQ leaves the entries dirty for the next pass. */
+	if (zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_PALETTE, &req, 0U,
+				     &id) == AAR_OK) {
+		uint32_t n;
+
+		for (n = first; n < first + count; n++)
+			state->palette_dirty[n / 32U] &= ~(1U << (n % 32U));
+	}
+}
+
 int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
 				  uint32_t count, const uint32_t *rgb)
 {
 	struct zzapp_service_runtime *state = current_runtime();
 	zzapp_rec_t *rec = service_rec();
 	zzapp_xport_buf_t area;
-	aar_completion c;
-	uint32_t args[3];
 	uint32_t i;
 	int rc;
 
@@ -3289,17 +3375,21 @@ int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
 		return AAR_E_INVAL;
 	if (!rgb || count == 0U || first >= 256U || count > 256U - first)
 		return AAR_E_INVAL;
-	rc = zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_SCRATCH, &area);
+	rc = zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_PALETTE, &area);
 	if (rc != AAR_OK)
 		return rc;
-	for (i = 0U; i < count; i++)
-		zzapp_put_be32((uint8_t *)area.ptr + i * sizeof(uint32_t),
+	for (i = 0U; i < count; i++) {
+		uint32_t n = first + i;
+
+		zzapp_put_be32((uint8_t *)area.ptr + n * sizeof(uint32_t),
 			       rgb[i] & 0x00ffffffU);
-	args[AAR_A_DISPLAY_ID] = state->display_client_id;
-	args[AAR_A_DISPLAY_PALETTE_FIRST] = first;
-	args[AAR_A_DISPLAY_PALETTE_COUNT] = count;
-	return blocking_request(AAR_OP_DISPLAY_PALETTE, ZZAPP_WAIT_DISPLAY_OPEN,
-				0U, args, 3U, &area, count * sizeof(uint32_t), &c);
+		state->palette_dirty[n / 32U] |= 1U << (n % 32U);
+	}
+	slot_state_lock_acquire();
+	set_add(&set_svc, service_pid());
+	slot_state_lock_release();
+	palette_service(rec);
+	return AAR_OK;
 }
 
 /* The flip request of the pan or buffer-change path. */
@@ -3417,6 +3507,7 @@ static void display_unbind(zzapp_rec_t *rec)
 	state->display_flip_gen = 0U;
 	state->display_flip_ack = 0U;
 	state->display_flip_submit = 0U;
+	memset(state->palette_dirty, 0, sizeof(state->palette_dirty));
 	state->display_flip_address = 0U;
 	set_del(&set_display, rec->hdr.pid);
 	slot_state_lock_release();
@@ -4084,12 +4175,14 @@ static int service_one_locked(zzapp_rec_t *rec)
 	if (!zzapp_xport_live(rec))
 		return 0;
 	kicked = zzapp_xport_kick_take(rec) != 0U;
-	if (kicked || state->wait_kind != ZZAPP_WAIT_NONE || console_pending(rec)) {
+	if (kicked || state->wait_kind != ZZAPP_WAIT_NONE || console_pending(rec) ||
+	    palette_pending(rec)) {
 		if (zzapp_xport_pump(rec) < 0)
 			/* The waiter finds the indices corrupt and ends. */
 			ready = 1;
 	}
 	console_service(rec);
+	palette_service(rec);
 	if (state->wait_kind == ZZAPP_WAIT_NONE)
 		return 0;
 	switch (state->wait_kind) {
@@ -4131,7 +4224,7 @@ static int service_one_locked(zzapp_rec_t *rec)
 static int service_wanted(zzapp_rec_t *rec)
 {
 	return runtime_of(rec)->wait_kind != ZZAPP_WAIT_NONE ||
-	       console_pending(rec);
+	       console_pending(rec) || palette_pending(rec);
 }
 
 static void service_pass(void)

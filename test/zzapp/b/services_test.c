@@ -856,11 +856,458 @@ static void test_clut8_palette_publication(void)
 	EXPECT(open_display(0U, 320U, 200U, AAR_FMT_CLUT8, 0U, &surface) == AAR_OK,
 	       "CLUT8 display open");
 	EXPECT(zzapp_svc_display_set_palette(1U, 4U, 2U, rgb) == AAR_OK, "CLUT8 palette call");
+	svc_yield();
 	h = mock_client_last(&CL(0), AAR_OP_DISPLAY_PALETTE);
 	EXPECT(h && h->req.arg[AAR_A_DISPLAY_PALETTE_FIRST] == 4U &&
 	       h->req.arg[AAR_A_DISPLAY_PALETTE_COUNT] == 2U, "palette request words");
 	EXPECT(CL(0).palette[4] == 0x223344U && CL(0).palette[5] == 0xa0b0c0U,
 	       "palette colours read through the scratch area");
+}
+
+/* ---- Palette updates: aar_display_set_palette does not block ----------------------------- */
+
+/* The client's palette as the tests model it: every call writes the colours
+ * here too, and what the client ends up holding must equal it. */
+static uint32_t pal_model[256];
+static uint8_t pal_written[256], pal_seen[256];
+static unsigned pal_yields;
+
+struct pal_req {
+	uint32_t id, first, count, display;
+	const uint8_t *buf;
+	uint8_t snap[1024];
+};
+static struct pal_req pal_log[32];
+static unsigned pal_reqs, pal_inflight, pal_max_inflight;
+static int pal_hold;
+
+/* A yield inside a palette call means the app parked: after a while the stop
+ * request ends the wait, so a regression fails instead of hanging. */
+static void pal_yield(void)
+{
+	pal_yields++;
+	if (pal_yields == 20U)
+		mock_client_request_stop(&CL(0));
+	svc_yield();
+}
+
+/* The client: it reads the colours of the buffer the request names when it
+ * takes the request, and either answers at once or holds the completion. */
+static mock_verdict_t pal_on_request(mock_client *c, const aar_request *req,
+				     aar_completion *comp)
+{
+	struct pal_req *p;
+	const uint8_t *buf;
+	uint32_t i;
+
+	(void)comp;
+	if (req->op != AAR_OP_DISPLAY_PALETTE)
+		return MOCK_DEFAULT;
+	buf = (const uint8_t *)mock_client_buf(req);
+	p = &pal_log[pal_reqs % 32U];
+	p->id = req->id;
+	p->first = req->arg[AAR_A_DISPLAY_PALETTE_FIRST];
+	p->count = req->arg[AAR_A_DISPLAY_PALETTE_COUNT];
+	p->display = req->arg[AAR_A_DISPLAY_ID];
+	p->buf = buf;
+	pal_reqs++;
+	pal_inflight++;
+	if (pal_inflight > pal_max_inflight)
+		pal_max_inflight = pal_inflight;
+	if (!buf || p->count == 0U || p->count > 256U || p->first >= 256U ||
+	    p->count > 256U - p->first || req->buf_len < p->count * 4U) {
+		fail("palette request names its colours");
+		pal_inflight--;
+		return MOCK_COMPLETE;
+	}
+	memcpy(p->snap, buf, p->count * 4U);
+	for (i = 0U; i < p->count; i++)
+		c->palette[p->first + i] = zzapp_get_be32(buf + i * 4U);
+	if (pal_hold)
+		return MOCK_HOLD;
+	pal_inflight--;
+	return MOCK_COMPLETE;
+}
+
+static const struct pal_req *pal_req_at(unsigned n)
+{
+	return &pal_log[n % 32U];
+}
+
+/* The held request `n` is answered; core 1's next pass takes it. */
+static void pal_complete(unsigned n)
+{
+	pal_inflight--;
+	EXPECT(mock_client_complete(&CL(0), pal_req_at(n)->id, AAR_OK, NULL, 0U) ==
+	       AAR_OK, "held palette request completes");
+}
+
+/* The Amiga serves, core 1 posts what is pending, the Amiga serves again. */
+static void pal_settle(void)
+{
+	unsigned i;
+
+	for (i = 0U; i < 4U; i++)
+		svc_yield();
+}
+
+static int pal_set(uint32_t first, uint32_t count, uint32_t tag)
+{
+	uint32_t rgb[256];
+	uint32_t i;
+
+	for (i = 0U; i < count; i++) {
+		/* The top byte is not a colour: it must not reach the client. */
+		rgb[i] = 0xff000000U | ((tag & 0xffU) << 16) |
+			 (((first + i) & 0xffU) << 8) | (i & 0xffU);
+		if (first + i < 256U) {
+			pal_model[first + i] = rgb[i] & 0x00ffffffU;
+			pal_written[first + i] = 1U;
+		}
+	}
+	return zzapp_svc_display_set_palette(1U, first, count, rgb);
+}
+
+static void pal_client_matches_model(const char *what)
+{
+	uint32_t i;
+
+	for (i = 0U; i < 256U; i++) {
+		if (CL(0).palette[i] != pal_model[i]) {
+			fail(what);
+			fprintf(stderr, "  entry %u: client %06x want %06x\n",
+				(unsigned)i, (unsigned)CL(0).palette[i],
+				(unsigned)pal_model[i]);
+			return;
+		}
+	}
+}
+
+/* A CLUT8 display for app 0 with a palette the client holds already. */
+static void pal_world(int hold)
+{
+	aar_surface surface;
+	uint32_t i;
+
+	world_loaded(ZZAPP_CLIENT_CLUT8);
+	client_display(&CL(0), FRONT, BACK, 0U, AAR_DISPCAP_CLUT8);
+	EXPECT(open_display(0U, 320U, 200U, AAR_FMT_CLUT8, 0U, &surface) == AAR_OK,
+	       "palette display open");
+	for (i = 0U; i < 256U; i++)
+		CL(0).palette[i] = pal_model[i] = 0x00bb0000U | i;
+	memset(pal_written, 0, sizeof(pal_written));
+	memset(pal_seen, 0, sizeof(pal_seen));
+	pal_yields = 0U;
+	pal_reqs = pal_inflight = pal_max_inflight = 0U;
+	pal_hold = hold;
+	CL(0).on_request = pal_on_request;
+	zzapp_services_test_set_yield(pal_yield);
+}
+
+static void pal_done(void)
+{
+	CL(0).on_request = NULL;
+	zzapp_services_test_set_yield(svc_yield);
+}
+
+/* The contract of aar_display_set_palette: it does not block. A client that
+ * answers nothing must not park the app, however many updates it makes. */
+static void test_palette_never_parks_with_a_silent_client(void)
+{
+	unsigned i;
+	int rc = AAR_OK;
+
+	pal_world(0);
+	CL(0).frozen = 1;
+	for (i = 0U; i < 100U && rc == AAR_OK; i++)
+		rc = pal_set(0U, 256U, i);
+	EXPECT(rc == AAR_OK, "palette call with a silent client returns OK");
+	EXPECT(pal_yields == 0U, "palette call with a silent client does not park");
+	EXPECT(!zzapp_services_wait_registered(PID_OF(0U)),
+	       "palette call leaves no wait registered");
+	CL(0).frozen = 0;
+	pal_settle();
+	pal_client_matches_model("silent client: the latest palette arrives");
+	pal_done();
+}
+
+/* One request in flight at a time. The buffer it names is not written until
+ * the client has answered, later updates collect (latest wins, an entry that
+ * nobody wrote is never sent) and go out one run at a time. */
+static void test_palette_coalesces_behind_one_request_in_flight(void)
+{
+	const struct pal_req *first;
+	unsigned n, k;
+	uint8_t snap[1024];
+
+	pal_world(1);
+	EXPECT(pal_set(0U, 256U, 1U) == AAR_OK, "full palette");
+	pal_settle();
+	EXPECT(pal_reqs == 1U, "the first update goes out at once");
+	first = pal_req_at(0U);
+	EXPECT(first->first == 0U && first->count == 256U, "first request range");
+	memcpy(snap, first->buf, sizeof(snap));
+	memset(pal_written, 0, sizeof(pal_written));
+	/* Overlapping and disjoint updates while the first is unanswered. */
+	EXPECT(pal_set(10U, 3U, 2U) == AAR_OK, "update 10..12");
+	EXPECT(pal_set(11U, 1U, 3U) == AAR_OK, "overlapping update of 11");
+	EXPECT(pal_set(200U, 2U, 4U) == AAR_OK, "update 200..201");
+	EXPECT(pal_set(10U, 2U, 5U) == AAR_OK, "overlapping update 10..11");
+	EXPECT(pal_set(255U, 1U, 6U) == AAR_OK, "update of the last entry");
+	EXPECT(pal_set(0U, 1U, 7U) == AAR_OK, "update of the first entry");
+	pal_settle();
+	EXPECT(pal_reqs == 1U && pal_inflight == 1U,
+	       "nothing else goes out while the request is unanswered");
+	EXPECT(memcmp(first->buf, snap, sizeof(snap)) == 0,
+	       "the buffer of a request in flight is not written");
+	/* Each answer lets the next run out; the runs are what was written. */
+	for (n = 0U; n < 8U && pal_inflight != 0U; n++) {
+		pal_complete(n);
+		pal_settle();
+		EXPECT(pal_max_inflight == 1U, "one request in flight at most");
+	}
+	EXPECT(pal_inflight == 0U, "every request was answered");
+	for (n = 1U; n < pal_reqs; n++) {
+		const struct pal_req *r = pal_req_at(n);
+
+		for (k = r->first; k < r->first + r->count; k++)
+			pal_seen[k]++;
+	}
+	for (k = 0U; k < 256U; k++)
+		if (pal_seen[k] != pal_written[k]) {
+			fail("every written entry is sent once, no other");
+			fprintf(stderr, "  entry %u: sent %u times, written %u\n",
+				k, pal_seen[k], pal_written[k]);
+			break;
+		}
+	pal_client_matches_model("overlap and holes: the latest colours arrive");
+	pal_done();
+}
+
+/* Latest wins when the same entries are written many times behind one
+ * request in flight, and the colours are the last ones written. */
+static void test_palette_latest_wins(void)
+{
+	unsigned n;
+	unsigned i;
+
+	pal_world(1);
+	EXPECT(pal_set(0U, 256U, 1U) == AAR_OK, "initial palette");
+	pal_settle();
+	for (i = 0U; i < 50U; i++)
+		EXPECT(pal_set((i * 7U) & 0x7fU, 100U, 10U + i) == AAR_OK,
+		       "overlapping update");
+	for (n = 0U; n < 12U && pal_inflight != 0U; n++) {
+		pal_complete(n);
+		pal_settle();
+	}
+	EXPECT(pal_inflight == 0U && pal_max_inflight == 1U,
+	       "one request in flight at most, all answered");
+	pal_client_matches_model("latest colours win");
+	pal_done();
+}
+
+/* A full SQ is not an error for the app and loses nothing: the update waits
+ * and goes out when the client has drained. */
+static void test_palette_survives_a_full_sq(void)
+{
+	zzapp_rec_t *rec;
+	uint8_t msg[AAR_MSG_BYTES] = { 0 };
+	aar_request req;
+	uint32_t id;
+
+	pal_world(0);
+	rec = APP(0U).rec;
+	CL(0).frozen = 1;
+	while (zzapp_xport_post_msg(rec, msg) == AAR_OK)
+		;
+	memset(&req, 0, sizeof(req));
+	req.op = AAR_OP_FILE_CLOSE;
+	EXPECT(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &req, 0U, &id) ==
+	       AAR_OK, "the last SQ entry");
+	EXPECT(zzapp_xport_sq_space(rec) == 0, "the SQ is full");
+	EXPECT(pal_set(3U, 5U, 1U) == AAR_OK, "palette call with a full SQ");
+	EXPECT(pal_set(4U, 5U, 2U) == AAR_OK, "second palette call with a full SQ");
+	EXPECT(pal_yields == 0U, "a full SQ does not park the app");
+	CL(0).frozen = 0;
+	pal_settle();
+	EXPECT(pal_reqs >= 1U, "the update goes out once the client drained");
+	pal_client_matches_model("full SQ: the latest palette arrives");
+	pal_done();
+}
+
+/* The buffer of a request in flight stays while the screen is closed and
+ * opened again; an update made for the old screen is not sent to the new
+ * one, and one made for the new screen is. */
+static void test_palette_across_close_and_reopen(void)
+{
+	aar_surface surface;
+	const struct pal_req *held;
+	uint8_t snap[16];
+
+	pal_world(1);
+	EXPECT(pal_set(0U, 4U, 1U) == AAR_OK, "palette before close");
+	pal_settle();
+	EXPECT(pal_reqs == 1U, "request in flight");
+	held = pal_req_at(0U);
+	memcpy(snap, held->buf, sizeof(snap));
+	EXPECT(pal_set(5U, 2U, 2U) == AAR_OK, "update pending for the old screen");
+	EXPECT(zzapp_svc_display_close(1U) == AAR_OK, "display close");
+	EXPECT(open_display(0U, 320U, 200U, AAR_FMT_CLUT8, 0U, &surface) == AAR_OK,
+	       "display reopen");
+	EXPECT(pal_set(100U, 2U, 3U) == AAR_OK, "update for the new screen");
+	pal_settle();
+	EXPECT(pal_reqs == 1U, "no request goes out while the old one is unanswered");
+	EXPECT(memcmp(held->buf, snap, sizeof(snap)) == 0,
+	       "the buffer in flight survives close and reopen");
+	pal_complete(0U);
+	pal_settle();
+	EXPECT(pal_reqs == 2U, "the update of the new screen goes out");
+	if (pal_reqs >= 2U) {
+		const struct pal_req *r = pal_req_at(1U);
+
+		EXPECT(r->first == 100U && r->count == 2U,
+		       "only the new screen's colours are sent");
+		pal_complete(1U);
+	}
+	pal_settle();
+	EXPECT(pal_reqs == 2U, "nothing more is sent");
+	/* The update that belonged to the closed screen is gone. */
+	pal_model[5] = 0x00bb0005U;
+	pal_model[6] = 0x00bb0006U;
+	pal_client_matches_model("the old screen's update never reaches the new one");
+	pal_done();
+}
+
+/* An update kept for the client's display is not dropped by a flip, which
+ * leaves the display as it is: the pending colours are sent when it can. */
+static void test_palette_pending_survives_a_flip(void)
+{
+	pal_world(1);
+	EXPECT(pal_set(0U, 8U, 1U) == AAR_OK, "first palette");
+	pal_settle();
+	EXPECT(pal_set(20U, 4U, 2U) == AAR_OK, "pending palette");
+	(void)zzapp_svc_display_flip_async(1U);
+	pal_settle();
+	pal_complete(0U);
+	pal_settle();
+	EXPECT(pal_reqs == 2U, "the pending palette goes out after the flip");
+	if (pal_reqs >= 2U)
+		pal_complete(1U);
+	pal_settle();
+	pal_client_matches_model("pending palette survives a flip");
+	pal_done();
+}
+
+/* Two claims: each client sees its own colours, and one claim's unanswered
+ * request does not hold up the other. */
+static void test_palette_of_two_claims_is_independent(void)
+{
+	aar_surface surface;
+	uint32_t rgb0[2] = { 0x00112233U, 0x00445566U };
+	uint32_t rgb1[2] = { 0x00aabbccU, 0x00ddeeffU };
+	uint32_t i;
+
+	pal_world(1);
+	zzapp_services_test_set_core(0);
+	EXPECT(svc_app_claim(1U) != NULL, "second claim");
+	give_space(1U);
+	EXPECT(svc_load_begin(1U, ZZAPP_CLIENT_CLUT8, NULL, NULL) == SDK_STATUS_OK,
+	       "second load begin");
+	zzapp_services_test_set_core(1);
+	client_display(&CL(1), 0x00300000U, 0x00340000U, 0U, AAR_DISPCAP_CLUT8);
+	EXPECT(open_display(1U, 320U, 200U, AAR_FMT_CLUT8, 0U, &surface) == AAR_OK,
+	       "second display open");
+	for (i = 0U; i < 256U; i++)
+		CL(1).palette[i] = 0x00cc0000U | i;
+	svc_select(0U);
+	EXPECT(zzapp_svc_display_set_palette(1U, 0U, 2U, rgb0) == AAR_OK,
+	       "first claim palette");
+	svc_yield();
+	EXPECT(pal_reqs == 1U, "first claim request in flight, held");
+	svc_select(1U);
+	EXPECT(zzapp_svc_display_set_palette(1U, 8U, 2U, rgb1) == AAR_OK,
+	       "second claim palette while the first is unanswered");
+	pal_settle();
+	EXPECT(CL(1).palette[8] == 0x00aabbccU && CL(1).palette[9] == 0x00ddeeffU,
+	       "second claim's client has its colours");
+	EXPECT(CL(0).palette[8] != 0x00aabbccU && CL(0).palette[9] != 0x00ddeeffU,
+	       "first claim's client does not");
+	EXPECT(CL(1).palette[0] == 0x00cc0000U, "second claim's other entries stay");
+	svc_select(0U);
+	pal_complete(0U);
+	pal_settle();
+	pal_done();
+}
+
+/* The claim ends with an update in flight and one waiting: nothing is posted
+ * after the end, the request is given up, its late answer is dropped by id,
+ * and the buffer stays untouched. */
+static void test_palette_at_the_end_of_the_app(void)
+{
+	zzapp_rec_t *rec;
+	const struct pal_req *held;
+	uint8_t snap[64];
+	unsigned reqs;
+
+	pal_world(1);
+	rec = APP(0U).rec;
+	EXPECT(pal_set(0U, 16U, 1U) == AAR_OK, "palette before the end");
+	pal_settle();
+	EXPECT(pal_reqs == 1U, "request in flight");
+	held = pal_req_at(0U);
+	memcpy(snap, held->buf, sizeof(snap));
+	EXPECT(pal_set(40U, 4U, 2U) == AAR_OK, "palette waiting at the end");
+	zzapp_services_on_app_end();
+	reqs = pal_reqs;
+	pal_settle();
+	EXPECT(pal_reqs == reqs, "no palette request after the app ended");
+	EXPECT(memcmp(held->buf, snap, sizeof(snap)) == 0,
+	       "the buffer stays untouched after the end");
+	pal_complete(0U);
+	pal_settle();
+	(void)zzapp_xport_pump(rec);
+	EXPECT(zzapp_xport_stats(rec)->late_dropped >= 1U,
+	       "the late answer is dropped by id");
+	pal_done();
+}
+
+/* The checks of the call are unchanged: a bad range, a missing table, a
+ * display that is not CLUT8, a wrong surface id, and the partial updates at
+ * both ends of the table. */
+static void test_palette_validation_and_partial_updates(void)
+{
+	uint32_t rgb[2] = { 0x00010203U, 0x00040506U };
+	aar_surface surface;
+
+	pal_world(0);
+	EXPECT(zzapp_svc_display_set_palette(1U, 0U, 0U, rgb) == AAR_E_INVAL,
+	       "count 0");
+	EXPECT(zzapp_svc_display_set_palette(1U, 256U, 1U, rgb) == AAR_E_INVAL,
+	       "first 256");
+	EXPECT(zzapp_svc_display_set_palette(1U, 255U, 2U, rgb) == AAR_E_INVAL,
+	       "range past 256");
+	EXPECT(zzapp_svc_display_set_palette(1U, 0U, 257U, rgb) == AAR_E_INVAL,
+	       "count above 256");
+	EXPECT(zzapp_svc_display_set_palette(1U, 0U, 1U, NULL) == AAR_E_INVAL,
+	       "no colours");
+	EXPECT(zzapp_svc_display_set_palette(2U, 0U, 1U, rgb) == AAR_E_INVAL,
+	       "wrong surface id");
+	pal_settle();
+	EXPECT(pal_reqs == 0U, "refused calls send nothing");
+	EXPECT(pal_set(0U, 1U, 9U) == AAR_OK && pal_set(255U, 1U, 9U) == AAR_OK,
+	       "entries 0 and 255 alone");
+	pal_settle();
+	pal_client_matches_model("partial updates at both ends");
+	EXPECT(zzapp_svc_display_close(1U) == AAR_OK, "display close");
+	EXPECT(zzapp_svc_display_set_palette(1U, 0U, 1U, rgb) == AAR_E_INVAL,
+	       "no display");
+	client_display(&CL(0), FRONT, BACK, 0U, 0U);
+	EXPECT(open_display(0U, 320U, 200U, AAR_FMT_RGB565, 0U, &surface) == AAR_OK,
+	       "RGB565 display open");
+	EXPECT(zzapp_svc_display_set_palette(1U, 0U, 1U, rgb) == AAR_E_INVAL,
+	       "display is not CLUT8");
+	pal_done();
 }
 
 /* Card-owned LATEST flips never reach the client. */
@@ -2060,6 +2507,15 @@ int main(void)
 	test_display_scanout_ack();
 	test_display_wait_flip_idle();
 	test_clut8_palette_publication();
+	test_palette_never_parks_with_a_silent_client();
+	test_palette_coalesces_behind_one_request_in_flight();
+	test_palette_latest_wins();
+	test_palette_survives_a_full_sq();
+	test_palette_across_close_and_reopen();
+	test_palette_pending_survives_a_flip();
+	test_palette_of_two_claims_is_independent();
+	test_palette_at_the_end_of_the_app();
+	test_palette_validation_and_partial_updates();
 	test_display_latest_flip_posts_nothing();
 	test_display_mailbox_uses_scanout_owner();
 	test_returned_buffers_are_user_granted();

@@ -162,7 +162,7 @@ points to the current API segment plus one scheduler handoff; a body that does
 not yield remains subject to the API watchdog rather than a scheduler preemption.
 
 File and directory operations, console read and backpressure, display open and
-flip, palette, non-host audio open and close, `aar_msg_wait`, and sleep park
+flip, non-host audio open and close, `aar_msg_wait`, and sleep park
 the caller at the SVC handoff. `aar_gl_swap` parks through its flip.
 Completion wakes the record READY; file and directory waits wake TIMEOUT after
 30 seconds and return `AAR_E_TIMEDOUT`. Stop wakes a parked waiter (an EVENT
@@ -171,9 +171,9 @@ waiter wakes READY and then sees the stop); waiting service calls return
 latter only yields once.
 
 A service the app asks of its client is a request on the SQ. A record has
-three request table entries: a blocking one (file, list, console read,
-display open, palette, audio open and close), the flip, and the console
-output stream. Request ids come from a per-record counter, never zero and
+four request table entries: a blocking one (file, list, console read,
+display open and close, audio open and close), the flip, the console output
+stream, and the palette. Request ids come from a per-record counter, never zero and
 never reused for the life of the record, so a late completion of a request
 that timed out matches nothing and is dropped and counted. A request that
 finds the SQ full parks the app until the client has made room; requests
@@ -184,6 +184,19 @@ in order, so a completion is never stuck behind a message: the client posts a
 message only while it holds a credit (`posted - AAR_CB_MSG_CONSUMED` below the
 63-message capacity), and the firmware advances `AAR_CB_MSG_CONSUMED` when the
 app takes a message out of its inbox.
+
+`aar_display_set_palette` does not park. The call writes the colours into the
+shadow of the service block's palette area, marks the entries dirty and
+returns. At most one `AAR_OP_DISPLAY_PALETTE` request is outstanding. It
+names the stage, a copy of one run of dirty entries that is not written again
+until the client has answered. When it is answered the next run goes out, so
+updates made meanwhile collapse to the latest colours, and an entry nobody
+wrote is never sent. A full SQ leaves the entries dirty for the next pass of
+the system thread. Closing the display drops the entries still waiting; a
+request already in flight stays outstanding, because the client reads its
+stage in order with the close. The end of the app gives the request up and
+its late answer is dropped by id. A client that never answers only costs that
+claim its palette updates.
 
 `aar_msg_wait` parks as an `EVENT` wait with the caller's timeout as its
 deadline. The client posts the message on the CQ and may ring `KICK`, but
@@ -424,7 +437,7 @@ the request's `AAR_A_FILE_OPEN_FLAGS` argument: `AAR_FILE_READ` 1, `WRITE` 2,
 combination with `AAR_E_INVAL` before it reaches the client: an unknown bit,
 neither `READ` nor `WRITE`, `CREATE` or `TRUNCATE` without `WRITE`, or `EXCL`
 without `CREATE`. Create-or-replace is `CREATE | TRUNCATE`. Paths and names
-travel as NUL-terminated bytes in the scratch area of the service block.
+travel as NUL-terminated bytes in the 1 KiB scratch area of the service block.
 Reads and writes move through the data block, one request per chunk of at
 most 256 KiB.
 
@@ -547,7 +560,7 @@ a claim are:
 | Block | Size | Allocated | Freed |
 | --- | --- | --- | --- |
 | pair | 16 KiB | `CLAIM` | `RELEASE` |
-| service | 48 KiB: 4 KiB scratch, 4 KiB console input, 8 KiB log, 32 KiB console output ring | first path, name, palette, console or log use | `RELEASE` |
+| service | 48 KiB: 1 KiB scratch, 2 KiB palette (shadow and stage), 4 KiB console input, 8 KiB log, 32 KiB console output ring | first path, name, palette, console or log use | `RELEASE` |
 | data | 8 KiB steps up to 256 KiB | first file read or write | `RELEASE` |
 | audio ring | `0x80 + frames * 4` bytes, rounded to 8 KiB | `AAR_OP_AUDIO_OPEN` (AHI route) | audio close, exit |
 | load buffer | 72 KiB: 64 KiB staging, 2 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
