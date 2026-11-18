@@ -84,6 +84,7 @@ void Xil_AssertNonVoid() {}
 #include "zzm_minigl_host.h"
 #include "mw_service.h"
 #include "newlib_heap.h"
+#include "sdk_qprobe.h"
 
 extern uint32_t MMUTable;
 
@@ -2955,6 +2956,9 @@ int main() {
 				sdk_diag_task_count++;
 			}
 #endif
+			// temporary AAR cutover probe: serves attached CORE0 queues;
+			// one load and a branch while none is attached
+			sdk_qprobe_poll_core0();
 			sdk_mailbox_poll_divider++;
 			if ((sdk_mailbox_poll_divider & 0xffU) == 0) {
 				sdk_mailbox_task();

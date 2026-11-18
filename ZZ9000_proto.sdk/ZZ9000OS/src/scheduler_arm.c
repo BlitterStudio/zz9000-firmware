@@ -151,6 +151,7 @@ void scheduler_core1_host_test_init(taskq_shared_t *sh)
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
 #include "zzm_runtime.h"
+#include "sdk_qprobe.h"
 #include <stdio.h>
 #if ZZAPP_PERF_COUNTERS
 #include "xtime_l.h"
@@ -247,6 +248,7 @@ void zzapp_recover_external_locks(void)
   zzapp_mem_reconcile_halted();
   surface_allocator_reset_lock();
   zzm_runtime_reset_heap_lock();
+  sdk_qprobe_core1_halted();
 }
 
 void scheduler_boot_init(void)
@@ -726,6 +728,9 @@ void scheduler_core1_worker(void)
                                     scheduler_perf_stamp());
 #endif
     zzapp_worker_hook();
+    /* Temporary AAR cutover probe: serve attached CORE1 queues. */
+    if (sdk_qprobe_core1_active())
+      sdk_qprobe_service_core1();
 #if ZZAPP_PERF_COUNTERS
     {
       uint32_t work_kind = zzapp_loader_work_last_kind();
@@ -843,6 +848,9 @@ void scheduler_core1_worker(void)
         }
       }
     }
+    /* A CORE1 probe queue is polled, so the worker must not sleep. */
+    if (sdk_qprobe_core1_active())
+      should_wfe = 0;
 
     (void)zzapp_kernel_system_unlock(zzapp_runtime_kernel());
 #if ZZAPP_PERF_COUNTERS

@@ -343,6 +343,14 @@
 #define SDK_TASKQ_REGION_END \
     (SDK_TASKQ_REGION_ADDRESS + SDK_TASKQ_REGION_SIZE)
 
+// Temporary queue coherence probe state (sdk_qprobe.c, AAR cutover). It sits
+// in the coherent task-queue section, between the control block and the
+// image sessions, so both cores see it without cache maintenance.
+#define SDK_QPROBE_STATE_OFFSET     0x0003E000
+#define SDK_QPROBE_STATE_ADDRESS \
+    (SDK_TASKQ_REGION_ADDRESS + SDK_QPROBE_STATE_OFFSET)
+#define SDK_QPROBE_STATE_MAX_BYTES  0x00002000
+
 // Image/session offsets are inside the coherent task-queue section.
 #define SDK_IMAGE_SESSIONS_OFFSET   0x00040000
 #define SDK_IMAGE_SESSIONS_ADDRESS \

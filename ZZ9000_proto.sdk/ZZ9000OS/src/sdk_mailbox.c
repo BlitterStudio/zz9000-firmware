@@ -20,6 +20,7 @@
 #include "sdk_mailbox.h"
 #include "sdk_service_catalog.h"
 #include "sdk_client_release.h"
+#include "sdk_qprobe.h"
 #include "sdk_internal_completion.h"
 #include "sdk_compression.h"
 #include <zlib.h>
@@ -2081,6 +2082,8 @@ static uint32_t sanitize_allocator_metadata(void)
 	for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
 		if (shared_buffers[i].in_use &&
 		    !shared_buffer_live(&shared_buffers[i])) {
+			/* The buffer is already gone; stop any probe queue on it. */
+			(void)sdk_qprobe_detach_handle(shared_buffers[i].handle);
 			memset(&shared_buffers[i], 0, sizeof(shared_buffers[i]));
 			invalid++;
 		}
@@ -2452,6 +2455,8 @@ static uint16_t handle_free_shared(volatile struct SDKMailboxEntry *req,
 	if (!buffer)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	if (buffer->pin_count != 0U)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	if (!sdk_qprobe_detach_handle(buffer->handle))
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	if (buffer->pool_owner != 0U)
 		(void)card_pool_free(&card_pool, buffer->address,
@@ -5210,6 +5215,8 @@ static int client_shared_buffers_released(uint16_t client_id)
 		if (!shared_buffer_live(buffer) || buffer->owner_id != client_id)
 			continue;
 		if (buffer->pin_count != 0U)
+			return 0;
+		if (!sdk_qprobe_detach_handle(buffer->handle))
 			return 0;
 		if (buffer->pool_owner != 0U)
 			(void)card_pool_free(&card_pool, buffer->address,
@@ -8483,6 +8490,88 @@ static uint16_t handle_diag_memory(volatile struct SDKMailboxEntry *req,
 	return SDK_STATUS_OK;
 }
 
+/* Temporary AAR cutover diagnostic: the queue pair lives in a shared buffer
+ * of the calling client. */
+static int qprobe_lookup(uint32_t handle, struct SDKQProbeBuffer *out)
+{
+	const struct SDKSharedBuffer *buffer = find_shared_buffer(handle);
+
+	if (!buffer)
+		return 0;
+	out->handle = buffer->handle;
+	out->address = buffer->address;
+	out->length = buffer->length;
+	out->flags = buffer->flags;
+	out->owner_id = buffer->owner_id;
+	return 1;
+}
+
+static uint16_t handle_diag_qprobe(volatile struct SDKMailboxEntry *req,
+				   volatile struct SDKMailboxEntry *comp,
+				   uint16_t payload_len)
+{
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	uint16_t status;
+
+	status = sdk_qprobe_command(request_client_id(req),
+				    (const uint8_t *)req->payload, payload_len,
+				    reply, &reply_len, qprobe_lookup);
+	write_completion(comp, req, status, reply_len);
+	if (reply_len != 0U) {
+		memset((void *)comp->payload, 0, sizeof(comp->payload));
+		memcpy((void *)comp->payload, reply, reply_len);
+	}
+	return status;
+}
+
+#ifdef SDK_MAILBOX_HOST_TEST
+/* Host-test seam: the shared-buffer table, the paths that free a slot and
+ * the probe handler, as the production code runs them. */
+void sdk_mailbox_test_buffer_add(uint32_t handle, uint32_t address,
+				 uint32_t length, uint32_t flags,
+				 uint16_t owner_id)
+{
+	uint32_t i;
+
+	for (i = 0U; i < SDK_MAX_SHARED_BUFFERS; i++) {
+		if (!shared_buffers[i].in_use) {
+			shared_buffers[i].handle = handle;
+			shared_buffers[i].address = address;
+			shared_buffers[i].length = length;
+			shared_buffers[i].flags = flags;
+			shared_buffers[i].owner_id = owner_id;
+			shared_buffers[i].in_use = 1U;
+			return;
+		}
+	}
+}
+
+uint16_t sdk_mailbox_test_free_shared(volatile struct SDKMailboxEntry *req,
+				      volatile struct SDKMailboxEntry *comp,
+				      uint16_t payload_len)
+{
+	return handle_free_shared(req, comp, payload_len);
+}
+
+int sdk_mailbox_test_client_buffers_released(uint16_t client_id)
+{
+	return client_shared_buffers_released(client_id);
+}
+
+uint32_t sdk_mailbox_test_sanitize(void)
+{
+	return sanitize_allocator_metadata();
+}
+
+uint16_t sdk_mailbox_test_qprobe(volatile struct SDKMailboxEntry *req,
+				 volatile struct SDKMailboxEntry *comp,
+				 uint16_t payload_len)
+{
+	return handle_diag_qprobe(req, comp, payload_len);
+}
+#endif
+
 static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
                                      volatile struct SDKMailboxEntry *comp,
                                      uint16_t payload_len)
@@ -8965,6 +9054,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_diag_sched(req, comp);
 	case SDK_OP_DIAG_MEMORY:
 		return handle_diag_memory(req, comp);
+	case SDK_OP_DIAG_QPROBE:
+		return handle_diag_qprobe(req, comp, payload_len);
 	case SDK_OP_APP_QUERY:
 	case SDK_OP_APP_ALLOC_WINDOW:
 	case SDK_OP_APP_LOAD_BEGIN:
@@ -9085,6 +9176,13 @@ void sdk_mailbox_init(void)
 	 * generation tag stops the stale completion from posting, but only the
 	 * quiesce stops the write itself. No-op at cold boot (core 1 not yet up). */
 	scheduler_quiesce_for_reset();
+	/* A probe queue lives in a shared buffer this reset frees below; core 1
+	 * may be inside it. Detach every queue, and halt core 1 if it will not
+	 * leave. */
+	if (!sdk_qprobe_reset()) {
+		core1_cold_restart();
+		(void)sdk_qprobe_reset();
+	}
 	/* internal tasks (video compose, FWUP) were drained/dropped with
 	 * the queue and will never post their deferred completion */
 	overlay_scheduler_reset();

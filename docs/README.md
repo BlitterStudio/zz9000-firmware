@@ -42,6 +42,7 @@ and programs that use the card.
 | Document | Contents |
 | --- | --- |
 | [memory-map.md](memory-map.md) | DDR reservations, the linker image, and the card pool. |
+| [queue-probe.md](queue-probe.md) | The temporary queue coherence probe for the AAR cutover: firmware behaviour, core-1 teardown handshake, tests. |
 | [modules.md](modules.md) | Module runtime v2: verified, on-demand `.ZZM` modules. |
 | [audio-fabric.md](audio-fabric.md) | Mixing SDK playback and direct-ring audio into the TX ring. |
 | [audio-conversion.md](audio-conversion.md) | PCM rate conversion to and from the 48 kHz period. |

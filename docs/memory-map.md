@@ -24,7 +24,7 @@ above it.
 | `0x00200000`–`0x033F0000` | 49.9375 MiB | P96 VRAM, managed by rtg.library. The RTG driver's MemorySize ends here. |
 | `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages, the MiniGL wire-v9 transport window (one dynamic allocation, see below) and the AHI/MHI scratch. |
 | `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. The high image also reserves a 208 KiB app translation-table slab: four 16 KiB app L1 tables, one 16 KiB template, and 128 1 KiB L2 tables. |
-| `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
+| `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. The temporary queue probe keeps 8 KiB of state at offset `0x3E000` (see `queue-probe.md`). |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
 | `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. |
 | `0x09000000`–`0x0A000000` | 16 MiB | Fixed external firmware-module arena: MPEG-2, WebM and WebP slots. |

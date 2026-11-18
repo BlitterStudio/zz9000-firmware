@@ -146,7 +146,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		.capability_bits = SDK_CAP_DIAGNOSTICS,
 		.flags = SDK_SERVICE_FLAG_FIRMWARE,
 		.opcode_base = SDK_SERVICE_DIAG,
-		.opcode_count = 4,
+		.opcode_count = 5,	/* 0x0900..0x0904 incl. the temporary QPROBE */
 		.name = "diag"
 	},
 	{

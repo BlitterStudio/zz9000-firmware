@@ -187,6 +187,8 @@ jobs:
         run: make -C test/aperture test
       - name: MMU page split suite
         run: make -C test/mmu test
+      - name: Queue probe suite
+        run: make -C test/qprobe test
       - name: Media session suite
         run: make -C test/media test
       - name: WebM demux suite

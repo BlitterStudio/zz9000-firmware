@@ -57,6 +57,7 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libtest.c -o build/zz9k-libtest
 m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
 m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-ringtest.c -o build/zz9k-app-ringtest
+m68k-amigaos-gcc $STACKCFLAGS build/m68k/zz9k_host.o tools/zz9k-qprobe.c -o build/zz9k-qprobe
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libasync.c -o build/zz9k-libasync
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libbatch.c -o build/zz9k-libbatch
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libcancel.c -o build/zz9k-libcancel

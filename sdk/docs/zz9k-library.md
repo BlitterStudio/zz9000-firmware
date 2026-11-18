@@ -225,6 +225,37 @@ side is described in `docs/app-runtime.md`.
 app-to-host ring and checks every message, ping latency, and a counter word
 read through a cache-inhibited mapping; see step 12 of `zz9k-release-smoke.md`.
 
+`zz9k-qprobe` is a temporary diagnostic for the AAR cutover and goes away with
+the probe firmware. It checks that queues in the host-visible shared heap stay
+coherent between the Amiga and firmware code on both ARM cores, and it needs
+firmware with the `DIAG_QPROBE` opcode (`0x0904`). The Amiga reads and writes
+the shared pairs through a cache-inhibited mapping (mmu.library, else
+`CacheClearE` around each access).
+
+- `zz9k-qprobe stream [QUEUES=n] [OWNER=core0|core1|mix] [SECONDS=s]` lets the
+  firmware fill each down ring with numbered 64-byte entries while the Amiga
+  checks sequence numbers, torn entries, pattern words, and that no entry is
+  seen before its data, and answers every entry. Defaults: 2 queues, `mix`
+  (alternating cores), 30 s.
+- `zz9k-qprobe doorbell [QUEUES=1,8,32] [ITERATIONS=n]` times a mailbox KICK
+  and the time until the firmware's PONG is visible, for each queue count
+  (default 500 iterations).
+- `zz9k-qprobe all` runs stream on core 0, core 1, and mixed, then doorbell.
+
+Each part ends with one line, `QPROBE <part> PASS|FAIL key=value ...`; a
+failure adds `reason=` (`setup`, `break`, `call_failed`, `no_queues`,
+`no_status`, `amiga_errors`, `fw_errors`, `pong_wrong`, `pong_missing`,
+`down_lost`, `up_unconsumed`, or `low_traffic`). The lines above it show the
+first errors with queue, sequence number, error code, and the 16 raw words of
+the entry. A stream queue must see at least 1000 entries and get every PING
+answered, so a run that tested little fails. Doorbell timings are in
+`QPROBE-STAT doorbell` lines as min/avg/max microseconds: `kick_us` is the
+mailbox round trip, `pong_visible_us` runs from the KICK until the PONG shows
+in the down ring, `pong_after_kick_us` is the part after the KICK reply, and
+`handler_us` is the firmware handler time from the reply. Exit code 0 means
+every part passed, 20 a failure, 10 bad arguments. A firmware built with the
+shared bit cleared is the negative control and is expected to fail.
+
 Use `zz9k_known_service_count()` / `zz9k_known_service_id()` to enumerate the
 SDK-known built-in service IDs when checking the firmware service registry.
 
@@ -411,7 +442,7 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 | Audio | `0x0500` DECODE_MP3, `0x0501` MIX_AUDIO, `0x0502` RESAMPLE_AUDIO, `0x0503` STREAM_BEGIN, `0x0504` STREAM_FEED, `0x0505` STREAM_READ, `0x0506` STREAM_CLOSE, `0x0507` STREAM_PLAY, `0x0508` STREAM_STOP, `0x0509`–`0x050e` control and metering, `0x0512` FABRIC_STATE_GET, `0x0513` RING_ACQUIRE, `0x0514` RING_RELEASE, `0x0515` STREAM_GAIN, `0x0516` STREAM_BEGIN_EX, `0x0517` OUTPUT_CLOCK |
 | Codec | `0x0600` DECOMPRESS, `0x0601` DECOMPRESS_TEST, `0x0602` STREAM_BEGIN, `0x0603` STREAM_READ, `0x0604` STREAM_CLOSE, `0x0605` STREAM_FEED, `0x0606` DECOMPRESS_BATCH |
 | Crypto | `0x0800` HASH, `0x0801` STREAM, `0x0802` AEAD, `0x0803` KX, `0x0804` VERIFY |
-| Diagnostics | `0x0900` DIAG_READ, `0x0901` DIAG_TIMING, `0x0902` DIAG_SCHED, `0x0903` DIAG_MEMORY |
+| Diagnostics | `0x0900` DIAG_READ, `0x0901` DIAG_TIMING, `0x0902` DIAG_SCHED, `0x0903` DIAG_MEMORY, `0x0904` DIAG_QPROBE (temporary, for the AAR cutover probe) |
 | Module | `0x0a00` MODULE_STATUS |
 | Video | `0x0b00`–`0x0b03` video-session begin/write/decode/close; `0x0b04`–`0x0b0d` media-session begin/write/decode/audio-read/present/discard/status/audio-bind/audio-unbind/close |
 

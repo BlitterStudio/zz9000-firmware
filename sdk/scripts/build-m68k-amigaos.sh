@@ -77,6 +77,7 @@ m68k-amigaos-gcc $LIBCFLAGS -Itools build/m68k/zz9k-fb-common.o \
   tools/zz9k-libsmoke.c -o build/zz9k-libsmoke
 m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
 m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-ringtest.c -o build/zz9k-app-ringtest
+m68k-amigaos-gcc $STACKCFLAGS build/m68k/zz9k_host.o tools/zz9k-qprobe.c -o build/zz9k-qprobe
 m68k-amigaos-gcc $LIBCFLAGS examples/amiga-library/zz9k-library-demo.c \
   -o build/zz9k-library-demo
 m68k-amigaos-gcc $LIBCFLAGS examples/amiga-jpeg-stream/zz9k-jpeg-stream-demo.c \

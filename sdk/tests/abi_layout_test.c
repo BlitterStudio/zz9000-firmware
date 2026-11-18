@@ -372,6 +372,7 @@ int main(void)
   }
   if (ZZ9K_OP_QUERY_APERTURE_LAYOUT != 0x0005U) return 109;
   if (ZZ9K_OP_DIAG_MEMORY != 0x0903U) return 110;
+  if (ZZ9K_OP_DIAG_QPROBE != 0x0904U) return 190;
   if (ZZ9K_CAP_APERTURE_LAYOUT != (1U << 24)) return 111;
   if (ZZ9K_APERTURE_PROFILE(ZZ9K_APERTURE_LAYOUT_GENERATION_1,
                             ZZ9K_APERTURE_FLAG_VALID |

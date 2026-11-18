@@ -27,8 +27,10 @@ and [the API reference](docs/zzapp-api.md). The Amiga package includes
 `zz9k-app-echo-test`, which loads an `echo.elf` built from the ARM app
 template and verifies its 32-byte message round trip, and
 `zz9k-app-ringtest`, which floods the message ring from `ringflood.elf` and
-checks every message, the ping latency and a counter word. The
-[License](#license) section lists which files are MIT and which are
+checks every message, the ping latency and a counter word. `zz9k-qprobe` is a
+temporary diagnostic for the AAR cutover that checks queue coherence between
+the Amiga and both ARM cores; see [the library guide](docs/zz9k-library.md).
+The [License](#license) section lists which files are MIT and which are
 GPL-3.0-or-later.
 
 ## Build an AmigaOS 3 package

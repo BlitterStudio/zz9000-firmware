@@ -351,6 +351,7 @@ struct SDKCryptoVerifyPayload {
 #define SDK_OP_DIAG_TIMING             0x0901U
 #define SDK_OP_DIAG_SCHED              0x0902U
 #define SDK_OP_DIAG_MEMORY             0x0903U
+#define SDK_OP_DIAG_QPROBE             0x0904U	/* temporary AAR cutover probe */
 
 #define SDK_OP_MODULE_STATUS           0x0a00U
 #define SDK_OP_MINIGL_MODULE_ACQUIRE   0x0a01U
