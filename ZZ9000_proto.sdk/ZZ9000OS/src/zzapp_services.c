@@ -2638,11 +2638,22 @@ int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
 
 	if (!scanout)
 		return 0;
-	for (i = 0U; i < set_display.count; i++) {
-		uint32_t pid = set_display.pids[i];
-		zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+	for (i = 0U; ; i++) {
+		uint32_t pid;
+		zzapp_rec_t *rec;
 		struct zzapp_service_runtime *state;
 
+		/* The set changes under g_slot_state_lock; the record it names is
+		 * type stable and its mailbox is switched off under its own lock
+		 * before it is freed, which the checks below take again. */
+		slot_state_lock_acquire();
+		if (i >= set_display.count) {
+			slot_state_lock_release();
+			break;
+		}
+		pid = set_display.pids[i];
+		rec = zzapp_rec_by_pid(pid);
+		slot_state_lock_release();
 		if (!rec)
 			continue;
 		state = runtime_of(rec);
