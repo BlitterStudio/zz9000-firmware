@@ -2600,9 +2600,11 @@ void zzapp_on_core1_restart(void)
             force_stop(ZZAPP_FAULT_WATCHDOG_RESTART, 0, 0, 0, 0, 0, 0);
             __atomic_store_n(&host_slot(slot)->exit_state, ZZAPP_EXIT_NONE,
                              __ATOMIC_RELEASE);
-        } else {
+        } else if (zzapp_rec_state(slot) != ZZAPP_REC_RECLAIMED) {
             end_record(slot, reason);
         }
+        /* A shell whose retire finished (RECLAIMED) owes nothing: it keeps
+         * the end it already reports, which a restart does not rewrite. */
         if (amiga_reset) {
             /* The reset core 1 never acknowledged is answered here. Its
              * records are retired already; held shells are released once

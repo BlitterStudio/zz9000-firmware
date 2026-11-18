@@ -15,6 +15,7 @@ typedef struct {
 
 mock_heap_stats_t mock_heap;
 void (*mock_heap_on_release)(void *ptr, uint32_t card);
+void (*mock_heap_on_freed)(uint32_t card);
 static heap_block_t blocks[MOCK_HEAP_BLOCKS];
 static uint32_t next_card;
 
@@ -74,6 +75,8 @@ static int heap_release(void *ctx, void *ptr, uint32_t card)
             mock_heap.frees++;
             free(ptr);
             memset(&blocks[i], 0, sizeof(blocks[i]));
+            if (mock_heap_on_freed)
+                mock_heap_on_freed(card);
             return 0;
         }
     }
@@ -103,6 +106,7 @@ void mock_heap_reset(void)
     memset(&mock_heap, 0, sizeof(mock_heap));
     mock_heap.fail_after = -1;
     mock_heap_on_release = NULL;
+    mock_heap_on_freed = NULL;
     next_card = 0x08200000u;
 }
 
@@ -720,6 +724,13 @@ int mock_client_serve(mock_client *c)
 
     if (!c->attached || c->frozen)
         return 0;
+    /* A claim that was released took its pair with it: a client that still
+     * holds the pointers has nothing to serve (a real one would not touch
+     * the memory again after its release). */
+    if (!mock_heap_token((const void *)c->cb)) {
+        c->attached = 0;
+        return 0;
+    }
     c->serves++;
     for (;;) {
         const volatile uint8_t *slot = NULL;

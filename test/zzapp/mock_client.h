@@ -46,6 +46,9 @@ extern mock_heap_stats_t mock_heap;
 /* Runs at the start of every release, before the block is freed: a test
  * checks the order of a teardown here. */
 extern void (*mock_heap_on_release)(void *ptr, uint32_t card);
+/* Runs right after a block was freed: a test halts a teardown here, as a dead
+ * core 1 would. */
+extern void (*mock_heap_on_freed)(uint32_t card);
 
 /* Frees every block and clears the counters. The caller installs the heap:
  *   zzapp_xport_env_t e = mock_heap_env(); zzapp_xport_init(&e); */

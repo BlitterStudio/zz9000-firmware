@@ -1138,7 +1138,11 @@ void zzapp_services_note_progress(uint32_t lo, uint32_t hi)
 	zzapp_xport_cb_put(rec, AAR_CB_PROGRESS_HI, hi);
 }
 
-/* The end reason survives in the control block until the claim is released. */
+/* The end reason survives in the control block until the claim is released.
+ * A lease lost for good marks the claim quarantined here, before the retire
+ * that follows returns the app's resources: the client may still write
+ * through a mapping of the app's host-visible blocks, so they stay until the
+ * shell is released (retire_wire revokes the handle). */
 void zzapp_services_set_terminal(uint32_t reason)
 {
 	zzapp_rec_t *rec = service_rec();
@@ -1146,6 +1150,8 @@ void zzapp_services_set_terminal(uint32_t reason)
 	if (!rec)
 		return;
 	rec->claim.terminal_reason = reason;
+	if (reason == ZZAPP_END_LEASE)
+		zzapp_xport_flag_set(rec, ZZAPP_XPORT_F_QUARANTINED);
 	zzapp_xport_cb_put(rec, AAR_CB_END_REASON, reason);
 }
 
