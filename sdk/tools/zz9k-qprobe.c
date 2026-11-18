@@ -12,7 +12,7 @@
  *
  * usage:
  *   zz9k-qprobe stream [QUEUES=n] [OWNER=core0|core1|mix] [SECONDS=s]
- *   zz9k-qprobe doorbell [QUEUES=1,8,32] [ITERATIONS=n]
+ *   zz9k-qprobe doorbell [QUEUES=1,8,30] [ITERATIONS=n]
  *   zz9k-qprobe all [QUEUES=n] [SECONDS=s] [ITERATIONS=n] [DOORBELL=list]
  *
  * Result lines are "QPROBE <part> PASS|FAIL key=value ...". Exit code 0
@@ -62,7 +62,9 @@
 /* Down entries taken from one queue per pass, so a producer that keeps the
  * ring full cannot starve the other queues or the checks around it. */
 #define STREAM_BATCH 32U
-#define DOORBELL_COUNTS_DEFAULT "1,8,32"
+/* Each queue needs its own SDK shared buffer, and the firmware has 32 slots
+ * for every client together, so 32 queues do not fit. */
+#define DOORBELL_COUNTS_DEFAULT "1,8,30"
 
 #define EXIT_PASS 0
 #define EXIT_USAGE 10
@@ -1033,9 +1035,9 @@ static void usage(void)
 {
   puts("usage: zz9k-qprobe stream [QUEUES=n] [OWNER=core0|core1|mix] "
        "[SECONDS=s]\n"
-       "       zz9k-qprobe doorbell [QUEUES=1,8,32] [ITERATIONS=n]\n"
+       "       zz9k-qprobe doorbell [QUEUES=1,8,30] [ITERATIONS=n]\n"
        "       zz9k-qprobe all [QUEUES=n] [SECONDS=s] [ITERATIONS=n] "
-       "[DOORBELL=1,8,32]\n"
+       "[DOORBELL=1,8,30]\n"
        "defaults: 2 queues, OWNER=mix, 30 s, 500 iterations");
 }
 

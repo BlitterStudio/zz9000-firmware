@@ -237,9 +237,11 @@ the shared pairs through a cache-inhibited mapping (mmu.library, else
   checks sequence numbers, torn entries, pattern words, and that no entry is
   seen before its data, and answers every entry. Defaults: 2 queues, `mix`
   (alternating cores), 30 s.
-- `zz9k-qprobe doorbell [QUEUES=1,8,32] [ITERATIONS=n]` times a mailbox KICK
+- `zz9k-qprobe doorbell [QUEUES=1,8,30] [ITERATIONS=n]` times a mailbox KICK
   and the time until the firmware's PONG is visible, for each queue count
-  (default 500 iterations).
+  (default 500 iterations). Every queue takes one SDK shared buffer, and the
+  firmware has 32 for all clients together, so the queue count is limited to
+  32 less the buffers other clients hold.
 - `zz9k-qprobe all` runs stream on core 0, core 1, and mixed, then doorbell.
 
 Each part ends with one line, `QPROBE <part> PASS|FAIL key=value ...`; a
