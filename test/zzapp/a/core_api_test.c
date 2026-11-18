@@ -11,6 +11,7 @@
 #include "zzapp_svc.h"
 #include "zzapp_runtime.h"
 #include "zzapp_rec.h"
+#include "zzapp_xport.h"
 void zzapp_api_reclaim_resources(void);
 void zzapp_api_poison_resources(void);
 
@@ -25,6 +26,8 @@ static void boot_with_records(void)
 }
 #define zzapp_boot_init() boot_with_records()
 
+/* The pair of the admitted record is shared memory the runtime holds for the
+ * client: the app's own blocks are what is above it. */
 static uint64_t shared_used_now(const aar_api *api)
 {
     aar_info info;
@@ -32,7 +35,8 @@ static uint64_t shared_used_now(const aar_api *api)
     memset(&info, 0, sizeof(info));
     info.size = sizeof(info);
     assert(api->info(&info) == AAR_OK);
-    return info.shared_used;
+    assert(info.shared_used >= ZZAPP_XPORT_PAIR_ALLOC);
+    return info.shared_used - ZZAPP_XPORT_PAIR_ALLOC;
 }
 
 static void *shared_block(const aar_api *api, uint64_t bytes)
@@ -428,6 +432,7 @@ int main(void)
     assert(decode_reclaim_calls == 0u && app_decode_reclaim_calls == 2u);
     memset(&info, 0, sizeof(info));
     info.size = sizeof(info);
+    /* No services layer is linked: the retire freed the shell and its pair. */
     assert(zzapp_host_info(&info) == AAR_OK && info.shared_used == 0u);
 
     zzapp_loader_release();

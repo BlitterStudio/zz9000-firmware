@@ -1,21 +1,25 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
- * Claim admission and the window layer over process records (slice 5b).
+ * Claim admission over process records and the transport (slice 6).
  *
- * A claim reserves, in order, a window (LIMIT), a record slot (MEMORY), the
- * L2 reserve (TABLES) and the window memory (HOSTHEAP), and publishes nothing
- * until all four are held. Each refusal reason is driven here with the
- * resource it names exhausted, and must leave every counter, the handle table
- * and every lifecycle block as it was. Load-time refusals (staging, tables)
- * end the claim and give everything back. With the window ceiling lifted
- * (-DZZAPP_SLOT_COUNT=64u) many apps are live at once and every stop, exit,
- * reset and quarantine must return to the counts QUERY reports.
+ * A claim takes, in order, a record slot (MEMORY), the L2 reserve (TABLES)
+ * and the control block and queue pair from the host-visible heap (HOSTHEAP),
+ * and publishes nothing until all three are held. Each refusal reason is
+ * driven here with the resource it names exhausted, and must leave every
+ * counter and the handle table as it was. Load-time refusals (staging,
+ * tables) end the claim; the shell holds the pair until the client releases
+ * it, and then everything is back. There is no ceiling of launcher windows
+ * any more: many apps are live at once and every stop, exit, reset and
+ * quarantine must return to the counts QUERY reports.
  *
- * The services run on the stub kernel and loader of ZZAPP_SERVICES_STANDALONE_TEST,
- * over the real record arena and table layers. The host's retire path is the
- * double in svc_env.h (tables back, wire layer detached and freed).
+ * The services run on the stub kernel and loader of
+ * ZZAPP_SERVICES_STANDALONE_TEST, over the real record arena and table
+ * layers and the mock host-visible heap. The host's retire path is the double
+ * in svc_env.h (tables back, wire layer detached; the record and its pair
+ * stay for the client).
  */
 #define ZZAPP_SERVICES_STANDALONE_TEST
+#define ZZAPP_PROTO_NO_WINDOW
 #include "zzapp_services.c"
 
 #include "svc_env.h"
@@ -31,58 +35,18 @@
 static int checks;
 static int failures;
 
-static uint8_t win_mem[ZZAPP_SLOT_COUNT][ZZAPP_WINDOW_BYTES];
-
 /* ---- Host-heap model ----------------------------------------------------- */
 
-/* The surface allocator hands each window its fixed range. A test occupies a
- * range through zzapp_test_card_alloc_at() to make a claim's last step fail. */
-static uint8_t range_taken[ZZAPP_SLOT_COUNT];
-static uint32_t range_serial[ZZAPP_SLOT_COUNT];
-static uint32_t next_serial;
-
-static int range_of(uint32_t addr)
-{
-	uint32_t win;
-
-	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		if (ZZAPP_WINDOW_Z3_SLOT_ADDRESS(win) == addr)
-			return (int)win;
-	}
-	return -1;
-}
-
-uint32_t zzapp_test_card_alloc_at(uint32_t addr, uint32_t bytes, uint32_t *serial)
-{
-	int win = range_of(addr);
-
-	(void)bytes;
-	if (win < 0 || range_taken[win])
-		return 0U;
-	range_taken[win] = 1U;
-	range_serial[win] = next_serial++;
-	*serial = range_serial[win];
-	return 1U;
-}
-
-void zzapp_test_card_free(uint32_t card, uint32_t serial)
-{
-	int win = range_of(card);
-
-	if (win >= 0 && range_taken[win] && range_serial[win] == serial)
-		range_taken[win] = 0U;
-}
+#define HEAP_CAPACITY (64U << 20)
 
 uint32_t zzapp_test_hostheap_free(void)
 {
-	uint32_t win;
-	uint32_t total = 0U;
+	return HEAP_CAPACITY - mock_heap.live_bytes;
+}
 
-	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		if (!range_taken[win])
-			total += ZZAPP_WINDOW_BYTES;
-	}
-	return total;
+uint32_t zzapp_test_hostheap_largest(void)
+{
+	return HEAP_CAPACITY - mock_heap.live_bytes;
 }
 
 /* The commit ledger: a fixed capacity less what the live apps hold. */
@@ -91,13 +55,13 @@ uint32_t zzapp_test_hostheap_free(void)
 
 uint32_t zzapp_loader_pool_free(void)
 {
-	uint32_t win;
+	uint32_t pid;
 	uint32_t used = 0U;
 
-	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		zzapp_rec_t *rec = window_rec(&windows[win]);
+	for (pid = 0U; pid < zzapp_rec_capacity(); pid++) {
+		zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
 
-		if (rec)
+		if (rec && zzapp_rec_state(pid) != ZZAPP_REC_FREE)
 			used += rec->proc.memory.committed;
 	}
 	return COMMIT_CAPACITY - used;
@@ -134,122 +98,132 @@ static void hooks_ok(void)
 
 static void setup(uint32_t apps, uint32_t l2_total)
 {
-	uint32_t win;
-
-	memset(range_taken, 0, sizeof(range_taken));
-	next_serial = 1U;
 	svc_env_init(apps, l2_total, NULL);
 	zzapp_services_test_reset();
-	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++)
-		zzapp_services_test_set_window_pool(win, win_mem[win]);
+	mock_heap.capacity = HEAP_CAPACITY;
 	zzapp_services_test_set_core(0);
 	hooks_ok();
-}
-
-static void selector(uint8_t *req, uint32_t win, uint32_t gen)
-{
-	memset(req, 0, ZZAPP_MAILBOX_PAYLOAD_BYTES);
-	zzapp_put_be32(req + ZZAPP_SEL_SLOT, win);
-	zzapp_put_be32(req + ZZAPP_SEL_GENERATION, gen);
 }
 
 struct claim_result {
 	uint16_t status;
 	uint16_t reply_len;
-	uint32_t win;
-	uint32_t gen;
+	uint32_t handle;
+	uint32_t token;
+	uint32_t bytes;
 	uint32_t reason;
 };
 
 static struct claim_result claim(void)
 {
 	struct claim_result r = { 0 };
-	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 
-	r.status = zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, req, sizeof(req),
-					  reply, &r.reply_len, 1, next_req++, 0U);
+	r.status = zzapp_mailbox_dispatch(ZZAPP_OP_CLAIM, NULL, 0U, reply,
+					  &r.reply_len, 1, next_req++, 0U);
 	if (r.status == SDK_STATUS_OK) {
-		r.win = zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT);
-		r.gen = zzapp_get_be32(reply + ZZAPP_ALLOC_GENERATION);
-	} else if (r.reply_len == ZZAPP_ALLOC_REFUSAL_REPLY_BYTES) {
-		r.reason = zzapp_get_be32(reply + ZZAPP_ALLOC_REASON);
+		r.handle = zzapp_get_be32(reply + ZZAPP_CLAIM_HANDLE);
+		r.token = zzapp_get_be32(reply + ZZAPP_CLAIM_CB_TOKEN);
+		r.bytes = zzapp_get_be32(reply + ZZAPP_CLAIM_CB_BYTES);
+	} else if (r.reply_len == ZZAPP_REFUSAL_REPLY_BYTES) {
+		r.reason = zzapp_get_be32(reply + ZZAPP_REFUSAL_REASON);
 	}
 	return r;
 }
 
-static uint16_t simple_op(uint16_t opcode, uint32_t win, uint32_t gen)
+static uint16_t simple_op(uint16_t opcode, uint32_t handle)
 {
-	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint16_t reply_len = 0U;
 
-	selector(req, win, gen);
+	zzapp_build_handle(req, handle);
 	return zzapp_mailbox_dispatch(opcode, req, sizeof(req), reply, &reply_len,
 				      1, next_req++, 0U);
 }
 
 /* One deferred op, run by core 1 and harvested by core 0. Returns the status
- * the launcher is given. */
-static uint16_t deferred_op(uint16_t opcode, uint32_t win, uint32_t gen)
+ * the client is given; the reply payload when asked. */
+static uint16_t deferred_op_reply(uint16_t opcode, uint32_t handle,
+				  uint8_t *payload, uint16_t *payload_len)
 {
-	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint16_t reply_len = 0U;
 	uint16_t status;
+	zzapp_rec_t *rec = zzapp_rec_by_handle(handle);
 
-	selector(req, win, gen);
 	if (opcode == ZZAPP_OP_LOAD_CHUNK)
-		zzapp_build_chunk_request(req, 0U, 1U);
-	zzapp_put_be32(req + ZZAPP_SEL_SLOT, win);
-	zzapp_put_be32(req + ZZAPP_SEL_GENERATION, gen);
+		zzapp_build_load_chunk_request(req, handle, 0U, 1U);
+	else if (opcode == ZZAPP_OP_START)
+		zzapp_build_start_app_request(req, handle, 0U);
+	else if (opcode == ZZAPP_OP_LOAD_BEGIN)
+		zzapp_build_load_begin_request(req, handle, 0U);
+	else
+		zzapp_build_handle(req, handle);
 	status = zzapp_mailbox_dispatch(opcode, req, sizeof(req), reply, &reply_len,
 					1, next_req++, 0U);
 	CHECK(status == SDK_STATUS_QUEUED);
 	zzapp_services_test_set_core(1);
 	zzapp_services_poll();
-	if (opcode == ZZAPP_OP_START) {
+	if (opcode == ZZAPP_OP_START && rec) {
 		uint32_t argc;
 
-		select_window(win);
+		zzapp_services_select_pid(rec->hdr.pid);
 		CHECK(zzapp_services_take_start(&argc));
-		CHECK(zzapp_services_start_entered(gen) == AAR_OK);
+		CHECK(zzapp_services_start_entered(zzapp_services_generation()) == AAR_OK);
 	}
 	zzapp_services_test_set_core(0);
-	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, NULL, &reply_len)) {
+	reply_len = 0U;
+	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, payload ? payload : reply,
+				   &reply_len)) {
 		CHECK(0);
 		return 0xffffU;
 	}
+	if (payload_len)
+		*payload_len = reply_len;
 	zzapp_mailbox_harvest_ack();
 	return status;
 }
 
-/* Claimed, loaded and running; the loader's commit is played by the test. */
-static void bring_up(uint32_t win, uint32_t gen)
+static uint16_t deferred_op(uint16_t opcode, uint32_t handle)
 {
-	CHECK(deferred_op(ZZAPP_OP_LOAD_BEGIN, win, gen) == SDK_STATUS_OK);
-	CHECK(WSTATE(win) == ZZAPP_ST_LOADING);
-	CHECK(deferred_op(ZZAPP_OP_LOAD_CHUNK, win, gen) == SDK_STATUS_OK);
-	CHECK(deferred_op(ZZAPP_OP_LOAD_END, win, gen) == SDK_STATUS_OK);
-	window_rec(&windows[win])->proc.memory.committed = APP_COMMIT;
-	CHECK(deferred_op(ZZAPP_OP_START, win, gen) == SDK_STATUS_OK);
-	CHECK(WSTATE(win) == ZZAPP_ST_RUNNING);
+	return deferred_op_reply(opcode, handle, NULL, NULL);
 }
 
-/* The host's end of an app: terminal reason, stage 3 resources, retire. */
-static void finish_app(uint32_t win, uint32_t reason)
+/* Claimed, loaded and running; the loader's commit is played by the test. */
+static void bring_up(uint32_t handle)
 {
+	zzapp_rec_t *rec = zzapp_rec_by_handle(handle);
+
+	CHECK(deferred_op(ZZAPP_OP_LOAD_BEGIN, handle) == SDK_STATUS_OK);
+	CHECK(rec && rec->claim.state == AAR_STATE_LOADING);
+	CHECK(deferred_op(ZZAPP_OP_LOAD_CHUNK, handle) == SDK_STATUS_OK);
+	CHECK(deferred_op(ZZAPP_OP_LOAD_END, handle) == SDK_STATUS_OK);
+	if (rec)
+		rec->proc.memory.committed = APP_COMMIT;
+	CHECK(deferred_op(ZZAPP_OP_START, handle) == SDK_STATUS_OK);
+	CHECK(rec && rec->claim.state == AAR_STATE_RUNNING);
+}
+
+/* The host's end of an app: terminal reason, stage 3 resources, retire. The
+ * record is a shell now and holds its pair until the client releases it. */
+static void finish_app(uint32_t handle, uint32_t reason)
+{
+	zzapp_rec_t *rec = zzapp_rec_by_handle(handle);
 	uint32_t pid;
 
-	select_window(win);
-	pid = zzapp_services_current_pid();
+	CHECK(rec != NULL);
+	if (!rec)
+		return;
+	pid = rec->hdr.pid;
+	zzapp_services_select_pid(pid);
 	zzapp_services_set_terminal(reason);
 	zzapp_services_on_app_end();
 	(void)zzapp_rec_retire(pid);
 }
 
-/* Use up record indices so the next admission is not index 0, and the window
- * number is not the pid. */
+/* Use up record indices so the next admission is not index 0. */
 static void burn_records(uint32_t count)
 {
 	uint32_t i;
@@ -258,7 +232,7 @@ static void burn_records(uint32_t count)
 		uint32_t handle = 0U;
 		zzapp_rec_t *rec = NULL;
 
-		CHECK(zzapp_rec_admit(ZZAPP_REC_NO_WINDOW, &handle, &rec) == 0U);
+		CHECK(zzapp_rec_admit(&handle, &rec) == 0U);
 		zzapp_rec_retire_tables(rec);
 		CHECK(zzapp_rec_free(handle) == 0);
 	}
@@ -270,23 +244,18 @@ struct resources {
 	zzapp_rec_stats_t rec;
 	zzapp_as_stats_t tables;
 	uint32_t hostheap;
+	uint32_t hostheap_blocks;
 	uint32_t commit_free;
-	uint32_t free_windows;
 };
 
 static void take(struct resources *s)
 {
-	uint32_t win;
-
 	memset(s, 0, sizeof(*s));
 	zzapp_rec_stats(&s->rec);
 	zzapp_as_stats(&s->tables);
 	s->hostheap = zzapp_test_hostheap_free();
+	s->hostheap_blocks = mock_heap.live;
 	s->commit_free = zzapp_loader_pool_free();
-	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		if (WSTATE(win) == ZZAPP_ST_IDLE && windows[win].handle == 0U)
-			s->free_windows++;
-	}
 }
 
 static int resources_equal(const struct resources *a, const struct resources *b)
@@ -298,8 +267,9 @@ static int resources_equal(const struct resources *a, const struct resources *b)
 	       a->tables.l2_reserved == b->tables.l2_reserved &&
 	       a->tables.l2_reserved_unused == b->tables.l2_reserved_unused &&
 	       a->tables.l2_shared_free == b->tables.l2_shared_free &&
-	       a->hostheap == b->hostheap && a->commit_free == b->commit_free &&
-	       a->free_windows == b->free_windows;
+	       a->hostheap == b->hostheap &&
+	       a->hostheap_blocks == b->hostheap_blocks &&
+	       a->commit_free == b->commit_free;
 }
 
 static int tables_equal(const zzapp_rec_table_snapshot_t *a,
@@ -313,27 +283,29 @@ static int tables_equal(const zzapp_rec_table_snapshot_t *a,
 	       a->owner_serial == b->owner_serial;
 }
 
-/* The lifecycle blocks a refused claim must leave alone: generation, state and
- * refusal words of every window that has memory. */
+/* The lifecycle state of every record a refused claim must leave alone. */
 static uint32_t life_sum(void)
 {
-	uint32_t win;
+	uint32_t pid;
 	uint32_t sum = 0U;
 
-	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		if (!windows[win].window)
+	for (pid = 0U; pid < zzapp_rec_capacity(); pid++) {
+		zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
+
+		if (!rec || zzapp_rec_state(pid) == ZZAPP_REC_FREE)
 			continue;
-		sum = sum * 31U + lget(&windows[win], ZZAPP_LIFE_GENERATION_OFF);
-		sum = sum * 31U + lget(&windows[win], ZZAPP_LIFE_STATE_OFF);
-		sum = sum * 31U + lget(&windows[win], ZZAPP_LIFE_REFUSAL_OFF);
+		sum = sum * 31U + rec->claim.state;
+		sum = sum * 31U + zzapp_xport_cb_get(rec, AAR_CB_STATE);
+		sum = sum * 31U + zzapp_xport_cb_get(rec, AAR_CB_END_REASON);
+		sum = sum * 31U + zzapp_xport_shared_used(rec);
 	}
 	return sum;
 }
 
 struct query {
 	uint16_t len;
-	uint32_t slots;
-	uint32_t free_slots;
+	uint32_t depth;
+	uint32_t hostheap_largest;
 	uint32_t commit_free;
 	uint32_t commit_total;
 	uint32_t records_free;
@@ -344,13 +316,12 @@ struct query {
 
 static void query(struct query *q)
 {
-	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 
-	CHECK(zzapp_mailbox_dispatch(ZZAPP_OP_QUERY, req, sizeof(req), reply,
-				     &q->len, 1, next_req++, 0U) == SDK_STATUS_OK);
-	q->slots = zzapp_get_be32(reply + ZZAPP_QUERY_SLOTS);
-	q->free_slots = zzapp_get_be32(reply + ZZAPP_QUERY_FREE_SLOTS);
+	CHECK(zzapp_mailbox_dispatch(ZZAPP_OP_QUERY, NULL, 0U, reply, &q->len, 1,
+				     next_req++, 0U) == SDK_STATUS_OK);
+	q->depth = zzapp_get_be32(reply + ZZAPP_QUERY_QUEUE_DEPTH);
+	q->hostheap_largest = zzapp_get_be32(reply + ZZAPP_QUERY_HOSTHEAP_LARGEST);
 	q->commit_free = zzapp_get_be32(reply + ZZAPP_QUERY_COMMIT_FREE);
 	q->commit_total = zzapp_get_be32(reply + ZZAPP_QUERY_COMMIT_TOTAL);
 	q->records_free = zzapp_get_be32(reply + ZZAPP_QUERY_RECORDS_FREE);
@@ -361,37 +332,18 @@ static void query(struct query *q)
 
 static int query_equal(const struct query *a, const struct query *b)
 {
-	return a->free_slots == b->free_slots && a->commit_free == b->commit_free &&
+	return a->commit_free == b->commit_free &&
 	       a->commit_total == b->commit_total &&
 	       a->records_free == b->records_free &&
 	       a->tables_free == b->tables_free &&
 	       a->tables_total == b->tables_total &&
-	       a->hostheap_free == b->hostheap_free;
+	       a->hostheap_free == b->hostheap_free &&
+	       a->hostheap_largest == b->hostheap_largest;
 }
 
-/* Claim every window of the count at once and stop them, so each holds its
- * window memory: that memory stays until the Amiga resets, and counts compared
- * afterwards are the ones a steady system returns to. */
-static void warm_windows(uint32_t count)
+static uint32_t apps_for(uint32_t needed)
 {
-	struct claim_result r[ZZAPP_SLOT_COUNT];
-	uint32_t i;
-
-	for (i = 0U; i < count; i++) {
-		r[i] = claim();
-		CHECK(r[i].status == SDK_STATUS_OK);
-	}
-	for (i = 0U; i < count; i++) {
-		if (r[i].status == SDK_STATUS_OK)
-			CHECK(simple_op(ZZAPP_OP_STOP, r[i].win, r[i].gen) ==
-			      SDK_STATUS_OK);
-	}
-}
-
-static uint32_t apps_for(uint32_t windows_needed)
-{
-	return windows_needed + 8U < ZZAPP_REC_MIN_APPS ? ZZAPP_REC_MIN_APPS :
-	       windows_needed + 8U;
+	return needed + 8U < ZZAPP_REC_MIN_APPS ? ZZAPP_REC_MIN_APPS : needed + 8U;
 }
 
 /* ---- Tests --------------------------------------------------------------- */
@@ -425,49 +377,14 @@ static void expect_unchanged(const struct before *b, const char *what)
 	checks++;
 }
 
-static void test_refusal_limit(void)
-{
-	struct before b;
-	struct claim_result r;
-	uint32_t i;
-
-	setup(apps_for(ZZAPP_SLOT_COUNT), 0U);
-	/* Window memory first, so the refusal is the only thing that changes. */
-	warm_windows(ZZAPP_SLOT_COUNT);
-	for (i = 0U; i < ZZAPP_SLOT_COUNT; i++) {
-		r = claim();
-		CHECK(r.status == SDK_STATUS_OK && r.win == i);
-	}
-	snap_before(&b);
-	r = claim();
-	CHECK(r.status == SDK_STATUS_BUSY);
-	CHECK(r.reply_len == ZZAPP_ALLOC_REFUSAL_REPLY_BYTES);
-	CHECK(r.reason == AAR_REASON_LIMIT);
-	expect_unchanged(&b, "LIMIT");
-	/* The refusal named the window ceiling, not records: records remain. */
-	CHECK(b.res.rec.free >= 8U);
-	/* A legacy claim is refused the same way, without a reply payload. */
-	{
-		uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
-		uint16_t reply_len = 99U;
-
-		CHECK(zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, NULL, 0U, reply,
-					     &reply_len, 1, next_req++, 0U) ==
-		      SDK_STATUS_BUSY);
-		CHECK(reply_len == 0U);
-	}
-	expect_unchanged(&b, "legacy LIMIT");
-}
-
 static void test_refusal_memory(void)
 {
 	struct before b;
-	struct claim_result r;
+	struct claim_result r[4];
 	struct claim_result again;
 	uint32_t i;
 
 	setup(8U, 0U);
-	warm_windows(ZZAPP_SLOT_COUNT < 4U ? ZZAPP_SLOT_COUNT : 4U);
 	/* Five of the eight records are in use elsewhere: the arena is down to
 	 * three. */
 	{
@@ -475,23 +392,20 @@ static void test_refusal_memory(void)
 		zzapp_rec_t *rec;
 
 		for (i = 0U; i < 5U; i++)
-			CHECK(zzapp_rec_admit(ZZAPP_REC_NO_WINDOW, &handle, &rec) == 0U);
+			CHECK(zzapp_rec_admit(&handle, &rec) == 0U);
 	}
 	for (i = 0U; i < 3U; i++) {
-		r = claim();
-		CHECK(r.status == SDK_STATUS_OK);
+		r[i] = claim();
+		CHECK(r[i].status == SDK_STATUS_OK);
 	}
 	snap_before(&b);
-	r = claim();
-	CHECK(r.status == SDK_STATUS_NO_MEMORY);
-	CHECK(r.reply_len == ZZAPP_ALLOC_REFUSAL_REPLY_BYTES);
-	CHECK(r.reason == AAR_REASON_MEMORY);
+	r[3] = claim();
+	CHECK(r[3].status == SDK_STATUS_NO_MEMORY);
+	CHECK(r[3].reply_len == ZZAPP_REFUSAL_REPLY_BYTES);
+	CHECK(r[3].reason == AAR_REASON_MEMORY);
 	expect_unchanged(&b, "MEMORY");
-	/* The window it tried is not bound, and a record that comes back is
-	 * enough for the next claim: nothing was left half held. */
-	CHECK(windows[3].handle == 0U);
-	CHECK(simple_op(ZZAPP_OP_STOP, 0U, windows[0].claim_generation) ==
-	      SDK_STATUS_OK);
+	/* Nothing was left half held: a record that comes back is enough. */
+	CHECK(simple_op(ZZAPP_OP_RELEASE, r[0].handle) == SDK_STATUS_OK);
 	again = claim();
 	CHECK(again.status == SDK_STATUS_OK);
 }
@@ -499,7 +413,8 @@ static void test_refusal_memory(void)
 static void test_refusal_tables(void)
 {
 	struct before b;
-	struct claim_result r;
+	struct claim_result r[3];
+	struct claim_result again;
 	zzapp_as_stats_t tables;
 
 	/* A pool for the kernel template and two reserves. */
@@ -510,85 +425,98 @@ static void test_refusal_tables(void)
 		zzapp_as_stats(&st);
 		setup(8U, st.l2_template + 2U * ZZAPP_AS_L2_RESERVE);
 	}
-	warm_windows(ZZAPP_SLOT_COUNT < 2U ? ZZAPP_SLOT_COUNT : 2U);
-	r = claim();
-	CHECK(r.status == SDK_STATUS_OK);
-	r = claim();
-	CHECK(r.status == SDK_STATUS_OK);
+	r[0] = claim();
+	CHECK(r[0].status == SDK_STATUS_OK);
+	r[1] = claim();
+	CHECK(r[1].status == SDK_STATUS_OK);
 	snap_before(&b);
-	r = claim();
-	CHECK(r.status == SDK_STATUS_NO_MEMORY);
-	CHECK(r.reply_len == ZZAPP_ALLOC_REFUSAL_REPLY_BYTES);
-	CHECK(r.reason == AAR_REASON_TABLES);
+	r[2] = claim();
+	CHECK(r[2].status == SDK_STATUS_NO_MEMORY);
+	CHECK(r[2].reply_len == ZZAPP_REFUSAL_REPLY_BYTES);
+	CHECK(r[2].reason == AAR_REASON_TABLES);
 	expect_unchanged(&b, "TABLES");
 	zzapp_as_stats(&tables);
 	CHECK(tables.l2_reserved == 2U * ZZAPP_AS_L2_RESERVE);
-	CHECK(windows[2].handle == 0U);
-	/* The record slot the refused claim popped is back: a freed reserve is
+	/* The record the refused claim popped is back: a freed reserve is
 	 * enough. */
-	CHECK(simple_op(ZZAPP_OP_STOP, 1U, windows[1].claim_generation) ==
-	      SDK_STATUS_OK);
-	r = claim();
-	CHECK(r.status == SDK_STATUS_OK);
+	CHECK(simple_op(ZZAPP_OP_RELEASE, r[1].handle) == SDK_STATUS_OK);
+	again = claim();
+	CHECK(again.status == SDK_STATUS_OK);
 }
 
 static void test_refusal_hostheap(void)
 {
 	struct before b;
 	struct claim_result r;
-	uint32_t serial = 0U;
 
-	setup(apps_for(ZZAPP_SLOT_COUNT), 0U);
-	/* Someone else holds window 0's range of the host heap. */
-	CHECK(zzapp_test_card_alloc_at(ZZAPP_WINDOW_Z3_SLOT_ADDRESS(0U),
-				       ZZAPP_WINDOW_BYTES, &serial) == 1U);
+	setup(apps_for(8U), 0U);
+	/* The host-visible heap has no room for a 16 KiB pair. */
+	mock_heap.fail_after = 0;
 	snap_before(&b);
 	r = claim();
 	CHECK(r.status == SDK_STATUS_NO_MEMORY);
-	CHECK(r.reply_len == ZZAPP_ALLOC_REFUSAL_REPLY_BYTES);
+	CHECK(r.reply_len == ZZAPP_REFUSAL_REPLY_BYTES);
 	CHECK(r.reason == AAR_REASON_HOSTHEAP);
 	/* Admission had gone through the record and the reserve before the heap
 	 * said no: all of it is undone, and the handle table is bit-identical. */
 	expect_unchanged(&b, "HOSTHEAP");
-	CHECK(windows[0].handle == 0U && windows[0].window == NULL);
-	CHECK(lget(&windows[0], ZZAPP_LIFE_STATE_OFF) == 0U);
-	zzapp_test_card_free(ZZAPP_WINDOW_Z3_SLOT_ADDRESS(0U), serial);
+	CHECK(mock_heap.live == 0U);
+	mock_heap.fail_after = -1;
+
+	/* The same when the heap holds fewer bytes than the pair. */
+	mock_heap.capacity = 0x3000U;
+	snap_before(&b);
 	r = claim();
-	CHECK(r.status == SDK_STATUS_OK && r.win == 0U);
+	CHECK(r.status == SDK_STATUS_NO_MEMORY && r.reason == AAR_REASON_HOSTHEAP);
+	expect_unchanged(&b, "HOSTHEAP capacity");
+	mock_heap.capacity = HEAP_CAPACITY;
+	r = claim();
+	CHECK(r.status == SDK_STATUS_OK && r.bytes == AAR_PAIR_BYTES);
+	/* The pair is a 16 KiB block aligned to 8 KiB. */
+	CHECK(mock_heap.last_bytes == ZZAPP_XPORT_PAIR_ALLOC &&
+	      mock_heap.last_align == ZZAPP_XPORT_PAIR_ALIGN);
 }
 
-/* LOAD_BEGIN cannot get its staging block: the claim ends, everything the
- * claim held is back, and the lifecycle word says why. */
+/* LOAD_BEGIN cannot get its staging block: the claim ends with the reason in
+ * the reply, the shell holds its pair, and a release gives everything back. */
 static void test_load_memory_refusal(void)
 {
 	struct before b;
 	struct claim_result r;
-	uint32_t pid;
+	uint8_t payload[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint16_t plen = 0U;
+	zzapp_rec_t *rec;
 
-	setup(apps_for(ZZAPP_SLOT_COUNT), 0U);
-	warm_windows(1U);
+	setup(apps_for(8U), 0U);
 	snap_before(&b);
 	r = claim();
 	CHECK(r.status == SDK_STATUS_OK);
-	pid = PID_OF(r.win);
+	rec = zzapp_rec_by_handle(r.handle);
+	CHECK(rec != NULL);
 	service_test_loader_begin_rc = AAR_E_NOMEM;
-	CHECK(deferred_op(ZZAPP_OP_LOAD_BEGIN, r.win, r.gen) == SDK_STATUS_NO_MEMORY);
+	CHECK(deferred_op_reply(ZZAPP_OP_LOAD_BEGIN, r.handle, payload, &plen) ==
+	      SDK_STATUS_NO_MEMORY);
 	service_test_loader_begin_rc = AAR_OK;
-	CHECK(lget(&windows[r.win], ZZAPP_LIFE_REFUSAL_OFF) == AAR_REASON_MEMORY);
-	CHECK(WSTATE(r.win) == ZZAPP_ST_IDLE && windows[r.win].handle == 0U);
-	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_FREE);
-	/* Windows, records, tables and commit are what they were before the
-	 * claim; only the generation counters moved. */
+	CHECK(plen == ZZAPP_REFUSAL_REPLY_BYTES &&
+	      zzapp_get_be32(payload + ZZAPP_REFUSAL_REASON) == AAR_REASON_MEMORY);
+	if (rec) {
+		CHECK(zzapp_xport_cb_get(rec, AAR_CB_STATE) == AAR_STATE_IDLE);
+		CHECK(zzapp_rec_state(rec->hdr.pid) == ZZAPP_REC_RECLAIMED);
+	}
+	/* Tables and commit are back at once; the record and the pair go with
+	 * the release. */
+	CHECK(simple_op(ZZAPP_OP_RELEASE, r.handle) == SDK_STATUS_OK);
 	{
 		struct resources res;
 
 		take(&res);
 		CHECK(resources_equal(&b.res, &res));
 	}
-	/* The next claim of the window starts clean. */
+	/* The next claim starts clean. */
 	r = claim();
 	CHECK(r.status == SDK_STATUS_OK);
-	CHECK(lget(&windows[r.win], ZZAPP_LIFE_REFUSAL_OFF) == AAR_REASON_NONE);
+	rec = zzapp_rec_by_handle(r.handle);
+	CHECK(rec && zzapp_xport_cb_get(rec, AAR_CB_STATE) == AAR_STATE_CLAIMED);
 }
 
 /* LOAD_END: the image needs more tables than the reserve holds. */
@@ -596,19 +524,22 @@ static void test_load_tables_refusal(void)
 {
 	struct before b;
 	struct claim_result r;
+	uint8_t payload[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint16_t plen = 0U;
 
-	setup(apps_for(ZZAPP_SLOT_COUNT), 0U);
-	warm_windows(1U);
+	setup(apps_for(8U), 0U);
 	snap_before(&b);
 	r = claim();
 	CHECK(r.status == SDK_STATUS_OK);
-	CHECK(deferred_op(ZZAPP_OP_LOAD_BEGIN, r.win, r.gen) == SDK_STATUS_OK);
-	CHECK(deferred_op(ZZAPP_OP_LOAD_CHUNK, r.win, r.gen) == SDK_STATUS_OK);
+	CHECK(deferred_op(ZZAPP_OP_LOAD_BEGIN, r.handle) == SDK_STATUS_OK);
+	CHECK(deferred_op(ZZAPP_OP_LOAD_CHUNK, r.handle) == SDK_STATUS_OK);
 	service_test_loader_end_hook = end_tables_refused;
-	CHECK(deferred_op(ZZAPP_OP_LOAD_END, r.win, r.gen) == SDK_STATUS_NO_MEMORY);
+	CHECK(deferred_op_reply(ZZAPP_OP_LOAD_END, r.handle, payload, &plen) ==
+	      SDK_STATUS_NO_MEMORY);
 	service_test_loader_end_hook = end_ok;
-	CHECK(lget(&windows[r.win], ZZAPP_LIFE_REFUSAL_OFF) == AAR_REASON_TABLES);
-	CHECK(WSTATE(r.win) == ZZAPP_ST_IDLE && windows[r.win].handle == 0U);
+	CHECK(plen == ZZAPP_REFUSAL_REPLY_BYTES &&
+	      zzapp_get_be32(payload + ZZAPP_REFUSAL_REASON) == AAR_REASON_TABLES);
+	CHECK(simple_op(ZZAPP_OP_RELEASE, r.handle) == SDK_STATUS_OK);
 	{
 		struct resources res;
 
@@ -617,318 +548,311 @@ static void test_load_tables_refusal(void)
 	}
 }
 
-/* QUERY words 32 to 47, the corrected commit words, and the legacy form. */
+/* QUERY: the counts a claim, load and release cycle returns to. */
 static void test_query_words(void)
 {
 	struct query q0;
 	struct query q1;
 	struct query q2;
+	struct query q3;
 	struct claim_result r;
-	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
-	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
-	uint16_t len = 0U;
 	zzapp_as_stats_t st;
-	uint32_t apps = apps_for(ZZAPP_SLOT_COUNT);
+	uint32_t apps = apps_for(8U);
 
 	setup(apps, 0U);
 	zzapp_as_stats(&st);
 	query(&q0);
-	CHECK(q0.len == ZZAPP_QUERY_EXT_REPLY_BYTES && q0.len == 48U);
-	CHECK(q0.slots == ZZAPP_SLOT_COUNT);
-	CHECK(q0.free_slots == ZZAPP_SLOT_COUNT);
+	CHECK(q0.len == ZZAPP_MAILBOX_PAYLOAD_BYTES);
+	CHECK(q0.depth == AAR_QUEUE_DEPTH_DEFAULT);
 	CHECK(q0.records_free == apps);
 	CHECK(q0.tables_total == zzapp_rec_layout()->l2_total - st.l2_template);
 	CHECK(q0.tables_free == q0.tables_total);
-	CHECK(q0.hostheap_free == ZZAPP_SLOT_COUNT * ZZAPP_WINDOW_BYTES);
+	CHECK(q0.hostheap_free == HEAP_CAPACITY);
+	CHECK(q0.hostheap_largest == HEAP_CAPACITY);
 	/* COMMIT_FREE is what is still admissible, COMMIT_TOTAL the capacity. */
 	CHECK(q0.commit_free == COMMIT_CAPACITY && q0.commit_total == COMMIT_CAPACITY);
 
 	r = claim();
 	CHECK(r.status == SDK_STATUS_OK);
+	CHECK(r.bytes == AAR_PAIR_BYTES);
 	query(&q1);
-	CHECK(q1.free_slots == q0.free_slots - 1U);
 	CHECK(q1.records_free == q0.records_free - 1U);
 	CHECK(q1.tables_free == q0.tables_free - ZZAPP_AS_L2_RESERVE);
 	CHECK(q1.tables_total == q0.tables_total);
-	CHECK(q1.hostheap_free == q0.hostheap_free - ZZAPP_WINDOW_BYTES);
-	bring_up(r.win, r.gen);
+	CHECK(q1.hostheap_free == q0.hostheap_free - ZZAPP_XPORT_PAIR_ALLOC);
+	bring_up(r.handle);
 	query(&q2);
 	CHECK(q2.commit_free == COMMIT_CAPACITY - APP_COMMIT);
 	CHECK(q2.commit_total == COMMIT_CAPACITY);
-	/* The window memory stays after the app ends; the rest comes back. */
-	finish_app(r.win, ZZAPP_END_EXIT);
-	query(&q2);
-	CHECK(q2.free_slots == q0.free_slots && q2.records_free == q0.records_free);
-	CHECK(q2.tables_free == q0.tables_free && q2.commit_free == COMMIT_CAPACITY);
-	CHECK(q2.hostheap_free == q1.hostheap_free);
-
-	/* A legacy QUERY keeps its 16 bytes. */
-	len = 0U;
-	CHECK(zzapp_mailbox_dispatch(ZZAPP_OP_QUERY, NULL, 0U, reply, &len, 1,
-				     next_req++, 0U) == SDK_STATUS_OK);
-	CHECK(len == ZZAPP_QUERY_REPLY_BYTES);
-	(void)req;
+	/* The load buffer is a block of the claim too. */
+	CHECK(q2.hostheap_free <= q1.hostheap_free);
+	/* The app ends: tables and commit are back, the shell holds the rest
+	 * until the client lets go. */
+	finish_app(r.handle, ZZAPP_END_EXIT);
+	query(&q3);
+	CHECK(q3.tables_free == q0.tables_free && q3.commit_free == COMMIT_CAPACITY);
+	CHECK(q3.records_free == q0.records_free - 1U);
+	CHECK(q3.hostheap_free <= q1.hostheap_free);
+	CHECK(simple_op(ZZAPP_OP_RELEASE, r.handle) == SDK_STATUS_OK);
+	query(&q3);
+	CHECK(query_equal(&q3, &q0));
 }
 
-/* A window is not a record. Burn record indices, claim every window and check
- * that nothing assumed pid == window: each record knows its window, the app
- * thread of a record reaches its own window's memory, and a wait woken by the
- * service pass wakes the record's thread, not the thread of the same number. */
-static void test_window_is_not_pid(void)
+/* An app is not its record index. Burn record indices, claim many apps and
+ * check that nothing assumed pid == app number: each client reads its own
+ * pair, the thread of a record reaches its own console, and a wait woken by
+ * the service pass wakes the record's thread, not the thread of the same
+ * number. */
+static void test_app_is_not_pid(void)
 {
-	uint32_t win;
-	uint32_t apps = apps_for(ZZAPP_SLOT_COUNT);
-	struct claim_result r[ZZAPP_SLOT_COUNT];
+	uint32_t i;
+	enum { N = 6 };
+	struct claim_result r[N];
+	zzapp_rec_t *rec[N];
+	mock_client cl[N];
 	uint32_t written;
-	uint32_t target = ZZAPP_SLOT_COUNT > 2U ? 2U : ZZAPP_SLOT_COUNT - 1U;
 
-	setup(apps, 0U);
+	setup(apps_for(N), 0U);
 	burn_records(1U);
-	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		r[win] = claim();
-		CHECK(r[win].status == SDK_STATUS_OK && r[win].win == win);
+	for (i = 0U; i < N; i++) {
+		r[i] = claim();
+		CHECK(r[i].status == SDK_STATUS_OK);
+		rec[i] = zzapp_rec_by_handle(r[i].handle);
+		CHECK(rec[i] != NULL);
+		mock_client_init(&cl[i]);
+		CHECK(mock_client_attach(&cl[i], r[i].token) == AAR_OK);
+		CHECK(cl[i].handle == r[i].handle);
+		CHECK(aar_handle_index(r[i].handle) == rec[i]->hdr.pid);
+		(void)zzapp_as_create(&rec[i]->proc.as, rec[i]->hdr.pid);
 	}
-	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		zzapp_rec_t *rec = window_rec(&windows[win]);
+	CHECK(rec[0]->hdr.pid != 0U);
+	/* Each pair is its own block. */
+	for (i = 1U; i < N; i++)
+		CHECK(r[i].token != r[0].token);
 
-		CHECK(rec != NULL);
-		CHECK(rec->hdr.window == win);
-		CHECK(rec->hdr.pid != win);
-		CHECK(zzapp_rec_by_handle(windows[win].handle) == rec);
-	}
-	CHECK(PID_OF(0U) != 0U);
-
-	/* The thread of window 0's record writes window 0's console. */
-	service_test_current_thread = (int)PID_OF(0U);
+	/* The thread of record 0 writes record 0's console. */
+	service_test_current_thread = (int)rec[0]->hdr.pid;
 	zzapp_services_test_set_core(1);
-	CHECK(zzapp_services_window() == win_mem[0]);
+	zzapp_services_test_set_time(NULL);
 	CHECK(zzapp_svc_console_write("a", 1U, &written) == AAR_OK && written == 1U);
-	CHECK(win_mem[0][ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR] == 'a');
 	service_test_current_thread = -1;
-	zzapp_services_test_set_core(0);
-	CHECK(zzapp_get_be32(win_mem[1] + ZZAPP_CONSOLE_OUT_OFF) == 0U);
-
-	/* A parked waiter of window `target` wakes through its own record. */
-	RT(target).wait_kind = ZZAPP_WAIT_CONSOLE_READ;
-	RT(target).wait_value = 0U;
-	zzapp_put_be32(win_mem[target] + ZZAPP_CONSOLE_IN_OFF, 1U);
-	TH(target).state = ZZAPP_THREAD_BLOCKED;
-	{
-		zzapp_rec_t *same_number = zzapp_rec_by_pid(target);
-
-		same_number->thread.state = ZZAPP_THREAD_BLOCKED;
-		zzapp_services_test_set_core(1);
-		zzapp_services_poll();
-		zzapp_services_test_set_core(0);
-		CHECK(TH(target).state == ZZAPP_THREAD_RUNNABLE);
-		CHECK(same_number->thread.state == ZZAPP_THREAD_BLOCKED);
-	}
+	zzapp_services_select_pid(rec[0]->hdr.pid);
+	(void)mock_client_serve(&cl[0]);
+	zzapp_services_poll();
+	(void)mock_client_serve(&cl[0]);
+	CHECK(cl[0].console_out_len == 1U && cl[0].console_out[0] == 'a');
+	CHECK(mock_client_sq_used(&cl[1]) == 0);
 }
 
-/* The wire generation is the window's counter, +1 per claim, whichever record
- * the claim got; the handle generation moves with the record's own life. A
- * request with a stale wire generation is refused as before. */
-static void test_wire_generation_and_handles(void)
+/* A handle is the record index and a generation. A released claim's handle is
+ * stale for good, the live claim is untouched, and the next claim of the
+ * record has a new generation. */
+static void test_handles_after_reuse(void)
 {
 	struct claim_result first;
 	struct claim_result second;
 	struct claim_result third;
 	uint32_t pid1;
-	uint32_t handle1;
 
-	setup(apps_for(ZZAPP_SLOT_COUNT), 0U);
+	setup(apps_for(8U), 0U);
 	first = claim();
-	CHECK(first.status == SDK_STATUS_OK && first.win == 0U);
-	pid1 = PID_OF(0U);
-	handle1 = windows[0].handle;
-	CHECK(simple_op(ZZAPP_OP_STOP, 0U, first.gen) == SDK_STATUS_OK);
+	CHECK(first.status == SDK_STATUS_OK);
+	pid1 = aar_handle_index(first.handle);
+	CHECK(simple_op(ZZAPP_OP_STOP, first.handle) == SDK_STATUS_OK);
+	CHECK(simple_op(ZZAPP_OP_RELEASE, first.handle) == SDK_STATUS_OK);
 
-	/* Another window's claim takes the next record; window 0 comes back on
-	 * a different record with the wire generation +1. */
-	if (ZZAPP_SLOT_COUNT > 1U)
-		windows[0].quarantined = 0;
 	second = claim();
-	CHECK(second.status == SDK_STATUS_OK && second.win == 0U);
-	CHECK(second.gen == first.gen + 1U);
-	CHECK(PID_OF(0U) != pid1);
-	CHECK(zzapp_rec_by_handle(handle1) == NULL);
-	CHECK(aar_handle_index(windows[0].handle) == PID_OF(0U));
-	/* Stale wire generation: refused, and the live claim is untouched. */
-	CHECK(simple_op(ZZAPP_OP_STATUS, 0U, first.gen) == SDK_STATUS_BAD_HANDLE);
-	CHECK(simple_op(ZZAPP_OP_STOP, 0U, first.gen) == SDK_STATUS_BAD_HANDLE);
-	CHECK(WSTATE(0U) == ZZAPP_ST_CLAIMED);
-	CHECK(simple_op(ZZAPP_OP_STATUS, 0U, second.gen) == SDK_STATUS_OK);
-	CHECK(simple_op(ZZAPP_OP_STOP, 0U, second.gen) == SDK_STATUS_OK);
+	CHECK(second.status == SDK_STATUS_OK);
+	CHECK(second.handle != first.handle);
+	CHECK(zzapp_rec_by_handle(first.handle) == NULL);
+	/* Stale: refused, and the live claim is untouched. */
+	CHECK(simple_op(ZZAPP_OP_STOP, first.handle) == SDK_STATUS_BAD_HANDLE);
+	CHECK(simple_op(ZZAPP_OP_RELEASE, first.handle) == SDK_STATUS_BAD_HANDLE);
+	CHECK(zzapp_rec_by_handle(second.handle) != NULL);
+	CHECK(zzapp_rec_by_handle(second.handle)->claim.state == AAR_STATE_CLAIMED);
+	CHECK(simple_op(ZZAPP_OP_STOP, second.handle) == SDK_STATUS_OK);
+	CHECK(simple_op(ZZAPP_OP_RELEASE, second.handle) == SDK_STATUS_OK);
 	third = claim();
-	CHECK(third.status == SDK_STATUS_OK && third.gen == second.gen + 1U);
-	/* The first record's handle generation advanced once, by its own free,
-	 * and has nothing to do with the three wire generations seen. */
+	CHECK(third.status == SDK_STATUS_OK && third.handle != second.handle);
+	/* The first record's generation advanced once, by its own free. */
 	CHECK(aar_handle_generation(zzapp_rec_handle(pid1)) == 0U ||
-	      zzapp_rec_by_handle(handle1) == NULL);
-	CHECK(aar_handle_generation(handle1) == 1U);
+	      zzapp_rec_by_handle(first.handle) == NULL);
+	CHECK(aar_handle_generation(first.handle) == 1U);
 }
 
 /* ---- Many apps ----------------------------------------------------------- */
 
-static void expect_back(uint32_t n, const struct query *base, const char *what)
+static void expect_back(const struct query *base, const char *what)
 {
 	struct query q;
-	uint32_t win;
 
 	query(&q);
 	if (!query_equal(&q, base)) {
-		printf("FAIL: %s did not return to the QUERY counts (%u apps)\n",
-		       what, (unsigned)n);
+		printf("FAIL: %s did not return to the QUERY counts\n", what);
 		failures++;
 	}
 	checks++;
-	for (win = 0U; win < n; win++) {
-		CHECK(windows[win].handle == 0U);
-		CHECK(WSTATE(win) == ZZAPP_ST_IDLE);
-	}
 }
 
 static void run_apps(uint32_t n)
 {
-	struct claim_result r[ZZAPP_SLOT_COUNT];
+	struct claim_result *r = calloc(n, sizeof(*r));
 	struct query initial;
-	struct query steady;
 	zzapp_rec_stats_t stats;
-	uint32_t win;
+	uint32_t i;
 	uint32_t q;
 
 	setup(apps_for(n), 0U);
-	/* Make the record index differ from the window number. */
+	/* Make the record index differ from the app number. */
 	burn_records(3U);
 	query(&initial);
-	warm_windows(n);
-	query(&steady);
-	CHECK(steady.hostheap_free == initial.hostheap_free - n * ZZAPP_WINDOW_BYTES);
-	CHECK(steady.records_free == initial.records_free);
 
-	/* Stop all: the launchers ask, the host ends each app by force. */
-	for (win = 0U; win < n; win++) {
-		r[win] = claim();
-		CHECK(r[win].status == SDK_STATUS_OK && r[win].win == win);
-		bring_up(win, r[win].gen);
+	/* Claim and bring up n apps: past four, with no window ceiling. */
+	for (i = 0U; i < n; i++) {
+		r[i] = claim();
+		CHECK(r[i].status == SDK_STATUS_OK);
+		bring_up(r[i].handle);
 	}
 	{
 		struct query q_live;
 
 		query(&q_live);
-		CHECK(q_live.records_free == steady.records_free - n);
-		CHECK(q_live.tables_free == steady.tables_free - n * ZZAPP_AS_L2_RESERVE);
-		CHECK(q_live.free_slots == steady.free_slots - n);
-		CHECK(q_live.commit_free == steady.commit_free - n * APP_COMMIT);
-		CHECK(q_live.commit_total == steady.commit_total);
+		CHECK(q_live.records_free == initial.records_free - n);
+		CHECK(q_live.tables_free == initial.tables_free - n * ZZAPP_AS_L2_RESERVE);
+		CHECK(q_live.commit_free == initial.commit_free - n * APP_COMMIT);
+		CHECK(q_live.commit_total == initial.commit_total);
 	}
 	zzapp_rec_stats(&stats);
 	CHECK(stats.live == n);
-	for (win = 0U; win < n; win++) {
-		CHECK(simple_op(ZZAPP_OP_STOP, win, r[win].gen) == SDK_STATUS_OK);
-		CHECK(zzapp_get_be32(win_mem[win] + ZZAPP_LIFE_STOP_OFF) == 1U);
-		finish_app(win, ZZAPP_END_FORCED);
-	}
-	expect_back(n, &steady, "stop");
 
-	/* Exit all. */
-	for (win = 0U; win < n; win++) {
-		r[win] = claim();
-		CHECK(r[win].status == SDK_STATUS_OK && r[win].gen != 0U);
-		bring_up(win, r[win].gen);
+	/* Stop all: the clients ask, the host ends each app by force. */
+	for (i = 0U; i < n; i++) {
+		CHECK(simple_op(ZZAPP_OP_STOP, r[i].handle) == SDK_STATUS_OK);
+		zzapp_services_select_pid(aar_handle_index(r[i].handle));
+		CHECK(zzapp_services_stop_requested());
+		finish_app(r[i].handle, ZZAPP_END_FORCED);
+		CHECK(simple_op(ZZAPP_OP_RELEASE, r[i].handle) == SDK_STATUS_OK);
 	}
-	for (win = 0U; win < n; win++)
-		finish_app(win, ZZAPP_END_EXIT);
-	expect_back(n, &steady, "exit");
+	expect_back(&initial, "stop");
+
+	/* Exit all: the client reads the end from its control block before it
+	 * releases. */
+	for (i = 0U; i < n; i++) {
+		r[i] = claim();
+		CHECK(r[i].status == SDK_STATUS_OK && r[i].handle != 0U);
+		bring_up(r[i].handle);
+	}
+	for (i = 0U; i < n; i++)
+		finish_app(r[i].handle, ZZAPP_END_EXIT);
+	for (i = 0U; i < n; i++) {
+		zzapp_rec_t *rec = zzapp_rec_by_handle(r[i].handle);
+
+		CHECK(rec != NULL);
+		if (rec) {
+			CHECK(zzapp_xport_cb_get(rec, AAR_CB_END_REASON) == AAR_END_EXIT);
+			CHECK(zzapp_xport_cb_get(rec, AAR_CB_STATE) == AAR_STATE_IDLE);
+		}
+	}
 	{
-		uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+		uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 		uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
 		uint16_t len = 0U;
 
-		selector(req, 0U, 0U);
+		/* LIST by index finds a shell by its end reason too. */
+		zzapp_build_list_request(req, aar_handle_index(r[0].handle));
 		CHECK(zzapp_mailbox_dispatch(ZZAPP_OP_LIST, req, sizeof(req), reply,
 					     &len, 1, next_req++, 0U) == SDK_STATUS_OK);
+		CHECK(zzapp_get_be32(reply + ZZAPP_LIST_HANDLE) == r[0].handle);
 		CHECK(reply[ZZAPP_LIST_REASONS + 1U] == ZZAPP_END_EXIT);
 	}
+	for (i = 0U; i < n; i++)
+		CHECK(simple_op(ZZAPP_OP_RELEASE, r[i].handle) == SDK_STATUS_OK);
+	expect_back(&initial, "exit");
 
 	/* Reset with every app live: the host retires each, then services. The
-	 * window memory goes back too. */
-	for (win = 0U; win < n; win++) {
-		r[win] = claim();
-		CHECK(r[win].status == SDK_STATUS_OK);
-		bring_up(win, r[win].gen);
+	 * shells and their pairs go back too. */
+	for (i = 0U; i < n; i++) {
+		r[i] = claim();
+		CHECK(r[i].status == SDK_STATUS_OK);
+		bring_up(r[i].handle);
 	}
-	for (win = 0U; win < n; win++)
-		finish_app(win, ZZAPP_END_AMIGA_RESET);
+	for (i = 0U; i < n; i++)
+		finish_app(r[i].handle, ZZAPP_END_AMIGA_RESET);
 	zzapp_services_on_reset();
-	expect_back(n, &initial, "reset");
-	for (win = 0U; win < n; win++)
-		CHECK(windows[win].window == NULL);
+	expect_back(&initial, "reset");
+	for (i = 0U; i < n; i++)
+		CHECK(zzapp_rec_by_handle(r[i].handle) == NULL);
+	CHECK(mock_heap.live == 0U);
 
 	/* Quarantine one claim that stopped talking while loading. */
-	warm_windows(n);
-	query(&steady);
 	q = n / 2U;
-	for (win = 0U; win < n; win++) {
-		r[win] = claim();
-		CHECK(r[win].status == SDK_STATUS_OK);
-		if (win == q)
-			CHECK(deferred_op(ZZAPP_OP_LOAD_BEGIN, win, r[win].gen) ==
-			      SDK_STATUS_OK);
+	for (i = 0U; i < n; i++) {
+		r[i] = claim();
+		CHECK(r[i].status == SDK_STATUS_OK);
+		if (i == q)
+			CHECK(deferred_op(ZZAPP_OP_LOAD_BEGIN, r[i].handle) == SDK_STATUS_OK);
 		else
-			bring_up(win, r[win].gen);
+			bring_up(r[i].handle);
 	}
 	zzapp_services_expire_claims(ZZAPP_LOAD_LEASE_US);
-	CHECK(WSTATE(q) == ZZAPP_ST_STOPPING && windows[q].quarantined);
 	{
+		zzapp_rec_t *rec = zzapp_rec_by_pid(aar_handle_index(r[q].handle));
 		struct query before;
 		struct query after;
+		uint32_t current;
 
+		CHECK(rec != NULL && rec->claim.state == AAR_STATE_STOPPING);
+		current = rec ? rec->hdr.handle : 0U;
+		CHECK(current != 0U && current != r[q].handle);
+		CHECK(rec && (zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_QUARANTINED) != 0));
 		query(&before);
-		select_window(q);
+		zzapp_services_select_pid(aar_handle_index(r[q].handle));
 		zzapp_services_on_app_end();
-		(void)zzapp_rec_retire(zzapp_services_current_pid());
+		(void)zzapp_rec_retire(aar_handle_index(r[q].handle));
 		query(&after);
-		/* Resources are back, the shell and handle are held. */
+		/* Resources are back, the shell and its pair are held. */
 		CHECK(after.tables_free == before.tables_free + ZZAPP_AS_L2_RESERVE);
 		CHECK(after.records_free == before.records_free);
-		CHECK(windows[q].quarantine_reclaimed && windows[q].handle != 0U);
-		CHECK(WSTATE(q) == ZZAPP_ST_STOPPING);
+		CHECK(after.hostheap_free == before.hostheap_free);
 	}
-	/* The launcher's next contact with its stale generation releases it. */
+	/* The client's next contact with its stale handle releases the shell. */
 	{
 		struct query released;
+		struct query live;
 
-		CHECK(simple_op(ZZAPP_OP_LOAD_CHUNK, q, r[q].gen) == SDK_STATUS_BAD_HANDLE);
+		query(&live);
+		CHECK(simple_op(ZZAPP_OP_LOAD_CHUNK, r[q].handle) == SDK_STATUS_BAD_HANDLE);
 		query(&released);
-		CHECK(released.records_free == steady.records_free - (n - 1U));
-		CHECK(windows[q].handle == 0U && !windows[q].quarantined);
+		CHECK(released.records_free == live.records_free + 1U);
+		CHECK(released.hostheap_free > live.hostheap_free);
 	}
-	for (win = 0U; win < n; win++) {
-		if (win != q)
-			finish_app(win, ZZAPP_END_EXIT);
+	for (i = 0U; i < n; i++) {
+		if (i != q) {
+			finish_app(r[i].handle, ZZAPP_END_EXIT);
+			CHECK(simple_op(ZZAPP_OP_RELEASE, r[i].handle) == SDK_STATUS_OK);
+		}
 	}
-	expect_back(n, &steady, "quarantine");
+	expect_back(&initial, "quarantine");
 	zzapp_rec_stats(&stats);
-	CHECK(stats.free == stats.capacity);
+	CHECK(stats.free == stats.capacity - 0U);
 	CHECK(stats.claimed == 0U && stats.live == 0U && stats.retiring == 0U &&
 	      stats.reclaimed == 0U);
+	free(r);
 }
 
 int main(void)
 {
 	test_query_words();
-	test_refusal_limit();
 	test_refusal_memory();
 	test_refusal_tables();
 	test_refusal_hostheap();
 	test_load_memory_refusal();
 	test_load_tables_refusal();
-	test_window_is_not_pid();
-	test_wire_generation_and_handles();
-	run_apps(ZZAPP_SLOT_COUNT < 8U ? ZZAPP_SLOT_COUNT : 8U);
-	if (ZZAPP_SLOT_COUNT >= 64U)
-		run_apps(64U);
+	test_app_is_not_pid();
+	test_handles_after_reuse();
+	run_apps(8U);
+	run_apps(64U);
+	run_apps(200U);
 	if (failures != 0) {
 		printf("admission_test: %d of %d checks failed\n", failures, checks);
 		return 1;

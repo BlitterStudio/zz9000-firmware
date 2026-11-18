@@ -73,8 +73,9 @@ static uint32_t setup_arena(uint32_t apps)
 static zzapp_rec_t *admit(uint32_t window, uint32_t *handle)
 {
     zzapp_rec_t *rec = NULL;
+    (void)window; /* the window protocol is gone; callers still name a slot */
 
-    if (zzapp_rec_admit(window, handle, &rec) != 0)
+    if (zzapp_rec_admit(handle, &rec) != 0)
         return NULL;
     return rec;
 }
@@ -284,7 +285,7 @@ static void test_arena_init_validation(void)
     CHECK(zzapp_rec_arena_init((void *)(uintptr_t)addr, &bad) == -1);
     /* A failed init leaves no usable table behind. */
     CHECK(zzapp_rec_capacity() == 0U && zzapp_rec_by_pid(0U) == NULL);
-    CHECK(zzapp_rec_admit(0U, NULL, NULL) == AAR_REASON_MEMORY);
+    CHECK(zzapp_rec_admit(NULL, NULL) == AAR_REASON_MEMORY);
     CHECK(zzapp_rec_arena_init((void *)(uintptr_t)addr, &lay) == 0);
     CHECK(zzapp_rec_capacity() == 8U);
 }
@@ -310,7 +311,7 @@ static void test_boot_clears_records(void)
 
         CHECK(rec != NULL);
         CHECK(rec->thread.state == ZZAPP_THREAD_STOPPED);
-        CHECK(rec->hdr.pid == pid && rec->hdr.window == ZZAPP_REC_NO_WINDOW);
+        CHECK(rec->hdr.pid == pid);
         CHECK(rec->hdr.handle == 0U);
         for (i = sizeof(rec->thread); i < sizeof(*rec); i++) {
             if (i >= offsetof(zzapp_rec_t, hdr) &&
@@ -395,7 +396,7 @@ static void test_capacity_refusal(void)
     }
     zzapp_rec_table_snapshot(&before);
     CHECK(before.free_count == 0U && before.head == 0xffffU);
-    CHECK(zzapp_rec_admit(0U, &extra, &rec) == AAR_REASON_MEMORY);
+    CHECK(zzapp_rec_admit(&extra, &rec) == AAR_REASON_MEMORY);
     CHECK(extra == 0U);
     zzapp_rec_table_snapshot(&after);
     CHECK(memcmp(&before, &after, sizeof(before)) == 0);
@@ -445,7 +446,7 @@ static void test_free_order_and_fifo_reuse(void)
     CHECK(aar_handle_index(handle[1]) == order[2]);
     CHECK((rec = admit(0U, &handle[2])) != NULL);
     CHECK(aar_handle_index(handle[2]) == order[7]);
-    CHECK(zzapp_rec_admit(0U, &handle[3], &rec) == AAR_REASON_MEMORY);
+    CHECK(zzapp_rec_admit(&handle[3], &rec) == AAR_REASON_MEMORY);
 }
 
 /* The window index and the record index are different things. */
@@ -464,7 +465,7 @@ static void test_window_is_not_pid(void)
     for (i = 0U; i < 5U; i++)
         CHECK(admit(0U, &h[i]) != NULL);
     rec = zzapp_rec_by_handle(h[0]);
-    CHECK(rec && rec->hdr.pid == 3U && rec->hdr.window == 0U);
+    CHECK(rec && rec->hdr.pid == 3U);
     CHECK(zzapp_rec_by_handle(h[4]) && zzapp_rec_by_handle(h[4])->hdr.pid == 7U);
     CHECK(zzapp_rec_by_pid(3U) == rec);
     CHECK(aar_handle_index(h[0]) == 3U);
@@ -661,7 +662,7 @@ static void test_admit_clears_the_record(void)
     CHECK(rec == zzapp_rec_by_handle(again) && rec->hdr.pid == 0U);
     CHECK(rec->proc.heap_base == 0U && rec->host.exit_code == 0U);
     CHECK(rec->thread.state == ZZAPP_THREAD_STOPPED && rec->coh.running == 0U);
-    CHECK(rec->hdr.launch_generation == 0U && rec->hdr.window == 5U);
+    CHECK(rec->hdr.launch_generation == 0U);
     CHECK(rec->visible.block[3].bytes == 0U && rec->visible.block[63].card == 0U);
     CHECK(rec->hdr.kstack_top == zzapp_rec_stack_top(0U));
     CHECK(rec->hdr.l1 == (uint32_t)(uintptr_t)zzapp_as_pool_l1(0U));
@@ -757,7 +758,7 @@ static void test_unadmit_is_bit_identical(void)
     CHECK(memcmp(&before, &after, sizeof(before)) == 0);
     CHECK(memcmp(&as_before, &as_after, sizeof(as_before)) == 0);
     CHECK(memcmp(&st_before, &st_after, sizeof(st_before)) == 0);
-    CHECK(rec && rec->hdr.handle == 0U && rec->hdr.window == ZZAPP_REC_NO_WINDOW);
+    CHECK(rec && rec->hdr.handle == 0U);
     CHECK(zzapp_rec_by_handle(t) == NULL);
     /* The next admission gets the very same handle and serial. */
     {
@@ -823,7 +824,7 @@ static void test_tables_refusal(void)
     CHECK(admit(1U, &h[1]) != NULL);
     zzapp_rec_table_snapshot(&before);
     zzapp_as_stats(&as_before);
-    CHECK(zzapp_rec_admit(2U, &refused, &rec) == AAR_REASON_TABLES);
+    CHECK(zzapp_rec_admit(&refused, &rec) == AAR_REASON_TABLES);
     CHECK(refused == 0U);
     zzapp_rec_table_snapshot(&after);
     zzapp_as_stats(&as_after);
