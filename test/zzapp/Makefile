@@ -16,9 +16,9 @@ ZZAPP_HARNESS_OBJS := $(BUILD)/mock_window.o $(BUILD)/mock_api.o $(BUILD)/host_l
 	$(BUILD)/aar.o $(BUILD)/gl.o $(BUILD)/syscalls.o
 
 # Hook for test owners. They may append custom binaries/rules here.
--include $(wildcard [a-h]/tests.mk)
+-include $(wildcard [a-i]/tests.mk)
 
-AUTO_TEST_SOURCES := $(wildcard [a-h]/*_test.c)
+AUTO_TEST_SOURCES := $(wildcard [a-i]/*_test.c)
 AUTO_TESTS := $(patsubst %.c,$(BUILD)/%,$(AUTO_TEST_SOURCES))
 ZZAPP_TESTS ?=
 # Suites a slice lists again in its tests.mk are still run once.
