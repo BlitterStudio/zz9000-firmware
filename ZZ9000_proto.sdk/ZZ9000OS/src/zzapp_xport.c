@@ -80,10 +80,15 @@ static void cb_put32(zzapp_rec_t *rec, uint32_t off, uint32_t value)
 		aar_put_be32(cb + off, value);
 }
 
-static void publish_shared(zzapp_rec_t *rec)
+/* AAR_CB_SHARED_USED is the runtime's blocks plus the app's own shared
+ * allocations (rec->visible.used, kept by zzapp_host.c). */
+void zzapp_xport_publish_shared(zzapp_rec_t *rec)
 {
-	uint64_t used = rec->xport.shared_used;
+	uint64_t used;
 
+	if (!rec)
+		return;
+	used = (uint64_t)rec->xport.shared_used + rec->visible.used;
 	zzapp_xport_cb_put64(rec, AAR_CB_SHARED_USED_HI, used);
 }
 
@@ -189,7 +194,7 @@ static int block_return(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind)
 	x->shared_used = x->shared_used >= b.bytes ? x->shared_used - b.bytes
 						    : 0U;
 	if (kind != ZZAPP_XPORT_BLOCK_PAIR)
-		publish_shared(rec);
+		zzapp_xport_publish_shared(rec);
 	return env.release && env.release(env.ctx, b.ptr, b.card) == 0 ? 0 : -1;
 }
 
@@ -217,7 +222,8 @@ static int block_take(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
 	uint32_t card = 0U;
 
 	if (!exempt && x->shared_limit != 0U &&
-	    (bytes > x->shared_limit || x->shared_used > x->shared_limit - bytes))
+	    (bytes > x->shared_limit ||
+	     x->shared_used + rec->visible.used > x->shared_limit - bytes))
 		return AAR_E_NOMEM;
 	if (!env.alloc ||
 	    env.alloc(env.ctx, bytes, align, env.lo, env.hi, &ptr, &card) != 0 ||
@@ -247,7 +253,7 @@ int zzapp_xport_block_alloc(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
 	rc = block_take(rec, kind, size, ZZAPP_XPORT_BLOCK_STEP, 0);
 	if (rc != AAR_OK)
 		return rc;
-	publish_shared(rec);
+	zzapp_xport_publish_shared(rec);
 	block_get(rec, kind, out);
 	return AAR_OK;
 }

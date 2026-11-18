@@ -463,6 +463,46 @@ static void test_service_and_blocks(void)
     CHECK(heap.frees == heap.allocs);
 }
 
+/* AAR_CB_SHARED_USED is the runtime's blocks plus the app's own shared
+ * allocations, and the limit counts both. */
+static void test_shared_total(void)
+{
+    client_t c;
+    zzapp_rec_t *rec;
+    zzapp_xport_buf_t a;
+
+    reset_all();
+    rec = claim(&c);
+    CHECK(word(&c, AAR_CB_SHARED_USED_LO) == 0x4000U);
+
+    /* zzapp_host.c keeps visible.used and publishes after each app alloc. */
+    rec->visible.used = 0x6000U;
+    zzapp_xport_publish_shared(rec);
+    CHECK(word(&c, AAR_CB_SHARED_USED_HI) == 0U && word(&c, AAR_CB_SHARED_USED_LO) == 0xA000U);
+    CHECK(zzapp_xport_shared_used(rec) == 0x4000U);           /* runtime blocks only */
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_LOG, &a) == AAR_OK);
+    CHECK(word(&c, AAR_CB_SHARED_USED_LO) == 0x4000U + 0xC000U + 0x6000U);
+    CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &a) == AAR_OK);
+    CHECK(word(&c, AAR_CB_SHARED_USED_LO) == 0x4000U + 0xC000U + 0x2000U + 0x6000U);
+    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_DATA) == AAR_OK);
+    CHECK(word(&c, AAR_CB_SHARED_USED_LO) == 0x4000U + 0xC000U + 0x6000U);
+    rec->visible.used = 0U;
+    zzapp_xport_publish_shared(rec);
+    CHECK(word(&c, AAR_CB_SHARED_USED_LO) == 0x10000U);
+
+    /* The limit counts the app's blocks too. */
+    rec->visible.used = 0x6000U;
+    zzapp_xport_publish_shared(rec);
+    zzapp_xport_set_shared_limit(rec, 0x10000U + 0x6000U + 0x2000U - 0x2000U);
+    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_LOAD, 0x2000U, &a) == AAR_E_NOMEM);
+    zzapp_xport_set_shared_limit(rec, 0x10000U + 0x6000U + 0x2000U);
+    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_LOAD, 0x2000U, &a) == AAR_OK);
+    CHECK(word(&c, AAR_CB_SHARED_USED_LO) == 0x18000U);
+    rec->visible.used = 0U;
+    unclaim(rec);
+    zzapp_xport_publish_shared(rec);               /* no pair: harmless */
+}
+
 static void test_release_failure_and_replay(void)
 {
     zzapp_rec_t *rec;
@@ -1632,6 +1672,7 @@ int main(void)
     test_admission();
     test_service_and_blocks();
     test_release_failure_and_replay();
+    test_shared_total();
     test_request_roundtrip_near_wrap();
     test_three_entries_are_independent();
     test_sq_full_empty_and_message_reserve();
