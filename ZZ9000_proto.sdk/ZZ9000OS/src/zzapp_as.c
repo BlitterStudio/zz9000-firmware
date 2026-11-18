@@ -928,6 +928,12 @@ static int reserve_locked(uint32_t pid)
 		return ZZAPP_AS_ETABLES;
 	own = pid_l2_count[pid] < ZZAPP_AS_L2_RESERVE ?
 		ZZAPP_AS_L2_RESERVE - pid_l2_count[pid] : 0U;
+	/* The unused part of the new reserve is a promise of `own` tables out
+	 * of what is free and not promised already. Tables an admitted record
+	 * allocated beyond its own reserve are gone from the free count, so
+	 * the reserve total above cannot see that they broke the promise. */
+	if (l2_shared_free() < own)
+		return ZZAPP_AS_ETABLES;
 	l2_reserved_total += ZZAPP_AS_L2_RESERVE;
 	l2_reserved_unused += own;
 	pid_flags[pid] |= PID_RESERVED;

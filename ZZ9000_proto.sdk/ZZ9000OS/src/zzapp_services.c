@@ -4892,10 +4892,9 @@ static void put_query(uint8_t *reply, uint16_t *reply_len, uint32_t caps,
 	zzapp_put_be32(reply + ZZAPP_QUERY_COMMIT_FREE, commit_free);
 	zzapp_put_be32(reply + ZZAPP_QUERY_COMMIT_TOTAL, commit_free + committed);
 	zzapp_put_be32(reply + ZZAPP_QUERY_RECORDS_FREE, records.free);
-	/* Tables a new admission can still reserve, and the pool less the
-	 * kernel template. */
-	zzapp_put_be32(reply + ZZAPP_QUERY_TABLES_FREE,
-		       tables.l2_total - tables.l2_template - tables.l2_reserved);
+	/* Tables a new admission can still reserve (free and not promised),
+	 * and the pool less the kernel template. */
+	zzapp_put_be32(reply + ZZAPP_QUERY_TABLES_FREE, tables.l2_shared_free);
 	zzapp_put_be32(reply + ZZAPP_QUERY_TABLES_TOTAL,
 		       tables.l2_total - tables.l2_template);
 	zzapp_put_be32(reply + ZZAPP_QUERY_HOSTHEAP_FREE, hostheap_free_bytes());

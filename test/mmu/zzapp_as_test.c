@@ -997,6 +997,50 @@ static void test_l2_reserve_and_exhaustion(void)
 	CHECK(stats_equal_except_refused(&s0, &s2));
 }
 
+/* A record that allocated beyond its reserve took tables a later reserve
+ * would be promised: admission counts what is free and not promised, not
+ * the reserves alone. */
+static void test_l2_reserve_counts_allocations_beyond_a_reserve(void)
+{
+	zzapp_as_t a;
+	zzapp_as_stats_t s1;
+	zzapp_as_stats_t s2;
+	uint32_t va;
+
+	setup_pool(8U, 40U);
+	CHECK(zzapp_as_reserve_l2(0U) == 0);
+	CHECK(zzapp_as_create(&a, 0U) == 0);
+	/* 30 tables: 16 from a's reserve, 14 beyond it. */
+	CHECK(zzapp_as_alias_map(&a, 0x03400000U, 30U << 20, 1, &va) == 0);
+	stats_get(&s1);
+	CHECK(s1.l2_free == 10U && s1.l2_reserved_unused == 0U &&
+	      s1.l2_shared_free == 10U);
+	/* 16 reserved tables do not fit in 10 free ones. */
+	CHECK(zzapp_as_reserve_l2(1U) == ZZAPP_AS_ETABLES);
+	stats_get(&s2);
+	CHECK(memcmp(&s1, &s2, sizeof(s1)) == 0);
+	zzapp_as_destroy(&a);
+
+	/* The boundary: 24 held leaves exactly 16 to promise, 25 one short. */
+	CHECK(zzapp_as_create(&a, 0U) == 0);
+	CHECK(zzapp_as_alias_map(&a, 0x03400000U, 25U << 20, 1, &va) == 0);
+	CHECK(zzapp_as_reserve_l2(1U) == ZZAPP_AS_ETABLES);
+	zzapp_as_destroy(&a);
+	CHECK(zzapp_as_create(&a, 0U) == 0);
+	CHECK(zzapp_as_alias_map(&a, 0x03400000U, 24U << 20, 1, &va) == 0);
+	CHECK(zzapp_as_reserve_l2(1U) == 0);
+	stats_get(&s1);
+	CHECK(s1.l2_free == 16U && s1.l2_reserved_unused == 16U &&
+	      s1.l2_shared_free == 0U);
+	/* a holds more than its own reserve, so the 16 free tables are all
+	 * promised and it cannot take another. */
+	CHECK(zzapp_as_alias_map(&a, 0x03400000U, 1U << 20, 1, &va) ==
+	      ZZAPP_AS_ENOMEM);
+	zzapp_as_destroy(&a);
+	CHECK(zzapp_as_release_l2(0U) == 0);
+	CHECK(zzapp_as_release_l2(1U) == 0);
+}
+
 static void test_release_l2_refuses_live_space(void)
 {
 	zzapp_as_t a;
@@ -1290,6 +1334,7 @@ int main(void)
 	test_asid_300_run();
 	test_lazy_asid_and_switch();
 	test_l2_reserve_and_exhaustion();
+	test_l2_reserve_counts_allocations_beyond_a_reserve();
 	test_release_l2_refuses_live_space();
 	test_reconcile_rebuilds_pool();
 	test_hook_without_tables_faults_the_record();

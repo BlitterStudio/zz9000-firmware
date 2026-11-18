@@ -683,7 +683,11 @@ committed bytes as they were (`claim_window`, `zzapp_services.c:4832-4921`;
    record is free.
 3. L2 reserve of 16 tables (`zzapp_as_reserve_l2`). Refusal reason `TABLES`
    when the reserved tables plus 16 would exceed the pool less the kernel
-   template (`zzapp_as.c:939-953`).
+   template, or when fewer than 16 tables are free and not already promised
+   to the unused part of another record's reserve. A record that allocated
+   beyond its own reserve has taken tables out of that count, so a reserve is
+   never promised tables that are gone (`zzapp_as.c:919-945`). `TABLES_FREE`
+   in `QUERY` is that count.
 4. Window memory. The first claim of a window takes its fixed range from the
    host-visible heap; a window kept from an earlier claim skips this step.
    Refusal reason `HOSTHEAP` when the range is held by another client or the
