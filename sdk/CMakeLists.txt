@@ -1096,6 +1096,46 @@ target_include_directories(app_ringtest_logic_test
 
 add_test(NAME app_ringtest_logic_test COMMAND app_ringtest_logic_test)
 
+# The client transport module against the firmware's zzapp_xport.c (same code
+# at both ends). Needs the aar headers (sh scripts/fetch-aar.sh, or
+# -DAAR_DIR=<checkout>) and the firmware sources one directory up.
+set(AAR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/aar" CACHE PATH "AAR checkout (include/aar/transport.h)")
+set(ZZ_FW_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../ZZ9000_proto.sdk/ZZ9000OS/src")
+set(ZZ_FW_TEST "${CMAKE_CURRENT_SOURCE_DIR}/../test")
+if(EXISTS "${AAR_DIR}/include/aar/transport.h" AND EXISTS "${ZZ_FW_SRC}/zzapp_xport.c")
+  find_package(Threads REQUIRED)
+  add_executable(aar_xport_zz9000_test
+    tests/aar_xport_zz9000_test.c
+    amiga/src/aar_xport_zz9000.c
+    ${ZZ_FW_SRC}/zzapp_xport.c
+    ${ZZ_FW_SRC}/zzapp_rec.c
+    ${ZZ_FW_SRC}/zzapp_as.c
+    ${ZZ_FW_SRC}/mmu_page.c
+    ${ZZ_FW_SRC}/sdk_smp_lock.c
+    ${ZZ_FW_SRC}/card_pool.c
+    ${ZZ_FW_TEST}/card_pool/host_card_pool.c
+  )
+  set_target_properties(aar_xport_zz9000_test PROPERTIES C_STANDARD 11)
+  target_include_directories(aar_xport_zz9000_test
+    PRIVATE
+      ${AAR_DIR}/include
+      ${AAR_DIR}/libaar/src
+      ${ZZ_FW_SRC}
+      ${CMAKE_CURRENT_SOURCE_DIR}/amiga/src
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${ZZ_FW_TEST}/card_pool
+      ${ZZ_FW_TEST}/mmu/mock
+  )
+  target_compile_definitions(aar_xport_zz9000_test
+    PRIVATE ZZAPP_HOST_TEST MMU_PAGE_HOST_TEST SMP_LOCK_HOST_TEST)
+  target_compile_options(aar_xport_zz9000_test PRIVATE -Wall -Wextra -Werror -fno-pie)
+  target_link_options(aar_xport_zz9000_test PRIVATE -no-pie)
+  target_link_libraries(aar_xport_zz9000_test PRIVATE Threads::Threads)
+  add_test(NAME aar_xport_zz9000_test COMMAND aar_xport_zz9000_test)
+else()
+  message(STATUS "aar_xport_zz9000_test skipped: no aar checkout or firmware sources")
+endif()
+
 add_executable(bench_tool_source_test
   tests/bench_tool_source_test.c
 )
