@@ -48,9 +48,9 @@
 /* Domain 14 is Client in DACR; AP bits therefore enforce firmware text RO. */
 #define MMU_L1_DOMAIN_TEXT     (14U << 5)
 #define PAGE_TABLE_BYTES (MMU_PAGES_PER_SECTION * sizeof(uint32_t))
-/* Three adjacent sections hold the Z3 app windows; a fourth preserves the
- * existing Z2 mailbox page split. */
-#define MMU_NONCACHE_PAGE_TABLE_COUNT 4U
+/* One table: the split of the Z2 mailbox page. Nothing else splits a section
+ * into non-cacheable pages (the app transport lives in cacheable memory). */
+#define MMU_NONCACHE_PAGE_TABLE_COUNT 1U
 
 #ifdef MMU_PAGE_HOST_TEST
 /* Host tests place the tables where bit 18 of their addresses is set: in a
@@ -67,15 +67,12 @@ static uint32_t page_tables[MMU_NONCACHE_PAGE_TABLE_COUNT]
 #define page_table(index) page_tables[(index)]
 #endif
 static uint32_t page_table_section[MMU_NONCACHE_PAGE_TABLE_COUNT] = {
-	MMU_SECTION_COUNT, MMU_SECTION_COUNT, MMU_SECTION_COUNT,
 	MMU_SECTION_COUNT
 };
 
-/* Firmware text uses a separate L2 table from the host-window page split.
- * The sections therefore coexist in the one translation table core 0 and
- * core 1 share. */
-/* Firmware text uses private L2 tables rather than the host-window table.
- * The cores share one L1 table, so every changed mapping is global. */
+/* Firmware text uses a separate L2 table from the mailbox page split. The
+ * sections therefore coexist in the one translation table core 0 and core 1
+ * share. The cores share one L1 table, so every changed mapping is global. */
 #define MMU_RO_TEXT_SECTIONS 4U
 static uint32_t ro_page_table[MMU_RO_TEXT_SECTIONS][MMU_PAGES_PER_SECTION]
 	__attribute__((aligned(1024)));

@@ -18,3 +18,19 @@ $(BUILD)/i/proto_wire_test: i/proto_wire_test.c $(FW)/zzapp_proto.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -DZZAPP_PROTO_NO_WINDOW -I$(FW) \
 		-o $@ i/proto_wire_test.c
+
+# The lifecycle on the transport: host.c and the loader over the record arena,
+# with the real surface of the transport (zzapp_xport.c) and a services layer
+# reduced to what the host calls. Links like a/retire_test; the lists are
+# spelled out so the rule does not depend on which tests.mk make reads first.
+LIFE_TEST_OBJS := $(BUILD)/a/zzapp_loader_real_as_incremental.o \
+	$(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o \
+	$(BUILD)/a/zzapp_rec.o $(BUILD)/a/host_decode_stubs.o
+LIFE_TEST_SOURCES := $(FW)/zzapp_xport.c $(FW)/zzapp_mem.c $(FW)/card_pool.c \
+	$(FW)/sdk_smp_lock.c $(FW)/zzapp_as.c $(FW)/mmu_page.c \
+	../card_pool/host_card_pool.c
+$(BUILD)/i/life_test: i/life_test.c $(LIFE_TEST_OBJS) $(LIFE_TEST_SOURCES) $(FW)/zzapp_xport.h $(FW)/zzapp_state.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -DMMU_PAGE_HOST_TEST \
+		-I../card_pool -I../mmu/mock -o $@ i/life_test.c $(LIFE_TEST_OBJS) \
+		$(LIFE_TEST_SOURCES)

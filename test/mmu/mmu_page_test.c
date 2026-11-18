@@ -214,25 +214,23 @@ static void test_repeat_and_second_page(void)
 				mmu_page_test_page_table()[0xdeU]);
 }
 
-static void test_app_window_sections_are_all_mappable(void)
+/* The pool holds the one split the Z2 mailbox page needs. The app transport
+ * lives in cacheable memory, so no other section is ever split: a second
+ * section is refused and left as the BSP mapped it, and the split section
+ * keeps working. */
+static void test_pool_holds_one_split_only(void)
 {
+	static const uint32_t nc[] = { 0xdeU, 0xdfU };
 	uint32_t section;
 
-	for (section = 0x07eU; section <= 0x080U; section++)
-		set_section(section, BSP_DDR_WB);
-	set_section(0x07dU, BSP_DDR_WB);
-	set_section(0x081U, BSP_DDR_WB);
-
 	for (section = 0x07eU; section <= 0x080U; section++) {
-		uint32_t address;
-
-		for (address = section << 20; address < (section + 1U) << 20;
-		     address += 0x1000U)
-			CHECK(mmu_page_set_noncacheable(address));
-		CHECK((mmu_page_test_l1[section] & 3U) == 1U);
+		set_section(section, BSP_DDR_WB);
+		CHECK(!mmu_page_set_noncacheable(section << 20));
+		CHECK(mmu_page_test_l1[section] == ((section << 20) | BSP_DDR_WB));
 	}
-	CHECK(mmu_page_test_l1[0x07dU] == (0x07d00000U | BSP_DDR_WB));
-	CHECK(mmu_page_test_l1[0x081U] == (0x08100000U | BSP_DDR_WB));
+	/* The section split by the earlier tests is still served. */
+	CHECK(mmu_page_set_noncacheable(0x005de000U));
+	check_split_section(0x005U, nc, 2U);
 }
 
 int main(void)
@@ -241,7 +239,7 @@ int main(void)
 	test_uncached_sections_are_accepted_as_is();
 	test_split_one_page();
 	test_repeat_and_second_page();
-	test_app_window_sections_are_all_mappable();
+	test_pool_holds_one_split_only();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }
