@@ -219,6 +219,8 @@ static void finish_app(uint32_t handle, uint32_t reason)
 	zzapp_services_select_pid(pid);
 	zzapp_services_set_terminal(reason);
 	zzapp_services_on_app_end();
+	/* The host's retire returns the frames, and the commit with them. */
+	rec->proc.memory.committed = 0U;
 	(void)zzapp_rec_retire(pid);
 }
 
@@ -796,6 +798,7 @@ static void run_apps(uint32_t n)
 	zzapp_services_expire_claims(ZZAPP_LOAD_LEASE_US);
 	{
 		zzapp_rec_t *rec = zzapp_rec_by_pid(aar_handle_index(r[q].handle));
+		zzapp_xport_buf_t load;
 		struct query before;
 		struct query after;
 		uint32_t current;
@@ -804,6 +807,9 @@ static void run_apps(uint32_t n)
 		current = rec ? rec->hdr.handle : 0U;
 		CHECK(current != 0U && current != r[q].handle);
 		CHECK(rec && (zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_QUARANTINED) != 0));
+		/* The claim was loading: its load buffer is the one block the end
+		 * of the app gives back (design 3.9); the pair stays. */
+		CHECK(rec && zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_LOAD, &load) == 1);
 		query(&before);
 		zzapp_services_select_pid(aar_handle_index(r[q].handle));
 		zzapp_services_on_app_end();
@@ -812,7 +818,9 @@ static void run_apps(uint32_t n)
 		/* Resources are back, the shell and its pair are held. */
 		CHECK(after.tables_free == before.tables_free + ZZAPP_AS_L2_RESERVE);
 		CHECK(after.records_free == before.records_free);
-		CHECK(after.hostheap_free == before.hostheap_free);
+		CHECK(after.hostheap_free == before.hostheap_free + load.bytes);
+		CHECK(rec && zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_LOAD, &load) == 0);
+		CHECK(rec && zzapp_xport_live(rec));
 	}
 	/* The client's next contact with its stale handle releases the shell. */
 	{

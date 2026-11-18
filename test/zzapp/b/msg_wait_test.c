@@ -139,8 +139,25 @@ static void arrive_between_check_and_park(unsigned n)
 	host_push(0x22);
 }
 
+/* The waiter is parked by the real wait path (registered with the pass), and
+ * the message is in the CQ the first time any pass looks. */
+static void arrive_before_first_pass(unsigned n)
+{
+	(void)n;
+	CHECK(zzapp_services_wait_registered(PID_OF(0U)));
+	CHECK(RT(0).wait_kind == ZZAPP_WAIT_EVENT);
+	TH(0).state = ZZAPP_THREAD_BLOCKED;
+	host_push(0x33);
+	service_test_wake_count = 0U;
+	zzapp_services_poll();
+	CHECK(service_test_wake_count == 1U);
+	CHECK(TH(0).state == ZZAPP_THREAD_RUNNABLE);
+}
+
 static void test_message_between_check_and_park_is_not_missed(void)
 {
+	uint8_t msg[AAR_MSG_BYTES];
+
 	reset();
 	on_yield = arrive_between_check_and_park;
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
@@ -149,14 +166,11 @@ static void test_message_between_check_and_park_is_not_missed(void)
 	/* A service pass that sees the CQ ready wakes a parked waiter even
 	 * though the message arrived before the pass ever saw the wait empty. */
 	reset();
-	RT(0).wait_kind = ZZAPP_WAIT_EVENT;
-	RT(0).wait_deadline = 1000U + 5000000U;
-	TH(0).state = ZZAPP_THREAD_BLOCKED;
-	host_push(0x33);
-	service_test_wake_count = 0U;
-	zzapp_services_poll();
-	CHECK(service_test_wake_count == 1U);
-	CHECK(TH(0).state == ZZAPP_THREAD_RUNNABLE);
+	on_yield = arrive_before_first_pass;
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
+	CHECK(yields == 1U);
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
+	CHECK(zzapp_svc_msg_poll(msg) == 1 && msg[0] == 0x33);
 }
 
 static void run_to_deadline(unsigned n)

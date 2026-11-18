@@ -163,7 +163,7 @@ static uint16_t __attribute__((unused)) svc_load_begin(unsigned n, uint32_t caps
 	}
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(g_app[n].pid);
-	run_deferred(service_rec());
+	zzapp_services_poll();
 	service_test_loader_begin_hook = saved;
 	if (!zzapp_mailbox_harvest(NULL, NULL, NULL, &status, reply ? reply : scratch,
 				   &len)) {

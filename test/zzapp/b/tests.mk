@@ -73,11 +73,16 @@ B_REC_FLAGS := -fno-pie -no-pie -DMMU_PAGE_HOST_TEST -DSMP_LOCK_HOST_TEST \
 	-I../card_pool -I../mmu/mock
 B_STANDALONE_TESTS := mock_client_test services_test present_flush_test msg_wait_test \
 	admission_test queue_runtime_test lost_client_test
+# Sources a standalone suite links besides the shared set: the strong
+# zzapp_host_latch_stop of the host runtime, where the suite checks that a
+# STOP reached the record.
+B_EXTRA_admission_test := c/svc_stubs.c
+B_EXTRA_msg_wait_test := c/svc_stubs.c
 
 define B_STANDALONE_RULE
-$(BUILD)/b/$(1): b/$(1).c $(B_REC_SOURCES) $(B_REC_DEPS) | $(BUILD)
+$(BUILD)/b/$(1): b/$(1).c $(B_REC_SOURCES) $$(B_EXTRA_$(1)) $(B_REC_DEPS) | $(BUILD)
 	@mkdir -p $$(dir $$@)
-	$$(CC) $$(ZZAPP_HARNESS_CFLAGS) $$(B_REC_FLAGS) -o $$@ $$< $$(B_REC_SOURCES)
+	$$(CC) $$(ZZAPP_HARNESS_CFLAGS) $$(B_REC_FLAGS) -o $$@ $$< $$(B_REC_SOURCES) $$(B_EXTRA_$(1))
 endef
 $(foreach t,$(B_STANDALONE_TESTS),$(eval $(call B_STANDALONE_RULE,$(t))))
 

@@ -24,6 +24,20 @@
 #define READ_BYTES (300u * 1024u)
 
 static int g_fails;
+/* The host-visible heap QUERY reports: a 64 MiB heap of which the mock heap's
+ * live blocks are taken. */
+#define HEAP_MODEL_BYTES (64U << 20)
+
+uint32_t zzapp_test_hostheap_free(void)
+{
+	return HEAP_MODEL_BYTES - mock_heap.live_bytes;
+}
+
+uint32_t zzapp_test_hostheap_largest(void)
+{
+	return HEAP_MODEL_BYTES - mock_heap.live_bytes;
+}
+
 static uint64_t g_now;
 
 static void fail(const char *what)
@@ -123,6 +137,8 @@ static void load_begin_run(unsigned n, uint32_t caps, uint8_t reply[48],
 		fail("load begin queued");
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(n));
+	if (!start_posted_deferred(n))
+		fail("load begin posted");
 	run_deferred(service_rec());
 }
 
@@ -569,12 +585,26 @@ static void test_audio_ahi_route_names_the_ring(void)
 		return;
 	}
 	EXPECT(h->req.arg[AAR_A_AUDIO_OPEN_ROUTE] == AAR_AUDIO_ROUTE_AHI, "ahi route");
+	/* The request names the ring the runtime allocated: its token, and the
+	 * ring's own length (header and samples), which the block rounds up. */
 	EXPECT(zzapp_xport_block_get(APP(0).rec, ZZAPP_XPORT_BLOCK_AUDIO, &ring) == 1 &&
-	       h->req.buf == ring.token && h->req.buf_len == ring.bytes,
+	       h->req.buf == ring.token &&
+	       h->req.buf_len == AAR_AUDIO_RING_HDR_BYTES + ZZAPP_AUDIO_FRAMES * 4U &&
+	       h->req.buf_len <= ring.bytes,
 	       "request names the runtime's ring");
 	EXPECT(zzapp_svc_audio_close() == AAR_OK, "ahi audio close");
 	EXPECT(zzapp_xport_block_get(APP(0).rec, ZZAPP_XPORT_BLOCK_AUDIO, &ring) == 0,
 	       "ring returned at close");
+}
+
+/* The audio ring of a record: the transport's AUDIO block (the app's own
+ * ring, which the card reads in place), NULL while none is open. */
+static void *audio_ring_ptr(zzapp_rec_t *rec)
+{
+	zzapp_xport_buf_t ring;
+
+	return zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, &ring) == 1 ?
+	       ring.ptr : NULL;
 }
 
 /* ---- Two apps: state is per record ----------------------------------------------- */
@@ -616,7 +646,8 @@ static void test_per_app_file_console_and_audio_state(void)
 	EXPECT(zzapp_svc_audio_open(22050U, 2U, &first) == AAR_OK, "first app audio open");
 	svc_select(1U);
 	EXPECT(zzapp_svc_audio_open(22050U, 2U, &second) == AAR_OK &&
-	       RT(0).audio_block != RT(1).audio_block, "per-app audio state");
+	       audio_ring_ptr(APP(0).rec) != NULL && audio_ring_ptr(APP(1).rec) != NULL &&
+	       audio_ring_ptr(APP(0).rec) != audio_ring_ptr(APP(1).rec), "per-app audio state");
 	svc_select(0U);
 	EXPECT(zzapp_svc_audio_close() == AAR_OK, "first app audio close");
 	svc_select(1U);
@@ -653,7 +684,10 @@ static void wake_yield(void)
 		zzapp_services_core0_poll();
 		EXPECT(service_test_wake_count == 0U, "core zero called wake");
 		zzapp_services_test_set_core(1);
+		/* The Amiga answers while the app is parked: core 1's pass
+		 * pumps the completion and wakes the waiter. */
 		(void)mock_client_serve(&CL(0));
+		zzapp_services_poll();
 		return;
 	}
 	zzapp_services_poll();
@@ -675,9 +709,11 @@ static void test_core1_wakes_ready_waiter(void)
 
 /* ---- Display ---------------------------------------------------------------------------- */
 
+/* 320x200 RGB565 is 128000 bytes: the buffers sit 0x40000 apart, so the
+ * address between the first two (0x00230000) is outside every buffer. */
 #define FRONT 0x00200000U
-#define BACK  0x00210000U
-#define SPARE 0x00220000U
+#define BACK  0x00240000U
+#define SPARE 0x00280000U
 
 static void client_display(mock_client *c, uint32_t front, uint32_t back,
 			   uint32_t spare, uint32_t caps)
@@ -715,14 +751,15 @@ static void test_display_refresh_rotation_and_layout(void)
 	       PHYS(surface.front) == FRONT && PHYS(surface.back) == BACK &&
 	       surface.layout == AAR_LAYOUT_RGB565_BE, "display initial surface");
 	/* A flip the client holds is pending: the surface does not rotate. */
-	CL(0).delay[AAR_OP_DISPLAY_FLIP] = 1000U;
-	EXPECT(zzapp_display_flip_bound() == AAR_OK, "display flip");
+	CL(0).delay[AAR_OP_DISPLAY_FLIP] = 2U;
+	EXPECT(zzapp_svc_display_flip_async(1U) == AAR_OK, "display flip");
 	(void)mock_client_serve(&CL(0));
 	EXPECT(mock_client_last(&CL(0), AAR_OP_DISPLAY_FLIP) != NULL, "flip request posted");
 	EXPECT(zzapp_svc_display_refresh(&surface) == AAR_E_BUSY, "display pending refresh");
 	/* The completion arrives with no SUBMITTED flag: the flip is complete
 	 * without waiting for the card's vertical blank. */
 	CL(0).delay[AAR_OP_DISPLAY_FLIP] = 0U;
+	svc_yield();
 	svc_yield();
 	EXPECT(zzapp_svc_display_refresh(&surface) == AAR_OK &&
 	       PHYS(surface.front) == BACK && PHYS(surface.back) == FRONT,
@@ -885,6 +922,10 @@ static void test_display_mailbox_uses_scanout_owner(void)
 	svc_app_new(0U);
 	svc_app_new(1U);
 	RT(1).display_mailbox_active = 1;
+	/* The vblank walks the records with a bound display. */
+	slot_state_lock_acquire();
+	set_add(&set_display, PID_OF(1U));
+	slot_state_lock_release();
 	RT(1).display_mailbox_shown = 0x00200000U;
 	RT(1).display_mailbox_pending = 0x00210000U;
 	RT(1).display_mailbox_buffers[0] = 0x00200000U;
@@ -1069,6 +1110,8 @@ static void test_chunk_reads_the_load_buffer(void)
 				NULL, NULL) == SDK_STATUS_QUEUED, "chunk queued");
 	zzapp_services_test_set_core(1);
 	zzapp_services_select_pid(PID_OF(0U));
+	if (!start_posted_deferred(0U))
+		fail("chunk posted");
 	run_deferred(service_rec());
 	service_test_loader_chunk_hook = NULL;
 	EXPECT(g_chunk_ok && memcmp(g_chunk_data, "hello", 5U) == 0, "chunk bytes from the load buffer");
@@ -1271,7 +1314,6 @@ static void start_loading(void)
 
 static void test_abandoned_loading_is_quarantined(void)
 {
-	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
 	uint32_t old_handle;
 	uint32_t free_before;
 	uint32_t current;
@@ -1397,7 +1439,11 @@ static void test_claim_expiry_cancels_running_load(void)
 	run_deferred(service_rec());
 	service_test_deferred_completion_hook = NULL;
 	service_test_loader_begin_hook = NULL;
-	EXPECT(CBSTATE(0) == AAR_STATE_STOPPING &&
+	/* The cancelled load ends through the retire path: the shell reads
+	 * IDLE with the end reason in the control block (it read STOPPING while
+	 * a window held the state), after the loader dropped its arena. */
+	EXPECT(CBSTATE(0) == AAR_STATE_IDLE &&
+	       CB(0, AAR_CB_END_REASON) == AAR_END_QUARANTINED &&
 	       __atomic_load_n(&DEF(0).state, __ATOMIC_ACQUIRE) == DEFER_IDLE &&
 	       service_test_loader_abort_count == g_abort_base + 1U,
 	       "expired running load was not quarantined");
@@ -1430,7 +1476,8 @@ static void test_preload_cancellation_keeps_the_loader_consistent(void)
 	zzapp_services_select_pid(PID_OF(0U));
 	run_deferred(service_rec());
 	service_test_loader_set_generation_hook = NULL;
-	EXPECT(CBSTATE(0) == AAR_STATE_STOPPING &&
+	EXPECT(CBSTATE(0) == AAR_STATE_IDLE &&
+	       CB(0, AAR_CB_END_REASON) == AAR_END_QUARANTINED &&
 	       __atomic_load_n(&DEF(0).state, __ATOMIC_ACQUIRE) == DEFER_IDLE &&
 	       service_test_loader_abort_count == g_abort_base + 1U,
 	       "pre-load cancellation did not quarantine lifecycle state");
@@ -1607,7 +1654,7 @@ static void test_audio_handoff_blocks_release(void)
 	zzapp_services_test_set_core(1);
 	svc_select(0U);
 	EXPECT(zzapp_svc_audio_open(22050U, 2U, &audio) == AAR_OK, "audio open before blocked release");
-	block = current_runtime()->audio_block;
+	block = audio_ring_ptr(service_rec());
 	zzapp_services_on_app_end();
 	(void)zzapp_rec_retire(zzapp_services_current_pid());
 	handed = zzapp_services_test_audio_request();
@@ -1618,7 +1665,7 @@ static void test_audio_handoff_blocks_release(void)
 	EXPECT(query_word(ZZAPP_QUERY_RECORDS_FREE) == free_before,
 	       "the record was freed during the audio handoff");
 	svc_select(0U);
-	EXPECT(current_runtime()->audio_block == block &&
+	EXPECT(audio_ring_ptr(service_rec()) == block &&
 	       zzapp_services_test_audio_request() == handed &&
 	       zzapp_services_test_audio_detach_count() == 0U, "release zeroed live audio during handoff");
 	zzapp_services_test_set_core(1);
@@ -1670,6 +1717,7 @@ static void test_reclaim_halted_audio_reclaims_every_app(void)
 	rec0 = service_rec();
 	pid0 = zzapp_services_current_pid();
 	zzapp_services_test_set_core(1);
+	svc_select(0U);
 	EXPECT(zzapp_svc_audio_open(22050U, 2U, &audio[0]) == AAR_OK, "producer 0 open");
 	svc_select(1U);
 	rec1 = service_rec();
@@ -1690,7 +1738,7 @@ static void test_reclaim_halted_audio_reclaims_every_app(void)
 	EXPECT(zzapp_services_current_pid() == pid0, "halted reclaim did not preserve the selection");
 	EXPECT(CBSTATE(0) == AAR_STATE_IDLE && CBSTATE(1) == AAR_STATE_IDLE,
 	       "halted reclaim left a producer unreleased");
-	EXPECT(runtime_of(rec0)->audio_block == NULL && runtime_of(rec1)->audio_block == NULL,
+	EXPECT(audio_ring_ptr(rec0) == NULL && audio_ring_ptr(rec1) == NULL,
 	       "halted reclaim left an audio block allocated");
 	EXPECT(runtime_of(rec0)->audio_detach_count == 1U && runtime_of(rec1)->audio_detach_count == 1U,
 	       "halted reclaim did not detach both producers");
@@ -1806,22 +1854,33 @@ static void test_vblank_pass_holds_record_lifetime(void)
 	EXPECT(open_display(0U, 320U, 200U, AAR_FMT_RGB565, 0U, &surface) == AAR_OK &&
 	       zzapp_svc_display_flip_async(1U) == AAR_OK, "vblank lifetime display setup");
 	svc_yield();
+	/* The app's flip wait pumps the completion, which is what lets the
+	 * card acknowledge the submitted flip. */
+	EXPECT(zzapp_display_flip_idle() == 0, "flip submitted, not yet shown");
 	arm_lookup_race(0U);
 	zzapp_services_display_vblank(BACK);
 	EXPECT(zzapp_display_flip_idle() == 1, "vblank pass lost its record to the retirement");
 	expect_held_off("vblank pass left its record unprotected", 0U);
 }
 
+/* The passes walk the sets of records with something to do: a record is put
+ * in the one the pass reads, as its parked wait or its audio request would. */
 static void test_audio_polls_hold_record_lifetime(void)
 {
 	world();
 	zzapp_services_test_set_core(1);
+	slot_state_lock_acquire();
+	set_add(&set_svc, PID_OF(0U));
+	slot_state_lock_release();
 	arm_lookup_race(0U);
 	zzapp_services_poll();
-	expect_held_off("core 1 audio poll left its record unprotected", 0U);
+	expect_held_off("core 1 pass left its record unprotected", 0U);
 
 	world();
 	zzapp_services_test_set_core(0);
+	slot_state_lock_acquire();
+	set_add(&set_core0, PID_OF(0U));
+	slot_state_lock_release();
 	arm_lookup_race(0U);
 	zzapp_services_core0_poll();
 	expect_held_off("core 0 audio poll left its record unprotected", 0U);

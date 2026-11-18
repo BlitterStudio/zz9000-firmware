@@ -106,10 +106,15 @@ static void test_steady_flip_flushes_surface_only(void)
 				(unsigned long)presented, bytes);
 			fail("flip flush range");
 		}
-		/* The client submits the flip; the card shows it. */
+		/* The client submits the flip. Nothing pumps an async flip's
+		 * completion until the app asks whether the flip is done (its
+		 * flip wait does), and the card can only acknowledge a flip
+		 * whose submission the runtime has seen. */
 		svc_yield();
 		if (mock_client_count(&CL(0), AAR_OP_DISPLAY_FLIP) != flip + 1U)
 			fail("one flip request per flip");
+		if (zzapp_display_flip_idle())
+			fail("flip idle before the card showed it");
 		zzapp_services_display_vblank(presented);
 		if (zzapp_svc_display_refresh(&surface) != AAR_OK)
 			fail("steady refresh");
