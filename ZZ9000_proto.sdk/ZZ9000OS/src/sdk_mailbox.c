@@ -8389,11 +8389,24 @@ static uint16_t handle_diag_timing(volatile struct SDKMailboxEntry *req,
 }
 
 static uint16_t handle_diag_sched(volatile struct SDKMailboxEntry *req,
-                                  volatile struct SDKMailboxEntry *comp)
+                                  volatile struct SDKMailboxEntry *comp,
+                                  uint16_t payload_len)
 {
 	volatile struct SDKDiagSchedPayload *sched;
 	taskq_shared_t *sh = scheduler_shared();
 
+	if (payload_len != 0U) {
+		uint8_t reply[ZZ9K_APP_PERF_REPLY_BYTES];
+		uint16_t reply_len = 0U;
+		uint16_t status = zzapp_services_perf_diag(
+			(const uint8_t *)req->payload, payload_len, reply, &reply_len);
+
+		write_completion(comp, req, status, reply_len);
+		memset((void *)comp->payload, 0, sizeof(comp->payload));
+		if (reply_len != 0U)
+			memcpy((void *)comp->payload, reply, reply_len);
+		return status;
+	}
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*sched));
 	memset((void *)comp->payload, 0, sizeof(comp->payload));
 	sched = (volatile struct SDKDiagSchedPayload *)comp->payload;
@@ -8961,7 +8974,7 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_DIAG_TIMING:
 		return handle_diag_timing(req, comp);
 	case SDK_OP_DIAG_SCHED:
-		return handle_diag_sched(req, comp);
+		return handle_diag_sched(req, comp, payload_len);
 	case SDK_OP_DIAG_MEMORY:
 		return handle_diag_memory(req, comp);
 	case SDK_OP_APP_QUERY:

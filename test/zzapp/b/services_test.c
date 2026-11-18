@@ -1886,9 +1886,162 @@ static void test_audio_polls_hold_record_lifetime(void)
 	expect_held_off("core 0 audio poll left its record unprotected", 0U);
 }
 
+static uint16_t perf_request(uint32_t action, uint32_t flags, uint8_t *reply)
+{
+	uint8_t req[ZZ9K_APP_PERF_REQUEST_BYTES];
+	uint16_t len = 0U;
+	uint16_t status;
+	unsigned core = service_context();
+
+	zzapp_put_be32(req, ZZ9K_APP_PERF_TAG);
+	zzapp_put_be32(req + 4U, action);
+	zzapp_put_be32(req + 8U, flags);
+	zzapp_services_test_set_core(0);
+	status = zzapp_services_perf_diag(req, sizeof(req), reply, &len);
+	zzapp_services_test_set_core((int)core);
+	EXPECT(len == (status == SDK_STATUS_OK ? ZZ9K_APP_PERF_REPLY_BYTES : 0U),
+	       "perf diagnostic reply length");
+	return status;
+}
+
+static uint32_t perf_clock_calls;
+static uint64_t perf_clock(void)
+{
+	perf_clock_calls++;
+	g_now += 7U;
+	return g_now;
+}
+
+static int (*perf_heap_alloc)(void *, uint32_t, uint32_t, uint32_t, uint32_t,
+			      void **, uint32_t *);
+static uint32_t perf_alloc_lo, perf_alloc_hi;
+static int perf_alloc(void *ctx, uint32_t bytes, uint32_t align,
+		       uint32_t lo, uint32_t hi, void **ptr, uint32_t *card)
+{
+	perf_alloc_lo = lo;
+	perf_alloc_hi = hi;
+	return perf_heap_alloc(ctx, bytes, align, lo, hi, ptr, card);
+}
+
+static void test_perf_diagnostic_controls(void)
+{
+	uint8_t reply[ZZ9K_APP_PERF_REPLY_BYTES];
+	uint8_t req[ZZ9K_APP_PERF_REQUEST_BYTES] = { 0 };
+	uint16_t len = 123U;
+	zzapp_rec_t *rec;
+	zzapp_xport_env_t env;
+	zzapp_xport_buf_t ring;
+	aar_audio audio;
+	uint32_t used;
+	unsigned mode;
+
+	svc_apps_reset();
+	zzapp_services_test_set_core(0);
+	EXPECT(zzapp_services_perf_diag(req, sizeof(req), reply, &len) ==
+	       SDK_STATUS_BAD_REQUEST && len == 0U, "perf rejects unknown tag");
+	zzapp_put_be32(req, ZZ9K_APP_PERF_TAG);
+	EXPECT(zzapp_services_perf_diag(req, sizeof(req) - 1U, reply, &len) ==
+	       SDK_STATUS_BAD_REQUEST && len == 0U, "perf rejects short request");
+	EXPECT(zzapp_services_perf_diag(req, sizeof(req) + 1U, reply, &len) ==
+	       SDK_STATUS_BAD_REQUEST && len == 0U, "perf rejects long request");
+	EXPECT(perf_request(3U, 0U, reply) == SDK_STATUS_BAD_REQUEST &&
+	       perf_request(ZZ9K_APP_PERF_SET, 4U, reply) == SDK_STATUS_BAD_REQUEST &&
+	       perf_request(ZZ9K_APP_PERF_QUERY, 1U, reply) == SDK_STATUS_BAD_REQUEST &&
+	       perf_request(ZZ9K_APP_PERF_RESET, 1U, reply) == SDK_STATUS_BAD_REQUEST,
+	       "perf rejects unknown action and invalid flag combinations");
+	EXPECT(perf_request(ZZ9K_APP_PERF_SET, ZZ9K_APP_PERF_LOCK_TIMING, reply) ==
+	       SDK_STATUS_OK, "perf enables lock timing with no held claims");
+	zzapp_services_test_set_time(perf_clock);
+	perf_clock_calls = 0U;
+	slot_state_lock_acquire();
+	slot_state_lock_release();
+	EXPECT(perf_clock_calls == 0U, "perf never times core 0");
+	zzapp_services_test_set_core(1);
+	slot_state_lock_acquire();
+	slot_state_lock_release();
+	EXPECT(perf_clock_calls == 2U, "perf times one core 1 acquisition");
+	EXPECT(perf_request(ZZ9K_APP_PERF_QUERY, 0U, reply) == SDK_STATUS_OK &&
+	       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_LOCK_CALLS) == 1U &&
+	       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_LOCK_US_HI) == 0U &&
+	       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_LOCK_US_LO) == 7U &&
+	       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_LOCK_MAX_US) == 7U,
+	       "perf query snapshots acquisition microseconds without resetting");
+	EXPECT(perf_request(ZZ9K_APP_PERF_RESET, 0U, reply) == SDK_STATUS_OK &&
+	       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_FLAGS) ==
+			ZZ9K_APP_PERF_LOCK_TIMING &&
+	       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_LOCK_CALLS) == 0U,
+	       "perf reset clears measurements but keeps mode");
+	EXPECT(perf_request(ZZ9K_APP_PERF_SET, 0U, reply) == SDK_STATUS_OK,
+	       "perf restores defaults");
+	perf_clock_calls = 0U;
+	slot_state_lock_acquire();
+	slot_state_lock_release();
+	EXPECT(perf_clock_calls == 0U, "disabled perf performs no timing reads");
+	zzapp_services_test_set_time(test_time);
+
+	/* A claim cannot race SET: every held state is tested under the
+	 * admission/release lock, including retired shells and quarantines. */
+	rec = world_claimed();
+	EXPECT(perf_request(ZZ9K_APP_PERF_SET, 1U, reply) == SDK_STATUS_BUSY,
+	       "perf refuses placement change while CLAIMED");
+	(void)zzapp_rec_set_state(rec, ZZAPP_REC_LIVE);
+	EXPECT(perf_request(ZZ9K_APP_PERF_SET, 1U, reply) == SDK_STATUS_BUSY,
+	       "perf refuses placement change while LIVE");
+	(void)zzapp_rec_set_state(rec, ZZAPP_REC_RETIRING);
+	EXPECT(perf_request(ZZ9K_APP_PERF_SET, 1U, reply) == SDK_STATUS_BUSY,
+	       "perf refuses placement change while RETIRING");
+	(void)zzapp_rec_set_state(rec, ZZAPP_REC_RECLAIMED);
+	EXPECT(perf_request(ZZ9K_APP_PERF_SET, 1U, reply) == SDK_STATUS_BUSY &&
+	       perf_request(ZZ9K_APP_PERF_QUERY, 0U, reply) == SDK_STATUS_OK &&
+	       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_FLAGS) == 0U &&
+	       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_CLAIMS) == 1U,
+	       "perf refuses held shell without changing mode; query stays available");
+
+	for (mode = 0U; mode < 2U; mode++) {
+		svc_apps_reset();
+		EXPECT(perf_request(ZZ9K_APP_PERF_SET, mode, reply) == SDK_STATUS_OK,
+		       "perf selects audio placement while idle");
+		world_loaded(0U);
+		rec = APP(0).rec;
+		env = *zzapp_xport_env();
+		perf_heap_alloc = env.alloc;
+		env.alloc = perf_alloc;
+		zzapp_xport_init(&env);
+		used = zzapp_xport_shared_used(rec);
+		EXPECT(zzapp_svc_audio_open(22050U, 2U, &audio) == AAR_OK,
+		       "perf placement opens platform audio through production allocator");
+		EXPECT(perf_alloc_lo == (mode ? SDK_MAILBOX_Z3_RESERVE_END : env.lo) &&
+		       perf_alloc_hi == (mode ? SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS :
+						 env.hi),
+		       "perf changes only the audio allocation interval");
+		EXPECT(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, &ring) == 1 &&
+		       zzapp_xport_shared_used(rec) == used + ring.bytes,
+		       "perf ring retains transport ownership and shared accounting");
+		EXPECT(perf_request(ZZ9K_APP_PERF_QUERY, 0U, reply) == SDK_STATUS_OK &&
+		       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_RING) ==
+			ring.token + env.token_adjust &&
+		       zzapp_get_be32(reply + ZZ9K_APP_PERF_R_RING_BYTES) == ring.bytes,
+		       "perf reports the actual allocation, not the requested address");
+		EXPECT(zzapp_svc_audio_close() == AAR_OK &&
+		       zzapp_xport_shared_used(rec) == used,
+		       "perf placement closes through normal transport release");
+		mock_heap.fail_after = 0;
+		EXPECT(zzapp_svc_audio_open(22050U, 2U, &audio) == AAR_E_NOMEM &&
+		       zzapp_xport_shared_used(rec) == used,
+		       "perf placement failure does not fall back or leak accounting");
+		mock_heap.fail_after = -1;
+	}
+	svc_apps_reset();
+	EXPECT(perf_request(ZZ9K_APP_PERF_SET, 0U, reply) == SDK_STATUS_OK,
+	       "perf test leaves default mode");
+}
+
 int main(void)
 {
 	svc_env_init(SVC_MAX_APPS, 0U, NULL);
+	/* The control test needs an empty arena, before lifecycle race tests
+	 * deliberately leave unbound shells that its SET must reject. */
+	test_perf_diagnostic_controls();
 	test_z2_query();
 	test_chunked_read();
 	test_events_drop_on_full();
