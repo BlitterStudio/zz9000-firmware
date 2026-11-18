@@ -4,6 +4,11 @@
 card. The app includes `zzapp.h`, defines `zz_main`, and links this library.
 The library provides `main()`, the `zz_*` wrappers, and a fully populated
 API 0.4 table. It does not link the ARM `crt0`, `syscalls.c`, or `gl_wrap.c`.
+It always links the host C library, so `ZZAPP_FREESTANDING` has no effect
+here: `zz_alloc` without `ZZ_ALLOC_HOST_VISIBLE` uses `malloc`, and an app
+that calls `malloc` runs on the host but fails to link for the card in
+freestanding mode. `freestanding_unit` compiles `zzapp.c` with the macro set
+to test the no-libc `zz_alloc` and the `mem*` routines.
 
 ## Build
 

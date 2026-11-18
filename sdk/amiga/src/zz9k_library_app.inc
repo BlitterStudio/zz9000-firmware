@@ -195,7 +195,7 @@ static int zz9k_lib_app_valid_locked(struct ZZ9KBase *base,
   if (!base || !handle || handle->slot >= ZZ9K_APP_SLOT_COUNT ||
       !zz9k_lib_app_handle_live_locked(base, handle) ||
       zz9k_app_slot_get(&base->apps, handle->slot) != handle ||
-      !handle->active || !handle->claimed) {
+      !handle->active || !handle->claimed || handle->dead) {
     return ZZ9K_STATUS_BAD_HANDLE;
   }
   if (handle->owner_task != FindTask(0)) {
@@ -326,7 +326,7 @@ static void zz9k_lib_app_service_handle_locked(ZZ9KAppHandle *handle)
   uint32_t event_type;
   ULONG pending;
 
-  if (!handle || !handle->active || !handle->claimed) {
+  if (!handle || handle->dead || !handle->active || !handle->claimed) {
     return;
   }
   Disable();
@@ -374,13 +374,8 @@ static void zz9k_lib_app_service_handle_locked(ZZ9KAppHandle *handle)
 
 static void zz9k_lib_app_service_locked(struct ZZ9KBase *base)
 {
-  uint32_t slot;
-
   if (!base) return;
-  for (slot = 0U; slot < ZZ9K_APP_SLOT_COUNT; slot++) {
-    zz9k_lib_app_service_handle_locked(
-        (ZZ9KAppHandle *)zz9k_app_slot_get(&base->apps, slot));
-  }
+  zz9k_lib_reap_service(base, ZZ9K_APP_SLOT_COUNT);
 }
 
 static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
@@ -414,6 +409,7 @@ static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
     return ZZ9K_STATUS_NO_MEMORY;
   }
   handle->owner_task = FindTask(0);
+  zz9k_lib_task_stamp_read(handle->owner_task, &handle->owner);
   handle->notify_port = notify_port;
   handle->signal_mask = 1UL << signal_bit;
   handle->signal_bit = signal_bit;
@@ -547,6 +543,10 @@ static int zz9k_lib_app_load_begin_locked(struct ZZ9KBase *base,
   if (status == ZZ9K_STATUS_OK) {
     status = zz9k_lib_app_select_request(handle, &request);
   }
+  if (status == ZZ9K_STATUS_OK && handle->slot_addressed) {
+    status = zz9k_app_request_limits(&request, handle->max_mib,
+                                     handle->host_visible_mib);
+  }
   if (status == ZZ9K_STATUS_OK) {
     status = zz9k_lib_app_call_locked(base, &request, &reply);
   }
@@ -559,6 +559,7 @@ static int zz9k_lib_app_load_begin_locked(struct ZZ9KBase *base,
     }
     if (!handle->slot_addressed) handle->generation = generation;
     handle->started = 0U;
+    handle->load_begun = 1U;
   }
   return status;
 }
@@ -847,9 +848,13 @@ static void zz9k_lib_app_destroy_locked(struct ZZ9KBase *base,
     (void)zz9k_lib_app_call_locked(base, &request, &reply);
   }
   zz9k_lib_app_unpublish_locked(base, handle);
-  zz9k_lib_app_event_remove(base, handle);
+  /* A dead handle's owner is gone: its notify port and signal are not ours
+   * to touch. */
+  if (!handle->dead) zz9k_lib_app_event_remove(base, handle);
   zz9k_lib_app_cache_release(handle);
-  if (handle->owner_task == FindTask(0)) {
+  if (handle->dead) {
+    FreeVec(handle);
+  } else if (handle->owner_task == FindTask(0)) {
     if (handle->signal_bit >= 0) FreeSignal(handle->signal_bit);
     FreeVec(handle);
   }
@@ -860,10 +865,15 @@ static void zz9k_lib_app_destroy_owner_locked(struct ZZ9KBase *base,
 {
   ZZ9KAppHandle *handle;
   ZZ9KAppHandle *next;
+  ZZ9KTaskStamp now;
 
+  zz9k_lib_task_stamp_read(owner, &now);
   for (handle = base ? base->app_handles : 0; handle; handle = next) {
     next = handle->next;
-    if (handle->owner_task == owner) {
+    /* Exec can reuse the address of a task that died with a handle open;
+     * that handle is not this task's to close. The service task reaps it. */
+    if (handle->owner_task == owner &&
+        zz9k_task_stamp_equal(&handle->owner, &now)) {
       zz9k_lib_app_destroy_locked(base, handle);
     }
   }
@@ -873,11 +883,22 @@ static void zz9k_lib_app_close(REG(a6, struct ZZ9KBase *base),
                                REG(a0, ZZ9KAppHandle *handle))
 {
   if (zz9k_lib_enter(base) != ZZ9K_STATUS_OK) return;
-  if (zz9k_lib_app_handle_live_locked(base, handle) &&
+  if (zz9k_lib_app_handle_live_locked(base, handle) && !handle->dead &&
       handle->owner_task == FindTask(0)) {
     zz9k_lib_app_destroy_locked(base, handle);
   }
   zz9k_lib_leave(base);
+}
+
+static ZZ9KAppHandle *zz9k_lib_graveyard_take(struct ZZ9KBase *base)
+{
+  ZZ9KAppHandle *handle = base ? base->app_graveyard : 0;
+
+  if (handle) {
+    base->app_graveyard = handle->next;
+    handle->next = 0;
+  }
+  return handle;
 }
 
 static void zz9k_lib_app_close_all_locked(struct ZZ9KBase *base)
@@ -889,4 +910,90 @@ static void zz9k_lib_app_close_all_locked(struct ZZ9KBase *base)
     next = handle->next;
     zz9k_lib_app_destroy_locked(base, handle);
   }
+  /* Gone owners' handles kept for a posted event: no port can reach them
+   * once every opener has closed. */
+  zz9k_lib_reap_drain_graveyard(base);
+}
+
+/* Releases a handle whose owner is gone, from the service task with the
+ * transport lock held. The generation is stopped as ZZ9KAppClose would, and
+ * the slot and mapping state are released; the caller then frees the record,
+ * or keeps it when its posted event may still be on a port. The signal bit
+ * is not freed, since it belonged to the dead task, and the notify port is
+ * not touched, since it may be gone with that task. The VBlank lease
+ * stopped renewing when the handle was marked dead. */
+static void zz9k_lib_app_reap_handle_locked(struct ZZ9KBase *base,
+                                             ZZ9KAppHandle *handle)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+
+  if (!base || !handle || !handle->dead ||
+      !zz9k_lib_app_handle_live_locked(base, handle)) {
+    return;
+  }
+  if (base->core.ctx && handle->claimed &&
+      zz9k_lib_app_generation_matches(handle) &&
+      zz9k_lib_app_stop_request(handle, &request) == ZZ9K_STATUS_OK) {
+    (void)zz9k_lib_app_call_locked(base, &request, &reply);
+  }
+  zz9k_lib_app_unpublish_locked(base, handle);
+  zz9k_lib_app_cache_release(handle);
+}
+
+/* Releases the client id of an opener whose task is gone, as the final
+ * CloseLibrary would, but without lowering the library's open count: that
+ * count was raised by the dead task and no CloseLibrary will lower it, and
+ * lowering it here could reach zero while this task still runs. Returns 1
+ * once the record is gone, 0 while the firmware still answers BUSY. */
+static int zz9k_lib_opener_reap_locked(struct ZZ9KBase *base,
+                                        struct ZZ9KOpener *opener)
+{
+  struct ZZ9KOpener **link;
+
+  if (base->core.ctx) {
+    ZZ9KRequest request;
+    ZZ9KMailboxEntry reply;
+    int status;
+
+    memset(&request, 0, sizeof(request));
+    request.entry.opcode = ZZ9K_OP_CLIENT_RELEASE;
+    request.entry.flags = ZZ9K_ENTRY_INLINE_PAYLOAD;
+    (void)ZZ9KSetClientId(&base->core, opener->lease.client_id);
+    status = zz9k_lib_app_call_locked(base, &request, &reply);
+    (void)ZZ9KSetClientId(&base->core, 0U);
+    /* The firmware still has worker activity for this client; the service
+     * task offers the release again, and the last close retries it. */
+    if (status == ZZ9K_STATUS_BUSY) return 0;
+  }
+  for (link = &base->openers; *link; link = &(*link)->next) {
+    if (*link == opener) {
+      *link = opener->next;
+      FreeVec(opener);
+      return 1;
+    }
+  }
+  return 1;
+}
+
+static int zz9k_lib_app_set_limits(REG(a6, struct ZZ9KBase *base),
+                                   REG(a0, ZZ9KAppHandle *handle),
+                                   REG(d0, uint32_t max_mib),
+                                   REG(d1, uint32_t host_visible_mib))
+{
+  int status = zz9k_lib_enter(base);
+
+  if (status != ZZ9K_STATUS_OK) return status;
+  status = zz9k_lib_app_valid_locked(base, handle);
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_app_limits_check(max_mib, host_visible_mib,
+                                   handle->slot_addressed,
+                                   handle->load_begun);
+  }
+  if (status == ZZ9K_STATUS_OK) {
+    handle->max_mib = max_mib;
+    handle->host_visible_mib = host_visible_mib;
+  }
+  zz9k_lib_leave(base);
+  return status;
 }

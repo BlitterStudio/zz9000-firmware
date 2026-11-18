@@ -249,6 +249,25 @@ static void test_alias_rejects_larger_than_private_region(void)
 	zzapp_as_destroy(&as);
 }
 
+/* A launcher can raise an app's host-visible limit past 16 MiB, so a single
+ * block that large must map as one alias. */
+static void test_alias_maps_a_34_mib_block(void)
+{
+	zzapp_as_t as;
+	const uint32_t bytes = 34U << 20;
+	uint32_t va;
+
+	CHECK(zzapp_as_create(&as, 0U, 10U) == 0);
+	CHECK(zzapp_as_alias_map(&as, 0x03400000U, bytes, 1, &va) == 0);
+	CHECK(va == ZZAPP_AS_ALIAS_BASE);
+	CHECK(zzapp_as_alias_phys(&as, va) == 0x03400000U);
+	CHECK(zzapp_as_alias_phys(&as, va + bytes - 4096U) ==
+	      0x03400000U + bytes - 4096U);
+	CHECK(zzapp_as_alias_unmap(&as, va, bytes) == 0);
+	CHECK(zzapp_as_alias_phys(&as, va) == 0U);
+	zzapp_as_destroy(&as);
+}
+
 static void test_alias_honours_virtual_alignment(void)
 {
 	zzapp_as_t as;
@@ -678,6 +697,7 @@ int main(void)
 	test_alias_maps_only_in_private_region();
 	test_alias_l2_exhaustion_is_atomic();
 	test_alias_rejects_larger_than_private_region();
+	test_alias_maps_a_34_mib_block();
 	test_alias_honours_virtual_alignment();
 	test_template_l2_published_after_clean();
 	test_destroy_on_core0_keeps_bsp_table();

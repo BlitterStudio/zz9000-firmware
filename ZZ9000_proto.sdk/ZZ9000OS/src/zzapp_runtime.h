@@ -195,11 +195,18 @@ uint32_t zzapp_services_current_slot(void);
 void zzapp_services_select_slot(uint32_t slot);
 uint32_t zzapp_services_state(void);
 uint32_t zzapp_services_memory_limit(void);
+/* Per-app host-visible limit in bytes the launcher requested at LOAD_BEGIN;
+ * zero selects ZZAPP_HOST_VISIBLE_DEFAULT_BYTES. */
+uint32_t zzapp_services_host_visible_limit(uint32_t slot);
+/* Largest host-visible limit the card can honour: the surface heap, capped
+ * by one app's alias window. */
+uint32_t zzapp_host_visible_capacity(void);
 int zzapp_services_wait_registered(uint32_t slot);
 int zzapp_services_start_entered(uint32_t generation);
 void zzapp_services_loader_aborted(void);
 void zzapp_services_set_idle_for(uint32_t generation);
 void zzapp_services_on_reset(void);
+void zzapp_services_retire_idle_window(void);
 void zzapp_services_on_app_end(void);
 void zzapp_services_cancel_start(int status);
 void zzapp_services_on_launch(void);
@@ -257,6 +264,7 @@ uint32_t zzapp_test_loader_work_last_bytes(void);
 uint32_t zzapp_test_loader_mapping_calls(void);
 int zzapp_test_cold_restarts(void);
 uint32_t zzapp_test_exit_code(void);
+uint32_t zzapp_test_exit_state(uint32_t slot);
 void zzapp_test_set_wait_registered(uint32_t slot, int registered);
 #endif
 

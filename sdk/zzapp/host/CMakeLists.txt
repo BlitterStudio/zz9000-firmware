@@ -98,6 +98,8 @@ set(ZZAPP_TEMPLATE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../templates)
 zzapp_host_executable(hello SOURCES ${ZZAPP_TEMPLATE_DIR}/hello.c)
 zzapp_host_executable(console SOURCES ${ZZAPP_TEMPLATE_DIR}/console.c)
 zzapp_host_executable(filter SOURCES ${ZZAPP_TEMPLATE_DIR}/filter.c)
+zzapp_host_executable(freestanding SOURCES ${ZZAPP_TEMPLATE_DIR}/freestanding.c)
+zzapp_host_executable(ringflood SOURCES ${ZZAPP_TEMPLATE_DIR}/ringflood.c)
 zzapp_host_executable(echo SOURCES ${ZZAPP_TEMPLATE_DIR}/echo.c)
 zzapp_host_executable(pixels SOURCES ${ZZAPP_TEMPLATE_DIR}/pixels.c)
 zzapp_host_executable(tone SOURCES ${ZZAPP_TEMPLATE_DIR}/tone.c)
@@ -124,11 +126,27 @@ target_include_directories(sleep_unit PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
+# Compiles zzapp.c with ZZAPP_FREESTANDING and freestanding.c by inclusion.
+add_executable(freestanding_unit tests/freestanding_unit.c)
+target_include_directories(freestanding_unit PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+# freestanding.c as its own object with the mem* names prefixed, so the test
+# can define a strong zzfs_memcpy over the weak one.
+add_executable(freestanding_memmove_unit
+  tests/freestanding_memmove_unit.c
+  ../src/freestanding.c)
+set_source_files_properties(../src/freestanding.c PROPERTIES
+  COMPILE_DEFINITIONS "memcpy=zzfs_memcpy;memmove=zzfs_memmove;memset=zzfs_memset;memcmp=zzfs_memcmp"
+  COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns")
 target_link_libraries(sleep_unit PRIVATE ${ZZAPP_SDL2})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(files_unit PRIVATE -Wall -Wextra)
   target_compile_options(memory_unit PRIVATE -Wall -Wextra)
   target_compile_options(sleep_unit PRIVATE -Wall -Wextra)
+  target_compile_options(freestanding_unit PRIVATE -Wall -Wextra)
 endif()
 
 include(CTest)
@@ -149,6 +167,8 @@ if(BUILD_TESTING)
   zzapp_host_test(hello)
   zzapp_host_test(console)
   zzapp_host_test(filter)
+  zzapp_host_test(freestanding)
+  zzapp_host_test(ringflood)
   zzapp_host_test(echo)
   zzapp_host_test(pixels)
   zzapp_host_test(tone)
@@ -190,6 +210,8 @@ if(BUILD_TESTING)
   add_test(NAME files_unit COMMAND files_unit)
   add_test(NAME memory_unit COMMAND memory_unit)
   add_test(NAME sleep_unit COMMAND sleep_unit)
+  add_test(NAME freestanding_unit COMMAND freestanding_unit)
+  add_test(NAME freestanding_memmove_unit COMMAND freestanding_memmove_unit)
   add_test(
     NAME keys
     COMMAND ${Python3_EXECUTABLE} ${ZZAPP_CHECK} keys $<TARGET_FILE:hello>

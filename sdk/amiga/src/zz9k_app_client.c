@@ -138,6 +138,38 @@ int zz9k_app_request_start(ZZ9KRequest *request, uint32_t argc)
   return ZZ9K_STATUS_OK;
 }
 
+int zz9k_app_request_limits(ZZ9KRequest *request, uint32_t max_mib,
+                            uint32_t host_visible_mib)
+{
+  if (!request || request->entry.opcode != ZZ9K_APP_OP_LOAD_BEGIN ||
+      request->entry.payload_len != ZZ9K_APP_MAILBOX_PAYLOAD_BYTES ||
+      max_mib > ZZ9K_APP_LIMIT_MIB_MAX ||
+      host_visible_mib > ZZ9K_APP_LIMIT_MIB_MAX) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  zz9k_put_be32(request->entry.payload.inline_data +
+                ZZ9K_APP_LOAD_MEM_LIMIT_MIB, max_mib);
+  zz9k_put_be32(request->entry.payload.inline_data +
+                ZZ9K_APP_LOAD_HOST_VISIBLE_MIB, host_visible_mib);
+  return ZZ9K_STATUS_OK;
+}
+
+int zz9k_app_limits_check(uint32_t max_mib, uint32_t host_visible_mib,
+                          int slot_addressed, int load_begun)
+{
+  if (load_begun) {
+    return ZZ9K_STATUS_BUSY;
+  }
+  if (max_mib > ZZ9K_APP_LIMIT_MIB_MAX ||
+      host_visible_mib > ZZ9K_APP_LIMIT_MIB_MAX) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  if ((max_mib != 0U || host_visible_mib != 0U) && !slot_addressed) {
+    return ZZ9K_STATUS_UNSUPPORTED;
+  }
+  return ZZ9K_STATUS_OK;
+}
+
 int zz9k_app_parse_status(const ZZ9KMailboxEntry *reply,
                           ZZ9KAppStatusInfo *status)
 {

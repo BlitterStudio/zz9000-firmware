@@ -84,8 +84,10 @@ mark, it appends one low-memory record to every live slot's launcher log ring;
 another record is written only after free memory rises above the high-water
 mark and falls again. A launcher may cap its own app.
 `ZZ_ALLOC_HOST_VISIBLE` remains a separately accounted shared card allocation,
-up to 16 MiB per app, for Amiga-visible buffers rather than private working
-memory.
+up to 16 MiB per app by default, for Amiga-visible buffers rather than private
+working memory. The launcher can change that cap at load (`HOSTMEM` in ZZRun,
+`ZZ9KAppSetLimits` in the library); it is a cap, not a reservation, so an
+allocation can still fail below it while the card's shared heap is busy.
 
 ## Sharing pixels with AmigaOS
 
@@ -105,7 +107,8 @@ The CPU can still reorder plain stores. Put a barrier
 (`__sync_synchronize()`) between filling the data and updating the flag or
 index the 68k polls. The allocation is separate from the private arena and
 display surfaces. The total of these allocations is limited to 16 MiB per
-app; use `zz_mem_info` to inspect the used and allowed amounts, and release
+app by default, or to the cap the launcher set at load; use `zz_mem_info` to
+inspect the used and allowed amounts, and release
 each block with `zz_free` when the 68k side no longer needs it.
 
 ## Isolation
@@ -238,6 +241,58 @@ position-independent little-endian hard-float ELF for Cortex-A9/NEON, no
 Flags in the note: bit 0 display, bit 1 audio, bit 2 GL. Request only what
 the app uses.
 
+## Freestanding apps
+
+An app can leave newlib out. Build it with `ZZAPP_FREESTANDING=1` in the make
+include, with `FREESTANDING` on `zzapp_add_executable`, or configure CMake
+with `-DZZAPP_FREESTANDING=ON` to make every target freestanding. The image
+links `crt0`, the app, `libzzapp` and `libgcc`. The PIC sysroot is not needed
+for make or for `-DZZAPP_FREESTANDING=ON`. Without that option the CMake
+toolchain file still requires `ZZAPP_PIC_SYSROOT`, so a project that mixes a
+`FREESTANDING` target with normal targets sets it for the normal ones. The macro
+`ZZAPP_FREESTANDING` is defined for the app's sources, so one file can build
+in both modes. The normal mode is unchanged.
+
+What differs:
+
+- `crt0` passes the value `zz_main` returns to `zz_exit`. Nothing flushes
+  stdio or runs `atexit` handlers. Neither mode calls `__libc_init_array`, so
+  a `constructor` function never runs.
+- The link has no `-lc` and no `-lm`, and `--no-undefined` stays. A call to
+  `malloc`, `printf`, `strlen` or `sinf` fails at link time. Integer division
+  comes from `libgcc` (`__aeabi_uidiv` and friends), because the Cortex-A9
+  has no divide instruction.
+- `libzzapp` leaves out `syscalls.c`: there is no `_sbrk`, `_write` or
+  `_exit`. Write output with `zz_log` or `zz_console_write`.
+- `zz_alloc` without `ZZ_ALLOC_HOST_VISIBLE` returns NULL. The app brings its
+  own allocator over the heap. `zz_heap_range` reports the committed span,
+  `zz_heap_grow` commits whole MiB at its end and returns the old break, and
+  `zz_heap_shrink` gives them back. Host-visible blocks work as
+  before. `zz_free` releases only host-visible blocks and ignores any other
+  pointer.
+- `libzzapp` carries weak `memcpy`, `memmove`, `memset` and `memcmp`
+  (`sdk/zzapp/src/freestanding.c`). GCC calls them for struct copies and zero
+  initialisers even when the source never names them, and `libgcc` does not
+  provide them. They move whole words only when every address is 4-byte
+  aligned and do not use NEON. `memmove` does its own copying and never calls
+  `memcpy`, so replacing `memcpy` with a backward copy is safe. Define your
+  own strong versions to replace them. No other `<string.h>` function exists
+  in this mode.
+
+After linking, the make include and the CMake function run
+`zzapp-check --no-libc` on the link map. It fails when any archive other than
+`libzzapp.a` and `libgcc.a` appears, for example when `LDLIBS=-lc` brings
+newlib back. `make -C sdk/zzapp check` also links a fixture that does this on
+purpose and expects the failure. `sdk/zzapp/templates/freestanding.c` is a
+worked app with a bump allocator over the heap, a hand-written hash and its
+own number formatting. The SDL host runner links the host C library and
+ignores the mode, so an app that calls `malloc` runs there and fails to link
+for the card. The make include keeps each mode's objects and archive in
+its own directory under `BUILD` (`hosted/` and `freestanding/`), so switching
+`ZZAPP_FREESTANDING` in one build directory never reuses the other mode's
+`crt0.o` or archive members; `make check` builds normal, freestanding and
+normal again and compares the last image with a clean build.
+
 ## Running on a PC
 
 The runner implements the API 0.4 table with host semantics, including plain
@@ -248,20 +303,24 @@ differences from the card are in `sdk/zzapp/host/README.md`.
 
 ## Running with ZZRun
 
-ZZRun is a Shell command and a Workbench tool. On firmware with slot support,
-each instance claims its own slot; an unchanged API 0.2 launcher still uses
-slot 0. Zorro III only. It needs `zz9k.library` and, for a display, Picasso96.
+ZZRun is a Shell command and a Workbench tool. Each instance claims its own
+slot, so up to four apps run at once. It needs firmware that advertises the
+slots capability; the slot-0 request forms stay in the firmware for an
+unchanged API 0.2 launcher. Zorro III only. It needs `zz9k.library` and, for
+a display, Picasso96.
 
 Shell:
 
 ```text
 Stack 32768
-ZZRun RAM:app.elf [AUDIO=AHI] [args]
+ZZRun RAM:app.elf [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [AUDIO=AHI] [args]
 ```
 
 `argv[0]` is the ELF file name. Further tokens are the app's arguments, at
 most 15 of them. `AUDIO=AHI` before those arguments selects AHI. The default
-route is the card audio fabric.
+route is the card audio fabric. `MAXMEM` caps the app's private memory and
+`HOSTMEM` sets its host-visible limit (16 MiB by default); the ZZRun manual
+describes both.
 
 Workbench: the project icon's default tool is ZZRun (`DEFAULT_TOOL=ZZRun`).
 Dragging an ELF onto the ZZRun icon overrides ToolType `APP`.
@@ -274,6 +333,8 @@ Dragging an ELF onto the ZZRun icon overrides ToolType `APP`.
 | `MODE` | Optional Picasso96 DisplayID, decimal, `$` hex, or `0x` hex. The app still chooses width, height, and format |
 | `ARGS` | Space-separated arguments. Quoting is not parsed |
 | `AUDIO=AHI` | PCM to AHI instead of the card fabric |
+| `MAXMEM` | Private memory cap in MiB |
+| `HOSTMEM` | Host-visible memory limit in MiB, 1 to 4095; the card grants at most 62 MiB |
 | `JOYPORT0=1` | Also read joystick port 0. Port 1 is read while the display window is active |
 
 ZZRun reads `JOYxDAT` and the CIA-A fire bits. It does not drive the port
@@ -289,20 +350,29 @@ and recovery intervals.
 
 ## zz9k.library client
 
-`zz9k.library` version 2, revision 39 exposes the same runtime without
+`zz9k.library` version 2, revision 40 exposes the same runtime without
 ZZRun. The ARM-app client first appeared in revision 35; programs that use it
 require at least `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT`. Include
 `proto/zz9k.h`. The calls are `ZZ9KAppOpen`, `ZZ9KAppLoadFile`,
 `ZZ9KAppLoadMemory`, `ZZ9KAppStart`, `ZZ9KAppStop`, `ZZ9KAppStatus`,
-`ZZ9KAppSendMessage`, `ZZ9KAppGetMessage`, `ZZ9KAppMessageSignal`, and
-`ZZ9KAppClose`.
+`ZZ9KAppSendMessage`, `ZZ9KAppGetMessage`, `ZZ9KAppMessageSignal`,
+`ZZ9KAppClose`, and, from revision 40, `ZZ9KAppSetLimits`.
 
 `ZZ9KAppOpen` creates a handle owned by the calling task. Do not use or close
 that handle from another task. New firmware gives a handle its claimed slot
-and generation; operations affect only that pair. An unchanged library uses
-the legacy slot-0 request shape. `ZZ9KAppLoadMemory` accepts at most 16 MiB.
-The library's VBlank server renews each open handle's lease. A task that dies
-holding a handle is reclaimed by lease expiry or Amiga reset.
+and generation; operations affect only that pair. On firmware without slots
+the library uses the legacy slot-0 request shape. `ZZ9KAppLoadMemory` accepts
+at most 16 MiB. The library's VBlank server renews each open handle's lease.
+From revision 40 a task that dies holding a handle loses its slot within about
+a second, because the library notices the task is gone; before that, lease
+expiry or Amiga reset reclaimed it. A shell command that ends without
+`ZZ9KAppClose` keeps its slot until the shell process ends, and a task that
+renames itself after `ZZ9KAppOpen` loses it. Details are in
+[zz9k-library.md](zz9k-library.md#arm-app-client).
+
+`ZZ9KAppSetLimits(handle, max_mib, host_visible_mib)` sets the launcher memory
+cap and the app's host-visible limit before the load, as ZZRun's `MAXMEM` and
+`HOSTMEM` do. Zero keeps the defaults: no launcher cap and 16 MiB host-visible.
 
 `ZZ9KAppStart` passes `argv` unchanged. Put the program name in `argv[0]`
 if the app expects the ZZRun convention. Messages are 32 opaque bytes.
@@ -311,6 +381,19 @@ if the app expects the ZZRun convention. Messages are 32 opaque bytes.
 completion, or fault). Before `ZZ9KAppClose`, drain the notify port and call
 `ZZ9KAppGetMessage` until it returns `ZZ9K_STATUS_BUSY`. The message signal
 is also available without a port.
+
+`zz9k-app-ringtest` and `templates/ringflood.c` are the ring conformance
+test. The app starts quiet and answers pings; on request it floods
+sequence-numbered, pattern-checked messages and a counter word in a host-visible
+block, then goes quiet again. The tool runs an idle phase, the flood for a
+number of seconds, and an idle phase again, and reads the counter through a
+cache-inhibited mapping. It reports gaps, wrong bytes, backwards or lagging
+counter reads and ping round trips, and ends in `PASS` or `FAIL`. Round trips
+are kept per phase. The idle figure times the ring and the app's wake-up and
+takes a limit (`MAXLAT`). The flood figure is queueing behind a full ring and
+has none. The tool polls the ring instead of waiting on the library signal,
+which a VBlank server raises, so the signal path can add up to one frame
+(20 ms at 50 Hz) to what it measures. See step 12 of `zz9k-release-smoke.md`.
 
 The app side is `zz_msg_poll`, `zz_msg_send`, and `zz_msg_wait`. A full
 app-to-host ring returns `ZZ_EBUSY`. Poll does not block. `zz_msg_wait`
@@ -391,6 +474,80 @@ cannot open 22050 stereo, the open fails.
 SHA-256, decompress, and image or audio decode run on core 1 inside the
 call. They are the right tool for a codec you do not want to port. They
 are not a second core.
+
+## Bit-identical maths
+
+A lockstep simulation or a replay needs the same floating-point results on
+every run. This section states what the card does and which compiler flags
+keep an app inside it. `sdk/zzapp/tests/fp_codegen_test.py` (part of
+`make -C sdk/zzapp check`, arm-none-eabi-gcc 15.3.1) checks the code
+generation claims, except two that come from the GCC documentation: that
+`__FLT_EVAL_METHOD__` is 0 and that fast-math reassociates reductions. The
+entry value and the denormal behaviour can be checked on the card with
+`sdk/zzapp/templates/fpenv.c`.
+
+Entry state. The kernel clears a new thread's context
+(`zzapp_kernel_prepare_app` in `zzapp_kernel.c`, user mode CPSR `0x10`), and
+the first dispatch loads FPSCR and D0 to D31 from it. FPSCR is therefore 0
+when `zz_main` starts: round to nearest, flush-to-zero off, default NaN off,
+no trapped exceptions, cumulative flags clear. `ZZAPP_ENTRY_FPSCR` in
+`zzapp_runtime.h` names that value. Nothing programs it separately; the zero
+comes from the cleared frame. Core 1 enables VFP and NEON for user mode once
+at start (`core1_loop` in `core2.c` sets the coprocessor access bits and
+`FPEXC.EN`).
+
+Per-thread state. Every switch into or out of an app (tick, doorbell, voluntary
+yield or sleep, abort, FIQ) goes through `save_frame` and `restore_frame` in
+`zzapp_kernel_asm.S`. They push and pop D0 to D31 and FPSCR with the integer
+registers. An app that changes its rounding mode keeps the change across
+preemption, and no other app sees it. An API call does not reset FPSCR, so
+firmware code running inside a call sees yours; restore the entry value
+before a call if you changed it.
+
+NEON and VFP differ. Advanced SIMD floating-point arithmetic always flushes
+denormal inputs and results to zero and rounds to nearest, whatever FPSCR
+holds (Arm ARM DDI 0406C, "Flush-to-zero"; NEON Programmer's Guide DEN0018A,
+"Flush-to-zero mode"). Scalar VFP code follows FPSCR, which is 0 on entry, so
+it keeps denormals. The same expression on an S register and on a Q register
+gives different bits for denormal data. `fpenv.c` shows the two results on
+the card; the Arm documents above are the source for the NEON behaviour, and
+the card has not been measured here.
+
+Fused multiply-add. The Cortex-A9 implements VFPv3, which has no fused
+multiply-add (VFMA arrived with VFPv4). With the SDK's `-mfpu=neon`:
+
+- GCC defines no `__ARM_FEATURE_FMA`, rejects `vfmaq_f32` ("target specific
+  option mismatch") and turns `__builtin_fmaf` into a call to `fmaf` in
+  libm. `-mfpu=neon-vfpv4` would emit `vfma`, which this CPU cannot run.
+- `a * b + c` compiles to `vmla.f32` (S or D registers) and the intrinsic
+  `vmlaq_f32` to `vmla.f32` on Q registers. VMLA is a multiply followed by an
+  add, and the Arm ARM ("Floating-point exceptions") describes it as two
+  operations, so the product is rounded before the add and the result equals
+  a separate `vmul` and `vadd`. The generated code is identical for
+  `-ffp-contract=off` and `fast`.
+
+Flags. The SDK's flags already keep float code on VFP and IEEE-exact. Keep it
+that way:
+
+- Do not use `-ffast-math` or `-funsafe-math-optimizations`. With them,
+  `-O3` moves float loops onto Q registers (flush-to-zero) and reassociates
+  reductions such as a dot product. Without them the same loops stay scalar
+  VFP, in source order.
+- Add `-ffp-contract=off` (`CFLAGS := -ffp-contract=off` before the make
+  include). It changes nothing on this target. It keeps a build for the PC
+  from fusing `a * b + c`, which GCC does by default on hardware with FMA.
+- `__FLT_EVAL_METHOD__` is 0, so no operation is evaluated at a wider type.
+- GCC folds a call such as `sinf(0.5f)` with a constant argument at build
+  time. Compile with `-fno-builtin` (or `-fno-builtin-sinf`) when the result
+  must be what the libm in the image computes.
+- libm is linked statically from the PIC newlib sysroot, so results match
+  for the same sysroot. Pin the SDK image tag, because another newlib
+  version can change the last bit of a function such as `sinf`. A freestanding
+  app has no libm and brings its own functions.
+
+The SDL host runner is a native build. Use it for logic. Its denormal
+handling, fusing and libm differ from the card, so compare bits only on
+the card.
 
 ## Porting a POSIX command-line tool
 

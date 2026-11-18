@@ -453,6 +453,9 @@ int      zz_should_stop(void);
 uint64_t zz_time_us(void);
 void     zz_sleep_us(uint32_t us);
 
+/* Without ZZ_ALLOC_HOST_VISIBLE this is newlib malloc. A ZZAPP_FREESTANDING
+ * build has no malloc and returns NULL; the app allocates from zz_heap_range
+ * and zz_heap_grow. */
 void    *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags);
 
 /* Returns the board-relative address at which an Amiga Zorro III client can

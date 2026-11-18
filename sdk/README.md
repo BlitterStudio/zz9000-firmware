@@ -25,7 +25,9 @@ Research GmbH. SDK issues and fork-specific discussion belong here.
 ARM apps on core 1 use [the developer guide](docs/zzapp-developer-guide.md)
 and [the API reference](docs/zzapp-api.md). The Amiga package includes
 `zz9k-app-echo-test`, which loads an `echo.elf` built from the ARM app
-template and verifies its 32-byte message round trip. The
+template and verifies its 32-byte message round trip, and
+`zz9k-app-ringtest`, which floods the message ring from `ringflood.elf` and
+checks every message, the ping latency and a counter word. The
 [License](#license) section lists which files are MIT and which are
 GPL-3.0-or-later.
 
@@ -88,7 +90,8 @@ The generated `build/package/amigaos3` tree contains:
 
 - `Libs/zz9k.library` and `Libs/mpega.library`
 - `C/` command-line tools, including `zz9k-services`, `zz9k-jpeg`,
-  `zz9k-png`, `zz9k-view`, `zz9k-app-echo-test`, and the diagnostics
+  `zz9k-png`, `zz9k-view`, `zz9k-app-echo-test`, `zz9k-app-ringtest`, and the
+  diagnostics
 - `C/ZZPlay`, the media player, with its service modules in
   `C/Providers/` (`radio.zzprov` for internet radio, `plex.zzprov` for Plex
   Media Server)

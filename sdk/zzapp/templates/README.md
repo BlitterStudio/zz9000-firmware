@@ -4,8 +4,9 @@ Templates are MIT-licensed `zz_main` programs. Each one calls `ZZAPP_NOTE()`
 from `zzapp_note.h`, so the image carries the `.zzapp` note without a separate
 assembler file. Do not include `zzapp_proto.h`. The public API is `zzapp.h`.
 
-Apps link against PIC newlib from `build_pic_newlib.sh`. Stock newlib is not
-PIC and fails `zzapp-check`. Set `ZZAPP_PIC_SYSROOT` to that sysroot and
+Apps link against PIC newlib from `build_pic_newlib.sh`, except freestanding
+apps (see "Freestanding" below). Stock newlib is not PIC and fails
+`zzapp-check`. Set `ZZAPP_PIC_SYSROOT` to that sysroot and
 `ZZAPP_SDK` to this `sdk/zzapp` directory (or `/opt/zzapp-sdk` in the image).
 
 ## Make
@@ -29,6 +30,9 @@ make -C sdk/zzapp check
 
 ELFs land in `sdk/zzapp/build/<name>.elf`.
 
+`ZZAPP_FREESTANDING=1` links without newlib; see "Freestanding" below and
+[the developer guide](../../docs/zzapp-developer-guide.md#freestanding-apps).
+
 ## CMake
 
 ```text
@@ -36,8 +40,9 @@ cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=$ZZAPP_SDK/cmake/zzapp-toolchain.cmak
 cmake --build build
 ```
 
-`zzapp_add_executable(name SOURCES ...)` in `cmake/zzapp.cmake` links the same
-way and runs `zzapp-check` after the link. `cmake/example` builds `hello`.
+`zzapp_add_executable(name [FREESTANDING] SOURCES ...)` in `cmake/zzapp.cmake`
+links the same way and runs `zzapp-check` after the link. `cmake/example`
+builds `hello` and `freestanding`.
 
 ## Docker
 
@@ -64,6 +69,20 @@ little-endian ARM PIE, a relocation other than `R_ARM_RELATIVE`, `PT_INTERP`,
 `DT_NEEDED`, a writable and executable segment, or a ZZAPP note that is
 missing, has the wrong magic, an abi major other than 0, unknown flag bits,
 or a stack other than 0 or 64 KiB–1 MiB aligned to 8.
+
+`zzapp-check --no-libc app.map` checks the link map of a freestanding build and
+fails if any archive other than `libzzapp.a` and `libgcc.a` was linked.
+
+## Freestanding
+
+`ZZAPP_FREESTANDING=1` (make), `FREESTANDING` on `zzapp_add_executable`, or
+`-DZZAPP_FREESTANDING=ON` at CMake configure time links `crt0`, the app,
+`libzzapp` and `libgcc` without newlib and without the PIC sysroot. `crt0`
+calls `zz_exit` directly, `zz_alloc` without `ZZ_ALLOC_HOST_VISIBLE` returns
+NULL, and `libzzapp` supplies weak `memcpy`, `memmove`, `memset` and
+`memcmp`. The developer guide has the full list of differences. `make check`
+builds `freestanding.c` this way, checks its link map, and links a fixture
+(`tests/freestanding_leak.c` with `-lc`) that must be rejected.
 
 ## Templates
 
@@ -97,3 +116,19 @@ or a stack other than 0 or 64 KiB–1 MiB aligned to 8.
 - `console.c`: Shell console example. Prints its arguments to stdout and a
   line to stderr, echoes each stdin line in upper case, reports Ctrl-D/E/F
   break events, and exits at EOF (Ctrl-\ in a Shell window).
+- `freestanding.c`: no newlib. A bump allocator over `zz_heap_range` and
+  `zz_heap_grow`, a hand-written hash, and its own number formatting; build
+  it with `ZZAPP_FREESTANDING=1`. The host runner builds it too and a test
+  compares its hash with an independent implementation.
+- `fpenv.c`: prints FPSCR as the app sees it on entry and checks that a VFP add
+  keeps a denormal result while a NEON add flushes it. ARM only. Exit status 0
+  means FPSCR was 0 and both denormal results held; it is the card test for
+  the developer guide's bit-identical maths section.
+- `ringflood.c`: message ring conformance load. Starts quiet, parked in
+  `zz_msg_wait`, and answers PING messages. On CTRL FLOOD it sends
+  sequence-numbered, pattern-checked 32-byte messages as fast as the
+  app-to-host ring takes them and bumps a counter word in a host-visible
+  block on every loop; CTRL QUIET stops it. Its message layout is in the file
+  header. Use it with the `zz9k-app-ringtest` tool; `ringflood N` on the host
+  runner leaves the flood after N data messages, and the host tests check its
+  output against an independent implementation of the pattern.

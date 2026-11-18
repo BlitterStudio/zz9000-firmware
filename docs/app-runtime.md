@@ -211,7 +211,8 @@ with the restart reason.
 
 The app service is `0x0c00`; its catalog version is `0x00030000`. Integers
 in mailbox payloads and windows are big-endian. `ZZAPP_CAP_SLOTS` advertises
-four slots. `ZZAPP_CAP_LOW_MEMORY` and `ZZAPP_CAP_LOAD_PROGRESS` are
+four slots. `ZZAPP_CAP_LOW_MEMORY`, `ZZAPP_CAP_LOAD_PROGRESS`, and
+`ZZAPP_CAP_HOST_LIMIT` are
 append-only bits in the extended `QUERY` capability word; a client with
 `ZZAPP_CAP_SLOTS` uses the extended request form for all operations after
 allocation and carries the returned slot and generation.
@@ -235,6 +236,10 @@ two seconds. A launcher that sets lifecycle flag bit 18
 Amiga task does not lose its app; it still renews only from its own main
 loop, so a launcher that has died is still detected.
 
+The client side of that lease is in `zz9k.library`: from revision 40 its
+service task releases the slot of an owner task that is gone, see
+[zz9k-library.md](../sdk/docs/zz9k-library.md#arm-app-client).
+
 An expired load becomes `STOPPING` with terminal reason `QUARANTINED` (9).
 Core 1 aborts the loader and frees the app memory, but its card window remains
 reserved: a late `Read` from the old Amiga process must never write into a
@@ -255,6 +260,111 @@ minimum heap commit as well as later heap growth. `DISPLAY_BIND` always
 carries the spare-buffer field at byte 28; zero means none. A second bind while
 a surface is already bound returns `BUSY` and leaves the existing mappings alone.
 
+Extended `LOAD_BEGIN` also carries the app's host-visible limit in MiB at
+byte 4 (`ZZAPP_LOAD_HOST_VISIBLE_MIB`); firmware that advertises
+`ZZAPP_CAP_HOST_LIMIT` reads it. Zero, and every request form that has no such
+word, keeps the default of 16 MiB. A nonzero value replaces the default for
+that app, so it can raise the limit or lower it, and `zz_mem_info` reports the
+value in force as `host_visible_limit`. A value above 4095 in either limit
+word returns `BAD_REQUEST`. The limit is a cap, not a
+reservation: nothing is set aside when the load begins, and an allocation can
+still fail below the cap when the shared host-visible heap, which also serves
+P96 surfaces and SDK buffers, or the app's alias range is full. Only a request
+that could never be satisfied is refused. `LOAD_BEGIN` then returns
+`SDK_STATUS_NO_MEMORY` (6) at once and leaves the claim as it was. That
+ceiling is the smaller of the surface heap and one app's alias window of 62
+MiB; the heap on the card is larger, so the window sets it, and a request of
+up to 62 MiB is accepted. The limit lasts until the slot is claimed again.
+Both limits (the memory cap at byte 0 and this one) take effect only when the
+request is
+admitted to the slot's queue and the slot is idle or claimed; a `LOAD_BEGIN`
+answered `BUSY`, or sent after the load has begun, changes neither.
+
+A normal exit does not tear the slot down on the app's own thread. The exit
+call only records the exit and stops the app's thread, and does both in one
+step with local interrupts masked: a tick between the two would either strand
+the stopped thread with the exit unrecorded, or let the system thread start
+the teardown while the app still runs. The thread then hands the CPU on. The
+system thread runs the teardown (end-of-app services, GL reclaim, publishing
+`IDLE`, dropping the loader arena), the same place faults, forced stops and
+watchdog stops are torn down. That matters because a stopped app thread is
+never scheduled again, and the arena drop unmaps every host-visible block,
+which holds the address-space lock for longer than a scheduler tick when a
+block is tens of MiB. The tick is taken as soon as the lock is released,
+before the arena is marked unbound. On the app's own thread that left the slot
+idle with its arena still bound, and every later `LOAD_BEGIN` answered bad
+request until the card reset. The system thread is resumed after the tick,
+and other apps keep running while a long teardown is in progress.
+
+From the exit call until the teardown has finished, the exit counts as owed
+state of the slot, separate from the app being running. Core 1 records the
+exit first and then publishes `running = 0` with release semantics; core 0
+loads `running` with acquire semantics before it reads the exit state, so
+whoever sees the app stopped also sees the cleanup it owes. That ordering is
+by construction; the host tests cannot show it.
+
+An Amiga reset is posted to every slot and core 0 waits for core 1's
+acknowledgement of each before it goes on to reset the surface allocator.
+Core 1's reset path does the work for every slot: it tears down a running
+app, a loading slot or an exit still owed, so the allocator is not reset
+under a cleanup that still frees blocks from the old run, and it releases
+the slot's window, idle slots included, freeing the block and dropping the
+pointer. The window is therefore given back by one core, never by both at
+once. Core 0 touches it only when there is no core 1 at all, or when core 1
+is halted. If a slot's acknowledgement has not come within one second, core 1
+may only be slow, and a slow worker would run its reset later, after the
+allocator was reset and its addresses reused. Core 0 then does not clean up
+beside it: it halts core 1 and recovers every slot while it is held. A slot
+with a pending reset ends with the reason `AMIGA_RESET`, and the reset
+itself is completed by the routine core 1's worker would have run, not by a
+part of it: the window is retired whatever state the slot is in (an app
+whose audio close is still owed is `STOPPING` when it is stopped, not idle),
+deferred work queued for the slot, such as a posted `LOAD_BEGIN`, is
+cancelled, the guard of a commit the halted core could not finish is
+dropped, and the request is acknowledged. Core 1 is then released with
+nothing left to do: the restarted worker finds no reset request, no window,
+no deferred work and no running app, so it can run before the allocator is
+reset without allocating or freeing anything. The next claim allocates a
+window again at the slot's fixed range. A slot that kept its pointer would
+free, at a later reset, whatever new owner holds that address.
+
+The timeout has a cost. Each slot is given up to one second, so a reset that
+core 1 cannot acknowledge waits up to four seconds, and then the recovery is
+a cold restart of core 1: it also aborts the SDK requests queued for it and
+resets the shared graphics, audio and module state, not only the app slots.
+It is the price of not cleaning up beside a worker that may still be running.
+Core 0 prints `[app] reset: core 1 did not acknowledge slot N within 1 s` for
+each slot that missed.
+
+A core-1 restart treats a slot that owes a cleanup like a running app and
+tears it down with the reason `CORE_RESTART`, replaying teardown steps that
+may have run already. The allocator frees by address and cannot tell owners
+apart, so every resource it holds is detached from its owner's record before
+it is freed: host-visible blocks, slot windows and the audio ring. A halt
+between the two leaks the block until the allocator is reset, instead of
+freeing the block of whoever was given the address meanwhile. Loader arena
+and app memory are freed through the card pool, which checks the owner. A
+restart that finds a slot that is claimed or loading releases its arena,
+publishes the host state as idle before it reopens the slot, and frees the
+slot's window block together with the window, so the next claim can allocate
+it again at the same fixed range.
+
+A fault or restart leaves the slot's loader state `FAULTED` until `STATUS`
+observes it or the latch expires, and `LOAD_BEGIN` is refused meanwhile.
+A successful claim of the slot releases the latch, because a launcher that
+claims again has moved on and goes straight from claim to `LOAD_BEGIN`. The
+fault snapshot in the life block stays readable, and a teardown that is
+still finishing does not set the latch again.
+
+A rejected app request that carries a reason prints a `[app] reject op
+0x<opcode>` line on the console. That covers a deferred `LOAD_BEGIN`,
+`LOAD_CHUNK`, `LOAD_END` or `START` the loader refuses, a `DISPLAY_BIND` with
+bad fields, a limit above 4095 MiB, a host-visible limit the card cannot
+grant, and a deferred request with request id zero. Every such rejection
+prints, but at most four lines a second; the next line printed is
+`[app] N rejected ops held back`. A request that fails the slot or generation
+check prints nothing.
+
 `LIST` (`0x0c09`) is extended-only. The selector names the slot and ignores
 its generation. Its 48-byte reply has state, generation, committed bytes,
 limit, app CPU milliseconds, and kernel service milliseconds at bytes 0
@@ -274,7 +384,7 @@ Firmware advertising `ZZAPP_CAP_LOAD_PROGRESS` increments the big-endian
 step. `LOAD_BEGIN` resets it to zero. The word wraps modulo $2^{32}$ and only
 denotes loader progress while the slot is `LOADING`; once the app runs, the
 existing runtime progress timestamp again owns offsets `0x68` and `0x6C`.
-Revision 39 of `zz9k.library` resets its normal five-second inactivity
+`zz9k.library` revision 39 and later resets its normal five-second inactivity
 deadline whenever this word changes. With older firmware, which does not
 advertise the bit, it retains the fixed 32-second load-lease fallback.
 

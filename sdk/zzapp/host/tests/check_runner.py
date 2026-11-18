@@ -91,6 +91,139 @@ def check_console(exe):
         raise SystemExit("console stderr")
 
 
+def fnv1a32(data):
+    h = 2166136261
+    for byte in data:
+        h = ((h ^ byte) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def check_freestanding(exe):
+    # The template fills 3 MiB from an xorshift32 stream and hashes it. This
+    # recomputes the hash independently of the C code.
+    seed = 0x2545F491
+    data = bytearray(3 << 20)
+    for i in range(len(data)):
+        seed ^= (seed << 13) & 0xFFFFFFFF
+        seed ^= seed >> 17
+        seed ^= (seed << 5) & 0xFFFFFFFF
+        data[i] = seed & 0xFF
+    want = "freestanding ok: hash=%08x " % fnv1a32(data)
+    proc = run(exe, ["--headless"])
+    expect_ok(proc)
+    out = proc.stdout.decode("utf-8", "replace")
+    if want not in out or "FAIL" in out:
+        show(proc)
+        raise SystemExit("freestanding line %r missing" % want)
+
+
+def ring_mix(h):
+    h &= 0xFFFFFFFF
+    h ^= h >> 16
+    h = (h * 0x85EBCA6B) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 0xC2B2AE35) & 0xFFFFFFFF
+    h ^= h >> 16
+    return h
+
+
+def ring_ping(ident):
+    return struct.pack("<8I", 5, ident, 0x11110000 + ident, 0x22, 0, 0, 0, 0)
+
+
+def ring_ctrl(ident, mode):
+    return struct.pack("<8I", 7, ident, mode, 0, 0, 0, 0, 0)
+
+
+def ring_run(exe, script_messages, args, stop=False):
+    """Runs ringflood with injected messages and returns what it sent."""
+    with tempfile.TemporaryDirectory() as root:
+        script = os.path.join(root, "msg.txt")
+        out = os.path.join(root, "msg.out")
+        with open(script, "w", encoding="ascii") as fh:
+            for message in script_messages:
+                fh.write(message.hex() + "\n")
+            if stop:
+                fh.write("stop\n")
+        argv = ["--headless", "--msg-script", script, "--msg-out", out]
+        if args:
+            argv += ["--"] + args
+        proc = run(exe, argv)
+        expect_ok(proc)
+        with open(out, "r", encoding="ascii") as fh:
+            lines = [line.strip() for line in fh if line.strip()]
+    return [struct.unpack("<8I", bytes.fromhex(line)) for line in lines]
+
+
+def check_ringflood(exe):
+    # Known answers shared with sdk/tests/app_ringtest_logic_test.c: pattern
+    # word i of message seq is ring_mix(seq * 4 + i).
+    vectors = {
+        1: (0x249CB285, 0xCC0D53CD, 0x5CEB4D08, 0x18C9AEC4),
+        2: (0x4939650B, 0xC27C2913, 0xE9250490, 0x93A0FE04),
+        1000: (0x1F0A4224, 0x9F34547F, 0xB764BC10, 0x4F4FFC5F),
+        0xFFFFFFFE: (0xF94C9009, 0x0CC81F63, 0xC24094C8, 0x937F414E),
+    }
+    for seq, words in vectors.items():
+        got = tuple(ring_mix((seq * 4 + i) & 0xFFFFFFFF) for i in range(4))
+        if got != words:
+            raise SystemExit(f"pattern vector for seq {seq}: {got}")
+    # Run A: the app starts quiet and answers pings, floods after CTRL, and
+    # leaves the flood after `count` DATA messages.
+    count = 500
+    msgs = ring_run(exe, [ring_ping(7), ring_ping(8), ring_ping(9),
+                          ring_ctrl(1, 1)], [str(count)])
+    info = msgs[0]
+    if info[0] != 1 or info[1] != 1 or info[3] != 4096 or info[2] == 0xFFFFFFFF:
+        raise SystemExit(f"INFO message {info}")
+    kinds = [m[0] for m in msgs]
+    if kinds[:5] != [1, 6, 6, 6, 8]:
+        raise SystemExit(f"quiet start sent {kinds[:5]}, not INFO, 3 PONG, ACK")
+    pongs = [m for m in msgs if m[0] == 6]
+    if [m[1] for m in pongs] != [7, 8, 9]:
+        raise SystemExit(f"pong ids {[m[1] for m in pongs]}")
+    for m in pongs:
+        if m[2] != 0x11110000 + m[1] or m[3] != 0x22 or m[5] != 0:
+            raise SystemExit(f"pong echo {m}")
+    ack = msgs[4]
+    if ack[1:4] != (1, 1, 0):
+        raise SystemExit(f"flood ACK {ack}")
+    data = [m for m in msgs if m[0] == 2]
+    if [m[1] for m in data] != list(range(1, count + 1)):
+        raise SystemExit("data sequence is not 1..%d" % count)
+    last_counter = 0
+    for m in data:
+        want = tuple(ring_mix(m[1] * 4 + i) for i in range(4))
+        if m[4:8] != want:
+            raise SystemExit(f"pattern of message {m[1]}: {m[4:8]}")
+        if m[3] < last_counter or m[3] < m[1]:
+            raise SystemExit(f"counter {m[3]} at message {m[1]}")
+        last_counter = m[3]
+    done = msgs[-1]
+    if done[0] != 3 or done[1] != count or done[3] < last_counter or done[5] != 3:
+        raise SystemExit(f"DONE message {done}")
+    if len(msgs) != 1 + 3 + 1 + count + 1:
+        raise SystemExit(f"{len(msgs)} messages recorded")
+
+    # Run B: flood, ten pings, back to quiet, one more ping, then stop. The
+    # app sends no DATA after the ACK for quiet and still answers.
+    script = [ring_ctrl(1, 1)] + [ring_ping(20 + i) for i in range(10)]
+    script += [ring_ctrl(2, 0)] + [ring_ping(97 + i) for i in range(3)]
+    msgs = ring_run(exe, script, [], stop=True)
+    kinds = [m[0] for m in msgs]
+    if kinds[:2] != [1, 8] or kinds[-1] != 3 or 2 in kinds:
+        raise SystemExit(f"quiet switch sent {kinds}")
+    acks = [m for m in msgs if m[0] == 8]
+    if [a[1:4] for a in acks] != [(1, 1, 0), (2, 0, 0)]:
+        raise SystemExit(f"ACKs {acks}")
+    after = msgs[msgs.index(acks[1]) + 1:-1]
+    if not after or any(m[0] != 6 for m in after):
+        raise SystemExit(f"after the quiet ACK the app sent {after}")
+    done = msgs[-1]
+    if done[1] != 0 or done[5] != len([m for m in msgs if m[0] == 6]):
+        raise SystemExit(f"DONE {done}")
+
+
 def check_filter(exe):
     with tempfile.TemporaryDirectory() as root:
         data = b"zzapp-host filter\n"
@@ -385,6 +518,8 @@ def check_contract(exe):
 
 
 CHECKS = {
+    "ringflood": check_ringflood,
+    "freestanding": check_freestanding,
     "hello": check_hello,
     "console": check_console,
     "filter": check_filter,

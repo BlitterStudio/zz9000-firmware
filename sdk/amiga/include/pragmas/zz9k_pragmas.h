@@ -21,5 +21,6 @@
 #pragma libcall ZZ9KBase ZZ9KAppGetMessage    18C 9802
 #pragma libcall ZZ9KBase ZZ9KAppMessageSignal 192 801
 #pragma libcall ZZ9KBase ZZ9KAppClose         198 801
+#pragma libcall ZZ9KBase ZZ9KAppSetLimits     19E 10803
 #endif
 #endif
