@@ -38,7 +38,10 @@ A handle is `(generation << 16) | pid`, built with `aar_handle_make`: a
 16-bit index and a 16-bit generation from 1 to `0xFFFF`, so a handle is never
 0 (`zzapp_rec.h:9-13`, `zzapp_rec.c:311`). Freeing a record bumps its
 generation first, and the generation wraps from `0xFFFF` to 1, so a handle
-from an earlier life of the index fails the lookup
+from an earlier life of the index fails the lookup. The record keeps its
+handle until `FREE` is published, so a halt between the generation store and
+the state store is replayed from the handle alone: the free finishes whatever
+store it stopped after, and a handle of another life never matches
 (`zzapp_rec.c:382-425`). Free indices wait in a FIFO queue, so an index is
 reused as late as possible (`zzapp_rec.c:297-323`). The table holds at least 8
 and at most 1024 records (`ZZAPP_REC_MIN_APPS`, `ZZAPP_REC_MAX_APPS`,

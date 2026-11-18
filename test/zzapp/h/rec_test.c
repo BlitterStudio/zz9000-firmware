@@ -576,6 +576,64 @@ static void test_stale_lookups(void)
     CHECK(zzapp_rec_free(aar_handle_make(99U, 1U)) == -1);
 }
 
+/*
+ * A core halted inside zzapp_rec_free(). After the generation store alone the
+ * handle no longer resolves (the generation moved on) yet the record is not
+ * FREE and is not in the queue: a replay with the original handle must finish
+ * the free, or the record is lost for good. A handle of an earlier life of the
+ * index finishes nothing, whichever store the halt stopped after.
+ */
+static void test_halted_free_replays_from_each_store(void)
+{
+    unsigned step;
+
+    for (step = 1U; step <= 2U; step++) {
+        zzapp_rec_table_snapshot_t snap;
+        uint32_t old_life;
+        uint32_t life;
+        uint32_t others[7];
+        uint32_t pid;
+        uint32_t i;
+
+        setup_arena(8U);
+        CHECK(admit(0U, &old_life) != NULL);
+        CHECK(zzapp_rec_free(old_life) == 0);
+        /* Take every other index so the next admission reuses this one. */
+        for (i = 0U; i < 7U; i++)
+            CHECK(admit(0U, &others[i]) != NULL);
+        CHECK(admit(1U, &life) != NULL);
+        pid = aar_handle_index(life);
+        CHECK(pid == aar_handle_index(old_life));
+        CHECK(aar_handle_generation(life) == 2U);
+
+        zzapp_rec_test_halt_step = step;
+        CHECK(zzapp_rec_free(life) == 0);
+        zzapp_rec_test_halt_step = 0U;
+        zzapp_rec_table_snapshot(&snap);
+        CHECK(snap.gen[pid] == 3U);
+        CHECK(zzapp_rec_by_handle(life) == NULL);
+        CHECK((zzapp_rec_state(pid) == ZZAPP_REC_FREE) == (step >= 2U));
+        CHECK(snap.free_count == 0U);
+
+        /* The earlier life's handle finishes nothing. */
+        CHECK(zzapp_rec_free(old_life) == -1);
+        CHECK((zzapp_rec_state(pid) == ZZAPP_REC_FREE) == (step >= 2U));
+
+        /* The record is still reachable for recovery: reconcile counts it
+         * busy or queues it, and a replay with the original handle ends
+         * with it FREE and queued exactly once. */
+        if (step == 1U)
+            CHECK(zzapp_rec_reconcile_halted() == 8U);
+        CHECK(zzapp_rec_free(life) == 0);
+        CHECK(zzapp_rec_state(pid) == ZZAPP_REC_FREE);
+        CHECK(zzapp_rec_reconcile_halted() == 7U);
+        zzapp_rec_table_snapshot(&snap);
+        CHECK(snap.free_count == 1U && snap.head == pid && snap.tail == pid);
+        CHECK(snap.gen[pid] == 3U);
+        CHECK(zzapp_rec_free(life) == 0);
+    }
+}
+
 static int release_record(uint32_t handle);
 
 /* Admission hands out a cleared record: nothing of the previous life of the
@@ -1055,6 +1113,7 @@ int main(void)
     test_window_is_not_pid();
     test_generation_wrap_and_never_zero();
     test_stale_lookups();
+    test_halted_free_replays_from_each_store();
     test_admit_clears_the_record();
     test_state_transitions();
     test_owner_serial();

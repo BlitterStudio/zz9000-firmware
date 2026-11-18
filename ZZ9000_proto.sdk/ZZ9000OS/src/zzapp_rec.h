@@ -392,9 +392,13 @@ void zzapp_rec_set_stage(zzapp_rec_t *rec, zzapp_retire_stage_t stage);
  */
 void zzapp_rec_retire_tables(zzapp_rec_t *rec);
 /*
- * Retire step 7, idempotent: bump the generation, publish FREE, append the
- * index to the FIFO queue. Bumping first means no stale handle can match even
- * if the core halts before the state flips. 0, or -1 for a stale handle.
+ * Retire step 7, idempotent: bump the generation, publish FREE, clear the
+ * handle and append the index to the FIFO queue. Bumping first means no stale
+ * handle can match even if the core halts before the state flips. The record
+ * keeps its handle until FREE is published, so a replay with that handle
+ * completes the free from whichever store the halt stopped after, including
+ * the bumped generation without the state change. 0, or -1 for a handle of
+ * another life.
  */
 int zzapp_rec_free(uint32_t handle);
 /*
@@ -404,7 +408,7 @@ int zzapp_rec_free(uint32_t handle);
  * ascending order; the order of the rest is kept. Idempotent. Returns the
  * number of records that are not FREE, which the caller walks with
  * zzapp_rec_state() and retires (replaying zzapp_rec_free() for a record
- * whose handle was already bumped).
+ * whose free was interrupted).
  */
 uint32_t zzapp_rec_reconcile_halted(void);
 

@@ -9,10 +9,6 @@
 #include "zzapp_rec.h"
 
 #define REC_NONE         0xffffU
-/* Set in a state byte between the generation bump and the FREE store of
- * zzapp_rec_free(), so a replay knows the bump already happened. */
-#define REC_STATE_BUMPED 0x80U
-#define REC_STATE_MASK   0x7fU
 #define REC_SERIAL_MASK  0x00ffffffU
 
 #ifdef ZZAPP_HOST_TEST
@@ -211,7 +207,7 @@ zzapp_rec_t *zzapp_rec_by_handle(uint32_t handle)
 	if (__atomic_load_n(&tab.gen[index], __ATOMIC_ACQUIRE) != generation)
 		return NULL;
 	state = __atomic_load_n(&tab.state[index], __ATOMIC_ACQUIRE);
-	if ((state & REC_STATE_MASK) == ZZAPP_REC_FREE)
+	if (state == ZZAPP_REC_FREE)
 		return NULL;
 	if (__atomic_load_n(&tab.gen[index], __ATOMIC_ACQUIRE) != generation)
 		return NULL;
@@ -221,7 +217,7 @@ zzapp_rec_t *zzapp_rec_by_handle(uint32_t handle)
 uint32_t zzapp_rec_handle(uint32_t pid)
 {
 	if (!ready || pid >= layout.apps ||
-	    (tab.state[pid] & REC_STATE_MASK) == ZZAPP_REC_FREE)
+	    tab.state[pid] == ZZAPP_REC_FREE)
 		return 0U;
 	return record_at(pid)->hdr.handle;
 }
@@ -230,9 +226,8 @@ zzapp_rec_state_t zzapp_rec_state(uint32_t pid)
 {
 	if (!ready || pid >= layout.apps)
 		return ZZAPP_REC_FREE;
-	return (zzapp_rec_state_t)(__atomic_load_n(&tab.state[pid],
-						    __ATOMIC_ACQUIRE) &
-				   REC_STATE_MASK);
+	return (zzapp_rec_state_t)__atomic_load_n(&tab.state[pid],
+						   __ATOMIC_ACQUIRE);
 }
 
 int zzapp_rec_set_state(zzapp_rec_t *rec, zzapp_rec_state_t state)
@@ -246,12 +241,10 @@ int zzapp_rec_set_state(zzapp_rec_t *rec, zzapp_rec_state_t state)
 	if (pid >= layout.apps || record_at(pid) != rec)
 		return -1;
 	old = tab.state[pid];
-	if ((old & REC_STATE_MASK) == ZZAPP_REC_FREE ||
-	    state == ZZAPP_REC_FREE || state > ZZAPP_REC_RECLAIMED ||
-	    state < (old & REC_STATE_MASK))
+	if (old == ZZAPP_REC_FREE || state == ZZAPP_REC_FREE ||
+	    state > ZZAPP_REC_RECLAIMED || state < old)
 		return -1;
-	__atomic_store_n(&tab.state[pid], (uint8_t)(state | (old & REC_STATE_BUMPED)),
-			 __ATOMIC_RELEASE);
+	__atomic_store_n(&tab.state[pid], (uint8_t)state, __ATOMIC_RELEASE);
 	return 0;
 }
 
@@ -327,7 +320,7 @@ int zzapp_rec_unadmit(uint32_t handle)
 	zzapp_rec_t *r = zzapp_rec_by_handle(handle);
 	uint32_t index;
 
-	if (!r || (tab.state[r->hdr.pid] & REC_STATE_MASK) != ZZAPP_REC_CLAIMED)
+	if (!r || tab.state[r->hdr.pid] != ZZAPP_REC_CLAIMED)
 		return -1;
 	index = r->hdr.pid;
 	if (zzapp_as_release_l2(index) != 0)
@@ -383,37 +376,37 @@ int zzapp_rec_free(uint32_t handle)
 {
 	uint32_t index = aar_handle_index(handle);
 	uint32_t generation = aar_handle_generation(handle);
-	uint8_t state;
-	int bumped;
+	uint32_t current;
 
 	if (!ready || generation == 0U || index >= layout.apps)
 		return -1;
-	state = tab.state[index];
-	bumped = (state & REC_STATE_BUMPED) != 0U;
-	if ((state & REC_STATE_MASK) == ZZAPP_REC_FREE) {
+	current = tab.gen[index];
+	if (tab.state[index] == ZZAPP_REC_FREE) {
 		/* Replay of a free that completed: the generation moved on by
 		 * exactly this free. */
-		return generation == prev_generation(tab.gen[index]) ? 0 : -1;
+		return generation == prev_generation(current) ? 0 : -1;
 	}
-	if (generation != (bumped ? prev_generation(tab.gen[index]) :
-			   tab.gen[index]))
+	/* A live record keeps its handle until FREE is published, so the handle
+	 * names the record whatever the generation says: the generation is
+	 * the old one until the bump below and the next one after it. A halt
+	 * between any two stores of this function is replayed from the handle
+	 * alone; a handle of another life is refused. */
+	if (handle != record_at(index)->hdr.handle)
 		return -1;
-	if (!bumped) {
+	if (generation == current) {
 		/* 1: no stale handle can match from here on. */
 		__atomic_store_n(&tab.gen[index],
-				 (uint16_t)aar_handle_next_gen(tab.gen[index]),
-				 __ATOMIC_RELEASE);
-		__atomic_store_n(&tab.state[index],
-				 (uint8_t)(state | REC_STATE_BUMPED),
+				 (uint16_t)aar_handle_next_gen(current),
 				 __ATOMIC_RELEASE);
 	}
 	REC_HALT_AFTER_INT(1U, 0);
 	/* 2: publish FREE. */
-	record_at(index)->hdr.handle = 0U;
 	__atomic_store_n(&tab.state[index], (uint8_t)ZZAPP_REC_FREE,
 			 __ATOMIC_RELEASE);
 	REC_HALT_AFTER_INT(2U, 0);
-	/* 3: queue at the tail. */
+	/* 3: forget the handle and queue at the tail. A FREE record that still
+	 * holds its handle is harmless: admission clears the record. */
+	record_at(index)->hdr.handle = 0U;
 	tab.next[index] = REC_NONE;
 	if (tab.tail != REC_NONE)
 		tab.next[tab.tail] = (uint16_t)index;
@@ -442,14 +435,14 @@ uint32_t zzapp_rec_reconcile_halted(void)
 	 * the old chain from the head while it names FREE indices, once each. */
 	for (index = tab.head; index < layout.apps && steps++ < layout.apps &&
 	     !seen[index] &&
-	     (tab.state[index] & REC_STATE_MASK) == ZZAPP_REC_FREE;
+	     tab.state[index] == ZZAPP_REC_FREE;
 	     index = tab.next[index]) {
 		seen[index] = 1U;
 		order[count++] = (uint16_t)index;
 	}
 	/* A FREE index the chain lost (halt between FREE and the queue). */
 	for (i = 0U; i < layout.apps; i++) {
-		if ((tab.state[i] & REC_STATE_MASK) != ZZAPP_REC_FREE)
+		if (tab.state[i] != ZZAPP_REC_FREE)
 			busy++;
 		else if (!seen[i])
 			order[count++] = (uint16_t)i;
@@ -473,7 +466,7 @@ void zzapp_rec_stats(zzapp_rec_stats_t *out)
 		return;
 	out->capacity = layout.apps;
 	for (i = 0U; i < layout.apps; i++) {
-		switch (tab.state[i] & REC_STATE_MASK) {
+		switch (tab.state[i]) {
 		case ZZAPP_REC_FREE:
 			out->free++;
 			break;
