@@ -410,6 +410,40 @@ static zzapp_rec_t *window_rec(const struct zzapp_window *w)
 	return zzapp_rec_by_handle(w->handle);
 }
 
+/*
+ * Record lifetime. Retirement frees a record only under g_slot_state_lock
+ * (release_shell_locked, retire_wire), after it detached the window, and a
+ * record is type stable: its bytes stay readable once it is FREE. A pass that
+ * walks the windows therefore may not look a record up by window and use it
+ * later: the record can be freed between the two steps (an app that exits or
+ * is stopped on the other core), and the selected context then names no
+ * record and current_runtime() is NULL.
+ *
+ * The rule: every use of a record reached by window lookup runs in the same
+ * g_slot_state_lock section as the lookup. A pass that must not hold the lock
+ * for its whole work (a ring copy, an allocation) reads what it needs under
+ * the lock and drops it only when the record cannot be freed behind it: an
+ * open audio ring or a pending audio request keeps the shell until the
+ * handoff completes (audio_handoff_pending), and the display mailbox is
+ * disabled under its own lock before the free (display_mailbox_disable).
+ *
+ * Sites: zzapp_services_display_vblank, audio_core1_poll_all,
+ * zzapp_services_core0_poll, and the audio fabric callbacks
+ * (app_audio_*_for, audio_fabric_starvation_event).
+ */
+#ifdef ZZAPP_SERVICES_STANDALONE_TEST
+/* Runs inside a pass after its window lookup, before the record is used: where
+ * the other core's retirement would land if the pass did not hold the lock. */
+static void (*service_test_lookup_hook)(uint32_t win);
+#define SERVICE_LOOKUP_GAP(win) \
+	do { \
+		if (service_test_lookup_hook) \
+			service_test_lookup_hook(win); \
+	} while (0)
+#else
+#define SERVICE_LOOKUP_GAP(win) do { } while (0)
+#endif
+
 /* What QUERY, STATUS and LIST report: STOPPING for a quarantined window and
  * while core 1 still completes a cancelled op for it (the window is not
  * claimable until then), else the state of the record bound to it, else
@@ -2803,30 +2837,42 @@ uint32_t zzapp_svc_display_latest_dropped(void)
 	return life_get(ZZAPP_LIFE_MAILBOX_REPLACED_OFF);
 }
 
+/* One window of the vblank pass; the caller holds g_slot_state_lock and has
+ * selected a window with a record. */
+static void display_vblank_window_locked(uint32_t scanout_address)
+{
+	uint32_t flags;
+	uint32_t gen;
+
+	if (!current_runtime()->display_bound || display_mailbox_enabled())
+		return;
+	flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
+	if ((flags & (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK)) !=
+	    (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK))
+		return;
+	gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
+	if (gen == life_get(ZZAPP_LIFE_FLIP_ACK_OFF) ||
+	    gen != life_get(ZZAPP_LIFE_FLIP_SUBMIT_OFF) ||
+	    scanout_address != life_get(ZZAPP_LIFE_FLIP_ADDRESS_OFF))
+		return;
+	life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+}
+
+/* Core 0, from the vblank ISR. The lock masks this core's IRQs and is
+ * recursive, so the ISR may take it over core 0 code that holds it. */
 void zzapp_services_display_vblank(uint32_t scanout_address)
 {
 	uint32_t win;
 	struct svc_ctx saved = ctx_save();
 
 	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		uint32_t flags;
-		uint32_t gen;
-
-		if (!window_rec(&windows[win]))
-			continue;
-		select_window(win);
-		if (!current_runtime()->display_bound || display_mailbox_enabled())
-			continue;
-		flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
-		if ((flags & (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK)) !=
-		    (ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK))
-			continue;
-		gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
-		if (gen == life_get(ZZAPP_LIFE_FLIP_ACK_OFF) ||
-		    gen != life_get(ZZAPP_LIFE_FLIP_SUBMIT_OFF) ||
-		    scanout_address != life_get(ZZAPP_LIFE_FLIP_ADDRESS_OFF))
-			continue;
-		life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+		slot_state_lock_acquire();
+		if (window_rec(&windows[win])) {
+			select_window(win);
+			SERVICE_LOOKUP_GAP(win);
+			display_vblank_window_locked(scanout_address);
+		}
+		slot_state_lock_release();
 	}
 	ctx_restore(saved);
 }
@@ -3295,6 +3341,8 @@ static uint32_t runtime_pid(const struct zzapp_service_runtime *state)
 		offsetof(zzapp_rec_t, services)))->hdr.pid;
 }
 
+/* The app whose ring feeds a producer slot. The caller holds
+ * g_slot_state_lock and uses the result inside the same section. */
 static struct zzapp_service_runtime *audio_runtime(uint32_t producer_slot)
 {
 	uint32_t win;
@@ -3316,12 +3364,15 @@ static struct zzapp_service_runtime *audio_runtime(uint32_t producer_slot)
 static int app_audio_snapshot_for(uint32_t producer_slot,
 				  struct audio_fabric_source *source)
 {
-	struct zzapp_service_runtime *state = audio_runtime(producer_slot);
+	struct zzapp_service_runtime *state;
 	uint32_t wr;
 	uint64_t staged;
+	int snapshot = 0;
 
+	slot_state_lock_acquire();
+	state = audio_runtime(producer_slot);
 	if (!state || !state->audio_samples || !state->audio_write_frame)
-		return 0;
+		goto out;
 	wr = *state->audio_write_frame;
 	staged = state->audio_staged;
 	memset(source, 0, sizeof(*source));
@@ -3344,32 +3395,42 @@ static int app_audio_snapshot_for(uint32_t producer_slot,
 		state->audio_low_water_latched = 0U;
 	}
 #endif
-	return 1;
+	snapshot = 1;
+out:
+	slot_state_lock_release();
+	return snapshot;
 }
 
 static int app_audio_stage_for(uint32_t producer_slot, uint32_t bytes)
 {
-	struct zzapp_service_runtime *state = audio_runtime(producer_slot);
+	struct zzapp_service_runtime *state;
 	uint64_t produced;
+	int staged = 0;
 
-	if (!state || !state->audio_write_frame)
-		return 0;
-	produced = audio_produced_frames(*state->audio_write_frame,
-					 state->audio_staged) * 4U;
-	if (produced < state->audio_staged ||
-	    produced - state->audio_staged < bytes)
-		return 0;
-	state->audio_staged += bytes;
-	return 1;
+	slot_state_lock_acquire();
+	state = audio_runtime(producer_slot);
+	if (state && state->audio_write_frame) {
+		produced = audio_produced_frames(*state->audio_write_frame,
+						 state->audio_staged) * 4U;
+		if (produced >= state->audio_staged &&
+		    produced - state->audio_staged >= bytes) {
+			state->audio_staged += bytes;
+			staged = 1;
+		}
+	}
+	slot_state_lock_release();
+	return staged;
 }
 
 static void app_audio_retire_for(uint32_t producer_slot, uint32_t bytes)
 {
-	struct zzapp_service_runtime *state = audio_runtime(producer_slot);
+	struct zzapp_service_runtime *state;
 
-	if (!state || !state->audio_read_frame || (bytes & 3U) != 0U)
-		return;
-	*state->audio_read_frame += bytes / 4U;
+	slot_state_lock_acquire();
+	state = audio_runtime(producer_slot);
+	if (state && state->audio_read_frame && (bytes & 3U) == 0U)
+		*state->audio_read_frame += bytes / 4U;
+	slot_state_lock_release();
 }
 
 static int app_audio_snapshot_mailbox(struct audio_fabric_source *source)
@@ -3405,22 +3466,28 @@ static void app_audio_retire_reserved(uint32_t bytes)
 #if ZZAPP_PERF_COUNTERS
 void audio_fabric_starvation_event(uint32_t producer_slot)
 {
-	struct zzapp_service_runtime *state = audio_runtime(producer_slot);
+	struct zzapp_service_runtime *state;
 
+	slot_state_lock_acquire();
+	state = audio_runtime(producer_slot);
 	if (state)
 		zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
 					runtime_pid(state), 0U, 1U, 0U);
+	slot_state_lock_release();
 }
 #endif
 
 static void app_audio_underrun_for(uint32_t producer_slot)
 {
 #if ZZAPP_PERF_COUNTERS
-	struct zzapp_service_runtime *state = audio_runtime(producer_slot);
+	struct zzapp_service_runtime *state;
 
+	slot_state_lock_acquire();
+	state = audio_runtime(producer_slot);
 	if (state)
 		zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
 					runtime_pid(state), 0U, 0U, 1U);
+	slot_state_lock_release();
 #else
 	(void)producer_slot;
 #endif
@@ -3957,10 +4024,17 @@ static void wake_ready_waits(void)
 	ctx_restore(saved);
 }
 
-static void audio_core0_poll_slot(void)
-{
-	uint32_t request = current_runtime()->audio_request;
+#define AUDIO_NO_GO_LIVE 0xffffffffU
 
+/*
+ * Core 0's audio work for one window. `request` and `go_live_slot` were read
+ * under g_slot_state_lock together with the window lookup. The rest runs
+ * without it (an attach allocates and maps): a record with an audio request
+ * pending is not freed until this handoff ends (audio_post_teardown marks the
+ * teardown, audio_handoff_pending then holds the shell).
+ */
+static void audio_core0_poll_slot(uint32_t request, uint32_t go_live_slot)
+{
 	if (request == AUDIO_REQUEST_OPEN) {
 		if (current_runtime()->audio_teardown)
 			current_runtime()->audio_result = AAR_E_IO;
@@ -3978,12 +4052,11 @@ static void audio_core0_poll_slot(void)
 	}
 	if (request == AUDIO_REQUEST_NONE) {
 #ifndef ZZAPP_HOST_TEST
-		if (current_runtime()->audio_first_write_seen &&
-		    current_runtime()->audio_open &&
-		    !current_runtime()->audio_ahi_route) {
+		if (go_live_slot != AUDIO_NO_GO_LIVE)
 			(void)audio_fabric_producer_go_live_when_ready(
-				current_runtime()->audio_slot, 1);
-		}
+				go_live_slot, 1);
+#else
+		(void)go_live_slot;
 #endif
 		finish_audio_slot_release();
 		return;
@@ -4006,10 +4079,24 @@ void zzapp_services_core0_poll(void)
 	uint32_t win;
 
 	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		if (!window_rec(&windows[win]))
+		uint32_t request;
+		uint32_t go_live_slot = AUDIO_NO_GO_LIVE;
+
+		slot_state_lock_acquire();
+		if (!window_rec(&windows[win])) {
+			slot_state_lock_release();
 			continue;
+		}
 		select_window(win);
-		audio_core0_poll_slot();
+		SERVICE_LOOKUP_GAP(win);
+		request = current_runtime()->audio_request;
+		if (request == AUDIO_REQUEST_NONE &&
+		    current_runtime()->audio_first_write_seen &&
+		    current_runtime()->audio_open &&
+		    !current_runtime()->audio_ahi_route)
+			go_live_slot = current_runtime()->audio_slot;
+		slot_state_lock_release();
+		audio_core0_poll_slot(request, go_live_slot);
 	}
 	ctx_restore(saved);
 }
@@ -4268,16 +4355,29 @@ static void audio_core1_poll_all(void)
 					scheduler_perf_stamp());
 #endif
 	for (win = 0U; win < ZZAPP_SLOT_COUNT; win++) {
-		if (!window_rec(&windows[win]))
+		int pump;
+
+		slot_state_lock_acquire();
+		if (!window_rec(&windows[win])) {
+			slot_state_lock_release();
 			continue;
+		}
 		select_window(win);
+		SERVICE_LOOKUP_GAP(win);
 		if (current_runtime()->audio_request == AUDIO_REQUEST_CLOSE) {
 			barrier();
 			current_runtime()->audio_request =
 				AUDIO_REQUEST_CLOSE_QUIESCED;
+			slot_state_lock_release();
 			continue;
 		}
-		if (current_runtime()->audio_request != AUDIO_REQUEST_NONE)
+		/* The ring copy runs without the lock. An open ring keeps the
+		 * shell: core 0 frees the record only after a close, which
+		 * waits for this loop to quiesce it. */
+		pump = current_runtime()->audio_request == AUDIO_REQUEST_NONE &&
+		       current_runtime()->audio_open;
+		slot_state_lock_release();
+		if (!pump)
 			continue;
 		audio_pump_ahi_window();
 #ifndef ZZAPP_HOST_TEST
@@ -5318,6 +5418,7 @@ void zzapp_services_test_reset(void)
 	service_test_deferred_completion_hook = NULL;
 	service_test_deferred_completing_hook = NULL;
 	service_test_deferred_reply_hook = NULL;
+	service_test_lookup_hook = NULL;
 	service_test_loader_abort_count = 0U;
 #endif
 	memset(slot_busy_test, 0, sizeof(slot_busy_test));

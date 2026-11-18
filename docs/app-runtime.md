@@ -588,6 +588,17 @@ A reset or restart ends the records but does not touch the record arena, the
 handle table, or the handle generations: a handle from before the reset
 stays stale, and the arena survives because its class is permanent.
 
+A record is freed only under the slot-state lock, after its window is detached,
+and its bytes stay readable once it is free. A pass on either core that walks
+the windows (core 0's vblank scanout acknowledgement and audio fabric
+callbacks, core 0's audio poll, core 1's audio poll) therefore uses a record in
+the same lock section that found it: an app that exits or is stopped on the
+other core cannot free the record between the lookup and the use. A pass that
+copies a ring or allocates drops the lock after reading what it needs, which is
+safe because an open audio ring or a pending audio request holds the shell until
+the handoff ends, and the display mailbox is disabled under its own lock before
+the free.
+
 A core-1 restart retires a faulted app the same way. The fault snapshot in the
 life block stays readable, and a teardown that is still finishing does not set
 it again. A successful claim of the window therefore goes straight to

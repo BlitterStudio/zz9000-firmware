@@ -2005,6 +2005,104 @@ static void test_file_open_flags(void)
 	    invalid != 64U - 13U + (uint32_t)(sizeof(unknown) / sizeof(unknown[0])))
 		fail("count of valid flag combinations");
 }
+/* The other core retires the record a pass just looked up: the retirement
+ * needs g_slot_state_lock, so a pass that holds it at the lookup gap makes
+ * the retirement wait, and one that does not lets it free the record under
+ * the pass. */
+static uint32_t g_lookup_win;
+static unsigned g_lookup_blocked;
+static unsigned g_lookup_retired;
+
+static void retire_at_lookup(uint32_t win)
+{
+	zzapp_rec_t *rec;
+
+	if (win != g_lookup_win)
+		return;
+	if (__atomic_test_and_set(&g_slot_state_test_lock, __ATOMIC_ACQUIRE)) {
+		g_lookup_blocked++;
+		return;
+	}
+	__atomic_clear(&g_slot_state_test_lock, __ATOMIC_RELEASE);
+	rec = window_rec(&windows[win]);
+	if (!rec)
+		return;
+	g_lookup_retired++;
+	(void)zzapp_rec_retire(rec->hdr.pid);
+}
+
+static void arm_lookup_race(uint32_t win)
+{
+	g_lookup_win = win;
+	g_lookup_blocked = 0U;
+	g_lookup_retired = 0U;
+	service_test_lookup_hook = retire_at_lookup;
+}
+
+/* The retirement a pass held off goes through once the pass is over. */
+static void expect_held_off(const char *what, uint32_t win)
+{
+	zzapp_rec_t *rec = window_rec(&windows[win]);
+
+	service_test_lookup_hook = NULL;
+	if (g_lookup_blocked != 1U || g_lookup_retired != 0U || !rec) {
+		fail(what);
+		return;
+	}
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	if (window_rec(&windows[win]))
+		fail("retirement after the held-off pass");
+}
+
+static void test_vblank_pass_holds_record_lifetime(void)
+{
+	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
+	uint8_t reply[48];
+	uint16_t reply_len = 0U;
+	uint32_t front = 0x00200000U;
+	uint32_t back = 0x00210000U;
+	uint32_t spare = 0x00220000U;
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
+		       ZZAPP_F_LAUNCHER_SCANOUT_ACK);
+	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
+						AAR_FMT_RGB565, front, back,
+						AAR_LAYOUT_RGB565_LE, spare);
+	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload, sizeof(payload),
+				   reply, &reply_len, 1, 1U, 0U) != SDK_STATUS_OK ||
+	    zzapp_svc_display_flip_async(1U) != AAR_OK)
+		fail("vblank lifetime display setup");
+	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_SUBMIT_OFF, 1U);
+	arm_lookup_race(0U);
+	zzapp_services_display_vblank(back);
+	if (zzapp_get_be32(g_window + ZZAPP_LIFE_OFF +
+			   ZZAPP_LIFE_FLIP_ACK_OFF) != 1U)
+		fail("vblank pass lost its window to the retirement");
+	expect_held_off("vblank pass left its record unprotected", 0U);
+}
+
+static void test_audio_polls_hold_record_lifetime(void)
+{
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(1);
+	arm_lookup_race(0U);
+	zzapp_services_poll();
+	expect_held_off("core 1 audio poll left its record unprotected", 0U);
+
+	zzapp_services_test_reset();
+	memset(g_window, 0, sizeof(g_window));
+	zzapp_services_test_set_window(g_window, sizeof(g_window));
+	zzapp_services_test_set_core(0);
+	arm_lookup_race(0U);
+	zzapp_services_core0_poll();
+	expect_held_off("core 0 audio poll left its record unprotected", 0U);
+}
+
 
 int main(void)
 {
@@ -2055,6 +2153,8 @@ int main(void)
 	test_scheduler_file_timeout_cancels_seqlock();
 	test_console_eof_ends_wait();
 	test_file_open_flags();
+	test_vblank_pass_holds_record_lifetime();
+	test_audio_polls_hold_record_lifetime();
 	if (g_fails != 0) {
 		fprintf(stderr, "%d failure(s)\n", g_fails);
 		return 1;
