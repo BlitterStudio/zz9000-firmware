@@ -32,6 +32,7 @@
 #include "memorymap.h"
 #include "xil_cache.h"
 #include "zz9k/abi.h"
+#include "zz9k-app-ringtest.h"
 #include "zzapp_xport.h"
 
 struct xil_cache_mock_state g_xil_cache_mock;
@@ -680,6 +681,54 @@ static void test_requests_end_to_end(void)
     CHECK(aar_xport_release(&x) == AAR_OK && heap.live == 0U);
 }
 
+/* The list's path and returned names use the same scratch token/offset.
+ * The server writes names before posting completion, and the firmware then
+ * copies those bytes out. DOS packet name decoding is tested in ZZRun. */
+static void test_list_names_cross_the_request_buffer(void)
+{
+    aar_xport x;
+    aar_xport_req req;
+    aar_completion c;
+    zzapp_xport_buf_t scratch;
+    uint32_t i, id;
+
+    reset_all();
+    claim(&x);
+    CHECK(zzapp_xport_service_area(card.rec, ZZAPP_XPORT_AREA_SCRATCH,
+                                   &scratch) == AAR_OK);
+    strcpy(scratch.ptr, "RAM:fh");
+    id = fw_request(ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_LIST_OPEN, 3U, 0U,
+                    scratch.token, scratch.off, 7U);
+    CHECK(aar_xport_service_next(&x, &req) == 1);
+    CHECK(req.op == AAR_OP_LIST_OPEN && req.id == id &&
+          req.buf == scratch.token && req.buf_off == scratch.off &&
+          req.buf_len == 7U && !strcmp((const char *)req.ptr, "RAM:fh"));
+    CHECK(aar_xport_service_reply(&x, &req) == AAR_OK);
+    CHECK(fw_completion(ZZAPP_XPORT_REQ_BLOCKING, &c) == 1);
+    for (i = 0U; i < 47U; i++) {
+        char expected[32];
+        aar_dirent de;
+
+        memset(scratch.ptr, 0xa5, 256U);
+        id = fw_request(ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_LIST_NEXT, 3U, 0U,
+                        scratch.token, scratch.off, 256U);
+        CHECK(aar_xport_service_next(&x, &req) == 1);
+        CHECK(req.op == AAR_OP_LIST_NEXT && req.id == id &&
+              req.arg[AAR_A_LIST_ID] == 3U &&
+              req.ptr == (volatile uint8_t *)scratch.ptr && req.buf_len == 256U);
+        snprintf(expected, sizeof(expected), "f%02u.bin", i);
+        memcpy((void *)req.ptr, expected, strlen(expected) + 1U);
+        req.out[AAR_R_LIST_MODE] = AAR_MODE_FILE;
+        CHECK(aar_xport_service_reply(&x, &req) == AAR_OK);
+        CHECK(fw_completion(ZZAPP_XPORT_REQ_BLOCKING, &c) == 1 &&
+              c.result == AAR_OK && c.id == id);
+        memcpy(de.name, scratch.ptr, strlen(expected) + 1U);
+        de.mode = c.out[AAR_R_LIST_MODE];
+        CHECK(!strcmp(de.name, expected) && de.mode == AAR_MODE_FILE);
+    }
+    CHECK(aar_xport_release(&x) == AAR_OK);
+}
+
 static void test_mapping_cache(void)
 {
     aar_xport x;
@@ -823,38 +872,320 @@ static void test_messages_and_credits(void)
     CHECK(aar_xport_release(&x) == AAR_OK);
 }
 
-static void test_inbox_overflow_is_counted(void)
+/* A full inbox must not drop: the message stays at the SQ head, the app sees
+ * the queue fill (BUSY from its own post), and everything behind the message
+ * waits until the owner takes some. */
+static void test_full_inbox_holds_messages_at_the_head(void)
 {
     aar_xport x;
     aar_xport_req req;
     uint8_t m[AAR_MSG_BYTES] = { 0 }, got[AAR_MSG_BYTES];
-    uint32_t i, taken = 0U;
+    uint32_t i, posted = 0U, taken = 0U, id;
+    uint32_t sq_used;
 
     reset_all();
     claim(&x);
-    /* The app sends 63; the client moves them aside, reads none. The app sends
-     * 63 more; the inbox holds 64 in all, the rest are lost and counted. */
+    /* The app sends 63; the client moves them aside and reads none. */
     for (i = 0U; i < AAR_MSG_CAPACITY; i++) {
-        m[0] = (uint8_t)i;
+        m[0] = (uint8_t)posted++;
         CHECK(zzapp_xport_post_msg(card.rec, m) == AAR_OK);
     }
     CHECK(aar_xport_service_next(&x, &req) == 0);
-    CHECK(aar_xport_message_count(&x) == AAR_MSG_CAPACITY);
+    CHECK(aar_xport_message_count(&x) == AAR_MSG_CAPACITY && !aar_xport_sq_blocked(&x));
+    /* 63 more: the inbox takes one more (64), the rest stay in the SQ. */
     for (i = 0U; i < AAR_MSG_CAPACITY; i++) {
-        m[0] = (uint8_t)(100U + i);
+        m[0] = (uint8_t)posted++;
         CHECK(zzapp_xport_post_msg(card.rec, m) == AAR_OK);
     }
     CHECK(aar_xport_service_next(&x, &req) == 0);
     CHECK(aar_xport_message_count(&x) == AAR_XPORT_INBOX);
-    CHECK(aar_xport_stats_get(&x)->msgs_overflow == 2U * AAR_MSG_CAPACITY - AAR_XPORT_INBOX);
+    CHECK(aar_xport_sq_blocked(&x) == 1);
+    CHECK(aar_xport_stats_get(&x)->sq_blocked == 1U);
+    CHECK(aar_queue_used(&x.sq, &sq_used) == AAR_OK &&
+          sq_used == 2U * AAR_MSG_CAPACITY - AAR_XPORT_INBOX);
+    /* The app fills the queue and then sees BUSY: nothing was dropped. */
+    for (i = 0U; (m[0] = (uint8_t)posted, zzapp_xport_post_msg(card.rec, m) == AAR_OK); i++)
+        posted++;
+    CHECK(zzapp_xport_post_msg(card.rec, m) == AAR_E_BUSY);
+    CHECK(i > 0U);
+    CHECK(aar_queue_used(&x.sq, &sq_used) == AAR_OK && sq_used == x.sq.depth - 1U);
+
+    /* A request behind the stuck messages waits with them. */
+    id = fw_request(ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_FILE_STAT, 0U, 0U, 0U, 0U, 0U);
+    CHECK(aar_xport_service_next(&x, &req) == 0 && aar_xport_sq_blocked(&x));
+    /* The owner takes messages, in order; the request is reached once every
+     * message in front of it has been moved out, not before. */
+    req.id = 0U;
+    for (;;) {
+        int rc = aar_xport_service_next(&x, &req);
+
+        if (rc == 1)
+            break;
+        CHECK(rc == 0);
+        CHECK(aar_xport_get_message(&x, got) == 1);
+        CHECK(got[0] == (uint8_t)taken);
+        taken++;
+        if (taken > 4U * AAR_XPORT_INBOX)
+            break;
+    }
+    CHECK(req.op == AAR_OP_FILE_STAT && req.id == id);
+    CHECK(taken > 0U && taken < posted);
     while (aar_xport_get_message(&x, got) == 1) {
-        if (taken < AAR_MSG_CAPACITY)
-            CHECK(got[0] == taken);
-        else
-            CHECK(got[0] == 100U);    /* the first of the second batch */
+        CHECK(got[0] == (uint8_t)taken);
         taken++;
     }
-    CHECK(taken == AAR_XPORT_INBOX);
+    CHECK(taken == posted);
+    CHECK(!aar_xport_sq_blocked(&x));
+    CHECK(aar_xport_release(&x) == AAR_OK);
+}
+
+/* ---- The ringtest on the module: ringflood against zz9k-app-ringtest's logic ---- */
+
+#define RF_INFO 1U
+#define RF_DATA 2U
+#define RF_DONE 3U
+#define RF_PING 5U
+#define RF_PONG 6U
+#define RF_CTRL 7U
+#define RF_ACK 8U
+
+typedef struct {
+    uint32_t mode, seq, counter, busy, pongs, clock;
+    int pend_valid, pend_is_pong;
+    uint8_t pend[AAR_MSG_BYTES];
+} rf_app;
+
+/* One pass of aar_main of templates/ringflood.c: poll, answer, flood. */
+static void rf_app_step(rf_app *a, unsigned passes)
+{
+    uint8_t in[AAR_MSG_BYTES], msg[AAR_MSG_BYTES];
+    unsigned p, i;
+
+    for (p = 0U; p < passes; p++) {
+        a->clock++;
+        if (a->mode == ZZ9K_RT_MODE_FLOOD)
+            a->counter++;
+        if (!a->pend_valid) {
+            CHECK(zzapp_xport_pump(card.rec) >= 0);
+            if (zzapp_xport_take_msg(card.rec, in) == 1) {
+                if (zz9k_rt_get(in, 0) == RF_PING) {
+                    memset(a->pend, 0, sizeof(a->pend));
+                    zz9k_rt_put(a->pend, 0, RF_PONG);
+                    zz9k_rt_put(a->pend, 1, zz9k_rt_get(in, 1));
+                    zz9k_rt_put(a->pend, 2, zz9k_rt_get(in, 2));
+                    zz9k_rt_put(a->pend, 3, zz9k_rt_get(in, 3));
+                    zz9k_rt_put(a->pend, 4, a->clock);
+                    zz9k_rt_put(a->pend, 5, a->counter);
+                    a->pend_valid = 1;
+                    a->pend_is_pong = 1;
+                } else if (zz9k_rt_get(in, 0) == RF_CTRL) {
+                    a->mode = zz9k_rt_get(in, 2);
+                    memset(a->pend, 0, sizeof(a->pend));
+                    zz9k_rt_put(a->pend, 0, RF_ACK);
+                    zz9k_rt_put(a->pend, 1, zz9k_rt_get(in, 1));
+                    zz9k_rt_put(a->pend, 2, a->mode);
+                    zz9k_rt_put(a->pend, 3, a->seq);
+                    zz9k_rt_put(a->pend, 4, a->counter);
+                    a->pend_valid = 1;
+                    a->pend_is_pong = 0;
+                }
+            }
+        }
+        if (a->pend_valid) {
+            int rc = zzapp_xport_post_msg(card.rec, a->pend);
+
+            if (rc == AAR_OK) {
+                a->pend_valid = 0;
+                if (a->pend_is_pong)
+                    a->pongs++;
+            } else {
+                CHECK(rc == AAR_E_BUSY);
+                a->busy++;
+            }
+            continue;
+        }
+        if (a->mode != ZZ9K_RT_MODE_FLOOD)
+            continue;
+        memset(msg, 0, sizeof(msg));
+        zz9k_rt_put(msg, 0, RF_DATA);
+        zz9k_rt_put(msg, 1, a->seq + 1U);
+        zz9k_rt_put(msg, 2, a->clock);
+        zz9k_rt_put(msg, 3, a->counter);
+        for (i = 0U; i < 4U; i++)
+            zz9k_rt_put(msg, 4U + i, zz9k_rt_pattern(a->seq + 1U, i));
+        {
+            int rc = zzapp_xport_post_msg(card.rec, msg);
+
+            if (rc == AAR_OK) {
+                a->seq++;
+            } else {
+                CHECK(rc == AAR_E_BUSY);
+                a->busy++;
+            }
+        }
+    }
+}
+
+typedef struct {
+    aar_xport *x;
+    rf_app *app;
+    unsigned app_per_get;           /* app passes that run per message taken */
+    ZZ9KRingTest t;
+    uint64_t clock;
+    uint32_t ping_id, ctrl_id;
+} rf_client;
+
+static int rf_get(void *ctx, uint8_t m[32])
+{
+    rf_client *c = ctx;
+    int rc;
+
+    /* The app runs while the client reads: on the card both are live. */
+    rf_app_step(c->app, c->app_per_get);
+    rc = aar_xport_get_message(c->x, m);
+    return rc == 1 ? 0 : rc == 0 ? 1 : -1;
+}
+
+static uint64_t rf_now(void *ctx)
+{
+    rf_client *c = ctx;
+
+    return ++c->clock;
+}
+
+/* A bounded drain, as the ringtest tool does between pings and checks. */
+static void rf_drain(rf_client *c)
+{
+    ZZ9KRtIo io;
+    uint32_t taken;
+
+    io.get = rf_get;
+    io.now = rf_now;
+    io.sample = NULL;
+    io.ctx = c;
+    CHECK(zz9k_rt_drain(&c->t, &io, ZZ9K_RT_DRAIN_BATCH, &taken) == 0);
+}
+
+static void rf_ping(rf_client *c)
+{
+    uint8_t ping[AAR_MSG_BYTES];
+    uint32_t id = c->ping_id + 1U;
+
+    zz9k_rt_build_ping(ping, id, c->clock);
+    if (aar_xport_send_message(c->x, ping) == AAR_OK) {
+        zz9k_rt_note_ping(&c->t, id, c->clock);
+        c->ping_id = id;
+    }
+}
+
+static void rf_ctrl(rf_client *c, rf_app *a, uint32_t mode, unsigned app_passes)
+{
+    uint8_t ctrl[AAR_MSG_BYTES];
+    uint32_t id = c->ctrl_id + 1U;
+    unsigned guard;
+
+    zz9k_rt_build_ctrl(ctrl, id, mode);
+    for (guard = 0U; guard < 100000U; guard++) {
+        if (aar_xport_send_message(c->x, ctrl) == AAR_OK) {
+            zz9k_rt_note_ctrl(&c->t, id, mode);
+            c->ctrl_id = id;
+            return;
+        }
+        rf_drain(c);
+        rf_app_step(a, app_passes);
+    }
+    CHECK(0 && "the CTRL never found credit");
+}
+
+static void test_ringflood_logic(void)
+{
+    static rf_client c;
+    static rf_app a;
+    aar_xport x;
+    uint8_t m[AAR_MSG_BYTES];
+    unsigned step, guard;
+    const aar_xport_stats *xs;
+
+    reset_all();
+    claim(&x);
+    memset(&c, 0, sizeof(c));
+    memset(&a, 0, sizeof(a));
+    c.x = &x;
+    c.app = &a;
+    c.app_per_get = 2U;
+    zz9k_rt_init(&c.t);
+
+    /* INFO first, as the app does. */
+    memset(m, 0, sizeof(m));
+    zz9k_rt_put(m, 0, RF_INFO);
+    zz9k_rt_put(m, 1, ZZ9K_RT_VERSION);
+    zz9k_rt_put(m, 2, ZZ9K_RT_NO_COUNTER);
+    CHECK(zzapp_xport_post_msg(card.rec, m) == AAR_OK);
+    rf_drain(&c);
+    CHECK(c.t.have_info);
+
+    /* Idle: only pings, answered. */
+    c.t.phase = ZZ9K_RT_PHASE_IDLE;
+    for (step = 0U; step < 40U; step++) {
+        rf_ping(&c);
+        rf_app_step(&a, 4U);
+        rf_drain(&c);
+    }
+    /* Flood: the app is far faster than the client's bounded drain, so the
+     * inbox fills over and over. */
+    rf_ctrl(&c, &a, ZZ9K_RT_MODE_FLOOD, 4U);
+    c.t.phase = ZZ9K_RT_PHASE_FLOOD;
+    for (step = 0U; step < 600U; step++) {
+        if (step % 5U == 0U)
+            rf_ping(&c);
+        rf_app_step(&a, 300U);
+        rf_drain(&c);
+    }
+    CHECK(a.seq > 10U * AAR_XPORT_INBOX);
+    CHECK(a.busy > 0U);
+    xs = aar_xport_stats_get(&x);
+    CHECK(xs->sq_blocked > 0U);
+    /* Quiet: the ACK must come back in order behind the last DATA. */
+    rf_ctrl(&c, &a, ZZ9K_RT_MODE_QUIET, 300U);
+    for (guard = 0U; guard < 100000U && zz9k_rt_ctrls_outstanding(&c.t); guard++) {
+        rf_app_step(&a, 300U);
+        rf_drain(&c);
+    }
+    CHECK(zz9k_rt_ctrls_outstanding(&c.t) == 0U);
+    /* Idle again, then DONE. */
+    c.t.phase = ZZ9K_RT_PHASE_IDLE;
+    for (step = 0U; step < 40U; step++) {
+        rf_ping(&c);
+        rf_app_step(&a, 4U);
+        rf_drain(&c);
+    }
+    for (guard = 0U; guard < 1000U && zz9k_rt_pings_outstanding(&c.t); guard++) {
+        rf_app_step(&a, 4U);
+        rf_drain(&c);
+    }
+    memset(m, 0, sizeof(m));
+    zz9k_rt_put(m, 0, RF_DONE);
+    zz9k_rt_put(m, 1, a.seq);
+    zz9k_rt_put(m, 2, a.clock);
+    zz9k_rt_put(m, 3, a.counter);
+    zz9k_rt_put(m, 4, a.busy);
+    zz9k_rt_put(m, 5, a.pongs);
+    CHECK(zzapp_xport_post_msg(card.rec, m) == AAR_OK);
+    for (guard = 0U; guard < 100U && !c.t.have_done; guard++)
+        rf_drain(&c);
+    CHECK(c.t.have_done);
+
+    CHECK(c.t.lost == 0U && c.t.gaps == 0U && c.t.reordered == 0U);
+    CHECK(c.t.bad_messages == 0U && c.t.unknown == 0U);
+    CHECK(c.t.messages == a.seq);
+    CHECK(c.t.ack_unmatched == 0U && c.t.ack_count_bad == 0U &&
+          c.t.data_in_quiet == 0U);
+    CHECK(c.t.pings_sent > 100U && zz9k_rt_pings_outstanding(&c.t) == 0U);
+    CHECK(c.t.rtt[ZZ9K_RT_PHASE_FLOOD].n >= ZZ9K_RT_MIN_PONGS);
+    CHECK(c.t.rtt[ZZ9K_RT_PHASE_IDLE].n >= ZZ9K_RT_MIN_PONGS);
+    CHECK(c.t.pong_count_bad == 0U && c.t.tail_lost == 0U);
+    CHECK(zz9k_rt_failures(&c.t) == 0U);
+    CHECK(zzapp_xport_stats(card.rec)->msgs_overflow == 0U);
     CHECK(aar_xport_release(&x) == AAR_OK);
 }
 
@@ -1438,6 +1769,101 @@ static void test_audio_ring(void)
     CHECK(aar_xport_release(&x) == AAR_OK);
 }
 
+/* The ring's index words are shared with the app, which reads and writes each
+ * with one 32-bit access. The module must do the same, or a carry out of the
+ * low byte (0x00ff to 0x0100) shows the other side a half-written word. The
+ * app side is played by a thread that touches the words only with 32-bit
+ * atomic accesses, as the ARM does. */
+typedef struct {
+    volatile uint8_t *ring;
+    int stop;
+    uint32_t bad;                   /* observations that were never a real value */
+} tear_ctx_t;
+
+static void *flip_write_thread(void *arg)
+{
+    tear_ctx_t *c = arg;
+    volatile uint32_t *w = (volatile uint32_t *)(volatile void *)(c->ring + AAR_AUDIO_RING_WRITE_FRAME);
+
+    while (!__atomic_load_n(&c->stop, __ATOMIC_RELAXED)) {
+        __atomic_store_n(w, 0x000000ffU, __ATOMIC_RELAXED);
+        __atomic_store_n(w, 0x00000100U, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+static void *watch_read_thread(void *arg)
+{
+    tear_ctx_t *c = arg;
+    volatile uint32_t *r = (volatile uint32_t *)(volatile void *)(c->ring + AAR_AUDIO_RING_READ_FRAME);
+
+    while (!__atomic_load_n(&c->stop, __ATOMIC_RELAXED)) {
+        uint32_t v = __atomic_load_n(r, __ATOMIC_RELAXED);
+
+        /* The test only ever stores 0xff, and the module stores 0x100. */
+        if (v != 0xffU && v != 0x100U)
+            c->bad++;
+    }
+    return NULL;
+}
+
+static void test_audio_ring_words_are_never_torn(void)
+{
+    aar_xport x;
+    zzapp_xport_buf_t ring;
+    volatile uint8_t *r;
+    tear_ctx_t ctx;
+    pthread_t th;
+    int16_t out[2];
+    uint32_t got, i, bad = 0U;
+    const uint32_t frames = 1024U;
+
+    reset_all();
+    claim(&x);
+    CHECK(zzapp_xport_block_alloc(card.rec, ZZAPP_XPORT_BLOCK_AUDIO,
+                                  ZZAPP_XPORT_AUDIO_BYTES(frames), &ring) == AAR_OK);
+    r = ring.ptr;
+    write_le32(r + AAR_AUDIO_RING_RATE, 22050U);
+    write_le32(r + AAR_AUDIO_RING_CHANNELS, 2U);
+    write_le32(r + AAR_AUDIO_RING_FORMAT, AAR_AUDIO_FORMAT_S16LE);
+    CHECK(aar_xport_audio_attach(&x, ring.token, ring.bytes, frames) == AAR_OK);
+
+    /* The module reads write_frame while the app moves it across a carry. */
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.ring = r;
+    write_le32(r + AAR_AUDIO_RING_WRITE_FRAME, 0xffU);
+    CHECK(pthread_create(&th, NULL, flip_write_thread, &ctx) == 0);
+    for (i = 0U; i < 3000000U; i++) {
+        uint32_t n = aar_xport_audio_available(&x);
+
+        if (n != 0xffU && n != 0x100U)
+            bad++;
+    }
+    __atomic_store_n(&ctx.stop, 1, __ATOMIC_RELAXED);
+    pthread_join(th, NULL);
+    CHECK(bad == 0U);
+
+    /* The module writes read_frame (0xff to 0x100, a carry every time) while
+     * the app watches it. */
+    write_le32(r + AAR_AUDIO_RING_WRITE_FRAME, 0x100U);
+    write_le32(r + AAR_AUDIO_RING_READ_FRAME, 0xffU);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.ring = r;
+    CHECK(pthread_create(&th, NULL, watch_read_thread, &ctx) == 0);
+    for (i = 0U; i < 3000000U; i++) {
+        __atomic_store_n((volatile uint32_t *)(volatile void *)(r + AAR_AUDIO_RING_READ_FRAME),
+                         0xffU, __ATOMIC_RELAXED);
+        if (aar_xport_audio_read(&x, out, 1U, &got) != AAR_OK || got != 1U)
+            bad++;
+    }
+    __atomic_store_n(&ctx.stop, 1, __ATOMIC_RELAXED);
+    pthread_join(th, NULL);
+    CHECK(bad == 0U);
+    CHECK(ctx.bad == 0U);
+    CHECK(read_le32(r + AAR_AUDIO_RING_READ_FRAME) == 0x100U);
+    CHECK(aar_xport_release(&x) == AAR_OK);
+}
+
 static void test_corrupt_queue(void)
 {
     aar_xport x;
@@ -1639,10 +2065,12 @@ int main(void)
     test_open_and_refusal();
     test_query_and_list();
     test_requests_end_to_end();
+    test_list_names_cross_the_request_buffer();
     test_mapping_cache();
     test_bad_buffer_is_refused();
     test_messages_and_credits();
-    test_inbox_overflow_is_counted();
+    test_full_inbox_holds_messages_at_the_head();
+    test_ringflood_logic();
     test_events_coalescing_and_drops();
     test_logs();
     test_log_sink();
@@ -1654,6 +2082,7 @@ int main(void)
     test_staleness_after_revocation();
     test_teardown_returns_everything();
     test_audio_ring();
+    test_audio_ring_words_are_never_torn();
     test_corrupt_queue();
     test_two_threads();
     printf("aar_xport_zz9000: %d checks, %d failures\n", checks, failures);

@@ -557,9 +557,9 @@ stop:
   {
     const aar_xport_stats *xs = aar_xport_stats_get(&app);
 
-    printf("  transport: %lu messages sent, %lu taken, %lu lost to a full "
-           "inbox, %lu doorbells\n", (unsigned long)xs->msgs_sent,
-           (unsigned long)xs->msgs_taken, (unsigned long)xs->msgs_overflow,
+    printf("  transport: %lu messages sent, %lu taken, %lu passes held at a "
+           "full inbox, %lu doorbells\n", (unsigned long)xs->msgs_sent,
+           (unsigned long)xs->msgs_taken, (unsigned long)xs->sq_blocked,
            (unsigned long)xs->kicks);
   }
   goto finish;

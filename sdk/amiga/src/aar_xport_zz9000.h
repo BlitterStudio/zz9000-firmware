@@ -160,7 +160,7 @@ typedef struct aar_xport_stats {
 	uint32_t bad_buf;               /* requests whose buffer did not map */
 	uint32_t bad_entries;           /* SQ entries of an op the client does not take */
 	uint32_t msgs_taken;            /* messages moved into the inbox */
-	uint32_t msgs_overflow;         /* messages lost to a full inbox */
+	uint32_t sq_blocked;            /* pump passes that stopped at a message the full inbox could not take */
 	uint32_t msgs_sent;
 	uint32_t logs;                  /* log records delivered to the sink */
 	uint32_t logs_unclaimed;        /* log records dropped, no sink */
@@ -192,6 +192,7 @@ typedef struct aar_xport {
 	/* messages from the app */
 	uint8_t inbox[AAR_XPORT_INBOX][AAR_MSG_BYTES];
 	uint32_t inbox_head, inbox_tail;
+	uint8_t sq_blocked;             /* the SQ head is a message the inbox cannot take */
 	void (*log_sink)(void *user, const void *data, uint32_t len);
 	void *log_user;
 	/* events */
@@ -317,12 +318,22 @@ typedef struct aar_xport_req {
 /*
  * The next request on the SQ: 1 with *req filled (out[], result, reply_flags
  * zeroed), 0 when none, AAR_E_IO on corrupt indices. Messages and logs in
- * front of it are moved aside (to the inbox, to the log sink), so a request
- * is never stuck behind them. A request whose buffer does not map is answered
- * AAR_E_INVAL here and not returned. Also sends a pending doorbell and posts
- * a coalesced mouse event the CQ had no room for.
+ * front of it are moved aside (to the inbox, to the log sink). A request
+ * whose buffer does not map is answered AAR_E_INVAL here and not returned.
+ * Also sends a pending doorbell and posts a coalesced mouse event the CQ had
+ * no room for.
+ *
+ * Head of line: a message stays at the SQ head while the inbox is full (the
+ * app then sees the queue fill and gets AAR_E_BUSY from its message post), and
+ * every request behind it waits too. 0 is returned and aar_xport_sq_blocked()
+ * says why. The owner must drain messages (aar_xport_get_message) as well as
+ * serve requests. Requests behind the held message resume only after that
+ * consumer makes room; the module neither bypasses the FIFO nor drops data.
  */
 int aar_xport_service_next(aar_xport *x, aar_xport_req *req);
+/* 1 when the last pass over the SQ stopped at a message the full inbox could
+ * not take, so the requests behind it cannot be reached yet. */
+int aar_xport_sq_blocked(const aar_xport *x);
 /*
  * Completes `req`: posts the completion on the CQ, then rings the doorbell
  * (KICK, coalesced). Write any payload bytes the completion names first.
