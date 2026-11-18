@@ -14,7 +14,6 @@
 #include <string.h>
 
 #include "aar/app.h"
-#define ZZAPP_PROTO_NO_WINDOW
 #include "zzapp_proto.h"
 #include "zzapp_state.h"
 #include "zzapp_xport.h"
@@ -145,13 +144,6 @@ int __attribute__((weak)) zzapp_services_retire_wire(struct zzapp_rec *rec)
 void __attribute__((weak)) zzapp_services_expire_claims(uint64_t now)
 {
     (void)now;
-}
-
-void __attribute__((weak)) zzapp_services_set_low_memory_crossings(
-    uint32_t pid, uint32_t crossings)
-{
-    (void)pid;
-    (void)crossings;
 }
 
 int __attribute__((weak)) zzapp_services_wait_registered(uint32_t pid)
@@ -703,7 +695,6 @@ void zzapp_host_reset_low_memory(uint32_t pid)
     if (!rec)
         return;
     __atomic_store_n(&rec->host.low_memory_pending, 0u, __ATOMIC_RELAXED);
-    __atomic_store_n(&rec->host.low_memory_crossings, 0u, __ATOMIC_RELAXED);
 }
 
 /* Services admitted the record and published the claim (under its lock). */
@@ -765,9 +756,6 @@ void zzapp_host_low_memory(void *context)
         if (!__atomic_load_n(&rec->coh.running, __ATOMIC_ACQUIRE))
             continue;
         __atomic_add_fetch(&host->low_memory_pending, 1u, __ATOMIC_RELAXED);
-        zzapp_services_set_low_memory_crossings(
-            pid, __atomic_add_fetch(&host->low_memory_crossings, 1u,
-                                    __ATOMIC_RELAXED));
     }
 }
 

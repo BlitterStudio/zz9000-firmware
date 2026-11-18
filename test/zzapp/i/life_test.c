@@ -9,7 +9,6 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #define _GNU_SOURCE
-#define ZZAPP_PROTO_NO_WINDOW
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>

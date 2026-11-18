@@ -10,11 +10,6 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-/* The private wire alone: no window protocol. */
-#ifndef ZZAPP_PROTO_NO_WINDOW
-#define ZZAPP_PROTO_NO_WINDOW
-#endif
-
 #include "zzapp_services.h"
 
 #include <stddef.h>
@@ -2710,11 +2705,6 @@ int zzapp_display_latest(void)
 	struct zzapp_service_runtime *state = current_runtime();
 
 	return state && display_mailbox_enabled();
-}
-
-uint32_t zzapp_services_flags(void)
-{
-	return zzapp_display_latest() ? ZZAPP_F_MAILBOX : 0U;
 }
 
 /* One record of the vblank pass; the caller holds g_slot_state_lock. */

@@ -44,7 +44,6 @@
 #include "sdk_aperture_layout.h"
 #include "sdk_smp_lock.h"
 #include "memorymap.h"
-#define ZZAPP_PROTO_NO_WINDOW
 #include "zzapp_proto.h"
 #include "zzapp_services.h"
 #include "card_pool.h"

@@ -13,4 +13,4 @@ SVC_XPORT_TEST_DEPS := $(FW)/zzapp_services.c $(FW)/zzapp_services.h \
 $(BUILD)/c/svc_xport_test: $(SVC_XPORT_TEST_SOURCES) $(SVC_XPORT_TEST_DEPS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -fno-pie -no-pie -DMMU_PAGE_HOST_TEST \
-		-DZZAPP_PROTO_NO_WINDOW -DSMP_LOCK_HOST_TEST -I../card_pool -I../mmu/mock -o $@ $(SVC_XPORT_TEST_SOURCES)
+		-DSMP_LOCK_HOST_TEST -I../card_pool -I../mmu/mock -o $@ $(SVC_XPORT_TEST_SOURCES)

@@ -1457,7 +1457,7 @@ static void test_display_pan(void)
 	CHECK(word(&c, AAR_CB_FLAGS) & AAR_CBF_DISPLAY);
 	CHECK(set_display.count == 1U);
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_E_BUSY);
-	CHECK(zzapp_display_latest() == 0 && zzapp_services_flags() == 0U);
+	CHECK(zzapp_display_latest() == 0);
 
 	/* A flip is a request; the completion with SUBMITTED leaves the
 	 * acknowledgement to the vertical blank, which shows the flip address. */
@@ -1678,7 +1678,7 @@ static void test_display_latest(void)
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_LATEST, &s) ==
 	      AAR_OK);
 	CHECK(s.caps & AAR_DISPCAP_LATEST);
-	CHECK(zzapp_display_latest() == 1 && (zzapp_services_flags() & ZZAPP_F_MAILBOX));
+	CHECK(zzapp_display_latest() == 1);
 	CHECK(zzapp_svc_display_latest_dropped() == 0U);
 	/* The card owns these flips: the client sees only the open. */
 	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);

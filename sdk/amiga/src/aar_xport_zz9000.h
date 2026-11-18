@@ -49,9 +49,6 @@
 #include "aar/app.h"
 #include "aar/transport.h"
 
-#ifndef ZZAPP_PROTO_NO_WINDOW
-#define ZZAPP_PROTO_NO_WINDOW 1
-#endif
 #include "zzapp_proto.h"
 
 #if defined(__amigaos__) || defined(__amiga__) || defined(__AMIGA__)

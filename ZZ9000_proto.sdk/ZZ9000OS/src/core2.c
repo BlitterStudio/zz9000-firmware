@@ -22,7 +22,7 @@
 #include "zzm_runtime.h"
 #include "zzapp_runtime.h"
 #include "cpu_tls.h"
-#include "zzapp_proto.h"
+#include "zzapp_state.h"
 #include "interrupt.h"
 #include "zzapp_services.h"
 

@@ -296,7 +296,7 @@ static void test_host_window_palette_and_app_guard(void)
     window = services->get_service(ZZM_SERVICE_HOST_WINDOW, ZZM_SERVICE_HOST_WINDOW_V3);
     palette = services->get_service(ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
     app_host = services->get_service(ZZM_SERVICE_APP_GL_HOST,
-                                     ZZM_SERVICE_APP_GL_HOST_V3);
+                                     ZZM_SERVICE_APP_GL_HOST_V4);
     CHECK(reclaim->create_owner(4U, ZZM_RUNTIME_OWNER_CLASS_MINIGL_TRANSPORT,
                                 0U, CARD_POOL_PAGE_BYTES, &owner));
     CHECK(window->alloc(owner, 0x91000U, 4096U, &allocation));

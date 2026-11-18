@@ -212,7 +212,6 @@ typedef struct {
 	uint32_t stop_svc_number;
 	uint32_t stop_diagnostics_valid;
 	volatile uint32_t low_memory_pending;
-	volatile uint32_t low_memory_crossings;
 	/* ZZAPP_EXIT_* : a normal exit's teardown is owed from the exit call
 	 * until it ends. Core 1 writes, core 0 reads with acquire. It survives
 	 * the loader's unbind, which clears the rest of this block. */

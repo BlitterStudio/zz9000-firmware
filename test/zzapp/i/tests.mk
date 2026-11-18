@@ -13,10 +13,10 @@ $(BUILD)/i/xport_test: $(XPORT_TEST_SOURCES) $(XPORT_TEST_DEPS) | $(BUILD)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -fno-pie -no-pie -pthread -DMMU_PAGE_HOST_TEST \
 		-DSMP_LOCK_HOST_TEST -I../card_pool -I../mmu/mock -o $@ $(XPORT_TEST_SOURCES)
 
-# The private wire, on its own: no window protocol shim.
+# The private wire, on its own.
 $(BUILD)/i/proto_wire_test: i/proto_wire_test.c $(FW)/zzapp_proto.h | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -DZZAPP_PROTO_NO_WINDOW -I$(FW) \
+	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -I$(FW) \
 		-o $@ i/proto_wire_test.c
 
 # The lifecycle on the transport: host.c and the loader over the record arena,

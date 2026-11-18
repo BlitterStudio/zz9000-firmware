@@ -7,7 +7,6 @@
 #ifndef ZZAPP_HOST_DEFERRED_TEST
 #define ZZAPP_HOST_DEFERRED_TEST
 #endif
-#define ZZAPP_PROTO_NO_WINDOW
 #include "zzapp_services.c"
 #include "host_card_pool.h"
 #include "aar_note_image.h"

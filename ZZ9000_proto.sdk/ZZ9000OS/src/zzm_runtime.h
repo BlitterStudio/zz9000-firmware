@@ -43,7 +43,8 @@ enum zzm_service_id {
 #define ZZM_SERVICE_RECLAIM_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_HOST_WINDOW_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_PALETTE_V3 ZZM_SERVICE_VERSION(3U, 0U)
-#define ZZM_SERVICE_APP_GL_HOST_V3 ZZM_SERVICE_VERSION(3U, 0U)
+/* V4: display_flags became display_latest (1 while the display is card-owned). */
+#define ZZM_SERVICE_APP_GL_HOST_V4 ZZM_SERVICE_VERSION(4U, 0U)
 #define ZZM_SERVICE_PROFILE_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_TRANSPORT_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_GRAPHICS_HW_V3 ZZM_SERVICE_VERSION(3U, 0U)
@@ -181,7 +182,7 @@ typedef struct zzm_app_gl_host_service {
     int (*flip_idle)(uint32_t generation);
     uint32_t (*generation)(void);
     int (*display_layout)(uint32_t *layout);
-    uint32_t (*display_flags)(void);
+    int (*display_latest)(void);
     int (*stop_requested)(void);
     void (*yield_wait)(void);
     /* Blocks the calling app thread until the bound display's last flip is

@@ -32,12 +32,6 @@ struct zzapp_rec;
 #define SDK_STATUS_NOT_FOUND       10u
 #endif
 
-/* The bit zzapp_services_flags() reports while a card-owned (LATEST) display
- * is active. zzapp_gl.c tests it; zzapp_display_latest() says the same. */
-#ifndef ZZAPP_F_MAILBOX
-#define ZZAPP_F_MAILBOX            (1u << 15)
-#endif
-
 /* Amiga reset, once, after the host retired every record and before the
  * allocator is reset: every held shell is released and gives its buffers back,
  * quarantines are dropped (a shell with an audio detach still owed to core 0,
@@ -85,10 +79,6 @@ void zzapp_services_note_progress(uint32_t lo, uint32_t hi);
 void zzapp_services_set_terminal(uint32_t reason);
 /* Core 0: ends a claim whose lease ran out while it was CLAIMED or LOADING. */
 void zzapp_services_expire_claims(uint64_t now_us);
-/* ZZAPP_F_MAILBOX while the selected record's display is card-owned (LATEST),
- * else 0. */
-uint32_t zzapp_services_flags(void);
-
 /* After poll: nonzero means START is waiting for the worker to enter. Copy
  * argv from the load buffer, then start_entered with the captured generation
  * before publishing RUNNING or branching into the app. */

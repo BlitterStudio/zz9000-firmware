@@ -19,7 +19,6 @@
  * stay for the client).
  */
 #define ZZAPP_SERVICES_STANDALONE_TEST
-#define ZZAPP_PROTO_NO_WINDOW
 #include "zzapp_services.c"
 
 #include "svc_env.h"

@@ -16,10 +16,7 @@
  *
  * The launcher window of the earlier protocol (life block, rings, file wire,
  * slots, ZZAPP_OP_ALLOC_WINDOW, ZZAPP_OP_STATUS, ZZAPP_OP_DISPLAY_BIND) is
- * gone. Until the firmware files that still use it are ported, the last
- * section of this file includes zzapp_proto_window.h, which carries those
- * definitions. A file that no longer needs them defines ZZAPP_PROTO_NO_WINDOW
- * before including this header and then sees this wire alone.
+ * gone; ZZAPP_OP_CLAIM is the admission and the control block replaces STATUS.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -367,11 +364,5 @@ static inline void zzapp_build_list_request(
 {
     zzapp_put_be32(payload + ZZAPP_LIST_CURSOR, cursor);
 }
-
-/* ---- The window protocol this one replaces ------------------------------ */
-
-#ifndef ZZAPP_PROTO_NO_WINDOW
-#include "zzapp_proto_window.h"
-#endif
 
 #endif /* ZZAPP_PROTO_H */

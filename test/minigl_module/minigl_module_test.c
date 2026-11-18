@@ -78,7 +78,7 @@ static uint32_t display_format = 2U;
 static uint32_t display_front = 0x08000000U;
 static uint32_t display_back = 0x08000000U;
 static uint32_t display_layout = 5U;
-static uint32_t display_flags;
+static int display_latest;
 static int flip_idle = 1;
 static int hold_flip;
 static unsigned wait_yields;
@@ -482,16 +482,12 @@ int zzapp_display_layout(uint32_t *layout)
     *layout = display_layout;
     return 0;
 }
-int zzapp_display_flip_bound(void)
-{
-    if (hold_flip)
-        flip_idle = 0;
-    return 0;
-}
 int zzapp_svc_display_flip(uint32_t surface_id)
 {
     (void)surface_id;
-    return zzapp_display_flip_bound();
+    if (hold_flip)
+        flip_idle = 0;
+    return 0;
 }
 
 int zzapp_svc_display_flip_async(uint32_t surface_id)
@@ -511,7 +507,7 @@ int zzapp_display_wait_flip_idle(void)
     flip_idle = 1;
     return 0;
 }
-uint32_t zzapp_services_flags(void) { return display_flags; }
+int zzapp_display_latest(void) { return display_latest; }
 int zzapp_services_stop_requested(void) { return 0; }
 void zzapp_host_yield_wait(void)
 {
@@ -1658,7 +1654,7 @@ int main(void)
     display_front = 0x08000000U;
     display_back = 0x08100000U;
     display_layout = 2U;
-    display_flags = 1U << 15;
+    display_latest = 1;
     assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_DIRECT_PRESENT, &gl) == 0);
     assert(amiberry_transport_inproc_ctx()->state.target.buffer_count == 3U);
     assert(ops->app_swap(context) == 0);
@@ -1753,7 +1749,7 @@ int main(void)
     display_height = 2U;
     display_front = 0x08000000U;
     display_back = 0x08100000U;
-    display_flags = 0U;
+    display_latest = 0;
     display_format = 1U;
     display_layout = 1U;
     display_pitch = 8U;
@@ -1788,7 +1784,7 @@ int main(void)
     display_format = 1U;
     display_layout = 2U;
 
-    display_flags = 0U;
+    display_latest = 0;
     hold_flip = 1;
     flip_idle = 1;
     flip_waits = 0U;

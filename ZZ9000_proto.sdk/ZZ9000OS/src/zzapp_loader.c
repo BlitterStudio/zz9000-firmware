@@ -17,7 +17,6 @@
 #include <string.h>
 
 #include "aar/app.h"
-#define ZZAPP_PROTO_NO_WINDOW
 #include "zzapp_proto.h"
 #include "zzapp_state.h"
 #include "zzapp_runtime.h"
