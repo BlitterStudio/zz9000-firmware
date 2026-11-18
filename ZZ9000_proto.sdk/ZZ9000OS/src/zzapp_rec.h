@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Vocabulary (slice 5b):
- *   window  a wire-layer launcher window, ZZAPP_SLOT_COUNT of them.
  *   pid     process-record index, 0 .. capacity - 1. The same index always
  *           names the same record, stack, L1 table and table pages.
  *   handle  (generation << 16) | pid, built with aar_handle_make(). Never 0.
@@ -57,13 +56,11 @@
 #define ZZAPP_REC_GL_PAGE_OFFSET  0x1000U
 
 #define ZZAPP_PID_NONE          0xffffffffU
-/* SHIM (window protocol, delete with zzapp_services.c's window code). */
-#define ZZAPP_REC_NO_WINDOW     0xffffU
 
 /* Record state. Core 0 and core 1 publish transitions with release stores. */
 typedef enum {
 	ZZAPP_REC_FREE = 0,
-	/* Admitted, not yet published to the launcher; core 0 may still undo. */
+	/* Admitted, not yet published to the client; core 0 may still undo. */
 	ZZAPP_REC_CLAIMED,
 	ZZAPP_REC_LIVE,
 	/* Retire started. Never goes back. */
@@ -86,7 +83,8 @@ typedef enum {
 	ZZAPP_RETIRE_TABLES,
 	/* 5: commit ledger released. */
 	ZZAPP_RETIRE_COMMIT,
-	/* 6: wire layer detached from the window. Step 7 is zzapp_rec_free(). */
+	/* 6: services published IDLE and freed the record or held the shell (and
+	 * its transport) for the client's release. Step 7 is zzapp_rec_free(). */
 	ZZAPP_RETIRE_WIRE
 } zzapp_retire_stage_t;
 
@@ -105,7 +103,7 @@ typedef struct {
 	uint32_t kstack_top;     /* one past the highest byte */
 	uint32_t tables;         /* 8 KiB: user API page, user GL page */
 	uint32_t l1;             /* this index's L1 table */
-	uint16_t window;         /* SHIM: window protocol only; ZZAPP_REC_NO_WINDOW */
+	uint16_t reserved16;
 	uint8_t  retire_stage;   /* zzapp_retire_stage_t */
 	uint8_t  reserved8;
 	uint32_t flags;
@@ -148,8 +146,8 @@ typedef struct {
 	uint32_t reserved[2];
 } zzapp_rec_kernel_t;
 
-/* Launcher-facing claim state that follows the app (was struct
- * zzapp_service_slot, less the window-only fields). 64 bytes. */
+/* Client-facing claim state that follows the app (limits, load progress,
+ * reasons, the client capability word). 64 bytes. */
 typedef struct {
 	uint32_t wire_generation;
 	uint32_t state;
@@ -477,15 +475,6 @@ void *zzapp_rec_tables(uint32_t pid);
  * A refusal changes nothing the table can observe. The record is CLAIMED.
  */
 uint32_t zzapp_rec_admit(uint32_t *handle, zzapp_rec_t **rec);
-/* SHIM: the window form, for callers that still bind a window. It calls
- * zzapp_rec_admit() and records `window` in hdr.window. The macro below
- * picks it by argument count, so existing three-argument calls compile. */
-uint32_t zzapp_rec_admit_window(uint32_t window, uint32_t *handle,
-				zzapp_rec_t **rec);
-#define ZZAPP_REC_ADMIT_PICK(a, b, c, name, ...) name
-#define zzapp_rec_admit(...) \
-	ZZAPP_REC_ADMIT_PICK(__VA_ARGS__, zzapp_rec_admit_window, \
-			     zzapp_rec_admit, unused)(__VA_ARGS__)
 /*
  * Undo a claim that failed before publication: the reserve returns, the index
  * goes back to the head of the free queue, and its generation, the queue and
