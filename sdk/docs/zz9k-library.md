@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 40 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 41 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -92,138 +92,96 @@ sends `ZZ9K_OP_CLIENT_RELEASE` and resubmits it while the firmware answers
 sessions, streams and buffers still finishing on the ARM side -- before that
 opener's owned resources are reclaimed.
 
-Revision 39 makes ARM-app `LOAD_END` waits progress-aware. Firmware that
-advertises `ZZ9K_APP_CAP_LOAD_PROGRESS` increments lifecycle offset `0x68`
-after every incremental loader step; each change resets the library's normal
-five-second inactivity deadline, so progressing loads may run longer than the
-30-second firmware lease window. A stalled load still times out after five
-seconds. Older firmware has no progress signal, so revision 39 retains a
-fixed 32-second lease-covering fallback for it.
-
-Revision 40 releases the app slot of an owner task that is gone without
-`ZZ9KAppClose`, and adds `ZZ9KAppSetLimits` for the launcher memory cap and
-the host-visible limit; both are described under [ARM app client](#arm-app-client).
+Revision 41 removes the `ZZ9KApp*` calls (LVOs `-354` to `-414`: `ZZ9KAppOpen`,
+`LoadFile`, `LoadMemory`, `Start`, `Stop`, `Status`, `SendMessage`,
+`GetMessage`, `MessageSignal`, `Close` and `SetLimits`) together with the
+VBlank lease they used and the owner check of app handles. The vector table
+ends at `ZZ9KAudioStreamBeginEx` (`-348`), 54 public functions. Nothing of
+the removed interface was released to users. The owner check of client ids
+stays: the service task still releases the opener record and the client id of
+a task that is gone without `CloseLibrary()`.
 
 ## ARM app client
 
-Revision 35 adds an Amiga-side client for the ARM app runtime. Include
-`proto/zz9k.h` and require `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT`. The API is:
+Programs reach the ARM app runtime through the client transport module
+`sdk/amiga/src/aar_xport_zz9000.[ch]`, which they link statically (ZZRun and
+the SDK tools do). It claims an app, maps its control block and its pair of
+queues with `mmu.library`, loads and starts the image, serves the requests
+the app posts, exchanges messages and input events, renews the lease and
+releases the claim. `zz9k.library` (revision 36 or later) carries only the
+mailbox calls underneath it. The wire is the one of `aar/transport.h` (queue
+entries, control block, message credits) plus the private mailbox operations
+of `zzapp_proto.h`; the module includes both, so a build needs the aar
+headers pinned in `sdk/AAR_REF` (`sh scripts/fetch-aar.sh`) and
+`zzapp_proto.h`.
 
 ```c
-int ZZ9KAppOpen(ZZ9KAppHandle **handle, struct MsgPort *notify_port);
-int ZZ9KAppLoadFile(ZZ9KAppHandle *handle, const char *path);
-int ZZ9KAppLoadMemory(ZZ9KAppHandle *handle, const void *data, uint32_t length);
-int ZZ9KAppStart(ZZ9KAppHandle *handle, const char *const *argv, uint32_t argc);
-int ZZ9KAppStop(ZZ9KAppHandle *handle);
-int ZZ9KAppStatus(ZZ9KAppHandle *handle, ZZ9KAppStatusInfo *status);
-int ZZ9KAppSendMessage(ZZ9KAppHandle *handle, const ZZ9KAppMessage *message);
-int ZZ9KAppGetMessage(ZZ9KAppHandle *handle, ZZ9KAppMessage *message);
-uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);
-void ZZ9KAppClose(ZZ9KAppHandle *handle);
-int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib, uint32_t host_visible_mib);
+aar_xport_board board;
+aar_xport app;
+uint32_t reason;
+
+aar_xport_amiga_board_open(&board);          /* zz9k.library, board, mmu.library */
+aar_xport_open(&app, &board, &reason);       /* QUERY, CLAIM, map, bind queues */
+aar_xport_set_limits(&app, private_mib, shared_mib, weight);  /* optional */
+aar_xport_load_file(&app, "RAM:echo.elf", 0);                 /* or load_memory */
+aar_xport_start(&app, argv, argc);
+for (;;) {                                   /* the poll loop */
+    aar_xport_lease_renew(&app);             /* about every 100 ms */
+    while (aar_xport_service_next(&app, &req) == 1) {
+        /* serve req.op with req.arg[], req.ptr (mapped buffer) ... */
+        aar_xport_service_reply(&app, &req); /* result, out[], reply_flags */
+    }
+    /* aar_xport_get_message / send_message / post_event ... */
+}
+aar_xport_release(&app);                     /* the card returns everything */
+aar_xport_amiga_board_close(&board);
 ```
 
-`ZZ9KAppStart` passes `argv` to the app unchanged. Put the program name in
-`argv[0]`, as ZZRun does, so the app sees a standard C argument vector.
+Points that matter to a caller:
 
-A `ZZ9KAppHandle` belongs to the task that calls `ZZ9KAppOpen`. Do not pass it
-to another task: only its owner can operate on it or close it. `Open` checks
-for Zorro III, app-runtime ABI major 0, and an Amiga `mmu.library` mapping
-that can keep the shared window cache-inhibited for the handle lifetime. When
-the extended `QUERY` reply advertises `ZZ9K_APP_CAP_SLOTS`, the library can
-open up to `ZZ9K_APP_SLOT_COUNT` (four) handles. Each one claims its own
-window and generation, so a stale generation or terminal state affects only
-that handle; a new claim detaches a stale handle while leaving it safe to
-close. A claimed slot that does not begin loading expires after two seconds.
-If `Open` cannot finish setup after a successful claim, it cancels that claim.
-With firmware that lacks that cap, the library retains the single-slot behaviour: one
-handle claims legacy slot 0 and a second `Open` returns `ZZ9K_STATUS_BUSY`.
-Legacy firmware assigns that handle's generation at `LOAD_BEGIN`, so `Open`
-also succeeds while the unloaded window reports generation zero. `LoadFile`
-streams the ELF through the handle's runtime staging window; `LoadMemory`
-accepts at most 16 MiB. `Start` copies no more than 16 argv strings of 127
-bytes each. `Status` returns the fault/exit snapshot for its handle.
-
-`ZZ9KAppMessage` is exactly 32 opaque bytes. Send returns `ZZ9K_STATUS_BUSY`
-when the host-to-app ring is full; get returns it when the app-to-host ring is
-empty. The library's real Amiga VBlank interrupt server renews every active
-handle's runtime lease independently of the caller's task and a concurrent
-load. It signals `ZZ9KAppMessageSignal(handle)` for an app message, exit, or
-fault. When a `notify_port` was supplied, it posts one coalesced
-`ZZ9KAppEvent`. Dequeue that event before draining messages with
-`ZZ9KAppGetMessage`; the library posts the next event only after the previous
-one has left the port. Before `Close`, drain the port, then call
-`ZZ9KAppGetMessage` until it returns `ZZ9K_STATUS_BUSY`.
-
-Always call `ZZ9KAppClose`: it stops only the generation loaded by that handle
-and releases the owner. Closing the owning task's final `zz9k.library`
-reference performs the same cleanup; another opener cannot release that
-task's signal.
-
-Revision 40 also releases a handle whose owning task is gone without `Close`.
-About once a second (50 vertical blanks) the library's service task checks
-each claimed handle's owner against Exec's task lists, with interrupts
-disabled for the walk: the running task, `TaskReady`, and `TaskWait`. The
-interrupt server only counts vertical blanks. A handle whose owner is gone is
-marked dead at that check and stops receiving lease renewals from then on. The
-service task then stops the generation, frees the slot, and answers a late
-call on the stale pointer with
-`ZZ9K_STATUS_BAD_HANDLE`. It frees the handle record unless the handle has an
-event posted to its notify port: that message lives in the record, and the
-port can outlive the owner, so such a record is kept until the library's last
-close. It does not free the dead task's message signal and does not touch its
-notify port. It also releases the dead task's opener
-record and sends `ZZ9K_OP_CLIENT_RELEASE` for its client id, as the final
-`CloseLibrary()` would; the library's open count stays as it was, because no
-`CloseLibrary()` from that task will lower it. Exactly one side frees an
-opener: a `CloseLibrary()` already releasing it is left alone by the service
-task, and a record the service task has already taken is left to it by a
-later `CloseLibrary()`. The library's last `CloseLibrary()` finishes every
-release the firmware had answered with `ZZ9K_STATUS_BUSY`, retrying until it
-is accepted and freeing the record, before it stops the service task.
-
-Exec can give a dead task's address to a new task, so an address alone does
-not identify the owner. The library records the owner's name pointer, node
-type, and CLI task number at `Open`, and an owner counts as present only while
-the task at that address still has all three and still holds the signal bit
-the library allocated from it. A task that points its node name at another
-string after `Open` therefore counts as gone, and within about a second its
-app is stopped and its handle answers `ZZ9K_STATUS_BAD_HANDLE`, although the
-task is still running. A new task that matches every field is taken for
-the owner and keeps the slot, as it did before revision 40. A foreground
-shell command that ends without `Close` leaves its shell process alive, so
-this check does not see it: the owner exists, and the library goes on renewing
-the handle's lease while it stays open. The slot is then held until the shell
-process ends, `ZZ9KAppClose` is called by that task, or the Amiga resets.
-
-```c
-int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib,
-                     uint32_t host_visible_mib);
-```
-
-`ZZ9KAppSetLimits` sets the limits the next `LoadFile` or `LoadMemory` sends
-with `LOAD_BEGIN`; call it from the owning task between `Open` and the load.
-It returns `ZZ9K_STATUS_BUSY` once a load has begun on the handle and when
-another task calls it, `ZZ9K_STATUS_BAD_HANDLE` for a handle that is not live
-or no longer holds its slot, and `ZZ9K_STATUS_BAD_REQUEST` for a value above
-4095. Require
-`ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS`. Both values are in MiB, and zero
-keeps the firmware default. `max_mib` caps the app's private memory.
-`host_visible_mib` is the app's host-visible limit, 16 MiB by default. It is a
-cap, not a reservation, so allocations can still fail below it while the
-card's shared heap is busy. A legacy (non-slot) runtime cannot carry a nonzero
-value, and the call returns `ZZ9K_STATUS_UNSUPPORTED`. A host-visible request
-larger than the card can ever grant makes the load fail with
-`ZZ9K_STATUS_NO_MEMORY`. The library does not check the capability: firmware
-that does not advertise `ZZ9K_APP_CAP_HOST_LIMIT` ignores the host-visible
-word and applies 16 MiB, so query the cap before relying on it. The firmware
-side is described in `docs/app-runtime.md`.
+- **Mapping.** Every buffer the card names (control block, queues, console,
+  file data, audio ring, load buffer) is a board offset (a token) in memory the
+  card allocated 8 KiB aligned and sized. The module makes it cache-inhibited
+  with `mmu.library` once per block (`CacheClearE`, `SetProperties`,
+  `RebuildTree`) and keeps the mapping for the claim. It needs `mmu.library` 41
+  or later; without it `aar_xport_amiga_board_open` fails with `AAR_E_NOSYS`.
+  `aar_xport_map(x, token, off, len)` maps any other token, for example the
+  counter block an app publishes.
+- **Lease.** The card stops an app whose client does not advance
+  `AAR_CB_LEASE_COUNTER`: after 2 s while it runs (10 s with
+  `ZZAPP_CLIENT_LEASE_EXTENDED`, 30 s while loading). `aar_xport_lease_renew()`
+  is one store and is safe from a timer or interrupt; the long mailbox calls
+  (load begin, load end, start) renew it themselves. There is no VBlank server
+  any more: the caller's own loop renews it until `aar.library` takes that over.
+- **Requests.** `aar_xport_service_next()` returns the next request of the app
+  (file, console, display, audio) with its buffer already mapped, and moves
+  messages and logs in front of it aside (`aar_xport_get_message`,
+  `aar_xport_set_log_sink`). `aar_xport_service_reply()` posts the completion
+  and rings the card's doorbell (`ZZAPP_OP_KICK`, coalesced, asynchronous).
+  `AAR_E_BUSY` means the completion queue is full: try again.
+- **Messages** are 32 bytes. Sending is credited: at most `AAR_MSG_CAPACITY`
+  (63) messages may be unconsumed by the app (`AAR_CB_MSG_CONSUMED`), else
+  `AAR_E_BUSY`. A message the app sends is held in the module's inbox of 64
+  until read; a flood nobody reads is lost beyond that and counted.
+- **Events.** `aar_xport_post_event()` coalesces mouse motion (sums `dx` and
+  `dy` while the button state is the same) and drops the newest event when
+  the completion queue is full, counting it in `AAR_CB_EVENTS_DROPPED`.
+- **Stale claims.** After `aar_xport_release()`, or when any mailbox call
+  answers `AAR_E_STALE` (the card revoked the claim: lease lost, quarantine),
+  the module drops every pointer and answers `AAR_E_STALE` to all later calls
+  without touching the memory, which the card may reuse.
+- **Status** (`aar_xport_status_get()`) is read from the control block: state,
+  end reason, exit code, fault record, load progress, accounting. It stays
+  readable after the app ended, until the claim is released.
 
 `zz9k-app-echo-test <path-to-echo.elf> [count]` is the hardware smoke client.
 
 `zz9k-app-ringtest <path-to-ringflood.elf> [seconds] [MAXLAT=<ms>]` floods the
 app-to-host ring and checks every message, ping latency, and a counter word
 read through a cache-inhibited mapping; see step 12 of `zz9k-release-smoke.md`.
+Both are built on the module. The host test
+`tests/aar_xport_zz9000_test.c` runs the module against the firmware's
+`zzapp_xport.c` (the same queue code at both ends) over a fake board.
 
 Use `zz9k_known_service_count()` / `zz9k_known_service_id()` to enumerate the
 SDK-known built-in service IDs when checking the firmware service registry.
@@ -1945,12 +1903,13 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 31 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN` | `ZZ9KAudioStreamSetGain()`; gain 0 is silence, 128 preserves scene level, and flags are zero |
 | 32 | `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION` | `ZZ9KImageAnimationFrameNext()`, Present, Retire, and Restart |
 | 33 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX` | `ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX` (`-348`); older firmware returns `ZZ9K_STATUS_UNSUPPORTED`, with no implicit MP3-only fallback |
-| 35 | `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT` | `ZZ9KAppOpen`, load/start/stop/status, 32-byte message rings, VBlank lease, and close |
+| 35 | `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT` | `ZZ9KAppOpen`, load/start/stop/status, 32-byte message rings, VBlank lease, and close (removed in revision 41) |
 | 36 | `ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY` | Synchronous completion waits poll for up to 250 microseconds before their existing event or DOS-tick wait. A synchronous call also routes foreign completions to the resident pending-request registry; the static host client requires this revision. |
 | 37 | `ZZ9K_LIBRARY_MIN_REVISION_SYNC_CONCURRENT` | A synchronous caller holds the transport lock only to submit, drain, route, or cancel. Its pending record has an owner signal, so another drainer wakes it after routing its completion. |
 | 38 | `ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM` | Per-opener client ids and `ZZ9K_OP_CLIENT_RELEASE`; the final `CloseLibrary()` resubmits the release while the firmware answers `BUSY` and reclaims that opener's owned SDK resources after worker quiescence |
-| 39 | `ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE` | ARM-app `LOAD_END` waits use lifecycle progress when firmware advertises `ZZ9K_APP_CAP_LOAD_PROGRESS`; older firmware retains a 32-second lease-covering wait. |
-| 40 | `ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP`, `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS` | The service task releases an app handle, its opener record, and its client id when the owner task is gone without `Close`; `ZZ9KAppSetLimits()` at `ZZ9K_LVO_APP_SET_LIMITS` (`-414`) carries the launcher memory cap and the host-visible limit in `LOAD_BEGIN` |
+| 39 | `ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE` | ARM-app `LOAD_END` waits used lifecycle progress (removed in revision 41). |
+| 40 | `ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP`, `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS` | The service task released an app handle, its opener record, and its client id when the owner task was gone; since revision 41 only the opener record and the client id (the app calls were removed) |
+| 41 | None | The `ZZ9KApp*` calls (`-354` to `-414`) are removed; the ARM app runtime is reached through the static client transport module `aar_xport_zz9000`; the vector table ends at `ZZ9KAudioStreamBeginEx` (`-348`) |
 
 ### Async submission and wait helpers
 

@@ -98,15 +98,6 @@ int ZZ9KPing(ZZ9KLibrary *library, const uint8_t *payload,
  */
 int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
              ZZ9KMailboxEntry *reply, uint32_t timeout_ticks);
-int zz9k_library_app_call(ZZ9KLibrary *library, ZZ9KRequest *request,
-                          ZZ9KMailboxEntry *reply);
-typedef uint32_t (*ZZ9KProgressReader)(void *user_data);
-int zz9k_library_app_call_progress(ZZ9KLibrary *library,
-                                   ZZ9KRequest *request,
-                                   ZZ9KMailboxEntry *reply,
-                                   ZZ9KProgressReader progress_reader,
-                                   void *progress_data,
-                                   int progress_supported);
 int ZZ9KCallAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async,
                   const ZZ9KRequest *request, ZZ9KAsyncCallback callback,
                   void *user_data);

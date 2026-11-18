@@ -7,12 +7,9 @@
 #define ZZ9K_LIBRARY_RESIDENT_SYNC_H
 
 #if !defined(ZZ9K_LIB_SYNC_OBTAIN) || !defined(ZZ9K_LIB_SYNC_ATTEMPT) || \
+    !defined(ZZ9K_LIB_SYNC_REAP_SERVICE) || \
     !defined(ZZ9K_LIB_SYNC_REAP_RELEASE) || \
-    !defined(ZZ9K_LIB_SYNC_RELEASE) || !defined(ZZ9K_LIB_SYNC_SERVICE) || \
-    !defined(ZZ9K_LIB_SYNC_MESSAGE_POP) || \
-    !defined(ZZ9K_LIB_SYNC_EVENT_POSTED) || \
-    !defined(ZZ9K_LIB_SYNC_EVENT_QUEUED) || \
-    !defined(ZZ9K_LIB_SYNC_CLEAR_EVENT_POSTED) || \
+    !defined(ZZ9K_LIB_SYNC_RELEASE) || \
     !defined(ZZ9K_LIB_SYNC_CALL_SUBMIT) || \
     !defined(ZZ9K_LIB_SYNC_CALL_POLL) || \
     !defined(ZZ9K_LIB_SYNC_CALL_COMPLETED) || \
@@ -41,37 +38,21 @@
 #error "resident synchronization bindings are required"
 #endif
 
-static inline int zz9k_lib_dispatcher_service_apps(void *base, void *app_lock,
-                                                    void *transport_lock)
+/*
+ * One pass of the dispatcher: note whether an owner check is due, then, when
+ * the transport lock is free, release what the check found. Stopping or
+ * releasing a client id is a transport call, so it needs that lock.
+ */
+static inline int zz9k_lib_dispatcher_service(void *base, void *transport_lock)
 {
   int got_transport;
 
-  ZZ9K_LIB_SYNC_OBTAIN(app_lock);
-  ZZ9K_LIB_SYNC_SERVICE(base);
-  ZZ9K_LIB_SYNC_RELEASE(app_lock);
+  ZZ9K_LIB_SYNC_REAP_SERVICE(base);
   got_transport = ZZ9K_LIB_SYNC_ATTEMPT(transport_lock);
-  /* What the service pass found dead is released here, never under the app
-   * lock: stopping a generation is a transport call. */
   if (got_transport) {
     ZZ9K_LIB_SYNC_REAP_RELEASE(base);
   }
   return got_transport;
-}
-
-static inline int zz9k_lib_app_pop_and_acknowledge(void *app_lock,
-                                                    void *handle,
-                                                    void *message)
-{
-  int status;
-
-  ZZ9K_LIB_SYNC_OBTAIN(app_lock);
-  ZZ9K_LIB_SYNC_MESSAGE_POP(handle, message, status);
-  if (ZZ9K_LIB_SYNC_EVENT_POSTED(handle) &&
-      !ZZ9K_LIB_SYNC_EVENT_QUEUED(handle)) {
-    ZZ9K_LIB_SYNC_CLEAR_EVENT_POSTED(handle);
-  }
-  ZZ9K_LIB_SYNC_RELEASE(app_lock);
-  return status;
 }
 
 

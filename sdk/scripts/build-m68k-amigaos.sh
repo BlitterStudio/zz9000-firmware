@@ -8,6 +8,18 @@ set -e
 IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:c0e453fde28fd9c52461f4f9a926c4481548dcfcaca94b0740d8cce4561f2e1e}"
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
+# The client transport module (amiga/src/aar_xport_zz9000.c) includes the aar
+# headers, pinned in sdk/AAR_REF, and the private wire zzapp_proto.h of the
+# firmware tree. The pinned aar checkout comes from scripts/fetch-aar.sh (or
+# AAR_DIR=<your checkout>); the wire header is staged under build/.
+AAR_DIR="${AAR_DIR:-$REPO_ROOT/aar}"
+if [ ! -f "$AAR_DIR/include/aar/transport.h" ]; then
+  sh "$REPO_ROOT/scripts/fetch-aar.sh" "$AAR_DIR"
+fi
+mkdir -p "$REPO_ROOT/build/stage"
+cp "$REPO_ROOT/../ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_proto.h" \
+  "$REPO_ROOT/build/stage/zzapp_proto.h"
+
 # Run as root inside the container: the toolchain NDK headers under
 # /opt/m68k-amigaos are not world-readable, so a non-root --user cannot
 # compile. Pass the invoking host user/group ids so the container can hand the
@@ -15,19 +27,20 @@ REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # blocks the host-side packaging step from writing build/package on Linux/CI.
 # MSYS_NO_PATHCONV=1 keeps Git Bash from rewriting the container-absolute
 # -w /work into a host path; the Docker daemon accepts the /d/... mount form.
-MSYS_NO_PATHCONV=1 docker run --rm -v "$REPO_ROOT:/work" -w /work \
+MSYS_NO_PATHCONV=1 docker run --rm -v "$REPO_ROOT:/work" -v "$AAR_DIR:/aar:ro" -w /work \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" "$IMAGE" sh -c '
 set -e
 mkdir -p build/m68k build/dtcode build/providers
 CFLAGS="-fcommon -noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
 STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
+XPORTFLAGS="-Iamiga/src -Ibuild/stage -I/aar/include"
 
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -DZZ9K_HOST_LIBRARY_BUILD=1 \
   -c host/src/zz9k_host.c -o build/m68k/zz9k_host_library.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
-m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_app_client.c -o build/m68k/zz9k_app_client.o
+m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS -c amiga/src/aar_xport_zz9000.c -o build/m68k/aar_xport_zz9000.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-fb-common.c -o build/m68k/zz9k-fb-common.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-image-window.c -o build/m68k/zz9k-image-window.o
@@ -56,7 +69,7 @@ ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-xml.c tools/zzplay/zzplay-pr
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-browse.c tools/zzplay/zzplay-browse-model.c tools/zzplay/zzplay-browse-rows.c tools/zzplay/zzplay-browse-worker.c tools/zzplay/zzplay-browse-gather.c"
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
-  build/m68k/zz9k_app_client.o build/m68k/zz9k_host_library.o -o build/zz9k.library
+  build/m68k/zz9k_host_library.o -o build/zz9k.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   amiga/mpega/mpega_resident.c -o build/mpega.library
 
@@ -75,8 +88,10 @@ m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libeventcancel.c -o build/zz9k-libeventca
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libdecode.c -o build/zz9k-libdecode
 m68k-amigaos-gcc $LIBCFLAGS -Itools build/m68k/zz9k-fb-common.o \
   tools/zz9k-libsmoke.c -o build/zz9k-libsmoke
-m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
-m68k-amigaos-gcc $STACKCFLAGS tools/zz9k-app-ringtest.c -o build/zz9k-app-ringtest
+m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS build/m68k/aar_xport_zz9000.o \
+  tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
+m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS build/m68k/aar_xport_zz9000.o \
+  tools/zz9k-app-ringtest.c -o build/zz9k-app-ringtest
 m68k-amigaos-gcc $LIBCFLAGS examples/amiga-library/zz9k-library-demo.c \
   -o build/zz9k-library-demo
 m68k-amigaos-gcc $LIBCFLAGS examples/amiga-jpeg-stream/zz9k-jpeg-stream-demo.c \
