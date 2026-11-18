@@ -82,6 +82,7 @@ int ZZ9KAppSendMessage(ZZ9KAppHandle *handle, const ZZ9KAppMessage *message);
 int ZZ9KAppGetMessage(ZZ9KAppHandle *handle, ZZ9KAppMessage *message);
 uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);
 void ZZ9KAppClose(ZZ9KAppHandle *handle);
+int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib, uint32_t host_visible_mib);
 
 #ifdef __cplusplus
 }

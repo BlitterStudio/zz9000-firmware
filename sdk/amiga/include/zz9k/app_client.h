@@ -50,6 +50,19 @@ int ZZ9KAppSendMessage(ZZ9KAppHandle *handle,
 int ZZ9KAppGetMessage(ZZ9KAppHandle *handle, ZZ9KAppMessage *message);
 uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);
 void ZZ9KAppClose(ZZ9KAppHandle *handle);
+/* Sets the limits the next ZZ9KAppLoadFile or ZZ9KAppLoadMemory sends with
+ * its LOAD_BEGIN, both in MiB. `max_mib` caps the app's private memory,
+ * 0 for no cap beyond the card's pool. `host_visible_mib` is the app's
+ * host-visible limit, 0 for the firmware default of 16 MiB. The host-visible
+ * limit is a cap, not a reservation: allocations can still fail below it
+ * while the card's shared heap is in use. Call it between ZZ9KAppOpen and
+ * the load; it returns ZZ9K_STATUS_BUSY once a load has begun,
+ * ZZ9K_STATUS_BAD_REQUEST above 4095, and ZZ9K_STATUS_UNSUPPORTED on a
+ * legacy runtime that cannot carry a nonzero value. A host-visible request
+ * larger than the card can ever hold makes the load itself fail with
+ * ZZ9K_STATUS_NO_MEMORY. Requires ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS. */
+int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib,
+                     uint32_t host_visible_mib);
 
 #ifdef __cplusplus
 }

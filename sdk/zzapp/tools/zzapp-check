@@ -3,7 +3,12 @@
 
 Today's relocation rules, plus the ZZAPP note: present, magic 0x50505A41,
 abi major 0, only known flag bits, and a stack the loader will accept.
+
+  zzapp-check app.elf...            check images
+  zzapp-check --expect-note ...     compare the note bytes
+  zzapp-check --no-libc app.map     check a ZZAPP_FREESTANDING link map
 """
+import re
 import struct
 import sys
 
@@ -209,7 +214,37 @@ def expect_note(path, flags, stack):
     die(path, "no .note.zzapp section")
 
 
+# A freestanding image links only libzzapp (an archive under make, plain
+# objects under CMake) and the compiler's libgcc.
+FREESTANDING_ARCHIVES = ("libzzapp.a", "libgcc.a")
+MAP_MEMBER = re.compile(r"([^\s()]+\.a)\(([^)\s]+)\)")
+
+
+def no_libc(path):
+    """Fail if the link map shows an archive member from outside the allowed set."""
+    try:
+        text = open(path, "r", encoding="utf-8", errors="replace").read()
+    except OSError as exc:
+        die(path, str(exc))
+    found = {}
+    for archive, member in MAP_MEMBER.findall(text):
+        base = re.split(r"[\\/]", archive)[-1]
+        found.setdefault(base, []).append(member)
+    if "Linker script and memory map" not in text:
+        die(path, "not a GNU ld link map")
+    bad = sorted(base for base in found if base not in FREESTANDING_ARCHIVES)
+    if bad:
+        die(path, "freestanding link pulled %s" % ", ".join(
+            "%s(%s)" % (base, ", ".join(found[base][:3])) for base in bad))
+    sys.stdout.write("%s: no archive but libzzapp.a and libgcc.a\n" % path)
+
+
 def main(argv):
+    if len(argv) >= 2 and argv[1] == "--no-libc":
+        if len(argv) != 3:
+            die("zzapp-check", "usage: zzapp-check --no-libc <map>")
+        no_libc(argv[2])
+        return
     if len(argv) >= 2 and argv[1] == "--expect-note":
         if len(argv) != 5:
             die("zzapp-check", "usage: zzapp-check --expect-note <elf> <flags> <stack>")

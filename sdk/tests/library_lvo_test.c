@@ -32,9 +32,13 @@ static void test_library_identity(void)
 {
   expect_str("name", ZZ9K_LIBRARY_NAME, "zz9k.library");
   expect_u32("version", ZZ9K_LIBRARY_VERSION, 2);
-  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 39);
+  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 40);
+  expect_str("id string", ZZ9K_LIBRARY_ID_STRING,
+             "zz9k.library 2.40 (17.11.2026)");
   expect_u32("client reclaim", ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM, 38);
   expect_u32("app load lease", ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE, 39);
+  expect_u32("app owner reap", ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP, 40);
+  expect_u32("app set limits", ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS, 40);
 }
 
 static void test_standard_lvos(void)
@@ -112,7 +116,8 @@ static void test_public_lvos(void)
   expect_u32("app_get_message", ZZ9K_LVO_APP_GET_MESSAGE, -396);
   expect_u32("app_message_signal", ZZ9K_LVO_APP_MESSAGE_SIGNAL, -402);
   expect_u32("app_close", ZZ9K_LVO_APP_CLOSE, -408);
-  expect_u32("function_count", ZZ9K_LVO_FUNCTION_COUNT, 64);
+  expect_u32("app_set_limits", ZZ9K_LVO_APP_SET_LIMITS, -414);
+  expect_u32("function_count", ZZ9K_LVO_FUNCTION_COUNT, 65);
 }
 
 int main(void)

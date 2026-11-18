@@ -67,4 +67,5 @@ ZZ9KAppSendMessage(handle,message)(a0/a1)
 ZZ9KAppGetMessage(handle,message)(a0/a1)
 ZZ9KAppMessageSignal(handle)(a0)
 ZZ9KAppClose(handle)(a0)
+ZZ9KAppSetLimits(handle,max_mib,host_visible_mib)(a0/d0/d1)
 ##end

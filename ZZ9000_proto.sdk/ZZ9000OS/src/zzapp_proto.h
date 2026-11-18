@@ -49,6 +49,9 @@
 #define ZZAPP_CAP_LOW_MEMORY       (1u << 6)
 /* Lifecycle progress advances after every incremental LOAD_END step. */
 #define ZZAPP_CAP_LOAD_PROGRESS    (1u << 7)
+/* Extended LOAD_BEGIN carries a per-app host-visible limit in MiB at
+ * ZZAPP_LOAD_HOST_VISIBLE_MIB. */
+#define ZZAPP_CAP_HOST_LIMIT       (1u << 8)
 #define ZZAPP_SLOT_COUNT           4u
 
 /* Extended-request ownership mismatch. Matches SDK_STATUS_BAD_HANDLE. */
@@ -135,6 +138,10 @@
 
 /* Extended LOAD_BEGIN: launcher memory cap in MiB, 0 for none. */
 #define ZZAPP_LOAD_MEM_LIMIT_MIB   0u
+/* Extended LOAD_BEGIN, ZZAPP_CAP_HOST_LIMIT: host-visible limit in MiB for
+ * this app, 0 for the default. Firmware without the cap ignores the word. */
+#define ZZAPP_LOAD_HOST_VISIBLE_MIB 4u
+#define ZZAPP_HOST_VISIBLE_DEFAULT_BYTES (16u << 20)
 
 /* LIST reply for the selector's slot. */
 #define ZZAPP_LIST_STATE           0u

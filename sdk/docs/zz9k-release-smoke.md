@@ -233,13 +233,14 @@ default shared heap are Zorro III diagnostics.
     still plays.
 
 12. Check the ARM app runtime on Zorro III. Install `ZZRun` from the matched
-    driver package and build `hello.elf` and `echo.elf` from
+    driver package and build `hello.elf`, `echo.elf` and `ringflood.elf` from
     `sdk/zzapp/templates/` with the ARM app SDK.
 
     ```text
     Stack 32768
     ZZRun RAM:hello.elf
     zz9k-app-echo-test RAM:echo.elf 300
+    zz9k-app-ringtest RAM:ringflood.elf 10
     ```
 
     Expected result: `ZZRun` returns after `hello.elf` exits, and
@@ -247,6 +248,33 @@ default shared heap are Zorro III diagnostics.
     The tool covers the `zz9k.library` app-client load, start, 32-byte message
     rings, notification handling, stop, status, and close. A failure reports
     the last recorded phase; keep the trace lines printed before it.
+
+    `zz9k-app-ringtest` runs three phases: 1.5 s idle, where the app only
+    answers pings; the flood, 10 seconds here, where the app keeps the
+    app-to-host ring full; and 1.5 s idle again. It ends with
+    `zz9k-app-ringtest: PASS`. Its report lists sequence gaps, wrong-byte
+    messages, reads of the counter word through a cache-inhibited mapping that
+    ran backwards or lagged a delivered message, mode-change
+    acknowledgements, and ping round trips per phase. Ping round trips are
+    two figures. The idle figure times the ring and the app's wake-up, and
+    `MAXLAT=<ms>` limits it (for example `MAXLAT=5` fails the run when an
+    idle ping takes over 5 ms). The flood figure is queueing delay: during
+    the flood each PONG waits behind a full ring of DATA and the 68k's drain,
+    so it is reported with no limit and is not a transport bound. Zero in
+    every error count is the pass condition, and the run must also show
+    coverage: the app's DONE message, at least 100 counter reads, and at
+    least 3 answered pings in each phase. Missing coverage is a FAIL. Each
+    PONG must answer a ping that was sent; unmatched or duplicate PONGs and a
+    PONG count that differs from the app's DONE fail the run. Every ping that
+    was sent must be answered, after a 0.5 s grace for replies in flight
+    after the last ping; the `unanswered` count in the report must be 0,
+    because that is what shows host-to-app delivery. Each mode change must be
+    acknowledged with the DATA count the 68k has seen, and no DATA may follow
+    the acknowledgement of QUIET. Keep the report. A line that says
+    `CacheClearE` instead of `cache-inhibited` means `mmu.library` could not
+    map the page, and the counter was read with cache flushes instead. Run it
+    once on an idle Amiga and once with a CPU-heavy task running; a late ring
+    is what the loaded run shows in the idle figure.
 
 ## Failure routing
 
@@ -271,5 +299,8 @@ default shared heap are Zorro III diagnostics.
   and the exact artifact hashes.
 - Route `ZZRun` load or exit failures to the app runtime and launcher, and
   `zz9k-app-echo-test` failures to the `zz9k.library` app client. Keep the
-  `[app]` lines from the UART log.
+  `[app]` lines from the UART log. When the echo test passes and
+  `zz9k-app-ringtest` fails, route lost or wrong messages and a backwards or
+  lagging counter to the app message rings and the memory mapping of the
+  launcher window and host-visible blocks, not to the library.
 

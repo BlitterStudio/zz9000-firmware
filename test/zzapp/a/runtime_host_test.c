@@ -21,6 +21,12 @@ static unsigned api_yield_post_resume_clock_reads;
 static uint64_t api_yield_post_resume_irq_tick;
 static uint8_t replacement_mem[4096];
 
+/* These tests look at the state between a reset request and core 1 acting on
+ * it, so they only post the request. zzapp_on_amiga_reset also waits for
+ * core 1's acknowledgement, and halts and recovers core 1 when it does not
+ * come. */
+void zzapp_test_request_reset(uint32_t slot);
+
 static uint64_t api_yield_post_resume_time(void)
 {
     api_yield_post_resume_clock_reads++;
@@ -413,7 +419,7 @@ int main(void)
     zzapp_kernel_set_current_thread(0);
     zzapp_test_mark_running();
     zzapp_host_commit_begin();
-    zzapp_on_amiga_reset();
+    zzapp_test_request_reset(0U);
     zzapp_host_tick_at(ZZAPP_STOP_GRACE_US);
     zzapp_worker_hook();
     assert(zzapp_runtime_kernel()->threads[0].state == ZZAPP_THREAD_RUNNABLE);
@@ -724,7 +730,7 @@ int main(void)
     zzapp_boot_init();
     zzapp_test_set_xtime(0);
     zzapp_test_mark_running();
-    zzapp_on_amiga_reset();
+    zzapp_test_request_reset(0U);
     assert(zzapp_api_table()->should_stop() == 1);
     zzapp_worker_hook();
     zzapp_test_mark_running();

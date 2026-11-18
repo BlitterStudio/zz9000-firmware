@@ -111,7 +111,8 @@ zero or above the call's limit, or an id does not name an open object.
 
 ## ZZ_ENOMEM
 
-`-3`. The arena, the 16 MiB host-visible quota, the 64 host-visible slots,
+`-3`. The arena, the host-visible quota (16 MiB unless the launcher set another
+one at load), the 64 host-visible slots,
 the 16 file slots, or the four image or audio decode sessions are exhausted.
 `zz_alloc` reports this as a NULL pointer, not as this code.
 
@@ -308,8 +309,9 @@ has none. The 68k side must still read the block through a cache-inhibited
 mapping or do its own cache maintenance before reading; the ACP does not
 reach the 68k's caches. The CPU may still reorder plain stores:
 put a barrier (`__sync_synchronize()`) between the data and the flag or
-index that the 68k polls. The per-app limit
-is 16 MiB, in at most 64 firmware slots. `libzzapp` tracks 64 of those
+index that the 68k polls. The per-app limit is 16 MiB by default, raised or
+lowered by the launcher's load-time request (see `docs/app-runtime.md`, Slot
+protocol), in at most 64 firmware slots. `libzzapp` tracks 64 of those
 pointers so `zz_free` can tell them from newlib blocks; a 65th success is
 freed and the wrapper returns NULL. Minimum minor for the flag's table path:
 2 (`alloc` itself is minor 0; the flag is rejected by a wrapper that does not
@@ -621,8 +623,9 @@ typedef struct zzapp_mem_info {
 } zzapp_mem_info;
 ```
 
-All fields are bytes. `host_visible_limit` is 16 MiB, a per-app cap inside
-the shared host heap, not a slice of the 96 MiB arena.
+All fields are bytes. `host_visible_limit` is 16 MiB by default and follows the
+launcher's load-time request (see `docs/app-runtime.md`, Slot protocol). It is a
+per-app cap inside the shared host heap, not a slice of the 96 MiB arena.
 
 ## zzapp_heap_info
 
@@ -809,7 +812,10 @@ Failure is NULL. With `ZZ_ALLOC_HOST_VISIBLE`, the table `alloc` is used.
 Firmware also requires `align >= 8` and a power of two, and rejects unknown
 flag bits. Host-visible failure is NULL (`ZZ_ENOMEM` conditions above).
 Calling the table `alloc` directly without `ZZ_ALLOC_HOST_VISIBLE` returns
-NULL.
+NULL. In a `ZZAPP_FREESTANDING` build there is no newlib `malloc`, so
+`zz_alloc` without `ZZ_ALLOC_HOST_VISIBLE` also returns NULL; the app
+allocates from the heap itself (see `zz_heap_range` and `zz_heap_grow`, and
+"Freestanding apps" in the [developer guide](zzapp-developer-guide.md)).
 Does not block. Gate for the host-visible path: `ZZ_API_COVERS(api, alloc)`.
 Core 1. Minimum minor: 0 for arena malloc; 2 to honour
 `ZZ_ALLOC_HOST_VISIBLE`.
@@ -822,7 +828,8 @@ void zz_free(void *p);
 
 NULL is ignored. A pointer returned by a host-visible `zz_alloc` is released
 through the table and the quota returns immediately. Any other pointer is
-the newlib block saved under the aligned address. Does not block. Gate:
+the newlib block saved under the aligned address. A `ZZAPP_FREESTANDING`
+build has no such block, so the call does nothing for it. Does not block. Gate:
 `ZZ_API_COVERS(api, free)` for the host-visible case only. Core 1. Minimum
 minor: 0. Remaining host-visible blocks are reclaimed on exit, fault,
 core-1 restart, and Amiga reset.
@@ -846,7 +853,8 @@ int zz_heap_grow(uint32_t bytes, void **old_break);
 Requests `bytes` more private heap, in whole MiB units. On success,
 `*old_break` is the start of the new contiguous range. Dynamic API 0.3 apps
 use this through newlib `_sbrk`; normal application code normally calls
-`malloc` instead. `ZZ_ENOMEM` means the pool, launcher cap, or private-window
+`malloc` instead. A `ZZAPP_FREESTANDING` app has no `_sbrk` and calls it
+directly. `ZZ_ENOMEM` means the pool, launcher cap, or private-window
 limit cannot satisfy the request. `ZZ_EINVAL` covers zero, non-MiB, or invalid
 arguments. Gate direct use with `ZZ_API_COVERS(api, heap_grow)`. Minimum
 minor: 3.
@@ -909,8 +917,8 @@ arguments are `ZZ_EINVAL`. A stat or open error is returned as that call's
 code. A short read is `ZZ_EIO`. Fault during the copy is `ZZ_EFAULT`.
 Blocks on each file wait, up to 30 seconds per wait, in chunks of at most
 64 KiB. Gate: `ZZ_API_COVERS(api, map_file)`. Missing slot: `ZZ_ENOSYS`.
-Core 1. Minimum minor: 2. The allocation counts against the 16 MiB
-host-visible quota.
+Core 1. Minimum minor: 2. The allocation counts against the host-visible
+quota (`host_visible_limit`; 16 MiB by default).
 
 ## zz_unmap_file
 

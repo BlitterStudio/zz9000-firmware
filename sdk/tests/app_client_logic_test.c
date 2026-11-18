@@ -235,6 +235,65 @@ static void test_generation_fence(void)
   expect_u32("replaced generation", zz9k_app_generation_matches(9U, 10U), 0U);
 }
 
+/* The load-time limits ride in the extended LOAD_BEGIN: the launcher cap at
+ * byte 0 as before, the host-visible limit at byte 4. */
+static void test_load_limits(void)
+{
+  ZZ9KRequest request;
+  const uint8_t *payload;
+
+  expect_u32("cap bit", ZZ9K_APP_CAP_HOST_LIMIT, 0x100U);
+  expect_u32("cap offset", ZZ9K_APP_LOAD_MEM_LIMIT_MIB, 0U);
+  expect_u32("host offset", ZZ9K_APP_LOAD_HOST_VISIBLE_MIB, 4U);
+  expect_u32("host default", ZZ9K_APP_HOST_VISIBLE_DEFAULT_MIB, 16U);
+
+  expect_status("limits init", zz9k_app_request_init(
+                    &request, ZZ9K_APP_OP_LOAD_BEGIN), ZZ9K_STATUS_OK);
+  expect_status("limits need selector",
+                zz9k_app_request_limits(&request, 8U, 64U),
+                ZZ9K_STATUS_BAD_REQUEST);
+  expect_status("limits select", zz9k_app_request_select(&request, 2U, 5U),
+                ZZ9K_STATUS_OK);
+  expect_status("limits", zz9k_app_request_limits(&request, 8U, 64U),
+                ZZ9K_STATUS_OK);
+  payload = request.entry.payload.inline_data;
+  expect_u32("limits cap", zz9k_get_be32(payload), 8U);
+  expect_u32("limits host", zz9k_get_be32(payload + 4U), 64U);
+  expect_u32("limits bytes", request.entry.payload_len, 48U);
+  expect_u32("limits keep slot", zz9k_get_be32(payload + ZZ9K_APP_SEL_SLOT),
+             2U);
+  expect_u32("limits keep generation",
+             zz9k_get_be32(payload + ZZ9K_APP_SEL_GENERATION), 5U);
+  expect_status("limits too large",
+                zz9k_app_request_limits(&request, 0U, 4096U),
+                ZZ9K_STATUS_BAD_REQUEST);
+  expect_status("limits wrong opcode", zz9k_app_request_init(
+                    &request, ZZ9K_APP_OP_START), ZZ9K_STATUS_OK);
+  expect_status("limits wrong opcode send", zz9k_app_request_limits(
+                    &request, 1U, 1U), ZZ9K_STATUS_BAD_REQUEST);
+
+  /* Zero everywhere is the unchanged request, on any runtime. */
+  expect_status("check none legacy", zz9k_app_limits_check(0U, 0U, 0, 0),
+                ZZ9K_STATUS_OK);
+  expect_status("check none slots", zz9k_app_limits_check(0U, 0U, 1, 0),
+                ZZ9K_STATUS_OK);
+  expect_status("check host", zz9k_app_limits_check(0U, 34U, 1, 0),
+                ZZ9K_STATUS_OK);
+  expect_status("check cap", zz9k_app_limits_check(12U, 0U, 1, 0),
+                ZZ9K_STATUS_OK);
+  expect_status("check legacy runtime", zz9k_app_limits_check(12U, 0U, 0, 0),
+                ZZ9K_STATUS_UNSUPPORTED);
+  expect_status("check too large", zz9k_app_limits_check(4096U, 0U, 1, 0),
+                ZZ9K_STATUS_BAD_REQUEST);
+  expect_status("check host too large", zz9k_app_limits_check(0U, 4096U, 1, 0),
+                ZZ9K_STATUS_BAD_REQUEST);
+  /* Once a load has begun the firmware has taken its limits. */
+  expect_status("check after load", zz9k_app_limits_check(0U, 34U, 1, 1),
+                ZZ9K_STATUS_BUSY);
+  expect_status("check zero after load", zz9k_app_limits_check(0U, 0U, 1, 1),
+                ZZ9K_STATUS_BUSY);
+}
+
 int main(void)
 {
   test_request_builders();
@@ -243,5 +302,6 @@ int main(void)
   test_slot_selectors();
   test_slot_registry();
   test_generation_fence();
+  test_load_limits();
   return failures != 0;
 }

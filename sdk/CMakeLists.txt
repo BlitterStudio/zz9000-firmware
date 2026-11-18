@@ -1084,6 +1084,18 @@ target_include_directories(bench_logic_test
 
 add_test(NAME bench_logic_test COMMAND bench_logic_test)
 
+add_executable(app_ringtest_logic_test
+  tests/app_ringtest_logic_test.c
+)
+
+target_include_directories(app_ringtest_logic_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+)
+
+add_test(NAME app_ringtest_logic_test COMMAND app_ringtest_logic_test)
+
 add_executable(bench_tool_source_test
   tests/bench_tool_source_test.c
 )

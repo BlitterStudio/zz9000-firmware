@@ -4,6 +4,10 @@
  * libc exit() so newlib flushes buffered stdio (stdout is fully buffered
  * because _isatty reports 0); exit's _exit stub is zz_exit.
  *
+ * With ZZAPP_FREESTANDING the image has no libc. The status zz_main returns
+ * goes straight to zz_exit. Neither mode calls __libc_init_array, so
+ * .init_array constructors never run; only newlib exit runs atexit handlers.
+ *
  * SPDX-License-Identifier: MIT
  */
 	.syntax unified
@@ -23,6 +27,10 @@ zz_start:
 	mov	r0, r4
 	mov	r1, r5
 	bl	zz_main
+#ifdef ZZAPP_FREESTANDING
+	bl	zz_exit		/* r0 is the zz_main status */
+#else
 	bl	exit
-	b	zz_exit		/* unreachable: exit() does not return */
+#endif
+	b	zz_exit		/* unreachable: neither exit nor zz_exit returns */
 	.size zz_start, . - zz_start

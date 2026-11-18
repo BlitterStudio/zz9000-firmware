@@ -2,10 +2,15 @@
  * zz_* wrappers. Every firmware call goes through zzapp_api. A field is
  * read only when size covers it. A missing optional call returns ZZ_ENOSYS.
  *
+ * ZZAPP_FREESTANDING builds this file without libc: zz_alloc without
+ * ZZ_ALLOC_HOST_VISIBLE returns NULL, because the app owns the heap.
+ *
  * SPDX-License-Identifier: MIT
  */
 #include "zzapp.h"
+#ifndef ZZAPP_FREESTANDING
 #include <stdlib.h>
+#endif
 
 const zzapp_api *zzapp_api_ptr;
 static const zzapp_gl *bound_gl;
@@ -56,7 +61,9 @@ void zz_sleep_us(uint32_t us)
 
 void *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
 {
+#ifndef ZZAPP_FREESTANDING
     uintptr_t aligned;
+#endif
     void *raw;
     uint32_t i;
 
@@ -77,6 +84,10 @@ void *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
         zzapp_api_ptr->free(raw);
         return 0;
     }
+#ifdef ZZAPP_FREESTANDING
+    /* No libc heap here. The app allocates from heap_range/heap_grow. */
+    return 0;
+#else
     if (align < sizeof(void *) || (align & (align - 1u)) != 0u)
         return 0;
     if (bytes > UINT32_MAX - align - (uint32_t)sizeof(void *))
@@ -88,6 +99,7 @@ void *zz_alloc(uint32_t bytes, uint32_t align, uint32_t flags)
               ~(uintptr_t)(align - 1u);
     ((void **)aligned)[-1] = raw;
     return (void *)aligned;
+#endif
 }
 
 void zz_free(void *p)
@@ -104,7 +116,9 @@ void zz_free(void *p)
             return;
         }
     }
+#ifndef ZZAPP_FREESTANDING
     free(((void **)p)[-1]);
+#endif
 }
 
 void zz_heap_range(void **base, uint32_t *bytes)

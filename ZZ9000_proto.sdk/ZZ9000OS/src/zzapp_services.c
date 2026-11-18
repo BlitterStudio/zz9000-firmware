@@ -19,6 +19,12 @@ void __attribute__((weak)) zzapp_host_latch_stop(uint32_t slot)
 {
 	(void)slot;
 }
+/* Largest host-visible limit a launcher may request. The host runtime
+ * defines it; a build that links only the services gets no ceiling. */
+uint32_t __attribute__((weak)) zzapp_host_visible_capacity(void)
+{
+	return UINT32_MAX;
+}
 extern int zzapp_host_take_low_memory_event(uint32_t slot)
 	__attribute__((weak));
 extern void zzapp_host_reset_low_memory(uint32_t slot)
@@ -183,6 +189,7 @@ struct zzapp_service_slot {
 	uint32_t generation;
 	uint32_t state;
 	uint32_t memory_limit;
+	uint32_t host_visible_limit;
 	uint32_t terminal_reason;
 	uint64_t claim_started;
 	uint64_t load_progress;
@@ -819,6 +826,31 @@ static int load_diag_once(uint16_t opcode)
 	load_diag_seen |= bit;
 	return 1;
 }
+
+static uint64_t now_us(void);
+static uint64_t reject_report_last_us;
+static uint32_t reject_report_held;
+
+/* A rejection prints every time, so a slot that refuses all loads leaves a
+ * line per refusal. A client that retries in a loop is held to four lines a
+ * second; the next line carries the count it held back. */
+static int reject_report_allowed(void)
+{
+	uint64_t now = now_us();
+
+	if (reject_report_last_us != 0U &&
+	    now - reject_report_last_us < 250000ULL) {
+		reject_report_held++;
+		return 0;
+	}
+	reject_report_last_us = now;
+	if (reject_report_held != 0U) {
+		printf("[app] %lu rejected ops held back\r\n",
+		       (unsigned long)reject_report_held);
+		reject_report_held = 0U;
+	}
+	return 1;
+}
 #endif
 
 static void report_load_snapshot(const char *event, uint16_t opcode,
@@ -829,7 +861,8 @@ static void report_load_snapshot(const char *event, uint16_t opcode,
 	uint32_t life_stop;
 	int raw_life;
 
-	if (!load_diag_once(opcode))
+	if (strcmp(event, "reject") == 0 ? !reject_report_allowed() :
+					   !load_diag_once(opcode))
 		return;
 	raw_life = raw_life_get(ZZAPP_LIFE_STATE_OFF, &life_state) &&
 		raw_life_get(ZZAPP_LIFE_STOP_OFF, &life_stop);
@@ -886,7 +919,7 @@ static uint64_t now_us(void)
 static void report_rejected_app_op(uint16_t opcode, const char *reason)
 {
 #ifndef ZZAPP_HOST_TEST
-	if (load_diag_once(opcode))
+	if (reject_report_allowed())
 		printf("[app] reject op 0x%04x: %s\r\n", (unsigned)opcode, reason);
 #else
 	(void)opcode;
@@ -1239,6 +1272,11 @@ uint32_t zzapp_services_memory_limit(void)
 	return slots[service_slot()].memory_limit;
 }
 
+uint32_t zzapp_services_host_visible_limit(uint32_t slot)
+{
+	return slot < ZZAPP_SLOT_COUNT ? slots[slot].host_visible_limit : 0U;
+}
+
 void zzapp_services_set_fault(uint32_t code, uint32_t pc, uint32_t sp,
 			      uint32_t lr, uint32_t far, uint32_t fsr,
 			      uint32_t cpsr)
@@ -1299,6 +1337,7 @@ static void begin_claim_cancellation(struct zzapp_service_slot *entry,
 		entry->generation = 1U;
 	life_put(ZZAPP_LIFE_GENERATION_OFF, entry->generation);
 	entry->memory_limit = 0U;
+	entry->host_visible_limit = 0U;
 	entry->load_progress = 0U;
 	entry->state = ZZAPP_ST_STOPPING;
 	entry->terminal_reason = reason;
@@ -1475,10 +1514,46 @@ static void release_unbound_back(uint32_t back)
 {
 	if (!current_runtime()->display_back_owned)
 		return;
-	zzapp_loader_free_back(back);
+	/* Ownership is dropped before the block is given back, see
+	 * forget_window. */
 	current_runtime()->display_back_owned = 0;
+	zzapp_loader_free_back(back);
 }
 
+
+#ifdef ZZAPP_HOST_TEST
+/* Stands in for the surface allocator's fixed window range of each slot: the
+ * backing array the test injected, and whether its range is still allocated.
+ * A test that installs an allocator model (zzapp_test_card_alloc_at and
+ * _free) gets ownership by address and serial instead of the flag. */
+static uint8_t *test_window_backing[ZZAPP_SLOT_COUNT];
+static int test_window_range_held[ZZAPP_SLOT_COUNT];
+static uint32_t test_window_serial[ZZAPP_SLOT_COUNT];
+extern uint32_t zzapp_test_card_alloc_at(uint32_t addr, uint32_t bytes,
+					 uint32_t *serial) __attribute__((weak));
+extern void zzapp_test_card_free(uint32_t card, uint32_t serial)
+	__attribute__((weak));
+#endif
+
+/* The slot's window is a block of the surface allocator, at a fixed range.
+ * Forgetting it without freeing the block leaves that range occupied, and
+ * the slot's next claim asks the allocator for the same range again. */
+static void release_window_range(uint32_t slot, uint8_t *base,
+				 uint32_t serial)
+{
+	if (!base)
+		return;
+#ifdef ZZAPP_HOST_TEST
+	if (zzapp_test_card_free)
+		zzapp_test_card_free(ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot), serial);
+	else
+		test_window_range_held[slot] = 0;
+#else
+	(void)slot;
+	(void)serial;
+	(void)surface_allocator_free((uint32_t)(uintptr_t)base);
+#endif
+}
 
 static void forget_window(void)
 {
@@ -1486,7 +1561,20 @@ static void forget_window(void)
 	struct zzapp_service_runtime *state = current_runtime();
 	struct zzapp_service_runtime saved = *state;
 
+	uint8_t *base = slots[slot].window;
+#ifdef ZZAPP_HOST_TEST
+	uint32_t serial = test_window_serial[slot];
+#else
+	uint32_t serial = 0U;
+#endif
+
+	/* The window is detached from the slot before its block is freed. A
+	 * core 1 restart can replay this teardown, and the allocator frees by
+	 * address: a pointer that outlived its free would take the block of
+	 * whoever was given the address meanwhile. A halt in between leaks the
+	 * block until the allocator is reset. */
 	slots[slot].window = NULL;
+	release_window_range(slot, base, serial);
 	slots[slot].window_bytes = 0U;
 	slots[slot].window_uncached = 0;
 	memset(state, 0, sizeof(*state));
@@ -1515,6 +1603,15 @@ static void forget_window(void)
 #ifdef ZZAPP_HOST_TEST
 	state->audio_detach_count = saved.audio_detach_count;
 #endif
+}
+
+/* Amiga reset: a slot that is idle still holds its window. The allocator is
+ * reset right after, so the block is given back and the pointer dropped now;
+ * claims allocate a new window. */
+void zzapp_services_retire_idle_window(void)
+{
+	if (slots[service_slot()].state == ZZAPP_ST_IDLE && have_window())
+		forget_window();
 }
 
 static void audio_detach(void);
@@ -3340,7 +3437,14 @@ static void audio_detach(void)
 		audio_fabric_producer_detach(current_runtime()->audio_slot);
 	}
 	if (current_runtime()->audio_block)
-		surface_allocator_free((uint32_t)(uintptr_t)current_runtime()->audio_block);
+	{
+		void *block = current_runtime()->audio_block;
+
+		/* Detached before the free, see forget_window. */
+		current_runtime()->audio_block = NULL;
+		if (block)
+			surface_allocator_free((uint32_t)(uintptr_t)block);
+	}
 #endif
 #ifdef ZZAPP_HOST_TEST
 	free(current_runtime()->audio_block);
@@ -3771,8 +3875,24 @@ static int alloc_window(uint32_t slot, uint32_t *arm_addr, uint32_t *host_off)
 {
 	select_slot(slot);
 #ifdef ZZAPP_HOST_TEST
-	if (!have_window())
-		return ZZ_ENOMEM;
+	if (!have_window()) {
+		uint32_t serial = 0U;
+
+		if (!test_window_backing[slot])
+			return ZZ_ENOMEM;
+		if (zzapp_test_card_alloc_at) {
+			if (!zzapp_test_card_alloc_at(
+				    ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot),
+				    ZZAPP_WINDOW_BYTES, &serial))
+				return ZZ_ENOMEM;
+		} else {
+			if (test_window_range_held[slot])
+				return ZZ_ENOMEM;
+			test_window_range_held[slot] = 1;
+		}
+		test_window_serial[slot] = serial;
+		init_window(test_window_backing[slot], ZZAPP_WINDOW_BYTES, 1);
+	}
 	*arm_addr = (uint32_t)(uintptr_t)current_window();
 	*host_off = *arm_addr;
 	return ZZ_OK;
@@ -4370,6 +4490,20 @@ static int queue_deferred(uint16_t opcode, const uint8_t *req, uint16_t req_len,
 	defer->cookie = user_cookie;
 	defer->generation = slots[service_slot()].generation;
 	defer->reply_len = 0U;
+	/* The limits belong to the request that was admitted: a LOAD_BEGIN
+	 * refused above, or one the slot is no longer in a state to start,
+	 * leaves the first load's limits alone. */
+	if (opcode == ZZAPP_OP_LOAD_BEGIN &&
+	    req_len == ZZAPP_MAILBOX_PAYLOAD_BYTES && req &&
+	    (slots[service_slot()].state == ZZAPP_ST_IDLE ||
+	     slots[service_slot()].state == ZZAPP_ST_CLAIMED)) {
+		slots[service_slot()].memory_limit =
+			zzapp_get_be32(req + ZZAPP_LOAD_MEM_LIMIT_MIB) *
+			1024U * 1024U;
+		slots[service_slot()].host_visible_limit =
+			zzapp_get_be32(req + ZZAPP_LOAD_HOST_VISIBLE_MIB) *
+			1024U * 1024U;
+	}
 	defer->state = DEFER_POSTED;
 	slot_state_lock_release();
 #ifndef ZZAPP_HOST_TEST
@@ -4445,6 +4579,7 @@ static int claim_window(uint32_t slot, uint32_t *arm, uint32_t *host,
 	slots[slot].generation = generation;
 	slots[slot].legacy_claim = legacy_claim;
 	slots[slot].memory_limit = 0U;
+	slots[slot].host_visible_limit = 0U;
 	slots[slot].terminal_reason = ZZAPP_END_NONE;
 	if (zzapp_host_claimed)
 		zzapp_host_claimed(slot);
@@ -4541,6 +4676,7 @@ static void release_quarantine_locked(struct zzapp_service_slot *entry)
 	entry->claim_started = 0U;
 	entry->load_progress = 0U;
 	entry->memory_limit = 0U;
+	entry->host_visible_limit = 0U;
 	entry->state = ZZAPP_ST_IDLE;
 	life_put(ZZAPP_LIFE_STOP_OFF, 0U);
 	life_put(ZZAPP_LIFE_STATE_OFF, ZZAPP_ST_IDLE);
@@ -4612,7 +4748,8 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 			  ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY | ZZAPP_CAP_AUDIO |
 			  ZZAPP_CAP_GL | ZZAPP_CAP_CLUT8 | ZZAPP_CAP_SLOTS |
 			  (extended ? ZZAPP_CAP_LOW_MEMORY |
-				      ZZAPP_CAP_LOAD_PROGRESS : 0U),
+				      ZZAPP_CAP_LOAD_PROGRESS |
+				      ZZAPP_CAP_HOST_LIMIT : 0U),
 			  extended);
 		return SDK_STATUS_OK;
 	}
@@ -4710,6 +4847,7 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 			if (release_now > 0) {
 				memset(current_runtime(), 0, sizeof(*current_runtime()));
 				slots[service_slot()].memory_limit = 0U;
+				slots[service_slot()].host_visible_limit = 0U;
 				slots[service_slot()].terminal_reason = ZZAPP_END_FORCED;
 				publish_claim_idle(&slots[service_slot()]);
 				life_put(ZZAPP_LIFE_TERMINAL_OFF, ZZAPP_END_FORCED);
@@ -4747,10 +4885,25 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 	case ZZAPP_OP_LOAD_BEGIN:
 		if (extended) {
 			uint32_t mib = zzapp_get_be32(req + ZZAPP_LOAD_MEM_LIMIT_MIB);
+			uint32_t host_mib =
+				zzapp_get_be32(req + ZZAPP_LOAD_HOST_VISIBLE_MIB);
 
-			if (mib > UINT32_MAX / (1024U * 1024U))
+			if (mib > UINT32_MAX / (1024U * 1024U) ||
+			    host_mib > UINT32_MAX / (1024U * 1024U))
+			{
+				report_rejected_app_op(opcode, "load limit above 4095 MiB");
 				return SDK_STATUS_BAD_REQUEST;
-			slots[service_slot()].memory_limit = mib * 1024U * 1024U;
+			}
+			/* The limit is a cap, not a reservation: only a request
+			 * the heap and the app's alias range could never hold is
+			 * refused. Allocations can still fail below the cap. */
+			if (host_mib > zzapp_host_visible_capacity() /
+				       (1024U * 1024U))
+			{
+				report_rejected_app_op(opcode,
+					"host-visible limit above the card's ceiling");
+				return SDK_STATUS_NO_MEMORY;
+			}
 		}
 		/* fall through */
 	case ZZAPP_OP_LOAD_CHUNK:
@@ -4827,6 +4980,9 @@ void zzapp_services_test_reset(void)
 		audio_detach();
 	}
 	memset(runtime, 0, sizeof(runtime));
+	memset(test_window_backing, 0, sizeof(test_window_backing));
+	memset(test_window_range_held, 0, sizeof(test_window_range_held));
+	memset(test_window_serial, 0, sizeof(test_window_serial));
 	memset(slots, 0, sizeof(slots));
 	memset(deferred, 0, sizeof(deferred));
 	selected_slot[0] = 0U;
@@ -4871,8 +5027,26 @@ void zzapp_services_test_set_window_slot(uint32_t slot, void *base, uint32_t byt
 	if (slot >= ZZAPP_SLOT_COUNT)
 		return;
 	select_slot(slot);
-	if (base && bytes >= ZZAPP_WINDOW_BYTES)
+	if (base && bytes >= ZZAPP_WINDOW_BYTES) {
+		uint32_t serial = 0U;
+
+		if (zzapp_test_card_alloc_at)
+			(void)zzapp_test_card_alloc_at(
+				ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot),
+				ZZAPP_WINDOW_BYTES, &serial);
+		test_window_serial[slot] = serial;
+		test_window_range_held[slot] = 1;
 		init_window((uint8_t *)base, bytes, 1);
+	}
+}
+
+/* Lets a claim allocate this slot's window again once a reset has released
+ * it, like the allocator does for the slot's fixed range. Without it a reset
+ * leaves the slot without a window until core 0 binds one. */
+void zzapp_services_test_set_window_pool(uint32_t slot, void *base)
+{
+	if (slot < ZZAPP_SLOT_COUNT)
+		test_window_backing[slot] = (uint8_t *)base;
 }
 
 void zzapp_services_test_set_yield(void (*fn)(void))

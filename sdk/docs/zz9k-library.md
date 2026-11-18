@@ -100,6 +100,10 @@ five-second inactivity deadline, so progressing loads may run longer than the
 seconds. Older firmware has no progress signal, so revision 39 retains a
 fixed 32-second lease-covering fallback for it.
 
+Revision 40 releases the app slot of an owner task that is gone without
+`ZZ9KAppClose`, and adds `ZZ9KAppSetLimits` for the launcher memory cap and
+the host-visible limit; both are described under [ARM app client](#arm-app-client).
+
 ## ARM app client
 
 Revision 35 adds an Amiga-side client for the ARM app runtime. Include
@@ -116,6 +120,7 @@ int ZZ9KAppSendMessage(ZZ9KAppHandle *handle, const ZZ9KAppMessage *message);
 int ZZ9KAppGetMessage(ZZ9KAppHandle *handle, ZZ9KAppMessage *message);
 uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);
 void ZZ9KAppClose(ZZ9KAppHandle *handle);
+int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib, uint32_t host_visible_mib);
 ```
 
 `ZZ9KAppStart` passes `argv` to the app unchanged. Put the program name in
@@ -153,12 +158,64 @@ one has left the port. Before `Close`, drain the port, then call
 Always call `ZZ9KAppClose`: it stops only the generation loaded by that handle
 and releases the owner. Closing the owning task's final `zz9k.library`
 reference performs the same cleanup; another opener cannot release that
-task's signal. AmigaOS does not provide a safe general callback for a client
-task that dies while retaining an open library handle, so a killed client
-without `Close` is reclaimed by the firmware lease after the library stops
-renewing it (or by Amiga reset).
+task's signal.
+
+Revision 40 also releases a handle whose owning task is gone without `Close`.
+About once a second (50 vertical blanks) the library's service task checks
+each claimed handle's owner against Exec's task lists, with interrupts
+disabled for the walk: the running task, `TaskReady`, and `TaskWait`. The
+interrupt server only counts vertical blanks. A handle whose owner is gone
+stops receiving lease renewals at once, so the firmware lease no longer
+outlives the task, and the service task then stops the generation, frees the
+slot, and answers a late call on the stale pointer with
+`ZZ9K_STATUS_BAD_HANDLE`. It frees the handle record unless the handle has an
+event posted to its notify port: that message lives in the record, and the
+port can outlive the owner, so such a record is kept until the library's last
+close. It does not free the dead task's message signal and does not touch its
+notify port. It also releases the dead task's opener
+record and sends `ZZ9K_OP_CLIENT_RELEASE` for its client id, as the final
+`CloseLibrary()` would; the library's open count stays as it was, because no
+`CloseLibrary()` from that task will lower it. Exactly one side frees an
+opener: a `CloseLibrary()` already releasing it is left alone by the service
+task, and a record the service task has already taken is left to it by a
+later `CloseLibrary()`. The library's last `CloseLibrary()` finishes every
+release the firmware had answered with `ZZ9K_STATUS_BUSY`, retrying until it
+is accepted and freeing the record, before it stops the service task.
+
+Exec can give a dead task's address to a new task, so an address alone does
+not identify the owner. The library records the owner's name pointer, node
+type, and CLI task number at `Open`, and an owner counts as present only while
+the task at that address still has all three and still holds the signal bit
+the library allocated from it. A task that changes its own name after `Open`
+therefore counts as gone. A new task that matches every field is taken for
+the owner and keeps the slot, as it did before revision 40. A foreground
+shell command that ends without `Close` leaves its shell process alive, so
+this check does not see it: the owner exists, and only the lease and
+`CloseLibrary()` apply.
+
+```c
+int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib,
+                     uint32_t host_visible_mib);
+```
+
+`ZZ9KAppSetLimits` sets the limits the next `LoadFile` or `LoadMemory` sends
+with `LOAD_BEGIN`; it returns `ZZ9K_STATUS_BUSY` once a load has begun on the
+handle. Require `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS`. Both
+values are in MiB, at most 4095, and zero keeps the firmware default. `max_mib`
+caps the app's private memory. `host_visible_mib` is the app's host-visible
+limit, 16 MiB by default. It is a cap, not a reservation, so allocations can
+still fail below it while the card's shared heap is busy. A legacy (non-slot)
+runtime cannot carry a nonzero value, and the call returns
+`ZZ9K_STATUS_UNSUPPORTED`. A host-visible request larger than the card can
+ever grant makes the load fail with `ZZ9K_STATUS_NO_MEMORY`. The firmware
+side is described in `docs/app-runtime.md`, and firmware that advertises
+`ZZ9K_APP_CAP_HOST_LIMIT` honours the host-visible value.
 
 `zz9k-app-echo-test <path-to-echo.elf> [count]` is the hardware smoke client.
+
+`zz9k-app-ringtest <path-to-ringflood.elf> [seconds] [MAXLAT=<ms>]` floods the
+app-to-host ring and checks every message, ping latency, and a counter word
+read through a cache-inhibited mapping; see step 12 of `zz9k-release-smoke.md`.
 
 Use `zz9k_known_service_count()` / `zz9k_known_service_id()` to enumerate the
 SDK-known built-in service IDs when checking the firmware service registry.
@@ -1885,6 +1942,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 37 | `ZZ9K_LIBRARY_MIN_REVISION_SYNC_CONCURRENT` | A synchronous caller holds the transport lock only to submit, drain, route, or cancel. Its pending record has an owner signal, so another drainer wakes it after routing its completion. |
 | 38 | `ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM` | Per-opener client ids and `ZZ9K_OP_CLIENT_RELEASE`; the final `CloseLibrary()` resubmits the release while the firmware answers `BUSY` and reclaims that opener's owned SDK resources after worker quiescence |
 | 39 | `ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE` | ARM-app `LOAD_END` waits use lifecycle progress when firmware advertises `ZZ9K_APP_CAP_LOAD_PROGRESS`; older firmware retains a 32-second lease-covering wait. |
+| 40 | `ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP`, `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS` | The service task releases an app handle, its opener record, and its client id when the owner task is gone without `Close`; `ZZ9KAppSetLimits()` at `ZZ9K_LVO_APP_SET_LIMITS` (`-414`) carries the launcher memory cap and the host-visible limit in `LOAD_BEGIN` |
 
 ### Async submission and wait helpers
 

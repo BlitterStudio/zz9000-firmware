@@ -59,5 +59,10 @@ static __inline void __ZZ9KAppCloseInline(ZZ9KAppHandle *handle) {
   register struct Library *a6 __asm("a6") = ZZ9KBase; register ZZ9KAppHandle *a0 __asm("a0") = handle;
   __asm volatile("jsr -408(a6)" : "+r"(a0) : "r"(a6) : ZZ9K_APP_INLINE_CLOBBERS_A0_D0); }
 #define ZZ9KAppClose(handle) __ZZ9KAppCloseInline((handle))
+static __inline int __ZZ9KAppSetLimitsInline(ZZ9KAppHandle *handle, uint32_t max_mib, uint32_t host_visible_mib) {
+  register uint32_t d0 __asm("d0") = max_mib; register uint32_t d1 __asm("d1") = host_visible_mib; register struct Library *a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KAppHandle *a0 __asm("a0") = handle;
+  __asm volatile("jsr -414(a6)" : "+r"(d0), "+r"(d1), "+r"(a0) : "r"(a6) : "cc", "memory", "a1"); return (int)d0; }
+#define ZZ9KAppSetLimits(handle, max_mib, host_visible_mib) __ZZ9KAppSetLimitsInline((handle), (max_mib), (host_visible_mib))
 #endif
 #endif

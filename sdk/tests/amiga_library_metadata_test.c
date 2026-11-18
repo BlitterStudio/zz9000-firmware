@@ -348,7 +348,11 @@ int main(int argc, char **argv)
      "uint32_t ZZ9KAppMessageSignal(const ZZ9KAppHandle *handle);",
      "#include <inline/zz9k.h>"},
     {"ZZ9KAppClose", "ZZ9KAppClose(handle)(a0)",
-     "void ZZ9KAppClose(ZZ9KAppHandle *handle);", "#include <inline/zz9k.h>"}
+     "void ZZ9KAppClose(ZZ9KAppHandle *handle);", "#include <inline/zz9k.h>"},
+    {"ZZ9KAppSetLimits",
+     "ZZ9KAppSetLimits(handle,max_mib,host_visible_mib)(a0/d0/d1)",
+     "int ZZ9KAppSetLimits(ZZ9KAppHandle *handle, uint32_t max_mib, "
+     "uint32_t host_visible_mib);", "#include <inline/zz9k.h>"}
   };
   char *fd;
   char *clib;

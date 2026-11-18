@@ -7,6 +7,7 @@
 #define ZZ9K_LIBRARY_RESIDENT_SYNC_H
 
 #if !defined(ZZ9K_LIB_SYNC_OBTAIN) || !defined(ZZ9K_LIB_SYNC_ATTEMPT) || \
+    !defined(ZZ9K_LIB_SYNC_REAP_RELEASE) || \
     !defined(ZZ9K_LIB_SYNC_RELEASE) || !defined(ZZ9K_LIB_SYNC_SERVICE) || \
     !defined(ZZ9K_LIB_SYNC_MESSAGE_POP) || \
     !defined(ZZ9K_LIB_SYNC_EVENT_POSTED) || \
@@ -43,10 +44,18 @@
 static inline int zz9k_lib_dispatcher_service_apps(void *base, void *app_lock,
                                                     void *transport_lock)
 {
+  int got_transport;
+
   ZZ9K_LIB_SYNC_OBTAIN(app_lock);
   ZZ9K_LIB_SYNC_SERVICE(base);
   ZZ9K_LIB_SYNC_RELEASE(app_lock);
-  return ZZ9K_LIB_SYNC_ATTEMPT(transport_lock);
+  got_transport = ZZ9K_LIB_SYNC_ATTEMPT(transport_lock);
+  /* What the service pass found dead is released here, never under the app
+   * lock: stopping a generation is a transport call. */
+  if (got_transport) {
+    ZZ9K_LIB_SYNC_REAP_RELEASE(base);
+  }
+  return got_transport;
 }
 
 static inline int zz9k_lib_app_pop_and_acknowledge(void *app_lock,

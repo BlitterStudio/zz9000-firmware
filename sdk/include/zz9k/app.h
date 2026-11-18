@@ -71,9 +71,19 @@ extern "C" {
 #define ZZ9K_APP_MESSAGE_BYTES 32U
 #define ZZ9K_APP_MESSAGE_CAPACITY 64U
 
+/* Extended LOAD_BEGIN: launcher memory cap and host-visible limit, in MiB,
+ * at these payload offsets. Zero keeps the firmware default for each (no
+ * launcher cap, 16 MiB host-visible). */
+#define ZZ9K_APP_LOAD_MEM_LIMIT_MIB 0U
+#define ZZ9K_APP_LOAD_HOST_VISIBLE_MIB 4U
+#define ZZ9K_APP_HOST_VISIBLE_DEFAULT_MIB 16U
+#define ZZ9K_APP_LIMIT_MIB_MAX 4095U
+
 #define ZZ9K_APP_CAP_Z3 (1U << 0)
 #define ZZ9K_APP_CAP_SLOTS (1U << 5)
 #define ZZ9K_APP_CAP_LOAD_PROGRESS (1U << 7)
+/* Extended LOAD_BEGIN carries a per-app host-visible limit. */
+#define ZZ9K_APP_CAP_HOST_LIMIT (1U << 8)
 #define ZZ9K_APP_SLOT_COUNT 4U
 
 #define ZZ9K_APP_STATE_IDLE 0U
@@ -130,6 +140,14 @@ int zz9k_app_request_select(ZZ9KRequest *request, uint32_t slot,
 int zz9k_app_request_chunk(ZZ9KRequest *request, uint32_t file_offset,
                            uint32_t length);
 int zz9k_app_request_start(ZZ9KRequest *request, uint32_t argc);
+/* Writes both LOAD_BEGIN limits into an already selected request. */
+int zz9k_app_request_limits(ZZ9KRequest *request, uint32_t max_mib,
+                            uint32_t host_visible_mib);
+/* Whether a handle may take these limits now: not once a load has begun
+ * (BUSY), both within range, and nothing nonzero on a legacy (non-slot)
+ * runtime, whose LOAD_BEGIN has no payload. */
+int zz9k_app_limits_check(uint32_t max_mib, uint32_t host_visible_mib,
+                          int slot_addressed, int load_begun);
 int zz9k_app_parse_status(const ZZ9KMailboxEntry *reply,
                           ZZ9KAppStatusInfo *status);
 int zz9k_app_ring_indices(const volatile uint8_t *ring, uint32_t *head,

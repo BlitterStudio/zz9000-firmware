@@ -32,8 +32,12 @@ struct zzapp_audio;
 #define SDK_STATUS_NOT_FOUND       10u
 #endif
 
-/* Amiga reset: forget the window (the host heap is already reset) and detach audio. */
+/* Amiga reset: forget the window and free its block before the host heap is
+ * reset, and detach audio. */
 void zzapp_services_on_reset(void);
+/* Amiga reset, before the allocator is reset: an idle slot gives its window
+ * back too. */
+void zzapp_services_retire_idle_window(void);
 /* App lifetime cleanup retains the launch window so status remains readable. */
 void zzapp_services_on_app_end(void);
 void zzapp_services_cancel_start(int status);
