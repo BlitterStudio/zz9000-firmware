@@ -1576,7 +1576,8 @@ void zzapp_services_on_reset(void)
 		if (zzapp_rec_state(pid) == ZZAPP_REC_FREE)
 			continue;
 		slot_state_lock_acquire();
-		zzapp_xport_flag_clear(rec, ZZAPP_XPORT_F_QUARANTINED);
+		/* The quarantine stays until the shell is released: release then
+		 * returns the app's own host-visible blocks with it. */
 		zzapp_xport_flag_set(rec, ZZAPP_XPORT_F_RELEASE_REQUESTED);
 		if (discard_deferred(rec))
 			/* Core 1 still owns the cancelled op; completing it is
