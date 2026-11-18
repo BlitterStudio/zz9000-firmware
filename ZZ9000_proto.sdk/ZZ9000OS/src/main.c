@@ -602,28 +602,6 @@ static int reserve_host_control_ranges(void)
 #undef RESERVE_HOST_CONTROL_RANGE
 }
 
-/* The wire window count is a platform ceiling: every window has a carved,
- * non-cacheable range below. It is unrelated to how many apps can run. */
-_Static_assert(ZZAPP_SLOT_COUNT <= ZZAPP_WINDOW_Z3_SLOTS,
-	       "every launcher window needs a carved Z3 range");
-
-/* App windows are allocated on demand, but every page any slot can use must
- * be non-cacheable before core 1 and interrupts can observe the mapping.
- * The slot ranges are contiguous below the legacy slot 0 range. */
-static int map_zzapp_window_pages(void)
-{
-	uint32_t address;
-
-	if (!sdk_aperture_runtime_is_zorro3())
-		return 0;
-	for (address = ZZAPP_WINDOW_Z3_LOWEST;
-	     address < ZZAPP_WINDOW_Z3_END; address += 0x1000U) {
-		if (!mmu_page_set_noncacheable((uintptr_t)address))
-			return 0;
-	}
-	return 1;
-}
-
 static void apply_aperture_framebuffer_limit(void)
 {
 	if ((sdk_aperture_runtime_flags() & SDK_APERTURE_FLAG_VALID) != 0U)
@@ -1169,11 +1147,9 @@ int main() {
 	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
 			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
-	/* Both host-written command regions must be mapped before core 1 and
-	 * interrupts run. Z2 keeps its existing mailbox page; Z3 maps the
-	 * app-window placement separately. */
+	/* The host-written command region must be mapped before core 1 and
+	 * interrupts run. Z2 keeps its existing mailbox page. */
 	sdk_mailbox_map_z2_page();
-	zzapp_services_set_window_mapping_available(map_zzapp_window_pages());
 
 	boot_rom_init();
 

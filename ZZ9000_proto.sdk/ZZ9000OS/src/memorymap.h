@@ -489,44 +489,6 @@
 #if (SDK_HOST_WINDOW_Z3_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE
 #error "Z3 host window lies outside the Zorro III main board aperture"
 #endif
-/*
- * App windows are allocated on APP_ALLOC_WINDOW, never at boot, each in a
- * fixed range that main.c maps Normal non-cacheable before core 1 starts.
- * Slot 0 keeps the legacy range, which ends at the fixed Z3 host window;
- * slots 1-3 sit directly below it. Board offsets are ARM - ADDR_ADJ.
- */
-#define ZZAPP_WINDOW_Z3_ADDRESS       0x0805C000U
-#define ZZAPP_WINDOW_Z3_SIZE          0x00094000U
-#define ZZAPP_WINDOW_Z3_SLOTS         4U
-#define ZZAPP_WINDOW_Z3_SLOT_ADDRESS(slot) \
-	(ZZAPP_WINDOW_Z3_ADDRESS - (slot) * ZZAPP_WINDOW_Z3_SIZE)
-#define ZZAPP_WINDOW_Z3_LOWEST \
-	ZZAPP_WINDOW_Z3_SLOT_ADDRESS(ZZAPP_WINDOW_Z3_SLOTS - 1U)
-#define ZZAPP_WINDOW_Z3_END \
-	(ZZAPP_WINDOW_Z3_ADDRESS + ZZAPP_WINDOW_Z3_SIZE)
-
-#if ZZAPP_WINDOW_Z3_LOWEST < HOST_VISIBLE_HEAP_ADDRESS
-#error "every app window must fit the host-visible heap"
-#endif
-
-#if ZZAPP_WINDOW_Z3_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS || \
-    ZZAPP_WINDOW_Z3_END > HOST_VISIBLE_HEAP_END
-#error "app window must fit the host-visible heap"
-#endif
-#if ZZAPP_WINDOW_Z3_END != SDK_HOST_WINDOW_Z3_ADDRESS
-#error "app window must end before the fixed Z3 host window"
-#endif
-#if (ZZAPP_WINDOW_Z3_ADDRESS - ADDR_ADJ) >= Z3_MAIN_BOARD_WINDOW_SIZE || \
-    (ZZAPP_WINDOW_Z3_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE
-#error "app window must fit the Z3 main board aperture"
-#endif
-#if (ZZAPP_WINDOW_Z3_ADDRESS & 0xfffU) != 0U || \
-    (ZZAPP_WINDOW_Z3_SIZE & 0xfffU) != 0U
-#error "app window must use whole MMU pages"
-#endif
-#if ZZAPP_WINDOW_Z3_END > FIRMWARE_HIGH_DDR_ADDRESS
-#error "app window must remain below firmware and card-pool DDR"
-#endif
 
 // MiniGL wire-v9 transport window (2.9.0 layout). One dynamic allocation
 // from the host-visible heap -- there is deliberately NO fixed low-DDR

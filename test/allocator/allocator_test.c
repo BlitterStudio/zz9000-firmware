@@ -205,6 +205,19 @@ static void test_slot_exhaustion(void) {
     (void)last;
 }
 
+/* The table is sized for hundreds of apps at five transport blocks each next
+ * to the P96 bitmaps: at least 4096 live blocks. */
+static void test_four_thousand_blocks(void) {
+    uint32_t i;
+
+    CHECK(SURFACE_ALLOCATOR_MAX_BLOCKS >= 4096u);
+    surface_allocator_init(HEAP_BASE, (4096u + 8u) * ALIGN);
+    for (i = 0; i < 4096u; i++)
+        CHECK(surface_allocator_alloc(ALIGN) == HEAP_BASE + i * ALIGN);
+    CHECK(surface_allocator_free(HEAP_BASE + 4095u * ALIGN) == 0);
+    CHECK(surface_allocator_alloc(ALIGN) == HEAP_BASE + 4095u * ALIGN);
+}
+
 static void test_reset(void) {
     surface_allocator_init(HEAP_BASE, HEAP_SIZE);
     CHECK(surface_allocator_alloc(1024) != 0);
@@ -407,6 +420,7 @@ int main(void) {
     test_double_free();
     test_free_unknown();
     test_slot_exhaustion();
+    test_four_thousand_blocks();
     test_reset();
     test_churn();
     test_p96_sdk_interleaving();

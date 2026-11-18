@@ -103,7 +103,6 @@ static void hdr_constants(uint32_t index)
 	hdr->tables = (uint32_t)(uintptr_t)(area_tables +
 		(size_t)index * ZZAPP_REC_TABLES_BYTES);
 	hdr->l1 = (uint32_t)(uintptr_t)zzapp_as_pool_l1(index);
-	hdr->window = ZZAPP_REC_NO_WINDOW;
 }
 
 int zzapp_rec_arena_init(void *base, const zzapp_rec_layout_t *lay)
@@ -317,21 +316,6 @@ uint32_t zzapp_rec_admit(uint32_t *handle, zzapp_rec_t **rec)
 	return 0U;
 }
 
-/* SHIM: see zzapp_rec.h. */
-uint32_t zzapp_rec_admit_window(uint32_t window, uint32_t *handle,
-				zzapp_rec_t **rec)
-{
-	zzapp_rec_t *r;
-	uint32_t reason = zzapp_rec_admit(handle, &r);
-
-	if (reason != 0U)
-		return reason;
-	r->hdr.window = (uint16_t)window;
-	if (rec)
-		*rec = r;
-	return 0U;
-}
-
 int zzapp_rec_unadmit(uint32_t handle)
 {
 	zzapp_rec_t *r = zzapp_rec_by_handle(handle);
@@ -347,7 +331,6 @@ int zzapp_rec_unadmit(uint32_t handle)
 	r->hdr.handle = 0U;
 	r->hdr.owner_serial = 0U;
 	r->hdr.serial_prev = 0U;
-	r->hdr.window = ZZAPP_REC_NO_WINDOW;
 	r->hdr.retire_stage = ZZAPP_RETIRE_NONE;
 	__atomic_store_n(&tab.state[index], (uint8_t)ZZAPP_REC_FREE,
 			 __ATOMIC_RELEASE);
