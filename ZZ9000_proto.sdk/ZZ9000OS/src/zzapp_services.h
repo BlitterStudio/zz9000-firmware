@@ -10,7 +10,6 @@
 #define ZZAPP_SERVICES_H
 
 #include <stdint.h>
-#include "../../../sdk/include/zz9k/app_perf.h"
 
 struct aar_event;
 struct aar_stat;
@@ -53,11 +52,6 @@ void zzapp_services_on_launch(void);
 void zzapp_services_poll(void);
 /* Core 0: audio open, close and go-live of every record that has audio. */
 void zzapp_services_core0_poll(void);
-/* Optional DIAG_SCHED payload, independent of the empty scheduler query.
- * Core 0. SET is serialized with claim/release and requires no held claims.
- * RESET clears measurements only; QUERY takes a coherent snapshot. */
-uint16_t zzapp_services_perf_diag(const uint8_t *req, uint16_t req_len,
-				  uint8_t *reply, uint16_t *reply_len);
 /* Core 0, while core 1 is halted and cannot be inside an audio handoff. */
 void zzapp_services_reclaim_halted_audio(void);
 

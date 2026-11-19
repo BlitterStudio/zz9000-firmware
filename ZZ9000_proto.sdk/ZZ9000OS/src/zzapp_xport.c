@@ -226,8 +226,7 @@ static int block_get(const zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
 }
 
 static int block_take(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
-		      uint32_t bytes, uint32_t align, int exempt,
-		      uint32_t lo, uint32_t hi)
+		      uint32_t bytes, uint32_t align, int exempt)
 {
 	zzapp_rec_xport_t *x = &rec->xport;
 	void *ptr = NULL;
@@ -238,7 +237,7 @@ static int block_take(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
 	     x->shared_used + rec->visible.used > x->shared_limit - bytes))
 		return AAR_E_NOMEM;
 	if (!env.alloc ||
-	    env.alloc(env.ctx, bytes, align, lo, hi, &ptr, &card) != 0 ||
+	    env.alloc(env.ctx, bytes, align, env.lo, env.hi, &ptr, &card) != 0 ||
 	    !ptr)
 		return AAR_E_NOMEM;
 	memset(ptr, 0, bytes);
@@ -249,34 +248,25 @@ static int block_take(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
 	return AAR_OK;
 }
 
-int zzapp_xport_block_alloc_range(zzapp_rec_t *rec,
-				  zzapp_xport_block_kind_t kind,
-				  uint32_t bytes, uint32_t lo, uint32_t hi,
-				  zzapp_xport_buf_t *out)
+int zzapp_xport_block_alloc(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
+			    uint32_t bytes, zzapp_xport_buf_t *out)
 {
 	uint32_t size;
 	int rc;
 
 	if (!is_live(rec) || kind == ZZAPP_XPORT_BLOCK_PAIR ||
 	    (unsigned)kind >= ZZAPP_XPORT_BLOCK_COUNT || bytes == 0U ||
-	    bytes > 0xffffe000U || ((lo | hi) != 0U && lo >= hi))
+	    bytes > 0xffffe000U)
 		return AAR_E_INVAL;
 	if (rec->xport.block[kind].ptr)
 		return AAR_E_BUSY;
 	size = round_step(bytes);
-	rc = block_take(rec, kind, size, ZZAPP_XPORT_BLOCK_STEP, 0, lo, hi);
+	rc = block_take(rec, kind, size, ZZAPP_XPORT_BLOCK_STEP, 0);
 	if (rc != AAR_OK)
 		return rc;
 	zzapp_xport_publish_shared(rec);
 	block_get(rec, kind, out);
 	return AAR_OK;
-}
-
-int zzapp_xport_block_alloc(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
-			    uint32_t bytes, zzapp_xport_buf_t *out)
-{
-	return zzapp_xport_block_alloc_range(rec, kind, bytes, env.lo, env.hi,
-					     out);
 }
 
 int zzapp_xport_block_free(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind)
@@ -359,7 +349,7 @@ uint32_t zzapp_xport_admit(zzapp_rec_t *rec)
 	if (is_live(rec))
 		return AAR_REASON_NONE;
 	if (block_take(rec, ZZAPP_XPORT_BLOCK_PAIR, ZZAPP_XPORT_PAIR_ALLOC,
-		       ZZAPP_XPORT_PAIR_ALIGN, 1, env.lo, env.hi) != AAR_OK)
+		       ZZAPP_XPORT_PAIR_ALIGN, 1) != AAR_OK)
 		return AAR_REASON_HOSTHEAP;
 	token = token_of(x->block[ZZAPP_XPORT_BLOCK_PAIR].card);
 	ring = (uint8_t *)x->block[ZZAPP_XPORT_BLOCK_PAIR].ptr;

@@ -498,12 +498,6 @@ mailbox byte order before filling public SDK structs.
 `zz9k_read_diag_memory()` reports the layout state and host-heap total, free,
 largest-block, allocation, and invalid-slot counters used by `zz9k-info`.
 
-`zz9k-info --app-perf` controls the optional app transport performance
-experiments through a tagged `DIAG_SCHED` payload. See
-[Transport performance experiments](../../docs/app-runtime.md#transport-performance-experiments)
-for modes, counter units, reset semantics and the card A/B procedure. The
-ordinary `zz9k_read_diag_sched()` request and reply are unchanged.
-
 Keep host-window allocations small and short-lived: the Zorro 2 heap is
 shared by every host-visible SDK client (the MHI driver's feed staging,
 mpega's staging + compact PCM ring, 32 KiB image-view staging, archive stream

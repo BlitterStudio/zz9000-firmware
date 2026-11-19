@@ -6,10 +6,7 @@
 
 #include "zz9k/caps.h"
 #include "zz9k/host.h"
-#include "zz9k/app_perf.h"
-#include "zz9k/request.h"
 #include <stdio.h>
-#include <string.h>
 
 static void print_capability_name(int *first, const char *name)
 {
@@ -280,50 +277,7 @@ static void print_diag_memory(const ZZ9KDiagMemoryInfo *memory)
          (unsigned long)memory->allocator_invalid_slots);
 }
 
-static int app_perf(ZZ9KContext *ctx, uint32_t action, uint32_t flags)
-{
-  ZZ9KRequest request;
-  ZZ9KMailboxEntry reply;
-  const uint8_t *p = reply.payload.inline_data;
-  uint64_t acquire_us;
-  int status;
-
-  zz9k_request_diag_sched(&request);
-  request.entry.payload_len = ZZ9K_APP_PERF_REQUEST_BYTES;
-  zz9k_put_be32(request.entry.payload.inline_data, ZZ9K_APP_PERF_TAG);
-  zz9k_put_be32(request.entry.payload.inline_data + 4U, action);
-  zz9k_put_be32(request.entry.payload.inline_data + 8U, flags);
-  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
-  if (status != ZZ9K_STATUS_OK) {
-    printf("App perf: %s (%d)\n", zz9k_status_name(status), status);
-    return 1;
-  }
-  if (reply.opcode != ZZ9K_OP_DIAG_SCHED ||
-      reply.payload_len != ZZ9K_APP_PERF_REPLY_BYTES ||
-      zz9k_get_be32(p) != ZZ9K_APP_PERF_TAG ||
-      zz9k_get_be32(p + 4U) != ZZ9K_APP_PERF_VERSION) {
-    puts("App perf: unsupported diagnostic reply");
-    return 1;
-  }
-  flags = zz9k_get_be32(p + ZZ9K_APP_PERF_R_FLAGS);
-  acquire_us = ((uint64_t)zz9k_get_be32(p + ZZ9K_APP_PERF_R_LOCK_US_HI) << 32) |
-               zz9k_get_be32(p + ZZ9K_APP_PERF_R_LOCK_US_LO);
-  printf("App perf: flags=%lu audio=%s lock_timing=%s held_claims=%lu\n",
-         (unsigned long)flags,
-         flags & ZZ9K_APP_PERF_AUDIO_NC ? "noncacheable" : "default-cacheable",
-         flags & ZZ9K_APP_PERF_LOCK_TIMING ? "on" : "off",
-         (unsigned long)zz9k_get_be32(p + ZZ9K_APP_PERF_R_CLAIMS));
-  printf("Core1 lifecycle lock: calls=%lu acquire_us=%llu max_us=%lu\n",
-         (unsigned long)zz9k_get_be32(p + ZZ9K_APP_PERF_R_LOCK_CALLS),
-         (unsigned long long)acquire_us,
-         (unsigned long)zz9k_get_be32(p + ZZ9K_APP_PERF_R_LOCK_MAX_US));
-  printf("Last audio ring: ARM=0x%08lx bytes=%lu\n",
-         (unsigned long)zz9k_get_be32(p + ZZ9K_APP_PERF_R_RING),
-         (unsigned long)zz9k_get_be32(p + ZZ9K_APP_PERF_R_RING_BYTES));
-  return 0;
-}
-
-int main(int argc, char **argv)
+int main(void)
 {
   ZZ9KContext *ctx = 0;
   ZZ9KCaps caps;
@@ -333,30 +287,6 @@ int main(int argc, char **argv)
   ZZ9KApertureLayout layout;
   ZZ9KDiagMemoryInfo memory;
   int status;
-  uint32_t perf_action = ZZ9K_APP_PERF_QUERY;
-  uint32_t perf_flags = 0U;
-
-  if (argc != 1) {
-    if (argc != 3 || strcmp(argv[1], "--app-perf") != 0) {
-      puts("Usage: zz9k-info [--app-perf query|reset|default|audio-nc|lock|audio-nc-lock]");
-      return 1;
-    }
-    if (strcmp(argv[2], "reset") == 0)
-      perf_action = ZZ9K_APP_PERF_RESET;
-    else if (strcmp(argv[2], "query") != 0) {
-      perf_action = ZZ9K_APP_PERF_SET;
-      if (strcmp(argv[2], "audio-nc") == 0)
-        perf_flags = ZZ9K_APP_PERF_AUDIO_NC;
-      else if (strcmp(argv[2], "lock") == 0)
-        perf_flags = ZZ9K_APP_PERF_LOCK_TIMING;
-      else if (strcmp(argv[2], "audio-nc-lock") == 0)
-        perf_flags = ZZ9K_APP_PERF_FLAGS;
-      else if (strcmp(argv[2], "default") != 0) {
-        puts("App perf: unknown mode");
-        return 1;
-      }
-    }
-  }
 
   printf("zz9k-info: opening SDK mailbox\n");
   fflush(stdout);
@@ -369,11 +299,6 @@ int main(int argc, char **argv)
              zz9k_status_name(status), status);
     }
     return 1;
-  }
-  if (argc != 1) {
-    status = app_perf(ctx, perf_action, perf_flags);
-    zz9k_close(ctx);
-    return status;
   }
 
   printf("zz9k-info: querying capabilities\n");
