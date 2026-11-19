@@ -291,8 +291,10 @@ static int fb_call(void *user, uint16_t op, const uint8_t *payload,
             return ZZ9K_STATUS_BAD_REQUEST;
         handle = zzapp_get_be32(payload + ZZAPP_SEL_HANDLE);
         if (handle != 0U && handle == card.revoked) {
-            /* The stale path of a revoked claim: the shell is released. */
-            if (card.rec)
+            /* The stale path of a revoked claim: STOP and RELEASE release the
+             * shell; a deferred call does not (its lease tick may still
+             * write the control block when its reply is on the way). */
+            if (card.rec && (op == ZZAPP_OP_STOP || op == ZZAPP_OP_RELEASE))
                 card_release_claim();
             reply_status(reply, ZZAPP_ERR_STALE);
             return ZZAPP_ERR_STALE;
@@ -1655,6 +1657,8 @@ static void test_staleness_after_revocation(void)
     claim(&x);
     card.revoked = x.handle;
     CHECK(aar_xport_load_memory(&x, "abcd", 4U, 0U) == AAR_E_STALE);
+    /* The client detached, then released the shell with a plain RELEASE. */
+    CHECK(card.last_op == ZZAPP_OP_RELEASE);
     CHECK(!aar_xport_live(&x) && heap.live == 0U && graveyard_intact());
 
     /* Release of a revoked claim by its owner is fine too. */

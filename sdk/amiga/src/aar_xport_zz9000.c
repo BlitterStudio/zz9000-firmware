@@ -132,19 +132,39 @@ static int xport_tick(void *user)
 	return aar_xport_lease_renew((aar_xport *)user) != AAR_OK;
 }
 
+/* A deferred call is answered while its lease tick may still write the claim's
+ * control block, so the card does not release a revoked claim's shell for it
+ * (the shell would be reused under that write). The reply has been read and
+ * the claim detached here, which makes a plain RELEASE under the old handle,
+ * a call with no tick, the safe request that lets the card release it. */
+static void stale_release(aar_xport *x, uint32_t old_handle)
+{
+	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+	aar_xport_reply reply;
+
+	memset(req, 0, sizeof(req));
+	zzapp_build_handle(req, old_handle);
+	(void)board_call(&x->board, ZZAPP_OP_RELEASE, req, sizeof(req), 0, NULL,
+			 NULL, &reply);
+}
+
 /* One mailbox call on a claim. */
 static int mbx(aar_xport *x, uint16_t op, uint8_t *payload, uint32_t len,
 	       int long_op, aar_xport_reply *reply)
 {
 	aar_xport_reply local;
+	uint32_t old_handle = x->handle;
 	int rc;
 
 	if (!reply)
 		reply = &local;
 	rc = board_call(&x->board, op, payload, len, long_op,
 			long_op ? xport_tick : NULL, x, reply);
-	if (rc == AAR_E_STALE)
+	if (rc == AAR_E_STALE) {
 		detach(x);
+		if (long_op && old_handle != 0u)
+			stale_release(x, old_handle);
+	}
 	return rc;
 }
 
