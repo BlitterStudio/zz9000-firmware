@@ -1258,10 +1258,17 @@ void zzapp_kernel_yield(zzapp_kernel_t *kernel)
 
 		if (pid != (uint32_t)current && peer->state == ZZAPP_THREAD_RUNNABLE &&
 		    yield_peer_entitled(kernel, yielder, peer)) {
-			/* A yield not yet spent by a pick gives way to this one. */
+			/* A yield not yet spent by a pick gives way to this one.
+			 * The flag and its owner are published together: an IRQ
+			 * between the two stores would let a pick see the flag
+			 * while yield_spent() cannot find its owner, and the
+			 * yielder would stay excluded from every pick. */
+			uint32_t irq_state = smp_local_irq_save();
+
 			yield_spent(kernel);
 			yielder->yield_pending = 1U;
 			kernel->yielder = (uint32_t)current;
+			smp_local_irq_restore(irq_state);
 #if ZZAPP_PERF_COUNTERS
 			yielder->acct.yields_given++;
 #endif
