@@ -1,5 +1,6 @@
 CC ?= cc
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror
+		-DXIL_CACHE_MOCK_MODEL \
 
 SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 MOCK_DIR := mock

@@ -57,6 +57,17 @@ enum audio_fabric_ownership {
  * published cursors. The producer is the single writer of its source
  * ring and of produced/staged; the compositor is the sole consumer-
  * side writer (it advances staging through the stage callback below).
+ *
+ * Cache ownership of the ring bytes. A snapshot starts zeroed, so a
+ * producer is non-coherent unless it says otherwise: the compositor
+ * invalidates the range it is about to read, which is right for bytes
+ * written by DMA or through the Zorro aperture, or cleaned by the
+ * producer before it published produced_bytes. `coherent` is the
+ * producer's statement that it writes the ring with cacheable, shareable
+ * stores on a core that is in the SCU coherency domain: the freshest PCM
+ * may then sit dirty in another core's L1 or in L2 and not in DDR, and
+ * an invalidate would discard it. The compositor reads such a ring with
+ * ordinary loads, ordered after the producer's published index.
  */
 struct audio_fabric_source {
 	uint8_t *ring;
@@ -68,6 +79,7 @@ struct audio_fabric_source {
 	uint32_t sample_format;
 	uint8_t done;
 	uint8_t faulted;
+	uint8_t coherent;
 };
 
 /*

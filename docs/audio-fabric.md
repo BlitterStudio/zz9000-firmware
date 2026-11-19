@@ -74,6 +74,32 @@ written and consumed byte cursors, heartbeat age, underruns, 16.16 peak, and
 clip count. A state read with `HOLD_RESET` requests reset of the lease peak
 window.
 
+## Producer ring cache ownership
+
+The compositor copies each period out of the producer's PCM ring from the
+formatter interrupt on core 0. What it does first depends on how the producer
+wrote the ring, which the producer states in its source snapshot
+(`struct audio_fabric_source`). A snapshot starts zeroed, so a producer is
+non-coherent unless it sets `coherent`.
+
+| Producer wrote the ring | Snapshot | Reader step before the copy |
+| --- | --- | --- |
+| By DMA, through the Zorro aperture, or cleaned to DDR before it published the index | `coherent` = 0 | Invalidate the range, so a stale cached copy is dropped |
+| With cacheable, shareable stores on a core in the SCU coherency domain | `coherent` = 1 | An acquire barrier only; the loads see the producer's dirty lines in L1 or L2 |
+
+An invalidate must not run over a coherent producer's ring. The newest PCM can
+be dirty in the producer's L1 or in L2 and not yet in DDR, and an invalidate
+by address discards those lines, so the copy reads whatever DDR held from the
+ring's previous lap. That plays as distortion. An app on the platform audio
+route is such a producer: it stores PCM through its own cacheable alias of the
+ring, and the app cannot clean its cache. The playback pump, the media
+session and the direct-ring leases stay non-coherent. The queued-period
+replay after a peer detaches follows the same rule as the first read.
+
+The barrier orders the ring loads after the producer's published write index,
+which the snapshot read. The producer's side of the pair is a release barrier
+between its PCM stores and the index store.
+
 ## Source formats, conversion, and admission
 
 A zero-flags acquire is a 48 kHz stereo S16LE bypass lease. A client can set

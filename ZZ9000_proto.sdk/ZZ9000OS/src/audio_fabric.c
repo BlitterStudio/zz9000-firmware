@@ -501,6 +501,30 @@ static uint32_t fabric_slot_fill_lease_preconvert(
 }
 
 /*
+ * Make the PCM at [ptr, ptr + bytes) of a producer ring readable by the
+ * copy that follows, under the cache ownership the snapshot declared
+ * (struct audio_fabric_source). The call runs after the snapshot read the
+ * producer's published index and before the ring is read.
+ *
+ * A coherent producer's lines are the authoritative copy wherever they sit
+ * (its L1, L2): ordinary loads on this core see them through the SCU, and an
+ * invalidate would throw away PCM that is not in DDR yet. Only the barrier
+ * is needed, so these loads cannot pass the index read.
+ *
+ * Any other producer wrote through DMA or the aperture, or cleaned its
+ * lines before publishing: the cached copy here may be stale, so drop it.
+ */
+static void fabric_source_acquire(const struct audio_fabric_source *source,
+	const uint8_t *ptr, uint32_t bytes)
+{
+	if (source->coherent) {
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		return;
+	}
+	Xil_DCacheInvalidateRange((INTPTR)ptr, bytes);
+}
+
+/*
  * Per-slot fill: the pre-fabric pump's audio_pump_fill_period, ported
  * verbatim. Writes one period of S16 stereo into the shared stereo
  * scratch and returns the number of source PCM bytes staged (zero when
@@ -553,19 +577,17 @@ static uint32_t fabric_slot_fill(struct audio_fabric_slot *s,
 	 * 20 ms period. Drain it zero-padded; refusing partial pulls would
 	 * pin used above zero and the stream could never report DONE. */
 
-	/* Pull the source from the PCM ring. The decode side flushed these
-	 * bytes before publishing produced_bytes, so a reader-side
-	 * invalidate makes them visible on this core. */
+	/* Pull the source from the PCM ring (fabric_source_acquire). */
 	ring = source->ring;
 	offset = audio_playback_source_offset(
 		source->staged_bytes, source->capacity);
 	first = source->capacity - offset;
 	if (first > pull)
 		first = pull;
-	Xil_DCacheInvalidateRange((INTPTR)(ring + offset), first);
+	fabric_source_acquire(source, ring + offset, first);
 	memcpy(g_fabric_src, ring + offset, first);
 	if (pull > first) {
-		Xil_DCacheInvalidateRange((INTPTR)ring, pull - first);
+		fabric_source_acquire(source, ring, pull - first);
 		memcpy((uint8_t *)g_fabric_src + first, ring, pull - first);
 	}
 	if (pull < src_bytes)
@@ -751,18 +773,17 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 		return 0U;
 
 	/* Pull the replayed bytes from the producer's ring, exactly as
-	 * the fill loop pulled them the first time: reader-side
-	 * invalidate (the producer wrote them through the aperture),
+	 * the fill loop pulled them the first time (fabric_source_acquire),
 	 * wrap-safe copy, zero-pad a drain-tail period. */
 	ring = source->ring;
 	offset = audio_playback_source_offset(*cursor, source->capacity);
 	first = source->capacity - offset;
 	if (first > want)
 		first = want;
-	Xil_DCacheInvalidateRange((INTPTR)(ring + offset), first);
+	fabric_source_acquire(source, ring + offset, first);
 	memcpy(g_fabric_src, ring + offset, first);
 	if (want > first) {
-		Xil_DCacheInvalidateRange((INTPTR)ring, want - first);
+		fabric_source_acquire(source, ring, want - first);
 		memcpy((uint8_t *)g_fabric_src + first, ring, want - first);
 	}
 	if (want < src_bytes)

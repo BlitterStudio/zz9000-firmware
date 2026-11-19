@@ -3533,6 +3533,9 @@ static int app_audio_snapshot_for(uint32_t producer_slot,
 	source->sample_rate = ZZAPP_AUDIO_RATE;
 	source->channels = 2U;
 	source->sample_format = 1U; /* SDK_AUDIO_SAMPLE_FORMAT_S16LE */
+	/* The app stores PCM through its cacheable, shareable alias of the
+	 * ring: the fabric reads it without invalidating. */
+	source->coherent = 1U;
 #if ZZAPP_PERF_COUNTERS
 	if (source->produced_bytes - source->staged_bytes <= source->capacity / 4U) {
 		if (!state->audio_low_water_latched) {

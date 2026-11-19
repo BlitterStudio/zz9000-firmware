@@ -20,6 +20,11 @@
 struct xil_cache_mock_state g_xil_cache_mock;
 #endif
 
+#ifdef XIL_CACHE_MOCK_MODEL
+/* The cache-model binary's registered region (see mock/xil_cache.h). */
+struct xil_cache_mock_model g_xil_cache_model;
+#endif
+
 /* ---- assertions (suite convention) ---- */
 
 int failures;
@@ -123,6 +128,7 @@ int model_snapshot(struct src_model *m, void *source)
 	s->sample_format = m->sample_format;
 	s->done = (uint8_t)(m->done ? 1 : 0);
 	s->faulted = (uint8_t)(m->faulted ? 1 : 0);
+	s->coherent = (uint8_t)(m->coherent ? 1 : 0);
 	return 1;
 }
 

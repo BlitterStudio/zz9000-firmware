@@ -51,6 +51,7 @@ struct pump_golden_source {
 	uint32_t sample_format;
 	uint8_t done;
 	uint8_t faulted;
+	uint8_t coherent;
 };
 
 /* Producer seams the golden calls in place of the sdk_mailbox helpers. */

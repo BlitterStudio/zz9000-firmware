@@ -89,7 +89,93 @@ static inline int xil_cache_mock_op(unsigned index, int *kind,
     return 1;
 }
 
-#else /* !XIL_CACHE_MOCK_RECORD */
+#elif defined(XIL_CACHE_MOCK_MODEL)
+
+/*
+ * Write-back cache model (fabric coherent-source test). One registered
+ * region has two images: `cpu` is what a load on the compositor's core
+ * returns (the producer's fresh PCM when its lines are dirty, or a stale
+ * cached copy), `ddr` is what memory and DMA hold. Like the BSP, an
+ * invalidate discards the cached copy of every whole 32-byte line in the
+ * range, so those lines read back from `ddr`; the unaligned first and last
+ * lines are cleaned and invalidated, so they keep their data. A flush
+ * cleans the lines it covers. No region attached means no effect.
+ */
+struct xil_cache_mock_model {
+    uint8_t *cpu;
+    uint8_t *ddr;
+    unsigned long len;
+};
+
+extern struct xil_cache_mock_model g_xil_cache_model;
+
+#define XIL_CACHE_MOCK_LINE 32UL
+
+static inline void xil_cache_model_attach(uint8_t *cpu, uint8_t *ddr,
+                                          unsigned long len) {
+    g_xil_cache_model.cpu = cpu;
+    g_xil_cache_model.ddr = ddr;
+    g_xil_cache_model.len = len;
+}
+
+static inline void xil_cache_model_detach(void) {
+    g_xil_cache_model.cpu = NULL;
+    g_xil_cache_model.ddr = NULL;
+    g_xil_cache_model.len = 0UL;
+}
+
+/* Copies [lo, hi) of the registered region: cpu to ddr (clean) or ddr to
+ * cpu (the cached copy dropped). */
+static inline void xil_cache_model_copy(uintptr_t lo, uintptr_t hi,
+                                        int clean) {
+    uintptr_t base = (uintptr_t)g_xil_cache_model.cpu;
+    uintptr_t end = base + g_xil_cache_model.len;
+
+    if (lo < base)
+        lo = base;
+    if (hi > end)
+        hi = end;
+    if (lo >= hi)
+        return;
+    if (clean)
+        memcpy(g_xil_cache_model.ddr + (lo - base),
+               g_xil_cache_model.cpu + (lo - base), hi - lo);
+    else
+        memcpy(g_xil_cache_model.cpu + (lo - base),
+               g_xil_cache_model.ddr + (lo - base), hi - lo);
+}
+
+static inline void Xil_DCacheInvalidateRange(INTPTR adr, unsigned long len) {
+    uintptr_t lo = (uintptr_t)adr;
+    uintptr_t hi = lo + len;
+
+    if (g_xil_cache_model.cpu == NULL || len == 0UL)
+        return;
+    if ((lo & (XIL_CACHE_MOCK_LINE - 1UL)) != 0UL) {
+        uintptr_t line = lo & ~(XIL_CACHE_MOCK_LINE - 1UL);
+
+        xil_cache_model_copy(line, line + XIL_CACHE_MOCK_LINE, 1);
+        lo = line + XIL_CACHE_MOCK_LINE;
+    }
+    if ((hi & (XIL_CACHE_MOCK_LINE - 1UL)) != 0UL) {
+        uintptr_t line = hi & ~(XIL_CACHE_MOCK_LINE - 1UL);
+
+        xil_cache_model_copy(line, line + XIL_CACHE_MOCK_LINE, 1);
+        hi = line;
+    }
+    if (lo < hi)
+        xil_cache_model_copy(lo, hi, 0);
+}
+
+static inline void Xil_DCacheFlushRange(UINTPTR adr, unsigned long len) {
+    if (g_xil_cache_model.cpu == NULL || len == 0UL)
+        return;
+    xil_cache_model_copy(adr & ~(XIL_CACHE_MOCK_LINE - 1UL),
+                         (adr + len + XIL_CACHE_MOCK_LINE - 1UL) &
+                         ~(XIL_CACHE_MOCK_LINE - 1UL), 1);
+}
+
+#else /* !XIL_CACHE_MOCK_RECORD && !XIL_CACHE_MOCK_MODEL */
 
 /* Reader-side invalidate used by the playback pump / fabric compositor
  * before pulling producer PCM; a no-op on the host just like the flush. */
@@ -103,6 +189,6 @@ static inline void Xil_DCacheFlushRange(UINTPTR adr, unsigned long len) {
     (void)len;
 }
 
-#endif /* XIL_CACHE_MOCK_RECORD */
+#endif /* XIL_CACHE_MOCK_RECORD / XIL_CACHE_MOCK_MODEL */
 
 #endif /* XIL_CACHE_H */
