@@ -3708,6 +3708,7 @@ static void audio_detach(void)
 	zzapp_rec_t *rec = service_rec();
 	int open = 1;
 	int was_ahi_route;
+	int keep;
 
 	/* Core 0 releases a close only after core 1 has quiesced. */
 	if (!__atomic_compare_exchange_n(&state->audio_open, &open, 0, 0,
@@ -3726,14 +3727,19 @@ static void audio_detach(void)
 #endif
 	/* The ring goes back with its block pointer cleared first (the
 	 * transport does that), so a replayed teardown frees nothing twice.
-	 * A quarantined claim keeps it: its client maps the ring (the AHI
-	 * route writes READ_FRAME through it) and may still write until it
-	 * learns the handle is stale, so the shell's release returns it with
-	 * the other transport blocks. */
+	 * The client of the AHI route maps the ring and writes READ_FRAME
+	 * through it, so the ring stays, and the shell's release returns it,
+	 * whenever the client has not been told to stop: a quarantined claim
+	 * (the client may still write until it finds out), and an app that
+	 * ended without closing the stream (a close the client answered
+	 * leaves keep clear). A request the client may still be working on
+	 * also keeps it (zzapp_xport_block_free, ZZAPP_XPORT_F_PINNED). */
 	state->audio_samples = NULL;
 	state->audio_read_frame = NULL;
 	state->audio_write_frame = NULL;
-	if (!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_QUARANTINED))
+	keep = zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_QUARANTINED) ||
+	       (was_ahi_route && state->audio_teardown);
+	if (!keep)
 		(void)zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO);
 	state->audio_staged = 0U;
 	state->audio_first_write_seen = 0U;
@@ -3760,7 +3766,8 @@ static int audio_attach(void)
 
 	state->audio_ahi_route =
 		(rec->claim.client_caps & ZZAPP_CLIENT_AUDIO_AHI) != 0U;
-	if (state->audio_open)
+	if (state->audio_open || zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO,
+						       NULL))
 		return AAR_E_BUSY;
 	if (!state->audio_ahi_route) {
 		slot = AUDIO_FABRIC_SLOT_RESERVED;

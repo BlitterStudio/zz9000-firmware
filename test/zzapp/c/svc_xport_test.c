@@ -1885,6 +1885,39 @@ static void test_audio_ring_kept_by_quarantine(void)
 	CHECK(heap.live == 0U);
 }
 
+/* An AHI app that ends without closing the stream (exit, fault or a forced
+ * stop) never told its client to stop reading, so the ring stays until the
+ * claim is released. The card route's ring, which no client maps, goes with
+ * the app. */
+static void test_audio_ahi_ring_kept_when_app_ends(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_audio a;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_AUDIO_AHI;
+	CHECK(zzapp_svc_audio_open(22050U, 2U, &a) == AAR_OK);
+	CHECK(cl.nreq[AAR_OP_AUDIO_CLOSE] == 0U);
+	zzapp_services_set_terminal(ZZAPP_END_EXIT);
+	zzapp_services_on_app_end();
+	CHECK(zzapp_rec_retire(rec->hdr.pid) == 0);
+	zzapp_services_poll();	/* core 1 quiesces */
+	zzapp_services_core0_poll();
+	CHECK(runtime_of(rec)->audio_request == AUDIO_REQUEST_NONE);
+	CHECK(runtime_of(rec)->audio_open == 0);
+	CHECK(word(&c, AAR_CB_STATE) == AAR_STATE_IDLE);
+	/* No close went to the client, so the ring stays. */
+	CHECK(cl.nreq[AAR_OP_AUDIO_CLOSE] == 0U);
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 1);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	CHECK(zzapp_rec_state(rec->hdr.pid) == ZZAPP_REC_FREE);
+	CHECK(heap.live == 0U);
+}
+
 /* ---- Lease, quarantine, reset ------------------------------------------------------------------------- */
 
 static void test_lease_and_quarantine(void)
@@ -2105,6 +2138,7 @@ int main(void)
 	test_audio_card();
 	test_audio_ahi();
 	test_audio_ring_kept_by_quarantine();
+	test_audio_ahi_ring_kept_when_app_ends();
 	test_lease_and_quarantine();
 	test_reset();
 	test_churn();

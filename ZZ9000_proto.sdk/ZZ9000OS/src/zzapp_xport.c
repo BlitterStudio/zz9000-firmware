@@ -274,6 +274,9 @@ int zzapp_xport_block_free(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind)
 	if (!is_live(rec) || kind == ZZAPP_XPORT_BLOCK_PAIR ||
 	    (unsigned)kind >= ZZAPP_XPORT_BLOCK_COUNT)
 		return AAR_E_INVAL;
+	if ((kind == ZZAPP_XPORT_BLOCK_DATA || kind == ZZAPP_XPORT_BLOCK_AUDIO) &&
+	    zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED))
+		return AAR_OK;
 	return block_return(rec, kind) == 0 ? AAR_OK : AAR_E_IO;
 }
 
@@ -290,14 +293,18 @@ int zzapp_xport_data_reserve(zzapp_rec_t *rec, uint32_t bytes,
 			     zzapp_xport_buf_t *out)
 {
 	zzapp_xport_buf_t cur;
+	int have;
 
 	if (!is_live(rec) || bytes == 0U || bytes > ZZAPP_XPORT_DATA_MAX)
 		return AAR_E_INVAL;
-	if (block_get(rec, ZZAPP_XPORT_BLOCK_DATA, &cur) && cur.bytes >= bytes) {
+	have = block_get(rec, ZZAPP_XPORT_BLOCK_DATA, &cur);
+	if (have && cur.bytes >= bytes) {
 		if (out)
 			*out = cur;
 		return AAR_OK;
 	}
+	if (have && zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED))
+		return AAR_E_BUSY;
 	if (block_return(rec, ZZAPP_XPORT_BLOCK_DATA) != 0)
 		return AAR_E_IO;
 	return zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_DATA, bytes, out);
@@ -591,6 +598,8 @@ void zzapp_xport_abandon(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind)
 	r = &rec->xport.req[kind];
 	if (r->state == ZZAPP_XPORT_REQ_FREE)
 		return;
+	if (r->state == ZZAPP_XPORT_REQ_POSTED)
+		zzapp_xport_flag_set(rec, ZZAPP_XPORT_F_PINNED);
 	r->abandoned_id = r->id;
 	r->state = ZZAPP_XPORT_REQ_FREE;
 }

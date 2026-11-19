@@ -561,8 +561,8 @@ a claim are:
 | --- | --- | --- | --- |
 | pair | 16 KiB | `CLAIM` | `RELEASE` |
 | service | 48 KiB: 1 KiB scratch, 2 KiB palette (shadow and stage), 4 KiB console input, 8 KiB log, 32 KiB console output ring | first path, name, palette, console or log use | `RELEASE` |
-| data | 8 KiB steps up to 256 KiB | first file read or write | `RELEASE` |
-| audio ring | `0x80 + frames * 4` bytes, rounded to 8 KiB | `AAR_OP_AUDIO_OPEN` (AHI route) | audio close, exit; a quarantined claim keeps it until `RELEASE` |
+| data | 8 KiB steps up to 256 KiB | first file read or write | `RELEASE` (a growth replaces it, unless a request was abandoned, below) |
+| audio ring | `0x80 + frames * 4` bytes, rounded to 8 KiB | `AAR_OP_AUDIO_OPEN` | audio close; exit on the card route. On the AHI route the client maps the ring, so an exit without a close, a quarantined claim and an abandoned request keep it until `RELEASE` |
 | load buffer | 72 KiB: 64 KiB staging, 2 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
 
 A spin app with no services costs 16 KiB. A console app costs 64 KiB. A game
@@ -570,6 +570,13 @@ that reads files costs up to 320 KiB plus its audio ring. A claim holds at
 most five blocks of the surface allocator on top of the app's own 64
 (`SURFACE_ALLOCATOR_MAX_BLOCKS` is 4096, 32 KiB of BSS, shared with every P96
 bitmap and SDK buffer).
+
+A request the app gave up on while the client could still be working on it (a
+file or audio wait that timed out or was stopped) pins the data block and the
+audio ring for the rest of the claim: the late client access would otherwise
+land in memory handed to another claim. A pinned data block is not replaced
+when a larger read or write needs it (that call fails with `BUSY`), and
+neither block is freed before `RELEASE`.
 
 All of these blocks count against the app's shared limit: `AAR_CB_SHARED_USED`
 is the sum of the transport blocks and the app's own `aar_shared_alloc` blocks

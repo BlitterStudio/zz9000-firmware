@@ -101,6 +101,9 @@ typedef enum {
 #define ZZAPP_XPORT_F_QUARANTINED       (1u << 1) /* lease lost; shell held */
 #define ZZAPP_XPORT_F_RELEASE_REQUESTED (1u << 2) /* core 1's retire frees */
 #define ZZAPP_XPORT_F_CORRUPT           (1u << 3) /* a queue index was corrupt */
+#define ZZAPP_XPORT_F_PINNED            (1u << 4) /* an abandoned request may
+						   * still name the data block
+						   * or the audio ring */
 
 /* ---- Environment -------------------------------------------------------- */
 
@@ -219,7 +222,10 @@ void zzapp_xport_publish_private(zzapp_rec_t *rec);
  */
 int zzapp_xport_block_alloc(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
 			    uint32_t bytes, zzapp_xport_buf_t *out);
-/* Return the block of `kind` (not the pair). AAR_OK also when absent. */
+/* Return the block of `kind` (not the pair). AAR_OK also when absent. The data
+ * block and the audio ring stay, with AAR_OK, while ZZAPP_XPORT_F_PINNED is
+ * set: the client may still be working on a request the owner gave up on, and
+ * only the claim's release returns them. */
 int zzapp_xport_block_free(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind);
 /* 1 and *out filled when the block exists, else 0. */
 int zzapp_xport_block_get(const zzapp_rec_t *rec,
@@ -227,7 +233,8 @@ int zzapp_xport_block_get(const zzapp_rec_t *rec,
 			  zzapp_xport_buf_t *out);
 /* The data block, at least `bytes` (at most ZZAPP_XPORT_DATA_MAX): allocated
  * on first use at the request rounded to the step, grown by free and
- * allocate. A grown block loses its contents. */
+ * allocate. A grown block loses its contents. A block that is too small stays
+ * (AAR_E_BUSY) while ZZAPP_XPORT_F_PINNED is set. */
 int zzapp_xport_data_reserve(zzapp_rec_t *rec, uint32_t bytes,
 			     zzapp_xport_buf_t *out);
 /* An area of the service block; the block is allocated, zeroed, on the first
@@ -284,7 +291,10 @@ uint64_t zzapp_xport_req_deadline(const zzapp_rec_t *rec,
 int zzapp_xport_take_completion(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
 				aar_completion *out);
 /* The owner gives up (timeout, stop): the entry becomes FREE at once and its
- * id is remembered, so the late completion is dropped and counted as late. */
+ * id is remembered, so the late completion is dropped and counted as late. A
+ * request that was still POSTED sets ZZAPP_XPORT_F_PINNED: the client may
+ * still read or write the blocks it names, and the completion that drops
+ * proves nothing about when it stops. */
 void zzapp_xport_abandon(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind);
 
 /* A message to the client: AAR_OK, AAR_E_BUSY when only the reserved entry is

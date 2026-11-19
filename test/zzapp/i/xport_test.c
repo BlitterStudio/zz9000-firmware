@@ -1225,6 +1225,56 @@ static void test_id_exhaustion(void)
     unclaim(rec);
 }
 
+/* A request the owner gave up on while the client may still work on it pins
+ * the data block and the audio ring: neither is returned or replaced before
+ * the claim's release. A request that had already completed pins nothing. */
+static void test_abandon_pins_data_and_audio(void)
+{
+    client_t c;
+    zzapp_rec_t *rec;
+    aar_request rq, seen;
+    zzapp_xport_buf_t a, b, now;
+    const volatile uint8_t *slot = NULL;
+    uint32_t id = 0U;
+
+    reset_all();
+    rec = claim(&c);
+    fill_request(&rq, 4U);
+    CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &a) == AAR_OK);
+    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO, 0x2000U, &b) == AAR_OK);
+
+    /* Completed, then dropped: nothing outstanding, nothing pinned. */
+    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_OK);
+    CHECK(aar_queue_peek(&c.sq, NULL, &slot) == 1);
+    aar_entry_get_request(slot, &seen);
+    aar_queue_pop(&c.sq, NULL);
+    complete(&c, &seen, 0, 1U);
+    CHECK(zzapp_xport_pump(rec) == 1);
+    zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
+    CHECK(!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED));
+    CHECK(zzapp_xport_data_reserve(rec, 0x4000U, &a) == AAR_OK && a.bytes == 0x4000U);
+
+    /* Still POSTED when it is given up: the client may be reading or writing. */
+    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_OK);
+    zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
+    CHECK(zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED));
+    CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &now) == AAR_OK && now.ptr == a.ptr);
+    CHECK(zzapp_xport_data_reserve(rec, 0x6000U, &now) == AAR_E_BUSY);
+    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_DATA, &now) == 1 &&
+          now.ptr == a.ptr && now.bytes == 0x4000U);
+    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_DATA) == AAR_OK);
+    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_DATA, NULL) == 1);
+    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO) == AAR_OK);
+    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, &now) == 1 && now.ptr == b.ptr);
+    /* A block no queue request names is still returned. */
+    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_LOAD, 0x2000U, &now) == AAR_OK);
+    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_LOAD) == AAR_OK);
+    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_LOAD, NULL) == 0);
+    /* The claim's release returns everything. */
+    unclaim(rec);
+    CHECK(heap.live == 0U && heap.bad_frees == 0U);
+}
+
 /* ---- Corrupt indices ---------------------------------------------------------------------- */
 
 static void test_corrupt_indices(void)
@@ -1689,6 +1739,7 @@ int main(void)
     test_event_ring();
     test_ids();
     test_id_exhaustion();
+    test_abandon_pins_data_and_audio();
     test_corrupt_indices();
     test_log();
     test_log_drops_on_full_sq_and_heap();
