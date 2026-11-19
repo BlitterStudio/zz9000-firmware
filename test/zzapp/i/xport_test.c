@@ -1226,44 +1226,72 @@ static void test_id_exhaustion(void)
 }
 
 /* A request the owner gave up on while the client may still work on it pins
- * the data block and the audio ring: neither is returned or replaced before
- * the claim's release. A request that had already completed pins nothing. */
+ * the block its buffer is: the data block is then neither returned, replaced
+ * nor reused (an old FILE_WRITE would write the new bytes, a late FILE_READ
+ * would overwrite them), and the audio ring is not returned, before the
+ * claim's release. A request that had completed, or that names neither, pins
+ * nothing. */
+static void post_naming(zzapp_rec_t *rec, const zzapp_xport_buf_t *buf)
+{
+    aar_request rq;
+    uint32_t id = 0U;
+
+    fill_request(&rq, 4U);
+    rq.buf = buf ? buf->token : 0U;
+    rq.buf_len = buf ? 16U : 0U;
+    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_OK);
+}
+
 static void test_abandon_pins_data_and_audio(void)
 {
     client_t c;
     zzapp_rec_t *rec;
-    aar_request rq, seen;
+    aar_request seen;
     zzapp_xport_buf_t a, b, now;
     const volatile uint8_t *slot = NULL;
-    uint32_t id = 0U;
 
     reset_all();
     rec = claim(&c);
-    fill_request(&rq, 4U);
     CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &a) == AAR_OK);
     CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO, 0x2000U, &b) == AAR_OK);
 
     /* Completed, then dropped: nothing outstanding, nothing pinned. */
-    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_OK);
+    post_naming(rec, &a);
     CHECK(aar_queue_peek(&c.sq, NULL, &slot) == 1);
     aar_entry_get_request(slot, &seen);
     aar_queue_pop(&c.sq, NULL);
     complete(&c, &seen, 0, 1U);
     CHECK(zzapp_xport_pump(rec) == 1);
     zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
-    CHECK(!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED));
+    CHECK(!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_DATA));
     CHECK(zzapp_xport_data_reserve(rec, 0x4000U, &a) == AAR_OK && a.bytes == 0x4000U);
 
-    /* Still POSTED when it is given up: the client may be reading or writing. */
-    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_OK);
+    /* Still POSTED, but its buffer is neither block: nothing is pinned. */
+    post_naming(rec, NULL);
     zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
-    CHECK(zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED));
-    CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &now) == AAR_OK && now.ptr == a.ptr);
-    CHECK(zzapp_xport_data_reserve(rec, 0x6000U, &now) == AAR_E_BUSY);
+    CHECK(!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_DATA) &&
+          !zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_AUDIO));
+
+    /* Still POSTED and naming the data block: the block is held as it is. */
+    post_naming(rec, &a);
+    zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
+    CHECK(zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_DATA));
+    CHECK(!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_AUDIO));
+    CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &now) == AAR_E_BUSY);   /* no reuse */
+    CHECK(zzapp_xport_data_reserve(rec, 0x6000U, &now) == AAR_E_BUSY);   /* no growth */
     CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_DATA, &now) == 1 &&
           now.ptr == a.ptr && now.bytes == 0x4000U);
     CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_DATA) == AAR_OK);
     CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_DATA, NULL) == 1);
+    /* The ring was not named: it still goes. */
+    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO) == AAR_OK);
+    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 0);
+
+    /* The same for the ring. */
+    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO, 0x2000U, &b) == AAR_OK);
+    post_naming(rec, &b);
+    zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
+    CHECK(zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_AUDIO));
     CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO) == AAR_OK);
     CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, &now) == 1 && now.ptr == b.ptr);
     /* A block no queue request names is still returned. */

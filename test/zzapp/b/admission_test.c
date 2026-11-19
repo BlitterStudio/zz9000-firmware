@@ -822,13 +822,17 @@ static void run_apps(uint32_t n)
 		CHECK(rec && zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_LOAD, &load) == 0);
 		CHECK(rec && zzapp_xport_live(rec));
 	}
-	/* The client's next contact with its stale handle releases the shell. */
+	/* A deferred call's stale answer leaves the shell; the client's stale
+	 * RELEASE releases it. */
 	{
 		struct query released;
 		struct query live;
 
 		query(&live);
 		CHECK(simple_op(ZZAPP_OP_LOAD_CHUNK, r[q].handle) == SDK_STATUS_BAD_HANDLE);
+		query(&released);
+		CHECK(released.records_free == live.records_free);
+		CHECK(simple_op(ZZAPP_OP_RELEASE, r[q].handle) == SDK_STATUS_BAD_HANDLE);
 		query(&released);
 		CHECK(released.records_free == live.records_free + 1U);
 		CHECK(released.hostheap_free > live.hostheap_free);

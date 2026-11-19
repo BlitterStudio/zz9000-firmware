@@ -550,12 +550,14 @@ status is `SDK_STATUS_NO_MEMORY` (6) for all three. A Zorro II board refuses
 every claim as unsupported.
 
 The pair and every buffer the runtime allocates later (the transport blocks)
-are multiples of 8 KiB, 8 KiB aligned, and live until `RELEASE`, not until the
-app ends. That is what lets the client drain messages and read the final
-status after the app exited, and what keeps a late client write harmless:
-a client that lost its lease may still write through its mapping, so the
-memory is not reused until the old client is known to be gone. The blocks of
-a claim are:
+are multiples of 8 KiB and 8 KiB aligned. The pair, the service block and the
+data block live until `RELEASE`, not until the app ends. That is what lets the
+client drain messages and read the final status after the app exited, and what
+keeps a late client write harmless: a client that lost its lease may still
+write through its mapping, so the memory is not reused until the old client is
+known to be gone. The audio ring and the load buffer have earlier ends, listed
+below, but a block the client may still touch is kept until `RELEASE` too. The
+blocks of a claim are:
 
 | Block | Size | Allocated | Freed |
 | --- | --- | --- | --- |
@@ -722,17 +724,20 @@ the client releases the claim.
   still write through its mapping of them (the AHI route writes the ring's
   `READ_FRAME`). The record's handle is revoked: its
   generation advances to a value the old client does not know, and the shell
-  stays under that new handle. The old client's next mailbox request names the
-  old handle, fails the lookup, and the stale path releases the shell. `KICK`
-  is the exception: the client posts it without reading its status, so a stale
-  `KICK` proves nothing about what the client still maps and leaves the shell.
+  stays under that new handle. A `STOP` or `RELEASE` that names the old handle
+  fails the lookup and releases the shell: the client reads its answer before
+  it touches the claim again. A `KICK` does not, because the client posts it
+  without reading its status. A deferred load call (`LOAD_BEGIN`, `LOAD_CHUNK`,
+  `LOAD_END`, `START`) does not either, because its lease tick may still write
+  the control block while the answer is on the way; the client follows a stale
+  answer to such a call with a plain `RELEASE` under the old handle.
   `LIST` returns the current handle of a quarantined shell, so an
   administrative `RELEASE` works. The quarantine flag stays on the shell until
   it is released, and the release returns the held blocks with it. Quarantine
   never ages out; it holds one record, up to 360 KiB of transport blocks (pair,
   service, data and audio ring) and the app's own host-visible blocks until
-  the client's next stale request other than `KICK`, `RELEASE` or an Amiga
-  reset, which releases every held shell (see below).
+  the client's stale `STOP` or `RELEASE`, an administrative `RELEASE` or an
+  Amiga reset, which releases every held shell (see below).
 - `RELEASE` on a `LIVE` record latches a stop with reason `FORCED` and sets
   `release_requested`; the retire that core 1 runs completes the release when
   it reaches its last stage. On a `RECLAIMED` record core 0 frees under the

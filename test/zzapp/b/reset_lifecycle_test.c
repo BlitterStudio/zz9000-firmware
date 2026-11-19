@@ -142,7 +142,10 @@ static void test_stale_contact_releases_expired_load(void)
     uint32_t stale, current;
 
     expire_loading_claim(&stale, &current);
+    /* A deferred call's stale answer leaves the shell; a stale STOP releases it. */
     assert(rt_simple(0U, ZZAPP_OP_LOAD_CHUNK) == SDK_STATUS_BAD_HANDLE);
+    assert(zzapp_rec_state(rt_pid[0]) == ZZAPP_REC_RECLAIMED);
+    assert(rt_simple(0U, ZZAPP_OP_STOP) == SDK_STATUS_BAD_HANDLE);
     assert(zzapp_rec_state(rt_pid[0]) == ZZAPP_REC_FREE);
     assert(zzapp_runtime_state() == ZZAPP_ST_IDLE);
     rt_assert_back(g_start);
@@ -251,8 +254,8 @@ static void expire_and_record_intent(void)
     race_hook_fired = 1;
     zzapp_services_test_set_core(0);
     zzapp_services_expire_claims(ZZAPP_LOAD_LEASE_US);
-    zzapp_build_load_chunk_request(req, rt_cl[0].handle, 0U, 1U);
-    assert(zzapp_mailbox_dispatch(ZZAPP_OP_LOAD_CHUNK, req, sizeof(req), reply,
+    zzapp_build_handle(req, rt_cl[0].handle);
+    assert(zzapp_mailbox_dispatch(ZZAPP_OP_STOP, req, sizeof(req), reply,
                                   &bytes, 1, 77U, 0U) == SDK_STATUS_BAD_HANDLE);
     defer_test_core = saved;
 }

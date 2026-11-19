@@ -274,8 +274,10 @@ int zzapp_xport_block_free(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind)
 	if (!is_live(rec) || kind == ZZAPP_XPORT_BLOCK_PAIR ||
 	    (unsigned)kind >= ZZAPP_XPORT_BLOCK_COUNT)
 		return AAR_E_INVAL;
-	if ((kind == ZZAPP_XPORT_BLOCK_DATA || kind == ZZAPP_XPORT_BLOCK_AUDIO) &&
-	    zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED))
+	if ((kind == ZZAPP_XPORT_BLOCK_DATA &&
+	     zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_DATA)) ||
+	    (kind == ZZAPP_XPORT_BLOCK_AUDIO &&
+	     zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_AUDIO)))
 		return AAR_OK;
 	return block_return(rec, kind) == 0 ? AAR_OK : AAR_E_IO;
 }
@@ -298,13 +300,16 @@ int zzapp_xport_data_reserve(zzapp_rec_t *rec, uint32_t bytes,
 	if (!is_live(rec) || bytes == 0U || bytes > ZZAPP_XPORT_DATA_MAX)
 		return AAR_E_INVAL;
 	have = block_get(rec, ZZAPP_XPORT_BLOCK_DATA, &cur);
+	/* An abandoned request may still be reading or writing the block: it
+	 * is neither replaced nor reused, or the old FILE_WRITE writes the new
+	 * bytes and a late FILE_READ overwrites them. */
+	if (have && zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_DATA))
+		return AAR_E_BUSY;
 	if (have && cur.bytes >= bytes) {
 		if (out)
 			*out = cur;
 		return AAR_OK;
 	}
-	if (have && zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED))
-		return AAR_E_BUSY;
 	if (block_return(rec, ZZAPP_XPORT_BLOCK_DATA) != 0)
 		return AAR_E_IO;
 	return zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_DATA, bytes, out);
@@ -523,6 +528,16 @@ int zzapp_xport_post_request(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
 	r->flags = 0U;
 	memset(r->out, 0, sizeof(r->out));
 	r->deadline = deadline;
+	r->names = 0U;
+	if (req->buf != 0U) {
+		const zzapp_xport_block_t *d = &x->block[ZZAPP_XPORT_BLOCK_DATA];
+		const zzapp_xport_block_t *a = &x->block[ZZAPP_XPORT_BLOCK_AUDIO];
+
+		if (d->ptr && token_of(d->card) == req->buf)
+			r->names |= ZZAPP_XPORT_NAMES_DATA;
+		if (a->ptr && token_of(a->card) == req->buf)
+			r->names |= ZZAPP_XPORT_NAMES_AUDIO;
+	}
 	r->state = ZZAPP_XPORT_REQ_POSTED;
 	x->next_id++;
 	aar_queue_commit(&x->sq, env.release_barrier);
@@ -598,8 +613,12 @@ void zzapp_xport_abandon(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind)
 	r = &rec->xport.req[kind];
 	if (r->state == ZZAPP_XPORT_REQ_FREE)
 		return;
-	if (r->state == ZZAPP_XPORT_REQ_POSTED)
-		zzapp_xport_flag_set(rec, ZZAPP_XPORT_F_PINNED);
+	if (r->state == ZZAPP_XPORT_REQ_POSTED) {
+		if ((r->names & ZZAPP_XPORT_NAMES_DATA) != 0U)
+			zzapp_xport_flag_set(rec, ZZAPP_XPORT_F_PINNED_DATA);
+		if ((r->names & ZZAPP_XPORT_NAMES_AUDIO) != 0U)
+			zzapp_xport_flag_set(rec, ZZAPP_XPORT_F_PINNED_AUDIO);
+	}
 	r->abandoned_id = r->id;
 	r->state = ZZAPP_XPORT_REQ_FREE;
 }

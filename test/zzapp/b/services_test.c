@@ -1617,6 +1617,19 @@ static uint16_t stale_chunk(uint32_t handle, uint32_t id)
 				      &rl, 1, id, 0U);
 }
 
+/* A STOP that names `handle` after its claim was revoked: the one stale
+ * request, with RELEASE, that lets a quarantined shell go. */
+static uint16_t stale_stop(uint32_t handle)
+{
+	uint8_t req[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint8_t rep[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	uint16_t rl = 0U;
+
+	zzapp_build_handle(req, handle);
+	return zzapp_mailbox_dispatch(ZZAPP_OP_STOP, req, sizeof(req), rep, &rl, 1,
+				      0U, 0U);
+}
+
 static void test_failed_starts_release_admission(void)
 {
 	uint32_t free_before;
@@ -1791,8 +1804,11 @@ static void test_abandoned_loading_is_quarantined(void)
 	(void)zzapp_loader_abort();
 	(void)zzapp_rec_retire(PID_OF(0U));
 	EXPECT(stale_chunk(old_handle, 5U) == SDK_STATUS_BAD_HANDLE, "stale contact after teardown");
+	EXPECT(query_word(ZZAPP_QUERY_RECORDS_FREE) == free_before,
+	       "a stale deferred call released the shell");
+	EXPECT(stale_stop(old_handle) == SDK_STATUS_BAD_HANDLE, "stale stop after teardown");
 	EXPECT(query_word(ZZAPP_QUERY_RECORDS_FREE) == free_before + 1U,
-	       "stale contact did not release after loader teardown");
+	       "stale stop did not release after loader teardown");
 }
 
 static void test_explicit_release_of_a_quarantined_shell_and_reset(void)

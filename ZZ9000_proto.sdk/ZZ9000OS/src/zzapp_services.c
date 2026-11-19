@@ -249,6 +249,9 @@ struct zzapp_service_runtime {
 	volatile uint32_t display_flip_ack;
 	volatile uint32_t display_flip_submit;
 	volatile uint32_t display_flip_address;
+	/* The completion's result of the flip in flight, 0 until it is in: a
+	 * failed flip leaves the scanout alone, so no page is handed over. */
+	volatile int32_t display_flip_result;
 	uint64_t display_flip_submit_us;
 	uint32_t display_ack_seen;
 	uint32_t display_queued;
@@ -2533,6 +2536,15 @@ static void display_reap_flip(void)
 	if (ack == state->display_ack_seen)
 		return;
 	state->display_ack_seen = ack;
+	if (state->display_flip_result < 0) {
+		/* The client did not change the scanout: the front stays and
+		 * the page that was queued for it goes back to the spare. */
+		if (state->display_queued != 0U) {
+			state->display_spare = state->display_queued;
+			state->display_queued = 0U;
+		}
+		return;
+	}
 	if (state->display_queued != 0U) {
 		uint32_t front = state->display_front;
 
@@ -2585,6 +2597,7 @@ static int flip_apply_locked(zzapp_rec_t *rec)
 		    ZZAPP_XPORT_REQ_DONE ||
 	    zzapp_xport_take_completion(rec, ZZAPP_XPORT_REQ_FLIP, &c) != 1)
 		return 0;
+	state->display_flip_result = c.result < 0 ? c.result : AAR_OK;
 	if (c.result == AAR_OK && (c.flags & ZZAPP_FLIPF_SUBMITTED) != 0U &&
 	    state->display_scanout_ack) {
 		uint32_t shown = token_address(c.out[AAR_R_DISPLAY_FLIP_FRONT]);
@@ -2878,6 +2891,16 @@ static void report_slow_flip(uint32_t gen, uint64_t waited_us)
  * round trip at all. The pump of a posted flip is a read of one index. */
 #define FLIP_POLL_ACKS 8U
 
+/* The failure of the last flip, once: a wait that finds the flip complete
+ * reports it to its caller and then the slate is clean. */
+static int flip_take_result(struct zzapp_service_runtime *state)
+{
+	int32_t result = state->display_flip_result;
+
+	state->display_flip_result = AAR_OK;
+	return result;
+}
+
 static int wait_flip(uint32_t gen)
 {
 	struct zzapp_service_runtime *state = current_runtime();
@@ -2893,7 +2916,7 @@ static int wait_flip(uint32_t gen)
 		if (__atomic_load_n(&state->display_flip_ack,
 				    __ATOMIC_ACQUIRE) == gen) {
 			display_reap_flip();
-			return AAR_OK;
+			return flip_take_result(state);
 		}
 	}
 	for (;;) {
@@ -2909,7 +2932,7 @@ static int wait_flip(uint32_t gen)
 				    __ATOMIC_ACQUIRE) == gen) {
 			display_reap_flip();
 			wait_end();
-			return AAR_OK;
+			return flip_take_result(state);
 		}
 		/* The first registration wakes this parked app at 50 ms solely for
 		 * diagnostics. Subsequent waiting remains event-driven until ack. */
@@ -3326,6 +3349,7 @@ static int flip_post(zzapp_rec_t *rec, uint32_t present, uint32_t flags)
 	slot_state_lock_acquire();
 	state->display_flip_address = present;
 	state->display_flip_submit = 0U;
+	state->display_flip_result = AAR_OK;
 	/* The generation moves before the post: a completion is applied against
 	 * it. */
 	__atomic_store_n(&state->display_flip_gen, state->display_flip_gen + 1U,
@@ -5234,11 +5258,14 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 	if (!rec) {
 		/* Nothing changes for a stale handle, except that a
 		 * quarantined shell is released when its old client turns up
-		 * with a request it is told the result of. A KICK is posted
-		 * without waiting for the status, so it proves nothing: the
-		 * client would keep its mappings of blocks the release hands
-		 * to another claim. */
-		if (opcode != ZZAPP_OP_KICK)
+		 * with a request whose answer it reads before it touches the
+		 * claim again: STOP and RELEASE. A KICK is posted without
+		 * waiting for the status, and a deferred load call is answered
+		 * while the client's lease tick may still write the control
+		 * block, so neither proves the client has let go of its
+		 * mappings; the client follows a stale deferred reply with a
+		 * RELEASE of its own. */
+		if (opcode == ZZAPP_OP_STOP || opcode == ZZAPP_OP_RELEASE)
 			(void)release_stale_quarantine(handle);
 		return SDK_STATUS_BAD_HANDLE;
 	}

@@ -83,7 +83,9 @@ host-visible heap at `CLAIM`, and later up to four more blocks (service, data,
 audio ring, load buffer), each a multiple of 8 KiB and 8 KiB aligned. They
 are placed in the cacheable part of the heap, below the SDK mailbox section at
 `0x08100000`, so no transport block lands in a page the firmware maps
-non-cacheable, and they live until the client releases the claim (see
+non-cacheable. The pair, service and data blocks live until the client releases
+the claim, the audio ring and load buffer have earlier ends, and a block the
+client may still touch is kept until the release (see
 [app-runtime.md](app-runtime.md#transport-and-claim-protocol)). The former
 four fixed 592 KiB launcher windows (`0x07EA0000`–`0x080F0000`) and the
 boot loop that mapped them non-cacheable are gone: only the Z2 mailbox page

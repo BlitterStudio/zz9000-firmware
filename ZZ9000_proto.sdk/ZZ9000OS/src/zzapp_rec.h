@@ -299,6 +299,10 @@ typedef enum {
 	ZZAPP_XPORT_REQ_COUNT = ZZAPP_XPORT_REQUESTS
 } zzapp_xport_req_kind_t;
 
+/* The blocks a request's buffer can be (zzapp_xport_req_t.names). */
+#define ZZAPP_XPORT_NAMES_DATA   (1U << 0)
+#define ZZAPP_XPORT_NAMES_AUDIO  (1U << 1)
+
 typedef enum {
 	ZZAPP_XPORT_REQ_FREE = 0,
 	ZZAPP_XPORT_REQ_POSTED,        /* on the SQ, no completion yet */
@@ -315,7 +319,7 @@ typedef struct {
 	uint32_t id;
 	uint16_t op;
 	uint8_t  state;                /* zzapp_xport_req_state_t */
-	uint8_t  reserved8;
+	uint8_t  names;                /* ZZAPP_XPORT_NAMES_*: blocks its buffer is */
 	int32_t  result;
 	uint16_t flags;
 	uint16_t reserved16;

@@ -1472,12 +1472,20 @@ static void test_display_pan(void)
 	CHECK(zzapp_display_flip_idle() == 1);
 	/* The front and back buffers swapped when the flip was acknowledged. */
 	CHECK(st->display_front == 0x00500000U && st->display_back == 0x00400000U);
+	/* A flip the client completes with an error leaves the scanout alone: the
+	 * pages stay where they are and the error reaches the caller. */
+	cl.result = AAR_E_IO;
+	cl.flip_flags = 0U;
+	CHECK(zzapp_svc_display_flip(1U) == AAR_E_IO);
+	CHECK(st->display_front == 0x00500000U && st->display_back == 0x00400000U);
+	CHECK(zzapp_display_flip_idle() == 1);
+	cl.result = AAR_OK;
 
 	/* A flip the client completes without SUBMITTED is complete at once, with
 	 * no vertical blank. */
 	cl.flip_flags = 0U;
 	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
-	CHECK(st->display_flip_gen == 2U && st->display_flip_ack == 2U);
+	CHECK(st->display_flip_gen == 3U && st->display_flip_ack == 3U);
 	/* ...and the async form returns before the client has answered. */
 	cl.ignore = 1;
 	CHECK(zzapp_svc_display_flip_async(1U) == AAR_OK);
@@ -1954,8 +1962,13 @@ static void test_lease_and_quarantine(void)
 	CHECK(mbox(ZZAPP_OP_LIST, 0U, 0U, 0U, reply, &len) == SDK_STATUS_OK);
 	CHECK(zzapp_get_be32(reply + ZZAPP_LIST_HANDLE) == newh);
 	CHECK(reply[ZZAPP_LIST_REASONS + 1U] == ZZAPP_END_LEASE);
-	/* The old client's next request is stale and lets the shell go. */
+	/* A deferred load call is answered while the client's lease tick may
+	 * still write the control block, so its stale reply leaves the shell;
+	 * the client follows it with a RELEASE, which lets the shell go. */
 	CHECK(mbox(ZZAPP_OP_LOAD_BEGIN, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_BAD_HANDLE);
+	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_RECLAIMED && heap.live == 1U);
+	CHECK(revoke_visible_calls == 0U);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_BAD_HANDLE);
 	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_FREE);
 	CHECK(heap.live == 0U);
 	CHECK(revoke_visible_calls == 1U);
