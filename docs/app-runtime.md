@@ -610,8 +610,12 @@ kept in the claim words of the record.
 
 Core 1, under the API lock, is the only agent that produces on the SQ and
 consumes from the CQ, so each ring has one producer and one consumer at any
-time. Core 0 never touches a ring while core 1 runs; with core 1 halted it
-touches only the control block words and block lifetime. Barriers are the ARM
+time. Core 0 produces and consumes nothing. It binds the pair at `CLAIM`,
+before the record is published `LIVE` and so before core 1 can use it, and
+afterwards touches only the control block words and block lifetime. A claim's
+blocks are freed only once core 1 has finished with the record (its retire
+reached `RECLAIMED`); core 0 holds core 1 only in the reset-deadline recovery.
+Barriers are the ARM
 `dmb ish` at the places `transport.h` names: after an index is read, and before
 one is written. There is no cache maintenance on the ARM side, because the
 pair is normal cacheable memory that the Zorro master reaches through the ACP.

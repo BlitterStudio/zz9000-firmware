@@ -15,9 +15,13 @@
  *
  * Ownership (design 3.4). Core 1, under the API lock, is the only agent that
  * produces on the SQ and consumes from the CQ: every post_*, pump, take_* and
- * abandon below is for core 1. Core 0 never touches a queue while core 1 runs;
- * it uses only zzapp_xport_resolve(), zzapp_xport_kick(), the flag helpers
- * and, with core 1 halted, zzapp_xport_release(). The control block words the
+ * abandon below is for core 1. Core 0 never produces on or consumes from a
+ * queue. It binds the pair in zzapp_xport_admit() before the record is
+ * published LIVE, so before core 1 can use it, and otherwise uses only
+ * zzapp_xport_resolve(), zzapp_xport_kick(), the flag helpers and
+ * zzapp_xport_release(). Release runs only once core 1 has finished with the
+ * record (its retire reached RECLAIMED); in the reset-deadline recovery core 0
+ * holds core 1 first. The control block words the
  * platform writes (state, end reason, fault record, accounting, flags,
  * progress, lease period) are written through zzapp_xport_cb_*, under the
  * services slot-state lock, so both cores may write them.
@@ -155,8 +159,10 @@ int zzapp_xport_live(const zzapp_rec_t *rec);
 /*
  * Return every block of the record: data, audio, load, service, then the
  * pair last. Each pointer is cleared before its block is returned, so a
- * replayed release frees nothing twice. Idempotent. Core 1 after retire, or
- * core 0 with core 1 halted. 0, or -n when n blocks the allocator did not
+ * replayed release frees nothing twice. Idempotent. Only once core 1 has
+ * finished with the record (its retire reached RECLAIMED), by core 1 or by
+ * core 0; in the reset-deadline recovery core 0 calls it while core 1 is
+ * held. 0, or -n when n blocks the allocator did not
  * know (they stay leaked; the record forgets them).
  */
 int zzapp_xport_release(zzapp_rec_t *rec);
