@@ -49,6 +49,9 @@ struct src_model {
 	int done;
 	int faulted;
 	int snapshot_ok;
+	/* The ring is written through shareable cacheable memory (the
+	 * app producer): the snapshot says so (audio_fabric_source.coherent). */
+	int coherent;
 	/* Failure injection for the mid-loop snapshot test: snapshots
 	 * fail from this (1-based) call number on. 0 disables it. */
 	int snapshot_fail_from;

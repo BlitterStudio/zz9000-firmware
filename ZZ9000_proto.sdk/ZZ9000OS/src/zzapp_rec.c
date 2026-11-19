@@ -103,7 +103,6 @@ static void hdr_constants(uint32_t index)
 	hdr->tables = (uint32_t)(uintptr_t)(area_tables +
 		(size_t)index * ZZAPP_REC_TABLES_BYTES);
 	hdr->l1 = (uint32_t)(uintptr_t)zzapp_as_pool_l1(index);
-	hdr->window = ZZAPP_REC_NO_WINDOW;
 }
 
 int zzapp_rec_arena_init(void *base, const zzapp_rec_layout_t *lay)
@@ -267,7 +266,10 @@ void *zzapp_rec_tables(uint32_t pid)
 		area_tables + (size_t)pid * ZZAPP_REC_TABLES_BYTES : NULL;
 }
 
-uint32_t zzapp_rec_admit(uint32_t window, uint32_t *handle, zzapp_rec_t **rec)
+/* The header's argument-count macro would rewrite the definition. */
+#undef zzapp_rec_admit
+
+uint32_t zzapp_rec_admit(uint32_t *handle, zzapp_rec_t **rec)
 {
 	zzapp_rec_hdr_t *hdr;
 	zzapp_rec_t *r;
@@ -304,7 +306,6 @@ uint32_t zzapp_rec_admit(uint32_t window, uint32_t *handle, zzapp_rec_t **rec)
 	hdr->handle = aar_handle_make(index, tab.gen[index]);
 	hdr->owner_serial = tab.owner_serial;
 	hdr->serial_prev = serial;
-	hdr->window = (uint16_t)window;
 	hdr->retire_stage = ZZAPP_RETIRE_NONE;
 	__atomic_store_n(&tab.state[index], (uint8_t)ZZAPP_REC_CLAIMED,
 			 __ATOMIC_RELEASE);
@@ -330,7 +331,6 @@ int zzapp_rec_unadmit(uint32_t handle)
 	r->hdr.handle = 0U;
 	r->hdr.owner_serial = 0U;
 	r->hdr.serial_prev = 0U;
-	r->hdr.window = ZZAPP_REC_NO_WINDOW;
 	r->hdr.retire_stage = ZZAPP_RETIRE_NONE;
 	__atomic_store_n(&tab.state[index], (uint8_t)ZZAPP_REC_FREE,
 			 __ATOMIC_RELEASE);
@@ -415,6 +415,26 @@ int zzapp_rec_free(uint32_t handle)
 	tab.tail = index;
 	tab.free_count++;
 	return 0;
+}
+
+uint32_t zzapp_rec_revoke_handle(zzapp_rec_t *rec)
+{
+	uint32_t index;
+	uint32_t generation;
+
+	if (!ready || !rec)
+		return 0U;
+	index = rec->hdr.pid;
+	if (index >= layout.apps || rec != record_at(index) ||
+	    tab.state[index] == ZZAPP_REC_FREE)
+		return 0U;
+	generation = aar_handle_next_gen(tab.gen[index]);
+	/* The generation first: from here no handle the client holds can match.
+	 * A halt before the record's own handle follows leaves a record that
+	 * zzapp_rec_free() still frees from its old handle. */
+	__atomic_store_n(&tab.gen[index], (uint16_t)generation, __ATOMIC_RELEASE);
+	rec->hdr.handle = aar_handle_make(index, generation);
+	return rec->hdr.handle;
 }
 
 uint32_t zzapp_rec_reconcile_halted(void)

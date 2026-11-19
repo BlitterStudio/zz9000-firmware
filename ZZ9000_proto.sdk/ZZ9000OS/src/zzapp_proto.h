@@ -1,9 +1,22 @@
 /*
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  *
- * ZZ9000 trusted-app launcher protocol. Shared by the firmware and ZZRun.
- * Apps do not include this header. Integer fields on the wire are
- * big-endian. Layout is section 4 of docs/app-runtime.md.
+ * The ZZ9000 private wire of the AAR transport: the mailbox operations a
+ * client (ZZRun, the SDK tools, later aar.library) sends to the card to claim
+ * an app, load it, start and stop it, ring the doorbell and release it. This
+ * header is the single source of that wire. The queue pair (control block,
+ * request and completion rings, entry layouts, op codes) is not here: it is
+ * the portable contract of aar/transport.h.
+ *
+ * Mailbox payloads are the 48-byte entry payload, big-endian. Offsets are
+ * from the start of that payload. Every operation except QUERY and CLAIM names
+ * its claim by handle at ZZAPP_SEL_HANDLE (aar/transport.h, spec 10.2). A
+ * handle that is not the live one gets ZZAPP_ERR_STALE and changes nothing.
+ * Unused bytes are zero.
+ *
+ * The launcher window of the earlier protocol (life block, rings, file wire,
+ * slots, ZZAPP_OP_ALLOC_WINDOW, ZZAPP_OP_STATUS, ZZAPP_OP_DISPLAY_BIND) is
+ * gone; ZZAPP_OP_CLAIM is the admission and the control block replaces STATUS.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -19,172 +32,171 @@
 #define ZZAPP_ABI_MAJOR            0u
 #define ZZAPP_ABI_MINOR            5u
 
-#define ZZAPP_OP_QUERY             0x0c00u
-#define ZZAPP_OP_ALLOC_WINDOW      0x0c01u
+/* ---- Operations --------------------------------------------------------- */
+
+#define ZZAPP_OP_QUERY             0x0c00u /* no handle */
+#define ZZAPP_OP_CLAIM             0x0c01u /* no handle; admits an app */
 #define ZZAPP_OP_LOAD_BEGIN        0x0c02u
 #define ZZAPP_OP_LOAD_CHUNK        0x0c03u
 #define ZZAPP_OP_LOAD_END          0x0c04u
 #define ZZAPP_OP_START             0x0c05u
 #define ZZAPP_OP_STOP              0x0c06u
-#define ZZAPP_OP_STATUS            0x0c07u
-#define ZZAPP_OP_DISPLAY_BIND      0x0c08u
+/* 0x0c07 (STATUS) and 0x0c08 (DISPLAY_BIND) are retired: the client reads the
+ * control block, and binds the display by completing AAR_OP_DISPLAY_OPEN. */
 #define ZZAPP_OP_FIRST             ZZAPP_OP_QUERY
-/* Per-slot snapshot for status listings (extended requests only). */
+/* Next live claim at or after a cursor index; takes no handle. */
 #define ZZAPP_OP_LIST              0x0c09u
-/* Explicitly releases an expired launcher window after the user confirms
- * its process cannot still write the card mapping. Extended request only. */
+/* Ends a claim: stops the app if it still runs, then returns the control
+ * block, the queues and every service buffer. The normal close. */
 #define ZZAPP_OP_RELEASE           0x0c0au
-#define ZZAPP_OP_LAST              ZZAPP_OP_RELEASE
-/* 0x0c00..0x0c1f is reserved. v0 uses FIRST..LAST. */
+/* Doorbell: the client has posted completions or freed submission space. A
+ * hint only; the queue indices are authoritative. */
+#define ZZAPP_OP_KICK              0x0c0bu
+#define ZZAPP_OP_LAST              ZZAPP_OP_KICK
+/* 0x0c00..0x0c1f is reserved. */
 #define ZZAPP_OP_RANGE_LO          0x0c00u
 #define ZZAPP_OP_RANGE_HI          0x0c1fu
 
-/* APP_QUERY reply caps. Z2 clears every bit and returns unsupported. */
+/* QUERY reply caps. Z2 clears every bit and returns unsupported. */
 #define ZZAPP_CAP_Z3               (1u << 0)
 #define ZZAPP_CAP_DISPLAY          (1u << 1)
 #define ZZAPP_CAP_AUDIO            (1u << 2)
 #define ZZAPP_CAP_GL               (1u << 3)
 #define ZZAPP_CAP_CLUT8            (1u << 4)
-/* ZZAPP_SLOT_COUNT apps at once; the extended request forms below work. */
-#define ZZAPP_CAP_SLOTS            (1u << 5)
-/* Extended QUERY advertises low-memory crossing counters in lifecycle blocks. */
-#define ZZAPP_CAP_LOW_MEMORY       (1u << 6)
-/* Lifecycle progress advances after every incremental LOAD_END step. */
-#define ZZAPP_CAP_LOAD_PROGRESS    (1u << 7)
-/* Extended LOAD_BEGIN carries a per-app host-visible limit in MiB at
- * ZZAPP_LOAD_HOST_VISIBLE_MIB. */
-#define ZZAPP_CAP_HOST_LIMIT       (1u << 8)
-/*
- * Launcher windows: the number of slots the wire addresses. It is a platform
- * ceiling on launcher windows (one fixed card range each), not a limit on the
- * number of apps: the firmware keeps apps in process records sized from
- * memory, and a refused claim says why (AAR_REASON_LIMIT when every window is
- * in use). Clients still use this value until the wire names handles. Host
- * tests may lift it with -DZZAPP_SLOT_COUNT=64u; the firmware asserts it
- * against the carved window ranges.
- */
-#ifndef ZZAPP_SLOT_COUNT
-#define ZZAPP_SLOT_COUNT           4u
-#endif
 
-/* Extended-request ownership mismatch. Matches SDK_STATUS_BAD_HANDLE. */
+/* Status of a request whose handle is not the live one. Matches
+ * SDK_STATUS_BAD_HANDLE. */
 #define ZZAPP_ERR_STALE            5u
 
-/*
- * Mailbox payloads are big-endian in the 48-byte entry payload.
- * Offsets below are from the start of that payload.
- */
+#define ZZAPP_MAILBOX_PAYLOAD_BYTES 48u
+
+/* ---- Handle ------------------------------------------------------------- */
+
+/* The claim, in every operation except QUERY and CLAIM. Bytes 44 to 47 are
+ * reserved and zero. */
+#define ZZAPP_SEL_HANDLE           40u
+#define ZZAPP_SEL_RESERVED         44u
+
+/* ---- QUERY (no handle) -------------------------------------------------- */
+
+/* The reply fills the 48-byte payload. The counts are what a claim, load and
+ * release cycle returns to. COMMIT_FREE is the bytes still admissible for app
+ * commits and COMMIT_TOTAL that plus what is committed. TABLES_FREE counts L2
+ * tables a new admission can still reserve and TABLES_TOTAL the pool less the
+ * kernel template. HOSTHEAP_LARGEST is the largest free block of the
+ * host-visible heap. QUEUE_DEPTH is the depth of a new claim's queues. */
 #define ZZAPP_QUERY_ABI_MAJOR      0u
 #define ZZAPP_QUERY_ABI_MINOR      4u
 #define ZZAPP_QUERY_STATE          8u
 #define ZZAPP_QUERY_CAPS           12u
-#define ZZAPP_QUERY_REPLY_BYTES    16u
-
-#define ZZAPP_ALLOC_ARM_ADDRESS    0u
-#define ZZAPP_ALLOC_SIZE           4u
-#define ZZAPP_ALLOC_HOST_OFFSET    8u
-#define ZZAPP_ALLOC_REPLY_BYTES    12u
-
-#define ZZAPP_CHUNK_FILE_OFF       0u
-#define ZZAPP_CHUNK_LENGTH         4u
-#define ZZAPP_CHUNK_STAGING        8u
-#define ZZAPP_CHUNK_REQ_BYTES      12u
-#define ZZAPP_CHUNK_MIN            1u
-#define ZZAPP_CHUNK_MAX            65536u
-#define ZZAPP_IMAGE_MAX_BYTES      0x01000000u
-
-#define ZZAPP_START_ARGC           0u
-#define ZZAPP_START_REQ_BYTES      4u
-/* Optional APP_STOP payload. Absent or shorter than 4 bytes keeps the
- * original unconditional stop, for clients that predate the generation. */
-#define ZZAPP_STOP_GENERATION      0u
-#define ZZAPP_STOP_REQ_BYTES       4u
-
-#define ZZAPP_BIND_WIDTH           0u
-#define ZZAPP_BIND_HEIGHT          4u
-#define ZZAPP_BIND_PITCH           8u
-#define ZZAPP_BIND_FORMAT          12u
-#define ZZAPP_BIND_CARD_FRONT      16u
-#define ZZAPP_BIND_CARD_BACK       20u
-#define ZZAPP_BIND_LAYOUT          24u
-#define ZZAPP_BIND_REQ_BYTES       28u
-#define ZZAPP_BIND_CARD_SPARE      28u
-#define ZZAPP_BIND_EXT_REQ_BYTES   32u
-
-/* APP_STATUS snapshot. The full block stays in the rings window. */
-#define ZZAPP_STATUS_STATE         0u
-#define ZZAPP_STATUS_GENERATION    4u
-#define ZZAPP_STATUS_FAULT         8u
-#define ZZAPP_STATUS_EXIT          12u
-#define ZZAPP_STATUS_FLAGS         16u
-#define ZZAPP_STATUS_PC            20u
-#define ZZAPP_STATUS_SP            24u
-#define ZZAPP_STATUS_LR            28u
-#define ZZAPP_STATUS_FAR           32u
-#define ZZAPP_STATUS_FSR           36u
-#define ZZAPP_STATUS_CPSR          40u
-#define ZZAPP_STATUS_FLIP_GEN      44u
-#define ZZAPP_STATUS_REPLY_BYTES   48u
-
-#define ZZAPP_MAILBOX_PAYLOAD_BYTES 48u
-
-/*
- * Extended requests. A payload of exactly ZZAPP_MAILBOX_PAYLOAD_BYTES
- * carries the slot and its generation in the last 8 bytes; legacy fields
- * keep their offsets and unused bytes are zero. Any other payload length
- * is a legacy request and addresses slot 0 only.
- */
-#define ZZAPP_SEL_SLOT             40u
-#define ZZAPP_SEL_GENERATION       44u
-
-/* Extended QUERY reply: the legacy 16 bytes, then slot and commit counts,
- * then the record, table and host-heap counts. The second group is additive:
- * clients that decode 32 bytes still work. COMMIT_FREE is the bytes still
- * admissible for app commits and COMMIT_TOTAL that plus what is committed.
- * TABLES_FREE counts L2 tables a new admission can still reserve and
- * TABLES_TOTAL the pool less the kernel template. Together with the free
- * windows they are the counts a claim, load and release cycle returns to. */
-#define ZZAPP_QUERY_SLOTS          16u
-#define ZZAPP_QUERY_FREE_SLOTS     20u
+#define ZZAPP_QUERY_HOSTHEAP_LARGEST 16u
+#define ZZAPP_QUERY_QUEUE_DEPTH    20u
 #define ZZAPP_QUERY_COMMIT_FREE    24u
 #define ZZAPP_QUERY_COMMIT_TOTAL   28u
 #define ZZAPP_QUERY_RECORDS_FREE   32u
 #define ZZAPP_QUERY_TABLES_FREE    36u
 #define ZZAPP_QUERY_TABLES_TOTAL   40u
 #define ZZAPP_QUERY_HOSTHEAP_FREE  44u
-#define ZZAPP_QUERY_EXT_REPLY_BYTES 48u
 
-/* Extended ALLOC_WINDOW reply: the legacy 12 bytes, then the claim. */
-#define ZZAPP_ALLOC_SLOT           12u
-#define ZZAPP_ALLOC_GENERATION     16u
-#define ZZAPP_ALLOC_EXT_REPLY_BYTES 20u
-/* Refusal of an extended ALLOC_WINDOW: the status is the one the old firmware
- * gave (BUSY for a platform limit, NO_MEMORY for the rest) and the reply, which
- * used to be empty, carries the reason. Additive. */
-#define ZZAPP_ALLOC_REASON         0u
-#define ZZAPP_ALLOC_REFUSAL_REPLY_BYTES 4u
+/* ---- CLAIM (no handle) -------------------------------------------------- */
 
-/* Extended LOAD_BEGIN: launcher memory cap in MiB, 0 for none. */
-#define ZZAPP_LOAD_MEM_LIMIT_MIB   0u
-/* Extended LOAD_BEGIN, ZZAPP_CAP_HOST_LIMIT: host-visible limit in MiB for
- * this app, 0 for the default. Firmware without the cap ignores the word. */
-#define ZZAPP_LOAD_HOST_VISIBLE_MIB 4u
+/* Reply: the claim's handle, the token of its control block (a board offset,
+ * the card address less ADDR_ADJ, as aar_shared.haddr) and the contract size
+ * of the block (AAR_PAIR_BYTES at the default depth). Depth, ring offsets and
+ * ring tokens are read from the control block descriptors. */
+#define ZZAPP_CLAIM_HANDLE         0u
+#define ZZAPP_CLAIM_CB_TOKEN       4u
+#define ZZAPP_CLAIM_CB_BYTES       8u
+#define ZZAPP_CLAIM_REPLY_BYTES    12u
+
+/* A refused CLAIM, LOAD_BEGIN or LOAD_END replies with the reason alone
+ * (AAR_REASON_*). */
+#define ZZAPP_REFUSAL_REASON       0u
+#define ZZAPP_REFUSAL_REPLY_BYTES  4u
+
+/* ---- LOAD_BEGIN, LOAD_CHUNK, LOAD_END, START ---------------------------- */
+
+/* LOAD_BEGIN reads the limits the client wrote to the control block
+ * (AAR_CB_PRIVATE_MIB, AAR_CB_SHARED_MIB, AAR_CB_WEIGHT). Its request carries
+ * only the client's capabilities. It allocates the load buffer, which holds
+ * ZZAPP_LOAD_STAGING_BYTES of image staging, then the argv area, and the
+ * (deferred) reply names it. */
+#define ZZAPP_LOAD_CLIENT_CAPS     0u
+#define ZZAPP_LOAD_BEGIN_REQ_BYTES 4u
+#define ZZAPP_LOAD_REPLY_TOKEN     0u  /* token of the load buffer */
+#define ZZAPP_LOAD_REPLY_SIZE      4u  /* size of the load buffer */
+#define ZZAPP_LOAD_REPLY_CHUNK_MAX 8u  /* largest LOAD_CHUNK length */
+#define ZZAPP_LOAD_REPLY_ARGV_OFF  12u /* offset of the argv area */
+#define ZZAPP_LOAD_BEGIN_REPLY_BYTES 16u
+
+/* Client capabilities, ZZAPP_LOAD_CLIENT_CAPS. They are ZZ9000 details with
+ * no control block word. */
+#define ZZAPP_CLIENT_LEASE_EXTENDED (1u << 0) /* extended main-loop lease */
+#define ZZAPP_CLIENT_AUDIO_AHI      (1u << 1) /* can serve the AHI audio route */
+#define ZZAPP_CLIENT_CLUT8          (1u << 2) /* can serve 8-bit CLUT screens */
+#define ZZAPP_CLIENT_SCANOUT_ACK    (1u << 3) /* acknowledges pan flips */
+#define ZZAPP_CLIENT_LATEST         (1u << 4) /* accepts card-owned flips */
+#define ZZAPP_CLIENT_KNOWN          0x1fu
+
+#define ZZAPP_LOAD_STAGING_BYTES   0x00010000u /* 64 KiB, at buffer offset 0 */
+#define ZZAPP_LOAD_ARGV_OFF        ZZAPP_LOAD_STAGING_BYTES
+#define ZZAPP_LOAD_ARGV_BYTES      2048u
+#define ZZAPP_LOAD_BUFFER_BYTES    0x00012000u /* 72 KiB */
+
+/* LOAD_CHUNK: the firmware reads `length` bytes at offset 0 of the load
+ * buffer and places them at `file_off` of the image. */
+#define ZZAPP_CHUNK_FILE_OFF       0u
+#define ZZAPP_CHUNK_LENGTH         4u
+#define ZZAPP_CHUNK_REQ_BYTES      8u
+#define ZZAPP_CHUNK_MIN            1u
+#define ZZAPP_CHUNK_MAX            ZZAPP_LOAD_STAGING_BYTES
+#define ZZAPP_IMAGE_MAX_BYTES      0x01000000u
+
+/* LOAD_END replies with the status, and on a refusal the reason alone. */
+
+/* START: the argv table and strings are in the load buffer at the argv
+ * offset; the request carries only argc. The load buffer is freed after the
+ * firmware has copied argv. Argv area: u32 argc, then ZZAPP_ARGV_MAX offsets
+ * from the start of the load buffer, then the strings, each at most
+ * ZZAPP_ARGV_STR_MAX bytes including the NUL. */
+#define ZZAPP_START_ARGC           0u
+#define ZZAPP_START_REQ_BYTES      4u
+#define ZZAPP_ARGV_MAX             16u
+#define ZZAPP_ARGV_STR_MAX         128u
+#define ZZAPP_ARGV_ARGC_OFF        0u
+#define ZZAPP_ARGV_OFFS_OFF        4u
+#define ZZAPP_ARGV_STR_OFF         (4u + ZZAPP_ARGV_MAX * 4u)
+
+/* Default limit on host-visible (shared) memory, in bytes, when the client
+ * writes 0 to AAR_CB_SHARED_MIB. */
 #define ZZAPP_HOST_VISIBLE_DEFAULT_BYTES (16u << 20)
 
-/* LIST reply for the selector's slot. */
-#define ZZAPP_LIST_STATE           0u
-#define ZZAPP_LIST_GENERATION      4u
+/* ---- STOP, RELEASE ------------------------------------------------------ */
+
+/* STOP: the handle alone. An unconditional stop of the named claim. RELEASE:
+ * the handle alone; the reply is the status, OK for any valid handle. */
+
+/* ---- LIST --------------------------------------------------------------- */
+
+/* Request: the cursor, a record index, at 0. No handle. Reply: the next live
+ * claim at or after the cursor, or handle 0 when there is none. A client lists
+ * everything by passing INDEX + 1 until HANDLE is 0. A claim whose handle was
+ * revoked (quarantine) is listed under its current handle, so an
+ * administrative RELEASE works. */
+#define ZZAPP_LIST_CURSOR          0u
+#define ZZAPP_LIST_STATE           0u  /* AAR_STATE_* */
+#define ZZAPP_LIST_HANDLE          4u  /* 0: no further claim */
 #define ZZAPP_LIST_COMMITTED       8u
-#define ZZAPP_LIST_LIMIT           12u
+#define ZZAPP_LIST_INDEX           12u
 #define ZZAPP_LIST_CPU_MS          16u
 #define ZZAPP_LIST_SERVICE_MS      20u
-#define ZZAPP_LIST_REASONS         24u   /* block, terminal, flags (u16) */
+#define ZZAPP_LIST_REASONS         24u /* block (u8), end reason (u8), flags (u16) */
 #define ZZAPP_LIST_NAME            28u
 #define ZZAPP_LIST_NAME_BYTES      20u
 #define ZZAPP_LIST_REPLY_BYTES     48u
 #define ZZAPP_LIST_FLAG_OVERLOAD   1u
 
-/* LIST terminal reasons. */
+/* End reasons (AAR_END_* values). */
 #define ZZAPP_END_NONE             0u
 #define ZZAPP_END_EXIT             1u
 #define ZZAPP_END_FORCED           2u
@@ -196,7 +208,7 @@
 #define ZZAPP_END_CORE_RESTART     8u
 #define ZZAPP_END_QUARANTINED      9u
 
-/* LIST block reasons. */
+/* What the app is blocked on, LIST block reasons. */
 #define ZZAPP_BLOCK_NONE           0u
 #define ZZAPP_BLOCK_FILE           1u
 #define ZZAPP_BLOCK_CONSOLE        2u
@@ -205,472 +217,50 @@
 #define ZZAPP_BLOCK_VSYNC          5u
 #define ZZAPP_BLOCK_AUDIO          6u
 
-#define ZZAPP_WINDOW_BYTES     0x00094000u   /* 592 KiB allocation */
+/* ---- KICK --------------------------------------------------------------- */
 
-#define ZZAPP_LIFE_OFF         0x00000000u
-#define ZZAPP_LIFE_BYTES       0x00000100u
+/* Flags word at 0. Handler on core 0: look the handle up, OR the flags into
+ * the claim's kick word, wake core 1. The reply is the status. */
+#define ZZAPP_KICK_FLAGS           0u
+#define ZZAPP_KICK_REQ_BYTES       4u
+#define ZZAPP_KICK_CQ_POSTED       (1u << 0) /* completions or events posted */
+#define ZZAPP_KICK_SQ_SPACE        (1u << 1) /* submission queue entries freed */
+#define ZZAPP_KICK_KNOWN           0x3u
 
-/* header at +0: head, tail, reserved0, reserved1 (16 bytes).
-   events at +16. 256 * 16 = 4096. Region padded to 0x1100. */
-#define ZZAPP_INPUT_OFF        0x00000100u
-#define ZZAPP_INPUT_HDR        16u
-#define ZZAPP_INPUT_CAP        256u
-#define ZZAPP_EVENT_BYTES      16u
-#define ZZAPP_INPUT_BYTES      0x00001100u   /* ends at 0x1200 */
+/* ---- Entry flags -------------------------------------------------------- */
 
-/* header at +0: head, tail (8 bytes). records follow. */
-#define ZZAPP_LOG_OFF          0x00001200u
-#define ZZAPP_LOG_BYTES        0x00008000u   /* ends at 0x9200 */
-#define ZZAPP_LOG_HDR          8u
+/* AAR_OP_DISPLAY_FLIP completion flags (the entry's uint16 flags): the client
+ * submitted the pan or buffer change and relies on the card's vertical blank
+ * to show it. Without it the flip is complete when the completion arrives. */
+#define ZZAPP_FLIPF_SUBMITTED      (1u << 0)
 
-#define ZZAPP_FILE_OFF         0x00009200u
-#define ZZAPP_FILE_BYTES       64u
-#define ZZAPP_PATH_OFF         0x00009240u
-#define ZZAPP_PATH_BYTES       256u
-#define ZZAPP_ARGV_OFF         0x00009340u
-#define ZZAPP_ARGV_BYTES       2048u          /* ends at 0x9B40 */
+/* ---- Layout checks ------------------------------------------------------ */
 
-#define ZZAPP_DATA_OFF         0x00009B40u
-#define ZZAPP_DATA_BYTES       0x00040000u   /* 256 KiB, ends at 0x49B40 */
-#define ZZAPP_STAGING_OFF      0x00049B40u
-#define ZZAPP_STAGING_BYTES    0x00010000u   /* 64 KiB, ends at 0x59B40 */
-
-/* The v0 tail through 0x60000 remains reserved for ABI stability. */
-#define ZZAPP_PALETTE_OFF      ZZAPP_RESERVED_OFF
-#define ZZAPP_PALETTE_BYTES    1024u
-#define ZZAPP_RESERVED_OFF     0x00059B40u
-
-/* API 0.2 host: byte rings have monotonic u32 head/tail counters.
- * Console output is app-to-host; input is host-to-app and eof is written by
- * the host when its input stream closes. Neither console ring drops data. */
-/* These payload capacities are powers of two so wrapping u32 counters retain
- * their physical position across UINT32_MAX.  The unused tail in each region
- * remains reserved by this layout version. */
-#define ZZAPP_CONSOLE_OUT_OFF  0x00060000u
-#define ZZAPP_CONSOLE_OUT_BYTES 0x00010000u
-#define ZZAPP_CONSOLE_IN_OFF   0x00070000u
-#define ZZAPP_CONSOLE_IN_BYTES 0x00002000u
-#define ZZAPP_CONSOLE_HDR      16u
-#define ZZAPP_CONSOLE_OUT_CAP  0x00008000u
-#define ZZAPP_CONSOLE_IN_CAP   0x00001000u
-#define ZZAPP_CONSOLE_EOF_OFF  8u
-/* Console-in only: 1 while the app is blocked reading an empty ring, so the
- * launcher reads the keyboard only when the app asks for input. */
-#define ZZAPP_CONSOLE_WANT_OFF 12u
-
-/* PCM is S16LE interleaved. The app is its only producer; route describes
- * the launcher-selected card-fabric or AHI consumer. */
-#define ZZAPP_AUDIO_OFF        0x00072000u
-#define ZZAPP_AUDIO_BYTES      0x00020000u
-#define ZZAPP_AUDIO_HDR        32u
-#define ZZAPP_AUDIO_CAP        0x00010000u
-#define ZZAPP_AUDIO_HEAD_OFF   0u
-#define ZZAPP_AUDIO_TAIL_OFF   4u
-#define ZZAPP_AUDIO_RATE_OFF   8u
-#define ZZAPP_AUDIO_CHANNELS_OFF 12u
-#define ZZAPP_AUDIO_FORMAT_OFF 16u
-#define ZZAPP_AUDIO_ROUTE_OFF  20u
-#define ZZAPP_AUDIO_UNDERRUNS_OFF 24u
-/* Per-open stream epoch, never 0 while a stream is open. Written after the
- * rest of the header, so a launcher that sees 0 waits for the next poll and
- * one that sees a new value knows the stream was replaced. */
-#define ZZAPP_AUDIO_EPOCH_OFF  28u
-#define ZZAPP_AUDIO_FORMAT_S16LE 1u
-#define ZZAPP_AUDIO_ROUTE_CARD 0u
-#define ZZAPP_AUDIO_ROUTE_AHI  1u
-
-/* Fixed 32-byte application messages. Host-to-app and app-to-host each have
- * one single-producer/single-consumer ring. Payload bytes are opaque. */
-#define ZZAPP_MSG_H2A_OFF      0x00092000u
-#define ZZAPP_MSG_A2H_OFF      0x00093000u
-#define ZZAPP_MSG_BYTES        0x00001000u
-#define ZZAPP_MSG_HDR          16u
-#define ZZAPP_MSG_BYTES_PER    32u
-#define ZZAPP_MSG_CAP          64u
-
-#define ZZAPP_LIFE_MAGIC       0x5A415050u   /* 'ZAPP' */
-#define ZZAPP_LIFE_VERSION     2u
-
-#define ZZAPP_LIFE_MAGIC_OFF       0x00u
-#define ZZAPP_LIFE_VERSION_OFF     0x04u
-#define ZZAPP_LIFE_STATE_OFF       0x08u
-#define ZZAPP_LIFE_GENERATION_OFF  0x0Cu
-#define ZZAPP_LIFE_HEARTBEAT_OFF   0x10u
-#define ZZAPP_LIFE_STOP_OFF        0x14u
-#define ZZAPP_LIFE_FAULT_OFF       0x18u
-#define ZZAPP_LIFE_EXIT_OFF        0x1Cu
-#define ZZAPP_LIFE_PC_OFF          0x20u
-#define ZZAPP_LIFE_SP_OFF          0x24u
-#define ZZAPP_LIFE_LR_OFF          0x28u
-#define ZZAPP_LIFE_FAR_OFF         0x2Cu
-#define ZZAPP_LIFE_FSR_OFF         0x30u
-#define ZZAPP_LIFE_CPSR_OFF        0x34u
-#define ZZAPP_LIFE_FLAGS_OFF       0x38u
-#define ZZAPP_LIFE_INPUT_DROPS_OFF 0x3Cu
-#define ZZAPP_LIFE_LOG_DROPS_OFF   0x40u
-#define ZZAPP_LIFE_FLIP_GEN_OFF    0x44u
-#define ZZAPP_LIFE_FLIP_ACK_OFF    0x48u
-#define ZZAPP_LIFE_FLIP_SHOWING_OFF 0x4Cu
-#define ZZAPP_LIFE_WIDTH_OFF       0x50u
-#define ZZAPP_LIFE_HEIGHT_OFF      0x54u
-#define ZZAPP_LIFE_PITCH_OFF       0x58u
-#define ZZAPP_LIFE_FORMAT_OFF      0x5Cu
-#define ZZAPP_LIFE_CARD_FRONT_OFF  0x60u
-#define ZZAPP_LIFE_CARD_BACK_OFF   0x64u
-#define ZZAPP_LIFE_PROGRESS_LO_OFF 0x68u
-#define ZZAPP_LIFE_PROGRESS_HI_OFF 0x6Cu
-#define ZZAPP_LIFE_LAYOUT_OFF      0x70u
-#define ZZAPP_LIFE_PALETTE_GEN_OFF   0x74u
-#define ZZAPP_LIFE_PALETTE_FIRST_OFF 0x78u
-#define ZZAPP_LIFE_PALETTE_COUNT_OFF 0x7Cu
-#define ZZAPP_LIFE_CARD_SPARE_OFF      0x80u
-#define ZZAPP_LIFE_FLIP_ADDRESS_OFF    0x84u
-#define ZZAPP_LIFE_FLIP_SUBMIT_OFF     0x88u
-#define ZZAPP_LIFE_MAILBOX_REPLACED_OFF 0x8Cu
-#define ZZAPP_LIFE_AUDIO_ROUTE_OFF     0x90u
-#define ZZAPP_LIFE_AUDIO_RATE_OFF      0x94u
-#define ZZAPP_LIFE_AUDIO_CHANNELS_OFF  0x98u
-#define ZZAPP_LIFE_AUDIO_FORMAT_OFF    0x9Cu
-#define ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF 0xA0u
-#define ZZAPP_LIFE_TERMINAL_OFF     0xA4u
-#define ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF 0xA8u
-/* Reason of the last resource refusal of this claim (AAR_REASON_*): set
- * before a failing LOAD_BEGIN or LOAD_END completes, cleared at claim. 0 when
- * none. Additive: older launchers never read it. */
-#define ZZAPP_LIFE_REFUSAL_OFF     0xACu
-
-/* State: 0 idle, 1 loading, 2 starting, 3 running, 4 paused (unused),
- * 5 stopping, 6 faulted. */
-#define ZZAPP_ST_IDLE              0u
-#define ZZAPP_ST_LOADING           1u
-#define ZZAPP_ST_STARTING          2u
-#define ZZAPP_ST_RUNNING           3u
-#define ZZAPP_ST_PAUSED            4u
-#define ZZAPP_ST_STOPPING          5u
-#define ZZAPP_ST_FAULTED           6u
-/* A launcher claimed the slot and has not loaded an image yet. */
-#define ZZAPP_ST_CLAIMED           7u
-
-/* Fault: 0 none, 1 data abort, 2 prefetch, 3 undefined, 4 watchdog,
- * 5 forced stop (grace or reset), 6 watchdog that fell through to cold restart. */
-#define ZZAPP_FAULT_NONE           0u
-#define ZZAPP_FAULT_DATA           1u
-#define ZZAPP_FAULT_PREFETCH       2u
-#define ZZAPP_FAULT_UNDEF          3u
-#define ZZAPP_FAULT_WATCHDOG       4u
-#define ZZAPP_FAULT_FORCED         5u
-#define ZZAPP_FAULT_WATCHDOG_RESTART 6u
-
-/* Flags: bit0 display wanted, bit1 audio, bit2 GL,
- * bit8 display requested and not yet bound, bit9 vsync wanted.
- * Launcher/Firmware scanout-ack bits negotiate strict vblank-safe panning;
- * mailbox bits negotiate card-owned triple-buffer presentation. Bit16 marks
- * an app that has used the console; bit17 selects AHI for the audio ring.
- * Bit18 selects the launcher's extended main-loop lease. */
-#define ZZAPP_F_DISPLAY                 (1u << 0)
-#define ZZAPP_F_AUDIO                   (1u << 1)
-#define ZZAPP_F_GL                      (1u << 2)
-#define ZZAPP_F_DISPLAY_UNBOUND         (1u << 8)
-#define ZZAPP_F_VSYNC                   (1u << 9)
-#define ZZAPP_F_LAUNCHER_CLUT8          (1u << 10)
-#define ZZAPP_F_LAUNCHER_SCANOUT_ACK    (1u << 11)
-#define ZZAPP_F_SCANOUT_ACK             (1u << 12)
-#define ZZAPP_F_MAILBOX_REQUEST         (1u << 13)
-#define ZZAPP_F_LAUNCHER_MAILBOX        (1u << 14)
-#define ZZAPP_F_MAILBOX                 (1u << 15)
-#define ZZAPP_F_CONSOLE                 (1u << 16)
-#define ZZAPP_F_LAUNCHER_AUDIO_AHI      (1u << 17)
-#define ZZAPP_F_LAUNCHER_HEARTBEAT     (1u << 18)
-
-#define ZZAPP_EV_KEY_DOWN          1u
-#define ZZAPP_EV_KEY_UP            2u
-#define ZZAPP_EV_MOUSE             3u
-#define ZZAPP_EV_JOY               4u
-#define ZZAPP_EV_STOP              5u
-#define ZZAPP_EV_RESIZE            6u
-#define ZZAPP_EV_BREAK             7u
-#define ZZAPP_EV_LOW_MEMORY        8u
-
-#define ZZAPP_BREAK_CTRL_D         4u
-#define ZZAPP_BREAK_CTRL_E         5u
-#define ZZAPP_BREAK_CTRL_F         6u
-
-#define ZZAPP_FILE_OP_OPEN         1u
-#define ZZAPP_FILE_OP_CLOSE        2u
-#define ZZAPP_FILE_OP_READ         3u
-#define ZZAPP_FILE_OP_WRITE        4u
-#define ZZAPP_FILE_OP_SEEK         5u
-#define ZZAPP_FILE_OP_STAT         6u
-#define ZZAPP_FILE_OP_LIST_OPEN    7u
-#define ZZAPP_FILE_OP_LIST_NEXT    8u
-#define ZZAPP_FILE_OP_LIST_CLOSE   9u
-
-/* Open flags travel unchanged from the app as AAR_FILE_* values. CREATE
- * creates a missing file and keeps an existing one, TRUNCATE empties an
- * existing file, EXCL with CREATE fails when the file exists. The firmware
- * refuses invalid combinations before they reach the launcher. */
-#define ZZAPP_FILE_READ            1u
-#define ZZAPP_FILE_WRITE           2u
-#define ZZAPP_FILE_CREATE          4u
-#define ZZAPP_FILE_TRUNCATE        8u
-#define ZZAPP_FILE_EXCL            16u
-#define ZZAPP_SEEK_SET             0
-#define ZZAPP_SEEK_CUR             1
-#define ZZAPP_SEEK_END             2
-#define ZZAPP_MODE_FILE            1u
-#define ZZAPP_MODE_DIR             2u
-
-/* FDs are small integers, 16 of them, starting at 3. */
-#define ZZAPP_FD_BASE              3
-#define ZZAPP_FD_COUNT             16
-#define ZZAPP_PATH_MAX             255u
-
-/* Argv area: u32 argc, then 16 offsets from the window base, then the
- * strings, each at most 127 bytes plus NUL. */
-#define ZZAPP_ARGV_MAX             16u
-#define ZZAPP_ARGV_STR_MAX         128u
-#define ZZAPP_ARGV_ARGC_OFF        0u
-#define ZZAPP_ARGV_OFFS_OFF        4u
-#define ZZAPP_ARGV_STR_OFF         (4u + ZZAPP_ARGV_MAX * 4u)
-
-struct zzapp_wire_event {
-    uint16_t type;
-    uint16_t code;         /* Amiga rawkey, or button id */
-    int16_t  dx;
-    int16_t  dy;
-    uint16_t buttons;      /* IEQUALIFIER on keys; mouse/joy buttons */
-    uint16_t reserved;
-    uint32_t time_ms;
-};
-
-struct zzapp_file_wire {   /* 64 bytes; do not add a field */
-    uint32_t seq;          /* 0 */
-    uint32_t op;           /* 4 */
-    int32_t  fd;           /* 8 */
-    int32_t  flags;        /* 12 */
-    int32_t  whence;       /* 16: 0 set, 1 cur, 2 end */
-    int32_t  err;          /* 20: 0 or a ZZ_* code */
-    uint32_t path_off;     /* 24: offset from window base; 0 if none */
-    uint32_t length;       /* 28 */
-    uint32_t out_n;        /* 32 */
-    uint32_t mode;         /* 36: stat, 1 file, 2 dir */
-    uint64_t offset;       /* 40 */
-    uint64_t out_pos;      /* 48: seek position; open/stat file size */
-    uint32_t mtime;        /* 56: seconds, 0 if unknown */
-    uint32_t reserved;     /* 60 */
-};
-#define ZZAPP_FILE_WIRE_DEFINED 1
-
-struct zzapp_ring_hdr {
-    uint32_t head;
-    uint32_t tail;
-    uint32_t value0;
-    uint32_t value1;
-};
-
-struct zzapp_wire_msg {
-    uint8_t bytes[ZZAPP_MSG_BYTES_PER];
-};
-
-/* Native layout documents offsets. Wire stores are big-endian; use the
- * accessors. Do not read these fields as host integers on a little-endian CPU. */
-struct zzapp_life {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t state;
-    uint32_t generation;
-    uint32_t heartbeat_ms;
-    uint32_t stop;
-    uint32_t fault_code;
-    int32_t  exit_code;
-    uint32_t pc;
-    uint32_t sp;
-    uint32_t lr;
-    uint32_t far;
-    uint32_t fsr;
-    uint32_t cpsr;
-    uint32_t flags;
-    uint32_t input_drops;
-    uint32_t log_drops;
-    uint32_t flip_gen;
-    uint32_t flip_ack;
-    uint32_t flip_showing;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pitch;
-    uint32_t format;
-    uint32_t card_front;
-    uint32_t card_back;
-    uint32_t progress_lo;
-    uint32_t progress_hi;
-    uint32_t layout;
-    uint32_t palette_generation;
-    uint32_t palette_first;
-    uint32_t palette_count;
-    uint32_t card_spare;
-    uint32_t flip_address;
-    uint32_t flip_submit;
-    uint32_t mailbox_replaced;
-    uint32_t audio_route;
-    uint32_t audio_rate;
-    uint32_t audio_channels;
-    uint32_t audio_format;
-    uint32_t audio_underruns;
-    uint32_t terminal_reason;
-    uint32_t low_memory_crossings;
-};
-
-struct zzapp_input_hdr {
-    uint32_t head;
-    uint32_t tail;
-    uint32_t reserved0;
-    uint32_t reserved1;
-};
-
-struct zzapp_log_hdr {
-    uint32_t head;             /* byte offset, monotonic */
-    uint32_t tail;
-};
-
-_Static_assert(ZZAPP_QUERY_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "query");
-_Static_assert(ZZAPP_ALLOC_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "alloc");
-_Static_assert(ZZAPP_CHUNK_REQ_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "chunk");
-_Static_assert(ZZAPP_START_REQ_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "start");
-_Static_assert(ZZAPP_BIND_REQ_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "bind");
-_Static_assert(ZZAPP_STATUS_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "status");
-_Static_assert(ZZAPP_STATUS_REPLY_BYTES == 48, "status fills the payload");
-_Static_assert(ZZAPP_SEL_GENERATION + 4u == ZZAPP_MAILBOX_PAYLOAD_BYTES,
-               "selector ends the payload");
-_Static_assert(ZZAPP_BIND_EXT_REQ_BYTES <= ZZAPP_SEL_SLOT, "bind below selector");
-_Static_assert(ZZAPP_QUERY_EXT_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "query ext");
-_Static_assert(ZZAPP_ALLOC_EXT_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "alloc ext");
+_Static_assert(ZZAPP_QUERY_HOSTHEAP_FREE + 4u == ZZAPP_MAILBOX_PAYLOAD_BYTES,
+               "query fills the payload");
+_Static_assert(ZZAPP_CLAIM_REPLY_BYTES <= ZZAPP_SEL_HANDLE, "claim reply");
+_Static_assert(ZZAPP_LOAD_BEGIN_REPLY_BYTES <= ZZAPP_SEL_HANDLE, "load reply");
+_Static_assert(ZZAPP_CHUNK_REQ_BYTES <= ZZAPP_SEL_HANDLE, "chunk request");
+_Static_assert(ZZAPP_START_REQ_BYTES <= ZZAPP_SEL_HANDLE, "start request");
+_Static_assert(ZZAPP_KICK_REQ_BYTES <= ZZAPP_SEL_HANDLE, "kick request");
 _Static_assert(ZZAPP_LIST_NAME + ZZAPP_LIST_NAME_BYTES == ZZAPP_LIST_REPLY_BYTES,
                "list name ends the reply");
-
-_Static_assert(ZZAPP_LIFE_OFF == 0u, "life");
-_Static_assert(ZZAPP_LIFE_OFF + ZZAPP_LIFE_BYTES == ZZAPP_INPUT_OFF, "life end");
-_Static_assert(ZZAPP_INPUT_OFF + ZZAPP_INPUT_BYTES == 0x1200u, "input end");
-_Static_assert(ZZAPP_INPUT_HDR == 16u, "input hdr");
-_Static_assert(ZZAPP_INPUT_HDR + ZZAPP_INPUT_CAP * ZZAPP_EVENT_BYTES == 0x1010u,
-               "input events");
-_Static_assert(ZZAPP_INPUT_BYTES == 0x1100u, "input region");
-_Static_assert(ZZAPP_LOG_OFF == 0x1200u, "log");
-_Static_assert(ZZAPP_LOG_OFF + ZZAPP_LOG_BYTES == 0x9200u, "log end");
-_Static_assert(ZZAPP_FILE_OFF == 0x9200u, "file");
-_Static_assert(ZZAPP_FILE_OFF + ZZAPP_FILE_BYTES == ZZAPP_PATH_OFF, "file end");
-_Static_assert(ZZAPP_PATH_OFF + ZZAPP_PATH_BYTES == ZZAPP_ARGV_OFF, "path end");
-_Static_assert(ZZAPP_ARGV_OFF + ZZAPP_ARGV_BYTES == 0x9B40u, "argv end");
-_Static_assert(ZZAPP_DATA_OFF == 0x9B40u, "data");
-_Static_assert(ZZAPP_DATA_OFF + ZZAPP_DATA_BYTES == 0x49B40u, "data end");
-_Static_assert(ZZAPP_STAGING_OFF == 0x49B40u, "staging");
-_Static_assert(ZZAPP_STAGING_OFF + ZZAPP_STAGING_BYTES == 0x59B40u, "staging end");
-_Static_assert(ZZAPP_STAGING_OFF + ZZAPP_STAGING_BYTES == ZZAPP_RESERVED_OFF,
-               "reserved");
-_Static_assert(ZZAPP_RESERVED_OFF + ZZAPP_PALETTE_BYTES == 0x59F40u,
-               "palette");
-_Static_assert(0x60000u <= ZZAPP_WINDOW_BYTES, "v0 window retained");
-_Static_assert(ZZAPP_CONSOLE_OUT_OFF == 0x60000u, "console out");
-_Static_assert(ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_OUT_BYTES ==
-               ZZAPP_CONSOLE_IN_OFF, "console out end");
-_Static_assert(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_IN_BYTES ==
-               ZZAPP_AUDIO_OFF, "console in end");
-_Static_assert(ZZAPP_CONSOLE_OUT_CAP > 0u && ZZAPP_CONSOLE_IN_CAP > 0u,
-               "console capacity");
-_Static_assert((ZZAPP_CONSOLE_OUT_CAP & (ZZAPP_CONSOLE_OUT_CAP - 1u)) == 0u,
-               "console output capacity wraps");
-_Static_assert((ZZAPP_CONSOLE_IN_CAP & (ZZAPP_CONSOLE_IN_CAP - 1u)) == 0u,
-               "console input capacity wraps");
-_Static_assert(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_BYTES == ZZAPP_MSG_H2A_OFF,
-               "audio end");
-_Static_assert(ZZAPP_AUDIO_CAP > 0u, "audio capacity");
-_Static_assert((ZZAPP_AUDIO_CAP & (ZZAPP_AUDIO_CAP - 1u)) == 0u,
-               "audio capacity wraps");
-_Static_assert(ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_BYTES == ZZAPP_MSG_A2H_OFF,
-               "host message end");
-_Static_assert(ZZAPP_MSG_A2H_OFF + ZZAPP_MSG_BYTES == ZZAPP_WINDOW_BYTES,
-               "app message end");
-_Static_assert(ZZAPP_MSG_HDR + ZZAPP_MSG_CAP * ZZAPP_MSG_BYTES_PER <=
-               ZZAPP_MSG_BYTES, "message capacity");
-_Static_assert(ZZAPP_CHUNK_MAX == ZZAPP_STAGING_BYTES, "chunk fits staging");
-_Static_assert(ZZAPP_ARGV_STR_OFF < ZZAPP_ARGV_BYTES, "argv header");
-_Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_STR_MAX <= ZZAPP_ARGV_BYTES,
+_Static_assert(ZZAPP_LIST_REPLY_BYTES <= ZZAPP_MAILBOX_PAYLOAD_BYTES, "list reply");
+_Static_assert(ZZAPP_SEL_RESERVED + 4u == ZZAPP_MAILBOX_PAYLOAD_BYTES,
+               "the handle selector ends the payload");
+_Static_assert(ZZAPP_SEL_HANDLE + 4u == ZZAPP_SEL_RESERVED, "handle word");
+_Static_assert(ZZAPP_LOAD_ARGV_OFF + ZZAPP_LOAD_ARGV_BYTES <=
+               ZZAPP_LOAD_BUFFER_BYTES, "load buffer layout");
+_Static_assert((ZZAPP_LOAD_BUFFER_BYTES & 0x1fffu) == 0u,
+               "load buffer is a multiple of 8 KiB");
+_Static_assert(ZZAPP_ARGV_STR_OFF < ZZAPP_LOAD_ARGV_BYTES, "argv header");
+_Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_STR_MAX <= ZZAPP_LOAD_ARGV_BYTES,
                "one max argv string");
+_Static_assert(ZZAPP_OP_LAST <= ZZAPP_OP_RANGE_HI, "operations in range");
 
-_Static_assert(sizeof(struct zzapp_wire_event) == ZZAPP_EVENT_BYTES, "event");
-_Static_assert(offsetof(struct zzapp_wire_event, type) == 0, "event type");
-_Static_assert(offsetof(struct zzapp_wire_event, code) == 2, "event code");
-_Static_assert(offsetof(struct zzapp_wire_event, dx) == 4, "event dx");
-_Static_assert(offsetof(struct zzapp_wire_event, dy) == 6, "event dy");
-_Static_assert(offsetof(struct zzapp_wire_event, buttons) == 8, "event buttons");
-_Static_assert(offsetof(struct zzapp_wire_event, reserved) == 10, "event reserved");
-_Static_assert(offsetof(struct zzapp_wire_event, time_ms) == 12, "event time");
+/* ---- Big-endian accessors ----------------------------------------------- */
 
-_Static_assert(sizeof(struct zzapp_file_wire) == ZZAPP_FILE_BYTES, "file wire");
-_Static_assert(offsetof(struct zzapp_file_wire, seq) == 0, "file seq");
-_Static_assert(offsetof(struct zzapp_file_wire, op) == 4, "file op");
-_Static_assert(offsetof(struct zzapp_file_wire, fd) == 8, "file fd");
-_Static_assert(offsetof(struct zzapp_file_wire, flags) == 12, "file flags");
-_Static_assert(offsetof(struct zzapp_file_wire, whence) == 16, "file whence");
-_Static_assert(offsetof(struct zzapp_file_wire, err) == 20, "file err");
-_Static_assert(offsetof(struct zzapp_file_wire, path_off) == 24, "file path");
-_Static_assert(offsetof(struct zzapp_file_wire, length) == 28, "file length");
-_Static_assert(offsetof(struct zzapp_file_wire, out_n) == 32, "file out_n");
-_Static_assert(offsetof(struct zzapp_file_wire, mode) == 36, "file mode");
-_Static_assert(offsetof(struct zzapp_file_wire, offset) == 40, "file offset");
-_Static_assert(offsetof(struct zzapp_file_wire, out_pos) == 48, "file out_pos");
-_Static_assert(offsetof(struct zzapp_file_wire, mtime) == 56, "file mtime");
-_Static_assert(offsetof(struct zzapp_file_wire, reserved) == 60, "file reserved");
-
-_Static_assert(sizeof(struct zzapp_input_hdr) == ZZAPP_INPUT_HDR, "input hdr");
-_Static_assert(sizeof(struct zzapp_log_hdr) == ZZAPP_LOG_HDR, "log hdr");
-_Static_assert(sizeof(struct zzapp_ring_hdr) == ZZAPP_CONSOLE_HDR, "ring hdr");
-_Static_assert(sizeof(struct zzapp_wire_msg) == ZZAPP_MSG_BYTES_PER, "message");
-_Static_assert(offsetof(struct zzapp_life, magic) == ZZAPP_LIFE_MAGIC_OFF, "magic");
-_Static_assert(offsetof(struct zzapp_life, version) == ZZAPP_LIFE_VERSION_OFF, "ver");
-_Static_assert(offsetof(struct zzapp_life, state) == ZZAPP_LIFE_STATE_OFF, "state");
-_Static_assert(offsetof(struct zzapp_life, generation) == ZZAPP_LIFE_GENERATION_OFF, "gen");
-_Static_assert(offsetof(struct zzapp_life, heartbeat_ms) == ZZAPP_LIFE_HEARTBEAT_OFF, "hb");
-_Static_assert(offsetof(struct zzapp_life, stop) == ZZAPP_LIFE_STOP_OFF, "stop");
-_Static_assert(offsetof(struct zzapp_life, fault_code) == ZZAPP_LIFE_FAULT_OFF, "fault");
-_Static_assert(offsetof(struct zzapp_life, exit_code) == ZZAPP_LIFE_EXIT_OFF, "exit");
-_Static_assert(offsetof(struct zzapp_life, pc) == ZZAPP_LIFE_PC_OFF, "pc");
-_Static_assert(offsetof(struct zzapp_life, sp) == ZZAPP_LIFE_SP_OFF, "sp");
-_Static_assert(offsetof(struct zzapp_life, lr) == ZZAPP_LIFE_LR_OFF, "lr");
-_Static_assert(offsetof(struct zzapp_life, far) == ZZAPP_LIFE_FAR_OFF, "far");
-_Static_assert(offsetof(struct zzapp_life, fsr) == ZZAPP_LIFE_FSR_OFF, "fsr");
-_Static_assert(offsetof(struct zzapp_life, cpsr) == ZZAPP_LIFE_CPSR_OFF, "cpsr");
-_Static_assert(offsetof(struct zzapp_life, flags) == ZZAPP_LIFE_FLAGS_OFF, "flags");
-_Static_assert(offsetof(struct zzapp_life, input_drops) == ZZAPP_LIFE_INPUT_DROPS_OFF, "idrop");
-_Static_assert(offsetof(struct zzapp_life, log_drops) == ZZAPP_LIFE_LOG_DROPS_OFF, "ldrop");
-_Static_assert(offsetof(struct zzapp_life, flip_gen) == ZZAPP_LIFE_FLIP_GEN_OFF, "fgen");
-_Static_assert(offsetof(struct zzapp_life, flip_ack) == ZZAPP_LIFE_FLIP_ACK_OFF, "fack");
-_Static_assert(offsetof(struct zzapp_life, flip_showing) == ZZAPP_LIFE_FLIP_SHOWING_OFF, "fshow");
-_Static_assert(offsetof(struct zzapp_life, width) == ZZAPP_LIFE_WIDTH_OFF, "width");
-_Static_assert(offsetof(struct zzapp_life, height) == ZZAPP_LIFE_HEIGHT_OFF, "height");
-_Static_assert(offsetof(struct zzapp_life, pitch) == ZZAPP_LIFE_PITCH_OFF, "pitch");
-_Static_assert(offsetof(struct zzapp_life, format) == ZZAPP_LIFE_FORMAT_OFF, "format");
-_Static_assert(offsetof(struct zzapp_life, card_front) == ZZAPP_LIFE_CARD_FRONT_OFF, "front");
-_Static_assert(offsetof(struct zzapp_life, card_back) == ZZAPP_LIFE_CARD_BACK_OFF, "back");
-_Static_assert(offsetof(struct zzapp_life, progress_lo) == ZZAPP_LIFE_PROGRESS_LO_OFF, "plo");
-_Static_assert(offsetof(struct zzapp_life, progress_hi) == ZZAPP_LIFE_PROGRESS_HI_OFF, "phi");
-_Static_assert(offsetof(struct zzapp_life, layout) == ZZAPP_LIFE_LAYOUT_OFF, "layout");
-_Static_assert(offsetof(struct zzapp_life, palette_generation) == ZZAPP_LIFE_PALETTE_GEN_OFF, "pgen");
-_Static_assert(offsetof(struct zzapp_life, palette_first) == ZZAPP_LIFE_PALETTE_FIRST_OFF, "pfirst");
-_Static_assert(offsetof(struct zzapp_life, palette_count) == ZZAPP_LIFE_PALETTE_COUNT_OFF, "pcount");
-_Static_assert(offsetof(struct zzapp_life, card_spare) == ZZAPP_LIFE_CARD_SPARE_OFF, "spare");
-_Static_assert(offsetof(struct zzapp_life, flip_address) == ZZAPP_LIFE_FLIP_ADDRESS_OFF, "faddr");
-_Static_assert(offsetof(struct zzapp_life, flip_submit) == ZZAPP_LIFE_FLIP_SUBMIT_OFF, "fsubmit");
-_Static_assert(offsetof(struct zzapp_life, mailbox_replaced) == ZZAPP_LIFE_MAILBOX_REPLACED_OFF, "mreplace");
-_Static_assert(offsetof(struct zzapp_life, audio_route) == ZZAPP_LIFE_AUDIO_ROUTE_OFF, "aroute");
-_Static_assert(offsetof(struct zzapp_life, audio_rate) == ZZAPP_LIFE_AUDIO_RATE_OFF, "arate");
-_Static_assert(offsetof(struct zzapp_life, audio_channels) == ZZAPP_LIFE_AUDIO_CHANNELS_OFF, "achannels");
-_Static_assert(offsetof(struct zzapp_life, audio_format) == ZZAPP_LIFE_AUDIO_FORMAT_OFF, "aformat");
-_Static_assert(offsetof(struct zzapp_life, audio_underruns) == ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF, "aunderruns");
-_Static_assert(offsetof(struct zzapp_life, terminal_reason) == ZZAPP_LIFE_TERMINAL_OFF, "terminal");
-_Static_assert(offsetof(struct zzapp_life, low_memory_crossings) ==
-               ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, "lowmem");
-_Static_assert(sizeof(struct zzapp_life) <= ZZAPP_LIFE_BYTES, "life bytes");
-
+/* Byte stores and loads, so they work on any alignment and either host. */
 static inline void zzapp_put_be16(void *p, uint16_t value)
 {
     uint8_t *b = (uint8_t *)p;
@@ -726,55 +316,53 @@ static inline int16_t zzapp_get_be16s(const void *p)
     return (int16_t)zzapp_get_be16(p);
 }
 
-static inline void zzapp_build_chunk_request(
-    uint8_t payload[ZZAPP_CHUNK_REQ_BYTES], uint32_t file_off, uint32_t length)
+/* ---- Request builders --------------------------------------------------- */
+
+/* Handle word of an operation that names a claim. */
+static inline void zzapp_build_handle(uint8_t payload[ZZAPP_MAILBOX_PAYLOAD_BYTES],
+                                      uint32_t handle)
+{
+    zzapp_put_be32(payload + ZZAPP_SEL_HANDLE, handle);
+    zzapp_put_be32(payload + ZZAPP_SEL_RESERVED, 0u);
+}
+
+static inline void zzapp_build_load_begin_request(
+    uint8_t payload[ZZAPP_MAILBOX_PAYLOAD_BYTES], uint32_t handle,
+    uint32_t client_caps)
+{
+    zzapp_put_be32(payload + ZZAPP_LOAD_CLIENT_CAPS, client_caps);
+    zzapp_build_handle(payload, handle);
+}
+
+static inline void zzapp_build_load_chunk_request(
+    uint8_t payload[ZZAPP_MAILBOX_PAYLOAD_BYTES], uint32_t handle,
+    uint32_t file_off, uint32_t length)
 {
     zzapp_put_be32(payload + ZZAPP_CHUNK_FILE_OFF, file_off);
     zzapp_put_be32(payload + ZZAPP_CHUNK_LENGTH, length);
-    zzapp_put_be32(payload + ZZAPP_CHUNK_STAGING, ZZAPP_STAGING_OFF);
+    zzapp_build_handle(payload, handle);
 }
 
-static inline void zzapp_build_start_request(
-    uint8_t payload[ZZAPP_START_REQ_BYTES], uint32_t argc)
+static inline void zzapp_build_start_app_request(
+    uint8_t payload[ZZAPP_MAILBOX_PAYLOAD_BYTES], uint32_t handle,
+    uint32_t argc)
 {
     zzapp_put_be32(payload + ZZAPP_START_ARGC, argc);
+    zzapp_build_handle(payload, handle);
 }
 
-static inline void zzapp_build_display_bind_request(
-    uint8_t payload[ZZAPP_BIND_REQ_BYTES], uint32_t width, uint32_t height,
-    uint32_t pitch, uint32_t format, uint32_t card_front, uint32_t card_back)
+static inline void zzapp_build_kick_request(
+    uint8_t payload[ZZAPP_MAILBOX_PAYLOAD_BYTES], uint32_t handle,
+    uint32_t flags)
 {
-    zzapp_put_be32(payload + ZZAPP_BIND_WIDTH, width);
-    zzapp_put_be32(payload + ZZAPP_BIND_HEIGHT, height);
-    zzapp_put_be32(payload + ZZAPP_BIND_PITCH, pitch);
-    zzapp_put_be32(payload + ZZAPP_BIND_FORMAT, format);
-    zzapp_put_be32(payload + ZZAPP_BIND_CARD_FRONT, card_front);
-    zzapp_put_be32(payload + ZZAPP_BIND_CARD_BACK, card_back);
-    zzapp_put_be32(payload + ZZAPP_BIND_LAYOUT, 0U);
+    zzapp_put_be32(payload + ZZAPP_KICK_FLAGS, flags);
+    zzapp_build_handle(payload, handle);
 }
 
-static inline void zzapp_build_display_bind_request_layout(
-    uint8_t payload[ZZAPP_BIND_REQ_BYTES], uint32_t width, uint32_t height,
-    uint32_t pitch, uint32_t format, uint32_t card_front, uint32_t card_back,
-    uint32_t layout)
+static inline void zzapp_build_list_request(
+    uint8_t payload[ZZAPP_MAILBOX_PAYLOAD_BYTES], uint32_t cursor)
 {
-    zzapp_put_be32(payload + ZZAPP_BIND_WIDTH, width);
-    zzapp_put_be32(payload + ZZAPP_BIND_HEIGHT, height);
-    zzapp_put_be32(payload + ZZAPP_BIND_PITCH, pitch);
-    zzapp_put_be32(payload + ZZAPP_BIND_FORMAT, format);
-    zzapp_put_be32(payload + ZZAPP_BIND_CARD_FRONT, card_front);
-    zzapp_put_be32(payload + ZZAPP_BIND_CARD_BACK, card_back);
-    zzapp_put_be32(payload + ZZAPP_BIND_LAYOUT, layout);
-}
-
-static inline void zzapp_build_display_bind_request_triple(
-    uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES], uint32_t width, uint32_t height,
-    uint32_t pitch, uint32_t format, uint32_t card_front, uint32_t card_back,
-    uint32_t layout, uint32_t card_spare)
-{
-    zzapp_build_display_bind_request_layout(payload, width, height, pitch, format,
-                                            card_front, card_back, layout);
-    zzapp_put_be32(payload + ZZAPP_BIND_CARD_SPARE, card_spare);
+    zzapp_put_be32(payload + ZZAPP_LIST_CURSOR, cursor);
 }
 
 #endif /* ZZAPP_PROTO_H */

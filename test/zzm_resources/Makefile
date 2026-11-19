@@ -1,11 +1,12 @@
 CC ?= cc
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections
 LDFLAGS ?= -Wl,--gc-sections
+include ../../sdk/aar.mk
 SRC := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/zzm_resources_test
 
-CPPFLAGS += -DMINIGL_HOST_TEST -DSMP_LOCK_HOST_TEST -I mock -I$(SRC)
+CPPFLAGS += -DMINIGL_HOST_TEST -DSMP_LOCK_HOST_TEST -I mock -I$(SRC) -I$(AAR_DIR)/include
 SOURCES := zzm_resources_test.c $(SRC)/zzm_runtime.c $(SRC)/card_pool.c \
 	$(SRC)/surface_allocator.c $(SRC)/sdk_palette.c $(SRC)/sdk_smp_lock.c
 DEPS := $(SRC)/zzm_runtime.h $(SRC)/card_pool.h $(SRC)/surface_allocator.h \

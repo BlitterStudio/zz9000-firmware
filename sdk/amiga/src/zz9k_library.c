@@ -5,11 +5,9 @@
  */
 
 #include "zz9k/library.h"
-#include "zz9k/app.h"
 #include <string.h>
 
 #define ZZ9K_LIBRARY_BUSY_POLL_MICROS 250UL
-#define ZZ9K_LIBRARY_APP_LOAD_TIMEOUT_TICKS (32UL * 50UL)
 
 #if ZZ9K_LIBRARY_AMIGA
 #include <devices/timer.h>
@@ -453,17 +451,12 @@ int ZZ9KPing(ZZ9KLibrary *library, const uint8_t *payload,
                    reply_len);
 }
 
-static int zz9k_call_with_progress(ZZ9KLibrary *library,
-                                   ZZ9KRequest *request,
-                                   ZZ9KMailboxEntry *reply,
-                                   uint32_t timeout_ticks,
-                                   ZZ9KProgressReader progress_reader,
-                                   void *progress_data)
+int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
+             ZZ9KMailboxEntry *reply, uint32_t timeout_ticks)
 {
   uint32_t request_id;
   uint32_t ticks;
   uint32_t busy_start;
-  uint32_t progress = progress_reader ? progress_reader(progress_data) : 0U;
   int busy_polling;
   int busy_expired;
   int status;
@@ -481,8 +474,6 @@ static int zz9k_call_with_progress(ZZ9KLibrary *library,
   busy_expired = 0;
 
   for (ticks = 0;;) {
-    uint32_t current_progress;
-
     status = zz9k_poll(library->ctx, reply);
     if (status == ZZ9K_STATUS_OK) {
       if (reply->request_id == request_id) {
@@ -497,12 +488,6 @@ static int zz9k_call_with_progress(ZZ9KLibrary *library,
     }
     if (status != ZZ9K_STATUS_BUSY) {
       return status;
-    }
-    current_progress = progress_reader ? progress_reader(progress_data) :
-                                        progress;
-    if (current_progress != progress) {
-      progress = current_progress;
-      ticks = 0U;
     }
     if (ticks == timeout_ticks) {
       return ZZ9K_STATUS_TIMEOUT;
@@ -527,37 +512,6 @@ static int zz9k_call_with_progress(ZZ9KLibrary *library,
     }
     zz9k_busy_poll_pause();
   }
-}
-
-int ZZ9KCall(ZZ9KLibrary *library, ZZ9KRequest *request,
-             ZZ9KMailboxEntry *reply, uint32_t timeout_ticks)
-{
-  return zz9k_call_with_progress(library, request, reply, timeout_ticks,
-                                 NULL, NULL);
-}
-
-int zz9k_library_app_call(ZZ9KLibrary *library, ZZ9KRequest *request,
-                          ZZ9KMailboxEntry *reply)
-{
-  return ZZ9KCall(library, request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
-}
-
-int zz9k_library_app_call_progress(ZZ9KLibrary *library,
-                                   ZZ9KRequest *request,
-                                   ZZ9KMailboxEntry *reply,
-                                   ZZ9KProgressReader progress_reader,
-                                   void *progress_data,
-                                   int progress_supported)
-{
-  if (progress_supported && progress_reader) {
-    return zz9k_call_with_progress(
-        library, request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS,
-        progress_reader, progress_data);
-  }
-  /* Old firmware has no loader progress signal. Preserve revision 39's
-   * lease-covering fixed deadline for that compatibility path. */
-  return ZZ9KCall(library, request, reply,
-                  ZZ9K_LIBRARY_APP_LOAD_TIMEOUT_TICKS);
 }
 
 int ZZ9KCallAsync(ZZ9KLibrary *library, ZZ9KAsyncRequest *async,

@@ -245,8 +245,9 @@ default shared heap are Zorro III diagnostics.
 
     Expected result: `ZZRun` returns after `hello.elf` exits, and
     `zz9k-app-echo-test` ends with `zz9k-app-echo-test: PASS (300 messages)`.
-    The tool covers the `zz9k.library` app-client load, start, 32-byte message
-    rings, notification handling, stop, status, and close. A failure reports
+    The tool covers the client transport module's claim, load, start, 32-byte
+    message exchange under the message credit, stop, status, and release. A
+    failure reports
     the last recorded phase; keep the trace lines printed before it.
 
     `zz9k-app-ringtest` runs three phases: 1.5 s idle, where the app only
@@ -298,9 +299,10 @@ default shared heap are Zorro III diagnostics.
 - Treat corruption outside the PIP as a stop condition. Preserve the UART log
   and the exact artifact hashes.
 - Route `ZZRun` load or exit failures to the app runtime and launcher, and
-  `zz9k-app-echo-test` failures to the `zz9k.library` app client. Keep the
+  `zz9k-app-echo-test` failures to the client transport module
+  (`aar_xport_zz9000`). Keep the
   `[app]` lines from the UART log. When the echo test passes and
   `zz9k-app-ringtest` fails, route lost or wrong messages and a backwards or
-  lagging counter to the app message rings and the memory mapping of the
-  launcher window and host-visible blocks, not to the library.
+  lagging counter to the queue pair and the memory mapping of the
+  host-visible blocks (the module's `mmu.library` mapping), not to the library.
 

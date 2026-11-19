@@ -354,7 +354,7 @@ int zzm_module_init(const zzm_services_t *services)
     reclaim = zzm_rt_get_service(ZZM_SERVICE_RECLAIM,
                                  ZZM_SERVICE_RECLAIM_V3);
     app_host = zzm_rt_get_service(ZZM_SERVICE_APP_GL_HOST,
-                                  ZZM_SERVICE_APP_GL_HOST_V3);
+                                  ZZM_SERVICE_APP_GL_HOST_V4);
     palette = zzm_rt_get_service(ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
     graphics = zzm_rt_get_service(ZZM_SERVICE_GRAPHICS_HW,
                                   ZZM_SERVICE_GRAPHICS_HW_V3);
@@ -372,7 +372,7 @@ int zzm_module_init(const zzm_services_t *services)
         !reclaim->create_owner || !reclaim->close_owner ||
         !reclaim->quarantine_owner ||
         !minigl_table_compatible(app_host->version, app_host->size,
-                                 ZZM_SERVICE_APP_GL_HOST_V3,
+                                 ZZM_SERVICE_APP_GL_HOST_V4,
                                  sizeof(*app_host)) ||
         !minigl_table_compatible(palette->version, palette->size,
                                  ZZM_SERVICE_PALETTE_V3,

@@ -1,8 +1,7 @@
 /*
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  *
- * Trusted-app services: rings, files, input, log, display bind, audio.
- * Apps do not include this header. zzapp_proto.h is the wire layout.
+ * The app runtime's services over the AAR transport (zzapp_services.c).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -34,63 +33,70 @@ struct zzapp_rec;
 #endif
 
 /* Amiga reset, once, after the host retired every record and before the
- * allocator is reset: every window is forgotten and gives its memory back,
- * quarantines are dropped, a held record shell is released (one with an audio
- * detach still owed to core 0 stays until core 0 finishes it). */
+ * allocator is reset: every held shell is released and gives its buffers back
+ * (a shell with an audio detach still owed to core 0, or an unharvested reply,
+ * goes as soon as that is done). The quarantine flag stays on a quarantined
+ * shell until its release, so the release returns the app's own host-visible
+ * blocks along with the transport blocks. */
 void zzapp_services_on_reset(void);
-/* Retire stage 3: display grants, audio post-teardown, files and waits of the
- * selected record. The state moves to STOPPING; IDLE comes from
- * zzapp_services_retire_wire(). */
+/* Retire stage 3: display grants, audio post-teardown, files, waits and
+ * requests in flight of the selected record. The state moves to STOPPING;
+ * IDLE comes from zzapp_services_retire_wire(). */
 void zzapp_services_on_app_end(void);
 void zzapp_services_cancel_start(int status);
 void zzapp_services_on_launch(void);
 
+/* Core 1, the system thread: the next deferred mailbox op, the pass over the
+ * records with a parked wait, a doorbell or console output, the audio close
+ * handoff. */
 void zzapp_services_poll(void);
+/* Core 0: audio open, close and go-live of every record that has audio. */
 void zzapp_services_core0_poll(void);
-/* Core 0, while core 1 is halted and cannot be inside the AHI pump. */
+/* Core 0, while core 1 is halted and cannot be inside an audio handoff. */
 void zzapp_services_reclaim_halted_audio(void);
-void zzapp_services_set_window_mapping_available(int available);
 
-uint8_t *zzapp_services_window(void);
+/* The launch generation of the selected record: the generation of its handle. */
 uint32_t zzapp_services_generation(void);
 uint32_t zzapp_services_state(void);
 /* The record services act for: the running app's own on core 1, else the one
  * selected by zzapp_services_select_pid(); ZZAPP_PID_NONE when there is none. */
 uint32_t zzapp_services_current_pid(void);
-/* Select the record (and its window) as this core's context. A pid that is
- * out of range or FREE clears the record context. */
+/* Select the record as this core's context. A pid that is out of range or
+ * FREE clears the record context. */
 void zzapp_services_select_pid(uint32_t pid);
+/* 1 when the selected record has a stop latched, or the client asked for one
+ * in its control block. */
 int zzapp_services_stop_requested(void);
 int zzapp_services_wait_registered(uint32_t pid);
+/* Publish the state of the selected record in the control block (IDLE of a
+ * claim comes from retire_wire). */
 void zzapp_services_set_state(uint32_t state);
-void zzapp_services_set_generation(uint32_t generation);
 uint32_t zzapp_services_memory_limit(void);
 void zzapp_services_set_fault(uint32_t code, uint32_t pc, uint32_t sp,
 			      uint32_t lr, uint32_t far, uint32_t fsr,
 			      uint32_t cpsr);
 void zzapp_services_set_exit(int32_t code);
 void zzapp_services_note_progress(uint32_t lo, uint32_t hi);
-void zzapp_services_or_flags(uint32_t flags);
-void zzapp_services_and_flags(uint32_t mask);
-uint32_t zzapp_services_flags(void);
-/* Terminal status survives slot reclamation for APP_LIST. */
+/* The end reason: kept in the record and in AAR_CB_END_REASON. */
 void zzapp_services_set_terminal(uint32_t reason);
+/* Core 0: ends a claim whose lease ran out while it was CLAIMED or LOADING. */
 void zzapp_services_expire_claims(uint64_t now_us);
-
-/* After poll: nonzero means APP_START is waiting for the worker to enter.
- * Copy argv from the window, then start_entered with the captured generation
+/* After poll: nonzero means START is waiting for the worker to enter. Copy
+ * argv from the load buffer, then start_entered with the captured generation
  * before publishing RUNNING or branching into the app. */
 int zzapp_services_take_start(uint32_t *argc);
 int zzapp_services_start_entered(uint32_t generation);
-/* Retire steps 6 and 7 (the host's zzapp_rec_retire calls it last): copy the
- * terminal reason and name into the window's last-end summary, publish IDLE,
- * detach the record from its window and free it. 1: freed, the record must
- * not be touched again. 0: the shell is held (quarantined window, audio
- * handoff pending) and services frees it later from core 0. Replay safe: a
- * record that is already free reports 1. */
+/*
+ * Retire stages 6 and 7 (the host's zzapp_rec_retire calls it last): publish
+ * IDLE with the end reason in the control block and hold the record, its
+ * queues and its buffers (the client drains messages and reads the final
+ * status after the app ended). 1: the shell was released (its release was
+ * requested) and the record freed; 0: it stays until RELEASE, a stale request
+ * of a quarantined claim, or reset. A record that is already free reports 1.
+ */
 int zzapp_services_retire_wire(struct zzapp_rec *rec);
-/* A resource refusal of the selected record during load (AAR_REASON_*),
- * published in the lifecycle block before the failing op completes. */
+/* A resource refusal of the selected record during load (AAR_REASON_*): the
+ * refused op replies with it. */
 void zzapp_services_note_refusal(uint32_t reason);
 
 void zzapp_svc_log(const char *msg, uint32_t len);
@@ -107,35 +113,41 @@ int zzapp_svc_file_list_close(int list);
 int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 			   uint32_t flags, struct aar_surface *out);
 int zzapp_svc_display_flip(uint32_t surface_id);
-/* Queue a completed P96 buffer without waiting for ZZRun's acknowledgement. */
+/* Queue a completed buffer without waiting for the client's acknowledgement. */
 int zzapp_svc_display_flip_async(uint32_t surface_id);
 int zzapp_svc_display_refresh(struct aar_surface *out);
 int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
                                   uint32_t count, const uint32_t *rgb);
+int zzapp_svc_display_close(uint32_t surface_id);
 int zzapp_display_flip_idle(void);
 /* Blocks the app thread until the last queued flip is acknowledged, as a
  * registered wait the core-1 service pass wakes.  AAR_OK once idle. */
 int zzapp_display_wait_flip_idle(void);
 uint32_t zzapp_svc_display_latest_dropped(void);
+/* 1 while the selected record's display is card-owned (LATEST): flips never
+ * reach the client. */
+int zzapp_display_latest(void);
 int zzapp_svc_display_vsync(void);
 int zzapp_svc_event_poll(struct aar_event *out, uint32_t max, uint32_t *out_n);
 int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, struct aar_audio *out);
 int zzapp_svc_audio_close(void);
+/* Console output is appended to a firmware ring and goes out as one
+ * outstanding AAR_OP_CONSOLE_WRITE at a time; input is an AAR_OP_CONSOLE_READ
+ * request. */
 int zzapp_svc_console_write(const void *buf, uint32_t len, uint32_t *out_n);
 int zzapp_svc_console_read(void *buf, uint32_t len, uint32_t *out_n);
 int zzapp_svc_msg_send(const void *msg);
 int zzapp_svc_msg_poll(void *msg);
-/* Parks until the host-to-app ring holds a message (AAR_OK), the timeout in
- * microseconds passes (AAR_E_TIMEDOUT), or the app is stopped (AAR_E_IO). Zero
- * only tests the ring. The message stays queued for zzapp_svc_msg_poll. */
+/* Parks until the inbox holds a message (AAR_OK), the timeout in microseconds
+ * passes (AAR_E_TIMEDOUT), or the app is stopped (AAR_E_IO). Zero only tests
+ * the inbox. The message stays queued for zzapp_svc_msg_poll. */
 int zzapp_svc_msg_wait(uint32_t timeout_us);
 
-/* Slice C. card_* are ARM physical. flip publishes flip_gen and does not wait. */
+/* The bound display, for the GL module. */
 int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
 			uint32_t *format, uint32_t *card_front,
 			uint32_t *card_back);
 int zzapp_display_layout(uint32_t *layout);
-int zzapp_display_flip_bound(void);
 /* Core 0 brackets VDMA programming at vblank. begin returns nonzero with the
  * cross-core mailbox lock held; end must be called exactly once in that case. */
 int zzapp_services_display_mailbox_begin(uint32_t normal_scanout,
@@ -147,7 +159,9 @@ void zzapp_services_display_vblank(uint32_t scanout_address);
 void zzapp_services_reset_core1_lock(void);
 
 
-/* Mailbox. QUEUED means core 1 will finish it; harvest from core 0. */
+/* Mailbox. QUEUED means core 1 will finish it; harvest from core 0. Every
+ * operation but QUERY, CLAIM and LIST names its claim by the handle at byte 40
+ * of the payload (zzapp_proto.h). */
 uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 				uint16_t req_len, uint8_t *reply,
 				uint16_t *reply_len, int z3,
@@ -168,12 +182,12 @@ void zzapp_host_yield(void);
 uint64_t zzapp_host_time_us(void);
 
 #ifdef ZZAPP_HOST_TEST
+/* Between sub-tests: the service statics and hooks go back to their initial
+ * state. Records and their transport blocks are the test's to release. */
 void zzapp_services_test_reset(void);
 void zzapp_services_test_set_core(int core);
-void zzapp_services_test_select_window(uint32_t win);
-void zzapp_services_test_set_window(void *window, uint32_t bytes);
-void zzapp_services_test_set_window_slot(uint32_t slot, void *window,
-					 uint32_t bytes);
+/* Called inside every wait loop of the services, where a test's client model
+ * drains the SQ and posts completions. */
 void zzapp_services_test_set_yield(void (*fn)(void));
 void zzapp_services_test_set_time(uint64_t (*fn)(void));
 void zzapp_services_test_set_slot_busy(uint32_t slot, int busy);

@@ -25,10 +25,6 @@
 #include "amiberry_types.h"
 #include "zzm_minigl_host.h"
 
-#ifndef ZZAPP_F_MAILBOX
-#define ZZAPP_F_MAILBOX (1u << 15)
-#endif
-
 
 
 #include "minigl_platform.h"
@@ -122,7 +118,7 @@ int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host)
 {
     if (!host || !host->api_enter || !host->api_leave ||
         !host->bound_display || !host->flip_bound || !host->flip_idle ||
-        !host->generation || !host->display_layout || !host->display_flags ||
+        !host->generation || !host->display_layout || !host->display_latest ||
         !host->stop_requested || !host->yield_wait || !host->wait_flip)
         return AAR_E_INVAL;
     g_module_app_host = host;
@@ -202,9 +198,9 @@ int zzm_module_svc_display_flip(uint32_t surface_id)
     return zzm_module_display_flip_bound();
 }
 
-uint32_t zzm_module_display_flags(void)
+int zzm_module_display_latest(void)
 {
-    return g_module_app_host->display_flags();
+    return g_module_app_host->display_latest();
 }
 
 int zzm_module_stop_requested(void)
@@ -241,15 +237,10 @@ __attribute__((weak)) int zzapp_display_layout(uint32_t *layout)
 }
 
 
-__attribute__((weak)) int zzapp_display_flip_bound(void)
-{
-    return AAR_E_NOSYS;
-}
-
 __attribute__((weak)) int zzapp_svc_display_flip(uint32_t surface_id)
 {
     (void)surface_id;
-    return zzapp_display_flip_bound();
+    return AAR_E_NOSYS;
 }
 
 __attribute__((weak)) int zzapp_display_flip_idle(void)
@@ -268,9 +259,9 @@ __attribute__((weak)) int zzapp_svc_display_flip_async(uint32_t surface_id)
     return AAR_E_NOSYS;
 }
 
-__attribute__((weak)) uint32_t zzapp_services_flags(void)
+__attribute__((weak)) int zzapp_display_latest(void)
 {
-    return 0U;
+    return 0;
 }
 
 __attribute__((weak)) int zzapp_services_stop_requested(void)
@@ -297,11 +288,10 @@ __attribute__((weak)) uint32_t zzapp_current_generation(void)
 #define zzapp_api_leave zzm_module_api_leave
 #define zzapp_display_bound zzm_module_display_bound
 #define zzapp_display_layout zzm_module_display_layout
-#define zzapp_display_flip_bound zzm_module_display_flip_bound
 #define zzapp_display_flip_idle zzm_module_display_flip_idle
 #define zzapp_display_wait_flip_idle zzm_module_display_wait_flip_idle
 #define zzapp_svc_display_flip zzm_module_svc_display_flip
-#define zzapp_services_flags zzm_module_display_flags
+#define zzapp_display_latest zzm_module_display_latest
 #define zzapp_services_stop_requested zzm_module_stop_requested
 #define zzapp_host_yield_wait zzm_module_yield_wait
 #define zzapp_current_generation zzm_module_current_generation
@@ -567,7 +557,7 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
     g_zero_copy = 0U;
     if ((flags & AAR_ZZ9000_GL_BIND_DIRECT_PRESENT) == 0U)
         present_mode = "copy (direct not requested)";
-    else if ((zzapp_services_flags() & ZZAPP_F_MAILBOX) != 0U)
+    else if (zzapp_display_latest() != 0)
         present_mode = "copy (mailbox display)";
     else if (format != AAR_FMT_RGB565)
         present_mode = "copy (not RGB565)";

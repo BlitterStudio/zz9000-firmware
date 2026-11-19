@@ -31,7 +31,11 @@
  *      sources from --srcdir (the Makefile recipe passes it explicitly;
  *      standalone runs derive it from argv[0] and SKIP when the tree is
  *      absent),
- *   8. mid-loop snapshot failure vs top-of-ISR unbind (U5).
+ *   8. mid-loop snapshot failure vs top-of-ISR unbind (U5),
+ *   9. cache ownership of producer rings: a coherent producer's dirty PCM
+ *      survives the compositor's read, a non-coherent producer's ring is
+ *      refreshed from DDR, and the queued-period replay follows the same
+ *      rule (cache model in mock/xil_cache.h).
  */
 
 #include <setjmp.h>
@@ -48,6 +52,7 @@
 
 #include "fabric_test_common.h"
 #include "memorymap.h"
+#include "xil_cache.h"
 #include "pump_golden.h"
 
 /* Host stub: the lease poll's boundary rebase disables local IRQs on
@@ -1026,6 +1031,166 @@ static char *slurp(const char *path)
 	return buf;
 }
 
+/* ---- 9. cache ownership of producer rings ---- */
+
+static uint8_t g_ddr_image[MODEL_RING_BYTES];
+
+static void fill_constant(uint8_t *dst, int16_t value)
+{
+	uint32_t i;
+
+	for (i = 0U; i < MODEL_RING_BYTES; i += 2U) {
+		dst[i] = (uint8_t)value;
+		dst[i + 1U] = (uint8_t)(((uint16_t)value) >> 8);
+	}
+}
+
+/* fabric_reset_state() fills the TX ring with 0xAA: a period still holding
+ * it was never committed. */
+#define TX_NEVER_WRITTEN ((int16_t)0xAAAA)
+
+/* The consumer-visible result: the S16 words of `bytes` TX bytes at
+ * `from`. A written word that is neither silence nor `expected` is PCM the
+ * compositor took from the wrong copy of the ring. */
+static void scan_tx(const uint8_t *from, uint32_t bytes, int16_t expected,
+		    uint32_t *committed, uint32_t *wrong, int16_t *first_wrong)
+{
+	const int16_t *words = (const int16_t *)from;
+	uint32_t i;
+
+	*committed = 0U;
+	*wrong = 0U;
+	*first_wrong = 0;
+	for (i = 0U; i < bytes / 2U; i++) {
+		if (words[i] == 0 || words[i] == TX_NEVER_WRITTEN)
+			continue;
+		(*committed)++;
+		if (words[i] != expected) {
+			if (*wrong == 0U)
+				*first_wrong = words[i];
+			(*wrong)++;
+		}
+	}
+}
+
+static void run_ticks(unsigned ticks)
+{
+	while (ticks-- != 0U) {
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+}
+
+/* The app writes the ring with cacheable stores: its fresh PCM is dirty in
+ * the cache while DDR still holds older bytes. The compositor must play the
+ * fresh PCM, not what an invalidate would let it read back from DDR. */
+static void scenario_coherent_source_keeps_dirty_pcm(void)
+{
+	uint32_t committed;
+	uint32_t wrong;
+	int16_t first_wrong;
+
+	fabric_reset_state();
+	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	g_model_c.coherent = 1;
+	model_prefill_constant(&g_model_c, 1234);
+	fill_constant(g_ddr_image, -777);
+	xil_cache_model_attach(g_model_c.ring, g_ddr_image, MODEL_RING_BYTES);
+	g_dma_count = 0U;
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_MAILBOX, &g_ops_c);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_MAILBOX);
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_MAILBOX);
+	run_ticks(3U);
+	xil_cache_model_detach();
+	scan_tx(g_fabric_tx, AUDIO_TX_BUFFER_SIZE, 1234, &committed, &wrong,
+		&first_wrong);
+	check(committed != 0U, "coherent source commits PCM", "");
+	check(wrong == 0U, "coherent source plays its dirty PCM, not DDR",
+	      fmt("%u of %u words wrong, first %d", wrong, committed,
+		  first_wrong));
+}
+
+/* A DMA or aperture writer leaves the CPU cache holding stale lines while
+ * DDR has the fresh PCM: the compositor must still invalidate first. */
+static void scenario_noncoherent_source_reads_ddr(void)
+{
+	uint32_t committed;
+	uint32_t wrong;
+	int16_t first_wrong;
+
+	fabric_reset_state();
+	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	g_model_c.coherent = 0;
+	model_prefill_constant(&g_model_c, 4321);
+	memcpy(g_ddr_image, g_model_c.ring, MODEL_RING_BYTES);
+	fill_constant(g_model_c.ring, -777);
+	xil_cache_model_attach(g_model_c.ring, g_ddr_image, MODEL_RING_BYTES);
+	g_dma_count = 0U;
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_MAILBOX, &g_ops_c);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_MAILBOX);
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_MAILBOX);
+	run_ticks(3U);
+	xil_cache_model_detach();
+	scan_tx(g_fabric_tx, AUDIO_TX_BUFFER_SIZE, 4321, &committed, &wrong,
+		&first_wrong);
+	check(committed != 0U, "non-coherent source commits PCM", "");
+	check(wrong == 0U, "non-coherent source is refreshed from DDR",
+	      fmt("%u of %u words wrong, first %d", wrong, committed,
+		  first_wrong));
+}
+
+/* A peer that detaches leaves queued periods to be rebuilt from the
+ * remaining producers' rings. The replay reads the coherent producer's
+ * dirty PCM too, and still refreshes a non-coherent one. */
+static void replay_case(int coherent, const char *label)
+{
+	uint32_t pos_period;
+	uint32_t ahead;
+	uint32_t committed;
+	uint32_t wrong;
+	int16_t first_wrong;
+
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_prefill_constant(&g_model_b, 100);
+	g_model_c.coherent = coherent;
+	model_prefill_constant(&g_model_c, 1234);
+	g_dma_count = 0U;
+	fabric_pump_start();
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_MAILBOX, &g_ops_c);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_MAILBOX);
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_MAILBOX);
+	run_ticks(3U);
+	if (coherent) {
+		/* Dirty fresh PCM again: DDR holds something else. */
+		fill_constant(g_ddr_image, -777);
+	} else {
+		/* Fresh PCM in DDR, a stale copy cached. */
+		memcpy(g_ddr_image, g_model_c.ring, MODEL_RING_BYTES);
+		fill_constant(g_model_c.ring, -777);
+	}
+	xil_cache_model_attach(g_model_c.ring, g_ddr_image, MODEL_RING_BYTES);
+	audio_fabric_request_rebuild(AUDIO_FABRIC_SLOT_PUMP);
+	audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_PUMP);
+	run_ticks(1U);
+	xil_cache_model_detach();
+	pos_period = (g_dma_count % AUDIO_TX_BUFFER_SIZE) / TICK_BYTES;
+	ahead = (pos_period + 1U) % AUDIO_NUM_PERIODS;
+	scan_tx(&g_fabric_tx[ahead * TICK_BYTES], TICK_BYTES, 1234, &committed,
+		&wrong, &first_wrong);
+	check(committed != 0U, "replayed period carries PCM", label);
+	check(wrong == 0U, "replay reads the rebuilt peer's own PCM",
+	      fmt("%s: %u of %u words wrong, first %d", label, wrong,
+		  committed, first_wrong));
+}
+
+static void scenario_replay_cache_ownership(void)
+{
+	replay_case(1, "coherent producer");
+	replay_case(0, "non-coherent producer");
+}
+
 static int count_occurrences(const char *hay, const char *needle)
 {
 	const char *p = hay;
@@ -1245,6 +1410,9 @@ int main(int argc, char **argv)
 	scenario_excluded_underrun();
 	scenario_snapshot_midloop();
 	scenario_ring_authority();
+	scenario_coherent_source_keeps_dirty_pcm();
+	scenario_noncoherent_source_reads_ddr();
+	scenario_replay_cache_ownership();
 	scenario_source_contract();
 
 	if (failures != 0) {

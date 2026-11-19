@@ -1,8 +1,10 @@
 /*
- * aar_msg_wait: park until the Amiga queues a host-to-app message. The Amiga
- * writes the ring in the launcher window with no doorbell, so the wait is a
- * level test the core-1 service pass repeats; a message that lands between
- * the ring check and the park is seen by that pass.
+ * aar_msg_wait: park until the Amiga queues a client-to-app message. The
+ * Amiga posts the message on the completion queue, within its credit, and
+ * rings no doorbell the wait depends on: the wait is a level test the core-1
+ * service pass repeats; a message that lands between the check and the park
+ * is seen by that pass. A message counts as consumed, and hands its credit
+ * back through AAR_CB_MSG_CONSUMED, when the app takes it.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -13,7 +15,6 @@
 #include <stdio.h>
 #include <string.h>
 
-static uint8_t window[ZZAPP_WINDOW_BYTES];
 static int checks;
 static int failures;
 
@@ -43,11 +44,10 @@ static void test_yield(void)
 
 static void reset(void)
 {
-	memset(window, 0, sizeof(window));
-	zzapp_services_test_reset();
+	svc_apps_reset();
 	memset(&service_test_kernel, 0, sizeof(service_test_kernel));
-	zzapp_services_test_set_window(window, sizeof(window));
-	zzapp_services_set_generation(1U);
+	svc_app_new(0U);
+	zzapp_services_test_set_core(1);
 	zzapp_services_test_set_time(test_time);
 	zzapp_services_test_set_yield(test_yield);
 	now_value = 1000U;
@@ -55,43 +55,44 @@ static void reset(void)
 	on_yield = NULL;
 }
 
-/* What zz9k_app_ring_push does from the 68k. */
+/* What AARSendMessage does from the 68k, within its credit. */
 static void host_push(uint8_t fill)
 {
-	uint32_t head = zzapp_get_be32(window + ZZAPP_MSG_H2A_OFF);
+	uint8_t msg[AAR_MSG_BYTES];
 
-	memset(window + ZZAPP_MSG_H2A_OFF + ZZAPP_MSG_HDR +
-	       (head & (ZZAPP_MSG_CAP - 1U)) * ZZAPP_MSG_BYTES_PER, fill,
-	       ZZAPP_MSG_BYTES_PER);
-	zzapp_put_be32(window + ZZAPP_MSG_H2A_OFF, head + 1U);
+	memset(msg, fill, sizeof(msg));
+	CHECK(mock_client_post_msg(&CL(0), msg) == AAR_OK);
 }
 
 static uint32_t list_block_reason(void)
 {
-	uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
-	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
-	uint16_t reply_len = 0U;
+	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
+	mock_client probe;
 
-	zzapp_put_be32(request + ZZAPP_SEL_SLOT, 0U);
-	if (zzapp_mailbox_dispatch(ZZAPP_OP_LIST, request, sizeof(request), reply,
-				   &reply_len, 1, 1U, 0U) != SDK_STATUS_OK)
+	mock_client_init(&probe);
+	svc_client_wire(&probe);
+	if (mock_client_list(&probe, PID_OF(0U), reply) != SDK_STATUS_OK)
 		return 0xffU;
 	return reply[ZZAPP_LIST_REASONS];
 }
 
 static void test_ready_message_returns_at_once(void)
 {
-	uint8_t msg[ZZAPP_MSG_BYTES_PER];
+	uint8_t msg[AAR_MSG_BYTES];
 
 	reset();
 	host_push(0x5a);
 	CHECK(zzapp_svc_msg_wait(1000000U) == AAR_OK);
 	CHECK(yields == 0U);
 	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
-	/* The wait only reports readiness; the message is still queued. */
+	/* The wait only reports readiness; the message is still queued and its
+	 * credit is still out. */
+	CHECK(CB(0, AAR_CB_MSG_CONSUMED) == 0U);
 	CHECK(zzapp_svc_msg_poll(msg) == 1);
 	CHECK(msg[0] == 0x5a && msg[31] == 0x5a);
+	CHECK(CB(0, AAR_CB_MSG_CONSUMED) == 1U);
 	CHECK(zzapp_svc_msg_poll(msg) == 0);
+	CHECK(CB(0, AAR_CB_MSG_CONSUMED) == 1U);
 }
 
 static void arrive_later(unsigned n)
@@ -107,8 +108,7 @@ static void arrive_later(unsigned n)
 		service_test_wake_count = 0U;
 		zzapp_services_poll();
 		CHECK(service_test_wake_count == 0U);
-		CHECK(TH(0).state ==
-		      ZZAPP_THREAD_BLOCKED);
+		CHECK(TH(0).state == ZZAPP_THREAD_BLOCKED);
 		return;
 	}
 	host_push(0x11);
@@ -119,7 +119,7 @@ static void arrive_later(unsigned n)
 
 static void test_message_that_arrives_later_wakes(void)
 {
-	uint8_t msg[ZZAPP_MSG_BYTES_PER];
+	uint8_t msg[AAR_MSG_BYTES];
 
 	reset();
 	on_yield = arrive_later;
@@ -133,30 +133,44 @@ static void test_message_that_arrives_later_wakes(void)
 static void arrive_between_check_and_park(unsigned n)
 {
 	(void)n;
-	/* The ring was empty at the check; the Amiga pushes before the app is
+	/* The CQ was empty at the check; the Amiga posts before the app is
 	 * actually blocked and no service pass runs. Whatever resumes the app
-	 * next finds the message because the wait re-reads the ring. */
+	 * next finds the message because the wait re-reads the queue. */
 	host_push(0x22);
 }
 
-static void test_message_between_check_and_park_is_not_missed(void)
+/* The waiter is parked by the real wait path (registered with the pass), and
+ * the message is in the CQ the first time any pass looks. */
+static void arrive_before_first_pass(unsigned n)
 {
-	reset();
-	on_yield = arrive_between_check_and_park;
-	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
-	CHECK(yields == 1U);
-
-	/* A service pass that sees the ring ready wakes a parked waiter even
-	 * though the message arrived before the pass ever saw the wait empty. */
-	reset();
-	RT(0).wait_kind = ZZAPP_WAIT_EVENT;
-	RT(0).wait_deadline = 1000U + 5000000U;
+	(void)n;
+	CHECK(zzapp_services_wait_registered(PID_OF(0U)));
+	CHECK(RT(0).wait_kind == ZZAPP_WAIT_EVENT);
 	TH(0).state = ZZAPP_THREAD_BLOCKED;
 	host_push(0x33);
 	service_test_wake_count = 0U;
 	zzapp_services_poll();
 	CHECK(service_test_wake_count == 1U);
 	CHECK(TH(0).state == ZZAPP_THREAD_RUNNABLE);
+}
+
+static void test_message_between_check_and_park_is_not_missed(void)
+{
+	uint8_t msg[AAR_MSG_BYTES];
+
+	reset();
+	on_yield = arrive_between_check_and_park;
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
+	CHECK(yields == 1U);
+
+	/* A service pass that sees the CQ ready wakes a parked waiter even
+	 * though the message arrived before the pass ever saw the wait empty. */
+	reset();
+	on_yield = arrive_before_first_pass;
+	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
+	CHECK(yields == 1U);
+	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
+	CHECK(zzapp_svc_msg_poll(msg) == 1 && msg[0] == 0x33);
 }
 
 static void run_to_deadline(unsigned n)
@@ -173,7 +187,7 @@ static void run_to_deadline(unsigned n)
 static void test_timeout(void)
 {
 	reset();
-	/* Zero only tests the ring. */
+	/* Zero only tests the queue. */
 	CHECK(zzapp_svc_msg_wait(0U) == AAR_E_TIMEDOUT);
 	CHECK(yields == 0U);
 	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
@@ -186,15 +200,11 @@ static void test_timeout(void)
 	CHECK(RT(0).wait_deadline == 0U);
 }
 
-/* The Amiga's APP_STOP, as the mailbox dispatches it. It only latches the
- * stop word; nothing wakes the waiter except the service pass. */
+/* The Amiga's STOP, as the mailbox dispatches it. It only latches the stop;
+ * nothing wakes the waiter except the service pass. */
 static void send_app_stop(void)
 {
-	uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
-	uint16_t reply_len = 0U;
-
-	CHECK(zzapp_mailbox_dispatch(ZZAPP_OP_STOP, NULL, 0U, reply, &reply_len,
-				     1, 1U, 0U) == SDK_STATUS_OK);
+	CHECK(mock_client_stop(&CL(0)) == SDK_STATUS_OK);
 }
 
 static int stop_with_message;
@@ -242,7 +252,7 @@ static void message_after_timeout_wake(unsigned n)
 
 static void test_message_during_timeout_is_not_lost(void)
 {
-	uint8_t msg[ZZAPP_MSG_BYTES_PER];
+	uint8_t msg[AAR_MSG_BYTES];
 
 	reset();
 	on_yield = message_at_deadline;
@@ -259,7 +269,7 @@ static void test_message_during_timeout_is_not_lost(void)
 static void test_stop_cancels_the_wait(void)
 {
 	reset();
-	test_force_state(0U, ZZAPP_ST_RUNNING);
+	test_force_state(0U, AAR_STATE_RUNNING);
 	stop_with_message = 0;
 	on_yield = stop_while_parked;
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
@@ -268,14 +278,14 @@ static void test_stop_cancels_the_wait(void)
 
 	/* A message queued with the stop is still returned. */
 	reset();
-	test_force_state(0U, ZZAPP_ST_RUNNING);
+	test_force_state(0U, AAR_STATE_RUNNING);
 	stop_with_message = 1;
 	on_yield = stop_while_parked;
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
 
-	/* Already stopping: no park at all. */
+	/* Already stopping, by the client's own stop word: no park at all. */
 	reset();
-	zzapp_put_be32(window + ZZAPP_LIFE_STOP_OFF, 1U);
+	mock_client_request_stop(&CL(0));
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
 	CHECK(yields == 0U);
 
@@ -284,13 +294,34 @@ static void test_stop_cancels_the_wait(void)
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_OK);
 }
 
-static void test_ring_corruption_is_an_error(void)
+static void test_queue_corruption_is_an_error(void)
 {
 	reset();
-	zzapp_put_be32(window + ZZAPP_MSG_H2A_OFF, ZZAPP_MSG_CAP + 5U);
+	/* A completion queue whose tail is further ahead than it is deep. */
+	aar_put_be32(CL(0).cq.tail, aar_get_be32(CL(0).cq.head) + ZZAPP_XPORT_DEPTH + 5U);
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
 	CHECK(yields == 0U);
 	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
+	CHECK(zzapp_xport_flag_test(APP(0).rec, ZZAPP_XPORT_F_CORRUPT) != 0);
+}
+
+/* A client that keeps within its credit never fills the inbox: 63 messages
+ * are accepted, the 64th is refused at the client, and taking one hands the
+ * credit back. */
+static void test_message_credit_is_returned_on_take(void)
+{
+	uint8_t msg[AAR_MSG_BYTES];
+	unsigned i;
+
+	reset();
+	memset(msg, 0x42, sizeof(msg));
+	for (i = 0U; i < AAR_MSG_CAPACITY; i++)
+		CHECK(mock_client_post_msg(&CL(0), msg) == AAR_OK);
+	CHECK(mock_client_post_msg(&CL(0), msg) == AAR_E_BUSY);
+	CHECK(zzapp_svc_msg_wait(1000000U) == AAR_OK);
+	CHECK(zzapp_svc_msg_poll(msg) == 1);
+	CHECK(mock_client_post_msg(&CL(0), msg) == AAR_OK);
+	CHECK(mock_client_post_msg(&CL(0), msg) == AAR_E_BUSY);
 }
 
 int main(void)
@@ -302,7 +333,8 @@ int main(void)
 	test_timeout();
 	test_stop_cancels_the_wait();
 	test_message_during_timeout_is_not_lost();
-	test_ring_corruption_is_an_error();
+	test_queue_corruption_is_an_error();
+	test_message_credit_is_returned_on_take();
 	printf("msg_wait_test: %d checks, %d failures\n", checks, failures);
 	return failures != 0;
 }

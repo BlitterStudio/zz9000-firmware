@@ -15,6 +15,8 @@
 
 #include "aar/app.h"
 #include "zzapp_proto.h"
+#include "zzapp_state.h"
+#include "zzapp_xport.h"
 #include "zzapp_runtime.h"
 #include "zzapp_rec.h"
 #include "zzapp_svc.h"
@@ -117,7 +119,10 @@ void __attribute__((weak)) zzapp_services_set_state(uint32_t state)
 
 void __attribute__((weak)) zzapp_services_set_terminal(uint32_t reason)
 {
-    (void)reason;
+    zzapp_rec_t *rec = zzapp_rec_by_pid(zzapp_services_current_pid());
+
+    if (rec)
+        rec->claim.terminal_reason = reason;
 }
 
 void __attribute__((weak)) zzapp_services_note_refusal(uint32_t reason)
@@ -125,15 +130,13 @@ void __attribute__((weak)) zzapp_services_note_refusal(uint32_t reason)
     (void)reason;
 }
 
-/* Stages 6 and 7 without a window layer: publish IDLE in the selected life
- * block, then free the record. */
+/* Stages 6 and 7 without a services layer: publish IDLE and the end reason in
+ * the control block, return the transport (the client has nothing left to
+ * read in a harness), then free the record. */
 int __attribute__((weak)) zzapp_services_retire_wire(struct zzapp_rec *rec)
 {
-    uint8_t *window = zzapp_services_window();
-
-    if (window)
-        zzapp_put_be32(window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_STATE_OFF,
-                       ZZAPP_ST_IDLE);
+    zzapp_xport_cb_set_state(rec, ZZAPP_ST_IDLE, rec->claim.terminal_reason);
+    (void)zzapp_xport_release(rec);
     (void)zzapp_rec_free(rec->hdr.handle);
     return 1;
 }
@@ -141,13 +144,6 @@ int __attribute__((weak)) zzapp_services_retire_wire(struct zzapp_rec *rec)
 void __attribute__((weak)) zzapp_services_expire_claims(uint64_t now)
 {
     (void)now;
-}
-
-void __attribute__((weak)) zzapp_services_set_low_memory_crossings(
-    uint32_t pid, uint32_t crossings)
-{
-    (void)pid;
-    (void)crossings;
 }
 
 int __attribute__((weak)) zzapp_services_wait_registered(uint32_t pid)
@@ -361,6 +357,7 @@ int zzapp_proc_heap_grow(uint32_t bytes, void **old_break)
 #ifdef ZZAPP_HOST_TEST
     proc->memory.committed += bytes;
 #endif
+    zzapp_xport_publish_private(rec_must(slot));
     return AAR_OK;
 }
 
@@ -380,6 +377,7 @@ int zzapp_proc_heap_shrink(uint32_t bytes, void **new_break)
 #ifdef ZZAPP_HOST_TEST
     proc->memory.committed -= bytes;
 #endif
+    zzapp_xport_publish_private(rec_must(slot));
     if (new_break)
 #ifdef ZZAPP_HOST_TEST
         *new_break = host_slot(slot)->mem + proc->heap_break;
@@ -475,7 +473,10 @@ static void host_visible_retire(uint32_t slot,
                                 const zzapp_host_visible_block_t *rec)
 {
 #ifndef ZZAPP_HOST_TEST
-    (void)host_visible_alias_unmap(slot, rec->alias, rec->bytes);
+    /* A quarantined shell is released after its address space is gone, and
+     * the alias went with it. */
+    if (proc_of(slot)->as.active)
+        (void)host_visible_alias_unmap(slot, rec->alias, rec->bytes);
     /* A non-cooperative reset can lose core 1's NULL detach store. This
      * rejects missing or differently sized blocks, not same-size reuse. */
     if (!g_finish_tlb_on_stop &&
@@ -515,6 +516,7 @@ static void host_visible_release_all(void)
         host_visible_retire(slot, &rec);
     }
     vis->used = 0;
+    zzapp_xport_publish_shared(rec_must(slot));
 }
 void zzapp_host_revoke_visible(void)
 {
@@ -644,36 +646,42 @@ static uint64_t ticks_to_us(uint64_t ticks)
 #endif
 }
 
-static void life32(uint32_t off, uint32_t value)
+/* The selected record's control block, through the transport. A record
+ * without a pair drops writes and reads 0. Words the platform writes go
+ * through zzapp_xport_cb_put, words the client writes (stop request, lease
+ * counter) through zzapp_xport_cb_read_client, which orders the load. */
+static zzapp_rec_t *life_rec(void)
 {
-    uint8_t *window = (uint8_t *)zzapp_services_window();
-    if (window)
-        zzapp_put_be32(window + ZZAPP_LIFE_OFF + off, value);
+    return zzapp_rec_by_pid(zzapp_services_current_pid());
 }
 
-static uint32_t life_get32(uint32_t off)
+static void cb_put(uint32_t off, uint32_t value)
 {
-    uint8_t *window = (uint8_t *)zzapp_services_window();
-    return window ? zzapp_get_be32(window + ZZAPP_LIFE_OFF + off) : 0;
+    zzapp_xport_cb_put(life_rec(), off, value);
 }
 
-static void life_progress(uint64_t ticks)
+static uint32_t cb_client(uint32_t off)
 {
-    life32(ZZAPP_LIFE_PROGRESS_LO_OFF, (uint32_t)ticks);
-    life32(ZZAPP_LIFE_PROGRESS_HI_OFF, (uint32_t)(ticks >> 32));
+    return zzapp_xport_cb_read_client(life_rec(), off);
 }
 
 /* The selected record's state, as the loader and the worker see it. IDLE is
- * host-side only: the life block of a bound record turns IDLE at its retire
- * (zzapp_services_retire_wire), which is also what frees the window. */
-static void publish_state(uint32_t state)
+ * host-side only: the control block of a claim turns IDLE, with its end
+ * reason, at the retire that ends the app (zzapp_services_retire_wire).
+ * `end_reason` goes with the state word (AAR_END_*, 0 while there is none). */
+static void publish_state_end(uint32_t state, uint32_t end_reason)
 {
     uint32_t slot = current_slot();
 
     host_slot(slot)->state = state;
     coherent_publish();
     if (state != ZZAPP_ST_IDLE)
-        life32(ZZAPP_LIFE_STATE_OFF, state);
+        zzapp_xport_cb_set_state(life_rec(), state, end_reason);
+}
+
+static void publish_state(uint32_t state)
+{
+    publish_state_end(state, ZZAPP_END_NONE);
 }
 
 void zzapp_host_register_low_memory_callback(zzapp_mem_t *memory)
@@ -689,7 +697,6 @@ void zzapp_host_reset_low_memory(uint32_t pid)
     if (!rec)
         return;
     __atomic_store_n(&rec->host.low_memory_pending, 0u, __ATOMIC_RELAXED);
-    __atomic_store_n(&rec->host.low_memory_crossings, 0u, __ATOMIC_RELAXED);
 }
 
 /* Services admitted the record and published the claim (under its lock). */
@@ -726,18 +733,11 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t owner,
     coh->fault = ZZAPP_FAULT_NONE;
     coh->owner = owner;
     coh->generation = generation;
-    life32(ZZAPP_LIFE_MAGIC_OFF, ZZAPP_LIFE_MAGIC);
-    life32(ZZAPP_LIFE_VERSION_OFF, ZZAPP_LIFE_VERSION);
-    life32(ZZAPP_LIFE_GENERATION_OFF, generation);
-    life32(ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_NONE);
-    life32(ZZAPP_LIFE_PC_OFF, 0u);
-    life32(ZZAPP_LIFE_SP_OFF, 0u);
-    life32(ZZAPP_LIFE_LR_OFF, 0u);
-    life32(ZZAPP_LIFE_FAR_OFF, 0u);
-    life32(ZZAPP_LIFE_FSR_OFF, 0u);
-    life32(ZZAPP_LIFE_CPSR_OFF, 0u);
-    life32(ZZAPP_LIFE_EXIT_OFF, 0u);
-    life32(ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF, 0u);
+    /* The pair was initialised at admission (zeroed words, handle, queue
+     * descriptors). A load starts from a clean fault record and exit code. */
+    zzapp_xport_cb_set_fault(life_rec(), AAR_FAULT_NONE, 0u, 0u, 0u, 0u, 0u,
+                             0u);
+    cb_put(AAR_CB_EXIT_CODE, 0u);
 }
 
 /* Memory fell below the low-water mark: tell every running app. */
@@ -758,9 +758,6 @@ void zzapp_host_low_memory(void *context)
         if (!__atomic_load_n(&rec->coh.running, __ATOMIC_ACQUIRE))
             continue;
         __atomic_add_fetch(&host->low_memory_pending, 1u, __ATOMIC_RELAXED);
-        zzapp_services_set_low_memory_crossings(
-            pid, __atomic_add_fetch(&host->low_memory_crossings, 1u,
-                                    __ATOMIC_RELAXED));
     }
 }
 
@@ -786,12 +783,15 @@ int zzapp_host_take_low_memory_event(uint32_t pid)
 extern void zzapp_api_reclaim_resources(void) __attribute__((weak));
 extern void zzapp_api_poison_resources(void) __attribute__((weak));
 /* Stage 3 of a retire, host half: the record's host-visible blocks, the API
- * layer's resources, and the thread. */
+ * layer's resources, and the thread. A quarantined record (its client lost
+ * the lease, so it may still write through a mapping) keeps its blocks: the
+ * release of the shell returns them (zzapp_host_revoke_visible). */
 void zzapp_loader_unbound_resources(void)
 {
     uint32_t slot = current_slot();
 
-    host_visible_release_all();
+    if (!zzapp_xport_flag_test(rec_must(slot), ZZAPP_XPORT_F_QUARANTINED))
+        host_visible_release_all();
     if (zzapp_api_reclaim_resources)
         zzapp_api_reclaim_resources();
     zzapp_kernel_stop_app(&g_kernel, slot);
@@ -822,6 +822,7 @@ void zzapp_loader_unbound(void)
     host->faulted = faulted;
     host->exit_state = exit_state;
     memset(&rec->proc, 0, sizeof(rec->proc));
+    zzapp_xport_publish_private(rec);
     rec->coh.owner = 0;
 }
 
@@ -898,8 +899,9 @@ int zzapp_loader_set_image(uint32_t entry, uint32_t image_end,
 #endif
     proc->memory.committed = commit;
     proc->memory.limit = limit;
-    life32(ZZAPP_LIFE_FLAGS_OFF,
-           note_flags & (ZZAPP_F_DISPLAY | ZZAPP_F_AUDIO | ZZAPP_F_GL));
+    zzapp_xport_publish_private(rec_must(slot));
+    cb_put(AAR_CB_FLAGS, note_flags & (AAR_CBF_DISPLAY | AAR_CBF_AUDIO |
+                                        AAR_CBF_GL));
     return AAR_OK;
 }
 
@@ -912,8 +914,8 @@ static uint32_t g_test_groups;
 static int g_test_groups_override;
 #endif
 
-/* Input has no table slots: the launcher's window events feed event_poll
- * whenever the runtime serves a launcher, which every ZZ9000 runtime does. */
+/* Input has no table slots: the client's input events feed event_poll
+ * whenever the runtime serves a client, which every ZZ9000 runtime does. */
 uint32_t zzapp_runtime_groups(void)
 {
     uint32_t caps = zzapp_runtime_caps();
@@ -946,7 +948,6 @@ void zzapp_note_progress(void)
     if (!rec)
         return;
     rec->coh.progress = now;
-    life_progress(now);
 }
 
 void zzapp_host_latch_stop(uint32_t pid)
@@ -1091,9 +1092,8 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
     selected = select_teardown_slot(slot);
     coh->running = 0;
     coh->fault = fault;
-    life32(ZZAPP_LIFE_FAULT_OFF, fault);
-    life32(ZZAPP_LIFE_PC_OFF, pc);
-    life32(ZZAPP_LIFE_SP_OFF, sp);
+    zzapp_xport_cb_set_fault(life_rec(), zzapp_fault_to_aar(fault, fsr), fsr,
+                             cpsr, pc, sp, lr, far);
     snapshot_stop_diagnostics(slot);
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
@@ -1101,9 +1101,6 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
         zzapp_kernel_perf_finish_slot(&g_kernel, slot);
     zzapp_kernel_perf_request_report(&g_kernel, slot, 1);
 #endif
-    life32(ZZAPP_LIFE_LR_OFF, lr);
-    life32(ZZAPP_LIFE_FAR_OFF, far);
-    life32(ZZAPP_LIFE_FSR_OFF, fsr);
     zzapp_kernel_stop_app(&g_kernel, slot);
 #ifndef ZZAPP_HOST_TEST
     {
@@ -1140,7 +1137,7 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
         fflush(stdout);
     }
 #endif
-    publish_state(ZZAPP_ST_FAULTED);
+    publish_state_end(ZZAPP_ST_FAULTED, terminal_reason(host, fault));
     host->fault_mark = now_ticks();
     zzapp_services_set_terminal(terminal_reason(host, fault));
     zzapp_services_on_app_end();
@@ -1250,7 +1247,7 @@ static void complete_pending_exit(uint32_t slot)
     if (coh->reset_request) {
         zzapp_services_set_terminal(ZZAPP_END_AMIGA_RESET);
     } else {
-        life32(ZZAPP_LIFE_EXIT_OFF, host->exit_code);
+        cb_put(AAR_CB_EXIT_CODE, host->exit_code);
         zzapp_services_set_terminal(host->terminal_reason ?
                                     host->terminal_reason : ZZAPP_END_EXIT);
     }
@@ -1290,7 +1287,8 @@ unsigned zzapp_test_retire_halt_stage;
  *              buffer (zzapp_loader_retire_resources)
  *   TABLES     alias extents, L2 list, L2 reserve, L1, ASID (zzapp_rec.c)
  *   COMMIT     frames returned to the ledger, host and process state cleared
- *   WIRE       services detaches the window and frees the record
+ *   WIRE       services publishes IDLE, then frees the record or holds the
+ *              shell and its transport until the client releases it
  */
 int zzapp_rec_retire(uint32_t pid)
 {
@@ -1392,9 +1390,9 @@ static void service_tick_irq(uint64_t now)
         coh->progress = now;
     }
     host->last_tick = now;
-    /* ZZRun can set this host-visible word before its best-effort APP_STOP
+    /* The client can set this host-visible word before its best-effort STOP
      * reaches firmware. Sample it at the scheduler tick, never per SVC. */
-    if (life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
+    if (cb_client(AAR_CB_STOP_REQUEST) != 0u)
         zzapp_host_latch_stop(slot);
     if (visible(slot)->commit_active || !coh->running)
         goto finish;
@@ -1427,10 +1425,10 @@ static void service_watch_slot(uint64_t now)
     zzapp_rec_coherent_t *coh = coherent(slot);
     check_stack_canary();
 
-    /* The worker visits every slot on each system pass. ZZRun can write this
-     * host-visible word even when its best-effort APP_STOP is dropped, so
+    /* The worker visits every slot on each system pass. The client can write
+     * this host-visible word even when its best-effort STOP is dropped, so
      * sample every valid slot rather than only the timer's interrupted app. */
-    if (life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
+    if (cb_client(AAR_CB_STOP_REQUEST) != 0u)
         zzapp_host_latch_stop(slot);
     if (visible(slot)->commit_active)
         return;
@@ -1619,7 +1617,6 @@ static void resume_parked_api(uint32_t slot)
     host->api_entered = now;
     host->seen_api_calls = host->api_calls;
     coherent(slot)->progress = now;
-    life_progress(now);
     host->api_parked = 0u;
 }
 
@@ -1974,10 +1971,22 @@ static int write_argv_bytes(uint32_t offset, const void *src, uint32_t bytes)
     return AAR_OK;
 }
 
+/* The lease the client holds on a running app: the short one, or the
+ * extended one a client announced in its LOAD_BEGIN capabilities. */
+static uint32_t lease_period_us(const zzapp_rec_t *rec)
+{
+    return (rec->claim.client_caps & ZZAPP_CLIENT_LEASE_EXTENDED) ?
+           ZZAPP_LAUNCHER_LEASE_US : ZZAPP_LEASE_US;
+}
+
+/* Copies argc strings from the argv area of the load buffer (offsets from the
+ * start of the buffer, ZZAPP_LOAD_ARGV_OFF) into the app's heap and builds its
+ * argv table there. */
 static int copy_argv(uint32_t argc, char ***argv_out)
 {
     zzapp_rec_host_t *host = host_slot(current_slot());
-    uint8_t *window = (uint8_t *)zzapp_services_window();
+    zzapp_xport_buf_t load;
+    const uint8_t *area = NULL;
     uint32_t i;
 #ifdef ZZAPP_HOST_TEST
     uint32_t ptr_bytes = (uint32_t)sizeof(char *);
@@ -1991,18 +2000,25 @@ static int copy_argv(uint32_t argc, char ***argv_out)
 
     if (argc > ZZAPP_ARGV_MAX || !host->mem)
         return AAR_E_INVAL;
-    if (argc && !window)
-        return AAR_E_IO;
+    if (argc) {
+        if (!zzapp_xport_block_get(life_rec(), ZZAPP_XPORT_BLOCK_LOAD,
+                                   &load) ||
+            load.bytes < ZZAPP_LOAD_ARGV_OFF + ZZAPP_LOAD_ARGV_BYTES)
+            return AAR_E_IO;
+        area = (const uint8_t *)load.ptr;
+    }
     for (i = 0; i < argc; i++) {
-        uint32_t off = zzapp_get_be32(window + ZZAPP_ARGV_OFF +
+        uint32_t off = zzapp_get_be32(area + ZZAPP_LOAD_ARGV_OFF +
                                       ZZAPP_ARGV_OFFS_OFF + 4u * i);
         uint32_t n = 0;
 
-        if (off < ZZAPP_ARGV_OFF || off >= ZZAPP_ARGV_OFF + ZZAPP_ARGV_BYTES)
+        if (off < ZZAPP_LOAD_ARGV_OFF ||
+            off >= ZZAPP_LOAD_ARGV_OFF + ZZAPP_LOAD_ARGV_BYTES)
             return AAR_E_INVAL;
-        while (off + n < ZZAPP_ARGV_OFF + ZZAPP_ARGV_BYTES && window[off + n])
+        while (off + n < ZZAPP_LOAD_ARGV_OFF + ZZAPP_LOAD_ARGV_BYTES &&
+               area[off + n])
             n++;
-        if (off + n >= ZZAPP_ARGV_OFF + ZZAPP_ARGV_BYTES ||
+        if (off + n >= ZZAPP_LOAD_ARGV_OFF + ZZAPP_LOAD_ARGV_BYTES ||
             n >= ZZAPP_ARGV_STR_MAX)
             return AAR_E_INVAL;
         string_at[i] = off;
@@ -2025,7 +2041,7 @@ static int copy_argv(uint32_t argc, char ***argv_out)
         uint32_t value = ZZAPP_AS_WINDOW_BASE + value_off;
 #endif
 
-        if (write_argv_bytes(value_off, window + string_at[i], n) != AAR_OK ||
+        if (write_argv_bytes(value_off, area + string_at[i], n) != AAR_OK ||
             write_argv_bytes(value_off + n, NULL, 1u) != AAR_OK ||
             write_argv_bytes(argv_offset + i * ptr_bytes, &value,
                              ptr_bytes) != AAR_OK)
@@ -2078,11 +2094,14 @@ static void start_failed(uint32_t slot, int status)
 }
 
 /* A stop request found the record still loading: nothing runs, so the claim
- * ends here. */
+ * ends here. The client's stop is an administrative one and ends it FORCED,
+ * unless the claim already carries a reason (a lease that ran out). */
 static void abort_loading_stop(void)
 {
     uint32_t slot = current_slot();
 
+    if (rec_must(slot)->claim.terminal_reason == ZZAPP_END_NONE)
+        zzapp_services_set_terminal(ZZAPP_END_FORCED);
     zzapp_services_cancel_start(AAR_E_IO);
     (void)zzapp_rec_retire(slot);
 }
@@ -2117,6 +2136,8 @@ static void run_app(uint32_t argc)
     host->heap_bump = host->heap_off;
     if (host->heap_end <= host->heap_off) { start_failed(slot, AAR_E_NOMEM); return; }
     rc = copy_argv(argc, &argv);
+    /* The argv area was the last use of the load buffer. */
+    (void)zzapp_xport_block_free(life_rec(), ZZAPP_XPORT_BLOCK_LOAD);
     if (rc != AAR_OK) { start_failed(slot, rc); return; }
     host->heap_bump = (host->heap_bump + 7u) & ~7u;
     proc->heap_start = host->heap_bump;
@@ -2176,7 +2197,8 @@ static void run_app(uint32_t argc)
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_reset(slot);
 #endif
-    coh->heartbeat_value = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
+    coh->heartbeat_value = cb_client(AAR_CB_LEASE_COUNTER);
+    cb_put(AAR_CB_LEASE_PERIOD_MS, lease_period_us(life_rec()) / 1000u);
     coh->heartbeat_seen = now_ticks();
     coh->tick_seen = now_ticks();
     zzapp_note_progress();
@@ -2206,7 +2228,7 @@ static void run_app(uint32_t argc)
     if (rc != AAR_OK) {
         /*
          * A cancelled START is completed inside start_entered, which ends
-         * the claim's window state; the record is retired here.
+         * the claim's state; the record is retired here.
          */
         test_admission_point();
         (void)zzapp_rec_retire(slot);
@@ -2236,8 +2258,8 @@ static void run_app(uint32_t argc)
 }
 
 /* Core 1's side of an Amiga reset for one record: whatever it was doing ends
- * and the record is retired. Services forgets the windows afterwards, once
- * (zzapp_on_amiga_reset). */
+ * and the record is retired. Services releases the held shells afterwards,
+ * once (zzapp_on_amiga_reset). */
 static void service_reset(uint32_t slot)
 {
     zzapp_rec_host_t *host = host_slot(slot);
@@ -2345,7 +2367,7 @@ void zzapp_worker_hook(void)
         zzapp_services_select_pid(slot);
         host = host_slot(slot);
         if (host->state == ZZAPP_ST_LOADING &&
-            life_get32(ZZAPP_LIFE_STOP_OFF) != 0u)
+            cb_client(AAR_CB_STOP_REQUEST) != 0u)
             zzapp_host_latch_stop(slot);
         if (host->state == ZZAPP_ST_LOADING && stop_requested()) {
             abort_loading_stop();
@@ -2440,7 +2462,6 @@ void zzapp_core0_poll(void)
         uint64_t age;
         uint64_t now;
         uint32_t heartbeat;
-        uint32_t flags;
 
         if (!record_live(slot))
             continue;
@@ -2451,8 +2472,7 @@ void zzapp_core0_poll(void)
         coherent_barrier();
         age = core1_stamp_age_us(&coh->progress);
         now = now_ticks();
-        flags = life_get32(ZZAPP_LIFE_FLAGS_OFF);
-        heartbeat = life_get32(ZZAPP_LIFE_HEARTBEAT_OFF);
+        heartbeat = cb_client(AAR_CB_LEASE_COUNTER);
         maybe_expire_fault(now);
         if (heartbeat != coh->heartbeat_value) {
             coh->heartbeat_value = heartbeat;
@@ -2460,11 +2480,11 @@ void zzapp_core0_poll(void)
         }
         if (running && host->state == ZZAPP_ST_RUNNING &&
             core1_stamp_age_us(&coh->heartbeat_seen) >=
-                ((flags & ZZAPP_F_LAUNCHER_HEARTBEAT) ?
-                 ZZAPP_LAUNCHER_LEASE_US : ZZAPP_LEASE_US)) {
+                lease_period_us(zzapp_rec_by_pid(slot))) {
+            /* The lease ran out. Only the record's own stop latches; the
+             * client's stop word is the client's to write. */
             host->terminal_reason = ZZAPP_END_LEASE;
             zzapp_host_latch_stop(slot);
-            life32(ZZAPP_LIFE_STOP_OFF, 1u);
         }
         /* One stale record restarts the shared worker once. Clearing running
          * here would hide the other records from the retirement below. */
@@ -2587,12 +2607,14 @@ void zzapp_on_core1_restart(void)
             force_stop(ZZAPP_FAULT_WATCHDOG_RESTART, 0, 0, 0, 0, 0, 0);
             __atomic_store_n(&host_slot(slot)->exit_state, ZZAPP_EXIT_NONE,
                              __ATOMIC_RELEASE);
-        } else {
+        } else if (zzapp_rec_state(slot) != ZZAPP_REC_RECLAIMED) {
             end_record(slot, reason);
         }
+        /* A shell whose retire finished (RECLAIMED) owes nothing: it keeps
+         * the end it already reports, which a restart does not rewrite. */
         if (amiga_reset) {
             /* The reset core 1 never acknowledged is answered here. Its
-             * records are retired already; services forgets the windows once
+             * records are retired already; held shells are released once
              * in zzapp_on_amiga_reset. The restarted worker finds no reset
              * request, no deferred work and no running app, so it owns
              * nothing the allocator reset could invalidate. */
@@ -2656,7 +2678,7 @@ static uint32_t reset_first_unacked(void)
 /* Core 1 acknowledges the reset from its own reset path, which is also what
  * retires the record: it tears down a running app, an app that exited and
  * whose cleanup has not finished, and a loading or claimed record. Core 0
- * waits for every record before it lets services forget the windows and
+ * waits for every record before it lets services release the held shells and
  * resets the surface allocator, so no cleanup frees allocations from a
  * previous life. With no core 1 there is nothing to wait for. */
 static int reset_must_wait_for_core1(void)
@@ -2691,6 +2713,33 @@ static void recover_unresponsive_core1(void)
 #else
     core1_cold_restart();
 #endif
+}
+
+/* After a reset, every record that is still held (a shell whose client has
+ * not released it, a quarantined shell) is released: its host-visible blocks
+ * and its transport go back to the allocator, which is reset next, and the
+ * record is freed. The record is detached from every pointer before its
+ * block is returned (zzapp_xport_release clears first), so a replayed reset
+ * frees nothing twice. Core 1 is finished with every record. */
+static void release_held_shells(void)
+{
+    uint32_t pid;
+    uint32_t capacity = zzapp_rec_capacity();
+    uint32_t selected = current_slot();
+
+    for (pid = 0U; pid < capacity; ++pid) {
+        zzapp_rec_t *rec;
+
+        if (zzapp_rec_state(pid) != ZZAPP_REC_RECLAIMED)
+            continue;
+        rec = zzapp_rec_by_pid(pid);
+        zzapp_services_select_pid(pid);
+        zzapp_xport_flag_clear(rec, ZZAPP_XPORT_F_QUARANTINED);
+        host_visible_release_all();
+        (void)zzapp_xport_release(rec);
+        (void)zzapp_rec_free(rec->hdr.handle);
+    }
+    zzapp_services_select_pid(selected);
 }
 
 void zzapp_on_amiga_reset(void)
@@ -2747,22 +2796,12 @@ void zzapp_on_amiga_reset(void)
             if (record_live(pid))
                 end_record(pid, ZZAPP_END_AMIGA_RESET);
     }
-    /* Every record is retired. The windows forget theirs, once. */
+    /* Every record is retired. The held shells release theirs, once: the
+     * allocator is reset after this, and a block still owned by a record
+     * would be freed against a new owner. */
     zzapp_services_on_reset();
+    release_held_shells();
     zzapp_services_select_pid(selected);
-}
-
-void zzapp_status_observed(void)
-{
-    zzapp_rec_t *rec = selected_rec();
-
-    if (rec && rec->host.state == ZZAPP_ST_FAULTED)
-        publish_state(ZZAPP_ST_IDLE);
-}
-
-int zzapp_flip_ack_is_current(uint32_t gen)
-{
-    return life_get32(ZZAPP_LIFE_FLIP_ACK_OFF) == gen;
 }
 
 /* A table the BSP-change hook could not allocate for a record: nothing that
@@ -2776,7 +2815,6 @@ static void table_fault_hook(uint32_t pid)
 }
 
 #ifdef ZZAPP_HOST_TEST
-static uint32_t g_test_next_window;
 
 /* The harness record arena: one mapping below 4 GiB (table addresses go into
  * 32-bit descriptors), laid out again on every boot.
@@ -2788,6 +2826,48 @@ static uint32_t g_test_next_window;
 #define ZZAPP_HOST_BSP_DDR_SECTION 0x15de6U
 #define ZZAPP_HOST_BSP_DDR_SECTIONS 0x1000U
 static uint32_t g_test_bsp[4096];
+
+/* The harness stand-in for the host-visible heap: aligned host memory under a
+ * synthetic card address. A test that needs to refuse or place blocks
+ * installs its own environment with zzapp_xport_init() after the boot. */
+#define ZZAPP_HOST_XPORT_BASE 0x04000000u
+static uint32_t g_test_xport_next;
+
+static int test_xport_alloc(void *ctx, uint32_t bytes, uint32_t align,
+                            uint32_t lo, uint32_t hi, void **ptr,
+                            uint32_t *card)
+{
+    void *mem = NULL;
+    uint32_t at;
+
+    (void)ctx;
+    (void)lo;
+    (void)hi;
+    if (align < 8u || posix_memalign(&mem, align, bytes) != 0)
+        return -1;
+    at = (ZZAPP_HOST_XPORT_BASE + g_test_xport_next + align - 1u) &
+         ~(align - 1u);
+    g_test_xport_next = at - ZZAPP_HOST_XPORT_BASE + bytes;
+    *ptr = mem;
+    *card = at;
+    return 0;
+}
+
+static int test_xport_release(void *ctx, void *ptr, uint32_t card)
+{
+    (void)ctx;
+    (void)card;
+    free(ptr);
+    return 0;
+}
+
+static const zzapp_xport_env_t g_test_xport_env = {
+    .alloc = test_xport_alloc,
+    .release = test_xport_release,
+    .token_adjust = ADDR_ADJ,
+    .acquire = zzapp_xport_dmb,
+    .release_barrier = zzapp_xport_dmb,
+};
 
 static void host_arena_init(void)
 {
@@ -2820,7 +2900,7 @@ static void host_arena_init(void)
     for (uint32_t i = 0; i < ZZAPP_HOST_BSP_DDR_SECTIONS; i++)
         g_test_bsp[i] = (i << 20) | ZZAPP_HOST_BSP_DDR_SECTION;
     zzapp_as_init(g_test_bsp);
-    g_test_next_window = 0U;
+    zzapp_xport_init(&g_test_xport_env);
 }
 
 void zzapp_test_set_arena_apps(uint32_t apps)
@@ -2837,18 +2917,64 @@ uint32_t zzapp_test_admit(void)
     uint32_t handle;
     zzapp_rec_t *rec;
 
-    if (zzapp_rec_admit(g_test_next_window++, &handle, &rec) != 0U)
+    if (zzapp_rec_admit(&handle, &rec) != 0U)
         return ZZAPP_PID_NONE;
+    if (zzapp_xport_admit(rec) != AAR_REASON_NONE) {
+        (void)zzapp_rec_unadmit(handle);
+        return ZZAPP_PID_NONE;
+    }
     zzapp_services_select_pid(rec->hdr.pid);
     zzapp_host_claimed(rec->hdr.pid);
     return rec->hdr.pid;
 }
+
 #endif
 
+#ifndef ZZAPP_HOST_TEST
+/* The card's host-visible allocator for the transport: the surface heap. A
+ * pair and the service buffers are placed below the SDK mailbox section, the
+ * cacheable part of the heap, so a block never lands in a page the firmware
+ * maps non-cacheable. The card address is the ARM address (flat map). */
+static int xport_card_alloc(void *ctx, uint32_t bytes, uint32_t align,
+                            uint32_t lo, uint32_t hi, void **ptr,
+                            uint32_t *card)
+{
+    uint32_t addr = (lo | hi) ?
+                    surface_allocator_alloc_range(bytes, align, lo, hi) :
+                    surface_allocator_alloc_aligned(bytes, align);
+
+    (void)ctx;
+    if (!addr)
+        return -1;
+    *ptr = (void *)(uintptr_t)addr;
+    *card = addr;
+    return 0;
+}
+
+static int xport_card_release(void *ctx, void *ptr, uint32_t card)
+{
+    (void)ctx;
+    (void)ptr;
+    return surface_allocator_free(card) == 0 ? 0 : -1;
+}
+
+static const zzapp_xport_env_t g_card_xport_env = {
+    .alloc = xport_card_alloc,
+    .release = xport_card_release,
+    .lo = HOST_VISIBLE_HEAP_ADDRESS,
+    .hi = SDK_MAILBOX_Z3_ADDRESS,
+    .token_adjust = ADDR_ADJ,
+    .acquire = zzapp_xport_dmb,
+    .release_barrier = zzapp_xport_dmb,
+};
+#endif
 void zzapp_boot_init(void)
 {
 #ifdef ZZAPP_HOST_TEST
     host_arena_init();
+    g_test_xport_next = 0u;
+#else
+    zzapp_xport_init(&g_card_xport_env);
 #endif
     /* Without a record arena (the boot carve found no memory, apps are
      * unavailable) the kernel still needs a valid state: the shared worker
@@ -2923,7 +3049,8 @@ void *zzapp_host_alloc(uint32_t bytes, uint32_t align)
     bytes = (bytes + ZZAPP_SHARED_GRANULE - 1u) &
             ~(ZZAPP_SHARED_GRANULE - 1u);
     if (bytes > host_visible_limit(slot) ||
-        vis->used > host_visible_limit(slot) - bytes)
+        vis->used + zzapp_xport_shared_used(rec_must(slot)) >
+            host_visible_limit(slot) - bytes)
         return NULL;
     if (align < ZZAPP_SHARED_GRANULE)
         align = ZZAPP_SHARED_GRANULE;
@@ -2970,6 +3097,7 @@ void *zzapp_host_alloc(uint32_t bytes, uint32_t align)
         blocks[i].alias = alias;
         blocks[i].bytes = bytes;
         vis->used += bytes;
+        zzapp_xport_publish_shared(rec_must(slot));
         vis->commit_active = 0u;
         return ptr;
     }
@@ -2997,6 +3125,7 @@ int zzapp_host_free(void *p)
             /* Detached first, see host_visible_release_all. */
             blocks[i].ptr = NULL;
             vis->used -= rec.bytes;
+            zzapp_xport_publish_shared(rec_must(slot));
             host_visible_retire(slot, &rec);
         }
         vis->commit_active = 0u;
@@ -3096,13 +3225,14 @@ int zzapp_host_info(struct aar_info *out)
     info.groups = zzapp_runtime_groups();
     info.heap_granule = ZZAPP_MEM_FRAME_BYTES;
     info.shared_granule = ZZAPP_SHARED_GRANULE;
-    info.msg_capacity = ZZAPP_MSG_CAP;
+    info.msg_capacity = AAR_MSG_CAPACITY;
     info.sleep_granule_us = ZZAPP_TICK_US;
     info.stall_limit_ms = ZZAPP_APP_STALL_US / 1000u;
     info.stop_grace_ms = ZZAPP_STOP_GRACE_US / 1000u;
     info.cpu_features = 0u;
     info.shared_limit = host_visible_limit(slot);
-    info.shared_used = visible(slot)->used;
+    info.shared_used = visible(slot)->used +
+                       zzapp_xport_shared_used(rec_must(slot));
     info.max_files = ZZAPP_FD_COUNT;
     memcpy(out, &info, size < sizeof(info) ? size : sizeof(info));
     return AAR_OK;

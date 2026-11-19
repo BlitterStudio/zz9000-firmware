@@ -4,7 +4,9 @@
 #include <string.h>
 #include <stdio.h>
 #include "aar/app.h"
+#include "aar/transport.h"
 #include "zzapp_runtime.h"
+#include "zzapp_xport.h"
 #include "aar_note_image.h"
 #include "host_card_pool.h"
 #include "xil_cache.h"
@@ -44,7 +46,6 @@ uint32_t zzapp_services_current_pid(void)
 {
     return selected_slot;
 }
-static uint8_t service_window[ZZAPP_WINDOW_BYTES];
 static int start_pending;
 static int dynamic_started;
 static uint32_t start_argc;
@@ -65,11 +66,6 @@ uint32_t zzapp_services_memory_limit(void)
     return launcher_memory_limit;
 }
 
-
-uint8_t *zzapp_services_window(void)
-{
-    return service_window;
-}
 
 int zzapp_services_take_start(uint32_t *argc)
 {
@@ -332,6 +328,22 @@ static void assert_pass_work_bounded(void)
     default:
         assert(0);
     }
+}
+
+/* START's argv table and strings are in the load buffer the client filled. */
+static void set_argv(const char *text, uint32_t bytes)
+{
+    zzapp_rec_t *rec = zzapp_rec_by_pid(0U);
+    zzapp_xport_buf_t load;
+
+    assert(rec != NULL);
+    (void)zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_LOAD);
+    assert(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_LOAD,
+                                   ZZAPP_LOAD_BUFFER_BYTES, &load) == AAR_OK);
+    zzapp_put_be32((uint8_t *)load.ptr + ZZAPP_LOAD_ARGV_OFF +
+                   ZZAPP_ARGV_OFFS_OFF, ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
+    memcpy((uint8_t *)load.ptr + ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
+           text, bytes);
 }
 
 static int load_end(uint8_t image[IMAGE_BYTES])
@@ -882,7 +894,7 @@ static void test_note_v1_load_rules(void)
     assert(proc->stack_bytes == ZZAPP_STACK_DEFAULT);
     assert(proc->heap_frame_count == 0U);
     assert(proc->memory.committed == (2u << 20));
-    assert(zzapp_get_be32(service_window + ZZAPP_LIFE_FLAGS_OFF) == 0U);
+    assert(zzapp_xport_cb_get(zzapp_rec_by_pid(0U), AAR_CB_FLAGS) == 0U);
     zzapp_loader_release();
 
     /* An explicit stack, a committed heap and groups. */
@@ -900,8 +912,8 @@ static void test_note_v1_load_rules(void)
     assert(proc->heap_frame_count == 2u);
     /* image frame, one stack frame (rounded up), two heap frames */
     assert(proc->memory.committed == (4u << 20));
-    assert(zzapp_get_be32(service_window + ZZAPP_LIFE_FLAGS_OFF) ==
-           (ZZAPP_F_DISPLAY | ZZAPP_F_AUDIO));
+    assert(zzapp_xport_cb_get(zzapp_rec_by_pid(0U), AAR_CB_FLAGS) ==
+           (AAR_CBF_DISPLAY | AAR_CBF_AUDIO));
     zzapp_loader_release();
 
     for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++)
@@ -1122,9 +1134,7 @@ int main(void)
     zzapp_boot_init();
     make_image(image);
     assert(load_end(image) == AAR_OK);
-    zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
-                   ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
-    memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF, "argv-test", 10u);
+    set_argv("argv-test", 10u);
     start_argc = 1u;
     argv_started = 0;
     zzapp_test_set_entry(argv_entry);
@@ -1139,10 +1149,7 @@ int main(void)
     make_image(image);
     put32(image + PHOFF + 20u, (1u << 20) - LOAD_OFF);
     test_note_set(image + NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, 1u);
-    zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
-                   ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
-    memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
-           "dynamic-argv", 13u);
+    set_argv("dynamic-argv", 13u);
     start_argc = 1u;
     assert(load_end(image) == AAR_OK);
     zzapp_test_set_entry(dynamic_entry);
@@ -1195,10 +1202,7 @@ int main(void)
     put32(image + PHOFF + 20u, 0xFFFE0u - LOAD_OFF);
     test_note_set(image + NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, 1u);
     assert(load_end(image) == AAR_OK);
-    zzapp_put_be32(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF,
-                   ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
-    memcpy(service_window + ZZAPP_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
-           "frame-crossing-arg", 19u);
+    set_argv("frame-crossing-arg", 19u);
     boundary_started = 0;
     start_argc = 1u;
     zzapp_test_set_entry(crossing_entry);

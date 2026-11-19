@@ -63,7 +63,6 @@ extern const zzm_minigl_ops_v1_t *zzm_minigl_ops(void **context) WEAK;
 
 WEAK void zzapp_services_poll(void) {}
 WEAK int zzapp_services_take_start(uint32_t *argc) { (void)argc; return 0; }
-WEAK uint8_t *zzapp_services_window(void) { return NULL; }
 WEAK int zzapp_services_start_entered(uint32_t generation)
 {
     (void)generation;

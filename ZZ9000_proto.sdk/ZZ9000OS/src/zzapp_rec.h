@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Vocabulary (slice 5b):
- *   window  a wire-layer launcher window, ZZAPP_SLOT_COUNT of them.
  *   pid     process-record index, 0 .. capacity - 1. The same index always
  *           names the same record, stack, L1 table and table pages.
  *   handle  (generation << 16) | pid, built with aar_handle_make(). Never 0.
@@ -51,18 +50,17 @@
 
 #define ZZAPP_REC_L1_BYTES      ZZAPP_AS_L1_BYTES   /* 16 KiB, 16 KiB aligned */
 #define ZZAPP_REC_STACK_BYTES   ZZAPP_KERNEL_STACK_BYTES /* 32 KiB */
-#define ZZAPP_REC_RECORD_BYTES  0x3000U             /* 12 KiB, 64 B aligned */
+#define ZZAPP_REC_RECORD_BYTES  0x4000U             /* 16 KiB, 64 B aligned */
 #define ZZAPP_REC_TABLES_BYTES  0x2000U             /* API page + GL page */
 #define ZZAPP_REC_API_PAGE_OFFSET 0U
 #define ZZAPP_REC_GL_PAGE_OFFSET  0x1000U
 
 #define ZZAPP_PID_NONE          0xffffffffU
-#define ZZAPP_REC_NO_WINDOW     0xffffU
 
 /* Record state. Core 0 and core 1 publish transitions with release stores. */
 typedef enum {
 	ZZAPP_REC_FREE = 0,
-	/* Admitted, not yet published to the launcher; core 0 may still undo. */
+	/* Admitted, not yet published to the client; core 0 may still undo. */
 	ZZAPP_REC_CLAIMED,
 	ZZAPP_REC_LIVE,
 	/* Retire started. Never goes back. */
@@ -85,7 +83,8 @@ typedef enum {
 	ZZAPP_RETIRE_TABLES,
 	/* 5: commit ledger released. */
 	ZZAPP_RETIRE_COMMIT,
-	/* 6: wire layer detached from the window. Step 7 is zzapp_rec_free(). */
+	/* 6: services published IDLE and freed the record or held the shell (and
+	 * its transport) for the client's release. Step 7 is zzapp_rec_free(). */
 	ZZAPP_RETIRE_WIRE
 } zzapp_retire_stage_t;
 
@@ -104,7 +103,7 @@ typedef struct {
 	uint32_t kstack_top;     /* one past the highest byte */
 	uint32_t tables;         /* 8 KiB: user API page, user GL page */
 	uint32_t l1;             /* this index's L1 table */
-	uint16_t window;         /* ZZAPP_REC_NO_WINDOW when unbound */
+	uint16_t reserved16;
 	uint8_t  retire_stage;   /* zzapp_retire_stage_t */
 	uint8_t  reserved8;
 	uint32_t flags;
@@ -147,8 +146,8 @@ typedef struct {
 	uint32_t reserved[2];
 } zzapp_rec_kernel_t;
 
-/* Launcher-facing claim state that follows the app (was struct
- * zzapp_service_slot, less the window-only fields). 64 bytes. */
+/* Client-facing claim state that follows the app (limits, load progress,
+ * reasons, the client capability word). 64 bytes. */
 typedef struct {
 	uint32_t wire_generation;
 	uint32_t state;
@@ -158,7 +157,9 @@ typedef struct {
 	uint32_t load_step;
 	uint32_t refusal_reason;
 	uint32_t terminal_reason;
-	uint32_t reserved[8];
+	/* ZZAPP_CLIENT_* the client announced in LOAD_BEGIN; 0 before it. */
+	uint32_t client_caps;
+	uint32_t reserved[7];
 } zzapp_rec_claim_t;
 
 /* Host state of one app (was struct zzapp_host_slot in zzapp_host.c). */
@@ -211,7 +212,6 @@ typedef struct {
 	uint32_t stop_svc_number;
 	uint32_t stop_diagnostics_valid;
 	volatile uint32_t low_memory_pending;
-	volatile uint32_t low_memory_crossings;
 	/* ZZAPP_EXIT_* : a normal exit's teardown is owed from the exit call
 	 * until it ends. Core 1 writes, core 0 reads with acquire. It survives
 	 * the loader's unbind, which clears the rest of this block. */
@@ -248,7 +248,7 @@ typedef struct {
  *   decode            image sessions inline, audio session pointer
  *                     (zzapp_api.c)
  */
-#define ZZAPP_REC_SERVICES_BYTES 512U
+#define ZZAPP_REC_SERVICES_BYTES 1024U
 #define ZZAPP_REC_LOADER_BYTES   384U
 #define ZZAPP_REC_SVC_BYTES      1152U
 #define ZZAPP_REC_DECODE_BYTES   64U
@@ -265,6 +265,117 @@ typedef struct {
 typedef struct {
 	_Alignas(8) uint8_t bytes[ZZAPP_REC_DECODE_BYTES];
 } zzapp_rec_decode_part_t;
+
+/*
+ * The AAR transport part (zzapp_xport.[ch] own its use). It holds, for one
+ * claim: the blocks of host-visible memory it owns (the control block and
+ * queue pair, the service block, the data block, the audio ring, the load
+ * buffer), the two queue views, the request table, the message inbox, the
+ * event ring, the doorbell word and the counters. Nothing in it is shared
+ * with the client: the client sees only the pair and the buffers named in
+ * requests. Pointers are ARM views and card addresses of the same blocks;
+ * NULL means the block is not allocated.
+ */
+#define ZZAPP_XPORT_INBOX_ENTRIES AAR_MSG_CAPACITY      /* 63 */
+#define ZZAPP_XPORT_EVENT_ENTRIES 64U
+#define ZZAPP_XPORT_REQUESTS      4U
+#define ZZAPP_XPORT_LOG_SLOTS     8U
+
+typedef enum {
+	ZZAPP_XPORT_BLOCK_PAIR = 0,
+	ZZAPP_XPORT_BLOCK_SERVICE,
+	ZZAPP_XPORT_BLOCK_DATA,
+	ZZAPP_XPORT_BLOCK_AUDIO,
+	ZZAPP_XPORT_BLOCK_LOAD,
+	ZZAPP_XPORT_BLOCK_COUNT
+} zzapp_xport_block_kind_t;
+
+/* The request table entries: what may be in flight at once. */
+typedef enum {
+	ZZAPP_XPORT_REQ_BLOCKING = 0,  /* file, list, console read, display open... */
+	ZZAPP_XPORT_REQ_FLIP,          /* an asynchronous flip */
+	ZZAPP_XPORT_REQ_CONSOLE_OUT,   /* the console output stream */
+	ZZAPP_XPORT_REQ_PALETTE,       /* the coalesced palette updates */
+	ZZAPP_XPORT_REQ_COUNT = ZZAPP_XPORT_REQUESTS
+} zzapp_xport_req_kind_t;
+
+/* What a request's buffer is (zzapp_xport_req_t.names): the data block, the
+ * audio ring, or one area of the service block (zzapp_xport_area_t). */
+#define ZZAPP_XPORT_NAMES_DATA   (1U << 0)
+#define ZZAPP_XPORT_NAMES_AUDIO  (1U << 1)
+#define ZZAPP_XPORT_NAMES_AREA(a) (1U << (2U + (unsigned)(a)))
+
+typedef enum {
+	ZZAPP_XPORT_REQ_FREE = 0,
+	ZZAPP_XPORT_REQ_POSTED,        /* on the SQ, no completion yet */
+	ZZAPP_XPORT_REQ_DONE           /* completion stored, not yet taken */
+} zzapp_xport_req_state_t;
+
+typedef struct {
+	void *ptr;
+	uint32_t card;
+	uint32_t bytes;                /* size of the allocation */
+} zzapp_xport_block_t;
+
+typedef struct {
+	uint32_t id;
+	uint16_t op;
+	uint8_t  state;                /* zzapp_xport_req_state_t */
+	uint8_t  names;                /* ZZAPP_XPORT_NAMES_* of its buffer */
+	int32_t  result;
+	uint16_t flags;
+	/* What the abandoned request of this entry still names while its late
+	 * completion has not arrived: that memory stays allocated and unchanged.
+	 * Core 1 writes it; core 0 reads it with the core-1 handoff done. */
+	uint8_t  abandoned_names;
+	uint8_t  reserved8;
+	uint32_t out[AAR_ENTRY_OUTS];
+	/* The id and op of the last request of this entry that its owner gave up
+	 * on: only a completion with both clears abandoned_names, and it is
+	 * dropped and counted as late. */
+	uint32_t abandoned_id;
+	uint16_t abandoned_op;
+	uint16_t reserved16;
+	uint64_t deadline;             /* owner's clock, opaque to the transport */
+} zzapp_xport_req_t;
+
+/* Counters, all free-running and written by core 1 only. */
+typedef struct {
+	uint32_t events_dropped;       /* event ring full */
+	uint32_t msgs_overflow;        /* inbox full: a client broke its credit */
+	uint32_t late_dropped;         /* completion of an abandoned request */
+	uint32_t unknown_dropped;      /* completion that matches nothing */
+	uint32_t sq_full;              /* a post found the SQ full */
+	uint32_t log_dropped;          /* log record dropped, slot or SQ full */
+	uint32_t io_errors;            /* corrupt indices seen */
+	uint32_t pumped;               /* CQ entries consumed */
+} zzapp_xport_stats_t;
+
+typedef struct {
+	zzapp_xport_block_t block[ZZAPP_XPORT_BLOCK_COUNT];
+	aar_queue sq;                  /* view of the SQ in the pair */
+	aar_queue cq;
+	zzapp_xport_req_t req[ZZAPP_XPORT_REQUESTS];
+	zzapp_xport_stats_t stats;
+	/* ZZAPP_XPORT_F_*. Core 0 and core 1 use the atomic accessors. */
+	volatile uint32_t flags;
+	/* ZZAPP_KICK_* bits OR-ed in by the doorbell handler on core 0 and taken
+	 * by core 1. */
+	volatile uint32_t kick;
+	uint32_t next_id;              /* next request id, 0 once exhausted */
+	uint32_t shared_used;          /* bytes of the blocks above */
+	uint32_t shared_limit;         /* bytes the blocks may reach; 0: unchecked */
+	uint32_t msg_head, msg_count;  /* inbox: read index below 63, entries held */
+	uint32_t msg_consumed;         /* messages taken out of the inbox */
+	uint32_t ev_head, ev_tail;     /* event ring, free-running */
+	/* The SQ index each log slot was posted at, and which slots hold a
+	 * record the client may not have read yet. */
+	uint32_t log_index[ZZAPP_XPORT_LOG_SLOTS];
+	uint32_t log_busy;
+	uint32_t reserved[3];
+	uint8_t  inbox[ZZAPP_XPORT_INBOX_ENTRIES][AAR_MSG_BYTES];
+	aar_event events[ZZAPP_XPORT_EVENT_ENTRIES];
+} zzapp_rec_xport_t;
 
 /*
  * The record. The kernel thread is first, so a kernel that walks threads by
@@ -284,6 +395,7 @@ typedef struct zzapp_rec {
 	zzapp_rec_loader_part_t loader;
 	zzapp_rec_svc_part_t svc;
 	zzapp_rec_decode_part_t decode;
+	zzapp_rec_xport_t xport;
 } zzapp_rec_t;
 
 _Static_assert(sizeof(zzapp_rec_hdr_t) == 64, "record header is one line");
@@ -291,7 +403,7 @@ _Static_assert(sizeof(zzapp_rec_coherent_t) == 64, "coherent block");
 _Static_assert(sizeof(zzapp_rec_kernel_t) == 64, "kernel words");
 _Static_assert(sizeof(zzapp_rec_claim_t) == 64, "claim words");
 _Static_assert(sizeof(zzapp_rec_t) <= ZZAPP_REC_RECORD_BYTES,
-	       "record exceeds its 12 KiB slot");
+	       "record exceeds its 16 KiB slot");
 _Static_assert(ZZAPP_REC_RECORD_BYTES % 64U == 0U, "record stride alignment");
 _Static_assert(ZZAPP_REC_STACK_BYTES == (32U << 10), "stack stride");
 
@@ -366,13 +478,15 @@ void *zzapp_rec_tables(uint32_t pid);
 /* ---- Admission ---------------------------------------------------------- */
 
 /*
- * Admission steps 3 and 4 of a claim: pop the oldest free index (FIFO), bind
- * it to `window`, clear the record, and reserve ZZAPP_AS_L2_RESERVE tables.
+ * Admission steps 3 and 4 of a claim: pop the oldest free index (FIFO),
+ * clear the record (the transport part included: no block, empty queues),
+ * and reserve ZZAPP_AS_L2_RESERVE tables. The pair is allocated afterwards by
+ * zzapp_xport_admit().
  * 0 on success with *handle (and *rec when not NULL) set; AAR_REASON_MEMORY
  * when no record is free; AAR_REASON_TABLES when the reserve does not fit.
  * A refusal changes nothing the table can observe. The record is CLAIMED.
  */
-uint32_t zzapp_rec_admit(uint32_t window, uint32_t *handle, zzapp_rec_t **rec);
+uint32_t zzapp_rec_admit(uint32_t *handle, zzapp_rec_t **rec);
 /*
  * Undo a claim that failed before publication: the reserve returns, the index
  * goes back to the head of the free queue, and its generation, the queue and
@@ -401,6 +515,15 @@ void zzapp_rec_retire_tables(zzapp_rec_t *rec);
  * another life.
  */
 int zzapp_rec_free(uint32_t handle);
+/*
+ * Quarantine (design 3.10): advance the generation of an admitted record to
+ * the next one, so no handle the client holds names it, and make that the
+ * record's handle. Returns the new handle, or 0 for a NULL or FREE record. The
+ * record keeps its state and every block; zzapp_rec_free() with the new handle
+ * ends it (and bumps the generation again). Calling it twice yields two
+ * different handles; only the last one is live. Same locking as free.
+ */
+uint32_t zzapp_rec_revoke_handle(zzapp_rec_t *rec);
 /*
  * Core 1 is halted (recovery, or core 0 retiring everything). Rebuild the
  * FIFO queue and every count from the state bytes, and the table pool from

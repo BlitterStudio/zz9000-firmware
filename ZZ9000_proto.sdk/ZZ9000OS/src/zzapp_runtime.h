@@ -17,6 +17,7 @@
 #include "zzapp_kernel.h"
 #include "zzapp_mem.h"
 #include "zzapp_proto.h"
+#include "zzapp_state.h"
 #define ZZAPP_TICK_US          5000u
 /* Core 1 no longer answers at all (no app progress and no timer tick). */
 #define ZZAPP_WATCHDOG_US      2000000u
@@ -135,11 +136,11 @@ void zzapp_loader_retire_commit(void);
  * (zzapp_retire_stage_t marks the last completed stage). Core 1, or core 0
  * with core 1 halted, or a CLAIMED record that never loaded. Stops the
  * thread, returns every resource of the record, then lets services detach
- * the window (zzapp_services_retire_wire), which frees the record. The
+ * the wire (zzapp_services_retire_wire), which holds the shell. The
  * callers that end an app (exit, fault, reset) run set_terminal, on_app_end
  * and the GL reclaim first, as before.
  *   1   the record is FREE (do not touch it afterwards)
- *   0   the shell is held (quarantined window), services frees it later
+ *   0   the shell is held (reclaimed), services frees it later
  *  -1   no such record
  */
 int zzapp_rec_retire(uint32_t pid);
@@ -198,8 +199,6 @@ uint32_t zzapp_runtime_caps(void);
  * word and aar_info.groups report, and what a note's groups_required is
  * checked against. */
 uint32_t zzapp_runtime_groups(void);
-void zzapp_status_observed(void);
-int zzapp_flip_ack_is_current(uint32_t gen);
 void zzapp_host_low_memory(void *context);
 int zzapp_host_take_low_memory_event(uint32_t pid);
 /* 1 once per stop request, when the app has not yet been told through
@@ -245,11 +244,10 @@ void zzapp_host_heap(void **base, uint32_t *bytes);
 int zzapp_host_faulted(void);
 
 /* ---- B defines these. Weak no-ops here. All of them name a record by pid
- * (the process-record index), never a window. ---- */
+ * (the process-record index). ---- */
 struct zzapp_rec;
 void zzapp_services_poll(void);
 int zzapp_services_take_start(uint32_t *argc);
-uint8_t *zzapp_services_window(void);
 /* The record the calling context works on: the running app's own thread, or
  * the record the system thread selected. ZZAPP_PID_NONE when there is none. */
 uint32_t zzapp_services_current_pid(void);
@@ -272,10 +270,11 @@ void zzapp_services_cancel_start(int status);
 void zzapp_services_on_launch(void);
 void zzapp_services_set_terminal(uint32_t reason);
 void zzapp_services_expire_claims(uint64_t now_us);
-void zzapp_services_set_low_memory_crossings(uint32_t pid, uint32_t crossings);
-/* Stages 6 and 7 of a retire: the window forgets the record (copies the end
- * summary, publishes IDLE) and the record is freed. 1 freed (do not touch
- * the record again), 0 shell held for a quarantined window. Idempotent. */
+/* Stages 6 and 7 of a retire: the control block reads IDLE with the end
+ * reason and the record becomes RECLAIMED, holding its queues and buffers for
+ * the client. 1 freed (its release was requested: do not touch the record
+ * again), 0 shell held until RELEASE, a stale request of a quarantined claim,
+ * or reset. Idempotent. */
 int zzapp_services_retire_wire(struct zzapp_rec *rec);
 /* A resource failure of the selected record (AAR_REASON_*), noted before
  * LOAD_END or START returns so the lifecycle word carries the reason. */
@@ -334,9 +333,9 @@ int zzapp_test_cold_restarts(void);
 uint32_t zzapp_test_exit_code(void);
 uint32_t zzapp_test_exit_state(uint32_t pid);
 void zzapp_test_set_wait_registered(uint32_t pid, int registered);
-/* Admit the next record (its window number is its pid) and select it. The
- * services layer does this at claim; harness tests without services call
- * it. Returns the pid, or ZZAPP_PID_NONE when the arena is full. */
+/* Admit the next record (its index is its pid) and select it. The services
+ * layer does this at claim; harness tests without services call it. Returns
+ * the pid, or ZZAPP_PID_NONE when the arena is full. */
 uint32_t zzapp_test_admit(void);
 /* Capacity of the next zzapp_boot_init() arena, MIN_APPS..ZZAPP_HOST_ARENA_APPS;
  * 0 boots without an arena, as a card whose boot carve found no memory. */

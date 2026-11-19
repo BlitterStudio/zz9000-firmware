@@ -176,11 +176,11 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 	},
 	{
 		.service_id = SDK_SERVICE_APP,
-		.version = 0x00030000U,
+		.version = 0x00040000U,
 		.capability_bits = 0U,
 		.flags = SDK_SERVICE_FLAG_FIRMWARE,
 		.opcode_base = SDK_SERVICE_APP,
-		.opcode_count = 11,	/* 0x0c00..0x0c0a */
+		.opcode_count = 12,	/* 0x0c00..0x0c0b */
 		.name = "app"
 	},
 	{

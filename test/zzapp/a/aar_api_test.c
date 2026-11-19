@@ -14,6 +14,7 @@
 #include "aar/ext_zz9000.h"
 #include "memorymap.h"
 #include "zzapp_rec.h"
+#include "zzapp_xport.h"
 #include "zzapp_runtime.h"
 
 /* A shared block's token is its card address minus ADDR_ADJ: the ARM address
@@ -63,6 +64,10 @@ void zzapp_test_card_free(uint32_t card, uint32_t serial)
 
 static const aar_api *api;
 
+/* The pair of the admitted record: shared_used() reports the app's own
+ * blocks beyond it. */
+#define PAIR_BYTES ((uint64_t)ZZAPP_XPORT_PAIR_ALLOC)
+
 static uint64_t shared_used(void)
 {
     aar_info info;
@@ -70,7 +75,8 @@ static uint64_t shared_used(void)
     memset(&info, 0xa5, sizeof(info));
     info.size = sizeof(info);
     assert(api->info(&info) == AAR_OK);
-    return info.shared_used;
+    assert(info.shared_used >= PAIR_BYTES);
+    return info.shared_used - PAIR_BYTES;
 }
 
 /* Every case starts on a fresh record arena with one admitted record (the
@@ -172,14 +178,16 @@ static void test_info_values(void)
     assert(info.shared_granule == GRANULE);
     assert((info.shared_granule & (info.shared_granule - 1u)) == 0u);
     assert(info.shared_granule >= 64u);
-    assert(info.msg_capacity == 64u);
+    assert(info.msg_capacity == 63u);
     assert(info.sleep_granule_us == 5000u);
     assert(info.stall_limit_ms == 30000u);
     assert(info.stall_limit_ms >= AAR_STALL_LIMIT_MIN_MS);
     assert(info.stop_grace_ms == 500u);
     assert(info.cpu_features == 0u);
     assert(info.shared_limit == DEFAULT_SHARED_LIMIT);
-    assert(info.shared_used == 0u);
+    /* The claim's control block and queue pair is shared memory the runtime
+     * holds for the client, and counts in the limit. */
+    assert(info.shared_used == PAIR_BYTES);
     assert(info.max_files == 16u);
     assert(info.max_files >= AAR_MIN_FILES);
     for (i = 0u; i < 5u; i++)
@@ -404,10 +412,11 @@ static void test_shared_limits(void)
     assert(card_allocs == allocs && shared_used() == 0u);
 
     /* The limit is a cap on granted bytes. */
+    /* The pair counts against the limit, so the app has the rest. */
     assert(api->shared_alloc(DEFAULT_SHARED_LIMIT + GRANULE, 0u, 0u, &extra) ==
            AAR_E_NOMEM);
-    alloc_block(DEFAULT_SHARED_LIMIT, 0u, &extra);
-    assert(shared_used() == DEFAULT_SHARED_LIMIT);
+    alloc_block(DEFAULT_SHARED_LIMIT - PAIR_BYTES, 0u, &extra);
+    assert(shared_used() == DEFAULT_SHARED_LIMIT - PAIR_BYTES);
     {
         aar_shared over;
 

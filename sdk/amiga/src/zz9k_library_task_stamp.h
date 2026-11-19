@@ -17,11 +17,9 @@ typedef struct ZZ9KTaskStamp {
   const void *task;
   const void *name;
   uint32_t task_num;
-  uint32_t sig_alloc;
   uint8_t type;
 } ZZ9KTaskStamp;
 
-/* sig_alloc is the live mask at lookup time, not part of the identity. */
 static inline int zz9k_task_stamp_equal(const ZZ9KTaskStamp *a,
                                         const ZZ9KTaskStamp *b)
 {

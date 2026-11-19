@@ -2,8 +2,10 @@
  * Present-path steady state: a flip must not remap the surface alias, must
  * clean exactly the presented card range (surface-sized), and must not issue
  * any wider flush. The L1 data cache is PIPT, so this clean also covers app
- * alias writes. Drives the production display bind/flip/refresh code through
- * the recorded host flush hooks.
+ * alias writes. Drives the production display open/flip/refresh code through
+ * the recorded host flush hooks, with the Amiga as mock_client: the open
+ * completes with the client's buffers, the flip completes SUBMITTED, and the
+ * card's vertical blank acknowledges it.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -14,7 +16,10 @@
 #include <stdio.h>
 #include <string.h>
 
-static uint8_t g_window[ZZAPP_WINDOW_BYTES];
+#define FRONT 0x00200000U
+#define BACK  0x00210000U
+#define SPARE 0x00220000U
+
 static unsigned g_yields;
 static int g_fails;
 
@@ -23,38 +28,37 @@ static void fail(const char *what)
 	fprintf(stderr, "fail: %s\n", what);
 	g_fails++;
 }
-static void ack_pending_flip(uint32_t gen);
+
 /* Counts scheduler round trips, and bounds a runaway wait: if the ack is
  * never seen, force it after a while so the suite reports a failure
  * instead of hanging. */
 static void count_yield(void)
 {
+	svc_yield();
 	if (++g_yields >= 1000U)
-		ack_pending_flip(current_runtime()->display_flip_gen);
+		zzapp_services_display_vblank(current_runtime()->display_present);
 }
 
-static void bind_triple(uint32_t front, uint32_t back, uint32_t spare)
+static void open_display(void)
 {
-	uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
-	uint8_t reply[48];
-	uint16_t reply_len = 0U;
+	aar_surface surface;
 
-	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLAGS_OFF,
-		       ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_SCANOUT_ACK);
-	zzapp_build_display_bind_request_triple(payload, 320U, 200U, 640U,
-						AAR_FMT_RGB565, front, back,
-						AAR_LAYOUT_RGB565_LE, spare);
-	if (zzapp_mailbox_dispatch(ZZAPP_OP_DISPLAY_BIND, payload,
-				   sizeof(payload), reply, &reply_len, 1, 1U,
-				   0U) != SDK_STATUS_OK)
-		fail("present flush display bind");
+	svc_apps_reset();
+	svc_app_claim(0U);
+	give_space(0U);
+	if (svc_load_begin(0U, ZZAPP_CLIENT_SCANOUT_ACK, NULL, NULL) != SDK_STATUS_OK)
+		fail("present flush load begin");
+	zzapp_services_test_set_core(1);
+	zzapp_services_test_set_yield(svc_yield);
+	CL(0).display_front = SVC_TOKEN(FRONT);
+	CL(0).display_back = SVC_TOKEN(BACK);
+	CL(0).display_spare = SVC_TOKEN(SPARE);
+	CL(0).flip_flags = ZZAPP_FLIPF_SUBMITTED;
+	memset(&surface, 0, sizeof(surface));
+	if (zzapp_svc_display_open(320U, 200U, AAR_FMT_RGB565, 0U, &surface) != AAR_OK)
+		fail("present flush display open");
 }
 
-static void ack_pending_flip(uint32_t gen)
-{
-	zzapp_put_be32(g_window + ZZAPP_LIFE_OFF + ZZAPP_LIFE_FLIP_ACK_OFF,
-		       gen);
-}
 static void test_steady_flip_flushes_surface_only(void)
 {
 	const unsigned long bytes = 640U * 200U;
@@ -72,14 +76,13 @@ static void test_steady_flip_flushes_surface_only(void)
 		uint32_t presented;
 		unsigned base;
 
-		ack_pending_flip(current_runtime()->display_flip_gen);
 		if (zzapp_svc_display_flip_async(surface.id) != AAR_OK) {
 			fail("steady flip");
 			return;
 		}
 		presented = current_runtime()->display_present;
 		/* No remap and no grant churn across a steady-state flip:
-		 * the surface stays mapped from bind to close. */
+		 * the surface stays mapped from open to close. */
 		if (service_proc()->as.alias_count != aliases_before) {
 			fail("flip remapped the surface alias");
 			return;
@@ -103,6 +106,16 @@ static void test_steady_flip_flushes_surface_only(void)
 				(unsigned long)presented, bytes);
 			fail("flip flush range");
 		}
+		/* The client submits the flip. Nothing pumps an async flip's
+		 * completion until the app asks whether the flip is done (its
+		 * flip wait does), and the card can only acknowledge a flip
+		 * whose submission the runtime has seen. */
+		svc_yield();
+		if (mock_client_count(&CL(0), AAR_OP_DISPLAY_FLIP) != flip + 1U)
+			fail("one flip request per flip");
+		if (zzapp_display_flip_idle())
+			fail("flip idle before the card showed it");
+		zzapp_services_display_vblank(presented);
 		if (zzapp_svc_display_refresh(&surface) != AAR_OK)
 			fail("steady refresh");
 	}
@@ -110,7 +123,6 @@ static void test_steady_flip_flushes_surface_only(void)
 
 static void test_idle_wait_completes_without_round_trip(void)
 {
-	ack_pending_flip(current_runtime()->display_flip_gen);
 	g_yields = 0U;
 	zzapp_services_test_set_yield(count_yield);
 	/* The steady-state present loop's flipwait: the previous flip is
@@ -126,13 +138,10 @@ static void test_idle_wait_completes_without_round_trip(void)
 int main(void)
 {
 	svc_env_init(8U, 0U, NULL);
-	zzapp_services_test_reset();
-	memset(g_window, 0, sizeof(g_window));
-	zzapp_services_test_set_window(g_window, sizeof(g_window));
-	bind_triple(0x00200000U, 0x00210000U, 0x00220000U);
+	open_display();
 	test_steady_flip_flushes_surface_only();
 	test_idle_wait_completes_without_round_trip();
-	zzapp_services_test_reset();
+	svc_apps_reset();
 	if (g_fails) {
 		printf("present_flush_test: %d failure(s)\n", g_fails);
 		return 1;

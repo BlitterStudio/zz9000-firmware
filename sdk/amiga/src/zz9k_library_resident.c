@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#include "zz9k/app_client.h"
 #include "zz9k/library.h"
 #include "zz9k/library_vectors.h"
 #include <SDI_compiler.h>
@@ -33,53 +32,8 @@ struct DosLibrary *DOSBase;
 /* Defined by libnix next to the arithmetic helpers that use it. */
 extern struct Library *UtilityBase;
 
-#define ZZ9K_MMU_MAPP_CACHEINHIBIT 0x00000040UL
-#define ZZ9K_MMU_MAPP_COPYBACK 0x00002000UL
-#define ZZ9K_MMU_MAPP_IMPRECISE 0x00200000UL
-#define ZZ9K_MMU_MAPP_NONSERIALIZED 0x20000000UL
-#define ZZ9K_MMU_CACHE_MASK (ZZ9K_MMU_MAPP_CACHEINHIBIT | \
-                             ZZ9K_MMU_MAPP_COPYBACK | \
-                             ZZ9K_MMU_MAPP_IMPRECISE | \
-                             ZZ9K_MMU_MAPP_NONSERIALIZED)
-
-struct mmu_context;
-
-
 #define ZZ9K_LIB_IRQ_WAIT_MICROS 10UL
 #define ZZ9K_LIB_SYNC_POLL_MICROS 20000UL
-struct ZZ9KAppHandle {
-  struct ZZ9KAppHandle *next;
-  struct Task *owner_task;
-  struct MsgPort *notify_port;
-  ZZ9KAppEvent event;
-  volatile uint8_t *window;
-  ULONG signal_mask;
-  BYTE signal_bit;
-  ULONG heartbeat;
-  volatile ULONG vblank_pending;
-  uint32_t generation;
-  uint32_t slot;
-  struct Library *mmu_base;
-  struct mmu_context *mmu_context;
-  /* The task that called ZZ9KAppOpen, as it looked then; the service task
-   * compares it with what is at that address now. */
-  ZZ9KTaskStamp owner;
-  uint32_t max_mib;
-  uint32_t host_visible_mib;
-
-  volatile UBYTE active;
-  volatile UBYTE claimed;
-  UBYTE started;
-  UBYTE event_posted;
-  UBYTE slot_addressed;
-  UBYTE load_progress;
-  UBYTE load_begun;
-  /* Set by the service task once the owner is gone. A dead handle is never
-   * serviced or renewed again and answers every call with BAD_HANDLE until
-   * the release step frees it. */
-  volatile UBYTE dead;
-};
-
 struct ZZ9KOpener {
   struct ZZ9KOpener *next;
   struct Task *task;
@@ -99,7 +53,6 @@ struct ZZ9KBase {
   struct Library library;
   BPTR segment;
   struct SignalSemaphore lock;
-  struct SignalSemaphore app_lock;
   ZZ9KLibrary core;
   struct Interrupt irq;
   struct Interrupt vblank_irq;
@@ -124,11 +77,6 @@ struct ZZ9KBase {
   UBYTE dispatcher_running;
   UBYTE dispatcher_starting;
   UBYTE dispatcher_stop_requested;
-  ZZ9KAppSlotRegistry apps;
-  ZZ9KAppHandle *app_handles;
-  /* Handles of gone owners whose posted event may still sit on a port that
-   * outlives them. Freed at the last close. */
-  ZZ9KAppHandle *app_graveyard;
   struct ZZ9KOpener *openers;
   uint16_t next_client_id;
   /* Vertical blanks counted by the VBlank interrupt, the clock of the
@@ -173,15 +121,6 @@ static ULONG zz9k_lib_vblank_isr(REG(a1, struct ZZ9KBase *base));
 static int zz9k_lib_wait_for_irq_event(ZZ9KLibrary *library,
                                        void *user_data);
 static void zz9k_lib_dispatcher_proc(void);
-static void zz9k_lib_app_service_locked(struct ZZ9KBase *base);
-static void zz9k_lib_app_close_all_locked(struct ZZ9KBase *base);
-static void zz9k_lib_app_destroy_locked(struct ZZ9KBase *base,
-                                        ZZ9KAppHandle *handle);
-static void zz9k_lib_app_destroy_owner_locked(struct ZZ9KBase *base,
-                                               struct Task *owner);
-static void zz9k_lib_app_cache(volatile uint8_t *window, uint32_t offset,
-                               uint32_t length);
-static int zz9k_lib_app_event_queued(const ZZ9KAppHandle *handle);
 static int zz9k_lib_sync_call_submit(void *opaque, void *record);
 static int zz9k_lib_sync_call_poll(void *opaque, void *record);
 static int zz9k_lib_sync_call_completed(void *record);
@@ -195,27 +134,11 @@ static struct ZZ9KOpener *zz9k_lib_find_opener_locked(
     struct ZZ9KBase *base, struct Task *task, struct ZZ9KOpener **previous);
 static void zz9k_lib_task_stamp_read(struct Task *task, ZZ9KTaskStamp *out);
 static int zz9k_lib_task_lookup(const void *wanted, ZZ9KTaskStamp *out);
-static void zz9k_lib_app_service_handle_locked(ZZ9KAppHandle *handle);
-static void zz9k_lib_app_reap_handle_locked(struct ZZ9KBase *base,
-                                             ZZ9KAppHandle *handle);
 static int zz9k_lib_opener_reap_locked(struct ZZ9KBase *base,
                                         struct ZZ9KOpener *opener);
 static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
 
 /* Dead-owner check bindings; the logic is shared with the host test. */
-#define ZZ9K_LIB_REAP_SLOT_HANDLE(base, slot) \
-  zz9k_app_slot_get(&((struct ZZ9KBase *)(base))->apps, (slot))
-#define ZZ9K_LIB_REAP_HANDLE_CLAIMED(handle) \
-  (((ZZ9KAppHandle *)(handle))->claimed)
-#define ZZ9K_LIB_REAP_HANDLE_DEAD(handle) (((ZZ9KAppHandle *)(handle))->dead)
-#define ZZ9K_LIB_REAP_HANDLE_STAMP(handle) \
-  (&((ZZ9KAppHandle *)(handle))->owner)
-#define ZZ9K_LIB_REAP_HANDLE_SIGNAL_MASK(handle) \
-  (((ZZ9KAppHandle *)(handle))->signal_mask)
-#define ZZ9K_LIB_REAP_MARK_HANDLE_DEAD(base, handle) \
-  (((ZZ9KAppHandle *)(handle))->dead = 1U)
-#define ZZ9K_LIB_REAP_SERVICE_HANDLE(handle) \
-  zz9k_lib_app_service_handle_locked((ZZ9KAppHandle *)(handle))
 #define ZZ9K_LIB_REAP_TASK_LOOKUP(base, task, out) \
   zz9k_lib_task_lookup((task), (out))
 #define ZZ9K_LIB_REAP_CLOCK(base) (((struct ZZ9KBase *)(base))->vblank_ticks)
@@ -223,12 +146,6 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
   (((struct ZZ9KBase *)(base))->reap_last_check)
 #define ZZ9K_LIB_REAP_SCAN_PENDING(base) \
   (((struct ZZ9KBase *)(base))->reap_scan_pending)
-#define ZZ9K_LIB_REAP_HANDLES_FIRST(base) \
-  (((struct ZZ9KBase *)(base))->app_handles)
-#define ZZ9K_LIB_REAP_HANDLE_NEXT(handle) (((ZZ9KAppHandle *)(handle))->next)
-#define ZZ9K_LIB_REAP_RELEASE_HANDLE(base, handle) \
-  zz9k_lib_app_reap_handle_locked((struct ZZ9KBase *)(base), \
-                                  (ZZ9KAppHandle *)(handle))
 #define ZZ9K_LIB_REAP_OPENERS_FIRST(base) \
   (((struct ZZ9KBase *)(base))->openers)
 #define ZZ9K_LIB_REAP_OPENER_NEXT(opener) \
@@ -239,18 +156,6 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
   (&((struct ZZ9KOpener *)(opener))->stamp)
 #define ZZ9K_LIB_REAP_OPENER_CLOSING(opener) \
   (((struct ZZ9KOpener *)(opener))->closing)
-#define ZZ9K_LIB_REAP_HANDLE_EVENT_POSTED(handle) \
-  (((ZZ9KAppHandle *)(handle))->event_posted)
-#define ZZ9K_LIB_REAP_HANDLE_BURY(base, handle) do { \
-  ZZ9KAppHandle *bury_handle = (ZZ9KAppHandle *)(handle); \
-  struct ZZ9KBase *bury_base = (struct ZZ9KBase *)(base); \
-  bury_handle->next = bury_base->app_graveyard; \
-  bury_base->app_graveyard = bury_handle; \
-} while (0)
-#define ZZ9K_LIB_REAP_HANDLE_FREE(base, handle) FreeVec((ZZ9KAppHandle *)(handle))
-static ZZ9KAppHandle *zz9k_lib_graveyard_take(struct ZZ9KBase *base);
-#define ZZ9K_LIB_REAP_GRAVEYARD_TAKE(base) \
-  zz9k_lib_graveyard_take((struct ZZ9KBase *)(base))
 #define ZZ9K_LIB_REAP_NODE_SUCC(node) (((const struct Node *)(node))->ln_Succ)
 #define ZZ9K_LIB_REAP_RELEASE_OPENER(base, opener) \
   zz9k_lib_opener_reap_locked((struct ZZ9KBase *)(base), \
@@ -275,25 +180,8 @@ static ZZ9KAppHandle *zz9k_lib_graveyard_take(struct ZZ9KBase *base);
   AttemptSemaphore((struct SignalSemaphore *)(lock))
 #define ZZ9K_LIB_SYNC_RELEASE(lock) \
   ReleaseSemaphore((struct SignalSemaphore *)(lock))
-#define ZZ9K_LIB_SYNC_SERVICE(base) \
-  zz9k_lib_app_service_locked((struct ZZ9KBase *)(base))
+#define ZZ9K_LIB_SYNC_REAP_SERVICE(base) zz9k_lib_reap_service((void *)(base))
 #define ZZ9K_LIB_SYNC_REAP_RELEASE(base) zz9k_lib_reap_release((void *)(base))
-#define ZZ9K_LIB_SYNC_MESSAGE_POP(handle, message, status) do { \
-  ZZ9KAppHandle *sync_handle = (ZZ9KAppHandle *)(handle); \
-  ZZ9KAppMessage *sync_message = (ZZ9KAppMessage *)(message); \
-  zz9k_lib_app_cache(sync_handle->window, ZZ9K_APP_MESSAGE_A2H_OFFSET, \
-                      ZZ9K_APP_MESSAGE_RING_BYTES); \
-  (status) = zz9k_app_ring_pop(sync_handle->window + \
-      ZZ9K_APP_MESSAGE_A2H_OFFSET, sync_message->bytes); \
-  if ((status) == ZZ9K_STATUS_OK) zz9k_lib_app_cache(sync_handle->window, \
-      ZZ9K_APP_MESSAGE_A2H_OFFSET, ZZ9K_APP_MESSAGE_RING_BYTES); \
-} while (0)
-#define ZZ9K_LIB_SYNC_EVENT_POSTED(handle) \
-  (((ZZ9KAppHandle *)(handle))->event_posted)
-#define ZZ9K_LIB_SYNC_EVENT_QUEUED(handle) \
-  zz9k_lib_app_event_queued((const ZZ9KAppHandle *)(handle))
-#define ZZ9K_LIB_SYNC_CLEAR_EVENT_POSTED(handle) \
-  (((ZZ9KAppHandle *)(handle))->event_posted = 0U)
 #define ZZ9K_LIB_SYNC_CALL_SUBMIT(base, record) \
   zz9k_lib_sync_call_submit(base, record)
 #define ZZ9K_LIB_SYNC_CALL_POLL(base, record) \
@@ -361,12 +249,8 @@ static ZZ9KAppHandle *zz9k_lib_graveyard_take(struct ZZ9KBase *base);
 #undef ZZ9K_LIB_SYNC_OBTAIN
 #undef ZZ9K_LIB_SYNC_ATTEMPT
 #undef ZZ9K_LIB_SYNC_RELEASE
-#undef ZZ9K_LIB_SYNC_SERVICE
+#undef ZZ9K_LIB_SYNC_REAP_SERVICE
 #undef ZZ9K_LIB_SYNC_REAP_RELEASE
-#undef ZZ9K_LIB_SYNC_MESSAGE_POP
-#undef ZZ9K_LIB_SYNC_EVENT_POSTED
-#undef ZZ9K_LIB_SYNC_EVENT_QUEUED
-#undef ZZ9K_LIB_SYNC_CLEAR_EVENT_POSTED
 #undef ZZ9K_LIB_SYNC_CALL_SUBMIT
 #undef ZZ9K_LIB_SYNC_CALL_POLL
 #undef ZZ9K_LIB_SYNC_CALL_COMPLETED
@@ -612,39 +496,6 @@ static int zz9k_lib_audio_stream_set_gain(
     REG(a0, ZZ9KAudioStreamResult *result));
 static int zz9k_lib_query_palette(REG(a6, struct ZZ9KBase *base),
                                   REG(a0, const ZZ9KPaletteQueryDesc *desc));
-static int zz9k_lib_app_open(REG(a6, struct ZZ9KBase *base),
-                             REG(a0, ZZ9KAppHandle **handle),
-                             REG(a1, struct MsgPort *notify_port));
-static int zz9k_lib_app_load_file(REG(a6, struct ZZ9KBase *base),
-                                  REG(a0, ZZ9KAppHandle *handle),
-                                  REG(a1, const char *path));
-static int zz9k_lib_app_load_memory(REG(a6, struct ZZ9KBase *base),
-                                    REG(a0, ZZ9KAppHandle *handle),
-                                    REG(a1, const void *data),
-                                    REG(d0, uint32_t length));
-static int zz9k_lib_app_start(REG(a6, struct ZZ9KBase *base),
-                              REG(a0, ZZ9KAppHandle *handle),
-                              REG(a1, const char *const *argv),
-                              REG(d0, uint32_t argc));
-static int zz9k_lib_app_stop(REG(a6, struct ZZ9KBase *base),
-                             REG(a0, ZZ9KAppHandle *handle));
-static int zz9k_lib_app_status(REG(a6, struct ZZ9KBase *base),
-                               REG(a0, ZZ9KAppHandle *handle),
-                               REG(a1, ZZ9KAppStatusInfo *status));
-static int zz9k_lib_app_send_message(REG(a6, struct ZZ9KBase *base),
-                                     REG(a0, ZZ9KAppHandle *handle),
-                                     REG(a1, const ZZ9KAppMessage *message));
-static int zz9k_lib_app_get_message(REG(a6, struct ZZ9KBase *base),
-                                    REG(a0, ZZ9KAppHandle *handle),
-                                    REG(a1, ZZ9KAppMessage *message));
-static ULONG zz9k_lib_app_message_signal(REG(a6, struct ZZ9KBase *base),
-                                         REG(a0, const ZZ9KAppHandle *handle));
-static void zz9k_lib_app_close(REG(a6, struct ZZ9KBase *base),
-                               REG(a0, ZZ9KAppHandle *handle));
-static int zz9k_lib_app_set_limits(REG(a6, struct ZZ9KBase *base),
-                                   REG(a0, ZZ9KAppHandle *handle),
-                                   REG(d0, uint32_t max_mib),
-                                   REG(d1, uint32_t host_visible_mib));
 
 static const APTR zz9k_lib_vectors[] = {
   (APTR)zz9k_lib_open,
@@ -705,17 +556,6 @@ static const APTR zz9k_lib_vectors[] = {
   (APTR)zz9k_lib_image_animation_frame_retire,
   (APTR)zz9k_lib_image_animation_restart,
   (APTR)zz9k_lib_audio_stream_begin_ex,
-  (APTR)zz9k_lib_app_open,
-  (APTR)zz9k_lib_app_load_file,
-  (APTR)zz9k_lib_app_load_memory,
-  (APTR)zz9k_lib_app_start,
-  (APTR)zz9k_lib_app_stop,
-  (APTR)zz9k_lib_app_status,
-  (APTR)zz9k_lib_app_send_message,
-  (APTR)zz9k_lib_app_get_message,
-  (APTR)zz9k_lib_app_message_signal,
-  (APTR)zz9k_lib_app_close,
-  (APTR)zz9k_lib_app_set_limits,
   (APTR)-1
 };
 
@@ -752,7 +592,7 @@ static ULONG zz9k_lib_irq_isr(REG(a1, struct ZZ9KBase *base))
 }
 
 /* INTB_VERTB is a real Amiga vblank source.  The board VBlank source is
- * optional and starts disabled, so it cannot carry an app lease. */
+ * optional and starts disabled, so it cannot drive the owner check. */
 static ULONG zz9k_lib_vblank_isr(REG(a1, struct ZZ9KBase *base))
 {
   if (!base) {
@@ -761,16 +601,6 @@ static ULONG zz9k_lib_vblank_isr(REG(a1, struct ZZ9KBase *base))
   /* The service task turns these into the owner check; the interrupt
    * itself never walks a task list. */
   base->vblank_ticks++;
-  {
-    uint32_t slot;
-    for (slot = 0U; slot < ZZ9K_APP_SLOT_COUNT; slot++) {
-      ZZ9KAppHandle *handle =
-          (ZZ9KAppHandle *)zz9k_app_slot_get(&base->apps, slot);
-      if (handle && handle->active && handle->claimed && !handle->dead) {
-        handle->vblank_pending++;
-      }
-    }
-  }
   if (base->irq_task && base->irq_signal_mask) {
     Signal(base->irq_task, base->irq_signal_mask);
   }
@@ -784,7 +614,6 @@ static void zz9k_lib_task_stamp_read(struct Task *task, ZZ9KTaskStamp *out)
   out->type = task->tc_Node.ln_Type;
   out->task_num = task->tc_Node.ln_Type == NT_PROCESS ?
       (uint32_t)((struct Process *)task)->pr_TaskNum : 0U;
-  out->sig_alloc = task->tc_SigAlloc;
 }
 
 /* Whether `wanted` is still on one of Exec's task lists (the running task
@@ -843,7 +672,7 @@ static void zz9k_lib_vblank_install_locked(struct ZZ9KBase *base)
   memset(&base->vblank_irq, 0, sizeof(base->vblank_irq));
   base->vblank_irq.is_Node.ln_Type = NT_INTERRUPT;
   base->vblank_irq.is_Node.ln_Pri = 0;
-  base->vblank_irq.is_Node.ln_Name = (char *)"zz9k.library app VBlank";
+  base->vblank_irq.is_Node.ln_Name = (char *)"zz9k.library VBlank";
   base->vblank_irq.is_Data = base;
   base->vblank_irq.is_Code = (void *)zz9k_lib_vblank_isr;
   Forbid();
@@ -1257,8 +1086,7 @@ static void zz9k_lib_dispatcher_proc(void)
       uint32_t completed;
 
       completed = 0;
-      if (!zz9k_lib_dispatcher_service_apps(base, &base->app_lock,
-                                             &base->lock)) {
+      if (!zz9k_lib_dispatcher_service(base, &base->lock)) {
         break;
       }
       if (base->dispatcher_stop_requested) {
@@ -1620,7 +1448,6 @@ static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
     ObtainSemaphore(&base->lock);
   }
   if (release_opener) {
-    zz9k_lib_app_destroy_owner_locked(base, task);
     /* The list may have gained openers while the lock was released for
      * the BUSY retries; unlink through a fresh predecessor. */
     if (zz9k_lib_find_opener_locked(base, task, &previous) == opener) {
@@ -1634,7 +1461,6 @@ static BPTR zz9k_lib_close(REG(a6, struct ZZ9KBase *base))
   if (base->library.lib_OpenCnt == 0) {
     zz9k_lib_reap_final_close(base);
     ObtainSemaphore(&base->lock);
-    zz9k_lib_app_close_all_locked(base);
     zz9k_lib_irq_stop_locked(base);
     ZZ9KClose(&base->core);
     ReleaseSemaphore(&base->lock);
@@ -1719,7 +1545,6 @@ static struct ZZ9KBase *zz9k_lib_init(REG(a0, BPTR segment))
   base->irq_signal_bit = -1;
   base->dispatcher_signal_bit = -1;
   InitSemaphore(&base->lock);
-  InitSemaphore(&base->app_lock);
   ZZ9KInit(&base->core);
 
   AddLibrary((struct Library *)base);
@@ -2585,4 +2410,38 @@ static int zz9k_lib_query_palette(REG(a6, struct ZZ9KBase *base),
   return status;
 }
 
-#include "zz9k_library_app.inc"
+/* Releases the client id of an opener whose task is gone, as the final
+ * CloseLibrary would, but without lowering the library's open count: that
+ * count was raised by the dead task and no CloseLibrary will lower it, and
+ * lowering it here could reach zero while this task still runs. Returns 1
+ * once the record is gone, 0 while the firmware still answers BUSY. */
+static int zz9k_lib_opener_reap_locked(struct ZZ9KBase *base,
+                                        struct ZZ9KOpener *opener)
+{
+  struct ZZ9KOpener **link;
+
+  if (base->core.ctx) {
+    ZZ9KRequest request;
+    ZZ9KMailboxEntry reply;
+    int status;
+
+    memset(&request, 0, sizeof(request));
+    request.entry.opcode = ZZ9K_OP_CLIENT_RELEASE;
+    request.entry.flags = ZZ9K_ENTRY_INLINE_PAYLOAD;
+    (void)ZZ9KSetClientId(&base->core, opener->lease.client_id);
+    status = ZZ9KCall(&base->core, &request, &reply,
+                      ZZ9K_DEFAULT_TIMEOUT_TICKS);
+    (void)ZZ9KSetClientId(&base->core, 0U);
+    /* The firmware still has worker activity for this client; the service
+     * task offers the release again, and the last close retries it. */
+    if (status == ZZ9K_STATUS_BUSY) return 0;
+  }
+  for (link = &base->openers; *link; link = &(*link)->next) {
+    if (*link == opener) {
+      *link = opener->next;
+      FreeVec(opener);
+      return 1;
+    }
+  }
+  return 1;
+}

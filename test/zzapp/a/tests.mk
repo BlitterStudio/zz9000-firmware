@@ -2,7 +2,7 @@
 # card pool that host.c, the loader and the arena sit on. Compiled once for
 # every suite that links the runtime objects.
 A_REC_FLAGS := -DMMU_PAGE_HOST_TEST -DSMP_LOCK_HOST_TEST -I../mmu/mock -I../card_pool
-A_REC_OBJS := $(BUILD)/a/zzapp_rec.o $(BUILD)/a/zzapp_as.o \
+A_REC_OBJS := $(BUILD)/mock_client.o $(BUILD)/a/zzapp_rec.o $(BUILD)/a/zzapp_xport.o $(BUILD)/a/zzapp_as.o \
 	$(BUILD)/a/mmu_page.o $(BUILD)/a/host_rec_glue.o $(BUILD)/a/host_decode_stubs.o
 A_POOL_OBJS := $(BUILD)/a/card_pool.o $(BUILD)/a/sdk_smp_lock.o
 A_RUNTIME_OBJS := $(BUILD)/a/zzapp_loader.o $(BUILD)/a/zzapp_host.o \
@@ -15,6 +15,9 @@ ZZAPP_TESTS += $(BUILD)/a/loader_smoke $(BUILD)/a/runtime_host_test \
 	$(BUILD)/a/loader_dynamic_test
 
 $(BUILD)/a/zzapp_rec.o: $(FW)/zzapp_rec.c $(FW)/zzapp_rec.h $(FW)/zzapp_as.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) $(A_REC_FLAGS) -c -o $@ $<
+$(BUILD)/a/zzapp_xport.o: $(FW)/zzapp_xport.c $(FW)/zzapp_xport.h $(FW)/zzapp_rec.h | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) $(A_REC_FLAGS) -c -o $@ $<
 $(BUILD)/a/zzapp_as.o: $(FW)/zzapp_as.c $(FW)/zzapp_as.h | $(BUILD)
@@ -73,7 +76,7 @@ LOADER_INCREMENTAL_HOST_SOURCES := $(FW)/zzapp_mem.c $(FW)/card_pool.c \
 	$(FW)/sdk_smp_lock.c ../card_pool/host_card_pool.c
 LOADER_REAL_AS_HOST_OBJS := $(BUILD)/a/zzapp_loader_real_as_incremental.o \
 	$(BUILD)/a/zzapp_host.o $(BUILD)/a/zzapp_api.o $(BUILD)/a/zzapp_kernel.o \
-	$(BUILD)/a/zzapp_rec.o $(BUILD)/a/host_decode_stubs.o
+	$(BUILD)/mock_client.o $(BUILD)/a/zzapp_rec.o $(BUILD)/a/zzapp_xport.o $(BUILD)/a/host_decode_stubs.o
 LOADER_REAL_AS_HOST_SOURCES := $(FW)/zzapp_mem.c $(FW)/card_pool.c \
 	$(FW)/sdk_smp_lock.c $(FW)/zzapp_as.c $(FW)/mmu_page.c \
 	../card_pool/host_card_pool.c

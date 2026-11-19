@@ -18,8 +18,10 @@
 
 #include "aar/app.h"
 #include "zzapp_proto.h"
+#include "zzapp_state.h"
 #include "zzapp_runtime.h"
 #include "zzapp_rec.h"
+#include "zzapp_xport.h"
 
 #define EM_ARM                 40u
 #define ET_DYN                 3u
@@ -564,6 +566,7 @@ static int map_loaded_image(const struct load_image *img)
         proc->image_frame_count = image_frames;
         proc->heap_frame_count = heap_frames;
         proc->stack_frame_count = stack_frames;
+        zzapp_xport_publish_private(loader_rec_or_null());
         g_zero_frames = total_frames;
         g_zeroed_frames = 0U;
         g_zero_offset = 0U;
@@ -972,6 +975,31 @@ int zzapp_loader_set_generation(uint32_t generation)
     return AAR_OK;
 }
 
+/* Another record's staging block is still held (its LOAD_END has not copied
+ * the image out). Staging is 16 MiB of class APP each, so a few loads that
+ * start together can use the whole class limit between them although the
+ * card has memory to spare. */
+static int staging_held_by_others(void)
+{
+    uint32_t self = loader_pid();
+    uint32_t pid;
+
+    for (pid = 0U; pid < zzapp_rec_capacity(); pid++) {
+        zzapp_rec_t *rec;
+        const struct loader_slot *other;
+
+        if (pid == self || zzapp_rec_state(pid) == ZZAPP_REC_FREE)
+            continue;
+        rec = zzapp_rec_by_pid(pid);
+        if (!rec)
+            continue;
+        other = (const struct loader_slot *)(const void *)rec->loader.bytes;
+        if (other->mem && other->bytes != 0U)
+            return 1;
+    }
+    return 0;
+}
+
 int zzapp_loader_begin(void)
 {
     uint32_t gen;
@@ -997,6 +1025,10 @@ int zzapp_loader_begin(void)
     addr = pool_alloc(ZZAPP_FILE_MAX, owner);
 #endif
     if (!addr) {
+        /* Short only because other claims hold staging: not a refusal. The
+         * claim stays as it is and the client asks again (BUSY). */
+        if (staging_held_by_others())
+            return AAR_E_BUSY;
         zzapp_services_note_refusal(AAR_REASON_MEMORY);
         zzapp_loader_set_state(ZZAPP_ST_IDLE);
         return AAR_E_NOMEM;
@@ -1041,38 +1073,6 @@ int zzapp_loader_begin(void)
                        owner, gen);
 #endif
     zzapp_services_on_launch();
-    {
-        uint8_t *life = (uint8_t *)zzapp_services_window();
-        if (life) {
-            memset(life + ZZAPP_INPUT_OFF, 0, ZZAPP_INPUT_HDR);
-            memset(life + ZZAPP_LOG_OFF, 0, ZZAPP_LOG_HDR);
-            memset(life + ZZAPP_FILE_OFF, 0, ZZAPP_FILE_BYTES);
-            memset(life + ZZAPP_PALETTE_OFF, 0, ZZAPP_PALETTE_BYTES);
-            zzapp_put_be32(life + ZZAPP_LIFE_STOP_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_FAULT_OFF, ZZAPP_FAULT_NONE);
-            zzapp_put_be32(life + ZZAPP_LIFE_EXIT_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_FLAGS_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_INPUT_DROPS_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_LOG_DROPS_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_GEN_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_ACK_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_SHOWING_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_ADDRESS_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_FLIP_SUBMIT_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_MAILBOX_REPLACED_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_WIDTH_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_HEIGHT_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_PITCH_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_FORMAT_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_CARD_FRONT_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_CARD_BACK_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_LAYOUT_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_PALETTE_GEN_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_PALETTE_FIRST_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_PALETTE_COUNT_OFF, 0);
-            zzapp_put_be32(life + ZZAPP_LIFE_CARD_SPARE_OFF, 0);
-        }
-    }
     zzapp_loader_set_state(ZZAPP_ST_LOADING);
     return AAR_OK;
 }
@@ -1092,17 +1092,17 @@ int zzapp_loader_chunk(uint32_t file_off, const void *src, uint32_t len)
     return AAR_OK;
 }
 
-/* Life-block flag bits (what ZZRun reads) for the groups an app names. */
+/* AAR_CBF_* bits (AAR_CB_FLAGS) for the groups an app names. */
 static uint32_t note_wire_flags(uint32_t groups)
 {
     uint32_t flags = 0u;
 
     if (groups & AAR_GROUP_DISPLAY)
-        flags |= ZZAPP_F_DISPLAY;
+        flags |= AAR_CBF_DISPLAY;
     if (groups & AAR_GROUP_AUDIO)
-        flags |= ZZAPP_F_AUDIO;
+        flags |= AAR_CBF_AUDIO;
     if (groups & AAR_GROUP_GL)
-        flags |= ZZAPP_F_GL;
+        flags |= AAR_CBF_GL;
     return flags;
 }
 
@@ -1727,7 +1727,7 @@ failed:
 }
 
 /* The claim goes on: the resources go back and the host state is idle (the
- * window's IDLE is published by the retire that ends the claim). */
+ * control block's IDLE is published by the retire that ends the claim). */
 int zzapp_loader_abort(void)
 {
     uint32_t state = zzapp_loader_state();

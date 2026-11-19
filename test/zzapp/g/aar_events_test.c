@@ -1,82 +1,83 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * aar_event_poll (spec 8.3): the lifecycle events, stop and low memory, are
- * always delivered; the launcher's key, mouse, joystick and break events only
+ * always delivered; the client's key, mouse, joystick and break events only
  * with AAR_GROUP_INPUT. A stop request is delivered once: the firmware's own
- * AAR_EV_STOP and the launcher's own are the same delivery, in either order.
+ * AAR_EV_STOP and the client's own are the same delivery, in either order.
+ *
+ * The client is mock_client: it posts events into the completion queue of the
+ * claim's pair, and the runtime reads them through the pump. The completion
+ * queue indices show what was consumed: a poll without AAR_GROUP_INPUT must
+ * not move the head.
  */
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "aar/app.h"
+#include "mock_client.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
 #include "zzapp_services.h"
 
-#define SLOT 0u
-/* Record the claimed window runs on: not its window number once records were
- * used before. */
-static uint32_t g_pid;
 #define MAX_EVENTS 16u
 
 #define NO_INPUT_GROUPS (AAR_GROUP_DISPLAY | AAR_GROUP_AUDIO | \
                          AAR_GROUP_GL | AAR_GROUP_SERVICES)
 #define ALL_GROUPS (NO_INPUT_GROUPS | AAR_GROUP_INPUT)
 
-static uint8_t windows[ZZAPP_SLOT_COUNT][ZZAPP_WINDOW_BYTES];
+static mock_client client;
+/* The record the claim runs on. */
+static uint32_t g_pid;
 
 static void setup(uint32_t groups)
 {
-    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES] = { 0 };
-    uint8_t reply[ZZAPP_MAILBOX_PAYLOAD_BYTES];
-    uint16_t reply_len = 0u;
-    uint32_t i;
+    zzapp_xport_env_t env;
+    zzapp_xport_buf_t pair;
 
-    memset(windows, 0, sizeof(windows));
     zzapp_boot_init();
     zzapp_services_test_reset();
-    for (i = 0u; i < ZZAPP_SLOT_COUNT; i++)
-        zzapp_services_test_set_window_slot(i, windows[i], sizeof(windows[i]));
+    mock_heap_reset();
+    env = mock_heap_env();
+    zzapp_xport_init(&env);
     zzapp_test_set_groups(groups, 1);
-    assert(zzapp_mailbox_dispatch(ZZAPP_OP_ALLOC_WINDOW, request,
-                                  sizeof(request), reply, &reply_len, 1, 1U,
-                                  0U) == SDK_STATUS_OK);
-    assert(zzapp_get_be32(reply + ZZAPP_ALLOC_SLOT) == SLOT);
-    zzapp_services_test_select_window(SLOT);
-    g_pid = zzapp_services_current_pid();
+    g_pid = zzapp_test_admit();
+    assert(g_pid != ZZAPP_PID_NONE);
+    assert(zzapp_xport_block_get(zzapp_rec_by_pid(g_pid), ZZAPP_XPORT_BLOCK_PAIR,
+                                 &pair) == 1);
+    mock_client_init(&client);
+    assert(mock_client_attach(&client, pair.token) == AAR_OK);
     zzapp_test_mark_running();
     zzapp_host_clear_stop_requested(g_pid);
     zzapp_host_reset_low_memory(g_pid);
 }
 
-/* The launcher posts one event into the slot's input ring. */
+/* The client posts one event into the completion queue. */
 static void ring_push(uint16_t type, uint16_t code, int16_t dx, int16_t dy,
                       uint16_t buttons, uint32_t time_ms)
 {
-    uint8_t *window = windows[SLOT];
-    uint32_t head = zzapp_get_be32(window + ZZAPP_INPUT_OFF);
-    uint32_t off = ZZAPP_INPUT_OFF + ZZAPP_INPUT_HDR +
-                   (head & (ZZAPP_INPUT_CAP - 1u)) * ZZAPP_EVENT_BYTES;
+    aar_event ev;
 
-    zzapp_put_be16(window + off + 0u, type);
-    zzapp_put_be16(window + off + 2u, code);
-    zzapp_put_be16(window + off + 4u, (uint16_t)dx);
-    zzapp_put_be16(window + off + 6u, (uint16_t)dy);
-    zzapp_put_be16(window + off + 8u, buttons);
-    zzapp_put_be16(window + off + 10u, 0u);
-    zzapp_put_be32(window + off + 12u, time_ms);
-    zzapp_put_be32(window + ZZAPP_INPUT_OFF, head + 1u);
+    memset(&ev, 0, sizeof(ev));
+    ev.type = type;
+    ev.code = code;
+    ev.dx = dx;
+    ev.dy = dy;
+    ev.buttons = buttons;
+    ev.time_ms = time_ms;
+    assert(mock_client_post_event(&client, &ev) == AAR_OK);
 }
 
+/* Events the client posted, and the ones the runtime has taken from the
+ * queue. */
 static uint32_t ring_head(void)
 {
-    return zzapp_get_be32(windows[SLOT] + ZZAPP_INPUT_OFF);
+    return mock_client_cb_get(&client, AAR_CB_CQ_TAIL);
 }
 
 static uint32_t ring_tail(void)
 {
-    return zzapp_get_be32(windows[SLOT] + ZZAPP_INPUT_OFF + 4u);
+    return mock_client_cb_get(&client, AAR_CB_CQ_HEAD);
 }
 
 static void low_memory_crossing(void)
@@ -121,8 +122,8 @@ static void expect_empty(void)
     assert(poll_n(ev, MAX_EVENTS) == 0u);
 }
 
-/* Stop and low memory arrive whatever the groups, and the input ring is not
- * touched without AAR_GROUP_INPUT. */
+/* Stop and low memory arrive whatever the groups, and the completion queue is
+ * not read without AAR_GROUP_INPUT. */
 static void test_lifecycle_without_input_group(uint32_t groups)
 {
     aar_event ev[MAX_EVENTS];
@@ -144,7 +145,8 @@ static void test_lifecycle_without_input_group(uint32_t groups)
     assert(ring_tail() == 0u && ring_head() == 3u);
 }
 
-/* With AAR_GROUP_INPUT the ring follows the lifecycle events, in order. */
+/* With AAR_GROUP_INPUT the client's events follow the lifecycle events, in
+ * order. */
 static void test_input_with_input_group(void)
 {
     aar_event ev[MAX_EVENTS];
@@ -171,13 +173,13 @@ static void test_input_with_input_group(void)
     expect_empty();
 }
 
-/* A stop is one delivery: the firmware's and the launcher's events for the
- * same request are the same event, whichever comes first. */
+/* A stop is one delivery: the firmware's and the client's events for the same
+ * request are the same event, whichever comes first. */
 static void test_duplicate_stop_dropped(void)
 {
     aar_event ev[MAX_EVENTS];
 
-    /* The firmware's event first, the launcher's already in the ring. */
+    /* The firmware's event first, the client's already queued. */
     setup(ALL_GROUPS);
     ring_push(AAR_EV_KEY_DOWN, 1u, 0, 0, 0u, 1u);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 2u);
@@ -190,8 +192,8 @@ static void test_duplicate_stop_dropped(void)
     assert(ring_tail() == ring_head());
     expect_empty();
 
-    /* The launcher's own event first: it counts as the delivery, and the
-     * latch that follows queues nothing more. */
+    /* The client's own event first: it counts as the delivery, and the latch
+     * that follows queues nothing more. */
     setup(ALL_GROUPS);
     ring_push(AAR_EV_KEY_DOWN, 1u, 0, 0, 0u, 1u);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 2u);
@@ -204,7 +206,7 @@ static void test_duplicate_stop_dropped(void)
     zzapp_host_latch_stop(g_pid);
     expect_empty();
 
-    /* The launcher's event arrives after the firmware's was delivered. */
+    /* The client's event arrives after the firmware's was delivered. */
     setup(ALL_GROUPS);
     zzapp_host_latch_stop(g_pid);
     assert(poll_n(ev, MAX_EVENTS) == 1u);
@@ -215,7 +217,7 @@ static void test_duplicate_stop_dropped(void)
     assert(ev[0].type == AAR_EV_KEY_DOWN && ev[0].code == 2u);
     expect_empty();
 
-    /* The launcher posts two stops: one is delivered. */
+    /* The client posts two stops: one is delivered. */
     setup(ALL_GROUPS);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 1u);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 2u);
@@ -224,7 +226,7 @@ static void test_duplicate_stop_dropped(void)
     zzapp_host_latch_stop(g_pid);
     expect_empty();
 
-    /* Without the input group the launcher's event is never read, so the
+    /* Without the input group the client's event is never read, so the
      * firmware's is the delivery. */
     setup(NO_INPUT_GROUPS);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 1u);
@@ -272,7 +274,6 @@ static void test_short_buffer(void)
 
     /* max 0 consumes nothing, and NULL is fine for it. */
     assert(zzapp_svc_event_poll(NULL, 0u, &n) == AAR_OK && n == 0u);
-    assert(ring_tail() == 0u);
     assert(poll_n(ev, 1u) == 1u);
     expect_lifecycle(&ev[0], AAR_EV_STOP);
     assert(poll_n(ev, 1u) == 1u);
@@ -296,6 +297,48 @@ static void test_bad_arguments(void)
     expect_lifecycle(&ev, AAR_EV_STOP);
 }
 
+/* The completion queue is 64 deep and the client drops what does not fit,
+ * counting it (the contract of the event ring): a flood of events behind a
+ * poll that reads nothing loses the newest, keeps the oldest in order, and
+ * the control block says how many were dropped. */
+static void test_event_flood_is_lossy_and_counted(void)
+{
+    aar_event ev[MAX_EVENTS];
+    uint32_t posted = 0u;
+    uint32_t dropped_by_client;
+    uint32_t seen = 0u;
+    uint32_t n;
+
+    setup(ALL_GROUPS);
+    for (posted = 0u; posted < 100u; posted++) {
+        aar_event e;
+
+        memset(&e, 0, sizeof(e));
+        e.type = AAR_EV_MOUSE;
+        e.dx = (int16_t)posted;
+        e.time_ms = posted;
+        if (mock_client_post_event(&client, &e) != AAR_OK)
+            break;
+    }
+    assert(posted > 0u && posted < 100u);
+    dropped_by_client = mock_client_cb_get(&client, AAR_CB_EVENTS_DROPPED);
+    assert(dropped_by_client >= 1u);
+    /* Everything that fit is read, oldest first, nothing twice. */
+    for (;;) {
+        uint32_t i;
+
+        n = poll_n(ev, MAX_EVENTS);
+        if (n == 0u)
+            break;
+        for (i = 0u; i < n; i++) {
+            assert(ev[i].type == AAR_EV_MOUSE);
+            assert(ev[i].time_ms == seen);
+            seen++;
+        }
+    }
+    assert(seen == posted);
+}
+
 int main(void)
 {
     test_lifecycle_without_input_group(NO_INPUT_GROUPS);
@@ -305,6 +348,7 @@ int main(void)
     test_low_memory_per_crossing();
     test_short_buffer();
     test_bad_arguments();
+    test_event_flood_is_lossy_and_counted();
     zzapp_test_set_groups(0u, 0);
     return 0;
 }

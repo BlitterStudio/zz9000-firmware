@@ -30,9 +30,9 @@ extern int zzm_test_printf(const char *format, ...);
 #define ZZM_RUNTIME_LOG printf
 #endif
 
-__attribute__((weak)) uint32_t zzapp_services_flags(void)
+__attribute__((weak)) int zzapp_display_latest(void)
 {
-    return 0U;
+    return 0;
 }
 
 __attribute__((weak)) int zzapp_services_stop_requested(void)
@@ -1008,10 +1008,10 @@ static const zzm_palette_service_t palette_service = {
     module_palette_snapshot, module_palette_lookup
 };
 static const zzm_app_gl_host_service_t app_gl_host_service = {
-    ZZM_SERVICE_APP_GL_HOST_V3, sizeof(app_gl_host_service), zzapp_api_enter,
+    ZZM_SERVICE_APP_GL_HOST_V4, sizeof(app_gl_host_service), zzapp_api_enter,
     zzapp_api_leave, zzapp_display_bound, module_app_flip_bound,
     module_app_flip_idle, zzapp_current_generation, zzapp_display_layout,
-    zzapp_services_flags, zzapp_services_stop_requested, zzapp_host_yield_wait,
+    zzapp_display_latest, zzapp_services_stop_requested, zzapp_host_yield_wait,
     module_app_wait_flip
 };
 static const zzm_profile_service_t profile_service = {
