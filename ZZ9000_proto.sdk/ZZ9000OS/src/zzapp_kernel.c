@@ -8,6 +8,7 @@
 
 #include "sdk_smp_lock.h"
 #include "zzapp_kernel.h"
+#include "zzapp_proto.h"
 #include "zzapp_rec.h"
 
 #if ZZAPP_PERF_COUNTERS
@@ -24,7 +25,7 @@ void __attribute__((weak)) smp_local_irq_restore(uint32_t state)
 {
 	(void)state;
 }
-uint64_t __attribute__((weak)) zzapp_kernel_now_ms(void)
+uint64_t __attribute__((weak)) zzapp_kernel_now_us(void)
 {
 	return 0U;
 }
@@ -733,6 +734,39 @@ uint32_t zzapp_kernel_stack_high_water(const zzapp_kernel_t *kernel,
 		rec->hdr.kstack_top - rec->hdr.kstack_base);
 }
 
+/* The weight the scheduler divides by: a thread that was never given one
+ * counts as 1. */
+static uint32_t thread_weight(const zzapp_thread_t *thread)
+{
+	return thread->weight == 0U ? 1U : thread->weight;
+}
+
+/* Virtual run time of `us` microseconds of CPU at the thread's weight. */
+static uint64_t vruntime_charge(const zzapp_thread_t *thread, uint64_t us)
+{
+	return us * ZZAPP_KERNEL_VRUNTIME_SCALE / thread_weight(thread);
+}
+
+/* The smallest virtual run time among the runnable threads; 0 when none is
+ * runnable and `min` is untouched. */
+static int runnable_vruntime_min(const zzapp_kernel_t *kernel, uint64_t *min)
+{
+	uint32_t i;
+	int found = 0;
+
+	for (i = 0U; i < kernel->run_count; i++) {
+		const zzapp_thread_t *thread = kernel_thread(kernel,
+							     kernel->run[i]);
+
+		if (thread->state == ZZAPP_THREAD_RUNNABLE &&
+		    (!found || thread->vruntime < *min)) {
+			*min = thread->vruntime;
+			found = 1;
+		}
+	}
+	return found;
+}
+
 void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t pid)
 {
 	zzapp_thread_t *thread = kernel_thread(kernel, pid);
@@ -743,13 +777,30 @@ void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t pid)
 	thread->svc_ticks = 0U;
 }
 
+int zzapp_kernel_set_weight(zzapp_kernel_t *kernel, uint32_t pid,
+			    uint32_t weight)
+{
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+	if (!thread || weight > ZZAPP_WEIGHT_MAX)
+		return -1;
+	thread->weight = weight;
+	return 0;
+}
 
 int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t pid)
 {
 	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+	uint64_t start;
 
 	if (!thread)
 		return -1;
+	if (!runnable_vruntime_min(kernel, &start))
+		start = kernel->vfloor;
+	else if (start > kernel->vfloor)
+		kernel->vfloor = start;
+	thread->vruntime = start;
+	thread->yield_pending = 0U;
 	run_add(kernel, pid);
 	thread->state = ZZAPP_THREAD_RUNNABLE;
 	thread->wake_reason = ZZAPP_WAKE_READY;
@@ -864,6 +915,19 @@ int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t pid,
 	if (thread->state != ZZAPP_THREAD_BLOCKED &&
 	    thread->state != ZZAPP_THREAD_SLEEPING)
 		return -1;
+	/* A thread that was parked comes back no further behind than one
+	 * quantum below the floor, so it cannot bank the time it was away and
+	 * then take the core from the others. */
+	{
+		uint64_t min;
+		uint64_t credit = vruntime_charge(
+			thread, (uint64_t)ZZAPP_KERNEL_QUANTUM_MS * 1000U);
+
+		if (runnable_vruntime_min(kernel, &min) && min > kernel->vfloor)
+			kernel->vfloor = min;
+		if (thread->vruntime + credit < kernel->vfloor)
+			thread->vruntime = kernel->vfloor - credit;
+	}
 	thread->state = ZZAPP_THREAD_RUNNABLE;
 	thread->wake_reason = reason;
 	thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
@@ -928,7 +992,6 @@ void zzapp_kernel_yield(zzapp_kernel_t *kernel)
 
 		if (pid != (uint32_t)current &&
 		    kernel_thread(kernel, pid)->state == ZZAPP_THREAD_RUNNABLE) {
-			kernel->rr_next = (uint32_t)current + 1U;
 			kernel_thread(kernel, (uint32_t)current)->yield_pending = 1U;
 			return;
 		}
@@ -936,15 +999,37 @@ void zzapp_kernel_yield(zzapp_kernel_t *kernel)
 }
 
 
+/* The run time since the interval began, in whole milliseconds of the clock
+ * (the difference of the floored readings, so remainders are not lost
+ * between intervals) and in microseconds. */
+static void slice_elapsed(const zzapp_kernel_t *kernel, uint64_t now_us,
+			  uint32_t *elapsed_ms, uint32_t *elapsed_us)
+{
+	uint64_t delta_ms = 0U;
+	uint64_t delta_us = 0U;
+
+	if (kernel->slice_valid && now_us >= kernel->slice_started_us) {
+		delta_us = now_us - kernel->slice_started_us;
+		delta_ms = now_us / 1000U - kernel->slice_started_us / 1000U;
+	}
+	*elapsed_ms = delta_ms > UINT32_MAX ? UINT32_MAX : (uint32_t)delta_ms;
+	*elapsed_us = delta_us > UINT32_MAX ? UINT32_MAX : (uint32_t)delta_us;
+}
+
 uint64_t zzapp_kernel_now(const zzapp_kernel_t *kernel)
 {
+	uint64_t now;
+
 	if (!kernel)
 		return 0U;
-	uint64_t now = kernel->now;
+	now = kernel->now;
 	if (kernel->slice_valid && !kernel->idle) {
-		uint64_t now_ms = zzapp_kernel_now_ms();
-		if (now_ms > kernel->slice_started_ms)
-			now += (now_ms - kernel->slice_started_ms);
+		uint32_t elapsed_ms;
+		uint32_t elapsed_us;
+
+		slice_elapsed(kernel, zzapp_kernel_now_us(), &elapsed_ms,
+			      &elapsed_us);
+		now += elapsed_ms;
 	}
 	return now;
 }
@@ -954,15 +1039,16 @@ void zzapp_kernel_reset_slice(zzapp_kernel_t *kernel)
 	if (!kernel)
 		return;
 	kernel->slice_valid = 0U;
-	kernel->slice_started_ms = 0U;
+	kernel->slice_started_us = 0U;
 	kernel->idle = 0U;
 }
 
 void zzapp_kernel_idle_begin(zzapp_kernel_t *kernel)
 {
 	uint32_t irq_state;
-	uint64_t now_ms;
-	uint32_t elapsed = 0U;
+	uint64_t now_us;
+	uint32_t elapsed;
+	uint32_t elapsed_us;
 
 	if (!kernel)
 		return;
@@ -971,13 +1057,9 @@ void zzapp_kernel_idle_begin(zzapp_kernel_t *kernel)
 		smp_local_irq_restore(irq_state);
 		return;
 	}
-	now_ms = zzapp_kernel_now_ms();
-	if (kernel->slice_valid && now_ms >= kernel->slice_started_ms) {
-		uint64_t delta = now_ms - kernel->slice_started_ms;
-
-		elapsed = delta > UINT32_MAX ? UINT32_MAX : (uint32_t)delta;
-	}
-	kernel->slice_started_ms = now_ms;
+	now_us = zzapp_kernel_now_us();
+	slice_elapsed(kernel, now_us, &elapsed, &elapsed_us);
+	kernel->slice_started_us = now_us;
 	kernel->slice_valid = 1U;
 	zzapp_kernel_advance(kernel, elapsed);
 	if (kernel->now - kernel->window_start > ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
@@ -995,8 +1077,9 @@ void zzapp_kernel_idle_begin(zzapp_kernel_t *kernel)
 void zzapp_kernel_idle_end(zzapp_kernel_t *kernel)
 {
 	uint32_t irq_state;
-	uint64_t now_ms;
-	uint32_t elapsed = 0U;
+	uint64_t now_us;
+	uint32_t elapsed;
+	uint32_t elapsed_us;
 
 	if (!kernel)
 		return;
@@ -1005,13 +1088,9 @@ void zzapp_kernel_idle_end(zzapp_kernel_t *kernel)
 		smp_local_irq_restore(irq_state);
 		return;
 	}
-	now_ms = zzapp_kernel_now_ms();
-	if (kernel->slice_valid && now_ms >= kernel->slice_started_ms) {
-		uint64_t delta = now_ms - kernel->slice_started_ms;
-
-		elapsed = delta > UINT32_MAX ? UINT32_MAX : (uint32_t)delta;
-	}
-	kernel->slice_started_ms = now_ms;
+	now_us = zzapp_kernel_now_us();
+	slice_elapsed(kernel, now_us, &elapsed, &elapsed_us);
+	kernel->slice_started_us = now_us;
 	kernel->slice_valid = 1U;
 	kernel->idle = 0U;
 	kernel->idle_ticks += elapsed;
@@ -1023,13 +1102,22 @@ void zzapp_kernel_idle_end(zzapp_kernel_t *kernel)
 	smp_local_irq_restore(irq_state);
 }
 
-/* Round robin over the run list: the first runnable pid at or above rr_next,
- * wrapping to the lowest. */
+/* The runnable thread with the smallest virtual run time. Threads of equal
+ * virtual run time take turns: the scan starts at the first pid at or above
+ * rr_next and wraps, and only a strictly smaller value displaces the
+ * candidate. A thread that yielded is passed over for this pick unless it is
+ * the only one runnable. */
 static int choose_app(zzapp_kernel_t *kernel)
 {
 	uint32_t count = kernel->run_count;
 	uint32_t start;
 	uint32_t i;
+	uint32_t pick = ZZAPP_PID_NONE;
+	uint32_t yielded = ZZAPP_PID_NONE;
+	uint64_t pick_vr = 0U;
+	uint64_t yielded_vr = 0U;
+	uint64_t lowest = 0U;
+	int have_floor = 0;
 
 	if (kernel->active < kernel->capacity &&
 	    kernel_thread(kernel, kernel->active)->state == ZZAPP_THREAD_RUNNABLE &&
@@ -1040,25 +1128,51 @@ static int choose_app(zzapp_kernel_t *kernel)
 		;
 	for (i = 0U; i < count; i++) {
 		uint32_t pid = kernel->run[(start + i) % count];
-		zzapp_thread_t *thread = kernel_thread(kernel, pid);
+		const zzapp_thread_t *thread = kernel_thread(kernel, pid);
 
-		if (thread->state == ZZAPP_THREAD_RUNNABLE) {
-			kernel->active = pid;
-			kernel->rr_next = pid + 1U;
-			if (thread->quantum_left == 0U)
-				thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
-			return (int)pid;
+		if (thread->state != ZZAPP_THREAD_RUNNABLE)
+			continue;
+		if (!have_floor || thread->vruntime < lowest) {
+			lowest = thread->vruntime;
+			have_floor = 1;
+		}
+		if (thread->yield_pending) {
+			if (yielded == ZZAPP_PID_NONE || thread->vruntime < yielded_vr) {
+				yielded = pid;
+				yielded_vr = thread->vruntime;
+			}
+		} else if (pick == ZZAPP_PID_NONE || thread->vruntime < pick_vr) {
+			pick = pid;
+			pick_vr = thread->vruntime;
 		}
 	}
-	kernel->active = ZZAPP_PID_NONE;
-	return ZZAPP_KERNEL_IDLE;
+	if (have_floor && lowest > kernel->vfloor)
+		kernel->vfloor = lowest;
+	if (pick == ZZAPP_PID_NONE)
+		pick = yielded;
+	if (pick == ZZAPP_PID_NONE) {
+		kernel->active = ZZAPP_PID_NONE;
+		return ZZAPP_KERNEL_IDLE;
+	}
+	kernel->active = pick;
+	kernel->rr_next = pick + 1U;
+	if (kernel_thread(kernel, pick)->quantum_left == 0U)
+		kernel_thread(kernel, pick)->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
+	return (int)pick;
 }
 
-/* Charge `pid` for a slice of up to `elapsed_ms`; an exhausted quantum
- * lets the next pick rotate to another runnable app. Privileged time is
- * the API body, recorded separately from user mode. */
+static void charge_vruntime(zzapp_thread_t *thread, uint64_t elapsed_us)
+{
+	thread->vruntime += vruntime_charge(thread, elapsed_us);
+}
+
+/* Charge `pid` for a slice of up to `elapsed_ms` (`elapsed_us` of virtual
+ * run time); an exhausted quantum lets the next pick rotate to another
+ * runnable app. Privileged time is the API body, recorded separately from
+ * user mode. */
 static void charge_slice(zzapp_kernel_t *kernel, uint32_t pid,
-			 uint32_t elapsed_ms, int privileged)
+			 uint32_t elapsed_ms, uint64_t elapsed_us,
+			 int privileged)
 {
 	zzapp_thread_t *thread = kernel_thread(kernel, pid);
 
@@ -1070,6 +1184,7 @@ static void charge_slice(zzapp_kernel_t *kernel, uint32_t pid,
 		thread->svc_ticks += elapsed_ms;
 	else
 		thread->user_ticks += elapsed_ms;
+	charge_vruntime(thread, elapsed_us);
 
 	/* Clamp only the quantum decrement. */
 	if (thread->quantum_left <= elapsed_ms)
@@ -1148,7 +1263,8 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	pick = choose_app(kernel);
 	if (pick >= 0) {
 charge_app:
-		charge_slice(kernel, (uint32_t)pick, elapsed_ms, 0);
+		charge_slice(kernel, (uint32_t)pick, elapsed_ms,
+			     (uint64_t)elapsed_ms * 1000U, 0);
 		return pick;
 	}
 	return ZZAPP_KERNEL_IDLE;
@@ -1156,21 +1272,25 @@ charge_app:
 int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
 			 zzapp_kernel_dispatch_t source, uint32_t elapsed_ms)
 {
+	int current = -1;
+	int pick;
+
 	if (!kernel)
 		return ZZAPP_KERNEL_IDLE;
 	if (source == ZZAPP_KERNEL_DISPATCH_DOORBELL)
 		zzapp_kernel_service_due(kernel);
 	else if (source == ZZAPP_KERNEL_DISPATCH_VOLUNTARY) {
-		int current = zzapp_kernel_current_thread();
-
-		if (current >= 0 && (uint32_t)current < kernel->capacity)
-			kernel_thread(kernel, (uint32_t)current)->yield_pending = 0U;
+		current = zzapp_kernel_current_thread();
 		if (kernel->active < kernel->capacity) {
 			kernel_thread(kernel, kernel->active)->quantum_left = 0U;
 			kernel->active = ZZAPP_PID_NONE;
 		}
 	}
-	return zzapp_kernel_schedule(kernel, elapsed_ms);
+	pick = zzapp_kernel_schedule(kernel, elapsed_ms);
+	/* The yield is spent once the pick was made without the yielder. */
+	if (current >= 0 && (uint32_t)current < kernel->capacity)
+		kernel_thread(kernel, (uint32_t)current)->yield_pending = 0U;
+	return pick;
 }
 
 int zzapp_kernel_wait_status(const zzapp_kernel_t *kernel, uint32_t pid)
@@ -1223,17 +1343,14 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 	/* The interval since this context was dispatched, not a fixed quantum
 	 * and not zero on a voluntary handoff. */
 	{
-		uint64_t now_ms = zzapp_kernel_now_ms();
-		uint32_t elapsed = 0U;
+		uint64_t now_us = zzapp_kernel_now_us();
+		uint32_t elapsed;
+		uint32_t elapsed_us;
 		int privileged = 0;
 		int was_idle = kernel->idle;
 
-		if (kernel->slice_valid && now_ms >= kernel->slice_started_ms) {
-			uint64_t delta = now_ms - kernel->slice_started_ms;
-
-			elapsed = delta > UINT32_MAX ? UINT32_MAX : (uint32_t)delta;
-		}
-		kernel->slice_started_ms = now_ms;
+		slice_elapsed(kernel, now_us, &elapsed, &elapsed_us);
+		kernel->slice_started_us = now_us;
 		kernel->slice_valid = 1U;
 		kernel->idle = 0U;
 		if (was_idle)
@@ -1246,10 +1363,15 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 			kernel->window_start = kernel->now;
 			kernel->service_in_window = 0;
 		}
-		if (elapsed != 0U && !was_idle) {
-			if (app)
+		if (!was_idle && (elapsed != 0U || elapsed_us != 0U)) {
+			if (app && elapsed != 0U)
 				charge_slice(kernel, (uint32_t)cur, elapsed,
-					     privileged);
+					     elapsed_us, privileged);
+			else if (app)
+				/* Under a millisecond: no tick to count, but
+				 * the time is the app's all the same. */
+				charge_vruntime(thread_at(kernel, (uint32_t)cur),
+						elapsed_us);
 			else {
 				kernel->service_ticks += elapsed;
 				kernel->service_in_window += elapsed;

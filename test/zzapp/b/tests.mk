@@ -61,7 +61,7 @@ $(foreach t,$(B_STANDALONE_TESTS),$(eval $(call B_STANDALONE_RULE,$(t))))
 # kernel, address spaces, commit ledger and retire path, with only the
 # execution of ARM user code substituted. There are no launcher windows: the
 # claims are bounded by the record arena alone.
-B_RT_TESTS := many_apps_test load_end_status_test host_visible_limit_test \
+B_RT_TESTS := many_apps_test load_end_status_test host_visible_limit_test load_weight_test \
 	teardown_test reset_lifecycle_test exit_reset_test lost_client_test \
 	concurrent_load_test
 B_RT_DEPS := b/rt_env.h mock_client.h aar_note_image.h \

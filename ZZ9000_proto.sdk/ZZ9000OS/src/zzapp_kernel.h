@@ -22,6 +22,11 @@
 /* Entries of the wake log ring; independent of the record count. */
 #define ZZAPP_KERNEL_WAKE_LOG 16U
 #define ZZAPP_KERNEL_QUANTUM_MS 5U
+/* Virtual run time is charged in microseconds times this factor, divided by
+ * the app's weight. 2^16 leaves a microsecond at weight 256 a value of 256,
+ * and a weight-1 app takes about nine years of continuous run time to wrap
+ * the 64-bit counter. */
+#define ZZAPP_KERNEL_VRUNTIME_SCALE 65536ULL
 #define ZZAPP_KERNEL_SERVICE_WINDOW_MS 100U
 #define ZZAPP_KERNEL_SERVICE_LIMIT_MS 95U
 /* Covers the 13,216-byte MP3 decode scratch, exception frame, and callers. */
@@ -165,6 +170,12 @@ typedef struct {
 	uint64_t sleep_deadline;
 	uint32_t wake_sequence;
 	uint32_t stack_high_water;
+	/* CPU share weight of the claim, 1..ZZAPP_WEIGHT_MAX; 0 counts as 1. */
+	uint32_t weight;
+	/* Virtual run time: charged microseconds scaled by
+	 * ZZAPP_KERNEL_VRUNTIME_SCALE over the weight. The runnable thread with
+	 * the smallest value runs next. */
+	uint64_t vruntime;
 	zzapp_thread_context_t context;
 } zzapp_thread_t;
 
@@ -199,14 +210,20 @@ typedef struct {
 	uint64_t now;
 	uint64_t service_ticks;
 	uint32_t overload_count;
-	/* The next pick starts at the first runnable pid >= rr_next. */
+	/* Threads of equal virtual run time take turns: the next pick among
+	 * them starts at the first runnable pid >= rr_next. */
 	uint32_t rr_next;
 	uint32_t active;
 	uint32_t service_due;
 	uint64_t window_start;
 	uint32_t service_in_window;
-	uint64_t slice_started_ms;
+	/* Microsecond clock reading at the start of the interval not yet
+	 * charged to a context. */
+	uint64_t slice_started_us;
 	uint32_t slice_valid;
+	/* Monotonic lower bound of the virtual run time of the runnable
+	 * threads: the reference of a start or a wake when none is runnable. */
+	uint64_t vfloor;
 	uint32_t idle;
 	uint64_t idle_ticks;
 	uint32_t wake_serial;
@@ -253,6 +270,13 @@ uint32_t zzapp_kernel_stack_high_water(const zzapp_kernel_t *kernel,
 				       uint32_t pid);
 
 void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t pid);
+/* Sets the CPU share weight of `pid`: 1..ZZAPP_WEIGHT_MAX, or 0 for the
+ * default of 1. -1 for a larger value or a pid outside the capacity. Call it
+ * before zzapp_kernel_start_app: a thread never given a weight counts as 1. */
+int zzapp_kernel_set_weight(zzapp_kernel_t *kernel, uint32_t pid,
+			    uint32_t weight);
+/* Puts the thread on the run list at the smallest virtual run time of the
+ * runnable threads (the monotonic floor when none is runnable). */
 int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t pid);
 /* Builds the first context of `pid` and paints its kernel stack. */
 int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t pid,
@@ -278,9 +302,11 @@ int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t pid,
 		uint64_t deadline);
 void zzapp_kernel_advance(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 void zzapp_kernel_service_due(zzapp_kernel_t *kernel);
+/* The calling thread goes behind its runnable peers for the next pick. */
 void zzapp_kernel_yield(zzapp_kernel_t *kernel);
-/* Milliseconds since boot. Firmware supplies the global timer; tests inject one. */
-uint64_t zzapp_kernel_now_ms(void);
+/* Microseconds since boot. Firmware supplies the global timer; tests inject
+ * one. The scheduler charges run time from this clock at its resolution. */
+uint64_t zzapp_kernel_now_us(void);
 uint64_t zzapp_kernel_now(const zzapp_kernel_t *kernel);
 void zzapp_kernel_idle_begin(zzapp_kernel_t *kernel);
 void zzapp_kernel_idle_end(zzapp_kernel_t *kernel);

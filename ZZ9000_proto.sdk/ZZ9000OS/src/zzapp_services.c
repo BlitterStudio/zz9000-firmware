@@ -4836,6 +4836,7 @@ static int queue_deferred(zzapp_rec_t *rec, uint16_t opcode,
 	    (rec->claim.state == ZZAPP_ST_IDLE ||
 	     rec->claim.state == ZZAPP_ST_CLAIMED)) {
 		uint32_t host_limit;
+		uint32_t weight;
 
 		rec->claim.client_caps =
 			zzapp_get_be32(defer->req + ZZAPP_LOAD_CLIENT_CAPS);
@@ -4847,6 +4848,13 @@ static int queue_deferred(zzapp_rec_t *rec, uint16_t opcode,
 		rec->claim.host_visible_limit = host_limit;
 		zzapp_xport_set_shared_limit(rec, host_limit != 0U ? host_limit :
 					     ZZAPP_HOST_VISIBLE_DEFAULT_BYTES);
+		/* The admission above refused a weight over the bound. The
+		 * word is the client's and can change after it, so a late
+		 * change is held to the bound rather than let into the
+		 * scheduler. */
+		weight = zzapp_xport_cb_read_client(rec, AAR_CB_WEIGHT);
+		rec->claim.weight = weight == 0U ? 1U :
+			weight > ZZAPP_WEIGHT_MAX ? ZZAPP_WEIGHT_MAX : weight;
 	}
 	defer->state = DEFER_POSTED;
 	set_add(&set_core0, rec->hdr.pid);
@@ -4960,6 +4968,7 @@ static uint32_t claim_record(uint32_t *handle_out, uint32_t *token,
 	rec->claim.state = ZZAPP_ST_CLAIMED;
 	rec->claim.memory_limit = 0U;
 	rec->claim.host_visible_limit = 0U;
+	rec->claim.weight = 1U;
 	rec->claim.terminal_reason = ZZAPP_END_NONE;
 	rec->claim.refusal_reason = AAR_REASON_NONE;
 	runtime_of(rec)->claim_started = now_us();
@@ -5167,6 +5176,7 @@ static int record_op(zzapp_rec_t *rec, uint16_t opcode, const uint8_t *req,
 		uint32_t caps = zzapp_get_be32(req + ZZAPP_LOAD_CLIENT_CAPS);
 		uint32_t mib = zzapp_xport_cb_read_client(rec, AAR_CB_PRIVATE_MIB);
 		uint32_t host_mib = zzapp_xport_cb_read_client(rec, AAR_CB_SHARED_MIB);
+		uint32_t weight = zzapp_xport_cb_read_client(rec, AAR_CB_WEIGHT);
 
 		if ((caps & ~ZZAPP_CLIENT_KNOWN) != 0U) {
 			report_rejected_app_op(opcode, "client capability unknown");
@@ -5175,6 +5185,10 @@ static int record_op(zzapp_rec_t *rec, uint16_t opcode, const uint8_t *req,
 		if (mib > UINT32_MAX / (1024U * 1024U) ||
 		    host_mib > UINT32_MAX / (1024U * 1024U)) {
 			report_rejected_app_op(opcode, "load limit above 4095 MiB");
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		if (weight > ZZAPP_WEIGHT_MAX) {
+			report_rejected_app_op(opcode, "weight above 256");
 			return SDK_STATUS_BAD_REQUEST;
 		}
 		/* The limit is a cap, not a reservation: only a request the

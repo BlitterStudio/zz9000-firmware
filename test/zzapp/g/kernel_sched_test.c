@@ -20,11 +20,11 @@ void zzapp_test_kernel_wake_event(void)
 	wake_events++;
 }
 
-uint64_t zzapp_kernel_now_ms(void)
+uint64_t zzapp_kernel_now_us(void)
 {
 	if (test_clock_hook)
 		test_clock_hook();
-	return clock_ms;
+	return clock_ms * 1000U;
 }
 
 uint32_t smp_local_irq_save(void)
@@ -1382,7 +1382,9 @@ static void test_64_threads_round_robin_through_run_list(void)
 		CHECK(THREAD(kernel, pid).user_ticks == 10u);
 
 	/* A stopped thread leaves the rotation, and joins it again at its
-	 * place. */
+	 * place: it starts at the least virtual run time of the others, which
+	 * is behind every thread that already ran this lap, so it runs next
+	 * after the lap. */
 	zzapp_kernel_stop_app(&kernel, 20u);
 	CHECK(zzapp_kernel_run_count(&kernel) == 63u);
 	for (pid = 0u; pid < 20u; pid++)
@@ -1392,7 +1394,8 @@ static void test_64_threads_round_robin_through_run_list(void)
 	CHECK(zzapp_kernel_schedule(&kernel, 5u) == 22);
 	for (pid = 23u; pid < 64u; pid++)
 		CHECK(zzapp_kernel_schedule(&kernel, 5u) == (int)pid);
-	CHECK(zzapp_kernel_schedule(&kernel, 5u) == 0);
+	CHECK(zzapp_kernel_schedule(&kernel, 5u) == 20);
+	CHECK(zzapp_kernel_schedule(&kernel, 5u) == 21);
 }
 
 /* Pids above 31 and above 255, with gaps: the order is still ascending and
@@ -1416,7 +1419,7 @@ static void test_sparse_large_pids_round_robin(void)
 	CHECK(THREAD(kernel, 4).user_ticks == 0u);
 }
 
-static void test_yield_names_the_next_pid(void)
+static void test_yield_skips_the_yielder(void)
 {
 	zzapp_kernel_t kernel;
 
@@ -1426,10 +1429,10 @@ static void test_yield_names_the_next_pid(void)
 	zzapp_kernel_set_current_thread(40);
 	zzapp_kernel_yield(&kernel);
 	CHECK(THREAD(kernel, 40).yield_pending == 1u);
-	CHECK(kernel.rr_next == 41u);
-	/* The next pick after the yield is the one after 40. */
+	/* The next pick after the yield is a peer: the first of equal virtual
+	 * run time in pid order. */
 	kernel.active = ZZAPP_PID_NONE;
-	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u) == 41);
+	CHECK(zzapp_kernel_dispatch(&kernel, ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0u) == 10);
 	CHECK(THREAD(kernel, 40).yield_pending == 0u);
 	/* Nothing else runnable: no yield. */
 	zzapp_kernel_stop_app(&kernel, 10u);
@@ -1808,7 +1811,7 @@ int main(void)
     test_run_list_follows_start_and_stop();
     test_64_threads_round_robin_through_run_list();
     test_sparse_large_pids_round_robin();
-    test_yield_names_the_next_pid();
+    test_yield_skips_the_yielder();
     test_64_sleepers_wake_in_deadline_order();
     test_64_sleepers_with_equal_deadlines_wake_in_sleep_order();
     test_wake_log_keeps_pids_above_255();

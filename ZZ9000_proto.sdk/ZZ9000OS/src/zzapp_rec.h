@@ -159,7 +159,10 @@ typedef struct {
 	uint32_t terminal_reason;
 	/* ZZAPP_CLIENT_* the client announced in LOAD_BEGIN; 0 before it. */
 	uint32_t client_caps;
-	uint32_t reserved[7];
+	/* CPU share weight, 1..ZZAPP_WEIGHT_MAX: AAR_CB_WEIGHT as LOAD_BEGIN
+	 * read it, 0 selecting 1. 1 from the claim until then. */
+	uint32_t weight;
+	uint32_t reserved[6];
 } zzapp_rec_claim_t;
 
 /* Host state of one app (was struct zzapp_host_slot in zzapp_host.c). */

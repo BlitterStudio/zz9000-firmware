@@ -88,3 +88,12 @@ $(BUILD)/g/aar_events_test: g/aar_events_test.c $(A_RUNTIME_OBJS) \
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) \
 		$(BUILD)/a/zzapp_services.o
+
+# Weighted fair share of the scheduler (virtual run time, wake and join
+# rules, yield, sub-millisecond charging) over an injected microsecond clock.
+KERNEL_FAIR_SHARE_TEST_SOURCES := g/kernel_fair_share_test.c $(FW)/zzapp_kernel.c
+KERNEL_FAIR_SHARE_TEST_DEPS := $(FW)/zzapp_kernel.h $(FW)/zzapp_rec.h $(FW)/zzapp_proto.h
+
+$(BUILD)/g/kernel_fair_share_test: $(KERNEL_FAIR_SHARE_TEST_SOURCES) $(KERNEL_FAIR_SHARE_TEST_DEPS) | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -fno-pie -no-pie -o $@ $(KERNEL_FAIR_SHARE_TEST_SOURCES)

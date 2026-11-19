@@ -1762,14 +1762,14 @@ void zzapp_host_sleep(uint32_t us)
 
 uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
 #ifndef ZZAPP_HOST_TEST
-uint64_t zzapp_kernel_now_ms(void)
+uint64_t zzapp_kernel_now_us(void)
 {
-    return zzapp_host_time_us() / 1000u;
+    return zzapp_host_time_us();
 }
 #else
-uint64_t __attribute__((weak)) zzapp_kernel_now_ms(void)
+uint64_t __attribute__((weak)) zzapp_kernel_now_us(void)
 {
-    return zzapp_host_time_us() / 1000u;
+    return zzapp_host_time_us();
 }
 #endif
 
@@ -2217,7 +2217,9 @@ static void run_app(uint32_t argc)
 #else
                                  ZZAPP_AS_WINDOW_BASE + proc->stack_top
 #endif
-                                 ) != 0) {
+                                 ) != 0 ||
+        zzapp_kernel_set_weight(&g_kernel, slot,
+                                life_rec()->claim.weight) != 0) {
         start_failed(slot, AAR_E_INVAL);
         return;
     }
@@ -2986,7 +2988,7 @@ void zzapp_boot_init(void)
     zzapp_as_set_table_fault_hook(table_fault_hook);
     zzapp_loader_memory_init();
     g_cold_restarts = 0;
-    g_kernel.slice_started_ms = zzapp_kernel_now_ms();
+    g_kernel.slice_started_us = zzapp_kernel_now_us();
     g_kernel.slice_valid = 1U;
 #ifdef ZZAPP_HOST_TEST
     g_test_service_hook = NULL;
@@ -3275,7 +3277,7 @@ void zzapp_test_mark_running(void)
     host_slot(slot)->state = ZZAPP_ST_RUNNING;
     zzapp_note_progress();
     begin_tick_observation();
-    g_kernel.slice_started_ms = zzapp_kernel_now_ms();
+    g_kernel.slice_started_us = zzapp_kernel_now_us();
     g_kernel.slice_valid = 1U;
 }
 uint32_t zzapp_test_service_calls(void) { return g_test_service_calls; }

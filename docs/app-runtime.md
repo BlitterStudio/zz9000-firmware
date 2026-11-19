@@ -114,15 +114,38 @@ described below.
 
 The core-1 private timer gives apps a 5 ms quantum. The scheduler first runs
 due system work: SDK tasks, MiniGL service, launcher work, and audio feeding.
-It then selects runnable app threads round-robin. In an overload window,
-service work is limited so runnable apps retain a 5% floor.
+It then selects the runnable app thread with the smallest virtual run time,
+described below. In an overload window, service work is limited so runnable
+apps retain a 5% floor.
 Deferred client operations (`LOAD_BEGIN`, `LOAD_CHUNK`, `LOAD_END`, `START`)
 are selected round-robin across records. Each service pass advances at most
 one record by one bounded step, preserving per-record request order without
 letting a long `LOAD_END` starve another record's `LOAD_BEGIN`, `LOAD_CHUNK`,
 or `START`. The scheduler walks a dense run list of the
 records whose thread is not stopped, not the record capacity
-(`zzapp_kernel.h:186-196`).
+(`zzapp_kernel.h:197-207`).
+
+Apps share the core in proportion to their weights. Every thread keeps a
+virtual run time. Each interval an app runs adds its run time in microseconds,
+scaled by a fixed factor and divided by the app's weight, so a weight-3 app
+advances a third as fast as a weight-1 app and runs three times as long. The
+runnable app with the smallest value runs next. Apps with equal values take
+turns in pid order. The system thread, the service floor, the API lock
+handoff, the 5 ms quantum and the parked and blocked states are unchanged. The
+scheduler reads the microsecond global timer at each switch
+(`zzapp_kernel_now_us`), so run time under a millisecond is charged too;
+the tick counters in `LIST` still count in milliseconds.
+
+The other rules keep one app from taking more than its share. An app that
+starts begins at the smallest virtual run time among the runnable apps, or at
+the floor the scheduler kept (a value that never decreases) when none is
+runnable, so it neither waits for the others to catch up nor makes up for the
+time before it existed. An app that wakes from a block or a sleep takes the
+larger of its own value and the floor less one quantum of run time at its
+weight, so time spent parked is not saved up. A yield puts the app behind its
+runnable peers for the next pick, even if its value is the smallest. A pick
+scans the run list once, so its cost grows with the number of records in it.
+The weight comes from the client: `AAR_CB_WEIGHT`, read at `LOAD_BEGIN`.
 
 A system-service pass runs to completion, and no app runs on core 1 meanwhile.
 A CPU-bound app therefore gets about one service turn per 5 ms timer quantum;
@@ -650,7 +673,7 @@ authoritative. The firmware never rings the client: the client polls
 ### Load, start and stop
 
 `LOAD_BEGIN` reads `AAR_CB_PRIVATE_MIB`, `AAR_CB_SHARED_MIB` and
-`AAR_CB_WEIGHT` from the control block. A value above 4095 returns
+`AAR_CB_WEIGHT` from the control block. A memory limit above 4095 MiB returns
 `BAD_REQUEST`; a shared limit the card cannot grant (the smaller of the
 surface heap and one app's alias window of 62 MiB) returns
 `SDK_STATUS_NO_MEMORY` at once and leaves the claim as it was. Zero selects
@@ -660,6 +683,13 @@ minimum heap commit as well as later growth, and a shared cap is not a
 reservation: nothing is set aside, and an allocation can still fail below the
 cap when the shared heap or the app's alias range is full. The limits last for
 the claim.
+
+`AAR_CB_WEIGHT` is the app's CPU share, described under Scheduling. Zero
+selects 1, 1 to 256 (`ZZAPP_WEIGHT_MAX`) is taken as written, and a larger
+value returns `BAD_REQUEST`, reported as "weight above 256", and leaves the
+claim as it was. The weight is kept in the claim words of the record and goes
+to the app's thread when `START` prepares it. It lasts for the claim: the next
+claim of the record starts from 1.
 
 `LOAD_BEGIN` then allocates the load buffer and the deferred reply (16 bytes)
 names it: the buffer token at 0, its size at 4 (72 KiB), the largest
