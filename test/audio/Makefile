@@ -1,6 +1,5 @@
 CC ?= cc
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror
-		-DXIL_CACHE_MOCK_MODEL \
 
 SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 MOCK_DIR := mock
@@ -80,6 +79,7 @@ $(FABRIC_TARGET): audio_fabric_test.c pump_golden.c pump_golden.h \
 	$(MOCK_DIR)/xil_cache.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DAUDIO_FABRIC_HOST_TEST \
+		-DXIL_CACHE_MOCK_MODEL \
 		-o $@ audio_fabric_test.c \
 		pump_golden.c fabric_test_common.c \
 		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
