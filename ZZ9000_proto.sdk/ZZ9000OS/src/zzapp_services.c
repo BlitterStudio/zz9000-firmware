@@ -3725,11 +3725,16 @@ static void audio_detach(void)
 	(void)was_ahi_route;
 #endif
 	/* The ring goes back with its block pointer cleared first (the
-	 * transport does that), so a replayed teardown frees nothing twice. */
+	 * transport does that), so a replayed teardown frees nothing twice.
+	 * A quarantined claim keeps it: its client maps the ring (the AHI
+	 * route writes READ_FRAME through it) and may still write until it
+	 * learns the handle is stale, so the shell's release returns it with
+	 * the other transport blocks. */
 	state->audio_samples = NULL;
 	state->audio_read_frame = NULL;
 	state->audio_write_frame = NULL;
-	(void)zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO);
+	if (!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_QUARANTINED))
+		(void)zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO);
 	state->audio_staged = 0U;
 	state->audio_first_write_seen = 0U;
 	state->audio_ahi_route = 0;
@@ -5221,8 +5226,13 @@ uint16_t zzapp_mailbox_dispatch(uint16_t opcode, const uint8_t *req,
 	rec = zzapp_xport_resolve(handle, &rc);
 	if (!rec) {
 		/* Nothing changes for a stale handle, except that a
-		 * quarantined shell is released when its old client turns up. */
-		(void)release_stale_quarantine(handle);
+		 * quarantined shell is released when its old client turns up
+		 * with a request it is told the result of. A KICK is posted
+		 * without waiting for the status, so it proves nothing: the
+		 * client would keep its mappings of blocks the release hands
+		 * to another claim. */
+		if (opcode != ZZAPP_OP_KICK)
+			(void)release_stale_quarantine(handle);
 		return SDK_STATUS_BAD_HANDLE;
 	}
 	saved = ctx_save();

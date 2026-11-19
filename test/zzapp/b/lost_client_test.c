@@ -119,8 +119,14 @@ static void test_stale_request_releases_a_lost_app(void)
     assert_quarantined(0U, old_handle);
     assert(RT_STATE(1U) == AAR_STATE_RUNNING);
     assert(RT_REASON(1U) == AAR_END_NONE);
-    /* A stale request of any kind. */
+    /* A doorbell is posted without its status being read: a stale KICK tells
+     * the client nothing and leaves the shell. */
     assert(rt_simple(0U, ZZAPP_OP_KICK) == SDK_STATUS_BAD_HANDLE);
+    assert(zzapp_rec_state(rt_pid[0]) == ZZAPP_REC_RECLAIMED);
+    assert(zzapp_xport_flag_test(rt_rec(0U), ZZAPP_XPORT_F_QUARANTINED));
+    assert(rt_rec(0U)->visible.used == 4096U);
+    /* A request the client is answered releases the shell and every block. */
+    assert(rt_simple(0U, ZZAPP_OP_STOP) == SDK_STATUS_BAD_HANDLE);
     assert(zzapp_rec_state(rt_pid[0]) == ZZAPP_REC_FREE);
     assert(zzapp_rec_by_pid(rt_pid[0])->visible.used == 0U);
     /* The neighbour is untouched and goes at its own release. */

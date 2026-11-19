@@ -1843,6 +1843,48 @@ static void test_audio_ahi(void)
 	CHECK(heap.live == 0U);
 }
 
+/* A lease lost with the AHI stream open: the client maps the ring and writes
+ * READ_FRAME through it, so the quarantined shell keeps the ring until the
+ * shell is released. A stale KICK, which the client posts without reading
+ * its status, releases nothing; a request the client is answered does. */
+static void test_audio_ring_kept_by_quarantine(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle, pid;
+	aar_audio a;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	pid = rec->hdr.pid;
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_AUDIO_AHI;
+	rec->claim.state = ZZAPP_ST_RUNNING;
+	CHECK(zzapp_svc_audio_open(22050U, 2U, &a) == AAR_OK);
+	CHECK(runtime_of(rec)->audio_ahi_route == 1);
+	zzapp_services_set_terminal(ZZAPP_END_LEASE);
+	zzapp_services_on_app_end();
+	CHECK(runtime_of(rec)->audio_request == AUDIO_REQUEST_CLOSE);
+	CHECK(zzapp_rec_retire(pid) == 0);
+	zzapp_services_poll();	/* core 1 quiesces */
+	zzapp_services_core0_poll();
+	CHECK(runtime_of(rec)->audio_request == AUDIO_REQUEST_NONE);
+	CHECK(runtime_of(rec)->audio_open == 0);
+	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_RECLAIMED);
+	CHECK(zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_QUARANTINED));
+	/* The app is gone and its stream is closed, but the ring stays. */
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 1);
+	/* A stale doorbell tells the client nothing. */
+	CHECK(mbox(ZZAPP_OP_KICK, handle, ZZAPP_KICK_CQ_POSTED, 0U, NULL, NULL) ==
+	      SDK_STATUS_BAD_HANDLE);
+	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_RECLAIMED);
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 1);
+	/* A stale request it is answered releases the shell and the ring. */
+	CHECK(mbox(ZZAPP_OP_STOP, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_BAD_HANDLE);
+	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_FREE);
+	CHECK(heap.live == 0U);
+}
+
 /* ---- Lease, quarantine, reset ------------------------------------------------------------------------- */
 
 static void test_lease_and_quarantine(void)
@@ -1932,8 +1974,13 @@ static void test_lease_and_quarantine(void)
 	CHECK(word(&c, AAR_CB_END_REASON) == ZZAPP_END_LEASE);
 	CHECK(word(&c, AAR_CB_STATE) == AAR_STATE_IDLE);
 	CHECK(heap.live == 1U && revoke_visible_calls == 0U);
+	/* A stale KICK is posted without its status being read: it tells the
+	 * client nothing and leaves the shell. */
 	CHECK(mbox(ZZAPP_OP_KICK, handle, ZZAPP_KICK_CQ_POSTED, 0U, NULL, NULL) ==
 	      SDK_STATUS_BAD_HANDLE);
+	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_RECLAIMED && heap.live == 1U);
+	CHECK(revoke_visible_calls == 0U);
+	CHECK(mbox(ZZAPP_OP_STOP, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_BAD_HANDLE);
 	CHECK(zzapp_rec_state(pid) == ZZAPP_REC_FREE && heap.live == 0U);
 	CHECK(revoke_visible_calls == 1U);
 
@@ -2057,6 +2104,7 @@ int main(void)
 	test_display_bad_tokens();
 	test_audio_card();
 	test_audio_ahi();
+	test_audio_ring_kept_by_quarantine();
 	test_lease_and_quarantine();
 	test_reset();
 	test_churn();
