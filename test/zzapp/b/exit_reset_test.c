@@ -246,9 +246,9 @@ static jmp_buf stranded_env;
 static int in_reset_call;
 static int teardown_in_reset_call;
 
-uint64_t zzapp_kernel_now_ms(void)
+uint64_t zzapp_kernel_now_us(void)
 {
-    return kernel_ms;
+    return kernel_ms * 1000U;
 }
 
 /* Returns whether the interrupted context runs again. */
@@ -261,7 +261,7 @@ static int interrupt_teardown(void)
 
     memset(&frame, 0, sizeof(frame));
     kernel->system_context_valid = 1U;
-    kernel->slice_started_ms = kernel_ms;
+    kernel->slice_started_us = kernel_ms * 1000U;
     kernel->slice_valid = 1U;
     kernel->idle = 0U;
     /* The tick only marks service due; a teardown that ran for the service

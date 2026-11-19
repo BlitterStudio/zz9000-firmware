@@ -1,10 +1,11 @@
 /*
  * aar_msg_wait: park until the Amiga queues a client-to-app message. The
  * Amiga posts the message on the completion queue, within its credit, and
- * rings no doorbell the wait depends on: the wait is a level test the core-1
- * service pass repeats; a message that lands between the check and the park
- * is seen by that pass. A message counts as consumed, and hands its credit
- * back through AAR_CB_MSG_CONSUMED, when the app takes it.
+ * rings a doorbell as a hint, but the wait does not depend on it: the wait is
+ * a level test the core-1 service pass repeats; a message that lands between
+ * the check and the park is seen by that pass. A message counts as consumed,
+ * and hands its credit back through AAR_CB_MSG_CONSUMED, when the app takes
+ * it.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

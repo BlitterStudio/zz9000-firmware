@@ -22,6 +22,35 @@
 /* Entries of the wake log ring; independent of the record count. */
 #define ZZAPP_KERNEL_WAKE_LOG 16U
 #define ZZAPP_KERNEL_QUANTUM_MS 5U
+/* Virtual run time is charged in microseconds times this factor, divided by
+ * the app's weight. 2^16 leaves a microsecond at weight 256 a value of 256,
+ * and a weight-1 app takes about nine years of continuous run time to wrap
+ * the 64-bit counter. */
+#define ZZAPP_KERNEL_VRUNTIME_SCALE 65536ULL
+/* The most a woken thread may be behind the floor: one quantum of run time at
+ * weight 1, not divided by the thread's weight. A weight-w thread comes back
+ * up to w quanta of its own run time behind, so it may run that long before
+ * a neighbour is ahead of it. A credit of one quantum at the thread's own
+ * weight is smaller than the quantum of a weight-1 neighbour: a weight-8 app
+ * that blocks for 0.1 ms hands such a neighbour a whole 5 ms quantum, and
+ * the next wake clamps away the 5 ms it ran ahead, so the heavy app lost a
+ * quantum every other wake (model: 66.7 % of the core against an 8/9 share,
+ * 1333 clamps in 2666 wakes; with this credit 88.9 % and none). */
+#define ZZAPP_KERNEL_WAKE_CREDIT \
+	((uint64_t)ZZAPP_KERNEL_QUANTUM_MS * 1000U * ZZAPP_KERNEL_VRUNTIME_SCALE)
+/* Wake granularity: the active app keeps the core until a runnable thread
+ * lags it by more than 1 ms of that thread's own run time. The wake rule
+ * gives a waker up to ZZAPP_KERNEL_WAKE_CREDIT, so a thread
+ * that was parked, or that mostly waits on a client, is behind by more than
+ * this when it wakes and runs at once instead of after the rest of the active
+ * app's quantum. CPU-bound peers lag each other by what one of them ran since
+ * the last pick, so they swap at most once per millisecond of run time and the
+ * switch rate stays bounded. The limit is in virtual run time at weight 1 and
+ * is scaled by the lagging thread's weight, so a heavy interactive app is not
+ * held back by a light spinner. */
+#define ZZAPP_KERNEL_WAKE_GRAN_US 1000U
+#define ZZAPP_KERNEL_WAKE_GRAN \
+	((uint64_t)ZZAPP_KERNEL_WAKE_GRAN_US * ZZAPP_KERNEL_VRUNTIME_SCALE)
 #define ZZAPP_KERNEL_SERVICE_WINDOW_MS 100U
 #define ZZAPP_KERNEL_SERVICE_LIMIT_MS 95U
 /* Covers the 13,216-byte MP3 decode scratch, exception frame, and callers. */
@@ -153,6 +182,73 @@ typedef enum {
 	ZZAPP_KERNEL_SYSTEM = -1
 } zzapp_kernel_pick_t;
 
+#if ZZAPP_PERF_COUNTERS
+/* Park causes of the scheduling counters: 0 is a block with no wait
+ * registered (the API lock), 1..9 the ZZAPP_WAIT_* kind the services
+ * registered with zzapp_kernel_park_kind, ZZAPP_KERNEL_PARK_SLEEP a sleep. */
+#define ZZAPP_KERNEL_PARK_SLEEP 10U
+#define ZZAPP_KERNEL_PARK_KINDS 11U
+
+/* Why the last pick chose its thread. */
+typedef enum {
+	ZZAPP_PICK_NONE = 0,
+	ZZAPP_PICK_SYSTEM,	/* service work first */
+	ZZAPP_PICK_HANDOFF,	/* API lock handed to a waiter */
+	ZZAPP_PICK_OWNER,	/* the API lock owner finishes its call */
+	ZZAPP_PICK_STICKY,	/* the active thread keeps its quantum */
+	ZZAPP_PICK_LAG,		/* a thread lags the active one: wake preemption */
+	ZZAPP_PICK_MIN,		/* smallest virtual run time, none active */
+	ZZAPP_PICK_KINDS
+} zzapp_pick_reason_t;
+
+/* Where a preempted app's core time went to: it was runnable and lost the
+ * core to this. */
+enum {
+	ZZAPP_PREEMPT_SYSTEM = 0,
+	ZZAPP_PREEMPT_LAG,
+	ZZAPP_PREEMPT_QUANTUM,	/* quantum end or a voluntary switch */
+	ZZAPP_PREEMPT_OTHER,	/* API lock handoff or owner */
+	ZZAPP_PREEMPT_KINDS
+};
+
+/* One app's scheduling counters, since its start. Times are microseconds of
+ * zzapp_kernel_now_us. The thread is in exactly one state: on the core (RUN,
+ * counted in run_us), runnable behind another context (WAIT, counted in
+ * wait_sys_us while the system thread has the core and wait_app_us while an
+ * app has it, from snapshots of the kernel's two running totals) or parked
+ * (PARK, counted per cause). */
+typedef struct {
+	uint8_t state;
+	uint8_t park_kind;	/* cause of the park in progress */
+	uint8_t next_kind;	/* cause of the next park, from the services */
+	uint8_t reserved;
+	uint32_t picks;		/* times a dispatch gave the app the core */
+	uint64_t since_us;	/* start of the park in progress */
+	uint64_t snap_sys_us;	/* kernel totals when the wait began */
+	uint64_t snap_app_us;
+	uint64_t run_us;
+	uint64_t wait_sys_us;
+	uint64_t wait_app_us;
+	uint64_t park_us[ZZAPP_KERNEL_PARK_KINDS];
+	uint32_t park_n[ZZAPP_KERNEL_PARK_KINDS];
+	uint32_t wakes;
+	uint32_t clamps;	/* wakes that raised the virtual run time */
+	uint64_t clamp_vr;	/* virtual run time those wakes discarded */
+	uint32_t preempt[ZZAPP_PREEMPT_KINDS];
+	uint32_t deferrals;	/* service held back while this app was picked */
+	/* Dispatch decisions that gave the app the core, by ZZAPP_PICK_*; the
+	 * app that keeps the core counts too. */
+	uint32_t why[ZZAPP_PICK_KINDS];
+	uint32_t yields;	/* yields the app made */
+	uint32_t yields_given;	/* of those, the ones a peer was entitled to */
+	uint32_t yield_skips;	/* picks that passed the app over for a yield
+				 * while its virtual run time was the smallest */
+	uint32_t hold_skips;	/* picks that kept the active app although this
+				 * one was behind it, by less than the wake
+				 * granularity */
+} zzapp_sched_acct_t;
+#endif
+
 typedef struct {
 	zzapp_thread_state_t state;
 	zzapp_wake_reason_t wake_reason;
@@ -165,6 +261,15 @@ typedef struct {
 	uint64_t sleep_deadline;
 	uint32_t wake_sequence;
 	uint32_t stack_high_water;
+	/* CPU share weight of the claim, 1..ZZAPP_WEIGHT_MAX; 0 counts as 1. */
+	uint32_t weight;
+	/* Virtual run time: charged microseconds scaled by
+	 * ZZAPP_KERNEL_VRUNTIME_SCALE over the weight. The runnable thread with
+	 * the smallest value runs next. */
+	uint64_t vruntime;
+#if ZZAPP_PERF_COUNTERS
+	zzapp_sched_acct_t acct;
+#endif
 	zzapp_thread_context_t context;
 } zzapp_thread_t;
 
@@ -199,14 +304,33 @@ typedef struct {
 	uint64_t now;
 	uint64_t service_ticks;
 	uint32_t overload_count;
-	/* The next pick starts at the first runnable pid >= rr_next. */
+	/* Threads of equal virtual run time take turns: the next pick among
+	 * them starts at the first runnable pid >= rr_next. */
 	uint32_t rr_next;
+	/* The thread whose yield is in force (its yield_pending is set), until a
+	 * pick gives the core to an app. */
+	uint32_t yielder;
 	uint32_t active;
 	uint32_t service_due;
 	uint64_t window_start;
 	uint32_t service_in_window;
-	uint64_t slice_started_ms;
+	/* Microsecond clock reading at the start of the interval not yet
+	 * charged to a context. */
+	uint64_t slice_started_us;
 	uint32_t slice_valid;
+	/* Monotonic lower bound of the virtual run time of the runnable
+	 * threads: the reference of a start or a wake when none is runnable. */
+	uint64_t vfloor;
+#if ZZAPP_PERF_COUNTERS
+	/* Microseconds the core spent in the system thread and in apps, up to
+	 * slice_started_us (the idle core is neither). */
+	uint64_t acct_sys_us;
+	uint64_t acct_app_us;
+	zzapp_pick_reason_t pick_reason;
+	uint32_t defer_pending;
+	/* The app that held the core last, whatever the system thread did since. */
+	uint32_t acct_last;
+#endif
 	uint32_t idle;
 	uint64_t idle_ticks;
 	uint32_t wake_serial;
@@ -253,7 +377,19 @@ uint32_t zzapp_kernel_stack_high_water(const zzapp_kernel_t *kernel,
 				       uint32_t pid);
 
 void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t pid);
+/* Sets the CPU share weight of `pid`: 1..ZZAPP_WEIGHT_MAX, or 0 for the
+ * default of 1. -1 for a larger value or a pid outside the capacity. Call it
+ * before zzapp_kernel_start_app: a thread never given a weight counts as 1. */
+int zzapp_kernel_set_weight(zzapp_kernel_t *kernel, uint32_t pid,
+			    uint32_t weight);
+/* Puts the thread on the run list at the smallest virtual run time of the
+ * runnable threads (the monotonic floor when none is runnable). */
 int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t pid);
+/* Names the cause of the next park of `pid` for the scheduling counters
+ * (a ZZAPP_WAIT_* kind of the services, 0 for none). It is used by the next
+ * block and then forgotten. Without ZZAPP_PERF_COUNTERS it does nothing. */
+void zzapp_kernel_park_kind(zzapp_kernel_t *kernel, uint32_t pid,
+			    uint32_t kind);
 /* Builds the first context of `pid` and paints its kernel stack. */
 int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t pid,
 			      uint32_t entry, uint32_t api, uint32_t argc,
@@ -278,9 +414,11 @@ int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t pid,
 		uint64_t deadline);
 void zzapp_kernel_advance(zzapp_kernel_t *kernel, uint32_t elapsed_ms);
 void zzapp_kernel_service_due(zzapp_kernel_t *kernel);
+/* The calling thread goes behind its runnable peers for the next pick. */
 void zzapp_kernel_yield(zzapp_kernel_t *kernel);
-/* Milliseconds since boot. Firmware supplies the global timer; tests inject one. */
-uint64_t zzapp_kernel_now_ms(void);
+/* Microseconds since boot. Firmware supplies the global timer; tests inject
+ * one. The scheduler charges run time from this clock at its resolution. */
+uint64_t zzapp_kernel_now_us(void);
 uint64_t zzapp_kernel_now(const zzapp_kernel_t *kernel);
 void zzapp_kernel_idle_begin(zzapp_kernel_t *kernel);
 void zzapp_kernel_idle_end(zzapp_kernel_t *kernel);
@@ -315,6 +453,12 @@ void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t pid,
 				       int force);
 int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel);
 void zzapp_kernel_perf_print_reports(zzapp_kernel_t *kernel);
+/* The scheduling counters of `pid` as of now, the span in progress included.
+ * 0, or -1 outside the capacity. */
+int zzapp_kernel_sched_snapshot(const zzapp_kernel_t *kernel, uint32_t pid,
+				zzapp_sched_acct_t *out);
+/* Prints the app's "[app] sched" line (docs/app-runtime.md). */
+void zzapp_kernel_sched_report(zzapp_kernel_t *kernel, uint32_t pid);
 void zzapp_kernel_perf_switch_finished(zzapp_kernel_t *kernel);
 extern volatile uint32_t zzapp_kernel_switch_entry_stamp;
 extern volatile uint32_t zzapp_kernel_switch_exit_stamp;

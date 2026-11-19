@@ -709,7 +709,9 @@ static void note_event_drop(aar_xport *x)
 }
 
 /* Posts the pending mouse event: AAR_OK, AAR_E_BUSY (CQ full, still pending),
- * AAR_E_IO. */
+ * AAR_E_IO. A posted event rings the doorbell: an app parked on events is
+ * woken by the card's service pass, which another app on the core would
+ * otherwise delay to the next tick. */
 static int mouse_post(aar_xport *x)
 {
 	int rc;
@@ -721,6 +723,7 @@ static int mouse_post(aar_xport *x)
 	if (rc == AAR_OK) {
 		x->mouse_pending = 0u;
 		x->stats.events_posted++;
+		aar_xport_kick(x, ZZAPP_KICK_CQ_POSTED);
 	}
 	return rc;
 }
@@ -776,6 +779,7 @@ int aar_xport_post_event(aar_xport *x, const aar_event *ev)
 				  x->board.release);
 	if (rc == AAR_OK) {
 		x->stats.events_posted++;
+		aar_xport_kick(x, ZZAPP_KICK_CQ_POSTED);
 		return AAR_OK;
 	}
 	if (rc == AAR_E_BUSY)
@@ -810,8 +814,12 @@ int aar_xport_send_message(aar_xport *x, const void *msg)
 		return AAR_E_INVAL;
 	rc = aar_cb_post_msg(&x->cq, x->cb, &x->msg_posted, msg,
 			     x->board.acquire, x->board.release);
-	if (rc == AAR_OK)
+	if (rc == AAR_OK) {
 		x->stats.msgs_sent++;
+		/* An app parked in aar_msg_wait is woken by the card's service
+		 * pass: ring for it. */
+		aar_xport_kick(x, ZZAPP_KICK_CQ_POSTED);
+	}
 	return rc;
 }
 

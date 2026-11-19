@@ -1636,6 +1636,8 @@ static void test_display_vblank(void)
 	give_space(rec);
 	rec->claim.client_caps = ZZAPP_CLIENT_SCANOUT_ACK;
 	st = runtime_of(rec);
+	uint32_t rings;
+
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
 	cl.ignore = 1;
 	CHECK(zzapp_svc_display_flip_async(1U) == AAR_OK);
@@ -1648,10 +1650,21 @@ static void test_display_vblank(void)
 	client_post(&c, &d);
 	CHECK(zzapp_display_flip_idle() == 0);
 	CHECK(st->display_flip_submit == 1U && st->display_flip_ack == 0U);
+	/* An app parked on the flip is woken by core 1's pass. The vblank ends
+	 * its wait without a KICK, so the acknowledgement rings the doorbell:
+	 * with another app on the core the pass would otherwise wait for the
+	 * next 5 ms tick. A vblank at another address acknowledges nothing and
+	 * rings nothing. */
+	rings = zzapp_services_test_core1_doorbells();
 	zzapp_services_display_vblank(0x12345678U);
 	CHECK(st->display_flip_ack == 0U);
+	CHECK(zzapp_services_test_core1_doorbells() == rings);
 	zzapp_services_display_vblank(st->display_flip_address);
 	CHECK(st->display_flip_ack == 1U);
+	CHECK(zzapp_services_test_core1_doorbells() == rings + 1U);
+	/* The same vblank again has nothing left to acknowledge. */
+	zzapp_services_display_vblank(st->display_flip_address);
+	CHECK(zzapp_services_test_core1_doorbells() == rings + 1U);
 	CHECK(zzapp_display_flip_idle() == 1);
 	/* A completion carrying an error finishes the flip too (no stall). */
 	CHECK(zzapp_svc_display_flip_async(1U) == AAR_OK);

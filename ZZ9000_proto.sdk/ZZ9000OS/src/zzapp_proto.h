@@ -120,7 +120,12 @@
  * (AAR_CB_PRIVATE_MIB, AAR_CB_SHARED_MIB, AAR_CB_WEIGHT). Its request carries
  * only the client's capabilities. It allocates the load buffer, which holds
  * ZZAPP_LOAD_STAGING_BYTES of image staging, then the argv area, and the
- * (deferred) reply names it. */
+ * (deferred) reply names it.
+ *
+ * AAR_CB_WEIGHT is the CPU share weight of the claim for its whole life: 0
+ * selects 1, 1..ZZAPP_WEIGHT_MAX is taken as written, and a larger value
+ * refuses LOAD_BEGIN with SDK_STATUS_BAD_REQUEST. */
+#define ZZAPP_WEIGHT_MAX           256u
 #define ZZAPP_LOAD_CLIENT_CAPS     0u
 #define ZZAPP_LOAD_BEGIN_REQ_BYTES 4u
 #define ZZAPP_LOAD_REPLY_TOKEN     0u  /* token of the load buffer */

@@ -355,7 +355,8 @@ void aar_xport_set_log_sink(aar_xport *x,
 
 /* A message to the app (AAR_MSG_BYTES), subject to its credit
  * (aar_cb_post_msg). AAR_OK; AAR_E_BUSY when the credit or the queue is
- * exhausted; AAR_E_IO; AAR_E_STALE. */
+ * exhausted; AAR_E_IO; AAR_E_STALE. A posted message rings the doorbell
+ * (KICK, CQ_POSTED), so an app parked in aar_msg_wait is woken at once. */
 int aar_xport_send_message(aar_xport *x, const void *msg);
 /* A message from the app: 1 with `msg` filled (AAR_MSG_BYTES), 0 when none,
  * AAR_E_IO. Moves messages in front of the next request into the inbox
@@ -373,7 +374,8 @@ uint32_t aar_xport_message_count(const aar_xport *x);
  * other event first posts the pending mouse event, so the order of keys and
  * clicks is kept. AAR_OK when the event is posted or merged; AAR_E_BUSY when
  * it was dropped because the CQ is full (counted in AAR_CB_EVENTS_DROPPED);
- * AAR_E_STALE.
+ * AAR_E_STALE. Each event that reaches the CQ rings the doorbell (KICK,
+ * CQ_POSTED); a merged one rings nothing.
  */
 int aar_xport_post_event(aar_xport *x, const aar_event *ev);
 /* Posts the pending mouse event if the CQ has room. 1 when nothing is

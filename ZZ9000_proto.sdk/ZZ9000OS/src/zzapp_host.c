@@ -1097,6 +1097,7 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
     snapshot_stop_diagnostics(slot);
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
+    zzapp_kernel_sched_report(&g_kernel, slot);
     if (finish_tlb)
         zzapp_kernel_perf_finish_slot(&g_kernel, slot);
     zzapp_kernel_perf_request_report(&g_kernel, slot, 1);
@@ -1480,18 +1481,6 @@ static void zzapp_private_timer_enable(void)
               XSCUTIMER_CONTROL_ENABLE_MASK);
 }
 
-/* Doorbell SGI while an app runs: let its service tick fire on the next
- * timer count instead of at the end of the 5 ms quantum. The timer then
- * reloads its normal period. */
-void zzapp_private_timer_kick(void)
-{
-    if (!g_private_timer_ready ||
-        !(Xil_In32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_CONTROL_OFFSET) &
-          XSCUTIMER_CONTROL_ENABLE_MASK))
-        return;
-    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_COUNTER_OFFSET, 1u);
-}
-
 void zzapp_private_timer_init_core1(void)
 {
     XScuGic *intc = interrupt_get_intc();
@@ -1518,7 +1507,6 @@ void zzapp_private_timer_init_core1(void)
 void zzapp_private_timer_init_core1(void) {}
 static void zzapp_private_timer_enable(void) {}
 static void zzapp_private_timer_disable(void) {}
-void zzapp_private_timer_kick(void) {}
 #endif
 
 
@@ -1762,14 +1750,14 @@ void zzapp_host_sleep(uint32_t us)
 
 uint64_t zzapp_host_time_us(void) { return ticks_to_us(now_ticks()); }
 #ifndef ZZAPP_HOST_TEST
-uint64_t zzapp_kernel_now_ms(void)
+uint64_t zzapp_kernel_now_us(void)
 {
-    return zzapp_host_time_us() / 1000u;
+    return zzapp_host_time_us();
 }
 #else
-uint64_t __attribute__((weak)) zzapp_kernel_now_ms(void)
+uint64_t __attribute__((weak)) zzapp_kernel_now_us(void)
 {
-    return zzapp_host_time_us() / 1000u;
+    return zzapp_host_time_us();
 }
 #endif
 
@@ -2217,7 +2205,9 @@ static void run_app(uint32_t argc)
 #else
                                  ZZAPP_AS_WINDOW_BASE + proc->stack_top
 #endif
-                                 ) != 0) {
+                                 ) != 0 ||
+        zzapp_kernel_set_weight(&g_kernel, slot,
+                                life_rec()->claim.weight) != 0) {
         start_failed(slot, AAR_E_INVAL);
         return;
     }
@@ -2986,7 +2976,7 @@ void zzapp_boot_init(void)
     zzapp_as_set_table_fault_hook(table_fault_hook);
     zzapp_loader_memory_init();
     g_cold_restarts = 0;
-    g_kernel.slice_started_ms = zzapp_kernel_now_ms();
+    g_kernel.slice_started_us = zzapp_kernel_now_us();
     g_kernel.slice_valid = 1U;
 #ifdef ZZAPP_HOST_TEST
     g_test_service_hook = NULL;
@@ -3005,6 +2995,7 @@ void zzapp_host_exit(int code)
     host->exit_code = (uint32_t)code;
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
+    zzapp_kernel_sched_report(&g_kernel, slot);
     zzapp_kernel_perf_finish_slot(&g_kernel, slot);
     zzapp_kernel_perf_request_report(&g_kernel, slot, 1);
 #endif
@@ -3275,7 +3266,7 @@ void zzapp_test_mark_running(void)
     host_slot(slot)->state = ZZAPP_ST_RUNNING;
     zzapp_note_progress();
     begin_tick_observation();
-    g_kernel.slice_started_ms = zzapp_kernel_now_ms();
+    g_kernel.slice_started_us = zzapp_kernel_now_us();
     g_kernel.slice_valid = 1U;
 }
 uint32_t zzapp_test_service_calls(void) { return g_test_service_calls; }

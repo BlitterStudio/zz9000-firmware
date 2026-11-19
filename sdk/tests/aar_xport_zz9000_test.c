@@ -1309,6 +1309,99 @@ static void test_events_coalescing_and_drops(void)
     CHECK(aar_xport_release(&x) == AAR_OK);
 }
 
+/* Each event and message that reaches the CQ rings one KICK with CQ_POSTED, so
+ * an app parked on it is woken by the card's pass at once. A post that is
+ * refused, held or merged rings nothing, and a bell the mailbox refuses is
+ * kept for the next flush. */
+static void test_events_and_messages_ring_the_doorbell(void)
+{
+    aar_xport x;
+    aar_event ev, got;
+    uint8_t m[AAR_MSG_BYTES] = { 0 };
+    unsigned before;
+    uint32_t i;
+
+    reset_all();
+    claim(&x);
+
+    /* A key and a message: one bell each. */
+    memset(&ev, 0, sizeof(ev));
+    ev.type = AAR_EV_KEY_DOWN; ev.code = 0x20U;
+    before = card.kicks;
+    CHECK(aar_xport_post_event(&x, &ev) == AAR_OK);
+    CHECK(card.kicks == before + 1U && card.last_kick_flags == ZZAPP_KICK_CQ_POSTED);
+    CHECK(zzapp_xport_kick_take(card.rec) == ZZAPP_KICK_CQ_POSTED);
+    before = card.kicks;
+    CHECK(aar_xport_send_message(&x, m) == AAR_OK);
+    CHECK(card.kicks == before + 1U && card.last_kick_flags == ZZAPP_KICK_CQ_POSTED);
+    CHECK(zzapp_xport_kick_take(card.rec) == ZZAPP_KICK_CQ_POSTED);
+    CHECK(zzapp_xport_pump(card.rec) == 2);
+    CHECK(zzapp_xport_take_event(card.rec, &got) == 1);
+
+    /* Motion that goes out at once rings; motion that is merged does not. */
+    memset(&ev, 0, sizeof(ev));
+    ev.type = AAR_EV_MOUSE; ev.dx = 1;
+    before = card.kicks;
+    CHECK(aar_xport_post_event(&x, &ev) == AAR_OK);
+    CHECK(card.kicks == before + 1U);
+    (void)zzapp_xport_kick_take(card.rec);
+    CHECK(zzapp_xport_pump(card.rec) == 1);
+    CHECK(zzapp_xport_take_event(card.rec, &got) == 1);
+
+    /* A full CQ refuses the event, holds the motion: no bell for either. */
+    for (i = 0U; i < 64U; i++) {
+        memset(&ev, 0, sizeof(ev));
+        ev.type = AAR_EV_KEY_UP; ev.code = (uint16_t)i;
+        CHECK(aar_xport_post_event(&x, &ev) == AAR_OK);
+    }
+    before = card.kicks;
+    CHECK(aar_xport_post_event(&x, &ev) == AAR_E_BUSY);
+    CHECK(card.kicks == before);
+    memset(&ev, 0, sizeof(ev));
+    ev.type = AAR_EV_MOUSE; ev.dx = 2;
+    CHECK(aar_xport_post_event(&x, &ev) == AAR_OK);       /* held */
+    CHECK(aar_xport_post_event(&x, &ev) == AAR_OK);       /* merged */
+    CHECK(card.kicks == before);
+    CHECK(aar_xport_send_message(&x, m) == AAR_E_BUSY);   /* no room */
+    CHECK(card.kicks == before);
+    (void)zzapp_xport_kick_take(card.rec);
+    CHECK(zzapp_xport_pump(card.rec) == 64);
+    for (i = 0U; i < 64U; i++)
+        CHECK(zzapp_xport_take_event(card.rec, &got) == 1);
+    /* The held motion goes out once there is room, and rings once. */
+    CHECK(aar_xport_flush_events(&x) == 1);
+    CHECK(card.kicks == before + 1U && card.last_kick_flags == ZZAPP_KICK_CQ_POSTED);
+    (void)zzapp_xport_kick_take(card.rec);
+    CHECK(zzapp_xport_pump(card.rec) == 1);
+    CHECK(zzapp_xport_take_event(card.rec, &got) == 1 && got.dx == 4);
+
+    /* The credit runs out: the messages that fit ring, the refused one not.
+     * The one sent above is still unconsumed, so one credit is gone. */
+    (void)zzapp_xport_pump(card.rec);
+    before = card.kicks;
+    for (i = 0U; i < AAR_MSG_CAPACITY - 1U; i++)
+        CHECK(aar_xport_send_message(&x, m) == AAR_OK);
+    CHECK(card.kicks == before + AAR_MSG_CAPACITY - 1U);
+    CHECK(aar_xport_send_message(&x, m) == AAR_E_BUSY);
+    CHECK(card.kicks == before + AAR_MSG_CAPACITY - 1U);
+    (void)zzapp_xport_kick_take(card.rec);
+    CHECK(zzapp_xport_pump(card.rec) == (int)AAR_MSG_CAPACITY - 1);
+
+    /* The mailbox is busy with the last bell: the event is posted, the bell is
+     * kept and goes out from the next flush. */
+    memset(&ev, 0, sizeof(ev));
+    ev.type = AAR_EV_KEY_DOWN; ev.code = 0x21U;
+    before = card.kicks;
+    card.post_busy = 1U;
+    CHECK(aar_xport_post_event(&x, &ev) == AAR_OK);
+    CHECK(card.kicks == before);
+    aar_xport_flush(&x);
+    CHECK(card.kicks == before + 1U && card.last_kick_flags == ZZAPP_KICK_CQ_POSTED);
+    aar_xport_flush(&x);
+    CHECK(card.kicks == before + 1U);                     /* nothing pending */
+    CHECK(aar_xport_release(&x) == AAR_OK);
+}
+
 static void test_logs(void)
 {
     aar_xport x;
@@ -2076,6 +2169,7 @@ int main(void)
     test_full_inbox_holds_messages_at_the_head();
     test_ringflood_logic();
     test_events_coalescing_and_drops();
+    test_events_and_messages_ring_the_doorbell();
     test_logs();
     test_log_sink();
     test_doorbell();

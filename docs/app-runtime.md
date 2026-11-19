@@ -114,15 +114,73 @@ described below.
 
 The core-1 private timer gives apps a 5 ms quantum. The scheduler first runs
 due system work: SDK tasks, MiniGL service, launcher work, and audio feeding.
-It then selects runnable app threads round-robin. In an overload window,
-service work is limited so runnable apps retain a 5% floor.
+It then selects the runnable app thread with the smallest virtual run time,
+described below. In an overload window, service work is limited so runnable
+apps retain a 5% floor.
 Deferred client operations (`LOAD_BEGIN`, `LOAD_CHUNK`, `LOAD_END`, `START`)
 are selected round-robin across records. Each service pass advances at most
 one record by one bounded step, preserving per-record request order without
 letting a long `LOAD_END` starve another record's `LOAD_BEGIN`, `LOAD_CHUNK`,
 or `START`. The scheduler walks a dense run list of the
 records whose thread is not stopped, not the record capacity
-(`zzapp_kernel.h:186-196`).
+(`zzapp_kernel.h:210-220`).
+
+Apps share the core in proportion to their weights. Every thread keeps a
+virtual run time. Each interval an app runs adds its run time in microseconds,
+scaled by a fixed factor and divided by the app's weight, so a weight-3 app
+advances a third as fast as a weight-1 app and runs three times as long. The
+runnable app with the smallest value runs next. Apps with equal values take
+turns in pid order. The system thread, the service floor, the API lock
+handoff and the parked and blocked states are unchanged. The
+scheduler reads the microsecond global timer at each switch
+(`zzapp_kernel_now_us`), so run time under a millisecond is charged too;
+the tick counters in `LIST` still count in milliseconds.
+
+The running app keeps the core for its 5 ms quantum, with one exception: when
+a runnable app lags it by more than the wake granularity
+(`ZZAPP_KERNEL_WAKE_GRAN_US`, 1 ms of the lagging app's own run time at its
+weight), the next pick takes that app at once. An app that blocks on its
+client several times a frame is woken by a service pass, and the pass hands
+the core back through the same pick, so the app runs as soon as its wake is
+served and not after the rest of the quantum of a CPU-bound app. The rule is
+in `choose_app`, after the system thread, the service floor and the API lock
+owner and handoff picks. CPU-bound apps lag each other only by what one of
+them ran since the last pick, so they change places about once per
+millisecond of run time at most. A sleeper is woken when a switch finds its
+deadline due, at the next tick (`ZZAPP_TICK_US`, 5 ms) at the latest.
+
+The other rules keep one app from taking more than its share. An app that
+starts begins at the smallest virtual run time among the runnable apps, or at
+the floor the scheduler kept (a value that never decreases) when none is
+runnable, so it neither waits for the others to catch up nor makes up for the
+time before it existed. An app that wakes from a block or a sleep takes the
+larger of its own value and the floor less one weight-1 quantum of run time
+(`ZZAPP_KERNEL_WAKE_CREDIT`, 5 ms of virtual run time, not divided by the
+app's weight), so time spent parked is not saved up beyond that. A weight-w
+app therefore comes back up to w quanta of its own run time behind the floor
+and may run that long before a weight-1 neighbour is ahead of it: a weight-8
+app runs 40 ms and a weight-256 app 1.28 s, which is its share at work. The
+first weight-1 app at the floor gets the core back within w * 5 ms plus a
+quantum, and one that was a quantum ahead within twice that. A credit of one
+quantum at the app's own weight is smaller than a weight-1 neighbour's
+quantum: an interactive weight-8 app that blocks for 0.1 ms next to a
+spinner then handed over a whole quantum and lost the 5 ms it ran ahead at
+the next wake, and got 67 % of the core against an 8/9 share in the model.
+A yield puts the app behind a runnable peer for the next pick, even if the
+app's value is the smallest, when the peer is entitled to the core: its
+value is not above the yielder's by more than the wake granularity at the
+peer's weight (the scale of the lag rule). With no such peer the yield does
+nothing and the app keeps the core and its quantum, so an app that yields
+often is not made to hand a quantum to a neighbour that is far ahead. In the
+model a weight-8 app that yields every 1.5 ms next to a weight-1 spin kept
+60 % of the core with the old rule and keeps 8/9 with this one. The kernel
+records the one yielder, and the first pick that gives the core to an app
+spends the yield, whichever context made the pick: a timer interrupt that
+puts the system thread between the yield and the voluntary dispatch does not
+leave the flag set. The active app does not keep its quantum against a
+pending yield. A pick scans the run list once, so its cost grows with the
+number of records in it.
+The weight comes from the client: `AAR_CB_WEIGHT`, read at `LOAD_BEGIN`.
 
 A system-service pass runs to completion, and no app runs on core 1 meanwhile.
 A CPU-bound app therefore gets about one service turn per 5 ms timer quantum;
@@ -263,6 +321,53 @@ those windows only, not the full run, and are per-slot totals of
 micro-TLB refills observed while the slot held the core.
 Histogram percentiles are power-of-two buckets, so the exact maximum is the
 final number in each pair or triplet.
+
+With the counters on, an app's end also prints one `[app] sched slot=N` line
+next to its `svc` line (`zzapp_kernel_sched_report`). It shows where the app's
+time went since `START`, from `zzapp_kernel_now_us`. Times are milliseconds
+with three decimals, and every microsecond of the app's life is in exactly one
+of `run`, `wait_sys`, `wait_app` or a `park_*` total.
+
+- `run`: on the core. `wait_sys`: runnable while the system thread had the
+  core (service passes). `wait_app`: runnable while another app had it.
+  `picks`: times a dispatch gave the app the core.
+- `preempt=sys/lag/quantum/other`: times the app was runnable and lost the
+  core. `sys` counts the switches to the system thread. `lag`, `quantum` and
+  `other` count the pick that then gave the core to another app, by its
+  reason: a lagging (woken) app under the wake rule, the smallest virtual run
+  time after the quantum ended or the app switched voluntarily, and the API
+  lock owner or handoff rules. A wake preemption goes through the system
+  thread, so it adds one to `sys` and one to `lag`.
+- `wakes`, and `clamps=N/ms`: the wakes whose clamp raised the app's virtual
+  run time, and the run time at the app's weight those clamps discarded.
+- `defer`: the number of times service was due and its window budget
+  (`ZZAPP_KERNEL_SERVICE_LIMIT_MS`) was spent while apps were runnable, and
+  this app was the one given the core instead.
+- `why=sticky/lag/min/owner/handoff`: the dispatch decisions that gave the
+  app the core, by reason, counting the app that keeps the core. `sticky` is
+  the active app keeping its quantum, `lag` a lagging thread taking the core
+  from it, `min` the smallest virtual run time when no app is active, `owner`
+  the API lock owner finishing its call and `handoff` the lock passed to a
+  waiter. `time_us` and `should_stop` take no API lock, so an app that only
+  polls them never counts in `owner`.
+- `yields=R/G/S`: yields the app made (R), the ones a peer was entitled to
+  and that put the app behind it for the next pick (G), and the picks that
+  passed the app over for a yield while its virtual run time was the smallest
+  (S). `hold=N`: picks that kept the active app although this one was behind
+  it by less than the wake granularity.
+- `weight=W vr=ms floor=ms`: the weight the scheduler used, the app's virtual
+  run time at its end and the floor, in run-time milliseconds at weight 1.
+  Two apps that share fairly end close together whatever their weights; a
+  weight that is not the one asked for shows here.
+- `park_<cause>=ms/count`: time parked and the number of parks, for each cause
+  that occurred. The causes are `lock` (a block with no wait registered,
+  which is the wait for the API lock), the declared waits `file`, `conwr`,
+  `conrd`, `dispopen`, `flip`, `audio`, `event`, `sqspace` and `audioreq`,
+  and `sleep`.
+
+The counters use two running totals of the core's time, in system and in app
+context, and a thread's wait is the difference of the totals when it began
+and ended, so a switch does no division and walks nothing.
 
 `ZZAPP_SVC_PROBES=1` adds the `svcprobe` veneers used to characterize bare SVC
 paths. It defaults to off and is measurement tooling, not an application ABI.
@@ -647,10 +752,24 @@ data, because the pass also polls parked claims and the queue indices are
 authoritative. The firmware never rings the client: the client polls
 `AAR_CB_SQ_TAIL`.
 
+The doorbell makes the pass run at once: the SGI handler marks service due,
+the interrupt return selects the system thread, and the pass hands the core
+back through the pick described under Scheduling. Without a doorbell the pass
+comes at the next tick (5 ms) while another app is runnable, and when no app
+is runnable the worker polls parked waits continuously. A wait that ends
+without a `KICK` is therefore tick-bound unless its producer rings the
+doorbell. The card rings it when the vblank interrupt acknowledges a flip
+(`zzapp_services_display_vblank`): a client that is synchronised to the
+vblank would otherwise lose a frame to the tick. A message or event the
+client posts on the completion queue rings the doorbell like a reply: the
+client sends a `KICK` with `CQ_POSTED` after each post, and a merged mouse
+event sends none. The wait is still a level test the pass repeats, so a lost
+kick costs latency only.
+
 ### Load, start and stop
 
 `LOAD_BEGIN` reads `AAR_CB_PRIVATE_MIB`, `AAR_CB_SHARED_MIB` and
-`AAR_CB_WEIGHT` from the control block. A value above 4095 returns
+`AAR_CB_WEIGHT` from the control block. A memory limit above 4095 MiB returns
 `BAD_REQUEST`; a shared limit the card cannot grant (the smaller of the
 surface heap and one app's alias window of 62 MiB) returns
 `SDK_STATUS_NO_MEMORY` at once and leaves the claim as it was. Zero selects
@@ -660,6 +779,13 @@ minimum heap commit as well as later growth, and a shared cap is not a
 reservation: nothing is set aside, and an allocation can still fail below the
 cap when the shared heap or the app's alias range is full. The limits last for
 the claim.
+
+`AAR_CB_WEIGHT` is the app's CPU share, described under Scheduling. Zero
+selects 1, 1 to 256 (`ZZAPP_WEIGHT_MAX`) is taken as written, and a larger
+value returns `BAD_REQUEST`, reported as "weight above 256", and leaves the
+claim as it was. The weight is kept in the claim words of the record and goes
+to the app's thread when `START` prepares it. It lasts for the claim: the next
+claim of the record starts from 1.
 
 `LOAD_BEGIN` then allocates the load buffer and the deferred reply (16 bytes)
 names it: the buffer token at 0, its size at 4 (72 KiB), the largest
