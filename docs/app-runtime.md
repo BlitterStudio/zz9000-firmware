@@ -123,7 +123,7 @@ one record by one bounded step, preserving per-record request order without
 letting a long `LOAD_END` starve another record's `LOAD_BEGIN`, `LOAD_CHUNK`,
 or `START`. The scheduler walks a dense run list of the
 records whose thread is not stopped, not the record capacity
-(`zzapp_kernel.h:197-207`).
+(`zzapp_kernel.h:210-220`).
 
 Apps share the core in proportion to their weights. Every thread keeps a
 virtual run time. Each interval an app runs adds its run time in microseconds,
@@ -131,10 +131,23 @@ scaled by a fixed factor and divided by the app's weight, so a weight-3 app
 advances a third as fast as a weight-1 app and runs three times as long. The
 runnable app with the smallest value runs next. Apps with equal values take
 turns in pid order. The system thread, the service floor, the API lock
-handoff, the 5 ms quantum and the parked and blocked states are unchanged. The
+handoff and the parked and blocked states are unchanged. The
 scheduler reads the microsecond global timer at each switch
 (`zzapp_kernel_now_us`), so run time under a millisecond is charged too;
 the tick counters in `LIST` still count in milliseconds.
+
+The running app keeps the core for its 5 ms quantum, with one exception: when
+a runnable app lags it by more than the wake granularity
+(`ZZAPP_KERNEL_WAKE_GRAN_US`, 1 ms of the lagging app's own run time at its
+weight), the next pick takes that app at once. An app that blocks on its
+client several times a frame is woken by a service pass, and the pass hands
+the core back through the same pick, so the app runs as soon as its wake is
+served and not after the rest of the quantum of a CPU-bound app. The rule is
+in `choose_app`, after the system thread, the service floor and the API lock
+owner and handoff picks. CPU-bound apps lag each other only by what one of
+them ran since the last pick, so they change places about once per
+millisecond of run time at most. A sleeper is woken when a switch finds its
+deadline due, at the next tick (`ZZAPP_TICK_US`, 5 ms) at the latest.
 
 The other rules keep one app from taking more than its share. An app that
 starts begins at the smallest virtual run time among the runnable apps, or at

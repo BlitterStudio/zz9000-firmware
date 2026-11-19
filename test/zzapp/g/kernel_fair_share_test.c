@@ -46,6 +46,12 @@ typedef struct {
 	/* Microseconds each pid held the core, from the model's side. */
 	uint64_t ran_us[TEST_RECS];
 	uint64_t last_floor;
+	/* The app that last held the core, and the changes of app since:
+	 * all of them, and those that took the core from an app that was
+	 * still runnable. */
+	int last_app;
+	uint64_t switches;
+	uint64_t preemptions;
 } sim_t;
 
 static sim_t g_sim;
@@ -56,6 +62,7 @@ static sim_t g_sim;
 static void sim_boot(sim_t *sim, uint32_t records)
 {
 	memset(sim, 0, sizeof(*sim));
+	sim->last_app = -1;
 	clock_us = 0U;
 	CHECK(zzapp_kernel_init(&sim->kernel, g_recs, sizeof(g_recs[0]),
 				records) == 0);
@@ -69,10 +76,26 @@ static void sim_add(sim_t *sim, uint32_t pid, uint32_t weight)
 	CHECK(zzapp_kernel_start_app(&sim->kernel, pid) == 0);
 }
 
+static void sim_note_switch(sim_t *sim)
+{
+	int cur = zzapp_kernel_current_thread();
+
+	if (cur < 0)
+		return;
+	if (sim->last_app >= 0 && sim->last_app != cur) {
+		sim->switches++;
+		if (THREAD(sim->kernel, (uint32_t)sim->last_app).state ==
+		    ZZAPP_THREAD_RUNNABLE)
+			sim->preemptions++;
+	}
+	sim->last_app = cur;
+}
+
 static void sim_first_dispatch(sim_t *sim)
 {
 	(void)zzapp_kernel_switch_frame(&sim->kernel, &sim->frame,
 					ZZAPP_KERNEL_DISPATCH_VOLUNTARY, 0U);
+	sim_note_switch(sim);
 }
 
 static void sim_start(sim_t *sim, const uint32_t *weights, uint32_t count)
@@ -97,6 +120,7 @@ static void sim_step(sim_t *sim, uint64_t us, zzapp_kernel_dispatch_t source)
 	 * now ran in user mode. */
 	sim->frame.spsr = ZZAPP_KERNEL_APP_CPSR;
 	(void)zzapp_kernel_switch_frame(&sim->kernel, &sim->frame, source, 4U);
+	sim_note_switch(sim);
 	/* The floor never goes back. */
 	CHECK(sim->kernel.vfloor >= sim->last_floor);
 	sim->last_floor = sim->kernel.vfloor;
@@ -570,6 +594,203 @@ static void test_system_thread_first_and_shares_hold(void)
 	check_proportional(&g_sim, pair, 2U, total);
 }
 
+/* The card's timer tick, and the wake granularity as a run time. The kernel's
+ * own constant is checked where it exists. */
+#define CARD_TICK_US 5000U
+#define GRAN_US 1000U
+#ifdef ZZAPP_KERNEL_WAKE_GRAN_US
+_Static_assert(ZZAPP_KERNEL_WAKE_GRAN_US == GRAN_US, "test granularity");
+#endif
+
+/* A service pass: a tick or the doorbell puts the system thread on the core,
+ * it wakes `wake` (a pid, or -1) the way completion service does, and it
+ * hands the core back, which is where the next pick is made. */
+static void sim_service(sim_t *sim, int wake)
+{
+	zzapp_kernel_service_due(&sim->kernel);
+	sim_step(sim, 0U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == -1);
+	if (wake >= 0)
+		CHECK(zzapp_kernel_wake(&sim->kernel, (uint32_t)wake,
+					ZZAPP_WAKE_READY) == 0);
+	sim_step(sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+}
+
+/* `us` microseconds pass in the current context; the switch comes later. */
+static void sim_run_for(sim_t *sim, uint64_t us)
+{
+	int cur = zzapp_kernel_current_thread();
+
+	if (cur >= 0)
+		sim->ran_us[cur] += us;
+	clock_us += us;
+}
+
+static uint64_t g_ia_max_delay;
+static uint64_t g_ia_wakes;
+
+/* App 0 is CPU-bound at weight 1. App 1, of weight `i_weight`, is the
+ * interactive one: it runs `run_us`, blocks on a client, and is woken `gap_us`
+ * later by a service pass, over and over. The time from each wake to the
+ * app's next run is kept in g_ia_max_delay, the wakes in g_ia_wakes. Time
+ * moves in 100 us steps, with a tick every CARD_TICK_US. */
+static void run_interactive(sim_t *sim, uint32_t i_weight, uint32_t run_us,
+			    uint32_t gap_us, uint64_t total_us)
+{
+	const uint32_t dt = 100U;
+	uint32_t weights[2];
+	uint32_t left = run_us;
+	uint64_t wake_at = 0U;
+	uint64_t woke_at = 0U;
+	uint64_t done;
+	int blocked = 0;
+	int waiting = 0;
+
+	weights[0] = 1U;
+	weights[1] = i_weight;
+	sim_start(sim, weights, 2U);
+	g_ia_max_delay = 0U;
+	g_ia_wakes = 0U;
+	for (done = 0U; done < total_us; done += dt) {
+		if (waiting && zzapp_kernel_current_thread() == 1) {
+			if (clock_us - woke_at > g_ia_max_delay)
+				g_ia_max_delay = clock_us - woke_at;
+			waiting = 0;
+		}
+		sim_run_for(sim, dt);
+		if (zzapp_kernel_current_thread() == 1) {
+			left -= left < dt ? left : dt;
+			if (left == 0U) {
+				CHECK(zzapp_kernel_block(&sim->kernel, 1U) == 0);
+				blocked = 1;
+				wake_at = clock_us + gap_us;
+				left = run_us;
+				/* The blocking call hands the core on. */
+				sim_step(sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+			}
+		}
+		if (blocked && clock_us >= wake_at) {
+			blocked = 0;
+			sim_service(sim, 1);
+			waiting = 1;
+			woke_at = clock_us;
+			g_ia_wakes++;
+		} else if (clock_us % CARD_TICK_US == 0U) {
+			sim_service(sim, -1);
+		}
+	}
+}
+
+/* What the interactive app asks for is its run time per cycle; what it can
+ * have is its weight's share. It gets at least nine tenths of the smaller,
+ * and its wake-to-run delay stays within `delay_us`. */
+static void check_interactive(uint32_t i_weight, uint32_t run_us,
+			      uint32_t gap_us, uint64_t delay_us)
+{
+	const uint64_t total = 2000000U;
+	uint64_t ideal;
+	uint64_t share;
+	uint64_t demand;
+
+	run_interactive(&g_sim, i_weight, run_us, gap_us, total);
+	ideal = total * run_us / (run_us + gap_us);
+	share = total * i_weight / (i_weight + 1U);
+	demand = ideal < share ? ideal : share;
+	if (g_sim.ran_us[1] * 10U < demand * 9U || g_ia_max_delay > delay_us)
+		printf("weight %u run %u gap %u: ran %llu us of %llu, delay %llu us, "
+		       "preemptions %llu\n", (unsigned)i_weight, (unsigned)run_us,
+		       (unsigned)gap_us, (unsigned long long)g_sim.ran_us[1],
+		       (unsigned long long)demand,
+		       (unsigned long long)g_ia_max_delay,
+		       (unsigned long long)g_sim.preemptions);
+	CHECK(g_sim.ran_us[1] * 10U >= demand * 9U);
+	CHECK(g_ia_max_delay <= delay_us);
+	CHECK(g_sim.ran_us[0] + g_sim.ran_us[1] == total);
+	/* The spinner keeps what the interactive app cannot have. */
+	if (ideal >= share)
+		CHECK(g_sim.ran_us[0] * 10U >= (total - share) * 9U);
+}
+
+/* An app that blocks on its client several times a frame gets the core back
+ * when its wake is served, not after the rest of the spinner's quantum. */
+static void test_interactive_app_runs_when_woken(void)
+{
+	/* Wants 91 percent of the core, can have half of it. */
+	check_interactive(1U, 1000U, 100U, CARD_TICK_US);
+	/* Wants 91 percent, can have eight ninths of it. */
+	check_interactive(8U, 1000U, 100U, CARD_TICK_US);
+	/* Wants a sixth of the core: all of it, and at once. */
+	check_interactive(1U, 200U, 1000U, 100U);
+	check_interactive(8U, 200U, 1000U, 100U);
+}
+
+/* Runnable peers do not swap faster than the granularity: with a service pass
+ * every 100 us, two CPU-bound apps change places at most once per millisecond
+ * of run time, and keep their shares. */
+static void test_runnable_peers_swap_once_per_granularity(void)
+{
+	static const uint32_t equal[] = { 1U, 1U };
+	static const uint32_t unequal[] = { 1U, 8U };
+	const uint64_t total = 4ULL * 1000000U;
+	uint64_t done;
+
+	sim_start(&g_sim, equal, 2U);
+	for (done = 0U; done < total; done += 100U) {
+		sim_run_for(&g_sim, 100U);
+		sim_service(&g_sim, -1);
+	}
+	CHECK(g_sim.preemptions <= total / GRAN_US + 1U);
+	check_proportional(&g_sim, equal, 2U, total);
+
+	sim_start(&g_sim, unequal, 2U);
+	for (done = 0U; done < total; done += 100U) {
+		sim_run_for(&g_sim, 100U);
+		sim_service(&g_sim, -1);
+	}
+	CHECK(g_sim.preemptions <= total / GRAN_US + 1U);
+	check_proportional(&g_sim, unequal, 2U, total);
+}
+
+/* Two apps that wake each other: each runs 100 us, blocks and has the other
+ * woken by the service pass. Every change of app is the blocking one: the
+ * wake takes the core from nobody, so there is no extra switch. */
+static void test_mutual_wake_does_not_ping_pong(void)
+{
+	const uint32_t cycles = 5000U;
+	uint32_t i;
+
+	sim_boot(&g_sim, TEST_RECS);
+	sim_add(&g_sim, 0U, 1U);
+	sim_add(&g_sim, 1U, 1U);
+	CHECK(zzapp_kernel_block(&g_sim.kernel, 1U) == 0);
+	sim_first_dispatch(&g_sim);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	for (i = 0U; i < cycles; i++) {
+		int cur = zzapp_kernel_current_thread();
+		int other = 1 - cur;
+
+		CHECK(cur == (int)(i & 1U));
+		sim_run_for(&g_sim, 100U);
+		CHECK(zzapp_kernel_block(&g_sim.kernel, (uint32_t)cur) == 0);
+		sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+		sim_service(&g_sim, other);
+	}
+	CHECK(g_sim.preemptions == 0U);
+	CHECK(g_sim.switches == cycles);
+	CHECK(g_sim.ran_us[0] + g_sim.ran_us[1] == (uint64_t)cycles * 100U);
+}
+
+/* A chatty app next to a spinner takes the core at its wakes and nowhere
+ * else: it never causes more switches than it has wakes. */
+static void test_chatty_app_preempts_once_per_wake(void)
+{
+	run_interactive(&g_sim, 1U, 100U, 100U, 2000000U);
+	CHECK(g_ia_wakes > 1000U);
+	CHECK(g_sim.preemptions <= g_ia_wakes + 1U);
+	CHECK(g_sim.switches <= 2U * g_ia_wakes + 2U);
+	CHECK(g_ia_max_delay <= CARD_TICK_US);
+}
+
 static void run_case(const char *name, void (*fn)(void), int argc, char **argv)
 {
 	unsigned before = (unsigned)failures;
@@ -600,6 +821,10 @@ int main(int argc, char **argv)
 	run_case("submillisecond", test_sub_millisecond_slices_are_charged, argc,
 		 argv);
 	run_case("system", test_system_thread_first_and_shares_hold, argc, argv);
+	run_case("interactive", test_interactive_app_runs_when_woken, argc, argv);
+	run_case("peers", test_runnable_peers_swap_once_per_granularity, argc, argv);
+	run_case("mutual", test_mutual_wake_does_not_ping_pong, argc, argv);
+	run_case("chatty", test_chatty_app_preempts_once_per_wake, argc, argv);
 	printf("kernel_fair_share_test: %u checks, %d failures\n", checks, failures);
 	return failures == 0 ? 0 : 1;
 }

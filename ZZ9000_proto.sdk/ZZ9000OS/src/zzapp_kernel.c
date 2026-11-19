@@ -1102,11 +1102,39 @@ void zzapp_kernel_idle_end(zzapp_kernel_t *kernel)
 	smp_local_irq_restore(irq_state);
 }
 
+/* A runnable thread lags `active` by more than the wake granularity of its
+ * own run time: its value is below the active one's by more than
+ * ZZAPP_KERNEL_WAKE_GRAN_US microseconds at its weight, which is
+ * GRAN / weight in virtual run time. Compared as gap * weight > GRAN so the
+ * pick needs no division; a gap above GRAN is behind at any weight, and
+ * the product stays below 2^26 * 2^8 otherwise. Threads that yielded do not
+ * count: they are passed over for the pick anyway. */
+static int active_is_lagged(const zzapp_kernel_t *kernel,
+			    const zzapp_thread_t *active)
+{
+	uint32_t i;
+
+	for (i = 0U; i < kernel->run_count; i++) {
+		const zzapp_thread_t *thread = kernel_thread(kernel, kernel->run[i]);
+		uint64_t gap;
+
+		if (thread == active || thread->state != ZZAPP_THREAD_RUNNABLE ||
+		    thread->yield_pending || thread->vruntime >= active->vruntime)
+			continue;
+		gap = active->vruntime - thread->vruntime;
+		if (gap > ZZAPP_KERNEL_WAKE_GRAN ||
+		    gap * thread_weight(thread) > ZZAPP_KERNEL_WAKE_GRAN)
+			return 1;
+	}
+	return 0;
+}
+
 /* The runnable thread with the smallest virtual run time. Threads of equal
  * virtual run time take turns: the scan starts at the first pid at or above
  * rr_next and wraps, and only a strictly smaller value displaces the
  * candidate. A thread that yielded is passed over for this pick unless it is
- * the only one runnable. */
+ * the only one runnable. The active thread keeps the core for the rest of its
+ * quantum unless another runnable thread lags it by the wake granularity. */
 static int choose_app(zzapp_kernel_t *kernel)
 {
 	uint32_t count = kernel->run_count;
@@ -1121,7 +1149,8 @@ static int choose_app(zzapp_kernel_t *kernel)
 
 	if (kernel->active < kernel->capacity &&
 	    kernel_thread(kernel, kernel->active)->state == ZZAPP_THREAD_RUNNABLE &&
-	    kernel_thread(kernel, kernel->active)->quantum_left != 0U)
+	    kernel_thread(kernel, kernel->active)->quantum_left != 0U &&
+	    !active_is_lagged(kernel, kernel_thread(kernel, kernel->active)))
 		return (int)kernel->active;
 	for (start = 0U; start < count && kernel->run[start] < kernel->rr_next;
 	     start++)
