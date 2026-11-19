@@ -666,6 +666,35 @@ static void test_yielding_heavy_app_keeps_its_share(void)
 	check_proportional(&g_sim, third, 2U, clock_us);
 }
 
+/* A yield is spent by the first pick that gives the core to an app, whichever
+ * context made the pick. The timer comes between the yield and the SVC return
+ * that would dispatch it, the system thread takes the core and then picks the
+ * peer: the yielder must be eligible again at once, for the lag rule and the
+ * minimum pick, and get its share over a long run. */
+static void test_yield_is_spent_across_the_system_thread(void)
+{
+	static const uint32_t equal[] = { 1U, 1U };
+	const uint64_t total = 20ULL * 1000000U;
+
+	sim_start(&g_sim, equal, 2U);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	zzapp_kernel_yield(&g_sim.kernel);
+	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 1U);
+	zzapp_kernel_service_due(&g_sim.kernel);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == -1);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	CHECK(zzapp_kernel_current_thread() == 1);
+	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 0U);
+	/* The peer has run for 2 ms: the yielder lags it and takes the core. */
+	sim_step(&g_sim, 2000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 0U);
+	sim_clear(&g_sim);
+	sim_run(&g_sim, total, TICK_US);
+	check_proportional(&g_sim, equal, 2U, total);
+}
+
 /* (f) A slice shorter than a millisecond is charged. */
 static void test_sub_millisecond_slices_are_charged(void)
 {
@@ -1353,6 +1382,8 @@ int main(int argc, char **argv)
 	run_case("yield_entitled", test_yield_to_a_peer_that_is_not_entitled_is_nothing,
 		 argc, argv);
 	run_case("yield_heavy", test_yielding_heavy_app_keeps_its_share, argc, argv);
+	run_case("yield_system", test_yield_is_spent_across_the_system_thread, argc,
+		 argv);
 	run_case("submillisecond", test_sub_millisecond_slices_are_charged, argc,
 		 argv);
 	run_case("system", test_system_thread_first_and_shares_hold, argc, argv);

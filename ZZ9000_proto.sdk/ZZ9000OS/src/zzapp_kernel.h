@@ -307,6 +307,9 @@ typedef struct {
 	/* Threads of equal virtual run time take turns: the next pick among
 	 * them starts at the first runnable pid >= rr_next. */
 	uint32_t rr_next;
+	/* The thread whose yield is in force (its yield_pending is set), until a
+	 * pick gives the core to an app. */
+	uint32_t yielder;
 	uint32_t active;
 	uint32_t service_due;
 	uint64_t window_start;

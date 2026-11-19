@@ -173,8 +173,13 @@ peer's weight (the scale of the lag rule). With no such peer the yield does
 nothing and the app keeps the core and its quantum, so an app that yields
 often is not made to hand a quantum to a neighbour that is far ahead. In the
 model a weight-8 app that yields every 1.5 ms next to a weight-1 spin kept
-60 % of the core with the old rule and keeps 8/9 with this one. A pick
-scans the run list once, so its cost grows with the number of records in it.
+60 % of the core with the old rule and keeps 8/9 with this one. The kernel
+records the one yielder, and the first pick that gives the core to an app
+spends the yield, whichever context made the pick: a timer interrupt that
+puts the system thread between the yield and the voluntary dispatch does not
+leave the flag set. The active app does not keep its quantum against a
+pending yield. A pick scans the run list once, so its cost grows with the
+number of records in it.
 The weight comes from the client: `AAR_CB_WEIGHT`, read at `LOAD_BEGIN`.
 
 A system-service pass runs to completion, and no app runs on core 1 meanwhile.

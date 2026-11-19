@@ -664,6 +664,7 @@ static void kernel_attach(zzapp_kernel_t *kernel, void *threads,
 	kernel->active = ZZAPP_PID_NONE;
 	kernel->api_lock_owner = -1;
 	kernel->api_handoff = ZZAPP_PID_NONE;
+	kernel->yielder = ZZAPP_PID_NONE;
 	kernel->gl_owner = -1;
 #if ZZAPP_PERF_COUNTERS
 	kernel->perf.tlb_pid = ZZAPP_PID_NONE;
@@ -1222,6 +1223,16 @@ static int yield_peer_entitled(const zzapp_kernel_t *kernel,
 	       gap * thread_weight(peer) <= ZZAPP_KERNEL_WAKE_GRAN;
 }
 
+/* The yield in force is spent: the first pick that gives the core to an app
+ * ends it, whoever held the core before, the system thread and the idle core
+ * included. One pid records it, so no flag outlives a completed pick. */
+static void yield_spent(zzapp_kernel_t *kernel)
+{
+	if (kernel->yielder < kernel->capacity)
+		kernel_thread(kernel, kernel->yielder)->yield_pending = 0U;
+	kernel->yielder = ZZAPP_PID_NONE;
+}
+
 /* The calling thread goes behind its runnable peers for the next pick, if a
  * peer is entitled to the core. With none the yield is nothing: the caller
  * keeps the core and its quantum, and no peer is handed a quantum it has not
@@ -1247,7 +1258,10 @@ void zzapp_kernel_yield(zzapp_kernel_t *kernel)
 
 		if (pid != (uint32_t)current && peer->state == ZZAPP_THREAD_RUNNABLE &&
 		    yield_peer_entitled(kernel, yielder, peer)) {
+			/* A yield not yet spent by a pick gives way to this one. */
+			yield_spent(kernel);
 			yielder->yield_pending = 1U;
+			kernel->yielder = (uint32_t)current;
 #if ZZAPP_PERF_COUNTERS
 			yielder->acct.yields_given++;
 #endif
@@ -1423,7 +1437,8 @@ static int choose_app(zzapp_kernel_t *kernel)
 
 	if (kernel->active < kernel->capacity &&
 	    kernel_thread(kernel, kernel->active)->state == ZZAPP_THREAD_RUNNABLE &&
-	    kernel_thread(kernel, kernel->active)->quantum_left != 0U) {
+	    kernel_thread(kernel, kernel->active)->quantum_left != 0U &&
+	    !kernel_thread(kernel, kernel->active)->yield_pending) {
 		if (!active_is_lagged(kernel, kernel_thread(kernel, kernel->active))) {
 			PICK_REASON(kernel, ZZAPP_PICK_STICKY);
 			return (int)kernel->active;
@@ -1591,6 +1606,7 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	pick = choose_app(kernel);
 	if (pick >= 0) {
 charge_app:
+		yield_spent(kernel);
 		charge_slice(kernel, (uint32_t)pick, elapsed_ms,
 			     (uint64_t)elapsed_ms * 1000U, 0);
 		return pick;
@@ -1600,7 +1616,6 @@ charge_app:
 int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
 			 zzapp_kernel_dispatch_t source, uint32_t elapsed_ms)
 {
-	int current = -1;
 	int pick;
 
 	if (!kernel)
@@ -1608,16 +1623,12 @@ int zzapp_kernel_dispatch(zzapp_kernel_t *kernel,
 	if (source == ZZAPP_KERNEL_DISPATCH_DOORBELL)
 		zzapp_kernel_service_due(kernel);
 	else if (source == ZZAPP_KERNEL_DISPATCH_VOLUNTARY) {
-		current = zzapp_kernel_current_thread();
 		if (kernel->active < kernel->capacity) {
 			kernel_thread(kernel, kernel->active)->quantum_left = 0U;
 			kernel->active = ZZAPP_PID_NONE;
 		}
 	}
 	pick = zzapp_kernel_schedule(kernel, elapsed_ms);
-	/* The yield is spent once the pick was made without the yielder. */
-	if (current >= 0 && (uint32_t)current < kernel->capacity)
-		kernel_thread(kernel, (uint32_t)current)->yield_pending = 0U;
 	return pick;
 }
 
@@ -1795,11 +1806,7 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 		pick = zzapp_kernel_schedule(kernel, 0U);
 	}
 	ACCT_SWITCH(kernel, cur, app, pick);
-	/* A yield is spent by the next pick that gives the core to an app, by
-	 * whatever dispatch: it cannot keep the yielder out of the lag rule and
-	 * the minimum pick for longer. */
-	if (app && pick >= 0)
-		thread_at(kernel, (uint32_t)cur)->yield_pending = 0U;
+	/* (The pick spent any yield: zzapp_kernel_schedule.) */
 	if ((pick == ZZAPP_KERNEL_SYSTEM || pick == ZZAPP_KERNEL_IDLE) &&
 	    kernel->system_context_valid) {
 		zzapp_kernel_set_current_thread(-1);
@@ -2202,6 +2209,8 @@ void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t pid)
 	if (!thread)
 		return;
 	ACCT_STOP(kernel, thread);
+	if (kernel->yielder == pid)
+		yield_spent(kernel);
 	zzapp_kernel_audio_close(kernel, pid);
 	zzapp_kernel_gl_unbind(kernel, pid, words->resources.gl_generation);
 	memset(&words->resources, 0, sizeof(words->resources));
