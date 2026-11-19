@@ -667,6 +667,7 @@ static void kernel_attach(zzapp_kernel_t *kernel, void *threads,
 	kernel->gl_owner = -1;
 #if ZZAPP_PERF_COUNTERS
 	kernel->perf.tlb_pid = ZZAPP_PID_NONE;
+	kernel->acct_last = ZZAPP_PID_NONE;
 #endif
 	/* The records outlive the scheduler: start every thread STOPPED with no
 	 * stale kernel words. The contexts are rebuilt by prepare_app. */
@@ -767,6 +768,198 @@ static int runnable_vruntime_min(const zzapp_kernel_t *kernel, uint64_t *min)
 	return found;
 }
 
+#if ZZAPP_PERF_COUNTERS
+/* The scheduling counters (zzapp_sched_acct_t). Nothing here divides or
+ * walks the run list: a thread's wait is the difference of two running totals
+ * of the core's time, taken when the wait begins and ends. */
+enum { ACCT_NONE = 0, ACCT_RUN, ACCT_WAIT, ACCT_PARK };
+
+/* The clock and the two totals as of now: the totals are kept to the start of
+ * the interval in progress, which belongs to the context holding the core. */
+static void acct_now(const zzapp_kernel_t *kernel, uint64_t *now,
+		     uint64_t *sys, uint64_t *app)
+{
+	uint64_t delta = 0U;
+
+	*now = zzapp_kernel_now_us();
+	*sys = kernel->acct_sys_us;
+	*app = kernel->acct_app_us;
+	if (kernel->slice_valid && *now > kernel->slice_started_us)
+		delta = *now - kernel->slice_started_us;
+	if (current_thread >= 0)
+		*app += delta;
+	else if (!kernel->idle)
+		*sys += delta;
+}
+
+/* Ends the span in progress. */
+static void acct_close(zzapp_sched_acct_t *a, uint64_t now, uint64_t sys,
+		       uint64_t app)
+{
+	if (a->state == ACCT_WAIT) {
+		a->wait_sys_us += sys - a->snap_sys_us;
+		a->wait_app_us += app - a->snap_app_us;
+	} else if (a->state == ACCT_PARK && now > a->since_us) {
+		a->park_us[a->park_kind] += now - a->since_us;
+	}
+	a->state = ACCT_NONE;
+}
+
+static void acct_wait(zzapp_sched_acct_t *a, uint64_t sys, uint64_t app)
+{
+	a->state = ACCT_WAIT;
+	a->snap_sys_us = sys;
+	a->snap_app_us = app;
+}
+
+static void acct_park(zzapp_sched_acct_t *a, uint32_t kind, uint64_t now)
+{
+	if (kind >= ZZAPP_KERNEL_PARK_KINDS)
+		kind = 0U;
+	a->state = ACCT_PARK;
+	a->park_kind = (uint8_t)kind;
+	a->since_us = now;
+	a->park_n[kind]++;
+}
+
+/* The thread starts: its counters begin at zero, runnable behind the core's
+ * holder. */
+static void acct_start(const zzapp_kernel_t *kernel, zzapp_thread_t *thread)
+{
+	uint64_t now, sys, app;
+
+	memset(&thread->acct, 0, sizeof(thread->acct));
+	acct_now(kernel, &now, &sys, &app);
+	acct_wait(&thread->acct, sys, app);
+}
+
+/* The thread parks for `kind`, or for what the services named. */
+static void acct_block(const zzapp_kernel_t *kernel, zzapp_thread_t *thread,
+		       uint32_t kind)
+{
+	zzapp_sched_acct_t *a = &thread->acct;
+	uint64_t now, sys, app;
+
+	acct_now(kernel, &now, &sys, &app);
+	if (kind == 0U)
+		kind = a->next_kind;
+	a->next_kind = 0U;
+	acct_close(a, now, sys, app);
+	acct_park(a, kind, now);
+}
+
+static void acct_woken(const zzapp_kernel_t *kernel, zzapp_thread_t *thread)
+{
+	zzapp_sched_acct_t *a = &thread->acct;
+	uint64_t now, sys, app;
+
+	acct_now(kernel, &now, &sys, &app);
+	acct_close(a, now, sys, app);
+	acct_wait(a, sys, app);
+	a->wakes++;
+}
+
+/* A stopped thread's counters end with the interval last charged. The clock
+ * is not read: a reset stops every record, and each read would cost one. */
+static void acct_stop(const zzapp_kernel_t *kernel, zzapp_thread_t *thread)
+{
+	acct_close(&thread->acct, kernel->slice_started_us,
+		   kernel->acct_sys_us, kernel->acct_app_us);
+}
+#define ACCT_START(k, t) acct_start((k), (t))
+#define ACCT_BLOCK(k, t, kind) acct_block((k), (t), (kind))
+#define ACCT_WOKEN(k, t) acct_woken((k), (t))
+#define ACCT_STOP(k, t) acct_stop((k), (t))
+#define PICK_REASON(k, r) ((k)->pick_reason = (r))
+#define DEFER_NOTE(k) ((k)->defer_pending++)
+#else
+#define ACCT_START(k, t) ((void)0)
+#define ACCT_BLOCK(k, t, kind) ((void)0)
+#define ACCT_WOKEN(k, t) ((void)0)
+#define ACCT_STOP(k, t) ((void)0)
+#define PICK_REASON(k, r) ((void)0)
+#define DEFER_NOTE(k) ((void)0)
+#endif
+
+void zzapp_kernel_park_kind(zzapp_kernel_t *kernel, uint32_t pid,
+			    uint32_t kind)
+{
+#if ZZAPP_PERF_COUNTERS
+	zzapp_thread_t *thread = kernel_thread(kernel, pid);
+
+	if (thread)
+		thread->acct.next_kind = (uint8_t)(
+			kind < ZZAPP_KERNEL_PARK_SLEEP ? kind : 0U);
+#else
+	(void)kernel;
+	(void)pid;
+	(void)kind;
+#endif
+}
+
+#if ZZAPP_PERF_COUNTERS
+int zzapp_kernel_sched_snapshot(const zzapp_kernel_t *kernel, uint32_t pid,
+				zzapp_sched_acct_t *out)
+{
+	const zzapp_thread_t *thread = kernel_thread(kernel, pid);
+	uint64_t now, sys, app;
+
+	if (!thread || !out)
+		return -1;
+	*out = thread->acct;
+	acct_now(kernel, &now, &sys, &app);
+	if (out->state == ACCT_WAIT) {
+		out->wait_sys_us += sys - out->snap_sys_us;
+		out->wait_app_us += app - out->snap_app_us;
+	} else if (out->state == ACCT_PARK && now > out->since_us) {
+		out->park_us[out->park_kind] += now - out->since_us;
+	} else if (out->state == ACCT_RUN && current_thread == (int)pid &&
+		   kernel->slice_valid && now > kernel->slice_started_us) {
+		out->run_us += now - kernel->slice_started_us;
+	}
+	return 0;
+}
+
+void zzapp_kernel_sched_report(zzapp_kernel_t *kernel, uint32_t pid)
+{
+	static const char *const park_names[ZZAPP_KERNEL_PARK_KINDS] = {
+		"lock", "file", "conwr", "conrd", "dispopen", "flip", "audio",
+		"event", "sqspace", "audioreq", "sleep"
+	};
+	zzapp_sched_acct_t a;
+	uint64_t weight;
+	uint64_t clamp_us;
+	uint32_t kind;
+
+	if (zzapp_kernel_sched_snapshot(kernel, pid, &a) != 0)
+		return;
+	weight = thread_weight(thread_at(kernel, pid));
+	clamp_us = (a.clamp_vr / ZZAPP_KERNEL_VRUNTIME_SCALE) * weight +
+		   (a.clamp_vr % ZZAPP_KERNEL_VRUNTIME_SCALE) * weight /
+		   ZZAPP_KERNEL_VRUNTIME_SCALE;
+#define SCHED_MS(us) (unsigned long)((us) / 1000U), (unsigned long)((us) % 1000U)
+	printf("[app] sched slot=%lu run=%lu.%03lu wait_sys=%lu.%03lu "
+	       "wait_app=%lu.%03lu picks=%lu preempt=%lu/%lu/%lu/%lu wakes=%lu "
+	       "clamps=%lu/%lu.%03lu defer=%lu",
+	       (unsigned long)pid, SCHED_MS(a.run_us), SCHED_MS(a.wait_sys_us),
+	       SCHED_MS(a.wait_app_us), (unsigned long)a.picks,
+	       (unsigned long)a.preempt[ZZAPP_PREEMPT_SYSTEM],
+	       (unsigned long)a.preempt[ZZAPP_PREEMPT_LAG],
+	       (unsigned long)a.preempt[ZZAPP_PREEMPT_QUANTUM],
+	       (unsigned long)a.preempt[ZZAPP_PREEMPT_OTHER],
+	       (unsigned long)a.wakes, (unsigned long)a.clamps,
+	       SCHED_MS(clamp_us), (unsigned long)a.deferrals);
+	for (kind = 0U; kind < ZZAPP_KERNEL_PARK_KINDS; kind++) {
+		if (a.park_n[kind] == 0U)
+			continue;
+		printf(" park_%s=%lu.%03lu/%lu", park_names[kind],
+		       SCHED_MS(a.park_us[kind]), (unsigned long)a.park_n[kind]);
+	}
+#undef SCHED_MS
+	printf("\r\n");
+}
+#endif
+
 void zzapp_kernel_reset_cpu_ticks(zzapp_kernel_t *kernel, uint32_t pid)
 {
 	zzapp_thread_t *thread = kernel_thread(kernel, pid);
@@ -803,6 +996,7 @@ int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t pid)
 	thread->yield_pending = 0U;
 	run_add(kernel, pid);
 	thread->state = ZZAPP_THREAD_RUNNABLE;
+	ACCT_START(kernel, thread);
 	thread->wake_reason = ZZAPP_WAKE_READY;
 	thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
 	return 0;
@@ -884,6 +1078,7 @@ int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t pid)
 		return -1;
 	run_add(kernel, pid);
 	thread->state = ZZAPP_THREAD_BLOCKED;
+	ACCT_BLOCK(kernel, thread, 0U);
 	thread->quantum_left = 0;
 	if (kernel->active == pid)
 		kernel->active = ZZAPP_PID_NONE;
@@ -925,10 +1120,17 @@ int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t pid,
 
 		if (runnable_vruntime_min(kernel, &min) && min > kernel->vfloor)
 			kernel->vfloor = min;
-		if (thread->vruntime + credit < kernel->vfloor)
+		if (thread->vruntime + credit < kernel->vfloor) {
+#if ZZAPP_PERF_COUNTERS
+			thread->acct.clamps++;
+			thread->acct.clamp_vr += kernel->vfloor - credit -
+						 thread->vruntime;
+#endif
 			thread->vruntime = kernel->vfloor - credit;
+		}
 	}
 	thread->state = ZZAPP_THREAD_RUNNABLE;
+	ACCT_WOKEN(kernel, thread);
 	thread->wake_reason = reason;
 	thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
 	thread->wake_sequence = ++kernel->wake_serial;
@@ -955,6 +1157,7 @@ int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t pid,
 		return -1;
 	run_add(kernel, pid);
 	thread->state = ZZAPP_THREAD_SLEEPING;
+	ACCT_BLOCK(kernel, thread, ZZAPP_KERNEL_PARK_SLEEP);
 	thread->sleep_deadline = deadline;
 	thread->wake_sequence = ++kernel->wake_serial;
 	thread->quantum_left = 0;
@@ -1060,6 +1263,10 @@ void zzapp_kernel_idle_begin(zzapp_kernel_t *kernel)
 	now_us = zzapp_kernel_now_us();
 	slice_elapsed(kernel, now_us, &elapsed, &elapsed_us);
 	kernel->slice_started_us = now_us;
+#if ZZAPP_PERF_COUNTERS
+	/* What ran until now was the system thread's pass. */
+	kernel->acct_sys_us += elapsed_us;
+#endif
 	kernel->slice_valid = 1U;
 	zzapp_kernel_advance(kernel, elapsed);
 	if (kernel->now - kernel->window_start > ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
@@ -1146,12 +1353,17 @@ static int choose_app(zzapp_kernel_t *kernel)
 	uint64_t yielded_vr = 0U;
 	uint64_t lowest = 0U;
 	int have_floor = 0;
+	int lagged = 0;
 
 	if (kernel->active < kernel->capacity &&
 	    kernel_thread(kernel, kernel->active)->state == ZZAPP_THREAD_RUNNABLE &&
-	    kernel_thread(kernel, kernel->active)->quantum_left != 0U &&
-	    !active_is_lagged(kernel, kernel_thread(kernel, kernel->active)))
-		return (int)kernel->active;
+	    kernel_thread(kernel, kernel->active)->quantum_left != 0U) {
+		if (!active_is_lagged(kernel, kernel_thread(kernel, kernel->active))) {
+			PICK_REASON(kernel, ZZAPP_PICK_STICKY);
+			return (int)kernel->active;
+		}
+		lagged = 1;
+	}
 	for (start = 0U; start < count && kernel->run[start] < kernel->rr_next;
 	     start++)
 		;
@@ -1183,6 +1395,8 @@ static int choose_app(zzapp_kernel_t *kernel)
 		kernel->active = ZZAPP_PID_NONE;
 		return ZZAPP_KERNEL_IDLE;
 	}
+	(void)lagged;
+	PICK_REASON(kernel, lagged ? ZZAPP_PICK_LAG : ZZAPP_PICK_MIN);
 	kernel->active = pick;
 	kernel->rr_next = pick + 1U;
 	if (kernel_thread(kernel, pick)->quantum_left == 0U)
@@ -1193,6 +1407,9 @@ static int choose_app(zzapp_kernel_t *kernel)
 static void charge_vruntime(zzapp_thread_t *thread, uint64_t elapsed_us)
 {
 	thread->vruntime += vruntime_charge(thread, elapsed_us);
+#if ZZAPP_PERF_COUNTERS
+	thread->acct.run_us += elapsed_us;
+#endif
 }
 
 /* Charge `pid` for a slice of up to `elapsed_ms` (`elapsed_us` of virtual
@@ -1232,6 +1449,7 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 
 	if (!kernel)
 		return ZZAPP_KERNEL_IDLE;
+	PICK_REASON(kernel, ZZAPP_PICK_NONE);
 	zzapp_kernel_advance(kernel, elapsed_ms);
 	if (kernel->now - kernel->window_start > ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
 		kernel->window_start = kernel->now;
@@ -1243,8 +1461,10 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 	    !kernel->api_handoff_service_deferred) {
 		pick = (int)kernel->api_handoff;
 		if (kernel_thread(kernel, kernel->api_handoff)->state ==
-		    ZZAPP_THREAD_RUNNABLE)
+		    ZZAPP_THREAD_RUNNABLE) {
+			PICK_REASON(kernel, ZZAPP_PICK_HANDOFF);
 			goto charge_app;
+		}
 		kernel->api_handoff = ZZAPP_PID_NONE;
 		kernel->api_handoff_service_deferred = 0U;
 	}
@@ -1258,9 +1478,11 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 			    ZZAPP_KERNEL_SERVICE_LIMIT_MS) {
 				kernel->service_ticks += elapsed_ms;
 				kernel->service_in_window += elapsed_ms;
+				PICK_REASON(kernel, ZZAPP_PICK_SYSTEM);
 				return ZZAPP_KERNEL_SYSTEM;
 			}
 			kernel->overload_count++;
+			DEFER_NOTE(kernel);
 			break;
 		}
 	} else if (kernel->api_lock_owner >= 0 &&
@@ -1268,6 +1490,7 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 		   kernel_thread(kernel, (uint32_t)kernel->api_lock_owner)->state ==
 		   ZZAPP_THREAD_RUNNABLE) {
 		pick = kernel->api_lock_owner;
+		PICK_REASON(kernel, ZZAPP_PICK_OWNER);
 		goto charge_app;
 	}
 	if (kernel->service_due &&
@@ -1276,16 +1499,21 @@ int zzapp_kernel_schedule(zzapp_kernel_t *kernel, uint32_t elapsed_ms)
 		kernel->service_due = 0;
 		kernel->service_ticks += elapsed_ms;
 		kernel->service_in_window += elapsed_ms;
+		PICK_REASON(kernel, ZZAPP_PICK_SYSTEM);
 		return ZZAPP_KERNEL_SYSTEM;
 	}
-	if (kernel->service_due && runnable)
+	if (kernel->service_due && runnable) {
 		kernel->overload_count++;
+		DEFER_NOTE(kernel);
+	}
 	if (kernel->api_lock_owner == -1 &&
 	    kernel->api_handoff != ZZAPP_PID_NONE) {
 		pick = (int)kernel->api_handoff;
 		if (kernel_thread(kernel, kernel->api_handoff)->state ==
-		    ZZAPP_THREAD_RUNNABLE)
+		    ZZAPP_THREAD_RUNNABLE) {
+			PICK_REASON(kernel, ZZAPP_PICK_HANDOFF);
 			goto charge_app;
+		}
 		kernel->api_handoff = ZZAPP_PID_NONE;
 		kernel->api_handoff_service_deferred = 0U;
 	}
@@ -1350,6 +1578,83 @@ static zzapp_arm_frame_t *context_restore(const zzapp_thread_context_t *context,
 	return frame;
 }
 
+#if ZZAPP_PERF_COUNTERS
+/* A switch was made: `cur` held the core, `pick` has it now. The totals are
+ * as of the switch, the interval before it already charged. An app that
+ * leaves the core while still runnable begins to wait, and preempt[SYSTEM]
+ * counts it when the system thread takes the core. The app that held the core
+ * last (acct_last, which the system thread's passes in between leave alone)
+ * is preempted by the pick that gives the core to another app while it is
+ * still runnable, counted by that pick's reason: a woken app that lags it
+ * comes through the system thread, so this is where wake preemption shows.
+ * An app that is given the core leaves its wait. */
+static void acct_switch(zzapp_kernel_t *kernel, int cur, int app, int pick)
+{
+	uint64_t now = kernel->slice_started_us;
+	uint64_t sys = kernel->acct_sys_us;
+	uint64_t apps = kernel->acct_app_us;
+
+	if (app && cur != pick) {
+		zzapp_thread_t *thread = thread_at(kernel, (uint32_t)cur);
+
+		if (thread->state == ZZAPP_THREAD_RUNNABLE &&
+		    thread->acct.state == ACCT_RUN) {
+			if (pick < 0 && kernel->pick_reason == ZZAPP_PICK_SYSTEM)
+				thread->acct.preempt[ZZAPP_PREEMPT_SYSTEM]++;
+			acct_wait(&thread->acct, sys, apps);
+			kernel->acct_last = (uint32_t)cur;
+		}
+	}
+	if (pick >= 0 && (uint32_t)pick < kernel->capacity) {
+		zzapp_thread_t *thread = thread_at(kernel, (uint32_t)pick);
+
+		if (kernel->acct_last < kernel->capacity &&
+		    kernel->acct_last != (uint32_t)pick) {
+			zzapp_thread_t *last = thread_at(kernel, kernel->acct_last);
+
+			if (last->state == ZZAPP_THREAD_RUNNABLE &&
+			    last->acct.state == ACCT_WAIT) {
+				uint32_t kind;
+
+				switch (kernel->pick_reason) {
+				case ZZAPP_PICK_LAG:
+					kind = ZZAPP_PREEMPT_LAG;
+					break;
+				case ZZAPP_PICK_MIN:
+					kind = ZZAPP_PREEMPT_QUANTUM;
+					break;
+				default:
+					kind = ZZAPP_PREEMPT_OTHER;
+					break;
+				}
+				last->acct.preempt[kind]++;
+			}
+		}
+		kernel->acct_last = (uint32_t)pick;
+		if (thread->acct.state != ACCT_RUN) {
+			acct_close(&thread->acct, now, sys, apps);
+			thread->acct.state = ACCT_RUN;
+			thread->acct.picks++;
+		}
+		thread->acct.deferrals += kernel->defer_pending;
+		kernel->defer_pending = 0U;
+	}
+}
+#define ACCT_SWITCH(k, cur, app, pick) acct_switch((k), (cur), (app), (pick))
+#define ACCT_TOTALS(k, was_idle, app, us) \
+	do { \
+		if (!(was_idle)) { \
+			if (app) \
+				(k)->acct_app_us += (us); \
+			else \
+				(k)->acct_sys_us += (us); \
+		} \
+	} while (0)
+#else
+#define ACCT_SWITCH(k, cur, app, pick) ((void)0)
+#define ACCT_TOTALS(k, was_idle, app, us) ((void)0)
+#endif
+
 zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 					      zzapp_arm_frame_t *frame,
 					      zzapp_kernel_dispatch_t source,
@@ -1386,6 +1691,7 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 			kernel->idle_ticks += elapsed;
 		if (app && frame)
 			privileged = (frame->spsr & 0x1fU) != ZZAPP_KERNEL_APP_CPSR;
+		ACCT_TOTALS(kernel, was_idle, app, elapsed_us);
 		zzapp_kernel_advance(kernel, elapsed);
 		if (kernel->now - kernel->window_start >
 		    ZZAPP_KERNEL_SERVICE_WINDOW_MS) {
@@ -1416,6 +1722,7 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 		kernel->system_context_valid = 1U;
 		pick = zzapp_kernel_schedule(kernel, 0U);
 	}
+	ACCT_SWITCH(kernel, cur, app, pick);
 	if ((pick == ZZAPP_KERNEL_SYSTEM || pick == ZZAPP_KERNEL_IDLE) &&
 	    kernel->system_context_valid) {
 		zzapp_kernel_set_current_thread(-1);
@@ -1817,6 +2124,7 @@ void zzapp_kernel_stop_app(zzapp_kernel_t *kernel, uint32_t pid)
 
 	if (!thread)
 		return;
+	ACCT_STOP(kernel, thread);
 	zzapp_kernel_audio_close(kernel, pid);
 	zzapp_kernel_gl_unbind(kernel, pid, words->resources.gl_generation);
 	memset(&words->resources, 0, sizeof(words->resources));

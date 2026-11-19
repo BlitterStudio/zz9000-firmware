@@ -300,6 +300,37 @@ micro-TLB refills observed while the slot held the core.
 Histogram percentiles are power-of-two buckets, so the exact maximum is the
 final number in each pair or triplet.
 
+With the counters on, an app's end also prints one `[app] sched slot=N` line
+next to its `svc` line (`zzapp_kernel_sched_report`). It shows where the app's
+time went since `START`, from `zzapp_kernel_now_us`. Times are milliseconds
+with three decimals, and every microsecond of the app's life is in exactly one
+of `run`, `wait_sys`, `wait_app` or a `park_*` total.
+
+- `run`: on the core. `wait_sys`: runnable while the system thread had the
+  core (service passes). `wait_app`: runnable while another app had it.
+  `picks`: times a dispatch gave the app the core.
+- `preempt=sys/lag/quantum/other`: times the app was runnable and lost the
+  core. `sys` counts the switches to the system thread. `lag`, `quantum` and
+  `other` count the pick that then gave the core to another app, by its
+  reason: a lagging (woken) app under the wake rule, the smallest virtual run
+  time after the quantum ended or the app switched voluntarily, and the API
+  lock owner or handoff rules. A wake preemption goes through the system
+  thread, so it adds one to `sys` and one to `lag`.
+- `wakes`, and `clamps=N/ms`: the wakes whose clamp raised the app's virtual
+  run time, and the run time at the app's weight those clamps discarded.
+- `defer`: the number of times service was due and its window budget
+  (`ZZAPP_KERNEL_SERVICE_LIMIT_MS`) was spent while apps were runnable, and
+  this app was the one given the core instead.
+- `park_<cause>=ms/count`: time parked and the number of parks, for each cause
+  that occurred. The causes are `lock` (a block with no wait registered,
+  which is the wait for the API lock), the declared waits `file`, `conwr`,
+  `conrd`, `dispopen`, `flip`, `audio`, `event`, `sqspace` and `audioreq`,
+  and `sleep`.
+
+The counters use two running totals of the core's time, in system and in app
+context, and a thread's wait is the difference of the totals when it began
+and ended, so a switch does no division and walks nothing.
+
 `ZZAPP_SVC_PROBES=1` adds the `svcprobe` veneers used to characterize bare SVC
 paths. It defaults to off and is measurement tooling, not an application ABI.
 Build and run the dedicated probe firmware when enabling it; ordinary firmware

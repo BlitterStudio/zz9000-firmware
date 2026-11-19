@@ -171,6 +171,62 @@ typedef enum {
 	ZZAPP_KERNEL_SYSTEM = -1
 } zzapp_kernel_pick_t;
 
+#if ZZAPP_PERF_COUNTERS
+/* Park causes of the scheduling counters: 0 is a block with no wait
+ * registered (the API lock), 1..9 the ZZAPP_WAIT_* kind the services
+ * registered with zzapp_kernel_park_kind, ZZAPP_KERNEL_PARK_SLEEP a sleep. */
+#define ZZAPP_KERNEL_PARK_SLEEP 10U
+#define ZZAPP_KERNEL_PARK_KINDS 11U
+
+/* Why the last pick chose its thread. */
+typedef enum {
+	ZZAPP_PICK_NONE = 0,
+	ZZAPP_PICK_SYSTEM,	/* service work first */
+	ZZAPP_PICK_HANDOFF,	/* API lock handed to a waiter */
+	ZZAPP_PICK_OWNER,	/* the API lock owner finishes its call */
+	ZZAPP_PICK_STICKY,	/* the active thread keeps its quantum */
+	ZZAPP_PICK_LAG,		/* a thread lags the active one: wake preemption */
+	ZZAPP_PICK_MIN		/* smallest virtual run time, none active */
+} zzapp_pick_reason_t;
+
+/* Where a preempted app's core time went to: it was runnable and lost the
+ * core to this. */
+enum {
+	ZZAPP_PREEMPT_SYSTEM = 0,
+	ZZAPP_PREEMPT_LAG,
+	ZZAPP_PREEMPT_QUANTUM,	/* quantum end or a voluntary switch */
+	ZZAPP_PREEMPT_OTHER,	/* API lock handoff or owner */
+	ZZAPP_PREEMPT_KINDS
+};
+
+/* One app's scheduling counters, since its start. Times are microseconds of
+ * zzapp_kernel_now_us. The thread is in exactly one state: on the core (RUN,
+ * counted in run_us), runnable behind another context (WAIT, counted in
+ * wait_sys_us while the system thread has the core and wait_app_us while an
+ * app has it, from snapshots of the kernel's two running totals) or parked
+ * (PARK, counted per cause). */
+typedef struct {
+	uint8_t state;
+	uint8_t park_kind;	/* cause of the park in progress */
+	uint8_t next_kind;	/* cause of the next park, from the services */
+	uint8_t reserved;
+	uint32_t picks;		/* times a dispatch gave the app the core */
+	uint64_t since_us;	/* start of the park in progress */
+	uint64_t snap_sys_us;	/* kernel totals when the wait began */
+	uint64_t snap_app_us;
+	uint64_t run_us;
+	uint64_t wait_sys_us;
+	uint64_t wait_app_us;
+	uint64_t park_us[ZZAPP_KERNEL_PARK_KINDS];
+	uint32_t park_n[ZZAPP_KERNEL_PARK_KINDS];
+	uint32_t wakes;
+	uint32_t clamps;	/* wakes that raised the virtual run time */
+	uint64_t clamp_vr;	/* virtual run time those wakes discarded */
+	uint32_t preempt[ZZAPP_PREEMPT_KINDS];
+	uint32_t deferrals;	/* service held back while this app was picked */
+} zzapp_sched_acct_t;
+#endif
+
 typedef struct {
 	zzapp_thread_state_t state;
 	zzapp_wake_reason_t wake_reason;
@@ -189,6 +245,9 @@ typedef struct {
 	 * ZZAPP_KERNEL_VRUNTIME_SCALE over the weight. The runnable thread with
 	 * the smallest value runs next. */
 	uint64_t vruntime;
+#if ZZAPP_PERF_COUNTERS
+	zzapp_sched_acct_t acct;
+#endif
 	zzapp_thread_context_t context;
 } zzapp_thread_t;
 
@@ -237,6 +296,16 @@ typedef struct {
 	/* Monotonic lower bound of the virtual run time of the runnable
 	 * threads: the reference of a start or a wake when none is runnable. */
 	uint64_t vfloor;
+#if ZZAPP_PERF_COUNTERS
+	/* Microseconds the core spent in the system thread and in apps, up to
+	 * slice_started_us (the idle core is neither). */
+	uint64_t acct_sys_us;
+	uint64_t acct_app_us;
+	zzapp_pick_reason_t pick_reason;
+	uint32_t defer_pending;
+	/* The app that held the core last, whatever the system thread did since. */
+	uint32_t acct_last;
+#endif
 	uint32_t idle;
 	uint64_t idle_ticks;
 	uint32_t wake_serial;
@@ -291,6 +360,11 @@ int zzapp_kernel_set_weight(zzapp_kernel_t *kernel, uint32_t pid,
 /* Puts the thread on the run list at the smallest virtual run time of the
  * runnable threads (the monotonic floor when none is runnable). */
 int zzapp_kernel_start_app(zzapp_kernel_t *kernel, uint32_t pid);
+/* Names the cause of the next park of `pid` for the scheduling counters
+ * (a ZZAPP_WAIT_* kind of the services, 0 for none). It is used by the next
+ * block and then forgotten. Without ZZAPP_PERF_COUNTERS it does nothing. */
+void zzapp_kernel_park_kind(zzapp_kernel_t *kernel, uint32_t pid,
+			    uint32_t kind);
 /* Builds the first context of `pid` and paints its kernel stack. */
 int zzapp_kernel_prepare_app(zzapp_kernel_t *kernel, uint32_t pid,
 			      uint32_t entry, uint32_t api, uint32_t argc,
@@ -354,6 +428,12 @@ void zzapp_kernel_perf_request_report(zzapp_kernel_t *kernel, uint32_t pid,
 				       int force);
 int zzapp_kernel_perf_emit_reports(zzapp_kernel_t *kernel);
 void zzapp_kernel_perf_print_reports(zzapp_kernel_t *kernel);
+/* The scheduling counters of `pid` as of now, the span in progress included.
+ * 0, or -1 outside the capacity. */
+int zzapp_kernel_sched_snapshot(const zzapp_kernel_t *kernel, uint32_t pid,
+				zzapp_sched_acct_t *out);
+/* Prints the app's "[app] sched" line (docs/app-runtime.md). */
+void zzapp_kernel_sched_report(zzapp_kernel_t *kernel, uint32_t pid);
 void zzapp_kernel_perf_switch_finished(zzapp_kernel_t *kernel);
 extern volatile uint32_t zzapp_kernel_switch_entry_stamp;
 extern volatile uint32_t zzapp_kernel_switch_exit_stamp;

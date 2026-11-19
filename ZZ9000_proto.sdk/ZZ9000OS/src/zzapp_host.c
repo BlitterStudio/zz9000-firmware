@@ -1097,6 +1097,7 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
     snapshot_stop_diagnostics(slot);
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
+    zzapp_kernel_sched_report(&g_kernel, slot);
     if (finish_tlb)
         zzapp_kernel_perf_finish_slot(&g_kernel, slot);
     zzapp_kernel_perf_request_report(&g_kernel, slot, 1);
@@ -2994,6 +2995,7 @@ void zzapp_host_exit(int code)
     host->exit_code = (uint32_t)code;
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
+    zzapp_kernel_sched_report(&g_kernel, slot);
     zzapp_kernel_perf_finish_slot(&g_kernel, slot);
     zzapp_kernel_perf_request_report(&g_kernel, slot, 1);
 #endif

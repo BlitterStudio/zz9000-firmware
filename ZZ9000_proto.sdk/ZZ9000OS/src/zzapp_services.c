@@ -201,6 +201,12 @@ enum zzapp_wait_kind {
 	ZZAPP_WAIT_SQ_SPACE,
 	ZZAPP_WAIT_AUDIO_REQ
 };
+#if ZZAPP_PERF_COUNTERS
+/* The scheduling counters name the park cause by this value (zzapp_kernel.c,
+ * zzapp_kernel_sched_report). */
+_Static_assert(ZZAPP_WAIT_AUDIO_REQ < ZZAPP_KERNEL_PARK_SLEEP,
+	       "wait kinds fit the park causes");
+#endif
 
 /* The one mailbox op in flight per record (LOAD_BEGIN, LOAD_CHUNK, LOAD_END,
  * START); its reply is harvested by core 0. */
@@ -546,6 +552,9 @@ static void wait_begin(enum zzapp_wait_kind kind, uint32_t value,
 	state->wait_kind = kind;
 	state->wait_value = value;
 	state->wait_deadline = deadline;
+	/* The scheduling counters split the park by this kind. */
+	zzapp_kernel_park_kind(zzapp_runtime_kernel(), service_pid(),
+			       (uint32_t)kind);
 	slot_state_lock_acquire();
 	set_add(&set_svc, service_pid());
 	slot_state_lock_release();
@@ -560,6 +569,7 @@ static void wait_end(void)
 	state->wait_kind = ZZAPP_WAIT_NONE;
 	state->wait_value = 0U;
 	state->wait_deadline = 0U;
+	zzapp_kernel_park_kind(zzapp_runtime_kernel(), service_pid(), 0U);
 }
 
 int zzapp_services_wait_registered(uint32_t pid)
@@ -669,6 +679,14 @@ __attribute__((weak)) int zzapp_kernel_wake(zzapp_kernel_t *kernel,
 	rec->thread.state = ZZAPP_THREAD_RUNNABLE;
 	rec->thread.wake_reason = reason;
 	return 0;
+}
+
+__attribute__((weak)) void zzapp_kernel_park_kind(zzapp_kernel_t *kernel,
+						  uint32_t pid, uint32_t kind)
+{
+	(void)kernel;
+	(void)pid;
+	(void)kind;
 }
 
 __attribute__((weak)) int zzapp_kernel_surface_bind(zzapp_kernel_t *kernel,

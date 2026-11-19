@@ -791,6 +791,153 @@ static void test_chatty_app_preempts_once_per_wake(void)
 	CHECK(g_ia_max_delay <= CARD_TICK_US);
 }
 
+#if ZZAPP_PERF_COUNTERS
+static zzapp_sched_acct_t sched_of(sim_t *sim, uint32_t pid)
+{
+	zzapp_sched_acct_t a;
+
+	CHECK(zzapp_kernel_sched_snapshot(&sim->kernel, pid, &a) == 0);
+	return a;
+}
+
+static uint64_t sched_total(const zzapp_sched_acct_t *a)
+{
+	uint64_t total = a->run_us + a->wait_sys_us + a->wait_app_us;
+	uint32_t kind;
+
+	for (kind = 0U; kind < ZZAPP_KERNEL_PARK_KINDS; kind++)
+		total += a->park_us[kind];
+	return total;
+}
+
+/* A scripted run of two apps with every split known (times in us):
+ *   0..5000      A runs its quantum, B waits behind it
+ *   5000..7000   B runs, then the tick calls the system thread
+ *   7000..8500   system pass: both apps wait behind it
+ *   8500..11500  B finishes its quantum, A waits behind it
+ *   11500..12500 A runs, then parks on a file
+ *   12500..24500 B runs alone; A is parked
+ *   24500        a pass wakes A, 12 ms behind B: the wake raises its virtual
+ *                run time by 6 ms, and A takes the core from B
+ *   24500..27500 A runs.
+ * Every app's time is in exactly one of run, wait or park. */
+static void test_sched_counters_split_the_time(void)
+{
+	static const uint32_t pair[] = { 1U, 1U };
+	zzapp_sched_acct_t a, b;
+
+	sim_start(&g_sim, pair, 2U);
+	sim_step(&g_sim, 5000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == 1);
+	zzapp_kernel_service_due(&g_sim.kernel);
+	sim_step(&g_sim, 2000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == -1);
+	sim_step(&g_sim, 1500U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	CHECK(zzapp_kernel_current_thread() == 1);
+	sim_step(&g_sim, 3000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	sim_run_for(&g_sim, 1000U);
+	zzapp_kernel_park_kind(&g_sim.kernel, 0U, 1U);
+	CHECK(zzapp_kernel_block(&g_sim.kernel, 0U) == 0);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	CHECK(zzapp_kernel_current_thread() == 1);
+	sim_run(&g_sim, 12000U, TICK_US);
+	sim_service(&g_sim, 0);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	sim_step(&g_sim, 3000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	CHECK(clock_us == 27500U);
+
+	a = sched_of(&g_sim, 0U);
+	CHECK(a.run_us == 9000U);
+	CHECK(a.wait_sys_us == 1500U && a.wait_app_us == 5000U);
+	CHECK(a.picks == 3U);
+	CHECK(a.preempt[ZZAPP_PREEMPT_SYSTEM] == 0U &&
+	      a.preempt[ZZAPP_PREEMPT_LAG] == 0U &&
+	      a.preempt[ZZAPP_PREEMPT_QUANTUM] == 1U &&
+	      a.preempt[ZZAPP_PREEMPT_OTHER] == 0U);
+	CHECK(a.park_us[1] == 12000U && a.park_n[1] == 1U);
+	CHECK(a.park_n[0] == 0U && a.park_n[ZZAPP_KERNEL_PARK_SLEEP] == 0U);
+	CHECK(a.wakes == 1U && a.clamps == 1U);
+	CHECK(a.clamp_vr == 6000ULL * ZZAPP_KERNEL_VRUNTIME_SCALE);
+	CHECK(a.deferrals == 0U);
+	CHECK(sched_total(&a) == clock_us);
+
+	b = sched_of(&g_sim, 1U);
+	CHECK(b.run_us == 17000U);
+	CHECK(b.wait_sys_us == 1500U && b.wait_app_us == 9000U);
+	CHECK(b.picks == 3U);
+	CHECK(b.preempt[ZZAPP_PREEMPT_SYSTEM] == 2U &&
+	      b.preempt[ZZAPP_PREEMPT_LAG] == 1U &&
+	      b.preempt[ZZAPP_PREEMPT_QUANTUM] == 1U &&
+	      b.preempt[ZZAPP_PREEMPT_OTHER] == 0U);
+	CHECK(b.wakes == 0U && b.clamps == 0U && b.clamp_vr == 0U);
+	CHECK(b.park_n[1] == 0U);
+	CHECK(sched_total(&b) == clock_us);
+	/* The counters start over with the app. */
+	CHECK(zzapp_kernel_start_app(&g_sim.kernel, 2U) == 0);
+	b = sched_of(&g_sim, 2U);
+	CHECK(b.run_us == 0U && b.picks == 0U && b.wakes == 0U);
+}
+
+/* The park causes: a wait kind the services named, a block with none (the API
+ * lock) and a sleep, each with its own total and count. The kind is used by
+ * one block only. */
+static void test_sched_counters_split_parks_by_cause(void)
+{
+	static const uint32_t pair[] = { 1U, 1U };
+	zzapp_sched_acct_t a;
+	int guard;
+
+	sim_start(&g_sim, pair, 2U);
+	sim_run_for(&g_sim, 1000U);
+	zzapp_kernel_park_kind(&g_sim.kernel, 0U, 5U);		/* flip */
+	CHECK(zzapp_kernel_block(&g_sim.kernel, 0U) == 0);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	sim_step(&g_sim, 3000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	sim_service(&g_sim, 0);					/* t = 4000 */
+	CHECK(zzapp_kernel_current_thread() == 0);
+	sim_run_for(&g_sim, 1000U);
+	CHECK(zzapp_kernel_block(&g_sim.kernel, 0U) == 0);	/* no kind: lock */
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	sim_step(&g_sim, 2000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	sim_service(&g_sim, 0);					/* t = 7000 */
+	CHECK(zzapp_kernel_current_thread() == 0);
+	sim_run_for(&g_sim, 500U);
+	CHECK(zzapp_kernel_sleep(&g_sim.kernel, 0U,
+				 zzapp_kernel_now(&g_sim.kernel) + 3U) == 0);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);	/* t = 7500 */
+	for (guard = 0; guard < 100 &&
+	     THREAD(g_sim.kernel, 0U).state == ZZAPP_THREAD_SLEEPING; guard++)
+		sim_step(&g_sim, TICK_US, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(clock_us == 10500U);
+
+	a = sched_of(&g_sim, 0U);
+	CHECK(a.park_us[5] == 3000U && a.park_n[5] == 1U);
+	CHECK(a.park_us[0] == 2000U && a.park_n[0] == 1U);
+	CHECK(a.park_us[ZZAPP_KERNEL_PARK_SLEEP] == 3000U &&
+	      a.park_n[ZZAPP_KERNEL_PARK_SLEEP] == 1U);
+	CHECK(a.wakes == 3U);
+	CHECK(sched_total(&a) == clock_us);
+}
+
+/* A pick that gives the core to an app while service is due and its window
+ * budget is spent counts against that app. */
+static void test_sched_counters_count_service_deferrals(void)
+{
+	static const uint32_t pair[] = { 1U, 1U };
+
+	sim_start(&g_sim, pair, 2U);
+	g_sim.kernel.service_in_window = ZZAPP_KERNEL_SERVICE_LIMIT_MS + 1U;
+	zzapp_kernel_service_due(&g_sim.kernel);
+	sim_step(&g_sim, 1000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	CHECK(g_sim.kernel.overload_count == 1U);
+	CHECK(sched_of(&g_sim, 0U).deferrals == 1U);
+	CHECK(sched_of(&g_sim, 1U).deferrals == 0U);
+}
+#endif
+
 static void run_case(const char *name, void (*fn)(void), int argc, char **argv)
 {
 	unsigned before = (unsigned)failures;
@@ -825,6 +972,13 @@ int main(int argc, char **argv)
 	run_case("peers", test_runnable_peers_swap_once_per_granularity, argc, argv);
 	run_case("mutual", test_mutual_wake_does_not_ping_pong, argc, argv);
 	run_case("chatty", test_chatty_app_preempts_once_per_wake, argc, argv);
+#if ZZAPP_PERF_COUNTERS
+	run_case("sched_split", test_sched_counters_split_the_time, argc, argv);
+	run_case("sched_park", test_sched_counters_split_parks_by_cause, argc,
+		 argv);
+	run_case("sched_defer", test_sched_counters_count_service_deferrals, argc,
+		 argv);
+#endif
 	printf("kernel_fair_share_test: %u checks, %d failures\n", checks, failures);
 	return failures == 0 ? 0 : 1;
 }
