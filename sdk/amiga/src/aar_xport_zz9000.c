@@ -1300,8 +1300,15 @@ static int amiga_call(void *user, uint16_t opcode, const uint8_t *payload,
 					}
 					status = ZZ9KPollAtBase(a->zz9k, 1u,
 								&done);
-					if (status != ZZ9K_STATUS_OK)
+					if (status != ZZ9K_STATUS_OK) {
+						/* The request lives on this
+						 * stack frame: unlink it from
+						 * the library's pending list
+						 * before it goes. */
+						(void)ZZ9KCancelAsyncAtBase(
+							a->zz9k, &async);
 						return status;
+					}
 					if (async.completed)
 						break;
 					if (amiga_now_ms(a) - op_started >=
