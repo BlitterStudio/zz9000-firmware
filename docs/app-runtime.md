@@ -683,6 +683,18 @@ data, because the pass also polls parked claims and the queue indices are
 authoritative. The firmware never rings the client: the client polls
 `AAR_CB_SQ_TAIL`.
 
+The doorbell makes the pass run at once: the SGI handler marks service due,
+the interrupt return selects the system thread, and the pass hands the core
+back through the pick described under Scheduling. Without a doorbell the pass
+comes at the next tick (5 ms) while another app is runnable, and when no app
+is runnable the worker polls parked waits continuously. A wait that ends
+without a `KICK` is therefore tick-bound unless its producer rings the
+doorbell. The card rings it when the vblank interrupt acknowledges a flip
+(`zzapp_services_display_vblank`): a client that is synchronised to the
+vblank would otherwise lose a frame to the tick. A message or event the
+client posts on the completion queue rings nothing, and an app parked in
+`aar_msg_wait` sees it at the next pass.
+
 ### Load, start and stop
 
 `LOAD_BEGIN` reads `AAR_CB_PRIVATE_MIB`, `AAR_CB_SHARED_MIB` and

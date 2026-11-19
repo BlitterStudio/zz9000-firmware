@@ -511,6 +511,29 @@ static int wait_status(void)
 	return AAR_OK;
 }
 
+/* Asks core 1 for a service pass: the doorbell SGI interrupts the running app
+ * and the pass runs at once, where waiting for the next 5 ms tick would delay
+ * every parked app behind whatever else holds the core. Whoever makes a
+ * parked wait ready without the client's KICK rings it. Host builds count the
+ * rings. */
+#ifdef ZZAPP_HOST_TEST
+static uint32_t core1_doorbells;
+
+uint32_t zzapp_services_test_core1_doorbells(void)
+{
+	return core1_doorbells;
+}
+#endif
+
+static void ring_core1(void)
+{
+#ifdef ZZAPP_HOST_TEST
+	core1_doorbells++;
+#else
+	scheduler_core1_publish();
+#endif
+}
+
 /* Registers the wait with the system pass: the record joins the set the pass
  * walks, and stays in it until its wait and its console output are done. */
 static void wait_begin(enum zzapp_wait_kind kind, uint32_t value,
@@ -2739,8 +2762,9 @@ int zzapp_display_latest(void)
 	return state && display_mailbox_enabled();
 }
 
-/* One record of the vblank pass; the caller holds g_slot_state_lock. */
-static void display_vblank_locked(zzapp_rec_t *rec, uint32_t scanout_address)
+/* One record of the vblank pass; the caller holds g_slot_state_lock. 1 when
+ * it acknowledged the flip a parked app may be waiting for. */
+static int display_vblank_locked(zzapp_rec_t *rec, uint32_t scanout_address)
 {
 	struct zzapp_service_runtime *state = runtime_of(rec);
 	uint32_t gen;
@@ -2748,20 +2772,26 @@ static void display_vblank_locked(zzapp_rec_t *rec, uint32_t scanout_address)
 	if (!state->display_bound ||
 	    __atomic_load_n(&state->display_mailbox_active, __ATOMIC_ACQUIRE) ||
 	    !state->display_scanout_ack)
-		return;
+		return 0;
 	gen = state->display_flip_gen;
 	if (gen == __atomic_load_n(&state->display_flip_ack, __ATOMIC_ACQUIRE) ||
 	    gen != __atomic_load_n(&state->display_flip_submit, __ATOMIC_ACQUIRE) ||
 	    scanout_address != state->display_flip_address)
-		return;
+		return 0;
 	__atomic_store_n(&state->display_flip_ack, gen, __ATOMIC_RELEASE);
+	return 1;
 }
 
 /* Core 0, from the vblank ISR. The lock masks this core's IRQs and is
- * recursive, so the ISR may take it over core 0 code that holds it. */
+ * recursive, so the ISR may take it over core 0 code that holds it. An app
+ * parked on the flip is woken by core 1's pass, and the card's vblank is the
+ * one thing that ends that wait without a KICK: with another app on the
+ * core the pass would come at the next tick, a frame late for a client that
+ * is synchronised to the vblank. So an acknowledgement rings the doorbell. */
 void zzapp_services_display_vblank(uint32_t scanout_address)
 {
 	uint32_t i;
+	int acked = 0;
 
 	for (i = set_display.count; i-- > 0U;) {
 		zzapp_rec_t *rec;
@@ -2771,11 +2801,14 @@ void zzapp_services_display_vblank(uint32_t scanout_address)
 			rec = zzapp_rec_by_pid(set_display.pids[i]);
 			if (rec) {
 				SERVICE_LOOKUP_GAP(set_display.pids[i]);
-				display_vblank_locked(rec, scanout_address);
+				acked |= display_vblank_locked(rec,
+							       scanout_address);
 			}
 		}
 		slot_state_lock_release();
 	}
+	if (acked)
+		ring_core1();
 }
 
 int zzapp_display_bound(uint32_t *w, uint32_t *h, uint32_t *pitch,
@@ -4859,9 +4892,7 @@ static int queue_deferred(zzapp_rec_t *rec, uint16_t opcode,
 	defer->state = DEFER_POSTED;
 	set_add(&set_core0, rec->hdr.pid);
 	slot_state_lock_release();
-#ifndef ZZAPP_HOST_TEST
-	scheduler_core1_publish();
-#endif
+	ring_core1();
 	return 1;
 }
 
@@ -5167,9 +5198,7 @@ static int record_op(zzapp_rec_t *rec, uint16_t opcode, const uint8_t *req,
 		slot_state_lock_acquire();
 		set_add(&set_svc, rec->hdr.pid);
 		slot_state_lock_release();
-#ifndef ZZAPP_HOST_TEST
-		scheduler_core1_publish();
-#endif
+		ring_core1();
 		return SDK_STATUS_OK;
 	}
 	case ZZAPP_OP_LOAD_BEGIN: {

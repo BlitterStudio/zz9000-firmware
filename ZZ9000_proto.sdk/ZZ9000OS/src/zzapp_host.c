@@ -1480,18 +1480,6 @@ static void zzapp_private_timer_enable(void)
               XSCUTIMER_CONTROL_ENABLE_MASK);
 }
 
-/* Doorbell SGI while an app runs: let its service tick fire on the next
- * timer count instead of at the end of the 5 ms quantum. The timer then
- * reloads its normal period. */
-void zzapp_private_timer_kick(void)
-{
-    if (!g_private_timer_ready ||
-        !(Xil_In32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_CONTROL_OFFSET) &
-          XSCUTIMER_CONTROL_ENABLE_MASK))
-        return;
-    Xil_Out32(XPAR_PS7_SCUTIMER_0_BASEADDR + XSCUTIMER_COUNTER_OFFSET, 1u);
-}
-
 void zzapp_private_timer_init_core1(void)
 {
     XScuGic *intc = interrupt_get_intc();
@@ -1518,7 +1506,6 @@ void zzapp_private_timer_init_core1(void)
 void zzapp_private_timer_init_core1(void) {}
 static void zzapp_private_timer_enable(void) {}
 static void zzapp_private_timer_disable(void) {}
-void zzapp_private_timer_kick(void) {}
 #endif
 
 
