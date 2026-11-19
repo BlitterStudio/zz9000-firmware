@@ -1110,13 +1110,12 @@ int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t pid,
 	if (thread->state != ZZAPP_THREAD_BLOCKED &&
 	    thread->state != ZZAPP_THREAD_SLEEPING)
 		return -1;
-	/* A thread that was parked comes back no further behind than one
-	 * quantum below the floor, so it cannot bank the time it was away and
-	 * then take the core from the others. */
+	/* A thread that was parked comes back no further behind than
+	 * ZZAPP_KERNEL_WAKE_CREDIT below the floor, so it cannot bank the time
+	 * it was away and then take the core from the others. */
 	{
 		uint64_t min;
-		uint64_t credit = vruntime_charge(
-			thread, (uint64_t)ZZAPP_KERNEL_QUANTUM_MS * 1000U);
+		uint64_t credit = ZZAPP_KERNEL_WAKE_CREDIT;
 
 		if (runnable_vruntime_min(kernel, &min) && min > kernel->vfloor)
 			kernel->vfloor = min;

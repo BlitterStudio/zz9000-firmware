@@ -27,9 +27,20 @@
  * and a weight-1 app takes about nine years of continuous run time to wrap
  * the 64-bit counter. */
 #define ZZAPP_KERNEL_VRUNTIME_SCALE 65536ULL
+/* The most a woken thread may be behind the floor: one quantum of run time at
+ * weight 1, not divided by the thread's weight. A weight-w thread comes back
+ * up to w quanta of its own run time behind, so it may run that long before
+ * a neighbour is ahead of it. A credit of one quantum at the thread's own
+ * weight is smaller than the quantum of a weight-1 neighbour: a weight-8 app
+ * that blocks for 0.1 ms hands such a neighbour a whole 5 ms quantum, and
+ * the next wake clamps away the 5 ms it ran ahead, so the heavy app lost a
+ * quantum every other wake (model: 66.7 % of the core against an 8/9 share,
+ * 1333 clamps in 2666 wakes; with this credit 88.9 % and none). */
+#define ZZAPP_KERNEL_WAKE_CREDIT \
+	((uint64_t)ZZAPP_KERNEL_QUANTUM_MS * 1000U * ZZAPP_KERNEL_VRUNTIME_SCALE)
 /* Wake granularity: the active app keeps the core until a runnable thread
  * lags it by more than 1 ms of that thread's own run time. The wake rule
- * gives a waker up to one quantum (5 ms) of credit at its weight, so a thread
+ * gives a waker up to ZZAPP_KERNEL_WAKE_CREDIT, so a thread
  * that was parked, or that mostly waits on a client, is behind by more than
  * this when it wakes and runs at once instead of after the rest of the active
  * app's quantum. CPU-bound peers lag each other by what one of them ran since

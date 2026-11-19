@@ -35,6 +35,13 @@ static unsigned checks;
 #define TEST_RECS 12u
 #define TICK_US 1000u
 #define QUANTUM_US (ZZAPP_KERNEL_QUANTUM_MS * 1000U)
+/* The most a woken thread may be behind the floor: one quantum of run time at
+ * weight 1, in virtual run time (the kernel's own constant is checked where
+ * it exists). */
+#define WAKE_CREDIT (5000ULL * ZZAPP_KERNEL_VRUNTIME_SCALE)
+#ifdef ZZAPP_KERNEL_WAKE_CREDIT
+_Static_assert(ZZAPP_KERNEL_WAKE_CREDIT == WAKE_CREDIT, "test credit");
+#endif
 
 static zzapp_rec_t g_recs[TEST_RECS];
 
@@ -361,23 +368,41 @@ static void test_wake_after_long_sleep(void)
 	check_window(&g_sim, equal, 3U, window, 3U * QUANTUM_US);
 }
 
-/* A wake does not hand out more than one quantum of credit at the app's
- * weight, however long the app was away. */
-static void test_wake_credit_is_one_quantum(void)
+/* However long it was away, and at whatever weight, a woken thread is never
+ * more than one weight-1 quantum behind the floor, and a wake never lowers
+ * its value: it takes the larger of its own and the floor less the credit. */
+static void test_wake_never_leaves_more_than_the_credit(void)
 {
-	static const uint32_t pair[] = { 1U, 4U };
-	uint64_t floor_vr;
+	static const uint32_t weights[] = { 1U, 4U, ZZAPP_WEIGHT_MAX };
+	static const uint64_t sleeps[] = { 10000ULL, 1000000ULL, 60000000ULL };
+	unsigned wi;
+	unsigned si;
 
-	sim_start(&g_sim, pair, 2U);
-	sim_run(&g_sim, 1000000U, TICK_US);
-	CHECK(zzapp_kernel_block(&g_sim.kernel, 1U) == 0);
-	sim_run(&g_sim, 30ULL * 1000000U, TICK_US);
-	floor_vr = THREAD(g_sim.kernel, 0U).vruntime;
-	CHECK(zzapp_kernel_wake(&g_sim.kernel, 1U, ZZAPP_WAKE_READY) == 0);
-	/* The waker's weight is 4: a quantum of it is a quarter of the charge
-	 * of a quantum at weight 1, below the floor of the apps that ran. */
-	CHECK(THREAD(g_sim.kernel, 1U).vruntime ==
-	      floor_vr - QUANTUM_US * ZZAPP_KERNEL_VRUNTIME_SCALE / 4U);
+	for (wi = 0U; wi < 3U; wi++) {
+		for (si = 0U; si < 3U; si++) {
+			uint32_t pair[2];
+			uint64_t before;
+			uint64_t floor_vr;
+			uint64_t lowest;
+			uint64_t after;
+
+			pair[0] = 1U;
+			pair[1] = weights[wi];
+			sim_start(&g_sim, pair, 2U);
+			sim_run(&g_sim, 1000000U, TICK_US);
+			CHECK(zzapp_kernel_block(&g_sim.kernel, 1U) == 0);
+			before = THREAD(g_sim.kernel, 1U).vruntime;
+			sim_run(&g_sim, sleeps[si], TICK_US);
+			floor_vr = THREAD(g_sim.kernel, 0U).vruntime;
+			CHECK(zzapp_kernel_wake(&g_sim.kernel, 1U,
+						ZZAPP_WAKE_READY) == 0);
+			after = THREAD(g_sim.kernel, 1U).vruntime;
+			lowest = floor_vr > WAKE_CREDIT ? floor_vr - WAKE_CREDIT : 0U;
+			CHECK(after >= before);
+			CHECK(after + WAKE_CREDIT >= floor_vr);
+			CHECK(after == (before > lowest ? before : lowest));
+		}
+	}
 }
 
 /* A short sleeper keeps what it earned: waking brings it back no further
@@ -791,6 +816,123 @@ static void test_chatty_app_preempts_once_per_wake(void)
 	CHECK(g_ia_max_delay <= CARD_TICK_US);
 }
 
+/* The time from a wake until each other app has the core again. Apps 0 and 1
+ * are CPU-bound at weight 1, app 2 has weight `w`, sleeps while they run, and
+ * is woken by a service pass. The first of the others to run has been at the
+ * floor, the waker comes back at most one weight-1 quantum below it and its
+ * value rises 1/w as fast, so the others wait for w * 5 ms of the waker's run
+ * time, plus the pick that ends its quantum. An app that was a quantum ahead
+ * of the floor waits for another w * 5 ms. */
+static void measure_wake_delays(uint32_t w, uint64_t *first_us, uint64_t *second_us)
+{
+	uint32_t weights[3];
+	uint64_t t0;
+	uint64_t seen_at[2] = { 0U, 0U };
+	int seen[2] = { 0, 0 };
+	int waker_ran = 0;
+	uint64_t i;
+
+	weights[0] = 1U;
+	weights[1] = 1U;
+	weights[2] = w;
+	sim_start(&g_sim, weights, 3U);
+	sim_run(&g_sim, 2000000U, TICK_US);
+	CHECK(zzapp_kernel_block(&g_sim.kernel, 2U) == 0);
+	sim_run(&g_sim, 4000000U, TICK_US);
+	t0 = clock_us;
+	sim_service(&g_sim, 2);
+	for (i = 0U; i < 4000U && !(seen[0] && seen[1]); i++) {
+		int cur = zzapp_kernel_current_thread();
+
+		if (cur == 2)
+			waker_ran = 1;
+		else if (cur >= 0 && waker_ran && !seen[cur]) {
+			seen[cur] = 1;
+			seen_at[cur] = clock_us - t0;
+		}
+		sim_step(&g_sim, TICK_US, ZZAPP_KERNEL_DISPATCH_TICK);
+	}
+	CHECK(waker_ran && seen[0] && seen[1]);
+	*first_us = seen_at[0] < seen_at[1] ? seen_at[0] : seen_at[1];
+	*second_us = seen_at[0] < seen_at[1] ? seen_at[1] : seen_at[0];
+}
+
+/* After a weight-w app wakes, the app at the floor runs again within
+ * w * 5 ms + one quantum, and any other CPU-bound weight-1 app within
+ * 2 * w * 5 ms + one quantum and one tick. At weight 256 that is 1.28 s for
+ * the first, which is its 99.6 % share at work: measured 1280 ms and 1542 ms. */
+static void test_heavy_wake_returns_the_core_in_bounded_time(void)
+{
+	static const uint32_t weights[] = { 1U, 2U, 8U, 64U, ZZAPP_WEIGHT_MAX };
+	unsigned i;
+
+	for (i = 0U; i < 5U; i++) {
+		uint32_t w = weights[i];
+		uint64_t first;
+		uint64_t second;
+
+		measure_wake_delays(w, &first, &second);
+		if (w == ZZAPP_WEIGHT_MAX)
+			printf("weight %u waker: first other runs after %llu us, "
+			       "second after %llu us\n", (unsigned)w,
+			       (unsigned long long)first, (unsigned long long)second);
+		CHECK(first <= (uint64_t)w * QUANTUM_US + QUANTUM_US);
+		CHECK(second <= 2ULL * w * QUANTUM_US + QUANTUM_US + TICK_US);
+	}
+}
+
+/* The long-run shares do not move for the credit. */
+static void test_shares_hold_with_a_heavy_sleeper(void)
+{
+	static const uint32_t weights[] = { 1U, 1U, 8U };
+	const uint64_t total = 120ULL * 1000000U;
+	uint64_t done;
+
+	sim_start(&g_sim, weights, 3U);
+	for (done = 0U; done < total; done += TICK_US) {
+		/* The heavy app blocks for 2 ms every 100 ms. */
+		if (done % 100000U == 0U && done != 0U &&
+		    THREAD(g_sim.kernel, 2U).state == ZZAPP_THREAD_RUNNABLE)
+			CHECK(zzapp_kernel_block(&g_sim.kernel, 2U) == 0);
+		if (done % 100000U == 2000U &&
+		    THREAD(g_sim.kernel, 2U).state == ZZAPP_THREAD_BLOCKED)
+			sim_service(&g_sim, 2);
+		sim_step(&g_sim, TICK_US, ZZAPP_KERNEL_DISPATCH_TICK);
+	}
+	/* It was parked 2 % of the time, so its share is its demand. */
+	CHECK(abs_diff(g_sim.ran_us[2], total * 8U / 10U * 98U / 100U) * 50U <=
+	      total * 8U / 10U);
+	CHECK(abs_diff(g_sim.ran_us[0], g_sim.ran_us[1]) <= 2U * QUANTUM_US);
+	CHECK(g_sim.ran_us[0] + g_sim.ran_us[1] + g_sim.ran_us[2] == total);
+}
+
+/* An interactive weight-8 app (runs 5 ms, blocks 0.1 ms, woken by a doorbell
+ * pass) next to a weight-1 spin gets its 8/9 share; the wake no longer clamps
+ * away what the spin's quantum overran. At weight 1 it keeps half. */
+static void test_heavy_interactive_app_gets_its_share(void)
+{
+	const uint64_t total = 20ULL * 1000000U;
+
+	run_interactive(&g_sim, 8U, 5000U, 100U, total);
+	if (g_sim.ran_us[1] * 100U < total * 87U)
+		printf("weight 8: ran %llu of %llu us\n",
+		       (unsigned long long)g_sim.ran_us[1],
+		       (unsigned long long)total);
+	CHECK(g_sim.ran_us[1] * 100U >= total * 87U);
+	CHECK(g_ia_max_delay <= CARD_TICK_US);
+#if ZZAPP_PERF_COUNTERS
+	{
+		zzapp_sched_acct_t a;
+
+		CHECK(zzapp_kernel_sched_snapshot(&g_sim.kernel, 1U, &a) == 0);
+		CHECK(a.wakes > 1000U && a.clamps * 100U <= a.wakes);
+	}
+#endif
+	run_interactive(&g_sim, 1U, 5000U, 100U, total);
+	CHECK(g_sim.ran_us[1] * 100U >= total * 45U &&
+	      g_sim.ran_us[1] * 100U <= total * 55U);
+}
+
 #if ZZAPP_PERF_COUNTERS
 static zzapp_sched_acct_t sched_of(sim_t *sim, uint32_t pid)
 {
@@ -956,7 +1098,8 @@ int main(int argc, char **argv)
 	run_case("rotate", test_equal_weights_rotate_in_pid_order, argc, argv);
 	run_case("wake_block", test_wake_after_long_block, argc, argv);
 	run_case("wake_sleep", test_wake_after_long_sleep, argc, argv);
-	run_case("wake_credit", test_wake_credit_is_one_quantum, argc, argv);
+	run_case("wake_credit", test_wake_never_leaves_more_than_the_credit, argc,
+		 argv);
 	run_case("wake_keeps", test_wake_keeps_a_larger_virtual_time, argc, argv);
 	run_case("parked", test_parked_apps_get_nothing, argc, argv);
 	run_case("join", test_late_join, argc, argv);
@@ -969,6 +1112,11 @@ int main(int argc, char **argv)
 		 argv);
 	run_case("system", test_system_thread_first_and_shares_hold, argc, argv);
 	run_case("interactive", test_interactive_app_runs_when_woken, argc, argv);
+	run_case("heavy_wake", test_heavy_wake_returns_the_core_in_bounded_time,
+		 argc, argv);
+	run_case("heavy_shares", test_shares_hold_with_a_heavy_sleeper, argc, argv);
+	run_case("heavy_interactive", test_heavy_interactive_app_gets_its_share,
+		 argc, argv);
 	run_case("peers", test_runnable_peers_swap_once_per_granularity, argc, argv);
 	run_case("mutual", test_mutual_wake_does_not_ping_pong, argc, argv);
 	run_case("chatty", test_chatty_app_preempts_once_per_wake, argc, argv);

@@ -154,8 +154,19 @@ starts begins at the smallest virtual run time among the runnable apps, or at
 the floor the scheduler kept (a value that never decreases) when none is
 runnable, so it neither waits for the others to catch up nor makes up for the
 time before it existed. An app that wakes from a block or a sleep takes the
-larger of its own value and the floor less one quantum of run time at its
-weight, so time spent parked is not saved up. A yield puts the app behind its
+larger of its own value and the floor less one weight-1 quantum of run time
+(`ZZAPP_KERNEL_WAKE_CREDIT`, 5 ms of virtual run time, not divided by the
+app's weight), so time spent parked is not saved up beyond that. A weight-w
+app therefore comes back up to w quanta of its own run time behind the floor
+and may run that long before a weight-1 neighbour is ahead of it: a weight-8
+app runs 40 ms and a weight-256 app 1.28 s, which is its share at work. The
+first weight-1 app at the floor gets the core back within w * 5 ms plus a
+quantum, and one that was a quantum ahead within twice that. A credit of one
+quantum at the app's own weight is smaller than a weight-1 neighbour's
+quantum: an interactive weight-8 app that blocks for 0.1 ms next to a
+spinner then handed over a whole quantum and lost the 5 ms it ran ahead at
+the next wake, and got 67 % of the core against an 8/9 share in the model.
+A yield puts the app behind its
 runnable peers for the next pick, even if its value is the smallest. A pick
 scans the run list once, so its cost grows with the number of records in it.
 The weight comes from the client: `AAR_CB_WEIGHT`, read at `LOAD_BEGIN`.
