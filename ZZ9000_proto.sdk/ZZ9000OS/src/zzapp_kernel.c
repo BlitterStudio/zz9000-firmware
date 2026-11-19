@@ -949,14 +949,14 @@ void zzapp_kernel_sched_report(zzapp_kernel_t *kernel, uint32_t pid)
 	       (unsigned long)a.preempt[ZZAPP_PREEMPT_OTHER],
 	       (unsigned long)a.wakes, (unsigned long)a.clamps,
 	       SCHED_MS(clamp_us), (unsigned long)a.deferrals);
-	printf(" why=%lu/%lu/%lu/%lu/%lu yields=%lu/%lu hold=%lu",
+	printf(" why=%lu/%lu/%lu/%lu/%lu yields=%lu/%lu/%lu hold=%lu",
 	       (unsigned long)a.why[ZZAPP_PICK_STICKY],
 	       (unsigned long)a.why[ZZAPP_PICK_LAG],
 	       (unsigned long)a.why[ZZAPP_PICK_MIN],
 	       (unsigned long)a.why[ZZAPP_PICK_OWNER],
 	       (unsigned long)a.why[ZZAPP_PICK_HANDOFF],
-	       (unsigned long)a.yields, (unsigned long)a.yield_skips,
-	       (unsigned long)a.hold_skips);
+	       (unsigned long)a.yields, (unsigned long)a.yields_given,
+	       (unsigned long)a.yield_skips, (unsigned long)a.hold_skips);
 	/* The weight the scheduler divides by and where the app ended, against
 	 * the floor: two apps that share fairly end close together in virtual run
 	 * time, whatever their weights. */
@@ -1198,24 +1198,58 @@ void zzapp_kernel_service_due(zzapp_kernel_t *kernel)
 		kernel->service_due = 1;
 }
 
+/* A runnable peer is entitled to the core a yield gives up when its virtual
+ * run time is not above the yielder's by more than the wake granularity at
+ * the peer's weight (the scale of the lag rule). The yielder's own value is
+ * taken to now: the run since the last switch is not charged yet. */
+static int yield_peer_entitled(const zzapp_kernel_t *kernel,
+			       const zzapp_thread_t *yielder,
+			       const zzapp_thread_t *peer)
+{
+	uint64_t own = yielder->vruntime;
+	uint64_t now;
+	uint64_t gap;
+
+	if (kernel->slice_valid && !kernel->idle) {
+		now = zzapp_kernel_now_us();
+		if (now > kernel->slice_started_us)
+			own += vruntime_charge(yielder, now - kernel->slice_started_us);
+	}
+	if (peer->vruntime <= own)
+		return 1;
+	gap = peer->vruntime - own;
+	return gap <= ZZAPP_KERNEL_WAKE_GRAN &&
+	       gap * thread_weight(peer) <= ZZAPP_KERNEL_WAKE_GRAN;
+}
+
+/* The calling thread goes behind its runnable peers for the next pick, if a
+ * peer is entitled to the core. With none the yield is nothing: the caller
+ * keeps the core and its quantum, and no peer is handed a quantum it has not
+ * earned. */
 void zzapp_kernel_yield(zzapp_kernel_t *kernel)
 {
 	uint32_t i;
 	int current;
+	zzapp_thread_t *yielder;
 
 	if (!kernel)
 		return;
 	current = zzapp_kernel_current_thread();
 	if (current < 0 || (uint32_t)current >= kernel->capacity)
 		return;
+	yielder = kernel_thread(kernel, (uint32_t)current);
+#if ZZAPP_PERF_COUNTERS
+	yielder->acct.yields++;
+#endif
 	for (i = 0U; i < kernel->run_count; i++) {
 		uint32_t pid = kernel->run[i];
+		const zzapp_thread_t *peer = kernel_thread(kernel, pid);
 
-		if (pid != (uint32_t)current &&
-		    kernel_thread(kernel, pid)->state == ZZAPP_THREAD_RUNNABLE) {
-			kernel_thread(kernel, (uint32_t)current)->yield_pending = 1U;
+		if (pid != (uint32_t)current && peer->state == ZZAPP_THREAD_RUNNABLE &&
+		    yield_peer_entitled(kernel, yielder, peer)) {
+			yielder->yield_pending = 1U;
 #if ZZAPP_PERF_COUNTERS
-			kernel_thread(kernel, (uint32_t)current)->acct.yields++;
+			yielder->acct.yields_given++;
 #endif
 			return;
 		}
@@ -1761,6 +1795,11 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
 		pick = zzapp_kernel_schedule(kernel, 0U);
 	}
 	ACCT_SWITCH(kernel, cur, app, pick);
+	/* A yield is spent by the next pick that gives the core to an app, by
+	 * whatever dispatch: it cannot keep the yielder out of the lag rule and
+	 * the minimum pick for longer. */
+	if (app && pick >= 0)
+		thread_at(kernel, (uint32_t)cur)->yield_pending = 0U;
 	if ((pick == ZZAPP_KERNEL_SYSTEM || pick == ZZAPP_KERNEL_IDLE) &&
 	    kernel->system_context_valid) {
 		zzapp_kernel_set_current_thread(-1);

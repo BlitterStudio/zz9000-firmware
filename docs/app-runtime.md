@@ -166,8 +166,14 @@ quantum at the app's own weight is smaller than a weight-1 neighbour's
 quantum: an interactive weight-8 app that blocks for 0.1 ms next to a
 spinner then handed over a whole quantum and lost the 5 ms it ran ahead at
 the next wake, and got 67 % of the core against an 8/9 share in the model.
-A yield puts the app behind its
-runnable peers for the next pick, even if its value is the smallest. A pick
+A yield puts the app behind a runnable peer for the next pick, even if the
+app's value is the smallest, when the peer is entitled to the core: its
+value is not above the yielder's by more than the wake granularity at the
+peer's weight (the scale of the lag rule). With no such peer the yield does
+nothing and the app keeps the core and its quantum, so an app that yields
+often is not made to hand a quantum to a neighbour that is far ahead. In the
+model a weight-8 app that yields every 1.5 ms next to a weight-1 spin kept
+60 % of the core with the old rule and keeps 8/9 with this one. A pick
 scans the run list once, so its cost grows with the number of records in it.
 The weight comes from the client: `AAR_CB_WEIGHT`, read at `LOAD_BEGIN`.
 
@@ -339,10 +345,11 @@ of `run`, `wait_sys`, `wait_app` or a `park_*` total.
   the API lock owner finishing its call and `handoff` the lock passed to a
   waiter. `time_us` and `should_stop` take no API lock, so an app that only
   polls them never counts in `owner`.
-- `yields=N/M`: yields that put the app behind a runnable peer, and the picks
-  that passed the app over for a yield while its virtual run time was the
-  smallest. `hold=N`: picks that kept the active app although this one was
-  behind it by less than the wake granularity.
+- `yields=R/G/S`: yields the app made (R), the ones a peer was entitled to
+  and that put the app behind it for the next pick (G), and the picks that
+  passed the app over for a yield while its virtual run time was the smallest
+  (S). `hold=N`: picks that kept the active app although this one was behind
+  it by less than the wake granularity.
 - `weight=W vr=ms floor=ms`: the weight the scheduler used, the app's virtual
   run time at its end and the floor, in run-time milliseconds at weight 1.
   Two apps that share fairly end close together whatever their weights; a

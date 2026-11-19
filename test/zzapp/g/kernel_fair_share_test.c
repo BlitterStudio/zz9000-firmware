@@ -501,16 +501,21 @@ static void test_join_into_an_empty_run_set_starts_at_the_floor(void)
 	CHECK(THREAD(g_sim.kernel, 2U).vruntime == floor_vr);
 }
 
-/* (e) A yield sends the app behind its runnable peers for the next pick, even
- * when its virtual run time is the smallest. */
+static void sim_run_for(sim_t *sim, uint64_t us);
+
+/* (e) A yield sends the app behind a runnable peer that is entitled to the
+ * core, for the next pick, even when the yielder's virtual run time is the
+ * smallest. A peer is entitled when its value is not above the yielder's by
+ * more than the wake granularity at the peer's weight. */
 static void test_yield_goes_behind_peers(void)
 {
 	static const uint32_t pair[] = { 1U, 1U };
 	int i;
 
 	sim_start(&g_sim, pair, 2U);
-	/* The peer is well ahead, so the yielder stays the smallest. */
-	THREAD(g_sim.kernel, 1U).vruntime = 1000000ULL * ZZAPP_KERNEL_VRUNTIME_SCALE;
+	/* The peer is a little ahead, within the granularity: it gets the core
+	 * although the yielder's value is the smaller. */
+	THREAD(g_sim.kernel, 1U).vruntime = 500ULL * ZZAPP_KERNEL_VRUNTIME_SCALE;
 	CHECK(zzapp_kernel_current_thread() == 0);
 	zzapp_kernel_yield(&g_sim.kernel);
 	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 1U);
@@ -538,6 +543,44 @@ static void test_yield_goes_behind_peers(void)
 	CHECK(zzapp_kernel_current_thread() == 0);
 }
 
+/* A peer that is not entitled does not get the core from a yield: the yielder
+ * is not skipped and keeps its quantum. The limit is the granularity at the
+ * peer's weight, in the scale of the lag rule. */
+static void test_yield_to_a_peer_that_is_not_entitled_is_nothing(void)
+{
+	static const uint32_t pair[] = { 1U, 1U };
+	static const uint32_t heavy[] = { 1U, 8U };
+	uint32_t quantum;
+
+	sim_start(&g_sim, pair, 2U);
+	THREAD(g_sim.kernel, 1U).vruntime = 1000000ULL * ZZAPP_KERNEL_VRUNTIME_SCALE;
+	quantum = THREAD(g_sim.kernel, 0U).quantum_left;
+	zzapp_kernel_yield(&g_sim.kernel);
+	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 0U);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	CHECK(THREAD(g_sim.kernel, 0U).quantum_left == quantum);
+	/* Exactly the granularity ahead still counts, one more does not. */
+	THREAD(g_sim.kernel, 1U).vruntime = THREAD(g_sim.kernel, 0U).vruntime +
+					    1000ULL * ZZAPP_KERNEL_VRUNTIME_SCALE;
+	zzapp_kernel_yield(&g_sim.kernel);
+	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 1U);
+	THREAD(g_sim.kernel, 0U).yield_pending = 0U;
+	THREAD(g_sim.kernel, 1U).vruntime += 1U;
+	zzapp_kernel_yield(&g_sim.kernel);
+	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 0U);
+
+	/* At weight 8 the peer's limit is an eighth of that. */
+	sim_start(&g_sim, heavy, 2U);
+	THREAD(g_sim.kernel, 1U).vruntime = THREAD(g_sim.kernel, 0U).vruntime +
+					    125ULL * ZZAPP_KERNEL_VRUNTIME_SCALE;
+	zzapp_kernel_yield(&g_sim.kernel);
+	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 1U);
+	THREAD(g_sim.kernel, 0U).yield_pending = 0U;
+	THREAD(g_sim.kernel, 1U).vruntime += ZZAPP_KERNEL_VRUNTIME_SCALE;
+	zzapp_kernel_yield(&g_sim.kernel);
+	CHECK(THREAD(g_sim.kernel, 0U).yield_pending == 0U);
+}
+
 /* An app that yields after every millisecond goes behind its peer each time,
  * so it runs less than the peer, but it keeps running and the peer is not
  * starved either. */
@@ -561,6 +604,66 @@ static void test_yielding_peer_does_not_starve_the_other(void)
 	CHECK(g_sim.ran_us[0] >= total / 10U);
 	CHECK(g_sim.ran_us[1] >= total / 2U);
 	CHECK(g_sim.ran_us[0] + g_sim.ran_us[1] == total);
+}
+
+/* Apps that run for a while and yield: `run0`/`run1` microseconds of the
+ * run and then a yield, 0 for an app that never yields. */
+static void run_yielders(sim_t *sim, uint64_t total_us, uint32_t run0,
+			 uint32_t run1)
+{
+	uint64_t done = 0U;
+
+	while (done < total_us) {
+		int cur = zzapp_kernel_current_thread();
+		uint32_t us = cur == 0 ? run0 : run1;
+
+		if (us == 0U) {
+			sim_step(sim, TICK_US, ZZAPP_KERNEL_DISPATCH_TICK);
+			done += TICK_US;
+		} else {
+			sim_run_for(sim, us);
+			zzapp_kernel_yield(&sim->kernel);
+			sim_step(sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+			done += us;
+		}
+	}
+}
+
+/* A weight-8 app that runs 1.5 ms and yields, next to a weight-1 spin, keeps
+ * its 8/9 share: a yield that goes to a peer far behind its entitlement is
+ * not a gift of a quantum. Equal yielders alternate, and a 1:3 pair that
+ * both yield keeps its shares. */
+static void test_yielding_heavy_app_keeps_its_share(void)
+{
+	static const uint32_t heavy[] = { 1U, 8U };
+	static const uint32_t equal[] = { 1U, 1U };
+	static const uint32_t third[] = { 1U, 3U };
+	const uint64_t total = 20ULL * 1000000U;
+	uint32_t i;
+
+	sim_start(&g_sim, heavy, 2U);
+	run_yielders(&g_sim, total, 0U, 1500U);
+	if (g_sim.ran_us[1] * 100U < clock_us * 87U)
+		printf("weight 8 yielder: ran %llu of %llu us\n",
+		       (unsigned long long)g_sim.ran_us[1],
+		       (unsigned long long)clock_us);
+	CHECK(g_sim.ran_us[1] * 100U >= clock_us * 87U);
+
+	/* Two equal yielders take one pick each. */
+	sim_start(&g_sim, equal, 2U);
+	for (i = 0U; i < 40U; i++) {
+		int cur = zzapp_kernel_current_thread();
+
+		CHECK(cur == (int)(i & 1U));
+		sim_run_for(&g_sim, 1000U);
+		zzapp_kernel_yield(&g_sim.kernel);
+		sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	}
+
+	/* The pair 1:3 with a yield on both sides. */
+	sim_start(&g_sim, third, 2U);
+	run_yielders(&g_sim, 60ULL * 1000000U, 1000U, 1000U);
+	check_proportional(&g_sim, third, 2U, clock_us);
 }
 
 /* (f) A slice shorter than a millisecond is charged. */
@@ -1194,7 +1297,7 @@ static void test_sched_counters_name_the_picks(void)
 	/* A is inside an API body when the next tick comes. */
 	CHECK(zzapp_kernel_api_lock(&g_sim.kernel, 0U) == 0);
 	zzapp_kernel_service_due(&g_sim.kernel);
-	sim_step(&g_sim, 1000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_TICK);
 	CHECK(zzapp_kernel_current_thread() == 0);
 	CHECK(zzapp_kernel_api_unlock(&g_sim.kernel, 0U) == 0);
 	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
@@ -1247,6 +1350,9 @@ int main(int argc, char **argv)
 	run_case("yield", test_yield_goes_behind_peers, argc, argv);
 	run_case("yield_peer", test_yielding_peer_does_not_starve_the_other, argc,
 		 argv);
+	run_case("yield_entitled", test_yield_to_a_peer_that_is_not_entitled_is_nothing,
+		 argc, argv);
+	run_case("yield_heavy", test_yielding_heavy_app_keeps_its_share, argc, argv);
 	run_case("submillisecond", test_sub_millisecond_slices_are_charged, argc,
 		 argv);
 	run_case("system", test_system_thread_first_and_shares_hold, argc, argv);

@@ -239,7 +239,8 @@ typedef struct {
 	/* Dispatch decisions that gave the app the core, by ZZAPP_PICK_*; the
 	 * app that keeps the core counts too. */
 	uint32_t why[ZZAPP_PICK_KINDS];
-	uint32_t yields;	/* yields that went behind a runnable peer */
+	uint32_t yields;	/* yields the app made */
+	uint32_t yields_given;	/* of those, the ones a peer was entitled to */
 	uint32_t yield_skips;	/* picks that passed the app over for a yield
 				 * while its virtual run time was the smallest */
 	uint32_t hold_skips;	/* picks that kept the active app although this
