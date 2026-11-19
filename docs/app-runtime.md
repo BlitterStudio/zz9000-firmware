@@ -332,6 +332,21 @@ of `run`, `wait_sys`, `wait_app` or a `park_*` total.
 - `defer`: the number of times service was due and its window budget
   (`ZZAPP_KERNEL_SERVICE_LIMIT_MS`) was spent while apps were runnable, and
   this app was the one given the core instead.
+- `why=sticky/lag/min/owner/handoff`: the dispatch decisions that gave the
+  app the core, by reason, counting the app that keeps the core. `sticky` is
+  the active app keeping its quantum, `lag` a lagging thread taking the core
+  from it, `min` the smallest virtual run time when no app is active, `owner`
+  the API lock owner finishing its call and `handoff` the lock passed to a
+  waiter. `time_us` and `should_stop` take no API lock, so an app that only
+  polls them never counts in `owner`.
+- `yields=N/M`: yields that put the app behind a runnable peer, and the picks
+  that passed the app over for a yield while its virtual run time was the
+  smallest. `hold=N`: picks that kept the active app although this one was
+  behind it by less than the wake granularity.
+- `weight=W vr=ms floor=ms`: the weight the scheduler used, the app's virtual
+  run time at its end and the floor, in run-time milliseconds at weight 1.
+  Two apps that share fairly end close together whatever their weights; a
+  weight that is not the one asked for shows here.
 - `park_<cause>=ms/count`: time parked and the number of parks, for each cause
   that occurred. The causes are `lock` (a block with no wait registered,
   which is the wait for the API lock), the declared waits `file`, `conwr`,

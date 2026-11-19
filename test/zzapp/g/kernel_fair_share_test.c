@@ -641,6 +641,40 @@ static void sim_service(sim_t *sim, int wake)
 	sim_step(sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
 }
 
+/* The model of an app that calls the API all the time: every
+ * g_api_every-th pass finds app g_api_who (-1: whoever has the core) inside
+ * an API body, holding the API lock. The pass interrupts it: the scheduler
+ * must keep the owner on the core until the call ends, the call ends, and
+ * the pending service runs at that SVC exit. g_pass_us is the time between
+ * passes. */
+static unsigned g_api_every;
+static int g_api_who = -1;
+static unsigned g_pass_count;
+static uint64_t g_pass_us = CARD_TICK_US;
+
+static void sim_pass(sim_t *sim, int wake)
+{
+	int cur = zzapp_kernel_current_thread();
+
+	g_pass_count++;
+	if (g_api_every != 0U && cur >= 0 && (g_api_who < 0 || g_api_who == cur) &&
+	    g_pass_count % g_api_every == 0U) {
+		CHECK(zzapp_kernel_api_lock(&sim->kernel, (uint32_t)cur) == 0);
+		zzapp_kernel_service_due(&sim->kernel);
+		sim_step(sim, 0U, ZZAPP_KERNEL_DISPATCH_TICK);
+		CHECK(zzapp_kernel_current_thread() == cur);
+		CHECK(zzapp_kernel_api_unlock(&sim->kernel, (uint32_t)cur) == 0);
+		sim_step(sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+		CHECK(zzapp_kernel_current_thread() == -1);
+		if (wake >= 0)
+			CHECK(zzapp_kernel_wake(&sim->kernel, (uint32_t)wake,
+						ZZAPP_WAKE_READY) == 0);
+		sim_step(sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+		return;
+	}
+	sim_service(sim, wake);
+}
+
 /* `us` microseconds pass in the current context; the switch comes later. */
 static void sim_run_for(sim_t *sim, uint64_t us)
 {
@@ -696,12 +730,12 @@ static void run_interactive(sim_t *sim, uint32_t i_weight, uint32_t run_us,
 		}
 		if (blocked && clock_us >= wake_at) {
 			blocked = 0;
-			sim_service(sim, 1);
+			sim_pass(sim, 1);
 			waiting = 1;
 			woke_at = clock_us;
 			g_ia_wakes++;
-		} else if (clock_us % CARD_TICK_US == 0U) {
-			sim_service(sim, -1);
+		} else if (clock_us % g_pass_us == 0U) {
+			sim_pass(sim, -1);
 		}
 	}
 }
@@ -933,6 +967,67 @@ static void test_heavy_interactive_app_gets_its_share(void)
 	      g_sim.ran_us[1] * 100U <= total * 55U);
 }
 
+static void api_model_begin(unsigned every, int who, uint64_t pass_us)
+{
+	g_api_every = every;
+	g_api_who = who;
+	g_pass_count = 0U;
+	g_pass_us = pass_us;
+}
+
+static void api_model_end(void)
+{
+	g_api_every = 0U;
+	g_api_who = -1;
+	g_pass_us = CARD_TICK_US;
+}
+
+/* A spin that is inside an API body (lock held) at a quarter of the passes,
+ * with a pass every millisecond, does not take more than its share: the
+ * scheduler keeps it on the core to finish the call, the call ends within
+ * the pass, and the pick after it follows the virtual run time. A weight-8
+ * compute app and a weight-8 interactive app keep 87 %, and two CPU-bound
+ * apps that both call the API keep their 1:3 shares. */
+static void test_api_calling_spin_does_not_take_the_core(void)
+{
+	static const uint32_t pair[] = { 1U, 3U };
+	const uint64_t total = 20ULL * 1000000U;
+	uint64_t done;
+
+	api_model_begin(4U, 0, 1000U);
+	run_interactive(&g_sim, 8U, 2000000000U, 100U, total);
+	if (g_sim.ran_us[1] * 100U < total * 87U)
+		printf("weight 8 compute: ran %llu of %llu us\n",
+		       (unsigned long long)g_sim.ran_us[1], (unsigned long long)total);
+	CHECK(g_sim.ran_us[1] * 100U >= total * 87U);
+#if ZZAPP_PERF_COUNTERS
+	{
+		zzapp_sched_acct_t spin;
+
+		CHECK(zzapp_kernel_sched_snapshot(&g_sim.kernel, 0U, &spin) == 0);
+		/* The model does put the spin inside API bodies at passes. */
+		CHECK(spin.why[ZZAPP_PICK_OWNER] > 100U);
+	}
+#endif
+
+	api_model_begin(4U, 0, 1000U);
+	run_interactive(&g_sim, 8U, 5000U, 100U, total);
+	if (g_sim.ran_us[1] * 100U < total * 87U)
+		printf("weight 8 interactive: ran %llu of %llu us\n",
+		       (unsigned long long)g_sim.ran_us[1], (unsigned long long)total);
+	CHECK(g_sim.ran_us[1] * 100U >= total * 87U);
+
+	api_model_begin(4U, -1, 1000U);
+	sim_start(&g_sim, pair, 2U);
+	for (done = 0U; done < total; done += 100U) {
+		sim_run_for(&g_sim, 100U);
+		if (clock_us % g_pass_us == 0U)
+			sim_pass(&g_sim, -1);
+	}
+	check_proportional(&g_sim, pair, 2U, total);
+	api_model_end();
+}
+
 #if ZZAPP_PERF_COUNTERS
 static zzapp_sched_acct_t sched_of(sim_t *sim, uint32_t pid)
 {
@@ -1079,6 +1174,50 @@ static void test_sched_counters_count_service_deferrals(void)
 	CHECK(sched_of(&g_sim, 1U).deferrals == 0U);
 }
 #endif
+#if ZZAPP_PERF_COUNTERS
+/* The pick-reason counters: the active app keeping the core (sticky), the API
+ * lock owner finishing its call (owner), the smallest virtual run time (min),
+ * the passes that held a thread behind the active one by less than the wake
+ * granularity (hold) and a yield that went past the app with the smallest
+ * value (yield skip). */
+static void test_sched_counters_name_the_picks(void)
+{
+	static const uint32_t pair[] = { 1U, 1U };
+	zzapp_sched_acct_t a, b;
+
+	sim_start(&g_sim, pair, 2U);
+	/* A starts: smallest value, nobody active. */
+	sim_step(&g_sim, 1000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	/* One quantum not over: A stays, B is behind by exactly the granularity,
+	 * which is not enough to take the core. */
+	CHECK(zzapp_kernel_current_thread() == 0);
+	/* A is inside an API body when the next tick comes. */
+	CHECK(zzapp_kernel_api_lock(&g_sim.kernel, 0U) == 0);
+	zzapp_kernel_service_due(&g_sim.kernel);
+	sim_step(&g_sim, 1000U, ZZAPP_KERNEL_DISPATCH_TICK);
+	CHECK(zzapp_kernel_current_thread() == 0);
+	CHECK(zzapp_kernel_api_unlock(&g_sim.kernel, 0U) == 0);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	CHECK(zzapp_kernel_current_thread() == -1);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	CHECK(zzapp_kernel_current_thread() == 1);
+	/* B has the smallest value and yields: A is picked though B is behind. */
+	zzapp_kernel_yield(&g_sim.kernel);
+	sim_step(&g_sim, 0U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	CHECK(zzapp_kernel_current_thread() == 0);
+
+	a = sched_of(&g_sim, 0U);
+	b = sched_of(&g_sim, 1U);
+	CHECK(a.why[ZZAPP_PICK_MIN] == 2U && a.why[ZZAPP_PICK_STICKY] == 1U &&
+	      a.why[ZZAPP_PICK_OWNER] == 1U && a.why[ZZAPP_PICK_LAG] == 0U &&
+	      a.why[ZZAPP_PICK_HANDOFF] == 0U);
+	CHECK(a.yields == 0U && a.yield_skips == 0U && a.hold_skips == 0U);
+	CHECK(b.why[ZZAPP_PICK_MIN] == 1U && b.why[ZZAPP_PICK_STICKY] == 0U &&
+	      b.why[ZZAPP_PICK_OWNER] == 0U);
+	CHECK(b.hold_skips == 1U);
+	CHECK(b.yields == 1U && b.yield_skips == 1U);
+}
+#endif
 
 static void run_case(const char *name, void (*fn)(void), int argc, char **argv)
 {
@@ -1119,6 +1258,8 @@ int main(int argc, char **argv)
 		 argc, argv);
 	run_case("peers", test_runnable_peers_swap_once_per_granularity, argc, argv);
 	run_case("mutual", test_mutual_wake_does_not_ping_pong, argc, argv);
+	run_case("api_spin", test_api_calling_spin_does_not_take_the_core, argc,
+		 argv);
 	run_case("chatty", test_chatty_app_preempts_once_per_wake, argc, argv);
 #if ZZAPP_PERF_COUNTERS
 	run_case("sched_split", test_sched_counters_split_the_time, argc, argv);
@@ -1126,6 +1267,7 @@ int main(int argc, char **argv)
 		 argv);
 	run_case("sched_defer", test_sched_counters_count_service_deferrals, argc,
 		 argv);
+	run_case("sched_why", test_sched_counters_name_the_picks, argc, argv);
 #endif
 	printf("kernel_fair_share_test: %u checks, %d failures\n", checks, failures);
 	return failures == 0 ? 0 : 1;

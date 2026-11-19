@@ -197,7 +197,8 @@ typedef enum {
 	ZZAPP_PICK_OWNER,	/* the API lock owner finishes its call */
 	ZZAPP_PICK_STICKY,	/* the active thread keeps its quantum */
 	ZZAPP_PICK_LAG,		/* a thread lags the active one: wake preemption */
-	ZZAPP_PICK_MIN		/* smallest virtual run time, none active */
+	ZZAPP_PICK_MIN,		/* smallest virtual run time, none active */
+	ZZAPP_PICK_KINDS
 } zzapp_pick_reason_t;
 
 /* Where a preempted app's core time went to: it was runnable and lost the
@@ -235,6 +236,15 @@ typedef struct {
 	uint64_t clamp_vr;	/* virtual run time those wakes discarded */
 	uint32_t preempt[ZZAPP_PREEMPT_KINDS];
 	uint32_t deferrals;	/* service held back while this app was picked */
+	/* Dispatch decisions that gave the app the core, by ZZAPP_PICK_*; the
+	 * app that keeps the core counts too. */
+	uint32_t why[ZZAPP_PICK_KINDS];
+	uint32_t yields;	/* yields that went behind a runnable peer */
+	uint32_t yield_skips;	/* picks that passed the app over for a yield
+				 * while its virtual run time was the smallest */
+	uint32_t hold_skips;	/* picks that kept the active app although this
+				 * one was behind it, by less than the wake
+				 * granularity */
 } zzapp_sched_acct_t;
 #endif
 

@@ -949,6 +949,25 @@ void zzapp_kernel_sched_report(zzapp_kernel_t *kernel, uint32_t pid)
 	       (unsigned long)a.preempt[ZZAPP_PREEMPT_OTHER],
 	       (unsigned long)a.wakes, (unsigned long)a.clamps,
 	       SCHED_MS(clamp_us), (unsigned long)a.deferrals);
+	printf(" why=%lu/%lu/%lu/%lu/%lu yields=%lu/%lu hold=%lu",
+	       (unsigned long)a.why[ZZAPP_PICK_STICKY],
+	       (unsigned long)a.why[ZZAPP_PICK_LAG],
+	       (unsigned long)a.why[ZZAPP_PICK_MIN],
+	       (unsigned long)a.why[ZZAPP_PICK_OWNER],
+	       (unsigned long)a.why[ZZAPP_PICK_HANDOFF],
+	       (unsigned long)a.yields, (unsigned long)a.yield_skips,
+	       (unsigned long)a.hold_skips);
+	/* The weight the scheduler divides by and where the app ended, against
+	 * the floor: two apps that share fairly end close together in virtual run
+	 * time, whatever their weights. */
+	{
+		uint64_t vr_us = thread_at(kernel, pid)->vruntime /
+				 ZZAPP_KERNEL_VRUNTIME_SCALE;
+		uint64_t floor_us = kernel->vfloor / ZZAPP_KERNEL_VRUNTIME_SCALE;
+
+		printf(" weight=%lu vr=%lu.%03lu floor=%lu.%03lu",
+		       (unsigned long)weight, SCHED_MS(vr_us), SCHED_MS(floor_us));
+	}
 	for (kind = 0U; kind < ZZAPP_KERNEL_PARK_KINDS; kind++) {
 		if (a.park_n[kind] == 0U)
 			continue;
@@ -1195,6 +1214,9 @@ void zzapp_kernel_yield(zzapp_kernel_t *kernel)
 		if (pid != (uint32_t)current &&
 		    kernel_thread(kernel, pid)->state == ZZAPP_THREAD_RUNNABLE) {
 			kernel_thread(kernel, (uint32_t)current)->yield_pending = 1U;
+#if ZZAPP_PERF_COUNTERS
+			kernel_thread(kernel, (uint32_t)current)->acct.yields++;
+#endif
 			return;
 		}
 	}
@@ -1332,6 +1354,17 @@ static int active_is_lagged(const zzapp_kernel_t *kernel,
 		    gap * thread_weight(thread) > ZZAPP_KERNEL_WAKE_GRAN)
 			return 1;
 	}
+#if ZZAPP_PERF_COUNTERS
+	/* The active thread stays: the runnable threads behind it, by less than
+	 * the granularity, were held off. */
+	for (i = 0U; i < kernel->run_count; i++) {
+		zzapp_thread_t *thread = thread_at(kernel, kernel->run[i]);
+
+		if (thread != active && thread->state == ZZAPP_THREAD_RUNNABLE &&
+		    !thread->yield_pending && thread->vruntime < active->vruntime)
+			thread->acct.hold_skips++;
+	}
+#endif
 	return 0;
 }
 
@@ -1388,6 +1421,11 @@ static int choose_app(zzapp_kernel_t *kernel)
 	}
 	if (have_floor && lowest > kernel->vfloor)
 		kernel->vfloor = lowest;
+#if ZZAPP_PERF_COUNTERS
+	if (pick != ZZAPP_PID_NONE && yielded != ZZAPP_PID_NONE &&
+	    yielded_vr < pick_vr)
+		kernel_thread(kernel, yielded)->acct.yield_skips++;
+#endif
 	if (pick == ZZAPP_PID_NONE)
 		pick = yielded;
 	if (pick == ZZAPP_PID_NONE) {
@@ -1635,6 +1673,7 @@ static void acct_switch(zzapp_kernel_t *kernel, int cur, int app, int pick)
 			thread->acct.state = ACCT_RUN;
 			thread->acct.picks++;
 		}
+		thread->acct.why[kernel->pick_reason]++;
 		thread->acct.deferrals += kernel->defer_pending;
 		kernel->defer_pending = 0U;
 	}
