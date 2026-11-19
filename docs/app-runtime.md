@@ -692,8 +692,10 @@ without a `KICK` is therefore tick-bound unless its producer rings the
 doorbell. The card rings it when the vblank interrupt acknowledges a flip
 (`zzapp_services_display_vblank`): a client that is synchronised to the
 vblank would otherwise lose a frame to the tick. A message or event the
-client posts on the completion queue rings nothing, and an app parked in
-`aar_msg_wait` sees it at the next pass.
+client posts on the completion queue rings the doorbell like a reply: the
+client sends a `KICK` with `CQ_POSTED` after each post, and a merged mouse
+event sends none. The wait is still a level test the pass repeats, so a lost
+kick costs latency only.
 
 ### Load, start and stop
 

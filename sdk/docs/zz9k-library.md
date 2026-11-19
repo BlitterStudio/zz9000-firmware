@@ -158,6 +158,8 @@ Points that matter to a caller:
   messages and logs in front of it aside (`aar_xport_get_message`,
   `aar_xport_set_log_sink`). `aar_xport_service_reply()` posts the completion
   and rings the card's doorbell (`ZZAPP_OP_KICK`, coalesced, asynchronous).
+  `aar_xport_send_message()` and `aar_xport_post_event()` ring it too after each
+  post that reaches the completion queue, so a parked app is woken at once.
   `AAR_E_BUSY` means the completion queue is full: try again.
 - **Messages** are 32 bytes. Sending is credited: at most `AAR_MSG_CAPACITY`
   (63) messages may be unconsumed by the app (`AAR_CB_MSG_CONSUMED`), else
