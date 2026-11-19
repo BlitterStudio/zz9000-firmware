@@ -101,10 +101,17 @@ typedef enum {
 #define ZZAPP_XPORT_F_QUARANTINED       (1u << 1) /* lease lost; shell held */
 #define ZZAPP_XPORT_F_RELEASE_REQUESTED (1u << 2) /* core 1's retire frees */
 #define ZZAPP_XPORT_F_CORRUPT           (1u << 3) /* a queue index was corrupt */
-#define ZZAPP_XPORT_F_PINNED_DATA       (1u << 4) /* an abandoned request may
-						   * still name the data block */
-#define ZZAPP_XPORT_F_PINNED_AUDIO      (1u << 5) /* the same for the audio
-						   * ring */
+/*
+ * A buffer that a request names stays allocated and unchanged until the client
+ * has completed that request. A request the owner abandons (timeout, stop)
+ * while it is still POSTED keeps its buffer in its entry (abandoned_names)
+ * until the late completion arrives; zzapp_xport_buffer_held() tells. Nothing
+ * frees, replaces, reuses or rewrites such a buffer, and the entry takes no
+ * new request meanwhile (AAR_E_BUSY). The claim's release returns everything.
+ * The buffers a request can name: the data block, the audio ring (also named
+ * by AUDIO_CLOSE, which tells the client to stop using it) and the areas of
+ * the service block.
+ */
 
 /* ---- Environment -------------------------------------------------------- */
 
@@ -224,9 +231,8 @@ void zzapp_xport_publish_private(zzapp_rec_t *rec);
 int zzapp_xport_block_alloc(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind,
 			    uint32_t bytes, zzapp_xport_buf_t *out);
 /* Return the block of `kind` (not the pair). AAR_OK also when absent. The data
- * block and the audio ring stay, with AAR_OK, while their ZZAPP_XPORT_F_PINNED_*
- * flag is set: the client may still be working on a request the owner gave up
- * on, and only the claim's release returns them. */
+ * block and the audio ring stay, with AAR_OK, while an abandoned request still
+ * names them (zzapp_xport_buffer_held); the claim's release returns them. */
 int zzapp_xport_block_free(zzapp_rec_t *rec, zzapp_xport_block_kind_t kind);
 /* 1 and *out filled when the block exists, else 0. */
 int zzapp_xport_block_get(const zzapp_rec_t *rec,
@@ -234,15 +240,22 @@ int zzapp_xport_block_get(const zzapp_rec_t *rec,
 			  zzapp_xport_buf_t *out);
 /* The data block, at least `bytes` (at most ZZAPP_XPORT_DATA_MAX): allocated
  * on first use at the request rounded to the step, grown by free and
- * allocate. A grown block loses its contents. While ZZAPP_XPORT_F_PINNED_DATA is
- * set an existing block is neither reused nor replaced (AAR_E_BUSY): an old
- * FILE_WRITE would write the new bytes, a late FILE_READ would overwrite them. */
+ * allocate. A grown block loses its contents. While an abandoned request still
+ * names an existing block it is neither reused nor replaced (AAR_E_BUSY): an
+ * old FILE_WRITE would write the new bytes, a late FILE_READ would overwrite
+ * them. */
 int zzapp_xport_data_reserve(zzapp_rec_t *rec, uint32_t bytes,
 			     zzapp_xport_buf_t *out);
 /* An area of the service block; the block is allocated, zeroed, on the first
- * call for any area. AAR_E_NOMEM as above. */
+ * call for any area. AAR_E_NOMEM as above; AAR_E_BUSY while an abandoned
+ * request still names the area (its late completion has not arrived). */
 int zzapp_xport_service_area(zzapp_rec_t *rec, zzapp_xport_area_t area,
 			     zzapp_xport_buf_t *out);
+
+/* Nonzero while an abandoned request of any entry still names one of the
+ * buffers in `names` (ZZAPP_XPORT_NAMES_*): the client may still read or write
+ * it. */
+int zzapp_xport_buffer_held(const zzapp_rec_t *rec, uint32_t names);
 
 /* ---- Control block words ------------------------------------------------ */
 
@@ -294,10 +307,9 @@ int zzapp_xport_take_completion(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
 				aar_completion *out);
 /* The owner gives up (timeout, stop): the entry becomes FREE at once and its
  * id is remembered, so the late completion is dropped and counted as late. A
- * request that was still POSTED and whose buffer is the data block or the
- * audio ring sets ZZAPP_XPORT_F_PINNED_DATA or _AUDIO: the client may still
- * read or write that block, and the completion that is dropped later proves
- * nothing about when it stopped. */
+ * request that was still POSTED keeps the buffer it names held until that
+ * completion arrives (zzapp_xport_buffer_held), and the entry answers
+ * AAR_E_BUSY to a new request until then. */
 void zzapp_xport_abandon(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind);
 
 /* A message to the client: AAR_OK, AAR_E_BUSY when only the reserved entry is

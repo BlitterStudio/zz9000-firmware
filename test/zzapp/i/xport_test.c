@@ -1225,80 +1225,226 @@ static void test_id_exhaustion(void)
     unclaim(rec);
 }
 
-/* A request the owner gave up on while the client may still work on it pins
- * the block its buffer is: the data block is then neither returned, replaced
- * nor reused (an old FILE_WRITE would write the new bytes, a late FILE_READ
- * would overwrite them), and the audio ring is not returned, before the
- * claim's release. A request that had completed, or that names neither, pins
- * nothing. */
-static void post_naming(zzapp_rec_t *rec, const zzapp_xport_buf_t *buf)
+/* A buffer a request names stays allocated and unchanged until the client has
+ * completed that request. A request the owner abandons while it is still
+ * POSTED keeps its buffer held in its entry (abandoned_names) until the late
+ * completion with its id and op arrives; meanwhile nothing frees, replaces,
+ * reuses or rewrites the buffer and the entry takes no new request. A request
+ * that completed or never named a tracked buffer holds nothing. */
+static void post_named(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
+                       uint16_t op, const zzapp_xport_buf_t *buf)
 {
     aar_request rq;
     uint32_t id = 0U;
 
-    fill_request(&rq, 4U);
-    rq.buf = buf ? buf->token : 0U;
-    rq.buf_len = buf ? 16U : 0U;
-    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_OK);
+    memset(&rq, 0, sizeof(rq));
+    rq.op = op;
+    if (buf) {
+        rq.buf = buf->token;
+        rq.buf_off = buf->off;
+        rq.buf_len = 16U;
+    }
+    CHECK(zzapp_xport_post_request(rec, kind, &rq, 0U, &id) == AAR_OK);
 }
 
-static void test_abandon_pins_data_and_audio(void)
+/* The client takes the oldest request off the SQ. */
+static void take_request(client_t *c, aar_request *seen)
+{
+    const volatile uint8_t *slot = NULL;
+
+    CHECK(aar_queue_peek(&c->sq, NULL, &slot) == 1);
+    aar_entry_get_request(slot, seen);
+    aar_queue_pop(&c->sq, NULL);
+}
+
+static void test_abandoned_request_holds_data_block(void)
 {
     client_t c;
     zzapp_rec_t *rec;
-    aar_request seen;
-    zzapp_xport_buf_t a, b, now;
-    const volatile uint8_t *slot = NULL;
+    aar_request first, second, wrong;
+    zzapp_xport_buf_t a, ring, now;
+    uint32_t late0, unknown0;
+    uint8_t *p;
+    uint32_t i;
 
     reset_all();
     rec = claim(&c);
     CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &a) == AAR_OK);
-    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO, 0x2000U, &b) == AAR_OK);
+    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO, 0x2000U, &ring) == AAR_OK);
 
-    /* Completed, then dropped: nothing outstanding, nothing pinned. */
-    post_naming(rec, &a);
-    CHECK(aar_queue_peek(&c.sq, NULL, &slot) == 1);
-    aar_entry_get_request(slot, &seen);
-    aar_queue_pop(&c.sq, NULL);
-    complete(&c, &seen, 0, 1U);
+    /* Completed, then dropped: nothing is held. */
+    post_named(rec, ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_FILE_READ, &a);
+    take_request(&c, &first);
+    complete(&c, &first, 0, 1U);
     CHECK(zzapp_xport_pump(rec) == 1);
     zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
-    CHECK(!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_DATA));
+    CHECK(!zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_DATA));
     CHECK(zzapp_xport_data_reserve(rec, 0x4000U, &a) == AAR_OK && a.bytes == 0x4000U);
 
-    /* Still POSTED, but its buffer is neither block: nothing is pinned. */
-    post_naming(rec, NULL);
+    /* Posted but naming no tracked buffer (a seek): nothing is held, and the
+     * entry takes the next request. */
+    post_named(rec, ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_FILE_SEEK, NULL);
+    take_request(&c, &first);
     zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
-    CHECK(!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_DATA) &&
-          !zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_AUDIO));
+    CHECK(!zzapp_xport_buffer_held(rec, 0xffU));
+    post_named(rec, ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_FILE_SEEK, NULL);
+    take_request(&c, &first);
+    zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
 
-    /* Still POSTED and naming the data block: the block is held as it is. */
-    post_naming(rec, &a);
+    /* Posted and naming the data block: held, immutable under every use. */
+    p = (uint8_t *)a.ptr;
+    for (i = 0U; i < 64U; i++)
+        p[i] = (uint8_t)(0x40U + i);
+    post_named(rec, ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_FILE_WRITE, &a);
+    take_request(&c, &first);
     zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
-    CHECK(zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_DATA));
-    CHECK(!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_AUDIO));
-    CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &now) == AAR_E_BUSY);   /* no reuse */
-    CHECK(zzapp_xport_data_reserve(rec, 0x6000U, &now) == AAR_E_BUSY);   /* no growth */
+    CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_DATA));
+    CHECK(!zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AUDIO));
+    CHECK(zzapp_xport_data_reserve(rec, 0x1000U, &now) == AAR_E_BUSY);   /* smaller */
+    CHECK(zzapp_xport_data_reserve(rec, 0x4000U, &now) == AAR_E_BUSY);   /* same */
+    CHECK(zzapp_xport_data_reserve(rec, 0x6000U, &now) == AAR_E_BUSY);   /* larger */
     CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_DATA, &now) == 1 &&
           now.ptr == a.ptr && now.bytes == 0x4000U);
+    for (i = 0U; i < 64U; i++)
+        CHECK(p[i] == (uint8_t)(0x40U + i));
     CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_DATA) == AAR_OK);
     CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_DATA, NULL) == 1);
-    /* The ring was not named: it still goes. */
+    /* The entry is unavailable while the buffer is borrowed. */
+    {
+        aar_request rq;
+        uint32_t id = 0U;
+
+        memset(&rq, 0, sizeof(rq));
+        rq.op = AAR_OP_FILE_SEEK;
+        CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_E_BUSY);
+    }
+    /* The ring is not named: it still goes. */
     CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO) == AAR_OK);
     CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 0);
 
-    /* The same for the ring. */
-    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO, 0x2000U, &b) == AAR_OK);
-    post_naming(rec, &b);
+    /* A completion with the wrong op, the wrong id, or one for nothing the
+     * entry remembers does not release the buffer. */
+    late0 = zzapp_xport_stats(rec)->late_dropped;
+    unknown0 = zzapp_xport_stats(rec)->unknown_dropped;
+    wrong = first;
+    wrong.op = (uint16_t)(first.op + 1U);
+    complete(&c, &wrong, 0, 2U);
+    wrong = first;
+    wrong.id = first.id + 0x100U;
+    complete(&c, &wrong, 0, 3U);
+    CHECK(zzapp_xport_pump(rec) == 2);
+    CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_DATA));
+    CHECK(zzapp_xport_stats(rec)->late_dropped == late0);
+    CHECK(zzapp_xport_stats(rec)->unknown_dropped == unknown0 + 2U);
+    /* The right completion arrives and nothing else pumps: the next use of
+     * the buffer takes it. */
+    complete(&c, &first, 0, 4U);
+    CHECK(zzapp_xport_data_reserve(rec, 0x2000U, &now) == AAR_OK && now.ptr == a.ptr);
+    CHECK(!zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_DATA));
+    CHECK(zzapp_xport_stats(rec)->late_dropped == late0 + 1U);
+    CHECK(zzapp_xport_data_reserve(rec, 0x6000U, &now) == AAR_OK && now.bytes == 0x6000U);
+
+    /* A duplicate of that completion cannot release the next borrow. */
+    post_named(rec, ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_FILE_READ, &now);
+    take_request(&c, &second);
     zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
-    CHECK(zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PINNED_AUDIO));
-    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO) == AAR_OK);
-    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, &now) == 1 && now.ptr == b.ptr);
-    /* A block no queue request names is still returned. */
-    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_LOAD, 0x2000U, &now) == AAR_OK);
-    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_LOAD) == AAR_OK);
-    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_LOAD, NULL) == 0);
+    CHECK(second.id != first.id && zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_DATA));
+    complete(&c, &first, 0, 5U);
+    CHECK(zzapp_xport_pump(rec) == 1);
+    CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_DATA));
+    complete(&c, &second, 0, 6U);
+    CHECK(zzapp_xport_pump(rec) == 1);
+    CHECK(!zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_DATA));
+
+    /* A post that fails (SQ full) leaves nothing held. */
+    {
+        aar_request rq;
+        uint32_t id = 0U;
+        unsigned n;
+
+        fill_request(&rq, 1U);
+        for (n = 0U; n < 64U; n++)
+            if (aar_queue_post_request(&rec->xport.sq, &rq, NULL, NULL) != AAR_OK)
+                break;
+        memset(&rq, 0, sizeof(rq));
+        rq.op = AAR_OP_FILE_READ;
+        rq.buf = now.token;
+        CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) != AAR_OK);
+        zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
+        CHECK(!zzapp_xport_buffer_held(rec, 0xffU));
+    }
     /* The claim's release returns everything. */
+    unclaim(rec);
+    CHECK(heap.live == 0U && heap.bad_frees == 0U);
+}
+
+/* The paths and the console-read room of a service block are held the same
+ * way, area by area: the other areas, which keep their own in-flight rules,
+ * are not. Two entries borrow two areas at once. */
+static void test_abandoned_request_holds_service_areas(void)
+{
+    client_t c;
+    zzapp_rec_t *rec;
+    aar_request first, second;
+    zzapp_xport_buf_t scratch, in, other;
+    uint8_t *p;
+
+    reset_all();
+    rec = claim(&c);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_SCRATCH, &scratch) == AAR_OK);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_CONSOLE_IN, &in) == AAR_OK);
+    p = (uint8_t *)scratch.ptr;
+    memcpy(p, "pak0.pak", 9U);
+
+    post_named(rec, ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_FILE_OPEN, &scratch);
+    take_request(&c, &first);
+    zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
+    CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AREA(ZZAPP_XPORT_AREA_SCRATCH)));
+    CHECK(!zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AREA(ZZAPP_XPORT_AREA_CONSOLE_IN)));
+    /* The path of the abandoned open cannot be rewritten for the next one. */
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_SCRATCH, &other) == AAR_E_BUSY);
+    CHECK(memcmp(p, "pak0.pak", 9U) == 0);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_CONSOLE_IN, &other) == AAR_OK);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_PALETTE, &other) == AAR_OK);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_CONSOLE_OUT, &other) == AAR_OK);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_LOG, &other) == AAR_OK);
+    /* A second entry borrows the console-read room. */
+    post_named(rec, ZZAPP_XPORT_REQ_FLIP, AAR_OP_CONSOLE_READ, &in);
+    take_request(&c, &second);
+    zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_FLIP);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_CONSOLE_IN, &other) == AAR_E_BUSY);
+    /* The scratch completion arrives: only that area is free again. */
+    complete(&c, &first, 0, 1U);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_SCRATCH, &other) == AAR_OK);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_CONSOLE_IN, &other) == AAR_E_BUSY);
+    complete(&c, &second, 0, 2U);
+    CHECK(zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_CONSOLE_IN, &other) == AAR_OK);
+    unclaim(rec);
+    CHECK(heap.live == 0U && heap.bad_frees == 0U);
+}
+
+/* AUDIO_CLOSE names no buffer but tells the client to stop using the ring:
+ * until the client has answered it, the ring is not returned. */
+static void test_abandoned_audio_close_holds_ring(void)
+{
+    client_t c;
+    zzapp_rec_t *rec;
+    aar_request close_req;
+    zzapp_xport_buf_t ring;
+
+    reset_all();
+    rec = claim(&c);
+    CHECK(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_AUDIO, 0x2000U, &ring) == AAR_OK);
+    post_named(rec, ZZAPP_XPORT_REQ_BLOCKING, AAR_OP_AUDIO_CLOSE, NULL);
+    take_request(&c, &close_req);
+    zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
+    CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AUDIO));
+    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO) == AAR_OK);
+    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 1);
+    complete(&c, &close_req, 0, 1U);
+    CHECK(zzapp_xport_pump(rec) == 1);
+    CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_AUDIO) == AAR_OK);
+    CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 0);
     unclaim(rec);
     CHECK(heap.live == 0U && heap.bad_frees == 0U);
 }
@@ -1767,7 +1913,9 @@ int main(void)
     test_event_ring();
     test_ids();
     test_id_exhaustion();
-    test_abandon_pins_data_and_audio();
+    test_abandoned_request_holds_data_block();
+    test_abandoned_request_holds_service_areas();
+    test_abandoned_audio_close_holds_ring();
     test_corrupt_indices();
     test_log();
     test_log_drops_on_full_sq_and_heap();

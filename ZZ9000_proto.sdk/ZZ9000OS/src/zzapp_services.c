@@ -3753,11 +3753,11 @@ static void audio_detach(void)
 	 * transport does that), so a replayed teardown frees nothing twice.
 	 * The client of the AHI route maps the ring and writes READ_FRAME
 	 * through it, so the ring stays, and the shell's release returns it,
-	 * whenever the client has not been told to stop: a quarantined claim
-	 * (the client may still write until it finds out), and an app that
-	 * ended without closing the stream (a close the client answered
-	 * leaves keep clear). A request the client may still be working on
-	 * also keeps it (zzapp_xport_block_free, ZZAPP_XPORT_F_PINNED). */
+	 * whenever the client has not been told to stop and answered: a
+	 * quarantined claim (the client may still write until it finds out), an
+	 * app that ended without closing the stream, and, through the request
+	 * it still names (zzapp_xport_buffer_held in block_free), an AUDIO_OPEN
+	 * or AUDIO_CLOSE the client has not completed. */
 	state->audio_samples = NULL;
 	state->audio_read_frame = NULL;
 	state->audio_write_frame = NULL;
@@ -3998,11 +3998,21 @@ int zzapp_svc_audio_close(void)
 
 	if (!state->audio_open || state->audio_request != AUDIO_REQUEST_NONE)
 		return AAR_E_INVAL;
-	if (state->audio_ahi_route)
-		/* The client stops its AHI reads; whether it answers or the
-		 * wait ends does not change that the ring goes. */
-		(void)blocking_request(AAR_OP_AUDIO_CLOSE, ZZAPP_WAIT_AUDIO_REQ,
-				       0U, NULL, 0U, NULL, 0U, NULL);
+	if (state->audio_ahi_route) {
+		int rc;
+
+		/* The client stops its AHI reads when it answers the close. The
+		 * ring is returned only after that answer: a close that could
+		 * not be posted, whose wait failed, or that the client
+		 * answered with an error leaves the stream open and the ring
+		 * with the client, which may still write READ_FRAME. The app
+		 * can retry the close; its end or the claim's release returns
+		 * the ring. */
+		rc = blocking_request(AAR_OP_AUDIO_CLOSE, ZZAPP_WAIT_AUDIO_REQ,
+				      0U, NULL, 0U, NULL, 0U, NULL);
+		if (rc != AAR_OK)
+			return rc;
+	}
 	return audio_release_ring(state);
 }
 

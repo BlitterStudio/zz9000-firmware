@@ -299,9 +299,11 @@ typedef enum {
 	ZZAPP_XPORT_REQ_COUNT = ZZAPP_XPORT_REQUESTS
 } zzapp_xport_req_kind_t;
 
-/* The blocks a request's buffer can be (zzapp_xport_req_t.names). */
+/* What a request's buffer is (zzapp_xport_req_t.names): the data block, the
+ * audio ring, or one area of the service block (zzapp_xport_area_t). */
 #define ZZAPP_XPORT_NAMES_DATA   (1U << 0)
 #define ZZAPP_XPORT_NAMES_AUDIO  (1U << 1)
+#define ZZAPP_XPORT_NAMES_AREA(a) (1U << (2U + (unsigned)(a)))
 
 typedef enum {
 	ZZAPP_XPORT_REQ_FREE = 0,
@@ -319,15 +321,21 @@ typedef struct {
 	uint32_t id;
 	uint16_t op;
 	uint8_t  state;                /* zzapp_xport_req_state_t */
-	uint8_t  names;                /* ZZAPP_XPORT_NAMES_*: blocks its buffer is */
+	uint8_t  names;                /* ZZAPP_XPORT_NAMES_* of its buffer */
 	int32_t  result;
 	uint16_t flags;
-	uint16_t reserved16;
+	/* What the abandoned request of this entry still names while its late
+	 * completion has not arrived: that memory stays allocated and unchanged.
+	 * Core 1 writes it; core 0 reads it with the core-1 handoff done. */
+	uint8_t  abandoned_names;
+	uint8_t  reserved8;
 	uint32_t out[AAR_ENTRY_OUTS];
-	/* The id of the last request of this entry that its owner gave up on:
-	 * a completion that arrives for it is dropped and counted as late. */
+	/* The id and op of the last request of this entry that its owner gave up
+	 * on: only a completion with both clears abandoned_names, and it is
+	 * dropped and counted as late. */
 	uint32_t abandoned_id;
-	uint32_t reserved32;
+	uint16_t abandoned_op;
+	uint16_t reserved16;
 	uint64_t deadline;             /* owner's clock, opaque to the transport */
 } zzapp_xport_req_t;
 

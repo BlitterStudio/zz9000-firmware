@@ -263,10 +263,25 @@ static void test_late_file_reply_ids(void)
 	EXPECT(zzapp_xport_req_state(APP(0).rec, ZZAPP_XPORT_REQ_BLOCKING) ==
 	       ZZAPP_XPORT_REQ_FREE, "timeout abandoned the request");
 	first_id = zzapp_xport_req_id(APP(0).rec, ZZAPP_XPORT_REQ_BLOCKING);
-	/* The Amiga wakes up and answers everything in order. */
+	/* The abandoned open still names the path in the scratch area: nothing
+	 * rewrites it while the client has not answered, so a second open waits. */
+	EXPECT(zzapp_xport_buffer_held(APP(0).rec,
+		ZZAPP_XPORT_NAMES_AREA(ZZAPP_XPORT_AREA_SCRATCH)),
+	       "the timed-out open does not hold its path");
 	CL(0).frozen = 0;
 	file_phase = 1;
 	file_now = 0U;
+	fd = zzapp_svc_file_open("pak1.pak", AAR_FILE_READ);
+	EXPECT(fd == AAR_E_BUSY, "a second open reused the path of the first");
+	{
+		zzapp_xport_buf_t blk;
+
+		EXPECT(zzapp_xport_block_get(APP(0).rec, ZZAPP_XPORT_BLOCK_SERVICE, &blk) == 1 &&
+		       memcmp(blk.ptr, "pak0.pak", 9U) == 0,
+		       "the path of the abandoned open was rewritten");
+	}
+	/* The Amiga wakes up and answers everything in order. */
+	svc_yield();
 	fd = zzapp_svc_file_open("pak1.pak", AAR_FILE_READ);
 	EXPECT(fd == AAR_FD_BASE + 1, "late reply applied or timed-out fd reused");
 	st = zzapp_xport_stats(APP(0).rec);
@@ -300,6 +315,10 @@ static void test_scheduler_file_timeout_abandons_request(void)
 	service_rec()->thread.wake_reason = ZZAPP_WAKE_NONE;
 	CL(0).frozen = 0;
 	zzapp_services_test_set_yield(svc_yield);
+	/* The abandoned open still holds its path until the client answers. */
+	fd = zzapp_svc_file_open("next.pak", AAR_FILE_READ);
+	EXPECT(fd == AAR_E_BUSY, "an open before the answer of the timed-out one");
+	svc_yield();
 	fd = zzapp_svc_file_open("next.pak", AAR_FILE_READ);
 	EXPECT(fd == AAR_FD_BASE + 1, "next open after the scheduler timeout");
 }

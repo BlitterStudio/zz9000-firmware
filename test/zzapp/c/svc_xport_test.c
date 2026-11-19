@@ -1018,24 +1018,26 @@ static void test_file_timeout(void)
 	CHECK(zzapp_svc_file_open("Work:x", AAR_FILE_READ) == AAR_E_TIMEDOUT);
 	CHECK(zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_BLOCKING) == ZZAPP_XPORT_REQ_FREE);
 	CHECK(runtime_of(rec)->wait_kind == ZZAPP_WAIT_NONE);
-	/* The fd stays retired (the client may still complete into it). */
+	/* The abandoned open still names its path in the scratch area: the next
+	 * open answers BUSY until the client has answered the first. */
 	cl.ignore = 0;
 	cl.clock_step = 1000U;
-	fd = zzapp_svc_file_open("Work:y", AAR_FILE_READ);
-	CHECK(fd == ZZAPP_FD_BASE + 1);
-	/* The old request's completion arrives now and is dropped as late. */
+	CHECK(zzapp_svc_file_open("Work:y", AAR_FILE_READ) == AAR_E_BUSY);
+	/* The old request's completion arrives now and is dropped as late. The
+	 * fd stays retired (the client may still complete into it). */
 	{
 		aar_completion d;
 
 		memset(&d, 0, sizeof(d));
 		d.op = AAR_OP_FILE_OPEN;
-		d.id = zzapp_xport_stats(rec)->late_dropped + 1U;	/* not the live id */
 		late_before = zzapp_xport_stats(rec)->late_dropped;
 		d.id = 1U;
 		client_post(&c, &d);
-		(void)zzapp_xport_pump(rec);
-		CHECK(zzapp_xport_stats(rec)->late_dropped == late_before + 1U);
 	}
+	/* No other call pumps: the next open takes the late completion first. */
+	fd = zzapp_svc_file_open("Work:y", AAR_FILE_READ);
+	CHECK(fd == ZZAPP_FD_BASE + 1);
+	CHECK(zzapp_xport_stats(rec)->late_dropped == late_before + 1U);
 	CHECK(zzapp_svc_file_close(fd) == AAR_OK);
 
 	/* A stop ends the wait with AAR_E_IO. */
@@ -1926,6 +1928,111 @@ static void test_audio_ahi_ring_kept_when_app_ends(void)
 	CHECK(heap.live == 0U);
 }
 
+/* An AHI close returns the ring only once the client has answered it. A close
+ * that could not be posted, whose wait ended without an answer, that the
+ * client answered with an error, or that met a corrupt CQ leaves the stream
+ * open and the ring with the client; the app can retry, and its end or the
+ * claim's release returns the ring. */
+static void ahi_open(client_t *c, zzapp_rec_t **rec, uint32_t *handle)
+{
+	aar_audio a;
+
+	reset_all();
+	*rec = claim(c, handle);
+	give_space(*rec);
+	(*rec)->claim.client_caps = ZZAPP_CLIENT_AUDIO_AHI;
+	CHECK(zzapp_svc_audio_open(22050U, 2U, &a) == AAR_OK);
+	CHECK(cl.nreq[AAR_OP_AUDIO_CLOSE] == 0U);
+}
+
+static void ahi_ring_kept(zzapp_rec_t *rec)
+{
+	CHECK(runtime_of(rec)->audio_open == 1);
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 1);
+}
+
+/* The app ends with the stream still open: the ring waits for the release. */
+static void ahi_end_and_release(client_t *c, zzapp_rec_t *rec, uint32_t handle)
+{
+	zzapp_services_set_terminal(ZZAPP_END_EXIT);
+	zzapp_services_on_app_end();
+	CHECK(zzapp_rec_retire(rec->hdr.pid) == 0);
+	zzapp_services_poll();
+	zzapp_services_core0_poll();
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 1);
+	CHECK(word(c, AAR_CB_STATE) == AAR_STATE_IDLE);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	CHECK(zzapp_rec_state(rec->hdr.pid) == ZZAPP_REC_FREE);
+	CHECK(heap.live == 0U);
+}
+
+static void test_audio_ahi_close_failures(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_completion d;
+
+	/* Not posted (the ids are used up): nothing is in flight, nothing held. */
+	ahi_open(&c, &rec, &handle);
+	rec->xport.next_id = 0U;
+	CHECK(zzapp_svc_audio_close() == AAR_E_NOSPC);
+	ahi_ring_kept(rec);
+	CHECK(!zzapp_xport_buffer_held(rec, 0xffU));
+	CHECK(cl.nreq[AAR_OP_AUDIO_CLOSE] == 0U);
+	rec->xport.next_id = 0x1000U;
+	CHECK(zzapp_svc_audio_close() == AAR_OK);
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 0);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	CHECK(heap.live == 0U);
+
+	/* Posted, then the wait ends without an answer: the close names the ring
+	 * until the client answers it, even late and with no other call. */
+	ahi_open(&c, &rec, &handle);
+	cl.ignore = 1;
+	cl.stop_at_yield = cl.yields + 2U;
+	CHECK(zzapp_svc_audio_close() == AAR_E_IO);
+	ahi_ring_kept(rec);
+	CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AUDIO));
+	rec->host.stop_requested = 0U;
+	cl.stop_at_yield = 0U;
+	cl.ignore = 0;
+	CHECK(zzapp_svc_audio_close() == AAR_E_BUSY);	/* nobody answered yet */
+	ahi_ring_kept(rec);
+	memset(&d, 0, sizeof(d));
+	d.op = AAR_OP_AUDIO_CLOSE;
+	d.id = rec->xport.req[ZZAPP_XPORT_REQ_BLOCKING].id;
+	client_post(&c, &d);
+	CHECK(zzapp_svc_audio_close() == AAR_OK);	/* the late answer is taken first */
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 0);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	CHECK(heap.live == 0U);
+
+	/* The client answers with an error: the stream stays open. */
+	ahi_open(&c, &rec, &handle);
+	cl.result = AAR_E_IO;
+	CHECK(zzapp_svc_audio_close() == AAR_E_IO);
+	ahi_ring_kept(rec);
+	cl.result = AAR_OK;
+	CHECK(zzapp_svc_audio_close() == AAR_OK);
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_AUDIO, NULL) == 0);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	CHECK(heap.live == 0U);
+
+	/* A corrupt CQ ends the wait: the ring stays, and the app's end and the
+	 * claim's release return it. */
+	ahi_open(&c, &rec, &handle);
+	cl.ignore = 1;
+	aar_put_be32(c.cq.tail, 0x1000U);
+	CHECK(zzapp_svc_audio_close() == AAR_E_IO);
+	ahi_ring_kept(rec);
+	CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AUDIO));
+	aar_put_be32(c.cq.tail, 0U);
+	zzapp_xport_flag_clear(rec, ZZAPP_XPORT_F_CORRUPT);
+	cl.ignore = 0;
+	ahi_end_and_release(&c, rec, handle);
+}
+
 /* ---- Lease, quarantine, reset ------------------------------------------------------------------------- */
 
 static void test_lease_and_quarantine(void)
@@ -2152,6 +2259,7 @@ int main(void)
 	test_audio_ahi();
 	test_audio_ring_kept_by_quarantine();
 	test_audio_ahi_ring_kept_when_app_ends();
+	test_audio_ahi_close_failures();
 	test_lease_and_quarantine();
 	test_reset();
 	test_churn();
