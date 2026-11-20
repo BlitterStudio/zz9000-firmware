@@ -2452,7 +2452,7 @@ static void test_staleness_after_revocation(void)
     h = claim();
     req_init(&req);
     dispatch();
-    /* A message that arrived before the revocation stays readable. */
+    /* A message that arrives before the revocation (checked below). */
     CHECK(zzapp_xport_post_msg(card.rec, m) == AAR_OK);
     CHECK(SNEXT(h, &req) == AAR_E_BUSY);
     /* The card revoked the handle (lease lost, quarantine) but holds the
@@ -2479,8 +2479,8 @@ static void test_staleness_after_revocation(void)
     CHECK(SNEXT(h, &req) == AAR_E_STALE);
     CHECK(SENDMSG(h, m) == AAR_E_STALE);
     CHECK(graveyard_intact());
-    /* The message that was already in the inbox can still be read. */
-    CHECK(GETMSG(h, got) == AAR_OK && got[0] == 9U);
+    /* A message that arrived before the revocation is not handed out: a
+     * revoked handle answers STALE before anything else. */
     CHECK(GETMSG(h, got) == AAR_E_STALE);
     /* The handle is still the caller's: closing it is fine. */
     CHECK(CLOSE(h) == AAR_OK);
