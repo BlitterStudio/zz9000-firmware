@@ -594,7 +594,9 @@ Everything an app asks of its client (files, console, log, display, audio,
 messages) and everything the client sends (input events, messages, replies)
 travels in the rings. There is no launcher window, no slot and no fixed
 address range. The Amiga client is `aar.library` (its ZZ9000 platform layer is
-`sdk/amiga/src/aar_zz9000.[ch]`, described in `sdk/docs/zz9k-library.md`).
+`sdk/amiga/src/aar_zz9000.[ch]`, described in `sdk/docs/zz9k-library.md`), and
+the launcher that serves an app's requests through it is `aar-run`, which the
+SDK package ships as `C/aar-run`.
 
 Integers in mailbox payloads are big-endian. A request is 48 payload bytes
 except `QUERY`, `CLAIM` and `LIST`, which take no handle. Every other

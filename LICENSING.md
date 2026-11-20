@@ -76,6 +76,13 @@ as `zz9k.library` (above): it can use any licence. The packaged SDK
 ships the aar headers and fd file under the MIT licence
 (`Developer/LICENSE-MIT.txt`).
 
+`aar-run`, the reference launcher, and `libaarserve.a`, the serving loop it is
+built on, are MIT. The SDK build compiles them from `client/run` and
+`client/serve` of the pinned aar tree and links nothing from this repository:
+they call `aar.library` through its vectors and do not link the GPL platform
+layer. The package ships `C/aar-run` and `Developer/Lib/libaarserve.a` with the
+MIT text in `Developer/LICENSE-MIT.txt`.
+
 ## Everything else
 
 The rest of the repository is GPL-3.0-or-later unless a file says otherwise.

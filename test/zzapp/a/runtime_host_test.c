@@ -617,7 +617,7 @@ int main(void)
 
 
     /*
-     * A display flip can wait for ZZRun's SafeMessage longer than the
+     * A display flip can wait for aar-run's SafeMessage longer than the
      * ordinary API deadline.  Each declared wait renews that deadline,
      * unlike a wedged API call below.
      */

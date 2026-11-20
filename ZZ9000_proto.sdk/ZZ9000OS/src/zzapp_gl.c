@@ -836,7 +836,7 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
             return 0;
         }
         /* RasterIX writes DDR directly.  Discard any old CPU view before
-         * ZZRun's flip service performs its scanout cache hand-off. */
+         * aar-run's flip service performs its scanout cache hand-off. */
         present_cache_invalidate((uintptr_t)mw->direct_color_buffers[source],
                                  (size_t)w * h * 2U);
         minigl_platform_barrier(NULL);
@@ -940,7 +940,7 @@ void zzapp_gl_swap(void)
     if (!mw)
         goto done;
     /* A completed older target is copied while the app was constructing this
-     * frame.  Do not wait when RasterIX or ZZRun has not reached it yet. */
+     * frame.  Do not wait when RasterIX or aar-run has not reached it yet. */
     (void)zzapp_gl_present_pending(mw);
     target_started = minigl_platform_time_us();
     if (!zzapp_gl_make_target_available(mw))

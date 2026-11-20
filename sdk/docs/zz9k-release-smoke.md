@@ -232,20 +232,20 @@ default shared heap are Zorro III diagnostics.
     Without AmiSSL, the `https://` item fails with a message and `http://`
     still plays.
 
-12. Check the ARM app runtime on Zorro III. Install `Libs/aar.library` from
-    this package next to `zz9k.library` and `mmu.library`, install `ZZRun`
-    from the matched driver package, and build `hello.elf`, `echo.elf` and
+12. Check the ARM app runtime on Zorro III. Install `Libs/aar.library` and
+    `C/aar-run` from this package, with `zz9k.library` and `mmu.library`
+    beside them, and build `hello.elf`, `echo.elf` and
     `ringflood.elf` from `templates/` in
     [BlitterStudio/aar](https://github.com/BlitterStudio/aar).
 
     ```text
     Stack 32768
-    ZZRun RAM:hello.elf
+    aar-run RAM:hello.elf
     zz9k-app-echo-test RAM:echo.elf 300
     zz9k-app-ringtest RAM:ringflood.elf 10
     ```
 
-    Expected result: `ZZRun` returns after `hello.elf` exits, and
+    Expected result: `aar-run` returns after `hello.elf` exits, and
     `zz9k-app-echo-test` ends with `zz9k-app-echo-test: PASS (300 messages)`.
     The tool covers the library's open, load, start, 32-byte
     message exchange under the message credit, stop, status, and close. A
@@ -300,7 +300,7 @@ default shared heap are Zorro III diagnostics.
   failures with streams working belong to the service modules.
 - Treat corruption outside the PIP as a stop condition. Preserve the UART log
   and the exact artifact hashes.
-- Route `ZZRun` load or exit failures to the app runtime and launcher, and
+- Route `aar-run` load or exit failures to the app runtime and launcher, and
   `zz9k-app-echo-test` failures to `aar.library` (its ZZ9000 platform layer,
   `aar_zz9000`). Keep the
   `[app]` lines from the UART log. When the echo test passes and

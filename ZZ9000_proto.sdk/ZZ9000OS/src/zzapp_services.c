@@ -1669,7 +1669,7 @@ static int alloc_fd(int *table)
 	return -1;
 }
 
-/* 1 is a live fd. 2 is retired by a timeout: ZZRun may still complete the
+/* 1 is a live fd. 2 is retired by a timeout: aar-run may still complete the
  * abandoned op into that index, so it must not be allocated again. */
 static int slot_live(const int *table, int fd)
 {

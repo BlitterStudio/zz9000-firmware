@@ -23,7 +23,7 @@ Research GmbH. SDK issues and fork-specific discussion belong here.
 | `tests/` | Host-side tests and test fixtures |
 
 ARM apps on core 1 use [the developer guide](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md)
-and [the API reference](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md), which live in BlitterStudio/aar. The Amiga side reaches an app through `aar.library` ([client API](https://github.com/BlitterStudio/aar/blob/main/docs/aar-client-api.md)); the package includes it, its headers, and
+and [the API reference](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md), which live in BlitterStudio/aar. The Amiga side reaches an app through `aar.library` ([client API](https://github.com/BlitterStudio/aar/blob/main/docs/aar-client-api.md)); the package includes it, its headers, `aar-run` (the launcher that serves the app), and
 `zz9k-app-echo-test`, which loads an `echo.elf` built from the ARM app
 template and verifies its 32-byte message round trip, and
 `zz9k-app-ringtest`, which floods the message ring from `ringflood.elf` and
@@ -98,8 +98,13 @@ The generated `build/package/amigaos3` tree contains:
 - `Classes/DataTypes/zz9k-picture.datatype` and
   `Classes/DataTypes/zz9k-sound.datatype`
 - DataType descriptors in `Storage/DataTypes/`
+- `C/aar-run` and `C/aar-run.info`, the reference launcher that runs an app
+  and serves its files, console, display, audio and input through
+  `aar.library` (manual: `Docs/aar-run.guide`)
 - Public headers and FD files in `Developer/`, with `LICENSE-MIT.txt` and
-  `LICENSE-GPL-3.0.txt`
+  `LICENSE-GPL-3.0.txt`; `Developer/Lib/libaarserve.a` is the serving loop of
+  `aar-run` as an archive, with its header `libraries/aar_serve.h` in
+  `Developer/Include/`, for programs that embed the loop
 - AmigaGuide manuals in `Docs/` and source examples in `Examples/`
 - `MANIFEST.sha256`, containing a SHA-256 digest for every other packaged file
 
