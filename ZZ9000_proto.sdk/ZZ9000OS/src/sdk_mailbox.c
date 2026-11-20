@@ -7153,11 +7153,11 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		XTime batch_end;
 
 		base = (volatile uint8_t *)(uintptr_t)arena_addr;
-		/* The 68k wrote the arena over Zorro (non-coherent), and core 0
-		 * only resolved/range-checked the shared-buffer handle -- it never
-		 * touched arena contents. The magic/version/mode/member fields
-		 * below must be read only after this invalidate, on the core that
-		 * is actually executing the batch. */
+		/* The 68k wrote the arena over Zorro through the coherent ACP, and
+		 * core 0 only resolved/range-checked the shared-buffer handle -- it
+		 * never touched arena contents. The invalidate below is defensive;
+		 * the magic/version/mode/member fields are read after it, on the
+		 * core that is actually executing the batch. */
 		Xil_DCacheInvalidateRange((INTPTR)arena_addr, arena_length);
 
 		if (get_be32(base + SDK_BATCH_HDR_MAGIC) != SDK_BATCH_ARENA_MAGIC) {

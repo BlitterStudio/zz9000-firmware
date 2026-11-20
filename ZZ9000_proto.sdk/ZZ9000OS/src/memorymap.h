@@ -292,9 +292,10 @@
 // ARM = layout->audio.base - SDK_MAILBOX_Z2_SIZE + ADDR_ADJ, and it exists
 // only while the generation-2 contract is acknowledged.
 //
-// The Amiga writes the mailbox through non-coherent AXI and the descriptor
-// packs host- and firmware-owned cursors into the same cache lines, so the
-// ARM must map it non-cacheable. Its 1 MB section also holds VRAM and the
+// Zorro accesses enter through the coherent ACP, but the descriptor packs
+// host- and firmware-owned cursors into the same cache lines and both sides
+// poll them, so the ARM maps the mailbox non-cacheable rather than keep
+// those lines in its caches. Its 1 MB section also holds VRAM and the
 // PIP pool, which the ARM writes cached, so mmu_page.c makes only the 4 KiB
 // page directly below the audio scratch base non-cacheable. That page also
 // holds the last 0x480 bytes of the grant's ring; the lease code's
