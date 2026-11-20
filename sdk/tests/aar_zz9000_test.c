@@ -501,20 +501,32 @@ static int fb_call(void *user, uint16_t op, const uint8_t *payload,
     case ZZAPP_OP_RELEASE:
         card_release_claim(rec);
         return 0;
-    case ZZAPP_OP_LIST:
+    case ZZAPP_OP_LIST: {
+        /* As put_list of zzapp_services.c: the first live claim whose record
+         * index (pid) is at or after the cursor; INDEX is that raw pid. */
+        uint32_t pid, cap = zzapp_rec_capacity();
+
         reply->len = ZZAPP_LIST_REPLY_BYTES;
-        if (card.rec && zzapp_get_be32(payload) == 0U) {
-            zzapp_put_be32(reply->payload + ZZAPP_LIST_HANDLE, card.handle);
+        for (pid = zzapp_get_be32(payload + ZZAPP_LIST_CURSOR); pid < cap; pid++) {
+            zzapp_rec_t *r;
+
+            if (zzapp_rec_state(pid) == ZZAPP_REC_FREE)
+                continue;
+            r = zzapp_rec_by_pid(pid);
+            if (!r || !zzapp_xport_live(r))
+                continue;
+            zzapp_put_be32(reply->payload + ZZAPP_LIST_HANDLE, r->hdr.handle);
             zzapp_put_be32(reply->payload + ZZAPP_LIST_STATE, AAR_STATE_RUNNING);
-            zzapp_put_be32(reply->payload + ZZAPP_LIST_INDEX,
-                           aar_handle_index(card.handle));
+            zzapp_put_be32(reply->payload + ZZAPP_LIST_INDEX, r->hdr.pid);
             zzapp_put_be32(reply->payload + ZZAPP_LIST_COMMITTED, 0x400000U);
             zzapp_put_be32(reply->payload + ZZAPP_LIST_REASONS,
                            (ZZAPP_BLOCK_FILE << 24) | (AAR_END_NONE << 16) |
                            ZZAPP_LIST_FLAG_OVERLOAD);
             memcpy(reply->payload + ZZAPP_LIST_NAME, "swquake", 7);
+            break;
         }
         return 0;
+    }
     default:
         return ZZ9K_STATUS_UNSUPPORTED;
     }
@@ -869,6 +881,59 @@ static void test_abi_and_capability_checks(void)
     info.size = sizeof(info);
     CHECK(aar_core_query(&core, &info) == AAR_E_NOSYS);
     CHECK(aar_core_open(&core, 0U, NULL, NULL, &h, &reason) == AAR_E_NOSYS);
+}
+
+/* A walk over several claims with gaps in the slot numbers: the cursor goes to
+ * the card, INDEX is the raw slot, and the next cursor is INDEX + 1. Every
+ * live claim is listed once, in slot order, and the walk then ends with 0. */
+static void test_list_walks_claims_with_gaps(void)
+{
+    AARHandle *h[5];
+    const aar_client_ext_zz9000 *ext;
+    AARZZ9000List li;
+    uint32_t want[3], got[3] = { 0 }, idx[3] = { 0 }, cursor = 0U;
+    unsigned i, n = 0U;
+    LONG rc;
+
+    reset_all();
+    ext = aar_core_ext(&core, AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT);
+    CHECK(ext != NULL);
+    for (i = 0U; i < 5U; i++)
+        h[i] = claim();
+    want[0] = h[0]->claim.handle;
+    want[1] = h[2]->claim.handle;
+    want[2] = h[4]->claim.handle;
+    CHECK(CLOSE(h[1]) == AAR_OK);
+    CHECK(CLOSE(h[3]) == AAR_OK);
+    for (;;) {
+        memset(&li, 0, sizeof(li));
+        li.size = sizeof(li);
+        rc = ext->list(cursor, &li);
+        CHECK(rc >= 0);
+        if (rc != 1)
+            break;
+        if (n < 3U) {
+            got[n] = li.handle;
+            idx[n] = li.index;
+        }
+        n++;
+        if (n > 8U)
+            break;
+        cursor = li.index + 1U;
+    }
+    CHECK(rc == 0 && n == 3U);
+    for (i = 0U; i < 3U; i++)
+        CHECK(got[i] == want[i]);
+    CHECK(idx[0] < idx[1] && idx[1] < idx[2] && idx[1] - idx[0] > 1U);
+    /* The cursor is honoured: starting at a claim's own INDEX lists that claim
+     * again, starting after it skips it. */
+    li.size = sizeof(li);
+    CHECK(ext->list(idx[1], &li) == 1 && li.handle == want[1]);
+    li.size = sizeof(li);
+    CHECK(ext->list(idx[1] + 1U, &li) == 1 && li.handle == want[2]);
+    li.size = sizeof(li);
+    CHECK(ext->list(idx[2] + 1U, &li) == 0 && li.handle == 0U);
+    CHECK(CLOSE(h[0]) == AAR_OK && CLOSE(h[2]) == AAR_OK && CLOSE(h[4]) == AAR_OK);
 }
 
 static void test_query_and_extension(void)
@@ -2958,6 +3023,7 @@ int main(void)
     test_open_and_refusal();
     test_abi_and_capability_checks();
     test_query_and_extension();
+    test_list_walks_claims_with_gaps();
     test_requests_end_to_end();
     test_list_names_cross_the_request_buffer();
     test_mapping_cache_and_shared_maps();

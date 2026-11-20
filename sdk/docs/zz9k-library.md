@@ -199,7 +199,10 @@ Points that matter to a caller:
   counts pump passes held at a full inbox) are in the ZZ9000 extension table,
   `AARExt(AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT)`, next to the list of
   all claims on the card, the administrative release of any of them, the
-  lease test hook and the log sink.
+  lease test hook and the log sink. `list(cursor, &info)` returns the first
+  live claim whose slot is at or after `cursor` and puts that raw slot in
+  `info.index`; the next cursor is `info.index + 1` (passing `info.index`
+  again returns the same claim). It returns 0 when no claim is left.
 - **Events.** `AARPostEvent()` coalesces mouse motion (sums `dx` and `dy`
   while the button state is the same) and drops the newest event when the
   completion queue is full, counting it in `AAR_CB_EVENTS_DROPPED`.
