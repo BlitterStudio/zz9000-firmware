@@ -59,6 +59,19 @@ word, and the counters (`zzapp_rec.h`). Its states are `CLAIMED`, `LIVE`,
 the client releases the claim), and `FREE`; they only move forward until the
 free (`zzapp_rec.h`).
 
+A pass that walks the record indices, the core 1 worker pass and the core 0
+poll, reads each record's state without a lock, and the other core may free
+the record at any point of the walk: core 0 frees a claim that `RELEASE`
+ends, core 1 frees the shell of a released app. The walk therefore selects
+the record as its core's service context and takes the answer of
+`zzapp_services_select_pid`: 1 when the record is selected, 0 when it was
+freed since the state read (the context is cleared). A walk skips a record
+it could not select. Going on with no selected record is not allowed: the
+host code that works on "the selected record" treats an unselected context as
+a bug and stops the core on an undefined instruction. The record's bytes stay
+readable after the free, so a record freed after a successful select is
+harmless to the rest of that visit.
+
 Every mailbox request except `QUERY`, `CLAIM` and `LIST` names its record by
 handle at byte 40 of the payload, and the lookup (`zzapp_rec_by_handle`)
 fails for a stale one. The wire has no slot and no window; see

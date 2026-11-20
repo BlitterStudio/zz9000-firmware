@@ -28,9 +28,10 @@ uint32_t zzapp_services_current_pid(void)
     return selected_slot;
 }
 
-void zzapp_services_select_pid(uint32_t pid)
+int zzapp_services_select_pid(uint32_t pid)
 {
     selected_slot = pid;
+    return 1;
 }
 
 void __real_zzapp_loader_retire_resources(void);

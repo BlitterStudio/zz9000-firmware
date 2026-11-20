@@ -846,18 +846,21 @@ static unsigned service_context(void)
 #endif
 }
 
-/* Selects the record `pid` as this core's context. A pid outside the table or
- * a FREE record clears the record context. */
-void zzapp_services_select_pid(uint32_t pid)
+/* Selects the record `pid` as this core's context: 1 when it is selected. A
+ * pid outside the table or a FREE record clears the record context and
+ * returns 0, so a caller that read the record's state a moment ago, with
+ * the other core free to free it since, learns here that it is gone. */
+int zzapp_services_select_pid(uint32_t pid)
 {
 	zzapp_rec_t *rec = zzapp_rec_by_pid(pid);
 	unsigned core = service_context();
 
 	if (!rec || zzapp_rec_state(pid) == ZZAPP_REC_FREE) {
 		ctx_pid[core] = ZZAPP_PID_NONE;
-		return;
+		return 0;
 	}
 	ctx_pid[core] = pid;
+	return 1;
 }
 
 uint32_t zzapp_services_current_pid(void)

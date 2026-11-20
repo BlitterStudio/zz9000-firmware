@@ -61,9 +61,9 @@ uint32_t zzapp_services_state(void);
 /* The record services act for: the running app's own on core 1, else the one
  * selected by zzapp_services_select_pid(); ZZAPP_PID_NONE when there is none. */
 uint32_t zzapp_services_current_pid(void);
-/* Select the record as this core's context. A pid that is out of range or
- * FREE clears the record context. */
-void zzapp_services_select_pid(uint32_t pid);
+/* Select the record as this core's context; 1 when it is selected. A pid that
+ * is out of range or FREE clears the record context and returns 0. */
+int zzapp_services_select_pid(uint32_t pid);
 /* 1 when the selected record has a stop latched, or the client asked for one
  * in its control block. */
 int zzapp_services_stop_requested(void);
