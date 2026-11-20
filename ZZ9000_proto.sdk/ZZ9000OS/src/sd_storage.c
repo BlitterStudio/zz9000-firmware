@@ -285,10 +285,10 @@ uint32_t sd_storage_read_blocks(uint32_t block, uint32_t num_blocks, void *buffe
         goto out;
     }
 
-    /* f_read writes to `buffer` via CPU (cacheable store); the Zorro
-     * read path reads DDR directly (AXI_HP, non-coherent with the ARM
-     * D-cache). Clean+invalidate the range so DDR has the fresh block
-     * contents before the Amiga fetches them. Using Invalidate alone
+    /* f_read writes to `buffer` via CPU (cacheable store). The Zorro
+     * read path enters through the coherent ACP and would see those
+     * lines anyway; the clean+invalidate keeps DDR current for any
+     * non-coherent DMA reader of the buffer. Using Invalidate alone
      * would discard the just-written cache lines without writing them
      * back, leaving DDR with stale data. */
     Xil_DCacheFlushRange((UINTPTR)buffer, num_blocks * SD_BLOCK_SIZE);

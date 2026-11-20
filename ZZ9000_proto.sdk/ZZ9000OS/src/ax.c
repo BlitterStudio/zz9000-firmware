@@ -1326,8 +1326,10 @@ void audio_set_tx_buffer(uint8_t* addr) {
 	/*
 	 * The audio/fabric 1-MiB section at 0x3FE00000 holds the formatter TX
 	 * and RX rings, both direct-lease PCM rings, and their control lines.
-	 * Cached CPU access there is incoherent with Zorro producer writes;
-	 * map it non-cacheable so stale L1/L2 lines cannot enter the mix.
+	 * The formatter's DMA reads and writes these rings through an HP port,
+	 * which does not snoop the ARM caches (the 68k's Zorro accesses use
+	 * the coherent ACP); map the section non-cacheable so stale L1/L2
+	 * lines cannot enter the mix.
 	 */
 	{
 		static uint8_t audio_section_remapped;

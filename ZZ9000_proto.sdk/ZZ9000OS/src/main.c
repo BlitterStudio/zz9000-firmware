@@ -2021,8 +2021,10 @@ int main() {
 							config_file_status = ZZ_CONFIG_FILE_IO_ERROR;
 							config_file_len = 0;
 						}
-						// push ARM D-cache writes to DDR so the Zorro-bus
-						// read (via AXI_HP, non-coherent) sees fresh bytes
+						// push ARM D-cache writes to DDR. The Zorro-bus read
+						// enters through the coherent ACP and would see cached
+						// bytes too; the flush keeps DDR current for any
+						// non-coherent DMA reader of this shared buffer
 						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS,
 						                     ZZ_CONFIG_MAX_SIZE);
 						printf("[CFG] raw read -> status %d len %lu\n",
@@ -2301,8 +2303,10 @@ int main() {
 						                                      16u * 1024u,
 						                                      (void*)USB_BLOCK_STORAGE_ADDRESS,
 						                                      &fs_size);
-						/* Push ARM D-cache writes to DDR so the Zorro-bus
-						 * read (via AXI_HP, non-coherent) sees fresh bytes. */
+						/* Push ARM D-cache writes to DDR. The Zorro-bus read
+						 * enters through the coherent ACP and would see cached
+						 * bytes too; the flush keeps DDR current for any
+						 * non-coherent DMA reader of this shared buffer. */
 						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS, 16u * 1024u);
 						if (sd_boot_status != 0 || chunk_idx == 0) {
 							printf("[SD] LOADFS idx=%d chunk=%lu off=%lu -> %d bytes=%lu\n",
