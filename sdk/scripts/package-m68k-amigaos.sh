@@ -24,6 +24,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+# The aar checkout the client headers come from, the one build-m68k-amigaos.sh
+# built aar.library from (sdk/scripts/fetch-aar.sh, or AAR_DIR=<checkout>).
+AAR_DIR="${AAR_DIR:-$REPO_ROOT/aar}"
 if ! command -v realpath >/dev/null 2>&1; then
   echo "realpath is required to validate the package output path" >&2
   exit 2
@@ -124,6 +127,7 @@ decode_base64_file() {
 
 copy_one "build/zz9k.library" "Libs/zz9k.library"
 copy_one "build/mpega.library" "Libs/mpega.library"
+copy_one "build/aar.library" "Libs/aar.library"
 
 copy_one "build/zz9k-info" "C/zz9k-info"
 copy_one "build/zz9k-services" "C/zz9k-services"
@@ -202,6 +206,13 @@ copy_one "amiga/fd/zz9k_lib.fd" "Developer/FD/zz9k_lib.fd"
 copy_one "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
 copy_one "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 copy_one "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
+# The aar.library client headers (MIT) and the app headers they include, from
+# the aar checkout pinned in sdk/AAR_REF. The generated clib, pragmas, inline
+# and proto files merge into the directories above.
+mkdir -p "$PACKAGE_ROOT/Developer/Include/aar"
+cp -R "$AAR_DIR/client/include"/. "$PACKAGE_ROOT/Developer/Include/"
+cp -R "$AAR_DIR/include/aar"/. "$PACKAGE_ROOT/Developer/Include/aar/"
+cp "$AAR_DIR/client/fd/aar_lib.fd" "$PACKAGE_ROOT/Developer/FD/aar_lib.fd"
 copy_one "LICENSES/MIT.txt" "Developer/LICENSE-MIT.txt"
 copy_one "../LICENSE" "Developer/LICENSE-GPL-3.0.txt"
 

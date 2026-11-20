@@ -64,8 +64,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libssl-dev
-      # The AAR client module test (sdk/tests) builds against the pinned aar
-      # checkout; without it CMake silently skips that test.
+      # The aar.library host test (sdk/tests) builds against the pinned aar
+      # checkout; without it CMake silently skips that test, and a checkout
+      # without client/src/aar_core.c fails the configure.
       - name: Fetch AAR
         run: sh sdk/scripts/fetch-aar.sh
       - name: Configure

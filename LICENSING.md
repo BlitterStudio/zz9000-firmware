@@ -29,6 +29,12 @@ subject to the GPL.
 The permission covers calling the libraries. Copying or building in their source
 or object code, including `zz9k_host.o`, stays under the GPL.
 
+`aar.library` is GPL-3.0-or-later as linked, and the same permission applies to
+it: a program may open it with `OpenLibrary()` and call its public functions
+through the MIT headers and fd file of the aar repository, whatever that
+program's licence. Copying or building in its source or object code stays
+under the licence of each file (see below).
+
 Neither section changes the licence of any file. A program that copies or
 links GPL code stays bound by the GPL. That includes the library sources,
 `zz9k_host.o`, firmware objects, `libzzm_rt`, and the GL front-end objects.
@@ -57,6 +63,18 @@ The ARM app SDK is not in this repository any more. It lives in
 [BlitterStudio/aar](https://github.com/BlitterStudio/aar), where every file is
 MIT, and this repository pins the commit it builds against in `sdk/AAR_REF`.
 The fetched copy in `sdk/aar/` is not part of this repository.
+
+`aar.library` is built here from two sources: the portable core, the AmigaOS
+shell and the image probe in `client/src/` of that repository (MIT, with the
+`client/include` headers and `client/fd/aar_lib.fd` that programs compile
+against), and `sdk/amiga/src/aar_zz9000.[ch]` of this repository, the ZZ9000
+platform layer, which includes the private wire `zzapp_proto.h` and stays
+GPL-3.0-or-later. The linked `Libs/aar.library` binary is therefore
+GPL-3.0-or-later. A program that opens it with `OpenLibrary()` and calls its
+vectors through the MIT headers is covered by the same additional permission
+as `zz9k.library` (above): it can use any licence. The packaged SDK
+ships the aar headers and fd file under the MIT licence
+(`Developer/LICENSE-MIT.txt`).
 
 ## Everything else
 

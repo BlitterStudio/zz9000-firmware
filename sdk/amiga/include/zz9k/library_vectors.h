@@ -13,8 +13,8 @@
 #define ZZ9K_LIBRARY_REVISION 41
 #define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.41 (18.11.2026)"
 /* Revision 41 removes the ZZ9KApp* calls (LVOs -354 to -414). The ARM app
- * runtime is reached through the static client transport module
- * (aar_xport_zz9000) instead; the vector table ends at ZZ9KAudioStreamBeginEx
+ * runtime is reached through aar.library instead, which carries its mailbox
+ * calls through this library; the vector table ends at ZZ9KAudioStreamBeginEx
  * (-348). */
 /* Static clients proxy async completions through the resident library.
  * Revision 36 routes a foreign completion seen during a synchronous call

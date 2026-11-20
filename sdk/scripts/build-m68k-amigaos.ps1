@@ -4,7 +4,7 @@
 param(
   # Same pinned GCC 16 image as build-m68k-amigaos.sh.
   [string]$Image = "amigadev/crosstools:m68k-amigaos@sha256:6d96ee62dfac1ca84d54b063b4cfbc82bc6bf0971d6f5200be848d8c2f5fceee",
-  # The aar checkout the module's headers come from; default sdk/aar.
+  # The aar checkout aar.library is built from (client/src); default sdk/aar.
   [string]$AarDir = ""
 )
 
@@ -12,14 +12,20 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
-# The client transport module (amiga/src/aar_xport_zz9000.c) includes the aar
-# headers, pinned in sdk/AAR_REF, and the private wire zzapp_proto.h of the
-# firmware tree. The pinned aar checkout comes from scripts/fetch-aar.sh (run
-# it from a POSIX shell, or pass -AarDir <your checkout>); the wire header is
-# staged under build/.
+# aar.library is built from the aar checkout pinned in sdk/AAR_REF (the core,
+# shell and probe under client/src, MIT) and the ZZ9000 platform layer of this
+# tree (amiga/src/aar_zz9000.c), which includes the private wire zzapp_proto.h
+# of the firmware tree. The pinned aar checkout comes from scripts/fetch-aar.sh
+# (run it from a POSIX shell, or pass -AarDir <your checkout>); the wire header
+# is staged under build/.
 if (-not $AarDir) { $AarDir = Join-Path $RepoRoot "aar" }
 if (-not (Test-Path (Join-Path $AarDir "include/aar/transport.h"))) {
   throw "aar checkout not found at $AarDir: run sh scripts/fetch-aar.sh or pass -AarDir"
+}
+foreach ($f in "aar_core.c", "aar_shell.c", "aar_probe.c", "aar_plat.h") {
+  if (-not (Test-Path (Join-Path $AarDir "client/src/$f"))) {
+    throw "$AarDir/client/src/$f is missing: sdk/AAR_REF must name an aar commit with the client library"
+  }
 }
 $FirmwareProto = Join-Path $RepoRoot "..\ZZ9000_proto.sdk\ZZ9000OS\src\zzapp_proto.h"
 New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "build\stage") | Out-Null
@@ -31,13 +37,16 @@ mkdir -p build/m68k build/dtcode build/providers
 CFLAGS="-fcommon -noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
 STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
-XPORTFLAGS="-Iamiga/src -Ibuild/stage -I/aar/include"
+AARFLAGS="-Iamiga/src -Ibuild/stage -I/aar/client/src -I/aar/client/include -I/aar/include"
 
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -DZZ9K_HOST_LIBRARY_BUILD=1 \
   -c host/src/zz9k_host.c -o build/m68k/zz9k_host_library.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
-m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS -c amiga/src/aar_xport_zz9000.c -o build/m68k/aar_xport_zz9000.o
+for src in aar_core aar_shell aar_probe; do
+  m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS -c /aar/client/src/$src.c -o build/m68k/$src.o
+done
+m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS -c amiga/src/aar_zz9000.c -o build/m68k/aar_zz9000.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-fb-common.c -o build/m68k/zz9k-fb-common.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-image-window.c -o build/m68k/zz9k-image-window.o
@@ -69,11 +78,14 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Werror -Iinclude -Ihost/include
   build/m68k/zz9k_host_library.o -o build/zz9k.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   amiga/mpega/mpega_resident.c -o build/mpega.library
+m68k-amigaos-gcc -noixemul -nostartfiles -Os -s \
+  build/m68k/aar_shell.o build/m68k/aar_core.o build/m68k/aar_probe.o \
+  build/m68k/aar_zz9000.o -o build/aar.library
 
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libtest.c -o build/zz9k-libtest
-m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS build/m68k/aar_xport_zz9000.o \
+m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS \
   tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
-m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS build/m68k/aar_xport_zz9000.o \
+m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS \
   tools/zz9k-app-ringtest.c -o build/zz9k-app-ringtest
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libasync.c -o build/zz9k-libasync
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libbatch.c -o build/zz9k-libbatch

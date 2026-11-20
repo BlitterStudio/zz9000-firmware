@@ -580,7 +580,8 @@ app), defined by `aar/transport.h` in the aar repository and described in its
 Everything an app asks of its client (files, console, log, display, audio,
 messages) and everything the client sends (input events, messages, replies)
 travels in the rings. There is no launcher window, no slot and no fixed
-address range.
+address range. The Amiga client is `aar.library` (its ZZ9000 platform layer is
+`sdk/amiga/src/aar_zz9000.[ch]`, described in `sdk/docs/zz9k-library.md`).
 
 Integers in mailbox payloads are big-endian. A request is 48 payload bytes
 except `QUERY`, `CLAIM` and `LIST`, which take no handle. Every other
@@ -830,9 +831,15 @@ own inactivity deadline whenever `AAR_CB_PROGRESS` changes.
 
 Once the app runs, the client must change `AAR_CB_LEASE_COUNTER` at least every
 two seconds. A client that announced `ZZAPP_CLIENT_LEASE_EXTENDED` gets ten
-seconds, so a briefly starved Amiga task does not lose its app; it still
-renews only from its own main loop, so a client that has died is still
-detected. The firmware writes the period in force to `AAR_CB_LEASE_PERIOD_MS`
+seconds, so a starved dispatcher or a long interrupts-off period does not lose
+the app. The Amiga client, `aar.library`, announces it by default and stores
+the counter from a vertical-blank interrupt about every 100 ms, while its
+dispatcher process has run in the last five seconds. The dispatcher finds
+owners that died without closing their handles and releases their claims, so
+a dead client is reclaimed within about a second; a wedged but live owner
+keeps its app. If the dispatcher itself stops, the interrupt stops storing and
+the lease expires as described here. The firmware writes the period in force
+to `AAR_CB_LEASE_PERIOD_MS`
 at the claim and when the app starts. Core 0 compares the counter with the
 last value it saw on every poll, for each live record.
 
@@ -863,9 +870,11 @@ the client releases the claim.
   fails the lookup and releases the shell: the client reads its answer before
   it touches the claim again. A `KICK` does not, because the client posts it
   without reading its status. A deferred load call (`LOAD_BEGIN`, `LOAD_CHUNK`,
-  `LOAD_END`, `START`) does not either, because its lease tick may still write
-  the control block while the answer is on the way; the client follows a stale
-  answer to such a call with a plain `RELEASE` under the old handle.
+  `LOAD_END`, `START`) does not either, because the client's lease store may
+  still write the control block while the answer is on the way; `aar.library`
+  stops storing at the stale answer and releases the shell with a plain
+  `RELEASE` under the old handle when its owner closes the handle (or when its
+  dispatcher reaps a dead owner).
   `LIST` returns the current handle of a quarantined shell, so an
   administrative `RELEASE` works. The quarantine flag stays on the shell until
   it is released, and the release returns the held blocks with it. Quarantine
