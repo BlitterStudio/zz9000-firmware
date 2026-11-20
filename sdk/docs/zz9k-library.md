@@ -152,6 +152,14 @@ AARClose(handle);                               /* the card returns everything *
 CloseLibrary(AARBase);
 ```
 
+`aar-run`, the reference launcher, and `libaarserve.a`, the serving loop it is
+built on, come from the same pinned checkout (`client/run` and `client/serve`,
+MIT) and link no code of this repository: they call `aar.library` through its
+vectors. `aar-run` serves an app's files, console, display, audio and input;
+it ships as `C/aar-run` with `Docs/aar-run.guide` as its manual. The loop
+installs the log sink with `AARSetLogSink`. `Developer/Lib/libaarserve.a` and
+`libraries/aar_serve.h` let a program embed the same loop.
+
 Points that matter to a caller:
 
 - **Mapping.** Every buffer the card names (control block, queues, console,
@@ -198,8 +206,9 @@ Points that matter to a caller:
   after the caller takes messages. The counters of the library (`sq_blocked`
   counts pump passes held at a full inbox) are in the ZZ9000 extension table,
   `AARExt(AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT)`, next to the list of
-  all claims on the card, the administrative release of any of them, the
-  lease test hook and the log sink. `list(cursor, &info)` returns the first
+  all claims on the card, the administrative release of any of them and the
+  lease test hook (the log sink is not in this table: it is the base call
+  `AARSetLogSink`). `list(cursor, &info)` returns the first
   live claim whose slot is at or after `cursor` and puts that raw slot in
   `info.index`; the next cursor is `info.index + 1` (passing `info.index`
   again returns the same claim). It returns 0 when no claim is left.

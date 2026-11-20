@@ -971,7 +971,9 @@ static void test_query_and_extension(void)
     CHECK(card.calls == 1U && card.claims == 0U);
 
     ext = aar_core_ext(&core, AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT);
-    CHECK(ext != NULL && AAR_CLIENT_EXT_ZZ9000_COVERS(ext, set_log_sink));
+    CHECK(ext != NULL && AAR_CLIENT_EXT_ZZ9000_COVERS(ext, lease_pause));
+    /* The table ends at lease_pause: set_log_sink left it. */
+    CHECK(ext->size == offsetof(aar_client_ext_zz9000, lease_pause) + sizeof(ext->lease_pause));
     CHECK(aar_core_ext(&core, AAR_PLATFORM_ZZ9000, 99U) == NULL);
     CHECK(aar_core_ext(&core, AAR_PLATFORM_NONE, AAR_EXT_ZZ9000_CLIENT) == NULL);
 
@@ -1086,7 +1088,7 @@ static void test_requests_end_to_end(void)
 
 /* The list's path and returned names use the same scratch token/offset.
  * The server writes names before posting completion, and the firmware then
- * copies those bytes out. DOS packet name decoding is tested in ZZRun. */
+ * copies those bytes out. DOS packet name decoding is tested in aar_serve. */
 static void test_list_names_cross_the_request_buffer(void)
 {
     AARHandle *h;
@@ -1886,16 +1888,15 @@ static void test_log_sink(void)
     AARHandle *h;
     AARServiceReq req;
     char big[2000];
-    const aar_client_ext_zz9000 *ext;
     AARZZ9000Stats s;
 
     reset_all();
     h = claim();
     req_init(&req);
-    ext = aar_core_ext(&core, AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT);
-    CHECK(ext != NULL);
+    /* The sink is a call of the base library (AARSetLogSink), not a member of
+     * the ZZ9000 table; the test calls the core function behind it. */
     sink_count = 0U;
-    CHECK(ext->set_log_sink(h, log_sink_fn, (APTR)0x1234U) == AAR_OK);
+    CHECK(aar_core_set_log_sink(&core, h, log_sink_fn, (APTR)0x1234U) == AAR_OK);
     CHECK(zzapp_xport_post_log(card.rec, "first line", 10U) == AAR_OK);
     memset(big, 'z', sizeof(big));
     CHECK(zzapp_xport_post_log(card.rec, big, sizeof(big)) == AAR_OK);   /* truncated to 1024 */
