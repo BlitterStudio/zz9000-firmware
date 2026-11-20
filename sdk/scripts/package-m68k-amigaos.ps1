@@ -34,7 +34,7 @@ if (-not $PackageRoot.StartsWith(
 
 if (-not $SkipBuild) {
   powershell -ExecutionPolicy Bypass -File `
-    (Join-Path $PSScriptRoot "build-m68k-amigaos.ps1")
+    (Join-Path $PSScriptRoot "build-m68k-amigaos.ps1") -AarDir $AarDir
 }
 
 if (Test-Path -LiteralPath $PackageRoot) {
