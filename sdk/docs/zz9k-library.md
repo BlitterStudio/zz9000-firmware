@@ -103,97 +103,137 @@ a task that is gone without `CloseLibrary()`.
 
 ## ARM app client
 
-Programs reach the ARM app runtime through the client transport module
-`sdk/amiga/src/aar_xport_zz9000.[ch]`, which they link statically (ZZRun and
-the SDK tools do). It claims an app, maps its control block and its pair of
-queues with `mmu.library`, loads and starts the image, serves the requests
-the app posts, exchanges messages and input events, renews the lease and
-releases the claim. `zz9k.library` (revision 36 or later) carries only the
-mailbox calls underneath it. The wire is the one of `aar/transport.h` (queue
-entries, control block, message credits) plus the private mailbox operations
-of `zzapp_proto.h`; the module includes both, so a build needs the aar
-headers pinned in `sdk/AAR_REF` (`sh scripts/fetch-aar.sh`) and
-`zzapp_proto.h`.
+Programs reach the ARM app runtime through `aar.library`, the resident client
+library of the AAR standard (`Libs/aar.library`; the API is in
+`docs/aar-client-api.md` of [BlitterStudio/aar](https://github.com/BlitterStudio/aar)).
+It claims an app, maps its control block and its pair of queues with
+`mmu.library`, loads and starts the image, serves the requests the app posts,
+exchanges messages and input events, keeps the lease and closes the claim.
+`zz9k.library` (revision 36 or later) carries only the mailbox calls
+underneath it: `aar.library` opens it once, from its dispatcher process, and
+never drives the board registers itself.
+
+The library is built from two parts that the SDK build links into one
+`build/aar.library`:
+
+- the portable core and the AmigaOS shell, `client/src/aar_core.c`,
+  `aar_shell.c` and `aar_probe.c` of the aar repository (MIT), pinned in
+  `sdk/AAR_REF` (`sh scripts/fetch-aar.sh`);
+- the ZZ9000 platform layer, `sdk/amiga/src/aar_zz9000.[ch]` (GPL), which
+  implements the platform interface `client/src/aar_plat.h` with the private
+  mailbox operations of `zzapp_proto.h`, the board and `mmu.library`.
+
+The library is GPL-3.0-or-later as linked, because of the second part. A
+program that opens it with `OpenLibrary()` and calls its vectors through the
+MIT headers is not bound by the GPL (see `LICENSING.md`). The packaged SDK
+ships those headers under `Developer/Include` (`proto/aar.h`,
+`libraries/aar.h`, `libraries/aar_zz9000.h`, the generated `clib`, `pragmas`
+and `inline` files, and `aar/app.h` and `aar/transport.h` they include) and
+`Developer/FD/aar_lib.fd`.
 
 ```c
-aar_xport_board board;
-aar_xport app;
-uint32_t reason;
+#include <proto/aar.h>
 
-aar_xport_amiga_board_open(&board);          /* zz9k.library, board, mmu.library */
-aar_xport_open(&app, &board, &reason);       /* QUERY, CLAIM, map, bind queues */
-aar_xport_set_limits(&app, private_mib, shared_mib, weight);  /* optional */
-aar_xport_load_file(&app, "RAM:echo.elf", 0);                 /* or load_memory */
-aar_xport_start(&app, argv, argc);
-for (;;) {                                   /* the poll loop */
-    aar_xport_lease_renew(&app);             /* about every 100 ms */
-    while (aar_xport_service_next(&app, &req) == 1) {
+struct Library *AARBase;
+
+AARBase = OpenLibrary(AAR_LIB_NAME, AAR_LIB_VERSION);
+AAROpen(&handle, NULL, &reason);                /* QUERY, CLAIM, map, bind queues */
+AARSetTags(handle, AAR_TAG_PRIVATE_MIB, 64, TAG_DONE);   /* optional */
+AARLoadFile(handle, "RAM:echo.elf");            /* or AARLoadMemory */
+AARStart(handle, argv, argc);
+for (;;) {                                      /* the poll loop */
+    while (AARServiceNext(handle, &req) == AAR_OK) {
         /* serve req.op with req.arg[], req.ptr (mapped buffer) ... */
-        aar_xport_service_reply(&app, &req); /* result, out[], reply_flags */
+        AARServiceReply(handle, &req);          /* result, out[], reply_flags */
     }
-    /* aar_xport_get_message / send_message / post_event ... */
+    /* AARGetMessage / AARSendMessage / AARPostEvent ... */
 }
-aar_xport_release(&app);                     /* the card returns everything */
-aar_xport_amiga_board_close(&board);
+AARClose(handle);                               /* the card returns everything */
+CloseLibrary(AARBase);
 ```
 
 Points that matter to a caller:
 
 - **Mapping.** Every buffer the card names (control block, queues, console,
   file data, audio ring, load buffer) is a board offset (a token) in memory the
-  card allocated 8 KiB aligned and sized. The module makes it cache-inhibited
-  with `mmu.library` once per block (`CacheClearE`, `SetProperties`,
-  `RebuildTree`) and keeps the mapping for the claim. It needs `mmu.library` 41
-  or later; without it `aar_xport_amiga_board_open` fails with `AAR_E_NOSYS`.
-  `aar_xport_map(x, token, off, len)` maps any other token, for example the
-  counter block an app publishes.
+  card allocated 8 KiB aligned and sized. The platform layer makes it
+  cache-inhibited with `mmu.library` once per block (`CacheClearE`,
+  `SetProperties`, `RebuildTree`) and the core keeps the mapping for the
+  claim. `mmu.library` 41 or later is opened at the first claim or map, so
+  `AARQuery` works without it and `AAROpen` answers `AAR_E_NOSYS` when it is
+  missing. `AARSharedMap` maps any other token, for example the counter block
+  an app publishes, and `AARSharedToken` is its inverse. `AARSharedUnmap` is
+  bookkeeping: the pages stay cache-inhibited, because restoring them costs
+  about 0.7 s a range.
 - **Lease.** The card stops an app whose client does not advance
   `AAR_CB_LEASE_COUNTER`: after 2 s while it runs (10 s with
-  `ZZAPP_CLIENT_LEASE_EXTENDED`, 30 s while loading). `aar_xport_lease_renew()`
-  is one store and is safe from a timer or interrupt; the long mailbox calls
-  (load begin, load end, start) renew it themselves. There is no VBlank server
-  any more: the caller's own loop renews it until `aar.library` takes that over.
-- **Requests.** `aar_xport_service_next()` returns the next request of the app
+  `ZZAPP_CLIENT_LEASE_EXTENDED`, which the library sets unless
+  `AAR_TAG_LEASE_EXTENDED` says otherwise, 30 s while loading). The library
+  stores the counter of every open handle from a vertical-blank interrupt
+  server about every 100 ms, so an owner that is blocked for a long time (a
+  requester, `Forbid()`) does not lose its app. The interrupt renews only
+  while the library's dispatcher process (priority 5) has run in the last
+  5 s; if it is killed or starved, renewal stops and the card's own expiry is
+  the backstop. The dispatcher also finds owners that died without closing
+  their handles (about once a second) and stops and releases their claims. A
+  task must not rename itself while it owns a handle. A wedged but live owner
+  keeps its app alive.
+- **Requests.** `AARServiceNext()` returns the next request of the app
   (file, console, display, audio) with its buffer already mapped, and moves
-  messages and logs in front of it aside (`aar_xport_get_message`,
-  `aar_xport_set_log_sink`). `aar_xport_service_reply()` posts the completion
-  and rings the card's doorbell (`ZZAPP_OP_KICK`, coalesced, asynchronous).
-  `aar_xport_send_message()` and `aar_xport_post_event()` ring it too after each
-  post that reaches the completion queue, so a parked app is woken at once.
-  `AAR_E_BUSY` means the completion queue is full: try again.
+  messages and logs in front of it aside. `AARServiceReply()` posts the
+  completion and rings the card's doorbell (`ZZAPP_OP_KICK`, coalesced,
+  asynchronous). The doorbell request belongs to the claim, so tasks that
+  serve different claims never share one. `AARSendMessage()` and
+  `AARPostEvent()` ring it too after each post that reaches the completion
+  queue, so a parked app is woken at once. `AAR_E_BUSY` means the completion
+  queue is full: try again. A request that does not arrive is not an error:
+  `AARServiceNext()` returns `AAR_E_BUSY` when none waits.
 - **Messages** are 32 bytes. Sending is credited: at most `AAR_MSG_CAPACITY`
   (63) messages may be unconsumed by the app (`AAR_CB_MSG_CONSUMED`), else
-  `AAR_E_BUSY`. A message the app sends is held in the module's inbox of 64
+  `AAR_E_BUSY`. A message the app sends is held in the library's inbox of 64
   until read. When that inbox is full, the next message stays at the SQ head
   and the app sees `AAR_E_BUSY` once the queue fills. Nothing is dropped.
-  The caller must drain messages with `aar_xport_get_message()` as well as
-  serve requests: a request behind a held message cannot pass it and resumes
-  only after the caller takes messages. `aar_xport_sq_blocked()` reports that
-  condition; `stats.sq_blocked` counts pump passes held at a full inbox.
-- **Events.** `aar_xport_post_event()` coalesces mouse motion (sums `dx` and
-  `dy` while the button state is the same) and drops the newest event when
-  the completion queue is full, counting it in `AAR_CB_EVENTS_DROPPED`.
-- **Stale claims.** After `aar_xport_release()`, or when any mailbox call
+  The caller must drain messages with `AARGetMessage()` as well as serve
+  requests: a request behind a held message cannot pass it and resumes only
+  after the caller takes messages. The counters of the library (`sq_blocked`
+  counts pump passes held at a full inbox) are in the ZZ9000 extension table,
+  `AARExt(AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT)`, next to the list of
+  all claims on the card, the administrative release of any of them, the
+  lease test hook and the log sink. `list(cursor, &info)` returns the first
+  live claim whose slot is at or after `cursor` and puts that raw slot in
+  `info.index`; the next cursor is `info.index + 1` (passing `info.index`
+  again returns the same claim). It returns 0 when no claim is left.
+- **Events.** `AARPostEvent()` coalesces mouse motion (sums `dx` and `dy`
+  while the button state is the same) and drops the newest event when the
+  completion queue is full, counting it in `AAR_CB_EVENTS_DROPPED`.
+- **Ownership and stale claims.** A handle belongs to the task that opened
+  it; another task's call answers `AAR_E_OWNER` (only `AARMessageSignal` may
+  be called from any task). After `AARClose()`, or when any mailbox call
   answers `AAR_E_STALE` (the card revoked the claim: lease lost, quarantine),
-  the module drops every pointer and answers `AAR_E_STALE` to all later calls
-  without touching the memory, which the card may reuse.
-- **Status** (`aar_xport_status_get()`) is read from the control block: state,
-  end reason, exit code, fault record, load progress, accounting. It stays
-  readable after the app ended, until the claim is released.
-- **Audio.** `aar_xport_audio_read()` takes frames, not samples or bytes.
-  The audio ring's indices are little-endian aligned 32-bit words. Each is
-  read or written with one long access so the app cannot see a partial carry
-  while the client advances its read index. Indices wrap modulo 2^32; the
-  sample slot wraps at the ring's frame capacity.
+  the library drops every pointer of the claim and answers `AAR_E_STALE` to
+  all later calls without touching the memory, which the card may reuse. A
+  handle pointer that was closed is looked up before it is used, so it
+  answers `AAR_E_STALE` and never crashes.
+- **Status** (`AARStatus()`) is read from the control block: state, end
+  reason, exit code, fault record, load progress, accounting. A caller passes
+  the size of the structure it wants, and a poll with `size = 16` reads three
+  words. It stays readable after the app ended, until the handle is closed.
+- **Audio.** `AARAudioRead()` takes frames, not samples or bytes. The library
+  attaches the ring when it sees the `AUDIO_OPEN` completion and detaches it
+  at `AUDIO_CLOSE`. The ring's indices are little-endian aligned 32-bit
+  words. Each is read or written with one long access so the app cannot see a
+  partial carry while the client advances its read index. Indices wrap modulo
+  2^32; the sample slot wraps at the ring's frame capacity.
 
 `zz9k-app-echo-test <path-to-echo.elf> [count]` is the hardware smoke client.
 
 `zz9k-app-ringtest <path-to-ringflood.elf> [seconds] [MAXLAT=<ms>]` floods the
 app-to-host ring and checks every message, ping latency, and a counter word
 read through a cache-inhibited mapping; see step 12 of `zz9k-release-smoke.md`.
-Both are built on the module. The host test
-`tests/aar_xport_zz9000_test.c` runs the module against the firmware's
-`zzapp_xport.c` (the same queue code at both ends) over a fake board.
+Both are clients of `aar.library`. The host test `tests/aar_zz9000_test.c` runs
+the library's portable core and the ZZ9000 platform layer against the
+firmware's `zzapp_xport.c` (the same queue code at both ends) over a fake
+board.
 
 Use `zz9k_known_service_count()` / `zz9k_known_service_id()` to enumerate the
 SDK-known built-in service IDs when checking the firmware service registry.
@@ -1921,7 +1961,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 38 | `ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM` | Per-opener client ids and `ZZ9K_OP_CLIENT_RELEASE`; the final `CloseLibrary()` resubmits the release while the firmware answers `BUSY` and reclaims that opener's owned SDK resources after worker quiescence |
 | 39 | `ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE` | ARM-app `LOAD_END` waits used lifecycle progress (removed in revision 41). |
 | 40 | `ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP`, `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS` | The service task released an app handle, its opener record, and its client id when the owner task was gone; since revision 41 only the opener record and the client id (the app calls were removed) |
-| 41 | None | The `ZZ9KApp*` calls (`-354` to `-414`) are removed; the ARM app runtime is reached through the static client transport module `aar_xport_zz9000`; the vector table ends at `ZZ9KAudioStreamBeginEx` (`-348`) |
+| 41 | None | The `ZZ9KApp*` calls (`-354` to `-414`) are removed; the ARM app runtime is reached through `aar.library`, which carries its mailbox calls through `zz9k.library`; the vector table ends at `ZZ9KAudioStreamBeginEx` (`-348`) |
 
 ### Async submission and wait helpers
 

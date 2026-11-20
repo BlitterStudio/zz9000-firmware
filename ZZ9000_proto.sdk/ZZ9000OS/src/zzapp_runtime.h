@@ -249,7 +249,7 @@ int zzapp_services_take_start(uint32_t *argc);
 /* The record the calling context works on: the running app's own thread, or
  * the record the system thread selected. ZZAPP_PID_NONE when there is none. */
 uint32_t zzapp_services_current_pid(void);
-void zzapp_services_select_pid(uint32_t pid);
+int zzapp_services_select_pid(uint32_t pid);
 uint32_t zzapp_services_state(void);
 uint32_t zzapp_services_memory_limit(void);
 /* Per-app host-visible limit in bytes the launcher requested at LOAD_BEGIN;

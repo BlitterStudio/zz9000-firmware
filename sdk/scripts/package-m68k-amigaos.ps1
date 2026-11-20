@@ -3,12 +3,16 @@
 
 param(
   [switch]$SkipBuild,
-  [string]$OutputDir = ""
+  [string]$OutputDir = "",
+  [string]$AarDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+# The aar checkout the client headers come from, the one
+# build-m68k-amigaos.ps1 built aar.library from (default sdk/aar).
+if ([string]::IsNullOrEmpty($AarDir)) { $AarDir = Join-Path $RepoRoot "aar" }
 if ([string]::IsNullOrEmpty($OutputDir)) {
   $OutputDir = Join-Path $RepoRoot "build\package\amigaos3"
 } elseif (-not [System.IO.Path]::IsPathRooted($OutputDir)) {
@@ -30,7 +34,7 @@ if (-not $PackageRoot.StartsWith(
 
 if (-not $SkipBuild) {
   powershell -ExecutionPolicy Bypass -File `
-    (Join-Path $PSScriptRoot "build-m68k-amigaos.ps1")
+    (Join-Path $PSScriptRoot "build-m68k-amigaos.ps1") -AarDir $AarDir
 }
 
 if (Test-Path -LiteralPath $PackageRoot) {
@@ -97,6 +101,7 @@ function Make-Guide {
 
 Copy-One "build/zz9k.library" "Libs/zz9k.library"
 Copy-One "build/mpega.library" "Libs/mpega.library"
+Copy-One "build/aar.library" "Libs/aar.library"
 
 Copy-One "build/zz9k-info" "C/zz9k-info"
 Copy-One "build/zz9k-app-echo-test" "C/zz9k-app-echo-test"
@@ -172,6 +177,17 @@ Copy-Tree "amiga/include/inline" "Developer/Include/inline"
 Copy-Tree "amiga/include/pragmas" "Developer/Include/pragmas"
 Copy-One "amiga/fd/zz9k_lib.fd" "Developer/FD/zz9k_lib.fd"
 Copy-One "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
+# The aar.library client headers (MIT) and the app headers they include, from
+# the aar checkout pinned in sdk/AAR_REF. The generated clib, pragmas, inline
+# and proto files merge into the directories above.
+New-Item -ItemType Directory -Force `
+  -Path (Join-Path $PackageRoot "Developer\Include\aar") | Out-Null
+Copy-Item -Path (Join-Path $AarDir "client\include\*") `
+  -Destination (Join-Path $PackageRoot "Developer\Include") -Recurse -Force
+Copy-Item -Path (Join-Path $AarDir "include\aar\*") `
+  -Destination (Join-Path $PackageRoot "Developer\Include\aar") -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $AarDir "client\fd\aar_lib.fd") `
+  -Destination (Join-Path $PackageRoot "Developer\FD\aar_lib.fd") -Force
 Copy-One "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
 Copy-One "LICENSES/MIT.txt" "Developer/LICENSE-MIT.txt"

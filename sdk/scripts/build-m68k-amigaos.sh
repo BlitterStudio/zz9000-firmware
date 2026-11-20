@@ -8,14 +8,23 @@ set -e
 IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:98c6671ce9bfec0355e9336e02cbef2a39bad8c5ddd71c43720acacdb697b9a0}"
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-# The client transport module (amiga/src/aar_xport_zz9000.c) includes the aar
-# headers, pinned in sdk/AAR_REF, and the private wire zzapp_proto.h of the
-# firmware tree. The pinned aar checkout comes from scripts/fetch-aar.sh (or
-# AAR_DIR=<your checkout>); the wire header is staged under build/.
+# aar.library is built here from the aar checkout pinned in sdk/AAR_REF: the
+# portable core, the AmigaOS shell and the probe (client/src/aar_core.c,
+# aar_shell.c, aar_probe.c, MIT) linked with the ZZ9000 platform layer of this
+# tree (amiga/src/aar_zz9000.c, GPL), which includes the private wire
+# zzapp_proto.h of the firmware tree. The pinned aar checkout comes from
+# scripts/fetch-aar.sh (or AAR_DIR=<your checkout>); the wire header is staged
+# under build/.
 AAR_DIR="${AAR_DIR:-$REPO_ROOT/aar}"
 if [ ! -f "$AAR_DIR/include/aar/transport.h" ]; then
   sh "$REPO_ROOT/scripts/fetch-aar.sh" "$AAR_DIR"
 fi
+for f in aar_core.c aar_shell.c aar_probe.c aar_plat.h; do
+  if [ ! -f "$AAR_DIR/client/src/$f" ]; then
+    echo "build-m68k-amigaos: $AAR_DIR/client/src/$f is missing; sdk/AAR_REF must name an aar commit with the client library" >&2
+    exit 1
+  fi
+done
 mkdir -p "$REPO_ROOT/build/stage"
 cp "$REPO_ROOT/../ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_proto.h" \
   "$REPO_ROOT/build/stage/zzapp_proto.h"
@@ -34,13 +43,16 @@ mkdir -p build/m68k build/dtcode build/providers
 CFLAGS="-fcommon -noixemul -Os -s -Werror -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
 STACKCFLAGS="$LIBCFLAGS -Wstack-usage=4000"
-XPORTFLAGS="-Iamiga/src -Ibuild/stage -I/aar/include"
+AARFLAGS="-Iamiga/src -Ibuild/stage -I/aar/client/src -I/aar/client/include -I/aar/include"
 
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -DZZ9K_HOST_LIBRARY_BUILD=1 \
   -c host/src/zz9k_host.c -o build/m68k/zz9k_host_library.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_library.o
-m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS -c amiga/src/aar_xport_zz9000.c -o build/m68k/aar_xport_zz9000.o
+for src in aar_core aar_shell aar_probe; do
+  m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS -c /aar/client/src/$src.c -o build/m68k/$src.o
+done
+m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS -c amiga/src/aar_zz9000.c -o build/m68k/aar_zz9000.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-fb-common.c -o build/m68k/zz9k-fb-common.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-image-window.c -o build/m68k/zz9k-image-window.o
@@ -72,6 +84,9 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga
   build/m68k/zz9k_host_library.o -o build/zz9k.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   amiga/mpega/mpega_resident.c -o build/mpega.library
+m68k-amigaos-gcc -noixemul -nostartfiles -Os -s \
+  build/m68k/aar_shell.o build/m68k/aar_core.o build/m68k/aar_probe.o \
+  build/m68k/aar_zz9000.o -o build/aar.library
 
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libtest.c -o build/zz9k-libtest
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libasync.c -o build/zz9k-libasync
@@ -88,9 +103,9 @@ m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libeventcancel.c -o build/zz9k-libeventca
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libdecode.c -o build/zz9k-libdecode
 m68k-amigaos-gcc $LIBCFLAGS -Itools build/m68k/zz9k-fb-common.o \
   tools/zz9k-libsmoke.c -o build/zz9k-libsmoke
-m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS build/m68k/aar_xport_zz9000.o \
+m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS \
   tools/zz9k-app-echo-test.c -o build/zz9k-app-echo-test
-m68k-amigaos-gcc $STACKCFLAGS $XPORTFLAGS build/m68k/aar_xport_zz9000.o \
+m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS \
   tools/zz9k-app-ringtest.c -o build/zz9k-app-ringtest
 m68k-amigaos-gcc $LIBCFLAGS examples/amiga-library/zz9k-library-demo.c \
   -o build/zz9k-library-demo

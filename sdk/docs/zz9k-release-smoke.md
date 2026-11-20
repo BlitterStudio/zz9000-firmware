@@ -232,9 +232,11 @@ default shared heap are Zorro III diagnostics.
     Without AmiSSL, the `https://` item fails with a message and `http://`
     still plays.
 
-12. Check the ARM app runtime on Zorro III. Install `ZZRun` from the matched
-    driver package and build `hello.elf`, `echo.elf` and `ringflood.elf` from
-    `templates/` in [BlitterStudio/aar](https://github.com/BlitterStudio/aar).
+12. Check the ARM app runtime on Zorro III. Install `Libs/aar.library` from
+    this package next to `zz9k.library` and `mmu.library`, install `ZZRun`
+    from the matched driver package, and build `hello.elf`, `echo.elf` and
+    `ringflood.elf` from `templates/` in
+    [BlitterStudio/aar](https://github.com/BlitterStudio/aar).
 
     ```text
     Stack 32768
@@ -245,8 +247,8 @@ default shared heap are Zorro III diagnostics.
 
     Expected result: `ZZRun` returns after `hello.elf` exits, and
     `zz9k-app-echo-test` ends with `zz9k-app-echo-test: PASS (300 messages)`.
-    The tool covers the client transport module's claim, load, start, 32-byte
-    message exchange under the message credit, stop, status, and release. A
+    The tool covers the library's open, load, start, 32-byte
+    message exchange under the message credit, stop, status, and close. A
     failure reports
     the last recorded phase; keep the trace lines printed before it.
 
@@ -299,10 +301,11 @@ default shared heap are Zorro III diagnostics.
 - Treat corruption outside the PIP as a stop condition. Preserve the UART log
   and the exact artifact hashes.
 - Route `ZZRun` load or exit failures to the app runtime and launcher, and
-  `zz9k-app-echo-test` failures to the client transport module
-  (`aar_xport_zz9000`). Keep the
+  `zz9k-app-echo-test` failures to `aar.library` (its ZZ9000 platform layer,
+  `aar_zz9000`). Keep the
   `[app]` lines from the UART log. When the echo test passes and
   `zz9k-app-ringtest` fails, route lost or wrong messages and a backwards or
   lagging counter to the queue pair and the memory mapping of the
-  host-visible blocks (the module's `mmu.library` mapping), not to the library.
+  host-visible blocks (the `mmu.library` mapping the platform layer makes),
+  not to the transport library.
 

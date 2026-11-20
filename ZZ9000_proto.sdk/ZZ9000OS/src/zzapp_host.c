@@ -91,9 +91,10 @@ uint32_t __attribute__((weak)) zzapp_services_current_pid(void)
     return g_weak_selected;
 }
 
-void __attribute__((weak)) zzapp_services_select_pid(uint32_t pid)
+int __attribute__((weak)) zzapp_services_select_pid(uint32_t pid)
 {
     g_weak_selected = pid;
+    return 1;
 }
 
 uint32_t __attribute__((weak)) zzapp_services_memory_limit(void)
@@ -2310,20 +2311,27 @@ void zzapp_worker_hook(void)
 #if ZZAPP_PERF_COUNTERS || defined(ZZAPP_HOST_TEST)
     zzapp_loader_work_begin_pass();
 #endif
+    /* Each walk reads a record's state without a lock, and the other core
+     * frees a record (a RELEASEd claim on core 0, a released shell on
+     * core 1) at any point. Selecting a record that is gone since that read
+     * clears the context, and a pass on no record stops the core: a walk
+     * skips a record that is not selected. */
     for (slot = 0; slot < capacity; ++slot) {
         if (!record_live(slot))
             continue;
         if (coherent(slot)->reset_request && coherent(slot)->running &&
             !visible(slot)->commit_active)
             request_stop(slot, ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
-        zzapp_services_select_pid(slot);
+        if (!zzapp_services_select_pid(slot))
+            continue;
         complete_pending_stop(slot);
         complete_pending_exit(slot);
     }
     for (slot = 0; slot < capacity; ++slot) {
         if (!record_live(slot) || !coherent(slot)->reset_request)
             continue;
-        zzapp_services_select_pid(slot);
+        if (!zzapp_services_select_pid(slot))
+            continue;
         service_reset(slot);
         /* service_reset returns only after this record's teardown has no
          * worker task in flight, so a pending core-1 cache clean is safe. */
@@ -2332,7 +2340,8 @@ void zzapp_worker_hook(void)
     for (slot = 0; slot < capacity; ++slot) {
         if (!record_live(slot))
             continue;
-        zzapp_services_select_pid(slot);
+        if (!zzapp_services_select_pid(slot))
+            continue;
         service_watch_slot(now);
         complete_pending_stop(slot);
         complete_pending_exit(slot);
@@ -2354,7 +2363,8 @@ void zzapp_worker_hook(void)
     for (slot = 0U; slot < capacity; ++slot) {
         if (!record_live(slot))
             continue;
-        zzapp_services_select_pid(slot);
+        if (!zzapp_services_select_pid(slot))
+            continue;
         host = host_slot(slot);
         if (host->state == ZZAPP_ST_LOADING &&
             cb_client(AAR_CB_STOP_REQUEST) != 0u)
@@ -2458,7 +2468,8 @@ void zzapp_core0_poll(void)
         host = host_slot(slot);
         coh = coherent(slot);
         running = coh->running;
-        zzapp_services_select_pid(slot);
+        if (!zzapp_services_select_pid(slot))
+            continue;
         coherent_barrier();
         age = core1_stamp_age_us(&coh->progress);
         now = now_ticks();

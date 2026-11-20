@@ -11,11 +11,10 @@
  * so that figure is reported as queueing delay without a limit. The
  * accounting is in zz9k-app-ringtest.h, which has a host test.
  *
- * The messages travel through the client transport module
- * (aar_xport_zz9000): the app's messages are taken from the submission queue
- * into the module's inbox, pings and mode changes are sent under the message
- * credit of the control block, and the lease is renewed from the polling
- * loop.
+ * The messages travel through aar.library: the app's messages are taken from
+ * the submission queue into the library's inbox, and pings and mode changes
+ * are sent under the message credit of the control block. The library keeps
+ * the lease itself.
  *
  * usage: zz9k-app-ringtest <ringflood.elf> [seconds] [MAXLAT=<ms>]
  *
@@ -25,13 +24,14 @@
 #include <exec/ports.h>
 #include <exec/types.h>
 #include <dos/dos.h>
+#include <libraries/aar_zz9000.h>
+#include <proto/aar.h>
 #include <proto/exec.h>
 #include <proto/timer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "aar_xport_zz9000.h"
 #include "zz9k-app-ringtest.h"
 
 struct Device *TimerBase;
@@ -47,13 +47,12 @@ struct Device *TimerBase;
 /* How long the ring may take to drain to the QUIET acknowledgement. */
 #define SETTLE_TIMEOUT_US 10000000U
 #define CTRL_TIMEOUT_US 2000000U
-/* The lease is renewed this often; it is 2 s while the app runs. */
-#define LEASE_INTERVAL_US 100000U
 /* Outcome of a Ctrl-C, apart from the AAR_E_* codes. */
 #define RT_CANCELLED (-1000)
 
+struct Library *AARBase;
 static uint32_t eclock_hz;
-static aar_xport app;
+static AARHandle *app;
 
 static uint64_t now_us(void)
 {
@@ -99,43 +98,29 @@ static const char *aar_text(int rc)
   }
 }
 
-static uint32_t read_counter(volatile uint32_t *word, int flush)
+static uint32_t read_counter(volatile uint32_t *word)
 {
-  if (flush) CacheClearE((APTR)word, 4, CACRF_ClearD);
   return *word;
 }
 
 typedef struct Session {
   ZZ9KRingTest test;
   volatile uint32_t *counter;
-  int flush;
   int sample;
   int last_status;
   uint32_t taken;
   uint32_t ping_id;
   uint32_t ctrl_id;
-  uint64_t last_lease;
 } Session;
 
-/* Renews the lease about every LEASE_INTERVAL_US, from whichever loop is
- * running. */
-static void lease(Session *s)
-{
-  uint64_t now = now_us();
-
-  if (now - s->last_lease >= LEASE_INTERVAL_US) {
-    s->last_lease = now;
-    (void)aar_xport_lease_renew(&app);
-  }
-}
 
 static int io_get(void *ctx, uint8_t message[32])
 {
   Session *s = (Session *)ctx;
 
-  s->last_status = aar_xport_get_message(&app, message);
-  if (s->last_status == 1) return 0;
-  if (s->last_status == 0) return 1;
+  s->last_status = AARGetMessage(app, (AARMessage *)message);
+  if (s->last_status == AAR_OK) return 0;
+  if (s->last_status == AAR_E_BUSY) return 1;
   return -1;
 }
 
@@ -150,7 +135,7 @@ static void io_sample(void *ctx, ZZ9KRingTest *t)
   Session *s = (Session *)ctx;
 
   if (s->sample && s->counter) {
-    zz9k_rt_on_counter(t, read_counter(s->counter, s->flush));
+    zz9k_rt_on_counter(t, read_counter(s->counter));
   }
 }
 
@@ -161,7 +146,6 @@ static int drain(Session *s)
 {
   ZZ9KRtIo io;
 
-  lease(s);
   io.get = io_get;
   io.now = io_now;
   io.sample = io_sample;
@@ -172,9 +156,12 @@ static int drain(Session *s)
   return AAR_OK;
 }
 
-static int app_alive(aar_xport_status *info)
+/* State and end reason are in the first 16 bytes of the status, three
+ * control block reads. */
+static int app_alive(AARStatusInfo *info)
 {
-  if (aar_xport_status_get(&app, info) != AAR_OK) return 0;
+  info->size = 16U;
+  if (AARStatus(app, info) != AAR_OK) return 0;
   return info->state == AAR_STATE_RUNNING ||
          info->state == AAR_STATE_STARTING;
 }
@@ -199,7 +186,7 @@ static void print_rtt(const char *label, const ZZ9KRtRtt *r)
  * when the app stopped by itself. */
 static int run_phase(Session *s, uint64_t duration_us, int pinging, int *died)
 {
-  aar_xport_status info;
+  AARStatusInfo info;
   uint64_t start = now_us();
   uint64_t end = start + duration_us;
   uint64_t next_ping = start;
@@ -220,7 +207,7 @@ static int run_phase(Session *s, uint64_t duration_us, int pinging, int *died)
 
       zz9k_rt_build_ping(ping, id, now);
       /* BUSY means no credit or a full queue: not sent, so not recorded. */
-      if (aar_xport_send_message(&app, ping) == AAR_OK) {
+      if (AARSendMessage(app, (AARMessage *)ping) == AAR_OK) {
         zz9k_rt_note_ping(&s->test, id, now);
         s->ping_id = id;
       }
@@ -249,7 +236,7 @@ static int send_ctrl(Session *s, uint32_t mode)
 
   zz9k_rt_build_ctrl(ctrl, id, mode);
   do {
-    status = aar_xport_send_message(&app, ctrl);
+    status = AARSendMessage(app, (AARMessage *)ctrl);
     if (status == AAR_OK) {
       zz9k_rt_note_ctrl(&s->test, id, mode);
       s->ctrl_id = id;
@@ -268,11 +255,11 @@ static int send_ctrl(Session *s, uint32_t mode)
 int main(int argc, char **argv)
 {
   static Session session;
-  aar_xport_board board;
+  struct AARSharedMap counter_map;
   struct MsgPort *timer_port = 0;
   struct timerequest *timer_request = 0;
   const char *app_argv[1] = { "ringflood" };
-  aar_xport_status info;
+  AARStatusInfo info;
   uint32_t seconds = 10U;
   uint64_t max_rtt_us = 0U;
   uint64_t start;
@@ -282,8 +269,8 @@ int main(int argc, char **argv)
   const char *mapping = "none";
   const char *reason = 0;
   const char *step = "open";
-  uint32_t refusal = 0U;
-  int board_open = 0;
+  ULONG refusal = 0U;
+  int opened = 0;
   int claimed = 0;
   int status;
   int i;
@@ -331,26 +318,29 @@ int main(int argc, char **argv)
     return 20;
   }
   TimerBase = timer_request->tr_node.io_Device;
-  if (aar_xport_amiga_board_open(&board) != AAR_OK) {
-    puts("zz9k-app-ringtest: no Zorro III board, zz9k.library or mmu.library");
+  AARBase = OpenLibrary((CONST_STRPTR)AAR_LIB_NAME, AAR_LIB_VERSION);
+  if (!AARBase) {
+    puts("zz9k-app-ringtest: cannot open aar.library");
     status = AAR_E_NOSYS;
-    reason = "no Zorro III board";
+    reason = "no aar.library";
     goto finish;
   }
-  board_open = 1;
+  opened = 1;
 
   trace("open");
-  status = aar_xport_open(&app, &board, &refusal);
-  if (status != AAR_OK) goto fail;
+  status = AAROpen(&app, 0, &refusal);
+  if (status != AAR_OK) {
+    app = 0;
+    goto fail;
+  }
   claimed = 1;
-  session.last_lease = now_us();
   step = "load";
   trace(step);
-  status = aar_xport_load_file(&app, argv[1], 0U);
+  status = AARLoadFile(app, argv[1]);
   if (status != AAR_OK) goto fail;
   step = "start";
   trace(step);
-  status = aar_xport_start(&app, app_argv, 1U);
+  status = AARStart(app, app_argv, 1U);
   if (status != AAR_OK) goto fail;
 
   /* The app's first message is INFO. */
@@ -373,27 +363,14 @@ int main(int argc, char **argv)
     goto stop;
   }
   /* The offset the app reports is a board offset, the token of its block. */
-  {
-    uint32_t block_off = t->block_offset & 0xfffU;
-    uint32_t block_token = t->block_offset - block_off;
-    volatile uint8_t *word = aar_xport_map(&app, block_token, block_off, 4U);
-    uint32_t board_size = aar_xport_amiga_board_size(&board);
-
-    if (!word && board_size && (t->block_offset >= board_size ||
-                                board_size - t->block_offset < 4U)) {
-      reason = "the app has no usable counter block";
-      goto stop;
-    }
-    if (word) {
-      session.counter = (volatile uint32_t *)word;
-      mapping = "cache-inhibited (mmu.library)";
-    } else {
-      session.counter = (volatile uint32_t *)(uintptr_t)(
-          aar_xport_amiga_board_base(&board) + t->block_offset);
-      mapping = "CacheClearE before each read (no mmu.library mapping)";
-      session.flush = 1;
-    }
+  memset(&counter_map, 0, sizeof(counter_map));
+  counter_map.size = sizeof(counter_map);
+  if (AARSharedMap(app, t->block_offset, 4U, 0U, &counter_map) != AAR_OK) {
+    reason = "the app has no usable counter block";
+    goto stop;
   }
+  session.counter = (volatile uint32_t *)counter_map.base;
+  mapping = "cache-inhibited (mmu.library)";
   printf("zz9k-app-ringtest: counter block at board offset %08lx, %s\n",
          (unsigned long)t->block_offset, mapping);
   fflush(stdout);
@@ -477,7 +454,7 @@ stop:
   session.sample = 0;
   step = "stop";
   trace(step);
-  status = aar_xport_stop(&app);
+  status = AARStop(app);
   if (status != AAR_OK) goto fail;
   start = now_us();
   for (;;) {
@@ -487,7 +464,8 @@ stop:
       status = RT_CANCELLED;
       goto fail;
     }
-    status = aar_xport_status_get(&app, &info);
+    info.size = sizeof(info);
+    status = AARStatus(app, &info);
     if (status != AAR_OK) goto fail;
     if (info.state == AAR_STATE_IDLE ||
         info.state == AAR_STATE_FAULTED) break;
@@ -555,12 +533,18 @@ stop:
     putchar('\n');
   }
   {
-    const aar_xport_stats *xs = aar_xport_stats_get(&app);
+    const aar_client_ext_zz9000 *ext = (const aar_client_ext_zz9000 *)AARExt(
+        AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT);
+    AARZZ9000Stats xs;
 
-    printf("  transport: %lu messages sent, %lu taken, %lu passes held at a "
-           "full inbox, %lu doorbells\n", (unsigned long)xs->msgs_sent,
-           (unsigned long)xs->msgs_taken, (unsigned long)xs->sq_blocked,
-           (unsigned long)xs->kicks);
+    xs.size = sizeof(xs);
+    if (AAR_CLIENT_EXT_ZZ9000_COVERS(ext, stats) &&
+        ext->stats(app, &xs) == AAR_OK) {
+      printf("  transport: %lu messages sent, %lu taken, %lu passes held at a "
+             "full inbox, %lu doorbells\n", (unsigned long)xs.msgs_sent,
+             (unsigned long)xs.msgs_taken, (unsigned long)xs.sq_blocked,
+             (unsigned long)xs.kicks);
+    }
   }
   goto finish;
 
@@ -569,21 +553,24 @@ fail:
          aar_text(status), status);
   if (status == AAR_E_NORESOURCE) {
     printf("the card refused the claim, reason %lu\n",
-           (unsigned long)(refusal ? refusal : aar_xport_reason(&app)));
+           (unsigned long)refusal);
   }
-  if (claimed && aar_xport_status_get(&app, &info) == AAR_OK) {
-    printf("app state %lu fault %lu exit %ld handle %08lx pc %08lx\n",
-           (unsigned long)info.state, (unsigned long)info.fault_class,
-           (long)info.exit_code, (unsigned long)info.handle,
-           (unsigned long)info.fault_pc);
+  if (claimed) {
+    info.size = sizeof(info);
+    if (AARStatus(app, &info) == AAR_OK) {
+      printf("app state %lu fault %lu exit %ld reason %lu pc %08lx\n",
+             (unsigned long)info.state, (unsigned long)info.fault_class,
+             (long)info.exit_code, (unsigned long)info.reason,
+             (unsigned long)info.fault_pc.lo);
+    }
   }
   reason = reason ? reason : "see above";
   status = AAR_E_IO;
 
 finish:
   session.counter = 0;
-  if (claimed) (void)aar_xport_release(&app);
-  if (board_open) aar_xport_amiga_board_close(&board);
+  if (claimed) (void)AARClose(app);
+  if (opened) CloseLibrary(AARBase);
   CloseDevice((struct IORequest *)timer_request);
   DeleteIORequest((struct IORequest *)timer_request);
   DeleteMsgPort(timer_port);

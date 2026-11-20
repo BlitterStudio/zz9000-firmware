@@ -49,7 +49,7 @@ static uint32_t last_refusal;
 static unsigned on_reset_calls;
 
 uint32_t zzapp_services_current_pid(void) { return selected; }
-void zzapp_services_select_pid(uint32_t pid) { selected = pid; }
+int zzapp_services_select_pid(uint32_t pid) { selected = pid; return 1; }
 int zzapp_services_take_start(uint32_t *argc)
 {
     (void)argc;

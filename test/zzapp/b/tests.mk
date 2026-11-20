@@ -63,7 +63,7 @@ $(foreach t,$(B_STANDALONE_TESTS),$(eval $(call B_STANDALONE_RULE,$(t))))
 # claims are bounded by the record arena alone.
 B_RT_TESTS := many_apps_test load_end_status_test host_visible_limit_test load_weight_test \
 	teardown_test reset_lifecycle_test exit_reset_test lost_client_test \
-	concurrent_load_test
+	concurrent_load_test record_race_test
 B_RT_DEPS := b/rt_env.h mock_client.h aar_note_image.h \
 	$(FW)/zzapp_services.c $(FW)/zzapp_services.h
 # Per suite: B_RTX_<name> extra link inputs, B_RTF_<name> extra flags.
@@ -71,6 +71,8 @@ B_RT_DEPS := b/rt_env.h mock_client.h aar_note_image.h \
 B_RTX_exit_reset_test := $(BUILD)/b/spin_template.o $(BUILD)/aar.o
 B_RTF_exit_reset_test := -Wl,--wrap=zzapp_loader_retire_resources \
 	-Wl,--wrap=zzapp_kernel_stop_app
+# zzapp_rec_state is wrapped to free a record between two reads of its state.
+B_RTF_record_race_test := -Wl,--wrap=zzapp_rec_state
 
 define B_RT_RULE
 $(BUILD)/b/$(1): b/$(1).c $$(LOADER_REAL_AS_HOST_OBJS) $$(LOADER_REAL_AS_HOST_SOURCES) \

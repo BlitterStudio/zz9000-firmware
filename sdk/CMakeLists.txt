@@ -1080,17 +1080,25 @@ target_include_directories(app_ringtest_logic_test
 
 add_test(NAME app_ringtest_logic_test COMMAND app_ringtest_logic_test)
 
-# The client transport module against the firmware's zzapp_xport.c (same code
-# at both ends). Needs the aar headers (sh scripts/fetch-aar.sh, or
-# -DAAR_DIR=<checkout>) and the firmware sources one directory up.
+# aar.library's portable core (aar repository, client/src/aar_core.c) and the
+# ZZ9000 platform layer (amiga/src/aar_zz9000.c) against the firmware's
+# zzapp_xport.c (same code at both ends). Needs the aar checkout pinned in
+# sdk/AAR_REF (sh scripts/fetch-aar.sh, or -DAAR_DIR=<checkout>) and the
+# firmware sources one directory up. The aar test stubs give ULONG and APTR the
+# 68k's 32 bits, so the test keeps every block below 4 GiB and links without
+# PIE.
 set(AAR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/aar" CACHE PATH "AAR checkout (include/aar/transport.h)")
 set(ZZ_FW_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../ZZ9000_proto.sdk/ZZ9000OS/src")
 set(ZZ_FW_TEST "${CMAKE_CURRENT_SOURCE_DIR}/../test")
 if(EXISTS "${AAR_DIR}/include/aar/transport.h" AND EXISTS "${ZZ_FW_SRC}/zzapp_xport.c")
+  if(NOT EXISTS "${AAR_DIR}/client/src/aar_core.c")
+    message(FATAL_ERROR "${AAR_DIR} has no client/src/aar_core.c: sdk/AAR_REF must name an aar commit with the aar.library client")
+  endif()
   find_package(Threads REQUIRED)
-  add_executable(aar_xport_zz9000_test
-    tests/aar_xport_zz9000_test.c
-    amiga/src/aar_xport_zz9000.c
+  add_executable(aar_zz9000_test
+    tests/aar_zz9000_test.c
+    amiga/src/aar_zz9000.c
+    ${AAR_DIR}/client/src/aar_core.c
     ${ZZ_FW_SRC}/zzapp_xport.c
     ${ZZ_FW_SRC}/zzapp_rec.c
     ${ZZ_FW_SRC}/zzapp_as.c
@@ -1099,9 +1107,12 @@ if(EXISTS "${AAR_DIR}/include/aar/transport.h" AND EXISTS "${ZZ_FW_SRC}/zzapp_xp
     ${ZZ_FW_SRC}/card_pool.c
     ${ZZ_FW_TEST}/card_pool/host_card_pool.c
   )
-  set_target_properties(aar_xport_zz9000_test PROPERTIES C_STANDARD 11)
-  target_include_directories(aar_xport_zz9000_test
+  set_target_properties(aar_zz9000_test PROPERTIES C_STANDARD 11)
+  target_include_directories(aar_zz9000_test
     PRIVATE
+      ${AAR_DIR}/client/tests/stubs
+      ${AAR_DIR}/client/include
+      ${AAR_DIR}/client/src
       ${AAR_DIR}/include
       ${AAR_DIR}/libaar/src
       ${ZZ_FW_SRC}
@@ -1111,14 +1122,14 @@ if(EXISTS "${AAR_DIR}/include/aar/transport.h" AND EXISTS "${ZZ_FW_SRC}/zzapp_xp
       ${ZZ_FW_TEST}/card_pool
       ${ZZ_FW_TEST}/mmu/mock
   )
-  target_compile_definitions(aar_xport_zz9000_test
+  target_compile_definitions(aar_zz9000_test
     PRIVATE ZZAPP_HOST_TEST MMU_PAGE_HOST_TEST SMP_LOCK_HOST_TEST)
-  target_compile_options(aar_xport_zz9000_test PRIVATE -Wall -Wextra -Werror -fno-pie)
-  target_link_options(aar_xport_zz9000_test PRIVATE -no-pie)
-  target_link_libraries(aar_xport_zz9000_test PRIVATE Threads::Threads)
-  add_test(NAME aar_xport_zz9000_test COMMAND aar_xport_zz9000_test)
+  target_compile_options(aar_zz9000_test PRIVATE -Wall -Wextra -Werror -fno-pie)
+  target_link_options(aar_zz9000_test PRIVATE -no-pie)
+  target_link_libraries(aar_zz9000_test PRIVATE Threads::Threads)
+  add_test(NAME aar_zz9000_test COMMAND aar_zz9000_test)
 else()
-  message(STATUS "aar_xport_zz9000_test skipped: no aar checkout or firmware sources")
+  message(STATUS "aar_zz9000_test skipped: no aar checkout or firmware sources")
 endif()
 
 add_executable(bench_tool_source_test
