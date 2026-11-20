@@ -12,7 +12,9 @@ REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # portable core, the AmigaOS shell and the probe (client/src/aar_core.c,
 # aar_shell.c, aar_probe.c, MIT) linked with the ZZ9000 platform layer of this
 # tree (amiga/src/aar_zz9000.c, GPL), which includes the private wire
-# zzapp_proto.h of the firmware tree. The pinned aar checkout comes from
+# zzapp_proto.h of the firmware tree. aar-run and libaarserve.a are built from
+# the same checkout (client/run, client/serve, MIT) and do not link the
+# platform layer. The pinned aar checkout comes from
 # scripts/fetch-aar.sh (or AAR_DIR=<your checkout>); the wire header is staged
 # under build/.
 AAR_DIR="${AAR_DIR:-$REPO_ROOT/aar}"
@@ -22,6 +24,13 @@ fi
 for f in aar_core.c aar_shell.c aar_probe.c aar_plat.h; do
   if [ ! -f "$AAR_DIR/client/src/$f" ]; then
     echo "build-m68k-amigaos: $AAR_DIR/client/src/$f is missing; sdk/AAR_REF must name an aar commit with the client library" >&2
+    exit 1
+  fi
+done
+for f in run/aar_run.c run/aar_run_zz9000.c run/aar-run.info run/README.md \
+    serve/aar_serve.c serve/aar_serve_core.c include/libraries/aar_serve.h; do
+  if [ ! -f "$AAR_DIR/client/$f" ]; then
+    echo "build-m68k-amigaos: $AAR_DIR/client/$f is missing; sdk/AAR_REF must name an aar commit with aar-run and the serving loop" >&2
     exit 1
   fi
 done
@@ -87,6 +96,20 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s \
   build/m68k/aar_shell.o build/m68k/aar_core.o build/m68k/aar_probe.o \
   build/m68k/aar_zz9000.o -o build/aar.library
+
+# aar-run, the reference launcher (client/run, MIT), and libaarserve.a, the
+# portable serving loop it is built on (client/serve, MIT), from the same aar
+# checkout. They are built with the flags of client/tests/m68k_check.sh in
+# the aar repository and link no GPL code: the launcher calls the library
+# through its vectors. The archive goes into the Developer directory of the
+# package with the header libraries/aar_serve.h.
+RUNFLAGS="-std=gnu11 -noixemul -m68030 -O2 -Wall -Wextra -Werror -I/aar/client/include -I/aar/include"
+m68k-amigaos-gcc $RUNFLAGS -c /aar/client/serve/aar_serve.c -o build/m68k/aar_serve.o
+m68k-amigaos-gcc $RUNFLAGS -c /aar/client/serve/aar_serve_core.c -o build/m68k/aar_serve_core.o
+rm -f build/libaarserve.a
+m68k-amigaos-ar rcs build/libaarserve.a build/m68k/aar_serve.o build/m68k/aar_serve_core.o
+m68k-amigaos-gcc $RUNFLAGS /aar/client/run/aar_run.c \
+  build/m68k/aar_serve.o build/m68k/aar_serve_core.o -lamiga -o build/aar-run
 
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libtest.c -o build/zz9k-libtest
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libasync.c -o build/zz9k-libasync
