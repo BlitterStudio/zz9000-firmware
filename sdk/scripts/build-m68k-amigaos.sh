@@ -5,7 +5,7 @@ set -e
 
 # GCC 16. The tag follows release candidates, so the digest pins the
 # compiler; card runs of it happen before releases.
-IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:98c6671ce9bfec0355e9336e02cbef2a39bad8c5ddd71c43720acacdb697b9a0}"
+IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:9391792c327c1058f04cb0a0e5e67bbf5504e9b696f486f6fbfb214bf6ca2d64}"
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 # aar.library is built here from the aar checkout pinned in sdk/AAR_REF: the
