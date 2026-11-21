@@ -77,12 +77,22 @@ uint32_t audio_reduce_raw_room(const struct audio_reduce *r,
 		return r->req_channels == 2U ? ring_free / 2U : ring_free;
 	}
 	if (r->in_channels == 1U && r->out_channels == 2U) {
+		uint64_t out_frames = ring_free / 4U;
+		uint64_t n;
+
 		if (r->divisor == 1U)
 			return ring_free / 2U;
-		/* Decimated: N mono frames give at most (N + d - 1) / d
-		 * stereo frames with the phase carried from the last pass,
-		 * which is at most 2N + 2 bytes. */
-		return ring_free > 2U ? (ring_free - 2U) & ~1U : 0U;
+		/* The most mono frames whose stereo output fits, given the
+		 * inputs each stage already holds (its phase): one stage
+		 * emits floor((n + p0) / 2), two stages floor((m + p1) / 2)
+		 * of those. Bounded by ring_free too, since the decoder
+		 * writes its own PCM into the ring first. */
+		if (r->divisor == 2U)
+			n = 2U * out_frames + 1U - r->stage[0].phase;
+		else
+			n = 4U * out_frames + 3U - 2U * r->stage[1].phase -
+			    r->stage[0].phase;
+		return 2U * n < ring_free ? (uint32_t)(2U * n) : ring_free & ~1U;
 	}
 	return ring_free;
 }

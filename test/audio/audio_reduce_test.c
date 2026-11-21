@@ -127,16 +127,17 @@ static void test_divisor_selection(void)
 }
 
 /* Mono to stereo with decimation: whatever phase the last pass left, the
- * decoder bytes raw_room allows never reduce to more than the free room. */
+ * decoder bytes raw_room allows reduce to no more than the free room, and
+ * one frame more would not fit unless the free room itself is the cap. */
 static void test_raw_room_bounds_output(void)
 {
 	static const uint32_t divisors[] = { 2U, 4U };
-	static int16_t in[64];
-	static int16_t out[2U * 64U];
+	static int16_t in[4200];
+	static int16_t out[2U * 4200U];
 	uint32_t di;
 	uint32_t i;
 
-	for (i = 0U; i < 64U; i++)
+	for (i = 0U; i < 4200U; i++)
 		in[i] = (int16_t)(i * 97U);
 	for (di = 0U; di < 2U; di++) {
 		uint32_t d = divisors[di];
@@ -146,20 +147,36 @@ static void test_raw_room_bounds_output(void)
 			uint32_t free_bytes;
 
 			for (free_bytes = 0U; free_bytes <= 40U; free_bytes += 2U) {
+				struct audio_reduce saved;
 				uint32_t room;
 				uint32_t produced;
 
 				configure(48000U, 1U, 48000U / d, 2U);
 				(void)audio_reduce_run(&g_r, in, lead, out);
+				saved = g_r;
 				room = audio_reduce_raw_room(&g_r, free_bytes);
-				CHECK((room & 1U) == 0U, "d=%u room %u is odd", d,
-				      room);
+				CHECK((room & 1U) == 0U && room <= free_bytes,
+				      "d=%u room %u free %u", d, room, free_bytes);
 				produced = audio_reduce_run(&g_r, in, room / 2U, out);
 				CHECK(produced * 4U <= free_bytes,
 				      "d=%u lead %u free %u: room %u gives %u bytes",
 				      d, lead, free_bytes, room, produced * 4U);
+				if (room + 2U <= free_bytes) {
+					produced = audio_reduce_run(
+						&saved, in, room / 2U + 1U, out);
+					CHECK(produced * 4U > free_bytes,
+					      "d=%u lead %u free %u: room %u is "
+					      "not the most that fits", d, lead,
+					      free_bytes, room);
+				}
 			}
 		}
+		/* An empty ring takes a raw block as large as itself (a 4096
+		 * sample mono FLAC block in an 8192 byte ring). */
+		configure(48000U, 1U, 48000U / d, 2U);
+		CHECK(audio_reduce_raw_room(&g_r, 8192U) == 8192U,
+		      "d=%u empty 8192 byte ring gives room %u", d,
+		      audio_reduce_raw_room(&g_r, 8192U));
 	}
 }
 
