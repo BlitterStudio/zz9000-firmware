@@ -883,6 +883,33 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include/pragmas/mpega_pragmas.h
 )
 
+add_executable(mpega_convert_test
+  tests/mpega_convert_test.c
+  amiga/mpega/mpega_convert.c
+)
+
+target_include_directories(mpega_convert_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/hoststubs
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+add_test(NAME mpega_convert_test COMMAND mpega_convert_test)
+
+add_executable(mpega_romtag_test
+  tests/mpega_romtag_test.c
+  amiga/mpega/mpega_romtag.c
+)
+
+target_include_directories(mpega_romtag_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/hoststubs
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include
+)
+
+add_test(NAME mpega_romtag_test COMMAND mpega_romtag_test)
+
 add_executable(mpega_resident_source_test
   tests/mpega_resident_source_test.c
 )

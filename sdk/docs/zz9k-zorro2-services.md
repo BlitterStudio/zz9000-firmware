@@ -34,7 +34,7 @@ allocator.
 
 | Client or operation | 2 MiB | 4 MiB | Current behavior |
 | --- | --- | --- | --- |
-| `mpega.library` | No | No | Its compact PCM ring is 32 KiB, followed by 16 KiB feed staging. Neither layout has a 32 KiB host window. |
+| `mpega.library` | No | No | Its compact PCM ring is 32 KiB, followed by 16 KiB feed staging. Neither layout has a 32 KiB host window. When the compact allocation fails, `MPEGA_open` passes the stream to `LIBS:mpega-software.library` if that file exists, and returns `NULL` otherwise. |
 | ZZPlay with AHI | No | No | The compact AHI path allocates a 32 KiB PCM ring and 16 KiB staging buffer. |
 | ZZPlay card-local streaming | Limited | Limited | The card-local pass keeps PCM and compressed rings card-only and uses up to 16 KiB of host-window staging. It requires an otherwise free host window. |
 | Accelerated `amissl.library` | Yes | Yes | The provider advertises hardware algorithms only after a 32-byte host-window probe succeeds. Scratch allocations are 16-byte aligned and grow to the requested size. X25519 is offload-or-fail after advertisement. P-256 and AEAD operations can use the default provider after an offload miss. RSA-2048 PKCS#1/SHA-256 verification uses the default provider by default; set `ENV:ZZ9K_RSA_VERIFY_OFFLOAD` only to test the board path. |

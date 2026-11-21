@@ -21,6 +21,8 @@ LONG MPEGA_seek(MPEGA_STREAM *mpds, ULONG ms_time_position);
 LONG MPEGA_time(MPEGA_STREAM *mpds, ULONG *ms_time_position);
 LONG MPEGA_find_sync(BYTE *buffer, LONG buffer_size);
 LONG MPEGA_scale(MPEGA_STREAM *mpds, LONG scale_percent);
+/* Needs mpega.library 2.127 or newer from the ZZ9000 SDK. */
+LONG MPGA_decode_to(MPEGA_STREAM *mpds, struct MpgaOut *out);
 
 #ifdef __cplusplus
 }

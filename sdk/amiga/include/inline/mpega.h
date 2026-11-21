@@ -119,6 +119,22 @@ static __inline LONG __MPEGAScaleInline(MPEGA_STREAM *mpds,
 #define MPEGA_scale(mpds, scale_percent) \
   __MPEGAScaleInline((mpds), (scale_percent))
 
+/* Needs mpega.library 2.127 or newer from the ZZ9000 SDK. */
+static __inline LONG __MPGADecodeToInline(MPEGA_STREAM *mpds,
+                                          struct MpgaOut *out)
+{
+  register LONG mpega_d0 __asm("d0");
+  register struct Library *mpega_a6 __asm("a6") = MPEGABase;
+  register MPEGA_STREAM *mpega_a0 __asm("a0") = mpds;
+  register struct MpgaOut *mpega_a1 __asm("a1") = out;
+  __asm volatile("jsr -72(a6)"
+                 : "=r"(mpega_d0), "+r"(mpega_a0), "+r"(mpega_a1)
+                 : "r"(mpega_a6)
+                 : MPEGA_INLINE_CLOBBERS_D0_A0_A1);
+  return mpega_d0;
+}
+#define MPGA_decode_to(mpds, out) __MPGADecodeToInline((mpds), (out))
+
 #else
 
 #define MPEGA_INLINE_CLOBBERS_VOID_A0

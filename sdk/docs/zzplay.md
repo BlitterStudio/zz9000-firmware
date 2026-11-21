@@ -65,9 +65,11 @@ ZZPlay still opens its player window, settings, Browse services and ARexx port.
 It can play MP3 files, HTTP or HTTPS streams, radio stations and Plex MP3
 items. `AUTO` tries the selected MHI driver, then other drivers in `LIBS:MHI/`.
 If no MHI driver can play, it uses AHI with an installed software
-`mpega.library`. ZZPlay does not install an MP3 decoder. FLAC, Ogg Vorbis,
-MPEG and WebM video, and animated WebP need a ZZ9000. ZZPlay marks those
-playlist items unplayable and continues with the next item.
+`mpega.library`. The ZZ9000 `mpega.library`, when installed, passes such a
+stream to `LIBS:mpega-software.library`. ZZPlay does not install an MP3
+decoder. FLAC, Ogg Vorbis, MPEG and WebM video, and animated WebP need a
+ZZ9000. ZZPlay marks those playlist items unplayable and continues with the
+next item.
 
 ## Start playback
 

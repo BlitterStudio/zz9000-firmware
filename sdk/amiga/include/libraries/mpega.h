@@ -98,4 +98,46 @@ typedef struct MPEGA_STREAM {
 #define MPEGA_ERR_NO_SYNC  (MPEGA_ERR_BASE - 4)
 #define MPEGA_ERR_BADVALUE (MPEGA_ERR_BASE - 5)
 
+/*
+ * MPGA_decode_to: the next frame written straight into the caller's output
+ * buffers. This vector is not part of Stephane Tavenard's mpega.library. It
+ * sits after MPEGA_scale (offset -72) with the same struct and format values
+ * as in ambmpega.library, whose interface header (MIT, (c) 2026 Brian King)
+ * these declarations follow. A program that calls it needs mpega.library
+ * 2.127 or newer from the ZZ9000 SDK (check lib_Revision of the opened
+ * library): other mpega.library builds have nothing at this slot.
+ *
+ * mo_Buffer[] are rings of mo_Mask + 1 samples each (mo_Mask is a power of
+ * two minus one; ~0 for a buffer that does not wrap), written from mo_Index
+ * on. mo_Index is advanced by the samples written. The samples are those
+ * MPEGA_decode_frame would give, then:
+ *   MPGA_FMT_S16   WORD, mo_Buffer[0] left (or mono), [1] right
+ *   MPGA_FMT_S16I  WORD, left and right interleaved in mo_Buffer[0] (AHI's
+ *                  AHIST_S16S; mono: AHIST_M16S), mo_Index in sample frames,
+ *                  mo_Mask in WORDs
+ *   MPGA_FMT_S8    BYTE (Paula), the high byte: [0] left, [1] right
+ *   MPGA_FMT_S8D   BYTE, rounded with triangular dither of one 8-bit step
+ *   MPGA_FMT_S14   Paula's 14 bits: [0] and [1] each channel's high byte
+ *                  (signed, played at volume 64), [2] and [3] its next 6
+ *                  bits (0 to 63, played at volume 1 on a channel of its
+ *                  own)
+ * mo_Peak[] is each channel's largest size in this frame (0 to 32767, of
+ * the 16-bit samples). The samples MPEGA_scale clipped are added to
+ * mo_Clipped.
+ */
+#define MPGA_FMT_S16  0
+#define MPGA_FMT_S16I 1
+#define MPGA_FMT_S8   2
+#define MPGA_FMT_S8D  3
+#define MPGA_FMT_S14  4
+
+struct MpgaOut {
+  ULONG mo_Format;
+  APTR mo_Buffer[4];
+  ULONG mo_Mask;
+  ULONG mo_Index;
+  UWORD mo_Peak[2];
+  ULONG mo_Clipped;
+};
+
 #endif /* LIBRARIES_MPEGA_H */

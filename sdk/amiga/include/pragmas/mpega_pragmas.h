@@ -20,6 +20,7 @@
 #pragma libcall MPEGABase MPEGA_time         036 9802
 #pragma libcall MPEGABase MPEGA_find_sync    03C 0802
 #pragma libcall MPEGABase MPEGA_scale        042 0802
+#pragma libcall MPEGABase MPGA_decode_to    048 9802
 #endif
 
 #endif /* PRAGMAS_MPEGA_PRAGMAS_H */

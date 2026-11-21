@@ -132,6 +132,9 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "tools/zzplay/zzplay.c");
   ok &= expect_contains(script, name, "tools/zz9k-mpega-smoke.c");
   ok &= expect_contains(script, name, "amiga/mpega/mpega_resident.c");
+  ok &= expect_contains(script, name, "amiga/mpega/mpega_convert.c");
+  ok &= expect_contains(script, name, "amiga/mpega/mpega_fallback.c");
+  ok &= expect_contains(script, name, "amiga/mpega/mpega_romtag.c");
   ok &= expect_not_contains(script, name, "mpega.library.zz9k");
   ok &= expect_contains(script, name, "tools/zz9k-image-window.c");
   ok &= expect_contains(script, name, "tools/zz9k-picture-viewer.c");

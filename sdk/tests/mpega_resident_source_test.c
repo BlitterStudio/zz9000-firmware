@@ -94,7 +94,7 @@ int main(int argc, char **argv)
    * two ways, and hardcoding the string let them drift apart during the v2.8
    * freeze. Pin the macros and the derivation, not the rendered text. */
   ok &= expect_contains(source, "#define MPEGA_LIBRARY_VERSION 2");
-  ok &= expect_contains(source, "#define MPEGA_LIBRARY_REVISION 126");
+  ok &= expect_contains(source, "#define MPEGA_LIBRARY_REVISION 127");
   ok &= expect_contains(source,
                         "MPEGA_STRINGIFY(MPEGA_LIBRARY_VERSION)");
   ok &= expect_contains(source,
@@ -157,12 +157,7 @@ int main(int argc, char **argv)
   ok &= expect_contains(source, "static void mpega_zz9k_release");
   ok &= expect_contains(source, "static int mpega_stream_begin");
   ok &= expect_contains(source, "static int mpega_stream_feed_until_pcm");
-  ok &= expect_contains(source, "static LONG mpega_copy_pcm_planar");
-  ok &= expect_contains(source, "static void mpega_copy_pcm_linear");
-  ok &= expect_contains(source, "static uint32_t mpega_copy_pcm_wrapped");
   ok &= expect_contains(source, "static int mpega_ack_pcm");
-  ok &= expect_contains(source, "static void mpega_store_pcm_word_be");
-  ok &= expect_contains(source, "static void mpega_store_scaled_pcm_word_be");
   ok &= expect_contains(source, "static void mpega_update_time_ms");
   ok &= expect_contains(source, "static int mpega_is_sync_header");
   ok &= expect_contains(source, "static int mpega_shared_copy_to_bytes");
@@ -424,12 +419,6 @@ int main(int argc, char **argv)
                         "if (!mpds || !mpds->handle) {\n"
                         "    return MPEGA_ERR_EOF;\n"
                         "  }\n\n"
-                        "  state = (MPEGACompatStream *)mpds->handle;\n"
-                        "  byte_pos = mpega_stream_seek_byte_for_ms");
-  ok &= expect_contains(source,
-                        "if (!mpds || !mpds->handle) {\n"
-                        "    return MPEGA_ERR_EOF;\n"
-                        "  }\n\n"
                         "  state = (MPEGACompatStream *)mpds->handle;");
   ok &= expect_contains(source,
                         "if (!mpds) {\n"
@@ -459,64 +448,18 @@ int main(int argc, char **argv)
   ok &= expect_contains(source, "return MPEGA_ERR_NO_SYNC;");
   ok &= expect_contains(source, "source_channels");
   ok &= expect_contains(source, "output_channels");
-  ok &= expect_contains(source, "if (output_channels == 2U && !pcm[1])");
   ok &= expect_contains(source, "MPEGA_PCM_SIZE * source_channels * 2U");
   ok &= expect_not_contains(source, "frame_bytes = channels * 2U;");
   ok &= expect_contains(source, "frame_bytes = source_channels * 2U;");
   ok &= expect_contains(source, "bytes &= ~(frame_bytes - 1U);");
   ok &= expect_contains(source, "source_samples = bytes / frame_bytes;");
   ok &= expect_contains(source, "freq_div = mpega_output_freq_div");
-  ok &= expect_contains(source,
-                        "output_samples = (source_samples + freq_div - 1U) / "
-                        "freq_div;");
   ok &= expect_not_contains(source, "  samples = bytes / frame_bytes;");
   ok &= expect_not_contains(source,
                             "samples = channels == 1U ? (bytes >> 1) : "
                             "(bytes >> 2);");
   ok &= expect_not_contains(source, "bytes -= bytes % (channels * 2U)");
   ok &= expect_not_contains(source, "samples = bytes / (channels * 2U)");
-  ok &= expect_contains(source, "uint8_t *bytes = (uint8_t *)dst;");
-  ok &= expect_contains(source, "bytes[sample] = hi;");
-  ok &= expect_contains(source, "bytes[sample + 1U] = lo;");
-  ok &= expect_contains(source, "ring = (volatile const uint8_t *)state->pcm_ring.data;");
-  ok &= expect_contains(source, "if (offset <= state->pcm_ring.length - bytes)");
-  ok &= expect_contains(source,
-                        "mpega_copy_pcm_linear(pcm, ring + offset, "
-                        "source_samples, source_channels, output_channels, "
-                        "freq_div");
-  ok &= expect_contains(source,
-                        "offset = mpega_copy_pcm_wrapped(state, pcm, offset, "
-                        "source_samples, source_channels, output_channels, "
-                        "freq_div");
-  ok &= expect_contains(source, "uint32_t source_sample;");
-  ok &= expect_contains(source, "uint32_t output_sample;");
-  ok &= expect_contains(source, "source_sample += freq_div");
-  ok &= expect_contains(source, "sample_src = src +");
-  ok &= expect_contains(source, "output_sample++");
-  ok &= expect_contains(source, "int16_t left_value");
-  ok &= expect_contains(source, "int16_t right_value");
-  ok &= expect_contains(source,
-                        "mpega_store_scaled_pcm_value_be(pcm[0], output_sample,");
-  ok &= expect_contains(source, "((int32_t)left_value +");
-  ok &= expect_contains(source,
-                        "mpega_store_scaled_pcm_value_be(pcm[0], output_sample, value");
-  ok &= expect_contains(source, "uint8_t *left = (uint8_t *)pcm[0];");
-  ok &= expect_contains(source, "uint8_t *right = (uint8_t *)pcm[1];");
-  ok &= expect_contains(source, "left[0] = sample_src[0];");
-  ok &= expect_contains(source, "left[1] = sample_src[1];");
-  ok &= expect_contains(source, "right[0] = sample_src[2];");
-  ok &= expect_contains(source, "right[1] = sample_src[3];");
-  ok &= expect_contains(source, "left += 2;");
-  ok &= expect_contains(source, "right += 2;");
-  ok &= expect_not_contains(source, "mpega_store_pcm_word_be(pcm[0], sample, left_hi, left_lo);");
-  ok &= expect_not_contains(source, "mpega_store_pcm_word_be(pcm[1], sample, right_hi, right_lo);");
-  ok &= expect_contains(source, "if (scale_percent == 100)");
-  ok &= expect_contains(source, "int32_t value = (int16_t)");
-  ok &= expect_contains(source, "value = (value * scale_percent) / 100;");
-  ok &= expect_contains(source, "if (value > 32767)");
-  ok &= expect_contains(source, "if (value < -32768)");
-  ok &= expect_contains(source, "static void mpega_store_scaled_pcm_value_be");
-  ok &= expect_contains(source, "if (offset >= state->pcm_ring.length)");
   ok &= expect_contains(source, "if (available > state->pcm_ring.length)");
   ok &= expect_contains(source, "mpega_update_time_ms(state, source_samples);");
   ok &= expect_not_contains(source, "mpega_update_time_ms(state, samples);");

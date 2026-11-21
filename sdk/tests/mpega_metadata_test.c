@@ -65,6 +65,36 @@ static int expect_contains(const char *label, const char *source,
   return 0;
 }
 
+/* Scans the function lines of an .fd file (the lines with an argument list).
+ * Returns the position of `line` among them, or -1, and counts them in
+ * *count. The vector offset of a function is 30 + 6 * position. */
+static int fd_scan(const char *fd, const char *line, int *count)
+{
+  const char *cursor = fd;
+  int position = 0;
+  int found = -1;
+
+  while (*cursor) {
+    const char *end = strchr(cursor, '\n');
+    size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+
+    if (cursor[0] != '*' && cursor[0] != '#' && memchr(cursor, '(', length)) {
+      if (line && found < 0 && strlen(line) == length &&
+          strncmp(cursor, line, length) == 0) {
+        found = position;
+      }
+      position++;
+    }
+    if (!end) {
+      break;
+    }
+    cursor = end + 1;
+  }
+
+  *count = position;
+  return found;
+}
+
 int main(int argc, char **argv)
 {
   static const ExpectedFunction expected[] = {
@@ -88,7 +118,10 @@ int main(int argc, char **argv)
      "jsr -60(a6)"},
     {"MPEGA_scale(mpds,scale_percent)(a0,d0)",
      "LONG MPEGA_scale(MPEGA_STREAM *mpds, LONG scale_percent);",
-     "jsr -66(a6)"}
+     "jsr -66(a6)"},
+    {"MPGA_decode_to(mpds,out)(a0,a1)",
+     "LONG MPGA_decode_to(MPEGA_STREAM *mpds, struct MpgaOut *out);",
+     "jsr -72(a6)"}
   };
   char *fd;
   char *fd_alias;
@@ -184,6 +217,35 @@ int main(int argc, char **argv)
                         "#pragma libcall MPEGABase MPEGA_find_sync    03C 0802");
   ok &= expect_contains("pragmas", pragmas,
                         "#pragma libcall MPEGABase MPEGA_scale        042 0802");
+  ok &= expect_contains("pragmas", pragmas,
+                        "#pragma libcall MPEGABase MPGA_decode_to    048 9802");
+  ok &= expect_contains("library", library, "struct MpgaOut {");
+  ok &= expect_contains("library", library, "#define MPGA_FMT_S16  0");
+  ok &= expect_contains("library", library, "#define MPGA_FMT_S16I 1");
+  ok &= expect_contains("library", library, "#define MPGA_FMT_S8   2");
+  ok &= expect_contains("library", library, "#define MPGA_FMT_S8D  3");
+  ok &= expect_contains("library", library, "#define MPGA_FMT_S14  4");
+
+  /* Each function sits at the vector its place in the .fd gives. */
+  for (i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+    char jsr[32];
+    int count;
+    int alias_count;
+
+    snprintf(jsr, sizeof(jsr), "jsr -%u(a6)", (unsigned)(30 + 6 * i));
+    if (fd_scan(fd, expected[i].fd_line, &count) != (int)i ||
+        fd_scan(fd_alias, expected[i].fd_line, &alias_count) != (int)i ||
+        strcmp(jsr, expected[i].inline_token) != 0) {
+      printf("vector of %s is not -%u\n", expected[i].fd_line,
+             (unsigned)(30 + 6 * i));
+      ok = 0;
+    }
+    /* Eight functions, and nothing after MPGA_decode_to. */
+    if (count != 8 || alias_count != 8) {
+      printf("the .fd files do not hold eight functions\n");
+      ok = 0;
+    }
+  }
 
   free(fd);
   free(fd_alias);
