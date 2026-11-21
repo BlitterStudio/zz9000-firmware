@@ -301,8 +301,10 @@ void mpega_reduce_plan(MPEGAReducePlan *plan, uint32_t service_flags,
   if (force_mono && stream_channels == 2U) {
     plan->output_channels = 1U;
   }
-  if (freq_div > 1U && probed_rate / freq_div != 0U) {
-    plan->output_hz = probed_rate / freq_div;
+  /* Rounded up: the card divides by the smallest d with rate <= limit * d,
+   * so 11025 / 2 must ask for 5513, not 5512. */
+  if (freq_div > 1U && probed_rate != 0U) {
+    plan->output_hz = (probed_rate + freq_div - 1U) / freq_div;
   }
 }
 

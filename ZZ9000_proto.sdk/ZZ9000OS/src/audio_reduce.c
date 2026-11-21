@@ -76,8 +76,14 @@ uint32_t audio_reduce_raw_room(const struct audio_reduce *r,
 	if (r->divisor == 0U) {
 		return r->req_channels == 2U ? ring_free / 2U : ring_free;
 	}
-	if (r->divisor == 1U && r->in_channels == 1U && r->out_channels == 2U)
-		return ring_free / 2U;
+	if (r->in_channels == 1U && r->out_channels == 2U) {
+		if (r->divisor == 1U)
+			return ring_free / 2U;
+		/* Decimated: N mono frames give at most (N + d - 1) / d
+		 * stereo frames with the phase carried from the last pass,
+		 * which is at most 2N + 2 bytes. */
+		return ring_free > 2U ? (ring_free - 2U) & ~1U : 0U;
+	}
 	return ring_free;
 }
 

@@ -499,6 +499,31 @@ static void test_reduce_plan(void)
 
   mpega_reduce_plan(&plan, reduce, 1, 2, 1, 48000, 4);
   CHECK(plan.output_hz == 12000 && plan.output_channels == 1);
+
+  /* Odd rates: the limit is rounded up, so the card's rule (the smallest
+   * d in 1, 2, 4 with rate <= limit * d) picks freq_div itself. */
+  {
+    static const uint32_t rates[] = {11025, 22050, 44100, 8000, 12000};
+    static const uint32_t divs[] = {2, 4};
+    size_t r;
+    size_t d;
+
+    for (r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
+      for (d = 0; d < 2; d++) {
+        uint32_t card_div = 4;
+
+        mpega_reduce_plan(&plan, reduce, 1, 2, 0, rates[r], divs[d]);
+        if (rates[r] <= plan.output_hz) {
+          card_div = 1;
+        } else if (rates[r] <= plan.output_hz * 2U) {
+          card_div = 2;
+        }
+        CHECK(card_div == divs[d]);
+      }
+    }
+    mpega_reduce_plan(&plan, reduce, 1, 2, 0, 11025, 2);
+    CHECK(plan.output_hz == 5513);
+  }
 }
 
 typedef struct FakeCard {

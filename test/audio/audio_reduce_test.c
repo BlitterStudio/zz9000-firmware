@@ -126,6 +126,43 @@ static void test_divisor_selection(void)
 	      "mono d=4 raw bytes %u", audio_reduce_raw_bytes(&g_r, 1000U));
 }
 
+/* Mono to stereo with decimation: whatever phase the last pass left, the
+ * decoder bytes raw_room allows never reduce to more than the free room. */
+static void test_raw_room_bounds_output(void)
+{
+	static const uint32_t divisors[] = { 2U, 4U };
+	static int16_t in[64];
+	static int16_t out[2U * 64U];
+	uint32_t di;
+	uint32_t i;
+
+	for (i = 0U; i < 64U; i++)
+		in[i] = (int16_t)(i * 97U);
+	for (di = 0U; di < 2U; di++) {
+		uint32_t d = divisors[di];
+		uint32_t lead;
+
+		for (lead = 0U; lead < 2U * d; lead++) {
+			uint32_t free_bytes;
+
+			for (free_bytes = 0U; free_bytes <= 40U; free_bytes += 2U) {
+				uint32_t room;
+				uint32_t produced;
+
+				configure(48000U, 1U, 48000U / d, 2U);
+				(void)audio_reduce_run(&g_r, in, lead, out);
+				room = audio_reduce_raw_room(&g_r, free_bytes);
+				CHECK((room & 1U) == 0U, "d=%u room %u is odd", d,
+				      room);
+				produced = audio_reduce_run(&g_r, in, room / 2U, out);
+				CHECK(produced * 4U <= free_bytes,
+				      "d=%u lead %u free %u: room %u gives %u bytes",
+				      d, lead, free_bytes, room, produced * 4U);
+			}
+		}
+	}
+}
+
 /* Amplitude of the output for a sine of the given amplitude and frequency
  * (cycles per input sample), as an RMS over the settled output. */
 static double tone_gain_db(uint32_t in_hz, uint32_t in_ch, uint32_t out_hz,
@@ -468,6 +505,7 @@ static void test_rate_change_resets(void)
 int main(void)
 {
 	test_divisor_selection();
+	test_raw_room_bounds_output();
 	test_frequency_response();
 	test_matches_model();
 	test_chunk_split_invariance();

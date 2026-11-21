@@ -73,7 +73,8 @@ typedef struct MPEGAReducePlan {
 /*
  * Choose the reduction for a stream whose header was read (header_probed):
  * mono when force_mono applies to a stereo stream, and probed_rate / freq_div
- * as the maximum rate when freq_div is above 1. Nothing is requested unless
+ * rounded up as the maximum rate when freq_div is above 1 (the card picks
+ * the smallest divisor d with rate <= limit * d). Nothing is requested unless
  * the audio service reports the reduce flag.
  */
 void mpega_reduce_plan(MPEGAReducePlan *plan, uint32_t service_flags,

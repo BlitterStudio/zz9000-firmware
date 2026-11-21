@@ -71,8 +71,9 @@ int audio_reduce_set_input(struct audio_reduce *r, uint32_t hz,
 /* True when audio_reduce_run() changes the data. */
 int audio_reduce_active(const struct audio_reduce *r);
 
-/* Decoder bytes that stay within `ring_free` ring bytes once reduced
- * (only mono to stereo at divisor 1 grows the data). */
+/* Decoder bytes that stay within `ring_free` ring bytes once reduced. Only
+ * mono to stereo grows the data: twice at divisor 1, and by up to one
+ * frame from the carried decimation phase at divisor 2 or 4. */
 uint32_t audio_reduce_raw_room(const struct audio_reduce *r,
                                uint32_t ring_free);
 
