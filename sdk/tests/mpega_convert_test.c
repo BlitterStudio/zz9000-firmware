@@ -579,6 +579,207 @@ static void test_reduce_begin(void)
   CHECK(card.calls == 2);
 }
 
+/* --------------------------------------------------------------- feed */
+
+/* A card stream as the firmware runs one: a FEED that does not fit the input
+ * ring is refused whole with BACKPRESSURE and runs no decode; every other
+ * FEED and every READ runs one decode pass of at most `pass` input bytes,
+ * and only while the PCM ring is empty. DONE needs EOF, an empty input ring
+ * and no PCM left. */
+typedef struct FakeStream {
+  uint32_t source_bytes;
+  uint32_t source_read;
+  uint32_t chunk;
+  uint32_t ring_capacity;
+  uint32_t input_length;
+  uint32_t pass;
+  uint32_t consumed;
+  uint32_t produced;
+  uint32_t pcm_waiting;
+  uint32_t flags;
+  uint32_t accepted;
+  int eof;
+  int stuck_after_eof; /* the decoder stops consuming once EOF is seen */
+  int fail_feed;
+} FakeStream;
+
+static void fake_decode(FakeStream *s)
+{
+  uint32_t take;
+
+  if (s->pcm_waiting != 0U || (s->stuck_after_eof && s->eof)) {
+    return;
+  }
+  take = s->input_length < s->pass ? s->input_length : s->pass;
+  s->input_length -= take;
+  s->consumed += take;
+  s->produced += take * 2U;
+  s->pcm_waiting += take * 2U;
+}
+
+static void fake_flags(FakeStream *s)
+{
+  s->flags &= ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE;
+  if (s->eof && s->input_length == 0U && s->pcm_waiting == 0U) {
+    s->flags |= ZZ9K_AUDIO_STREAM_RESULT_DONE;
+  }
+}
+
+static int fake_pcm_available(void *c)
+{
+  return ((FakeStream *)c)->pcm_waiting != 0U;
+}
+
+static int fake_ack(void *c)
+{
+  fake_flags((FakeStream *)c);
+  return 1;
+}
+
+static int fake_read_stage(void *c, uint32_t *got)
+{
+  FakeStream *s = (FakeStream *)c;
+  uint32_t left = s->source_bytes - s->source_read;
+
+  *got = left < s->chunk ? left : s->chunk;
+  s->source_read += *got;
+  return 1;
+}
+
+static int fake_feed(void *c, uint32_t length, uint32_t flags)
+{
+  FakeStream *s = (FakeStream *)c;
+
+  if (s->fail_feed) {
+    return 0;
+  }
+  if (length > s->ring_capacity - s->input_length) {
+    s->flags |= ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE;
+    fake_flags(s);
+    return 1;
+  }
+  s->flags &= ~(uint32_t)ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE;
+  s->input_length += length;
+  s->accepted += length;
+  if ((flags & ZZ9K_AUDIO_STREAM_FEED_EOF) != 0U) {
+    s->eof = 1;
+  }
+  fake_decode(s);
+  fake_flags(s);
+  return 1;
+}
+
+static int fake_kick(void *c)
+{
+  fake_decode((FakeStream *)c);
+  fake_flags((FakeStream *)c);
+  return 1;
+}
+
+static uint32_t fake_result_flags(void *c)
+{
+  return ((FakeStream *)c)->flags;
+}
+
+static uint32_t fake_bytes_consumed(void *c)
+{
+  return ((FakeStream *)c)->consumed;
+}
+
+static uint32_t fake_bytes_produced(void *c)
+{
+  return ((FakeStream *)c)->produced;
+}
+
+/* Drives the loop as MPEGA_decode_frame does, taking all waiting PCM after
+ * each NONE. Returns the final status; *pcm_read gets the PCM taken. */
+static int run_fake(FakeStream *s, uint32_t *pcm_read)
+{
+  MPEGAFeedOps ops;
+  MPEGAFeedState state;
+  int status;
+  int calls;
+
+  memset(&state, 0, sizeof(state));
+  ops.context = s;
+  ops.pcm_available = fake_pcm_available;
+  ops.ack = fake_ack;
+  ops.read_stage = fake_read_stage;
+  ops.feed = fake_feed;
+  ops.kick = fake_kick;
+  ops.result_flags = fake_result_flags;
+  ops.bytes_consumed = fake_bytes_consumed;
+  ops.bytes_produced = fake_bytes_produced;
+
+  *pcm_read = 0U;
+  for (calls = 0; calls < 100000; calls++) {
+    status = mpega_feed_until_pcm(&state, &ops, 128U);
+    if (status != MPEGA_ERR_NONE) {
+      return status;
+    }
+    *pcm_read += s->pcm_waiting;
+    s->pcm_waiting = 0U;
+  }
+  return 99;
+}
+
+static void test_feed_whole_source(void)
+{
+  static const uint32_t chunks[] = {700, 1000, 64, 999};
+  static const uint32_t passes[] = {300, 1, 1000};
+  size_t c;
+  size_t p;
+
+  /* Chunks that overfill the ring and passes far smaller than a chunk:
+   * every source byte must reach the decoder and come back as PCM. */
+  for (c = 0; c < sizeof(chunks) / sizeof(chunks[0]); c++) {
+    for (p = 0; p < sizeof(passes) / sizeof(passes[0]); p++) {
+      FakeStream s;
+      uint32_t pcm_read;
+
+      memset(&s, 0, sizeof(s));
+      s.source_bytes = 5003U;
+      s.chunk = chunks[c];
+      s.ring_capacity = 1000U;
+      s.pass = passes[p];
+      CHECK(run_fake(&s, &pcm_read) == MPEGA_ERR_EOF);
+      CHECK(s.accepted == 5003U);
+      CHECK(s.consumed == 5003U);
+      CHECK(pcm_read == 2U * 5003U);
+    }
+  }
+}
+
+static void test_feed_stall_after_eof(void)
+{
+  FakeStream s;
+  uint32_t pcm_read;
+
+  /* A decoder that stops after EOF ends the stream instead of spinning. */
+  memset(&s, 0, sizeof(s));
+  s.source_bytes = 2000U;
+  s.chunk = 500U;
+  s.ring_capacity = 4000U;
+  s.pass = 100U;
+  s.stuck_after_eof = 1;
+  CHECK(run_fake(&s, &pcm_read) == MPEGA_ERR_EOF);
+  CHECK(s.accepted == 2000U);
+}
+
+static void test_feed_failure(void)
+{
+  FakeStream s;
+  uint32_t pcm_read;
+
+  memset(&s, 0, sizeof(s));
+  s.source_bytes = 2000U;
+  s.chunk = 500U;
+  s.ring_capacity = 4000U;
+  s.pass = 100U;
+  s.fail_feed = 1;
+  CHECK(run_fake(&s, &pcm_read) == MPEGA_ERR_BADFRAME);
+}
+
 int main(void)
 {
   test_ring_read();
@@ -596,6 +797,9 @@ int main(void)
   test_write_s14();
   test_reduce_plan();
   test_reduce_begin();
+  test_feed_whole_source();
+  test_feed_stall_after_eof();
+  test_feed_failure();
 
   if (failures != 0) {
     printf("%d check(s) failed\n", failures);

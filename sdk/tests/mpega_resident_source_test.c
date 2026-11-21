@@ -125,7 +125,6 @@ int main(int argc, char **argv)
   ok &= expect_contains(source, "uint8_t xing_toc[MPEGA_XING_TOC_BYTES];");
   ok &= expect_contains(source, "uint8_t xing_has_toc;");
   ok &= expect_contains(source, "uint8_t session_open;");
-  ok &= expect_contains(source, "uint8_t eof_sent;");
   ok &= expect_contains(source, "uint8_t hook_open;");
   ok &= expect_contains(source, "typedef struct MPEGAParsedHeader");
   ok &= expect_contains(source, "WORD samples_per_frame;");
@@ -200,17 +199,10 @@ int main(int argc, char **argv)
   ok &= expect_contains(source, "#define MPEGA_PCM_ACK_BATCH_BYTES (192UL * 1024UL)");
   ok &= expect_not_contains(source, "#define MPEGA_PCM_ACK_BATCH_BYTES (128UL * 1024UL)");
   ok &= expect_not_contains(source, "#define MPEGA_PCM_ACK_BATCH_BYTES (64UL * 1024UL)");
-  ok &= expect_contains(source, "#define MPEGA_INTERNAL_NO_PCM 1");
   ok &= expect_contains(source, "#define MPEGA_DEFAULT_STREAM_BUFFER_BYTES 16384L");
   ok &= expect_contains(source, "#define MPEGA_XING_TOC_BYTES 100U");
   ok &= expect_contains(source, "mpega_ack_pcm(state, 1)");
   ok &= expect_contains(source, "mpega_ack_pcm(state, 0)");
-  ok &= expect_contains(source, "return MPEGA_INTERNAL_NO_PCM;");
-  ok &= expect_contains(source,
-                        "if (status == MPEGA_INTERNAL_NO_PCM) {\n"
-                        "    return 0;\n"
-                        "  }\n"
-                        "  if (status != MPEGA_ERR_NONE)");
   ok &= expect_contains(source, "mpega_stream_end_session(state);");
   ok &= expect_not_contains(source, "MPEGA_DIAG_TRACE_CHECK_MPEG");
   ok &= expect_not_contains(source, "uint8_t diag_trace;");
@@ -402,7 +394,6 @@ int main(int argc, char **argv)
   ok &= expect_contains(source, "state->pcm_pending_ack_bytes = 0U;");
   ok &= expect_contains(source, "state->time_ms = ms_time_position;");
   ok &= expect_contains(source, "state->time_ms_accum = 0U;");
-  ok &= expect_contains(source, "state->eof_sent = 0U;");
   ok &= expect_contains(source, "return mpega_stream_begin(state);");
   ok &= expect_contains(source, "byte_pos = mpega_stream_seek_byte_for_ms");
   ok &= expect_contains(source, "if (byte_pos < 0)");

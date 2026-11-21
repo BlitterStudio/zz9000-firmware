@@ -1,7 +1,8 @@
 /*
  * PCM handling of the ZZ9000 mpega.library: reading the card's PCM ring,
- * turning it into the caller's buffers, and choosing what the card reduces.
- * No AmigaOS calls, so the host tests compile this file as it is.
+ * turning it into the caller's buffers, choosing what the card reduces and
+ * feeding the card's stream. No AmigaOS calls, so the host tests compile
+ * this file as it is.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -92,5 +93,48 @@ typedef int (*MPEGAReduceBeginFn)(void *context, uint32_t output_hz,
  */
 int mpega_reduce_begin(MPEGAReducePlan *plan, MPEGAReduceBeginFn begin,
                        void *context);
+
+/* What the feed loop needs from a card stream. Every call except
+ * pcm_available returns 0 on failure. The card fields are those of the
+ * latest ZZ9KAudioStreamResult. */
+typedef struct MPEGAFeedOps {
+  void *context;
+  /* PCM the caller has not read yet is waiting in the ring. */
+  int (*pcm_available)(void *context);
+  /* Return all PCM credit (a READ of what was read). */
+  int (*ack)(void *context);
+  /* Read the next chunk of the source into the staging buffer; *got is
+   * its length, 0 at the end of the source. */
+  int (*read_stage)(void *context, uint32_t *got);
+  /* FEED length staged bytes with ZZ9K_AUDIO_STREAM_FEED_* flags. */
+  int (*feed)(void *context, uint32_t length, uint32_t flags);
+  /* A zero-byte READ: one decode pass, no credit returned. */
+  int (*kick)(void *context);
+  /* ZZ9K_AUDIO_STREAM_RESULT_* flags, bytes_consumed and bytes_produced. */
+  uint32_t (*result_flags)(void *context);
+  uint32_t (*bytes_consumed)(void *context);
+  uint32_t (*bytes_produced)(void *context);
+} MPEGAFeedOps;
+
+/* Feed progress of one card stream; zero it when a stream (re)starts. */
+typedef struct MPEGAFeedState {
+  uint32_t staged_pending; /* staged bytes a BACKPRESSURE feed did not take */
+  uint8_t eof_sent;
+  uint8_t eof_stalls;
+} MPEGAFeedState;
+
+#define MPEGA_FEED_NO_PCM 1
+
+/*
+ * Feed the card until it has PCM. A feed the input ring has no room for comes
+ * back with BACKPRESSURE and keeps none of the chunk; the chunk stays staged
+ * and is offered again after a decode pass has used up input. After the EOF
+ * feed the decoder still works in bounded passes, so passes run until the
+ * card reports DONE, or until a few passes in a row make no progress.
+ * Returns MPEGA_ERR_NONE (PCM is ready), MPEGA_ERR_EOF, MPEGA_ERR_BADFRAME,
+ * or MPEGA_FEED_NO_PCM after max_attempts rounds without PCM.
+ */
+int mpega_feed_until_pcm(MPEGAFeedState *state, const MPEGAFeedOps *ops,
+                         uint32_t max_attempts);
 
 #endif /* MPEGA_CONVERT_H */

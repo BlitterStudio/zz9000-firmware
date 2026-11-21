@@ -320,3 +320,76 @@ int mpega_reduce_begin(MPEGAReducePlan *plan, MPEGAReduceBeginFn begin,
 
   return status;
 }
+
+#define MPEGA_EOF_STALL_LIMIT 4U
+
+int mpega_feed_until_pcm(MPEGAFeedState *state, const MPEGAFeedOps *ops,
+                         uint32_t max_attempts)
+{
+  void *context = ops->context;
+  uint32_t attempts;
+
+  for (attempts = 0; attempts < max_attempts; attempts++) {
+    uint32_t got;
+
+    if (ops->pcm_available(context)) {
+      return MPEGA_ERR_NONE;
+    }
+    if (!ops->ack(context)) {
+      return MPEGA_ERR_BADFRAME;
+    }
+    if ((ops->result_flags(context) & ZZ9K_AUDIO_STREAM_RESULT_DONE) != 0U) {
+      return MPEGA_ERR_EOF;
+    }
+
+    if (state->staged_pending != 0U) {
+      if (!ops->feed(context, state->staged_pending, 0U)) {
+        return MPEGA_ERR_BADFRAME;
+      }
+      if ((ops->result_flags(context) &
+           ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) == 0U) {
+        state->staged_pending = 0U;
+      } else if (!ops->kick(context)) {
+        return MPEGA_ERR_BADFRAME;
+      }
+      continue;
+    }
+
+    if (state->eof_sent) {
+      uint32_t consumed = ops->bytes_consumed(context);
+      uint32_t produced = ops->bytes_produced(context);
+
+      if (!ops->kick(context)) {
+        return MPEGA_ERR_BADFRAME;
+      }
+      if (ops->bytes_consumed(context) != consumed ||
+          ops->bytes_produced(context) != produced) {
+        state->eof_stalls = 0U;
+      } else if (++state->eof_stalls >= MPEGA_EOF_STALL_LIMIT) {
+        return MPEGA_ERR_EOF;
+      }
+      continue;
+    }
+
+    if (!ops->read_stage(context, &got)) {
+      return MPEGA_ERR_BADFRAME;
+    }
+    if (got == 0U) {
+      state->eof_sent = 1U;
+      state->eof_stalls = 0U;
+      if (!ops->feed(context, 0U, ZZ9K_AUDIO_STREAM_FEED_EOF)) {
+        return MPEGA_ERR_BADFRAME;
+      }
+      continue;
+    }
+    if (!ops->feed(context, got, 0U)) {
+      return MPEGA_ERR_BADFRAME;
+    }
+    if ((ops->result_flags(context) & ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) !=
+        0U) {
+      state->staged_pending = got;
+    }
+  }
+
+  return MPEGA_FEED_NO_PCM;
+}

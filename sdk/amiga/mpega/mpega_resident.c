@@ -67,7 +67,6 @@
 #define MPEGA_PCM_RING_COMPACT_CAPACITY (32UL * 1024UL)
 #define MPEGA_STREAM_CHUNK_COMPACT_BYTES (16UL * 1024UL)
 #define MPEGA_DEFAULT_STREAM_BUFFER_BYTES 16384L
-#define MPEGA_INTERNAL_NO_PCM 1
 #define MPEGA_MAX_FEED_ATTEMPTS 128U
 #define MPEGA_TIME_UPDATE_CHUNK_SAMPLES 64U
 #define MPEGA_TIME_UPDATE_CHUNK_MS 64000U
@@ -120,7 +119,7 @@ typedef struct MPEGACompatStream {
   uint8_t mp3_allocated;
   uint8_t pcm_allocated;
   uint8_t staging_allocated;
-  uint8_t eof_sent;
+  MPEGAFeedState feed;
   uint8_t hook_open;
   /* The software library's stream when it serves this one. The fields of
    * `stream` then mirror its public fields. */
@@ -1110,7 +1109,7 @@ static int mpega_stream_restart_at_byte(MPEGACompatStream *state,
   state->pcm_pending_ack_bytes = 0U;
   state->time_ms = ms_time_position;
   state->time_ms_accum = 0U;
-  state->eof_sent = 0U;
+  memset(&state->feed, 0, sizeof(state->feed));
   return mpega_stream_begin(state);
 }
 
@@ -1316,71 +1315,107 @@ static uint32_t mpega_pcm_available(const MPEGACompatStream *state)
   return state->result.bytes_produced - state->pcm_seen_bytes;
 }
 
+static int mpega_stream_feed(MPEGACompatStream *state, uint32_t length,
+                             uint32_t flags)
+{
+  ZZ9KAudioStreamFeedDesc feed;
+  ZZ9KAudioStreamResult result;
+
+  if (!zz9k_audio_build_stream_feed_desc(&feed, state->session,
+                                         state->staging.handle, 0U, length,
+                                         flags) ||
+      ZZ9KAudioStreamFeed(&feed, &result) != ZZ9K_STATUS_OK) {
+    return 0;
+  }
+  state->result = result;
+  mpega_update_stream_info(state);
+  return 1;
+}
+
+/* A zero-byte READ runs a decode pass without returning PCM credit (an empty
+ * FEED is not a valid request). The loop below calls it with no credit
+ * pending. */
+static int mpega_stream_kick(MPEGACompatStream *state)
+{
+  ZZ9KAudioStreamResult result;
+
+  if (ZZ9KAudioStreamRead(state->session, 0U, 0U, &result) != ZZ9K_STATUS_OK) {
+    return 0;
+  }
+  state->result = result;
+  state->pcm_read_offset = state->result.pcm_read;
+  mpega_update_stream_info(state);
+  return 1;
+}
+
+static int mpega_feed_op_pcm_available(void *context)
+{
+  return mpega_pcm_available((MPEGACompatStream *)context) != 0U;
+}
+
+static int mpega_feed_op_ack(void *context)
+{
+  return mpega_ack_pcm((MPEGACompatStream *)context, 1);
+}
+
+static int mpega_feed_op_read_stage(void *context, uint32_t *got)
+{
+  MPEGACompatStream *state = (MPEGACompatStream *)context;
+  LONG length = mpega_stream_read_source(state, state->input_buffer,
+                                         state->input_chunk_bytes);
+
+  if (length < 0) {
+    return 0;
+  }
+  *got = (uint32_t)length;
+  return length == 0 ||
+         mpega_shared_copy_to_bytes(&state->staging, 0U, state->input_buffer,
+                                    (uint32_t)length);
+}
+
+static int mpega_feed_op_feed(void *context, uint32_t length, uint32_t flags)
+{
+  return mpega_stream_feed((MPEGACompatStream *)context, length, flags);
+}
+
+static int mpega_feed_op_kick(void *context)
+{
+  return mpega_stream_kick((MPEGACompatStream *)context);
+}
+
+static uint32_t mpega_feed_op_result_flags(void *context)
+{
+  return ((MPEGACompatStream *)context)->result.flags;
+}
+
+static uint32_t mpega_feed_op_bytes_consumed(void *context)
+{
+  return ((MPEGACompatStream *)context)->result.bytes_consumed;
+}
+
+static uint32_t mpega_feed_op_bytes_produced(void *context)
+{
+  return ((MPEGACompatStream *)context)->result.bytes_produced;
+}
+
+/* Feeds the card until it has PCM for us (mpega_feed_until_pcm). */
 static int mpega_stream_feed_until_pcm(MPEGACompatStream *state)
 {
-  uint32_t attempts;
+  MPEGAFeedOps ops;
 
   if (!state) {
     return MPEGA_ERR_BADVALUE;
   }
-
-  for (attempts = 0; attempts < MPEGA_MAX_FEED_ATTEMPTS; attempts++) {
-    ZZ9KAudioStreamFeedDesc feed;
-    ZZ9KAudioStreamResult result;
-    LONG got;
-    uint32_t flags;
-
-    if (mpega_pcm_available(state) != 0U) {
-      return MPEGA_ERR_NONE;
-    }
-    if (!mpega_ack_pcm(state, 1)) {
-      return MPEGA_ERR_BADFRAME;
-    }
-    if ((state->result.flags & ZZ9K_AUDIO_STREAM_RESULT_DONE) != 0U) {
-      return MPEGA_ERR_EOF;
-    }
-    if (state->eof_sent) {
-      return MPEGA_ERR_EOF;
-    }
-
-    got = mpega_stream_read_source(state, state->input_buffer,
-                                   state->input_chunk_bytes);
-    if (got < 0) {
-      return MPEGA_ERR_BADFRAME;
-    }
-
-    flags = 0U;
-    if (got == 0) {
-      flags = ZZ9K_AUDIO_STREAM_FEED_EOF;
-      state->eof_sent = 1;
-    } else {
-      if (!mpega_shared_copy_to_bytes(&state->staging, 0U,
-                                      state->input_buffer, (uint32_t)got)) {
-        return MPEGA_ERR_BADFRAME;
-      }
-    }
-
-    if (!zz9k_audio_build_stream_feed_desc(
-            &feed, state->session, state->staging.handle, 0U,
-            (uint32_t)got, flags)) {
-      return MPEGA_ERR_BADVALUE;
-    }
-
-    if (ZZ9KAudioStreamFeed(&feed, &result) != ZZ9K_STATUS_OK) {
-      return MPEGA_ERR_BADFRAME;
-    }
-    state->result = result;
-    mpega_update_stream_info(state);
-
-    if (mpega_pcm_available(state) != 0U) {
-      return MPEGA_ERR_NONE;
-    }
-    if ((state->result.flags & ZZ9K_AUDIO_STREAM_RESULT_DONE) != 0U) {
-      return MPEGA_ERR_EOF;
-    }
-  }
-
-  return MPEGA_INTERNAL_NO_PCM;
+  ops.context = state;
+  ops.pcm_available = mpega_feed_op_pcm_available;
+  ops.ack = mpega_feed_op_ack;
+  ops.read_stage = mpega_feed_op_read_stage;
+  ops.feed = mpega_feed_op_feed;
+  ops.kick = mpega_feed_op_kick;
+  ops.result_flags = mpega_feed_op_result_flags;
+  ops.bytes_consumed = mpega_feed_op_bytes_consumed;
+  ops.bytes_produced = mpega_feed_op_bytes_produced;
+  return mpega_feed_until_pcm(&state->feed, &ops, MPEGA_MAX_FEED_ATTEMPTS);
 }
 
 static uint32_t mpega_source_channel_count(const MPEGACompatStream *state)
@@ -1692,7 +1727,7 @@ static LONG mpega_call_decode_frame(REG(a6, struct MPEGACompatBase *base),
   }
 
   status = mpega_stream_feed_until_pcm(state);
-  if (status == MPEGA_INTERNAL_NO_PCM) {
+  if (status == MPEGA_FEED_NO_PCM) {
     return 0;
   }
   if (status != MPEGA_ERR_NONE) {
@@ -1874,7 +1909,7 @@ static LONG mpega_call_decode_to(REG(a6, struct MPEGACompatBase *base),
     }
   } else {
     status = mpega_stream_feed_until_pcm(state);
-    if (status == MPEGA_INTERNAL_NO_PCM) {
+    if (status == MPEGA_FEED_NO_PCM) {
       return 0;
     }
     if (status != MPEGA_ERR_NONE) {
