@@ -15,7 +15,9 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 # aar.library is built from the aar checkout pinned in sdk/AAR_REF (the core,
 # shell and probe under client/src, MIT) and the ZZ9000 platform layer of this
 # tree (amiga/src/aar_zz9000.c), which includes the private wire zzapp_proto.h
-# of the firmware tree. The pinned aar checkout comes from scripts/fetch-aar.sh
+# of the firmware tree. aar-run and libaarserve.a are built from the same
+# checkout (client/run, client/serve, MIT) and do not link the platform layer.
+# The pinned aar checkout comes from scripts/fetch-aar.sh
 # (run it from a POSIX shell, or pass -AarDir <your checkout>); the wire header
 # is staged under build/.
 if (-not $AarDir) { $AarDir = Join-Path $RepoRoot "aar" }
@@ -25,6 +27,12 @@ if (-not (Test-Path (Join-Path $AarDir "include/aar/transport.h"))) {
 foreach ($f in "aar_core.c", "aar_shell.c", "aar_probe.c", "aar_plat.h") {
   if (-not (Test-Path (Join-Path $AarDir "client/src/$f"))) {
     throw "$AarDir/client/src/$f is missing: sdk/AAR_REF must name an aar commit with the client library"
+  }
+}
+foreach ($f in "run/aar_run.c", "run/aar_run_zz9000.c", "run/aar-run.info", "run/README.md",
+               "serve/aar_serve.c", "serve/aar_serve_core.c", "include/libraries/aar_serve.h") {
+  if (-not (Test-Path (Join-Path $AarDir "client/$f"))) {
+    throw "$AarDir/client/$f is missing: sdk/AAR_REF must name an aar commit with aar-run and the serving loop"
   }
 }
 $FirmwareProto = Join-Path $RepoRoot "..\ZZ9000_proto.sdk\ZZ9000OS\src\zzapp_proto.h"
@@ -81,6 +89,20 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s \
   build/m68k/aar_shell.o build/m68k/aar_core.o build/m68k/aar_probe.o \
   build/m68k/aar_zz9000.o -o build/aar.library
+
+# aar-run, the reference launcher (client/run, MIT), and libaarserve.a, the
+# portable serving loop it is built on (client/serve, MIT), from the same aar
+# checkout. They are built with the flags of client/tests/m68k_check.sh in
+# the aar repository and link no GPL code: the launcher calls the library
+# through its vectors. The archive goes into the Developer directory of the
+# package with the header libraries/aar_serve.h.
+RUNFLAGS="-std=gnu11 -noixemul -m68030 -O2 -Wall -Wextra -Werror -I/aar/client/include -I/aar/include"
+m68k-amigaos-gcc $RUNFLAGS -c /aar/client/serve/aar_serve.c -o build/m68k/aar_serve.o
+m68k-amigaos-gcc $RUNFLAGS -c /aar/client/serve/aar_serve_core.c -o build/m68k/aar_serve_core.o
+rm -f build/libaarserve.a
+m68k-amigaos-ar rcs build/libaarserve.a build/m68k/aar_serve.o build/m68k/aar_serve_core.o
+m68k-amigaos-gcc $RUNFLAGS /aar/client/run/aar_run.c \
+  build/m68k/aar_serve.o build/m68k/aar_serve_core.o -lamiga -o build/aar-run
 
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libtest.c -o build/zz9k-libtest
 m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS \

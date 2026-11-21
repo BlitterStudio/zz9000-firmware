@@ -54,6 +54,7 @@ $Dirs = @(
   "Developer\Include\pragmas",
   "Developer\Include\fd",
   "Developer\FD",
+  "Developer\Lib",
   "Docs",
   "Examples",
   "C\Providers",
@@ -102,6 +103,11 @@ function Make-Guide {
 Copy-One "build/zz9k.library" "Libs/zz9k.library"
 Copy-One "build/mpega.library" "Libs/mpega.library"
 Copy-One "build/aar.library" "Libs/aar.library"
+# aar-run, the reference launcher (MIT, built from the aar checkout), with the
+# Workbench icon that ships in the aar tree.
+Copy-One "build/aar-run" "C/aar-run"
+Copy-Item -LiteralPath (Join-Path $AarDir "client\run\aar-run.info") `
+  -Destination (Join-Path $PackageRoot "C\aar-run.info") -Force
 
 Copy-One "build/zz9k-info" "C/zz9k-info"
 Copy-One "build/zz9k-app-echo-test" "C/zz9k-app-echo-test"
@@ -188,6 +194,13 @@ Copy-Item -Path (Join-Path $AarDir "include\aar\*") `
   -Destination (Join-Path $PackageRoot "Developer\Include\aar") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $AarDir "client\fd\aar_lib.fd") `
   -Destination (Join-Path $PackageRoot "Developer\FD\aar_lib.fd") -Force
+# The serving loop as an archive (built by build-m68k-amigaos.ps1 from
+# client/serve, MIT); its header libraries/aar_serve.h comes with the client
+# headers above.
+Copy-One "build/libaarserve.a" "Developer/Lib/libaarserve.a"
+if (-not (Test-Path -LiteralPath (Join-Path $PackageRoot "Developer\Include\libraries\aar_serve.h"))) {
+  throw "package: $AarDir has no client/include/libraries/aar_serve.h; sdk/AAR_REF must name an aar commit with the serving loop"
+}
 Copy-One "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
 Copy-One "LICENSES/MIT.txt" "Developer/LICENSE-MIT.txt"
@@ -208,10 +221,18 @@ foreach ($spec in $GuideSpecs) {
   $GuideSiblings += "--sibling"
   $GuideSiblings += "$($spec.Split(':')[1]).guide"
 }
+$GuideSiblings += "--sibling"
+$GuideSiblings += "aar-run.guide"
 foreach ($spec in $GuideSpecs) {
   $parts = $spec.Split(':')
   Make-Guide $parts[0] $parts[1]
 }
+# aar-run's manual is the Markdown of the aar checkout the launcher was built
+# from (client/run/README.md).
+& python "$RepoRoot\scripts\md2guide.py" --name aar-run @GuideSiblings `
+  (Join-Path $AarDir "client\run\README.md") `
+  (Join-Path $PackageRoot "Docs\aar-run.guide")
+if ($LASTEXITCODE -ne 0) { exit 1 }
 
 Decode-Base64File "tests/fixtures/archives/split-deflate.7z.b64" `
   "Archives/split-deflate.7z"

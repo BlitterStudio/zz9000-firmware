@@ -120,7 +120,7 @@ int minigl_present_copy_rgb565(const ZZ9KMiniGLPacketPresent *p,
 
     /* The locked P96 back bitmap of a full-screen client is the common
      * frame: same 16-bit format, row bytes equal to the pitch.  A panned
-     * ZZRun screen is exactly that, so the frame present is one memcpy or
+     * aar-run screen is exactly that, so the frame present is one memcpy or
      * one byteswap pass instead of a per-pixel format switch.  The source
      * rows are target_width apart, so only a window covering whole source
      * rows from column zero may be copied as one block. */

@@ -159,6 +159,26 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "build/zz9k-jpeg-stream-demo");
   ok &= expect_contains(script, name, "build/zz9k-typed-decode-demo");
   ok &= expect_contains(script, name, "build/zz9k-crypto-demo");
+  /* aar-run, the reference launcher built from the aar checkout, ships with
+   * its icon and manual; the serving loop ships as libaarserve.a with the
+   * header libraries/aar_serve.h that the client headers carry. */
+  ok &= expect_contains(script, name, "build/aar-run");
+  ok &= expect_contains(script, name, "C/aar-run");
+  ok &= expect_contains(script, name, "build/libaarserve.a");
+  ok &= expect_contains(script, name, "Developer/Lib/libaarserve.a");
+  ok &= expect_contains(script, name, "libraries/aar_serve.h");
+  ok &= expect_contains(script, name, "aar-run.guide");
+  if (strstr(name, ".ps1")) {
+    ok &= expect_contains(script, name, "client\\run\\aar-run.info");
+    ok &= expect_contains(script, name, "C\\aar-run.info");
+    ok &= expect_contains(script, name, "client\\run\\README.md");
+    ok &= expect_contains(script, name, "Docs\\aar-run.guide");
+  } else {
+    ok &= expect_contains(script, name, "client/run/aar-run.info");
+    ok &= expect_contains(script, name, "C/aar-run.info");
+    ok &= expect_contains(script, name, "client/run/README.md");
+    ok &= expect_contains(script, name, "Docs/aar-run.guide");
+  }
   ok &= expect_contains(script, name, "include/zz9k");
   ok &= expect_contains(script, name, "host/include/zz9k");
   ok &= expect_contains(script, name, "amiga/include/proto");

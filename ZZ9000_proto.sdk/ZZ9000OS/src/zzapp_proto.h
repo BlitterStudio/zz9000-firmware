@@ -2,11 +2,11 @@
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  *
  * The ZZ9000 private wire of the AAR transport: the mailbox operations a
- * client (ZZRun, the SDK tools, later aar.library) sends to the card to claim
- * an app, load it, start and stop it, ring the doorbell and release it. This
- * header is the single source of that wire. The queue pair (control block,
- * request and completion rings, entry layouts, op codes) is not here: it is
- * the portable contract of aar/transport.h.
+ * client (aar.library, for aar-run and the SDK tools) sends to the card to
+ * claim an app, load it, start and stop it, ring the doorbell and release it.
+ * This header is the single source of that wire. The queue pair (control
+ * block, request and completion rings, entry layouts, op codes) is not here:
+ * it is the portable contract of aar/transport.h.
  *
  * Mailbox payloads are the 48-byte entry payload, big-endian. Offsets are
  * from the start of that payload. Every operation except QUERY and CLAIM names

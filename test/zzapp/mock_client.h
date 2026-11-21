@@ -1,6 +1,6 @@
 /*
  * Host model of the Amiga client of the AAR transport (spec sections 6 and
- * 10, aar/transport.h). It is what ZZRun and the SDK tools do on the 68k, on
+ * 10, aar/transport.h). It is what aar-run and the SDK tools do on the 68k, on
  * the reference queue model: CLAIM, map the control block by token, bind the
  * two queues from the descriptors, drain the submission queue and answer each
  * op type, post completions, events and credited messages, ring the doorbell,

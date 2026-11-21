@@ -689,10 +689,10 @@ static aar_client_ext_zz9000 zz_ext = {
 	0u,
 	ext_list,
 	ext_release_handle,
-	/* The three that take a handle act on the core's own state. */
+	/* The two that take a handle act on the core's own state. The log sink
+	 * is not in this table: AARSetLogSink is a call of the base library. */
 	aar_core_ext_stats,
 	aar_core_ext_lease_pause,
-	aar_core_ext_set_log_sink,
 };
 
 static const void *zz_ext_get(struct aar_plat *p, uint32_t ext_id)

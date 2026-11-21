@@ -70,6 +70,7 @@ mkdir -p \
   "$PACKAGE_ROOT/Developer/Include/pragmas" \
   "$PACKAGE_ROOT/Developer/Include/fd" \
   "$PACKAGE_ROOT/Developer/FD" \
+  "$PACKAGE_ROOT/Developer/Lib" \
   "$PACKAGE_ROOT/Docs" \
   "$PACKAGE_ROOT/Examples" \
   "$PACKAGE_ROOT/C/Providers" \
@@ -101,6 +102,7 @@ GUIDE_SIBLINGS=""
 for spec in $GUIDE_SPECS; do
   GUIDE_SIBLINGS="$GUIDE_SIBLINGS --sibling ${spec##*:}.guide"
 done
+GUIDE_SIBLINGS="$GUIDE_SIBLINGS --sibling aar-run.guide"
 make_guide() {
   src=${1%%:*}
   name=${1##*:}
@@ -128,6 +130,10 @@ decode_base64_file() {
 copy_one "build/zz9k.library" "Libs/zz9k.library"
 copy_one "build/mpega.library" "Libs/mpega.library"
 copy_one "build/aar.library" "Libs/aar.library"
+# aar-run, the reference launcher (MIT, built from the aar checkout), with the
+# Workbench icon that ships in the aar tree.
+copy_one "build/aar-run" "C/aar-run"
+cp "$AAR_DIR/client/run/aar-run.info" "$PACKAGE_ROOT/C/aar-run.info"
 
 copy_one "build/zz9k-info" "C/zz9k-info"
 copy_one "build/zz9k-services" "C/zz9k-services"
@@ -213,12 +219,26 @@ mkdir -p "$PACKAGE_ROOT/Developer/Include/aar"
 cp -R "$AAR_DIR/client/include"/. "$PACKAGE_ROOT/Developer/Include/"
 cp -R "$AAR_DIR/include/aar"/. "$PACKAGE_ROOT/Developer/Include/aar/"
 cp "$AAR_DIR/client/fd/aar_lib.fd" "$PACKAGE_ROOT/Developer/FD/aar_lib.fd"
+# The serving loop as an archive (built by build-m68k-amigaos.sh from
+# client/serve, MIT); its header libraries/aar_serve.h comes with the client
+# headers above.
+copy_one "build/libaarserve.a" "Developer/Lib/libaarserve.a"
+if [ ! -f "$PACKAGE_ROOT/Developer/Include/libraries/aar_serve.h" ]; then
+  echo "package: $AAR_DIR has no client/include/libraries/aar_serve.h; sdk/AAR_REF must name an aar commit with the serving loop" >&2
+  exit 1
+fi
 copy_one "LICENSES/MIT.txt" "Developer/LICENSE-MIT.txt"
 copy_one "../LICENSE" "Developer/LICENSE-GPL-3.0.txt"
 
 for spec in $GUIDE_SPECS; do
   make_guide "$spec"
 done
+# aar-run's manual is the Markdown of the aar checkout the launcher was built
+# from (client/run/README.md).
+# shellcheck disable=SC2086
+python3 "$REPO_ROOT/scripts/md2guide.py" \
+  --name aar-run $GUIDE_SIBLINGS \
+  "$AAR_DIR/client/run/README.md" "$PACKAGE_ROOT/Docs/aar-run.guide"
 decode_base64_file "tests/fixtures/archives/split-deflate.7z.b64" \
   "Archives/split-deflate.7z"
 decode_base64_file "tests/fixtures/archives/split-lzma.7z.b64" \
