@@ -3,7 +3,9 @@
  *
  * This is the ZZ9000-accelerated drop-in for the exact-name mpega.library.
  * It implements the full public MPEGA API: Open, Close, DecodeFrame, Seek,
- * Time, FindSync and Scale.
+ * Time, FindSync and Scale, and MPGA_decode_to after them. A stream the card
+ * cannot serve goes to the software library LIBS:mpega-software.library
+ * (mpega_fallback.c). The PCM handling is in mpega_convert.c.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -19,6 +21,7 @@
 #include <proto/exec.h>
 #include <proto/utility.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "zz9k/audio.h"
@@ -26,11 +29,14 @@
 #include "zz9k/shared.h"
 #include <proto/zz9k.h>
 
+#include "mpega_convert.h"
+#include "mpega_fallback.h"
+
 #define MPEGA_LIBRARY_NAME "mpega.library"
 
 #define MPEGA_LIBRARY_VERSION 2
-#define MPEGA_LIBRARY_REVISION 126
-#define MPEGA_LIBRARY_DATE "21.10.2026"
+#define MPEGA_LIBRARY_REVISION 127
+#define MPEGA_LIBRARY_DATE "21.11.2026"
 
 /* Derive the $VER: string from the version macros rather than repeating the
  * numbers. They are the same identity read two ways -- lib_Version and
@@ -61,7 +67,6 @@
 #define MPEGA_PCM_RING_COMPACT_CAPACITY (32UL * 1024UL)
 #define MPEGA_STREAM_CHUNK_COMPACT_BYTES (16UL * 1024UL)
 #define MPEGA_DEFAULT_STREAM_BUFFER_BYTES 16384L
-#define MPEGA_INTERNAL_NO_PCM 1
 #define MPEGA_MAX_FEED_ATTEMPTS 128U
 #define MPEGA_TIME_UPDATE_CHUNK_SAMPLES 64U
 #define MPEGA_TIME_UPDATE_CHUNK_MS 64000U
@@ -77,6 +82,9 @@ struct MPEGACompatBase {
   struct Library library;
   BPTR segment;
   UWORD zz9k_open_count;
+  /* The audio service's flags, read each time a stream acquires zz9k.library. */
+  uint32_t audio_flags;
+  MPEGAFallback fallback;
 };
 
 typedef struct MPEGACompatStream {
@@ -111,8 +119,21 @@ typedef struct MPEGACompatStream {
   uint8_t mp3_allocated;
   uint8_t pcm_allocated;
   uint8_t staging_allocated;
-  uint8_t eof_sent;
+  MPEGAFeedState feed;
   uint8_t hook_open;
+  /* The software library's stream when it serves this one. The fields of
+   * `stream` then mirror its public fields. */
+  MPEGA_STREAM *fb_stream;
+  struct Library *fb_lib;
+  /* What the card reduced for this stream (set by mpega_stream_begin). */
+  uint32_t reduce_div;
+  uint8_t reduce_active;
+  uint8_t reduce_mono;
+  uint8_t header_probed;
+  uint32_t dither;
+  /* One frame of PCM ring bytes, and MPGA_decode_to's samples. */
+  uint32_t raw[MPEGA_PCM_SIZE];
+  int16_t chan[MPEGA_MAX_CHANNELS][MPEGA_PCM_SIZE];
 } MPEGACompatStream;
 
 typedef struct MPEGAParsedHeader {
@@ -181,33 +202,14 @@ static int mpega_zz9k_acquire(struct MPEGACompatBase *base);
 static void mpega_zz9k_release(struct MPEGACompatBase *base);
 static int mpega_stream_begin(MPEGACompatStream *state);
 static int mpega_stream_feed_until_pcm(MPEGACompatStream *state);
-static LONG mpega_copy_pcm_planar(MPEGACompatStream *state,
-                                  WORD *pcm[MPEGA_MAX_CHANNELS]);
-static void mpega_copy_pcm_linear(WORD *pcm[MPEGA_MAX_CHANNELS],
-                                  volatile const uint8_t *src,
-                                  uint32_t source_samples,
-                                  uint32_t source_channels,
+static uint32_t mpega_source_channel_count(const MPEGACompatStream *state);
+static uint32_t mpega_output_channel_count(const MPEGACompatStream *state);
+static uint32_t mpega_pcm_divisor(const MPEGACompatStream *state,
                                   uint32_t output_channels,
-                                  uint32_t freq_div,
-                                  LONG scale_percent);
-static uint32_t mpega_copy_pcm_wrapped(MPEGACompatStream *state,
-                                       WORD *pcm[MPEGA_MAX_CHANNELS],
-                                       uint32_t offset,
-                                       uint32_t source_samples,
-                                       uint32_t source_channels,
-                                       uint32_t output_channels,
-                                       uint32_t freq_div,
-                                       LONG scale_percent);
+                                  uint32_t source_rate);
+static LONG mpega_take_frame(MPEGACompatStream *state, int16_t *dst0,
+                             int16_t *dst1, uint32_t *clipped);
 static int mpega_ack_pcm(MPEGACompatStream *state, int force);
-static int16_t mpega_pcm_value_from_be(uint8_t hi, uint8_t lo);
-static void mpega_store_pcm_word_be(WORD *dst, uint32_t sample,
-                                    uint8_t hi, uint8_t lo);
-static void mpega_store_scaled_pcm_value_be(WORD *dst, uint32_t sample,
-                                            int32_t value,
-                                            LONG scale_percent);
-static void mpega_store_scaled_pcm_word_be(WORD *dst, uint32_t sample,
-                                           uint8_t hi, uint8_t lo,
-                                           LONG scale_percent);
 static void mpega_update_time_ms(MPEGACompatStream *state, uint32_t samples);
 static int mpega_is_sync_header(const UBYTE *bytes);
 static int mpega_shared_copy_to_bytes(ZZ9KSharedBuffer *buffer,
@@ -234,6 +236,9 @@ static LONG mpega_call_find_sync(REG(a6, struct MPEGACompatBase *base),
 static LONG mpega_call_scale(REG(a6, struct MPEGACompatBase *base),
                              REG(a0, MPEGA_STREAM *mpds),
                              REG(d0, LONG scale_percent));
+static LONG mpega_call_decode_to(REG(a6, struct MPEGACompatBase *base),
+                                 REG(a0, MPEGA_STREAM *mpds),
+                                 REG(a1, struct MpgaOut *out));
 
 static const APTR mpega_lib_vectors[] = {
   (APTR)mpega_lib_open,
@@ -247,6 +252,7 @@ static const APTR mpega_lib_vectors[] = {
   (APTR)mpega_call_time,
   (APTR)mpega_call_find_sync,
   (APTR)mpega_call_scale,
+  (APTR)mpega_call_decode_to,
   (APTR)-1
 };
 
@@ -297,10 +303,13 @@ static BPTR mpega_lib_expunge(REG(a6, struct MPEGACompatBase *base))
   if (!base) {
     return 0;
   }
-  if (base->library.lib_OpenCnt != 0) {
+  if (base->library.lib_OpenCnt != 0 ||
+      mpega_fallback_busy(&base->fallback)) {
     base->library.lib_Flags |= LIBF_DELEXP;
     return 0;
   }
+
+  mpega_fallback_unload(&base->fallback);
 
   Remove((struct Node *)base);
   if (ZZ9KBase) {
@@ -360,6 +369,7 @@ static struct MPEGACompatBase *mpega_lib_init(REG(a0, BPTR segment))
   base->library.lib_Revision = MPEGA_LIBRARY_REVISION;
   base->library.lib_IdString = (APTR)MPEGA_LIBRARY_ID_STRING;
   base->segment = segment;
+  mpega_fallback_init(&base->fallback);
 
   AddLibrary((struct Library *)base);
   return base;
@@ -628,6 +638,7 @@ static void mpega_apply_mpeg_header(MPEGACompatStream *state,
   state->stream.copyright = parsed->copyright;
   state->stream.original = parsed->original;
   state->stream_start_byte = header_offset;
+  state->header_probed = 1;
   output_channels = mpega_output_channels(state, parsed->channels);
   freq_div = mpega_output_freq_div(state, output_channels,
                                    (uint32_t)parsed->frequency);
@@ -899,6 +910,8 @@ static void mpega_stream_set_defaults(MPEGACompatStream *state)
   stream->dec_frequency = 44100;
   state->stream.handle = state;
   state->scale_percent = 100;
+  state->reduce_div = 1U;
+  state->dither = 0x2545F491UL;
   state->input_chunk_bytes = MPEGA_STREAM_CHUNK_BYTES;
   state->mp3_ring.handle = ZZ9K_INVALID_HANDLE;
   state->pcm_ring.handle = ZZ9K_INVALID_HANDLE;
@@ -951,6 +964,11 @@ static void mpega_stream_free(MPEGACompatStream *state)
     return;
   }
 
+  if (state->fb_stream) {
+    mpega_fb_close(state->fb_lib, state->fb_stream);
+    state->fb_stream = 0;
+    mpega_fallback_stream_closed(&state->base->fallback);
+  }
   mpega_stream_end_session(state);
   if (state->input_buffer) {
     FreeMem(state->input_buffer, MPEGA_STREAM_CHUNK_BYTES);
@@ -1091,7 +1109,7 @@ static int mpega_stream_restart_at_byte(MPEGACompatStream *state,
   state->pcm_pending_ack_bytes = 0U;
   state->time_ms = ms_time_position;
   state->time_ms_accum = 0U;
-  state->eof_sent = 0U;
+  memset(&state->feed, 0, sizeof(state->feed));
   return mpega_stream_begin(state);
 }
 
@@ -1129,6 +1147,7 @@ static int mpega_zz9k_acquire(struct MPEGACompatBase *base)
     return 0;
   }
 
+  base->audio_flags = service.flags;
   base->zz9k_open_count++;
   return 1;
 }
@@ -1152,13 +1171,25 @@ static void mpega_update_stream_info(MPEGACompatStream *state)
   uint32_t output_channels;
   uint32_t freq_div;
 
-  if (!state || state->result.sample_rate == 0U) {
+  if (!state || state->fb_stream || state->result.sample_rate == 0U) {
     return;
   }
 
   channels = state->result.channels;
   if (channels == 0U || channels > MPEGA_MAX_CHANNELS) {
     channels = MPEGA_MAX_CHANNELS;
+  }
+
+  if (state->reduce_active) {
+    /* The ring holds what the card reduced the stream to. The stream's own
+     * rate and layout are what it was reduced from. */
+    state->stream.frequency =
+        (LONG)(state->result.sample_rate * state->reduce_div);
+    state->stream.channels = (WORD)(state->reduce_mono ? 2U : channels);
+    state->stream.dec_frequency = (LONG)state->result.sample_rate;
+    state->stream.dec_channels = (WORD)channels;
+    state->stream.dec_quality = mpega_output_quality(state, channels);
+    return;
   }
 
   state->stream.frequency = (LONG)state->result.sample_rate;
@@ -1172,15 +1203,45 @@ static void mpega_update_stream_info(MPEGACompatStream *state)
   state->stream.dec_quality = mpega_output_quality(state, output_channels);
 }
 
+typedef struct MPEGABeginContext {
+  MPEGACompatStream *state;
+  uint32_t staging_bytes;
+} MPEGABeginContext;
+
+static int mpega_begin_call(void *context, uint32_t output_hz,
+                            uint32_t output_channels)
+{
+  MPEGABeginContext *begin_context = (MPEGABeginContext *)context;
+  MPEGACompatStream *state = begin_context->state;
+  ZZ9KAudioStreamBeginDesc begin;
+
+  /* low_water is the firmware pump's PCM refill threshold; it must stay
+   * below the ring capacity, so scale it with the staging quantum. */
+  if (!zz9k_audio_build_stream_begin_desc(
+          &begin, state->mp3_ring.handle, state->mp3_ring.length,
+          state->pcm_ring.handle, state->pcm_ring.length, output_hz,
+          output_channels, ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE,
+          begin_context->staging_bytes, 0U, 0U)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return ZZ9KAudioStreamBegin(&begin, &state->result);
+}
+
 static int mpega_stream_begin(MPEGACompatStream *state)
 {
-  ZZ9KAudioStreamBeginDesc begin;
+  MPEGABeginContext begin_context;
+  MPEGAReducePlan plan;
   uint32_t staging_bytes;
+  uint32_t freq_div;
 
   if (!state || !mpega_zz9k_acquire(state->base)) {
     return 0;
   }
   state->zz9k_acquired = 1;
+  state->reduce_active = 0;
+  state->reduce_mono = 0;
+  state->reduce_div = 1U;
 
   /* The decode input ring is card-side only (the 68k passes just the
    * handle), so it must not consume board-window mapping space. */
@@ -1217,18 +1278,26 @@ static int mpega_stream_begin(MPEGACompatStream *state)
     state->input_chunk_bytes = (LONG)state->staging.length;
   }
 
-  /* low_water is the firmware pump's PCM refill threshold; it must stay
-   * below the ring capacity, so scale it with the staging quantum. */
-  if (!zz9k_audio_build_stream_begin_desc(
-          &begin, state->mp3_ring.handle, state->mp3_ring.length,
-          state->pcm_ring.handle, state->pcm_ring.length, 0U, 0U,
-          ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE, staging_bytes,
-          0U, 0U)) {
+  /* A card that reports AUDIO_STREAM_REDUCE mixes down and decimates (with a
+   * low-pass filter) for us, so the 68k reads a ring in the layout it hands
+   * out. An older card rejects the request and the 68k reduces instead. */
+  freq_div = mpega_output_freq_div(
+      state, mpega_output_channels(state, (uint32_t)state->stream.channels),
+      (uint32_t)state->stream.frequency);
+  mpega_reduce_plan(&plan, state->base->audio_flags, state->header_probed,
+                    (uint32_t)state->stream.channels,
+                    mpega_output_force_mono(state),
+                    (uint32_t)state->stream.frequency, freq_div);
+  begin_context.state = state;
+  begin_context.staging_bytes = staging_bytes;
+  if (mpega_reduce_begin(&plan, mpega_begin_call, &begin_context) !=
+      ZZ9K_STATUS_OK) {
     return 0;
   }
-
-  if (ZZ9KAudioStreamBegin(&begin, &state->result) != ZZ9K_STATUS_OK) {
-    return 0;
+  if (plan.output_hz != 0U || plan.output_channels != 0U) {
+    state->reduce_active = 1;
+    state->reduce_mono = plan.output_channels == 1U;
+    state->reduce_div = plan.output_hz != 0U ? freq_div : 1U;
   }
 
   state->session_open = 1;
@@ -1246,75 +1315,148 @@ static uint32_t mpega_pcm_available(const MPEGACompatStream *state)
   return state->result.bytes_produced - state->pcm_seen_bytes;
 }
 
+static int mpega_stream_feed(MPEGACompatStream *state, uint32_t length,
+                             uint32_t flags)
+{
+  ZZ9KAudioStreamFeedDesc feed;
+  ZZ9KAudioStreamResult result;
+
+  if (!zz9k_audio_build_stream_feed_desc(&feed, state->session,
+                                         state->staging.handle, 0U, length,
+                                         flags) ||
+      ZZ9KAudioStreamFeed(&feed, &result) != ZZ9K_STATUS_OK) {
+    return 0;
+  }
+  state->result = result;
+  mpega_update_stream_info(state);
+  return 1;
+}
+
+/* A zero-byte READ runs a decode pass without returning PCM credit (an empty
+ * FEED is not a valid request). The loop below calls it with no credit
+ * pending. */
+static int mpega_stream_kick(MPEGACompatStream *state)
+{
+  ZZ9KAudioStreamResult result;
+
+  if (ZZ9KAudioStreamRead(state->session, 0U, 0U, &result) != ZZ9K_STATUS_OK) {
+    return 0;
+  }
+  state->result = result;
+  state->pcm_read_offset = state->result.pcm_read;
+  mpega_update_stream_info(state);
+  return 1;
+}
+
+static int mpega_feed_op_pcm_available(void *context)
+{
+  return mpega_pcm_available((MPEGACompatStream *)context) != 0U;
+}
+
+static int mpega_feed_op_ack(void *context)
+{
+  return mpega_ack_pcm((MPEGACompatStream *)context, 1);
+}
+
+static int mpega_feed_op_read_stage(void *context, uint32_t *got)
+{
+  MPEGACompatStream *state = (MPEGACompatStream *)context;
+  LONG length = mpega_stream_read_source(state, state->input_buffer,
+                                         state->input_chunk_bytes);
+
+  if (length < 0) {
+    return 0;
+  }
+  *got = (uint32_t)length;
+  return length == 0 ||
+         mpega_shared_copy_to_bytes(&state->staging, 0U, state->input_buffer,
+                                    (uint32_t)length);
+}
+
+static int mpega_feed_op_feed(void *context, uint32_t length, uint32_t flags)
+{
+  return mpega_stream_feed((MPEGACompatStream *)context, length, flags);
+}
+
+static int mpega_feed_op_kick(void *context)
+{
+  return mpega_stream_kick((MPEGACompatStream *)context);
+}
+
+static uint32_t mpega_feed_op_result_flags(void *context)
+{
+  return ((MPEGACompatStream *)context)->result.flags;
+}
+
+static uint32_t mpega_feed_op_bytes_consumed(void *context)
+{
+  return ((MPEGACompatStream *)context)->result.bytes_consumed;
+}
+
+static uint32_t mpega_feed_op_bytes_produced(void *context)
+{
+  return ((MPEGACompatStream *)context)->result.bytes_produced;
+}
+
+/* Feeds the card until it has PCM for us (mpega_feed_until_pcm). */
 static int mpega_stream_feed_until_pcm(MPEGACompatStream *state)
 {
-  uint32_t attempts;
+  MPEGAFeedOps ops;
 
   if (!state) {
     return MPEGA_ERR_BADVALUE;
   }
-
-  for (attempts = 0; attempts < MPEGA_MAX_FEED_ATTEMPTS; attempts++) {
-    ZZ9KAudioStreamFeedDesc feed;
-    ZZ9KAudioStreamResult result;
-    LONG got;
-    uint32_t flags;
-
-    if (mpega_pcm_available(state) != 0U) {
-      return MPEGA_ERR_NONE;
-    }
-    if (!mpega_ack_pcm(state, 1)) {
-      return MPEGA_ERR_BADFRAME;
-    }
-    if ((state->result.flags & ZZ9K_AUDIO_STREAM_RESULT_DONE) != 0U) {
-      return MPEGA_ERR_EOF;
-    }
-    if (state->eof_sent) {
-      return MPEGA_ERR_EOF;
-    }
-
-    got = mpega_stream_read_source(state, state->input_buffer,
-                                   state->input_chunk_bytes);
-    if (got < 0) {
-      return MPEGA_ERR_BADFRAME;
-    }
-
-    flags = 0U;
-    if (got == 0) {
-      flags = ZZ9K_AUDIO_STREAM_FEED_EOF;
-      state->eof_sent = 1;
-    } else {
-      if (!mpega_shared_copy_to_bytes(&state->staging, 0U,
-                                      state->input_buffer, (uint32_t)got)) {
-        return MPEGA_ERR_BADFRAME;
-      }
-    }
-
-    if (!zz9k_audio_build_stream_feed_desc(
-            &feed, state->session, state->staging.handle, 0U,
-            (uint32_t)got, flags)) {
-      return MPEGA_ERR_BADVALUE;
-    }
-
-    if (ZZ9KAudioStreamFeed(&feed, &result) != ZZ9K_STATUS_OK) {
-      return MPEGA_ERR_BADFRAME;
-    }
-    state->result = result;
-    mpega_update_stream_info(state);
-
-    if (mpega_pcm_available(state) != 0U) {
-      return MPEGA_ERR_NONE;
-    }
-    if ((state->result.flags & ZZ9K_AUDIO_STREAM_RESULT_DONE) != 0U) {
-      return MPEGA_ERR_EOF;
-    }
-  }
-
-  return MPEGA_INTERNAL_NO_PCM;
+  ops.context = state;
+  ops.pcm_available = mpega_feed_op_pcm_available;
+  ops.ack = mpega_feed_op_ack;
+  ops.read_stage = mpega_feed_op_read_stage;
+  ops.feed = mpega_feed_op_feed;
+  ops.kick = mpega_feed_op_kick;
+  ops.result_flags = mpega_feed_op_result_flags;
+  ops.bytes_consumed = mpega_feed_op_bytes_consumed;
+  ops.bytes_produced = mpega_feed_op_bytes_produced;
+  return mpega_feed_until_pcm(&state->feed, &ops, MPEGA_MAX_FEED_ATTEMPTS);
 }
 
-static LONG mpega_copy_pcm_planar(MPEGACompatStream *state,
-                                  WORD *pcm[MPEGA_MAX_CHANNELS])
+static uint32_t mpega_source_channel_count(const MPEGACompatStream *state)
+{
+  uint32_t channels = state->result.channels ? state->result.channels :
+                      (uint32_t)state->stream.channels;
+
+  if (channels == 0U || channels > MPEGA_MAX_CHANNELS) {
+    channels = MPEGA_MAX_CHANNELS;
+  }
+  return channels;
+}
+
+static uint32_t mpega_output_channel_count(const MPEGACompatStream *state)
+{
+  uint32_t channels =
+      mpega_output_channels(state, mpega_source_channel_count(state));
+
+  if (channels == 0U || channels > MPEGA_MAX_CHANNELS) {
+    channels = MPEGA_MAX_CHANNELS;
+  }
+  return channels;
+}
+
+static uint32_t mpega_pcm_divisor(const MPEGACompatStream *state,
+                                  uint32_t output_channels,
+                                  uint32_t source_rate)
+{
+  /* A card that reduced the stream already sent the rate asked for. */
+  return state->reduce_active ? 1U :
+         mpega_output_freq_div(state, output_channels, source_rate);
+}
+
+/*
+ * Takes the next frame from the PCM ring into dst0 (left, or mono) and dst1
+ * (right, only for two output channels). Returns the samples per channel, 0
+ * when the ring holds nothing, or an error. *clipped is increased by the
+ * samples MPEGA_scale clipped.
+ */
+static LONG mpega_take_frame(MPEGACompatStream *state, int16_t *dst0,
+                             int16_t *dst1, uint32_t *clipped)
 {
   uint32_t source_channels;
   uint32_t output_channels;
@@ -1326,22 +1468,14 @@ static LONG mpega_copy_pcm_planar(MPEGACompatStream *state,
   uint32_t source_rate;
   uint32_t freq_div;
   uint32_t offset;
-  volatile const uint8_t *ring;
 
-  if (!state || !pcm || !pcm[0]) {
+  if (!state || !dst0) {
     return MPEGA_ERR_BADVALUE;
   }
 
-  source_channels = state->result.channels ? state->result.channels :
-                    (uint32_t)state->stream.channels;
-  if (source_channels == 0U || source_channels > MPEGA_MAX_CHANNELS) {
-    source_channels = MPEGA_MAX_CHANNELS;
-  }
-  output_channels = mpega_output_channels(state, source_channels);
-  if (output_channels == 0U || output_channels > MPEGA_MAX_CHANNELS) {
-    output_channels = MPEGA_MAX_CHANNELS;
-  }
-  if (output_channels == 2U && !pcm[1]) {
+  source_channels = mpega_source_channel_count(state);
+  output_channels = mpega_output_channel_count(state);
+  if (output_channels == 2U && !dst1) {
     return MPEGA_ERR_BADVALUE;
   }
 
@@ -1365,22 +1499,18 @@ static LONG mpega_copy_pcm_planar(MPEGACompatStream *state,
   source_samples = bytes / frame_bytes;
   source_rate = state->result.sample_rate ? state->result.sample_rate :
                 (uint32_t)state->stream.frequency;
-  freq_div = mpega_output_freq_div(state, output_channels, source_rate);
-  output_samples = (source_samples + freq_div - 1U) / freq_div;
-  offset = state->pcm_read_offset;
-  ring = (volatile const uint8_t *)state->pcm_ring.data;
+  freq_div = mpega_pcm_divisor(state, output_channels, source_rate);
 
-  if (offset <= state->pcm_ring.length - bytes) {
-    mpega_copy_pcm_linear(pcm, ring + offset, source_samples, source_channels, output_channels, freq_div,
-                          state->scale_percent);
-    offset += bytes;
-    if (offset >= state->pcm_ring.length) {
-      offset = 0;
-    }
-  } else {
-    offset = mpega_copy_pcm_wrapped(state, pcm, offset, source_samples, source_channels, output_channels, freq_div,
-                                    state->scale_percent);
-  }
+  mpega_ring_read((uint8_t *)state->raw,
+                  (const volatile uint8_t *)state->pcm_ring.data,
+                  state->pcm_ring.length, state->pcm_read_offset, bytes);
+  offset = mpega_ring_advance(state->pcm_read_offset, bytes,
+                              state->pcm_ring.length);
+  output_samples = mpega_pcm_prepare((const uint8_t *)state->raw,
+                                     source_samples, source_channels,
+                                     output_channels, freq_div,
+                                     (int32_t)state->scale_percent, dst0,
+                                     dst1, clipped);
 
   if (state->pcm_pending_ack_bytes > 0xffffffffUL - bytes) {
     return MPEGA_ERR_BADFRAME;
@@ -1395,184 +1525,6 @@ static LONG mpega_copy_pcm_planar(MPEGACompatStream *state,
   }
 
   return (LONG)output_samples;
-}
-
-static void mpega_copy_pcm_linear(WORD *pcm[MPEGA_MAX_CHANNELS],
-                                  volatile const uint8_t *src,
-                                  uint32_t source_samples,
-                                  uint32_t source_channels,
-                                  uint32_t output_channels,
-                                  uint32_t freq_div,
-                                  LONG scale_percent)
-{
-  uint32_t source_sample;
-  uint32_t output_sample;
-
-  if (freq_div == 0U) {
-    freq_div = 1U;
-  }
-
-  if (output_channels == 1U) {
-    for (source_sample = 0, output_sample = 0;
-         source_sample < source_samples;
-         source_sample += freq_div, output_sample++) {
-      volatile const uint8_t *sample_src;
-
-      sample_src = src + (source_sample * source_channels * 2U);
-      if (source_channels == 1U) {
-        int32_t value = mpega_pcm_value_from_be(sample_src[0],
-                                                sample_src[1]);
-
-        mpega_store_scaled_pcm_value_be(pcm[0], output_sample, value,
-                                        scale_percent);
-      } else {
-        int16_t left_value = mpega_pcm_value_from_be(sample_src[0],
-                                                     sample_src[1]);
-        int16_t right_value = mpega_pcm_value_from_be(sample_src[2],
-                                                      sample_src[3]);
-
-        mpega_store_scaled_pcm_value_be(pcm[0], output_sample,
-                                       ((int32_t)left_value +
-                                       (int32_t)right_value) / 2,
-                                       scale_percent);
-      }
-    }
-    return;
-  }
-
-  if (output_channels == 2U && source_channels == 1U) {
-    for (source_sample = 0, output_sample = 0;
-         source_sample < source_samples;
-         source_sample += freq_div, output_sample++) {
-      volatile const uint8_t *sample_src;
-      uint8_t hi;
-      uint8_t lo;
-
-      sample_src = src + (source_sample * source_channels * 2U);
-      hi = sample_src[0];
-      lo = sample_src[1];
-      mpega_store_scaled_pcm_word_be(pcm[0], output_sample, hi, lo,
-                                     scale_percent);
-      mpega_store_scaled_pcm_word_be(pcm[1], output_sample, hi, lo,
-                                     scale_percent);
-    }
-    return;
-  }
-
-  if (output_channels == 2U) {
-    uint8_t *left = (uint8_t *)pcm[0];
-    uint8_t *right = (uint8_t *)pcm[1];
-
-    for (source_sample = 0, output_sample = 0;
-         source_sample < source_samples;
-         source_sample += freq_div, output_sample++) {
-      volatile const uint8_t *sample_src;
-
-      sample_src = src + (source_sample * source_channels * 2U);
-      if (scale_percent == 100) {
-        left[0] = sample_src[0];
-        left[1] = sample_src[1];
-        right[0] = sample_src[2];
-        right[1] = sample_src[3];
-      } else {
-        mpega_store_scaled_pcm_word_be((WORD *)left, 0, sample_src[0],
-                                       sample_src[1], scale_percent);
-        mpega_store_scaled_pcm_word_be((WORD *)right, 0, sample_src[2],
-                                       sample_src[3], scale_percent);
-      }
-      left += 2;
-      right += 2;
-    }
-  }
-}
-
-static uint32_t mpega_copy_pcm_wrapped(MPEGACompatStream *state,
-                                       WORD *pcm[MPEGA_MAX_CHANNELS],
-                                       uint32_t offset,
-                                       uint32_t source_samples,
-                                       uint32_t source_channels,
-                                       uint32_t output_channels,
-                                       uint32_t freq_div,
-                                       LONG scale_percent)
-{
-  volatile const uint8_t *ring =
-      (volatile const uint8_t *)state->pcm_ring.data;
-  uint32_t source_sample;
-  uint32_t output_sample;
-  uint32_t channel;
-
-  if (freq_div == 0U) {
-    freq_div = 1U;
-  }
-
-  output_sample = 0U;
-  for (source_sample = 0; source_sample < source_samples; source_sample++) {
-    int store_sample = (source_sample % freq_div) == 0U;
-
-    if (output_channels == 1U && source_channels == 2U) {
-      uint8_t left_hi = ring[offset];
-      uint8_t left_lo;
-      uint8_t right_hi;
-      uint8_t right_lo;
-      int16_t left_value;
-      int16_t right_value;
-
-      offset++;
-      if (offset >= state->pcm_ring.length) {
-        offset = 0;
-      }
-      left_lo = ring[offset];
-      offset++;
-      if (offset >= state->pcm_ring.length) {
-        offset = 0;
-      }
-      right_hi = ring[offset];
-      offset++;
-      if (offset >= state->pcm_ring.length) {
-        offset = 0;
-      }
-      right_lo = ring[offset];
-      offset++;
-      if (offset >= state->pcm_ring.length) {
-        offset = 0;
-      }
-
-      left_value = mpega_pcm_value_from_be(left_hi, left_lo);
-      right_value = mpega_pcm_value_from_be(right_hi, right_lo);
-      if (store_sample) {
-        mpega_store_scaled_pcm_value_be(pcm[0], output_sample,
-                                       ((int32_t)left_value +
-                                       (int32_t)right_value) / 2,
-                                       scale_percent);
-        output_sample++;
-      }
-      continue;
-    }
-
-    for (channel = 0; channel < source_channels; channel++) {
-      uint8_t hi = ring[offset];
-      uint8_t lo;
-
-      offset++;
-      if (offset >= state->pcm_ring.length) {
-        offset = 0;
-      }
-      lo = ring[offset];
-      offset++;
-      if (offset >= state->pcm_ring.length) {
-        offset = 0;
-      }
-      if (store_sample && channel < output_channels) {
-        mpega_store_scaled_pcm_word_be(pcm[channel], output_sample, hi, lo,
-                                       scale_percent);
-      }
-    }
-    if (store_sample) {
-      output_sample++;
-    }
-  }
-
-  return offset;
 }
 
 static int mpega_ack_pcm(MPEGACompatStream *state, int force)
@@ -1599,53 +1551,6 @@ static int mpega_ack_pcm(MPEGACompatStream *state, int force)
   state->pcm_read_offset = state->result.pcm_read;
   mpega_update_stream_info(state);
   return 1;
-}
-
-static void mpega_store_pcm_word_be(WORD *dst, uint32_t sample,
-                                    uint8_t hi, uint8_t lo)
-{
-  uint8_t *bytes = (uint8_t *)dst;
-
-  sample *= 2U;
-  bytes[sample] = hi;
-  bytes[sample + 1U] = lo;
-}
-
-static int16_t mpega_pcm_value_from_be(uint8_t hi, uint8_t lo)
-{
-  return (int16_t)((((uint16_t)hi) << 8) | (uint16_t)lo);
-}
-
-static void mpega_store_scaled_pcm_value_be(WORD *dst, uint32_t sample,
-                                            int32_t value,
-                                            LONG scale_percent)
-{
-  if (scale_percent != 100) {
-    value = (value * scale_percent) / 100;
-  }
-  if (value > 32767) {
-    value = 32767;
-  }
-  if (value < -32768) {
-    value = -32768;
-  }
-
-  mpega_store_pcm_word_be(dst, sample, (uint8_t)(((uint16_t)value) >> 8),
-                          (uint8_t)value);
-}
-
-static void mpega_store_scaled_pcm_word_be(WORD *dst, uint32_t sample,
-                                           uint8_t hi, uint8_t lo,
-                                           LONG scale_percent)
-{
-  int32_t value = (int16_t)((((uint16_t)hi) << 8) | (uint16_t)lo);
-
-  if (scale_percent == 100) {
-    mpega_store_pcm_word_be(dst, sample, hi, lo);
-    return;
-  }
-
-  mpega_store_scaled_pcm_value_be(dst, sample, value, scale_percent);
 }
 
 static void mpega_update_time_ms(MPEGACompatStream *state, uint32_t samples)
@@ -1696,13 +1601,56 @@ static int mpega_shared_copy_to_bytes(ZZ9KSharedBuffer *buffer,
   return 1;
 }
 
+/* The fields of our MPEGA_STREAM follow the software library's stream. */
+static void mpega_fallback_mirror(MPEGACompatStream *state)
+{
+  void *handle = state->stream.handle;
+
+  state->stream = *state->fb_stream;
+  state->stream.handle = handle;
+}
+
+/*
+ * Hands a stream the card cannot serve to the software library. The card
+ * resources and the source this library opened are released first, so that
+ * the software library opens the stream by itself (a bs_access hook sees a
+ * CLOSE for each OPEN).
+ */
+static int mpega_open_fallback(MPEGACompatStream *state, char *filename,
+                               MPEGA_CTRL *ctrl)
+{
+  struct Library *lib;
+  MPEGA_STREAM *stream;
+
+  mpega_stream_end_session(state);
+  mpega_stream_close_source(state);
+  if (state->input_buffer) {
+    FreeMem(state->input_buffer, MPEGA_STREAM_CHUNK_BYTES);
+    state->input_buffer = 0;
+  }
+
+  lib = mpega_fallback_acquire(&state->base->fallback);
+  if (!lib) {
+    return 0;
+  }
+  stream = mpega_fb_open(lib, filename, ctrl);
+  if (!stream) {
+    return 0;
+  }
+
+  state->fb_lib = lib;
+  state->fb_stream = stream;
+  mpega_fallback_stream_opened(&state->base->fallback);
+  mpega_fallback_mirror(state);
+  return 1;
+}
+
 static MPEGA_STREAM *mpega_call_open(REG(a6, struct MPEGACompatBase *base),
                                     REG(a0, char *filename),
                                     REG(a1, MPEGA_CTRL *ctrl))
 {
   MPEGACompatStream *state;
 
-  (void)base;
   /* A custom bitstream hook owns stream access and may not need a name.
    * RiVA relies on this original mpega.library behaviour for system streams. */
   if (!filename && (!ctrl || !ctrl->bs_access)) {
@@ -1732,7 +1680,16 @@ static MPEGA_STREAM *mpega_call_open(REG(a6, struct MPEGACompatBase *base),
   state->input_buffer = (uint8_t *)AllocMem(MPEGA_STREAM_CHUNK_BYTES,
                                             MEMF_PUBLIC);
   if (!state->input_buffer || !mpega_stream_open_source(state, filename) ||
-      !mpega_open_probe_metadata(state) || !mpega_stream_begin(state)) {
+      !mpega_open_probe_metadata(state)) {
+    mpega_stream_free(state);
+    return 0;
+  }
+
+  /* The stream is MPEG audio. If the card cannot serve it (no zz9k.library
+   * or MP3 stream service, no shared memory, or the card refuses the
+   * stream), the software mpega.library gets it. */
+  if (!mpega_stream_begin(state) &&
+      !mpega_open_fallback(state, filename, ctrl)) {
     mpega_stream_free(state);
     return 0;
   }
@@ -1754,6 +1711,7 @@ static LONG mpega_call_decode_frame(REG(a6, struct MPEGACompatBase *base),
                                     REG(a1, WORD **pcm))
 {
   MPEGACompatStream *state;
+  uint32_t clipped;
   LONG status;
 
   (void)base;
@@ -1762,15 +1720,26 @@ static LONG mpega_call_decode_frame(REG(a6, struct MPEGACompatBase *base),
   }
 
   state = (MPEGACompatStream *)mpds->handle;
+  if (state->fb_stream) {
+    status = mpega_fb_decode_frame(state->fb_lib, state->fb_stream, pcm);
+    mpega_fallback_mirror(state);
+    return status;
+  }
+
   status = mpega_stream_feed_until_pcm(state);
-  if (status == MPEGA_INTERNAL_NO_PCM) {
+  if (status == MPEGA_FEED_NO_PCM) {
     return 0;
   }
   if (status != MPEGA_ERR_NONE) {
     return status;
   }
 
-  return mpega_copy_pcm_planar(state, pcm);
+  if (!pcm || !pcm[0]) {
+    return MPEGA_ERR_BADVALUE;
+  }
+  clipped = 0U;
+  return mpega_take_frame(state, (int16_t *)pcm[0], (int16_t *)pcm[1],
+                          &clipped);
 }
 
 static LONG mpega_call_seek(REG(a6, struct MPEGACompatBase *base),
@@ -1779,6 +1748,7 @@ static LONG mpega_call_seek(REG(a6, struct MPEGACompatBase *base),
 {
   MPEGACompatStream *state;
   LONG byte_pos;
+  LONG status;
 
   (void)base;
   if (!mpds || !mpds->handle) {
@@ -1786,6 +1756,12 @@ static LONG mpega_call_seek(REG(a6, struct MPEGACompatBase *base),
   }
 
   state = (MPEGACompatStream *)mpds->handle;
+  if (state->fb_stream) {
+    status = mpega_fb_seek(state->fb_lib, state->fb_stream, ms_time_position);
+    mpega_fallback_mirror(state);
+    return status;
+  }
+
   byte_pos = mpega_stream_seek_byte_for_ms(state, ms_time_position);
   if (byte_pos < 0) {
     return MPEGA_ERR_EOF;
@@ -1802,6 +1778,7 @@ static LONG mpega_call_time(REG(a6, struct MPEGACompatBase *base),
                             REG(a1, ULONG *ms_time_position))
 {
   MPEGACompatStream *state;
+  LONG status;
 
   (void)base;
   if (!mpds) {
@@ -1814,6 +1791,12 @@ static LONG mpega_call_time(REG(a6, struct MPEGACompatBase *base),
   state = (MPEGACompatStream *)mpds->handle;
   if (!state) {
     return MPEGA_ERR_EOF;
+  }
+
+  if (state->fb_stream) {
+    status = mpega_fb_time(state->fb_lib, state->fb_stream, ms_time_position);
+    mpega_fallback_mirror(state);
+    return status;
   }
 
   mpega_update_stream_info(state);
@@ -1866,16 +1849,104 @@ static LONG mpega_call_scale(REG(a6, struct MPEGACompatBase *base),
                              REG(d0, LONG scale_percent))
 {
   MPEGACompatStream *state;
+  LONG status;
 
   (void)base;
   if (!mpds || !mpds->handle) {
     return MPEGA_ERR_BADVALUE;
   }
+
+  state = (MPEGACompatStream *)mpds->handle;
+  if (state->fb_stream) {
+    /* The software library applies the scale and has its own range. */
+    status = mpega_fb_scale(state->fb_lib, state->fb_stream, scale_percent);
+    if (status == MPEGA_ERR_NONE) {
+      state->scale_percent = scale_percent;
+    }
+    return status;
+  }
   if (scale_percent <= 0 || scale_percent > 10000) {
     return MPEGA_ERR_BADVALUE;
   }
 
-  state = (MPEGACompatStream *)mpds->handle;
   state->scale_percent = scale_percent;
   return MPEGA_ERR_NONE;
 }
+
+static LONG mpega_call_decode_to(REG(a6, struct MPEGACompatBase *base),
+                                 REG(a0, MPEGA_STREAM *mpds),
+                                 REG(a1, struct MpgaOut *out))
+{
+  MPEGACompatStream *state;
+  WORD *fb_pcm[MPEGA_MAX_CHANNELS];
+  uint32_t channels;
+  uint32_t clipped;
+  LONG status;
+
+  (void)base;
+  if (!mpds || !mpds->handle || !out) {
+    return MPEGA_ERR_BADVALUE;
+  }
+
+  state = (MPEGACompatStream *)mpds->handle;
+  clipped = 0U;
+  if (state->fb_stream) {
+    /* The software library decodes into our buffers; they are converted
+     * below. It has applied the scale already, so no clip is counted. */
+    channels = (uint32_t)state->stream.dec_channels;
+    if (channels == 0U || channels > MPEGA_MAX_CHANNELS) {
+      channels = MPEGA_MAX_CHANNELS;
+    }
+    if (!mpega_out_valid(out, channels)) {
+      return MPEGA_ERR_BADVALUE;
+    }
+    fb_pcm[0] = (WORD *)state->chan[0];
+    fb_pcm[1] = (WORD *)state->chan[1];
+    status = mpega_fb_decode_frame(state->fb_lib, state->fb_stream, fb_pcm);
+    mpega_fallback_mirror(state);
+    if (status <= 0) {
+      return status;
+    }
+  } else {
+    status = mpega_stream_feed_until_pcm(state);
+    if (status == MPEGA_FEED_NO_PCM) {
+      return 0;
+    }
+    if (status != MPEGA_ERR_NONE) {
+      return status;
+    }
+    /* Checked against the frame's layout before it is taken, so a bad
+     * buffer set leaves the frame in the ring. */
+    channels = mpega_output_channel_count(state);
+    if (!mpega_out_valid(out, channels)) {
+      return MPEGA_ERR_BADVALUE;
+    }
+    status = mpega_take_frame(state, state->chan[0], state->chan[1],
+                              &clipped);
+    if (status <= 0) {
+      return status;
+    }
+  }
+
+  if (status > MPEGA_PCM_SIZE) {
+    status = MPEGA_PCM_SIZE;
+  }
+  mpega_pcm_write_out(out, state->chan[0], state->chan[1], (uint32_t)status,
+                      channels, &state->dither);
+  out->mo_Clipped += clipped;
+  return status;
+}
+
+/* MPGA_decode_to shares ambmpega.library's struct and vector slot, so a
+ * change to either breaks programs built for that interface. */
+#ifdef __m68k__
+_Static_assert(sizeof(struct MpgaOut) == 36U, "struct MpgaOut size");
+_Static_assert(offsetof(struct MpgaOut, mo_Buffer) == 4U, "mo_Buffer offset");
+_Static_assert(offsetof(struct MpgaOut, mo_Mask) == 20U, "mo_Mask offset");
+_Static_assert(offsetof(struct MpgaOut, mo_Index) == 24U, "mo_Index offset");
+_Static_assert(offsetof(struct MpgaOut, mo_Peak) == 28U, "mo_Peak offset");
+_Static_assert(offsetof(struct MpgaOut, mo_Clipped) == 32U,
+               "mo_Clipped offset");
+_Static_assert(sizeof(mpega_lib_vectors) / sizeof(mpega_lib_vectors[0]) ==
+               13U, "MPGA_decode_to is the twelfth vector, offset -72");
+#endif

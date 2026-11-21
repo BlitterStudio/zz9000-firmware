@@ -263,6 +263,12 @@ static int test_service_flag_names(void)
                    "webp-animation")) {
     return 48;
   }
+  if (!expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_AUDIO,
+                       ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE),
+                   "stream-reduce")) {
+    return 53;
+  }
   if (zz9k_service_flag_name(ZZ9K_SERVICE_CRYPTO,
                              ZZ9K_SERVICE_FLAG_IMAGE_JPEG_DIRECT_BGRA) != 0) {
     return 4;
@@ -568,7 +574,7 @@ static int test_service_flag_iteration(void)
   if (zz9k_known_service_flag(ZZ9K_SERVICE_CODEC, 19) != 0U) {
     return 28;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_AUDIO) != 15U) {
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_AUDIO) != 16U) {
     return 20;
   }
   if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 4) !=
@@ -613,7 +619,11 @@ static int test_service_flag_iteration(void)
           ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM) {
     return 51;
   }
-  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 15) != 0U) {
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 15) !=
+      ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE) {
+    return 52;
+  }
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 16) != 0U) {
     return 50;
   }
   if (zz9k_known_service_flag_count(ZZ9K_SERVICE_VIDEO) != 20U ||

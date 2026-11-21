@@ -121,6 +121,96 @@ zz9k-services --check-release
 A successful check ends with `release check ok`. For the package-level smoke
 procedure, follow [`docs/zz9k-release-smoke.md`](docs/zz9k-release-smoke.md).
 
+## mpega.library
+
+`Libs/mpega.library` is a drop-in for the original `mpega.library` 2 (version
+2, with the revision in its `$VER:` string, ending in `ZZ9000 SDK`). It
+decodes MP3 on the card through the audio MP3 stream service and has the seven
+original functions (`MPEGA_open`, `MPEGA_close`, `MPEGA_decode_frame`,
+`MPEGA_seek`, `MPEGA_time`, `MPEGA_find_sync`, `MPEGA_scale`) plus
+`MPGA_decode_to` at offset -72.
+
+### Software fallback
+
+Installing this library over a software `mpega.library` would end MP3 playback
+on an Amiga where the card path is unavailable, so the library passes such a
+stream to the software decoder. The software decoder has to be the file
+`LIBS:mpega-software.library`. The ZZ9000 drivers installer saves a previous
+software `mpega.library` under that name; to do it by hand, copy the old file
+there before installing this one.
+
+`MPEGA_open` hands the stream over when the card cannot serve it: `zz9k.library`
+is missing or too old, the firmware has no MP3 stream service, shared memory
+for the stream cannot be allocated (for example when the Zorro II host window
+is taken), or the card refuses to start the stream. A bad argument and data
+that is not MPEG audio still fail with `NULL`. A `bs_access` hook sees
+`MPEGA_BSFUNC_CLOSE` for the open this library made before the software
+decoder opens the stream again with its own `MPEGA_BSFUNC_OPEN`.
+
+The software decoder's own name is also `mpega.library`, so it is not opened
+with `OpenLibrary()`. The first stream that needs it loads the file with
+`LoadSeg()`, starts it with `InitResident()` and moves its library node from
+the system library list to a private list, so no program can open it by name.
+A file whose name or `$VER:` string contains `ZZ9000` is refused, because that
+would be this library. Only a process loads it; a plain task gets `NULL` from
+`MPEGA_open` when the card path is unavailable.
+
+The stream that `MPEGA_open` returns belongs to this library. `MPEGA_close`,
+`MPEGA_decode_frame`, `MPEGA_seek`, `MPEGA_time`, `MPEGA_scale` and
+`MPGA_decode_to` forward to the software decoder, and the public
+`MPEGA_STREAM` fields are copied from its stream after the open and after each
+call. `MPEGA_find_sync` is always answered here. The software decoder is
+closed and expunged when this library expunges and no stream of it is open;
+while one is open, this library stays in memory. If the software decoder keeps
+itself in memory because something else still holds it, it stays loaded.
+
+### Rate and channel reduction
+
+`freq_div`, `freq_max` and `force_mono` of `MPEGA_CTRL` shrink the PCM before
+it reaches the caller. Firmware that reports
+`ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE` in the audio service flags does that on
+the card: the library starts the stream with `output_channels` 1 for a stereo
+stream under `force_mono`, and with `output_hz` set to the stream's rate divided
+by the chosen divisor. The card mixes stereo to mono as `(L + R) / 2` and
+decimates through a low-pass filter, so the PCM ring already holds the
+requested layout. Firmware without the flag rejects the request with
+`ZZ9K_STATUS_UNSUPPORTED`; the library then begins the stream with zeros and
+does the same work on the 68k. That path keeps every `freq_div`th sample
+without a filter, so high frequencies alias.
+
+Either way `MPEGA_STREAM` keeps describing the file in `frequency` and
+`channels`, and the decoded PCM in `dec_frequency` and `dec_channels`. The 68k
+reads the card's PCM ring with aligned longword accesses.
+
+### MPGA_decode_to
+
+`LONG MPGA_decode_to(MPEGA_STREAM *mpds, struct MpgaOut *out)` decodes the next
+frame and writes it into the caller's buffers in the format the output wants,
+so the program need not copy or convert it again. Its offset, `struct MpgaOut`
+and the `MPGA_FMT_*` values are those of `ambmpega.library`
+(<https://github.com/luvwagn/mpga.library>, interface MIT), and the formats
+follow that library's documentation: `MPGA_FMT_S16` (planar 16-bit),
+`MPGA_FMT_S16I` (interleaved 16-bit, as AHI's `AHIST_S16S`), `MPGA_FMT_S8`
+(Paula bytes), `MPGA_FMT_S8D` (the same with triangular dither of one 8-bit
+step) and `MPGA_FMT_S14` (Paula's 14 bits as a high byte and 6 more bits). The
+buffers are rings of `mo_Mask + 1` samples, `mo_Index` is advanced by the
+samples written, `mo_Peak[]` receives each channel's peak (0 to 32767), and
+`mo_Clipped` is increased by the samples that `MPEGA_scale` above 100 clipped.
+On a stream served by the software decoder, `mo_Clipped` is left as it was
+because the software decoder clips inside its own scaling.
+
+The vector exists only in `mpega.library` 2.127 or newer from this SDK. Check
+`lib_Revision` of the opened library before calling it. An `mpega.library` from
+another source, and older builds of this one, have nothing at offset -72.
+
+```c
+struct Library *MPEGABase = OpenLibrary("mpega.library", 2);
+
+if (MPEGABase && MPEGABase->lib_Revision >= 127) {
+  /* MPGA_decode_to() is available. */
+}
+```
+
 ## Develop with the SDK
 
 Include `zz9k/sdk.h` for the public ABI, mailbox host interface, request and

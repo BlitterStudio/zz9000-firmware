@@ -85,7 +85,9 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Werror -Iinclude -Ihost/include
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
   build/m68k/zz9k_host_library.o -o build/zz9k.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
-  amiga/mpega/mpega_resident.c -o build/mpega.library
+  amiga/mpega/mpega_resident.c amiga/mpega/mpega_convert.c \
+  amiga/mpega/mpega_fallback.c amiga/mpega/mpega_romtag.c \
+  -o build/mpega.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s \
   build/m68k/aar_shell.o build/m68k/aar_core.o build/m68k/aar_probe.o \
   build/m68k/aar_zz9000.o -o build/aar.library

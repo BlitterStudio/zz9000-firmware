@@ -168,7 +168,7 @@ static inline uint32_t zz9k_known_service_flag_count(uint32_t service_id)
     return 18U;
   }
   if (service_id == ZZ9K_SERVICE_AUDIO) {
-    return 15U;
+    return 16U;
   }
   if (service_id == ZZ9K_SERVICE_CODEC) {
     return 19U;
@@ -297,6 +297,8 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM;
     case 14:
       return ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM;
+    case 15:
+      return ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE;
     default:
       return 0U;
     }
@@ -544,6 +546,8 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
       return "flac-stream";
     case ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM:
       return "vorbis-stream";
+    case ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE:
+      return "stream-reduce";
     default:
       return 0;
     }

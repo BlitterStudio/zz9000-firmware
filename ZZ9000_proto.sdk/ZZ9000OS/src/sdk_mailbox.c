@@ -3530,10 +3530,16 @@ static uint32_t audio_stream_decode_native(struct SDKAudioStream *stream)
 	io.pcm_capacity = stream->pcm_capacity;
 	pcm_flush_start = stream->pcm_written_total % stream->pcm_capacity;
 	io.pcm_write = pcm_flush_start;
-	io.pcm_free = audio_stream_pcm_free(stream);
+	/* The backend writes decoder-format PCM straight into the ring and
+	 * audio_stream_reduce_ring() shrinks it in place afterwards, so the
+	 * room it may use must not exceed what the reduced form needs, and
+	 * the client's high-water budget counts reduced bytes. */
+	io.pcm_free = audio_reduce_raw_room(&stream->reduce,
+	                                    audio_stream_pcm_free(stream));
 	io.pcm_budget = stream->high_water_bytes;
 	if (io.pcm_budget == 0U || io.pcm_budget > stream->pcm_capacity)
 		io.pcm_budget = stream->pcm_capacity;
+	io.pcm_budget = audio_reduce_raw_bytes(&stream->reduce, io.pcm_budget);
 	io.pcm_unread = audio_stream_pcm_used(stream);
 	if (stream->codec == SDK_AUDIO_CODEC_VORBIS)
 		status = sdk_vorbis_decode(&stream->vorbis, &io);
@@ -3544,15 +3550,20 @@ static uint32_t audio_stream_decode_native(struct SDKAudioStream *stream)
 		stream->bytes_consumed += io.consumed;
 		progress = 1U;
 	}
-	if (stream->sample_rate == 0U) {
-		if (stream->codec == SDK_AUDIO_CODEC_VORBIS) {
-			stream->sample_rate = stream->vorbis.sample_rate;
-			stream->channels = stream->vorbis.channels;
-		} else {
-			stream->sample_rate = stream->flac.sample_rate;
-			stream->channels = stream->flac.channels;
-		}
+	{
+		const uint32_t dec_hz = stream->codec == SDK_AUDIO_CODEC_VORBIS ?
+		                        stream->vorbis.sample_rate :
+		                        stream->flac.sample_rate;
+		const uint32_t dec_channels =
+			stream->codec == SDK_AUDIO_CODEC_VORBIS ?
+			stream->vorbis.channels : stream->flac.channels;
+
+		/* Also re-evaluates the divisor if the rate changed. */
+		audio_stream_set_format(stream, dec_hz, dec_channels);
 	}
+	if (io.produced != 0U)
+		io.produced = audio_stream_reduce_ring(stream, pcm_flush_start,
+		                                       io.produced);
 	if (io.produced != 0U) {
 		stream->pcm_written_total += io.produced;
 		stream->bytes_produced += io.produced;
@@ -4681,7 +4692,9 @@ static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
                                   uint32_t pcm_capacity,
                                   uint32_t output_format,
                                   uint32_t low_water_bytes,
-                                  uint32_t high_water_bytes)
+                                  uint32_t high_water_bytes,
+                                  uint32_t output_hz,
+                                  uint32_t output_channels)
 {
 	struct SDKAudioStream *stream;
 	int input_pinned;
@@ -4717,6 +4730,8 @@ static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
 	stream->high_water_bytes = high_water_bytes & ~1UL;
 	stream->sample_format = output_format;
 	stream->owner_id = request_client_id(req);
+	/* Validated by the BEGIN handlers (audio_stream_reduce_begin_status). */
+	(void)audio_reduce_request(&stream->reduce, output_hz, output_channels);
 	/* Affinity is fixed for the stream's whole life: the input staging
 	 * ring becomes cache-owned by whichever core runs the decoder. */
 	stream->core1_affine = scheduler_core1_available() ? 1U : 0U;
@@ -4753,20 +4768,28 @@ static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
 	if (!mp3_ring || !pcm_ring)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	output_format = get_be32(payload->output_format);
-	if (get_be32(payload->flags) != 0U ||
-	    get_be32(payload->output_hz) != 0U ||
-	    get_be32(payload->output_channels) != 0U)
+	if (get_be32(payload->flags) != 0U)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
 	    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	{
+		uint16_t reduce_status = audio_stream_reduce_begin_status(
+			output_format, get_be32(payload->output_hz),
+			get_be32(payload->output_channels));
+
+		if (reduce_status != SDK_STATUS_OK)
+			return complete_status(req, comp, reduce_status);
+	}
 	return open_audio_stream(req, comp, SDK_AUDIO_CODEC_MP3, mp3_ring,
 	                         pcm_ring,
 	                         get_be32(payload->mp3_ring_capacity),
 	                         get_be32(payload->pcm_ring_capacity),
 	                         output_format,
 	                         get_be32(payload->low_water_bytes),
-	                         get_be32(payload->high_water_bytes));
+	                         get_be32(payload->high_water_bytes),
+	                         get_be32(payload->output_hz),
+	                         get_be32(payload->output_channels));
 }
 
 static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *req,
@@ -4791,14 +4814,17 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 	if (!input_ring || !pcm_ring)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	output_format = get_be32(payload->output_format);
-	if (get_be32(payload->flags) != 0U ||
-	    get_be32(payload->output_hz) != 0U ||
-	    get_be32(payload->output_channels) != 0U)
+	if (get_be32(payload->flags) != 0U)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	{
 		uint16_t format_status = audio_stream_begin_ex_format_status(
 			codec, output_format);
 
+		if (format_status != SDK_STATUS_OK)
+			return complete_status(req, comp, format_status);
+		format_status = audio_stream_reduce_begin_status(
+			output_format, get_be32(payload->output_hz),
+			get_be32(payload->output_channels));
 		if (format_status != SDK_STATUS_OK)
 			return complete_status(req, comp, format_status);
 	}
@@ -4812,7 +4838,9 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 	                         get_be32(payload->pcm_ring_capacity),
 	                         output_format,
 	                         get_be32(payload->low_water_bytes),
-	                         get_be32(payload->high_water_bytes));
+	                         get_be32(payload->high_water_bytes),
+	                         get_be32(payload->output_hz),
+	                         get_be32(payload->output_channels));
 }
 
 static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,

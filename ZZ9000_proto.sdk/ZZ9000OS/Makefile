@@ -336,6 +336,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_vorbis_alloc.c \
 	$(SRC_DIR)/sdk_audio_vorbis.c \
 	$(SRC_DIR)/sdk_audio_stream.c \
+	$(SRC_DIR)/audio_reduce.c \
 	$(SRC_DIR)/sdk_video_stream.c \
 	$(SRC_DIR)/sdk_video_mpeg2_glue.c \
 	$(SRC_DIR)/sdk_media_profile.c \

@@ -352,8 +352,8 @@ static ZZPlayCodecPassResult zzplay_codec_pass_failure(
                                           : ZZPLAY_CODEC_PASS_UNSUPPORTED;
 }
 
-/* The stream decoder has no rate or channel conversion, so the firmware
- * rejects a non-zero output geometry outright. Ask for the file's native
+/* Firmware without ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE rejects a non-zero
+ * output geometry, and ZZPlay plays the file's own rate. Ask for the native
  * rate/channels; zzplay_codec_result_valid then holds the decoded stream to
  * the geometry the probe already reported. MP3 keeps the original Begin so
  * it runs on firmware that predates the codec-aware BeginEx; its high

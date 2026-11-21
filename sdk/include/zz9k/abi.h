@@ -463,6 +463,10 @@ enum ZZ9KServiceFlags {
   /* Stream capability flags for the FLAC and Vorbis backends. */
   ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM = 1U << 25,
   ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM = 1U << 26,
+  /* AUDIO_STREAM_BEGIN and BEGIN_EX honour output_hz (a maximum rate:
+   * the stream rate divided by 1, 2 or 4 through a low-pass decimator)
+   * and output_channels (1 mixes stereo down, 2 duplicates mono). */
+  ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE = 1U << 27,
 
 
   ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 = 1U << 16,

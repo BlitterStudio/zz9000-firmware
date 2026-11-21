@@ -16,6 +16,7 @@
 
 #include "sdk_audio_stream.h"
 #include "sdk_audio_codec_io.h"
+#include "audio_reduce.h"
 #include "audio_stream_drain.h"
 #include "xil_cache.h"
 #include "mp3/mp3.h"
@@ -108,6 +109,147 @@ void byteswap_pcm16(uint8_t *data, uint32_t bytes)
 	}
 }
 
+/* The reducer and the ring staging treat PCM as int16_t. */
+typedef char audio_stream_sample_is_s16[
+	sizeof(mp3d_sample_t) == sizeof(int16_t) ? 1 : -1];
+
+uint16_t audio_stream_reduce_begin_status(uint32_t sample_format,
+                                          uint32_t output_hz,
+                                          uint32_t output_channels)
+{
+	if (output_hz == 0U && output_channels == 0U)
+		return SDK_STATUS_OK;
+	if (sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
+	    sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+		return SDK_STATUS_UNSUPPORTED;
+	if (output_channels > AUDIO_REDUCE_MAX_CHANNELS)
+		return SDK_STATUS_UNSUPPORTED;
+	return SDK_STATUS_OK;
+}
+
+void audio_stream_set_format(struct SDKAudioStream *stream, uint32_t hz,
+                             uint32_t channels)
+{
+	if (!audio_reduce_set_input(&stream->reduce, hz, channels))
+		return;
+	stream->sample_rate = stream->reduce.out_hz;
+	stream->channels = stream->reduce.out_channels;
+}
+
+/* Copy ring bytes [offset, offset + bytes) (wrapping) to or from a linear
+ * buffer. */
+static void audio_stream_ring_read(const struct SDKAudioStream *stream,
+                                   uint32_t offset, uint8_t *dst,
+                                   uint32_t bytes)
+{
+	const uint8_t *ring = (const uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+	uint32_t first = stream->pcm_capacity - offset;
+
+	if (first > bytes)
+		first = bytes;
+	memcpy(dst, ring + offset, first);
+	if (bytes > first)
+		memcpy(dst + first, ring, bytes - first);
+}
+
+static void audio_stream_ring_write(const struct SDKAudioStream *stream,
+                                    uint32_t offset, const uint8_t *src,
+                                    uint32_t bytes)
+{
+	uint8_t *ring = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+	uint32_t first = stream->pcm_capacity - offset;
+
+	if (first > bytes)
+		first = bytes;
+	memcpy(ring + offset, src, first);
+	if (bytes > first)
+		memcpy(ring, src + first, bytes - first);
+}
+
+uint32_t audio_stream_reduce_ring(struct SDKAudioStream *stream,
+                                  uint32_t start, uint32_t raw_bytes)
+{
+	struct audio_reduce *r = &stream->reduce;
+	const uint32_t cap = stream->pcm_capacity;
+	const uint32_t in_fb = 2U * r->in_channels;
+	const uint32_t out_fb = 2U * r->out_channels;
+	const uint32_t total = r->in_channels != 0U ? raw_bytes / in_fb : 0U;
+	const int be = stream->sample_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE;
+	uint8_t *in_buf = (uint8_t *)stream->scratch;
+	uint8_t *out_buf = (uint8_t *)stream->reduced;
+	const uint32_t in_cap = (uint32_t)sizeof(stream->scratch) / in_fb;
+	uint32_t done;
+
+	if (!audio_reduce_active(r) || total == 0U)
+		return raw_bytes;
+
+	if (r->divisor == 1U && r->in_channels == 1U && r->out_channels == 2U) {
+		/* Duplication doubles the data and the output runs ahead of the
+		 * input, so walk backward: each chunk is read before its output
+		 * lands, and the output never reaches input still to be read. */
+		const uint32_t chunk_max = in_cap < sizeof(stream->reduced) / 4U ?
+		                           in_cap : (uint32_t)sizeof(stream->reduced) / 4U;
+		uint32_t remaining = total;
+
+		while (remaining != 0U) {
+			uint32_t n = remaining < chunk_max ? remaining : chunk_max;
+			uint32_t first = remaining - n;
+			const int16_t *src = (const int16_t *)in_buf;
+			int16_t *dst = (int16_t *)out_buf;
+			uint32_t i;
+
+			audio_stream_ring_read(stream, (start + first * in_fb) % cap,
+			                       in_buf, n * in_fb);
+			if (be)
+				byteswap_pcm16(in_buf, n * in_fb);
+			for (i = 0U; i < n; i++) {
+				dst[2U * i] = src[i];
+				dst[2U * i + 1U] = src[i];
+			}
+			if (be)
+				byteswap_pcm16(out_buf, n * out_fb);
+			audio_stream_ring_write(stream,
+			                        (start + first * out_fb) % cap,
+			                        out_buf, n * out_fb);
+			remaining = first;
+		}
+		return total * out_fb;
+	}
+
+	/* Forward pass: cumulative output never exceeds cumulative input, so
+	 * a chunk's output only lands on bytes that were already read. */
+	{
+		const uint32_t chunk_max = in_cap < 1024U ? in_cap : 1024U;
+		uint32_t out_off = 0U;
+
+		for (done = 0U; done < total;) {
+			uint32_t n = total - done;
+			uint32_t out_frames;
+
+			if (n > chunk_max)
+				n = chunk_max;
+			audio_stream_ring_read(stream,
+			                       (start + done * in_fb) % cap,
+			                       in_buf, n * in_fb);
+			if (be)
+				byteswap_pcm16(in_buf, n * in_fb);
+			out_frames = audio_reduce_run(
+				r, (const int16_t *)in_buf, n,
+				(int16_t *)out_buf);
+			if (out_frames != 0U) {
+				if (be)
+					byteswap_pcm16(out_buf, out_frames * out_fb);
+				audio_stream_ring_write(
+					stream, (start + out_off) % cap, out_buf,
+					out_frames * out_fb);
+				out_off += out_frames * out_fb;
+			}
+			done += n;
+		}
+		return out_off;
+	}
+}
+
 static uint32_t audio_stream_get_be32(const uint8_t *data)
 {
 	return ((uint32_t)data[0] << 24) |
@@ -174,8 +316,10 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 	const uint32_t frame_pcm_bytes =
 		MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t);
 	uint32_t produced_this_call = 0U;
+	uint32_t raw_this_call = 0U;
 	uint32_t frames_this_call = 0U;
 	uint32_t max_pcm_this_call;
+	uint32_t max_raw_this_call;
 	uint32_t pcm_flush_start;
 	uint32_t progress = 0U;
 	int drain_blocked_on_input = 0;
@@ -204,8 +348,13 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 		max_pcm_this_call = stream->pcm_capacity;
 	/* Bound this pass to the measured ~3.5 ms of core-1 service regardless
 	 * of the client's high-water budget; see sdk_audio_codec_io.h for the
-	 * 333 MHz global-timer basis. */
-	max_pcm_this_call = sdk_audio_decode_pass_budget(max_pcm_this_call);
+	 * 333 MHz global-timer basis. The decode cost follows the decoder's
+	 * PCM, so the cap counts it before reduction, while the client's
+	 * high-water budget counts the bytes that reach the ring. */
+	max_raw_this_call = sdk_audio_decode_pass_budget(
+		audio_reduce_raw_bytes(&stream->reduce, max_pcm_this_call));
+	if (max_raw_this_call < frame_pcm_bytes)
+		max_raw_this_call = frame_pcm_bytes;
 	if (max_pcm_this_call < frame_pcm_bytes)
 		max_pcm_this_call = frame_pcm_bytes;
 	pcm_flush_start = stream->pcm_written_total % stream->pcm_capacity;
@@ -228,8 +377,9 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 			    stream->eof, stream->drain_requested))
 			break;
 		if (produced_this_call != 0U &&
-		    (max_pcm_this_call - produced_this_call) <
-		        frame_pcm_bytes) {
+		    ((max_raw_this_call - raw_this_call) < frame_pcm_bytes ||
+		     (max_pcm_this_call - produced_this_call) <
+		         frame_pcm_bytes)) {
 			break;
 		}
 		if (stream->drain_requested && !stream->eof &&
@@ -259,12 +409,11 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 		}
 
 		if (samples > 0) {
-			if (stream->sample_rate == 0U) {
-				stream->sample_rate = (uint32_t)info.hz;
-				stream->channels = (uint32_t)info.channels;
-			}
-			if ((uint32_t)info.hz != stream->sample_rate ||
-			    (uint32_t)info.channels != stream->channels) {
+			if (stream->reduce.in_hz == 0U)
+				audio_stream_set_format(stream, (uint32_t)info.hz,
+				                        (uint32_t)info.channels);
+			if ((uint32_t)info.hz != stream->reduce.in_hz ||
+			    (uint32_t)info.channels != stream->reduce.in_channels) {
 				stream->faulted = 1U;
 				break;
 			}
@@ -283,14 +432,29 @@ uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream)
 				        sizeof(mp3d_sample_t);
 			}
 			if (bytes != 0U) {
-				if (stream->sample_format ==
-				    SDK_AUDIO_SAMPLE_FORMAT_S16BE)
-					byteswap_pcm16((uint8_t *)stream->scratch,
-					               bytes);
-				audio_stream_pcm_write(
-					stream, (uint8_t *)stream->scratch, bytes);
+				uint8_t *pcm = (uint8_t *)stream->scratch;
+				uint32_t out_bytes = bytes;
+
+				raw_this_call += bytes;
+				if (audio_reduce_active(&stream->reduce)) {
+					/* Reduction first; the byteswap stays
+					 * last so the filter sees native S16. */
+					out_bytes = audio_reduce_run(
+						&stream->reduce, stream->scratch,
+						(uint32_t)samples,
+						stream->reduced) *
+						2U * stream->reduce.out_channels;
+					pcm = (uint8_t *)stream->reduced;
+				}
+				if (out_bytes != 0U) {
+					if (stream->sample_format ==
+					    SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+						byteswap_pcm16(pcm, out_bytes);
+					audio_stream_pcm_write(stream, pcm,
+					                       out_bytes);
+				}
 				stream->frames_decoded++;
-				produced_this_call += bytes;
+				produced_this_call += out_bytes;
 				progress = 1U;
 				if (stream->output_frame_limit != 0U &&
 				    stream->frames_decoded >=

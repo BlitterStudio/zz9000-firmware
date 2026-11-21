@@ -75,6 +75,59 @@ Capture resets its converter at record start, when the frame-count value
 changes, and when the RX buffer is reassigned. Repeating the same frame-count
 value keeps the existing history.
 
+## Stream reduction
+
+`AUDIO_STREAM_BEGIN` and `AUDIO_STREAM_BEGIN_EX` accept `output_hz` and
+`output_channels` and the firmware advertises `SDK_SERVICE_FLAG_AUDIO_STREAM_REDUCE`
+(bit 27). The reduction lives in `audio_reduce.c`, apart from the polyphase
+converter above: it runs on S16 PCM as the stream decoder finishes a frame or
+a pass, before the PCM enters the stream ring. The filter always sees native
+S16 samples: an S16BE stream is swapped after the reduction for MP3 and swapped
+around it for FLAC and Vorbis. MP3 frames are reduced from the session's frame buffer.
+FLAC and Vorbis write decoder PCM into the ring and `audio_stream_reduce_ring()`
+shrinks it in place, one chunk at a time, through the session's frame and
+scratch buffers; no pass allocates memory. S32 formats are not reduced and a
+non-zero request with one returns `UNSUPPORTED`.
+
+`output_channels` of 1 mixes stereo to mono as `(L + R + 1) >> 1`; 2 copies a
+mono stream to both channels. `output_hz` is a maximum: the divisor is the
+smallest of 1, 2 and 4 with `stream_rate / divisor <= output_hz`, or 4 when
+none fits, and the ring rate is `stream_rate / divisor` rounded to the nearest
+integer. Stereo mixdown happens at the input rate, before the filter. A mono
+source copied to stereo is filtered once.
+
+Decimation by 2 uses a 59-tap Kaiser half-band FIR (beta 9.0, Q30 taps whose
+sum is exactly 2^30, `int64_t` accumulation, rounding and saturation to
+`int16_t`). Only 15 tap pairs and the centre tap are non-zero, so a stage costs
+16 multiplies per output sample and channel. A divisor of 4 runs two stages
+back to back. The taps come from `util/gen_audio_reduce_table.py` into
+`audio_reduce_table.h`:
+
+```
+python util/gen_audio_reduce_table.py
+```
+
+The design edges are a flat passband to 0.20 x the stage input rate (0.40 x its
+output rate) and a stop-band from 0.30 x the input rate, the first input
+frequency that folds onto the passband edge. `make -C test/audio` runs
+`audio_reduce_test`, which measures sine gain through the production code and
+compares it with a double-precision model of the same taps. At 48 kHz stereo
+the measured figures are:
+
+| Divisor | Worst passband deviation, 0 to 0.40 x output rate | 1 kHz | Weakest alias rejection |
+| ---: | ---: | ---: | ---: |
+| 2 | 0.0003 dB | 0.0001 dB | 86.7 dB |
+| 4 | 0.0003 dB | -0.0006 dB | 87.4 dB |
+
+The rejection figures include the 16-bit rounding floor of the output. The
+FIR history and decimation phase belong to the session and persist across
+decode calls, so odd-sized passes give the same output as one call; a change
+in decoder rate or channel count selects the divisor again and clears the
+history. Each stage delays the signal by 29 input samples and the final few
+samples of a stream remain in the filter. The decode pass cap of 24 KiB counts
+the decoder PCM before reduction, so reduction does not lengthen a pass; the
+client's low and high water marks count ring bytes.
+
 ## Current status
 
 The generated tables are committed source. Regenerate them with:
@@ -84,7 +137,8 @@ python util/gen_audio_convert_tables.py
 ```
 
 `make -C test/audio` builds and runs the converter, capture, AHI playback-rate,
-and pump-preconversion host tests along with the other audio test targets.
+pump-preconversion, and stream reduction host tests along with the other audio
+test targets.
 The converter tests cover table integrity, response limits, alias and image
 rejection, chunked conversion, period geometry, group delay, mono output,
 saturation, reset behavior, and the additional source-to-48 kHz banks.

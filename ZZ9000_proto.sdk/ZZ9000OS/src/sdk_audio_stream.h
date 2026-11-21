@@ -20,6 +20,7 @@
 #include "sdk_audio_flac.h"
 #include "sdk_audio_vorbis.h"
 #include "audio_stream_drain.h"
+#include "audio_reduce.h"
 #include "mp3/minimp3.h"
 
 /* The MP3 stream loop keeps a lookahead reserve of compressed input; EOF
@@ -58,6 +59,8 @@ struct SDKAudioStream {
 	uint32_t pcm_consumed_total;
 	uint32_t low_water_bytes;
 	uint32_t high_water_bytes;
+	/* Format of the PCM in the ring (after reduction), not the decoder's;
+	 * the decoder format lives in reduce.in_hz / reduce.in_channels. */
 	uint32_t sample_rate;
 	uint32_t channels;
 	uint32_t sample_format;
@@ -116,8 +119,14 @@ struct SDKAudioStream {
 		struct sdk_flac_state flac;
 		struct sdk_vorbis_state vorbis;
 	};
+	/* output_hz / output_channels reduction (audio_reduce.h). */
+	struct audio_reduce reduce;
 	mp3dec_t decoder;
+	/* MP3 frame output. The native codecs never use it, so
+	 * audio_stream_reduce_ring() borrows it, with `reduced`, as the input
+	 * and output staging for a pass. */
 	mp3d_sample_t scratch[MINIMP3_MAX_SAMPLES_PER_FRAME];
+	mp3d_sample_t reduced[MINIMP3_MAX_SAMPLES_PER_FRAME];
 };
 
 /* Ring bookkeeping shared by the MP3 pass, the native codec pass in
@@ -132,6 +141,25 @@ void audio_stream_pcm_write(struct SDKAudioStream *stream,
 void flush_audio_pcm_written(const struct SDKAudioStream *stream,
                              uint8_t *dst, uint32_t offset, uint32_t bytes);
 void byteswap_pcm16(uint8_t *data, uint32_t bytes);
+
+/* BEGIN output_hz / output_channels check (S16 only, channels 0..2):
+ * SDK_STATUS_OK or SDK_STATUS_UNSUPPORTED. Both zero is always accepted. */
+uint16_t audio_stream_reduce_begin_status(uint32_t sample_format,
+                                          uint32_t output_hz,
+                                          uint32_t output_channels);
+
+/* Announce the decoder's format. Applies the BEGIN reduction request and
+ * sets stream->sample_rate / channels to the PCM format the ring will
+ * carry. A changed decoder rate or channel count re-evaluates the divisor
+ * and clears the filter state. */
+void audio_stream_set_format(struct SDKAudioStream *stream, uint32_t hz,
+                             uint32_t channels);
+
+/* Reduce `raw_bytes` of decoder PCM that a native codec wrote at ring
+ * offset `start` (wrapping) in the stream's sample format, in place.
+ * Returns the reduced byte count now at `start`. */
+uint32_t audio_stream_reduce_ring(struct SDKAudioStream *stream,
+                                  uint32_t start, uint32_t raw_bytes);
 
 /* One bounded MP3 decode pass over the stream's rings: as many frames as
  * input, PCM room, the low-water quantum and the measured ~3.5 ms service cap

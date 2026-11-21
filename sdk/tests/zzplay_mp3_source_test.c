@@ -28,11 +28,10 @@ static char *read_file(const char *path)
   return source;
 }
 
-/* The firmware's AUDIO_STREAM_BEGIN rejects a non-zero output_hz or
- * output_channels with UNSUPPORTED: the stream decoder has no rate or
- * channel conversion and always emits the file's native geometry. Asking
- * for the probed rate/channels there aborts standalone MP3 playback before
- * a single sample is decoded, so the request must stay zeroed. */
+/* Firmware without ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE rejects a non-zero
+ * output_hz or output_channels with UNSUPPORTED. Asking for the probed
+ * rate/channels there aborts standalone MP3 playback before a single
+ * sample is decoded, so the request must stay zeroed. */
 static int begin_requests_native_geometry(const char *source)
 {
   const char *call =

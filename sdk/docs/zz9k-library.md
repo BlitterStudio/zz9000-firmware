@@ -1123,13 +1123,61 @@ shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
 | Field | Contract |
 | --- | --- |
 | Codecs | `enum ZZ9KAudioCodec` defines `ZZ9K_AUDIO_CODEC_MP3` (1), `ZZ9K_AUDIO_CODEC_FLAC` (2), and `ZZ9K_AUDIO_CODEC_VORBIS` (3). `ZZ9KAudioStreamBeginExDesc.codec` selects the codec. Unknown or unavailable values return `ZZ9K_STATUS_BAD_REQUEST` or `ZZ9K_STATUS_UNSUPPORTED`. |
-| Native rate and channels | Set `output_hz` to 0 for the source rate and `output_channels` to 0 for the source channel count. `ZZ9KAudioStreamResult.sample_rate` and `channels` return the selected geometry. |
+| Rate and channels | Set `output_hz` to 0 for the source rate and `output_channels` to 0 for the source channel count. Non-zero values ask the firmware to reduce the PCM before it reaches the ring; see Rate and channel reduction below. `ZZ9KAudioStreamResult.sample_rate` and `channels` return the geometry of the PCM in the ring. |
 | PCM format | `ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE` (1), `S16BE` (2), `S32LE` (3), and `S32BE` (4) select signed linear PCM containers. A 24-bit source in a 32-bit container is left-aligned: bits 31..8 contain the sample and bits 7..0 are zero. Unsupported codec/format combinations return `ZZ9K_STATUS_UNSUPPORTED`. |
 | Cursors | `bytes_consumed`, `bytes_produced`, `pcm_write`, `pcm_read`, and capacities are byte counts. A read acknowledgement must contain whole PCM frames (`channels * bytes_per_sample`). |
 | Format stability | Sample rate, channel count, and sample format become fixed after header decode. An unannounced format change faults the session. |
 | Consumer | A session is either unbound readback (`ZZ9KAudioStreamRead()`) or bound playback (`ZZ9KAudioStreamPlay()`). Binding while another session owns playback returns `ZZ9K_STATUS_BUSY`. |
 | End and drain | `ZZ9K_AUDIO_STREAM_FEED_EOF` finishes the stream and returns `ZZ9K_AUDIO_STREAM_RESULT_DONE` after PCM is consumed. `ZZ9K_AUDIO_STREAM_FEED_DRAIN` requires `ZZ9K_CAP_AUDIO_STREAM_DRAIN`, decodes complete frames, retires queued PCM to `ZZ9K_AUDIO_STREAM_RESULT_DRAINED`, and retains incomplete compressed input for a later feed. |
 | Cleanup | Close reclaims decoder allocations and invalidates the session handle. A mailbox reset or firmware restart invalidates every active session. |
+
+#### Rate and channel reduction
+
+Firmware that reports `ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE` (bit 27 of the
+audio service flags, printed as `stream-reduce` by `zz9k-services`) honours
+`output_hz` and `output_channels` in `ZZ9KAudioStreamBegin()` and
+`ZZ9KAudioStreamBeginEx()`, for MP3, FLAC, and Vorbis. The reduction runs on
+the ARM before the PCM enters the ring, so the 68k reads less data and needs
+no filter of its own. Firmware without the flag returns
+`ZZ9K_STATUS_UNSUPPORTED` for a non-zero value. A client retries the Begin
+with both fields zero and converts on the 68k.
+
+| Field | Contract |
+| --- | --- |
+| `output_channels` | 0 keeps the stream layout. 1 writes mono: a stereo stream is mixed down as `(L + R + 1) >> 1`, the average with halves rounded up. 2 writes stereo: a mono stream is duplicated to both channels. Any other value returns `ZZ9K_STATUS_UNSUPPORTED`. |
+| `output_hz` | 0 keeps the stream rate. A non-zero value is a maximum rate. The firmware picks the smallest divisor d in {1, 2, 4} with `stream_rate / d <= output_hz`, or 4 when none fits, and keeps every d-th sample after a low-pass filter. The ring rate is `stream_rate / d` rounded to the nearest integer. A stream rate at or below `output_hz` is left alone. |
+| Sample format | `ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE` and `S16BE` only. A non-zero `output_hz` or `output_channels` with an S32 format returns `ZZ9K_STATUS_UNSUPPORTED`. The byte order of the ring stays as requested. |
+| Result geometry | `sample_rate` and `channels` in every `ZZ9KAudioStreamResult` describe the PCM written to the ring after reduction. They stay 0 until the decoder has read the stream header, as without reduction. |
+| Cursors and water marks | `bytes_produced`, `pcm_write`, `pcm_read`, `low_water_bytes`, and `high_water_bytes` count ring bytes, that is reduced PCM. A read acknowledgement covers complete reduced frames. A bound stream plays the reduced rate through the ZZ9000AX converter. |
+| Rate change | The divisor follows the decoder rate. A native codec that reports a different rate or channel count gets a new divisor and a cleared filter, and `sample_rate` and `channels` in later results follow. The MP3 stream faults on a rate change, as it does without reduction. |
+
+Divisors for common sources:
+
+| Stream rate | `output_hz` 48000 | `output_hz` 32000 | `output_hz` 22050 | `output_hz` 11025 |
+| ---: | ---: | ---: | ---: | ---: |
+| 48000 | 1 (48000) | 2 (24000) | 4 (12000) | 4 (12000) |
+| 44100 | 1 (44100) | 2 (22050) | 2 (22050) | 4 (11025) |
+| 32000 | 1 (32000) | 1 (32000) | 2 (16000) | 4 (8000) |
+| 22050 | 1 (22050) | 1 (22050) | 1 (22050) | 2 (11025) |
+
+Each cell is the divisor followed by the ring rate in hertz.
+
+The decimator is a 59-tap linear-phase half-band FIR with Q30 taps and 64-bit
+accumulation; a divisor of 4 runs two stages in cascade. Measured on the host
+build of the firmware code with sine sweeps at 48 kHz:
+
+| Divisor | Passband deviation, 0 to 0.40 x ring rate | 1 kHz gain | Alias rejection |
+| ---: | ---: | ---: | ---: |
+| 2 | 0.0003 dB | 0.0001 dB | 86.7 dB |
+| 4 | 0.0003 dB | -0.0006 dB | 87.4 dB |
+
+Alias rejection is the weakest suppression of any input frequency that would
+fold into the 0 to 0.40 x ring rate band, with a 16-bit rounding floor near
+-98 dB. The filter history and decimation phase persist between decode
+calls, so the output does not depend on how the stream is cut into feeds and
+reads. Each stage delays the PCM by 29 samples of its input rate (about 0.6
+ms at 48 kHz); the last few samples of a stream stay in the filter when the
+stream ends.
 
 #### Native FLAC sessions (`ZZ9K_AUDIO_CODEC_FLAC`, gated by
 `ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM` and `ZZ9K_CAP_AUDIO_FLAC`; firmware

@@ -118,7 +118,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE |
 			SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN |
 			SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM |
-			SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM,
+			SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM |
+			SDK_SERVICE_FLAG_AUDIO_STREAM_REDUCE,
 		.opcode_base = SDK_SERVICE_AUDIO,
 		.opcode_count = 23,	/* 0x0500..0x0516 incl. audio control plane,
 			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511
