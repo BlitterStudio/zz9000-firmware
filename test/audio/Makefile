@@ -25,12 +25,14 @@ RING_TARGET := $(BUILD_DIR)/audio_fabric_ring_test
 BENCH_SMOKE_TARGET := $(BUILD_DIR)/bench_smoke_test
 MEDIA_VIEW_TARGET := $(BUILD_DIR)/audio_pump_media_view_test
 STREAM_DECODE_TARGET := $(BUILD_DIR)/audio_stream_decode_test
+REDUCE_TARGET := $(BUILD_DIR)/audio_reduce_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
 	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) $(RECLAIM_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
-	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET)
+	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET) \
+	$(REDUCE_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
 # real firmware dependencies are FatFs and the Zynq cache API. The
@@ -62,6 +64,7 @@ test: $(TARGETS)
 	$(RING_TARGET)
 	$(BENCH_SMOKE_TARGET)
 	$(STREAM_DECODE_TARGET) fixtures/tone.mp3
+	$(REDUCE_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -263,12 +266,23 @@ $(MPEG_LAYER2_TARGET): mpeg_layer2_decode_test.c \
 
 $(STREAM_DECODE_TARGET): audio_stream_decode_test.c \
 	$(SRC_DIR)/sdk_audio_stream.c $(SRC_DIR)/sdk_audio_stream.h \
+	$(SRC_DIR)/audio_reduce.c $(SRC_DIR)/audio_reduce.h \
+	$(SRC_DIR)/audio_reduce_table.h \
 	$(SRC_DIR)/sdk_audio_codec_io.h $(SRC_DIR)/audio_stream_drain.h \
 	$(SRC_DIR)/mp3/decode_mp3.c $(SRC_DIR)/mp3/mp3.h \
 	$(SRC_DIR)/mp3/minimp3.h $(MOCK_DIR)/xil_cache.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_stream_decode_test.c \
-		$(SRC_DIR)/sdk_audio_stream.c $(SRC_DIR)/mp3/decode_mp3.c
+		$(SRC_DIR)/sdk_audio_stream.c $(SRC_DIR)/audio_reduce.c \
+		$(SRC_DIR)/mp3/decode_mp3.c -lm
+
+# Reducer (output_hz / output_channels): divisor selection, frequency
+# response, chunk-split invariance, mixdown and duplication.
+$(REDUCE_TARGET): audio_reduce_test.c $(SRC_DIR)/audio_reduce.c \
+	$(SRC_DIR)/audio_reduce.h $(SRC_DIR)/audio_reduce_table.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_reduce_test.c \
+		$(SRC_DIR)/audio_reduce.c -lm
 
 check-tables:
 	python3 ../../util/gen_audio_convert_tables.py

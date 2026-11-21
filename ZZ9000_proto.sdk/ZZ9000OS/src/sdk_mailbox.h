@@ -170,6 +170,9 @@
 #define SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN (1U << 24)
 #define SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM (1U << 25)
 #define SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM (1U << 26)
+/* AUDIO_STREAM_BEGIN and BEGIN_EX honour output_hz and output_channels
+ * (audio_reduce.h). */
+#define SDK_SERVICE_FLAG_AUDIO_STREAM_REDUCE (1U << 27)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
