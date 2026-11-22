@@ -65,6 +65,7 @@ void Xil_AssertNonVoid() {}
 #include "audio_capture.h"
 #include "audio_scene.h"
 #include "audio_fabric.h"
+#include "audio_voice_session.h"
 #include "watchdog.h"
 #include "mp3/mp3.h"
 
@@ -2929,6 +2930,9 @@ int main() {
 			// only copies (drivers#83 follow-up); no-op without
 			// converting leases
 			audio_fabric_lease_poll();
+			// render the wavetable voice engine into its fabric slot
+			// and drain its command ring; no-op without a session
+			audio_voice_session_poll();
 
 			if (sdk_mailbox_register_events) {
 				uint32_t events = sdk_mailbox_register_events;

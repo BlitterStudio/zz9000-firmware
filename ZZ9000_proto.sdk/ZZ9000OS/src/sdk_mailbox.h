@@ -173,6 +173,10 @@
 /* AUDIO_STREAM_BEGIN and BEGIN_EX honour output_hz and output_channels
  * (audio_reduce.h). */
 #define SDK_SERVICE_FLAG_AUDIO_STREAM_REDUCE (1U << 27)
+/* Wavetable voice engine opcodes (0x0518+) dispatch, but the capability
+ * stays unadvertised until the engine is qualified on hardware: neither
+ * the service catalog nor the audio opcode count mention it yet. */
+#define SDK_SERVICE_FLAG_AUDIO_VOICE (1U << 28)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
@@ -294,6 +298,69 @@ struct SDKAudioOutputClockResultPayload {
 	uint8_t flags[4];
 	uint8_t reserved[24];
 };
+
+/*
+ * Wavetable voice engine (audio_voice_session.h). OPEN names three shared
+ * buffers the caller owns (command ring, status block, upload staging) and
+ * pins them for the life of the session. All fields are big-endian.
+ * Mirrors the ZZ9KAudioVoice*Payload structs.
+ */
+#define SDK_OP_AUDIO_VOICE_OPEN        0x0518U
+#define SDK_OP_AUDIO_VOICE_CLOSE       0x0519U
+#define SDK_OP_AUDIO_VOICE_RESET       0x051AU
+#define SDK_OP_AUDIO_VOICE_UPLOAD      0x051BU
+
+struct SDKAudioVoiceOpenPayload {
+	uint8_t ring_handle[4];
+	uint8_t status_handle[4];
+	uint8_t staging_handle[4];
+	uint8_t bank_bytes[4];
+	uint8_t lead_frames[4];
+	uint8_t flags[4];
+	uint8_t voices[4];
+	uint8_t reserved[20];
+};
+
+struct SDKAudioVoiceOpenResultPayload {
+	uint8_t session[4];
+	uint8_t voices[4];
+	uint8_t bank_bytes[4];
+	uint8_t lead_frames[4];
+	uint8_t lead_floor_frames[4];
+	uint8_t lead_max_frames[4];
+	uint8_t ring_records[4];
+	uint8_t output_rate[4];
+	uint8_t max_samples[4];
+	uint8_t reserved[12];
+};
+
+/* CLOSE and RESET. */
+struct SDKAudioVoiceSessionPayload {
+	uint8_t session[4];
+	uint8_t reserved[44];
+};
+
+struct SDKAudioVoiceUploadPayload {
+	uint8_t session[4];
+	uint8_t flags[4];
+	uint8_t staging_offset[4];
+	uint8_t bank_offset[4];
+	uint8_t length[4];
+	uint8_t sample_id[4];
+	uint8_t sample_offset[4];
+	uint8_t sample_length[4];
+	uint8_t format[4];
+	uint8_t reserved[12];
+};
+
+typedef char SDKAudioVoiceOpenPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioVoiceOpenPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioVoiceOpenResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioVoiceOpenResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioVoiceSessionPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioVoiceSessionPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioVoiceUploadPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioVoiceUploadPayload) == 48U) ? 1 : -1];
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U

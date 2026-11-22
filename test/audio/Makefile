@@ -28,13 +28,15 @@ STREAM_DECODE_TARGET := $(BUILD_DIR)/audio_stream_decode_test
 REDUCE_TARGET := $(BUILD_DIR)/audio_reduce_test
 VOICE_TARGET := $(BUILD_DIR)/audio_voice_test
 VOICE_PT4_TARGET := $(BUILD_DIR)/audio_voice_pt4_test
+VOICE_SESSION_TARGET := $(BUILD_DIR)/audio_voice_session_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
 	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) $(RECLAIM_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET) \
-	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET)
+	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
+	$(VOICE_SESSION_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
 # real firmware dependencies are FatFs and the Zynq cache API. The
@@ -69,6 +71,7 @@ test: $(TARGETS)
 	$(REDUCE_TARGET)
 	$(VOICE_TARGET)
 	$(VOICE_PT4_TARGET)
+	$(VOICE_SESSION_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -308,6 +311,30 @@ $(VOICE_PT4_TARGET): audio_voice_pt4_test.c $(SRC_DIR)/audio_voice.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -I$(PT4_DIR) $(CFLAGS) -o $@ audio_voice_pt4_test.c \
 		$(SRC_DIR)/audio_voice.c $(PT4_DIR)/zz9k-voice-pt4.c $(PT4_SRCS)
+
+# Voice session: the ring, event queue, render, status, reset, heartbeat and
+# upload paths against the real compositor through the fabric host seam
+# (the lease harness), with xil_cache.h in recording mode for the
+# cache-fidelity scenario and the XTime shim as the heartbeat clock.
+$(VOICE_SESSION_TARGET): audio_voice_session_test.c \
+	fabric_test_common.c fabric_test_common.h \
+	$(SRC_DIR)/audio_voice_session.c $(SRC_DIR)/audio_voice_session.h \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h \
+	$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
+	$(SRC_DIR)/audio_fabric.h $(SRC_DIR)/audio_fabric_internal.h \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert.h \
+	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h \
+	$(SRC_DIR)/audio_playback_frontier.h $(SRC_DIR)/ax.h \
+	$(SRC_DIR)/memorymap.h $(SRC_DIR)/sdk_mailbox.h \
+	$(SRC_DIR)/sdk_aperture_layout.h \
+	$(MOCK_DIR)/xil_cache.h host_stubs/xtime_l.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DAUDIO_FABRIC_HOST_TEST \
+		-DXIL_CACHE_MOCK_RECORD \
+		-o $@ audio_voice_session_test.c fabric_test_common.c \
+		$(SRC_DIR)/audio_voice_session.c $(SRC_DIR)/audio_voice.c \
+		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
 check-tables:
 	python3 ../../util/gen_audio_convert_tables.py
