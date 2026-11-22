@@ -753,6 +753,19 @@ int main(void)
     goto close_session;
   }
 
+  /* The engine timeline starts with the first record. A module whose first
+   * rows are silent produces no event until its first note, and the pacing
+   * loop would wait for a playing frame that never advances, so a unity
+   * master gain goes out first, stamped at the start of the song. */
+  {
+    ZZ9KVoiceRecord *record =
+        pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_MASTER);
+
+    if (record) {
+      record->arg0 = 256U;
+    }
+  }
+
   reason = play(&source, seconds * ZZ9K_VOICE_OUTPUT_RATE);
   report(reason);
   if (strcmp(reason, "song end") != 0) {

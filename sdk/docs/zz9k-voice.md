@@ -160,7 +160,11 @@ A refused open leaves nothing allocated or pinned on the card.
 
 The engine counts frames at 48 kHz. Frame 0 is the first frame handed to the
 fabric after the first command record arrives. Until then the session is in
-state "open" and the slot adds silence.
+state "open" and the slot adds silence. `playing_frame` stays at 0 in that
+state, so a client that paces on it must write a record before it waits: a
+player whose song starts with silent rows can send a MASTER record with unity
+gain, stamped at `lead_frames`, to start the timeline. `zz9k-voiceplay` does
+this.
 
 Every record carries a stamp, the engine frame it takes effect at. The
 firmware renders whole 960-frame periods (20 ms) on its main loop, up to
