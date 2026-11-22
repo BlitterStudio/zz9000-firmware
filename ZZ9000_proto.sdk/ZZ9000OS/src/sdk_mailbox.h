@@ -178,6 +178,11 @@
  * qualification. Not set on Zorro II until it is tested on a Zorro II
  * machine; the opcodes dispatch on both buses. */
 #define SDK_SERVICE_FLAG_AUDIO_VOICE (1U << 28)
+/* The voice engine plays the interleaved stereo sample formats S8S and
+ * S16S (AUDIO_VOICE_FMT_S8S, AUDIO_VOICE_FMT_S16S). Defined to mirror the
+ * SDK name; no firmware path sets it yet, so the formats are not
+ * advertised. */
+#define SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO (1U << 29)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)

@@ -384,15 +384,18 @@ and 4 bytes in S16S.
   partial frame, because the length is rounded down.
 
 Firmware advertises the formats with `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO`
-(see [Discovery](#discovery)).
+(see [Discovery](#discovery)). The engine plays them already, and the flag is
+not set yet.
 
 ## Timing helpers
 
 `zz9k/voice.h` carries the arithmetic a client needs to predict where the
 engine is, as pure functions. They are the single source of that arithmetic
 for clients, and they state what `advance()` in the firmware's
-`audio_voice.c` does. The SDK tests check them against an independent model
-of it.
+`audio_voice.c` does. The firmware engine test
+(`test/audio/audio_voice_test.c`) checks them against the engine over a
+sweep of rates, lengths and fractions, forward and backward, and the SDK
+tests check them against an independent model of it.
 
 - `zz9k_voice_rate_step(hz)` returns the engine's step for a rate in Hz: the
   number of 1/65536 sample frames a voice advances per output frame,
@@ -537,20 +540,19 @@ A client that opens without checking handles the refusal:
 `ZZ9K_STATUS_UNSUPPORTED` means the firmware has no voice engine, and
 `zz9k-voiceplay` reports it that way.
 
-<<<<<<< HEAD
 There is no service flag for the low-latency mode. The open flag is the
 advertisement: a client opens with it and, on `ZZ9K_STATUS_BAD_REQUEST`, opens
 again without it and keeps the standard floor. `zz9k-voiceplay LOWLAT` does
 this and says so.
-=======
+
 The stereo sample formats have their own flag,
 `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` (bit 29, printed as
 `audio-voice-stereo`), reported together with `audio-voice`. A client that
 wants S8S or S16S samples checks it and defines only the mono formats when it
-is clear. No firmware reports it yet. A firmware without it refuses a DEFINE
-in format 2 or 3 with `ZZ9K_STATUS_BAD_REQUEST`. See [Stereo
-samples](#stereo-samples).
->>>>>>> b2ba857a (sdk: add stereo voice sample formats and shared timing helpers)
+is clear. The firmware engine plays both formats, but no firmware sets the
+flag yet, so a client cannot use them until one does. A firmware without
+the stereo support refuses a DEFINE in format 2 or 3 with
+`ZZ9K_STATUS_BAD_REQUEST`. See [Stereo samples](#stereo-samples).
 
 ## zz9k-voiceplay
 

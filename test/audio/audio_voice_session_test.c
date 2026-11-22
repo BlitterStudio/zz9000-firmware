@@ -1701,7 +1701,7 @@ static void scenario_upload(void)
 	      memcmp(g_bank, bank_before, sizeof(bank_before)) == 0,
 	      "upload: sample id 256 is refused", "");
 	up.sample_id = 3U;
-	up.format = 2U;
+	up.format = AUDIO_VOICE_FMT_COUNT;
 	check(audio_voice_session_upload(g_grant.session, &up) ==
 	      SDK_STATUS_BAD_REQUEST &&
 	      memcmp(g_bank, bank_before, sizeof(bank_before)) == 0,
@@ -1832,6 +1832,226 @@ static void scenario_redefine(void)
 	check(new_pattern, "redefine: the next START plays the new bytes", "");
 }
 
+/* ---- I. stereo samples through upload and playback ---- */
+
+/* Frame i of the 50-frame stereo pattern as raw sample values. */
+static int32_t st_raw_l(uint32_t sf, uint32_t i)
+{
+	return sf == AUDIO_VOICE_FMT_S16S ? ramp(i) : 10 + (int32_t)i;
+}
+
+static int32_t st_raw_r(uint32_t sf, uint32_t i)
+{
+	return sf == AUDIO_VOICE_FMT_S16S ? -(2000 + 40 * (int32_t)i) :
+	       -(5 + (int32_t)i);
+}
+
+static uint32_t st_frame_bytes(uint32_t sf)
+{
+	return sf == AUDIO_VOICE_FMT_S16S ? 4U : 2U;
+}
+
+/* What the engine outputs for pattern frame i on one side at a volume. */
+static int16_t st_out(uint32_t sf, uint32_t i, int right, uint32_t vol)
+{
+	int32_t raw = right ? st_raw_r(sf, i) : st_raw_l(sf, i);
+	int32_t s = sf == AUDIO_VOICE_FMT_S16S ? raw : raw * 256;
+
+	return (int16_t)((s * (int32_t)vol) >> 16);
+}
+
+static uint16_t upload_stereo(uint32_t session, uint32_t sf)
+{
+	struct audio_voice_session_upload up;
+	uint32_t fb = st_frame_bytes(sf);
+	uint32_t i;
+
+	for (i = 0U; i < LOOP_SAMPLES; i++) {
+		int32_t l = st_raw_l(sf, i);
+		int32_t r = st_raw_r(sf, i);
+		uint8_t *p = g_staging + i * fb;
+
+		if (sf == AUDIO_VOICE_FMT_S16S) {
+			p[0] = (uint8_t)((uint32_t)l >> 8);
+			p[1] = (uint8_t)l;
+			p[2] = (uint8_t)((uint32_t)r >> 8);
+			p[3] = (uint8_t)r;
+		} else {
+			p[0] = (uint8_t)l;
+			p[1] = (uint8_t)r;
+		}
+	}
+	memset(&up, 0, sizeof(up));
+	up.flags = AUDIO_VOICE_UPLOAD_COPY | AUDIO_VOICE_UPLOAD_DEFINE;
+	up.length = LOOP_SAMPLES * fb;
+	up.sample_id = SAMPLE_ID;
+	up.sample_length = LOOP_SAMPLES * fb;
+	up.format = sf;
+	return audio_voice_session_upload(session, &up);
+}
+
+/* The TX period where the stereo voice begins at stamp: silent before the
+ * stamp frame, then the looping pattern on the side(s) the volumes open. */
+static int find_stereo_start(uint32_t stamp, uint32_t sf, uint32_t vl,
+	uint32_t vr)
+{
+	uint32_t index = stamp % AUDIO_VOICE_PERIOD_FRAMES;
+	uint32_t i;
+
+	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
+		const int16_t *p = tx_period(i);
+		uint32_t last = 2U * (AUDIO_VOICE_PERIOD_FRAMES - 1U);
+		uint32_t f;
+
+		if (p[0] != 0 || p[1] != 0 || (p[last] == 0 && p[last + 1U] == 0))
+			continue;
+		for (f = 0U; f < AUDIO_VOICE_PERIOD_FRAMES; f++) {
+			int16_t wl = 0;
+			int16_t wr = 0;
+
+			if (f >= index) {
+				wl = st_out(sf, (f - index) % LOOP_SAMPLES, 0, vl);
+				wr = st_out(sf, (f - index) % LOOP_SAMPLES, 1, vr);
+			}
+			if (p[2U * f] != wl || p[2U * f + 1U] != wr)
+				return 0;
+		}
+		return 1;
+	}
+	return 0;
+}
+
+static void stereo_scenario(uint32_t sf, uint32_t vl, uint32_t vr)
+{
+	char name[96];
+	uint32_t i;
+	int found = 0;
+
+	snprintf(name, sizeof(name), "stereo format %u volumes %u/%u", sf, vl,
+	         vr);
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, name, "open");
+	check(upload_stereo(g_grant.session, sf) == SDK_STATUS_OK, name,
+	      "upload is accepted");
+	rec(4805U, 0U, AUDIO_VOICE_OP_SET,
+	    AUDIO_VOICE_SET_RATE | AUDIO_VOICE_SET_VOLUME | AUDIO_VOICE_RATE_HZ,
+	    48000U, (vl << 16) | vr);
+	rec(4805U, 0U, AUDIO_VOICE_OP_START, SAMPLE_ID, 0U, 0U);
+	rec(4805U, 0U, AUDIO_VOICE_OP_LOOP, 0U, 0U,
+	    LOOP_SAMPLES * st_frame_bytes(sf));
+	run(4);
+	publish();
+	period(1);
+	for (i = 0U; i < 12U; i++) {
+		if (find_stereo_start(4805U, sf, vl, vr))
+			found = 1;
+		period(1);
+	}
+	check(found, name, "the voice plays the pattern on the right sides");
+	check(st32(AUDIO_VOICE_STATUS_OFF_REJECTED) == 0U, name,
+	      fmt("rejected=%u", st32(AUDIO_VOICE_STATUS_OFF_REJECTED)));
+}
+
+static void scenario_stereo_play(void)
+{
+	static const uint32_t formats[2] = {AUDIO_VOICE_FMT_S8S,
+	                                    AUDIO_VOICE_FMT_S16S};
+	size_t i;
+
+	for (i = 0U; i < 2U; i++) {
+		stereo_scenario(formats[i], 0xFFFFU, 0U);
+		stereo_scenario(formats[i], 0U, 0xFFFFU);
+		stereo_scenario(formats[i], 0xFFFFU, 0xFFFFU);
+	}
+}
+
+/* DEFINE takes formats 0 to 3 and refuses the rest without changing the
+ * bank or the sample table. */
+static void scenario_define_formats(void)
+{
+	static uint8_t bank_before[BANK_LEN];
+	struct audio_voice_session_upload up;
+	static const uint32_t bad[] = {AUDIO_VOICE_FMT_COUNT, 5U, 0x80000000U,
+	                               0xFFFFFFFFU};
+	uint32_t sf;
+	size_t i;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "formats: open", "");
+
+	/* The four formats are accepted by a DEFINE-only upload over the bank,
+	 * the bank-wide view an AHI-style client uses. */
+	for (sf = 0U; sf < AUDIO_VOICE_FMT_COUNT; sf++) {
+		memset(&up, 0, sizeof(up));
+		up.flags = AUDIO_VOICE_UPLOAD_DEFINE;
+		up.sample_id = 10U + sf;
+		up.sample_offset = 0U;
+		up.sample_length = BANK_LEN;
+		up.format = sf;
+		check(audio_voice_session_upload(g_grant.session, &up) ==
+		      SDK_STATUS_OK, fmt("formats: format %u is accepted", sf),
+		      "");
+	}
+	for (i = 0U; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		memset(&up, 0, sizeof(up));
+		up.flags = AUDIO_VOICE_UPLOAD_DEFINE;
+		up.sample_id = 20U;
+		up.sample_length = 64U;
+		up.format = bad[i];
+		check(audio_voice_session_upload(g_grant.session, &up) ==
+		      SDK_STATUS_BAD_REQUEST,
+		      fmt("formats: format %u is refused", bad[i]), "");
+	}
+
+	/* Sample 5 is 25 stereo frames (100 bytes) over the ramp bytes. A
+	 * refused redefinition as format 4, with a COPY, changes neither the
+	 * bank nor sample 5, and leaves sample 6 undefined. */
+	check(upload_ramp(g_grant.session) == SDK_STATUS_OK,
+	      "formats: ramp upload", "");
+	memset(&up, 0, sizeof(up));
+	up.flags = AUDIO_VOICE_UPLOAD_DEFINE;
+	up.sample_id = 5U;
+	up.sample_offset = 0U;
+	up.sample_length = 100U;
+	up.format = AUDIO_VOICE_FMT_S16S;
+	check(audio_voice_session_upload(g_grant.session, &up) ==
+	      SDK_STATUS_OK, "formats: define sample 5", "");
+	memset(g_staging, 0x55, 64U);
+	memcpy(bank_before, g_bank, sizeof(bank_before));
+	memset(&up, 0, sizeof(up));
+	up.flags = AUDIO_VOICE_UPLOAD_COPY | AUDIO_VOICE_UPLOAD_DEFINE;
+	up.bank_offset = 2000U;
+	up.length = 64U;
+	up.sample_id = 5U;
+	up.sample_offset = 2000U;
+	up.sample_length = 8U;
+	up.format = AUDIO_VOICE_FMT_COUNT;
+	check(audio_voice_session_upload(g_grant.session, &up) ==
+	      SDK_STATUS_BAD_REQUEST &&
+	      memcmp(g_bank, bank_before, sizeof(bank_before)) == 0,
+	      "formats: a refused format changes no bank byte", "");
+	up.sample_id = 6U;
+	check(audio_voice_session_upload(g_grant.session, &up) ==
+	      SDK_STATUS_BAD_REQUEST, "formats: a refused format for sample 6",
+	      "");
+
+	/* Offset 50 is frame 12 of the 25 frames of sample 5, and would be
+	 * past the 2 frames the refused redefinition described. Sample 6 was
+	 * never defined: that START is the one rejected record. */
+	rec(4805U, 1U, AUDIO_VOICE_OP_SET,
+	    AUDIO_VOICE_SET_RATE | AUDIO_VOICE_SET_VOLUME | AUDIO_VOICE_RATE_HZ,
+	    48000U, 0xFFFFFFFFU);
+	rec(4805U, 1U, AUDIO_VOICE_OP_START, 5U, 50U, 0U);
+	rec(4805U, 2U, AUDIO_VOICE_OP_START, 6U, 0U, 0U);
+	run(4);
+	publish();
+	run(12);
+	check(st32(AUDIO_VOICE_STATUS_OFF_REJECTED) == 1U,
+	      "formats: sample 5 kept its geometry and sample 6 stayed undefined",
+	      fmt("rejected=%u", st32(AUDIO_VOICE_STATUS_OFF_REJECTED)));
+}
+
 int main(void)
 {
 	scenario_open();
@@ -1861,6 +2081,8 @@ int main(void)
 	scenario_upload();
 	scenario_upload_liveness();
 	scenario_redefine();
+	scenario_stereo_play();
+	scenario_define_formats();
 	if (failures != 0)
 		printf("audio_voice_session_test: %d FAILED\n", failures);
 	else

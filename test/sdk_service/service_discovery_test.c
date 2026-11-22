@@ -99,6 +99,11 @@ int main(void)
 				puts("service discovery: voice flag is not Zorro III only");
 				return 1;
 			}
+			if (((z3_flags | z2_flags | service->flags) &
+			     SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO) != 0U) {
+				puts("service discovery: stereo voice flag is advertised");
+				return 1;
+			}
 		} else if (expected[i].id == SDK_SERVICE_MEMORY) {
 			if (z3_flags != (service->flags |
 					 SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT)) {
