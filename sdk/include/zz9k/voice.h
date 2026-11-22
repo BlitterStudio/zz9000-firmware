@@ -263,7 +263,7 @@ typedef char ZZ9KVoiceStatusWire_is_64_bytes[
 
 /* Host-order status snapshot. */
 typedef struct ZZ9KVoiceStatus {
-  uint32_t playing_frame; /* engine frame now leaving the DAC */
+  uint32_t playing_frame; /* first frame of the period the DMA is fetching */
   uint32_t horizon;       /* next engine frame the engine will render */
   uint16_t read_cursor;   /* records the firmware has taken */
   uint16_t state;         /* ZZ9K_VOICE_STATE_* */

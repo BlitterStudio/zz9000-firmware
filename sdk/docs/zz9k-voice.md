@@ -40,8 +40,9 @@ fourth slot of the audio fabric and mixes with the other fabric producers.
 ### From zz9k.library
 
 The six calls need `zz9k.library` revision 42
-(`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE`). Open fills a `ZZ9KVoiceSession`,
-and every later call takes it.
+(`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE`); the low-latency open flag needs
+revision 43 (`ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY`). Open fills a
+`ZZ9KVoiceSession`, and every later call takes it.
 
 | Call | LVO | Registers | Purpose |
 | --- | ---: | --- | --- |
@@ -65,6 +66,7 @@ The descriptors and the record builders are in `zz9k/voice.h`:
 | `ZZ9KVoiceUploadDesc` | `sample_id`, `bank_offset`, `data`, `length`, `format` |
 | `ZZ9KVoiceGrant` (in `session.grant`) | What the firmware granted |
 | `ZZ9KVoiceStatus` | Host-order copy of the status block |
+| `ZZ9KVoiceJitter` and `zz9k_voice_jitter_read()` | The two jitter words of the status block, read apart from `ZZ9KVoiceStatus` so that struct keeps its size |
 | `zz9k_voice_build_start()` and the other `zz9k_voice_build_*()` helpers | Fill a `ZZ9KVoiceRecord` |
 
 ```c
@@ -138,12 +140,21 @@ use 48-byte inline payloads, big-endian, laid out in `zz9k/voice.h`.
 OPEN takes the three buffers, the bank size, the voice count, the requested
 lead and the flags. `ZZ9K_VOICE_OPEN_FLAG_NTSC` selects the NTSC Paula clock
 for period input (PAL otherwise). `ZZ9K_VOICE_OPEN_FLAG_LINEAR` selects
-linear interpolation (nearest otherwise). Reserved fields must be zero.
+linear interpolation (nearest otherwise). `ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY`
+opens a [low-latency session](#low-latency-session). Reserved fields must be
+zero.
 
 The grant returns the session id, the voices, the bank size, the lead, the
 lead floor and maximum, the ring capacity in records, the output rate (48000)
 and the sample limit (256). The session id is nonzero and changes at every
 open.
+
+A low-latency grant reports the lead floor of its mode, 2880 frames, and a
+request below it is raised to it. A request of 0 asks for the floor of the mode
+the flag chose. Firmware without the mode treats the flag as an unknown bit and
+answers `ZZ9K_STATUS_BAD_REQUEST`, as does a `zz9k.library` older than
+revision 43; the client opens again without the flag and gets the standard
+floor.
 
 OPEN fails with:
 
@@ -178,17 +189,24 @@ Three numbers in the grant bound the lead:
 
 | Number | Value | Meaning |
 | --- | ---: | --- |
-| `lead_floor_frames` | 7680 | The smallest lead: 160 ms |
+| `lead_floor_frames` | 7680, or 2880 in a low-latency session | The smallest lead: 160 ms, or 60 ms |
 | `lead_max_frames` | 24000 | The largest lead: 500 ms |
 | `lead_frames` | granted | The request, raised to the floor, capped at the maximum, then rounded up to a whole number of 960-frame periods |
 
-The floor exists because the fabric keeps its transmit ring filled six
-periods ahead of the DMA, so the engine has to be at least six periods ahead
-of the playing frame for its audio to be staged in time. Two more periods
-cover jitter in the firmware main loop. Latency from a stamp to sound is
-therefore about 160 ms at the floor, and a larger lead adds to it. A larger
-lead tolerates a busier 68k, because commands may arrive later relative to
-their stamp.
+A frame sounds the lead plus the formatter's FIFO delay after the engine
+renders it. The FIFO delay is about 11 ms, inferred from the formatter's
+design and not measured. A record stamped at the horizon sounds between
+`lead - 20 ms` and `lead` plus that delay after it was written, depending on
+where in a period the write falls. A larger lead adds to that, and tolerates
+a busier 68k, because commands may arrive later relative to their stamp.
+
+The fabric keeps its transmit ring a fill-ahead of periods ahead of the DMA,
+six by default, so the engine has to be at least the fill-ahead plus one
+period ahead of the playing frame for its audio to be staged in time, and
+only if the firmware main loop polls the engine in every 20 ms window. The
+poll gap the lead tolerates is `(lead - fill-ahead) * 20 ms`, less the time
+the engine needs to render a period. The standard floor adds two periods to
+the six, which tolerates a gap of 40 ms.
 
 Stamping rules:
 
@@ -208,8 +226,40 @@ Stamping rules:
   Subtracting the horizon from the stamp at write time gives the scheduling
   margin that `zz9k-voiceplay` reports.
 
-`playing_frame` is the frame now leaving the DAC. It advances in whole
-periods, so it moves in steps of 960 frames.
+`playing_frame` is the first frame of the period the DMA is fetching. It
+advances in whole periods, so it moves in steps of 960 frames. The DAC plays
+that frame about 11 ms after the step, because of the formatter FIFO, so right
+after a step `playing_frame` is ahead of the frame leaving the DAC by about
+11 ms, and just before the next step it is about 9 ms behind it.
+
+### Low-latency session
+
+A session opened with `ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY` makes the fabric
+keep its transmit ring 2 periods ahead of the DMA instead of 6 while the
+session is open, and reports a lead floor of 3 periods, 2880 frames. The lead
+is 100 ms shorter than at the standard floor, and so is the time from a record
+written at the earliest frame to its sound. Hardware measurements of that
+time are not recorded here.
+
+- The shorter fill-ahead applies to every producer on the card while the
+  session is open. Other audio, AHI and ZZPlay included, plays the same
+  samples in the same order, only sooner. The audio interrupt may run late by
+  less than 20 ms instead of less than 100 ms before the DMA catches up with
+  the transmit ring, and the fabric then counts an underrun for each producer
+  that was owed audio.
+- The floor assumes a firmware main-loop poll in every 20 ms window and
+  tolerates a gap of about 20 ms. A client that cannot promise that asks for a
+  larger lead; each extra period of lead tolerates 20 ms more. The jitter words
+  of the status block show the gap and the margin seen.
+- Ending the session by any route in [Ending a session](#ending-a-session)
+  returns the fabric to 6 periods, one period per audio interrupt, without a
+  skipped or repeated period for the other producers. A refused open changes
+  nothing.
+- A live client, a keyboard player for example, stamps each record at the
+  status `horizon`, or at 0. A late record is applied at the first frame of
+  the next period the engine renders, the same frame a record stamped at the
+  horizon gets, and the `late` counter shows how often it happened.
+  `zz9k-voiceplay LIVE LOWLAT` plays that way.
 
 ## Command records
 
@@ -313,7 +363,7 @@ has the byte layout.
 
 | Field | Meaning |
 | --- | --- |
-| `playing_frame` | The engine frame now leaving the DAC |
+| `playing_frame` | The first frame of the period the DMA is fetching |
 | `horizon` | The next engine frame the engine will render |
 | `read_cursor` | Records the firmware has taken from the ring |
 | `state` | 0 closed, 1 open and waiting for the first record, 2 live |
@@ -322,8 +372,22 @@ has the byte layout.
 | `underruns` | Periods in which the voice slot had nothing staged |
 | `dropped` | Records lost because the card queue was full or the client wrote over unread records |
 | `session` | The session id |
+| jitter `margin_min_us` | The smallest time a rendered period waited for the audio interrupt to take it, in microseconds since open, or `0xFFFFFFFF` until the first period is taken. Periods rendered before the slot goes live are not counted |
+| jitter `poll_gap_max_us` | The largest gap between two firmware polls of the session since open, in microseconds |
 
 The words are consistent individually; the block is not one atomic snapshot.
+
+The two jitter words sit at offsets 32 and 36, in bytes the block kept
+reserved, so readers of the older block are unaffected. `ZZ9KVoiceStatus` does
+not carry them, because the library fills that struct and a program built with
+an older, smaller one must keep working. Read them with
+`zz9k_voice_jitter_read()` on `session.status` after `ZZ9KVoiceGetStatus()`.
+Firmware that does not report them leaves both words zero, which reads as a
+poll gap of 0; the firmware never reports a gap of 0 once the session has been
+polled twice. A margin near zero means a period was rendered just before the
+interrupt needed it, so any further delay would have counted an underrun. A
+poll gap above `(lead - fill-ahead) * 20 ms` less the render time is a lead
+that was too small for that machine's load.
 
 The heartbeat is a counter in the ring header. `ZZ9KVoiceGetStatus()` adds
 one to it on every call, so the one call both reads the status and keeps the
@@ -343,6 +407,9 @@ paces on `playing_frame` already reads the status often enough.
 | Missed heartbeat | The firmware ends the session as Close does. The status block reads state 0. A later `ZZ9KVoiceClose()` returns `ZZ9K_STATUS_BAD_HANDLE` and still frees the buffers. |
 | Client exit | The final `CloseLibrary()` releases the opener's client id, which ends its session and frees its buffers. Without that the heartbeat limit applies. |
 | Amiga reset | A warm reset ends the session and frees its buffers. |
+
+A low-latency session gives the fabric its 6-period fill-ahead back by every
+route in that table, one period per audio interrupt.
 
 A second OPEN, from any client, fails with `ZZ9K_STATUS_BUSY` while a session
 is open. A session id from another client is refused with
@@ -382,25 +449,32 @@ A client that opens without checking handles the refusal:
 `ZZ9K_STATUS_UNSUPPORTED` means the firmware has no voice engine, and
 `zz9k-voiceplay` reports it that way.
 
+There is no service flag for the low-latency mode. The open flag is the
+advertisement: a client opens with it and, on `ZZ9K_STATUS_BAD_REQUEST`, opens
+again without it and keeps the standard floor. `zz9k-voiceplay LOWLAT` does
+this and says so.
+
 ## zz9k-voiceplay
 
-`zz9k-voiceplay` plays a ProTracker module, or a click, through the engine
-with `zz9k.library`. The SDK build script builds it as
-`build/zz9k-voiceplay`. It needs `zz9k.library` revision 42 and
-`timer.device`.
+`zz9k-voiceplay` plays a ProTracker module, a click, or the keyboard through
+the engine with `zz9k.library`. The SDK build script builds it as
+`build/zz9k-voiceplay`. It needs `zz9k.library` revision 42, revision 43 for
+`LOWLAT`, and `timer.device`.
 
 ```text
-zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n]
-zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n]
+zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]
+zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]
+zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `MODULE` | The module file. The word `CLICK` in any case selects click mode instead |
+| `MODULE` | The module file. The word `CLICK` in any case selects click mode, and `LIVE` selects live mode |
 | `LEAD` | The lead in 48 kHz frames; 0 or absent asks for the firmware floor |
 | `NTSC` | The module uses the NTSC Paula clock (PAL otherwise) |
 | `LINEAR` | Linear interpolation (nearest otherwise) |
 | `SECONDS` | Stop after this many seconds of engine time, 1 to 86400 |
+| `LOWLAT` | Open a low-latency session. The tool prints the granted floor and the latency range the model gives for it. It falls back to the standard floor, and says so, when `zz9k.library` is older than revision 43 or the firmware refuses the flag |
 
 In module mode the tool reads the file and runs libpt4, the ProTracker
 replayer in `sdk/tools/libpt4/`, one tick at a time. Each tick's voice events
@@ -419,10 +493,18 @@ In click mode it plays a 1 ms pulse on voice 0 once per second at 48000 Hz,
 the first at the granted lead. It runs for 10 seconds unless `SECONDS` says
 otherwise. It is for listening and for checking the scheduling margin.
 
-Ctrl-C, the end of the song, the time limit, a status read that fails, a
-session the card closed (heartbeat lost or card reset), or an engine frame
-counter that stops advancing for 3 seconds ends the run. The tool resets the
-session unless the song ended, closes it and prints a report:
+In live mode the keys `zsxdcvgbhnjm` play one octave from middle C and
+`q2w3er5t6y7u` the next, with `i` the top C; ESC stops. Each key writes a SET
+and a START at the status horizon on the next of eight voices, a decaying
+triangle wave of 4096 bytes whose pitch follows the key. It needs an
+interactive console, and it reports the keys played and the records the engine
+found late. It is for the ear test of a low-latency session next to a
+standard one.
+
+Ctrl-C, ESC in live mode, the end of the song, the time limit, a status read
+that fails, a session the card closed (heartbeat lost or card reset), or an
+engine frame counter that stops advancing for 3 seconds ends the run. The
+tool resets the session unless the song ended, closes it and prints a report:
 
 | Report field | Meaning |
 | --- | --- |
@@ -430,6 +512,9 @@ session unless the song ended, closes it and prints a report:
 | ticks, records | Replayer ticks run and records written |
 | ring-full waits | Passes in which the ring could not take all pending records |
 | late, rejected, underruns, dropped | The firmware counters from the status block |
+| session | `low latency` or `standard`, with the granted lead floor in frames |
+| jitter | The two jitter words of the status block: the smallest wait of a rendered period for the audio interrupt and the largest gap between firmware polls, in microseconds |
+| keys played | Live mode only |
 | smallest scheduling margin | The smallest stamp minus horizon at the moment a record was written, in frames and microseconds |
 | record latency | Minimum, average and maximum of each record's stamp minus the playing frame of the status read before its write, in frames and milliseconds: how far ahead of the sound the records were queued. Click records are included |
 | engine rate | The playing frames advanced per EClock time between the first and the last live status read, in Hz with two decimals and as the difference from 48000 in ppm; it prints a note instead when less than a second of live playback was seen |
@@ -481,8 +566,9 @@ have its bytes rewritten.
 ## Hardware measurements
 
 These runs used a ZZ9000 on Zorro III in an A4000 with a 68060, under
-AmigaOS 3.2, with the firmware lead floor of 7680 frames. The maintainer
-listened to each run. All runs used `zz9k-voiceplay`.
+AmigaOS 3.2, with the firmware lead floor of 7680 frames (standard sessions;
+no low-latency session has run). The maintainer listened to each run. All
+runs used `zz9k-voiceplay`.
 
 | Run | Result |
 | --- | --- |

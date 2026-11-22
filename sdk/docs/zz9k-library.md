@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 42 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 43 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -1452,6 +1452,14 @@ library does not take its transport lock for them. Call GetStatus at least
 every 500 ms: the firmware closes a session whose heartbeat stays unchanged
 for 2 seconds.
 
+Open accepts `ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY` from revision 43
+(`ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY`). The flag adds no call. A
+revision 42 library refuses it with `ZZ9K_STATUS_BAD_REQUEST` before anything
+reaches the card, the same status firmware without the mode returns, so a
+client falls back by opening again without the flag. `ZZ9KVoiceGetStatus()`
+fills the unchanged `ZZ9KVoiceStatus`; the jitter words come from
+`zz9k_voice_jitter_read()` on `session.status`.
+
 The mailbox opcodes are `ZZ9K_OP_AUDIO_VOICE_OPEN` (`0x0518`), `_CLOSE`
 (`0x0519`), `_RESET` (`0x051a`) and `_UPLOAD` (`0x051b`). The firmware sets
 `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` on Zorro III and does not set it on Zorro II
@@ -2076,6 +2084,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 40 | `ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP`, `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS` | The service task released an app handle, its opener record, and its client id when the owner task was gone; since revision 41 only the opener record and the client id (the app calls were removed) |
 | 41 | None | The `ZZ9KApp*` calls (`-354` to `-414`) are removed; the ARM app runtime is reached through `aar.library`, which carries its mailbox calls through `zz9k.library`; the vector table ended at `ZZ9KAudioStreamBeginEx` (`-348`) |
 | 42 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE` | The voice engine calls `ZZ9KVoiceOpen()`, `ZZ9KVoiceClose()`, `ZZ9KVoiceReset()`, `ZZ9KVoiceUpload()`, `ZZ9KVoiceWrite()` and `ZZ9KVoiceGetStatus()` at `-354` to `-384`; the vector table ends at `ZZ9KVoiceGetStatus`. See [the voice engine guide](zz9k-voice.md) |
+| 43 | `ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY` | `ZZ9KVoiceOpen()` accepts `ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY`; no new calls. See [the voice engine guide](zz9k-voice.md) |
 
 ### Async submission and wait helpers
 

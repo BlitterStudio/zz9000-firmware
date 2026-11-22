@@ -61,9 +61,61 @@ The slot produces 48 kHz stereo S16, so it needs no conversion.
 Closing a session detaches the slot, and a reset clears it. Both drop the
 periods already queued in the TX ring and request a rebuild from the
 remaining producers, so at most the period the DMA is playing still carries
-voice audio. The lead floor is the fabric's fill-ahead of six periods plus
-two periods of main-loop jitter; the client contract is in
-[zz9k-voice.md](../sdk/docs/zz9k-voice.md).
+voice audio. The lead floor is the fabric's fill-ahead plus two periods of
+main-loop jitter, eight periods with the default fill-ahead; a low-latency
+session shortens the fill-ahead and the floor (see Fill-ahead). The client
+contract is in [zz9k-voice.md](../sdk/docs/zz9k-voice.md).
+
+## Fill-ahead
+
+The compositor keeps the TX ring ahead of the DMA by the fill-ahead: six of
+the ring's eight periods (120 ms) by default. The fill-ahead is the room the
+audio interrupt has to run late. After an interrupt the frontier is
+`fill-ahead` periods ahead of the DMA, so an interrupt that finds the DMA at
+the frontier has reached a period that was never filled. The fabric then
+counts one underrun for each live producer that was owed audio and restarts
+the frontier one period ahead. The interrupt can therefore run late by less
+than `(fill-ahead - 1)` periods, minus its own run time.
+
+`audio_fabric_fill_ahead_set(periods)` asks for 2 to 6 periods, and 0 gives
+the default back. It has one owner at a time. The voice engine's
+low-latency session is the only caller: it asks for
+`AUDIO_VOICE_LL_FILL_AHEAD_PERIODS` (2) once its slot is attached, and
+withdraws the request when the session ends by any route, so close, a missed
+heartbeat, the client's exit and a warm reset all restore the default. A
+refused open leaves the fill-ahead alone.
+
+The request is written by the main loop and the compositor ISR keeps its own
+effective value, so each has one writer. The ISR moves the effective value
+once per period, `fabric_fill_ahead_step()` in `audio_fabric.c`. It follows a
+lower request at once: the ISR stops filling and the frontier drains by one
+period per interrupt, with no period skipped or repeated. It follows a higher
+request one period per interrupt, so ending a session never makes one
+interrupt fill several periods. Each fill is an uncached 3,840-byte write and
+a cache flush on core 0, and `isr_audio` shares a priority with `isr_video`.
+Rebase detection keeps the fixed ring bound of six periods, because a rebase
+on a lowered target would abandon queued periods whose source bytes are
+already staged. An idle fabric and `audio_fabric_reset()` restore the
+default.
+
+The fill-ahead applies to every producer while a low-latency session is open.
+The pump and the leases play the same samples in the same order, only
+sooner, and the host tests check that sequence for fill-ahead 2, 3 and 4
+against the default. Their tolerance for a late interrupt shrinks.
+
+| Fill-ahead | Interrupt may run late by less than | Voice lead floor | Main-loop poll gap the floor tolerates |
+| ---: | ---: | ---: | ---: |
+| 6 (default) | 100 ms | 8 periods, 160 ms | 40 ms |
+| 2 (low-latency session) | 20 ms | 3 periods, 60 ms | 20 ms |
+
+The floor is the fill-ahead plus one period for a main loop that polls the
+voice engine in every 20 ms window, plus one period for each further 20 ms of
+gap the poll may show. The default floor carries one extra period of margin.
+The last column is `(lead - fill-ahead) * 20 ms`, less the time the engine
+needs to render a period. The status block reports the largest poll gap seen
+and the smallest time a rendered period waited for the ISR, which is how a
+client picks its lead. Hardware measurements of the two settings are not
+recorded here.
 
 ## Ownership and direct rings
 
@@ -174,6 +226,7 @@ equal one CPU cycle.
 | Report row | Measured region |
 | --- | --- |
 | `isr` | An active compositor tick from frontier check through tail tracking |
+| `phase` | How far into its 20 ms period the DMA already was when the compositor ran: the largest value in microseconds and a histogram with edges at 0.5, 1, 2.5, 5 and 10 ms |
 | `mix` | Mix clear, per-slot accumulation, S16 clamp, and TX cache flush |
 | `slotN fill` | Slot N fill, including source pull, byte order handling, metering, expansion, and gain |
 | `slotN conv` | Slot N conversion work measured by the compositor |

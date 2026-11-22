@@ -7,7 +7,7 @@
  * timestamped records. The module's sample arena is uploaded as sample 0.
  * The first tick is stamped at the granted lead, so the engine frames before
  * it are silence; every later tick keeps its distance to the first. A tick is
- * run when its song frame is closer to the frame now leaving the DAC than the
+ * run when its song frame is closer to the playing frame than the
  * granted lead, which keeps the ring a lead ahead of the player and never
  * further. Each pass reads the status block (which is also the ring
  * heartbeat), writes what is pending and sleeps about 5 ms.
