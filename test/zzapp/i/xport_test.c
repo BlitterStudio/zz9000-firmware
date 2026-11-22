@@ -281,6 +281,9 @@ static uint32_t word(client_t *c, uint32_t off) { return aar_get_be32(c->cb + of
 static void reset_all(void)
 {
     heap_reset();
+    /* The event block of an earlier test lived in the heap just reset. */
+    zzapp_xport_init(NULL);
+    (void)zzapp_xport_events_init();
     env_set();
     acquire_calls = release_calls = 0U;
     release_probe = NULL;
@@ -1896,9 +1899,333 @@ static void test_two_threads(void)
     CHECK(heap.live == 0U && heap.bad_frees == 0U);
 }
 
+/* ---- Event counts ------------------------------------------------------------------ */
+
+static uint32_t evw(unsigned w)
+{
+    return aar_get_be32(zzapp_xport_events_block() + 4U * w);
+}
+
+/* A record that only has a handle: all the event post looks at. */
+static const zzapp_rec_t *rec_with_index(zzapp_rec_t *r, uint32_t index)
+{
+    memset(r, 0, sizeof(*r));
+    r->hdr.handle = (9U << 16) | index;
+    return r;
+}
+
+static void evs_snapshot(uint32_t w[ZZAPP_EVENT_BYTES / 4U])
+{
+    unsigned i;
+
+    for (i = 0U; i < ZZAPP_EVENT_BYTES / 4U; i++)
+        w[i] = evw(i);
+}
+
+/* After `before` was taken: the global count moved by `by`, group word `gw`
+ * by `by` (gw 0: none), and no other word moved. */
+static int evs_moved(const uint32_t before[ZZAPP_EVENT_BYTES / 4U], unsigned gw,
+                     uint32_t by)
+{
+    unsigned i;
+
+    for (i = 0U; i < ZZAPP_EVENT_BYTES / 4U; i++) {
+        uint32_t want = before[i] + ((i == 0U || i == gw) ? by : 0U);
+
+        if (evw(i) != want)
+            return 0;
+    }
+    return 1;
+}
+
+/* The block comes from the heap once, zeroed, aligned and sized as a block
+ * step; no block or a refused allocation means no counts. */
+static void test_event_block(void)
+{
+    zzapp_rec_t fake;
+    uint32_t token;
+    unsigned i;
+
+    reset_all();
+    zzapp_xport_init(NULL);
+    CHECK(zzapp_xport_events_init() == -1);          /* no allocator */
+    env_set();
+    CHECK(zzapp_xport_events_block() == NULL && zzapp_xport_events_token() == 0U);
+    zzapp_xport_event_post(rec_with_index(&fake, 0U));  /* nothing to bump */
+
+    CHECK(zzapp_xport_events_init() == 0);
+    CHECK(heap.allocs == 1U && heap.live == 1U);
+    CHECK(heap.last_bytes == ZZAPP_EVENT_BLOCK_BYTES && heap.last_align == 0x2000U);
+    CHECK(ZZAPP_EVENT_BLOCK_BYTES == 0x2000U && ZZAPP_EVENT_BYTES == 64U);
+    CHECK(heap.last_lo == HOST_VISIBLE_HEAP_ADDRESS && heap.last_hi == 0x08100000U);
+    CHECK((heap.block[0].card & 0x1fffU) == 0U);
+    CHECK(zzapp_xport_events_block() == (volatile uint8_t *)heap.block[0].ptr);
+    token = zzapp_xport_events_token();
+    CHECK(token == heap.block[0].card - TOKEN_ADJUST);
+    CHECK(map_token(token) == (void *)zzapp_xport_events_block());
+    for (i = 0U; i < ZZAPP_EVENT_BYTES / 4U; i++)
+        CHECK(evw(i) == 0U);                         /* the heap's 0xA5 is gone */
+
+    /* The heap is full: no block, and the old one is forgotten. */
+    heap.fail_after = 0;
+    CHECK(zzapp_xport_events_init() == -1);
+    heap.fail_after = -1;
+    CHECK(zzapp_xport_events_block() == NULL && zzapp_xport_events_token() == 0U);
+    zzapp_xport_event_post(rec_with_index(&fake, 0U));
+}
+
+/* A record's group is its index / 32 (the handle without its generation),
+ * word 1 + group; from record 480 only the global word moves. */
+static void test_event_groups(void)
+{
+    static const struct {
+        uint32_t index;
+        unsigned word;
+    } t[] = {
+        { 0U, 1U }, { 1U, 1U }, { 31U, 1U }, { 32U, 2U }, { 63U, 2U },
+        { 64U, 3U }, { 230U, 8U }, { 447U, 14U }, { 448U, 15U }, { 479U, 15U },
+        { 480U, 0U }, { 511U, 0U }, { 0x1000U, 0U }, { 0xffffU, 0U },
+    };
+    zzapp_rec_t fake;
+    uint32_t before[ZZAPP_EVENT_BYTES / 4U], total = 0U;
+    unsigned i;
+
+    reset_all();
+    CHECK(zzapp_xport_events_init() == 0);
+    CHECK(ZZAPP_EVENT_GROUPS == 15U && ZZAPP_EVENT_GROUP_RECORDS == 32U);
+    for (i = 0U; i < sizeof(t) / sizeof(t[0]); i++) {
+        evs_snapshot(before);
+        zzapp_xport_event_post(rec_with_index(&fake, t[i].index));
+        total++;
+        CHECK(evs_moved(before, t[i].word, 1U));
+        CHECK(evw(0) == total);
+    }
+    /* The words are big-endian. */
+    aar_put_be32(zzapp_xport_events_block() + 4U, 0xffU);
+    zzapp_xport_event_post(rec_with_index(&fake, 5U));
+    CHECK(zzapp_xport_events_block()[4] == 0U && zzapp_xport_events_block()[5] == 0U &&
+          zzapp_xport_events_block()[6] == 1U && zzapp_xport_events_block()[7] == 0U);
+    /* A count that wraps goes from all ones to 0. */
+    aar_put_be32(zzapp_xport_events_block(), 0xffffffffU);
+    aar_put_be32(zzapp_xport_events_block() + 4U, 0xffffffffU);
+    zzapp_xport_event_post(rec_with_index(&fake, 5U));
+    CHECK(evw(0) == 0U && evw(1) == 0U);
+}
+
+/* Every post of the card that publishes an SQ entry counts, a post that does
+ * not publish one does not. */
+static void test_event_post_kinds(void)
+{
+    client_t c;
+    zzapp_rec_t *rec;
+    aar_request rq;
+    uint8_t msg[AAR_MSG_BYTES];
+    uint32_t before[ZZAPP_EVENT_BYTES / 4U], id = 0U, i;
+    unsigned gw;
+
+    reset_all();
+    CHECK(zzapp_xport_events_init() == 0);
+    rec = claim(&c);
+    gw = 1U + aar_handle_index(rec->hdr.handle) / ZZAPP_EVENT_GROUP_RECORDS;
+    evs_snapshot(before);
+    CHECK(evs_moved(before, gw, 0U) && evw(0) == 0U);   /* the claim posts nothing */
+    memset(msg, 0x33, sizeof(msg));
+    fill_request(&rq, 1U);
+
+    /* A request. */
+    evs_snapshot(before);
+    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_OK);
+    CHECK(evs_moved(before, gw, 1U));
+    /* Refused: the entry is in use, the arguments are bad. Nothing is posted. */
+    evs_snapshot(before);
+    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_E_BUSY);
+    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, NULL, 0U, &id) == AAR_E_INVAL);
+    CHECK(zzapp_xport_post_msg(rec, NULL) == AAR_E_INVAL);
+    CHECK(zzapp_xport_post_log(rec, "x", 0U) == AAR_E_INVAL);
+    CHECK(evs_moved(before, gw, 0U));
+
+    /* A message, a log record. */
+    evs_snapshot(before);
+    CHECK(zzapp_xport_post_msg(rec, msg) == AAR_OK);
+    CHECK(evs_moved(before, gw, 1U));
+    evs_snapshot(before);
+    CHECK(zzapp_xport_post_log(rec, "log line", 8U) == AAR_OK);
+    CHECK(evs_moved(before, gw, 1U));
+
+    /* A full SQ refuses all three and counts none of them. */
+    while (zzapp_xport_post_msg(rec, msg) == AAR_OK)
+        ;
+    fill_request(&rq, 2U);
+    (void)zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_FLIP, &rq, 0U, &id);
+    evs_snapshot(before);
+    CHECK(zzapp_xport_post_msg(rec, msg) == AAR_E_BUSY);
+    CHECK(zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_BLOCKING, &rq, 0U, &id) == AAR_E_BUSY);
+    CHECK(zzapp_xport_post_log(rec, "dropped", 7U) == AAR_E_BUSY);
+    CHECK(evs_moved(before, gw, 0U));
+    /* Every entry that is in the queue was counted: the count is the tail. */
+    CHECK(evw(0) == word(&c, AAR_CB_SQ_TAIL) && evw(gw) == evw(0));
+    for (i = 1U; i <= ZZAPP_EVENT_GROUPS; i++)
+        if (i != gw)
+            CHECK(evw(i) == 0U);
+    unclaim(rec);
+}
+
+/* Every write of a non-zero end reason counts once, after the state it goes
+ * with; a zero one, any other word and a record without a pair do not. */
+static void test_event_end_reasons(void)
+{
+    client_t c;
+    zzapp_rec_t *rec;
+    uint32_t before[ZZAPP_EVENT_BYTES / 4U];
+    unsigned gw;
+
+    reset_all();
+    CHECK(zzapp_xport_events_init() == 0);
+    rec = claim(&c);
+    gw = 1U + aar_handle_index(rec->hdr.handle) / ZZAPP_EVENT_GROUP_RECORDS;
+
+    evs_snapshot(before);
+    zzapp_xport_cb_put(rec, AAR_CB_END_REASON, AAR_END_LEASE);
+    CHECK(word(&c, AAR_CB_END_REASON) == AAR_END_LEASE);
+    CHECK(evs_moved(before, gw, 1U));
+
+    evs_snapshot(before);
+    zzapp_xport_cb_put(rec, AAR_CB_END_REASON, AAR_END_NONE);
+    zzapp_xport_cb_put(rec, AAR_CB_STATE, AAR_STATE_RUNNING);
+    zzapp_xport_cb_put(rec, AAR_CB_EXIT_CODE, 5U);
+    zzapp_xport_cb_put64(rec, AAR_CB_PROGRESS_HI, 77U);
+    zzapp_xport_cb_set_fault(rec, 1U, 2U, 3U, 4U, 5U, 6U, 7U);
+    zzapp_xport_cb_set_state(rec, AAR_STATE_RUNNING, AAR_END_NONE);
+    CHECK(evs_moved(before, gw, 0U));
+
+    /* set_state: one count, and the state is stored before it. */
+    evs_snapshot(before);
+    zzapp_xport_cb_set_state(rec, AAR_STATE_FAULTED, AAR_END_USER_FAULT);
+    CHECK(word(&c, AAR_CB_STATE) == AAR_STATE_FAULTED &&
+          word(&c, AAR_CB_END_REASON) == AAR_END_USER_FAULT);
+    CHECK(evs_moved(before, gw, 1U));
+
+    /* Without a pair there is no store and no count. */
+    zzapp_xport_flag_clear(rec, ZZAPP_XPORT_F_PAIR_LIVE);
+    evs_snapshot(before);
+    zzapp_xport_cb_put(rec, AAR_CB_END_REASON, AAR_END_EXIT);
+    zzapp_xport_cb_set_state(rec, AAR_STATE_IDLE, AAR_END_EXIT);
+    CHECK(evs_moved(before, gw, 0U));
+    zzapp_xport_flag_set(rec, ZZAPP_XPORT_F_PAIR_LIVE);
+    unclaim(rec);
+}
+
+/* The count follows the store: a reader that sees the global count at n then
+ * reads the SQ tail at n or more, so an entry is never announced before it is
+ * there. One thread posts, the other consumes and checks. */
+typedef struct {
+    client_t c;
+    volatile int done;
+    uint32_t violations;
+} visible_t;
+
+#define VISIBLE_POSTS 100000U
+
+static void *visible_reader(void *arg)
+{
+    visible_t *v = arg;
+    const volatile uint8_t *slot = NULL;
+
+    for (;;) {
+        int fin = __atomic_load_n(&v->done, __ATOMIC_ACQUIRE);
+        uint32_t g = evw(0);
+        uint32_t tail;
+
+        zzapp_xport_dmb();
+        tail = aar_get_be32(v->c.sq.tail);
+        if ((int32_t)(tail - g) < 0)
+            v->violations++;
+        while (aar_queue_peek(&v->c.sq, zzapp_xport_dmb, &slot) == 1)
+            aar_queue_pop(&v->c.sq, zzapp_xport_dmb);
+        if (fin)
+            return NULL;
+    }
+}
+
+static void test_event_follows_the_store(void)
+{
+    static visible_t v;
+    zzapp_rec_t *rec;
+    zzapp_xport_env_t e;
+    uint8_t msg[AAR_MSG_BYTES];
+    pthread_t th;
+    uint32_t i;
+
+    reset_all();
+    e = *zzapp_xport_env();
+    e.acquire = zzapp_xport_dmb;
+    e.release_barrier = zzapp_xport_dmb;
+    zzapp_xport_init(&e);
+    CHECK(zzapp_xport_events_init() == 0);
+    memset(&v, 0, sizeof(v));
+    rec = claim(&v.c);
+    memset(msg, 0x44, sizeof(msg));
+    CHECK(pthread_create(&th, NULL, visible_reader, &v) == 0);
+    for (i = 0U; i < VISIBLE_POSTS;) {
+        if (zzapp_xport_post_msg(rec, msg) == AAR_OK)
+            i++;
+    }
+    __atomic_store_n(&v.done, 1, __ATOMIC_RELEASE);
+    pthread_join(th, NULL);
+    CHECK(v.violations == 0U);
+    CHECK(evw(0) == VISIBLE_POSTS);
+    CHECK(evw(1U + aar_handle_index(rec->hdr.handle) / ZZAPP_EVENT_GROUP_RECORDS) ==
+          VISIBLE_POSTS);
+    unclaim(rec);
+}
+
+/* Both cores post: no increment is lost, on a word they share and on words
+ * they do not. */
+#define CORE_POSTS 300000U
+
+static void *core_poster(void *arg)
+{
+    zzapp_rec_t *r = arg;     /* three records: group 0, group 1, no group */
+    uint32_t i;
+
+    for (i = 0U; i < CORE_POSTS; i++) {
+        zzapp_xport_event_post(&r[0]);
+        zzapp_xport_event_post(&r[1]);
+        zzapp_xport_event_post(&r[2]);
+    }
+    return NULL;
+}
+
+static void test_event_two_cores_lose_nothing(void)
+{
+    static zzapp_rec_t a[3], b[3];
+    pthread_t th;
+
+    reset_all();
+    CHECK(zzapp_xport_events_init() == 0);
+    (void)rec_with_index(&a[0], 3U);
+    (void)rec_with_index(&a[1], 40U);
+    (void)rec_with_index(&a[2], 500U);
+    (void)rec_with_index(&b[0], 17U);
+    (void)rec_with_index(&b[1], 33U);
+    (void)rec_with_index(&b[2], 481U);
+    CHECK(pthread_create(&th, NULL, core_poster, b) == 0);
+    core_poster(a);
+    pthread_join(th, NULL);
+    CHECK(evw(0) == 6U * CORE_POSTS);
+    CHECK(evw(1) == 2U * CORE_POSTS && evw(2) == 2U * CORE_POSTS);
+    CHECK(evw(3) == 0U && evw(15) == 0U);
+}
+
 int main(void)
 {
     test_admission();
+    test_event_block();
+    test_event_groups();
+    test_event_post_kinds();
+    test_event_end_reasons();
+    test_event_follows_the_store();
+    test_event_two_cores_lose_nothing();
     test_service_and_blocks();
     test_release_failure_and_replay();
     test_shared_total();

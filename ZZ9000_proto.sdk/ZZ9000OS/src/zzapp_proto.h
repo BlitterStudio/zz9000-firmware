@@ -84,10 +84,14 @@
  * commits and COMMIT_TOTAL that plus what is committed. TABLES_FREE counts L2
  * tables a new admission can still reserve and TABLES_TOTAL the pool less the
  * kernel template. HOSTHEAP_LARGEST is the largest free block of the
- * host-visible heap. QUEUE_DEPTH is the depth of a new claim's queues. */
+ * host-visible heap. QUEUE_DEPTH is the depth of a new claim's queues. EVENTS
+ * is the token (a board offset, like a control block's) of the event block
+ * (zzapp_xport.h), 0 when there is none; it is the word that held the state,
+ * which was always IDLE (0) and that nothing read, so a firmware without the
+ * block also reports 0. */
 #define ZZAPP_QUERY_ABI_MAJOR      0u
 #define ZZAPP_QUERY_ABI_MINOR      4u
-#define ZZAPP_QUERY_STATE          8u
+#define ZZAPP_QUERY_EVENTS         8u
 #define ZZAPP_QUERY_CAPS           12u
 #define ZZAPP_QUERY_HOSTHEAP_LARGEST 16u
 #define ZZAPP_QUERY_QUEUE_DEPTH    20u
@@ -97,6 +101,17 @@
 #define ZZAPP_QUERY_TABLES_FREE    36u
 #define ZZAPP_QUERY_TABLES_TOTAL   40u
 #define ZZAPP_QUERY_HOSTHEAP_FREE  44u
+
+/* The event block QUERY names: ZZAPP_EVENT_BYTES of big-endian words. Word 0
+ * counts every event, word 1 + g counts those of records g * 32 to g * 32 + 31
+ * (record index = handle & 0xffff). A record at or above ZZAPP_EVENT_GROUPS *
+ * ZZAPP_EVENT_GROUP_RECORDS has no group: only word 0 moves for it. */
+#define ZZAPP_EVENT_BYTES          64u
+#define ZZAPP_EVENT_GROUPS         15u
+#define ZZAPP_EVENT_GROUP_RECORDS  32u
+/* What the card allocates for it and a client maps: one 8 KiB block step, so a
+ * cache-inhibited page of the client holds nothing else. */
+#define ZZAPP_EVENT_BLOCK_BYTES    0x2000u
 
 /* ---- CLAIM (no handle) -------------------------------------------------- */
 

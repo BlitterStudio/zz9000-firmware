@@ -34,6 +34,86 @@ void zzapp_xport_dmb(void)
 #endif
 }
 
+static void run_release(void)
+{
+	aar_barrier_run(env.release_barrier);
+}
+
+static uint32_t token_of(uint32_t card)
+{
+	return card - env.token_adjust;
+}
+
+/* ---- Event counts -------------------------------------------------------- */
+
+_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+	       "the event words are swapped from a little-endian core");
+_Static_assert(1u + ZZAPP_EVENT_GROUPS ==
+	       ZZAPP_EVENT_BYTES / 4u, "event block layout");
+_Static_assert(ZZAPP_EVENT_BLOCK_BYTES % ZZAPP_XPORT_BLOCK_STEP == 0u,
+	       "the event block is whole block steps");
+
+static volatile uint8_t *events_ptr;
+static uint32_t events_card;
+
+int zzapp_xport_events_init(void)
+{
+	void *ptr = NULL;
+	uint32_t card = 0U;
+	unsigned i;
+
+	/* Whatever block there was belonged to a heap that is rebuilt. */
+	events_ptr = NULL;
+	events_card = 0U;
+	if (!env.alloc ||
+	    env.alloc(env.ctx, ZZAPP_EVENT_BLOCK_BYTES, ZZAPP_XPORT_BLOCK_STEP,
+		      env.lo, env.hi, &ptr, &card) != 0 || !ptr)
+		return -1;
+	for (i = 0U; i < ZZAPP_EVENT_BYTES; i += 4U)
+		aar_put_be32((volatile uint8_t *)ptr + i, 0U);
+	run_release();
+	events_card = card;
+	events_ptr = (volatile uint8_t *)ptr;
+	return 0;
+}
+
+uint32_t zzapp_xport_events_token(void)
+{
+	return events_ptr ? token_of(events_card) : 0U;
+}
+
+volatile uint8_t *zzapp_xport_events_block(void)
+{
+	return events_ptr;
+}
+
+/* Add 1 to a big-endian word. The core's exclusive load and store make it
+ * atomic against the other core. */
+static void be32_inc(volatile uint8_t *word)
+{
+	volatile uint32_t *w = (volatile uint32_t *)word;
+	uint32_t old = __atomic_load_n(w, __ATOMIC_RELAXED);
+
+	while (!__atomic_compare_exchange_n(
+		       w, &old, __builtin_bswap32(__builtin_bswap32(old) + 1U),
+		       1, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+		;
+}
+
+void zzapp_xport_event_post(const zzapp_rec_t *rec)
+{
+	uint32_t group;
+
+	if (!events_ptr || !rec)
+		return;
+	/* The store that made the news visible comes first. */
+	zzapp_xport_dmb();
+	group = (rec->hdr.handle & 0xffffU) / ZZAPP_EVENT_GROUP_RECORDS;
+	if (group < ZZAPP_EVENT_GROUPS)
+		be32_inc(events_ptr + 4U * (1U + group));
+	be32_inc(events_ptr);
+}
+
 /* ---- Small helpers ------------------------------------------------------- */
 
 static uint32_t round_step(uint32_t bytes)
@@ -52,16 +132,6 @@ static volatile uint8_t *cb_base(const zzapp_rec_t *rec)
 {
 	return is_live(rec) ? (volatile uint8_t *)rec->xport.block[
 		ZZAPP_XPORT_BLOCK_PAIR].ptr : NULL;
-}
-
-static void run_release(void)
-{
-	aar_barrier_run(env.release_barrier);
-}
-
-static uint32_t token_of(uint32_t card)
-{
-	return card - env.token_adjust;
 }
 
 /* A queue view found the indices corrupt. */
@@ -458,6 +528,8 @@ uint32_t zzapp_xport_cb_get(const zzapp_rec_t *rec, uint32_t off)
 void zzapp_xport_cb_put(zzapp_rec_t *rec, uint32_t off, uint32_t value)
 {
 	cb_put32(rec, off, value);
+	if (off == AAR_CB_END_REASON && value != 0U && is_live(rec))
+		zzapp_xport_event_post(rec);
 }
 
 uint64_t zzapp_xport_cb_get64(const zzapp_rec_t *rec, uint32_t off_hi)
@@ -509,6 +581,9 @@ void zzapp_xport_cb_set_state(zzapp_rec_t *rec, uint32_t state,
 	cb_put32(rec, AAR_CB_END_REASON, end_reason);
 	run_release();
 	cb_put32(rec, AAR_CB_STATE, state);
+	/* The state is the last store: a client that takes the news reads both. */
+	if (end_reason != 0U)
+		zzapp_xport_event_post(rec);
 }
 
 /* ---- Requests -------------------------------------------------------------- */
@@ -596,6 +671,7 @@ int zzapp_xport_post_request(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
 	r->state = ZZAPP_XPORT_REQ_POSTED;
 	x->next_id++;
 	aar_queue_commit(&x->sq, env.release_barrier);
+	zzapp_xport_event_post(rec);
 	if (id)
 		*id = out.id;
 	return AAR_OK;
@@ -686,6 +762,8 @@ int zzapp_xport_post_msg(zzapp_rec_t *rec, const void *msg)
 		return AAR_E_INVAL;
 	rc = aar_queue_post_msg(&rec->xport.sq, msg, env.acquire,
 				env.release_barrier);
+	if (rc == AAR_OK)
+		zzapp_xport_event_post(rec);
 	return rc == AAR_E_IO ? io_error(rec) : rc;
 }
 
@@ -747,6 +825,7 @@ int zzapp_xport_post_log(zzapp_rec_t *rec, const void *data, uint32_t len)
 	x->log_index[i] = index;
 	x->log_busy |= 1U << i;
 	aar_queue_commit(&x->sq, env.release_barrier);
+	zzapp_xport_event_post(rec);
 	return AAR_OK;
 }
 

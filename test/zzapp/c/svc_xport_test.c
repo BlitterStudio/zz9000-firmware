@@ -533,6 +533,9 @@ static void reset_all(void)
 		; /* records are re-initialised by the arena */
 	zzapp_services_test_reset();
 	heap_reset();
+	/* The event block of an earlier test lived in the heap just reset. */
+	zzapp_xport_init(NULL);
+	(void)zzapp_xport_events_init();
 	memset(&e, 0, sizeof(e));
 	e.alloc = heap_alloc;
 	e.release = heap_release;
@@ -2246,9 +2249,92 @@ static void test_churn(void)
 	CHECK(after.free == before.free);
 }
 
+/* ---- Event counts --------------------------------------------------------------------- */
+
+static uint32_t evw(unsigned word)
+{
+	return aar_get_be32(zzapp_xport_events_block() + 4U * word);
+}
+
+static void query_events(int z3, uint32_t *events, uint16_t *len)
+{
+	uint8_t reply[48];
+
+	memset(reply, 0xEE, sizeof(reply));
+	CHECK(zzapp_mailbox_dispatch(ZZAPP_OP_QUERY, NULL, 0U, reply, len, z3, 0U,
+				     0U) == (z3 ? SDK_STATUS_OK : SDK_STATUS_UNSUPPORTED));
+	*events = zzapp_get_be32(reply + ZZAPP_QUERY_EVENTS);
+}
+
+/* QUERY names the event block, and every end reason the services write moves
+ * the counts of the record's group and the global count. */
+static void test_events(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle, before, token;
+	uint16_t len;
+
+	/* No block: the word is 0 and the reply is 48 bytes. */
+	reset_all();
+	CHECK(zzapp_xport_events_block() == NULL && zzapp_xport_events_token() == 0U);
+	query_events(1, &token, &len);
+	CHECK(token == 0U && len == ZZAPP_MAILBOX_PAYLOAD_BYTES);
+
+	/* A block: zeroed, named by its token (a board offset), 64 bytes of
+	 * words in an 8 KiB block of the heap. */
+	CHECK(zzapp_xport_events_init() == 0);
+	CHECK(heap.live == 1U && zzapp_xport_events_block() != NULL);
+	query_events(1, &token, &len);
+	CHECK(len == ZZAPP_MAILBOX_PAYLOAD_BYTES);
+	CHECK(token != 0U && token == zzapp_xport_events_token());
+	CHECK(map_token(token) == (void *)zzapp_xport_events_block());
+	CHECK(heap.block[0].bytes == ZZAPP_EVENT_BLOCK_BYTES);
+	CHECK(((uintptr_t)heap.block[0].ptr & (ZZAPP_XPORT_BLOCK_STEP - 1U)) == 0U);
+	for (before = 0U; before < ZZAPP_EVENT_BYTES / 4U; before++)
+		CHECK(evw(before) == 0U);
+	query_events(0, &token, &len);                /* Z2: nothing */
+	CHECK(token == 0U);
+
+	/* The claim itself posts nothing; an end reason does. */
+	rec = claim(&c, &handle);
+	CHECK(rec && evw(0) == 0U && evw(1) == 0U);
+	zzapp_services_set_terminal(ZZAPP_END_EXIT);
+	CHECK(evw(0) == 1U && evw(1) == 1U && evw(2) == 0U);
+	zzapp_services_set_terminal(0U);              /* a zero reason shows nothing */
+	CHECK(evw(0) == 1U && evw(1) == 1U);
+
+	/* The lease runs out on a claim that never loaded: the end reason comes
+	 * with the retire. */
+	reset_all();
+	CHECK(zzapp_xport_events_init() == 0);
+	rec = claim(&c, &handle);
+	CHECK(rec && evw(0) == 0U);
+	zzapp_services_expire_claims(fake_now + 31000000U);
+	CHECK(word(&c, AAR_CB_END_REASON) == ZZAPP_END_LEASE);
+	CHECK(evw(0) >= 1U && evw(1) == evw(0));
+
+	/* The lease runs out during a load: the end reason is written at once. */
+	reset_all();
+	CHECK(zzapp_xport_events_init() == 0);
+	service_test_loader_begin_hook = begin_hook;
+	rec = claim(&c, &handle);
+	CHECK(deferred(ZZAPP_OP_LOAD_BEGIN, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	CHECK(rec->claim.state == ZZAPP_ST_LOADING);
+	before = evw(0);
+	zzapp_services_expire_claims(runtime_of(rec)->load_progress + 31000000U);
+	CHECK(word(&c, AAR_CB_END_REASON) == ZZAPP_END_QUARANTINED);
+	CHECK(evw(0) > before && evw(1) == evw(0));
+
+	/* The block of a test is not the next test's. */
+	reset_all();
+	CHECK(zzapp_xport_events_block() == NULL);
+}
+
 int main(void)
 {
 	test_claim_release();
+	test_events();
 	test_bad_handles();
 	test_kick();
 	test_load_start();
