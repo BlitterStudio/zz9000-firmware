@@ -318,6 +318,7 @@ static struct {
     uint32_t abi_major;             /* what QUERY reports */
     uint32_t caps;                  /* what QUERY reports */
     int no_mmu;                     /* the board cannot map (mmu.library missing) */
+    int events;                     /* QUERY names the firmware's event block */
     unsigned calls, long_calls, claims;
     uint16_t last_op;
     unsigned posts, post_busy;      /* post_busy: answer BUSY this many times */
@@ -397,6 +398,8 @@ static int fb_call(void *user, uint16_t op, const uint8_t *payload,
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_ABI_MAJOR, card.abi_major);
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_ABI_MINOR, ZZAPP_ABI_MINOR);
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_CAPS, card.caps);
+        zzapp_put_be32(reply->payload + ZZAPP_QUERY_EVENTS,
+                       card.events ? zzapp_xport_events_token() : 0U);
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_QUEUE_DEPTH, 64U);
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_RECORDS_FREE, 15U);
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_TABLES_FREE, 3871U);
@@ -693,14 +696,35 @@ static void client_init(void)
     CHECK(aar_core_attach(&core) == AAR_OK);
 }
 
+/* 1: the card has an event block and QUERY names it, from the first query. */
+static int events_at_reset;
+
 static void reset_all(void)
 {
     heap_reset();
+    /* No allocator: the firmware forgets the previous test's event block,
+     * which lived in a heap that is gone. A test that wants one asks. */
+    zzapp_xport_init(NULL);
+    (void)zzapp_xport_events_init();
     env_set();
     fw_acquire = fw_release = cl_acquire = cl_release = 0U;
     card_reset();
+    if (events_at_reset) {
+        CHECK(zzapp_xport_events_init() == 0);
+        CHECK(zzapp_xport_events_block() != NULL);
+        card.events = 1;
+    }
     setup_arena(16U);
     client_init();
+}
+
+static void reset_all_events(void)
+{
+    /* A fresh attach: the library has not seen the card yet. */
+    aar_plat_get()->ops->detach(aar_plat_get());
+    events_at_reset = 1;
+    reset_all();
+    events_at_reset = 0;
 }
 
 /* Opens a handle for the current task. */
@@ -3038,6 +3062,238 @@ static void test_two_threads(void)
     (void)out_msgs;
 }
 
+/* ---- Event counts ------------------------------------------------------------- */
+
+static uint32_t evw(unsigned word)
+{
+    return aar_get_be32(zzapp_xport_events_block() + 4U * word);
+}
+
+static void evw_put(unsigned word, uint32_t v)
+{
+    aar_put_be32(zzapp_xport_events_block() + 4U * word, v);
+}
+
+/* The firmware posts one event for the record `index` (any index, whatever
+ * the record arena holds). */
+static void ev_post(uint32_t index)
+{
+    static zzapp_rec_t rec;
+
+    rec.hdr.handle = (7U << 16) | index;
+    zzapp_xport_event_post(&rec);
+}
+
+#define NEWS_CLAIMS 8U
+
+/* A claim of the platform that the card does not know: claim_news looks only
+ * at its handle and its own storage. */
+static struct aar_plat_claim *fake_claim(unsigned n, uint32_t index)
+{
+    static struct aar_plat_claim c[NEWS_CLAIMS];
+    static uint8_t priv[NEWS_CLAIMS][1024];
+
+    CHECK(ops()->claim_priv_bytes <= sizeof(priv[0]));
+    memset(&c[n], 0, sizeof(c[n]));
+    memset(priv[n], 0, sizeof(priv[n]));
+    c[n].handle = (3U << 16) | index;
+    c[n].priv = priv[n];
+    return &c[n];
+}
+
+#define SAMPLE() ops()->events_sample(aar_plat_get())
+#define NEWS(c) ops()->claim_news(aar_plat_get(), (c))
+
+/* A firmware that reports 0 in the word that held the state (every firmware
+ * before the event block) gives no events: nothing is mapped and the sample
+ * says so, whatever sits in the card's memory. */
+static void test_events_absent_on_older_firmware(void)
+{
+    AARHandle *h;
+    unsigned maps;
+
+    ops()->detach(aar_plat_get());
+    reset_all();
+    CHECK(zzapp_xport_events_init() == 0);        /* a block, but QUERY says 0 */
+    CHECK(card.events == 0);
+    CHECK(ops()->events_sample != NULL && ops()->claim_news != NULL);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NONE);      /* before any QUERY */
+    h = claim();
+    maps = card.map_calls;
+    CHECK(maps == 2U);                            /* the pair: one map, extended */
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NONE);
+    ev_post(0U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NONE);
+    CHECK(CLOSE(h) == AAR_OK);
+
+    /* The reply of a card that has a block names it: the same open maps it,
+     * whole, once, with the pair. */
+    reset_all_events();
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NONE);      /* not mapped before the first QUERY */
+    h = claim();
+    CHECK(card.map_calls == 3U && card.map_violations == 0U);
+    CHECK(card.maps[0].token == zzapp_xport_events_token() &&
+          card.maps[0].bytes == ZZAPP_EVENT_BLOCK_BYTES);
+    CHECK(SAMPLE() != AAR_PLAT_EVENTS_NONE);
+    CHECK(CLOSE(h) == AAR_OK);
+    h = claim();                                  /* a second claim maps no event block again */
+    CHECK(card.map_calls == 5U);                  /* its pair only */
+    CHECK(CLOSE(h) == AAR_OK);
+}
+
+/* One word is read when nothing moved. The group words are read only after
+ * the global count changed: the test plants other values in the group words
+ * and sees when the library notices them. */
+static void test_events_sample_reads_one_word(void)
+{
+    struct aar_plat_claim *a;
+    unsigned i;
+    AARHandle *h;
+
+    reset_all_events();
+    h = claim();                                  /* maps the block */
+    a = fake_claim(0U, 3U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);      /* the first sample */
+    CHECK(NEWS(a) == 1);                          /* never asked */
+    CHECK(NEWS(a) == 0);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_QUIET);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_QUIET);
+
+    /* Group 0 moves without the global count: not read. */
+    evw_put(1U, 41U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_QUIET);
+    CHECK(NEWS(a) == 0);
+    /* The global count moves: the groups are read, the planted value shows. */
+    evw_put(0U, 1U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(NEWS(a) == 1);
+    CHECK(NEWS(a) == 0);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_QUIET);
+
+    /* The firmware's own posts: one pass sees any number of them. */
+    for (i = 0U; i < 5U; i++)
+        ev_post(3U);
+    CHECK(evw(0U) == 6U && evw(1U) == 46U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(NEWS(a) == 1);
+    CHECK(NEWS(a) == 0);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_QUIET);
+    CHECK(CLOSE(h) == AAR_OK);
+}
+
+/* A claim sees its group's count, an unknown group the global count, and a
+ * wrapped count is a change like any other. */
+static void test_claim_news_per_group(void)
+{
+    struct aar_plat_claim *g0, *g1, *g14, *u480, *uffff, *g0b;
+    AARHandle *h;
+
+    reset_all_events();
+    h = claim();
+    g0 = fake_claim(0U, 5U);
+    g0b = fake_claim(1U, 31U);                    /* the same group, the last record */
+    g1 = fake_claim(2U, 32U);                     /* the first of group 1 */
+    g14 = fake_claim(3U, 479U);                   /* the last known record */
+    u480 = fake_claim(4U, 480U);                  /* the first unknown */
+    uffff = fake_claim(5U, 0xffffU);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    /* Every claim is news at its first question, then not. */
+    CHECK(NEWS(g0) == 1 && NEWS(g0b) == 1 && NEWS(g1) == 1 && NEWS(g14) == 1 &&
+          NEWS(u480) == 1 && NEWS(uffff) == 1);
+    CHECK(NEWS(g0) == 0 && NEWS(g0b) == 0 && NEWS(g1) == 0 && NEWS(g14) == 0 &&
+          NEWS(u480) == 0 && NEWS(uffff) == 0);
+
+    ev_post(5U);                                  /* group 0 */
+    CHECK(evw(0U) == 1U && evw(1U) == 1U && evw(2U) == 0U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(NEWS(g0) == 1 && NEWS(g0b) == 1);
+    CHECK(NEWS(g1) == 0 && NEWS(g14) == 0);
+    CHECK(NEWS(u480) == 1 && NEWS(uffff) == 1);   /* the global count moved */
+    CHECK(NEWS(g0) == 0 && NEWS(g0b) == 0 && NEWS(u480) == 0 && NEWS(uffff) == 0);
+
+    ev_post(32U);                                 /* group 1 */
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(NEWS(g1) == 1);
+    CHECK(NEWS(g0) == 0 && NEWS(g0b) == 0 && NEWS(g14) == 0);
+    CHECK(NEWS(u480) == 1 && NEWS(uffff) == 1);
+
+    ev_post(479U);                                /* group 14, the last */
+    CHECK(evw(15U) == 1U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(NEWS(g14) == 1);
+    CHECK(NEWS(g0) == 0 && NEWS(g1) == 0);
+    CHECK(NEWS(u480) == 1);
+
+    ev_post(480U);                                /* no group: only the global count */
+    CHECK(evw(0U) == 4U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(NEWS(u480) == 1 && NEWS(uffff) == 1);
+    CHECK(NEWS(g0) == 0 && NEWS(g0b) == 0 && NEWS(g1) == 0 && NEWS(g14) == 0);
+    CHECK(NEWS(u480) == 0);
+
+    /* Counts that wrap: the group and the global word go from all ones to 0,
+     * which differs from what the claim saw. */
+    evw_put(1U, 0xffffffffU);
+    evw_put(0U, 0xffffffffU);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(NEWS(g0) == 1 && NEWS(u480) == 1);
+    CHECK(NEWS(g0) == 0 && NEWS(u480) == 0);
+    ev_post(7U);
+    CHECK(evw(0U) == 0U && evw(1U) == 0U);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(NEWS(g0) == 1 && NEWS(u480) == 1);
+    CHECK(NEWS(g1) == 0);
+    CHECK(CLOSE(h) == AAR_OK);
+}
+
+/* The real claims of the arena: what the firmware posts for them reaches the
+ * claim of the right record and no other. */
+static void test_events_with_real_claims(void)
+{
+    AARHandle *a, *b;
+    uint32_t id = 0U;
+    aar_request r;
+    uint8_t msg[AAR_MSG_BYTES];
+
+    reset_all_events();
+    a = claim();
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(ops()->claim_news(aar_plat_get(), &a->claim) == 1);
+    CHECK(ops()->claim_news(aar_plat_get(), &a->claim) == 0);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_QUIET);
+
+    /* An SQ entry of the card: a request, a message, an end reason. */
+    memset(&r, 0, sizeof(r));
+    r.op = AAR_OP_LOG;
+    CHECK(zzapp_xport_post_request(card.rec, ZZAPP_XPORT_REQ_BLOCKING, &r, 0U,
+                                   &id) == AAR_OK);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(ops()->claim_news(aar_plat_get(), &a->claim) == 1);
+    CHECK(ops()->claim_news(aar_plat_get(), &a->claim) == 0);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_QUIET);
+    memset(msg, 0, sizeof(msg));
+    CHECK(zzapp_xport_post_msg(card.rec, msg) == AAR_OK);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(ops()->claim_news(aar_plat_get(), &a->claim) == 1);
+    zzapp_xport_cb_set_state(card.rec, AAR_STATE_IDLE, AAR_END_FORCED);
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_NEWS);
+    CHECK(ops()->claim_news(aar_plat_get(), &a->claim) == 1);
+    CHECK(ops()->claim_news(aar_plat_get(), &a->claim) == 0);
+
+    /* A claim of the next record index is in the same group: it sees these
+     * events too, as the groups are coarse. */
+    current_task = TASK_B;
+    b = claim();
+    current_task = TASK_A;
+    CHECK(SAMPLE() == AAR_PLAT_EVENTS_QUIET);
+    CHECK(ops()->claim_news(aar_plat_get(), &b->claim) == 1);
+    CHECK(ops()->claim_news(aar_plat_get(), &b->claim) == 0);
+    current_task = TASK_B;
+    CHECK(CLOSE(b) == AAR_OK);
+    current_task = TASK_A;
+    CHECK(CLOSE(a) == AAR_OK);
+}
+
 int main(void)
 {
     test_open_and_refusal();
@@ -3072,6 +3328,10 @@ int main(void)
     test_audio_ring_words_are_never_torn();
     test_corrupt_queue();
     test_two_threads();
+    test_events_absent_on_older_firmware();
+    test_events_sample_reads_one_word();
+    test_claim_news_per_group();
+    test_events_with_real_claims();
     printf("aar_zz9000: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

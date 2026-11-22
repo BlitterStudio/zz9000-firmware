@@ -196,6 +196,14 @@ Points that matter to a caller:
   queue, so a parked app is woken at once. `AAR_E_BUSY` means the completion
   queue is full: try again. A request that does not arrive is not an error:
   `AARServiceNext()` returns `AAR_E_BUSY` when none waits.
+- **Event counts.** When the firmware publishes its event block (`QUERY`
+  `EVENTS`, see `docs/app-runtime.md`), the platform layer maps it once,
+  cache-inhibited, at the first claim. The dispatcher reads one word of it
+  per pass (`events_sample`) and the 15 group words only when that word
+  moved; `claim_news` then answers from those samples, without touching the
+  card, whether a claim's group (record index / 32; records from 480 up use
+  the global count) changed since that claim last asked. A firmware without
+  the block reports 0 and the library polls every armed claim as before.
 - **Messages** are 32 bytes. Sending is credited: at most `AAR_MSG_CAPACITY`
   (63) messages may be unconsumed by the app (`AAR_CB_MSG_CONSUMED`), else
   `AAR_E_BUSY`. A message the app sends is held in the library's inbox of 64
