@@ -322,10 +322,12 @@ has the byte layout.
 The words are consistent individually; the block is not one atomic snapshot.
 
 The heartbeat is a counter in the ring header. `ZZ9KVoiceGetStatus()` adds
-one to it on every call. Call GetStatus at least every 500 ms
-(`ZZ9K_VOICE_HEARTBEAT_MS`). The firmware closes a session whose heartbeat has
-not changed for 2 seconds, and a session that has not been polled since open
-counts from the open. Write does not touch the heartbeat. A player that
+one to it on every call, so the one call both reads the status and keeps the
+session alive. Call GetStatus at least every 500 ms
+(`ZZ9K_VOICE_HEARTBEAT_MS`). The firmware closes a session after 2 seconds
+without a changed heartbeat or a voice mailbox call; `ZZ9KVoiceUpload()` and
+`ZZ9KVoiceReset()` count as liveness, `ZZ9KVoiceWrite()` does not. A session
+that has not been polled since open counts from the open. A player that
 paces on `playing_frame` already reads the status often enough.
 
 ## Ending a session
@@ -405,15 +407,17 @@ each later tick keeps its distance from the first. A tick runs when its song
 frame is closer to the playing frame than the granted lead, which keeps the
 ring a lead ahead of the player and no further. Each pass reads the status
 (which is also the heartbeat), writes the pending records and sleeps about
-5 ms.
+5 ms. A status that reads closed ends the run, as the card closes a session
+whose heartbeat stops.
 
 In click mode it plays a 1 ms pulse on voice 0 once per second at 48000 Hz,
 the first at the granted lead. It runs for 10 seconds unless `SECONDS` says
 otherwise. It is for listening and for checking the scheduling margin.
 
-Ctrl-C, the end of the song, the time limit, a status read that fails, or an
-engine frame counter that stops advancing for 3 seconds ends the run. The
-tool resets the session unless the song ended, closes it and prints a report:
+Ctrl-C, the end of the song, the time limit, a status read that fails, a
+session the card closed (heartbeat lost or card reset), or an engine frame
+counter that stops advancing for 3 seconds ends the run. The tool resets the
+session unless the song ended, closes it and prints a report:
 
 | Report field | Meaning |
 | --- | --- |
@@ -422,11 +426,14 @@ tool resets the session unless the song ended, closes it and prints a report:
 | ring-full waits | Passes in which the ring could not take all pending records |
 | late, rejected, underruns, dropped | The firmware counters from the status block |
 | smallest scheduling margin | The smallest stamp minus horizon at the moment a record was written, in frames and microseconds |
+| record latency | Minimum, average and maximum of each record's stamp minus the playing frame of the status read before its write, in frames and milliseconds: how far ahead of the sound the records were queued. Click records are included |
+| engine rate | The playing frames advanced per EClock time between the first and the last live status read, in Hz with two decimals and as the difference from 48000 in ppm; it prints a note instead when less than a second of live playback was seen |
 | 68k time per tick | Average and maximum time for a replayer tick, the record mapping and the ring writes, with the EClock rate used to convert it |
 
 Exit codes: 0 after a normal run, 5 when no module was named, 10 for a bad
 argument or a module the tool cannot play, and 20 for a failure to open the
-library, the timer or the session, or for an upload, status or stall failure.
+library, the timer or the session, or for an upload, status, closed-session or
+stall failure.
 
 ## For tracker authors
 

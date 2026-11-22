@@ -19,7 +19,14 @@
  * The report counts what the firmware saw (late, rejected, underruns,
  * dropped), the smallest scheduling margin (record stamp minus the engine
  * horizon when the record was written, in frames), and the 68k time one tick
- * takes (replayer tick, record mapping and ring writes).
+ * takes (replayer tick, record mapping and ring writes). It also reports the
+ * record latency (min, average and max of record stamp minus the playing
+ * frame of the status read before the write, in frames and milliseconds: how
+ * far ahead of the sound each record was queued, click records included) and
+ * the engine's measured rate (playing frames advanced per 68k EClock time
+ * between the first and the last live status read, in Hz, and its difference
+ * from 48000 in ppm). A run ends with exit code 20 when the card closes the
+ * session on its own, which happens when no status read reaches it for 2 s.
  *
  * usage: see the text printed without arguments.
  *
@@ -99,6 +106,14 @@ static int stat_have_margin;
 static uint64_t stat_work_sum;
 static uint64_t stat_work_max;
 static uint64_t tick_work;
+static int64_t stat_latency_sum;
+static int32_t stat_latency_min;
+static int32_t stat_latency_max;
+static int stat_have_drift;
+static uint32_t drift_first_frame;
+static uint32_t drift_last_frame;
+static uint64_t drift_first_ticks;
+static uint64_t drift_last_ticks;
 
 static ZZ9KPt4Events events;
 
@@ -157,8 +172,33 @@ static void usage(void)
   puts("  LINEAR   linear interpolation (else nearest)");
   puts("  SECONDS  stop after this many seconds of engine time");
   puts("Ctrl-C stops, resets and closes. The report lists frames, ticks, records,");
-  puts("ring-full waits, late, rejected, underruns, dropped, the smallest margin and");
-  puts("the 68k time per tick. The engine need not be advertised as a service.");
+  puts("ring-full waits, late, rejected, underruns, dropped, the smallest margin,");
+  puts("the record latency (min, average, max in frames and ms), the measured");
+  puts("engine rate in Hz with its ppm difference from 48000, and the 68k time");
+  puts("per tick. The engine need not be advertised as a service.");
+}
+
+/* Frames at 48 kHz as milliseconds with two decimals, truncated. */
+static void format_ms(char *out, long long frames)
+{
+  long long ms100 = (frames * 25LL) / 12LL;
+  unsigned long long magnitude = ms100 < 0 ? -ms100 : ms100;
+
+  sprintf(out, "%s%lu.%02lu", ms100 < 0 ? "-" : "",
+          (unsigned long)(magnitude / 100ULL),
+          (unsigned long)(magnitude % 100ULL));
+}
+
+/* Remembers a status read of a live session for the rate measurement. */
+static void note_live(uint32_t played, uint64_t ticks)
+{
+  if (!stat_have_drift) {
+    drift_first_frame = played;
+    drift_first_ticks = ticks;
+    stat_have_drift = 1;
+  }
+  drift_last_frame = played;
+  drift_last_ticks = ticks;
 }
 
 /* ---- Record building ---- */
@@ -259,10 +299,23 @@ static int flush_pending(void)
   if (written > 0U) {
     int32_t margin =
         (int32_t)(pending[pending_done].stamp - status.horizon);
+    uint32_t i;
 
     if (!stat_have_margin || margin < stat_min_margin) {
       stat_min_margin = margin;
       stat_have_margin = 1;
+    }
+    for (i = 0U; i < written; i++) {
+      int32_t latency = (int32_t)(pending[pending_done + i].stamp -
+                                  status.playing_frame);
+
+      if (stat_records + i == 0U || latency < stat_latency_min) {
+        stat_latency_min = latency;
+      }
+      if (stat_records + i == 0U || latency > stat_latency_max) {
+        stat_latency_max = latency;
+      }
+      stat_latency_sum += latency;
     }
     stat_records += written;
     pending_done += written;
@@ -386,11 +439,17 @@ static const char *play(Source *source, uint32_t limit_frames)
     if (ZZ9KVoiceGetStatus(&session, &status) != ZZ9K_STATUS_OK) {
       return "status read failed";
     }
+    if (status.state == ZZ9K_VOICE_STATE_CLOSED) {
+      return "session closed by the card (heartbeat lost or card reset)";
+    }
     played = status.playing_frame;
     if (limit_frames != 0U && played >= limit_frames) {
       return "time limit";
     }
     now = now_ticks();
+    if (status.state == ZZ9K_VOICE_STATE_LIVE) {
+      note_live(played, now);
+    }
     if (played != last_played) {
       last_played = played;
       last_change = now;
@@ -438,6 +497,9 @@ static void report(const char *reason)
     avg_us = ticks_to_us(stat_work_sum / stat_ticks);
   }
   ZZ9KVoiceGetStatus(&session, &status);
+  if (status.state == ZZ9K_VOICE_STATE_LIVE) {
+    note_live(status.playing_frame, now_ticks());
+  }
   printf("zz9k-voiceplay: stopped: %s\n", reason);
   printf("  frames played %lu, ticks %lu, records %lu, ring-full waits %lu\n",
          (unsigned long)status.playing_frame, (unsigned long)stat_ticks,
@@ -452,6 +514,41 @@ static void report(const char *reason)
                   (long long)ZZ9K_VOICE_OUTPUT_RATE));
   } else {
     printf("  smallest scheduling margin: no record was written\n");
+  }
+  if (stat_records != 0U) {
+    char min_ms[24];
+    char avg_ms[24];
+    char max_ms[24];
+    long long average = stat_latency_sum / (long long)stat_records;
+
+    format_ms(min_ms, stat_latency_min);
+    format_ms(avg_ms, average);
+    format_ms(max_ms, stat_latency_max);
+    printf("  record latency min %ld, average %ld, max %ld frames "
+           "(%s, %s, %s ms)\n",
+           (long)stat_latency_min, (long)average, (long)stat_latency_max,
+           min_ms, avg_ms, max_ms);
+  } else {
+    printf("  record latency: no record was written\n");
+  }
+  {
+    uint32_t frames = drift_last_frame - drift_first_frame;
+    uint64_t ticks = drift_last_ticks - drift_first_ticks;
+
+    if (stat_have_drift && eclock_hz != 0U && ticks != 0U &&
+        frames >= ZZ9K_VOICE_OUTPUT_RATE) {
+      uint64_t hz100 = ((uint64_t)frames * eclock_hz * 100ULL + ticks / 2U) /
+                       ticks;
+      long long diff = (long long)hz100 -
+                       (long long)ZZ9K_VOICE_OUTPUT_RATE * 100LL;
+
+      printf("  engine rate %lu.%02lu Hz over %lu frames, %ld ppm from %lu\n",
+             (unsigned long)(hz100 / 100ULL), (unsigned long)(hz100 % 100ULL),
+             (unsigned long)frames, (long)(diff * 5LL / 24LL),
+             (unsigned long)ZZ9K_VOICE_OUTPUT_RATE);
+    } else {
+      printf("  engine rate: less than a second of live playback\n");
+    }
   }
   printf("  68k time per tick: average %lu us, max %lu us (EClock %lu Hz)\n",
          avg_us, max_us, (unsigned long)eclock_hz);
@@ -662,7 +759,8 @@ int main(void)
     ZZ9KVoiceReset(&session);
   }
   if (pending_overflow || strcmp(reason, "status read failed") == 0 ||
-      strcmp(reason, "engine frame counter stopped advancing") == 0) {
+      strcmp(reason, "engine frame counter stopped advancing") == 0 ||
+      strncmp(reason, "session closed by the card", 26) == 0) {
     code = 20;
   }
 

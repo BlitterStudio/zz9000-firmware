@@ -1127,6 +1127,9 @@ static __inline uint32_t __ZZ9KVoiceWriteInline(
 #define ZZ9KVoiceWrite(session, records, count) \
   __ZZ9KVoiceWriteInline((session), (records), (count))
 
+/* ZZ9KVoiceGetStatus also refreshes the session heartbeat: call it at least
+ * every 500 ms. The card closes the session after 2 s without it or a voice
+ * mailbox call (Upload and Reset count as liveness too; Write does not). */
 static __inline int __ZZ9KVoiceGetStatusInline(
     ZZ9KVoiceSession *session,
     ZZ9KVoiceStatus *status)

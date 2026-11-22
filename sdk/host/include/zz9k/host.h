@@ -352,8 +352,11 @@ int zz9k_voice_upload(ZZ9KContext *ctx, ZZ9KVoiceSession *session,
  * call: pure shared-memory work, safe next to a blocked synchronous call. */
 uint32_t zz9k_voice_write(ZZ9KVoiceSession *session,
                           const ZZ9KVoiceRecord *records, uint32_t count);
-/* Reads the status block and bumps the ring heartbeat word; call it at least
- * every ZZ9K_VOICE_HEARTBEAT_MS. No mailbox call. */
+/* Reads the status block and refreshes the session heartbeat by bumping the
+ * ring heartbeat word; call it at least every ZZ9K_VOICE_HEARTBEAT_MS
+ * (500 ms). The card closes the session after 2 s without it or a voice
+ * mailbox call (upload and reset count as liveness too; write does not).
+ * No mailbox call. */
 int zz9k_voice_status(ZZ9KVoiceSession *session, ZZ9KVoiceStatus *status);
 int zz9k_video_session_begin(ZZ9KContext *ctx,
                              const ZZ9KVideoSessionBeginDesc *desc,
